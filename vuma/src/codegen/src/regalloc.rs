@@ -2086,18 +2086,21 @@ impl TargetAgnosticRegAlloc {
         let mut next_spill_index: u32 = 0;
 
         for interval in intervals {
-            // Expire old intervals.
+            // Expire old intervals.  Pass the original callee-saved lists so
+            // that expired registers are returned to the correct pool.
             Self::expire_old(
                 &mut active_gprs,
                 &mut free_caller_gprs,
                 &mut free_callee_gprs,
                 interval.start,
+                &self.callee_saved_gprs,
             );
             Self::expire_old(
                 &mut active_fps,
                 &mut free_caller_fps,
                 &mut free_callee_fps,
                 interval.start,
+                &self.callee_saved_fps,
             );
 
             match interval.class {
@@ -2285,17 +2288,26 @@ impl TargetAgnosticRegAlloc {
     }
 
     /// Expire old intervals whose end point is before `position`.
+    ///
+    /// Uses `original_callee` (the full, unmodified callee-saved register list
+    /// from the target description) to correctly classify expired registers
+    /// back into the caller-saved or callee-saved free pool.
     fn expire_old(
         active: &mut Vec<(IRValueId, crate::backend::PhysicalReg, u32, u32)>,
         free_caller: &mut Vec<crate::backend::PhysicalReg>,
         free_callee: &mut Vec<crate::backend::PhysicalReg>,
         position: u32,
+        original_callee: &[crate::backend::PhysicalReg],
     ) {
         let mut i = 0;
         while i < active.len() {
             if active[i].2 < position {
                 let (_, reg, _, _) = active.remove(i);
-                if free_callee.contains(&reg) || is_callee_saved_in(&reg, free_callee) {
+                // Use the *original* callee-saved list to classify the
+                // register.  We cannot check `free_callee` because the
+                // register was popped from that pool when it was allocated,
+                // so it will never be found there.
+                if original_callee.contains(&reg) {
                     free_callee.push(reg);
                 } else {
                     free_caller.push(reg);
@@ -2373,14 +2385,6 @@ fn self_is_callee_saved(
     preg: &crate::backend::PhysicalReg,
 ) -> bool {
     callee_gprs.contains(preg) || callee_fps.contains(preg)
-}
-
-/// Check if a register is in the callee list.
-fn is_callee_saved_in(
-    preg: &crate::backend::PhysicalReg,
-    callee: &[crate::backend::PhysicalReg],
-) -> bool {
-    callee.contains(preg)
 }
 
 /// Convert the local `RegClass` to `backend::RegClass`.

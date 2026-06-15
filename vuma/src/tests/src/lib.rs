@@ -23,6 +23,7 @@
 //! | Verification   | `trivial`, `dlist`  | IVE invariant checks, proofs                   |
 //! | Codegen        | `codegen`           | ARM64 code emission, ELF generation            |
 //! | Pipeline       | `full_pipeline`     | Full compile() pipeline end-to-end             |
+//! | Parser         | `parser_roundtrip`  | Parse roundtrip: source → AST → SCG            |
 //! | Benchmark      | `benchmarks`        | Performance benchmarks (8 categories)           |
 //!
 //! # Benchmark Result Type
@@ -71,9 +72,17 @@ pub mod full_pipeline;
 #[cfg(test)]
 pub mod graph;
 #[cfg(test)]
+pub mod parser_roundtrip;
+#[cfg(test)]
 pub mod sha256d;
 #[cfg(test)]
+pub mod elf_validation;
+#[cfg(test)]
 pub mod trivial;
+#[cfg(test)]
+pub mod wasm_validation;
+#[cfg(test)]
+pub mod cross_backend;
 
 // Re-export the helper macros from the framework module.
 // Note: #[macro_export] macros are already at the crate root, so no

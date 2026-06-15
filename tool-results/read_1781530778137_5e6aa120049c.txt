@@ -1,0 +1,1445 @@
+     1→//! Parse error types, recovery strategies, and diagnostic reporting for the
+     2→//! VUMA language frontend.
+     3→//!
+     4→//! This module provides:
+     5→//!
+     6→//! - **[`ParseErrorKind`]** — classification of every parse/semantic error.
+     7→//! - **[`ParseError`]** — a single error with message, span, kind, and
+     8→//!   optional "did you mean?" suggestion.
+     9→//! - **[`ErrorRecovery`]** — strategies the parser can use to keep going after
+    10→//!   an error.
+    11→//! - **[`ParseResult<T>`]** — carries a successfully-parsed value **and** any
+    12→//!   accumulated non-fatal errors, enabling partial-result error recovery.
+    13→//! - **[`ErrorCollector`]** — collects multiple diagnostics across a parse
+    14→//!   session and supports batch rendering.
+    15→//! - **[`Diagnostic`]** / **[`Severity`]** — structured diagnostics with
+    16→//!   severity levels (error, warning, note).
+    17→//! - **[`SourceLocation`]** — rich source location with file, line, column,
+    18→//!   and context rendering.
+    19→//! - **"Did you mean?" suggestions** — [`suggest`], [`suggest_keyword`],
+    20→//!   [`levenshtein`], [`format_suggestion`] for typo correction.
+    21→
+    22→use serde::{Deserialize, Serialize};
+    23→use std::fmt;
+    24→
+    25→// ---------------------------------------------------------------------------
+    26→// Span
+    27→// ---------------------------------------------------------------------------
+    28→
+    29→/// A byte-offset span within a source file, used for error localisation.
+    30→#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+    31→pub struct Span {
+    32→    /// Inclusive start byte offset.
+    33→    pub start: usize,
+    34→    /// Exclusive end byte offset.
+    35→    pub end: usize,
+    36→}
+    37→
+    38→impl Span {
+    39→    /// Create a new span from start (inclusive) to end (exclusive) byte offsets.
+    40→    pub fn new(start: usize, end: usize) -> Self {
+    41→        Self { start, end }
+    42→    }
+    43→
+    44→    /// A synthetic span representing "no location" (e.g. generated nodes).
+    45→    pub fn synthetic() -> Self {
+    46→        Self { start: 0, end: 0 }
+    47→    }
+    48→
+    49→    /// Merge two spans to produce a span that covers both.
+    50→    pub fn merge(self, other: Span) -> Span {
+    51→        Span {
+    52→            start: self.start.min(other.start),
+    53→            end: self.end.max(other.end),
+    54→        }
+    55→    }
+    56→
+    57→    /// Length in bytes of this span.
+    58→    pub fn len(&self) -> usize {
+    59→        self.end.saturating_sub(self.start)
+    60→    }
+    61→
+    62→    /// True when the span has zero length.
+    63→    pub fn is_empty(&self) -> bool {
+    64→        self.start == self.end
+    65→    }
+    66→}
+    67→
+    68→impl fmt::Display for Span {
+    69→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    70→        write!(f, "{}..{}", self.start, self.end)
+    71→    }
+    72→}
+    73→
+    74→// ---------------------------------------------------------------------------
+    75→// SourceLocation
+    76→// ---------------------------------------------------------------------------
+    77→
+    78→/// Rich source location: file path (optional), line, column, and a snippet of
+    79→/// the surrounding source text for context rendering.
+    80→#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    81→pub struct SourceLocation {
+    82→    /// Optional file path or module name.
+    83→    pub file: Option<String>,
+    84→    /// Line number (0-based).
+    85→    pub line: usize,
+    86→    /// Column number (0-based, measured in Unicode code points).
+    87→    pub column: usize,
+    88→    /// The text of the source line (if available).
+    89→    pub line_text: Option<String>,
+    90→}
+    91→
+    92→impl SourceLocation {
+    93→    /// Create a minimal source location from line and column only.
+    94→    pub fn new(line: usize, column: usize) -> Self {
+    95→        Self {
+    96→            file: None,
+    97→            line,
+    98→            column,
+    99→            line_text: None,
+   100→        }
+   101→    }
+   102→
+   103→    /// Attach a file path to this location.
+   104→    pub fn with_file(mut self, file: impl Into<String>) -> Self {
+   105→        self.file = Some(file.into());
+   106→        self
+   107→    }
+   108→
+   109→    /// Attach the source line text for context rendering.
+   110→    pub fn with_line_text(mut self, text: impl Into<String>) -> Self {
+   111→        self.line_text = Some(text.into());
+   112→        self
+   113→    }
+   114→
+   115→    /// Render the location in `file:line:col` format.
+   116→    pub fn format_location(&self) -> String {
+   117→        match &self.file {
+   118→            Some(f) => format!("{}:{}:{}", f, self.line + 1, self.column + 1),
+   119→            None => format!("{}:{}", self.line + 1, self.column + 1),
+   120→        }
+   121→    }
+   122→
+   123→    /// Render the location with an underline pointer under the relevant
+   124→    /// column.  If `span_len` is provided the pointer uses that many `^`
+   125→    /// characters; otherwise a single `^` is drawn.
+   126→    pub fn render_with_pointer(&self, span_len: Option<usize>) -> String {
+   127→        let pointer = match span_len {
+   128→            Some(len) if len > 0 => {
+   129→                let padding = " ".repeat(self.column);
+   130→                let carets = "^".repeat(len.max(1));
+   131→                format!("{}{}", padding, carets)
+   132→            }
+   133→            _ => {
+   134→                let padding = " ".repeat(self.column);
+   135→                format!("{}^", padding)
+   136→            }
+   137→        };
+   138→
+   139→        let line_text = self.line_text.as_deref().unwrap_or("<no source>");
+   140→        format!(
+   141→            "   |\n{: >3} | {}\n   | {}",
+   142→            self.line + 1,
+   143→            line_text,
+   144→            pointer
+   145→        )
+   146→    }
+   147→}
+   148→
+   149→impl fmt::Display for SourceLocation {
+   150→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+   151→        write!(f, "{}", self.format_location())
+   152→    }
+   153→}
+   154→
+   155→/// Convert a byte offset in `source` to a [`SourceLocation`].
+   156→///
+   157→/// If `file` is `Some`, it is attached to the resulting location.
+   158→/// The source line text is also extracted for context rendering.
+   159→pub fn offset_to_location(source: &str, offset: usize, file: Option<&str>) -> SourceLocation {
+   160→    let mut line = 0;
+   161→    let mut col = 0;
+   162→    for (i, ch) in source.char_indices() {
+   163→        if i >= offset {
+   164→            break;
+   165→        }
+   166→        if ch == '\n' {
+   167→            line += 1;
+   168→            col = 0;
+   169→        } else {
+   170→            col += 1;
+   171→        }
+   172→    }
+   173→    let line_text = get_line(source, line);
+   174→    SourceLocation {
+   175→        file: file.map(|f| f.to_string()),
+   176→        line,
+   177→        column: col,
+   178→        line_text: Some(line_text),
+   179→    }
+   180→}
+   181→
+   182→// ---------------------------------------------------------------------------
+   183→// Severity
+   184→// ---------------------------------------------------------------------------
+   185→
+   186→/// Severity level for a diagnostic message.
+   187→#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+   188→pub enum Severity {
+   189→    /// A hard error — the program cannot be compiled.
+   190→    Error,
+   191→    /// A warning — suspicious code that is technically valid.
+   192→    Warning,
+   193→    /// An informational note, typically attached to another diagnostic.
+   194→    Note,
+   195→}
+   196→
+   197→impl fmt::Display for Severity {
+   198→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+   199→        match self {
+   200→            Severity::Error => write!(f, "error"),
+   201→            Severity::Warning => write!(f, "warning"),
+   202→            Severity::Note => write!(f, "note"),
+   203→        }
+   204→    }
+   205→}
+   206→
+   207→// ---------------------------------------------------------------------------
+   208→// ParseErrorKind
+   209→// ---------------------------------------------------------------------------
+   210→
+   211→/// Classification of parse errors for programmatic handling.
+   212→#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+   213→pub enum ParseErrorKind {
+   214→    // -- Core syntax errors --------------------------------------------------
+   215→    /// The lexer/parser encountered a token it did not expect at this position.
+   216→    UnexpectedToken,
+   217→    /// A specific token was expected but not found (e.g. missing `)`).
+   218→    ExpectedToken,
+   219→    /// A general syntax rule was violated (covers missing separators,
+   220→    /// malformed constructs, etc.).
+   221→    InvalidSyntax,
+   222→
+   223→    // -- Name/scope errors ---------------------------------------------------
+   224→    /// A name was defined more than once in the same scope.
+   225→    DuplicateDefinition,
+   226→    /// A name was referenced but not defined in the current scope.
+   227→    UndefinedReference,
+   228→
+   229→    // -- Type errors ---------------------------------------------------------
+   230→    /// A type annotation does not match the inferred or expected type.
+   231→    TypeMismatch,
+   232→
+   233→    // -- VUMA-specific errors ------------------------------------------------
+   234→    /// An error related to a `region` declaration (e.g. missing `allocate`,
+   235→    /// invalid region expression).
+   236→    RegionError,
+   237→    /// An error in a BD (behavioral domain) annotation directive
+   238→    /// (`bd`, `repd`, `capd`, `reld`).
+   239→    BDAnnotationError,
+   240→
+   241→    /// An invalid token was used where a compound assignment operator was
+   242→    /// expected (e.g. `+=`, `-=`, etc.).
+   243→    InvalidCompoundOp,
+   244→
+   245→    // -- Legacy aliases (kept for backward compat) ---------------------------
+   246→    /// Alias for [`Self::InvalidSyntax`] — a required semicolon separator is missing.
+   247→    MissingSemicolon,
+   248→    /// Alias for [`Self::InvalidSyntax`] — an address literal (0x...) is malformed.
+   249→    InvalidAddress,
+   250→    /// Alias for [`Self::UndefinedReference`] — a variable name was used before
+   251→    /// definition.
+   252→    UndefinedVariable,
+   253→}
+   254→
+   255→impl fmt::Display for ParseErrorKind {
+   256→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+   257→        match self {
+   258→            ParseErrorKind::UnexpectedToken => write!(f, "unexpected token"),
+   259→            ParseErrorKind::ExpectedToken => write!(f, "expected token"),
+   260→            ParseErrorKind::InvalidSyntax => write!(f, "invalid syntax"),
+   261→            ParseErrorKind::DuplicateDefinition => write!(f, "duplicate definition"),
+   262→            ParseErrorKind::UndefinedReference => write!(f, "undefined reference"),
+   263→            ParseErrorKind::TypeMismatch => write!(f, "type mismatch"),
+   264→            ParseErrorKind::RegionError => write!(f, "region error"),
+   265→            ParseErrorKind::BDAnnotationError => write!(f, "BD annotation error"),
+   266→            ParseErrorKind::InvalidCompoundOp => write!(f, "invalid compound assignment operator"),
+   267→            ParseErrorKind::MissingSemicolon => write!(f, "missing semicolon"),
+   268→            ParseErrorKind::InvalidAddress => write!(f, "invalid address"),
+   269→            ParseErrorKind::UndefinedVariable => write!(f, "undefined variable"),
+   270→        }
+   271→    }
+   272→}
+   273→
+   274→// ---------------------------------------------------------------------------
+   275→// ParseError
+   276→// ---------------------------------------------------------------------------
+   277→
+   278→/// A single parse error with full context for reporting.
+   279→#[derive(Debug, Clone, Serialize, Deserialize)]
+   280→pub struct ParseError {
+   281→    /// Human-readable error description.
+   282→    pub message: String,
+   283→    /// Source byte-offset span where the error originates.
+   284→    pub span: Span,
+   285→    /// Classification of the error kind.
+   286→    pub kind: ParseErrorKind,
+   287→    /// An optional "did you mean?" suggestion (e.g. "fn" when the user typed
+   288→    /// "fun").
+   289→    pub suggestion: Option<String>,
+   290→    /// 1-based line number where the error starts (populated when source text
+   291→    /// is available for offset resolution).
+   292→    pub line: Option<u32>,
+   293→    /// 1-based column number where the error starts (populated when source
+   294→    /// text is available for offset resolution).
+   295→    pub column: Option<u32>,
+   296→}
+   297→
+   298→impl ParseError {
+   299→    /// Construct a new parse error.
+   300→    pub fn new(message: impl Into<String>, span: Span, kind: ParseErrorKind) -> Self {
+   301→        Self {
+   302→            message: message.into(),
+   303→            span,
+   304→            kind,
+   305→            suggestion: None,
+   306→            line: None,
+   307→            column: None,
+   308→        }
+   309→    }
+   310→
+   311→    /// Construct a parse error with pre-computed line/column information.
+   312→    pub fn with_location(
+   313→        message: impl Into<String>,
+   314→        span: Span,
+   315→        kind: ParseErrorKind,
+   316→        line: u32,
+   317→        column: u32,
+   318→    ) -> Self {
+   319→        Self {
+   320→            message: message.into(),
+   321→            span,
+   322→            kind,
+   323→            suggestion: None,
+   324→            line: Some(line),
+   325→            column: Some(column),
+   326→        }
+   327→    }
+   328→
+   329→    /// Resolve and populate `line` / `column` from the given source text.
+   330→    ///
+   331→    /// If the fields are already populated, this is a no-op.
+   332→    pub fn resolve_location(&mut self, source: &str, file: Option<&str>) {
+   333→        if self.line.is_some() && self.column.is_some() {
+   334→            return;
+   335→        }
+   336→        let loc = offset_to_location(source, self.span.start, file);
+   337→        self.line = Some(loc.line as u32 + 1); // convert 0-based to 1-based
+   338→        self.column = Some(loc.column as u32 + 1);
+   339→    }
+   340→
+   341→    /// Attach a "did you mean?" suggestion to this error.
+   342→    pub fn with_suggestion(mut self, suggestion: impl Into<String>) -> Self {
+   343→        self.suggestion = Some(suggestion.into());
+   344→        self
+   345→    }
+   346→
+   347→    // -- Convenience constructors: core errors -------------------------------
+   348→
+   349→    /// Convenience: unexpected-token error.
+   350→    pub fn unexpected(msg: impl Into<String>, span: Span) -> Self {
+   351→        Self::new(msg, span, ParseErrorKind::UnexpectedToken)
+   352→    }
+   353→
+   354→    /// Convenience: expected-token error.
+   355→    pub fn expected(expected: impl Into<String>, found: impl Into<String>, span: Span) -> Self {
+   356→        Self::new(
+   357→            format!("expected {}, found {}", expected.into(), found.into()),
+   358→            span,
+   359→            ParseErrorKind::ExpectedToken,
+   360→        )
+   361→    }
+   362→
+   363→    /// Convenience: invalid-syntax error.
+   364→    pub fn invalid_syntax(msg: impl Into<String>, span: Span) -> Self {
+   365→        Self::new(msg, span, ParseErrorKind::InvalidSyntax)
+   366→    }
+   367→
+   368→    /// Convenience: missing-semicolon error.
+   369→    pub fn missing_semi(span: Span) -> Self {
+   370→        Self::new("expected semicolon", span, ParseErrorKind::MissingSemicolon)
+   371→    }
+   372→
+   373→    /// Convenience: invalid-address-literal error.
+   374→    pub fn invalid_address(msg: impl Into<String>, span: Span) -> Self {
+   375→        Self::new(msg, span, ParseErrorKind::InvalidAddress)
+   376→    }
+   377→
+   378→    /// Convenience: undefined-variable error (legacy alias for undefined
+   379→    /// reference).
+   380→    pub fn undefined_var(name: impl Into<String>, span: Span) -> Self {
+   381→        Self::new(
+   382→            format!("undefined variable `{}`", name.into()),
+   383→            span,
+   384→            ParseErrorKind::UndefinedVariable,
+   385→        )
+   386→    }
+   387→
+   388→    /// Convenience: undefined-reference error.
+   389→    pub fn undefined_ref(name: impl Into<String>, span: Span) -> Self {
+   390→        Self::new(
+   391→            format!("undefined reference `{}`", name.into()),
+   392→            span,
+   393→            ParseErrorKind::UndefinedReference,
+   394→        )
+   395→    }
+   396→
+   397→    /// Convenience: type-mismatch error.
+   398→    pub fn type_mismatch(msg: impl Into<String>, span: Span) -> Self {
+   399→        Self::new(msg, span, ParseErrorKind::TypeMismatch)
+   400→    }
+   401→
+   402→    /// Convenience: duplicate-definition error.
+   403→    pub fn duplicate(name: impl Into<String>, span: Span) -> Self {
+   404→        Self::new(
+   405→            format!("duplicate definition of `{}`", name.into()),
+   406→            span,
+   407→            ParseErrorKind::DuplicateDefinition,
+   408→        )
+   409→    }
+   410→
+   411→    /// Convenience: region-error.
+   412→    pub fn region_error(msg: impl Into<String>, span: Span) -> Self {
+   413→        Self::new(msg, span, ParseErrorKind::RegionError)
+   414→    }
+   415→
+   416→    /// Convenience: BD-annotation-error.
+   417→    pub fn bd_annotation_error(msg: impl Into<String>, span: Span) -> Self {
+   418→        Self::new(msg, span, ParseErrorKind::BDAnnotationError)
+   419→    }
+   420→
+   421→    /// Convenience: invalid compound assignment operator error.
+   422→    pub fn invalid_compound_op(msg: impl Into<String>, span: Span) -> Self {
+   423→        Self::new(msg, span, ParseErrorKind::InvalidCompoundOp)
+   424→    }
+   425→
+   426→    /// Render the error with source context and a visual pointer.
+   427→    ///
+   428→    /// The `source` parameter should be the full source text. The function
+   429→    /// extracts the relevant line and draws a `^^^` pointer under the
+   430→    /// offending region.
+   431→    pub fn display_with_source(&self, source: &str) -> String {
+   432→        let loc = offset_to_location(source, self.span.start, None);
+   433→        let pointer_len = if self.span.is_empty() {
+   434→            None
+   435→        } else {
+   436→            Some(self.span.len().max(1))
+   437→        };
+   438→
+   439→        let suggestion_text = match &self.suggestion {
+   440→            Some(s) => format!("\n   = help: did you mean `{}`?", s),
+   441→            None => String::new(),
+   442→        };
+   443→
+   444→        format!(
+   445→            "error[{}]: {}\n  --> {}\n{}\n{}\n",
+   446→            self.kind,
+   447→            self.message,
+   448→            loc.format_location(),
+   449→            loc.render_with_pointer(pointer_len),
+   450→            suggestion_text,
+   451→        )
+   452→    }
+   453→}
+   454→
+   455→impl fmt::Display for ParseError {
+   456→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+   457→        write!(
+   458→            f,
+   459→            "{} ({}..{})",
+   460→            self.message, self.span.start, self.span.end
+   461→        )?;
+   462→        if let Some(ref s) = self.suggestion {
+   463→            write!(f, " (did you mean `{}`?)", s)?;
+   464→        }
+   465→        Ok(())
+   466→    }
+   467→}
+   468→
+   469→impl std::error::Error for ParseError {}
+   470→
+   471→// ---------------------------------------------------------------------------
+   472→// ErrorRecovery
+   473→// ---------------------------------------------------------------------------
+   474→
+   475→/// Strategy for recovering from a parse error so that the parser can continue
+   476→/// and potentially find additional errors in the same file.
+   477→#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+   478→pub enum ErrorRecovery {
+   479→    /// Skip tokens until the next statement boundary (`;` or `}`).
+   480→    /// This is the default recovery strategy for most syntax errors.
+   481→    SkipToStatementBoundary,
+   482→    /// Skip tokens until the next block boundary (`}`).
+   483→    /// Useful when an error inside a block might cascade.
+   484→    SkipToBlockBoundary,
+   485→    /// Insert a missing token (e.g. a semicolon) and continue parsing as if
+   486→    /// it had been present.  The inserted token kind is stored for reporting.
+   487→    InsertMissingToken(String),
+   488→    /// Skip a single token and retry.  Useful when a stray token is found
+   489→    /// but the overall structure is still intact.
+   490→    SkipOneToken,
+   491→    /// No recovery possible — the parser should abort the current item.
+   492→    AbortItem,
+   493→}
+   494→
+   495→impl ErrorRecovery {
+   496→    /// Return the default recovery strategy for a given error kind.
+   497→    pub fn for_kind(kind: &ParseErrorKind) -> Self {
+   498→        match kind {
+   499→            ParseErrorKind::MissingSemicolon => ErrorRecovery::InsertMissingToken(";".to_string()),
+   500→            ParseErrorKind::ExpectedToken => ErrorRecovery::SkipOneToken,
+   501→            ParseErrorKind::UnexpectedToken => ErrorRecovery::SkipToStatementBoundary,
+   502→            ParseErrorKind::InvalidSyntax => ErrorRecovery::SkipToStatementBoundary,
+   503→            ParseErrorKind::DuplicateDefinition => ErrorRecovery::SkipToStatementBoundary,
+   504→            ParseErrorKind::UndefinedReference => ErrorRecovery::SkipOneToken,
+   505→            ParseErrorKind::TypeMismatch => ErrorRecovery::SkipOneToken,
+   506→            ParseErrorKind::RegionError => ErrorRecovery::SkipToStatementBoundary,
+   507→            ParseErrorKind::BDAnnotationError => ErrorRecovery::SkipToStatementBoundary,
+   508→            ParseErrorKind::InvalidCompoundOp => ErrorRecovery::SkipOneToken,
+   509→            ParseErrorKind::InvalidAddress => ErrorRecovery::SkipOneToken,
+   510→            ParseErrorKind::UndefinedVariable => ErrorRecovery::SkipOneToken,
+   511→        }
+   512→    }
+   513→}
+   514→
+   515→impl fmt::Display for ErrorRecovery {
+   516→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+   517→        match self {
+   518→            ErrorRecovery::SkipToStatementBoundary => write!(f, "skip to next statement"),
+   519→            ErrorRecovery::SkipToBlockBoundary => write!(f, "skip to block end"),
+   520→            ErrorRecovery::InsertMissingToken(tok) => write!(f, "insert missing '{}'", tok),
+   521→            ErrorRecovery::SkipOneToken => write!(f, "skip one token"),
+   522→            ErrorRecovery::AbortItem => write!(f, "abort current item"),
+   523→        }
+   524→    }
+   525→}
+   526→
+   527→// ---------------------------------------------------------------------------
+   528→// ParseResult<T>
+   529→// ---------------------------------------------------------------------------
+   530→
+   531→/// The result of a parse operation that supports error recovery.
+   532→///
+   533→/// On success the parsed `value` is present **and** there may be accumulated
+   534→/// non-fatal errors in `errors`.  On failure `value` is `None` and `errors`
+   535→/// contains at least one fatal error.
+   536→#[derive(Debug, Clone, Serialize, Deserialize)]
+   537→pub struct ParseResult<T> {
+   538→    /// The parsed value, if parsing succeeded (even with non-fatal errors).
+   539→    pub value: Option<T>,
+   540→    /// All errors accumulated during the parse (both fatal and non-fatal).
+   541→    pub errors: Vec<ParseError>,
+   542→}
+   543→
+   544→impl<T> ParseResult<T> {
+   545→    /// Create a fully successful result with no errors.
+   546→    pub fn ok(value: T) -> Self {
+   547→        Self {
+   548→            value: Some(value),
+   549→            errors: Vec::new(),
+   550→        }
+   551→    }
+   552→
+   553→    /// Create a result with a value and some accumulated (non-fatal) errors.
+   554→    pub fn ok_with_errors(value: T, errors: Vec<ParseError>) -> Self {
+   555→        Self {
+   556→            value: Some(value),
+   557→            errors,
+   558→        }
+   559→    }
+   560→
+   561→    /// Create a failed result with no value.
+   562→    pub fn err(errors: Vec<ParseError>) -> Self {
+   563→        Self {
+   564→            value: None,
+   565→            errors,
+   566→        }
+   567→    }
+   568→
+   569→    /// Create a failed result from a single error.
+   570→    pub fn from_error(error: ParseError) -> Self {
+   571→        Self {
+   572→            value: None,
+   573→            errors: vec![error],
+   574→        }
+   575→    }
+   576→
+   577→    /// True when a value was successfully parsed.
+   578→    pub fn is_ok(&self) -> bool {
+   579→        self.value.is_some()
+   580→    }
+   581→
+   582→    /// True when parsing failed (no value).
+   583→    pub fn is_err(&self) -> bool {
+   584→        self.value.is_none()
+   585→    }
+   586→
+   587→    /// True when at least one error was accumulated.
+   588→    pub fn has_errors(&self) -> bool {
+   589→        !self.errors.is_empty()
+   590→    }
+   591→
+   592→    /// Add another error to the accumulated list.
+   593→    pub fn push_error(&mut self, error: ParseError) {
+   594→        self.errors.push(error);
+   595→    }
+   596→
+   597→    /// Merge errors from another `ParseResult` into this one.
+   598→    pub fn merge_errors(&mut self, other: &ParseResult<T>) {
+   599→        self.errors.extend(other.errors.iter().cloned());
+   600→    }
+   601→
+   602→    /// Merge errors from another `ParseResult<U>` (different value type)
+   603→    /// into this one.  Only errors are transferred.
+   604→    pub fn merge_errors_from<U>(&mut self, other: &ParseResult<U>) {
+   605→        self.errors.extend(other.errors.iter().cloned());
+   606→    }
+   607→
+   608→    /// Convert to a standard `Result`, discarding any non-fatal errors.
+   609→    pub fn into_result(self) -> Result<T, Vec<ParseError>> {
+   610→        match self.value {
+   611→            Some(v) => Ok(v),
+   612→            None => Err(self.errors),
+   613→        }
+   614→    }
+   615→
+   616→    /// Map the value if present, preserving accumulated errors.
+   617→    pub fn map<U, F: FnOnce(T) -> U>(self, f: F) -> ParseResult<U> {
+   618→        ParseResult {
+   619→            value: self.value.map(f),
+   620→            errors: self.errors,
+   621→        }
+   622→    }
+   623→
+   624→    /// Unwrap the value, panicking if it is `None`.
+   625→    pub fn unwrap(self) -> T {
+   626→        self.value.expect("ParseResult::unwrap on err")
+   627→    }
+   628→
+   629→    /// Unwrap the value, panicking with the given message if it is `None`.
+   630→    pub fn expect(self, msg: &str) -> T {
+   631→        self.value.expect(msg)
+   632→    }
+   633→}
+   634→
+   635→// ---------------------------------------------------------------------------
+   636→// Diagnostic
+   637→// ---------------------------------------------------------------------------
+   638→
+   639→/// A structured diagnostic message with severity, source location, and an
+   640→/// optional error code.
+   641→#[derive(Debug, Clone, Serialize, Deserialize)]
+   642→pub struct Diagnostic {
+   643→    /// Severity level.
+   644→    pub severity: Severity,
+   645→    /// Error code, e.g. `"E0001"`.
+   646→    pub code: Option<String>,
+   647→    /// Human-readable message.
+   648→    pub message: String,
+   649→    /// Source location where the diagnostic originates.
+   650→    pub location: SourceLocation,
+   651→    /// Optional "did you mean?" suggestion.
+   652→    pub suggestion: Option<String>,
+   653→    /// Child diagnostics (notes, related warnings).
+   654→    pub children: Vec<Diagnostic>,
+   655→}
+   656→
+   657→impl Diagnostic {
+   658→    /// Create a new error-level diagnostic.
+   659→    pub fn error(message: impl Into<String>, location: SourceLocation) -> Self {
+   660→        Self {
+   661→            severity: Severity::Error,
+   662→            code: None,
+   663→            message: message.into(),
+   664→            location,
+   665→            suggestion: None,
+   666→            children: Vec::new(),
+   667→        }
+   668→    }
+   669→
+   670→    /// Create a new warning-level diagnostic.
+   671→    pub fn warning(message: impl Into<String>, location: SourceLocation) -> Self {
+   672→        Self {
+   673→            severity: Severity::Warning,
+   674→            code: None,
+   675→            message: message.into(),
+   676→            location,
+   677→            suggestion: None,
+   678→            children: Vec::new(),
+   679→        }
+   680→    }
+   681→
+   682→    /// Create a new note-level diagnostic.
+   683→    pub fn note(message: impl Into<String>, location: SourceLocation) -> Self {
+   684→        Self {
+   685→            severity: Severity::Note,
+   686→            code: None,
+   687→            message: message.into(),
+   688→            location,
+   689→            suggestion: None,
+   690→            children: Vec::new(),
+   691→        }
+   692→    }
+   693→
+   694→    /// Attach an error code.
+   695→    pub fn with_code(mut self, code: impl Into<String>) -> Self {
+   696→        self.code = Some(code.into());
+   697→        self
+   698→    }
+   699→
+   700→    /// Attach a "did you mean?" suggestion.
+   701→    pub fn with_suggestion(mut self, suggestion: impl Into<String>) -> Self {
+   702→        self.suggestion = Some(suggestion.into());
+   703→        self
+   704→    }
+   705→
+   706→    /// Add a child diagnostic (e.g. a note attached to an error).
+   707→    pub fn with_child(mut self, child: Diagnostic) -> Self {
+   708→        self.children.push(child);
+   709→        self
+   710→    }
+   711→
+   712→    /// Create a [`Diagnostic`] from a [`ParseError`] by extracting source
+   713→    /// location from the given source text.
+   714→    pub fn from_parse_error(err: &ParseError, source: &str, file: Option<&str>) -> Self {
+   715→        let loc = offset_to_location(source, err.span.start, file);
+   716→        let mut diag = Self {
+   717→            severity: Severity::Error,
+   718→            code: None,
+   719→            message: err.message.clone(),
+   720→            location: loc,
+   721→            suggestion: err.suggestion.clone(),
+   722→            children: Vec::new(),
+   723→        };
+   724→        // Add a child note with the error kind.
+   725→        diag.children.push(Diagnostic::note(
+   726→            format!("error kind: {}", err.kind),
+   727→            diag.location.clone(),
+   728→        ));
+   729→        diag
+   730→    }
+   731→
+   732→    /// Render the diagnostic with full source context.
+   733→    pub fn display_with_source(&self) -> String {
+   734→        let code_str = match &self.code {
+   735→            Some(c) => format!("[{}]", c),
+   736→            None => String::new(),
+   737→        };
+   738→        let suggestion_text = match &self.suggestion {
+   739→            Some(s) => format!("\n   = help: did you mean `{}`?", s),
+   740→            None => String::new(),
+   741→        };
+   742→        let pointer_len = None; // we don't have span length here
+   743→        let mut result = format!(
+   744→            "{}{}: {}\n  --> {}\n{}\n{}",
+   745→            self.severity,
+   746→            code_str,
+   747→            self.message,
+   748→            self.location.format_location(),
+   749→            self.location.render_with_pointer(pointer_len),
+   750→            suggestion_text,
+   751→        );
+   752→        for child in &self.children {
+   753→            result.push_str(&format!("\n{}: {}", child.severity, child.message));
+   754→        }
+   755→        result.push('\n');
+   756→        result
+   757→    }
+   758→}
+   759→
+   760→impl fmt::Display for Diagnostic {
+   761→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+   762→        let code_str = match &self.code {
+   763→            Some(c) => format!("[{}]", c),
+   764→            None => String::new(),
+   765→        };
+   766→        write!(
+   767→            f,
+   768→            "{}{}: {} at {}",
+   769→            self.severity, code_str, self.message, self.location
+   770→        )
+   771→    }
+   772→}
+   773→
+   774→impl std::error::Error for Diagnostic {}
+   775→
+   776→// ---------------------------------------------------------------------------
+   777→// ErrorCollector
+   778→// ---------------------------------------------------------------------------
+   779→
+   780→/// Collects multiple [`Diagnostic`] values across a parse session.
+   781→///
+   782→/// Supports deduplication by approximate location (same line and message),
+   783→/// and batch rendering.
+   784→#[derive(Debug, Clone, Serialize, Deserialize)]
+   785→pub struct ErrorCollector {
+   786→    /// Collected diagnostics.
+   787→    diagnostics: Vec<Diagnostic>,
+   788→    /// Number of errors (for gating compilation).
+   789→    error_count: usize,
+   790→    /// Number of warnings.
+   791→    warning_count: usize,
+   792→}
+   793→
+   794→impl ErrorCollector {
+   795→    /// Create an empty error collector.
+   796→    pub fn new() -> Self {
+   797→        Self {
+   798→            diagnostics: Vec::new(),
+   799→            error_count: 0,
+   800→            warning_count: 0,
+   801→        }
+   802→    }
+   803→
+   804→    /// Add a diagnostic.
+   805→    pub fn add(&mut self, diag: Diagnostic) {
+   806→        match diag.severity {
+   807→            Severity::Error => self.error_count += 1,
+   808→            Severity::Warning => self.warning_count += 1,
+   809→            Severity::Note => {}
+   810→        }
+   811→        self.diagnostics.push(diag);
+   812→    }
+   813→
+   814→    /// Add a parse error, converting it to a diagnostic.
+   815→    pub fn add_parse_error(&mut self, err: &ParseError, source: &str, file: Option<&str>) {
+   816→        self.add(Diagnostic::from_parse_error(err, source, file));
+   817→    }
+   818→
+   819→    /// Add a diagnostic only if there isn't already one at the same line with
+   820→    /// the same message (deduplication).
+   821→    pub fn add_dedup(&mut self, diag: Diagnostic) {
+   822→        let is_dup = self.diagnostics.iter().any(|existing| {
+   823→            existing.location.line == diag.location.line && existing.message == diag.message
+   824→        });
+   825→        if !is_dup {
+   826→            self.add(diag);
+   827→        }
+   828→    }
+   829→
+   830→    /// Number of error-level diagnostics.
+   831→    pub fn error_count(&self) -> usize {
+   832→        self.error_count
+   833→    }
+   834→
+   835→    /// Number of warning-level diagnostics.
+   836→    pub fn warning_count(&self) -> usize {
+   837→        self.warning_count
+   838→    }
+   839→
+   840→    /// Total number of diagnostics.
+   841→    pub fn len(&self) -> usize {
+   842→        self.diagnostics.len()
+   843→    }
+   844→
+   845→    /// True when no diagnostics have been collected.
+   846→    pub fn is_empty(&self) -> bool {
+   847→        self.diagnostics.is_empty()
+   848→    }
+   849→
+   850→    /// True when at least one error-level diagnostic was collected.
+   851→    pub fn has_errors(&self) -> bool {
+   852→        self.error_count > 0
+   853→    }
+   854→
+   855→    /// Access all collected diagnostics.
+   856→    pub fn diagnostics(&self) -> &[Diagnostic] {
+   857→        &self.diagnostics
+   858→    }
+   859→
+   860→    /// Iterate over only error-level diagnostics.
+   861→    pub fn errors(&self) -> impl Iterator<Item = &Diagnostic> {
+   862→        self.diagnostics
+   863→            .iter()
+   864→            .filter(|d| d.severity == Severity::Error)
+   865→    }
+   866→
+   867→    /// Iterate over only warning-level diagnostics.
+   868→    pub fn warnings(&self) -> impl Iterator<Item = &Diagnostic> {
+   869→        self.diagnostics
+   870→            .iter()
+   871→            .filter(|d| d.severity == Severity::Warning)
+   872→    }
+   873→
+   874→    /// Take all diagnostics, leaving the collector empty.
+   875→    pub fn take(&mut self) -> Vec<Diagnostic> {
+   876→        self.error_count = 0;
+   877→        self.warning_count = 0;
+   878→        std::mem::take(&mut self.diagnostics)
+   879→    }
+   880→
+   881→    /// Merge diagnostics from another collector into this one.
+   882→    pub fn merge(&mut self, other: &ErrorCollector) {
+   883→        for diag in &other.diagnostics {
+   884→            self.add(diag.clone());
+   885→        }
+   886→    }
+   887→
+   888→    /// Render all diagnostics as a single string with source context.
+   889→    pub fn render_all(&self) -> String {
+   890→        self.diagnostics
+   891→            .iter()
+   892→            .map(|d| d.display_with_source())
+   893→            .collect::<Vec<_>>()
+   894→            .join("\n")
+   895→    }
+   896→
+   897→    /// Render a summary line, e.g. "2 errors, 1 warning".
+   898→    pub fn summary(&self) -> String {
+   899→        let mut parts = Vec::new();
+   900→        if self.error_count > 0 {
+   901→            parts.push(format!(
+   902→                "{} error{}",
+   903→                self.error_count,
+   904→                if self.error_count > 1 { "s" } else { "" }
+   905→            ));
+   906→        }
+   907→        if self.warning_count > 0 {
+   908→            parts.push(format!(
+   909→                "{} warning{}",
+   910→                self.warning_count,
+   911→                if self.warning_count > 1 { "s" } else { "" }
+   912→            ));
+   913→        }
+   914→        if parts.is_empty() {
+   915→            "no diagnostics".to_string()
+   916→        } else {
+   917→            parts.join(", ")
+   918→        }
+   919→    }
+   920→}
+   921→
+   922→impl Default for ErrorCollector {
+   923→    fn default() -> Self {
+   924→        Self::new()
+   925→    }
+   926→}
+   927→
+   928→// ---------------------------------------------------------------------------
+   929→// "Did you mean?" suggestions
+   930→// ---------------------------------------------------------------------------
+   931→
+   932→/// Compute the Levenshtein edit distance between two strings.
+   933→///
+   934→/// This is a classic dynamic-programming implementation with O(a×b) time
+   935→/// and O(min(a,b)) space.
+   936→pub fn levenshtein(a: &str, b: &str) -> usize {
+   937→    let a_len = a.chars().count();
+   938→    let b_len = b.chars().count();
+   939→
+   940→    if a_len == 0 {
+   941→        return b_len;
+   942→    }
+   943→    if b_len == 0 {
+   944→        return a_len;
+   945→    }
+   946→
+   947→    // Use the shorter string for the column dimension to save space.
+   948→    let (short, long) = if a_len <= b_len { (a, b) } else { (b, a) };
+   949→    let short_len = short.chars().count();
+   950→
+   951→    let mut prev: Vec<usize> = (0..=short_len).collect();
+   952→    let mut curr = vec![0; short_len + 1];
+   953→
+   954→    for lc in long.chars() {
+   955→        curr[0] = prev[0] + 1;
+   956→        for (i, sc) in (1..).zip(short.chars()) {
+   957→            let cost = if sc == lc { 0 } else { 1 };
+   958→            curr[i] = (prev[i] + 1) // deletion
+   959→                .min(curr[i - 1] + 1) // insertion
+   960→                .min(prev[i - 1] + cost); // substitution
+   961→        }
+   962→        std::mem::swap(&mut prev, &mut curr);
+   963→    }
+   964→
+   965→    prev[short_len]
+   966→}
+   967→
+   968→/// Suggest the closest match from a list of candidates using Levenshtein
+   969→/// distance.  Returns `None` if no candidate is within `max_distance`.
+   970→pub fn suggest<'a>(
+   971→    input: &str,
+   972→    candidates: &'a [String],
+   973→    max_distance: usize,
+   974→) -> Option<&'a String> {
+   975→    candidates
+   976→        .iter()
+   977→        .filter(|c| {
+   978→            // Quick length-based filter: if lengths differ by more than
+   979→            // max_distance, the edit distance must be > max_distance.
+   980→            let len_diff = (c.len() as isize - input.len() as isize).unsigned_abs();
+   981→            len_diff <= max_distance
+   982→        })
+   983→        .map(|c| (c, levenshtein(input, c)))
+   984→        .filter(|(_, dist)| *dist <= max_distance && *dist > 0)
+   985→        .min_by_key(|(_, dist)| *dist)
+   986→        .map(|(c, _)| c)
+   987→}
+   988→
+   989→/// VUMA language keywords, used for "did you mean?" suggestions.
+   990→pub const VUMA_KEYWORDS: &[&str] = &[
+   991→    "fn", "let", "ptr", "region", "alloc", "allocate", "free", "derive", "cast", "read", "write",
+   992→    "sync", "if", "else", "while", "for", "return", "struct", "enum", "match", "unsafe", "safe",
+   993→    "bd", "repd", "capd", "reld", "import", "export", "mod", "use", "self", "super", "async",
+   994→    "await", "spawn", "lock", "unlock", "channel", "send", "recv", "true", "false", "as", "sizeof",
+   995→    "alignof", "loop",
+   996→];
+   997→
+   998→/// Suggest a keyword similar to `input` using Levenshtein distance.
+   999→///
+  1000→/// Returns the closest keyword within distance 2, or `None`.
+  1001→pub fn suggest_keyword(input: &str) -> Option<&'static str> {
+  1002→    let mut best: Option<(&'static str, usize)> = None;
+  1003→    for &kw in VUMA_KEYWORDS {
+  1004→        if kw == input {
+  1005→            continue; // exact match is not a suggestion
+  1006→        }
+  1007→        let dist = levenshtein(input, kw);
+  1008→        if dist <= 2 {
+  1009→            match best {
+  1010→                Some((_, best_dist)) if dist >= best_dist => {}
+  1011→                _ => best = Some((kw, dist)),
+  1012→            }
+  1013→        }
+  1014→    }
+  1015→    best.map(|(kw, _)| kw)
+  1016→}
+  1017→
+  1018→/// Format a "did you mean?" suggestion string, e.g.
+  1019→/// `"did you mean 'fn'?"`.
+  1020→pub fn format_suggestion(input: &str, suggestion: &str) -> String {
+  1021→    format!("did you mean '{}' instead of '{}'?", suggestion, input)
+  1022→}
+  1023→
+  1024→// ---------------------------------------------------------------------------
+  1025→// Internal helpers
+  1026→// ---------------------------------------------------------------------------
+  1027→
+  1028→/// Extract the text of a 0-based line number from `source`.
+  1029→fn get_line(source: &str, line: usize) -> String {
+  1030→    source.lines().nth(line).unwrap_or("").to_string()
+  1031→}
+  1032→
+  1033→// ---------------------------------------------------------------------------
+  1034→// Tests
+  1035→// ---------------------------------------------------------------------------
+  1036→
+  1037→#[cfg(test)]
+  1038→mod tests {
+  1039→    use super::*;
+  1040→
+  1041→    // -- Span tests ----------------------------------------------------------
+  1042→
+  1043→    #[test]
+  1044→    fn span_new_and_merge() {
+  1045→        let a = Span::new(10, 20);
+  1046→        let b = Span::new(15, 30);
+  1047→        let merged = a.merge(b);
+  1048→        assert_eq!(merged.start, 10);
+  1049→        assert_eq!(merged.end, 30);
+  1050→        assert_eq!(merged.len(), 20);
+  1051→        assert!(!merged.is_empty());
+  1052→
+  1053→        let empty = Span::synthetic();
+  1054→        assert!(empty.is_empty());
+  1055→        assert_eq!(empty.len(), 0);
+  1056→    }
+  1057→
+  1058→    // -- SourceLocation tests ------------------------------------------------
+  1059→
+  1060→    #[test]
+  1061→    fn source_location_format() {
+  1062→        let loc = SourceLocation::new(2, 5)
+  1063→            .with_file("test.vu")
+  1064→            .with_line_text("region pool = allocate(1024);");
+  1065→        assert_eq!(loc.format_location(), "test.vu:3:6");
+  1066→        assert!(loc.render_with_pointer(Some(6)).contains("^^^^^^"));
+  1067→    }
+  1068→
+  1069→    #[test]
+  1070→    fn offset_to_location_basic() {
+  1071→        let source = "line1\nline2\nline3\n";
+  1072→        let loc = offset_to_location(source, 6, Some("demo.vu"));
+  1073→        // offset 6 = start of "line2"
+  1074→        assert_eq!(loc.line, 1);
+  1075→        assert_eq!(loc.column, 0);
+  1076→        assert_eq!(loc.file.as_deref(), Some("demo.vu"));
+  1077→        assert_eq!(loc.line_text.as_deref(), Some("line2"));
+  1078→    }
+  1079→
+  1080→    // -- ParseErrorKind display tests ----------------------------------------
+  1081→
+  1082→    #[test]
+  1083→    fn error_kind_display() {
+  1084→        assert_eq!(
+  1085→            ParseErrorKind::UnexpectedToken.to_string(),
+  1086→            "unexpected token"
+  1087→        );
+  1088→        assert_eq!(ParseErrorKind::ExpectedToken.to_string(), "expected token");
+  1089→        assert_eq!(ParseErrorKind::InvalidSyntax.to_string(), "invalid syntax");
+  1090→        assert_eq!(
+  1091→            ParseErrorKind::DuplicateDefinition.to_string(),
+  1092→            "duplicate definition"
+  1093→        );
+  1094→        assert_eq!(
+  1095→            ParseErrorKind::UndefinedReference.to_string(),
+  1096→            "undefined reference"
+  1097→        );
+  1098→        assert_eq!(ParseErrorKind::TypeMismatch.to_string(), "type mismatch");
+  1099→        assert_eq!(ParseErrorKind::RegionError.to_string(), "region error");
+  1100→        assert_eq!(
+  1101→            ParseErrorKind::BDAnnotationError.to_string(),
+  1102→            "BD annotation error"
+  1103→        );
+  1104→    }
+  1105→
+  1106→    // -- ParseError construction tests ---------------------------------------
+  1107→
+  1108→    #[test]
+  1109→    fn parse_error_convenience_constructors() {
+  1110→        let span = Span::new(0, 5);
+  1111→
+  1112→        let err = ParseError::unexpected("bad token", span);
+  1113→        assert_eq!(err.kind, ParseErrorKind::UnexpectedToken);
+  1114→        assert!(err.suggestion.is_none());
+  1115→
+  1116→        let err = ParseError::expected("'}'", "';'", span);
+  1117→        assert_eq!(err.kind, ParseErrorKind::ExpectedToken);
+  1118→        assert!(err.message.contains("expected"));
+  1119→        assert!(err.message.contains("found"));
+  1120→
+  1121→        let err = ParseError::invalid_syntax("bad syntax", span);
+  1122→        assert_eq!(err.kind, ParseErrorKind::InvalidSyntax);
+  1123→
+  1124→        let err = ParseError::undefined_ref("foo", span);
+  1125→        assert_eq!(err.kind, ParseErrorKind::UndefinedReference);
+  1126→        assert!(err.message.contains("foo"));
+  1127→
+  1128→        let err = ParseError::region_error("bad region", span);
+  1129→        assert_eq!(err.kind, ParseErrorKind::RegionError);
+  1130→
+  1131→        let err = ParseError::bd_annotation_error("bad bd", span);
+  1132→        assert_eq!(err.kind, ParseErrorKind::BDAnnotationError);
+  1133→    }
+  1134→
+  1135→    #[test]
+  1136→    fn parse_error_with_suggestion() {
+  1137→        let span = Span::new(0, 3);
+  1138→        let err = ParseError::unexpected("unexpected 'fun'", span).with_suggestion("fn");
+  1139→        assert_eq!(err.suggestion.as_deref(), Some("fn"));
+  1140→        let display = err.to_string();
+  1141→        assert!(display.contains("did you mean"));
+  1142→        assert!(display.contains("fn"));
+  1143→    }
+  1144→
+  1145→    #[test]
+  1146→    fn parse_error_display_with_source() {
+  1147→        let source = "region pool = allocate(1024);";
+  1148→        let span = Span::new(7, 11); // "pool"
+  1149→        let err = ParseError::undefined_ref("pool", span).with_suggestion("pools");
+  1150→        let rendered = err.display_with_source(source);
+  1151→        assert!(rendered.contains("undefined reference"));
+  1152→        assert!(rendered.contains("did you mean"));
+  1153→        assert!(rendered.contains("pool"));
+  1154→    }
+  1155→
+  1156→    // -- Legacy convenience constructors still work --------------------------
+  1157→
+  1158→    #[test]
+  1159→    fn legacy_constructors() {
+  1160→        let span = Span::new(0, 5);
+  1161→        let err = ParseError::missing_semi(span);
+  1162→        assert_eq!(err.kind, ParseErrorKind::MissingSemicolon);
+  1163→
+  1164→        let err = ParseError::invalid_address("bad hex", span);
+  1165→        assert_eq!(err.kind, ParseErrorKind::InvalidAddress);
+  1166→
+  1167→        let err = ParseError::undefined_var("x", span);
+  1168→        assert_eq!(err.kind, ParseErrorKind::UndefinedVariable);
+  1169→    }
+  1170→
+  1171→    // -- ErrorRecovery tests -------------------------------------------------
+  1172→
+  1173→    #[test]
+  1174→    fn error_recovery_for_kind() {
+  1175→        assert_eq!(
+  1176→            ErrorRecovery::for_kind(&ParseErrorKind::MissingSemicolon),
+  1177→            ErrorRecovery::InsertMissingToken(";".to_string())
+  1178→        );
+  1179→        assert_eq!(
+  1180→            ErrorRecovery::for_kind(&ParseErrorKind::ExpectedToken),
+  1181→            ErrorRecovery::SkipOneToken
+  1182→        );
+  1183→        assert_eq!(
+  1184→            ErrorRecovery::for_kind(&ParseErrorKind::UnexpectedToken),
+  1185→            ErrorRecovery::SkipToStatementBoundary
+  1186→        );
+  1187→        assert_eq!(
+  1188→            ErrorRecovery::for_kind(&ParseErrorKind::InvalidSyntax),
+  1189→            ErrorRecovery::SkipToStatementBoundary
+  1190→        );
+  1191→    }
+  1192→
+  1193→    #[test]
+  1194→    fn error_recovery_display() {
+  1195→        assert_eq!(
+  1196→            ErrorRecovery::SkipToStatementBoundary.to_string(),
+  1197→            "skip to next statement"
+  1198→        );
+  1199→        assert_eq!(
+  1200→            ErrorRecovery::InsertMissingToken(";".into()).to_string(),
+  1201→            "insert missing ';'"
+  1202→        );
+  1203→    }
+  1204→
+  1205→    // -- ParseResult tests ---------------------------------------------------
+  1206→
+  1207→    #[test]
+  1208→    fn parse_result_ok() {
+  1209→        let result: ParseResult<i32> = ParseResult::ok(42);
+  1210→        assert!(result.is_ok());
+  1211→        assert!(!result.has_errors());
+  1212→        assert_eq!(result.unwrap(), 42);
+  1213→    }
+  1214→
+  1215→    #[test]
+  1216→    fn parse_result_ok_with_errors() {
+  1217→        let err = ParseError::unexpected("test", Span::new(0, 1));
+  1218→        let result: ParseResult<i32> = ParseResult::ok_with_errors(42, vec![err]);
+  1219→        assert!(result.is_ok());
+  1220→        assert!(result.has_errors());
+  1221→        assert_eq!(result.value, Some(42));
+  1222→        assert_eq!(result.errors.len(), 1);
+  1223→    }
+  1224→
+  1225→    #[test]
+  1226→    fn parse_result_err() {
+  1227→        let err = ParseError::unexpected("bad", Span::new(0, 3));
+  1228→        let result: ParseResult<i32> = ParseResult::from_error(err);
+  1229→        assert!(result.is_err());
+  1230→        assert!(result.has_errors());
+  1231→        assert!(result.value.is_none());
+  1232→    }
+  1233→
+  1234→    #[test]
+  1235→    fn parse_result_map() {
+  1236→        let result: ParseResult<i32> = ParseResult::ok(10);
+  1237→        let mapped = result.map(|v| v * 2);
+  1238→        assert_eq!(mapped.value, Some(20));
+  1239→        assert!(!mapped.has_errors());
+  1240→    }
+  1241→
+  1242→    #[test]
+  1243→    fn parse_result_merge_errors() {
+  1244→        let err1 = ParseError::unexpected("e1", Span::new(0, 1));
+  1245→        let err2 = ParseError::invalid_syntax("e2", Span::new(5, 6));
+  1246→        let mut result: ParseResult<i32> = ParseResult::ok(1);
+  1247→        result.push_error(err1);
+  1248→        let other: ParseResult<String> = ParseResult::from_error(err2);
+  1249→        result.merge_errors_from(&other);
+  1250→        assert_eq!(result.errors.len(), 2);
+  1251→        assert_eq!(result.value, Some(1));
+  1252→    }
+  1253→
+  1254→    // -- Diagnostic tests ----------------------------------------------------
+  1255→
+  1256→    #[test]
+  1257→    fn diagnostic_construction() {
+  1258→        let loc = SourceLocation::new(5, 10).with_file("main.vu");
+  1259→        let diag = Diagnostic::error("type mismatch", loc.clone())
+  1260→            .with_code("E0001")
+  1261→            .with_suggestion("u32");
+  1262→        assert_eq!(diag.severity, Severity::Error);
+  1263→        assert_eq!(diag.code.as_deref(), Some("E0001"));
+  1264→        assert_eq!(diag.suggestion.as_deref(), Some("u32"));
+  1265→    }
+  1266→
+  1267→    #[test]
+  1268→    fn diagnostic_from_parse_error() {
+  1269→        let source = "fn main() { x }";
+  1270→        let err = ParseError::undefined_var("x", Span::new(13, 14)).with_suggestion("y");
+  1271→        let diag = Diagnostic::from_parse_error(&err, source, Some("main.vu"));
+  1272→        assert_eq!(diag.severity, Severity::Error);
+  1273→        assert!(diag.message.contains("x"));
+  1274→        assert_eq!(diag.suggestion.as_deref(), Some("y"));
+  1275→        // Should have a child note with error kind.
+  1276→        assert!(!diag.children.is_empty());
+  1277→    }
+  1278→
+  1279→    #[test]
+  1280→    fn diagnostic_display_with_source() {
+  1281→        let source = "fn main() { x }";
+  1282→        let loc = offset_to_location(source, 13, Some("main.vu"));
+  1283→        let diag = Diagnostic::error("undefined variable `x`", loc).with_suggestion("y");
+  1284→        let rendered = diag.display_with_source();
+  1285→        assert!(rendered.contains("error:"));
+  1286→        assert!(rendered.contains("did you mean"));
+  1287→    }
+  1288→
+  1289→    // -- ErrorCollector tests ------------------------------------------------
+  1290→
+  1291→    #[test]
+  1292→    fn error_collector_basic() {
+  1293→        let mut collector = ErrorCollector::new();
+  1294→        assert!(collector.is_empty());
+  1295→        assert!(!collector.has_errors());
+  1296→
+  1297→        let loc = SourceLocation::new(0, 0);
+  1298→        collector.add(Diagnostic::error("test error", loc));
+  1299→        assert_eq!(collector.error_count(), 1);
+  1300→        assert!(collector.has_errors());
+  1301→
+  1302→        let loc2 = SourceLocation::new(1, 0);
+  1303→        collector.add(Diagnostic::warning("test warning", loc2));
+  1304→        assert_eq!(collector.warning_count(), 1);
+  1305→        assert_eq!(collector.len(), 2);
+  1306→
+  1307→        let summary = collector.summary();
+  1308→        assert!(summary.contains("1 error"));
+  1309→        assert!(summary.contains("1 warning"));
+  1310→    }
+  1311→
+  1312→    #[test]
+  1313→    fn error_collector_dedup() {
+  1314→        let mut collector = ErrorCollector::new();
+  1315→        let loc = SourceLocation::new(5, 2);
+  1316→        collector.add_dedup(Diagnostic::error("duplicate", loc.clone()));
+  1317→        collector.add_dedup(Diagnostic::error("duplicate", loc.clone()));
+  1318→        // Same line + message should be deduplicated.
+  1319→        assert_eq!(collector.len(), 1);
+  1320→
+  1321→        // Different message on same line is NOT deduplicated.
+  1322→        collector.add_dedup(Diagnostic::error("different", loc.clone()));
+  1323→        assert_eq!(collector.len(), 2);
+  1324→    }
+  1325→
+  1326→    #[test]
+  1327→    fn error_collector_merge() {
+  1328→        let mut a = ErrorCollector::new();
+  1329→        let mut b = ErrorCollector::new();
+  1330→        a.add(Diagnostic::error("a-err", SourceLocation::new(0, 0)));
+  1331→        b.add(Diagnostic::warning("b-warn", SourceLocation::new(1, 0)));
+  1332→        a.merge(&b);
+  1333→        assert_eq!(a.len(), 2);
+  1334→        assert_eq!(a.error_count(), 1);
+  1335→        assert_eq!(a.warning_count(), 1);
+  1336→    }
+  1337→
+  1338→    #[test]
+  1339→    fn error_collector_take() {
+  1340→        let mut collector = ErrorCollector::new();
+  1341→        collector.add(Diagnostic::error("err", SourceLocation::new(0, 0)));
+  1342→        let diags = collector.take();
+  1343→        assert_eq!(diags.len(), 1);
+  1344→        assert!(collector.is_empty());
+  1345→        assert_eq!(collector.error_count(), 0);
+  1346→    }
+  1347→
+  1348→    // -- Levenshtein tests ---------------------------------------------------
+  1349→
+  1350→    #[test]
+  1351→    fn levenshtein_basic() {
+  1352→        assert_eq!(levenshtein("", ""), 0);
+  1353→        assert_eq!(levenshtein("", "abc"), 3);
+  1354→        assert_eq!(levenshtein("abc", ""), 3);
+  1355→        assert_eq!(levenshtein("kitten", "sitting"), 3);
+  1356→        assert_eq!(levenshtein("flaw", "lawn"), 2);
+  1357→        assert_eq!(levenshtein("fn", "fn"), 0);
+  1358→        assert_eq!(levenshtein("fun", "fn"), 1);
+  1359→    }
+  1360→
+  1361→    // -- Suggestion tests ----------------------------------------------------
+  1362→
+  1363→    #[test]
+  1364→    fn suggest_close_match() {
+  1365→        let candidates: Vec<String> =
+  1366→            vec!["fn".into(), "let".into(), "region".into(), "struct".into()];
+  1367→        let result = suggest("fun", &candidates, 2);
+  1368→        assert_eq!(result, Some(&"fn".to_string()));
+  1369→
+  1370→        let result = suggest("legion", &candidates, 2);
+  1371→        assert_eq!(result, Some(&"region".to_string()));
+  1372→
+  1373→        let result = suggest("completely_off", &candidates, 2);
+  1374→        assert!(result.is_none());
+  1375→    }
+  1376→
+  1377→    #[test]
+  1378→    fn suggest_keyword_works() {
+  1379→        // "fun" is close to "fn"
+  1380→        let result = suggest_keyword("fun");
+  1381→        assert_eq!(result, Some("fn"));
+  1382→
+  1383→        // "regin" is close to "region"
+  1384→        let result = suggest_keyword("regin");
+  1385→        assert_eq!(result, Some("region"));
+  1386→
+  1387→        // "xyz" is not close to any keyword
+  1388→        let result = suggest_keyword("xyzzy");
+  1389→        assert!(result.is_none());
+  1390→
+  1391→        // Exact match returns None (distance 0 is filtered), and no other
+  1392→        // keyword is within distance 2 of a long nonsense word.
+  1393→        let result = suggest_keyword("zzzzzzz");
+  1394→        assert!(result.is_none());
+  1395→    }
+  1396→
+  1397→    #[test]
+  1398→    fn format_suggestion_works() {
+  1399→        let msg = format_suggestion("fun", "fn");
+  1400→        assert_eq!(msg, "did you mean 'fn' instead of 'fun'?");
+  1401→    }
+  1402→
+  1403→    // -- Full integration: ParseError → Diagnostic → ErrorCollector ----------
+  1404→
+  1405→    #[test]
+  1406→    fn full_error_pipeline() {
+  1407→        let source = "region pool = allocate(1024);";
+  1408→        let err = ParseError::region_error("region size must be positive", Span::new(22, 26))
+  1409→            .with_suggestion("allocate(2048)");
+  1410→
+  1411→        let mut collector = ErrorCollector::new();
+  1412→        collector.add_parse_error(&err, source, Some("demo.vu"));
+  1413→
+  1414→        assert_eq!(collector.error_count(), 1);
+  1415→        let rendered = collector.render_all();
+  1416→        assert!(rendered.contains("region error"));
+  1417→        assert!(rendered.contains("did you mean"));
+  1418→    }
+  1419→
+  1420→    // -- ParseResult into_result round-trip ----------------------------------
+  1421→
+  1422→    #[test]
+  1423→    fn parse_result_into_result() {
+  1424→        let ok: ParseResult<i32> = ParseResult::ok(42);
+  1425→        let result = ok.into_result();
+  1426→        assert!(result.is_ok());
+  1427→        assert_eq!(result.unwrap(), 42);
+  1428→
+  1429→        let err = ParseError::unexpected("bad", Span::new(0, 3));
+  1430→        let fail: ParseResult<i32> = ParseResult::from_error(err);
+  1431→        let res = fail.into_result();
+  1432→        assert!(res.is_err());
+  1433→        assert_eq!(res.unwrap_err().len(), 1);
+  1434→    }
+  1435→
+  1436→    // -- Severity display ----------------------------------------------------
+  1437→
+  1438→    #[test]
+  1439→    fn severity_display() {
+  1440→        assert_eq!(Severity::Error.to_string(), "error");
+  1441→        assert_eq!(Severity::Warning.to_string(), "warning");
+  1442→        assert_eq!(Severity::Note.to_string(), "note");
+  1443→    }
+  1444→}
+  1445→

@@ -478,9 +478,10 @@ fn encode_m_form(opcode: u32, rs: u32, ra: u32, sh: u32, mb: u32, me: u32, rc: u
 }
 
 /// Build an I-form instruction: opcode[0:5] | LI[6:29] | AA[30] | LK[31]
+/// LI is a 24-bit signed value (word offset from CIA).
 fn encode_i_form(opcode: u32, li: i32, aa: u32, lk: u32) -> [u8; 4] {
     let word =
-        ((opcode & 0x3F) << 26) | (((li as u32) & 0x03FF_FFFF) << 2) | ((aa & 1) << 1) | (lk & 1);
+        ((opcode & 0x3F) << 26) | (((li as u32) & 0x00FF_FFFF) << 2) | ((aa & 1) << 1) | (lk & 1);
     encode_word(word)
 }
 
@@ -495,12 +496,13 @@ fn encode_b_form(opcode: u32, bo: u32, bi: u32, bd: i32, aa: u32, lk: u32) -> [u
     encode_word(word)
 }
 
-/// Build an XL-form instruction: opcode[0:5] | BO[6:10] | BI[11:15] | 0[16:18] | BH[19:21] | xo[21:30] | LK[31]
+/// Build an XL-form instruction: opcode[0:5] | BO[6:10] | BI[11:15] | 0[16:18] | BH[19:21] | xo[22:30] | LK[31]
+/// BH[19:21] in MSB-first bit numbering = normal bits 12:10 = shift by 10.
 fn encode_xl_form(opcode: u32, bo: u32, bi: u32, bh: u32, xo: u32, lk: u32) -> [u8; 4] {
     let word = ((opcode & 0x3F) << 26)
         | ((bo & 0x1F) << 21)
         | ((bi & 0x1F) << 16)
-        | ((bh & 0x7) << 11)
+        | ((bh & 0x7) << 10)
         | ((xo & 0x3FF) << 1)
         | (lk & 1);
     encode_word(word)
@@ -861,28 +863,28 @@ impl Instruction {
                 encode_x_form(31, rs.encoding(), ra.encoding(), rb.encoding(), 792, 0)
             }
             Instruction::Rldcl { ra, rs, rb, mb } => {
-                // RLDCL rA, rS, rB, MB: primary=31, rB, MB, xo=8, sh=0, Rc=0
-                // Encoding: [0:5]=31, [6:10]=rS, [11:15]=rA, [16:20]=rB,
-                //           [21:25]=MB, [26:30]=xo=8, [31]=Rc=0
-                // Note: for RLDCL the mb field occupies bits [21:25] (5 bits,
-                // representing the beginning mask position encoded as
-                // mb[5] in bit 1 and mb[0:4] in bits [21:25]).
-                // Simplified: we treat mb as 5-bit field in bits [21:25]
-                let word = (31u32 << 26)
+                // RLDCL rA, rS, rB, MB: MD-form, primary=30
+                // Encoding: [0:5]=30, [6:10]=rS, [11:15]=rA, [16:20]=rB,
+                //           [21:25]=MB[0:4], [26]=MB[5], [27:30]=XO(=8), [31]=Rc(=0)
+                let word = (30u32 << 26)
                     | (rs.encoding() << 21)
                     | (ra.encoding() << 16)
                     | (rb.encoding() << 11)
                     | ((mb & 0x1F) << 6)
+                    | (((mb >> 5) & 1) << 5)
                     | (8 << 1);
                 encode_word(word)
             }
             Instruction::Rldcr { ra, rs, rb, me } => {
-                // RLDCR rA, rS, rB, ME: primary=31, rB, ME, xo=9, Rc=0
-                let word = (31u32 << 26)
+                // RLDCR rA, rS, rB, ME: MD-form, primary=30
+                // Encoding: [0:5]=30, [6:10]=rS, [11:15]=rA, [16:20]=rB,
+                //           [21:25]=ME[0:4], [26]=ME[5], [27:30]=XO(=9), [31]=Rc(=0)
+                let word = (30u32 << 26)
                     | (rs.encoding() << 21)
                     | (ra.encoding() << 16)
                     | (rb.encoding() << 11)
                     | ((me & 0x1F) << 6)
+                    | (((me >> 5) & 1) << 5)
                     | (9 << 1);
                 encode_word(word)
             }
@@ -964,28 +966,31 @@ impl Instruction {
             // ── Compare ────────────────────────────────────────
             Instruction::Cmp { bf, l, ra, rb } => {
                 // CMP crf, l, rA, rB: primary=31, xo=0, Rc=0
-                // bits [6:8] = bf, [9]=l, [11:15]=rA, [16:20]=rB
+                // bits [6:8] = bf, [9]=l, [10]=0, [11:15]=rA, [16:20]=rB
+                // l-field at MSB-first bit 9 = normal bit 22
                 let word = (31u32 << 26)
                     | ((bf.encoding() & 0x7) << 23)
-                    | ((*l & 1) << 21)
+                    | ((*l & 1) << 22)
                     | (ra.encoding() << 16)
                     | (rb.encoding() << 11);
                 encode_word(word)
             }
             Instruction::Cmpi { bf, l, ra, simm } => {
                 // CMPI crf, l, rA, simm16: primary=11
+                // l-field at MSB-first bit 9 = normal bit 22
                 let word = (11u32 << 26)
                     | ((bf.encoding() & 0x7) << 23)
-                    | ((*l & 1) << 21)
+                    | ((*l & 1) << 22)
                     | (ra.encoding() << 16)
                     | ((*simm as u32) & 0xFFFF);
                 encode_word(word)
             }
             Instruction::Cmpl { bf, l, ra, rb } => {
                 // CMPL crf, l, rA, rB: primary=31, xo=32, Rc=0
+                // l-field at MSB-first bit 9 = normal bit 22
                 let word = (31u32 << 26)
                     | ((bf.encoding() & 0x7) << 23)
-                    | ((*l & 1) << 21)
+                    | ((*l & 1) << 22)
                     | (ra.encoding() << 16)
                     | (rb.encoding() << 11)
                     | (32 << 1);
@@ -993,9 +998,10 @@ impl Instruction {
             }
             Instruction::Cmpli { bf, l, ra, uimm } => {
                 // CMPLI crf, l, rA, uimm16: primary=10
+                // l-field at MSB-first bit 9 = normal bit 22
                 let word = (10u32 << 26)
                     | ((bf.encoding() & 0x7) << 23)
-                    | ((*l & 1) << 21)
+                    | ((*l & 1) << 22)
                     | (ra.encoding() << 16)
                     | (uimm & 0xFFFF);
                 encode_word(word)
@@ -2032,19 +2038,40 @@ fn lower_ir_instr_ppc64(
                     ));
                 }
                 BinOpKind::Ror | BinOpKind::Rol => {
-                    // PPC64 rotation placeholder - use Srad
-                    result.push(emit_alloc_instr(
-                        Instruction::Srad {
-                            ra: d,
-                            rs: l,
-                            rb: r,
-                        },
-                        vec![
-                            PhysicalReg::new(RegClass::Gpr, l.encoding()),
-                            PhysicalReg::new(RegClass::Gpr, r.encoding()),
-                        ],
-                        vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
-                    ));
+                    // 64-bit rotation: use RLDCL (rotate left doubleword then clear left)
+                    // ROR(n, r) = ROTL64(n, 64-r); ROL(n, r) = ROTL64(n, r)
+                    // RLDCL ra, rs, rb, 0 performs: ra = ROTL64(rs, rb[58:63])
+                    if *op == BinOpKind::Ror {
+                        // Negate shift: subf r, r, r0 → r = -r; then addi r, r, 64
+                        // Use R11 as scratch (R0 is NOT hardwired zero on PPC)
+                        result.push(emit_alloc_instr(
+                            Instruction::Neg { rt: Gpr::R11, ra: r },
+                            vec![PhysicalReg::new(RegClass::Gpr, r.encoding())],
+                            vec![PhysicalReg::new(RegClass::Gpr, Gpr::R11.encoding())],
+                        ));
+                        result.push(emit_alloc_instr(
+                            Instruction::Addi { rt: Gpr::R11, ra: Gpr::R11, simm: 64 },
+                            vec![PhysicalReg::new(RegClass::Gpr, Gpr::R11.encoding())],
+                            vec![PhysicalReg::new(RegClass::Gpr, Gpr::R11.encoding())],
+                        ));
+                        result.push(emit_alloc_instr(
+                            Instruction::Rldcl { ra: d, rs: l, rb: Gpr::R11, mb: 0 },
+                            vec![
+                                PhysicalReg::new(RegClass::Gpr, l.encoding()),
+                                PhysicalReg::new(RegClass::Gpr, Gpr::R11.encoding()),
+                            ],
+                            vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+                        ));
+                    } else {
+                        result.push(emit_alloc_instr(
+                            Instruction::Rldcl { ra: d, rs: l, rb: r, mb: 0 },
+                            vec![
+                                PhysicalReg::new(RegClass::Gpr, l.encoding()),
+                                PhysicalReg::new(RegClass::Gpr, r.encoding()),
+                            ],
+                            vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+                        ));
+                    }
                 }
                 BinOpKind::SLt
                 | BinOpKind::SLe
@@ -2914,12 +2941,12 @@ impl Backend for PPC64Backend {
             opcode: "mflr".into(), reads: vec![], writes: vec![PhysicalReg::new(RegClass::Gpr, 0)],
             encoded: encode_word(mflr_word).to_vec(),
         });
-        // STD R0, fs+8(R1) - save LR
+        // STD R0, fs+16(R1) - save LR at caller's SP+16 (ELFv2 LR save area)
         instructions.push(AllocatedInstruction {
             opcode: "std".into(),
             reads: vec![PhysicalReg::new(RegClass::Gpr, 0), PhysicalReg::new(RegClass::Gpr, 1)],
             writes: vec![],
-            encoded: Instruction::Std { rs: Gpr::R0, ra: Gpr::R1, ds: fs + 8 }.encode().to_vec(),
+            encoded: Instruction::Std { rs: Gpr::R0, ra: Gpr::R1, ds: fs + 16 }.encode().to_vec(),
         });
         // STD R31, fs-16(R1) - save R31
         instructions.push(AllocatedInstruction {
@@ -3306,6 +3333,9 @@ impl Backend for PPC64Backend {
                             if i >= 8 { break; }
                             code.extend(ss_load_value(arg, &vreg_stack_slots, arg_regs[i]));
                         }
+                        // Save TOC (R2) per ELFv2 ABI convention before BL
+                        // STD R2, 24(R1) — TOC save area at caller's SP+24
+                        code.extend_from_slice(&Instruction::Std { rs: Gpr::R2, ra: Gpr::R1, ds: 24 }.encode());
                         let bl_byte_offset = current_byte_offset + code.len() as u64;
                         code.extend_from_slice(&Instruction::Bl { li: 0 }.encode());
                         relocations.push(crate::backend::RelocationEntry {
@@ -3313,6 +3343,9 @@ impl Backend for PPC64Backend {
                             symbol: target_func.clone(),
                             reloc_type: "R_PPC64_REL24".to_string(),
                         });
+                        // Restore TOC (R2) per ELFv2 ABI convention after BL
+                        // LD R2, 24(R1)
+                        code.extend_from_slice(&Instruction::Ld { rt: Gpr::R2, ra: Gpr::R1, ds: 24 }.encode());
                         if let Some(d) = dst {
                             let dst_id = d.as_register().unwrap_or(0);
                             let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
@@ -3326,7 +3359,7 @@ impl Backend for PPC64Backend {
                             code.extend(ss_load_value(val, &vreg_stack_slots, Gpr::R3));
                         }
                         // Epilogue
-                        code.extend_from_slice(&Instruction::Ld { rt: Gpr::R0, ra: Gpr::R1, ds: fs + 8 }.encode());
+                        code.extend_from_slice(&Instruction::Ld { rt: Gpr::R0, ra: Gpr::R1, ds: fs + 16 }.encode());
                         let mtlr_word: u32 = (31u32 << 26) | (0u32 << 21) | (8u32 << 16) | (467 << 1);
                         code.extend_from_slice(&encode_word(mtlr_word));
                         code.extend_from_slice(&Instruction::Ld { rt: Gpr::R31, ra: Gpr::R1, ds: fs - 16 }.encode());
@@ -3640,7 +3673,7 @@ impl Backend for PPC64Backend {
 // Tests
 // ===========================================================================
 
-#[cfg(any())] // Disabled: broken tests need fixing
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -3879,6 +3912,7 @@ mod tests {
     #[test]
     fn test_cmp_encoding() {
         // CMP CR0, 1, r3, r4: primary=31, bf=0, l=1, rA=3, rB=4, xo=0
+        // Known encoding: cmp cr0, 1, r3, r4 = 0x7C432000 (with l=1 at bit 22)
         let encoded = Instruction::Cmp {
             bf: CrField::CR0,
             l: 1,
@@ -3889,7 +3923,53 @@ mod tests {
         let word = u32::from_be_bytes(encoded);
         assert_eq!((word >> 26) & 0x3F, 31);
         assert_eq!((word >> 23) & 0x7, 0); // bf = CR0
-        assert_eq!((word >> 21) & 0x1, 1); // l = 1 (64-bit)
+        assert_eq!((word >> 22) & 0x1, 1); // l = 1 (64-bit) at bit 22
+        // Also verify against known-good encoding: 0x7C432000
+        assert_eq!(word, 0x7C432000, "cmp cr0,1,r3,r4 should encode as 0x7C432000");
+    }
+
+    #[test]
+    fn test_cmpl_encoding() {
+        // CMPL CR0, 1, r3, r4: primary=31, bf=0, l=1, rA=3, rB=4, xo=32
+        let encoded = Instruction::Cmpl {
+            bf: CrField::CR0,
+            l: 1,
+            ra: Gpr::R3,
+            rb: Gpr::R4,
+        }
+        .encode();
+        let word = u32::from_be_bytes(encoded);
+        assert_eq!((word >> 26) & 0x3F, 31);
+        assert_eq!((word >> 22) & 0x1, 1, "l field should be at bit 22");
+        assert_eq!((word >> 1) & 0x3FF, 32, "xo should be 32 for cmpl");
+    }
+
+    #[test]
+    fn test_cmpi_l_field() {
+        // CMPI CR0, 1, r3, 0: verify l=1 is at bit 22, not bit 21
+        let encoded = Instruction::Cmpi {
+            bf: CrField::CR0,
+            l: 1,
+            ra: Gpr::R3,
+            simm: 0,
+        }
+        .encode();
+        let word = u32::from_be_bytes(encoded);
+        assert_eq!((word >> 22) & 0x1, 1, "l field must be at bit 22 for 64-bit compare");
+    }
+
+    #[test]
+    fn test_cmpli_l_field() {
+        // CMPLI CR0, 1, r3, 0: verify l=1 is at bit 22
+        let encoded = Instruction::Cmpli {
+            bf: CrField::CR0,
+            l: 1,
+            ra: Gpr::R3,
+            uimm: 0,
+        }
+        .encode();
+        let word = u32::from_be_bytes(encoded);
+        assert_eq!((word >> 22) & 0x1, 1, "l field must be at bit 22 for 64-bit compare");
     }
 
     #[test]
@@ -3905,6 +3985,95 @@ mod tests {
         assert_eq!((word >> 26) & 0x3F, 19);
         assert_eq!((word >> 21) & 0x1F, 20); // BO
         assert_eq!((word >> 1) & 0x3FF, 16); // xo
+        // Verify exact encoding: 0x4E800020
+        assert_eq!(word, 0x4E800020, "bclr 20,0,0 (blr) should encode as 0x4E800020");
+    }
+
+    #[test]
+    fn test_bclr_bh_field_encoding() {
+        // BCLR with BH=1: verify BH is at MSB-first bits [19:21] = normal shift 10
+        let encoded_bh0 = Instruction::Bclr { bo: 20, bi: 0, bh: 0 }.encode();
+        let encoded_bh1 = Instruction::Bclr { bo: 20, bi: 0, bh: 1 }.encode();
+        let word0 = u32::from_be_bytes(encoded_bh0);
+        let word1 = u32::from_be_bytes(encoded_bh1);
+        let diff = word1 ^ word0;
+        // BH=1 should set bit 10 (normal numbering) = MSB-first bit 21
+        assert_eq!(diff, 1 << 10, "BH field should be at normal bit 10");
+    }
+
+    #[test]
+    fn test_bcctr_encoding() {
+        // BCTR = BCCTR 20, 0, 0: known encoding 0x4E800420
+        let encoded = Instruction::Bcctr { bo: 20, bi: 0, bh: 0 }.encode();
+        let word = u32::from_be_bytes(encoded);
+        assert_eq!((word >> 26) & 0x3F, 19);
+        assert_eq!((word >> 1) & 0x3FF, 528, "xo should be 528 for bcctr");
+        assert_eq!(word, 0x4E800420, "bcctr 20,0,0 should encode as 0x4E800420");
+    }
+
+    #[test]
+    fn test_rldcl_uses_opcode_30() {
+        // RLDCL r3, r4, r5, 0: MUST use primary opcode 30 (MD-form), NOT 31
+        let encoded = Instruction::Rldcl {
+            ra: Gpr::R3,
+            rs: Gpr::R4,
+            rb: Gpr::R5,
+            mb: 0,
+        }
+        .encode();
+        let word = u32::from_be_bytes(encoded);
+        assert_eq!((word >> 26) & 0x3F, 30, "RLDCL must use primary opcode 30 (MD-form)");
+        assert_eq!((word >> 21) & 0x1F, 4, "rS should be r4");
+        assert_eq!((word >> 16) & 0x1F, 3, "rA should be r3");
+        assert_eq!((word >> 11) & 0x1F, 5, "rB should be r5");
+    }
+
+    #[test]
+    fn test_rldcl_mb5_bit() {
+        // RLDCL with mb=32: mb5 bit must be set at bit 5 (normal) = MSB-first bit 26
+        let encoded_mb0 = Instruction::Rldcl { ra: Gpr::R3, rs: Gpr::R4, rb: Gpr::R5, mb: 0 }.encode();
+        let encoded_mb32 = Instruction::Rldcl { ra: Gpr::R3, rs: Gpr::R4, rb: Gpr::R5, mb: 32 }.encode();
+        let word0 = u32::from_be_bytes(encoded_mb0);
+        let word32 = u32::from_be_bytes(encoded_mb32);
+        let diff = word32 ^ word0;
+        // mb=32: mb[0:4]=0, mb5=1 → only bit 5 should differ
+        assert_eq!(diff, 1 << 5, "mb5 bit for mb=32 should be at normal bit 5");
+    }
+
+    #[test]
+    fn test_rldcr_uses_opcode_30() {
+        // RLDCR r3, r4, r5, 63: MUST use primary opcode 30 (MD-form)
+        let encoded = Instruction::Rldcr {
+            ra: Gpr::R3,
+            rs: Gpr::R4,
+            rb: Gpr::R5,
+            me: 63,
+        }
+        .encode();
+        let word = u32::from_be_bytes(encoded);
+        assert_eq!((word >> 26) & 0x3F, 30, "RLDCR must use primary opcode 30 (MD-form)");
+    }
+
+    #[test]
+    fn test_rldcr_me5_bit() {
+        // RLDCR with me=32: me5 bit must be set at bit 5 (normal)
+        let encoded_me0 = Instruction::Rldcr { ra: Gpr::R3, rs: Gpr::R4, rb: Gpr::R5, me: 0 }.encode();
+        let encoded_me32 = Instruction::Rldcr { ra: Gpr::R3, rs: Gpr::R4, rb: Gpr::R5, me: 32 }.encode();
+        let word0 = u32::from_be_bytes(encoded_me0);
+        let word32 = u32::from_be_bytes(encoded_me32);
+        let diff = word32 ^ word0;
+        // me=32: me[0:4]=0, me5=1 → only bit 5 should differ
+        assert_eq!(diff, 1 << 5, "me5 bit for me=32 should be at normal bit 5");
+    }
+
+    #[test]
+    fn test_i_form_li_mask_24bit() {
+        // BL with a 24-bit LI value should not corrupt the opcode field
+        let encoded = Instruction::Bl { li: 0x00FF_FFFF }.encode();
+        let word = u32::from_be_bytes(encoded);
+        assert_eq!((word >> 26) & 0x3F, 18, "BL primary opcode must be 18");
+        // The LI field occupies bits [2:25] (24 bits shifted by 2)
+        assert_eq!((word >> 2) & 0x00FF_FFFF, 0x00FF_FFFF, "LI field should be 24-bit");
     }
 
     #[test]
@@ -3965,8 +4134,9 @@ mod tests {
     fn test_trampoline_length() {
         let backend = PPC64Backend::new();
         let tramp = backend.trampoline(0x12345678_9ABCDEF0);
-        // 7 instructions * 4 bytes = 28 bytes
-        assert_eq!(tramp.len(), 28);
+        // 8 instructions * 4 bytes = 32 bytes:
+        // lis r12, ori r12, li r11,32, sld r12,r12,r11, oris r12, ori r12, mtctr r12, bctr
+        assert_eq!(tramp.len(), 32);
     }
 
     #[test]
@@ -4129,7 +4299,7 @@ mod tests {
 
     #[test]
     fn test_isel_free_emits_trap() {
-        // Free should emit a trap (tw 31, r0, r0), not a NOP
+        // Free should emit a trap (tw 31, r0, r0 = 0x7FE00008)
         let backend = PPC64Backend::new();
         let mut func = IRFunction::new("test_free");
         func.blocks[0].instructions.push(IRInstr::Free {
@@ -4137,31 +4307,27 @@ mod tests {
         });
         func.blocks[0].terminator = crate::ir::IRTerminator::Return(vec![]);
         let allocated = backend.allocate_registers(&func).unwrap();
-        // Find the trap instruction
-        let trap_instrs: Vec<_> = allocated
+        // Find a trap-encoded instruction (0x7FE00008) regardless of opcode string
+        let has_trap = allocated
             .blocks
             .iter()
             .flat_map(|b| &b.instructions)
-            .filter(|i| i.opcode == "trap")
-            .collect();
-        assert!(
-            !trap_instrs.is_empty(),
-            "free should emit at least one trap instruction"
-        );
-        // Verify the trap encoding is NOT a NOP (0x60000000)
-        let trap_encoded = &trap_instrs[0].encoded;
-        let word = u32::from_be_bytes([
-            trap_encoded[0],
-            trap_encoded[1],
-            trap_encoded[2],
-            trap_encoded[3],
-        ]);
-        assert_eq!(word, 0x7FE00008, "trap should encode as tw 31, r0, r0");
+            .any(|i| {
+                if i.encoded.len() >= 4 {
+                    let word = u32::from_be_bytes([
+                        i.encoded[0], i.encoded[1], i.encoded[2], i.encoded[3],
+                    ]);
+                    word == 0x7FE00008
+                } else {
+                    false
+                }
+            });
+        assert!(has_trap, "free should emit trap encoding 0x7FE00008");
     }
 
     #[test]
     fn test_isel_phi_emits_nop() {
-        // Phi should emit NOP (eliminated by SSA)
+        // Phi should emit NOP (0x60000000)
         let backend = PPC64Backend::new();
         let mut func = IRFunction::new("test_phi");
         func.blocks[0].instructions.push(IRInstr::Phi {
@@ -4170,14 +4336,22 @@ mod tests {
         });
         func.blocks[0].terminator = crate::ir::IRTerminator::Return(vec![]);
         let allocated = backend.allocate_registers(&func).unwrap();
-        // Find the nop instruction
-        let nop_instrs: Vec<_> = allocated
+        // Find a NOP-encoded instruction (0x60000000) regardless of opcode string
+        let has_nop = allocated
             .blocks
             .iter()
             .flat_map(|b| &b.instructions)
-            .filter(|i| i.opcode == "nop")
-            .collect();
-        assert!(!nop_instrs.is_empty(), "phi should emit a NOP instruction");
+            .any(|i| {
+                if i.encoded.len() >= 4 {
+                    let word = u32::from_be_bytes([
+                        i.encoded[0], i.encoded[1], i.encoded[2], i.encoded[3],
+                    ]);
+                    word == 0x60000000
+                } else {
+                    false
+                }
+            });
+        assert!(has_nop, "phi should emit NOP encoding 0x60000000");
     }
 
     #[test]
@@ -4193,7 +4367,8 @@ mod tests {
 
     #[test]
     fn test_isel_binop_with_immediate() {
-        // BinOp::Add with an immediate operand should emit load + add
+        // BinOp::Add with an immediate operand should produce correct encoded output
+        // that includes an add instruction (primary opcode 31, xo=266)
         let backend = PPC64Backend::new();
         let mut func = IRFunction::new("test_add_imm");
         func.blocks[0].instructions.push(IRInstr::BinOp {
@@ -4201,20 +4376,24 @@ mod tests {
             dst: IRValue::Register(2),
             lhs: IRValue::Register(0),
             rhs: IRValue::Immediate(42),
+            ty: None,
         });
         func.blocks[0].terminator = crate::ir::IRTerminator::Return(vec![]);
         let allocated = backend.allocate_registers(&func).unwrap();
-        // Should contain at least a li (load immediate) and an add
-        let opcodes: Vec<&str> = allocated
-            .blocks
-            .iter()
-            .flat_map(|b| &b.instructions)
-            .map(|i| i.opcode.as_str())
-            .collect();
-        assert!(
-            opcodes.contains(&"add"),
-            "BinOp::Add with immediate should still emit an add instruction"
-        );
+        // Find an ADD instruction (primary opcode 31, xo=266) anywhere in encoded output.
+        // Each AllocatedInstruction may contain multiple 4-byte PPC instructions.
+        let mut has_add = false;
+        for instr in allocated.blocks.iter().flat_map(|b| &b.instructions) {
+            for chunk in instr.encoded.chunks_exact(4) {
+                let word = u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                if (word >> 26) & 0x3F == 31 && (word >> 1) & 0x1FF == 266 {
+                    has_add = true;
+                    break;
+                }
+            }
+            if has_add { break; }
+        }
+        assert!(has_add, "BinOp::Add should emit an add instruction (opcode 31, xo 266)");
     }
 }
 pub mod disasm;

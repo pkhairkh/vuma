@@ -1391,3 +1391,265 @@ Stage Summary:
 - `vuma lsp` CLI command starts the language server
 - Full document sync, diagnostics, hover, definition, completion, symbols, and semantic tokens all wired up
 - All tests pass; module compiles against vuma-parser cleanly
+
+---
+Task ID: 6-g
+Agent: general-purpose
+Task: Create parser roundtrip tests (Wave 6)
+
+Work Log:
+- Read parser crate API: `Parser::new(source).parse_program()` → `ParseResult<Program>` with `has_errors()`, `unwrap()`, and `errors` fields
+- Read AST types: `Program { items, span }`, `Item::FnDef(FnDef)`, `Stmt`, `Expr`, `BinOp`, `UnOp`, `Lit`, `Type`
+- Read SCG conversion: `AstToScg::new().convert(&program)` → `Result<SCG, ParseError>`
+- Read existing test patterns in `full_pipeline.rs` and `framework.rs` (`build_scg_from_source`)
+- Created `/home/z/my-project/vuma/src/tests/src/parser_roundtrip.rs` with 10 tests:
+  1. test_minimal_program — "fn main() -> i32 { return 0; }" — verifies single FnDef, name, return type, body
+  2. test_function_with_params — "fn add(a: u32, b: u32) -> u32 { return a + b; }" — verifies 2 typed params
+  3. test_memory_operations — allocate, deref, free — verifies SCG Allocation/Deallocation nodes
+  4. test_for_loop — "for i in 0..10" — verifies Stmt::For in AST
+  5. test_nested_function_calls — inner(inner(42)) — verifies 2 FnDef items, SCG valid
+  6. test_u32_masking — (x + y) & 4294967295 — verifies return statement present, SCG valid
+  7. test_bitwise_ops — AND, OR, XOR, shifts — verifies 5+ assignment statements
+  8. test_pointer_arithmetic — *(buf + offset) — verifies SCG has Allocation + Deallocation
+  9. test_sha256d_parse — include_str! of full sha256d.vuma — verifies 10+ fns, main, sha256d, SCG valid
+  10. test_error_recovery — 6 malformed sources — verifies has_errors(), no panic, diagnostics present
+- Updated `src/tests/src/lib.rs` to add `pub mod parser_roundtrip;` and added Parser category to docs table
+- Fixed include_str! path from `../../../../examples` to `../../../examples` (relative to `src/tests/src/`)
+- All 10 tests pass: `cargo test -p vuma-tests --lib parser_roundtrip` → 10 passed, 0 failed
+
+Files Changed:
+- NEW: src/tests/src/parser_roundtrip.rs (267 lines, 10 test functions)
+- MOD:  src/tests/src/lib.rs (added `#[cfg(test)] pub mod parser_roundtrip;` + docs table row)
+
+---
+Task ID: 6-d
+Agent: general-purpose
+Task: Wave6: Wasm32 binary validation tests
+
+Work Log:
+- Read worklog.md and project structure to understand existing test patterns
+- Studied wasm32/mod.rs backend: WasmModuleBuilder, compile_to_wasm(), encode_program(), section IDs, binary format
+- Studied existing tests in execution_validation.rs for Wasm validation patterns
+- Created /home/z/my-project/vuma/src/tests/src/wasm_validation.rs with 12 tests covering:
+  1. test_wasm_magic_and_version — Header bytes 0x00 0x61 0x73 0x6D + version 0x01 0x00 0x00 0x00
+  2. test_wasm_type_section_valid — Type section has 0x60 func tags, valid WasmType bytes for params/results
+  3. test_wasm_import_section_wasi — Import section has wasi_snapshot_preview1.fd_write and .proc_exit
+  4. test_wasm_function_section_matches_types — Function section type indices are within type section bounds
+  5. test_wasm_memory_section_min_pages — Memory section declares at least 2 pages minimum
+  6. test_wasm_global_section_heap_ptr — Global section has mutable i32 __heap_ptr initialised to 65536
+  7. test_wasm_export_section_start — Export section exports _start and main as functions
+  8. test_wasm_start_section_set — Start section present, references valid function index, signature () -> ()
+  9. test_wasm_code_section_bodies_end — Every code body ends with 0x0B (end opcode)
+  10. test_compile_to_wasm_returns_ok — compile_to_wasm() returns Ok for i32-return, void, and non-main functions
+  11. test_compile_to_wasm_valid_module — Output is well-formed: all 8 required sections present, ascending order, fully consumable
+  12. test_compile_to_wasm_simple_return_values — 9 different i32 return values (0,1,42,127,128,255,256,-1,-42) all compile to valid modules
+- Added shared helper infrastructure: parse_sections(), find_section(), parse_imports(), parse_exports(), ParsedSection, ImportInfo, ExportInfo
+- Updated src/tests/src/lib.rs to include `#[cfg(test)] pub mod wasm_validation;`
+- Fixed compilation error: `return ti;` in test_wasm_start_section_set (type mismatch in test function returning ())
+- Fixed warnings: unused imports, unused variables, unused constants
+- All 12 new tests pass: `cargo test -p vuma-tests --lib wasm_validation` → 12 passed, 0 failed
+
+Files Changed:
+- NEW: src/tests/src/wasm_validation.rs (~990 lines, 12 test functions, 4 helper structs, 6 helper functions)
+- MOD:  src/tests/src/lib.rs (added `#[cfg(test)] pub mod wasm_validation;`)
+
+---
+Task ID: 6-c
+Agent: sub
+Task: Create ELF validation tests for all native backends
+
+Work Log:
+- Read worklog.md, lib.rs, execution_validation.rs, codegen.rs to understand existing test patterns
+- Studied all 7 native backend ELF builders: x86_64, AArch64, RISC-V 64, ARM32, MIPS64, PPC64, LoongArch64
+- Documented ELF format differences: ELFCLASS32/64, LE/BE, EM_* values, Phdr layouts (32 vs 64)
+- Created /home/z/my-project/vuma/src/tests/src/elf_validation.rs with:
+  - Custom ELF parser (ElfFile) supporting both ELF32 and ELF64 with correct endianness
+  - Parsed structs: ElfHeader, ElfPhdr, ElfShdr
+  - 7 per-backend tests (one per native architecture)
+  - 5 cross-backend consistency tests
+  - Validation of: e_ident[EI_MAG/CLASS/DATA], e_type=ET_EXEC, e_machine, e_entry!=0, e_phoff!=0
+  - Program header checks: PT_LOAD exists, p_offset+p_filesz valid, p_vaddr!=0, p_memsz>=p_filesz, p_align power-of-2, entry within executable segment
+  - Section header checks: sh_offset+sh_size within file, sh_addralign power-of-2
+- Updated src/tests/src/lib.rs to include `#[cfg(test)] pub mod elf_validation;`
+- Fixed pre-existing compile error in codegen.rs (emit_raw missing data_sections argument)
+- All 12 tests pass successfully
+
+Stage Summary:
+- All 12 ELF validation tests pass across all 7 native backends
+- Key architecture properties validated:
+  x86_64:      ELFCLASS64, LE, EM_X86_64=62
+  AArch64:     ELFCLASS64, LE, EM_AARCH64=183
+  RISC-V 64:   ELFCLASS64, LE, EM_RISCV=243
+  ARM32:       ELFCLASS32, LE, EM_ARM=40
+  MIPS64:      ELFCLASS64, BE, EM_MIPS=8
+  PPC64:       ELFCLASS64, BE, EM_PPC64=21
+  LoongArch64: ELFCLASS64, LE, EM_LOONGARCH=258
+- Cross-backend tests verify: ELF magic, ET_EXEC type, PT_LOAD presence, TargetInfo consistency, entry point validity
+
+Files Changed:
+- NEW: src/tests/src/elf_validation.rs (~710 lines, 12 test functions, 3 parsed structs, 4 validation helpers)
+- MOD:  src/tests/src/lib.rs (added `#[cfg(test)] pub mod elf_validation;`)
+
+---
+Task ID: 6-b
+Agent: sub
+Task: Create cross-backend consistency test suite
+
+Work Log:
+- Read existing codebase: Backend trait, IR types (IRFunction, IRBlock, IRInstr, IRTerminator, IRValue), all 8 backend module structures
+- Studied existing test patterns in codegen.rs, execution_validation.rs, elf_validation.rs
+- Created /home/z/my-project/vuma/src/tests/src/cross_backend.rs with 9 test functions covering 4 IR programs across all 8 backends
+- Updated src/tests/src/lib.rs to include `#[cfg(test)] pub mod cross_backend;`
+- Fixed MIPS64/PPC64 big-endian ELF e_machine field reading (use from_be_bytes when ei_data==2)
+- Fixed Wasm32 frame_size assertion (Wasm is stack machine, frame_size is always 0)
+- All 9 tests pass successfully
+
+IR Programs:
+1. Simple: fn main() -> i64 { return 42; }
+2. Arithmetic: fn main() -> i64 { return (10+20)*3 - 5; } // = 85
+3. Memory: alloc 8 bytes, store 0x42424242, load back, AND 0xFF, return (0x42 = 66)
+4. Function call: helper() returns 7, main calls helper and returns result
+
+Test Functions:
+1. test_cross_backend_simple_return — trivial return on all 8 backends
+2. test_cross_backend_arithmetic — Add/Mul/Sub chain on all 8 backends
+3. test_cross_backend_memory — Alloc/Store/Load/And on all 8 backends
+4. test_cross_backend_function_call — Call instruction with relocation on all 8 backends
+5. test_cross_backend_output_format_consistency — TargetInfo matches actual output format
+6. test_cross_backend_code_size_sanity — All outputs non-empty and < 1MB
+7. test_cross_backend_name_consistency — backend.name() matches expected, all unique
+8. test_cross_backend_wasm32_module_structure — Wasm magic, version, sections (type/function/memory/code)
+9. test_cross_backend_elf_header_validation — ELF magic, class, endianness, machine type for all 7 ELF backends
+
+Files Changed:
+- NEW: src/tests/src/cross_backend.rs (~1045 lines, 9 test functions, 4 IR constructors, format-specific validators)
+- MOD:  src/tests/src/lib.rs (added `#[cfg(test)] pub mod cross_backend;`)
+
+---
+Task ID: 6-f
+Agent: sub-6f
+Task: Wave6: Shared codegen fixes — fix remaining shared codegen issues affecting multiple backends
+
+Work Log:
+- Read and analyzed all 4 target files: emit.rs, opt.rs, regalloc.rs, control_flow.rs
+- Identified 3 correctness bugs and fixed them:
+
+1. **regalloc.rs: TargetAgnosticRegAlloc::expire_old — callee-saved register misclassification (CRITICAL)**
+   - Bug: `expire_old()` checked `free_callee.contains(&reg)` to decide if an expired register was callee-saved. But when a register is allocated, it's popped from the free pool, so it will NEVER be found there. This caused all expired callee-saved registers to be incorrectly returned to the caller-saved pool.
+   - Impact: Corrupted register pools across all backends using TargetAgnosticRegAlloc (x86_64, RISC-V, ARM32, MIPS64, PPC64, LoongArch64). Intervals crossing calls might not get callee-saved registers, leading to potential clobbered values after function calls.
+   - Fix: Added `original_callee` parameter to `expire_old()` containing the full, unmodified callee-saved register list from the target description. Now correctly classifies expired registers using `original_callee.contains(&reg)`. Removed dead `is_callee_saved_in()` helper.
+
+2. **opt.rs: dead_code_eliminate — cross-block liveness not tracked (CRITICAL)**
+   - Bug: DCE only seeded the "used" set from each block's own terminator values. If a register was defined in block A and used only in block B's instructions (not its terminator), DCE in block A would see it as unused and incorrectly eliminate the defining instruction.
+   - Impact: Any IR with cross-block register references (not flowing through terminators) could have live instructions incorrectly removed, producing wrong code.
+   - Fix: Added a global pre-pass that computes the set of all register IDs used anywhere in the function (any block's instructions or terminators). Each block's DCE now seeds with both terminator uses AND any globally-used register defined in that block. This is a conservative but correct approach that never incorrectly removes a live instruction. Also refactored terminator register extraction into a `terminator_used_regs()` helper.
+
+3. **emit.rs: emit_raw — data sections silently dropped for raw binary output (MEDIUM)**
+   - Bug: `emit_raw()` didn't accept `data_sections` parameter, so the `emit_binary()` dispatcher couldn't pass data sections through for Raw format output. Data sections were silently lost for bare-metal targets.
+   - Impact: Bare-metal binaries would be missing .rodata/.data sections, causing incorrect behavior for programs that reference data.
+   - Fix: Added `data_sections: &[DataSection]` parameter to `emit_raw()`. After the text section, each data section is appended with proper alignment. Updated `emit_binary()` dispatcher and all call sites (including test code in codegen.rs and ppc64 test).
+
+- Also fixed pre-existing compile error in ppc64/mod.rs test: missing `ty: None` field in BinOp construction.
+
+- Verified all emit::tests (56 pass), control_flow::tests (22 pass), and integration tests (196 pass) still work.
+- Pre-existing test failures in loongarch64, arm64 decode, ppc64 disasm, scg_to_ir, x86_64 tests are unrelated to these changes.
+
+Stage Summary:
+- 3 shared codegen correctness bugs fixed
+- Key root causes:
+  1. TargetAgnosticRegAlloc::expire_old used free pool (always empty for allocated regs) to classify callee-saved registers
+  2. DCE was purely local (per-block) without cross-block awareness, could remove live cross-block definitions
+  3. emit_raw simply didn't accept data sections, silently dropping them for bare-metal targets
+- All changes are correctness-focused, not optimization; the stack-slot approach is intentionally simple
+- No new test failures introduced
+
+---
+Task ID: 6-e
+Agent: deep-audit
+Task: PPC64 deep audit — ELFv2 ABI conformance, instruction encoding, stack frames
+
+Work Log:
+- Read entire ppc64/mod.rs (4400+ lines) and ppc64/disasm.rs systematically
+- Identified and fixed 7 encoding/ABI bugs, re-enabled and fixed all tests, added 11 new tests
+
+Bugs Found and Fixed:
+
+1. **LR save/restore at wrong ELFv2 offset** (CRITICAL)
+   - Prologue saved LR at `fs+8(R1)` = caller's SP+8 (CR save area)
+   - Fixed to `fs+16(R1)` = caller's SP+16 (LR save area per ELFv2 ABI)
+   - Epilogue LR load also fixed from `fs+8` to `fs+16`
+
+2. **CMP/CMPL/CMPI/CMPLI `l` field at wrong bit position** (CRITICAL)
+   - `l` field was shifted by 21 (MSB-first bit 10, a reserved bit)
+   - Should be shifted by 22 (MSB-first bit 9, the actual `l` field)
+   - This meant ALL comparisons with l=1 were silently 32-bit instead of 64-bit
+   - Verified: `cmp cr0,1,r3,r4` now encodes as 0x7C432000 (was 0x7C232000)
+
+3. **RLDCL/RLDCR used primary opcode 31 instead of 30** (CRITICAL)
+   - These are MD-form instructions requiring primary opcode 30
+   - Opcode 31 is the X-form space; RLDCL/RLDCR with opcode 31 would decode as
+     completely different instructions (e.g., RLWIMI, CMP, etc.)
+   - Fixed both to use opcode 30
+
+4. **RLDCL/RLDCR missing mb5/me5 bit** (HIGH)
+   - The 6-bit mask field is split: bits [0:4] at positions [21:25], bit 5 at position [26]
+   - Previous encoding only stored the lower 5 bits, dropping bit 5
+   - For mb/me values >= 32 (e.g., SLDI which uses me=63), encoding was wrong
+   - Added `(((mb >> 5) & 1) << 5)` and `(((me >> 5) & 1) << 5)` to encoding
+
+5. **XL-form BH field at wrong position** (MEDIUM)
+   - BH[19:21] in MSB-first = normal bits [12:10] = shift by 10
+   - Code used shift by 11, placing BH one bit too high
+   - Only latent because all current uses pass BH=0, but would break for
+     branch hints with BH>0
+
+6. **BinOpKind::Ror/Rol emitted Srad instead of rotation** (MEDIUM)
+   - The `lower_ir_instr_ppc64` path (non-stack-slot) used `Srad` as a placeholder
+   - Replaced with proper RLDCL-based rotation (ROL=RLDCL with mb=0,
+     ROR=neg+addi 64+RLDCL)
+
+7. **I-form LI mask too wide** (LOW)
+   - LI field is 24 bits (bits [6:29]) but mask was 0x03FF_FFFF (26 bits)
+   - Values with bits 25-24 set would corrupt the primary opcode after shift
+   - Fixed to 0x00FF_FFFF (24 bits)
+
+Additional Fixes:
+
+8. **TOC save/restore around function calls** — Added `std r2,24(r1)` before BL and
+   `ld r2,24(r1)` after BL in the stack-slot ISel call sequence, per ELFv2 ABI
+
+9. **Disassembler byte order** — `from_le_bytes` changed to `from_be_bytes` to match
+   instruction encoding (PPC instructions are always big-endian)
+
+10. **Disassembler CMP l-field** — Same shift-21→22 fix applied to decoder
+
+11. **Disassembler DS-form decode** — Fixed `ds_raw` to multiply by 4 (DS field stores offset/4)
+
+12. **Disassembler MD-form decode** — Added RLDCL/RLDCR decoding for primary opcode 30
+
+13. **Disassembler BH field** — Fixed from shift-11 to shift-10
+
+14. **Tests re-enabled** — Changed `#[cfg(any())]` to `#[cfg(test)]`
+
+15. **Pre-existing test fixes** — Updated trampoline length (28→32 bytes), fixed
+    ISel tests to scan encoded bytes instead of relying on opcode strings
+
+New Tests Added:
+- test_cmpl_encoding, test_cmpi_l_field, test_cmpli_l_field (CMP l-field at bit 22)
+- test_bclr_bh_field_encoding (BH field at bit 10)
+- test_bcctr_encoding (exact encoding 0x4E800420)
+- test_rldcl_uses_opcode_30 (primary opcode must be 30)
+- test_rldcl_mb5_bit (mb5 at bit 5)
+- test_rldcr_uses_opcode_30 (primary opcode must be 30)
+- test_rldcr_me5_bit (me5 at bit 5)
+- test_i_form_li_mask_24bit (LI field stays within 24 bits)
+
+All 63 PPC64 tests pass (50 ppc64::tests + 9 disasm tests + 4 others).
+
+Stage Summary:
+- 7 encoding/ABI bugs fixed, 4 critical (LR offset, CMP l-field, RLDCL/RLDCR opcode, mb5/me5)
+- 6 disassembler bugs fixed
+- Tests re-enabled and 11 new tests added
+- No regressions — codegen crate builds, all PPC64 tests pass
+- The CMP l-field bug was particularly insidious: all 64-bit comparisons were
+  silently 32-bit, masked by SHA256d using zero-extended 32-bit values

@@ -153,7 +153,7 @@ impl Instruction {
                 available: bytes.len(),
             });
         }
-        let word = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        let word = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
         let primary = (word >> 26) & 0x3F;
         let rt = (word >> 21) & 0x1F;
         let ra = (word >> 16) & 0x1F;
@@ -161,7 +161,7 @@ impl Instruction {
         let xo_xform = (word >> 1) & 0x3FF;
         let rc = word & 1;
         let d = sign_extend_16(word & 0xFFFF);
-        let ds_raw = sign_extend_16((word >> 2) & 0x3FFF);
+        let ds_raw = sign_extend_16((word >> 2) & 0x3FFF) * 4; // DS field is ds/4
 
         // D-form instructions
         match primary {
@@ -227,7 +227,7 @@ impl Instruction {
             // CMPI (primary=11)
             11 => {
                 let bf = (word >> 23) & 0x7;
-                let l = (word >> 21) & 1;
+                let l = (word >> 22) & 1; // l field at MSB-first bit 9 = normal bit 22
                 return Ok(Instruction::Cmpi {
                     bf: cr_from_bits(bf),
                     l,
@@ -238,7 +238,7 @@ impl Instruction {
             // CMPLI (primary=10)
             10 => {
                 let bf = (word >> 23) & 0x7;
-                let l = (word >> 21) & 1;
+                let l = (word >> 22) & 1; // l field at MSB-first bit 9 = normal bit 22
                 let uimm = word & 0xFFFF;
                 return Ok(Instruction::Cmpli {
                     bf: cr_from_bits(bf),
@@ -662,7 +662,7 @@ impl Instruction {
                 // CMP (xo=0)
                 0 => {
                     let bf = (word >> 23) & 0x7;
-                    let l = (word >> 21) & 1;
+                    let l = (word >> 22) & 1; // l field at MSB-first bit 9 = normal bit 22
                     return Ok(Instruction::Cmp {
                         bf: cr_from_bits(bf),
                         l,
@@ -673,7 +673,7 @@ impl Instruction {
                 // CMPL (xo=32)
                 32 => {
                     let bf = (word >> 23) & 0x7;
-                    let l = (word >> 21) & 1;
+                    let l = (word >> 22) & 1; // l field at MSB-first bit 9 = normal bit 22
                     return Ok(Instruction::Cmpl {
                         bf: cr_from_bits(bf),
                         l,
@@ -700,11 +700,40 @@ impl Instruction {
             }
         }
 
+        // MD-form (primary=30) — RLDCL, RLDCR
+        if primary == 30 {
+            let rs = (word >> 21) & 0x1F;
+            let ra = (word >> 16) & 0x1F;
+            let rb = (word >> 11) & 0x1F;
+            let mb_lo = (word >> 6) & 0x1F;  // MB[0:4]
+            let mb5 = (word >> 5) & 1;       // MB[5]
+            let mb = mb_lo | (mb5 << 5);
+            let me_lo = mb_lo; // same field positions for ME
+            let me5 = mb5;
+            let me = me_lo | (me5 << 5);
+            let xo_md = (word >> 1) & 0xF; // 4-bit XO in MD-form
+            match xo_md {
+                8 => return Ok(Instruction::Rldcl {
+                    ra: gpr_from_bits(ra),
+                    rs: gpr_from_bits(rs),
+                    rb: gpr_from_bits(rb),
+                    mb,
+                }),
+                9 => return Ok(Instruction::Rldcr {
+                    ra: gpr_from_bits(ra),
+                    rs: gpr_from_bits(rs),
+                    rb: gpr_from_bits(rb),
+                    me,
+                }),
+                _ => {}
+            }
+        }
+
         // XL-form (primary=19)
         if primary == 19 {
             let bo = (word >> 21) & 0x1F;
             let bi = (word >> 16) & 0x1F;
-            let bh = (word >> 11) & 0x7;
+            let bh = (word >> 10) & 0x7; // BH at MSB-first bits [19:21] = normal shift 10
             match xo_xform {
                 16 => return Ok(Instruction::Bclr { bo, bi, bh }),
                 528 => return Ok(Instruction::Bcctr { bo, bi, bh }),
@@ -834,7 +863,7 @@ mod tests {
 
     #[test]
     fn test_decode_nop() {
-        let decoded = Instruction::decode(&0x6000_0000u32.to_le_bytes()).unwrap();
+        let decoded = Instruction::decode(&0x6000_0000u32.to_be_bytes()).unwrap();
         assert_eq!(decoded, Instruction::Nop);
     }
 

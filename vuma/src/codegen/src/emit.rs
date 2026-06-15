@@ -3958,7 +3958,7 @@ pub fn emit_elf(
 ///
 /// The output is the concatenated machine code for all functions, suitable for
 /// loading at address `0x80000` on the AArch64.
-pub fn emit_raw(functions: &[IRFunction], config: &EmitConfig) -> Result<Vec<u8>> {
+pub fn emit_raw(functions: &[IRFunction], data_sections: &[DataSection], config: &EmitConfig) -> Result<Vec<u8>> {
     // Wasm32 should never go through the raw binary emission path.
     if config.backend == BackendKind::Wasm32 || config.format == OutputFormat::Wasm {
         return Err(CodegenError::ElfError(
@@ -3984,6 +3984,16 @@ pub fn emit_raw(functions: &[IRFunction], config: &EmitConfig) -> Result<Vec<u8>
     }
 
     resolve_call_relocs(&mut text_section, &all_call_relocs, &function_offsets)?;
+
+    // Append data sections after the text section for bare-metal targets.
+    // Each section is aligned to its stated alignment requirement.
+    for section in data_sections {
+        let align = section.align.max(1) as usize;
+        let padding = (align - (text_section.len() % align)) % align;
+        text_section.extend(std::iter::repeat(0u8).take(padding));
+        text_section.extend_from_slice(&section.data);
+    }
+
     let _ = config; // base_addr used implicitly via relocation math
     Ok(text_section)
 }
@@ -4104,7 +4114,7 @@ pub fn emit_binary(
         OutputFormat::ELF | OutputFormat::Obj => {
             emit_elf(functions, data_sections, config)
         }
-        OutputFormat::Raw => emit_raw(functions, config),
+        OutputFormat::Raw => emit_raw(functions, data_sections, config),
         OutputFormat::Wasm => emit_wasm(functions, data_sections, config),
     }
 }
@@ -4460,7 +4470,7 @@ mod tests {
     fn emit_raw_flat_binary() {
         let funcs = vec![make_return_function("_start")];
         let config = EmitConfig::bare_metal_raw();
-        let raw = emit_raw(&funcs, &config).unwrap();
+        let raw = emit_raw(&funcs, &[], &config).unwrap();
         if raw.len() >= 4 {
             assert_ne!(&raw[0..4], &[0x7f, b'E', b'L', b'F'], "raw must not be ELF");
         }
@@ -5512,7 +5522,7 @@ mod tests {
     fn test_emit_raw_rejects_wasm32() {
         let funcs = vec![make_return_function("main")];
         let config = EmitConfig::wasm_binary();
-        let result = emit_raw(&funcs, &config);
+        let result = emit_raw(&funcs, &[], &config);
         assert!(result.is_err(), "emit_raw should reject Wasm32 backend");
         let err_msg = format!("{}", result.unwrap_err());
         assert!(

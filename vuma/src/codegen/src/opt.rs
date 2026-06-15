@@ -629,48 +629,44 @@ fn try_fold_instruction(instr: &IRInstr) -> Option<(u32, i64)> {
 /// Walk instructions in reverse. Track which IRValues are "used" (appear as
 /// operands or have side effects). Remove instructions whose `dst` is never
 /// used and that have no side effects.
+///
+/// This pass accounts for cross-block liveness by first computing a global
+/// set of registers that are used in *any* block's instructions or
+/// terminator.  Without this, a register defined in block A and used only
+/// in block B's instructions (not its terminator) would be incorrectly
+/// eliminated in block A.
 pub fn dead_code_eliminate(mut func: IRFunction) -> IRFunction {
+    // ── Phase 1: compute the global set of register IDs used anywhere ──
+    let mut globally_used: HashSet<u32> = HashSet::new();
+    for block in &func.blocks {
+        for instr in &block.instructions {
+            for id in instr.used_regs() {
+                globally_used.insert(id);
+            }
+        }
+        for id in terminator_used_regs(&block.terminator) {
+            globally_used.insert(id);
+        }
+    }
+
+    // ── Phase 2: per-block DCE, seeded with both terminator uses and
+    //    the global set (conservative but correct) ──
     for block in &mut func.blocks {
         // Seed the used set with values referenced by the terminator.
         let mut used: HashSet<u32> = HashSet::new();
-        match &block.terminator {
-            IRTerminator::Return(vals) => {
-                for val in vals {
-                    if let IRValue::Register(id) = val {
-                        used.insert(*id);
-                    }
+        for id in terminator_used_regs(&block.terminator) {
+            used.insert(id);
+        }
+
+        // Also seed with any globally-used register that is defined in
+        // this block.  This ensures that cross-block references are not
+        // eliminated.
+        for instr in &block.instructions {
+            for def_id in instr.defined_regs() {
+                if globally_used.contains(&def_id) {
+                    used.insert(def_id);
                 }
             }
-            IRTerminator::Branch { cond, .. } => {
-                if let IRValue::Register(id) = cond {
-                    used.insert(*id);
-                }
-            }
-            IRTerminator::Switch { discr, .. } => {
-                if let IRValue::Register(id) = discr {
-                    used.insert(*id);
-                }
-            }
-            IRTerminator::Invoke { args, .. } => {
-                for arg in args {
-                    if let IRValue::Register(id) = arg {
-                        used.insert(*id);
-                    }
-                }
-            }
-            IRTerminator::TailCall { args, .. } => {
-                for arg in args {
-                    if let IRValue::Register(id) = arg {
-                        used.insert(*id);
-                    }
-                }
-            }
-            IRTerminator::Resume { value } => {
-                if let IRValue::Register(id) = value {
-                    used.insert(*id);
-                }
-            }
-            IRTerminator::Jump(_) | IRTerminator::Unreachable => {}
         }
 
         // Walk instructions in reverse.
@@ -693,6 +689,34 @@ pub fn dead_code_eliminate(mut func: IRFunction) -> IRFunction {
         block.instructions = new_instrs;
     }
     func
+}
+
+/// Collect all virtual register IDs used (read) by a terminator.
+fn terminator_used_regs(terminator: &IRTerminator) -> Vec<u32> {
+    match terminator {
+        IRTerminator::Return(vals) => vals
+            .iter()
+            .filter_map(|v| if let IRValue::Register(id) = v { Some(*id) } else { None })
+            .collect(),
+        IRTerminator::Branch { cond, .. } => {
+            if let IRValue::Register(id) = cond { vec![*id] } else { vec![] }
+        }
+        IRTerminator::Switch { discr, .. } => {
+            if let IRValue::Register(id) = discr { vec![*id] } else { vec![] }
+        }
+        IRTerminator::Invoke { args, .. } => args
+            .iter()
+            .filter_map(|v| if let IRValue::Register(id) = v { Some(*id) } else { None })
+            .collect(),
+        IRTerminator::TailCall { args, .. } => args
+            .iter()
+            .filter_map(|v| if let IRValue::Register(id) = v { Some(*id) } else { None })
+            .collect(),
+        IRTerminator::Resume { value } => {
+            if let IRValue::Register(id) = value { vec![*id] } else { vec![] }
+        }
+        IRTerminator::Jump(_) | IRTerminator::Unreachable => vec![],
+    }
 }
 
 // ===========================================================================

@@ -1,0 +1,502 @@
+     1→  2601→        IRInstr::Free { ptr: _ } => {
+     2→  2602→            // Free is not directly implementable as a single instruction;
+     3→  2603→            // emit a trap to catch any accidental execution at runtime.
+     4→  2604→            result.push(emit_alloc_instr(Instruction::Trap, vec![], vec![]));
+     5→  2605→        }
+     6→  2606→
+     7→  2607→        IRInstr::Phi { .. } => {
+     8→  2608→            // Phi nodes are eliminated by SSA deconstruction; emit NOP.
+     9→  2609→            result.push(emit_alloc_instr(Instruction::Nop, vec![], vec![]));
+    10→  2610→        }
+    11→  2611→    }
+    12→  2612→
+    13→  2613→    (result, relocations)
+    14→  2614→}
+    15→  2615→
+    16→  2616→// ===========================================================================
+    17→  2617→// Stack-Slot Helpers (for allocate_registers)
+    18→  2618→// ===========================================================================
+    19→  2619→
+    20→  2620→/// Load a 64-bit immediate into a GPR, returning encoded instruction bytes.
+    21→  2621→fn ss_load_imm(rd: Gpr, val: i64) -> Vec<u8> {
+    22→  2622→    let mut code = Vec::new();
+    23→  2623→    let uval = val as u64;
+    24→  2624→    if (-32768..=32767).contains(&val) {
+    25→  2625→        code.extend_from_slice(&Instruction::Li { rt: rd, simm: val as i32 }.encode());
+    26→  2626→    } else if uval <= 0xFFFF {
+    27→  2627→        code.extend_from_slice(&Instruction::Ori { ra: rd, rs: Gpr::R0, uimm: uval as u32 & 0xFFFF }.encode());
+    28→  2628→    } else if uval & 0xFFFF == 0 && (uval >> 32) == 0 {
+    29→  2629→        code.extend_from_slice(&Instruction::Lis { rt: rd, simm: ((uval >> 16) & 0xFFFF) as i16 as i32 }.encode());
+    30→  2630→        // If the high 16 bits have bit 15 set, LIS sign-extends to 64-bit all-1s.
+    31→  2631→        // Clear upper 32 bits with rlwinm rd,rd,0,0,31 (equivalent to clrldi rd,rd,32)
+    32→  2632→        if ((uval >> 16) & 0xFFFF) >= 0x8000 {
+    33→  2633→            code.extend_from_slice(&Instruction::Rlwinm { ra: rd, rs: rd, sh: 0, mb: 0, me: 31 }.encode());
+    34→  2634→        }
+    35→  2635→    } else if uval >> 32 == 0 {
+    36→  2636→        let hi16 = ((uval >> 16) & 0xFFFF) as u32;
+    37→  2637→        let lo16 = (uval & 0xFFFF) as u32;
+    38→  2638→        code.extend_from_slice(&Instruction::Lis { rt: rd, simm: hi16 as i16 as i32 }.encode());
+    39→  2639→        if lo16 != 0 { code.extend_from_slice(&Instruction::Ori { ra: rd, rs: rd, uimm: lo16 }.encode()); }
+    40→  2640→        // LIS sign-extends: if bit 31 of the 32-bit value is set, the upper 32 bits
+    41→  2641→        // of the 64-bit register are all 1s. Clear them with rlwinm rd,rd,0,0,31
+    42→  2642→        // (equivalent to clrldi rd,rd,32) which zero-extends to 64 bits.
+    43→  2643→        if hi16 >= 0x8000 {
+    44→  2644→            code.extend_from_slice(&Instruction::Rlwinm { ra: rd, rs: rd, sh: 0, mb: 0, me: 31 }.encode());
+    45→  2645→        }
+    46→  2646→    } else {
+    47→  2647→        let hi32 = (uval >> 32) as u32;
+    48→  2648→        let lo32 = (uval & 0xFFFF_FFFF) as u32;
+    49→  2649→        code.extend_from_slice(&Instruction::Lis { rt: rd, simm: ((hi32 >> 16) & 0xFFFF) as i16 as i32 }.encode());
+    50→  2650→        if hi32 & 0xFFFF != 0 { code.extend_from_slice(&Instruction::Ori { ra: rd, rs: rd, uimm: hi32 & 0xFFFF }.encode()); }
+    51→  2651→        // SLDI rd, rd, 32 = RLDICR rd, rd, 32, 31 (shift left by 32 bits)
+    52→  2652→        // Use rlwinm-based approach: SLDI is correct for upper-32 ops,
+    53→  2653→        // but the MD-form encoding was buggy. Use SLW + clear instead:
+    54→  2654→        // Load 32 into R12, then sld rd, rd, r12
+    55→  2655→        code.extend_from_slice(&Instruction::Li { rt: Gpr::R12, simm: 32 }.encode());
+    56→  2656→        code.extend_from_slice(&Instruction::Sld { ra: rd, rs: rd, rb: Gpr::R12 }.encode());
+    57→  2657→        if (lo32 >> 16) & 0xFFFF != 0 {
+    58→  2658→            let oris_word: u32 = (25u32<<26)|(rd.encoding()<<21)|(rd.encoding()<<16)|((lo32>>16)&0xFFFF);
+    59→  2659→            code.extend_from_slice(&encode_word(oris_word));
+    60→  2660→        }
+    61→  2661→        if lo32 & 0xFFFF != 0 { code.extend_from_slice(&Instruction::Ori { ra: rd, rs: rd, uimm: lo32 & 0xFFFF }.encode()); }
+    62→  2662→    }
+    63→  2663→    code
+    64→  2664→}
+    65→  2665→
+    66→  2666→/// Load from stack slot [R31 - offset_from_r31] into dst_reg.
+    67→  2667→fn ss_load_from_slot(dst_reg: Gpr, offset_from_r31: i32) -> Vec<u8> {
+    68→  2668→    let neg_off = -offset_from_r31;
+    69→  2669→    if neg_off >= -32764 && neg_off <= 32764 && (neg_off & 3) == 0 {
+    70→  2670→        Instruction::Ld { rt: dst_reg, ra: Gpr::R31, ds: neg_off }.encode().to_vec()
+    71→  2671→    } else if neg_off >= -32768 && neg_off <= 32767 {
+    72→  2672→        let mut code = Vec::new();
+    73→  2673→        code.extend_from_slice(&Instruction::Addi { rt: Gpr::R12, ra: Gpr::R31, simm: neg_off }.encode());
+    74→  2674→        code.extend_from_slice(&Instruction::Ld { rt: dst_reg, ra: Gpr::R12, ds: 0 }.encode());
+    75→  2675→        code
+    76→  2676→    } else {
+    77→  2677→        let mut code = Vec::new();
+    78→  2678→        code.extend(ss_load_imm(Gpr::R12, offset_from_r31 as i64));
+    79→  2679→        code.extend_from_slice(&Instruction::Subf { rt: Gpr::R12, ra: Gpr::R12, rb: Gpr::R31 }.encode());
+    80→  2680→        code.extend_from_slice(&Instruction::Ld { rt: dst_reg, ra: Gpr::R12, ds: 0 }.encode());
+    81→  2681→        code
+    82→  2682→    }
+    83→  2683→}
+    84→  2684→
+    85→  2685→/// Store src_reg into stack slot [R31 - offset_from_r31].
+    86→  2686→fn ss_store_to_slot(src_reg: Gpr, offset_from_r31: i32) -> Vec<u8> {
+    87→  2687→    let neg_off = -offset_from_r31;
+    88→  2688→    if neg_off >= -32764 && neg_off <= 32764 && (neg_off & 3) == 0 {
+    89→  2689→        Instruction::Std { rs: src_reg, ra: Gpr::R31, ds: neg_off }.encode().to_vec()
+    90→  2690→    } else if neg_off >= -32768 && neg_off <= 32767 {
+    91→  2691→        let mut code = Vec::new();
+    92→  2692→        code.extend_from_slice(&Instruction::Addi { rt: Gpr::R12, ra: Gpr::R31, simm: neg_off }.encode());
+    93→  2693→        code.extend_from_slice(&Instruction::Std { rs: src_reg, ra: Gpr::R12, ds: 0 }.encode());
+    94→  2694→        code
+    95→  2695→    } else {
+    96→  2696→        let mut code = Vec::new();
+    97→  2697→        code.extend(ss_load_imm(Gpr::R12, offset_from_r31 as i64));
+    98→  2698→        code.extend_from_slice(&Instruction::Subf { rt: Gpr::R12, ra: Gpr::R12, rb: Gpr::R31 }.encode());
+    99→  2699→        code.extend_from_slice(&Instruction::Std { rs: src_reg, ra: Gpr::R12, ds: 0 }.encode());
+   100→  2700→        code
+   101→  2701→    }
+   102→  2702→}
+   103→  2703→
+   104→  2704→/// Load an IRValue into a scratch register.
+   105→  2705→fn ss_load_value(val: &IRValue, slots: &std::collections::HashMap<u32, i32>, scratch: Gpr) -> Vec<u8> {
+   106→  2706→    match val {
+   107→  2707→        IRValue::Register(id) => { let offset = slots.get(id).copied().unwrap_or(0); ss_load_from_slot(scratch, offset) }
+   108→  2708→        IRValue::Immediate(v) => ss_load_imm(scratch, *v),
+   109→  2709→        IRValue::Address(a) => ss_load_imm(scratch, *a as i64),
+   110→  2710→        IRValue::Label(_) => Instruction::Li { rt: scratch, simm: 0 }.encode().to_vec(),
+   111→  2711→    }
+   112→  2712→}
+   113→  2713→
+   114→  2714→/// Emit comparison code producing 0 or 1 in dst.
+   115→  2715→fn ss_emit_cmp(kind: &CmpKind, dst: Gpr, lhs: Gpr, rhs: Gpr) -> Vec<u8> {
+   116→  2716→    let mut code = Vec::new();
+   117→  2717→    let cmp_signed = !matches!(kind, CmpKind::ULt|CmpKind::ULe|CmpKind::UGt|CmpKind::UGe);
+   118→  2718→    if cmp_signed {
+   119→  2719→        code.extend_from_slice(&Instruction::Cmp { bf: CrField::CR0, l: 1, ra: lhs, rb: rhs }.encode());
+   120→  2720→    } else {
+   121→  2721→        code.extend_from_slice(&Instruction::Cmpl { bf: CrField::CR0, l: 1, ra: lhs, rb: rhs }.encode());
+   122→  2722→    }
+   123→  2723→    code.extend_from_slice(&Instruction::Li { rt: dst, simm: 0 }.encode());
+   124→  2724→    let (bo, bi) = match kind {
+   125→  2725→        CmpKind::Eq => (4, 2u32), CmpKind::Ne => (12, 2u32),
+   126→  2726→        // SLt/ULt: branch if LT=0 (not less than) → skip setting 1; only set 1 when LT=1
+   127→  2727→        CmpKind::SLt|CmpKind::ULt => (4, 0u32),
+   128→  2728→        // SLe/ULe: branch if GT=1 (strictly greater) → skip setting 1; set 1 when LT=1 or EQ=1
+   129→  2729→        CmpKind::SLe|CmpKind::ULe => (12, 1u32),
+   130→  2730→        // SGt/UGt: branch if GT=0 (not greater) → skip setting 1; only set 1 when GT=1
+   131→  2731→        CmpKind::SGt|CmpKind::UGt => (4, 1u32),
+   132→  2732→        // SGe/UGe: branch if LT=1 (strictly less) → skip setting 1; set 1 when GT=1 or EQ=1
+   133→  2733→        CmpKind::SGe|CmpKind::UGe => (12, 0u32),
+   134→  2734→    };
+   135→  2735→    code.extend_from_slice(&Instruction::Bc { bo, bi, bd: 2 }.encode());
+   136→  2736→    code.extend_from_slice(&Instruction::Li { rt: dst, simm: 1 }.encode());
+   137→  2737→    code
+   138→  2738→}
+   139→  2739→
+   140→  2740→/// Typed load from memory.
+   141→  2741→fn ss_emit_typed_load(dst_reg: Gpr, addr_reg: Gpr, offset: i32, ty: &IRType) -> Vec<u8> {
+   142→  2742→    let mut code = Vec::new();
+   143→  2743→    match ty {
+   144→  2744→        IRType::I8 | IRType::U8 => {
+   145→  2745→            if offset >= -32768 && offset <= 32767 {
+   146→  2746→                code.extend_from_slice(&Instruction::Lbz { rt: dst_reg, ra: addr_reg, d: offset }.encode());
+   147→  2747→            } else {
+   148→  2748→                code.extend(ss_load_imm(Gpr::R5, offset as i64));
+   149→  2749→                code.extend_from_slice(&Instruction::Add { rt: Gpr::R5, ra: addr_reg, rb: Gpr::R5 }.encode());
+   150→  2750→                code.extend_from_slice(&Instruction::Lbz { rt: dst_reg, ra: Gpr::R5, d: 0 }.encode());
+   151→  2751→            }
+   152→  2752→        }
+   153→  2753→        IRType::I16 | IRType::U16 => {
+   154→  2754→            if offset >= -32768 && offset <= 32767 {
+   155→  2755→                code.extend_from_slice(&Instruction::Lhz { rt: dst_reg, ra: addr_reg, d: offset }.encode());
+   156→  2756→            } else {
+   157→  2757→                code.extend(ss_load_imm(Gpr::R5, offset as i64));
+   158→  2758→                code.extend_from_slice(&Instruction::Add { rt: Gpr::R5, ra: addr_reg, rb: Gpr::R5 }.encode());
+   159→  2759→                code.extend_from_slice(&Instruction::Lhz { rt: dst_reg, ra: Gpr::R5, d: 0 }.encode());
+   160→  2760→            }
+   161→  2761→        }
+   162→  2762→        IRType::I32 | IRType::U32 => {
+   163→  2763→            if offset >= -32768 && offset <= 32767 {
+   164→  2764→                code.extend_from_slice(&Instruction::Lwz { rt: dst_reg, ra: addr_reg, d: offset }.encode());
+   165→  2765→            } else {
+   166→  2766→                code.extend(ss_load_imm(Gpr::R5, offset as i64));
+   167→  2767→                code.extend_from_slice(&Instruction::Add { rt: Gpr::R5, ra: addr_reg, rb: Gpr::R5 }.encode());
+   168→  2768→                code.extend_from_slice(&Instruction::Lwz { rt: dst_reg, ra: Gpr::R5, d: 0 }.encode());
+   169→  2769→            }
+   170→  2770→        }
+   171→  2771→        _ => {
+   172→  2772→            if offset % 4 == 0 && offset >= -32764 && offset <= 32764 {
+   173→  2773→                code.extend_from_slice(&Instruction::Ld { rt: dst_reg, ra: addr_reg, ds: offset }.encode());
+   174→  2774→            } else if offset >= -32768 && offset <= 32767 {
+   175→  2775→                code.extend_from_slice(&Instruction::Addi { rt: Gpr::R5, ra: addr_reg, simm: offset }.encode());
+   176→  2776→                code.extend_from_slice(&Instruction::Ld { rt: dst_reg, ra: Gpr::R5, ds: 0 }.encode());
+   177→  2777→            } else {
+   178→  2778→                code.extend(ss_load_imm(Gpr::R5, offset as i64));
+   179→  2779→                code.extend_from_slice(&Instruction::Add { rt: Gpr::R5, ra: addr_reg, rb: Gpr::R5 }.encode());
+   180→  2780→                code.extend_from_slice(&Instruction::Ld { rt: dst_reg, ra: Gpr::R5, ds: 0 }.encode());
+   181→  2781→            }
+   182→  2782→        }
+   183→  2783→    }
+   184→  2784→    code
+   185→  2785→}
+   186→  2786→
+   187→  2787→/// Typed store to memory.
+   188→  2788→fn ss_emit_typed_store(value_reg: Gpr, addr_reg: Gpr, offset: i32, ty: &IRType) -> Vec<u8> {
+   189→  2789→    let mut code = Vec::new();
+   190→  2790→    match ty {
+   191→  2791→        IRType::I8 | IRType::U8 => {
+   192→  2792→            if offset >= -32768 && offset <= 32767 {
+   193→  2793→                code.extend_from_slice(&Instruction::Stb { rs: value_reg, ra: addr_reg, d: offset }.encode());
+   194→  2794→            } else {
+   195→  2795→                code.extend(ss_load_imm(Gpr::R5, offset as i64));
+   196→  2796→                code.extend_from_slice(&Instruction::Add { rt: Gpr::R5, ra: addr_reg, rb: Gpr::R5 }.encode());
+   197→  2797→                code.extend_from_slice(&Instruction::Stb { rs: value_reg, ra: Gpr::R5, d: 0 }.encode());
+   198→  2798→            }
+   199→  2799→        }
+   200→  2800→        IRType::I16 | IRType::U16 => {
+   201→  2801→            if offset >= -32768 && offset <= 32767 {
+   202→  2802→                code.extend_from_slice(&Instruction::Sth { rs: value_reg, ra: addr_reg, d: offset }.encode());
+   203→  2803→            } else {
+   204→  2804→                code.extend(ss_load_imm(Gpr::R5, offset as i64));
+   205→  2805→                code.extend_from_slice(&Instruction::Add { rt: Gpr::R5, ra: addr_reg, rb: Gpr::R5 }.encode());
+   206→  2806→                code.extend_from_slice(&Instruction::Sth { rs: value_reg, ra: Gpr::R5, d: 0 }.encode());
+   207→  2807→            }
+   208→  2808→        }
+   209→  2809→        IRType::I32 | IRType::U32 => {
+   210→  2810→            if offset >= -32768 && offset <= 32767 {
+   211→  2811→                code.extend_from_slice(&Instruction::Stw { rs: value_reg, ra: addr_reg, d: offset }.encode());
+   212→  2812→            } else {
+   213→  2813→                code.extend(ss_load_imm(Gpr::R5, offset as i64));
+   214→  2814→                code.extend_from_slice(&Instruction::Add { rt: Gpr::R5, ra: addr_reg, rb: Gpr::R5 }.encode());
+   215→  2815→                code.extend_from_slice(&Instruction::Stw { rs: value_reg, ra: Gpr::R5, d: 0 }.encode());
+   216→  2816→            }
+   217→  2817→        }
+   218→  2818→        _ => {
+   219→  2819→            if offset % 4 == 0 && offset >= -32764 && offset <= 32764 {
+   220→  2820→                code.extend_from_slice(&Instruction::Std { rs: value_reg, ra: addr_reg, ds: offset }.encode());
+   221→  2821→            } else if offset >= -32768 && offset <= 32767 {
+   222→  2822→                code.extend_from_slice(&Instruction::Addi { rt: Gpr::R5, ra: addr_reg, simm: offset }.encode());
+   223→  2823→                code.extend_from_slice(&Instruction::Std { rs: value_reg, ra: Gpr::R5, ds: 0 }.encode());
+   224→  2824→            } else {
+   225→  2825→                code.extend(ss_load_imm(Gpr::R5, offset as i64));
+   226→  2826→                code.extend_from_slice(&Instruction::Add { rt: Gpr::R5, ra: addr_reg, rb: Gpr::R5 }.encode());
+   227→  2827→                code.extend_from_slice(&Instruction::Std { rs: value_reg, ra: Gpr::R5, ds: 0 }.encode());
+   228→  2828→            }
+   229→  2829→        }
+   230→  2830→    }
+   231→  2831→    code
+   232→  2832→}
+   233→  2833→
+   234→  2834→impl Backend for PPC64Backend {
+   235→  2835→    fn target_info(&self) -> &dyn TargetInfo {
+   236→  2836→        &self.target_info
+   237→  2837→    }
+   238→  2838→
+   239→  2839→    fn allocate_registers(&self, func: &IRFunction) -> Result<AllocatedFunction, BackendError> {
+   240→  2840→        let func_name = func.name.clone();
+   241→  2841→
+   242→  2842→        // ── Phase 1: Collect all vreg IDs and compute stack layout ──
+   243→  2843→        let mut all_vreg_ids: std::collections::HashSet<u32> = std::collections::HashSet::new();
+   244→  2844→        for &id in func.vregs.keys() { all_vreg_ids.insert(id); }
+   245→  2845→        for param in &func.params {
+   246→  2846→            if let Some(id) = param.as_register() { all_vreg_ids.insert(id); }
+   247→  2847→        }
+   248→  2848→        for block in &func.blocks {
+   249→  2849→            for instr in &block.instructions {
+   250→  2850→                for id in instr.defined_regs() { all_vreg_ids.insert(id); }
+   251→  2851→                for id in instr.used_regs() { all_vreg_ids.insert(id); }
+   252→  2852→            }
+   253→  2853→        }
+   254→  2854→        for val in &func.results {
+   255→  2855→            if let Some(id) = val.as_register() { all_vreg_ids.insert(id); }
+   256→  2856→        }
+   257→  2857→
+   258→  2858→        let mut stack_alloc_vregs: std::collections::HashSet<u32> = std::collections::HashSet::new();
+   259→  2859→        let mut alloc_sizes: std::collections::HashMap<u32, i32> = std::collections::HashMap::new();
+   260→  2860→        for block in &func.blocks {
+   261→  2861→            for instr in &block.instructions {
+   262→  2862→                if let IRInstr::Alloc { dst, size } = instr {
+   263→  2863→                    if let Some(id) = dst.as_register() {
+   264→  2864→                        stack_alloc_vregs.insert(id);
+   265→  2865→                        let aligned_size = ((*size as i32 + 15) & !15) as i32;
+   266→  2866→                        alloc_sizes.insert(id, aligned_size);
+   267→  2867→                    }
+   268→  2868→                }
+   269→  2869→            }
+   270→  2870→        }
+   271→  2871→
+   272→  2872→        // Stack Layout (relative to R31, which = R1 + frame_size):
+   273→  2873→        // [R31 + 8]  = saved LR
+   274→  2874→        // [R31]      = back chain
+   275→  2875→        // [R31 - 16] = saved R31
+   276→  2876→        // Then alloc regions, then vreg slots at [R31 - offset]
+   277→  2877→
+   278→  2878→        let mut alloc_offsets: std::collections::HashMap<u32, i32> = std::collections::HashMap::new();
+   279→  2879→        let mut current_offset: i32 = 24; // after saved R31 at -16
+   280→  2880→
+   281→  2881→        let mut alloc_vreg_ids: Vec<u32> = stack_alloc_vregs.iter().copied().collect();
+   282→  2882→        alloc_vreg_ids.sort();
+   283→  2883→        for &id in &alloc_vreg_ids {
+   284→  2884→            let size = alloc_sizes[&id];
+   285→  2885→            current_offset += size;
+   286→  2886→            alloc_offsets.insert(id, current_offset);
+   287→  2887→        }
+   288→  2888→
+   289→  2889→        let mut vreg_stack_slots: std::collections::HashMap<u32, i32> = std::collections::HashMap::new();
+   290→  2890→        let mut all_vreg_ids_sorted: Vec<u32> = all_vreg_ids.iter().copied().collect();
+   291→  2891→        all_vreg_ids_sorted.sort();
+   292→  2892→        for &id in &all_vreg_ids_sorted {
+   293→  2893→            current_offset += 8;
+   294→  2894→            vreg_stack_slots.insert(id, current_offset);
+   295→  2895→        }
+   296→  2896→
+   297→  2897→        let frame_size = ((current_offset + 15) & !15) as usize;
+   298→  2898→        let fs = frame_size as i32;
+   299→  2899→
+   300→  2900→        // ── Phase 2: Emit prologue ──
+   301→  2901→        let mut instructions: Vec<AllocatedInstruction> = Vec::new();
+   302→  2902→        let mut relocations: Vec<crate::backend::RelocationEntry> = Vec::new();
+   303→  2903→
+   304→  2904→        // STDU R1, -frame_size(R1)
+   305→  2905→        instructions.push(AllocatedInstruction {
+   306→  2906→            opcode: "stdu".into(),
+   307→  2907→            reads: vec![PhysicalReg::new(RegClass::Gpr, 1)],
+   308→  2908→            writes: vec![PhysicalReg::new(RegClass::Gpr, 1)],
+   309→  2909→            encoded: Instruction::Stdu { rs: Gpr::R1, ra: Gpr::R1, ds: -fs }.encode().to_vec(),
+   310→  2910→        });
+   311→  2911→        // MFLR R0
+   312→  2912→        let mflr_word: u32 = (31u32 << 26) | (0u32 << 21) | (8u32 << 16) | (339 << 1);
+   313→  2913→        instructions.push(AllocatedInstruction {
+   314→  2914→            opcode: "mflr".into(), reads: vec![], writes: vec![PhysicalReg::new(RegClass::Gpr, 0)],
+   315→  2915→            encoded: encode_word(mflr_word).to_vec(),
+   316→  2916→        });
+   317→  2917→        // STD R0, fs+8(R1) - save LR
+   318→  2918→        instructions.push(AllocatedInstruction {
+   319→  2919→            opcode: "std".into(),
+   320→  2920→            reads: vec![PhysicalReg::new(RegClass::Gpr, 0), PhysicalReg::new(RegClass::Gpr, 1)],
+   321→  2921→            writes: vec![],
+   322→  2922→            encoded: Instruction::Std { rs: Gpr::R0, ra: Gpr::R1, ds: fs + 8 }.encode().to_vec(),
+   323→  2923→        });
+   324→  2924→        // STD R31, fs-16(R1) - save R31
+   325→  2925→        instructions.push(AllocatedInstruction {
+   326→  2926→            opcode: "std".into(),
+   327→  2927→            reads: vec![PhysicalReg::new(RegClass::Gpr, 31), PhysicalReg::new(RegClass::Gpr, 1)],
+   328→  2928→            writes: vec![],
+   329→  2929→            encoded: Instruction::Std { rs: Gpr::R31, ra: Gpr::R1, ds: fs - 16 }.encode().to_vec(),
+   330→  2930→        });
+   331→  2931→        // ADDI R31, R1, frame_size
+   332→  2932→        instructions.push(AllocatedInstruction {
+   333→  2933→            opcode: "addi".into(),
+   334→  2934→            reads: vec![PhysicalReg::new(RegClass::Gpr, 1)],
+   335→  2935→            writes: vec![PhysicalReg::new(RegClass::Gpr, 31)],
+   336→  2936→            encoded: Instruction::Addi { rt: Gpr::R31, ra: Gpr::R1, simm: fs }.encode().to_vec(),
+   337→  2937→        });
+   338→  2938→
+   339→  2939→        // Store function params from R3-R10 to stack slots
+   340→  2940→        let arg_regs = [Gpr::R3, Gpr::R4, Gpr::R5, Gpr::R6, Gpr::R7, Gpr::R8, Gpr::R9, Gpr::R10];
+   341→  2941→        for (i, param) in func.params.iter().enumerate() {
+   342→  2942→            if let Some(id) = param.as_register() {
+   343→  2943→                if i < 8 {
+   344→  2944→                    let offset = vreg_stack_slots.get(&id).copied().unwrap_or(0);
+   345→  2945→                    let store_code = ss_store_to_slot(arg_regs[i], offset);
+   346→  2946→                    instructions.push(AllocatedInstruction {
+   347→  2947→                        opcode: "std".into(),
+   348→  2948→                        reads: vec![PhysicalReg::new(RegClass::Gpr, arg_regs[i].encoding())],
+   349→  2949→                        writes: vec![], encoded: store_code,
+   350→  2950→                    });
+   351→  2951→                }
+   352→  2952→            }
+   353→  2953→        }
+   354→  2954→
+   355→  2955→        // ── Phase 3: Emit body ──
+   356→  2956→        let mut current_byte_offset: u64 = instructions.iter().map(|i| i.encoded.len() as u64).sum();
+   357→  2957→        let mut label_offsets: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+   358→  2958→
+   359→  2959→        struct BranchFixup { instr_idx: usize, offset_in_encoded: usize, abs_byte_offset: u64, target_label: String, is_unconditional: bool, bc_bo: u32, bc_bi: u32 }
+   360→  2960→        let mut branch_fixups: Vec<BranchFixup> = Vec::new();
+   361→  2961→
+   362→  2962→        for block in &func.blocks {
+   363→  2963→            label_offsets.insert(block.label.clone(), current_byte_offset);
+   364→  2964→            for instr in &block.instructions {
+   365→  2965→                let encoded: Vec<u8> = match instr {
+   366→  2966→                    IRInstr::BinOp { op, dst, lhs, rhs, ty } => {
+   367→  2967→                        let dst_id = dst.as_register().unwrap_or(0);
+   368→  2968→                        let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+   369→  2969→                        let is_32bit = ty.as_ref().map_or(false, |t| matches!(t, IRType::I32 | IRType::U32));
+   370→  2970→                        let mut code = Vec::new();
+   371→  2971→                        match op {
+   372→  2972→                            BinOpKind::Ror | BinOpKind::Rol => {
+   373→  2973→                                code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R4));
+   374→  2974→                                code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::R5));
+   375→  2975→                                if is_32bit {
+   376→  2976→                                    // 32-bit rotation: use rlwinm which clears upper 32 bits
+   377→  2977→                                    // rlwinm operates on the low 32 bits and zero-extends the result
+   378→  2978→                                    // ROR(n, r) = ROTL32(n, 32-r)
+   379→  2979→                                    // ROL(n, r) = ROTL32(n, r)
+   380→  2980→                                    if *op == BinOpKind::Ror {
+   381→  2981→                                        // neg r5, r5; addi r5, r5, 32 -> r5 = 32 - amount
+   382→  2982→                                        code.extend_from_slice(&Instruction::Neg { rt: Gpr::R5, ra: Gpr::R5 }.encode());
+   383→  2983→                                        code.extend_from_slice(&Instruction::Addi { rt: Gpr::R5, ra: Gpr::R5, simm: 32 }.encode());
+   384→  2984→                                    }
+   385→  2985→                                    // rlwinm needs immediate shift, but we have register shift.
+   386→  2986→                                    // Use rlwnm (register-based rotate left word then AND mask)
+   387→  2987→                                    // rlwnm r3, r4, r5, 0, 31 — rotates low 32 bits of r4 left by r5[0:4],
+   388→  2988→                                    // then masks bits 0-31, clearing upper 32 bits.
+   389→  2989→                                    // Encoding: M-form, primary opcode 23
+   390→  2990→                                    // rlwnm RA, RS, RB, MB, ME: opcode=23, RS[6:10], RA[11:15], RB[16:20], MB[21:25], ME[26:30], Rc[31]
+   391→  2991→                                    let rlwnm_word: u32 = (23u32 << 26)
+   392→  2992→                                        | (Gpr::R4.encoding() << 21)
+   393→  2993→                                        | (Gpr::R3.encoding() << 16)
+   394→  2994→                                        | (Gpr::R5.encoding() << 11)
+   395→  2995→                                        | (0u32 << 6)    // MB = 0
+   396→  2996→                                        | (31u32 << 1)   // ME = 31
+   397→  2997→                                        | 0u32;          // Rc = 0
+   398→  2998→                                    code.extend_from_slice(&encode_word(rlwnm_word));
+   399→  2999→                                } else {
+   400→  3000→                                    // 64-bit rotation: use rldcl
+   401→  3001→                                    if *op == BinOpKind::Ror {
+   402→  3002→                                        code.extend_from_slice(&Instruction::Neg { rt: Gpr::R5, ra: Gpr::R5 }.encode());
+   403→  3003→                                        code.extend_from_slice(&Instruction::Addi { rt: Gpr::R5, ra: Gpr::R5, simm: 64 }.encode());
+   404→  3004→                                    }
+   405→  3005→                                    // rldcl with mb=0 — but encoding only uses 5-bit mb field.
+   406→  3006→                                    // For mb=0 this is fine (only lower 5 bits matter, mb5=0).
+   407→  3007→                                    code.extend_from_slice(&Instruction::Rldcl { ra: Gpr::R3, rs: Gpr::R4, rb: Gpr::R5, mb: 0 }.encode());
+   408→  3008→                                }
+   409→  3009→                            }
+   410→  3010→                            BinOpKind::Shl | BinOpKind::ShrL | BinOpKind::ShrA => {
+   411→  3011→                                code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R4));
+   412→  3012→                                code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::R5));
+   413→  3013→                                if is_32bit {
+   414→  3014→                                    match op {
+   415→  3015→                                        // SLW/SRW clear upper 32 bits automatically
+   416→  3016→                                        BinOpKind::Shl => { code.extend_from_slice(&Instruction::Slw { ra: Gpr::R3, rs: Gpr::R4, rb: Gpr::R5 }.encode()); }
+   417→  3017→                                        BinOpKind::ShrL => { code.extend_from_slice(&Instruction::Srw { ra: Gpr::R3, rs: Gpr::R4, rb: Gpr::R5 }.encode()); }
+   418→  3018→                                        BinOpKind::ShrA => { code.extend_from_slice(&Instruction::Sraw { ra: Gpr::R3, rs: Gpr::R4, rb: Gpr::R5 }.encode()); }
+   419→  3019→                                        _ => unreachable!(),
+   420→  3020→                                    }
+   421→  3021→                                } else {
+   422→  3022→                                    match op {
+   423→  3023→                                        BinOpKind::Shl => { code.extend_from_slice(&Instruction::Sld { ra: Gpr::R3, rs: Gpr::R4, rb: Gpr::R5 }.encode()); }
+   424→  3024→                                        BinOpKind::ShrL => { code.extend_from_slice(&Instruction::Srd { ra: Gpr::R3, rs: Gpr::R4, rb: Gpr::R5 }.encode()); }
+   425→  3025→                                        BinOpKind::ShrA => { code.extend_from_slice(&Instruction::Srad { ra: Gpr::R3, rs: Gpr::R4, rb: Gpr::R5 }.encode()); }
+   426→  3026→                                        _ => unreachable!(),
+   427→  3027→                                    }
+   428→  3028→                                }
+   429→  3029→                            }
+   430→  3030→                            BinOpKind::SRem | BinOpKind::URem => {
+   431→  3031→                                code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R3));
+   432→  3032→                                code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::R4));
+   433→  3033→                                if is_32bit {
+   434→  3034→                                    let div_instr = match op {
+   435→  3035→                                        BinOpKind::URem => Instruction::Divwu { rt: Gpr::R5, ra: Gpr::R3, rb: Gpr::R4 },
+   436→  3036→                                        _ => Instruction::Divw { rt: Gpr::R5, ra: Gpr::R3, rb: Gpr::R4 },
+   437→  3037→                                    };
+   438→  3038→                                    code.extend_from_slice(&div_instr.encode());
+   439→  3039→                                    code.extend_from_slice(&Instruction::Mullw { rt: Gpr::R5, ra: Gpr::R5, rb: Gpr::R4 }.encode());
+   440→  3040→                                } else {
+   441→  3041→                                    let div_instr = match op {
+   442→  3042→                                        BinOpKind::URem => Instruction::Divdu { rt: Gpr::R5, ra: Gpr::R3, rb: Gpr::R4 },
+   443→  3043→                                        _ => Instruction::Divd { rt: Gpr::R5, ra: Gpr::R3, rb: Gpr::R4 },
+   444→  3044→                                    };
+   445→  3045→                                    code.extend_from_slice(&div_instr.encode());
+   446→  3046→                                    code.extend_from_slice(&Instruction::Mulld { rt: Gpr::R5, ra: Gpr::R5, rb: Gpr::R4 }.encode());
+   447→  3047→                                }
+   448→  3048→                                code.extend_from_slice(&Instruction::Subf { rt: Gpr::R3, ra: Gpr::R5, rb: Gpr::R3 }.encode());
+   449→  3049→                                if is_32bit {
+   450→  3050→                                    // Mask to 32 bits
+   451→  3051→                                    code.extend_from_slice(&Instruction::Rlwinm { ra: Gpr::R3, rs: Gpr::R3, sh: 0, mb: 0, me: 31 }.encode());
+   452→  3052→                                }
+   453→  3053→                            }
+   454→  3054→                            _ => {
+   455→  3055→                                code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R3));
+   456→  3056→                                code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::R4));
+   457→  3057→                                match op {
+   458→  3058→                                    BinOpKind::Add => {
+   459→  3059→                                        if is_32bit {
+   460→  3060→                                            // Add and mask to 32 bits
+   461→  3061→                                            code.extend_from_slice(&Instruction::Add { rt: Gpr::R3, ra: Gpr::R3, rb: Gpr::R4 }.encode());
+   462→  3062→                                            code.extend_from_slice(&Instruction::Rlwinm { ra: Gpr::R3, rs: Gpr::R3, sh: 0, mb: 0, me: 31 }.encode());
+   463→  3063→                                        } else {
+   464→  3064→                                            code.extend_from_slice(&Instruction::Add { rt: Gpr::R3, ra: Gpr::R3, rb: Gpr::R4 }.encode());
+   465→  3065→                                        }
+   466→  3066→                                    }
+   467→  3067→                                    BinOpKind::Sub => {
+   468→  3068→                                        if is_32bit {
+   469→  3069→                                            code.extend_from_slice(&Instruction::Subf { rt: Gpr::R3, ra: Gpr::R4, rb: Gpr::R3 }.encode());
+   470→  3070→                                            code.extend_from_slice(&Instruction::Rlwinm { ra: Gpr::R3, rs: Gpr::R3, sh: 0, mb: 0, me: 31 }.encode());
+   471→  3071→                                        } else {
+   472→  3072→                                            code.extend_from_slice(&Instruction::Subf { rt: Gpr::R3, ra: Gpr::R4, rb: Gpr::R3 }.encode());
+   473→  3073→                                        }
+   474→  3074→                                    }
+   475→  3075→                                    BinOpKind::Mul => {
+   476→  3076→                                        if is_32bit {
+   477→  3077→                                            code.extend_from_slice(&Instruction::Mullw { rt: Gpr::R3, ra: Gpr::R3, rb: Gpr::R4 }.encode());
+   478→  3078→                                        } else {
+   479→  3079→                                            code.extend_from_slice(&Instruction::Mulld { rt: Gpr::R3, ra: Gpr::R3, rb: Gpr::R4 }.encode());
+   480→  3080→                                        }
+   481→  3081→                                    }
+   482→  3082→                                    BinOpKind::SDiv | BinOpKind::UDiv => {
+   483→  3083→                                        if is_32bit {
+   484→  3084→                                            let div_instr = match op {
+   485→  3085→                                                BinOpKind::UDiv => Instruction::Divwu { rt: Gpr::R3, ra: Gpr::R3, rb: Gpr::R4 },
+   486→  3086→                                                _ => Instruction::Divw { rt: Gpr::R3, ra: Gpr::R3, rb: Gpr::R4 },
+   487→  3087→                                            };
+   488→  3088→                                            code.extend_from_slice(&div_instr.encode());
+   489→  3089→                                        } else {
+   490→  3090→                                            let div_instr = match op {
+   491→  3091→                                                BinOpKind::UDiv => Instruction::Divdu { rt: Gpr::R3, ra: Gpr::R3, rb: Gpr::R4 },
+   492→  3092→                                                _ => Instruction::Divd { rt: Gpr::R3, ra: Gpr::R3, rb: Gpr::R4 },
+   493→  3093→                                            };
+   494→  3094→                                            code.extend_from_slice(&div_instr.encode());
+   495→  3095→                                        }
+   496→  3096→                                    }
+   497→  3097→                                    BinOpKind::And => { code.extend_from_slice(&Instruction::And { ra: Gpr::R3, rs: Gpr::R3, rb: Gpr::R4 }.encode()); }
+   498→  3098→                                    BinOpKind::Or => { code.extend_from_slice(&Instruction::Or { ra: Gpr::R3, rs: Gpr::R3, rb: Gpr::R4 }.encode()); }
+   499→  3099→                                    BinOpKind::Xor => { code.extend_from_slice(&Instruction::Xor { ra: Gpr::R3, rs: Gpr::R3, rb: Gpr::R4 }.encode()); }
+   500→  3100→                                    BinOpKind::Eq|BinOpKind::Ne|BinOpKind::SLt|BinOpKind::SLe|BinOpKind::SGt|BinOpKind::SGe|BinOpKind::ULt|BinOpKind::ULe|BinOpKind::UGt|BinOpKind::UGe => {
+
+[showing lines 1-500 of 502; use offset=501 with limit to continue reading]

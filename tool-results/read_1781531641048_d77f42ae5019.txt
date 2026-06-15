@@ -1,0 +1,1053 @@
+     1→//! # Cross-Backend Consistency Test Suite
+     2→//!
+     3→//! Compiles the same VUMA programs for all 8 backends and verifies they produce
+     4→//! equivalent, structurally valid results.  Each test constructs IR functions
+     5→//! directly (bypassing the SCG front-end), runs each backend's
+     6→//! `allocate_registers` + `encode_function`, and validates:
+     7→//!
+     8→//! - Binary output exists and has reasonable size
+     9→//! - For Wasm32: the module structure (magic, version, sections)
+    10→//! - For ELF backends: the ELF header (magic, class, machine type)
+    11→//!
+    12→//! # Test Programs
+    13→//!
+    14→//! | # | Program        | Semantics                                        | Expected result |
+    15→//! |---|----------------|--------------------------------------------------|-----------------|
+    16→//! | 1 | Simple         | `fn main() -> i64 { return 42; }`               | 42              |
+    17→//! | 2 | Arithmetic     | `fn main() -> i64 { return (10+20)*3 - 5; }`    | 85              |
+    18→//! | 3 | Memory         | alloc 8B, store 0x42424242, load, return low byte| 66 (0x42)       |
+    19→//! | 4 | Function call  | helper() returns 7; main returns helper()        | 7               |
+    20→
+    21→use vuma_codegen::backend::{
+    22→    create_backend, AllocatedProgram, Backend, BackendKind, OutputFormat,
+    23→};
+    24→use vuma_codegen::ir::{
+    25→    BinOpKind, IRFunction, IRInstr, IRTerminator, IRType, IRValue, VirtualRegister,
+    26→};
+    27→use std::collections::HashMap;
+    28→
+    29→// ---------------------------------------------------------------------------
+    30→// Backend helpers
+    31→// ---------------------------------------------------------------------------
+    32→
+    33→/// All 8 backend kinds, in a stable order for iteration.
+    34→const ALL_BACKENDS: &[BackendKind] = &[
+    35→    BackendKind::AArch64,
+    36→    BackendKind::RiscV64,
+    37→    BackendKind::Wasm32,
+    38→    BackendKind::LoongArch64,
+    39→    BackendKind::X86_64,
+    40→    BackendKind::Arm32,
+    41→    BackendKind::Mips64,
+    42→    BackendKind::PowerPC64,
+    43→];
+    44→
+    45→/// Human-readable name for a BackendKind (for assertion messages).
+    46→fn backend_name(kind: BackendKind) -> &'static str {
+    47→    match kind {
+    48→        BackendKind::AArch64 => "aarch64",
+    49→        BackendKind::RiscV64 => "riscv64",
+    50→        BackendKind::Wasm32 => "wasm32",
+    51→        BackendKind::LoongArch64 => "loongarch64",
+    52→        BackendKind::X86_64 => "x86_64",
+    53→        BackendKind::Arm32 => "arm32",
+    54→        BackendKind::Mips64 => "mips64",
+    55→        BackendKind::PowerPC64 => "ppc64",
+    56→    }
+    57→}
+    58→
+    59→/// ELF machine type for a BackendKind (0 for non-ELF targets).
+    60→fn elf_machine(kind: BackendKind) -> u16 {
+    61→    match kind {
+    62→        BackendKind::AArch64 => 183,   // EM_AARCH64
+    63→        BackendKind::RiscV64 => 243,   // EM_RISCV
+    64→        BackendKind::Wasm32 => 0,      // Not ELF
+    65→        BackendKind::LoongArch64 => 258, // EM_LOONGARCH
+    66→        BackendKind::X86_64 => 62,     // EM_X86_64
+    67→        BackendKind::Arm32 => 40,      // EM_ARM
+    68→        BackendKind::Mips64 => 8,      // EM_MIPS
+    69→        BackendKind::PowerPC64 => 21,  // EM_PPC64
+    70→    }
+    71→}
+    72→
+    73→/// Expected output format for a BackendKind.
+    74→fn expected_output_format(kind: BackendKind) -> OutputFormat {
+    75→    match kind {
+    76→        BackendKind::Arm32 => OutputFormat::Elf32,
+    77→        BackendKind::Wasm32 => OutputFormat::WasmBinary,
+    78→        _ => OutputFormat::Elf64,
+    79→    }
+    80→}
+    81→
+    82→/// Run the full `allocate_registers` + `encode_program` pipeline for a
+    83→/// multi-function program and return the final binary.
+    84→fn compile_program(
+    85→    backend: &dyn Backend,
+    86→    functions: &[IRFunction],
+    87→    label: &str,
+    88→) -> Vec<u8> {
+    89→    let mut allocated_functions = Vec::new();
+    90→    for func in functions {
+    91→        let allocated = backend
+    92→            .allocate_registers(func)
+    93→            .unwrap_or_else(|e| {
+    94→                panic!(
+    95→                    "{}: allocate_registers failed for {} / {}: {}",
+    96→                    backend.name(),
+    97→                    label,
+    98→                    func.name,
+    99→                    e
+   100→                )
+   101→            });
+   102→        allocated_functions.push(allocated);
+   103→    }
+   104→
+   105→    let total_code_size: usize = allocated_functions
+   106→        .iter()
+   107→        .map(|f| f.code_size)
+   108→        .sum();
+   109→
+   110→    let program = AllocatedProgram {
+   111→        functions: allocated_functions,
+   112→        total_code_size,
+   113→        total_data_size: 0,
+   114→    };
+   115→
+   116→    backend
+   117→        .encode_program(&program)
+   118→        .unwrap_or_else(|e| {
+   119→            panic!(
+   120→                "{}: encode_program failed for {}: {}",
+   121→                backend.name(),
+   122→                label,
+   123→                e
+   124→            )
+   125→        })
+   126→}
+   127→
+   128→/// Validate the ELF header of a compiled binary for the given backend.
+   129→fn validate_elf_header(bytes: &[u8], kind: BackendKind) {
+   130→    let name = backend_name(kind);
+   131→
+   132→    // ELF header must be at least 52 bytes (ELF32) or 64 bytes (ELF64).
+   133→    let min_header = match expected_output_format(kind) {
+   134→        OutputFormat::Elf32 => 52,
+   135→        OutputFormat::Elf64 => 64,
+   136→        _ => panic!("validate_elf_header called for non-ELF backend {}", name),
+   137→    };
+   138→    assert!(
+   139→        bytes.len() >= min_header,
+   140→        "{}: ELF binary too short ({} bytes, need at least {})",
+   141→        name,
+   142→        bytes.len(),
+   143→        min_header
+   144→    );
+   145→
+   146→    // Magic bytes: 0x7f 'E' 'L' 'F'
+   147→    assert_eq!(
+   148→        &bytes[0..4],
+   149→        &[0x7f, b'E', b'L', b'F'],
+   150→        "{}: ELF magic bytes incorrect",
+   151→        name
+   152→    );
+   153→
+   154→    // ELF class
+   155→    let expected_class = match expected_output_format(kind) {
+   156→        OutputFormat::Elf32 => 1u8, // ELFCLASS32
+   157→        OutputFormat::Elf64 => 2u8, // ELFCLASS64
+   158→        _ => unreachable!(),
+   159→    };
+   160→    assert_eq!(
+   161→        bytes[4], expected_class,
+   162→        "{}: ELF class should be {}",
+   163→        name, expected_class
+   164→    );
+   165→
+   166→    // ELF version must be EV_CURRENT (1)
+   167→    assert_eq!(bytes[6], 1, "{}: ELF version should be EV_CURRENT (1)", name);
+   168→
+   169→    // Machine type at offset 18..20 — read using the ELF's declared byte order.
+   170→    // Byte 5 (ei_data): 1 = little-endian, 2 = big-endian.
+   171→    let e_machine = if bytes[5] == 2 {
+   172→        u16::from_be_bytes([bytes[18], bytes[19]])
+   173→    } else {
+   174→        u16::from_le_bytes([bytes[18], bytes[19]])
+   175→    };
+   176→    assert_eq!(
+   177→        e_machine,
+   178→        elf_machine(kind),
+   179→        "{}: ELF machine type should be {} (got {})",
+   180→        name,
+   181→        elf_machine(kind),
+   182→        e_machine
+   183→    );
+   184→}
+   185→
+   186→/// Validate the Wasm module structure of a compiled binary.
+   187→fn validate_wasm_module(bytes: &[u8]) {
+   188→    // Must have at least 8 bytes (magic + version)
+   189→    assert!(
+   190→        bytes.len() >= 8,
+   191→        "wasm32: binary too short ({} bytes, need at least 8)",
+   192→        bytes.len()
+   193→    );
+   194→
+   195→    // Magic: 0x00 0x61 0x73 0x6D ("\0asm")
+   196→    assert_eq!(
+   197→        &bytes[0..4],
+   198→        &[0x00, 0x61, 0x73, 0x6D],
+   199→        "wasm32: magic bytes should be \\0asm"
+   200→    );
+   201→
+   202→    // Version: 0x01 0x00 0x00 0x00 (version 1)
+   203→    assert_eq!(
+   204→        &bytes[4..8],
+   205→        &[0x01, 0x00, 0x00, 0x00],
+   206→        "wasm32: version should be 1"
+   207→    );
+   208→
+   209→    // Verify at least some sections exist after the header
+   210→    assert!(
+   211→        bytes.len() > 8,
+   212→        "wasm32: module should have content after header"
+   213→    );
+   214→
+   215→    // Walk sections and verify they appear in ascending ID order
+   216→    let mut offset = 8usize;
+   217→    let mut last_section_id: Option<u8> = None;
+   218→    while offset < bytes.len() {
+   219→        let section_id = bytes[offset];
+   220→        offset += 1;
+   221→
+   222→        // Decode LEB128 size
+   223→        let mut size: usize = 0;
+   224→        let mut shift: usize = 0;
+   225→        loop {
+   226→            assert!(offset < bytes.len(), "wasm32: truncated section size");
+   227→            let byte = bytes[offset];
+   228→            offset += 1;
+   229→            size |= ((byte & 0x7F) as usize) << shift;
+   230→            shift += 7;
+   231→            if byte & 0x80 == 0 {
+   232→                break;
+   233→            }
+   234→        }
+   235→
+   236→        // Sections must appear in order of ascending ID (except custom sections, ID 0)
+   237→        if section_id != 0 {
+   238→            if let Some(prev) = last_section_id {
+   239→                assert!(
+   240→                    section_id > prev,
+   241→                    "wasm32: sections out of order ({} after {})",
+   242→                    section_id,
+   243→                    prev
+   244→                );
+   245→            }
+   246→            last_section_id = Some(section_id);
+   247→        }
+   248→
+   249→        offset += size;
+   250→    }
+   251→}
+   252→
+   253→/// Validate a binary produced by any backend: check format-specific structure
+   254→/// and that the output has a reasonable minimum size.
+   255→fn validate_binary(bytes: &[u8], kind: BackendKind, min_size: usize) {
+   256→    let name = backend_name(kind);
+   257→
+   258→    // Reasonable minimum size (at least a few instructions)
+   259→    assert!(
+   260→        bytes.len() >= min_size,
+   261→        "{}: binary too small ({} bytes, expected at least {})",
+   262→        name,
+   263→        bytes.len(),
+   264→        min_size
+   265→    );
+   266→
+   267→    match expected_output_format(kind) {
+   268→        OutputFormat::Elf32 | OutputFormat::Elf64 => validate_elf_header(bytes, kind),
+   269→        OutputFormat::WasmBinary => validate_wasm_module(bytes),
+   270→        OutputFormat::RawBinary => {
+   271→            // No structural validation for raw binaries
+   272→        }
+   273→    }
+   274→}
+   275→
+   276→// ===========================================================================
+   277→// IR Program Constructors
+   278→// ===========================================================================
+   279→
+   280→/// Program 1: Simple — a function that returns 42.
+   281→///
+   282→/// ```text
+   283→/// fn main() -> i64 { return 42; }
+   284→/// ```
+   285→fn make_simple_function() -> IRFunction {
+   286→    let mut func = IRFunction::new("main");
+   287→    func.result_types.push(IRType::I64);
+   288→    func.results.push(IRValue::Register(0));
+   289→    func.vregs.insert(0, VirtualRegister::new(0, Some("ret_val".to_string())));
+   290→
+   291→    func.current_block().terminator = IRTerminator::Return(vec![IRValue::Immediate(42)]);
+   292→    func
+   293→}
+   294→
+   295→/// Program 2: Arithmetic — computes (10 + 20) * 3 - 5 = 85.
+   296→///
+   297→/// ```text
+   298→/// fn main() -> i64 {
+   299→///     let a = 10 + 20;   // 30
+   300→///     let b = a * 3;     // 90
+   301→///     let c = b - 5;     // 85
+   302→///     return c;
+   303→/// }
+   304→/// ```
+   305→fn make_arithmetic_function() -> IRFunction {
+   306→    let mut func = IRFunction::new("main");
+   307→    func.result_types.push(IRType::I64);
+   308→    func.results.push(IRValue::Register(2));
+   309→    func.vregs.insert(0, VirtualRegister::new(0, Some("a".to_string())));
+   310→    func.vregs.insert(1, VirtualRegister::new(1, Some("b".to_string())));
+   311→    func.vregs.insert(2, VirtualRegister::new(2, Some("c".to_string())));
+   312→
+   313→    let block = func.current_block();
+   314→
+   315→    // a = 10 + 20
+   316→    block.push(IRInstr::Add {
+   317→        dst: IRValue::Register(0),
+   318→        lhs: IRValue::Immediate(10),
+   319→        rhs: IRValue::Immediate(20),
+   320→        ty: Some(IRType::I64),
+   321→    });
+   322→
+   323→    // b = a * 3
+   324→    block.push(IRInstr::BinOp {
+   325→        op: BinOpKind::Mul,
+   326→        dst: IRValue::Register(1),
+   327→        lhs: IRValue::Register(0),
+   328→        rhs: IRValue::Immediate(3),
+   329→        ty: Some(IRType::I64),
+   330→    });
+   331→
+   332→    // c = b - 5
+   333→    block.push(IRInstr::BinOp {
+   334→        op: BinOpKind::Sub,
+   335→        dst: IRValue::Register(2),
+   336→        lhs: IRValue::Register(1),
+   337→        rhs: IRValue::Immediate(5),
+   338→        ty: Some(IRType::I64),
+   339→    });
+   340→
+   341→    block.terminator = IRTerminator::Return(vec![IRValue::Register(2)]);
+   342→    func
+   343→}
+   344→
+   345→/// Program 3: Memory — allocates 8 bytes, writes 0x42424242, reads it back,
+   346→/// returns the low byte (0x42 = 66).
+   347→///
+   348→/// ```text
+   349→/// fn main() -> i64 {
+   350→///     let ptr = alloc 8;
+   351→///     store 0x42424242 at ptr;
+   352→///     let val = load ptr as i64;
+   353→///     let byte = val & 0xFF;
+   354→///     return byte;          // 0x42 = 66
+   355→/// }
+   356→/// ```
+   357→fn make_memory_function() -> IRFunction {
+   358→    let mut func = IRFunction::new("main");
+   359→    func.result_types.push(IRType::I64);
+   360→    func.results.push(IRValue::Register(2));
+   361→    func.vregs.insert(0, VirtualRegister::new(0, Some("ptr".to_string())));
+   362→    func.vregs.insert(1, VirtualRegister::new(1, Some("val".to_string())));
+   363→    func.vregs.insert(2, VirtualRegister::new(2, Some("byte".to_string())));
+   364→
+   365→    let block = func.current_block();
+   366→
+   367→    // ptr = alloc 8
+   368→    block.push(IRInstr::Alloc {
+   369→        dst: IRValue::Register(0),
+   370→        size: 8,
+   371→    });
+   372→
+   373→    // store 0x42424242 at ptr + 0
+   374→    block.push(IRInstr::Store {
+   375→        value: IRValue::Immediate(0x42424242),
+   376→        addr: IRValue::Register(0),
+   377→        offset: 0,
+   378→        ty: IRType::I64,
+   379→    });
+   380→
+   381→    // val = load ptr + 0 as i64
+   382→    block.push(IRInstr::Load {
+   383→        dst: IRValue::Register(1),
+   384→        addr: IRValue::Register(0),
+   385→        offset: 0,
+   386→        ty: IRType::I64,
+   387→    });
+   388→
+   389→    // byte = val & 0xFF
+   390→    block.push(IRInstr::BinOp {
+   391→        op: BinOpKind::And,
+   392→        dst: IRValue::Register(2),
+   393→        lhs: IRValue::Register(1),
+   394→        rhs: IRValue::Immediate(0xFF),
+   395→        ty: Some(IRType::I64),
+   396→    });
+   397→
+   398→    block.terminator = IRTerminator::Return(vec![IRValue::Register(2)]);
+   399→    func
+   400→}
+   401→
+   402→/// Program 4: Function call — a helper that returns 7, main calls it
+   403→/// and returns the result.
+   404→///
+   405→/// ```text
+   406→/// fn helper() -> i64 { return 7; }
+   407→/// fn main() -> i64 { return helper(); }
+   408→/// ```
+   409→fn make_function_call_program() -> Vec<IRFunction> {
+   410→    // Helper function: returns 7
+   411→    let mut helper = IRFunction::new("helper");
+   412→    helper.result_types.push(IRType::I64);
+   413→    helper.results.push(IRValue::Register(0));
+   414→    helper
+   415→        .vregs
+   416→        .insert(0, VirtualRegister::new(0, Some("ret".to_string())));
+   417→    helper.current_block().terminator = IRTerminator::Return(vec![IRValue::Immediate(7)]);
+   418→
+   419→    // Main function: calls helper and returns the result
+   420→    let mut main_fn = IRFunction::new("main");
+   421→    main_fn.result_types.push(IRType::I64);
+   422→    main_fn.results.push(IRValue::Register(0));
+   423→    main_fn
+   424→        .vregs
+   425→        .insert(0, VirtualRegister::new(0, Some("result".to_string())));
+   426→
+   427→    main_fn.current_block().push(IRInstr::Call {
+   428→        dst: Some(IRValue::Register(0)),
+   429→        func: "helper".to_string(),
+   430→        args: vec![],
+   431→    });
+   432→    main_fn.current_block().terminator = IRTerminator::Return(vec![IRValue::Register(0)]);
+   433→
+   434→    vec![helper, main_fn]
+   435→}
+   436→
+   437→// ===========================================================================
+   438→// Tests
+   439→// ===========================================================================
+   440→
+   441→/// Test 1: Simple program — `fn main() -> i64 { return 42; }`
+   442→///
+   443→/// Validates that all 8 backends can compile a trivial return-constant
+   444→/// function and produce structurally valid output.
+   445→#[test]
+   446→fn test_cross_backend_simple_return() {
+   447→    let func = make_simple_function();
+   448→
+   449→    for &kind in ALL_BACKENDS {
+   450→        let name = backend_name(kind);
+   451→        let backend = create_backend(kind).expect("backend creation should succeed");
+   452→
+   453→        // --- allocate_registers + encode_function ---
+   454→        let allocated = backend
+   455→            .allocate_registers(&func)
+   456→            .unwrap_or_else(|e| panic!("{}: allocate_registers failed: {}", name, e));
+   457→
+   458→        // The allocated function should have at least one block
+   459→        assert!(
+   460→            !allocated.blocks.is_empty(),
+   461→            "{}: allocated function should have at least one block",
+   462→            name
+   463→        );
+   464→
+   465→        // The block should contain at least one instruction
+   466→        let total_instrs: usize = allocated
+   467→            .blocks
+   468→            .iter()
+   469→            .map(|b| b.instructions.len())
+   470→            .sum();
+   471→        assert!(
+   472→            total_instrs > 0,
+   473→            "{}: allocated function should have instructions",
+   474→            name
+   475→        );
+   476→
+   477→        // Encode the function
+   478→        let code = backend
+   479→            .encode_function(&allocated)
+   480→            .unwrap_or_else(|e| panic!("{}: encode_function failed: {}", name, e));
+   481→
+   482→        // Even a trivial function needs at least 4 bytes of machine code
+   483→        assert!(
+   484→            code.len() >= 4,
+   485→            "{}: encoded function too small ({} bytes)",
+   486→            name,
+   487→            code.len()
+   488→        );
+   489→
+   490→        // --- encode_program (full binary) ---
+   491→        let program_bytes = compile_program(&*backend, &[func.clone()], "simple");
+   492→        validate_binary(&program_bytes, kind, 16);
+   493→    }
+   494→}
+   495→
+   496→/// Test 2: Arithmetic program — `(10 + 20) * 3 - 5 = 85`
+   497→///
+   498→/// Validates that all 8 backends can compile a sequence of arithmetic
+   499→/// operations and produce structurally valid output.
+   500→#[test]
+   501→fn test_cross_backend_arithmetic() {
+   502→    let func = make_arithmetic_function();
+   503→
+   504→    for &kind in ALL_BACKENDS {
+   505→        let name = backend_name(kind);
+   506→        let backend = create_backend(kind).expect("backend creation should succeed");
+   507→
+   508→        let allocated = backend
+   509→            .allocate_registers(&func)
+   510→            .unwrap_or_else(|e| panic!("{}: allocate_registers failed: {}", name, e));
+   511→
+   512→        // Arithmetic function should have more instructions than the simple one
+   513→        let total_instrs: usize = allocated
+   514→            .blocks
+   515→            .iter()
+   516→            .map(|b| b.instructions.len())
+   517→            .sum();
+   518→        assert!(
+   519→            total_instrs >= 3,
+   520→            "{}: arithmetic program should have at least 3 instructions (got {})",
+   521→            name,
+   522→            total_instrs
+   523→        );
+   524→
+   525→        let code = backend
+   526→            .encode_function(&allocated)
+   527→            .unwrap_or_else(|e| panic!("{}: encode_function failed: {}", name, e));
+   528→
+   529→        // Should be larger than the simple function
+   530→        assert!(
+   531→            code.len() >= 4,
+   532→            "{}: encoded arithmetic function too small ({} bytes)",
+   533→            name,
+   534→            code.len()
+   535→        );
+   536→
+   537→        // Full program binary
+   538→        let program_bytes = compile_program(&*backend, &[func.clone()], "arithmetic");
+   539→        validate_binary(&program_bytes, kind, 16);
+   540→    }
+   541→}
+   542→
+   543→/// Test 3: Memory program — alloc, store, load, mask, return
+   544→///
+   545→/// Validates that all 8 backends can compile memory operations
+   546→/// (stack allocation, store, load) and produce structurally valid output.
+   547→#[test]
+   548→fn test_cross_backend_memory() {
+   549→    let func = make_memory_function();
+   550→
+   551→    for &kind in ALL_BACKENDS {
+   552→        let name = backend_name(kind);
+   553→        let backend = create_backend(kind).expect("backend creation should succeed");
+   554→
+   555→        let allocated = backend
+   556→            .allocate_registers(&func)
+   557→            .unwrap_or_else(|e| panic!("{}: allocate_registers failed: {}", name, e));
+   558→
+   559→        // Memory function should have alloc + store + load + and instructions
+   560→        let total_instrs: usize = allocated
+   561→            .blocks
+   562→            .iter()
+   563→            .map(|b| b.instructions.len())
+   564→            .sum();
+   565→        assert!(
+   566→            total_instrs >= 4,
+   567→            "{}: memory program should have at least 4 instructions (got {})",
+   568→            name,
+   569→            total_instrs
+   570→        );
+   571→
+   572→        // The function should need a stack frame (for the Alloc)
+   573→        // Wasm32 is a stack machine — it does not use frame_size.
+   574→        if kind != BackendKind::Wasm32 {
+   575→            assert!(
+   576→                allocated.frame_size > 0,
+   577→                "{}: memory program should have a non-zero frame size",
+   578→                name
+   579→            );
+   580→        }
+   581→
+   582→        let code = backend
+   583→            .encode_function(&allocated)
+   584→            .unwrap_or_else(|e| panic!("{}: encode_function failed: {}", name, e));
+   585→
+   586→        assert!(
+   587→            code.len() >= 4,
+   588→            "{}: encoded memory function too small ({} bytes)",
+   589→            name,
+   590→            code.len()
+   591→        );
+   592→
+   593→        // Full program binary
+   594→        let program_bytes = compile_program(&*backend, &[func.clone()], "memory");
+   595→        validate_binary(&program_bytes, kind, 16);
+   596→    }
+   597→}
+   598→
+   599→/// Test 4: Function call — helper returns 7, main returns helper()
+   600→///
+   601→/// Validates that all 8 backends can compile a multi-function program
+   602→/// with an inter-function call and produce structurally valid output.
+   603→#[test]
+   604→fn test_cross_backend_function_call() {
+   605→    let functions = make_function_call_program();
+   606→
+   607→    for &kind in ALL_BACKENDS {
+   608→        let name = backend_name(kind);
+   609→        let backend = create_backend(kind).expect("backend creation should succeed");
+   610→
+   611→        // Allocate registers for each function independently
+   612→        let mut allocated_fns = Vec::new();
+   613→        for func in &functions {
+   614→            let allocated = backend
+   615→                .allocate_registers(func)
+   616→                .unwrap_or_else(|e| {
+   617→                    panic!(
+   618→                        "{}: allocate_registers failed for '{}': {}",
+   619→                        name,
+   620→                        func.name,
+   621→                        e
+   622→                    )
+   623→                });
+   624→            allocated_fns.push(allocated);
+   625→        }
+   626→
+   627→        // We should have 2 allocated functions
+   628→        assert_eq!(
+   629→            allocated_fns.len(),
+   630→            2,
+   631→            "{}: should have 2 allocated functions",
+   632→            name
+   633→        );
+   634→
+   635→        // Encode each function individually
+   636→        for alloc_fn in &allocated_fns {
+   637→            let code = backend
+   638→                .encode_function(alloc_fn)
+   639→                .unwrap_or_else(|e| panic!("{}: encode_function failed: {}", name, e));
+   640→            assert!(
+   641→                code.len() >= 4,
+   642→                "{}: encoded function '{}' too small ({} bytes)",
+   643→                name,
+   644→                alloc_fn.name,
+   645→                code.len()
+   646→            );
+   647→        }
+   648→
+   649→        // Full program binary (links the two functions together)
+   650→        let program_bytes = compile_program(&*backend, &functions, "func_call");
+   651→        validate_binary(&program_bytes, kind, 16);
+   652→
+   653→        // The main function should have a relocation to the helper
+   654→        let main_alloc = &allocated_fns[1]; // second function is "main"
+   655→        let has_helper_reloc = main_alloc
+   656→            .relocations
+   657→            .iter()
+   658→            .any(|r| r.symbol == "helper");
+   659→        assert!(
+   660→            has_helper_reloc,
+   661→            "{}: main function should have a relocation to 'helper'",
+   662→            name
+   663→        );
+   664→    }
+   665→}
+   666→
+   667→/// Test 5: Cross-backend output format consistency
+   668→///
+   669→/// Verifies that each backend reports the correct output format and that
+   670→/// the `encode_program` output matches the declared format.
+   671→#[test]
+   672→fn test_cross_backend_output_format_consistency() {
+   673→    let func = make_simple_function();
+   674→
+   675→    for &kind in ALL_BACKENDS {
+   676→        let name = backend_name(kind);
+   677→        let backend = create_backend(kind).expect("backend creation should succeed");
+   678→
+   679→        // TargetInfo consistency
+   680→        let info = backend.target_info();
+   681→        let expected_fmt = expected_output_format(kind);
+   682→        assert_eq!(
+   683→            info.output_format(),
+   684→            expected_fmt,
+   685→            "{}: output_format mismatch",
+   686→            name
+   687→        );
+   688→
+   689→        // ISA name should match
+   690→        assert_eq!(
+   691→            info.isa_name(),
+   692→            name,
+   693→            "{}: isa_name mismatch",
+   694→            name
+   695→        );
+   696→
+   697→        // Pointer width consistency
+   698→        match expected_fmt {
+   699→            OutputFormat::Elf32 | OutputFormat::WasmBinary => {
+   700→                assert_eq!(
+   701→                    info.pointer_width(),
+   702→                    4,
+   703→                    "{}: 32-bit target should have pointer_width 4",
+   704→                    name
+   705→                );
+   706→            }
+   707→            OutputFormat::Elf64 => {
+   708→                assert_eq!(
+   709→                    info.pointer_width(),
+   710→                    8,
+   711→                    "{}: 64-bit target should have pointer_width 8",
+   712→                    name
+   713→                );
+   714→            }
+   715→            OutputFormat::RawBinary => {}
+   716→        }
+   717→
+   718→        // ELF machine type consistency (for ELF targets)
+   719→        if expected_fmt != OutputFormat::WasmBinary {
+   720→            assert_eq!(
+   721→                info.elf_machine_type(),
+   722→                elf_machine(kind),
+   723→                "{}: elf_machine_type mismatch",
+   724→                name
+   725→            );
+   726→        }
+   727→
+   728→        // Compile and check the binary matches the expected format
+   729→        let program_bytes = compile_program(&*backend, &[func.clone()], "format_check");
+   730→
+   731→        match expected_fmt {
+   732→            OutputFormat::Elf32 | OutputFormat::Elf64 => {
+   733→                // Must start with ELF magic
+   734→                assert!(
+   735→                    program_bytes.len() >= 4,
+   736→                    "{}: ELF output too short",
+   737→                    name
+   738→                );
+   739→                assert_eq!(
+   740→                    &program_bytes[0..4],
+   741→                    &[0x7f, b'E', b'L', b'F'],
+   742→                    "{}: ELF output must start with ELF magic",
+   743→                    name
+   744→                );
+   745→            }
+   746→            OutputFormat::WasmBinary => {
+   747→                assert!(
+   748→                    program_bytes.len() >= 8,
+   749→                    "{}: Wasm output too short",
+   750→                    name
+   751→                );
+   752→                assert_eq!(
+   753→                    &program_bytes[0..4],
+   754→                    &[0x00, 0x61, 0x73, 0x6D],
+   755→                    "{}: Wasm output must start with \\0asm magic",
+   756→                    name
+   757→                );
+   758→            }
+   759→            OutputFormat::RawBinary => {}
+   760→        }
+   761→    }
+   762→}
+   763→
+   764→/// Test 6: Cross-backend code size sanity
+   765→///
+   766→/// Compiles all 4 programs on all 8 backends and verifies that the
+   767→/// code sizes are within sane bounds relative to each other.
+   768→/// While the absolute sizes differ per ISA, they should all be > 0 and
+   769→/// not absurdly large for these tiny programs.
+   770→#[test]
+   771→fn test_cross_backend_code_size_sanity() {
+   772→    let simple = make_simple_function();
+   773→    let arithmetic = make_arithmetic_function();
+   774→    let memory = make_memory_function();
+   775→    let func_call = make_function_call_program();
+   776→
+   777→    let programs: Vec<(&str, Vec<IRFunction>)> = vec![
+   778→        ("simple", vec![simple]),
+   779→        ("arithmetic", vec![arithmetic]),
+   780→        ("memory", vec![memory]),
+   781→        ("func_call", func_call),
+   782→    ];
+   783→
+   784→    // Upper bound: no tiny program should produce > 1MB of code
+   785→    const MAX_REASONABLE_SIZE: usize = 1_048_576;
+   786→
+   787→    for &kind in ALL_BACKENDS {
+   788→        let name = backend_name(kind);
+   789→        let backend = create_backend(kind).expect("backend creation should succeed");
+   790→
+   791→        for (label, functions) in &programs {
+   792→            let program_bytes = compile_program(&*backend, functions, label);
+   793→
+   794→            assert!(
+   795→                !program_bytes.is_empty(),
+   796→                "{}: {} program should produce non-empty output",
+   797→                name,
+   798→                label
+   799→            );
+   800→
+   801→            assert!(
+   802→                program_bytes.len() <= MAX_REASONABLE_SIZE,
+   803→                "{}: {} program produced suspiciously large output ({} bytes)",
+   804→                name,
+   805→                label,
+   806→                program_bytes.len()
+   807→            );
+   808→        }
+   809→    }
+   810→}
+   811→
+   812→/// Test 7: Backend name consistency
+   813→///
+   814→/// Verifies that `backend.name()` matches the expected name string for
+   815→/// each backend kind, and that `BackendKind` discriminants are unique.
+   816→#[test]
+   817→fn test_cross_backend_name_consistency() {
+   818→    let mut seen_names: HashMap<&str, BackendKind> = HashMap::new();
+   819→
+   820→    for &kind in ALL_BACKENDS {
+   821→        let backend = create_backend(kind).expect("backend creation should succeed");
+   822→        let name = backend.name();
+   823→        let expected = backend_name(kind);
+   824→
+   825→        assert_eq!(
+   826→            name, expected,
+   827→            "BackendKind::{:?}.name() should be '{}', got '{}'",
+   828→            kind, expected, name
+   829→        );
+   830→
+   831→        if let Some(prev) = seen_names.get(name) {
+   832→            panic!(
+   833→                "Duplicate backend name '{}' for {:?} and {:?}",
+   834→                name, prev, kind
+   835→            );
+   836→        }
+   837→        seen_names.insert(name, kind);
+   838→    }
+   839→
+   840→    assert_eq!(
+   841→        seen_names.len(),
+   842→        ALL_BACKENDS.len(),
+   843→        "All backends should have unique names"
+   844→    );
+   845→}
+   846→
+   847→/// Test 8: Wasm32-specific module structure validation
+   848→///
+   849→/// Compiles each program with the Wasm32 backend and performs detailed
+   850→/// validation of the Wasm module structure: sections present, order,
+   851→/// type section contents, and memory section.
+   852→#[test]
+   853→fn test_cross_backend_wasm32_module_structure() {
+   854→    let simple = make_simple_function();
+   855→    let arithmetic = make_arithmetic_function();
+   856→    let memory = make_memory_function();
+   857→    let func_call = make_function_call_program();
+   858→
+   859→    let programs: Vec<(&str, Vec<IRFunction>)> = vec![
+   860→        ("simple", vec![simple]),
+   861→        ("arithmetic", vec![arithmetic]),
+   862→        ("memory", vec![memory]),
+   863→        ("func_call", func_call),
+   864→    ];
+   865→
+   866→    let backend = create_backend(BackendKind::Wasm32).expect("Wasm32 backend creation");
+   867→
+   868→    for (label, functions) in &programs {
+   869→        let bytes = compile_program(&*backend, functions, label);
+   870→
+   871→        // Basic Wasm structure
+   872→        assert!(
+   873→            bytes.len() >= 8,
+   874→            "wasm32/{}: module too short ({} bytes)",
+   875→            label,
+   876→            bytes.len()
+   877→        );
+   878→        assert_eq!(
+   879→            &bytes[0..4],
+   880→            &[0x00, 0x61, 0x73, 0x6D],
+   881→            "wasm32/{}: magic bytes incorrect",
+   882→            label
+   883→        );
+   884→        assert_eq!(
+   885→            &bytes[4..8],
+   886→            &[0x01, 0x00, 0x00, 0x00],
+   887→            "wasm32/{}: version incorrect",
+   888→            label
+   889→        );
+   890→
+   891→        // Parse sections and verify presence of required sections
+   892→        let mut found_type_section = false;
+   893→        let mut found_function_section = false;
+   894→        let mut found_memory_section = false;
+   895→        let mut found_code_section = false;
+   896→
+   897→        let mut offset = 8usize;
+   898→        while offset < bytes.len() {
+   899→            let section_id = bytes[offset];
+   900→            offset += 1;
+   901→
+   902→            // Decode LEB128 size
+   903→            let mut size: usize = 0;
+   904→            let mut shift: usize = 0;
+   905→            loop {
+   906→                assert!(offset < bytes.len(), "wasm32/{}: truncated section", label);
+   907→                let byte = bytes[offset];
+   908→                offset += 1;
+   909→                size |= ((byte & 0x7F) as usize) << shift;
+   910→                shift += 7;
+   911→                if byte & 0x80 == 0 {
+   912→                    break;
+   913→                }
+   914→            }
+   915→
+   916→            match section_id {
+   917→                1 => found_type_section = true,
+   918→                3 => found_function_section = true,
+   919→                5 => found_memory_section = true,
+   920→                10 => found_code_section = true,
+   921→                _ => {}
+   922→            }
+   923→
+   924→            offset += size;
+   925→        }
+   926→
+   927→        assert!(
+   928→            found_type_section,
+   929→            "wasm32/{}: missing type section (ID 1)",
+   930→            label
+   931→        );
+   932→        assert!(
+   933→            found_function_section,
+   934→            "wasm32/{}: missing function section (ID 3)",
+   935→            label
+   936→        );
+   937→        assert!(
+   938→            found_memory_section,
+   939→            "wasm32/{}: missing memory section (ID 5)",
+   940→            label
+   941→        );
+   942→        assert!(
+   943→            found_code_section,
+   944→            "wasm32/{}: missing code section (ID 10)",
+   945→            label
+   946→        );
+   947→    }
+   948→}
+   949→
+   950→/// Test 9: ELF-specific header validation for all ELF backends
+   951→///
+   952→/// Compiles each program with every ELF-producing backend and verifies
+   953→/// the ELF header fields (magic, class, endianness, machine type, version).
+   954→#[test]
+   955→fn test_cross_backend_elf_header_validation() {
+   956→    let simple = make_simple_function();
+   957→    let arithmetic = make_arithmetic_function();
+   958→    let memory = make_memory_function();
+   959→    let func_call = make_function_call_program();
+   960→
+   961→    let programs: Vec<(&str, Vec<IRFunction>)> = vec![
+   962→        ("simple", vec![simple]),
+   963→        ("arithmetic", vec![arithmetic]),
+   964→        ("memory", vec![memory]),
+   965→        ("func_call", func_call),
+   966→    ];
+   967→
+   968→    for &kind in ALL_BACKENDS {
+   969→        let fmt = expected_output_format(kind);
+   970→        if fmt != OutputFormat::Elf32 && fmt != OutputFormat::Elf64 {
+   971→            continue; // Skip non-ELF backends
+   972→        }
+   973→
+   974→        let name = backend_name(kind);
+   975→        let backend = create_backend(kind).expect("backend creation should succeed");
+   976→
+   977→        for (label, functions) in &programs {
+   978→            let bytes = compile_program(&*backend, functions, label);
+   979→
+   980→            // Minimum ELF header size
+   981→            let min_hdr = if fmt == OutputFormat::Elf32 { 52 } else { 64 };
+   982→            assert!(
+   983→                bytes.len() >= min_hdr,
+   984→                "{}/{}: ELF binary too short ({} bytes)",
+   985→                name,
+   986→                label,
+   987→                bytes.len()
+   988→            );
+   989→
+   990→            // Magic
+   991→            assert_eq!(
+   992→                &bytes[0..4],
+   993→                &[0x7f, b'E', b'L', b'F'],
+   994→                "{}/{}: bad ELF magic",
+   995→                name,
+   996→                label
+   997→            );
+   998→
+   999→            // Class
+  1000→            let expected_class = if fmt == OutputFormat::Elf32 { 1u8 } else { 2u8 };
+  1001→            assert_eq!(
+  1002→                bytes[4], expected_class,
+  1003→                "{}/{}: ELF class mismatch",
+  1004→                name,
+  1005→                label
+  1006→            );
+  1007→
+  1008→            // Endianness
+  1009→            let backend_obj = create_backend(kind).unwrap();
+  1010→            let endian = backend_obj.target_info().endianness();
+  1011→            let expected_data = match endian {
+  1012→                vuma_codegen::backend::Endianness::Little => 1u8, // ELFDATA2LSB
+  1013→                vuma_codegen::backend::Endianness::Big => 2u8,    // ELFDATA2MSB
+  1014→                vuma_codegen::backend::Endianness::Bi => 2u8,     // Bi-endian defaults big
+  1015→            };
+  1016→            assert_eq!(
+  1017→                bytes[5], expected_data,
+  1018→                "{}/{}: ELF data encoding mismatch",
+  1019→                name,
+  1020→                label
+  1021→            );
+  1022→
+  1023→            // Version
+  1024→            assert_eq!(
+  1025→                bytes[6], 1,
+  1026→                "{}/{}: ELF version should be EV_CURRENT",
+  1027→                name,
+  1028→                label
+  1029→            );
+  1030→
+  1031→            // Machine type
+  1032→            let e_machine = u16::from_le_bytes([bytes[18], bytes[19]]);
+  1033→            // For big-endian ELF files the header is still encoded in the
+  1034→            // target's endianness, so we may need to read it as BE.
+  1035→            let e_machine_val = if expected_data == 2u8 {
+  1036→                u16::from_be_bytes([bytes[18], bytes[19]])
+  1037→            } else {
+  1038→                e_machine
+  1039→            };
+  1040→            assert_eq!(
+  1041→                e_machine_val,
+  1042→                elf_machine(kind),
+  1043→                "{}/{}: machine type mismatch (expected {}, got {} / {} LE)",
+  1044→                name,
+  1045→                label,
+  1046→                elf_machine(kind),
+  1047→                e_machine,
+  1048→                e_machine_val
+  1049→            );
+  1050→        }
+  1051→    }
+  1052→}
+  1053→

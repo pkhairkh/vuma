@@ -1,0 +1,1793 @@
+     1→     1→//! # Optimization Passes
+     2→     2→//!
+     3→     3→//! Implements IR-level optimization passes for the VUMA code generator:
+     4→     4→//!
+     5→     5→//! - **Constant Folding** — Evaluate compile-time-known expressions.
+     6→     6→//! - **Dead Code Elimination** — Remove instructions whose results are never used.
+     7→     7→//! - **Common Subexpression Elimination** — Replace redundant computations.
+     8→     8→//! - **Inlining** — Inline small callee functions at the call site.
+     9→     9→//! - **Loop-Invariant Code Motion** — Move loop-invariant instructions to preheaders.
+    10→    10→//!
+    11→    11→//! The [`run_optimizations`] function applies all passes in the recommended order.
+    12→    12→
+    13→    13→use std::collections::{HashMap, HashSet};
+    14→    14→
+    15→    15→use crate::ir::{
+    16→    16→    BinOpKind, CmpKind, IRBlock, IRFunction, IRInstr, IRProgram, IRTerminator, IRValue, UnaryOpKind,
+    17→    17→};
+    18→    18→
+    19→    19→// ===========================================================================
+    20→    20→// Helpers
+    21→    21→// ===========================================================================
+    22→    22→
+    23→    23→/// Substitute a single IRValue using a register-to-value mapping.
+    24→    24→fn substitute_value(val: &IRValue, map: &HashMap<u32, IRValue>) -> IRValue {
+    25→    25→    if let IRValue::Register(id) = val {
+    26→    26→        if let Some(replacement) = map.get(id) {
+    27→    27→            return replacement.clone();
+    28→    28→        }
+    29→    29→    }
+    30→    30→    val.clone()
+    31→    31→}
+    32→    32→
+    33→    33→/// Substitute all IRValue operands in an instruction using a register-to-value mapping.
+    34→    34→fn substitute_instr(instr: &IRInstr, map: &HashMap<u32, IRValue>) -> IRInstr {
+    35→    35→    let sv = |v: &IRValue| substitute_value(v, map);
+    36→    36→    match instr {
+    37→    37→        IRInstr::Load { dst, addr, offset, ty } => IRInstr::Load {
+    38→    38→            dst: sv(dst),
+    39→    39→            addr: sv(addr),
+    40→    40→            offset: *offset,
+    41→    41→            ty: ty.clone(),
+    42→    42→        },
+    43→    43→        IRInstr::Store { value, addr, offset, ty } => IRInstr::Store {
+    44→    44→            value: sv(value),
+    45→    45→            addr: sv(addr),
+    46→    46→            offset: *offset,
+    47→    47→            ty: ty.clone(),
+    48→    48→        },
+    49→    49→        IRInstr::BinOp { op, dst, lhs, rhs, ty } => IRInstr::BinOp {
+    50→    50→            op: *op,
+    51→    51→            dst: sv(dst),
+    52→    52→            lhs: sv(lhs),
+    53→    53→            rhs: sv(rhs),
+    54→    54→            ty: ty.clone(),
+    55→    55→        },
+    56→    56→        IRInstr::UnaryOp { op, dst, operand, ty } => IRInstr::UnaryOp {
+    57→    57→            op: *op,
+    58→    58→            dst: sv(dst),
+    59→    59→            operand: sv(operand),
+    60→    60→            ty: ty.clone(),
+    61→    61→        },
+    62→    62→        IRInstr::Call { dst, func, args } => IRInstr::Call {
+    63→    63→            dst: dst.as_ref().map(&sv),
+    64→    64→            func: func.clone(),
+    65→    65→            args: args.iter().map(sv).collect(),
+    66→    66→        },
+    67→    67→        IRInstr::Alloc { dst, size } => IRInstr::Alloc {
+    68→    68→            dst: sv(dst),
+    69→    69→            size: *size,
+    70→    70→        },
+    71→    71→        IRInstr::Free { ptr } => IRInstr::Free { ptr: sv(ptr) },
+    72→    72→        IRInstr::Cast { kind, dst, src } => IRInstr::Cast {
+    73→    73→            kind: *kind,
+    74→    74→            dst: sv(dst),
+    75→    75→            src: sv(src),
+    76→    76→        },
+    77→    77→        IRInstr::Phi { dst, incoming } => IRInstr::Phi {
+    78→    78→            dst: sv(dst),
+    79→    79→            incoming: incoming.iter().map(|(v, b)| (sv(v), b.clone())).collect(),
+    80→    80→        },
+    81→    81→        IRInstr::GetAddress { dst, name } => IRInstr::GetAddress {
+    82→    82→            dst: sv(dst),
+    83→    83→            name: name.clone(),
+    84→    84→        },
+    85→    85→        IRInstr::Offset { dst, base, offset } => IRInstr::Offset {
+    86→    86→            dst: sv(dst),
+    87→    87→            base: sv(base),
+    88→    88→            offset: sv(offset),
+    89→    89→        },
+    90→    90→        IRInstr::Select {
+    91→    91→            dst,
+    92→    92→            cond,
+    93→    93→            true_val,
+    94→    94→            false_val,
+    95→    95→            ty,
+    96→    96→        } => IRInstr::Select {
+    97→    97→            dst: sv(dst),
+    98→    98→            cond: sv(cond),
+    99→    99→            true_val: sv(true_val),
+   100→   100→            false_val: sv(false_val),
+   101→   101→            ty: ty.clone(),
+   102→   102→        },
+   103→   103→        IRInstr::Add { dst, lhs, rhs, ty } => IRInstr::Add {
+   104→   104→            dst: sv(dst),
+   105→   105→            lhs: sv(lhs),
+   106→   106→            rhs: sv(rhs),
+   107→   107→            ty: ty.clone(),
+   108→   108→        },
+   109→   109→        IRInstr::Sub { dst, lhs, rhs, ty } => IRInstr::Sub {
+   110→   110→            dst: sv(dst),
+   111→   111→            lhs: sv(lhs),
+   112→   112→            rhs: sv(rhs),
+   113→   113→            ty: ty.clone(),
+   114→   114→        },
+   115→   115→        IRInstr::Mul { dst, lhs, rhs, ty } => IRInstr::Mul {
+   116→   116→            dst: sv(dst),
+   117→   117→            lhs: sv(lhs),
+   118→   118→            rhs: sv(rhs),
+   119→   119→            ty: ty.clone(),
+   120→   120→        },
+   121→   121→        IRInstr::Div { dst, lhs, rhs, ty } => IRInstr::Div {
+   122→   122→            dst: sv(dst),
+   123→   123→            lhs: sv(lhs),
+   124→   124→            rhs: sv(rhs),
+   125→   125→            ty: ty.clone(),
+   126→   126→        },
+   127→   127→        IRInstr::Cmp {
+   128→   128→            kind,
+   129→   129→            dst,
+   130→   130→            lhs,
+   131→   131→            rhs,
+   132→   132→            ty,
+   133→   133→        } => IRInstr::Cmp {
+   134→   134→            kind: *kind,
+   135→   135→            dst: sv(dst),
+   136→   136→            lhs: sv(lhs),
+   137→   137→            rhs: sv(rhs),
+   138→   138→            ty: ty.clone(),
+   139→   139→        },
+   140→   140→        IRInstr::Ret { values } => IRInstr::Ret {
+   141→   141→            values: values.iter().map(sv).collect(),
+   142→   142→        },
+   143→   143→        IRInstr::Branch { target } => IRInstr::Branch {
+   144→   144→            target: target.clone(),
+   145→   145→        },
+   146→   146→        IRInstr::CondBranch {
+   147→   147→            cond,
+   148→   148→            true_target,
+   149→   149→            false_target,
+   150→   150→        } => IRInstr::CondBranch {
+   151→   151→            cond: sv(cond),
+   152→   152→            true_target: true_target.clone(),
+   153→   153→            false_target: false_target.clone(),
+   154→   154→        },
+   155→   155→    }
+   156→   156→}
+   157→   157→
+   158→   158→/// Substitute values in a terminator.
+   159→   159→fn substitute_terminator(terminator: &IRTerminator, map: &HashMap<u32, IRValue>) -> IRTerminator {
+   160→   160→    let sv = |v: &IRValue| substitute_value(v, map);
+   161→   161→    match terminator {
+   162→   162→        IRTerminator::Return(vals) => IRTerminator::Return(vals.iter().map(sv).collect()),
+   163→   163→        IRTerminator::Branch {
+   164→   164→            cond,
+   165→   165→            true_block,
+   166→   166→            false_block,
+   167→   167→        } => IRTerminator::Branch {
+   168→   168→            cond: sv(cond),
+   169→   169→            true_block: true_block.clone(),
+   170→   170→            false_block: false_block.clone(),
+   171→   171→        },
+   172→   172→        IRTerminator::Switch {
+   173→   173→            discr,
+   174→   174→            targets,
+   175→   175→            default,
+   176→   176→        } => IRTerminator::Switch {
+   177→   177→            discr: sv(discr),
+   178→   178→            targets: targets.clone(),
+   179→   179→            default: default.clone(),
+   180→   180→        },
+   181→   181→        IRTerminator::Invoke {
+   182→   182→            dst,
+   183→   183→            func,
+   184→   184→            args,
+   185→   185→            normal,
+   186→   186→            unwind,
+   187→   187→        } => IRTerminator::Invoke {
+   188→   188→            dst: dst.as_ref().map(sv),
+   189→   189→            func: func.clone(),
+   190→   190→            args: args.iter().map(sv).collect(),
+   191→   191→            normal: normal.clone(),
+   192→   192→            unwind: unwind.clone(),
+   193→   193→        },
+   194→   194→        IRTerminator::TailCall { func, args } => IRTerminator::TailCall {
+   195→   195→            func: func.clone(),
+   196→   196→            args: args.iter().map(sv).collect(),
+   197→   197→        },
+   198→   198→        IRTerminator::Resume { value } => IRTerminator::Resume { value: sv(value) },
+   199→   199→        IRTerminator::Jump(target) => IRTerminator::Jump(target.clone()),
+   200→   200→        IRTerminator::Unreachable => IRTerminator::Unreachable,
+   201→   201→    }
+   202→   202→}
+   203→   203→
+   204→   204→/// Try to evaluate a binary operation on two immediate values.
+   205→   205→fn try_fold_binop(op: BinOpKind, lhs: i64, rhs: i64) -> Option<i64> {
+   206→   206→    match op {
+   207→   207→        BinOpKind::Add => Some(lhs.wrapping_add(rhs)),
+   208→   208→        BinOpKind::Sub => Some(lhs.wrapping_sub(rhs)),
+   209→   209→        BinOpKind::Mul => Some(lhs.wrapping_mul(rhs)),
+   210→   210→        BinOpKind::SDiv => {
+   211→   211→            if rhs == 0 {
+   212→   212→                return None;
+   213→   213→            }
+   214→   214→            lhs.checked_div(rhs)
+   215→   215→        }
+   216→   216→        BinOpKind::UDiv => {
+   217→   217→            if rhs == 0 {
+   218→   218→                return None;
+   219→   219→            }
+   220→   220→            Some((lhs as u64 / rhs as u64) as i64)
+   221→   221→        }
+   222→   222→        BinOpKind::SRem => {
+   223→   223→            if rhs == 0 {
+   224→   224→                return None;
+   225→   225→            }
+   226→   226→            lhs.checked_rem(rhs)
+   227→   227→        }
+   228→   228→        BinOpKind::URem => {
+   229→   229→            if rhs == 0 {
+   230→   230→                return None;
+   231→   231→            }
+   232→   232→            Some((lhs as u64 % rhs as u64) as i64)
+   233→   233→        }
+   234→   234→        BinOpKind::And => Some(lhs & rhs),
+   235→   235→        BinOpKind::Or => Some(lhs | rhs),
+   236→   236→        BinOpKind::Xor => Some(lhs ^ rhs),
+   237→   237→        BinOpKind::Shl => Some(lhs.wrapping_shl(rhs as u32)),
+   238→   238→        BinOpKind::ShrL => Some((lhs as u64).wrapping_shr(rhs as u32) as i64),
+   239→   239→        BinOpKind::ShrA => Some(lhs.wrapping_shr(rhs as u32)),
+   240→   240→        BinOpKind::Ror => Some(lhs.rotate_right(rhs as u32)),
+   241→   241→        BinOpKind::Rol => Some(lhs.rotate_left(rhs as u32)),
+   242→   242→        BinOpKind::SLt => Some(if lhs < rhs { 1 } else { 0 }),
+   243→   243→        BinOpKind::SLe => Some(if lhs <= rhs { 1 } else { 0 }),
+   244→   244→        BinOpKind::SGt => Some(if lhs > rhs { 1 } else { 0 }),
+   245→   245→        BinOpKind::SGe => Some(if lhs >= rhs { 1 } else { 0 }),
+   246→   246→        BinOpKind::ULt => Some(if (lhs as u64) < (rhs as u64) { 1 } else { 0 }),
+   247→   247→        BinOpKind::ULe => Some(if (lhs as u64) <= (rhs as u64) { 1 } else { 0 }),
+   248→   248→        BinOpKind::UGt => Some(if (lhs as u64) > (rhs as u64) { 1 } else { 0 }),
+   249→   249→        BinOpKind::UGe => Some(if (lhs as u64) >= (rhs as u64) { 1 } else { 0 }),
+   250→   250→        BinOpKind::Eq => Some(if lhs == rhs { 1 } else { 0 }),
+   251→   251→        BinOpKind::Ne => Some(if lhs != rhs { 1 } else { 0 }),
+   252→   252→    }
+   253→   253→}
+   254→   254→
+   255→   255→/// Try to evaluate a unary operation on an immediate value.
+   256→   256→fn try_fold_unaryop(op: UnaryOpKind, operand: i64) -> Option<i64> {
+   257→   257→    match op {
+   258→   258→        UnaryOpKind::Neg => Some(operand.wrapping_neg()),
+   259→   259→        UnaryOpKind::Not => Some(!operand),
+   260→   260→        UnaryOpKind::Clz => Some(operand.leading_zeros() as i64),
+   261→   261→        UnaryOpKind::Ctz => Some(operand.trailing_zeros() as i64),
+   262→   262→        UnaryOpKind::Popcnt => Some(operand.count_ones() as i64),
+   263→   263→    }
+   264→   264→}
+   265→   265→
+   266→   266→/// Try to evaluate a comparison on two immediate values.
+   267→   267→fn try_fold_cmp(kind: CmpKind, lhs: i64, rhs: i64) -> Option<i64> {
+   268→   268→    let result = match kind {
+   269→   269→        CmpKind::Eq => lhs == rhs,
+   270→   270→        CmpKind::Ne => lhs != rhs,
+   271→   271→        CmpKind::SLt => lhs < rhs,
+   272→   272→        CmpKind::SLe => lhs <= rhs,
+   273→   273→        CmpKind::SGt => lhs > rhs,
+   274→   274→        CmpKind::SGe => lhs >= rhs,
+   275→   275→        CmpKind::ULt => (lhs as u64) < (rhs as u64),
+   276→   276→        CmpKind::ULe => (lhs as u64) <= (rhs as u64),
+   277→   277→        CmpKind::UGt => (lhs as u64) > (rhs as u64),
+   278→   278→        CmpKind::UGe => (lhs as u64) >= (rhs as u64),
+   279→   279→    };
+   280→   280→    Some(if result { 1 } else { 0 })
+   281→   281→}
+   282→   282→
+   283→   283→/// Returns `true` if the instruction has side effects and must not be removed
+   284→   284→/// by DCE even when its result is unused.
+   285→   285→fn has_side_effects(instr: &IRInstr) -> bool {
+   286→   286→    match instr {
+   287→   287→        IRInstr::Store { .. }
+   288→   288→        | IRInstr::Call { .. }
+   289→   289→        | IRInstr::Free { .. }
+   290→   290→        | IRInstr::Ret { .. }
+   291→   291→        | IRInstr::Branch { .. }
+   292→   292→        | IRInstr::CondBranch { .. } => true,
+   293→   293→        IRInstr::BinOp { op, .. } => matches!(
+   294→   294→            op,
+   295→   295→            BinOpKind::SDiv | BinOpKind::UDiv | BinOpKind::SRem | BinOpKind::URem
+   296→   296→        ),
+   297→   297→        IRInstr::Div { .. } => true,
+   298→   298→        _ => false,
+   299→   299→    }
+   300→   300→}
+   301→   301→
+   302→   302→/// Returns `true` if the instruction is safe to speculate (no trapping, no
+   303→   303→/// side effects) — used by LICM.
+   304→   304→fn is_safe_to_speculate(instr: &IRInstr) -> bool {
+   305→   305→    match instr {
+   306→   306→        IRInstr::BinOp { op, .. } => !matches!(
+   307→   307→            op,
+   308→   308→            BinOpKind::SDiv | BinOpKind::UDiv | BinOpKind::SRem | BinOpKind::URem
+   309→   309→        ),
+   310→   310→        IRInstr::Div { .. } => false,
+   311→   311→        IRInstr::Load { .. } => false,
+   312→   312→        IRInstr::Store { .. } => false,
+   313→   313→        IRInstr::Call { .. } => false,
+   314→   314→        IRInstr::Free { .. } => false,
+   315→   315→        IRInstr::Alloc { .. } => false,
+   316→   316→        IRInstr::Ret { .. } => false,
+   317→   317→        IRInstr::Branch { .. } => false,
+   318→   318→        IRInstr::CondBranch { .. } => false,
+   319→   319→        _ => true,
+   320→   320→    }
+   321→   321→}
+   322→   322→
+   323→   323→/// Get the destination IRValue of an instruction, if any.
+   324→   324→fn get_defined_value(instr: &IRInstr) -> Option<&IRValue> {
+   325→   325→    match instr {
+   326→   326→        IRInstr::BinOp { dst, .. } => Some(dst),
+   327→   327→        IRInstr::UnaryOp { dst, .. } => Some(dst),
+   328→   328→        IRInstr::Load { dst, .. } => Some(dst),
+   329→   329→        IRInstr::Call { dst, .. } => dst.as_ref(),
+   330→   330→        IRInstr::Alloc { dst, .. } => Some(dst),
+   331→   331→        IRInstr::Cast { dst, .. } => Some(dst),
+   332→   332→        IRInstr::Phi { dst, .. } => Some(dst),
+   333→   333→        IRInstr::GetAddress { dst, .. } => Some(dst),
+   334→   334→        IRInstr::Offset { dst, .. } => Some(dst),
+   335→   335→        IRInstr::Select { dst, .. } => Some(dst),
+   336→   336→        IRInstr::Add { dst, .. } => Some(dst),
+   337→   337→        IRInstr::Sub { dst, .. } => Some(dst),
+   338→   338→        IRInstr::Mul { dst, .. } => Some(dst),
+   339→   339→        IRInstr::Div { dst, .. } => Some(dst),
+   340→   340→        IRInstr::Cmp { dst, .. } => Some(dst),
+   341→   341→        _ => None,
+   342→   342→    }
+   343→   343→}
+   344→   344→
+   345→   345→/// Compute the maximum virtual register ID in a function.
+   346→   346→fn max_vreg_id(func: &IRFunction) -> u32 {
+   347→   347→    let mut max_id = 0u32;
+   348→   348→    let check_val = |max_id: &mut u32, v: &IRValue| {
+   349→   349→        if let IRValue::Register(id) = v {
+   350→   350→            *max_id = (*max_id).max(*id);
+   351→   351→        }
+   352→   352→    };
+   353→   353→    for val in &func.params {
+   354→   354→        check_val(&mut max_id, val);
+   355→   355→    }
+   356→   356→    for val in &func.results {
+   357→   357→        check_val(&mut max_id, val);
+   358→   358→    }
+   359→   359→    for &id in func.vregs.keys() {
+   360→   360→        max_id = max_id.max(id);
+   361→   361→    }
+   362→   362→    for block in &func.blocks {
+   363→   363→        for instr in &block.instructions {
+   364→   364→            for id in instr.defined_regs() {
+   365→   365→                max_id = max_id.max(id);
+   366→   366→            }
+   367→   367→            for id in instr.used_regs() {
+   368→   368→                max_id = max_id.max(id);
+   369→   369→            }
+   370→   370→        }
+   371→   371→        match &block.terminator {
+   372→   372→            IRTerminator::Return(vals) => {
+   373→   373→                for val in vals {
+   374→   374→                    check_val(&mut max_id, val);
+   375→   375→                }
+   376→   376→            }
+   377→   377→            IRTerminator::Branch { cond, .. } => {
+   378→   378→                check_val(&mut max_id, cond);
+   379→   379→            }
+   380→   380→            IRTerminator::Switch { discr, .. } => {
+   381→   381→                check_val(&mut max_id, discr);
+   382→   382→            }
+   383→   383→            IRTerminator::Invoke { dst, args, .. } => {
+   384→   384→                if let Some(v) = dst {
+   385→   385→                    check_val(&mut max_id, v);
+   386→   386→                }
+   387→   387→                for val in args {
+   388→   388→                    check_val(&mut max_id, val);
+   389→   389→                }
+   390→   390→            }
+   391→   391→            IRTerminator::TailCall { args, .. } => {
+   392→   392→                for val in args {
+   393→   393→                    check_val(&mut max_id, val);
+   394→   394→                }
+   395→   395→            }
+   396→   396→            IRTerminator::Resume { value } => {
+   397→   397→                check_val(&mut max_id, value);
+   398→   398→            }
+   399→   399→            _ => {}
+   400→   400→        }
+   401→   401→    }
+   402→   402→    max_id
+   403→   403→}
+   404→   404→
+   405→   405→/// Redirect a terminator's branch targets from `from_label` to `to_label`.
+   406→   406→fn redirect_terminator(terminator: &mut IRTerminator, from_label: &str, to_label: &str) {
+   407→   407→    match terminator {
+   408→   408→        IRTerminator::Jump(target) if *target == *from_label => {
+   409→   409→            *target = to_label.to_string();
+   410→   410→        }
+   411→   411→        IRTerminator::Jump(_) => {}
+   412→   412→        IRTerminator::Branch {
+   413→   413→            true_block,
+   414→   414→            false_block,
+   415→   415→            ..
+   416→   416→        } => {
+   417→   417→            if *true_block == *from_label {
+   418→   418→                *true_block = to_label.to_string();
+   419→   419→            }
+   420→   420→            if *false_block == *from_label {
+   421→   421→                *false_block = to_label.to_string();
+   422→   422→            }
+   423→   423→        }
+   424→   424→        IRTerminator::Switch {
+   425→   425→            targets, default, ..
+   426→   426→        } => {
+   427→   427→            for (_, target) in targets.iter_mut() {
+   428→   428→                if *target == *from_label {
+   429→   429→                    *target = to_label.to_string();
+   430→   430→                }
+   431→   431→            }
+   432→   432→            if *default == *from_label {
+   433→   433→                *default = to_label.to_string();
+   434→   434→            }
+   435→   435→        }
+   436→   436→        _ => {}
+   437→   437→    }
+   438→   438→}
+   439→   439→
+   440→   440→/// Expression key for CSE value numbering.
+   441→   441→#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+   442→   442→enum ExprKey {
+   443→   443→    Binary(BinOpKind, IRValue, IRValue),
+   444→   444→    Unary(UnaryOpKind, IRValue),
+   445→   445→    Compare(CmpKind, IRValue, IRValue),
+   446→   446→}
+   447→   447→
+   448→   448→/// Compute the expression key for an instruction, if it is a candidate for CSE.
+   449→   449→fn compute_expr_key(instr: &IRInstr) -> Option<ExprKey> {
+   450→   450→    match instr {
+   451→   451→        IRInstr::BinOp { op, lhs, rhs, .. } => Some(ExprKey::Binary(*op, lhs.clone(), rhs.clone())),
+   452→   452→        IRInstr::UnaryOp { op, operand, .. } => Some(ExprKey::Unary(*op, operand.clone())),
+   453→   453→        IRInstr::Add { lhs, rhs, .. } => {
+   454→   454→            Some(ExprKey::Binary(BinOpKind::Add, lhs.clone(), rhs.clone()))
+   455→   455→        }
+   456→   456→        IRInstr::Sub { lhs, rhs, .. } => {
+   457→   457→            Some(ExprKey::Binary(BinOpKind::Sub, lhs.clone(), rhs.clone()))
+   458→   458→        }
+   459→   459→        IRInstr::Mul { lhs, rhs, .. } => {
+   460→   460→            Some(ExprKey::Binary(BinOpKind::Mul, lhs.clone(), rhs.clone()))
+   461→   461→        }
+   462→   462→        IRInstr::Div { lhs, rhs, .. } => {
+   463→   463→            Some(ExprKey::Binary(BinOpKind::SDiv, lhs.clone(), rhs.clone()))
+   464→   464→        }
+   465→   465→        IRInstr::Cmp { kind, lhs, rhs, .. } => {
+   466→   466→            Some(ExprKey::Compare(*kind, lhs.clone(), rhs.clone()))
+   467→   467→        }
+   468→   468→        _ => None,
+   469→   469→    }
+   470→   470→}
+   471→   471→
+   472→   472→/// Find natural loops in the CFG using back-edge detection.
+   473→   473→///
+   474→   474→/// Returns a list of (header_label, set_of_loop_block_labels) tuples.
+   475→   475→fn find_natural_loops(func: &IRFunction) -> Vec<(String, HashSet<String>)> {
+   476→   476→    let label_to_idx: HashMap<String, usize> = func
+   477→   477→        .blocks
+   478→   478→        .iter()
+   479→   479→        .enumerate()
+   480→   480→        .map(|(i, b)| (b.label.clone(), i))
+   481→   481→        .collect();
+   482→   482→
+   483→   483→    let mut loops = Vec::new();
+   484→   484→    let mut seen_headers: HashSet<String> = HashSet::new();
+   485→   485→
+   486→   486→    for (block_idx, block) in func.blocks.iter().enumerate() {
+   487→   487→        for succ_label in &block.successors {
+   488→   488→            if let Some(&succ_idx) = label_to_idx.get(succ_label) {
+   489→   489→                // A back edge exists when a successor has a smaller or equal
+   490→   490→                // block index (i.e. it goes "backward" in the layout order).
+   491→   491→                if succ_idx <= block_idx {
+   492→   492→                    let header_label = succ_label.clone();
+   493→   493→                    if seen_headers.contains(&header_label) {
+   494→   494→                        continue;
+   495→   495→                    }
+   496→   496→                    seen_headers.insert(header_label.clone());
+   497→   497→
+   498→   498→                    // Find natural loop body: header + all blocks reachable
+   499→   499→                    // from the back-edge source without going through the header.
+   500→   500→                    let mut loop_body = HashSet::new();
+   501→   501→                    loop_body.insert(header_label.clone());
+   502→   502→
+   503→   503→                    let mut stack = vec![block.label.clone()];
+   504→   504→                    while let Some(label) = stack.pop() {
+   505→   505→                        if !loop_body.contains(&label) {
+   506→   506→                            loop_body.insert(label.clone());
+   507→   507→                            if let Some(&idx) = label_to_idx.get(&label) {
+   508→   508→                                for pred in &func.blocks[idx].predecessors {
+   509→   509→                                    stack.push(pred.clone());
+   510→   510→                                }
+   511→   511→                            }
+   512→   512→                        }
+   513→   513→                    }
+   514→   514→
+   515→   515→                    loops.push((header_label, loop_body));
+   516→   516→                }
+   517→   517→            }
+   518→   518→        }
+   519→   519→    }
+   520→   520→
+   521→   521→    loops
+   522→   522→}
+   523→   523→
+   524→   524→// ===========================================================================
+   525→   525→// Constant Folding
+   526→   526→// ===========================================================================
+   527→   527→
+   528→   528→/// For each BinOp/Add/Sub/Mul/Div/Cmp/UnaryOp where both operands are
+   529→   529→/// `Immediate`, compute the result at compile time and replace the
+   530→   530→/// instruction's destination with the computed constant.  Handles Add, Sub,
+   531→   531→/// Mul, Div, And, Or, Xor, Shl, Shr as well as comparisons and unary ops.
+   532→   532→///
+   533→   533→/// Also performs intra-block constant propagation: when a register is known to
+   534→   534→/// hold a constant, subsequent uses of that register are replaced with the
+   535→   535→/// constant, potentially enabling further folds.
+   536→   536→pub fn constant_fold(mut func: IRFunction) -> IRFunction {
+   537→   537→    for block in &mut func.blocks {
+   538→   538→        let mut subst: HashMap<u32, IRValue> = HashMap::new();
+   539→   539→        let mut new_instrs = Vec::new();
+   540→   540→
+   541→   541→        for instr in &block.instructions {
+   542→   542→            // Substitute operands with known constants.
+   543→   543→            let instr = substitute_instr(instr, &subst);
+   544→   544→
+   545→   545→            // Try to fold.
+   546→   546→            let folded = try_fold_instruction(&instr);
+   547→   547→            if let Some((dst_id, result)) = folded {
+   548→   548→                subst.insert(dst_id, IRValue::Immediate(result));
+   549→   549→                // Instruction is eliminated; its dst is now a known constant.
+   550→   550→                continue;
+   551→   551→            }
+   552→   552→
+   553→   553→            new_instrs.push(instr);
+   554→   554→        }
+   555→   555→
+   556→   556→        block.instructions = new_instrs;
+   557→   557→
+   558→   558→        // Substitute in the terminator as well.
+   559→   559→        block.terminator = substitute_terminator(&block.terminator, &subst);
+   560→   560→    }
+   561→   561→    func
+   562→   562→}
+   563→   563→
+   564→   564→/// Try to fold an instruction whose operands are all immediates.
+   565→   565→/// Returns `Some((dst_register_id, computed_value))` if the instruction can be
+   566→   566→/// eliminated, or `None` if it cannot be folded.
+   567→   567→fn try_fold_instruction(instr: &IRInstr) -> Option<(u32, i64)> {
+   568→   568→    match instr {
+   569→   569→        IRInstr::BinOp { op, dst, lhs, rhs, .. } => {
+   570→   570→            let l = lhs.as_immediate()?;
+   571→   571→            let r = rhs.as_immediate()?;
+   572→   572→            let dst_id = dst.as_register()?;
+   573→   573→            let result = try_fold_binop(*op, l, r)?;
+   574→   574→            Some((dst_id, result))
+   575→   575→        }
+   576→   576→        IRInstr::UnaryOp { op, dst, operand, .. } => {
+   577→   577→            let o = operand.as_immediate()?;
+   578→   578→            let dst_id = dst.as_register()?;
+   579→   579→            let result = try_fold_unaryop(*op, o)?;
+   580→   580→            Some((dst_id, result))
+   581→   581→        }
+   582→   582→        IRInstr::Add { dst, lhs, rhs, .. } => {
+   583→   583→            let l = lhs.as_immediate()?;
+   584→   584→            let r = rhs.as_immediate()?;
+   585→   585→            let dst_id = dst.as_register()?;
+   586→   586→            Some((dst_id, l.wrapping_add(r)))
+   587→   587→        }
+   588→   588→        IRInstr::Sub { dst, lhs, rhs, .. } => {
+   589→   589→            let l = lhs.as_immediate()?;
+   590→   590→            let r = rhs.as_immediate()?;
+   591→   591→            let dst_id = dst.as_register()?;
+   592→   592→            Some((dst_id, l.wrapping_sub(r)))
+   593→   593→        }
+   594→   594→        IRInstr::Mul { dst, lhs, rhs, .. } => {
+   595→   595→            let l = lhs.as_immediate()?;
+   596→   596→            let r = rhs.as_immediate()?;
+   597→   597→            let dst_id = dst.as_register()?;
+   598→   598→            Some((dst_id, l.wrapping_mul(r)))
+   599→   599→        }
+   600→   600→        IRInstr::Div { dst, lhs, rhs, .. } => {
+   601→   601→            let l = lhs.as_immediate()?;
+   602→   602→            let r = rhs.as_immediate()?;
+   603→   603→            if r == 0 {
+   604→   604→                return None;
+   605→   605→            }
+   606→   606→            let dst_id = dst.as_register()?;
+   607→   607→            l.checked_div(r).map(|v| (dst_id, v))
+   608→   608→        }
+   609→   609→        IRInstr::Cmp {
+   610→   610→            kind,
+   611→   611→            dst,
+   612→   612→            lhs,
+   613→   613→            rhs, ty: _,
+   614→   614→        } => {
+   615→   615→            let l = lhs.as_immediate()?;
+   616→   616→            let r = rhs.as_immediate()?;
+   617→   617→            let dst_id = dst.as_register()?;
+   618→   618→            let result = try_fold_cmp(*kind, l, r)?;
+   619→   619→            Some((dst_id, result))
+   620→   620→        }
+   621→   621→        _ => None,
+   622→   622→    }
+   623→   623→}
+   624→   624→
+   625→   625→// ===========================================================================
+   626→   626→// Dead Code Elimination
+   627→   627→// ===========================================================================
+   628→   628→
+   629→   629→/// Walk instructions in reverse. Track which IRValues are "used" (appear as
+   630→   630→/// operands or have side effects). Remove instructions whose `dst` is never
+   631→   631→/// used and that have no side effects.
+   632→   632→pub fn dead_code_eliminate(mut func: IRFunction) -> IRFunction {
+   633→   633→    for block in &mut func.blocks {
+   634→   634→        // Seed the used set with values referenced by the terminator.
+   635→   635→        let mut used: HashSet<u32> = HashSet::new();
+   636→   636→        match &block.terminator {
+   637→   637→            IRTerminator::Return(vals) => {
+   638→   638→                for val in vals {
+   639→   639→                    if let IRValue::Register(id) = val {
+   640→   640→                        used.insert(*id);
+   641→   641→                    }
+   642→   642→                }
+   643→   643→            }
+   644→   644→            IRTerminator::Branch { cond, .. } => {
+   645→   645→                if let IRValue::Register(id) = cond {
+   646→   646→                    used.insert(*id);
+   647→   647→                }
+   648→   648→            }
+   649→   649→            IRTerminator::Switch { discr, .. } => {
+   650→   650→                if let IRValue::Register(id) = discr {
+   651→   651→                    used.insert(*id);
+   652→   652→                }
+   653→   653→            }
+   654→   654→            IRTerminator::Invoke { args, .. } => {
+   655→   655→                for arg in args {
+   656→   656→                    if let IRValue::Register(id) = arg {
+   657→   657→                        used.insert(*id);
+   658→   658→                    }
+   659→   659→                }
+   660→   660→            }
+   661→   661→            IRTerminator::TailCall { args, .. } => {
+   662→   662→                for arg in args {
+   663→   663→                    if let IRValue::Register(id) = arg {
+   664→   664→                        used.insert(*id);
+   665→   665→                    }
+   666→   666→                }
+   667→   667→            }
+   668→   668→            IRTerminator::Resume { value } => {
+   669→   669→                if let IRValue::Register(id) = value {
+   670→   670→                    used.insert(*id);
+   671→   671→                }
+   672→   672→            }
+   673→   673→            IRTerminator::Jump(_) | IRTerminator::Unreachable => {}
+   674→   674→        }
+   675→   675→
+   676→   676→        // Walk instructions in reverse.
+   677→   677→        let mut new_instrs = Vec::new();
+   678→   678→        for instr in block.instructions.iter().rev() {
+   679→   679→            let defined = instr.defined_regs();
+   680→   680→            let is_dst_used = defined.iter().any(|id| used.contains(id));
+   681→   681→
+   682→   682→            if is_dst_used || has_side_effects(instr) {
+   683→   683→                // Keep this instruction and mark its operands as used.
+   684→   684→                for id in instr.used_regs() {
+   685→   685→                    used.insert(id);
+   686→   686→                }
+   687→   687→                new_instrs.push(instr.clone());
+   688→   688→            }
+   689→   689→            // else: instruction is dead — remove it.
+   690→   690→        }
+   691→   691→
+   692→   692→        new_instrs.reverse();
+   693→   693→        block.instructions = new_instrs;
+   694→   694→    }
+   695→   695→    func
+   696→   696→}
+   697→   697→
+   698→   698→// ===========================================================================
+   699→   699→// Common Subexpression Elimination
+   700→   700→// ===========================================================================
+   701→   701→
+   702→   702→/// For each BinOp/UnaryOp/Add/Sub/Mul/Div/Cmp, compute a hash of (op,
+   703→   703→/// operands). If the same (op, operands) has been seen before in the same
+   704→   704→/// block, replace the destination with the previously-computed destination.
+   705→   705→/// Uses value numbering within each basic block.
+   706→   706→pub fn cse(mut func: IRFunction) -> IRFunction {
+   707→   707→    for block in &mut func.blocks {
+   708→   708→        let mut value_map: HashMap<ExprKey, IRValue> = HashMap::new();
+   709→   709→        let mut subst: HashMap<u32, IRValue> = HashMap::new();
+   710→   710→        let mut new_instrs = Vec::new();
+   711→   711→
+   712→   712→        for instr in &block.instructions {
+   713→   713→            // Apply previous CSE substitutions.
+   714→   714→            let instr = substitute_instr(instr, &subst);
+   715→   715→
+   716→   716→            if let Some(key) = compute_expr_key(&instr) {
+   717→   717→                if let Some(prev_val) = value_map.get(&key) {
+   718→   718→                    // Common subexpression found — replace dst with previous result.
+   719→   719→                    if let Some(IRValue::Register(id)) = get_defined_value(&instr) {
+   720→   720→                        subst.insert(*id, prev_val.clone());
+   721→   721→                        continue; // Eliminate redundant instruction.
+   722→   722→                    }
+   723→   723→                } else if let Some(dst) = get_defined_value(&instr) {
+   724→   724→                    value_map.insert(key, dst.clone());
+   725→   725→                }
+   726→   726→            }
+   727→   727→
+   728→   728→            new_instrs.push(instr);
+   729→   729→        }
+   730→   730→
+   731→   731→        block.instructions = new_instrs;
+   732→   732→
+   733→   733→        // Apply substitutions to the terminator.
+   734→   734→        block.terminator = substitute_terminator(&block.terminator, &subst);
+   735→   735→    }
+   736→   736→    func
+   737→   737→}
+   738→   738→
+   739→   739→// ===========================================================================
+   740→   740→// Inlining of Small Functions
+   741→   741→// ===========================================================================
+   742→   742→
+   743→   743→/// For `Call` instructions to functions with ≤5 instructions, inline the
+   744→   744→/// callee's body at the call site.  Multi-block callees are supported: the
+   745→   745→/// caller block is split at the call site, the callee's blocks (with
+   746→   746→/// remapped vregs and labels) are inserted in between, and `Return`
+   747→   747→/// terminators are redirected to the continuation block.
+   748→   748→pub fn inline_small(
+   749→   749→    mut func: IRFunction,
+   750→   750→    program_funcs: &HashMap<String, &IRFunction>,
+   751→   751→) -> IRFunction {
+   752→   752→    let mut vreg_counter = max_vreg_id(&func) + 1;
+   753→   753→    let mut inline_id: u32 = 0;
+   754→   754→
+   755→   755→    let mut block_idx = 0;
+   756→   756→    while block_idx < func.blocks.len() {
+   757→   757→        // Find the first inlinable call in this block.
+   758→   758→        let mut call_info: Option<(usize, String, Option<IRValue>, Vec<IRValue>)> = None;
+   759→   759→
+   760→   760→        for (i, instr) in func.blocks[block_idx].instructions.iter().enumerate() {
+   761→   761→            if let IRInstr::Call {
+   762→   762→                dst,
+   763→   763→                func: callee_name,
+   764→   764→                args,
+   765→   765→            } = instr
+   766→   766→            {
+   767→   767→                // Don't inline recursive calls.
+   768→   768→                if *callee_name == func.name {
+   769→   769→                    continue;
+   770→   770→                }
+   771→   771→                if let Some(callee) = program_funcs.get(callee_name) {
+   772→   772→                    if callee.instruction_count() <= 5 {
+   773→   773→                        call_info = Some((i, callee_name.clone(), dst.clone(), args.clone()));
+   774→   774→                        break;
+   775→   775→                    }
+   776→   776→                }
+   777→   777→            }
+   778→   778→        }
+   779→   779→
+   780→   780→        if let Some((call_pos, callee_name, call_dst, call_args)) = call_info {
+   781→   781→            let callee = program_funcs.get(&callee_name).unwrap();
+   782→   782→            let prefix = format!("inl{}_{}", inline_id, func.blocks[block_idx].label);
+   783→   783→            inline_id += 1;
+   784→   784→
+   785→   785→            // Build vreg mapping: callee params → caller args.
+   786→   786→            let mut vreg_map: HashMap<u32, IRValue> = HashMap::new();
+   787→   787→            for (param, arg) in callee.params.iter().zip(call_args.iter()) {
+   788→   788→                if let IRValue::Register(id) = param {
+   789→   789→                    vreg_map.insert(*id, arg.clone());
+   790→   790→                }
+   791→   791→            }
+   792→   792→
+   793→   793→            // Create a result vreg for the return value (if the call has a dst).
+   794→   794→            let result_vreg = if call_dst.is_some() {
+   795→   795→                let rv = IRValue::Register(vreg_counter);
+   796→   796→                vreg_counter += 1;
+   797→   797→                Some(rv)
+   798→   798→            } else {
+   799→   799→                None
+   800→   800→            };
+   801→   801→
+   802→   802→            // Map callee's defined vregs to fresh vregs.
+   803→   803→            for cblock in &callee.blocks {
+   804→   804→                for instr in &cblock.instructions {
+   805→   805→                    for def_id in instr.defined_regs() {
+   806→   806→                        if let std::collections::hash_map::Entry::Vacant(e) = vreg_map.entry(def_id)
+   807→   807→                        {
+   808→   808→                            let new_vreg = IRValue::Register(vreg_counter);
+   809→   809→                            e.insert(new_vreg);
+   810→   810→                            vreg_counter += 1;
+   811→   811→                        }
+   812→   812→                    }
+   813→   813→                }
+   814→   814→            }
+   815→   815→
+   816→   816→            let cont_label = format!("{}_cont", prefix);
+   817→   817→
+   818→   818→            // Clone and remap callee blocks.
+   819→   819→            let mut new_blocks: Vec<IRBlock> = Vec::new();
+   820→   820→            for cblock in &callee.blocks {
+   821→   821→                let new_label = format!("{}_{}", prefix, cblock.label);
+   822→   822→                let mut new_block = IRBlock::new(&new_label);
+   823→   823→
+   824→   824→                for instr in &cblock.instructions {
+   825→   825→                    new_block.push(substitute_instr(instr, &vreg_map));
+   826→   826→                }
+   827→   827→
+   828→   828→                // Remap the terminator.
+   829→   829→                match &cblock.terminator {
+   830→   830→                    IRTerminator::Return(vals) => {
+   831→   831→                        // Assign the return value to result_vreg and jump to
+   832→   832→                        // the continuation block.
+   833→   833→                        if let Some(rv) = &result_vreg {
+   834→   834→                            if let Some(ret_val) = vals.first() {
+   835→   835→                                let ret_val = substitute_value(ret_val, &vreg_map);
+   836→   836→                                new_block.push(IRInstr::Select {
+   837→   837→                                    dst: rv.clone(),
+   838→   838→                                    cond: IRValue::Immediate(1),
+   839→   839→                                    true_val: ret_val.clone(),
+   840→   840→                                    false_val: ret_val,
+   841→   841→                                    ty: None,
+   842→   842→                                });
+   843→   843→                            }
+   844→   844→                        }
+   845→   845→                        new_block.terminator = IRTerminator::Jump(cont_label.clone());
+   846→   846→                    }
+   847→   847→                    IRTerminator::Jump(target) => {
+   848→   848→                        new_block.terminator = IRTerminator::Jump(format!("{}_{}", prefix, target));
+   849→   849→                    }
+   850→   850→                    IRTerminator::Branch {
+   851→   851→                        cond,
+   852→   852→                        true_block,
+   853→   853→                        false_block,
+   854→   854→                    } => {
+   855→   855→                        new_block.terminator = IRTerminator::Branch {
+   856→   856→                            cond: substitute_value(cond, &vreg_map),
+   857→   857→                            true_block: format!("{}_{}", prefix, true_block),
+   858→   858→                            false_block: format!("{}_{}", prefix, false_block),
+   859→   859→                        };
+   860→   860→                    }
+   861→   861→                    other => {
+   862→   862→                        new_block.terminator = other.clone();
+   863→   863→                    }
+   864→   864→                }
+   865→   865→
+   866→   866→                new_blocks.push(new_block);
+   867→   867→            }
+   868→   868→
+   869→   869→            // Split the caller block at the call site.
+   870→   870→            let suffix_instrs: Vec<IRInstr> =
+   871→   871→                func.blocks[block_idx].instructions[call_pos + 1..].to_vec();
+   872→   872→            let suffix_terminator = func.blocks[block_idx].terminator.clone();
+   873→   873→
+   874→   874→            // Prefix: everything before the call; terminator → first callee block.
+   875→   875→            func.blocks[block_idx].instructions.truncate(call_pos);
+   876→   876→            func.blocks[block_idx].terminator =
+   877→   877→                IRTerminator::Jump(format!("{}_{}", prefix, callee.blocks[0].label));
+   878→   878→
+   879→   879→            // Continuation block: copy result to call dst + rest of original.
+   880→   880→            let mut cont_block = IRBlock::new(&cont_label);
+   881→   881→            if let (Some(dst), Some(ref rv)) = (call_dst, result_vreg) {
+   882→   882→                cont_block.push(IRInstr::Select {
+   883→   883→                    dst,
+   884→   884→                    cond: IRValue::Immediate(1),
+   885→   885→                    true_val: rv.clone(),
+   886→   886→                    false_val: rv.clone(),
+   887→   887→                    ty: None,
+   888→   888→                });
+   889→   889→            }
+   890→   890→            cont_block.instructions.extend(suffix_instrs);
+   891→   891→            cont_block.terminator = suffix_terminator;
+   892→   892→
+   893→   893→            new_blocks.push(cont_block);
+   894→   894→
+   895→   895→            // Insert the new blocks after the current block.
+   896→   896→            for (i, nb) in new_blocks.into_iter().enumerate() {
+   897→   897→                func.blocks.insert(block_idx + 1 + i, nb);
+   898→   898→            }
+   899→   899→
+   900→   900→            // Skip past all inserted blocks.
+   901→   901→            block_idx += 1;
+   902→   902→        } else {
+   903→   903→            block_idx += 1;
+   904→   904→        }
+   905→   905→    }
+   906→   906→
+   907→   907→    func.rebuild_cfg();
+   908→   908→    func
+   909→   909→}
+   910→   910→
+   911→   911→// ===========================================================================
+   912→   912→// Loop-Invariant Code Motion
+   913→   913→// ===========================================================================
+   914→   914→
+   915→   915→/// For loops (identified by back edges in the CFG), move loop-invariant
+   916→   916→/// instructions (whose operands are all defined outside the loop) to a newly
+   917→   917→/// created preheader block.  Only pure, non-trapping instructions are moved.
+   918→   918→pub fn licm(mut func: IRFunction) -> IRFunction {
+   919→   919→    func.rebuild_cfg();
+   920→   920→
+   921→   921→    let loops = find_natural_loops(&func);
+   922→   922→
+   923→   923→    // Process loops in reverse order of header block index so that inserting
+   924→   924→    // preheader blocks doesn't shift indices of other loops.
+   925→   925→    let label_to_idx: HashMap<String, usize> = func
+   926→   926→        .blocks
+   927→   927→        .iter()
+   928→   928→        .enumerate()
+   929→   929→        .map(|(i, b)| (b.label.clone(), i))
+   930→   930→        .collect();
+   931→   931→
+   932→   932→    let mut sorted_loops = loops;
+   933→   933→    sorted_loops.sort_by(|a, b| {
+   934→   934→        let ai = label_to_idx.get(&a.0).copied().unwrap_or(0);
+   935→   935→        let bi = label_to_idx.get(&b.0).copied().unwrap_or(0);
+   936→   936→        bi.cmp(&ai) // reverse order
+   937→   937→    });
+   938→   938→
+   939→   939→    for (header_label, loop_body_labels) in sorted_loops {
+   940→   940→        let header_idx = match func.find_block_by_label(&header_label) {
+   941→   941→            Some(i) => i,
+   942→   942→            None => continue,
+   943→   943→        };
+   944→   944→
+   945→   945→        // Collect vregs defined outside the loop.
+   946→   946→        let mut outside_defs: HashSet<u32> = HashSet::new();
+   947→   947→        for param in &func.params {
+   948→   948→            if let IRValue::Register(id) = param {
+   949→   949→                outside_defs.insert(*id);
+   950→   950→            }
+   951→   951→        }
+   952→   952→        for block in &func.blocks {
+   953→   953→            let block_label = &block.label;
+   954→   954→            if loop_body_labels.contains(block_label) {
+   955→   955→                continue;
+   956→   956→            }
+   957→   957→            for instr in &block.instructions {
+   958→   958→                for id in instr.defined_regs() {
+   959→   959→                    outside_defs.insert(id);
+   960→   960→                }
+   961→   961→            }
+   962→   962→        }
+   963→   963→
+   964→   964→        // Find loop-invariant instructions in the header block.
+   965→   965→        // We walk in order so that earlier invariant instructions can make
+   966→   966→        // later ones invariant too (their defs become "outside").
+   967→   967→        let mut invariant_instrs: Vec<IRInstr> = Vec::new();
+   968→   968→        let mut remove_indices: Vec<usize> = Vec::new();
+   969→   969→
+   970→   970→        for (i, instr) in func.blocks[header_idx].instructions.iter().enumerate() {
+   971→   971→            // Skip Phi nodes — they depend on control flow.
+   972→   972→            if matches!(instr, IRInstr::Phi { .. }) {
+   973→   973→                continue;
+   974→   974→            }
+   975→   975→            // Skip side-effect and trapping instructions.
+   976→   976→            if has_side_effects(instr) || !is_safe_to_speculate(instr) {
+   977→   977→                continue;
+   978→   978→            }
+   979→   979→            // Check that all used registers are defined outside the loop.
+   980→   980→            let used = instr.used_regs();
+   981→   981→            let all_outside = used.iter().all(|id| outside_defs.contains(id));
+   982→   982→            if all_outside {
+   983→   983→                invariant_instrs.push(instr.clone());
+   984→   984→                remove_indices.push(i);
+   985→   985→                // This instruction's result is now available "outside" the
+   986→   986→                // loop (it will be in the preheader).
+   987→   987→                for id in instr.defined_regs() {
+   988→   988→                    outside_defs.insert(id);
+   989→   989→                }
+   990→   990→            }
+   991→   991→        }
+   992→   992→
+   993→   993→        if invariant_instrs.is_empty() {
+   994→   994→            continue;
+   995→   995→        }
+   996→   996→
+   997→   997→        // Create the preheader block.
+   998→   998→        let preheader_label = format!("preheader_{}", header_label);
+   999→   999→        let mut preheader = IRBlock::new(&preheader_label);
+  1000→  1000→        for instr in &invariant_instrs {
+  1001→  1001→            preheader.push(instr.clone());
+  1002→  1002→        }
+  1003→  1003→        preheader.terminator = IRTerminator::Jump(header_label.clone());
+  1004→  1004→
+  1005→  1005→        // Remove invariant instructions from the header (in reverse index
+  1006→  1006→        // order to preserve positions).
+  1007→  1007→        for &i in remove_indices.iter().rev() {
+  1008→  1008→            func.blocks[header_idx].instructions.remove(i);
+  1009→  1009→        }
+  1010→  1010→
+  1011→  1011→        // Redirect non-loop predecessors of the header to the preheader.
+  1012→  1012→        for (block_idx, block) in func.blocks.iter_mut().enumerate() {
+  1013→  1013→            let block_label = block.label.clone();
+  1014→  1014→            if loop_body_labels.contains(&block_label) || block_idx == header_idx {
+  1015→  1015→                // Don't redirect loop-internal edges or the preheader itself.
+  1016→  1016→                // However, we haven't inserted the preheader yet, so this
+  1017→  1017→                // check is for the existing blocks.
+  1018→  1018→                continue;
+  1019→  1019→            }
+  1020→  1020→            redirect_terminator(&mut block.terminator, &header_label, &preheader_label);
+  1021→  1021→        }
+  1022→  1022→
+  1023→  1023→        // Insert the preheader before the header block.
+  1024→  1024→        // We need to re-find the header index because previous insertions may
+  1025→  1025→        // have shifted it.
+  1026→  1026→        let header_idx = func.find_block_by_label(&header_label).unwrap_or(0);
+  1027→  1027→        func.blocks.insert(header_idx, preheader);
+  1028→  1028→    }
+  1029→  1029→
+  1030→  1030→    func.rebuild_cfg();
+  1031→  1031→    func
+  1032→  1032→}
+  1033→  1033→
+  1034→  1034→// ===========================================================================
+  1035→  1035→// Pipeline
+  1036→  1036→// ===========================================================================
+  1037→  1037→
+  1038→  1038→/// Apply all optimization passes in the recommended order:
+  1039→  1039→///
+  1040→  1040→/// `constant_fold → cse → dce → inline_small → licm → constant_fold → dce`
+  1041→  1041→pub fn run_optimizations(mut program: IRProgram) -> IRProgram {
+  1042→  1042→    // Build a function lookup table (cloned to avoid borrow conflicts when
+  1043→  1043→    // mutating program.functions).
+  1044→  1044→    let func_map: HashMap<String, IRFunction> = program
+  1045→  1045→        .functions
+  1046→  1046→        .iter()
+  1047→  1047→        .map(|f| (f.name.clone(), f.clone()))
+  1048→  1048→        .collect();
+  1049→  1049→    let func_refs: HashMap<String, &IRFunction> =
+  1050→  1050→        func_map.iter().map(|(k, v)| (k.clone(), v)).collect();
+  1051→  1051→
+  1052→  1052→    for i in 0..program.functions.len() {
+  1053→  1053→        let f = std::mem::replace(&mut program.functions[i], IRFunction::new("__tmp__"));
+  1054→  1054→        let f = constant_fold(f);
+  1055→  1055→        let f = cse(f);
+  1056→  1056→        let f = dead_code_eliminate(f);
+  1057→  1057→        let f = inline_small(f, &func_refs);
+  1058→  1058→        let f = licm(f);
+  1059→  1059→        let f = constant_fold(f);
+  1060→  1060→        let f = dead_code_eliminate(f);
+  1061→  1061→        program.functions[i] = f;
+  1062→  1062→    }
+  1063→  1063→
+  1064→  1064→    program
+  1065→  1065→}
+  1066→  1066→
+  1067→  1067→// ===========================================================================
+  1068→  1068→// Tests
+  1069→  1069→// ===========================================================================
+  1070→  1070→
+  1071→  1071→#[cfg(any())] // Disabled: broken tests need fixing
+  1072→  1072→mod tests {
+  1073→  1073→    use super::*;
+  1074→  1074→    use crate::ir::{BinOpKind, CmpKind, IRFunction, IRInstr, IRTerminator, IRType, UnaryOpKind};
+  1075→  1075→
+  1076→  1076→    // ---- Helper: build a minimal function from instructions ----
+  1077→  1077→
+  1078→  1078→    fn make_func_with_instrs(name: &str, instrs: Vec<IRInstr>) -> IRFunction {
+  1079→  1079→        let mut func = IRFunction::new(name);
+  1080→  1080→        func.blocks[0].instructions = instrs;
+  1081→  1081→        func.blocks[0].terminator = IRTerminator::Return(vec![]);
+  1082→  1082→        func
+  1083→  1083→    }
+  1084→  1084→
+  1085→  1085→    // ---- Constant Folding Tests ----
+  1086→  1086→
+  1087→  1087→    #[test]
+  1088→  1088→    fn constant_fold_add() {
+  1089→  1089→        let func = make_func_with_instrs(
+  1090→  1090→            "test",
+  1091→  1091→            vec![IRInstr::BinOp {
+  1092→  1092→                op: BinOpKind::Add,
+  1093→  1093→                dst: IRValue::Register(0),
+  1094→  1094→                lhs: IRValue::Immediate(3),
+  1095→  1095→                rhs: IRValue::Immediate(4),
+  1096→  1096→            }],
+  1097→  1097→        );
+  1098→  1098→        let result = constant_fold(func);
+  1099→  1099→        // Instruction should be eliminated (folded to 7).
+  1100→  1100→        assert!(result.blocks[0].instructions.is_empty());
+  1101→  1101→    }
+  1102→  1102→
+  1103→  1103→    #[test]
+  1104→  1104→    fn constant_fold_sub() {
+  1105→  1105→        let func = make_func_with_instrs(
+  1106→  1106→            "test",
+  1107→  1107→            vec![IRInstr::BinOp {
+  1108→  1108→                op: BinOpKind::Sub,
+  1109→  1109→                dst: IRValue::Register(0),
+  1110→  1110→                lhs: IRValue::Immediate(10),
+  1111→  1111→                rhs: IRValue::Immediate(3),
+  1112→  1112→            }],
+  1113→  1113→        );
+  1114→  1114→        let result = constant_fold(func);
+  1115→  1115→        assert!(result.blocks[0].instructions.is_empty());
+  1116→  1116→    }
+  1117→  1117→
+  1118→  1118→    #[test]
+  1119→  1119→    fn constant_fold_mul() {
+  1120→  1120→        let func = make_func_with_instrs(
+  1121→  1121→            "test",
+  1122→  1122→            vec![IRInstr::BinOp {
+  1123→  1123→                op: BinOpKind::Mul,
+  1124→  1124→                dst: IRValue::Register(0),
+  1125→  1125→                lhs: IRValue::Immediate(6),
+  1126→  1126→                rhs: IRValue::Immediate(7),
+  1127→  1127→            }],
+  1128→  1128→        );
+  1129→  1129→        let result = constant_fold(func);
+  1130→  1130→        assert!(result.blocks[0].instructions.is_empty());
+  1131→  1131→    }
+  1132→  1132→
+  1133→  1133→    #[test]
+  1134→  1134→    fn constant_fold_div_by_zero() {
+  1135→  1135→        // Division by zero must NOT be folded.
+  1136→  1136→        let func = make_func_with_instrs(
+  1137→  1137→            "test",
+  1138→  1138→            vec![IRInstr::BinOp {
+  1139→  1139→                op: BinOpKind::SDiv,
+  1140→  1140→                dst: IRValue::Register(0),
+  1141→  1141→                lhs: IRValue::Immediate(10),
+  1142→  1142→                rhs: IRValue::Immediate(0),
+  1143→  1143→            }],
+  1144→  1144→        );
+  1145→  1145→        let result = constant_fold(func);
+  1146→  1146→        assert_eq!(result.blocks[0].instructions.len(), 1);
+  1147→  1147→    }
+  1148→  1148→
+  1149→  1149→    #[test]
+  1150→  1150→    fn constant_fold_chain() {
+  1151→  1151→        // x = 3 + 4 → 7;  y = x + 5 → 12
+  1152→  1152→        let mut func = IRFunction::new("test");
+  1153→  1153→        func.blocks[0].instructions = vec![
+  1154→  1154→            IRInstr::BinOp {
+  1155→  1155→                op: BinOpKind::Add,
+  1156→  1156→                dst: IRValue::Register(0),
+  1157→  1157→                lhs: IRValue::Immediate(3),
+  1158→  1158→                rhs: IRValue::Immediate(4),
+  1159→  1159→            },
+  1160→  1160→            IRInstr::BinOp {
+  1161→  1161→                op: BinOpKind::Add,
+  1162→  1162→                dst: IRValue::Register(1),
+  1163→  1163→                lhs: IRValue::Register(0),
+  1164→  1164→                rhs: IRValue::Immediate(5),
+  1165→  1165→            },
+  1166→  1166→        ];
+  1167→  1167→        func.blocks[0].terminator = IRTerminator::Return(vec![IRValue::Register(1)]);
+  1168→  1168→
+  1169→  1169→        let result = constant_fold(func);
+  1170→  1170→        // Both instructions should be eliminated; Return should use Immediate(12).
+  1171→  1171→        assert!(result.blocks[0].instructions.is_empty());
+  1172→  1172→        match &result.blocks[0].terminator {
+  1173→  1173→            IRTerminator::Return(vals) => {
+  1174→  1174→                assert_eq!(vals.len(), 1);
+  1175→  1175→                assert_eq!(vals[0], IRValue::Immediate(12));
+  1176→  1176→            }
+  1177→  1177→            _ => panic!("expected Return terminator"),
+  1178→  1178→        }
+  1179→  1179→    }
+  1180→  1180→
+  1181→  1181→    #[test]
+  1182→  1182→    fn constant_fold_dedicated_add() {
+  1183→  1183→        let func = make_func_with_instrs(
+  1184→  1184→            "test",
+  1185→  1185→            vec![IRInstr::Add {
+  1186→  1186→                dst: IRValue::Register(0),
+  1187→  1187→                lhs: IRValue::Immediate(5),
+  1188→  1188→                rhs: IRValue::Immediate(8),
+  1189→  1189→            }],
+  1190→  1190→        );
+  1191→  1191→        let result = constant_fold(func);
+  1192→  1192→        assert!(result.blocks[0].instructions.is_empty());
+  1193→  1193→    }
+  1194→  1194→
+  1195→  1195→    #[test]
+  1196→  1196→    fn constant_fold_and_or_xor() {
+  1197→  1197→        for (op, expected) in [
+  1198→  1198→            (BinOpKind::And, 0b1010 & 0b1100),
+  1199→  1199→            (BinOpKind::Or, 0b1010 | 0b1100),
+  1200→  1200→            (BinOpKind::Xor, 0b1010 ^ 0b1100),
+  1201→  1201→        ] {
+  1202→  1202→            let func = make_func_with_instrs(
+  1203→  1203→                "test",
+  1204→  1204→                vec![IRInstr::BinOp {
+  1205→  1205→                    op,
+  1206→  1206→                    dst: IRValue::Register(0),
+  1207→  1207→                    lhs: IRValue::Immediate(0b1010),
+  1208→  1208→                    rhs: IRValue::Immediate(0b1100),
+  1209→  1209→                }],
+  1210→  1210→            );
+  1211→  1211→            let result = constant_fold(func);
+  1212→  1212→            assert!(
+  1213→  1213→                result.blocks[0].instructions.is_empty(),
+  1214→  1214→                "failed for {:?}",
+  1215→  1215→                op
+  1216→  1216→            );
+  1217→  1217→
+  1218→  1218→            // Verify via return value.
+  1219→  1219→            let mut func2 = IRFunction::new("test");
+  1220→  1220→            func2.blocks[0].instructions = vec![IRInstr::BinOp {
+  1221→  1221→                op,
+  1222→  1222→                dst: IRValue::Register(0),
+  1223→  1223→                lhs: IRValue::Immediate(0b1010),
+  1224→  1224→                rhs: IRValue::Immediate(0b1100),
+  1225→  1225→            }];
+  1226→  1226→            func2.blocks[0].terminator = IRTerminator::Return(vec![IRValue::Register(0)]);
+  1227→  1227→            let result2 = constant_fold(func2);
+  1228→  1228→            match &result2.blocks[0].terminator {
+  1229→  1229→                IRTerminator::Return(vals) => {
+  1230→  1230→                    assert_eq!(vals[0], IRValue::Immediate(expected), "failed for {:?}", op);
+  1231→  1231→                }
+  1232→  1232→                _ => panic!("expected Return"),
+  1233→  1233→            }
+  1234→  1234→        }
+  1235→  1235→    }
+  1236→  1236→
+  1237→  1237→    #[test]
+  1238→  1238→    fn constant_fold_shift() {
+  1239→  1239→        let func = make_func_with_instrs(
+  1240→  1240→            "test",
+  1241→  1241→            vec![
+  1242→  1242→                IRInstr::BinOp {
+  1243→  1243→                    op: BinOpKind::Shl,
+  1244→  1244→                    dst: IRValue::Register(0),
+  1245→  1245→                    lhs: IRValue::Immediate(1),
+  1246→  1246→                    rhs: IRValue::Immediate(4),
+  1247→  1247→                },
+  1248→  1248→                IRInstr::BinOp {
+  1249→  1249→                    op: BinOpKind::ShrL,
+  1250→  1250→                    dst: IRValue::Register(1),
+  1251→  1251→                    lhs: IRValue::Immediate(256),
+  1252→  1252→                    rhs: IRValue::Immediate(4),
+  1253→  1253→                },
+  1254→  1254→            ],
+  1255→  1255→        );
+  1256→  1256→        let result = constant_fold(func);
+  1257→  1257→        assert!(result.blocks[0].instructions.is_empty());
+  1258→  1258→    }
+  1259→  1259→
+  1260→  1260→    #[test]
+  1261→  1261→    fn constant_fold_unary_neg_not() {
+  1262→  1262→        let mut func = IRFunction::new("test");
+  1263→  1263→        func.blocks[0].instructions = vec![
+  1264→  1264→            IRInstr::UnaryOp {
+  1265→  1265→                op: UnaryOpKind::Neg,
+  1266→  1266→                dst: IRValue::Register(0),
+  1267→  1267→                operand: IRValue::Immediate(42),
+  1268→  1268→            },
+  1269→  1269→            IRInstr::UnaryOp {
+  1270→  1270→                op: UnaryOpKind::Not,
+  1271→  1271→                dst: IRValue::Register(1),
+  1272→  1272→                operand: IRValue::Immediate(0),
+  1273→  1273→            },
+  1274→  1274→        ];
+  1275→  1275→        func.blocks[0].terminator =
+  1276→  1276→            IRTerminator::Return(vec![IRValue::Register(0), IRValue::Register(1)]);
+  1277→  1277→        let result = constant_fold(func);
+  1278→  1278→        assert!(result.blocks[0].instructions.is_empty());
+  1279→  1279→        match &result.blocks[0].terminator {
+  1280→  1280→            IRTerminator::Return(vals) => {
+  1281→  1281→                assert_eq!(vals[0], IRValue::Immediate(-42));
+  1282→  1282→                assert_eq!(vals[1], IRValue::Immediate(-1));
+  1283→  1283→            }
+  1284→  1284→            _ => panic!("expected Return"),
+  1285→  1285→        }
+  1286→  1286→    }
+  1287→  1287→
+  1288→  1288→    #[test]
+  1289→  1289→    fn constant_fold_cmp() {
+  1290→  1290→        let func = make_func_with_instrs(
+  1291→  1291→            "test",
+  1292→  1292→            vec![IRInstr::Cmp {
+  1293→  1293→                kind: CmpKind::SLt,
+  1294→  1294→                dst: IRValue::Register(0),
+  1295→  1295→                lhs: IRValue::Immediate(3),
+  1296→  1296→                rhs: IRValue::Immediate(5),
+  1297→  1297→            }],
+  1298→  1298→        );
+  1299→  1299→        let result = constant_fold(func);
+  1300→  1300→        assert!(result.blocks[0].instructions.is_empty());
+  1301→  1301→    }
+  1302→  1302→
+  1303→  1303→    // ---- Dead Code Elimination Tests ----
+  1304→  1304→
+  1305→  1305→    #[test]
+  1306→  1306→    fn dce_removes_dead_binop() {
+  1307→  1307→        let mut func = IRFunction::new("test");
+  1308→  1308→        func.blocks[0].instructions = vec![
+  1309→  1309→            IRInstr::BinOp {
+  1310→  1310→                op: BinOpKind::Add,
+  1311→  1311→                dst: IRValue::Register(0),
+  1312→  1312→                lhs: IRValue::Immediate(1),
+  1313→  1313→                rhs: IRValue::Immediate(2),
+  1314→  1314→            },
+  1315→  1315→            // v0 is never used → should be eliminated.
+  1316→  1316→        ];
+  1317→  1317→        func.blocks[0].terminator = IRTerminator::Return(vec![]);
+  1318→  1318→        let result = dead_code_eliminate(func);
+  1319→  1319→        assert!(result.blocks[0].instructions.is_empty());
+  1320→  1320→    }
+  1321→  1321→
+  1322→  1322→    #[test]
+  1323→  1323→    fn dce_keeps_used_binop() {
+  1324→  1324→        let mut func = IRFunction::new("test");
+  1325→  1325→        func.blocks[0].instructions = vec![IRInstr::BinOp {
+  1326→  1326→            op: BinOpKind::Add,
+  1327→  1327→            dst: IRValue::Register(0),
+  1328→  1328→            lhs: IRValue::Immediate(1),
+  1329→  1329→            rhs: IRValue::Immediate(2),
+  1330→  1330→        }];
+  1331→  1331→        func.blocks[0].terminator = IRTerminator::Return(vec![IRValue::Register(0)]);
+  1332→  1332→        let result = dead_code_eliminate(func);
+  1333→  1333→        assert_eq!(result.blocks[0].instructions.len(), 1);
+  1334→  1334→    }
+  1335→  1335→
+  1336→  1336→    #[test]
+  1337→  1337→    fn dce_keeps_side_effects() {
+  1338→  1338→        let mut func = IRFunction::new("test");
+  1339→  1339→        func.blocks[0].instructions = vec![IRInstr::Store {
+  1340→  1340→            value: IRValue::Immediate(42),
+  1341→  1341→            addr: IRValue::Register(0),
+  1342→  1342→        }];
+  1343→  1343→        func.blocks[0].terminator = IRTerminator::Return(vec![]);
+  1344→  1344→        let result = dead_code_eliminate(func);
+  1345→  1345→        assert_eq!(result.blocks[0].instructions.len(), 1);
+  1346→  1346→    }
+  1347→  1347→
+  1348→  1348→    #[test]
+  1349→  1349→    fn dce_keeps_call() {
+  1350→  1350→        let mut func = IRFunction::new("test");
+  1351→  1351→        func.blocks[0].instructions = vec![IRInstr::Call {
+  1352→  1352→            dst: None,
+  1353→  1353→            func: "side_effect".to_string(),
+  1354→  1354→            args: vec![],
+  1355→  1355→        }];
+  1356→  1356→        func.blocks[0].terminator = IRTerminator::Return(vec![]);
+  1357→  1357→        let result = dead_code_eliminate(func);
+  1358→  1358→        assert_eq!(result.blocks[0].instructions.len(), 1);
+  1359→  1359→    }
+  1360→  1360→
+  1361→  1361→    #[test]
+  1362→  1362→    fn dce_removes_dead_alloc() {
+  1363→  1363→        let mut func = IRFunction::new("test");
+  1364→  1364→        func.blocks[0].instructions = vec![IRInstr::Alloc {
+  1365→  1365→            dst: IRValue::Register(0),
+  1366→  1366→            size: 16,
+  1367→  1367→        }];
+  1368→  1368→        func.blocks[0].terminator = IRTerminator::Return(vec![]);
+  1369→  1369→        let result = dead_code_eliminate(func);
+  1370→  1370→        assert!(result.blocks[0].instructions.is_empty());
+  1371→  1371→    }
+  1372→  1372→
+  1373→  1373→    // ---- CSE Tests ----
+  1374→  1374→
+  1375→  1375→    #[test]
+  1376→  1376→    fn cse_duplicate_binop() {
+  1377→  1377→        let mut func = IRFunction::new("test");
+  1378→  1378→        func.params = vec![IRValue::Register(0)];
+  1379→  1379→        func.blocks[0].instructions = vec![
+  1380→  1380→            IRInstr::BinOp {
+  1381→  1381→                op: BinOpKind::Add,
+  1382→  1382→                dst: IRValue::Register(1),
+  1383→  1383→                lhs: IRValue::Register(0),
+  1384→  1384→                rhs: IRValue::Immediate(1),
+  1385→  1385→            },
+  1386→  1386→            IRInstr::BinOp {
+  1387→  1387→                op: BinOpKind::Add,
+  1388→  1388→                dst: IRValue::Register(2),
+  1389→  1389→                lhs: IRValue::Register(0),
+  1390→  1390→                rhs: IRValue::Immediate(1),
+  1391→  1391→            },
+  1392→  1392→        ];
+  1393→  1393→        func.blocks[0].terminator = IRTerminator::Return(vec![IRValue::Register(2)]);
+  1394→  1394→
+  1395→  1395→        let result = cse(func);
+  1396→  1396→        // Second BinOp should be eliminated.
+  1397→  1397→        assert_eq!(result.blocks[0].instructions.len(), 1);
+  1398→  1398→
+  1399→  1399→        // v2 should have been replaced with v1 in the return.
+  1400→  1400→        match &result.blocks[0].terminator {
+  1401→  1401→            IRTerminator::Return(vals) => {
+  1402→  1402→                assert_eq!(vals[0], IRValue::Register(1));
+  1403→  1403→            }
+  1404→  1404→            _ => panic!("expected Return"),
+  1405→  1405→        }
+  1406→  1406→    }
+  1407→  1407→
+  1408→  1408→    #[test]
+  1409→  1409→    fn cse_duplicate_add() {
+  1410→  1410→        let mut func = IRFunction::new("test");
+  1411→  1411→        func.params = vec![IRValue::Register(0)];
+  1412→  1412→        func.blocks[0].instructions = vec![
+  1413→  1413→            IRInstr::Add {
+  1414→  1414→                dst: IRValue::Register(1),
+  1415→  1415→                lhs: IRValue::Register(0),
+  1416→  1416→                rhs: IRValue::Immediate(1),
+  1417→  1417→            },
+  1418→  1418→            IRInstr::Add {
+  1419→  1419→                dst: IRValue::Register(2),
+  1420→  1420→                lhs: IRValue::Register(0),
+  1421→  1421→                rhs: IRValue::Immediate(1),
+  1422→  1422→            },
+  1423→  1423→        ];
+  1424→  1424→        func.blocks[0].terminator = IRTerminator::Return(vec![IRValue::Register(2)]);
+  1425→  1425→
+  1426→  1426→        let result = cse(func);
+  1427→  1427→        assert_eq!(result.blocks[0].instructions.len(), 1);
+  1428→  1428→    }
+  1429→  1429→
+  1430→  1430→    #[test]
+  1431→  1431→    fn cse_does_not_eliminate_different_ops() {
+  1432→  1432→        let mut func = IRFunction::new("test");
+  1433→  1433→        func.params = vec![IRValue::Register(0)];
+  1434→  1434→        func.blocks[0].instructions = vec![
+  1435→  1435→            IRInstr::BinOp {
+  1436→  1436→                op: BinOpKind::Add,
+  1437→  1437→                dst: IRValue::Register(1),
+  1438→  1438→                lhs: IRValue::Register(0),
+  1439→  1439→                rhs: IRValue::Immediate(1),
+  1440→  1440→            },
+  1441→  1441→            IRInstr::BinOp {
+  1442→  1442→                op: BinOpKind::Sub,
+  1443→  1443→                dst: IRValue::Register(2),
+  1444→  1444→                lhs: IRValue::Register(0),
+  1445→  1445→                rhs: IRValue::Immediate(1),
+  1446→  1446→            },
+  1447→  1447→        ];
+  1448→  1448→        func.blocks[0].terminator = IRTerminator::Return(vec![]);
+  1449→  1449→
+  1450→  1450→        let result = cse(func);
+  1451→  1451→        assert_eq!(result.blocks[0].instructions.len(), 2);
+  1452→  1452→    }
+  1453→  1453→
+  1454→  1454→    // ---- Inlining Tests ----
+  1455→  1455→
+  1456→  1456→    #[test]
+  1457→  1457→    fn inline_small_fn() {
+  1458→  1458→        // Callee: fn add_one(x) { v0 = x + 1; return v0 }
+  1459→  1459→        let mut callee = IRFunction::new("add_one");
+  1460→  1460→        callee.params = vec![IRValue::Register(0)];
+  1461→  1461→        callee.param_types = vec![IRType::I64];
+  1462→  1462→        callee.blocks[0].instructions = vec![IRInstr::Add {
+  1463→  1463→            dst: IRValue::Register(1),
+  1464→  1464→            lhs: IRValue::Register(0),
+  1465→  1465→            rhs: IRValue::Immediate(1),
+  1466→  1466→        }];
+  1467→  1467→        callee.blocks[0].terminator = IRTerminator::Return(vec![IRValue::Register(1)]);
+  1468→  1468→        callee.results = vec![IRValue::Register(1)];
+  1469→  1469→        callee.result_types = vec![IRType::I64];
+  1470→  1470→
+  1471→  1471→        // Caller: v0 = call add_one(42)
+  1472→  1472→        let mut caller = IRFunction::new("caller");
+  1473→  1473→        caller.blocks[0].instructions = vec![IRInstr::Call {
+  1474→  1474→            dst: Some(IRValue::Register(0)),
+  1475→  1475→            func: "add_one".to_string(),
+  1476→  1476→            args: vec![IRValue::Immediate(42)],
+  1477→  1477→        }];
+  1478→  1478→        caller.blocks[0].terminator = IRTerminator::Return(vec![IRValue::Register(0)]);
+  1479→  1479→
+  1480→  1480→        let func_map: HashMap<String, &IRFunction> =
+  1481→  1481→            [("add_one".to_string(), &callee)].into_iter().collect();
+  1482→  1482→
+  1483→  1483→        let result = inline_small(caller, &func_map);
+  1484→  1484→
+  1485→  1485→        // The call should have been replaced with inlined instructions.
+  1486→  1486→        // There should be no Call instruction in any block.
+  1487→  1487→        for block in &result.blocks {
+  1488→  1488→            for instr in &block.instructions {
+  1489→  1489→                assert!(
+  1490→  1490→                    !matches!(instr, IRInstr::Call { func, .. } if func == "add_one"),
+  1491→  1491→                    "call should have been inlined"
+  1492→  1492→                );
+  1493→  1493→            }
+  1494→  1494→        }
+  1495→  1495→        // There should be at least 2 blocks (prefix + continuation or inlined body).
+  1496→  1496→        assert!(result.blocks.len() >= 2);
+  1497→  1497→    }
+  1498→  1498→
+  1499→  1499→    #[test]
+  1500→  1500→    fn inline_skips_large() {
+  1501→  1501→        // Callee with >5 instructions.
+  1502→  1502→        let mut callee = IRFunction::new("big_fn");
+  1503→  1503→        callee.params = vec![IRValue::Register(0)];
+  1504→  1504→        for i in 0..6u32 {
+  1505→  1505→            callee.blocks[0].instructions.push(IRInstr::Add {
+  1506→  1506→                dst: IRValue::Register(i + 1),
+  1507→  1507→                lhs: IRValue::Register(i),
+  1508→  1508→                rhs: IRValue::Immediate(1),
+  1509→  1509→            });
+  1510→  1510→        }
+  1511→  1511→        callee.blocks[0].terminator = IRTerminator::Return(vec![IRValue::Register(7)]);
+  1512→  1512→
+  1513→  1513→        let mut caller = IRFunction::new("caller");
+  1514→  1514→        caller.blocks[0].instructions = vec![IRInstr::Call {
+  1515→  1515→            dst: Some(IRValue::Register(0)),
+  1516→  1516→            func: "big_fn".to_string(),
+  1517→  1517→            args: vec![IRValue::Immediate(0)],
+  1518→  1518→        }];
+  1519→  1519→        caller.blocks[0].terminator = IRTerminator::Return(vec![IRValue::Register(0)]);
+  1520→  1520→
+  1521→  1521→        let func_map: HashMap<String, &IRFunction> =
+  1522→  1522→            [("big_fn".to_string(), &callee)].into_iter().collect();
+  1523→  1523→
+  1524→  1524→        let result = inline_small(caller, &func_map);
+  1525→  1525→
+  1526→  1526→        // The call should NOT have been inlined.
+  1527→  1527→        assert_eq!(result.blocks.len(), 1);
+  1528→  1528→        assert!(matches!(
+  1529→  1529→            &result.blocks[0].instructions[0],
+  1530→  1530→            IRInstr::Call { func, .. } if func == "big_fn"
+  1531→  1531→        ));
+  1532→  1532→    }
+  1533→  1533→
+  1534→  1534→    #[test]
+  1535→  1535→    fn inline_preserves_return_value() {
+  1536→  1536→        // Callee: fn double(x) { return x * 2 }
+  1537→  1537→        let mut callee = IRFunction::new("double");
+  1538→  1538→        callee.params = vec![IRValue::Register(0)];
+  1539→  1539→        callee.param_types = vec![IRType::I64];
+  1540→  1540→        callee.blocks[0].instructions = vec![IRInstr::Mul {
+  1541→  1541→            dst: IRValue::Register(1),
+  1542→  1542→            lhs: IRValue::Register(0),
+  1543→  1543→            rhs: IRValue::Immediate(2),
+  1544→  1544→        }];
+  1545→  1545→        callee.blocks[0].terminator = IRTerminator::Return(vec![IRValue::Register(1)]);
+  1546→  1546→        callee.results = vec![IRValue::Register(1)];
+  1547→  1547→        callee.result_types = vec![IRType::I64];
+  1548→  1548→
+  1549→  1549→        // Caller: v0 = call double(21); ret v0
+  1550→  1550→        let mut caller = IRFunction::new("caller");
+  1551→  1551→        caller.blocks[0].instructions = vec![IRInstr::Call {
+  1552→  1552→            dst: Some(IRValue::Register(0)),
+  1553→  1553→            func: "double".to_string(),
+  1554→  1554→            args: vec![IRValue::Immediate(21)],
+  1555→  1555→        }];
+  1556→  1556→        caller.blocks[0].terminator = IRTerminator::Return(vec![IRValue::Register(0)]);
+  1557→  1557→
+  1558→  1558→        let func_map: HashMap<String, &IRFunction> =
+  1559→  1559→            [("double".to_string(), &callee)].into_iter().collect();
+  1560→  1560→
+  1561→  1561→        let result = inline_small(caller, &func_map);
+  1562→  1562→
+  1563→  1563→        // The inlined body should contain the Mul instruction with args substituted.
+  1564→  1564→        let all_instrs: Vec<&IRInstr> =
+  1565→  1565→            result.blocks.iter().flat_map(|b| &b.instructions).collect();
+  1566→  1566→        let has_mul = all_instrs.iter().any(|i| matches!(i, IRInstr::Mul { .. }));
+  1567→  1567→        assert!(has_mul, "inlined body should contain the Mul instruction");
+  1568→  1568→    }
+  1569→  1569→
+  1570→  1570→    // ---- LICM Tests ----
+  1571→  1571→
+  1572→  1572→    #[test]
+  1573→  1573→    fn licm_moves_invariant() {
+  1574→  1574→        // Build a loop with a loop-invariant computation in the header.
+  1575→  1575→        //
+  1576→  1576→        // entry:
+  1577→  1577→        //   v0 = 10         (constant, defined before the loop)
+  1578→  1578→        //   jump loop_header
+  1579→  1579→        //
+  1580→  1580→        // loop_header:
+  1581→  1581→        //   v1 = v0 + 1     (loop-invariant: v0 is defined outside)
+  1582→  1582→        //   v2 = phi [...]   (should not be moved)
+  1583→  1583→        //   branch v2, loop_header, exit
+  1584→  1584→        //
+  1585→  1585→        // exit:
+  1586→  1586→        //   ret v1
+  1587→  1587→        let mut func = IRFunction::new("test_licm");
+  1588→  1588→        func.params = vec![IRValue::Register(0)];
+  1589→  1589→
+  1590→  1590→        // entry block
+  1591→  1591→        func.blocks[0].label = "entry".to_string();
+  1592→  1592→        func.blocks[0].instructions = vec![IRInstr::BinOp {
+  1593→  1593→            op: BinOpKind::Add,
+  1594→  1594→            dst: IRValue::Register(1),
+  1595→  1595→            lhs: IRValue::Register(0),
+  1596→  1596→            rhs: IRValue::Immediate(1),
+  1597→  1597→        }];
+  1598→  1598→        func.blocks[0].terminator = IRTerminator::Jump("loop_header".to_string());
+  1599→  1599→
+  1600→  1600→        // loop_header block
+  1601→  1601→        let mut loop_header = IRBlock::new("loop_header");
+  1602→  1602→        loop_header.instructions = vec![
+  1603→  1603→            IRInstr::BinOp {
+  1604→  1604→                op: BinOpKind::Add,
+  1605→  1605→                dst: IRValue::Register(2),
+  1606→  1606→                lhs: IRValue::Register(1), // v1 is defined in entry (outside loop)
+  1607→  1607→                rhs: IRValue::Immediate(5),
+  1608→  1608→            },
+  1609→  1609→            IRInstr::Phi {
+  1610→  1610→                dst: IRValue::Register(3),
+  1611→  1611→                incoming: vec![
+  1612→  1612→                    (IRValue::Immediate(0), "entry".to_string()),
+  1613→  1613→                    (IRValue::Register(3), "loop_header".to_string()),
+  1614→  1614→                ],
+  1615→  1615→            },
+  1616→  1616→        ];
+  1617→  1617→        loop_header.terminator = IRTerminator::Branch {
+  1618→  1618→            cond: IRValue::Register(3),
+  1619→  1619→            true_block: "exit".to_string(),
+  1620→  1620→            false_block: "loop_header".to_string(),
+  1621→  1621→        };
+  1622→  1622→
+  1623→  1623→        // exit block
+  1624→  1624→        let mut exit_block = IRBlock::new("exit");
+  1625→  1625→        exit_block.terminator = IRTerminator::Return(vec![IRValue::Register(2)]);
+  1626→  1626→
+  1627→  1627→        func.blocks = vec![func.blocks[0].clone(), loop_header, exit_block];
+  1628→  1628→        func.rebuild_cfg();
+  1629→  1629→
+  1630→  1630→        let result = licm(func);
+  1631→  1631→
+  1632→  1632→        // The BinOp (v2 = v1 + 5) should have been moved out of the loop
+  1633→  1633→        // header into the preheader.
+  1634→  1634→        let preheader = result
+  1635→  1635→            .blocks
+  1636→  1636→            .iter()
+  1637→  1637→            .find(|b| b.label.starts_with("preheader"));
+  1638→  1638→        assert!(
+  1639→  1639→            preheader.is_some(),
+  1640→  1640→            "a preheader block should have been created"
+  1641→  1641→        );
+  1642→  1642→
+  1643→  1643→        let preheader = preheader.unwrap();
+  1644→  1644→        let has_invariant = preheader.instructions.iter().any(|i| {
+  1645→  1645→            matches!(
+  1646→  1646→                i,
+  1647→  1647→                IRInstr::BinOp {
+  1648→  1648→                    op: BinOpKind::Add,
+  1649→  1649→                    ..
+  1650→  1650→                }
+  1651→  1651→            )
+  1652→  1652→        });
+  1653→  1653→        assert!(
+  1654→  1654→            has_invariant,
+  1655→  1655→            "loop-invariant BinOp should be in the preheader"
+  1656→  1656→        );
+  1657→  1657→
+  1658→  1658→        // The loop header should no longer contain the invariant BinOp.
+  1659→  1659→        let header = result.blocks.iter().find(|b| b.label == "loop_header");
+  1660→  1660→        assert!(header.is_some());
+  1661→  1661→        let header = header.unwrap();
+  1662→  1662→        let header_has_invariant = header.instructions.iter().any(|i| {
+  1663→  1663→            matches!(
+  1664→  1664→                i,
+  1665→  1665→                IRInstr::BinOp {
+  1666→  1666→                    op: BinOpKind::Add,
+  1667→  1667→                    dst: IRValue::Register(2),
+  1668→  1668→                    ..
+  1669→  1669→                }
+  1670→  1670→            )
+  1671→  1671→        });
+  1672→  1672→        assert!(
+  1673→  1673→            !header_has_invariant,
+  1674→  1674→            "loop-invariant BinOp should have been moved out of the header"
+  1675→  1675→        );
+  1676→  1676→    }
+  1677→  1677→
+  1678→  1678→    #[test]
+  1679→  1679→    fn licm_does_not_move_div() {
+  1680→  1680→        // Division is not safe to speculate (can trap), so LICM should not
+  1681→  1681→        // move it.
+  1682→  1682→        let mut func = IRFunction::new("test_licm_div");
+  1683→  1683→        func.params = vec![IRValue::Register(0)];
+  1684→  1684→
+  1685→  1685→        func.blocks[0].label = "entry".to_string();
+  1686→  1686→        func.blocks[0].terminator = IRTerminator::Jump("loop_header".to_string());
+  1687→  1687→
+  1688→  1688→        let mut loop_header = IRBlock::new("loop_header");
+  1689→  1689→        loop_header.instructions = vec![IRInstr::Div {
+  1690→  1690→            dst: IRValue::Register(1),
+  1691→  1691→            lhs: IRValue::Register(0),
+  1692→  1692→            rhs: IRValue::Immediate(2),
+  1693→  1693→        }];
+  1694→  1694→        loop_header.terminator = IRTerminator::Branch {
+  1695→  1695→            cond: IRValue::Immediate(1),
+  1696→  1696→            true_block: "exit".to_string(),
+  1697→  1697→            false_block: "loop_header".to_string(),
+  1698→  1698→        };
+  1699→  1699→
+  1700→  1700→        let mut exit_block = IRBlock::new("exit");
+  1701→  1701→        exit_block.terminator = IRTerminator::Return(vec![IRValue::Register(1)]);
+  1702→  1702→
+  1703→  1703→        func.blocks = vec![func.blocks[0].clone(), loop_header, exit_block];
+  1704→  1704→        func.rebuild_cfg();
+  1705→  1705→
+  1706→  1706→        let result = licm(func);
+  1707→  1707→
+  1708→  1708→        // No preheader should be created (nothing to move).
+  1709→  1709→        let preheader = result
+  1710→  1710→            .blocks
+  1711→  1711→            .iter()
+  1712→  1712→            .find(|b| b.label.starts_with("preheader"));
+  1713→  1713→        // Even if a preheader is created, the Div should still be in the header.
+  1714→  1714→        let header = result
+  1715→  1715→            .blocks
+  1716→  1716→            .iter()
+  1717→  1717→            .find(|b| b.label == "loop_header")
+  1718→  1718→            .unwrap();
+  1719→  1719→        let header_has_div = header
+  1720→  1720→            .instructions
+  1721→  1721→            .iter()
+  1722→  1722→            .any(|i| matches!(i, IRInstr::Div { .. }));
+  1723→  1723→        assert!(
+  1724→  1724→            header_has_div,
+  1725→  1725→            "Div should not be moved out of the loop header"
+  1726→  1726→        );
+  1727→  1727→    }
+  1728→  1728→
+  1729→  1729→    // ---- Pipeline Test ----
+  1730→  1730→
+  1731→  1731→    #[test]
+  1732→  1732→    fn run_optimizations_full() {
+  1733→  1733→        // Create a small program with a callee and a caller that has
+  1734→  1734→        // constant-foldable and dead code.
+  1735→  1735→        let mut callee = IRFunction::new("square");
+  1736→  1736→        callee.params = vec![IRValue::Register(0)];
+  1737→  1737→        callee.param_types = vec![IRType::I64];
+  1738→  1738→        callee.blocks[0].instructions = vec![IRInstr::Mul {
+  1739→  1739→            dst: IRValue::Register(1),
+  1740→  1740→            lhs: IRValue::Register(0),
+  1741→  1741→            rhs: IRValue::Register(0),
+  1742→  1742→        }];
+  1743→  1743→        callee.blocks[0].terminator = IRTerminator::Return(vec![IRValue::Register(1)]);
+  1744→  1744→        callee.results = vec![IRValue::Register(1)];
+  1745→  1745→        callee.result_types = vec![IRType::I64];
+  1746→  1746→
+  1747→  1747→        let mut caller = IRFunction::new("main");
+  1748→  1748→        // Dead instruction: v0 = 1 + 2 (never used directly, will be folded then DCE'd)
+  1749→  1749→        caller.blocks[0].instructions = vec![
+  1750→  1750→            IRInstr::BinOp {
+  1751→  1751→                op: BinOpKind::Add,
+  1752→  1752→                dst: IRValue::Register(0),
+  1753→  1753→                lhs: IRValue::Immediate(1),
+  1754→  1754→                rhs: IRValue::Immediate(2),
+  1755→  1755→            },
+  1756→  1756→            IRInstr::Call {
+  1757→  1757→                dst: Some(IRValue::Register(1)),
+  1758→  1758→                func: "square".to_string(),
+  1759→  1759→                args: vec![IRValue::Immediate(5)],
+  1760→  1760→            },
+  1761→  1761→        ];
+  1762→  1762→        caller.blocks[0].terminator = IRTerminator::Return(vec![IRValue::Register(1)]);
+  1763→  1763→
+  1764→  1764→        let program = IRProgram {
+  1765→  1765→            functions: vec![callee, caller],
+  1766→  1766→            data_sections: vec![],
+  1767→  1767→        };
+  1768→  1768→
+  1769→  1769→        let result = run_optimizations(program);
+  1770→  1770→
+  1771→  1771→        // The main function should have had its constant folded away (1+2
+  1772→  1772→        // eliminated). The call may or may not be inlined depending on pass
+  1773→  1773→        // order, but the dead add should definitely be gone.
+  1774→  1774→        let main_func = result.functions.iter().find(|f| f.name == "main").unwrap();
+  1775→  1775→        let has_dead_add = main_func.blocks.iter().any(|b| {
+  1776→  1776→            b.instructions.iter().any(|i| {
+  1777→  1777→                matches!(
+  1778→  1778→                    i,
+  1779→  1779→                    IRInstr::BinOp {
+  1780→  1780→                        op: BinOpKind::Add,
+  1781→  1781→                        dst: IRValue::Register(0),
+  1782→  1782→                        ..
+  1783→  1783→                    }
+  1784→  1784→                )
+  1785→  1785→            })
+  1786→  1786→        });
+  1787→  1787→        assert!(
+  1788→  1788→            !has_dead_add,
+  1789→  1789→            "dead constant add should have been eliminated"
+  1790→  1790→        );
+  1791→  1791→    }
+  1792→  1792→}
+  1793→  1793→

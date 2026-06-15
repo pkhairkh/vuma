@@ -554,7 +554,7 @@ fn test_codegen_bare_metal_raw() {
     let ir_program = builder.build(&scg).expect("IRBuilder should succeed");
 
     let config = EmitConfig::bare_metal_raw();
-    let raw_bytes = emit_raw(&ir_program.functions, &config).expect("Raw emission should succeed");
+    let raw_bytes = emit_raw(&ir_program.functions, &[], &config).expect("Raw emission should succeed");
 
     // Raw binary should NOT start with ELF magic
     if raw_bytes.len() >= 4 {
