@@ -55,13 +55,16 @@ pub use pipeline::{
 pub use diagnostics::{
     diagnostics_to_json, diagnostics_to_json_pretty, from_codegen_error, from_parse_error,
     from_parse_errors, from_vuma_error, code_for_parse_error_kind, code_for_codegen_error,
-    code_description, DiagnosticSeverity, DiagnosticSourceLocation, RelatedInfo, VumaDiagnostic,
+    code_category, code_subcategory, code_description,
+    DiagnosticSeverity, DiagnosticSourceLocation, DiagnosticSummary,
+    RelatedInfo, Suggestion, SuggestionApplicability, VumaDiagnostic,
 };
 
 // Re-export the primary API types for convenience.
 pub use api::{
-    ApiTargetInfo, CompileMetadata, CompileResult, FunctionSummary, ParseResult, ScgSummary,
-    TargetOutput, VumaCompiler,
+    ApiTargetInfo, CompileMetadata, CompileResult, CounterexampleInfo, FunctionSummary,
+    InvariantVerification, InvariantVerificationStatus, ParseResult, ScgSummary, TargetOutput,
+    VerificationMetadata, VerificationReport, VerificationVerdict, VumaCompiler,
 };
 
 // Re-export REPL types from vuma-core for convenience.

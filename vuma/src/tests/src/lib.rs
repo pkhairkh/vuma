@@ -83,6 +83,8 @@ pub mod trivial;
 pub mod wasm_validation;
 #[cfg(test)]
 pub mod cross_backend;
+#[cfg(test)]
+pub mod property_tests;
 
 // Re-export the helper macros from the framework module.
 // Note: #[macro_export] macros are already at the crate root, so no

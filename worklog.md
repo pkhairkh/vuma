@@ -1889,3 +1889,243 @@ Stage Summary:
 - Module resolution: relative path resolution, circular import detection, name conflict detection
 - Pipeline: new `compile_with_path()` API, backward-compatible `compile()` still works
 - CLI: all subcommands now pass file paths for import resolution
+
+---
+Task ID: 16
+Agent: general-purpose
+Task: Wave16: CI build matrix
+
+Work Log:
+- Created .github/workflows/ci.yml with GitHub Actions workflow
+  - Triggers on push to main and pull requests
+  - Test job: Ubuntu latest with Rust nightly-2026-03-01 (pinned via rust-toolchain.toml)
+  - Steps: checkout, cargo build --workspace, cargo test --workspace, cargo clippy --workspace, cargo fmt --workspace --check
+  - Release job: builds vuma binary for x86_64-linux with LTO, uploads as artifact
+- Created .github/workflows/cross-compile.yml
+  - Matrix covers all 8 backend targets: x86_64, aarch64, riscv64gc, armv7, mips64, powerpc64, loongarch64, wasm32
+  - Uses cross-rs for aarch64, riscv64gc, armv7, mips64, powerpc64 (QEMU-backed)
+  - LoongArch64: cargo check only (limited cross-rs support)
+  - Wasm32: cargo build only (no std runtime)
+  - Native x86_64: standard cargo build
+  - fail-fast: false so all targets report independently
+- Created .github/dependabot.yml
+  - Checks for Cargo dependency updates weekly (Mondays)
+  - Limits 5 open PRs, applies dependencies/rust labels
+- Updated .gitignore
+  - Added *.wasm, tool-results/, .env entries
+- All YAML files validated with Python yaml.safe_load
+
+Stage Summary:
+- CI pipeline: test + release workflow for main/PR builds
+- Cross-compile verification for all 8 ISA backends
+- Automated dependency updates via Dependabot
+- .gitignore covers build artifacts and tool output
+
+---
+Task ID: 13-14
+Agent: general-purpose
+Task: Documentation Overhaul + REPL Enhancements
+
+Work Log:
+
+1. **ROADMAP.md Overhaul** (`docs/ROADMAP.md`):
+   - Updated version to 0.2.0, status to "Phase 2 — Core Implementation (substantial progress)"
+   - Removed all BCM2712/Pi5 references from overview (replaced with multi-arch description)
+   - Phase 1: Marked COMPLETE with expanded milestones (M1.1-M1.6) including multi-arch codegen (8 backends), parser, and proof system
+   - Phase 1 deliverables: Added all 8 backend architectures, parser crate, projection crate to achievement list
+   - Phase 2: Added 5 new milestones (M2.7-M2.11) for LLM API, LSP server, enhanced REPL, module resolution, and Wasm32 sandbox
+   - Phase 2: Updated existing milestones — M2.1/M2.2/M2.5 now marked Complete
+   - Phase 2 success criteria: Updated to checkbox format with 10 items (7 checked)
+   - Phase 3: Updated to "In Progress (waves 6-10)" with new milestones M3.6-M3.8 (verification hardening, cross-backend validation, diagnostics)
+   - Phase 3 success criteria: Updated to checkbox format with 14 items (6 checked)
+   - Phase 4: Updated status — LSP, parser, projections now marked Complete
+   - Added new section: "LLM Integration" as key differentiator with architecture diagram, interface table, and Wasm32 sandbox description
+   - Updated dependency graph to reflect LLM API, LSP, module resolution, parser, and proof system
+   - Updated risk mitigation table with LLM API stability risk
+
+2. **architecture.md Updates** (`docs/architecture.md`):
+   - Updated version to 0.2.0, status to "Phase 2 — substantial progress"
+   - Added Section 9: "LLM Integration Architecture" with LLM-facing components, workflow diagram, and Wasm32 sandbox section
+   - Updated Table of Contents to include new section
+   - Updated Layer Interaction Diagram: Added LLM Integration Layer (VumaCompiler API, LSP Server, REPL), changed "Parser / Frontend" to include "Module System", changed Execution Layer to "Multi-Arch Backends" showing all 8 architectures
+   - Removed all "ARM64" single-architecture references in favor of "multi-arch" / "8 backends" language
+   - Updated COR Layer 4 description to mention 8 backend architectures
+   - Updated data flow Stage 5 and Stage 6 to reference multi-arch codegen
+   - Updated codegen crate description to "Multi-Arch Code Generation"
+   - Updated code generation pipeline section to describe 8 backend architectures and Backend trait
+   - Updated register allocation section to describe per-backend strategies
+   - Updated emit module description to include Wasm module generation
+   - Updated COR description to remove "ARM64" constraint
+   - Updated platform layer description to reference multi-arch linker scripts
+   - Added "LLM-native" as sixth architectural principle
+   - Zero remaining Pi5/BCM2712/Raspberry Pi references in architecture.md
+
+3. **REPL Enhancements** (`src/vuma/src/repl.rs`):
+   - Added `:wasm` command — compiles current session to Wasm32 and shows estimated binary size
+   - Added `:backends` command — lists all 8 available backends with status (stable/experimental) and current target marker
+   - Added `:check` command — alias for `:verify`, runs IVE verification on current session
+   - Added `:diagnostics` command — outputs all current diagnostics (IVE, parser, SCG, MSG) as JSON using serde_json
+   - Added `:exports` command — lists all function signatures, constants, and variable bindings in the session
+   - Added tab completion system: `complete()` function supports command completion (all `:xxx` commands) and VUMA keyword completion (fn, let, if, while, etc.)
+   - Added ANSI color output: `ansi` module with escape codes, `supports_color()` detection, `color!` macro
+   - Applied color to: REPL prompt (bold green), banner (bold cyan), errors (bold red), warnings (yellow), success messages (green), section headers (bold cyan), function names (bold cyan), variable names (cyan), backend status markers (bold green), estimated/notes (dim)
+   - Updated help text to include all new commands and tab completion instructions
+   - Added 11 new tests (tests 30-36): :wasm, :backends, :check, :diagnostics, :exports, tab completion commands, tab completion keywords, ANSI color support
+   - All 39 REPL tests pass
+
+Files Changed:
+- `docs/ROADMAP.md` — Complete rewrite reflecting project state after Waves 1-10
+- `docs/architecture.md` — Updated for multi-arch, LLM integration, removed Pi5 references, added Section 9
+- `src/vuma/src/repl.rs` — Added 5 new commands, tab completion, ANSI color output, 11 new tests
+
+Stage Summary:
+- ROADMAP.md now accurately reflects 8 backends, LLM API, LSP, REPL, parser, proof system achievements
+- architecture.md has zero Pi5/BCM2712 references, new LLM Integration Architecture section
+- REPL has :wasm, :backends, :check, :diagnostics, :exports commands with tab completion and color output
+
+---
+Task ID: 15
+Agent: general-purpose
+Task: Wave15: Create comprehensive structured error reporting system
+
+Work Log:
+- Read existing diagnostics.rs (1113 lines) — had 23 diagnostic codes (E001-E023, W001-W003)
+- Expanded error catalog to 65 diagnostic codes:
+  - E001-E030: Compilation errors (syntax, type, name resolution, etc.)
+  - E031-E040: Codegen errors (register allocation, encoding, relocation, linker)
+  - E041-E050: Verification errors (invariant violations, proof failures, BD inference)
+  - W001-W010: Warnings (unused vars, dead code, redundant cast, shadowed variable, unnecessary mut, deprecated, unused import, reachable panic)
+  - I001-I005: Informational messages (compilation started, stage completed, optimization applied, verification passed, artifact produced)
+- Added `code_category()` and `code_subcategory()` helper functions for code introspection
+- Added `Suggestion` struct with structured edit ranges:
+  - `Suggestion::text()` — plain text suggestions
+  - `Suggestion::edit()` — suggestions with edit range + replacement text
+  - `Suggestion::machine_applicable()` — auto-fixable suggestions
+  - `Suggestion::with_placeholders()` — suggestions needing human review
+  - `SuggestionApplicability` enum (MachineApplicable, MaybeIncorrect, HasPlaceholders, Unspecified)
+- Added error chaining via `VumaDiagnostic::chain()`:
+  - `chain(cause)` — adds causal diagnostic
+  - `root_cause()` — returns deepest cause
+  - `immediate_cause()` — returns first cause
+  - `causal_chain()` — returns full chain slice
+  - `has_chain()` — checks if chain exists
+  - JSON serialization includes `chain` field
+  - Display/Plain/Rich text all show "caused by:" chain
+- Added output format methods:
+  - `to_json()` — machine-readable JSON (existing, enhanced with chain/suggestions)
+  - `to_rich_text()` — ANSI-colored terminal output (red errors, yellow warnings, green suggestions, indented causal chain)
+  - `to_plain_text()` — plain text for logs (no ANSI codes)
+  - `to_lsp()` — LSP Diagnostic format (0-based positions, severity codes, relatedInformation, tags, codeDescription)
+- Added `DiagnosticSummary` for error statistics:
+  - Counts by severity (errors, warnings, infos, hints)
+  - Counts by code (e.g. "E001" × 3)
+  - Counts by source (e.g. "parser" × 5)
+  - Counts by subcategory (compilation, codegen, verification, warning, informational)
+  - `has_errors()`, `has_warnings()`, `count_for_code()`, `count_for_source()`
+  - JSON serialization and Display implementation
+- Added convenience constructors for all new codes (E024-E050, W004-W010, I001-I005)
+- Updated `from_vuma_error()` to use proper new codes (E024, E032, E035, E042, E048 instead of generic E001)
+- Updated `from_codegen_error()` to use E031-E036 range and structured suggestions
+- Updated `code_for_codegen_error()` to use E031-E036
+- Updated re-exports in lib.rs (added DiagnosticSummary, Suggestion, SuggestionApplicability, code_category, code_subcategory)
+- Fixed pre-existing build errors: vuma-core/repl.rs missing cmd_wasm/cmd_backends/cmd_diagnostics/cmd_exports method bodies, Expr Display format
+- Added 64 comprehensive tests covering all new features
+
+Stage Summary:
+- Diagnostic codes expanded from 23 to 65 (E001-E050, W001-W010, I001-I005)
+- Error chaining supports causal chains with JSON/Display/Rich/Plain output
+- Structured suggestions carry edit ranges, replacements, and applicability
+- Four output formats: JSON, ANSI rich text, plain text, LSP
+- DiagnosticSummary provides statistical analysis of diagnostic collections
+- All 102 library tests pass (64 diagnostics-specific)
+- All 39 REPL unit tests pass (11 new tests added)
+
+---
+Task ID: 11-12
+Agent: general-purpose
+Task: Verification Pipeline Hardening + Property-Based Testing
+
+Work Log:
+
+1. **Read and analyzed IVE module** (`src/ive/src/`):
+   - `VerificationEngine` — facade that checks 5 invariants (liveness, exclusivity, interpretation, origin, cleanup)
+   - `InvariantAggregator` — orchestrates checks, supports Quick/Normal/Exhaustive levels, incremental verification
+   - `VerificationInput` — accepts SCG + optional BD map
+   - `VerificationResult` — Proven/ProbablySafe/Unverified/Violated with CounterExample
+
+2. **Read and analyzed Proof module** (`src/proof/src/`):
+   - `ProofChecker` — validates proof steps, detects circular reasoning
+   - `CounterExample` — execution trace + violation point, supports delta-debugging minimization
+   - `ProofBundle` — aggregates proofs for all 5 invariants with cross-invariant consistency checking
+   - `InvariantStatus` — Proven/Failed/NotAttempted per invariant
+
+3. **Added `verify()` method to `VumaCompiler`** in `src/api.rs`:
+   - Parses source → SCG via `run_frontend()`
+   - Runs `InvariantAggregator::verify_all()` at Normal level (all 5 checks)
+   - Converts IVE results to API-level `VerificationReport` with:
+     - Per-invariant `InvariantVerification` (kind, status, message, elapsed_ms, counterexample)
+     - `InvariantVerificationStatus`: Pass/Fail/Unverified
+     - `CounterexampleInfo` with description + execution trace
+   - Cross-checks with proof system via `ProofBundle::status()` — upgrades Unverified→Fail if proof system finds failures
+   - Converts IVE counterexamples through proof-system `CounterExample::minimal()` for delta-debugged traces
+   - Full serialization support (all types derive Serialize/Deserialize)
+   - 3 new tests: test_verify_simple, test_verify_report_serializable, test_verify_invalid_source
+
+4. **New verification report types** added to `src/api.rs`:
+   - `VerificationVerdict` (Pass/Fail/Inconclusive/Error)
+   - `InvariantVerificationStatus` (Pass/Fail/Unverified)
+   - `CounterexampleInfo` (description + execution_trace)
+   - `InvariantVerification` (kind, status, message, elapsed_ms, counterexample)
+   - `VerificationMetadata` (total_elapsed_ms, source_lines, source_bytes)
+   - `VerificationReport` (overall_verdict, invariants, diagnostics, metadata)
+
+5. **Re-exported new types** from `src/lib.rs`:
+   - CounterexampleInfo, InvariantVerification, InvariantVerificationStatus
+   - VerificationMetadata, VerificationReport, VerificationVerdict
+
+6. **Added `vuma-proof` dependency** to root `Cargo.toml`
+
+7. **Fixed pre-existing build issues**:
+   - Added `serde_json` and `vuma-proof` deps to `src/vuma/Cargo.toml`
+   - Fixed `SuggestionApplicability` Default derive (added `#[default]` attribute)
+   - Fixed `vuma_core::repl` Expr Display issue (changed `{}` to `{:?}`)
+
+8. **Created `property_tests.rs`** at `src/tests/src/property_tests.rs`:
+   - Random program generation strategies:
+     - `arb_identifier()` — valid VUMA identifiers (letter-first, no underscore start)
+     - `arb_int_literal()` — bounded integer literals
+     - `arb_binop()` — 15 binary operators
+     - `arb_simple_expr()` — binary expression statements
+     - `arb_lit_assign()` — literal assignment statements
+     - `arb_statement()` — random single statement
+     - `arb_fn_body()` — 1-5 statements
+     - `arb_fn_def()` — function definition
+     - `arb_vuma_program()` — 0-2 helper functions + main
+     - `arb_memory_program()` — region allocation + pointer arithmetic
+     - `arb_call_program()` — function call program
+   - Random SCG construction strategies:
+     - `arb_node_type()`, `arb_edge_kind()`, `arb_computation_payload()`, etc.
+     - `arb_program_point()`, `arb_node_payload()`
+   - 15 proptest-based property tests across 6 categories:
+     - Parser roundtrip: 4 tests (no errors, memory, call, parse-to-SCG)
+     - Cross-backend consistency: 2 tests (all backends produce output, same SCG)
+     - SCG structural invariants: 3 tests (function entry, valid edges, validation)
+     - SCG construction invariants: 3 tests (node count, edge validity, nonexistent node)
+     - Verification pipeline: 2 tests (no panic, serializable)
+     - IVE verification: 1 test (all invariants on random SCG)
+
+9. **Updated `src/tests/src/lib.rs`** with `pub mod property_tests`
+
+10. **Added `proptest` and `serde_json` dependencies** to `src/tests/Cargo.toml`
+
+11. **All tests pass**:
+    - 102 vuma lib tests (including 3 new verify tests)
+    - 211 vuma-tests (including 15 new property tests)
+    - 0 failures
+
+Stage Summary:
+- VumaCompiler.verify() method fully integrated with IVE + proof pipeline
+- Verification reports include per-invariant pass/fail + counterexamples
+- Proof system cross-check identifies IVE misses (upgrades Unverified→Fail)
+- 15 property-based tests cover parser roundtrip, cross-backend, SCG invariants, verification
+- All workspace crates compile cleanly

@@ -1,0 +1,1113 @@
+     1→     1→//! Structured JSON diagnostics output for LLM integration.
+     2→     2→//!
+     3→     3→//! This module provides machine-readable diagnostic messages that can be
+     4→     4→//! serialized to JSON, enabling LLM-based tools and IDE integrations to
+     5→     5→//! programmatically consume compiler errors, warnings, and hints.
+     6→     6→//!
+     7→     7→//! # Architecture
+     8→     8→//!
+     9→     9→//! Each diagnostic carries a structured error code (`"E001"`, `"W001"`, etc.),
+    10→    10→//! a severity level, a human-readable message, a source identifier (which
+    11→    11→//! compiler stage produced it), a precise source location, optional related
+    12→    12→//! information, and quick-fix suggestions.
+    13→    13→//!
+    14→    14→//! # Example JSON output
+    15→    15→//!
+    16→    16→//! ```json
+    17→    17→//! [
+    18→    18→//!   {
+    19→    19→//!     "code": "E002",
+    20→    20→//!     "severity": "error",
+    21→    21→//!     "message": "undefined variable `foo`",
+    22→    22→//!     "source": "parser",
+    23→    23→//!     "location": {
+    24→    24→//!       "file": "main.vu",
+    25→    25→//!       "start_line": 10,
+    26→    26→//!       "start_col": 4,
+    27→    27→//!       "end_line": 10,
+    28→    28→//!       "end_col": 7
+    29→    29→//!     },
+    30→    30→//!     "related": [],
+    31→    31→//!     "suggestions": ["did you mean `for`?"]
+    32→    32→//!   }
+    33→    33→//! ]
+    34→    34→//! ```
+    35→    35→//!
+    36→    36→//! # Integration
+    37→    37→//!
+    38→    38→//! Use [`from_parse_error`] to convert parser errors, [`from_vuma_error`] for
+    39→    39→//! pipeline-level errors, and [`from_codegen_error`] for code-generation
+    40→    40→//! failures.
+    41→    41→
+    42→    42→use serde::{Deserialize, Serialize};
+    43→    43→use std::fmt;
+    44→    44→
+    45→    45→use vuma_codegen::CodegenError;
+    46→    46→use vuma_parser::{offset_to_location, ParseError, ParseErrorKind, Severity as ParserSeverity};
+    47→    47→
+    48→    48→use crate::pipeline::VumaError;
+    49→    49→
+    50→    50→// ═══════════════════════════════════════════════════════════════════════════
+    51→    51→// DiagnosticSeverity
+    52→    52→// ═══════════════════════════════════════════════════════════════════════════
+    53→    53→
+    54→    54→/// Severity level for a machine-readable diagnostic.
+    55→    55→///
+    56→    56→/// Unlike the parser's `Severity` (which has `Note`), this uses `Hint` for
+    57→    57→/// LLM-consumable suggestions and `Info` for informational notes.
+    58→    58→#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+    59→    59→#[serde(rename_all = "lowercase")]
+    60→    60→pub enum DiagnosticSeverity {
+    61→    61→    /// A hard error — the program cannot be compiled.
+    62→    62→    Error,
+    63→    63→    /// A warning — suspicious code that is technically valid.
+    64→    64→    Warning,
+    65→    65→    /// An informational note, typically providing context.
+    66→    66→    Info,
+    67→    67→    /// A hint or quick-fix suggestion.
+    68→    68→    Hint,
+    69→    69→}
+    70→    70→
+    71→    71→impl fmt::Display for DiagnosticSeverity {
+    72→    72→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    73→    73→        match self {
+    74→    74→            DiagnosticSeverity::Error => write!(f, "error"),
+    75→    75→            DiagnosticSeverity::Warning => write!(f, "warning"),
+    76→    76→            DiagnosticSeverity::Info => write!(f, "info"),
+    77→    77→            DiagnosticSeverity::Hint => write!(f, "hint"),
+    78→    78→        }
+    79→    79→    }
+    80→    80→}
+    81→    81→
+    82→    82→impl From<ParserSeverity> for DiagnosticSeverity {
+    83→    83→    fn from(s: ParserSeverity) -> Self {
+    84→    84→        match s {
+    85→    85→            ParserSeverity::Error => DiagnosticSeverity::Error,
+    86→    86→            ParserSeverity::Warning => DiagnosticSeverity::Warning,
+    87→    87→            ParserSeverity::Note => DiagnosticSeverity::Info,
+    88→    88→        }
+    89→    89→    }
+    90→    90→}
+    91→    91→
+    92→    92→// ═══════════════════════════════════════════════════════════════════════════
+    93→    93→// DiagnosticSourceLocation
+    94→    94→// ═══════════════════════════════════════════════════════════════════════════
+    95→    95→
+    96→    96→/// Machine-readable source location with line/column ranges.
+    97→    97→///
+    98→    98→/// All positions are 1-based (as is conventional for compiler diagnostics)
+    99→    99→/// rather than the 0-based positions used internally by the parser.
+   100→   100→#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+   101→   101→pub struct DiagnosticSourceLocation {
+   102→   102→    /// File path or module name.
+   103→   103→    pub file: String,
+   104→   104→    /// Start line (1-based).
+   105→   105→    pub start_line: u32,
+   106→   106→    /// Start column (1-based).
+   107→   107→    pub start_col: u32,
+   108→   108→    /// End line (1-based).
+   109→   109→    pub end_line: u32,
+   110→   110→    /// End column (1-based, exclusive).
+   111→   111→    pub end_col: u32,
+   112→   112→}
+   113→   113→
+   114→   114→impl DiagnosticSourceLocation {
+   115→   115→    /// Create a location spanning a single point (zero-width).
+   116→   116→    pub fn point(file: impl Into<String>, line: u32, col: u32) -> Self {
+   117→   117→        Self {
+   118→   118→            file: file.into(),
+   119→   119→            start_line: line,
+   120→   120→            start_col: col,
+   121→   121→            end_line: line,
+   122→   122→            end_col: col,
+   123→   123→        }
+   124→   124→    }
+   125→   125→
+   126→   126→    /// Create a location spanning a range within a single line.
+   127→   127→    pub fn range(
+   128→   128→        file: impl Into<String>,
+   129→   129→        line: u32,
+   130→   130→        start_col: u32,
+   131→   131→        end_col: u32,
+   132→   132→    ) -> Self {
+   133→   133→        Self {
+   134→   134→            file: file.into(),
+   135→   135→            start_line: line,
+   136→   136→            start_col,
+   137→   137→            end_line: line,
+   138→   138→            end_col,
+   139→   139→        }
+   140→   140→    }
+   141→   141→
+   142→   142→    /// Create a synthetic "unknown" location for diagnostics that cannot be
+   143→   143→    /// tied to a specific source position.
+   144→   144→    pub fn unknown() -> Self {
+   145→   145→        Self {
+   146→   146→            file: String::new(),
+   147→   147→            start_line: 0,
+   148→   148→            start_col: 0,
+   149→   149→            end_line: 0,
+   150→   150→            end_col: 0,
+   151→   151→        }
+   152→   152→    }
+   153→   153→
+   154→   154→    /// Returns `true` if this location represents an unknown / synthetic
+   155→   155→    /// position (all fields zero, no file).
+   156→   156→    pub fn is_unknown(&self) -> bool {
+   157→   157→        self.file.is_empty() && self.start_line == 0 && self.start_col == 0
+   158→   158→    }
+   159→   159→}
+   160→   160→
+   161→   161→impl fmt::Display for DiagnosticSourceLocation {
+   162→   162→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+   163→   163→        if self.is_unknown() {
+   164→   164→            write!(f, "<unknown>")
+   165→   165→        } else if self.start_line == self.end_line && self.start_col == self.end_col {
+   166→   166→            write!(f, "{}:{}:{}", self.file, self.start_line, self.start_col)
+   167→   167→        } else {
+   168→   168→            write!(
+   169→   169→                f,
+   170→   170→                "{}:{}:{}-{}:{}",
+   171→   171→                self.file, self.start_line, self.start_col, self.end_line, self.end_col
+   172→   172→            )
+   173→   173→        }
+   174→   174→    }
+   175→   175→}
+   176→   176→
+   177→   177→// ═══════════════════════════════════════════════════════════════════════════
+   178→   178→// RelatedInfo
+   179→   179→// ═══════════════════════════════════════════════════════════════════════════
+   180→   180→
+   181→   181→/// Additional context for a diagnostic: a related source location with a
+   182→   182→/// message explaining its relevance.
+   183→   183→#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+   184→   184→pub struct RelatedInfo {
+   185→   185→    /// The related source location.
+   186→   186→    pub location: DiagnosticSourceLocation,
+   187→   187→    /// Why this location is relevant to the primary diagnostic.
+   188→   188→    pub message: String,
+   189→   189→}
+   190→   190→
+   191→   191→impl RelatedInfo {
+   192→   192→    /// Create a new related-info entry.
+   193→   193→    pub fn new(location: DiagnosticSourceLocation, message: impl Into<String>) -> Self {
+   194→   194→        Self {
+   195→   195→            location,
+   196→   196→            message: message.into(),
+   197→   197→        }
+   198→   198→    }
+   199→   199→}
+   200→   200→
+   201→   201→// ═══════════════════════════════════════════════════════════════════════════
+   202→   202→// Diagnostic codes
+   203→   203→// ═══════════════════════════════════════════════════════════════════════════
+   204→   204→
+   205→   205→/// Returns the diagnostic code string for a given [`ParseErrorKind`].
+   206→   206→///
+   207→   207→/// Mapping:
+   208→   208→///
+   209→   209→/// | Code  | Kind                    | Description                |
+   210→   210→/// |-------|-------------------------|----------------------------|
+   211→   211→/// | E001  | InvalidSyntax           | Syntax error               |
+   212→   212→/// | E002  | UndefinedReference / UndefinedVariable | Undefined variable |
+   213→   213→/// | E003  | TypeMismatch            | Type mismatch              |
+   214→   214→/// | E004  | DuplicateDefinition     | Duplicate definition       |
+   215→   215→/// | E005  | —                       | Invalid argument count     |
+   216→   216→/// | E006  | —                       | Invalid type               |
+   217→   217→/// | E007  | —                       | Missing return             |
+   218→   218→/// | E008  | —                       | Unreachable code           |
+   219→   219→/// | W001  | —                       | Unused variable            |
+   220→   220→/// | W002  | —                       | Implicit type conversion   |
+   221→   221→/// | W003  | —                       | Large constant (perf hint) |
+   222→   222→/// | E009  | UnexpectedToken         | Unexpected token           |
+   223→   223→/// | E010  | ExpectedToken           | Expected token             |
+   224→   224→/// | E011  | RegionError             | Region error               |
+   225→   225→/// | E012  | BDAnnotationError       | BD annotation error        |
+   226→   226→/// | E013  | InvalidCompoundOp       | Invalid compound operator  |
+   227→   227→/// | E014  | MissingSemicolon        | Missing semicolon          |
+   228→   228→/// | E015  | InvalidAddress          | Invalid address literal    |
+   229→   229→pub fn code_for_parse_error_kind(kind: &ParseErrorKind) -> &'static str {
+   230→   230→    match kind {
+   231→   231→        ParseErrorKind::InvalidSyntax => "E001",
+   232→   232→        ParseErrorKind::UndefinedReference | ParseErrorKind::UndefinedVariable => "E002",
+   233→   233→        ParseErrorKind::TypeMismatch => "E003",
+   234→   234→        ParseErrorKind::DuplicateDefinition => "E004",
+   235→   235→        ParseErrorKind::UnexpectedToken => "E009",
+   236→   236→        ParseErrorKind::ExpectedToken => "E010",
+   237→   237→        ParseErrorKind::RegionError => "E011",
+   238→   238→        ParseErrorKind::BDAnnotationError => "E012",
+   239→   239→        ParseErrorKind::InvalidCompoundOp => "E013",
+   240→   240→        ParseErrorKind::MissingSemicolon => "E014",
+   241→   241→        ParseErrorKind::InvalidAddress => "E015",
+   242→   242→        ParseErrorKind::LlmMistake => "E021",
+   243→   243→        ParseErrorKind::CStyleForLoop => "E022",
+   244→   244→        ParseErrorKind::UnknownType => "E023",
+   245→   245→    }
+   246→   246→}
+   247→   247→
+   248→   248→/// Returns the diagnostic code string for a given [`CodegenError`].
+   249→   249→pub fn code_for_codegen_error(err: &CodegenError) -> &'static str {
+   250→   250→    match err {
+   251→   251→        CodegenError::InvalidInstruction(_) => "E016",
+   252→   252→        CodegenError::RegisterAllocFailed(_) => "E017",
+   253→   253→        CodegenError::EncodingError(_) => "E018",
+   254→   254→        CodegenError::TranslationError(_) => "E019",
+   255→   255→        CodegenError::ElfError(_) => "E020",
+   256→   256→        CodegenError::UnknownVariable { .. } => "E002",
+   257→   257→        CodegenError::WasmSectionNotFound { .. } => "E016",
+   258→   258→    }
+   259→   259→}
+   260→   260→
+   261→   261→/// Human-readable description of a diagnostic code.
+   262→   262→pub fn code_description(code: &str) -> &'static str {
+   263→   263→    match code {
+   264→   264→        "E001" => "Syntax error",
+   265→   265→        "E002" => "Undefined variable",
+   266→   266→        "E003" => "Type mismatch",
+   267→   267→        "E004" => "Duplicate definition",
+   268→   268→        "E005" => "Invalid argument count",
+   269→   269→        "E006" => "Invalid type",
+   270→   270→        "E007" => "Missing return",
+   271→   271→        "E008" => "Unreachable code",
+   272→   272→        "E009" => "Unexpected token",
+   273→   273→        "E010" => "Expected token",
+   274→   274→        "E011" => "Region error",
+   275→   275→        "E012" => "BD annotation error",
+   276→   276→        "E013" => "Invalid compound assignment operator",
+   277→   277→        "E014" => "Missing semicolon",
+   278→   278→        "E015" => "Invalid address literal",
+   279→   279→        "E016" => "Invalid instruction",
+   280→   280→        "E017" => "Register allocation failed",
+   281→   281→        "E018" => "Encoding error",
+   282→   282→        "E019" => "IR translation error",
+   283→   283→        "E021" => "LLM code mismatch (Rust/C syntax in VUMA)",
+   284→   284→        "E022" => "C-style for loop (use range-based for instead)",
+   285→   285→        "E023" => "Unknown type (use VUMA sized integer types)",
+   286→   286→        "E020" => "ELF emission error",
+   287→   287→        "W001" => "Unused variable",
+   288→   288→        "W002" => "Implicit type conversion",
+   289→   289→        "W003" => "Large constant (performance hint)",
+   290→   290→        _ => "Unknown diagnostic code",
+   291→   291→    }
+   292→   292→}
+   293→   293→
+   294→   294→// ═══════════════════════════════════════════════════════════════════════════
+   295→   295→// VumaDiagnostic
+   296→   296→// ═══════════════════════════════════════════════════════════════════════════
+   297→   297→
+   298→   298→/// A machine-readable diagnostic with structured fields for LLM consumption.
+   299→   299→///
+   300→   300→/// This is the primary output type for JSON diagnostics. Every field is
+   301→   301→/// serializable and carries enough information for an LLM or IDE to
+   302→   302→/// understand, categorize, and potentially auto-fix the issue.
+   303→   303→#[derive(Debug, Clone, Serialize, Deserialize)]
+   304→   304→pub struct VumaDiagnostic {
+   305→   305→    /// Structured diagnostic code, e.g. `"E001"`, `"W001"`.
+   306→   306→    pub code: String,
+   307→   307→    /// Severity level.
+   308→   308→    pub severity: DiagnosticSeverity,
+   309→   309→    /// Human-readable message (suitable for display).
+   310→   310→    pub message: String,
+   311→   311→    /// Compiler stage that produced this diagnostic
+   312→   312→    /// (`"parser"`, `"scg"`, `"ir"`, `"codegen"`, etc.).
+   313→   313→    pub source: String,
+   314→   314→    /// Precise source location.
+   315→   315→    pub location: DiagnosticSourceLocation,
+   316→   316→    /// Related source locations with explanatory messages.
+   317→   317→    pub related: Vec<RelatedInfo>,
+   318→   318→    /// Quick-fix suggestions (e.g. `"did you mean 'fn'?"`,
+   319→   319→    /// `"add semicolon"`).
+   320→   320→    pub suggestions: Vec<String>,
+   321→   321→}
+   322→   322→
+   323→   323→impl VumaDiagnostic {
+   324→   324→    /// Create a new diagnostic with all fields.
+   325→   325→    pub fn new(
+   326→   326→        code: impl Into<String>,
+   327→   327→        severity: DiagnosticSeverity,
+   328→   328→        message: impl Into<String>,
+   329→   329→        source: impl Into<String>,
+   330→   330→        location: DiagnosticSourceLocation,
+   331→   331→    ) -> Self {
+   332→   332→        Self {
+   333→   333→            code: code.into(),
+   334→   334→            severity,
+   335→   335→            message: message.into(),
+   336→   336→            source: source.into(),
+   337→   337→            location,
+   338→   338→            related: Vec::new(),
+   339→   339→            suggestions: Vec::new(),
+   340→   340→        }
+   341→   341→    }
+   342→   342→
+   343→   343→    /// Add a related-info entry.
+   344→   344→    pub fn with_related(mut self, info: RelatedInfo) -> Self {
+   345→   345→        self.related.push(info);
+   346→   346→        self
+   347→   347→    }
+   348→   348→
+   349→   349→    /// Add a quick-fix suggestion.
+   350→   350→    pub fn with_suggestion(mut self, suggestion: impl Into<String>) -> Self {
+   351→   351→        self.suggestions.push(suggestion.into());
+   352→   352→        self
+   353→   353→    }
+   354→   354→
+   355→   355→    /// Serialize this diagnostic as a JSON string.
+   356→   356→    pub fn to_json(&self) -> String {
+   357→   357→        serde_json::to_string(self).unwrap_or_else(|_| {
+   358→   358→            r#"{"code":"E000","severity":"error","message":"JSON serialization failed","source":"diagnostics","location":{"file":"","start_line":0,"start_col":0,"end_line":0,"end_col":0},"related":[],"suggestions":[]}"#.to_string()
+   359→   359→        })
+   360→   360→    }
+   361→   361→
+   362→   362→    /// Serialize this diagnostic as a pretty-printed JSON string.
+   363→   363→    pub fn to_json_pretty(&self) -> String {
+   364→   364→        serde_json::to_string_pretty(self).unwrap_or_else(|_| self.to_json())
+   365→   365→    }
+   366→   366→}
+   367→   367→
+   368→   368→impl fmt::Display for VumaDiagnostic {
+   369→   369→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+   370→   370→        write!(
+   371→   371→            f,
+   372→   372→            "{}[{}]: {} ({} at {})",
+   373→   373→            self.severity, self.code, self.message, self.source, self.location
+   374→   374→        )?;
+   375→   375→        for related in &self.related {
+   376→   376→            write!(f, "\n  note: {} at {}", related.message, related.location)?;
+   377→   377→        }
+   378→   378→        for suggestion in &self.suggestions {
+   379→   379→            write!(f, "\n  help: {}", suggestion)?;
+   380→   380→        }
+   381→   381→        Ok(())
+   382→   382→    }
+   383→   383→}
+   384→   384→
+   385→   385→// ═══════════════════════════════════════════════════════════════════════════
+   386→   386→// JSON array serialization
+   387→   387→// ═══════════════════════════════════════════════════════════════════════════
+   388→   388→
+   389→   389→/// Serialize a slice of diagnostics as a JSON array.
+   390→   390→pub fn diagnostics_to_json(diagnostics: &[VumaDiagnostic]) -> String {
+   391→   391→    serde_json::to_string(diagnostics).unwrap_or_else(|_| "[]".to_string())
+   392→   392→}
+   393→   393→
+   394→   394→/// Serialize a slice of diagnostics as a pretty-printed JSON array.
+   395→   395→pub fn diagnostics_to_json_pretty(diagnostics: &[VumaDiagnostic]) -> String {
+   396→   396→    serde_json::to_string_pretty(diagnostics).unwrap_or_else(|_| "[]".to_string())
+   397→   397→}
+   398→   398→
+   399→   399→// ═══════════════════════════════════════════════════════════════════════════
+   400→   400→// Integration: ParseError → VumaDiagnostic
+   401→   401→// ═══════════════════════════════════════════════════════════════════════════
+   402→   402→
+   403→   403→/// Convert a [`ParseError`] to a [`VumaDiagnostic`].
+   404→   404→///
+   405→   405→/// `source` is the full source text (used to compute line/column from byte
+   406→   406→/// offsets). `file` is the optional file path.
+   407→   407→pub fn from_parse_error(
+   408→   408→    err: &ParseError,
+   409→   409→    source: &str,
+   410→   410→    file: Option<&str>,
+   411→   411→) -> VumaDiagnostic {
+   412→   412→    let code = code_for_parse_error_kind(&err.kind).to_string();
+   413→   413→    let loc = offset_to_location(source, err.span.start, file);
+   414→   414→
+   415→   415→    // Compute end position from span end.
+   416→   416→    let end_loc = if err.span.end > err.span.start && err.span.end <= source.len() {
+   417→   417→        offset_to_location(source, err.span.end, file)
+   418→   418→    } else {
+   419→   419→        loc.clone()
+   420→   420→    };
+   421→   421→
+   422→   422→    let diag_loc = DiagnosticSourceLocation {
+   423→   423→        file: loc.file.clone().unwrap_or_default(),
+   424→   424→        start_line: loc.line as u32 + 1, // convert 0-based to 1-based
+   425→   425→        start_col: loc.column as u32 + 1,
+   426→   426→        end_line: end_loc.line as u32 + 1,
+   427→   427→        end_col: end_loc.column as u32 + 1,
+   428→   428→    };
+   429→   429→
+   430→   430→    let mut diag = VumaDiagnostic::new(
+   431→   431→        code,
+   432→   432→        DiagnosticSeverity::Error,
+   433→   433→        &err.message,
+   434→   434→        "parser",
+   435→   435→        diag_loc,
+   436→   436→    );
+   437→   437→
+   438→   438→    if let Some(ref suggestion) = err.suggestion {
+   439→   439→        diag = diag.with_suggestion(format!("did you mean '{}'?", suggestion));
+   440→   440→    }
+   441→   441→
+   442→   442→    // Store the line text as a hint if available.
+   443→   443→    if let Some(ref line_text) = loc.line_text {
+   444→   444→        diag = diag.with_suggestion(format!("source: {}", line_text.trim()));
+   445→   445→    }
+   446→   446→
+   447→   447→    diag
+   448→   448→}
+   449→   449→
+   450→   450→/// Convert multiple [`ParseError`]s into [`VumaDiagnostic`]s.
+   451→   451→pub fn from_parse_errors(
+   452→   452→    errors: &[ParseError],
+   453→   453→    source: &str,
+   454→   454→    file: Option<&str>,
+   455→   455→) -> Vec<VumaDiagnostic> {
+   456→   456→    errors.iter().map(|e| from_parse_error(e, source, file)).collect()
+   457→   457→}
+   458→   458→
+   459→   459→// ═══════════════════════════════════════════════════════════════════════════
+   460→   460→// Integration: VumaError → Vec<VumaDiagnostic>
+   461→   461→// ═══════════════════════════════════════════════════════════════════════════
+   462→   462→
+   463→   463→/// Convert a [`VumaError`] to one or more [`VumaDiagnostic`]s.
+   464→   464→///
+   465→   465→/// Since `VumaError` does not carry the original source text, the resulting
+   466→   466→/// diagnostics will have [`DiagnosticSourceLocation::unknown()`] for variants
+   467→   467→/// that don't carry location information. For parse errors, prefer
+   468→   468→/// [`from_parse_error`] which can compute precise locations.
+   469→   469→pub fn from_vuma_error(err: &VumaError) -> Vec<VumaDiagnostic> {
+   470→   470→    match err {
+   471→   471→        VumaError::Parse { errors } => {
+   472→   472→            // Parse errors need source text for location computation;
+   473→   473→            // without it, we produce diagnostics with unknown locations.
+   474→   474→            errors
+   475→   475→                .iter()
+   476→   476→                .map(|pe| {
+   477→   477→                    let code = code_for_parse_error_kind(&pe.kind).to_string();
+   478→   478→                    let mut diag = VumaDiagnostic::new(
+   479→   479→                        code,
+   480→   480→                        DiagnosticSeverity::Error,
+   481→   481→                        &pe.message,
+   482→   482→                        "parser",
+   483→   483→                        DiagnosticSourceLocation::unknown(),
+   484→   484→                    );
+   485→   485→                    if let Some(ref suggestion) = pe.suggestion {
+   486→   486→                        diag = diag.with_suggestion(format!("did you mean '{}'?", suggestion));
+   487→   487→                    }
+   488→   488→                    diag
+   489→   489→                })
+   490→   490→                .collect()
+   491→   491→        }
+   492→   492→        VumaError::AstToScg { message } => {
+   493→   493→            vec![VumaDiagnostic::new(
+   494→   494→                "E001",
+   495→   495→                DiagnosticSeverity::Error,
+   496→   496→                message,
+   497→   497→                "scg",
+   498→   498→                DiagnosticSourceLocation::unknown(),
+   499→   499→            )]
+   500→   500→        }
+   501→   501→        VumaError::ScgValidation { errors } => errors
+   502→   502→            .iter()
+   503→   503→            .map(|msg| {
+   504→   504→                VumaDiagnostic::new(
+   505→   505→                    "E001",
+   506→   506→                    DiagnosticSeverity::Error,
+   507→   507→                    msg,
+   508→   508→                    "scg",
+   509→   509→                    DiagnosticSourceLocation::unknown(),
+   510→   510→                )
+   511→   511→            })
+   512→   512→            .collect(),
+   513→   513→        VumaError::ScgToMsg { error } => {
+   514→   514→            vec![VumaDiagnostic::new(
+   515→   515→                "E001",
+   516→   516→                DiagnosticSeverity::Error,
+   517→   517→                error.to_string(),
+   518→   518→                "msg",
+   519→   519→                DiagnosticSourceLocation::unknown(),
+   520→   520→            )]
+   521→   521→        }
+   522→   522→        VumaError::BdInference { node_id, message } => {
+   523→   523→            let mut diag = VumaDiagnostic::new(
+   524→   524→                "E001",
+   525→   525→                DiagnosticSeverity::Error,
+   526→   526→                message,
+   527→   527→                "bd",
+   528→   528→                DiagnosticSourceLocation::unknown(),
+   529→   529→            );
+   530→   530→            if let Some(id) = node_id {
+   531→   531→                diag = diag.with_suggestion(format!("at SCG node {}", id));
+   532→   532→            }
+   533→   533→            vec![diag]
+   534→   534→        }
+   535→   535→        VumaError::Verification { result } => {
+   536→   536→            vec![VumaDiagnostic::new(
+   537→   537→                "E001",
+   538→   538→                DiagnosticSeverity::Error,
+   539→   539→                format!("verification failed: {}", result.overall),
+   540→   540→                "ive",
+   541→   541→                DiagnosticSourceLocation::unknown(),
+   542→   542→            )]
+   543→   543→        }
+   544→   544→        VumaError::Transform { pass_name, errors } => errors
+   545→   545→            .iter()
+   546→   546→            .map(|msg| {
+   547→   547→                VumaDiagnostic::new(
+   548→   548→                    "E001",
+   549→   549→                    DiagnosticSeverity::Error,
+   550→   550→                    msg,
+   551→   551→                    format!("scg-transform:{}", pass_name),
+   552→   552→                    DiagnosticSourceLocation::unknown(),
+   553→   553→                )
+   554→   554→            })
+   555→   555→            .collect(),
+   556→   556→        VumaError::Codegen { error } => {
+   557→   557→            vec![from_codegen_error(error)]
+   558→   558→        }
+   559→   559→        VumaError::RegisterAlloc { message } => {
+   560→   560→            vec![VumaDiagnostic::new(
+   561→   561→                "E017",
+   562→   562→                DiagnosticSeverity::Error,
+   563→   563→                message,
+   564→   564→                "register-alloc",
+   565→   565→                DiagnosticSourceLocation::unknown(),
+   566→   566→            )]
+   567→   567→        }
+   568→   568→        VumaError::Emission { message } => {
+   569→   569→            vec![VumaDiagnostic::new(
+   570→   570→                "E020",
+   571→   571→                DiagnosticSeverity::Error,
+   572→   572→                message,
+   573→   573→                "elf-emission",
+   574→   574→                DiagnosticSourceLocation::unknown(),
+   575→   575→            )]
+   576→   576→        }
+   577→   577→        VumaError::CorInit { message } => {
+   578→   578→            vec![VumaDiagnostic::new(
+   579→   579→                "E001",
+   580→   580→                DiagnosticSeverity::Error,
+   581→   581→                message,
+   582→   582→                "cor-init",
+   583→   583→                DiagnosticSourceLocation::unknown(),
+   584→   584→            )]
+   585→   585→        }
+   586→   586→        VumaError::Multi { errors } => errors.iter().flat_map(from_vuma_error).collect(),
+   587→   587→        VumaError::ModuleResolution { errors } => errors
+   588→   588→            .iter()
+   589→   589→            .flat_map(|e| {
+   590→   590→                vec![VumaDiagnostic::new(
+   591→   591→                    "E001",
+   592→   592→                    DiagnosticSeverity::Error,
+   593→   593→                    e.to_string(),
+   594→   594→                    "module-resolution",
+   595→   595→                    DiagnosticSourceLocation::unknown(),
+   596→   596→                )]
+   597→   597→            })
+   598→   598→            .collect(),
+   599→   599→    }
+   600→   600→}
+   601→   601→
+   602→   602→// ═══════════════════════════════════════════════════════════════════════════
+   603→   603→// Integration: CodegenError → VumaDiagnostic
+   604→   604→// ═══════════════════════════════════════════════════════════════════════════
+   605→   605→
+   606→   606→/// Convert a [`CodegenError`] to a [`VumaDiagnostic`].
+   607→   607→pub fn from_codegen_error(err: &CodegenError) -> VumaDiagnostic {
+   608→   608→    let code = code_for_codegen_error(err).to_string();
+   609→   609→    let message = err.to_string();
+   610→   610→
+   611→   611→    let (source, suggestion) = match err {
+   612→   612→        CodegenError::UnknownVariable { name } => (
+   613→   613→            "codegen",
+   614→   614→            Some(format!("declare '{}' before use", name)),
+   615→   615→        ),
+   616→   616→        CodegenError::RegisterAllocFailed(_) => (
+   617→   617→            "register-alloc",
+   618→   618→            Some("reduce register pressure by splitting live ranges".to_string()),
+   619→   619→        ),
+   620→   620→        CodegenError::TranslationError(_) => (
+   621→   621→            "ir",
+   622→   622→            None,
+   623→   623→        ),
+   624→   624→        CodegenError::EncodingError(_) => (
+   625→   625→            "codegen",
+   626→   626→            None,
+   627→   627→        ),
+   628→   628→        CodegenError::ElfError(_) => (
+   629→   629→            "emit",
+   630→   630→            None,
+   631→   631→        ),
+   632→   632→        CodegenError::InvalidInstruction(_) => (
+   633→   633→            "codegen",
+   634→   634→            None,
+   635→   635→        ),
+   636→   636→        CodegenError::WasmSectionNotFound { section } => (
+   637→   637→            "codegen",
+   638→   638→            Some(format!("ensure '{}' section is generated", section)),
+   639→   639→        ),
+   640→   640→    };
+   641→   641→
+   642→   642→    let mut diag = VumaDiagnostic::new(
+   643→   643→        code,
+   644→   644→        DiagnosticSeverity::Error,
+   645→   645→        message,
+   646→   646→        source,
+   647→   647→        DiagnosticSourceLocation::unknown(),
+   648→   648→    );
+   649→   649→
+   650→   650→    if let Some(s) = suggestion {
+   651→   651→        diag = diag.with_suggestion(s);
+   652→   652→    }
+   653→   653→
+   654→   654→    diag
+   655→   655→}
+   656→   656→
+   657→   657→// ═══════════════════════════════════════════════════════════════════════════
+   658→   658→// Convenience constructors for common diagnostics
+   659→   659→// ═══════════════════════════════════════════════════════════════════════════
+   660→   660→
+   661→   661→/// Create an E001 (syntax error) diagnostic.
+   662→   662→pub fn syntax_error(
+   663→   663→    message: impl Into<String>,
+   664→   664→    location: DiagnosticSourceLocation,
+   665→   665→) -> VumaDiagnostic {
+   666→   666→    VumaDiagnostic::new("E001", DiagnosticSeverity::Error, message, "parser", location)
+   667→   667→}
+   668→   668→
+   669→   669→/// Create an E002 (undefined variable) diagnostic.
+   670→   670→pub fn undefined_variable(
+   671→   671→    name: &str,
+   672→   672→    location: DiagnosticSourceLocation,
+   673→   673→) -> VumaDiagnostic {
+   674→   674→    VumaDiagnostic::new(
+   675→   675→        "E002",
+   676→   676→        DiagnosticSeverity::Error,
+   677→   677→        format!("undefined variable `{}`", name),
+   678→   678→        "parser",
+   679→   679→        location,
+   680→   680→    )
+   681→   681→}
+   682→   682→
+   683→   683→/// Create an E003 (type mismatch) diagnostic.
+   684→   684→pub fn type_mismatch(
+   685→   685→    message: impl Into<String>,
+   686→   686→    location: DiagnosticSourceLocation,
+   687→   687→) -> VumaDiagnostic {
+   688→   688→    VumaDiagnostic::new("E003", DiagnosticSeverity::Error, message, "parser", location)
+   689→   689→}
+   690→   690→
+   691→   691→/// Create an E004 (duplicate definition) diagnostic.
+   692→   692→pub fn duplicate_definition(
+   693→   693→    name: &str,
+   694→   694→    location: DiagnosticSourceLocation,
+   695→   695→) -> VumaDiagnostic {
+   696→   696→    VumaDiagnostic::new(
+   697→   697→        "E004",
+   698→   698→        DiagnosticSeverity::Error,
+   699→   699→        format!("duplicate definition of `{}`", name),
+   700→   700→        "parser",
+   701→   701→        location,
+   702→   702→    )
+   703→   703→}
+   704→   704→
+   705→   705→/// Create an E005 (invalid argument count) diagnostic.
+   706→   706→pub fn invalid_arg_count(
+   707→   707→    expected: usize,
+   708→   708→    found: usize,
+   709→   709→    location: DiagnosticSourceLocation,
+   710→   710→) -> VumaDiagnostic {
+   711→   711→    VumaDiagnostic::new(
+   712→   712→        "E005",
+   713→   713→        DiagnosticSeverity::Error,
+   714→   714→        format!("expected {} argument(s), found {}", expected, found),
+   715→   715→        "parser",
+   716→   716→        location,
+   717→   717→    )
+   718→   718→}
+   719→   719→
+   720→   720→/// Create an E006 (invalid type) diagnostic.
+   721→   721→pub fn invalid_type(
+   722→   722→    message: impl Into<String>,
+   723→   723→    location: DiagnosticSourceLocation,
+   724→   724→) -> VumaDiagnostic {
+   725→   725→    VumaDiagnostic::new("E006", DiagnosticSeverity::Error, message, "parser", location)
+   726→   726→}
+   727→   727→
+   728→   728→/// Create an E007 (missing return) diagnostic.
+   729→   729→pub fn missing_return(location: DiagnosticSourceLocation) -> VumaDiagnostic {
+   730→   730→    VumaDiagnostic::new(
+   731→   731→        "E007",
+   732→   732→        DiagnosticSeverity::Error,
+   733→   733→        "function may not return a value",
+   734→   734→        "parser",
+   735→   735→        location,
+   736→   736→    )
+   737→   737→}
+   738→   738→
+   739→   739→/// Create an E008 (unreachable code) diagnostic.
+   740→   740→pub fn unreachable_code(location: DiagnosticSourceLocation) -> VumaDiagnostic {
+   741→   741→    VumaDiagnostic::new(
+   742→   742→        "E008",
+   743→   743→        DiagnosticSeverity::Warning,
+   744→   744→        "unreachable code detected",
+   745→   745→        "parser",
+   746→   746→        location,
+   747→   747→    )
+   748→   748→}
+   749→   749→
+   750→   750→/// Create a W001 (unused variable) diagnostic.
+   751→   751→pub fn unused_variable(name: &str, location: DiagnosticSourceLocation) -> VumaDiagnostic {
+   752→   752→    VumaDiagnostic::new(
+   753→   753→        "W001",
+   754→   754→        DiagnosticSeverity::Warning,
+   755→   755→        format!("unused variable `{}`", name),
+   756→   756→        "parser",
+   757→   757→        location,
+   758→   758→    ).with_suggestion(format!("prefix with `_{}' to suppress", name))
+   759→   759→}
+   760→   760→
+   761→   761→/// Create a W002 (implicit type conversion) diagnostic.
+   762→   762→pub fn implicit_conversion(
+   763→   763→    from: &str,
+   764→   764→    to: &str,
+   765→   765→    location: DiagnosticSourceLocation,
+   766→   766→) -> VumaDiagnostic {
+   767→   767→    VumaDiagnostic::new(
+   768→   768→        "W002",
+   769→   769→        DiagnosticSeverity::Warning,
+   770→   770→        format!("implicit conversion from `{}` to `{}`", from, to),
+   771→   771→        "parser",
+   772→   772→        location,
+   773→   773→    ).with_suggestion(format!("add explicit `as {}' cast", to))
+   774→   774→}
+   775→   775→
+   776→   776→/// Create a W003 (large constant performance hint) diagnostic.
+   777→   777→pub fn large_constant(value: &str, location: DiagnosticSourceLocation) -> VumaDiagnostic {
+   778→   778→    VumaDiagnostic::new(
+   779→   779→        "W003",
+   780→   780→        DiagnosticSeverity::Hint,
+   781→   781→        format!("large constant `{}` may require multiple instructions", value),
+   782→   782→        "codegen",
+   783→   783→        location,
+   784→   784→    )
+   785→   785→}
+   786→   786→
+   787→   787→// ═══════════════════════════════════════════════════════════════════════════
+   788→   788→// Tests
+   789→   789→// ═══════════════════════════════════════════════════════════════════════════
+   790→   790→
+   791→   791→#[cfg(test)]
+   792→   792→mod tests {
+   793→   793→    use super::*;
+   794→   794→
+   795→   795→    // -- DiagnosticSeverity tests --------------------------------------------
+   796→   796→
+   797→   797→    #[test]
+   798→   798→    fn severity_display() {
+   799→   799→        assert_eq!(DiagnosticSeverity::Error.to_string(), "error");
+   800→   800→        assert_eq!(DiagnosticSeverity::Warning.to_string(), "warning");
+   801→   801→        assert_eq!(DiagnosticSeverity::Info.to_string(), "info");
+   802→   802→        assert_eq!(DiagnosticSeverity::Hint.to_string(), "hint");
+   803→   803→    }
+   804→   804→
+   805→   805→    #[test]
+   806→   806→    fn severity_from_parser_severity() {
+   807→   807→        assert_eq!(
+   808→   808→            DiagnosticSeverity::from(ParserSeverity::Error),
+   809→   809→            DiagnosticSeverity::Error
+   810→   810→        );
+   811→   811→        assert_eq!(
+   812→   812→            DiagnosticSeverity::from(ParserSeverity::Warning),
+   813→   813→            DiagnosticSeverity::Warning
+   814→   814→        );
+   815→   815→        assert_eq!(
+   816→   816→            DiagnosticSeverity::from(ParserSeverity::Note),
+   817→   817→            DiagnosticSeverity::Info
+   818→   818→        );
+   819→   819→    }
+   820→   820→
+   821→   821→    #[test]
+   822→   822→    fn severity_json_roundtrip() {
+   823→   823→        let json = serde_json::to_string(&DiagnosticSeverity::Error).unwrap();
+   824→   824→        assert_eq!(json, "\"error\"");
+   825→   825→        let back: DiagnosticSeverity = serde_json::from_str(&json).unwrap();
+   826→   826→        assert_eq!(back, DiagnosticSeverity::Error);
+   827→   827→    }
+   828→   828→
+   829→   829→    // -- DiagnosticSourceLocation tests --------------------------------------
+   830→   830→
+   831→   831→    #[test]
+   832→   832→    fn location_point() {
+   833→   833→        let loc = DiagnosticSourceLocation::point("main.vu", 10, 5);
+   834→   834→        assert_eq!(loc.file, "main.vu");
+   835→   835→        assert_eq!(loc.start_line, 10);
+   836→   836→        assert_eq!(loc.start_col, 5);
+   837→   837→        assert_eq!(loc.end_line, 10);
+   838→   838→        assert_eq!(loc.end_col, 5);
+   839→   839→        assert!(!loc.is_unknown());
+   840→   840→    }
+   841→   841→
+   842→   842→    #[test]
+   843→   843→    fn location_range() {
+   844→   844→        let loc = DiagnosticSourceLocation::range("main.vu", 10, 5, 9);
+   845→   845→        assert_eq!(loc.start_line, 10);
+   846→   846→        assert_eq!(loc.end_line, 10);
+   847→   847→        assert_eq!(loc.start_col, 5);
+   848→   848→        assert_eq!(loc.end_col, 9);
+   849→   849→    }
+   850→   850→
+   851→   851→    #[test]
+   852→   852→    fn location_unknown() {
+   853→   853→        let loc = DiagnosticSourceLocation::unknown();
+   854→   854→        assert!(loc.is_unknown());
+   855→   855→        assert_eq!(loc.to_string(), "<unknown>");
+   856→   856→    }
+   857→   857→
+   858→   858→    #[test]
+   859→   859→    fn location_display() {
+   860→   860→        let loc = DiagnosticSourceLocation::point("foo.vu", 5, 10);
+   861→   861→        assert_eq!(loc.to_string(), "foo.vu:5:10");
+   862→   862→
+   863→   863→        let loc = DiagnosticSourceLocation::range("foo.vu", 5, 10, 15);
+   864→   864→        assert_eq!(loc.to_string(), "foo.vu:5:10-5:15");
+   865→   865→    }
+   866→   866→
+   867→   867→    #[test]
+   868→   868→    fn location_json_roundtrip() {
+   869→   869→        let loc = DiagnosticSourceLocation::range("test.vu", 3, 1, 8);
+   870→   870→        let json = serde_json::to_string(&loc).unwrap();
+   871→   871→        let back: DiagnosticSourceLocation = serde_json::from_str(&json).unwrap();
+   872→   872→        assert_eq!(loc, back);
+   873→   873→    }
+   874→   874→
+   875→   875→    // -- VumaDiagnostic tests -----------------------------------------------
+   876→   876→
+   877→   877→    #[test]
+   878→   878→    fn diagnostic_construction() {
+   879→   879→        let loc = DiagnosticSourceLocation::point("main.vu", 5, 10);
+   880→   880→        let diag = VumaDiagnostic::new("E002", DiagnosticSeverity::Error, "undefined variable `x`", "parser", loc);
+   881→   881→        assert_eq!(diag.code, "E002");
+   882→   882→        assert_eq!(diag.severity, DiagnosticSeverity::Error);
+   883→   883→        assert_eq!(diag.message, "undefined variable `x`");
+   884→   884→        assert_eq!(diag.source, "parser");
+   885→   885→        assert!(diag.related.is_empty());
+   886→   886→        assert!(diag.suggestions.is_empty());
+   887→   887→    }
+   888→   888→
+   889→   889→    #[test]
+   890→   890→    fn diagnostic_with_suggestion() {
+   891→   891→        let loc = DiagnosticSourceLocation::point("main.vu", 5, 10);
+   892→   892→        let diag = VumaDiagnostic::new("E002", DiagnosticSeverity::Error, "undefined variable `x`", "parser", loc)
+   893→   893→            .with_suggestion("did you mean 'y'?");
+   894→   894→        assert_eq!(diag.suggestions.len(), 1);
+   895→   895→        assert_eq!(diag.suggestions[0], "did you mean 'y'?");
+   896→   896→    }
+   897→   897→
+   898→   898→    #[test]
+   899→   899→    fn diagnostic_with_related() {
+   900→   900→        let loc = DiagnosticSourceLocation::point("main.vu", 5, 10);
+   901→   901→        let related_loc = DiagnosticSourceLocation::point("main.vu", 2, 1);
+   902→   902→        let diag = VumaDiagnostic::new("E004", DiagnosticSeverity::Error, "duplicate definition", "parser", loc)
+   903→   903→            .with_related(RelatedInfo::new(related_loc, "previous definition here"));
+   904→   904→        assert_eq!(diag.related.len(), 1);
+   905→   905→        assert_eq!(diag.related[0].message, "previous definition here");
+   906→   906→    }
+   907→   907→
+   908→   908→    #[test]
+   909→   909→    fn diagnostic_display() {
+   910→   910→        let loc = DiagnosticSourceLocation::point("main.vu", 5, 10);
+   911→   911→        let diag = VumaDiagnostic::new("E002", DiagnosticSeverity::Error, "undefined variable `x`", "parser", loc)
+   912→   912→            .with_suggestion("did you mean 'y'?");
+   913→   913→        let display = diag.to_string();
+   914→   914→        assert!(display.contains("error[E002]"));
+   915→   915→        assert!(display.contains("undefined variable `x`"));
+   916→   916→        assert!(display.contains("did you mean 'y'?"));
+   917→   917→    }
+   918→   918→
+   919→   919→    #[test]
+   920→   920→    fn diagnostic_json_output() {
+   921→   921→        let loc = DiagnosticSourceLocation::range("main.vu", 10, 4, 7);
+   922→   922→        let diag = VumaDiagnostic::new("E002", DiagnosticSeverity::Error, "undefined variable `foo`", "parser", loc)
+   923→   923→            .with_suggestion("did you mean `for`?");
+   924→   924→
+   925→   925→        let json = diag.to_json();
+   926→   926→        assert!(json.contains("\"code\":\"E002\""));
+   927→   927→        assert!(json.contains("\"severity\":\"error\""));
+   928→   928→        assert!(json.contains("\"message\":\"undefined variable `foo`\""));
+   929→   929→        assert!(json.contains("\"source\":\"parser\""));
+   930→   930→        assert!(json.contains("\"start_line\":10"));
+   931→   931→        assert!(json.contains("\"start_col\":4"));
+   932→   932→        assert!(json.contains("\"end_line\":10"));
+   933→   933→        assert!(json.contains("\"end_col\":7"));
+   934→   934→        assert!(json.contains("did you mean"));
+   935→   935→
+   936→   936→        // Verify round-trip.
+   937→   937→        let back: VumaDiagnostic = serde_json::from_str(&json).unwrap();
+   938→   938→        assert_eq!(back.code, "E002");
+   939→   939→        assert_eq!(back.severity, DiagnosticSeverity::Error);
+   940→   940→        assert_eq!(back.message, "undefined variable `foo`");
+   941→   941→        assert_eq!(back.source, "parser");
+   942→   942→        assert_eq!(back.suggestions.len(), 1);
+   943→   943→    }
+   944→   944→
+   945→   945→    #[test]
+   946→   946→    fn diagnostics_array_json() {
+   947→   947→        let loc1 = DiagnosticSourceLocation::point("a.vu", 1, 1);
+   948→   948→        let loc2 = DiagnosticSourceLocation::point("b.vu", 2, 3);
+   949→   949→        let diags = vec![
+   950→   950→            VumaDiagnostic::new("E001", DiagnosticSeverity::Error, "syntax error", "parser", loc1),
+   951→   951→            VumaDiagnostic::new("W001", DiagnosticSeverity::Warning, "unused variable", "parser", loc2),
+   952→   952→        ];
+   953→   953→        let json = diagnostics_to_json(&diags);
+   954→   954→        assert!(json.starts_with('['));
+   955→   955→        assert!(json.ends_with(']'));
+   956→   956→        assert!(json.contains("\"E001\""));
+   957→   957→        assert!(json.contains("\"W001\""));
+   958→   958→    }
+   959→   959→
+   960→   960→    // -- Diagnostic code tests -----------------------------------------------
+   961→   961→
+   962→   962→    #[test]
+   963→   963→    fn codes_for_parse_error_kinds() {
+   964→   964→        assert_eq!(code_for_parse_error_kind(&ParseErrorKind::InvalidSyntax), "E001");
+   965→   965→        assert_eq!(code_for_parse_error_kind(&ParseErrorKind::UndefinedVariable), "E002");
+   966→   966→        assert_eq!(code_for_parse_error_kind(&ParseErrorKind::UndefinedReference), "E002");
+   967→   967→        assert_eq!(code_for_parse_error_kind(&ParseErrorKind::TypeMismatch), "E003");
+   968→   968→        assert_eq!(code_for_parse_error_kind(&ParseErrorKind::DuplicateDefinition), "E004");
+   969→   969→        assert_eq!(code_for_parse_error_kind(&ParseErrorKind::UnexpectedToken), "E009");
+   970→   970→        assert_eq!(code_for_parse_error_kind(&ParseErrorKind::ExpectedToken), "E010");
+   971→   971→        assert_eq!(code_for_parse_error_kind(&ParseErrorKind::MissingSemicolon), "E014");
+   972→   972→    }
+   973→   973→
+   974→   974→    #[test]
+   975→   975→    fn code_descriptions() {
+   976→   976→        assert_eq!(code_description("E001"), "Syntax error");
+   977→   977→        assert_eq!(code_description("E002"), "Undefined variable");
+   978→   978→        assert_eq!(code_description("E003"), "Type mismatch");
+   979→   979→        assert_eq!(code_description("E004"), "Duplicate definition");
+   980→   980→        assert_eq!(code_description("E005"), "Invalid argument count");
+   981→   981→        assert_eq!(code_description("E006"), "Invalid type");
+   982→   982→        assert_eq!(code_description("E007"), "Missing return");
+   983→   983→        assert_eq!(code_description("E008"), "Unreachable code");
+   984→   984→        assert_eq!(code_description("W001"), "Unused variable");
+   985→   985→        assert_eq!(code_description("W002"), "Implicit type conversion");
+   986→   986→        assert_eq!(code_description("W003"), "Large constant (performance hint)");
+   987→   987→    }
+   988→   988→
+   989→   989→    // -- Convenience constructors --------------------------------------------
+   990→   990→
+   991→   991→    #[test]
+   992→   992→    fn convenience_constructors() {
+   993→   993→        let loc = DiagnosticSourceLocation::point("test.vu", 1, 1);
+   994→   994→
+   995→   995→        let d = syntax_error("bad syntax", loc.clone());
+   996→   996→        assert_eq!(d.code, "E001");
+   997→   997→
+   998→   998→        let d = undefined_variable("x", loc.clone());
+   999→   999→        assert_eq!(d.code, "E002");
+  1000→  1000→        assert!(d.message.contains("x"));
+  1001→  1001→
+  1002→  1002→        let d = type_mismatch("expected u32", loc.clone());
+  1003→  1003→        assert_eq!(d.code, "E003");
+  1004→  1004→
+  1005→  1005→        let d = duplicate_definition("foo", loc.clone());
+  1006→  1006→        assert_eq!(d.code, "E004");
+  1007→  1007→
+  1008→  1008→        let d = invalid_arg_count(2, 3, loc.clone());
+  1009→  1009→        assert_eq!(d.code, "E005");
+  1010→  1010→        assert!(d.message.contains("2"));
+  1011→  1011→        assert!(d.message.contains("3"));
+  1012→  1012→
+  1013→  1013→        let d = invalid_type("void not allowed", loc.clone());
+  1014→  1014→        assert_eq!(d.code, "E006");
+  1015→  1015→
+  1016→  1016→        let d = missing_return(loc.clone());
+  1017→  1017→        assert_eq!(d.code, "E007");
+  1018→  1018→
+  1019→  1019→        let d = unreachable_code(loc.clone());
+  1020→  1020→        assert_eq!(d.code, "E008");
+  1021→  1021→        assert_eq!(d.severity, DiagnosticSeverity::Warning);
+  1022→  1022→
+  1023→  1023→        let d = unused_variable("y", loc.clone());
+  1024→  1024→        assert_eq!(d.code, "W001");
+  1025→  1025→        assert_eq!(d.severity, DiagnosticSeverity::Warning);
+  1026→  1026→        assert!(!d.suggestions.is_empty());
+  1027→  1027→
+  1028→  1028→        let d = implicit_conversion("u8", "u32", loc.clone());
+  1029→  1029→        assert_eq!(d.code, "W002");
+  1030→  1030→
+  1031→  1031→        let d = large_constant("0xDEADBEEF", loc);
+  1032→  1032→        assert_eq!(d.code, "W003");
+  1033→  1033→        assert_eq!(d.severity, DiagnosticSeverity::Hint);
+  1034→  1034→    }
+  1035→  1035→
+  1036→  1036→    // -- Integration: ParseError → VumaDiagnostic ----------------------------
+  1037→  1037→
+  1038→  1038→    #[test]
+  1039→  1039→    fn from_parse_error_integration() {
+  1040→  1040→        use vuma_parser::Span;
+  1041→  1041→
+  1042→  1042→        let source = "fn main() { x }";
+  1043→  1043→        let err = ParseError::undefined_var("x", Span::new(13, 14)).with_suggestion("y");
+  1044→  1044→        let diag = from_parse_error(&err, source, Some("main.vu"));
+  1045→  1045→
+  1046→  1046→        assert_eq!(diag.code, "E002");
+  1047→  1047→        assert_eq!(diag.severity, DiagnosticSeverity::Error);
+  1048→  1048→        assert_eq!(diag.source, "parser");
+  1049→  1049→        assert!(diag.message.contains("x"));
+  1050→  1050→        assert!(!diag.location.is_unknown());
+  1051→  1051→        assert!(!diag.suggestions.is_empty());
+  1052→  1052→    }
+  1053→  1053→
+  1054→  1054→    // -- Integration: VumaError → Vec<VumaDiagnostic> ------------------------
+  1055→  1055→
+  1056→  1056→    #[test]
+  1057→  1057→    fn from_vuma_error_ast_to_scg() {
+  1058→  1058→        let err = VumaError::AstToScg {
+  1059→  1059→            message: "cannot convert node".to_string(),
+  1060→  1060→        };
+  1061→  1061→        let diags = from_vuma_error(&err);
+  1062→  1062→        assert_eq!(diags.len(), 1);
+  1063→  1063→        assert_eq!(diags[0].source, "scg");
+  1064→  1064→    }
+  1065→  1065→
+  1066→  1066→    #[test]
+  1067→  1067→    fn from_vuma_error_codegen() {
+  1068→  1068→        let err = VumaError::Codegen {
+  1069→  1069→            error: CodegenError::UnknownVariable {
+  1070→  1070→                name: "foo".to_string(),
+  1071→  1071→            },
+  1072→  1072→        };
+  1073→  1073→        let diags = from_vuma_error(&err);
+  1074→  1074→        assert_eq!(diags.len(), 1);
+  1075→  1075→        assert_eq!(diags[0].code, "E002");
+  1076→  1076→        assert_eq!(diags[0].source, "codegen");
+  1077→  1077→        assert!(!diags[0].suggestions.is_empty());
+  1078→  1078→    }
+  1079→  1079→
+  1080→  1080→    #[test]
+  1081→  1081→    fn from_vuma_error_multi() {
+  1082→  1082→        let err = VumaError::Multi {
+  1083→  1083→            errors: vec![
+  1084→  1084→                VumaError::AstToScg {
+  1085→  1085→                    message: "err1".to_string(),
+  1086→  1086→                },
+  1087→  1087→                VumaError::Emission {
+  1088→  1088→                    message: "err2".to_string(),
+  1089→  1089→                },
+  1090→  1090→            ],
+  1091→  1091→        };
+  1092→  1092→        let diags = from_vuma_error(&err);
+  1093→  1093→        assert_eq!(diags.len(), 2);
+  1094→  1094→    }
+  1095→  1095→
+  1096→  1096→    // -- Integration: CodegenError → VumaDiagnostic --------------------------
+  1097→  1097→
+  1098→  1098→    #[test]
+  1099→  1099→    fn from_codegen_error_integration() {
+  1100→  1100→        let err = CodegenError::RegisterAllocFailed("spill".to_string());
+  1101→  1101→        let diag = from_codegen_error(&err);
+  1102→  1102→        assert_eq!(diag.code, "E017");
+  1103→  1103→        assert_eq!(diag.source, "register-alloc");
+  1104→  1104→
+  1105→  1105→        let err = CodegenError::UnknownVariable {
+  1106→  1106→            name: "bar".to_string(),
+  1107→  1107→        };
+  1108→  1108→        let diag = from_codegen_error(&err);
+  1109→  1109→        assert_eq!(diag.code, "E002");
+  1110→  1110→        assert!(diag.suggestions.iter().any(|s| s.contains("declare")));
+  1111→  1111→    }
+  1112→  1112→}
+  1113→  1113→

@@ -48,6 +48,16 @@ use crate::diagnostics::{
     self, DiagnosticSeverity, DiagnosticSourceLocation, VumaDiagnostic,
 };
 use crate::pipeline::{self, CompileConfig, VerificationLevel};
+use vuma_ive::{
+    InvariantAggregator,
+    VerificationLevel as IveVerificationLevel,
+    verification::VerificationInput,
+};
+use vuma_proof::{
+    CounterExample as ProofCounterExample,
+    ViolationPoint,
+    composition::{ProofBundle, InvariantStatus},
+};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // VumaCompiler
@@ -424,6 +434,133 @@ impl VumaCompiler {
 
         all_diagnostics
     }
+
+    /// Verify a VUMA program by running all five IVE invariant checkers
+    /// on the SCG and producing a structured verification report.
+    ///
+    /// This method runs the full front-end pipeline (parse → SCG),
+    /// then invokes the IVE `InvariantAggregator` to check all five
+    /// core invariants (liveness, exclusivity, interpretation, origin,
+    /// cleanup) and the proof system to produce pass/fail per invariant
+    /// with counterexamples for any violations.
+    ///
+    /// # Returns
+    ///
+    /// A [`VerificationReport`] containing:
+    /// - Per-invariant pass/fail status
+    /// - Counterexamples for each violation
+    /// - An overall pass/fail verdict
+    /// - Timing metadata
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use vuma::api::VumaCompiler;
+    ///
+    /// let compiler = VumaCompiler::new();
+    /// let source = "fn main() {}";
+    /// let report = compiler.verify(source);
+    /// println!("Overall verdict: {}", report.overall_verdict);
+    /// for inv in &report.invariants {
+    ///     println!("  {} — {}", inv.kind, inv.status);
+    /// }
+    /// ```
+    pub fn verify(&self, source: &str) -> VerificationReport {
+        let start = Instant::now();
+
+        // Run the front-end pipeline to get the SCG.
+        let front_result = run_frontend(source, &self.config);
+
+        let scg = match front_result {
+            FrontendResult::Ok { scg } => scg,
+            FrontendResult::Err { diagnostics } => {
+                let messages: Vec<String> =
+                    diagnostics.iter().map(|d| d.message.clone()).collect();
+                return VerificationReport {
+                    overall_verdict: VerificationVerdict::Error,
+                    invariants: Vec::new(),
+                    diagnostics: messages,
+                    metadata: VerificationMetadata {
+                        total_elapsed_ms: start.elapsed().as_millis() as u64,
+                        source_lines: source.lines().count(),
+                        source_bytes: source.len(),
+                    },
+                };
+            }
+        };
+
+        // Run the IVE invariant aggregator at Normal level (all 5 checks).
+        let aggregator = InvariantAggregator::new().with_level(IveVerificationLevel::Normal);
+        let input = VerificationInput::from_scg(scg.clone());
+        let aggregated = aggregator.verify_all(&input);
+
+        // Convert the aggregated result into per-invariant API results,
+        // building counterexamples from the proof system for any violations.
+        let mut invariants = Vec::with_capacity(aggregated.per_invariant.len());
+        for pir in &aggregated.per_invariant {
+            let kind_str = pir.kind.label().to_string();
+
+            let (status, counterexample) = if pir.is_pass() {
+                (InvariantVerificationStatus::Pass, None)
+            } else if pir.is_fail() {
+                // Build a proof-system counterexample from the IVE violation.
+                let proof_ce = build_proof_counterexample(&pir.result);
+                (InvariantVerificationStatus::Fail, Some(proof_ce))
+            } else {
+                (InvariantVerificationStatus::Unverified, None)
+            };
+
+            invariants.push(InvariantVerification {
+                kind: kind_str,
+                status,
+                message: pir.result.message.clone(),
+                elapsed_ms: pir.elapsed_ms,
+                counterexample,
+            });
+        }
+
+        // Determine overall verdict.
+        let overall_verdict = match aggregated.overall {
+            vuma_ive::OverallVerdict::Pass => VerificationVerdict::Pass,
+            vuma_ive::OverallVerdict::Fail => VerificationVerdict::Fail,
+            vuma_ive::OverallVerdict::Inconclusive => VerificationVerdict::Inconclusive,
+            vuma_ive::OverallVerdict::NoChecks => VerificationVerdict::Error,
+        };
+
+        // Also attempt proof-system verification for a cross-check.
+        let proof_bundle = build_proof_bundle(&scg);
+        let proof_statuses = proof_bundle.status();
+
+        // If the proof system found failures that the IVE missed,
+        // upgrade unverified results to fail.
+        for (i, (_inv_name, proof_status)) in proof_statuses.iter().enumerate() {
+            if i < invariants.len() {
+                if let InvariantStatus::Failed(reason) = proof_status {
+                    if invariants[i].status == InvariantVerificationStatus::Unverified {
+                        invariants[i].status = InvariantVerificationStatus::Fail;
+                        invariants[i].counterexample = Some(CounterexampleInfo {
+                            description: reason.clone(),
+                            execution_trace: Vec::new(),
+                        });
+                    }
+                }
+            }
+        }
+
+        let diagnostics = Vec::new();
+        let total_elapsed_ms = start.elapsed().as_millis() as u64;
+
+        VerificationReport {
+            overall_verdict,
+            invariants,
+            diagnostics,
+            metadata: VerificationMetadata {
+                total_elapsed_ms,
+                source_lines: source.lines().count(),
+                source_bytes: source.len(),
+            },
+        }
+    }
 }
 
 impl Default for VumaCompiler {
@@ -620,6 +757,155 @@ fn deserialize_binary_hex<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<
     }
 
     d.deserialize_str(HexVisitor)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Verification Report Types
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Overall verdict of the verification run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum VerificationVerdict {
+    /// All five invariants passed.
+    Pass,
+    /// At least one invariant was violated.
+    Fail,
+    /// No invariant was violated, but at least one is unverified.
+    Inconclusive,
+    /// An error occurred before verification could run (e.g., parse error).
+    Error,
+}
+
+impl fmt::Display for VerificationVerdict {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            VerificationVerdict::Pass => write!(f, "PASS"),
+            VerificationVerdict::Fail => write!(f, "FAIL"),
+            VerificationVerdict::Inconclusive => write!(f, "INCONCLUSIVE"),
+            VerificationVerdict::Error => write!(f, "ERROR"),
+        }
+    }
+}
+
+/// Status of a single invariant verification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum InvariantVerificationStatus {
+    /// The invariant was proven to hold.
+    Pass,
+    /// The invariant was violated; see the counterexample.
+    Fail,
+    /// The invariant could not be verified (insufficient information).
+    Unverified,
+}
+
+impl fmt::Display for InvariantVerificationStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            InvariantVerificationStatus::Pass => write!(f, "PASS"),
+            InvariantVerificationStatus::Fail => write!(f, "FAIL"),
+            InvariantVerificationStatus::Unverified => write!(f, "UNVERIFIED"),
+        }
+    }
+}
+
+/// Counterexample information for an invariant violation.
+///
+/// Provides a human-readable description and an execution trace that
+/// demonstrates how the violation can be reached.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CounterexampleInfo {
+    /// Human-readable description of the violation.
+    pub description: String,
+    /// Execution trace steps demonstrating the violation.
+    pub execution_trace: Vec<String>,
+}
+
+/// Result of verifying a single invariant.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InvariantVerification {
+    /// Name of the invariant (e.g., "liveness", "exclusivity").
+    pub kind: String,
+    /// Pass/fail/unverified status.
+    pub status: InvariantVerificationStatus,
+    /// Human-readable message describing the outcome.
+    pub message: String,
+    /// Wall-clock time spent checking this invariant (milliseconds).
+    pub elapsed_ms: u64,
+    /// Counterexample demonstrating the violation, if any.
+    pub counterexample: Option<CounterexampleInfo>,
+}
+
+/// Metadata about a verification run.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VerificationMetadata {
+    /// Total wall-clock time for the verification run (milliseconds).
+    pub total_elapsed_ms: u64,
+    /// Number of lines in the source code.
+    pub source_lines: usize,
+    /// Number of bytes in the source code.
+    pub source_bytes: usize,
+}
+
+/// The full verification report produced by `VumaCompiler::verify()`.
+///
+/// Contains per-invariant results with pass/fail status and counterexamples
+/// for any violations, plus an overall verdict and metadata.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VerificationReport {
+    /// The overall verification verdict.
+    pub overall_verdict: VerificationVerdict,
+    /// Per-invariant verification results.
+    pub invariants: Vec<InvariantVerification>,
+    /// Any diagnostics or informational messages.
+    pub diagnostics: Vec<String>,
+    /// Metadata about the verification run.
+    pub metadata: VerificationMetadata,
+}
+
+impl VerificationReport {
+    /// Returns `true` if all invariants passed.
+    pub fn is_pass(&self) -> bool {
+        self.overall_verdict == VerificationVerdict::Pass
+    }
+
+    /// Returns `true` if at least one invariant was violated.
+    pub fn is_fail(&self) -> bool {
+        self.overall_verdict == VerificationVerdict::Fail
+    }
+
+    /// Returns the number of invariants that passed.
+    pub fn pass_count(&self) -> usize {
+        self.invariants
+            .iter()
+            .filter(|i| i.status == InvariantVerificationStatus::Pass)
+            .count()
+    }
+
+    /// Returns the number of invariants that failed.
+    pub fn fail_count(&self) -> usize {
+        self.invariants
+            .iter()
+            .filter(|i| i.status == InvariantVerificationStatus::Fail)
+            .count()
+    }
+}
+
+impl fmt::Display for VerificationReport {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(
+            f,
+            "Verification Report — {} ({}ms)",
+            self.overall_verdict, self.metadata.total_elapsed_ms
+        )?;
+        for inv in &self.invariants {
+            write!(f, "  {} — {}", inv.kind, inv.status)?;
+            if let Some(ce) = &inv.counterexample {
+                write!(f, " — {}", ce.description)?;
+            }
+            writeln!(f)?;
+        }
+        Ok(())
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1052,6 +1338,73 @@ fn parse_target(target: &str) -> Option<vuma_codegen::backend::BackendKind> {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Verification Helper Functions
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Build a proof-system counterexample from an IVE verification result.
+///
+/// Takes the IVE `VerificationResult` (which uses its own counterexample
+/// format) and converts it into a proof-system `CounterExample`, then
+/// extracts the relevant information into the API's `CounterexampleInfo`.
+fn build_proof_counterexample(
+    result: &vuma_ive::result::VerificationResult,
+) -> CounterexampleInfo {
+    use vuma_ive::result::VerificationStatus;
+
+    match &result.status {
+        VerificationStatus::Violated { counterexample } => {
+            // Convert the IVE counterexample into a proof-system
+            // counterexample for structural consistency.
+            let proof_inv = match result.invariant.as_str() {
+                "liveness" => vuma_proof::proof::InvariantName::Liveness,
+                "exclusivity" => vuma_proof::proof::InvariantName::Exclusivity,
+                "cleanup" => vuma_proof::proof::InvariantName::Cleanup,
+                "origin" => vuma_proof::proof::InvariantName::Origin,
+                "interpretation" => vuma_proof::proof::InvariantName::Interpretation,
+                _ => vuma_proof::proof::InvariantName::Liveness,
+            };
+
+            let violation_point = ViolationPoint::new(
+                proof_inv,
+                &counterexample.description,
+                0, // program offset
+            );
+            let proof_ce = ProofCounterExample::from_violation(&result.message, violation_point);
+            let minimal_ce = proof_ce.minimal();
+
+            // Convert trace steps to human-readable strings.
+            let trace: Vec<String> = minimal_ce
+                .execution
+                .iter()
+                .map(|step| step.to_string())
+                .collect();
+
+            CounterexampleInfo {
+                description: counterexample.description.clone(),
+                execution_trace: trace,
+            }
+        }
+        _ => CounterexampleInfo {
+            description: result.message.clone(),
+            execution_trace: Vec::new(),
+        },
+    }
+}
+
+/// Build a proof bundle from the SCG for cross-checking with the
+/// proof system. Currently produces an empty bundle since the proof
+/// system's proof generation is still being integrated — the bundle
+/// is used for its status() method which returns NotAttempted for
+/// each invariant.
+fn build_proof_bundle(_scg: &vuma_scg::SCG) -> ProofBundle {
+    // The proof bundle currently returns NotAttempted for all invariants
+    // since full proof generation from SCG is still being integrated.
+    // As the proof system matures, this function will extract ProofSCG
+    // data from the SCG and attempt proof generation.
+    ProofBundle::new()
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Tests
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -1174,5 +1527,50 @@ mod tests {
         let result = compiler.compile(source);
         assert!(result.metadata.source_lines > 0);
         assert!(result.metadata.source_bytes > 0);
+    }
+
+    #[test]
+    fn test_verify_simple() {
+        let compiler = VumaCompiler::new();
+        let source = "fn main() {}";
+        let report = compiler.verify(source);
+        // A simple empty function should parse and verify without errors.
+        assert!(
+            report.overall_verdict != VerificationVerdict::Error,
+            "Verification should not error for valid source"
+        );
+        assert!(
+            !report.invariants.is_empty(),
+            "Should have per-invariant results"
+        );
+        assert!(
+            report.metadata.total_elapsed_ms > 0 || report.invariants.len() == 5,
+            "Should have timing data or all 5 invariants"
+        );
+    }
+
+    #[test]
+    fn test_verify_report_serializable() {
+        let compiler = VumaCompiler::new();
+        let source = "fn main() {}";
+        let report = compiler.verify(source);
+        let json = serde_json::to_string(&report);
+        assert!(json.is_ok(), "VerificationReport should be serializable");
+    }
+
+    #[test]
+    fn test_verify_invalid_source() {
+        let compiler = VumaCompiler::new();
+        let source = "fn 123invalid() {}";
+        let report = compiler.verify(source);
+        assert_eq!(
+            report.overall_verdict,
+            VerificationVerdict::Error,
+            "Invalid source should produce Error verdict"
+        );
+        assert!(
+            !report.diagnostics.is_empty(),
+            "Invalid source should have diagnostics"
+        );
     }
 }

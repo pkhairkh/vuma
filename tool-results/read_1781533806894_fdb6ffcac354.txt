@@ -1,0 +1,381 @@
+   600→│  struct Derivation {                                                 │
+   601→│      id: DerivationId,                                               │
+   602→│      source: DerivationSource,  // Direct, Offset, Cast, Index      │
+   603→│      kind: DerivationKind,                                           │
+   604→│      parent: Option<DerivationId>,                                   │
+   605→│      offset: i64,                // byte offset from parent          │
+   606→│      provenance_range: Option<(Address, Address)>,                   │
+   607→│  }                                                                   │
+   608→│                                                                      │
+   609→│  struct Access {                                                     │
+   610→│      id: AccessId,                                                   │
+   611→│      target: Address,            // address being accessed           │
+   612→│      kind: AccessKind,           // Read, Write                      │
+   613→│      size: u64,                  // bytes accessed                   │
+   614→│      program_point: ProgramPoint,                                    │
+   615→│      derivation: Option<DerivationId>,                               │
+   616→│  }                                                                   │
+   617→│                                                                      │
+   618→│  struct SyncEdge {                                                   │
+   619→│      id: SyncEdgeId,                                                 │
+   620→│      access_a: AccessId,                                             │
+   621→│      access_b: AccessId,                                             │
+   622→│      ordering: Ordering,         // HappensBefore, Atomic,           │
+   623→│                                   // LockAcquire, LockRelease        │
+   624→│  }                                                                   │
+   625→└──────────────────────────────────────────────────────────────────────┘
+   626→```
+   627→
+   628→**SCG-to-MSG Conversion.** The `scg_to_msg` module implements the conversion pipeline. It performs a topological walk of SCG nodes ensuring all predecessors are converted first. `AllocationNode → Region` with monotonic address allocation (base `0x1_0000`). `AccessNode → Derivation + Access` with proper kind (Read/Write) and size. `DeallocationNode → Region status Freed` with free_point set. `CastNode → DerivationKind::Cast` derivation from parent chain. `ComputationNode → passthrough Derivation` (Direct, forwarding provenance). Pointer operations produce `Derivation` with `DerivationKind::Offset` and provenance range. ControlFlow edges between Access nodes produce `SyncEdge` with `HappensBefore` ordering. Post-conversion verification checks all derivation chains are well-formed.
+   629→
+   630→**Incremental MSG.** The `msg_incremental` module supports incremental verification via `MSGDelta`, `compute_delta`, `apply_delta`, and `SCGSnapshot`. When the SCG changes, only the affected subgraph is re-converted, and the delta is applied to the existing MSG. This enables sub-second verification for single-function edits, which is critical for interactive development.
+   631→
+   632→### 4.4 Proof
+   633→
+   634→The Proof structure represents a formal verification result — either a proof that an invariant holds or a counterexample demonstrating a violation. Proofs are generated per-invariant by specialized proof modules (`liveness_proofs`, `exclusivity_proofs`, `interpretation_proofs`, `origin_proofs`, `cleanup_proofs`) and checked by the independent `checker` module.
+   635→
+   636→```
+   637→┌──────────────────────────────────────────────────────────────────────┐
+   638→│                       Proof Structure                                 │
+   639→│                                                                      │
+   640→│  struct Proof {                                                      │
+   641→│      goal: Goal,                  // what we're proving              │
+   642→│      status: ProofStatus,         // Proven, Refuted, Unknown       │
+   643→│      steps: Vec<ProofStep>,       // chain of reasoning             │
+   644→│  }                                                                   │
+   645→│                                                                      │
+   646→│  struct Goal {                                                       │
+   647→│      invariant: InvariantName,    // Liveness, Exclusivity, etc.    │
+   648→│      target: ProgramPoint,        // where the invariant applies    │
+   649→│      context: Vec<Assumption>,    // assumptions in scope           │
+   650→│  }                                                                   │
+   651→│                                                                      │
+   652→│  struct ProofStep {                                                  │
+   653→│      rule: InferenceRule,         // which rule was applied         │
+   654→│      premises: Vec<Goal>,         // sub-goals                      │
+   655→│      conclusion: Goal,            // derived fact                   │
+   656→│  }                                                                   │
+   657→│                                                                      │
+   658→│  enum ProofStatus {                                                  │
+   659→│      Proven(ConfidenceLevel),      // High, Medium, Low             │
+   660→│      Refuted(CounterExample),      // violation found               │
+   661→│      Unknown,                       // cannot prove or refute        │
+   662→│  }                                                                   │
+   663→│                                                                      │
+   664→│  struct CounterExample {                                             │
+   665→│      execution_path: Vec<ProgramPoint>,  // path to violation       │
+   666→│      violated_invariant: InvariantName,                            │
+   667→│      evidence: Vec<Evidence>,           // supporting observations  │
+   668→│      description: String,               // human-readable           │
+   669→│  }                                                                   │
+   670→└──────────────────────────────────────────────────────────────────────┘
+   671→```
+   672→
+   673→**Design Decisions.** The Proof structure is a derivation tree — each step depends on premises that are themselves goals, forming a tree of reasoning. This enables independent verification: the `checker` module can verify each step independently and compose the results. The `ProofStatus` uses a tiered confidence model: `Proven` with a confidence level (High = full formal proof, Medium = proof with some assumptions, Low = empirical evidence only), `Refuted` with a concrete counterexample, or `Unknown` when the proof engine cannot reach a conclusion. This avoids the binary accept/reject decision that would recreate the restriction problem VUMA was designed to solve. The `tactics` module provides automated proof strategies for common patterns.
+   674→
+   675→### 4.5 Data Structure Relationships
+   676→
+   677→```
+   678→                           ┌─────────┐
+   679→                           │   SCG   │ ◄── single source of truth
+   680→                           └────┬────┘
+   681→                                │
+   682→                    ┌───────────┼───────────┐
+   683→                    │           │           │
+   684→                    ▼           ▼           ▼
+   685→              ┌──────────┐ ┌────────┐ ┌──────────┐
+   686→              │   BD     │ │ Parser │ │ Proof    │
+   687→              │(inferred)│ │(input) │ │(output)  │
+   688→              └────┬─────┘ └────────┘ └────┬─────┘
+   689→                   │                       │
+   690→                   ▼                       │
+   691→             ┌───────────┐                │
+   692→             │ Annotated │                │
+   693→             │    SCG    │                │
+   694→             └─────┬─────┘                │
+   695→                   │                       │
+   696→                   ▼                       │
+   697→             ┌───────────┐                │
+   698→             │    MSG    │────────────────┘
+   699→             │ (derived) │  verification produces
+   700→             └─────┬─────┘  Proof + CounterExample
+   701→                   │
+   702→                   ▼
+   703→             ┌───────────┐
+   704→             │ Verified  │
+   705→             │    SCG    │ ──▶ Codegen ──▶ ARM64 ──▶ COR
+   706→             └───────────┘
+   707→```
+   708→
+   709→The key insight is that data flows through these structures in a strict order: SCG → BD (inference) → Annotated SCG → MSG (construction) → Verification → Proof → Verified SCG → Codegen. Each transformation is one-way and produces a richer artifact. Feedback loops operate at the SCG level — profile data and counterexamples modify the SCG, which re-enters the pipeline.
+   710→
+   711→---
+   712→
+   713→## 5. Verification Pipeline
+   714→
+   715→The verification pipeline is the heart of the VUMA system. It transforms a raw SCG (produced by the parser) into a verified, annotated SCG (consumed by the code generator) through a sequence of inference, construction, and verification steps. Each step is designed to be composable, incremental, and auditable — you can re-run any step independently, and the system produces structured results that can be inspected, cached, and incrementally updated. The pipeline is orchestrated by the `InvariantAggregator`, which runs all five invariant checks and produces a unified `VerificationSummary`.
+   716→
+   717→### Pipeline Architecture
+   718→
+   719→```
+   720→┌─────────────────────────────────────────────────────────────────────────┐
+   721→│                        Verification Pipeline                             │
+   722→│                                                                         │
+   723→│  ┌──────────┐    ┌──────────────┐    ┌───────────────┐                 │
+   724→│  │ Raw SCG  │───▶│ BD Inference │───▶│ Annotated SCG │                 │
+   725→│  └──────────┘    │ (IVE)        │    │ (BDs attached)│                 │
+   726→│                  └──────────────┘    └───────┬───────┘                 │
+   727→│                                              │                          │
+   728→│                                              ▼                          │
+   729→│                                      ┌───────────────┐                 │
+   730→│                                      │ MSG Builder   │                 │
+   731→│                                      │ (scg_to_msg)  │                 │
+   732→│                                      └───────┬───────┘                 │
+   733→│                                              │                          │
+   734→│                          ┌───────────────────┼───────────────────┐     │
+   735→│                          ▼                   ▼                   ▼     │
+   736→│                  ┌──────────────┐   ┌──────────────┐   ┌────────────┐ │
+   737→│                  │ Liveness     │   │ Exclusivity  │   │Interpret.  │ │
+   738→│                  │ Verifier     │   │ Verifier     │   │ Verifier   │ │
+   739→│                  └──────┬───────┘   └──────┬───────┘   └─────┬──────┘ │
+   740→│                         │                  │                  │        │
+   741→│                         └──────────────────┼──────────────────┘        │
+   742→│                                            │                           │
+   743→│                          ┌─────────────────┼──────────────────┐        │
+   744→│                          ▼                 ▼                            │
+   745→│                  ┌──────────────┐   ┌──────────────┐                  │
+   746→│                  │ Origin       │   │ Cleanup      │                  │
+   747→│                  │ Verifier     │   │ Verifier     │                  │
+   748→│                  └──────┬───────┘   └──────┬───────┘                  │
+   749→│                         │                  │                           │
+   750→│                         └──────────────────┘                           │
+   751→│                                    │                                    │
+   752→│                                    ▼                                    │
+   753→│                         ┌──────────────────────┐                       │
+   754→│                         │ Invariant Aggregator │                       │
+   755→│                         │ (VerificationSummary)│                       │
+   756→│                         └──────────┬───────────┘                       │
+   757→│                                    │                                    │
+   758→│                          ┌─────────┼─────────┐                        │
+   759→│                          ▼         ▼         ▼                        │
+   760→│                    ┌──────────┐ ┌────────┐ ┌──────────┐               │
+   761→│                    │ Proof    │ │Counter │ │ Debt     │               │
+   762→│                    │ Engine   │ │Example │ │ Tracker  │               │
+   763→│                    └──────────┘ └────────┘ └──────────┘               │
+   764→└─────────────────────────────────────────────────────────────────────────┘
+   765→```
+   766→
+   767→### The Five VUMA Invariants
+   768→
+   769→**1. Liveness** — Every access targets allocated memory. The liveness verifier builds a `LivenessInput` from the MSG, tracking resource events (allocate, free, access) across program points and threads. It generates `ProofObligation`s for each access and verifies that the accessed region is in `Allocated` status at the access point. Violations produce `LivenessViolation` records identifying use-after-free and use-before-allocate scenarios. The verifier handles concurrent programs by tracking per-thread resource states and synchronization edges.
+   770→
+   771→**2. Exclusivity** — No overlapping simultaneous write access. The exclusivity verifier builds an `InterferenceGraph` from concurrent accesses to overlapping memory regions. Two accesses conflict if they target overlapping addresses, at least one is a write, and they are not ordered by a happens-before relationship (via `SyncEdge`). The verifier checks `CapDInfo` to determine whether concurrent reads are allowed (shared-read regions). Violations produce `Conflict` records with `ConflictKind` (WriteWrite, WriteRead, ReadWrite) and the specific access pairs involved.
+   772→
+   773→**3. Interpretation** — Every access interprets bytes according to a valid RepD. The interpretation verifier tracks `WriteReadPair`s: every read must be preceded by a write that established the data with a compatible RepD. The `CapDTransitionResult` tracks capability transitions that may change how a value can be interpreted (e.g., sealing a buffer removes the write capability and fixes the interpretation). Violations produce `InterpretationViolation` records identifying type confusion, reading integer bytes as pointers, and reading uninitialized memory.
+   774→
+   775→**4. Origin** — Every address traces to a valid allocation. The origin verifier traverses the derivation chain from every access back to its root allocation. Each `Derivation` must have a valid parent chain ending at a `DerivationSource::Direct` from a `Region`. The verifier rejects phantom pointers (hardcoded addresses, untrusted inputs) that have no valid derivation chain. Violations produce origin violation records with the broken chain and the address that cannot be traced to an allocation.
+   776→
+   777→**5. Cleanup** — Every allocated region is eventually freed or intentionally leaked. The cleanup verifier builds a `CleanupGraph` from the MSG, tracking the lifecycle of each resource (allocation → use → deallocation). It verifies that every region reaches a terminal state (`Freed` or intentionally leaked via annotation). The verifier distinguishes between leaks (unreachable regions with no deallocation) and intentional leaks (regions marked with explicit leak annotations, such as arenas and global buffers). Violations produce `CleanupViolation` records with `ViolationKind` (Leak, DoubleFree, UseAfterFree).
+   778→
+   779→### Verification Result Aggregation
+   780→
+   781→The `InvariantAggregator` runs all five verifiers and produces a `VerificationSummary` containing:
+   782→
+   783→- **`AggregatedResult`** per invariant: `OverallVerdict` (Pass, Fail, Inconclusive) with `VerificationLevel` (Full, Partial, BestEffort)
+   784→- **`DiagnosticsReport`**: human-readable diagnostics with per-invariant details
+   785→- **`InvariantDelta`**: when re-verifying, the delta between previous and current results (for incremental reporting)
+   786→- **`VerificationDebt`**: unverified obligations ordered by `Priority` (Critical, High, Medium, Low)
+   787→
+   788→The tiered verification model (`VerificationLevel`) is essential: some invariants can be fully verified (e.g., liveness in single-threaded programs), some can be partially verified (e.g., exclusivity requires happens-before analysis that may be incomplete), and some can only be verified on a best-effort basis (e.g., cleanup in the presence of arbitrary interop). The system does not reject programs that cannot be fully verified; instead, it records the verification debt and makes it visible to the programmer.
+   789→
+   790→### Incremental Verification
+   791→
+   792→The `msg_incremental` module supports incremental verification via `MSGDelta`. When the SCG changes (e.g., a single function is edited), the system computes the delta between the old and new SCGs using `compute_scg_delta`, converts only the affected subgraph to MSG via `compute_delta`, and applies the delta to the existing MSG via `apply_delta`. The `VerificationStatus` tracks which invariants need re-verification based on the delta. This enables sub-second verification for typical edits, which is critical for interactive development and the projection system's bidirectional editing feature.
+   793→
+   794→---
+   795→
+   796→## 6. Code Generation Pipeline
+   797→
+   798→The code generation pipeline translates a verified SCG into ARM64 machine code. The pipeline consists of three phases: SCG-to-IR lowering, register allocation, and machine code emission. Each phase produces a well-defined intermediate artifact that can be inspected, cached, and incrementally updated. The pipeline is designed to produce zero-overhead code — because VUMA has already proven memory safety, the codegen can emit raw pointer operations without any runtime bounds checks, borrow checks, or GC barriers.
+   799→
+   800→### Three-Phase Pipeline
+   801→
+   802→```
+   803→┌──────────────────────────────────────────────────────────────────────────┐
+   804→│                     Code Generation Pipeline                              │
+   805→│                                                                          │
+   806→│  ┌───────────┐     ┌──────────────────┐     ┌──────────────────────┐    │
+   807→│  │ Verified  │     │   IR (Intermedi- │     │   ARM64 Machine Code │    │
+   808→│  │ SCG       │────▶│   ate Represen-  │────▶│   + ELF Binary       │    │
+   809→│  │           │     │   tation)        │     │   + Debug Info        │    │
+   810→│  └───────────┘     └──────────────────┘     └──────────────────────┘    │
+   811→│       Phase 1           Phase 2                  Phase 3                │
+   812→│    (scg_to_ir)        (regalloc)                (emit)                  │
+   813→└──────────────────────────────────────────────────────────────────────────┘
+   814→```
+   815→
+   816→### Phase 1: SCG → IR Lowering
+   817→
+   818→The `ScgToIr` converter translates SCG nodes into an intermediate representation that is closer to the target architecture while remaining target-independent enough to support future backends. The IR consists of functions, basic blocks, instructions, terminators, and values.
+   819→
+   820→```
+   821→┌──────────────────────────────────────────────────────────────────────┐
+   822→│                         IR Types                                     │
+   823→│                                                                      │
+   824→│  struct IrFunction {                                                 │
+   825→│      name: String,                                                   │
+   826→│      params: Vec<IrValue>,     // function parameters               │
+   827→│      blocks: Vec<IrBasicBlock>,// basic blocks                      │
+   828→│      return_type: Option<IrType>,                                    │
+   829→│  }                                                                   │
+   830→│                                                                      │
+   831→│  struct IrBasicBlock {                                               │
+   832→│      label: String,                                                  │
+   833→│      instructions: Vec<IrInstruction>,                               │
+   834→│      terminator: IrTerminator,                                       │
+   835→│  }                                                                   │
+   836→│                                                                      │
+   837→│  enum IrInstruction {                                                │
+   838→│      BinOp { op, dst, lhs, rhs },      // Add, Sub, Mul, Div, ...  │
+   839→│      UnaryOp { op, dst, src },         // Neg, Not, ...             │
+   840→│      Load { dst, addr, size },         // memory read               │
+   841→│      Store { addr, value, size },      // memory write              │
+   842→│      Call { dst, func, args },         // function call             │
+   843→│      Alloca { dst, size, align },      // stack allocation          │
+   844→│      Cast { dst, src, from_type, to_type },                         │
+   845→│      Gep { dst, base, offset },        // pointer arithmetic        │
+   846→│      Cmp { op, dst, lhs, rhs },        // comparison               │
+   847→│      Phi { dst, inputs },              // SSA phi node             │
+   848→│  }                                                                   │
+   849→│                                                                      │
+   850→│  enum IrTerminator {                                                 │
+   851→│      Return(Option<IrValue>),                                        │
+   852→│      Branch { condition, true_block, false_block },                  │
+   853→│      Jump { target },                                                │
+   854→│      Unreachable,                                                    │
+   855→│  }                                                                   │
+   856→│                                                                      │
+   857→│  enum IrValue {                                                      │
+   858→│      Register(IrReg),         // virtual register                   │
+   859→│      Constant(IrConst),       // immediate value                    │
+   860→│      FunctionRef(String),     // function reference                 │
+   861→│  }                                                                   │
+   862→└──────────────────────────────────────────────────────────────────────┘
+   863→```
+   864→
+   865→**Node-to-IR Mapping.** `AllocationNode` → `Alloca` instruction. `AccessNode` with Read mode → `Load` instruction. `AccessNode` with Write mode → `Store` instruction. `ComputationNode` → `BinOp` or `UnaryOp` depending on the operation. `CastNode` → `Cast` instruction. `ControlNode` with Branch → `Branch` terminator. `ControlNode` with Return → `Return` terminator. `PhiNode` → `Phi` instruction. `EffectNode` → target-specific intrinsic call.
+   866→
+   867→### Phase 2: Register Allocation
+   868→
+   869→The register allocator assigns physical ARM64 registers to virtual registers in the IR. The current implementation uses a linear-scan algorithm, which provides good allocation quality in O(n) time where n is the number of virtual registers. The allocator targets the full AArch64 register set: `x0–x30` (general-purpose), `sp` (stack pointer), and `xzr` (zero register). It respects calling conventions (AAPCS64): `x0–x7` are argument/result registers, `x19–x28` are callee-saved, and `x9–x15` are caller-saved temporaries.
+   870→
+   871→The allocator handles spilling when the number of simultaneously live virtual registers exceeds the number of available physical registers. Spill code generates `Load`/`Store` pairs that save and restore values to/from the stack. Because the VUMA verification has already proven memory safety, spilled values can be stored directly to the stack without any additional bounds checking.
+   872→
+   873→### Phase 3: Machine Code Emission
+   874→
+   875→The `arm64` module defines `Arm64Instruction` with all core integer instructions (MOV, ADD, SUB, MUL, DIV, AND, ORR, EOR, LSL, LSR, ASR), memory instructions (LDR, STR, LDP, STP with all addressing modes), and branch instructions (B, BL, BR, BLR, B.cond, CBZ, CBNZ, TBZ, TBNZ). Each instruction has a binary encoding verified against the ARM Architecture Reference Manual.
+   876→
+   877→The `emit` module generates ARM64 machine code from the register-allocated IR and produces an ELF binary with proper section layout (`.text.boot`, `.text`, `.rodata`, `.data`, `.bss`) and debug information mapping SCG nodes to code offsets. The emitted binary includes `DebugInfo` with source-to-offset mapping, symbol table, and compiler notes for COR integration.
+   878→
+   879→### Bare-Metal Boot Sequence
+   880→
+   881→The platform module provides a complete bare-metal boot sequence. The `_start` entry point (in `.text.boot`) saves the DTB pointer, reads the core ID from `MPIDR_EL1.Aff0`, parks secondary cores in a `WFE` loop, sets up the stack for core 0 above `__bss_end`, zeros the BSS section, installs the exception vector table via `VBAR_EL1`, and jumps to `boot_main`. The `boot_main` function initializes UART at 115200 baud, parses the FDT header, constructs `BootInfo`, and calls the user's `main()` function. The linker script defines the memory layout with kernel, per-core stacks, MMIO window, and exports symbols for boot code consumption.
+   882→
+   883→---
+   884→
+   885→## 7. Runtime Optimization Pipeline
+   886→
+   887→The Continuous Optimization Runtime (COR) is the always-on execution engine that treats compilation not as a one-shot process but as a continuous cycle of compile-profile-optimize-recompile. The COR maintains an always-compiled invariant: every reachable SCG region is kept in compiled ARM64 machine code at all times. This enables the system to respond to runtime observations by re-optimizing hot paths, deoptimizing when speculation fails, and migrating regions across heterogeneous targets.
+   888→
+   889→### COR Architecture
+   890→
+   891→```
+   892→┌──────────────────────────────────────────────────────────────────────────┐
+   893→│                    Continuous Optimization Runtime                        │
+   894→│                                                                          │
+   895→│  ┌──────────────────────────────────────────────────────────────────┐    │
+   896→│  │                       CORuntime (orchestrator)                    │    │
+   897→│  │  ┌─────────────┐ ┌──────────────┐ ┌─────────────────────────┐   │    │
+   898→│  │  │ Incremental │ │ Profile      │ │ Deployment              │   │    │
+   899→│  │  │ Compiler    │ │ Collector    │ │ Manager                 │   │    │
+   900→│  │  │             │ │ (thread-safe)│ │ (hot-swap, delta,       │   │    │
+   901→│  │  │             │ │              │ │  version tracking)      │   │    │
+   902→│  │  └──────┬──────┘ └──────┬───────┘ └───────────┬─────────────┘   │    │
+   903→│  │         │               │                      │                  │    │
+   904→│  │         └───────────────┼──────────────────────┘                  │    │
+   905→│  │                         │                                         │    │
+   906→│  │                         ▼                                         │    │
+   907→│  │  ┌──────────────────────────────────────────────────────────┐    │    │
+   908→│  │  │              Optimization Engine                          │    │    │
+   909→│  │  │  ┌─────────────┐ ┌──────────────┐ ┌──────────────────┐  │    │    │
+   910→│  │  │  │ PGO         │ │ Speculative  │ │ SCG Transform    │  │    │    │
+   911→│  │  │  │ (hot paths, │ │ Executor     │ │ Passes           │  │    │    │
+   912→│  │  │  │  inlining,  │ │ (branch pred,│ │ (DCE, folding,   │  │    │    │
+   913→│  │  │  │  code       │ │  inlining,   │ │  inlining, CSE,  │  │    │    │
+   914→│  │  │  │  layout)    │ │  code motion)│ │  loop unroll)    │  │    │    │
+   915→│  │  │  └─────────────┘ └──────────────┘ └──────────────────┘  │    │    │
+   916→│  │  └──────────────────────────────────────────────────────────┘    │    │
+   917→│  └──────────────────────────────────────────────────────────────────┘    │
+   918→└──────────────────────────────────────────────────────────────────────────┘
+   919→```
+   920→
+   921→### Profile-Guided Optimization
+   922→
+   923→The `ProfileCollector` is a thread-safe runtime collector (backed by `Mutex<ProfileData>` + `AtomicU64` sample counter) that records node execution times, edge traversal frequencies, allocation statistics, and hardware PMU counter snapshots. The `PmuCounters` struct captures cycle count, instruction count, cache misses, and branch misses, with computed metrics: `ipc()` (instructions per cycle), `cache_miss_rate()`, and `branch_miss_rate()`. The `collect_profile` analysis entry point ingests `ProfileSample` records, computes hot spots (`NodeHotSpot` with per-node call count, total time, time fraction), cold spots, hot paths (`HotPath` with cumulative time fraction and dominance threshold), and PMU aggregates. It produces a `ProfileReport` with recommendations including `CacheOptimize` and `BranchLayout` suggestions derived from PMU data.
+   924→
+   925→Profile-guided optimization improves benchmark performance by at least 15% over unoptimized codegen through: (1) aggressive inlining of hot call sites, (2) code layout optimization for hot paths (sequential instruction cache utilization), (3) branch prediction hints for frequently taken branches, and (4) cold path outlining for rarely executed code.
+   926→
+   927→### Speculative Optimization
+   928→
+   929→The `SpeculativeExecutor` manages the full speculative-optimization lifecycle through three phases. **Phase 1 — Identify:** `identify_candidates()` scans profile data for `SpeculationCandidate`s with `CandidateKind` (LikelyBranch, HotPath, MonomorphicCall, UncontendedRegion) and confidence scores. `identify_inline_candidates()` analyzes call frequency data for speculative inlining. `identify_code_motion_candidates()` identifies hot/cold code for hoisting/sinking. **Phase 2 — Apply:** `apply_speculation()`, `apply_inline()`, and `apply_code_motion()` each save a `Snapshot` (compiled regions + SCG dimensions) before transforming the code. The `BranchPredictionTable` stores per-edge predictions derived from `ProfileData` with confidence thresholds. **Phase 3 — Validate and Rollback:** `validate_and_rollback()` checks all active assumptions against runtime observations. When an assumption is invalidated, the executor rolls back to the pre-speculation `Snapshot`, records a `SpeculationResult::Failure`, and removes the speculation from the active set. This transparent deoptimization ensures correctness while enabling aggressive optimization.
+   930→
+   931→### SCG Transformation Passes
+   932→
+   933→The `PassManager` in the SCG module orchestrates verification-aware optimization passes that operate directly on the SCG before code generation. Available passes include: `DeadCodeElimination` (removes unreachable nodes), `ConstantFolding` (evaluates compile-time-known expressions), `InliningPass` (inline calls below a size threshold), `CommonSubexpressionElimination` (deduplicates redundant computations), and `VerificationPass` (re-runs the verification pipeline after transformation to ensure semantics are preserved). Each pass implements the `SCGPass` trait and returns a `PassResult` indicating whether the pass made changes. The `PassManager` runs passes in dependency order and stops if any pass introduces a verification violation.
+   934→
+   935→### Deployment and Hot-Swap
+   936→
+   937→The `DeploymentManager` handles adaptive deployment across heterogeneous targets. `DeploymentTarget` variants include `Local`, `BareMetal { board_id, core_id }`, `Linux { host, core_affinity }`, and `Remote { endpoint }`. The manager supports: **Hot-swap deployment** via a 6-phase state machine (Idle → PreparingShadow → AwaitingSafePoint → Swapping → Completed → Failed) that replaces running code without stopping execution; **Delta deployment** via `DeploymentDelta` with block-level binary diffing (`compute()`, `apply()`, `estimated_size()`); **Version tracking** via `VersionLog` with per-region version history and rollback support; and **Package management** via `DeploymentPackage` with CRC32 checksums, debug info, and monotonic version numbers. Deployment results include timing, bytes transferred, and whether the deployment was a hot-swap or delta.
+   938→
+   939→---
+   940→
+   941→## 8. Security Model Overview
+   942→
+   943→VUMA's security model is built on the principle that security properties should be derived from verified invariants, not from access control restrictions. Traditional security models restrict what programs can do; VUMA verifies what programs actually do and raises an alarm when behavior deviates from verified expectations. This inversion eliminates the fundamental tension between security and expressiveness: programs are not prevented from performing "dangerous" operations; instead, every dangerous operation is verified against the security model, and violations are caught before deployment.
+   944→
+   945→### Security Layers
+   946→
+   947→**Layer 1 — Memory Safety (VUMA Invariants).** The five VUMA invariants form the foundation of the security model. Liveness prevents use-after-free attacks. Exclusivity prevents data races that could lead to information disclosure or corruption. Interpretation prevents type confusion attacks (e.g., interpreting integer bytes as pointers). Origin prevents phantom pointer injection (e.g., using hardcoded addresses or untrusted input as pointers). Cleanup prevents resource exhaustion attacks via memory leaks. These invariants are verified at compile time and do not impose any runtime overhead.
+   948→
+   949→**Layer 2 — Capability Security (CapD).** The `CapD` component of Behavioral Descriptors provides fine-grained capability-based security. Every value has a set of capabilities that determine what operations are permitted. Capabilities are not just read/write — they include `Send` (can the value be sent across a security boundary?), `Persist` (can the value be written to persistent storage?), `Serialize` (can the value be converted to a byte stream?), `DerivePtr` (can a pointer be derived from this value?), and `Execute` (can these bytes be executed as code?). The `ContextSolver` ensures that capabilities are context-dependent — a value may have `Send` in one security region but not in another. Capability transitions are verified by the IVE: a capability can only be removed (never added) as a value crosses a security boundary, ensuring that security levels only increase.
+   950→
+   951→**Layer 3 — Information Flow (RelD).** The `RelD` component of Behavioral Descriptors tracks information flow between values. The `SecurityLevel` relationship kind assigns security classifications to values (e.g., Public, Confidential, Secret). The IVE verifies that information does not flow from higher-security values to lower-security channels: a `Secret` value cannot be written to a `Public` output, a `Confidential` value cannot be sent across an unencrypted channel. This is verified at the SCG level — the IVE traces data flow edges and checks that every edge from a higher-security node to a lower-security node is either explicitly authorized or blocked. The RelD also tracks `MustNotOutlive` relationships that prevent dangling references to freed resources, and `DerivedFrom` relationships that maintain taint tracking through pointer arithmetic and casts.
+   952→
+   953→**Layer 4 — Region Security (SCG Regions).** SCG regions provide coarse-grained security boundaries. A `Security` region encloses a set of nodes that operate at a particular security level. Crossing a region boundary requires capability downgrade: values entering a lower-security region have their CapD intersected with the region's allowed capabilities. This is enforced by the IVE during verification — no code generation proceeds if a region boundary violation is detected. Regions can be nested (a Secret region inside a Confidential region inside a Public region), and the containment hierarchy is verified to be a proper lattice (no cycles, consistent ordering).
+   954→
+   955→**Layer 5 — Platform Security.** The platform module provides hardware-level security through memory protection features. The `DeploymentTarget::BareMetal` variant includes `board_id` and `core_id` fields that bind compiled code to specific hardware. The bare-metal boot sequence installs exception vectors that trap unauthorized access attempts. The MMIO module provides memory-mapped register access with capability descriptors that prevent unauthorized peripheral access. The DMA controller driver includes cache coherency management that prevents DMA-based attacks on main memory.
+   956→
+   957→### Threat Model
+   958→
+   959→VUMA's security model addresses the following threat categories:
+   960→
+   961→1. **Memory corruption attacks** (buffer overflows, use-after-free, double-free, type confusion) — addressed by VUMA invariants verified at compile time with zero runtime overhead.
+   962→
+   963→2. **Information disclosure** (reading sensitive data through pointer arithmetic, type punning, or side channels) — addressed by RelD information flow tracking and CapD capability restrictions.
+   964→
+   965→3. **Privilege escalation** (gaining unauthorized capabilities by crossing security boundaries) — addressed by CapD context transitions verified by the IVE and region boundary enforcement.
+   966→
+   967→4. **Resource exhaustion** (memory leaks, file descriptor exhaustion) — addressed by the cleanup invariant that verifies every resource is eventually freed or explicitly leaked.
+   968→
+   969→5. **Concurrent access violations** (data races, deadlock, livelock) — addressed by the exclusivity invariant with happens-before analysis and deadlock detection.
+   970→
+   971→6. **Supply chain attacks** (malicious code injected through dependencies) — partially addressed by origin verification (every pointer traces to a valid allocation), but full supply chain security requires additional mechanisms beyond VUMA's current scope.
+   972→
+   973→### Verification Confidence and Debt
+   974→
+   975→Not all security properties can be verified with full confidence. The `VerificationLevel` tier (Full, Partial, BestEffort) reflects the verification engine's ability to prove each invariant. `Full` verification produces a formal proof. `Partial` verification covers most cases but may have unresolved assumptions. `BestEffort` verification provides empirical evidence but no formal guarantee. Unverified properties are tracked as `VerificationDebt` items with priorities: `Critical` debt (safety violations) must be resolved before deployment, `High` debt (security concerns) should be resolved, and `Medium`/`Low` debt (quality issues) can be deferred. The `VerificationDebt` tracker maintains an ordered list of unresolved obligations and supports incremental resolution as the IVE gains more information (through additional annotations, profile data, or manual proof assistance).
+   976→
+   977→---
+   978→
+   979→*This document is maintained by the VUMA project team and updated as the architecture evolves. For implementation details, refer to the source crates in `src/`. For formal specifications, refer to `docs/specs/`. For the project roadmap, refer to `docs/ROADMAP.md`.*
+   980→

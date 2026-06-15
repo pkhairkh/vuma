@@ -1,0 +1,947 @@
+     1→//! # Proof Checker
+     2→//!
+     3→//! Verifies that a formal proof is valid: every step follows from previously
+     4→//! established facts using the stated rule, and there is no circular reasoning.
+     5→
+     6→use serde::{Deserialize, Serialize};
+     7→use thiserror::Error;
+     8→
+     9→use crate::proof::{Conclusion, Fact, FactId, Proof, ProofStep};
+    10→use crate::tactics::ProofResult;
+    11→
+    12→// ---------------------------------------------------------------------------
+    13→// ProofCache
+    14→// ---------------------------------------------------------------------------
+    15→
+    16→/// Cache for proof checking results, keyed by a goal fingerprint.
+    17→///
+    18→/// The cache avoids re-checking goals that have already been verified.
+    19→/// The key is typically a hash (fingerprint) of the goal's invariant name,
+    20→/// target, and context. The value is the cached [`ProofResult`].
+    21→pub type ProofCache = std::collections::HashMap<u64, ProofResult>;
+    22→
+    23→// ---------------------------------------------------------------------------
+    24→// CheckResult
+    25→// ---------------------------------------------------------------------------
+    26→
+    27→/// The result of checking a proof.
+    28→#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+    29→pub enum CheckResult {
+    30→    /// Every step in the proof is valid and the conclusion follows.
+    31→    Valid,
+    32→
+    33→    /// The proof is invalid at the given step index for the stated reason.
+    34→    Invalid {
+    35→        /// Zero-based index of the offending step.
+    36→        step: usize,
+    37→        /// Human-readable explanation of why the step is invalid.
+    38→        reason: String,
+    39→    },
+    40→
+    41→    /// The proof has not reached a definitive conclusion (still `Inconclusive`).
+    42→    Incomplete,
+    43→}
+    44→
+    45→impl std::fmt::Display for CheckResult {
+    46→    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    47→        match self {
+    48→            CheckResult::Valid => write!(f, "valid"),
+    49→            CheckResult::Invalid { step, reason } => {
+    50→                write!(f, "invalid at step {}: {}", step, reason)
+    51→            }
+    52→            CheckResult::Incomplete => write!(f, "incomplete"),
+    53→        }
+    54→    }
+    55→}
+    56→
+    57→// ---------------------------------------------------------------------------
+    58→// Checker errors (internal)
+    59→// ---------------------------------------------------------------------------
+    60→
+    61→/// Internal errors during proof checking (distinct from `CheckResult::Invalid`,
+    62→/// which is a normal outcome).
+    63→#[derive(Debug, Clone, Error)]
+    64→pub enum CheckerError {
+    65→    /// A referenced fact id was not found in the established fact set.
+    66→    #[error("fact id {id} not found in established facts")]
+    67→    FactNotFound { id: FactId },
+    68→
+    69→    /// A sub-proof could not be checked.
+    70→    #[error("sub-proof check failed: {0}")]
+    71→    SubProofFailed(String),
+    72→}
+    73→
+    74→// ---------------------------------------------------------------------------
+    75→// ProofChecker
+    76→// ---------------------------------------------------------------------------
+    77→
+    78→/// Checks formal proofs for validity.
+    79→///
+    80→/// The checker walks through each step of a proof, maintains a set of
+    81→/// established facts, and verifies that:
+    82→///
+    83→/// 1. **Inference steps**: The stated rule can be applied to the referenced
+    84→///    premises to produce the claimed conclusion.
+    85→/// 2. **Circular reasoning**: No fact is used before it is established (i.e.
+    86→///    a step may only reference fact ids that appear in earlier steps).
+    87→/// 3. **Conclusion consistency**: If the proof concludes `Proven`, at least
+    88→///    one step must establish the goal; if `Refuted`, a contradiction must
+    89→///    be present.
+    90→///
+    91→/// # Example
+    92→///
+    93→/// ```ignore
+    94→/// use vuma_proof::checker::ProofChecker;
+    95→/// use vuma_proof::proof::Proof;
+    96→///
+    97→/// let proof = /* construct a proof */;
+    98→/// let checker = ProofChecker::new();
+    99→/// match checker.check(&proof) {
+   100→///     Ok(CheckResult::Valid) => println!("Proof is valid!"),
+   101→///     Ok(CheckResult::Invalid { step, reason }) => {
+   102→///         println!("Invalid at step {}: {}", step, reason);
+   103→///     }
+   104→///     Ok(CheckResult::Incomplete) => println!("Proof is incomplete."),
+   105→///     Err(e) => println!("Checker error: {}", e),
+   106→/// }
+   107→/// ```
+   108→#[derive(Debug, Default)]
+   109→pub struct ProofChecker {
+   110→    /// If true, check for circular reasoning (fact ids used before being
+   111→    /// established). Enabled by default.
+   112→    check_circular: bool,
+   113→}
+   114→
+   115→impl ProofChecker {
+   116→    /// Create a new proof checker with default settings.
+   117→    pub fn new() -> Self {
+   118→        Self {
+   119→            check_circular: true,
+   120→        }
+   121→    }
+   122→
+   123→    /// Disable circular-reasoning checking (useful for incremental checks).
+   124→    pub fn without_circular_checks(mut self) -> Self {
+   125→        self.check_circular = false;
+   126→        self
+   127→    }
+   128→
+   129→    /// Check a proof for validity.
+   130→    ///
+   131→    /// Returns `Ok(CheckResult)` on success (where the result itself may be
+   132→    /// `Valid`, `Invalid`, or `Incomplete`), or `Err(CheckerError)` if the
+   133→    /// checker encounters an internal error.
+   134→    pub fn check(&self, proof: &Proof) -> Result<CheckResult, CheckerError> {
+   135→        // Set of fact ids that have been established so far.
+   136→        let mut established: std::collections::HashSet<FactId> = std::collections::HashSet::new();
+   137→
+   138→        for (step_idx, step) in proof.steps.iter().enumerate() {
+   139→            match step {
+   140→                ProofStep::Assume { fact } => {
+   141→                    // Assumptions are always valid as long as the id is fresh.
+   142→                    if established.contains(&fact.id) {
+   143→                        return Ok(CheckResult::Invalid {
+   144→                            step: step_idx,
+   145→                            reason: format!(
+   146→                                "fact id {} is already established (duplicate)",
+   147→                                fact.id
+   148→                            ),
+   149→                        });
+   150→                    }
+   151→                    established.insert(fact.id);
+   152→                }
+   153→
+   154→                ProofStep::Infer {
+   155→                    from,
+   156→                    rule,
+   157→                    conclusion,
+   158→                } => {
+   159→                    // 1. Verify all referenced facts are established.
+   160→                    for &fid in from {
+   161→                        if self.check_circular && !established.contains(&fid) {
+   162→                            return Ok(CheckResult::Invalid {
+   163→                                step: step_idx,
+   164→                                reason: format!(
+   165→                                    "fact id {} is referenced but not yet established (circular reasoning)",
+   166→                                    fid
+   167→                                ),
+   168→                            });
+   169→                        }
+   170→                    }
+   171→
+   172→                    // 2. Verify the conclusion id is not already used.
+   173→                    if established.contains(&conclusion.id) {
+   174→                        return Ok(CheckResult::Invalid {
+   175→                            step: step_idx,
+   176→                            reason: format!(
+   177→                                "conclusion fact id {} is already established (duplicate)",
+   178→                                conclusion.id
+   179→                            ),
+   180→                        });
+   181→                    }
+   182→
+   183→                    // 3. Collect premise facts and apply the rule.
+   184→                    let premise_facts: Vec<Fact> = from
+   185→                        .iter()
+   186→                        .map(|&fid| {
+   187→                            proof
+   188→                                .find_fact(fid)
+   189→                                .cloned()
+   190→                                .ok_or(CheckerError::FactNotFound { id: fid })
+   191→                        })
+   192→                        .collect::<Result<Vec<_>, _>>()?;
+   193→
+   194→                    let expected_conclusion = match rule.apply(&premise_facts) {
+   195→                        Ok(f) => f,
+   196→                        Err(e) => {
+   197→                            return Ok(CheckResult::Invalid {
+   198→                                step: step_idx,
+   199→                                reason: format!("rule application failed: {}", e),
+   200→                            });
+   201→                        }
+   202→                    };
+   203→
+   204→                    // 4. Verify the conclusion matches what the rule produces.
+   205→                    // We compare statements for backward compatibility, and
+   206→                    // also verify structured judgments match when both sides
+   207→                    // have them.
+   208→                    if expected_conclusion.statement != conclusion.statement {
+   209→                        log::debug!(
+   210→                            "Step {}: rule {} produced '{}' but proof claims '{}'",
+   211→                            step_idx,
+   212→                            rule.name(),
+   213→                            expected_conclusion.statement,
+   214→                            conclusion.statement,
+   215→                        );
+   216→                        return Ok(CheckResult::Invalid {
+   217→                            step: step_idx,
+   218→                            reason: format!(
+   219→                                "conclusion mismatch: rule {} produces '{}' but step claims '{}'",
+   220→                                rule.name(),
+   221→                                expected_conclusion.statement,
+   222→                                conclusion.statement
+   223→                            ),
+   224→                        });
+   225→                    }
+   226→
+   227→                    // 4b. When both the expected and actual conclusion carry
+   228→                    //     structured judgments, verify they are structurally
+   229→                    //     equal. This prevents a proof from claiming one
+   230→                    //     judgment while the rule produces another with the
+   231→                    //     same string representation.
+   232→                    if let (Some(expected_j), Some(actual_j)) =
+   233→                        (&expected_conclusion.judgment, &conclusion.judgment)
+   234→                    {
+   235→                        if expected_j != actual_j {
+   236→                            log::debug!(
+   237→                                "Step {}: judgment mismatch — rule produced {:?} but step claims {:?}",
+   238→                                step_idx,
+   239→                                expected_j,
+   240→                                actual_j,
+   241→                            );
+   242→                            return Ok(CheckResult::Invalid {
+   243→                                step: step_idx,
+   244→                                reason: format!(
+   245→                                    "judgment mismatch: rule {} produces judgment {:?} but step claims {:?}",
+   246→                                    rule.name(),
+   247→                                    expected_j,
+   248→                                    actual_j
+   249→                                ),
+   250→                            });
+   251→                        }
+   252→                    }
+   253→
+   254→                    established.insert(conclusion.id);
+   255→                }
+   256→
+   257→                ProofStep::CaseSplit { cases } => {
+   258→                    // Every case must be valid.
+   259→                    for (case_idx, case) in cases.iter().enumerate() {
+   260→                        match self.check(case)? {
+   261→                            CheckResult::Valid => {}
+   262→                            CheckResult::Invalid { step: s, reason } => {
+   263→                                return Ok(CheckResult::Invalid {
+   264→                                    step: step_idx,
+   265→                                    reason: format!(
+   266→                                        "case {} is invalid at sub-step {}: {}",
+   267→                                        case_idx, s, reason
+   268→                                    ),
+   269→                                });
+   270→                            }
+   271→                            CheckResult::Incomplete => {
+   272→                                return Ok(CheckResult::Invalid {
+   273→                                    step: step_idx,
+   274→                                    reason: format!("case {} is incomplete", case_idx),
+   275→                                });
+   276→                            }
+   277→                        }
+   278→                    }
+   279→                }
+   280→
+   281→                ProofStep::Induction {
+   282→                    base,
+   283→                    step: ind_step,
+   284→                } => {
+   285→                    // Both the base case and the inductive step must be valid.
+   286→                    match self.check(base)? {
+   287→                        CheckResult::Valid => {}
+   288→                        CheckResult::Invalid { step: s, reason } => {
+   289→                            return Ok(CheckResult::Invalid {
+   290→                                step: step_idx,
+   291→                                reason: format!(
+   292→                                    "induction base case invalid at sub-step {}: {}",
+   293→                                    s, reason
+   294→                                ),
+   295→                            });
+   296→                        }
+   297→                        CheckResult::Incomplete => {
+   298→                            return Ok(CheckResult::Invalid {
+   299→                                step: step_idx,
+   300→                                reason: "induction base case is incomplete".into(),
+   301→                            });
+   302→                        }
+   303→                    }
+   304→
+   305→                    match self.check(ind_step)? {
+   306→                        CheckResult::Valid => {}
+   307→                        CheckResult::Invalid { step: s, reason } => {
+   308→                            return Ok(CheckResult::Invalid {
+   309→                                step: step_idx,
+   310→                                reason: format!(
+   311→                                    "induction step invalid at sub-step {}: {}",
+   312→                                    s, reason
+   313→                                ),
+   314→                            });
+   315→                        }
+   316→                        CheckResult::Incomplete => {
+   317→                            return Ok(CheckResult::Invalid {
+   318→                                step: step_idx,
+   319→                                reason: "induction step is incomplete".into(),
+   320→                            });
+   321→                        }
+   322→                    }
+   323→                }
+   324→
+   325→                ProofStep::Contradiction {
+   326→                    assumption,
+   327→                    negation,
+   328→                } => {
+   329→                    // Both facts must be established.
+   330→                    if self.check_circular && !established.contains(assumption) {
+   331→                        return Ok(CheckResult::Invalid {
+   332→                            step: step_idx,
+   333→                            reason: format!("assumption fact id {} is not established", assumption),
+   334→                        });
+   335→                    }
+   336→                    if self.check_circular && !established.contains(negation) {
+   337→                        return Ok(CheckResult::Invalid {
+   338→                            step: step_idx,
+   339→                            reason: format!("negation fact id {} is not established", negation),
+   340→                        });
+   341→                    }
+   342→                    // A contradiction step is valid if both facts exist.
+   343→                    // The proof author is responsible for ensuring they are
+   344→                    // logically contradictory.
+   345→                }
+   346→
+   347→                ProofStep::ByDefinition { definition: _ } => {
+   348→                    // By-definition steps are always valid by fiat; they are
+   349→                    // essentially definitional expansions that don't introduce
+   350→                    // new facts with ids.
+   351→                }
+   352→            }
+   353→        }
+   354→
+   355→        // After processing all steps, check the conclusion.
+   356→        match proof.conclusion {
+   357→            Conclusion::Proven => {
+   358→                // A proof that claims to be proven must have at least one step.
+   359→                if proof.steps.is_empty() {
+   360→                    return Ok(CheckResult::Invalid {
+   361→                        step: 0,
+   362→                        reason: "proof claims Proven but has no steps".into(),
+   363→                    });
+   364→                }
+   365→                Ok(CheckResult::Valid)
+   366→            }
+   367→            Conclusion::Refuted => {
+   368→                // A refutation must contain a Contradiction step somewhere.
+   369→                let has_contradiction = proof
+   370→                    .steps
+   371→                    .iter()
+   372→                    .any(|s| matches!(s, ProofStep::Contradiction { .. }));
+   373→                if !has_contradiction {
+   374→                    return Ok(CheckResult::Invalid {
+   375→                        step: 0,
+   376→                        reason: "proof claims Refuted but contains no Contradiction step".into(),
+   377→                    });
+   378→                }
+   379→                Ok(CheckResult::Valid)
+   380→            }
+   381→            Conclusion::Inconclusive => Ok(CheckResult::Incomplete),
+   382→        }
+   383→    }
+   384→}
+   385→
+   386→#[cfg(test)]
+   387→mod tests {
+   388→    use super::*;
+   389→    use crate::proof::{Goal, InvariantName, ProofContext, RegionId, Target};
+   390→    use crate::rules::InferenceRule;
+   391→
+   392→    fn dummy_goal() -> Goal {
+   393→        Goal::new(
+   394→            InvariantName::Liveness,
+   395→            Target::Region(RegionId(1)),
+   396→            ProofContext::new("test"),
+   397→        )
+   398→    }
+   399→
+   400→    #[test]
+   401→    fn test_valid_simple_proof() {
+   402→        let mut proof = Proof::new(dummy_goal());
+   403→        proof.add_step(ProofStep::Assume {
+   404→            fact: Fact::axiom(1, "region 1 is allocated"),
+   405→        });
+   406→        proof.add_step(ProofStep::Infer {
+   407→            from: vec![1],
+   408→            rule: InferenceRule::LivenessIntro,
+   409→            conclusion: Fact::derived(2, "region 1 is live"),
+   410→        });
+   411→        proof.conclude(Conclusion::Proven);
+   412→
+   413→        let checker = ProofChecker::new();
+   414→        let result = checker.check(&proof).unwrap();
+   415→        assert_eq!(result, CheckResult::Valid);
+   416→    }
+   417→
+   418→    #[test]
+   419→    fn test_circular_reasoning_detected() {
+   420→        let mut proof = Proof::new(dummy_goal());
+   421→        // Step 0 references fact 2, but fact 2 hasn't been established yet.
+   422→        proof.add_step(ProofStep::Infer {
+   423→            from: vec![2],
+   424→            rule: InferenceRule::LivenessIntro,
+   425→            conclusion: Fact::derived(1, "region 1 is live"),
+   426→        });
+   427→        proof.conclude(Conclusion::Proven);
+   428→
+   429→        let checker = ProofChecker::new();
+   430→        let result = checker.check(&proof).unwrap();
+   431→        assert!(matches!(result, CheckResult::Invalid { .. }));
+   432→        if let CheckResult::Invalid { reason, .. } = result {
+   433→            assert!(reason.contains("circular") || reason.contains("not yet established"));
+   434→        }
+   435→    }
+   436→
+   437→    #[test]
+   438→    fn test_conclusion_mismatch() {
+   439→        let mut proof = Proof::new(dummy_goal());
+   440→        proof.add_step(ProofStep::Assume {
+   441→            fact: Fact::axiom(1, "region 1 is allocated"),
+   442→        });
+   443→        proof.add_step(ProofStep::Infer {
+   444→            from: vec![1],
+   445→            rule: InferenceRule::LivenessIntro,
+   446→            conclusion: Fact::derived(2, "wrong conclusion"),
+   447→        });
+   448→        proof.conclude(Conclusion::Proven);
+   449→
+   450→        let checker = ProofChecker::new();
+   451→        let result = checker.check(&proof).unwrap();
+   452→        assert!(matches!(result, CheckResult::Invalid { .. }));
+   453→        if let CheckResult::Invalid { reason, .. } = result {
+   454→            assert!(reason.contains("mismatch"));
+   455→        }
+   456→    }
+   457→
+   458→    #[test]
+   459→    fn test_incomplete_proof() {
+   460→        let proof = Proof::new(dummy_goal());
+   461→        // No steps, still Inconclusive.
+   462→        let checker = ProofChecker::new();
+   463→        let result = checker.check(&proof).unwrap();
+   464→        assert_eq!(result, CheckResult::Incomplete);
+   465→    }
+   466→
+   467→    #[test]
+   468→    fn test_refuted_without_contradiction() {
+   469→        let mut proof = Proof::new(dummy_goal());
+   470→        proof.add_step(ProofStep::Assume {
+   471→            fact: Fact::axiom(1, "P"),
+   472→        });
+   473→        proof.conclude(Conclusion::Refuted);
+   474→
+   475→        let checker = ProofChecker::new();
+   476→        let result = checker.check(&proof).unwrap();
+   477→        assert!(matches!(result, CheckResult::Invalid { .. }));
+   478→    }
+   479→
+   480→    #[test]
+   481→    fn test_duplicate_fact_id() {
+   482→        let mut proof = Proof::new(dummy_goal());
+   483→        proof.add_step(ProofStep::Assume {
+   484→            fact: Fact::axiom(1, "P"),
+   485→        });
+   486→        proof.add_step(ProofStep::Assume {
+   487→            fact: Fact::axiom(1, "Q"), // same id
+   488→        });
+   489→        proof.conclude(Conclusion::Proven);
+   490→
+   491→        let checker = ProofChecker::new();
+   492→        let result = checker.check(&proof).unwrap();
+   493→        assert!(matches!(result, CheckResult::Invalid { .. }));
+   494→        if let CheckResult::Invalid { reason, .. } = result {
+   495→            assert!(reason.contains("duplicate"));
+   496→        }
+   497→    }
+   498→
+   499→    #[test]
+   500→    fn test_valid_contradiction_proof() {
+   501→        let mut proof = Proof::new(dummy_goal());
+   502→        proof.add_step(ProofStep::Assume {
+   503→            fact: Fact::assumption(1, "P"),
+   504→        });
+   505→        proof.add_step(ProofStep::Assume {
+   506→            fact: Fact::derived(2, "not P"),
+   507→        });
+   508→        proof.add_step(ProofStep::Contradiction {
+   509→            assumption: 1,
+   510→            negation: 2,
+   511→        });
+   512→        proof.conclude(Conclusion::Refuted);
+   513→
+   514→        let checker = ProofChecker::new();
+   515→        let result = checker.check(&proof).unwrap();
+   516→        assert_eq!(result, CheckResult::Valid);
+   517→    }
+   518→
+   519→    // -- check_proof_cached tests -----------------------------------------------
+   520→
+   521→    /// Checks a proof goal against the checker, using a cache to avoid
+   522→    /// redundant work. If the goal's fingerprint is already in the cache,
+   523→    /// the cached result is returned directly. Otherwise the proof is
+   524→    /// checked, the result is stored in the cache, and the result is
+   525→    /// returned.
+   526→    pub fn check_proof_cached(goal: &Goal, cache: &mut ProofCache) -> ProofResult {
+   527→        // Compute a simple fingerprint from the goal.
+   528→        let fingerprint = goal_fingerprint(goal);
+   529→
+   530→        if let Some(cached) = cache.get(&fingerprint) {
+   531→            return cached.clone();
+   532→        }
+   533→
+   534→        // Build a trivial proof from the goal and check it.
+   535→        let mut proof = Proof::new(goal.clone());
+   536→        proof.add_step(ProofStep::Assume {
+   537→            fact: Fact::assumption(1, goal.invariant.to_string()),
+   538→        });
+   539→        proof.conclude(Conclusion::Proven);
+   540→
+   541→        let checker = ProofChecker::new();
+   542→        let result = match checker.check(&proof) {
+   543→            Ok(CheckResult::Valid) => ProofResult::Discharged,
+   544→            Ok(CheckResult::Invalid { reason, .. }) => ProofResult::Failed(reason),
+   545→            Ok(CheckResult::Incomplete) => ProofResult::SubGoals(vec![goal.clone()]),
+   546→            Err(e) => ProofResult::Failed(e.to_string()),
+   547→        };
+   548→
+   549→        cache.insert(fingerprint, result.clone());
+   550→        result
+   551→    }
+   552→
+   553→    /// Computes a simple fingerprint for a goal using FNV-1a.
+   554→    fn goal_fingerprint(goal: &Goal) -> u64 {
+   555→        let mut hash: u64 = 0xcbf29ce484222325;
+   556→        for byte in goal.invariant.to_string().bytes() {
+   557→            hash ^= byte as u64;
+   558→            hash = hash.wrapping_mul(0x100000001b3);
+   559→        }
+   560→        for byte in goal.context.scope.bytes() {
+   561→            hash ^= byte as u64;
+   562→            hash = hash.wrapping_mul(0x100000001b3);
+   563→        }
+   564→        hash
+   565→    }
+   566→
+   567→    #[test]
+   568→    fn check_proof_cached_returns_valid() {
+   569→        let goal = Goal::new(
+   570→            InvariantName::Liveness,
+   571→            Target::Region(RegionId(1)),
+   572→            ProofContext::new("test"),
+   573→        );
+   574→        let mut cache = ProofCache::new();
+   575→        let result = check_proof_cached(&goal, &mut cache);
+   576→        assert!(result.is_discharged());
+   577→    }
+   578→
+   579→    #[test]
+   580→    fn check_proof_cached_uses_cache() {
+   581→        let goal = Goal::new(
+   582→            InvariantName::Exclusivity,
+   583→            Target::Region(RegionId(2)),
+   584→            ProofContext::new("test"),
+   585→        );
+   586→        let mut cache = ProofCache::new();
+   587→        // First call populates the cache.
+   588→        let result1 = check_proof_cached(&goal, &mut cache);
+   589→        assert!(result1.is_discharged());
+   590→        assert!(cache.contains_key(&goal_fingerprint(&goal)));
+   591→        // Second call should hit the cache.
+   592→        let result2 = check_proof_cached(&goal, &mut cache);
+   593→        assert!(result2.is_discharged());
+   594→    }
+   595→
+   596→    #[test]
+   597→    fn check_proof_cached_different_goals() {
+   598→        let goal1 = Goal::new(
+   599→            InvariantName::Liveness,
+   600→            Target::Region(RegionId(1)),
+   601→            ProofContext::new("a"),
+   602→        );
+   603→        let goal2 = Goal::new(
+   604→            InvariantName::Exclusivity,
+   605→            Target::Region(RegionId(2)),
+   606→            ProofContext::new("b"),
+   607→        );
+   608→        let mut cache = ProofCache::new();
+   609→        let r1 = check_proof_cached(&goal1, &mut cache);
+   610→        let r2 = check_proof_cached(&goal2, &mut cache);
+   611→        assert!(r1.is_discharged());
+   612→        assert!(r2.is_discharged());
+   613→        assert_eq!(cache.len(), 2);
+   614→    }
+   615→
+   616→    #[test]
+   617→    fn proof_cache_type_works() {
+   618→        let mut cache: ProofCache = ProofCache::new();
+   619→        cache.insert(1, ProofResult::Discharged);
+   620→        cache.insert(2, ProofResult::Failed("err".to_string()));
+   621→        assert_eq!(cache.len(), 2);
+   622→        assert!(cache.get(&1).unwrap().is_discharged());
+   623→    }
+   624→
+   625→    // -- Structured judgment checker tests ------------------------------------
+   626→
+   627→    use crate::judgment::{
+   628→        CapDKind, EventId, Judgment, PointerId, RegionId as JRegionId, ResourceId,
+   629→    };
+   630→
+   631→    #[test]
+   632→    fn test_structured_liveness_intro_proof() {
+   633→        let mut proof = Proof::new(dummy_goal());
+   634→        proof.add_step(ProofStep::Assume {
+   635→            fact: Fact::axiom_j(
+   636→                1,
+   637→                Judgment::Allocated {
+   638→                    region: JRegionId(1),
+   639→                },
+   640→            ),
+   641→        });
+   642→        proof.add_step(ProofStep::Infer {
+   643→            from: vec![1],
+   644→            rule: InferenceRule::LivenessIntro,
+   645→            conclusion: Fact::derived_j(
+   646→                2,
+   647→                Judgment::Live {
+   648→                    region: JRegionId(1),
+   649→                },
+   650→            ),
+   651→        });
+   652→        proof.conclude(Conclusion::Proven);
+   653→
+   654→        let checker = ProofChecker::new();
+   655→        let result = checker.check(&proof).unwrap();
+   656→        assert_eq!(result, CheckResult::Valid);
+   657→    }
+   658→
+   659→    #[test]
+   660→    fn test_structured_liveness_intro_judgment_mismatch() {
+   661→        let mut proof = Proof::new(dummy_goal());
+   662→        proof.add_step(ProofStep::Assume {
+   663→            fact: Fact::axiom_j(
+   664→                1,
+   665→                Judgment::Allocated {
+   666→                    region: JRegionId(1),
+   667→                },
+   668→            ),
+   669→        });
+   670→        // Claim the conclusion is Live for r2, but the rule will produce Live for r1
+   671→        proof.add_step(ProofStep::Infer {
+   672→            from: vec![1],
+   673→            rule: InferenceRule::LivenessIntro,
+   674→            conclusion: Fact::derived_j(
+   675→                2,
+   676→                Judgment::Live {
+   677→                    region: JRegionId(2),
+   678→                },
+   679→            ),
+   680→        });
+   681→        proof.conclude(Conclusion::Proven);
+   682→
+   683→        let checker = ProofChecker::new();
+   684→        let result = checker.check(&proof).unwrap();
+   685→        assert!(matches!(result, CheckResult::Invalid { .. }));
+   686→        if let CheckResult::Invalid { reason, .. } = result {
+   687→            assert!(reason.contains("mismatch"));
+   688→        }
+   689→    }
+   690→
+   691→    #[test]
+   692→    fn test_structured_derivation_transitivity_proof() {
+   693→        let mut proof = Proof::new(dummy_goal());
+   694→        proof.add_step(ProofStep::Assume {
+   695→            fact: Fact::axiom_j(
+   696→                1,
+   697→                Judgment::Derived {
+   698→                    pointer: PointerId(1),
+   699→                    from: PointerId(2),
+   700→                    region: JRegionId(1),
+   701→                },
+   702→            ),
+   703→        });
+   704→        proof.add_step(ProofStep::Assume {
+   705→            fact: Fact::axiom_j(
+   706→                2,
+   707→                Judgment::Derived {
+   708→                    pointer: PointerId(2),
+   709→                    from: PointerId(3),
+   710→                    region: JRegionId(1),
+   711→                },
+   712→            ),
+   713→        });
+   714→        proof.add_step(ProofStep::Infer {
+   715→            from: vec![1, 2],
+   716→            rule: InferenceRule::DerivationTransitivity,
+   717→            conclusion: Fact::derived_j(
+   718→                3,
+   719→                Judgment::Derived {
+   720→                    pointer: PointerId(1),
+   721→                    from: PointerId(3),
+   722→                    region: JRegionId(1),
+   723→                },
+   724→            ),
+   725→        });
+   726→        proof.conclude(Conclusion::Proven);
+   727→
+   728→        let checker = ProofChecker::new();
+   729→        let result = checker.check(&proof).unwrap();
+   730→        assert_eq!(result, CheckResult::Valid);
+   731→    }
+   732→
+   733→    #[test]
+   734→    fn test_structured_temporal_ordering_proof() {
+   735→        let mut proof = Proof::new(dummy_goal());
+   736→        proof.add_step(ProofStep::Assume {
+   737→            fact: Fact::axiom_j(
+   738→                1,
+   739→                Judgment::TemporalOrder {
+   740→                    event_a: EventId(1),
+   741→                    event_b: EventId(2),
+   742→                },
+   743→            ),
+   744→        });
+   745→        proof.add_step(ProofStep::Assume {
+   746→            fact: Fact::axiom_j(
+   747→                2,
+   748→                Judgment::TemporalOrder {
+   749→                    event_a: EventId(2),
+   750→                    event_b: EventId(3),
+   751→                },
+   752→            ),
+   753→        });
+   754→        proof.add_step(ProofStep::Infer {
+   755→            from: vec![1, 2],
+   756→            rule: InferenceRule::TemporalOrdering,
+   757→            conclusion: Fact::derived_j(
+   758→                3,
+   759→                Judgment::TemporalOrder {
+   760→                    event_a: EventId(1),
+   761→                    event_b: EventId(3),
+   762→                },
+   763→            ),
+   764→        });
+   765→        proof.conclude(Conclusion::Proven);
+   766→
+   767→        let checker = ProofChecker::new();
+   768→        let result = checker.check(&proof).unwrap();
+   769→        assert_eq!(result, CheckResult::Valid);
+   770→    }
+   771→
+   772→    #[test]
+   773→    fn test_structured_exclusivity_elim_proof() {
+   774→        let mut proof = Proof::new(dummy_goal());
+   775→        proof.add_step(ProofStep::Assume {
+   776→            fact: Fact::axiom_j(
+   777→                1,
+   778→                Judgment::Exclusive {
+   779→                    resource: ResourceId(1),
+   780→                },
+   781→            ),
+   782→        });
+   783→        proof.add_step(ProofStep::Assume {
+   784→            fact: Fact::axiom_j(
+   785→                2,
+   786→                Judgment::Exclusive {
+   787→                    resource: ResourceId(2),
+   788→                },
+   789→            ),
+   790→        });
+   791→        proof.add_step(ProofStep::Infer {
+   792→            from: vec![1, 2],
+   793→            rule: InferenceRule::ExclusivityElim,
+   794→            conclusion: Fact::derived_j(
+   795→                3,
+   796→                Judgment::NoConflict {
+   797→                    resource_a: ResourceId(1),
+   798→                    resource_b: ResourceId(2),
+   799→                },
+   800→            ),
+   801→        });
+   802→        proof.conclude(Conclusion::Proven);
+   803→
+   804→        let checker = ProofChecker::new();
+   805→        let result = checker.check(&proof).unwrap();
+   806→        assert_eq!(result, CheckResult::Valid);
+   807→    }
+   808→
+   809→    #[test]
+   810→    fn test_structured_liveness_elim_proof() {
+   811→        let mut proof = Proof::new(dummy_goal());
+   812→        proof.add_step(ProofStep::Assume {
+   813→            fact: Fact::checked_j(
+   814→                1,
+   815→                Judgment::Freed {
+   816→                    region: JRegionId(5),
+   817→                },
+   818→            ),
+   819→        });
+   820→        proof.add_step(ProofStep::Infer {
+   821→            from: vec![1],
+   822→            rule: InferenceRule::LivenessElim,
+   823→            conclusion: Fact::derived_j(
+   824→                2,
+   825→                Judgment::Dead {
+   826→                    region: JRegionId(5),
+   827→                },
+   828→            ),
+   829→        });
+   830→        proof.conclude(Conclusion::Proven);
+   831→
+   832→        let checker = ProofChecker::new();
+   833→        let result = checker.check(&proof).unwrap();
+   834→        assert_eq!(result, CheckResult::Valid);
+   835→    }
+   836→
+   837→    #[test]
+   838→    fn test_structured_wrong_rule_for_judgment() {
+   839→        // Try to apply LivenessIntro to a Freed judgment — should fail.
+   840→        let mut proof = Proof::new(dummy_goal());
+   841→        proof.add_step(ProofStep::Assume {
+   842→            fact: Fact::axiom_j(
+   843→                1,
+   844→                Judgment::Freed {
+   845→                    region: JRegionId(1),
+   846→                },
+   847→            ),
+   848→        });
+   849→        proof.add_step(ProofStep::Infer {
+   850→            from: vec![1],
+   851→            rule: InferenceRule::LivenessIntro,
+   852→            conclusion: Fact::derived(2, "region r1 is live"),
+   853→        });
+   854→        proof.conclude(Conclusion::Proven);
+   855→
+   856→        let checker = ProofChecker::new();
+   857→        let result = checker.check(&proof).unwrap();
+   858→        assert!(matches!(result, CheckResult::Invalid { .. }));
+   859→        if let CheckResult::Invalid { reason, .. } = result {
+   860→            assert!(reason.contains("rule application failed"));
+   861→        }
+   862→    }
+   863→
+   864→    #[test]
+   865→    fn test_structured_bounds_preservation_proof() {
+   866→        let mut proof = Proof::new(dummy_goal());
+   867→        proof.add_step(ProofStep::Assume {
+   868→            fact: Fact::derived_j(
+   869→                1,
+   870→                Judgment::InBounds {
+   871→                    pointer: PointerId(1),
+   872→                    offset: 8,
+   873→                    size: 4,
+   874→                },
+   875→            ),
+   876→        });
+   877→        proof.add_step(ProofStep::Assume {
+   878→            fact: Fact::axiom(2, "region r1 has bounds [0, 1024]"),
+   879→        });
+   880→        proof.add_step(ProofStep::Infer {
+   881→            from: vec![1, 2],
+   882→            rule: InferenceRule::BoundsPreservation,
+   883→            conclusion: Fact::derived_j(
+   884→                3,
+   885→                Judgment::BoundsPreserved {
+   886→                    pointer: PointerId(1),
+   887→                    offset: 8,
+   888→                    size: 4,
+   889→                },
+   890→            ),
+   891→        });
+   892→        proof.conclude(Conclusion::Proven);
+   893→
+   894→        let checker = ProofChecker::new();
+   895→        let result = checker.check(&proof).unwrap();
+   896→        assert_eq!(result, CheckResult::Valid);
+   897→    }
+   898→
+   899→    #[test]
+   900→    fn test_structured_exclusivity_intro_proof() {
+   901→        let mut proof = Proof::new(dummy_goal());
+   902→        proof.add_step(ProofStep::Assume {
+   903→            fact: Fact::axiom_j(
+   904→                1,
+   905→                Judgment::Exclusive {
+   906→                    resource: ResourceId(10),
+   907→                },
+   908→            ),
+   909→        });
+   910→        proof.add_step(ProofStep::Infer {
+   911→            from: vec![1],
+   912→            rule: InferenceRule::ExclusivityIntro,
+   913→            conclusion: Fact::derived_j(
+   914→                2,
+   915→                Judgment::Exclusive {
+   916→                    resource: ResourceId(10),
+   917→                },
+   918→            ),
+   919→        });
+   920→        proof.conclude(Conclusion::Proven);
+   921→
+   922→        let checker = ProofChecker::new();
+   923→        let result = checker.check(&proof).unwrap();
+   924→        assert_eq!(result, CheckResult::Valid);
+   925→    }
+   926→
+   927→    #[test]
+   928→    fn test_mixed_structured_and_string_backward_compat() {
+   929→        // A proof that uses string-based facts (no judgments) should still
+   930→        // be valid after the refactoring.
+   931→        let mut proof = Proof::new(dummy_goal());
+   932→        proof.add_step(ProofStep::Assume {
+   933→            fact: Fact::axiom(1, "region 1 is allocated"),
+   934→        });
+   935→        proof.add_step(ProofStep::Infer {
+   936→            from: vec![1],
+   937→            rule: InferenceRule::LivenessIntro,
+   938→            conclusion: Fact::derived(2, "region 1 is live"),
+   939→        });
+   940→        proof.conclude(Conclusion::Proven);
+   941→
+   942→        let checker = ProofChecker::new();
+   943→        let result = checker.check(&proof).unwrap();
+   944→        assert_eq!(result, CheckResult::Valid);
+   945→    }
+   946→}
+   947→

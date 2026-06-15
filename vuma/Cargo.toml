@@ -28,6 +28,7 @@ vuma-bd = { path = "src/bd" }
 vuma-codegen = { path = "src/codegen" }
 vuma-parser = { path = "src/parser" }
 vuma-cor = { path = "src/cor" }
+vuma-proof = { path = "src/proof" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 petgraph = "0.6"

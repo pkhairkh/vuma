@@ -1,8 +1,8 @@
 # VUMA Architecture Document
 
 **Project:** VUMA — Verified-Unsafe Memory Access Framework  
-**Version:** 0.1.0  
-**Status:** Phase 2 — Core Implementation  
+**Version:** 0.2.0  
+**Status:** Phase 2 — Core Implementation (substantial progress)  
 **Date:** March 5, 2026  
 **Authors:** VUMA Project Team
 
@@ -18,6 +18,7 @@
 6. [Code Generation Pipeline](#6-code-generation-pipeline)  
 7. [Runtime Optimization Pipeline](#7-runtime-optimization-pipeline)  
 8. [Security Model Overview](#8-security-model-overview)  
+9. [LLM Integration Architecture](#9-llm-integration-architecture)  
 
 ---
 
@@ -35,7 +36,7 @@ The six layers form a stack of cooperating subsystems, each with a well-defined 
 
 **Layer 3 — Projections.** The human interface. The Projection System renders the SCG into multiple views: textual (code-like syntax with role-specific formatting), visual (dataflow diagrams, call graphs, memory layout views as SVG/HTML), and conversational (natural-language descriptions for AI agents). Bidirectional editing allows modifications in any projection to write back through validation, producing SCG modifications that are verified before application.
 
-**Layer 4 — COR (Continuous Optimization Runtime).** The always-on execution engine. COR maintains an always-compiled invariant: every reachable SCG region is kept in compiled ARM64 machine code at all times. It performs incremental compilation, profile-guided optimization, speculative optimization with transparent deoptimization, and adaptive deployment across heterogeneous targets (local, remote). Runtime profile data feeds back to the IVE for continuous re-optimization.
+**Layer 4 — COR (Continuous Optimization Runtime).** The always-on execution engine. COR maintains an always-compiled invariant: every reachable SCG region is kept in compiled machine code at all times. It performs incremental compilation, profile-guided optimization, speculative optimization with transparent deoptimization, and adaptive deployment across heterogeneous targets (local, remote). Runtime profile data feeds back to the IVE for continuous re-optimization. COR supports 8 backend architectures (AArch64, x86_64, RISC-V 64, ARM32, MIPS64, PPC64, LoongArch64, Wasm32).
 
 **Layer 5 — BD (Behavioral Descriptors).** The type replacement. A BD is the triple (RepD, CapD, RelD) that replaces traditional nominal types. RepD describes memory layout (size, alignment, field offsets, multiple simultaneous interpretations). CapD describes permitted operations (read, write, execute, serialize, send, persist, derive-pointer) with context-dependent capability sets. RelD describes relationships (temporal co-occurrence, structural containment, dependency ordering, semantic equivalence, security-level flow). BDs are inferred, not declared; the IVE derives them from SCG structure.
 
@@ -45,6 +46,14 @@ The six layers form a stack of cooperating subsystems, each with a well-defined 
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
+│                  LLM Integration Layer (AI-Native)                      │
+│   ┌───────────────┐  ┌───────────────┐  ┌───────────────────────────┐│
+│   │ VumaCompiler  │  │ LSP Server    │  │ REPL (interactive + LLM)  ││
+│   │ API           │  │ (JSON-RPC)    │  │ (:wasm, :check, :exports) ││
+│   └───────┬───────┘  └───────┬───────┘  └───────────┬───────────────┘│
+│           └──────────────────┼───────────────────────┘                 │
+│                              │  structured diagnostics (JSON)          │
+├──────────────────────────────┼─────────────────────────────────────────┤
 │                     Projection System (Layer 3)                         │
 │   ┌──────────┐   ┌──────────┐   ┌────────────────┐   ┌─────────────┐ │
 │   │ Textual  │   │ Visual   │   │ Conversational │   │ Diff        │ │
@@ -53,7 +62,7 @@ The six layers form a stack of cooperating subsystems, each with a well-defined 
 │        └───────────────┼─────────────────┼───────────────────┘        │
 │                        │  bidirectional edits via validation          │
 ├────────────────────────┼───────────────────────────────────────────────┤
-│              Parser / Frontend (auxiliary)                             │
+│              Parser / Frontend / Module System (auxiliary)              │
 │   ┌─────────┐   ┌──────────┐   ┌───────────────────────┐             │
 │   │  Lexer  │──▶│  Parser  │──▶│  AST → SCG Lowering   │             │
 │   └─────────┘   └──────────┘   └───────────────────────┘             │
@@ -80,20 +89,19 @@ The six layers form a stack of cooperating subsystems, each with a well-defined 
 │   │  effects) │   │  deps)    │   │                               │ │
 │   └───────────┘   └───────────┘   └────────────────────────────────┘ │
 ├────────────────────────────────────────────────────────────────────────┤
-│           Execution Layer (Layer 4 + Platform)                         │
-│   ┌───────────────┐  ┌───────────────┐  ┌──────────────────────────┐│
-│   │ COR Runtime   │  │ ARM64         │  │ Platform                  ││
-│   │ (always-      │  │ Codegen       │  │ (GPIO, UART, I2C, SPI,  ││
-│   │  compiled,   │  │ (register     │  │  DMA, multicore)         ││
-│   │  PGO, JIT)   │  │  alloc,       │  │                          ││
-│   │              │  │  insn sel)    │  │                          ││
-│   └───────────────┘  └───────────────┘  └──────────────────────────┘│
+│           Execution Layer (Layer 4 + Multi-Arch Backends)               │
+│   ┌───────────────┐  ┌──────────────────────────────────────────────┐│
+│   │ COR Runtime   │  │ Multi-Arch Codegen (8 backends)             ││
+│   │ (always-      │  │ AArch64 · x86_64 · RISC-V 64 · ARM32      ││
+│   │  compiled,   │  │ MIPS64 · PPC64 · LoongArch64 · Wasm32      ││
+│   │  PGO, JIT)   │  │ (register alloc, insn sel, ELF/Wasm emit)  ││
+│   └───────────────┘  └──────────────────────────────────────────────┘│
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Architectural Principles
 
-The architecture is governed by five principles. **SCG primacy**: the SCG is the single source of truth; all other representations are projections. **Verification over restriction**: instead of rejecting programs that cannot be statically proven safe, VUMA verifies them and provides precise diagnostics when violations are found. **Inference over annotation**: Behavioral Descriptors are derived from program structure, not manually declared; the programmer specifies intent, the IVE infers types. **Continuous optimization**: the COR treats execution as a continuous cycle of compile-profile-optimize-recompile, not a one-shot compilation. **Bare-metal first**: the target hardware is not an afterthought or a porting target; it is the primary platform, and every design decision accounts for its constraints (ARM64 architecture, peripheral support, no MMU in bare-metal mode).
+The architecture is governed by five principles. **SCG primacy**: the SCG is the single source of truth; all other representations are projections. **Verification over restriction**: instead of rejecting programs that cannot be statically proven safe, VUMA verifies them and provides precise diagnostics when violations are found. **Inference over annotation**: Behavioral Descriptors are derived from program structure, not manually declared; the programmer specifies intent, the IVE infers types. **Continuous optimization**: the COR treats execution as a continuous cycle of compile-profile-optimize-recompile, not a one-shot compilation. **Bare-metal first**: the target hardware is not an afterthought or a porting target; it is the primary platform, and every design decision accounts for its constraints (multi-architecture support with AArch64 as primary, peripheral support, no MMU in bare-metal mode). **LLM-native**: every interface is designed for programmatic consumption by AI agents, from the `VumaCompiler` API to the LSP server to the structured REPL commands.
 
 ---
 
@@ -152,14 +160,14 @@ A VUMA program travels through a multi-stage pipeline from human intent to hardw
                                                            ┌───────────┼───────────┐
                                                            ▼           ▼           ▼
                                                      ┌──────────┐ ┌────────┐ ┌────────────┐
-                                                     │ ARM64    │ │ COR    │ │ PGO        │
+                                                     │ Codegen  │ │ COR    │ │ PGO        │
                                                      │ Codegen  │ │ Setup  │ │ Guided Opts│
                                                      └────┬─────┘ └───┬────┘ └─────┬──────┘
                                                           │           │             │
                                                           └───────────┼─────────────┘
                                                                       ▼
                                                           ┌──────────────────────────┐
-                                                          │  ARM64 Machine Code      │
+                                                          │  Machine Code (multi-arch) │
                                                           │  + Runtime Metadata      │
                                                           │  + Profile Instrument.   │
                                                           └────────────┬─────────────┘
@@ -197,9 +205,9 @@ The data flow is not purely top-down. Three critical feedback loops ensure conti
 
 **Stage 4 — VUMA Verification.** Once BDs are attached, the MSG Builder constructs a Memory State Graph from the annotated SCG via the `scg_to_msg` conversion pipeline. This conversion performs a topological walk of SCG nodes, mapping `AllocationNode → Region` with monotonic address allocation, `AccessNode → Derivation + Access` with proper kind and size, `DeallocationNode → Region status Freed`, and `CastNode → DerivationKind::Cast` derivation chains. Control flow edges between Access nodes produce `SyncEdge` with HappensBefore ordering. The VUMA Verification Engine then checks the five global invariants against the MSG: liveness (every access targets allocated memory), exclusivity (no conflicting concurrent accesses), interpretation (every access uses a valid RepD), origin (every address traces to a valid allocation), and cleanup (every region is eventually freed or explicitly leaked). The Proof Engine generates formal proofs for verified invariants and counterexamples for violations.
 
-**Stage 5 — Code Generation.** The verified SCG is handed to the ARM64 code generator through a three-phase pipeline: SCG → IR lowering, register allocation, and machine code emission. Because VUMA has already proven memory safety, the codegen can emit raw pointer operations without any runtime bounds checks, borrow checks, or GC barriers. The COR sets up the runtime environment: allocating stack space, configuring the memory allocator, setting up the profile-guided optimization feedback loop with hardware PMU instrumentation, and preparing the hardware (GPIO, UART, I2C, SPI, DMA, interrupt controllers) for execution.
+**Stage 5 — Code Generation.** The verified SCG is handed to the code generator through a three-phase pipeline: SCG → IR lowering, register allocation, and machine code emission. VUMA supports 8 backend architectures (AArch64, x86_64, RISC-V 64, ARM32, MIPS64, PPC64, LoongArch64, Wasm32) via the `Backend` trait. Because VUMA has already proven memory safety, the codegen can emit raw pointer operations without any runtime bounds checks, borrow checks, or GC barriers. The COR sets up the runtime environment: allocating stack space, configuring the memory allocator, setting up the profile-guided optimization feedback loop with hardware PMU instrumentation, and preparing the hardware (GPIO, UART, I2C, SPI, DMA, interrupt controllers) for execution.
 
-**Stage 6 — Execution and Feedback.** The ARM64 machine code runs under the COR. The COR collects profile data through `ProfileCollector` — a thread-safe collector that records node execution times, edge traversal frequencies, allocation statistics, and hardware PMU counter snapshots (cycle count, instruction count, cache misses, branch misses). The `collect_profile` analysis entry point computes hot spots, cold spots, hot paths, and PMU aggregates, producing recommendations for optimization. This feedback loop is continuous — the system is always learning from its own execution and improving accordingly through speculative optimization, profile-guided inlining, and adaptive code layout.
+**Stage 6 — Execution and Feedback.** The compiled machine code runs under the COR. The COR collects profile data through `ProfileCollector` — a thread-safe collector that records node execution times, edge traversal frequencies, allocation statistics, and hardware PMU counter snapshots (cycle count, instruction count, cache misses, branch misses). The `collect_profile` analysis entry point computes hot spots, cold spots, hot paths, and PMU aggregates, producing recommendations for optimization. This feedback loop is continuous — the system is always learning from its own execution and improving accordingly through speculative optimization, profile-guided inlining, and adaptive code layout.
 
 ---
 
@@ -315,7 +323,7 @@ vuma/
 │   │       ├── to_scg.rs         (AST → SCG lowering)
 │   │       └── error.rs          (Parse errors with recovery and suggestions)
 │   │
-│   ├── codegen/                  (Auxiliary — ARM64 Code Generation)
+│   ├── codegen/                  (Auxiliary — Multi-Arch Code Generation)
 │   │   ├── Cargo.toml
 │   │   └── src/
 │   │       ├── lib.rs            (crate root, CodegenError, pipeline entry)
@@ -323,7 +331,7 @@ vuma/
 │   │       ├── ir.rs             (IR types: functions, blocks, instructions, terminators, values)
 │   │       ├── scg_to_ir.rs      (SCG → IR translation via ScgToIr converter)
 │   │       ├── regalloc.rs       (Linear-scan register allocator for aarch64)
-│   │       └── emit.rs           (ARM64 code emitter and ELF generation)
+│   │       └── emit.rs           (code emitter and ELF/Wasm generation)
 │   │
 │   ├── proof/                    (Formal Proofs)
 │   │   ├── Cargo.toml
@@ -443,7 +451,7 @@ vuma/
 
 5. **`codegen` and `cor` are the execution layer.** They depend on `scg` and on the verification crates (`vuma`, `ive`) because they need the verified, annotated SCG to generate correct code. They do not depend on `projection` or `parser` — execution is independent of input format and presentation. `codegen` provides the three-phase pipeline (SCG → IR → register allocation → emission), while `cor` adds continuous optimization (profiling, speculative optimization, deployment management).
 
-6. **The platform layer** depends on `cor` and `codegen` to integrate target-specific runtime services (GPIO, UART, multicore boot, interrupt handling, DMA) with the code generation pipeline. It contains target-specific code, bare-metal boot sequences, and the ARM64 linker script.
+6. **The platform layer** depends on `cor` and `codegen` to integrate target-specific runtime services (GPIO, UART, multicore boot, interrupt handling, DMA) with the code generation pipeline. It contains target-specific code, bare-metal boot sequences, and linker scripts for multiple architectures.
 
 7. **`projection` and `parser` are the human interface.** They depend on `scg` and `ive` but not on `vuma`, `cor`, or `codegen`. This ensures that the projection system can render verification results without depending on the execution layer, and that the parser can produce SCGs without depending on verification.
 
@@ -702,7 +710,7 @@ The Proof structure represents a formal verification result — either a proof t
                    ▼
              ┌───────────┐
              │ Verified  │
-             │    SCG    │ ──▶ Codegen ──▶ ARM64 ──▶ COR
+             │    SCG    │ ──▶ Codegen ──▶ Multi-Arch ──▶ COR
              └───────────┘
 ```
 
@@ -795,7 +803,7 @@ The `msg_incremental` module supports incremental verification via `MSGDelta`. W
 
 ## 6. Code Generation Pipeline
 
-The code generation pipeline translates a verified SCG into ARM64 machine code. The pipeline consists of three phases: SCG-to-IR lowering, register allocation, and machine code emission. Each phase produces a well-defined intermediate artifact that can be inspected, cached, and incrementally updated. The pipeline is designed to produce zero-overhead code — because VUMA has already proven memory safety, the codegen can emit raw pointer operations without any runtime bounds checks, borrow checks, or GC barriers.
+The code generation pipeline translates a verified SCG into machine code for any of 8 supported backend architectures (AArch64, x86_64, RISC-V 64, ARM32, MIPS64, PPC64, LoongArch64, Wasm32). The pipeline consists of three phases: SCG-to-IR lowering, register allocation, and machine code emission. Each phase produces a well-defined intermediate artifact that can be inspected, cached, and incrementally updated. The pipeline is designed to produce zero-overhead code — because VUMA has already proven memory safety, the codegen can emit raw pointer operations without any runtime bounds checks, borrow checks, or GC barriers. The `Backend` trait defines the interface for each architecture, enabling target-specific instruction selection, register allocation, and code emission while sharing the common IR lowering pipeline.
 
 ### Three-Phase Pipeline
 
@@ -804,7 +812,7 @@ The code generation pipeline translates a verified SCG into ARM64 machine code. 
 │                     Code Generation Pipeline                              │
 │                                                                          │
 │  ┌───────────┐     ┌──────────────────┐     ┌──────────────────────┐    │
-│  │ Verified  │     │   IR (Intermedi- │     │   ARM64 Machine Code │    │
+│  │ Verified  │     │   IR (Intermedi- │     │   Machine Code        │    │
 │  │ SCG       │────▶│   ate Represen-  │────▶│   + ELF Binary       │    │
 │  │           │     │   tation)        │     │   + Debug Info        │    │
 │  └───────────┘     └──────────────────┘     └──────────────────────┘    │
@@ -866,7 +874,7 @@ The `ScgToIr` converter translates SCG nodes into an intermediate representation
 
 ### Phase 2: Register Allocation
 
-The register allocator assigns physical ARM64 registers to virtual registers in the IR. The current implementation uses a linear-scan algorithm, which provides good allocation quality in O(n) time where n is the number of virtual registers. The allocator targets the full AArch64 register set: `x0–x30` (general-purpose), `sp` (stack pointer), and `xzr` (zero register). It respects calling conventions (AAPCS64): `x0–x7` are argument/result registers, `x19–x28` are callee-saved, and `x9–x15` are caller-saved temporaries.
+The register allocator assigns physical registers to virtual registers in the IR. The current implementation uses a linear-scan algorithm, which provides good allocation quality in O(n) time where n is the number of virtual registers. For AArch64, the allocator targets the full register set: `x0–x30` (general-purpose), `sp` (stack pointer), and `xzr` (zero register). It respects calling conventions (AAPCS64): `x0–x7` are argument/result registers, `x19–x28` are callee-saved, and `x9–x15` are caller-saved temporaries. Each backend provides its own register allocation strategy appropriate for its architecture.
 
 The allocator handles spilling when the number of simultaneously live virtual registers exceeds the number of available physical registers. Spill code generates `Load`/`Store` pairs that save and restore values to/from the stack. Because the VUMA verification has already proven memory safety, spilled values can be stored directly to the stack without any additional bounds checking.
 
@@ -874,7 +882,7 @@ The allocator handles spilling when the number of simultaneously live virtual re
 
 The `arm64` module defines `Arm64Instruction` with all core integer instructions (MOV, ADD, SUB, MUL, DIV, AND, ORR, EOR, LSL, LSR, ASR), memory instructions (LDR, STR, LDP, STP with all addressing modes), and branch instructions (B, BL, BR, BLR, B.cond, CBZ, CBNZ, TBZ, TBNZ). Each instruction has a binary encoding verified against the ARM Architecture Reference Manual.
 
-The `emit` module generates ARM64 machine code from the register-allocated IR and produces an ELF binary with proper section layout (`.text.boot`, `.text`, `.rodata`, `.data`, `.bss`) and debug information mapping SCG nodes to code offsets. The emitted binary includes `DebugInfo` with source-to-offset mapping, symbol table, and compiler notes for COR integration.
+The `emit` module generates machine code from the register-allocated IR and produces an ELF binary (for native backends) or a Wasm module (for the Wasm32 backend) with proper section layout and debug information mapping SCG nodes to code offsets. The emitted binary includes `DebugInfo` with source-to-offset mapping, symbol table, and compiler notes for COR integration.
 
 ### Bare-Metal Boot Sequence
 
@@ -884,7 +892,7 @@ The platform module provides a complete bare-metal boot sequence. The `_start` e
 
 ## 7. Runtime Optimization Pipeline
 
-The Continuous Optimization Runtime (COR) is the always-on execution engine that treats compilation not as a one-shot process but as a continuous cycle of compile-profile-optimize-recompile. The COR maintains an always-compiled invariant: every reachable SCG region is kept in compiled ARM64 machine code at all times. This enables the system to respond to runtime observations by re-optimizing hot paths, deoptimizing when speculation fails, and migrating regions across heterogeneous targets.
+The Continuous Optimization Runtime (COR) is the always-on execution engine that treats compilation not as a one-shot process but as a continuous cycle of compile-profile-optimize-recompile. The COR maintains an always-compiled invariant: every reachable SCG region is kept in compiled machine code at all times. This enables the system to respond to runtime observations by re-optimizing hot paths, deoptimizing when speculation fails, and migrating regions across heterogeneous targets.
 
 ### COR Architecture
 
@@ -973,6 +981,52 @@ VUMA's security model addresses the following threat categories:
 ### Verification Confidence and Debt
 
 Not all security properties can be verified with full confidence. The `VerificationLevel` tier (Full, Partial, BestEffort) reflects the verification engine's ability to prove each invariant. `Full` verification produces a formal proof. `Partial` verification covers most cases but may have unresolved assumptions. `BestEffort` verification provides empirical evidence but no formal guarantee. Unverified properties are tracked as `VerificationDebt` items with priorities: `Critical` debt (safety violations) must be resolved before deployment, `High` debt (security concerns) should be resolved, and `Medium`/`Low` debt (quality issues) can be deferred. The `VerificationDebt` tracker maintains an ordered list of unresolved obligations and supports incremental resolution as the IVE gains more information (through additional annotations, profile data, or manual proof assistance).
+
+---
+
+## 9. LLM Integration Architecture
+
+VUMA is designed as an AI-native language framework. Every compiler interface is structured for programmatic consumption by LLM agents, enabling AI coding assistants to compile, verify, and iterate on VUMA code without human intervention.
+
+### LLM-Facing Components
+
+**VumaCompiler API (`src/api.rs`).** The primary programmatic interface for LLM agents. `VumaCompiler` provides `compile()` for full pipeline execution, `compile_for_target()` for backend-specific compilation (8 native backends + Wasm32 sandbox), `parse()` for syntax-only analysis returning `ParseResult` with `AstSummary`, `analyze()` for SCG structure inspection returning `ScgSummary` with `FunctionSummary` per function, `available_targets()` returning `Vec<ApiTargetInfo>` with backend metadata, and `validate()` for diagnostic-only checks returning `Vec<VumaDiagnostic>`. All result types are JSON-serializable for LLM consumption.
+
+**LSP Server (`src/lsp/`).** Full Language Server Protocol implementation over JSON-RPC stdin/stdout. Capabilities include: textDocument sync for `.vuma` files, diagnostics with line/column info, hover information (types, BD details, verification status), go-to-definition (jump from usage to SCG node), completion (function names, types, keywords), document symbols (all functions and variables), and semantic tokens (syntax highlighting). The LSP server enables both IDE integration and LLM agent interaction with the compiler.
+
+**Enhanced REPL (`src/vuma/src/repl.rs`).** The interactive REPL provides LLM-friendly commands beyond traditional REPL functionality: `:wasm` compiles the current session to Wasm32 and shows binary size (for sandboxed execution), `:backends` lists all 8 available backends with their status, `:check` runs IVE verification on the current session, `:diagnostics` outputs all current diagnostics as JSON, and `:exports` lists all function signatures in the session. Tab completion supports commands and VUMA keywords. ANSI color output differentiates errors, warnings, and informational messages.
+
+**Module Resolution (`src/pipeline.rs`).** The `ModuleResolution` error type handles import resolution and module path tracking, enabling multi-file VUMA programs with proper dependency tracking.
+
+**Structured Diagnostics (`src/diagnostics.rs`).** The `VumaDiagnostic` type provides structured error reporting with severity levels, source context, and JSON serialization. All errors are designed for LLM consumption: an LLM agent can parse the JSON output, identify the exact error location, and generate a fix.
+
+### LLM Agent Workflow
+
+```
+┌──────────────┐     ┌──────────────┐     ┌──────────────┐     ┌──────────────┐
+│ 1. Parse     │────▶│ 2. Analyze   │────▶│ 3. Verify    │────▶│ 4. Compile   │
+│    source    │     │    SCG       │     │    IVE       │     │    target    │
+│  (VumaComp)  │     │  (VumaComp)  │     │  (REPL/CLI)  │     │  (VumaComp)  │
+└──────────────┘     └──────────────┘     └──────────────┘     └──────────────┘
+       │                    │                     │                     │
+       ▼                    ▼                     ▼                     ▼
+  ParseResult          ScgSummary         AggregatedResult      CompileResult
+  (AstSummary)    (FunctionSummary)   (Pass/Fail/Debt)    (bytes + target)
+       │                    │                     │                     │
+       └────────────────────┴─────────────────────┴─────────────────────┘
+                                     │
+                                     ▼
+                           ┌──────────────────┐
+                           │ JSON Response     │
+                           │ to LLM Agent      │
+                           │ (structured,      │
+                           │  actionable)      │
+                           └──────────────────┘
+```
+
+### Wasm32 Sandbox
+
+The Wasm32 backend serves a dual purpose: (1) as a compilation target for web deployment, and (2) as a sandboxed execution environment for LLM-generated code. An LLM agent can compile a VUMA program to Wasm32 and execute it in a sandboxed Wasm runtime with no access to host memory, filesystem, or peripherals. The `:wasm` REPL command provides quick Wasm compilation with binary size reporting. The `compile_for_target("wasm32")` API produces a valid `.wasm` module suitable for execution in any Wasm runtime.
 
 ---
 

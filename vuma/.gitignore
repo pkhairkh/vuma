@@ -2,7 +2,10 @@
 **/*.rs.bk
 Cargo.lock
 *.o
+*.wasm
 *.elf
 *.bin
 *.img
 .DS_Store
+tool-results/
+.env

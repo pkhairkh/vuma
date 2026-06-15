@@ -1,0 +1,1016 @@
+     1→//! Invariant aggregator for the IVE module.
+     2→//!
+     3→//! The [`InvariantAggregator`] runs all five VUMA invariant checks against an
+     4→//! SCG and produces a unified [`AggregatedResult`] that captures
+     5→//! per-invariant outcomes, an overall pass/fail verdict, and a
+     6→//! [`VerificationSummary`] with statistics.
+     7→//!
+     8→//! # Verification Levels
+     9→//!
+    10→//! | Level       | Checks run                                             |
+    11→//! |-------------|--------------------------------------------------------|
+    12→//! | [`Quick`]   | Only cheap, syntactic checks (exclusivity, origin).    |
+    13→//! | [`Normal`]  | All five invariant checks.                             |
+    14→//! | [`Exhaustive`] | All checks plus proof-generation where possible.   |
+    15→//!
+    16→//! # Incremental Verification
+    17→//!
+    18→//! The aggregator supports *incremental* verification: when a delta
+    19→//! describing which invariants are affected is provided, only those
+    20→//! invariants are re-checked while cached results are kept for the rest.
+    21→//!
+    22→//! [`Quick`]: VerificationLevel::Quick
+    23→//! [`Normal`]: VerificationLevel::Normal
+    24→//! [`Exhaustive`]: VerificationLevel::Exhaustive
+    25→
+    26→use crate::result::{ConfidenceLevel, Evidence, ProofStep, VerificationResult, VerificationStatus};
+    27→use crate::verification::{VerificationEngine, VerificationInput};
+    28→use serde::{Deserialize, Serialize};
+    29→use std::fmt;
+    30→use std::time::Instant;
+    31→
+    32→// ---------------------------------------------------------------------------
+    33→// InvariantKind
+    34→// ---------------------------------------------------------------------------
+    35→
+    36→/// The five VUMA invariant kinds.
+    37→///
+    38→/// Each variant corresponds to one of the core safety invariants that
+    39→/// every VUMA program must satisfy.
+    40→#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
+    41→pub enum InvariantKind {
+    42→    /// Every requested resource will eventually be provided.
+    43→    Liveness,
+    44→    /// At most one owner for exclusive resources.
+    45→    Exclusivity,
+    46→    /// Every read interprets data under the correct BD.
+    47→    Interpretation,
+    48→    /// Every piece of data has a well-defined provenance.
+    49→    Origin,
+    50→    /// Every acquired resource is eventually released.
+    51→    Cleanup,
+    52→}
+    53→
+    54→impl InvariantKind {
+    55→    /// Return all five invariant kinds in canonical order.
+    56→    pub fn all() -> &'static [InvariantKind; 5] {
+    57→        &[
+    58→            InvariantKind::Liveness,
+    59→            InvariantKind::Exclusivity,
+    60→            InvariantKind::Interpretation,
+    61→            InvariantKind::Origin,
+    62→            InvariantKind::Cleanup,
+    63→        ]
+    64→    }
+    65→
+    66→    /// Return the cheap (quick-check) invariants.
+    67→    ///
+    68→    /// Exclusivity and origin can be verified by syntactic analysis
+    69→    /// without deep semantic reasoning.
+    70→    pub fn quick_set() -> &'static [InvariantKind; 2] {
+    71→        &[InvariantKind::Exclusivity, InvariantKind::Origin]
+    72→    }
+    73→
+    74→    /// Human-readable label for this invariant kind.
+    75→    pub fn label(&self) -> &'static str {
+    76→        match self {
+    77→            InvariantKind::Liveness => "liveness",
+    78→            InvariantKind::Exclusivity => "exclusivity",
+    79→            InvariantKind::Interpretation => "interpretation",
+    80→            InvariantKind::Origin => "origin",
+    81→            InvariantKind::Cleanup => "cleanup",
+    82→        }
+    83→    }
+    84→}
+    85→
+    86→impl fmt::Display for InvariantKind {
+    87→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    88→        write!(f, "{}", self.label())
+    89→    }
+    90→}
+    91→
+    92→// ---------------------------------------------------------------------------
+    93→// VerificationLevel
+    94→// ---------------------------------------------------------------------------
+    95→
+    96→/// How thoroughly to verify the program.
+    97→///
+    98→/// Controls which invariant checks are run and whether proofs are
+    99→/// attempted for properties that can be formally established.
+   100→#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+   101→pub enum VerificationLevel {
+   102→    /// Only run cheap, syntactic checks (exclusivity, origin).
+   103→    Quick,
+   104→    /// Run all five invariant checks (default).
+   105→    #[default]
+   106→    Normal,
+   107→    /// Run all checks and attempt formal proof generation.
+   108→    Exhaustive,
+   109→}
+   110→
+   111→impl fmt::Display for VerificationLevel {
+   112→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+   113→        match self {
+   114→            VerificationLevel::Quick => write!(f, "QUICK"),
+   115→            VerificationLevel::Normal => write!(f, "NORMAL"),
+   116→            VerificationLevel::Exhaustive => write!(f, "EXHAUSTIVE"),
+   117→        }
+   118→    }
+   119→}
+   120→
+   121→// ---------------------------------------------------------------------------
+   122→// InvariantDelta
+   123→// ---------------------------------------------------------------------------
+   124→
+   125→/// Describes which invariants are affected by a change, for incremental
+   126→/// verification.
+   127→///
+   128→/// When a program is edited, only the invariants whose results could
+   129→/// change need to be re-checked. The delta captures this set.
+   130→#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+   131→pub struct InvariantDelta {
+   132→    /// Invariant kinds that must be re-checked.
+   133→    pub affected: Vec<InvariantKind>,
+   134→    /// Optional description of the change that triggered this delta.
+   135→    pub reason: Option<String>,
+   136→}
+   137→
+   138→impl InvariantDelta {
+   139→    /// Create an empty delta (nothing affected).
+   140→    pub fn new() -> Self {
+   141→        Self::default()
+   142→    }
+   143→
+   144→    /// Create a delta affecting a single invariant.
+   145→    pub fn single(kind: InvariantKind) -> Self {
+   146→        Self {
+   147→            affected: vec![kind],
+   148→            reason: None,
+   149→        }
+   150→    }
+   151→
+   152→    /// Create a delta affecting the given invariants.
+   153→    pub fn from_set(kinds: impl IntoIterator<Item = InvariantKind>) -> Self {
+   154→        Self {
+   155→            affected: kinds.into_iter().collect(),
+   156→            reason: None,
+   157→        }
+   158→    }
+   159→
+   160→    /// Attach a human-readable reason to this delta.
+   161→    pub fn with_reason(mut self, reason: impl Into<String>) -> Self {
+   162→        self.reason = Some(reason.into());
+   163→        self
+   164→    }
+   165→
+   166→    /// Returns `true` if a given invariant kind is in the affected set.
+   167→    pub fn affects(&self, kind: InvariantKind) -> bool {
+   168→        self.affected.contains(&kind)
+   169→    }
+   170→
+   171→    /// Returns `true` if the delta is empty (no invariants affected).
+   172→    pub fn is_empty(&self) -> bool {
+   173→        self.affected.is_empty()
+   174→    }
+   175→}
+   176→
+   177→// ---------------------------------------------------------------------------
+   178→// PerInvariantResult
+   179→// ---------------------------------------------------------------------------
+   180→
+   181→/// The result of a single invariant check within an aggregated run.
+   182→#[derive(Debug, Clone, Serialize, Deserialize)]
+   183→pub struct PerInvariantResult {
+   184→    /// Which invariant was checked.
+   185→    pub kind: InvariantKind,
+   186→    /// The verification result.
+   187→    pub result: VerificationResult,
+   188→    /// Wall-clock time spent on this check (milliseconds).
+   189→    pub elapsed_ms: u64,
+   190→    /// Whether this result was reused from a previous run (incremental).
+   191→    pub cached: bool,
+   192→}
+   193→
+   194→impl PerInvariantResult {
+   195→    /// Construct a new per-invariant result.
+   196→    pub fn new(kind: InvariantKind, result: VerificationResult, elapsed_ms: u64) -> Self {
+   197→        Self {
+   198→            kind,
+   199→            result,
+   200→            elapsed_ms,
+   201→            cached: false,
+   202→        }
+   203→    }
+   204→
+   205→    /// Mark this result as cached (from a previous run).
+   206→    pub fn with_cached(mut self, cached: bool) -> Self {
+   207→        self.cached = cached;
+   208→        self
+   209→    }
+   210→
+   211→    /// Returns `true` if the invariant was proven or probably safe.
+   212→    pub fn is_pass(&self) -> bool {
+   213→        matches!(
+   214→            self.result.status,
+   215→            VerificationStatus::Proven | VerificationStatus::ProbablySafe { .. }
+   216→        )
+   217→    }
+   218→
+   219→    /// Returns `true` if the invariant was violated.
+   220→    pub fn is_fail(&self) -> bool {
+   221→        self.result.is_violated()
+   222→    }
+   223→
+   224→    /// Returns `true` if the invariant could not be verified.
+   225→    pub fn is_unverified(&self) -> bool {
+   226→        matches!(self.result.status, VerificationStatus::Unverified { .. })
+   227→    }
+   228→}
+   229→
+   230→// ---------------------------------------------------------------------------
+   231→// AggregatedResult
+   232→// ---------------------------------------------------------------------------
+   233→
+   234→/// The unified result of running all (or a subset of) invariant checks.
+   235→///
+   236→/// Contains per-invariant results, an overall pass/fail verdict, and a
+   237→/// summary of statistics.
+   238→#[derive(Debug, Clone, Serialize, Deserialize)]
+   239→pub struct AggregatedResult {
+   240→    /// Per-invariant results, in canonical order.
+   241→    pub per_invariant: Vec<PerInvariantResult>,
+   242→    /// The overall verdict.
+   243→    pub overall: OverallVerdict,
+   244→    /// The verification level that was used.
+   245→    pub level: VerificationLevel,
+   246→    /// Total wall-clock time for the entire verification run (milliseconds).
+   247→    pub total_elapsed_ms: u64,
+   248→    /// Summary statistics.
+   249→    pub summary: VerificationSummary,
+   250→}
+   251→
+   252→// ---------------------------------------------------------------------------
+   253→// OverallVerdict
+   254→// ---------------------------------------------------------------------------
+   255→
+   256→/// The overall verdict across all invariant checks.
+   257→#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+   258→pub enum OverallVerdict {
+   259→    /// All checked invariants passed (proven or probably safe).
+   260→    Pass,
+   261→    /// At least one invariant was violated.
+   262→    Fail,
+   263→    /// No invariant was violated, but at least one is unverified.
+   264→    Inconclusive,
+   265→    /// No checks were run (empty input).
+   266→    NoChecks,
+   267→}
+   268→
+   269→impl fmt::Display for OverallVerdict {
+   270→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+   271→        match self {
+   272→            OverallVerdict::Pass => write!(f, "PASS"),
+   273→            OverallVerdict::Fail => write!(f, "FAIL"),
+   274→            OverallVerdict::Inconclusive => write!(f, "INCONCLUSIVE"),
+   275→            OverallVerdict::NoChecks => write!(f, "NO_CHECKS"),
+   276→        }
+   277→    }
+   278→}
+   279→
+   280→// ---------------------------------------------------------------------------
+   281→// VerificationSummary
+   282→// ---------------------------------------------------------------------------
+   283→
+   284→/// Statistics about an aggregated verification run.
+   285→#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+   286→pub struct VerificationSummary {
+   287→    /// Number of invariants that passed (proven or probably safe).
+   288→    pub passed: usize,
+   289→    /// Number of invariants that failed (violated).
+   290→    pub failed: usize,
+   291→    /// Number of invariants that were unverified.
+   292→    pub unverified: usize,
+   293→    /// Total number of invariants checked.
+   294→    pub total_checked: usize,
+   295→    /// Number of results reused from cache (incremental verification).
+   296→    pub cached_count: usize,
+   297→    /// Number of results freshly computed.
+   298→    pub fresh_count: usize,
+   299→    /// Overall confidence level (minimum across all results).
+   300→    pub min_confidence: Option<ConfidenceLevel>,
+   301→}
+   302→
+   303→impl VerificationSummary {
+   304→    /// Compute a summary from a slice of per-invariant results.
+   305→    pub fn from_results(results: &[PerInvariantResult]) -> Self {
+   306→        let mut summary = Self {
+   307→            total_checked: results.len(),
+   308→            ..Default::default()
+   309→        };
+   310→
+   311→        for r in results {
+   312→            if r.cached {
+   313→                summary.cached_count += 1;
+   314→            } else {
+   315→                summary.fresh_count += 1;
+   316→            }
+   317→            if r.is_pass() {
+   318→                summary.passed += 1;
+   319→            } else if r.is_fail() {
+   320→                summary.failed += 1;
+   321→            } else if r.is_unverified() {
+   322→                summary.unverified += 1;
+   323→            }
+   324→        }
+   325→
+   326→        // Compute minimum confidence across all results.
+   327→        if !results.is_empty() {
+   328→            summary.min_confidence = Some(
+   329→                results
+   330→                    .iter()
+   331→                    .map(|r| r.result.confidence())
+   332→                    .min()
+   333→                    .unwrap_or(ConfidenceLevel::Low),
+   334→            );
+   335→        }
+   336→
+   337→        summary
+   338→    }
+   339→
+   340→    /// Returns `true` if all checks passed.
+   341→    pub fn is_all_pass(&self) -> bool {
+   342→        self.total_checked > 0 && self.failed == 0 && self.unverified == 0
+   343→    }
+   344→
+   345→    /// Returns the pass rate as a fraction 0.0..=1.0.
+   346→    pub fn pass_rate(&self) -> f64 {
+   347→        if self.total_checked == 0 {
+   348→            0.0
+   349→        } else {
+   350→            self.passed as f64 / self.total_checked as f64
+   351→        }
+   352→    }
+   353→}
+   354→
+   355→impl fmt::Display for VerificationSummary {
+   356→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+   357→        writeln!(f, "Verification Summary:")?;
+   358→        writeln!(f, "  Total checked : {}", self.total_checked)?;
+   359→        writeln!(f, "  Passed        : {}", self.passed)?;
+   360→        writeln!(f, "  Failed        : {}", self.failed)?;
+   361→        writeln!(f, "  Unverified    : {}", self.unverified)?;
+   362→        writeln!(f, "  Cached        : {}", self.cached_count)?;
+   363→        writeln!(f, "  Fresh         : {}", self.fresh_count)?;
+   364→        writeln!(f, "  Pass rate     : {:.0}%", self.pass_rate() * 100.0)?;
+   365→        match self.min_confidence {
+   366→            Some(c) => writeln!(f, "  Min confidence: {c}")?,
+   367→            None => writeln!(f, "  Min confidence: N/A")?,
+   368→        }
+   369→        Ok(())
+   370→    }
+   371→}
+   372→
+   373→// ---------------------------------------------------------------------------
+   374→// DiagnosticsReport
+   375→// ---------------------------------------------------------------------------
+   376→
+   377→/// A human-readable diagnostics report for a verification run.
+   378→///
+   379→/// Generates a structured text report suitable for terminal output or
+   380→/// logging, summarising the verification results and highlighting
+   381→/// violations and unverified invariants.
+   382→#[derive(Debug, Clone, Serialize, Deserialize)]
+   383→pub struct DiagnosticsReport {
+   384→    /// Header line (e.g., "IVE Verification Report").
+   385→    pub header: String,
+   386→    /// The verification level used.
+   387→    pub level: VerificationLevel,
+   388→    /// The overall verdict.
+   389→    pub verdict: OverallVerdict,
+   390→    /// The summary statistics.
+   391→    pub summary: VerificationSummary,
+   392→    /// Per-invariant diagnostic entries.
+   393→    pub entries: Vec<DiagnosticEntry>,
+   394→    /// Total elapsed time in milliseconds.
+   395→    pub total_elapsed_ms: u64,
+   396→}
+   397→
+   398→/// A single diagnostic entry for one invariant.
+   399→#[derive(Debug, Clone, Serialize, Deserialize)]
+   400→pub struct DiagnosticEntry {
+   401→    /// Which invariant this entry is about.
+   402→    pub kind: InvariantKind,
+   403→    /// Status icon.
+   404→    pub icon: String,
+   405→    /// Status label (PASS, FAIL, UNVERIFIED).
+   406→    pub status_label: String,
+   407→    /// Human-readable message.
+   408→    pub message: String,
+   409→    /// Whether this was a cached result.
+   410→    pub cached: bool,
+   411→    /// Elapsed time in milliseconds.
+   412→    pub elapsed_ms: u64,
+   413→}
+   414→
+   415→impl DiagnosticsReport {
+   416→    /// Build a diagnostics report from an aggregated result.
+   417→    pub fn from_aggregated(result: &AggregatedResult) -> Self {
+   418→        let mut entries = Vec::with_capacity(result.per_invariant.len());
+   419→
+   420→        for pir in &result.per_invariant {
+   421→            let (icon, status_label) = match &pir.result.status {
+   422→                VerificationStatus::Proven => ("PASS".to_string(), "PROVEN".into()),
+   423→                VerificationStatus::ProbablySafe { .. } => {
+   424→                    ("PROB".to_string(), "PROBABLY_SAFE".into())
+   425→                }
+   426→                VerificationStatus::Unverified { .. } => ("????".to_string(), "UNVERIFIED".into()),
+   427→                VerificationStatus::Violated { .. } => ("FAIL".to_string(), "VIOLATED".into()),
+   428→            };
+   429→
+   430→            entries.push(DiagnosticEntry {
+   431→                kind: pir.kind,
+   432→                icon,
+   433→                status_label,
+   434→                message: pir.result.message.clone(),
+   435→                cached: pir.cached,
+   436→                elapsed_ms: pir.elapsed_ms,
+   437→            });
+   438→        }
+   439→
+   440→        Self {
+   441→            header: "IVE Verification Report".into(),
+   442→            level: result.level,
+   443→            verdict: result.overall,
+   444→            summary: result.summary.clone(),
+   445→            entries,
+   446→            total_elapsed_ms: result.total_elapsed_ms,
+   447→        }
+   448→    }
+   449→
+   450→    /// Render the report as a human-readable string.
+   451→    pub fn render(&self) -> String {
+   452→        let mut out = String::new();
+   453→
+   454→        out.push_str(&format!("{}\n", self.header));
+   455→        out.push_str(&format!(
+   456→            "Level: {} | Verdict: {} | Time: {}ms\n\n",
+   457→            self.level, self.verdict, self.total_elapsed_ms
+   458→        ));
+   459→
+   460→        for entry in &self.entries {
+   461→            let cached_tag = if entry.cached { " [cached]" } else { "" };
+   462→            out.push_str(&format!(
+   463→                "  {} {:<16} {:<16} ({}ms){} — {}\n",
+   464→                entry.icon,
+   465→                entry.kind.label(),
+   466→                entry.status_label,
+   467→                entry.elapsed_ms,
+   468→                cached_tag,
+   469→                entry.message,
+   470→            ));
+   471→        }
+   472→
+   473→        out.push('\n');
+   474→        out.push_str(&self.summary.to_string());
+   475→
+   476→        out
+   477→    }
+   478→}
+   479→
+   480→impl fmt::Display for DiagnosticsReport {
+   481→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+   482→        write!(f, "{}", self.render())
+   483→    }
+   484→}
+   485→
+   486→// ---------------------------------------------------------------------------
+   487→// InvariantAggregator
+   488→// ---------------------------------------------------------------------------
+   489→
+   490→/// Runs all five VUMA invariant checks and aggregates the results.
+   491→///
+   492→/// The aggregator wraps a [`VerificationEngine`] and orchestrates the
+   493→/// individual invariant checks, collecting timing data, supporting
+   494→/// incremental re-verification, and producing unified results.
+   495→///
+   496→/// # Example
+   497→///
+   498→/// ```rust
+   499→/// use vuma_ive::invariant_aggregator::{
+   500→///     InvariantAggregator, VerificationLevel,
+   501→/// };
+   502→/// use vuma_ive::verification::VerificationInput;
+   503→/// use vuma_scg::SCG;
+   504→///
+   505→/// let scg = SCG::new();
+   506→/// let input = VerificationInput::from_scg(scg);
+   507→/// let aggregator = InvariantAggregator::new();
+   508→/// let result = aggregator.verify_all(&input);
+   509→/// ```
+   510→pub struct InvariantAggregator {
+   511→    /// The underlying verification engine.
+   512→    engine: VerificationEngine,
+   513→    /// The verification level (default: Normal).
+   514→    level: VerificationLevel,
+   515→    /// Cached results from a previous run (for incremental verification).
+   516→    cache: Vec<Option<PerInvariantResult>>,
+   517→    /// Whether to emit verbose diagnostic output.
+   518→    verbose: bool,
+   519→}
+   520→
+   521→impl InvariantAggregator {
+   522→    /// Construct a new invariant aggregator with default settings.
+   523→    pub fn new() -> Self {
+   524→        Self {
+   525→            engine: VerificationEngine::new(),
+   526→            level: VerificationLevel::Normal,
+   527→            cache: InvariantKind::all().iter().map(|_| None).collect(),
+   528→            verbose: false,
+   529→        }
+   530→    }
+   531→
+   532→    /// Set the verification level.
+   533→    pub fn with_level(mut self, level: VerificationLevel) -> Self {
+   534→        self.level = level;
+   535→        self
+   536→    }
+   537→
+   538→    /// Enable verbose diagnostic output.
+   539→    pub fn with_verbose(mut self, verbose: bool) -> Self {
+   540→        self.verbose = verbose;
+   541→        self
+   542→    }
+   543→
+   544→    /// Run all invariant checks (at the configured verification level)
+   545→    /// and return the aggregated result.
+   546→    pub fn verify_all(&self, input: &VerificationInput) -> AggregatedResult {
+   547→        let run_start = Instant::now();
+   548→
+   549→        let invariants_to_run = self.invariants_for_level();
+   550→        let mut per_invariant = Vec::with_capacity(invariants_to_run.len());
+   551→
+   552→        for &kind in &invariants_to_run {
+   553→            let check_start = Instant::now();
+   554→            let result = self.run_single_check(kind, input);
+   555→            let elapsed = check_start.elapsed().as_millis() as u64;
+   556→
+   557→            per_invariant.push(PerInvariantResult::new(kind, result, elapsed));
+   558→        }
+   559→
+   560→        let total_elapsed = run_start.elapsed().as_millis() as u64;
+   561→        let summary = VerificationSummary::from_results(&per_invariant);
+   562→        let overall = compute_overall_verdict(&per_invariant);
+   563→
+   564→        AggregatedResult {
+   565→            per_invariant,
+   566→            overall,
+   567→            level: self.level,
+   568→            total_elapsed_ms: total_elapsed,
+   569→            summary,
+   570→        }
+   571→    }
+   572→
+   573→    /// Run incremental verification: only re-check invariants affected
+   574→    /// by the given delta, reusing cached results for the rest.
+   575→    pub fn verify_incremental(
+   576→        &mut self,
+   577→        input: &VerificationInput,
+   578→        delta: &InvariantDelta,
+   579→    ) -> AggregatedResult {
+   580→        let run_start = Instant::now();
+   581→        let invariants_to_run = self.invariants_for_level();
+   582→        let mut per_invariant = Vec::with_capacity(invariants_to_run.len());
+   583→
+   584→        for &kind in &invariants_to_run {
+   585→            if delta.affects(kind) {
+   586→                // Re-check this invariant.
+   587→                let check_start = Instant::now();
+   588→                let result = self.run_single_check(kind, input);
+   589→                let elapsed = check_start.elapsed().as_millis() as u64;
+   590→
+   591→                let pir = PerInvariantResult::new(kind, result, elapsed);
+   592→                // Update cache.
+   593→                if let Some(idx) = invariant_index(kind) {
+   594→                    self.cache[idx] = Some(pir.clone());
+   595→                }
+   596→                per_invariant.push(pir);
+   597→            } else {
+   598→                // Reuse cached result if available.
+   599→                if let Some(idx) = invariant_index(kind) {
+   600→                    if let Some(cached) = self.cache[idx].clone() {
+   601→                        per_invariant.push(cached.with_cached(true));
+   602→                        continue;
+   603→                    }
+   604→                }
+   605→                // No cache — must compute anyway.
+   606→                let check_start = Instant::now();
+   607→                let result = self.run_single_check(kind, input);
+   608→                let elapsed = check_start.elapsed().as_millis() as u64;
+   609→                let pir = PerInvariantResult::new(kind, result, elapsed);
+   610→                if let Some(idx) = invariant_index(kind) {
+   611→                    self.cache[idx] = Some(pir.clone());
+   612→                }
+   613→                per_invariant.push(pir);
+   614→            }
+   615→        }
+   616→
+   617→        let total_elapsed = run_start.elapsed().as_millis() as u64;
+   618→        let summary = VerificationSummary::from_results(&per_invariant);
+   619→        let overall = compute_overall_verdict(&per_invariant);
+   620→
+   621→        AggregatedResult {
+   622→            per_invariant,
+   623→            overall,
+   624→            level: self.level,
+   625→            total_elapsed_ms: total_elapsed,
+   626→            summary,
+   627→        }
+   628→    }
+   629→
+   630→    /// Generate a diagnostics report from the given aggregated result.
+   631→    pub fn diagnostics(&self, result: &AggregatedResult) -> DiagnosticsReport {
+   632→        DiagnosticsReport::from_aggregated(result)
+   633→    }
+   634→
+   635→    /// Clear the internal cache, forcing all checks to be re-run.
+   636→    pub fn clear_cache(&mut self) {
+   637→        self.cache = InvariantKind::all().iter().map(|_| None).collect();
+   638→    }
+   639→
+   640→    /// Returns the current verification level.
+   641→    pub fn level(&self) -> VerificationLevel {
+   642→        self.level
+   643→    }
+   644→
+   645→    // -----------------------------------------------------------------------
+   646→    // Private helpers
+   647→    // -----------------------------------------------------------------------
+   648→
+   649→    /// Return the set of invariants to check for the current level.
+   650→    fn invariants_for_level(&self) -> Vec<InvariantKind> {
+   651→        match self.level {
+   652→            VerificationLevel::Quick => InvariantKind::quick_set().to_vec(),
+   653→            VerificationLevel::Normal => InvariantKind::all().to_vec(),
+   654→            VerificationLevel::Exhaustive => InvariantKind::all().to_vec(),
+   655→        }
+   656→    }
+   657→
+   658→    /// Run a single invariant check by kind.
+   659→    fn run_single_check(
+   660→        &self,
+   661→        kind: InvariantKind,
+   662→        input: &VerificationInput,
+   663→    ) -> VerificationResult {
+   664→        if self.verbose {
+   665→            log::info!("InvariantAggregator: checking {kind}");
+   666→        }
+   667→
+   668→        let mut result = match kind {
+   669→            InvariantKind::Liveness => self.engine.verify_liveness(input),
+   670→            InvariantKind::Exclusivity => self.engine.verify_exclusivity(input),
+   671→            InvariantKind::Interpretation => self.engine.verify_interpretation(input),
+   672→            InvariantKind::Origin => self.engine.verify_origin(input),
+   673→            InvariantKind::Cleanup => self.engine.verify_cleanup(input),
+   674→        };
+   675→
+   676→        // In exhaustive mode, attempt to attach proof evidence for
+   677→        // proven properties.
+   678→        if self.level == VerificationLevel::Exhaustive && result.is_proven() {
+   679→            result = result.with_evidence(Evidence::FormalProof {
+   680→                steps: vec![ProofStep::from(format!(
+   681→                    "proof of {} verified by IVE",
+   682→                    kind.label()
+   683→                ))],
+   684→            });
+   685→        }
+   686→
+   687→        result
+   688→    }
+   689→}
+   690→
+   691→impl Default for InvariantAggregator {
+   692→    fn default() -> Self {
+   693→        Self::new()
+   694→    }
+   695→}
+   696→
+   697→// ---------------------------------------------------------------------------
+   698→// Free function: verify_all
+   699→// ---------------------------------------------------------------------------
+   700→
+   701→/// Convenience function: run all five invariant checks at the Normal
+   702→/// verification level and return the aggregated result.
+   703→pub fn verify_all(input: &VerificationInput) -> AggregatedResult {
+   704→    InvariantAggregator::new().verify_all(input)
+   705→}
+   706→
+   707→// ---------------------------------------------------------------------------
+   708→// Helpers
+   709→// ---------------------------------------------------------------------------
+   710→
+   711→/// Compute the overall verdict from per-invariant results.
+   712→fn compute_overall_verdict(results: &[PerInvariantResult]) -> OverallVerdict {
+   713→    if results.is_empty() {
+   714→        return OverallVerdict::NoChecks;
+   715→    }
+   716→
+   717→    let has_violation = results.iter().any(|r| r.is_fail());
+   718→    let has_unverified = results.iter().any(|r| r.is_unverified());
+   719→
+   720→    if has_violation {
+   721→        OverallVerdict::Fail
+   722→    } else if has_unverified {
+   723→        OverallVerdict::Inconclusive
+   724→    } else {
+   725→        OverallVerdict::Pass
+   726→    }
+   727→}
+   728→
+   729→/// Map an invariant kind to a cache index (0..5).
+   730→fn invariant_index(kind: InvariantKind) -> Option<usize> {
+   731→    match kind {
+   732→        InvariantKind::Liveness => Some(0),
+   733→        InvariantKind::Exclusivity => Some(1),
+   734→        InvariantKind::Interpretation => Some(2),
+   735→        InvariantKind::Origin => Some(3),
+   736→        InvariantKind::Cleanup => Some(4),
+   737→    }
+   738→}
+   739→
+   740→// ---------------------------------------------------------------------------
+   741→// Tests
+   742→// ---------------------------------------------------------------------------
+   743→
+   744→#[cfg(test)]
+   745→mod tests {
+   746→    use super::*;
+   747→    use crate::result::CounterExample;
+   748→    use vuma_scg::graph::SCG;
+   749→
+   750→    #[test]
+   751→    fn invariant_kind_all_has_five() {
+   752→        assert_eq!(InvariantKind::all().len(), 5);
+   753→    }
+   754→
+   755→    #[test]
+   756→    fn invariant_kind_quick_set_has_two() {
+   757→        assert_eq!(InvariantKind::quick_set().len(), 2);
+   758→        assert!(InvariantKind::quick_set().contains(&InvariantKind::Exclusivity));
+   759→        assert!(InvariantKind::quick_set().contains(&InvariantKind::Origin));
+   760→    }
+   761→
+   762→    #[test]
+   763→    fn invariant_kind_labels() {
+   764→        assert_eq!(InvariantKind::Liveness.label(), "liveness");
+   765→        assert_eq!(InvariantKind::Exclusivity.label(), "exclusivity");
+   766→        assert_eq!(InvariantKind::Interpretation.label(), "interpretation");
+   767→        assert_eq!(InvariantKind::Origin.label(), "origin");
+   768→        assert_eq!(InvariantKind::Cleanup.label(), "cleanup");
+   769→    }
+   770→
+   771→    #[test]
+   772→    fn invariant_kind_display() {
+   773→        assert_eq!(format!("{}", InvariantKind::Liveness), "liveness");
+   774→    }
+   775→
+   776→    #[test]
+   777→    fn verification_level_default_is_normal() {
+   778→        assert_eq!(VerificationLevel::default(), VerificationLevel::Normal);
+   779→    }
+   780→
+   781→    #[test]
+   782→    fn verification_level_display() {
+   783→        assert_eq!(format!("{}", VerificationLevel::Quick), "QUICK");
+   784→        assert_eq!(format!("{}", VerificationLevel::Normal), "NORMAL");
+   785→        assert_eq!(format!("{}", VerificationLevel::Exhaustive), "EXHAUSTIVE");
+   786→    }
+   787→
+   788→    #[test]
+   789→    fn delta_empty_by_default() {
+   790→        let delta = InvariantDelta::new();
+   791→        assert!(delta.is_empty());
+   792→        assert!(!delta.affects(InvariantKind::Liveness));
+   793→    }
+   794→
+   795→    #[test]
+   796→    fn delta_single_affects_only_one() {
+   797→        let delta = InvariantDelta::single(InvariantKind::Cleanup);
+   798→        assert!(!delta.is_empty());
+   799→        assert!(delta.affects(InvariantKind::Cleanup));
+   800→        assert!(!delta.affects(InvariantKind::Liveness));
+   801→    }
+   802→
+   803→    #[test]
+   804→    fn delta_from_set() {
+   805→        let delta = InvariantDelta::from_set([InvariantKind::Liveness, InvariantKind::Cleanup])
+   806→            .with_reason("resource change");
+   807→        assert!(delta.affects(InvariantKind::Liveness));
+   808→        assert!(delta.affects(InvariantKind::Cleanup));
+   809→        assert!(!delta.affects(InvariantKind::Origin));
+   810→        assert_eq!(delta.reason.as_deref(), Some("resource change"));
+   811→    }
+   812→
+   813→    #[test]
+   814→    fn verify_all_normal_returns_five_results() {
+   815→        let aggregator = InvariantAggregator::new();
+   816→        let input = VerificationInput::from_scg(SCG::new());
+   817→        let result = aggregator.verify_all(&input);
+   818→        assert_eq!(result.per_invariant.len(), 5);
+   819→        assert_eq!(result.level, VerificationLevel::Normal);
+   820→    }
+   821→
+   822→    #[test]
+   823→    fn verify_all_quick_returns_two_results() {
+   824→        let aggregator = InvariantAggregator::new().with_level(VerificationLevel::Quick);
+   825→        let input = VerificationInput::from_scg(SCG::new());
+   826→        let result = aggregator.verify_all(&input);
+   827→        assert_eq!(result.per_invariant.len(), 2);
+   828→        assert_eq!(result.level, VerificationLevel::Quick);
+   829→    }
+   830→
+   831→    #[test]
+   832→    fn verify_all_exhaustive_returns_five_results() {
+   833→        let aggregator = InvariantAggregator::new().with_level(VerificationLevel::Exhaustive);
+   834→        let input = VerificationInput::from_scg(SCG::new());
+   835→        let result = aggregator.verify_all(&input);
+   836→        assert_eq!(result.per_invariant.len(), 5);
+   837→        assert_eq!(result.level, VerificationLevel::Exhaustive);
+   838→    }
+   839→
+   840→    #[test]
+   841→    fn free_function_verify_all() {
+   842→        let input = VerificationInput::from_scg(SCG::new());
+   843→        let result = verify_all(&input);
+   844→        assert_eq!(result.per_invariant.len(), 5);
+   845→        assert_eq!(result.level, VerificationLevel::Normal);
+   846→    }
+   847→
+   848→    #[test]
+   849→    fn incremental_reuses_cache_for_unaffected() {
+   850→        let mut aggregator = InvariantAggregator::new();
+   851→        let input = VerificationInput::from_scg(SCG::new());
+   852→
+   853→        // First run to populate cache.
+   854→        let first = aggregator.verify_all(&input);
+   855→        for pir in &first.per_invariant {
+   856→            if let Some(idx) = invariant_index(pir.kind) {
+   857→                aggregator.cache[idx] = Some(pir.clone());
+   858→            }
+   859→        }
+   860→
+   861→        // Incremental run — only liveness affected.
+   862→        let delta = InvariantDelta::single(InvariantKind::Liveness);
+   863→        let second = aggregator.verify_incremental(&input, &delta);
+   864→
+   865→        // Liveness should be fresh; others should be cached.
+   866→        let liveness = second
+   867→            .per_invariant
+   868→            .iter()
+   869→            .find(|r| r.kind == InvariantKind::Liveness)
+   870→            .unwrap();
+   871→        assert!(!liveness.cached);
+   872→
+   873→        let exclusivity = second
+   874→            .per_invariant
+   875→            .iter()
+   876→            .find(|r| r.kind == InvariantKind::Exclusivity)
+   877→            .unwrap();
+   878→        assert!(exclusivity.cached);
+   879→
+   880→        assert!(second.summary.cached_count > 0);
+   881→    }
+   882→
+   883→    #[test]
+   884→    fn incremental_empty_delta_uses_all_cache() {
+   885→        let mut aggregator = InvariantAggregator::new();
+   886→        let input = VerificationInput::from_scg(SCG::new());
+   887→
+   888→        let first = aggregator.verify_all(&input);
+   889→        for pir in &first.per_invariant {
+   890→            if let Some(idx) = invariant_index(pir.kind) {
+   891→                aggregator.cache[idx] = Some(pir.clone());
+   892→            }
+   893→        }
+   894→
+   895→        let delta = InvariantDelta::new();
+   896→        let second = aggregator.verify_incremental(&input, &delta);
+   897→
+   898→        // All results should be cached.
+   899→        assert_eq!(second.summary.cached_count, 5);
+   900→        assert_eq!(second.summary.fresh_count, 0);
+   901→    }
+   902→
+   903→    #[test]
+   904→    fn diagnostics_report_renders() {
+   905→        let aggregator = InvariantAggregator::new();
+   906→        let input = VerificationInput::from_scg(SCG::new());
+   907→        let result = aggregator.verify_all(&input);
+   908→        let report = aggregator.diagnostics(&result);
+   909→
+   910→        let rendered = report.render();
+   911→        assert!(rendered.contains("IVE Verification Report"));
+   912→        assert!(rendered.contains("liveness"));
+   913→        assert!(rendered.contains("exclusivity"));
+   914→        assert!(rendered.contains("interpretation"));
+   915→        assert!(rendered.contains("origin"));
+   916→        assert!(rendered.contains("cleanup"));
+   917→    }
+   918→
+   919→    #[test]
+   920→    fn overall_verdict_no_checks() {
+   921→        let results: Vec<PerInvariantResult> = vec![];
+   922→        assert_eq!(compute_overall_verdict(&results), OverallVerdict::NoChecks);
+   923→    }
+   924→
+   925→    #[test]
+   926→    fn overall_verdict_pass() {
+   927→        let results = vec![PerInvariantResult::new(
+   928→            InvariantKind::Liveness,
+   929→            VerificationResult::new("liveness", VerificationStatus::Proven, "ok"),
+   930→            0,
+   931→        )];
+   932→        assert_eq!(compute_overall_verdict(&results), OverallVerdict::Pass);
+   933→    }
+   934→
+   935→    #[test]
+   936→    fn overall_verdict_fail() {
+   937→        let ce = CounterExample::new(
+   938→            vec!["entry".into()],
+   939→            "entry".into(),
+   940→            "duplicate owner".into(),
+   941→        );
+   942→        let results = vec![PerInvariantResult::new(
+   943→            InvariantKind::Exclusivity,
+   944→            VerificationResult::new(
+   945→                "exclusivity",
+   946→                VerificationStatus::Violated { counterexample: ce },
+   947→                "violation",
+   948→            ),
+   949→            0,
+   950→        )];
+   951→        assert_eq!(compute_overall_verdict(&results), OverallVerdict::Fail);
+   952→    }
+   953→
+   954→    #[test]
+   955→    fn overall_verdict_inconclusive() {
+   956→        let results = vec![PerInvariantResult::new(
+   957→            InvariantKind::Liveness,
+   958→            VerificationResult::new(
+   959→                "liveness",
+   960→                VerificationStatus::Unverified {
+   961→                    reason: "not yet implemented".into(),
+   962→                },
+   963→                "pending",
+   964→            ),
+   965→            0,
+   966→        )];
+   967→        assert_eq!(
+   968→            compute_overall_verdict(&results),
+   969→            OverallVerdict::Inconclusive
+   970→        );
+   971→    }
+   972→
+   973→    #[test]
+   974→    fn clear_cache_resets() {
+   975→        let mut aggregator = InvariantAggregator::new();
+   976→        let input = VerificationInput::from_scg(SCG::new());
+   977→
+   978→        let first = aggregator.verify_all(&input);
+   979→        for pir in &first.per_invariant {
+   980→            if let Some(idx) = invariant_index(pir.kind) {
+   981→                aggregator.cache[idx] = Some(pir.clone());
+   982→            }
+   983→        }
+   984→
+   985→        aggregator.clear_cache();
+   986→
+   987→        for slot in &aggregator.cache {
+   988→            assert!(slot.is_none());
+   989→        }
+   990→    }
+   991→
+   992→    #[test]
+   993→    fn default_aggregator() {
+   994→        let aggregator = InvariantAggregator::default();
+   995→        assert_eq!(aggregator.level(), VerificationLevel::Normal);
+   996→    }
+   997→
+   998→    #[test]
+   999→    fn summary_display() {
+  1000→        let aggregator = InvariantAggregator::new();
+  1001→        let input = VerificationInput::from_scg(SCG::new());
+  1002→        let result = aggregator.verify_all(&input);
+  1003→        let text = format!("{}", result.summary);
+  1004→        assert!(text.contains("Verification Summary"));
+  1005→        assert!(text.contains("Total checked : 5"));
+  1006→    }
+  1007→
+  1008→    #[test]
+  1009→    fn overall_verdict_display() {
+  1010→        assert_eq!(format!("{}", OverallVerdict::Pass), "PASS");
+  1011→        assert_eq!(format!("{}", OverallVerdict::Fail), "FAIL");
+  1012→        assert_eq!(format!("{}", OverallVerdict::Inconclusive), "INCONCLUSIVE");
+  1013→        assert_eq!(format!("{}", OverallVerdict::NoChecks), "NO_CHECKS");
+  1014→    }
+  1015→}
+  1016→

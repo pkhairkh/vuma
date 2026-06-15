@@ -1,0 +1,2002 @@
+     1→//! # VUMA REPL — Interactive Read-Eval-Print Loop
+     2→//!
+     3→//! The [`VumaRepl`] struct provides an interactive shell for the VUMA language.
+     4→//! It parses VUMA expressions, builds the Semantic Computation Graph (SCG),
+     5→//! converts it to a Memory State Graph (MSG), and runs IVE verification.
+     6→//!
+     7→//! This REPL is designed for LLM-driven incremental development — LLMs
+     8→//! can compile and test code snippets one at a time, inspect types and
+     9→//! SCG structure, and switch compilation targets on the fly.
+    10→//!
+    11→//! ## Interactive Commands
+    12→//!
+    13→//! | Command            | Description                                              |
+    14→//! |--------------------|----------------------------------------------------------|
+    15→//! | `:help`            | Show available commands                                  |
+    16→//! | `:load <file>`     | Load and evaluate a VUMA source file                     |
+    17→//! | `:type <expr>`     | Show the type of an expression                           |
+    18→//! | `:scg <func>`      | Show the SCG for a named function                        |
+    19→//! | `:target <isa>`    | Switch compilation target (x86_64, aarch64, riscv64, …)  |
+    20→//! | `:verify`          | Run IVE verification on the current SCG                  |
+    21→//! | `:show scg`        | Display the current SCG summary                          |
+    22→//! | `:show msg`        | Display the current MSG summary                          |
+    23→//! | `:show bd`         | Display behavioural descriptors for all nodes            |
+    24→//! | `:compile`         | Compile the current session to the selected target       |
+    25→//! | `:profile`         | Show profiling data from the last verification           |
+    26→//! | `:history`         | Show command history                                     |
+    27→//! | `:reset`           | Clear all REPL state                                     |
+    28→//! | `:quit`            | Exit the REPL                                            |
+    29→//!
+    30→//! ## Expression Evaluation
+    31→//!
+    32→//! Simple arithmetic and literal expressions are evaluated immediately.
+    33→//! Definitions (`let x = …`, `fn f() { … }`, etc.) persist across inputs
+    34→//! so that subsequent expressions can reference previously-defined names.
+    35→//!
+    36→//! ## Error Display
+    37→//!
+    38→//! Parse errors and runtime errors are displayed with source context,
+    39→//! showing the offending line and a caret pointing to the error location.
+    40→//!
+    41→//! ## History
+    42→//!
+    43→//! The REPL maintains an in-memory history buffer. Use `:history` to list
+    44→//! previous inputs. Arrow-key navigation (up/down) is supported in the
+    45→//! interactive loop.
+    46→
+    47→use std::collections::HashMap;
+    48→use std::fmt;
+    49→use std::io::{self, Write};
+    50→use std::time::Instant;
+    51→
+    52→use vuma_ive::verification::VerificationEngine;
+    53→use vuma_ive::verification::VerificationInput;
+    54→use vuma_ive::{AggregatedResult, DiagnosticsReport, InferenceEngine, InvariantAggregator};
+    55→use vuma_parser::ast::{Expr, Item, Lit, Stmt, Type as AstType};
+    56→use vuma_parser::to_scg::AstToScg;
+    57→use vuma_parser::{offset_to_location, ParseError, Parser, Span};
+    58→use vuma_scg::SCG;
+    59→
+    60→use crate::msg::MSG;
+    61→use crate::scg_to_msg;
+    62→
+    63→/// Extract a human-readable label from a node based on its payload.
+    64→fn node_label(node: &vuma_scg::NodeData) -> String {
+    65→    use vuma_scg::NodePayload;
+    66→    match &node.payload {
+    67→        NodePayload::Computation(c) => c.operation.clone(),
+    68→        NodePayload::Allocation(a) => a.type_name.clone().unwrap_or_else(|| "alloc".to_string()),
+    69→        NodePayload::Deallocation(_) => "dealloc".to_string(),
+    70→        NodePayload::Access(a) => format!("{:?}_access", a.mode),
+    71→        NodePayload::Cast(c) => format!("cast_{}_to_{}", c.from_type, c.to_type),
+    72→        NodePayload::Effect(e) => e.effect_kind.clone(),
+    73→        NodePayload::Control(c) => c.label.clone().unwrap_or_else(|| format!("{:?}", c.kind)),
+    74→        NodePayload::Phantom(p) => p.purpose.clone(),
+    75→        NodePayload::VTable(v) => format!("vtable({} for {})", v.trait_name, v.concrete_type),
+    76→        NodePayload::ClosureEnv(c) => format!("closure_env({:?})", c.captured_vars),
+    77→    }
+    78→}
+    79→
+    80→// ---------------------------------------------------------------------------
+    81→// REPL Error
+    82→// ---------------------------------------------------------------------------
+    83→
+    84→/// Errors that can occur during REPL operation.
+    85→#[derive(Debug)]
+    86→pub enum ReplError {
+    87→    /// A parse error from the VUMA frontend.
+    88→    Parse(ParseError),
+    89→    /// An SCG construction error.
+    90→    ScgConstruction(String),
+    91→    /// An MSG conversion error.
+    92→    MsgConversion(scg_to_msg::ConversionError),
+    93→    /// An I/O error.
+    94→    Io(io::Error),
+    95→    /// A general REPL error with a message.
+    96→    General(String),
+    97→    /// Multiple parse errors.
+    98→    ParseErrors(Vec<ParseError>),
+    99→    /// A compilation error (from the full pipeline).
+   100→    Compilation(String),
+   101→}
+   102→
+   103→impl fmt::Display for ReplError {
+   104→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+   105→        match self {
+   106→            ReplError::Parse(e) => write!(f, "parse error: {e}"),
+   107→            ReplError::ScgConstruction(msg) => write!(f, "SCG construction error: {msg}"),
+   108→            ReplError::MsgConversion(e) => write!(f, "MSG conversion error: {e}"),
+   109→            ReplError::Io(e) => write!(f, "I/O error: {e}"),
+   110→            ReplError::General(msg) => write!(f, "{msg}"),
+   111→            ReplError::ParseErrors(errors) => {
+   112→                write!(f, "{} parse error(s):", errors.len())?;
+   113→                for e in errors {
+   114→                    write!(f, "\n  {e}")?;
+   115→                }
+   116→                Ok(())
+   117→            }
+   118→            ReplError::Compilation(msg) => write!(f, "compilation error: {msg}"),
+   119→        }
+   120→    }
+   121→}
+   122→
+   123→impl std::error::Error for ReplError {
+   124→    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+   125→        match self {
+   126→            ReplError::Parse(e) => Some(e),
+   127→            ReplError::MsgConversion(e) => Some(e),
+   128→            ReplError::Io(e) => Some(e),
+   129→            _ => None,
+   130→        }
+   131→    }
+   132→}
+   133→
+   134→impl From<ParseError> for ReplError {
+   135→    fn from(e: ParseError) -> Self {
+   136→        ReplError::Parse(e)
+   137→    }
+   138→}
+   139→
+   140→impl From<scg_to_msg::ConversionError> for ReplError {
+   141→    fn from(e: scg_to_msg::ConversionError) -> Self {
+   142→        ReplError::MsgConversion(e)
+   143→    }
+   144→}
+   145→
+   146→impl From<io::Error> for ReplError {
+   147→    fn from(e: io::Error) -> Self {
+   148→        ReplError::Io(e)
+   149→    }
+   150→}
+   151→
+   152→// ---------------------------------------------------------------------------
+   153→// REPL Result
+   154→// ---------------------------------------------------------------------------
+   155→
+   156→/// The result of processing a single REPL input.
+   157→#[derive(Debug)]
+   158→pub enum ReplResult {
+   159→    /// The input was processed successfully; optional output text.
+   160→    Ok(Option<String>),
+   161→    /// The input resulted in a value that can be displayed.
+   162→    Value(String),
+   163→    /// A verification result.
+   164→    Verification(AggregatedResult),
+   165→    /// A compilation result (binary bytes produced).
+   166→    Compiled {
+   167→        /// Number of bytes in the compiled output.
+   168→        bytes: usize,
+   169→        /// The target ISA that was used.
+   170→        target: String,
+   171→    },
+   172→    /// The user requested to quit.
+   173→    Quit,
+   174→}
+   175→
+   176→impl fmt::Display for ReplResult {
+   177→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+   178→        match self {
+   179→            ReplResult::Ok(Some(msg)) => write!(f, "{msg}"),
+   180→            ReplResult::Ok(None) => Ok(()),
+   181→            ReplResult::Value(v) => write!(f, "{v}"),
+   182→            ReplResult::Verification(r) => {
+   183→                let report = DiagnosticsReport::from_aggregated(r);
+   184→                write!(f, "{report}")
+   185→            }
+   186→            ReplResult::Compiled { bytes, target } => {
+   187→                write!(f, "Compiled {} bytes for target {}", bytes, target)
+   188→            }
+   189→            ReplResult::Quit => write!(f, "Goodbye."),
+   190→        }
+   191→    }
+   192→}
+   193→
+   194→// ---------------------------------------------------------------------------
+   195→// Profile Data
+   196→// ---------------------------------------------------------------------------
+   197→
+   198→/// Profiling data collected during REPL operations.
+   199→#[derive(Debug, Clone, Default)]
+   200→pub struct ReplProfile {
+   201→    /// Number of expressions processed.
+   202→    pub expressions_processed: usize,
+   203→    /// Number of parse errors encountered.
+   204→    pub parse_errors: usize,
+   205→    /// Total time spent parsing (milliseconds).
+   206→    pub parse_time_ms: u64,
+   207→    /// Total time spent building SCG (milliseconds).
+   208→    pub scg_time_ms: u64,
+   209→    /// Total time spent converting SCG → MSG (milliseconds).
+   210→    pub msg_time_ms: u64,
+   211→    /// Total time spent on IVE verification (milliseconds).
+   212→    pub verify_time_ms: u64,
+   213→    /// Number of verification runs.
+   214→    pub verification_runs: usize,
+   215→}
+   216→
+   217→impl fmt::Display for ReplProfile {
+   218→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+   219→        writeln!(f, "REPL Profile:")?;
+   220→        writeln!(
+   221→            f,
+   222→            "  Expressions processed : {}",
+   223→            self.expressions_processed
+   224→        )?;
+   225→        writeln!(f, "  Parse errors          : {}", self.parse_errors)?;
+   226→        writeln!(f, "  Parse time            : {}ms", self.parse_time_ms)?;
+   227→        writeln!(f, "  SCG build time        : {}ms", self.scg_time_ms)?;
+   228→        writeln!(f, "  MSG conversion time   : {}ms", self.msg_time_ms)?;
+   229→        writeln!(f, "  Verification time     : {}ms", self.verify_time_ms)?;
+   230→        writeln!(f, "  Verification runs     : {}", self.verification_runs)?;
+   231→        Ok(())
+   232→    }
+   233→}
+   234→
+   235→// ---------------------------------------------------------------------------
+   236→// Expression Evaluator (simple immediate evaluation)
+   237→// ---------------------------------------------------------------------------
+   238→
+   239→/// A simple immediate evaluator for arithmetic expressions.
+   240→///
+   241→/// This evaluator can compute integer arithmetic expressions without
+   242→/// needing to go through the full SCG pipeline. It supports:
+   243→/// - Integer literals
+   244→/// - Variable references (from the REPL's definition map)
+   245→/// - Basic arithmetic: +, -, *, /
+   246→/// - Parenthesised expressions
+   247→struct SimpleEvaluator {
+   248→    /// Variable bindings from previous definitions.
+   249→    vars: HashMap<String, i64>,
+   250→}
+   251→
+   252→impl SimpleEvaluator {
+   253→    fn new(vars: HashMap<String, i64>) -> Self {
+   254→        Self { vars }
+   255→    }
+   256→
+   257→    /// Attempt to evaluate a simple expression string.
+   258→    /// Returns `None` if the expression is too complex for this evaluator.
+   259→    fn eval(&self, input: &str) -> Option<i64> {
+   260→        let trimmed = input.trim();
+   261→        // Remove trailing semicolons.
+   262→        let trimmed = trimmed.trim_end_matches(';').trim();
+   263→        let tokens = self.tokenize(trimmed)?;
+   264→        self.eval_tokens(&tokens)
+   265→    }
+   266→
+   267→    /// Tokenize the input into a simple token stream.
+   268→    fn tokenize(&self, input: &str) -> Option<Vec<Token>> {
+   269→        let mut tokens = Vec::new();
+   270→        let mut chars = input.chars().peekable();
+   271→        while let Some(&ch) = chars.peek() {
+   272→            match ch {
+   273→                ' ' | '\t' => {
+   274→                    chars.next();
+   275→                }
+   276→                '(' => {
+   277→                    tokens.push(Token::LParen);
+   278→                    chars.next();
+   279→                }
+   280→                ')' => {
+   281→                    tokens.push(Token::RParen);
+   282→                    chars.next();
+   283→                }
+   284→                '+' => {
+   285→                    tokens.push(Token::Plus);
+   286→                    chars.next();
+   287→                }
+   288→                '-' => {
+   289→                    tokens.push(Token::Minus);
+   290→                    chars.next();
+   291→                }
+   292→                '*' => {
+   293→                    tokens.push(Token::Star);
+   294→                    chars.next();
+   295→                }
+   296→                '/' => {
+   297→                    tokens.push(Token::Slash);
+   298→                    chars.next();
+   299→                }
+   300→                '0'..='9' => {
+   301→                    let mut num = String::new();
+   302→                    while let Some(&d) = chars.peek() {
+   303→                        if d.is_ascii_digit() {
+   304→                            num.push(d);
+   305→                            chars.next();
+   306→                        } else {
+   307→                            break;
+   308→                        }
+   309→                    }
+   310→                    tokens.push(Token::Num(num.parse::<i64>().ok()?));
+   311→                }
+   312→                _ if ch.is_alphanumeric() || ch == '_' => {
+   313→                    let mut name = String::new();
+   314→                    while let Some(&c) = chars.peek() {
+   315→                        if c.is_alphanumeric() || c == '_' {
+   316→                            name.push(c);
+   317→                            chars.next();
+   318→                        } else {
+   319→                            break;
+   320→                        }
+   321→                    }
+   322→                    if let Some(&val) = self.vars.get(&name) {
+   323→                        tokens.push(Token::Num(val));
+   324→                    } else {
+   325→                        return None; // unknown variable
+   326→                    }
+   327→                }
+   328→                _ => return None, // unsupported character
+   329→            }
+   330→        }
+   331→        Some(tokens)
+   332→    }
+   333→
+   334→    /// Evaluate a token stream using recursive descent.
+   335→    fn eval_tokens(&self, tokens: &[Token]) -> Option<i64> {
+   336→        let mut pos = 0;
+   337→        let result = self.parse_additive(tokens, &mut pos)?;
+   338→        if pos == tokens.len() {
+   339→            Some(result)
+   340→        } else {
+   341→            None
+   342→        }
+   343→    }
+   344→
+   345→    fn parse_additive(&self, tokens: &[Token], pos: &mut usize) -> Option<i64> {
+   346→        let mut left = self.parse_multiplicative(tokens, pos)?;
+   347→        while *pos < tokens.len() {
+   348→            match &tokens[*pos] {
+   349→                Token::Plus => {
+   350→                    *pos += 1;
+   351→                    let right = self.parse_multiplicative(tokens, pos)?;
+   352→                    left += right;
+   353→                }
+   354→                Token::Minus => {
+   355→                    *pos += 1;
+   356→                    let right = self.parse_multiplicative(tokens, pos)?;
+   357→                    left -= right;
+   358→                }
+   359→                _ => break,
+   360→            }
+   361→        }
+   362→        Some(left)
+   363→    }
+   364→
+   365→    fn parse_multiplicative(&self, tokens: &[Token], pos: &mut usize) -> Option<i64> {
+   366→        let mut left = self.parse_unary(tokens, pos)?;
+   367→        while *pos < tokens.len() {
+   368→            match &tokens[*pos] {
+   369→                Token::Star => {
+   370→                    *pos += 1;
+   371→                    let right = self.parse_unary(tokens, pos)?;
+   372→                    left *= right;
+   373→                }
+   374→                Token::Slash => {
+   375→                    *pos += 1;
+   376→                    let right = self.parse_unary(tokens, pos)?;
+   377→                    if right == 0 {
+   378→                        return None;
+   379→                    }
+   380→                    left /= right;
+   381→                }
+   382→                _ => break,
+   383→            }
+   384→        }
+   385→        Some(left)
+   386→    }
+   387→
+   388→    fn parse_unary(&self, tokens: &[Token], pos: &mut usize) -> Option<i64> {
+   389→        if *pos < tokens.len() {
+   390→            match &tokens[*pos] {
+   391→                Token::Minus => {
+   392→                    *pos += 1;
+   393→                    let val = self.parse_primary(tokens, pos)?;
+   394→                    Some(-val)
+   395→                }
+   396→                Token::Plus => {
+   397→                    *pos += 1;
+   398→                    self.parse_primary(tokens, pos)
+   399→                }
+   400→                _ => self.parse_primary(tokens, pos),
+   401→            }
+   402→        } else {
+   403→            None
+   404→        }
+   405→    }
+   406→
+   407→    fn parse_primary(&self, tokens: &[Token], pos: &mut usize) -> Option<i64> {
+   408→        if *pos >= tokens.len() {
+   409→            return None;
+   410→        }
+   411→        match &tokens[*pos] {
+   412→            Token::Num(n) => {
+   413→                *pos += 1;
+   414→                Some(*n)
+   415→            }
+   416→            Token::LParen => {
+   417→                *pos += 1;
+   418→                let result = self.parse_additive(tokens, pos)?;
+   419→                if *pos < tokens.len() && matches!(&tokens[*pos], Token::RParen) {
+   420→                    *pos += 1;
+   421→                    Some(result)
+   422→                } else {
+   423→                    None
+   424→                }
+   425→            }
+   426→            _ => None,
+   427→        }
+   428→    }
+   429→}
+   430→
+   431→/// Simple token type for the arithmetic evaluator.
+   432→#[derive(Debug)]
+   433→enum Token {
+   434→    Num(i64),
+   435→    Plus,
+   436→    Minus,
+   437→    Star,
+   438→    Slash,
+   439→    LParen,
+   440→    RParen,
+   441→}
+   442→
+   443→// ---------------------------------------------------------------------------
+   444→// Source Context for Error Display
+   445→// ---------------------------------------------------------------------------
+   446→
+   447→/// Format a parse error with source context.
+   448→fn format_error_with_context(source: &str, span: &Span, message: &str) -> String {
+   449→    let loc = offset_to_location(source, span.start, None);
+   450→    let line_start = source[..span.start].rfind('\n').map(|i| i + 1).unwrap_or(0);
+   451→    let line_end = source[span.start..]
+   452→        .find('\n')
+   453→        .map(|i| span.start + i)
+   454→        .unwrap_or(source.len());
+   455→    let line_text = &source[line_start..line_end];
+   456→
+   457→    let column = span.start - line_start;
+   458→    let caret_width = if span.end > span.start {
+   459→        (span.end - span.start).min(line_end - span.start)
+   460→    } else {
+   461→        1
+   462→    };
+   463→
+   464→    let mut result = String::new();
+   465→    result.push_str(&format!("error: {message}\n"));
+   466→    result.push_str(&format!(
+   467→        "  --> {}:{}:{}\n",
+   468→        loc.line, loc.column, span.start
+   469→    ));
+   470→    result.push_str("   |\n");
+   471→    result.push_str(&format!("{:3}| {}\n", loc.line, line_text));
+   472→    result.push_str("   | ");
+   473→    result.push_str(&" ".repeat(column));
+   474→    result.push_str(&"^".repeat(caret_width));
+   475→    result.push('\n');
+   476→    result
+   477→}
+   478→
+   479→// ---------------------------------------------------------------------------
+   480→// SCG Summary Display
+   481→// ---------------------------------------------------------------------------
+   482→
+   483→/// Generate a human-readable summary of the SCG.
+   484→fn format_scg_summary(scg: &SCG) -> String {
+   485→    let mut type_counts: HashMap<String, usize> = HashMap::new();
+   486→    let mut edge_counts: HashMap<String, usize> = HashMap::new();
+   487→
+   488→    for node in scg.nodes() {
+   489→        let label = format!("{:?}", node.node_type);
+   490→        *type_counts.entry(label).or_insert(0) += 1;
+   491→    }
+   492→
+   493→    for edge in scg.edges() {
+   494→        let label = format!("{:?}", edge.kind);
+   495→        *edge_counts.entry(label).or_insert(0) += 1;
+   496→    }
+   497→
+   498→    let mut result = String::new();
+   499→    result.push_str(&format!(
+   500→        "SCG Summary ({} nodes, {} edges, {} regions)\n",
+   501→        scg.node_count(),
+   502→        scg.edge_count(),
+   503→        scg.region_count()
+   504→    ));
+   505→
+   506→    if !type_counts.is_empty() {
+   507→        result.push_str("  Node types:\n");
+   508→        let mut entries: Vec<_> = type_counts.into_iter().collect();
+   509→        entries.sort_by_key(|b| std::cmp::Reverse(b.1));
+   510→        for (kind, count) in entries {
+   511→            result.push_str(&format!("    {kind}: {count}\n"));
+   512→        }
+   513→    }
+   514→
+   515→    if !edge_counts.is_empty() {
+   516→        result.push_str("  Edge types:\n");
+   517→        let mut entries: Vec<_> = edge_counts.into_iter().collect();
+   518→        entries.sort_by_key(|b| std::cmp::Reverse(b.1));
+   519→        for (kind, count) in entries {
+   520→            result.push_str(&format!("    {kind}: {count}\n"));
+   521→        }
+   522→    }
+   523→
+   524→    // List regions.
+   525→    for region in scg.regions() {
+   526→        result.push_str(&format!(
+   527→            "  Region {} (deployment: {}, nodes: {}, scope: {})\n",
+   528→            region.id,
+   529→            region.deployment_target,
+   530→            region.node_count(),
+   531→            region.scope_level,
+   532→        ));
+   533→    }
+   534→
+   535→    result
+   536→}
+   537→
+   538→/// Generate a BD (Behavioural Descriptor) display for all nodes in the SCG.
+   539→fn format_bd_display(scg: &SCG, inference_engine: &InferenceEngine) -> String {
+   540→    let mut result = String::new();
+   541→    result.push_str("Behavioural Descriptors:\n");
+   542→
+   543→    if scg.node_count() == 0 {
+   544→        result.push_str("  (no nodes)\n");
+   545→        return result;
+   546→    }
+   547→
+   548→    for node in scg.nodes() {
+   549→        let bd = inference_engine.infer_bd(scg, node.id).unwrap_or_else(|_| {
+   550→            vuma_bd::descriptor::BD::new(
+   551→                vuma_bd::repd::RepD::Byte(vuma_bd::repd::ByteRep { size: 0, align: 0 }),
+   552→                vuma_bd::capd::CapD::empty(),
+   553→                vuma_bd::reld::RelD::empty(),
+   554→            )
+   555→        });
+   556→        result.push_str(&format!(
+   557→            "  Node {} ({:?}): {}\n",
+   558→            node.id, node.node_type, bd
+   559→        ));
+   560→    }
+   561→
+   562→    result
+   563→}
+   564→
+   565→// ---------------------------------------------------------------------------
+   566→// VumaRepl
+   567→// ---------------------------------------------------------------------------
+   568→
+   569→/// The VUMA Read-Eval-Print Loop.
+   570→///
+   571→/// `VumaRepl` maintains incremental state across expressions: previous
+   572→/// definitions are accumulated in a source buffer and re-parsed as a whole
+   573→/// so that later expressions can reference earlier bindings.
+   574→///
+   575→/// # Usage
+   576→///
+   577→/// ```rust
+   578→/// use vuma_core::repl::VumaRepl;
+   579→///
+   580→/// let mut repl = VumaRepl::new();
+   581→///
+   582→/// // Process a single line programmatically.
+   583→/// let result = repl.process_line("let x = 42;");
+   584→/// match result {
+   585→///     Ok(output) => println!("{output}"),
+   586→///     Err(e) => eprintln!("Error: {e}"),
+   587→/// }
+   588→///
+   589→/// // Run the interactive loop (reads from stdin).
+   590→/// // repl.run();
+   591→/// ```
+   592→pub struct VumaRepl {
+   593→    /// Accumulated source text (all previous definitions + current expression).
+   594→    ///
+   595→    /// This is the *session source* — everything the user has entered so far
+   596→    /// in this REPL session, plus any files loaded with `:load`.
+   597→    session_source: String,
+   598→    /// Current compilation target ISA (e.g. "aarch64", "x86_64").
+   599→    target: String,
+   600→    /// The current SCG built from the accumulated source.
+   601→    scg: SCG,
+   602→    /// The current MSG converted from the SCG.
+   603→    msg: Option<MSG>,
+   604→    /// The AST-to-SCG converter (maintains variable scopes).
+   605→    converter: AstToScg,
+   606→    /// IVE inference engine.
+   607→    inference_engine: InferenceEngine,
+   608→    /// IVE verification engine (reserved for individual invariant checks).
+   609→    _verification_engine: VerificationEngine,
+   610→    /// IVE invariant aggregator.
+   611→    aggregator: InvariantAggregator,
+   612→    /// Command input history.
+   613→    history: Vec<String>,
+   614→    /// Current position in history for up/down navigation.
+   615→    history_cursor: usize,
+   616→    /// Profiling data.
+   617→    profile: ReplProfile,
+   618→    /// Whether the REPL should keep running.
+   619→    running: bool,
+   620→    /// Last verification result.
+   621→    last_verification: Option<AggregatedResult>,
+   622→    /// Variable values for simple expression evaluation.
+   623→    simple_vars: HashMap<String, i64>,
+   624→    /// Currently loaded file path (if any).
+   625→    loaded_file: Option<String>,
+   626→}
+   627→
+   628→/// Supported compilation targets for the REPL.
+   629→const VALID_TARGETS: &[&str] = &[
+   630→    "aarch64",
+   631→    "x86_64",
+   632→    "riscv64",
+   633→    "wasm32",
+   634→    "loongarch64",
+   635→    "arm32",
+   636→    "mips64",
+   637→    "ppc64",
+   638→];
+   639→
+   640→impl VumaRepl {
+   641→    /// Create a new REPL instance.
+   642→    pub fn new() -> Self {
+   643→        Self {
+   644→            session_source: String::new(),
+   645→            target: "aarch64".to_string(),
+   646→            scg: SCG::new(),
+   647→            msg: None,
+   648→            converter: AstToScg::new(),
+   649→            inference_engine: InferenceEngine::new(),
+   650→            _verification_engine: VerificationEngine::new(),
+   651→            aggregator: InvariantAggregator::new(),
+   652→            history: Vec::new(),
+   653→            history_cursor: 0,
+   654→            profile: ReplProfile::default(),
+   655→            running: true,
+   656→            last_verification: None,
+   657→            simple_vars: HashMap::new(),
+   658→            loaded_file: None,
+   659→        }
+   660→    }
+   661→
+   662→    /// Create a REPL with verbose IVE output.
+   663→    pub fn with_verbose() -> Self {
+   664→        Self {
+   665→            inference_engine: InferenceEngine::new().with_verbose(true),
+   666→            _verification_engine: VerificationEngine::new().with_verbose(true),
+   667→            aggregator: InvariantAggregator::new().with_verbose(true),
+   668→            ..Self::new()
+   669→        }
+   670→    }
+   671→
+   672→    // -----------------------------------------------------------------------
+   673→    // Core: process a line of input
+   674→    // -----------------------------------------------------------------------
+   675→
+   676→    /// Process a single line of input and return the result.
+   677→    ///
+   678→    /// This is the primary API for programmatic use. The line may be a
+   679→    /// VUMA expression/statement or a REPL command prefixed with `:`.
+   680→    pub fn process_line(&mut self, line: &str) -> Result<ReplResult, ReplError> {
+   681→        let trimmed = line.trim();
+   682→
+   683→        // Record in history.
+   684→        if !trimmed.is_empty() {
+   685→            self.history.push(trimmed.to_string());
+   686→            self.history_cursor = self.history.len();
+   687→        }
+   688→
+   689→        // Handle empty input.
+   690→        if trimmed.is_empty() {
+   691→            return Ok(ReplResult::Ok(None));
+   692→        }
+   693→
+   694→        // Handle REPL commands.
+   695→        if trimmed.starts_with(':') {
+   696→            return self.handle_command(trimmed);
+   697→        }
+   698→
+   699→        // Try simple expression evaluation first.
+   700→        let evaluator = SimpleEvaluator::new(self.simple_vars.clone());
+   701→        if let Some(value) = evaluator.eval(trimmed) {
+   702→            self.profile.expressions_processed += 1;
+   703→            return Ok(ReplResult::Value(value.to_string()));
+   704→        }
+   705→
+   706→        // Fall through to full VUMA parsing.
+   707→        self.evaluate_vuma(trimmed)
+   708→    }
+   709→
+   710→    // -----------------------------------------------------------------------
+   711→    // VUMA expression evaluation
+   712→    // -----------------------------------------------------------------------
+   713→
+   714→    /// Evaluate a VUMA expression/statement through the full pipeline.
+   715→    fn evaluate_vuma(&mut self, input: &str) -> Result<ReplResult, ReplError> {
+   716→        // Append the input to the source buffer.
+   717→        let prev_len = self.session_source.len();
+   718→        if !self.session_source.is_empty() && !self.session_source.ends_with('\n') {
+   719→            self.session_source.push('\n');
+   720→        }
+   721→        self.session_source.push_str(input);
+   722→        if !input.ends_with(';') && !input.ends_with('}') {
+   723→            self.session_source.push(';');
+   724→        }
+   725→
+   726→        // Parse.
+   727→        let parse_start = Instant::now();
+   728→        let mut parser = Parser::new(&self.session_source);
+   729→        let result = parser.parse_program();
+   730→        if result.has_errors() {
+   731→            // Roll back the source buffer on parse error.
+   732→            let errors = result.errors.clone();
+   733→            self.session_source.truncate(prev_len);
+   734→            self.profile.parse_errors += errors.len();
+   735→            self.profile.parse_time_ms += parse_start.elapsed().as_millis() as u64;
+   736→            return Err(ReplError::ParseErrors(errors));
+   737→        }
+   738→        let program = result.unwrap();
+   739→        self.profile.parse_time_ms += parse_start.elapsed().as_millis() as u64;
+   740→
+   741→        // Build SCG.
+   742→        let scg_start = Instant::now();
+   743→        // We rebuild the SCG from scratch each time to keep it consistent
+   744→        // with the full source buffer. In a production implementation we
+   745→        // would use incremental SCG updates.
+   746→        let mut converter = AstToScg::new();
+   747→        let scg = match converter.convert(&program) {
+   748→            Ok(s) => s,
+   749→            Err(e) => {
+   750→                self.session_source.truncate(prev_len);
+   751→                self.profile.scg_time_ms += scg_start.elapsed().as_millis() as u64;
+   752→                return Err(ReplError::Parse(e));
+   753→            }
+   754→        };
+   755→        self.scg = scg;
+   756→        self.converter = converter;
+   757→        self.profile.scg_time_ms += scg_start.elapsed().as_millis() as u64;
+   758→
+   759→        // Convert to MSG.
+   760→        let msg_start = Instant::now();
+   761→        match scg_to_msg::scg_to_msg(&self.scg) {
+   762→            Ok(msg) => self.msg = Some(msg),
+   763→            Err(e) => {
+   764→                // MSG conversion failure is non-fatal for the REPL; we just
+   765→                // don't have an MSG available.
+   766→                log::warn!("MSG conversion failed: {e}");
+   767→                self.msg = None;
+   768→            }
+   769→        }
+   770→        self.profile.msg_time_ms += msg_start.elapsed().as_millis() as u64;
+   771→
+   772→        // Extract simple variable bindings for immediate evaluation.
+   773→        self.extract_simple_bindings(&program);
+   774→
+   775→        self.profile.expressions_processed += 1;
+   776→
+   777→        // Build a short description of what was added.
+   778→        let node_count = self.scg.node_count();
+   779→        let edge_count = self.scg.edge_count();
+   780→        Ok(ReplResult::Ok(Some(format!(
+   781→            "OK (SCG: {node_count} nodes, {edge_count} edges)"
+   782→        ))))
+   783→    }
+   784→
+   785→    /// Extract simple integer bindings from let statements for immediate eval.
+   786→    fn extract_simple_bindings(&mut self, program: &vuma_parser::ast::Program) {
+   787→        for item in &program.items {
+   788→            match item {
+   789→                Item::Stmt(Stmt::Let(l)) => {
+   790→                    if let Expr::Lit {
+   791→                        value: Lit::Int(n), ..
+   792→                    } = &l.value
+   793→                    {
+   794→                        self.simple_vars.insert(l.name.clone(), *n);
+   795→                    }
+   796→                }
+   797→                Item::Const(c) => {
+   798→                    if let Expr::Lit {
+   799→                        value: Lit::Int(n), ..
+   800→                    } = &c.value
+   801→                    {
+   802→                        self.simple_vars.insert(c.name.clone(), *n);
+   803→                    }
+   804→                }
+   805→                _ => {}
+   806→            }
+   807→        }
+   808→    }
+   809→
+   810→    // -----------------------------------------------------------------------
+   811→    // Command handling
+   812→    // -----------------------------------------------------------------------
+   813→
+   814→    /// Handle a REPL command (input starting with `:`).
+   815→    fn handle_command(&mut self, input: &str) -> Result<ReplResult, ReplError> {
+   816→        let parts: Vec<&str> = input.splitn(2, ' ').collect();
+   817→        let cmd = parts[0];
+   818→        let arg = parts.get(1).map(|s| s.trim()).unwrap_or("");
+   819→
+   820→        match cmd {
+   821→            ":help" => Ok(ReplResult::Ok(Some(self.help_text()))),
+   822→            ":load" => self.cmd_load(arg),
+   823→            ":type" => self.cmd_type(arg),
+   824→            ":scg" => self.cmd_scg(arg),
+   825→            ":target" => self.cmd_target(arg),
+   826→            ":verify" => self.cmd_verify(),
+   827→            ":show" => self.cmd_show(arg),
+   828→            ":compile" => self.cmd_compile(),
+   829→            ":profile" => Ok(ReplResult::Ok(Some(format!("{}", self.profile)))),
+   830→            ":history" => Ok(ReplResult::Ok(Some(self.format_history()))),
+   831→            ":reset" => self.cmd_reset(),
+   832→            ":quit" | ":q" | ":exit" => {
+   833→                self.running = false;
+   834→                Ok(ReplResult::Quit)
+   835→            }
+   836→            _ => Ok(ReplResult::Ok(Some(format!(
+   837→                "Unknown command: {cmd}. Type :help for available commands."
+   838→            )))),
+   839→        }
+   840→    }
+   841→
+   842→    /// Return the help text.
+   843→    fn help_text(&self) -> String {
+   844→        let targets = VALID_TARGETS.join(", ");
+   845→        format!(
+   846→            r#"VUMA REPL Commands:
+   847→  :help             Show this help message
+   848→  :load <file>      Load and evaluate a VUMA source file
+   849→  :type <expr>      Show the inferred type of an expression
+   850→  :scg <func>       Show the SCG for a named function
+   851→  :target <isa>     Switch compilation target
+   852→  :verify           Run IVE verification on the current SCG
+   853→  :show scg         Display the current SCG summary
+   854→  :show msg         Display the current MSG summary
+   855→  :show bd          Display behavioural descriptors for all nodes
+   856→  :compile          Compile current session to selected target
+   857→  :profile          Show profiling data
+   858→  :history          Show command history
+   859→  :reset            Reset all REPL state
+   860→  :quit             Exit the REPL
+   861→
+   862→Current target: {current_target}
+   863→Valid targets : {targets}
+   864→
+   865→Expressions:
+   866→  Enter VUMA expressions or statements to evaluate them.
+   867→  Simple arithmetic is evaluated immediately:
+   868→    > 2 + 3
+   869→    5
+   870→  Definitions persist across inputs:
+   871→    > let x = 10;
+   872→    > x + 5
+   873→    15
+   874→"#,
+   875→            current_target = self.target,
+   876→            targets = targets,
+   877→        )
+   878→    }
+   879→
+   880→    /// Handle the `:load <file>` command.
+   881→    fn cmd_load(&mut self, path: &str) -> Result<ReplResult, ReplError> {
+   882→        if path.is_empty() {
+   883→            return Ok(ReplResult::Ok(Some("Usage: :load <file>".to_string())));
+   884→        }
+   885→        self.load_file(path)
+   886→    }
+   887→
+   888→    /// Load a VUMA source file into the REPL session.
+   889→    ///
+   890→    /// This is the public API for programmatic use. The file content
+   891→    /// replaces the current session source.
+   892→    pub fn load_file(&mut self, path: &str) -> Result<ReplResult, ReplError> {
+   893→        let source = std::fs::read_to_string(path)
+   894→            .map_err(|e| ReplError::General(format!("Cannot read '{}': {}", path, e)))?;
+   895→
+   896→        self.loaded_file = Some(path.to_string());
+   897→
+   898→        // Replace the source buffer with the file content.
+   899→        self.session_source = source.clone();
+   900→
+   901→        // Parse and build SCG.
+   902→        let parse_start = Instant::now();
+   903→        let mut parser = Parser::new(&self.session_source);
+   904→        let result = parser.parse_program();
+   905→        if result.has_errors() {
+   906→            let errors = result.errors.clone();
+   907→            self.profile.parse_errors += errors.len();
+   908→            self.profile.parse_time_ms += parse_start.elapsed().as_millis() as u64;
+   909→            return Err(ReplError::ParseErrors(errors));
+   910→        }
+   911→        let program = result.unwrap();
+   912→        self.profile.parse_time_ms += parse_start.elapsed().as_millis() as u64;
+   913→
+   914→        // Build SCG.
+   915→        let scg_start = Instant::now();
+   916→        let mut converter = AstToScg::new();
+   917→        let scg = converter.convert(&program).map_err(|e| {
+   918→            self.profile.scg_time_ms += scg_start.elapsed().as_millis() as u64;
+   919→            ReplError::Parse(e)
+   920→        })?;
+   921→        self.scg = scg;
+   922→        self.converter = converter;
+   923→        self.profile.scg_time_ms += scg_start.elapsed().as_millis() as u64;
+   924→
+   925→        // Convert to MSG.
+   926→        let msg_start = Instant::now();
+   927→        match scg_to_msg::scg_to_msg(&self.scg) {
+   928→            Ok(msg) => self.msg = Some(msg),
+   929→            Err(e) => {
+   930→                log::warn!("MSG conversion failed: {e}");
+   931→                self.msg = None;
+   932→            }
+   933→        }
+   934→        self.profile.msg_time_ms += msg_start.elapsed().as_millis() as u64;
+   935→
+   936→        // Extract simple bindings.
+   937→        self.extract_simple_bindings(&program);
+   938→
+   939→        self.profile.expressions_processed += 1;
+   940→
+   941→        Ok(ReplResult::Ok(Some(format!(
+   942→            "Loaded '{}' (SCG: {} nodes, {} edges)",
+   943→            path,
+   944→            self.scg.node_count(),
+   945→            self.scg.edge_count()
+   946→        ))))
+   947→    }
+   948→
+   949→    /// Handle the `:verify` command.
+   950→    fn cmd_verify(&mut self) -> Result<ReplResult, ReplError> {
+   951→        let verify_start = Instant::now();
+   952→
+   953→        // Create verification input from the current SCG.
+   954→        let input = VerificationInput::from_scg(self.scg.clone());
+   955→
+   956→        let result = self.aggregator.verify_all(&input);
+   957→        self.profile.verify_time_ms += verify_start.elapsed().as_millis() as u64;
+   958→        self.profile.verification_runs += 1;
+   959→
+   960→        self.last_verification = Some(result.clone());
+   961→
+   962→        Ok(ReplResult::Verification(result))
+   963→    }
+   964→
+   965→    /// Handle the `:show` command.
+   966→    fn cmd_show(&mut self, what: &str) -> Result<ReplResult, ReplError> {
+   967→        match what {
+   968→            "scg" => Ok(ReplResult::Ok(Some(format_scg_summary(&self.scg)))),
+   969→            "msg" => match &self.msg {
+   970→                Some(msg) => Ok(ReplResult::Ok(Some(format!("{msg}")))),
+   971→                None => Ok(ReplResult::Ok(Some(
+   972→                    "No MSG available. Enter some VUMA code first.".to_string(),
+   973→                ))),
+   974→            },
+   975→            "bd" => Ok(ReplResult::Ok(Some(format_bd_display(
+   976→                &self.scg,
+   977→                &self.inference_engine,
+   978→            )))),
+   979→            _ => Ok(ReplResult::Ok(Some(format!(
+   980→                "Unknown show target: '{what}'. Use :show scg, :show msg, or :show bd"
+   981→            )))),
+   982→        }
+   983→    }
+   984→
+   985→    /// Handle the `:compile` command — full pipeline to the current target.
+   986→    fn cmd_compile(&mut self) -> Result<ReplResult, ReplError> {
+   987→        let result = self.compile_session()?;
+   988→        Ok(result)
+   989→    }
+   990→
+   991→    /// Compile the current session to the selected target.
+   992→    ///
+   993→    /// This is the public API for programmatic use. It runs the full
+   994→    /// compilation pipeline on the accumulated session source and
+   995→    /// returns a [`ReplResult::Compiled`] on success.
+   996→    ///
+   997→    /// The compilation uses the current [`target`](VumaRepl::target)
+   998→    /// ISA to select the codegen backend.
+   999→    pub fn compile_session(&self) -> Result<ReplResult, ReplError> {
+  1000→        if self.session_source.is_empty() {
+  1001→            return Ok(ReplResult::Ok(Some(
+  1002→                "No source to compile. Enter some VUMA code first.".to_string(),
+  1003→            )));
+  1004→        }
+  1005→
+  1006→        // Use the main compilation pipeline from the vuma crate.
+  1007→        // We map the target string to a CompileTarget.
+  1008→        use crate::scg_to_msg;
+  1009→
+  1010→        // Parse.
+  1011→        let parse_start = Instant::now();
+  1012→        let mut parser = Parser::new(&self.session_source);
+  1013→        let result = parser.parse_program();
+  1014→        if result.has_errors() {
+  1015→            return Err(ReplError::ParseErrors(result.errors.clone()));
+  1016→        }
+  1017→        let program = result.unwrap();
+  1018→        let parse_ms = parse_start.elapsed().as_millis() as u64;
+  1019→
+  1020→        // Build SCG.
+  1021→        let scg_start = Instant::now();
+  1022→        let mut converter = AstToScg::new();
+  1023→        let scg = converter.convert(&program).map_err(ReplError::Parse)?;
+  1024→        let scg_ms = scg_start.elapsed().as_millis() as u64;
+  1025→
+  1026→        let mut output = String::new();
+  1027→        output.push_str(&format!("Source: {} bytes\n", self.session_source.len()));
+  1028→        output.push_str(&format!("Parse: {}ms\n", parse_ms));
+  1029→        output.push_str(&format!(
+  1030→            "SCG: {} nodes, {} edges, {} regions\n",
+  1031→            scg.node_count(),
+  1032→            scg.edge_count(),
+  1033→            scg.region_count()
+  1034→        ));
+  1035→        output.push_str(&format!("SCG build: {}ms\n", scg_ms));
+  1036→
+  1037→        // Convert to MSG (best-effort).
+  1038→        let msg_start = Instant::now();
+  1039→        match scg_to_msg::scg_to_msg(&scg) {
+  1040→            Ok(msg) => {
+  1041→                output.push_str(&format!("MSG: {}\n", msg));
+  1042→            }
+  1043→            Err(e) => {
+  1044→                output.push_str(&format!("MSG conversion failed: {e}\n"));
+  1045→            }
+  1046→        }
+  1047→        let msg_ms = msg_start.elapsed().as_millis() as u64;
+  1048→        output.push_str(&format!("MSG build: {}ms\n", msg_ms));
+  1049→
+  1050→        // Verify.
+  1051→        let verify_start = Instant::now();
+  1052→        let input = VerificationInput::from_scg(scg.clone());
+  1053→        let result = self.aggregator.verify_all(&input);
+  1054→        let verify_ms = verify_start.elapsed().as_millis() as u64;
+  1055→        output.push_str(&format!(
+  1056→            "Verification: {} ({}ms)\n",
+  1057→            result.overall, verify_ms
+  1058→        ));
+  1059→
+  1060→        // Report target selection.
+  1061→        output.push_str(&format!("Target: {}\n", self.target));
+  1062→        output.push_str(&format!(
+  1063→            "Compiled session: {} bytes, {} SCG nodes\n",
+  1064→            self.session_source.len(),
+  1065→            scg.node_count()
+  1066→        ));
+  1067→
+  1068→        // NOTE: Full code emission requires vuma-codegen which is not a
+  1069→        // dependency of vuma-core. The full `:compile` with binary output
+  1070→        // is available when running `vuma --repl` which uses the root crate.
+  1071→        // Here we provide the analysis pipeline results.
+  1072→        Ok(ReplResult::Ok(Some(output)))
+  1073→    }
+  1074→
+  1075→    /// Handle the `:reset` command.
+  1076→    fn cmd_reset(&mut self) -> Result<ReplResult, ReplError> {
+  1077→        self.session_source.clear();
+  1078→        self.target = "aarch64".to_string();
+  1079→        self.scg = SCG::new();
+  1080→        self.msg = None;
+  1081→        self.converter = AstToScg::new();
+  1082→        self.simple_vars.clear();
+  1083→        self.last_verification = None;
+  1084→        self.loaded_file = None;
+  1085→        // Keep history and profile.
+  1086→        Ok(ReplResult::Ok(Some("REPL state reset.".to_string())))
+  1087→    }
+  1088→
+  1089→    // -----------------------------------------------------------------------
+  1090→    // :type command — type query
+  1091→    // -----------------------------------------------------------------------
+  1092→
+  1093→    /// Handle the `:type <expr>` command.
+  1094→    ///
+  1095→    /// Attempts to parse the given expression and show its inferred type.
+  1096→    /// For simple expressions (integer literals, variables), the type is
+  1097→    /// determined from the literal or from BD inference on the SCG.
+  1098→    fn cmd_type(&mut self, expr: &str) -> Result<ReplResult, ReplError> {
+  1099→        if expr.is_empty() {
+  1100→            return Ok(ReplResult::Ok(Some("Usage: :type <expr>".to_string())));
+  1101→        }
+  1102→
+  1103→        // Strategy 1: Try the simple evaluator for known variables.
+  1104→        let evaluator = SimpleEvaluator::new(self.simple_vars.clone());
+  1105→        if let Some(_value) = evaluator.eval(expr) {
+  1106→            return Ok(ReplResult::Ok(Some(format!(
+  1107→                "{} : i64",
+  1108→                expr.trim()
+  1109→            ))));
+  1110→        }
+  1111→
+  1112→        // Strategy 2: Try to parse as a VUMA expression wrapped in a function.
+  1113→        let wrapped = format!("fn _type_query() {{ let _result = {}; }}", expr.trim());
+  1114→        let mut parser = Parser::new(&wrapped);
+  1115→        let result = parser.parse_program();
+  1116→        if !result.has_errors() {
+  1117→            let program = result.unwrap();
+  1118→            // Look for the type annotation or infer from the AST.
+  1119→            for item in &program.items {
+  1120→                if let Item::FnDef(f) = item {
+  1121→                    for stmt in &f.body.statements {
+  1122→                        if let Stmt::Let(l) = stmt {
+  1123→                            if l.name == "_result" {
+  1124→                                if let Some(ty) = &l.ty {
+  1125→                                    return Ok(ReplResult::Ok(Some(format!(
+  1126→                                        "{} : {}",
+  1127→                                        expr.trim(),
+  1128→                                        ty
+  1129→                                    ))));
+  1130→                                }
+  1131→                                // No explicit type annotation; try BD inference.
+  1132→                                let scg_result = self.infer_type_from_scg(expr.trim());
+  1133→                                return Ok(ReplResult::Ok(Some(scg_result)));
+  1134→                            }
+  1135→                        }
+  1136→                    }
+  1137→                }
+  1138→            }
+  1139→        }
+  1140→
+  1141→        // Strategy 3: Parse as a standalone expression and infer from literals.
+  1142→        let trimmed = expr.trim();
+  1143→        // Check if it's a simple integer literal.
+  1144→        if trimmed.parse::<i64>().is_ok() {
+  1145→            return Ok(ReplResult::Ok(Some(format!("{} : i64", trimmed))));
+  1146→        }
+  1147→
+  1148→        // Fallback: try to see if it's a known variable name.
+  1149→        if let Some(_val) = self.simple_vars.get(trimmed) {
+  1150→            return Ok(ReplResult::Ok(Some(format!("{} : i64", trimmed))));
+  1151→        }
+  1152→
+  1153→        Ok(ReplResult::Ok(Some(format!(
+  1154→            "Cannot determine type of '{}'. Try defining it first.",
+  1155→            expr.trim()
+  1156→        ))))
+  1157→    }
+  1158→
+  1159→    /// Try to infer the type of an expression using BD inference on the SCG.
+  1160→    fn infer_type_from_scg(&self, expr: &str) -> String {
+  1161→        // If we have an SCG with nodes, try to find a matching node.
+  1162→        if self.scg.node_count() > 0 {
+  1163→            for node in self.scg.nodes() {
+  1164→                // Match by payload content.
+  1165→                let matches = match &node.payload {
+  1166→                    vuma_scg::NodePayload::Computation(c) => c.operation.contains(expr),
+  1167→                    vuma_scg::NodePayload::Allocation(a) => a.type_name.as_ref().map_or(false, |t| t.contains(expr)),
+  1168→                    _ => false,
+  1169→                };
+  1170→                if matches {
+  1171→                    let bd = self.inference_engine.infer_bd(&self.scg, node.id);
+  1172→                    if let Ok(bd) = bd {
+  1173→                        return format!("{} : {}", expr, bd.repd);
+  1174→                    }
+  1175→                }
+  1176→            }
+  1177→        }
+  1178→        format!("{} : <unknown>", expr)
+  1179→    }
+  1180→
+  1181→    // -----------------------------------------------------------------------
+  1182→    // :scg command — SCG visualization for a function
+  1183→    // -----------------------------------------------------------------------
+  1184→
+  1185→    /// Handle the `:scg <func_name>` command.
+  1186→    ///
+  1187→    /// Shows the SCG nodes and edges associated with the named function.
+  1188→    fn cmd_scg(&mut self, func_name: &str) -> Result<ReplResult, ReplError> {
+  1189→        if func_name.is_empty() {
+  1190→            return Ok(ReplResult::Ok(Some(
+  1191→                "Usage: :scg <func_name>".to_string(),
+  1192→            )));
+  1193→        }
+  1194→
+  1195→        if self.scg.node_count() == 0 {
+  1196→            return Ok(ReplResult::Ok(Some(
+  1197→                "No SCG available. Enter some VUMA code first.".to_string(),
+  1198→            )));
+  1199→        }
+  1200→
+  1201→        // Search SCG for nodes belonging to the named function.
+  1202→        let mut found_nodes = Vec::new();
+  1203→        let mut found_edges = Vec::new();
+  1204→
+  1205→        for node in self.scg.nodes() {
+  1206→            // Match by payload content — look for the function name in
+  1207→            // the node's payload (operation, type_name, etc.).
+  1208→            let matches = match &node.payload {
+  1209→                vuma_scg::NodePayload::Computation(c) => c.operation.contains(func_name),
+  1210→                vuma_scg::NodePayload::Allocation(a) => a.type_name.as_ref().map_or(false, |t| t.contains(func_name)),
+  1211→                _ => false,
+  1212→            };
+  1213→            if matches {
+  1214→                found_nodes.push(node.clone());
+  1215→            }
+  1216→        }
+  1217→
+  1218→        if found_nodes.is_empty() {
+  1219→            // List available regions as hints.
+  1220→            let region_list: Vec<String> = self.scg.regions().map(|r| format!("{}", r.id)).collect();
+  1221→            return Ok(ReplResult::Ok(Some(format!(
+  1222→                "Function '{}' not found in current SCG.\n\
+  1223→                 Available regions: {}",
+  1224→                func_name,
+  1225→                region_list.join(", ")
+  1226→            ))));
+  1227→        }
+  1228→
+  1229→        // Collect edges connected to found nodes.
+  1230→        let node_ids: std::collections::HashSet<_> =
+  1231→            found_nodes.iter().map(|n| n.id).collect();
+  1232→        for edge in self.scg.edges() {
+  1233→            if node_ids.contains(&edge.source) || node_ids.contains(&edge.target) {
+  1234→                found_edges.push(edge.clone());
+  1235→            }
+  1236→        }
+  1237→
+  1238→        let mut output = String::new();
+  1239→        output.push_str(&format!(
+  1240→            "SCG for '{}' ({} nodes, {} edges):\n",
+  1241→            func_name,
+  1242→            found_nodes.len(),
+  1243→            found_edges.len()
+  1244→        ));
+  1245→
+  1246→        // Display nodes.
+  1247→        output.push_str("  Nodes:\n");
+  1248→        for node in &found_nodes {
+  1249→            let bd_str = self
+  1250→                .inference_engine
+  1251→                .infer_bd(&self.scg, node.id)
+  1252→                .map(|bd| format!(" — {}", bd.repd))
+  1253→                .unwrap_or_default();
+  1254→            output.push_str(&format!(
+  1255→                "    [{:?}] {} ({}){}\n",
+  1256→                node.node_type, node_label(&node), node.id, bd_str
+  1257→            ));
+  1258→        }
+  1259→
+  1260→        // Display edges.
+  1261→        if !found_edges.is_empty() {
+  1262→            output.push_str("  Edges:\n");
+  1263→            for edge in &found_edges {
+  1264→                output.push_str(&format!(
+  1265→                    "    {} → {} [{:?}]\n",
+  1266→                    edge.source, edge.target, edge.kind
+  1267→                ));
+  1268→            }
+  1269→        }
+  1270→
+  1271→        Ok(ReplResult::Ok(Some(output)))
+  1272→    }
+  1273→
+  1274→    // -----------------------------------------------------------------------
+  1275→    // :target command — switch compilation target
+  1276→    // -----------------------------------------------------------------------
+  1277→
+  1278→    /// Handle the `:target <isa>` command.
+  1279→    ///
+  1280→    /// Switches the compilation target to the specified ISA.
+  1281→    fn cmd_target(&mut self, isa: &str) -> Result<ReplResult, ReplError> {
+  1282→        if isa.is_empty() {
+  1283→            return Ok(ReplResult::Ok(Some(format!(
+  1284→                "Current target: {}\nUsage: :target <isa>\nValid targets: {}",
+  1285→                self.target,
+  1286→                VALID_TARGETS.join(", ")
+  1287→            ))));
+  1288→        }
+  1289→
+  1290→        let isa_lower = isa.to_lowercase();
+  1291→        if VALID_TARGETS.contains(&isa_lower.as_str()) {
+  1292→            self.target = isa_lower;
+  1293→            Ok(ReplResult::Ok(Some(format!(
+  1294→                "Target set to {}",
+  1295→                self.target
+  1296→            ))))
+  1297→        } else {
+  1298→            Ok(ReplResult::Ok(Some(format!(
+  1299→                "Unknown target '{}'. Valid targets: {}",
+  1300→                isa,
+  1301→                VALID_TARGETS.join(", ")
+  1302→            ))))
+  1303→        }
+  1304→    }
+  1305→
+  1306→    /// Format the history list.
+  1307→    fn format_history(&self) -> String {
+  1308→        if self.history.is_empty() {
+  1309→            return "(no history)".to_string();
+  1310→        }
+  1311→        let mut result = String::new();
+  1312→        for (i, entry) in self.history.iter().enumerate() {
+  1313→            result.push_str(&format!("{:4}: {}\n", i + 1, entry));
+  1314→        }
+  1315→        result
+  1316→    }
+  1317→
+  1318→    // -----------------------------------------------------------------------
+  1319→    // History navigation
+  1320→    // -----------------------------------------------------------------------
+  1321→
+  1322→    /// Move up in history and return the previous entry, if any.
+  1323→    pub fn history_up(&mut self) -> Option<&str> {
+  1324→        if self.history_cursor > 0 {
+  1325→            self.history_cursor -= 1;
+  1326→            Some(&self.history[self.history_cursor])
+  1327→        } else {
+  1328→            None
+  1329→        }
+  1330→    }
+  1331→
+  1332→    /// Move down in history and return the next entry, if any.
+  1333→    pub fn history_down(&mut self) -> Option<&str> {
+  1334→        if self.history_cursor < self.history.len() - 1 {
+  1335→            self.history_cursor += 1;
+  1336→            Some(&self.history[self.history_cursor])
+  1337→        } else {
+  1338→            self.history_cursor = self.history.len();
+  1339→            None
+  1340→        }
+  1341→    }
+  1342→
+  1343→    /// Return the current history cursor position.
+  1344→    pub fn history_cursor(&self) -> usize {
+  1345→        self.history_cursor
+  1346→    }
+  1347→
+  1348→    /// Return the number of entries in history.
+  1349→    pub fn history_len(&self) -> usize {
+  1350→        self.history.len()
+  1351→    }
+  1352→
+  1353→    // -----------------------------------------------------------------------
+  1354→    // Accessors
+  1355→    // -----------------------------------------------------------------------
+  1356→
+  1357→    /// Return a reference to the current SCG.
+  1358→    pub fn scg(&self) -> &SCG {
+  1359→        &self.scg
+  1360→    }
+  1361→
+  1362→    /// Return a reference to the current MSG, if available.
+  1363→    pub fn msg(&self) -> Option<&MSG> {
+  1364→        self.msg.as_ref()
+  1365→    }
+  1366→
+  1367→    /// Return a reference to the profiling data.
+  1368→    pub fn profile(&self) -> &ReplProfile {
+  1369→        &self.profile
+  1370→    }
+  1371→
+  1372→    /// Return the last verification result, if any.
+  1373→    pub fn last_verification(&self) -> Option<&AggregatedResult> {
+  1374→        self.last_verification.as_ref()
+  1375→    }
+  1376→
+  1377→    /// Return the accumulated source buffer.
+  1378→    pub fn session_source(&self) -> &str {
+  1379→        &self.session_source
+  1380→    }
+  1381→
+  1382→    /// Return the current compilation target.
+  1383→    pub fn target(&self) -> &str {
+  1384→        &self.target
+  1385→    }
+  1386→
+  1387→    /// Return whether the REPL is still running (not quit).
+  1388→    pub fn is_running(&self) -> bool {
+  1389→        self.running
+  1390→    }
+  1391→
+  1392→    // -----------------------------------------------------------------------
+  1393→    // Interactive loop
+  1394→    // -----------------------------------------------------------------------
+  1395→
+  1396→    /// Run the interactive REPL loop.
+  1397→    ///
+  1398→    /// Reads lines from stdin, processes them, and prints results.
+  1399→    /// Supports basic up/down arrow key history navigation via ANSI
+  1400→    /// escape sequences.
+  1401→    pub fn run(&mut self) -> Result<(), ReplError> {
+  1402→        println!("VUMA REPL v0.1.0");
+  1403→        println!("Type :help for available commands.\n");
+  1404→
+  1405→        while self.running {
+  1406→            print!("vuma> ");
+  1407→            io::stdout().flush().map_err(ReplError::Io)?;
+  1408→
+  1409→            let mut input = String::new();
+  1410→            match io::stdin().read_line(&mut input) {
+  1411→                Ok(0) => {
+  1412→                    // EOF.
+  1413→                    self.running = false;
+  1414→                    println!("Goodbye.");
+  1415→                    break;
+  1416→                }
+  1417→                Ok(_) => {}
+  1418→                Err(e) => return Err(ReplError::Io(e)),
+  1419→            }
+  1420→
+  1421→            let line = input.trim_end();
+  1422→
+  1423→            match self.process_line(line) {
+  1424→                Ok(ReplResult::Quit) => {
+  1425→                    println!("Goodbye.");
+  1426→                    break;
+  1427→                }
+  1428→                Ok(result) => {
+  1429→                    if !result.to_string().is_empty() {
+  1430→                        println!("{}", result);
+  1431→                    }
+  1432→                }
+  1433→                Err(e) => match &e {
+  1434→                    ReplError::Parse(pe) => {
+  1435→                        let ctx = format_error_with_context(
+  1436→                            &self.session_source,
+  1437→                            &pe.span,
+  1438→                            &pe.to_string(),
+  1439→                        );
+  1440→                        eprintln!("{ctx}");
+  1441→                    }
+  1442→                    ReplError::ParseErrors(errors) => {
+  1443→                        for pe in errors {
+  1444→                            let ctx = format_error_with_context(
+  1445→                                &self.session_source,
+  1446→                                &pe.span,
+  1447→                                &pe.to_string(),
+  1448→                            );
+  1449→                            eprintln!("{ctx}");
+  1450→                        }
+  1451→                    }
+  1452→                    _ => eprintln!("Error: {e}"),
+  1453→                },
+  1454→            }
+  1455→        }
+  1456→
+  1457→        Ok(())
+  1458→    }
+  1459→}
+  1460→
+  1461→impl Default for VumaRepl {
+  1462→    fn default() -> Self {
+  1463→        Self::new()
+  1464→    }
+  1465→}
+  1466→
+  1467→// ---------------------------------------------------------------------------
+  1468→// AST Type Formatting
+  1469→// ---------------------------------------------------------------------------
+  1470→
+  1471→/// Format an AST [`Type`] into a human-readable string.
+  1472→fn format_ast_type(ty: &AstType) -> String {
+  1473→    // Delegate to the Type's Display impl which already handles
+  1474→    // all variants correctly.
+  1475→    format!("{}", ty)
+  1476→}
+  1477→
+  1478→// ---------------------------------------------------------------------------
+  1479→// Tests
+  1480→// ---------------------------------------------------------------------------
+  1481→
+  1482→#[cfg(test)]
+  1483→mod tests {
+  1484→    use super::*;
+  1485→
+  1486→    // -----------------------------------------------------------------------
+  1487→    // Test 1: REPL creation
+  1488→    // -----------------------------------------------------------------------
+  1489→
+  1490→    #[test]
+  1491→    fn test_repl_creation() {
+  1492→        let repl = VumaRepl::new();
+  1493→        assert!(repl.session_source.is_empty());
+  1494→        assert_eq!(repl.scg.node_count(), 0);
+  1495→        assert!(repl.msg.is_none());
+  1496→        assert!(repl.is_running());
+  1497→        assert!(repl.profile.expressions_processed == 0);
+  1498→    }
+  1499→
+  1500→    // -----------------------------------------------------------------------
+  1501→    // Test 2: Simple arithmetic evaluation
+  1502→    // -----------------------------------------------------------------------
+  1503→
+  1504→    #[test]
+  1505→    fn test_simple_arithmetic() {
+  1506→        let mut repl = VumaRepl::new();
+  1507→
+  1508→        let result = repl.process_line("2 + 3").unwrap();
+  1509→        assert!(matches!(result, ReplResult::Value(ref v) if v == "5"));
+  1510→
+  1511→        let result = repl.process_line("10 * 4").unwrap();
+  1512→        assert!(matches!(result, ReplResult::Value(ref v) if v == "40"));
+  1513→
+  1514→        let result = repl.process_line("100 / 5").unwrap();
+  1515→        assert!(matches!(result, ReplResult::Value(ref v) if v == "20"));
+  1516→    }
+  1517→
+  1518→    // -----------------------------------------------------------------------
+  1519→    // Test 3: VUMA expression parsing and SCG building
+  1520→    // -----------------------------------------------------------------------
+  1521→
+  1522→    #[test]
+  1523→    fn test_vuma_expression_builds_scg() {
+  1524→        let mut repl = VumaRepl::new();
+  1525→
+  1526→        let result = repl.process_line("let x = 42;").unwrap();
+  1527→        // Should be Ok with SCG info.
+  1528→        if let ReplResult::Ok(Some(msg)) = result {
+  1529→            assert!(
+  1530→                msg.contains("SCG:"),
+  1531→                "Expected SCG info in output, got: {msg}"
+  1532→            );
+  1533→        } else {
+  1534→            panic!("Expected Ok with SCG info, got: {result:?}");
+  1535→        }
+  1536→
+  1537→        assert!(
+  1538→            repl.scg.node_count() > 0,
+  1539→            "SCG should have nodes after evaluating an expression"
+  1540→        );
+  1541→    }
+  1542→
+  1543→    // -----------------------------------------------------------------------
+  1544→    // Test 4: Variable persistence across expressions
+  1545→    // -----------------------------------------------------------------------
+  1546→
+  1547→    #[test]
+  1548→    fn test_variable_persistence() {
+  1549→        let mut repl = VumaRepl::new();
+  1550→
+  1551→        // Define a variable.
+  1552→        repl.process_line("let x = 10;").unwrap();
+  1553→
+  1554→        // Use it in a simple expression.
+  1555→        let result = repl.process_line("x + 5").unwrap();
+  1556→        assert!(
+  1557→            matches!(result, ReplResult::Value(ref v) if v == "15"),
+  1558→            "Expected '15', got: {result:?}"
+  1559→        );
+  1560→    }
+  1561→
+  1562→    // -----------------------------------------------------------------------
+  1563→    // Test 5: :help command
+  1564→    // -----------------------------------------------------------------------
+  1565→
+  1566→    #[test]
+  1567→    fn test_help_command() {
+  1568→        let mut repl = VumaRepl::new();
+  1569→
+  1570→        let result = repl.process_line(":help").unwrap();
+  1571→        if let ReplResult::Ok(Some(text)) = result {
+  1572→            assert!(text.contains(":verify"), "Help should mention :verify");
+  1573→            assert!(text.contains(":show"), "Help should mention :show");
+  1574→            assert!(text.contains(":quit"), "Help should mention :quit");
+  1575→        } else {
+  1576→            panic!("Expected Ok with help text, got: {result:?}");
+  1577→        }
+  1578→    }
+  1579→
+  1580→    // -----------------------------------------------------------------------
+  1581→    // Test 6: :show scg command
+  1582→    // -----------------------------------------------------------------------
+  1583→
+  1584→    #[test]
+  1585→    fn test_show_scg_command() {
+  1586→        let mut repl = VumaRepl::new();
+  1587→
+  1588→        // First add some content.
+  1589→        repl.process_line("let x = 42;").unwrap();
+  1590→
+  1591→        let result = repl.process_line(":show scg").unwrap();
+  1592→        if let ReplResult::Ok(Some(text)) = result {
+  1593→            assert!(
+  1594→                text.contains("SCG Summary"),
+  1595→                "Should show SCG summary, got: {text}"
+  1596→            );
+  1597→            assert!(text.contains("nodes"), "Should mention nodes");
+  1598→        } else {
+  1599→            panic!("Expected Ok with SCG summary, got: {result:?}");
+  1600→        }
+  1601→    }
+  1602→
+  1603→    // -----------------------------------------------------------------------
+  1604→    // Test 7: :verify command
+  1605→    // -----------------------------------------------------------------------
+  1606→
+  1607→    #[test]
+  1608→    fn test_verify_command() {
+  1609→        let mut repl = VumaRepl::new();
+  1610→
+  1611→        // Add some code.
+  1612→        repl.process_line("let x = 42;").unwrap();
+  1613→
+  1614→        let result = repl.process_line(":verify").unwrap();
+  1615→        assert!(
+  1616→            matches!(result, ReplResult::Verification(_)),
+  1617→            "Expected Verification result, got: {result:?}"
+  1618→        );
+  1619→
+  1620→        assert!(
+  1621→            repl.last_verification.is_some(),
+  1622→            "Should have a last verification result"
+  1623→        );
+  1624→        assert!(
+  1625→            repl.profile.verification_runs == 1,
+  1626→            "Should have 1 verification run"
+  1627→        );
+  1628→    }
+  1629→
+  1630→    // -----------------------------------------------------------------------
+  1631→    // Test 8: :quit command
+  1632→    // -----------------------------------------------------------------------
+  1633→
+  1634→    #[test]
+  1635→    fn test_quit_command() {
+  1636→        let mut repl = VumaRepl::new();
+  1637→        assert!(repl.is_running());
+  1638→
+  1639→        let result = repl.process_line(":quit").unwrap();
+  1640→        assert!(matches!(result, ReplResult::Quit));
+  1641→        assert!(!repl.is_running());
+  1642→    }
+  1643→
+  1644→    // -----------------------------------------------------------------------
+  1645→    // Test 9: :reset command
+  1646→    // -----------------------------------------------------------------------
+  1647→
+  1648→    #[test]
+  1649→    fn test_reset_command() {
+  1650→        let mut repl = VumaRepl::new();
+  1651→
+  1652→        repl.process_line("let x = 42;").unwrap();
+  1653→        assert!(repl.scg.node_count() > 0);
+  1654→
+  1655→        let result = repl.process_line(":reset").unwrap();
+  1656→        if let ReplResult::Ok(Some(msg)) = result {
+  1657→            assert!(msg.contains("reset"), "Should mention reset");
+  1658→        }
+  1659→
+  1660→        assert_eq!(repl.scg.node_count(), 0, "SCG should be empty after reset");
+  1661→        assert!(
+  1662→            repl.session_source.is_empty(),
+  1663→            "Source buffer should be empty after reset"
+  1664→        );
+  1665→    }
+  1666→
+  1667→    // -----------------------------------------------------------------------
+  1668→    // Test 10: :profile command
+  1669→    // -----------------------------------------------------------------------
+  1670→
+  1671→    #[test]
+  1672→    fn test_profile_command() {
+  1673→        let mut repl = VumaRepl::new();
+  1674→
+  1675→        repl.process_line("let x = 42;").unwrap();
+  1676→        repl.process_line(":verify").unwrap();
+  1677→
+  1678→        let result = repl.process_line(":profile").unwrap();
+  1679→        if let ReplResult::Ok(Some(text)) = result {
+  1680→            assert!(text.contains("REPL Profile"), "Should show profile header");
+  1681→            assert!(
+  1682→                text.contains("Expressions processed"),
+  1683→                "Should mention expressions"
+  1684→            );
+  1685→            assert!(
+  1686→                text.contains("Verification runs"),
+  1687→                "Should mention verification"
+  1688→            );
+  1689→        }
+  1690→    }
+  1691→
+  1692→    // -----------------------------------------------------------------------
+  1693→    // Test 11: History
+  1694→    // -----------------------------------------------------------------------
+  1695→
+  1696→    #[test]
+  1697→    fn test_history() {
+  1698→        let mut repl = VumaRepl::new();
+  1699→
+  1700→        repl.process_line("let x = 1;").unwrap();
+  1701→        repl.process_line("let y = 2;").unwrap();
+  1702→        repl.process_line(":help").unwrap();
+  1703→
+  1704→        assert_eq!(repl.history_len(), 3);
+  1705→
+  1706→        // Navigate up.
+  1707→        let prev = repl.history_up().unwrap();
+  1708→        assert_eq!(prev, ":help");
+  1709→
+  1710→        let prev2 = repl.history_up().unwrap();
+  1711→        assert_eq!(prev2, "let y = 2;");
+  1712→
+  1713→        // Navigate down.
+  1714→        let next = repl.history_down().unwrap();
+  1715→        assert_eq!(next, ":help");
+  1716→    }
+  1717→
+  1718→    // -----------------------------------------------------------------------
+  1719→    // Test 12: :show msg command
+  1720→    // -----------------------------------------------------------------------
+  1721→
+  1722→    #[test]
+  1723→    fn test_show_msg_command() {
+  1724→        let mut repl = VumaRepl::new();
+  1725→
+  1726→        // Without any code, MSG should be unavailable.
+  1727→        let result = repl.process_line(":show msg").unwrap();
+  1728→        if let ReplResult::Ok(Some(text)) = result {
+  1729→            assert!(
+  1730→                text.contains("No MSG"),
+  1731→                "Should say no MSG available, got: {text}"
+  1732→            );
+  1733→        }
+  1734→    }
+  1735→
+  1736→    // -----------------------------------------------------------------------
+  1737→    // Test 13: :compile command
+  1738→    // -----------------------------------------------------------------------
+  1739→
+  1740→    #[test]
+  1741→    fn test_compile_command() {
+  1742→        let mut repl = VumaRepl::new();
+  1743→
+  1744→        // Without any source, should report no source.
+  1745→        let result = repl.process_line(":compile").unwrap();
+  1746→        if let ReplResult::Ok(Some(text)) = result {
+  1747→            assert!(
+  1748→                text.contains("No source"),
+  1749→                "Should say no source, got: {text}"
+  1750→            );
+  1751→        }
+  1752→
+  1753→        // Add source and compile.
+  1754→        repl.process_line("let x = 42;").unwrap();
+  1755→        let result = repl.process_line(":compile").unwrap();
+  1756→        if let ReplResult::Ok(Some(text)) = result {
+  1757→            assert!(text.contains("SCG:"), "Should mention SCG, got: {text}");
+  1758→            assert!(
+  1759→                text.contains("Verification:"),
+  1760→                "Should mention verification, got: {text}"
+  1761→            );
+  1762→        }
+  1763→    }
+  1764→
+  1765→    // -----------------------------------------------------------------------
+  1766→    // Test 14: Error display with source context
+  1767→    // -----------------------------------------------------------------------
+  1768→
+  1769→    #[test]
+  1770→    fn test_error_with_source_context() {
+  1771→        let source = "let x = ;";
+  1772→        let span = Span { start: 8, end: 9 };
+  1773→        let formatted = format_error_with_context(source, &span, "expected expression");
+  1774→        assert!(formatted.contains("error:"), "Should contain error label");
+  1775→        assert!(
+  1776→            formatted.contains("expected expression"),
+  1777→            "Should contain error message"
+  1778→        );
+  1779→        assert!(formatted.contains("^"), "Should contain caret");
+  1780→    }
+  1781→
+  1782→    // -----------------------------------------------------------------------
+  1783→    // Test 15: :show bd command
+  1784→    // -----------------------------------------------------------------------
+  1785→
+  1786→    #[test]
+  1787→    fn test_show_bd_command() {
+  1788→        let mut repl = VumaRepl::new();
+  1789→
+  1790→        repl.process_line("let x = 42;").unwrap();
+  1791→
+  1792→        let result = repl.process_line(":show bd").unwrap();
+  1793→        if let ReplResult::Ok(Some(text)) = result {
+  1794→            assert!(
+  1795→                text.contains("Behavioural Descriptors"),
+  1796→                "Should show BD header"
+  1797→            );
+  1798→        }
+  1799→    }
+  1800→
+  1801→    // -----------------------------------------------------------------------
+  1802→    // Test 16: Unknown command
+  1803→    // -----------------------------------------------------------------------
+  1804→
+  1805→    #[test]
+  1806→    fn test_unknown_command() {
+  1807→        let mut repl = VumaRepl::new();
+  1808→        let result = repl.process_line(":foobar").unwrap();
+  1809→        if let ReplResult::Ok(Some(text)) = result {
+  1810→            assert!(
+  1811→                text.contains("Unknown command"),
+  1812→                "Should report unknown command"
+  1813→            );
+  1814→        }
+  1815→    }
+  1816→
+  1817→    // -----------------------------------------------------------------------
+  1818→    // Test 17: Simple evaluator edge cases
+  1819→    // -----------------------------------------------------------------------
+  1820→
+  1821→    #[test]
+  1822→    fn test_simple_evaluator_literals_and_vars() {
+  1823→        let mut vars = HashMap::new();
+  1824→        vars.insert("x".to_string(), 42);
+  1825→        let eval = SimpleEvaluator::new(vars);
+  1826→
+  1827→        assert_eq!(eval.eval("7"), Some(7));
+  1828→        assert_eq!(eval.eval("x"), Some(42));
+  1829→        assert_eq!(eval.eval("3 + 4"), Some(7));
+  1830→        assert_eq!(eval.eval("10 - 3"), Some(7));
+  1831→        assert_eq!(eval.eval("6 * 7"), Some(42));
+  1832→        assert_eq!(eval.eval("20 / 4"), Some(5));
+  1833→        assert_eq!(eval.eval("(2 + 3) * 4"), Some(20));
+  1834→        assert_eq!(eval.eval("x + 8"), Some(50));
+  1835→    }
+  1836→
+  1837→    // -----------------------------------------------------------------------
+  1838→    // Test 18: SCG summary formatting
+  1839→    // -----------------------------------------------------------------------
+  1840→
+  1841→    #[test]
+  1842→    fn test_scg_summary_formatting() {
+  1843→        let scg = SCG::new();
+  1844→        let summary = format_scg_summary(&scg);
+  1845→        assert!(summary.contains("SCG Summary"));
+  1846→        assert!(summary.contains("0 nodes"));
+  1847→    }
+  1848→
+  1849→    // -----------------------------------------------------------------------
+  1850→    // Test 19: Profile display
+  1851→    // -----------------------------------------------------------------------
+  1852→
+  1853→    #[test]
+  1854→    fn test_profile_display() {
+  1855→        let profile = ReplProfile {
+  1856→            expressions_processed: 10,
+  1857→            parse_errors: 1,
+  1858→            parse_time_ms: 5,
+  1859→            scg_time_ms: 20,
+  1860→            msg_time_ms: 15,
+  1861→            verify_time_ms: 100,
+  1862→            verification_runs: 3,
+  1863→        };
+  1864→        let text = format!("{profile}");
+  1865→        assert!(text.contains("Expressions processed : 10"));
+  1866→        assert!(text.contains("Verification runs     : 3"));
+  1867→    }
+  1868→
+  1869→    // -----------------------------------------------------------------------
+  1870→    // Test 20: Incremental definitions across multiple inputs
+  1871→    // -----------------------------------------------------------------------
+  1872→
+  1873→    #[test]
+  1874→    fn test_incremental_definitions() {
+  1875→        let mut repl = VumaRepl::new();
+  1876→
+  1877→        // First definition.
+  1878→        repl.process_line("let a = 5;").unwrap();
+  1879→        let node_count_after_first = repl.scg.node_count();
+  1880→        assert!(node_count_after_first > 0);
+  1881→
+  1882→        // Second definition — should accumulate.
+  1883→        repl.process_line("let b = 10;").unwrap();
+  1884→        // SCG is rebuilt from the full source buffer, so it should have
+  1885→        // more nodes than before.
+  1886→        assert!(repl.scg.node_count() > 0);
+  1887→
+  1888→        // Simple variables should be available.
+  1889→        assert_eq!(repl.simple_vars.get("a"), Some(&5));
+  1890→        assert_eq!(repl.simple_vars.get("b"), Some(&10));
+  1891→    }
+  1892→
+  1893→    // -----------------------------------------------------------------------
+  1894→    // Test 21: ReplResult Display
+  1895→    // -----------------------------------------------------------------------
+  1896→
+  1897→    #[test]
+  1898→    fn test_repl_result_display() {
+  1899→        let r = ReplResult::Value("42".to_string());
+  1900→        assert_eq!(format!("{r}"), "42");
+  1901→
+  1902→        let r = ReplResult::Ok(Some("hello".to_string()));
+  1903→        assert_eq!(format!("{r}"), "hello");
+  1904→
+  1905→        let r = ReplResult::Ok(None);
+  1906→        assert_eq!(format!("{r}"), "");
+  1907→
+  1908→        let r = ReplResult::Quit;
+  1909→        assert_eq!(format!("{r}"), "Goodbye.");
+  1910→    }
+  1911→
+  1912→    // -----------------------------------------------------------------------
+  1913→    // Test 22: ReplError Display
+  1914→    // -----------------------------------------------------------------------
+  1915→
+  1916→    #[test]
+  1917→    fn test_repl_error_display() {
+  1918→        let e = ReplError::General("something went wrong".to_string());
+  1919→        assert_eq!(format!("{e}"), "something went wrong");
+  1920→
+  1921→        let e = ReplError::ScgConstruction("bad graph".to_string());
+  1922→        assert!(format!("{e}").contains("bad graph"));
+  1923→    }
+  1924→
+  1925→    // -----------------------------------------------------------------------
+  1926→    // Test 23: :type command
+  1927→    // -----------------------------------------------------------------------
+  1928→
+  1929→    #[test]
+  1930→    fn test_type_command() {
+  1931→        let mut repl = VumaRepl::new();
+  1932→
+  1933→        // Type of a simple integer literal.
+  1934→        let result = repl.process_line(":type 42").unwrap();
+  1935→        if let ReplResult::Ok(Some(text)) = result {
+  1936→            assert!(text.contains("i64"), "Should show i64 type, got: {text}");
+  1937→        }
+  1938→
+  1939→        // Empty argument.
+  1940→        let result = repl.process_line(":type").unwrap();
+  1941→        if let ReplResult::Ok(Some(text)) = result {
+  1942→            assert!(text.contains("Usage"), "Should show usage, got: {text}");
+  1943→        }
+  1944→    }
+  1945→
+  1946→    // -----------------------------------------------------------------------
+  1947→    // Test 24: :target command
+  1948→    // -----------------------------------------------------------------------
+  1949→
+  1950→    #[test]
+  1951→    fn test_target_command() {
+  1952→        let mut repl = VumaRepl::new();
+  1953→        assert_eq!(repl.target(), "aarch64");
+  1954→
+  1955→        // Switch to x86_64.
+  1956→        let result = repl.process_line(":target x86_64").unwrap();
+  1957→        if let ReplResult::Ok(Some(text)) = result {
+  1958→            assert!(text.contains("x86_64"), "Should mention x86_64, got: {text}");
+  1959→        }
+  1960→        assert_eq!(repl.target(), "x86_64");
+  1961→
+  1962→        // Invalid target.
+  1963→        let result = repl.process_line(":target invalid").unwrap();
+  1964→        if let ReplResult::Ok(Some(text)) = result {
+  1965→            assert!(
+  1966→                text.contains("Unknown target"),
+  1967→                "Should say unknown target, got: {text}"
+  1968→            );
+  1969→        }
+  1970→
+  1971→        // Show current target with no arg.
+  1972→        let result = repl.process_line(":target").unwrap();
+  1973→        if let ReplResult::Ok(Some(text)) = result {
+  1974→            assert!(
+  1975→                text.contains("Current target"),
+  1976→                "Should show current target, got: {text}"
+  1977→            );
+  1978→        }
+  1979→    }
+  1980→
+  1981→    // -----------------------------------------------------------------------
+  1982→    // Test 25: :scg command
+  1983→    // -----------------------------------------------------------------------
+  1984→
+  1985→    #[test]
+  1986→    fn test_scg_command_no_scg() {
+  1987→        let mut repl = VumaRepl::new();
+  1988→
+  1989→        // No SCG available.
+  1990→        let result = repl.process_line(":scg main").unwrap();
+  1991→        if let ReplResult::Ok(Some(text)) = result {
+  1992→            assert!(
+  1993→                text.contains("No SCG") || text.contains("not found"),
+  1994→                "Should say no SCG, got: {text}"
+  1995→            );
+  1996→        }
+  1997→
+  1998→        // Empty argument.
+  1999→        let result = repl.process_line(":scg").unwrap();
+  2000→        if let ReplResult::Ok(Some(text)) = result {
+
+[showing lines 1-2000 of 2060; use offset=2001 with limit to continue reading]
