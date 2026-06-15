@@ -331,6 +331,30 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     }
                 }
             }
+            crate::ir::IRTerminator::Switch { discr, .. } => {
+                if let Some(id) = discr.as_register() {
+                    all_vreg_ids.insert(id);
+                }
+            }
+            crate::ir::IRTerminator::Invoke { args, .. } => {
+                for val in args {
+                    if let Some(id) = val.as_register() {
+                        all_vreg_ids.insert(id);
+                    }
+                }
+            }
+            crate::ir::IRTerminator::TailCall { args, .. } => {
+                for val in args {
+                    if let Some(id) = val.as_register() {
+                        all_vreg_ids.insert(id);
+                    }
+                }
+            }
+            crate::ir::IRTerminator::Resume { value } => {
+                if let Some(id) = value.as_register() {
+                    all_vreg_ids.insert(id);
+                }
+            }
             _ => {}
         }
     }
@@ -1095,9 +1119,125 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     code
                 }
 
-                // ── Atomic operations (placeholder) ──
-                IRInstr::AtomicLoad { .. } | IRInstr::AtomicStore { .. } | IRInstr::AtomicCas { .. } => {
-                    Vec::new() // TODO: implement LoongArch64 atomic lowering
+                // ── Atomic operations ──────────────────────────────────────────
+                //
+                // LoongArch64 provides LL.D/SC.D (load-linked / store-conditional)
+                // and AMSWAP.D for atomic operations.  We use DBAR 0 (full data
+                // barrier) for memory ordering.
+                //
+                // For 32-bit types (I8/I16/I32/U8/U16/U32) we use the .W variants;
+                // for 64-bit types (I64/U64/Ptr/Func) we use the .D variants.
+
+                IRInstr::AtomicLoad { dst, addr, ty } => {
+                    let mut code = Vec::new();
+                    let dst_id = dst.as_register().unwrap_or(0);
+                    let is_32bit = matches!(
+                        ty,
+                        IRType::I8 | IRType::I16 | IRType::I32
+                            | IRType::U8 | IRType::U16 | IRType::U32
+                    );
+                    // Load address into S0
+                    code.extend(encode_load_value(addr, S0, fp, &vreg_slots));
+                    // dbar 0 — acquire fence
+                    code.extend_from_slice(&Instruction::Dbar { hint: 0 }.encode());
+                    // Load-linked from [S0 + 0]
+                    if is_32bit {
+                        code.extend_from_slice(&Instruction::LlW { rd: S0, rj: S0, imm14: 0 }.encode());
+                    } else {
+                        code.extend_from_slice(&Instruction::LlD { rd: S0, rj: S0, imm14: 0 }.encode());
+                    }
+                    // dbar 0 — fence after the load to ensure ordering
+                    code.extend_from_slice(&Instruction::Dbar { hint: 0 }.encode());
+                    // Store result to dst vreg slot
+                    code.extend(encode_store_to_vreg(S0, dst_id, fp, &vreg_slots));
+                    code
+                }
+
+                IRInstr::AtomicStore { value, addr, ty } => {
+                    let mut code = Vec::new();
+                    let is_32bit = matches!(
+                        ty,
+                        IRType::I8 | IRType::I16 | IRType::I32
+                            | IRType::U8 | IRType::U16 | IRType::U32
+                    );
+                    // Load address into S1, value into S0
+                    code.extend(encode_load_value(addr, S1, fp, &vreg_slots));
+                    code.extend(encode_load_value(value, S0, fp, &vreg_slots));
+                    // dbar 0 — release fence
+                    code.extend_from_slice(&Instruction::Dbar { hint: 0 }.encode());
+                    // amswap.{w,d} $r0, S1, S0 — atomically store S0 to [S1], discard old value
+                    if is_32bit {
+                        code.extend_from_slice(
+                            &Instruction::AmswapW { rd: Gpr::R0, rj: S1, rk: S0 }.encode(),
+                        );
+                    } else {
+                        code.extend_from_slice(
+                            &Instruction::AmswapD { rd: Gpr::R0, rj: S1, rk: S0 }.encode(),
+                        );
+                    }
+                    // dbar 0 — fence after the store
+                    code.extend_from_slice(&Instruction::Dbar { hint: 0 }.encode());
+                    code
+                }
+
+                IRInstr::AtomicCas { dst, addr, expected, desired, ty } => {
+                    let mut code = Vec::new();
+                    let dst_id = dst.as_register().unwrap_or(0);
+                    let is_32bit = matches!(
+                        ty,
+                        IRType::I8 | IRType::I16 | IRType::I32
+                            | IRType::U8 | IRType::U16 | IRType::U32
+                    );
+                    // Load operands from stack
+                    // S0 = addr, S1 = expected, S2 = desired
+                    code.extend(encode_load_value(addr, S0, fp, &vreg_slots));
+                    code.extend(encode_load_value(expected, S1, fp, &vreg_slots));
+                    code.extend(encode_load_value(desired, S2, fp, &vreg_slots));
+
+                    // CAS loop using LL/SC:
+                    //   dbar 0                          ; offset 0  — full fence
+                    //   ll.{d,w} S3, S0, 0              ; offset 4  — S3 = current value
+                    //   bne S3, S1, +5                  ; offset 8  — if current != expected, skip to dbar
+                    //   or S3, S2, $r0                   ; offset 12 — S3 = desired (reload before each SC)
+                    //   sc.{d,w} S3, S0, 0              ; offset 16 — store desired; S3 = 0 (ok) / 1 (fail)
+                    //   bnez S3, -4                     ; offset 20 — retry if SC failed
+                    //   or S3, S1, $r0                   ; offset 24 — SC succeeded: old value = expected = S1
+                    //   dbar 0                          ; offset 28 — fence after CAS
+                    //   ; store S3 (old value) to dst vreg slot
+                    //
+                    // When BNE fires (current != expected), we jump to offset 28 (dbar).
+                    // S3 still holds the current (old) value from LL, which is what dst needs.
+                    //
+                    // When SC succeeds, S3 = 0, and old value = S1 (expected).
+                    // The OR at offset 24 moves S1 → S3 so we have a unified store path.
+
+                    // dbar 0 — full fence before CAS
+                    code.extend_from_slice(&Instruction::Dbar { hint: 0 }.encode());
+                    // ll.{d,w} S3, S0, 0
+                    if is_32bit {
+                        code.extend_from_slice(&Instruction::LlW { rd: S3, rj: S0, imm14: 0 }.encode());
+                    } else {
+                        code.extend_from_slice(&Instruction::LlD { rd: S3, rj: S0, imm14: 0 }.encode());
+                    }
+                    // bne S3, S1, +5 (jump to dbar at offset 28 = 5 instructions from offset 8)
+                    code.extend_from_slice(&Instruction::Bne { rj: S3, rd: S1, offs16: 5 }.encode());
+                    // or S3, S2, $r0 — move desired into S3 for SC
+                    code.extend_from_slice(&Instruction::Or { rd: S3, rj: S2, rk: Gpr::R0 }.encode());
+                    // sc.{d,w} S3, S0, 0
+                    if is_32bit {
+                        code.extend_from_slice(&Instruction::ScW { rd: S3, rj: S0, imm14: 0 }.encode());
+                    } else {
+                        code.extend_from_slice(&Instruction::ScD { rd: S3, rj: S0, imm14: 0 }.encode());
+                    }
+                    // bnez S3, -4 (retry: jump back 4 instructions to ll.{d,w})
+                    code.extend_from_slice(&Instruction::Bnez { rj: S3, offs21: -4 }.encode());
+                    // SC succeeded: move expected (old value) into S3
+                    code.extend_from_slice(&Instruction::Or { rd: S3, rj: S1, rk: Gpr::R0 }.encode());
+                    // dbar 0 — fence after CAS
+                    code.extend_from_slice(&Instruction::Dbar { hint: 0 }.encode());
+                    // Store old value (S3) to dst vreg slot
+                    code.extend(encode_store_to_vreg(S3, dst_id, fp, &vreg_slots));
+                    code
                 }
 
                 // ── Offset ──
@@ -1221,19 +1361,217 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                 byte_offset += code.len();
                 instrs.push(emit(code, "unreachable"));
             }
-            crate::ir::IRTerminator::Switch { .. } => {
-                // Not implemented — emit break
-                let code = Instruction::Break.encode().to_vec();
+            crate::ir::IRTerminator::Switch { discr, targets, default } => {
+                // Switch: cascade of BEQ comparisons
+                // Load discriminator into S0, then compare against each target value.
+                // If a match is found, branch to the corresponding label.
+                // Fall through to default if no match.
+                let mut code = Vec::new();
+                // Load discr into S0
+                code.extend(encode_load_value(discr, S0, fp, &vreg_slots));
+                // For each (value, target) pair, emit a comparison and conditional branch
+                for (val, target_label) in targets {
+                    // Load the comparison value into S1
+                    code.extend(encode_load_imm(S1, *val));
+                    // BEQ S0, S1, target_label (placeholder offset)
+                    let beq_off = byte_offset + code.len();
+                    code.extend_from_slice(&Instruction::Beq { rj: S0, rd: S1, offs16: 0 }.encode());
+                    branch_patches.push((beq_off, target_label.clone()));
+                }
+                // Default: unconditional branch to default label
+                let b_off = byte_offset + code.len();
+                code.extend_from_slice(&Instruction::B { offs26: 0 }.encode());
+                branch_patches.push((b_off, default.clone()));
                 byte_offset += code.len();
-                instrs.push(emit(code, "switch_unimplemented"));
+                instrs.push(emit(code, "switch"));
             }
-            crate::ir::IRTerminator::Invoke { .. }
-            | crate::ir::IRTerminator::TailCall { .. }
-            | crate::ir::IRTerminator::Resume { .. } => {
-                // Not implemented — emit break
-                let code = Instruction::Break.encode().to_vec();
+            crate::ir::IRTerminator::Invoke { dst, func: call_target, args, normal, unwind: _unwind } => {
+                // Invoke: call a function that may throw, with separate normal/unwind continuations.
+                // Implemented as: set up args, BL to function, store return value, branch to normal.
+                // The unwind path is reached by the unwinder (requires DWARF info which is not
+                // emitted here; the unwind label is tracked for control flow correctness).
+                let mut code = Vec::new();
+                let call_arg_regs = [Gpr::A0, Gpr::A1, Gpr::A2, Gpr::A3, Gpr::A4, Gpr::A5, Gpr::A6, Gpr::A7];
+
+                let num_stack_args = if args.len() > 8 { args.len() - 8 } else { 0 };
+                let stack_arg_space = ((num_stack_args * 8 + 15) & !15) as i32;
+
+                // Step 1: Allocate stack space for stack-passed arguments
+                if stack_arg_space > 0 {
+                    if fits_si12(-(stack_arg_space as i64)) {
+                        code.extend_from_slice(
+                            &Instruction::AddiD { rd: Gpr::Sp, rj: Gpr::Sp, imm12: -stack_arg_space }.encode(),
+                        );
+                    } else {
+                        code.extend(encode_load_imm(S2, -(stack_arg_space as i64)));
+                        code.extend_from_slice(
+                            &Instruction::AddD { rd: Gpr::Sp, rj: Gpr::Sp, rk: S2 }.encode(),
+                        );
+                    }
+                }
+
+                // Step 2: Store stack-passed arguments (index >= 8)
+                for (i, arg) in args.iter().enumerate() {
+                    if i >= call_arg_regs.len() {
+                        let sp_off = ((i - call_arg_regs.len()) as i32) * 8;
+                        code.extend(encode_load_value(arg, S0, fp, &vreg_slots));
+                        if fits_si12(sp_off as i64) {
+                            code.extend_from_slice(
+                                &Instruction::StD { rd: S0, rj: Gpr::Sp, imm12: sp_off }.encode(),
+                            );
+                        } else {
+                            code.extend(encode_load_imm(S2, sp_off as i64));
+                            code.extend_from_slice(
+                                &Instruction::AddD { rd: S2, rj: Gpr::Sp, rk: S2 }.encode(),
+                            );
+                            code.extend_from_slice(
+                                &Instruction::StD { rd: S0, rj: S2, imm12: 0 }.encode(),
+                            );
+                        }
+                    }
+                }
+
+                // Step 3: Load register-passed arguments (index 0–7)
+                for (i, arg) in args.iter().enumerate() {
+                    if i < call_arg_regs.len() {
+                        code.extend(encode_load_value(arg, call_arg_regs[i], fp, &vreg_slots));
+                    }
+                }
+
+                // Step 4: BL — call the function
+                let bl_byte_offset = byte_offset + code.len();
+                code.extend_from_slice(&Instruction::Bl { offs26: 0 }.encode());
+                relocations.push(RelocationEntry {
+                    offset: bl_byte_offset as u64,
+                    symbol: call_target.clone(),
+                    reloc_type: "R_LARCH_B26".to_string(),
+                });
+
+                // Step 5: Deallocate stack argument space
+                if stack_arg_space > 0 {
+                    if fits_si12(stack_arg_space as i64) {
+                        code.extend_from_slice(
+                            &Instruction::AddiD { rd: Gpr::Sp, rj: Gpr::Sp, imm12: stack_arg_space }.encode(),
+                        );
+                    } else {
+                        code.extend(encode_load_imm(S2, stack_arg_space as i64));
+                        code.extend_from_slice(
+                            &Instruction::AddD { rd: Gpr::Sp, rj: Gpr::Sp, rk: S2 }.encode(),
+                        );
+                    }
+                }
+
+                // Step 6: Store return value ($a0) to dst's stack slot
+                if let Some(d) = dst {
+                    let dst_id = d.as_register().unwrap_or(0);
+                    code.extend(encode_store_to_vreg(S0, dst_id, fp, &vreg_slots));
+                }
+
+                // Step 7: Branch to normal continuation
+                let normal_off = byte_offset + code.len();
+                code.extend_from_slice(&Instruction::B { offs26: 0 }.encode());
+                branch_patches.push((normal_off, normal.clone()));
+
                 byte_offset += code.len();
-                instrs.push(emit(code, "unimplemented_terminator"));
+                instrs.push(emit(code, "invoke"));
+            }
+            crate::ir::IRTerminator::TailCall { func: call_target, args } => {
+                // TailCall: jump to callee, reusing caller's stack frame.
+                // 1. Load register args into $a0-$a7
+                // 2. Place stack-passed args at old_sp (caller's frame area above our frame)
+                // 3. Epilogue: restore $ra, $fp, deallocate frame
+                // 4. B to target (callee returns directly to our caller via $ra)
+                let mut code = Vec::new();
+                let call_arg_regs = [Gpr::A0, Gpr::A1, Gpr::A2, Gpr::A3, Gpr::A4, Gpr::A5, Gpr::A6, Gpr::A7];
+
+                let num_stack_args = if args.len() > 8 { args.len() - 8 } else { 0 };
+
+                // Step 1: Place stack-passed arguments at old_sp offsets.
+                // old_sp = $sp + frame_size. The area at old_sp+0 was our caller's
+                // stack-arg region, which is no longer needed, so we can overwrite it.
+                if num_stack_args > 0 {
+                    // Compute old_sp into S2: S2 = $sp + frame_size
+                    if fits_si12(fs as i64) {
+                        code.extend_from_slice(
+                            &Instruction::AddiD { rd: S2, rj: Gpr::Sp, imm12: fs }.encode(),
+                        );
+                    } else {
+                        code.extend(encode_load_imm(S2, fs as i64));
+                        code.extend_from_slice(
+                            &Instruction::AddD { rd: S2, rj: Gpr::Sp, rk: S2 }.encode(),
+                        );
+                    }
+                    // Store stack args at old_sp + (i-8)*8
+                    for (i, arg) in args.iter().enumerate() {
+                        if i >= call_arg_regs.len() {
+                            let sp_off = ((i - call_arg_regs.len()) as i32) * 8;
+                            code.extend(encode_load_value(arg, S3, fp, &vreg_slots));
+                            if fits_si12(sp_off as i64) {
+                                code.extend_from_slice(
+                                    &Instruction::StD { rd: S3, rj: S2, imm12: sp_off }.encode(),
+                                );
+                            } else {
+                                // Compute address in another scratch
+                                code.extend(encode_load_imm(S0, sp_off as i64));
+                                // S0 is $a0 — we'll reload it below for arg passing
+                                code.extend_from_slice(
+                                    &Instruction::AddD { rd: S0, rj: S2, rk: S0 }.encode(),
+                                );
+                                code.extend_from_slice(
+                                    &Instruction::StD { rd: S3, rj: S0, imm12: 0 }.encode(),
+                                );
+                            }
+                        }
+                    }
+                }
+
+                // Step 2: Load register-passed arguments (index 0–7) into $a0–$a7
+                for (i, arg) in args.iter().enumerate() {
+                    if i < call_arg_regs.len() {
+                        code.extend(encode_load_value(arg, call_arg_regs[i], fp, &vreg_slots));
+                    }
+                }
+
+                // Step 3: Epilogue — restore $ra, $fp, deallocate frame
+                code.extend_from_slice(&Instruction::LdD { rd: Gpr::Ra, rj: fp, imm12: -8 }.encode());
+                code.extend_from_slice(&Instruction::LdD { rd: fp, rj: fp, imm12: -16 }.encode());
+                if fits_si12(fs as i64) {
+                    code.extend_from_slice(&Instruction::AddiD { rd: Gpr::Sp, rj: Gpr::Sp, imm12: fs }.encode());
+                } else {
+                    code.extend(encode_load_imm(S2, fs as i64));
+                    code.extend_from_slice(&Instruction::AddD { rd: Gpr::Sp, rj: Gpr::Sp, rk: S2 }.encode());
+                }
+
+                // Step 4: B to target (no return address save — callee returns to our caller)
+                let b_byte_offset = byte_offset + code.len();
+                code.extend_from_slice(&Instruction::B { offs26: 0 }.encode());
+                relocations.push(RelocationEntry {
+                    offset: b_byte_offset as u64,
+                    symbol: call_target.clone(),
+                    reloc_type: "R_LARCH_B26".to_string(),
+                });
+
+                byte_offset += code.len();
+                instrs.push(emit(code, "tailcall"));
+            }
+            crate::ir::IRTerminator::Resume { value } => {
+                // Resume unwinding with the given exception value.
+                // Load the exception into $a0, then call __Unwind_Resume (which never returns).
+                let mut code = Vec::new();
+                // Load exception value into $a0 (S0)
+                code.extend(encode_load_value(value, S0, fp, &vreg_slots));
+                // BL __Unwind_Resume (with relocation)
+                let bl_byte_offset = byte_offset + code.len();
+                code.extend_from_slice(&Instruction::Bl { offs26: 0 }.encode());
+                relocations.push(RelocationEntry {
+                    offset: bl_byte_offset as u64,
+                    symbol: "__Unwind_Resume".to_string(),
+                    reloc_type: "R_LARCH_B26".to_string(),
+                });
+                // If __Unwind_Resume returns (it shouldn't), trap
+                code.extend_from_slice(&Instruction::Break.encode());
+                byte_offset += code.len();
+                instrs.push(emit(code, "resume"));
             }
         }
     }

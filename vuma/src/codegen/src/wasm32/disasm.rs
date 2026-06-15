@@ -292,6 +292,36 @@ impl std::fmt::Display for WasmInstr {
             }
             WasmInstr::MemoryFill { mem } => write!(f, "memory.fill {mem}"),
             WasmInstr::MemoryInit { data_idx, mem } => write!(f, "memory.init {data_idx} {mem}"),
+
+            // Atomic instructions
+            WasmInstr::I32AtomicLoad { align, offset }
+            | WasmInstr::I64AtomicLoad { align, offset }
+            | WasmInstr::I32AtomicLoad8U { align, offset }
+            | WasmInstr::I32AtomicLoad16U { align, offset }
+            | WasmInstr::I64AtomicLoad8U { align, offset }
+            | WasmInstr::I64AtomicLoad16U { align, offset }
+            | WasmInstr::I64AtomicLoad32U { align, offset } => {
+                write!(f, "atomic.load align={align} offset={offset}")
+            }
+            WasmInstr::I32AtomicStore { align, offset }
+            | WasmInstr::I64AtomicStore { align, offset }
+            | WasmInstr::I32AtomicStore8 { align, offset }
+            | WasmInstr::I32AtomicStore16 { align, offset }
+            | WasmInstr::I64AtomicStore8 { align, offset }
+            | WasmInstr::I64AtomicStore16 { align, offset }
+            | WasmInstr::I64AtomicStore32 { align, offset } => {
+                write!(f, "atomic.store align={align} offset={offset}")
+            }
+            WasmInstr::I32AtomicRmwCmpxchg { align, offset }
+            | WasmInstr::I64AtomicRmwCmpxchg { align, offset }
+            | WasmInstr::I32AtomicRmw8CmpxchgU { align, offset }
+            | WasmInstr::I32AtomicRmw16CmpxchgU { align, offset }
+            | WasmInstr::I64AtomicRmw8CmpxchgU { align, offset }
+            | WasmInstr::I64AtomicRmw16CmpxchgU { align, offset }
+            | WasmInstr::I64AtomicRmw32CmpxchgU { align, offset } => {
+                write!(f, "atomic.rmw.cmpxchg align={align} offset={offset}")
+            }
+            WasmInstr::MemoryAtomicFence => write!(f, "atomic.fence"),
         }
     }
 }

@@ -45,7 +45,7 @@ use crate::backend::{
     AllocatedBlock, AllocatedFunction, AllocatedInstruction, AllocatedProgram, Arm32TargetInfo,
     Backend, BackendError, PhysicalReg, RegClass, RelocationEntry, TargetInfo,
 };
-use crate::ir::{BinOpKind, CmpKind, IRFunction, UnaryOpKind};
+use crate::ir::{BinOpKind, CastKind, CmpKind, IRFunction, UnaryOpKind};
 use std::collections::HashMap;
 use std::fmt;
 
@@ -788,6 +788,110 @@ fn encode_msr(cond: Condition, mask: u32, rm: u32) -> [u8; 4] {
     word.to_le_bytes()
 }
 
+/// Encode LDREX (Load Register Exclusive) instruction.
+///
+/// Format: `cond[31:28] | 00011011[27:20] | Rn[19:16] | Rd[15:12] | 1111[11:8] | 1001[7:4] | 1111[3:0]`
+fn encode_ldrex(cond: Condition, rn: u32, rd: u32) -> [u8; 4] {
+    let word = (cond.encoding() << 28)
+        | (0b0001_1011 << 20)
+        | ((rn & 0xF) << 16)
+        | ((rd & 0xF) << 12)
+        | (0b1111 << 8)
+        | (0b1001 << 4)
+        | 0b1111;
+    word.to_le_bytes()
+}
+
+/// Encode LDREXB (Load Register Exclusive Byte) instruction.
+///
+/// Format: `cond[31:28] | 00011101[27:20] | Rn[19:16] | Rd[15:12] | 1111[11:8] | 1001[7:4] | 1111[3:0]`
+fn encode_ldrexb(cond: Condition, rn: u32, rd: u32) -> [u8; 4] {
+    let word = (cond.encoding() << 28)
+        | (0b0001_1101 << 20)
+        | ((rn & 0xF) << 16)
+        | ((rd & 0xF) << 12)
+        | (0b1111 << 8)
+        | (0b1001 << 4)
+        | 0b1111;
+    word.to_le_bytes()
+}
+
+/// Encode LDREXH (Load Register Exclusive Halfword) instruction.
+///
+/// Format: `cond[31:28] | 00011111[27:20] | Rn[19:16] | Rd[15:12] | 1111[11:8] | 1001[7:4] | 1111[3:0]`
+fn encode_ldrexh(cond: Condition, rn: u32, rd: u32) -> [u8; 4] {
+    let word = (cond.encoding() << 28)
+        | (0b0001_1111 << 20)
+        | ((rn & 0xF) << 16)
+        | ((rd & 0xF) << 12)
+        | (0b1111 << 8)
+        | (0b1001 << 4)
+        | 0b1111;
+    word.to_le_bytes()
+}
+
+/// Encode STREX (Store Register Exclusive) instruction.
+///
+/// Format: `cond[31:28] | 00011000[27:20] | Rn[19:16] | Rd[15:12] | 1111[11:8] | 1001[7:4] | Rt[3:0]`
+///
+/// Rd = destination status register (0 = success, 1 = failure)
+/// Rn = base address register
+/// Rt = source register (value to store)
+fn encode_strex(cond: Condition, rn: u32, rd: u32, rt: u32) -> [u8; 4] {
+    let word = (cond.encoding() << 28)
+        | (0b0001_1000 << 20)
+        | ((rn & 0xF) << 16)
+        | ((rd & 0xF) << 12)
+        | (0b1111 << 8)
+        | (0b1001 << 4)
+        | (rt & 0xF);
+    word.to_le_bytes()
+}
+
+/// Encode STREXB (Store Register Exclusive Byte) instruction.
+///
+/// Format: `cond[31:28] | 00011100[27:20] | Rn[19:16] | Rd[15:12] | 1111[11:8] | 1001[7:4] | Rt[3:0]`
+fn encode_strexb(cond: Condition, rn: u32, rd: u32, rt: u32) -> [u8; 4] {
+    let word = (cond.encoding() << 28)
+        | (0b0001_1100 << 20)
+        | ((rn & 0xF) << 16)
+        | ((rd & 0xF) << 12)
+        | (0b1111 << 8)
+        | (0b1001 << 4)
+        | (rt & 0xF);
+    word.to_le_bytes()
+}
+
+/// Encode STREXH (Store Register Exclusive Halfword) instruction.
+///
+/// Format: `cond[31:28] | 00011110[27:20] | Rn[19:16] | Rd[15:12] | 1111[11:8] | 1001[7:4] | Rt[3:0]`
+fn encode_strexh(cond: Condition, rn: u32, rd: u32, rt: u32) -> [u8; 4] {
+    let word = (cond.encoding() << 28)
+        | (0b0001_1110 << 20)
+        | ((rn & 0xF) << 16)
+        | ((rd & 0xF) << 12)
+        | (0b1111 << 8)
+        | (0b1001 << 4)
+        | (rt & 0xF);
+    word.to_le_bytes()
+}
+
+/// Encode DMB (Data Memory Barrier) instruction.
+///
+/// Format: `cond[31:28] | 01010111[27:20] | 1111[19:16] | 1111[15:12] | 1111[11:8] | 0101[7:4] | option[3:0]`
+///
+/// option = 0xF for DMB SY (full system barrier)
+fn encode_dmb(cond: Condition, option: u32) -> [u8; 4] {
+    let word = (cond.encoding() << 28)
+        | (0b0101_0111 << 20)
+        | (0b1111 << 16)
+        | (0b1111 << 12)
+        | (0b1111 << 8)
+        | (0b0101 << 4)
+        | (option & 0xF);
+    word.to_le_bytes()
+}
+
 // ===========================================================================
 // Instruction Enum
 // ===========================================================================
@@ -1101,6 +1205,23 @@ pub enum Instruction {
     },
     /// MSR CPSR_f, Rm
     Msr { mask: u32, rm: Gpr, cond: Condition },
+
+    // ── Synchronization Primitives (ARMv7-A) ────────────────────────
+    /// LDREX Rd, [Rn] — Load Register Exclusive (32-bit)
+    Ldrex { rd: Gpr, rn: Gpr, cond: Condition },
+    /// LDREXB Rd, [Rn] — Load Register Exclusive Byte
+    Ldrexb { rd: Gpr, rn: Gpr, cond: Condition },
+    /// LDREXH Rd, [Rn] — Load Register Exclusive Halfword
+    Ldrexh { rd: Gpr, rn: Gpr, cond: Condition },
+    /// STREX Rd, Rt, [Rn] — Store Register Exclusive (32-bit)
+    /// Rd = status destination (0=success, 1=failure), Rt = value source, Rn = address
+    Strex { rd: Gpr, rt: Gpr, rn: Gpr, cond: Condition },
+    /// STREXB Rd, Rt, [Rn] — Store Register Exclusive Byte
+    Strexb { rd: Gpr, rt: Gpr, rn: Gpr, cond: Condition },
+    /// STREXH Rd, Rt, [Rn] — Store Register Exclusive Halfword
+    Strexh { rd: Gpr, rt: Gpr, rn: Gpr, cond: Condition },
+    /// DMB option — Data Memory Barrier (option=0xF for DMB SY)
+    Dmb { option: u32, cond: Condition },
 }
 
 impl Instruction {
@@ -1663,6 +1784,29 @@ impl Instruction {
             }
             Instruction::Mrs { rd, spsr, cond } => encode_mrs(*cond, rd.encoding(), *spsr),
             Instruction::Msr { mask, rm, cond } => encode_msr(*cond, *mask, rm.encoding()),
+
+            // ── Synchronization Primitives ────────────────────────────
+            Instruction::Ldrex { rd, rn, cond } => {
+                encode_ldrex(*cond, rn.encoding(), rd.encoding())
+            }
+            Instruction::Ldrexb { rd, rn, cond } => {
+                encode_ldrexb(*cond, rn.encoding(), rd.encoding())
+            }
+            Instruction::Ldrexh { rd, rn, cond } => {
+                encode_ldrexh(*cond, rn.encoding(), rd.encoding())
+            }
+            Instruction::Strex { rd, rt, rn, cond } => {
+                encode_strex(*cond, rn.encoding(), rd.encoding(), rt.encoding())
+            }
+            Instruction::Strexb { rd, rt, rn, cond } => {
+                encode_strexb(*cond, rn.encoding(), rd.encoding(), rt.encoding())
+            }
+            Instruction::Strexh { rd, rt, rn, cond } => {
+                encode_strexh(*cond, rn.encoding(), rd.encoding(), rt.encoding())
+            }
+            Instruction::Dmb { option, cond } => {
+                encode_dmb(*cond, *option)
+            }
         }
     }
 
@@ -1717,6 +1861,13 @@ impl Instruction {
             Instruction::Nop => "nop",
             Instruction::Mrs { .. } => "mrs",
             Instruction::Msr { .. } => "msr",
+            Instruction::Ldrex { .. } => "ldrex",
+            Instruction::Ldrexb { .. } => "ldrexb",
+            Instruction::Ldrexh { .. } => "ldrexh",
+            Instruction::Strex { .. } => "strex",
+            Instruction::Strexb { .. } => "strexb",
+            Instruction::Strexh { .. } => "strexh",
+            Instruction::Dmb { .. } => "dmb",
         }
     }
 }
@@ -1989,6 +2140,31 @@ impl fmt::Display for Instruction {
             }
             Instruction::Msr { mask, rm, cond } => {
                 write!(f, "msr{} cpsr_{}, {}", cond, mask, rm)
+            }
+            Instruction::Ldrex { rd, rn, cond } => {
+                write!(f, "ldrex{} {}, [{}]", cond, rd, rn)
+            }
+            Instruction::Ldrexb { rd, rn, cond } => {
+                write!(f, "ldrexb{} {}, [{}]", cond, rd, rn)
+            }
+            Instruction::Ldrexh { rd, rn, cond } => {
+                write!(f, "ldrexh{} {}, [{}]", cond, rd, rn)
+            }
+            Instruction::Strex { rd, rt, rn, cond } => {
+                write!(f, "strex{} {}, {}, [{}]", cond, rd, rt, rn)
+            }
+            Instruction::Strexb { rd, rt, rn, cond } => {
+                write!(f, "strexb{} {}, {}, [{}]", cond, rd, rt, rn)
+            }
+            Instruction::Strexh { rd, rt, rn, cond } => {
+                write!(f, "strexh{} {}, {}, [{}]", cond, rd, rt, rn)
+            }
+            Instruction::Dmb { option, cond: _ } => {
+                let opt_name = match option {
+                    0xF => "sy",
+                    _ => "???",
+                };
+                write!(f, "dmb {}", opt_name)
             }
         }
     }
@@ -2791,68 +2967,109 @@ fn decode_arm32(word: u32) -> String {
     let imm12 = word & 0xFFF;
 
     match bits27_26 {
-        // Data processing
+        // Data processing / Synchronization primitives
         0b00 => {
-            if i_bit == 1 {
-                // Immediate operand2
-                let expanded = rotate_right(imm8, rotate * 2);
-                match opcode {
-                    0b0000 => format!("and{} r{}, r{}, #{}", cond_suffix, rd, rn, expanded),
-                    0b0001 => format!("eor{} r{}, r{}, #{}", cond_suffix, rd, rn, expanded),
-                    0b0010 => format!("sub{} r{}, r{}, #{}", cond_suffix, rd, rn, expanded),
-                    0b0011 => format!("rsb{} r{}, r{}, #{}", cond_suffix, rd, rn, expanded),
-                    0b0100 => format!("add{} r{}, r{}, #{}", cond_suffix, rd, rn, expanded),
-                    0b1000 => format!("tst{} r{}, #{}", cond_suffix, rn, expanded),
-                    0b1001 => format!("teq{} r{}, #{}", cond_suffix, rn, expanded),
-                    0b1010 => format!("cmp{} r{}, #{}", cond_suffix, rn, expanded),
-                    0b1011 => format!("cmn{} r{}, #{}", cond_suffix, rn, expanded),
-                    0b1100 => format!("orr{} r{}, r{}, #{}", cond_suffix, rd, rn, expanded),
-                    0b1101 => format!("mov{} r{}, #{}", cond_suffix, rd, expanded),
-                    0b1110 => format!("bic{} r{}, r{}, #{}", cond_suffix, rd, rn, expanded),
-                    0b1111 => format!("mvn{} r{}, #{}", cond_suffix, rd, expanded),
-                    _ => format!(".word {:08x}", word),
+            // Check for synchronization primitives first (LDREX/STREX/DMB)
+            let bits27_20 = (word >> 20) & 0xFF;
+            let bits7_4 = (word >> 4) & 0xF;
+            let bits3_0 = word & 0xF;
+            match bits27_20 {
+                0b0001_1011 if bits7_4 == 0b1001 && bits3_0 == 0b1111 => {
+                    // LDREX Rd, [Rn]
+                    format!("ldrex{} r{}, [r{}]", cond_suffix, rd, rn)
                 }
-            } else {
-                // Register operand2
-                let shift_str = if shift_imm == 0 && shift_type == 0 {
-                    String::new()
-                } else {
-                    let st = match shift_type {
-                        0 => "lsl",
-                        1 => "lsr",
-                        2 => "asr",
-                        3 => "ror",
+                0b0001_1101 if bits7_4 == 0b1001 && bits3_0 == 0b1111 => {
+                    // LDREXB Rd, [Rn]
+                    format!("ldrexb{} r{}, [r{}]", cond_suffix, rd, rn)
+                }
+                0b0001_1111 if bits7_4 == 0b1001 && bits3_0 == 0b1111 => {
+                    // LDREXH Rd, [Rn]
+                    format!("ldrexh{} r{}, [r{}]", cond_suffix, rd, rn)
+                }
+                0b0001_1000 if bits7_4 == 0b1001 => {
+                    // STREX Rd, Rt, [Rn]
+                    format!("strex{} r{}, r{}, [r{}]", cond_suffix, rd, rm, rn)
+                }
+                0b0001_1100 if bits7_4 == 0b1001 => {
+                    // STREXB Rd, Rt, [Rn]
+                    format!("strexb{} r{}, r{}, [r{}]", cond_suffix, rd, rm, rn)
+                }
+                0b0001_1110 if bits7_4 == 0b1001 => {
+                    // STREXH Rd, Rt, [Rn]
+                    format!("strexh{} r{}, r{}, [r{}]", cond_suffix, rd, rm, rn)
+                }
+                0b0101_0111 => {
+                    // DMB option
+                    let opt_name = match bits3_0 {
+                        0xF => "sy",
                         _ => "???",
                     };
-                    format!(", {} #{}", st, shift_imm)
-                };
-                match opcode {
-                    0b0000 => format!("and{} r{}, r{}, r{}{}", cond_suffix, rd, rn, rm, shift_str),
-                    0b0001 => format!("eor{} r{}, r{}, r{}{}", cond_suffix, rd, rn, rm, shift_str),
-                    0b0010 => format!("sub{} r{}, r{}, r{}{}", cond_suffix, rd, rn, rm, shift_str),
-                    0b0011 => format!("rsb{} r{}, r{}, r{}{}", cond_suffix, rd, rn, rm, shift_str),
-                    0b0100 => format!("add{} r{}, r{}, r{}{}", cond_suffix, rd, rn, rm, shift_str),
-                    0b1000 if s_bit == 1 && rd == 0 => {
-                        format!("tst{} r{}, r{}{}", cond_suffix, rn, rm, shift_str)
+                    format!("dmb {}", opt_name)
+                }
+                _ => {
+                    // Fall through to data processing decoding
+                    if i_bit == 1 {
+                        // Immediate operand2
+                        let expanded = rotate_right(imm8, rotate * 2);
+                        match opcode {
+                            0b0000 => format!("and{} r{}, r{}, #{}", cond_suffix, rd, rn, expanded),
+                            0b0001 => format!("eor{} r{}, r{}, #{}", cond_suffix, rd, rn, expanded),
+                            0b0010 => format!("sub{} r{}, r{}, #{}", cond_suffix, rd, rn, expanded),
+                            0b0011 => format!("rsb{} r{}, r{}, #{}", cond_suffix, rd, rn, expanded),
+                            0b0100 => format!("add{} r{}, r{}, #{}", cond_suffix, rd, rn, expanded),
+                            0b1000 => format!("tst{} r{}, #{}", cond_suffix, rn, expanded),
+                            0b1001 => format!("teq{} r{}, #{}", cond_suffix, rn, expanded),
+                            0b1010 => format!("cmp{} r{}, #{}", cond_suffix, rn, expanded),
+                            0b1011 => format!("cmn{} r{}, #{}", cond_suffix, rn, expanded),
+                            0b1100 => format!("orr{} r{}, r{}, #{}", cond_suffix, rd, rn, expanded),
+                            0b1101 => format!("mov{} r{}, #{}", cond_suffix, rd, expanded),
+                            0b1110 => format!("bic{} r{}, r{}, #{}", cond_suffix, rd, rn, expanded),
+                            0b1111 => format!("mvn{} r{}, #{}", cond_suffix, rd, expanded),
+                            _ => format!(".word {:08x}", word),
+                        }
+                    } else {
+                        // Register operand2
+                        let shift_str = if shift_imm == 0 && shift_type == 0 {
+                            String::new()
+                        } else {
+                            let st = match shift_type {
+                                0 => "lsl",
+                                1 => "lsr",
+                                2 => "asr",
+                                3 => "ror",
+                                _ => "???",
+                            };
+                            format!(", {} #{}", st, shift_imm)
+                        };
+                        match opcode {
+                            0b0000 => format!("and{} r{}, r{}, r{}{}", cond_suffix, rd, rn, rm, shift_str),
+                            0b0001 => format!("eor{} r{}, r{}, r{}{}", cond_suffix, rd, rn, rm, shift_str),
+                            0b0010 => format!("sub{} r{}, r{}, r{}{}", cond_suffix, rd, rn, rm, shift_str),
+                            0b0011 => format!("rsb{} r{}, r{}, r{}{}", cond_suffix, rd, rn, rm, shift_str),
+                            0b0100 => format!("add{} r{}, r{}, r{}{}", cond_suffix, rd, rn, rm, shift_str),
+                            0b1000 if s_bit == 1 && rd == 0 => {
+                                format!("tst{} r{}, r{}{}", cond_suffix, rn, rm, shift_str)
+                            }
+                            0b1001 if s_bit == 1 && rd == 0 => {
+                                format!("teq{} r{}, r{}{}", cond_suffix, rn, rm, shift_str)
+                            }
+                            0b1010 if s_bit == 1 && rd == 0 => {
+                                format!("cmp{} r{}, r{}{}", cond_suffix, rn, rm, shift_str)
+                            }
+                            0b1011 if s_bit == 1 && rd == 0 => {
+                                format!("cmn{} r{}, r{}{}", cond_suffix, rn, rm, shift_str)
+                            }
+                            0b1100 => format!("orr{} r{}, r{}, r{}{}", cond_suffix, rd, rn, rm, shift_str),
+                            0b1101 if rn == 0 => {
+                                format!("mov{} r{}, r{}{}", cond_suffix, rd, rm, shift_str)
+                            }
+                            0b1110 => format!("bic{} r{}, r{}, r{}{}", cond_suffix, rd, rn, rm, shift_str),
+                            0b1111 if rn == 0 => {
+                                format!("mvn{} r{}, r{}{}", cond_suffix, rd, rm, shift_str)
+                            }
+                            _ => format!(".word {:08x}", word),
+                        }
                     }
-                    0b1001 if s_bit == 1 && rd == 0 => {
-                        format!("teq{} r{}, r{}{}", cond_suffix, rn, rm, shift_str)
-                    }
-                    0b1010 if s_bit == 1 && rd == 0 => {
-                        format!("cmp{} r{}, r{}{}", cond_suffix, rn, rm, shift_str)
-                    }
-                    0b1011 if s_bit == 1 && rd == 0 => {
-                        format!("cmn{} r{}, r{}{}", cond_suffix, rn, rm, shift_str)
-                    }
-                    0b1100 => format!("orr{} r{}, r{}, r{}{}", cond_suffix, rd, rn, rm, shift_str),
-                    0b1101 if rn == 0 => {
-                        format!("mov{} r{}, r{}{}", cond_suffix, rd, rm, shift_str)
-                    }
-                    0b1110 => format!("bic{} r{}, r{}, r{}{}", cond_suffix, rd, rn, rm, shift_str),
-                    0b1111 if rn == 0 => {
-                        format!("mvn{} r{}, r{}{}", cond_suffix, rd, rm, shift_str)
-                    }
-                    _ => format!(".word {:08x}", word),
                 }
             }
         }
@@ -3013,6 +3230,25 @@ impl Backend for Arm32Backend {
             code
         }
 
+        // ── Helper: emit ADD SP, SP, #large_value ──
+        // Handles values that don't fit in ARM rotated-immediate
+        fn emit_add_sp(imm: i32) -> Vec<u8> {
+            let mut code = Vec::new();
+            if let Some((rotate, imm8)) = try_encode_arm_imm(imm as u32) {
+                code.extend_from_slice(&encode_dp_imm(
+                    Condition::Al, DP_ADD, false,
+                    Gpr::R13.encoding(), Gpr::R13.encoding(), rotate, imm8,
+                ));
+            } else {
+                code.extend_from_slice(&load_immediate_arm32(Gpr::R12, imm as u32));
+                code.extend_from_slice(&encode_dp_reg(
+                    Condition::Al, DP_ADD, false,
+                    Gpr::R13.encoding(), Gpr::R13.encoding(), Gpr::R12.encoding(),
+                ));
+            }
+            code
+        }
+
         // ── Helper: emit ADD Rd, Rn, #large_value ──
         fn emit_add_imm(rd: Gpr, rn: Gpr, imm: i32) -> Vec<u8> {
             let mut code = Vec::new();
@@ -3058,6 +3294,31 @@ impl Backend for Arm32Backend {
                 code.extend_from_slice(&encode_ls_imm(
                     Condition::Al, true, true, false, false, true,
                     R12_TEMP, dst_reg.encoding(), 0,
+                ));
+                code
+            }
+        }
+
+        /// Load 32-bit word from [R11 + offset] into dst_reg (positive offset from R11).
+        /// Used to access stack-passed arguments (args 5+) which reside above the
+        /// saved {R11, LR} pair in the callee's frame.
+        fn ss_load_from_r11_plus(dst_reg: Gpr, offset_from_r11: i32) -> Vec<u8> {
+            if offset_from_r11 >= 0 && offset_from_r11 <= 4095 {
+                encode_ls_imm(
+                    Condition::Al, true, true, false, false, true,
+                    Gpr::R11.encoding(), dst_reg.encoding(), offset_from_r11 as u32,
+                ).to_vec()
+            } else {
+                // Large offset: compute address into R12, then LDR from R12
+                let mut code = Vec::new();
+                code.extend_from_slice(&load_immediate_arm32(Gpr::R12, offset_from_r11 as u32));
+                code.extend_from_slice(&encode_dp_reg(
+                    Condition::Al, DP_ADD, false,
+                    Gpr::R11.encoding(), Gpr::R12.encoding(), Gpr::R12.encoding(),
+                ));
+                code.extend_from_slice(&encode_ls_imm(
+                    Condition::Al, true, true, false, false, true,
+                    Gpr::R12.encoding(), dst_reg.encoding(), 0,
                 ));
                 code
             }
@@ -3180,7 +3441,9 @@ impl Backend for Arm32Backend {
             encoded: set_fp_code,
         });
 
-        // Store function parameters from R0-R3 to their stack slots
+        // Store function parameters to their stack slots
+        // Args 0–3 come from R0–R3; args 4+ reside on the stack above the
+        // saved {R11, LR} pair at [R11 + 8 + (i-4)*4].
         let arg_regs = [Gpr::R0, Gpr::R1, Gpr::R2, Gpr::R3];
         for (i, param) in func.params.iter().enumerate() {
             if let Some(id) = param.as_register() {
@@ -3192,6 +3455,26 @@ impl Backend for Arm32Backend {
                         reads: vec![PhysicalReg::new(RegClass::Gpr, arg_regs[i].encoding())],
                         writes: vec![],
                         encoded: store_code,
+                    });
+                } else {
+                    // Stack-passed argument: located at [R11 + 8 + (i-4)*4]
+                    // Load into R0 (free — already saved to its slot for param 0),
+                    // then store to the parameter's stack slot.
+                    // NOTE: We use R0 rather than R12 because ss_store_to_slot
+                    // uses R12 internally for large offsets and documents that
+                    // src_reg must NOT be R12 in that case.
+                    let arg_offset_from_r11: i32 = 8 + ((i - 4) * 4) as i32;
+                    let slot_offset = vreg_stack_slots.get(&id).copied().unwrap_or(0);
+                    let mut param_code = Vec::new();
+                    // LDR R0, [R11, #arg_offset_from_r11]
+                    param_code.extend(ss_load_from_r11_plus(Gpr::R0, arg_offset_from_r11));
+                    // STR R0, [R11 - slot_offset]
+                    param_code.extend(ss_store_to_slot(Gpr::R0, slot_offset));
+                    instructions.push(AllocatedInstruction {
+                        opcode: "ldr+str".to_string(),
+                        reads: vec![PhysicalReg::new(RegClass::Gpr, Gpr::R11.encoding())],
+                        writes: vec![],
+                        encoded: param_code,
                     });
                 }
             }
@@ -3579,8 +3862,49 @@ impl Backend for Arm32Backend {
                     // ── Call ──
                     crate::ir::IRInstr::Call { dst, func: target_func, args, is_extern: _ } => {
                         let mut code = Vec::new();
+                        let num_args = args.len();
+                        let num_stack_args = if num_args > 4 { num_args - 4 } else { 0 };
+                        let stack_args_bytes = num_stack_args * 4;
 
-                        // Move args to R0-R3
+                        // ── AAPCS: args 5+ go on the stack ──
+                        // 1. Decrement SP to make room for stack-passed arguments
+                        if stack_args_bytes > 0 {
+                            code.extend_from_slice(&emit_sub_sp(stack_args_bytes as i32));
+                        }
+
+                        // 2. Store args 5+ onto the stack (right-to-left push is
+                        //    achieved by placing arg5 at [SP+0], arg6 at [SP+4], etc.)
+                        for (i, arg) in args.iter().enumerate() {
+                            if i >= 4 {
+                                let stack_offset = ((i - 4) * 4) as u32;
+                                if stack_offset <= 4095 {
+                                    // Load arg value into R12 and STR directly
+                                    code.extend(ss_load_value(arg, &vreg_stack_slots, Gpr::R12));
+                                    code.extend_from_slice(&encode_ls_imm(
+                                        Condition::Al, true, true, false, false, false,
+                                        Gpr::R13.encoding(), Gpr::R12.encoding(), stack_offset,
+                                    ));
+                                } else {
+                                    // Large offset (extremely unlikely): compute addr first,
+                                    // then load arg value and store.
+                                    // Compute SP + stack_offset into R12
+                                    code.extend_from_slice(&load_immediate_arm32(Gpr::R12, stack_offset));
+                                    code.extend_from_slice(&encode_dp_reg(
+                                        Condition::Al, DP_ADD, false,
+                                        Gpr::R13.encoding(), Gpr::R12.encoding(), Gpr::R12.encoding(),
+                                    ));
+                                    // Load arg into R0 (R0-R3 not yet set up for this call)
+                                    code.extend(ss_load_value(arg, &vreg_stack_slots, Gpr::R0));
+                                    // STR R0, [R12, #0]
+                                    code.extend_from_slice(&encode_ls_imm(
+                                        Condition::Al, true, true, false, false, false,
+                                        Gpr::R12.encoding(), Gpr::R0.encoding(), 0,
+                                    ));
+                                }
+                            }
+                        }
+
+                        // 3. Move args 0–3 to R0–R3
                         // We need to be careful: if an arg is in a stack slot that
                         // uses R12 for large offsets, and we've already loaded an
                         // earlier arg into R0-R3, we need to handle this carefully.
@@ -3591,7 +3915,6 @@ impl Backend for Arm32Backend {
                                 let arg_reg = Gpr::arg_register(i).unwrap();
                                 code.extend(ss_load_value(arg, &vreg_stack_slots, arg_reg));
                             }
-                            // TODO: handle > 4 args via stack
                         }
 
                         // BL offset (placeholder)
@@ -3602,6 +3925,11 @@ impl Backend for Arm32Backend {
                             symbol: target_func.clone(),
                             reloc_type: "R_ARM_CALL".to_string(),
                         });
+
+                        // 4. Caller cleanup: pop stack-passed arguments
+                        if stack_args_bytes > 0 {
+                            code.extend_from_slice(&emit_add_sp(stack_args_bytes as i32));
+                        }
 
                         // Store return value to dst stack slot
                         if let Some(d) = dst {
@@ -3662,11 +3990,95 @@ impl Backend for Arm32Backend {
                     }
 
                     // ── Cast ──
-                    crate::ir::IRInstr::Cast { dst, src, .. } => {
+                    crate::ir::IRInstr::Cast { kind, dst, src } => {
                         let dst_id = dst.as_register().unwrap_or(0);
                         let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
                         let mut code = Vec::new();
                         code.extend(ss_load_value(src, &vreg_stack_slots, Gpr::R0));
+                        match kind {
+                            CastKind::ZExt | CastKind::SExt | CastKind::Trunc | CastKind::BitCast => {
+                                // No conversion needed for integer casts on ARM32
+                                // (all values are already 32-bit)
+                            }
+                            CastKind::IntToFloat | CastKind::UIntToFloat => {
+                                // VCVT.F32.S32 S0, S0 — convert signed int to f32
+                                // First, move int bits from R0 to S0 via STR+VLDR
+                                // STR R0, [R11, #-(frame_size+4)]  (temp slot below frame)
+                                // VLDR S0, [R11, #-(frame_size+4)]
+                                // VCVT.F32.S32 S0, S0
+                                // VSTR S0, [R11, #dst_offset]
+                                // Then load back: LDR R0, [R11, #dst_offset]
+                                let temp_off = -(fs + 4);
+                                // Store R0 to temp
+                                if (-temp_off) <= 4095 {
+                                    code.extend_from_slice(&encode_ls_imm(
+                                        Condition::Al, true, true, false, false, false,
+                                        Gpr::R11.encoding(), Gpr::R0.encoding(), (-temp_off) as u32,
+                                    ));
+                                } else {
+                                    code.extend_from_slice(&load_immediate_arm32(Gpr::R12, (-temp_off) as u32));
+                                    code.extend_from_slice(&encode_dp_reg(Condition::Al, DP_SUB, false, Gpr::R11.encoding(), Gpr::R12.encoding(), Gpr::R12.encoding()));
+                                    code.extend_from_slice(&encode_ls_imm(Condition::Al, true, true, false, false, false, Gpr::R12.encoding(), Gpr::R0.encoding(), 0));
+                                }
+                                // VLDR S0, [R11, #temp_off]
+                                code.extend_from_slice(&encode_vldr(0, Gpr::R11.encoding() as u8, temp_off));
+                                // VCVT.F32.S32 S0, S0 (signed int → single float)
+                                code.extend_from_slice(&encode_vcvt_f32_s32(0));
+                                // VSTR S0, [R11, #dst_offset]
+                                let neg_dst = -dst_offset;
+                                code.extend_from_slice(&encode_vstr(0, Gpr::R11.encoding() as u8, neg_dst));
+                                // Load result bits back to R0
+                                if (-neg_dst) <= 4095 {
+                                    code.extend_from_slice(&encode_ls_imm(
+                                        Condition::Al, true, false, false, false, false,
+                                        Gpr::R11.encoding(), Gpr::R0.encoding(), (-neg_dst) as u32,
+                                    ));
+                                } else {
+                                    code.extend_from_slice(&load_immediate_arm32(Gpr::R12, (-neg_dst) as u32));
+                                    code.extend_from_slice(&encode_dp_reg(Condition::Al, DP_SUB, false, Gpr::R11.encoding(), Gpr::R12.encoding(), Gpr::R12.encoding()));
+                                    code.extend_from_slice(&encode_ls_imm(Condition::Al, true, false, false, false, false, Gpr::R12.encoding(), Gpr::R0.encoding(), 0));
+                                }
+                            }
+                            CastKind::FloatToInt | CastKind::FloatToUInt => {
+                                // VCVT.S32.F32 S0, S0 — convert f32 to signed int
+                                // Move float bits from R0 to S0 via STR+VLDR
+                                // VCVT.S32.F32 S0, S0
+                                // VSTR S0, then LDR back
+                                let temp_off = -(fs + 4);
+                                if (-temp_off) <= 4095 {
+                                    code.extend_from_slice(&encode_ls_imm(
+                                        Condition::Al, true, true, false, false, false,
+                                        Gpr::R11.encoding(), Gpr::R0.encoding(), (-temp_off) as u32,
+                                    ));
+                                } else {
+                                    code.extend_from_slice(&load_immediate_arm32(Gpr::R12, (-temp_off) as u32));
+                                    code.extend_from_slice(&encode_dp_reg(Condition::Al, DP_SUB, false, Gpr::R11.encoding(), Gpr::R12.encoding(), Gpr::R12.encoding()));
+                                    code.extend_from_slice(&encode_ls_imm(Condition::Al, true, true, false, false, false, Gpr::R12.encoding(), Gpr::R0.encoding(), 0));
+                                }
+                                // VLDR S0, [R11, #temp_off]
+                                code.extend_from_slice(&encode_vldr(0, Gpr::R11.encoding() as u8, temp_off));
+                                // VCVT.S32.F32 S0, S0
+                                code.extend_from_slice(&encode_vcvt_s32_f32(0));
+                                // VSTR S0, [R11, #dst_offset]
+                                let neg_dst = -dst_offset;
+                                code.extend_from_slice(&encode_vstr(0, Gpr::R11.encoding() as u8, neg_dst));
+                                // Load result bits back to R0
+                                if (-neg_dst) <= 4095 {
+                                    code.extend_from_slice(&encode_ls_imm(
+                                        Condition::Al, true, false, false, false, false,
+                                        Gpr::R11.encoding(), Gpr::R0.encoding(), (-neg_dst) as u32,
+                                    ));
+                                } else {
+                                    code.extend_from_slice(&load_immediate_arm32(Gpr::R12, (-neg_dst) as u32));
+                                    code.extend_from_slice(&encode_dp_reg(Condition::Al, DP_SUB, false, Gpr::R11.encoding(), Gpr::R12.encoding(), Gpr::R12.encoding()));
+                                    code.extend_from_slice(&encode_ls_imm(Condition::Al, true, false, false, false, false, Gpr::R12.encoding(), Gpr::R0.encoding(), 0));
+                                }
+                            }
+                            CastKind::FloatToFloat => {
+                                // f32 ↔ f64 conversion on ARM32: treat as no-op for now
+                                // (would need double-precision VCVT instructions)
+                            }
+                        }
                         code.extend(ss_store_to_slot(Gpr::R0, dst_offset));
                         code
                     }
@@ -3913,23 +4325,90 @@ impl Backend for Arm32Backend {
                         code
                     }
                     crate::ir::IRInstr::AtomicCas { dst, addr, expected, desired, ty } => {
-                        // Lower as a simple load (placeholder)
-                        let load_ir = crate::ir::IRInstr::Load {
-                            dst: dst.clone(),
-                            addr: addr.clone(),
-                            offset: 0,
-                            ty: ty.clone(),
-                        };
+                        // Lower AtomicCas using LDREX/STREX (ARMv7-A compare-and-swap)
+                        //
+                        // Register allocation:
+                        //   R3 = address
+                        //   R1 = expected value
+                        //   R2 = desired value
+                        //   R0 = old value (from LDREX, also result stored to dst)
+                        //   R12 = STREX status (0=success, 1=failure)
+                        //
+                        // CAS loop layout (all 4-byte instructions):
+                        //   +0:  DMB SY
+                        //   +4:  LDREX{,B,H} R0, [R3]    ← retry
+                        //   +8:  CMP R0, R1
+                        //   +12: BNE done                  (offset_words = +2)
+                        //   +16: STREX{,B,H} R12, R2, [R3]
+                        //   +20: CMP R12, #0
+                        //   +24: BNE retry                 (offset_words = -7)
+                        //   +28: DMB SY                    ← done
+                        //
+                        // ARM branch offset = (target - (branch_addr + 8)) / 4
+                        // BNE done:   (28 - (12 + 8)) / 4 = +2
+                        // BNE retry:  (4  - (24 + 8)) / 4 = -7
                         let mut code = Vec::new();
+
+                        // Load operands into scratch registers
                         code.extend(ss_load_value(addr, &vreg_stack_slots, Gpr::R3));
+                        code.extend(ss_load_value(expected, &vreg_stack_slots, Gpr::R1));
+                        code.extend(ss_load_value(desired, &vreg_stack_slots, Gpr::R2));
+
+                        // DMB SY — acquire barrier before the CAS loop
+                        code.extend_from_slice(&encode_dmb(Condition::Al, 0xF));
+
+                        // LDREX{,B,H} R0, [R3] — load exclusive (retry label)
+                        match ty {
+                            crate::ir::IRType::I8 | crate::ir::IRType::U8 => {
+                                code.extend_from_slice(&encode_ldrexb(Condition::Al, Gpr::R3.encoding(), Gpr::R0.encoding()));
+                            }
+                            crate::ir::IRType::I16 | crate::ir::IRType::U16 => {
+                                code.extend_from_slice(&encode_ldrexh(Condition::Al, Gpr::R3.encoding(), Gpr::R0.encoding()));
+                            }
+                            _ => {
+                                code.extend_from_slice(&encode_ldrex(Condition::Al, Gpr::R3.encoding(), Gpr::R0.encoding()));
+                            }
+                        }
+
+                        // CMP R0, R1 — compare old value with expected
+                        code.extend_from_slice(&encode_dp_reg(
+                            Condition::Al, DP_CMP, true,
+                            Gpr::R0.encoding(), 0, Gpr::R1.encoding(),
+                        ));
+
+                        // BNE done — if old != expected, skip store (offset_words = +2)
+                        code.extend_from_slice(&encode_branch(Condition::Ne, false, 2));
+
+                        // STREX{,B,H} R12, R2, [R3] — try to store desired value
+                        match ty {
+                            crate::ir::IRType::I8 | crate::ir::IRType::U8 => {
+                                code.extend_from_slice(&encode_strexb(Condition::Al, Gpr::R3.encoding(), Gpr::R12.encoding(), Gpr::R2.encoding()));
+                            }
+                            crate::ir::IRType::I16 | crate::ir::IRType::U16 => {
+                                code.extend_from_slice(&encode_strexh(Condition::Al, Gpr::R3.encoding(), Gpr::R12.encoding(), Gpr::R2.encoding()));
+                            }
+                            _ => {
+                                code.extend_from_slice(&encode_strex(Condition::Al, Gpr::R3.encoding(), Gpr::R12.encoding(), Gpr::R2.encoding()));
+                            }
+                        }
+
+                        // CMP R12, #0 — check STREX status
+                        code.extend_from_slice(&encode_dp_imm(
+                            Condition::Al, DP_CMP, true,
+                            Gpr::R12.encoding(), 0, 0, 0,
+                        ));
+
+                        // BNE retry — if store failed, retry (offset_words = -7)
+                        code.extend_from_slice(&encode_branch(Condition::Ne, false, -7));
+
+                        // DMB SY — release barrier after successful CAS (done label)
+                        code.extend_from_slice(&encode_dmb(Condition::Al, 0xF));
+
+                        // Store the old value (in R0) to the dst stack slot
                         let dst_id = dst.as_register().unwrap_or(0);
                         let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
-                        code.extend_from_slice(&encode_ls_imm(
-                            Condition::Al, true, true, false, false, false,
-                            Gpr::R3.encoding(), Gpr::R0.encoding(), 0,
-                        ));
                         code.extend(ss_store_to_slot(Gpr::R0, dst_offset));
-                        let _ = (load_ir, expected, desired);
+
                         code
                     }
 
@@ -4844,4 +5323,103 @@ mod tests {
         );
     }
 }
+
+// ===========================================================================
+// VFPv3 Encoding Helpers (VLDR, VSTR, VCVT)
+// ===========================================================================
+
+/// Encode VLDR Sd, [Rn, #imm] — VFPv3 single-precision load.
+///
+/// Encoding: cond 1101 D001 Rn Vd 1010 imm8
+/// - D: bit 7 of Sd (Sd = D:Vd)
+/// - imm8: offset / 4 (signed, U bit indicates sign)
+fn encode_vldr(sd: u8, rn: u8, offset: i32) -> [u8; 4] {
+    let d_bit = ((sd >> 4) & 1) as u32;
+    let vd = (sd & 0xF) as u32;
+    let (u_bit, imm8) = if offset >= 0 {
+        (true, (offset / 4) as u32)
+    } else {
+        (false, (-offset / 4) as u32)
+    };
+    let word = (Condition::Al.encoding() as u32) << 28
+        | 0b1101 << 24
+        | (d_bit << 22)
+        | 0b01 << 20
+        | ((rn as u32 & 0xF) << 16)
+        | (vd << 12)
+        | 0b1010 << 8
+        | (u_bit as u32) << 23
+        | (imm8 & 0xFF);
+    word.to_le_bytes()
+}
+
+/// Encode VSTR Sd, [Rn, #imm] — VFPv3 single-precision store.
+///
+/// Encoding: cond 1101 D000 Rn Vd 1010 imm8
+fn encode_vstr(sd: u8, rn: u8, offset: i32) -> [u8; 4] {
+    let d_bit = ((sd >> 4) & 1) as u32;
+    let vd = (sd & 0xF) as u32;
+    let (u_bit, imm8) = if offset >= 0 {
+        (true, (offset / 4) as u32)
+    } else {
+        (false, (-offset / 4) as u32)
+    };
+    let word = (Condition::Al.encoding() as u32) << 28
+        | 0b1101 << 24
+        | (d_bit << 22)
+        | 0b00 << 20
+        | ((rn as u32 & 0xF) << 16)
+        | (vd << 12)
+        | 0b1010 << 8
+        | (u_bit as u32) << 23
+        | (imm8 & 0xFF);
+    word.to_le_bytes()
+}
+
+/// Encode VCVT.F32.S32 Sd, Sm — convert signed integer to single-precision float.
+///
+/// Encoding: cond 1110 D11 011 Sd 1010 01 M0 Sm
+/// - Sd = D:Vd, Sm = M:Vm
+fn encode_vcvt_f32_s32(sd: u8) -> [u8; 4] {
+    let d_bit = ((sd >> 4) & 1) as u32;
+    let vd = (sd & 0xF) as u32;
+    // For VCVT.F32.S32 Sd, Sd: Sm = Sd
+    let m_bit = d_bit;
+    let vm = vd;
+    let word = (Condition::Al.encoding() as u32) << 28
+        | 0b1110 << 24
+        | (d_bit << 22)
+        | 0b11 << 20
+        | 0b011 << 17
+        | (vd << 12)
+        | 0b1010 << 8
+        | 0b01 << 6
+        | (m_bit << 5)
+        | 0 << 4
+        | (vm & 0xF);
+    word.to_le_bytes()
+}
+
+/// Encode VCVT.S32.F32 Sd, Sm — convert single-precision float to signed integer.
+///
+/// Encoding: cond 1110 D11 011 Sd 1011 11 M0 Sm
+fn encode_vcvt_s32_f32(sd: u8) -> [u8; 4] {
+    let d_bit = ((sd >> 4) & 1) as u32;
+    let vd = (sd & 0xF) as u32;
+    let m_bit = d_bit;
+    let vm = vd;
+    let word = (Condition::Al.encoding() as u32) << 28
+        | 0b1110 << 24
+        | (d_bit << 22)
+        | 0b11 << 20
+        | 0b011 << 17
+        | (vd << 12)
+        | 0b1011 << 8
+        | 0b11 << 6
+        | (m_bit << 5)
+        | 0 << 4
+        | (vm & 0xF);
+    word.to_le_bytes()
+}
+
 pub mod disasm;

@@ -576,6 +576,7 @@ const OPC_ST_D: u32 = 0x0A7;
 const OPC_LD_BU: u32 = 0x0A8;
 const OPC_LD_HU: u32 = 0x0A9;
 const OPC_LD_WU: u32 = 0x0AA;
+const OPC_DBAR: u32 = 0x0E7; // DBAR: 2RI12 format with rd=$r0, rj=$r0
 
 // ===========================================================================
 // 2RI16-format Opcodes (bits[31:26])
@@ -607,6 +608,13 @@ const OPC_LL_W: u32 = 0x20;
 const OPC_SC_W: u32 = 0x21;
 const OPC_LL_D: u32 = 0x22;
 const OPC_SC_D: u32 = 0x23;
+
+// ===========================================================================
+// 3R-format Atomic Memory Operation Opcodes (bits[31:15])
+// ===========================================================================
+
+const OPC_AMSWAP_W: u32 = 0x00C0;
+const OPC_AMSWAP_D: u32 = 0x00C2;
 
 // ===========================================================================
 // 1RI21-format Opcodes (bits[31:26])
@@ -866,6 +874,19 @@ pub enum Instruction {
     /// Store-Conditional Doubleword: `sc.d rd, rj, si14`
     ScD { rd: Gpr, rj: Gpr, imm14: i32 },
 
+    // ── Atomic Memory Operations (3R) ──────────────────────────────
+    /// Atomic Memory Swap Word: `amswap.w rd, rj, rk`
+    /// rd = old value at [rj]; [rj] = rk
+    AmswapW { rd: Gpr, rj: Gpr, rk: Gpr },
+    /// Atomic Memory Swap Doubleword: `amswap.d rd, rj, rk`
+    /// rd = old value at [rj]; [rj] = rk
+    AmswapD { rd: Gpr, rj: Gpr, rk: Gpr },
+
+    // ── Memory Barrier (2RI12) ─────────────────────────────────────
+    /// Data Barrier: `dbar hint`
+    /// Ensures memory ordering. hint=0 is a full barrier.
+    Dbar { hint: u32 },
+
     // ── Move (2R) ───────────────────────────────────────────────────
     /// Sign-extend Halfword to Word: `ext.w.h rd, rj`
     ExtWH { rd: Gpr, rj: Gpr },
@@ -913,6 +934,20 @@ pub enum Instruction {
     FmovS { fd: Fpr, fj: Fpr },
     /// FP Move Double: `fmov.d fd, fj`
     FmovD { fd: Fpr, fj: Fpr },
+
+    // ── FP Conversion (2R) ──────────────────────────────────────────
+    /// Float Convert From Signed Integer Word: `ffint.s.w fd, fj`
+    FfintSW { fd: Fpr, fj: Fpr },
+    /// Float Convert From Signed Integer Doubleword: `ffint.d.w fd, fj`
+    FfintDW { fd: Fpr, fj: Fpr },
+    /// Float Convert To Signed Integer Word: `ftint.w.s fd, fj`
+    FtintWS { fd: Fpr, fj: Fpr },
+    /// Float Convert To Signed Integer Doubleword: `ftint.w.d fd, fj`
+    FtintWD { fd: Fpr, fj: Fpr },
+    /// Float Convert Single to Double: `fcvt.d.s fd, fj`
+    FcvtDS { fd: Fpr, fj: Fpr },
+    /// Float Convert Double to Single: `fcvt.s.d fd, fj`
+    FcvtSD { fd: Fpr, fj: Fpr },
 
     // ── FP Compare (4R-like) ────────────────────────────────────────
     /// FP Compare Single: `fcmp.cond.s cd, fj, fk`
@@ -1285,6 +1320,28 @@ impl Instruction {
                 rd.encoding(),
             ),
 
+            // ── Atomic Memory Operations (3R) ─────────────────────
+            Instruction::AmswapW { rd, rj, rk } => encode_3r(
+                OPC_AMSWAP_W,
+                rk.encoding(),
+                rj.encoding(),
+                rd.encoding(),
+            ),
+            Instruction::AmswapD { rd, rj, rk } => encode_3r(
+                OPC_AMSWAP_D,
+                rk.encoding(),
+                rj.encoding(),
+                rd.encoding(),
+            ),
+
+            // ── Memory Barrier (2RI12) ────────────────────────────
+            Instruction::Dbar { hint } => encode_2ri12(
+                OPC_DBAR,
+                (*hint) & 0xFFF,
+                0, // rj = $r0
+                0, // rd = $r0
+            ),
+
             // ── Move (2R) ─────────────────────────────────────────
             Instruction::ExtWH { rd, rj } => encode_2r(OPC_EXT_W_H, rj.encoding(), rd.encoding()),
             Instruction::ExtWB { rd, rj } => encode_2r(OPC_EXT_W_B, rj.encoding(), rd.encoding()),
@@ -1353,6 +1410,17 @@ impl Instruction {
             // ── FP Move (2R) ──────────────────────────────────────
             Instruction::FmovS { fd, fj } => encode_2r(OPC_FMOV_S, fj.encoding(), fd.encoding()),
             Instruction::FmovD { fd, fj } => encode_2r(OPC_FMOV_D, fj.encoding(), fd.encoding()),
+
+            // ── FP Conversion (2R) ──────────────────────────────
+            // FFINT.S.W: opcode=0x004519, FFINT.D.W: opcode=0x00451A
+            Instruction::FfintSW { fd, fj } => encode_2r(0x004519, fj.encoding(), fd.encoding()),
+            Instruction::FfintDW { fd, fj } => encode_2r(0x00451A, fj.encoding(), fd.encoding()),
+            // FTINT.W.S: opcode=0x00450C, FTINT.W.D: opcode=0x00450D
+            Instruction::FtintWS { fd, fj } => encode_2r(0x00450C, fj.encoding(), fd.encoding()),
+            Instruction::FtintWD { fd, fj } => encode_2r(0x00450D, fj.encoding(), fd.encoding()),
+            // FCVT.D.S: opcode=0x004502, FCVT.S.D: opcode=0x004503
+            Instruction::FcvtDS { fd, fj } => encode_2r(0x004502, fj.encoding(), fd.encoding()),
+            Instruction::FcvtSD { fd, fj } => encode_2r(0x004503, fj.encoding(), fd.encoding()),
 
             // ── FP Compare (4R-like) ──────────────────────────────
             Instruction::FCmpS { cond, fj, fk, cd } => encode_4r(
@@ -1470,6 +1538,9 @@ impl Instruction {
             Instruction::ScW { .. } => "sc.w",
             Instruction::LlD { .. } => "ll.d",
             Instruction::ScD { .. } => "sc.d",
+            Instruction::AmswapW { .. } => "amswap.w",
+            Instruction::AmswapD { .. } => "amswap.d",
+            Instruction::Dbar { .. } => "dbar",
             Instruction::ExtWH { .. } => "ext.w.h",
             Instruction::ExtWB { .. } => "ext.w.b",
             Instruction::CloD { .. } => "clo.d",
@@ -1489,6 +1560,12 @@ impl Instruction {
             Instruction::FdivD { .. } => "fdiv.d",
             Instruction::FmovS { .. } => "fmov.s",
             Instruction::FmovD { .. } => "fmov.d",
+            Instruction::FfintSW { .. } => "ffint.s.w",
+            Instruction::FfintDW { .. } => "ffint.d.w",
+            Instruction::FtintWS { .. } => "ftint.w.s",
+            Instruction::FtintWD { .. } => "ftint.w.d",
+            Instruction::FcvtDS { .. } => "fcvt.d.s",
+            Instruction::FcvtSD { .. } => "fcvt.s.d",
             Instruction::FCmpS { .. } => "fcmp.cond.s",
             Instruction::FCmpD { .. } => "fcmp.cond.d",
             Instruction::Nop => "nop",
@@ -1601,6 +1678,9 @@ impl fmt::Display for Instruction {
             Instruction::ScW { rd, rj, imm14 } => write!(f, "sc.w {}, {}, {}", rd, rj, imm14),
             Instruction::LlD { rd, rj, imm14 } => write!(f, "ll.d {}, {}, {}", rd, rj, imm14),
             Instruction::ScD { rd, rj, imm14 } => write!(f, "sc.d {}, {}, {}", rd, rj, imm14),
+            Instruction::AmswapW { rd, rj, rk } => write!(f, "amswap.w {}, {}, {}", rd, rj, rk),
+            Instruction::AmswapD { rd, rj, rk } => write!(f, "amswap.d {}, {}, {}", rd, rj, rk),
+            Instruction::Dbar { hint } => write!(f, "dbar {}", hint),
             Instruction::ExtWH { rd, rj } => write!(f, "ext.w.h {}, {}", rd, rj),
             Instruction::ExtWB { rd, rj } => write!(f, "ext.w.b {}, {}", rd, rj),
             Instruction::CloD { rd, rj } => write!(f, "clo.d {}, {}", rd, rj),
@@ -1620,6 +1700,12 @@ impl fmt::Display for Instruction {
             Instruction::FdivD { fd, fj, fk } => write!(f, "fdiv.d {}, {}, {}", fd, fj, fk),
             Instruction::FmovS { fd, fj } => write!(f, "fmov.s {}, {}", fd, fj),
             Instruction::FmovD { fd, fj } => write!(f, "fmov.d {}, {}", fd, fj),
+            Instruction::FfintSW { fd, fj } => write!(f, "ffint.s.w {}, {}", fd, fj),
+            Instruction::FfintDW { fd, fj } => write!(f, "ffint.d.w {}, {}", fd, fj),
+            Instruction::FtintWS { fd, fj } => write!(f, "ftint.w.s {}, {}", fd, fj),
+            Instruction::FtintWD { fd, fj } => write!(f, "ftint.w.d {}, {}", fd, fj),
+            Instruction::FcvtDS { fd, fj } => write!(f, "fcvt.d.s {}, {}", fd, fj),
+            Instruction::FcvtSD { fd, fj } => write!(f, "fcvt.s.d {}, {}", fd, fj),
             Instruction::FCmpS { cond, fj, fk, cd } => write!(
                 f,
                 "fcmp.{}.s $c{}, {}, {}",
@@ -1780,6 +1866,68 @@ fn patch_load_imm_64(code: &mut [u8], offset: usize, val: u64) {
 
 /// Decode a single LoongArch64 32-bit instruction word into a mnemonic string.
 fn decode_loongarch64_instruction(word: u32) -> String {
+    // Check higher-bit opcodes first (more specific patterns)
+
+    // ── 2RI12 format: 10-bit opcode at bits[31:22] ──
+    let opc_2ri12 = (word >> 22) & 0x3FF;
+    match opc_2ri12 {
+        0x0E7 => {
+            // DBAR hint: rd=$r0, rj=$r0, hint=si12
+            let hint = (word >> 10) & 0xFFF;
+            return format!("dbar {}", hint);
+        }
+        _ => {}
+    }
+
+    // ── 3R format: 17-bit opcode at bits[31:15] for atomic memory ops ──
+    let opc_3r_17 = (word >> 15) & 0x1FFFF;
+    match opc_3r_17 {
+        0x00C0 => {
+            let rd = word & 0x1F;
+            let rj = (word >> 5) & 0x1F;
+            let rk = (word >> 10) & 0x1F;
+            return format!("amswap.w $r{}, $r{}, $r{}", rd, rj, rk);
+        }
+        0x00C2 => {
+            let rd = word & 0x1F;
+            let rj = (word >> 5) & 0x1F;
+            let rk = (word >> 10) & 0x1F;
+            return format!("amswap.d $r{}, $r{}, $r{}", rd, rj, rk);
+        }
+        _ => {}
+    }
+
+    // ── 2RI14 format: 8-bit opcode at bits[31:24] for LL/SC ──
+    let opc_2ri14 = (word >> 24) & 0xFF;
+    match opc_2ri14 {
+        0x20 => {
+            let rd = word & 0x1F;
+            let rj = (word >> 5) & 0x1F;
+            let imm14 = ((word >> 10) as i32) << 18 >> 18;
+            return format!("ll.w $r{}, $r{}, {}", rd, rj, imm14);
+        }
+        0x21 => {
+            let rd = word & 0x1F;
+            let rj = (word >> 5) & 0x1F;
+            let imm14 = ((word >> 10) as i32) << 18 >> 18;
+            return format!("sc.w $r{}, $r{}, {}", rd, rj, imm14);
+        }
+        0x22 => {
+            let rd = word & 0x1F;
+            let rj = (word >> 5) & 0x1F;
+            let imm14 = ((word >> 10) as i32) << 18 >> 18;
+            return format!("ll.d $r{}, $r{}, {}", rd, rj, imm14);
+        }
+        0x23 => {
+            let rd = word & 0x1F;
+            let rj = (word >> 5) & 0x1F;
+            let imm14 = ((word >> 10) as i32) << 18 >> 18;
+            return format!("sc.d $r{}, $r{}, {}", rd, rj, imm14);
+        }
+        _ => {}
+    }
+
+    // ── Fall back to simplified 7-bit opcode matching ──
     let opcode = word & 0x7f;
     match opcode {
         0x00 => {
@@ -2788,7 +2936,7 @@ fn lower_binop_la64(
                 ));
             }
         }
-        BinOpKind::Ror | BinOpKind::Rol => {
+        BinOpKind::Ror => {
             let (r, pre) = resolve_gpr_la64(rhs, vreg_map, Gpr::T1);
             result.extend(pre);
             result.push(emit_alloc_instr(
@@ -2800,6 +2948,37 @@ fn lower_binop_la64(
                 vec![
                     PhysicalReg::new(RegClass::Gpr, l.encoding()),
                     PhysicalReg::new(RegClass::Gpr, r.encoding()),
+                ],
+                vec![PhysicalReg::new(RegClass::Gpr, dst_reg.encoding())],
+            ));
+        }
+        BinOpKind::Rol => {
+            // ROL(x, n) = ROTR(x, 64-n)
+            let (r, pre) = resolve_gpr_la64(rhs, vreg_map, Gpr::T1);
+            result.extend(pre);
+            // Compute 64-n in T2: ADDI.D T2, $r0, 64; SUB.D T2, T2, r
+            result.push(emit_alloc_instr(
+                Instruction::AddiD { rd: Gpr::T2, rj: Gpr::R0, imm12: 64 },
+                vec![],
+                vec![PhysicalReg::new(RegClass::Gpr, Gpr::T2.encoding())],
+            ));
+            result.push(emit_alloc_instr(
+                Instruction::SubD { rd: Gpr::T2, rj: Gpr::T2, rk: r },
+                vec![
+                    PhysicalReg::new(RegClass::Gpr, Gpr::T2.encoding()),
+                    PhysicalReg::new(RegClass::Gpr, r.encoding()),
+                ],
+                vec![PhysicalReg::new(RegClass::Gpr, Gpr::T2.encoding())],
+            ));
+            result.push(emit_alloc_instr(
+                Instruction::RotrD {
+                    rd: dst_reg,
+                    rj: l,
+                    rk: Gpr::T2,
+                },
+                vec![
+                    PhysicalReg::new(RegClass::Gpr, l.encoding()),
+                    PhysicalReg::new(RegClass::Gpr, Gpr::T2.encoding()),
                 ],
                 vec![PhysicalReg::new(RegClass::Gpr, dst_reg.encoding())],
             ));

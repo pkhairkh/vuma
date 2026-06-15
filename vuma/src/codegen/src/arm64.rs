@@ -1092,6 +1092,10 @@ pub enum Instruction {
     SCVTF { rd: Register, rn: Register },
     /// Float to signed integer: `FCVTZS Xd, Dn`
     FCVTZS { rd: Register, rn: Register },
+    /// Unsigned integer to float: `UCVTF Dd, Xn`
+    UCVTF { rd: Register, rn: Register },
+    /// Float to unsigned integer: `FCVTZU Xd, Dn`
+    FCVTZU { rd: Register, rn: Register },
     /// Float convert (single ↔ double): `FCVT Sd, Dn` or `FCVT Dd, Sn`
     FCVT {
         rd: Register,
@@ -1805,6 +1809,20 @@ impl Instruction {
             // FCVTZS: 1 0 0 1 1 0 1 1 0 0 1 1 0 0 0 0 0 0 0 0 0 0 Rn Rd
             Instruction::FCVTZS { rd, rn } => {
                 Ok(0b10_0110_1100_0110_0000_0000_0000_0000 | (rn.encoding() << 5) | rd.encoding())
+            }
+
+            // ---- UCVTF (unsigned integer to double-precision float) ----
+            // UCVTF Xd, Xn: 1 0 0110 1 000 1100 0000 0000 00 Rn Rd
+            // Encoding: sf=1, op=1, S=0, type=10, rmode=11, opcode=000, Rn, Rd
+            // 0b1_0_0110_1_000_1100_0000_0000_0000_0000
+            Instruction::UCVTF { rd, rn } => {
+                Ok(0b1_00_1101_000_110_0000_0000_0000_0000 | (rn.encoding() << 5) | rd.encoding())
+            }
+
+            // ---- FCVTZU (double-precision float to unsigned integer) ----
+            // FCVTZU Xd, Dn: 1 0 0110 1 100 0111 0000 0000 00 Rn Rd
+            Instruction::FCVTZU { rd, rn } => {
+                Ok(0b1_00_1101_100_011_0000_0000_0000_0000 | (rn.encoding() << 5) | rd.encoding())
             }
 
             // ---- FCVT (convert between single and double) ----
@@ -2895,6 +2913,8 @@ impl std::fmt::Display for Instruction {
             Instruction::SXTW { rd, rn } => write!(f, "sxtw {}, {}", rd, rn),
             Instruction::SCVTF { rd, rn } => write!(f, "scvtf {}, {}", rd, rn),
             Instruction::FCVTZS { rd, rn } => write!(f, "fcvtzs {}, {}", rd, rn),
+            Instruction::UCVTF { rd, rn } => write!(f, "ucvtf {}, {}", rd, rn),
+            Instruction::FCVTZU { rd, rn } => write!(f, "fcvtzu {}, {}", rd, rn),
             Instruction::FCVT { rd, rn, to_double } => {
                 if *to_double {
                     write!(f, "fcvt {}, {} (to double)", rd, rn)
@@ -3704,13 +3724,25 @@ impl InstructionSelector {
                         self.push(Instruction::MOV { rd, rm: rn });
                     }
                 }
-                CastKind::IntToFloat | CastKind::UIntToFloat |
-                CastKind::FloatToInt | CastKind::FloatToUInt |
+                CastKind::IntToFloat => {
+                    // Signed int → float: SCVTF
+                    self.push(Instruction::SCVTF { rd, rn });
+                }
+                CastKind::UIntToFloat => {
+                    // Unsigned int → float: UCVTF
+                    self.push(Instruction::UCVTF { rd, rn });
+                }
+                CastKind::FloatToInt => {
+                    // Float → signed int: FCVTZS
+                    self.push(Instruction::FCVTZS { rd, rn });
+                }
+                CastKind::FloatToUInt => {
+                    // Float → unsigned int: FCVTZU
+                    self.push(Instruction::FCVTZU { rd, rn });
+                }
                 CastKind::FloatToFloat => {
-                    // FP conversion casts — not yet implemented; pass through.
-                    if rd != rn {
-                        self.push(Instruction::MOV { rd, rm: rn });
-                    }
+                    // Float ↔ float width change: FCVT
+                    self.push(Instruction::FCVT { rd, rn, to_double: true });
                 }
             }
         }

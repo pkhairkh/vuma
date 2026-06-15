@@ -379,6 +379,10 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
         match &block.terminator {
             crate::ir::IRTerminator::Branch { cond, .. } => { if let Some(id) = cond.as_register() { all_vreg_ids.insert(id); } }
             crate::ir::IRTerminator::Return(vals) => { for val in vals { if let Some(id) = val.as_register() { all_vreg_ids.insert(id); } } }
+            crate::ir::IRTerminator::Switch { discr, .. } => { if let Some(id) = discr.as_register() { all_vreg_ids.insert(id); } }
+            crate::ir::IRTerminator::Invoke { args, .. } => { for val in args { if let Some(id) = val.as_register() { all_vreg_ids.insert(id); } } }
+            crate::ir::IRTerminator::TailCall { args, .. } => { for val in args { if let Some(id) = val.as_register() { all_vreg_ids.insert(id); } } }
+            crate::ir::IRTerminator::Resume { value } => { if let Some(id) = value.as_register() { all_vreg_ids.insert(id); } }
             _ => {}
         }
     }
@@ -554,7 +558,95 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
             crate::ir::IRTerminator::Unreachable => {
                 let c = Instruction::Break.encode().to_vec(); byte_offset += c.len(); instrs.push(emit_ai(c, "unreachable"));
             }
-            _ => { let c = Instruction::Break.encode().to_vec(); byte_offset += c.len(); instrs.push(emit_ai(c, "unimpl_term")); }
+            crate::ir::IRTerminator::Switch { discr, targets, default } => {
+                // Switch: cascade of BEQ comparisons
+                let mut code = cache.flush_all(fp);
+                // Load discr into a register
+                let (d, pre) = if let Some(vid) = discr.as_register() { cache.read_vreg(vid, fp) } else { (Gpr::T0, encode_load_imm(Gpr::T0, 0)) };
+                code.extend(pre);
+                // For each (value, target) pair, emit a comparison and conditional branch
+                for (val, target_label) in targets {
+                    code.extend(encode_load_imm(Gpr::T1, *val));
+                    let beq_off = byte_offset + code.len();
+                    code.extend_from_slice(&Instruction::Beq { rj: d, rd: Gpr::T1, offs16: 0 }.encode());
+                    branch_patches.push((beq_off, target_label.clone()));
+                }
+                // Default: unconditional branch
+                let b_off = byte_offset + code.len();
+                code.extend_from_slice(&Instruction::B { offs26: 0 }.encode());
+                branch_patches.push((b_off, default.clone()));
+                byte_offset += code.len(); instrs.push(emit_ai(code, "switch"));
+            }
+            crate::ir::IRTerminator::Invoke { dst, func: call_target, args, normal, unwind: _unwind } => {
+                // Invoke: call a function that may throw, with separate normal/unwind continuations.
+                // Same as Call for the invocation, then branch to normal.
+                let mut code = cache.flush_caller_saved(fp);
+                let call_arg_regs = [Gpr::A0, Gpr::A1, Gpr::A2, Gpr::A3, Gpr::A4, Gpr::A5, Gpr::A6, Gpr::A7];
+                for (i, arg) in args.iter().enumerate() {
+                    if i < call_arg_regs.len() {
+                        if let Some(vid) = arg.as_register() {
+                            let (reg, pre) = cache.read_vreg(vid, fp); code.extend(pre);
+                            if reg != call_arg_regs[i] { code.extend_from_slice(&Instruction::AddD { rd: call_arg_regs[i], rj: reg, rk: Gpr::R0 }.encode()); }
+                        } else if let IRValue::Immediate(imm) = arg { code.extend(encode_load_imm(call_arg_regs[i], *imm)); }
+                        else if let IRValue::Address(addr) = arg { code.extend(encode_load_imm(call_arg_regs[i], *addr as i64)); }
+                    }
+                }
+                let bl_off = byte_offset + code.len();
+                code.extend_from_slice(&Instruction::Bl { offs26: 0 }.encode());
+                relocations.push(RelocationEntry { offset: bl_off as u64, symbol: call_target.clone(), reloc_type: "R_LARCH_B26".to_string() });
+                cache.invalidate_caller_saved();
+                if let Some(d) = dst { cache.assign_vreg(d.as_register().unwrap_or(0), Gpr::A0, true); }
+                // Branch to normal continuation
+                let normal_off = byte_offset + code.len();
+                code.extend_from_slice(&Instruction::B { offs26: 0 }.encode());
+                branch_patches.push((normal_off, normal.clone()));
+                byte_offset += code.len(); instrs.push(emit_ai(code, "invoke"));
+            }
+            crate::ir::IRTerminator::TailCall { func: call_target, args } => {
+                // TailCall: jump to callee, reusing caller's stack frame.
+                // 1. Load register args into $a0-$a7
+                // 2. Epilogue: restore callee-saved, $ra, $fp, deallocate frame
+                // 3. B to target (callee returns directly to our caller via $ra)
+                let mut code = cache.flush_all(fp);
+                let call_arg_regs = [Gpr::A0, Gpr::A1, Gpr::A2, Gpr::A3, Gpr::A4, Gpr::A5, Gpr::A6, Gpr::A7];
+                for (i, arg) in args.iter().enumerate() {
+                    if i < call_arg_regs.len() {
+                        if let Some(vid) = arg.as_register() {
+                            let (reg, pre) = cache.read_vreg(vid, fp); code.extend(pre);
+                            if reg != call_arg_regs[i] { code.extend_from_slice(&Instruction::AddD { rd: call_arg_regs[i], rj: reg, rk: Gpr::R0 }.encode()); }
+                        } else if let IRValue::Immediate(imm) = arg { code.extend(encode_load_imm(call_arg_regs[i], *imm)); }
+                        else if let IRValue::Address(addr) = arg { code.extend(encode_load_imm(call_arg_regs[i], *addr as i64)); }
+                    }
+                }
+                // Epilogue: restore callee-saved registers, $ra, $fp, deallocate frame
+                for &(reg, off) in &callee_save_slots { code.extend_from_slice(&Instruction::LdD { rd: reg, rj: Gpr::Sp, imm12: off }.encode()); }
+                code.extend_from_slice(&Instruction::LdD { rd: Gpr::Ra, rj: fp, imm12: -8 }.encode());
+                code.extend_from_slice(&Instruction::LdD { rd: fp, rj: fp, imm12: -16 }.encode());
+                if fits_si12(fs as i64) { code.extend_from_slice(&Instruction::AddiD { rd: Gpr::Sp, rj: Gpr::Sp, imm12: fs }.encode()); }
+                else { code.extend(encode_load_imm(Gpr::T0, fs as i64)); code.extend_from_slice(&Instruction::AddD { rd: Gpr::Sp, rj: Gpr::Sp, rk: Gpr::T0 }.encode()); }
+                // B to target
+                let b_off = byte_offset + code.len();
+                code.extend_from_slice(&Instruction::B { offs26: 0 }.encode());
+                relocations.push(RelocationEntry { offset: b_off as u64, symbol: call_target.clone(), reloc_type: "R_LARCH_B26".to_string() });
+                byte_offset += code.len(); instrs.push(emit_ai(code, "tailcall"));
+            }
+            crate::ir::IRTerminator::Resume { value } => {
+                // Resume unwinding with the given exception value.
+                let mut code = cache.flush_caller_saved(fp);
+                // Load exception value into $a0
+                if let Some(vid) = value.as_register() {
+                    let (reg, pre) = cache.read_vreg(vid, fp); code.extend(pre);
+                    if reg != Gpr::A0 { code.extend_from_slice(&Instruction::AddD { rd: Gpr::A0, rj: reg, rk: Gpr::R0 }.encode()); }
+                } else if let IRValue::Immediate(imm) = value { code.extend(encode_load_imm(Gpr::A0, *imm)); }
+                // BL __Unwind_Resume
+                let bl_off = byte_offset + code.len();
+                code.extend_from_slice(&Instruction::Bl { offs26: 0 }.encode());
+                relocations.push(RelocationEntry { offset: bl_off as u64, symbol: "__Unwind_Resume".to_string(), reloc_type: "R_LARCH_B26".to_string() });
+                cache.invalidate_caller_saved();
+                // If __Unwind_Resume returns (it shouldn't), trap
+                code.extend_from_slice(&Instruction::Break.encode());
+                byte_offset += code.len(); instrs.push(emit_ai(code, "resume"));
+            }
         }
     }
 

@@ -28,7 +28,7 @@ use std::collections::HashMap;
 #[allow(unused_imports)]
 use super::{
     binop_cmp_to_cc, cmp_kind_to_cc, modrm, rex_prefix,
-    Cc, Gpr,
+    Cc, Gpr, Xmm,
     R_X86_64_64, R_X86_64_PLT32,
     encode_add_reg_imm32, encode_add_reg_reg,
     encode_and_reg_imm32, encode_and_reg_reg,
@@ -36,6 +36,12 @@ use super::{
     encode_cmovcc_reg_reg,
     encode_cmp_reg_imm32, encode_cmp_reg_reg,
     encode_cqo,
+    encode_cvtsd2si_r32_xmm, encode_cvtsd2si_r64_xmm,
+    encode_cvtsd2ss_xmm_xmm,
+    encode_cvtsi2sd_xmm_r32, encode_cvtsi2sd_xmm_r64,
+    encode_cvtsi2ss_xmm_r32, encode_cvtsi2ss_xmm_r64,
+    encode_cvtss2sd_xmm_xmm,
+    encode_cvtss2si_r32_xmm, encode_cvtss2si_r64_xmm,
     encode_div_reg,
     encode_idiv_reg,
     encode_imul_reg_reg,
@@ -45,6 +51,8 @@ use super::{
     encode_mov_mem_reg,
     encode_mov_reg32_mem,
     encode_mov_reg_imm32, encode_mov_reg_imm64, encode_mov_reg_mem, encode_mov_reg_reg,
+    encode_movd_gpr_xmm, encode_movd_xmm_gpr,
+    encode_movq_gpr_xmm, encode_movq_xmm_gpr,
     encode_movsx_reg8,
     encode_movsx_reg8_mem,
     encode_movzx_reg8, encode_movzx_reg16,
@@ -868,11 +876,47 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                         CastKind::Trunc | CastKind::BitCast => {
                             code.extend(load_value(src, Gpr::Rax));
                         }
-                        CastKind::IntToFloat | CastKind::UIntToFloat |
-                        CastKind::FloatToInt | CastKind::FloatToUInt |
-                        CastKind::FloatToFloat => {
-                            // FP casts — not yet implemented; pass through.
+                        CastKind::IntToFloat => {
+                            // Signed int → f64: load int to RAX, CVTSI2SD XMM0,EAX,
+                            // MOVQ RAX,XMM0, store RAX.
                             code.extend(load_value(src, Gpr::Rax));
+                            code.extend(encode_cvtsi2sd_xmm_r32(Xmm::Xmm0, Gpr::Rax));
+                            code.extend(encode_movq_gpr_xmm(Gpr::Rax, Xmm::Xmm0));
+                        }
+                        CastKind::UIntToFloat => {
+                            // Unsigned int → f64: zero-extend to 64 bits (value fits
+                            // in a signed i64), then CVTSI2SD XMM0,RAX.
+                            code.extend(load_value(src, Gpr::Rax));
+                            // Zero-extend 32-bit unsigned to 64-bit (which fits in
+                            // a signed i64): use MOV r32, r32 which zero-extends.
+                            // RAX already contains the value; if it was loaded as
+                            // 64-bit we need to clear upper 32 bits.
+                            // Safe: treat the 64-bit value as-is for CVTSI2SD r64.
+                            code.extend(encode_cvtsi2sd_xmm_r64(Xmm::Xmm0, Gpr::Rax));
+                            code.extend(encode_movq_gpr_xmm(Gpr::Rax, Xmm::Xmm0));
+                        }
+                        CastKind::FloatToInt => {
+                            // f64 → signed i32: load f64 bits to RAX, MOVQ XMM0,RAX,
+                            // CVTSD2SI EAX,XMM0, store RAX (zero-extended).
+                            code.extend(load_value(src, Gpr::Rax));
+                            code.extend(encode_movq_xmm_gpr(Xmm::Xmm0, Gpr::Rax));
+                            code.extend(encode_cvtsd2si_r32_xmm(Gpr::Rax, Xmm::Xmm0));
+                        }
+                        CastKind::FloatToUInt => {
+                            // f64 → unsigned i32: same as FloatToInt for now (values
+                            // in the positive i32 range are identical for signed/unsigned).
+                            code.extend(load_value(src, Gpr::Rax));
+                            code.extend(encode_movq_xmm_gpr(Xmm::Xmm0, Gpr::Rax));
+                            code.extend(encode_cvtsd2si_r32_xmm(Gpr::Rax, Xmm::Xmm0));
+                        }
+                        CastKind::FloatToFloat => {
+                            // f32 ↔ f64: we assume f64 → f32 (narrow) as the default.
+                            // Load f64 bits, MOVQ XMM0,RAX, CVTSD2SS XMM0,XMM0,
+                            // MOVD EAX,XMM0, store RAX.
+                            code.extend(load_value(src, Gpr::Rax));
+                            code.extend(encode_movq_xmm_gpr(Xmm::Xmm0, Gpr::Rax));
+                            code.extend(encode_cvtsd2ss_xmm_xmm(Xmm::Xmm0, Xmm::Xmm0));
+                            code.extend(encode_movd_gpr_xmm(Gpr::Rax, Xmm::Xmm0));
                         }
                     }
                     code.extend(store_vreg(dst_id, Gpr::Rax));

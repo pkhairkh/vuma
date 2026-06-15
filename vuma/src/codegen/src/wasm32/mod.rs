@@ -361,6 +361,62 @@ pub enum WasmInstr {
     F32ReinterpretI32,
     F64ReinterpretI64,
 
+    // ── Atomic memory instructions (0xFE prefix, Threads proposal) ────
+    /// i32.atomic.load: atomically load 32-bit value (0xFE 0x10)
+    I32AtomicLoad { align: u32, offset: u32 },
+    /// i64.atomic.load: atomically load 64-bit value (0xFE 0x11)
+    I64AtomicLoad { align: u32, offset: u32 },
+    /// i32.atomic.load8_u: atomically load 8-bit value, zero-extend (0xFE 0x12)
+    I32AtomicLoad8U { align: u32, offset: u32 },
+    /// i32.atomic.load16_u: atomically load 16-bit value, zero-extend (0xFE 0x13)
+    I32AtomicLoad16U { align: u32, offset: u32 },
+    /// i64.atomic.load8_u: atomically load 8-bit value, zero-extend to i64 (0xFE 0x14)
+    I64AtomicLoad8U { align: u32, offset: u32 },
+    /// i64.atomic.load16_u: atomically load 16-bit value, zero-extend to i64 (0xFE 0x15)
+    I64AtomicLoad16U { align: u32, offset: u32 },
+    /// i64.atomic.load32_u: atomically load 32-bit value, zero-extend to i64 (0xFE 0x16)
+    I64AtomicLoad32U { align: u32, offset: u32 },
+
+    /// i32.atomic.store: atomically store 32-bit value (0xFE 0x17)
+    I32AtomicStore { align: u32, offset: u32 },
+    /// i64.atomic.store: atomically store 64-bit value (0xFE 0x18)
+    I64AtomicStore { align: u32, offset: u32 },
+    /// i32.atomic.store8: atomically store 8-bit value (0xFE 0x19)
+    I32AtomicStore8 { align: u32, offset: u32 },
+    /// i32.atomic.store16: atomically store 16-bit value (0xFE 0x1A)
+    I32AtomicStore16 { align: u32, offset: u32 },
+    /// i64.atomic.store8: atomically store 8-bit value from i64 (0xFE 0x1B)
+    I64AtomicStore8 { align: u32, offset: u32 },
+    /// i64.atomic.store16: atomically store 16-bit value from i64 (0xFE 0x1C)
+    I64AtomicStore16 { align: u32, offset: u32 },
+    /// i64.atomic.store32: atomically store 32-bit value from i64 (0xFE 0x1D)
+    I64AtomicStore32 { align: u32, offset: u32 },
+
+    /// memory.atomic.fence: fence for atomic ordering (0xFE 0x1E)
+    MemoryAtomicFence,
+
+    /// i32.atomic.rmw.cmpxchg: 32-bit compare-and-swap (0xFE 0x48)
+    /// Stack: [addr, expected, replacement] → [old_value]
+    I32AtomicRmwCmpxchg { align: u32, offset: u32 },
+    /// i64.atomic.rmw.cmpxchg: 64-bit compare-and-swap (0xFE 0x49)
+    /// Stack: [addr, expected, replacement] → [old_value]
+    I64AtomicRmwCmpxchg { align: u32, offset: u32 },
+    /// i32.atomic.rmw8.cmpxchg_u: 8-bit compare-and-swap, zero-extend (0xFE 0x4A)
+    /// Stack: [addr, expected, replacement] → [old_value (i32)]
+    I32AtomicRmw8CmpxchgU { align: u32, offset: u32 },
+    /// i32.atomic.rmw16.cmpxchg_u: 16-bit compare-and-swap, zero-extend (0xFE 0x4B)
+    /// Stack: [addr, expected, replacement] → [old_value (i32)]
+    I32AtomicRmw16CmpxchgU { align: u32, offset: u32 },
+    /// i64.atomic.rmw8.cmpxchg_u: 8-bit compare-and-swap, zero-extend to i64 (0xFE 0x4C)
+    /// Stack: [addr, expected, replacement] → [old_value (i64)]
+    I64AtomicRmw8CmpxchgU { align: u32, offset: u32 },
+    /// i64.atomic.rmw16.cmpxchg_u: 16-bit compare-and-swap, zero-extend to i64 (0xFE 0x4D)
+    /// Stack: [addr, expected, replacement] → [old_value (i64)]
+    I64AtomicRmw16CmpxchgU { align: u32, offset: u32 },
+    /// i64.atomic.rmw32.cmpxchg_u: 32-bit compare-and-swap, zero-extend to i64 (0xFE 0x4E)
+    /// Stack: [addr, expected, replacement] → [old_value (i64)]
+    I64AtomicRmw32CmpxchgU { align: u32, offset: u32 },
+
     // ── Pseudo-instruction: no-op (used for IR ops that lower to nothing) ──
     Nop,
 
@@ -768,6 +824,142 @@ impl WasmInstr {
                 out.extend_from_slice(&encode_unsigned_leb128(0x35)); // f32x4.mul
             }
 
+            // ── Atomic memory instructions (0xFE prefix) ─────────
+            // All atomic instructions are prefixed with 0xFE per the
+            // Wasm Threads proposal (now standardized).  The sub-opcode
+            // and memarg (align + offset) follow as LEB128.
+            WasmInstr::I32AtomicLoad { align, offset } => {
+                out.push(0xFE);
+                out.extend_from_slice(&encode_unsigned_leb128(0x10)); // i32.atomic.load
+                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+            }
+            WasmInstr::I64AtomicLoad { align, offset } => {
+                out.push(0xFE);
+                out.extend_from_slice(&encode_unsigned_leb128(0x11)); // i64.atomic.load
+                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+            }
+            WasmInstr::I32AtomicLoad8U { align, offset } => {
+                out.push(0xFE);
+                out.extend_from_slice(&encode_unsigned_leb128(0x12)); // i32.atomic.load8_u
+                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+            }
+            WasmInstr::I32AtomicLoad16U { align, offset } => {
+                out.push(0xFE);
+                out.extend_from_slice(&encode_unsigned_leb128(0x13)); // i32.atomic.load16_u
+                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+            }
+            WasmInstr::I64AtomicLoad8U { align, offset } => {
+                out.push(0xFE);
+                out.extend_from_slice(&encode_unsigned_leb128(0x14)); // i64.atomic.load8_u
+                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+            }
+            WasmInstr::I64AtomicLoad16U { align, offset } => {
+                out.push(0xFE);
+                out.extend_from_slice(&encode_unsigned_leb128(0x15)); // i64.atomic.load16_u
+                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+            }
+            WasmInstr::I64AtomicLoad32U { align, offset } => {
+                out.push(0xFE);
+                out.extend_from_slice(&encode_unsigned_leb128(0x16)); // i64.atomic.load32_u
+                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+            }
+            WasmInstr::I32AtomicStore { align, offset } => {
+                out.push(0xFE);
+                out.extend_from_slice(&encode_unsigned_leb128(0x17)); // i32.atomic.store
+                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+            }
+            WasmInstr::I64AtomicStore { align, offset } => {
+                out.push(0xFE);
+                out.extend_from_slice(&encode_unsigned_leb128(0x18)); // i64.atomic.store
+                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+            }
+            WasmInstr::I32AtomicStore8 { align, offset } => {
+                out.push(0xFE);
+                out.extend_from_slice(&encode_unsigned_leb128(0x19)); // i32.atomic.store8
+                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+            }
+            WasmInstr::I32AtomicStore16 { align, offset } => {
+                out.push(0xFE);
+                out.extend_from_slice(&encode_unsigned_leb128(0x1A)); // i32.atomic.store16
+                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+            }
+            WasmInstr::I64AtomicStore8 { align, offset } => {
+                out.push(0xFE);
+                out.extend_from_slice(&encode_unsigned_leb128(0x1B)); // i64.atomic.store8
+                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+            }
+            WasmInstr::I64AtomicStore16 { align, offset } => {
+                out.push(0xFE);
+                out.extend_from_slice(&encode_unsigned_leb128(0x1C)); // i64.atomic.store16
+                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+            }
+            WasmInstr::I64AtomicStore32 { align, offset } => {
+                out.push(0xFE);
+                out.extend_from_slice(&encode_unsigned_leb128(0x1D)); // i64.atomic.store32
+                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+            }
+            WasmInstr::MemoryAtomicFence => {
+                out.push(0xFE);
+                out.extend_from_slice(&encode_unsigned_leb128(0x1E)); // memory.atomic.fence
+                out.push(0x00); // reserved byte, must be 0
+            }
+            WasmInstr::I32AtomicRmwCmpxchg { align, offset } => {
+                out.push(0xFE);
+                out.extend_from_slice(&encode_unsigned_leb128(0x48)); // i32.atomic.rmw.cmpxchg
+                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+            }
+            WasmInstr::I64AtomicRmwCmpxchg { align, offset } => {
+                out.push(0xFE);
+                out.extend_from_slice(&encode_unsigned_leb128(0x49)); // i64.atomic.rmw.cmpxchg
+                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+            }
+            WasmInstr::I32AtomicRmw8CmpxchgU { align, offset } => {
+                out.push(0xFE);
+                out.extend_from_slice(&encode_unsigned_leb128(0x4A)); // i32.atomic.rmw8.cmpxchg_u
+                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+            }
+            WasmInstr::I32AtomicRmw16CmpxchgU { align, offset } => {
+                out.push(0xFE);
+                out.extend_from_slice(&encode_unsigned_leb128(0x4B)); // i32.atomic.rmw16.cmpxchg_u
+                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+            }
+            WasmInstr::I64AtomicRmw8CmpxchgU { align, offset } => {
+                out.push(0xFE);
+                out.extend_from_slice(&encode_unsigned_leb128(0x4C)); // i64.atomic.rmw8.cmpxchg_u
+                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+            }
+            WasmInstr::I64AtomicRmw16CmpxchgU { align, offset } => {
+                out.push(0xFE);
+                out.extend_from_slice(&encode_unsigned_leb128(0x4D)); // i64.atomic.rmw16.cmpxchg_u
+                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+            }
+            WasmInstr::I64AtomicRmw32CmpxchgU { align, offset } => {
+                out.push(0xFE);
+                out.extend_from_slice(&encode_unsigned_leb128(0x4E)); // i64.atomic.rmw32.cmpxchg_u
+                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+            }
+
             // ── Bulk Memory Operations ────────────────────────────
             WasmInstr::MemoryCopy { src_mem, dst_mem } => {
                 out.push(0xFC); // multi-byte op prefix
@@ -973,21 +1165,21 @@ pub enum WasmImportKind {
 pub struct WasmLimits {
     pub min: u32,
     pub max: Option<u32>,
+    /// Whether this memory is shared (required for Wasm atomic instructions).
+    /// Shared memories must have both `min` and `max` defined.
+    pub shared: bool,
 }
 
 impl WasmLimits {
     fn encode(&self) -> Vec<u8> {
         let mut out = Vec::new();
-        match self.max {
-            Some(max) => {
-                out.push(0x01);
-                out.extend_from_slice(&encode_unsigned_leb128(self.min as u64));
-                out.extend_from_slice(&encode_unsigned_leb128(max as u64));
-            }
-            None => {
-                out.push(0x00);
-                out.extend_from_slice(&encode_unsigned_leb128(self.min as u64));
-            }
+        let has_max = self.max.is_some();
+        // Flag bits: bit 0 = has_max, bit 1 = shared
+        let flag = (has_max as u8) | ((self.shared as u8) << 1);
+        out.push(flag);
+        out.extend_from_slice(&encode_unsigned_leb128(self.min as u64));
+        if let Some(max) = self.max {
+            out.extend_from_slice(&encode_unsigned_leb128(max as u64));
         }
         out
     }
@@ -2455,21 +2647,67 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
             }
         }
 
-        // Atomic operations — not natively supported in Wasm MVP;
-        // lower to their non-atomic equivalents (single-threaded semantics).
+        // Atomic operations — lowered to Wasm Threads proposal atomics
+        // (0xFE prefix).  These require shared linear memory.
+        //
+        // Alignment is always the natural alignment of the access width:
+        //   1 byte  → align = 0  (2^0 = 1)
+        //   2 bytes → align = 1  (2^1 = 2)
+        //   4 bytes → align = 2  (2^2 = 4)
+        //   8 bytes → align = 3  (2^3 = 8)
         IRInstr::AtomicLoad { dst, addr, ty } => {
-            let ir_load = IRInstr::Load { dst: dst.clone(), addr: addr.clone(), offset: 0, ty: ty.clone() };
-            lower_instruction(&ir_load, ctx)?;
+            let load_ty = WasmType::from_ir_type(ty).unwrap_or(WasmType::I32);
+            ctx.push_value(addr, Some(&WasmType::I32));
+            // Select the correct Wasm atomic load instruction based on the IR type.
+            let load_op = match ty {
+                IRType::I8 | IRType::U8 => WasmInstr::I32AtomicLoad8U { align: 0, offset: 0 },
+                IRType::I16 | IRType::U16 => WasmInstr::I32AtomicLoad16U { align: 1, offset: 0 },
+                IRType::I64 | IRType::U64 => WasmInstr::I64AtomicLoad { align: 3, offset: 0 },
+                _ => WasmInstr::I32AtomicLoad { align: 2, offset: 0 },
+            };
+            ctx.emit(load_op);
+            if let IRValue::Register(id) = dst {
+                ctx.pop_to_vreg(*id, load_ty);
+            } else {
+                ctx.emit(WasmInstr::Drop);
+            }
         }
         IRInstr::AtomicStore { value, addr, ty } => {
-            let ir_store = IRInstr::Store { value: value.clone(), addr: addr.clone(), offset: 0, ty: ty.clone() };
-            lower_instruction(&ir_store, ctx)?;
+            let store_ty = WasmType::from_ir_type(ty).unwrap_or(WasmType::I32);
+            // Wasm store: addr first, then value
+            ctx.push_value(addr, Some(&WasmType::I32));
+            ctx.push_value(value, Some(&store_ty));
+            // Select the correct Wasm atomic store instruction based on the IR type.
+            let store_op = match ty {
+                IRType::I8 | IRType::U8 => WasmInstr::I32AtomicStore8 { align: 0, offset: 0 },
+                IRType::I16 | IRType::U16 => WasmInstr::I32AtomicStore16 { align: 1, offset: 0 },
+                IRType::I64 | IRType::U64 => WasmInstr::I64AtomicStore { align: 3, offset: 0 },
+                _ => WasmInstr::I32AtomicStore { align: 2, offset: 0 },
+            };
+            ctx.emit(store_op);
         }
         IRInstr::AtomicCas { dst, addr, expected, desired, ty } => {
-            // CAS is complex; emit a simple load for now (placeholder)
-            let ir_load = IRInstr::Load { dst: dst.clone(), addr: addr.clone(), offset: 0, ty: ty.clone() };
-            lower_instruction(&ir_load, ctx)?;
-            let _ = (expected, desired);
+            // Wasm cmpxchg stack: [addr, expected, replacement] → [old_value]
+            // The instruction atomically reads the value at addr, compares it
+            // with expected, and if equal writes replacement.  It always
+            // returns the old value so the caller can test for success.
+            let value_ty = WasmType::from_ir_type(ty).unwrap_or(WasmType::I32);
+            ctx.push_value(addr, Some(&WasmType::I32));
+            ctx.push_value(expected, Some(&value_ty));
+            ctx.push_value(desired, Some(&value_ty));
+            // Select the correct Wasm atomic cmpxchg instruction based on the IR type.
+            let cas_op = match ty {
+                IRType::I8 | IRType::U8 => WasmInstr::I32AtomicRmw8CmpxchgU { align: 0, offset: 0 },
+                IRType::I16 | IRType::U16 => WasmInstr::I32AtomicRmw16CmpxchgU { align: 1, offset: 0 },
+                IRType::I64 | IRType::U64 => WasmInstr::I64AtomicRmwCmpxchg { align: 3, offset: 0 },
+                _ => WasmInstr::I32AtomicRmwCmpxchg { align: 2, offset: 0 },
+            };
+            ctx.emit(cas_op);
+            if let IRValue::Register(id) = dst {
+                ctx.pop_to_vreg(*id, value_ty);
+            } else {
+                ctx.emit(WasmInstr::Drop);
+            }
         }
     }
     Ok(())
@@ -2659,10 +2897,13 @@ impl Backend for Wasm32Backend {
         // Build a complete .wasm module from the allocated program.
         let mut module = WasmModuleBuilder::new();
 
-        // Add memory (2 pages minimum = 128KB, so the heap has room)
+        // Add memory (2 pages minimum = 128KB, so the heap has room).
+        // Mark as shared so that Wasm atomic instructions (0xFE prefix)
+        // are valid at runtime.  Shared memories must specify a maximum.
         module.add_memory(WasmLimits {
             min: 2,
             max: Some(256),
+            shared: true,
         });
 
         // Add the __heap_ptr global (mutable i32, initialised to HEAP_START = start of page 2)
@@ -3588,6 +3829,120 @@ mod tests {
         assert_eq!(bytes[4], 0x01);
     }
 
+    // ── Atomic instruction encoding tests ─────────────────────────
+
+    #[test]
+    fn test_i32_atomic_load_encoding() {
+        // i32.atomic.load with align=2, offset=0
+        let instr = WasmInstr::I32AtomicLoad { align: 2, offset: 0 };
+        let bytes = instr.to_bytes();
+        assert_eq!(bytes[0], 0xFE, "atomic prefix byte");
+        assert_eq!(bytes[1], 0x10, "i32.atomic.load sub-opcode");
+        // align=2, offset=0 (both LEB128)
+        assert_eq!(bytes[2], 2, "alignment");
+        assert_eq!(bytes[3], 0, "offset");
+    }
+
+    #[test]
+    fn test_i64_atomic_load_encoding() {
+        // i64.atomic.load with align=3, offset=0
+        let instr = WasmInstr::I64AtomicLoad { align: 3, offset: 0 };
+        let bytes = instr.to_bytes();
+        assert_eq!(bytes[0], 0xFE, "atomic prefix byte");
+        assert_eq!(bytes[1], 0x11, "i64.atomic.load sub-opcode");
+        assert_eq!(bytes[2], 3, "alignment");
+        assert_eq!(bytes[3], 0, "offset");
+    }
+
+    #[test]
+    fn test_i32_atomic_store_encoding() {
+        // i32.atomic.store with align=2, offset=0
+        let instr = WasmInstr::I32AtomicStore { align: 2, offset: 0 };
+        let bytes = instr.to_bytes();
+        assert_eq!(bytes[0], 0xFE, "atomic prefix byte");
+        assert_eq!(bytes[1], 0x17, "i32.atomic.store sub-opcode");
+        assert_eq!(bytes[2], 2, "alignment");
+        assert_eq!(bytes[3], 0, "offset");
+    }
+
+    #[test]
+    fn test_i64_atomic_store_encoding() {
+        // i64.atomic.store with align=3, offset=0
+        let instr = WasmInstr::I64AtomicStore { align: 3, offset: 0 };
+        let bytes = instr.to_bytes();
+        assert_eq!(bytes[0], 0xFE, "atomic prefix byte");
+        assert_eq!(bytes[1], 0x18, "i64.atomic.store sub-opcode");
+        assert_eq!(bytes[2], 3, "alignment");
+        assert_eq!(bytes[3], 0, "offset");
+    }
+
+    #[test]
+    fn test_i32_atomic_rmw_cmpxchg_encoding() {
+        // i32.atomic.rmw.cmpxchg with align=2, offset=0
+        let instr = WasmInstr::I32AtomicRmwCmpxchg { align: 2, offset: 0 };
+        let bytes = instr.to_bytes();
+        assert_eq!(bytes[0], 0xFE, "atomic prefix byte");
+        assert_eq!(bytes[1], 0x48, "i32.atomic.rmw.cmpxchg sub-opcode");
+        assert_eq!(bytes[2], 2, "alignment");
+        assert_eq!(bytes[3], 0, "offset");
+    }
+
+    #[test]
+    fn test_i64_atomic_rmw_cmpxchg_encoding() {
+        // i64.atomic.rmw.cmpxchg with align=3, offset=0
+        let instr = WasmInstr::I64AtomicRmwCmpxchg { align: 3, offset: 0 };
+        let bytes = instr.to_bytes();
+        assert_eq!(bytes[0], 0xFE, "atomic prefix byte");
+        assert_eq!(bytes[1], 0x49, "i64.atomic.rmw.cmpxchg sub-opcode");
+        assert_eq!(bytes[2], 3, "alignment");
+        assert_eq!(bytes[3], 0, "offset");
+    }
+
+    #[test]
+    fn test_subword_atomic_cmpxchg_encoding() {
+        // i32.atomic.rmw8.cmpxchg_u with align=0, offset=0
+        let instr = WasmInstr::I32AtomicRmw8CmpxchgU { align: 0, offset: 0 };
+        let bytes = instr.to_bytes();
+        assert_eq!(bytes[0], 0xFE, "atomic prefix byte");
+        assert_eq!(bytes[1], 0x4A, "i32.atomic.rmw8.cmpxchg_u sub-opcode");
+
+        // i32.atomic.rmw16.cmpxchg_u with align=1, offset=0
+        let instr = WasmInstr::I32AtomicRmw16CmpxchgU { align: 1, offset: 0 };
+        let bytes = instr.to_bytes();
+        assert_eq!(bytes[0], 0xFE, "atomic prefix byte");
+        assert_eq!(bytes[1], 0x4B, "i32.atomic.rmw16.cmpxchg_u sub-opcode");
+    }
+
+    #[test]
+    fn test_memory_atomic_fence_encoding() {
+        let instr = WasmInstr::MemoryAtomicFence;
+        let bytes = instr.to_bytes();
+        assert_eq!(bytes[0], 0xFE, "atomic prefix byte");
+        assert_eq!(bytes[1], 0x1E, "memory.atomic.fence sub-opcode");
+        assert_eq!(bytes[2], 0x00, "reserved byte must be 0");
+    }
+
+    #[test]
+    fn test_shared_memory_limits_encoding() {
+        // Shared memory with min=2, max=256
+        let limits = WasmLimits { min: 2, max: Some(256), shared: true };
+        let bytes = limits.encode();
+        // flag = 0x03 (has_max=1 | shared<<1=2)
+        assert_eq!(bytes[0], 0x03, "shared + has_max flag");
+        assert_eq!(bytes[1], 2, "min pages");
+        assert_eq!(bytes[2], 256, "max pages (note: 256 fits in one LEB128 byte)");
+
+        // Non-shared memory with min=2, max=256
+        let limits = WasmLimits { min: 2, max: Some(256), shared: false };
+        let bytes = limits.encode();
+        assert_eq!(bytes[0], 0x01, "has_max flag without shared");
+
+        // Non-shared memory with min only
+        let limits = WasmLimits { min: 2, max: None, shared: false };
+        let bytes = limits.encode();
+        assert_eq!(bytes[0], 0x00, "min only flag without shared");
+    }
+
     #[test]
     fn test_br_encoding() {
         let instr = WasmInstr::Br(1);
@@ -3653,6 +4008,7 @@ mod tests {
         builder.add_memory(WasmLimits {
             min: 1,
             max: Some(256),
+            shared: false,
         });
         let module = builder.encode();
         // Verify the memory section is present
@@ -3688,6 +4044,7 @@ mod tests {
         builder.add_memory(WasmLimits {
             min: 1,
             max: Some(256),
+            shared: false,
         });
 
         // Add a function
@@ -4765,6 +5122,7 @@ mod tests {
         builder.add_memory(WasmLimits {
             min: 2,
             max: Some(256),
+            shared: false,
         });
 
         // Add __heap_ptr global (mutable i32, initialised to 65536 = start of page 2)

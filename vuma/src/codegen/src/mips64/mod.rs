@@ -100,6 +100,21 @@ const OPC_SWC1: u32 = 0x39;
 const OPC_LDC1: u32 = 0x35;
 const OPC_SDC1: u32 = 0x3D;
 
+const OPC_COP1: u32 = 0x11; // Coprocessor 1 operations
+
+// COP1 fmt field values (bits 25:21)
+const FMT_S: u32 = 16; // single
+const FMT_D: u32 = 17; // double
+const FMT_W: u32 = 20; // word (integer)
+
+// COP1 function codes for FP conversion instructions
+const FN_CVT_S_D: u32 = 0x20; // cvt.s.d
+const FN_CVT_D_S: u32 = 0x21; // cvt.d.s
+const FN_CVT_S_W: u32 = 0x20; // cvt.s.w
+const FN_CVT_D_W: u32 = 0x21; // cvt.d.w
+const FN_CVT_W_S: u32 = 0x24; // cvt.w.s
+const FN_CVT_W_D: u32 = 0x24; // cvt.w.d
+
 /// J-type opcodes.
 const OPC_J: u32 = 0x02;
 const OPC_JAL: u32 = 0x03;
@@ -150,6 +165,13 @@ const FN_JR: u32 = 0x08;
 const FN_JALR: u32 = 0x09;
 const FN_SYSCALL: u32 = 0x0C;
 const FN_BREAK: u32 = 0x0D;
+const FN_SYNC: u32 = 0x0F;
+
+/// I-type opcodes for atomic load-linked / store-conditional.
+const OPC_LL: u32 = 0x30;
+const OPC_LLD: u32 = 0x34;
+const OPC_SC: u32 = 0x38;
+const OPC_SCD: u32 = 0x3C;
 
 // ===========================================================================
 // General-Purpose Registers
@@ -449,6 +471,19 @@ fn encode_r_type(opcode: u32, rs: u32, rt: u32, rd: u32, sa: u32, funct: u32) ->
     word.to_be_bytes()
 }
 
+/// Encode a COP1 R-type instruction (big-endian).
+///
+/// Format: `COP1[31:26] | fmt[25:21] | 0[20:16] | fs[15:11] | fd[10:6] | func[5:0]`
+fn encode_cop1_r_type(fmt: u32, ft: u32, fs: u32, fd: u32, funct: u32) -> [u8; 4] {
+    let word = (OPC_COP1 << 26)
+        | ((fmt & 0x1F) << 21)
+        | ((ft & 0x1F) << 16)
+        | ((fs & 0x1F) << 11)
+        | ((fd & 0x1F) << 6)
+        | (funct & 0x3F);
+    word.to_be_bytes()
+}
+
 /// Encode an I-type instruction (big-endian).
 ///
 /// Format: `opcode[31:26] | rs[25:21] | rt[20:16] | imm[15:0]`
@@ -678,9 +713,37 @@ pub enum Instruction {
     /// Jump and Link: `jal target`
     Jal { target: u32 },
 
+    // ── I-type: Atomic Load-Linked / Store-Conditional ─────────────────
+    /// Load Linked (32-bit): `ll rt, offset(base)`
+    Ll { rt: Gpr, base: Gpr, offset: i32 },
+    /// Load Linked Doubleword (64-bit): `lld rt, offset(base)`
+    Lld { rt: Gpr, base: Gpr, offset: i32 },
+    /// Store Conditional (32-bit): `sc rt, offset(base)` — rt=1 success, rt=0 failure
+    Sc { rt: Gpr, base: Gpr, offset: i32 },
+    /// Store Conditional Doubleword (64-bit): `scd rt, offset(base)`
+    Scd { rt: Gpr, base: Gpr, offset: i32 },
+
+    // ── R-type: Synchronization ────────────────────────────────────────
+    /// SYNC: memory synchronization barrier (stype=0 for full barrier)
+    Sync { stype: u32 },
+
     // ── No-op ──────────────────────────────────────────────────────────
     /// No-operation (encoded as `sll $zero, $zero, 0` = 0x00000000).
     Nop,
+
+    // ── Coprocessor 1: FP Conversion ──────────────────────────────────────
+    /// Convert Single to Double: `cvt.d.s fd, fs` (fmt=S, func=0x21)
+    CvtDS { fd: Fpr, fs: Fpr },
+    /// Convert Double to Single: `cvt.s.d fd, fs` (fmt=D, func=0x20)
+    CvtSD { fd: Fpr, fs: Fpr },
+    /// Convert Word to Single: `cvt.s.w fd, fs` (fmt=W, func=0x20)
+    CvtSW { fd: Fpr, fs: Fpr },
+    /// Convert Word to Double: `cvt.d.w fd, fs` (fmt=W, func=0x21)
+    CvtDW { fd: Fpr, fs: Fpr },
+    /// Convert Single to Word: `cvt.w.s fd, fs` (fmt=S, func=0x24)
+    CvtWS { fd: Fpr, fs: Fpr },
+    /// Convert Double to Word: `cvt.w.d fd, fs` (fmt=D, func=0x24)
+    CvtWD { fd: Fpr, fs: Fpr },
 }
 
 impl Instruction {
@@ -1154,8 +1217,61 @@ impl Instruction {
             Instruction::J { target } => encode_j_type(OPC_J, *target),
             Instruction::Jal { target } => encode_j_type(OPC_JAL, *target),
 
+            // ── I-type: Atomic Load-Linked / Store-Conditional ────────────
+            Instruction::Ll { rt, base, offset } => encode_i_type(
+                OPC_LL,
+                base.encoding(),
+                rt.encoding(),
+                (*offset as u32) & 0xFFFF,
+            ),
+            Instruction::Lld { rt, base, offset } => encode_i_type(
+                OPC_LLD,
+                base.encoding(),
+                rt.encoding(),
+                (*offset as u32) & 0xFFFF,
+            ),
+            Instruction::Sc { rt, base, offset } => encode_i_type(
+                OPC_SC,
+                base.encoding(),
+                rt.encoding(),
+                (*offset as u32) & 0xFFFF,
+            ),
+            Instruction::Scd { rt, base, offset } => encode_i_type(
+                OPC_SCD,
+                base.encoding(),
+                rt.encoding(),
+                (*offset as u32) & 0xFFFF,
+            ),
+
+            // ── R-type: Synchronization ───────────────────────────────────
+            Instruction::Sync { stype } => {
+                // SYNC: opcode=0x00 (SPECIAL), rs=0, rt=0, rd=0, sa=stype, funct=0x0F
+                encode_r_type(OPC_SPECIAL, 0, 0, 0, *stype & 0x1F, FN_SYNC)
+            }
+
             // ── No-op ──────────────────────────────────────────────────
             Instruction::Nop => encode_nop(),
+
+            // ── Coprocessor 1: FP Conversion ───────────────────────────
+            // COP1 R-type: opcode=COP1, fmt[25:21], ft=0[20:16], fs[15:11], fd[10:6], func[5:0]
+            Instruction::CvtDS { fd, fs } => {
+                encode_cop1_r_type(FMT_S, 0, fs.encoding(), fd.encoding(), FN_CVT_D_S)
+            }
+            Instruction::CvtSD { fd, fs } => {
+                encode_cop1_r_type(FMT_D, 0, fs.encoding(), fd.encoding(), FN_CVT_S_D)
+            }
+            Instruction::CvtSW { fd, fs } => {
+                encode_cop1_r_type(FMT_W, 0, fs.encoding(), fd.encoding(), FN_CVT_S_W)
+            }
+            Instruction::CvtDW { fd, fs } => {
+                encode_cop1_r_type(FMT_W, 0, fs.encoding(), fd.encoding(), FN_CVT_D_W)
+            }
+            Instruction::CvtWS { fd, fs } => {
+                encode_cop1_r_type(FMT_S, 0, fs.encoding(), fd.encoding(), FN_CVT_W_S)
+            }
+            Instruction::CvtWD { fd, fs } => {
+                encode_cop1_r_type(FMT_D, 0, fs.encoding(), fd.encoding(), FN_CVT_W_D)
+            }
         }
     }
 
@@ -1254,7 +1370,18 @@ impl Instruction {
             Instruction::Sdc1 { .. } => "sdc1",
             Instruction::J { .. } => "j",
             Instruction::Jal { .. } => "jal",
+            Instruction::Ll { .. } => "ll",
+            Instruction::Lld { .. } => "lld",
+            Instruction::Sc { .. } => "sc",
+            Instruction::Scd { .. } => "scd",
+            Instruction::Sync { .. } => "sync",
             Instruction::Nop => "nop",
+            Instruction::CvtDS { .. } => "cvt.d.s",
+            Instruction::CvtSD { .. } => "cvt.s.d",
+            Instruction::CvtSW { .. } => "cvt.s.w",
+            Instruction::CvtDW { .. } => "cvt.d.w",
+            Instruction::CvtWS { .. } => "cvt.w.s",
+            Instruction::CvtWD { .. } => "cvt.w.d",
         }
     }
 }
@@ -1343,7 +1470,18 @@ impl fmt::Display for Instruction {
             }
             Instruction::J { target } => write!(f, "j 0x{:08x}", target),
             Instruction::Jal { target } => write!(f, "jal 0x{:08x}", target),
+            Instruction::Ll { rt, base, offset } => write!(f, "ll {}, {}({})", rt, offset, base),
+            Instruction::Lld { rt, base, offset } => write!(f, "lld {}, {}({})", rt, offset, base),
+            Instruction::Sc { rt, base, offset } => write!(f, "sc {}, {}({})", rt, offset, base),
+            Instruction::Scd { rt, base, offset } => write!(f, "scd {}, {}({})", rt, offset, base),
+            Instruction::Sync { stype } => write!(f, "sync {}", stype),
             Instruction::Nop => write!(f, "nop"),
+            Instruction::CvtDS { fd, fs } => write!(f, "cvt.d.s {}, {}", fd, fs),
+            Instruction::CvtSD { fd, fs } => write!(f, "cvt.s.d {}, {}", fd, fs),
+            Instruction::CvtSW { fd, fs } => write!(f, "cvt.s.w {}, {}", fd, fs),
+            Instruction::CvtDW { fd, fs } => write!(f, "cvt.d.w {}, {}", fd, fs),
+            Instruction::CvtWS { fd, fs } => write!(f, "cvt.w.s {}, {}", fd, fs),
+            Instruction::CvtWD { fd, fs } => write!(f, "cvt.w.d {}, {}", fd, fs),
         }
     }
 }
@@ -1829,23 +1967,96 @@ fn lower_binop(
             rs: rhs_reg,
         },
         BinOpKind::Ror => {
-            // ROR: (n >> r) | (n << (64-r)) — need scratch regs, emit inline
-            // Using: dsrlv dst, lhs, rhs ; daddiu tmp, $zero, 64 ; dsubu tmp, tmp, rhs ; dsllv tmp, lhs, tmp ; or dst, dst, tmp
-            // Simplified: just emit dsrlv as placeholder (lower_ir_instr is dead code)
-            Instruction::Dsrlv {
-                rd: dst_reg,
-                rt: lhs_reg,
-                rs: rhs_reg,
-            }
+            // ROR: (n >> r) | (n << (64-r))
+            // Sequence: dsrlv T2, lhs, rhs ; daddiu T3, $zero, 64 ; dsubu T3, T3, rhs ; dsllv T3, lhs, T3 ; or dst, T2, T3
+            result.push(AllocatedInstruction {
+                opcode: "dsrlv".to_string(),
+                reads: vec![
+                    PhysicalReg::new(RegClass::Gpr, lhs_reg.encoding()),
+                    PhysicalReg::new(RegClass::Gpr, rhs_reg.encoding()),
+                ],
+                writes: vec![PhysicalReg::new(RegClass::Gpr, Gpr::T2.encoding())],
+                encoded: Instruction::Dsrlv { rd: Gpr::T2, rt: lhs_reg, rs: rhs_reg }.encode().to_vec(),
+            });
+            result.push(AllocatedInstruction {
+                opcode: "daddiu".to_string(),
+                reads: vec![],
+                writes: vec![PhysicalReg::new(RegClass::Gpr, Gpr::T3.encoding())],
+                encoded: Instruction::Daddiu { rt: Gpr::T3, rs: Gpr::Zero, imm: 64 }.encode().to_vec(),
+            });
+            result.push(AllocatedInstruction {
+                opcode: "dsubu".to_string(),
+                reads: vec![
+                    PhysicalReg::new(RegClass::Gpr, rhs_reg.encoding()),
+                ],
+                writes: vec![PhysicalReg::new(RegClass::Gpr, Gpr::T3.encoding())],
+                encoded: Instruction::Dsubu { rd: Gpr::T3, rs: Gpr::T3, rt: rhs_reg }.encode().to_vec(),
+            });
+            result.push(AllocatedInstruction {
+                opcode: "dsllv".to_string(),
+                reads: vec![
+                    PhysicalReg::new(RegClass::Gpr, lhs_reg.encoding()),
+                    PhysicalReg::new(RegClass::Gpr, Gpr::T3.encoding()),
+                ],
+                writes: vec![PhysicalReg::new(RegClass::Gpr, Gpr::T3.encoding())],
+                encoded: Instruction::Dsllv { rd: Gpr::T3, rt: lhs_reg, rs: Gpr::T3 }.encode().to_vec(),
+            });
+            result.push(AllocatedInstruction {
+                opcode: "or".to_string(),
+                reads: vec![
+                    PhysicalReg::new(RegClass::Gpr, Gpr::T2.encoding()),
+                    PhysicalReg::new(RegClass::Gpr, Gpr::T3.encoding()),
+                ],
+                writes: vec![PhysicalReg::new(RegClass::Gpr, dst_reg.encoding())],
+                encoded: Instruction::Or { rd: dst_reg, rs: Gpr::T2, rt: Gpr::T3 }.encode().to_vec(),
+            });
+            return result;
         }
         BinOpKind::Rol => {
-            // ROL: (n << r) | (n >> (64-r)) — need scratch regs, emit inline
-            // Simplified: just emit dsllv as placeholder (lower_ir_instr is dead code)
-            Instruction::Dsllv {
-                rd: dst_reg,
-                rt: lhs_reg,
-                rs: rhs_reg,
-            }
+            // ROL: (n << r) | (n >> (64-r))
+            // Sequence: dsllv T2, lhs, rhs ; daddiu T3, $zero, 64 ; dsubu T3, T3, rhs ; dsrlv T3, lhs, T3 ; or dst, T2, T3
+            result.push(AllocatedInstruction {
+                opcode: "dsllv".to_string(),
+                reads: vec![
+                    PhysicalReg::new(RegClass::Gpr, lhs_reg.encoding()),
+                    PhysicalReg::new(RegClass::Gpr, rhs_reg.encoding()),
+                ],
+                writes: vec![PhysicalReg::new(RegClass::Gpr, Gpr::T2.encoding())],
+                encoded: Instruction::Dsllv { rd: Gpr::T2, rt: lhs_reg, rs: rhs_reg }.encode().to_vec(),
+            });
+            result.push(AllocatedInstruction {
+                opcode: "daddiu".to_string(),
+                reads: vec![],
+                writes: vec![PhysicalReg::new(RegClass::Gpr, Gpr::T3.encoding())],
+                encoded: Instruction::Daddiu { rt: Gpr::T3, rs: Gpr::Zero, imm: 64 }.encode().to_vec(),
+            });
+            result.push(AllocatedInstruction {
+                opcode: "dsubu".to_string(),
+                reads: vec![
+                    PhysicalReg::new(RegClass::Gpr, rhs_reg.encoding()),
+                ],
+                writes: vec![PhysicalReg::new(RegClass::Gpr, Gpr::T3.encoding())],
+                encoded: Instruction::Dsubu { rd: Gpr::T3, rs: Gpr::T3, rt: rhs_reg }.encode().to_vec(),
+            });
+            result.push(AllocatedInstruction {
+                opcode: "dsrlv".to_string(),
+                reads: vec![
+                    PhysicalReg::new(RegClass::Gpr, lhs_reg.encoding()),
+                    PhysicalReg::new(RegClass::Gpr, Gpr::T3.encoding()),
+                ],
+                writes: vec![PhysicalReg::new(RegClass::Gpr, Gpr::T3.encoding())],
+                encoded: Instruction::Dsrlv { rd: Gpr::T3, rt: lhs_reg, rs: Gpr::T3 }.encode().to_vec(),
+            });
+            result.push(AllocatedInstruction {
+                opcode: "or".to_string(),
+                reads: vec![
+                    PhysicalReg::new(RegClass::Gpr, Gpr::T2.encoding()),
+                    PhysicalReg::new(RegClass::Gpr, Gpr::T3.encoding()),
+                ],
+                writes: vec![PhysicalReg::new(RegClass::Gpr, dst_reg.encoding())],
+                encoded: Instruction::Or { rd: dst_reg, rs: Gpr::T2, rt: Gpr::T3 }.encode().to_vec(),
+            });
+            return result;
         }
         BinOpKind::SLt => Instruction::Slt {
             rd: dst_reg,
@@ -2461,35 +2672,58 @@ fn mips64_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, 
                         }
                         BinOpKind::ShrA => { code.extend_from_slice(&Instruction::Dsrav { rd: Gpr::T0, rt: Gpr::T0, rs: Gpr::T1 }.encode()); }
                         BinOpKind::Ror => {
-                            // 32-bit ROR: (n >> r) | (n << (32-r)), then mask to 32 bits
+                            // ROR: (n >> r) | (n << (bits-r))
                             // $t0 = value, $t1 = amount
-                            // First zero-extend $t0 to clear upper 32 bits
-                            code.extend_from_slice(&Instruction::Dsll { rd: Gpr::T0, rt: Gpr::T0, sa: 32 }.encode());
-                            code.extend_from_slice(&Instruction::Dsrl { rd: Gpr::T0, rt: Gpr::T0, sa: 32 }.encode());
-                            // $t2 = $t0 >> $t1 (zero-extended, so upper bits are 0)
-                            code.extend_from_slice(&Instruction::Dsrlv { rd: Gpr::T2, rt: Gpr::T0, rs: Gpr::T1 }.encode());
-                            // $t4 = 32 - $t1
-                            code.extend_from_slice(&Instruction::Addiu { rt: Gpr::T4, rs: Gpr::Zero, imm: 32 }.encode());
-                            code.extend_from_slice(&Instruction::Dsubu { rd: Gpr::T4, rs: Gpr::T4, rt: Gpr::T1 }.encode());
-                            // $t3 = $t0 << $t4
-                            code.extend_from_slice(&Instruction::Dsllv { rd: Gpr::T3, rt: Gpr::T0, rs: Gpr::T4 }.encode());
-                            // $t0 = $t2 | $t3
-                            code.extend_from_slice(&Instruction::Or { rd: Gpr::T0, rs: Gpr::T2, rt: Gpr::T3 }.encode());
-                            // Mask to 32 bits (in case left-shift spilled into upper 32 bits)
-                            code.extend_from_slice(&Instruction::Dsll { rd: Gpr::T0, rt: Gpr::T0, sa: 32 }.encode());
-                            code.extend_from_slice(&Instruction::Dsrl { rd: Gpr::T0, rt: Gpr::T0, sa: 32 }.encode());
+                            if is_32bit {
+                                // 32-bit ROR: zero-extend, rotate, mask
+                                code.extend_from_slice(&Instruction::Dsll { rd: Gpr::T0, rt: Gpr::T0, sa: 32 }.encode());
+                                code.extend_from_slice(&Instruction::Dsrl { rd: Gpr::T0, rt: Gpr::T0, sa: 32 }.encode());
+                                code.extend_from_slice(&Instruction::Dsrlv { rd: Gpr::T2, rt: Gpr::T0, rs: Gpr::T1 }.encode());
+                                code.extend_from_slice(&Instruction::Addiu { rt: Gpr::T4, rs: Gpr::Zero, imm: 32 }.encode());
+                                code.extend_from_slice(&Instruction::Dsubu { rd: Gpr::T4, rs: Gpr::T4, rt: Gpr::T1 }.encode());
+                                code.extend_from_slice(&Instruction::Dsllv { rd: Gpr::T3, rt: Gpr::T0, rs: Gpr::T4 }.encode());
+                                code.extend_from_slice(&Instruction::Or { rd: Gpr::T0, rs: Gpr::T2, rt: Gpr::T3 }.encode());
+                                code.extend_from_slice(&Instruction::Dsll { rd: Gpr::T0, rt: Gpr::T0, sa: 32 }.encode());
+                                code.extend_from_slice(&Instruction::Dsrl { rd: Gpr::T0, rt: Gpr::T0, sa: 32 }.encode());
+                            } else {
+                                // 64-bit ROR: (n >> r) | (n << (64-r))
+                                // $t2 = $t0 >> $t1
+                                code.extend_from_slice(&Instruction::Dsrlv { rd: Gpr::T2, rt: Gpr::T0, rs: Gpr::T1 }.encode());
+                                // $t4 = 64 - $t1
+                                code.extend_from_slice(&Instruction::Daddiu { rt: Gpr::T4, rs: Gpr::Zero, imm: 64 }.encode());
+                                code.extend_from_slice(&Instruction::Dsubu { rd: Gpr::T4, rs: Gpr::T4, rt: Gpr::T1 }.encode());
+                                // $t3 = $t0 << $t4
+                                code.extend_from_slice(&Instruction::Dsllv { rd: Gpr::T3, rt: Gpr::T0, rs: Gpr::T4 }.encode());
+                                // $t0 = $t2 | $t3
+                                code.extend_from_slice(&Instruction::Or { rd: Gpr::T0, rs: Gpr::T2, rt: Gpr::T3 }.encode());
+                            }
                         }
                         BinOpKind::Rol => {
-                            // 32-bit ROL: (n << r) | (n >> (32-r)), then mask to 32 bits
-                            code.extend_from_slice(&Instruction::Dsll { rd: Gpr::T0, rt: Gpr::T0, sa: 32 }.encode());
-                            code.extend_from_slice(&Instruction::Dsrl { rd: Gpr::T0, rt: Gpr::T0, sa: 32 }.encode());
-                            code.extend_from_slice(&Instruction::Dsllv { rd: Gpr::T2, rt: Gpr::T0, rs: Gpr::T1 }.encode());
-                            code.extend_from_slice(&Instruction::Addiu { rt: Gpr::T4, rs: Gpr::Zero, imm: 32 }.encode());
-                            code.extend_from_slice(&Instruction::Dsubu { rd: Gpr::T4, rs: Gpr::T4, rt: Gpr::T1 }.encode());
-                            code.extend_from_slice(&Instruction::Dsrlv { rd: Gpr::T3, rt: Gpr::T0, rs: Gpr::T4 }.encode());
-                            code.extend_from_slice(&Instruction::Or { rd: Gpr::T0, rs: Gpr::T2, rt: Gpr::T3 }.encode());
-                            code.extend_from_slice(&Instruction::Dsll { rd: Gpr::T0, rt: Gpr::T0, sa: 32 }.encode());
-                            code.extend_from_slice(&Instruction::Dsrl { rd: Gpr::T0, rt: Gpr::T0, sa: 32 }.encode());
+                            // ROL: (n << r) | (n >> (bits-r))
+                            // $t0 = value, $t1 = amount
+                            if is_32bit {
+                                // 32-bit ROL: zero-extend, rotate, mask
+                                code.extend_from_slice(&Instruction::Dsll { rd: Gpr::T0, rt: Gpr::T0, sa: 32 }.encode());
+                                code.extend_from_slice(&Instruction::Dsrl { rd: Gpr::T0, rt: Gpr::T0, sa: 32 }.encode());
+                                code.extend_from_slice(&Instruction::Dsllv { rd: Gpr::T2, rt: Gpr::T0, rs: Gpr::T1 }.encode());
+                                code.extend_from_slice(&Instruction::Addiu { rt: Gpr::T4, rs: Gpr::Zero, imm: 32 }.encode());
+                                code.extend_from_slice(&Instruction::Dsubu { rd: Gpr::T4, rs: Gpr::T4, rt: Gpr::T1 }.encode());
+                                code.extend_from_slice(&Instruction::Dsrlv { rd: Gpr::T3, rt: Gpr::T0, rs: Gpr::T4 }.encode());
+                                code.extend_from_slice(&Instruction::Or { rd: Gpr::T0, rs: Gpr::T2, rt: Gpr::T3 }.encode());
+                                code.extend_from_slice(&Instruction::Dsll { rd: Gpr::T0, rt: Gpr::T0, sa: 32 }.encode());
+                                code.extend_from_slice(&Instruction::Dsrl { rd: Gpr::T0, rt: Gpr::T0, sa: 32 }.encode());
+                            } else {
+                                // 64-bit ROL: (n << r) | (n >> (64-r))
+                                // $t2 = $t0 << $t1
+                                code.extend_from_slice(&Instruction::Dsllv { rd: Gpr::T2, rt: Gpr::T0, rs: Gpr::T1 }.encode());
+                                // $t4 = 64 - $t1
+                                code.extend_from_slice(&Instruction::Daddiu { rt: Gpr::T4, rs: Gpr::Zero, imm: 64 }.encode());
+                                code.extend_from_slice(&Instruction::Dsubu { rd: Gpr::T4, rs: Gpr::T4, rt: Gpr::T1 }.encode());
+                                // $t3 = $t0 >> $t4
+                                code.extend_from_slice(&Instruction::Dsrlv { rd: Gpr::T3, rt: Gpr::T0, rs: Gpr::T4 }.encode());
+                                // $t0 = $t2 | $t3
+                                code.extend_from_slice(&Instruction::Or { rd: Gpr::T0, rs: Gpr::T2, rt: Gpr::T3 }.encode());
+                            }
                         }
                         // Comparisons
                         BinOpKind::SLt | BinOpKind::SLe | BinOpKind::SGt | BinOpKind::SGe |
@@ -2669,11 +2903,64 @@ fn mips64_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, 
                             // Sign-extend: already sign-extended in 64-bit MIPS load
                         }
                         CastKind::BitCast | CastKind::Trunc => { /* no-op */ }
-                        CastKind::IntToFloat | CastKind::UIntToFloat |
-                        CastKind::FloatToInt | CastKind::FloatToUInt |
+                        CastKind::IntToFloat => {
+                            // Signed int → f64: MTC1 T0→F0, CVT.D.W F0,F0
+                            // Store int to stack, LDC1 to F0, CVT.D.W F0,F0, SDC1 F0, LD back
+                            code.extend(ss_sd(Gpr::T0, dst_off)); // store int to dst slot temporarily
+                            code.extend_from_slice(&Instruction::Ldc1 { ft: Fpr::F0, base: Gpr::Fp, offset: dst_off }.encode());
+                            code.extend_from_slice(&encode_nop());
+                            code.extend_from_slice(&Instruction::CvtDW { fd: Fpr::F0, fs: Fpr::F0 }.encode());
+                            code.extend_from_slice(&encode_nop());
+                            code.extend_from_slice(&Instruction::Sdc1 { ft: Fpr::F0, base: Gpr::Fp, offset: dst_off }.encode());
+                            code.extend_from_slice(&encode_nop());
+                            code.extend(ss_ld(Gpr::T0, dst_off));
+                        }
+                        CastKind::UIntToFloat => {
+                            // Unsigned int → f64: store int, LDC1, CVT.D.W, SDC1, LD
+                            // (For unsigned 32-bit values, zero-extended to 64-bit,
+                            //  CVT.D.W on MIPS treats the 32-bit value in the low word)
+                            code.extend(ss_sd(Gpr::T0, dst_off));
+                            code.extend_from_slice(&Instruction::Lwc1 { ft: Fpr::F0, base: Gpr::Fp, offset: dst_off }.encode());
+                            code.extend_from_slice(&encode_nop());
+                            code.extend_from_slice(&Instruction::CvtDW { fd: Fpr::F0, fs: Fpr::F0 }.encode());
+                            code.extend_from_slice(&encode_nop());
+                            code.extend_from_slice(&Instruction::Sdc1 { ft: Fpr::F0, base: Gpr::Fp, offset: dst_off }.encode());
+                            code.extend_from_slice(&encode_nop());
+                            code.extend(ss_ld(Gpr::T0, dst_off));
+                        }
+                        CastKind::FloatToInt => {
+                            // f64 → signed int: LDC1 F0, CVT.W.D F0,F0, SWC1 F0, LW
+                            code.extend_from_slice(&Instruction::Ldc1 { ft: Fpr::F0, base: Gpr::Fp, offset: dst_off }.encode());
+                            code.extend_from_slice(&encode_nop());
+                            code.extend_from_slice(&Instruction::CvtWD { fd: Fpr::F0, fs: Fpr::F0 }.encode());
+                            code.extend_from_slice(&encode_nop());
+                            code.extend_from_slice(&Instruction::Swc1 { ft: Fpr::F0, base: Gpr::Fp, offset: dst_off }.encode());
+                            code.extend_from_slice(&encode_nop());
+                            // Load the 32-bit int back and sign-extend to 64-bit
+                            code.extend_from_slice(&Instruction::Lw { rt: Gpr::T0, base: Gpr::Fp, offset: dst_off }.encode());
+                            code.extend_from_slice(&encode_nop());
+                        }
+                        CastKind::FloatToUInt => {
+                            // f64 → unsigned int: same as FloatToInt for now
+                            code.extend_from_slice(&Instruction::Ldc1 { ft: Fpr::F0, base: Gpr::Fp, offset: dst_off }.encode());
+                            code.extend_from_slice(&encode_nop());
+                            code.extend_from_slice(&Instruction::CvtWD { fd: Fpr::F0, fs: Fpr::F0 }.encode());
+                            code.extend_from_slice(&encode_nop());
+                            code.extend_from_slice(&Instruction::Swc1 { ft: Fpr::F0, base: Gpr::Fp, offset: dst_off }.encode());
+                            code.extend_from_slice(&encode_nop());
+                            code.extend_from_slice(&Instruction::Lw { rt: Gpr::T0, base: Gpr::Fp, offset: dst_off }.encode());
+                            code.extend_from_slice(&encode_nop());
+                        }
                         CastKind::FloatToFloat => {
-                            // FP conversion casts require FP register support;
-                            // for now, treat as a no-op move.
+                            // f64 → f32 (narrow): LDC1 F0, CVT.S.D F0,F0, SWC1 F0, LD
+                            code.extend_from_slice(&Instruction::Ldc1 { ft: Fpr::F0, base: Gpr::Fp, offset: dst_off }.encode());
+                            code.extend_from_slice(&encode_nop());
+                            code.extend_from_slice(&Instruction::CvtSD { fd: Fpr::F0, fs: Fpr::F0 }.encode());
+                            code.extend_from_slice(&encode_nop());
+                            code.extend_from_slice(&Instruction::Swc1 { ft: Fpr::F0, base: Gpr::Fp, offset: dst_off }.encode());
+                            code.extend_from_slice(&encode_nop());
+                            code.extend_from_slice(&Instruction::Lw { rt: Gpr::T0, base: Gpr::Fp, offset: dst_off }.encode());
+                            code.extend_from_slice(&encode_nop());
                         }
                     }
                     code.extend(ss_sd(Gpr::T0, dst_off));
@@ -2864,14 +3151,84 @@ fn mips64_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, 
                     };
                     code.extend(sub_code);
                 }
-                IRInstr::AtomicCas { dst, addr, expected: _, desired: _, ty } => {
-                    // Placeholder: simple load
+                IRInstr::AtomicCas { dst, addr, expected, desired, ty } => {
+                    // Lower AtomicCas using LLD/SCD (or LL/SC) with SYNC (MIPS64 compare-and-swap)
+                    //
+                    // Register allocation:
+                    //   T0 ($8)  = address
+                    //   T1 ($9)  = expected value
+                    //   T2 ($10) = desired value
+                    //   V0 ($2)  = old value (from LLD, result stored to dst)
+                    //   T3 ($11) = temp for SCD (desired copy, then status)
+                    //
+                    // CAS loop layout (each instruction + optional NOP = 4 bytes):
+                    //   +0:  SYNC
+                    //   +4:  LLD V0, 0(T0)               ← retry
+                    //   +8:  NOP (load-use hazard)
+                    //   +12: BNE V0, T1, done
+                    //   +16: NOP (delay slot)
+                    //   +20: DADDU T3, $zero, T2          (copy desired to T3)
+                    //   +24: SCD T3, 0(T0)                (store conditional, T3=status)
+                    //   +28: NOP (hazard)
+                    //   +32: BEQ T3, $zero, retry
+                    //   +36: NOP (delay slot)
+                    //   +40: SYNC                         ← done
+                    //
+                    // MIPS64 branch offset = target - (branch + 4) [in bytes]
+                    // BNE done:   40 - (12 + 4) = 24
+                    // BEQ retry:   4 - (32 + 4) = -32
                     let dst_id = dst.as_register().unwrap_or(0);
                     let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
                     let mut c = Vec::new();
+
+                    // Load operands into scratch registers
                     c.extend(ss_load_value(addr, &vreg_stack_slots, Gpr::T0));
-                    c.extend_from_slice(&Instruction::Ld { rt: Gpr::V0, base: Gpr::T0, offset: 0 }.encode());
+                    c.extend(ss_load_value(expected, &vreg_stack_slots, Gpr::T1));
+                    c.extend(ss_load_value(desired, &vreg_stack_slots, Gpr::T2));
+
+                    // SYNC — acquire barrier before the CAS loop
+                    c.extend_from_slice(&Instruction::Sync { stype: 0 }.encode());
+
+                    // LLD/LL V0, 0(T0) — load-linked (retry label)
+                    match ty {
+                        IRType::I32 | IRType::U32 => {
+                            c.extend_from_slice(&Instruction::Ll { rt: Gpr::V0, base: Gpr::T0, offset: 0 }.encode());
+                        }
+                        _ => {
+                            c.extend_from_slice(&Instruction::Lld { rt: Gpr::V0, base: Gpr::T0, offset: 0 }.encode());
+                        }
+                    }
+                    c.extend_from_slice(&encode_nop()); // load-use hazard
+
+                    // BNE V0, T1, done — if old != expected, skip store
+                    c.extend_from_slice(&Instruction::Bne { rs: Gpr::V0, rt: Gpr::T1, offset: 24 }.encode());
+                    c.extend_from_slice(&encode_nop()); // delay slot
+
+                    // DADDU T3, $zero, T2 — copy desired to temp register
+                    c.extend_from_slice(&Instruction::Daddu { rd: Gpr::T3, rs: Gpr::Zero, rt: Gpr::T2 }.encode());
+                    c.extend_from_slice(&encode_nop());
+
+                    // SCD/SC T3, 0(T0) — store conditional (T3 = status: 1=success, 0=failure)
+                    match ty {
+                        IRType::I32 | IRType::U32 => {
+                            c.extend_from_slice(&Instruction::Sc { rt: Gpr::T3, base: Gpr::T0, offset: 0 }.encode());
+                        }
+                        _ => {
+                            c.extend_from_slice(&Instruction::Scd { rt: Gpr::T3, base: Gpr::T0, offset: 0 }.encode());
+                        }
+                    }
+                    c.extend_from_slice(&encode_nop()); // hazard
+
+                    // BEQ T3, $zero, retry — if store failed, retry
+                    c.extend_from_slice(&Instruction::Beq { rs: Gpr::T3, rt: Gpr::Zero, offset: -32 }.encode());
+                    c.extend_from_slice(&encode_nop()); // delay slot
+
+                    // SYNC — release barrier after successful CAS (done label)
+                    c.extend_from_slice(&Instruction::Sync { stype: 0 }.encode());
+
+                    // Store the old value (in V0) to the dst stack slot
                     c.extend(ss_sd(Gpr::V0, dst_off));
+
                     code.extend(c);
                 }
             }

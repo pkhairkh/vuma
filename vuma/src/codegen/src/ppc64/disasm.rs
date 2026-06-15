@@ -658,6 +658,95 @@ impl Instruction {
                         rs: gpr_from_bits(rt),
                     })
                 }
+                // EXTSB (xo=954)
+                954 => {
+                    return Ok(Instruction::Extsb {
+                        ra: gpr_from_bits(ra),
+                        rs: gpr_from_bits(rt),
+                    })
+                }
+                // EXTSH (xo=922)
+                922 => {
+                    return Ok(Instruction::Extsh {
+                        ra: gpr_from_bits(ra),
+                        rs: gpr_from_bits(rt),
+                    })
+                }
+
+                // LDARX (xo=84)
+                84 => {
+                    return Ok(Instruction::Ldarx {
+                        rt: gpr_from_bits(rt),
+                        ra: gpr_from_bits(ra),
+                        rb: gpr_from_bits(rb),
+                    })
+                }
+                // LWARX (xo=20)
+                20 => {
+                    return Ok(Instruction::Lwarx {
+                        rt: gpr_from_bits(rt),
+                        ra: gpr_from_bits(ra),
+                        rb: gpr_from_bits(rb),
+                    })
+                }
+                // LBARX (xo=52)
+                52 => {
+                    return Ok(Instruction::Lbarx {
+                        rt: gpr_from_bits(rt),
+                        ra: gpr_from_bits(ra),
+                        rb: gpr_from_bits(rb),
+                    })
+                }
+                // LHARX (xo=116)
+                116 => {
+                    return Ok(Instruction::Lharx {
+                        rt: gpr_from_bits(rt),
+                        ra: gpr_from_bits(ra),
+                        rb: gpr_from_bits(rb),
+                    })
+                }
+                // STDCX. (xo=214, Rc=1)
+                214 => {
+                    return Ok(Instruction::Stdcx {
+                        rs: gpr_from_bits(rt),
+                        ra: gpr_from_bits(ra),
+                        rb: gpr_from_bits(rb),
+                    })
+                }
+                // STWCX. (xo=150, Rc=1)
+                150 => {
+                    return Ok(Instruction::Stwcx {
+                        rs: gpr_from_bits(rt),
+                        ra: gpr_from_bits(ra),
+                        rb: gpr_from_bits(rb),
+                    })
+                }
+                // STBCX. (xo=694, Rc=1)
+                694 => {
+                    return Ok(Instruction::Stbcx {
+                        rs: gpr_from_bits(rt),
+                        ra: gpr_from_bits(ra),
+                        rb: gpr_from_bits(rb),
+                    })
+                }
+                // STHCX. (xo=726, Rc=1)
+                726 => {
+                    return Ok(Instruction::Sthcx {
+                        rs: gpr_from_bits(rt),
+                        ra: gpr_from_bits(ra),
+                        rb: gpr_from_bits(rb),
+                    })
+                }
+                // SYNC / LWSYNC (xo=598)
+                598 => {
+                    // The L field (sync variant) is encoded in the rt position:
+                    // rt=0 → heavyweight sync, rt=1 → lwsync
+                    if rt == 0 {
+                        return Ok(Instruction::Sync);
+                    } else {
+                        return Ok(Instruction::Lwsync);
+                    }
+                }
 
                 // CMP (xo=0)
                 0 => {
@@ -736,6 +825,7 @@ impl Instruction {
             let bh = (word >> 10) & 0x7; // BH at MSB-first bits [19:21] = normal shift 10
             match xo_xform {
                 16 => return Ok(Instruction::Bclr { bo, bi, bh }),
+                150 => return Ok(Instruction::Isync), // ISYNC: primary=19, xo=150
                 528 => return Ok(Instruction::Bcctr { bo, bi, bh }),
                 560 => return Ok(Instruction::Bctar { bo, bi, bh }),
                 _ => {}

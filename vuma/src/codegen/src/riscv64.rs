@@ -660,6 +660,52 @@ pub enum Instruction {
     /// FP Move Double: `fmv.d fd, fs1` (pseudo: fsgnj.d)
     FmvD { rd: Fpr, rs1: Fpr },
 
+    // ── F/D Extension: FP ↔ Integer Conversion ────────────────────────
+    /// Convert signed 32-bit integer to single float: `fcvt.s.w fd, rs1`
+    FcvtSW { rd: Fpr, rs1: Gpr },
+    /// Convert unsigned 32-bit integer to single float: `fcvt.s.wu fd, rs1`
+    FcvtSWU { rd: Fpr, rs1: Gpr },
+    /// Convert signed 64-bit integer to single float: `fcvt.s.l fd, rs1`
+    FcvtSL { rd: Fpr, rs1: Gpr },
+    /// Convert unsigned 64-bit integer to single float: `fcvt.s.lu fd, rs1`
+    FcvtSLU { rd: Fpr, rs1: Gpr },
+    /// Convert signed 32-bit integer to double float: `fcvt.d.w fd, rs1`
+    FcvtDW { rd: Fpr, rs1: Gpr },
+    /// Convert unsigned 32-bit integer to double float: `fcvt.d.wu fd, rs1`
+    FcvtDWU { rd: Fpr, rs1: Gpr },
+    /// Convert signed 64-bit integer to double float: `fcvt.d.l fd, rs1`
+    FcvtDL { rd: Fpr, rs1: Gpr },
+    /// Convert unsigned 64-bit integer to double float: `fcvt.d.lu fd, rs1`
+    FcvtDLU { rd: Fpr, rs1: Gpr },
+    /// Convert single float to signed 32-bit integer: `fcvt.w.s rd, fs1`
+    FcvtWS { rd: Gpr, rs1: Fpr },
+    /// Convert single float to unsigned 32-bit integer: `fcvt.wu.s rd, fs1`
+    FcvtWUS { rd: Gpr, rs1: Fpr },
+    /// Convert single float to signed 64-bit integer: `fcvt.l.s rd, fs1`
+    FcvtLS { rd: Gpr, rs1: Fpr },
+    /// Convert single float to unsigned 64-bit integer: `fcvt.lu.s rd, fs1`
+    FcvtLUS { rd: Gpr, rs1: Fpr },
+    /// Convert double float to signed 32-bit integer: `fcvt.w.d rd, fs1`
+    FcvtWD { rd: Gpr, rs1: Fpr },
+    /// Convert double float to unsigned 32-bit integer: `fcvt.wu.d rd, fs1`
+    FcvtWUD { rd: Gpr, rs1: Fpr },
+    /// Convert double float to signed 64-bit integer: `fcvt.l.d rd, fs1`
+    FcvtLD { rd: Gpr, rs1: Fpr },
+    /// Convert double float to unsigned 64-bit integer: `fcvt.lu.d rd, fs1`
+    FcvtLUD { rd: Gpr, rs1: Fpr },
+    /// Convert single float to double float: `fcvt.d.s fd, fs1`
+    FcvtDS { rd: Fpr, rs1: Fpr },
+    /// Convert double float to single float: `fcvt.s.d fd, fs1`
+    FcvtSD { rd: Fpr, rs1: Fpr },
+    /// Move single float from FPR to GPR: `fmv.x.w rd, fs1`
+    FmvXW { rd: Gpr, rs1: Fpr },
+    /// Move single float from GPR to FPR: `fmv.w.x fd, rs1`
+    FmvWX { rd: Fpr, rs1: Gpr },
+    /// Move double float from FPR to GPR: `fmv.x.d rd, fs1`
+    FmvXD { rd: Gpr, rs1: Fpr },
+    /// Move double float from GPR to FPR: `fmv.d.x fd, rs1`
+    FmvDX { rd: Fpr, rs1: Gpr },
+
     // ── Zicsr Extension: Control and Status Register ────────────────
     /// CSR Read/Write: `csrrw rd, csr, rs1`
     Csrrw { rd: Gpr, csr: u32, rs1: Gpr },
@@ -1196,6 +1242,84 @@ impl Instruction {
                 )
             }
 
+            // ── F/D Extension: FP ↔ Integer Conversion ────────────────
+            // FCVT.S.W: funct7=1101000, rs2=00000, funct3=rm (0b111=dynamic)
+            Instruction::FcvtSW { rd, rs1 } => {
+                encode_r_type(0b1101000, 0b00000, rs1.encoding(), 0b111, rd.encoding(), OP_FP)
+            }
+            Instruction::FcvtSWU { rd, rs1 } => {
+                encode_r_type(0b1101000, 0b00001, rs1.encoding(), 0b111, rd.encoding(), OP_FP)
+            }
+            Instruction::FcvtSL { rd, rs1 } => {
+                encode_r_type(0b1101000, 0b00010, rs1.encoding(), 0b111, rd.encoding(), OP_FP)
+            }
+            Instruction::FcvtSLU { rd, rs1 } => {
+                encode_r_type(0b1101000, 0b00011, rs1.encoding(), 0b111, rd.encoding(), OP_FP)
+            }
+            // FCVT.D.W: funct7=1100001, rs2=00000
+            Instruction::FcvtDW { rd, rs1 } => {
+                encode_r_type(0b1100001, 0b00000, rs1.encoding(), 0b111, rd.encoding(), OP_FP)
+            }
+            Instruction::FcvtDWU { rd, rs1 } => {
+                encode_r_type(0b1100001, 0b00001, rs1.encoding(), 0b111, rd.encoding(), OP_FP)
+            }
+            Instruction::FcvtDL { rd, rs1 } => {
+                encode_r_type(0b1100001, 0b00010, rs1.encoding(), 0b111, rd.encoding(), OP_FP)
+            }
+            Instruction::FcvtDLU { rd, rs1 } => {
+                encode_r_type(0b1100001, 0b00011, rs1.encoding(), 0b111, rd.encoding(), OP_FP)
+            }
+            // FCVT.W.S: funct7=1100000, rs2=00000
+            Instruction::FcvtWS { rd, rs1 } => {
+                encode_r_type(0b1100000, 0b00000, rs1.encoding(), 0b111, rd.encoding(), OP_FP)
+            }
+            Instruction::FcvtWUS { rd, rs1 } => {
+                encode_r_type(0b1100000, 0b00001, rs1.encoding(), 0b111, rd.encoding(), OP_FP)
+            }
+            Instruction::FcvtLS { rd, rs1 } => {
+                encode_r_type(0b1100000, 0b00010, rs1.encoding(), 0b111, rd.encoding(), OP_FP)
+            }
+            Instruction::FcvtLUS { rd, rs1 } => {
+                encode_r_type(0b1100000, 0b00011, rs1.encoding(), 0b111, rd.encoding(), OP_FP)
+            }
+            // FCVT.W.D: funct7=1100001, rs2=00000
+            Instruction::FcvtWD { rd, rs1 } => {
+                encode_r_type(0b1100001, 0b00000, rs1.encoding(), 0b111, rd.encoding(), OP_FP)
+            }
+            Instruction::FcvtWUD { rd, rs1 } => {
+                encode_r_type(0b1100001, 0b00001, rs1.encoding(), 0b111, rd.encoding(), OP_FP)
+            }
+            Instruction::FcvtLD { rd, rs1 } => {
+                encode_r_type(0b1100001, 0b00010, rs1.encoding(), 0b111, rd.encoding(), OP_FP)
+            }
+            Instruction::FcvtLUD { rd, rs1 } => {
+                encode_r_type(0b1100001, 0b00011, rs1.encoding(), 0b111, rd.encoding(), OP_FP)
+            }
+            // FCVT.D.S: funct7=0100001, rs2=00000
+            Instruction::FcvtDS { rd, rs1 } => {
+                encode_r_type(0b0100001, 0b00000, rs1.encoding(), 0b000, rd.encoding(), OP_FP)
+            }
+            // FCVT.S.D: funct7=0100000, rs2=00001
+            Instruction::FcvtSD { rd, rs1 } => {
+                encode_r_type(0b0100000, 0b00001, rs1.encoding(), 0b000, rd.encoding(), OP_FP)
+            }
+            // FMV.X.W: funct7=1110000, rs2=00000, funct3=000
+            Instruction::FmvXW { rd, rs1 } => {
+                encode_r_type(0b1110000, 0b00000, rs1.encoding(), 0b000, rd.encoding(), OP_FP)
+            }
+            // FMV.W.X: funct7=1111000, rs2=00000, funct3=000
+            Instruction::FmvWX { rd, rs1 } => {
+                encode_r_type(0b1111000, 0b00000, rs1.encoding(), 0b000, rd.encoding(), OP_FP)
+            }
+            // FMV.X.D: funct7=1110001, rs2=00000, funct3=000
+            Instruction::FmvXD { rd, rs1 } => {
+                encode_r_type(0b1110001, 0b00000, rs1.encoding(), 0b000, rd.encoding(), OP_FP)
+            }
+            // FMV.D.X: funct7=1111001, rs2=00000, funct3=000
+            Instruction::FmvDX { rd, rs1 } => {
+                encode_r_type(0b1111001, 0b00000, rs1.encoding(), 0b000, rd.encoding(), OP_FP)
+            }
+
             // ── Zicsr Extension ──────────────────────────────────────
             Instruction::Csrrw { rd, csr, rs1 } => {
                 // CSRRW: I-type, funct3=0b001, opcode=SYSTEM
@@ -1332,6 +1456,28 @@ impl Instruction {
             Instruction::FmulD { .. } => "fmul.d",
             Instruction::FdivD { .. } => "fdiv.d",
             Instruction::FmvD { .. } => "fmv.d",
+            Instruction::FcvtSW { .. } => "fcvt.s.w",
+            Instruction::FcvtSWU { .. } => "fcvt.s.wu",
+            Instruction::FcvtSL { .. } => "fcvt.s.l",
+            Instruction::FcvtSLU { .. } => "fcvt.s.lu",
+            Instruction::FcvtDW { .. } => "fcvt.d.w",
+            Instruction::FcvtDWU { .. } => "fcvt.d.wu",
+            Instruction::FcvtDL { .. } => "fcvt.d.l",
+            Instruction::FcvtDLU { .. } => "fcvt.d.lu",
+            Instruction::FcvtWS { .. } => "fcvt.w.s",
+            Instruction::FcvtWUS { .. } => "fcvt.wu.s",
+            Instruction::FcvtLS { .. } => "fcvt.l.s",
+            Instruction::FcvtLUS { .. } => "fcvt.lu.s",
+            Instruction::FcvtWD { .. } => "fcvt.w.d",
+            Instruction::FcvtWUD { .. } => "fcvt.wu.d",
+            Instruction::FcvtLD { .. } => "fcvt.l.d",
+            Instruction::FcvtLUD { .. } => "fcvt.lu.d",
+            Instruction::FcvtDS { .. } => "fcvt.d.s",
+            Instruction::FcvtSD { .. } => "fcvt.s.d",
+            Instruction::FmvXW { .. } => "fmv.x.w",
+            Instruction::FmvWX { .. } => "fmv.w.x",
+            Instruction::FmvXD { .. } => "fmv.x.d",
+            Instruction::FmvDX { .. } => "fmv.d.x",
             Instruction::Csrrw { .. } => "csrrw",
             Instruction::Csrrs { .. } => "csrrs",
             Instruction::Csrrc { .. } => "csrrc",
@@ -1931,6 +2077,28 @@ impl std::fmt::Display for Instruction {
             Instruction::FmulD { rd, rs1, rs2 } => write!(f, "fmul.d {}, {}, {}", rd, rs1, rs2),
             Instruction::FdivD { rd, rs1, rs2 } => write!(f, "fdiv.d {}, {}, {}", rd, rs1, rs2),
             Instruction::FmvD { rd, rs1 } => write!(f, "fmv.d {}, {}", rd, rs1),
+            Instruction::FcvtSW { rd, rs1 } => write!(f, "fcvt.s.w {}, {}", rd, rs1),
+            Instruction::FcvtSWU { rd, rs1 } => write!(f, "fcvt.s.wu {}, {}", rd, rs1),
+            Instruction::FcvtSL { rd, rs1 } => write!(f, "fcvt.s.l {}, {}", rd, rs1),
+            Instruction::FcvtSLU { rd, rs1 } => write!(f, "fcvt.s.lu {}, {}", rd, rs1),
+            Instruction::FcvtDW { rd, rs1 } => write!(f, "fcvt.d.w {}, {}", rd, rs1),
+            Instruction::FcvtDWU { rd, rs1 } => write!(f, "fcvt.d.wu {}, {}", rd, rs1),
+            Instruction::FcvtDL { rd, rs1 } => write!(f, "fcvt.d.l {}, {}", rd, rs1),
+            Instruction::FcvtDLU { rd, rs1 } => write!(f, "fcvt.d.lu {}, {}", rd, rs1),
+            Instruction::FcvtWS { rd, rs1 } => write!(f, "fcvt.w.s {}, {}", rd, rs1),
+            Instruction::FcvtWUS { rd, rs1 } => write!(f, "fcvt.wu.s {}, {}", rd, rs1),
+            Instruction::FcvtLS { rd, rs1 } => write!(f, "fcvt.l.s {}, {}", rd, rs1),
+            Instruction::FcvtLUS { rd, rs1 } => write!(f, "fcvt.lu.s {}, {}", rd, rs1),
+            Instruction::FcvtWD { rd, rs1 } => write!(f, "fcvt.w.d {}, {}", rd, rs1),
+            Instruction::FcvtWUD { rd, rs1 } => write!(f, "fcvt.wu.d {}, {}", rd, rs1),
+            Instruction::FcvtLD { rd, rs1 } => write!(f, "fcvt.l.d {}, {}", rd, rs1),
+            Instruction::FcvtLUD { rd, rs1 } => write!(f, "fcvt.lu.d {}, {}", rd, rs1),
+            Instruction::FcvtDS { rd, rs1 } => write!(f, "fcvt.d.s {}, {}", rd, rs1),
+            Instruction::FcvtSD { rd, rs1 } => write!(f, "fcvt.s.d {}, {}", rd, rs1),
+            Instruction::FmvXW { rd, rs1 } => write!(f, "fmv.x.w {}, {}", rd, rs1),
+            Instruction::FmvWX { rd, rs1 } => write!(f, "fmv.w.x {}, {}", rd, rs1),
+            Instruction::FmvXD { rd, rs1 } => write!(f, "fmv.x.d {}, {}", rd, rs1),
+            Instruction::FmvDX { rd, rs1 } => write!(f, "fmv.d.x {}, {}", rd, rs1),
             Instruction::Csrrw { rd, csr, rs1 } => {
                 write!(f, "csrrw {}, 0x{:03x}, {}", rd, csr, rs1)
             }
@@ -3940,6 +4108,22 @@ fn ss_store_to_slot(src_reg: Gpr, offset_from_s0: i32) -> Vec<u8> {
     }
 }
 
+/// Store a double-precision FP value from an FPR to a stack slot at [S0 - offset_from_s0].
+fn ss_store_fpr_to_slot(src_fpr: Fpr, offset_from_s0: i32) -> Vec<u8> {
+    let neg_off = -offset_from_s0;
+    if neg_off >= -2048 {
+        Instruction::Fsd { rs1: Gpr::S0, rs2: src_fpr, imm: neg_off }
+            .encode()
+            .to_vec()
+    } else {
+        let mut code = Vec::new();
+        code.extend(ss_load_imm(Gpr::T3, offset_from_s0 as i64));
+        code.extend(Instruction::Sub { rd: Gpr::T3, rs1: Gpr::S0, rs2: Gpr::T3 }.encode());
+        code.extend(Instruction::Fsd { rs1: Gpr::T3, rs2: src_fpr, imm: 0 }.encode());
+        code
+    }
+}
+
 /// Load an [`IRValue`] into a scratch register.
 ///
 /// For registers: load from the stack slot.
@@ -4412,17 +4596,35 @@ impl Backend for RiscV64Backend {
                             CastKind::SExt => {
                                 code.extend(Instruction::Addiw { rd: Gpr::T0, rs1: Gpr::T0, imm: 0 }.encode());
                             }
-                            CastKind::IntToFloat | CastKind::UIntToFloat => {
-                                // FCVT.S.L / FCVT.S.LU or FCVT.D.L / FCVT.D.LU
-                                // Placeholder: treat as no-op for now
+                            CastKind::IntToFloat => {
+                                // Signed int → f64: FCVT.D.L F0, T0 then FSD F0 + LD
+                                code.extend(Instruction::FcvtDL { rd: Fpr::F0, rs1: Gpr::T0 }.encode());
+                                // Store the f64 result from F0 to dst slot via FSD
+                                code.extend(ss_store_fpr_to_slot(Fpr::F0, dst_offset));
+                                // Load the 64-bit value back to T0
+                                code.extend(ss_load_from_slot(Gpr::T0, dst_offset));
                             }
-                            CastKind::FloatToInt | CastKind::FloatToUInt => {
-                                // FCVT.L.S / FCVT.LU.S or FCVT.L.D / FCVT.LU.D
-                                // Placeholder: treat as no-op for now
+                            CastKind::UIntToFloat => {
+                                // Unsigned int → f64: FCVT.D.LU F0, T0 then FSD F0 + LD
+                                code.extend(Instruction::FcvtDLU { rd: Fpr::F0, rs1: Gpr::T0 }.encode());
+                                code.extend(ss_store_fpr_to_slot(Fpr::F0, dst_offset));
+                                code.extend(ss_load_from_slot(Gpr::T0, dst_offset));
+                            }
+                            CastKind::FloatToInt => {
+                                // f64 → signed int: FMV.D.X F0, T0 then FCVT.L.D T0, F0
+                                code.extend(Instruction::FmvDX { rd: Fpr::F0, rs1: Gpr::T0 }.encode());
+                                code.extend(Instruction::FcvtLD { rd: Gpr::T0, rs1: Fpr::F0 }.encode());
+                            }
+                            CastKind::FloatToUInt => {
+                                // f64 → unsigned int: FMV.D.X F0, T0 then FCVT.LU.D T0, F0
+                                code.extend(Instruction::FmvDX { rd: Fpr::F0, rs1: Gpr::T0 }.encode());
+                                code.extend(Instruction::FcvtLUD { rd: Gpr::T0, rs1: Fpr::F0 }.encode());
                             }
                             CastKind::FloatToFloat => {
-                                // FCVT.S.D / FCVT.D.S
-                                // Placeholder: treat as no-op for now
+                                // f64 → f32 (narrow): FMV.D.X F0, T0 then FCVT.S.D F0, F0 then FMV.X.W T0, F0
+                                code.extend(Instruction::FmvDX { rd: Fpr::F0, rs1: Gpr::T0 }.encode());
+                                code.extend(Instruction::FcvtSD { rd: Fpr::F0, rs1: Fpr::F0 }.encode());
+                                code.extend(Instruction::FmvXW { rd: Gpr::T0, rs1: Fpr::F0 }.encode());
                             }
                         }
                         code.extend(ss_store_to_slot(Gpr::T0, dst_offset));
@@ -4657,14 +4859,20 @@ impl Backend for RiscV64Backend {
                     }
 
                     IRInstr::AtomicStore { value, addr, .. } => {
-                        // RISC-V: SC.D loop — store-conditional, retry on failure
+                        // RISC-V: LR.D/SC.D loop — load-reserved, store-conditional, retry on failure
                         let mut code = Vec::new();
                         code.extend(ss_load_value(addr, &vreg_stack_slots, Gpr::T0));
                         code.extend(ss_load_value(value, &vreg_stack_slots, Gpr::T1));
 
-                        // retry: SC.D T2, T1, T0
-                        let retry_offset = code.len() as u64 + current_byte_offset;
+                        // retry: LR.D T2, T0 — establish reservation
+                        let retry_abs_offset = current_byte_offset + code.len() as u64;
+                        let retry_label = format!("__atomic_store_retry_{}", retry_abs_offset);
+                        label_offsets.insert(retry_label.clone(), retry_abs_offset);
+                        code.extend(Instruction::LrD { rd: Gpr::T2, rs1: Gpr::T0 }.encode());
+
+                        // SC.D T2, T1, T0 — attempt store
                         code.extend(Instruction::ScD { rd: Gpr::T2, rs1: Gpr::T0, rs2: Gpr::T1 }.encode());
+
                         // BNE T2, x0, retry — if SC failed, retry
                         let bne_offset_in_encoded = code.len();
                         let bne_abs_offset = current_byte_offset + bne_offset_in_encoded as u64;
@@ -4675,49 +4883,73 @@ impl Backend for RiscV64Backend {
                             instr_idx: instructions.len(),
                             offset_in_encoded: bne_offset_in_encoded,
                             abs_byte_offset: bne_abs_offset,
-                            target_label: format!("__atomic_store_retry_{}", retry_offset),
+                            target_label: retry_label,
                             is_jal: false,
                             jal_rd: Gpr::Zero,
                             bne_rs1: Gpr::T2,
                             bne_rs2: Gpr::Zero,
                         });
-                        // We need a label at retry_offset — for simplicity, emit a NOP
-                        // The proper fix would add label support; for now we use a self-referencing
-                        // backward branch. We'll emit the retry label as part of the same block.
-                        // TODO: proper label support for atomic loops
                         code
                     }
 
                     IRInstr::AtomicCas { dst, addr, expected, desired, .. } => {
-                        // RISC-V CAS loop: LR.D / BNE / SC.D / BNE retry
+                        // RISC-V CAS loop: LR.D / BNE done / SC.D / BNE retry
                         let mut code = Vec::new();
                         code.extend(ss_load_value(addr, &vreg_stack_slots, Gpr::T0));
                         code.extend(ss_load_value(expected, &vreg_stack_slots, Gpr::T1));
                         code.extend(ss_load_value(desired, &vreg_stack_slots, Gpr::T3));
 
-                        // retry: LR.D T2, T0 — load current value
-                        let retry_offset_in_encoded = code.len();
+                        // retry: LR.D T2, T0 — load current value & establish reservation
+                        let retry_abs_offset = current_byte_offset + code.len() as u64;
+                        let retry_label = format!("__atomic_cas_retry_{}", retry_abs_offset);
+                        label_offsets.insert(retry_label.clone(), retry_abs_offset);
                         code.extend(Instruction::LrD { rd: Gpr::T2, rs1: Gpr::T0 }.encode());
 
-                        // BNE T2, T1, done — if not equal, skip
-                        let bne_offset_in_encoded = code.len();
-                        let bne_abs_offset = current_byte_offset + bne_offset_in_encoded as u64;
+                        // BNE T2, T1, done — if current != expected, skip to done
+                        let bne1_offset_in_encoded = code.len();
+                        let bne1_abs_offset = current_byte_offset + bne1_offset_in_encoded as u64;
                         code.extend(Instruction::Bne { rs1: Gpr::T2, rs2: Gpr::T1, offset: 0 }.encode());
 
-                        // SC.D T4, T3, T0 — try to store desired
+                        // SC.D T4, T3, T0 — try to store desired value
                         code.extend(Instruction::ScD { rd: Gpr::T4, rs1: Gpr::T0, rs2: Gpr::T3 }.encode());
 
-                        // BNE T4, x0, retry — if SC failed, retry
+                        // BNE T4, x0, retry — if SC failed, retry from LR.D
                         let bne2_offset_in_encoded = code.len();
                         let bne2_abs_offset = current_byte_offset + bne2_offset_in_encoded as u64;
                         code.extend(Instruction::Bne { rs1: Gpr::T4, rs2: Gpr::Zero, offset: 0 }.encode());
 
                         // done: store old value (T2) to dst
-                        // For now, always store T2 (the current value)
+                        let done_abs_offset = current_byte_offset + code.len() as u64;
+                        let done_label = format!("__atomic_cas_done_{}", done_abs_offset);
+                        label_offsets.insert(done_label.clone(), done_abs_offset);
                         let dst_id = dst.as_register().unwrap_or(0);
                         let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
                         code.extend(ss_store_to_slot(Gpr::T2, dst_off));
-                        // TODO: proper label fixups for the retry/done branches
+
+                        // Branch fixup: BNE (current != expected → done)
+                        branch_fixups.push(BranchFixup {
+                            instr_idx: instructions.len(),
+                            offset_in_encoded: bne1_offset_in_encoded,
+                            abs_byte_offset: bne1_abs_offset,
+                            target_label: done_label,
+                            is_jal: false,
+                            jal_rd: Gpr::Zero,
+                            bne_rs1: Gpr::T2,
+                            bne_rs2: Gpr::T1,
+                        });
+
+                        // Branch fixup: BNE (SC failed → retry)
+                        branch_fixups.push(BranchFixup {
+                            instr_idx: instructions.len(),
+                            offset_in_encoded: bne2_offset_in_encoded,
+                            abs_byte_offset: bne2_abs_offset,
+                            target_label: retry_label,
+                            is_jal: false,
+                            jal_rd: Gpr::Zero,
+                            bne_rs1: Gpr::T4,
+                            bne_rs2: Gpr::Zero,
+                        });
+
                         code
                     }
                 };

@@ -1129,13 +1129,25 @@ impl Emitter {
                             self.emit_instruction(Instruction::MOV { rd, rm: rn })?;
                         }
                     }
-                    CastKind::IntToFloat | CastKind::UIntToFloat |
-                    CastKind::FloatToInt | CastKind::FloatToUInt |
+                    CastKind::IntToFloat => {
+                        // Signed int → float: SCVTF
+                        self.emit_instruction(Instruction::SCVTF { rd, rn })?;
+                    }
+                    CastKind::UIntToFloat => {
+                        // Unsigned int → float: UCVTF
+                        self.emit_instruction(Instruction::UCVTF { rd, rn })?;
+                    }
+                    CastKind::FloatToInt => {
+                        // Float → signed int: FCVTZS
+                        self.emit_instruction(Instruction::FCVTZS { rd, rn })?;
+                    }
+                    CastKind::FloatToUInt => {
+                        // Float → unsigned int: FCVTZU
+                        self.emit_instruction(Instruction::FCVTZU { rd, rn })?;
+                    }
                     CastKind::FloatToFloat => {
-                        // FP casts — not yet implemented; pass through.
-                        if rd != rn {
-                            self.emit_instruction(Instruction::MOV { rd, rm: rn })?;
-                        }
+                        // Float ↔ float width change: FCVT
+                        self.emit_instruction(Instruction::FCVT { rd, rn, to_double: true })?;
                     }
                 }
             }
@@ -2737,10 +2749,25 @@ impl Emitter {
                     CastKind::Trunc | CastKind::BitCast => {
                         // No-op: just store the value
                     }
-                    CastKind::IntToFloat | CastKind::UIntToFloat |
-                    CastKind::FloatToInt | CastKind::FloatToUInt |
+                    CastKind::IntToFloat => {
+                        // Signed int → float: SCVTF
+                        self.emit_instruction(Instruction::SCVTF { rd: Register::X9, rn: Register::X9 })?;
+                    }
+                    CastKind::UIntToFloat => {
+                        // Unsigned int → float: UCVTF
+                        self.emit_instruction(Instruction::UCVTF { rd: Register::X9, rn: Register::X9 })?;
+                    }
+                    CastKind::FloatToInt => {
+                        // Float → signed int: FCVTZS
+                        self.emit_instruction(Instruction::FCVTZS { rd: Register::X9, rn: Register::X9 })?;
+                    }
+                    CastKind::FloatToUInt => {
+                        // Float → unsigned int: FCVTZU
+                        self.emit_instruction(Instruction::FCVTZU { rd: Register::X9, rn: Register::X9 })?;
+                    }
                     CastKind::FloatToFloat => {
-                        // FP casts — not yet implemented; pass through.
+                        // Float ↔ float width change: FCVT
+                        self.emit_instruction(Instruction::FCVT { rd: Register::X9, rn: Register::X9, to_double: true })?;
                     }
                 }
                 self.ss_store_to_slot(Register::X9, dst_offset)?;
