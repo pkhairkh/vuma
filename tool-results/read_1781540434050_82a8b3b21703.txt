@@ -1,0 +1,502 @@
+  1700→Stage Summary:
+  1701→- 3 new modules created (crypto.rs, string.rs, math.rs)
+  1702→- 2 existing modules enhanced (alloc.rs, io.rs)
+  1703→- 15 new public functions with comprehensive documentation
+  1704→- Each function has VUMA program equivalents, BD annotations, and safety documentation
+  1705→- All functions follow existing codebase patterns (VUMA-VERIFIED comments, CapD/SyncEdge annotations, cfg feature flags)
+  1706→
+  1707→---
+  1708→Task ID: 9
+  1709→Agent: general-purpose
+  1710→Task: Improve register allocator to reduce excessive stack spilling (greedy register cache)
+  1711→
+  1712→Work Log:
+  1713→- Read regalloc.rs (5470 lines), target_desc.rs, and stack_slot_isel files for x86_64 and loongarch64
+  1714→- Analyzed the current approach: stack-slot ISel assigns every vreg → stack slot, meaning every operation does load→compute→store (3 memory ops per instruction)
+  1715→- Studied loongarch64/reg_alloc_isel.rs which already implements a target-specific register cache (RegCache)
+  1716→- Designed and implemented a TARGET-INDEPENDENT solution in regalloc.rs
+  1717→
+  1718→Changes to regalloc.rs:
+  1719→1. **LoopDetector** — Detects natural loops via back-edge analysis and dominator computation
+  1720→   - Uses iterative dominator algorithm (Cooper, Harvey, Kennedy)
+  1721→   - Computes loop nesting depth for each loop
+  1722→   - detect_with_induction_vars() identifies self-referencing induction variables (v = v + const)
+  1723→
+  1724→2. **Loop Depth Computation** — compute_block_loop_depths() and compute_vreg_loop_depths()
+  1725→   - Maps each block to its loop nesting depth
+  1726→   - Maps each vreg to its maximum loop depth across all uses/defs
+  1727→
+  1728→3. **Enhanced LiveInterval spill weights** — enhanced_spill_weight() and enhanced_weight_per_length()
+  1729→   - Loop depth multiplier: 10^depth (exponential, standard in production compilers)
+  1730→   - Induction variable bonus: 3x
+  1731→   - Call crossing penalty: 2x
+  1732→   - Formula: (uses+defs) × 10^depth × induction_bonus × call_multiplier
+  1733→
+  1734→4. **GreedyRegCache** — Target-independent register cache for backends to use at ISel time
+  1735→   - Tracks which vregs are in physical registers vs on the stack
+  1736→   - LRU eviction policy, preferring to evict caller-saved over callee-saved
+  1737→   - read_vreg(): ensures vreg is in register (returns whether reload needed)
+  1738→   - alloc_vreg(): allocates register for new definition
+  1739→   - release_vreg(): frees register when liveness says vreg is dead (NO spill needed)
+  1740→   - flush_all()/flush_caller_saved(): emits spill code for dirty registers
+  1741→   - invalidate_caller_saved(): after function calls, marks caller-saved regs as stale
+  1742→   - Can be constructed from TargetDesc for any backend
+  1743→
+  1744→5. **LivenessAnalysis** — Per-instruction liveness dataflow analysis
+  1745→   - Iterative backward dataflow: live_in = use ∪ (live_out - def)
+  1746→   - Per-instruction dead_at set: definitions that are never used later
+  1747→   - Backends can query is_dead_at() to know when to call release_vreg()
+  1748→
+  1749→6. **Enhanced TargetAgnosticRegAlloc::allocate_function_enhanced()**
+  1750→   - Integrates loop detection + induction variable detection
+  1751→   - Sorts intervals by (start, -loop_depth, -is_induction, -length) for priority
+  1752→   - Uses enhanced spill weights for eviction decisions
+  1753→   - Tracks dead vregs during allocation for register reuse
+  1754→
+  1755→7. **19 new tests** (all passing):
+  1756→   - loop_detector_simple_loop — back-edge detection
+  1757→   - loop_detector_induction_variable — induction var detection
+  1758→   - loop_detector_self_referencing_induction — v=v+1 pattern detection
+  1759→   - loop_depth_computation — block/vreg depth mapping
+  1760→   - enhanced_spill_weight_loop_priority — depth 1 > depth 0
+  1761→   - enhanced_spill_weight_induction_bonus — 3x bonus for induction vars
+  1762→   - enhanced_spill_weight_exponential_depth — 10^depth growth
+  1763→   - cache_basic_alloc — register cache creation and vreg allocation
+  1764→   - cache_release_dead_vreg — dead vreg releases register
+  1765→   - cache_spill_only_when_necessary — eviction only when all regs full
+  1766→   - enhanced_allocator_prioritizes_loop_vars — loop vars get priority
+  1767→   - enhanced_allocator_fewer_spills_for_loops — fewer spills for loop code
+  1768→   - liveness_identifies_dead_vregs — dead-at detection
+  1769→   - liveness_block_in_out — live-in/live-out computation
+  1770→   - cache_dead_vreg_frees_register — release + new alloc without spill
+  1771→   - cache_flush_caller_saved — caller-saved flush before calls
+  1772→   - cache_invalidate_caller_saved — post-call invalidation
+  1773→   - enhanced_weight_per_length_eviction_decision — eviction ordering
+  1774→   - cache_register_reuse_after_death — register reuse after vreg death
+  1775→
+  1776→Stage Summary:
+  1777→- All new code is TARGET-INDEPENDENT in regalloc.rs — all backends benefit
+  1778→- Backends can still use stack-slot ISel as fallback, but can incrementally
+  1779→  adopt GreedyRegCache for frequently-used vregs
+  1780→- For SHA256d's 64-round compression, loop variables (working vars a-h, round constants)
+  1781→  will now have 10x-1000x higher spill weights, ensuring they stay in registers
+  1782→  instead of being spilled in favor of one-off temporaries
+  1783→- The GreedyRegCache can be used at ISel time by any backend to eliminate the
+  1784→  load→compute→store pattern for cached vregs (direct register operations)
+  1785→- Build: cargo build -p vuma-codegen succeeds with only pre-existing warnings
+  1786→- Tests: 19/19 passing
+  1787→
+  1788→---
+  1789→Task ID: 7
+  1790→Agent: main
+  1791→Task: Harden VUMA parser for LLM-generated code
+  1792→
+  1793→Work Log:
+  1794→- Read and analyzed parser.rs (6100+ lines), error.rs (1445+ lines), lexer.rs (2969+ lines)
+  1795→- Added 3 new ParseErrorKind variants: LlmMistake, CStyleForLoop, UnknownType
+  1796→- Added convenience constructors: llm_mistake(), c_style_for_loop(), unknown_type()
+  1797→- Added ErrorRecovery strategies for new error kinds (SkipOneToken, SkipToStatementBoundary)
+  1798→- Added LLM type suggestion system in error.rs:
+  1799→  - LLM_TYPE_ALIASES table: maps C/Rust types (int, float, double, String, Vec, etc.) to VUMA equivalents (i32, f32, f64, string, array, etc.)
+  1800→  - VUMA_TYPES list for fuzzy spellcheck suggestions via Levenshtein distance
+  1801→  - suggest_vuma_type() function: exact alias lookup + fuzzy matching
+  1802→  - check_llm_construct() function: detects println!, vec!, format!, panic!, etc.
+  1803→- Enhanced lexer.rs:
+  1804→  - Added TokenKind::MacroIdent for Rust-style macro identifiers (println!, vec!, etc.)
+  1805→  - lex_ident() now detects `name!` patterns and produces MacroIdent tokens
+  1806→- Enhanced parser.rs:
+  1807→  - Added current_fn_name field to Parser for context-aware error messages
+  1808→  - parse_stmt(): detects `mut` keyword → LLM mistake with suggestion to remove
+  1809→  - parse_stmt(): detects MacroIdent → LLM mistake with helpful hint, skips macro args
+  1810→  - parse_for_stmt(): detects C-style for `(i=0; i<n; i++)` → specific error with suggestion
+  1811→  - parse_type(): detects `&T` and `&mut T` → LLM mistake, auto-converts to `*T` pointer
+  1812→  - parse_type(): detects unknown type names (int, float, etc.) → UnknownType error with suggestion
+  1813→  - expect(): improved messages to "expected ';' after expression, found '}'" format
+  1814→  - expect(): adds line/column tracking from current token
+  1815→  - expect(): also checks suggest_vuma_type for identifiers
+  1816→  - expect_name(), expect_ident(), expect_string(): improved messages with line/column
+  1817→  - parse_block(): better EOF handling — pushes error for missing '}' but returns partial block
+  1818→  - parse_program(): collects lexer errors before and after parsing
+  1819→  - parse_program(): resolves line/column for all accumulated errors
+  1820→  - Added skip_balanced_parens() and skip_balanced_braces() recovery helpers
+  1821→- Updated diagnostics.rs:
+  1822→  - Added error codes E021 (LlmMistake), E022 (CStyleForLoop), E023 (UnknownType)
+  1823→  - Added code descriptions for new error codes
+  1824→  - Fixed pre-existing non-exhaustive match on VumaError::ModuleResolution
+  1825→- Updated lib.rs: re-exported check_llm_construct and suggest_vuma_type
+  1826→
+  1827→Key Design Decisions:
+  1828→- LLM mistakes are pushed to self.errors as non-fatal errors (parser still returns partial AST)
+  1829→- Type detection (int→i32) uses the alias table to auto-correct: parse_type() reports the error but still produces a valid Type node so downstream passes can continue
+  1830→- &T/&mut T auto-convert to *T (pointer type) so the rest of the compilation pipeline works
+  1831→- The `fn main()` return type hint was considered but removed — omitting return types is valid VUMA
+  1832→- Valid VUMA types (i8, i32, i64, etc.) are excluded from LLM_TYPE_ALIASES to avoid false positives
+  1833→
+  1834→Build: cargo build --lib succeeds, all 324 parser tests pass, all 58 vuma lib tests pass
+  1835→
+  1836→---
+  1837→Task ID: 10
+  1838→Agent: general-purpose
+  1839→Task: Add multi-file compilation support to VUMA (module system)
+  1840→
+  1841→Work Log:
+  1842→- Read existing parser, AST, lexer, pipeline, main.rs, and to_scg codebase
+  1843→- Found that import syntax already partially existed (import "path" {names};)
+  1844→- Updated parser.rs parse_import() to support new `::` syntax:
+  1845→  `import "crypto.vuma"::{sha256, sha256d};` (with `::` before `{`)
+  1846→  Legacy `import "crypto.vuma" {sha256};` still works
+  1847→- Created /home/z/my-project/vuma/src/parser/src/resolver.rs:
+  1848→  - ModuleResolver struct with cache + in_progress set
+  1849→  - resolve_file() for file-path-based resolution
+  1850→  - resolve_source() for source-string-based resolution (used by pipeline)
+  1851→  - merge_imports() to merge imported items into the importing program
+  1852→  - Circular import detection via in_progress set
+  1853→  - FileNotFound vs Io error distinction
+  1854→  - Name conflict detection (same name from multiple sources)
+  1855→  - Symbol not found validation for selective imports
+  1856→  - item_name() helper to extract names from AST items
+  1857→  - 8 unit tests covering all resolver features
+  1858→- Updated /home/z/my-project/vuma/src/parser/src/lib.rs:
+  1859→  - Added `pub mod resolver;`
+  1860→  - Re-exported `ModuleResolver` and `ResolveError`
+  1861→- Updated /home/z/my-project/vuma/src/pipeline.rs:
+  1862→  - Added `ModuleResolution` variant to `VumaError` enum
+  1863→  - Added `parse_and_resolve()` helper that uses ModuleResolver when imports are present
+  1864→  - Created `compile_with_path(source, file_path, config)` function
+  1865→  - `compile()` now delegates to `compile_with_path(source, None, config)`
+  1866→  - Added stage() and Display() for ModuleResolution error
+  1867→- Updated /home/z/my-project/vuma/src/lib.rs:
+  1868→  - Re-exported `compile_with_path` from pipeline
+  1869→- Updated /home/z/my-project/vuma/src/diagnostics.rs:
+  1870→  - Added `from_vuma_error` match arm for `ModuleResolution` variant
+  1871→- Updated /home/z/my-project/vuma/src/main.rs:
+  1872→  - All CLI commands (build, run, check, verify) now use `compile_with_path`
+  1873→  - Pass the input file path so imports resolve relative to the source file
+  1874→  - Fixed borrow/move issues in command dispatch
+  1875→
+  1876→Test Results:
+  1877→- All 286 parser unit tests pass (including 8 new resolver tests)
+  1878→- All 36 edge_cases tests pass
+  1879→- End-to-end tests with multi-file programs:
+  1880→  - `import "utils.vuma"::{helper};` with specific symbol import: ✓
+  1881→  - `import "utils.vuma";` with wildcard import: ✓
+  1882→  - Circular import detection: ✓ (proper error message)
+  1883→  - Missing symbol in selective import: ✓ (shows available symbols)
+  1884→  - File not found: ✓ (proper error with resolved path)
+  1885→
+  1886→Stage Summary:
+  1887→- Minimal module system implemented: file-level imports, no visibility modifiers, no hierarchy
+  1888→- Import syntax: `import "path";` or `import "path"::{name1, name2};`
+  1889→- Module resolution: relative path resolution, circular import detection, name conflict detection
+  1890→- Pipeline: new `compile_with_path()` API, backward-compatible `compile()` still works
+  1891→- CLI: all subcommands now pass file paths for import resolution
+  1892→
+  1893→---
+  1894→Task ID: 16
+  1895→Agent: general-purpose
+  1896→Task: Wave16: CI build matrix
+  1897→
+  1898→Work Log:
+  1899→- Created .github/workflows/ci.yml with GitHub Actions workflow
+  1900→  - Triggers on push to main and pull requests
+  1901→  - Test job: Ubuntu latest with Rust nightly-2026-03-01 (pinned via rust-toolchain.toml)
+  1902→  - Steps: checkout, cargo build --workspace, cargo test --workspace, cargo clippy --workspace, cargo fmt --workspace --check
+  1903→  - Release job: builds vuma binary for x86_64-linux with LTO, uploads as artifact
+  1904→- Created .github/workflows/cross-compile.yml
+  1905→  - Matrix covers all 8 backend targets: x86_64, aarch64, riscv64gc, armv7, mips64, powerpc64, loongarch64, wasm32
+  1906→  - Uses cross-rs for aarch64, riscv64gc, armv7, mips64, powerpc64 (QEMU-backed)
+  1907→  - LoongArch64: cargo check only (limited cross-rs support)
+  1908→  - Wasm32: cargo build only (no std runtime)
+  1909→  - Native x86_64: standard cargo build
+  1910→  - fail-fast: false so all targets report independently
+  1911→- Created .github/dependabot.yml
+  1912→  - Checks for Cargo dependency updates weekly (Mondays)
+  1913→  - Limits 5 open PRs, applies dependencies/rust labels
+  1914→- Updated .gitignore
+  1915→  - Added *.wasm, tool-results/, .env entries
+  1916→- All YAML files validated with Python yaml.safe_load
+  1917→
+  1918→Stage Summary:
+  1919→- CI pipeline: test + release workflow for main/PR builds
+  1920→- Cross-compile verification for all 8 ISA backends
+  1921→- Automated dependency updates via Dependabot
+  1922→- .gitignore covers build artifacts and tool output
+  1923→
+  1924→---
+  1925→Task ID: 13-14
+  1926→Agent: general-purpose
+  1927→Task: Documentation Overhaul + REPL Enhancements
+  1928→
+  1929→Work Log:
+  1930→
+  1931→1. **ROADMAP.md Overhaul** (`docs/ROADMAP.md`):
+  1932→   - Updated version to 0.2.0, status to "Phase 2 — Core Implementation (substantial progress)"
+  1933→   - Removed all BCM2712/Pi5 references from overview (replaced with multi-arch description)
+  1934→   - Phase 1: Marked COMPLETE with expanded milestones (M1.1-M1.6) including multi-arch codegen (8 backends), parser, and proof system
+  1935→   - Phase 1 deliverables: Added all 8 backend architectures, parser crate, projection crate to achievement list
+  1936→   - Phase 2: Added 5 new milestones (M2.7-M2.11) for LLM API, LSP server, enhanced REPL, module resolution, and Wasm32 sandbox
+  1937→   - Phase 2: Updated existing milestones — M2.1/M2.2/M2.5 now marked Complete
+  1938→   - Phase 2 success criteria: Updated to checkbox format with 10 items (7 checked)
+  1939→   - Phase 3: Updated to "In Progress (waves 6-10)" with new milestones M3.6-M3.8 (verification hardening, cross-backend validation, diagnostics)
+  1940→   - Phase 3 success criteria: Updated to checkbox format with 14 items (6 checked)
+  1941→   - Phase 4: Updated status — LSP, parser, projections now marked Complete
+  1942→   - Added new section: "LLM Integration" as key differentiator with architecture diagram, interface table, and Wasm32 sandbox description
+  1943→   - Updated dependency graph to reflect LLM API, LSP, module resolution, parser, and proof system
+  1944→   - Updated risk mitigation table with LLM API stability risk
+  1945→
+  1946→2. **architecture.md Updates** (`docs/architecture.md`):
+  1947→   - Updated version to 0.2.0, status to "Phase 2 — substantial progress"
+  1948→   - Added Section 9: "LLM Integration Architecture" with LLM-facing components, workflow diagram, and Wasm32 sandbox section
+  1949→   - Updated Table of Contents to include new section
+  1950→   - Updated Layer Interaction Diagram: Added LLM Integration Layer (VumaCompiler API, LSP Server, REPL), changed "Parser / Frontend" to include "Module System", changed Execution Layer to "Multi-Arch Backends" showing all 8 architectures
+  1951→   - Removed all "ARM64" single-architecture references in favor of "multi-arch" / "8 backends" language
+  1952→   - Updated COR Layer 4 description to mention 8 backend architectures
+  1953→   - Updated data flow Stage 5 and Stage 6 to reference multi-arch codegen
+  1954→   - Updated codegen crate description to "Multi-Arch Code Generation"
+  1955→   - Updated code generation pipeline section to describe 8 backend architectures and Backend trait
+  1956→   - Updated register allocation section to describe per-backend strategies
+  1957→   - Updated emit module description to include Wasm module generation
+  1958→   - Updated COR description to remove "ARM64" constraint
+  1959→   - Updated platform layer description to reference multi-arch linker scripts
+  1960→   - Added "LLM-native" as sixth architectural principle
+  1961→   - Zero remaining Pi5/BCM2712/Raspberry Pi references in architecture.md
+  1962→
+  1963→3. **REPL Enhancements** (`src/vuma/src/repl.rs`):
+  1964→   - Added `:wasm` command — compiles current session to Wasm32 and shows estimated binary size
+  1965→   - Added `:backends` command — lists all 8 available backends with status (stable/experimental) and current target marker
+  1966→   - Added `:check` command — alias for `:verify`, runs IVE verification on current session
+  1967→   - Added `:diagnostics` command — outputs all current diagnostics (IVE, parser, SCG, MSG) as JSON using serde_json
+  1968→   - Added `:exports` command — lists all function signatures, constants, and variable bindings in the session
+  1969→   - Added tab completion system: `complete()` function supports command completion (all `:xxx` commands) and VUMA keyword completion (fn, let, if, while, etc.)
+  1970→   - Added ANSI color output: `ansi` module with escape codes, `supports_color()` detection, `color!` macro
+  1971→   - Applied color to: REPL prompt (bold green), banner (bold cyan), errors (bold red), warnings (yellow), success messages (green), section headers (bold cyan), function names (bold cyan), variable names (cyan), backend status markers (bold green), estimated/notes (dim)
+  1972→   - Updated help text to include all new commands and tab completion instructions
+  1973→   - Added 11 new tests (tests 30-36): :wasm, :backends, :check, :diagnostics, :exports, tab completion commands, tab completion keywords, ANSI color support
+  1974→   - All 39 REPL tests pass
+  1975→
+  1976→Files Changed:
+  1977→- `docs/ROADMAP.md` — Complete rewrite reflecting project state after Waves 1-10
+  1978→- `docs/architecture.md` — Updated for multi-arch, LLM integration, removed Pi5 references, added Section 9
+  1979→- `src/vuma/src/repl.rs` — Added 5 new commands, tab completion, ANSI color output, 11 new tests
+  1980→
+  1981→Stage Summary:
+  1982→- ROADMAP.md now accurately reflects 8 backends, LLM API, LSP, REPL, parser, proof system achievements
+  1983→- architecture.md has zero Pi5/BCM2712 references, new LLM Integration Architecture section
+  1984→- REPL has :wasm, :backends, :check, :diagnostics, :exports commands with tab completion and color output
+  1985→
+  1986→---
+  1987→Task ID: 15
+  1988→Agent: general-purpose
+  1989→Task: Wave15: Create comprehensive structured error reporting system
+  1990→
+  1991→Work Log:
+  1992→- Read existing diagnostics.rs (1113 lines) — had 23 diagnostic codes (E001-E023, W001-W003)
+  1993→- Expanded error catalog to 65 diagnostic codes:
+  1994→  - E001-E030: Compilation errors (syntax, type, name resolution, etc.)
+  1995→  - E031-E040: Codegen errors (register allocation, encoding, relocation, linker)
+  1996→  - E041-E050: Verification errors (invariant violations, proof failures, BD inference)
+  1997→  - W001-W010: Warnings (unused vars, dead code, redundant cast, shadowed variable, unnecessary mut, deprecated, unused import, reachable panic)
+  1998→  - I001-I005: Informational messages (compilation started, stage completed, optimization applied, verification passed, artifact produced)
+  1999→- Added `code_category()` and `code_subcategory()` helper functions for code introspection
+  2000→- Added `Suggestion` struct with structured edit ranges:
+  2001→  - `Suggestion::text()` — plain text suggestions
+  2002→  - `Suggestion::edit()` — suggestions with edit range + replacement text
+  2003→  - `Suggestion::machine_applicable()` — auto-fixable suggestions
+  2004→  - `Suggestion::with_placeholders()` — suggestions needing human review
+  2005→  - `SuggestionApplicability` enum (MachineApplicable, MaybeIncorrect, HasPlaceholders, Unspecified)
+  2006→- Added error chaining via `VumaDiagnostic::chain()`:
+  2007→  - `chain(cause)` — adds causal diagnostic
+  2008→  - `root_cause()` — returns deepest cause
+  2009→  - `immediate_cause()` — returns first cause
+  2010→  - `causal_chain()` — returns full chain slice
+  2011→  - `has_chain()` — checks if chain exists
+  2012→  - JSON serialization includes `chain` field
+  2013→  - Display/Plain/Rich text all show "caused by:" chain
+  2014→- Added output format methods:
+  2015→  - `to_json()` — machine-readable JSON (existing, enhanced with chain/suggestions)
+  2016→  - `to_rich_text()` — ANSI-colored terminal output (red errors, yellow warnings, green suggestions, indented causal chain)
+  2017→  - `to_plain_text()` — plain text for logs (no ANSI codes)
+  2018→  - `to_lsp()` — LSP Diagnostic format (0-based positions, severity codes, relatedInformation, tags, codeDescription)
+  2019→- Added `DiagnosticSummary` for error statistics:
+  2020→  - Counts by severity (errors, warnings, infos, hints)
+  2021→  - Counts by code (e.g. "E001" × 3)
+  2022→  - Counts by source (e.g. "parser" × 5)
+  2023→  - Counts by subcategory (compilation, codegen, verification, warning, informational)
+  2024→  - `has_errors()`, `has_warnings()`, `count_for_code()`, `count_for_source()`
+  2025→  - JSON serialization and Display implementation
+  2026→- Added convenience constructors for all new codes (E024-E050, W004-W010, I001-I005)
+  2027→- Updated `from_vuma_error()` to use proper new codes (E024, E032, E035, E042, E048 instead of generic E001)
+  2028→- Updated `from_codegen_error()` to use E031-E036 range and structured suggestions
+  2029→- Updated `code_for_codegen_error()` to use E031-E036
+  2030→- Updated re-exports in lib.rs (added DiagnosticSummary, Suggestion, SuggestionApplicability, code_category, code_subcategory)
+  2031→- Fixed pre-existing build errors: vuma-core/repl.rs missing cmd_wasm/cmd_backends/cmd_diagnostics/cmd_exports method bodies, Expr Display format
+  2032→- Added 64 comprehensive tests covering all new features
+  2033→
+  2034→Stage Summary:
+  2035→- Diagnostic codes expanded from 23 to 65 (E001-E050, W001-W010, I001-I005)
+  2036→- Error chaining supports causal chains with JSON/Display/Rich/Plain output
+  2037→- Structured suggestions carry edit ranges, replacements, and applicability
+  2038→- Four output formats: JSON, ANSI rich text, plain text, LSP
+  2039→- DiagnosticSummary provides statistical analysis of diagnostic collections
+  2040→- All 102 library tests pass (64 diagnostics-specific)
+  2041→- All 39 REPL unit tests pass (11 new tests added)
+  2042→
+  2043→---
+  2044→Task ID: 11-12
+  2045→Agent: general-purpose
+  2046→Task: Verification Pipeline Hardening + Property-Based Testing
+  2047→
+  2048→Work Log:
+  2049→
+  2050→1. **Read and analyzed IVE module** (`src/ive/src/`):
+  2051→   - `VerificationEngine` — facade that checks 5 invariants (liveness, exclusivity, interpretation, origin, cleanup)
+  2052→   - `InvariantAggregator` — orchestrates checks, supports Quick/Normal/Exhaustive levels, incremental verification
+  2053→   - `VerificationInput` — accepts SCG + optional BD map
+  2054→   - `VerificationResult` — Proven/ProbablySafe/Unverified/Violated with CounterExample
+  2055→
+  2056→2. **Read and analyzed Proof module** (`src/proof/src/`):
+  2057→   - `ProofChecker` — validates proof steps, detects circular reasoning
+  2058→   - `CounterExample` — execution trace + violation point, supports delta-debugging minimization
+  2059→   - `ProofBundle` — aggregates proofs for all 5 invariants with cross-invariant consistency checking
+  2060→   - `InvariantStatus` — Proven/Failed/NotAttempted per invariant
+  2061→
+  2062→3. **Added `verify()` method to `VumaCompiler`** in `src/api.rs`:
+  2063→   - Parses source → SCG via `run_frontend()`
+  2064→   - Runs `InvariantAggregator::verify_all()` at Normal level (all 5 checks)
+  2065→   - Converts IVE results to API-level `VerificationReport` with:
+  2066→     - Per-invariant `InvariantVerification` (kind, status, message, elapsed_ms, counterexample)
+  2067→     - `InvariantVerificationStatus`: Pass/Fail/Unverified
+  2068→     - `CounterexampleInfo` with description + execution trace
+  2069→   - Cross-checks with proof system via `ProofBundle::status()` — upgrades Unverified→Fail if proof system finds failures
+  2070→   - Converts IVE counterexamples through proof-system `CounterExample::minimal()` for delta-debugged traces
+  2071→   - Full serialization support (all types derive Serialize/Deserialize)
+  2072→   - 3 new tests: test_verify_simple, test_verify_report_serializable, test_verify_invalid_source
+  2073→
+  2074→4. **New verification report types** added to `src/api.rs`:
+  2075→   - `VerificationVerdict` (Pass/Fail/Inconclusive/Error)
+  2076→   - `InvariantVerificationStatus` (Pass/Fail/Unverified)
+  2077→   - `CounterexampleInfo` (description + execution_trace)
+  2078→   - `InvariantVerification` (kind, status, message, elapsed_ms, counterexample)
+  2079→   - `VerificationMetadata` (total_elapsed_ms, source_lines, source_bytes)
+  2080→   - `VerificationReport` (overall_verdict, invariants, diagnostics, metadata)
+  2081→
+  2082→5. **Re-exported new types** from `src/lib.rs`:
+  2083→   - CounterexampleInfo, InvariantVerification, InvariantVerificationStatus
+  2084→   - VerificationMetadata, VerificationReport, VerificationVerdict
+  2085→
+  2086→6. **Added `vuma-proof` dependency** to root `Cargo.toml`
+  2087→
+  2088→7. **Fixed pre-existing build issues**:
+  2089→   - Added `serde_json` and `vuma-proof` deps to `src/vuma/Cargo.toml`
+  2090→   - Fixed `SuggestionApplicability` Default derive (added `#[default]` attribute)
+  2091→   - Fixed `vuma_core::repl` Expr Display issue (changed `{}` to `{:?}`)
+  2092→
+  2093→8. **Created `property_tests.rs`** at `src/tests/src/property_tests.rs`:
+  2094→   - Random program generation strategies:
+  2095→     - `arb_identifier()` — valid VUMA identifiers (letter-first, no underscore start)
+  2096→     - `arb_int_literal()` — bounded integer literals
+  2097→     - `arb_binop()` — 15 binary operators
+  2098→     - `arb_simple_expr()` — binary expression statements
+  2099→     - `arb_lit_assign()` — literal assignment statements
+  2100→     - `arb_statement()` — random single statement
+  2101→     - `arb_fn_body()` — 1-5 statements
+  2102→     - `arb_fn_def()` — function definition
+  2103→     - `arb_vuma_program()` — 0-2 helper functions + main
+  2104→     - `arb_memory_program()` — region allocation + pointer arithmetic
+  2105→     - `arb_call_program()` — function call program
+  2106→   - Random SCG construction strategies:
+  2107→     - `arb_node_type()`, `arb_edge_kind()`, `arb_computation_payload()`, etc.
+  2108→     - `arb_program_point()`, `arb_node_payload()`
+  2109→   - 15 proptest-based property tests across 6 categories:
+  2110→     - Parser roundtrip: 4 tests (no errors, memory, call, parse-to-SCG)
+  2111→     - Cross-backend consistency: 2 tests (all backends produce output, same SCG)
+  2112→     - SCG structural invariants: 3 tests (function entry, valid edges, validation)
+  2113→     - SCG construction invariants: 3 tests (node count, edge validity, nonexistent node)
+  2114→     - Verification pipeline: 2 tests (no panic, serializable)
+  2115→     - IVE verification: 1 test (all invariants on random SCG)
+  2116→
+  2117→9. **Updated `src/tests/src/lib.rs`** with `pub mod property_tests`
+  2118→
+  2119→10. **Added `proptest` and `serde_json` dependencies** to `src/tests/Cargo.toml`
+  2120→
+  2121→11. **All tests pass**:
+  2122→    - 102 vuma lib tests (including 3 new verify tests)
+  2123→    - 211 vuma-tests (including 15 new property tests)
+  2124→    - 0 failures
+  2125→
+  2126→Stage Summary:
+  2127→- VumaCompiler.verify() method fully integrated with IVE + proof pipeline
+  2128→- Verification reports include per-invariant pass/fail + counterexamples
+  2129→- Proof system cross-check identifies IVE misses (upgrades Unverified→Fail)
+  2130→- 15 property-based tests cover parser roundtrip, cross-backend, SCG invariants, verification
+  2131→- All workspace crates compile cleanly
+  2132→
+  2133→---
+  2134→Task ID: 19-20
+  2135→Agent: general-purpose
+  2136→Task: ABI conformance testing + DWARF debug info enhancements
+  2137→
+  2138→Work Log:
+  2139→
+  2140→**Task 1: ABI Conformance Testing**
+  2141→
+  2142→- Created `/home/z/my-project/vuma/src/tests/src/abi_conformance.rs` with 27 tests
+  2143→- Tests verify each backend's calling convention via:
+  2144→  - `TargetInfo` trait validation (calling_convention_name, num_int_arg_regs, num_fp_arg_regs, pointer_width, stack_alignment)
+  2145→  - IR function creation with varying argument counts (0 args, register-only args, stack args)
+  2146→  - Register allocation via `allocate_registers()` on each backend
+  2147→  - Encoding via `encode_function()` and `encode_program()`
+  2148→  - Disassembly via `disassemble()`
+  2149→  - Physical register class and index validation (GPR ranges per ISA)
+  2150→
+  2151→- Per-backend target info tests (8 tests):
+  2152→  - x86_64: System V (6 int arg regs, 8 FP, RDI/RSI/RDX/RCX/R8/R9)
+  2153→  - AArch64: AAPCS64 (8 int arg regs X0-X7, 8 FP V0-V7)
+  2154→  - RISC-V 64: RV64G LP64D (8 int arg regs A0-A7, hardwired zero, link register)
+  2155→  - ARM32: AAPCS (4 int arg regs R0-R3, Elf32 output, 4-byte pointers)
+  2156→  - MIPS64: N64 ABI (8 int arg regs $a0-$a7, branch delay slots, big-endian)
+  2157→  - PPC64: ELFv2 (8 int arg regs R3-R10, TOC pointer, condition registers)
+  2158→  - LoongArch64: LP64 (8 int arg regs $a0-$a7, hardwired zero, link register)
+  2159→  - Wasm32: Stack machine (0 registers, 4-byte pointers, WasmBinary output)
+  2160→
+  2161→- Cross-backend tests (7 tests):
+  2162→  - Zero-arg function allocation
+  2163→  - Stack argument handling (args > register count)
+  2164→  - Call instruction with multiple args
+  2165→  - Function encoding verification
+  2166→  - Disassembly output validation
+  2167→  - Return value in GPR verification
+  2168→  - Full program (multi-function) encoding
+  2169→
+  2170→- Comprehensive ABI data validation table test
+  2171→- Register-specific range checks for x86_64, AArch64, ARM32
+  2172→
+  2173→**Task 2: DWARF Debug Info Enhancement**
+  2174→
+  2175→- Enhanced `/home/z/my-project/vuma/src/codegen/src/dwarf.rs`:
+  2176→  - Replaced hardcoded `ADDRESS_SIZE` (8) with parameterised `address_size` field on `DwarfBuilder`
+  2177→  - Added `new_32bit(min_inst_length)` constructor for ARM32/Wasm32
+  2178→  - Added `with_config(address_size, min_inst_length)` for arbitrary configuration
+  2179→  - Added `for_backend(BackendKind)` factory with correct per-ISA settings:
+  2180→    - x86_64: addr=8, min_inst=1
+  2181→    - AArch64: addr=8, min_inst=4
+  2182→    - RISC-V 64: addr=8, min_inst=2
+  2183→    - ARM32: addr=4, min_inst=2
+  2184→    - MIPS64: addr=8, min_inst=4
+  2185→    - PPC64: addr=8, min_inst=4
+  2186→    - LoongArch64: addr=8, min_inst=4
+  2187→    - Wasm32: addr=4, min_inst=1
+  2188→  - Added `write_address()` helper for 4-byte vs 8-byte address emission
+  2189→  - Updated `emit_debug_info()` to use `self.address_size` for DW_FORM_ADDR fields
+  2190→  - Updated `emit_debug_line()` to use `self.address_size` and `self.min_inst_length`
+  2191→  - Added 5 new tests (16-20) covering multi-backend DWARF:
+  2192→    - `test_for_backend_address_sizes`: verifies 8 backends have correct address_size
+  2193→    - `test_for_backend_min_inst_length`: verifies per-ISA instruction lengths
+  2194→    - `test_32bit_debug_line_address_size`: verifies 4-byte addr in .debug_line
+  2195→    - `test_32bit_debug_info_addresses`: verifies 4-byte addresses in .debug_info
+  2196→    - `test_with_config`: arbitrary configuration testing
+  2197→
+  2198→**Task 2b: CLI --debug-info flag**
+  2199→
+
+[showing lines 1700-2199 of 2497; use offset=2200 with limit to continue reading]

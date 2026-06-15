@@ -4651,7 +4651,8 @@ impl Backend for RiscV64Backend {
                         // LR.D T1, T0, 0
                         code.extend(Instruction::LrD { rd: Gpr::T1, rs1: Gpr::T0 }.encode());
                         let dst_id = dst.as_register().unwrap_or(0);
-                        code.extend(ss_store_vreg(dst_id, Gpr::T1, &vreg_stack_slots));
+                        let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+                        code.extend(ss_store_to_slot(Gpr::T1, dst_off));
                         code
                     }
 
@@ -4714,7 +4715,8 @@ impl Backend for RiscV64Backend {
                         // done: store old value (T2) to dst
                         // For now, always store T2 (the current value)
                         let dst_id = dst.as_register().unwrap_or(0);
-                        code.extend(ss_store_vreg(dst_id, Gpr::T2, &vreg_stack_slots));
+                        let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+                        code.extend(ss_store_to_slot(Gpr::T2, dst_off));
                         // TODO: proper label fixups for the retry/done branches
                         code
                     }
@@ -4752,6 +4754,8 @@ impl Backend for RiscV64Backend {
                         IRInstr::AtomicLoad { .. } => "atomic_load",
                         IRInstr::AtomicStore { .. } => "atomic_store",
                         IRInstr::AtomicCas { .. } => "atomic_cas",
+                        IRInstr::CtSelect { .. } => "ct_select",
+                        IRInstr::CtEq { .. } => "ct_eq",
                     };
 
                     let encoded_len = encoded.len() as u64;

@@ -546,6 +546,7 @@ fn item_name(item: &Item) -> Option<String> {
         Item::Import(_) => None,     // imports are not definitions
         Item::Export(_) => None,     // exports are not definitions
         Item::Stmt(_) => None,       // top-level statements are not named
+        Item::ExternBlock(_) => None, // extern blocks are not named
     }
 }
 

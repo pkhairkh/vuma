@@ -79,6 +79,11 @@ fn map_node_type(
         | vuma_scg::NodeType::ClosureEnv => NodeKind::Entry,
 
         vuma_scg::NodeType::Effect => NodeKind::Call,
+
+        vuma_scg::NodeType::StructDef
+        | vuma_scg::NodeType::EnumDef
+        | vuma_scg::NodeType::Match
+        | vuma_scg::NodeType::ConstantTime => NodeKind::Entry,
     }
 }
 

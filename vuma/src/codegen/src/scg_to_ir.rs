@@ -1782,10 +1782,10 @@ impl IRBuilder {
             ConstantTimeOpKind::CtSelect => {
                 // ct_select(cond, a, b) — requires exactly 3 operands
                 if ct.operands.len() != 3 {
-                    return Err(crate::Error::InvalidIR(format!(
+                    return Err(crate::CodegenError::TranslationError(format!(
                         "ct_select requires 3 operands, got {}",
                         ct.operands.len()
-                    )));
+                    )).into());
                 }
                 let cond = self.resolve_expr(&ct.operands[0], names)?;
                 let true_val = self.resolve_expr(&ct.operands[1], names)?;
@@ -1802,10 +1802,10 @@ impl IRBuilder {
             ConstantTimeOpKind::CtEq => {
                 // ct_eq(a, b) — requires exactly 2 operands
                 if ct.operands.len() != 2 {
-                    return Err(crate::Error::InvalidIR(format!(
+                    return Err(crate::CodegenError::TranslationError(format!(
                         "ct_eq requires 2 operands, got {}",
                         ct.operands.len()
-                    )));
+                    )).into());
                 }
                 let lhs = self.resolve_expr(&ct.operands[0], names)?;
                 let rhs = self.resolve_expr(&ct.operands[1], names)?;
@@ -2191,6 +2191,40 @@ impl IRBuilder {
                     uses.extend(u);
                 }
             }
+            ScgStatement::ConstantTime(ct) => {
+                defs.insert(ct.dst.clone());
+                for operand in &ct.operands {
+                    Self::expr_uses(operand, &mut uses);
+                }
+            }
+            ScgStatement::StructAccess(sa) => match sa {
+                StructAccessNode::Load { dst, ptr, .. } => {
+                    defs.insert(dst.clone());
+                    Self::expr_uses(ptr, &mut uses);
+                }
+                StructAccessNode::Store { ptr, value, .. } => {
+                    Self::expr_uses(ptr, &mut uses);
+                    Self::expr_uses(value, &mut uses);
+                }
+            },
+            ScgStatement::EnumAccess(ea) => match ea {
+                EnumAccessNode::LoadTag { dst, ptr, .. } => {
+                    defs.insert(dst.clone());
+                    Self::expr_uses(ptr, &mut uses);
+                }
+                EnumAccessNode::StoreTag { ptr, value, .. } => {
+                    Self::expr_uses(ptr, &mut uses);
+                    Self::expr_uses(value, &mut uses);
+                }
+                EnumAccessNode::LoadPayload { dst, ptr, .. } => {
+                    defs.insert(dst.clone());
+                    Self::expr_uses(ptr, &mut uses);
+                }
+                EnumAccessNode::StorePayload { ptr, value, .. } => {
+                    Self::expr_uses(ptr, &mut uses);
+                    Self::expr_uses(value, &mut uses);
+                }
+            },
         }
 
         (defs, uses)

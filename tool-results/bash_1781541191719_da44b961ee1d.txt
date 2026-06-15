@@ -1,0 +1,496 @@
+Line 231: (=3, )=2, line_diff=+1, running=6: kind: ComputationKind::Other(format!("enum {} [{}]", e.name, variants_str.join(", ")),
+Line 243: (=1, )=0, line_diff=+1, running=6: NodePayload::Computation(ComputationNode {
+Line 244: (=2, )=1, line_diff=+1, running=7: kind: ComputationKind::Other(format!("module {}", m.name),
+Line 247: (=0, )=1, line_diff=-1, running=6: }),
+Line 256: (=1, )=0, line_diff=+1, running=6: let id = scg.add_node(
+Line 258: (=1, )=0, line_diff=+1, running=7: NodePayload::Computation(ComputationNode {
+Line 262: (=0, )=1, line_diff=-1, running=6: }),
+Line 277: (=1, )=0, line_diff=+1, running=6: let id = scg.add_node(
+Line 279: (=1, )=0, line_diff=+1, running=7: NodePayload::Computation(ComputationNode {
+Line 280: (=3, )=2, line_diff=+1, running=8: kind: ComputationKind::Other(format!("trait {} [{}]", t.name, methods_str.join(", ")),
+Line 283: (=0, )=1, line_diff=-1, running=7: }),
+Line 285: (=0, )=1, line_diff=-1, running=6: );
+Line 293: (=1, )=0, line_diff=+1, running=7: let id = scg.add_node(
+Line 295: (=1, )=0, line_diff=+1, running=8: NodePayload::Computation(ComputationNode {
+Line 296: (=2, )=0, line_diff=+2, running=10: kind: ComputationKind::Other(format!(
+Line 302: (=0, )=1, line_diff=-1, running=9: ),
+Line 305: (=0, )=1, line_diff=-1, running=8: }),
+Line 307: (=0, )=1, line_diff=-1, running=7: );
+Line 332: (=1, )=0, line_diff=+1, running=8: let entry_id = scg.add_node(
+Line 334: (=1, )=0, line_diff=+1, running=9: NodePayload::Control(ControlNode {
+Line 337: (=0, )=1, line_diff=-1, running=8: }),
+Line 339: (=0, )=1, line_diff=-1, running=7: );
+Line 345: (=1, )=0, line_diff=+1, running=8: let param_id = scg.add_node(
+Line 347: (=1, )=0, line_diff=+1, running=9: NodePayload::Computation(ComputationNode {
+Line 348: (=2, )=1, line_diff=+1, running=10: kind: ComputationKind::Other(format!("param {}", p.name),
+Line 351: (=0, )=1, line_diff=-1, running=9: }),
+Line 353: (=0, )=1, line_diff=-1, running=8: );
+Line 356: (=1, )=0, line_diff=+1, running=9: // Enhanced: DataFlow edge from entry to each param (represents
+Line 357: (=0, )=1, line_diff=-1, running=8: // the value flowing from the caller into the parameter).
+Line 382: (=1, )=0, line_diff=+1, running=9: let ret_id = scg.add_node(
+Line 384: (=1, )=0, line_diff=+1, running=10: NodePayload::Control(ControlNode {
+Line 387: (=0, )=1, line_diff=-1, running=9: }),
+Line 389: (=0, )=1, line_diff=-1, running=8: );
+Line 407: (=1, )=0, line_diff=+1, running=9: fn convert_region_def(
+Line 412: (=0, )=1, line_diff=-1, running=8: ) -> Result<NodeId, ParseError> {
+Line 420: (=1, )=0, line_diff=+1, running=9: let alloc_id = scg.add_node(
+Line 422: (=1, )=0, line_diff=+1, running=10: NodePayload::Allocation(AllocationNode {
+Line 427: (=0, )=1, line_diff=-1, running=9: }),
+Line 429: (=0, )=1, line_diff=-1, running=8: );
+Line 434: (=1, )=0, line_diff=+1, running=9: let region_node_id = scg.add_node(
+Line 436: (=1, )=0, line_diff=+1, running=10: NodePayload::Phantom(PhantomNode {
+Line 438: (=0, )=1, line_diff=-1, running=9: }),
+Line 440: (=0, )=1, line_diff=-1, running=8: );
+Line 460: (=1, )=0, line_diff=+1, running=9: fn convert_stmt(
+Line 465: (=0, )=1, line_diff=-1, running=8: ) -> Result<NodeId, ParseError> {
+Line 471: (=1, )=0, line_diff=+1, running=9: fn convert_stmt_in_region(
+Line 476: (=0, )=1, line_diff=-1, running=8: ) -> Result<NodeId, ParseError> {
+Line 487: (=1, )=0, line_diff=+1, running=9: let id = scg.add_node(
+Line 489: (=1, )=0, line_diff=+1, running=10: NodePayload::Computation(ComputationNode {
+Line 493: (=0, )=1, line_diff=-1, running=9: }),
+Line 495: (=0, )=1, line_diff=-1, running=8: );
+Line 503: (=1, )=0, line_diff=+1, running=9: let uninit_id = scg.add_node(
+Line 505: (=1, )=0, line_diff=+1, running=10: NodePayload::Computation(ComputationNode {
+Line 509: (=0, )=1, line_diff=-1, running=9: }),
+Line 511: (=0, )=1, line_diff=-1, running=8: );
+Line 534: (=1, )=0, line_diff=+1, running=9: self.emit_alloc_from_expr(
+Line 542: (=0, )=1, line_diff=-1, running=8: )?;
+Line 555: (=1, )=0, line_diff=+1, running=9: let cast_id = scg.add_node(
+Line 557: (=1, )=0, line_diff=+1, running=10: NodePayload::Cast(CastNode {
+Line 561: (=0, )=1, line_diff=-1, running=9: }),
+Line 563: (=0, )=1, line_diff=-1, running=8: );
+Line 581: (=1, )=0, line_diff=+1, running=9: let id = scg.add_node(
+Line 583: (=1, )=0, line_diff=+1, running=10: NodePayload::Computation(ComputationNode {
+Line 587: (=0, )=1, line_diff=-1, running=9: }),
+Line 589: (=0, )=1, line_diff=-1, running=8: );
+Line 593: (=1, )=0, line_diff=+1, running=9: // this is also a Write (or ReadWrite if the target is read
+Line 594: (=0, )=1, line_diff=-1, running=8: // before being written, e.g., +=).
+Line 595: (=1, )=0, line_diff=+1, running=9: if matches!(
+Line 600: (=0, )=1, line_diff=-1, running=8: ) {
+Line 602: (=1, )=0, line_diff=+1, running=9: let access_id = scg.add_node(
+Line 604: (=1, )=0, line_diff=+1, running=10: NodePayload::Access(AccessNode {
+Line 609: (=0, )=1, line_diff=-1, running=9: }),
+Line 611: (=0, )=1, line_diff=-1, running=8: );
+Line 673: (=1, )=0, line_diff=+1, running=9: let cast_id = scg.add_node(
+Line 675: (=1, )=0, line_diff=+1, running=10: NodePayload::Cast(CastNode {
+Line 679: (=0, )=1, line_diff=-1, running=9: }),
+Line 681: (=0, )=1, line_diff=-1, running=8: );
+Line 691: (=1, )=0, line_diff=+1, running=9: self.emit_alloc_from_expr(
+Line 699: (=0, )=1, line_diff=-1, running=8: )?;
+Line 710: (=1, )=0, line_diff=+1, running=9: let id = scg.add_node(
+Line 712: (=1, )=0, line_diff=+1, running=10: NodePayload::Allocation(AllocationNode {
+Line 717: (=0, )=1, line_diff=-1, running=9: }),
+Line 719: (=0, )=1, line_diff=-1, running=8: );
+Line 781: (=1, )=0, line_diff=+1, running=9: let id = scg.add_node(
+Line 783: (=1, )=0, line_diff=+1, running=10: NodePayload::Deallocation(DeallocationNode {
+Line 786: (=0, )=1, line_diff=-1, running=9: }),
+Line 788: (=0, )=1, line_diff=-1, running=8: );
+Line 796: (=1, )=0, line_diff=+1, running=9: let id = scg.add_node(
+Line 798: (=1, )=0, line_diff=+1, running=10: NodePayload::Computation(ComputationNode {
+Line 802: (=0, )=1, line_diff=-1, running=9: }),
+Line 804: (=0, )=1, line_diff=-1, running=8: );
+Line 819: (=1, )=0, line_diff=+1, running=9: let id = scg.add_node(
+Line 821: (=1, )=0, line_diff=+1, running=10: NodePayload::Access(AccessNode {
+Line 826: (=0, )=1, line_diff=-1, running=9: }),
+Line 828: (=0, )=1, line_diff=-1, running=8: );
+Line 848: (=1, )=0, line_diff=+1, running=9: let id = scg.add_node(
+Line 850: (=1, )=0, line_diff=+1, running=10: NodePayload::Cast(CastNode {
+Line 854: (=0, )=1, line_diff=-1, running=9: }),
+Line 856: (=0, )=1, line_diff=-1, running=8: );
+Line 874: (=1, )=0, line_diff=+1, running=9: let branch_id = scg.add_node(
+Line 876: (=1, )=0, line_diff=+1, running=10: NodePayload::Control(ControlNode {
+Line 879: (=0, )=1, line_diff=-1, running=9: }),
+Line 881: (=0, )=1, line_diff=-1, running=8: );
+Line 919: (=1, )=0, line_diff=+1, running=9: let join_id = scg.add_node(
+Line 921: (=1, )=0, line_diff=+1, running=10: NodePayload::Control(ControlNode {
+Line 924: (=0, )=1, line_diff=-1, running=9: }),
+Line 926: (=0, )=1, line_diff=-1, running=8: );
+Line 954: (=1, )=0, line_diff=+1, running=9: let header_id = scg.add_node(
+Line 956: (=1, )=0, line_diff=+1, running=10: NodePayload::Control(ControlNode {
+Line 959: (=0, )=1, line_diff=-1, running=9: }),
+Line 961: (=0, )=1, line_diff=-1, running=8: );
+Line 973: (=1, )=0, line_diff=+1, running=9: let exit_id = scg.add_node(
+Line 975: (=1, )=0, line_diff=+1, running=10: NodePayload::Control(ControlNode {
+Line 978: (=0, )=1, line_diff=-1, running=9: }),
+Line 980: (=0, )=1, line_diff=-1, running=8: );
+Line 983: (=1, )=0, line_diff=+1, running=9: // Back edge: last body → header (enhanced: also re-add
+Line 984: (=0, )=1, line_diff=-1, running=8: // condition data-flow for loop iterations).
+Line 1002: (=1, )=0, line_diff=+1, running=9: let header_id = scg.add_node(
+Line 1004: (=1, )=0, line_diff=+1, running=10: NodePayload::Control(ControlNode {
+Line 1007: (=0, )=1, line_diff=-1, running=9: }),
+Line 1009: (=0, )=1, line_diff=-1, running=8: );
+Line 1022: (=1, )=0, line_diff=+1, running=9: let exit_id = scg.add_node(
+Line 1024: (=1, )=0, line_diff=+1, running=10: NodePayload::Control(ControlNode {
+Line 1027: (=0, )=1, line_diff=-1, running=9: }),
+Line 1029: (=0, )=1, line_diff=-1, running=8: );
+Line 1044: (=1, )=0, line_diff=+1, running=9: let header_id = scg.add_node(
+Line 1046: (=1, )=0, line_diff=+1, running=10: NodePayload::Control(ControlNode {
+Line 1049: (=0, )=1, line_diff=-1, running=9: }),
+Line 1051: (=0, )=1, line_diff=-1, running=8: );
+Line 1062: (=1, )=0, line_diff=+1, running=9: let exit_id = scg.add_node(
+Line 1064: (=1, )=0, line_diff=+1, running=10: NodePayload::Control(ControlNode {
+Line 1067: (=0, )=1, line_diff=-1, running=9: }),
+Line 1069: (=0, )=1, line_diff=-1, running=8: );
+Line 1083: (=1, )=0, line_diff=+1, running=9: let unsafe_id = scg.add_node(
+Line 1085: (=1, )=0, line_diff=+1, running=10: NodePayload::Effect(EffectNode {
+Line 1088: (=0, )=1, line_diff=-1, running=9: }),
+Line 1090: (=0, )=1, line_diff=-1, running=8: );
+Line 1104: (=1, )=0, line_diff=+1, running=9: let exit_id = scg.add_node(
+Line 1106: (=1, )=0, line_diff=+1, running=10: NodePayload::Effect(EffectNode {
+Line 1109: (=0, )=1, line_diff=-1, running=9: }),
+Line 1111: (=0, )=1, line_diff=-1, running=8: );
+Line 1133: (=1, )=0, line_diff=+1, running=9: let switch_id = scg.add_node(
+Line 1135: (=1, )=0, line_diff=+1, running=10: NodePayload::Control(ControlNode {
+Line 1138: (=0, )=1, line_diff=-1, running=9: }),
+Line 1140: (=0, )=1, line_diff=-1, running=8: );
+Line 1145: (=1, )=0, line_diff=+1, running=9: let join_id = scg.add_node(
+Line 1147: (=1, )=0, line_diff=+1, running=10: NodePayload::Control(ControlNode {
+Line 1150: (=0, )=1, line_diff=-1, running=9: }),
+Line 1152: (=0, )=1, line_diff=-1, running=8: );
+Line 1161: (=1, )=0, line_diff=+1, running=9: let case_id = scg.add_node(
+Line 1163: (=1, )=0, line_diff=+1, running=10: NodePayload::Control(ControlNode {
+Line 1166: (=0, )=1, line_diff=-1, running=9: }),
+Line 1168: (=0, )=1, line_diff=-1, running=8: );
+Line 1182: (=1, )=0, line_diff=+1, running=9: let guard_branch_id = scg.add_node(
+Line 1184: (=1, )=0, line_diff=+1, running=10: NodePayload::Control(ControlNode {
+Line 1187: (=0, )=1, line_diff=-1, running=9: }),
+Line 1189: (=0, )=1, line_diff=-1, running=8: );
+Line 1199: (=1, )=0, line_diff=+1, running=9: let body_id = scg.add_node(
+Line 1201: (=1, )=0, line_diff=+1, running=10: NodePayload::Computation(ComputationNode {
+Line 1202: (=2, )=1, line_diff=+1, running=11: kind: ComputationKind::Other(format!("match_arm[{}]: {}", arm_idx, arm_body_desc),
+Line 1205: (=0, )=1, line_diff=-1, running=10: }),
+Line 1207: (=0, )=1, line_diff=-1, running=9: );
+Line 1214: (=1, )=0, line_diff=+1, running=10: let field_access_id = scg.add_node(
+Line 1216: (=1, )=0, line_diff=+1, running=11: NodePayload::Access(AccessNode {
+Line 1221: (=0, )=1, line_diff=-1, running=10: }),
+Line 1223: (=0, )=1, line_diff=-1, running=9: );
+Line 1226: (=1, )=0, line_diff=+1, running=10: let field_comp_id = scg.add_node(
+Line 1228: (=1, )=0, line_diff=+1, running=11: NodePayload::Computation(ComputationNode {
+Line 1229: (=2, )=1, line_diff=+1, running=12: kind: ComputationKind::Other(format!("destructure {}.{}", name, field),
+Line 1232: (=0, )=1, line_diff=-1, running=11: }),
+Line 1234: (=0, )=1, line_diff=-1, running=10: );
+Line 1248: (=1, )=0, line_diff=+1, running=11: let bind_id = scg.add_node(
+Line 1250: (=1, )=0, line_diff=+1, running=12: NodePayload::Computation(ComputationNode {
+Line 1251: (=3, )=2, line_diff=+1, running=13: kind: ComputationKind::Other(format!("enum_bind {}({})", name, b),
+Line 1254: (=0, )=1, line_diff=-1, running=12: }),
+Line 1256: (=0, )=1, line_diff=-1, running=11: );
+Line 1264: (=1, )=0, line_diff=+1, running=12: let range_check_id = scg.add_node(
+Line 1266: (=1, )=0, line_diff=+1, running=13: NodePayload::Computation(ComputationNode {
+Line 1267: (=2, )=0, line_diff=+2, running=15: kind: ComputationKind::Other(format!(
+Line 1271: (=0, )=1, line_diff=-1, running=14: ),
+Line 1274: (=0, )=1, line_diff=-1, running=13: }),
+Line 1276: (=0, )=1, line_diff=-1, running=12: );
+Line 1285: (=1, )=0, line_diff=+1, running=13: let or_branch_id = scg.add_node(
+Line 1287: (=1, )=0, line_diff=+1, running=14: NodePayload::Control(ControlNode {
+Line 1290: (=0, )=1, line_diff=-1, running=13: }),
+Line 1292: (=0, )=1, line_diff=-1, running=12: );
+Line 1309: (=1, )=0, line_diff=+1, running=13: let sync_enter_id = scg.add_node(
+Line 1311: (=1, )=0, line_diff=+1, running=14: NodePayload::Effect(EffectNode {
+Line 1314: (=0, )=1, line_diff=-1, running=13: }),
+Line 1316: (=0, )=1, line_diff=-1, running=12: );
+Line 1328: (=1, )=0, line_diff=+1, running=13: let sync_exit_id = scg.add_node(
+Line 1330: (=1, )=0, line_diff=+1, running=14: NodePayload::Effect(EffectNode {
+Line 1333: (=0, )=1, line_diff=-1, running=13: }),
+Line 1335: (=0, )=1, line_diff=-1, running=12: );
+Line 1353: (=1, )=0, line_diff=+1, running=13: let id = scg.add_node(
+Line 1355: (=1, )=0, line_diff=+1, running=14: NodePayload::Control(ControlNode {
+Line 1358: (=0, )=1, line_diff=-1, running=13: }),
+Line 1360: (=0, )=1, line_diff=-1, running=12: );
+Line 1372: (=1, )=0, line_diff=+1, running=13: let id = scg.add_node(
+Line 1374: (=1, )=0, line_diff=+1, running=14: NodePayload::Computation(ComputationNode {
+Line 1378: (=0, )=1, line_diff=-1, running=13: }),
+Line 1380: (=0, )=1, line_diff=-1, running=12: );
+Line 1434: (=1, )=0, line_diff=+1, running=13: let access_id = scg.add_node(
+Line 1436: (=1, )=0, line_diff=+1, running=14: NodePayload::Access(AccessNode {
+Line 1441: (=0, )=1, line_diff=-1, running=13: }),
+Line 1443: (=0, )=1, line_diff=-1, running=12: );
+Line 1458: (=1, )=0, line_diff=+1, running=13: let cast_id = scg.add_node(
+Line 1460: (=1, )=0, line_diff=+1, running=14: NodePayload::Cast(CastNode {
+Line 1464: (=0, )=1, line_diff=-1, running=13: }),
+Line 1466: (=0, )=1, line_diff=-1, running=12: );
+Line 1485: (=1, )=0, line_diff=+1, running=13: let alloc_id = scg.add_node(
+Line 1487: (=1, )=0, line_diff=+1, running=14: NodePayload::Allocation(AllocationNode {
+Line 1492: (=0, )=1, line_diff=-1, running=13: }),
+Line 1494: (=0, )=1, line_diff=-1, running=12: );
+Line 1501: (=1, )=0, line_diff=+1, running=13: let size_id = scg.add_node(
+Line 1503: (=1, )=0, line_diff=+1, running=14: NodePayload::Computation(ComputationNode {
+Line 1504: (=3, )=2, line_diff=+1, running=15: kind: ComputationKind::Other(format!("sizeof({})", ty),
+Line 1507: (=0, )=1, line_diff=-1, running=14: }),
+Line 1509: (=0, )=1, line_diff=-1, running=13: );
+Line 1515: (=1, )=0, line_diff=+1, running=14: let align_id = scg.add_node(
+Line 1517: (=1, )=0, line_diff=+1, running=15: NodePayload::Computation(ComputationNode {
+Line 1518: (=3, )=2, line_diff=+1, running=16: kind: ComputationKind::Other(format!("alignof({})", ty),
+Line 1521: (=0, )=1, line_diff=-1, running=15: }),
+Line 1523: (=0, )=1, line_diff=-1, running=14: );
+Line 1546: (=1, )=0, line_diff=+1, running=15: let desc = format!(
+Line 1551: (=0, )=1, line_diff=-1, running=14: );
+Line 1552: (=1, )=0, line_diff=+1, running=15: let id = scg.add_node(
+Line 1554: (=1, )=0, line_diff=+1, running=16: NodePayload::Computation(ComputationNode {
+Line 1558: (=0, )=1, line_diff=-1, running=15: }),
+Line 1560: (=0, )=1, line_diff=-1, running=14: );
+Line 1568: (=1, )=0, line_diff=+1, running=15: let id = scg.add_node(
+Line 1570: (=1, )=0, line_diff=+1, running=16: NodePayload::Control(ControlNode {
+Line 1573: (=0, )=1, line_diff=-1, running=15: }),
+Line 1575: (=0, )=1, line_diff=-1, running=14: );
+Line 1585: (=1, )=0, line_diff=+1, running=15: let id = scg.add_node(
+Line 1587: (=1, )=0, line_diff=+1, running=16: NodePayload::Control(ControlNode {
+Line 1590: (=0, )=1, line_diff=-1, running=15: }),
+Line 1592: (=0, )=1, line_diff=-1, running=14: );
+Line 1610: (=1, )=0, line_diff=+1, running=15: let id = scg.add_node(
+Line 1612: (=1, )=0, line_diff=+1, running=16: NodePayload::Effect(EffectNode {
+Line 1615: (=0, )=1, line_diff=-1, running=15: }),
+Line 1617: (=0, )=1, line_diff=-1, running=14: );
+Line 1630: (=1, )=0, line_diff=+1, running=15: fn emit_call_nodes(
+Line 1637: (=1, )=2, line_diff=-1, running=14: ) -> Result<(), ParseError> {
+Line 1640: (=1, )=0, line_diff=+1, running=15: let entry_id = scg.add_node(
+Line 1642: (=1, )=0, line_diff=+1, running=16: NodePayload::Control(ControlNode {
+Line 1645: (=0, )=1, line_diff=-1, running=15: }),
+Line 1652: (=0, )=1, line_diff=-1, running=14: );
+Line 1674: (=1, )=0, line_diff=+1, running=15: let ret_id = scg.add_node(
+Line 1676: (=1, )=0, line_diff=+1, running=16: NodePayload::Control(ControlNode {
+Line 1679: (=0, )=1, line_diff=-1, running=15: }),
+Line 1686: (=0, )=1, line_diff=-1, running=14: );
+Line 1701: (=1, )=0, line_diff=+1, running=15: fn emit_closure_lowering(
+Line 1710: (=0, )=1, line_diff=-1, running=14: ) -> Result<NodeId, ParseError> {
+Line 1735: (=2, )=1, line_diff=+1, running=15: .map(|(name, _)| {
+Line 1745: (=0, )=1, line_diff=-1, running=14: })
+Line 1749: (=1, )=0, line_diff=+1, running=15: let env_id = scg.add_node(
+Line 1751: (=1, )=0, line_diff=+1, running=16: NodePayload::ClosureEnv(ClosureEnvNode {
+Line 1755: (=0, )=1, line_diff=-1, running=15: }),
+Line 1757: (=0, )=1, line_diff=-1, running=14: );
+Line 1765: (=1, )=0, line_diff=+1, running=15: let copy_id = scg.add_node(
+Line 1767: (=1, )=0, line_diff=+1, running=16: NodePayload::Computation(ComputationNode {
+Line 1768: (=2, )=1, line_diff=+1, running=17: kind: ComputationKind::Other(format!("copy_capture[{}]", idx),
+Line 1771: (=0, )=1, line_diff=-1, running=16: }),
+Line 1773: (=0, )=1, line_diff=-1, running=15: );
+Line 1784: (=1, )=0, line_diff=+1, running=16: let entry_id = scg.add_node(
+Line 1786: (=1, )=0, line_diff=+1, running=17: NodePayload::Control(ControlNode {
+Line 1789: (=0, )=1, line_diff=-1, running=16: }),
+Line 1791: (=0, )=1, line_diff=-1, running=15: );
+Line 1807: (=1, )=0, line_diff=+1, running=16: let param_id = scg.add_node(
+Line 1809: (=1, )=0, line_diff=+1, running=17: NodePayload::Computation(ComputationNode {
+Line 1810: (=2, )=1, line_diff=+1, running=18: kind: ComputationKind::Other(format!("closure_param {}", p.name),
+Line 1813: (=0, )=1, line_diff=-1, running=17: }),
+Line 1815: (=0, )=1, line_diff=-1, running=16: );
+Line 1828: (=1, )=0, line_diff=+1, running=17: let body_id = scg.add_node(
+Line 1830: (=1, )=0, line_diff=+1, running=18: NodePayload::Computation(ComputationNode {
+Line 1834: (=0, )=1, line_diff=-1, running=17: }),
+Line 1836: (=0, )=1, line_diff=-1, running=16: );
+Line 1856: (=1, )=0, line_diff=+1, running=17: let ret_id = scg.add_node(
+Line 1858: (=1, )=0, line_diff=+1, running=18: NodePayload::Control(ControlNode {
+Line 1861: (=0, )=1, line_diff=-1, running=17: }),
+Line 1863: (=0, )=1, line_diff=-1, running=16: );
+Line 1877: (=1, )=0, line_diff=+1, running=17: fn emit_async_await_lowering(
+Line 1884: (=0, )=1, line_diff=-1, running=16: ) -> Result<NodeId, ParseError> {
+Line 1886: (=1, )=0, line_diff=+1, running=17: let poll_id = scg.add_node(
+Line 1888: (=1, )=0, line_diff=+1, running=18: NodePayload::Control(ControlNode {
+Line 1891: (=0, )=1, line_diff=-1, running=17: }),
+Line 1893: (=0, )=1, line_diff=-1, running=16: );
+Line 1899: (=1, )=0, line_diff=+1, running=17: let waker_id = scg.add_node(
+Line 1901: (=1, )=0, line_diff=+1, running=18: NodePayload::Control(ControlNode {
+Line 1904: (=0, )=1, line_diff=-1, running=17: }),
+Line 1906: (=0, )=1, line_diff=-1, running=16: );
+Line 1911: (=1, )=0, line_diff=+1, running=17: let state_id = scg.add_node(
+Line 1913: (=1, )=0, line_diff=+1, running=18: NodePayload::Control(ControlNode {
+Line 1916: (=0, )=1, line_diff=-1, running=17: }),
+Line 1918: (=0, )=1, line_diff=-1, running=16: );
+Line 1926: (=1, )=0, line_diff=+1, running=17: let resume_id = scg.add_node(
+Line 1928: (=1, )=0, line_diff=+1, running=18: NodePayload::Control(ControlNode {
+Line 1931: (=0, )=1, line_diff=-1, running=17: }),
+Line 1933: (=0, )=1, line_diff=-1, running=16: );
+Line 1943: (=1, )=0, line_diff=+1, running=17: fn emit_static_dispatch(
+Line 1953: (=0, )=1, line_diff=-1, running=16: ) -> Result<NodeId, ParseError> {
+Line 1955: (=1, )=0, line_diff=+1, running=17: let impl_entry_id = scg.add_node(
+Line 1957: (=1, )=0, line_diff=+1, running=18: NodePayload::Control(ControlNode {
+Line 1960: (=0, )=1, line_diff=-1, running=17: }),
+Line 1962: (=0, )=1, line_diff=-1, running=16: );
+Line 1980: (=1, )=0, line_diff=+1, running=17: let impl_ret_id = scg.add_node(
+Line 1982: (=1, )=0, line_diff=+1, running=18: NodePayload::Control(ControlNode {
+Line 1984: (=2, )=0, line_diff=+2, running=20: label: Some(format!(
+Line 1987: (=0, )=2, line_diff=-2, running=18: )),
+Line 1988: (=0, )=1, line_diff=-1, running=17: }),
+Line 1990: (=0, )=1, line_diff=-1, running=16: );
+Line 1999: (=1, )=0, line_diff=+1, running=17: fn emit_dynamic_dispatch(
+Line 2010: (=0, )=1, line_diff=-1, running=16: ) -> Result<NodeId, ParseError> {
+Line 2012: (=1, )=0, line_diff=+1, running=17: let vtable_id = scg.add_node(
+Line 2014: (=1, )=0, line_diff=+1, running=18: NodePayload::VTable(VTableNode {
+Line 2018: (=0, )=1, line_diff=-1, running=17: }),
+Line 2020: (=0, )=1, line_diff=-1, running=16: );
+Line 2025: (=1, )=0, line_diff=+1, running=17: let dispatch_id = scg.add_node(
+Line 2027: (=1, )=0, line_diff=+1, running=18: NodePayload::Computation(ComputationNode {
+Line 2028: (=2, )=0, line_diff=+2, running=20: kind: ComputationKind::Other(format!(
+Line 2031: (=0, )=1, line_diff=-1, running=19: ),
+Line 2034: (=0, )=1, line_diff=-1, running=18: }),
+Line 2036: (=0, )=1, line_diff=-1, running=17: );
+Line 2061: (=1, )=0, line_diff=+1, running=18: fn emit_monomorphization(
+Line 2071: (=0, )=1, line_diff=-1, running=17: ) -> Result<NodeId, ParseError> {
+Line 2073: (=1, )=0, line_diff=+1, running=18: let mono_entry_id = scg.add_node(
+Line 2075: (=1, )=0, line_diff=+1, running=19: NodePayload::Control(ControlNode {
+Line 2078: (=0, )=1, line_diff=-1, running=18: }),
+Line 2080: (=0, )=1, line_diff=-1, running=17: );
+Line 2098: (=1, )=0, line_diff=+1, running=18: let mono_ret_id = scg.add_node(
+Line 2100: (=1, )=0, line_diff=+1, running=19: NodePayload::Control(ControlNode {
+Line 2103: (=0, )=1, line_diff=-1, running=18: }),
+Line 2105: (=0, )=1, line_diff=-1, running=17: );
+Line 2115: (=1, )=0, line_diff=+1, running=18: fn emit_async_region(
+Line 2122: (=1, )=2, line_diff=-1, running=17: ) -> Result<(), ParseError> {
+Line 2128: (=1, )=0, line_diff=+1, running=18: let fork_id = scg.add_node(
+Line 2130: (=1, )=0, line_diff=+1, running=19: NodePayload::Control(ControlNode {
+Line 2133: (=0, )=1, line_diff=-1, running=18: }),
+Line 2135: (=0, )=1, line_diff=-1, running=17: );
+Line 2147: (=1, )=0, line_diff=+1, running=18: let join_id = scg.add_node(
+Line 2149: (=1, )=0, line_diff=+1, running=19: NodePayload::Control(ControlNode {
+Line 2152: (=0, )=1, line_diff=-1, running=18: }),
+Line 2154: (=0, )=1, line_diff=-1, running=17: );
+Line 2174: (=1, )=0, line_diff=+1, running=18: fn emit_spawn_node(
+Line 2181: (=1, )=2, line_diff=-1, running=17: ) -> Result<(), ParseError> {
+Line 2182: (=1, )=0, line_diff=+1, running=18: let id = scg.add_node(
+Line 2184: (=1, )=0, line_diff=+1, running=19: NodePayload::Effect(EffectNode {
+Line 2187: (=0, )=1, line_diff=-1, running=18: }),
+Line 2189: (=0, )=1, line_diff=-1, running=17: );
+Line 2206: (=1, )=0, line_diff=+1, running=18: fn emit_alloc_from_expr(
+Line 2215: (=1, )=2, line_diff=-1, running=17: ) -> Result<(), ParseError> {
+Line 2224: (=1, )=0, line_diff=+1, running=18: (
+Line 2227: (=0, )=1, line_diff=-1, running=17: )
+Line 2230: (=1, )=0, line_diff=+1, running=18: let alloc_id = scg.add_node(
+Line 2232: (=1, )=0, line_diff=+1, running=19: NodePayload::Allocation(AllocationNode {
+Line 2237: (=0, )=1, line_diff=-1, running=18: }),
+Line 2239: (=0, )=1, line_diff=-1, running=17: );
+Line 2249: (=1, )=0, line_diff=+1, running=18: fn convert_block_ids(
+Line 2254: (=0, )=1, line_diff=-1, running=17: ) -> Result<Vec<NodeId>, ParseError> {
+Line 2333: (=1, )=0, line_diff=+1, running=18: // Check predecessors (incoming edges — emit_alloc_from_expr creates:
+Line 2334: (=0, )=1, line_diff=-1, running=17: //   parent_id --Derivation--> alloc_id)
+Line 2682: (=1, )=0, line_diff=+1, running=18: format!(
+Line 2687: (=0, )=1, line_diff=-1, running=17: )
+Line 2702: (=1, )=0, line_diff=+1, running=18: format!(
+Line 2706: (=0, )=1, line_diff=-1, running=17: )
+Line 2714: (=1, )=0, line_diff=+1, running=18: format!(
+Line 2718: (=0, )=1, line_diff=-1, running=17: )
+Line 2734: (=1, )=0, line_diff=+1, running=18: format!(
+Line 2738: (=0, )=1, line_diff=-1, running=17: )
+Line 2750: (=1, )=0, line_diff=+1, running=18: format!(
+Line 2754: (=0, )=1, line_diff=-1, running=17: )
+Line 2799: (=1, )=0, line_diff=+1, running=18: format!(
+Line 2803: (=0, )=1, line_diff=-1, running=17: )
+Line 2836: (=1, )=0, line_diff=+1, running=18: format!(
+Line 2840: (=0, )=1, line_diff=-1, running=17: )
+Line 2892: (=1, )=0, line_diff=+1, running=18: .find(|n| {
+Line 2898: (=0, )=1, line_diff=-1, running=17: })
+Line 2905: (=1, )=0, line_diff=+1, running=18: .find(|n| {
+Line 2911: (=0, )=1, line_diff=-1, running=17: })
+Line 2918: (=1, )=0, line_diff=+1, running=18: .filter(|n| {
+Line 2924: (=0, )=1, line_diff=-1, running=17: })
+Line 2935: (=1, )=0, line_diff=+1, running=18: assert!(
+Line 2938: (=0, )=1, line_diff=-1, running=17: );
+Line 2949: (=1, )=0, line_diff=+1, running=18: assert!(
+Line 2952: (=0, )=1, line_diff=-1, running=17: );
+Line 2987: (=1, )=0, line_diff=+1, running=18: assert!(
+Line 2990: (=0, )=1, line_diff=-1, running=17: );
+Line 3017: (=1, )=0, line_diff=+1, running=18: assert_eq!(
+Line 3020: (=0, )=1, line_diff=-1, running=17: );
+Line 3041: (=1, )=0, line_diff=+1, running=18: assert!(
+Line 3044: (=0, )=1, line_diff=-1, running=17: );
+Line 3050: (=1, )=0, line_diff=+1, running=18: assert!(
+Line 3053: (=0, )=1, line_diff=-1, running=17: );
+Line 3108: (=1, )=0, line_diff=+1, running=18: assert!(
+Line 3111: (=0, )=1, line_diff=-1, running=17: );
+Line 3120: (=1, )=0, line_diff=+1, running=18: assert!(
+Line 3123: (=0, )=1, line_diff=-1, running=17: );
+Line 3124: (=1, )=0, line_diff=+1, running=18: assert!(
+Line 3127: (=0, )=1, line_diff=-1, running=17: );
+Line 3143: (=2, )=1, line_diff=+1, running=18: let has_header_to_exit = scg.edges().any(|edge| {
+Line 3145: (=0, )=1, line_diff=-1, running=17: });
+Line 3165: (=1, )=0, line_diff=+1, running=18: assert!(
+Line 3168: (=0, )=1, line_diff=-1, running=17: );
+Line 3178: (=1, )=0, line_diff=+1, running=18: assert!(
+Line 3181: (=0, )=1, line_diff=-1, running=17: );
+Line 3196: (=2, )=1, line_diff=+1, running=18: let effect_node = scg.nodes().find(|n| {
+Line 3202: (=0, )=1, line_diff=-1, running=17: });
+Line 3222: (=1, )=0, line_diff=+1, running=18: assert!(
+Line 3225: (=0, )=1, line_diff=-1, running=17: );
+Line 3228: (=2, )=1, line_diff=+1, running=18: let sync_enter = scg.nodes().find(|n| {
+Line 3234: (=0, )=1, line_diff=-1, running=17: });
+Line 3235: (=2, )=1, line_diff=+1, running=18: let sync_exit = scg.nodes().find(|n| {
+Line 3241: (=0, )=1, line_diff=-1, running=17: });
+Line 3261: (=1, )=0, line_diff=+1, running=18: assert!(
+Line 3264: (=0, )=1, line_diff=-1, running=17: );
+Line 3265: (=1, )=0, line_diff=+1, running=18: assert!(
+Line 3268: (=0, )=1, line_diff=-1, running=17: );
+Line 3269: (=1, )=0, line_diff=+1, running=18: assert!(
+Line 3272: (=0, )=1, line_diff=-1, running=17: );
+Line 3273: (=1, )=0, line_diff=+1, running=18: assert!(
+Line 3276: (=0, )=1, line_diff=-1, running=17: );
+Line 3278: (=1, )=0, line_diff=+1, running=18: assert!(
+Line 3281: (=0, )=1, line_diff=-1, running=17: );
+Line 3309: (=1, )=0, line_diff=+1, running=18: assert!(
+Line 3312: (=0, )=1, line_diff=-1, running=17: );
+Line 3330: (=1, )=0, line_diff=+1, running=18: assert!(
+Line 3333: (=0, )=1, line_diff=-1, running=17: );
+Line 3339: (=1, )=0, line_diff=+1, running=18: assert!(
+Line 3342: (=0, )=1, line_diff=-1, running=17: );
+Line 3364: (=2, )=1, line_diff=+1, running=18: let write_access = scg.nodes().find(|n| {
+Line 3370: (=0, )=1, line_diff=-1, running=17: });
+Line 3371: (=1, )=0, line_diff=+1, running=18: assert!(
+Line 3374: (=0, )=1, line_diff=-1, running=17: );
+Line 3383: (=2, )=1, line_diff=+1, running=18: let cast_node = scg.nodes().find(|n| {
+Line 3385: (=0, )=1, line_diff=-1, running=17: });
+Line 3410: (=1, )=0, line_diff=+1, running=18: assert!(
+Line 3414: (=0, )=1, line_diff=-1, running=17: );
+Line 3432: (=1, )=0, line_diff=+1, running=18: assert!(
+Line 3436: (=0, )=1, line_diff=-1, running=17: );
+Line 3454: (=1, )=0, line_diff=+1, running=18: assert_eq!(
+Line 3458: (=0, )=1, line_diff=-1, running=17: );
+Line 3466: (=1, )=0, line_diff=+1, running=18: let scg = parse_and_convert(
+Line 3468: (=0, )=1, line_diff=-1, running=17: );
+Line 3471: (=2, )=1, line_diff=+1, running=18: let call_entry = scg.nodes().find(|n| {
+Line 3480: (=0, )=1, line_diff=-1, running=17: });
+Line 3481: (=1, )=0, line_diff=+1, running=18: assert!(
+Line 3484: (=0, )=1, line_diff=-1, running=17: );
+Line 3489: (=1, )=0, line_diff=+1, running=18: .filter(|e| {
+Line 3492: (=0, )=1, line_diff=-1, running=17: })
+Line 3494: (=1, )=0, line_diff=+1, running=18: assert!(
+Line 3498: (=0, )=1, line_diff=-1, running=17: );
+Line 3515: (=1, )=0, line_diff=+1, running=18: assert!(
+Line 3518: (=0, )=1, line_diff=-1, running=17: );
+Line 3535: (=1, )=0, line_diff=+1, running=18: assert!(
+Line 3538: (=0, )=1, line_diff=-1, running=17: );
+Line 3549: (=2, )=1, line_diff=+1, running=18: let sync_enter = scg.nodes().find(|n| {
+Line 3555: (=0, )=1, line_diff=-1, running=17: });
+Line 3556: (=2, )=1, line_diff=+1, running=18: let sync_exit = scg.nodes().find(|n| {
+Line 3562: (=0, )=1, line_diff=-1, running=17: });
+Line 3573: (=1, )=0, line_diff=+1, running=18: assert!(
+Line 3576: (=0, )=1, line_diff=-1, running=17: );
+Line 3581: (=1, )=0, line_diff=+1, running=18: assert!(
+Line 3584: (=0, )=1, line_diff=-1, running=17: );
+Line 3596: (=2, )=1, line_diff=+1, running=18: let fallthrough = scg.edges().any(|e| {
+Line 3599: (=0, )=1, line_diff=-1, running=17: });
+Line 3600: (=1, )=0, line_diff=+1, running=18: assert!(
+Line 3603: (=0, )=1, line_diff=-1, running=17: );
+Line 3612: (=2, )=1, line_diff=+1, running=18: let write_access = scg.nodes().find(|n| {
+Line 3618: (=0, )=1, line_diff=-1, running=17: });
+Line 3629: (=2, )=1, line_diff=+1, running=18: let has_derivation = scg.edges().any(|e| {
+Line 3631: (=0, )=1, line_diff=-1, running=17: });
+Line 3632: (=1, )=0, line_diff=+1, running=18: assert!(
+Line 3635: (=0, )=1, line_diff=-1, running=17: );
+Line 3663: (=1, )=0, line_diff=+1, running=18: assert!(
+Line 3666: (=0, )=1, line_diff=-1, running=17: );
+Line 3683: (=1, )=0, line_diff=+1, running=18: assert!(
+Line 3686: (=0, )=1, line_diff=-1, running=17: );
+Line 3691: (=1, )=0, line_diff=+1, running=18: assert!(
+Line 3695: (=0, )=1, line_diff=-1, running=17: );
+Line 3708: (=1, )=0, line_diff=+1, running=18: assert!(
+Line 3711: (=0, )=1, line_diff=-1, running=17: );
+Line 3722: (=1, )=0, line_diff=+1, running=18: assert!(
+Line 3725: (=0, )=1, line_diff=-1, running=17: );
+Line 3727: (=2, )=1, line_diff=+1, running=18: let spawn_effect = scg.nodes().find(|n| {
+Line 3733: (=0, )=1, line_diff=-1, running=17: });
+Line 3734: (=1, )=0, line_diff=+1, running=18: assert!(
+Line 3737: (=0, )=1, line_diff=-1, running=17: );
+Line 3747: (=2, )=1, line_diff=+1, running=18: let call_return = scg.nodes().find(|n| {
+Line 3756: (=0, )=1, line_diff=-1, running=17: });
+Line 3757: (=1, )=0, line_diff=+1, running=18: assert!(
+Line 3760: (=0, )=1, line_diff=-1, running=17: );
+Line 3772: (=1, )=0, line_diff=+1, running=18: assert!(
+Line 3775: (=0, )=1, line_diff=-1, running=17: );
+
+Final running balance: 17

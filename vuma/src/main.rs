@@ -18,8 +18,10 @@ use std::process::Command;
 use clap::{Parser, Subcommand, ValueEnum};
 
 use vuma::pipeline::{
-    compile_with_path, CompileConfig, CompileTarget, OptLevel, VerificationLevel, VumaError,
+    compile_with_path, CompileConfig, CompileResult, CompileTarget, OptLevel, VerificationLevel, VumaError,
 };
+use vuma::telemetry::TelemetryCollector;
+use vuma::logging::{LogLevel, init_logger, global_logger};
 use vuma_codegen::backend::{create_backend, BackendKind};
 use vuma_codegen::ScgToIr;
 use vuma_codegen::scg_to_ir::{Scg, ScgNode, ScgFunction, ScgParam, ScgStatement, ScgType,
@@ -61,6 +63,18 @@ struct Cli {
     /// Run performance benchmarks instead of compiling
     #[arg(long, global = true)]
     bench: bool,
+
+    /// Enable verbose/debug logging
+    #[arg(short = 'v', long, global = true)]
+    verbose: bool,
+
+    /// Suppress non-error output
+    #[arg(short = 'q', long, global = true)]
+    quiet: bool,
+
+    /// Output telemetry data as JSON
+    #[arg(long, global = true)]
+    telemetry: bool,
 
     #[command(subcommand)]
     command: Option<Commands>,
@@ -264,6 +278,31 @@ impl From<TargetArg> for CompileTarget {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Version information
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// VUMA version.
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Supported backend list.
+const SUPPORTED_BACKENDS: &str =
+    "aarch64, x86_64, riscv64, arm32, mips64, ppc64, loongarch64, wasm32";
+
+/// Build the long version string.
+fn version_long() -> String {
+    format!(
+        "vuma {}\n\
+         supported backends: {}\n\
+         rustc: {}.{}.{}",
+        VERSION,
+        SUPPORTED_BACKENDS,
+        option_env!("RUSTC_VERSION_MAJOR").unwrap_or("?"),
+        option_env!("RUSTC_VERSION_MINOR").unwrap_or("?"),
+        option_env!("RUSTC_VERSION_PATCH").unwrap_or("?"),
+    )
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Helper functions
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -314,49 +353,100 @@ fn cmd_build(
 ) -> Result<(), String> {
     let source = read_source(file)?;
     let config = make_config(cli, CompileTarget::from(*target));
-    let result = compile_with_path(&source, Some(file), &config).map_err(|errors| {
-        print_errors(&errors);
-        format!("compilation failed with {} error(s)", errors.len())
-    })?;
 
-    let out_path = output
-        .as_ref()
-        .cloned()
-        .unwrap_or_else(|| default_output_path(file));
-    fs::write(&out_path, &result.binary).map_err(|e| {
-        format!(
-            "error: cannot write output file '{}': {}",
-            out_path.display(),
-            e
-        )
-    })?;
-    // Make the output file executable on Unix.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = fs::metadata(&out_path)
-            .map_err(|e| format!("error: cannot stat '{}': {}", out_path.display(), e))?
-            .permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&out_path, perms)
-            .map_err(|e| format!("error: cannot chmod '{}': {}", out_path.display(), e))?;
+    // Initialize telemetry collector if --telemetry is set.
+    let mut telemetry = if cli.telemetry {
+        let mut tc = TelemetryCollector::new();
+        tc.set_opt_level(&format!("{:?}", cli.opt_level));
+        tc.set_verification_level(&format!("{:?}", cli.verification));
+        tc.set_target(&format!("{:?}", target));
+        tc.set_debug_info(cli.debug);
+        Some(tc)
+    } else {
+        None
+    };
+
+    if let Some(ref mut tc) = telemetry { tc.stage_start("compile"); }
+
+    let compile_result = vuma::compile_with_recovery(&source, Some(file), &config);
+
+    if let Some(ref mut tc) = telemetry { tc.stage_end("compile"); }
+
+    match compile_result {
+        CompileResult::Success(result) => {
+            if let Some(ref mut tc) = telemetry {
+                tc.set_scg_node_count(result.scg.node_count());
+                tc.set_ir_function_count(result.ir_function_count);
+                tc.set_ir_instruction_count(result.ir_instruction_count);
+                tc.set_binary_size(result.binary.len());
+            }
+
+            let out_path = output
+                .as_ref()
+                .cloned()
+                .unwrap_or_else(|| default_output_path(file));
+            fs::write(&out_path, &result.binary).map_err(|e| {
+                format!(
+                    "error: cannot write output file '{}': {}",
+                    out_path.display(),
+                    e
+                )
+            })?;
+            // Make the output file executable on Unix.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut perms = fs::metadata(&out_path)
+                    .map_err(|e| format!("error: cannot stat '{}': {}", out_path.display(), e))?
+                    .permissions();
+                perms.set_mode(0o755);
+                fs::set_permissions(&out_path, perms)
+                    .map_err(|e| format!("error: cannot chmod '{}': {}", out_path.display(), e))?;
+            }
+
+            if !cli.quiet {
+                println!(
+                    "Compiled {} -> {} ({} bytes, {} SCG nodes, {} IR instructions)",
+                    file.display(),
+                    out_path.display(),
+                    result.binary.len(),
+                    result.scg.node_count(),
+                    result.ir_instruction_count,
+                );
+
+                // Print stage timings.
+                for (stage, ms) in &result.stage_timings {
+                    println!("  {:20} {}ms", stage, ms);
+                }
+            }
+
+            // Output telemetry if requested.
+            if let Some(tc) = telemetry {
+                let report = tc.finalize();
+                println!("\n{}", serde_json::to_string_pretty(&report).unwrap());
+            }
+
+            Ok(())
+        }
+        CompileResult::Partial(partial) => {
+            print_errors(&partial.diagnostics);
+
+            if cli.telemetry {
+                if let Some(tc) = telemetry {
+                    let report = tc.finalize();
+                    eprintln!("\n{}", serde_json::to_string_pretty(&report).unwrap());
+                }
+            }
+
+            Err(format!(
+                "compilation failed with {} error(s) (last completed stage: {})",
+                partial.diagnostics.len(),
+                partial.last_completed_stage
+                    .map(|s| format!("{:?}", s))
+                    .unwrap_or_else(|| "none".to_string())
+            ))
+        }
     }
-
-    println!(
-        "Compiled {} -> {} ({} bytes, {} SCG nodes, {} IR instructions)",
-        file.display(),
-        out_path.display(),
-        result.binary.len(),
-        result.scg.node_count(),
-        result.ir_instruction_count,
-    );
-
-    // Print stage timings.
-    for (stage, ms) in &result.stage_timings {
-        println!("  {:20} {}ms", stage, ms);
-    }
-
-    Ok(())
 }
 
 /// `vuma run <file>` — Build + execute.
@@ -365,10 +455,9 @@ fn cmd_run(cli: &Cli, file: &PathBuf, args: &[String]) -> Result<(), String> {
     let config = make_config(cli, CompileTarget::Linux);
     let result = compile_with_path(&source, Some(file), &config).map_err(|errors| {
         print_errors(&errors);
+        global_logger().error("compile", &format!("compilation failed with {} error(s)", errors.len()));
         format!("compilation failed with {} error(s)", errors.len())
     })?;
-
-    // Write binary to a temp file.
     let tmp_dir = std::env::temp_dir();
     let exe_path = tmp_dir.join(format!("vuma_run_{}", std::process::id()));
     fs::write(&exe_path, &result.binary).map_err(|e| {
@@ -443,21 +532,24 @@ fn cmd_check(cli: &Cli, file: &PathBuf) -> Result<(), String> {
     // it just verifies the program compiles and passes verification.
     let result = compile_with_path(&source, Some(file), &config).map_err(|errors| {
         print_errors(&errors);
+        global_logger().error("check", &format!("check failed with {} error(s)", errors.len()));
         format!("check failed with {} error(s)", errors.len())
     })?;
 
-    println!("Check passed for {}", file.display());
-    println!("  SCG nodes:      {}", result.scg.node_count());
-    println!("  IR functions:   {}", result.ir_function_count);
-    println!("  IR instructions: {}", result.ir_instruction_count);
+    if !cli.quiet {
+        println!("Check passed for {}", file.display());
+        println!("  SCG nodes:      {}", result.scg.node_count());
+        println!("  IR functions:   {}", result.ir_function_count);
+        println!("  IR instructions: {}", result.ir_instruction_count);
 
-    if let Some(ref verification) = result.verification {
-        println!("  Verification:   {}", verification.overall);
-    }
+        if let Some(ref verification) = result.verification {
+            println!("  Verification:   {}", verification.overall);
+        }
 
-    // Print stage timings.
-    for (stage, ms) in &result.stage_timings {
-        println!("  {:20} {}ms", stage, ms);
+        // Print stage timings.
+        for (stage, ms) in &result.stage_timings {
+            println!("  {:20} {}ms", stage, ms);
+        }
     }
 
     Ok(())
@@ -511,10 +603,24 @@ fn cmd_emit(
         }
     }
 
-    // Step 4: Create backend and allocate registers.
-    let backend = create_backend(backend_kind).map_err(|e| {
-        format!("error: cannot create {} backend: {}", backend_kind.isa_name(), e)
-    })?;
+    // Step 4: Create backend and allocate registers (with fallback).
+    let backend = match create_backend(backend_kind) {
+        Ok(b) => b,
+        Err(e) => {
+            let err_msg = format!("{}", e);
+            global_logger().warn("emit", &format!("{} backend failed: {}", backend_kind.isa_name(), err_msg));
+            // Try fallback to AArch64 if not already trying it
+            if backend_kind != BackendKind::AArch64 {
+                global_logger().info("emit", "falling back to aarch64 backend");
+                create_backend(BackendKind::AArch64).map_err(|e2| {
+                    format!("error: cannot create {} backend: {}, aarch64 fallback also failed: {}",
+                        backend_kind.isa_name(), err_msg, e2)
+                })?
+            } else {
+                return Err(format!("error: cannot create {} backend: {}", backend_kind.isa_name(), err_msg));
+            }
+        }
+    };
 
     let mut allocated_functions = Vec::new();
     for func in &ir_program.functions {
@@ -1639,10 +1745,36 @@ fn cmd_bench(_cli: &Cli) {
 // ═══════════════════════════════════════════════════════════════════════════
 
 fn main() {
-    // Initialize logger.
-    env_logger::init();
+    // Determine log level from CLI flags.
+    let log_level = if std::env::args().any(|a| a == "--quiet" || a == "-q") {
+        LogLevel::Error
+    } else if std::env::args().any(|a| a == "--verbose" || a == "-v") {
+        LogLevel::Debug
+    } else {
+        LogLevel::Info
+    };
+
+    // Initialize the VUMA structured logger.
+    init_logger(log_level);
+
+    // Also set up the `log` crate bridge so that internal log::info! etc.
+    // go through our structured logger.
+    let _ = log::set_boxed_logger(Box::new(vuma::logging::VumaLogBridge));
+    log::set_max_level(match log_level {
+        LogLevel::Error => log::LevelFilter::Error,
+        LogLevel::Warn => log::LevelFilter::Warn,
+        LogLevel::Info => log::LevelFilter::Info,
+        LogLevel::Debug => log::LevelFilter::Debug,
+        LogLevel::Trace => log::LevelFilter::Trace,
+    });
 
     let cli = Cli::parse();
+
+    // Handle --version with extended info.
+    if std::env::args().any(|a| a == "--version" || a == "-V") {
+        println!("{}", version_long());
+        return;
+    }
 
     // Handle --bench flag: run the benchmark suite.
     if cli.bench {

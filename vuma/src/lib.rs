@@ -43,8 +43,10 @@ pub mod api;
 pub mod diagnostics;
 pub mod ffi;
 pub mod llm_api;
+pub mod logging;
 pub mod lsp;
 pub mod pipeline;
+pub mod telemetry;
 
 // Re-export package manager types.
 pub use vuma_package::{
@@ -57,8 +59,9 @@ pub use vuma_package::{
 
 // Re-export the primary pipeline API at the crate root for convenience.
 pub use pipeline::{
-    compile, compile_incremental, compile_to_wasm, compile_with_path, CompilationOutput, CompileConfig,
-    CompileTarget, DebugInfo, IncrementalCache, OptLevel, PipelineStage, SourceFingerprint,
+    compile, compile_incremental, compile_to_wasm, compile_with_path, compile_with_recovery,
+    CompilationOutput, CompileConfig, CompileResult, CompileTarget, DebugInfo,
+    IncrementalCache, OptLevel, PartialCompilationOutput, PipelineStage, SourceFingerprint,
     VerificationLevel, VumaError,
 };
 
@@ -73,7 +76,7 @@ pub use diagnostics::{
 
 // Re-export the primary API types for convenience.
 pub use api::{
-    ApiTargetInfo, CompileMetadata, CompileResult, CounterexampleInfo, FunctionSummary,
+    ApiTargetInfo, CompileMetadata, CompileResult as ApiCompileResult, CounterexampleInfo, FunctionSummary,
     InvariantVerification, InvariantVerificationStatus, ParseResult, ScgSummary, TargetOutput,
     VerificationMetadata, VerificationReport, VerificationVerdict, VumaCompiler,
 };
@@ -87,6 +90,12 @@ pub use lsp::{
     LspServer, Position, Range, SemanticTokensLegend, SymbolKind, VumaDocument,
 };
 pub use lsp::DiagnosticSeverity as LspDiagnosticSeverity;
+
+// Re-export telemetry types for convenience.
+pub use telemetry::{TelemetryCollector, TelemetryReport, StageMetrics};
+
+// Re-export logging types for convenience.
+pub use logging::{LogLevel, VumaLogger, VumaLogBridge, init_logger, global_logger};
 
 // Re-export LLM API types for convenience.
 pub use llm_api::{LLMCompileResult, LLMTargetInfo, VumaForLLM};

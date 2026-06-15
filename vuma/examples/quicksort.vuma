@@ -1,0 +1,111 @@
+// Quicksort — In-place quicksort on an array of integers
+//
+// Implements the classic quicksort algorithm using Lomuto partition scheme
+// with in-place swapping. The array is stored in allocated memory with
+// 8-byte (u64) elements.
+//
+// VUMA Key Concepts:
+//   - Pointer arithmetic for array indexing (base + index * stride)
+//   - In-place mutation via pointer dereference
+//   - Recursive algorithm (partition + sort sub-ranges)
+//   - allocate/free for array storage
+//   - Loop and conditional control flow
+
+// ===========================================================================
+// Read a u64 from array at given index (8-byte stride)
+// ===========================================================================
+
+fn arr_read(arr: Address, idx: u64) -> u64 {
+    // Each element is 8 bytes (u64)
+    return *(arr + idx * 8);
+}
+
+// ===========================================================================
+// Write a u64 to array at given index (8-byte stride)
+// ===========================================================================
+
+fn arr_write(arr: Address, idx: u64, val: u64) {
+    *(arr + idx * 8) = val;
+}
+
+// ===========================================================================
+// Swap two elements in the array
+// ===========================================================================
+
+fn arr_swap(arr: Address, i: u64, j: u64) {
+    temp: u64 = arr_read(arr, i);
+    arr_write(arr, i, arr_read(arr, j));
+    arr_write(arr, j, temp);
+}
+
+// ===========================================================================
+// Lomuto partition: choose last element as pivot
+// ===========================================================================
+// Rearranges elements so that arr[lo..pivot] <= pivot < arr[pivot+1..hi]
+// Returns the final index of the pivot element.
+
+fn partition(arr: Address, lo: u64, hi: u64) -> u64 {
+    pivot: u64 = arr_read(arr, hi);
+    i: u64 = lo;
+    j: u64 = lo;
+    while j < hi {
+        if arr_read(arr, j) <= pivot {
+            arr_swap(arr, i, j);
+            i = i + 1;
+        }
+        j = j + 1;
+    }
+    arr_swap(arr, i, hi);
+    return i;
+}
+
+// ===========================================================================
+// Recursive quicksort
+// ===========================================================================
+// Sorts arr[lo..hi] inclusive using partition-then-recurse.
+
+fn quicksort(arr: Address, lo: u64, hi: u64) {
+    if lo < hi {
+        p: u64 = partition(arr, lo, hi);
+        if p > 0 {
+            quicksort(arr, lo, p - 1);
+        }
+        quicksort(arr, p + 1, hi);
+    }
+}
+
+// ===========================================================================
+// Main entry point
+// ===========================================================================
+// Creates an array of 10 integers, sorts them, and returns the median.
+// Input:  [64, 25, 12, 22, 11, 90, 33, 7, 55, 42]
+// Sorted: [7, 11, 12, 22, 25, 33, 42, 55, 64, 90]
+// Median (index 5): 33
+// Exit code: 33
+
+fn main() -> i32 {
+    // Allocate array of 10 u64 elements (80 bytes)
+    arr = allocate(80);
+
+    // Initialize with unsorted data
+    arr_write(arr, 0, 64);
+    arr_write(arr, 1, 25);
+    arr_write(arr, 2, 12);
+    arr_write(arr, 3, 22);
+    arr_write(arr, 4, 11);
+    arr_write(arr, 5, 90);
+    arr_write(arr, 6, 33);
+    arr_write(arr, 7, 7);
+    arr_write(arr, 8, 55);
+    arr_write(arr, 9, 42);
+
+    // Sort the array
+    quicksort(arr, 0, 9);
+
+    // Return the median value (index 5 of 10 elements)
+    // After sorting: [7, 11, 12, 22, 25, 33, 42, 55, 64, 90]
+    median: u64 = arr_read(arr, 5);
+
+    free(arr);
+    return median;
+}

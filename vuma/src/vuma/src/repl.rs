@@ -160,6 +160,10 @@ fn node_label(node: &vuma_scg::NodeData) -> String {
         NodePayload::Phantom(p) => p.purpose.clone(),
         NodePayload::VTable(v) => format!("vtable({} for {})", v.trait_name, v.concrete_type),
         NodePayload::ClosureEnv(c) => format!("closure_env({:?})", c.captured_vars),
+        NodePayload::StructDef(s) => format!("struct {}", s.name),
+        NodePayload::EnumDef(e) => format!("enum {}", e.name),
+        NodePayload::Match(m) => format!("match({})", m.subject),
+        NodePayload::ConstantTime(ct) => format!("ct_{:?}", ct.op),
     }
 }
 

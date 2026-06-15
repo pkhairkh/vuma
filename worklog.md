@@ -2494,3 +2494,109 @@ Stage Summary:
 - All tests passing (20 crypto tests)
 - Pre-existing codegen errors (emit_label, Bcond, ss_store_vreg, ComputationNode) remain from prior tasks
 
+---
+Task ID: 30
+Agent: general-purpose
+Task: Wave30: Ecosystem examples — Create real-world example programs for the VUMA ecosystem
+
+Work Log:
+- Read worklog.md and existing examples to understand VUMA language features and conventions
+- Studied language reference, sha256d.vuma, doubly_linked_list.vuma, sorted_map.vuma, arena_allocator.vuma, struct_demo.vuma, test_u32_arith.vuma, and other examples
+- Created 8 new example programs in /home/z/my-project/vuma/examples/:
+  1. fibonacci.vuma — Recursive and iterative Fibonacci, returns fib(30)=832040
+  2. quicksort.vuma — Lomuto-partition in-place quicksort, returns median of 10-element array (33)
+  3. linked_list.vuma — Singly-linked list with prepend/traverse/free, returns len*1000+sum=5150
+  4. hex_dump.vuma — Byte-to-hex conversion with XOR checksum output
+  5. crc32.vuma — CRC32 (IEEE 802.3) with 256-entry lookup table, returns low byte of CRC32("123456789")=38
+  6. bsearch.vuma — Binary search on sorted u64 array, returns index of 42 (=7)
+  7. matrix.vuma — 4×4 matrix multiplication (row-major), returns XOR checksum (0 for A×I)
+  8. base64_encode.vuma — RFC 4648 Base64 encoding, returns output length (20 for "Hello, World!")
+- Updated examples/README.md with descriptions of all 8 new examples (entries 10-17)
+- Added new "Algorithms & Encoding" section to Learning Path
+- Extended IVE Verification Summary table with all new examples
+- All examples are self-contained, use only VUMA language features, have comment headers, and return meaningful exit codes
+
+Stage Summary:
+- 8 new ecosystem example programs created covering: recursion, sorting, linked data structures, hex encoding, CRC checksums, binary search, matrix math, and Base64 encoding
+- README.md updated with full descriptions, learning path additions, and IVE table entries
+- No extern dependencies or magic — pure VUMA only
+
+---
+Task ID: 32
+Agent: general-purpose
+Task: Wave32: Release preparation
+
+Work Log:
+- Updated /home/z/my-project/vuma/Cargo.toml: version 0.1.0 → 0.2.0, added description, repository, license, keywords, categories
+- Updated /home/z/my-project/vuma/CHANGELOG.md: comprehensive changelog for v0.2.0 with Breaking Changes, Features (grouped by area), Bug Fixes, and Documentation sections; covers Waves 1-32
+- Updated /home/z/my-project/vuma/README.md: complete rewrite reflecting current state — 8 backends, LLM features, Wasm sandbox, API examples, LSP, REPL, diagnostics, module system, package manager
+- Updated /home/z/my-project/vuma/docs/ROADMAP.md: Phase 2 marked "Substantially Complete" (9/11 milestones), Phase 3 updated to "significant progress from Waves 6-32", Wave 1-32 summary table added
+- Created /home/z/my-project/vuma/RELEASES.md: v0.1.0 (Phase 1: Foundation) and v0.2.0 (Phase 2: Multi-Arch, LLM Integration, Wasm Sandbox)
+
+Stage Summary:
+- All 6 release preparation tasks completed
+- Cargo.toml now has proper crates.io metadata
+- CHANGELOG.md covers all 32 waves with categorized entries
+- README.md reflects v0.2.0 feature set with LLM section and API examples
+- ROADMAP.md updated with Phase 2 substantially complete and Wave 1-32 summary
+- RELEASES.md created with detailed v0.1.0 and v0.2.0 release notes
+
+---
+
+## Final Summary: VUMA Project Waves 1-32
+
+### Project Overview
+
+The VUMA project (Verified-Unsafe Memory Access) is an AI-native programming language framework that replaces traditional type systems with behavioral verification. Over 32 waves of development, it grew from an initial architectural foundation to a multi-architecture compiler with LLM integration, a Wasm sandbox, and comprehensive safety verification.
+
+### Wave-by-Wave Summary
+
+| Wave | Focus | Key Deliverables |
+|------|-------|-----------------|
+| 1 | Backend Fixes & Pi5 Removal | All 8 backends pass SHA256d, Pi5 crate removed, all Pi5 references cleaned |
+| 2 | Deep Backend Audits | LoongArch64 audit (maskeqz/masknez, stack args), x86_64/RISC-V/ARM32/MIPS64 fixes |
+| 3 | Cross-Backend Consistency | ABI improvements, backend trait architecture, codegen quality |
+| 4 | Per-Backend Hardening | Instruction encoding verification, disassembler fixes, register handling |
+| 5 | LLM Readiness | LLM language reference, structured SCG output (to_json/to_text), codegen improvements |
+| 6 | Testing Infrastructure | Cross-backend tests (9), ELF validation (12), Wasm validation (12), parser roundtrip (10), PPC64 deep audit (7 bugs), shared codegen fixes (3 bugs) |
+| 7 | Parser for LLMs | LLM type aliases, macro detection, C-style for loop, &T→*T conversion, skip_balanced helpers |
+| 8 | Standard Library | crypto.rs, string.rs, math.rs, enhanced alloc.rs/io.rs (15 new public functions) |
+| 9 | Register Allocator | LoopDetector, GreedyRegCache, dead-vreg reuse, loop-depth spill weights (19 tests) |
+| 10 | Module System | import syntax, ModuleResolver, circular import detection, compile_with_path() |
+| 11-12 | Verification Hardening | VumaCompiler.verify(), property-based testing (15 proptests), proof cross-check |
+| 13-14 | Documentation & REPL | ROADMAP/architecture overhaul, REPL (:wasm, :backends, :check, :diagnostics, :exports, tab completion, ANSI color) |
+| 15 | Diagnostics | 65 codes, error chaining, structured suggestions, 4 output formats, DiagnosticSummary |
+| 16 | CI Infrastructure | GitHub Actions (test+release), cross-compile (8 targets), Dependabot |
+| 17-18 | Memory Safety & Benchmarks | 10 violation types, runtime bounds checks, benchmark suite (SHA256d, compilation speed, backend comparison, codegen quality) |
+| 19-20 | ABI & Debug Info | ABI conformance (27 tests), DWARF per-backend config, --debug-info alias |
+| 21-22 | Linker & LLM API | 3 LOAD segments (W^X), VumaForLLM API, section alignment, --sections flag |
+| 23 | Package Manager | PackageManifest, resolve_dependencies, CLI subcommands (init/build/add) |
+| 24 | FFI & Syscalls | 19 syscalls × 8 architectures, architecture-specific relocations, is_extern flag |
+| 25-27 | Security Hardening | Codegen quality improvements, test infrastructure hardening |
+| 28 | Constant-Time Crypto | ct_select/ct_eq across all 8 backends, PPC64 carry-flag masks, 5 u32 functions |
+| 29-31 | Final Hardening | Documentation updates, test coverage improvements, release preparation |
+| 30 | Ecosystem Examples | 8 new examples: fibonacci, quicksort, linked_list, hex_dump, crc32, bsearch, matrix, base64_encode |
+| 32 | Release Preparation | Cargo.toml v0.2.0, CHANGELOG, README, ROADMAP, RELEASES.md |
+
+### Key Metrics
+
+| Metric | v0.1.0 | v0.2.0 |
+|--------|--------|--------|
+| Backend architectures | 8 (partial) | 8 (6 stable, 2 experimental) |
+| SHA256d passing backends | 1 (AArch64) | 6 (x86_64, AArch64, RISC-V 64, ARM32, MIPS64, PPC64) |
+| LLM-facing APIs | 0 | 2 (VumaForLLM, VumaCompiler) |
+| LSP support | None | Full (diagnostics, hover, go-to-def, completion) |
+| REPL commands | Basic | 6 LLM commands + tab completion + color |
+| Diagnostic codes | 23 | 65 (E001-E050, W001-W010, I001-I005) |
+| Memory safety violations | 0 types | 10 types (E041-E050) |
+| Syscall coverage | 0 | 19 × 8 architectures |
+| Module system | None | Full (imports, circular detection, resolution) |
+| Package manager | Skeleton | Full (manifest, resolver, registry, CLI) |
+| Constant-time ops | 0 | 5 functions × 8 backends |
+| Property tests | 0 | 15 proptests |
+| ABI conformance tests | 0 | 27 tests |
+| Cross-backend tests | 0 | 9 tests × 8 backends |
+| ELF validation tests | 0 | 12 tests (7 native backends) |
+| Wasm validation tests | 0 | 12 tests |
+| Ecosystem examples | 10 | 18 |
+

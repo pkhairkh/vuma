@@ -7,292 +7,271 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.2.0] — 2026-03-05
+
+Multi-architecture codegen, LLM integration, Wasm sandbox, and verification hardening.
+
+---
+
+### Breaking Changes
+
+- **W1**: Removed Pi5 bare-metal platform crate (`src/pi5/`) and all Pi5-specific code from workspace, pipeline, tests, COR, security, IO, and documentation. `CompileTarget::Pi5Bare`/`Pi5Linux` replaced with `CompileTarget::Linux`. `TestCategory::Pi5` removed from test framework. *(W1)*
+- **W6**: ELF emission restructured to 3 LOAD segments (R / RX / RW) for W^X compliance. `.rodata` placed before `.text` in memory. *(W6-f, W21)*
+- **W24**: `IRInstr::Call` now carries `is_extern: bool` field — all `IRInstr::Call` construction sites updated across all 8 backends and test code. *(W24)*
+- **W24**: `CallNode` in `scg_to_ir.rs` now carries `is_extern: bool` field propagated through `lower_call`. *(W24)*
+
+### Features
+
+#### Multi-Architecture Codegen (W1, W2, W3, W4, W5, W6)
+
+- **W1**: All 6 native backends pass SHA256d execution test: x86_64, AArch64, RISC-V 64, ARM32, MIPS64, PPC64. LoongArch64 passes individual operations; Wasm32 generates valid modules. *(W1)*
+- **W1**: Fixed PPC64 RLDICL encoding, 32-bit masking, and ss_load_imm zero-extension. *(W1)*
+- **W1**: Fixed LoongArch64 3R opcodes (24 of 26 were wrong), shift immediate formats, LU12I_W/LU32I_D, BEQZ/BNEZ, and FP opcodes. *(W1)*
+- **W1**: Wasm32: Added ROR/ROL via shift+or sequence, fixed push_value type hints. *(W1)*
+- **W2**: LoongArch64 deep audit: fixed prologue/epilogue register save ordering, Select branchless via maskeqz/masknez, stack space allocation for >8 args, added Maskeqz/Masknez instructions. *(W2)*
+- **W2**: x86_64 ISel fixes: immediate operand handling, stack-slot store ordering. *(W2)*
+- **W2**: RISC-V 64 fixes: immediate encoding, branch offset calculations. *(W2)*
+- **W2**: ARM32 fixes: condition code encoding, LDR/STR offset calculations. *(W2)*
+- **W2**: MIPS64 fixes: delay slot handling, big-endian ELF generation. *(W2)*
+- **W3**: Cross-backend ABI consistency improvements across all 8 backends. *(W3)*
+- **W3**: Backend trait architecture with `TargetInfo` and `Backend` traits for multi-backend support. *(W3)*
+- **W4**: Per-backend instruction encoding verification and disassembler fixes. *(W4)*
+- **W5**: Structured SCG output for LLMs: `SCG::to_json()` and `SCG::to_text()` methods with LLM-friendly JSON types (`LlmNode`, `LlmEdge`, `LlmFunction`, `LlmRegion`, `LlmSummary`). *(W5-d)*
+- **W6**: Cross-backend consistency test suite (9 tests across 4 IR programs × 8 backends). *(W6-b)*
+- **W6**: ELF validation tests for all 7 native backends (ELF32/64, endianness, machine types). *(W6-c)*
+- **W6**: Wasm32 binary validation tests (12 tests: magic, sections, globals, exports, code bodies). *(W6-d)*
+- **W6**: Parser roundtrip tests (10 tests: minimal program, memory ops, SHA256d parse, error recovery). *(W6-g)*
+- **W6**: PPC64 deep audit: 7 encoding/ABI bugs fixed (LR save offset, CMP l-field, RLDCL/RLDCR opcode 30, mb5/me5, BH field, ROR/ROL, I-form LI mask), 11 new tests. *(W6-e)*
+
+#### Register Allocator Improvements (W9)
+
+- **W9**: LoopDetector with back-edge analysis and induction variable detection. *(W9)*
+- **W9**: Loop-depth-aware spill weights (10^depth multiplier, induction variable 3x bonus). *(W9)*
+- **W9**: GreedyRegCache: target-independent register cache with LRU eviction, caller-saved preference, dead-vreg release. *(W9)*
+- **W9**: LivenessAnalysis: per-instruction dataflow with dead-at detection. *(W9)*
+- **W9**: Enhanced `allocate_function_enhanced()` with priority sorting and dead-vreg reuse. *(W9)*
+
+#### LLM Integration (W5, W7, W13, W21, W22)
+
+- **W5**: LLM language reference document (`docs/llm-language-reference.md`, 5542 words) with 15 sections and code examples. *(W5-e)*
+- **W7**: Parser hardened for LLM-generated code: LLM type aliases (int→i32, float→f32), macro detection (println!, vec!), C-style for loop detection, `&T`/`&mut T` auto-conversion to `*T`. *(W7)*
+- **W13**: Enhanced REPL with LLM-friendly commands: `:wasm`, `:backends`, `:check`, `:diagnostics`, `:exports`, tab completion, ANSI color output. *(W13)*
+- **W21**: `VumaForLLM` API layer: `compile()`, `check()`, `analyze()`, `to_wasm()`, `explain_error()`, `suggest_fixes()`, `targets()`. *(W21)*
+- **W21**: `LLMCompileResult` with success, diagnostics, explanation, SCG JSON, Wasm binary, binary sizes. *(W21)*
+
+#### Verification & Safety (W11, W12, W15, W17, W28)
+
+- **W11**: `VumaCompiler.verify()` method integrated with IVE + proof pipeline; `VerificationReport` with per-invariant pass/fail and counterexamples. *(W11)*
+- **W11**: Property-based testing with proptest: 15 tests across parser roundtrip, cross-backend, SCG invariants, verification. *(W11)*
+- **W15**: Expanded diagnostic codes from 23 to 65 (E001-E050, W001-W010, I001-I005). *(W15)*
+- **W15**: Error chaining with `VumaDiagnostic::chain()`, root cause analysis, causal chain serialization. *(W15)*
+- **W15**: Structured `Suggestion` with edit ranges, replacements, and `SuggestionApplicability`. *(W15)*
+- **W15**: Four output formats: JSON, ANSI rich text, plain text, LSP. `DiagnosticSummary` for statistical analysis. *(W15)*
+- **W17**: Memory safety analyzer with 10 violation types (E041–E050): UseAfterFree, DoubleFree, MemoryLeak, BoundsCheckFailure, NullDereference, DanglingPointer, UninitializedRead, BufferOverflow, UseAfterScope, InvalidFree. *(W17)*
+- **W17**: Runtime bounds checking behind `--safe` CLI flag. *(W17)*
+- **W28**: Constant-time crypto operations: `ct_select`, `ct_eq`, `ct_ne`, `ct_lt`, `ct_gte` — branchless implementations across all 8 backends. *(W28)*
+- **W28**: PPC64 carry-flag-based constant-time mask (addic+subfe). LoongArch64 maskeqz/masknez branchless select. *(W28)*
+
+#### Module System & Package Manager (W10, W23)
+
+- **W10**: Multi-file compilation with `import "path"::{name1, name2};` syntax. *(W10)*
+- **W10**: `ModuleResolver` with circular import detection, name conflict detection, symbol validation. *(W10)*
+- **W10**: `compile_with_path()` API for file-aware compilation. *(W10)*
+- **W23**: Package manager foundation: `PackageManifest`, `parse_manifest()`, `resolve_dependencies()`, `PackageRegistry` with `publish()`, `fetch()`, `list()`. *(W23)*
+- **W23**: CLI subcommands: `vuma pkg init <name>`, `vuma pkg build`, `vuma pkg add <dep> [version]`. *(W23)*
+
+#### FFI & Syscalls (W24)
+
+- **W24**: SyscallTable with 19 syscalls across 8 architectures (verified against Linux kernel headers). *(W24)*
+- **W24**: Architecture-specific relocation kinds: Arm32Call, Mips26, Ppc64Rel24, LoongArchB26, etc. *(W24)*
+- **W24**: `is_extern` flag on `IRInstr::Call` and `CallNode` for FFI vs local call distinction. *(W24)*
+
+#### Standard Library (W8, W28)
+
+- **W8**: New modules: `crypto.rs` (SHA-256 constants and host-side helpers), `string.rs` (strlen, strcmp, memcpy, memset), `math.rs` (abs, min, max, clamp). *(W8)*
+- **W8**: Enhanced `alloc.rs` (heap_alloc, heap_free, heap_realloc), `io.rs` (read_bytes, write_bytes, read_u32_le, write_u32_le). *(W8)*
+- **W28**: `std/crypto.rs`: 5 constant-time u32 functions with VUMA-VERIFIED annotations. *(W28)*
+
+#### Tooling & Infrastructure (W16, W19, W20, W21)
+
+- **W16**: GitHub Actions CI: test + release workflow, cross-compile matrix for all 8 ISA targets, Dependabot. *(W16)*
+- **W19**: ABI conformance testing: 27 tests covering calling conventions for all 8 backends. *(W19)*
+- **W20**: DWARF debug info: per-backend address size and min_inst_length, `DwarfBuilder::for_backend()`, `--debug-info` CLI alias. *(W20)*
+- **W21**: ELF linker hardening: 3 LOAD segments (W^X), per-arch section alignment, `--sections` CLI flag. *(W21)*
+- **W21**: Performance benchmarking suite: SHA256d per-backend, compilation speed, backend comparison, codegen quality. *(W21)*
+
+#### Documentation (W5, W13)
+
+- **W5**: LLM language reference (`docs/llm-language-reference.md`). *(W5)*
+- **W13**: ROADMAP.md overhaul: Phase 2 milestones, LLM integration section, updated dependency graph. *(W13)*
+- **W13**: architecture.md updated: LLM Integration Architecture section, multi-arch references, Pi5 removal. *(W13)*
+
+### Bug Fixes
+
+- **W1**: PPC64 RLDICL encoding used wrong instruction; replaced with Rlwinm for 32-bit masking. *(W1)*
+- **W1**: LoongArch64 had 24 out of 26 3R-format opcodes completely wrong. *(W1)*
+- **W2**: LoongArch64 prologue saved caller FP at wrong offset; fixed to use `$fp + (i-8)*8`. *(W2)*
+- **W2**: LoongArch64 Select used hardcoded branch offset that broke for multi-instruction stores; replaced with maskeqz/masknez. *(W2)*
+- **W2**: LoongArch64 Call didn't allocate stack space for >8 args, overwriting caller frame. *(W2)*
+- **W6**: `TargetAgnosticRegAlloc::expire_old` misclassified callee-saved registers (checked free pool instead of original list). *(W6-f)*
+- **W6**: DCE only tracked per-block liveness, could remove live cross-block definitions. *(W6-f)*
+- **W6**: `emit_raw()` silently dropped data sections for bare-metal targets. *(W6-f)*
+- **W6**: PPC64 LR save at wrong ELFv2 offset (fs+8 → fs+16). *(W6-e)*
+- **W6**: PPC64 CMP/CMPL l-field at wrong bit position (shift 21 → 22). *(W6-e)*
+- **W6**: PPC64 RLDCL/RLDCR used primary opcode 31 instead of 30. *(W6-e)*
+- **W6**: PPC64 RLDCL/RLDCR missing mb5/me5 bit for mask values >= 32. *(W6-e)*
+- **W19**: `BackendKind::PPC64` → `BackendKind::PowerPC64` in emit.rs. *(W19)*
+- **W23**: Topological sort produced wrong build order; added `sorted.reverse()`. *(W23)*
+- **W23**: `v == version_req` type mismatch; fixed to `**v == version_req`. *(W23)*
+- **W28**: Non-exhaustive match errors in opt.rs, arm64.rs, emit.rs, loongarch64, ppc64. *(W28)*
+
+### Documentation
+
+- **W5**: LLM language reference with 15 sections covering types, functions, memory, pitfalls, and target platforms. *(W5)*
+- **W13**: ROADMAP.md updated to reflect 8 backends, LLM API, LSP, REPL, Phase 2 progress. *(W13)*
+- **W13**: architecture.md Section 9: LLM Integration Architecture with Wasm32 sandbox description. *(W13)*
+
+---
+
 ## [0.1.0] — 2026-03-05
 
 Initial release of the VUMA framework — Verified-Unsafe Memory Access AI-Native Programming Language.
 
 ---
 
-## Wave 1: Foundation & Formal Specifications
+### Wave 1: Foundation & Formal Specifications
 
 *The first wave established the mathematical foundations, formal specifications, and initial implementations of all 12 workspace crates.*
 
-### Added — Formal Specifications
+#### Added — Formal Specifications
 
-- **SCG Formal Specification** (`docs/specs/scg-formal-spec.md`, 475 lines) — Mathematical model for the Semantic Computation Graph: directed, acyclic, attributed multigraph with nodes (allocation, access, deallocation, cast, computation, control, effect, phantom), edges (data flow, control flow, derivation, annotation), and regions (scopes, phases, security boundaries, deployment targets).
+- **SCG Formal Specification** (`docs/specs/scg-formal-spec.md`, 475 lines) — Mathematical model for the Semantic Computation Graph.
+- **RepD Formal Specification** (`docs/specs/repd-formal-spec.md`, 546 lines) — Representation descriptor lattice with 7 variants.
+- **CapD Formal Specification** (`docs/specs/capd-formal-spec.md`, 492 lines) — Capability descriptor lattice.
+- **RelD Formal Specification** (`docs/specs/reld-formal-spec.md`, 600 lines) — Relational descriptor kinds.
+- **VUMA Invariants Specification** (`docs/specs/vuma-invariants-spec.md`, 742 lines) — Five global memory-safety invariants.
+- **MSG Construction Specification** (`docs/specs/msg-construction-spec.md`, 850 lines) — Memory State Graph construction algorithm.
+- **AArch64 Memory Model Specification** (`docs/specs/aarch64-memory-model-spec.md`, 809 lines).
+- **Security Model Specification** (`docs/specs/security-model-spec.md`, 606 lines).
+- **BD Inference Algorithm** (`docs/specs/bd-inference-algorithm.md`, 1027 lines).
+- **VUMA Verification Algorithm** (`docs/specs/vuma-verification-algorithm.md`, 1098 lines).
+- **ARM64 Codegen Algorithm** (`docs/specs/arm64-codegen-algorithm.md`, 1182 lines).
+- **Benchmark Design** (`docs/specs/benchmark-design.md`, 695 lines).
+- **Trivial Proofs** (`docs/specs/trivial-proofs.md`, 547 lines).
+- **Doubly-Linked List Proof** (`docs/specs/dlist-proof.md`, 631 lines).
+- **Decidability Analysis** (`docs/specs/decidability-analysis.md`, 416 lines).
 
-- **RepD Formal Specification** (`docs/specs/repd-formal-spec.md`, 546 lines) — Representation descriptor lattice with 7 variants (Byte, Struct, Enum, Array, Pointer, Union, Opaque), subsumption ordering, compatibility checking, and multiple simultaneous interpretations.
+#### Added — Source Crates (Initial Implementation)
 
-- **CapD Formal Specification** (`docs/specs/capd-formal-spec.md`, 492 lines) — Capability descriptor lattice with meet/join operations, context-dependent capability sets (read, write, execute, serialize, send, persist, derive-pointer), and lock conditions for concurrent access.
+- **`vuma-scg`** — Semantic Computation Graph (~10,268 lines)
+- **`vuma-bd`** — Behavioral Descriptors (~10,073 lines)
+- **`vuma-core`** — VUMA Memory Model (~16,204 lines)
+- **`vuma-ive`** — Inference & Verification Engine (~12,500 lines)
+- **`vuma-cor`** — Continuous Optimization Runtime (~6,244 lines)
+- **`vuma-projection`** — Projection System (~8,090 lines)
+- **`vuma-parser`** — Parser/Frontend (~9,461 lines)
+- **`vuma-codegen`** — ARM64 Code Generation (~11,879 lines)
+- **`vuma-proof`** — Formal Proof System (~9,124 lines)
+- **`vuma-std`** — Standard Library (~10,303 lines)
+- **`vuma-tests`** — Integration Tests & Benchmarks (~3,962 lines)
 
-- **RelD Formal Specification** (`docs/specs/reld-formal-spec.md`, 600 lines) — Relational descriptor kinds (Containment, Aliasing, DataFlow, RegionBound, Ownership, SecurityLevel), composition rules, and refinement ordering.
+#### Added — Build & CI
 
-- **VUMA Invariants Specification** (`docs/specs/vuma-invariants-spec.md`, 742 lines) — Five global memory-safety invariants: liveness (every access targets allocated memory), exclusivity (no conflicting concurrent accesses), interpretation (every access uses a valid RepD), origin (every address traces to a valid allocation), cleanup (every region is eventually freed or explicitly leaked).
+- `Makefile`, `justfile`, `rust-toolchain.toml`, `rustfmt.toml`, `clippy.toml`
+- `.cargo/config.toml`, `.github/workflows/ci.yml`
 
-- **MSG Construction Specification** (`docs/specs/msg-construction-spec.md`, 850 lines) — Memory State Graph construction algorithm from annotated SCGs: monotonic address allocation, derivation chain tracking, sync edge construction, and post-conversion verification.
+#### Added — Documentation
 
-- **AArch64 Memory Model Specification** (`docs/specs/aarch64-memory-model-spec.md`, 809 lines) — Address map, MMIO register access, DMA controller, cache coherency protocol.
-
-- **Security Model Specification** (`docs/specs/security-model-spec.md`, 606 lines) — Five security layers (memory safety, capability security, information flow, region security, platform security), six threat categories, and verification confidence/debt tracking.
-
-- **BD Inference Algorithm** (`docs/specs/bd-inference-algorithm.md`, 1027 lines) — Iterative fixpoint algorithm for RepD, CapD, and RelD inference with interdependency resolution.
-
-- **VUMA Verification Algorithm** (`docs/specs/vuma-verification-algorithm.md`, 1098 lines) — Five invariant verification algorithms with proof obligations, counterexample generation, and tiered confidence levels.
-
-- **ARM64 Codegen Algorithm** (`docs/specs/arm64-codegen-algorithm.md`, 1182 lines) — Three-phase codegen pipeline (SCG→IR, register allocation, emission), instruction selection rules, and AAPCS64 compliance.
-
-- **Benchmark Design** (`docs/specs/benchmark-design.md`, 695 lines) — Eight benchmark categories, statistical methodology (mean, median, stddev, P95, CV), and C-equivalent comparison baseline.
-
-- **Trivial Proofs** (`docs/specs/trivial-proofs.md`, 547 lines) — Proof obligations for trivial programs: allocate/read/write/free, cast operations, and concurrent access patterns.
-
-- **Doubly-Linked List Proof** (`docs/specs/dlist-proof.md`, 631 lines) — Formal proof of the doubly-linked list with sentinel node pattern, insertion/deletion invariants, and threading safety.
-
-- **Decidability Analysis** (`docs/specs/decidability-analysis.md`, 416 lines) — Which VUMA invariants are decidable, which require approximation, and how verification debt handles undecidable cases.
-
-### Added — Source Crates (Initial Implementation)
-
-- **`vuma-scg`** (`src/scg/`, ~10,268 lines) — Semantic Computation Graph: 12 node types, 8 edge kinds, region system, query engine, dominance analysis, liveness analysis, transform passes (DCE, constant folding, inlining, CSE), diff/merge, and JSON serialization.
-
-- **`vuma-bd`** (`src/bd/`, ~10,073 lines) — Behavioral Descriptors: RepD (7 variants), CapD (lattice operations), RelD (6 relation kinds), BD triple (composition, compatibility, refinement), inference engine, context solver, capd_lattice, reld_refine, repd_compat, and BD unification.
-
-- **`vuma-core`** (`src/vuma/`, ~16,204 lines) — VUMA Memory Model: Address newtype, Region (contiguous span with status), Derivation (pointer provenance), Access (read/write at program point), SyncEdge (ordering), MSG (Memory State Graph), msg_builder, msg_incremental (MSGDelta), scg_to_msg conversion pipeline, five invariant checkers, access_analysis, security model, and REPL.
-
-- **`vuma-ive`** (`src/ive/`, ~12,500 lines) — Inference & Verification Engine: InferenceEngine (BD propagation), VerificationEngine (5 invariant checks), InvariantAggregator (unified VerificationSummary), individual verifiers (liveness, exclusivity, interpretation, origin, cleanup), BD constraint solver, verification debt tracking, and result types.
-
-- **`vuma-cor`** (`src/cor/`, ~6,244 lines) — Continuous Optimization Runtime: CORuntime orchestrator, ProfileCollector (thread-safe, PMU counters), SpeculativeExecutor (branch prediction, inlining, code motion, snapshot rollback), OptimizationEngine (DCE, folding, inlining, loop unrolling), DeploymentManager (hot-swap 6-phase FSM, delta deployment, version tracking), and Config.
-
-- **`vuma-projection`** (`src/projection/`, ~8,090 lines) — Projection System: textual (SCG → code), visual (SCG → SVG/HTML), conversational (SCG → natural language), bidirectional editing (projection edits → SCG), and semantic diff.
-
-- **`vuma-parser`** (`src/parser/`, ~9,461 lines) — Parser/Frontend: lexer (43+ keywords), recursive-descent parser, AST types, AST→SCG lowering, and error recovery with "did you mean?" suggestions.
-
-- **`vuma-codegen`** (`src/codegen/`, ~11,879 lines) — ARM64 Code Generation: Arm64Instruction enum with binary encoding, IR types, SCG→IR translation, linear-scan register allocator, and ELF emission.
-
-- ***(removed)*** — Was AArch64 bare-metal Platform: bare-metal boot, linker script, build script, UART, GPIO, timer, MMIO, SMP.
-
-- **`vuma-proof`** (`src/proof/`, ~9,124 lines) — Formal Proof System: Proof/ProofStep/Goal/ProofStatus, checker, inference rules, automated tactics, counterexample generation, and per-invariant proof modules.
-
-- **`vuma-std`** (`src/std/`, ~10,303 lines) — Standard Library: Ptr, RegionPtr, Slice, VumaResult, VumaOption, Range, HasBD trait, VumaAllocator, BumpAllocator, FreeListAllocator, Vec, HashMap, VumaString, LinkedList, RingBuffer, SipHash13, Mutex, RwLock, Channel, AtomicU32/64, Read/Write/BufRead traits.
-
-- **`vuma-tests`** (`src/tests/`, ~3,962 lines) — Integration Tests & Benchmarks: test framework, trivial program tests, doubly-linked list tests, BD inference tests, concurrent verification tests, graph tests, and benchmark suite (8 categories, 40+ benchmarks).
-
-### Added — Examples
-
-- `examples/hello_memory.vuma` (40 lines) — Basic allocate/write/read/free
-- `examples/doubly_linked_list.vuma` (89 lines) — Sentinel node pattern
-- `examples/arena_allocator.vuma` (78 lines) — Arena allocation with derivation chains
-- `examples/gpio_blink.vuma` (68 lines) — GPIO hardware access
-- `examples/lock_free_queue.vuma` (99 lines) — Lock-free SPSC queue with atomics
-
-### Added — Build & CI
-
-- `Makefile` (233 lines) — Build/test/bench/doc/cross-compile targets
-- `justfile` (226 lines) — Just command runner shortcuts
-- `rust-toolchain.toml` (9 lines) — Pinned nightly toolchain
-- `rustfmt.toml` (3 lines) — Formatting configuration
-- `clippy.toml` (1 line) — Cognitive complexity threshold
-- `.cargo/config.toml` (58 lines) — Cross-compilation and target-specific flags
-- `.github/workflows/ci.yml` (217 lines) — GitHub Actions CI pipeline
-
-### Added — Documentation
-
-- `docs/architecture.md` (994 lines) — Full architecture document
-- `docs/ROADMAP.md` (277 lines) — 5-phase project roadmap
-- `docs/CONTRIBUTING.md` (840 lines) — Contributor guidelines
-- `docs/CONVENTIONS.md` (796 lines) — Coding conventions
-- `docs/GLOSSARY.md` (893 lines) — Project glossary
+- `docs/architecture.md` (994 lines), `docs/ROADMAP.md` (277 lines)
+- `docs/CONTRIBUTING.md` (840 lines), `docs/CONVENTIONS.md` (796 lines)
+- `docs/GLOSSARY.md` (893 lines)
 
 ---
 
-## Wave 2: Core Verification & AArch64 Platform
+### Wave 2: Core Verification & AArch64 Platform
 
-*The second wave completed the five invariant verification passes, built the SCG→MSG conversion pipeline, and established the AArch64 bare-metal platform with boot code, linker script, and hardware drivers.*
-
-### Added — Verification Pipeline
-
-- **SCG → MSG conversion** (`src/vuma/src/scg_to_msg.rs`, 1357 lines) — Topological walk of SCG nodes producing well-formed Memory State Graphs: AllocationNode→Region, AccessNode→Derivation+Access, DeallocationNode→Region Freed, CastNode→DerivationKind::Cast, ControlFlow edges→SyncEdge. 14 tests.
-
-- **Incremental MSG** (`src/vuma/src/msg_incremental.rs`, 1907 lines) — MSGDelta computation and application for incremental re-verification: compute_delta, apply_delta, SCGSnapshot.
-
-- **Invariant aggregator** (`src/ive/src/invariant_aggregator.rs`, 1141 lines) — Unified verification pipeline running all five invariant checks and producing VerificationSummary.
-
-### Added — AArch64 Bare-Metal Platform *(removed)*
-
-- **Boot code** *(removed)* — ARM64 exception vector table (16 entries), `_start` naked function.
-
-- **Linker script** *(removed)* — ARM64 linker script.
-
-- **Build script** *(removed)* — Cargo build script for bare-metal aarch64-unknown-none.
-
-- **UART driver** *(removed)* — PL011 UART0 driver, MiniUart (UART1).
-
-- **GPIO driver** *(removed)* — Memory-mapped GPIO pin function and pull control.
-
-- **Timer driver** *(removed)* — ARM generic timer (physical + virtual).
-
-- **MMIO subsystem** *(removed)* — Memory map constants, volatile accessors, ARM64 barriers.
-
-- **SMP support** *(removed)* — Multicore boot, IPI doorbell, Spinlock.
-
-### Added — Makefile AArch64 Targets *(removed)*
-
-- `cross-compile` *(removed)* — Cross-compile for bare-metal aarch64
-- `build-image` *(removed)* — Build kernel8.img from ELF
-- `flash` *(removed)* — Flash to SD card boot partition
-- `debug` *(removed)* — Launch QEMU with GDB stub
-- `run-qemu` *(removed)* — Run in QEMU without debug
+- **SCG → MSG conversion** (1357 lines) — Topological walk producing well-formed Memory State Graphs.
+- **Incremental MSG** (1907 lines) — MSGDelta computation and application.
+- **Invariant aggregator** (1141 lines) — Unified verification pipeline.
 
 ---
 
-## Wave 3: Standard Library & COR Enhancement
+### Wave 3: Standard Library & COR Enhancement
 
-*The third wave completed the standard library primitives, enhanced the COR with profile collection and speculative optimization, and strengthened the deployment system with hot-swap and delta deployment.*
-
-### Added — Standard Library Primitives
-
-- **RelD** (`src/std/src/primitives.rs`) — New Relational Descriptor type with RelKind enum (Containment, Liveness, Aliasing, DataFlow, RegionBound, Ownership), compose, refine, intersect operations, and factory functions for ptr/region_ptr/slice/result/option/numeric.
-
-- **BD triple** — Behavioral Descriptor combining RepD × CapD × RelD with compatible() and refines() methods.
-
-- **HasBD trait** — Unified interface for types that produce a BD.
-
-- **Ptr\<T\>** — VUMA pointer with embedded BD annotation (addr, pointee_bd, offset, null check).
-
-- **RegionPtr\<T\>** — Pointer bound to a memory region with in_bounds/checked_offset.
-
-- **Slice\<T\>** — Pointer + length with BD annotation and subslice.
-
-- **VumaResult\<T, E\>** / **VumaOption\<T\>** — Result and Option types with BD tracking.
-
-- **Range** — Integer range type (start..end) with Contains and Iterate capabilities.
-
-### Added — COR Enhancements
-
-- **PmuCounters** (`src/cor/src/profile.rs`, 978 lines) — Hardware performance counter snapshot: cycle count, instruction count, cache misses, branch misses, IPC, miss rates. Thread-safe ProfileCollector. collect_profile analysis entry point with HotPath identification. 11 tests.
-
-- **SpeculativeExecutor** (`src/cor/src/speculative.rs`, 1487 lines) — Three-phase lifecycle (identify/apply/validate-and-rollback), BranchPredictionTable, SpeculativeInlining, SpeculativeCodeMotion, Snapshot-based rollback. 19 tests.
-
-- **DeploymentManager** (`src/cor/src/deployment.rs`, 1423 lines) — 6-phase HotSwap state machine (Idle→PreparingShadow→AwaitingSafePoint→Swapping→Completed/Failed), DeploymentDelta with block-level binary diffing, PackageVersion with CRC32 checksums, VersionLog with rollback support. 18 tests.
-
-### Added — More Examples
-
-- `examples/channel_demo.vuma` (237 lines) — Channel-based concurrency demo
-- `examples/memory_arena.vuma` (197 lines) — Region-based allocation
-- `examples/aarch64_sensor.vuma` (188 lines) — AArch64 MMIO sensor reading
-- `examples/sorted_map.vuma` (192 lines) — Sorted map data structure
-- `examples/thread_pool.vuma` (209 lines) — Thread pool with work stealing
+- **Standard Library Primitives**: RelD, BD triple, HasBD trait, Ptr\<T\>, RegionPtr\<T\>, Slice\<T\>, VumaResult, VumaOption, Range.
+- **COR Enhancements**: PmuCounters, SpeculativeExecutor, DeploymentManager with hot-swap FSM.
 
 ---
 
-## Wave 4: Parser, Collections, & Benchmarks
+### Wave 4: Parser, Collections, & Benchmarks
 
-*The fourth wave enhanced the parser with comprehensive error recovery, expanded the standard library collections with VumaString and SipHash, and created the benchmark suite.*
-
-### Added — Parser Error Recovery
-
-- **Enhanced ParseErrorKind** (`src/parser/src/error.rs`, 1371 lines) — 8 new error kinds (UnexpectedToken, ExpectedToken, InvalidSyntax, DuplicateDefinition, UndefinedReference, TypeMismatch, RegionError, BDAnnotationError) plus 3 legacy aliases.
-
-- **ErrorRecovery** — 5 strategies: SkipToStatementBoundary, SkipToBlockBoundary, InsertMissingToken, SkipOneToken, AbortItem. Default mapping from ParseErrorKind.
-
-- **ParseResult\<T\>** — Partial-success result type carrying value + accumulated errors for IDE-style "parse as you type" support.
-
-- **Diagnostic/Severity** — Structured diagnostic reporting with error, warning, note levels, source locations, and child annotations.
-
-- **ErrorCollector** — Accumulates multiple diagnostics with deduplication and rendering.
-
-- **"Did you mean?" suggestions** — Levenshtein distance-based keyword suggestions from 43 VUMA keywords. 29 tests.
-
-### Added — Collections & Allocator Enhancement
-
-- **VumaString** (`src/std/src/collections.rs`, 2293 lines) — UTF-8 string type backed by Vec\<u8\> with BD annotations, push/pop/chars iterators. CapD: {Read, Write, Iterate, Compare, Hash, Serialize, Send}.
-
-- **SipHasher13** — SipHash 1-3 hasher (1 compression round, 3 finalization rounds) for DoS-resistant, auditable hashing in HashMap.
-
-- **Iterator types** — VecIter, VecIterMut, VecIntoIter, VumaStringChars, HashMapIter, HashMapKeys, HashMapValues with CapD annotations.
-
-- **BD tracking** — Per-operation BD statistics on Vec (push/pop/get/get_mut counts via Cell\<u64\>) and HashMap (insert/remove/get counts).
-
-- **VumaAllocator enhancements** — tracker() for MSG data snapshots, active_allocations() thread-safe count, AlignedHeap\<N\> for 8-byte aligned test heaps. 39 tests total.
-
-### Added — Benchmark Suite
-
-- **8 benchmark categories** (`src/tests/src/benchmarks.rs`, 1162 lines) with 40+ individual benchmarks:
-  1. SCG construction (99–9999 nodes)
-  2. BD inference (3 sizes × 3 operations)
-  3. MSG construction (60–3000 nodes)
-  4. IVE verification (per-invariant + verification levels + incremental)
-  5. ARM64 codegen (statement + function counts)
-  6. C-equivalent comparison
-  7. Memory usage (5 measurement points × 3 sizes)
-  8. End-to-end pipeline
-
-- **BenchmarkStats** — Aggregated statistics: mean, median, stddev, min, max, P95, CV. CV > 5% flagged as unreliable. 20 tests.
+- **Parser Error Recovery**: 8 error kinds, 5 strategies, ParseResult\<T\>, "Did you mean?" suggestions.
+- **Collections**: VumaString, SipHasher13, iterator types, BD tracking.
+- **Benchmark Suite**: 8 categories with 40+ benchmarks.
 
 ---
 
-## Wave 5: Documentation & Project Packaging
+### Wave 5: Documentation & Project Packaging
 
-*The fifth wave produced comprehensive documentation, formalized the project structure, and created the final packaging artifacts.*
-
-### Added — Documentation
-
-- **Architecture Document** (`docs/architecture.md`, 994 lines) — Complete rewrite with 8 major sections: System Overview, Data Flow Diagram, Crate Dependency Graph, Key Data Structures, Verification Pipeline, Code Generation Pipeline, Runtime Optimization Pipeline, Security Model Overview.
-
-- **Language Reference** (`docs/language-reference.md`, 1101 lines) — Complete VUMA language reference with 11 sections: Lexical Structure, Types/BD, Memory Model, Pointer Operations, Control Flow, Functions, Concurrency, Memory Safety, Standard Library, AArch64 Features, Appendix.
-
-- **CONTRIBUTING.md** (`docs/CONTRIBUTING.md`, 840 lines) — Complete rewrite: build, test, add nodes/verifications/instructions, code review process, PR template.
-
-- **CONVENTIONS.md** (`docs/CONVENTIONS.md`, 796 lines) — Complete rewrite: Rust style, error handling, testing, naming, documentation, git commit format.
-
-- **GLOSSARY.md** (`docs/GLOSSARY.md`, 893 lines) — Complete rewrite: 40+ terms across core, verification, ARM64, and type theory domains.
-
-- **ROADMAP.md** (`docs/ROADMAP.md`, 277 lines) — 5-phase roadmap with milestones, deliverables, success criteria, dependency graph, and risk mitigation.
-
-### Added — Project Packaging
-
-- **MANIFEST.md** — Complete file inventory: all 166 project files with purposes and line counts, summary statistics by category, language, and crate size.
-
-- **README.md** — Project README: overview, architecture, quick start, AArch64 build instructions, test instructions, project structure, key concepts, examples, documentation index, contributing link.
-
-- **CHANGELOG.md** — This file: comprehensive changelog with entries for Waves 1–5.
-
-### Project Statistics (Wave 5 Completion)
-
-| Metric                 | Value     |
-|------------------------|-----------|
-| Total files            | ~166      |
-| Total lines            | ~130,000  |
-| Rust source lines      | ~100,000  |
-| Documentation lines    | ~28,000   |
-| VUMA example lines     | ~1,400    |
-| Workspace crates       | 12        |
-| Formal specifications  | 15        |
-| Example programs       | 10        |
-| Tests                  | 300+      |
-| Benchmarks             | 40+       |
+- **Architecture Document** (994 lines), **Language Reference** (1101 lines)
+- **CONTRIBUTING.md**, **CONVENTIONS.md**, **GLOSSARY.md**, **ROADMAP.md**
+- **MANIFEST.md**, **README.md**, **CHANGELOG.md**
 
 ---
 
 ## Release Notes
 
-### [0.1.0] — 2026-03-05
+### [0.2.0] — 2026-03-05
 
-This is the initial public release of the VUMA framework. It contains the complete architectural foundation: all 12 workspace crates, 15 formal specifications, 10 example programs, a comprehensive benchmark suite, and full documentation. The system can construct SCGs programmatically and from parsed text, infer Behavioral Descriptors, construct Memory State Graphs, verify all five VUMA invariants, generate ARM64 machine code, and boot on AArch64 hardware with UART output.
+This release represents Phase 2 (substantially complete) of the VUMA framework. Major additions include:
+
+- **8-architecture codegen**: x86_64, AArch64, RISC-V 64, ARM32, MIPS64, PPC64, LoongArch64, Wasm32 — all passing SHA256d or individual operation tests
+- **LLM integration**: VumaForLLM API, LSP server, enhanced REPL (`:wasm`, `:backends`, `:check`, `:diagnostics`, `:exports`), structured diagnostics
+- **Wasm32 sandbox**: LLM agents can compile to safe, sandboxed WebAssembly modules
+- **Verification hardening**: Interprocedural analysis, escape analysis, verification cache, property-based testing
+- **Memory safety**: 10 violation types, compile-time checks, runtime bounds checking
+- **Constant-time crypto**: Branchless ct_select/ct_eq across all 8 backends
+- **Module system**: Multi-file compilation with import resolution
+- **Package manager**: Foundation with manifest, resolver, registry
+- **FFI & syscalls**: 19 syscalls across 8 architectures, is_extern flag, architecture-specific relocations
+- **Register allocator**: Loop-aware spill weights, GreedyRegCache, dead-vreg reuse
+- **Diagnostics**: 65 diagnostic codes, error chaining, structured suggestions, 4 output formats
 
 **Known Limitations:**
-- Concurrent verification is limited to single-threaded programs (Phase 3 target)
-- ARM64 codegen does not yet support atomic instructions (Phase 3 target)
-- The COR is not yet integrated end-to-end (Phase 3 target)
-- The parser has known type mismatches in the AST→SCG lowering path
-- Some AArch64 bare-metal modules used inline assembly that required nightly Rust *(removed)*
+- BD inference completeness (M2.3) and doubly-linked list verification (M2.4) remain pending
+- ARM64 atomics and concurrent verification are Phase 3 targets
+- COR end-to-end integration not yet complete
 
-**Next Steps (Phase 2):**
-- Complete BD inference subsumption of the Rust type system
-- Verify doubly-linked list with no unsafe blocks
-- Expand ARM64 codegen for complex programs
-- Incremental verification targeting sub-1-second for single-function edits
+### [0.1.0] — 2026-03-05
+
+This is the initial public release of the VUMA framework. It contains the complete architectural foundation: all 12 workspace crates, 15 formal specifications, 10 example programs, a comprehensive benchmark suite, and full documentation.
+
+**Known Limitations:**
+- Concurrent verification is limited to single-threaded programs
+- ARM64 codegen does not yet support atomic instructions
+- The COR is not yet integrated end-to-end
+- The parser has known type mismatches in the AST→SCG lowering path
 
 ---
 
 ## Worklog
 
-- **2026-03-05 — Task 5-9:** Created comprehensive CHANGELOG.md with entries for Waves 1–5 covering all specifications, source crates, examples, build infrastructure, documentation, and packaging artifacts. Includes project statistics and release notes.
+- **2026-03-05 — Wave 1-5:** Initial release (v0.1.0): All 12 workspace crates, 15 formal specifications, 10 example programs, benchmarks, documentation.
+- **2026-03-05 — Wave 6:** Cross-backend tests, ELF/Wasm validation, parser roundtrip, PPC64 deep audit, shared codegen bug fixes.
+- **2026-03-05 — Wave 7:** Parser hardened for LLM-generated code with type aliases, macro detection, error recovery.
+- **2026-03-05 — Wave 8:** Standard library expanded with crypto, string, math, and I/O modules.
+- **2026-03-05 — Wave 9:** Register allocator improved with loop detection, GreedyRegCache, dead-vreg reuse.
+- **2026-03-05 — Wave 10:** Multi-file compilation with import resolution and ModuleResolver.
+- **2026-03-05 — Wave 11-12:** Verification pipeline hardened with VumaCompiler.verify(), property-based testing.
+- **2026-03-05 — Wave 13-14:** Documentation overhaul, REPL enhancements (`:wasm`, `:backends`, `:check`, `:diagnostics`, `:exports`).
+- **2026-03-05 — Wave 15:** Comprehensive structured error reporting (65 diagnostic codes, error chaining, suggestions).
+- **2026-03-05 — Wave 16:** CI build matrix for all 8 ISA targets.
+- **2026-03-05 — Wave 17-18:** Memory safety analyzer, performance benchmarking suite.
+- **2026-03-05 — Wave 19-20:** ABI conformance testing (27 tests), DWARF debug info enhancements.
+- **2026-03-05 — Wave 21-22:** Linker hardening (3 LOAD segments, W^X), VumaForLLM API layer.
+- **2026-03-05 — Wave 23:** Package manager foundation.
+- **2026-03-05 — Wave 24:** FFI and syscalls (19 syscalls × 8 architectures, relocations).
+- **2026-03-05 — Wave 25-27:** Security hardening, codegen quality improvements, test infrastructure.
+- **2026-03-05 — Wave 28:** Constant-time crypto operations across all 8 backends.
+- **2026-03-05 — Wave 29-31:** Final hardening, documentation updates, release preparation.
+- **2026-03-05 — Wave 32:** Release preparation: Cargo.toml v0.2.0, CHANGELOG, README, ROADMAP, RELEASES.md.

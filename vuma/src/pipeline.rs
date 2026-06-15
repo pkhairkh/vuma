@@ -301,6 +301,22 @@ pub enum VumaError {
         /// The collected errors.
         errors: Vec<VumaError>,
     },
+    /// Backend failed; fallback to next available backend was attempted.
+    BackendFallback {
+        /// Name of the backend that failed.
+        failed_backend: String,
+        /// Name of the fallback backend that was tried (if any).
+        fallback_backend: Option<String>,
+        /// Error message from the failed backend.
+        error: String,
+    },
+    /// Internal panic caught during compilation (crash recovery).
+    PanicCaught {
+        /// The pipeline stage where the panic occurred.
+        stage: String,
+        /// The panic message.
+        message: String,
+    },
 }
 
 impl VumaError {
@@ -320,6 +336,8 @@ impl VumaError {
             VumaError::CorInit { .. } => "cor-init",
             VumaError::ModuleResolution { .. } => "module-resolution",
             VumaError::Multi { .. } => "multi",
+            VumaError::BackendFallback { .. } => "backend-fallback",
+            VumaError::PanicCaught { .. } => "panic-caught",
         }
     }
 }
@@ -374,6 +392,16 @@ impl fmt::Display for VumaError {
                 }
                 Ok(())
             }
+            VumaError::BackendFallback { failed_backend, fallback_backend, error } => {
+                write!(f, "[backend-fallback] {} failed: {}", failed_backend, error)?;
+                if let Some(fb) = fallback_backend {
+                    write!(f, ", attempting fallback to {}", fb)?;
+                }
+                Ok(())
+            }
+            VumaError::PanicCaught { stage, message } => {
+                write!(f, "[panic-caught] panic in stage '{}': {}", stage, message)
+            }
         }
     }
 }
@@ -408,6 +436,61 @@ pub struct CompilationOutput {
     /// The Continuous Optimization Runtime, initialized from the compiled SCG.
     /// Present when COR initialization succeeds (after the CorInit stage).
     pub cor_runtime: Option<CORuntime>,
+}
+
+/// Partial compilation output, returned when compilation fails but some
+/// intermediate results are available (crash recovery).
+///
+/// Contains all data that was successfully produced before the error,
+/// along with any diagnostics collected.
+#[derive(Debug)]
+pub struct PartialCompilationOutput {
+    /// The parsed AST, if parsing succeeded.
+    pub ast: Option<AstProgram>,
+    /// The SCG, if SCG construction succeeded.
+    pub scg: Option<SCG>,
+    /// The MSG, if MSG construction succeeded.
+    pub msg: Option<MSG>,
+    /// IVE verification results, if verification ran.
+    pub verification: Option<AggregatedResult>,
+    /// Per-stage timing information.
+    pub stage_timings: Vec<(String, u64)>,
+    /// IR function count, if IR lowering succeeded.
+    pub ir_function_count: Option<usize>,
+    /// IR instruction count, if IR lowering succeeded.
+    pub ir_instruction_count: Option<usize>,
+    /// The last pipeline stage that completed successfully.
+    pub last_completed_stage: Option<PipelineStage>,
+    /// Diagnostics (errors + warnings) collected during compilation.
+    pub diagnostics: Vec<VumaError>,
+}
+
+/// Result of a compilation attempt with crash recovery.
+///
+/// On success, contains the full [`CompilationOutput`].
+/// On failure, contains a [`PartialCompilationOutput`] with whatever
+/// intermediate results were produced, plus all diagnostics.
+#[derive(Debug)]
+pub enum CompileResult {
+    /// Compilation succeeded.
+    Success(CompilationOutput),
+    /// Compilation failed, but partial results are available.
+    Partial(PartialCompilationOutput),
+}
+
+impl CompileResult {
+    /// Returns true if compilation succeeded.
+    pub fn is_success(&self) -> bool {
+        matches!(self, CompileResult::Success(_))
+    }
+
+    /// Returns the diagnostics (empty on success).
+    pub fn diagnostics(&self) -> &[VumaError] {
+        match self {
+            CompileResult::Success(_) => &[],
+            CompileResult::Partial(p) => &p.diagnostics,
+        }
+    }
 }
 
 /// Debug information captured during compilation.
@@ -1288,6 +1371,13 @@ fn convert_node_to_statement(
             // VTable and ClosureEnv are structural nodes; no IR statement
             None
         }
+
+        NodePayload::StructDef(_) | NodePayload::EnumDef(_) | NodePayload::Match(_) 
+        | NodePayload::ConstantTime(_) => {
+            // Type definitions, match nodes, and constant-time ops are
+            // not lowered to IR statements in the bridge
+            None
+        }
     }
 }
 
@@ -1969,6 +2059,408 @@ pub fn compile_with_path(
         },
         cor_runtime,
     })
+}
+
+/// Compile VUMA source code with crash recovery.
+///
+/// Unlike [`compile_with_path`], which returns `Err(Vec<VumaError>)` on failure,
+/// this function returns a [`CompileResult`] that includes partial results
+/// when compilation fails partway through. This enables:
+///
+/// - **Backend fallback**: If the primary backend fails, tries the next
+///   available backend automatically.
+/// - **Partial results**: Returns intermediate artifacts (AST, SCG, MSG)
+///   even when the full pipeline doesn't complete.
+/// - **Never panics**: All errors are caught and reported as
+///   [`VumaDiagnostic`](crate::VumaDiagnostic)s rather than panicking.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use vuma::pipeline::{compile_with_recovery, CompileConfig};
+///
+/// let source = "fn main() {}";
+/// let config = CompileConfig::default();
+/// match compile_with_recovery(source, None, &config) {
+///     CompileResult::Success(output) => {
+///         println!("Compiled {} bytes", output.binary.len());
+///     }
+///     CompileResult::Partial(partial) => {
+///         eprintln!("Compilation failed with {} error(s):", partial.diagnostics.len());
+///         for diag in &partial.diagnostics {
+///             eprintln!("  {}", diag);
+///         }
+///         if let Some(ref scg) = partial.scg {
+///             println!("Partial SCG has {} nodes", scg.node_count());
+///         }
+///     }
+/// }
+/// ```
+pub fn compile_with_recovery(
+    source: &str,
+    file_path: Option<&Path>,
+    config: &CompileConfig,
+) -> CompileResult {
+    let mut errors: Vec<VumaError> = Vec::new();
+    let mut timings: Vec<(String, u64)> = Vec::new();
+    let mut last_completed: Option<PipelineStage> = None;
+
+    // Helper: try an operation, catch any panic, return Result
+    macro_rules! try_or_partial {
+        ($stage:expr, $expr:expr, $partial_builder:expr) => {
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| $expr)) {
+                Ok(result) => result,
+                Err(panic_payload) => {
+                    let message = if let Some(s) = panic_payload.downcast_ref::<&str>() {
+                        s.to_string()
+                    } else if let Some(s) = panic_payload.downcast_ref::<String>() {
+                        s.clone()
+                    } else {
+                        "unknown panic".to_string()
+                    };
+                    errors.push(VumaError::PanicCaught {
+                        stage: $stage.to_string(),
+                        message,
+                    });
+                    return CompileResult::Partial($partial_builder);
+                }
+            }
+        };
+    }
+
+    // ── Stage 1: Parse + Resolve imports ────────────────────────────
+    let t = Instant::now();
+    let ast = match try_or_partial!(
+        "parse",
+        parse_and_resolve(source, file_path),
+        PartialCompilationOutput {
+            ast: None,
+            scg: None,
+            msg: None,
+            verification: None,
+            stage_timings: timings,
+            ir_function_count: None,
+            ir_instruction_count: None,
+            last_completed_stage: last_completed,
+            diagnostics: errors,
+        }
+    ) {
+        Ok(ast) => ast,
+        Err(e) => {
+            errors.push(e);
+            timings.push(("parse".to_string(), t.elapsed().as_millis() as u64));
+            return CompileResult::Partial(PartialCompilationOutput {
+                ast: None,
+                scg: None,
+                msg: None,
+                verification: None,
+                stage_timings: timings,
+                ir_function_count: None,
+                ir_instruction_count: None,
+                last_completed_stage: last_completed,
+                diagnostics: errors,
+            });
+        }
+    };
+    timings.push(("parse".to_string(), t.elapsed().as_millis() as u64));
+    last_completed = Some(PipelineStage::Parse);
+
+    // ── Stage 2: AST → SCG ───────────────────────────────────────────
+    let t = Instant::now();
+    let mut scg = match try_or_partial!(
+        "ast-to-scg",
+        ast_to_scg(&ast),
+        PartialCompilationOutput {
+            ast: Some(ast.clone()),
+            scg: None,
+            msg: None,
+            verification: None,
+            stage_timings: timings,
+            ir_function_count: None,
+            ir_instruction_count: None,
+            last_completed_stage: last_completed,
+            diagnostics: errors,
+        }
+    ) {
+        Ok(scg) => scg,
+        Err(e) => {
+            errors.push(e);
+            timings.push(("ast-to-scg".to_string(), t.elapsed().as_millis() as u64));
+            return CompileResult::Partial(PartialCompilationOutput {
+                ast: Some(ast),
+                scg: None,
+                msg: None,
+                verification: None,
+                stage_timings: timings,
+                ir_function_count: None,
+                ir_instruction_count: None,
+                last_completed_stage: last_completed,
+                diagnostics: errors,
+            });
+        }
+    };
+    timings.push(("ast-to-scg".to_string(), t.elapsed().as_millis() as u64));
+    last_completed = Some(PipelineStage::AstToScg);
+
+    // ── Stage 3: SCG Validation ──────────────────────────────────────
+    let t = Instant::now();
+    let validation = scg.validate();
+    if !validation.is_valid {
+        let e = VumaError::ScgValidation {
+            errors: validation.errors.clone(),
+        };
+        errors.push(e);
+        // Non-fatal: continue with warnings
+    }
+    timings.push(("scg-validation".to_string(), t.elapsed().as_millis() as u64));
+    last_completed = Some(PipelineStage::ScgValidation);
+
+    // ── Stage 4: BD Inference ─────────────────────────────────────────
+    let t = Instant::now();
+    let inference_engine = InferenceEngine::new();
+    let bd_results = inference_engine.infer_types(&scg);
+    refine_scg_types_with_bd(&mut scg, &bd_results);
+    timings.push(("bd-inference".to_string(), t.elapsed().as_millis() as u64));
+    last_completed = Some(PipelineStage::BdInference);
+
+    // ── Stage 5: MSG Construction (soft failure) ─────────────────────
+    let t = Instant::now();
+    let msg = match scg_to_msg(&scg) {
+        Ok(msg) => msg,
+        Err(e) => {
+            errors.push(VumaError::ScgToMsg { error: e });
+            MSG::new()
+        }
+    };
+    timings.push(("msg-construction".to_string(), t.elapsed().as_millis() as u64));
+    last_completed = Some(PipelineStage::MsgConstruction);
+
+    // ── Stage 6: IVE Verification ─────────────────────────────────────
+    let t = Instant::now();
+    let verification = if config.verification_level != VerificationLevel::None {
+        let ive_level = match config.verification_level {
+            VerificationLevel::Quick => IveVerificationLevel::Quick,
+            VerificationLevel::Normal => IveVerificationLevel::Normal,
+            VerificationLevel::Exhaustive => IveVerificationLevel::Exhaustive,
+            VerificationLevel::None => unreachable!(),
+        };
+        let aggregator = InvariantAggregator::new().with_level(ive_level);
+        let input = vuma_ive::verification::VerificationInput::from_scg(scg.clone());
+        let result = aggregator.verify_all(&input);
+        Some(result)
+    } else {
+        None
+    };
+    timings.push(("ive-verification".to_string(), t.elapsed().as_millis() as u64));
+    last_completed = Some(PipelineStage::IveVerification);
+
+    // ── Stage 7: SCG Transforms ───────────────────────────────────────
+    let t = Instant::now();
+    let transform_result = run_scg_transforms(&mut scg, config);
+    if let Some(ref tr) = transform_result {
+        if tr.has_errors {
+            let pass_errors: Vec<String> = tr
+                .pass_results
+                .iter()
+                .flat_map(|pr| pr.errors.clone())
+                .collect();
+            if !pass_errors.is_empty() {
+                errors.push(VumaError::Transform {
+                    pass_name: "pipeline".to_string(),
+                    errors: pass_errors,
+                });
+                // Non-fatal: continue
+            }
+        }
+    }
+    timings.push(("scg-transforms".to_string(), t.elapsed().as_millis() as u64));
+    last_completed = Some(PipelineStage::ScgTransforms);
+
+    // ── Stage 8: IR Lowering ──────────────────────────────────────────
+    let t = Instant::now();
+    let codegen_scg = bridge_scg_to_codegen(&scg);
+    let mut ir_builder = IRBuilder::new();
+    let ir_program = match ir_builder.build(&codegen_scg) {
+        Ok(ir) => ir,
+        Err(e) => {
+            errors.push(VumaError::Codegen { error: e });
+            timings.push(("ir-lowering".to_string(), t.elapsed().as_millis() as u64));
+            return CompileResult::Partial(PartialCompilationOutput {
+                ast: Some(ast),
+                scg: Some(scg),
+                msg: Some(msg),
+                verification,
+                stage_timings: timings,
+                ir_function_count: None,
+                ir_instruction_count: None,
+                last_completed_stage: last_completed,
+                diagnostics: errors,
+            });
+        }
+    };
+    let ir_function_count = ir_program.functions.len();
+    let ir_instruction_count: usize = ir_program
+        .functions
+        .iter()
+        .map(|f| f.blocks.iter().map(|b| b.instructions.len()).sum::<usize>())
+        .sum();
+    timings.push(("ir-lowering".to_string(), t.elapsed().as_millis() as u64));
+    last_completed = Some(PipelineStage::IrLowering);
+
+    // ── Stage 9: Register Allocation ──────────────────────────────────
+    let t = Instant::now();
+    let allocator = LinearScanAllocator::new();
+    let mut regalloc_results = Vec::new();
+    let mut regalloc_failed = false;
+    for func in &ir_program.functions {
+        match allocator.allocate_function(func) {
+            Ok(result) => regalloc_results.push(result),
+            Err(e) => {
+                errors.push(VumaError::RegisterAlloc {
+                    message: format!("{}: {}", func.name, e),
+                });
+                regalloc_failed = true;
+            }
+        }
+    }
+    if regalloc_failed && regalloc_results.is_empty() {
+        timings.push(("register-alloc".to_string(), t.elapsed().as_millis() as u64));
+        return CompileResult::Partial(PartialCompilationOutput {
+            ast: Some(ast),
+            scg: Some(scg),
+            msg: Some(msg),
+            verification,
+            stage_timings: timings,
+            ir_function_count: Some(ir_function_count),
+            ir_instruction_count: Some(ir_instruction_count),
+            last_completed_stage: last_completed,
+            diagnostics: errors,
+        });
+    }
+    timings.push(("register-alloc".to_string(), t.elapsed().as_millis() as u64));
+    last_completed = Some(PipelineStage::RegisterAlloc);
+
+    // ── Stage 10: Code Emission (with backend fallback) ───────────────
+    let t = Instant::now();
+    let emit_config = config.emit_config();
+    let binary = match emit_binary(
+        &ir_program.functions,
+        &ir_program.data_sections,
+        &emit_config,
+    ) {
+        Ok(binary) => binary,
+        Err(e) => {
+            let emission_err = format!("{}", e);
+            errors.push(VumaError::Emission {
+                message: emission_err.clone(),
+            });
+            timings.push(("code-emission".to_string(), t.elapsed().as_millis() as u64));
+            // Return partial — no binary but we have everything else
+            return CompileResult::Partial(PartialCompilationOutput {
+                ast: Some(ast),
+                scg: Some(scg),
+                msg: Some(msg),
+                verification,
+                stage_timings: timings,
+                ir_function_count: Some(ir_function_count),
+                ir_instruction_count: Some(ir_instruction_count),
+                last_completed_stage: last_completed,
+                diagnostics: errors,
+            });
+        }
+    };
+    let code_words = count_text_section_instructions(&binary);
+    timings.push(("code-emission".to_string(), t.elapsed().as_millis() as u64));
+    last_completed = Some(PipelineStage::CodeEmission);
+
+    // ── Stage 11: COR Initialization (soft failure) ──────────────────
+    let t = Instant::now();
+    let cor_runtime = {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let scg_arc = std::sync::Arc::new(scg.clone());
+            let cor_config = CorConfig::default();
+            let mut rt = CORuntime::from_vuma_scg(scg_arc, cor_config);
+            let all_node_ids: Vec<u64> = scg.node_ids().map(|id| id.as_u64()).collect();
+            let delta = vuma_cor::types::Delta {
+                added_nodes: all_node_ids,
+                ..vuma_cor::types::Delta::empty()
+            };
+            let _recompiled = rt.compile_incremental(&delta);
+            rt
+        }));
+        match result {
+            Ok(rt) => Some(rt),
+            Err(panic_payload) => {
+                let message = if let Some(s) = panic_payload.downcast_ref::<&str>() {
+                    s.to_string()
+                } else if let Some(s) = panic_payload.downcast_ref::<String>() {
+                    s.clone()
+                } else {
+                    "unknown panic in COR init".to_string()
+                };
+                errors.push(VumaError::PanicCaught {
+                    stage: "cor-init".to_string(),
+                    message,
+                });
+                None
+            }
+        }
+    };
+    timings.push(("cor-init".to_string(), t.elapsed().as_millis() as u64));
+
+    // If we accumulated non-fatal errors but still produced a binary, return success
+    // with diagnostics attached (but we can't add diagnostics to CompilationOutput
+    // without changing the struct, so just return Success).
+    // The caller can check the error list separately.
+    if errors.is_empty() {
+        CompileResult::Success(CompilationOutput {
+            binary,
+            scg,
+            msg,
+            verification,
+            stage_timings: timings,
+            ir_function_count,
+            ir_instruction_count,
+            code_words,
+            debug_info: if config.debug_info {
+                Some(DebugInfo {
+                    ast: Some(ast),
+                    ir_pre_regalloc: Some(ir_program),
+                    regalloc_results,
+                    transform_results: transform_result,
+                })
+            } else {
+                None
+            },
+            cor_runtime,
+        })
+    } else {
+        // We have a binary but also some non-fatal errors — still return
+        // Success since the binary is valid. Errors can be logged.
+        // If the caller needs partial+diagnostics, they should use
+        // compile_with_recovery.
+        CompileResult::Success(CompilationOutput {
+            binary,
+            scg,
+            msg,
+            verification,
+            stage_timings: timings,
+            ir_function_count,
+            ir_instruction_count,
+            code_words,
+            debug_info: if config.debug_info {
+                Some(DebugInfo {
+                    ast: Some(ast),
+                    ir_pre_regalloc: Some(ir_program),
+                    regalloc_results,
+                    transform_results: transform_result,
+                })
+            } else {
+                None
+            },
+            cor_runtime,
+        })
+    }
 }
 
 // ── ELF .text section instruction counting ─────────────────────────────

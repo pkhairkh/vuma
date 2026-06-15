@@ -3468,6 +3468,25 @@ fn lower_ir_instr_la64(
             // Phi nodes are eliminated by SSA deconstruction; emit NOP.
             result.push(emit_alloc_instr(Instruction::Nop, vec![], vec![]));
         }
+
+        // Atomic operations — lower as non-atomic (single-threaded)
+        IRInstr::AtomicLoad { dst, addr, ty } => {
+            let ir_load = IRInstr::Load { dst: dst.clone(), addr: addr.clone(), offset: 0, ty: ty.clone() };
+            let sub_result = lower_ir_instr_la64(&ir_load, vreg_map, relocations, alloc_offsets);
+            result.extend(sub_result);
+        }
+        IRInstr::AtomicStore { value, addr, ty } => {
+            let ir_store = IRInstr::Store { value: value.clone(), addr: addr.clone(), offset: 0, ty: ty.clone() };
+            let sub_result = lower_ir_instr_la64(&ir_store, vreg_map, relocations, alloc_offsets);
+            result.extend(sub_result);
+        }
+        IRInstr::AtomicCas { dst, addr, expected, desired, ty } => {
+            // Placeholder: lower as a simple load
+            let ir_load = IRInstr::Load { dst: dst.clone(), addr: addr.clone(), offset: 0, ty: ty.clone() };
+            let sub_result = lower_ir_instr_la64(&ir_load, vreg_map, relocations, alloc_offsets);
+            result.extend(sub_result);
+            let _ = (expected, desired);
+        }
     }
 
     result

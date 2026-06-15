@@ -496,7 +496,11 @@ impl MsgBuilder {
             ScgNodeType::Control
             | ScgNodeType::Phantom
             | ScgNodeType::VTable
-            | ScgNodeType::ClosureEnv => ScgNodeMapping::None,
+            | ScgNodeType::ClosureEnv
+            | ScgNodeType::StructDef
+            | ScgNodeType::EnumDef
+            | ScgNodeType::Match
+            | ScgNodeType::ConstantTime => ScgNodeMapping::None,
         };
 
         self.node_map.insert(node_id, result);

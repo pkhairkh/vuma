@@ -615,6 +615,9 @@ impl MemorySafetyAnalyzer {
                 ScgStatement::Computation(_) => {}
                 ScgStatement::UnaryComputation(_) => {}
                 ScgStatement::Cast(_) => {}
+                ScgStatement::ConstantTime(_) => {}
+                ScgStatement::StructAccess(_) => {}
+                ScgStatement::EnumAccess(_) => {}
             }
         }
     }

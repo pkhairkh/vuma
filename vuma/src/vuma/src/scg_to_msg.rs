@@ -353,7 +353,11 @@ fn process_node(
         | NodeType::Control
         | NodeType::Phantom
         | NodeType::VTable
-        | NodeType::ClosureEnv => {
+        | NodeType::ClosureEnv
+        | NodeType::StructDef
+        | NodeType::EnumDef
+        | NodeType::Match
+        | NodeType::ConstantTime => {
             // These node types do not directly produce MSG constructs.
             // However, if they participate in derivation chains via Derivation
             // edges, we create a passthrough derivation.

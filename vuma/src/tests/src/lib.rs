@@ -88,6 +88,8 @@ pub mod cross_backend;
 pub mod property_tests;
 #[cfg(test)]
 pub mod abi_conformance;
+#[cfg(test)]
+pub mod final_integration;
 
 // Re-export the helper macros from the framework module.
 // Note: #[macro_export] macros are already at the crate root, so no

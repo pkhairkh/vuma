@@ -2822,6 +2822,58 @@ fn mips64_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, 
 
                 // ── Phi ──
                 IRInstr::Phi { .. } => { /* no-op */ }
+
+                // ── Atomic operations (lowered as non-atomic) ──
+                IRInstr::AtomicLoad { dst, addr, ty } => {
+                    let ir_load = IRInstr::Load { dst: dst.clone(), addr: addr.clone(), offset: 0, ty: ty.clone() };
+                    let sub_code: Vec<u8> = match &ir_load {
+                        IRInstr::Load { dst: ldst, addr: laddr, offset: loff, ty: lty } => {
+                            let dst_id = ldst.as_register().unwrap_or(0);
+                            let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+                            let mut c = Vec::new();
+                            c.extend(ss_load_value(laddr, &vreg_stack_slots, Gpr::T0));
+                            match lty {
+                                IRType::I8 | IRType::U8 => { c.extend_from_slice(&Instruction::Lbu { rt: Gpr::V0, base: Gpr::T0, offset: *loff }.encode()); }
+                                IRType::I16 | IRType::U16 => { c.extend_from_slice(&Instruction::Lhu { rt: Gpr::V0, base: Gpr::T0, offset: *loff }.encode()); }
+                                IRType::I32 | IRType::U32 => { c.extend_from_slice(&Instruction::Lwu { rt: Gpr::V0, base: Gpr::T0, offset: *loff }.encode()); }
+                                _ => { c.extend_from_slice(&Instruction::Ld { rt: Gpr::V0, base: Gpr::T0, offset: *loff }.encode()); }
+                            }
+                            c.extend(ss_sd(Gpr::V0, dst_off));
+                            c
+                        }
+                        _ => Vec::new(),
+                    };
+                    code.extend(sub_code);
+                }
+                IRInstr::AtomicStore { value, addr, ty } => {
+                    let ir_store = IRInstr::Store { value: value.clone(), addr: addr.clone(), offset: 0, ty: ty.clone() };
+                    let sub_code: Vec<u8> = match &ir_store {
+                        IRInstr::Store { value: sval, addr: saddr, offset: soff, ty: sty } => {
+                            let mut c = Vec::new();
+                            c.extend(ss_load_value(saddr, &vreg_stack_slots, Gpr::T0));
+                            c.extend(ss_load_value(sval, &vreg_stack_slots, Gpr::T1));
+                            match sty {
+                                IRType::I8 | IRType::U8 => { c.extend_from_slice(&Instruction::Sb { rt: Gpr::T1, base: Gpr::T0, offset: *soff }.encode()); }
+                                IRType::I16 | IRType::U16 => { c.extend_from_slice(&Instruction::Sh { rt: Gpr::T1, base: Gpr::T0, offset: *soff }.encode()); }
+                                IRType::I32 | IRType::U32 => { c.extend_from_slice(&Instruction::Sw { rt: Gpr::T1, base: Gpr::T0, offset: *soff }.encode()); }
+                                _ => { c.extend_from_slice(&Instruction::Sd { rt: Gpr::T1, base: Gpr::T0, offset: *soff }.encode()); }
+                            }
+                            c
+                        }
+                        _ => Vec::new(),
+                    };
+                    code.extend(sub_code);
+                }
+                IRInstr::AtomicCas { dst, addr, expected: _, desired: _, ty } => {
+                    // Placeholder: simple load
+                    let dst_id = dst.as_register().unwrap_or(0);
+                    let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+                    let mut c = Vec::new();
+                    c.extend(ss_load_value(addr, &vreg_stack_slots, Gpr::T0));
+                    c.extend_from_slice(&Instruction::Ld { rt: Gpr::V0, base: Gpr::T0, offset: 0 }.encode());
+                    c.extend(ss_sd(Gpr::V0, dst_off));
+                    code.extend(c);
+                }
             }
         }
     }

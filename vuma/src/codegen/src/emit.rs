@@ -1358,7 +1358,8 @@ impl Emitter {
                 let rn = self.resolve_reg(addr)?;
                 let rs = Register::X9; // scratch for status
                 let retry_label = format!("__atomic_store_retry_{}", self.code.len());
-                self.emit_label(&retry_label)?;
+                // Record label position
+                self.label_offsets.insert(retry_label.clone(), self.code.len());
                 self.emit_instruction(Instruction::STLXR { rs, rt, rn })?;
                 // CBNZ rs, retry — if store failed, retry
                 let fixup = self.code.len();
@@ -1378,7 +1379,8 @@ impl Emitter {
                 let retry_label = format!("__atomic_cas_retry_{}", self.code.len());
                 let done_label = format!("__atomic_cas_done_{}", self.code.len());
 
-                self.emit_label(&retry_label)?;
+                // Record retry label position
+                self.label_offsets.insert(retry_label.clone(), self.code.len());
                 // LDAXR scratch_cmp, [addr] — load current value
                 self.emit_instruction(Instruction::LDAXR { rt: scratch_cmp, rn })?;
                 // CMP scratch_cmp, expected — SUB XZR, scratch_cmp, expected
@@ -1390,7 +1392,7 @@ impl Emitter {
                 // B.NE done — if not equal, skip store
                 let fixup_ne = self.code.len();
                 self.fixups.push((fixup_ne, done_label.clone(), BranchFormat::Cond19));
-                self.emit_instruction(Instruction::Bcond {
+                self.emit_instruction(Instruction::BCond {
                     cond: crate::arm64::Condition::NE,
                     offset: 0,
                 })?;
@@ -1400,7 +1402,8 @@ impl Emitter {
                 let fixup_retry = self.code.len();
                 self.fixups.push((fixup_retry, retry_label, BranchFormat::Cond19));
                 self.emit_instruction(Instruction::CBNZ { rt: rs, offset: 0 })?;
-                self.emit_label(&done_label)?;
+                // Record done label position
+                self.label_offsets.insert(done_label.clone(), self.code.len());
                 // CSEL rd, re, scratch_cmp, EQ
                 // If EQ (match succeeded), rd = re (expected); else rd = scratch_cmp (current value)
                 self.emit_instruction(Instruction::CSEL {
@@ -1451,7 +1454,7 @@ impl Emitter {
                 let rn = self.resolve_reg(lhs)?;
                 let rm = self.resolve_reg(rhs)?;
                 // EOR rd, rn, rm (XOR)
-                self.emit_instruction(Instruction::EOR { rd, rn, rm: Operand::Reg { reg: rm, shift: None } })?;
+                self.emit_instruction(Instruction::EOR { rd, rn, rm })?;
                 // CMP rd, #0 + CSET rd, EQ
                 self.emit_instruction(Instruction::SUB {
                     rd: Register::XZR,

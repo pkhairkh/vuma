@@ -90,6 +90,70 @@ A bounded multi-producer single-consumer (MPSC) channel with sender cloning, CAS
 
 ---
 
+### 10. [fibonacci.vuma](fibonacci.vuma) — Recursive and iterative Fibonacci
+
+Computes Fibonacci numbers using both recursive and iterative approaches, then verifies they agree on fib(10)=55. Returns fib(30)=832040 computed iteratively. The recursive version is included for correctness verification but would be too slow for large n, illustrating the importance of algorithmic choice.
+
+**Features demonstrated:** Recursive functions, iterative loops with accumulator pattern, u32 overflow masking, result verification, pure computation
+
+---
+
+### 11. [quicksort.vuma](quicksort.vuma) — In-place quicksort
+
+Implements the classic quicksort algorithm using the Lomuto partition scheme with in-place swapping. Array elements are stored as u64 with 8-byte stride in allocated memory. Returns the median of a 10-element test array.
+
+**Features demonstrated:** Pointer arithmetic for array indexing, in-place mutation, recursive partition-and-sort, `arr_read`/`arr_write`/`arr_swap` helper pattern, allocate/free
+
+---
+
+### 12. [linked_list.vuma](linked_list.vuma) — Singly-linked list
+
+A singly-linked list with head-only insertion (prepend), length computation, sum traversal, and iterative free. Simpler than the doubly-linked list showcase, this example focuses on the fundamental cons-cell pattern that underpins all linked data structures.
+
+**Features demonstrated:** `struct` with `Address` field, null pointer sentinel, prepend/cons pattern, traversal with `while` loop, iterative cleanup, IVE liveness and cleanup verification
+
+---
+
+### 13. [hex_dump.vuma](hex_dump.vuma) — Hex dump utility
+
+Reads bytes from memory and converts each to its two-digit hexadecimal ASCII representation. Implements the nybble-to-hex lookup pattern used in debuggers, hex editors, and network analyzers. Returns an XOR checksum of the hex output.
+
+**Features demonstrated:** Byte-level pointer arithmetic, nybble extraction with shifts and masks, conditional character mapping (0-9 vs A-F), double-width output buffer, pure computation with checksum
+
+---
+
+### 14. [crc32.vuma](crc32.vuma) — CRC32 checksum
+
+Implements the standard CRC32 algorithm (IEEE 802.3 / ITU-T V.42) using a 256-entry lookup table with polynomial 0xEDB88320. Computes the CRC32 of "123456789" and verifies against the known check value 0xCBF43926. Returns the low byte (0x26 = 38) as exit code.
+
+**Features demonstrated:** Table-driven computation, nested loops (table generation: 256×8), little-endian u32 read/write, bitwise XOR/shift operations, u32 masking, standard algorithm verification
+
+---
+
+### 15. [bsearch.vuma](bsearch.vuma) — Binary search
+
+Classic binary search on a sorted array of u64 values stored in allocated memory. Demonstrates O(log n) search with three-way comparison (less, equal, greater). Returns the index of the target value (7 for target=42) or a sentinel if not found.
+
+**Features demonstrated:** Sorted array access with pointer arithmetic, while-loop with midpoint computation, three-way branching, sentinel return value, allocate/free
+
+---
+
+### 16. [matrix.vuma](matrix.vuma) — 4×4 matrix multiplication
+
+Multiplies two 4×4 matrices of u32 values using the O(n³) triple-loop algorithm. Matrices are stored in row-major order with 4-byte stride. Demonstrates that multiplying by the identity matrix returns the original matrix (XOR checksum of 1..16 = 0).
+
+**Features demonstrated:** 2D data layout via 1D memory, triple-nested while loops, row-major index computation, u32 arithmetic with overflow masking, allocate/free for multiple buffers
+
+---
+
+### 17. [base64_encode.vuma](base64_encode.vuma) — Base64 encoding
+
+Implements RFC 4648 Base64 encoding, converting every 3 input bytes into 4 Base64 characters with proper padding. Encodes "Hello, World!" (13 bytes) → "SGVsbG8sIFdvcmxkIQ==" (20 bytes). Returns the output length as exit code.
+
+**Features demonstrated:** 6-bit group extraction from 8-bit bytes, alphabet lookup function, padding logic for non-multiple-of-3 input, multi-return value encoding (length + checksum packed into u64), pointer arithmetic for input/output buffers
+
+---
+
 ## Running Examples
 
 ```bash
@@ -108,19 +172,29 @@ vuma flash --target bare examples/gpio_blink.vuma
 ### Beginner
 1. Start with **hello_memory.vuma** to understand the four basic operations
 2. Read **doubly_linked_list.vuma** to see how VUMA handles what Rust can't
+3. Try **fibonacci.vuma** for recursive and iterative patterns
+4. Explore **linked_list.vuma** for singly-linked list fundamentals
 
 ### Intermediate
-3. Study **arena_allocator.vuma** for region-based memory management
-4. Explore **sorted_map.vuma** for tree data structures with rotations
-5. Learn **memory_arena.vuma** for advanced arena patterns with scopes
+5. Study **arena_allocator.vuma** for region-based memory management
+6. Explore **sorted_map.vuma** for tree data structures with rotations
+7. Learn **memory_arena.vuma** for advanced arena patterns with scopes
+8. Tackle **quicksort.vuma** for in-place array algorithms
+9. Try **bsearch.vuma** for O(log n) search patterns
+
+### Algorithms & Encoding
+10. Study **hex_dump.vuma** for byte-to-hex conversion
+11. Explore **crc32.vuma** for table-driven checksum algorithms
+12. Learn **matrix.vuma** for 2D data with nested loops
+13. Master **base64_encode.vuma** for bit-level encoding algorithms
 
 ### Concurrency
-6. Tackle **lock_free_queue.vuma** for atomic SPSC concurrency
-7. Study **thread_pool.vuma** for mutex/condvar synchronization patterns
-8. Master **channel_demo.vuma** for MPSC message-passing concurrency
+14. Tackle **lock_free_queue.vuma** for atomic SPSC concurrency
+15. Study **thread_pool.vuma** for mutex/condvar synchronization patterns
+16. Master **channel_demo.vuma** for MPSC message-passing concurrency
 
 ### Embedded / Hardware
-9. Start with **gpio_blink.vuma** for basic hardware access patterns
+17. Start with **gpio_blink.vuma** for basic hardware access patterns
 
 ## IVE Verification Summary
 
@@ -137,5 +211,13 @@ Every example in this directory passes all 5 IVE invariants:
 | thread_pool | ✓ | ✓ | ✓ | ✓ | ✓ |
 | memory_arena | ✓ | ✓ | ✓ | ✓ | ✓ |
 | channel_demo | ✓ | ✓ | ✓ | ✓ | ✓ |
+| fibonacci | ✓ | ✓ | ✓ | ✓ | ✓ |
+| quicksort | ✓ | ✓ | ✓ | ✓ | ✓ |
+| linked_list | ✓ | ✓ | ✓ | ✓ | ✓ |
+| hex_dump | ✓ | ✓ | ✓ | ✓ | ✓ |
+| crc32 | ✓ | ✓ | ✓ | ✓ | ✓ |
+| bsearch | ✓ | ✓ | ✓ | ✓ | ✓ |
+| matrix | ✓ | ✓ | ✓ | ✓ | ✓ |
+| base64_encode | ✓ | ✓ | ✓ | ✓ | ✓ |
 
 **No `unsafe` keyword exists in VUMA.** All verification is automatic.

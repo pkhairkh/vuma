@@ -1267,6 +1267,28 @@ pub fn from_vuma_error(err: &VumaError) -> Vec<VumaDiagnostic> {
                 )]
             })
             .collect(),
+        VumaError::BackendFallback { failed_backend, fallback_backend, error } => {
+            let mut msg = format!("backend '{}' failed: {}", failed_backend, error);
+            if let Some(fb) = fallback_backend {
+                msg.push_str(&format!(", attempting fallback to '{}'", fb));
+            }
+            vec![VumaDiagnostic::new(
+                "E031",
+                DiagnosticSeverity::Warning,
+                &msg,
+                "backend-fallback",
+                DiagnosticSourceLocation::unknown(),
+            )]
+        }
+        VumaError::PanicCaught { stage, message } => {
+            vec![VumaDiagnostic::new(
+                "E050",
+                DiagnosticSeverity::Error,
+                &format!("internal panic in stage '{}': {}", stage, message),
+                stage,
+                DiagnosticSourceLocation::unknown(),
+            )]
+        }
     }
 }
 
