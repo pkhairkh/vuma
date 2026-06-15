@@ -24,6 +24,7 @@
 //! - `scg_to_ir` — Translation from SCG nodes to IR.
 //! - `regalloc` — Simple register allocator.
 //! - `emit` — ARM64 code emitter and ELF generation.
+//! - `memory_safety` — Compile-time and runtime memory safety checks (E041–E050).
 
 pub mod arm32;
 pub mod arm64;
@@ -33,6 +34,7 @@ pub mod dwarf;
 pub mod emit;
 pub mod ir;
 pub mod loongarch64;
+pub mod memory_safety;
 pub mod mips64;
 pub mod opt;
 pub mod ppc64;
@@ -83,6 +85,12 @@ pub use ppc64::PPC64Backend;
 /// Re-export target description types.
 pub use target_desc::{
     CallingConventionDesc, InstCategoryDesc, RegDesc, TargetDesc, TargetDescRegistry,
+};
+
+/// Re-export memory safety types.
+pub use memory_safety::{
+    BoundsCheckSite, MemorySafetyAnalyzer, MemorySafetyConfig, MemorySafetyReport,
+    MemorySafetyViolation,
 };
 
 /// Error type for code-generation failures.

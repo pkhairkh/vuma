@@ -56,6 +56,7 @@
 #[cfg(test)]
 pub mod bd_inference;
 pub mod benchmarks;
+
 #[cfg(test)]
 pub mod codegen;
 #[cfg(test)]
@@ -85,6 +86,8 @@ pub mod wasm_validation;
 pub mod cross_backend;
 #[cfg(test)]
 pub mod property_tests;
+#[cfg(test)]
+pub mod abi_conformance;
 
 // Re-export the helper macros from the framework module.
 // Note: #[macro_export] macros are already at the crate root, so no

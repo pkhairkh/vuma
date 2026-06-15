@@ -1334,6 +1334,111 @@ pub fn from_codegen_error(err: &CodegenError) -> VumaDiagnostic {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Memory safety diagnostics (E041–E050)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Convert a [`MemorySafetyViolation`] into a [`VumaDiagnostic`].
+///
+/// Maps each violation to its E041–E050 code and creates a structured
+/// diagnostic with source location and quick-fix suggestions where
+/// applicable.
+pub fn from_memory_safety_violation(violation: &vuma_codegen::MemorySafetyViolation) -> VumaDiagnostic {
+    use vuma_codegen::MemorySafetyViolation;
+
+    let code = violation.code().to_string();
+    let message = violation.description();
+    let severity = DiagnosticSeverity::Error;
+
+    let (source, suggestion): (&str, Option<Suggestion>) = match violation {
+        MemorySafetyViolation::UseAfterFree { allocation_name, .. } => (
+            "memory-safety",
+            Some(Suggestion::text(format!(
+                "ensure '{}' is not accessed after it is freed", allocation_name
+            ))),
+        ),
+        MemorySafetyViolation::DoubleFree { allocation_name, .. } => (
+            "memory-safety",
+            Some(Suggestion::text(format!(
+                "'{}' is freed more than once — remove the duplicate free", allocation_name
+            ))),
+        ),
+        MemorySafetyViolation::MemoryLeak { allocation_name, .. } => (
+            "memory-safety",
+            Some(Suggestion::text(format!(
+                "add a 'free({})' before the function returns", allocation_name
+            ))),
+        ),
+        MemorySafetyViolation::BoundsCheckFailure { array_name, .. } => (
+            "runtime-safety",
+            Some(Suggestion::text(format!(
+                "check the index before accessing '{}'", array_name
+            ))),
+        ),
+        MemorySafetyViolation::NullDereference { pointer_name } => (
+            "memory-safety",
+            Some(Suggestion::text(format!(
+                "add a null check before dereferencing '{}'", pointer_name
+            ))),
+        ),
+        MemorySafetyViolation::DanglingPointer { pointer_name, .. } => (
+            "memory-safety",
+            Some(Suggestion::text(format!(
+                "'{}' references a stack allocation that escapes its scope — allocate on the heap instead",
+                pointer_name
+            ))),
+        ),
+        MemorySafetyViolation::UninitializedRead { variable_name } => (
+            "memory-safety",
+            Some(Suggestion::text(format!(
+                "initialize '{}' before reading it", variable_name
+            ))),
+        ),
+        MemorySafetyViolation::BufferOverflow { buffer_name, .. } => (
+            "runtime-safety",
+            Some(Suggestion::text(format!(
+                "check the offset before writing to '{}'", buffer_name
+            ))),
+        ),
+        MemorySafetyViolation::UseAfterScope { variable_name, .. } => (
+            "memory-safety",
+            Some(Suggestion::text(format!(
+                "'{}' is used after its scope ends — extend the scope or copy the value",
+                variable_name
+            ))),
+        ),
+        MemorySafetyViolation::InvalidFree { pointer_name, reason } => (
+            "memory-safety",
+            Some(Suggestion::text(format!(
+                "'{}' cannot be freed: {} — check the pointer origin", pointer_name, reason
+            ))),
+        ),
+    };
+
+    let mut diag = VumaDiagnostic::new(
+        code,
+        severity,
+        message,
+        source,
+        DiagnosticSourceLocation::unknown(),
+    );
+
+    if let Some(s) = suggestion {
+        diag = diag.with_structured_suggestion(s);
+    }
+
+    diag
+}
+
+/// Convert all violations from a [`MemorySafetyReport`] into diagnostics.
+pub fn from_memory_safety_report(report: &vuma_codegen::MemorySafetyReport) -> Vec<VumaDiagnostic> {
+    report
+        .violations
+        .iter()
+        .map(from_memory_safety_violation)
+        .collect()
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Convenience constructors for common diagnostics
 // ═══════════════════════════════════════════════════════════════════════════
 

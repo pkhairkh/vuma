@@ -27,13 +27,13 @@
 //! ┌─────────────────────┐
 //! │ ELF Header           │  64 bytes
 //! ├─────────────────────┤
-//! │ Program Headers      │  2 × 56 bytes (LOAD segments)
+//! │ Program Headers      │  3 × 56 bytes (LOAD segments)
 //! ├─────────────────────┤
-//! │ .text                │  emitted code
+//! │ .rodata              │  read-only data (segment: R)
 //! ├─────────────────────┤
-//! │ .rodata              │  read-only data
+//! │ .text                │  emitted code   (segment: R+X)
 //! ├─────────────────────┤
-//! │ .data                │  initialized data
+//! │ .data                │  initialized data (segment: R+W)
 //! ├─────────────────────┤
 //! │ .symtab              │  symbol table entries
 //! ├─────────────────────┤
@@ -44,6 +44,15 @@
 //! │ Section Headers      │  N × 64 bytes
 //! └─────────────────────┘
 //! .bss is virtual-only (memsz > filesz in the data LOAD segment).
+//!
+//! Section alignment is target-dependent:
+//! - ARM32:    4-byte alignment
+//! - AArch64:  16-byte alignment
+//! - x86-64:   16-byte alignment
+//! - RISC-V:   4-byte alignment
+//! - MIPS64:   8-byte alignment
+//! - PPC64:    16-byte alignment
+//! - LoongArch: 8-byte alignment
 //! ```
 //!
 //! ## Relocation Support
@@ -3544,15 +3553,29 @@ fn call_reloc_type_for_backend(backend: BackendKind) -> Result<u32> {
 // Top-level emission functions
 // ---------------------------------------------------------------------------
 
-/// Emit a full ELF64 binary for AArch64 from the given IR functions.
+/// Emit a full ELF64 binary from the given IR functions.
 ///
 /// The output includes:
-/// - ELF64 header with `EM_AARCH64`, little-endian, static executable
-/// - Program headers: LOAD segments for text and data
-/// - Section headers: `.text`, `.rodata`, `.data`, `.bss`, `.symtab`,
+/// - ELF64 header with the appropriate `e_machine`, little-endian, static executable
+/// - Program headers: 3 LOAD segments (R for .rodata, RX for .text, RW for .data+.bss)
+/// - Section headers: `.rodata`, `.text`, `.data`, `.bss`, `.symtab`,
 ///   `.strtab`, `.shstrtab`
 /// - Symbol table entries for each function
 /// - Relocation fixups for inter-function `BL` calls
+///
+/// ## Memory Layout
+///
+/// ```text
+/// ┌─────────────┐  Lowest address
+/// │ .rodata      │  Read-only data (segment: PF_R)
+/// ├─────────────┤
+/// │ .text        │  Executable code (segment: PF_R|PF_X)
+/// ├─────────────┤
+/// │ .data        │  Read-write data (segment: PF_R|PF_W)
+/// ├─────────────┤
+/// │ .bss         │  Zero-initialized (virtual only, same segment as .data)
+/// └─────────────┘  Highest address
+/// ```
 pub fn emit_elf(
     functions: &[IRFunction],
     data_sections: &[DataSection],
@@ -3567,6 +3590,7 @@ pub fn emit_elf(
 
     let base_addr = config.effective_base_addr();
     let is_obj = config.format == OutputFormat::Obj;
+    let sec_align = section_alignment_for_backend(config.backend);
 
     // ---- Step 1: Emit all functions ----
     let mut emitter = Emitter::new();
@@ -3606,29 +3630,43 @@ pub fn emit_elf(
         resolve_call_relocs(&mut text_section, &all_call_relocs, &function_offsets)?;
     }
 
-    // ---- Step 3: Collect data sections ----
-    let (rodata_section, data_section, bss_size) = collect_data_sections(data_sections);
+    // ---- Step 3: Collect data sections (with proper alignment) ----
+    let (rodata_section, data_section, bss_size) =
+        collect_data_sections(data_sections, config.backend);
 
-    // ---- Step 4: Compute partial layout ----
+    // ---- Step 4: Compute layout ----
+    //
+    // New layout places .rodata before .text in memory:
+    //   [ELF Header] [Program Headers] [.rodata] [.text] [.rela.text] [.data] [.symtab] [.strtab] [.shstrtab] [Section Headers]
+    //
     let elf_header_size: u64 = 64;
     let phdr_size: u64 = 56;
     let shdr_size: u64 = 64;
-    let num_phdrs: u64 = if is_obj { 0 } else { 2 };
+    // 3 LOAD segments: R (.rodata), RX (.text), RW (.data+.bss)
+    let num_phdrs: u64 = if is_obj { 0 } else { 3 };
     let headers_total = elf_header_size + phdr_size * num_phdrs;
 
-    let text_offset = headers_total;
-    let text_size = text_section.len() as u64;
-    let text_aligned = align_up(text_size, 16);
+    // .rodata comes first in the file (after headers).
+    let rodata_offset = headers_total;
+    let rodata_size = rodata_section.len() as u64;
+    let rodata_aligned = align_up(rodata_size, sec_align);
+    let rodata_vaddr = if is_obj { 0 } else { base_addr + rodata_offset };
 
+    // .text comes after .rodata.
+    let text_offset = rodata_offset + rodata_aligned;
+    let text_size = text_section.len() as u64;
+    let text_aligned = align_up(text_size, sec_align);
     let text_vaddr = if is_obj { 0 } else { base_addr + text_offset };
 
     let entry_offset = function_offsets
         .get(&config.entry_name)
         .copied()
         .unwrap_or(0);
-    let entry_point = if is_obj { 0 } else { base_addr + entry_offset };
+    let entry_point = if is_obj { 0 } else { text_vaddr + entry_offset };
 
     // ---- Step 5: Build symbol table and string table ----
+    // .text is now at section index 2 (0=null, 1=.rodata, 2=.text).
+    let text_section_idx: u16 = 2;
     let (symtab_bytes, strtab_bytes, sym_name_to_idx) = if config.symbol_table {
         build_symbol_table(
             functions,
@@ -3636,6 +3674,7 @@ pub fn emit_elf(
             &function_sizes,
             text_vaddr,
             &external_symbols,
+            text_section_idx,
         )
     } else {
         (Vec::new(), Vec::new(), HashMap::new())
@@ -3669,11 +3708,9 @@ pub fn emit_elf(
         0
     };
 
+    // .data section comes after .rela.text (or after .text if not ET_REL).
     let data_file_offset = text_offset + text_aligned + rela_text_aligned;
-    let rodata_size = rodata_section.len() as u64;
     let rwdata_size = data_section.len() as u64;
-    let data_file_total = rodata_size + rwdata_size;
-
     let data_vaddr = if is_obj {
         0
     } else {
@@ -3684,7 +3721,7 @@ pub fn emit_elf(
     let shstrtab = build_shstrtab(config);
 
     // ---- Step 8: Compute section header offsets ----
-    let symtab_file_offset = data_file_offset + data_file_total;
+    let symtab_file_offset = data_file_offset + rwdata_size;
     let symtab_aligned = align_up(symtab_bytes.len() as u64, 8);
     let strtab_file_offset = symtab_file_offset + symtab_aligned;
     let strtab_aligned = align_up(strtab_bytes.len() as u64, 8);
@@ -3743,8 +3780,21 @@ pub fn emit_elf(
 
     assert_eq!(elf.len(), 64, "ELF header must be exactly 64 bytes");
 
-    // ---- Step 9: Program Headers ----
+    // ---- Step 10: Program Headers ----
+    // 3 LOAD segments: R for .rodata, RX for .text, RW for .data+.bss
     if !is_obj {
+        // Segment 1: .rodata (read-only)
+        write_phdr(
+            &mut elf,
+            PT_LOAD,
+            PF_R,
+            rodata_offset,
+            rodata_vaddr,
+            rodata_vaddr,
+            rodata_size,
+            rodata_size,
+        );
+        // Segment 2: .text (read + execute)
         write_phdr(
             &mut elf,
             PT_LOAD,
@@ -3755,6 +3805,7 @@ pub fn emit_elf(
             text_size,
             text_size,
         );
+        // Segment 3: .data + .bss (read + write)
         write_phdr(
             &mut elf,
             PT_LOAD,
@@ -3762,28 +3813,32 @@ pub fn emit_elf(
             data_file_offset,
             data_vaddr,
             data_vaddr,
-            data_file_total,
-            data_file_total + bss_size,
+            rwdata_size,
+            rwdata_size + bss_size,
         );
     }
 
-    // ---- Step 10: .text section ----
+    // ---- Step 11: .rodata section ----
+    elf.extend_from_slice(&rodata_section);
+    let padding = rodata_aligned - rodata_size;
+    elf.extend_from_slice(&vec![0u8; padding as usize]);
+
+    // ---- Step 12: .text section ----
     elf.extend_from_slice(&text_section);
     let padding = text_aligned - text_size;
     elf.extend_from_slice(&vec![0u8; padding as usize]);
 
-    // ---- Step 10.5: .rela.text section (ET_REL only) ----
+    // ---- Step 12.5: .rela.text section (ET_REL only) ----
     if is_obj {
         elf.extend_from_slice(&rela_text_bytes);
         let pad = rela_text_aligned - rela_text_bytes.len() as u64;
         elf.extend_from_slice(&vec![0u8; pad as usize]);
     }
 
-    // ---- Step 11: .rodata + .data ----
-    elf.extend_from_slice(&rodata_section);
+    // ---- Step 13: .data section ----
     elf.extend_from_slice(&data_section);
 
-    // ---- Step 12–14: .symtab, .strtab, .shstrtab ----
+    // ---- Step 14–16: .symtab, .strtab, .shstrtab ----
     if config.symbol_table {
         elf.extend_from_slice(&symtab_bytes);
         let pad = symtab_aligned - symtab_bytes.len() as u64;
@@ -3796,14 +3851,31 @@ pub fn emit_elf(
         elf.extend_from_slice(&vec![0u8; pad as usize]);
     }
 
-    // ---- Step 15: Section Headers ----
+    // ---- Step 17: Section Headers ----
+    //
+    // Section order (ET_EXEC):       0=null, 1=.rodata, 2=.text, 3=.data, 4=.bss, 5=.symtab, 6=.strtab, 7=.shstrtab
+    // Section order (ET_REL):        0=null, 1=.rodata, 2=.text, 3=.rela.text, 4=.data, 5=.bss, 6=.symtab, 7=.strtab, 8=.shstrtab
     if config.section_headers {
-        let rela_shift: u32 = if is_obj { 1 } else { 0 };
-
         // Section 0: null
         write_filled_shdr(&mut elf, &new_shdr(SHT_NULL, 0, 0, 0, 0, 0, 0, 0, 0));
 
-        // Section 1: .text
+        // Section 1: .rodata
+        let rodata_name_idx = shstrtab_name_offset(&shstrtab, ".rodata");
+        let mut sh = new_shdr(
+            SHT_PROGBITS,
+            PF_R as u64,
+            rodata_vaddr,
+            rodata_offset,
+            rodata_size,
+            0,
+            0,
+            sec_align,
+            0,
+        );
+        sh.name = rodata_name_idx as u32;
+        write_filled_shdr(&mut elf, &sh);
+
+        // Section 2: .text
         let text_name_idx = shstrtab_name_offset(&shstrtab, ".text");
         let mut sh = new_shdr(
             SHT_PROGBITS,
@@ -3813,13 +3885,13 @@ pub fn emit_elf(
             text_size,
             0,
             0,
-            16,
+            sec_align,
             0,
         );
         sh.name = text_name_idx as u32;
         write_filled_shdr(&mut elf, &sh);
 
-        // Section 2: .rela.text (ET_REL only)
+        // Section 3: .rela.text (ET_REL only)
         if is_obj {
             let rela_name_idx = shstrtab_name_offset(&shstrtab, ".rela.text");
             let mut sh = new_shdr(
@@ -3828,8 +3900,8 @@ pub fn emit_elf(
                 0,
                 rela_text_offset,
                 rela_text_size,
-                5 + rela_shift, // sh_link: .symtab section index
-                1,              // sh_info: .text section index
+                6 + rela_shift as u32, // sh_link: .symtab section index (6 for ET_REL with .rela.text)
+                2,                     // sh_info: .text section index
                 8,
                 24, // alignment, entry size
             );
@@ -3837,35 +3909,17 @@ pub fn emit_elf(
             write_filled_shdr(&mut elf, &sh);
         }
 
-        // Section 2+rela_shift: .rodata
-        let rodata_name_idx = shstrtab_name_offset(&shstrtab, ".rodata");
-        let mut sh = new_shdr(
-            SHT_PROGBITS,
-            PF_R as u64,
-            data_vaddr,
-            data_file_offset,
-            rodata_size,
-            0,
-            0,
-            8,
-            0,
-        );
-        sh.name = rodata_name_idx as u32;
-        write_filled_shdr(&mut elf, &sh);
-
         // Section 3+rela_shift: .data
         let data_name_idx = shstrtab_name_offset(&shstrtab, ".data");
-        let data_section_offset = data_file_offset + rodata_size;
-        let data_section_vaddr = data_vaddr + rodata_size;
         let mut sh = new_shdr(
             SHT_PROGBITS,
             (PF_R | PF_W) as u64,
-            data_section_vaddr,
-            data_section_offset,
+            data_vaddr,
+            data_file_offset,
             rwdata_size,
             0,
             0,
-            8,
+            sec_align,
             0,
         );
         sh.name = data_name_idx as u32;
@@ -3873,7 +3927,7 @@ pub fn emit_elf(
 
         // Section 4+rela_shift: .bss
         let bss_name_idx = shstrtab_name_offset(&shstrtab, ".bss");
-        let bss_vaddr = data_vaddr + data_file_total;
+        let bss_vaddr = data_vaddr + rwdata_size;
         let mut sh = new_shdr(
             SHT_NOBITS,
             (PF_R | PF_W) as u64,
@@ -3882,7 +3936,7 @@ pub fn emit_elf(
             bss_size,
             0,
             0,
-            16,
+            sec_align,
             0,
         );
         sh.name = bss_name_idx as u32;
@@ -3896,8 +3950,8 @@ pub fn emit_elf(
             0,
             symtab_file_offset,
             symtab_bytes.len() as u64,
-            6 + rela_shift, // sh_link: .strtab section index
-            2,              // sh_info: one past last local symbol
+            6 + rela_shift as u32, // sh_link: .strtab section index
+            2,                     // sh_info: one past last local symbol
             8,
             24,
         );
@@ -3937,7 +3991,7 @@ pub fn emit_elf(
         write_filled_shdr(&mut elf, &sh);
     }
 
-    // ---- Step 16: Append DWARF5 debug sections if requested ----
+    // ---- Step 18: Append DWARF5 debug sections if requested ----
     if config.debug_info && config.section_headers {
         let mut db = crate::dwarf::DwarfBuilder::new();
         let source_file = config.entry_name.clone() + ".vuma";
@@ -4162,27 +4216,73 @@ fn resolve_call_relocs(
     Ok(())
 }
 
-/// Separate data sections into rodata, data, and bss size.
-fn collect_data_sections(data_sections: &[DataSection]) -> (Vec<u8>, Vec<u8>, u64) {
+/// Return the natural section alignment (in bytes) for the given backend.
+///
+/// This is used for `sh_addralign` in section headers and for padding
+/// between adjacent data contributions within a section.
+///
+/// | Backend      | Alignment | Rationale                        |
+/// |--------------|-----------|----------------------------------|
+/// | ARM32        | 4         | 32-bit instructions, 4-byte word |
+/// | AArch64      | 16        | 128-bit SIMD, cache-line hint    |
+/// | x86-64       | 16        | SSE/AVX alignment requirement    |
+/// | RISC-V 64    | 4         | Base ISA 32-bit, compressed OK   |
+/// | MIPS64       | 8         | 64-bit word-oriented             |
+/// | PPC64        | 16        | Altivec/VSX 128-bit alignment    |
+/// | LoongArch64  | 8         | 64-bit word-oriented             |
+pub fn section_alignment_for_backend(backend: BackendKind) -> u64 {
+    match backend {
+        BackendKind::AArch64 => 16,
+        BackendKind::X86_64 => 16,
+        BackendKind::RiscV64 => 4,
+        BackendKind::Arm32 => 4,
+        BackendKind::Mips64 => 8,
+        BackendKind::PowerPC64 => 16,
+        BackendKind::LoongArch64 => 8,
+        BackendKind::Wasm32 => 4, // Wasm doesn't use ELF, but provide a default
+    }
+}
+
+/// Separate data sections into rodata, data, and bss size, respecting
+/// per-section alignment requirements.
+///
+/// Each `DataSection` may specify its own alignment.  Padding bytes
+/// (zero-filled) are inserted between adjacent contributions so that
+/// every contribution starts at an offset that is a multiple of its
+/// stated alignment.  The overall section alignment is the maximum of
+/// the individual alignments (or the backend default if higher).
+fn collect_data_sections(data_sections: &[DataSection], backend: BackendKind) -> (Vec<u8>, Vec<u8>, u64) {
+    let default_align = section_alignment_for_backend(backend);
     let mut rodata_section = Vec::new();
     let mut data_section = Vec::new();
     let mut bss_size: u64 = 0;
 
     for ds in data_sections {
+        // Use the section's own alignment, or the backend default if lower.
+        let align = if ds.align > 0 {
+            std::cmp::max(ds.align as u64, default_align)
+        } else {
+            default_align
+        };
+
         match ds.kind {
             DataSectionKind::ReadOnly => {
+                // Pad rodata_section to `align` boundary before appending.
+                let padding = (align - (rodata_section.len() as u64 % align)) % align;
+                rodata_section.extend(std::iter::repeat(0u8).take(padding as usize));
                 rodata_section.extend_from_slice(&ds.data);
             }
             DataSectionKind::Data => {
+                // Pad data_section to `align` boundary before appending.
+                let padding = (align - (data_section.len() as u64 % align)) % align;
+                data_section.extend(std::iter::repeat(0u8).take(padding as usize));
                 data_section.extend_from_slice(&ds.data);
             }
             DataSectionKind::Bss => {
+                // Pad bss_size to `align` boundary before accounting for this section.
+                let padding = (align - (bss_size % align)) % align;
+                bss_size += padding;
                 bss_size += ds.data.len() as u64;
-                if ds.align > 1 {
-                    let padding =
-                        (ds.align as u64 - (bss_size % ds.align as u64)) % ds.align as u64;
-                    bss_size += padding;
-                }
             }
         }
     }
@@ -4272,12 +4372,18 @@ fn write_filled_shdr(buf: &mut Vec<u8>, sh: &FilledShdr) {
 ///
 /// Also returns a mapping from symbol name to symbol table index, used to
 /// populate relocation entries.
+///
+/// The `text_section_idx` parameter specifies which section index the .text
+/// section occupies in the section header table (needed for st_shndx in
+/// function symbols).  With the new layout (.rodata at index 1, .text at
+/// index 2), this is `2`.
 fn build_symbol_table(
     functions: &[IRFunction],
     function_offsets: &HashMap<String, u64>,
     function_sizes: &HashMap<String, u64>,
     text_vaddr: u64,
     external_symbols: &[String],
+    text_section_idx: u16,
 ) -> (Vec<u8>, Vec<u8>, HashMap<String, u32>) {
     let mut strtab = Vec::new();
     let mut symtab = Vec::new();
@@ -4300,7 +4406,7 @@ fn build_symbol_table(
     symtab.extend_from_slice(&text_name_off.to_le_bytes());
     symtab.push(st_info);
     symtab.push(0);
-    symtab.extend_from_slice(&1u16.to_le_bytes()); // .text = section 1
+    symtab.extend_from_slice(&text_section_idx.to_le_bytes());
     symtab.extend_from_slice(&text_vaddr.to_le_bytes());
     symtab.extend_from_slice(&0u64.to_le_bytes());
 
@@ -4316,7 +4422,7 @@ fn build_symbol_table(
         symtab.extend_from_slice(&name_off.to_le_bytes());
         symtab.push(st_info);
         symtab.push(0);
-        symtab.extend_from_slice(&1u16.to_le_bytes()); // .text section
+        symtab.extend_from_slice(&text_section_idx.to_le_bytes()); // .text section
         symtab.extend_from_slice(&value.to_le_bytes());
         symtab.extend_from_slice(&size.to_le_bytes());
         name_to_idx.insert(func.name.clone(), next_idx);
@@ -4344,15 +4450,18 @@ fn build_symbol_table(
 }
 
 /// Build the section-header string table (`.shstrtab`).
+///
+/// The order must match the section header table order:
+/// `.rodata`, `.text`, [`.rela.text`], `.data`, `.bss`, `.symtab`, `.strtab`, `.shstrtab`
 fn build_shstrtab(config: &EmitConfig) -> Vec<u8> {
     let mut buf = Vec::new();
     buf.push(0);
     if config.section_headers {
+        buf.extend_from_slice(b".rodata\0");
         buf.extend_from_slice(b".text\0");
         if config.format == OutputFormat::Obj {
             buf.extend_from_slice(b".rela.text\0");
         }
-        buf.extend_from_slice(b".rodata\0");
         buf.extend_from_slice(b".data\0");
         buf.extend_from_slice(b".bss\0");
         buf.extend_from_slice(b".symtab\0");
@@ -4446,7 +4555,7 @@ mod tests {
         let e_shoff = u64::from_le_bytes(elf[40..48].try_into().unwrap());
         assert_ne!(e_shoff, 0, "section headers must be present");
         let e_shnum = u16::from_le_bytes(elf[60..62].try_into().unwrap());
-        assert_eq!(e_shnum, 8, "expected 8 section headers");
+        assert_eq!(e_shnum, 8, "expected 8 section headers (null+rodata+text+data+bss+symtab+strtab+shstrtab)");
         let e_shstrndx = u16::from_le_bytes(elf[62..64].try_into().unwrap());
         assert_eq!(e_shstrndx, 7, "shstrtab at index 7");
     }
@@ -4488,7 +4597,9 @@ mod tests {
         assert_eq!(&elf[0..4], &[0x7f, b'E', b'L', b'F']);
 
         // Look for a patched BL instruction in the text section.
-        let text_offset: usize = (64 + 56 * 2) as usize;
+        // With 3 LOAD segments, text starts after: ELF header (64) + 3 phdrs (56*3) + rodata_aligned
+        // Since there's no rodata in this test, text starts at 64 + 56*3 = 232
+        let text_offset: usize = (64 + 56 * 3) as usize;
         let mut found_bl = false;
         let mut i = text_offset;
         while i + 4 <= elf.len() {
@@ -5593,6 +5704,131 @@ mod tests {
         assert!(!config.section_headers);
         assert!(!config.symbol_table);
     }
+
+    // -----------------------------------------------------------------------
+    // Section alignment tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn section_alignment_per_backend() {
+        assert_eq!(section_alignment_for_backend(BackendKind::Arm32), 4);
+        assert_eq!(section_alignment_for_backend(BackendKind::AArch64), 16);
+        assert_eq!(section_alignment_for_backend(BackendKind::X86_64), 16);
+        assert_eq!(section_alignment_for_backend(BackendKind::RiscV64), 4);
+        assert_eq!(section_alignment_for_backend(BackendKind::Mips64), 8);
+        assert_eq!(section_alignment_for_backend(BackendKind::PowerPC64), 16);
+        assert_eq!(section_alignment_for_backend(BackendKind::LoongArch64), 8);
+        assert_eq!(section_alignment_for_backend(BackendKind::Wasm32), 4);
+    }
+
+    #[test]
+    fn emit_elf_three_load_segments() {
+        // Verify that ET_EXEC has 3 LOAD segments.
+        let funcs = vec![make_return_function("main")];
+        let config = EmitConfig::linux_elf();
+        let elf = emit_elf(&funcs, &[], &config).unwrap();
+        let e_phnum = u16::from_le_bytes([elf[56], elf[57]]);
+        assert_eq!(e_phnum, 3, "ET_EXEC should have 3 LOAD segments");
+
+        // Verify the segment flags: R, RX, RW
+        let phdr_size: usize = 56;
+        let flags_offsets: Vec<u32> = (0..3)
+            .map(|i| {
+                let off = 64 + i * phdr_size + 4;
+                u32::from_le_bytes(elf[off..off + 4].try_into().unwrap())
+            })
+            .collect();
+        assert_eq!(flags_offsets[0], PF_R, "segment 1 should be R-only");
+        assert_eq!(flags_offsets[1], PF_R | PF_X, "segment 2 should be R+X");
+        assert_eq!(flags_offsets[2], PF_R | PF_W, "segment 3 should be R+W");
+    }
+
+    #[test]
+    fn emit_elf_rodata_before_text_in_memory() {
+        // Verify that .rodata has a lower virtual address than .text.
+        let funcs = vec![make_return_function("main")];
+        let data_sections = vec![
+            DataSection {
+                name: "rodata".into(),
+                kind: DataSectionKind::ReadOnly,
+                align: 16,
+                data: vec![0xAA; 32],
+            },
+        ];
+        let config = EmitConfig::linux_elf();
+        let elf = emit_elf(&funcs, &data_sections, &config).unwrap();
+
+        // Parse the section headers to find .rodata and .text virtual addresses.
+        let e_shoff = u64::from_le_bytes(elf[40..48].try_into().unwrap()) as usize;
+        let e_shnum = u16::from_le_bytes(elf[60..62].try_into().unwrap()) as usize;
+
+        let mut rodata_vaddr: u64 = 0;
+        let mut text_vaddr: u64 = 0;
+        let mut found_rodata = false;
+        let mut found_text = false;
+
+        for i in 0..e_shnum {
+            let off = e_shoff + i * 64;
+            let sh_name_idx = u32::from_le_bytes(elf[off..off + 4].try_into().unwrap()) as usize;
+            let sh_addr = u64::from_le_bytes(elf[off + 16..off + 24].try_into().unwrap());
+
+            // Read the name from .shstrtab
+            let e_shstrndx = u16::from_le_bytes(elf[62..64].try_into().unwrap()) as usize;
+            let shstrtab_off = e_shoff + e_shstrndx * 64;
+            let shstrtab_offset = u64::from_le_bytes(elf[shstrtab_off + 24..shstrtab_off + 32].try_into().unwrap()) as usize;
+            let shstrtab_size = u64::from_le_bytes(elf[shstrtab_off + 32..shstrtab_off + 40].try_into().unwrap()) as usize;
+
+            if sh_name_idx < shstrtab_size {
+                let name_end = elf[shstrtab_offset + sh_name_idx..]
+                    .iter()
+                    .position(|&b| b == 0)
+                    .unwrap_or(0);
+                let name = String::from_utf8_lossy(
+                    &elf[shstrtab_offset + sh_name_idx..shstrtab_offset + sh_name_idx + name_end]
+                );
+                if name == ".rodata" {
+                    rodata_vaddr = sh_addr;
+                    found_rodata = true;
+                } else if name == ".text" {
+                    text_vaddr = sh_addr;
+                    found_text = true;
+                }
+            }
+        }
+
+        assert!(found_rodata, ".rodata section must be present");
+        assert!(found_text, ".text section must be present");
+        assert!(
+            rodata_vaddr < text_vaddr,
+            ".rodata (0x{:x}) must be at a lower address than .text (0x{:x})",
+            rodata_vaddr,
+            text_vaddr
+        );
+    }
+
+    #[test]
+    fn emit_elf_collect_data_sections_alignment() {
+        // Verify that collect_data_sections respects alignment.
+        let data_sections = vec![
+            DataSection {
+                name: "a".into(),
+                kind: DataSectionKind::ReadOnly,
+                align: 4,
+                data: vec![0x01, 0x02], // 2 bytes, needs padding to 4
+            },
+            DataSection {
+                name: "b".into(),
+                kind: DataSectionKind::ReadOnly,
+                align: 16,
+                data: vec![0x03; 8], // 8 bytes, needs padding to 16
+            },
+        ];
+        let (rodata, _data, _bss) = collect_data_sections(&data_sections, BackendKind::AArch64);
+
+        // AArch64 default align = 16, so first section padded to 16, second section also 16-aligned
+        // First: 2 bytes padded to 16 → 16 bytes, then 8 bytes at offset 16
+        assert!(rodata.len() >= 24, "rodata should be at least 24 bytes with alignment padding");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -5626,3 +5862,27 @@ mod tests {
 //   function symbols.
 // - Updated lib.rs to re-export EmitConfig, OutputFormat, Target, emit_elf,
 //   emit_raw.
+//
+// 2026-03-05: Linker Integration Hardening (Task 21-22)
+//
+// Changes:
+// - Restructured ELF layout: .rodata is now placed before .text in memory,
+//   matching the natural memory ordering: R data → RX code → RW data.
+// - Changed from 2 to 3 LOAD segments: PF_R for .rodata, PF_R|PF_X for
+//   .text, PF_R|PF_W for .data+.bss.  This provides proper memory
+//   protection granularity (W^X compliance).
+// - Added section_alignment_for_backend() function returning per-arch
+//   alignment: ARM32=4, AArch64=16, x86-64=16, RISC-V=4, MIPS64=8,
+//   PPC64=16, LoongArch64=8.
+// - Enhanced collect_data_sections() to respect per-DataSection alignment
+//   requirements by inserting padding between adjacent contributions.
+//   The overall section alignment is max(section.align, backend_default).
+// - Updated section header table order: null, .rodata, .text, [.rela.text],
+//   .data, .bss, .symtab, .strtab, .shstrtab.
+// - Updated build_shstrtab() to list sections in the new order.
+// - Updated build_symbol_table() to accept text_section_idx parameter
+//   (.text is now at section index 2 instead of 1).
+// - All sh_addralign values now use section_alignment_for_backend() instead
+//   of hardcoded 8/16 values.
+// - Entry point calculation now accounts for the .rodata offset: entry is
+//   text_vaddr + entry_offset (not base_addr + entry_offset).

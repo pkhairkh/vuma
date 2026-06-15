@@ -164,6 +164,12 @@ pub struct CompileConfig {
     pub stop_on_first_error: bool,
     /// Maximum inline size (number of SCG nodes) for the inlining pass.
     pub max_inline_size: usize,
+    /// Enable memory safety checks (use-after-free, double-free, leaks, etc.).
+    pub memory_safety: bool,
+    /// Enable runtime bounds checks for array accesses (--safe flag).
+    pub runtime_bounds_checks: bool,
+    /// Force section headers in the ELF output (--sections flag).
+    pub section_headers: bool,
 }
 
 impl CompileConfig {
@@ -189,7 +195,11 @@ impl CompileConfig {
     /// Returns the emit config for this compile config.
     fn emit_config(&self) -> EmitConfig {
         match self.target {
-            CompileTarget::Linux => EmitConfig::linux_elf(),
+            CompileTarget::Linux => {
+                let mut cfg = EmitConfig::linux_elf();
+                cfg.section_headers = cfg.section_headers || self.section_headers;
+                cfg
+            }
             CompileTarget::Wasm32 => EmitConfig::wasm_binary(),
         }
     }
@@ -205,6 +215,9 @@ impl Default for CompileConfig {
             debug_info: false,
             stop_on_first_error: true,
             max_inline_size: 50,
+            memory_safety: true,
+            runtime_bounds_checks: false,
+            section_headers: false,
         }
     }
 }
@@ -2124,6 +2137,9 @@ pub fn compile_to_wasm(source: &str) -> Result<Vec<u8>, Vec<VumaError>> {
         debug_info: false,
         stop_on_first_error: true,
         max_inline_size: 50,
+        memory_safety: true,
+        runtime_bounds_checks: false,
+        section_headers: false,
     });
 
     // ── Stage 4: IR Lowering ─────────────────────────────────────

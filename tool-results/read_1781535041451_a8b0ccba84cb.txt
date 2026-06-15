@@ -1,0 +1,1723 @@
+     1→//! VUMA CLI — Command-line interface for the VUMA compiler.
+     2→//!
+     3→//! Subcommands:
+     4→//! - `vuma build <file>` — Parse + compile to ARM64 ELF (default), save to output file
+     5→//! - `vuma run <file>`   — Build + execute (via QEMU aarch64 or native)
+     6→//! - `vuma check <file>` — Parse + SCG + BD inference + IVE verification only
+     7→//! - `vuma emit <isa> <file>` — Compile to specific ISA
+     8→//! - `vuma disasm <file>` — Read binary and disassemble
+     9→//! - `vuma verify <file>` — Run IVE 5-invariant verification
+    10→//! - `vuma repl` — Interactive REPL (parse expr, print AST)
+    11→//! - `vuma lsp`  — Start Language Server (LSP) for IDE/LLM integration
+    12→
+    13→use std::fs;
+    14→use std::io::{self, Write as IoWrite};
+    15→use std::path::{Path, PathBuf};
+    16→use std::process::Command;
+    17→
+    18→use clap::{Parser, Subcommand, ValueEnum};
+    19→
+    20→use vuma::pipeline::{
+    21→    compile_with_path, CompileConfig, CompileTarget, OptLevel, VerificationLevel, VumaError,
+    22→};
+    23→use vuma_codegen::backend::{create_backend, BackendKind};
+    24→use vuma_codegen::ScgToIr;
+    25→use vuma_codegen::scg_to_ir::{Scg, ScgNode, ScgFunction, ScgParam, ScgStatement, ScgType,
+    26→    ScgExpr, ComputationNode, AllocationNode, AccessNode, CallNode, ControlNode};
+    27→use vuma_codegen::ir::BinOpKind;
+    28→
+    29→// ═══════════════════════════════════════════════════════════════════════════
+    30→// CLI definition (clap derive)
+    31→// ═══════════════════════════════════════════════════════════════════════════
+    32→
+    33→/// VUMA — Verified-Unsafe Memory Access: AI-Native Programming Language
+    34→#[derive(Parser, Debug)]
+    35→#[command(name = "vuma", version, about = "VUMA compiler and toolchain")]
+    36→struct Cli {
+    37→    /// Optimization level (overrides subcommand default)
+    38→    #[arg(long, global = true, value_enum, default_value = "O2")]
+    39→    opt_level: OptLevelArg,
+    40→
+    41→    /// Verification level (overrides subcommand default)
+    42→    #[arg(long, global = true, value_enum, default_value = "normal")]
+    43→    verification: VerificationArg,
+    44→
+    45→    /// Include debug info in output
+    46→    #[arg(long, global = true)]
+    47→    debug: bool,
+    48→
+    49→    /// Launch the interactive REPL (shorthand for `vuma repl`)
+    50→    #[arg(long, global = true)]
+    51→    repl: bool,
+    52→
+    53→    #[command(subcommand)]
+    54→    command: Option<Commands>,
+    55→}
+    56→
+    57→/// Optimization level CLI argument.
+    58→#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+    59→enum OptLevelArg {
+    60→    #[value(name = "O0")]
+    61→    O0,
+    62→    #[value(name = "O1")]
+    63→    O1,
+    64→    #[value(name = "O2")]
+    65→    O2,
+    66→    #[value(name = "O3")]
+    67→    O3,
+    68→}
+    69→
+    70→impl From<OptLevelArg> for OptLevel {
+    71→    fn from(val: OptLevelArg) -> Self {
+    72→        match val {
+    73→            OptLevelArg::O0 => OptLevel::O0,
+    74→            OptLevelArg::O1 => OptLevel::O1,
+    75→            OptLevelArg::O2 => OptLevel::O2,
+    76→            OptLevelArg::O3 => OptLevel::O3,
+    77→        }
+    78→    }
+    79→}
+    80→
+    81→/// Verification level CLI argument.
+    82→#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+    83→enum VerificationArg {
+    84→    #[value(name = "none")]
+    85→    None,
+    86→    #[value(name = "quick")]
+    87→    Quick,
+    88→    #[value(name = "normal")]
+    89→    Normal,
+    90→    #[value(name = "exhaustive")]
+    91→    Exhaustive,
+    92→}
+    93→
+    94→impl From<VerificationArg> for VerificationLevel {
+    95→    fn from(val: VerificationArg) -> Self {
+    96→        match val {
+    97→            VerificationArg::None => VerificationLevel::None,
+    98→            VerificationArg::Quick => VerificationLevel::Quick,
+    99→            VerificationArg::Normal => VerificationLevel::Normal,
+   100→            VerificationArg::Exhaustive => VerificationLevel::Exhaustive,
+   101→        }
+   102→    }
+   103→}
+   104→
+   105→/// Target ISA for the `emit` subcommand.
+   106→#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+   107→enum IsaArg {
+   108→    #[value(name = "aarch64")]
+   109→    Aarch64,
+   110→    #[value(name = "x86_64")]
+   111→    X86_64,
+   112→    #[value(name = "riscv64")]
+   113→    Riscv64,
+   114→    #[value(name = "wasm32")]
+   115→    Wasm32,
+   116→    #[value(name = "loongarch64")]
+   117→    Loongarch64,
+   118→    #[value(name = "arm32")]
+   119→    Arm32,
+   120→    #[value(name = "mips64")]
+   121→    Mips64,
+   122→    #[value(name = "ppc64")]
+   123→    Ppc64,
+   124→}
+   125→
+   126→impl From<IsaArg> for BackendKind {
+   127→    fn from(val: IsaArg) -> Self {
+   128→        match val {
+   129→            IsaArg::Aarch64 => BackendKind::AArch64,
+   130→            IsaArg::X86_64 => BackendKind::X86_64,
+   131→            IsaArg::Riscv64 => BackendKind::RiscV64,
+   132→            IsaArg::Wasm32 => BackendKind::Wasm32,
+   133→            IsaArg::Loongarch64 => BackendKind::LoongArch64,
+   134→            IsaArg::Arm32 => BackendKind::Arm32,
+   135→            IsaArg::Mips64 => BackendKind::Mips64,
+   136→            IsaArg::Ppc64 => BackendKind::PowerPC64,
+   137→        }
+   138→    }
+   139→}
+   140→
+   141→#[derive(Subcommand, Debug)]
+   142→enum Commands {
+   143→    /// Parse + compile to ARM64 ELF (default), save to output file
+   144→    Build {
+   145→        /// Input VUMA source file
+   146→        file: PathBuf,
+   147→
+   148→        /// Output file path (default: <input>.o)
+   149→        #[arg(short, long)]
+   150→        output: Option<PathBuf>,
+   151→
+   152→        /// Target platform
+   153→        #[arg(long, value_enum, default_value = "linux")]
+   154→        target: TargetArg,
+   155→    },
+   156→
+   157→    /// Build + execute (via QEMU aarch64 or native)
+   158→    Run {
+   159→        /// Input VUMA source file
+   160→        file: PathBuf,
+   161→
+   162→        /// Arguments to pass to the executed program
+   163→        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+   164→        args: Vec<String>,
+   165→    },
+   166→
+   167→    /// Parse + SCG + BD inference + IVE verification only (no codegen)
+   168→    Check {
+   169→        /// Input VUMA source file
+   170→        file: PathBuf,
+   171→    },
+   172→
+   173→    /// Compile to a specific ISA target
+   174→    Emit {
+   175→        /// Target ISA
+   176→        isa: IsaArg,
+   177→
+   178→        /// Input VUMA source file
+   179→        file: PathBuf,
+   180→
+   181→        /// Output file path (default: <input>.o)
+   182→        #[arg(short, long)]
+   183→        output: Option<PathBuf>,
+   184→    },
+   185→
+   186→    /// Read a binary file and disassemble it
+   187→    Disasm {
+   188→        /// Binary file to disassemble
+   189→        file: PathBuf,
+   190→
+   191→        /// ISA to use for disassembly (default: aarch64)
+   192→        #[arg(long, value_enum, default_value = "aarch64")]
+   193→        isa: IsaArg,
+   194→
+   195→        /// Starting virtual address (default: 0x400000)
+   196→        #[arg(long, default_value = "0x400000")]
+   197→        base_addr: String,
+   198→    },
+   199→
+   200→    /// Run IVE 5-invariant verification
+   201→    Verify {
+   202→        /// Input VUMA source file
+   203→        file: PathBuf,
+   204→    },
+   205→
+   206→    /// Interactive REPL: parse expressions and print AST
+   207→    Repl,
+   208→
+   209→    /// Start the Language Server (LSP) for IDE/LLM integration
+   210→    Lsp,
+   211→}
+   212→
+   213→/// Target platform CLI argument for the `build` subcommand.
+   214→#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+   215→enum TargetArg {
+   216→    #[value(name = "linux")]
+   217→    Linux,
+   218→}
+   219→
+   220→impl From<TargetArg> for CompileTarget {
+   221→    fn from(val: TargetArg) -> Self {
+   222→        match val {
+   223→            TargetArg::Linux => CompileTarget::Linux,
+   224→        }
+   225→    }
+   226→}
+   227→
+   228→// ═══════════════════════════════════════════════════════════════════════════
+   229→// Helper functions
+   230→// ═══════════════════════════════════════════════════════════════════════════
+   231→
+   232→/// Read source file content with a human-readable error on failure.
+   233→fn read_source(path: &PathBuf) -> Result<String, String> {
+   234→    fs::read_to_string(path)
+   235→        .map_err(|e| format!("error: cannot read source file '{}': {}", path.display(), e))
+   236→}
+   237→
+   238→/// Build a `CompileConfig` from the global CLI flags.
+   239→fn make_config(cli: &Cli, target: CompileTarget) -> CompileConfig {
+   240→    CompileConfig {
+   241→        target,
+   242→        opt_level: OptLevel::from(cli.opt_level),
+   243→        verification_level: VerificationLevel::from(cli.verification),
+   244→        debug_info: cli.debug,
+   245→        ..CompileConfig::default()
+   246→    }
+   247→}
+   248→
+   249→/// Print compilation errors to stderr in a human-readable format.
+   250→fn print_errors(errors: &[VumaError]) {
+   251→    for err in errors {
+   252→        eprintln!("error[{}]: {}", err.stage(), err);
+   253→    }
+   254→}
+   255→
+   256→/// Determine the default output path for a given input file.
+   257→fn default_output_path(input: &Path) -> PathBuf {
+   258→    let stem = input.file_stem().unwrap_or_default().to_string_lossy();
+   259→    let dir = input.parent().unwrap_or(std::path::Path::new("."));
+   260→    dir.join(format!("{}.o", stem))
+   261→}
+   262→
+   263→// ═══════════════════════════════════════════════════════════════════════════
+   264→// Subcommand handlers
+   265→// ═══════════════════════════════════════════════════════════════════════════
+   266→
+   267→/// `vuma build <file>` — Parse + compile to ELF, save to output file.
+   268→fn cmd_build(
+   269→    cli: &Cli,
+   270→    file: &PathBuf,
+   271→    output: &Option<PathBuf>,
+   272→    target: &TargetArg,
+   273→) -> Result<(), String> {
+   274→    let source = read_source(file)?;
+   275→    let config = make_config(cli, CompileTarget::from(*target));
+   276→    let result = compile_with_path(&source, Some(file), &config).map_err(|errors| {
+   277→        print_errors(&errors);
+   278→        format!("compilation failed with {} error(s)", errors.len())
+   279→    })?;
+   280→
+   281→    let out_path = output
+   282→        .as_ref()
+   283→        .cloned()
+   284→        .unwrap_or_else(|| default_output_path(file));
+   285→    fs::write(&out_path, &result.binary).map_err(|e| {
+   286→        format!(
+   287→            "error: cannot write output file '{}': {}",
+   288→            out_path.display(),
+   289→            e
+   290→        )
+   291→    })?;
+   292→    // Make the output file executable on Unix.
+   293→    #[cfg(unix)]
+   294→    {
+   295→        use std::os::unix::fs::PermissionsExt;
+   296→        let mut perms = fs::metadata(&out_path)
+   297→            .map_err(|e| format!("error: cannot stat '{}': {}", out_path.display(), e))?
+   298→            .permissions();
+   299→        perms.set_mode(0o755);
+   300→        fs::set_permissions(&out_path, perms)
+   301→            .map_err(|e| format!("error: cannot chmod '{}': {}", out_path.display(), e))?;
+   302→    }
+   303→
+   304→    println!(
+   305→        "Compiled {} -> {} ({} bytes, {} SCG nodes, {} IR instructions)",
+   306→        file.display(),
+   307→        out_path.display(),
+   308→        result.binary.len(),
+   309→        result.scg.node_count(),
+   310→        result.ir_instruction_count,
+   311→    );
+   312→
+   313→    // Print stage timings.
+   314→    for (stage, ms) in &result.stage_timings {
+   315→        println!("  {:20} {}ms", stage, ms);
+   316→    }
+   317→
+   318→    Ok(())
+   319→}
+   320→
+   321→/// `vuma run <file>` — Build + execute.
+   322→fn cmd_run(cli: &Cli, file: &PathBuf, args: &[String]) -> Result<(), String> {
+   323→    let source = read_source(file)?;
+   324→    let config = make_config(cli, CompileTarget::Linux);
+   325→    let result = compile_with_path(&source, Some(file), &config).map_err(|errors| {
+   326→        print_errors(&errors);
+   327→        format!("compilation failed with {} error(s)", errors.len())
+   328→    })?;
+   329→
+   330→    // Write binary to a temp file.
+   331→    let tmp_dir = std::env::temp_dir();
+   332→    let exe_path = tmp_dir.join(format!("vuma_run_{}", std::process::id()));
+   333→    fs::write(&exe_path, &result.binary).map_err(|e| {
+   334→        format!(
+   335→            "error: cannot write temporary executable '{}': {}",
+   336→            exe_path.display(),
+   337→            e
+   338→        )
+   339→    })?;
+   340→
+   341→    // Make the file executable on Unix.
+   342→    #[cfg(unix)]
+   343→    {
+   344→        use std::os::unix::fs::PermissionsExt;
+   345→        let mut perms = fs::metadata(&exe_path)
+   346→            .map_err(|e| format!("error: cannot stat '{}': {}", exe_path.display(), e))?
+   347→            .permissions();
+   348→        perms.set_mode(0o755);
+   349→        fs::set_permissions(&exe_path, perms)
+   350→            .map_err(|e| format!("error: cannot chmod '{}': {}", exe_path.display(), e))?;
+   351→    }
+   352→
+   353→    // Try to execute: first natively (if on aarch64), then via qemu-aarch64.
+   354→    let native_output = Command::new(&exe_path).args(args).output();
+   355→
+   356→    let output = match native_output {
+   357→        Ok(out) => out,
+   358→        Err(_) => {
+   359→            // Native execution failed; try qemu-aarch64.
+   360→            let qemu_output = Command::new("qemu-aarch64")
+   361→                .arg(&exe_path)
+   362→                .args(args)
+   363→                .output()
+   364→                .map_err(|e| {
+   365→                    format!(
+   366→                        "error: failed to execute binary (neither native nor qemu-aarch64): {}",
+   367→                        e
+   368→                    )
+   369→                })?;
+   370→            qemu_output
+   371→        }
+   372→    };
+   373→
+   374→    io::stdout()
+   375→        .write_all(&output.stdout)
+   376→        .map_err(|e| format!("error: failed to write program output: {}", e))?;
+   377→    io::stderr()
+   378→        .write_all(&output.stderr)
+   379→        .map_err(|e| format!("error: failed to write program stderr: {}", e))?;
+   380→
+   381→    // Clean up temp file.
+   382→    let _ = fs::remove_file(&exe_path);
+   383→
+   384→    let code = output.status.code().unwrap_or(1);
+   385→    if code != 0 {
+   386→        return Err(format!("program exited with code {}", code));
+   387→    }
+   388→
+   389→    Ok(())
+   390→}
+   391→
+   392→/// `vuma check <file>` — Parse + SCG + BD inference + IVE verification only.
+   393→fn cmd_check(cli: &Cli, file: &PathBuf) -> Result<(), String> {
+   394→    let source = read_source(file)?;
+   395→    let mut config = make_config(cli, CompileTarget::Linux);
+   396→    // check mode: always run verification, don't skip
+   397→    if config.verification_level == VerificationLevel::None {
+   398→        config.verification_level = VerificationLevel::Normal;
+   399→    }
+   400→
+   401→    // Run the full compile — the check command doesn't save the binary,
+   402→    // it just verifies the program compiles and passes verification.
+   403→    let result = compile_with_path(&source, Some(file), &config).map_err(|errors| {
+   404→        print_errors(&errors);
+   405→        format!("check failed with {} error(s)", errors.len())
+   406→    })?;
+   407→
+   408→    println!("Check passed for {}", file.display());
+   409→    println!("  SCG nodes:      {}", result.scg.node_count());
+   410→    println!("  IR functions:   {}", result.ir_function_count);
+   411→    println!("  IR instructions: {}", result.ir_instruction_count);
+   412→
+   413→    if let Some(ref verification) = result.verification {
+   414→        println!("  Verification:   {}", verification.overall);
+   415→    }
+   416→
+   417→    // Print stage timings.
+   418→    for (stage, ms) in &result.stage_timings {
+   419→        println!("  {:20} {}ms", stage, ms);
+   420→    }
+   421→
+   422→    Ok(())
+   423→}
+   424→
+   425→/// `vuma emit <isa> <file>` — Compile to a specific ISA target.
+   426→///
+   427→/// Uses the direct AST → codegen SCG → IR path for better code quality
+   428→/// than the main pipeline (which goes through the semantic SCG and loses
+   429→/// most program semantics in the SCG→IR bridge).
+   430→fn cmd_emit(
+   431→    cli: &Cli,
+   432→    isa: &IsaArg,
+   433→    file: &PathBuf,
+   434→    output: &Option<PathBuf>,
+   435→) -> Result<(), String> {
+   436→    let source = read_source(file)?;
+   437→    let backend_kind = BackendKind::from(*isa);
+   438→
+   439→    // Step 1: Parse source → AST.
+   440→    let mut parser = vuma_parser::Parser::new(&source);
+   441→    let parse_result = parser.parse_program();
+   442→    if parse_result.is_err() {
+   443→        return Err(format!("parse error: {:?}", parse_result.errors));
+   444→    }
+   445→    if !parse_result.errors.is_empty() {
+   446→        eprintln!("[emit] WARNING: {} non-fatal parse errors:", parse_result.errors.len());
+   447→        for err in &parse_result.errors {
+   448→            eprintln!("[emit]   {:?}", err);
+   449→        }
+   450→    }
+   451→    let program = parse_result.value.unwrap();
+   452→
+   453→    // Step 2: Bridge parser AST → codegen SCG.
+   454→    let codegen_scg = bridge_ast_to_codegen_scg(&program);
+   455→
+   456→    // Step 3: Lower codegen SCG → IR.
+   457→    let mut ir_builder = ScgToIr::new();
+   458→    let ir_program = ir_builder.convert(&codegen_scg).map_err(|e| {
+   459→        format!("IR conversion error: {}", e)
+   460→    })?;
+   461→
+   462→    eprintln!("[emit] IR program has {} functions", ir_program.functions.len());
+   463→    for func in &ir_program.functions {
+   464→        eprintln!("[emit] Function: {} ({} params, {} vregs)", func.name, func.params.len(), func.vregs.len());
+   465→        for block in &func.blocks {
+   466→            eprintln!("[emit]   Block: {}", block.label);
+   467→            for instr in &block.instructions {
+   468→                eprintln!("[emit]     {:?}", instr);
+   469→            }
+   470→        }
+   471→    }
+   472→
+   473→    // Step 4: Create backend and allocate registers.
+   474→    let backend = create_backend(backend_kind).map_err(|e| {
+   475→        format!("error: cannot create {} backend: {}", backend_kind.isa_name(), e)
+   476→    })?;
+   477→
+   478→    let mut allocated_functions = Vec::new();
+   479→    for func in &ir_program.functions {
+   480→        match backend.allocate_registers(func) {
+   481→            Ok(allocated) => allocated_functions.push(allocated),
+   482→            Err(e) => {
+   483→                eprintln!("warning: register allocation failed for '{}': {}", func.name, e);
+   484→            }
+   485→        }
+   486→    }
+   487→
+   488→    let out_path = output
+   489→        .as_ref()
+   490→        .cloned()
+   491→        .unwrap_or_else(|| default_output_path(file));
+   492→
+   493→    // Step 5: Encode and write output.
+   494→    if !allocated_functions.is_empty() {
+   495→        let allocated_program = vuma_codegen::backend::AllocatedProgram {
+   496→            functions: allocated_functions,
+   497→            total_code_size: 0,
+   498→            total_data_size: 0,
+   499→        };
+   500→        match backend.encode_program(&allocated_program) {
+   501→            Ok(bytes) => {
+   502→                fs::write(&out_path, &bytes).map_err(|e| {
+   503→                    format!("error: cannot write output file '{}': {}", out_path.display(), e)
+   504→                })?;
+   505→                // Make the output file executable on Unix.
+   506→                #[cfg(unix)]
+   507→                {
+   508→                    use std::os::unix::fs::PermissionsExt;
+   509→                    let mut perms = fs::metadata(&out_path)
+   510→                        .map_err(|e| format!("error: cannot stat '{}': {}", out_path.display(), e))?
+   511→                        .permissions();
+   512→                    perms.set_mode(0o755);
+   513→                    fs::set_permissions(&out_path, perms)
+   514→                        .map_err(|e| format!("error: cannot chmod '{}': {}", out_path.display(), e))?;
+   515→                }
+   516→                println!(
+   517→                    "Emitted {} -> {} ({} bytes, ISA: {})",
+   518→                    file.display(),
+   519→                    out_path.display(),
+   520→                    bytes.len(),
+   521→                    backend.name(),
+   522→                );
+   523→            }
+   524→            Err(e) => {
+   525→                return Err(format!("{} encoding failed: {}", backend.name(), e));
+   526→            }
+   527→        }
+   528→    } else {
+   529→        return Err("no functions were successfully allocated".to_string());
+   530→    }
+   531→
+   532→    Ok(())
+   533→}
+   534→
+   535→/// Bridge parser AST → codegen SCG.
+   536→///
+   537→/// This converts the parser's AST into the codegen's SCG representation,
+   538→/// which can then be lowered to IR. This bypasses the main pipeline's
+   539→/// semantic SCG which loses most program semantics.
+   540→///
+   541→/// Key design: expressions are flattened into three-address code (TAC) by
+   542→/// introducing temporary variables for sub-expressions. This preserves the
+   543→/// full semantics of nested binary operations, function calls, dereferences,
+   544→/// and casts.
+   545→fn bridge_ast_to_codegen_scg(program: &vuma_parser::ast::Program) -> Scg {
+   546→    use vuma_parser::ast::Item;
+   547→
+   548→    let mut nodes: Vec<ScgNode> = Vec::new();
+   549→
+   550→    for item in &program.items {
+   551→        if let Item::FnDef(fn_def) = item {
+   552→            let params: Vec<ScgParam> = fn_def
+   553→                .params
+   554→                .iter()
+   555→                .map(|p| ScgParam {
+   556→                    name: p.name.clone(),
+   557→                    ty: bridge_type_to_codegen_scg(&p.ty),
+   558→                })
+   559→                .collect();
+   560→
+   561→            let results = if let Some(ref ret_ty) = fn_def.return_type {
+   562→                vec![bridge_type_to_codegen_scg(&Some(ret_ty.clone()))]
+   563→            } else {
+   564→                vec![]
+   565→            };
+   566→
+   567→            let mut ctx = BridgeCtx::new();
+   568→            let mut body = bridge_block_to_scg_stmts(&fn_def.body, &mut ctx);
+   569→
+   570→            // Ensure every function ends with a Return statement.
+   571→            // If the body doesn't end with a Return, add an implicit one.
+   572→            // When the function has a return type and the last statement was an
+   573→            // expression, use ctx.last_expr_result as the return value.
+   574→            let has_return = body.last().map_or(false, |s| matches!(s, ScgStatement::Return(_)));
+   575→            if !has_return {
+   576→                let ret_val = if !results.is_empty() {
+   577→                    // First check if the last expression was tracked.
+   578→                    if let Some(ref expr) = ctx.last_expr_result {
+   579→                        Some(expr.clone())
+   580→                    } else {
+   581→                        // Otherwise, look for the last computation/call result.
+   582→                        body.iter().rev().find_map(|s| match s {
+   583→                            ScgStatement::Computation(comp) => Some(ScgExpr::Var(comp.dst.clone())),
+   584→                            ScgStatement::Call(call) => call.dst.as_ref().map(|d| ScgExpr::Var(d.clone())),
+   585→                            _ => None,
+   586→                        })
+   587→                    }
+   588→                } else {
+   589→                    None
+   590→                };
+   591→                body.push(ScgStatement::Return(ret_val.into_iter().collect()));
+   592→            }
+   593→
+   594→            nodes.push(ScgNode::Function(ScgFunction {
+   595→                name: fn_def.name.clone(),
+   596→                params,
+   597→                results,
+   598→                body,
+   599→            }));
+   600→        }
+   601→    }
+   602→
+   603→    Scg { nodes }
+   604→}
+   605→
+   606→/// Context for the AST → codegen SCG bridge, tracking a monotonic temp counter
+   607→/// and the last expression result for implicit returns.
+   608→struct BridgeCtx {
+   609→    temp_counter: u32,
+   610→    /// The result of the last expression statement, if any.
+   611→    /// Used for implicit return when a function body ends with an expression.
+   612→    last_expr_result: Option<ScgExpr>,
+   613→}
+   614→
+   615→impl BridgeCtx {
+   616→    fn new() -> Self {
+   617→        Self { temp_counter: 0, last_expr_result: None }
+   618→    }
+   619→
+   620→    /// Allocate a unique temporary variable name.
+   621→    fn alloc_temp(&mut self) -> String {
+   622→        let name = format!("__t{}", self.temp_counter);
+   623→        self.temp_counter += 1;
+   624→        name
+   625→    }
+   626→}
+   627→
+   628→/// Convert a parser type annotation to a codegen SCG type.
+   629→fn bridge_type_to_codegen_scg(ty: &Option<vuma_parser::ast::Type>) -> ScgType {
+   630→    match ty {
+   631→        Some(vuma_parser::ast::Type::BDBase(name)) => match name.as_str() {
+   632→            "i8" => ScgType::I8,
+   633→            "i16" => ScgType::I16,
+   634→            "i32" => ScgType::I32,
+   635→            "i64" => ScgType::I64,
+   636→            "u8" => ScgType::U8,
+   637→            "u16" => ScgType::U16,
+   638→            "u32" => ScgType::U32,
+   639→            "u64" => ScgType::U64,
+   640→            _ => ScgType::I64,
+   641→        },
+   642→        Some(vuma_parser::ast::Type::Ptr(_)) => ScgType::Ptr,
+   643→        Some(vuma_parser::ast::Type::RegionPtr { .. }) => ScgType::Ptr,
+   644→        _ => ScgType::Void,
+   645→    }
+   646→}
+   647→
+   648→
+   649→/// Convert a parser block into codegen SCG statements, flattening expressions
+   650→/// into three-address code with temporaries.
+   651→fn bridge_block_to_scg_stmts(block: &vuma_parser::ast::Block, ctx: &mut BridgeCtx) -> Vec<ScgStatement> {
+   652→    block
+   653→        .statements
+   654→        .iter()
+   655→        .flat_map(|s| bridge_stmt_to_scg(s, ctx))
+   656→        .collect()
+   657→}
+   658→
+   659→/// Flatten an expression into three-address code. Returns the ScgExpr that
+   660→/// holds the result, and appends any intermediate computation statements
+   661→/// to `stmts`.
+   662→///
+   663→/// This is the core of the bridge: it recursively decomposes nested
+   664→/// expressions into a sequence of simple computation nodes, each operating
+   665→/// on at most two operands and producing one result. This preserves the
+   666→/// full semantics of the original expression tree.
+   667→fn flatten_expr(
+   668→    expr: &vuma_parser::ast::Expr,
+   669→    stmts: &mut Vec<ScgStatement>,
+   670→    ctx: &mut BridgeCtx,
+   671→) -> ScgExpr {
+   672→    use vuma_parser::ast::{Expr, Lit, UnOp};
+   673→
+   674→    match expr {
+   675→        // ── Leaf expressions: return directly, no flattening needed ──
+   676→        Expr::Var { name, .. } => ScgExpr::Var(name.clone()),
+   677→        Expr::Lit { value, .. } => match value {
+   678→            Lit::Int(n) => ScgExpr::Int(*n),
+   679→            Lit::Float(f) => ScgExpr::Float(*f),
+   680→            Lit::Bool(b) => ScgExpr::Int(if *b { 1 } else { 0 }),
+   681→            Lit::Address(a) => ScgExpr::Int(*a as i64),
+   682→            Lit::String(_) => ScgExpr::Int(0),
+   683→        },
+   684→
+   685→        // ── Binary operations: flatten lhs and rhs, then emit one Computation ──
+   686→        Expr::BinOp { op, lhs, rhs, .. } => {
+   687→            let lhs_expr = flatten_expr(lhs, stmts, ctx);
+   688→            let rhs_expr = flatten_expr(rhs, stmts, ctx);
+   689→            let dst = ctx.alloc_temp();
+   690→            let binop_kind = map_ast_binop(op);
+   691→            stmts.push(ScgStatement::Computation(ComputationNode {
+   692→                dst: dst.clone(),
+   693→                op: binop_kind,
+   694→                lhs: lhs_expr,
+   695→                rhs: rhs_expr,
+   696→                tail_call: false,
+   697→            }));
+   698→            ScgExpr::Var(dst)
+   699→        }
+   700→
+   701→        // ── Unary operations: flatten operand, then emit one Computation ──
+   702→        Expr::UnOp { op, expr: operand, .. } => {
+   703→            let operand_expr = flatten_expr(operand, stmts, ctx);
+   704→            let dst = ctx.alloc_temp();
+   705→            match op {
+   706→                UnOp::BitNot => {
+   707→                    stmts.push(ScgStatement::Computation(ComputationNode {
+   708→                        dst: dst.clone(),
+   709→                        op: BinOpKind::Xor,
+   710→                        lhs: operand_expr,
+   711→                        rhs: ScgExpr::Int(-1),
+   712→                        tail_call: false,
+   713→                    }));
+   714→                }
+   715→                UnOp::Neg => {
+   716→                    stmts.push(ScgStatement::Computation(ComputationNode {
+   717→                        dst: dst.clone(),
+   718→                        op: BinOpKind::Sub,
+   719→                        lhs: ScgExpr::Int(0),
+   720→                        rhs: operand_expr,
+   721→                        tail_call: false,
+   722→                    }));
+   723→                }
+   724→                UnOp::Not => {
+   725→                    stmts.push(ScgStatement::Computation(ComputationNode {
+   726→                        dst: dst.clone(),
+   727→                        op: BinOpKind::Eq,
+   728→                        lhs: operand_expr,
+   729→                        rhs: ScgExpr::Int(0),
+   730→                        tail_call: false,
+   731→                    }));
+   732→                }
+   733→                UnOp::Deref => {
+   734→                    stmts.push(ScgStatement::Access(AccessNode::Load {
+   735→                        dst: dst.clone(),
+   736→                        ptr: operand_expr,
+   737→                        offset: None,
+   738→                    }));
+   739→                }
+   740→            }
+   741→            ScgExpr::Var(dst)
+   742→        }
+   743→
+   744→        // ── Function call: flatten args, emit CallNode ──
+   745→        Expr::Call { callee, args, .. } => {
+   746→            let func_name = match callee.as_ref() {
+   747→                Expr::Var { name, .. } => name.clone(),
+   748→                _ => "_unknown".into(),
+   749→            };
+   750→            let flat_args: Vec<ScgExpr> = args.iter()
+   751→                .map(|a| flatten_expr(a, stmts, ctx))
+   752→                .collect();
+   753→            let dst = ctx.alloc_temp();
+   754→            stmts.push(ScgStatement::Call(CallNode {
+   755→                dst: Some(dst.clone()),
+   756→                func: func_name,
+   757→                args: flat_args,
+   758→            }));
+   759→            ScgExpr::Var(dst)
+   760→        }
+   761→
+   762→        // ── Dereference: flatten the address, emit Load ──
+   763→        Expr::Deref { expr, .. } => {
+   764→            let addr = flatten_expr(expr, stmts, ctx);
+   765→            let dst = ctx.alloc_temp();
+   766→            stmts.push(ScgStatement::Access(AccessNode::Load {
+   767→                dst: dst.clone(),
+   768→                ptr: addr,
+   769→                offset: None,
+   770→            }));
+   771→            ScgExpr::Var(dst)
+   772→        }
+   773→
+   774→        // ── Offset (pointer arithmetic): flatten base and offset, emit Add ──
+   775→        Expr::Offset { base, offset, .. } => {
+   776→            let base_expr = flatten_expr(base, stmts, ctx);
+   777→            let off_expr = flatten_expr(offset, stmts, ctx);
+   778→            let dst = ctx.alloc_temp();
+   779→            stmts.push(ScgStatement::Computation(ComputationNode {
+   780→                dst: dst.clone(),
+   781→                op: BinOpKind::Add,
+   782→                lhs: base_expr,
+   783→                rhs: off_expr,
+   784→                tail_call: false,
+   785→            }));
+   786→            ScgExpr::Var(dst)
+   787→        }
+   788→
+   789→        // ── Cast: flatten operand, pass through ──
+   790→        Expr::Cast { expr, .. } => flatten_expr(expr, stmts, ctx),
+   791→
+   792→        // ── TypeAscription: flatten inner expression ──
+   793→        Expr::TypeAscription { expr, .. } => flatten_expr(expr, stmts, ctx),
+   794→
+   795→        // ── Index: flatten base and index, compute addr, emit Load ──
+   796→        Expr::Index { expr, index, .. } => {
+   797→            let base_expr = flatten_expr(expr, stmts, ctx);
+   798→            let idx_expr = flatten_expr(index, stmts, ctx);
+   799→            let addr = ctx.alloc_temp();
+   800→            stmts.push(ScgStatement::Computation(ComputationNode {
+   801→                dst: addr.clone(),
+   802→                op: BinOpKind::Add,
+   803→                lhs: base_expr,
+   804→                rhs: idx_expr,
+   805→                tail_call: false,
+   806→            }));
+   807→            let dst = ctx.alloc_temp();
+   808→            stmts.push(ScgStatement::Access(AccessNode::Load {
+   809→                dst: dst.clone(),
+   810→                ptr: ScgExpr::Var(addr),
+   811→                offset: None,
+   812→            }));
+   813→            ScgExpr::Var(dst)
+   814→        }
+   815→
+   816→        // ── Range: just flatten start (range is handled by For) ──
+   817→        Expr::Range { start, .. } => flatten_expr(start, stmts, ctx),
+   818→
+   819→        // ── Allocate: emit as a heap allocation call ──
+   820→        Expr::Allocate { size, .. } => {
+   821→            let size_expr = flatten_expr(size, stmts, ctx);
+   822→            let dst = ctx.alloc_temp();
+   823→            stmts.push(ScgStatement::Call(CallNode {
+   824→                dst: Some(dst.clone()),
+   825→                func: "__vuma_alloc".to_string(),
+   826→                args: vec![size_expr],
+   827→            }));
+   828→            ScgExpr::Var(dst)
+   829→        }
+   830→
+   831→        // ── Null → 0 ──
+   832→        Expr::Null { .. } => ScgExpr::Int(0),
+   833→
+   834→        // ── Uninitialized → 0 ──
+   835→        Expr::Uninitialized { .. } => ScgExpr::Int(0),
+   836→
+   837→        // ── Fallback for unsupported expression types ──
+   838→        _ => ScgExpr::Int(0),
+   839→    }
+   840→}
+   841→
+   842→/// Map a VUMA AST BinOp to a codegen BinOpKind.
+   843→fn map_ast_binop(op: &vuma_parser::ast::BinOp) -> BinOpKind {
+   844→    use vuma_parser::ast::BinOp;
+   845→    match op {
+   846→        BinOp::Add => BinOpKind::Add,
+   847→        BinOp::Sub => BinOpKind::Sub,
+   848→        BinOp::Mul => BinOpKind::Mul,
+   849→        BinOp::Div => BinOpKind::SDiv,
+   850→        BinOp::Mod => BinOpKind::SRem,
+   851→        BinOp::And => BinOpKind::And,
+   852→        BinOp::Or => BinOpKind::Or,
+   853→        BinOp::BitAnd => BinOpKind::And,
+   854→        BinOp::BitOr => BinOpKind::Or,
+   855→        BinOp::BitXor => BinOpKind::Xor,
+   856→        BinOp::Shl => BinOpKind::Shl,
+   857→        BinOp::Shr => BinOpKind::ShrL,
+   858→        BinOp::Eq => BinOpKind::Eq,
+   859→        BinOp::Ne => BinOpKind::Ne,
+   860→        BinOp::Lt => BinOpKind::SLt,
+   861→        BinOp::Le => BinOpKind::SLe,
+   862→        BinOp::Gt => BinOpKind::SGt,
+   863→        BinOp::Ge => BinOpKind::SGe,
+   864→    }
+   865→}
+   866→
+   867→/// Convert a single parser statement into zero or more codegen SCG statements.
+   868→/// Uses `flatten_expr` to decompose nested expressions into three-address code.
+   869→fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) -> Vec<ScgStatement> {
+   870→    use vuma_parser::ast::Stmt as PStmt;
+   871→
+   872→    match stmt {
+   873→        // ── let x [: T] = expr ──
+   874→        PStmt::Let(let_stmt) => {
+   875→            let mut stmts = Vec::new();
+   876→
+   877→            // Check if the RHS is an allocate() call → AllocationNode::Stack
+   878→            if let vuma_parser::ast::Expr::Call { callee, args, .. } = &let_stmt.value {
+   879→                if let vuma_parser::ast::Expr::Var { name, .. } = callee.as_ref() {
+   880→                    if name == "allocate" {
+   881→                        let size: u32 = args.first()
+   882→                            .and_then(|a| {
+   883→                                if let vuma_parser::ast::Expr::Lit { value, .. } = a {
+   884→                                    if let vuma_parser::ast::Lit::Int(n) = value {
+   885→                                        return Some(*n as u32);
+   886→                                    }
+   887→                                }
+   888→                                None
+   889→                            })
+   890→                            .unwrap_or(8);
+   891→                        return vec![ScgStatement::Allocation(AllocationNode::Stack {
+   892→                            name: let_stmt.name.clone(),
+   893→                            size,
+   894→                            ty: ScgType::Ptr,
+   895→                        })];
+   896→                    }
+   897→                    // Other function calls → CallNode (flatten args)
+   898→                    let flat_args: Vec<ScgExpr> = args.iter()
+   899→                        .map(|a| flatten_expr(a, &mut stmts, ctx))
+   900→                        .collect();
+   901→                    stmts.push(ScgStatement::Call(CallNode {
+   902→                        dst: Some(let_stmt.name.clone()),
+   903→                        func: name.clone(),
+   904→                        args: flat_args,
+   905→                    }));
+   906→                    return stmts;
+   907→                }
+   908→            }
+   909→
+   910→            // Check if the RHS is an Allocate expression → AllocationNode::Stack
+   911→            if let vuma_parser::ast::Expr::Allocate { size, .. } = &let_stmt.value {
+   912→                let size_val: u32 = match size.as_ref() {
+   913→                    vuma_parser::ast::Expr::Lit { value, .. } => {
+   914→                        if let vuma_parser::ast::Lit::Int(n) = value {
+   915→                            *n as u32
+   916→                        } else {
+   917→                            8
+   918→                        }
+   919→                    }
+   920→                    _ => 8,
+   921→                };
+   922→                return vec![ScgStatement::Allocation(AllocationNode::Stack {
+   923→                    name: let_stmt.name.clone(),
+   924→                    size: size_val,
+   925→                    ty: ScgType::Ptr,
+   926→                })];
+   927→            }
+   928→
+   929→            // General case: flatten the expression and assign to dst
+   930→            let result = flatten_expr(&let_stmt.value, &mut stmts, ctx);
+   931→            match &result {
+   932→                ScgExpr::Var(name) if name == &let_stmt.name => {}
+   933→                _ => {
+   934→                    stmts.push(ScgStatement::Computation(ComputationNode {
+   935→                        dst: let_stmt.name.clone(),
+   936→                        op: BinOpKind::Add,
+   937→                        lhs: result,
+   938→                        rhs: ScgExpr::Int(0),
+   939→                        tail_call: false,
+   940→                    }));
+   941→                }
+   942→            }
+   943→            stmts
+   944→        }
+   945→
+   946→        // ── target = value ──
+   947→        PStmt::Assign(assign_stmt) => {
+   948→            let mut stmts = Vec::new();
+   949→
+   950→            // Detect dereference writes: `*expr = val` → Access::Store
+   951→            if let vuma_parser::ast::AssignTarget::Deref { expr, .. } = &assign_stmt.target {
+   952→                let ptr = flatten_expr(expr, &mut stmts, ctx);
+   953→                let value = flatten_expr(&assign_stmt.value, &mut stmts, ctx);
+   954→                stmts.push(ScgStatement::Access(AccessNode::Store {
+   955→                    ptr,
+   956→                    offset: None,
+   957→                    value,
+   958→                }));
+   959→                return stmts;
+   960→            }
+   961→
+   962→            // Handle Index target: ptr[index] = value
+   963→            if let vuma_parser::ast::AssignTarget::Index { expr, index, .. } = &assign_stmt.target {
+   964→                let base = flatten_expr(expr, &mut stmts, ctx);
+   965→                let idx = flatten_expr(index, &mut stmts, ctx);
+   966→                let addr = ctx.alloc_temp();
+   967→                stmts.push(ScgStatement::Computation(ComputationNode {
+   968→                    dst: addr.clone(),
+   969→                    op: BinOpKind::Add,
+   970→                    lhs: base,
+   971→                    rhs: idx,
+   972→                    tail_call: false,
+   973→                }));
+   974→                let value = flatten_expr(&assign_stmt.value, &mut stmts, ctx);
+   975→                stmts.push(ScgStatement::Access(AccessNode::Store {
+   976→                    ptr: ScgExpr::Var(addr),
+   977→                    offset: None,
+   978→                    value,
+   979→                }));
+   980→                return stmts;
+   981→            }
+   982→
+   983→            let dst = match &assign_stmt.target {
+   984→                vuma_parser::ast::AssignTarget::Var { name, .. } => name.clone(),
+   985→                vuma_parser::ast::AssignTarget::DerefField { field, .. } => field.clone(),
+   986→                vuma_parser::ast::AssignTarget::Deref { .. } => "_deref".into(),
+   987→                vuma_parser::ast::AssignTarget::Index { .. } => "_index".into(),
+   988→            };
+   989→
+   990→            // Detect allocate() expression → AllocationNode::Stack
+   991→            if let vuma_parser::ast::Expr::Allocate { size, .. } = &assign_stmt.value {
+   992→                let size_val: u32 = match size.as_ref() {
+   993→                    vuma_parser::ast::Expr::Lit { value, .. } => {
+   994→                        if let vuma_parser::ast::Lit::Int(n) = value {
+   995→                            *n as u32
+   996→                        } else {
+   997→                            8
+   998→                        }
+   999→                    }
+  1000→                    _ => 8,
+  1001→                };
+  1002→                return vec![ScgStatement::Allocation(AllocationNode::Stack {
+  1003→                    name: dst,
+  1004→                    size: size_val,
+  1005→                    ty: ScgType::Ptr,
+  1006→                })];
+  1007→            }
+  1008→
+  1009→            // Detect function calls in assign: `x = foo(args)` → CallNode (flatten args)
+  1010→            if let vuma_parser::ast::Expr::Call { callee, args, .. } = &assign_stmt.value {
+  1011→                if let vuma_parser::ast::Expr::Var { name, .. } = callee.as_ref() {
+  1012→                    let flat_args: Vec<ScgExpr> = args.iter()
+  1013→                        .map(|a| flatten_expr(a, &mut stmts, ctx))
+  1014→                        .collect();
+  1015→                    stmts.push(ScgStatement::Call(CallNode {
+  1016→                        dst: Some(dst),
+  1017→                        func: name.clone(),
+  1018→                        args: flat_args,
+  1019→                    }));
+  1020→                    return stmts;
+  1021→                }
+  1022→            }
+  1023→
+  1024→            // General case: flatten the value expression and assign to dst
+  1025→            let result = flatten_expr(&assign_stmt.value, &mut stmts, ctx);
+  1026→            match &result {
+  1027→                ScgExpr::Var(name) if name == &dst => {}
+  1028→                _ => {
+  1029→                    stmts.push(ScgStatement::Computation(ComputationNode {
+  1030→                        dst,
+  1031→                        op: BinOpKind::Add,
+  1032→                        lhs: result,
+  1033→                        rhs: ScgExpr::Int(0),
+  1034→                        tail_call: false,
+  1035→                    }));
+  1036→                }
+  1037→            }
+  1038→            stmts
+  1039→        }
+  1040→
+  1041→        // ── target op= value ──
+  1042→        PStmt::CompoundAssign(ca_stmt) => {
+  1043→            let mut stmts = Vec::new();
+  1044→            let dst = match &ca_stmt.target {
+  1045→                vuma_parser::ast::AssignTarget::Var { name, .. } => name.clone(),
+  1046→                vuma_parser::ast::AssignTarget::DerefField { field, .. } => field.clone(),
+  1047→                _ => "_".into(),
+  1048→            };
+  1049→            let binop = match ca_stmt.op {
+  1050→                vuma_parser::ast::CompoundOp::Add => BinOpKind::Add,
+  1051→                vuma_parser::ast::CompoundOp::Sub => BinOpKind::Sub,
+  1052→                vuma_parser::ast::CompoundOp::Mul => BinOpKind::Mul,
+  1053→                vuma_parser::ast::CompoundOp::Div => BinOpKind::SDiv,
+  1054→                vuma_parser::ast::CompoundOp::Mod => BinOpKind::SRem,
+  1055→                vuma_parser::ast::CompoundOp::BitAnd => BinOpKind::And,
+  1056→                vuma_parser::ast::CompoundOp::BitOr => BinOpKind::Or,
+  1057→                vuma_parser::ast::CompoundOp::BitXor => BinOpKind::Xor,
+  1058→                vuma_parser::ast::CompoundOp::Shl => BinOpKind::Shl,
+  1059→                vuma_parser::ast::CompoundOp::Shr => BinOpKind::ShrL,
+  1060→            };
+  1061→            let rhs = flatten_expr(&ca_stmt.value, &mut stmts, ctx);
+  1062→            stmts.push(ScgStatement::Computation(ComputationNode {
+  1063→                dst: dst.clone(),
+  1064→                op: binop,
+  1065→                lhs: ScgExpr::Var(dst),
+  1066→                rhs,
+  1067→                tail_call: false,
+  1068→            }));
+  1069→            stmts
+  1070→        }
+  1071→
+  1072→        PStmt::Allocate(_) => vec![],
+  1073→        PStmt::Free(_) => vec![],
+  1074→
+  1075→        PStmt::Cast(cast_stmt) => {
+  1076→            let mut stmts = Vec::new();
+  1077→            let _ = flatten_expr(&cast_stmt.expr, &mut stmts, ctx);
+  1078→            stmts
+  1079→        }
+  1080→
+  1081→        PStmt::Return(ret_stmt) => {
+  1082→            let mut stmts = Vec::new();
+  1083→            let values = match &ret_stmt.value {
+  1084→                Some(expr) => vec![flatten_expr(expr, &mut stmts, ctx)],
+  1085→                None => vec![],
+  1086→            };
+  1087→            stmts.push(ScgStatement::Return(values));
+  1088→            stmts
+  1089→        }
+  1090→
+  1091→        PStmt::Expr(expr_stmt) => {
+  1092→            let mut stmts = Vec::new();
+  1093→            let result = flatten_expr(&expr_stmt.expr, &mut stmts, ctx);
+  1094→            ctx.last_expr_result = Some(result);
+  1095→            stmts
+  1096→        }
+  1097→
+  1098→        PStmt::If(if_stmt) => {
+  1099→            let mut pre_stmts = Vec::new();
+  1100→            let cond = flatten_expr(&if_stmt.condition, &mut pre_stmts, ctx);
+  1101→            let then_body = bridge_block_to_scg_stmts(&if_stmt.then_block, ctx);
+  1102→            let else_body = if_stmt
+  1103→                .else_block
+  1104→                .as_ref()
+  1105→                .map(|b| bridge_block_to_scg_stmts(b, ctx));
+  1106→            let mut result = pre_stmts;
+  1107→            result.push(ScgStatement::Control(ControlNode::If {
+  1108→                cond,
+  1109→                then_body,
+  1110→                else_body,
+  1111→            }));
+  1112→            result
+  1113→        }
+  1114→
+  1115→        // while condition { body }
+  1116→        // Lowered as: Loop { <compute cond>; if cond { body } else { break } }
+  1117→        PStmt::While(while_stmt) => {
+  1118→            let then_body = bridge_block_to_scg_stmts(&while_stmt.body, ctx);
+  1119→            let mut loop_body = Vec::new();
+  1120→            let cond = flatten_expr(&while_stmt.condition, &mut loop_body, ctx);
+  1121→            loop_body.push(ScgStatement::Control(ControlNode::If {
+  1122→                cond,
+  1123→                then_body,
+  1124→                else_body: Some(vec![ScgStatement::Control(ControlNode::Break)]),
+  1125→            }));
+  1126→            vec![ScgStatement::Control(ControlNode::Loop { body: loop_body })]
+  1127→        }
+  1128→
+  1129→        // for name in start..end { body }
+  1130→        // Lowered as:
+  1131→        //   name = start
+  1132→        //   loop { _cond = name < end; if _cond { body; name = name + 1 } else { break } }
+  1133→        PStmt::For(for_stmt) => {
+  1134→            let mut pre_stmts = Vec::new();
+  1135→            let (start_expr, end_expr) = match &for_stmt.iter {
+  1136→                vuma_parser::ast::Expr::Range { start, end, .. } => {
+  1137→                    let s = flatten_expr(start, &mut pre_stmts, ctx);
+  1138→                    let e = flatten_expr(end, &mut pre_stmts, ctx);
+  1139→                    (s, e)
+  1140→                }
+  1141→                other => {
+  1142→                    (ScgExpr::Int(0), ScgExpr::Int(0))
+  1143→                }
+  1144→            };
+  1145→
+  1146→            let init_stmt = ScgStatement::Computation(ComputationNode {
+  1147→                dst: for_stmt.name.clone(),
+  1148→                op: BinOpKind::Add,
+  1149→                lhs: start_expr,
+  1150→                rhs: ScgExpr::Int(0),
+  1151→                tail_call: false,
+  1152→            });
+  1153→
+  1154→            let mut loop_body = Vec::new();
+  1155→            let cond_temp = format!("{}_cond", for_stmt.name);
+  1156→            loop_body.push(ScgStatement::Computation(ComputationNode {
+  1157→                dst: cond_temp.clone(),
+  1158→                op: BinOpKind::SLt,
+  1159→                lhs: ScgExpr::Var(for_stmt.name.clone()),
+  1160→                rhs: end_expr.clone(),
+  1161→                tail_call: false,
+  1162→            }));
+  1163→
+  1164→            let inner_body = bridge_block_to_scg_stmts(&for_stmt.body, ctx);
+  1165→            let mut full_then = inner_body;
+  1166→            full_then.push(ScgStatement::Computation(ComputationNode {
+  1167→                dst: for_stmt.name.clone(),
+  1168→                op: BinOpKind::Add,
+  1169→                lhs: ScgExpr::Var(for_stmt.name.clone()),
+  1170→                rhs: ScgExpr::Int(1),
+  1171→                tail_call: false,
+  1172→            }));
+  1173→
+  1174→            loop_body.push(ScgStatement::Control(ControlNode::If {
+  1175→                cond: ScgExpr::Var(cond_temp),
+  1176→                then_body: full_then,
+  1177→                else_body: Some(vec![ScgStatement::Control(ControlNode::Break)]),
+  1178→            }));
+  1179→
+  1180→            let mut result = pre_stmts;
+  1181→            result.push(init_stmt);
+  1182→            result.push(ScgStatement::Control(ControlNode::Loop { body: loop_body }));
+  1183→            result
+  1184→        }
+  1185→
+  1186→        PStmt::Loop(loop_stmt) => {
+  1187→            let body = bridge_block_to_scg_stmts(&loop_stmt.body, ctx);
+  1188→            vec![ScgStatement::Control(ControlNode::Loop { body })]
+  1189→        }
+  1190→
+  1191→        PStmt::Break(_) => vec![ScgStatement::Control(ControlNode::Break)],
+  1192→        PStmt::Continue(_) => vec![ScgStatement::Control(ControlNode::Continue)],
+  1193→        PStmt::BdDirective(_)
+  1194→        | PStmt::Sync(_)
+  1195→        | PStmt::UnsafeBlock { .. }
+  1196→        | PStmt::Match(_)
+  1197→        | PStmt::Access(_) => vec![],
+  1198→    }
+  1199→}
+  1200→fn cmd_disasm(file: &PathBuf, isa: &IsaArg, base_addr_str: &str) -> Result<(), String> {
+  1201→    let bytes = fs::read(file)
+  1202→        .map_err(|e| format!("error: cannot read binary file '{}': {}", file.display(), e))?;
+  1203→
+  1204→    let base_addr = u64::from_str_radix(base_addr_str.trim_start_matches("0x"), 16)
+  1205→        .map_err(|e| format!("error: invalid base address '{}': {}", base_addr_str, e))?;
+  1206→
+  1207→    let backend_kind = BackendKind::from(*isa);
+  1208→    let backend = create_backend(backend_kind).map_err(|e| {
+  1209→        format!(
+  1210→            "error: cannot create {} backend: {}",
+  1211→            backend_kind.isa_name(),
+  1212→            e
+  1213→        )
+  1214→    })?;
+  1215→
+  1216→    let instructions = backend.disassemble(&bytes, base_addr);
+  1217→
+  1218→    println!(
+  1219→        "Disassembly of {} ({} bytes, ISA: {}):",
+  1220→        file.display(),
+  1221→        bytes.len(),
+  1222→        backend.name()
+  1223→    );
+  1224→    for line in &instructions {
+  1225→        println!("{}", line);
+  1226→    }
+  1227→
+  1228→    Ok(())
+  1229→}
+  1230→
+  1231→/// `vuma verify <file>` — Run IVE 5-invariant verification.
+  1232→fn cmd_verify(cli: &Cli, file: &PathBuf) -> Result<(), String> {
+  1233→    let source = read_source(file)?;
+  1234→    let mut config = make_config(cli, CompileTarget::Linux);
+  1235→    // Force exhaustive verification for the verify subcommand.
+  1236→    config.verification_level = VerificationLevel::Exhaustive;
+  1237→
+  1238→    let result = compile_with_path(&source, Some(file), &config).map_err(|errors| {
+  1239→        print_errors(&errors);
+  1240→        format!(
+  1241→            "compilation/verification failed with {} error(s)",
+  1242→            errors.len()
+  1243→        )
+  1244→    })?;
+  1245→
+  1246→    match result.verification {
+  1247→        Some(ref verification) => {
+  1248→            println!("IVE Verification Results for {}", file.display());
+  1249→            println!("  Overall verdict: {}", verification.overall);
+  1250→            println!(
+  1251→                "  Summary: {} invariant(s) checked",
+  1252→                verification.summary.total_checked
+  1253→            );
+  1254→            println!("           {} passed", verification.summary.passed);
+  1255→            println!("           {} failed", verification.summary.failed);
+  1256→            println!("           {} unverified", verification.summary.unverified);
+  1257→
+  1258→            // Print individual invariant results.
+  1259→            for per_inv in &verification.per_invariant {
+  1260→                let status_str = match &per_inv.result.status {
+  1261→                    vuma_ive::VerificationStatus::Proven => "PROVEN",
+  1262→                    vuma_ive::VerificationStatus::ProbablySafe { .. } => "PROBABLY_SAFE",
+  1263→                    vuma_ive::VerificationStatus::Unverified { .. } => "UNVERIFIED",
+  1264→                    vuma_ive::VerificationStatus::Violated { .. } => "VIOLATED",
+  1265→                };
+  1266→                println!(
+  1267→                    "  [{}] {:?} — {}",
+  1268→                    status_str, per_inv.kind, per_inv.result.message,
+  1269→                );
+  1270→                if let Some(ref evidence) = per_inv.result.evidence {
+  1271→                    println!("    evidence: {}", evidence);
+  1272→                }
+  1273→            }
+  1274→        }
+  1275→        None => {
+  1276→            println!("Verification was skipped (verification level set to None).");
+  1277→        }
+  1278→    }
+  1279→
+  1280→    Ok(())
+  1281→}
+  1282→
+  1283→/// `vuma repl` — Interactive REPL: parse expressions and print AST.
+  1284→fn cmd_repl() -> Result<(), String> {
+  1285→    println!("VUMA REPL v0.1.0");
+  1286→    println!("Type VUMA expressions or statements. Enter ':quit' to exit, ':help' for help.");
+  1287→
+  1288→    let stdin = io::stdin();
+  1289→    let mut input = String::new();
+  1290→
+  1291→    loop {
+  1292→        print!("vuma> ");
+  1293→        io::stdout()
+  1294→            .flush()
+  1295→            .map_err(|e| format!("flush error: {}", e))?;
+  1296→
+  1297→        input.clear();
+  1298→        match stdin.read_line(&mut input) {
+  1299→            Ok(0) => break, // EOF
+  1300→            Ok(_) => {}
+  1301→            Err(e) => return Err(format!("error reading input: {}", e)),
+  1302→        }
+  1303→
+  1304→        let trimmed = input.trim();
+  1305→        if trimmed.is_empty() {
+  1306→            continue;
+  1307→        }
+  1308→        if trimmed == ":quit" || trimmed == ":q" {
+  1309→            break;
+  1310→        }
+  1311→        if trimmed == ":help" || trimmed == ":h" {
+  1312→            println!("  :quit, :q   — Exit the REPL");
+  1313→            println!("  :help, :h   — Show this help");
+  1314→            println!("  <expr>      — Parse and display the AST");
+  1315→            println!("  <stmt>      — Parse and display the AST");
+  1316→            println!("  <program>   — Parse and display the full program AST");
+  1317→            continue;
+  1318→        }
+  1319→
+  1320→        // Try to parse as a full program first.
+  1321→        let mut parser = vuma_parser::Parser::new(trimmed);
+  1322→        let result = parser.parse_program();
+  1323→        if !result.has_errors() {
+  1324→            // Successfully parsed; display the AST.
+  1325→            let program = result.unwrap();
+  1326→            println!("{:#?}", program);
+  1327→            continue;
+  1328→        }
+  1329→        // Program parse had errors; try to parse as an expression via
+  1330→        // wrapping it in a dummy program context.
+  1331→        let program_errors = result.errors.clone();
+  1332→        // Since parse_expr is private, we re-parse as a minimal program.
+  1333→        let wrapped = format!("fn _repl_expr() {{ {} }}", trimmed);
+  1334→        let mut expr_parser = vuma_parser::Parser::new(&wrapped);
+  1335→        let expr_result = expr_parser.parse_program();
+  1336→        if !expr_result.has_errors() {
+  1337→            // Print the function body AST.
+  1338→            let program = expr_result.unwrap();
+  1339→            if let Some(item) = program.items.first() {
+  1340→                println!("{:#?}", item);
+  1341→            } else {
+  1342→                println!("{:#?}", program);
+  1343→            }
+  1344→        } else {
+  1345→            // Show the original parse errors.
+  1346→            for err in &program_errors {
+  1347→                eprintln!("parse error: {}", err);
+  1348→            }
+  1349→        }
+  1350→    }
+  1351→
+  1352→    Ok(())
+  1353→}
+  1354→
+  1355→/// Start the VUMA Language Server (LSP) over stdin/stdout.
+  1356→fn cmd_lsp() -> Result<(), String> {
+  1357→    let mut server = vuma::lsp::LspServer::new();
+  1358→    server.run();
+  1359→    Ok(())
+  1360→}
+  1361→
+  1362→// ═══════════════════════════════════════════════════════════════════════════
+  1363→// Main entry point
+  1364→// ═══════════════════════════════════════════════════════════════════════════
+  1365→
+  1366→fn main() {
+  1367→    // Initialize logger.
+  1368→    env_logger::init();
+  1369→
+  1370→    let cli = Cli::parse();
+  1371→
+  1372→    // Handle --repl flag: launch the full VumaRepl instead of subcommand.
+  1373→    if cli.repl {
+  1374→        let mut repl = vuma_core::repl::VumaRepl::new();
+  1375→        if let Err(e) = repl.run() {
+  1376→            eprintln!("REPL error: {e}");
+  1377→            std::process::exit(1);
+  1378→        }
+  1379→        return;
+  1380→    }
+  1381→
+  1382→    let command = match cli.command {
+  1383→        Some(ref cmd) => cmd.clone(),
+  1384→        None => {
+  1385→            // No subcommand and no --repl: print help.
+  1386→            eprintln!("No subcommand specified. Use `vuma --help` or `vuma --repl`.");
+  1387→            std::process::exit(1);
+  1388→        }
+  1389→    };
+  1390→
+  1391→    let result = match command {
+  1392→        Commands::Build {
+  1393→            ref file,
+  1394→            ref output,
+  1395→            ref target,
+  1396→        } => cmd_build(&cli, file, output, target),
+  1397→        Commands::Run { ref file, ref args } => cmd_run(&cli, file, args),
+  1398→        Commands::Check { ref file } => cmd_check(&cli, file),
+  1399→        Commands::Emit {
+  1400→            ref isa,
+  1401→            ref file,
+  1402→            ref output,
+  1403→        } => cmd_emit(&cli, isa, file, output),
+  1404→        Commands::Disasm {
+  1405→            ref file,
+  1406→            ref isa,
+  1407→            ref base_addr,
+  1408→        } => cmd_disasm(file, isa, base_addr),
+  1409→        Commands::Verify { ref file } => cmd_verify(&cli, file),
+  1410→        Commands::Repl => cmd_repl(),
+  1411→        Commands::Lsp => cmd_lsp(),
+  1412→    };
+  1413→
+  1414→    if let Err(err) = result {
+  1415→        eprintln!("{}", err);
+  1416→        std::process::exit(1);
+  1417→    }
+  1418→}
+  1419→
+  1420→// ═══════════════════════════════════════════════════════════════════════════
+  1421→// Tests for CLI argument parsing
+  1422→// ═══════════════════════════════════════════════════════════════════════════
+  1423→
+  1424→#[cfg(test)]
+  1425→mod tests {
+  1426→    use super::*;
+  1427→    use clap::Parser;
+  1428→
+  1429→    /// Test 1: `vuma build hello.vuma` parses correctly.
+  1430→    #[test]
+  1431→    fn test_build_basic() {
+  1432→        let cli = Cli::try_parse_from(["vuma", "build", "hello.vuma"]).unwrap();
+  1433→        match cli.command {
+  1434→            Commands::Build {
+  1435→                ref file,
+  1436→                ref output,
+  1437→                ref target,
+  1438→            } => {
+  1439→                assert_eq!(file, &PathBuf::from("hello.vuma"));
+  1440→                assert!(output.is_none());
+  1441→                assert_eq!(target, &TargetArg::Linux);
+  1442→            }
+  1443→            _ => panic!("expected Build command"),
+  1444→        }
+  1445→    }
+  1446→
+  1447→    /// Test 2: `vuma build hello.vuma -o out.o --target linux` parses correctly.
+  1448→    #[test]
+  1449→    fn test_build_with_options() {
+  1450→        let cli = Cli::try_parse_from([
+  1451→            "vuma",
+  1452→            "build",
+  1453→            "hello.vuma",
+  1454→            "-o",
+  1455→            "out.o",
+  1456→            "--target",
+  1457→            "linux",
+  1458→        ])
+  1459→        .unwrap();
+  1460→        match cli.command {
+  1461→            Commands::Build {
+  1462→                ref file,
+  1463→                ref output,
+  1464→                ref target,
+  1465→            } => {
+  1466→                assert_eq!(file, &PathBuf::from("hello.vuma"));
+  1467→                assert_eq!(output.as_ref().unwrap(), &PathBuf::from("out.o"));
+  1468→                assert_eq!(target, &TargetArg::Linux);
+  1469→            }
+  1470→            _ => panic!("expected Build command"),
+  1471→        }
+  1472→    }
+  1473→
+  1474→    /// Test 3: `vuma run hello.vuma` parses correctly.
+  1475→    #[test]
+  1476→    fn test_run_basic() {
+  1477→        let cli = Cli::try_parse_from(["vuma", "run", "hello.vuma"]).unwrap();
+  1478→        match cli.command {
+  1479→            Commands::Run { ref file, ref args } => {
+  1480→                assert_eq!(file, &PathBuf::from("hello.vuma"));
+  1481→                assert!(args.is_empty());
+  1482→            }
+  1483→            _ => panic!("expected Run command"),
+  1484→        }
+  1485→    }
+  1486→
+  1487→    /// Test 4: `vuma run hello.vuma arg1 arg2` passes trailing args.
+  1488→    #[test]
+  1489→    fn test_run_with_args() {
+  1490→        let cli = Cli::try_parse_from(["vuma", "run", "hello.vuma", "arg1", "arg2"]).unwrap();
+  1491→        match cli.command {
+  1492→            Commands::Run { ref file, ref args } => {
+  1493→                assert_eq!(file, &PathBuf::from("hello.vuma"));
+  1494→                assert_eq!(args, &vec!["arg1".to_string(), "arg2".to_string()]);
+  1495→            }
+  1496→            _ => panic!("expected Run command"),
+  1497→        }
+  1498→    }
+  1499→
+  1500→    /// Test 5: `vuma check hello.vuma` parses correctly.
+  1501→    #[test]
+  1502→    fn test_check() {
+  1503→        let cli = Cli::try_parse_from(["vuma", "check", "hello.vuma"]).unwrap();
+  1504→        match cli.command {
+  1505→            Commands::Check { ref file } => {
+  1506→                assert_eq!(file, &PathBuf::from("hello.vuma"));
+  1507→            }
+  1508→            _ => panic!("expected Check command"),
+  1509→        }
+  1510→    }
+  1511→
+  1512→    /// Test 6: `vuma emit aarch64 hello.vuma` parses correctly.
+  1513→    #[test]
+  1514→    fn test_emit_aarch64() {
+  1515→        let cli = Cli::try_parse_from(["vuma", "emit", "aarch64", "hello.vuma"]).unwrap();
+  1516→        match cli.command {
+  1517→            Commands::Emit {
+  1518→                isa,
+  1519→                ref file,
+  1520→                ref output,
+  1521→            } => {
+  1522→                assert_eq!(isa, IsaArg::Aarch64);
+  1523→                assert_eq!(file, &PathBuf::from("hello.vuma"));
+  1524→                assert!(output.is_none());
+  1525→            }
+  1526→            _ => panic!("expected Emit command"),
+  1527→        }
+  1528→    }
+  1529→
+  1530→    /// Test 7: `vuma emit x86-64 hello.vuma -o out.o` parses correctly.
+  1531→    #[test]
+  1532→    fn test_emit_x86_64_with_output() {
+  1533→        let cli =
+  1534→            Cli::try_parse_from(["vuma", "emit", "x86_64", "hello.vuma", "-o", "out.o"]).unwrap();
+  1535→        match cli.command {
+  1536→            Commands::Emit {
+  1537→                isa,
+  1538→                ref file,
+  1539→                ref output,
+  1540→            } => {
+  1541→                assert_eq!(isa, IsaArg::X86_64);
+  1542→                assert_eq!(file, &PathBuf::from("hello.vuma"));
+  1543→                assert_eq!(output.as_ref().unwrap(), &PathBuf::from("out.o"));
+  1544→            }
+  1545→            _ => panic!("expected Emit command"),
+  1546→        }
+  1547→    }
+  1548→
+  1549→    /// Test 8: `vuma disasm hello.o --isa riscv64 --base-addr 0x1000` parses correctly.
+  1550→    #[test]
+  1551→    fn test_disasm() {
+  1552→        let cli = Cli::try_parse_from([
+  1553→            "vuma",
+  1554→            "disasm",
+  1555→            "hello.o",
+  1556→            "--isa",
+  1557→            "riscv64",
+  1558→            "--base-addr",
+  1559→            "0x1000",
+  1560→        ])
+  1561→        .unwrap();
+  1562→        match cli.command {
+  1563→            Commands::Disasm {
+  1564→                ref file,
+  1565→                isa,
+  1566→                ref base_addr,
+  1567→            } => {
+  1568→                assert_eq!(file, &PathBuf::from("hello.o"));
+  1569→                assert_eq!(isa, IsaArg::Riscv64);
+  1570→                assert_eq!(base_addr, "0x1000");
+  1571→            }
+  1572→            _ => panic!("expected Disasm command"),
+  1573→        }
+  1574→    }
+  1575→
+  1576→    /// Test 9: `vuma verify hello.vuma` parses correctly.
+  1577→    #[test]
+  1578→    fn test_verify() {
+  1579→        let cli = Cli::try_parse_from(["vuma", "verify", "hello.vuma"]).unwrap();
+  1580→        match cli.command {
+  1581→            Commands::Verify { ref file } => {
+  1582→                assert_eq!(file, &PathBuf::from("hello.vuma"));
+  1583→            }
+  1584→            _ => panic!("expected Verify command"),
+  1585→        }
+  1586→    }
+  1587→
+  1588→    /// Test 10: `vuma repl` parses correctly.
+  1589→    #[test]
+  1590→    fn test_repl_subcommand() {
+  1591→        let cli = Cli::try_parse_from(["vuma", "repl"]).unwrap();
+  1592→        match cli.command {
+  1593→            Some(Commands::Repl) => {}
+  1594→            _ => panic!("expected Repl command"),
+  1595→        }
+  1596→    }
+  1597→
+  1598→    /// Test 10b: `vuma --repl` parses correctly.
+  1599→    #[test]
+  1600→    fn test_repl_flag() {
+  1601→        let cli = Cli::try_parse_from(["vuma", "--repl"]).unwrap();
+  1602→        assert!(cli.repl, "--repl flag should be true");
+  1603→    }
+  1604→
+  1605→    /// Test 11: Global --opt-level flag works.
+  1606→    #[test]
+  1607→    fn test_global_opt_level() {
+  1608→        let cli =
+  1609→            Cli::try_parse_from(["vuma", "--opt-level", "O0", "build", "hello.vuma"]).unwrap();
+  1610→        assert_eq!(cli.opt_level, OptLevelArg::O0);
+  1611→    }
+  1612→
+  1613→    /// Test 12: Global --verification flag works.
+  1614→    #[test]
+  1615→    fn test_global_verification_level() {
+  1616→        let cli = Cli::try_parse_from([
+  1617→            "vuma",
+  1618→            "--verification",
+  1619→            "exhaustive",
+  1620→            "build",
+  1621→            "hello.vuma",
+  1622→        ])
+  1623→        .unwrap();
+  1624→        assert_eq!(cli.verification, VerificationArg::Exhaustive);
+  1625→    }
+  1626→
+  1627→    /// Test 13: Global --debug flag works.
+  1628→    #[test]
+  1629→    fn test_global_debug_flag() {
+  1630→        let cli = Cli::try_parse_from(["vuma", "--debug", "build", "hello.vuma"]).unwrap();
+  1631→        assert!(cli.debug);
+  1632→    }
+  1633→
+  1634→    /// Test 14: Default values are correct.
+  1635→    #[test]
+  1636→    fn test_defaults() {
+  1637→        let cli = Cli::try_parse_from(["vuma", "build", "hello.vuma"]).unwrap();
+  1638→        assert_eq!(cli.opt_level, OptLevelArg::O2);
+  1639→        assert_eq!(cli.verification, VerificationArg::Normal);
+  1640→        assert!(!cli.debug);
+  1641→    }
+  1642→
+  1643→    /// Test 15: All ISA values are parseable.
+  1644→    #[test]
+  1645→    fn test_all_isa_values() {
+  1646→        let isa_names = [
+  1647→            "aarch64",
+  1648→            "x86_64",
+  1649→            "riscv64",
+  1650→            "wasm32",
+  1651→            "loongarch64",
+  1652→            "arm32",
+  1653→            "mips64",
+  1654→            "ppc64",
+  1655→        ];
+  1656→        for name in isa_names {
+  1657→            let cli = Cli::try_parse_from(["vuma", "emit", name, "test.vuma"]).unwrap();
+  1658→            match cli.command {
+  1659→                Commands::Emit { isa, .. } => {
+  1660→                    // Verify it parsed without error.
+  1661→                    let _backend_kind = BackendKind::from(isa);
+  1662→                }
+  1663→                _ => panic!("expected Emit command for ISA {}", name),
+  1664→            }
+  1665→        }
+  1666→    }
+  1667→
+  1668→    /// Test 16: OptLevelArg conversion to pipeline OptLevel.
+  1669→    #[test]
+  1670→    fn test_opt_level_conversion() {
+  1671→        assert_eq!(OptLevel::from(OptLevelArg::O0), OptLevel::O0);
+  1672→        assert_eq!(OptLevel::from(OptLevelArg::O1), OptLevel::O1);
+  1673→        assert_eq!(OptLevel::from(OptLevelArg::O2), OptLevel::O2);
+  1674→        assert_eq!(OptLevel::from(OptLevelArg::O3), OptLevel::O3);
+  1675→    }
+  1676→
+  1677→    /// Test 17: VerificationArg conversion to pipeline VerificationLevel.
+  1678→    #[test]
+  1679→    fn test_verification_conversion() {
+  1680→        assert_eq!(
+  1681→            VerificationLevel::from(VerificationArg::None),
+  1682→            VerificationLevel::None
+  1683→        );
+  1684→        assert_eq!(
+  1685→            VerificationLevel::from(VerificationArg::Quick),
+  1686→            VerificationLevel::Quick
+  1687→        );
+  1688→        assert_eq!(
+  1689→            VerificationLevel::from(VerificationArg::Normal),
+  1690→            VerificationLevel::Normal
+  1691→        );
+  1692→        assert_eq!(
+  1693→            VerificationLevel::from(VerificationArg::Exhaustive),
+  1694→            VerificationLevel::Exhaustive
+  1695→        );
+  1696→    }
+  1697→
+  1698→    /// Test 18: TargetArg conversion to pipeline CompileTarget.
+  1699→    #[test]
+  1700→    fn test_target_conversion() {
+  1701→        assert_eq!(CompileTarget::from(TargetArg::Linux), CompileTarget::Linux);
+  1702→    }
+  1703→
+  1704→    /// Test 19: default_output_path produces correct path.
+  1705→    #[test]
+  1706→    fn test_default_output_path() {
+  1707→        let input = PathBuf::from("hello.vuma");
+  1708→        let output = default_output_path(&input);
+  1709→        assert_eq!(output, PathBuf::from("hello.o"));
+  1710→
+  1711→        let input2 = PathBuf::from("/tmp/test.vuma");
+  1712→        let output2 = default_output_path(&input2);
+  1713→        assert_eq!(output2, PathBuf::from("/tmp/test.o"));
+  1714→    }
+  1715→
+  1716→    /// Test 20: Invalid subcommand is rejected.
+  1717→    #[test]
+  1718→    fn test_invalid_subcommand() {
+  1719→        let result = Cli::try_parse_from(["vuma", "invalid"]);
+  1720→        assert!(result.is_err());
+  1721→    }
+  1722→}
+  1723→

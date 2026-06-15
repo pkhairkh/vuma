@@ -1,7 +1,7 @@
 //! # DWARF5 Debug Info Generation
 //!
-//! Produces DWARF version 5 debug information sections for the VUMA AArch64
-//! backend.  The emitted sections can be appended to an ELF binary so that
+//! Produces DWARF version 5 debug information sections for all VUMA
+//! backends.  The emitted sections can be appended to an ELF binary so that
 //! tools such as `readelf`, `objdump`, and `gdb` can decode the program's
 //! structure, function boundaries, local variables, and source-line mapping.
 //!
@@ -12,6 +12,22 @@
 //! | `.debug_abbrev`  | Abbreviation tables (tag + attribute encodings)   |
 //! | `.debug_info`    | Compilation unit DIEs (subprograms, variables)    |
 //! | `.debug_line`    | Line-number program (DWARF5 standard opcodes)     |
+//!
+//! ## Multi-Backend Support
+//!
+//! The `DwarfBuilder` is parameterised by address size to support all
+//! eight VUMA backends:
+//!
+//! | Backend      | Address Size | Min Inst Length |
+//! |--------------|-------------|-----------------|
+//! | x86_64       | 8 bytes     | 1               |
+//! | AArch64      | 8 bytes     | 4               |
+//! | RISC-V 64    | 8 bytes     | 2               |
+//! | ARM32        | 4 bytes     | 2               |
+//! | MIPS64       | 8 bytes     | 4               |
+//! | PPC64        | 8 bytes     | 4               |
+//! | LoongArch64  | 8 bytes     | 4               |
+//! | Wasm32       | 4 bytes     | 1               |
 //!
 //! ## DWARF5 Encoding
 //!
@@ -34,8 +50,10 @@ const DWARF_VERSION: u16 = 5;
 /// DWARF5 unit type: compile unit.
 const DW_UT_COMPILE: u8 = 0x01;
 
-/// DWARF5 address size for AArch64 (64-bit).
-const ADDRESS_SIZE: u8 = 8;
+/// Default DWARF5 address size for 64-bit targets.
+const ADDRESS_SIZE_64: u8 = 8;
+/// DWARF5 address size for 32-bit targets.
+const ADDRESS_SIZE_32: u8 = 4;
 
 // -- Tags --
 
@@ -157,12 +175,16 @@ pub struct LineEntry {
 
 /// Accumulates debug information during codegen and emits DWARF5 sections.
 ///
+/// The builder is parameterised by address size (4 for ARM32/Wasm32,
+/// 8 for all 64-bit targets) and minimum instruction length to correctly
+/// generate DWARF sections for each supported backend.
+///
 /// # Example
 ///
 /// ```
 /// use vuma_codegen::dwarf::DwarfBuilder;
 ///
-/// let mut db = DwarfBuilder::new();
+/// let mut db = DwarfBuilder::new(); // defaults to 64-bit, min_inst_length=4
 /// db.add_compile_unit("test.vuma", "vuma-codegen 0.1");
 /// db.add_subprogram("main", 0, 64);
 /// db.add_variable("x", "i64", -8, 0);
@@ -172,6 +194,18 @@ pub struct LineEntry {
 /// assert!(!sections.debug_abbrev.is_empty());
 /// assert!(!sections.debug_info.is_empty());
 /// assert!(!sections.debug_line.is_empty());
+/// ```
+///
+/// For 32-bit targets:
+///
+/// ```
+/// use vuma_codegen::dwarf::DwarfBuilder;
+///
+/// let mut db = DwarfBuilder::new_32bit(2); // ARM32: 4-byte addr, min_inst=2
+/// db.add_compile_unit("test.vuma", "vuma-codegen 0.1");
+/// db.add_subprogram("main", 0, 32);
+/// let sections = db.emit_debug_sections();
+/// assert!(!sections.debug_info.is_empty());
 /// ```
 #[derive(Debug, Clone)]
 pub struct DwarfBuilder {
@@ -185,6 +219,10 @@ pub struct DwarfBuilder {
     variables: Vec<Variable>,
     /// Recorded line-number entries.
     line_entries: Vec<LineEntry>,
+    /// Address size in bytes: 4 for ARM32/Wasm32, 8 for all 64-bit targets.
+    address_size: u8,
+    /// Minimum instruction length in bytes for the target.
+    min_inst_length: u8,
 }
 
 /// The three DWARF5 debug sections emitted by [`DwarfBuilder::emit_debug_sections`].
@@ -199,7 +237,10 @@ pub struct DebugSections {
 }
 
 impl DwarfBuilder {
-    /// Create a new, empty `DwarfBuilder`.
+    /// Create a new `DwarfBuilder` for 64-bit targets (default).
+    ///
+    /// Uses 8-byte address size and 4-byte minimum instruction length
+    /// (suitable for AArch64, MIPS64, PPC64, LoongArch64).
     pub fn new() -> Self {
         Self {
             source_file: String::new(),
@@ -207,7 +248,84 @@ impl DwarfBuilder {
             subprograms: Vec::new(),
             variables: Vec::new(),
             line_entries: Vec::new(),
+            address_size: ADDRESS_SIZE_64,
+            min_inst_length: 4,
         }
+    }
+
+    /// Create a new `DwarfBuilder` for 32-bit targets.
+    ///
+    /// Uses 4-byte address size and the given minimum instruction length.
+    ///
+    /// # Arguments
+    /// * `min_inst_length` - Minimum instruction length for the target
+    ///   (2 for ARM32, 1 for Wasm32)
+    pub fn new_32bit(min_inst_length: u8) -> Self {
+        Self {
+            source_file: String::new(),
+            producer: String::new(),
+            subprograms: Vec::new(),
+            variables: Vec::new(),
+            line_entries: Vec::new(),
+            address_size: ADDRESS_SIZE_32,
+            min_inst_length,
+        }
+    }
+
+    /// Create a `DwarfBuilder` with explicit address size and min instruction length.
+    ///
+    /// This is the most flexible constructor, allowing any combination
+    /// of address size and instruction length.
+    pub fn with_config(address_size: u8, min_inst_length: u8) -> Self {
+        Self {
+            source_file: String::new(),
+            producer: String::new(),
+            subprograms: Vec::new(),
+            variables: Vec::new(),
+            line_entries: Vec::new(),
+            address_size,
+            min_inst_length,
+        }
+    }
+
+    /// Create a `DwarfBuilder` configured for a specific backend.
+    ///
+    /// Selects the correct address size and minimum instruction length
+    /// for each supported ISA:
+    ///
+    /// | Backend      | address_size | min_inst_length |
+    /// |--------------|-------------|-----------------|
+    /// | x86_64       | 8           | 1               |
+    /// | AArch64      | 8           | 4               |
+    /// | RISC-V 64    | 8           | 2               |
+    /// | ARM32        | 4           | 2               |
+    /// | MIPS64       | 8           | 4               |
+    /// | PPC64        | 8           | 4               |
+    /// | LoongArch64  | 8           | 4               |
+    /// | Wasm32       | 4           | 1               |
+    pub fn for_backend(backend: crate::backend::BackendKind) -> Self {
+        use crate::backend::BackendKind;
+        let (addr_size, min_inst) = match backend {
+            BackendKind::X86_64       => (8, 1),
+            BackendKind::AArch64      => (8, 4),
+            BackendKind::RiscV64      => (8, 2),
+            BackendKind::Arm32        => (4, 2),
+            BackendKind::Mips64       => (8, 4),
+            BackendKind::PowerPC64    => (8, 4),
+            BackendKind::LoongArch64  => (8, 4),
+            BackendKind::Wasm32       => (4, 1),
+        };
+        Self::with_config(addr_size, min_inst)
+    }
+
+    /// Returns the address size configured for this builder.
+    pub fn address_size(&self) -> u8 {
+        self.address_size
+    }
+
+    /// Returns the minimum instruction length configured for this builder.
+    pub fn min_inst_length(&self) -> u8 {
+        self.min_inst_length
     }
 
     /// Record the top-level compilation unit.
@@ -390,7 +508,7 @@ impl DwarfBuilder {
             .map(|s| s.start_offset)
             .min()
             .unwrap_or(0);
-        die_buf.extend_from_slice(&cu_low_pc.to_le_bytes());
+        write_address(&mut die_buf, cu_low_pc, self.address_size);
         // DW_AT_HIGH_PC (DW_FORM_DATA4) — offset from low_pc
         let cu_high_pc: u32 = self
             .subprograms
@@ -409,7 +527,7 @@ impl DwarfBuilder {
                                              // DW_AT_NAME (DW_FORM_STRING)
             write_null_string(&mut die_buf, &sub.name);
             // DW_AT_LOW_PC (DW_FORM_ADDR)
-            die_buf.extend_from_slice(&sub.start_offset.to_le_bytes());
+            write_address(&mut die_buf, sub.start_offset, self.address_size);
             // DW_AT_HIGH_PC (DW_FORM_DATA4) — offset from low_pc
             let size = (sub.end_offset - sub.start_offset) as u32;
             die_buf.extend_from_slice(&size.to_le_bytes());
@@ -452,7 +570,7 @@ impl DwarfBuilder {
         // Unit type
         buf.push(DW_UT_COMPILE);
         // Address size
-        buf.push(ADDRESS_SIZE);
+        buf.push(self.address_size);
         // Debug abbrev offset (always 0 — we have a single abbrev table)
         buf.extend_from_slice(&0u32.to_le_bytes());
 
@@ -484,8 +602,8 @@ impl DwarfBuilder {
         let opcode_base: u8 = 13;
         // Standard opcode lengths for opcodes 1..12
         let standard_opcode_lengths: [u8; 12] = [0, 1, 1, 1, 1, 0, 0, 0, 1, 0, 0, 1];
-        // Minimum instruction length: 4 (AArch64)
-        let min_inst_length: u8 = 4;
+        // Minimum instruction length: target-dependent
+        let min_inst_length = self.min_inst_length;
         // Maximum operations per instruction: 1
         let max_ops_per_inst: u8 = 1;
 
@@ -587,7 +705,7 @@ impl DwarfBuilder {
         header.extend_from_slice(&DWARF_VERSION.to_le_bytes());
 
         // Address size
-        header.push(ADDRESS_SIZE);
+        header.push(self.address_size);
 
         // Segment selector size (DWARF5: 0)
         header.push(0);
@@ -694,6 +812,14 @@ fn encode_sleb128(buf: &mut Vec<u8>, mut value: i64) {
 fn write_null_string(buf: &mut Vec<u8>, s: &str) {
     buf.extend_from_slice(s.as_bytes());
     buf.push(0);
+}
+
+/// Write an address value into `buf` with the given address size (4 or 8 bytes).
+fn write_address(buf: &mut Vec<u8>, addr: u64, address_size: u8) {
+    match address_size {
+        4 => buf.extend_from_slice(&(addr as u32).to_le_bytes()),
+        _ => buf.extend_from_slice(&addr.to_le_bytes()),
+    }
 }
 
 /// Build a `DW_OP_fbreg <offset>` expression.
@@ -1284,7 +1410,7 @@ mod tests {
         assert_eq!(info[6], DW_UT_COMPILE, "unit type should be DW_UT_COMPILE");
     }
 
-    // -- Test 13: Debug info address size is 8 --
+    // -- Test 13: Debug info address size matches builder config --
     #[test]
     fn test_debug_info_address_size() {
         let db = make_simple_builder();
@@ -1294,8 +1420,20 @@ mod tests {
         // Header: unit_length(4) + version(2) + unit_type(1) + address_size(1)
         assert!(info.len() > 8, "debug_info must have at least 8 bytes");
         assert_eq!(
-            info[7], ADDRESS_SIZE,
-            "address size should be 8 for AArch64"
+            info[7], 8,
+            "address size should be 8 for 64-bit builder (default)"
+        );
+
+        // Test 32-bit builder
+        let mut db32 = DwarfBuilder::new_32bit(2);
+        db32.add_compile_unit("test.vuma", "vuma-codegen");
+        db32.add_subprogram("main", 0, 32);
+        let sections32 = db32.emit_debug_sections();
+        let info32 = &sections32.debug_info;
+        assert!(info32.len() > 8, "32-bit debug_info must have at least 8 bytes");
+        assert_eq!(
+            info32[7], 4,
+            "address size should be 4 for 32-bit builder"
         );
     }
 
@@ -1325,5 +1463,108 @@ mod tests {
             info_str.contains("test.vuma"),
             "debug_info should contain the source file name"
         );
+    }
+
+    // -- Test 16: for_backend creates correct address sizes --
+    #[test]
+    fn test_for_backend_address_sizes() {
+        use crate::backend::BackendKind;
+
+        // 64-bit backends should have address_size = 8
+        for kind in [
+            BackendKind::AArch64,
+            BackendKind::X86_64,
+            BackendKind::RiscV64,
+            BackendKind::Mips64,
+            BackendKind::PowerPC64,
+            BackendKind::LoongArch64,
+        ] {
+            let db = DwarfBuilder::for_backend(kind);
+            assert_eq!(
+                db.address_size(), 8,
+                "{:?}: 64-bit backend should have address_size=8", kind
+            );
+        }
+
+        // 32-bit backends should have address_size = 4
+        for kind in [BackendKind::Arm32, BackendKind::Wasm32] {
+            let db = DwarfBuilder::for_backend(kind);
+            assert_eq!(
+                db.address_size(), 4,
+                "{:?}: 32-bit backend should have address_size=4", kind
+            );
+        }
+    }
+
+    // -- Test 17: for_backend creates correct min_inst_length --
+    #[test]
+    fn test_for_backend_min_inst_length() {
+        use crate::backend::BackendKind;
+
+        assert_eq!(DwarfBuilder::for_backend(BackendKind::X86_64).min_inst_length(), 1);
+        assert_eq!(DwarfBuilder::for_backend(BackendKind::AArch64).min_inst_length(), 4);
+        assert_eq!(DwarfBuilder::for_backend(BackendKind::RiscV64).min_inst_length(), 2);
+        assert_eq!(DwarfBuilder::for_backend(BackendKind::Arm32).min_inst_length(), 2);
+        assert_eq!(DwarfBuilder::for_backend(BackendKind::Mips64).min_inst_length(), 4);
+        assert_eq!(DwarfBuilder::for_backend(BackendKind::PowerPC64).min_inst_length(), 4);
+        assert_eq!(DwarfBuilder::for_backend(BackendKind::LoongArch64).min_inst_length(), 4);
+        assert_eq!(DwarfBuilder::for_backend(BackendKind::Wasm32).min_inst_length(), 1);
+    }
+
+    // -- Test 18: 32-bit debug_line section has correct address size --
+    #[test]
+    fn test_32bit_debug_line_address_size() {
+        let mut db = DwarfBuilder::new_32bit(2);
+        db.add_compile_unit("test.vuma", "vuma-codegen");
+        db.add_line_entry(0, 1, 1, 0);
+        let sections = db.emit_debug_sections();
+        let line = &sections.debug_line;
+
+        // .debug_line header: unit_length(4) + version(2) + address_size(1)
+        // After unit_length + version, address_size is at offset 6
+        assert!(line.len() > 7, "debug_line must have at least 7 bytes");
+        // In DWARF5 .debug_line, address_size follows version:
+        // unit_length(4) + version(2) + address_size(1)
+        assert_eq!(line[6], 4, "32-bit debug_line address_size should be 4");
+    }
+
+    // -- Test 19: 32-bit debug_info addresses are 4 bytes --
+    #[test]
+    fn test_32bit_debug_info_addresses() {
+        let mut db32 = DwarfBuilder::new_32bit(2);
+        db32.add_compile_unit("test.vuma", "vuma-codegen");
+        db32.add_subprogram("main", 0x100, 0x200);
+        let sections32 = db32.emit_debug_sections();
+        let info32 = &sections32.debug_info;
+
+        // After the header (12 bytes for 32-bit), the first DIE (compile unit)
+        // should have DW_AT_LOW_PC as a 4-byte value
+        assert!(info32.len() > 12, "32-bit debug_info must have DIEs after header");
+        let (abbrev_code, _) = decode_uleb128(info32, 12);
+        assert_eq!(abbrev_code, 1, "first DIE should be compile unit");
+
+        // Verify that 4-byte addresses produce smaller sections than 8-byte
+        let mut db64 = DwarfBuilder::new();
+        db64.add_compile_unit("test.vuma", "vuma-codegen");
+        db64.add_subprogram("main", 0x100, 0x200);
+        let sections64 = db64.emit_debug_sections();
+
+        // 64-bit sections should be larger due to 8-byte addresses
+        assert!(
+            sections64.debug_info.len() > sections32.debug_info.len(),
+            "64-bit debug_info should be larger than 32-bit (8-byte vs 4-byte addresses)"
+        );
+    }
+
+    // -- Test 20: with_config allows arbitrary configuration --
+    #[test]
+    fn test_with_config() {
+        let db = DwarfBuilder::with_config(4, 1);
+        assert_eq!(db.address_size(), 4);
+        assert_eq!(db.min_inst_length(), 1);
+
+        let db2 = DwarfBuilder::with_config(8, 2);
+        assert_eq!(db2.address_size(), 8);
+        assert_eq!(db2.min_inst_length(), 2);
     }
 }

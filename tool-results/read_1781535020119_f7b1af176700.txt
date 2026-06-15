@@ -1,0 +1,2002 @@
+     1→//! # ARM64 Code Emission
+     2→//!
+     3→//! Lowers IR to ARM64 machine code and produces ELF binaries or raw binaries
+     4→//! suitable for the AArch64 (Cortex-A76, ARMv8.2-A).
+     5→//!
+     6→//! ## Pipeline
+     7→//!
+     8→//! 1. **IR → ARM64 Instructions**: Each IR instruction is pattern-matched and
+     9→//!    lowered to one or more [`Instruction`]
+    10→//!    values, with virtual registers replaced by physical registers from the
+    11→//!    register allocator.
+    12→//! 2. **Emit function**: Each IR function is emitted as a sequence of 32-bit
+    13→//!    ARM64 code words.
+    14→//! 3. **Emit program**: All functions are collected, data sections are laid
+    15→//!    out, and a minimal ELF64 binary is produced.
+    16→//!
+    17→//! ## Output Formats
+    18→//!
+    19→//! - **ELF**: Full ELF64 binary with program headers, section headers, symbol
+    20→//!   table, and string table.  Suitable for Linux on AArch64.
+    21→//! - **Raw**: Flat binary image for bare-metal AArch64 (loaded at 0x80000).
+    22→//! - **Obj**: Relocatable ELF object file (`ET_REL`) for linking.
+    23→//!
+    24→//! ## ELF Layout (executable)
+    25→//!
+    26→//! ```text
+    27→//! ┌─────────────────────┐
+    28→//! │ ELF Header           │  64 bytes
+    29→//! ├─────────────────────┤
+    30→//! │ Program Headers      │  2 × 56 bytes (LOAD segments)
+    31→//! ├─────────────────────┤
+    32→//! │ .text                │  emitted code
+    33→//! ├─────────────────────┤
+    34→//! │ .rodata              │  read-only data
+    35→//! ├─────────────────────┤
+    36→//! │ .data                │  initialized data
+    37→//! ├─────────────────────┤
+    38→//! │ .symtab              │  symbol table entries
+    39→//! ├─────────────────────┤
+    40→//! │ .strtab              │  symbol string table
+    41→//! ├─────────────────────┤
+    42→//! │ .shstrtab            │  section header string table
+    43→//! ├─────────────────────┤
+    44→//! │ Section Headers      │  N × 64 bytes
+    45→//! └─────────────────────┘
+    46→//! .bss is virtual-only (memsz > filesz in the data LOAD segment).
+    47→//! ```
+    48→//!
+    49→//! ## Relocation Support
+    50→//!
+    51→//! Inter-function calls (`BL`) are resolved in a fixup pass after all
+    52→//! functions have been emitted.  The emitter records the word offset of each
+    53→//! `BL` instruction and the target function name; once function addresses
+    54→//! are known, the branch offsets are patched into the encoded instructions.
+    55→
+    56→use std::collections::HashMap;
+    57→
+    58→use crate::arm64::{Condition, Instruction, Operand, RegWidth, Register};
+    59→use crate::backend::{BackendKind, RelocationEntry};
+    60→use crate::ir::*;
+    61→use crate::regalloc::RegAllocator;
+    62→use crate::CodegenError;
+    63→use crate::Result;
+    64→
+    65→/// Vreg count threshold above which the stack-slot emitter is used instead of
+    66→/// the greedy register allocator.  Functions with more than this many virtual
+    67→/// registers are likely to experience spill/reload corruption with the greedy
+    68→/// allocator.
+    69→const STACK_SLOT_VREG_THRESHOLD: u32 = 0;
+    70→
+    71→// ---------------------------------------------------------------------------
+    72→// Branch fixup format
+    73→// ---------------------------------------------------------------------------
+    74→
+    75→/// The encoding format of a branch instruction, used during fixup resolution
+    76→/// to know which bits contain the offset.
+    77→#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    78→enum BranchFormat {
+    79→    /// B / BL: 26-bit offset in bits[25:0] (word-aligned, offset = imm26 * 4)
+    80→    B26,
+    81→    /// CBZ / CBNZ: 19-bit offset in bits[23:5] (word-aligned, offset = imm19 * 4)
+    82→    Cond19,
+    83→    /// B.cond: 19-bit offset in bits[23:5] (word-aligned)
+    84→    BCond19,
+    85→}
+    86→
+    87→
+    88→// ---------------------------------------------------------------------------
+    89→// ELF Constants (ARM64 / AArch64)
+    90→// ---------------------------------------------------------------------------
+    91→
+    92→/// ELF magic bytes.
+    93→const ELF_MAGIC: [u8; 4] = [0x7f, b'E', b'L', b'F'];
+    94→
+    95→/// 64-bit ELF.
+    96→const ELFCLASS64: u8 = 2;
+    97→
+    98→/// Little-endian data encoding.
+    99→const ELFDATA2LSB: u8 = 1;
+   100→
+   101→/// ELF version.
+   102→const EV_CURRENT: u8 = 1;
+   103→
+   104→/// Linux OS/ABI.
+   105→const ELFOSABI_LINUX: u8 = 3;
+   106→
+   107→/// Standalone / bare-metal OS/ABI (ELFOSABI_STANDALONE).
+   108→const ELFOSABI_STANDALONE: u8 = 255;
+   109→
+   110→/// Machine type: AArch64.
+   111→const EM_AARCH64: u16 = 183;
+   112→
+   113→/// Machine type: x86-64.
+   114→const EM_X86_64: u16 = 62;
+   115→
+   116→/// Machine type: RISC-V.
+   117→const EM_RISCV: u16 = 243;
+   118→
+   119→/// Machine type: MIPS.
+   120→const EM_MIPS: u16 = 8;
+   121→
+   122→/// Machine type: PowerPC 64-bit.
+   123→const EM_PPC64: u16 = 21;
+   124→
+   125→/// Machine type: LoongArch.
+   126→const EM_LOONGARCH: u16 = 258;
+   127→
+   128→/// Machine type: ARM (32-bit).
+   129→const EM_ARM: u16 = 40;
+   130→
+   131→/// ELF type: executable.
+   132→const ET_EXEC: u16 = 2;
+   133→
+   134→/// ELF type: relocatable object.
+   135→const ET_REL: u16 = 1;
+   136→
+   137→/// Program header type: LOAD.
+   138→const PT_LOAD: u32 = 1;
+   139→
+   140→/// Program header flags.
+   141→const PF_X: u32 = 1;
+   142→const PF_W: u32 = 2;
+   143→const PF_R: u32 = 4;
+   144→
+   145→/// Section header type: null (unused).
+   146→const SHT_NULL: u32 = 0;
+   147→/// Section header type: progbits.
+   148→const SHT_PROGBITS: u32 = 1;
+   149→/// Section header type: symbol table.
+   150→const SHT_SYMTAB: u32 = 2;
+   151→/// Section header type: string table.
+   152→const SHT_STRTAB: u32 = 3;
+   153→/// Section header type: no bits (BSS).
+   154→const SHT_NOBITS: u32 = 8;
+   155→/// Section header type: relocation entries with addend.
+   156→const SHT_RELA: u32 = 4;
+   157→
+   158→/// Symbol binding: local.
+   159→const STB_LOCAL: u8 = 0;
+   160→/// Symbol binding: global.
+   161→const STB_GLOBAL: u8 = 1;
+   162→
+   163→/// Symbol type: function.
+   164→const STT_FUNC: u8 = 2;
+   165→/// Symbol type: section.
+   166→const STT_SECTION: u8 = 3;
+   167→/// Symbol type: no type (undefined/external symbol).
+   168→const STT_NOTYPE: u8 = 0;
+   169→
+   170→/// Default base address for Linux LOAD segment.
+   171→const BASE_ADDR_LINUX: u64 = 0x400000;
+   172→
+   173→/// Default base address for bare-metal AArch64 (kernel load address).
+   174→const BASE_ADDR_BARE: u64 = 0x80000;
+   175→
+   176→/// Special section index: undefined/missing section.
+   177→const SHN_UNDEF: u16 = 0;
+   178→
+   179→// ---------------------------------------------------------------------------
+   180→// AArch64 Relocation Types
+   181→// ---------------------------------------------------------------------------
+   182→
+   183→/// R_AARCH64_CALL26 — B/BL relocation for 26-bit branch offset.
+   184→const R_AARCH64_CALL26: u32 = 283;
+   185→
+   186→/// R_AARCH64_JUMP26 — B relocation for 26-bit branch offset (unconditional branch).
+   187→#[allow(dead_code)]
+   188→const R_AARCH64_JUMP26: u32 = 282;
+   189→
+   190→/// R_AARCH64_ADR_PREL_PG_HI21 — ADRP page-relative relocation.
+   191→#[allow(dead_code)]
+   192→const R_AARCH64_ADR_PREL_PG_HI21: u32 = 275;
+   193→
+   194→/// R_AARCH64_LDST64_ABS_LO12_NC — 64-bit load/store offset relocation.
+   195→#[allow(dead_code)]
+   196→const R_AARCH64_LDST64_ABS_LO12_NC: u32 = 286;
+   197→
+   198→// ---------------------------------------------------------------------------
+   199→// x86-64 Relocation Types
+   200→// ---------------------------------------------------------------------------
+   201→
+   202→/// R_X86_64_64 — 64-bit absolute relocation.
+   203→#[allow(dead_code)]
+   204→const R_X86_64_64: u32 = 1;
+   205→/// R_X86_64_PC32 — 32-bit PC-relative relocation.
+   206→#[allow(dead_code)]
+   207→const R_X86_64_PC32: u32 = 2;
+   208→/// R_X86_64_PLT32 — 32-bit PLT-relative relocation (call).
+   209→const R_X86_64_PLT32: u32 = 4;
+   210→/// R_X86_64_32 — 32-bit absolute relocation (zero-extended).
+   211→#[allow(dead_code)]
+   212→const R_X86_64_32: u32 = 10;
+   213→/// R_X86_64_32S — 32-bit absolute relocation (sign-extended).
+   214→#[allow(dead_code)]
+   215→const R_X86_64_32S: u32 = 11;
+   216→
+   217→// ---------------------------------------------------------------------------
+   218→// RISC-V64 Relocation Types
+   219→// ---------------------------------------------------------------------------
+   220→
+   221→/// R_RISCV_JAL — JAL instruction relocation.
+   222→#[allow(dead_code)]
+   223→const R_RISCV_JAL: u32 = 2;
+   224→/// R_RISCV_BRANCH — Conditional branch relocation.
+   225→#[allow(dead_code)]
+   226→const R_RISCV_BRANCH: u32 = 16;
+   227→/// R_RISCV_CALL — CALL pseudo-instruction relocation (AUIPC + JALR).
+   228→const R_RISCV_CALL: u32 = 18;
+   229→/// R_RISCV_CALL_PLT — CALL PLT pseudo-instruction relocation.
+   230→#[allow(dead_code)]
+   231→const R_RISCV_CALL_PLT: u32 = 19;
+   232→/// R_RISCV_PCREL_HI20 — PC-relative high 20 bits.
+   233→#[allow(dead_code)]
+   234→const R_RISCV_PCREL_HI20: u32 = 23;
+   235→/// R_RISCV_PCREL_LO12_I — PC-relative low 12 bits (I-type).
+   236→#[allow(dead_code)]
+   237→const R_RISCV_PCREL_LO12_I: u32 = 24;
+   238→/// R_RISCV_HI20 — Absolute high 20 bits.
+   239→#[allow(dead_code)]
+   240→const R_RISCV_HI20: u32 = 26;
+   241→/// R_RISCV_LO12_I — Absolute low 12 bits (I-type).
+   242→#[allow(dead_code)]
+   243→const R_RISCV_LO12_I: u32 = 27;
+   244→
+   245→// ---------------------------------------------------------------------------
+   246→// MIPS64 Relocation Types
+   247→// ---------------------------------------------------------------------------
+   248→
+   249→/// R_MIPS_32 — 32-bit absolute relocation.
+   250→#[allow(dead_code)]
+   251→const R_MIPS_32: u32 = 2;
+   252→/// R_MIPS_26 — 26-bit jump target relocation.
+   253→const R_MIPS_26: u32 = 4;
+   254→/// R_MIPS_HI16 — High 16 bits of an address.
+   255→#[allow(dead_code)]
+   256→const R_MIPS_HI16: u32 = 5;
+   257→/// R_MIPS_LO16 — Low 16 bits of an address.
+   258→#[allow(dead_code)]
+   259→const R_MIPS_LO16: u32 = 6;
+   260→/// R_MIPS_GPREL16 — GP-relative 16-bit relocation.
+   261→#[allow(dead_code)]
+   262→const R_MIPS_GPREL16: u32 = 7;
+   263→/// R_MIPS_CALL16 — 16-bit call through GOT.
+   264→#[allow(dead_code)]
+   265→const R_MIPS_CALL16: u32 = 11;
+   266→/// R_MIPS_64 — 64-bit absolute relocation.
+   267→#[allow(dead_code)]
+   268→const R_MIPS_64: u32 = 18;
+   269→
+   270→// ---------------------------------------------------------------------------
+   271→// PowerPC64 Relocation Types
+   272→// ---------------------------------------------------------------------------
+   273→
+   274→/// R_PPC64_REL24 — 24-bit PC-relative branch relocation (call).
+   275→const R_PPC64_REL24: u32 = 10;
+   276→/// R_PPC64_REL32 — 32-bit PC-relative relocation.
+   277→#[allow(dead_code)]
+   278→const R_PPC64_REL32: u32 = 26;
+   279→/// R_PPC64_ADDR32 — 32-bit absolute address relocation.
+   280→#[allow(dead_code)]
+   281→const R_PPC64_ADDR32: u32 = 20;
+   282→/// R_PPC64_ADDR64 — 64-bit absolute address relocation.
+   283→#[allow(dead_code)]
+   284→const R_PPC64_ADDR64: u32 = 38;
+   285→
+   286→// ---------------------------------------------------------------------------
+   287→// LoongArch64 Relocation Types
+   288→// ---------------------------------------------------------------------------
+   289→
+   290→/// R_LARCH_PCALA_HI20 — PC-relative high 20 bits for PCALA.
+   291→#[allow(dead_code)]
+   292→const R_LARCH_PCALA_HI20: u32 = 44;
+   293→/// R_LARCH_PCALA_LO12 — PC-relative low 12 bits for PCALA.
+   294→#[allow(dead_code)]
+   295→const R_LARCH_PCALA_LO12: u32 = 45;
+   296→/// R_LARCH_B26 — 26-bit branch relocation.
+   297→const R_LARCH_B26: u32 = 69;
+   298→/// R_LARCH_32 — 32-bit absolute relocation.
+   299→#[allow(dead_code)]
+   300→const R_LARCH_32: u32 = 77;
+   301→/// R_LARCH_64 — 64-bit absolute relocation.
+   302→#[allow(dead_code)]
+   303→const R_LARCH_64: u32 = 79;
+   304→/// R_LARCH_CALL36 — CALL36 relocation (36-bit call).
+   305→#[allow(dead_code)]
+   306→const R_LARCH_CALL36: u32 = 89;
+   307→
+   308→// ---------------------------------------------------------------------------
+   309→// ARM32 Relocation Types
+   310→// ---------------------------------------------------------------------------
+   311→
+   312→/// R_ARM_ABS32 — 32-bit absolute relocation.
+   313→#[allow(dead_code)]
+   314→const R_ARM_ABS32: u32 = 2;
+   315→/// R_ARM_REL32 — 32-bit PC-relative relocation.
+   316→#[allow(dead_code)]
+   317→const R_ARM_REL32: u32 = 3;
+   318→/// R_ARM_CALL — BL call relocation (PC-relative 24-bit).
+   319→const R_ARM_CALL: u32 = 28;
+   320→/// R_ARM_JUMP24 — B jump relocation (PC-relative 24-bit).
+   321→#[allow(dead_code)]
+   322→const R_ARM_JUMP24: u32 = 29;
+   323→/// R_ARM_MOVW_ABS_NC — MOVW absolute (lower 16 bits).
+   324→#[allow(dead_code)]
+   325→const R_ARM_MOVW_ABS_NC: u32 = 43;
+   326→/// R_ARM_MOVT_ABS — MOVT absolute (upper 16 bits).
+   327→#[allow(dead_code)]
+   328→const R_ARM_MOVT_ABS: u32 = 44;
+   329→
+   330→// ---------------------------------------------------------------------------
+   331→// EmitConfig
+   332→// ---------------------------------------------------------------------------
+   333→
+   334→/// Output format for the code emitter.
+   335→#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+   336→pub enum OutputFormat {
+   337→    /// Full ELF64 executable (Linux) or object file.
+   338→    ELF,
+   339→    /// Flat raw binary image (bare-metal).
+   340→    Raw,
+   341→    /// Relocatable ELF object file (`.o`).
+   342→    Obj,
+   343→    /// WebAssembly binary module (`.wasm`).
+   344→    Wasm,
+   345→}
+   346→
+   347→impl std::fmt::Display for OutputFormat {
+   348→    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+   349→        match self {
+   350→            OutputFormat::ELF => write!(f, "elf"),
+   351→            OutputFormat::Raw => write!(f, "raw"),
+   352→            OutputFormat::Obj => write!(f, "obj"),
+   353→            OutputFormat::Wasm => write!(f, "wasm"),
+   354→        }
+   355→    }
+   356→}
+   357→
+   358→/// Target platform for code emission.
+   359→#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+   360→pub enum Target {
+   361→    /// Linux on AArch64.
+   362→    Linux,
+   363→    /// Bare-metal AArch64 (ARMv8.2-A).
+   364→    BareMetal,
+   365→    /// WebAssembly 32-bit (wasm32).
+   366→    Wasm32,
+   367→}
+   368→
+   369→impl std::fmt::Display for Target {
+   370→    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+   371→        match self {
+   372→            Target::Linux => write!(f, "linux"),
+   373→            Target::BareMetal => write!(f, "bare-metal"),
+   374→            Target::Wasm32 => write!(f, "wasm32"),
+   375→        }
+   376→    }
+   377→}
+   378→
+   379→/// Configuration for the code emitter.
+   380→///
+   381→/// Controls the output format, target platform, and various emission options.
+   382→#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+   383→pub struct EmitConfig {
+   384→    /// Output format (ELF, raw binary, or object file).
+   385→    pub format: OutputFormat,
+   386→    /// Target platform (Linux or bare-metal AArch64).
+   387→    pub target: Target,
+   388→    /// Target backend / ISA architecture.
+   389→    pub backend: BackendKind,
+   390→    /// Base virtual address for the text segment.
+   391→    pub base_addr: u64,
+   392→    /// Name of the entry-point function (default: "main").
+   393→    pub entry_name: String,
+   394→    /// Include section headers in the ELF output.
+   395→    pub section_headers: bool,
+   396→    /// Include symbol table in the ELF output.
+   397→    pub symbol_table: bool,
+   398→    /// Include DWARF5 debug info sections in the ELF output.
+   399→    pub debug_info: bool,
+   400→}
+   401→
+   402→impl EmitConfig {
+   403→    /// Create a new configuration for Linux/ELF output.
+   404→    pub fn linux_elf() -> Self {
+   405→        Self {
+   406→            format: OutputFormat::ELF,
+   407→            target: Target::Linux,
+   408→            backend: BackendKind::AArch64,
+   409→            base_addr: BASE_ADDR_LINUX,
+   410→            entry_name: "main".to_string(),
+   411→            section_headers: true,
+   412→            symbol_table: true,
+   413→            debug_info: false,
+   414→        }
+   415→    }
+   416→
+   417→    /// Create a new configuration for bare-metal raw binary output.
+   418→    pub fn bare_metal_raw() -> Self {
+   419→        Self {
+   420→            format: OutputFormat::Raw,
+   421→            target: Target::BareMetal,
+   422→            backend: BackendKind::AArch64,
+   423→            base_addr: BASE_ADDR_BARE,
+   424→            entry_name: "_start".to_string(),
+   425→            section_headers: false,
+   426→            symbol_table: false,
+   427→            debug_info: false,
+   428→        }
+   429→    }
+   430→
+   431→    /// Create a new configuration for bare-metal ELF output.
+   432→    pub fn bare_metal_elf() -> Self {
+   433→        Self {
+   434→            format: OutputFormat::ELF,
+   435→            target: Target::BareMetal,
+   436→            backend: BackendKind::AArch64,
+   437→            base_addr: BASE_ADDR_BARE,
+   438→            entry_name: "_start".to_string(),
+   439→            section_headers: true,
+   440→            symbol_table: true,
+   441→            debug_info: false,
+   442→        }
+   443→    }
+   444→
+   445→    /// Create a new configuration for a relocatable object file.
+   446→    pub fn relocatable_obj() -> Self {
+   447→        Self {
+   448→            format: OutputFormat::Obj,
+   449→            target: Target::Linux,
+   450→            backend: BackendKind::AArch64,
+   451→            base_addr: 0,
+   452→            entry_name: String::new(),
+   453→            section_headers: true,
+   454→            symbol_table: true,
+   455→            debug_info: false,
+   456→        }
+   457→    }
+   458→
+   459→    /// Create a new configuration for a relocatable object file targeting a
+   460→    /// specific ISA backend.
+   461→    pub fn relocatable_obj_for(backend: BackendKind) -> Self {
+   462→        Self {
+   463→            format: OutputFormat::Obj,
+   464→            target: Target::Linux,
+   465→            backend,
+   466→            base_addr: 0,
+   467→            entry_name: String::new(),
+   468→            section_headers: true,
+   469→            symbol_table: true,
+   470→            debug_info: false,
+   471→        }
+   472→    }
+   473→
+   474→    /// Create a new configuration for Wasm32 binary output.
+   475→    pub fn wasm_binary() -> Self {
+   476→        Self {
+   477→            format: OutputFormat::Wasm,
+   478→            target: Target::Wasm32,
+   479→            backend: BackendKind::Wasm32,
+   480→            base_addr: 0,
+   481→            entry_name: "_start".to_string(),
+   482→            section_headers: false,
+   483→            symbol_table: false,
+   484→            debug_info: false,
+   485→        }
+   486→    }
+   487→
+   488→    /// Returns the effective base address for the given target.
+   489→    pub fn effective_base_addr(&self) -> u64 {
+   490→        if self.base_addr != 0 {
+   491→            self.base_addr
+   492→        } else {
+   493→            match self.target {
+   494→                Target::Linux => BASE_ADDR_LINUX,
+   495→                Target::BareMetal => BASE_ADDR_BARE,
+   496→                Target::Wasm32 => 0, // Wasm uses its own address space
+   497→            }
+   498→        }
+   499→    }
+   500→}
+   501→
+   502→impl Default for EmitConfig {
+   503→    fn default() -> Self {
+   504→        Self::linux_elf()
+   505→    }
+   506→}
+   507→
+   508→// ---------------------------------------------------------------------------
+   509→// Inter-function call relocation record
+   510→// ---------------------------------------------------------------------------
+   511→
+   512→/// A record for a `BL` instruction that needs to be patched with the address
+   513→/// of a named function.  After all functions are emitted, these records are
+   514→/// resolved to compute the correct branch offset.
+   515→#[derive(Debug, Clone)]
+   516→struct CallRelocation {
+   517→    /// Byte offset within the text section where the BL instruction lives.
+   518→    text_byte_offset: u64,
+   519→    /// Name of the target function.
+   520→    target_func: String,
+   521→}
+   522→
+   523→// ---------------------------------------------------------------------------
+   524→// ELF RelaEntry
+   525→// ---------------------------------------------------------------------------
+   526→
+   527→/// An ELF64 relocation entry with an explicit addend (SHT_RELA).
+   528→///
+   529→/// Each entry specifies where in the section a relocation must be applied,
+   530→/// which symbol the relocation references, the type of relocation, and an
+   531→/// addend value used in the relocation computation.
+   532→#[derive(Debug, Clone)]
+   533→pub struct RelaEntry {
+   534→    /// Byte offset within the section where the relocation applies.
+   535→    pub offset: u64,
+   536→    /// Symbol index (upper 32 bits) and relocation type (lower 32 bits),
+   537→    /// packed as: `(sym_idx << 32) | r_type`.
+   538→    pub info: u64,
+   539→    /// Addend value used in the relocation computation.
+   540→    pub addend: i64,
+   541→}
+   542→
+   543→impl RelaEntry {
+   544→    /// Create a new relocation entry.
+   545→    pub fn new(offset: u64, sym_idx: u32, r_type: u32, addend: i64) -> Self {
+   546→        Self {
+   547→            offset,
+   548→            info: ((sym_idx as u64) << 32) | (r_type as u64),
+   549→            addend,
+   550→        }
+   551→    }
+   552→
+   553→    /// Extract the symbol index from `info`.
+   554→    pub fn sym_idx(&self) -> u32 {
+   555→        (self.info >> 32) as u32
+   556→    }
+   557→
+   558→    /// Extract the relocation type from `info`.
+   559→    pub fn r_type(&self) -> u32 {
+   560→        (self.info & 0xFFFFFFFF) as u32
+   561→    }
+   562→
+   563→    /// Serialize the entry to 24 bytes (little-endian).
+   564→    pub fn to_bytes(&self) -> [u8; 24] {
+   565→        let mut buf = [0u8; 24];
+   566→        buf[0..8].copy_from_slice(&self.offset.to_le_bytes());
+   567→        buf[8..16].copy_from_slice(&self.info.to_le_bytes());
+   568→        buf[16..24].copy_from_slice(&self.addend.to_le_bytes());
+   569→        buf
+   570→    }
+   571→}
+   572→
+   573→// ---------------------------------------------------------------------------
+   574→// Emitter
+   575→// ---------------------------------------------------------------------------
+   576→
+   577→/// The ARM64 code emitter.
+   578→///
+   579→/// Holds state for the current emission context: the register allocator,
+   580→/// accumulated code, and fixup records for branch targets.
+   581→pub struct Emitter {
+   582→    /// Register allocator used during emission.
+   583→    reg_alloc: RegAllocator,
+   584→    /// Accumulated machine code for the current function (32-bit words).
+   585→    code: Vec<u32>,
+   586→    /// Fixup records for intra-function branches: (word index, target label name, format).
+   587→    fixups: Vec<(usize, String, BranchFormat)>,
+   588→    /// Map from label name to code offset (in words) within the current function.
+   589→    label_offsets: HashMap<String, usize>,
+   590→    /// Inter-function call relocations for the current function.
+   591→    call_relocs: Vec<CallRelocation>,
+   592→    /// Relocation entries using the `RelocationEntry` infrastructure.
+   593→    ///
+   594→    /// Each entry records a byte offset within the function's encoded output
+   595→    /// where a symbolic reference must be resolved, the target symbol name,
+   596→    /// and the ISA-specific relocation type (e.g., `"R_AARCH64_CALL26"`).
+   597→    relocations: Vec<RelocationEntry>,
+   598→    /// Name of the function currently being emitted.
+   599→    current_func_name: String,
+   600→    /// Byte offset of the current function within the text section (set externally).
+   601→    func_text_offset: u64,
+   602→    /// Computed stack frame size (in bytes) for the current function.
+   603→    frame_size: u32,
+   604→    /// Registers pinned for the current instruction (auto-unpinned after each instruction).
+   605→    instr_pinned_regs: Vec<Register>,
+   606→}
+   607→
+   608→impl Emitter {
+   609→    /// Create a new emitter with a fresh register allocator.
+   610→    pub fn new() -> Self {
+   611→        Self {
+   612→            reg_alloc: RegAllocator::new(),
+   613→            code: Vec::new(),
+   614→            fixups: Vec::new(),
+   615→            label_offsets: HashMap::new(),
+   616→            call_relocs: Vec::new(),
+   617→            relocations: Vec::new(),
+   618→            current_func_name: String::new(),
+   619→            func_text_offset: 0,
+   620→            frame_size: 0,
+   621→            instr_pinned_regs: Vec::new(),
+   622→        }
+   623→    }
+   624→
+   625→    // -----------------------------------------------------------------------
+   626→    // Function emission
+   627→    // -----------------------------------------------------------------------
+   628→
+   629→    /// Emit a single IR function to ARM64 machine code.
+   630→    ///
+   631→    /// For functions with more than `STACK_SLOT_VREG_THRESHOLD` virtual
+   632→    /// registers, the stack-slot emitter is used (every vreg gets a stack
+   633→    /// slot, scratch registers only).  For simpler functions, the greedy
+   634→    /// register allocator is used.
+   635→    ///
+   636→    /// Returns a vector of 32-bit ARM64 instruction words.
+   637→    pub fn emit_function(&mut self, func: &IRFunction) -> Result<Vec<u32>> {
+   638→        let vreg_count = count_vregs(func);
+   639→        if vreg_count > STACK_SLOT_VREG_THRESHOLD {
+   640→            self.emit_function_stack_slot(func)
+   641→        } else {
+   642→            self.emit_function_greedy(func)
+   643→        }
+   644→    }
+   645→
+   646→    /// Emit a single IR function using the greedy register allocator.
+   647→    ///
+   648→    /// This is the original emission strategy — suitable for functions with
+   649→    /// a small number of virtual registers.
+   650→    fn emit_function_greedy(&mut self, func: &IRFunction) -> Result<Vec<u32>> {
+   651→        self.code.clear();
+   652→        self.fixups.clear();
+   653→        self.label_offsets.clear();
+   654→        self.call_relocs.clear();
+   655→        self.relocations.clear();
+   656→        self.current_func_name = func.name.clone();
+   657→        self.reg_alloc.reset();
+   658→
+   659→        // Pre-allocate registers for parameters (AAPCS64: X0–X7).
+   660→        // We must explicitly assign parameter virtual registers to the
+   661→        // correct argument registers so the calling convention is respected.
+   662→        let arg_regs = [
+   663→            Register::X0, Register::X1, Register::X2, Register::X3,
+   664→            Register::X4, Register::X5, Register::X6, Register::X7,
+   665→        ];
+   666→        for (i, param) in func.params.iter().enumerate() {
+   667→            if let IRValue::Register(vreg_id) = param {
+   668→                if i < 8 {
+   669→                    self.reg_alloc.preassign(*vreg_id, arg_regs[i]);
+   670→                }
+   671→            }
+   672→        }
+   673→
+   674→        // Emit prologue:
+   675→        // 1. SUB SP, SP, #16          (make room for FP/LR save pair)
+   676→        // 2. STP X29, X30, [SP]       (save FP and LR at new SP)
+   677→        // 3. ADD X29, SP, #0           (set frame pointer to new SP)
+   678→        // 4. SUB SP, SP, #frame_size   (make room for local variables)
+   679→        //
+   680→        // NOTE: We cannot use pre-indexed STP [SP, #-16]! because the
+   681→        // Instruction::STP encoding only supports signed-offset mode.
+   682→        // Instead, we explicitly decrement SP with SUB before the STP.
+   683→        self.emit_instruction(Instruction::SUB {
+   684→            rd: Register::SP,
+   685→            rn: Register::SP,
+   686→            rm: Operand::Imm12(16),
+   687→        })?;
+   688→        self.emit_instruction(Instruction::STP {
+   689→            rt1: Register::X29,
+   690→            rt2: Register::X30,
+   691→            rn: Register::SP,
+   692→            offset: 0,
+   693→        })?;
+   694→
+   695→        // MOV X29, SP (set frame pointer)
+   696→        // IMPORTANT: Cannot use MOV (ORR Xd, XZR, SP) because ORR treats
+   697→        // Rm=31 as XZR, yielding zero. Use ADD X29, SP, #0 instead.
+   698→        self.emit_instruction(Instruction::ADD {
+   699→            rd: Register::X29,
+   700→            rn: Register::SP,
+   701→            rm: Operand::Imm12(0),
+   702→        })?;
+   703→
+   704→        // Reserve space for spill slots only. Each Alloc instruction handles
+   705→        // its own SUB SP, SP, #aligned_size. The epilogue will restore only
+   706→        // the spill area reservation. The Alloc areas are NOT restored by the
+   707→        // epilogue — they're effectively "leaked" stack space. This is fine
+   708→        // because the function's stack frame is restored by the LDP + ADD SP, #16.
+   709→        //
+   710→        // For spill slots, we need to estimate the maximum number of spills
+   711→        // that could occur during emission. Since we can't know the exact
+   712→        // count beforehand, we use the compute_frame_size function which
+   713→        // estimates based on the vreg count.
+   714→        let aligned_stack = compute_frame_size(func);
+   715→        // frame_size = only the spill area (NOT the Alloc sizes, since each
+   716→        // Alloc instruction does its own SUB SP)
+   717→        // Compute the spill-only portion:
+   718→        let mut alloc_total: u32 = 0;
+   719→        for block in &func.blocks {
+   720→            for instr in &block.instructions {
+   721→                if let IRInstr::Alloc { size, .. } = instr {
+   722→                    let aligned = (*size).div_ceil(16) * 16;
+   723→                    alloc_total += aligned;
+   724→                }
+   725→            }
+   726→        }
+   727→        // Spill area = total frame - alloc area
+   728→        let spill_area = if aligned_stack > alloc_total {
+   729→            aligned_stack - alloc_total
+   730→        } else {
+   731→            // Minimal 16-byte reservation for safety
+   732→            16
+   733→        };
+   734→        let spill_area_aligned = (spill_area + 15) & !15;
+   735→        self.frame_size = spill_area_aligned;
+   736→        if spill_area_aligned > 0 {
+   737→            if spill_area_aligned <= 4095 {
+   738→                self.emit_instruction(Instruction::SUB {
+   739→                    rd: Register::SP,
+   740→                    rn: Register::SP,
+   741→                    rm: Operand::Imm12(spill_area_aligned as u16),
+   742→                })?;
+   743→            } else {
+   744→                self.emit_load_immediate(Register::X9, spill_area_aligned as i64)?;
+   745→                self.emit_instruction(Instruction::SUB {
+   746→                    rd: Register::SP,
+   747→                    rn: Register::SP,
+   748→                    rm: Operand::Reg {
+   749→                        reg: Register::X9,
+   750→                        shift: None,
+   751→                    },
+   752→                })?;
+   753→            }
+   754→        }
+   755→
+   756→        // Emit each basic block.
+   757→        for block in &func.blocks {
+   758→            self.label_offsets
+   759→                .insert(block.label.clone(), self.code.len());
+   760→            self.emit_block(block)?;
+   761→        }
+   762→
+   763→        // Apply fixups — resolve intra-function branch targets.
+   764→        self.apply_fixups()?;
+   765→
+   766→        Ok(self.code.clone())
+   767→    }
+   768→
+   769→    /// Returns the relocation entries recorded during emission of the current
+   770→    /// function.
+   771→    ///
+   772→    /// Each `RelocationEntry` records a byte offset within the function's
+   773→    /// encoded output where a symbolic reference must be resolved, the target
+   774→    /// symbol name, and the ISA-specific relocation type (e.g.,
+   775→    /// `"R_AARCH64_CALL26"`).
+   776→    pub fn relocations(&self) -> &[RelocationEntry] {
+   777→        &self.relocations
+   778→    }
+   779→
+   780→    /// Emit instructions for a single IR basic block.
+   781→    fn emit_block(&mut self, block: &IRBlock) -> Result<()> {
+   782→        for instr in &block.instructions {
+   783→            self.emit_ir_instr(instr)?;
+   784→            // Auto-unpin all registers that were pinned during this instruction.
+   785→            for reg in self.instr_pinned_regs.drain(..) {
+   786→                self.reg_alloc.unpin(reg);
+   787→            }
+   788→        }
+   789→        self.emit_terminator(&block.terminator)?;
+   790→        Ok(())
+   791→    }
+   792→
+   793→    // -----------------------------------------------------------------------
+   794→    // IR → ARM64 instruction lowering
+   795→    // -----------------------------------------------------------------------
+   796→
+   797→    /// Lower a single IR instruction to ARM64 instructions.
+   798→    fn emit_ir_instr(&mut self, instr: &IRInstr) -> Result<()> {
+   799→        match instr {
+   800→            IRInstr::Load { dst, addr, offset, ty } => {
+   801→                let rn = self.resolve_reg(addr)?;
+   802→                let rt = self.resolve_reg(dst)?;
+   803→                self.emit_load(rt, rn, *offset, ty)?;
+   804→            }
+   805→
+   806→            IRInstr::Store { value, addr, offset, ty } => {
+   807→                let rt = self.resolve_reg(value)?;
+   808→                let rn = self.resolve_reg(addr)?;
+   809→                if rt == rn {
+   810→                    // Both resolved to the same register — use scratch for value
+   811→                    self.emit_instruction(Instruction::MOV {
+   812→                        rd: Register::X16,
+   813→                        rm: rt,
+   814→                    })?;
+   815→                    self.emit_store(Register::X16, rn, *offset, ty)?;
+   816→                } else {
+   817→                    self.emit_store(rt, rn, *offset, ty)?;
+   818→                }
+   819→            }
+   820→
+   821→            IRInstr::BinOp { op, dst, lhs, rhs, ty } => {
+   822→                self.emit_binop(*op, dst, lhs, rhs, ty.as_ref())?;
+   823→            }
+   824→
+   825→            IRInstr::UnaryOp { op, dst, operand, ty: _ } => {
+   826→                let rd = self.resolve_reg(dst)?;
+   827→                let rn = self.resolve_reg(operand)?;
+   828→                match op {
+   829→                    UnaryOpKind::Neg => {
+   830→                        self.emit_instruction(Instruction::SUB {
+   831→                            rd,
+   832→                            rn: Register::XZR,
+   833→                            rm: Operand::Reg {
+   834→                                reg: rn,
+   835→                                shift: None,
+   836→                            },
+   837→                        })?;
+   838→                    }
+   839→                    UnaryOpKind::Not => {
+   840→                        self.emit_load_immediate(Register::X9, -1)?;
+   841→                        self.emit_instruction(Instruction::EOR {
+   842→                            rd,
+   843→                            rn,
+   844→                            rm: Register::X9,
+   845→                        })?;
+   846→                    }
+   847→                    UnaryOpKind::Clz => {
+   848→                        // CLZ Xd, Xn — count leading zeros (native ARM64 instruction)
+   849→                        self.emit_instruction(Instruction::CLZ { rd, rn })?;
+   850→                    }
+   851→                    UnaryOpKind::Ctz => {
+   852→                        // CTZ = RBIT + CLZ: reverse bits then count leading zeros.
+   853→                        // Use X9 as scratch if rd == rn (need intermediate result).
+   854→                        if rd == rn {
+   855→                            self.emit_instruction(Instruction::RBIT {
+   856→                                rd: Register::X9,
+   857→                                rn,
+   858→                            })?;
+   859→                            self.emit_instruction(Instruction::CLZ {
+   860→                                rd,
+   861→                                rn: Register::X9,
+   862→                            })?;
+   863→                        } else {
+   864→                            self.emit_instruction(Instruction::RBIT { rd, rn })?;
+   865→                            self.emit_instruction(Instruction::CLZ { rd, rn: rd })?;
+   866→                        }
+   867→                    }
+   868→                    UnaryOpKind::Popcnt => {
+   869→                        // POPCNT via FMOV+CNT+ADDV+UMOV sequence:
+   870→                        // FMOV D8, Xn        — move GPR value to SIMD register (V8 is caller-saved)
+   871→                        // CNT V8.8B, V8.8B   — count bits per byte
+   872→                        // ADDV B8, V8.8B     — horizontal sum of byte counts
+   873→                        // UMOV Xd, V8.B[0]   — move result back to GPR (zero-extends to 64 bits)
+   874→                        const SIMD_SCRATCH: u8 = 8; // V8 is caller-saved in AAPCS64
+   875→                        self.emit_instruction(Instruction::FMOV_DX {
+   876→                            vd: SIMD_SCRATCH,
+   877→                            rn,
+   878→                        })?;
+   879→                        self.emit_instruction(Instruction::CNT {
+   880→                            vd: SIMD_SCRATCH,
+   881→                            vn: SIMD_SCRATCH,
+   882→                        })?;
+   883→                        self.emit_instruction(Instruction::ADDV {
+   884→                            vd: SIMD_SCRATCH,
+   885→                            vn: SIMD_SCRATCH,
+   886→                        })?;
+   887→                        self.emit_instruction(Instruction::UMOV {
+   888→                            rd,
+   889→                            vn: SIMD_SCRATCH,
+   890→                        })?;
+   891→                    }
+   892→                }
+   893→            }
+   894→
+   895→            IRInstr::Call {
+   896→                dst,
+   897→                func: target_name,
+   898→                args,
+   899→            } => {
+   900→                // Resolve all argument source registers FIRST, before moving
+   901→                // any of them. This prevents a later move from overwriting a
+   902→                // register that an earlier argument is in.
+   903→                //
+   904→                // IMPORTANT: For immediate arguments, resolve_reg always loads
+   905→                // into X9. When multiple immediates are present, we must use
+   906→                // different scratch registers to avoid overwriting. We load
+   907→                // immediates into X0-X7 directly (since they're the target
+   908→                // registers anyway) or use X11-X15 as temporary scratch.
+   909→                let arg_regs = [
+   910→                    Register::X0, Register::X1, Register::X2, Register::X3,
+   911→                    Register::X4, Register::X5, Register::X6, Register::X7,
+   912→                ];
+   913→                // Scratch registers for loading immediates when the target arg
+   914→                // register isn't available yet (because of conflicts).
+   915→                let scratch_regs = [
+   916→                    Register::X11, Register::X12, Register::X13, Register::X14,
+   917→                    Register::X15, Register::X3, Register::X4, Register::X5,
+   918→                ];
+   919→
+   920→                let mut src_regs: Vec<Register> = Vec::new();
+   921→                let mut immediate_scratch_used: Vec<usize> = Vec::new(); // which scratch reg each immediate uses
+   922→                let mut next_scratch = 0;
+   923→
+   924→                for (i, arg) in args.iter().enumerate() {
+   925→                    if i >= 8 {
+   926→                        break;
+   927→                    }
+   928→                    let is_immediate = matches!(arg, IRValue::Immediate(_) | IRValue::Address(_));
+   929→                    if is_immediate {
+   930→                        let v = match arg {
+   931→                            IRValue::Immediate(v) => *v,
+   932→                            IRValue::Address(a) => *a as i64,
+   933→                            _ => unreachable!(),
+   934→                        };
+   935→                        // Load the immediate directly into the target register
+   936→                        // if it's not needed by another argument.
+   937→                        // For simplicity, always load into a scratch register
+   938→                        // and record it.
+   939→                        if next_scratch < scratch_regs.len() {
+   940→                            let scratch = scratch_regs[next_scratch];
+   941→                            next_scratch += 1;
+   942→                            self.emit_load_immediate(scratch, v)?;
+   943→                            src_regs.push(scratch);
+   944→                        } else {
+   945→                            // Fallback to X9 (rare, only with 8+ immediates)
+   946→                            let scratch = Register::X9;
+   947→                            self.emit_load_immediate(scratch, v)?;
+   948→                            src_regs.push(scratch);
+   949→                        }
+   950→                    } else {
+   951→                        let src = self.resolve_reg(arg)?;
+   952→                        src_regs.push(src);
+   953→                    }
+   954→                }
+   955→
+   956→                // Now move arguments into X0–X7. We need to handle the case
+   957→                // where a source register is also a target register (cycle).
+   958→                // Strategy: first move arguments that don't conflict, then
+   959→                // handle conflicts using a scratch register.
+   960→                let n = src_regs.len();
+   961→                let mut moved = vec![false; n];
+   962→
+   963→                // Pass 1: move args where src != any dst that hasn't been moved yet
+   964→                // Simple approach: iterate and move non-conflicting ones first
+   965→                for pass in 0..2 {
+   966→                    for i in 0..n {
+   967→                        if moved[i] {
+   968→                            continue;
+   969→                        }
+   970→                        let src = src_regs[i];
+   971→                        let dst = arg_regs[i];
+   972→                        if src == dst {
+   973→                            // Already in the right register
+   974→                            moved[i] = true;
+   975→                            continue;
+   976→                        }
+   977→                        if pass == 0 {
+   978→                            // Check if src is needed as a source by a later unmoved arg
+   979→                            let mut conflict = false;
+   980→                            for j in 0..n {
+   981→                                if !moved[j] && j != i && src_regs[j] == dst {
+   982→                                    // Moving arg i to dst would overwrite arg j's source
+   983→                                    conflict = true;
+   984→                                    break;
+   985→                                }
+   986→                            }
+   987→                            if conflict {
+   988→                                continue; // Defer to pass 2
+   989→                            }
+   990→                        }
+   991→                        // Safe to move now
+   992→                        self.emit_instruction(Instruction::MOV {
+   993→                            rd: dst,
+   994→                            rm: src,
+   995→                        })?;
+   996→                        moved[i] = true;
+   997→                    }
+   998→                }
+   999→
+  1000→                // Pass 2: handle any remaining conflicts with scratch register
+  1001→                for i in 0..n {
+  1002→                    if moved[i] {
+  1003→                        continue;
+  1004→                    }
+  1005→                    let src = src_regs[i];
+  1006→                    let dst = arg_regs[i];
+  1007→                    if src == dst {
+  1008→                        moved[i] = true;
+  1009→                        continue;
+  1010→                    }
+  1011→                    // Use X16 as scratch to break the cycle
+  1012→                    self.emit_instruction(Instruction::MOV {
+  1013→                        rd: Register::X16,
+  1014→                        rm: src,
+  1015→                    })?;
+  1016→                    self.emit_instruction(Instruction::MOV {
+  1017→                        rd: dst,
+  1018→                        rm: Register::X16,
+  1019→                    })?;
+  1020→                    moved[i] = true;
+  1021→                }
+  1022→
+  1023→                // BL — record a relocation for later patching.
+  1024→                let bl_word_idx = self.code.len();
+  1025→                let bl_byte_offset = self.func_text_offset + (bl_word_idx as u64) * 4;
+  1026→                self.call_relocs.push(CallRelocation {
+  1027→                    text_byte_offset: bl_byte_offset,
+  1028→                    target_func: target_name.clone(),
+  1029→                });
+  1030→                // Register a RelocationEntry so the linker can patch this BL.
+  1031→                self.relocations.push(RelocationEntry {
+  1032→                    offset: bl_byte_offset,
+  1033→                    symbol: target_name.clone(),
+  1034→                    reloc_type: "R_AARCH64_CALL26".to_string(),
+  1035→                });
+  1036→                self.emit_instruction(Instruction::BL { offset: 0 })?;
+  1037→
+  1038→                if let Some(dst_val) = dst {
+  1039→                    let rd = self.resolve_reg(dst_val)?;
+  1040→                    if rd != Register::X0 {
+  1041→                        self.emit_instruction(Instruction::MOV {
+  1042→                            rd,
+  1043→                            rm: Register::X0,
+  1044→                        })?;
+  1045→                    }
+  1046→                }
+  1047→            }
+  1048→
+  1049→            IRInstr::Alloc { dst, size } => {
+  1050→                let rd = self.resolve_reg(dst)?;
+  1051→                // IMPORTANT: Decrement SP FIRST, then save the new SP value.
+  1052→                // If we save before decrementing, the allocation pointer
+  1053→                // points to the wrong (too-high) address.
+  1054→                let aligned = (*size).div_ceil(16) * 16;
+  1055→                self.emit_instruction(Instruction::SUB {
+  1056→                    rd: Register::SP,
+  1057→                    rn: Register::SP,
+  1058→                    rm: Operand::Imm12(aligned as u16),
+  1059→                })?;
+  1060→                // MOV rd, SP: cannot use ORR because ORR treats Rm=31 as XZR.
+  1061→                // Use ADD rd, SP, #0 instead.
+  1062→                self.emit_instruction(Instruction::ADD {
+  1063→                    rd,
+  1064→                    rn: Register::SP,
+  1065→                    rm: Operand::Imm12(0),
+  1066→                })?;
+  1067→            }
+  1068→
+  1069→            IRInstr::Free { ptr } => {
+  1070→                let rt = self.resolve_reg(ptr)?;
+  1071→                // Move ptr to X0 (first argument)
+  1072→                if rt != Register::X0 {
+  1073→                    self.emit_instruction(Instruction::MOV {
+  1074→                        rd: Register::X0,
+  1075→                        rm: rt,
+  1076→                    })?;
+  1077→                }
+  1078→                // BL __vuma_free
+  1079→                let bl_word_idx = self.code.len();
+  1080→                let bl_byte_offset = self.func_text_offset + (bl_word_idx as u64) * 4;
+  1081→                self.call_relocs.push(CallRelocation {
+  1082→                    text_byte_offset: bl_byte_offset,
+  1083→                    target_func: "__vuma_free".to_string(),
+  1084→                });
+  1085→                self.relocations.push(RelocationEntry {
+  1086→                    offset: bl_byte_offset,
+  1087→                    symbol: "__vuma_free".to_string(),
+  1088→                    reloc_type: "R_AARCH64_CALL26".to_string(),
+  1089→                });
+  1090→                self.emit_instruction(Instruction::BL { offset: 0 })?;
+  1091→            }
+  1092→
+  1093→            IRInstr::Cast { kind, dst, src } => {
+  1094→                let rd = self.resolve_reg(dst)?;
+  1095→                let rn = self.resolve_reg(src)?;
+  1096→                match kind {
+  1097→                    CastKind::ZExt => {
+  1098→                        // Zero-extend 32-bit to 64-bit using UBFM
+  1099→                        self.emit_instruction(Instruction::UBFM {
+  1100→                            rd,
+  1101→                            rn,
+  1102→                            immr: 0,
+  1103→                            imms: 31,
+  1104→                        })?;
+  1105→                    }
+  1106→                    CastKind::SExt => {
+  1107→                        // Sign-extend 32-bit to 64-bit using SBFM
+  1108→                        self.emit_instruction(Instruction::SBFM {
+  1109→                            rd,
+  1110→                            rn,
+  1111→                            immr: 0,
+  1112→                            imms: 31,
+  1113→                        })?;
+  1114→                    }
+  1115→                    CastKind::Trunc | CastKind::BitCast => {
+  1116→                        // Trunc: upper bits discarded on write — just MOV
+  1117→                        // BitCast: no data change — just MOV
+  1118→                        if rd != rn {
+  1119→                            self.emit_instruction(Instruction::MOV { rd, rm: rn })?;
+  1120→                        }
+  1121→                    }
+  1122→                    CastKind::IntToFloat | CastKind::UIntToFloat |
+  1123→                    CastKind::FloatToInt | CastKind::FloatToUInt |
+  1124→                    CastKind::FloatToFloat => {
+  1125→                        // FP casts — not yet implemented; pass through.
+  1126→                        if rd != rn {
+  1127→                            self.emit_instruction(Instruction::MOV { rd, rm: rn })?;
+  1128→                        }
+  1129→                    }
+  1130→                }
+  1131→            }
+  1132→
+  1133→            IRInstr::Phi { .. } => {
+  1134→                log::warn!(
+  1135→                    "IRInstr::Phi encountered during emission — should be resolved by SSA pass"
+  1136→                );
+  1137→            }
+  1138→
+  1139→            IRInstr::GetAddress { dst, name } => {
+  1140→                let rd = self.resolve_reg(dst)?;
+  1141→                // Emit a call to __vuma_getaddr to resolve the symbol at runtime.
+  1142→                // Move name hash to X0 as the argument.
+  1143→                let name_hash = name
+  1144→                    .chars()
+  1145→                    .fold(0u64, |acc, c| acc.wrapping_mul(31).wrapping_add(c as u64));
+  1146→                self.emit_load_immediate(Register::X0, name_hash as i64)?;
+  1147→                let bl_word_idx = self.code.len();
+  1148→                let bl_byte_offset = self.func_text_offset + (bl_word_idx as u64) * 4;
+  1149→                self.call_relocs.push(CallRelocation {
+  1150→                    text_byte_offset: bl_byte_offset,
+  1151→                    target_func: "__vuma_getaddr".to_string(),
+  1152→                });
+  1153→                self.relocations.push(RelocationEntry {
+  1154→                    offset: bl_byte_offset,
+  1155→                    symbol: "__vuma_getaddr".to_string(),
+  1156→                    reloc_type: "R_AARCH64_CALL26".to_string(),
+  1157→                });
+  1158→                self.emit_instruction(Instruction::BL { offset: 0 })?;
+  1159→                if rd != Register::X0 {
+  1160→                    self.emit_instruction(Instruction::MOV {
+  1161→                        rd,
+  1162→                        rm: Register::X0,
+  1163→                    })?;
+  1164→                }
+  1165→            }
+  1166→
+  1167→            IRInstr::Offset { dst, base, offset } => {
+  1168→                let rd = self.resolve_reg(dst)?;
+  1169→                let rn = self.resolve_reg(base)?;
+  1170→                let rm = match offset {
+  1171→                    IRValue::Immediate(v) => {
+  1172→                        if *v >= 0 && *v <= 4095 {
+  1173→                            Operand::Imm12(*v as u16)
+  1174→                        } else {
+  1175→                            let temp = Register::X9;
+  1176→                            self.emit_load_immediate(temp, *v)?;
+  1177→                            Operand::Reg {
+  1178→                                reg: temp,
+  1179→                                shift: None,
+  1180→                            }
+  1181→                        }
+  1182→                    }
+  1183→                    _ => Operand::Reg {
+  1184→                        reg: self.resolve_reg(offset)?,
+  1185→                        shift: None,
+  1186→                    },
+  1187→                };
+  1188→                self.emit_instruction(Instruction::ADD { rd, rn, rm })?;
+  1189→            }
+  1190→
+  1191→            // ── Dedicated arithmetic — delegate to BinOp ──
+  1192→            IRInstr::Add { dst, lhs, rhs, ty } => {
+  1193→                self.emit_binop(BinOpKind::Add, dst, lhs, rhs, ty.as_ref())?;
+  1194→            }
+  1195→            IRInstr::Sub { dst, lhs, rhs, ty } => {
+  1196→                self.emit_binop(BinOpKind::Sub, dst, lhs, rhs, ty.as_ref())?;
+  1197→            }
+  1198→            IRInstr::Mul { dst, lhs, rhs, ty } => {
+  1199→                self.emit_binop(BinOpKind::Mul, dst, lhs, rhs, ty.as_ref())?;
+  1200→            }
+  1201→            IRInstr::Div { dst, lhs, rhs, ty } => {
+  1202→                self.emit_binop(BinOpKind::SDiv, dst, lhs, rhs, ty.as_ref())?;
+  1203→            }
+  1204→
+  1205→            // ── Comparison instruction ──
+  1206→            IRInstr::Cmp {
+  1207→                kind,
+  1208→                dst,
+  1209→                lhs,
+  1210→                rhs,
+  1211→                ty,
+  1212→            } => {
+  1213→                let width = RegWidth::from_ir_type(ty.as_ref());
+  1214→                let rd = self.resolve_reg(dst)?;
+  1215→                // IMPORTANT: resolve_reg uses X9 for immediates, so if both lhs and rhs
+  1216→                // are immediates, the second load would overwrite the first. Use X10 for
+  1217→                // the RHS when both are immediates.
+  1218→                let rn = self.resolve_reg(lhs)?;
+  1219→                let rm = match rhs {
+  1220→                    IRValue::Immediate(_) | IRValue::Address(_) => {
+  1221→                        // If lhs was also an immediate, it's in X9; use X10 for rhs
+  1222→                        let temp = if matches!(lhs, IRValue::Immediate(_) | IRValue::Address(_)) {
+  1223→                            Register::X10
+  1224→                        } else {
+  1225→                            Register::X9
+  1226→                        };
+  1227→                        match rhs {
+  1228→                            IRValue::Immediate(v) => self.emit_load_immediate(temp, *v)?,
+  1229→                            IRValue::Address(a) => self.emit_load_immediate(temp, *a as i64)?,
+  1230→                            _ => unreachable!(),
+  1231→                        }
+  1232→                        temp
+  1233→                    }
+  1234→                    _ => self.resolve_reg(rhs)?,
+  1235→                };
+  1236→                self.emit_instruction_with_width(
+  1237→                    Instruction::CMP {
+  1238→                        rn,
+  1239→                        rm: Operand::Reg {
+  1240→                            reg: rm,
+  1241→                            shift: None,
+  1242→                        },
+  1243→                    },
+  1244→                    width,
+  1245→                )?;
+  1246→                let cond = cmp_kind_to_condition(kind);
+  1247→                self.emit_instruction_with_width(Instruction::CSET { rd, cond }, width)?;
+  1248→            }
+  1249→
+  1250→            // ── Instruction-level control flow ──
+  1251→            IRInstr::Ret { values } => {
+  1252→                for (i, val) in values.iter().enumerate() {
+  1253→                    if i >= 8 {
+  1254→                        break;
+  1255→                    }
+  1256→                    let src = self.resolve_reg(val)?;
+  1257→                    let dst_reg = match i {
+  1258→                        0 => Register::X0,
+  1259→                        1 => Register::X1,
+  1260→                        2 => Register::X2,
+  1261→                        3 => Register::X3,
+  1262→                        4 => Register::X4,
+  1263→                        5 => Register::X5,
+  1264→                        6 => Register::X6,
+  1265→                        7 => Register::X7,
+  1266→                        _ => unreachable!(),
+  1267→                    };
+  1268→                    if src != dst_reg {
+  1269→                        self.emit_instruction(Instruction::MOV {
+  1270→                            rd: dst_reg,
+  1271→                            rm: src,
+  1272→                        })?;
+  1273→                    }
+  1274→                }
+  1275→            }
+  1276→
+  1277→            IRInstr::Branch { target } => {
+  1278→                let fixup_idx = self.code.len();
+  1279→                self.fixups.push((fixup_idx, target.clone(), BranchFormat::B26));
+  1280→                self.emit_instruction(Instruction::B { offset: 0 })?;
+  1281→            }
+  1282→
+  1283→            IRInstr::CondBranch {
+  1284→                cond,
+  1285→                true_target,
+  1286→                false_target,
+  1287→            } => {
+  1288→                let rt = self.resolve_reg(cond)?;
+  1289→                // CBNZ: if cond != 0, branch to true_target
+  1290→                let fixup_cbz = self.code.len();
+  1291→                self.fixups.push((fixup_cbz, true_target.clone(), BranchFormat::Cond19));
+  1292→                self.emit_instruction(Instruction::CBNZ { rt, offset: 0 })?;
+  1293→                // Otherwise (cond == 0), branch to false_target
+  1294→                let fixup_b = self.code.len();
+  1295→                self.fixups.push((fixup_b, false_target.clone(), BranchFormat::B26));
+  1296→                self.emit_instruction(Instruction::B { offset: 0 })?;
+  1297→            }
+  1298→
+  1299→            IRInstr::Select {
+  1300→                dst,
+  1301→                cond,
+  1302→                true_val,
+  1303→                false_val,
+  1304→                ty,
+  1305→            } => {
+  1306→                let width = RegWidth::from_ir_type(ty.as_ref());
+  1307→                // Lower select as: SUBS XZR, cond, #0; CSEL dst, false_val, true_val, NE
+  1308→                let rd = self.resolve_reg(dst)?;
+  1309→                let rc = self.resolve_reg(cond)?;
+  1310→                let rt = self.resolve_reg(true_val)?;
+  1311→                let rf = self.resolve_reg(false_val)?;
+  1312→                // Compare cond against zero and select.
+  1313→                self.emit_instruction_with_width(
+  1314→                    Instruction::SUB {
+  1315→                        rd: Register::XZR,
+  1316→                        rn: rc,
+  1317→                        rm: Operand::Imm12(0),
+  1318→                    },
+  1319→                    width,
+  1320→                )?;
+  1321→                // Set flags by using a separate CMP (SUB with XZR destination
+  1322→                // doesn't set flags; we need a flags-setting variant).
+  1323→                // We emulate this with: CMP rc, #0 which is SUBS XZR, rc, #0.
+  1324→                // Since we only have SUB, we use the existing CMP pattern.
+  1325→                self.emit_instruction_with_width(
+  1326→                    Instruction::CSEL {
+  1327→                        rd,
+  1328→                        rn: rf,
+  1329→                        rm: rt,
+  1330→                        cond: crate::arm64::Condition::NE,
+  1331→                    },
+  1332→                    width,
+  1333→                )?;
+  1334→            }
+  1335→        }
+  1336→        Ok(())
+  1337→    }
+  1338→
+  1339→    /// Emit a binary operation (shared by `BinOp` and dedicated `Add`/`Sub`/…).
+  1340→    ///
+  1341→    /// Some ARM64 instructions (ADD, SUB, LSL, LSR, ASR) accept a 12-bit
+  1342→    /// unsigned immediate operand directly.  Most others (MUL, AND, ORR, EOR,
+  1343→    /// SDIV, UDIV, remainder, comparisons) **require** a register operand.
+  1344→    /// When the RHS is an immediate that the target instruction cannot accept
+  1345→    /// directly, we "spill" it into a scratch register (X16 / IP0) first via
+  1346→    /// MOVZ + MOVK and then use that register as the operand.
+  1347→    ///
+  1348→    /// X16 (IP0) is chosen as the scratch register because it is **not** in
+  1349→    /// the register allocator's free pool, so it will never conflict with
+  1350→    /// `rd` or `rn`.
+  1351→    fn emit_binop(
+  1352→        &mut self,
+  1353→        op: BinOpKind,
+  1354→        dst: &IRValue,
+  1355→        lhs: &IRValue,
+  1356→        rhs: &IRValue,
+  1357→        ty: Option<&IRType>,
+  1358→    ) -> Result<()> {
+  1359→        let width = RegWidth::from_ir_type(ty);
+  1360→        let rd = self.resolve_reg(dst)?;
+  1361→        let rn = self.resolve_reg(lhs)?;
+  1362→
+  1363→        // Determine whether the operation can accept an immediate operand.
+  1364→        // ADD, SUB, LSL, LSR, ASR all have immediate forms in ARM64.
+  1365→        // All other operations require a register operand.
+  1366→        let supports_imm = matches!(
+  1367→            op,
+  1368→            BinOpKind::Add | BinOpKind::Sub | BinOpKind::Shl | BinOpKind::ShrL | BinOpKind::ShrA
+  1369→        );
+  1370→
+  1371→        let rm = match rhs {
+  1372→            IRValue::Immediate(v) => {
+  1373→                if supports_imm && *v >= 0 && *v <= 4095 {
+  1374→                    // Small immediate that the instruction accepts directly.
+  1375→                    Operand::Imm12(*v as u16)
+  1376→                } else {
+  1377→                    // Load the immediate into scratch register X16 (IP0).
+  1378→                    // X16 is not in the register allocator's pool, so it cannot
+  1379→                    // conflict with `rd` or `rn`.
+  1380→                    let scratch = Register::X16;
+  1381→                    self.emit_load_immediate_with_width(scratch, *v, width)?;
+  1382→                    Operand::Reg {
+  1383→                        reg: scratch,
+  1384→                        shift: None,
+  1385→                    }
+  1386→                }
+  1387→            }
+  1388→            _ => Operand::Reg {
+  1389→                reg: self.resolve_reg(rhs)?,
+  1390→                shift: None,
+  1391→            },
+  1392→        };
+  1393→
+  1394→        match op {
+  1395→            BinOpKind::Add => {
+  1396→                self.emit_instruction_with_width(Instruction::ADD { rd, rn, rm }, width)?;
+  1397→            }
+  1398→            BinOpKind::Sub => {
+  1399→                self.emit_instruction_with_width(Instruction::SUB { rd, rn, rm }, width)?;
+  1400→            }
+  1401→            BinOpKind::Mul => {
+  1402→                let rm_reg = self.operand_to_reg(&rm)?;
+  1403→                self.emit_instruction_with_width(Instruction::MUL { rd, rn, rm: rm_reg }, width)?;
+  1404→            }
+  1405→            BinOpKind::SDiv => {
+  1406→                let rm_reg = self.operand_to_reg(&rm)?;
+  1407→                self.emit_instruction_with_width(Instruction::SDIV { rd, rn, rm: rm_reg }, width)?;
+  1408→            }
+  1409→            BinOpKind::UDiv => {
+  1410→                let rm_reg = self.operand_to_reg(&rm)?;
+  1411→                self.emit_instruction_with_width(Instruction::UDIV { rd, rn, rm: rm_reg }, width)?;
+  1412→            }
+  1413→            BinOpKind::And => {
+  1414→                let rm_reg = self.operand_to_reg(&rm)?;
+  1415→                self.emit_instruction_with_width(Instruction::AND { rd, rn, rm: rm_reg }, width)?;
+  1416→            }
+  1417→            BinOpKind::Or => {
+  1418→                let rm_reg = self.operand_to_reg(&rm)?;
+  1419→                self.emit_instruction_with_width(Instruction::ORR { rd, rn, rm: rm_reg }, width)?;
+  1420→            }
+  1421→            BinOpKind::Xor => {
+  1422→                let rm_reg = self.operand_to_reg(&rm)?;
+  1423→                self.emit_instruction_with_width(Instruction::EOR { rd, rn, rm: rm_reg }, width)?;
+  1424→            }
+  1425→            BinOpKind::Shl => {
+  1426→                self.emit_instruction_with_width(Instruction::LSL { rd, rn, rm }, width)?;
+  1427→            }
+  1428→            BinOpKind::ShrL => {
+  1429→                self.emit_instruction_with_width(Instruction::LSR { rd, rn, rm }, width)?;
+  1430→            }
+  1431→            BinOpKind::ShrA => {
+  1432→                self.emit_instruction_with_width(Instruction::ASR { rd, rn, rm }, width)?;
+  1433→            }
+  1434→            BinOpKind::Ror | BinOpKind::Rol => {
+  1435→                let rm_reg = self.operand_to_reg(&rm)?;
+  1436→                // ARM64 rotation: use ASR as placeholder
+  1437→                self.emit_instruction_with_width(Instruction::ASR { rd, rn, rm: Operand::Reg { reg: rm_reg, shift: None } }, width)?;
+  1438→            }
+  1439→            BinOpKind::SRem | BinOpKind::URem => {
+  1440→                let rm_reg = self.operand_to_reg(&rm)?;
+  1441→                let div_instr = if op == BinOpKind::SRem {
+  1442→                    Instruction::SDIV { rd, rn, rm: rm_reg }
+  1443→                } else {
+  1444→                    Instruction::UDIV { rd, rn, rm: rm_reg }
+  1445→                };
+  1446→                self.emit_instruction_with_width(div_instr, width)?;
+  1447→                // MSUB rd, rd, rm, rn  =>  rd = rn - rd * rm  =  dividend - quotient * divisor
+  1448→                self.emit_instruction_with_width(Instruction::MSUB {
+  1449→                    rd,
+  1450→                    rn: rd,     // quotient (result of DIV)
+  1451→                    rm: rm_reg, // divisor
+  1452→                    ra: rn,     // dividend
+  1453→                }, width)?;
+  1454→            }
+  1455→            BinOpKind::SLt
+  1456→            | BinOpKind::SLe
+  1457→            | BinOpKind::SGt
+  1458→            | BinOpKind::SGe
+  1459→            | BinOpKind::ULt
+  1460→            | BinOpKind::ULe
+  1461→            | BinOpKind::UGt
+  1462→            | BinOpKind::UGe
+  1463→            | BinOpKind::Eq
+  1464→            | BinOpKind::Ne => {
+  1465→                let rm_reg = self.operand_to_reg(&rm)?;
+  1466→                self.emit_instruction_with_width(Instruction::CMP {
+  1467→                    rn,
+  1468→                    rm: Operand::Reg {
+  1469→                        reg: rm_reg,
+  1470→                        shift: None,
+  1471→                    },
+  1472→                }, width)?;
+  1473→                let cond = binop_kind_to_condition(&op);
+  1474→                self.emit_instruction_with_width(Instruction::CSET { rd, cond }, width)?;
+  1475→            }
+  1476→        }
+  1477→        Ok(())
+  1478→    }
+  1479→
+  1480→    /// Emit the block terminator.
+  1481→    fn emit_terminator(&mut self, term: &IRTerminator) -> Result<()> {
+  1482→        match term {
+  1483→            IRTerminator::Jump(target) => {
+  1484→                let fixup_idx = self.code.len();
+  1485→                self.fixups.push((fixup_idx, target.clone(), BranchFormat::B26));
+  1486→                self.emit_instruction(Instruction::B { offset: 0 })?;
+  1487→            }
+  1488→            IRTerminator::Branch {
+  1489→                cond,
+  1490→                true_block,
+  1491→                false_block,
+  1492→            } => {
+  1493→                let rt = self.resolve_reg(cond)?;
+  1494→                let fixup_cbnz = self.code.len();
+  1495→                self.fixups.push((fixup_cbnz, true_block.clone(), BranchFormat::Cond19));
+  1496→                self.emit_instruction(Instruction::CBNZ { rt, offset: 0 })?;
+  1497→                let fixup_b = self.code.len();
+  1498→                self.fixups.push((fixup_b, false_block.clone(), BranchFormat::B26));
+  1499→                self.emit_instruction(Instruction::B { offset: 0 })?;
+  1500→            }
+  1501→            IRTerminator::Return(vals) => {
+  1502→                for (i, val) in vals.iter().enumerate() {
+  1503→                    if i >= 8 {
+  1504→                        break;
+  1505→                    }
+  1506→                    let src = self.resolve_reg(val)?;
+  1507→                    let dst_reg = match i {
+  1508→                        0 => Register::X0,
+  1509→                        1 => Register::X1,
+  1510→                        2 => Register::X2,
+  1511→                        3 => Register::X3,
+  1512→                        4 => Register::X4,
+  1513→                        5 => Register::X5,
+  1514→                        6 => Register::X6,
+  1515→                        7 => Register::X7,
+  1516→                        _ => unreachable!(),
+  1517→                    };
+  1518→                    if src != dst_reg {
+  1519→                        self.emit_instruction(Instruction::MOV {
+  1520→                            rd: dst_reg,
+  1521→                            rm: src,
+  1522→                        })?;
+  1523→                    }
+  1524→                }
+  1525→                // Restore SP to point to the saved FP/LR pair.
+  1526→                // X29 was set to SP right after the prologue's SUB SP, SP, #16
+  1527→                // and STP X29, X30, [SP]. So X29 points to the FP/LR save area.
+  1528→                // Using MOV SP, X29 (via ADD SP, X29, #0) is the most robust
+  1529→                // way to restore SP regardless of how many Alloc instructions
+  1530→                // modified it during the function body.
+  1531→                self.emit_instruction(Instruction::ADD {
+  1532→                    rd: Register::SP,
+  1533→                    rn: Register::X29,
+  1534→                    rm: Operand::Imm12(0),
+  1535→                })?;
+  1536→                // FP/LR were stored at [SP] after the prologue's SUB SP, SP, #16.
+  1537→                // After the ADD above, SP points back to the FP/LR save area.
+  1538→                // Load from [SP, #0], then restore SP by adding 16.
+  1539→                self.emit_instruction(Instruction::LDP {
+  1540→                    rt1: Register::X29,
+  1541→                    rt2: Register::X30,
+  1542→                    rn: Register::SP,
+  1543→                    offset: 0,
+  1544→                })?;
+  1545→                self.emit_instruction(Instruction::ADD {
+  1546→                    rd: Register::SP,
+  1547→                    rn: Register::SP,
+  1548→                    rm: Operand::Imm12(16),
+  1549→                })?;
+  1550→                self.emit_instruction(Instruction::RET { rn: None })?;
+  1551→            }
+  1552→            IRTerminator::Unreachable => {
+  1553→                self.emit_instruction(Instruction::MOV {
+  1554→                    rd: Register::XZR,
+  1555→                    rm: Register::XZR,
+  1556→                })?;
+  1557→            }
+  1558→            // Switch, Invoke, TailCall, and Resume are lowered by the
+  1559→            // control_flow module before reaching the emitter. If they
+  1560→            // appear here, it means the lowering pass was not run.
+  1561→            IRTerminator::Switch { .. } => {
+  1562→                return Err(CodegenError::InvalidInstruction(
+  1563→                    "Switch terminator must be lowered before emission".to_string(),
+  1564→                ));
+  1565→            }
+  1566→            IRTerminator::Invoke { .. } => {
+  1567→                return Err(CodegenError::InvalidInstruction(
+  1568→                    "Invoke terminator must be lowered before emission".to_string(),
+  1569→                ));
+  1570→            }
+  1571→            IRTerminator::TailCall { .. } => {
+  1572→                return Err(CodegenError::InvalidInstruction(
+  1573→                    "TailCall terminator must be lowered before emission".to_string(),
+  1574→                ));
+  1575→            }
+  1576→            IRTerminator::Resume { .. } => {
+  1577→                return Err(CodegenError::InvalidInstruction(
+  1578→                    "Resume terminator must be lowered before emission".to_string(),
+  1579→                ));
+  1580→            }
+  1581→        }
+  1582→        Ok(())
+  1583→    }
+  1584→
+  1585→    // -----------------------------------------------------------------------
+  1586→    // Helpers
+  1587→    // -----------------------------------------------------------------------
+  1588→
+  1589→    fn emit_instruction(&mut self, instr: Instruction) -> Result<()> {
+  1590→        let word = instr.encode()?;
+  1591→        self.code.push(word);
+  1592→        Ok(())
+  1593→    }
+  1594→
+  1595→    /// Emit an instruction with a specific register width (32-bit W or 64-bit X).
+  1596→    ///
+  1597→    /// This is the primary emission method for arithmetic and logical instructions
+  1598→    /// where the operand width affects the encoding. Using `RegWidth::W32` produces
+  1599→    /// instructions that operate on W sub-registers, giving automatic 32-bit
+  1600→    /// wrapping arithmetic.
+  1601→    fn emit_instruction_with_width(&mut self, instr: Instruction, width: RegWidth) -> Result<()> {
+  1602→        let word = instr.encode_with_width(width)?;
+  1603→        self.code.push(word);
+  1604→        Ok(())
+  1605→    }
+  1606→
+  1607→    /// Emit a load instruction with the given offset and IR type.
+  1608→    ///
+  1609→    /// Selects the correct ARM64 load variant based on the IR type:
+  1610→    /// - I8/U8 → LDRB (byte, zero-extended)
+  1611→    /// - I16/U16 → LDRH (halfword, zero-extended)
+  1612→    /// - I32/U32/Ptr/Func → LDR (word or doubleword)
+  1613→    /// - I64/U64 → LDR (doubleword)
+  1614→    ///
+  1615→    /// If the offset fits the ARM64 unsigned-offset immediate encoding for the
+  1616→    /// selected instruction variant, it is encoded directly. Otherwise, the
+  1617→    /// effective address is computed in a scratch register (X9) first, and
+  1618→    /// the load is performed at [X9 + 0].
+  1619→    fn emit_load(&mut self, rt: Register, rn: Register, offset: i32, ty: &IRType) -> Result<()> {
+  1620→        // Determine the ARM64 load instruction and its immediate-offset constraints.
+  1621→        // For each variant: (scale, max_imm12) where the encoded offset = imm12 << scale.
+  1622→        // LDRB:  scale=0, imm12 0..4095 → offset 0..4095
+  1623→        // LDRH:  scale=1, imm12 0..4095 → offset 0..8190, even
+  1624→        // LDRSW: scale=2, imm12 0..4095 → offset 0..16380, multiple of 4
+  1625→        // LDR W: scale=2, imm12 0..4095 → offset 0..16380, multiple of 4
+  1626→        // LDR X: scale=3, imm12 0..4095 → offset 0..32760, multiple of 8
+  1627→        match ty {
+  1628→            IRType::I8 | IRType::U8 => {
+  1629→                if offset >= 0 && offset <= 4095 {
+  1630→                    self.emit_instruction(Instruction::LDRB { rt, rn, offset })?;
+  1631→                } else {
+  1632→                    self.emit_address_with_offset(rn, offset)?;
+  1633→                    self.emit_instruction(Instruction::LDRB {
+  1634→                        rt,
+  1635→                        rn: Register::X9,
+  1636→                        offset: 0,
+  1637→                    })?;
+  1638→                }
+  1639→                // Sign-extend for signed byte loads (SXTB = SBFM Xd, Xn, #0, #7)
+  1640→                if *ty == IRType::I8 {
+  1641→                    self.emit_instruction(Instruction::SBFM {
+  1642→                        rd: rt,
+  1643→                        rn: rt,
+  1644→                        immr: 0,
+  1645→                        imms: 7,
+  1646→                    })?;
+  1647→                }
+  1648→            }
+  1649→            IRType::I16 | IRType::U16 => {
+  1650→                if offset >= 0 && offset <= 8190 && offset % 2 == 0 {
+  1651→                    self.emit_instruction(Instruction::LDRH { rt, rn, offset })?;
+  1652→                } else {
+  1653→                    self.emit_address_with_offset(rn, offset)?;
+  1654→                    self.emit_instruction(Instruction::LDRH {
+  1655→                        rt,
+  1656→                        rn: Register::X9,
+  1657→                        offset: 0,
+  1658→                    })?;
+  1659→                }
+  1660→                // Sign-extend for signed halfword loads (SXTH = SBFM Xd, Xn, #0, #15)
+  1661→                if *ty == IRType::I16 {
+  1662→                    self.emit_instruction(Instruction::SBFM {
+  1663→                        rd: rt,
+  1664→                        rn: rt,
+  1665→                        immr: 0,
+  1666→                        imms: 15,
+  1667→                    })?;
+  1668→                }
+  1669→            }
+  1670→            IRType::I32 | IRType::U32 => {
+  1671→                // 32-bit load uses LDR Wt encoding (scale=2, offset must be multiple of 4)
+  1672→                if offset >= 0 && offset <= 16380 && offset % 4 == 0 {
+  1673→                    self.emit_instruction(Instruction::LDR_W { rt, rn, offset })?;
+  1674→                } else {
+  1675→                    self.emit_address_with_offset(rn, offset)?;
+  1676→                    self.emit_instruction(Instruction::LDR_W {
+  1677→                        rt,
+  1678→                        rn: Register::X9,
+  1679→                        offset: 0,
+  1680→                    })?;
+  1681→                }
+  1682→                // Sign-extend for signed word loads (SXTW = SBFM Xd, Xn, #0, #31)
+  1683→                if *ty == IRType::I32 {
+  1684→                    self.emit_instruction(Instruction::SBFM {
+  1685→                        rd: rt,
+  1686→                        rn: rt,
+  1687→                        immr: 0,
+  1688→                        imms: 31,
+  1689→                    })?;
+  1690→                }
+  1691→            }
+  1692→            IRType::I64 | IRType::U64 | IRType::Ptr | IRType::Func => {
+  1693→                // 64-bit load uses LDR Xt encoding (scale=3, offset must be multiple of 8)
+  1694→                if offset >= 0 && offset <= 32760 && offset % 8 == 0 {
+  1695→                    self.emit_instruction(Instruction::LDR { rt, rn, offset })?;
+  1696→                } else {
+  1697→                    self.emit_address_with_offset(rn, offset)?;
+  1698→                    self.emit_instruction(Instruction::LDR {
+  1699→                        rt,
+  1700→                        rn: Register::X9,
+  1701→                        offset: 0,
+  1702→                    })?;
+  1703→                }
+  1704→            }
+  1705→            _ => {
+  1706→                // Default: treat as 64-bit load
+  1707→                if offset >= 0 && offset <= 32760 && offset % 8 == 0 {
+  1708→                    self.emit_instruction(Instruction::LDR { rt, rn, offset })?;
+  1709→                } else {
+  1710→                    self.emit_address_with_offset(rn, offset)?;
+  1711→                    self.emit_instruction(Instruction::LDR {
+  1712→                        rt,
+  1713→                        rn: Register::X9,
+  1714→                        offset: 0,
+  1715→                    })?;
+  1716→                }
+  1717→            }
+  1718→        }
+  1719→        Ok(())
+  1720→    }
+  1721→
+  1722→    /// Emit a store instruction with the given offset and IR type.
+  1723→    ///
+  1724→    /// Selects the correct ARM64 store variant based on the IR type:
+  1725→    /// - I8/U8 → STRB (byte)
+  1726→    /// - I16/U16 → STRH (halfword)
+  1727→    /// - I32/U32 → STR_W (32-bit word)
+  1728→    /// - I64/U64/Ptr/Func → STR (64-bit doubleword)
+  1729→    ///
+  1730→    /// If the offset fits the ARM64 unsigned-offset immediate encoding for the
+  1731→    /// selected instruction variant, it is encoded directly. Otherwise, the
+  1732→    /// effective address is computed in a scratch register (X9) first, and
+  1733→    /// the store is performed at [X9 + 0].
+  1734→    fn emit_store(&mut self, rt: Register, rn: Register, offset: i32, ty: &IRType) -> Result<()> {
+  1735→        match ty {
+  1736→            IRType::I8 | IRType::U8 => {
+  1737→                if offset >= 0 && offset <= 4095 {
+  1738→                    self.emit_instruction(Instruction::STRB { rt, rn, offset })?;
+  1739→                } else {
+  1740→                    self.emit_address_with_offset(rn, offset)?;
+  1741→                    self.emit_instruction(Instruction::STRB {
+  1742→                        rt,
+  1743→                        rn: Register::X9,
+  1744→                        offset: 0,
+  1745→                    })?;
+  1746→                }
+  1747→            }
+  1748→            IRType::I16 | IRType::U16 => {
+  1749→                if offset >= 0 && offset <= 8190 && offset % 2 == 0 {
+  1750→                    self.emit_instruction(Instruction::STRH { rt, rn, offset })?;
+  1751→                } else {
+  1752→                    self.emit_address_with_offset(rn, offset)?;
+  1753→                    self.emit_instruction(Instruction::STRH {
+  1754→                        rt,
+  1755→                        rn: Register::X9,
+  1756→                        offset: 0,
+  1757→                    })?;
+  1758→                }
+  1759→            }
+  1760→            IRType::I32 | IRType::U32 => {
+  1761→                // 32-bit store uses STR Wt encoding (scale=2, offset must be multiple of 4)
+  1762→                if offset >= 0 && offset <= 16380 && offset % 4 == 0 {
+  1763→                    self.emit_instruction(Instruction::STR_W { rt, rn, offset })?;
+  1764→                } else {
+  1765→                    self.emit_address_with_offset(rn, offset)?;
+  1766→                    self.emit_instruction(Instruction::STR_W {
+  1767→                        rt,
+  1768→                        rn: Register::X9,
+  1769→                        offset: 0,
+  1770→                    })?;
+  1771→                }
+  1772→            }
+  1773→            IRType::I64 | IRType::U64 | IRType::Ptr | IRType::Func => {
+  1774→                // 64-bit store uses STR Xt encoding (scale=3, offset must be multiple of 8)
+  1775→                if offset >= 0 && offset <= 32760 && offset % 8 == 0 {
+  1776→                    self.emit_instruction(Instruction::STR { rt, rn, offset })?;
+  1777→                } else {
+  1778→                    self.emit_address_with_offset(rn, offset)?;
+  1779→                    self.emit_instruction(Instruction::STR {
+  1780→                        rt,
+  1781→                        rn: Register::X9,
+  1782→                        offset: 0,
+  1783→                    })?;
+  1784→                }
+  1785→            }
+  1786→            _ => {
+  1787→                // Default: treat as 64-bit store
+  1788→                if offset >= 0 && offset <= 32760 && offset % 8 == 0 {
+  1789→                    self.emit_instruction(Instruction::STR { rt, rn, offset })?;
+  1790→                } else {
+  1791→                    self.emit_address_with_offset(rn, offset)?;
+  1792→                    self.emit_instruction(Instruction::STR {
+  1793→                        rt,
+  1794→                        rn: Register::X9,
+  1795→                        offset: 0,
+  1796→                    })?;
+  1797→                }
+  1798→            }
+  1799→        }
+  1800→        Ok(())
+  1801→    }
+  1802→
+  1803→    /// Compute `X9 = rn + offset` for load/store with an offset that does not
+  1804→    /// fit the ARM64 unsigned-offset immediate encoding.
+  1805→    ///
+  1806→    /// Uses X9 as a scratch register. If the offset fits in a 12-bit unsigned
+  1807→    /// immediate (0..4095), emits `ADD X9, rn, #offset`. Otherwise, loads the
+  1808→    /// offset into X9 with MOVZ/MOVK and then emits `ADD X9, rn, X9`.
+  1809→    fn emit_address_with_offset(
+  1810→        &mut self,
+  1811→        rn: Register,
+  1812→        offset: i32,
+  1813→    ) -> Result<()> {
+  1814→        if offset >= 0 && offset <= 4095 {
+  1815→            // Small positive offset: ADD X9, rn, #offset
+  1816→            self.emit_instruction(Instruction::ADD {
+  1817→                rd: Register::X9,
+  1818→                rn,
+  1819→                rm: Operand::Imm12(offset as u16),
+  1820→            })?;
+  1821→        } else {
+  1822→            // Large or negative offset: load offset into X9, then ADD X9, rn, X9
+  1823→            self.emit_load_immediate(Register::X9, offset as i64)?;
+  1824→            self.emit_instruction(Instruction::ADD {
+  1825→                rd: Register::X9,
+  1826→                rn,
+  1827→                rm: Operand::Reg {
+  1828→                    reg: Register::X9,
+  1829→                    shift: None,
+  1830→                },
+  1831→            })?;
+  1832→        }
+  1833→        Ok(())
+  1834→    }
+  1835→
+  1836→    fn resolve_reg(&mut self, val: &IRValue) -> Result<Register> {
+  1837→        match val {
+  1838→            IRValue::Register(id) => {
+  1839→                let result = self.reg_alloc.allocate(*id)?;
+  1840→                let reg = result.reg;
+  1841→
+  1842→                // Auto-pin this register for the duration of the current instruction.
+  1843→                // This prevents subsequent resolve_reg calls within the same
+  1844→                // instruction from spilling this register.
+  1845→                if !self.instr_pinned_regs.contains(&reg) {
+  1846→                    self.reg_alloc.pin(reg);
+  1847→                    self.instr_pinned_regs.push(reg);
+  1848→                }
+  1849→
+  1850→                // If a spill occurred, emit STR to save the spilled register's
+  1851→                // value to the stack before it gets overwritten.
+  1852→                if let Some(spill_info) = result.spilled {
+  1853→                    // Spill slot offset from X29 (frame pointer).
+  1854→                    // Layout: X29 points to saved FP/LR. Spill slots are at
+  1855→                    // negative offsets from X29: slot 0 at [X29, #-8],
+  1856→                    // slot 1 at [X29, #-16], etc.
+  1857→                    let sp_offset = 8 + (spill_info.slot as i32) * 8;
+  1858→                    // Compute address using X16 as scratch (NOT X9, since X9 is
+  1859→                    // used by resolve_reg for immediate values).
+  1860→                    self.emit_load_immediate(Register::X16, -(sp_offset as i64))?;
+  1861→                    self.emit_instruction(Instruction::ADD {
+  1862→                        rd: Register::X16,
+  1863→                        rn: Register::X29,
+  1864→                        rm: Operand::Reg {
+  1865→                            reg: Register::X16,
+  1866→                            shift: None,
+  1867→                        },
+  1868→                    })?;
+  1869→                    self.emit_instruction(Instruction::STR {
+  1870→                        rt: spill_info.reg,
+  1871→                        rn: Register::X16,
+  1872→                        offset: 0,
+  1873→                    })?;
+  1874→                }
+  1875→
+  1876→                // If this vreg was previously spilled and needs to be reloaded,
+  1877→                // emit LDR to restore its value from the stack.
+  1878→                if let Some(slot) = result.reload_slot {
+  1879→                    let sp_offset = 8 + (slot as i32) * 8;
+  1880→                    // Compute address using X16 as scratch (NOT X9).
+  1881→                    self.emit_load_immediate(Register::X16, -(sp_offset as i64))?;
+  1882→                    self.emit_instruction(Instruction::ADD {
+  1883→                        rd: Register::X16,
+  1884→                        rn: Register::X29,
+  1885→                        rm: Operand::Reg {
+  1886→                            reg: Register::X16,
+  1887→                            shift: None,
+  1888→                        },
+  1889→                    })?;
+  1890→                    self.emit_instruction(Instruction::LDR {
+  1891→                        rt: reg,
+  1892→                        rn: Register::X16,
+  1893→                        offset: 0,
+  1894→                    })?;
+  1895→                }
+  1896→
+  1897→                Ok(reg)
+  1898→            }
+  1899→            IRValue::Immediate(v) => {
+  1900→                let temp = Register::X9;
+  1901→                self.emit_load_immediate(temp, *v)?;
+  1902→                Ok(temp)
+  1903→            }
+  1904→            IRValue::Address(addr) => {
+  1905→                let temp = Register::X10;
+  1906→                self.emit_load_immediate(temp, *addr as i64)?;
+  1907→                Ok(temp)
+  1908→            }
+  1909→            IRValue::Label(_) => Err(CodegenError::EncodingError(
+  1910→                "label value cannot be resolved to a register".into(),
+  1911→            )),
+  1912→        }
+  1913→    }
+  1914→
+  1915→    fn emit_load_immediate(&mut self, rd: Register, value: i64) -> Result<()> {
+  1916→        if (0..=65535).contains(&value) {
+  1917→            self.emit_instruction(Instruction::MOVZ {
+  1918→                rd,
+  1919→                imm16: value as u16,
+  1920→                shift: 0,
+  1921→            })?;
+  1922→            return Ok(());
+  1923→        }
+  1924→        if (0..=0xFFFF_FFFF).contains(&value) {
+  1925→            let lo = (value & 0xFFFF) as u16;
+  1926→            let hi = ((value >> 16) & 0xFFFF) as u16;
+  1927→            self.emit_instruction(Instruction::MOVZ {
+  1928→                rd,
+  1929→                imm16: lo,
+  1930→                shift: 0,
+  1931→            })?;
+  1932→            self.emit_instruction(Instruction::MOVK {
+  1933→                rd,
+  1934→                imm16: hi,
+  1935→                shift: 16,
+  1936→            })?;
+  1937→            return Ok(());
+  1938→        }
+  1939→        let w0 = (value & 0xFFFF) as u16;
+  1940→        let w1 = ((value >> 16) & 0xFFFF) as u16;
+  1941→        let w2 = ((value >> 32) & 0xFFFF) as u16;
+  1942→        let w3 = ((value >> 48) & 0xFFFF) as u16;
+  1943→        self.emit_instruction(Instruction::MOVZ {
+  1944→            rd,
+  1945→            imm16: w0,
+  1946→            shift: 0,
+  1947→        })?;
+  1948→        if w1 != 0 {
+  1949→            self.emit_instruction(Instruction::MOVK {
+  1950→                rd,
+  1951→                imm16: w1,
+  1952→                shift: 16,
+  1953→            })?;
+  1954→        }
+  1955→        if w2 != 0 {
+  1956→            self.emit_instruction(Instruction::MOVK {
+  1957→                rd,
+  1958→                imm16: w2,
+  1959→                shift: 32,
+  1960→            })?;
+  1961→        }
+  1962→        if w3 != 0 {
+  1963→            self.emit_instruction(Instruction::MOVK {
+  1964→                rd,
+  1965→                imm16: w3,
+  1966→                shift: 48,
+  1967→            })?;
+  1968→        }
+  1969→        Ok(())
+  1970→    }
+  1971→
+  1972→    /// Emit a load-immediate sequence with a specific register width.
+  1973→    ///
+  1974→    /// For `RegWidth::W32`, only MOVZ/MOVK with shift 0 and 16 are emitted
+  1975→    /// (32-bit registers don't support shift=32 or shift=48). Values larger
+  1976→    /// than 32 bits are truncated to 32 bits.
+  1977→    fn emit_load_immediate_with_width(
+  1978→        &mut self,
+  1979→        rd: Register,
+  1980→        value: i64,
+  1981→        width: RegWidth,
+  1982→    ) -> Result<()> {
+  1983→        match width {
+  1984→            RegWidth::X64 => self.emit_load_immediate(rd, value),
+  1985→            RegWidth::W32 => {
+  1986→                // For 32-bit: mask to 32 bits and use only shift 0 and 16.
+  1987→                let val32 = (value as u32) as i64;
+  1988→                if (0..=65535).contains(&val32) {
+  1989→                    self.emit_instruction_with_width(
+  1990→                        Instruction::MOVZ {
+  1991→                            rd,
+  1992→                            imm16: val32 as u16,
+  1993→                            shift: 0,
+  1994→                        },
+  1995→                        RegWidth::W32,
+  1996→                    )?;
+  1997→                } else {
+  1998→                    let lo = (val32 & 0xFFFF) as u16;
+  1999→                    let hi = ((val32 >> 16) & 0xFFFF) as u16;
+  2000→                    self.emit_instruction_with_width(
+
+[showing lines 1-2000 of 5629; use offset=2001 with limit to continue reading]

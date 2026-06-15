@@ -41,6 +41,7 @@
 
 pub mod api;
 pub mod diagnostics;
+pub mod llm_api;
 pub mod lsp;
 pub mod pipeline;
 
@@ -76,3 +77,6 @@ pub use lsp::{
     LspServer, Position, Range, SemanticTokensLegend, SymbolKind, VumaDocument,
 };
 pub use lsp::DiagnosticSeverity as LspDiagnosticSeverity;
+
+// Re-export LLM API types for convenience.
+pub use llm_api::{LLMCompileResult, LLMTargetInfo, VumaForLLM};

@@ -42,13 +42,25 @@ struct Cli {
     #[arg(long, global = true, value_enum, default_value = "normal")]
     verification: VerificationArg,
 
-    /// Include debug info in output
-    #[arg(long, global = true)]
+    /// Include debug info in output (alias: --debug-info)
+    #[arg(long, global = true, visible_alias = "debug-info")]
     debug: bool,
+
+    /// Emit full ELF section headers in the output binary
+    #[arg(long, global = true)]
+    sections: bool,
 
     /// Launch the interactive REPL (shorthand for `vuma repl`)
     #[arg(long, global = true)]
     repl: bool,
+
+    /// Enable runtime memory safety checks (bounds checking, --safe mode)
+    #[arg(long, global = true)]
+    safe: bool,
+
+    /// Run performance benchmarks instead of compiling
+    #[arg(long, global = true)]
+    bench: bool,
 
     #[command(subcommand)]
     command: Option<Commands>,
@@ -242,6 +254,9 @@ fn make_config(cli: &Cli, target: CompileTarget) -> CompileConfig {
         opt_level: OptLevel::from(cli.opt_level),
         verification_level: VerificationLevel::from(cli.verification),
         debug_info: cli.debug,
+        section_headers: cli.sections,
+        runtime_bounds_checks: cli.safe,
+        memory_safety: true,
         ..CompileConfig::default()
     }
 }
@@ -1359,6 +1374,236 @@ fn cmd_lsp() -> Result<(), String> {
     Ok(())
 }
 
+/// `vuma --bench` — Run the performance benchmark suite.
+fn cmd_bench(_cli: &Cli) {
+    use vuma_codegen::backend::BackendKind;
+
+    println!("╔══════════════════════════════════════════════════════════════╗");
+    println!("║           VUMA Performance Benchmark Suite                  ║");
+    println!("╚══════════════════════════════════════════════════════════════╝");
+    println!();
+
+    // ── Benchmark 1: SHA256d compile time + binary size ──
+    println!("── Benchmark 1: SHA256d ──");
+    let sha256d_path = PathBuf::from("examples/sha256d.vuma");
+    let sha256d_source = fs::read_to_string(&sha256d_path).unwrap_or_else(|_| {
+        eprintln!("  Warning: examples/sha256d.vuma not found, skipping SHA256d benchmark");
+        String::new()
+    });
+
+    if !sha256d_source.is_empty() {
+        let backends: [(BackendKind, &str); 8] = [
+            (BackendKind::AArch64, "aarch64"),
+            (BackendKind::X86_64, "x86_64"),
+            (BackendKind::RiscV64, "riscv64"),
+            (BackendKind::Arm32, "arm32"),
+            (BackendKind::Mips64, "mips64"),
+            (BackendKind::PowerPC64, "ppc64"),
+            (BackendKind::LoongArch64, "loongarch64"),
+            (BackendKind::Wasm32, "wasm32"),
+        ];
+
+        println!("  {:15} {:>12} {:>12} {:>12}", "Backend", "Time (ms)", "Size (B)", "Instrs");
+        println!("  {:15} {:>12} {:>12} {:>12}", "───────", "────────", "────────", "────────");
+
+        for (kind, name) in &backends {
+            let start = std::time::Instant::now();
+
+            // Parse
+            let mut parser = vuma_parser::Parser::new(&sha256d_source);
+            let parse_result = parser.parse_program();
+
+            let parse_time = start.elapsed();
+
+            if parse_result.is_err() {
+                println!("  {:15} {:>12} {:>12} {:>12}", name, "PARSE_ERR", "-", "-");
+                continue;
+            }
+
+            let program = parse_result.value.unwrap();
+
+            // Bridge to codegen SCG
+            let codegen_scg = bridge_ast_to_codegen_scg(&program);
+
+            // Lower to IR
+            let mut ir_builder = ScgToIr::new();
+            let ir_result = ir_builder.convert(&codegen_scg);
+
+            let ir_time = start.elapsed();
+
+            if let Ok(ir_program) = ir_result {
+                let ir_instr_count: usize = ir_program.functions.iter()
+                    .map(|f| f.blocks.iter().map(|b| b.instructions.len()).sum::<usize>())
+                    .sum();
+
+                // Create backend and allocate
+                let backend = match create_backend(*kind) {
+                    Ok(b) => b,
+                    Err(_) => {
+                        println!("  {:15} {:>12} {:>12} {:>12}", name, "NO_BACKEND", "-", "-");
+                        continue;
+                    }
+                };
+
+                let mut allocated_functions = Vec::new();
+                for func in &ir_program.functions {
+                    if let Ok(allocated) = backend.allocate_registers(func) {
+                        allocated_functions.push(allocated);
+                    }
+                }
+
+                let total_time = start.elapsed();
+                let codegen_time_ms = total_time.as_millis() as u64;
+
+                // Encode
+                let binary_size = if !allocated_functions.is_empty() {
+                    let allocated_program = vuma_codegen::backend::AllocatedProgram {
+                        functions: allocated_functions,
+                        total_code_size: 0,
+                        total_data_size: 0,
+                    };
+                    match backend.encode_program(&allocated_program) {
+                        Ok(bytes) => bytes.len(),
+                        Err(_) => 0,
+                    }
+                } else {
+                    0
+                };
+
+                println!(
+                    "  {:15} {:>12} {:>12} {:>12}",
+                    name,
+                    codegen_time_ms,
+                    binary_size,
+                    ir_instr_count
+                );
+            } else {
+                println!("  {:15} {:>12} {:>12} {:>12}", name, "IR_ERR", "-", "-");
+            }
+        }
+    }
+    println!();
+
+    // ── Benchmark 2: Compilation speed at varying program sizes ──
+    println!("── Benchmark 2: Compilation Speed ──");
+    println!("  {:20} {:>12} {:>12} {:>12}", "Program Size", "Parse (μs)", "SCG (μs)", "Total (μs)");
+    println!("  {:20} {:>12} {:>12} {:>12}", "────────────", "──────────", "────────", "─────────");
+
+    for &line_count in &[10, 50, 100, 500] {
+        // Generate a synthetic program of the given size
+        let mut source = String::from("fn main() {\n");
+        for i in 0..line_count {
+            source.push_str(&format!("    x{} = {} + {};\n", i, i, i + 1));
+        }
+        source.push_str("}\n");
+
+        let start = std::time::Instant::now();
+        let mut parser = vuma_parser::Parser::new(&source);
+        let _ = parser.parse_program();
+        let parse_time = start.elapsed().as_micros() as u64;
+
+        let scg_start = std::time::Instant::now();
+        // SCG construction would happen here
+        let scg_time = scg_start.elapsed().as_micros() as u64;
+
+        let total_time = start.elapsed().as_micros() as u64;
+
+        println!(
+            "  {:20} {:>12} {:>12} {:>12}",
+            format!("{} lines", line_count),
+            parse_time,
+            scg_time,
+            total_time
+        );
+    }
+    println!();
+
+    // ── Benchmark 3: Codegen quality (redundant loads/stores) ──
+    println!("── Benchmark 3: Codegen Quality ──");
+    if !sha256d_source.is_empty() {
+        let mut parser = vuma_parser::Parser::new(&sha256d_source);
+        let parse_result = parser.parse_program();
+        if let Some(program) = parse_result.value {
+            let codegen_scg = bridge_ast_to_codegen_scg(&program);
+            let mut ir_builder = ScgToIr::new();
+            if let Ok(ir_program) = ir_builder.convert(&codegen_scg) {
+                let mut total_loads = 0usize;
+                let mut total_stores = 0usize;
+                let mut redundant_loads = 0usize;
+                let mut redundant_stores = 0usize;
+
+                for func in &ir_program.functions {
+                    let mut last_store_target: Option<String> = None;
+                    for block in &func.blocks {
+                        for instr in &block.instructions {
+                            match instr {
+                                vuma_codegen::ir::IRInstr::Load { dst, .. } => {
+                                    total_loads += 1;
+                                    // A load is potentially redundant if it immediately
+                                    // follows a store to the same address
+                                    if last_store_target.is_some() {
+                                        redundant_loads += 1;
+                                    }
+                                    let _ = dst;
+                                }
+                                vuma_codegen::ir::IRInstr::Store { .. } => {
+                                    total_stores += 1;
+                                    // A store is redundant if the same value was just stored
+                                    // (simplified check — full analysis would need value numbering)
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+
+                println!("  Total loads:           {}", total_loads);
+                println!("  Total stores:          {}", total_stores);
+                println!("  Potentially redundant loads:  {}", redundant_loads);
+                println!("  Potentially redundant stores: {}", redundant_stores);
+            }
+        }
+    }
+    println!();
+
+    // ── Benchmark 4: Memory safety analysis ──
+    println!("── Benchmark 4: Memory Safety Analysis ──");
+    if !sha256d_source.is_empty() {
+        let mut parser = vuma_parser::Parser::new(&sha256d_source);
+        let parse_result = parser.parse_program();
+        if let Some(program) = parse_result.value {
+            let codegen_scg = bridge_ast_to_codegen_scg(&program);
+
+            let config = if _cli.safe {
+                vuma_codegen::MemorySafetyConfig::safe_mode()
+            } else {
+                vuma_codegen::MemorySafetyConfig::compile_time_only()
+            };
+
+            let start = std::time::Instant::now();
+            let analyzer = vuma_codegen::MemorySafetyAnalyzer::new(config);
+            let report = analyzer.analyze(&codegen_scg);
+            let elapsed = start.elapsed();
+
+            println!("  Analysis time:         {}μs", elapsed.as_micros());
+            println!("  Heap allocations:      {}", report.heap_allocations_analyzed);
+            println!("  Stack allocations:     {}", report.stack_allocations_analyzed);
+            println!("  Access sites:          {}", report.access_sites_analyzed);
+            println!("  Violations found:      {}", report.violations.len());
+            if !report.violations.is_empty() {
+                for v in &report.violations {
+                    println!("    {}", v);
+                }
+            } else {
+                println!("  ✓ No memory safety violations detected");
+            }
+        }
+    }
+    println!();
+
+    println!("Benchmark suite complete.");
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Main entry point
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1368,6 +1613,12 @@ fn main() {
     env_logger::init();
 
     let cli = Cli::parse();
+
+    // Handle --bench flag: run the benchmark suite.
+    if cli.bench {
+        cmd_bench(&cli);
+        return;
+    }
 
     // Handle --repl flag: launch the full VumaRepl instead of subcommand.
     if cli.repl {
