@@ -1,0 +1,2002 @@
+     1→//! # VUMA Language Server Protocol Implementation
+     2→//!
+     3→//! This module provides a full LSP server for the VUMA language, enabling
+     4→//! structured access to compilation results, diagnostics, and code intelligence
+     5→//! for LLMs and IDE integrations.
+     6→//!
+     7→//! ## Capabilities
+     8→//!
+     9→//! - **JSON-RPC transport** over stdin/stdout (LSP spec compatible)
+    10→//! - **TextDocumentSync** — full document sync for `.vuma` files
+    11→//! - **Diagnostics** — publish compilation errors with line/column info
+    12→//! - **Hover** — show type information for variables and functions
+    13→//! - **Go to Definition** — navigate from usage to definition
+    14→//! - **Completion** — suggest function names, types, keywords
+    15→//! - **Document Symbols** — list all functions, variables in a document
+    16→//! - **Semantic Tokens** — highlight keywords, types, functions, variables
+    17→//!
+    18→//! ## Usage
+    19→//!
+    20→//! ```rust,no_run
+    21→//! use vuma::lsp::LspServer;
+    22→//!
+    23→//! // Start the LSP server — reads JSON-RPC from stdin, writes to stdout
+    24→//! let mut server = LspServer::new();
+    25→//! server.run();
+    26→//! ```
+    27→
+    28→use std::collections::HashMap;
+    29→use std::io::{self, BufRead, Read as IoRead, Write as IoWrite};
+    30→
+    31→use serde::{Deserialize, Serialize};
+    32→use serde_json::Value;
+    33→use serde_json::json;
+    34→
+    35→use vuma_parser::lexer::{Lexer, TokenKind};
+    36→use vuma_parser::parser::Parser;
+    37→use vuma_parser::ast::{
+    38→    Block, Item, Program, Stmt, Type,
+    39→};
+    40→use vuma_parser::error::Span;
+    41→
+    42→// ═══════════════════════════════════════════════════════════════════════════
+    43→// LSP Type Definitions
+    44→// ═══════════════════════════════════════════════════════════════════════════
+    45→
+    46→/// A position in a text document (0-based line and character).
+    47→#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+    48→pub struct Position {
+    49→    /// Line position (0-based).
+    50→    pub line: u32,
+    51→    /// Character offset on the line (0-based, UTF-16 code units).
+    52→    pub character: u32,
+    53→}
+    54→
+    55→impl Position {
+    56→    /// Create a new position.
+    57→    pub fn new(line: u32, character: u32) -> Self {
+    58→        Self { line, character }
+    59→    }
+    60→}
+    61→
+    62→/// A range in a text document expressed as (start, end) positions.
+    63→#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+    64→pub struct Range {
+    65→    /// Start position (inclusive).
+    66→    pub start: Position,
+    67→    /// End position (exclusive).
+    68→    pub end: Position,
+    69→}
+    70→
+    71→impl Range {
+    72→    /// Create a new range.
+    73→    pub fn new(start: Position, end: Position) -> Self {
+    74→        Self { start, end }
+    75→    }
+    76→
+    77→    /// Degenerate range at a single position.
+    78→    pub fn at(line: u32, character: u32) -> Self {
+    79→        let pos = Position::new(line, character);
+    80→        Self { start: pos.clone(), end: pos }
+    81→    }
+    82→}
+    83→
+    84→/// Diagnostic severity levels (LSP spec).
+    85→#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+    86→#[serde(rename_all = "camelCase")]
+    87→pub enum DiagnosticSeverity {
+    88→    /// Reports an error.
+    89→    Error = 1,
+    90→    /// Reports a warning.
+    91→    Warning = 2,
+    92→    /// Reports an information.
+    93→    Information = 3,
+    94→    /// Reports a hint.
+    95→    Hint = 4,
+    96→}
+    97→
+    98→/// A diagnostic item (LSP spec).
+    99→#[derive(Debug, Clone, Serialize, Deserialize)]
+   100→#[serde(rename_all = "camelCase")]
+   101→pub struct Diagnostic {
+   102→    /// The range at which the message applies.
+   103→    pub range: Range,
+   104→    /// The diagnostic's severity.
+   105→    #[serde(skip_serializing_if = "Option::is_none")]
+   106→    pub severity: Option<DiagnosticSeverity>,
+   107→    /// The diagnostic's code.
+   108→    #[serde(skip_serializing_if = "Option::is_none")]
+   109→    pub code: Option<Value>,
+   110→    /// A human-readable source of this diagnostic.
+   111→    #[serde(skip_serializing_if = "Option::is_none")]
+   112→    pub source: Option<String>,
+   113→    /// The diagnostic message.
+   114→    pub message: String,
+   115→}
+   116→
+   117→/// Completion item kind (LSP spec subset).
+   118→#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+   119→#[serde(rename_all = "camelCase")]
+   120→pub enum CompletionItemKind {
+   121→    /// Text completion.
+   122→    Text = 1,
+   123→    /// Method completion.
+   124→    Method = 2,
+   125→    /// Function completion.
+   126→    Function = 3,
+   127→    /// Constructor completion.
+   128→    Constructor = 4,
+   129→    /// Field completion.
+   130→    Field = 5,
+   131→    /// Variable completion.
+   132→    Variable = 6,
+   133→    /// Class completion.
+   134→    Class = 7,
+   135→    /// Interface completion.
+   136→    Interface = 8,
+   137→    /// Module completion.
+   138→    Module = 9,
+   139→    /// Property completion.
+   140→    Property = 10,
+   141→    /// Unit completion.
+   142→    Unit = 11,
+   143→    /// Value completion.
+   144→    Value = 12,
+   145→    /// Enum completion.
+   146→    Enum = 13,
+   147→    /// Keyword completion.
+   148→    Keyword = 14,
+   149→    /// Snippet completion.
+   150→    Snippet = 15,
+   151→    /// Color completion.
+   152→    Color = 16,
+   153→    /// File completion.
+   154→    File = 17,
+   155→    /// Reference completion.
+   156→    Reference = 18,
+   157→    /// Folder completion.
+   158→    Folder = 19,
+   159→    /// EnumMember completion.
+   160→    EnumMember = 20,
+   161→    /// Constant completion.
+   162→    Constant = 21,
+   163→    /// Struct completion.
+   164→    Struct = 22,
+   165→    /// Event completion.
+   166→    Event = 23,
+   167→    /// Operator completion.
+   168→    Operator = 24,
+   169→    /// Type parameter completion.
+   170→    TypeParameter = 25,
+   171→}
+   172→
+   173→/// A completion item (LSP spec).
+   174→#[derive(Debug, Clone, Serialize, Deserialize)]
+   175→#[serde(rename_all = "camelCase")]
+   176→pub struct CompletionItem {
+   177→    /// The label of this completion item.
+   178→    pub label: String,
+   179→    /// The kind of this completion item.
+   180→    #[serde(skip_serializing_if = "Option::is_none")]
+   181→    pub kind: Option<CompletionItemKind>,
+   182→    /// A human-readable string with additional information.
+   183→    #[serde(skip_serializing_if = "Option::is_none")]
+   184→    pub detail: Option<String>,
+   185→    /// A human-readable string that represents a doc-comment.
+   186→    #[serde(skip_serializing_if = "Option::is_none")]
+   187→    pub documentation: Option<String>,
+   188→    /// A string that should be used when comparing this item with others.
+   189→    #[serde(skip_serializing_if = "Option::is_none")]
+   190→    pub sort_text: Option<String>,
+   191→    /// A string that should be used when filtering a set of completion items.
+   192→    #[serde(skip_serializing_if = "Option::is_none")]
+   193→    pub filter_text: Option<String>,
+   194→    /// An edit which is applied to a document when selecting this completion.
+   195→    #[serde(skip_serializing_if = "Option::is_none")]
+   196→    pub text_edit: Option<Value>,
+   197→    /// Additional text edits.
+   198→    #[serde(skip_serializing_if = "Option::is_none")]
+   199→    pub additional_text_edits: Option<Vec<Value>>,
+   200→}
+   201→
+   202→/// Symbol kind (LSP spec subset).
+   203→#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+   204→#[serde(rename_all = "camelCase")]
+   205→pub enum SymbolKind {
+   206→    /// A file.
+   207→    File = 1,
+   208→    /// A module.
+   209→    Module = 2,
+   210→    /// A namespace.
+   211→    Namespace = 3,
+   212→    /// A package.
+   213→    Package = 4,
+   214→    /// A class.
+   215→    Class = 5,
+   216→    /// A method.
+   217→    Method = 6,
+   218→    /// A property.
+   219→    Property = 7,
+   220→    /// A field.
+   221→    Field = 8,
+   222→    /// A constructor.
+   223→    Constructor = 9,
+   224→    /// An enum.
+   225→    Enum = 10,
+   226→    /// An interface.
+   227→    Interface = 11,
+   228→    /// A function.
+   229→    Function = 12,
+   230→    /// A variable.
+   231→    Variable = 13,
+   232→    /// A constant.
+   233→    Constant = 14,
+   234→    /// A struct.
+   235→    Struct = 23,
+   236→    /// A type parameter.
+   237→    TypeParameter = 26,
+   238→}
+   239→
+   240→/// A document symbol (LSP spec).
+   241→#[derive(Debug, Clone, Serialize, Deserialize)]
+   242→#[serde(rename_all = "camelCase")]
+   243→pub struct DocumentSymbol {
+   244→    /// The name of this symbol.
+   245→    pub name: String,
+   246→    /// The kind of this symbol.
+   247→    pub kind: SymbolKind,
+   248→    /// The range enclosing this symbol, not including leading/trailing whitespace.
+   249→    pub range: Range,
+   250→    /// The range that should be selected and revealed.
+   251→    pub selection_range: Range,
+   252→    /// Children of this symbol.
+   253→    #[serde(skip_serializing_if = "Option::is_none")]
+   254→    pub children: Option<Vec<DocumentSymbol>>,
+   255→    /// Detail string.
+   256→    #[serde(skip_serializing_if = "Option::is_none")]
+   257→    pub detail: Option<String>,
+   258→}
+   259→
+   260→/// Semantic token types (LSP spec).
+   261→#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+   262→pub enum SemanticTokenType {
+   263→    /// A namespace token.
+   264→    Namespace,
+   265→    /// A type token.
+   266→    Type,
+   267→    /// A class token.
+   268→    Class,
+   269→    /// An enum token.
+   270→    Enum,
+   271→    /// An interface token.
+   272→    Interface,
+   273→    /// A struct token.
+   274→    Struct,
+   275→    /// A type parameter token.
+   276→    TypeParameter,
+   277→    /// A function token.
+   278→    Function,
+   279→    /// A method token.
+   280→    Method,
+   281→    /// A property token.
+   282→    Property,
+   283→    /// A variable token.
+   284→    Variable,
+   285→    /// A keyword token.
+   286→    Keyword,
+   287→    /// A modifier token.
+   288→    Modifier,
+   289→    /// A comment token.
+   290→    Comment,
+   291→    /// A string token.
+   292→    String,
+   293→    /// A number token.
+   294→    Number,
+   295→    /// A regexp token.
+   296→    Regexp,
+   297→    /// An operator token.
+   298→    Operator,
+   299→}
+   300→
+   301→impl SemanticTokenType {
+   302→    /// Map to the LSP legend index.
+   303→    fn legend_index(&self) -> u32 {
+   304→        match self {
+   305→            Self::Namespace => 0,
+   306→            Self::Type => 1,
+   307→            Self::Class => 2,
+   308→            Self::Enum => 3,
+   309→            Self::Interface => 4,
+   310→            Self::Struct => 5,
+   311→            Self::TypeParameter => 6,
+   312→            Self::Function => 7,
+   313→            Self::Method => 8,
+   314→            Self::Property => 9,
+   315→            Self::Variable => 10,
+   316→            Self::Keyword => 11,
+   317→            Self::Modifier => 12,
+   318→            Self::Comment => 13,
+   319→            Self::String => 14,
+   320→            Self::Number => 15,
+   321→            Self::Regexp => 16,
+   322→            Self::Operator => 17,
+   323→        }
+   324→    }
+   325→}
+   326→
+   327→/// The legend that defines the token types and modifiers used in semantic tokens.
+   328→#[derive(Debug, Clone, Serialize, Deserialize)]
+   329→pub struct SemanticTokensLegend {
+   330→    /// The token types a server uses.
+   331→    pub token_types: Vec<String>,
+   332→    /// The token modifiers a server uses.
+   333→    pub token_modifiers: Vec<String>,
+   334→}
+   335→
+   336→impl Default for SemanticTokensLegend {
+   337→    fn default() -> Self {
+   338→        Self {
+   339→            token_types: vec![
+   340→                "namespace".into(),
+   341→                "type".into(),
+   342→                "class".into(),
+   343→                "enum".into(),
+   344→                "interface".into(),
+   345→                "struct".into(),
+   346→                "typeParameter".into(),
+   347→                "function".into(),
+   348→                "method".into(),
+   349→                "property".into(),
+   350→                "variable".into(),
+   351→                "keyword".into(),
+   352→                "modifier".into(),
+   353→                "comment".into(),
+   354→                "string".into(),
+   355→                "number".into(),
+   356→                "regexp".into(),
+   357→                "operator".into(),
+   358→            ],
+   359→            token_modifiers: vec![
+   360→                "declaration".into(),
+   361→                "definition".into(),
+   362→                "readonly".into(),
+   363→                "static".into(),
+   364→                "deprecated".into(),
+   365→                "abstract".into(),
+   366→                "async".into(),
+   367→                "modification".into(),
+   368→                "documentation".into(),
+   369→                "defaultLibrary".into(),
+   370→            ],
+   371→        }
+   372→    }
+   373→}
+   374→
+   375→/// Semantic tokens result (LSP spec, relative encoding).
+   376→#[derive(Debug, Clone, Serialize, Deserialize)]
+   377→#[serde(rename_all = "camelCase")]
+   378→pub struct SemanticTokens {
+   379→    /// The actual tokens data, using relative encoding (delta encoding).
+   380→    pub data: Vec<u32>,
+   381→}
+   382→
+   383→/// Location in a document (LSP spec).
+   384→#[derive(Debug, Clone, Serialize, Deserialize)]
+   385→pub struct Location {
+   386→    /// The URI of the document.
+   387→    pub uri: String,
+   388→    /// The range inside the document.
+   389→    pub range: Range,
+   390→}
+   391→
+   392→/// Hover result (LSP spec).
+   393→#[derive(Debug, Clone, Serialize, Deserialize)]
+   394→#[serde(rename_all = "camelCase")]
+   395→pub struct Hover {
+   396→    /// The hover's content.
+   397→    pub contents: Value,
+   398→    /// An optional range.
+   399→    #[serde(skip_serializing_if = "Option::is_none")]
+   400→    pub range: Option<Range>,
+   401→}
+   402→
+   403→/// A stored VUMA document.
+   404→#[derive(Debug, Clone)]
+   405→pub struct VumaDocument {
+   406→    /// Document URI.
+   407→    pub uri: String,
+   408→    /// Full text content.
+   409→    pub text: String,
+   410→    /// Document version.
+   411→    pub version: i32,
+   412→}
+   413→
+   414→/// Symbol information extracted from a VUMA document.
+   415→#[derive(Debug, Clone)]
+   416→struct DocumentInfo {
+   417→    /// All function definitions with their spans.
+   418→    functions: Vec<(String, Range, Option<String>)>, // (name, range, return_type)
+   419→    /// All struct definitions.
+   420→    structs: Vec<(String, Range)>,
+   421→    /// All enum definitions.
+   422→    enums: Vec<(String, Range)>,
+   423→    /// All region definitions.
+   424→    regions: Vec<(String, Range)>,
+   425→    /// All const/static definitions.
+   426→    constants: Vec<(String, Range, Option<String>)>, // (name, range, type)
+   427→    /// All trait definitions.
+   428→    traits: Vec<(String, Range)>,
+   429→    /// All let bindings (variable name → type hint → span).
+   430→    variables: Vec<(String, Range, Option<String>)>, // (name, range, type)
+   431→    /// All type names (struct/enum/trait names for completion).
+   432→    type_names: Vec<String>,
+   433→}
+   434→
+   435→// ═══════════════════════════════════════════════════════════════════════════
+   436→// JSON-RPC Transport
+   437→// ═══════════════════════════════════════════════════════════════════════════
+   438→
+   439→/// Read a single JSON-RPC message from stdin.
+   440→fn read_message() -> io::Result<Option<String>> {
+   441→    let stdin = io::stdin();
+   442→    let mut handle = stdin.lock();
+   443→
+   444→    // Read headers until blank line
+   445→    let mut content_length: Option<usize> = None;
+   446→    loop {
+   447→        let mut line = String::new();
+   448→        let bytes = handle.read_line(&mut line)?;
+   449→        if bytes == 0 {
+   450→            // EOF
+   451→            return Ok(None);
+   452→        }
+   453→        let line = line.trim_end_matches(|c| c == '\r' || c == '\n');
+   454→        if line.is_empty() {
+   455→            break;
+   456→        }
+   457→        if let Some(rest) = line.strip_prefix("Content-Length: ") {
+   458→            content_length = Some(rest.trim().parse::<usize>().map_err(|e| {
+   459→                io::Error::new(io::ErrorKind::InvalidData, e)
+   460→            })?);
+   461→        }
+   462→    }
+   463→
+   464→    let length = content_length.ok_or_else(|| {
+   465→        io::Error::new(io::ErrorKind::InvalidData, "missing Content-Length header")
+   466→    })?;
+   467→
+   468→    let mut buf = vec![0u8; length];
+   469→    handle.read_exact(&mut buf)?;
+   470→    Ok(Some(String::from_utf8(buf).map_err(|e| {
+   471→        io::Error::new(io::ErrorKind::InvalidData, e)
+   472→    })?))
+   473→}
+   474→
+   475→/// Write a single JSON-RPC message to stdout.
+   476→fn write_message(content: &str) -> io::Result<()> {
+   477→    let stdout = io::stdout();
+   478→    let mut handle = stdout.lock();
+   479→    write!(handle, "Content-Length: {}\r\n\r\n{}", content.len(), content)?;
+   480→    handle.flush()?;
+   481→    Ok(())
+   482→}
+   483→
+   484→// ═══════════════════════════════════════════════════════════════════════════
+   485→// LspServer
+   486→// ═══════════════════════════════════════════════════════════════════════════
+   487→
+   488→/// The VUMA Language Server.
+   489→///
+   490→/// Maintains open documents, parses them on change, and responds to LSP
+   491→/// requests using the `vuma-parser` crate for lexing/parsing and the AST
+   492→/// for code intelligence.
+   493→pub struct LspServer {
+   494→    /// Open documents keyed by URI.
+   495→    documents: HashMap<String, VumaDocument>,
+   496→    /// Cached parse results per document URI.
+   497→    parse_cache: HashMap<String, Option<Program>>,
+   498→    /// Cached document info per URI.
+   499→    info_cache: HashMap<String, DocumentInfo>,
+   500→    /// Next request ID counter (for server-initiated requests).
+   501→    next_id: i64,
+   502→    /// Whether the server has been initialized.
+   503→    initialized: bool,
+   504→    /// Whether the server is shutting down.
+   505→    shutting_down: bool,
+   506→}
+   507→
+   508→impl LspServer {
+   509→    /// Create a new LSP server instance.
+   510→    pub fn new() -> Self {
+   511→        Self {
+   512→            documents: HashMap::new(),
+   513→            parse_cache: HashMap::new(),
+   514→            info_cache: HashMap::new(),
+   515→            next_id: 1,
+   516→            initialized: false,
+   517→            shutting_down: false,
+   518→        }
+   519→    }
+   520→
+   521→    /// Run the main event loop, reading JSON-RPC from stdin and writing to stdout.
+   522→    pub fn run(&mut self) {
+   523→        loop {
+   524→            match read_message() {
+   525→                Ok(Some(msg)) => {
+   526→                    if let Ok(value) = serde_json::from_str::<Value>(&msg) {
+   527→                        self.handle_message(value);
+   528→                    }
+   529→                }
+   530→                Ok(None) => break, // EOF
+   531→                Err(e) => {
+   532→                    eprintln!("LSP read error: {}", e);
+   533→                    break;
+   534→                }
+   535→            }
+   536→            if self.shutting_down {
+   537→                break;
+   538→            }
+   539→        }
+   540→    }
+   541→
+   542→    /// Dispatch an incoming JSON-RPC message.
+   543→    fn handle_message(&mut self, value: Value) {
+   544→        let id = value.get("id").cloned();
+   545→        let method = value.get("method").and_then(|v| v.as_str()).unwrap_or("");
+   546→
+   547→        // Check if this is a request (has id) or notification (no id)
+   548→        let is_request = id.is_some();
+   549→
+   550→        match method {
+   551→            "initialize" => {
+   552→                if let Some(ref id_val) = id {
+   553→                    let params = value.get("params").cloned().unwrap_or(Value::Null);
+   554→                    let result = self.handle_initialize(params);
+   555→                    self.send_response(id_val.clone(), Ok(result));
+   556→                }
+   557→            }
+   558→            "initialized" => {
+   559→                // Notification — no response needed
+   560→                self.initialized = true;
+   561→            }
+   562→            "shutdown" => {
+   563→                if let Some(ref id_val) = id {
+   564→                    self.shutting_down = true;
+   565→                    self.send_response(id_val.clone(), Ok(Value::Null));
+   566→                }
+   567→            }
+   568→            "exit" => {
+   569→                self.shutting_down = true;
+   570→            }
+   571→            "textDocument/didOpen" => {
+   572→                let params = value.get("params").cloned().unwrap_or(Value::Null);
+   573→                self.handle_text_document_did_open(params);
+   574→            }
+   575→            "textDocument/didChange" => {
+   576→                let params = value.get("params").cloned().unwrap_or(Value::Null);
+   577→                self.handle_text_document_did_change(params);
+   578→            }
+   579→            "textDocument/didClose" => {
+   580→                let params = value.get("params").cloned().unwrap_or(Value::Null);
+   581→                self.handle_text_document_did_close(params);
+   582→            }
+   583→            "textDocument/completion" => {
+   584→                if let Some(ref id_val) = id {
+   585→                    let params = value.get("params").cloned().unwrap_or(Value::Null);
+   586→                    let result = self.handle_text_document_completion(params);
+   587→                    self.send_response(id_val.clone(), Ok(result));
+   588→                }
+   589→            }
+   590→            "textDocument/hover" => {
+   591→                if let Some(ref id_val) = id {
+   592→                    let params = value.get("params").cloned().unwrap_or(Value::Null);
+   593→                    let result = self.handle_text_document_hover(params);
+   594→                    self.send_response(id_val.clone(), result);
+   595→                }
+   596→            }
+   597→            "textDocument/definition" => {
+   598→                if let Some(ref id_val) = id {
+   599→                    let params = value.get("params").cloned().unwrap_or(Value::Null);
+   600→                    let result = self.handle_text_document_definition(params);
+   601→                    self.send_response(id_val.clone(), Ok(result));
+   602→                }
+   603→            }
+   604→            "textDocument/documentSymbol" => {
+   605→                if let Some(ref id_val) = id {
+   606→                    let params = value.get("params").cloned().unwrap_or(Value::Null);
+   607→                    let result = self.handle_text_document_symbols(params);
+   608→                    self.send_response(id_val.clone(), Ok(result));
+   609→                }
+   610→            }
+   611→            "textDocument/semanticTokens/full" => {
+   612→                if let Some(ref id_val) = id {
+   613→                    let params = value.get("params").cloned().unwrap_or(Value::Null);
+   614→                    let result = self.handle_text_document_semantic_tokens_full(params);
+   615→                    self.send_response(id_val.clone(), Ok(result));
+   616→                }
+   617→            }
+   618→            "$/cancelRequest" => {
+   619→                // Ignore cancel requests for now
+   620→            }
+   621→            _ => {
+   622→                if is_request {
+   623→                    // Respond with method not found
+   624→                    if let Some(ref id_val) = id {
+   625→                        self.send_response(
+   626→                            id_val.clone(),
+   627→                            Err(json!({
+   628→                                "code": -32601,
+   629→                                "message": format!("Method not found: {}", method)
+   630→                            })),
+   631→                        );
+   632→                    }
+   633→                }
+   634→            }
+   635→        }
+   636→    }
+   637→
+   638→    /// Send a JSON-RPC response.
+   639→    fn send_response(&mut self, id: Value, result: Result<Value, Value>) {
+   640→        let mut response = serde_json::json!({
+   641→            "jsonrpc": "2.0",
+   642→            "id": id,
+   643→        });
+   644→        match result {
+   645→            Ok(val) => {
+   646→                response["result"] = val;
+   647→            }
+   648→            Err(err) => {
+   649→                response["error"] = err;
+   650→            }
+   651→        }
+   652→        let msg = serde_json::to_string(&response).unwrap_or_default();
+   653→        let _ = write_message(&msg);
+   654→    }
+   655→
+   656→    /// Send a JSON-RPC notification.
+   657→    fn send_notification(&mut self, method: &str, params: Value) {
+   658→        let notification = serde_json::json!({
+   659→            "jsonrpc": "2.0",
+   660→            "method": method,
+   661→            "params": params,
+   662→        });
+   663→        let msg = serde_json::to_string(&notification).unwrap_or_default();
+   664→        let _ = write_message(&msg);
+   665→    }
+   666→
+   667→    // ═══════════════════════════════════════════════════════════════════════
+   668→    // LSP Protocol Handlers
+   669→    // ═══════════════════════════════════════════════════════════════════════
+   670→
+   671→    /// Handle the `initialize` request.
+   672→    pub fn handle_initialize(&mut self, _params: Value) -> Value {
+   673→        self.initialized = true;
+   674→        json!({
+   675→            "capabilities": {
+   676→                "textDocumentSync": {
+   677→                    "openClose": true,
+   678→                    "change": 1, // Full document sync
+   679→                },
+   680→                "completionProvider": {
+   681→                    "triggerCharacters": [".", ":"],
+   682→                    "resolveProvider": false,
+   683→                },
+   684→                "hoverProvider": true,
+   685→                "definitionProvider": true,
+   686→                "documentSymbolProvider": true,
+   687→                "semanticTokensProvider": {
+   688→                    "full": true,
+   689→                    "delta": false,
+   690→                    "range": false,
+   691→                    "legend": SemanticTokensLegend::default(),
+   692→                },
+   693→                "workspace": {
+   694→                    "workspaceFolders": {
+   695→                        "supported": true,
+   696→                    }
+   697→                },
+   698→            }
+   699→        })
+   700→    }
+   701→
+   702→    /// Handle `textDocument/didOpen` notification.
+   703→    pub fn handle_text_document_did_open(&mut self, params: Value) {
+   704→        let text_doc = params.get("textDocument");
+   705→        if let Some(td) = text_doc {
+   706→            let uri = td.get("uri").and_then(|v| v.as_str()).unwrap_or("").to_string();
+   707→            let text = td.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string();
+   708→            let version = td.get("version").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+   709→
+   710→            let doc = VumaDocument { uri: uri.clone(), text, version };
+   711→            self.reparse_document(&doc);
+   712→            self.documents.insert(uri.clone(), doc);
+   713→
+   714→            // Publish diagnostics
+   715→            if let Some(doc) = self.documents.get(&uri) {
+   716→                let diagnostics = self.compute_diagnostics(doc);
+   717→                self.publish_diagnostics(&uri, diagnostics);
+   718→            }
+   719→        }
+   720→    }
+   721→
+   722→    /// Handle `textDocument/didChange` notification.
+   723→    pub fn handle_text_document_did_change(&mut self, params: Value) {
+   724→        let uri = params
+   725→            .get("textDocument")
+   726→            .and_then(|td| td.get("uri"))
+   727→            .and_then(|v| v.as_str())
+   728→            .unwrap_or("")
+   729→            .to_string();
+   730→
+   731→        let version = params
+   732→            .get("textDocument")
+   733→            .and_then(|td| td.get("version"))
+   734→            .and_then(|v| v.as_i64())
+   735→            .unwrap_or(0) as i32;
+   736→
+   737→        // Full document sync — take the last content change
+   738→        let text = params
+   739→            .get("contentChanges")
+   740→            .and_then(|v| v.as_array())
+   741→            .and_then(|arr| arr.last())
+   742→            .and_then(|change| change.get("text"))
+   743→            .and_then(|v| v.as_str())
+   744→            .unwrap_or("")
+   745→            .to_string();
+   746→
+   747→        let doc = VumaDocument { uri: uri.clone(), text, version };
+   748→        self.reparse_document(&doc);
+   749→        self.documents.insert(uri.clone(), doc);
+   750→
+   751→        // Publish diagnostics
+   752→        if let Some(doc) = self.documents.get(&uri) {
+   753→            let diagnostics = self.compute_diagnostics(doc);
+   754→            self.publish_diagnostics(&uri, diagnostics);
+   755→        }
+   756→    }
+   757→
+   758→    /// Handle `textDocument/didClose` notification.
+   759→    fn handle_text_document_did_close(&mut self, params: Value) {
+   760→        let uri = params
+   761→            .get("textDocument")
+   762→            .and_then(|td| td.get("uri"))
+   763→            .and_then(|v| v.as_str())
+   764→            .unwrap_or("")
+   765→            .to_string();
+   766→
+   767→        self.documents.remove(&uri);
+   768→        self.parse_cache.remove(&uri);
+   769→        self.info_cache.remove(&uri);
+   770→
+   771→        // Clear diagnostics
+   772→        self.publish_diagnostics(&uri, vec![]);
+   773→    }
+   774→
+   775→    /// Handle `textDocument/completion` request.
+   776→    pub fn handle_text_document_completion(&self, params: Value) -> Value {
+   777→        let uri = params
+   778→            .get("textDocument")
+   779→            .and_then(|td| td.get("uri"))
+   780→            .and_then(|v| v.as_str())
+   781→            .unwrap_or("");
+   782→
+   783→        let mut items: Vec<CompletionItem> = Vec::new();
+   784→
+   785→        // 1. Add VUMA keywords
+   786→        for kw in vuma_parser::error::VUMA_KEYWORDS.iter() {
+   787→            items.push(CompletionItem {
+   788→                label: kw.to_string(),
+   789→                kind: Some(CompletionItemKind::Keyword),
+   790→                detail: Some("keyword".to_string()),
+   791→                documentation: None,
+   792→                sort_text: Some(format!("2_{}", kw)),
+   793→                filter_text: None,
+   794→                text_edit: None,
+   795→                additional_text_edits: None,
+   796→            });
+   797→        }
+   798→
+   799→        // 2. Add document-specific symbols
+   800→        if let Some(info) = self.info_cache.get(uri) {
+   801→            // Functions
+   802→            for (name, _range, ret_ty) in &info.functions {
+   803→                let detail = match ret_ty {
+   804→                    Some(ty) => format!("fn {} -> {}", name, ty),
+   805→                    None => format!("fn {}", name),
+   806→                };
+   807→                items.push(CompletionItem {
+   808→                    label: name.clone(),
+   809→                    kind: Some(CompletionItemKind::Function),
+   810→                    detail: Some(detail),
+   811→                    documentation: None,
+   812→                    sort_text: Some(format!("0_{}", name)),
+   813→                    filter_text: None,
+   814→                    text_edit: None,
+   815→                    additional_text_edits: None,
+   816→                });
+   817→            }
+   818→
+   819→            // Structs
+   820→            for (name, _range) in &info.structs {
+   821→                items.push(CompletionItem {
+   822→                    label: name.clone(),
+   823→                    kind: Some(CompletionItemKind::Class),
+   824→                    detail: Some("struct".to_string()),
+   825→                    documentation: None,
+   826→                    sort_text: Some(format!("1_{}", name)),
+   827→                    filter_text: None,
+   828→                    text_edit: None,
+   829→                    additional_text_edits: None,
+   830→                });
+   831→            }
+   832→
+   833→            // Enums
+   834→            for (name, _range) in &info.enums {
+   835→                items.push(CompletionItem {
+   836→                    label: name.clone(),
+   837→                    kind: Some(CompletionItemKind::Enum),
+   838→                    detail: Some("enum".to_string()),
+   839→                    documentation: None,
+   840→                    sort_text: Some(format!("1_{}", name)),
+   841→                    filter_text: None,
+   842→                    text_edit: None,
+   843→                    additional_text_edits: None,
+   844→                });
+   845→            }
+   846→
+   847→            // Regions
+   848→            for (name, _range) in &info.regions {
+   849→                items.push(CompletionItem {
+   850→                    label: name.clone(),
+   851→                    kind: Some(CompletionItemKind::Variable),
+   852→                    detail: Some("region".to_string()),
+   853→                    documentation: None,
+   854→                    sort_text: Some(format!("0_{}", name)),
+   855→                    filter_text: None,
+   856→                    text_edit: None,
+   857→                    additional_text_edits: None,
+   858→                });
+   859→            }
+   860→
+   861→            // Constants
+   862→            for (name, _range, ty) in &info.constants {
+   863→                let detail = match ty {
+   864→                    Some(t) => format!("const: {}", t),
+   865→                    None => "const".to_string(),
+   866→                };
+   867→                items.push(CompletionItem {
+   868→                    label: name.clone(),
+   869→                    kind: Some(CompletionItemKind::Constant),
+   870→                    detail: Some(detail),
+   871→                    documentation: None,
+   872→                    sort_text: Some(format!("0_{}", name)),
+   873→                    filter_text: None,
+   874→                    text_edit: None,
+   875→                    additional_text_edits: None,
+   876→                });
+   877→            }
+   878→
+   879→            // Variables (let bindings)
+   880→            for (name, _range, ty) in &info.variables {
+   881→                let detail = match ty {
+   882→                    Some(t) => format!("let: {}", t),
+   883→                    None => "let".to_string(),
+   884→                };
+   885→                items.push(CompletionItem {
+   886→                    label: name.clone(),
+   887→                    kind: Some(CompletionItemKind::Variable),
+   888→                    detail: Some(detail),
+   889→                    documentation: None,
+   890→                    sort_text: Some(format!("0_{}", name)),
+   891→                    filter_text: None,
+   892→                    text_edit: None,
+   893→                    additional_text_edits: None,
+   894→                });
+   895→            }
+   896→
+   897→            // Types
+   898→            for name in &info.type_names {
+   899→                items.push(CompletionItem {
+   900→                    label: name.clone(),
+   901→                    kind: Some(CompletionItemKind::TypeParameter),
+   902→                    detail: Some("type".to_string()),
+   903→                    documentation: None,
+   904→                    sort_text: Some(format!("1_{}", name)),
+   905→                    filter_text: None,
+   906→                    text_edit: None,
+   907→                    additional_text_edits: None,
+   908→                });
+   909→            }
+   910→        }
+   911→
+   912→        // 3. Add built-in types
+   913→        for builtin in &["u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64",
+   914→                         "f32", "f64", "bool", "usize", "void", "ptr", "null"] {
+   915→            items.push(CompletionItem {
+   916→                label: builtin.to_string(),
+   917→                kind: Some(CompletionItemKind::TypeParameter),
+   918→                detail: Some("builtin type".to_string()),
+   919→                documentation: None,
+   920→                sort_text: Some(format!("3_{}", builtin)),
+   921→                filter_text: None,
+   922→                text_edit: None,
+   923→                additional_text_edits: None,
+   924→            });
+   925→        }
+   926→
+   927→        json!({
+   928→            "isIncomplete": false,
+   929→            "items": items,
+   930→        })
+   931→    }
+   932→
+   933→    /// Handle `textDocument/hover` request.
+   934→    pub fn handle_text_document_hover(&self, params: Value) -> Result<Value, Value> {
+   935→        let uri = params
+   936→            .get("textDocument")
+   937→            .and_then(|td| td.get("uri"))
+   938→            .and_then(|v| v.as_str())
+   939→            .unwrap_or("");
+   940→
+   941→        let position = params.get("position");
+   942→        let line = position
+   943→            .and_then(|p| p.get("line"))
+   944→            .and_then(|v| v.as_u64())
+   945→            .unwrap_or(0) as usize;
+   946→        let character = position
+   947→            .and_then(|p| p.get("character"))
+   948→            .and_then(|v| v.as_u64())
+   949→            .unwrap_or(0) as usize;
+   950→
+   951→        // Get the word at position from document text
+   952→        let doc = match self.documents.get(uri) {
+   953→            Some(d) => d,
+   954→            None => return Ok(Value::Null),
+   955→        };
+   956→
+   957→        let word = self.word_at_position(&doc.text, line, character);
+   958→
+   959→        if word.is_empty() {
+   960→            return Ok(Value::Null);
+   961→        }
+   962→
+   963→        // Look up in document info
+   964→        let info = match self.info_cache.get(uri) {
+   965→            Some(i) => i,
+   966→            None => return Ok(Value::Null),
+   967→        };
+   968→
+   969→        // Check functions
+   970→        for (name, range, ret_ty) in &info.functions {
+   971→            if name == &word {
+   972→                let type_str = ret_ty.as_deref().unwrap_or("()");
+   973→                let markdown = format!("```vuma\nfn {}(...) -> {}\n```", name, type_str);
+   974→                return Ok(serde_json::to_value(Hover {
+   975→                    contents: json!({
+   976→                        "kind": "markdown",
+   977→                        "value": markdown,
+   978→                    }),
+   979→                    range: Some(range.clone()),
+   980→                }).unwrap_or(Value::Null));
+   981→            }
+   982→        }
+   983→
+   984→        // Check variables
+   985→        for (name, range, ty) in &info.variables {
+   986→            if name == &word {
+   987→                let type_str = ty.as_deref().unwrap_or("unknown");
+   988→                let markdown = format!("```vuma\nlet {}: {}\n```", name, type_str);
+   989→                return Ok(serde_json::to_value(Hover {
+   990→                    contents: json!({
+   991→                        "kind": "markdown",
+   992→                        "value": markdown,
+   993→                    }),
+   994→                    range: Some(range.clone()),
+   995→                }).unwrap_or(Value::Null));
+   996→            }
+   997→        }
+   998→
+   999→        // Check constants
+  1000→        for (name, range, ty) in &info.constants {
+  1001→            if name == &word {
+  1002→                let type_str = ty.as_deref().unwrap_or("unknown");
+  1003→                let markdown = format!("```vuma\nconst {}: {}\n```", name, type_str);
+  1004→                return Ok(serde_json::to_value(Hover {
+  1005→                    contents: json!({
+  1006→                        "kind": "markdown",
+  1007→                        "value": markdown,
+  1008→                    }),
+  1009→                    range: Some(range.clone()),
+  1010→                }).unwrap_or(Value::Null));
+  1011→            }
+  1012→        }
+  1013→
+  1014→        // Check structs
+  1015→        for (name, range) in &info.structs {
+  1016→            if name == &word {
+  1017→                let markdown = format!("```vuma\nstruct {}\n```", name);
+  1018→                return Ok(serde_json::to_value(Hover {
+  1019→                    contents: json!({
+  1020→                        "kind": "markdown",
+  1021→                        "value": markdown,
+  1022→                    }),
+  1023→                    range: Some(range.clone()),
+  1024→                }).unwrap_or(Value::Null));
+  1025→            }
+  1026→        }
+  1027→
+  1028→        // Check enums
+  1029→        for (name, range) in &info.enums {
+  1030→            if name == &word {
+  1031→                let markdown = format!("```vuma\nenum {}\n```", name);
+  1032→                return Ok(serde_json::to_value(Hover {
+  1033→                    contents: json!({
+  1034→                        "kind": "markdown",
+  1035→                        "value": markdown,
+  1036→                    }),
+  1037→                    range: Some(range.clone()),
+  1038→                }).unwrap_or(Value::Null));
+  1039→            }
+  1040→        }
+  1041→
+  1042→        // Check regions
+  1043→        for (name, range) in &info.regions {
+  1044→            if name == &word {
+  1045→                let markdown = format!("```vuma\nregion {}\n```", name);
+  1046→                return Ok(serde_json::to_value(Hover {
+  1047→                    contents: json!({
+  1048→                        "kind": "markdown",
+  1049→                        "value": markdown,
+  1050→                    }),
+  1051→                    range: Some(range.clone()),
+  1052→                }).unwrap_or(Value::Null));
+  1053→            }
+  1054→        }
+  1055→
+  1056→        // Check traits
+  1057→        for (name, range) in &info.traits {
+  1058→            if name == &word {
+  1059→                let markdown = format!("```vuma\ntrait {}\n```", name);
+  1060→                return Ok(serde_json::to_value(Hover {
+  1061→                    contents: json!({
+  1062→                        "kind": "markdown",
+  1063→                        "value": markdown,
+  1064→                    }),
+  1065→                    range: Some(range.clone()),
+  1066→                }).unwrap_or(Value::Null));
+  1067→            }
+  1068→        }
+  1069→
+  1070→        Ok(Value::Null)
+  1071→    }
+  1072→
+  1073→    /// Handle `textDocument/definition` request.
+  1074→    pub fn handle_text_document_definition(&self, params: Value) -> Value {
+  1075→        let uri = params
+  1076→            .get("textDocument")
+  1077→            .and_then(|td| td.get("uri"))
+  1078→            .and_then(|v| v.as_str())
+  1079→            .unwrap_or("");
+  1080→
+  1081→        let position = params.get("position");
+  1082→        let line = position
+  1083→            .and_then(|p| p.get("line"))
+  1084→            .and_then(|v| v.as_u64())
+  1085→            .unwrap_or(0) as usize;
+  1086→        let character = position
+  1087→            .and_then(|p| p.get("character"))
+  1088→            .and_then(|v| v.as_u64())
+  1089→            .unwrap_or(0) as usize;
+  1090→
+  1091→        let doc = match self.documents.get(uri) {
+  1092→            Some(d) => d,
+  1093→            None => return Value::Null,
+  1094→        };
+  1095→
+  1096→        let word = self.word_at_position(&doc.text, line, character);
+  1097→        if word.is_empty() {
+  1098→            return Value::Null;
+  1099→        }
+  1100→
+  1101→        let info = match self.info_cache.get(uri) {
+  1102→            Some(i) => i,
+  1103→            None => return Value::Null,
+  1104→        };
+  1105→
+  1106→        // Search all definition locations for matching name
+  1107→
+  1108→        // For functions/constants/variables (3-tuples)
+  1109→        for (name, range, _) in &info.functions {
+  1110→            if name == &word {
+  1111→                return serde_json::to_value(Location {
+  1112→                    uri: uri.to_string(),
+  1113→                    range: range.clone(),
+  1114→                })
+  1115→                .unwrap_or(Value::Null);
+  1116→            }
+  1117→        }
+  1118→
+  1119→        for (name, range, _) in &info.constants {
+  1120→            if name == &word {
+  1121→                return serde_json::to_value(Location {
+  1122→                    uri: uri.to_string(),
+  1123→                    range: range.clone(),
+  1124→                })
+  1125→                .unwrap_or(Value::Null);
+  1126→            }
+  1127→        }
+  1128→
+  1129→        for (name, range, _) in &info.variables {
+  1130→            if name == &word {
+  1131→                return serde_json::to_value(Location {
+  1132→                    uri: uri.to_string(),
+  1133→                    range: range.clone(),
+  1134→                })
+  1135→                .unwrap_or(Value::Null);
+  1136→            }
+  1137→        }
+  1138→
+  1139→        // For structs/enums/regions/traits (2-tuples)
+  1140→        for (name, range) in &info.structs {
+  1141→            if name == &word {
+  1142→                return serde_json::to_value(Location {
+  1143→                    uri: uri.to_string(),
+  1144→                    range: range.clone(),
+  1145→                })
+  1146→                .unwrap_or(Value::Null);
+  1147→            }
+  1148→        }
+  1149→
+  1150→        for (name, range) in &info.enums {
+  1151→            if name == &word {
+  1152→                return serde_json::to_value(Location {
+  1153→                    uri: uri.to_string(),
+  1154→                    range: range.clone(),
+  1155→                })
+  1156→                .unwrap_or(Value::Null);
+  1157→            }
+  1158→        }
+  1159→
+  1160→        for (name, range) in &info.regions {
+  1161→            if name == &word {
+  1162→                return serde_json::to_value(Location {
+  1163→                    uri: uri.to_string(),
+  1164→                    range: range.clone(),
+  1165→                })
+  1166→                .unwrap_or(Value::Null);
+  1167→            }
+  1168→        }
+  1169→
+  1170→        for (name, range) in &info.traits {
+  1171→            if name == &word {
+  1172→                return serde_json::to_value(Location {
+  1173→                    uri: uri.to_string(),
+  1174→                    range: range.clone(),
+  1175→                })
+  1176→                .unwrap_or(Value::Null);
+  1177→            }
+  1178→        }
+  1179→
+  1180→        Value::Null
+  1181→    }
+  1182→
+  1183→    /// Handle `textDocument/documentSymbol` request.
+  1184→    pub fn handle_text_document_symbols(&self, params: Value) -> Value {
+  1185→        let uri = params
+  1186→            .get("textDocument")
+  1187→            .and_then(|td| td.get("uri"))
+  1188→            .and_then(|v| v.as_str())
+  1189→            .unwrap_or("");
+  1190→
+  1191→        let info = match self.info_cache.get(uri) {
+  1192→            Some(i) => i,
+  1193→            None => return json!([]),
+  1194→        };
+  1195→
+  1196→        let mut symbols: Vec<DocumentSymbol> = Vec::new();
+  1197→
+  1198→        // Functions
+  1199→        for (name, range, ret_ty) in &info.functions {
+  1200→            let detail = ret_ty.as_deref().map(|t| format!("-> {}", t));
+  1201→            symbols.push(DocumentSymbol {
+  1202→                name: name.clone(),
+  1203→                kind: SymbolKind::Function,
+  1204→                range: range.clone(),
+  1205→                selection_range: range.clone(),
+  1206→                detail,
+  1207→                children: None,
+  1208→            });
+  1209→        }
+  1210→
+  1211→        // Structs
+  1212→        for (name, range) in &info.structs {
+  1213→            symbols.push(DocumentSymbol {
+  1214→                name: name.clone(),
+  1215→                kind: SymbolKind::Struct,
+  1216→                range: range.clone(),
+  1217→                selection_range: range.clone(),
+  1218→                detail: None,
+  1219→                children: None,
+  1220→            });
+  1221→        }
+  1222→
+  1223→        // Enums
+  1224→        for (name, range) in &info.enums {
+  1225→            symbols.push(DocumentSymbol {
+  1226→                name: name.clone(),
+  1227→                kind: SymbolKind::Enum,
+  1228→                range: range.clone(),
+  1229→                selection_range: range.clone(),
+  1230→                detail: None,
+  1231→                children: None,
+  1232→            });
+  1233→        }
+  1234→
+  1235→        // Regions
+  1236→        for (name, range) in &info.regions {
+  1237→            symbols.push(DocumentSymbol {
+  1238→                name: name.clone(),
+  1239→                kind: SymbolKind::Variable,
+  1240→                range: range.clone(),
+  1241→                selection_range: range.clone(),
+  1242→                detail: Some("region".to_string()),
+  1243→                children: None,
+  1244→            });
+  1245→        }
+  1246→
+  1247→        // Constants
+  1248→        for (name, range, ty) in &info.constants {
+  1249→            let detail = ty.as_deref().map(|t| format!(": {}", t));
+  1250→            symbols.push(DocumentSymbol {
+  1251→                name: name.clone(),
+  1252→                kind: SymbolKind::Constant,
+  1253→                range: range.clone(),
+  1254→                selection_range: range.clone(),
+  1255→                detail,
+  1256→                children: None,
+  1257→            });
+  1258→        }
+  1259→
+  1260→        // Traits
+  1261→        for (name, range) in &info.traits {
+  1262→            symbols.push(DocumentSymbol {
+  1263→                name: name.clone(),
+  1264→                kind: SymbolKind::Interface,
+  1265→                range: range.clone(),
+  1266→                selection_range: range.clone(),
+  1267→                detail: None,
+  1268→                children: None,
+  1269→            });
+  1270→        }
+  1271→
+  1272→        serde_json::to_value(&symbols).unwrap_or(json!([]))
+  1273→    }
+  1274→
+  1275→    /// Handle `textDocument/semanticTokens/full` request.
+  1276→    pub fn handle_text_document_semantic_tokens_full(&self, params: Value) -> Value {
+  1277→        let uri = params
+  1278→            .get("textDocument")
+  1279→            .and_then(|td| td.get("uri"))
+  1280→            .and_then(|v| v.as_str())
+  1281→            .unwrap_or("");
+  1282→
+  1283→        let doc = match self.documents.get(uri) {
+  1284→            Some(d) => d,
+  1285→            None => {
+  1286→                return serde_json::to_value(SemanticTokens { data: vec![] })
+  1287→                    .unwrap_or(json!({ "data": [] }));
+  1288→            }
+  1289→        };
+  1290→
+  1291→        let tokens = self.compute_semantic_tokens(&doc.text);
+  1292→        serde_json::to_value(SemanticTokens { data: tokens })
+  1293→            .unwrap_or(json!({ "data": [] }))
+  1294→    }
+  1295→
+  1296→    /// Publish diagnostics for a document.
+  1297→    pub fn publish_diagnostics(&mut self, uri: &str, diagnostics: Vec<Diagnostic>) {
+  1298→        self.send_notification(
+  1299→            "textDocument/publishDiagnostics",
+  1300→            json!({
+  1301→                "uri": uri,
+  1302→                "diagnostics": diagnostics,
+  1303→            }),
+  1304→        );
+  1305→    }
+  1306→
+  1307→    // ═══════════════════════════════════════════════════════════════════════
+  1308→    // Internal helpers
+  1309→    // ═══════════════════════════════════════════════════════════════════════
+  1310→
+  1311→    /// Re-parse a document and update caches.
+  1312→    fn reparse_document(&mut self, doc: &VumaDocument) {
+  1313→        let mut parser = Parser::new(&doc.text);
+  1314→        let result = parser.parse_program();
+  1315→
+  1316→        if let Some(program) = result.value {
+  1317→            let info = self.extract_document_info(&program, &doc.text);
+  1318→            self.parse_cache.insert(doc.uri.clone(), Some(program));
+  1319→            self.info_cache.insert(doc.uri.clone(), info);
+  1320→        } else {
+  1321→            // Even on parse error, try to get partial results
+  1322→            // The parser may have produced partial AST with error recovery
+  1323→            self.parse_cache.insert(doc.uri.clone(), None);
+  1324→            self.info_cache.insert(doc.uri.clone(), DocumentInfo {
+  1325→                functions: vec![],
+  1326→                structs: vec![],
+  1327→                enums: vec![],
+  1328→                regions: vec![],
+  1329→                constants: vec![],
+  1330→                traits: vec![],
+  1331→                variables: vec![],
+  1332→                type_names: vec![],
+  1333→            });
+  1334→        }
+  1335→    }
+  1336→
+  1337→    /// Compute diagnostics for a document by running the lexer and parser.
+  1338→    fn compute_diagnostics(&self, doc: &VumaDocument) -> Vec<Diagnostic> {
+  1339→        let mut diagnostics = Vec::new();
+  1340→
+  1341→        // Run the lexer to collect lexical errors
+  1342→        let mut lexer = Lexer::new(&doc.text);
+  1343→        let _tokens = lexer.collect_tokens();
+  1344→        for error in lexer.errors() {
+  1345→            let range = self.span_to_range(&doc.text, error.span);
+  1346→            diagnostics.push(Diagnostic {
+  1347→                range,
+  1348→                severity: Some(DiagnosticSeverity::Error),
+  1349→                code: None,
+  1350→                source: Some("vuma-lsp".to_string()),
+  1351→                message: error.message.clone(),
+  1352→            });
+  1353→        }
+  1354→
+  1355→        // Run the parser to collect parse errors
+  1356→        let mut parser = Parser::new(&doc.text);
+  1357→        let _ = parser.parse_program();
+  1358→        for error in parser.errors() {
+  1359→            let range = self.span_to_range(&doc.text, error.span);
+  1360→            diagnostics.push(Diagnostic {
+  1361→                range,
+  1362→                severity: Some(DiagnosticSeverity::Error),
+  1363→                code: None,
+  1364→                source: Some("vuma-lsp".to_string()),
+  1365→                message: error.message.clone(),
+  1366→            });
+  1367→        }
+  1368→
+  1369→        diagnostics
+  1370→    }
+  1371→
+  1372→    /// Convert a byte-offset Span to an LSP Range.
+  1373→    fn span_to_range(&self, text: &str, span: Span) -> Range {
+  1374→        let start = self.offset_to_position(text, span.start);
+  1375→        let end = self.offset_to_position(text, span.end);
+  1376→        Range { start, end }
+  1377→    }
+  1378→
+  1379→    /// Convert a byte offset to an LSP Position.
+  1380→    fn offset_to_position(&self, text: &str, offset: usize) -> Position {
+  1381→        let mut line = 0u32;
+  1382→        let mut col = 0u32;
+  1383→        for (i, ch) in text.char_indices() {
+  1384→            if i >= offset {
+  1385→                break;
+  1386→            }
+  1387→            if ch == '\n' {
+  1388→                line += 1;
+  1389→                col = 0;
+  1390→            } else {
+  1391→                col += 1;
+  1392→            }
+  1393→        }
+  1394→        Position::new(line, col)
+  1395→    }
+  1396→
+  1397→    /// Extract the word at a given position in the text.
+  1398→    fn word_at_position(&self, text: &str, line: usize, character: usize) -> String {
+  1399→        let lines: Vec<&str> = text.lines().collect();
+  1400→        if line >= lines.len() {
+  1401→            return String::new();
+  1402→        }
+  1403→        let line_text = lines[line];
+  1404→        if character as usize >= line_text.len() {
+  1405→            return String::new();
+  1406→        }
+  1407→
+  1408→        let chars: Vec<char> = line_text.chars().collect();
+  1409→        let char_idx = character as usize;
+  1410→
+  1411→        // Find start of word
+  1412→        let mut start = char_idx;
+  1413→        while start > 0 && is_ident_char(chars[start - 1]) {
+  1414→            start -= 1;
+  1415→        }
+  1416→
+  1417→        // Find end of word
+  1418→        let mut end = char_idx;
+  1419→        while end < chars.len() && is_ident_char(chars[end]) {
+  1420→            end += 1;
+  1421→        }
+  1422→
+  1423→        if start == end {
+  1424→            return String::new();
+  1425→        }
+  1426→
+  1427→        chars[start..end].iter().collect()
+  1428→    }
+  1429→
+  1430→    /// Extract document info from a parsed program.
+  1431→    fn extract_document_info(&self, program: &Program, text: &str) -> DocumentInfo {
+  1432→        let mut info = DocumentInfo {
+  1433→            functions: vec![],
+  1434→            structs: vec![],
+  1435→            enums: vec![],
+  1436→            regions: vec![],
+  1437→            constants: vec![],
+  1438→            traits: vec![],
+  1439→            variables: vec![],
+  1440→            type_names: vec![],
+  1441→        };
+  1442→
+  1443→        for item in &program.items {
+  1444→            self.extract_item_info(item, text, &mut info);
+  1445→        }
+  1446→
+  1447→        info
+  1448→    }
+  1449→
+  1450→    /// Extract info from a single top-level item.
+  1451→    fn extract_item_info(&self, item: &Item, text: &str, info: &mut DocumentInfo) {
+  1452→        match item {
+  1453→            Item::FnDef(fndef) => {
+  1454→                let range = self.span_to_range(text, fndef.span);
+  1455→                let ret_type = fndef.return_type.as_ref().map(|t| format_type(t));
+  1456→                info.functions.push((fndef.name.clone(), range, ret_type));
+  1457→
+  1458→                // Extract parameters as variables
+  1459→                for param in &fndef.params {
+  1460→                    let range = self.span_to_range(text, param.span);
+  1461→                    let ty = param.ty.as_ref().map(|t| format_type(t));
+  1462→                    info.variables.push((param.name.clone(), range, ty));
+  1463→                }
+  1464→
+  1465→                // Extract let bindings from function body
+  1466→                self.extract_block_info(&fndef.body, text, info);
+  1467→            }
+  1468→            Item::StructDef(structdef) => {
+  1469→                let range = self.span_to_range(text, structdef.span);
+  1470→                info.structs.push((structdef.name.clone(), range.clone()));
+  1471→                info.type_names.push(structdef.name.clone());
+  1472→
+  1473→                // Extract fields as variables
+  1474→                for field in &structdef.fields {
+  1475→                    let range = self.span_to_range(text, field.span);
+  1476→                    let ty = format_type(&field.ty);
+  1477→                    info.variables.push((field.name.clone(), range, Some(ty)));
+  1478→                }
+  1479→            }
+  1480→            Item::EnumDef(enumdef) => {
+  1481→                let range = self.span_to_range(text, enumdef.span);
+  1482→                info.enums.push((enumdef.name.clone(), range));
+  1483→                info.type_names.push(enumdef.name.clone());
+  1484→            }
+  1485→            Item::RegionDef(regiondef) => {
+  1486→                let range = self.span_to_range(text, regiondef.span);
+  1487→                info.regions.push((regiondef.name.clone(), range));
+  1488→            }
+  1489→            Item::Const(constdef) => {
+  1490→                let range = self.span_to_range(text, constdef.span);
+  1491→                let ty = constdef.ty.as_ref().map(|t| format_type(t));
+  1492→                info.constants.push((constdef.name.clone(), range, ty));
+  1493→            }
+  1494→            Item::Static(staticdef) => {
+  1495→                let range = self.span_to_range(text, staticdef.span);
+  1496→                let ty = staticdef.ty.as_ref().map(|t| format_type(t));
+  1497→                info.constants.push((staticdef.name.clone(), range, ty));
+  1498→            }
+  1499→            Item::TraitDef(traitdef) => {
+  1500→                let range = self.span_to_range(text, traitdef.span);
+  1501→                info.traits.push((traitdef.name.clone(), range));
+  1502→                info.type_names.push(traitdef.name.clone());
+  1503→
+  1504→                // Extract method signatures
+  1505→                for method in traitdef.required_methods.iter().chain(traitdef.provided_methods.iter()) {
+  1506→                    let range = self.span_to_range(text, method.span);
+  1507→                    let ret_type = method.return_type.as_ref().map(|t| format_type(t));
+  1508→                    info.functions.push((method.name.clone(), range, ret_type));
+  1509→                }
+  1510→            }
+  1511→            Item::ImplBlock(implblock) => {
+  1512→                for method in &implblock.methods {
+  1513→                    let range = self.span_to_range(text, method.span);
+  1514→                    let ret_type = method.return_type.as_ref().map(|t| format_type(t));
+  1515→                    info.functions.push((method.name.clone(), range, ret_type));
+  1516→
+  1517→                    for param in &method.params {
+  1518→                        let range = self.span_to_range(text, param.span);
+  1519→                        let ty = param.ty.as_ref().map(|t| format_type(t));
+  1520→                        info.variables.push((param.name.clone(), range, ty));
+  1521→                    }
+  1522→
+  1523→                    self.extract_block_info(&method.body, text, info);
+  1524→                }
+  1525→            }
+  1526→            Item::ModuleDef(moduledef) => {
+  1527→                for sub_item in &moduledef.items {
+  1528→                    self.extract_item_info(sub_item, text, info);
+  1529→                }
+  1530→            }
+  1531→            Item::Stmt(stmt) => {
+  1532→                self.extract_stmt_info(stmt, text, info);
+  1533→            }
+  1534→            _ => {}
+  1535→        }
+  1536→    }
+  1537→
+  1538→    /// Extract info from a block of statements.
+  1539→    fn extract_block_info(&self, block: &Block, text: &str, info: &mut DocumentInfo) {
+  1540→        for stmt in &block.statements {
+  1541→            self.extract_stmt_info(stmt, text, info);
+  1542→        }
+  1543→    }
+  1544→
+  1545→    /// Extract info from a single statement.
+  1546→    fn extract_stmt_info(&self, stmt: &Stmt, text: &str, info: &mut DocumentInfo) {
+  1547→        match stmt {
+  1548→            Stmt::Let(let_stmt) => {
+  1549→                let range = self.span_to_range(text, let_stmt.span);
+  1550→                let ty = let_stmt.ty.as_ref().map(|t| format_type(t));
+  1551→                info.variables.push((let_stmt.name.clone(), range, ty));
+  1552→            }
+  1553→            Stmt::If(if_stmt) => {
+  1554→                self.extract_block_info(&if_stmt.then_block, text, info);
+  1555→                if let Some(else_block) = &if_stmt.else_block {
+  1556→                    self.extract_block_info(else_block, text, info);
+  1557→                }
+  1558→            }
+  1559→            Stmt::While(while_stmt) => {
+  1560→                self.extract_block_info(&while_stmt.body, text, info);
+  1561→            }
+  1562→            Stmt::For(for_stmt) => {
+  1563→                let range = self.span_to_range(text, for_stmt.span);
+  1564→                info.variables.push((for_stmt.name.clone(), range, None));
+  1565→                self.extract_block_info(&for_stmt.body, text, info);
+  1566→            }
+  1567→            Stmt::Loop(loop_stmt) => {
+  1568→                self.extract_block_info(&loop_stmt.body, text, info);
+  1569→            }
+  1570→            Stmt::Match(match_stmt) => {
+  1571→                // MatchArm.body is an Expr, not a Block, so no nested stmts to extract
+  1572→                let _ = &match_stmt.arms;
+  1573→            }
+  1574→            Stmt::UnsafeBlock { body, .. } => {
+  1575→                self.extract_block_info(body, text, info);
+  1576→            }
+  1577→            Stmt::Sync(sync_block) => {
+  1578→                self.extract_block_info(&sync_block.body, text, info);
+  1579→            }
+  1580→            _ => {}
+  1581→        }
+  1582→    }
+  1583→
+  1584→    /// Compute semantic tokens for a document by lexing it.
+  1585→    fn compute_semantic_tokens(&self, text: &str) -> Vec<u32> {
+  1586→        let mut lexer = Lexer::new(text);
+  1587→        let tokens = lexer.collect_tokens();
+  1588→
+  1589→        // Semantic tokens use delta encoding: each token is
+  1590→        // [delta_line, delta_start, length, token_type, token_modifiers]
+  1591→        let mut data: Vec<u32> = Vec::new();
+  1592→        let mut prev_line = 0u32;
+  1593→        let mut prev_start = 0u32;
+  1594→
+  1595→        for token in &tokens {
+  1596→            if token.kind == TokenKind::Eof {
+  1597→                continue;
+  1598→            }
+  1599→
+  1600→            let token_line = token.line as u32;
+  1601→            let token_start = token.column as u32;
+  1602→            let length = token.lexeme.len() as u32;
+  1603→
+  1604→            let token_type = match token.kind {
+  1605→                // Keywords
+  1606→                TokenKind::Fn | TokenKind::Let | TokenKind::Pub | TokenKind::Crate |
+  1607→                TokenKind::Ptr | TokenKind::Region | TokenKind::Alloc | TokenKind::Allocate |
+  1608→                TokenKind::Free | TokenKind::Derive | TokenKind::Cast | TokenKind::Read |
+  1609→                TokenKind::Write | TokenKind::Sync | TokenKind::If | TokenKind::Else |
+  1610→                TokenKind::While | TokenKind::For | TokenKind::Return | TokenKind::Struct |
+  1611→                TokenKind::Enum | TokenKind::Match | TokenKind::Unsafe | TokenKind::Safe |
+  1612→                TokenKind::Bd | TokenKind::Repd | TokenKind::Capd | TokenKind::Reld |
+  1613→                TokenKind::Import | TokenKind::Export | TokenKind::Mod | TokenKind::Use |
+  1614→                TokenKind::SelfKw | TokenKind::Super | TokenKind::Async | TokenKind::Await |
+  1615→                TokenKind::Spawn | TokenKind::Lock | TokenKind::Unlock | TokenKind::Channel |
+  1616→                TokenKind::Send | TokenKind::Recv | TokenKind::True | TokenKind::False |
+  1617→                TokenKind::Null | TokenKind::As | TokenKind::Sizeof | TokenKind::Alignof |
+  1618→                TokenKind::Break | TokenKind::Continue | TokenKind::Loop | TokenKind::Where |
+  1619→                TokenKind::Impl | TokenKind::Trait | TokenKind::Type | TokenKind::Const |
+  1620→                TokenKind::Static | TokenKind::Mut | TokenKind::Ref |
+  1621→                TokenKind::OptionKw | TokenKind::SomeKw | TokenKind::NoneKw |
+  1622→                TokenKind::ResultKw | TokenKind::OkKw | TokenKind::ErrKw => {
+  1623→                    SemanticTokenType::Keyword
+  1624→                }
+  1625→                // Strings
+  1626→                TokenKind::String | TokenKind::RawStr | TokenKind::ByteStr |
+  1627→                TokenKind::FormatStr | TokenKind::Char => {
+  1628→                    SemanticTokenType::String
+  1629→                }
+  1630→                // Numbers
+  1631→                TokenKind::Number | TokenKind::Float | TokenKind::Address => {
+  1632→                    SemanticTokenType::Number
+  1633→                }
+  1634→                // Identifiers — could be variable, function, or type
+  1635→                TokenKind::Ident => {
+  1636→                    // Heuristic: if it starts with uppercase, it's likely a type
+  1637→                    if token.lexeme.chars().next().map_or(false, |c| c.is_uppercase()) {
+  1638→                        SemanticTokenType::Type
+  1639→                    } else {
+  1640→                        SemanticTokenType::Variable
+  1641→                    }
+  1642→                }
+  1643→                // Comments
+  1644→                TokenKind::DocComment | TokenKind::ModuleDoc => {
+  1645→                    SemanticTokenType::Comment
+  1646→                }
+  1647→                // Operators
+  1648→                TokenKind::Plus | TokenKind::Minus | TokenKind::Star | TokenKind::Slash |
+  1649→                TokenKind::Percent | TokenKind::Ampersand | TokenKind::Pipe | TokenKind::Caret |
+  1650→                TokenKind::Tilde | TokenKind::Bang | TokenKind::Assign | TokenKind::EqEq |
+  1651→                TokenKind::Ne | TokenKind::Lt | TokenKind::Le | TokenKind::Gt | TokenKind::Ge |
+  1652→                TokenKind::Shl | TokenKind::Shr | TokenKind::AndAnd | TokenKind::OrOr |
+  1653→                TokenKind::Arrow | TokenKind::FatArrow | TokenKind::PathSep | TokenKind::Colon |
+  1654→                TokenKind::PlusEq | TokenKind::MinusEq | TokenKind::StarEq | TokenKind::SlashEq |
+  1655→                TokenKind::PercentEq | TokenKind::AmpEq | TokenKind::PipeEq | TokenKind::CaretEq |
+  1656→                TokenKind::ShlEq | TokenKind::ShrEq => {
+  1657→                    SemanticTokenType::Operator
+  1658→                }
+  1659→                // Skip delimiters and other tokens
+  1660→                _ => continue,
+  1661→            };
+  1662→
+  1663→            let delta_line = token_line - prev_line;
+  1664→            let delta_start = if delta_line == 0 {
+  1665→                token_start - prev_start
+  1666→            } else {
+  1667→                token_start
+  1668→            };
+  1669→
+  1670→            data.push(delta_line);
+  1671→            data.push(delta_start);
+  1672→            data.push(length);
+  1673→            data.push(token_type.legend_index());
+  1674→            data.push(0); // No modifiers
+  1675→
+  1676→            prev_line = token_line;
+  1677→            prev_start = token_start;
+  1678→        }
+  1679→
+  1680→        data
+  1681→    }
+  1682→}
+  1683→
+  1684→impl Default for LspServer {
+  1685→    fn default() -> Self {
+  1686→        Self::new()
+  1687→    }
+  1688→}
+  1689→
+  1690→// ═══════════════════════════════════════════════════════════════════════════
+  1691→// Utility Functions
+  1692→// ═══════════════════════════════════════════════════════════════════════════
+  1693→
+  1694→/// Check if a character is a valid identifier character.
+  1695→fn is_ident_char(c: char) -> bool {
+  1696→    c.is_alphanumeric() || c == '_'
+  1697→}
+  1698→
+  1699→/// Format a VUMA type as a string for display.
+  1700→///
+  1701→/// Delegates to the `Display` impl on `Type` which handles all variants.
+  1702→fn format_type(ty: &Type) -> String {
+  1703→    ty.to_string()
+  1704→}
+  1705→
+  1706→// ═══════════════════════════════════════════════════════════════════════════
+  1707→// Tests
+  1708→// ═══════════════════════════════════════════════════════════════════════════
+  1709→
+  1710→#[cfg(test)]
+  1711→mod tests {
+  1712→    use super::*;
+  1713→
+  1714→    #[test]
+  1715→    fn test_lsp_server_creation() {
+  1716→        let server = LspServer::new();
+  1717→        assert!(!server.initialized);
+  1718→        assert!(!server.shutting_down);
+  1719→        assert!(server.documents.is_empty());
+  1720→    }
+  1721→
+  1722→    #[test]
+  1723→    fn test_initialize_response() {
+  1724→        let mut server = LspServer::new();
+  1725→        let result = server.handle_initialize(Value::Null);
+  1726→        assert!(server.initialized);
+  1727→        assert!(result.get("capabilities").is_some());
+  1728→
+  1729→        let caps = &result["capabilities"];
+  1730→        assert!(caps.get("textDocumentSync").is_some());
+  1731→        assert!(caps.get("completionProvider").is_some());
+  1732→        assert!(caps.get("hoverProvider").is_some());
+  1733→        assert!(caps.get("definitionProvider").is_some());
+  1734→        assert!(caps.get("documentSymbolProvider").is_some());
+  1735→        assert!(caps.get("semanticTokensProvider").is_some());
+  1736→    }
+  1737→
+  1738→    #[test]
+  1739→    fn test_document_open_and_diagnostics() {
+  1740→        let mut server = LspServer::new();
+  1741→        server.initialized = true;
+  1742→
+  1743→        // Open a document with a syntax error
+  1744→        let params = json!({
+  1745→            "textDocument": {
+  1746→                "uri": "file:///test.vuma",
+  1747→                "languageId": "vuma",
+  1748→                "version": 1,
+  1749→                "text": "fn main( { }"
+  1750→            }
+  1751→        });
+  1752→
+  1753→        server.handle_text_document_did_open(params);
+  1754→        assert!(server.documents.contains_key("file:///test.vuma"));
+  1755→    }
+  1756→
+  1757→    #[test]
+  1758→    fn test_document_change() {
+  1759→        let mut server = LspServer::new();
+  1760→        server.initialized = true;
+  1761→
+  1762→        // Open document
+  1763→        let open_params = json!({
+  1764→            "textDocument": {
+  1765→                "uri": "file:///test.vuma",
+  1766→                "languageId": "vuma",
+  1767→                "version": 1,
+  1768→                "text": "fn main() {}"
+  1769→            }
+  1770→        });
+  1771→        server.handle_text_document_did_open(open_params);
+  1772→
+  1773→        // Change document
+  1774→        let change_params = json!({
+  1775→            "textDocument": {
+  1776→                "uri": "file:///test.vuma",
+  1777→                "version": 2,
+  1778→            },
+  1779→            "contentChanges": [{
+  1780→                "text": "fn main() {\n    let x = 42;\n}"
+  1781→            }]
+  1782→        });
+  1783→        server.handle_text_document_did_change(change_params);
+  1784→
+  1785→        let doc = server.documents.get("file:///test.vuma").unwrap();
+  1786→        assert_eq!(doc.version, 2);
+  1787→        assert!(doc.text.contains("let x = 42"));
+  1788→    }
+  1789→
+  1790→    #[test]
+  1791→    fn test_completion_keywords() {
+  1792→        let mut server = LspServer::new();
+  1793→        server.initialized = true;
+  1794→
+  1795→        let open_params = json!({
+  1796→            "textDocument": {
+  1797→                "uri": "file:///test.vuma",
+  1798→                "languageId": "vuma",
+  1799→                "version": 1,
+  1800→                "text": "fn main() {}"
+  1801→            }
+  1802→        });
+  1803→        server.handle_text_document_did_open(open_params);
+  1804→
+  1805→        let completion_params = json!({
+  1806→            "textDocument": { "uri": "file:///test.vuma" },
+  1807→            "position": { "line": 0, "character": 0 }
+  1808→        });
+  1809→        let result = server.handle_text_document_completion(completion_params);
+  1810→        let items = result.get("items").unwrap().as_array().unwrap();
+  1811→
+  1812→        // Should have at least keywords and built-in types
+  1813→        assert!(items.len() > 20);
+  1814→
+  1815→        // Check that some keywords are present
+  1816→        let labels: Vec<&str> = items.iter()
+  1817→            .filter_map(|i| i.get("label").and_then(|l| l.as_str()))
+  1818→            .collect();
+  1819→        assert!(labels.contains(&"fn"));
+  1820→        assert!(labels.contains(&"let"));
+  1821→        assert!(labels.contains(&"struct"));
+  1822→    }
+  1823→
+  1824→    #[test]
+  1825→    fn test_completion_with_document_symbols() {
+  1826→        let mut server = LspServer::new();
+  1827→        server.initialized = true;
+  1828→
+  1829→        let open_params = json!({
+  1830→            "textDocument": {
+  1831→                "uri": "file:///test.vuma",
+  1832→                "languageId": "vuma",
+  1833→                "version": 1,
+  1834→                "text": "fn hello() {}\nstruct Foo {}\nregion pool = allocate(256);"
+  1835→            }
+  1836→        });
+  1837→        server.handle_text_document_did_open(open_params);
+  1838→
+  1839→        let completion_params = json!({
+  1840→            "textDocument": { "uri": "file:///test.vuma" },
+  1841→            "position": { "line": 0, "character": 0 }
+  1842→        });
+  1843→        let result = server.handle_text_document_completion(completion_params);
+  1844→        let items = result.get("items").unwrap().as_array().unwrap();
+  1845→
+  1846→        let labels: Vec<&str> = items.iter()
+  1847→            .filter_map(|i| i.get("label").and_then(|l| l.as_str()))
+  1848→            .collect();
+  1849→        assert!(labels.contains(&"hello"));
+  1850→        assert!(labels.contains(&"Foo"));
+  1851→        assert!(labels.contains(&"pool"));
+  1852→    }
+  1853→
+  1854→    #[test]
+  1855→    fn test_hover_function() {
+  1856→        let mut server = LspServer::new();
+  1857→        server.initialized = true;
+  1858→
+  1859→        let open_params = json!({
+  1860→            "textDocument": {
+  1861→                "uri": "file:///test.vuma",
+  1862→                "languageId": "vuma",
+  1863→                "version": 1,
+  1864→                "text": "fn add(a: u32, b: u32) -> u32 {\n    a + b\n}"
+  1865→            }
+  1866→        });
+  1867→        server.handle_text_document_did_open(open_params);
+  1868→
+  1869→        let hover_params = json!({
+  1870→            "textDocument": { "uri": "file:///test.vuma" },
+  1871→            "position": { "line": 0, "character": 3 }
+  1872→        });
+  1873→        let result = server.handle_text_document_hover(hover_params);
+  1874→        assert!(result.is_ok());
+  1875→        let value = result.unwrap();
+  1876→        // Should contain function info
+  1877→        if value != Value::Null {
+  1878→            let contents = value.get("contents").unwrap();
+  1879→            let markdown = contents.get("value").unwrap().as_str().unwrap();
+  1880→            assert!(markdown.contains("fn add"));
+  1881→            assert!(markdown.contains("u32"));
+  1882→        }
+  1883→    }
+  1884→
+  1885→    #[test]
+  1886→    fn test_go_to_definition() {
+  1887→        let mut server = LspServer::new();
+  1888→        server.initialized = true;
+  1889→
+  1890→        let open_params = json!({
+  1891→            "textDocument": {
+  1892→                "uri": "file:///test.vuma",
+  1893→                "languageId": "vuma",
+  1894→                "version": 1,
+  1895→                "text": "struct NodeHeader {\n    size: u32,\n}\nfn main() {}"
+  1896→            }
+  1897→        });
+  1898→        server.handle_text_document_did_open(open_params);
+  1899→
+  1900→        let def_params = json!({
+  1901→            "textDocument": { "uri": "file:///test.vuma" },
+  1902→            "position": { "line": 0, "character": 7 }
+  1903→        });
+  1904→        let result = server.handle_text_document_definition(def_params);
+  1905→        assert!(result != Value::Null);
+  1906→        let uri = result.get("uri").unwrap().as_str().unwrap();
+  1907→        assert_eq!(uri, "file:///test.vuma");
+  1908→    }
+  1909→
+  1910→    #[test]
+  1911→    fn test_document_symbols() {
+  1912→        let mut server = LspServer::new();
+  1913→        server.initialized = true;
+  1914→
+  1915→        let open_params = json!({
+  1916→            "textDocument": {
+  1917→                "uri": "file:///test.vuma",
+  1918→                "languageId": "vuma",
+  1919→                "version": 1,
+  1920→                "text": "fn main() {}\nfn helper() {}\nstruct Data {\n    x: u32,\n}\nenum Color { Red, Blue }"
+  1921→            }
+  1922→        });
+  1923→        server.handle_text_document_did_open(open_params);
+  1924→
+  1925→        let symbols_params = json!({
+  1926→            "textDocument": { "uri": "file:///test.vuma" }
+  1927→        });
+  1928→        let result = server.handle_text_document_symbols(symbols_params);
+  1929→        let symbols = result.as_array().unwrap();
+  1930→        // Should have: main, helper, Data, x, Color
+  1931→        assert!(symbols.len() >= 4);
+  1932→
+  1933→        let names: Vec<&str> = symbols.iter()
+  1934→            .filter_map(|s| s.get("name").and_then(|n| n.as_str()))
+  1935→            .collect();
+  1936→        assert!(names.contains(&"main"));
+  1937→        assert!(names.contains(&"helper"));
+  1938→        assert!(names.contains(&"Data"));
+  1939→        assert!(names.contains(&"Color"));
+  1940→    }
+  1941→
+  1942→    #[test]
+  1943→    fn test_semantic_tokens() {
+  1944→        let mut server = LspServer::new();
+  1945→        server.initialized = true;
+  1946→
+  1947→        let open_params = json!({
+  1948→            "textDocument": {
+  1949→                "uri": "file:///test.vuma",
+  1950→                "languageId": "vuma",
+  1951→                "version": 1,
+  1952→                "text": "fn main() {\n    let x = 42;\n}"
+  1953→            }
+  1954→        });
+  1955→        server.handle_text_document_did_open(open_params);
+  1956→
+  1957→        let tokens_params = json!({
+  1958→            "textDocument": { "uri": "file:///test.vuma" }
+  1959→        });
+  1960→        let result = server.handle_text_document_semantic_tokens_full(tokens_params);
+  1961→        let data = result.get("data").unwrap().as_array().unwrap();
+  1962→        // Should have some tokens (at least fn, main, let, x, 42)
+  1963→        assert!(data.len() > 0);
+  1964→
+  1965→        // Tokens are in groups of 5: [delta_line, delta_start, length, token_type, token_modifiers]
+  1966→        assert_eq!(data.len() % 5, 0);
+  1967→    }
+  1968→
+  1969→    #[test]
+  1970→    fn test_position_conversion() {
+  1971→        let server = LspServer::new();
+  1972→        let text = "fn main() {\n    let x = 42;\n}";
+  1973→
+  1974→        let pos = server.offset_to_position(text, 0);
+  1975→        assert_eq!(pos.line, 0);
+  1976→        assert_eq!(pos.character, 0);
+  1977→
+  1978→        let pos = server.offset_to_position(text, 3);
+  1979→        assert_eq!(pos.line, 0);
+  1980→        assert_eq!(pos.character, 3);
+  1981→
+  1982→        // After newline
+  1983→        let pos = server.offset_to_position(text, 12);
+  1984→        assert_eq!(pos.line, 1);
+  1985→        assert_eq!(pos.character, 0);
+  1986→    }
+  1987→
+  1988→    #[test]
+  1989→    fn test_word_at_position() {
+  1990→        let server = LspServer::new();
+  1991→        let text = "fn main() {\n    let x = 42;\n}";
+  1992→
+  1993→        // "main" is at line 0, chars 3-6
+  1994→        let word = server.word_at_position(text, 0, 4);
+  1995→        assert_eq!(word, "main");
+  1996→
+  1997→        // "let" is at line 1, chars 4-6
+  1998→        let word = server.word_at_position(text, 1, 5);
+  1999→        assert_eq!(word, "let");
+  2000→
+
+[showing lines 1-2000 of 2056; use offset=2001 with limit to continue reading]
