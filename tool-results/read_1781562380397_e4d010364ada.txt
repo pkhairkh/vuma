@@ -1,0 +1,2002 @@
+     1→//! # WebAssembly 32-bit Backend
+     2→//!
+     3→//! Implements the `Backend` trait for the Wasm32 target.  WebAssembly is
+     4→//! fundamentally different from register-based ISAs: it is a stack machine
+     5→//! with structured control flow and a binary format.  This module provides:
+     6→//!
+     7→//! - `WasmType` — value types (i32, i64, f32, f64)
+     8→//! - `WasmInstr` — exhaustive instruction enum covering all ops needed for VUMA IR
+     9→//! - LEB128 encoding/decoding (unsigned and signed)
+    10→//! - Wasm binary-format encoder that emits complete `.wasm` modules
+    11→//! - `Wasm32Backend` — `Backend` implementation that lowers IR to Wasm bytecode
+    12→
+    13→use crate::backend::{
+    14→    AllocatedBlock, AllocatedFunction, AllocatedInstruction, AllocatedProgram, Backend,
+    15→    BackendError, RelocationEntry, Wasm32TargetInfo,
+    16→};
+    17→use crate::ir::{
+    18→    BinOpKind, CastKind, IRFunction, IRInstr, IRTerminator, IRType, IRValue, UnaryOpKind,
+    19→};
+    20→use std::collections::HashMap;
+    21→
+    22→pub mod disasm;
+    23→
+    24→// ===========================================================================
+    25→// Wasm value types
+    26→// ===========================================================================
+    27→
+    28→/// WebAssembly value types.
+    29→#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+    30→pub enum WasmType {
+    31→    I32,
+    32→    I64,
+    33→    F32,
+    34→    F64,
+    35→}
+    36→
+    37→impl WasmType {
+    38→    /// Binary encoding of this type in the Wasm format.
+    39→    pub fn to_byte(&self) -> u8 {
+    40→        match self {
+    41→            WasmType::I32 => 0x7F,
+    42→            WasmType::I64 => 0x7E,
+    43→            WasmType::F32 => 0x7D,
+    44→            WasmType::F64 => 0x7C,
+    45→        }
+    46→    }
+    47→
+    48→    /// Size in bytes of this Wasm type on the stack.
+    49→    pub fn byte_size(&self) -> usize {
+    50→        match self {
+    51→            WasmType::I32 | WasmType::F32 => 4,
+    52→            WasmType::I64 | WasmType::F64 => 8,
+    53→        }
+    54→    }
+    55→
+    56→    /// Whether this is an integer type.
+    57→    pub fn is_integer(&self) -> bool {
+    58→        matches!(self, WasmType::I32 | WasmType::I64)
+    59→    }
+    60→
+    61→    /// Whether this is a floating-point type.
+    62→    pub fn is_float(&self) -> bool {
+    63→        matches!(self, WasmType::F32 | WasmType::F64)
+    64→    }
+    65→
+    66→    /// Map an IRType to the corresponding WasmType.
+    67→    pub fn from_ir_type(ty: &IRType) -> Option<WasmType> {
+    68→        match ty {
+    69→            IRType::I8
+    70→            | IRType::I16
+    71→            | IRType::I32
+    72→            | IRType::U8
+    73→            | IRType::U16
+    74→            | IRType::U32
+    75→            | IRType::Ptr
+    76→            | IRType::Func => Some(WasmType::I32),
+    77→            IRType::I64 | IRType::U64 => Some(WasmType::I64),
+    78→            IRType::F32 => Some(WasmType::F32),
+    79→            IRType::F64 => Some(WasmType::F64),
+    80→            IRType::Void | IRType::Struct { .. } | IRType::Array { .. } | IRType::TaggedUnion { .. } => None,
+    81→        }
+    82→    }
+    83→
+    84→    /// Decode a WasmType from its binary encoding byte.
+    85→    pub fn from_byte(byte: u8) -> Option<WasmType> {
+    86→        match byte {
+    87→            0x7F => Some(WasmType::I32),
+    88→            0x7E => Some(WasmType::I64),
+    89→            0x7D => Some(WasmType::F32),
+    90→            0x7C => Some(WasmType::F64),
+    91→            _ => None,
+    92→        }
+    93→    }
+    94→}
+    95→
+    96→impl std::fmt::Display for WasmType {
+    97→    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    98→        match self {
+    99→            WasmType::I32 => write!(f, "i32"),
+   100→            WasmType::I64 => write!(f, "i64"),
+   101→            WasmType::F32 => write!(f, "f32"),
+   102→            WasmType::F64 => write!(f, "f64"),
+   103→        }
+   104→    }
+   105→}
+   106→
+   107→// ===========================================================================
+   108→// Wasm instructions
+   109→// ===========================================================================
+   110→
+   111→/// WebAssembly instructions needed for VUMA IR lowering.
+   112→///
+   113→/// Each variant corresponds to one Wasm opcode.  Variants that take
+   114→/// immediates carry them as fields.
+   115→#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+   116→pub enum WasmInstr {
+   117→    // ── Control ───────────────────────────────────────────────────────
+   118→    Block(Option<WasmType>),
+   119→    Loop(Option<WasmType>),
+   120→    If(Option<WasmType>),
+   121→    Else,
+   122→    End,
+   123→    Br(u32),
+   124→    BrIf(u32),
+   125→    BrTable {
+   126→        labels: Vec<u32>,
+   127→        default: u32,
+   128→    },
+   129→    Return,
+   130→    Call(u32),
+   131→    CallIndirect {
+   132→        type_idx: u32,
+   133→        table_idx: u32,
+   134→    },
+   135→
+   136→    // ── Parametric ────────────────────────────────────────────────────
+   137→    Select,
+   138→    Drop,
+   139→
+   140→    // ── Variable ──────────────────────────────────────────────────────
+   141→    LocalGet(u32),
+   142→    LocalSet(u32),
+   143→    LocalTee(u32),
+   144→    GlobalGet(u32),
+   145→    GlobalSet(u32),
+   146→
+   147→    // ── Memory ────────────────────────────────────────────────────────
+   148→    I32Load {
+   149→        align: u32,
+   150→        offset: u32,
+   151→    },
+   152→    I64Load {
+   153→        align: u32,
+   154→        offset: u32,
+   155→    },
+   156→    F32Load {
+   157→        align: u32,
+   158→        offset: u32,
+   159→    },
+   160→    F64Load {
+   161→        align: u32,
+   162→        offset: u32,
+   163→    },
+   164→    I32Store {
+   165→        align: u32,
+   166→        offset: u32,
+   167→    },
+   168→    I64Store {
+   169→        align: u32,
+   170→        offset: u32,
+   171→    },
+   172→    F32Store {
+   173→        align: u32,
+   174→        offset: u32,
+   175→    },
+   176→    F64Store {
+   177→        align: u32,
+   178→        offset: u32,
+   179→    },
+   180→    I32Load8S {
+   181→        align: u32,
+   182→        offset: u32,
+   183→    },
+   184→    I32Load8U {
+   185→        align: u32,
+   186→        offset: u32,
+   187→    },
+   188→    I32Load16S {
+   189→        align: u32,
+   190→        offset: u32,
+   191→    },
+   192→    I32Load16U {
+   193→        align: u32,
+   194→        offset: u32,
+   195→    },
+   196→    I64Load8S {
+   197→        align: u32,
+   198→        offset: u32,
+   199→    },
+   200→    I64Load8U {
+   201→        align: u32,
+   202→        offset: u32,
+   203→    },
+   204→    I64Load16S {
+   205→        align: u32,
+   206→        offset: u32,
+   207→    },
+   208→    I64Load16U {
+   209→        align: u32,
+   210→        offset: u32,
+   211→    },
+   212→    I64Load32S {
+   213→        align: u32,
+   214→        offset: u32,
+   215→    },
+   216→    I64Load32U {
+   217→        align: u32,
+   218→        offset: u32,
+   219→    },
+   220→    I32Store8 {
+   221→        align: u32,
+   222→        offset: u32,
+   223→    },
+   224→    I32Store16 {
+   225→        align: u32,
+   226→        offset: u32,
+   227→    },
+   228→    I64Store8 {
+   229→        align: u32,
+   230→        offset: u32,
+   231→    },
+   232→    I64Store16 {
+   233→        align: u32,
+   234→        offset: u32,
+   235→    },
+   236→    I64Store32 {
+   237→        align: u32,
+   238→        offset: u32,
+   239→    },
+   240→    MemorySize(u32),
+   241→    MemoryGrow(u32),
+   242→
+   243→    // ── Numeric i32 ──────────────────────────────────────────────────
+   244→    I32Const(i32),
+   245→    I32Eqz,
+   246→    I32Eq,
+   247→    I32Ne,
+   248→    I32LtS,
+   249→    I32LtU,
+   250→    I32GtS,
+   251→    I32GtU,
+   252→    I32LeS,
+   253→    I32LeU,
+   254→    I32GeS,
+   255→    I32GeU,
+   256→    I32Clz,
+   257→    I32Ctz,
+   258→    I32Popcnt,
+   259→    I32Add,
+   260→    I32Sub,
+   261→    I32Mul,
+   262→    I32DivS,
+   263→    I32DivU,
+   264→    I32RemS,
+   265→    I32RemU,
+   266→    I32And,
+   267→    I32Or,
+   268→    I32Xor,
+   269→    I32Shl,
+   270→    I32ShrS,
+   271→    I32ShrU,
+   272→    I32Rotl,
+   273→    I32Rotr,
+   274→
+   275→    // ── Numeric i64 ──────────────────────────────────────────────────
+   276→    I64Const(i64),
+   277→    I64Eqz,
+   278→    I64Eq,
+   279→    I64Ne,
+   280→    I64LtS,
+   281→    I64LtU,
+   282→    I64GtS,
+   283→    I64GtU,
+   284→    I64LeS,
+   285→    I64LeU,
+   286→    I64GeS,
+   287→    I64GeU,
+   288→    I64Clz,
+   289→    I64Ctz,
+   290→    I64Popcnt,
+   291→    I64Add,
+   292→    I64Sub,
+   293→    I64Mul,
+   294→    I64DivS,
+   295→    I64DivU,
+   296→    I64RemS,
+   297→    I64RemU,
+   298→    I64And,
+   299→    I64Or,
+   300→    I64Xor,
+   301→    I64Shl,
+   302→    I64ShrS,
+   303→    I64ShrU,
+   304→    I64Rotl,
+   305→    I64Rotr,
+   306→
+   307→    // ── Numeric f32 ──────────────────────────────────────────────────
+   308→    F32Const(f32),
+   309→    F32Eq,
+   310→    F32Ne,
+   311→    F32Lt,
+   312→    F32Gt,
+   313→    F32Le,
+   314→    F32Ge,
+   315→    F32Add,
+   316→    F32Sub,
+   317→    F32Mul,
+   318→    F32Div,
+   319→    F32Sqrt,
+   320→    F32Neg,
+   321→
+   322→    // ── Numeric f64 ──────────────────────────────────────────────────
+   323→    F64Const(f64),
+   324→    F64Eq,
+   325→    F64Ne,
+   326→    F64Lt,
+   327→    F64Gt,
+   328→    F64Le,
+   329→    F64Ge,
+   330→    F64Add,
+   331→    F64Sub,
+   332→    F64Mul,
+   333→    F64Div,
+   334→    F64Sqrt,
+   335→    F64Neg,
+   336→
+   337→    // ── Conversions ──────────────────────────────────────────────────
+   338→    I32WrapI64,
+   339→    I64ExtendI32S,
+   340→    I64ExtendI32U,
+   341→    F32DemoteF64,
+   342→    F64PromoteF32,
+   343→    I32TruncF32S,
+   344→    I32TruncF64S,
+   345→    I32TruncF32U,
+   346→    I32TruncF64U,
+   347→    I64TruncF32S,
+   348→    I64TruncF64S,
+   349→    I64TruncF32U,
+   350→    I64TruncF64U,
+   351→    F32ConvertI32S,
+   352→    F32ConvertI64S,
+   353→    F32ConvertI32U,
+   354→    F32ConvertI64U,
+   355→    F64ConvertI32S,
+   356→    F64ConvertI64S,
+   357→    F64ConvertI32U,
+   358→    F64ConvertI64U,
+   359→    I32ReinterpretF32,
+   360→    I64ReinterpretF64,
+   361→    F32ReinterpretI32,
+   362→    F64ReinterpretI64,
+   363→
+   364→    // ── Atomic memory instructions (0xFE prefix, Threads proposal) ────
+   365→    /// i32.atomic.load: atomically load 32-bit value (0xFE 0x10)
+   366→    I32AtomicLoad { align: u32, offset: u32 },
+   367→    /// i64.atomic.load: atomically load 64-bit value (0xFE 0x11)
+   368→    I64AtomicLoad { align: u32, offset: u32 },
+   369→    /// i32.atomic.load8_u: atomically load 8-bit value, zero-extend (0xFE 0x12)
+   370→    I32AtomicLoad8U { align: u32, offset: u32 },
+   371→    /// i32.atomic.load16_u: atomically load 16-bit value, zero-extend (0xFE 0x13)
+   372→    I32AtomicLoad16U { align: u32, offset: u32 },
+   373→    /// i64.atomic.load8_u: atomically load 8-bit value, zero-extend to i64 (0xFE 0x14)
+   374→    I64AtomicLoad8U { align: u32, offset: u32 },
+   375→    /// i64.atomic.load16_u: atomically load 16-bit value, zero-extend to i64 (0xFE 0x15)
+   376→    I64AtomicLoad16U { align: u32, offset: u32 },
+   377→    /// i64.atomic.load32_u: atomically load 32-bit value, zero-extend to i64 (0xFE 0x16)
+   378→    I64AtomicLoad32U { align: u32, offset: u32 },
+   379→
+   380→    /// i32.atomic.store: atomically store 32-bit value (0xFE 0x17)
+   381→    I32AtomicStore { align: u32, offset: u32 },
+   382→    /// i64.atomic.store: atomically store 64-bit value (0xFE 0x18)
+   383→    I64AtomicStore { align: u32, offset: u32 },
+   384→    /// i32.atomic.store8: atomically store 8-bit value (0xFE 0x19)
+   385→    I32AtomicStore8 { align: u32, offset: u32 },
+   386→    /// i32.atomic.store16: atomically store 16-bit value (0xFE 0x1A)
+   387→    I32AtomicStore16 { align: u32, offset: u32 },
+   388→    /// i64.atomic.store8: atomically store 8-bit value from i64 (0xFE 0x1B)
+   389→    I64AtomicStore8 { align: u32, offset: u32 },
+   390→    /// i64.atomic.store16: atomically store 16-bit value from i64 (0xFE 0x1C)
+   391→    I64AtomicStore16 { align: u32, offset: u32 },
+   392→    /// i64.atomic.store32: atomically store 32-bit value from i64 (0xFE 0x1D)
+   393→    I64AtomicStore32 { align: u32, offset: u32 },
+   394→
+   395→    /// memory.atomic.fence: fence for atomic ordering (0xFE 0x1E)
+   396→    MemoryAtomicFence,
+   397→
+   398→    /// i32.atomic.rmw.cmpxchg: 32-bit compare-and-swap (0xFE 0x48)
+   399→    /// Stack: [addr, expected, replacement] → [old_value]
+   400→    I32AtomicRmwCmpxchg { align: u32, offset: u32 },
+   401→    /// i64.atomic.rmw.cmpxchg: 64-bit compare-and-swap (0xFE 0x49)
+   402→    /// Stack: [addr, expected, replacement] → [old_value]
+   403→    I64AtomicRmwCmpxchg { align: u32, offset: u32 },
+   404→    /// i32.atomic.rmw8.cmpxchg_u: 8-bit compare-and-swap, zero-extend (0xFE 0x4A)
+   405→    /// Stack: [addr, expected, replacement] → [old_value (i32)]
+   406→    I32AtomicRmw8CmpxchgU { align: u32, offset: u32 },
+   407→    /// i32.atomic.rmw16.cmpxchg_u: 16-bit compare-and-swap, zero-extend (0xFE 0x4B)
+   408→    /// Stack: [addr, expected, replacement] → [old_value (i32)]
+   409→    I32AtomicRmw16CmpxchgU { align: u32, offset: u32 },
+   410→    /// i64.atomic.rmw8.cmpxchg_u: 8-bit compare-and-swap, zero-extend to i64 (0xFE 0x4C)
+   411→    /// Stack: [addr, expected, replacement] → [old_value (i64)]
+   412→    I64AtomicRmw8CmpxchgU { align: u32, offset: u32 },
+   413→    /// i64.atomic.rmw16.cmpxchg_u: 16-bit compare-and-swap, zero-extend to i64 (0xFE 0x4D)
+   414→    /// Stack: [addr, expected, replacement] → [old_value (i64)]
+   415→    I64AtomicRmw16CmpxchgU { align: u32, offset: u32 },
+   416→    /// i64.atomic.rmw32.cmpxchg_u: 32-bit compare-and-swap, zero-extend to i64 (0xFE 0x4E)
+   417→    /// Stack: [addr, expected, replacement] → [old_value (i64)]
+   418→    I64AtomicRmw32CmpxchgU { align: u32, offset: u32 },
+   419→
+   420→    // ── Pseudo-instruction: no-op (used for IR ops that lower to nothing) ──
+   421→    Nop,
+   422→
+   423→    // ── Unreachable ───────────────────────────────────────────────────
+   424→    /// unreachable: traps unconditionally (opcode 0x00)
+   425→    Unreachable,
+   426→
+   427→    // ── SIMD v128 instructions ────────────────────────────────────────
+   428→    /// v128.const: push a 128-bit vector constant
+   429→    V128Const([u8; 16]),
+   430→    /// i32x4.add: lane-wise addition of two i32x4 vectors
+   431→    I32X4Add,
+   432→    /// i32x4.mul: lane-wise multiplication of two i32x4 vectors
+   433→    I32X4Mul,
+   434→    /// f32x4.add: lane-wise addition of two f32x4 vectors
+   435→    F32X4Add,
+   436→    /// f32x4.mul: lane-wise multiplication of two f32x4 vectors
+   437→    F32X4Mul,
+   438→
+   439→    // ── Bulk Memory Operations ────────────────────────────────────────
+   440→    /// memory.copy: copy from one memory region to another
+   441→    MemoryCopy {
+   442→        src_mem: u32,
+   443→        dst_mem: u32,
+   444→    },
+   445→    /// memory.fill: fill a memory region with a byte value
+   446→    MemoryFill {
+   447→        mem: u32,
+   448→    },
+   449→    /// memory.init: initialize memory from a data segment
+   450→    MemoryInit {
+   451→        data_idx: u32,
+   452→        mem: u32,
+   453→    },
+   454→}
+   455→
+   456→impl WasmInstr {
+   457→    /// Encode this instruction into Wasm bytecode, appending bytes to `out`.
+   458→    pub fn encode(&self, out: &mut Vec<u8>) {
+   459→        match self {
+   460→            // ── Control ──────────────────────────────────────────────
+   461→            WasmInstr::Block(ty) => {
+   462→                out.push(0x02);
+   463→                match ty {
+   464→                    Some(t) => out.push(t.to_byte()),
+   465→                    None => out.push(0x40), // void block type
+   466→                }
+   467→            }
+   468→            WasmInstr::Loop(ty) => {
+   469→                out.push(0x03);
+   470→                match ty {
+   471→                    Some(t) => out.push(t.to_byte()),
+   472→                    None => out.push(0x40), // void loop type
+   473→                }
+   474→            }
+   475→            WasmInstr::If(ty) => {
+   476→                out.push(0x04);
+   477→                match ty {
+   478→                    Some(t) => out.push(t.to_byte()),
+   479→                    None => out.push(0x40), // void if type
+   480→                }
+   481→            }
+   482→            WasmInstr::Else => out.push(0x05),
+   483→            WasmInstr::End => out.push(0x0B),
+   484→            WasmInstr::Br(idx) => {
+   485→                out.push(0x0C);
+   486→                out.extend_from_slice(&encode_unsigned_leb128(*idx as u64));
+   487→            }
+   488→            WasmInstr::BrIf(idx) => {
+   489→                out.push(0x0D);
+   490→                out.extend_from_slice(&encode_unsigned_leb128(*idx as u64));
+   491→            }
+   492→            WasmInstr::BrTable { labels, default } => {
+   493→                out.push(0x0E);
+   494→                out.extend_from_slice(&encode_unsigned_leb128(labels.len() as u64));
+   495→                for &lbl in labels {
+   496→                    out.extend_from_slice(&encode_unsigned_leb128(lbl as u64));
+   497→                }
+   498→                out.extend_from_slice(&encode_unsigned_leb128(*default as u64));
+   499→            }
+   500→            WasmInstr::Return => out.push(0x0F),
+   501→            WasmInstr::Call(idx) => {
+   502→                out.push(0x10);
+   503→                out.extend_from_slice(&encode_unsigned_leb128(*idx as u64));
+   504→            }
+   505→            WasmInstr::CallIndirect {
+   506→                type_idx,
+   507→                table_idx,
+   508→            } => {
+   509→                out.push(0x11);
+   510→                out.extend_from_slice(&encode_unsigned_leb128(*type_idx as u64));
+   511→                out.extend_from_slice(&encode_unsigned_leb128(*table_idx as u64));
+   512→            }
+   513→
+   514→            // ── Parametric ──────────────────────────────────────────
+   515→            WasmInstr::Select => out.push(0x1B),
+   516→            WasmInstr::Drop => out.push(0x1A),
+   517→
+   518→            // ── Variable ────────────────────────────────────────────
+   519→            WasmInstr::LocalGet(idx) => {
+   520→                out.push(0x20);
+   521→                out.extend_from_slice(&encode_unsigned_leb128(*idx as u64));
+   522→            }
+   523→            WasmInstr::LocalSet(idx) => {
+   524→                out.push(0x21);
+   525→                out.extend_from_slice(&encode_unsigned_leb128(*idx as u64));
+   526→            }
+   527→            WasmInstr::LocalTee(idx) => {
+   528→                out.push(0x22);
+   529→                out.extend_from_slice(&encode_unsigned_leb128(*idx as u64));
+   530→            }
+   531→            WasmInstr::GlobalGet(idx) => {
+   532→                out.push(0x23);
+   533→                out.extend_from_slice(&encode_unsigned_leb128(*idx as u64));
+   534→            }
+   535→            WasmInstr::GlobalSet(idx) => {
+   536→                out.push(0x24);
+   537→                out.extend_from_slice(&encode_unsigned_leb128(*idx as u64));
+   538→            }
+   539→
+   540→            // ── Memory ──────────────────────────────────────────────
+   541→            WasmInstr::I32Load { align, offset } => {
+   542→                out.push(0x28);
+   543→                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+   544→                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+   545→            }
+   546→            WasmInstr::I64Load { align, offset } => {
+   547→                out.push(0x29);
+   548→                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+   549→                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+   550→            }
+   551→            WasmInstr::F32Load { align, offset } => {
+   552→                out.push(0x2A);
+   553→                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+   554→                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+   555→            }
+   556→            WasmInstr::F64Load { align, offset } => {
+   557→                out.push(0x2B);
+   558→                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+   559→                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+   560→            }
+   561→            WasmInstr::I32Store { align, offset } => {
+   562→                out.push(0x36);
+   563→                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+   564→                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+   565→            }
+   566→            WasmInstr::I64Store { align, offset } => {
+   567→                out.push(0x37);
+   568→                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+   569→                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+   570→            }
+   571→            WasmInstr::F32Store { align, offset } => {
+   572→                out.push(0x38);
+   573→                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+   574→                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+   575→            }
+   576→            WasmInstr::F64Store { align, offset } => {
+   577→                out.push(0x39);
+   578→                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+   579→                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+   580→            }
+   581→            WasmInstr::I32Load8S { align, offset } => {
+   582→                out.push(0x2C);
+   583→                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+   584→                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+   585→            }
+   586→            WasmInstr::I32Load8U { align, offset } => {
+   587→                out.push(0x2D);
+   588→                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+   589→                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+   590→            }
+   591→            WasmInstr::I32Load16S { align, offset } => {
+   592→                out.push(0x2E);
+   593→                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+   594→                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+   595→            }
+   596→            WasmInstr::I32Load16U { align, offset } => {
+   597→                out.push(0x2F);
+   598→                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+   599→                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+   600→            }
+   601→            WasmInstr::I64Load8S { align, offset } => {
+   602→                out.push(0x30);
+   603→                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+   604→                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+   605→            }
+   606→            WasmInstr::I64Load8U { align, offset } => {
+   607→                out.push(0x31);
+   608→                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+   609→                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+   610→            }
+   611→            WasmInstr::I64Load16S { align, offset } => {
+   612→                out.push(0x32);
+   613→                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+   614→                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+   615→            }
+   616→            WasmInstr::I64Load16U { align, offset } => {
+   617→                out.push(0x33);
+   618→                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+   619→                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+   620→            }
+   621→            WasmInstr::I64Load32S { align, offset } => {
+   622→                out.push(0x34);
+   623→                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+   624→                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+   625→            }
+   626→            WasmInstr::I64Load32U { align, offset } => {
+   627→                out.push(0x35);
+   628→                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+   629→                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+   630→            }
+   631→            WasmInstr::I32Store8 { align, offset } => {
+   632→                out.push(0x3A);
+   633→                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+   634→                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+   635→            }
+   636→            WasmInstr::I32Store16 { align, offset } => {
+   637→                out.push(0x3B);
+   638→                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+   639→                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+   640→            }
+   641→            WasmInstr::I64Store8 { align, offset } => {
+   642→                out.push(0x3C);
+   643→                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+   644→                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+   645→            }
+   646→            WasmInstr::I64Store16 { align, offset } => {
+   647→                out.push(0x3D);
+   648→                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+   649→                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+   650→            }
+   651→            WasmInstr::I64Store32 { align, offset } => {
+   652→                out.push(0x3E);
+   653→                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+   654→                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+   655→            }
+   656→            WasmInstr::MemorySize(idx) => {
+   657→                out.push(0x3F);
+   658→                out.extend_from_slice(&encode_unsigned_leb128(*idx as u64));
+   659→            }
+   660→            WasmInstr::MemoryGrow(idx) => {
+   661→                out.push(0x40);
+   662→                out.extend_from_slice(&encode_unsigned_leb128(*idx as u64));
+   663→            }
+   664→
+   665→            // ── Numeric i32 ─────────────────────────────────────────
+   666→            WasmInstr::I32Const(val) => {
+   667→                out.push(0x41);
+   668→                out.extend_from_slice(&encode_signed_leb128(*val as i64));
+   669→            }
+   670→            WasmInstr::I32Eqz => out.push(0x45),
+   671→            WasmInstr::I32Eq => out.push(0x46),
+   672→            WasmInstr::I32Ne => out.push(0x47),
+   673→            WasmInstr::I32LtS => out.push(0x48),
+   674→            WasmInstr::I32LtU => out.push(0x49),
+   675→            WasmInstr::I32GtS => out.push(0x4A),
+   676→            WasmInstr::I32GtU => out.push(0x4B),
+   677→            WasmInstr::I32LeS => out.push(0x4C),
+   678→            WasmInstr::I32LeU => out.push(0x4D),
+   679→            WasmInstr::I32GeS => out.push(0x4E),
+   680→            WasmInstr::I32GeU => out.push(0x4F),
+   681→            WasmInstr::I32Clz => out.push(0x67),
+   682→            WasmInstr::I32Ctz => out.push(0x68),
+   683→            WasmInstr::I32Popcnt => out.push(0x69),
+   684→            WasmInstr::I32Add => out.push(0x6A),
+   685→            WasmInstr::I32Sub => out.push(0x6B),
+   686→            WasmInstr::I32Mul => out.push(0x6C),
+   687→            WasmInstr::I32DivS => out.push(0x6D),
+   688→            WasmInstr::I32DivU => out.push(0x6E),
+   689→            WasmInstr::I32RemS => out.push(0x6F),
+   690→            WasmInstr::I32RemU => out.push(0x70),
+   691→            WasmInstr::I32And => out.push(0x71),
+   692→            WasmInstr::I32Or => out.push(0x72),
+   693→            WasmInstr::I32Xor => out.push(0x73),
+   694→            WasmInstr::I32Shl => out.push(0x74),
+   695→            WasmInstr::I32ShrS => out.push(0x75),
+   696→            WasmInstr::I32ShrU => out.push(0x76),
+   697→            WasmInstr::I32Rotl => out.push(0x77),
+   698→            WasmInstr::I32Rotr => out.push(0x78),
+   699→
+   700→            // ── Numeric i64 ─────────────────────────────────────────
+   701→            WasmInstr::I64Const(val) => {
+   702→                out.push(0x42);
+   703→                out.extend_from_slice(&encode_signed_leb128(*val));
+   704→            }
+   705→            WasmInstr::I64Eqz => out.push(0x50),
+   706→            WasmInstr::I64Eq => out.push(0x51),
+   707→            WasmInstr::I64Ne => out.push(0x52),
+   708→            WasmInstr::I64LtS => out.push(0x53),
+   709→            WasmInstr::I64LtU => out.push(0x54),
+   710→            WasmInstr::I64GtS => out.push(0x55),
+   711→            WasmInstr::I64GtU => out.push(0x56),
+   712→            WasmInstr::I64LeS => out.push(0x57),
+   713→            WasmInstr::I64LeU => out.push(0x58),
+   714→            WasmInstr::I64GeS => out.push(0x59),
+   715→            WasmInstr::I64GeU => out.push(0x5A),
+   716→            WasmInstr::I64Clz => out.push(0x79),
+   717→            WasmInstr::I64Ctz => out.push(0x7A),
+   718→            WasmInstr::I64Popcnt => out.push(0x7B),
+   719→            WasmInstr::I64Add => out.push(0x7C),
+   720→            WasmInstr::I64Sub => out.push(0x7D),
+   721→            WasmInstr::I64Mul => out.push(0x7E),
+   722→            WasmInstr::I64DivS => out.push(0x7F),
+   723→            WasmInstr::I64DivU => out.push(0x80),
+   724→            WasmInstr::I64RemS => out.push(0x81),
+   725→            WasmInstr::I64RemU => out.push(0x82),
+   726→            WasmInstr::I64And => out.push(0x83),
+   727→            WasmInstr::I64Or => out.push(0x84),
+   728→            WasmInstr::I64Xor => out.push(0x85),
+   729→            WasmInstr::I64Shl => out.push(0x86),
+   730→            WasmInstr::I64ShrS => out.push(0x87),
+   731→            WasmInstr::I64ShrU => out.push(0x88),
+   732→            WasmInstr::I64Rotl => out.push(0x89),
+   733→            WasmInstr::I64Rotr => out.push(0x8A),
+   734→
+   735→            // ── Numeric f32 ─────────────────────────────────────────
+   736→            WasmInstr::F32Const(val) => {
+   737→                out.push(0x43);
+   738→                out.extend_from_slice(&val.to_le_bytes());
+   739→            }
+   740→            WasmInstr::F32Eq => out.push(0x5B),
+   741→            WasmInstr::F32Ne => out.push(0x5C),
+   742→            WasmInstr::F32Lt => out.push(0x5D),
+   743→            WasmInstr::F32Gt => out.push(0x5E),
+   744→            WasmInstr::F32Le => out.push(0x5F),
+   745→            WasmInstr::F32Ge => out.push(0x60),
+   746→            WasmInstr::F32Add => out.push(0x92),
+   747→            WasmInstr::F32Sub => out.push(0x93),
+   748→            WasmInstr::F32Mul => out.push(0x94),
+   749→            WasmInstr::F32Div => out.push(0x95),
+   750→            WasmInstr::F32Sqrt => out.push(0x91),
+   751→            WasmInstr::F32Neg => out.push(0x8C),
+   752→
+   753→            // ── Numeric f64 ─────────────────────────────────────────
+   754→            WasmInstr::F64Const(val) => {
+   755→                out.push(0x44);
+   756→                out.extend_from_slice(&val.to_le_bytes());
+   757→            }
+   758→            WasmInstr::F64Eq => out.push(0x61),
+   759→            WasmInstr::F64Ne => out.push(0x62),
+   760→            WasmInstr::F64Lt => out.push(0x63),
+   761→            WasmInstr::F64Gt => out.push(0x64),
+   762→            WasmInstr::F64Le => out.push(0x65),
+   763→            WasmInstr::F64Ge => out.push(0x66),
+   764→            WasmInstr::F64Add => out.push(0xA0),
+   765→            WasmInstr::F64Sub => out.push(0xA1),
+   766→            WasmInstr::F64Mul => out.push(0xA2),
+   767→            WasmInstr::F64Div => out.push(0xA3),
+   768→            WasmInstr::F64Sqrt => out.push(0x9F),
+   769→            WasmInstr::F64Neg => out.push(0x9A),
+   770→
+   771→            // ── Conversions ─────────────────────────────────────────
+   772→            WasmInstr::I32WrapI64 => out.push(0xA7),
+   773→            WasmInstr::I64ExtendI32S => out.push(0xAC),
+   774→            WasmInstr::I64ExtendI32U => out.push(0xAD),
+   775→            WasmInstr::F32DemoteF64 => out.push(0xB6),
+   776→            WasmInstr::F64PromoteF32 => out.push(0xBB),
+   777→            WasmInstr::I32TruncF32S => out.push(0xA8),
+   778→            WasmInstr::I32TruncF64S => out.push(0xA9),
+   779→            WasmInstr::I32TruncF32U => out.push(0xAA),
+   780→            WasmInstr::I32TruncF64U => out.push(0xAB),
+   781→            WasmInstr::I64TruncF32S => out.push(0xAE),
+   782→            WasmInstr::I64TruncF64S => out.push(0xAF),
+   783→            WasmInstr::I64TruncF32U => out.push(0xB0),
+   784→            WasmInstr::I64TruncF64U => out.push(0xB1),
+   785→            WasmInstr::F32ConvertI32S => out.push(0xB2),
+   786→            WasmInstr::F32ConvertI64S => out.push(0xB3),
+   787→            WasmInstr::F32ConvertI32U => out.push(0xB4),
+   788→            WasmInstr::F32ConvertI64U => out.push(0xB5),
+   789→            WasmInstr::F64ConvertI32S => out.push(0xB7),
+   790→            WasmInstr::F64ConvertI64S => out.push(0xB8),
+   791→            WasmInstr::F64ConvertI32U => out.push(0xB9),
+   792→            WasmInstr::F64ConvertI64U => out.push(0xBA),
+   793→            WasmInstr::I32ReinterpretF32 => out.push(0xBC),
+   794→            WasmInstr::I64ReinterpretF64 => out.push(0xBD),
+   795→            WasmInstr::F32ReinterpretI32 => out.push(0xBE),
+   796→            WasmInstr::F64ReinterpretI64 => out.push(0xBF),
+   797→
+   798→            // ── Nop ─────────────────────────────────────────────────
+   799→            WasmInstr::Nop => out.push(0x01),
+   800→
+   801→            // ── Unreachable ──────────────────────────────────────────
+   802→            WasmInstr::Unreachable => out.push(0x00),
+   803→
+   804→            // ── SIMD v128 ──────────────────────────────────────────
+   805→            WasmInstr::V128Const(bytes) => {
+   806→                out.push(0xFD); // SIMD prefix
+   807→                out.extend_from_slice(&encode_unsigned_leb128(0x0C)); // v128.const opcode
+   808→                out.extend_from_slice(bytes);
+   809→            }
+   810→            WasmInstr::I32X4Add => {
+   811→                out.push(0xFD);
+   812→                out.extend_from_slice(&encode_unsigned_leb128(0x0E)); // i32x4.add
+   813→            }
+   814→            WasmInstr::I32X4Mul => {
+   815→                out.push(0xFD);
+   816→                out.extend_from_slice(&encode_unsigned_leb128(0x15)); // i32x4.mul
+   817→            }
+   818→            WasmInstr::F32X4Add => {
+   819→                out.push(0xFD);
+   820→                out.extend_from_slice(&encode_unsigned_leb128(0x2C)); // f32x4.add
+   821→            }
+   822→            WasmInstr::F32X4Mul => {
+   823→                out.push(0xFD);
+   824→                out.extend_from_slice(&encode_unsigned_leb128(0x35)); // f32x4.mul
+   825→            }
+   826→
+   827→            // ── Atomic memory instructions (0xFE prefix) ─────────
+   828→            // All atomic instructions are prefixed with 0xFE per the
+   829→            // Wasm Threads proposal (now standardized).  The sub-opcode
+   830→            // and memarg (align + offset) follow as LEB128.
+   831→            WasmInstr::I32AtomicLoad { align, offset } => {
+   832→                out.push(0xFE);
+   833→                out.extend_from_slice(&encode_unsigned_leb128(0x10)); // i32.atomic.load
+   834→                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+   835→                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+   836→            }
+   837→            WasmInstr::I64AtomicLoad { align, offset } => {
+   838→                out.push(0xFE);
+   839→                out.extend_from_slice(&encode_unsigned_leb128(0x11)); // i64.atomic.load
+   840→                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+   841→                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+   842→            }
+   843→            WasmInstr::I32AtomicLoad8U { align, offset } => {
+   844→                out.push(0xFE);
+   845→                out.extend_from_slice(&encode_unsigned_leb128(0x12)); // i32.atomic.load8_u
+   846→                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+   847→                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+   848→            }
+   849→            WasmInstr::I32AtomicLoad16U { align, offset } => {
+   850→                out.push(0xFE);
+   851→                out.extend_from_slice(&encode_unsigned_leb128(0x13)); // i32.atomic.load16_u
+   852→                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+   853→                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+   854→            }
+   855→            WasmInstr::I64AtomicLoad8U { align, offset } => {
+   856→                out.push(0xFE);
+   857→                out.extend_from_slice(&encode_unsigned_leb128(0x14)); // i64.atomic.load8_u
+   858→                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+   859→                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+   860→            }
+   861→            WasmInstr::I64AtomicLoad16U { align, offset } => {
+   862→                out.push(0xFE);
+   863→                out.extend_from_slice(&encode_unsigned_leb128(0x15)); // i64.atomic.load16_u
+   864→                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+   865→                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+   866→            }
+   867→            WasmInstr::I64AtomicLoad32U { align, offset } => {
+   868→                out.push(0xFE);
+   869→                out.extend_from_slice(&encode_unsigned_leb128(0x16)); // i64.atomic.load32_u
+   870→                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+   871→                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+   872→            }
+   873→            WasmInstr::I32AtomicStore { align, offset } => {
+   874→                out.push(0xFE);
+   875→                out.extend_from_slice(&encode_unsigned_leb128(0x17)); // i32.atomic.store
+   876→                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+   877→                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+   878→            }
+   879→            WasmInstr::I64AtomicStore { align, offset } => {
+   880→                out.push(0xFE);
+   881→                out.extend_from_slice(&encode_unsigned_leb128(0x18)); // i64.atomic.store
+   882→                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+   883→                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+   884→            }
+   885→            WasmInstr::I32AtomicStore8 { align, offset } => {
+   886→                out.push(0xFE);
+   887→                out.extend_from_slice(&encode_unsigned_leb128(0x19)); // i32.atomic.store8
+   888→                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+   889→                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+   890→            }
+   891→            WasmInstr::I32AtomicStore16 { align, offset } => {
+   892→                out.push(0xFE);
+   893→                out.extend_from_slice(&encode_unsigned_leb128(0x1A)); // i32.atomic.store16
+   894→                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+   895→                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+   896→            }
+   897→            WasmInstr::I64AtomicStore8 { align, offset } => {
+   898→                out.push(0xFE);
+   899→                out.extend_from_slice(&encode_unsigned_leb128(0x1B)); // i64.atomic.store8
+   900→                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+   901→                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+   902→            }
+   903→            WasmInstr::I64AtomicStore16 { align, offset } => {
+   904→                out.push(0xFE);
+   905→                out.extend_from_slice(&encode_unsigned_leb128(0x1C)); // i64.atomic.store16
+   906→                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+   907→                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+   908→            }
+   909→            WasmInstr::I64AtomicStore32 { align, offset } => {
+   910→                out.push(0xFE);
+   911→                out.extend_from_slice(&encode_unsigned_leb128(0x1D)); // i64.atomic.store32
+   912→                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+   913→                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+   914→            }
+   915→            WasmInstr::MemoryAtomicFence => {
+   916→                out.push(0xFE);
+   917→                out.extend_from_slice(&encode_unsigned_leb128(0x1E)); // memory.atomic.fence
+   918→                out.push(0x00); // reserved byte, must be 0
+   919→            }
+   920→            WasmInstr::I32AtomicRmwCmpxchg { align, offset } => {
+   921→                out.push(0xFE);
+   922→                out.extend_from_slice(&encode_unsigned_leb128(0x48)); // i32.atomic.rmw.cmpxchg
+   923→                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+   924→                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+   925→            }
+   926→            WasmInstr::I64AtomicRmwCmpxchg { align, offset } => {
+   927→                out.push(0xFE);
+   928→                out.extend_from_slice(&encode_unsigned_leb128(0x49)); // i64.atomic.rmw.cmpxchg
+   929→                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+   930→                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+   931→            }
+   932→            WasmInstr::I32AtomicRmw8CmpxchgU { align, offset } => {
+   933→                out.push(0xFE);
+   934→                out.extend_from_slice(&encode_unsigned_leb128(0x4A)); // i32.atomic.rmw8.cmpxchg_u
+   935→                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+   936→                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+   937→            }
+   938→            WasmInstr::I32AtomicRmw16CmpxchgU { align, offset } => {
+   939→                out.push(0xFE);
+   940→                out.extend_from_slice(&encode_unsigned_leb128(0x4B)); // i32.atomic.rmw16.cmpxchg_u
+   941→                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+   942→                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+   943→            }
+   944→            WasmInstr::I64AtomicRmw8CmpxchgU { align, offset } => {
+   945→                out.push(0xFE);
+   946→                out.extend_from_slice(&encode_unsigned_leb128(0x4C)); // i64.atomic.rmw8.cmpxchg_u
+   947→                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+   948→                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+   949→            }
+   950→            WasmInstr::I64AtomicRmw16CmpxchgU { align, offset } => {
+   951→                out.push(0xFE);
+   952→                out.extend_from_slice(&encode_unsigned_leb128(0x4D)); // i64.atomic.rmw16.cmpxchg_u
+   953→                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+   954→                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+   955→            }
+   956→            WasmInstr::I64AtomicRmw32CmpxchgU { align, offset } => {
+   957→                out.push(0xFE);
+   958→                out.extend_from_slice(&encode_unsigned_leb128(0x4E)); // i64.atomic.rmw32.cmpxchg_u
+   959→                out.extend_from_slice(&encode_unsigned_leb128(*align as u64));
+   960→                out.extend_from_slice(&encode_unsigned_leb128(*offset as u64));
+   961→            }
+   962→
+   963→            // ── Bulk Memory Operations ────────────────────────────
+   964→            WasmInstr::MemoryCopy { src_mem, dst_mem } => {
+   965→                out.push(0xFC); // multi-byte op prefix
+   966→                out.extend_from_slice(&encode_unsigned_leb128(0x0A)); // memory.copy
+   967→                out.extend_from_slice(&encode_unsigned_leb128(*src_mem as u64));
+   968→                out.extend_from_slice(&encode_unsigned_leb128(*dst_mem as u64));
+   969→            }
+   970→            WasmInstr::MemoryFill { mem } => {
+   971→                out.push(0xFC);
+   972→                out.extend_from_slice(&encode_unsigned_leb128(0x0B)); // memory.fill
+   973→                out.extend_from_slice(&encode_unsigned_leb128(*mem as u64));
+   974→            }
+   975→            WasmInstr::MemoryInit { data_idx, mem } => {
+   976→                out.push(0xFC);
+   977→                out.extend_from_slice(&encode_unsigned_leb128(0x08)); // memory.init
+   978→                out.extend_from_slice(&encode_unsigned_leb128(*data_idx as u64));
+   979→                out.extend_from_slice(&encode_unsigned_leb128(*mem as u64));
+   980→            }
+   981→        }
+   982→    }
+   983→
+   984→    /// Encode this instruction and return the bytes as a new Vec.
+   985→    pub fn to_bytes(&self) -> Vec<u8> {
+   986→        let mut out = Vec::new();
+   987→        self.encode(&mut out);
+   988→        out
+   989→    }
+   990→}
+   991→
+   992→// ===========================================================================
+   993→// LEB128 encoding / decoding
+   994→// ===========================================================================
+   995→
+   996→/// Encode an unsigned 64-bit value as unsigned LEB128.
+   997→pub fn encode_unsigned_leb128(value: u64) -> Vec<u8> {
+   998→    let mut result = Vec::new();
+   999→    let mut val = value;
+  1000→    loop {
+  1001→        let mut byte = (val & 0x7F) as u8;
+  1002→        val >>= 7;
+  1003→        if val != 0 {
+  1004→            byte |= 0x80;
+  1005→        }
+  1006→        result.push(byte);
+  1007→        if val == 0 {
+  1008→            break;
+  1009→        }
+  1010→    }
+  1011→    result
+  1012→}
+  1013→
+  1014→/// Encode a signed 64-bit value as signed LEB128.
+  1015→pub fn encode_signed_leb128(value: i64) -> Vec<u8> {
+  1016→    let mut result = Vec::new();
+  1017→    let mut val = value;
+  1018→    loop {
+  1019→        let mut byte = (val & 0x7F) as u8;
+  1020→        val >>= 7;
+  1021→        // Sign bit of byte is bit 6
+  1022→        let sign_bit = (byte & 0x40) != 0;
+  1023→        // If val is 0 and sign bit is clear, or val is -1 and sign bit is set, we're done
+  1024→        if (val == 0 && !sign_bit) || (val == -1 && sign_bit) {
+  1025→            result.push(byte);
+  1026→            break;
+  1027→        }
+  1028→        byte |= 0x80;
+  1029→        result.push(byte);
+  1030→    }
+  1031→    result
+  1032→}
+  1033→
+  1034→/// Decode an unsigned LEB128 value from a byte slice.
+  1035→/// Returns (decoded_value, number_of_bytes_consumed).
+  1036→pub fn decode_unsigned_leb128(bytes: &[u8]) -> (u64, usize) {
+  1037→    let mut result: u64 = 0;
+  1038→    let mut shift: u32 = 0;
+  1039→    let mut count = 0;
+  1040→    for &byte in bytes {
+  1041→        count += 1;
+  1042→        result |= ((byte & 0x7F) as u64) << shift;
+  1043→        if (byte & 0x80) == 0 {
+  1044→            break;
+  1045→        }
+  1046→        shift += 7;
+  1047→    }
+  1048→    (result, count)
+  1049→}
+  1050→
+  1051→/// Decode a signed LEB128 value from a byte slice.
+  1052→/// Returns (decoded_value, number_of_bytes_consumed).
+  1053→pub fn decode_signed_leb128(bytes: &[u8]) -> (i64, usize) {
+  1054→    let mut result: i64 = 0;
+  1055→    let mut shift: u32 = 0;
+  1056→    let mut count = 0;
+  1057→    let mut byte: u8;
+  1058→    loop {
+  1059→        byte = bytes[count];
+  1060→        count += 1;
+  1061→        result |= ((byte & 0x7F) as i64) << shift;
+  1062→        shift += 7;
+  1063→        if (byte & 0x80) == 0 {
+  1064→            break;
+  1065→        }
+  1066→    }
+  1067→    // Sign-extend if the sign bit is set
+  1068→    if shift < 64 && (byte & 0x40) != 0 {
+  1069→        result |= !0i64 << shift;
+  1070→    }
+  1071→    (result, count)
+  1072→}
+  1073→
+  1074→// ===========================================================================
+  1075→// Wasm binary format encoder
+  1076→// ===========================================================================
+  1077→
+  1078→/// Wasm section IDs.
+  1079→const SECTION_TYPE: u8 = 1;
+  1080→const SECTION_IMPORT: u8 = 2;
+  1081→const SECTION_FUNCTION: u8 = 3;
+  1082→const SECTION_TABLE: u8 = 4;
+  1083→const SECTION_MEMORY: u8 = 5;
+  1084→const SECTION_GLOBAL: u8 = 6;
+  1085→const SECTION_EXPORT: u8 = 7;
+  1086→const SECTION_START: u8 = 8;
+  1087→const SECTION_ELEMENT: u8 = 9;
+  1088→const SECTION_CODE: u8 = 10;
+  1089→const SECTION_DATA: u8 = 11;
+  1090→
+  1091→/// Wasm magic number and version.
+  1092→const WASM_MAGIC: [u8; 4] = [0x00, 0x61, 0x73, 0x6D]; // "\0asm"
+  1093→const WASM_VERSION: [u8; 4] = [0x01, 0x00, 0x00, 0x00]; // version 1
+  1094→
+  1095→/// A Wasm function type signature: (params) -> (results).
+  1096→///
+  1097→/// Supports multi-value returns (Wasm 2.0 feature): the `results` vector
+  1098→/// may contain more than one type.
+  1099→#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+  1100→pub struct WasmFuncType {
+  1101→    pub params: Vec<WasmType>,
+  1102→    pub results: Vec<WasmType>,
+  1103→}
+  1104→
+  1105→impl WasmFuncType {
+  1106→    /// Encode this function type in Wasm binary format.
+  1107→    pub fn encode(&self) -> Vec<u8> {
+  1108→        let mut out = Vec::new();
+  1109→        out.push(0x60); // func type tag
+  1110→        out.extend_from_slice(&encode_unsigned_leb128(self.params.len() as u64));
+  1111→        for p in &self.params {
+  1112→            out.push(p.to_byte());
+  1113→        }
+  1114→        out.extend_from_slice(&encode_unsigned_leb128(self.results.len() as u64));
+  1115→        for r in &self.results {
+  1116→            out.push(r.to_byte());
+  1117→        }
+  1118→        out
+  1119→    }
+  1120→}
+  1121→
+  1122→/// A Wasm import entry.
+  1123→#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+  1124→pub struct WasmImport {
+  1125→    pub module: String,
+  1126→    pub name: String,
+  1127→    pub kind: WasmImportKind,
+  1128→}
+  1129→
+  1130→impl WasmImport {
+  1131→    /// Create a WASI `fd_write` import (wasip1).
+  1132→    ///
+  1133→    /// Signature: (fd: i32, iov_ptr: i32, iov_cnt: i32, nwritten_ptr: i32) -> i32
+  1134→    pub fn wasi_fd_write(type_idx: u32) -> Self {
+  1135→        WasmImport {
+  1136→            module: "wasi_snapshot_preview1".to_string(),
+  1137→            name: "fd_write".to_string(),
+  1138→            kind: WasmImportKind::Function { type_idx },
+  1139→        }
+  1140→    }
+  1141→
+  1142→    /// Create a WASI `proc_exit` import (wasip1).
+  1143→    ///
+  1144→    /// Signature: (exit_code: i32) -> ()
+  1145→    pub fn wasi_proc_exit(type_idx: u32) -> Self {
+  1146→        WasmImport {
+  1147→            module: "wasi_snapshot_preview1".to_string(),
+  1148→            name: "proc_exit".to_string(),
+  1149→            kind: WasmImportKind::Function { type_idx },
+  1150→        }
+  1151→    }
+  1152→}
+  1153→
+  1154→/// Kind of import.
+  1155→#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+  1156→pub enum WasmImportKind {
+  1157→    Function { type_idx: u32 },
+  1158→    Table { elem_type: u8, limits: WasmLimits },
+  1159→    Memory { limits: WasmLimits },
+  1160→    Global { val_type: WasmType, mutable: bool },
+  1161→}
+  1162→
+  1163→/// Wasm limits (for tables and memories).
+  1164→#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+  1165→pub struct WasmLimits {
+  1166→    pub min: u32,
+  1167→    pub max: Option<u32>,
+  1168→    /// Whether this memory is shared (required for Wasm atomic instructions).
+  1169→    /// Shared memories must have both `min` and `max` defined.
+  1170→    pub shared: bool,
+  1171→}
+  1172→
+  1173→impl WasmLimits {
+  1174→    fn encode(&self) -> Vec<u8> {
+  1175→        let mut out = Vec::new();
+  1176→        let has_max = self.max.is_some();
+  1177→        // Flag bits: bit 0 = has_max, bit 1 = shared
+  1178→        let flag = (has_max as u8) | ((self.shared as u8) << 1);
+  1179→        out.push(flag);
+  1180→        out.extend_from_slice(&encode_unsigned_leb128(self.min as u64));
+  1181→        if let Some(max) = self.max {
+  1182→            out.extend_from_slice(&encode_unsigned_leb128(max as u64));
+  1183→        }
+  1184→        out
+  1185→    }
+  1186→}
+  1187→
+  1188→/// A Wasm export entry.
+  1189→#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+  1190→pub struct WasmExport {
+  1191→    pub name: String,
+  1192→    pub kind: WasmExportKind,
+  1193→    pub index: u32,
+  1194→}
+  1195→
+  1196→/// Kind of export.
+  1197→#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+  1198→pub enum WasmExportKind {
+  1199→    Function = 0,
+  1200→    Table = 1,
+  1201→    Memory = 2,
+  1202→    Global = 3,
+  1203→}
+  1204→
+  1205→/// A Wasm global variable.
+  1206→#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+  1207→pub struct WasmGlobal {
+  1208→    pub ty: WasmType,
+  1209→    pub mutable: bool,
+  1210→    pub init_value: i64,
+  1211→}
+  1212→
+  1213→/// Global index for the heap pointer used by the bump allocator.
+  1214→/// Must be kept in sync with the globals added in `encode_program`.
+  1215→const HEAP_PTR_GLOBAL_IDX: u32 = 0;
+  1216→
+  1217→/// Start of the heap area in linear memory (second 64 KiB page, leaving
+  1218→/// the first page for globals / stack).
+  1219→const HEAP_START: i32 = 65536;
+  1220→
+  1221→// ── WASI import function indices ─────────────────────────────────────────
+  1222→// These are the function indices of WASI imports in the module.
+  1223→// fd_write is the first import (index 0), proc_exit is the second (index 1).
+  1224→// MUST be kept in sync with the order imports are added in `encode_program`.
+  1225→
+  1226→/// Function index for the WASI `fd_write` import (first imported function).
+  1227→const WASI_FD_WRITE_IDX: u32 = 0;
+  1228→/// Function index for the WASI `proc_exit` import (second imported function).
+  1229→const WASI_PROC_EXIT_IDX: u32 = 1;
+  1230→
+  1231→// ── Runtime helper memory layout ─────────────────────────────────────────
+  1232→// These addresses are in page 0 of linear memory, well below the heap.
+  1233→// Used by the __vuma_print_int / __vuma_print_hex runtime helpers.
+  1234→
+  1235→/// Address of the 32-byte print buffer in linear memory.
+  1236→const PRINT_BUF_ADDR: i32 = 0x0800;
+  1237→/// Address of the 8-byte WASI iov structure (ptr: i32, len: i32).
+  1238→const IOV_BUF_ADDR: i32 = 0x0820;
+  1239→/// Address of the 4-byte nwritten result pointer.
+  1240→const NWRITTEN_ADDR: i32 = 0x0828;
+  1241→
+  1242→/// Placeholder function index for unresolved Call instructions.
+  1243→/// Will be patched during `encode_program` when the function index mapping
+  1244→/// is known.
+  1245→const UNRESOLVED_CALL_IDX: u32 = 0xDEAD;
+  1246→
+  1247→/// A Wasm data segment.
+  1248→#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+  1249→pub struct WasmDataSegment {
+  1250→    pub memory_index: u32,
+  1251→    pub offset_expr: Vec<u8>, // init expr for offset
+  1252→    pub data: Vec<u8>,
+  1253→}
+  1254→
+  1255→/// A Wasm element segment (for indirect calls).
+  1256→#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+  1257→pub struct WasmElementSegment {
+  1258→    pub table_index: u32,
+  1259→    pub offset_expr: Vec<u8>,
+  1260→    pub func_indices: Vec<u32>,
+  1261→}
+  1262→
+  1263→/// Builder for a complete Wasm module.
+  1264→#[derive(Debug, Clone, Default)]
+  1265→pub struct WasmModuleBuilder {
+  1266→    pub types: Vec<WasmFuncType>,
+  1267→    pub imports: Vec<WasmImport>,
+  1268→    pub functions: Vec<u32>,           // type indices for each function
+  1269→    pub tables: Vec<(u8, WasmLimits)>, // (elem_type, limits)
+  1270→    pub memories: Vec<WasmLimits>,
+  1271→    pub globals: Vec<WasmGlobal>,
+  1272→    pub exports: Vec<WasmExport>,
+  1273→    pub start_func: Option<u32>,
+  1274→    pub elements: Vec<WasmElementSegment>,
+  1275→    pub code: Vec<WasmFuncBody>, // one per function (after imports)
+  1276→    pub data: Vec<WasmDataSegment>,
+  1277→    pub num_imported_functions: u32,
+  1278→}
+  1279→
+  1280→/// A Wasm function body.
+  1281→///
+  1282→/// Supports local declarations (count + type pairs) as per the Wasm binary format.
+  1283→#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+  1284→pub struct WasmFuncBody {
+  1285→    pub locals: Vec<(u32, WasmType)>, // (count, type) pairs
+  1286→    pub body: Vec<u8>,                // bytecode of the function body
+  1287→}
+  1288→
+  1289→impl WasmFuncBody {
+  1290→    /// Create a new function body with given locals and body bytecode.
+  1291→    pub fn new(locals: Vec<(u32, WasmType)>, body: Vec<u8>) -> Self {
+  1292→        Self { locals, body }
+  1293→    }
+  1294→
+  1295→    /// Create a function body with no extra locals.
+  1296→    pub fn from_body(body: Vec<u8>) -> Self {
+  1297→        Self {
+  1298→            locals: vec![],
+  1299→            body,
+  1300→        }
+  1301→    }
+  1302→}
+  1303→
+  1304→impl WasmModuleBuilder {
+  1305→    /// Creates a new Wasm module builder with empty sections.
+  1306→    pub fn new() -> Self {
+  1307→        Self::default()
+  1308→    }
+  1309→
+  1310→    /// Add a function type and return its index.
+  1311→    pub fn add_type(&mut self, ft: WasmFuncType) -> u32 {
+  1312→        let idx = self.types.len() as u32;
+  1313→        self.types.push(ft);
+  1314→        idx
+  1315→    }
+  1316→
+  1317→    /// Add a function (type index only; body added separately).
+  1318→    pub fn add_function(&mut self, type_idx: u32) -> u32 {
+  1319→        let idx = self.num_imported_functions + (self.functions.len() as u32);
+  1320→        self.functions.push(type_idx);
+  1321→        idx
+  1322→    }
+  1323→
+  1324→    /// Add a function body (must match the function index).
+  1325→    pub fn add_code(&mut self, body: WasmFuncBody) {
+  1326→        self.code.push(body);
+  1327→    }
+  1328→
+  1329→    /// Add a memory definition.
+  1330→    pub fn add_memory(&mut self, limits: WasmLimits) -> u32 {
+  1331→        let idx = self.memories.len() as u32;
+  1332→        self.memories.push(limits);
+  1333→        idx
+  1334→    }
+  1335→
+  1336→    /// Add an import.
+  1337→    pub fn add_import(&mut self, import: WasmImport) {
+  1338→        if let WasmImportKind::Function { .. } = import.kind {
+  1339→            self.num_imported_functions += 1;
+  1340→        }
+  1341→        self.imports.push(import);
+  1342→    }
+  1343→
+  1344→    /// Add a global variable and return its index.
+  1345→    pub fn add_global(&mut self, global: WasmGlobal) -> u32 {
+  1346→        let idx = self.globals.len() as u32;
+  1347→        self.globals.push(global);
+  1348→        idx
+  1349→    }
+  1350→
+  1351→    /// Add an export.
+  1352→    pub fn add_export(&mut self, export: WasmExport) {
+  1353→        self.exports.push(export);
+  1354→    }
+  1355→
+  1356→    /// Add a data segment.
+  1357→    pub fn add_data(&mut self, segment: WasmDataSegment) {
+  1358→        self.data.push(segment);
+  1359→    }
+  1360→
+  1361→    /// Set the start function.
+  1362→    pub fn set_start(&mut self, func_idx: u32) {
+  1363→        self.start_func = Some(func_idx);
+  1364→    }
+  1365→
+  1366→    /// Encode the complete module into bytes.
+  1367→    pub fn encode(self) -> Vec<u8> {
+  1368→        let mut module = Vec::new();
+  1369→
+  1370→        // Magic + version
+  1371→        module.extend_from_slice(&WASM_MAGIC);
+  1372→        module.extend_from_slice(&WASM_VERSION);
+  1373→
+  1374→        // Type section
+  1375→        if !self.types.is_empty() {
+  1376→            let mut section = Vec::new();
+  1377→            section.extend_from_slice(&encode_unsigned_leb128(self.types.len() as u64));
+  1378→            for ft in &self.types {
+  1379→                section.extend_from_slice(&ft.encode());
+  1380→            }
+  1381→            emit_section(&mut module, SECTION_TYPE, &section);
+  1382→        }
+  1383→
+  1384→        // Import section
+  1385→        if !self.imports.is_empty() {
+  1386→            let mut section = Vec::new();
+  1387→            section.extend_from_slice(&encode_unsigned_leb128(self.imports.len() as u64));
+  1388→            for imp in &self.imports {
+  1389→                section.extend_from_slice(&encode_unsigned_leb128(imp.module.len() as u64));
+  1390→                section.extend_from_slice(imp.module.as_bytes());
+  1391→                section.extend_from_slice(&encode_unsigned_leb128(imp.name.len() as u64));
+  1392→                section.extend_from_slice(imp.name.as_bytes());
+  1393→                match &imp.kind {
+  1394→                    WasmImportKind::Function { type_idx } => {
+  1395→                        section.push(0x00);
+  1396→                        section.extend_from_slice(&encode_unsigned_leb128(*type_idx as u64));
+  1397→                    }
+  1398→                    WasmImportKind::Table { elem_type, limits } => {
+  1399→                        section.push(0x01);
+  1400→                        section.push(*elem_type);
+  1401→                        section.extend_from_slice(&limits.encode());
+  1402→                    }
+  1403→                    WasmImportKind::Memory { limits } => {
+  1404→                        section.push(0x02);
+  1405→                        section.extend_from_slice(&limits.encode());
+  1406→                    }
+  1407→                    WasmImportKind::Global { val_type, mutable } => {
+  1408→                        section.push(0x03);
+  1409→                        section.push(val_type.to_byte());
+  1410→                        section.push(if *mutable { 0x01 } else { 0x00 });
+  1411→                    }
+  1412→                }
+  1413→            }
+  1414→            emit_section(&mut module, SECTION_IMPORT, &section);
+  1415→        }
+  1416→
+  1417→        // Function section
+  1418→        if !self.functions.is_empty() {
+  1419→            let mut section = Vec::new();
+  1420→            section.extend_from_slice(&encode_unsigned_leb128(self.functions.len() as u64));
+  1421→            for &type_idx in &self.functions {
+  1422→                section.extend_from_slice(&encode_unsigned_leb128(type_idx as u64));
+  1423→            }
+  1424→            emit_section(&mut module, SECTION_FUNCTION, &section);
+  1425→        }
+  1426→
+  1427→        // Table section
+  1428→        if !self.tables.is_empty() {
+  1429→            let mut section = Vec::new();
+  1430→            section.extend_from_slice(&encode_unsigned_leb128(self.tables.len() as u64));
+  1431→            for (elem_type, limits) in &self.tables {
+  1432→                section.push(*elem_type);
+  1433→                section.extend_from_slice(&limits.encode());
+  1434→            }
+  1435→            emit_section(&mut module, SECTION_TABLE, &section);
+  1436→        }
+  1437→
+  1438→        // Memory section
+  1439→        if !self.memories.is_empty() {
+  1440→            let mut section = Vec::new();
+  1441→            section.extend_from_slice(&encode_unsigned_leb128(self.memories.len() as u64));
+  1442→            for limits in &self.memories {
+  1443→                section.extend_from_slice(&limits.encode());
+  1444→            }
+  1445→            emit_section(&mut module, SECTION_MEMORY, &section);
+  1446→        }
+  1447→
+  1448→        // Global section
+  1449→        if !self.globals.is_empty() {
+  1450→            let mut section = Vec::new();
+  1451→            section.extend_from_slice(&encode_unsigned_leb128(self.globals.len() as u64));
+  1452→            for g in &self.globals {
+  1453→                section.push(g.ty.to_byte());
+  1454→                section.push(if g.mutable { 0x01 } else { 0x00 });
+  1455→                // Emit init expr: <const opcode> <LEB128 value> end
+  1456→                match g.ty {
+  1457→                    WasmType::I32 => {
+  1458→                        section.push(0x41); // i32.const
+  1459→                        section.extend_from_slice(&encode_signed_leb128(g.init_value));
+  1460→                    }
+  1461→                    WasmType::I64 => {
+  1462→                        section.push(0x42); // i64.const
+  1463→                        section.extend_from_slice(&encode_signed_leb128(g.init_value));
+  1464→                    }
+  1465→                    WasmType::F32 => {
+  1466→                        section.push(0x43); // f32.const
+  1467→                        section.extend_from_slice(&(g.init_value as f32).to_le_bytes());
+  1468→                    }
+  1469→                    WasmType::F64 => {
+  1470→                        section.push(0x44); // f64.const
+  1471→                        section.extend_from_slice(&(g.init_value as f64).to_le_bytes());
+  1472→                    }
+  1473→                }
+  1474→                section.push(0x0B); // end
+  1475→            }
+  1476→            emit_section(&mut module, SECTION_GLOBAL, &section);
+  1477→        }
+  1478→
+  1479→        // Export section
+  1480→        if !self.exports.is_empty() {
+  1481→            let mut section = Vec::new();
+  1482→            section.extend_from_slice(&encode_unsigned_leb128(self.exports.len() as u64));
+  1483→            for exp in &self.exports {
+  1484→                section.extend_from_slice(&encode_unsigned_leb128(exp.name.len() as u64));
+  1485→                section.extend_from_slice(exp.name.as_bytes());
+  1486→                section.push(exp.kind as u8);
+  1487→                section.extend_from_slice(&encode_unsigned_leb128(exp.index as u64));
+  1488→            }
+  1489→            emit_section(&mut module, SECTION_EXPORT, &section);
+  1490→        }
+  1491→
+  1492→        // Start section
+  1493→        if let Some(func_idx) = self.start_func {
+  1494→            let section = encode_unsigned_leb128(func_idx as u64);
+  1495→            emit_section(&mut module, SECTION_START, &section);
+  1496→        }
+  1497→
+  1498→        // Element section
+  1499→        if !self.elements.is_empty() {
+  1500→            let mut section = Vec::new();
+  1501→            section.extend_from_slice(&encode_unsigned_leb128(self.elements.len() as u64));
+  1502→            for elem in &self.elements {
+  1503→                section.extend_from_slice(&encode_unsigned_leb128(elem.table_index as u64));
+  1504→                section.extend_from_slice(&elem.offset_expr);
+  1505→                section.extend_from_slice(&encode_unsigned_leb128(elem.func_indices.len() as u64));
+  1506→                for &idx in &elem.func_indices {
+  1507→                    section.extend_from_slice(&encode_unsigned_leb128(idx as u64));
+  1508→                }
+  1509→            }
+  1510→            emit_section(&mut module, SECTION_ELEMENT, &section);
+  1511→        }
+  1512→
+  1513→        // Code section
+  1514→        if !self.code.is_empty() {
+  1515→            let mut section = Vec::new();
+  1516→            section.extend_from_slice(&encode_unsigned_leb128(self.code.len() as u64));
+  1517→            for func_body in &self.code {
+  1518→                // Encode the function body: locals + code + end byte
+  1519→                let mut body_bytes = Vec::new();
+  1520→                body_bytes
+  1521→                    .extend_from_slice(&encode_unsigned_leb128(func_body.locals.len() as u64));
+  1522→                for (count, ty) in &func_body.locals {
+  1523→                    body_bytes.extend_from_slice(&encode_unsigned_leb128(*count as u64));
+  1524→                    body_bytes.push(ty.to_byte());
+  1525→                }
+  1526→                body_bytes.extend_from_slice(&func_body.body);
+  1527→                // Function body is size-prefixed
+  1528→                let body_size = body_bytes.len() as u64;
+  1529→                section.extend_from_slice(&encode_unsigned_leb128(body_size));
+  1530→                section.extend_from_slice(&body_bytes);
+  1531→            }
+  1532→            emit_section(&mut module, SECTION_CODE, &section);
+  1533→        }
+  1534→
+  1535→        // Data section
+  1536→        if !self.data.is_empty() {
+  1537→            let mut section = Vec::new();
+  1538→            section.extend_from_slice(&encode_unsigned_leb128(self.data.len() as u64));
+  1539→            for seg in &self.data {
+  1540→                section.extend_from_slice(&encode_unsigned_leb128(seg.memory_index as u64));
+  1541→                section.extend_from_slice(&seg.offset_expr);
+  1542→                section.extend_from_slice(&encode_unsigned_leb128(seg.data.len() as u64));
+  1543→                section.extend_from_slice(&seg.data);
+  1544→            }
+  1545→            emit_section(&mut module, SECTION_DATA, &section);
+  1546→        }
+  1547→
+  1548→        module
+  1549→    }
+  1550→}
+  1551→
+  1552→/// Emit a Wasm section: section ID + LEB128 size + content.
+  1553→fn emit_section(module: &mut Vec<u8>, section_id: u8, content: &[u8]) {
+  1554→    module.push(section_id);
+  1555→    module.extend_from_slice(&encode_unsigned_leb128(content.len() as u64));
+  1556→    module.extend_from_slice(content);
+  1557→}
+  1558→
+  1559→/// Skip `count` unsigned LEB128 values in the byte slice, advancing `offset`.
+  1560→fn skip_leb128(bytes: &[u8], offset: &mut usize, count: usize) {
+  1561→    for _ in 0..count {
+  1562→        while *offset < bytes.len() && (bytes[*offset] & 0x80) != 0 {
+  1563→            *offset += 1;
+  1564→        }
+  1565→        if *offset < bytes.len() {
+  1566→            *offset += 1;
+  1567→        }
+  1568→    }
+  1569→}
+  1570→
+  1571→/// Skip `count` signed LEB128 values in the byte slice, advancing `offset`.
+  1572→fn skip_signed_leb128(bytes: &[u8], offset: &mut usize, count: usize) {
+  1573→    // Signed and unsigned LEB128 have the same encoding structure for skipping
+  1574→    skip_leb128(bytes, offset, count);
+  1575→}
+  1576→
+  1577→/// Convert a WasmType (from this module) to the serializable WasmValueType
+  1578→/// (from the backend module).
+  1579→fn wasm_type_to_backend(ty: WasmType) -> crate::backend::WasmValueType {
+  1580→    match ty {
+  1581→        WasmType::I32 => crate::backend::WasmValueType::I32,
+  1582→        WasmType::I64 => crate::backend::WasmValueType::I64,
+  1583→        WasmType::F32 => crate::backend::WasmValueType::F32,
+  1584→        WasmType::F64 => crate::backend::WasmValueType::F64,
+  1585→    }
+  1586→}
+  1587→
+  1588→/// Convert a serializable WasmValueType (from the backend module) back to
+  1589→/// the WasmType used by this module.
+  1590→fn backend_to_wasm_type(ty: &crate::backend::WasmValueType) -> WasmType {
+  1591→    match ty {
+  1592→        crate::backend::WasmValueType::I32 => WasmType::I32,
+  1593→        crate::backend::WasmValueType::I64 => WasmType::I64,
+  1594→        crate::backend::WasmValueType::F32 => WasmType::F32,
+  1595→        crate::backend::WasmValueType::F64 => WasmType::F64,
+  1596→    }
+  1597→}
+  1598→
+  1599→/// Skip a single Wasm instruction starting at `offset`, advancing past it.
+  1600→///
+  1601→/// This is used by `allocate_registers` to split the body bytecode into
+  1602→/// per-instruction `AllocatedInstruction` entries with real opcode names.
+  1603→fn skip_one_instruction(bytes: &[u8], offset: &mut usize) {
+  1604→    if *offset >= bytes.len() {
+  1605→        return;
+  1606→    }
+  1607→    let byte = bytes[*offset];
+  1608→    *offset += 1;
+  1609→
+  1610→    match byte {
+  1611→        // ── Multi-byte opcodes ────────────────────────────────────
+  1612→        0xFC => {
+  1613→            // Bulk memory / saturated arithmetic prefix
+  1614→            skip_leb128(bytes, offset, 1); // sub-opcode
+  1615→            let (subop, _) = decode_unsigned_leb128(&bytes[*offset - 1..]);
+  1616→            match subop {
+  1617→                0x08 => skip_leb128(bytes, offset, 2), // memory.init
+  1618→                0x0A => skip_leb128(bytes, offset, 2), // memory.copy
+  1619→                0x0B => skip_leb128(bytes, offset, 1), // memory.fill
+  1620→                _ => {}                                // other sub-ops may have 0 or more operands
+  1621→            }
+  1622→        }
+  1623→        0xFD => {
+  1624→            // SIMD prefix
+  1625→            skip_leb128(bytes, offset, 1); // sub-opcode
+  1626→            let (subop, _) = decode_unsigned_leb128(&bytes[*offset - 1..]);
+  1627→            if subop == 0x0C {
+  1628→                // v128.const: skip 16 bytes of payload
+  1629→                *offset += 16;
+  1630→            }
+  1631→        }
+  1632→
+  1633→        // ── Control flow ─────────────────────────────────────────
+  1634→        0x00 => {} // unreachable
+  1635→        0x01 => {} // nop
+  1636→        0x02..=0x04 => {
+  1637→            *offset += 1;
+  1638→        } // block/loop/if + blocktype
+  1639→        0x05 | 0x0B => {} // else, end
+  1640→        0x0C | 0x0D => {
+  1641→            skip_leb128(bytes, offset, 1);
+  1642→        } // br, br_if
+  1643→        0x0E => {
+  1644→            // br_table: count + labels + default
+  1645→            let (count, size) = decode_unsigned_leb128(&bytes[*offset..]);
+  1646→            *offset += size;
+  1647→            skip_leb128(bytes, offset, count as usize + 1);
+  1648→        }
+  1649→        0x0F => {} // return
+  1650→        0x10 => {
+  1651→            skip_leb128(bytes, offset, 1);
+  1652→        } // call
+  1653→        0x11 => {
+  1654→            skip_leb128(bytes, offset, 2);
+  1655→        } // call_indirect
+  1656→
+  1657→        // ── Parametric ───────────────────────────────────────────
+  1658→        0x1A | 0x1B => {} // drop, select
+  1659→
+  1660→        // ── Variable ─────────────────────────────────────────────
+  1661→        0x20..=0x24 => {
+  1662→            skip_leb128(bytes, offset, 1);
+  1663→        } // local.get/set/tee, global.get/set
+  1664→
+  1665→        // ── Memory ───────────────────────────────────────────────
+  1666→        0x28..=0x3E => {
+  1667→            skip_leb128(bytes, offset, 2);
+  1668→        } // loads/stores: align + offset
+  1669→        0x3F | 0x40 => {
+  1670→            skip_leb128(bytes, offset, 1);
+  1671→        } // memory.size, memory.grow
+  1672→
+  1673→        // ── Numeric ──────────────────────────────────────────────
+  1674→        0x41 => {
+  1675→            skip_signed_leb128(bytes, offset, 1);
+  1676→        } // i32.const
+  1677→        0x42 => {
+  1678→            skip_signed_leb128(bytes, offset, 1);
+  1679→        } // i64.const
+  1680→        0x43 => {
+  1681→            *offset += 4;
+  1682→        } // f32.const
+  1683→        0x44 => {
+  1684→            *offset += 8;
+  1685→        } // f64.const
+  1686→
+  1687→        // All other single-byte opcodes (comparisons, arithmetic, conversions)
+  1688→        0x45..=0x4F
+  1689→        | 0x50..=0x5A
+  1690→        | 0x5B..=0x66
+  1691→        | 0x67..=0x78
+  1692→        | 0x79..=0x8A
+  1693→        | 0x8C
+  1694→        | 0x91..=0x95
+  1695→        | 0x9A
+  1696→        | 0x9F..=0xA3
+  1697→        | 0xA7..=0xBF => {}
+  1698→
+  1699→        _ => {} // Unknown opcode; nothing more to skip
+  1700→    }
+  1701→}
+  1702→
+  1703→// ===========================================================================
+  1704→// IR → Wasm lowering
+  1705→// ===========================================================================
+  1706→
+  1707→/// Context for lowering an IR function to Wasm bytecode.
+  1708→struct LoweringContext {
+  1709→    /// Map from virtual register ID to local index.
+  1710→    vreg_to_local: HashMap<u32, u32>,
+  1711→    /// Map from virtual register ID to its Wasm type.
+  1712→    vreg_types: HashMap<u32, WasmType>,
+  1713→    /// Number of locals (including parameters).
+  1714→    num_locals: u32,
+  1715→    /// Local declarations (for the function body).
+  1716→    locals: Vec<(u32, WasmType)>,
+  1717→    /// Map from block label to its label depth index for branch targets.
+  1718→    block_labels: HashMap<String, u32>,
+  1719→    /// Accumulated Wasm instructions.
+  1720→    instrs: Vec<WasmInstr>,
+  1721→    /// Expected result types for the function (used for return type coercion).
+  1722→    result_types: Vec<WasmType>,
+  1723→    /// For each Call instruction (indexed by position in `instrs`),
+  1724→    /// record the target function name for later resolution during
+  1725→    /// `encode_program`.  The placeholder `UNRESOLVED_CALL_IDX` is emitted
+  1726→    /// as the call index and must be patched once the module's function
+  1727→    /// index space is known.
+  1728→    call_targets: Vec<(usize, String)>,
+  1729→}
+  1730→
+  1731→impl LoweringContext {
+  1732→    fn new(result_types: Vec<WasmType>) -> Self {
+  1733→        Self {
+  1734→            vreg_to_local: HashMap::new(),
+  1735→            vreg_types: HashMap::new(),
+  1736→            num_locals: 0,
+  1737→            locals: Vec::new(),
+  1738→            block_labels: HashMap::new(),
+  1739→            instrs: Vec::new(),
+  1740→            result_types,
+  1741→            call_targets: Vec::new(),
+  1742→        }
+  1743→    }
+  1744→
+  1745→    /// Allocate a local for a virtual register, returning the local index.
+  1746→    fn alloc_local(&mut self, vreg_id: u32, ty: WasmType) -> u32 {
+  1747→        let idx = self.num_locals;
+  1748→        self.vreg_to_local.insert(vreg_id, idx);
+  1749→        self.vreg_types.insert(vreg_id, ty);
+  1750→        self.num_locals += 1;
+  1751→        // Try to merge with an existing (count, type) entry
+  1752→        if let Some(last) = self.locals.last_mut() {
+  1753→            if last.1 == ty {
+  1754→                last.0 += 1;
+  1755→                return idx;
+  1756→            }
+  1757→        }
+  1758→        self.locals.push((1, ty));
+  1759→        idx
+  1760→    }
+  1761→
+  1762→    /// Get the local index for a virtual register.
+  1763→    fn get_local(&self, vreg_id: u32) -> Option<u32> {
+  1764→        self.vreg_to_local.get(&vreg_id).copied()
+  1765→    }
+  1766→
+  1767→    /// Emit an instruction.
+  1768→    fn emit(&mut self, instr: WasmInstr) {
+  1769→        self.instrs.push(instr);
+  1770→    }
+  1771→
+  1772→    /// Push a value onto the Wasm stack from an IRValue.
+  1773→    /// On Wasm32, pointers and most integer values are pushed as i32.
+  1774→    /// I64 is used only when the type hint explicitly requests it (e.g., for
+  1775→    /// I64Load/I64Store of 64-bit values).  Addresses are always truncated
+  1776→    /// to i32 since the Wasm32 address space is 32 bits.
+  1777→    fn push_value(&mut self, val: &IRValue, type_hint: Option<&WasmType>) {
+  1778→        match val {
+  1779→            IRValue::Immediate(v) => {
+  1780→                let ty = type_hint.copied().unwrap_or(WasmType::I32);
+  1781→                match ty {
+  1782→                    WasmType::I64 => self.emit(WasmInstr::I64Const(*v)),
+  1783→                    WasmType::F32 => self.emit(WasmInstr::F32Const(*v as f32)),
+  1784→                    WasmType::F64 => self.emit(WasmInstr::F64Const(*v as f64)),
+  1785→                    _ => self.emit(WasmInstr::I32Const(*v as i32)),
+  1786→                }
+  1787→            }
+  1788→            IRValue::Register(id) => {
+  1789→                // If the register hasn't been allocated yet, allocate it as i32.
+  1790→                // On Wasm32, all integer locals are i32.
+  1791→                if self.get_local(*id).is_none() {
+  1792→                    self.alloc_local(*id, WasmType::I32);
+  1793→                }
+  1794→                if let Some(local_idx) = self.get_local(*id) {
+  1795→                    self.emit(WasmInstr::LocalGet(local_idx));
+  1796→                }
+  1797→            }
+  1798→            IRValue::Address(addr) => {
+  1799→                self.emit(WasmInstr::I32Const(*addr as i32)); // wasm32: pointers are i32
+  1800→            }
+  1801→            IRValue::Label(_) => {
+  1802→                // Labels are handled via block structure; not pushed as values
+  1803→            }
+  1804→        }
+  1805→    }
+  1806→
+  1807→    /// Store the top of the Wasm stack into a virtual register's local.
+  1808→    fn pop_to_vreg(&mut self, vreg_id: u32, ty: WasmType) {
+  1809→        if !self.vreg_to_local.contains_key(&vreg_id) {
+  1810→            self.alloc_local(vreg_id, ty);
+  1811→        }
+  1812→        if let Some(local_idx) = self.get_local(vreg_id) {
+  1813→            self.emit(WasmInstr::LocalSet(local_idx));
+  1814→        }
+  1815→    }
+  1816→}
+  1817→
+  1818→/// Determine the Wasm type for dedicated arithmetic IR instructions (Add, Sub,
+  1819→/// Mul, Div, Cmp).  These instructions carry an optional `ty` field that
+  1820→/// indicates the operand width.  On the Wasm32 target, all integer types map
+  1821→/// to I32 since pointers are 32 bits and the address space is 32 bits;
+  1822→/// only float types retain their original width.  This is consistent with
+  1823→/// `wasm_type_for_binop` and ensures pointer arithmetic always uses i32 ops.
+  1824→fn wasm_type_for_dedicated_arith(ir_ty: Option<&IRType>) -> WasmType {
+  1825→    match ir_ty {
+  1826→        Some(IRType::F32) => WasmType::F32,
+  1827→        Some(IRType::F64) => WasmType::F64,
+  1828→        _ => WasmType::I32, // all integer types → i32 on wasm32 (pointers are i32)
+  1829→    }
+  1830→}
+  1831→
+  1832→/// Determine the Wasm type for an IR BinOp based on the operand types and
+  1833→/// the optional IR type annotation.  On the Wasm32 target, all integer
+  1834→/// operations use i32 since the address space is 32 bits; only float types
+  1835→/// retain their original width.
+  1836→fn wasm_type_for_binop(
+  1837→    _op: &BinOpKind,
+  1838→    _lhs: &IRValue,
+  1839→    _rhs: &IRValue,
+  1840→    ir_ty: Option<&IRType>,
+  1841→    _vreg_types: &HashMap<u32, WasmType>,
+  1842→) -> WasmType {
+  1843→    // If the IR provides a type, use it (but map I64/U64 to I32 for Wasm32).
+  1844→    if let Some(ty) = ir_ty {
+  1845→        return match ty {
+  1846→            IRType::F32 => WasmType::F32,
+  1847→            IRType::F64 => WasmType::F64,
+  1848→            _ => WasmType::I32, // all integer types → i32 on wasm32
+  1849→        };
+  1850→    }
+  1851→    // Default to i32 for all integer ops on wasm32
+  1852→    WasmType::I32
+  1853→}
+  1854→
+  1855→/// Infer the Wasm type of an IR value based on its representation.
+  1856→///
+  1857→/// On the Wasm32 target, all integer values are i32.  Only float immediates
+  1858→/// use the wider type.
+  1859→fn infer_wasm_type(val: &IRValue) -> WasmType {
+  1860→    match val {
+  1861→        IRValue::Immediate(_)
+  1862→        | IRValue::Register(_)
+  1863→        | IRValue::Address(_)
+  1864→        | IRValue::Label(_) => WasmType::I32,
+  1865→    }
+  1866→}
+  1867→
+  1868→/// Lower an IR function to Wasm bytecode, returning the function body,
+  1869→/// type, and a list of call relocations that must be patched during
+  1870→/// `encode_program`.
+  1871→///
+  1872→/// Each relocation is `(byte_offset, func_name)` where `byte_offset` is
+  1873→/// the position *within the encoded body bytes* where the LEB128 function
+  1874→/// index starts (i.e., one byte past the `0x10` Call opcode).
+  1875→fn lower_function(
+  1876→    func: &IRFunction,
+  1877→) -> Result<(WasmFuncBody, WasmFuncType, Vec<(usize, String)>), BackendError> {
+  1878→    // Compute result types.
+  1879→    // In Wasm32, all integer results are i32 since it's a 32-bit target.
+  1880→    let result_types: Vec<WasmType> = func
+  1881→        .result_types
+  1882→        .iter()
+  1883→        .filter_map(WasmType::from_ir_type)
+  1884→        .map(|t| if t.is_integer() { WasmType::I32 } else { t })
+  1885→        .collect();
+  1886→    let mut ctx = LoweringContext::new(result_types);
+  1887→
+  1888→    // Assign locals for parameters.
+  1889→    // In Wasm32, all integer parameters are i32 regardless of IR type, since
+  1890→    // pointers and all integer values fit in 32 bits on a 32-bit target.
+  1891→    // Only float types retain their original width.
+  1892→    for (i, param) in func.params.iter().enumerate() {
+  1893→        let ty = func
+  1894→            .param_types
+  1895→            .get(i)
+  1896→            .and_then(WasmType::from_ir_type)
+  1897→            .map(|t| if t.is_integer() { WasmType::I32 } else { t })
+  1898→            .unwrap_or(WasmType::I32);
+  1899→        if let IRValue::Register(id) = param {
+  1900→            let idx = ctx.num_locals;
+  1901→            ctx.vreg_to_local.insert(*id, idx);
+  1902→            ctx.vreg_types.insert(*id, ty);
+  1903→            ctx.num_locals += 1;
+  1904→            if let Some(last) = ctx.locals.last_mut() {
+  1905→                if last.1 == ty {
+  1906→                    last.0 += 1;
+  1907→                } else {
+  1908→                    ctx.locals.push((1, ty));
+  1909→                }
+  1910→            } else {
+  1911→                ctx.locals.push((1, ty));
+  1912→            }
+  1913→        }
+  1914→    }
+  1915→
+  1916→    // Lower each block
+  1917→    for (block_idx, block) in func.blocks.iter().enumerate() {
+  1918→        // Emit a block for structured control flow (except the entry block)
+  1919→        if block_idx > 0 {
+  1920→            ctx.emit(WasmInstr::Block(None)); // void block (no result value)
+  1921→            ctx.block_labels
+  1922→                .insert(block.label.clone(), block_idx as u32);
+  1923→        } else {
+  1924→            ctx.block_labels.insert(block.label.clone(), 0);
+  1925→        }
+  1926→
+  1927→        // Lower instructions
+  1928→        for instr in &block.instructions {
+  1929→            lower_instruction(instr, &mut ctx)?;
+  1930→        }
+  1931→
+  1932→        // Lower terminator
+  1933→        lower_terminator(&block.terminator, &mut ctx, block_idx)?;
+  1934→
+  1935→        // End the block
+  1936→        if block_idx > 0 {
+  1937→            ctx.emit(WasmInstr::End);
+  1938→        }
+  1939→    }
+  1940→
+  1941→    // Build the function type.
+  1942→    // In Wasm32, all integer params/results are i32.
+  1943→    let param_types: Vec<WasmType> = func
+  1944→        .param_types
+  1945→        .iter()
+  1946→        .filter_map(WasmType::from_ir_type)
+  1947→        .map(|t| if t.is_integer() { WasmType::I32 } else { t })
+  1948→        .collect();
+  1949→    let result_types: Vec<WasmType> = func
+  1950→        .result_types
+  1951→        .iter()
+  1952→        .filter_map(WasmType::from_ir_type)
+  1953→        .map(|t| if t.is_integer() { WasmType::I32 } else { t })
+  1954→        .collect();
+  1955→
+  1956→    let func_type = WasmFuncType {
+  1957→        params: param_types,
+  1958→        results: result_types,
+  1959→    };
+  1960→
+  1961→    // Encode all instructions to bytecode and compute call relocations.
+  1962→    let mut body_bytes = Vec::new();
+  1963→    let mut call_relocations: Vec<(usize, String)> = Vec::new();
+  1964→    for (i, instr) in ctx.instrs.iter().enumerate() {
+  1965→        let offset_before = body_bytes.len();
+  1966→        instr.encode(&mut body_bytes);
+  1967→
+  1968→        // If this is a Call with an unresolved placeholder, record a relocation.
+  1969→        if let WasmInstr::Call(idx) = instr {
+  1970→            if *idx == UNRESOLVED_CALL_IDX {
+  1971→                // Find the function name for this instruction index.
+  1972→                if let Some((_, func_name)) = ctx.call_targets.iter().find(|(instr_idx, _)| *instr_idx == i) {
+  1973→                    // The LEB128 function index starts at offset_before + 1
+  1974→                    // (the 0x10 Call opcode is 1 byte).
+  1975→                    call_relocations.push((offset_before + 1, func_name.clone()));
+  1976→                }
+  1977→            }
+  1978→        }
+  1979→    }
+  1980→    // Append the implicit end byte for the function body
+  1981→    body_bytes.push(0x0B);
+  1982→
+  1983→    let func_body = WasmFuncBody {
+  1984→        locals: ctx.locals,
+  1985→        body: body_bytes,
+  1986→    };
+  1987→
+  1988→    Ok((func_body, func_type, call_relocations))
+  1989→}
+  1990→
+  1991→/// Lower a single IR instruction.
+  1992→fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), BackendError> {
+  1993→    match instr {
+  1994→        IRInstr::BinOp { op, dst, lhs, rhs, ty } => {
+  1995→            let wasm_ty = wasm_type_for_binop(op, lhs, rhs, ty.as_ref(), &ctx.vreg_types);
+  1996→            ctx.push_value(lhs, Some(&wasm_ty));
+  1997→            ctx.push_value(rhs, Some(&wasm_ty));
+  1998→            let mut skip_emit = false;
+  1999→            let wasm_op = match wasm_ty {
+  2000→                WasmType::I32 => match op {
+
+[showing lines 1-2000 of 5626; use offset=2001 with limit to continue reading]

@@ -753,6 +753,14 @@ pub enum Instruction {
     Fctiw { ft: Fpr, fb: Fpr },
     /// Float Convert To Integer Word with Round toward Zero: `fctiwz fT, fB` (X-form, primary=63, xo=15)
     Fctiwz { ft: Fpr, fb: Fpr },
+    /// Float Convert To Integer Doubleword with Round toward Zero: `fctidz fT, fB` (X-form, primary=63, xo=815)
+    Fctidz { ft: Fpr, fb: Fpr },
+    /// Float Round to Single Precision: `frsp fT, fB` (X-form, primary=63, xo=12)
+    Frsp { ft: Fpr, fb: Fpr },
+    /// Float Convert From Integer Doubleword Unsigned: `fcfidu fT, fB` (X-form, primary=63, xo=847)
+    Fcfidu { ft: Fpr, fb: Fpr },
+    /// Float Convert From Integer Doubleword Unsigned Single: `fcfidus fT, fB` (X-form, primary=59, xo=847)
+    Fcfidus { ft: Fpr, fb: Fpr },
     /// FP Move Register: `fmr fT, fB` (X-form, primary=63, xo=72)
     Fmr { ft: Fpr, fb: Fpr },
 }
@@ -1179,6 +1187,22 @@ impl Instruction {
                 // FCTIWZ: primary=63, frS=ft, frB=fb, xo=15, Rc=0
                 encode_x_form(63, ft.encoding(), 0, fb.encoding(), 15, 0)
             }
+            Instruction::Fctidz { ft, fb } => {
+                // FCTIDZ: primary=63, frS=ft, frB=fb, xo=815, Rc=0
+                encode_x_form(63, ft.encoding(), 0, fb.encoding(), 815, 0)
+            }
+            Instruction::Frsp { ft, fb } => {
+                // FRSP: primary=63, frS=ft, frB=fb, xo=12, Rc=0
+                encode_x_form(63, ft.encoding(), 0, fb.encoding(), 12, 0)
+            }
+            Instruction::Fcfidu { ft, fb } => {
+                // FCFIDU: primary=63, frS=ft, frB=fb, xo=847, Rc=0
+                encode_x_form(63, ft.encoding(), 0, fb.encoding(), 847, 0)
+            }
+            Instruction::Fcfidus { ft, fb } => {
+                // FCFIDUS: primary=59, frS=ft, frB=fb, xo=847, Rc=0
+                encode_x_form(59, ft.encoding(), 0, fb.encoding(), 847, 0)
+            }
             Instruction::Fmr { ft, fb } => {
                 // FMR: primary=63, frS=ft, frB=fb, xo=72, Rc=0
                 encode_x_form(63, ft.encoding(), 0, fb.encoding(), 72, 0)
@@ -1280,6 +1304,10 @@ impl Instruction {
             Instruction::Fcfids { .. } => "fcfids",
             Instruction::Fctiw { .. } => "fctiw",
             Instruction::Fctiwz { .. } => "fctiwz",
+            Instruction::Fctidz { .. } => "fctidz",
+            Instruction::Frsp { .. } => "frsp",
+            Instruction::Fcfidu { .. } => "fcfidu",
+            Instruction::Fcfidus { .. } => "fcfidus",
             Instruction::Fmr { .. } => "fmr",
         }
     }
@@ -1391,6 +1419,10 @@ impl fmt::Display for Instruction {
             Instruction::Fcfids { ft, fb } => write!(f, "fcfids {}, {}", ft, fb),
             Instruction::Fctiw { ft, fb } => write!(f, "fctiw {}, {}", ft, fb),
             Instruction::Fctiwz { ft, fb } => write!(f, "fctiwz {}, {}", ft, fb),
+            Instruction::Fctidz { ft, fb } => write!(f, "fctidz {}, {}", ft, fb),
+            Instruction::Frsp { ft, fb } => write!(f, "frsp {}, {}", ft, fb),
+            Instruction::Fcfidu { ft, fb } => write!(f, "fcfidu {}, {}", ft, fb),
+            Instruction::Fcfidus { ft, fb } => write!(f, "fcfidus {}, {}", ft, fb),
             Instruction::Fmr { ft, fb } => write!(f, "fmr {}, {}", ft, fb),
         }
     }
@@ -1514,10 +1546,15 @@ impl Default for PPC64Backend {
     }
 }
 
+/// Number of bytes reserved at the end of the stack frame for FP conversion
+/// scratch space (GPR↔FPR bridging via memory).
+const FP_SCRATCH_SIZE: u32 = 16;
+
 /// Compute the stack frame size for an IR function on PPC64.
 ///
 /// Sums `Alloc` instruction sizes, adds 32 bytes for the LR/CR save area
 /// (per ELFv2 ABI), and rounds up to 16-byte alignment.
+
 fn ppc64_compute_frame_size(func: &IRFunction) -> usize {
     let mut total: u32 = 32; // LR save (8) + CR save (8) + back chain (8) + TOC save (8)
     for block in &func.blocks {
@@ -1528,6 +1565,7 @@ fn ppc64_compute_frame_size(func: &IRFunction) -> usize {
             }
         }
     }
+    total += FP_SCRATCH_SIZE;
     // Round up to 16-byte alignment
     total = (total + 15) & !15;
     total as usize
@@ -2693,19 +2731,190 @@ fn lower_ir_instr_ppc64(
                         ));
                     }
                 }
-                CastKind::IntToFloat | CastKind::UIntToFloat => {
-                    // FP conversion casts require FP register support;
-                    // for now, treat as a no-op move (value stays in GPR d).
-                    // TODO: proper int-to-float conversion via FP registers
+                CastKind::IntToFloat => {
+                    // Signed int → float: STD s,scratch(R1); LFD F0,scratch(R1); FCFID F0,F0; STFD F0,scratch(R1); LD d,scratch(R1)
+                    let scratch = *alloc_offset;
+                    // STD s, scratch(R1)
+                    result.push(emit_alloc_instr(
+                        Instruction::Std { rs: s, ra: Gpr::R1, ds: scratch },
+                        vec![PhysicalReg::new(RegClass::Gpr, s.encoding()), PhysicalReg::new(RegClass::Gpr, Gpr::R1.encoding())],
+                        vec![],
+                    ));
+                    // LFD F0, scratch(R1)
+                    result.push(emit_alloc_instr(
+                        Instruction::Lfd { ft: Fpr::F0, ra: Gpr::R1, d: scratch },
+                        vec![PhysicalReg::new(RegClass::Gpr, Gpr::R1.encoding())],
+                        vec![PhysicalReg::new(RegClass::SimdFp, 0)],
+                    ));
+                    // FCFID F0, F0 — signed i64 → f64
+                    result.push(emit_alloc_instr(
+                        Instruction::Fcfid { ft: Fpr::F0, fb: Fpr::F0 },
+                        vec![PhysicalReg::new(RegClass::SimdFp, 0)],
+                        vec![PhysicalReg::new(RegClass::SimdFp, 0)],
+                    ));
+                    // STFD F0, scratch(R1)
+                    result.push(emit_alloc_instr(
+                        Instruction::Stfd { fs: Fpr::F0, ra: Gpr::R1, d: scratch },
+                        vec![PhysicalReg::new(RegClass::SimdFp, 0), PhysicalReg::new(RegClass::Gpr, Gpr::R1.encoding())],
+                        vec![],
+                    ));
+                    // LD d, scratch(R1)
+                    result.push(emit_alloc_instr(
+                        Instruction::Ld { rt: d, ra: Gpr::R1, ds: scratch },
+                        vec![PhysicalReg::new(RegClass::Gpr, Gpr::R1.encoding())],
+                        vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+                    ));
                 }
-                CastKind::FloatToInt | CastKind::FloatToUInt => {
-                    // FP conversion casts require FP register support;
-                    // for now, treat as a no-op move (value stays in GPR d).
-                    // TODO: proper float-to-int conversion via FP registers
+                CastKind::UIntToFloat => {
+                    // Unsigned int → float: STD s,scratch(R1); LFD F0,scratch(R1); FCFIDU F0,F0; STFD F0,scratch(R1); LD d,scratch(R1)
+                    let scratch = *alloc_offset;
+                    // STD s, scratch(R1)
+                    result.push(emit_alloc_instr(
+                        Instruction::Std { rs: s, ra: Gpr::R1, ds: scratch },
+                        vec![PhysicalReg::new(RegClass::Gpr, s.encoding()), PhysicalReg::new(RegClass::Gpr, Gpr::R1.encoding())],
+                        vec![],
+                    ));
+                    // LFD F0, scratch(R1)
+                    result.push(emit_alloc_instr(
+                        Instruction::Lfd { ft: Fpr::F0, ra: Gpr::R1, d: scratch },
+                        vec![PhysicalReg::new(RegClass::Gpr, Gpr::R1.encoding())],
+                        vec![PhysicalReg::new(RegClass::SimdFp, 0)],
+                    ));
+                    // FCFIDU F0, F0 — unsigned i64 → f64
+                    result.push(emit_alloc_instr(
+                        Instruction::Fcfidu { ft: Fpr::F0, fb: Fpr::F0 },
+                        vec![PhysicalReg::new(RegClass::SimdFp, 0)],
+                        vec![PhysicalReg::new(RegClass::SimdFp, 0)],
+                    ));
+                    // STFD F0, scratch(R1)
+                    result.push(emit_alloc_instr(
+                        Instruction::Stfd { fs: Fpr::F0, ra: Gpr::R1, d: scratch },
+                        vec![PhysicalReg::new(RegClass::SimdFp, 0), PhysicalReg::new(RegClass::Gpr, Gpr::R1.encoding())],
+                        vec![],
+                    ));
+                    // LD d, scratch(R1)
+                    result.push(emit_alloc_instr(
+                        Instruction::Ld { rt: d, ra: Gpr::R1, ds: scratch },
+                        vec![PhysicalReg::new(RegClass::Gpr, Gpr::R1.encoding())],
+                        vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+                    ));
+                }
+                CastKind::FloatToInt => {
+                    // Float → signed int: STD s,scratch(R1); LFD F0,scratch(R1); FCTIWZ F0,F0; STFD F0,scratch(R1); LWZ d,scratch+4(R1); EXTSW d,d
+                    let scratch = *alloc_offset;
+                    // STD s, scratch(R1)
+                    result.push(emit_alloc_instr(
+                        Instruction::Std { rs: s, ra: Gpr::R1, ds: scratch },
+                        vec![PhysicalReg::new(RegClass::Gpr, s.encoding()), PhysicalReg::new(RegClass::Gpr, Gpr::R1.encoding())],
+                        vec![],
+                    ));
+                    // LFD F0, scratch(R1)
+                    result.push(emit_alloc_instr(
+                        Instruction::Lfd { ft: Fpr::F0, ra: Gpr::R1, d: scratch },
+                        vec![PhysicalReg::new(RegClass::Gpr, Gpr::R1.encoding())],
+                        vec![PhysicalReg::new(RegClass::SimdFp, 0)],
+                    ));
+                    // FCTIWZ F0, F0 — f64 → signed i32 (result in low 32 bits of FP reg)
+                    result.push(emit_alloc_instr(
+                        Instruction::Fctiwz { ft: Fpr::F0, fb: Fpr::F0 },
+                        vec![PhysicalReg::new(RegClass::SimdFp, 0)],
+                        vec![PhysicalReg::new(RegClass::SimdFp, 0)],
+                    ));
+                    // STFD F0, scratch(R1)
+                    result.push(emit_alloc_instr(
+                        Instruction::Stfd { fs: Fpr::F0, ra: Gpr::R1, d: scratch },
+                        vec![PhysicalReg::new(RegClass::SimdFp, 0), PhysicalReg::new(RegClass::Gpr, Gpr::R1.encoding())],
+                        vec![],
+                    ));
+                    // LWZ d, scratch+4(R1) — low 32-bit word of the doubleword
+                    result.push(emit_alloc_instr(
+                        Instruction::Lwz { rt: d, ra: Gpr::R1, d: scratch + 4 },
+                        vec![PhysicalReg::new(RegClass::Gpr, Gpr::R1.encoding())],
+                        vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+                    ));
+                    // EXTSW d, d — sign-extend to 64 bits
+                    result.push(emit_alloc_instr(
+                        Instruction::Extsw { ra: d, rs: d },
+                        vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+                        vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+                    ));
+                }
+                CastKind::FloatToUInt => {
+                    // Float → unsigned int: STD s,scratch(R1); LFD F0,scratch(R1); FCTIWZ F0,F0; STFD F0,scratch(R1); LWZ d,scratch+4(R1); RLWINM zero-extend
+                    let scratch = *alloc_offset;
+                    // STD s, scratch(R1)
+                    result.push(emit_alloc_instr(
+                        Instruction::Std { rs: s, ra: Gpr::R1, ds: scratch },
+                        vec![PhysicalReg::new(RegClass::Gpr, s.encoding()), PhysicalReg::new(RegClass::Gpr, Gpr::R1.encoding())],
+                        vec![],
+                    ));
+                    // LFD F0, scratch(R1)
+                    result.push(emit_alloc_instr(
+                        Instruction::Lfd { ft: Fpr::F0, ra: Gpr::R1, d: scratch },
+                        vec![PhysicalReg::new(RegClass::Gpr, Gpr::R1.encoding())],
+                        vec![PhysicalReg::new(RegClass::SimdFp, 0)],
+                    ));
+                    // FCTIWZ F0, F0 — f64 → i32 word (same insn, result treated as unsigned)
+                    result.push(emit_alloc_instr(
+                        Instruction::Fctiwz { ft: Fpr::F0, fb: Fpr::F0 },
+                        vec![PhysicalReg::new(RegClass::SimdFp, 0)],
+                        vec![PhysicalReg::new(RegClass::SimdFp, 0)],
+                    ));
+                    // STFD F0, scratch(R1)
+                    result.push(emit_alloc_instr(
+                        Instruction::Stfd { fs: Fpr::F0, ra: Gpr::R1, d: scratch },
+                        vec![PhysicalReg::new(RegClass::SimdFp, 0), PhysicalReg::new(RegClass::Gpr, Gpr::R1.encoding())],
+                        vec![],
+                    ));
+                    // LWZ d, scratch+4(R1) — low 32-bit word
+                    result.push(emit_alloc_instr(
+                        Instruction::Lwz { rt: d, ra: Gpr::R1, d: scratch + 4 },
+                        vec![PhysicalReg::new(RegClass::Gpr, Gpr::R1.encoding())],
+                        vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+                    ));
+                    // RLWINM d, d, 0, 0, 31 — zero-extend to 64 bits
+                    result.push(emit_alloc_instr(
+                        Instruction::Rlwinm { ra: d, rs: d, sh: 0, mb: 0, me: 31 },
+                        vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+                        vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+                    ));
                 }
                 CastKind::FloatToFloat => {
-                    // FP conversion casts require FP register support;
-                    // for now, treat as a no-op move.
+                    // f64 → f32: STD s,scratch(R1); LFD F0,scratch(R1); FRSP F0,F0; STFS F0,scratch(R1); LWZ d,scratch(R1)
+                    // Note: f32 → f64 is a no-op on PPC64 (all FP ops are 64-bit internally),
+                    // but since we track values in GPRs we treat FloatToFloat as f64 → f32
+                    // with FRSP to round to single precision.
+                    let scratch = *alloc_offset;
+                    // STD s, scratch(R1)
+                    result.push(emit_alloc_instr(
+                        Instruction::Std { rs: s, ra: Gpr::R1, ds: scratch },
+                        vec![PhysicalReg::new(RegClass::Gpr, s.encoding()), PhysicalReg::new(RegClass::Gpr, Gpr::R1.encoding())],
+                        vec![],
+                    ));
+                    // LFD F0, scratch(R1)
+                    result.push(emit_alloc_instr(
+                        Instruction::Lfd { ft: Fpr::F0, ra: Gpr::R1, d: scratch },
+                        vec![PhysicalReg::new(RegClass::Gpr, Gpr::R1.encoding())],
+                        vec![PhysicalReg::new(RegClass::SimdFp, 0)],
+                    ));
+                    // FRSP F0, F0 — round to single precision
+                    result.push(emit_alloc_instr(
+                        Instruction::Frsp { ft: Fpr::F0, fb: Fpr::F0 },
+                        vec![PhysicalReg::new(RegClass::SimdFp, 0)],
+                        vec![PhysicalReg::new(RegClass::SimdFp, 0)],
+                    ));
+                    // STFS F0, scratch(R1)
+                    result.push(emit_alloc_instr(
+                        Instruction::Stfs { fs: Fpr::F0, ra: Gpr::R1, d: scratch },
+                        vec![PhysicalReg::new(RegClass::SimdFp, 0), PhysicalReg::new(RegClass::Gpr, Gpr::R1.encoding())],
+                        vec![],
+                    ));
+                    // LWZ d, scratch(R1) — load 32-bit float as integer into GPR
+                    result.push(emit_alloc_instr(
+                        Instruction::Lwz { rt: d, ra: Gpr::R1, d: scratch },
+                        vec![PhysicalReg::new(RegClass::Gpr, Gpr::R1.encoding())],
+                        vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+                    ));
                 }
             }
         }
@@ -3848,7 +4057,7 @@ impl Backend for PPC64Backend {
                         let trap_word: u32 = (31u32 << 26) | (31u32 << 21) | (0u32 << 16) | (0u32 << 11) | (4 << 1);
                         encode_word(trap_word).to_vec()
                     }
-                    IRInstr::Cast { kind, dst, src } => {
+                    IRInstr::Cast { kind, dst, src, .. } => {
                         let dst_id = dst.as_register().unwrap_or(0);
                         let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
                         let mut code = Vec::new();
@@ -3871,9 +4080,10 @@ impl Backend for PPC64Backend {
                                 code.extend(ss_load_from_slot(Gpr::R3, dst_offset));
                             }
                             CastKind::UIntToFloat => {
+                                // Unsigned int → f64: STD, LFD, FCFIDU, STFD, LD
                                 code.extend(ss_store_to_slot(Gpr::R3, dst_offset));
                                 code.extend_from_slice(&Instruction::Lfd { ft: Fpr::F0, ra: Gpr::R31, d: -dst_offset }.encode());
-                                code.extend_from_slice(&Instruction::Fcfid { ft: Fpr::F0, fb: Fpr::F0 }.encode());
+                                code.extend_from_slice(&Instruction::Fcfidu { ft: Fpr::F0, fb: Fpr::F0 }.encode());
                                 code.extend_from_slice(&Instruction::Stfd { fs: Fpr::F0, ra: Gpr::R31, d: -dst_offset }.encode());
                                 code.extend(ss_load_from_slot(Gpr::R3, dst_offset));
                             }
@@ -3906,8 +4116,12 @@ impl Backend for PPC64Backend {
                                 code.extend_from_slice(&Instruction::Rlwinm { ra: Gpr::R3, rs: Gpr::R3, sh: 0, mb: 0, me: 31 }.encode());
                             }
                             CastKind::FloatToFloat => {
+                                // f64 → f32: LFD, FRSP, STFS, LWZ
+                                // Note: f32 → f64 is a no-op on PPC64 (all FP ops are 64-bit internally),
+                                // but since we track values in GPRs we treat FloatToFloat as f64 → f32
+                                // with FRSP to round to single precision.
                                 code.extend_from_slice(&Instruction::Lfd { ft: Fpr::F0, ra: Gpr::R31, d: -dst_offset }.encode());
-                                code.extend_from_slice(&Instruction::Fcfids { ft: Fpr::F0, fb: Fpr::F0 }.encode());
+                                code.extend_from_slice(&Instruction::Frsp { ft: Fpr::F0, fb: Fpr::F0 }.encode());
                                 code.extend_from_slice(&Instruction::Stfs { fs: Fpr::F0, ra: Gpr::R31, d: -dst_offset }.encode());
                                 code.extend_from_slice(&Instruction::Lwz { rt: Gpr::R3, ra: Gpr::R31, d: -dst_offset }.encode());
                                 code.extend_from_slice(&Instruction::Rlwinm { ra: Gpr::R3, rs: Gpr::R3, sh: 0, mb: 0, me: 31 }.encode());

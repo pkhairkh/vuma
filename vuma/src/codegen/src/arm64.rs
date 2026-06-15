@@ -1088,14 +1088,46 @@ pub enum Instruction {
     // ---- Cast / Convert ----
     /// Sign-extend word to doubleword: `SXTW Xd, Wn` (alias for SBFM Xd, Xn, #0, #31)
     SXTW { rd: Register, rn: Register },
-    /// Signed integer to float: `SCVTF Dd, Xn`
-    SCVTF { rd: Register, rn: Register },
-    /// Float to signed integer: `FCVTZS Xd, Dn`
-    FCVTZS { rd: Register, rn: Register },
-    /// Unsigned integer to float: `UCVTF Dd, Xn`
-    UCVTF { rd: Register, rn: Register },
-    /// Float to unsigned integer: `FCVTZU Xd, Dn`
-    FCVTZU { rd: Register, rn: Register },
+    /// Signed integer to float: `SCVTF Sd/Dd, Wn/Xn`
+    ///
+    /// - `src_64`: true if source is 64-bit integer (Xn), false for 32-bit (Wn)
+    /// - `dst_double`: true if destination is double-precision (Dd), false for single (Sd)
+    SCVTF {
+        rd: Register,
+        rn: Register,
+        src_64: bool,
+        dst_double: bool,
+    },
+    /// Float to signed integer: `FCVTZS Wd/Xd, Sn/Dn`
+    ///
+    /// - `dst_64`: true if destination is 64-bit integer (Xd), false for 32-bit (Wd)
+    /// - `src_double`: true if source is double-precision (Dn), false for single (Sn)
+    FCVTZS {
+        rd: Register,
+        rn: Register,
+        dst_64: bool,
+        src_double: bool,
+    },
+    /// Unsigned integer to float: `UCVTF Sd/Dd, Wn/Xn`
+    ///
+    /// - `src_64`: true if source is 64-bit integer (Xn), false for 32-bit (Wn)
+    /// - `dst_double`: true if destination is double-precision (Dd), false for single (Sd)
+    UCVTF {
+        rd: Register,
+        rn: Register,
+        src_64: bool,
+        dst_double: bool,
+    },
+    /// Float to unsigned integer: `FCVTZU Wd/Xd, Sn/Dn`
+    ///
+    /// - `dst_64`: true if destination is 64-bit integer (Xd), false for 32-bit (Wd)
+    /// - `src_double`: true if source is double-precision (Dn), false for single (Sn)
+    FCVTZU {
+        rd: Register,
+        rn: Register,
+        dst_64: bool,
+        src_double: bool,
+    },
     /// Float convert (single ↔ double): `FCVT Sd, Dn` or `FCVT Dd, Sn`
     FCVT {
         rd: Register,
@@ -1799,47 +1831,105 @@ impl Instruction {
                 | (rn.encoding() << 5)
                 | rd.encoding()),
 
-            // ---- SCVTF (signed integer to double-precision float) ----
-            // SCVTF: 1 0 0 1 1 0 1 0 0 0 1 0 0 0 0 0 0 0 0 0 0 0 Rn Rd (64-bit to double)
-            Instruction::SCVTF { rd, rn } => {
-                Ok(0b10_0110_1000_0100_0000_0000_0000_0000 | (rn.encoding() << 5) | rd.encoding())
+            // ---- SCVTF (signed integer to float) ----
+            // Encoding format (Floating-point conversion from integer):
+            //   sf [31] 0 [30] S=0 [29] 11110 [28:24] type [23:22] rmode=10 [21:20]
+            //   opcode=0010 [19:16] 0 [15] Rn [14:10] 00000 [9:5] Rd [4:0]
+            //
+            //   sf = src_64 (1 for 64-bit int source, 0 for 32-bit)
+            //   type = dst_double (01 for double, 00 for single)
+            Instruction::SCVTF {
+                rd,
+                rn,
+                src_64,
+                dst_double,
+            } => {
+                // Base: sf=0, type=00 → 0x1E220000
+                Ok(0x1E220000u32
+                    | ((*src_64 as u32) << 31)
+                    | ((*dst_double as u32) << 22)
+                    | (rn.encoding() << 10)
+                    | rd.encoding())
             }
 
-            // ---- FCVTZS (double-precision float to signed integer) ----
-            // FCVTZS: 1 0 0 1 1 0 1 1 0 0 1 1 0 0 0 0 0 0 0 0 0 0 Rn Rd
-            Instruction::FCVTZS { rd, rn } => {
-                Ok(0b10_0110_1100_0110_0000_0000_0000_0000 | (rn.encoding() << 5) | rd.encoding())
+            // ---- FCVTZS (float to signed integer) ----
+            // Encoding format (Floating-point conversion from integer):
+            //   sf [31] 0 [30] S=0 [29] 11110 [28:24] type [23:22] rmode=11 [21:20]
+            //   opcode=1000 [19:16] 0 [15] Rn [14:10] 00000 [9:5] Rd [4:0]
+            //
+            //   sf = dst_64 (1 for 64-bit int destination, 0 for 32-bit)
+            //   type = src_double (01 for double, 00 for single)
+            Instruction::FCVTZS {
+                rd,
+                rn,
+                dst_64,
+                src_double,
+            } => {
+                // Base: sf=0, type=00 → 0x1E380000
+                Ok(0x1E380000u32
+                    | ((*dst_64 as u32) << 31)
+                    | ((*src_double as u32) << 22)
+                    | (rn.encoding() << 10)
+                    | rd.encoding())
             }
 
-            // ---- UCVTF (unsigned integer to double-precision float) ----
-            // UCVTF Xd, Xn: 1 0 0110 1 000 1100 0000 0000 00 Rn Rd
-            // Encoding: sf=1, op=1, S=0, type=10, rmode=11, opcode=000, Rn, Rd
-            // 0b1_0_0110_1_000_1100_0000_0000_0000_0000
-            Instruction::UCVTF { rd, rn } => {
-                Ok(0b1_00_1101_000_110_0000_0000_0000_0000 | (rn.encoding() << 5) | rd.encoding())
+            // ---- UCVTF (unsigned integer to float) ----
+            // Encoding format (Floating-point conversion from integer):
+            //   sf [31] 0 [30] S=0 [29] 11110 [28:24] type [23:22] rmode=10 [21:20]
+            //   opcode=0011 [19:16] 0 [15] Rn [14:10] 00000 [9:5] Rd [4:0]
+            //
+            //   sf = src_64 (1 for 64-bit int source, 0 for 32-bit)
+            //   type = dst_double (01 for double, 00 for single)
+            Instruction::UCVTF {
+                rd,
+                rn,
+                src_64,
+                dst_double,
+            } => {
+                // Base: sf=0, type=00 → 0x1E230000
+                Ok(0x1E230000u32
+                    | ((*src_64 as u32) << 31)
+                    | ((*dst_double as u32) << 22)
+                    | (rn.encoding() << 10)
+                    | rd.encoding())
             }
 
-            // ---- FCVTZU (double-precision float to unsigned integer) ----
-            // FCVTZU Xd, Dn: 1 0 0110 1 100 0111 0000 0000 00 Rn Rd
-            Instruction::FCVTZU { rd, rn } => {
-                Ok(0b1_00_1101_100_011_0000_0000_0000_0000 | (rn.encoding() << 5) | rd.encoding())
+            // ---- FCVTZU (float to unsigned integer) ----
+            // Encoding format (Floating-point conversion from integer):
+            //   sf [31] 0 [30] S=0 [29] 11110 [28:24] type [23:22] rmode=11 [21:20]
+            //   opcode=1001 [19:16] 0 [15] Rn [14:10] 00000 [9:5] Rd [4:0]
+            //
+            //   sf = dst_64 (1 for 64-bit int destination, 0 for 32-bit)
+            //   type = src_double (01 for double, 00 for single)
+            Instruction::FCVTZU {
+                rd,
+                rn,
+                dst_64,
+                src_double,
+            } => {
+                // Base: sf=0, type=00 → 0x1E390000
+                Ok(0x1E390000u32
+                    | ((*dst_64 as u32) << 31)
+                    | ((*src_double as u32) << 22)
+                    | (rn.encoding() << 10)
+                    | rd.encoding())
             }
 
             // ---- FCVT (convert between single and double) ----
-            // This is a floating-point instruction using the FP register bank.
-            // For now, we provide a placeholder encoding.
+            // Encoding format (Floating-point data-processing 1-source):
+            //   FCVT Dd, Sn (f32→f64): M=0, S=0 → base 0x1EE20000, Rn [9:5] Rd [4:0]
+            //   FCVT Sd, Dn (f64→f32): M=1, S=0 → base 0x1EE60000, Rn [9:5] Rd [4:0]
             Instruction::FCVT {
                 rd,
                 rn,
-                to_double: _,
+                to_double,
             } => {
-                // FCVT Dd, Sn: 0 0 0 1 1 1 1 0 0 1 1 0 0 0 1 1 1 0 0 0 0 0 Rn Rd
-                // Placeholder — real encoding requires FP register bank
-                Ok(
-                    0b0001_1110_0110_0011_1000_0000_0000_0000
-                        | (rn.encoding() << 5)
-                        | rd.encoding(),
-                )
+                let base = if *to_double {
+                    0x1EE20000u32 // FCVT Dd, Sn
+                } else {
+                    0x1EE60000u32 // FCVT Sd, Dn
+                };
+                Ok(base | (rn.encoding() << 5) | rd.encoding())
             }
 
             // ---- DMB ----
@@ -1911,12 +2001,20 @@ impl Instruction {
             // ---- FMOV Dd, Xn (GPR → FP double) ----
             // Conversion between FP and integer: sf 1 0 11 1110 00 S 00 00 110 000 Rn Rd
             // FMOV D0, X0 = 0x9E670000
-            Instruction::FMOV_DX { vd, rn } => Ok(0x9E670000 | (rn.encoding() << 5) | (*vd as u32)),
+            // FMOV Dd, Xn (GPR → FP double register)
+            // Encoding format (Floating-point conversion from integer):
+            //   sf=1, type=01, rmode=10, opcode=0111 → 0x9E670000
+            //   Rn at [14:10], Rd at [4:0]
+            Instruction::FMOV_DX { vd, rn } => Ok(0x9E670000 | (rn.encoding() << 10) | (*vd as u32)),
 
             // ---- FMOV Xd, Dn (FP double → GPR) ----
             // Conversion between FP and integer: sf 1 0 11 1110 00 S 00 00 111 000 Rn Rd
             // FMOV X0, D0 = 0x9E6F0000
-            Instruction::FMOV_XD { rd, vn } => Ok(0x9E6F0000 | ((*vn as u32) << 5) | rd.encoding()),
+            // FMOV Xd, Dn (FP double register → GPR)
+            // Encoding format (Floating-point conversion from integer):
+            //   sf=1, type=01, rmode=11, opcode=0111 → 0x9E6F0000
+            //   Rn at [14:10], Rd at [4:0]
+            Instruction::FMOV_XD { rd, vn } => Ok(0x9E6F0000 | ((*vn as u32) << 10) | rd.encoding()),
 
             // ---- CNT Vd.8B, Vn.8B ----
             // Advanced SIMD bitwise: 0 0 001110 00 1 00000 010110 Vn Vd
@@ -2911,15 +3009,31 @@ impl std::fmt::Display for Instruction {
                 write!(f, "sbfm {}, {}, #{}, #{}", rd, rn, immr, imms)
             }
             Instruction::SXTW { rd, rn } => write!(f, "sxtw {}, {}", rd, rn),
-            Instruction::SCVTF { rd, rn } => write!(f, "scvtf {}, {}", rd, rn),
-            Instruction::FCVTZS { rd, rn } => write!(f, "fcvtzs {}, {}", rd, rn),
-            Instruction::UCVTF { rd, rn } => write!(f, "ucvtf {}, {}", rd, rn),
-            Instruction::FCVTZU { rd, rn } => write!(f, "fcvtzu {}, {}", rd, rn),
+            Instruction::SCVTF { rd, rn, src_64, dst_double } => {
+                let dst_prefix = if *dst_double { "d" } else { "s" };
+                let src_prefix = if *src_64 { "x" } else { "w" };
+                write!(f, "scvtf {}{}, {}{}", dst_prefix, rd.encoding(), src_prefix, rn.encoding())
+            }
+            Instruction::FCVTZS { rd, rn, dst_64, src_double } => {
+                let dst_prefix = if *dst_64 { "x" } else { "w" };
+                let src_prefix = if *src_double { "d" } else { "s" };
+                write!(f, "fcvtzs {}{}, {}{}", dst_prefix, rd.encoding(), src_prefix, rn.encoding())
+            }
+            Instruction::UCVTF { rd, rn, src_64, dst_double } => {
+                let dst_prefix = if *dst_double { "d" } else { "s" };
+                let src_prefix = if *src_64 { "x" } else { "w" };
+                write!(f, "ucvtf {}{}, {}{}", dst_prefix, rd.encoding(), src_prefix, rn.encoding())
+            }
+            Instruction::FCVTZU { rd, rn, dst_64, src_double } => {
+                let dst_prefix = if *dst_64 { "x" } else { "w" };
+                let src_prefix = if *src_double { "d" } else { "s" };
+                write!(f, "fcvtzu {}{}, {}{}", dst_prefix, rd.encoding(), src_prefix, rn.encoding())
+            }
             Instruction::FCVT { rd, rn, to_double } => {
                 if *to_double {
-                    write!(f, "fcvt {}, {} (to double)", rd, rn)
+                    write!(f, "fcvt d{}, s{}", rd.encoding(), rn.encoding())
                 } else {
-                    write!(f, "fcvt {}, {} (to single)", rd, rn)
+                    write!(f, "fcvt s{}, d{}", rd.encoding(), rn.encoding())
                 }
             }
             Instruction::DMB { option } => write!(f, "dmb {}", option),
@@ -3655,7 +3769,9 @@ impl InstructionSelector {
     ///
     /// For float↔int conversions:
     /// - `SCVTF` (signed int → float)
+    /// - `UCVTF` (unsigned int → float)
     /// - `FCVTZS` (float → signed int)
+    /// - `FCVTZU` (float → unsigned int)
     /// - `FCVT` (float ↔ float width change)
     pub fn select_cast(
         &mut self,
@@ -3664,6 +3780,8 @@ impl InstructionSelector {
         rn: Register,
         is_float_conv: bool,
         _to_double: bool,
+        src_64: bool,
+        dst_double: bool,
     ) {
         if is_float_conv {
             match kind {
@@ -3676,11 +3794,11 @@ impl InstructionSelector {
                 }
                 CastKind::SExt => {
                     // Signed int → float: SCVTF
-                    self.push(Instruction::SCVTF { rd, rn });
+                    self.push(Instruction::SCVTF { rd, rn, src_64, dst_double });
                 }
                 CastKind::Trunc => {
                     // Float → signed int: FCVTZS
-                    self.push(Instruction::FCVTZS { rd, rn });
+                    self.push(Instruction::FCVTZS { rd, rn, dst_64: src_64, src_double: dst_double });
                 }
                 _ => {
                     if rd != rn {
@@ -3726,23 +3844,23 @@ impl InstructionSelector {
                 }
                 CastKind::IntToFloat => {
                     // Signed int → float: SCVTF
-                    self.push(Instruction::SCVTF { rd, rn });
+                    self.push(Instruction::SCVTF { rd, rn, src_64, dst_double });
                 }
                 CastKind::UIntToFloat => {
                     // Unsigned int → float: UCVTF
-                    self.push(Instruction::UCVTF { rd, rn });
+                    self.push(Instruction::UCVTF { rd, rn, src_64, dst_double });
                 }
                 CastKind::FloatToInt => {
                     // Float → signed int: FCVTZS
-                    self.push(Instruction::FCVTZS { rd, rn });
+                    self.push(Instruction::FCVTZS { rd, rn, dst_64: src_64, src_double: dst_double });
                 }
                 CastKind::FloatToUInt => {
                     // Float → unsigned int: FCVTZU
-                    self.push(Instruction::FCVTZU { rd, rn });
+                    self.push(Instruction::FCVTZU { rd, rn, dst_64: src_64, src_double: dst_double });
                 }
                 CastKind::FloatToFloat => {
                     // Float ↔ float width change: FCVT
-                    self.push(Instruction::FCVT { rd, rn, to_double: true });
+                    self.push(Instruction::FCVT { rd, rn, to_double: dst_double });
                 }
             }
         }
@@ -3951,10 +4069,16 @@ impl InstructionSelector {
                 // restoration in the epilogue handles it).
             }
 
-            IRInstr::Cast { kind, dst, src } => {
+            IRInstr::Cast { kind, dst, src, from_ty, to_ty } => {
                 let rd = resolve(dst);
                 let rn = resolve(src);
-                self.select_cast(*kind, rd, rn, false, false);
+                let src_64 = matches!(from_ty,
+                    Some(IRType::I64) | Some(IRType::U64) | None
+                );
+                let dst_double = matches!(to_ty,
+                    Some(IRType::F64) | None
+                );
+                self.select_cast(*kind, rd, rn, false, false, src_64, dst_double);
             }
 
             IRInstr::UnaryOp { op, dst, operand, .. } => {
@@ -4873,7 +4997,7 @@ mod tests {
     #[test]
     fn select_cast_sext() {
         let mut sel = InstructionSelector::new();
-        sel.select_cast(CastKind::SExt, Register::X0, Register::X1, false, false);
+        sel.select_cast(CastKind::SExt, Register::X0, Register::X1, false, false, false, false);
         let instrs = sel.take_instructions();
         assert_eq!(instrs.len(), 1);
         assert!(matches!(instrs[0], Instruction::SXTW { .. }));
@@ -4884,13 +5008,13 @@ mod tests {
     #[test]
     fn select_cast_bitcast() {
         let mut sel = InstructionSelector::new();
-        sel.select_cast(CastKind::BitCast, Register::X0, Register::X0, false, false);
+        sel.select_cast(CastKind::BitCast, Register::X0, Register::X0, false, false, false, false);
         let instrs = sel.take_instructions();
         // Same register → no instruction emitted
         assert_eq!(instrs.len(), 0);
 
         let mut sel = InstructionSelector::new();
-        sel.select_cast(CastKind::BitCast, Register::X0, Register::X1, false, false);
+        sel.select_cast(CastKind::BitCast, Register::X0, Register::X1, false, false, false, false);
         let instrs = sel.take_instructions();
         assert_eq!(instrs.len(), 1);
         assert!(matches!(instrs[0], Instruction::MOV { .. }));
@@ -4900,22 +5024,22 @@ mod tests {
     #[test]
     fn select_cast_int_to_float() {
         let mut sel = InstructionSelector::new();
-        sel.select_cast(CastKind::SExt, Register::X0, Register::X1, true, true);
+        sel.select_cast(CastKind::SExt, Register::X0, Register::X1, true, true, true, true);
         let instrs = sel.take_instructions();
         assert_eq!(instrs.len(), 1);
-        assert!(matches!(instrs[0], Instruction::SCVTF { .. }));
-        assert_eq!(format!("{}", instrs[0]), "scvtf x0, x1");
+        assert!(matches!(instrs[0], Instruction::SCVTF { src_64: true, dst_double: true, .. }));
+        assert_eq!(format!("{}", instrs[0]), "scvtf d0, x1");
     }
 
     // ---- Test 19: Cast — FCVTZS (float→int) instruction selection ----
     #[test]
     fn select_cast_float_to_int() {
         let mut sel = InstructionSelector::new();
-        sel.select_cast(CastKind::Trunc, Register::X0, Register::X1, true, false);
+        sel.select_cast(CastKind::Trunc, Register::X0, Register::X1, true, false, true, false);
         let instrs = sel.take_instructions();
         assert_eq!(instrs.len(), 1);
-        assert!(matches!(instrs[0], Instruction::FCVTZS { .. }));
-        assert_eq!(format!("{}", instrs[0]), "fcvtzs x0, x1");
+        assert!(matches!(instrs[0], Instruction::FCVTZS { dst_64: true, src_double: false, .. }));
+        assert_eq!(format!("{}", instrs[0]), "fcvtzs x0, s1");
     }
 
     // ---- Test 20: ControlFlow — CBZ/CBNZ instruction selection ----
@@ -5349,7 +5473,7 @@ mod tests {
         };
         assert_eq!(format!("{}", fmov_dx), "fmov d8, x0");
         let fmov_enc = fmov_dx.encode().unwrap();
-        assert_eq!(fmov_enc, 0x9E670000 | (0u32 << 5) | 8);
+        assert_eq!(fmov_enc, 0x9E670000 | (0u32 << 10) | 8);
 
         // CNT V8.8B, V8.8B: count bits per byte
         let cnt = Instruction::CNT { vd: 8, vn: 8 };
@@ -5384,6 +5508,6 @@ mod tests {
         };
         assert_eq!(format!("{}", fmov_xd), "fmov x0, d8");
         let fmov_xd_enc = fmov_xd.encode().unwrap();
-        assert_eq!(fmov_xd_enc, 0x9E6F0000 | (8u32 << 5) | 0);
+        assert_eq!(fmov_xd_enc, 0x9E6F0000 | (8u32 << 10) | 0);
     }
 }

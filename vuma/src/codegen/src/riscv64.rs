@@ -4124,6 +4124,38 @@ fn ss_store_fpr_to_slot(src_fpr: Fpr, offset_from_s0: i32) -> Vec<u8> {
     }
 }
 
+/// Store a single-precision FP value from an FPR to a stack slot at [S0 - offset_from_s0].
+fn ss_store_fpr_s_to_slot(src_fpr: Fpr, offset_from_s0: i32) -> Vec<u8> {
+    let neg_off = -offset_from_s0;
+    if neg_off >= -2048 {
+        Instruction::Fsw { rs1: Gpr::S0, rs2: src_fpr, imm: neg_off }
+            .encode()
+            .to_vec()
+    } else {
+        let mut code = Vec::new();
+        code.extend(ss_load_imm(Gpr::T3, offset_from_s0 as i64));
+        code.extend(Instruction::Sub { rd: Gpr::T3, rs1: Gpr::S0, rs2: Gpr::T3 }.encode());
+        code.extend(Instruction::Fsw { rs1: Gpr::T3, rs2: src_fpr, imm: 0 }.encode());
+        code
+    }
+}
+
+/// Load a 32-bit word from a stack slot at [S0 - offset_from_s0] into a GPR.
+fn ss_load_word_from_slot(dst_reg: Gpr, offset_from_s0: i32) -> Vec<u8> {
+    let neg_off = -offset_from_s0;
+    if neg_off >= -2048 {
+        Instruction::Lw { rd: dst_reg, rs1: Gpr::S0, imm: neg_off }
+            .encode()
+            .to_vec()
+    } else {
+        let mut code = Vec::new();
+        code.extend(ss_load_imm(Gpr::T3, offset_from_s0 as i64));
+        code.extend(Instruction::Sub { rd: Gpr::T3, rs1: Gpr::S0, rs2: Gpr::T3 }.encode());
+        code.extend(Instruction::Lw { rd: dst_reg, rs1: Gpr::T3, imm: 0 }.encode());
+        code
+    }
+}
+
 /// Load an [`IRValue`] into a scratch register.
 ///
 /// For registers: load from the stack slot.
@@ -4581,11 +4613,36 @@ impl Backend for RiscV64Backend {
 
                     IRInstr::Free { .. } => Vec::new(),
 
-                    IRInstr::Cast { kind, dst, src } => {
+                    IRInstr::Cast { kind, dst, src, from_ty, to_ty } => {
                         let dst_id = dst.as_register().unwrap_or(0);
                         let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
                         let mut code = Vec::new();
                         code.extend(ss_load_value(src, &vreg_stack_slots, Gpr::T0));
+
+                        // Helper: determine whether the source integer is 32-bit
+                        // (i32/u32) vs 64-bit (i64/u64).  Default to 64-bit
+                        // when type info is unavailable.
+                        let src_is_32bit = match from_ty {
+                            Some(IRType::I8) | Some(IRType::I16) | Some(IRType::I32)
+                            | Some(IRType::U8) | Some(IRType::U16) | Some(IRType::U32) => true,
+                            _ => false,
+                        };
+                        // Helper: determine whether the destination float is
+                        // f32 vs f64.  Default to f64 when type info is
+                        // unavailable.
+                        let dst_is_f32 = matches!(to_ty, Some(IRType::F32));
+                        // Helper: determine whether the source float is f32
+                        // vs f64.  Default to f64 when type info is
+                        // unavailable.
+                        let src_is_f32 = matches!(from_ty, Some(IRType::F32));
+                        // Helper: determine whether the destination integer is
+                        // 32-bit vs 64-bit.  Default to 64-bit.
+                        let dst_is_32bit = match to_ty {
+                            Some(IRType::I8) | Some(IRType::I16) | Some(IRType::I32)
+                            | Some(IRType::U8) | Some(IRType::U16) | Some(IRType::U32) => true,
+                            _ => false,
+                        };
+
                         match kind {
                             CastKind::BitCast | CastKind::Trunc => {}
                             CastKind::ZExt => {
@@ -4597,34 +4654,127 @@ impl Backend for RiscV64Backend {
                                 code.extend(Instruction::Addiw { rd: Gpr::T0, rs1: Gpr::T0, imm: 0 }.encode());
                             }
                             CastKind::IntToFloat => {
-                                // Signed int → f64: FCVT.D.L F0, T0 then FSD F0 + LD
-                                code.extend(Instruction::FcvtDL { rd: Fpr::F0, rs1: Gpr::T0 }.encode());
-                                // Store the f64 result from F0 to dst slot via FSD
-                                code.extend(ss_store_fpr_to_slot(Fpr::F0, dst_offset));
-                                // Load the 64-bit value back to T0
-                                code.extend(ss_load_from_slot(Gpr::T0, dst_offset));
+                                // Signed int → float.
+                                // If src is 32-bit: sign-extend to 64-bit first via ADDIW.
+                                if src_is_32bit {
+                                    code.extend(Instruction::Addiw { rd: Gpr::T0, rs1: Gpr::T0, imm: 0 }.encode());
+                                }
+                                if dst_is_f32 {
+                                    // i32/i64 → f32: FCVT.S.W or FCVT.S.L
+                                    if src_is_32bit {
+                                        code.extend(Instruction::FcvtSW { rd: Fpr::F0, rs1: Gpr::T0 }.encode());
+                                    } else {
+                                        code.extend(Instruction::FcvtSL { rd: Fpr::F0, rs1: Gpr::T0 }.encode());
+                                    }
+                                    // Store f32 result: FSW F0 then LW T0
+                                    code.extend(ss_store_fpr_s_to_slot(Fpr::F0, dst_offset));
+                                    code.extend(ss_load_word_from_slot(Gpr::T0, dst_offset));
+                                } else {
+                                    // i32/i64 → f64: FCVT.D.W or FCVT.D.L
+                                    if src_is_32bit {
+                                        code.extend(Instruction::FcvtDW { rd: Fpr::F0, rs1: Gpr::T0 }.encode());
+                                    } else {
+                                        code.extend(Instruction::FcvtDL { rd: Fpr::F0, rs1: Gpr::T0 }.encode());
+                                    }
+                                    // Store f64 result: FSD F0 then LD T0
+                                    code.extend(ss_store_fpr_to_slot(Fpr::F0, dst_offset));
+                                    code.extend(ss_load_from_slot(Gpr::T0, dst_offset));
+                                }
                             }
                             CastKind::UIntToFloat => {
-                                // Unsigned int → f64: FCVT.D.LU F0, T0 then FSD F0 + LD
-                                code.extend(Instruction::FcvtDLU { rd: Fpr::F0, rs1: Gpr::T0 }.encode());
-                                code.extend(ss_store_fpr_to_slot(Fpr::F0, dst_offset));
-                                code.extend(ss_load_from_slot(Gpr::T0, dst_offset));
+                                // Unsigned int → float.
+                                // If src is 32-bit: zero-extend to 64-bit first.
+                                if src_is_32bit {
+                                    code.extend(Instruction::Slli { rd: Gpr::T0, rs1: Gpr::T0, shamt: 32 }.encode());
+                                    code.extend(Instruction::Srli { rd: Gpr::T0, rs1: Gpr::T0, shamt: 32 }.encode());
+                                }
+                                if dst_is_f32 {
+                                    // u32/u64 → f32: FCVT.S.WU or FCVT.S.LU
+                                    if src_is_32bit {
+                                        code.extend(Instruction::FcvtSWU { rd: Fpr::F0, rs1: Gpr::T0 }.encode());
+                                    } else {
+                                        code.extend(Instruction::FcvtSLU { rd: Fpr::F0, rs1: Gpr::T0 }.encode());
+                                    }
+                                    // Store f32 result: FSW F0 then LW T0
+                                    code.extend(ss_store_fpr_s_to_slot(Fpr::F0, dst_offset));
+                                    code.extend(ss_load_word_from_slot(Gpr::T0, dst_offset));
+                                } else {
+                                    // u32/u64 → f64: FCVT.D.WU or FCVT.D.LU
+                                    if src_is_32bit {
+                                        code.extend(Instruction::FcvtDWU { rd: Fpr::F0, rs1: Gpr::T0 }.encode());
+                                    } else {
+                                        code.extend(Instruction::FcvtDLU { rd: Fpr::F0, rs1: Gpr::T0 }.encode());
+                                    }
+                                    // Store f64 result: FSD F0 then LD T0
+                                    code.extend(ss_store_fpr_to_slot(Fpr::F0, dst_offset));
+                                    code.extend(ss_load_from_slot(Gpr::T0, dst_offset));
+                                }
                             }
                             CastKind::FloatToInt => {
-                                // f64 → signed int: FMV.D.X F0, T0 then FCVT.L.D T0, F0
-                                code.extend(Instruction::FmvDX { rd: Fpr::F0, rs1: Gpr::T0 }.encode());
-                                code.extend(Instruction::FcvtLD { rd: Gpr::T0, rs1: Fpr::F0 }.encode());
+                                // float → signed int.
+                                if src_is_f32 {
+                                    // f32 → signed int: FMV.X.W F0→T0 bits, FMV.W.X T0→F0, FCVT.W.S or FCVT.L.S
+                                    // Actually: move bits to FPR first, then convert
+                                    code.extend(Instruction::FmvWX { rd: Fpr::F0, rs1: Gpr::T0 }.encode());
+                                    if dst_is_32bit {
+                                        code.extend(Instruction::FcvtWS { rd: Gpr::T0, rs1: Fpr::F0 }.encode());
+                                        // Sign-extend the 32-bit result
+                                        code.extend(Instruction::Addiw { rd: Gpr::T0, rs1: Gpr::T0, imm: 0 }.encode());
+                                    } else {
+                                        code.extend(Instruction::FcvtLS { rd: Gpr::T0, rs1: Fpr::F0 }.encode());
+                                    }
+                                } else {
+                                    // f64 → signed int: FMV.D.X F0←T0, FCVT.W.D or FCVT.L.D
+                                    code.extend(Instruction::FmvDX { rd: Fpr::F0, rs1: Gpr::T0 }.encode());
+                                    if dst_is_32bit {
+                                        code.extend(Instruction::FcvtWD { rd: Gpr::T0, rs1: Fpr::F0 }.encode());
+                                        // Sign-extend the 32-bit result
+                                        code.extend(Instruction::Addiw { rd: Gpr::T0, rs1: Gpr::T0, imm: 0 }.encode());
+                                    } else {
+                                        code.extend(Instruction::FcvtLD { rd: Gpr::T0, rs1: Fpr::F0 }.encode());
+                                    }
+                                }
                             }
                             CastKind::FloatToUInt => {
-                                // f64 → unsigned int: FMV.D.X F0, T0 then FCVT.LU.D T0, F0
-                                code.extend(Instruction::FmvDX { rd: Fpr::F0, rs1: Gpr::T0 }.encode());
-                                code.extend(Instruction::FcvtLUD { rd: Gpr::T0, rs1: Fpr::F0 }.encode());
+                                // float → unsigned int.
+                                if src_is_f32 {
+                                    // f32 → unsigned int: FMV.W.X T0→F0, FCVT.WU.S or FCVT.LU.S
+                                    code.extend(Instruction::FmvWX { rd: Fpr::F0, rs1: Gpr::T0 }.encode());
+                                    if dst_is_32bit {
+                                        code.extend(Instruction::FcvtWUS { rd: Gpr::T0, rs1: Fpr::F0 }.encode());
+                                        // Zero-extend the 32-bit result
+                                        code.extend(Instruction::Slli { rd: Gpr::T0, rs1: Gpr::T0, shamt: 32 }.encode());
+                                        code.extend(Instruction::Srli { rd: Gpr::T0, rs1: Gpr::T0, shamt: 32 }.encode());
+                                    } else {
+                                        code.extend(Instruction::FcvtLUS { rd: Gpr::T0, rs1: Fpr::F0 }.encode());
+                                    }
+                                } else {
+                                    // f64 → unsigned int: FMV.D.X T0→F0, FCVT.WU.D or FCVT.LU.D
+                                    code.extend(Instruction::FmvDX { rd: Fpr::F0, rs1: Gpr::T0 }.encode());
+                                    if dst_is_32bit {
+                                        code.extend(Instruction::FcvtWUD { rd: Gpr::T0, rs1: Fpr::F0 }.encode());
+                                        // Zero-extend the 32-bit result
+                                        code.extend(Instruction::Slli { rd: Gpr::T0, rs1: Gpr::T0, shamt: 32 }.encode());
+                                        code.extend(Instruction::Srli { rd: Gpr::T0, rs1: Gpr::T0, shamt: 32 }.encode());
+                                    } else {
+                                        code.extend(Instruction::FcvtLUD { rd: Gpr::T0, rs1: Fpr::F0 }.encode());
+                                    }
+                                }
                             }
                             CastKind::FloatToFloat => {
-                                // f64 → f32 (narrow): FMV.D.X F0, T0 then FCVT.S.D F0, F0 then FMV.X.W T0, F0
-                                code.extend(Instruction::FmvDX { rd: Fpr::F0, rs1: Gpr::T0 }.encode());
-                                code.extend(Instruction::FcvtSD { rd: Fpr::F0, rs1: Fpr::F0 }.encode());
-                                code.extend(Instruction::FmvXW { rd: Gpr::T0, rs1: Fpr::F0 }.encode());
+                                if src_is_f32 && !dst_is_f32 {
+                                    // f32 → f64 (widen): FMV.W.X T0→F0, FCVT.D.S F0→F0, FMV.X.D F0→T0
+                                    code.extend(Instruction::FmvWX { rd: Fpr::F0, rs1: Gpr::T0 }.encode());
+                                    code.extend(Instruction::FcvtDS { rd: Fpr::F0, rs1: Fpr::F0 }.encode());
+                                    code.extend(Instruction::FmvXD { rd: Gpr::T0, rs1: Fpr::F0 }.encode());
+                                } else if !src_is_f32 && dst_is_f32 {
+                                    // f64 → f32 (narrow): FMV.D.X T0→F0, FCVT.S.D F0→F0, FMV.X.W F0→T0
+                                    code.extend(Instruction::FmvDX { rd: Fpr::F0, rs1: Gpr::T0 }.encode());
+                                    code.extend(Instruction::FcvtSD { rd: Fpr::F0, rs1: Fpr::F0 }.encode());
+                                    code.extend(Instruction::FmvXW { rd: Gpr::T0, rs1: Fpr::F0 }.encode());
+                                } else {
+                                    // Same-width float→float: no-op (bitcast)
+                                }
                             }
                         }
                         code.extend(ss_store_to_slot(Gpr::T0, dst_offset));

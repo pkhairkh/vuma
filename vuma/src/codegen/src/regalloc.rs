@@ -700,6 +700,7 @@ impl LiveRangeComputer {
                     kind: crate::ir::CastKind::BitCast,
                     dst: IRValue::Register(dst_id),
                     src: IRValue::Register(src_id),
+                    ..
                 } = instr
                 {
                     copies.push(CopyInfo {
@@ -4522,6 +4523,8 @@ mod tests {
             kind: CastKind::BitCast,
             dst: IRValue::Register(1),
             src: IRValue::Register(0),
+            from_ty: None,
+            to_ty: None,
         });
         // v2 = v1 + 1
         block.push(IRInstr::BinOp {
@@ -4555,6 +4558,8 @@ mod tests {
             kind: CastKind::BitCast,
             dst: IRValue::Register(1),
             src: IRValue::Register(0),
+            from_ty: None,
+            to_ty: None,
         });
         block.terminator = IRTerminator::Return(vec![IRValue::Register(1)]);
 

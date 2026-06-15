@@ -936,17 +936,25 @@ pub enum Instruction {
     FmovD { fd: Fpr, fj: Fpr },
 
     // ── FP Conversion (2R) ──────────────────────────────────────────
-    /// Float Convert From Signed Integer Word: `ffint.s.w fd, fj`
+    /// Signed Integer Word to Single: `ffint.s.w fd, fj` (i32→f32)
     FfintSW { fd: Fpr, fj: Fpr },
-    /// Float Convert From Signed Integer Doubleword: `ffint.d.w fd, fj`
+    /// Signed Integer Long to Single: `ffint.s.l fd, fj` (i64→f32)
+    FfintSL { fd: Fpr, fj: Fpr },
+    /// Signed Integer Word to Double: `ffint.d.w fd, fj` (i32→f64)
     FfintDW { fd: Fpr, fj: Fpr },
-    /// Float Convert To Signed Integer Word: `ftint.w.s fd, fj`
+    /// Signed Integer Long to Double: `ffint.d.l fd, fj` (i64→f64)
+    FfintDL { fd: Fpr, fj: Fpr },
+    /// Single to Signed Integer Word: `ftint.w.s fd, fj` (f32→i32)
     FtintWS { fd: Fpr, fj: Fpr },
-    /// Float Convert To Signed Integer Doubleword: `ftint.w.d fd, fj`
+    /// Double to Signed Integer Word: `ftint.w.d fd, fj` (f64→i32)
     FtintWD { fd: Fpr, fj: Fpr },
-    /// Float Convert Single to Double: `fcvt.d.s fd, fj`
+    /// Single to Signed Integer Long: `ftint.l.s fd, fj` (f32→i64)
+    FtintLS { fd: Fpr, fj: Fpr },
+    /// Double to Signed Integer Long: `ftint.l.d fd, fj` (f64→i64)
+    FtintLD { fd: Fpr, fj: Fpr },
+    /// Single to Double: `fcvt.d.s fd, fj` (f32→f64)
     FcvtDS { fd: Fpr, fj: Fpr },
-    /// Float Convert Double to Single: `fcvt.s.d fd, fj`
+    /// Double to Single: `fcvt.s.d fd, fj` (f64→f32)
     FcvtSD { fd: Fpr, fj: Fpr },
 
     // ── FP Compare (4R-like) ────────────────────────────────────────
@@ -1412,14 +1420,25 @@ impl Instruction {
             Instruction::FmovD { fd, fj } => encode_2r(OPC_FMOV_D, fj.encoding(), fd.encoding()),
 
             // ── FP Conversion (2R) ──────────────────────────────
-            // FFINT.S.W: opcode=0x004519, FFINT.D.W: opcode=0x00451A
+            // FFINT.S.W: opcode=0x004519 (i32→f32)
             Instruction::FfintSW { fd, fj } => encode_2r(0x004519, fj.encoding(), fd.encoding()),
-            Instruction::FfintDW { fd, fj } => encode_2r(0x00451A, fj.encoding(), fd.encoding()),
-            // FTINT.W.S: opcode=0x00450C, FTINT.W.D: opcode=0x00450D
+            // FFINT.S.L: opcode=0x00451A (i64→f32)
+            Instruction::FfintSL { fd, fj } => encode_2r(0x00451A, fj.encoding(), fd.encoding()),
+            // FFINT.D.W: opcode=0x00451B (i32→f64)
+            Instruction::FfintDW { fd, fj } => encode_2r(0x00451B, fj.encoding(), fd.encoding()),
+            // FFINT.D.L: opcode=0x00451C (i64→f64)
+            Instruction::FfintDL { fd, fj } => encode_2r(0x00451C, fj.encoding(), fd.encoding()),
+            // FTINT.W.S: opcode=0x00450C (f32→i32)
             Instruction::FtintWS { fd, fj } => encode_2r(0x00450C, fj.encoding(), fd.encoding()),
+            // FTINT.W.D: opcode=0x00450D (f64→i32)
             Instruction::FtintWD { fd, fj } => encode_2r(0x00450D, fj.encoding(), fd.encoding()),
-            // FCVT.D.S: opcode=0x004502, FCVT.S.D: opcode=0x004503
+            // FTINT.L.S: opcode=0x00450E (f32→i64)
+            Instruction::FtintLS { fd, fj } => encode_2r(0x00450E, fj.encoding(), fd.encoding()),
+            // FTINT.L.D: opcode=0x00450F (f64→i64)
+            Instruction::FtintLD { fd, fj } => encode_2r(0x00450F, fj.encoding(), fd.encoding()),
+            // FCVT.D.S: opcode=0x004502 (f32→f64)
             Instruction::FcvtDS { fd, fj } => encode_2r(0x004502, fj.encoding(), fd.encoding()),
+            // FCVT.S.D: opcode=0x004503 (f64→f32)
             Instruction::FcvtSD { fd, fj } => encode_2r(0x004503, fj.encoding(), fd.encoding()),
 
             // ── FP Compare (4R-like) ──────────────────────────────
@@ -1561,9 +1580,13 @@ impl Instruction {
             Instruction::FmovS { .. } => "fmov.s",
             Instruction::FmovD { .. } => "fmov.d",
             Instruction::FfintSW { .. } => "ffint.s.w",
+            Instruction::FfintSL { .. } => "ffint.s.l",
             Instruction::FfintDW { .. } => "ffint.d.w",
+            Instruction::FfintDL { .. } => "ffint.d.l",
             Instruction::FtintWS { .. } => "ftint.w.s",
             Instruction::FtintWD { .. } => "ftint.w.d",
+            Instruction::FtintLS { .. } => "ftint.l.s",
+            Instruction::FtintLD { .. } => "ftint.l.d",
             Instruction::FcvtDS { .. } => "fcvt.d.s",
             Instruction::FcvtSD { .. } => "fcvt.s.d",
             Instruction::FCmpS { .. } => "fcmp.cond.s",
@@ -1701,9 +1724,13 @@ impl fmt::Display for Instruction {
             Instruction::FmovS { fd, fj } => write!(f, "fmov.s {}, {}", fd, fj),
             Instruction::FmovD { fd, fj } => write!(f, "fmov.d {}, {}", fd, fj),
             Instruction::FfintSW { fd, fj } => write!(f, "ffint.s.w {}, {}", fd, fj),
+            Instruction::FfintSL { fd, fj } => write!(f, "ffint.s.l {}, {}", fd, fj),
             Instruction::FfintDW { fd, fj } => write!(f, "ffint.d.w {}, {}", fd, fj),
+            Instruction::FfintDL { fd, fj } => write!(f, "ffint.d.l {}, {}", fd, fj),
             Instruction::FtintWS { fd, fj } => write!(f, "ftint.w.s {}, {}", fd, fj),
             Instruction::FtintWD { fd, fj } => write!(f, "ftint.w.d {}, {}", fd, fj),
+            Instruction::FtintLS { fd, fj } => write!(f, "ftint.l.s {}, {}", fd, fj),
+            Instruction::FtintLD { fd, fj } => write!(f, "ftint.l.d {}, {}", fd, fj),
             Instruction::FcvtDS { fd, fj } => write!(f, "fcvt.d.s {}, {}", fd, fj),
             Instruction::FcvtSD { fd, fj } => write!(f, "fcvt.s.d {}, {}", fd, fj),
             Instruction::FCmpS { cond, fj, fk, cd } => write!(

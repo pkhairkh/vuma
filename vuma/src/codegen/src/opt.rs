@@ -70,10 +70,12 @@ fn substitute_instr(instr: &IRInstr, map: &HashMap<u32, IRValue>) -> IRInstr {
             size: *size,
         },
         IRInstr::Free { ptr } => IRInstr::Free { ptr: sv(ptr) },
-        IRInstr::Cast { kind, dst, src } => IRInstr::Cast {
+        IRInstr::Cast { kind, dst, src, from_ty, to_ty } => IRInstr::Cast {
             kind: *kind,
             dst: sv(dst),
             src: sv(src),
+            from_ty: from_ty.clone(),
+            to_ty: to_ty.clone(),
         },
         IRInstr::Phi { dst, incoming } => IRInstr::Phi {
             dst: sv(dst),

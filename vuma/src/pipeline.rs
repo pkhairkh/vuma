@@ -1493,6 +1493,8 @@ fn scg_type_to_name(ty: &ScgType) -> &'static str {
         ScgType::U64 => "u64",
         ScgType::Ptr => "ptr",
         ScgType::Void => "void",
+        ScgType::F32 => "f32",
+        ScgType::F64 => "f64",
     }
 }
 

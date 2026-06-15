@@ -1100,9 +1100,26 @@ impl Emitter {
                 self.emit_instruction(Instruction::BL { offset: 0 })?;
             }
 
-            IRInstr::Cast { kind, dst, src } => {
+            IRInstr::Cast { kind, dst, src, from_ty, to_ty } => {
                 let rd = self.resolve_reg(dst)?;
                 let rn = self.resolve_reg(src)?;
+
+                // Determine source and destination sizes from IR type info.
+                // When type info is unavailable (`None`), fall back to defaults
+                // matching the prior behaviour (64-bit int, double-precision float).
+                let src_is_64bit_int = matches!(from_ty,
+                    Some(IRType::I64) | Some(IRType::U64) | None
+                );
+                let dst_is_f64 = matches!(to_ty,
+                    Some(IRType::F64) | None
+                );
+                let dst_is_64bit_int = matches!(to_ty,
+                    Some(IRType::I64) | Some(IRType::U64) | None
+                );
+                let src_is_f64 = matches!(from_ty,
+                    Some(IRType::F64) | None
+                );
+
                 match kind {
                     CastKind::ZExt => {
                         // Zero-extend 32-bit to 64-bit using UBFM
@@ -1131,23 +1148,47 @@ impl Emitter {
                     }
                     CastKind::IntToFloat => {
                         // Signed int → float: SCVTF
-                        self.emit_instruction(Instruction::SCVTF { rd, rn })?;
+                        self.emit_instruction(Instruction::SCVTF {
+                            rd,
+                            rn,
+                            src_64: src_is_64bit_int,
+                            dst_double: dst_is_f64,
+                        })?;
                     }
                     CastKind::UIntToFloat => {
                         // Unsigned int → float: UCVTF
-                        self.emit_instruction(Instruction::UCVTF { rd, rn })?;
+                        self.emit_instruction(Instruction::UCVTF {
+                            rd,
+                            rn,
+                            src_64: src_is_64bit_int,
+                            dst_double: dst_is_f64,
+                        })?;
                     }
                     CastKind::FloatToInt => {
                         // Float → signed int: FCVTZS
-                        self.emit_instruction(Instruction::FCVTZS { rd, rn })?;
+                        self.emit_instruction(Instruction::FCVTZS {
+                            rd,
+                            rn,
+                            dst_64: dst_is_64bit_int,
+                            src_double: src_is_f64,
+                        })?;
                     }
                     CastKind::FloatToUInt => {
                         // Float → unsigned int: FCVTZU
-                        self.emit_instruction(Instruction::FCVTZU { rd, rn })?;
+                        self.emit_instruction(Instruction::FCVTZU {
+                            rd,
+                            rn,
+                            dst_64: dst_is_64bit_int,
+                            src_double: src_is_f64,
+                        })?;
                     }
                     CastKind::FloatToFloat => {
                         // Float ↔ float width change: FCVT
-                        self.emit_instruction(Instruction::FCVT { rd, rn, to_double: true })?;
+                        self.emit_instruction(Instruction::FCVT {
+                            rd,
+                            rn,
+                            to_double: dst_is_f64,
+                        })?;
                     }
                 }
             }
@@ -2722,10 +2763,24 @@ impl Emitter {
             }
 
             // ── Cast ──
-            IRInstr::Cast { kind, dst, src } => {
+            IRInstr::Cast { kind, dst, src, from_ty, to_ty } => {
                 let dst_id = dst.as_register().unwrap_or(0);
                 let dst_offset = slots.get(&dst_id).copied().unwrap_or(0);
                 self.ss_load_value(src, Register::X9, slots)?;
+
+                // Determine source and destination sizes from IR type info.
+                let src_is_64bit_int = matches!(from_ty,
+                    Some(IRType::I64) | Some(IRType::U64) | None
+                );
+                let dst_is_f64 = matches!(to_ty,
+                    Some(IRType::F64) | None
+                );
+                let dst_is_64bit_int = matches!(to_ty,
+                    Some(IRType::I64) | Some(IRType::U64) | None
+                );
+                let src_is_f64 = matches!(from_ty,
+                    Some(IRType::F64) | None
+                );
 
                 match kind {
                     CastKind::ZExt => {
@@ -2751,23 +2806,47 @@ impl Emitter {
                     }
                     CastKind::IntToFloat => {
                         // Signed int → float: SCVTF
-                        self.emit_instruction(Instruction::SCVTF { rd: Register::X9, rn: Register::X9 })?;
+                        self.emit_instruction(Instruction::SCVTF {
+                            rd: Register::X9,
+                            rn: Register::X9,
+                            src_64: src_is_64bit_int,
+                            dst_double: dst_is_f64,
+                        })?;
                     }
                     CastKind::UIntToFloat => {
                         // Unsigned int → float: UCVTF
-                        self.emit_instruction(Instruction::UCVTF { rd: Register::X9, rn: Register::X9 })?;
+                        self.emit_instruction(Instruction::UCVTF {
+                            rd: Register::X9,
+                            rn: Register::X9,
+                            src_64: src_is_64bit_int,
+                            dst_double: dst_is_f64,
+                        })?;
                     }
                     CastKind::FloatToInt => {
                         // Float → signed int: FCVTZS
-                        self.emit_instruction(Instruction::FCVTZS { rd: Register::X9, rn: Register::X9 })?;
+                        self.emit_instruction(Instruction::FCVTZS {
+                            rd: Register::X9,
+                            rn: Register::X9,
+                            dst_64: dst_is_64bit_int,
+                            src_double: src_is_f64,
+                        })?;
                     }
                     CastKind::FloatToUInt => {
                         // Float → unsigned int: FCVTZU
-                        self.emit_instruction(Instruction::FCVTZU { rd: Register::X9, rn: Register::X9 })?;
+                        self.emit_instruction(Instruction::FCVTZU {
+                            rd: Register::X9,
+                            rn: Register::X9,
+                            dst_64: dst_is_64bit_int,
+                            src_double: src_is_f64,
+                        })?;
                     }
                     CastKind::FloatToFloat => {
                         // Float ↔ float width change: FCVT
-                        self.emit_instruction(Instruction::FCVT { rd: Register::X9, rn: Register::X9, to_double: true })?;
+                        self.emit_instruction(Instruction::FCVT {
+                            rd: Register::X9,
+                            rn: Register::X9,
+                            to_double: dst_is_f64,
+                        })?;
                     }
                 }
                 self.ss_store_to_slot(Register::X9, dst_offset)?;

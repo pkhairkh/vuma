@@ -1299,6 +1299,14 @@ pub enum IRInstr {
         dst: IRValue,
         /// Source value.
         src: IRValue,
+        /// Source type.  Used by backends that need to select different
+        /// instructions based on operand width (e.g. RISC-V FCVT variants).
+        /// `None` signals that type information was not available at the
+        /// point of IR construction; backends should fall back to a
+        /// reasonable default (typically 64-bit).
+        from_ty: Option<IRType>,
+        /// Destination type.  Symmetric to `from_ty`.
+        to_ty: Option<IRType>,
     },
 
     /// SSA phi node: `dst = phi [(val, block), …]`
@@ -1678,8 +1686,11 @@ impl fmt::Display for IRInstr {
             }
             IRInstr::Alloc { dst, size } => write!(f, "{} = alloc {}", dst, size),
             IRInstr::Free { ptr } => write!(f, "free {}", ptr),
-            IRInstr::Cast { kind, dst, src } => {
-                write!(f, "{} = {} {}", dst, kind, src)
+            IRInstr::Cast { kind, dst, src, from_ty, to_ty } => {
+                match (from_ty, to_ty) {
+                    (Some(ft), Some(tt)) => write!(f, "{} = {} {} ({})", dst, kind, src, ft),
+                    _ => write!(f, "{} = {} {}", dst, kind, src),
+                }
             }
             IRInstr::Phi { dst, incoming } => {
                 let pairs = incoming

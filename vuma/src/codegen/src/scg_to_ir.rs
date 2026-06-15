@@ -140,6 +140,10 @@ pub enum ScgType {
     Ptr,
     /// No value (unit type).
     Void,
+    /// IEEE 754 single-precision floating-point.
+    F32,
+    /// IEEE 754 double-precision floating-point.
+    F64,
 }
 
 impl ScgType {
@@ -156,6 +160,8 @@ impl ScgType {
             ScgType::U64 => IRType::U64,
             ScgType::Ptr => IRType::Ptr,
             ScgType::Void => IRType::Void,
+            ScgType::F32 => IRType::F32,
+            ScgType::F64 => IRType::F64,
         }
     }
 }
@@ -1512,6 +1518,8 @@ impl IRBuilder {
             kind: cast.kind,
             dst: IRValue::Register(dst_vreg),
             src: src_val,
+            from_ty: Some(cast.from_ty.to_ir_type()),
+            to_ty: Some(cast.to_ty.to_ir_type()),
         });
         Ok(())
     }

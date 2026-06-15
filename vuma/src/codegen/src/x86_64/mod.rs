@@ -1311,6 +1311,40 @@ pub fn encode_cvtsd2ss_xmm_xmm(dst: Xmm, src: Xmm) -> Vec<u8> {
     code
 }
 
+/// Encode ADDSD xmm, xmm (F2 0F 58 /r) — add scalar double-precision floats.
+pub fn encode_addsd_xmm_xmm(dst: Xmm, src: Xmm) -> Vec<u8> {
+    let mut code = Vec::with_capacity(4);
+    let r = src.needs_rex();
+    let b = dst.needs_rex();
+    if r || b {
+        if let Some(rex) = rex_prefix(false, r, false, b) {
+            code.push(rex);
+        }
+    }
+    code.push(0xF2);
+    code.push(0x0F);
+    code.push(0x58);
+    code.push(modrm(3, src.encoding() & 7, dst.encoding() & 7));
+    code
+}
+
+/// Encode ADDSS xmm, xmm (F3 0F 58 /r) — add scalar single-precision floats.
+pub fn encode_addss_xmm_xmm(dst: Xmm, src: Xmm) -> Vec<u8> {
+    let mut code = Vec::with_capacity(4);
+    let r = src.needs_rex();
+    let b = dst.needs_rex();
+    if r || b {
+        if let Some(rex) = rex_prefix(false, r, false, b) {
+            code.push(rex);
+        }
+    }
+    code.push(0xF3);
+    code.push(0x0F);
+    code.push(0x58);
+    code.push(modrm(3, src.encoding() & 7, dst.encoding() & 7));
+    code
+}
+
 // ===========================================================================
 // x86_64 Mnemonic Disassembler
 // ===========================================================================
@@ -3007,6 +3041,8 @@ mod tests {
             kind: CastKind::ZExt,
             dst: IRValue::Register(0),
             src: IRValue::Register(1),
+            from_ty: None,
+            to_ty: None,
         });
         // ZExt of a register uses MOVZX r8→r64 (0F B6)
         assert!(
@@ -3021,6 +3057,8 @@ mod tests {
             kind: CastKind::SExt,
             dst: IRValue::Register(0),
             src: IRValue::Register(1),
+            from_ty: None,
+            to_ty: None,
         });
         // SExt of a register uses MOVSX r8→r64 (0F BE)
         assert!(

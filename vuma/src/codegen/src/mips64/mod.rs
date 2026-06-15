@@ -106,6 +106,7 @@ const OPC_COP1: u32 = 0x11; // Coprocessor 1 operations
 const FMT_S: u32 = 16; // single
 const FMT_D: u32 = 17; // double
 const FMT_W: u32 = 20; // word (integer)
+const FMT_L: u32 = 21; // long (64-bit integer)
 
 // COP1 function codes for FP conversion instructions
 const FN_CVT_S_D: u32 = 0x20; // cvt.s.d
@@ -114,6 +115,16 @@ const FN_CVT_S_W: u32 = 0x20; // cvt.s.w
 const FN_CVT_D_W: u32 = 0x21; // cvt.d.w
 const FN_CVT_W_S: u32 = 0x24; // cvt.w.s
 const FN_CVT_W_D: u32 = 0x24; // cvt.w.d
+const FN_CVT_S_L: u32 = 0x20; // cvt.s.l
+const FN_CVT_D_L: u32 = 0x21; // cvt.d.l
+const FN_CVT_L_S: u32 = 0x25; // cvt.l.s
+const FN_CVT_L_D: u32 = 0x25; // cvt.l.d
+
+// COP1 fmt field values for move instructions
+const FMT_MF: u32 = 0x00; // MFC1
+const FMT_DMF: u32 = 0x01; // DMFC1
+const FMT_MT: u32 = 0x04; // MTC1
+const FMT_DMT: u32 = 0x05; // DMTC1
 
 /// J-type opcodes.
 const OPC_J: u32 = 0x02;
@@ -744,6 +755,24 @@ pub enum Instruction {
     CvtWS { fd: Fpr, fs: Fpr },
     /// Convert Double to Word: `cvt.w.d fd, fs` (fmt=D, func=0x24)
     CvtWD { fd: Fpr, fs: Fpr },
+    /// Convert Long to Single: `cvt.s.l fd, fs` (fmt=L, func=0x20)
+    CvtSL { fd: Fpr, fs: Fpr },
+    /// Convert Long to Double: `cvt.d.l fd, fs` (fmt=L, func=0x21)
+    CvtDL { fd: Fpr, fs: Fpr },
+    /// Convert Single to Long: `cvt.l.s fd, fs` (fmt=S, func=0x25)
+    CvtLS { fd: Fpr, fs: Fpr },
+    /// Convert Double to Long: `cvt.l.d fd, fs` (fmt=D, func=0x25)
+    CvtLD { fd: Fpr, fs: Fpr },
+
+    // ── Coprocessor 1: GPR↔FPR Move ────────────────────────────────────
+    /// Move Word to Coprocessor 1: `mtc1 rt, fs` (GPR→FPR, 32-bit)
+    Mtc1 { rt: Gpr, fs: Fpr },
+    /// Move Word from Coprocessor 1: `mfc1 rt, fs` (FPR→GPR, 32-bit)
+    Mfc1 { rt: Gpr, fs: Fpr },
+    /// Doubleword Move to Coprocessor 1: `dmtc1 rt, fs` (GPR→FPR, 64-bit)
+    Dmtc1 { rt: Gpr, fs: Fpr },
+    /// Doubleword Move from Coprocessor 1: `dmfc1 rt, fs` (FPR→GPR, 64-bit)
+    Dmfc1 { rt: Gpr, fs: Fpr },
 }
 
 impl Instruction {
@@ -1272,6 +1301,33 @@ impl Instruction {
             Instruction::CvtWD { fd, fs } => {
                 encode_cop1_r_type(FMT_D, 0, fs.encoding(), fd.encoding(), FN_CVT_W_D)
             }
+            Instruction::CvtSL { fd, fs } => {
+                encode_cop1_r_type(FMT_L, 0, fs.encoding(), fd.encoding(), FN_CVT_S_L)
+            }
+            Instruction::CvtDL { fd, fs } => {
+                encode_cop1_r_type(FMT_L, 0, fs.encoding(), fd.encoding(), FN_CVT_D_L)
+            }
+            Instruction::CvtLS { fd, fs } => {
+                encode_cop1_r_type(FMT_S, 0, fs.encoding(), fd.encoding(), FN_CVT_L_S)
+            }
+            Instruction::CvtLD { fd, fs } => {
+                encode_cop1_r_type(FMT_D, 0, fs.encoding(), fd.encoding(), FN_CVT_L_D)
+            }
+
+            // ── Coprocessor 1: GPR↔FPR Move ────────────────────────────
+            // MTC1/DMTC1/MFC1/DMFC1: COP1 fmt[25:21] rt[20:16] fs[15:11] 0[10:0]
+            Instruction::Mtc1 { rt, fs } => {
+                encode_cop1_r_type(FMT_MT, rt.encoding(), fs.encoding(), 0, 0)
+            }
+            Instruction::Mfc1 { rt, fs } => {
+                encode_cop1_r_type(FMT_MF, rt.encoding(), fs.encoding(), 0, 0)
+            }
+            Instruction::Dmtc1 { rt, fs } => {
+                encode_cop1_r_type(FMT_DMT, rt.encoding(), fs.encoding(), 0, 0)
+            }
+            Instruction::Dmfc1 { rt, fs } => {
+                encode_cop1_r_type(FMT_DMF, rt.encoding(), fs.encoding(), 0, 0)
+            }
         }
     }
 
@@ -1382,6 +1438,14 @@ impl Instruction {
             Instruction::CvtDW { .. } => "cvt.d.w",
             Instruction::CvtWS { .. } => "cvt.w.s",
             Instruction::CvtWD { .. } => "cvt.w.d",
+            Instruction::CvtSL { .. } => "cvt.s.l",
+            Instruction::CvtDL { .. } => "cvt.d.l",
+            Instruction::CvtLS { .. } => "cvt.l.s",
+            Instruction::CvtLD { .. } => "cvt.l.d",
+            Instruction::Mtc1 { .. } => "mtc1",
+            Instruction::Mfc1 { .. } => "mfc1",
+            Instruction::Dmtc1 { .. } => "dmtc1",
+            Instruction::Dmfc1 { .. } => "dmfc1",
         }
     }
 }
@@ -1482,6 +1546,14 @@ impl fmt::Display for Instruction {
             Instruction::CvtDW { fd, fs } => write!(f, "cvt.d.w {}, {}", fd, fs),
             Instruction::CvtWS { fd, fs } => write!(f, "cvt.w.s {}, {}", fd, fs),
             Instruction::CvtWD { fd, fs } => write!(f, "cvt.w.d {}, {}", fd, fs),
+            Instruction::CvtSL { fd, fs } => write!(f, "cvt.s.l {}, {}", fd, fs),
+            Instruction::CvtDL { fd, fs } => write!(f, "cvt.d.l {}, {}", fd, fs),
+            Instruction::CvtLS { fd, fs } => write!(f, "cvt.l.s {}, {}", fd, fs),
+            Instruction::CvtLD { fd, fs } => write!(f, "cvt.l.d {}, {}", fd, fs),
+            Instruction::Mtc1 { rt, fs } => write!(f, "mtc1 {}, {}", rt, fs),
+            Instruction::Mfc1 { rt, fs } => write!(f, "mfc1 {}, {}", rt, fs),
+            Instruction::Dmtc1 { rt, fs } => write!(f, "dmtc1 {}, {}", rt, fs),
+            Instruction::Dmfc1 { rt, fs } => write!(f, "dmfc1 {}, {}", rt, fs),
         }
     }
 }
@@ -2889,7 +2961,7 @@ fn mips64_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, 
                 IRInstr::Free { ptr: _ } => { /* Stack allocations freed by epilogue */ }
 
                 // ── Cast ──
-                IRInstr::Cast { kind, dst, src } => {
+                IRInstr::Cast { kind, dst, src, .. } => {
                     let dst_id = dst.as_register().unwrap_or(0);
                     let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
                     code.extend(ss_load_value(src, &vreg_stack_slots, Gpr::T0));
@@ -2904,63 +2976,38 @@ fn mips64_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, 
                         }
                         CastKind::BitCast | CastKind::Trunc => { /* no-op */ }
                         CastKind::IntToFloat => {
-                            // Signed int → f64: MTC1 T0→F0, CVT.D.W F0,F0
-                            // Store int to stack, LDC1 to F0, CVT.D.W F0,F0, SDC1 F0, LD back
-                            code.extend(ss_sd(Gpr::T0, dst_off)); // store int to dst slot temporarily
-                            code.extend_from_slice(&Instruction::Ldc1 { ft: Fpr::F0, base: Gpr::Fp, offset: dst_off }.encode());
-                            code.extend_from_slice(&encode_nop());
+                            // Signed i32 → f64: MTC1 T0→F0, CVT.D.W F0,F0, DMFC1 T0←F0
+                            code.extend_from_slice(&Instruction::Mtc1 { rt: Gpr::T0, fs: Fpr::F0 }.encode());
                             code.extend_from_slice(&Instruction::CvtDW { fd: Fpr::F0, fs: Fpr::F0 }.encode());
-                            code.extend_from_slice(&encode_nop());
-                            code.extend_from_slice(&Instruction::Sdc1 { ft: Fpr::F0, base: Gpr::Fp, offset: dst_off }.encode());
-                            code.extend_from_slice(&encode_nop());
-                            code.extend(ss_ld(Gpr::T0, dst_off));
+                            code.extend_from_slice(&Instruction::Dmfc1 { rt: Gpr::T0, fs: Fpr::F0 }.encode());
                         }
                         CastKind::UIntToFloat => {
-                            // Unsigned int → f64: store int, LDC1, CVT.D.W, SDC1, LD
-                            // (For unsigned 32-bit values, zero-extended to 64-bit,
-                            //  CVT.D.W on MIPS treats the 32-bit value in the low word)
-                            code.extend(ss_sd(Gpr::T0, dst_off));
-                            code.extend_from_slice(&Instruction::Lwc1 { ft: Fpr::F0, base: Gpr::Fp, offset: dst_off }.encode());
-                            code.extend_from_slice(&encode_nop());
-                            code.extend_from_slice(&Instruction::CvtDW { fd: Fpr::F0, fs: Fpr::F0 }.encode());
-                            code.extend_from_slice(&encode_nop());
-                            code.extend_from_slice(&Instruction::Sdc1 { ft: Fpr::F0, base: Gpr::Fp, offset: dst_off }.encode());
-                            code.extend_from_slice(&encode_nop());
-                            code.extend(ss_ld(Gpr::T0, dst_off));
+                            // Unsigned i32 → f64: zero-extend to 64-bit, DMTC1 T0→F0, CVT.D.L F0,F0, DMFC1 T0←F0
+                            // Zero-extend: DSLL 32 + DSRL 32
+                            code.extend_from_slice(&Instruction::Dsll { rd: Gpr::T0, rt: Gpr::T0, sa: 32 }.encode()); code.extend_from_slice(&encode_nop());
+                            code.extend_from_slice(&Instruction::Dsrl { rd: Gpr::T0, rt: Gpr::T0, sa: 32 }.encode()); code.extend_from_slice(&encode_nop());
+                            code.extend_from_slice(&Instruction::Dmtc1 { rt: Gpr::T0, fs: Fpr::F0 }.encode());
+                            code.extend_from_slice(&Instruction::CvtDL { fd: Fpr::F0, fs: Fpr::F0 }.encode());
+                            code.extend_from_slice(&Instruction::Dmfc1 { rt: Gpr::T0, fs: Fpr::F0 }.encode());
                         }
                         CastKind::FloatToInt => {
-                            // f64 → signed int: LDC1 F0, CVT.W.D F0,F0, SWC1 F0, LW
-                            code.extend_from_slice(&Instruction::Ldc1 { ft: Fpr::F0, base: Gpr::Fp, offset: dst_off }.encode());
-                            code.extend_from_slice(&encode_nop());
+                            // f64 → signed i32: DMTC1 T0→F0, CVT.W.D F0,F0, MFC1 T0←F0
+                            code.extend_from_slice(&Instruction::Dmtc1 { rt: Gpr::T0, fs: Fpr::F0 }.encode());
                             code.extend_from_slice(&Instruction::CvtWD { fd: Fpr::F0, fs: Fpr::F0 }.encode());
-                            code.extend_from_slice(&encode_nop());
-                            code.extend_from_slice(&Instruction::Swc1 { ft: Fpr::F0, base: Gpr::Fp, offset: dst_off }.encode());
-                            code.extend_from_slice(&encode_nop());
-                            // Load the 32-bit int back and sign-extend to 64-bit
-                            code.extend_from_slice(&Instruction::Lw { rt: Gpr::T0, base: Gpr::Fp, offset: dst_off }.encode());
-                            code.extend_from_slice(&encode_nop());
+                            code.extend_from_slice(&Instruction::Mfc1 { rt: Gpr::T0, fs: Fpr::F0 }.encode());
                         }
                         CastKind::FloatToUInt => {
-                            // f64 → unsigned int: same as FloatToInt for now
-                            code.extend_from_slice(&Instruction::Ldc1 { ft: Fpr::F0, base: Gpr::Fp, offset: dst_off }.encode());
-                            code.extend_from_slice(&encode_nop());
+                            // f64 → unsigned i32: DMTC1 T0→F0, CVT.W.D F0,F0, MFC1 T0←F0
+                            // (MIPS doesn't have a dedicated unsigned FP→int conversion)
+                            code.extend_from_slice(&Instruction::Dmtc1 { rt: Gpr::T0, fs: Fpr::F0 }.encode());
                             code.extend_from_slice(&Instruction::CvtWD { fd: Fpr::F0, fs: Fpr::F0 }.encode());
-                            code.extend_from_slice(&encode_nop());
-                            code.extend_from_slice(&Instruction::Swc1 { ft: Fpr::F0, base: Gpr::Fp, offset: dst_off }.encode());
-                            code.extend_from_slice(&encode_nop());
-                            code.extend_from_slice(&Instruction::Lw { rt: Gpr::T0, base: Gpr::Fp, offset: dst_off }.encode());
-                            code.extend_from_slice(&encode_nop());
+                            code.extend_from_slice(&Instruction::Mfc1 { rt: Gpr::T0, fs: Fpr::F0 }.encode());
                         }
                         CastKind::FloatToFloat => {
-                            // f64 → f32 (narrow): LDC1 F0, CVT.S.D F0,F0, SWC1 F0, LD
-                            code.extend_from_slice(&Instruction::Ldc1 { ft: Fpr::F0, base: Gpr::Fp, offset: dst_off }.encode());
-                            code.extend_from_slice(&encode_nop());
+                            // f64 → f32 (narrow): DMTC1 T0→F0, CVT.S.D F0,F0, MFC1 T0←F0
+                            code.extend_from_slice(&Instruction::Dmtc1 { rt: Gpr::T0, fs: Fpr::F0 }.encode());
                             code.extend_from_slice(&Instruction::CvtSD { fd: Fpr::F0, fs: Fpr::F0 }.encode());
-                            code.extend_from_slice(&encode_nop());
-                            code.extend_from_slice(&Instruction::Swc1 { ft: Fpr::F0, base: Gpr::Fp, offset: dst_off }.encode());
-                            code.extend_from_slice(&encode_nop());
-                            code.extend_from_slice(&Instruction::Lw { rt: Gpr::T0, base: Gpr::Fp, offset: dst_off }.encode());
-                            code.extend_from_slice(&encode_nop());
+                            code.extend_from_slice(&Instruction::Mfc1 { rt: Gpr::T0, fs: Fpr::F0 }.encode());
                         }
                     }
                     code.extend(ss_sd(Gpr::T0, dst_off));
@@ -3544,21 +3591,208 @@ fn lower_ir_instr(
             });
         }
 
-        IRInstr::Cast { dst, src, .. } => {
+        IRInstr::Cast { kind, dst, src, .. } => {
             let dst_reg = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
             let src_reg = map_vreg_to_gpr(vreg_id(src), None, vreg_map);
-            if dst_reg != src_reg {
-                let mov = Instruction::Daddu {
-                    rd: dst_reg,
-                    rs: src_reg,
-                    rt: Gpr::Zero,
-                };
-                result.push(AllocatedInstruction {
-                    opcode: "daddu".to_string(),
-                    reads: vec![PhysicalReg::new(RegClass::Gpr, src_reg.encoding())],
-                    writes: vec![PhysicalReg::new(RegClass::Gpr, dst_reg.encoding())],
-                    encoded: mov.encode().to_vec(),
-                });
+            match kind {
+                CastKind::ZExt => {
+                    // Zero-extend 32-bit to 64-bit: DSLL 32 + DSRL 32
+                    // First move src to dst if different
+                    if dst_reg != src_reg {
+                        let mov = Instruction::Daddu { rd: dst_reg, rs: src_reg, rt: Gpr::Zero };
+                        result.push(AllocatedInstruction {
+                            opcode: "daddu".to_string(),
+                            reads: vec![PhysicalReg::new(RegClass::Gpr, src_reg.encoding())],
+                            writes: vec![PhysicalReg::new(RegClass::Gpr, dst_reg.encoding())],
+                            encoded: mov.encode().to_vec(),
+                        });
+                    }
+                    let dsll = Instruction::Dsll { rd: dst_reg, rt: dst_reg, sa: 32 };
+                    result.push(AllocatedInstruction {
+                        opcode: "dsll".to_string(),
+                        reads: vec![PhysicalReg::new(RegClass::Gpr, dst_reg.encoding())],
+                        writes: vec![PhysicalReg::new(RegClass::Gpr, dst_reg.encoding())],
+                        encoded: dsll.encode().to_vec(),
+                    });
+                    let dsrl = Instruction::Dsrl { rd: dst_reg, rt: dst_reg, sa: 32 };
+                    result.push(AllocatedInstruction {
+                        opcode: "dsrl".to_string(),
+                        reads: vec![PhysicalReg::new(RegClass::Gpr, dst_reg.encoding())],
+                        writes: vec![PhysicalReg::new(RegClass::Gpr, dst_reg.encoding())],
+                        encoded: dsrl.encode().to_vec(),
+                    });
+                }
+                CastKind::SExt => {
+                    // Sign-extend: already sign-extended in 64-bit MIPS
+                    if dst_reg != src_reg {
+                        let mov = Instruction::Daddu { rd: dst_reg, rs: src_reg, rt: Gpr::Zero };
+                        result.push(AllocatedInstruction {
+                            opcode: "daddu".to_string(),
+                            reads: vec![PhysicalReg::new(RegClass::Gpr, src_reg.encoding())],
+                            writes: vec![PhysicalReg::new(RegClass::Gpr, dst_reg.encoding())],
+                            encoded: mov.encode().to_vec(),
+                        });
+                    }
+                }
+                CastKind::Trunc | CastKind::BitCast => {
+                    // Truncate / bitcast: just move if registers differ
+                    if dst_reg != src_reg {
+                        let mov = Instruction::Daddu { rd: dst_reg, rs: src_reg, rt: Gpr::Zero };
+                        result.push(AllocatedInstruction {
+                            opcode: "daddu".to_string(),
+                            reads: vec![PhysicalReg::new(RegClass::Gpr, src_reg.encoding())],
+                            writes: vec![PhysicalReg::new(RegClass::Gpr, dst_reg.encoding())],
+                            encoded: mov.encode().to_vec(),
+                        });
+                    }
+                }
+                CastKind::IntToFloat => {
+                    // Signed i32 → f64: MTC1 src→F0, CVT.D.W F0,F0, DMFC1 dst←F0
+                    let mtc1 = Instruction::Mtc1 { rt: src_reg, fs: Fpr::F0 };
+                    result.push(AllocatedInstruction {
+                        opcode: "mtc1".to_string(),
+                        reads: vec![PhysicalReg::new(RegClass::Gpr, src_reg.encoding())],
+                        writes: vec![PhysicalReg::new(RegClass::SimdFp, Fpr::F0.encoding())],
+                        encoded: mtc1.encode().to_vec(),
+                    });
+                    let cvt = Instruction::CvtDW { fd: Fpr::F0, fs: Fpr::F0 };
+                    result.push(AllocatedInstruction {
+                        opcode: "cvt.d.w".to_string(),
+                        reads: vec![PhysicalReg::new(RegClass::SimdFp, Fpr::F0.encoding())],
+                        writes: vec![PhysicalReg::new(RegClass::SimdFp, Fpr::F0.encoding())],
+                        encoded: cvt.encode().to_vec(),
+                    });
+                    let dmfc1 = Instruction::Dmfc1 { rt: dst_reg, fs: Fpr::F0 };
+                    result.push(AllocatedInstruction {
+                        opcode: "dmfc1".to_string(),
+                        reads: vec![PhysicalReg::new(RegClass::SimdFp, Fpr::F0.encoding())],
+                        writes: vec![PhysicalReg::new(RegClass::Gpr, dst_reg.encoding())],
+                        encoded: dmfc1.encode().to_vec(),
+                    });
+                }
+                CastKind::UIntToFloat => {
+                    // Unsigned i32 → f64: zero-extend to 64-bit, DMTC1, CVT.D.L
+                    // First zero-extend the 32-bit unsigned value to 64-bit
+                    if dst_reg != src_reg {
+                        let mov = Instruction::Daddu { rd: dst_reg, rs: src_reg, rt: Gpr::Zero };
+                        result.push(AllocatedInstruction {
+                            opcode: "daddu".to_string(),
+                            reads: vec![PhysicalReg::new(RegClass::Gpr, src_reg.encoding())],
+                            writes: vec![PhysicalReg::new(RegClass::Gpr, dst_reg.encoding())],
+                            encoded: mov.encode().to_vec(),
+                        });
+                    }
+                    // DSLL 32 + DSRL 32 to zero-extend
+                    let dsll = Instruction::Dsll { rd: dst_reg, rt: dst_reg, sa: 32 };
+                    result.push(AllocatedInstruction {
+                        opcode: "dsll".to_string(),
+                        reads: vec![PhysicalReg::new(RegClass::Gpr, dst_reg.encoding())],
+                        writes: vec![PhysicalReg::new(RegClass::Gpr, dst_reg.encoding())],
+                        encoded: dsll.encode().to_vec(),
+                    });
+                    let dsrl = Instruction::Dsrl { rd: dst_reg, rt: dst_reg, sa: 32 };
+                    result.push(AllocatedInstruction {
+                        opcode: "dsrl".to_string(),
+                        reads: vec![PhysicalReg::new(RegClass::Gpr, dst_reg.encoding())],
+                        writes: vec![PhysicalReg::new(RegClass::Gpr, dst_reg.encoding())],
+                        encoded: dsrl.encode().to_vec(),
+                    });
+                    // DMTC1 dst→F0, CVT.D.L F0,F0, DMFC1 dst←F0
+                    let dmtc1 = Instruction::Dmtc1 { rt: dst_reg, fs: Fpr::F0 };
+                    result.push(AllocatedInstruction {
+                        opcode: "dmtc1".to_string(),
+                        reads: vec![PhysicalReg::new(RegClass::Gpr, dst_reg.encoding())],
+                        writes: vec![PhysicalReg::new(RegClass::SimdFp, Fpr::F0.encoding())],
+                        encoded: dmtc1.encode().to_vec(),
+                    });
+                    let cvt = Instruction::CvtDL { fd: Fpr::F0, fs: Fpr::F0 };
+                    result.push(AllocatedInstruction {
+                        opcode: "cvt.d.l".to_string(),
+                        reads: vec![PhysicalReg::new(RegClass::SimdFp, Fpr::F0.encoding())],
+                        writes: vec![PhysicalReg::new(RegClass::SimdFp, Fpr::F0.encoding())],
+                        encoded: cvt.encode().to_vec(),
+                    });
+                    let dmfc1 = Instruction::Dmfc1 { rt: dst_reg, fs: Fpr::F0 };
+                    result.push(AllocatedInstruction {
+                        opcode: "dmfc1".to_string(),
+                        reads: vec![PhysicalReg::new(RegClass::SimdFp, Fpr::F0.encoding())],
+                        writes: vec![PhysicalReg::new(RegClass::Gpr, dst_reg.encoding())],
+                        encoded: dmfc1.encode().to_vec(),
+                    });
+                }
+                CastKind::FloatToInt => {
+                    // f64 → signed i32: DMTC1 src→F0, CVT.W.D F0,F0, MFC1 dst←F0
+                    let dmtc1 = Instruction::Dmtc1 { rt: src_reg, fs: Fpr::F0 };
+                    result.push(AllocatedInstruction {
+                        opcode: "dmtc1".to_string(),
+                        reads: vec![PhysicalReg::new(RegClass::Gpr, src_reg.encoding())],
+                        writes: vec![PhysicalReg::new(RegClass::SimdFp, Fpr::F0.encoding())],
+                        encoded: dmtc1.encode().to_vec(),
+                    });
+                    let cvt = Instruction::CvtWD { fd: Fpr::F0, fs: Fpr::F0 };
+                    result.push(AllocatedInstruction {
+                        opcode: "cvt.w.d".to_string(),
+                        reads: vec![PhysicalReg::new(RegClass::SimdFp, Fpr::F0.encoding())],
+                        writes: vec![PhysicalReg::new(RegClass::SimdFp, Fpr::F0.encoding())],
+                        encoded: cvt.encode().to_vec(),
+                    });
+                    let mfc1 = Instruction::Mfc1 { rt: dst_reg, fs: Fpr::F0 };
+                    result.push(AllocatedInstruction {
+                        opcode: "mfc1".to_string(),
+                        reads: vec![PhysicalReg::new(RegClass::SimdFp, Fpr::F0.encoding())],
+                        writes: vec![PhysicalReg::new(RegClass::Gpr, dst_reg.encoding())],
+                        encoded: mfc1.encode().to_vec(),
+                    });
+                }
+                CastKind::FloatToUInt => {
+                    // f64 → unsigned i32: same as FloatToInt for now
+                    // (MIPS doesn't have a dedicated unsigned FP→int conversion)
+                    let dmtc1 = Instruction::Dmtc1 { rt: src_reg, fs: Fpr::F0 };
+                    result.push(AllocatedInstruction {
+                        opcode: "dmtc1".to_string(),
+                        reads: vec![PhysicalReg::new(RegClass::Gpr, src_reg.encoding())],
+                        writes: vec![PhysicalReg::new(RegClass::SimdFp, Fpr::F0.encoding())],
+                        encoded: dmtc1.encode().to_vec(),
+                    });
+                    let cvt = Instruction::CvtWD { fd: Fpr::F0, fs: Fpr::F0 };
+                    result.push(AllocatedInstruction {
+                        opcode: "cvt.w.d".to_string(),
+                        reads: vec![PhysicalReg::new(RegClass::SimdFp, Fpr::F0.encoding())],
+                        writes: vec![PhysicalReg::new(RegClass::SimdFp, Fpr::F0.encoding())],
+                        encoded: cvt.encode().to_vec(),
+                    });
+                    let mfc1 = Instruction::Mfc1 { rt: dst_reg, fs: Fpr::F0 };
+                    result.push(AllocatedInstruction {
+                        opcode: "mfc1".to_string(),
+                        reads: vec![PhysicalReg::new(RegClass::SimdFp, Fpr::F0.encoding())],
+                        writes: vec![PhysicalReg::new(RegClass::Gpr, dst_reg.encoding())],
+                        encoded: mfc1.encode().to_vec(),
+                    });
+                }
+                CastKind::FloatToFloat => {
+                    // f64 → f32 (narrow): DMTC1 src→F0, CVT.S.D F0,F0, MFC1 dst←F0
+                    let dmtc1 = Instruction::Dmtc1 { rt: src_reg, fs: Fpr::F0 };
+                    result.push(AllocatedInstruction {
+                        opcode: "dmtc1".to_string(),
+                        reads: vec![PhysicalReg::new(RegClass::Gpr, src_reg.encoding())],
+                        writes: vec![PhysicalReg::new(RegClass::SimdFp, Fpr::F0.encoding())],
+                        encoded: dmtc1.encode().to_vec(),
+                    });
+                    let cvt = Instruction::CvtSD { fd: Fpr::F0, fs: Fpr::F0 };
+                    result.push(AllocatedInstruction {
+                        opcode: "cvt.s.d".to_string(),
+                        reads: vec![PhysicalReg::new(RegClass::SimdFp, Fpr::F0.encoding())],
+                        writes: vec![PhysicalReg::new(RegClass::SimdFp, Fpr::F0.encoding())],
+                        encoded: cvt.encode().to_vec(),
+                    });
+                    let mfc1 = Instruction::Mfc1 { rt: dst_reg, fs: Fpr::F0 };
+                    result.push(AllocatedInstruction {
+                        opcode: "mfc1".to_string(),
+                        reads: vec![PhysicalReg::new(RegClass::SimdFp, Fpr::F0.encoding())],
+                        writes: vec![PhysicalReg::new(RegClass::Gpr, dst_reg.encoding())],
+                        encoded: mfc1.encode().to_vec(),
+                    });
+                }
             }
         }
 

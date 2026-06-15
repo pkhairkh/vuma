@@ -21,7 +21,7 @@ use crate::backend::{
 use crate::ir::{BinOpKind, CastKind, CmpKind, IRFunction, IRInstr, IRType, IRValue, UnaryOpKind};
 use std::collections::HashMap;
 
-use super::{Gpr, Instruction};
+use super::{Fpr, Gpr, Instruction};
 
 // =============================================================================
 // Constants
@@ -48,6 +48,10 @@ const CALLEE_SAVED_ALLOC: &[Gpr] = &[
     Gpr::S0, Gpr::S1, Gpr::S2, Gpr::S3, Gpr::S4,
     Gpr::S5, Gpr::S6, Gpr::S7, Gpr::S8,
 ];
+
+// FPR scratch registers (caller-saved temporaries, not allocated to vregs)
+const FS0: Fpr = Fpr::F0; // $f0 / $fa0 — primary FPR scratch
+const FS1: Fpr = Fpr::F1; // $f1 / $fa1 — secondary FPR scratch
 
 // =============================================================================
 // Helpers
@@ -812,7 +816,7 @@ fn lower_instr(
             if let Some(d) = dst { cache.assign_vreg(d.as_register().unwrap_or(0), Gpr::A0, true); }
             code
         }
-        IRInstr::Cast { kind, dst, src, .. } => {
+        IRInstr::Cast { kind, dst, src, from_ty, to_ty } => {
             let mut code = Vec::new();
             let dst_id = dst.as_register().unwrap_or(0);
             let (s, pre) = resolve_val(src, cache, fp); code.extend(pre);
@@ -822,12 +826,118 @@ fn lower_instr(
                 CastKind::ZExt => { code.extend_from_slice(&Instruction::SlliD { rd: d, rj: d, imm8: 32 }.encode()); code.extend_from_slice(&Instruction::SrliD { rd: d, rj: d, imm8: 32 }.encode()); }
                 CastKind::SExt => { code.extend_from_slice(&Instruction::SlliW { rd: d, rj: d, imm8: 0 }.encode()); }
                 CastKind::Trunc | CastKind::BitCast => {}
-                CastKind::IntToFloat | CastKind::UIntToFloat |
-                CastKind::FloatToInt | CastKind::FloatToUInt |
+
+                // ── IntToFloat (signed integer → float) ─────────────
+                CastKind::IntToFloat => {
+                    let src_is_32 = from_ty.as_ref().map_or(false, |t|
+                        matches!(t, IRType::I8 | IRType::I16 | IRType::I32)
+                    );
+                    let dst_is_f32 = to_ty.as_ref().map_or(false, |t| matches!(t, IRType::F32));
+
+                    // Sign-extend i32 source in the GPR
+                    if src_is_32 {
+                        code.extend_from_slice(&Instruction::SlliW { rd: d, rj: d, imm8: 0 }.encode());
+                    }
+                    // Move GPR → FPR
+                    code.extend_from_slice(&Instruction::FmovFpr2GrD { fd: FS0, rj: d }.encode());
+                    // Emit FFINT instruction
+                    match (src_is_32, dst_is_f32) {
+                        (true,  true)  => code.extend_from_slice(&Instruction::FfintSW { fd: FS0, fj: FS0 }.encode()),
+                        (false, true)  => code.extend_from_slice(&Instruction::FfintSL { fd: FS0, fj: FS0 }.encode()),
+                        (true,  false) => code.extend_from_slice(&Instruction::FfintDW { fd: FS0, fj: FS0 }.encode()),
+                        (false, false) => code.extend_from_slice(&Instruction::FfintDL { fd: FS0, fj: FS0 }.encode()),
+                    }
+                    // Move FPR → GPR
+                    code.extend_from_slice(&Instruction::FmovGr2FprD { rd: d, fj: FS0 }.encode());
+                }
+
+                // ── UIntToFloat (unsigned integer → float) ───────────
+                CastKind::UIntToFloat => {
+                    let src_is_32 = from_ty.as_ref().map_or(false, |t|
+                        matches!(t, IRType::U8 | IRType::U16 | IRType::U32)
+                    );
+                    let dst_is_f32 = to_ty.as_ref().map_or(false, |t| matches!(t, IRType::F32));
+
+                    // Zero-extend 32-bit unsigned values
+                    if src_is_32 {
+                        code.extend_from_slice(&Instruction::SlliD { rd: d, rj: d, imm8: 32 }.encode());
+                        code.extend_from_slice(&Instruction::SrliD { rd: d, rj: d, imm8: 32 }.encode());
+                    }
+                    // Move GPR → FPR
+                    code.extend_from_slice(&Instruction::FmovFpr2GrD { fd: FS0, rj: d }.encode());
+                    // Use ffint.d.l (i64→f64) for the zero-extended value
+                    code.extend_from_slice(&Instruction::FfintDL { fd: FS0, fj: FS0 }.encode());
+                    // Narrow to f32 if needed
+                    if dst_is_f32 {
+                        code.extend_from_slice(&Instruction::FcvtSD { fd: FS0, fj: FS0 }.encode());
+                    }
+                    // Move FPR → GPR
+                    code.extend_from_slice(&Instruction::FmovGr2FprD { rd: d, fj: FS0 }.encode());
+                }
+
+                // ── FloatToInt (float → signed integer) ──────────────
+                CastKind::FloatToInt => {
+                    let src_is_f32 = from_ty.as_ref().map_or(false, |t| matches!(t, IRType::F32));
+                    let dst_is_32 = to_ty.as_ref().map_or(false, |t|
+                        matches!(t, IRType::I8 | IRType::I16 | IRType::I32)
+                    );
+
+                    // Move GPR → FPR
+                    code.extend_from_slice(&Instruction::FmovFpr2GrD { fd: FS0, rj: d }.encode());
+                    // Emit FTINT instruction
+                    match (src_is_f32, dst_is_32) {
+                        (true,  true)  => code.extend_from_slice(&Instruction::FtintWS { fd: FS0, fj: FS0 }.encode()),
+                        (false, true)  => code.extend_from_slice(&Instruction::FtintWD { fd: FS0, fj: FS0 }.encode()),
+                        (true,  false) => code.extend_from_slice(&Instruction::FtintLS { fd: FS0, fj: FS0 }.encode()),
+                        (false, false) => code.extend_from_slice(&Instruction::FtintLD { fd: FS0, fj: FS0 }.encode()),
+                    }
+                    // Move FPR → GPR
+                    code.extend_from_slice(&Instruction::FmovGr2FprD { rd: d, fj: FS0 }.encode());
+                    // Sign-extend i32 result
+                    if dst_is_32 {
+                        code.extend_from_slice(&Instruction::SlliW { rd: d, rj: d, imm8: 0 }.encode());
+                    }
+                }
+
+                // ── FloatToUInt (float → unsigned integer) ───────────
+                CastKind::FloatToUInt => {
+                    let src_is_f32 = from_ty.as_ref().map_or(false, |t| matches!(t, IRType::F32));
+                    let dst_is_32 = to_ty.as_ref().map_or(false, |t|
+                        matches!(t, IRType::U8 | IRType::U16 | IRType::U32)
+                    );
+
+                    // Move GPR → FPR
+                    code.extend_from_slice(&Instruction::FmovFpr2GrD { fd: FS0, rj: d }.encode());
+                    // Use signed ftint, then zero-extend for 32-bit results
+                    if src_is_f32 {
+                        code.extend_from_slice(&Instruction::FtintWS { fd: FS0, fj: FS0 }.encode());
+                    } else {
+                        code.extend_from_slice(&Instruction::FtintWD { fd: FS0, fj: FS0 }.encode());
+                    }
+                    // Move FPR → GPR
+                    code.extend_from_slice(&Instruction::FmovGr2FprD { rd: d, fj: FS0 }.encode());
+                    // Zero-extend for unsigned 32-bit result
+                    if dst_is_32 {
+                        code.extend_from_slice(&Instruction::SlliD { rd: d, rj: d, imm8: 32 }.encode());
+                        code.extend_from_slice(&Instruction::SrliD { rd: d, rj: d, imm8: 32 }.encode());
+                    }
+                }
+
+                // ── FloatToFloat (f32↔f64) ───────────────────────────
                 CastKind::FloatToFloat => {
-                    // FP conversion casts require FP register support;
-                    // for now, emit as a no-op move (backends should handle
-                    // via proper FP instructions when available).
+                    let src_is_f32 = from_ty.as_ref().map_or(false, |t| matches!(t, IRType::F32));
+
+                    // Move GPR → FPR
+                    code.extend_from_slice(&Instruction::FmovFpr2GrD { fd: FS0, rj: d }.encode());
+                    if src_is_f32 {
+                        // f32 → f64: fcvt.d.s
+                        code.extend_from_slice(&Instruction::FcvtDS { fd: FS0, fj: FS0 }.encode());
+                    } else {
+                        // f64 → f32: fcvt.s.d
+                        code.extend_from_slice(&Instruction::FcvtSD { fd: FS0, fj: FS0 }.encode());
+                    }
+                    // Move FPR → GPR
+                    code.extend_from_slice(&Instruction::FmovGr2FprD { rd: d, fj: FS0 }.encode());
                 }
             }
             cache.mark_dirty(dst_id); code

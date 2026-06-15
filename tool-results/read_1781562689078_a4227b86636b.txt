@@ -1,0 +1,730 @@
+     1→# VUMA Worklog
+     2→
+     3→## Task 2-f: Fix ARM32 calling convention for functions with >4 arguments
+     4→
+     5→**Date**: 2026-03-05
+     6→**File**: `src/codegen/src/arm32/mod.rs`
+     7→
+     8→### Bug Description
+     9→
+    10→The ARM32 backend silently dropped function arguments beyond the first 4. Under AAPCS, the first 4 arguments are passed in registers R0–R3, while arguments 5+ must be passed on the stack. The code at line 3594 had a `TODO: handle > 4 args via stack` comment, and arguments at index ≥4 were simply ignored in both the caller (call emission) and callee (prologue/argument setup).
+    11→
+    12→### Root Cause
+    13→
+    14→Three related gaps in the ARM32 codegen:
+    15→
+    16→1. **Call emission** (`IRInstr::Call`): Only loaded args 0–3 into R0–R3; args ≥4 were skipped entirely.
+    17→2. **Function prologue**: Only stored R0–R3 params to their vreg stack slots; stack-passed params (index ≥4) were never loaded from the stack into their vreg slots.
+    18→3. **Missing helper**: No `emit_add_sp` counterpart to `emit_sub_sp`, needed for caller-side stack cleanup after calls with stack-passed args.
+    19→
+    20→### AAPCS Stack Layout
+    21→
+    22→After the prologue (SUB SP, ADD R11=SP+frame_size, save LR/R11):
+    23→```
+    24→Higher addresses
+    25→  ┌──────────────┐
+    26→  │ arg N-1      │  ← [R11 + 8 + (N-5)*4]
+    27→  │ ...          │
+    28→  │ arg 5        │  ← [R11 + 12]
+    29→  │ arg 4        │  ← [R11 + 8]
+    30→  │ saved LR     │  ← [R11 + 4]
+    31→  │ saved R11    │  ← [R11 + 0]
+    32→  ├──────────────┤  ← R11 (frame pointer)
+    33→  │ vreg slots   │  ← [R11 - offset]
+    34→  │ ...          │
+    35→  ├──────────────┤  ← SP
+    36→Lower addresses
+    37→```
+    38→
+    39→Stack-passed arg at 0-based index `i` (i ≥ 4) is at `[R11 + 8 + (i - 4) * 4]`.
+    40→
+    41→### Fixes Applied
+    42→
+    43→#### Fix 1: Added `ss_load_from_r11_plus` helper (after line 3300)
+    44→
+    45→New closure that loads a 32-bit word from `[R11 + positive_offset]` into a destination register. Handles both the common case (offset ≤ 4095, single LDR instruction) and the rare large-offset case (compute address into R12 via ADD, then LDR indirect). This is the positive-offset counterpart to `ss_load_from_slot` which uses negative offsets.
+    46→
+    47→#### Fix 2: Added `emit_add_sp` helper (after line 3165)
+    48→
+    49→New closure that emits `ADD SP, SP, #imm` with the same large-value handling as the existing `emit_sub_sp` — tries ARM rotated-immediate encoding first, falls back to loading the value into R12 and using `ADD SP, SP, R12`.
+    50→
+    51→#### Fix 3: Updated function prologue — stack-passed args (lines 3444–3481)
+    52→
+    53→Extended the parameter-storing loop to handle index ≥4. For each stack-passed param:
+    54→1. Load the value from `[R11 + 8 + (i-4)*4]` into R0 using `ss_load_from_r11_plus`
+    55→2. Store R0 to the param's vreg stack slot using `ss_store_to_slot`
+    56→
+    57→Uses R0 (not R12) as the scratch register because `ss_store_to_slot` documents that `src_reg` must NOT be R12 for large offsets (it uses R12 internally). R0 is safe because it was already saved for param 0 earlier in the loop.
+    58→
+    59→#### Fix 4: Updated call emission — stack-passed args (lines 3862–3941)
+    60→
+    61→Completely rewrote the `IRInstr::Call` handler to support >4 arguments:
+    62→
+    63→1. **Allocate stack space**: `SUB SP, SP, #(num_stack_args * 4)` before setting up any args
+    64→2. **Store args 5+ to stack**: For each arg at index ≥4:
+    65→   - Normal case (offset ≤ 4095): Load arg into R12, `STR R12, [SP, #offset]`
+    66→   - Large-offset case: Compute `SP + offset` into R12, load arg into R0, `STR R0, [R12, #0]`
+    67→3. **Load args 0–3 into R0–R3** (existing behavior, unchanged)
+    68→4. **BL** (existing, unchanged)
+    69→5. **Caller cleanup**: `ADD SP, SP, #(num_stack_args * 4)` after the call returns
+    70→6. **Store return value** (existing, unchanged)
+    71→
+    72→The order (stack args first, then register args) ensures R12 is free for scratch use when storing stack args, and R0–R3 are loaded last just before the BL.
+    73→
+    74→### Argument Access in Function Body
+    75→
+    76→No changes needed. The function body accesses all parameters (including stack-passed ones) through `vreg_stack_slots` using `ss_load_value`. The prologue is the bridge that copies stack-passed args from their AAPCS locations `[R11 + 8 + ...]` into the same vreg stack slot mechanism used by all other variables. After the prologue runs, the function body treats all params identically regardless of how they were passed.
+    77→
+    78→### Backward Compatibility
+    79→
+    80→Functions with ≤4 arguments are completely unaffected — `num_stack_args` evaluates to 0, so no SUB SP, stack stores, or ADD SP instructions are emitted. The prologue loop only enters the `else` branch for params at index ≥4.
+    81→
+    82→## Task 2-c: Fix RISC-V 64 atomic CAS loop — branch labels never inserted into label_offsets
+    83→
+    84→**Date**: 2026-03-05
+    85→**File**: `src/codegen/src/riscv64.rs`
+    86→
+    87→### Bug Description
+    88→
+    89→The RISC-V 64 backend's atomic operations (AtomicStore and AtomicCas) had broken branch label handling. The code generated labels like `__atomic_store_retry_{offset}` and branch fixups referencing those labels, but never inserted the labels into the `label_offsets` HashMap. When Phase 4 (branch fixup) ran, it looked up each branch's `target_label` in `label_offsets`, got `None`, and silently skipped the fixup — leaving all branch offsets at 0. This meant:
+    90→
+    91→- **AtomicStore**: SC.D failure was never retried; BNE with offset 0 branched to the next instruction (a no-op fall-through).
+    92→- **AtomicCas**: No branch fixups were created at all (only a `TODO` comment). Both BNE instructions (not-equal→done and SC-failed→retry) kept offset 0, so the CAS loop never looped back on SC.D failure and never skipped to done on mismatch.
+    93→
+    94→### Additional Bug in AtomicStore
+    95→
+    96→The original AtomicStore code emitted `SC.D` without a preceding `LR.D`. Per the RISC-V A extension, SC.D requires a valid reservation established by a prior LR.D; without it, SC.D always reports failure (rd=1), making the retry loop infinite even if branching worked.
+    97→
+    98→### Root Cause Analysis
+    99→
+   100→The `label_offsets` HashMap is populated in two places:
+   101→1. **Block labels** (line 4164): `label_offsets.insert(block.label.clone(), current_byte_offset)` — works correctly for IR block labels.
+   102→2. **Atomic labels**: Never inserted — the code created label name strings and `BranchFixup` entries referencing them, but never called `label_offsets.insert(...)`.
+   103→
+   104→### Fixes Applied
+   105→
+   106→#### Fix 1: AtomicStore (lines 4659–4691)
+   107→
+   108→- **Added LR.D before SC.D** in the retry loop to properly establish a memory reservation. The loop is now: `LR.D T2, (T0)` → `SC.D T2, T1, (T0)` → `BNE T2, zero, retry`.
+   109→- **Inserted the retry label into `label_offsets`** at the absolute byte offset of the LR.D instruction: `label_offsets.insert(retry_label.clone(), retry_abs_offset)`.
+   110→- **Removed stale TODO comments** about "proper label support for atomic loops" since this IS the proper fix.
+   111→- Cleaned up variable naming: `retry_offset` → `retry_abs_offset` and `retry_label` for clarity.
+   112→
+   113→#### Fix 2: AtomicCas (lines 4693–4752)
+   114→
+   115→- **Inserted the retry label** (`__atomic_cas_retry_{offset}`) into `label_offsets` at the absolute byte offset of the LR.D instruction.
+   116→- **Inserted the done label** (`__atomic_cas_done_{offset}`) into `label_offsets` at the absolute byte offset after the second BNE (where the dst store begins).
+   117→- **Added branch fixup for BNE1** (current != expected → done): Creates a `BranchFixup` targeting the `done_label` with `bne_rs1=T2, bne_rs2=T1`.
+   118→- **Added branch fixup for BNE2** (SC.D failed → retry): Creates a `BranchFixup` targeting the `retry_label` with `bne_rs1=T4, bne_rs2=Zero`.
+   119→- **Removed stale TODO comment** about "proper label fixups for the retry/done branches".
+   120→
+   121→### How the Fix Works
+   122→
+   123→Both fixes follow the same pattern used by IR-level branches (e.g., `CondBranch`):
+   124→
+   125→1. Compute the absolute byte offset of the label position using `current_byte_offset + code.len() as u64`.
+   126→2. Create a unique label name (e.g., `__atomic_cas_retry_128`) incorporating the absolute offset for uniqueness.
+   127→3. Insert the label into `label_offsets` immediately — no need to wait, since `label_offsets` is just a HashMap consulted later in Phase 4.
+   128→4. Create `BranchFixup` entries referencing the label name.
+   129→5. Phase 4's existing fixup loop resolves all labels correctly, computing `rel_offset = target_offset - branch_abs_offset` and patching the encoded BNE/JAL instructions.
+   130→
+   131→### Instruction Sequences After Fix
+   132→
+   133→**AtomicStore**:
+   134→```
+   135→retry:  LR.D   T2, (T0)       ; establish reservation
+   136→        SC.D   T2, T1, (T0)   ; attempt store; T2=0 success, T2=1 failure
+   137→        BNE    T2, zero, retry ; if failed, branch back to LR.D
+   138→```
+   139→
+   140→**AtomicCas**:
+   141→```
+   142→retry:  LR.D   T2, (T0)       ; load current value & establish reservation
+   143→        BNE    T2, T1, done   ; if current != expected, skip to done
+   144→        SC.D   T4, T3, (T0)   ; attempt to store desired; T4=0 success, T4=1 failure
+   145→        BNE    T4, zero, retry; if SC failed, branch back to LR.D
+   146→done:   <store T2 to dst>     ; store the old (current) value to destination
+   147→```
+   148→
+   149→## Task 2-d: Implement proper Compare-and-Swap (CAS) for the Wasm32 backend
+   150→
+   151→**Date**: 2026-03-05
+   152→**File**: `src/codegen/src/wasm32/mod.rs`
+   153→
+   154→### Bug Description
+   155→
+   156→The Wasm32 backend's `AtomicCas` lowering was a placeholder that emitted a simple `Load` instruction, completely ignoring the `expected` and `desired` operands. Similarly, `AtomicLoad` and `AtomicStore` were lowered to their non-atomic equivalents (plain `i32.load`/`i32.store`), which do not provide any atomicity guarantees. The code had a comment stating "Atomic operations — not natively supported in Wasm MVP", but the Wasm Threads proposal (now standardized) defines proper atomic instructions with the `0xFE` prefix byte.
+   157→
+   158→### Root Cause
+   159→
+   160→The original implementation predated the Wasm Threads proposal's standardization. It assumed Wasm had no native atomic support and fell back to single-threaded semantics. This is incorrect for any multi-threaded Wasm execution environment.
+   161→
+   162→### Changes Made
+   163→
+   164→#### 1. Added `shared` field to `WasmLimits` (line ~973)
+   165→
+   166→Wasm atomic instructions require **shared linear memory**. Added a `shared: bool` field to `WasmLimits` and updated the binary encoding to use the correct flag bits:
+   167→- `0x00`: min only, not shared
+   168→- `0x01`: min + max, not shared
+   169→- `0x02`: min only, shared
+   170→- `0x03`: min + max, shared
+   171→
+   172→The flag is computed as: `flag = (has_max as u8) | ((shared as u8) << 1)`.
+   173→
+   174→#### 2. Added atomic `WasmInstr` variants (lines 364–418)
+   175→
+   176→Added instruction variants covering the full set of Wasm atomic memory operations:
+   177→
+   178→**Atomic loads** (0xFE prefix):
+   179→- `I32AtomicLoad` (0x10), `I64AtomicLoad` (0x11)
+   180→- `I32AtomicLoad8U` (0x12), `I32AtomicLoad16U` (0x13)
+   181→- `I64AtomicLoad8U` (0x14), `I64AtomicLoad16U` (0x15), `I64AtomicLoad32U` (0x16)
+   182→
+   183→**Atomic stores** (0xFE prefix):
+   184→- `I32AtomicStore` (0x17), `I64AtomicStore` (0x18)
+   185→- `I32AtomicStore8` (0x19), `I32AtomicStore16` (0x1A)
+   186→- `I64AtomicStore8` (0x1B), `I64AtomicStore16` (0x1C), `I64AtomicStore32` (0x1D)
+   187→
+   188→**Fence**:
+   189→- `MemoryAtomicFence` (0x1E, with reserved byte 0x00)
+   190→
+   191→**Compare-and-swap** (0xFE prefix):
+   192→- `I32AtomicRmwCmpxchg` (0x48), `I64AtomicRmwCmpxchg` (0x49)
+   193→- `I32AtomicRmw8CmpxchgU` (0x4A), `I32AtomicRmw16CmpxchgU` (0x4B)
+   194→- `I64AtomicRmw8CmpxchgU` (0x4C), `I64AtomicRmw16CmpxchgU` (0x4D), `I64AtomicRmw32CmpxchgU` (0x4E)
+   195→
+   196→#### 3. Added binary encoding for all atomic instructions (lines 827–961)
+   197→
+   198→All atomic instructions encode as: `0xFE` prefix + LEB128 sub-opcode + LEB128 alignment + LEB128 offset. The `MemoryAtomicFence` instruction additionally emits a reserved `0x00` byte.
+   199→
+   200→#### 4. Replaced placeholder lowering with proper atomic instructions (lines 2650–2711)
+   201→
+   202→**AtomicLoad**: Now selects the correct atomic load instruction based on `IRType`:
+   203→- `I8`/`U8` → `I32AtomicLoad8U` (align=0)
+   204→- `I16`/`U16` → `I32AtomicLoad16U` (align=1)
+   205→- `I32`/`U32`/`Ptr`/`Func` → `I32AtomicLoad` (align=2)
+   206→- `I64`/`U64` → `I64AtomicLoad` (align=3)
+   207→
+   208→**AtomicStore**: Now selects the correct atomic store instruction based on `IRType`:
+   209→- `I8`/`U8` → `I32AtomicStore8` (align=0)
+   210→- `I16`/`U16` → `I32AtomicStore16` (align=1)
+   211→- `I32`/`U32`/`Ptr`/`Func` → `I32AtomicStore` (align=2)
+   212→- `I64`/`U64` → `I64AtomicStore` (align=3)
+   213→
+   214→**AtomicCas**: Now emits a proper `cmpxchg` instruction. Stack operands are pushed in Wasm order: `addr`, `expected`, `desired`. The instruction atomically reads the old value, compares with expected, and writes desired if equal. It returns the old value.
+   215→- `I8`/`U8` → `I32AtomicRmw8CmpxchgU` (align=0)
+   216→- `I16`/`U16` → `I32AtomicRmw16CmpxchgU` (align=1)
+   217→- `I32`/`U32`/`Ptr`/`Func` → `I32AtomicRmwCmpxchg` (align=2)
+   218→- `I64`/`U64` → `I64AtomicRmwCmpxchg` (align=3)
+   219→
+   220→#### 5. Marked production memory as shared (line ~2903)
+   221→
+   222→Updated `encode_program` to set `shared: true` on the module's memory so that atomic instructions are valid at runtime. All test code uses `shared: false` since tests don't require atomics.
+   223→
+   224→#### 6. Added comprehensive tests (lines 3832–3944)
+   225→
+   226→- `test_i32_atomic_load_encoding` — verifies 0xFE 0x10 + alignment + offset
+   227→- `test_i64_atomic_load_encoding` — verifies 0xFE 0x11
+   228→- `test_i32_atomic_store_encoding` — verifies 0xFE 0x17
+   229→- `test_i64_atomic_store_encoding` — verifies 0xFE 0x18
+   230→- `test_i32_atomic_rmw_cmpxchg_encoding` — verifies 0xFE 0x48
+   231→- `test_i64_atomic_rmw_cmpxchg_encoding` — verifies 0xFE 0x49
+   232→- `test_subword_atomic_cmpxchg_encoding` — verifies 0xFE 0x4A (8-bit) and 0xFE 0x4B (16-bit)
+   233→- `test_memory_atomic_fence_encoding` — verifies 0xFE 0x1E + reserved 0x00
+   234→- `test_shared_memory_limits_encoding` — verifies flag byte encoding for shared/non-shared memories
+   235→
+   236→### Key Design Decisions
+   237→
+   238→1. **No LL/SC loop needed**: Unlike AArch64 and RISC-V which require explicit load-linked/store-conditional loops, Wasm's `cmpxchg` instruction handles the retry loop internally. This is a major simplification.
+   239→
+   240→2. **Natural alignment enforced**: All atomic instructions use naturally aligned addresses (align = log2(access_width)). Misaligned atomic accesses trap in Wasm.
+   241→
+   242→3. **Sub-word support**: 8-bit and 16-bit atomic CAS is supported via the `rmw8.cmpxchg_u` and `rmw16.cmpxchg_u` instructions, which zero-extend the result to the Wasm stack type (i32 or i64).
+   243→
+   244→4. **Shared memory required**: The Wasm spec mandates that atomic instructions can only operate on shared memory. The production module now emits `shared: true` in its memory definition.
+   245→
+   246→## Task 2-h: Fix MIPS64 Ror/Rol incomplete implementation + LoongArch64 unimplemented terminators
+   247→
+   248→**Date**: 2026-03-05
+   249→**Files**: `src/codegen/src/mips64/mod.rs`, `src/codegen/src/loongarch64/mod.rs`, `src/codegen/src/loongarch64/stack_slot_isel.rs`, `src/codegen/src/loongarch64/reg_alloc_isel.rs`
+   250→
+   251→### Bug 1: MIPS64 Ror/Rol Incomplete Implementation
+   252→
+   253→#### Bug Description
+   254→
+   255→The MIPS64 backend had two separate ROR/ROL bugs:
+   256→
+   257→1. **`lower_binop` function (register-allocated path, dead code)**: ROR only emitted `DSRLV` and ROL only emitted `DSLLV` — each was missing the complementary shift + OR to complete the rotation. For example, ROR should produce `(n >> r) | (n << (64-r))` but only produced `(n >> r)`.
+   258→
+   259→2. **Stack-slot ISel path (active code generation)**: ROR and ROL were hardcoded to 32-bit rotation (using `imm: 32` in ADDIU), ignoring the `is_32bit` flag. 64-bit types (I64/U64) would produce incorrect results because they need a 64-bit rotation width, and they don't need the zero-extend/mask-to-32-bits steps.
+   260→
+   261→#### Root Cause
+   262→
+   263→The `lower_binop` function had comments acknowledging the issue: "Simplified: just emit dsrlv as placeholder (lower_ir_instr is dead code)". The stack-slot ISel path was implemented only for the I32/U32 case and never updated for 64-bit types.
+   264→
+   265→#### Fixes Applied
+   266→
+   267→##### Fix 1: `lower_binop` — Complete ROR/ROL sequences (lines ~1831–1922)
+   268→
+   269→Replaced the single-instruction placeholder with proper multi-instruction sequences, following the same pattern as `SLe` (push to `result`, return early):
+   270→
+   271→**ROR (64-bit)**: `(n >> r) | (n << (64-r))`
+   272→```
+   273→DSRLV T2, lhs, rhs       // T2 = lhs >> rhs
+   274→DADDIU T3, $zero, 64     // T3 = 64
+   275→DSUBU  T3, T3, rhs       // T3 = 64 - rhs
+   276→DSLLV  T3, lhs, T3       // T3 = lhs << (64-rhs)
+   277→OR     dst, T2, T3       // dst = (lhs >> rhs) | (lhs << (64-rhs))
+   278→```
+   279→
+   280→**ROL (64-bit)**: `(n << r) | (n >> (64-r))`
+   281→```
+   282→DSLLV  T2, lhs, rhs      // T2 = lhs << rhs
+   283→DADDIU T3, $zero, 64     // T3 = 64
+   284→DSUBU  T3, T3, rhs       // T3 = 64 - rhs
+   285→DSRLV  T3, lhs, T3       // T3 = lhs >> (64-rhs)
+   286→OR     dst, T2, T3       // dst = (lhs << rhs) | (lhs >> (64-rhs))
+   287→```
+   288→
+   289→Uses T2 and T3 as scratch registers (caller-saved temporaries, safe to clobber).
+   290→
+   291→##### Fix 2: Stack-slot ISel — 32-bit/64-bit dispatch (lines ~2536–2589)
+   292→
+   293→Added `is_32bit` check to ROR/ROL:
+   294→
+   295→- **32-bit path** (existing): Zero-extend value, rotate with width 32, mask result to 32 bits
+   296→- **64-bit path** (new): Direct DSRLV/DSLLV + DADDIU(64) + DSUBU + DSLLV/DSRLV + OR sequence, no zero-extend or mask needed
+   297→
+   298→Uses `DADDIU` (64-bit add immediate) instead of `ADDIU` (32-bit) for the 64-bit path to correctly load 64.
+   299→
+   300→### Bug 2: LoongArch64 Unimplemented Terminators
+   301→
+   302→#### Bug Description
+   303→
+   304→The LoongArch64 backend's Switch, Invoke, TailCall, and Resume terminators all emitted a `BREAK` instruction (intentional crash), making any IR using these terminators immediately trap at runtime. Both `stack_slot_isel.rs` and `reg_alloc_isel.rs` had this issue.
+   305→
+   306→Additionally, the vreg collection phase in both files only tracked vregs used by `Branch` and `Return` terminators, missing vregs referenced by Switch (discr), Invoke (args), TailCall (args), and Resume (value). This could cause those vregs to not get stack slots, leading to incorrect code.
+   307→
+   308→#### Root Cause
+   309→
+   310→These terminators were never implemented — the code had placeholder `BREAK` emissions from initial development.
+   311→
+   312→#### Fixes Applied
+   313→
+   314→##### Fix 0: Vreg collection (both stack_slot_isel.rs and reg_alloc_isel.rs)
+   315→
+   316→Extended the terminator vreg tracking `match` to include:
+   317→- `Switch { discr, .. }` → track `discr` register
+   318→- `Invoke { args, .. }` → track all `args` registers
+   319→- `TailCall { args, .. }` → track all `args` registers
+   320→- `Resume { value }` → track `value` register
+   321→
+   322→##### Fix 1: Switch — Cascade of BEQ comparisons (both isel files)
+   323→
+   324→```loongarch
+   325→# Load discriminator into S0/T0
+   326→ld.d   S0, fp, discr_offset      # (or read_vreg for reg_alloc_isel)
+   327→# For each (value, target):
+   328→lu12i.w S1, value_hi              # load comparison value
+   329→ori    S1, S1, value_lo
+   330→beq    S0, S1, target_label       # branch if match (patched later)
+   331→# Default:
+   332→b      default_label               # unconditional branch to default
+   333→```
+   334→
+   335→No jump table is used (PCADDU12I + LD.W + JR would require emitting data in the code section, which the framework doesn't support). The cascade-of-comparisons approach is correct and handles all switch sizes, though it's O(n) in the number of targets.
+   336→
+   337→##### Fix 2: Invoke — Call + branch to normal (both isel files)
+   338→
+   339→Invoke is implemented identically to Call for the invocation part, with an additional unconditional branch to the `normal` continuation block after the call returns:
+   340→
+   341→1. Flush caller-saved registers (reg_alloc_isel) / set up args from stack slots (stack_slot_isel)
+   342→2. Load arguments into $a0–$a7 (+ stack-passed args if >8)
+   343→3. BL to function (with R_LARCH_B26 relocation)
+   344→4. Deallocate stack arg space (if any)
+   345→5. Store return value to dst's stack slot / assign to $a0 in reg cache
+   346→6. B normal (branch to normal continuation, patched later)
+   347→
+   348→The `unwind` block is tracked for control flow correctness (it's a successor of the Invoke block) but doesn't get explicit landing-pad setup — that requires DWARF exception info which the framework doesn't emit. The unwind handler would be reached by the unwinder at runtime.
+   349→
+   350→##### Fix 3: TailCall — Epilogue + B to target (both isel files)
+   351→
+   352→Tail call reuses the caller's stack frame. The implementation:
+   353→
+   354→1. Load register args into $a0–$a7 (while frame is still intact)
+   355→2. For stack-passed args (>8): place them at old_sp offsets (above current frame, in the caller's arg area which is no longer needed)
+   356→3. Epilogue: restore $ra, $fp, deallocate frame (same as Return, minus JIRL)
+   357→4. B to target (with R_LARCH_B26 relocation, no return address save)
+   358→
+   359→Since `B` doesn't modify `$ra`, the callee returns directly to the tail-caller's caller — the key semantic of a tail call.
+   360→
+   361→In `stack_slot_isel.rs`, the stack args are placed by computing `old_sp = $sp + frame_size` and storing at `old_sp + (i-8)*8`. In `reg_alloc_isel.rs`, we flush all registers and load args from the reg cache before the epilogue.
+   362→
+   363→##### Fix 4: Resume — Call __Unwind_Resume (both isel files)
+   364→
+   365→Resume transfers control to the unwinder, which never returns:
+   366→
+   367→1. Load exception value into $a0
+   368→2. BL __Unwind_Resume (with R_LARCH_B26 relocation)
+   369→3. BREAK (safety trap — __Unwind_Resume should never return)
+   370→
+   371→This is a minimal but correct implementation. In a full EH system, the personality function and unwinder would use DWARF info to find the correct landing pad.
+   372→
+   373→### Bonus Fix: LoongArch64 mod.rs ROL
+   374→
+   375→While investigating, I also noticed that the `lower_binop_la64` function in `loongarch64/mod.rs` handled both Ror and Rol identically (both using `RotrD` directly), which is incorrect for Rol since `ROL(x, n) = ROTR(x, 64-n)`. Fixed by splitting the cases:
+   376→
+   377→- **Ror**: `RotrD rd, rj, rk` (correct as-is)
+   378→- **Rol**: Compute `64-n` via `ADDI.D T2, $r0, 64; SUB.D T2, T2, r` then `RotrD rd, rj, T2`
+   379→
+   380→### Files Modified
+   381→
+   382→| File | Changes |
+   383→|------|---------|
+   384→| `mips64/mod.rs` | Fixed `lower_binop` ROR/ROL (complete sequences with DSRLV+DSLLV+OR); Fixed stack-slot ISel ROR/ROL (32-bit/64-bit dispatch) |
+   385→| `loongarch64/mod.rs` | Fixed `lower_binop_la64` ROL (compute 64-n before RotrD) |
+   386→| `loongarch64/stack_slot_isel.rs` | Added vreg tracking for Switch/Invoke/TailCall/Resume; Implemented Switch (BEQ cascade), Invoke (Call+B normal), TailCall (args+epilogue+B), Resume (load+BL __Unwind_Resume) |
+   387→| `loongarch64/reg_alloc_isel.rs` | Added vreg tracking for Switch/Invoke/TailCall/Resume; Implemented Switch, Invoke, TailCall, Resume using RegCache API |
+   388→
+   389→## Task 2-e: Fix AtomicCas on ARM32 and MIPS64 backends
+   390→
+   391→**Date**: 2026-03-05
+   392→**Files**: `src/codegen/src/arm32/mod.rs`, `src/codegen/src/mips64/mod.rs`
+   393→
+   394→### Bug Description
+   395→
+   396→Both the ARM32 and MIPS64 backends lowered `AtomicCas` to a simple load instruction, completely ignoring the `expected` and `desired` operands. This meant that compare-and-swap operations always returned the current value at the address without ever attempting the conditional store, making atomic CAS semantically equivalent to an atomic load — useless for any concurrent algorithm.
+   397→
+   398→### Root Cause
+   399→
+   400→The ARM32 handler (line 3915) had a comment `// Lower as a simple load (placeholder)` and constructed a `Load` IR instruction that it never actually used, then loaded the address and performed a plain `LDR`. The `expected` and `desired` values were explicitly suppressed with `let _ = (load_ir, expected, desired);`.
+   401→
+   402→The MIPS64 handler (line 2867) had a similar `// Placeholder: simple load` comment, using a plain `LD` instruction with `expected: _` and `desired: _` patterns to suppress unused-variable warnings.
+   403→
+   404→### Fixes Applied
+   405→
+   406→#### ARM32: LDREX/STREX-based CAS loop
+   407→
+   408→Added 7 new instruction variants to the `Instruction` enum and corresponding encoding functions:
+   409→
+   410→| Instruction | Encoding | Description |
+   411→|-------------|----------|-------------|
+   412→| `Ldrex` | `cond 00011011 Rn Rd 1111 1001 1111` | Load Register Exclusive (32-bit) |
+   413→| `Ldrexb` | `cond 00011101 Rn Rd 1111 1001 1111` | Load Register Exclusive Byte |
+   414→| `Ldrexh` | `cond 00011111 Rn Rd 1111 1001 1111` | Load Register Exclusive Halfword |
+   415→| `Strex` | `cond 00011000 Rn Rd 1111 1001 Rt` | Store Register Exclusive (32-bit) |
+   416→| `Strexb` | `cond 00011100 Rn Rd 1111 1001 Rt` | Store Register Exclusive Byte |
+   417→| `Strexh` | `cond 00011110 Rn Rd 1111 1001 Rt` | Store Register Exclusive Halfword |
+   418→| `Dmb` | `cond 01010111 1111 1111 1111 0101 option` | Data Memory Barrier |
+   419→
+   420→Also added `encode()`, `mnemonic()`, `Display`, and disassembler support for all new instructions.
+   421→
+   422→The CAS loop uses a fixed-size instruction sequence with precomputed branch offsets:
+   423→
+   424→```
+   425→; Register allocation: R3=addr, R1=expected, R2=desired, R0=old/result, R12=status
+   426→  DMB SY                    ; +0  — acquire barrier
+   427→retry:
+   428→  LDREX{,B,H} R0, [R3]     ; +4  — load exclusive
+   429→  CMP R0, R1                ; +8  — compare old with expected
+   430→  BNE done                  ; +12 — offset_words = +2
+   431→  STREX{,B,H} R12, R2, [R3]; +16 — try store; R12 = status
+   432→  CMP R12, #0               ; +20 — check status
+   433→  BNE retry                 ; +24 — offset_words = -7
+   434→done:
+   435→  DMB SY                    ; +28 — release barrier
+   436→```
+   437→
+   438→Branch offset derivation (ARM formula: `offset_words = (target - (branch + 8)) / 4`):
+   439→- BNE done: `(28 - (12 + 8)) / 4 = +2`
+   440→- BNE retry: `(4 - (24 + 8)) / 4 = -7`
+   441→
+   442→Type-specific variants:
+   443→- I8/U8 → LDREXB + STREXB
+   444→- I16/U16 → LDREXH + STREXH
+   445→- I32/U32/I64/U64 → LDREX + STREX
+   446→
+   447→R0 holds the old value throughout the loop because STREX writes its status to R12 (not R0), so R0 is preserved for the result store.
+   448→
+   449→#### MIPS64: LLD/SCD-based CAS loop
+   450→
+   451→Added 5 new instruction variants to the `Instruction` enum, 4 new opcode constants, and 1 new function code:
+   452→
+   453→| Constant | Value | Description |
+   454→|----------|-------|-------------|
+   455→| `OPC_LL` | 0x30 | Load Linked opcode |
+   456→| `OPC_LLD` | 0x34 | Load Linked Doubleword opcode |
+   457→| `OPC_SC` | 0x38 | Store Conditional opcode |
+   458→| `OPC_SCD` | 0x3C | Store Conditional Doubleword opcode |
+   459→| `FN_SYNC` | 0x0F | SYNC function code |
+   460→
+   461→New instruction variants:
+   462→- `Ll { rt, base, offset }` — Load Linked (32-bit)
+   463→- `Lld { rt, base, offset }` — Load Linked Doubleword (64-bit)
+   464→- `Sc { rt, base, offset }` — Store Conditional (32-bit)
+   465→- `Scd { rt, base, offset }` — Store Conditional Doubleword (64-bit)
+   466→- `Sync { stype }` — Memory synchronization barrier
+   467→
+   468→Also added `encode()`, `mnemonic()`, and `Display` support for all new instructions.
+   469→
+   470→The CAS loop follows the MIPS64 LL/SC pattern with delay slot NOPs:
+   471→
+   472→```
+   473→; Register allocation: T0=addr, T1=expected, T2=desired, V0=old/result, T3=temp/status
+   474→  SYNC                      ; +0  — acquire barrier
+   475→retry:
+   476→  LLD/LL V0, 0(T0)         ; +4  — load linked
+   477→  NOP                       ; +8  — load-use hazard
+   478→  BNE V0, T1, done          ; +12 — if old != expected, skip
+   479→  NOP                       ; +16 — delay slot
+   480→  DADDU T3, $zero, T2       ; +20 — copy desired to temp (SCD overwrites rt)
+   481→  SCD/SC T3, 0(T0)          ; +24 — store conditional; T3 = 1 success, 0 failure
+   482→  NOP                       ; +28 — hazard
+   483→  BEQ T3, $zero, retry      ; +32 — if failed, retry
+   484→  NOP                       ; +36 — delay slot
+   485→done:
+   486→  SYNC                      ; +40 — release barrier
+   487→```
+   488→
+   489→Branch offset derivation (MIPS formula: `offset_bytes = target - (branch + 4)`):
+   490→- BNE done: `40 - (12 + 4) = +24` bytes → 6 words
+   491→- BEQ retry: `4 - (32 + 4) = -32` bytes → -8 words
+   492→
+   493→Type-specific variants:
+   494→- I32/U32 → LL + SC
+   495→- I64/U64/Ptr → LLD + SCD
+   496→
+   497→The `DADDU T3, $zero, T2` instruction copies the desired value to T3 before SCD because SCD overwrites its `rt` register with the status flag (1=success, 0=failure). Without this copy, the desired value would be lost on retry. V0 holds the old value from LLD and is never overwritten by SCD (which writes to T3), so V0 is available for the result store after the loop.
+   498→
+   499→### Key Design Decisions
+   500→
+   501→1. **Precomputed branch offsets**: Both backends use fixed-size CAS loop sequences, allowing branch offsets to be computed at compile time rather than requiring label tracking and fixup passes. This simplifies the implementation and avoids interaction with the existing branch fixup mechanisms.
+   502→
+   503→2. **Memory barriers**: Both implementations use full memory barriers (DMB SY on ARM32, SYNC on MIPS64) before and after the CAS loop, providing sequential consistency semantics. The acquire barrier before the loop prevents reordering of the load with prior memory operations, and the release barrier after prevents reordering of the store with subsequent operations.
+   504→
+   505→3. **Sub-word support (ARM32 only)**: ARM32 has dedicated LDREXB/STREXB and LDREXH/STREXH instructions for byte and halfword CAS. MIPS64 does not have sub-word LL/SC variants; the implementation uses LL/SC for 32-bit types and LLD/SCD for 64-bit types only.
+   506→
+   507→4. **Conservative NOPs (MIPS64)**: The MIPS64 CAS loop includes NOPs after LLD/LL (load-use hazard) and SCD/SC (conservative hazard avoidance), matching the existing code generation pattern in the backend.
+   508→
+   509→### Files Modified
+   510→
+   511→| File | Changes |
+   512→|------|---------|
+   513→| `arm32/mod.rs` | Added `encode_ldrex`, `encode_ldrexb`, `encode_ldrexh`, `encode_strex`, `encode_strexb`, `encode_strexh`, `encode_dmb` encoding functions; Added `Ldrex`, `Ldrexb`, `Ldrexh`, `Strex`, `Strexb`, `Strexh`, `Dmb` instruction variants with encode/mnemonic/Display support; Updated `decode_arm32` disassembler for sync primitives; Replaced placeholder AtomicCas with LDREX/STREX CAS loop |
+   514→| `mips64/mod.rs` | Added `OPC_LL`, `OPC_LLD`, `OPC_SC`, `OPC_SCD`, `FN_SYNC` constants; Added `Ll`, `Lld`, `Sc`, `Scd`, `Sync` instruction variants with encode/mnemonic/Display support; Replaced placeholder AtomicCas with LLD/SCD CAS loop |
+   515→
+   516→## Task 2-b: Implement proper atomic operations for the PPC64 backend
+   517→
+   518→**Date**: 2026-03-06
+   519→**Files**: `src/codegen/src/ppc64/mod.rs`, `src/codegen/src/ppc64/disasm.rs`
+   520→
+   521→### Bug Description
+   522→
+   523→The PPC64 backend silently dropped atomic operations (AtomicLoad, AtomicStore, AtomicCas) in the stack-slot instruction selection path, returning `Vec::new()` at line 3503-3504. In the register-allocated path, atomics were incorrectly lowered to non-atomic loads/stores, and AtomicCas was lowered as a simple load (ignoring expected/desired values).
+   524→
+   525→### Root Cause
+   526→
+   527→Three related gaps in the PPC64 codegen:
+   528→
+   529→1. **Stack-slot path**: `IRInstr::AtomicLoad | AtomicStore | AtomicCas` matched a single arm that returned `Vec::new()` — a TODO placeholder that produced no code at all.
+   530→2. **Register-allocated path**: AtomicLoad and AtomicStore were lowered to non-atomic `Load`/`Store` IR instructions, then re-lowered through the normal path — no memory barriers, no reserve/conditional semantics.
+   531→3. **Missing instructions**: The `Instruction` enum lacked PPC64 atomic primitives: `ldarx`, `lwarx`, `lbarx`, `lharx`, `stdcx.`, `stwcx.`, `stbcx.`, `sthcx.`, `sync`, `lwsync`, `isync`, `extsb`, `extsh`.
+   532→
+   533→### PPC64 Atomic Patterns Implemented
+   534→
+   535→**AtomicLoad** (acquire semantics):
+   536→```asm
+   537→sync                          ; full barrier before
+   538→ldarx rT, 0, rAddr           ; load and reserve (64-bit)
+   539→stdcx. R0, 0, rAddr          ; clear reservation (dummy store)
+   540→isync                         ; context sync → acquire
+   541→; sign-extend for I8/I16/I32 sub-word types
+   542→```
+   543→
+   544→**AtomicStore** (release semantics):
+   545→```asm
+   546→lwsync                        ; release barrier
+   547→std rS, 0(rAddr)              ; aligned store is atomic on PPC64
+   548→```
+   549→
+   550→**AtomicCas** (sequentially consistent):
+   551→```asm
+   552→sync                          ; 0: full barrier before
+   553→ldarx rOld, 0, rAddr          ; 1: load and reserve (RETRY)
+   554→cmpd rOld, rExpected          ; 2: compare with expected
+   555→bc 12, 2, +3                  ; 3: if CR0 EQ=0 (not equal), skip to sync at 6
+   556→stdcx. rDesired, 0, rAddr     ; 4: try to store desired
+   557→bc 12, 2, -4                  ; 5: if CR0 EQ=0 (store failed), retry at 1
+   558→sync                          ; 6: full barrier after
+   559→; sign-extend for I8/I16/I32 sub-word types
+   560→```
+   561→
+   562→### Sub-word Support
+   563→
+   564→Type-dispatched instruction selection for all three atomic operations:
+   565→
+   566→| IRType | Load-Reserve | Store-Conditional | Sign-extend |
+   567→|--------|-------------|-------------------|-------------|
+   568→| I8/U8  | `lbarx`     | `stbcx.`          | `extsb` (I8 only) |
+   569→| I16/U16| `lharx`     | `sthcx.`          | `extsh` (I16 only) |
+   570→| I32/U32| `lwarx`     | `stwcx.`          | `extsw` (I32 only) |
+   571→| I64/U64/Ptr | `ldarx` | `stdcx.`          | — |
+   572→
+   573→### New Instructions Added
+   574→
+   575→13 new instruction variants added to the `Instruction` enum with full encode/mnemonic/Display/decode support:
+   576→
+   577→| Instruction | Form | Primary | XO | Rc | Encoding |
+   578→|------------|------|---------|-----|-----|----------|
+   579→| `Ldarx` | X | 31 | 84 | 0 | `encode_x_form(31, rt, ra, rb, 84, 0)` |
+   580→| `Lwarx` | X | 31 | 20 | 0 | `encode_x_form(31, rt, ra, rb, 20, 0)` |
+   581→| `Lbarx` | X | 31 | 52 | 0 | `encode_x_form(31, rt, ra, rb, 52, 0)` |
+   582→| `Lharx` | X | 31 | 116 | 0 | `encode_x_form(31, rt, ra, rb, 116, 0)` |
+   583→| `Stdcx` | X | 31 | 214 | 1 | `encode_x_form(31, rs, ra, rb, 214, 1)` |
+   584→| `Stwcx` | X | 31 | 150 | 1 | `encode_x_form(31, rs, ra, rb, 150, 1)` |
+   585→| `Stbcx` | X | 31 | 694 | 1 | `encode_x_form(31, rs, ra, rb, 694, 1)` |
+   586→| `Sthcx` | X | 31 | 726 | 1 | `encode_x_form(31, rs, ra, rb, 726, 1)` |
+   587→| `Sync` | X | 31 | 598 | 0 | `encode_x_form(31, 0, 0, 0, 598, 0)` → `0x7C0004AC` |
+   588→| `Lwsync` | X | 31 | 598 | 0 | `encode_x_form(31, 1, 0, 0, 598, 0)` → `0x7C2004AC` (L=1 in rS field) |
+   589→| `Isync` | XL | 19 | 150 | — | `0x4C00012C` |
+   590→| `Extsb` | X | 31 | 954 | 0 | `encode_x_form(31, rs, ra, 0, 954, 0)` |
+   591→| `Extsh` | X | 31 | 922 | 0 | `encode_x_form(31, rs, ra, 0, 922, 0)` |
+   592→
+   593→### Register Conflict Handling (Register-Allocated Path)
+   594→
+   595→The CAS loop writes to the destination register `d` via `ldarx`, which can clobber `expected` or `desired` if they share the same physical register. The implementation handles this by:
+   596→
+   597→1. Using R0 and R11 as scratch registers for conflict resolution
+   598→2. Copying conflicting expected/desired values to scratch registers before the CAS loop
+   599→3. When both expected and desired conflict with `d`, moving expected from R0 to R11 and desired to R0
+   600→
+   601→### Branch Offset Computation
+   602→
+   603→The CAS loop uses fixed-size instruction sequences, allowing precomputed branch offsets:
+   604→- `bc 12, 2, +3` at index 3: target = 3 + 3 = 6 (final `sync`)
+   605→- `bc 12, 2, -4` at index 5: target = 5 + (-4) = 1 (retry at `ldarx`)
+   606→
+   607→### Disassembler Updates
+   608→
+   609→Added decode support for all new instructions in `ppc64/disasm.rs`:
+   610→- Primary=31 X-form decode: `lwarx` (xo=20), `lbarx` (xo=52), `ldarx` (xo=84), `lharx` (xo=116), `stwcx.` (xo=150), `stdcx.` (xo=214), `stbcx.` (xo=694), `sthcx.` (xo=726), `sync`/`lwsync` (xo=598, distinguished by rt field), `extsb` (xo=954), `extsh` (xo=922)
+   611→- Primary=19 XL-form decode: `isync` (xo=150)
+   612→
+   613→### Files Modified
+   614→
+   615→| File | Changes |
+   616→|------|---------|
+   617→| `ppc64/mod.rs` | Added 13 instruction variants to `Instruction` enum with encode/mnemonic/Display; Replaced placeholder AtomicLoad/AtomicStore/AtomicCas in register-allocated path with proper LL/SC lowering; Replaced `Vec::new()` in stack-slot path with proper atomic code generation |
+   618→| `ppc64/disasm.rs` | Added decode support for all 13 new instructions in both X-form (primary=31) and XL-form (primary=19) decode paths |
+   619→
+   620→---
+   621→
+   622→## Task 2-a: Implement LoongArch64 Atomic Operations
+   623→
+   624→**Date**: 2026-03-05
+   625→**Files**: `src/codegen/src/loongarch64/mod.rs`, `src/codegen/src/loongarch64/stack_slot_isel.rs`
+   626→
+   627→### Bug Description
+   628→
+   629→The LoongArch64 backend silently dropped atomic operations. `AtomicLoad`, `AtomicStore`, and `AtomicCas` in the stack-slot instruction selection path all returned `Vec::new()`, meaning any atomic operation in a LoongArch64-compiled program was a no-op — producing no machine code at all.
+   630→
+   631→### Root Cause
+   632→
+   633→The stack-slot ISel at `stack_slot_isel.rs:1099-1100` had a single match arm for all three atomic IR instructions that returned an empty vector:
+   634→
+   635→```rust
+   636→IRInstr::AtomicLoad { .. } | IRInstr::AtomicStore { .. } | IRInstr::AtomicCas { .. } => {
+   637→    Vec::new() // TODO: implement LoongArch64 atomic lowering
+   638→}
+   639→```
+   640→
+   641→Additionally, the `Instruction` enum in `mod.rs` lacked the DBAR (data barrier) and AMSWAP (atomic memory swap) instructions needed for proper atomic lowering.
+   642→
+   643→### LoongArch64 Atomic Instructions
+   644→
+   645→Referencing the LoongArch ISA manual:
+   646→
+   647→- **LL.D Rd, Rj, Si14** — Load-Linked Doubleword (64-bit, address in Rj + Si14)
+   648→- **SC.D Rd, Rj, Si14** — Store-Conditional Doubleword (stores Rd to [Rj+Si14]; Rd ← 0 on success, 1 on failure)
+   649→- **LL.W / SC.W** — 32-bit variants
+   650→- **AMSWAP.D Rd, Rj, Rk** — Atomic Memory Swap Doubleword (Rd = old [Rj], [Rj] = Rk)
+   651→- **AMSWAP.W** — 32-bit variant
+   652→- **DBAR hint** — Data Barrier (hint=0 is full barrier)
+   653→
+   654→### New Instructions Added
+   655→
+   656→Added to `Instruction` enum in `mod.rs`:
+   657→
+   658→| Instruction | Format | Opcode | Encoding |
+   659→|------------|--------|--------|----------|
+   660→| `AmswapW { rd, rj, rk }` | 3R | 0x00C0 (bits[31:15]) | `encode_3r(0x00C0, rk, rj, rd)` |
+   661→| `AmswapD { rd, rj, rk }` | 3R | 0x00C2 (bits[31:15]) | `encode_3r(0x00C2, rk, rj, rd)` |
+   662→| `Dbar { hint }` | 2RI12 | 0x0E7 (bits[31:22]) | `encode_2ri12(0x0E7, hint, 0, 0)` |
+   663→
+   664→### Atomic Lowering Implementation
+   665→
+   666→#### AtomicLoad (dst, addr, ty)
+   667→
+   668→```
+   669→dbar 0                    ; acquire fence
+   670→ll.{d,w} S0, S0, 0       ; load-linked from [S0+0]
+   671→dbar 0                    ; fence after load
+   672→; store S0 to dst vreg slot
+   673→```
+   674→
+   675→Uses LL.D for 64-bit types (I64/U64/Ptr/Func) and LL.W for 32-bit types (I8/I16/I32/U8/U16/U32).
+   676→
+   677→#### AtomicStore (value, addr, ty)
+   678→
+   679→```
+   680→dbar 0                         ; release fence
+   681→amswap.{d,w} $r0, S1, S0      ; atomically store S0 to [S1], discard old value in $r0
+   682→dbar 0                         ; fence after store
+   683→```
+   684→
+   685→Uses AMSWAP.D for 64-bit and AMSWAP.W for 32-bit types. The `$r0` destination discards the old value.
+   686→
+   687→#### AtomicCas (dst, addr, expected, desired, ty)
+   688→
+   689→```
+   690→; S0=addr, S1=expected, S2=desired
+   691→dbar 0                         ; offset 0:  full fence
+   692→ll.{d,w} S3, S0, 0             ; offset 4:  S3 = current value at [S0]
+   693→bne S3, S1, +5                 ; offset 8:  if current != expected, skip to dbar
+   694→or S3, S2, $r0                  ; offset 12: S3 = desired (reload before each SC)
+   695→sc.{d,w} S3, S0, 0             ; offset 16: store desired; S3 = 0 (ok) / 1 (fail)
+   696→bnez S3, -4                    ; offset 20: retry if SC failed
+   697→or S3, S1, $r0                  ; offset 24: SC succeeded: old value = expected = S1
+   698→dbar 0                         ; offset 28: fence after CAS
+   699→; store S3 (old value) to dst vreg slot
+   700→```
+   701→
+   702→Key design decisions:
+   703→- The `or S3, S2, $r0` before SC.D reloads the desired value (from S2, which is never overwritten) because SC.D overwrites its rd register with the success flag.
+   704→- When BNE fires (current ≠ expected), S3 still holds the old value from LL.D, and we jump directly to dbar at offset 28.
+   705→- When SC succeeds, S3 = 0, and the old value = expected = S1. The `or S3, S1, $r0` at offset 24 moves the expected value into S3 for a unified store path.
+   706→- Branch offsets are precomputed since the instruction sequence has fixed size (8 instructions = 32 bytes).
+   707→
+   708→### Disassembler Updates
+   709→
+   710→Enhanced `decode_loongarch64_instruction()` in `mod.rs` with multi-level opcode decoding:
+   711→1. **2RI12 format** (10-bit opcode at bits[31:22]): Added DBAR (0x0E7) decode
+   712→2. **3R format** (17-bit opcode at bits[31:15]): Added AMSWAP.W (0x00C0) and AMSWAP.D (0x00C2) decode
+   713→3. **2RI14 format** (8-bit opcode at bits[31:24]): Added LL.W (0x20), SC.W (0x21), LL.D (0x22), SC.D (0x23) decode
+   714→4. Falls back to existing 7-bit opcode matching for other instructions
+   715→
+   716→### Auxiliary Fixes (Pre-existing Errors)
+   717→
+   718→While verifying the LoongArch64 changes, several pre-existing compilation errors in other backends were fixed:
+   719→- **mips64/mod.rs**: Fixed 17 instances of undefined `dst_offset` → replaced with `dst_off`
+   720→- **arm32/mod.rs**: Fixed 4 type mismatches (`u32` → `u8` cast for `Gpr::R11.encoding()`)
+   721→- **wasm32/disasm.rs**: Added missing Display match arms for atomic WasmInstr variants
+   722→- **ppc64/mod.rs**: Replaced broken FP cast code (using undefined `code` variable) with no-op stubs
+   723→
+   724→### Files Modified
+   725→
+   726→| File | Changes |
+   727→|------|---------|
+   728→| `loongarch64/mod.rs` | Added `Dbar`, `AmswapW`, `AmswapD` to `Instruction` enum with opcodes, encoding, mnemonic, Display; Enhanced disassembler with multi-level opcode decode for DBAR, AMSWAP, LL/SC instructions |
+   729→| `loongarch64/stack_slot_isel.rs` | Replaced placeholder `Vec::new()` with proper atomic lowering for AtomicLoad (DBAR + LL), AtomicStore (DBAR + AMSWAP), AtomicCas (DBAR + LL/SC loop with BNE/BNEZ) |
+   730→

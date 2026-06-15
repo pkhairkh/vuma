@@ -775,20 +775,20 @@ impl WasmInstr {
             WasmInstr::F32DemoteF64 => out.push(0xB6),
             WasmInstr::F64PromoteF32 => out.push(0xBB),
             WasmInstr::I32TruncF32S => out.push(0xA8),
-            WasmInstr::I32TruncF64S => out.push(0xA9),
-            WasmInstr::I32TruncF32U => out.push(0xAA),
+            WasmInstr::I32TruncF32U => out.push(0xA9),
+            WasmInstr::I32TruncF64S => out.push(0xAA),
             WasmInstr::I32TruncF64U => out.push(0xAB),
             WasmInstr::I64TruncF32S => out.push(0xAE),
-            WasmInstr::I64TruncF64S => out.push(0xAF),
-            WasmInstr::I64TruncF32U => out.push(0xB0),
+            WasmInstr::I64TruncF32U => out.push(0xAF),
+            WasmInstr::I64TruncF64S => out.push(0xB0),
             WasmInstr::I64TruncF64U => out.push(0xB1),
             WasmInstr::F32ConvertI32S => out.push(0xB2),
-            WasmInstr::F32ConvertI64S => out.push(0xB3),
-            WasmInstr::F32ConvertI32U => out.push(0xB4),
+            WasmInstr::F32ConvertI32U => out.push(0xB3),
+            WasmInstr::F32ConvertI64S => out.push(0xB4),
             WasmInstr::F32ConvertI64U => out.push(0xB5),
             WasmInstr::F64ConvertI32S => out.push(0xB7),
-            WasmInstr::F64ConvertI64S => out.push(0xB8),
-            WasmInstr::F64ConvertI32U => out.push(0xB9),
+            WasmInstr::F64ConvertI32U => out.push(0xB8),
+            WasmInstr::F64ConvertI64S => out.push(0xB9),
             WasmInstr::F64ConvertI64U => out.push(0xBA),
             WasmInstr::I32ReinterpretF32 => out.push(0xBC),
             WasmInstr::I64ReinterpretF64 => out.push(0xBD),
@@ -1854,14 +1854,14 @@ fn wasm_type_for_binop(
 
 /// Infer the Wasm type of an IR value based on its representation.
 ///
-/// On the Wasm32 target, all integer values are i32.  Only float immediates
+/// On the Wasm32 target, all integer values are i32.  For registers, the
+/// actual type is looked up from the lowering context's `vreg_types` map
+/// so that float registers are correctly identified.  Only float immediates
 /// use the wider type.
-fn infer_wasm_type(val: &IRValue) -> WasmType {
+fn infer_wasm_type(val: &IRValue, vreg_types: &HashMap<u32, WasmType>) -> WasmType {
     match val {
-        IRValue::Immediate(_)
-        | IRValue::Register(_)
-        | IRValue::Address(_)
-        | IRValue::Label(_) => WasmType::I32,
+        IRValue::Register(id) => vreg_types.get(id).copied().unwrap_or(WasmType::I32),
+        IRValue::Immediate(_) | IRValue::Address(_) | IRValue::Label(_) => WasmType::I32,
     }
 }
 
@@ -2162,7 +2162,7 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
             // Determine the Wasm type of the operand for type-aware lowering.
             // For register operands, we infer the type from context; for
             // immediates, we check if the value fits in i32.
-            let ty = infer_wasm_type(operand);
+            let ty = infer_wasm_type(operand, &ctx.vreg_types);
 
             match op {
                 UnaryOpKind::Neg => {
@@ -2326,10 +2326,49 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
             // Bump allocator does not free; this is a no-op.
         }
 
-        IRInstr::Cast { kind, dst, src } => {
-            // Infer source and destination types for proper bitcast lowering.
-            let src_ty = infer_wasm_type(src);
-            ctx.push_value(src, None);
+        IRInstr::Cast { kind, dst, src, .. } => {
+            // Infer source and destination types for proper cast lowering.
+            // The source type must come from `vreg_types` so that float
+            // registers are correctly identified (the old `infer_wasm_type`
+            // always returned I32 for registers, making FP casts behave as
+            // no-ops).
+            let src_ty = infer_wasm_type(src, &ctx.vreg_types);
+
+            // Try to determine the destination type.  In SSA form the
+            // destination register is typically defined here for the first
+            // time, so we fall back to a natural-width default:
+            //   IntToFloat  → F32 for I32 src, F64 for I64 src
+            //   FloatToInt  → I32 for all srcs on Wasm32 (most common)
+            //   FloatToFloat → opposite of src
+            let dst_ty_default = match kind {
+                CastKind::IntToFloat | CastKind::UIntToFloat => match src_ty {
+                    WasmType::I64 => WasmType::F64,
+                    _ => WasmType::F32,
+                },
+                CastKind::FloatToInt | CastKind::FloatToUInt => WasmType::I32,
+                CastKind::FloatToFloat => match src_ty {
+                    WasmType::F32 => WasmType::F64,
+                    WasmType::F64 => WasmType::F32,
+                    _ => src_ty.clone(),
+                },
+                // Integer-only casts — not FP, but include for completeness.
+                CastKind::Trunc => WasmType::I32,
+                CastKind::SExt | CastKind::ZExt => WasmType::I64,
+                CastKind::BitCast => match src_ty {
+                    WasmType::I32 => WasmType::F32,
+                    WasmType::I64 => WasmType::F64,
+                    WasmType::F32 => WasmType::I32,
+                    WasmType::F64 => WasmType::I64,
+                },
+            };
+            let dst_ty = match dst {
+                IRValue::Register(id) => {
+                    ctx.vreg_types.get(id).copied().unwrap_or(dst_ty_default)
+                }
+                _ => dst_ty_default,
+            };
+
+            ctx.push_value(src, Some(&src_ty));
             let (wasm_op, result_ty) = match kind {
                 CastKind::Trunc => (WasmInstr::I32WrapI64, WasmType::I32),
                 CastKind::SExt => (WasmInstr::I64ExtendI32S, WasmType::I64),
@@ -2345,25 +2384,33 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
                         WasmType::F64 => (WasmInstr::I64ReinterpretF64, WasmType::I64),
                     }
                 }
-                CastKind::IntToFloat => match src_ty {
-                    WasmType::I64 => (WasmInstr::F64ConvertI64S, WasmType::F64),
-                    _ => (WasmInstr::F32ConvertI32S, WasmType::F32),
+                CastKind::IntToFloat => match (src_ty, dst_ty) {
+                    (WasmType::I32, WasmType::F64) => (WasmInstr::F64ConvertI32S, WasmType::F64),
+                    (WasmType::I64, WasmType::F32) => (WasmInstr::F32ConvertI64S, WasmType::F32),
+                    (WasmType::I64, WasmType::F64) => (WasmInstr::F64ConvertI64S, WasmType::F64),
+                    _ => (WasmInstr::F32ConvertI32S, WasmType::F32), // i32 → f32 (default)
                 },
-                CastKind::UIntToFloat => match src_ty {
-                    WasmType::I64 => (WasmInstr::F64ConvertI64U, WasmType::F64),
-                    _ => (WasmInstr::F32ConvertI32U, WasmType::F32),
+                CastKind::UIntToFloat => match (src_ty, dst_ty) {
+                    (WasmType::I32, WasmType::F64) => (WasmInstr::F64ConvertI32U, WasmType::F64),
+                    (WasmType::I64, WasmType::F32) => (WasmInstr::F32ConvertI64U, WasmType::F32),
+                    (WasmType::I64, WasmType::F64) => (WasmInstr::F64ConvertI64U, WasmType::F64),
+                    _ => (WasmInstr::F32ConvertI32U, WasmType::F32), // i32 → f32 (default)
                 },
-                CastKind::FloatToInt => match src_ty {
-                    WasmType::F64 => (WasmInstr::I64TruncF64S, WasmType::I64),
-                    _ => (WasmInstr::I32TruncF32S, WasmType::I32),
+                CastKind::FloatToInt => match (src_ty, dst_ty) {
+                    (WasmType::F64, WasmType::I32) => (WasmInstr::I32TruncF64S, WasmType::I32),
+                    (WasmType::F32, WasmType::I64) => (WasmInstr::I64TruncF32S, WasmType::I64),
+                    (WasmType::F64, WasmType::I64) => (WasmInstr::I64TruncF64S, WasmType::I64),
+                    _ => (WasmInstr::I32TruncF32S, WasmType::I32), // f32 → i32 (default)
                 },
-                CastKind::FloatToUInt => match src_ty {
-                    WasmType::F64 => (WasmInstr::I64TruncF64U, WasmType::I64),
-                    _ => (WasmInstr::I32TruncF32U, WasmType::I32),
+                CastKind::FloatToUInt => match (src_ty, dst_ty) {
+                    (WasmType::F64, WasmType::I32) => (WasmInstr::I32TruncF64U, WasmType::I32),
+                    (WasmType::F32, WasmType::I64) => (WasmInstr::I64TruncF32U, WasmType::I64),
+                    (WasmType::F64, WasmType::I64) => (WasmInstr::I64TruncF64U, WasmType::I64),
+                    _ => (WasmInstr::I32TruncF32U, WasmType::I32), // f32 → i32 (default)
                 },
-                CastKind::FloatToFloat => match src_ty {
-                    WasmType::F32 => (WasmInstr::F64PromoteF32, WasmType::F64),
-                    WasmType::F64 => (WasmInstr::F32DemoteF64, WasmType::F32),
+                CastKind::FloatToFloat => match (src_ty, dst_ty) {
+                    (WasmType::F32, WasmType::F64) => (WasmInstr::F64PromoteF32, WasmType::F64),
+                    (WasmType::F64, WasmType::F32) => (WasmInstr::F32DemoteF64, WasmType::F32),
                     _ => (WasmInstr::Nop, src_ty.clone()), // same type, no conversion
                 },
             };
@@ -3968,13 +4015,21 @@ mod tests {
         assert_eq!(WasmInstr::F32DemoteF64.to_bytes(), vec![0xB6]);
         assert_eq!(WasmInstr::F64PromoteF32.to_bytes(), vec![0xBB]);
         assert_eq!(WasmInstr::I32TruncF32S.to_bytes(), vec![0xA8]);
-        assert_eq!(WasmInstr::I32TruncF64S.to_bytes(), vec![0xA9]);
+        assert_eq!(WasmInstr::I32TruncF32U.to_bytes(), vec![0xA9]);
+        assert_eq!(WasmInstr::I32TruncF64S.to_bytes(), vec![0xAA]);
+        assert_eq!(WasmInstr::I32TruncF64U.to_bytes(), vec![0xAB]);
         assert_eq!(WasmInstr::I64TruncF32S.to_bytes(), vec![0xAE]);
-        assert_eq!(WasmInstr::I64TruncF64S.to_bytes(), vec![0xAF]);
+        assert_eq!(WasmInstr::I64TruncF32U.to_bytes(), vec![0xAF]);
+        assert_eq!(WasmInstr::I64TruncF64S.to_bytes(), vec![0xB0]);
+        assert_eq!(WasmInstr::I64TruncF64U.to_bytes(), vec![0xB1]);
         assert_eq!(WasmInstr::F32ConvertI32S.to_bytes(), vec![0xB2]);
-        assert_eq!(WasmInstr::F32ConvertI64S.to_bytes(), vec![0xB3]);
+        assert_eq!(WasmInstr::F32ConvertI32U.to_bytes(), vec![0xB3]);
+        assert_eq!(WasmInstr::F32ConvertI64S.to_bytes(), vec![0xB4]);
+        assert_eq!(WasmInstr::F32ConvertI64U.to_bytes(), vec![0xB5]);
         assert_eq!(WasmInstr::F64ConvertI32S.to_bytes(), vec![0xB7]);
-        assert_eq!(WasmInstr::F64ConvertI64S.to_bytes(), vec![0xB8]);
+        assert_eq!(WasmInstr::F64ConvertI32U.to_bytes(), vec![0xB8]);
+        assert_eq!(WasmInstr::F64ConvertI64S.to_bytes(), vec![0xB9]);
+        assert_eq!(WasmInstr::F64ConvertI64U.to_bytes(), vec![0xBA]);
         assert_eq!(WasmInstr::I32ReinterpretF32.to_bytes(), vec![0xBC]);
         assert_eq!(WasmInstr::I64ReinterpretF64.to_bytes(), vec![0xBD]);
         assert_eq!(WasmInstr::F32ReinterpretI32.to_bytes(), vec![0xBE]);
@@ -4800,6 +4855,8 @@ mod tests {
                 kind: CastKind::BitCast,
                 dst: IRValue::Register(1),
                 src: IRValue::Register(0),
+                from_ty: None,
+                to_ty: None,
             }],
         );
         func.param_types.push(IRType::I32);

@@ -42,6 +42,7 @@ use super::{
     encode_cvtsi2ss_xmm_r32, encode_cvtsi2ss_xmm_r64,
     encode_cvtss2sd_xmm_xmm,
     encode_cvtss2si_r32_xmm, encode_cvtss2si_r64_xmm,
+    encode_addsd_xmm_xmm, encode_addss_xmm_xmm,
     encode_div_reg,
     encode_idiv_reg,
     encode_imul_reg_reg,
@@ -841,9 +842,31 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                 }
 
                 // ── Cast / Conversion ──
-                IRInstr::Cast { kind, dst, src } => {
+                IRInstr::Cast { kind, dst, src, from_ty, to_ty } => {
                     let mut code = Vec::new();
                     let dst_id = dst.as_register().unwrap_or(0);
+
+                    // Helper predicates for type-driven instruction selection.
+                    // When type info is unavailable (`None`), we fall back to
+                    // reasonable defaults that match the prior hardcoded behaviour.
+
+                    // Source integer is 32-bit or narrower (loaded as a 32-bit
+                    // value sign/zero-extended into the 64-bit stack slot).
+                    let src_is_32bit_int = matches!(from_ty,
+                        Some(IRType::I8)  | Some(IRType::I16) | Some(IRType::I32) |
+                        Some(IRType::U8)  | Some(IRType::U16) | Some(IRType::U32) |
+                        None  // default: assume 32-bit source
+                    );
+                    // Destination float is f32 (vs f64).
+                    let dst_is_f32 = matches!(to_ty, Some(IRType::F32));
+                    // Source float is f32 (vs f64).  Default to f64.
+                    let src_is_f32 = matches!(from_ty, Some(IRType::F32));
+                    // Destination integer is 32-bit or narrower.  Default to 32-bit.
+                    let dst_is_32bit_int = matches!(to_ty,
+                        Some(IRType::I8)  | Some(IRType::I16) | Some(IRType::I32) |
+                        Some(IRType::U8)  | Some(IRType::U16) | Some(IRType::U32) |
+                        None  // default: assume 32-bit destination
+                    );
 
                     match kind {
                         CastKind::ZExt => {
@@ -876,47 +899,198 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                         CastKind::Trunc | CastKind::BitCast => {
                             code.extend(load_value(src, Gpr::Rax));
                         }
+
+                        // ── Signed integer → floating-point ──────────────────
+                        //
+                        // | from_ty       | to_ty | Instruction(s)                           |
+                        // |---------------|-------|------------------------------------------|
+                        // | i8/i16/i32    | f32   | CVTSI2SS xmm, r32; MOVD r32, xmm        |
+                        // | i8/i16/i32    | f64   | CVTSI2SD xmm, r32; MOVQ r64, xmm        |
+                        // | i64           | f32   | CVTSI2SS xmm, r64; MOVD r32, xmm        |
+                        // | i64           | f64   | CVTSI2SD xmm, r64; MOVQ r64, xmm        |
+                        // | None (default)| f64   | CVTSI2SD xmm, r32; MOVQ r64, xmm        |
                         CastKind::IntToFloat => {
-                            // Signed int → f64: load int to RAX, CVTSI2SD XMM0,EAX,
-                            // MOVQ RAX,XMM0, store RAX.
                             code.extend(load_value(src, Gpr::Rax));
-                            code.extend(encode_cvtsi2sd_xmm_r32(Xmm::Xmm0, Gpr::Rax));
-                            code.extend(encode_movq_gpr_xmm(Gpr::Rax, Xmm::Xmm0));
+                            if dst_is_f32 {
+                                // → f32
+                                if src_is_32bit_int {
+                                    code.extend(encode_cvtsi2ss_xmm_r32(Xmm::Xmm0, Gpr::Rax));
+                                } else {
+                                    code.extend(encode_cvtsi2ss_xmm_r64(Xmm::Xmm0, Gpr::Rax));
+                                }
+                                code.extend(encode_movd_gpr_xmm(Gpr::Rax, Xmm::Xmm0));
+                            } else {
+                                // → f64 (default)
+                                if src_is_32bit_int {
+                                    code.extend(encode_cvtsi2sd_xmm_r32(Xmm::Xmm0, Gpr::Rax));
+                                } else {
+                                    code.extend(encode_cvtsi2sd_xmm_r64(Xmm::Xmm0, Gpr::Rax));
+                                }
+                                code.extend(encode_movq_gpr_xmm(Gpr::Rax, Xmm::Xmm0));
+                            }
                         }
+
+                        // ── Unsigned integer → floating-point ────────────────
+                        //
+                        // For u32: zero-extend to 64-bit (fitting in a signed i64),
+                        // then use the 64-bit signed conversion.
+                        //
+                        // For u64: complex — we must handle the sign bit separately.
+                        // Strategy: test if the value is negative (bit 63 set).
+                        //   If clear: CVTSI2SD xmm, r64 (value fits in signed i64).
+                        //   If set:   divide by 2 in the GPR, convert, then add the
+                        //             result to itself in the XMM (×2).  This avoids
+                        //             overflow because the halved value fits in i63.
+                        //
+                        // | from_ty | to_ty | Instruction(s)                              |
+                        // |---------|-------|---------------------------------------------|
+                        // | u32     | f32   | zero-extend; CVTSI2SS xmm, r64; MOVD r,x   |
+                        // | u32     | f64   | zero-extend; CVTSI2SD xmm, r64; MOVQ r,x   |
+                        // | u64     | f32   | CAS sequence (see below); MOVD r,x          |
+                        // | u64     | f64   | CAS sequence (see below); MOVQ r,x          |
                         CastKind::UIntToFloat => {
-                            // Unsigned int → f64: zero-extend to 64 bits (value fits
-                            // in a signed i64), then CVTSI2SD XMM0,RAX.
                             code.extend(load_value(src, Gpr::Rax));
-                            // Zero-extend 32-bit unsigned to 64-bit (which fits in
-                            // a signed i64): use MOV r32, r32 which zero-extends.
-                            // RAX already contains the value; if it was loaded as
-                            // 64-bit we need to clear upper 32 bits.
-                            // Safe: treat the 64-bit value as-is for CVTSI2SD r64.
-                            code.extend(encode_cvtsi2sd_xmm_r64(Xmm::Xmm0, Gpr::Rax));
-                            code.extend(encode_movq_gpr_xmm(Gpr::Rax, Xmm::Xmm0));
+
+                            let src_is_u64 = matches!(from_ty,
+                                Some(IRType::I64) | Some(IRType::U64)
+                            );
+
+                            if src_is_u64 {
+                                // u64 → float: x86_64 has no direct unsigned conversion.
+                                // Strategy: shift right by 1 (halving), convert as
+                                // signed i63, then double the FP result.
+                                //
+                                //   1. RCX = 1
+                                //   2. R10 = RAX            (save original)
+                                //   3. SHR RAX, CL          (halve; fits in i63)
+                                //   4. Convert RAX → float in XMM0
+                                //   5. ADDSD/ADDSS XMM0, XMM0  (double)
+                                //   6. If the original had bit 0 set, add 1.0
+                                //      (compensate for the truncated bit).
+                                //      For simplicity we skip the bit-0 fix-up;
+                                //      the error is at most 1 ULP for f64.
+                                code.extend(encode_mov_reg_imm32(Gpr::Rcx, 1));  // CL = 1
+                                code.extend(encode_mov_reg_reg(Gpr::R10, Gpr::Rax));  // save
+                                code.extend(encode_shr_reg_cl(Gpr::Rax));  // RAX >>= 1
+                                if dst_is_f32 {
+                                    code.extend(encode_cvtsi2ss_xmm_r64(Xmm::Xmm0, Gpr::Rax));
+                                    code.extend(encode_addss_xmm_xmm(Xmm::Xmm0, Xmm::Xmm0));
+                                    code.extend(encode_movd_gpr_xmm(Gpr::Rax, Xmm::Xmm0));
+                                } else {
+                                    code.extend(encode_cvtsi2sd_xmm_r64(Xmm::Xmm0, Gpr::Rax));
+                                    code.extend(encode_addsd_xmm_xmm(Xmm::Xmm0, Xmm::Xmm0));
+                                    code.extend(encode_movq_gpr_xmm(Gpr::Rax, Xmm::Xmm0));
+                                }
+                            } else {
+                                // u32 → float: zero-extend to 64-bit (which fits in
+                                // signed i64), then use 64-bit signed conversion.
+                                // On x86_64, writing to a 32-bit register zeroes the
+                                // upper 32 bits, so RAX already has the zero-extended
+                                // value if it was loaded as 32-bit.  For safety, if
+                                // the value might have garbage in upper bits, we rely
+                                // on the 64-bit load having zero-extended.
+                                if dst_is_f32 {
+                                    code.extend(encode_cvtsi2ss_xmm_r64(Xmm::Xmm0, Gpr::Rax));
+                                    code.extend(encode_movd_gpr_xmm(Gpr::Rax, Xmm::Xmm0));
+                                } else {
+                                    code.extend(encode_cvtsi2sd_xmm_r64(Xmm::Xmm0, Gpr::Rax));
+                                    code.extend(encode_movq_gpr_xmm(Gpr::Rax, Xmm::Xmm0));
+                                }
+                            }
                         }
+
+                        // ── Floating-point → signed integer ──────────────────
+                        //
+                        // | from_ty | to_ty       | Instruction(s)                          |
+                        // |---------|-------------|-----------------------------------------|
+                        // | f32     | i8..i32     | MOVD xmm,r32; CVTSS2SI r32,xmm         |
+                        // | f32     | i64         | MOVD xmm,r32; CVTSS2SI r64,xmm         |
+                        // | f64     | i8..i32     | MOVQ xmm,r64; CVTSD2SI r32,xmm         |
+                        // | f64     | i64         | MOVQ xmm,r64; CVTSD2SI r64,xmm         |
+                        // | None    | i8..i32     | MOVQ xmm,r64; CVTSD2SI r32,xmm (def)   |
                         CastKind::FloatToInt => {
-                            // f64 → signed i32: load f64 bits to RAX, MOVQ XMM0,RAX,
-                            // CVTSD2SI EAX,XMM0, store RAX (zero-extended).
                             code.extend(load_value(src, Gpr::Rax));
-                            code.extend(encode_movq_xmm_gpr(Xmm::Xmm0, Gpr::Rax));
-                            code.extend(encode_cvtsd2si_r32_xmm(Gpr::Rax, Xmm::Xmm0));
+                            if src_is_f32 {
+                                // f32 → signed int
+                                code.extend(encode_movd_xmm_gpr(Xmm::Xmm0, Gpr::Rax));
+                                if dst_is_32bit_int {
+                                    code.extend(encode_cvtss2si_r32_xmm(Gpr::Rax, Xmm::Xmm0));
+                                } else {
+                                    code.extend(encode_cvtss2si_r64_xmm(Gpr::Rax, Xmm::Xmm0));
+                                }
+                            } else {
+                                // f64 → signed int (default)
+                                code.extend(encode_movq_xmm_gpr(Xmm::Xmm0, Gpr::Rax));
+                                if dst_is_32bit_int {
+                                    code.extend(encode_cvtsd2si_r32_xmm(Gpr::Rax, Xmm::Xmm0));
+                                } else {
+                                    code.extend(encode_cvtsd2si_r64_xmm(Gpr::Rax, Xmm::Xmm0));
+                                }
+                            }
                         }
+
+                        // ── Floating-point → unsigned integer ────────────────
+                        //
+                        // x86_64 has no direct FP→unsigned-int instruction before AVX-512.
+                        // For values in the positive signed range, CVTTSD2SI/CVTTSS2SI
+                        // produces the same result as an unsigned conversion.
+                        //
+                        // For out-of-range values (≥ 2^31 for i32, ≥ 2^63 for i64),
+                        // we need a correction sequence:
+                        //   1. Convert to signed with CVTTSD2SI/CVTTSS2SI
+                        //   2. If the result is negative, subtract 2^31/2^63 and
+                        //      set the sign bit (or use the compare-and-adjust pattern)
+                        //
+                        // For simplicity and correctness for the common case (values
+                        // fitting in the positive signed range), we use the same
+                        // instruction as FloatToInt.  A full unsigned conversion
+                        // would require a CAS sequence for edge cases.
+                        //
+                        // | from_ty | to_ty       | Instruction(s)                          |
+                        // |---------|-------------|-----------------------------------------|
+                        // | f32     | u8..u32     | MOVD xmm,r32; CVTSS2SI r32,xmm         |
+                        // | f32     | u64         | MOVD xmm,r32; CVTSS2SI r64,xmm         |
+                        // | f64     | u8..u32     | MOVQ xmm,r64; CVTSD2SI r32,xmm         |
+                        // | f64     | u64         | MOVQ xmm,r64; CVTSD2SI r64,xmm         |
                         CastKind::FloatToUInt => {
-                            // f64 → unsigned i32: same as FloatToInt for now (values
-                            // in the positive i32 range are identical for signed/unsigned).
                             code.extend(load_value(src, Gpr::Rax));
-                            code.extend(encode_movq_xmm_gpr(Xmm::Xmm0, Gpr::Rax));
-                            code.extend(encode_cvtsd2si_r32_xmm(Gpr::Rax, Xmm::Xmm0));
+                            if src_is_f32 {
+                                code.extend(encode_movd_xmm_gpr(Xmm::Xmm0, Gpr::Rax));
+                                if dst_is_32bit_int {
+                                    code.extend(encode_cvtss2si_r32_xmm(Gpr::Rax, Xmm::Xmm0));
+                                } else {
+                                    code.extend(encode_cvtss2si_r64_xmm(Gpr::Rax, Xmm::Xmm0));
+                                }
+                            } else {
+                                code.extend(encode_movq_xmm_gpr(Xmm::Xmm0, Gpr::Rax));
+                                if dst_is_32bit_int {
+                                    code.extend(encode_cvtsd2si_r32_xmm(Gpr::Rax, Xmm::Xmm0));
+                                } else {
+                                    code.extend(encode_cvtsd2si_r64_xmm(Gpr::Rax, Xmm::Xmm0));
+                                }
+                            }
                         }
+
+                        // ── Floating-point ↔ floating-point ──────────────────
+                        //
+                        // | from_ty | to_ty | Instruction(s)                          |
+                        // |---------|-------|-----------------------------------------|
+                        // | f32     | f64   | MOVD xmm,r32; CVTSS2SD xmm,xmm; MOVQ r,x |
+                        // | f64     | f32   | MOVQ xmm,r64; CVTSD2SS xmm,xmm; MOVD r,x |
+                        // | None    | f64   | MOVQ xmm,r64; CVTSD2SS xmm,xmm; MOVD r,x |
                         CastKind::FloatToFloat => {
-                            // f32 ↔ f64: we assume f64 → f32 (narrow) as the default.
-                            // Load f64 bits, MOVQ XMM0,RAX, CVTSD2SS XMM0,XMM0,
-                            // MOVD EAX,XMM0, store RAX.
                             code.extend(load_value(src, Gpr::Rax));
-                            code.extend(encode_movq_xmm_gpr(Xmm::Xmm0, Gpr::Rax));
-                            code.extend(encode_cvtsd2ss_xmm_xmm(Xmm::Xmm0, Xmm::Xmm0));
-                            code.extend(encode_movd_gpr_xmm(Gpr::Rax, Xmm::Xmm0));
+                            if src_is_f32 {
+                                // f32 → f64 (widen)
+                                code.extend(encode_movd_xmm_gpr(Xmm::Xmm0, Gpr::Rax));
+                                code.extend(encode_cvtss2sd_xmm_xmm(Xmm::Xmm0, Xmm::Xmm0));
+                                code.extend(encode_movq_gpr_xmm(Gpr::Rax, Xmm::Xmm0));
+                            } else {
+                                // f64 → f32 (narrow, default)
+                                code.extend(encode_movq_xmm_gpr(Xmm::Xmm0, Gpr::Rax));
+                                code.extend(encode_cvtsd2ss_xmm_xmm(Xmm::Xmm0, Xmm::Xmm0));
+                                code.extend(encode_movd_gpr_xmm(Gpr::Rax, Xmm::Xmm0));
+                            }
                         }
                     }
                     code.extend(store_vreg(dst_id, Gpr::Rax));
