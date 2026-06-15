@@ -905,7 +905,7 @@ impl Emitter {
                 dst,
                 func: target_name,
                 args,
-                is_extern: _,
+                is_extern,
             } => {
                 // Resolve all argument source registers FIRST, before moving
                 // any of them. This prevents a later move from overwriting a
@@ -1031,6 +1031,9 @@ impl Emitter {
                 }
 
                 // BL — record a relocation for later patching.
+                // For extern calls, the relocation will be resolved by
+                // the system linker; for local calls, it is patched in
+                // emit_elf's resolve_call_relocs.
                 let bl_word_idx = self.code.len();
                 let bl_byte_offset = self.func_text_offset + (bl_word_idx as u64) * 4;
                 self.call_relocs.push(CallRelocation {
@@ -1038,6 +1041,10 @@ impl Emitter {
                     target_func: target_name.clone(),
                 });
                 // Register a RelocationEntry so the linker can patch this BL.
+                // Extern calls use the same R_AARCH64_CALL26 relocation —
+                // the distinction is that the symbol will be marked as
+                // undefined (SHN_UNDEF) in the ELF symbol table.
+                let _ = is_extern; // tracked via symbol table, not relocation type
                 self.relocations.push(RelocationEntry {
                     offset: bl_byte_offset,
                     symbol: target_name.clone(),
@@ -3045,19 +3052,189 @@ impl Emitter {
                 self.ss_store_to_slot(Register::X9, dst_offset)?;
             }
 
-            // ── Constant-time operations (stack-slot path) ──
-            // These use the same lowering as the non-stack-slot path since
-            // they were already implemented in emit_ir_instr above.
-            IRInstr::CtSelect { .. } | IRInstr::CtEq { .. } => {
-                // Already handled by emit_ir_instr; stack-slot path delegates.
-                // We reach here via the stack-slot emitter, so delegate back.
-                // For now, emit a NOP as a placeholder — the non-stack-slot
-                // path handles these correctly.
+            // ── Constant-time select (stack-slot path) ──
+            // ct_select(cond, a, b): constant-time conditional select.
+            // Same CSEL lowering as Select — no branch, constant-time on AArch64.
+            IRInstr::CtSelect {
+                dst,
+                cond,
+                true_val,
+                false_val,
+                ty,
+            } => {
+                let dst_id = dst.as_register().unwrap_or(0);
+                let dst_offset = slots.get(&dst_id).copied().unwrap_or(0);
+                let width = RegWidth::from_ir_type(ty.as_ref());
+                // Load cond and set flags
+                self.ss_load_value_with_width(cond, Register::X9, slots, width)?;
+                self.emit_instruction_with_width(
+                    Instruction::CMP {
+                        rn: Register::X9,
+                        rm: Operand::Imm12(0),
+                    },
+                    width,
+                )?;
+                // Load true and false values (LDR does NOT affect condition flags)
+                self.ss_load_value_with_width(true_val, Register::X10, slots, width)?;
+                self.ss_load_value_with_width(false_val, Register::X11, slots, width)?;
+                // CSEL: if NE (cond != 0), X9 = X10 (true_val); else X9 = X11 (false_val)
+                self.emit_instruction_with_width(
+                    Instruction::CSEL {
+                        rd: Register::X9,
+                        rn: Register::X10,
+                        rm: Register::X11,
+                        cond: Condition::NE,
+                    },
+                    width,
+                )?;
+                self.ss_store_to_slot(Register::X9, dst_offset)?;
             }
 
-            // ── Atomic operations (stack-slot path) ──
-            IRInstr::AtomicLoad { .. } | IRInstr::AtomicStore { .. } | IRInstr::AtomicCas { .. } => {
-                // Atomic operations handled by emit_ir_instr above.
+            // ── Constant-time equality (stack-slot path) ──
+            // ct_eq(a, b): constant-time equality check using XOR.
+            // EOR to find differing bits, then CMP #0 + CSET EQ → 1 if equal, 0 if not.
+            IRInstr::CtEq {
+                dst,
+                lhs,
+                rhs,
+                ty: _,
+            } => {
+                let dst_id = dst.as_register().unwrap_or(0);
+                let dst_offset = slots.get(&dst_id).copied().unwrap_or(0);
+                // Load operands into scratch registers
+                self.ss_load_value(lhs, Register::X9, slots)?;
+                self.ss_load_value(rhs, Register::X10, slots)?;
+                // EOR X9, X9, X10 — XOR to find differing bits
+                self.emit_instruction(Instruction::EOR {
+                    rd: Register::X9,
+                    rn: Register::X9,
+                    rm: Register::X10,
+                })?;
+                // Compare XOR result against zero (sets flags)
+                self.emit_instruction(Instruction::SUB {
+                    rd: Register::XZR,
+                    rn: Register::X9,
+                    rm: Operand::Imm12(0),
+                })?;
+                // CSET X9, EQ — 1 if all bits matched, 0 otherwise
+                self.emit_instruction(Instruction::CSET {
+                    rd: Register::X9,
+                    cond: crate::arm64::Condition::EQ,
+                })?;
+                self.ss_store_to_slot(Register::X9, dst_offset)?;
+            }
+
+            // ── Atomic load (stack-slot path) ──
+            IRInstr::AtomicLoad { dst, addr, ty: _ } => {
+                let dst_id = dst.as_register().unwrap_or(0);
+                let dst_offset = slots.get(&dst_id).copied().unwrap_or(0);
+                // Load address into X9
+                self.ss_load_value(addr, Register::X9, slots)?;
+                // LDAXR X10, [X9] — load-acquire exclusive
+                self.emit_instruction(Instruction::LDAXR {
+                    rt: Register::X10,
+                    rn: Register::X9,
+                })?;
+                // Store result to dst's stack slot
+                self.ss_store_to_slot(Register::X10, dst_offset)?;
+            }
+
+            // ── Atomic store (stack-slot path) ──
+            // STLXR loop: store-release exclusive until success.
+            IRInstr::AtomicStore { value, addr, ty: _ } => {
+                // Load address into X9, value into X10
+                self.ss_load_value(addr, Register::X9, slots)?;
+                self.ss_load_value(value, Register::X10, slots)?;
+                let retry_label = format!("__atomic_store_retry_{}", self.code.len());
+                self.label_offsets
+                    .insert(retry_label.clone(), self.code.len());
+                // STLXR X11, X10, [X9] — store-release exclusive
+                self.emit_instruction(Instruction::STLXR {
+                    rs: Register::X11,
+                    rt: Register::X10,
+                    rn: Register::X9,
+                })?;
+                // CBNZ X11, retry — if store failed, retry
+                let fixup = self.code.len();
+                self.fixups
+                    .push((fixup, retry_label, BranchFormat::Cond19));
+                self.emit_instruction(Instruction::CBNZ {
+                    rt: Register::X11,
+                    offset: 0,
+                })?;
+            }
+
+            // ── Atomic compare-and-swap (stack-slot path) ──
+            // LDAXR / CMP / B.NE skip / STLXR / CBNZ retry
+            IRInstr::AtomicCas {
+                dst,
+                addr,
+                expected,
+                desired,
+                ty: _,
+            } => {
+                let dst_id = dst.as_register().unwrap_or(0);
+                let dst_offset = slots.get(&dst_id).copied().unwrap_or(0);
+                // Load operands into scratch registers
+                self.ss_load_value(addr, Register::X9, slots)?;
+                self.ss_load_value(expected, Register::X10, slots)?;
+                self.ss_load_value(desired, Register::X11, slots)?;
+
+                let retry_label = format!("__atomic_cas_retry_{}", self.code.len());
+                let done_label = format!("__atomic_cas_done_{}", self.code.len());
+
+                // Record retry label position
+                self.label_offsets
+                    .insert(retry_label.clone(), self.code.len());
+                // LDAXR X12, [X9] — load current value
+                self.emit_instruction(Instruction::LDAXR {
+                    rt: Register::X12,
+                    rn: Register::X9,
+                })?;
+                // CMP X12, X10 — compare current vs expected
+                self.emit_instruction(Instruction::SUB {
+                    rd: Register::XZR,
+                    rn: Register::X12,
+                    rm: Operand::Reg {
+                        reg: Register::X10,
+                        shift: None,
+                    },
+                })?;
+                // B.NE done — if not equal, skip store
+                let fixup_ne = self.code.len();
+                self.fixups
+                    .push((fixup_ne, done_label.clone(), BranchFormat::Cond19));
+                self.emit_instruction(Instruction::BCond {
+                    cond: crate::arm64::Condition::NE,
+                    offset: 0,
+                })?;
+                // STLXR X13, X11, [X9] — try to store desired
+                self.emit_instruction(Instruction::STLXR {
+                    rs: Register::X13,
+                    rt: Register::X11,
+                    rn: Register::X9,
+                })?;
+                // CBNZ X13, retry — if store failed, retry
+                let fixup_retry = self.code.len();
+                self.fixups
+                    .push((fixup_retry, retry_label, BranchFormat::Cond19));
+                self.emit_instruction(Instruction::CBNZ {
+                    rt: Register::X13,
+                    offset: 0,
+                })?;
+                // Record done label position
+                self.label_offsets
+                    .insert(done_label.clone(), self.code.len());
+                // CSEL X14, X10, X12, EQ
+                // If EQ (match succeeded), X14 = X10 (expected); else X14 = X12 (current value)
+                self.emit_instruction(Instruction::CSEL {
+                    rd: Register::X14,
+                    rn: Register::X10,
+                    rm: Register::X12,
+                    cond: crate::arm64::Condition::EQ,
+                })?;
+                // Store result to dst's stack slot
+                self.ss_store_to_slot(Register::X14, dst_offset)?;
             }
         }
         Ok(())
@@ -4244,15 +4421,30 @@ pub fn emit_elf(
         write_filled_shdr(&mut elf, &sh);
     }
 
-    // ---- Step 18: Append DWARF5 debug sections if requested ----
+    // ---- Step 18: Append DWARF debug sections if requested ----
     if config.debug_info && config.section_headers {
-        let mut db = crate::dwarf::DwarfBuilder::new();
+        let mut db = crate::dwarf::DwarfBuilder::for_backend(config.backend);
         let source_file = config.entry_name.clone() + ".vuma";
         db.add_compile_unit(&source_file, "vuma-codegen 0.1");
+        db.set_cie_for_backend(config.backend);
         for func in functions {
             let start = function_offsets.get(&func.name).copied().unwrap_or(0);
             let size = function_sizes.get(&func.name).copied().unwrap_or(0);
             db.add_subprogram(&func.name, start, start + size);
+            db.add_fde(&func.name, start, size);
+
+            // Add line-number entries from IR block source_line annotations.
+            // Each block may have a source_line field (0 = no info).
+            // We estimate the offset of each block within the function by
+            // counting instructions (each IR instruction → 1 code word).
+            let mut block_offset: u64 = 0;
+            for block in &func.blocks {
+                if block.source_line > 0 {
+                    db.add_line_entry(start + block_offset, 1, block.source_line, 0);
+                }
+                block_offset += (block.instructions.len() as u64)
+                    * crate::dwarf::DwarfBuilder::for_backend(config.backend).min_inst_length() as u64;
+            }
         }
         let sections = db.emit_debug_sections();
         crate::dwarf::append_debug_sections_to_elf(&mut elf, &sections);
@@ -4431,6 +4623,12 @@ pub fn emit_binary(
 // ---------------------------------------------------------------------------
 
 /// Patch BL instructions in `text_section` according to the relocation records.
+///
+/// For calls to functions defined within the same compilation unit,
+/// the BL offset is patched directly.  For calls to external functions
+/// (declared in `extern "C" { ... }` blocks), the BL is left as a
+/// placeholder — the system linker will resolve it when linking the
+/// object file against libc or other shared libraries.
 fn resolve_call_relocs(
     text_section: &mut [u8],
     relocs: &[CallRelocation],
@@ -4440,8 +4638,12 @@ fn resolve_call_relocs(
         let target_offset = match function_offsets.get(&reloc.target_func) {
             Some(&off) => off,
             None => {
-                log::warn!(
-                    "call relocation target '{}' not found — leaving BL offset as 0",
+                // External symbol — the linker will resolve this.
+                // For ET_EXEC builds this means the call will go to
+                // offset 0 (a trap), but the proper path is to compile
+                // as ET_REL and link with the system linker.
+                log::debug!(
+                    "call relocation target '{}' is an external symbol — deferring to linker",
                     reloc.target_func
                 );
                 continue;
@@ -4684,11 +4886,16 @@ fn build_symbol_table(
 
     // External symbols (undefined, global) — for relocation targets not
     // defined in this object file.
+    //
+    // These represent functions declared in `extern "C" { ... }` blocks
+    // that will be resolved by the system linker.  We mark them as
+    // `STT_FUNC` (not `STT_NOTYPE`) so that the linker can properly
+    // set up PLT entries and enforce calling-convention compatibility.
     for name in external_symbols {
         let name_off = strtab.len() as u32;
         strtab.extend_from_slice(name.as_bytes());
         strtab.push(0);
-        let st_info = (STB_GLOBAL << 4) | STT_NOTYPE;
+        let st_info = (STB_GLOBAL << 4) | STT_FUNC;
         symtab.extend_from_slice(&name_off.to_le_bytes());
         symtab.push(st_info);
         symtab.push(0);

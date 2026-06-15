@@ -669,7 +669,12 @@ fn cmd_emit(
                 );
             }
             Err(e) => {
-                return Err(format!("{} encoding failed: {}", backend.name(), e));
+                use vuma_codegen::backend::BackendError;
+                let prefix = match &e {
+                    BackendError::UnresolvedRelocation { .. } => "E037",
+                    _ => "error",
+                };
+                return Err(format!("{}: {} encoding failed: {}", prefix, backend.name(), e));
             }
         }
     } else {

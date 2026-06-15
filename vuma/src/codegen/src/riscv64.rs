@@ -5328,6 +5328,24 @@ impl Backend for RiscV64Backend {
                         };
                         all_code[abs_offset..abs_offset + 4]
                             .copy_from_slice(&patched.encode());
+                    } else {
+                        // Unresolved relocation: emit an error instead of silently
+                        // leaving a placeholder at offset 0 which would cause a
+                        // runtime crash.
+                        eprintln!(
+                            "error[E037]: unresolved relocation: symbol '{}' referenced in function '{}' at offset 0x{:X} (type: {})",
+                            reloc.symbol, func.name, reloc.offset, reloc.reloc_type
+                        );
+                        let sentinel: u32 = 0xDEAD_BEEF;
+                        all_code[abs_offset..abs_offset + 4]
+                            .copy_from_slice(&sentinel.to_le_bytes());
+                        return Err(BackendError::UnresolvedRelocation {
+                            isa: "riscv64",
+                            symbol: reloc.symbol.clone(),
+                            function: func.name.clone(),
+                            offset: reloc.offset,
+                            reloc_type: reloc.reloc_type.clone(),
+                        });
                     }
                 }
             }
@@ -6816,7 +6834,9 @@ mod tests {
                 terminator: crate::ir::IRTerminator::Return(vec![]),
                 predecessors: HashSet::new(),
                 successors: HashSet::new(),
+                source_line: 0,
             }],
+            source_file: String::new(),
         };
         backend.allocate_registers(&func).unwrap()
     }

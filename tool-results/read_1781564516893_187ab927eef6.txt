@@ -1,0 +1,1499 @@
+     1→# VUMA Worklog
+     2→
+     3→## Task 3-d: Fix FP conversion casts in the ARM32 backend
+     4→
+     5→**Date**: 2026-03-05
+     6→**File**: `src/codegen/src/arm32/mod.rs`
+     7→
+     8→### Bug Description
+     9→
+    10→All FP conversion casts in the ARM32 backend were broken. The two existing VCVT encoding functions (`encode_vcvt_f32_s32` and `encode_vcvt_s32_f32`) had **incorrect bit patterns**, causing them to emit garbage instructions instead of valid VCVT operations. Additionally:
+    11→
+    12→1. `UIntToFloat` incorrectly used `VCVT.F32.S32` (signed) instead of `VCVT.F32.U32` (unsigned).
+    13→2. `FloatToUInt` incorrectly used `VCVT.S32.F32` (signed) instead of `VCVT.U32.F32` (unsigned).
+    14→3. `FloatToFloat` was a complete no-op, not emitting any conversion instruction.
+    15→
+    16→### Root Cause
+    17→
+    18→#### Wrong VCVT Encoding Bit Patterns
+    19→
+    20→The original `encode_vcvt_f32_s32` function had the following encoding errors:
+    21→
+    22→| Bit Position | Old (wrong)   | Correct       | Field                |
+    23→|--------------|---------------|---------------|----------------------|
+    24→| [23]         | 0             | 1             | Always 1 for VCVT   |
+    25→| [19:16]      | 0110 (0b011<<17) | 1000       | Opcode: int→float   |
+    26→| [8]          | Set via 1010  | 0             | sz = 0 (f32)        |
+    27→| [7]          | Set via 01    | 0             | Signed               |
+    28→
+    29→The old encoding produced `0xEE360A40` for VCVT.F32.S32 S0,S0, but the correct encoding is `0xEEB80A40`. Similarly, `encode_vcvt_s32_f32` produced `0xEE360BC0` instead of the correct `0xEEBD0A40`.
+    30→
+    31→The root cause was using `0b011 << 17` for bits [19:17] (which gave 0110 at [19:16]) instead of the correct `0b1000 << 16` for bits [19:16], and missing the `1 << 23` bit.
+    32→
+    33→#### Signed/Unsigned Not Distinguished
+    34→
+    35→The old code grouped `IntToFloat | UIntToFloat` and `FloatToInt | FloatToUInt` into single match arms, always using the signed VCVT variant regardless of the actual cast kind. The ARM VFP encoding distinguishes signed vs unsigned via bit [7]: 0 = signed, 1 = unsigned.
+    36→
+    37→#### FloatToFloat Not Implemented
+    38→
+    39→The `FloatToFloat` case was a no-op with a comment saying "would need double-precision VCVT instructions". ARM32 VFP provides `VCVT.F64.F32` (f32→f64 promote) and `VCVT.F32.F64` (f64→f32 demote) with a different opcode at [19:16] = 0110 and the `sz` bit [8] indicating the destination precision.
+    40→
+    41→### ARM32 VFP VCVT Encoding Reference
+    42→
+    43→All VCVT variants share a common encoding base:
+    44→
+    45→```
+    46→cond 1110 1D11 xxxx Vd 101 x xx 1 M 0 Vm
+    47→```
+    48→
+    49→| Variant         | [19:16] | [8] sz | [7] unsigned | Description              |
+    50→|-----------------|---------|--------|--------------|--------------------------|
+    51→| VCVT.F32.S32    | 1000    | 0      | 0            | signed i32 → f32        |
+    52→| VCVT.F32.U32    | 1000    | 0      | 1            | unsigned i32 → f32      |
+    53→| VCVT.S32.F32    | 1101    | 0      | 0            | f32 → signed i32        |
+    54→| VCVT.U32.F32    | 1101    | 0      | 1            | f32 → unsigned i32      |
+    55→| VCVT.F64.F32    | 0110    | 1      | 0            | f32 → f64 (promote)     |
+    56→| VCVT.F32.F64    | 0110    | 0      | 0            | f64 → f32 (demote)      |
+    57→
+    58→Verified reference encodings (S0,S0 or D0,S0 or S0,D0):
+    59→- VCVT.F32.S32 S0, S0 = `0xEEB80A40`
+    60→- VCVT.S32.F32 S0, S0 = `0xEEBD0A40`
+    61→
+    62→### Fixes Applied
+    63→
+    64→#### Fix 1: Corrected `encode_vcvt_f32_s32` encoding
+    65→
+    66→Changed the bit pattern to use:
+    67→- `(1 << 23)` — required for VCVT encoding
+    68→- `(0b1000 << 16)` — correct opcode for int→float
+    69→- `(0b101 << 9)` + `(0 << 8)` — sz=0 for f32, explicit
+    70→- `(0 << 7)` — signed
+    71→- `(1 << 6)` — required constant bit
+    72→- Added `sm` parameter (was hardcoded to sd)
+    73→
+    74→#### Fix 2: Corrected `encode_vcvt_s32_f32` encoding
+    75→
+    76→Same structural fix with `(0b1101 << 16)` for float→int opcode.
+    77→
+    78→#### Fix 3: Added `encode_vcvt_f32_u32` function
+    79→
+    80→Unsigned variant of int→float with bit [7] = 1.
+    81→
+    82→#### Fix 4: Added `encode_vcvt_u32_f32` function
+    83→
+    84→Unsigned variant of float→int with bit [7] = 1.
+    85→
+    86→#### Fix 5: Added `encode_vcvt_f64_f32` function
+    87→
+    88→f32→f64 promotion with opcode [19:16] = 0110, sz [8] = 1.
+    89→
+    90→#### Fix 6: Added `encode_vcvt_f32_f64` function
+    91→
+    92→f64→f32 demotion with opcode [19:16] = 0110, sz [8] = 0.
+    93→
+    94→#### Fix 7: Added `encode_vldr_d` and `encode_vstr_d` functions
+    95→
+    96→Double-precision VLDR/VSTR using CP11 (bits [11:8] = 1011) instead of CP10 (1010) used by single-precision variants. Needed for f64 stack load/store in FloatToFloat handling.
+    97→
+    98→#### Fix 8: Separated CastKind match arms
+    99→
+   100→Split the `IntToFloat | UIntToFloat` arm into separate `IntToFloat` and `UIntToFloat` arms, using `encode_vcvt_f32_s32` and `encode_vcvt_f32_u32` respectively. Similarly split `FloatToInt | FloatToUInt`.
+   101→
+   102→#### Fix 9: Implemented `FloatToFloat` handling
+   103→
+   104→Uses `from_ty` and `to_ty` (previously ignored with `..`) to determine direction:
+   105→- f32→f64: emit VCVT.F64.F32 with VLDR S0 → VCVT → VSTR D0
+   106→- f64→f32: emit VCVT.F32.F64 with VLDR D0 → VCVT → VSTR S0
+   107→- f32→f32 or unknown: no-op
+   108→
+   109→#### Fix 10: Added VCVT instruction variants to `Instruction` enum
+   110→
+   111→Added six new variants with `encode()`, `mnemonic()`, and `Display` implementations:
+   112→- `VcvtF32S32 { sd, sm, cond }`
+   113→- `VcvtF32U32 { sd, sm, cond }`
+   114→- `VcvtS32F32 { sd, sm, cond }`
+   115→- `VcvtU32F32 { sd, sm, cond }`
+   116→- `VcvtF64F32 { dd, sm, cond }`
+   117→- `VcvtF32F64 { sd, dm, cond }`
+   118→
+   119→
+   120→## Task 3-g: Fix FP conversion casts in the LoongArch64 backend
+   121→
+   122→**Date**: 2026-03-05
+   123→**Files**: `src/codegen/src/loongarch64/mod.rs`, `src/codegen/src/loongarch64/stack_slot_isel.rs`, `src/codegen/src/loongarch64/reg_alloc_isel.rs`
+   124→
+   125→### Bug Description
+   126→
+   127→All FP conversion casts (`IntToFloat`, `UIntToFloat`, `FloatToInt`, `FloatToUInt`, `FloatToFloat`) in the LoongArch64 backend were no-ops. The `CastKind` handling in both `stack_slot_isel.rs` and `reg_alloc_isel.rs` simply fell through without emitting any conversion instructions, meaning values were passed through unchanged (as raw bit patterns).
+   128→
+   129→Additionally, the `FfintDW` instruction variant had an incorrect opcode (0x00451A, which is actually `ffint.s.l`) instead of the correct opcode for `ffint.d.w` (0x00451B).
+   130→
+   131→### Missing Instruction Variants
+   132→
+   133→The `Instruction` enum in `mod.rs` was missing four FP conversion variants needed for full coverage:
+   134→- `FfintSL` — `ffint.s.l` (signed i64 → f32), opcode 0x00451A
+   135→- `FfintDL` — `ffint.d.l` (signed i64 → f64), opcode 0x00451C
+   136→- `FtintLS` — `ftint.l.s` (f32 → signed i64), opcode 0x00450E
+   137→- `FtintLD` — `ftint.l.d` (f64 → signed i64), opcode 0x00450F
+   138→
+   139→### LoongArch64 FP Conversion Instruction Opcodes (2R format)
+   140→
+   141→| Instruction | Semantics          | Opcode (bits[31:10]) |
+   142→|-------------|--------------------|-----------------------|
+   143→| FFINT.S.W   | signed i32 → f32   | 0x004519              |
+   144→| FFINT.S.L   | signed i64 → f32   | 0x00451A              |
+   145→| FFINT.D.W   | signed i32 → f64   | 0x00451B              |
+   146→| FFINT.D.L   | signed i64 → f64   | 0x00451C              |
+   147→| FTINT.W.S   | f32 → signed i32   | 0x00450C              |
+   148→| FTINT.W.D   | f64 → signed i32   | 0x00450D              |
+   149→| FTINT.L.S   | f32 → signed i64   | 0x00450E              |
+   150→| FTINT.L.D   | f64 → signed i64   | 0x00450F              |
+   151→| FCVT.D.S    | f32 → f64          | 0x004502              |
+   152→| FCVT.S.D    | f64 → f32          | 0x004503              |
+   153→
+   154→### Fixes Applied
+   155→
+   156→#### Fix 1: Added missing instruction variants to `Instruction` enum (`mod.rs`)
+   157→
+   158→Added `FfintSL`, `FfintDL`, `FtintLS`, `FtintLD` to the `Instruction` enum, with proper doc comments indicating the conversion semantics (e.g., `Signed Integer Long to Single: ffint.s.l fd, fj (i64→f32)`).
+   159→
+   160→Also improved the doc comments on existing variants to clearly indicate the conversion direction and types.
+   161→
+   162→#### Fix 2: Fixed `FfintDW` opcode (`mod.rs`)
+   163→
+   164→Changed the opcode from 0x00451A (which is `ffint.s.l`) to 0x00451B (correct for `ffint.d.w`). This was a pre-existing bug where the wrong opcode would have produced `ffint.s.l` (i64→f32) instead of `ffint.d.w` (i32→f64).
+   165→
+   166→#### Fix 3: Added encoding, mnemonic, and Display impl for new variants (`mod.rs`)
+   167→
+   168→- Added `encode()` cases for all four new variants using `encode_2r()` with the correct opcodes
+   169→- Added `mnemonic()` cases returning the standard LoongArch assembly mnemonics
+   170→- Added `Display` impl cases for disassembly output
+   171→
+   172→#### Fix 4: Fixed CastKind handling in `stack_slot_isel.rs`
+   173→
+   174→Replaced the no-op FP cast handling with proper conversion sequences:
+   175→
+   176→- **IntToFloat**: Load integer → sign-extend if i32 → `movgr2fr.d` (GPR→FPR) → appropriate `ffint` instruction based on `from_ty`/`to_ty` → `movfr2gr.d` (FPR→GPR) → store result
+   177→- **UIntToFloat**: Zero-extend u32 to 64 bits → `movgr2fr.d` → `ffint.d.l` (i64→f64) → `fcvt.s.d` if f32 needed → `movfr2gr.d` → store result. (Note: u64 with MSB set requires a more elaborate sequence, left as TODO.)
+   178→- **FloatToInt**: Load float bits → `movgr2fr.d` → appropriate `ftint` instruction based on `from_ty`/`to_ty` → `movfr2gr.d` → sign-extend if i32 dest → store result
+   179→- **FloatToUInt**: `movgr2fr.d` → `ftint.w.s` or `ftint.w.d` → `movfr2gr.d` → zero-extend for u32 dest. (Note: Full unsigned semantics for u64 requires dedicated `ftint.lu` instructions, left as TODO.)
+   180→- **FloatToFloat**: Load → `movgr2fr.d` → `fcvt.d.s` or `fcvt.s.d` → `movfr2gr.d` → store result
+   181→
+   182→Added FPR scratch registers (`FS0 = Fpr::F0`, `FS1 = Fpr::F1`) for temporary FP values.
+   183→
+   184→Also fixed `ZExt`, `SExt`, `Trunc`, and `BitCast` to properly load/store through scratch registers instead of relying on the single load-modify-store pattern (which was missing the initial load for `Trunc`/`BitCast`).
+   185→
+   186→#### Fix 5: Fixed CastKind handling in `reg_alloc_isel.rs`
+   187→
+   188→Applied the same FP conversion logic as in `stack_slot_isel.rs`, but using the register-allocated GPR (`d`) directly instead of stack-slot loads/stores. Added FPR scratch registers (`FS0`, `FS1`) and the `Fpr` import.
+   189→
+   190→### Design Notes
+   191→
+   192→- The conversion approach uses a GPR→FPR→convert→FPR→GPR round-trip because the stack-slot and reg-alloc ISels currently store all values (including floats) as raw bits in GPR-sized stack slots or registers. When the backend gains proper FPR allocation, this round-trip can be eliminated.
+   193→- `UIntToFloat` and `FloatToUInt` use the signed conversion instructions with zero-extension/sign-extension workarounds. LoongArch does have unsigned variants (`ffint.s.wu`, etc.) but these were not part of the current task scope.
+   194→- The `from_ty` and `to_ty` fields on `IRInstr::Cast` are used to select the correct instruction variant. When type info is `None`, the default is i64→f64 for IntToFloat and f64→i64 for FloatToInt.
+   195→
+   196→
+   197→
+   198→## Task 2-f: Fix ARM32 calling convention for functions with >4 arguments
+   199→
+   200→**Date**: 2026-03-05
+   201→**File**: `src/codegen/src/arm32/mod.rs`
+   202→
+   203→### Bug Description
+   204→
+   205→The ARM32 backend silently dropped function arguments beyond the first 4. Under AAPCS, the first 4 arguments are passed in registers R0–R3, while arguments 5+ must be passed on the stack. The code at line 3594 had a `TODO: handle > 4 args via stack` comment, and arguments at index ≥4 were simply ignored in both the caller (call emission) and callee (prologue/argument setup).
+   206→
+   207→### Root Cause
+   208→
+   209→Three related gaps in the ARM32 codegen:
+   210→
+   211→1. **Call emission** (`IRInstr::Call`): Only loaded args 0–3 into R0–R3; args ≥4 were skipped entirely.
+   212→2. **Function prologue**: Only stored R0–R3 params to their vreg stack slots; stack-passed params (index ≥4) were never loaded from the stack into their vreg slots.
+   213→3. **Missing helper**: No `emit_add_sp` counterpart to `emit_sub_sp`, needed for caller-side stack cleanup after calls with stack-passed args.
+   214→
+   215→### AAPCS Stack Layout
+   216→
+   217→After the prologue (SUB SP, ADD R11=SP+frame_size, save LR/R11):
+   218→```
+   219→Higher addresses
+   220→  ┌──────────────┐
+   221→  │ arg N-1      │  ← [R11 + 8 + (N-5)*4]
+   222→  │ ...          │
+   223→  │ arg 5        │  ← [R11 + 12]
+   224→  │ arg 4        │  ← [R11 + 8]
+   225→  │ saved LR     │  ← [R11 + 4]
+   226→  │ saved R11    │  ← [R11 + 0]
+   227→  ├──────────────┤  ← R11 (frame pointer)
+   228→  │ vreg slots   │  ← [R11 - offset]
+   229→  │ ...          │
+   230→  ├──────────────┤  ← SP
+   231→Lower addresses
+   232→```
+   233→
+   234→Stack-passed arg at 0-based index `i` (i ≥ 4) is at `[R11 + 8 + (i - 4) * 4]`.
+   235→
+   236→### Fixes Applied
+   237→
+   238→#### Fix 1: Added `ss_load_from_r11_plus` helper (after line 3300)
+   239→
+   240→New closure that loads a 32-bit word from `[R11 + positive_offset]` into a destination register. Handles both the common case (offset ≤ 4095, single LDR instruction) and the rare large-offset case (compute address into R12 via ADD, then LDR indirect). This is the positive-offset counterpart to `ss_load_from_slot` which uses negative offsets.
+   241→
+   242→#### Fix 2: Added `emit_add_sp` helper (after line 3165)
+   243→
+   244→New closure that emits `ADD SP, SP, #imm` with the same large-value handling as the existing `emit_sub_sp` — tries ARM rotated-immediate encoding first, falls back to loading the value into R12 and using `ADD SP, SP, R12`.
+   245→
+   246→#### Fix 3: Updated function prologue — stack-passed args (lines 3444–3481)
+   247→
+   248→Extended the parameter-storing loop to handle index ≥4. For each stack-passed param:
+   249→1. Load the value from `[R11 + 8 + (i-4)*4]` into R0 using `ss_load_from_r11_plus`
+   250→2. Store R0 to the param's vreg stack slot using `ss_store_to_slot`
+   251→
+   252→Uses R0 (not R12) as the scratch register because `ss_store_to_slot` documents that `src_reg` must NOT be R12 for large offsets (it uses R12 internally). R0 is safe because it was already saved for param 0 earlier in the loop.
+   253→
+   254→#### Fix 4: Updated call emission — stack-passed args (lines 3862–3941)
+   255→
+   256→Completely rewrote the `IRInstr::Call` handler to support >4 arguments:
+   257→
+   258→1. **Allocate stack space**: `SUB SP, SP, #(num_stack_args * 4)` before setting up any args
+   259→2. **Store args 5+ to stack**: For each arg at index ≥4:
+   260→   - Normal case (offset ≤ 4095): Load arg into R12, `STR R12, [SP, #offset]`
+   261→   - Large-offset case: Compute `SP + offset` into R12, load arg into R0, `STR R0, [R12, #0]`
+   262→3. **Load args 0–3 into R0–R3** (existing behavior, unchanged)
+   263→4. **BL** (existing, unchanged)
+   264→5. **Caller cleanup**: `ADD SP, SP, #(num_stack_args * 4)` after the call returns
+   265→6. **Store return value** (existing, unchanged)
+   266→
+   267→The order (stack args first, then register args) ensures R12 is free for scratch use when storing stack args, and R0–R3 are loaded last just before the BL.
+   268→
+   269→### Argument Access in Function Body
+   270→
+   271→No changes needed. The function body accesses all parameters (including stack-passed ones) through `vreg_stack_slots` using `ss_load_value`. The prologue is the bridge that copies stack-passed args from their AAPCS locations `[R11 + 8 + ...]` into the same vreg stack slot mechanism used by all other variables. After the prologue runs, the function body treats all params identically regardless of how they were passed.
+   272→
+   273→### Backward Compatibility
+   274→
+   275→Functions with ≤4 arguments are completely unaffected — `num_stack_args` evaluates to 0, so no SUB SP, stack stores, or ADD SP instructions are emitted. The prologue loop only enters the `else` branch for params at index ≥4.
+   276→
+   277→## Task 2-c: Fix RISC-V 64 atomic CAS loop — branch labels never inserted into label_offsets
+   278→
+   279→**Date**: 2026-03-05
+   280→**File**: `src/codegen/src/riscv64.rs`
+   281→
+   282→### Bug Description
+   283→
+   284→The RISC-V 64 backend's atomic operations (AtomicStore and AtomicCas) had broken branch label handling. The code generated labels like `__atomic_store_retry_{offset}` and branch fixups referencing those labels, but never inserted the labels into the `label_offsets` HashMap. When Phase 4 (branch fixup) ran, it looked up each branch's `target_label` in `label_offsets`, got `None`, and silently skipped the fixup — leaving all branch offsets at 0. This meant:
+   285→
+   286→- **AtomicStore**: SC.D failure was never retried; BNE with offset 0 branched to the next instruction (a no-op fall-through).
+   287→- **AtomicCas**: No branch fixups were created at all (only a `TODO` comment). Both BNE instructions (not-equal→done and SC-failed→retry) kept offset 0, so the CAS loop never looped back on SC.D failure and never skipped to done on mismatch.
+   288→
+   289→### Additional Bug in AtomicStore
+   290→
+   291→The original AtomicStore code emitted `SC.D` without a preceding `LR.D`. Per the RISC-V A extension, SC.D requires a valid reservation established by a prior LR.D; without it, SC.D always reports failure (rd=1), making the retry loop infinite even if branching worked.
+   292→
+   293→### Root Cause Analysis
+   294→
+   295→The `label_offsets` HashMap is populated in two places:
+   296→1. **Block labels** (line 4164): `label_offsets.insert(block.label.clone(), current_byte_offset)` — works correctly for IR block labels.
+   297→2. **Atomic labels**: Never inserted — the code created label name strings and `BranchFixup` entries referencing them, but never called `label_offsets.insert(...)`.
+   298→
+   299→### Fixes Applied
+   300→
+   301→#### Fix 1: AtomicStore (lines 4659–4691)
+   302→
+   303→- **Added LR.D before SC.D** in the retry loop to properly establish a memory reservation. The loop is now: `LR.D T2, (T0)` → `SC.D T2, T1, (T0)` → `BNE T2, zero, retry`.
+   304→- **Inserted the retry label into `label_offsets`** at the absolute byte offset of the LR.D instruction: `label_offsets.insert(retry_label.clone(), retry_abs_offset)`.
+   305→- **Removed stale TODO comments** about "proper label support for atomic loops" since this IS the proper fix.
+   306→- Cleaned up variable naming: `retry_offset` → `retry_abs_offset` and `retry_label` for clarity.
+   307→
+   308→#### Fix 2: AtomicCas (lines 4693–4752)
+   309→
+   310→- **Inserted the retry label** (`__atomic_cas_retry_{offset}`) into `label_offsets` at the absolute byte offset of the LR.D instruction.
+   311→- **Inserted the done label** (`__atomic_cas_done_{offset}`) into `label_offsets` at the absolute byte offset after the second BNE (where the dst store begins).
+   312→- **Added branch fixup for BNE1** (current != expected → done): Creates a `BranchFixup` targeting the `done_label` with `bne_rs1=T2, bne_rs2=T1`.
+   313→- **Added branch fixup for BNE2** (SC.D failed → retry): Creates a `BranchFixup` targeting the `retry_label` with `bne_rs1=T4, bne_rs2=Zero`.
+   314→- **Removed stale TODO comment** about "proper label fixups for the retry/done branches".
+   315→
+   316→### How the Fix Works
+   317→
+   318→Both fixes follow the same pattern used by IR-level branches (e.g., `CondBranch`):
+   319→
+   320→1. Compute the absolute byte offset of the label position using `current_byte_offset + code.len() as u64`.
+   321→2. Create a unique label name (e.g., `__atomic_cas_retry_128`) incorporating the absolute offset for uniqueness.
+   322→3. Insert the label into `label_offsets` immediately — no need to wait, since `label_offsets` is just a HashMap consulted later in Phase 4.
+   323→4. Create `BranchFixup` entries referencing the label name.
+   324→5. Phase 4's existing fixup loop resolves all labels correctly, computing `rel_offset = target_offset - branch_abs_offset` and patching the encoded BNE/JAL instructions.
+   325→
+   326→### Instruction Sequences After Fix
+   327→
+   328→**AtomicStore**:
+   329→```
+   330→retry:  LR.D   T2, (T0)       ; establish reservation
+   331→        SC.D   T2, T1, (T0)   ; attempt store; T2=0 success, T2=1 failure
+   332→        BNE    T2, zero, retry ; if failed, branch back to LR.D
+   333→```
+   334→
+   335→**AtomicCas**:
+   336→```
+   337→retry:  LR.D   T2, (T0)       ; load current value & establish reservation
+   338→        BNE    T2, T1, done   ; if current != expected, skip to done
+   339→        SC.D   T4, T3, (T0)   ; attempt to store desired; T4=0 success, T4=1 failure
+   340→        BNE    T4, zero, retry; if SC failed, branch back to LR.D
+   341→done:   <store T2 to dst>     ; store the old (current) value to destination
+   342→```
+   343→
+   344→## Task 2-d: Implement proper Compare-and-Swap (CAS) for the Wasm32 backend
+   345→
+   346→**Date**: 2026-03-05
+   347→**File**: `src/codegen/src/wasm32/mod.rs`
+   348→
+   349→### Bug Description
+   350→
+   351→The Wasm32 backend's `AtomicCas` lowering was a placeholder that emitted a simple `Load` instruction, completely ignoring the `expected` and `desired` operands. Similarly, `AtomicLoad` and `AtomicStore` were lowered to their non-atomic equivalents (plain `i32.load`/`i32.store`), which do not provide any atomicity guarantees. The code had a comment stating "Atomic operations — not natively supported in Wasm MVP", but the Wasm Threads proposal (now standardized) defines proper atomic instructions with the `0xFE` prefix byte.
+   352→
+   353→### Root Cause
+   354→
+   355→The original implementation predated the Wasm Threads proposal's standardization. It assumed Wasm had no native atomic support and fell back to single-threaded semantics. This is incorrect for any multi-threaded Wasm execution environment.
+   356→
+   357→### Changes Made
+   358→
+   359→#### 1. Added `shared` field to `WasmLimits` (line ~973)
+   360→
+   361→Wasm atomic instructions require **shared linear memory**. Added a `shared: bool` field to `WasmLimits` and updated the binary encoding to use the correct flag bits:
+   362→- `0x00`: min only, not shared
+   363→- `0x01`: min + max, not shared
+   364→- `0x02`: min only, shared
+   365→- `0x03`: min + max, shared
+   366→
+   367→The flag is computed as: `flag = (has_max as u8) | ((shared as u8) << 1)`.
+   368→
+   369→#### 2. Added atomic `WasmInstr` variants (lines 364–418)
+   370→
+   371→Added instruction variants covering the full set of Wasm atomic memory operations:
+   372→
+   373→**Atomic loads** (0xFE prefix):
+   374→- `I32AtomicLoad` (0x10), `I64AtomicLoad` (0x11)
+   375→- `I32AtomicLoad8U` (0x12), `I32AtomicLoad16U` (0x13)
+   376→- `I64AtomicLoad8U` (0x14), `I64AtomicLoad16U` (0x15), `I64AtomicLoad32U` (0x16)
+   377→
+   378→**Atomic stores** (0xFE prefix):
+   379→- `I32AtomicStore` (0x17), `I64AtomicStore` (0x18)
+   380→- `I32AtomicStore8` (0x19), `I32AtomicStore16` (0x1A)
+   381→- `I64AtomicStore8` (0x1B), `I64AtomicStore16` (0x1C), `I64AtomicStore32` (0x1D)
+   382→
+   383→**Fence**:
+   384→- `MemoryAtomicFence` (0x1E, with reserved byte 0x00)
+   385→
+   386→**Compare-and-swap** (0xFE prefix):
+   387→- `I32AtomicRmwCmpxchg` (0x48), `I64AtomicRmwCmpxchg` (0x49)
+   388→- `I32AtomicRmw8CmpxchgU` (0x4A), `I32AtomicRmw16CmpxchgU` (0x4B)
+   389→- `I64AtomicRmw8CmpxchgU` (0x4C), `I64AtomicRmw16CmpxchgU` (0x4D), `I64AtomicRmw32CmpxchgU` (0x4E)
+   390→
+   391→#### 3. Added binary encoding for all atomic instructions (lines 827–961)
+   392→
+   393→All atomic instructions encode as: `0xFE` prefix + LEB128 sub-opcode + LEB128 alignment + LEB128 offset. The `MemoryAtomicFence` instruction additionally emits a reserved `0x00` byte.
+   394→
+   395→#### 4. Replaced placeholder lowering with proper atomic instructions (lines 2650–2711)
+   396→
+   397→**AtomicLoad**: Now selects the correct atomic load instruction based on `IRType`:
+   398→- `I8`/`U8` → `I32AtomicLoad8U` (align=0)
+   399→- `I16`/`U16` → `I32AtomicLoad16U` (align=1)
+   400→- `I32`/`U32`/`Ptr`/`Func` → `I32AtomicLoad` (align=2)
+   401→- `I64`/`U64` → `I64AtomicLoad` (align=3)
+   402→
+   403→**AtomicStore**: Now selects the correct atomic store instruction based on `IRType`:
+   404→- `I8`/`U8` → `I32AtomicStore8` (align=0)
+   405→- `I16`/`U16` → `I32AtomicStore16` (align=1)
+   406→- `I32`/`U32`/`Ptr`/`Func` → `I32AtomicStore` (align=2)
+   407→- `I64`/`U64` → `I64AtomicStore` (align=3)
+   408→
+   409→**AtomicCas**: Now emits a proper `cmpxchg` instruction. Stack operands are pushed in Wasm order: `addr`, `expected`, `desired`. The instruction atomically reads the old value, compares with expected, and writes desired if equal. It returns the old value.
+   410→- `I8`/`U8` → `I32AtomicRmw8CmpxchgU` (align=0)
+   411→- `I16`/`U16` → `I32AtomicRmw16CmpxchgU` (align=1)
+   412→- `I32`/`U32`/`Ptr`/`Func` → `I32AtomicRmwCmpxchg` (align=2)
+   413→- `I64`/`U64` → `I64AtomicRmwCmpxchg` (align=3)
+   414→
+   415→#### 5. Marked production memory as shared (line ~2903)
+   416→
+   417→Updated `encode_program` to set `shared: true` on the module's memory so that atomic instructions are valid at runtime. All test code uses `shared: false` since tests don't require atomics.
+   418→
+   419→#### 6. Added comprehensive tests (lines 3832–3944)
+   420→
+   421→- `test_i32_atomic_load_encoding` — verifies 0xFE 0x10 + alignment + offset
+   422→- `test_i64_atomic_load_encoding` — verifies 0xFE 0x11
+   423→- `test_i32_atomic_store_encoding` — verifies 0xFE 0x17
+   424→- `test_i64_atomic_store_encoding` — verifies 0xFE 0x18
+   425→- `test_i32_atomic_rmw_cmpxchg_encoding` — verifies 0xFE 0x48
+   426→- `test_i64_atomic_rmw_cmpxchg_encoding` — verifies 0xFE 0x49
+   427→- `test_subword_atomic_cmpxchg_encoding` — verifies 0xFE 0x4A (8-bit) and 0xFE 0x4B (16-bit)
+   428→- `test_memory_atomic_fence_encoding` — verifies 0xFE 0x1E + reserved 0x00
+   429→- `test_shared_memory_limits_encoding` — verifies flag byte encoding for shared/non-shared memories
+   430→
+   431→### Key Design Decisions
+   432→
+   433→1. **No LL/SC loop needed**: Unlike AArch64 and RISC-V which require explicit load-linked/store-conditional loops, Wasm's `cmpxchg` instruction handles the retry loop internally. This is a major simplification.
+   434→
+   435→2. **Natural alignment enforced**: All atomic instructions use naturally aligned addresses (align = log2(access_width)). Misaligned atomic accesses trap in Wasm.
+   436→
+   437→3. **Sub-word support**: 8-bit and 16-bit atomic CAS is supported via the `rmw8.cmpxchg_u` and `rmw16.cmpxchg_u` instructions, which zero-extend the result to the Wasm stack type (i32 or i64).
+   438→
+   439→4. **Shared memory required**: The Wasm spec mandates that atomic instructions can only operate on shared memory. The production module now emits `shared: true` in its memory definition.
+   440→
+   441→## Task 2-h: Fix MIPS64 Ror/Rol incomplete implementation + LoongArch64 unimplemented terminators
+   442→
+   443→**Date**: 2026-03-05
+   444→**Files**: `src/codegen/src/mips64/mod.rs`, `src/codegen/src/loongarch64/mod.rs`, `src/codegen/src/loongarch64/stack_slot_isel.rs`, `src/codegen/src/loongarch64/reg_alloc_isel.rs`
+   445→
+   446→### Bug 1: MIPS64 Ror/Rol Incomplete Implementation
+   447→
+   448→#### Bug Description
+   449→
+   450→The MIPS64 backend had two separate ROR/ROL bugs:
+   451→
+   452→1. **`lower_binop` function (register-allocated path, dead code)**: ROR only emitted `DSRLV` and ROL only emitted `DSLLV` — each was missing the complementary shift + OR to complete the rotation. For example, ROR should produce `(n >> r) | (n << (64-r))` but only produced `(n >> r)`.
+   453→
+   454→2. **Stack-slot ISel path (active code generation)**: ROR and ROL were hardcoded to 32-bit rotation (using `imm: 32` in ADDIU), ignoring the `is_32bit` flag. 64-bit types (I64/U64) would produce incorrect results because they need a 64-bit rotation width, and they don't need the zero-extend/mask-to-32-bits steps.
+   455→
+   456→#### Root Cause
+   457→
+   458→The `lower_binop` function had comments acknowledging the issue: "Simplified: just emit dsrlv as placeholder (lower_ir_instr is dead code)". The stack-slot ISel path was implemented only for the I32/U32 case and never updated for 64-bit types.
+   459→
+   460→#### Fixes Applied
+   461→
+   462→##### Fix 1: `lower_binop` — Complete ROR/ROL sequences (lines ~1831–1922)
+   463→
+   464→Replaced the single-instruction placeholder with proper multi-instruction sequences, following the same pattern as `SLe` (push to `result`, return early):
+   465→
+   466→**ROR (64-bit)**: `(n >> r) | (n << (64-r))`
+   467→```
+   468→DSRLV T2, lhs, rhs       // T2 = lhs >> rhs
+   469→DADDIU T3, $zero, 64     // T3 = 64
+   470→DSUBU  T3, T3, rhs       // T3 = 64 - rhs
+   471→DSLLV  T3, lhs, T3       // T3 = lhs << (64-rhs)
+   472→OR     dst, T2, T3       // dst = (lhs >> rhs) | (lhs << (64-rhs))
+   473→```
+   474→
+   475→**ROL (64-bit)**: `(n << r) | (n >> (64-r))`
+   476→```
+   477→DSLLV  T2, lhs, rhs      // T2 = lhs << rhs
+   478→DADDIU T3, $zero, 64     // T3 = 64
+   479→DSUBU  T3, T3, rhs       // T3 = 64 - rhs
+   480→DSRLV  T3, lhs, T3       // T3 = lhs >> (64-rhs)
+   481→OR     dst, T2, T3       // dst = (lhs << rhs) | (lhs >> (64-rhs))
+   482→```
+   483→
+   484→Uses T2 and T3 as scratch registers (caller-saved temporaries, safe to clobber).
+   485→
+   486→##### Fix 2: Stack-slot ISel — 32-bit/64-bit dispatch (lines ~2536–2589)
+   487→
+   488→Added `is_32bit` check to ROR/ROL:
+   489→
+   490→- **32-bit path** (existing): Zero-extend value, rotate with width 32, mask result to 32 bits
+   491→- **64-bit path** (new): Direct DSRLV/DSLLV + DADDIU(64) + DSUBU + DSLLV/DSRLV + OR sequence, no zero-extend or mask needed
+   492→
+   493→Uses `DADDIU` (64-bit add immediate) instead of `ADDIU` (32-bit) for the 64-bit path to correctly load 64.
+   494→
+   495→### Bug 2: LoongArch64 Unimplemented Terminators
+   496→
+   497→#### Bug Description
+   498→
+   499→The LoongArch64 backend's Switch, Invoke, TailCall, and Resume terminators all emitted a `BREAK` instruction (intentional crash), making any IR using these terminators immediately trap at runtime. Both `stack_slot_isel.rs` and `reg_alloc_isel.rs` had this issue.
+   500→
+   501→Additionally, the vreg collection phase in both files only tracked vregs used by `Branch` and `Return` terminators, missing vregs referenced by Switch (discr), Invoke (args), TailCall (args), and Resume (value). This could cause those vregs to not get stack slots, leading to incorrect code.
+   502→
+   503→#### Root Cause
+   504→
+   505→These terminators were never implemented — the code had placeholder `BREAK` emissions from initial development.
+   506→
+   507→#### Fixes Applied
+   508→
+   509→##### Fix 0: Vreg collection (both stack_slot_isel.rs and reg_alloc_isel.rs)
+   510→
+   511→Extended the terminator vreg tracking `match` to include:
+   512→- `Switch { discr, .. }` → track `discr` register
+   513→- `Invoke { args, .. }` → track all `args` registers
+   514→- `TailCall { args, .. }` → track all `args` registers
+   515→- `Resume { value }` → track `value` register
+   516→
+   517→##### Fix 1: Switch — Cascade of BEQ comparisons (both isel files)
+   518→
+   519→```loongarch
+   520→# Load discriminator into S0/T0
+   521→ld.d   S0, fp, discr_offset      # (or read_vreg for reg_alloc_isel)
+   522→# For each (value, target):
+   523→lu12i.w S1, value_hi              # load comparison value
+   524→ori    S1, S1, value_lo
+   525→beq    S0, S1, target_label       # branch if match (patched later)
+   526→# Default:
+   527→b      default_label               # unconditional branch to default
+   528→```
+   529→
+   530→No jump table is used (PCADDU12I + LD.W + JR would require emitting data in the code section, which the framework doesn't support). The cascade-of-comparisons approach is correct and handles all switch sizes, though it's O(n) in the number of targets.
+   531→
+   532→##### Fix 2: Invoke — Call + branch to normal (both isel files)
+   533→
+   534→Invoke is implemented identically to Call for the invocation part, with an additional unconditional branch to the `normal` continuation block after the call returns:
+   535→
+   536→1. Flush caller-saved registers (reg_alloc_isel) / set up args from stack slots (stack_slot_isel)
+   537→2. Load arguments into $a0–$a7 (+ stack-passed args if >8)
+   538→3. BL to function (with R_LARCH_B26 relocation)
+   539→4. Deallocate stack arg space (if any)
+   540→5. Store return value to dst's stack slot / assign to $a0 in reg cache
+   541→6. B normal (branch to normal continuation, patched later)
+   542→
+   543→The `unwind` block is tracked for control flow correctness (it's a successor of the Invoke block) but doesn't get explicit landing-pad setup — that requires DWARF exception info which the framework doesn't emit. The unwind handler would be reached by the unwinder at runtime.
+   544→
+   545→##### Fix 3: TailCall — Epilogue + B to target (both isel files)
+   546→
+   547→Tail call reuses the caller's stack frame. The implementation:
+   548→
+   549→1. Load register args into $a0–$a7 (while frame is still intact)
+   550→2. For stack-passed args (>8): place them at old_sp offsets (above current frame, in the caller's arg area which is no longer needed)
+   551→3. Epilogue: restore $ra, $fp, deallocate frame (same as Return, minus JIRL)
+   552→4. B to target (with R_LARCH_B26 relocation, no return address save)
+   553→
+   554→Since `B` doesn't modify `$ra`, the callee returns directly to the tail-caller's caller — the key semantic of a tail call.
+   555→
+   556→In `stack_slot_isel.rs`, the stack args are placed by computing `old_sp = $sp + frame_size` and storing at `old_sp + (i-8)*8`. In `reg_alloc_isel.rs`, we flush all registers and load args from the reg cache before the epilogue.
+   557→
+   558→##### Fix 4: Resume — Call __Unwind_Resume (both isel files)
+   559→
+   560→Resume transfers control to the unwinder, which never returns:
+   561→
+   562→1. Load exception value into $a0
+   563→2. BL __Unwind_Resume (with R_LARCH_B26 relocation)
+   564→3. BREAK (safety trap — __Unwind_Resume should never return)
+   565→
+   566→This is a minimal but correct implementation. In a full EH system, the personality function and unwinder would use DWARF info to find the correct landing pad.
+   567→
+   568→### Bonus Fix: LoongArch64 mod.rs ROL
+   569→
+   570→While investigating, I also noticed that the `lower_binop_la64` function in `loongarch64/mod.rs` handled both Ror and Rol identically (both using `RotrD` directly), which is incorrect for Rol since `ROL(x, n) = ROTR(x, 64-n)`. Fixed by splitting the cases:
+   571→
+   572→- **Ror**: `RotrD rd, rj, rk` (correct as-is)
+   573→- **Rol**: Compute `64-n` via `ADDI.D T2, $r0, 64; SUB.D T2, T2, r` then `RotrD rd, rj, T2`
+   574→
+   575→### Files Modified
+   576→
+   577→| File | Changes |
+   578→|------|---------|
+   579→| `mips64/mod.rs` | Fixed `lower_binop` ROR/ROL (complete sequences with DSRLV+DSLLV+OR); Fixed stack-slot ISel ROR/ROL (32-bit/64-bit dispatch) |
+   580→| `loongarch64/mod.rs` | Fixed `lower_binop_la64` ROL (compute 64-n before RotrD) |
+   581→| `loongarch64/stack_slot_isel.rs` | Added vreg tracking for Switch/Invoke/TailCall/Resume; Implemented Switch (BEQ cascade), Invoke (Call+B normal), TailCall (args+epilogue+B), Resume (load+BL __Unwind_Resume) |
+   582→| `loongarch64/reg_alloc_isel.rs` | Added vreg tracking for Switch/Invoke/TailCall/Resume; Implemented Switch, Invoke, TailCall, Resume using RegCache API |
+   583→
+   584→## Task 2-e: Fix AtomicCas on ARM32 and MIPS64 backends
+   585→
+   586→**Date**: 2026-03-05
+   587→**Files**: `src/codegen/src/arm32/mod.rs`, `src/codegen/src/mips64/mod.rs`
+   588→
+   589→### Bug Description
+   590→
+   591→Both the ARM32 and MIPS64 backends lowered `AtomicCas` to a simple load instruction, completely ignoring the `expected` and `desired` operands. This meant that compare-and-swap operations always returned the current value at the address without ever attempting the conditional store, making atomic CAS semantically equivalent to an atomic load — useless for any concurrent algorithm.
+   592→
+   593→### Root Cause
+   594→
+   595→The ARM32 handler (line 3915) had a comment `// Lower as a simple load (placeholder)` and constructed a `Load` IR instruction that it never actually used, then loaded the address and performed a plain `LDR`. The `expected` and `desired` values were explicitly suppressed with `let _ = (load_ir, expected, desired);`.
+   596→
+   597→The MIPS64 handler (line 2867) had a similar `// Placeholder: simple load` comment, using a plain `LD` instruction with `expected: _` and `desired: _` patterns to suppress unused-variable warnings.
+   598→
+   599→### Fixes Applied
+   600→
+   601→#### ARM32: LDREX/STREX-based CAS loop
+   602→
+   603→Added 7 new instruction variants to the `Instruction` enum and corresponding encoding functions:
+   604→
+   605→| Instruction | Encoding | Description |
+   606→|-------------|----------|-------------|
+   607→| `Ldrex` | `cond 00011011 Rn Rd 1111 1001 1111` | Load Register Exclusive (32-bit) |
+   608→| `Ldrexb` | `cond 00011101 Rn Rd 1111 1001 1111` | Load Register Exclusive Byte |
+   609→| `Ldrexh` | `cond 00011111 Rn Rd 1111 1001 1111` | Load Register Exclusive Halfword |
+   610→| `Strex` | `cond 00011000 Rn Rd 1111 1001 Rt` | Store Register Exclusive (32-bit) |
+   611→| `Strexb` | `cond 00011100 Rn Rd 1111 1001 Rt` | Store Register Exclusive Byte |
+   612→| `Strexh` | `cond 00011110 Rn Rd 1111 1001 Rt` | Store Register Exclusive Halfword |
+   613→| `Dmb` | `cond 01010111 1111 1111 1111 0101 option` | Data Memory Barrier |
+   614→
+   615→Also added `encode()`, `mnemonic()`, `Display`, and disassembler support for all new instructions.
+   616→
+   617→The CAS loop uses a fixed-size instruction sequence with precomputed branch offsets:
+   618→
+   619→```
+   620→; Register allocation: R3=addr, R1=expected, R2=desired, R0=old/result, R12=status
+   621→  DMB SY                    ; +0  — acquire barrier
+   622→retry:
+   623→  LDREX{,B,H} R0, [R3]     ; +4  — load exclusive
+   624→  CMP R0, R1                ; +8  — compare old with expected
+   625→  BNE done                  ; +12 — offset_words = +2
+   626→  STREX{,B,H} R12, R2, [R3]; +16 — try store; R12 = status
+   627→  CMP R12, #0               ; +20 — check status
+   628→  BNE retry                 ; +24 — offset_words = -7
+   629→done:
+   630→  DMB SY                    ; +28 — release barrier
+   631→```
+   632→
+   633→Branch offset derivation (ARM formula: `offset_words = (target - (branch + 8)) / 4`):
+   634→- BNE done: `(28 - (12 + 8)) / 4 = +2`
+   635→- BNE retry: `(4 - (24 + 8)) / 4 = -7`
+   636→
+   637→Type-specific variants:
+   638→- I8/U8 → LDREXB + STREXB
+   639→- I16/U16 → LDREXH + STREXH
+   640→- I32/U32/I64/U64 → LDREX + STREX
+   641→
+   642→R0 holds the old value throughout the loop because STREX writes its status to R12 (not R0), so R0 is preserved for the result store.
+   643→
+   644→#### MIPS64: LLD/SCD-based CAS loop
+   645→
+   646→Added 5 new instruction variants to the `Instruction` enum, 4 new opcode constants, and 1 new function code:
+   647→
+   648→| Constant | Value | Description |
+   649→|----------|-------|-------------|
+   650→| `OPC_LL` | 0x30 | Load Linked opcode |
+   651→| `OPC_LLD` | 0x34 | Load Linked Doubleword opcode |
+   652→| `OPC_SC` | 0x38 | Store Conditional opcode |
+   653→| `OPC_SCD` | 0x3C | Store Conditional Doubleword opcode |
+   654→| `FN_SYNC` | 0x0F | SYNC function code |
+   655→
+   656→New instruction variants:
+   657→- `Ll { rt, base, offset }` — Load Linked (32-bit)
+   658→- `Lld { rt, base, offset }` — Load Linked Doubleword (64-bit)
+   659→- `Sc { rt, base, offset }` — Store Conditional (32-bit)
+   660→- `Scd { rt, base, offset }` — Store Conditional Doubleword (64-bit)
+   661→- `Sync { stype }` — Memory synchronization barrier
+   662→
+   663→Also added `encode()`, `mnemonic()`, and `Display` support for all new instructions.
+   664→
+   665→The CAS loop follows the MIPS64 LL/SC pattern with delay slot NOPs:
+   666→
+   667→```
+   668→; Register allocation: T0=addr, T1=expected, T2=desired, V0=old/result, T3=temp/status
+   669→  SYNC                      ; +0  — acquire barrier
+   670→retry:
+   671→  LLD/LL V0, 0(T0)         ; +4  — load linked
+   672→  NOP                       ; +8  — load-use hazard
+   673→  BNE V0, T1, done          ; +12 — if old != expected, skip
+   674→  NOP                       ; +16 — delay slot
+   675→  DADDU T3, $zero, T2       ; +20 — copy desired to temp (SCD overwrites rt)
+   676→  SCD/SC T3, 0(T0)          ; +24 — store conditional; T3 = 1 success, 0 failure
+   677→  NOP                       ; +28 — hazard
+   678→  BEQ T3, $zero, retry      ; +32 — if failed, retry
+   679→  NOP                       ; +36 — delay slot
+   680→done:
+   681→  SYNC                      ; +40 — release barrier
+   682→```
+   683→
+   684→Branch offset derivation (MIPS formula: `offset_bytes = target - (branch + 4)`):
+   685→- BNE done: `40 - (12 + 4) = +24` bytes → 6 words
+   686→- BEQ retry: `4 - (32 + 4) = -32` bytes → -8 words
+   687→
+   688→Type-specific variants:
+   689→- I32/U32 → LL + SC
+   690→- I64/U64/Ptr → LLD + SCD
+   691→
+   692→The `DADDU T3, $zero, T2` instruction copies the desired value to T3 before SCD because SCD overwrites its `rt` register with the status flag (1=success, 0=failure). Without this copy, the desired value would be lost on retry. V0 holds the old value from LLD and is never overwritten by SCD (which writes to T3), so V0 is available for the result store after the loop.
+   693→
+   694→### Key Design Decisions
+   695→
+   696→1. **Precomputed branch offsets**: Both backends use fixed-size CAS loop sequences, allowing branch offsets to be computed at compile time rather than requiring label tracking and fixup passes. This simplifies the implementation and avoids interaction with the existing branch fixup mechanisms.
+   697→
+   698→2. **Memory barriers**: Both implementations use full memory barriers (DMB SY on ARM32, SYNC on MIPS64) before and after the CAS loop, providing sequential consistency semantics. The acquire barrier before the loop prevents reordering of the load with prior memory operations, and the release barrier after prevents reordering of the store with subsequent operations.
+   699→
+   700→3. **Sub-word support (ARM32 only)**: ARM32 has dedicated LDREXB/STREXB and LDREXH/STREXH instructions for byte and halfword CAS. MIPS64 does not have sub-word LL/SC variants; the implementation uses LL/SC for 32-bit types and LLD/SCD for 64-bit types only.
+   701→
+   702→4. **Conservative NOPs (MIPS64)**: The MIPS64 CAS loop includes NOPs after LLD/LL (load-use hazard) and SCD/SC (conservative hazard avoidance), matching the existing code generation pattern in the backend.
+   703→
+   704→### Files Modified
+   705→
+   706→| File | Changes |
+   707→|------|---------|
+   708→| `arm32/mod.rs` | Added `encode_ldrex`, `encode_ldrexb`, `encode_ldrexh`, `encode_strex`, `encode_strexb`, `encode_strexh`, `encode_dmb` encoding functions; Added `Ldrex`, `Ldrexb`, `Ldrexh`, `Strex`, `Strexb`, `Strexh`, `Dmb` instruction variants with encode/mnemonic/Display support; Updated `decode_arm32` disassembler for sync primitives; Replaced placeholder AtomicCas with LDREX/STREX CAS loop |
+   709→| `mips64/mod.rs` | Added `OPC_LL`, `OPC_LLD`, `OPC_SC`, `OPC_SCD`, `FN_SYNC` constants; Added `Ll`, `Lld`, `Sc`, `Scd`, `Sync` instruction variants with encode/mnemonic/Display support; Replaced placeholder AtomicCas with LLD/SCD CAS loop |
+   710→
+   711→## Task 2-b: Implement proper atomic operations for the PPC64 backend
+   712→
+   713→**Date**: 2026-03-06
+   714→**Files**: `src/codegen/src/ppc64/mod.rs`, `src/codegen/src/ppc64/disasm.rs`
+   715→
+   716→### Bug Description
+   717→
+   718→The PPC64 backend silently dropped atomic operations (AtomicLoad, AtomicStore, AtomicCas) in the stack-slot instruction selection path, returning `Vec::new()` at line 3503-3504. In the register-allocated path, atomics were incorrectly lowered to non-atomic loads/stores, and AtomicCas was lowered as a simple load (ignoring expected/desired values).
+   719→
+   720→### Root Cause
+   721→
+   722→Three related gaps in the PPC64 codegen:
+   723→
+   724→1. **Stack-slot path**: `IRInstr::AtomicLoad | AtomicStore | AtomicCas` matched a single arm that returned `Vec::new()` — a TODO placeholder that produced no code at all.
+   725→2. **Register-allocated path**: AtomicLoad and AtomicStore were lowered to non-atomic `Load`/`Store` IR instructions, then re-lowered through the normal path — no memory barriers, no reserve/conditional semantics.
+   726→3. **Missing instructions**: The `Instruction` enum lacked PPC64 atomic primitives: `ldarx`, `lwarx`, `lbarx`, `lharx`, `stdcx.`, `stwcx.`, `stbcx.`, `sthcx.`, `sync`, `lwsync`, `isync`, `extsb`, `extsh`.
+   727→
+   728→### PPC64 Atomic Patterns Implemented
+   729→
+   730→**AtomicLoad** (acquire semantics):
+   731→```asm
+   732→sync                          ; full barrier before
+   733→ldarx rT, 0, rAddr           ; load and reserve (64-bit)
+   734→stdcx. R0, 0, rAddr          ; clear reservation (dummy store)
+   735→isync                         ; context sync → acquire
+   736→; sign-extend for I8/I16/I32 sub-word types
+   737→```
+   738→
+   739→**AtomicStore** (release semantics):
+   740→```asm
+   741→lwsync                        ; release barrier
+   742→std rS, 0(rAddr)              ; aligned store is atomic on PPC64
+   743→```
+   744→
+   745→**AtomicCas** (sequentially consistent):
+   746→```asm
+   747→sync                          ; 0: full barrier before
+   748→ldarx rOld, 0, rAddr          ; 1: load and reserve (RETRY)
+   749→cmpd rOld, rExpected          ; 2: compare with expected
+   750→bc 12, 2, +3                  ; 3: if CR0 EQ=0 (not equal), skip to sync at 6
+   751→stdcx. rDesired, 0, rAddr     ; 4: try to store desired
+   752→bc 12, 2, -4                  ; 5: if CR0 EQ=0 (store failed), retry at 1
+   753→sync                          ; 6: full barrier after
+   754→; sign-extend for I8/I16/I32 sub-word types
+   755→```
+   756→
+   757→### Sub-word Support
+   758→
+   759→Type-dispatched instruction selection for all three atomic operations:
+   760→
+   761→| IRType | Load-Reserve | Store-Conditional | Sign-extend |
+   762→|--------|-------------|-------------------|-------------|
+   763→| I8/U8  | `lbarx`     | `stbcx.`          | `extsb` (I8 only) |
+   764→| I16/U16| `lharx`     | `sthcx.`          | `extsh` (I16 only) |
+   765→| I32/U32| `lwarx`     | `stwcx.`          | `extsw` (I32 only) |
+   766→| I64/U64/Ptr | `ldarx` | `stdcx.`          | — |
+   767→
+   768→### New Instructions Added
+   769→
+   770→13 new instruction variants added to the `Instruction` enum with full encode/mnemonic/Display/decode support:
+   771→
+   772→| Instruction | Form | Primary | XO | Rc | Encoding |
+   773→|------------|------|---------|-----|-----|----------|
+   774→| `Ldarx` | X | 31 | 84 | 0 | `encode_x_form(31, rt, ra, rb, 84, 0)` |
+   775→| `Lwarx` | X | 31 | 20 | 0 | `encode_x_form(31, rt, ra, rb, 20, 0)` |
+   776→| `Lbarx` | X | 31 | 52 | 0 | `encode_x_form(31, rt, ra, rb, 52, 0)` |
+   777→| `Lharx` | X | 31 | 116 | 0 | `encode_x_form(31, rt, ra, rb, 116, 0)` |
+   778→| `Stdcx` | X | 31 | 214 | 1 | `encode_x_form(31, rs, ra, rb, 214, 1)` |
+   779→| `Stwcx` | X | 31 | 150 | 1 | `encode_x_form(31, rs, ra, rb, 150, 1)` |
+   780→| `Stbcx` | X | 31 | 694 | 1 | `encode_x_form(31, rs, ra, rb, 694, 1)` |
+   781→| `Sthcx` | X | 31 | 726 | 1 | `encode_x_form(31, rs, ra, rb, 726, 1)` |
+   782→| `Sync` | X | 31 | 598 | 0 | `encode_x_form(31, 0, 0, 0, 598, 0)` → `0x7C0004AC` |
+   783→| `Lwsync` | X | 31 | 598 | 0 | `encode_x_form(31, 1, 0, 0, 598, 0)` → `0x7C2004AC` (L=1 in rS field) |
+   784→| `Isync` | XL | 19 | 150 | — | `0x4C00012C` |
+   785→| `Extsb` | X | 31 | 954 | 0 | `encode_x_form(31, rs, ra, 0, 954, 0)` |
+   786→| `Extsh` | X | 31 | 922 | 0 | `encode_x_form(31, rs, ra, 0, 922, 0)` |
+   787→
+   788→### Register Conflict Handling (Register-Allocated Path)
+   789→
+   790→The CAS loop writes to the destination register `d` via `ldarx`, which can clobber `expected` or `desired` if they share the same physical register. The implementation handles this by:
+   791→
+   792→1. Using R0 and R11 as scratch registers for conflict resolution
+   793→2. Copying conflicting expected/desired values to scratch registers before the CAS loop
+   794→3. When both expected and desired conflict with `d`, moving expected from R0 to R11 and desired to R0
+   795→
+   796→### Branch Offset Computation
+   797→
+   798→The CAS loop uses fixed-size instruction sequences, allowing precomputed branch offsets:
+   799→- `bc 12, 2, +3` at index 3: target = 3 + 3 = 6 (final `sync`)
+   800→- `bc 12, 2, -4` at index 5: target = 5 + (-4) = 1 (retry at `ldarx`)
+   801→
+   802→### Disassembler Updates
+   803→
+   804→Added decode support for all new instructions in `ppc64/disasm.rs`:
+   805→- Primary=31 X-form decode: `lwarx` (xo=20), `lbarx` (xo=52), `ldarx` (xo=84), `lharx` (xo=116), `stwcx.` (xo=150), `stdcx.` (xo=214), `stbcx.` (xo=694), `sthcx.` (xo=726), `sync`/`lwsync` (xo=598, distinguished by rt field), `extsb` (xo=954), `extsh` (xo=922)
+   806→- Primary=19 XL-form decode: `isync` (xo=150)
+   807→
+   808→### Files Modified
+   809→
+   810→| File | Changes |
+   811→|------|---------|
+   812→| `ppc64/mod.rs` | Added 13 instruction variants to `Instruction` enum with encode/mnemonic/Display; Replaced placeholder AtomicLoad/AtomicStore/AtomicCas in register-allocated path with proper LL/SC lowering; Replaced `Vec::new()` in stack-slot path with proper atomic code generation |
+   813→| `ppc64/disasm.rs` | Added decode support for all 13 new instructions in both X-form (primary=31) and XL-form (primary=19) decode paths |
+   814→
+   815→---
+   816→
+   817→## Task 2-a: Implement LoongArch64 Atomic Operations
+   818→
+   819→**Date**: 2026-03-05
+   820→**Files**: `src/codegen/src/loongarch64/mod.rs`, `src/codegen/src/loongarch64/stack_slot_isel.rs`
+   821→
+   822→### Bug Description
+   823→
+   824→The LoongArch64 backend silently dropped atomic operations. `AtomicLoad`, `AtomicStore`, and `AtomicCas` in the stack-slot instruction selection path all returned `Vec::new()`, meaning any atomic operation in a LoongArch64-compiled program was a no-op — producing no machine code at all.
+   825→
+   826→### Root Cause
+   827→
+   828→The stack-slot ISel at `stack_slot_isel.rs:1099-1100` had a single match arm for all three atomic IR instructions that returned an empty vector:
+   829→
+   830→```rust
+   831→IRInstr::AtomicLoad { .. } | IRInstr::AtomicStore { .. } | IRInstr::AtomicCas { .. } => {
+   832→    Vec::new() // TODO: implement LoongArch64 atomic lowering
+   833→}
+   834→```
+   835→
+   836→Additionally, the `Instruction` enum in `mod.rs` lacked the DBAR (data barrier) and AMSWAP (atomic memory swap) instructions needed for proper atomic lowering.
+   837→
+   838→### LoongArch64 Atomic Instructions
+   839→
+   840→Referencing the LoongArch ISA manual:
+   841→
+   842→- **LL.D Rd, Rj, Si14** — Load-Linked Doubleword (64-bit, address in Rj + Si14)
+   843→- **SC.D Rd, Rj, Si14** — Store-Conditional Doubleword (stores Rd to [Rj+Si14]; Rd ← 0 on success, 1 on failure)
+   844→- **LL.W / SC.W** — 32-bit variants
+   845→- **AMSWAP.D Rd, Rj, Rk** — Atomic Memory Swap Doubleword (Rd = old [Rj], [Rj] = Rk)
+   846→- **AMSWAP.W** — 32-bit variant
+   847→- **DBAR hint** — Data Barrier (hint=0 is full barrier)
+   848→
+   849→### New Instructions Added
+   850→
+   851→Added to `Instruction` enum in `mod.rs`:
+   852→
+   853→| Instruction | Format | Opcode | Encoding |
+   854→|------------|--------|--------|----------|
+   855→| `AmswapW { rd, rj, rk }` | 3R | 0x00C0 (bits[31:15]) | `encode_3r(0x00C0, rk, rj, rd)` |
+   856→| `AmswapD { rd, rj, rk }` | 3R | 0x00C2 (bits[31:15]) | `encode_3r(0x00C2, rk, rj, rd)` |
+   857→| `Dbar { hint }` | 2RI12 | 0x0E7 (bits[31:22]) | `encode_2ri12(0x0E7, hint, 0, 0)` |
+   858→
+   859→### Atomic Lowering Implementation
+   860→
+   861→#### AtomicLoad (dst, addr, ty)
+   862→
+   863→```
+   864→dbar 0                    ; acquire fence
+   865→ll.{d,w} S0, S0, 0       ; load-linked from [S0+0]
+   866→dbar 0                    ; fence after load
+   867→; store S0 to dst vreg slot
+   868→```
+   869→
+   870→Uses LL.D for 64-bit types (I64/U64/Ptr/Func) and LL.W for 32-bit types (I8/I16/I32/U8/U16/U32).
+   871→
+   872→#### AtomicStore (value, addr, ty)
+   873→
+   874→```
+   875→dbar 0                         ; release fence
+   876→amswap.{d,w} $r0, S1, S0      ; atomically store S0 to [S1], discard old value in $r0
+   877→dbar 0                         ; fence after store
+   878→```
+   879→
+   880→Uses AMSWAP.D for 64-bit and AMSWAP.W for 32-bit types. The `$r0` destination discards the old value.
+   881→
+   882→#### AtomicCas (dst, addr, expected, desired, ty)
+   883→
+   884→```
+   885→; S0=addr, S1=expected, S2=desired
+   886→dbar 0                         ; offset 0:  full fence
+   887→ll.{d,w} S3, S0, 0             ; offset 4:  S3 = current value at [S0]
+   888→bne S3, S1, +5                 ; offset 8:  if current != expected, skip to dbar
+   889→or S3, S2, $r0                  ; offset 12: S3 = desired (reload before each SC)
+   890→sc.{d,w} S3, S0, 0             ; offset 16: store desired; S3 = 0 (ok) / 1 (fail)
+   891→bnez S3, -4                    ; offset 20: retry if SC failed
+   892→or S3, S1, $r0                  ; offset 24: SC succeeded: old value = expected = S1
+   893→dbar 0                         ; offset 28: fence after CAS
+   894→; store S3 (old value) to dst vreg slot
+   895→```
+   896→
+   897→Key design decisions:
+   898→- The `or S3, S2, $r0` before SC.D reloads the desired value (from S2, which is never overwritten) because SC.D overwrites its rd register with the success flag.
+   899→- When BNE fires (current ≠ expected), S3 still holds the old value from LL.D, and we jump directly to dbar at offset 28.
+   900→- When SC succeeds, S3 = 0, and the old value = expected = S1. The `or S3, S1, $r0` at offset 24 moves the expected value into S3 for a unified store path.
+   901→- Branch offsets are precomputed since the instruction sequence has fixed size (8 instructions = 32 bytes).
+   902→
+   903→### Disassembler Updates
+   904→
+   905→Enhanced `decode_loongarch64_instruction()` in `mod.rs` with multi-level opcode decoding:
+   906→1. **2RI12 format** (10-bit opcode at bits[31:22]): Added DBAR (0x0E7) decode
+   907→2. **3R format** (17-bit opcode at bits[31:15]): Added AMSWAP.W (0x00C0) and AMSWAP.D (0x00C2) decode
+   908→3. **2RI14 format** (8-bit opcode at bits[31:24]): Added LL.W (0x20), SC.W (0x21), LL.D (0x22), SC.D (0x23) decode
+   909→4. Falls back to existing 7-bit opcode matching for other instructions
+   910→
+   911→### Auxiliary Fixes (Pre-existing Errors)
+   912→
+   913→While verifying the LoongArch64 changes, several pre-existing compilation errors in other backends were fixed:
+   914→- **mips64/mod.rs**: Fixed 17 instances of undefined `dst_offset` → replaced with `dst_off`
+   915→- **arm32/mod.rs**: Fixed 4 type mismatches (`u32` → `u8` cast for `Gpr::R11.encoding()`)
+   916→- **wasm32/disasm.rs**: Added missing Display match arms for atomic WasmInstr variants
+   917→- **ppc64/mod.rs**: Replaced broken FP cast code (using undefined `code` variable) with no-op stubs
+   918→
+   919→### Files Modified
+   920→
+   921→| File | Changes |
+   922→|------|---------|
+   923→| `loongarch64/mod.rs` | Added `Dbar`, `AmswapW`, `AmswapD` to `Instruction` enum with opcodes, encoding, mnemonic, Display; Enhanced disassembler with multi-level opcode decode for DBAR, AMSWAP, LL/SC instructions |
+   924→| `loongarch64/stack_slot_isel.rs` | Replaced placeholder `Vec::new()` with proper atomic lowering for AtomicLoad (DBAR + LL), AtomicStore (DBAR + AMSWAP), AtomicCas (DBAR + LL/SC loop with BNE/BNEZ) |
+   925→
+   926→---
+   927→
+   928→## Task 3-f: Fix FP Conversion Casts in PPC64 Backend
+   929→
+   930→Fixed all FP conversion casts in the PPC64 backend that were previously no-ops (in the register-allocated path) or using incorrect instructions (in the small-struct path).
+   931→
+   932→### New Instruction Variants
+   933→
+   934→Added 4 new instruction variants to the `Instruction` enum:
+   935→
+   936→| Instruction | Description | X-form Encoding |
+   937→|-------------|-------------|-----------------|
+   938→| `Fctidz` | Float Convert To Integer Doubleword with Round toward Zero | primary=63, xo=815 |
+   939→| `Frsp` | Float Round to Single Precision | primary=63, xo=12 |
+   940→| `Fcfidu` | Float Convert From Integer Doubleword Unsigned | primary=63, xo=847 |
+   941→| `Fcfidus` | Float Convert From Integer Doubleword Unsigned Single | primary=59, xo=847 |
+   942→
+   943→Each variant includes encoding (`encode_x_form`), mnemonic, and `Display` implementation.
+   944→
+   945→### Register-Allocated Path (`lower_ir_instr_ppc64`)
+   946→
+   947→Replaced all no-op FP conversion casts with proper GPR↔FPR bridge sequences using scratch stack space:
+   948→
+   949→| CastKind | Instruction Sequence |
+   950→|----------|---------------------|
+   951→| `IntToFloat` | STD→LFD→**FCFID**→STFD→LD |
+   952→| `UIntToFloat` | STD→LFD→**FCFIDU**→STFD→LD |
+   953→| `FloatToInt` | STD→LFD→FCTIWZ→STFD→LWZ+4→EXTSW |
+   954→| `FloatToUInt` | STD→LFD→FCTIWZ→STFD→LWZ+4→RLWINM (zero-extend) |
+   955→| `FloatToFloat` | STD→LFD→**FRSP**→STFS→LWZ |
+   956→
+   957→Added `FP_SCRATCH_SIZE = 16` constant and included it in `ppc64_compute_frame_size()` to reserve scratch stack space for the GPR↔FPR bridge.
+   958→
+   959→### Small-Struct Path Bug Fixes
+   960→
+   961→| CastKind | Bug | Fix |
+   962→|----------|-----|-----|
+   963→| `UIntToFloat` | Used `FCFID` (signed int→float) | Changed to `FCFIDU` (unsigned int→float) |
+   964→| `FloatToFloat` | Used `FCFIDS` (int→float single — wrong opcode) | Changed to `FRSP` (round to single precision) |
+   965→
+   966→### Files Modified
+   967→
+   968→| File | Changes |
+   969→|------|---------|
+   970→| `ppc64/mod.rs` | Added `Fctidz`, `Frsp`, `Fcfidu`, `Fcfidus` instruction variants with encoding/mnemonic/Display; Fixed `lower_ir_instr_ppc64` FP cast handling from no-ops to proper instruction sequences; Fixed `UIntToFloat` to use `FCFIDU` and `FloatToFloat` to use `FRSP` in small-struct path; Added `FP_SCRATCH_SIZE` and updated `ppc64_compute_frame_size` |
+   971→
+   972→## Task 3-h: Fix FP conversion casts in the Wasm32 backend
+   973→
+   974→**Date**: 2026-03-05
+   975→**Files**: `src/codegen/src/wasm32/mod.rs`, `src/codegen/src/wasm32/disasm.rs`
+   976→
+   977→### Bug Description
+   978→
+   979→The Wasm32 backend's FP conversion casts (IntToFloat, UIntToFloat, FloatToInt, FloatToUInt, FloatToFloat) were functionally broken in two ways:
+   980→
+   981→1. **`infer_wasm_type()` always returned `I32` for registers**, making it impossible to distinguish float source values from integer ones. Since the CastKind lowering only considered the source type, FloatToInt/FloatToUInt would always select `i32.trunc_f32_s`/`i32.trunc_f32_u` (which expects an F32 on the stack) even when the source was an F64 register — producing invalid Wasm bytecode or silently wrong results.
+   982→
+   983→2. **Swapped signed/unsigned opcodes**: Eight conversion instructions had their signed/unsigned opcode pairs transposed in both the encoder and the decoder, violating the WebAssembly MVP spec:
+   984→
+   985→| Instruction | Wrong opcode | Correct opcode |
+   986→|-------------|-------------|----------------|
+   987→| `I32TruncF64S` | 0xA9 | 0xAA |
+   988→| `I32TruncF32U` | 0xAA | 0xA9 |
+   989→| `I64TruncF64S` | 0xAF | 0xB0 |
+   990→| `I64TruncF32U` | 0xB0 | 0xAF |
+   991→| `F32ConvertI64S` | 0xB3 | 0xB4 |
+   992→| `F32ConvertI32U` | 0xB4 | 0xB3 |
+   993→| `F64ConvertI64S` | 0xB8 | 0xB9 |
+   994→| `F64ConvertI32U` | 0xB9 | 0xB8 |
+   995→
+   996→### Root Cause
+   997→
+   998→1. `infer_wasm_type()` ignored the `LoweringContext::vreg_types` map entirely, returning `WasmType::I32` for all register values regardless of their actual tracked type. This meant the CastKind match arms that branch on `src_ty` (e.g., `WasmType::F64 => …`) could never fire for float source registers.
+   999→
+  1000→2. The opcode assignments were simply swapped — likely a copy-paste error during initial implementation. The decoder (`disasm.rs`) had the same swaps and was also missing several opcodes (0xAA, 0xAB, 0xB0, 0xB1, 0xB4, 0xB5, 0xB8, 0xB9, 0xBA).
+  1001→
+  1002→### Fixes Applied
+  1003→
+  1004→#### Fix 1: `infer_wasm_type` now uses `vreg_types` for register lookups
+  1005→
+  1006→```rust
+  1007→// Before:
+  1008→fn infer_wasm_type(val: &IRValue) -> WasmType {
+  1009→    match val {
+  1010→        IRValue::Immediate(_) | IRValue::Register(_) | … => WasmType::I32,
+  1011→    }
+  1012→}
+  1013→
+  1014→// After:
+  1015→fn infer_wasm_type(val: &IRValue, vreg_types: &HashMap<u32, WasmType>) -> WasmType {
+  1016→    match val {
+  1017→        IRValue::Register(id) => vreg_types.get(id).copied().unwrap_or(WasmType::I32),
+  1018→        IRValue::Immediate(_) | IRValue::Address(_) | IRValue::Label(_) => WasmType::I32,
+  1019→    }
+  1020→}
+  1021→```
+  1022→
+  1023→Both call sites (`UnaryOp` and `Cast` lowering) were updated to pass `&ctx.vreg_types`.
+  1024→
+  1025→#### Fix 2: CastKind lowering now considers both source and destination types
+  1026→
+  1027→The Cast lowering now:
+  1028→- Looks up the source type via `infer_wasm_type(src, &ctx.vreg_types)` (correctly resolves float registers)
+  1029→- Determines the destination type from `ctx.vreg_types` if already known, or falls back to a natural-width default
+  1030→- Passes `Some(&src_ty)` as the type hint to `push_value` (ensures float registers are loaded as the correct Wasm type)
+  1031→- Uses `(src_ty, dst_ty)` tuple matching to select the exact instruction for all width combinations
+  1032→
+  1033→Full dispatch table for FP casts:
+  1034→
+  1035→| CastKind | (src, dst) | Instruction | Opcode |
+  1036→|----------|-----------|-------------|--------|
+  1037→| IntToFloat | (I32, F32) | f32.convert_i32_s | 0xB2 |
+  1038→| IntToFloat | (I32, F64) | f64.convert_i32_s | 0xB7 |
+  1039→| IntToFloat | (I64, F32) | f32.convert_i64_s | 0xB4 |
+  1040→| IntToFloat | (I64, F64) | f64.convert_i64_s | 0xB9 |
+  1041→| UIntToFloat | (I32, F32) | f32.convert_i32_u | 0xB3 |
+  1042→| UIntToFloat | (I32, F64) | f64.convert_i32_u | 0xB8 |
+  1043→| UIntToFloat | (I64, F32) | f32.convert_i64_u | 0xB5 |
+  1044→| UIntToFloat | (I64, F64) | f64.convert_i64_u | 0xBA |
+  1045→| FloatToInt | (F32, I32) | i32.trunc_f32_s | 0xA8 |
+  1046→| FloatToInt | (F64, I32) | i32.trunc_f64_s | 0xAA |
+  1047→| FloatToInt | (F32, I64) | i64.trunc_f32_s | 0xAE |
+  1048→| FloatToInt | (F64, I64) | i64.trunc_f64_s | 0xB0 |
+  1049→| FloatToUInt | (F32, I32) | i32.trunc_f32_u | 0xA9 |
+  1050→| FloatToUInt | (F64, I32) | i32.trunc_f64_u | 0xAB |
+  1051→| FloatToUInt | (F32, I64) | i64.trunc_f32_u | 0xAF |
+  1052→| FloatToUInt | (F64, I64) | i64.trunc_f64_u | 0xB1 |
+  1053→| FloatToFloat | (F32, F64) | f64.promote_f32 | 0xBB |
+  1054→| FloatToFloat | (F64, F32) | f32.demote_f64 | 0xB6 |
+  1055→
+  1056→#### Fix 3: Corrected all swapped opcodes in encoder (`mod.rs`)
+  1057→
+  1058→All 8 swapped opcodes corrected in the `WasmInstr::encode()` match arms.
+  1059→
+  1060→#### Fix 4: Corrected all swapped opcodes + added missing opcodes in decoder (`disasm.rs`)
+  1061→
+  1062→The disassembler's opcode-to-instruction mapping was fixed, and 8 previously missing opcodes (0xAA, 0xAB, 0xB0, 0xB1, 0xB4, 0xB5, 0xB8, 0xB9, 0xBA) were added.
+  1063→
+  1064→#### Fix 5: Updated test assertions (`test_conversion_instructions`)
+  1065→
+  1066→Test expanded from 8 assertions to 16, covering all conversion instructions with their now-correct opcodes.
+  1067→
+  1068→### Files Changed
+  1069→
+  1070→| File | Changes |
+  1071→|------|---------|
+  1072→| `wasm32/mod.rs` | Fixed `infer_wasm_type` to accept `&HashMap<u32, WasmType>` and look up register types; updated both call sites; rewrote Cast lowering to use `(src_ty, dst_ty)` tuple matching with destination type inference; corrected 8 swapped opcodes in encoder; updated test assertions |
+  1073→| `wasm32/disasm.rs` | Corrected 8 swapped opcode mappings; added 8 missing opcode entries for full coverage of 0xA8–0xBA conversion range |
+  1074→
+  1075→## Task 3-e: Fix FP conversion casts in the MIPS64 backend
+  1076→
+  1077→**Date**: 2026-03-05
+  1078→**File**: `src/codegen/src/mips64/mod.rs`
+  1079→
+  1080→### Bug Description
+  1081→
+  1082→The MIPS64 backend treated all FP conversion casts (IntToFloat, UIntToFloat, FloatToInt, FloatToUInt, FloatToFloat) as no-ops in the register-allocated code path. The `lower_ir_instr` function matched `IRInstr::Cast { dst, src, .. }` and simply performed a GPR-to-GPR move (DADDU with $zero), completely ignoring the `kind` field. This meant that `inttofloat`, `floattoint`, and other FP conversion casts produced incorrect results — the raw bit pattern was just copied between registers with no actual conversion.
+  1083→
+  1084→Additionally, the stack-slot code path had bugs:
+  1085→1. **IntToFloat** used `LDC1` (64-bit load) instead of `MTC1` (32-bit GPR→FPR move), causing incorrect data placement on big-endian MIPS since `CVT.D.W` reads the low 32 bits of the FPR.
+  1086→2. **FloatToInt/FloatToUInt/FloatToFloat** loaded from `dst_off` without first storing the source value there — the source was already in T0 but was ignored.
+  1087→3. Missing instruction variants for i64↔FP conversions (CVT.S.L, CVT.D.L, CVT.L.S, CVT.L.D).
+  1088→4. Missing MTC1/MFC1/DMTC1/DMFC1 instructions needed for efficient GPR↔FPR transfers.
+  1089→
+  1090→### Root Cause
+  1091→
+  1092→1. **Register-allocated path** (`lower_ir_instr`): The `CastKind` discriminant was discarded with `..`, and all casts were treated as integer moves.
+  1093→2. **Stack-slot path**: Used a roundabout stack-based transfer (SD→LDC1→CVT→SDC1→LD) with endianness bugs, instead of the direct MTC1/DMTC1 approach.
+  1094→3. **Missing instructions**: The `Instruction` enum lacked CVT.S.L, CVT.D.L, CVT.L.S, CVT.L.D, MTC1, MFC1, DMTC1, DMFC1.
+  1095→
+  1096→### MIPS64 FP Conversion Instruction Summary
+  1097→
+  1098→| Conversion | Instruction | fmt | func |
+  1099→|-----------|-------------|-----|------|
+  1100→| i32→f32 | CVT.S.W | 0x14 (W) | 0x20 |
+  1101→| i32→f64 | CVT.D.W | 0x14 (W) | 0x21 |
+  1102→| i64→f32 | CVT.S.L | 0x15 (L) | 0x20 |
+  1103→| i64→f64 | CVT.D.L | 0x15 (L) | 0x21 |
+  1104→| f32→i32 | CVT.W.S | 0x10 (S) | 0x24 |
+  1105→| f64→i32 | CVT.W.D | 0x11 (D) | 0x24 |
+  1106→| f32→i64 | CVT.L.S | 0x10 (S) | 0x25 |
+  1107→| f64→i64 | CVT.L.D | 0x11 (D) | 0x25 |
+  1108→| f32→f64 | CVT.D.S | 0x10 (S) | 0x21 |
+  1109→| f64→f32 | CVT.S.D | 0x11 (D) | 0x20 |
+  1110→
+  1111→GPR↔FPR moves (COP1, opcode=0x11):
+  1112→- MTC1: fmt=0x04, rt=GPR→fs=FPR (32-bit)
+  1113→- MFC1: fmt=0x00, rt=GPR←fs=FPR (32-bit)
+  1114→- DMTC1: fmt=0x05, rt=GPR→fs=FPR (64-bit)
+  1115→- DMFC1: fmt=0x01, rt=GPR←fs=FPR (64-bit)
+  1116→
+  1117→### Changes Made
+  1118→
+  1119→1. **Added constants** (`mips64/mod.rs` lines 109–126):
+  1120→   - `FMT_L = 21` (long/64-bit integer format)
+  1121→   - `FN_CVT_S_L = 0x20`, `FN_CVT_D_L = 0x21`, `FN_CVT_L_S = 0x25`, `FN_CVT_L_D = 0x25`
+  1122→   - `FMT_MF = 0x00`, `FMT_DMF = 0x01`, `FMT_MT = 0x04`, `FMT_DMT = 0x05`
+  1123→
+  1124→2. **Added instruction variants** (Instruction enum, lines 758–775):
+  1125→   - `CvtSL { fd, fs }` — CVT.S.L (i64→f32)
+  1126→   - `CvtDL { fd, fs }` — CVT.D.L (i64→f64)
+  1127→   - `CvtLS { fd, fs }` — CVT.L.S (f32→i64)
+  1128→   - `CvtLD { fd, fs }` — CVT.L.D (f64→i64)
+  1129→   - `Mtc1 { rt, fs }` — Move word from GPR to FPR
+  1130→   - `Mfc1 { rt, fs }` — Move word from FPR to GPR
+  1131→   - `Dmtc1 { rt, fs }` — Move doubleword from GPR to FPR
+  1132→   - `Dmfc1 { rt, fs }` — Move doubleword from FPR to GPR
+  1133→
+  1134→3. **Added encoding** (encode method, lines 1304–1330):
+  1135→   - All CVT.L variants use `encode_cop1_r_type(FMT_L, ...)` / etc.
+  1136→   - MTC1/MFC1/DMTC1/DMFC1 use `encode_cop1_r_type(FMT_MT/FMT_MF/..., rt, fs, 0, 0)`
+  1137→
+  1138→4. **Added mnemonic() and Display impl** (lines 1441–1556):
+  1139→   - All new variants return correct mnemonic strings and format operands properly.
+  1140→
+  1141→5. **Fixed register-allocated Cast handling** (lines 3619–3822):
+  1142→   - Changed `IRInstr::Cast { dst, src, .. }` to `IRInstr::Cast { kind, dst, src }`
+  1143→   - Added full `match kind` with proper CVT instruction emission for each CastKind:
+  1144→     - ZExt: DSLL+DSRL (same as before, but now explicit)
+  1145→     - SExt/Trunc/BitCast: simple GPR move (same as before)
+  1146→     - IntToFloat: MTC1 + CVT.D.W + DMFC1
+  1147→     - UIntToFloat: DSLL+DSRL (zero-extend) + DMTC1 + CVT.D.L + DMFC1
+  1148→     - FloatToInt: DMTC1 + CVT.W.D + MFC1
+  1149→     - FloatToUInt: DMTC1 + CVT.W.D + MFC1 (same as FloatToInt, MIPS limitation)
+  1150→     - FloatToFloat: DMTC1 + CVT.S.D + MFC1
+  1151→
+  1152→6. **Fixed stack-slot Cast handling** (lines 2963–3014):
+  1153→   - Replaced buggy stack-based LDC1/LWC1/SDC1/SWC1 transfers with direct MTC1/DMTC1/MFC1/DMFC1 moves
+  1154→   - IntToFloat: MTC1 + CVT.D.W + DMFC1 (3 instructions vs previous 5+NOPs)
+  1155→   - UIntToFloat: DSLL+DSRL + DMTC1 + CVT.D.L + DMFC1
+  1156→   - FloatToInt: DMTC1 + CVT.W.D + MFC1 (3 instructions vs previous 5+NOPs)
+  1157→   - FloatToUInt: DMTC1 + CVT.W.D + MFC1
+  1158→   - FloatToFloat: DMTC1 + CVT.S.D + MFC1 (3 instructions vs previous 5+NOPs)
+  1159→
+  1160→### UIntToFloat Design Note
+  1161→
+  1162→For `UIntToFloat` (unsigned i32 → f64), we zero-extend the 32-bit value to 64 bits (DSLL 32 + DSRL 32), then use `DMTC1` to move the 64-bit value to FPR, and `CVT.D.L` (long→double) instead of `CVT.D.W` (word→double). This correctly handles unsigned 32-bit values in the range [2^31, 2^32-1] which would otherwise be treated as negative by `CVT.D.W`.
+  1163→
+  1164→### Files Changed
+  1165→
+  1166→| File | Changes |
+  1167→|------|---------|
+  1168→| `src/codegen/src/mips64/mod.rs` | Added FMT_L, FN_CVT_*_L, FMT_MF/DMF/MT/DMT constants; added CvtSL/DL/LS/LD, Mtc1/Mfc1/Dmtc1/Dmfc1 instruction variants with encoding/mnemonic/Display; rewrote register-allocated Cast lowering to match on CastKind and emit proper MTC1+CVT+MFC1 sequences; rewrote stack-slot Cast lowering to use direct MTC1/DMTC1/MFC1/DMFC1 instead of buggy stack-based LDC1/LWC1 transfers |
+  1169→
+  1170→
+  1171→## Task 3-c: Fix FP conversion casts in the RISC-V 64 backend
+  1172→
+  1173→**Date**: 2026-03-05
+  1174→**Files**: `src/codegen/src/ir.rs`, `src/codegen/src/riscv64.rs`, `src/codegen/src/scg_to_ir.rs`, `src/pipeline.rs`, `src/codegen/src/opt.rs`, `src/codegen/src/regalloc.rs`, `src/codegen/src/arm64.rs`, `src/codegen/src/emit.rs`, `src/codegen/src/arm32/mod.rs`, `src/codegen/src/ppc64/mod.rs`, `src/codegen/src/x86_64/mod.rs`, `src/codegen/src/x86_64/stack_slot_isel.rs`, `src/codegen/src/wasm32/mod.rs`, `src/codegen/src/mips64/mod.rs`
+  1175→
+  1176→### Bug Description
+  1177→
+  1178→The RISC-V 64 backend's `CastKind` handling for floating-point conversions only handled one type combination per cast kind (always the 64-bit variant), making conversions like `i32→f32`, `f32→i32`, `f32→f64`, etc. incorrect or impossible. Specifically:
+  1179→
+  1180→- `IntToFloat` always emitted `FCVT.D.L` (i64→f64), ignoring `FCVT.S.W` (i32→f32), `FCVT.S.L` (i64→f32), `FCVT.D.W` (i32→f64)
+  1181→- `UIntToFloat` always emitted `FCVT.D.LU` (u64→f64), ignoring unsigned 32-bit and f32 variants
+  1182→- `FloatToInt` always emitted `FCVT.L.D` (f64→i64), ignoring f32 source and i32 destination variants
+  1183→- `FloatToUInt` always emitted `FCVT.LU.D` (f64→u64), ignoring f32 source and u32 destination variants
+  1184→- `FloatToFloat` only handled `f64→f32` (narrowing), missing `f32→f64` (widening)
+  1185→
+  1186→### Root Cause
+  1187→
+  1188→The `IRInstr::Cast` instruction variant did not carry source/destination type information, so the RISC-V backend had no way to determine which specific FCVT instruction to emit. The ARM64 backend doesn't have this problem because ARM64's `SCVTF`/`UCVTF`/`FCVTZS`/`FCVTZU` handle different sizes via register width.
+  1189→
+  1190→### Fixes Applied
+  1191→
+  1192→#### Fix 1: Added `from_ty`/`to_ty` to `IRInstr::Cast` (ir.rs)
+  1193→
+  1194→Added two `Option<IRType>` fields to the `Cast` variant:
+  1195→- `from_ty: Option<IRType>` — source type for type-aware backends
+  1196→- `to_ty: Option<IRType>` — destination type for type-aware backends
+  1197→
+  1198→These default to `None` for backward compatibility; backends that don't need type info can ignore them with `..`.
+  1199→
+  1200→#### Fix 2: Added F32/F64 to ScgType (scg_to_ir.rs)
+  1201→
+  1202→Added `F32` and `F64` variants to `ScgType` with corresponding `to_ir_type()` mappings so that floating-point type information can flow from the SCG through the IR to the backend.
+  1203→
+  1204→#### Fix 3: Updated lower_cast to pass type info (scg_to_ir.rs)
+  1205→
+  1206→The `lower_cast` function now passes `from_ty: Some(cast.from_ty.to_ir_type())` and `to_ty: Some(cast.to_ty.to_ir_type())` when constructing `IRInstr::Cast`.
+  1207→
+  1208→#### Fix 4: Updated scg_type_to_name (pipeline.rs)
+  1209→
+  1210→Added `F32 => "f32"` and `F64 => "f64"` to the match in `scg_type_to_name`.
+  1211→
+  1212→#### Fix 5: Updated all `IRInstr::Cast` patterns across all backends
+  1213→
+  1214→Updated 14 files to either add `..` to destructuring patterns or add `from_ty: None, to_ty: None` to construction sites. Files modified:
+  1215→- `arm64.rs`, `emit.rs`, `arm32/mod.rs`, `ppc64/mod.rs` — added `..` to destructuring
+  1216→- `x86_64/mod.rs` — added `from_ty: None, to_ty: None` to test constructions
+  1217→- `x86_64/stack_slot_isel.rs`, `wasm32/mod.rs`, `mips64/mod.rs` — added `..` to destructuring
+  1218→- `loongarch64/mod.rs`, `loongarch64/reg_alloc_isel.rs`, `loongarch64/stack_slot_isel.rs` — already used `..`
+  1219→- `regalloc.rs` — added `..` to destructuring and `from_ty: None, to_ty: None` to test constructions
+  1220→- `opt.rs` — added `from_ty: from_ty.clone(), to_ty: to_ty.clone()` to substitution
+  1221→
+  1222→#### Fix 6: Rewrote RISC-V CastKind FP conversion handling (riscv64.rs)
+  1223→
+  1224→Completely rewrote the `CastKind::IntToFloat`, `UIntToFloat`, `FloatToInt`, `FloatToUInt`, and `FloatToFloat` arms to use `from_ty`/`to_ty` for proper instruction selection:
+  1225→
+  1226→**IntToFloat** (signed int → float):
+  1227→- 32-bit source sign-extended via `ADDIW` first
+  1228→- `FCVT.S.W` (i32→f32), `FCVT.S.L` (i64→f32), `FCVT.D.W` (i32→f64), `FCVT.D.L` (i64→f64)
+  1229→- f32 result stored via `FSW` + `LW`; f64 result stored via `FSD` + `LD`
+  1230→
+  1231→**UIntToFloat** (unsigned int → float):
+  1232→- 32-bit source zero-extended via `SLLI`+`SRLI` first
+  1233→- `FCVT.S.WU` (u32→f32), `FCVT.S.LU` (u64→f32), `FCVT.D.WU` (u32→f64), `FCVT.D.LU` (u64→f64)
+  1234→
+  1235→**FloatToInt** (float → signed int):
+  1236→- `FMV.W.X` for f32 source, `FMV.D.X` for f64 source
+  1237→- `FCVT.W.S` (f32→i32), `FCVT.L.S` (f32→i64), `FCVT.W.D` (f64→i32), `FCVT.L.D` (f64→i64)
+  1238→- 32-bit results sign-extended via `ADDIW`
+  1239→
+  1240→**FloatToUInt** (float → unsigned int):
+  1241→- `FMV.W.X` for f32 source, `FMV.D.X` for f64 source
+  1242→- `FCVT.WU.S` (f32→u32), `FCVT.LU.S` (f32→u64), `FCVT.WU.D` (f64→u32), `FCVT.LU.D` (f64→u64)
+  1243→- 32-bit results zero-extended via `SLLI`+`SRLI`
+  1244→
+  1245→**FloatToFloat** (float width change):
+  1246→- `f32→f64`: `FMV.W.X` + `FCVT.D.S` + `FMV.X.D`
+  1247→- `f64→f32`: `FMV.D.X` + `FCVT.S.D` + `FMV.X.W`
+  1248→- Same-width: no-op (bitcast)
+  1249→
+  1250→#### Fix 7: Added helper functions (riscv64.rs)
+  1251→
+  1252→Added two new stack-slot helpers:
+  1253→- `ss_store_fpr_s_to_slot` — stores a single-precision FP value via `FSW`
+  1254→- `ss_load_word_from_slot` — loads a 32-bit word via `LW`
+  1255→
+  1256→These complement the existing `ss_store_fpr_to_slot` (FSD) and `ss_load_from_slot` (LD) helpers.
+  1257→
+  1258→### Verification
+  1259→
+  1260→The project compiles cleanly with `cargo check` (no errors, only pre-existing warnings unrelated to this change).
+  1261→
+  1262→---
+  1263→
+  1264→## Task 3-a: Fix FP conversion casts in the x86_64 backend
+  1265→
+  1266→**Date**: 2026-03-05
+  1267→**Files**: `src/codegen/src/x86_64/stack_slot_isel.rs`, `src/codegen/src/x86_64/mod.rs`, `src/codegen/src/arm32/mod.rs`
+  1268→
+  1269→### Bug Description
+  1270→
+  1271→The x86_64 backend's `CastKind` handling in `stack_slot_isel.rs` ignored the `from_ty` and `to_ty` fields on `IRInstr::Cast` and hardcoded specific type combinations for FP conversion casts. This meant:
+  1272→
+  1273→- **IntToFloat** always emitted `CVTSI2SD xmm, r32` (i32→f64), ignoring i32→f32, i64→f32, i64→f64 cases
+  1274→- **UIntToFloat** always emitted `CVTSI2SD xmm, r64` (u32→f64 via zero-extend), ignoring u32→f32 and u64→f64/32 cases
+  1275→- **FloatToInt** always emitted `CVTSD2SI r32, xmm` (f64→i32), ignoring f32→i32, f32→i64, f64→i64 cases
+  1276→- **FloatToUInt** was identical to FloatToInt (no unsigned handling), ignoring f32→u32, f32→u64, f64→u32, f64→u64
+  1277→- **FloatToFloat** always assumed f64→f32 (narrow), missing f32→f64 (widen)
+  1278→
+  1279→### Root Cause
+  1280→
+  1281→The `IRInstr::Cast` variant already had `from_ty: Option<IRType>` and `to_ty: Option<IRType>` fields (added previously for the RISC-V and LoongArch64 backends), but the x86_64 stack-slot ISel used `{ kind, dst, src, .. }` to destructure, discarding the type information.
+  1282→
+  1283→### Changes Made
+  1284→
+  1285→#### 1. `src/codegen/src/x86_64/stack_slot_isel.rs`
+  1286→
+  1287→- Changed the `IRInstr::Cast` destructuring from `{ kind, dst, src, .. }` to `{ kind, dst, src, from_ty, to_ty }` to capture type information
+  1288→- Added four helper predicates for type-driven instruction selection:
+  1289→  - `src_is_32bit_int`: true when from_ty is i8/i16/i32/u8/u16/u32 or None (default)
+  1290→  - `dst_is_f32`: true when to_ty is F32
+  1291→  - `src_is_f32`: true when from_ty is F32
+  1292→  - `dst_is_32bit_int`: true when to_ty is i8/i16/i32/u8/u16/u32 or None (default)
+  1293→- **IntToFloat**: Now selects the correct instruction based on src/dst types:
+  1294→  - i32→f32: `CVTSI2SS xmm, r32` + `MOVD r32, xmm`
+  1295→  - i32→f64: `CVTSI2SD xmm, r32` + `MOVQ r64, xmm` (default)
+  1296→  - i64→f32: `CVTSI2SS xmm, r64` + `MOVD r32, xmm`
+  1297→  - i64→f64: `CVTSI2SD xmm, r64` + `MOVQ r64, xmm`
+  1298→- **UIntToFloat**: Now handles both u32 and u64:
+  1299→  - u32→f32: `CVTSI2SS xmm, r64` + `MOVD r32, xmm`
+  1300→  - u32→f64: `CVTSI2SD xmm, r64` + `MOVQ r64, xmm`
+  1301→  - u64→f32: SHR-by-1 + `CVTSI2SS xmm, r64` + `ADDSS xmm, xmm` + `MOVD r32, xmm`
+  1302→  - u64→f64: SHR-by-1 + `CVTSI2SD xmm, r64` + `ADDSD xmm, xmm` + `MOVQ r64, xmm`
+  1303→- **FloatToInt**: Now uses MOVD for f32 sources and MOVQ for f64 sources:
+  1304→  - f32→i32: `MOVD xmm, r32` + `CVTSS2SI r32, xmm`
+  1305→  - f32→i64: `MOVD xmm, r32` + `CVTSS2SI r64, xmm`
+  1306→  - f64→i32: `MOVQ xmm, r64` + `CVTSD2SI r32, xmm` (default)
+  1307→  - f64→i64: `MOVQ xmm, r64` + `CVTSD2SI r64, xmm`
+  1308→- **FloatToUInt**: Same structure as FloatToInt (using signed conversion as x86_64 has no direct unsigned FP→int before AVX-512)
+  1309→  - f32→u32: `MOVD xmm, r32` + `CVTSS2SI r32, xmm`
+  1310→  - f32→u64: `MOVD xmm, r32` + `CVTSS2SI r64, xmm`
+  1311→  - f64→u32: `MOVQ xmm, r64` + `CVTSD2SI r32, xmm`
+  1312→  - f64→u64: `MOVQ xmm, r64` + `CVTSD2SI r64, xmm`
+  1313→- **FloatToFloat**: Now distinguishes widen vs narrow:
+  1314→  - f32→f64: `MOVD xmm, r32` + `CVTSS2SD xmm, xmm` + `MOVQ r64, xmm`
+  1315→  - f64→f32: `MOVQ xmm, r64` + `CVTSD2SS xmm, xmm` + `MOVD r32, xmm` (default)
+  1316→- Added imports for `encode_addsd_xmm_xmm` and `encode_addss_xmm_xmm`
+  1317→
+  1318→#### 2. `src/codegen/src/x86_64/mod.rs`
+  1319→
+  1320→- Added `encode_addsd_xmm_xmm(dst: Xmm, src: Xmm)` — encodes `ADDSD xmm, xmm` (F2 0F 58 /r) for adding scalar double-precision floats
+  1321→- Added `encode_addss_xmm_xmm(dst: Xmm, src: Xmm)` — encodes `ADDSS xmm, xmm` (F3 0F 58 /r) for adding scalar single-precision floats
+  1322→- These are needed for the u64→float conversion sequence (halve, convert, double)
+  1323→
+  1324→#### 3. `src/codegen/src/arm32/mod.rs` (side fix)
+  1325→
+  1326→- Removed accidentally duplicated `encode_vstr_d` and `encode_vldr_d` function definitions that were already present earlier in the file
+  1327→
+  1328→### Instruction Encoding Reference
+  1329→
+  1330→| Cast | from_ty | to_ty | Instruction(s) |
+  1331→|------|---------|-------|----------------|
+  1332→| IntToFloat | i32 | f32 | CVTSI2SS xmm, r32; MOVD r32, xmm |
+  1333→| IntToFloat | i32 | f64 | CVTSI2SD xmm, r32; MOVQ r64, xmm |
+  1334→| IntToFloat | i64 | f32 | CVTSI2SS xmm, r64; MOVD r32, xmm |
+  1335→| IntToFloat | i64 | f64 | CVTSI2SD xmm, r64; MOVQ r64, xmm |
+  1336→| UIntToFloat | u32 | f32 | CVTSI2SS xmm, r64; MOVD r32, xmm |
+  1337→| UIntToFloat | u32 | f64 | CVTSI2SD xmm, r64; MOVQ r64, xmm |
+  1338→| UIntToFloat | u64 | f32 | SHR r64,1; CVTSI2SS xmm,r64; ADDSS xmm,xmm; MOVD r32,xmm |
+  1339→| UIntToFloat | u64 | f64 | SHR r64,1; CVTSI2SD xmm,r64; ADDSD xmm,xmm; MOVQ r64,xmm |
+  1340→| FloatToInt | f32 | i32 | MOVD xmm,r32; CVTSS2SI r32,xmm |
+  1341→| FloatToInt | f32 | i64 | MOVD xmm,r32; CVTSS2SI r64,xmm |
+  1342→| FloatToInt | f64 | i32 | MOVQ xmm,r64; CVTSD2SI r32,xmm |
+  1343→| FloatToInt | f64 | i64 | MOVQ xmm,r64; CVTSD2SI r64,xmm |
+  1344→| FloatToUInt | f32 | u32 | MOVD xmm,r32; CVTSS2SI r32,xmm |
+  1345→| FloatToUInt | f32 | u64 | MOVD xmm,r32; CVTSS2SI r64,xmm |
+  1346→| FloatToUInt | f64 | u32 | MOVQ xmm,r64; CVTSD2SI r32,xmm |
+  1347→| FloatToUInt | f64 | u64 | MOVQ xmm,r64; CVTSD2SI r64,xmm |
+  1348→| FloatToFloat | f32 | f64 | MOVD xmm,r32; CVTSS2SD xmm,xmm; MOVQ r64,xmm |
+  1349→| FloatToFloat | f64 | f32 | MOVQ xmm,r64; CVTSD2SS xmm,xmm; MOVD r32,xmm |
+  1350→
+  1351→### Verification
+  1352→
+  1353→The project compiles cleanly with `cargo check` (no errors, only pre-existing warnings unrelated to this change).
+  1354→
+  1355→---
+  1356→
+  1357→## Task 4-f: Set up CI/CD pipeline with GitHub Actions
+  1358→
+  1359→**Date**: 2026-03-05
+  1360→**Files**: `.github/workflows/ci.yml`, `.github/workflows/release.yml`, `.github/dependabot.yml`, `rust-toolchain.toml`
+  1361→
+  1362→### Summary
+  1363→
+  1364→Created a full CI/CD pipeline with GitHub Actions covering build, test, lint, documentation, and multi-platform release publishing.
+  1365→
+  1366→### Changes
+  1367→
+  1368→#### `.github/workflows/ci.yml` — Rewritten
+  1369→
+  1370→The original CI had a single monolithic `test` job that ran build + test + clippy + fmt sequentially, plus a simple release job on main pushes. Replaced with 5 parallel-capable jobs:
+  1371→
+  1372→| Job | Runner | Purpose | Dependencies |
+  1373→|-----|--------|---------|--------------|
+  1374→| **build** | ubuntu-latest | `cargo build --workspace` | none |
+  1375→| **test** | ubuntu-latest + macos-latest | `cargo test --workspace` | build |
+  1376→| **fmt** | ubuntu-latest | `cargo fmt --all -- --check` | none |
+  1377→| **clippy** | ubuntu-latest | `cargo clippy --workspace -- -D warnings` | build |
+  1378→| **docs** | ubuntu-latest | `cargo doc --workspace --no-deps` | build |
+  1379→
+  1380→Key design decisions:
+  1381→- **Separate jobs** for clearer failure signals and parallelism (fmt runs immediately, no waiting on build).
+  1382→- **Test matrix** covers `ubuntu-latest` (x86_64) and `macos-latest` (aarch64 Apple Silicon), providing native ARM64 test coverage without cross-compilation.
+  1383→- **Concurrency groups** cancel in-flight runs when new commits land on the same branch/PR.
+  1384→- All jobs use `nightly-2026-03-01` matching `rust-toolchain.toml`.
+  1385→- Each job only installs the components it needs (e.g., fmt job only installs `rustfmt`).
+  1386→- The docs job uploads built documentation as a 7-day artifact.
+  1387→
+  1388→#### `.github/workflows/release.yml` — New file
+  1389→
+  1390→Triggered on version tag pushes (`v[0-9]+.*`), builds release binaries for 4 platforms:
+  1391→
+  1392→| Target | Runner | Method |
+  1393→|--------|--------|--------|
+  1394→| `x86_64-unknown-linux-gnu` | ubuntu-latest | native |
+  1395→| `aarch64-unknown-linux-gnu` | ubuntu-latest | cross-rs (QEMU) |
+  1396→| `x86_64-apple-darwin` | macos-13 | native (Intel runner) |
+  1397→| `x86_64-pc-windows-msvc` | windows-latest | native |
+  1398→
+  1399→After all builds succeed, a `release` job:
+  1400→1. Downloads all build artifacts.
+  1401→2. Extracts the version from the git tag.
+  1402→3. Reads the matching section from `CHANGELOG.md` for release notes.
+  1403→4. Creates a GitHub Release using `softprops/action-gh-release@v2` with:
+  1404→   - Auto-detection of prereleases (version strings containing `-`).
+  1405→   - All 4 binaries attached as release assets.
+  1406→
+  1407→The `aarch64-unknown-linux-gnu` build uses `cross` (installed via `taiki-e/install-action@v2`), consistent with the existing `cross-compile.yml` approach.
+  1408→
+  1409→#### `.github/dependabot.yml` — Enhanced
+  1410→
+  1411→Added a second ecosystem for **GitHub Actions** updates (in addition to the existing cargo updates). Also added a `groups` configuration to batch Rust patch updates together, reducing PR noise.
+  1412→
+  1413→| Ecosystem | Schedule | PR Limit | Notes |
+  1414→|-----------|----------|----------|-------|
+  1415→| cargo | weekly (Monday) | 5 | Patch updates grouped |
+  1416→| github-actions | weekly (Monday) | 3 | New addition |
+  1417→
+  1418→#### `rust-toolchain.toml` — Verified consistent
+  1419→
+  1420→No changes needed. The pinned toolchain (`nightly-2026-03-01`) and components (`rustfmt`, `clippy`, `rust-src`) are used consistently across all workflow files. The targets (`aarch64-unknown-linux-gnu`, `aarch64-unknown-none`) in `rust-toolchain.toml` are for local development; CI specifies targets per-job via the `dtolnay/rust-toolchain` action's `targets` parameter.
+  1421→
+  1422→### Relationship to existing `cross-compile.yml`
+  1423→
+  1424→The existing `cross-compile.yml` remains untouched. It serves a different purpose: broad architecture compilation checks (8 targets including riscv64, mips64, ppc64, loongarch64, wasm32). The new `release.yml` focuses on the 4 platforms that ship distributable binaries. Both workflows are complementary.
+  1425→
+  1426→### Verification
+  1427→
+  1428→- All workflow YAML is syntactically valid.
+  1429→- Toolchain versions are consistent: `nightly-2026-03-01` everywhere.
+  1430→- `dtolnay/rust-toolchain@stable` is the correct action (the `@stable` refers to the action version, not the Rust channel — the `toolchain:` parameter overrides it).
+  1431→- Concurrency groups prevent duplicate runs on fast pushes.
+  1432→
+  1433→## Task 4-c: Create fmt/formatting module in the VUMA stdlib
+  1434→
+  1435→**Date**: 2026-03-05
+  1436→**Files**: `src/std/src/fmt.rs` (new), `src/std/src/lib.rs` (modified)
+  1437→
+  1438→### Summary
+  1439→
+  1440→Created a new `fmt` module in the VUMA standard library providing printf-style string formatting and output capabilities. Prior to this, there was no way to format strings or produce formatted output in the VUMA stdlib.
+  1441→
+  1442→### New File: `src/std/src/fmt.rs`
+  1443→
+  1444→Implements 13 public functions organized into 6 categories:
+  1445→
+  1446→**Integer Formatting**
+  1447→- `format_int(value: i64, base: u32, width: u32) -> VumaString` — signed integer in arbitrary base (2–36) with zero-padding
+  1448→- `format_uint(value: u64, base: u32, width: u32) -> VumaString` — unsigned integer in arbitrary base with zero-padding
+  1449→
+  1450→**Floating-Point Formatting**
+  1451→- `format_float(value: f64, precision: u32) -> VumaString` — decimal float with configurable precision; handles NaN, ±inf
+  1452→
+  1453→**Base-Specific Shortcuts**
+  1454→- `format_hex(value: u64, width: u32) -> VumaString` — lowercase hexadecimal
+  1455→- `format_binary(value: u64, width: u32) -> VumaString` — binary representation
+  1456→- `format_octal(value: u64, width: u32) -> VumaString` — octal representation
+  1457→
+  1458→**Pointer Formatting**
+  1459→- `format_pointer(addr: u64) -> VumaString` — `0x`-prefixed 16-digit hex (conventional pointer format)
+  1460→
+  1461→**String Manipulation**
+  1462→- `pad_left(s: &str, width: u32, fill: char) -> VumaString` — left-pad with fill character
+  1463→- `pad_right(s: &str, width: u32, fill: char) -> VumaString` — right-pad with fill character
+  1464→- `join(parts: &[&str], separator: &str) -> VumaString` — join string slices with separator
+  1465→
+  1466→**Buffer Writing**
+  1467→- `write_str(buf: &mut [u8], s: &str) -> u32` — write string to byte buffer
+  1468→- `write_int(buf: &mut [u8], value: i64) -> u32` — write formatted integer to byte buffer
+  1469→- `write_float(buf: &mut [u8], value: f64, precision: u32) -> u32` — write formatted float to byte buffer
+  1470→
+  1471→**Capability Descriptor**
+  1472→- `fmt_capd() -> CapD` — returns `{ Read, Write, Compare }` covering all fmt operations
+  1473→
+  1474→### Design Decisions
+  1475→
+  1476→1. **Internal helper `format_uint_inner`**: Extracted shared unsigned formatting logic used by `format_uint`, `format_hex`, `format_binary`, `format_octal`, and `format_pointer`. Avoids code duplication.
+  1477→
+  1478→2. **Base validation**: Bases outside 2–36 fall back to base 10, matching the convention of other formatting libraries and avoiding panics.
+  1479→
+  1480→3. **Negative sign in `format_int`**: The `-` sign occupies one character position. When `width` is specified, the padding applies to the digit portion (width - 1), ensuring `format_int(-42, 10, 5)` produces `-0042`.
+  1481→
+  1482→4. **`i64::MIN` handling**: Uses `i128::unsigned_abs()` to correctly compute the absolute value of `i64::MIN` without overflow.
+  1483→
+  1484→5. **Buffer writes are truncating**: `write_str`, `write_int`, and `write_float` write as many bytes as fit in the buffer rather than panicking. This is consistent with `snprintf` semantics.
+  1485→
+  1486→6. **BD annotations**: Pure formatting functions declare `{ Read, Compare }`; buffer-writing functions declare `{ Read, Write, Compare }`. The module-level `fmt_capd()` returns the union.
+  1487→
+  1488→### Modified File: `src/std/src/lib.rs`
+  1489→
+  1490→- Added `pub mod fmt;` in the module declarations (alphabetically sorted)
+  1491→- Added `fmt` module description to the module overview doc comment
+  1492→- Added re-export block for all 14 public items from `fmt`
+  1493→
+  1494→### Verification
+  1495→
+  1496→- `cargo check --package vuma-std` passes cleanly.
+  1497→- `cargo test --package vuma-std -- fmt` — all 60 tests pass.
+  1498→- Follows existing stdlib patterns: BD annotations (`// VUMA-VERIFIED`), doc comments with VUMA Program Equivalent sections, CapD/CapFlag usage, VumaString return types.
+  1499→

@@ -402,6 +402,7 @@ pub fn code_for_codegen_error(err: &CodegenError) -> &'static str {
         CodegenError::ElfError(_) => "E035",
         CodegenError::UnknownVariable { .. } => "E002",
         CodegenError::WasmSectionNotFound { .. } => "E036",
+        CodegenError::UnresolvedRelocation { .. } => "E037",
     }
 }
 
@@ -1336,6 +1337,12 @@ pub fn from_codegen_error(err: &CodegenError) -> VumaDiagnostic {
             "codegen",
             Some(Suggestion::text(
                 format!("ensure '{}' section is generated", section),
+            )),
+        ),
+        CodegenError::UnresolvedRelocation { symbol, function, .. } => (
+            "codegen",
+            Some(Suggestion::text(
+                format!("define function '{}' or provide an external definition for '{}' referenced in '{}'", symbol, symbol, function),
             )),
         ),
     };

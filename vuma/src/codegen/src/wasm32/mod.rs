@@ -5366,7 +5366,9 @@ mod wasm_target_tests {
                 terminator: IRTerminator::Return(vec![IRValue::Immediate(value as i64)]),
                 predecessors: HashSet::new(),
                 successors: HashSet::new(),
+                source_line: 0,
             }],
+            source_file: String::new(),
         }
     }
 
@@ -5385,7 +5387,9 @@ mod wasm_target_tests {
                 terminator: IRTerminator::Return(vec![]),
                 predecessors: HashSet::new(),
                 successors: HashSet::new(),
+                source_line: 0,
             }],
+            source_file: String::new(),
         }
     }
 
@@ -5580,7 +5584,9 @@ mod wasm_target_tests {
                 terminator: IRTerminator::Return(vec![IRValue::Immediate(0)]),
                 predecessors: HashSet::new(),
                 successors: HashSet::new(),
+                source_line: 0,
             }],
+            source_file: String::new(),
         };
         let wasm = compile_to_wasm(&[func]).expect("compilation should succeed");
 

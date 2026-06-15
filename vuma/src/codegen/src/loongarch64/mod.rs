@@ -3834,6 +3834,24 @@ impl Backend for LoongArch64Backend {
                                 .encode());
                         all_code[abs_offset..abs_offset + 4]
                             .copy_from_slice(&patched.to_le_bytes());
+                    } else {
+                        // Unresolved relocation: emit an error instead of silently
+                        // leaving a placeholder at offset 0 which would cause a
+                        // runtime crash.
+                        eprintln!(
+                            "error[E037]: unresolved relocation: symbol '{}' referenced in function '{}' at offset 0x{:X} (type: {})",
+                            reloc.symbol, func.name, reloc.offset, reloc.reloc_type
+                        );
+                        let sentinel: u32 = 0xDEAD_BEEF;
+                        all_code[abs_offset..abs_offset + 4]
+                            .copy_from_slice(&sentinel.to_le_bytes());
+                        return Err(BackendError::UnresolvedRelocation {
+                            isa: "loongarch64",
+                            symbol: reloc.symbol.clone(),
+                            function: func.name.clone(),
+                            offset: reloc.offset,
+                            reloc_type: reloc.reloc_type.clone(),
+                        });
                     }
                 } else if reloc.reloc_type == R_LARCH_64 {
                     // R_LARCH_64: patch the 4-instruction load-immediate sequence
@@ -3849,6 +3867,26 @@ impl Backend for LoongArch64Backend {
                     if let Some(&target_offset) = func_offsets.get(&reloc.symbol) {
                         let vaddr = code_vaddr_base + target_offset as u64;
                         patch_load_imm_64(&mut all_code, abs_offset, vaddr);
+                    } else {
+                        // Unresolved relocation: emit an error instead of silently
+                        // leaving a placeholder which would cause a runtime crash.
+                        eprintln!(
+                            "error[E037]: unresolved relocation: symbol '{}' referenced in function '{}' at offset 0x{:X} (type: {})",
+                            reloc.symbol, func.name, reloc.offset, reloc.reloc_type
+                        );
+                        let sentinel: u32 = 0xDEAD_BEEF;
+                        for i in 0..4 {
+                            let off = abs_offset + i * 4;
+                            all_code[off..off + 4]
+                                .copy_from_slice(&sentinel.to_le_bytes());
+                        }
+                        return Err(BackendError::UnresolvedRelocation {
+                            isa: "loongarch64",
+                            symbol: reloc.symbol.clone(),
+                            function: func.name.clone(),
+                            offset: reloc.offset,
+                            reloc_type: reloc.reloc_type.clone(),
+                        });
                     }
                 }
             }
@@ -4388,7 +4426,9 @@ mod tests {
                 terminator: crate::ir::IRTerminator::Return(vec![]),
                 predecessors: HashSet::new(),
                 successors: HashSet::new(),
+                source_line: 0,
             }],
+            source_file: String::new(),
         }
     }
 

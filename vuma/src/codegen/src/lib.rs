@@ -129,6 +129,21 @@ pub enum CodegenError {
         /// Name of the missing WASM section.
         section: String,
     },
+
+    /// A relocation references a symbol that could not be resolved during
+    /// program encoding. This is a fatal error — the binary cannot be
+    /// correctly linked without resolving all relocations.
+    #[error("unresolved relocation: symbol '{symbol}' in function '{function}' at offset 0x{offset:X} ({reloc_type})")]
+    UnresolvedRelocation {
+        /// Name of the unresolved symbol.
+        symbol: String,
+        /// Name of the function containing the reference.
+        function: String,
+        /// Byte offset within the function where the relocation applies.
+        offset: u64,
+        /// Relocation type string (e.g., "R_AARCH64_CALL26").
+        reloc_type: String,
+    },
 }
 
 /// Convenience alias for results in this crate.

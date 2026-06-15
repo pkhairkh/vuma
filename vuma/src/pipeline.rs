@@ -60,7 +60,7 @@ use vuma_ive::{
     AggregatedResult, InferenceEngine, InvariantAggregator,
     VerificationLevel as IveVerificationLevel,
 };
-use vuma_parser::{AstToScg, ModuleResolver, ParseError, Parser, Program as AstProgram, ResolveError};
+use vuma_parser::{AstToScg, Item, ModuleResolver, ParseError, Parser, Program as AstProgram, ResolveError};
 use vuma_scg::{
     AccessMode, CommonSubexpressionElimination, ConstantFolding, ControlKind, DeadCodeElimination,
     EdgeData, EdgeKind, InliningPass, NodeData, NodeId, NodePayload, NodeType, PassManager,
@@ -198,6 +198,7 @@ impl CompileConfig {
             CompileTarget::Linux => {
                 let mut cfg = EmitConfig::linux_elf();
                 cfg.section_headers = cfg.section_headers || self.section_headers;
+                cfg.debug_info = self.debug_info;
                 cfg
             }
             CompileTarget::Wasm32 => EmitConfig::wasm_binary(),
@@ -1047,6 +1048,19 @@ fn walk_control_flow(
     consumed: &mut HashSet<NodeId>,
     stop_at: &HashSet<NodeId>,
 ) -> Vec<ScgStatement> {
+    walk_control_flow_with_externs(start, scg, edge_idx, consumed, stop_at, &HashSet::new())
+}
+
+/// Walk control flow starting from `start`, producing `ScgStatement`s,
+/// with knowledge of extern functions for marking foreign calls.
+fn walk_control_flow_with_externs(
+    start: NodeId,
+    scg: &SCG,
+    edge_idx: &EdgeIndex,
+    consumed: &mut HashSet<NodeId>,
+    stop_at: &HashSet<NodeId>,
+    extern_functions: &HashSet<String>,
+) -> Vec<ScgStatement> {
     let mut stmts = Vec::new();
     let mut current = Some(start);
 
@@ -1100,7 +1114,7 @@ fn walk_control_flow(
                         // Generate a simple switch from the then arm
                         // with a discriminant expression.
                         let then_body_stmts =
-                            walk_control_flow(then_tgt, scg, edge_idx, consumed, &arm_stop);
+                            walk_control_flow_with_externs(then_tgt, scg, edge_idx, consumed, &arm_stop, extern_functions);
 
                         // Extract the case value from the AST's MatchArm pattern.
                         // The branch condition for a match arm is typically
@@ -1121,7 +1135,7 @@ fn walk_control_flow(
 
                         if let Some(tgt) = else_tgt {
                             let else_stmts =
-                                walk_control_flow(tgt, scg, edge_idx, consumed, &arm_stop);
+                                walk_control_flow_with_externs(tgt, scg, edge_idx, consumed, &arm_stop, extern_functions);
                             default_body = else_stmts;
                         }
 
@@ -1145,10 +1159,10 @@ fn walk_control_flow(
                         }
 
                         let then_body =
-                            walk_control_flow(then_tgt, scg, edge_idx, consumed, &arm_stop);
+                            walk_control_flow_with_externs(then_tgt, scg, edge_idx, consumed, &arm_stop, extern_functions);
 
                         let else_body = else_tgt
-                            .map(|tgt| walk_control_flow(tgt, scg, edge_idx, consumed, &arm_stop));
+                            .map(|tgt| walk_control_flow_with_externs(tgt, scg, edge_idx, consumed, &arm_stop, extern_functions));
 
                         stmts.push(ScgStatement::Control(ControlNode::If {
                             cond,
@@ -1177,7 +1191,7 @@ fn walk_control_flow(
                         loop_stop.insert(exit);
                     }
 
-                    let body = walk_control_flow(body_tgt, scg, edge_idx, consumed, &loop_stop);
+                    let body = walk_control_flow_with_externs(body_tgt, scg, edge_idx, consumed, &loop_stop, extern_functions);
 
                     stmts.push(ScgStatement::Control(ControlNode::Loop { body }));
 
@@ -1230,7 +1244,39 @@ fn walk_control_flow(
                 }
 
                 ControlKind::FunctionEntry => {
-                    // Shouldn't appear inside a function body; pass through
+                    // Call-site FunctionEntry nodes (label "call_<name>")
+                    // are lowered to CallNode statements.  Top-level
+                    // function-definition entries are handled in Phase 1
+                    // and should not appear here.
+                    if let Some(label) = &ctrl.label {
+                        if let Some(func_name) = label.strip_prefix("call_") {
+                            let is_extern = extern_functions.contains(func_name);
+                            // Collect arguments from DataFlow edges
+                            let mut args = Vec::new();
+                            let df_inputs = edge_idx.incoming_df(node_id);
+                            for df_edge in &df_inputs {
+                                let source = df_edge.source;
+                                args.push(ScgExpr::Var(format!("v_{}", source.as_u64())));
+                            }
+                            stmts.push(ScgStatement::Call(CallNode {
+                                dst: None, // return value flows via DataFlow edge
+                                func: func_name.to_string(),
+                                args,
+                                is_extern,
+                            }));
+                            // Consume the corresponding FunctionReturn node
+                            // and continue from its outgoing CF edge.
+                            let ret_node = find_function_return(node_id, scg, edge_idx);
+                            if let Some(ret) = ret_node {
+                                consumed.insert(ret);
+                                current = edge_idx.outgoing_cf(ret).first().map(|e| e.target);
+                            } else {
+                                current = edge_idx.outgoing_cf(node_id).first().map(|e| e.target);
+                            }
+                            continue;
+                        }
+                    }
+                    // Non-call-site FunctionEntry: pass through
                     current = edge_idx.outgoing_cf(node_id).first().map(|e| e.target);
                     continue;
                 }
@@ -1258,7 +1304,7 @@ fn walk_control_flow(
 
             // ── Non-control nodes: convert to statements ───────────
             _ => {
-                if let Some(stmt) = convert_node_to_statement(node_id, node_data, edge_idx, scg) {
+                if let Some(stmt) = convert_node_to_statement_with_externs(node_id, node_data, edge_idx, scg, extern_functions) {
                     stmts.push(stmt);
                 }
 
@@ -1282,6 +1328,21 @@ fn convert_node_to_statement(
     node_data: &NodeData,
     edge_idx: &EdgeIndex,
     scg: &SCG,
+) -> Option<ScgStatement> {
+    convert_node_to_statement_with_externs(node_id, node_data, edge_idx, scg, &HashSet::new())
+}
+
+/// Convert a non-control SCG node into an `ScgStatement`, with knowledge
+/// of which functions are declared as extern.
+///
+/// Handles all node types except `Control` (which is handled by
+/// `walk_control_flow`) and `Phantom` (which is skipped).
+fn convert_node_to_statement_with_externs(
+    node_id: NodeId,
+    node_data: &NodeData,
+    edge_idx: &EdgeIndex,
+    scg: &SCG,
+    extern_functions: &HashSet<String>,
 ) -> Option<ScgStatement> {
     match &node_data.payload {
         NodePayload::Allocation(alloc) => {
@@ -1353,12 +1414,18 @@ fn convert_node_to_statement(
             }))
         }
 
-        NodePayload::Effect(eff) => Some(ScgStatement::Call(CallNode {
-            dst: Some(node_var(node_id, "eff")),
-            func: eff.effect_kind.clone(),
-            args: vec![],
-            is_extern: false,
-        })),
+        NodePayload::Effect(eff) => {
+            // Effect nodes may represent function calls.  If the
+            // effect_kind matches a name in the extern set, mark it
+            // as an extern call so the backend emits a relocation.
+            let is_extern = extern_functions.contains(&eff.effect_kind);
+            Some(ScgStatement::Call(CallNode {
+                dst: Some(node_var(node_id, "eff")),
+                func: eff.effect_kind.clone(),
+                args: vec![],
+                is_extern,
+            }))
+        }
 
         NodePayload::Phantom(_) => None,
 
@@ -1604,14 +1671,56 @@ fn find_entry_points(scg: &SCG, edge_idx: &EdgeIndex) -> Vec<NodeId> {
 /// 3. **Phase 3: Statement generation** — Convert non-control nodes into
 ///    ScgStatements with DataFlow-based variable naming.
 pub fn bridge_scg_to_codegen(scg: &SCG) -> Scg {
+    bridge_scg_to_codegen_with_externs(scg, &HashSet::new())
+}
+
+/// Bridge the `vuma-scg` SCG to the codegen SCG, with knowledge of which
+/// functions are declared as extern (foreign) in the source program.
+///
+/// When a function call targets a name in `extern_functions`, the resulting
+/// `CallNode` gets `is_extern: true`, which causes the backend to emit
+/// a relocation entry instead of a local `BL` instruction.
+pub fn bridge_scg_to_codegen_with_externs(scg: &SCG, extern_functions: &HashSet<String>) -> Scg {
     let edge_idx = EdgeIndex::build(scg);
     let mut consumed: HashSet<NodeId> = HashSet::new();
     let mut scg_nodes: Vec<ScgNode> = Vec::new();
 
+    // ── Phase 0: Identify call-site FunctionEntry nodes ─────────────
+    //
+    // The AST→SCG conversion emits a FunctionEntry+FunctionReturn pair
+    // for every call site (e.g. `call_write` / `return_write`).  These
+    // must NOT be treated as function definitions — they represent call
+    // sites and should be lowered to `CallNode` statements.
+    //
+    // We distinguish them by label prefix ("call_") or by the presence
+    // of an incoming ControlFlow edge from a non-FunctionEntry node
+    // (a call site's FunctionEntry is reached from the caller's body,
+    // whereas a function definition's FunctionEntry is an SCG entry
+    // point with no incoming CF edges).
+    let mut call_site_entries: HashSet<NodeId> = HashSet::new();
+    let mut call_site_names: HashMap<NodeId, String> = HashMap::new();
+    for n in scg.nodes() {
+        if let NodePayload::Control(c) = &n.payload {
+            if c.kind == ControlKind::FunctionEntry {
+                if let Some(label) = &c.label {
+                    // Call-site FunctionEntry nodes have labels like "call_write"
+                    if let Some(func_name) = label.strip_prefix("call_") {
+                        call_site_entries.insert(n.id);
+                        call_site_names.insert(n.id, func_name.to_string());
+                    }
+                }
+            }
+        }
+    }
+
     // ── Phase 1: Function boundary detection ─────────────────────
+    // Only collect FunctionEntry nodes that are NOT call sites.
     let function_entries: Vec<(NodeId, String)> = scg
         .nodes()
         .filter_map(|n| {
+            if call_site_entries.contains(&n.id) {
+                return None; // skip call-site entries
+            }
             if let NodePayload::Control(c) = &n.payload {
                 if c.kind == ControlKind::FunctionEntry {
                     let name = c.label.clone().unwrap_or_else(|| "unknown".to_string());
@@ -1635,7 +1744,7 @@ pub fn bridge_scg_to_codegen(scg: &SCG) -> Scg {
                 if let Some(ret) = return_node {
                     stop_at.insert(ret);
                 }
-                walk_control_flow(first_cf.target, scg, &edge_idx, &mut consumed, &stop_at)
+                walk_control_flow_with_externs(first_cf.target, scg, &edge_idx, &mut consumed, &stop_at, extern_functions)
             } else {
                 vec![]
             };
@@ -1662,7 +1771,7 @@ pub fn bridge_scg_to_codegen(scg: &SCG) -> Scg {
         let mut body = Vec::new();
         for start in &entry_points {
             let stop_at = HashSet::new();
-            let mut partial = walk_control_flow(*start, scg, &edge_idx, &mut consumed, &stop_at);
+            let mut partial = walk_control_flow_with_externs(*start, scg, &edge_idx, &mut consumed, &stop_at, extern_functions);
             body.append(&mut partial);
         }
 
@@ -1674,7 +1783,7 @@ pub fn bridge_scg_to_codegen(scg: &SCG) -> Scg {
             }
             consumed.insert(*nid);
             if let Some(node_data) = scg.get_node(*nid) {
-                if let Some(stmt) = convert_node_to_statement(*nid, node_data, &edge_idx, scg) {
+                if let Some(stmt) = convert_node_to_statement_with_externs(*nid, node_data, &edge_idx, scg, extern_functions) {
                     body.push(stmt);
                 }
             }
@@ -1702,7 +1811,7 @@ pub fn bridge_scg_to_codegen(scg: &SCG) -> Scg {
             }
             consumed.insert(*nid);
             if let Some(node_data) = scg.get_node(*nid) {
-                if let Some(stmt) = convert_node_to_statement(*nid, node_data, &edge_idx, scg) {
+                if let Some(stmt) = convert_node_to_statement_with_externs(*nid, node_data, &edge_idx, scg, extern_functions) {
                     stmts.push(stmt);
                 }
             }
@@ -1946,7 +2055,8 @@ pub fn compile_with_path(
 
     // ── Stage 8: IR Lowering ──────────────────────────────────────────
     let t = Instant::now();
-    let codegen_scg = bridge_scg_to_codegen(&scg);
+    let extern_fns = extract_extern_functions(&ast);
+    let codegen_scg = bridge_scg_to_codegen_with_externs(&scg, &extern_fns);
     let mut ir_builder = IRBuilder::new();
     let ir_program = match ir_builder.build(&codegen_scg) {
         Ok(ir) => ir,
@@ -2280,7 +2390,8 @@ pub fn compile_with_recovery(
 
     // ── Stage 8: IR Lowering ──────────────────────────────────────────
     let t = Instant::now();
-    let codegen_scg = bridge_scg_to_codegen(&scg);
+    let extern_fns = extract_extern_functions(&ast);
+    let codegen_scg = bridge_scg_to_codegen_with_externs(&scg, &extern_fns);
     let mut ir_builder = IRBuilder::new();
     let ir_program = match ir_builder.build(&codegen_scg) {
         Ok(ir) => ir,
@@ -2641,7 +2752,8 @@ pub fn compile_to_wasm(source: &str) -> Result<Vec<u8>, Vec<VumaError>> {
     });
 
     // ── Stage 4: IR Lowering ─────────────────────────────────────
-    let codegen_scg = bridge_scg_to_codegen(&scg);
+    let extern_fns = extract_extern_functions(&ast);
+    let codegen_scg = bridge_scg_to_codegen_with_externs(&scg, &extern_fns);
     let mut ir_builder = IRBuilder::new();
     let ir_program = match ir_builder.build(&codegen_scg) {
         Ok(ir) => ir,
@@ -2757,6 +2869,22 @@ fn ast_to_scg(ast: &AstProgram) -> Result<SCG, VumaError> {
     converter.convert(ast).map_err(|e| VumaError::AstToScg {
         message: format!("{}", e),
     })
+}
+
+/// Extract the set of extern function names declared in `extern "C" { ... }`
+/// blocks in the AST.  These are functions that should be linked against
+/// external libraries (e.g. libc) and must be emitted as relocations rather
+/// than local branch instructions.
+fn extract_extern_functions(ast: &AstProgram) -> HashSet<String> {
+    let mut extern_fns = HashSet::new();
+    for item in &ast.items {
+        if let Item::ExternBlock(eb) = item {
+            for fn_decl in &eb.functions {
+                extern_fns.insert(fn_decl.name.clone());
+            }
+        }
+    }
+    extern_fns
 }
 
 /// Run SCG transformation passes based on the optimisation level.

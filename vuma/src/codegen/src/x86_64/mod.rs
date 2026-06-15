@@ -2210,9 +2210,25 @@ impl Backend for X86_64Backend {
                         let resolved = (s + a - p - 4) as i32;
                         all_code[abs_offset..abs_offset + 4]
                             .copy_from_slice(&resolved.to_le_bytes());
+                    } else {
+                        // Unresolved relocation: emit an error instead of silently
+                        // leaving a placeholder at offset 0 which would cause a
+                        // runtime crash.
+                        eprintln!(
+                            "error[E037]: unresolved relocation: symbol '{}' referenced in function '{}' at offset 0x{:X} (type: {})",
+                            reloc.symbol, func.name, reloc.offset, reloc.reloc_type
+                        );
+                        let sentinel: u32 = 0xDEAD_BEEF;
+                        all_code[abs_offset..abs_offset + 4]
+                            .copy_from_slice(&sentinel.to_le_bytes());
+                        return Err(BackendError::UnresolvedRelocation {
+                            isa: "x86_64",
+                            symbol: reloc.symbol.clone(),
+                            function: func.name.clone(),
+                            offset: reloc.offset,
+                            reloc_type: reloc.reloc_type.clone(),
+                        });
                     }
-                    // If the symbol is not found (e.g., external like __vuma_free),
-                    // leave the placeholder as-is
                 }
                 // R_X86_64_64 relocations would need different handling
                 // (absolute 64-bit address), but for intra-program references

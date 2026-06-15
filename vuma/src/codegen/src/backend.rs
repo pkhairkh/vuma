@@ -298,6 +298,22 @@ pub enum BackendError {
         ty: String,
     },
 
+    /// Unresolved relocation — a symbol referenced by a relocation entry
+    /// could not be found in the program's symbol table.
+    #[error("[{isa}] unresolved relocation: symbol '{symbol}' referenced in function '{function}' at offset 0x{offset:X} (relocation type: {reloc_type})")]
+    UnresolvedRelocation {
+        /// ISA identifier.
+        isa: &'static str,
+        /// Name of the unresolved symbol.
+        symbol: String,
+        /// Name of the function containing the reference.
+        function: String,
+        /// Byte offset within the function where the relocation applies.
+        offset: u64,
+        /// Relocation type string (e.g., "R_AARCH64_CALL26").
+        reloc_type: String,
+    },
+
     /// Generic backend error.
     #[error("[{isa}] {message}")]
     Other {
@@ -2015,9 +2031,29 @@ impl Backend for AArch64Backend {
                         let patched = (existing & !0x03FFFFFF) | imm26;
                         all_code[abs_offset..abs_offset + 4]
                             .copy_from_slice(&patched.to_le_bytes());
+                    } else {
+                        // Unresolved relocation: emit an error instead of silently
+                        // leaving a placeholder at offset 0 which would cause a
+                        // runtime crash.
+                        //
+                        // Write a distinctive sentinel value (0xDEAD_BEEF) at the
+                        // relocation site so the bug is immediately obvious in a
+                        // debugger if the error is somehow bypassed.
+                        eprintln!(
+                            "error[E037]: unresolved relocation: symbol '{}' referenced in function '{}' at offset 0x{:X} (type: {})",
+                            reloc.symbol, func.name, reloc.offset, reloc.reloc_type
+                        );
+                        let sentinel: u32 = 0xDEAD_BEEF;
+                        all_code[abs_offset..abs_offset + 4]
+                            .copy_from_slice(&sentinel.to_le_bytes());
+                        return Err(BackendError::UnresolvedRelocation {
+                            isa: "aarch64",
+                            symbol: reloc.symbol.clone(),
+                            function: func.name.clone(),
+                            offset: reloc.offset,
+                            reloc_type: reloc.reloc_type.clone(),
+                        });
                     }
-                    // If the symbol is not found (e.g., external like __vuma_free),
-                    // leave the placeholder as-is — the program will crash if it's called.
                 }
             }
             let func_size: usize = func.blocks.iter()

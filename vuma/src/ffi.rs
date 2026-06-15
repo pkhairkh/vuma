@@ -31,7 +31,7 @@
 //! ```
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 // ---------------------------------------------------------------------------
@@ -281,6 +281,31 @@ impl ExternRegistry {
         let mut names: Vec<&str> = self.functions.keys().map(|s| s.as_str()).collect();
         names.sort();
         names
+    }
+
+    /// Returns the set of all registered extern function names.
+    /// Useful for passing to the codegen bridge so that calls to
+    /// extern functions are marked with `is_extern: true`.
+    pub fn function_name_set(&self) -> HashSet<String> {
+        self.functions.keys().cloned().collect()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ExternBlock → ExternRegistry conversion
+// ---------------------------------------------------------------------------
+
+impl ExternBlock {
+    /// Convert this block into an `ExternRegistry`.
+    pub fn to_registry(&self) -> ExternRegistry {
+        let mut registry = ExternRegistry::new();
+        registry.register_block(self);
+        registry
+    }
+
+    /// Returns the set of function names declared in this block.
+    pub fn function_names_set(&self) -> HashSet<String> {
+        self.functions.iter().map(|f| f.name.clone()).collect()
     }
 }
 

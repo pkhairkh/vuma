@@ -3755,113 +3755,129 @@ impl InstructionSelector {
     }
 
     // -----------------------------------------------------------------------
-    // Cast: no-op, SXTW, SCVTF, FCVTZS, FCVT
+    // Cast: no-op, SXTW, SCVTF, UCVTF, FCVTZS, FCVTZU, FCVT
     // -----------------------------------------------------------------------
 
     /// Select instructions for a type cast.
     ///
-    /// | CastKind | Instruction(s)                               |
-    /// |----------|----------------------------------------------|
-    /// | BitCast  | No-op (MOV if rd != rn)                      |
-    /// | ZExt     | Zero-extension via `AND rd, rn, #mask` or MOV|
-    /// | SExt     | `SXTW rd, rn` (for i32→i64)                  |
-    /// | Trunc    | `AND rd, rn, #mask` (for i64→i32)            |
+    /// | CastKind     | Instruction(s)                                           |
+    /// |--------------|----------------------------------------------------------|
+    /// | BitCast      | No-op (MOV if rd != rn)                                  |
+    /// | ZExt         | Zero-extension via `AND rd, rn, #mask` or MOV            |
+    /// | SExt         | `SXTW rd, rn` (for i32→i64)                              |
+    /// | Trunc        | `AND rd, rn, #mask` (for i64→i32)                        |
+    /// | IntToFloat   | `SCVTF Sd/Dd, Wn/Xn` (signed int → float)                |
+    /// | UIntToFloat  | `UCVTF Sd/Dd, Wn/Xn` (unsigned int → float)              |
+    /// | FloatToInt   | `FCVTZS Wd/Xd, Sn/Dn` (float → signed int)               |
+    /// | FloatToUInt  | `FCVTZU Wd/Xd, Sn/Dn` (float → unsigned int)             |
+    /// | FloatToFloat | `FCVT Dd, Sn` or `FCVT Sd, Dn` (float width change)      |
     ///
-    /// For float↔int conversions:
-    /// - `SCVTF` (signed int → float)
-    /// - `UCVTF` (unsigned int → float)
-    /// - `FCVTZS` (float → signed int)
-    /// - `FCVTZU` (float → unsigned int)
-    /// - `FCVT` (float ↔ float width change)
+    /// The `from_ty` / `to_ty` parameters carry IR type information so that
+    /// the correct sub-variant (32-bit vs 64-bit, f32 vs f64) can be
+    /// selected.  When `None`, defaults matching the prior behaviour
+    /// (64-bit integer, double-precision float) are used.
     pub fn select_cast(
         &mut self,
         kind: CastKind,
         rd: Register,
         rn: Register,
-        is_float_conv: bool,
-        _to_double: bool,
-        src_64: bool,
-        dst_double: bool,
+        from_ty: Option<IRType>,
+        to_ty: Option<IRType>,
     ) {
-        if is_float_conv {
-            match kind {
-                CastKind::BitCast => {
-                    // Reinterpret bits between int and float — FMOV
-                    // Placeholder: MOV for now (would need FP reg in reality)
-                    if rd != rn {
-                        self.push(Instruction::MOV { rd, rm: rn });
-                    }
-                }
-                CastKind::SExt => {
-                    // Signed int → float: SCVTF
-                    self.push(Instruction::SCVTF { rd, rn, src_64, dst_double });
-                }
-                CastKind::Trunc => {
-                    // Float → signed int: FCVTZS
-                    self.push(Instruction::FCVTZS { rd, rn, dst_64: src_64, src_double: dst_double });
-                }
-                _ => {
-                    if rd != rn {
-                        self.push(Instruction::MOV { rd, rm: rn });
-                    }
+        // Derive type-info booleans from IR types.
+        // When type info is unavailable (`None`), fall back to defaults
+        // matching the prior behaviour (64-bit int, double-precision float).
+        let src_is_64bit_int = matches!(from_ty,
+            Some(IRType::I64) | Some(IRType::U64) | None
+        );
+        let dst_is_f64 = matches!(to_ty,
+            Some(IRType::F64) | None
+        );
+        let dst_is_64bit_int = matches!(to_ty,
+            Some(IRType::I64) | Some(IRType::U64) | None
+        );
+        let src_is_f64 = matches!(from_ty,
+            Some(IRType::F64) | None
+        );
+
+        match kind {
+            CastKind::BitCast => {
+                // No-op: same bits, different type.
+                if rd != rn {
+                    self.push(Instruction::MOV { rd, rm: rn });
                 }
             }
-        } else {
-            match kind {
-                CastKind::BitCast => {
-                    // No-op: same bits, different type.
-                    if rd != rn {
-                        self.push(Instruction::MOV { rd, rm: rn });
-                    }
+            CastKind::ZExt => {
+                // Zero-extend: on ARM64, we can use AND with a 32-bit mask.
+                // Since we don't have an AND-imm instruction variant, use the
+                // register AND with a pre-loaded mask. Actually, the simplest
+                // approach: SXTW zeros bits 63:32 for non-negative values but
+                // sign-extends. Instead, use LSR+LSL: shift left 32 then right 32.
+                // But even simpler: MOV to W register zero-extends. However our
+                // Instruction enum uses X registers. The most reliable approach
+                // is to compute: result = val & 0xFFFFFFFF using AND with a temp.
+                // For now, just emit a no-op since the stack-slot ISel on ARM64
+                // currently handles all values as 64-bit and the 32-bit W-form
+                // operations already zero-extend their results.
+                if rd != rn {
+                    self.push(Instruction::MOV { rd, rm: rn });
                 }
-                CastKind::ZExt => {
-                    // Zero-extend: on ARM64, we can use AND with a 32-bit mask.
-                    // Since we don't have an AND-imm instruction variant, use the
-                    // register AND with a pre-loaded mask. Actually, the simplest
-                    // approach: SXTW zeros bits 63:32 for non-negative values but
-                    // sign-extends. Instead, use LSR+LSL: shift left 32 then right 32.
-                    // But even simpler: MOV to W register zero-extends. However our
-                    // Instruction enum uses X registers. The most reliable approach
-                    // is to compute: result = val & 0xFFFFFFFF using AND with a temp.
-                    // For now, just emit a no-op since the stack-slot ISel on ARM64
-                    // currently handles all values as 64-bit and the 32-bit W-form
-                    // operations already zero-extend their results.
-                    if rd != rn {
-                        self.push(Instruction::MOV { rd, rm: rn });
-                    }
+            }
+            CastKind::SExt => {
+                // Sign-extend word to doubleword: SXTW
+                self.push(Instruction::SXTW { rd, rn });
+            }
+            CastKind::Trunc => {
+                // Truncate: just use the lower 32 bits.
+                // MOV Wd, Wn implicitly truncates. For X registers,
+                // we AND with a mask.
+                if rd != rn {
+                    self.push(Instruction::MOV { rd, rm: rn });
                 }
-                CastKind::SExt => {
-                    // Sign-extend word to doubleword: SXTW
-                    self.push(Instruction::SXTW { rd, rn });
-                }
-                CastKind::Trunc => {
-                    // Truncate: just use the lower 32 bits.
-                    // MOV Wd, Wn implicitly truncates. For X registers,
-                    // we AND with a mask.
-                    if rd != rn {
-                        self.push(Instruction::MOV { rd, rm: rn });
-                    }
-                }
-                CastKind::IntToFloat => {
-                    // Signed int → float: SCVTF
-                    self.push(Instruction::SCVTF { rd, rn, src_64, dst_double });
-                }
-                CastKind::UIntToFloat => {
-                    // Unsigned int → float: UCVTF
-                    self.push(Instruction::UCVTF { rd, rn, src_64, dst_double });
-                }
-                CastKind::FloatToInt => {
-                    // Float → signed int: FCVTZS
-                    self.push(Instruction::FCVTZS { rd, rn, dst_64: src_64, src_double: dst_double });
-                }
-                CastKind::FloatToUInt => {
-                    // Float → unsigned int: FCVTZU
-                    self.push(Instruction::FCVTZU { rd, rn, dst_64: src_64, src_double: dst_double });
-                }
-                CastKind::FloatToFloat => {
-                    // Float ↔ float width change: FCVT
-                    self.push(Instruction::FCVT { rd, rn, to_double: dst_double });
-                }
+            }
+            CastKind::IntToFloat => {
+                // Signed int → float: SCVTF Sd/Dd, Wn/Xn
+                self.push(Instruction::SCVTF {
+                    rd,
+                    rn,
+                    src_64: src_is_64bit_int,
+                    dst_double: dst_is_f64,
+                });
+            }
+            CastKind::UIntToFloat => {
+                // Unsigned int → float: UCVTF Sd/Dd, Wn/Xn
+                self.push(Instruction::UCVTF {
+                    rd,
+                    rn,
+                    src_64: src_is_64bit_int,
+                    dst_double: dst_is_f64,
+                });
+            }
+            CastKind::FloatToInt => {
+                // Float → signed int: FCVTZS Wd/Xd, Sn/Dn
+                self.push(Instruction::FCVTZS {
+                    rd,
+                    rn,
+                    dst_64: dst_is_64bit_int,
+                    src_double: src_is_f64,
+                });
+            }
+            CastKind::FloatToUInt => {
+                // Float → unsigned int: FCVTZU Wd/Xd, Sn/Dn
+                self.push(Instruction::FCVTZU {
+                    rd,
+                    rn,
+                    dst_64: dst_is_64bit_int,
+                    src_double: src_is_f64,
+                });
+            }
+            CastKind::FloatToFloat => {
+                // Float ↔ float width change: FCVT
+                self.push(Instruction::FCVT {
+                    rd,
+                    rn,
+                    to_double: dst_is_f64,
+                });
             }
         }
     }
@@ -4072,13 +4088,7 @@ impl InstructionSelector {
             IRInstr::Cast { kind, dst, src, from_ty, to_ty } => {
                 let rd = resolve(dst);
                 let rn = resolve(src);
-                let src_64 = matches!(from_ty,
-                    Some(IRType::I64) | Some(IRType::U64) | None
-                );
-                let dst_double = matches!(to_ty,
-                    Some(IRType::F64) | None
-                );
-                self.select_cast(*kind, rd, rn, false, false, src_64, dst_double);
+                self.select_cast(*kind, rd, rn, from_ty.clone(), to_ty.clone());
             }
 
             IRInstr::UnaryOp { op, dst, operand, .. } => {
@@ -4997,7 +5007,7 @@ mod tests {
     #[test]
     fn select_cast_sext() {
         let mut sel = InstructionSelector::new();
-        sel.select_cast(CastKind::SExt, Register::X0, Register::X1, false, false, false, false);
+        sel.select_cast(CastKind::SExt, Register::X0, Register::X1, None, None);
         let instrs = sel.take_instructions();
         assert_eq!(instrs.len(), 1);
         assert!(matches!(instrs[0], Instruction::SXTW { .. }));
@@ -5008,41 +5018,151 @@ mod tests {
     #[test]
     fn select_cast_bitcast() {
         let mut sel = InstructionSelector::new();
-        sel.select_cast(CastKind::BitCast, Register::X0, Register::X0, false, false, false, false);
+        sel.select_cast(CastKind::BitCast, Register::X0, Register::X0, None, None);
         let instrs = sel.take_instructions();
         // Same register → no instruction emitted
         assert_eq!(instrs.len(), 0);
 
         let mut sel = InstructionSelector::new();
-        sel.select_cast(CastKind::BitCast, Register::X0, Register::X1, false, false, false, false);
+        sel.select_cast(CastKind::BitCast, Register::X0, Register::X1, None, None);
         let instrs = sel.take_instructions();
         assert_eq!(instrs.len(), 1);
         assert!(matches!(instrs[0], Instruction::MOV { .. }));
     }
 
-    // ---- Test 18: Cast — SCVTF (int→float) instruction selection ----
+    // ---- Test 18: Cast — SCVTF (signed int→float) instruction selection ----
     #[test]
     fn select_cast_int_to_float() {
+        // i64 → f64: SCVTF Dd, Xn
         let mut sel = InstructionSelector::new();
-        sel.select_cast(CastKind::SExt, Register::X0, Register::X1, true, true, true, true);
+        sel.select_cast(CastKind::IntToFloat, Register::X0, Register::X1, Some(IRType::I64), Some(IRType::F64));
         let instrs = sel.take_instructions();
         assert_eq!(instrs.len(), 1);
         assert!(matches!(instrs[0], Instruction::SCVTF { src_64: true, dst_double: true, .. }));
         assert_eq!(format!("{}", instrs[0]), "scvtf d0, x1");
+
+        // i32 → f32: SCVTF Sd, Wn
+        let mut sel = InstructionSelector::new();
+        sel.select_cast(CastKind::IntToFloat, Register::X2, Register::X3, Some(IRType::I32), Some(IRType::F32));
+        let instrs = sel.take_instructions();
+        assert_eq!(instrs.len(), 1);
+        assert!(matches!(instrs[0], Instruction::SCVTF { src_64: false, dst_double: false, .. }));
+        assert_eq!(format!("{}", instrs[0]), "scvtf s2, w3");
+
+        // i64 → f32: SCVTF Sd, Xn
+        let mut sel = InstructionSelector::new();
+        sel.select_cast(CastKind::IntToFloat, Register::X4, Register::X5, Some(IRType::I64), Some(IRType::F32));
+        let instrs = sel.take_instructions();
+        assert_eq!(instrs.len(), 1);
+        assert!(matches!(instrs[0], Instruction::SCVTF { src_64: true, dst_double: false, .. }));
+        assert_eq!(format!("{}", instrs[0]), "scvtf s4, x5");
+
+        // i32 → f64: SCVTF Dd, Wn
+        let mut sel = InstructionSelector::new();
+        sel.select_cast(CastKind::IntToFloat, Register::X6, Register::X7, Some(IRType::I32), Some(IRType::F64));
+        let instrs = sel.take_instructions();
+        assert_eq!(instrs.len(), 1);
+        assert!(matches!(instrs[0], Instruction::SCVTF { src_64: false, dst_double: true, .. }));
+        assert_eq!(format!("{}", instrs[0]), "scvtf d6, w7");
     }
 
-    // ---- Test 19: Cast — FCVTZS (float→int) instruction selection ----
+    // ---- Test 19: Cast — UCVTF (unsigned int→float) instruction selection ----
+    #[test]
+    fn select_cast_uint_to_float() {
+        // u64 → f64: UCVTF Dd, Xn
+        let mut sel = InstructionSelector::new();
+        sel.select_cast(CastKind::UIntToFloat, Register::X0, Register::X1, Some(IRType::U64), Some(IRType::F64));
+        let instrs = sel.take_instructions();
+        assert_eq!(instrs.len(), 1);
+        assert!(matches!(instrs[0], Instruction::UCVTF { src_64: true, dst_double: true, .. }));
+        assert_eq!(format!("{}", instrs[0]), "ucvtf d0, x1");
+
+        // u32 → f32: UCVTF Sd, Wn
+        let mut sel = InstructionSelector::new();
+        sel.select_cast(CastKind::UIntToFloat, Register::X2, Register::X3, Some(IRType::U32), Some(IRType::F32));
+        let instrs = sel.take_instructions();
+        assert_eq!(instrs.len(), 1);
+        assert!(matches!(instrs[0], Instruction::UCVTF { src_64: false, dst_double: false, .. }));
+        assert_eq!(format!("{}", instrs[0]), "ucvtf s2, w3");
+    }
+
+    // ---- Test 20: Cast — FCVTZS (float→signed int) instruction selection ----
     #[test]
     fn select_cast_float_to_int() {
+        // f64 → i64: FCVTZS Xd, Dn
         let mut sel = InstructionSelector::new();
-        sel.select_cast(CastKind::Trunc, Register::X0, Register::X1, true, false, true, false);
+        sel.select_cast(CastKind::FloatToInt, Register::X0, Register::X1, Some(IRType::F64), Some(IRType::I64));
+        let instrs = sel.take_instructions();
+        assert_eq!(instrs.len(), 1);
+        assert!(matches!(instrs[0], Instruction::FCVTZS { dst_64: true, src_double: true, .. }));
+        assert_eq!(format!("{}", instrs[0]), "fcvtzs x0, d1");
+
+        // f32 → i32: FCVTZS Wd, Sn
+        let mut sel = InstructionSelector::new();
+        sel.select_cast(CastKind::FloatToInt, Register::X2, Register::X3, Some(IRType::F32), Some(IRType::I32));
+        let instrs = sel.take_instructions();
+        assert_eq!(instrs.len(), 1);
+        assert!(matches!(instrs[0], Instruction::FCVTZS { dst_64: false, src_double: false, .. }));
+        assert_eq!(format!("{}", instrs[0]), "fcvtzs w2, s3");
+
+        // f32 → i64: FCVTZS Xd, Sn
+        let mut sel = InstructionSelector::new();
+        sel.select_cast(CastKind::FloatToInt, Register::X4, Register::X5, Some(IRType::F32), Some(IRType::I64));
         let instrs = sel.take_instructions();
         assert_eq!(instrs.len(), 1);
         assert!(matches!(instrs[0], Instruction::FCVTZS { dst_64: true, src_double: false, .. }));
-        assert_eq!(format!("{}", instrs[0]), "fcvtzs x0, s1");
+        assert_eq!(format!("{}", instrs[0]), "fcvtzs x4, s5");
+
+        // f64 → i32: FCVTZS Wd, Dn
+        let mut sel = InstructionSelector::new();
+        sel.select_cast(CastKind::FloatToInt, Register::X6, Register::X7, Some(IRType::F64), Some(IRType::I32));
+        let instrs = sel.take_instructions();
+        assert_eq!(instrs.len(), 1);
+        assert!(matches!(instrs[0], Instruction::FCVTZS { dst_64: false, src_double: true, .. }));
+        assert_eq!(format!("{}", instrs[0]), "fcvtzs w6, d7");
     }
 
-    // ---- Test 20: ControlFlow — CBZ/CBNZ instruction selection ----
+    // ---- Test 21: Cast — FCVTZU (float→unsigned int) instruction selection ----
+    #[test]
+    fn select_cast_float_to_uint() {
+        // f64 → u64: FCVTZU Xd, Dn
+        let mut sel = InstructionSelector::new();
+        sel.select_cast(CastKind::FloatToUInt, Register::X0, Register::X1, Some(IRType::F64), Some(IRType::U64));
+        let instrs = sel.take_instructions();
+        assert_eq!(instrs.len(), 1);
+        assert!(matches!(instrs[0], Instruction::FCVTZU { dst_64: true, src_double: true, .. }));
+        assert_eq!(format!("{}", instrs[0]), "fcvtzu x0, d1");
+
+        // f32 → u32: FCVTZU Wd, Sn
+        let mut sel = InstructionSelector::new();
+        sel.select_cast(CastKind::FloatToUInt, Register::X2, Register::X3, Some(IRType::F32), Some(IRType::U32));
+        let instrs = sel.take_instructions();
+        assert_eq!(instrs.len(), 1);
+        assert!(matches!(instrs[0], Instruction::FCVTZU { dst_64: false, src_double: false, .. }));
+        assert_eq!(format!("{}", instrs[0]), "fcvtzu w2, s3");
+    }
+
+    // ---- Test 22: Cast — FCVT (float↔float width change) instruction selection ----
+    #[test]
+    fn select_cast_float_to_float() {
+        // f32 → f64: FCVT Dd, Sn
+        let mut sel = InstructionSelector::new();
+        sel.select_cast(CastKind::FloatToFloat, Register::X0, Register::X1, Some(IRType::F32), Some(IRType::F64));
+        let instrs = sel.take_instructions();
+        assert_eq!(instrs.len(), 1);
+        assert!(matches!(instrs[0], Instruction::FCVT { to_double: true, .. }));
+        assert_eq!(format!("{}", instrs[0]), "fcvt d0, s1");
+
+        // f64 → f32: FCVT Sd, Dn
+        let mut sel = InstructionSelector::new();
+        sel.select_cast(CastKind::FloatToFloat, Register::X2, Register::X3, Some(IRType::F64), Some(IRType::F32));
+        let instrs = sel.take_instructions();
+        assert_eq!(instrs.len(), 1);
+        assert!(matches!(instrs[0], Instruction::FCVT { to_double: false, .. }));
+        assert_eq!(format!("{}", instrs[0]), "fcvt s2, d3");
+    }
+
+    // ---- Test 23: ControlFlow — CBZ/CBNZ instruction selection ----
     #[test]
     fn select_branch_zero() {
         let mut sel = InstructionSelector::new();

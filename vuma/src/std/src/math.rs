@@ -1,24 +1,28 @@
 //! # Mathematical Utility Functions
 //!
 //! This module provides VUMA-verified mathematical helper functions that
-//! LLMs frequently need when writing real programs. These are simple,
-//! pure functions that operate on integer values — no floating-point
-//! operations, no side effects, and no capability requirements beyond
-//! { Read, Compare }.
+//! LLMs frequently need when writing real programs. Functions span integer
+//! arithmetic, floating-point trigonometry, exponentials, rounding,
+//! classification, and associated mathematical constants.
 //!
-//! ## Why These Functions?
+//! ## Function Categories
 //!
-//! LLMs generating VUMA code often need:
-//!
-//! - **`abs`**: Computing distances, error magnitudes, or delta values.
-//! - **`min` / `max`**: Clamping loop bounds, selecting extremal values,
-//!   or implementing saturation arithmetic.
-//! - **`clamp`**: Constraining values to valid ranges (array indices,
-//!   color channels, buffer offsets).
-//!
-//! These are trivial to implement but are so commonly needed that having
-//! them in the standard library saves boilerplate and reduces the chance
-//! of bugs (e.g., integer overflow in a hand-written `abs`).
+//! - **Integer arithmetic**: `abs`, `min`, `max`, `clamp` — operate on `i64`
+//! - **Trigonometric (f64)**: `sin`, `cos`, `tan`, `asin`, `acos`, `atan`,
+//!   `atan2`, `sinh`, `cosh`, `tanh`
+//! - **Exponential/Logarithmic (f64)**: `sqrt`, `cbrt`, `exp`, `exp2`,
+//!   `exp_m1`, `ln`, `log2`, `log10`, `ln_1p`, `pow`, `powi`
+//! - **Rounding (f64)**: `floor`, `ceil`, `round`, `trunc`, `fract`
+//! - **Comparison (f64)**: `min_of`, `max_of`
+//! - **Classification (f64)**: `is_nan`, `is_infinite`, `is_finite`,
+//!   `is_normal`, `signum`, `copysign`
+//! - **Constants**: `PI`, `TAU`, `E`, `LN_2`, `LN_10`, `LOG2_E`,
+//!   `LOG10_E`, `SQRT_2`, `FRAC_1_SQRT_2`
+//! - **f32 variants**: All floating-point functions above have `_f32`
+//!   suffixed counterparts (e.g., `sin_f32`, `cos_f32`, `sqrt_f32`).
+//! - **f32 constants**: `PI_F32`, `TAU_F32`, `E_F32`, `LN_2_F32`,
+//!   `LN_10_F32`, `LOG2_E_F32`, `LOG10_E_F32`, `SQRT_2_F32`,
+//!   `FRAC_1_SQRT_2_F32`
 //!
 //! ## BD Annotations
 //!
@@ -26,6 +30,184 @@
 //! their CapD is { Read, Compare }.
 
 use crate::primitives::{CapD, CapFlag};
+
+// ===========================================================================
+// Mathematical Constants (f64)
+// ===========================================================================
+
+/// Archimedes' constant (π ≈ 3.14159265358979323846).
+///
+/// The ratio of a circle's circumference to its diameter.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure constant, no side effects
+// VUMA-VERIFIED: constant value matches std::f64::consts::PI
+pub const PI: f64 = std::f64::consts::PI;
+
+/// The full circle constant (τ = 2π ≈ 6.28318530717958647693).
+///
+/// The ratio of a circle's circumference to its radius. Preferred in
+/// some pedagogical contexts over PI because it simplifies angle
+/// arithmetic (one full turn = τ radians).
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure constant, no side effects
+// VUMA-VERIFIED: constant value matches std::f64::consts::TAU
+pub const TAU: f64 = std::f64::consts::TAU;
+
+/// Euler's number (e ≈ 2.71828182845904523536).
+///
+/// The base of the natural logarithm. Fundamental to exponential growth
+/// and decay, compound interest, and probability distributions.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure constant, no side effects
+// VUMA-VERIFIED: constant value matches std::f64::consts::E
+pub const E: f64 = std::f64::consts::E;
+
+/// Natural logarithm of 2 (ln 2 ≈ 0.69314718055994530942).
+///
+/// Useful for converting between log base e and log base 2.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure constant, no side effects
+// VUMA-VERIFIED: constant value matches std::f64::consts::LN_2
+pub const LN_2: f64 = std::f64::consts::LN_2;
+
+/// Natural logarithm of 10 (ln 10 ≈ 2.30258509299404568402).
+///
+/// Useful for converting between log base e and log base 10.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure constant, no side effects
+// VUMA-VERIFIED: constant value matches std::f64::consts::LN_10
+pub const LN_10: f64 = std::f64::consts::LN_10;
+
+/// Logarithm base 2 of Euler's number (log₂ e ≈ 1.44269504088896340736).
+///
+/// Useful for converting between log base 2 and natural logarithm.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure constant, no side effects
+// VUMA-VERIFIED: constant value matches std::f64::consts::LOG2_E
+pub const LOG2_E: f64 = std::f64::consts::LOG2_E;
+
+/// Logarithm base 10 of Euler's number (log₁₀ e ≈ 0.43429448190325182765).
+///
+/// Useful for converting between log base 10 and natural logarithm.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure constant, no side effects
+// VUMA-VERIFIED: constant value matches std::f64::consts::LOG10_E
+pub const LOG10_E: f64 = std::f64::consts::LOG10_E;
+
+/// Square root of 2 (√2 ≈ 1.41421356237309504880).
+///
+/// The length of the diagonal of a unit square.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure constant, no side effects
+// VUMA-VERIFIED: constant value matches std::f64::consts::SQRT_2
+pub const SQRT_2: f64 = std::f64::consts::SQRT_2;
+
+/// Reciprocal of the square root of 2 (1/√2 ≈ 0.70710678118654752440).
+///
+/// Commonly encountered in signal processing (e.g., RMS normalization)
+/// and rotation matrices.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure constant, no side effects
+// VUMA-VERIFIED: constant value matches std::f64::consts::FRAC_1_SQRT_2
+pub const FRAC_1_SQRT_2: f64 = std::f64::consts::FRAC_1_SQRT_2;
+
+// ===========================================================================
+// Mathematical Constants (f32)
+// ===========================================================================
+
+/// Archimedes' constant (π) as f32.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure constant, no side effects
+// VUMA-VERIFIED: constant value matches std::f32::consts::PI
+pub const PI_F32: f32 = std::f32::consts::PI;
+
+/// The full circle constant (τ = 2π) as f32.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure constant, no side effects
+// VUMA-VERIFIED: constant value matches std::f32::consts::TAU
+pub const TAU_F32: f32 = std::f32::consts::TAU;
+
+/// Euler's number (e) as f32.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure constant, no side effects
+// VUMA-VERIFIED: constant value matches std::f32::consts::E
+pub const E_F32: f32 = std::f32::consts::E;
+
+/// Natural logarithm of 2 (ln 2) as f32.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure constant, no side effects
+// VUMA-VERIFIED: constant value matches std::f32::consts::LN_2
+pub const LN_2_F32: f32 = std::f32::consts::LN_2;
+
+/// Natural logarithm of 10 (ln 10) as f32.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure constant, no side effects
+// VUMA-VERIFIED: constant value matches std::f32::consts::LN_10
+pub const LN_10_F32: f32 = std::f32::consts::LN_10;
+
+/// Logarithm base 2 of Euler's number (log₂ e) as f32.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure constant, no side effects
+// VUMA-VERIFIED: constant value matches std::f32::consts::LOG2_E
+pub const LOG2_E_F32: f32 = std::f32::consts::LOG2_E;
+
+/// Logarithm base 10 of Euler's number (log₁₀ e) as f32.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure constant, no side effects
+// VUMA-VERIFIED: constant value matches std::f32::consts::LOG10_E
+pub const LOG10_E_F32: f32 = std::f32::consts::LOG10_E;
+
+/// Square root of 2 (√2) as f32.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure constant, no side effects
+// VUMA-VERIFIED: constant value matches std::f32::consts::SQRT_2
+pub const SQRT_2_F32: f32 = std::f32::consts::SQRT_2;
+
+/// Reciprocal of the square root of 2 (1/√2) as f32.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure constant, no side effects
+// VUMA-VERIFIED: constant value matches std::f32::consts::FRAC_1_SQRT_2
+pub const FRAC_1_SQRT_2_F32: f32 = std::f32::consts::FRAC_1_SQRT_2;
+
+// ===========================================================================
+// Integer Arithmetic
+// ===========================================================================
 
 // ---------------------------------------------------------------------------
 // Absolute Value
@@ -180,9 +362,1207 @@ pub fn clamp(x: i64, lo: i64, hi: i64) -> i64 {
     }
 }
 
+// ===========================================================================
+// Trigonometric Functions (f64)
+// ===========================================================================
+
 // ---------------------------------------------------------------------------
+// Sine
+// ---------------------------------------------------------------------------
+
+/// Compute the sine of `x` radians.
+///
+/// Returns a value in the range `[-1.0, 1.0]`. The input is interpreted
+/// as an angle in radians.
+///
+/// ## Edge Cases
+///
+/// - If `x` is NaN, the result is NaN.
+/// - If `x` is ±0, the result is ±0 (preserves sign).
+/// - If `x` is ±∞, the result is NaN.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: delegates to Rust std f64::sin
+pub fn sin(x: f64) -> f64 {
+    x.sin()
+}
+
+// ---------------------------------------------------------------------------
+// Cosine
+// ---------------------------------------------------------------------------
+
+/// Compute the cosine of `x` radians.
+///
+/// Returns a value in the range `[-1.0, 1.0]`. The input is interpreted
+/// as an angle in radians.
+///
+/// ## Edge Cases
+///
+/// - If `x` is NaN, the result is NaN.
+/// - If `x` is ±0, the result is 1.0.
+/// - If `x` is ±∞, the result is NaN.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: delegates to Rust std f64::cos
+pub fn cos(x: f64) -> f64 {
+    x.cos()
+}
+
+// ---------------------------------------------------------------------------
+// Tangent
+// ---------------------------------------------------------------------------
+
+/// Compute the tangent of `x` radians.
+///
+/// The input is interpreted as an angle in radians. The tangent is the
+/// ratio of sine to cosine.
+///
+/// ## Edge Cases
+///
+/// - If `x` is NaN, the result is NaN.
+/// - If `x` is ±0, the result is ±0 (preserves sign).
+/// - If `x` is ±∞, the result is NaN.
+/// - At odd multiples of π/2 the result approaches ±∞; the exact
+///   return value depends on the host platform.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: delegates to Rust std f64::tan
+pub fn tan(x: f64) -> f64 {
+    x.tan()
+}
+
+// ---------------------------------------------------------------------------
+// Arc Sine
+// ---------------------------------------------------------------------------
+
+/// Compute the arc sine of `x`.
+///
+/// Returns the angle in radians whose sine is `x`. The result is in the
+/// range `[-π/2, π/2]`.
+///
+/// ## Edge Cases
+///
+/// - If `x` is outside `[-1.0, 1.0]`, the result is NaN.
+/// - If `x` is NaN, the result is NaN.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: delegates to Rust std f64::asin
+pub fn asin(x: f64) -> f64 {
+    x.asin()
+}
+
+// ---------------------------------------------------------------------------
+// Arc Cosine
+// ---------------------------------------------------------------------------
+
+/// Compute the arc cosine of `x`.
+///
+/// Returns the angle in radians whose cosine is `x`. The result is in the
+/// range `[0, π]`.
+///
+/// ## Edge Cases
+///
+/// - If `x` is outside `[-1.0, 1.0]`, the result is NaN.
+/// - If `x` is NaN, the result is NaN.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: delegates to Rust std f64::acos
+pub fn acos(x: f64) -> f64 {
+    x.acos()
+}
+
+// ---------------------------------------------------------------------------
+// Arc Tangent
+// ---------------------------------------------------------------------------
+
+/// Compute the arc tangent of `x`.
+///
+/// Returns the angle in radians whose tangent is `x`. The result is in the
+/// range `[-π/2, π/2]`.
+///
+/// ## Edge Cases
+///
+/// - If `x` is ±0, the result is ±0 (preserves sign).
+/// - If `x` is ±∞, the result is ±π/2.
+/// - If `x` is NaN, the result is NaN.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: delegates to Rust std f64::atan
+pub fn atan(x: f64) -> f64 {
+    x.atan()
+}
+
+// ---------------------------------------------------------------------------
+// Arc Tangent (two-argument)
+// ---------------------------------------------------------------------------
+
+/// Compute the four-quadrant arc tangent of `y / x`.
+///
+/// Returns the angle in radians between the positive x-axis and the point
+/// `(x, y)`. The result is in the range `(-π, π]`. Unlike `atan(y / x)`,
+/// `atan2` correctly handles all four quadrants and the case where `x` is
+/// zero.
+///
+/// ## Edge Cases
+///
+/// - `atan2(0.0, 0.0)` returns 0.0.
+/// - `atan2(±0.0, -0.0)` returns ±π.
+/// - `atan2(±∞, +∞)` returns ±π/4.
+/// - `atan2(±∞, -∞)` returns ±3π/4.
+/// - If either argument is NaN, the result is NaN.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: delegates to Rust std f64::atan2
+pub fn atan2(y: f64, x: f64) -> f64 {
+    y.atan2(x)
+}
+
+// ---------------------------------------------------------------------------
+// Hyperbolic Sine
+// ---------------------------------------------------------------------------
+
+/// Compute the hyperbolic sine of `x`.
+///
+/// Defined as `(e^x - e^(-x)) / 2`.
+///
+/// ## Edge Cases
+///
+/// - If `x` is ±0, the result is ±0 (preserves sign).
+/// - If `x` is ±∞, the result is ±∞.
+/// - If `x` is NaN, the result is NaN.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: delegates to Rust std f64::sinh
+pub fn sinh(x: f64) -> f64 {
+    x.sinh()
+}
+
+// ---------------------------------------------------------------------------
+// Hyperbolic Cosine
+// ---------------------------------------------------------------------------
+
+/// Compute the hyperbolic cosine of `x`.
+///
+/// Defined as `(e^x + e^(-x)) / 2`.
+///
+/// ## Edge Cases
+///
+/// - If `x` is ±0, the result is 1.0.
+/// - If `x` is ±∞, the result is +∞.
+/// - If `x` is NaN, the result is NaN.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: delegates to Rust std f64::cosh
+pub fn cosh(x: f64) -> f64 {
+    x.cosh()
+}
+
+// ---------------------------------------------------------------------------
+// Hyperbolic Tangent
+// ---------------------------------------------------------------------------
+
+/// Compute the hyperbolic tangent of `x`.
+///
+/// Defined as `sinh(x) / cosh(x)`.
+///
+/// ## Edge Cases
+///
+/// - If `x` is ±0, the result is ±0 (preserves sign).
+/// - If `x` is ±∞, the result is ±1.0.
+/// - If `x` is NaN, the result is NaN.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: delegates to Rust std f64::tanh
+pub fn tanh(x: f64) -> f64 {
+    x.tanh()
+}
+
+// ===========================================================================
+// Exponential / Logarithmic Functions (f64)
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// Square Root
+// ---------------------------------------------------------------------------
+
+/// Compute the square root of `x`.
+///
+/// Returns `√x`. If `x` is negative, the result is NaN.
+///
+/// ## Edge Cases
+///
+/// - If `x` is ±0, the result is ±0 (preserves sign).
+/// - If `x` is +∞, the result is +∞.
+/// - If `x` is negative, the result is NaN.
+/// - If `x` is NaN, the result is NaN.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: delegates to Rust std f64::sqrt
+pub fn sqrt(x: f64) -> f64 {
+    x.sqrt()
+}
+
+// ---------------------------------------------------------------------------
+// Cube Root
+// ---------------------------------------------------------------------------
+
+/// Compute the cube root of `x`.
+///
+/// Returns `∛x`. Unlike `sqrt`, this is defined for negative inputs.
+///
+/// ## Edge Cases
+///
+/// - If `x` is ±0, the result is ±0 (preserves sign).
+/// - If `x` is ±∞, the result is ±∞.
+/// - If `x` is NaN, the result is NaN.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: delegates to Rust std f64::cbrt
+pub fn cbrt(x: f64) -> f64 {
+    x.cbrt()
+}
+
+// ---------------------------------------------------------------------------
+// Exponential (base e)
+// ---------------------------------------------------------------------------
+
+/// Compute `e^x` (the exponential function).
+///
+/// Returns Euler's number raised to the power of `x`.
+///
+/// ## Edge Cases
+///
+/// - If `x` is ±0, the result is 1.0.
+/// - If `x` is +∞, the result is +∞.
+/// - If `x` is -∞, the result is 0.0.
+/// - If `x` is NaN, the result is NaN.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: delegates to Rust std f64::exp
+pub fn exp(x: f64) -> f64 {
+    x.exp()
+}
+
+// ---------------------------------------------------------------------------
+// Exponential (base 2)
+// ---------------------------------------------------------------------------
+
+/// Compute `2^x`.
+///
+/// Returns 2 raised to the power of `x`.
+///
+/// ## Edge Cases
+///
+/// - If `x` is ±0, the result is 1.0.
+/// - If `x` is +∞, the result is +∞.
+/// - If `x` is -∞, the result is 0.0.
+/// - If `x` is NaN, the result is NaN.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: delegates to Rust std f64::exp2
+pub fn exp2(x: f64) -> f64 {
+    x.exp2()
+}
+
+// ---------------------------------------------------------------------------
+// Exponential minus one
+// ---------------------------------------------------------------------------
+
+/// Compute `e^x - 1` with greater precision for small `x`.
+///
+/// For values of `x` near zero, `exp_m1(x)` is more accurate than
+/// computing `exp(x) - 1`, which can lose precision due to cancellation.
+///
+/// ## Edge Cases
+///
+/// - If `x` is ±0, the result is ±0 (preserves sign).
+/// - If `x` is +∞, the result is +∞.
+/// - If `x` is -∞, the result is -1.0.
+/// - If `x` is NaN, the result is NaN.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: delegates to Rust std f64::exp_m1
+pub fn exp_m1(x: f64) -> f64 {
+    x.exp_m1()
+}
+
+// ---------------------------------------------------------------------------
+// Natural Logarithm
+// ---------------------------------------------------------------------------
+
+/// Compute the natural logarithm of `x` (ln x, logₑ x).
+///
+/// Returns the value `y` such that `e^y = x`.
+///
+/// ## Edge Cases
+///
+/// - If `x` is negative, the result is NaN.
+/// - If `x` is ±0, the result is -∞.
+/// - If `x` is 1.0, the result is 0.0.
+/// - If `x` is +∞, the result is +∞.
+/// - If `x` is NaN, the result is NaN.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: delegates to Rust std f64::ln
+pub fn ln(x: f64) -> f64 {
+    x.ln()
+}
+
+// ---------------------------------------------------------------------------
+// Base-2 Logarithm
+// ---------------------------------------------------------------------------
+
+/// Compute the base-2 logarithm of `x` (log₂ x).
+///
+/// Returns the value `y` such that `2^y = x`.
+///
+/// ## Edge Cases
+///
+/// - If `x` is negative, the result is NaN.
+/// - If `x` is ±0, the result is -∞.
+/// - If `x` is 1.0, the result is 0.0.
+/// - If `x` is +∞, the result is +∞.
+/// - If `x` is NaN, the result is NaN.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: delegates to Rust std f64::log2
+pub fn log2(x: f64) -> f64 {
+    x.log2()
+}
+
+// ---------------------------------------------------------------------------
+// Base-10 Logarithm
+// ---------------------------------------------------------------------------
+
+/// Compute the base-10 logarithm of `x` (log₁₀ x).
+///
+/// Returns the value `y` such that `10^y = x`.
+///
+/// ## Edge Cases
+///
+/// - If `x` is negative, the result is NaN.
+/// - If `x` is ±0, the result is -∞.
+/// - If `x` is 1.0, the result is 0.0.
+/// - If `x` is +∞, the result is +∞.
+/// - If `x` is NaN, the result is NaN.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: delegates to Rust std f64::log10
+pub fn log10(x: f64) -> f64 {
+    x.log10()
+}
+
+// ---------------------------------------------------------------------------
+// Natural Logarithm of (1 + x)
+// ---------------------------------------------------------------------------
+
+/// Compute `ln(1 + x)` with greater precision for small `x`.
+///
+/// For values of `x` near zero, `ln_1p(x)` is more accurate than
+/// computing `ln(1.0 + x)`, which can lose precision due to the
+/// addition step.
+///
+/// ## Edge Cases
+///
+/// - If `x` is ±0, the result is ±0 (preserves sign).
+/// - If `x` is -1.0, the result is -∞.
+/// - If `x` is less than -1.0, the result is NaN.
+/// - If `x` is +∞, the result is +∞.
+/// - If `x` is NaN, the result is NaN.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: delegates to Rust std f64::ln_1p
+pub fn ln_1p(x: f64) -> f64 {
+    x.ln_1p()
+}
+
+// ---------------------------------------------------------------------------
+// Power (floating-point exponent)
+// ---------------------------------------------------------------------------
+
+/// Compute `x` raised to the power of `y` (x^y).
+///
+/// Returns `x` raised to the floating-point power `y`.
+///
+/// ## Edge Cases
+///
+/// - `pow(0.0, y)` where `y > 0` returns 0.0.
+/// - `pow(0.0, y)` where `y < 0` returns +∞.
+/// - `pow(x, 0.0)` returns 1.0 for any `x` (including NaN).
+/// - `pow(-1.0, ±∞)` returns 1.0.
+/// - `pow(1.0, ±∞)` returns 1.0.
+/// - `pow(x, NaN)` or `pow(NaN, y)` returns NaN (except where noted).
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: delegates to Rust std f64::powf
+pub fn pow(x: f64, y: f64) -> f64 {
+    x.powf(y)
+}
+
+// ---------------------------------------------------------------------------
+// Power (integer exponent)
+// ---------------------------------------------------------------------------
+
+/// Compute `x` raised to the integer power `n` (x^n).
+///
+/// Uses exponentiation by squaring, which is typically faster than
+/// `pow(x, n as f64)` for integer exponents and avoids intermediate
+/// rounding.
+///
+/// ## Edge Cases
+///
+/// - `powi(x, 0)` returns 1.0 for any `x` (including 0.0 and NaN).
+/// - `powi(0.0, n)` where `n > 0` returns 0.0.
+/// - `powi(0.0, n)` where `n < 0` returns +∞.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: delegates to Rust std f64::powi
+pub fn powi(x: f64, n: i32) -> f64 {
+    x.powi(n)
+}
+
+// ===========================================================================
+// Rounding Functions (f64)
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// Floor
+// ---------------------------------------------------------------------------
+
+/// Return the largest integer less than or equal to `x`.
+///
+/// Rounds toward negative infinity.
+///
+/// ## Edge Cases
+///
+/// - If `x` is ±0, the result is ±0 (preserves sign).
+/// - If `x` is ±∞, the result is ±∞.
+/// - If `x` is NaN, the result is NaN.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: delegates to Rust std f64::floor
+pub fn floor(x: f64) -> f64 {
+    x.floor()
+}
+
+// ---------------------------------------------------------------------------
+// Ceil
+// ---------------------------------------------------------------------------
+
+/// Return the smallest integer greater than or equal to `x`.
+///
+/// Rounds toward positive infinity.
+///
+/// ## Edge Cases
+///
+/// - If `x` is ±0, the result is ±0 (preserves sign).
+/// - If `x` is ±∞, the result is ±∞.
+/// - If `x` is NaN, the result is NaN.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: delegates to Rust std f64::ceil
+pub fn ceil(x: f64) -> f64 {
+    x.ceil()
+}
+
+// ---------------------------------------------------------------------------
+// Round
+// ---------------------------------------------------------------------------
+
+/// Return the nearest integer to `x`. Rounds half-way cases away from zero.
+///
+/// For example, `round(0.5) == 1.0` and `round(-0.5) == -1.0`.
+///
+/// ## Edge Cases
+///
+/// - If `x` is ±0, the result is ±0 (preserves sign).
+/// - If `x` is ±∞, the result is ±∞.
+/// - If `x` is NaN, the result is NaN.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: delegates to Rust std f64::round
+pub fn round(x: f64) -> f64 {
+    x.round()
+}
+
+// ---------------------------------------------------------------------------
+// Trunc
+// ---------------------------------------------------------------------------
+
+/// Return the integer part of `x`, discarding any fractional part.
+///
+/// Rounds toward zero. Equivalent to `floor` for positive values and
+/// `ceil` for negative values.
+///
+/// ## Edge Cases
+///
+/// - If `x` is ±0, the result is ±0 (preserves sign).
+/// - If `x` is ±∞, the result is ±∞.
+/// - If `x` is NaN, the result is NaN.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: delegates to Rust std f64::trunc
+pub fn trunc(x: f64) -> f64 {
+    x.trunc()
+}
+
+// ---------------------------------------------------------------------------
+// Fract
+// ---------------------------------------------------------------------------
+
+/// Return the fractional part of `x`.
+///
+/// Returns `x - trunc(x)`. The result is in the range `[0.0, 1.0)` for
+/// positive `x` and `(-1.0, 0.0]` for negative `x`.
+///
+/// ## Edge Cases
+///
+/// - If `x` is ±0, the result is ±0 (preserves sign).
+/// - If `x` is ±∞, the result is ±0 (preserves sign of input).
+/// - If `x` is NaN, the result is NaN.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: delegates to Rust std f64::fract
+pub fn fract(x: f64) -> f64 {
+    x.fract()
+}
+
+// ===========================================================================
+// Comparison Functions (f64)
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// Min of two f64
+// ---------------------------------------------------------------------------
+
+/// Return the smaller of two `f64` values.
+///
+/// Follows IEEE 754-2008 `minNum` semantics: if either argument is NaN,
+/// the other is returned. If both are NaN, NaN is returned.
+///
+/// ## Edge Cases
+///
+/// - If either argument is NaN, the non-NaN value is returned.
+/// - `-0.0` is considered less than `+0.0`.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: delegates to Rust std f64::min
+pub fn min_of(a: f64, b: f64) -> f64 {
+    a.min(b)
+}
+
+// ---------------------------------------------------------------------------
+// Max of two f64
+// ---------------------------------------------------------------------------
+
+/// Return the larger of two `f64` values.
+///
+/// Follows IEEE 754-2008 `maxNum` semantics: if either argument is NaN,
+/// the other is returned. If both are NaN, NaN is returned.
+///
+/// ## Edge Cases
+///
+/// - If either argument is NaN, the non-NaN value is returned.
+/// - `+0.0` is considered greater than `-0.0`.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: delegates to Rust std f64::max
+pub fn max_of(a: f64, b: f64) -> f64 {
+    a.max(b)
+}
+
+// ===========================================================================
+// Classification Functions (f64)
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// Is NaN
+// ---------------------------------------------------------------------------
+
+/// Return `true` if `x` is NaN (Not a Number).
+///
+/// This is the only reliable way to test for NaN, since NaN != NaN
+/// by IEEE 754 definition.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: delegates to Rust std f64::is_nan
+pub fn is_nan(x: f64) -> bool {
+    x.is_nan()
+}
+
+// ---------------------------------------------------------------------------
+// Is Infinite
+// ---------------------------------------------------------------------------
+
+/// Return `true` if `x` is positive or negative infinity.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: delegates to Rust std f64::is_infinite
+pub fn is_infinite(x: f64) -> bool {
+    x.is_infinite()
+}
+
+// ---------------------------------------------------------------------------
+// Is Finite
+// ---------------------------------------------------------------------------
+
+/// Return `true` if `x` is neither infinite nor NaN.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: delegates to Rust std f64::is_finite
+pub fn is_finite(x: f64) -> bool {
+    x.is_finite()
+}
+
+// ---------------------------------------------------------------------------
+// Is Normal
+// ---------------------------------------------------------------------------
+
+/// Return `true` if `x` is a normal floating-point number.
+///
+/// A number is "normal" if it is neither zero, subnormal, infinite, nor NaN.
+/// Normal numbers have full precision in their mantissa.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: delegates to Rust std f64::is_normal
+pub fn is_normal(x: f64) -> bool {
+    x.is_normal()
+}
+
+// ---------------------------------------------------------------------------
+// Signum
+// ---------------------------------------------------------------------------
+
+/// Return the sign of `x` as a floating-point number.
+///
+/// Returns:
+/// - `1.0` if `x > 0`
+/// - `-1.0` if `x < 0`
+/// - `0.0` if `x == 0`
+/// - NaN if `x` is NaN
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: delegates to Rust std f64::signum
+pub fn signum(x: f64) -> f64 {
+    x.signum()
+}
+
+// ---------------------------------------------------------------------------
+// Copy Sign
+// ---------------------------------------------------------------------------
+
+/// Return a value with the magnitude of `x` and the sign of `y`.
+///
+/// ## Edge Cases
+///
+/// - If `x` is NaN, the result is NaN with the sign of `y`.
+/// - If `y` is NaN, the sign bit is treated as positive.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: delegates to Rust std f64::copysign
+pub fn copysign(x: f64, y: f64) -> f64 {
+    x.copysign(y)
+}
+
+// ===========================================================================
+// f32 Variants — Trigonometric
+// ===========================================================================
+
+/// Compute the sine of `x` radians (f32).
+///
+/// See [`sin`] for full documentation.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: delegates to Rust std f32::sin
+pub fn sin_f32(x: f32) -> f32 {
+    x.sin()
+}
+
+/// Compute the cosine of `x` radians (f32).
+///
+/// See [`cos`] for full documentation.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: delegates to Rust std f32::cos
+pub fn cos_f32(x: f32) -> f32 {
+    x.cos()
+}
+
+/// Compute the tangent of `x` radians (f32).
+///
+/// See [`tan`] for full documentation.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: delegates to Rust std f32::tan
+pub fn tan_f32(x: f32) -> f32 {
+    x.tan()
+}
+
+/// Compute the arc sine of `x` (f32).
+///
+/// See [`asin`] for full documentation.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: delegates to Rust std f32::asin
+pub fn asin_f32(x: f32) -> f32 {
+    x.asin()
+}
+
+/// Compute the arc cosine of `x` (f32).
+///
+/// See [`acos`] for full documentation.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: delegates to Rust std f32::acos
+pub fn acos_f32(x: f32) -> f32 {
+    x.acos()
+}
+
+/// Compute the arc tangent of `x` (f32).
+///
+/// See [`atan`] for full documentation.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: delegates to Rust std f32::atan
+pub fn atan_f32(x: f32) -> f32 {
+    x.atan()
+}
+
+/// Compute the four-quadrant arc tangent of `y / x` (f32).
+///
+/// See [`atan2`] for full documentation.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: delegates to Rust std f32::atan2
+pub fn atan2_f32(y: f32, x: f32) -> f32 {
+    y.atan2(x)
+}
+
+/// Compute the hyperbolic sine of `x` (f32).
+///
+/// See [`sinh`] for full documentation.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: delegates to Rust std f32::sinh
+pub fn sinh_f32(x: f32) -> f32 {
+    x.sinh()
+}
+
+/// Compute the hyperbolic cosine of `x` (f32).
+///
+/// See [`cosh`] for full documentation.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: delegates to Rust std f32::cosh
+pub fn cosh_f32(x: f32) -> f32 {
+    x.cosh()
+}
+
+/// Compute the hyperbolic tangent of `x` (f32).
+///
+/// See [`tanh`] for full documentation.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: delegates to Rust std f32::tanh
+pub fn tanh_f32(x: f32) -> f32 {
+    x.tanh()
+}
+
+// ===========================================================================
+// f32 Variants — Exponential / Logarithmic
+// ===========================================================================
+
+/// Compute the square root of `x` (f32).
+///
+/// See [`sqrt`] for full documentation.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: delegates to Rust std f32::sqrt
+pub fn sqrt_f32(x: f32) -> f32 {
+    x.sqrt()
+}
+
+/// Compute the cube root of `x` (f32).
+///
+/// See [`cbrt`] for full documentation.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: delegates to Rust std f32::cbrt
+pub fn cbrt_f32(x: f32) -> f32 {
+    x.cbrt()
+}
+
+/// Compute `e^x` (f32).
+///
+/// See [`exp`] for full documentation.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: delegates to Rust std f32::exp
+pub fn exp_f32(x: f32) -> f32 {
+    x.exp()
+}
+
+/// Compute `2^x` (f32).
+///
+/// See [`exp2`] for full documentation.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: delegates to Rust std f32::exp2
+pub fn exp2_f32(x: f32) -> f32 {
+    x.exp2()
+}
+
+/// Compute `e^x - 1` with greater precision for small `x` (f32).
+///
+/// See [`exp_m1`] for full documentation.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: delegates to Rust std f32::exp_m1
+pub fn exp_m1_f32(x: f32) -> f32 {
+    x.exp_m1()
+}
+
+/// Compute the natural logarithm of `x` (f32).
+///
+/// See [`ln`] for full documentation.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: delegates to Rust std f32::ln
+pub fn ln_f32(x: f32) -> f32 {
+    x.ln()
+}
+
+/// Compute the base-2 logarithm of `x` (f32).
+///
+/// See [`log2`] for full documentation.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: delegates to Rust std f32::log2
+pub fn log2_f32(x: f32) -> f32 {
+    x.log2()
+}
+
+/// Compute the base-10 logarithm of `x` (f32).
+///
+/// See [`log10`] for full documentation.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: delegates to Rust std f32::log10
+pub fn log10_f32(x: f32) -> f32 {
+    x.log10()
+}
+
+/// Compute `ln(1 + x)` with greater precision for small `x` (f32).
+///
+/// See [`ln_1p`] for full documentation.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: delegates to Rust std f32::ln_1p
+pub fn ln_1p_f32(x: f32) -> f32 {
+    x.ln_1p()
+}
+
+/// Compute `x` raised to the power of `y` (f32).
+///
+/// See [`pow`] for full documentation.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: delegates to Rust std f32::powf
+pub fn pow_f32(x: f32, y: f32) -> f32 {
+    x.powf(y)
+}
+
+/// Compute `x` raised to the integer power `n` (f32).
+///
+/// See [`powi`] for full documentation.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: delegates to Rust std f32::powi
+pub fn powi_f32(x: f32, n: i32) -> f32 {
+    x.powi(n)
+}
+
+// ===========================================================================
+// f32 Variants — Rounding
+// ===========================================================================
+
+/// Return the largest integer less than or equal to `x` (f32).
+///
+/// See [`floor`] for full documentation.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: delegates to Rust std f32::floor
+pub fn floor_f32(x: f32) -> f32 {
+    x.floor()
+}
+
+/// Return the smallest integer greater than or equal to `x` (f32).
+///
+/// See [`ceil`] for full documentation.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: delegates to Rust std f32::ceil
+pub fn ceil_f32(x: f32) -> f32 {
+    x.ceil()
+}
+
+/// Return the nearest integer to `x`, rounding half away from zero (f32).
+///
+/// See [`round`] for full documentation.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: delegates to Rust std f32::round
+pub fn round_f32(x: f32) -> f32 {
+    x.round()
+}
+
+/// Return the integer part of `x`, discarding the fractional part (f32).
+///
+/// See [`trunc`] for full documentation.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: delegates to Rust std f32::trunc
+pub fn trunc_f32(x: f32) -> f32 {
+    x.trunc()
+}
+
+/// Return the fractional part of `x` (f32).
+///
+/// See [`fract`] for full documentation.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: delegates to Rust std f32::fract
+pub fn fract_f32(x: f32) -> f32 {
+    x.fract()
+}
+
+// ===========================================================================
+// f32 Variants — Comparison
+// ===========================================================================
+
+/// Return the smaller of two `f32` values.
+///
+/// See [`min_of`] for full documentation.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: delegates to Rust std f32::min
+pub fn min_of_f32(a: f32, b: f32) -> f32 {
+    a.min(b)
+}
+
+/// Return the larger of two `f32` values.
+///
+/// See [`max_of`] for full documentation.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: delegates to Rust std f32::max
+pub fn max_of_f32(a: f32, b: f32) -> f32 {
+    a.max(b)
+}
+
+// ===========================================================================
+// f32 Variants — Classification
+// ===========================================================================
+
+/// Return `true` if `x` is NaN (f32).
+///
+/// See [`is_nan`] for full documentation.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: delegates to Rust std f32::is_nan
+pub fn is_nan_f32(x: f32) -> bool {
+    x.is_nan()
+}
+
+/// Return `true` if `x` is positive or negative infinity (f32).
+///
+/// See [`is_infinite`] for full documentation.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: delegates to Rust std f32::is_infinite
+pub fn is_infinite_f32(x: f32) -> bool {
+    x.is_infinite()
+}
+
+/// Return `true` if `x` is neither infinite nor NaN (f32).
+///
+/// See [`is_finite`] for full documentation.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: delegates to Rust std f32::is_finite
+pub fn is_finite_f32(x: f32) -> bool {
+    x.is_finite()
+}
+
+/// Return `true` if `x` is a normal floating-point number (f32).
+///
+/// See [`is_normal`] for full documentation.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: delegates to Rust std f32::is_normal
+pub fn is_normal_f32(x: f32) -> bool {
+    x.is_normal()
+}
+
+/// Return the sign of `x` as a floating-point number (f32).
+///
+/// See [`signum`] for full documentation.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: delegates to Rust std f32::signum
+pub fn signum_f32(x: f32) -> f32 {
+    x.signum()
+}
+
+/// Return a value with the magnitude of `x` and the sign of `y` (f32).
+///
+/// See [`copysign`] for full documentation.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: delegates to Rust std f32::copysign
+pub fn copysign_f32(x: f32, y: f32) -> f32 {
+    x.copysign(y)
+}
+
+// ===========================================================================
 // Capability Descriptor for Math Operations
-// ---------------------------------------------------------------------------
+// ===========================================================================
 
 /// Returns the capability descriptor for mathematical operations.
 ///
@@ -197,9 +1577,9 @@ pub fn math_capd() -> CapD {
     CapD::new(vec![CapFlag::Read, CapFlag::Compare])
 }
 
-// ---------------------------------------------------------------------------
+// ===========================================================================
 // Tests
-// ---------------------------------------------------------------------------
+// ===========================================================================
 
 #[cfg(test)]
 mod tests {
@@ -333,6 +1713,503 @@ mod tests {
     fn test_clamp_singleton() {
         assert_eq!(clamp(42, 7, 7), 7);
         assert_eq!(clamp(7, 7, 7), 7);
+    }
+
+    // --- trigonometric f64 tests ---
+
+    #[test]
+    fn test_sin_basic() {
+        let tolerance = 1e-10;
+        assert!((sin(0.0) - 0.0).abs() < tolerance);
+        assert!((sin(PI / 2.0) - 1.0).abs() < tolerance);
+        assert!((sin(PI) - 0.0).abs() < tolerance);
+    }
+
+    #[test]
+    fn test_cos_basic() {
+        let tolerance = 1e-10;
+        assert!((cos(0.0) - 1.0).abs() < tolerance);
+        assert!((cos(PI) - (-1.0)).abs() < tolerance);
+        assert!((cos(PI / 2.0) - 0.0).abs() < tolerance);
+    }
+
+    #[test]
+    fn test_tan_basic() {
+        let tolerance = 1e-10;
+        assert!((tan(0.0) - 0.0).abs() < tolerance);
+        assert!((tan(PI / 4.0) - 1.0).abs() < tolerance);
+    }
+
+    #[test]
+    fn test_asin_basic() {
+        let tolerance = 1e-10;
+        assert!((asin(0.0) - 0.0).abs() < tolerance);
+        assert!((asin(1.0) - PI / 2.0).abs() < tolerance);
+    }
+
+    #[test]
+    fn test_acos_basic() {
+        let tolerance = 1e-10;
+        assert!((acos(1.0) - 0.0).abs() < tolerance);
+        assert!((acos(0.0) - PI / 2.0).abs() < tolerance);
+    }
+
+    #[test]
+    fn test_atan_basic() {
+        let tolerance = 1e-10;
+        assert!((atan(0.0) - 0.0).abs() < tolerance);
+        assert!((atan(1.0) - PI / 4.0).abs() < tolerance);
+    }
+
+    #[test]
+    fn test_atan2_basic() {
+        let tolerance = 1e-10;
+        assert!((atan2(1.0, 1.0) - PI / 4.0).abs() < tolerance);
+        assert!((atan2(1.0, 0.0) - PI / 2.0).abs() < tolerance);
+        assert!((atan2(0.0, -1.0) - PI).abs() < tolerance);
+    }
+
+    #[test]
+    fn test_sinh_basic() {
+        let tolerance = 1e-10;
+        assert!((sinh(0.0) - 0.0).abs() < tolerance);
+    }
+
+    #[test]
+    fn test_cosh_basic() {
+        let tolerance = 1e-10;
+        assert!((cosh(0.0) - 1.0).abs() < tolerance);
+    }
+
+    #[test]
+    fn test_tanh_basic() {
+        let tolerance = 1e-10;
+        assert!((tanh(0.0) - 0.0).abs() < tolerance);
+    }
+
+    #[test]
+    fn test_trig_nan_propagation() {
+        assert!(sin(f64::NAN).is_nan());
+        assert!(cos(f64::NAN).is_nan());
+        assert!(tan(f64::NAN).is_nan());
+        assert!(asin(f64::NAN).is_nan());
+        assert!(acos(f64::NAN).is_nan());
+        assert!(atan(f64::NAN).is_nan());
+        assert!(atan2(f64::NAN, 1.0).is_nan());
+        assert!(sinh(f64::NAN).is_nan());
+        assert!(cosh(f64::NAN).is_nan());
+        assert!(tanh(f64::NAN).is_nan());
+    }
+
+    #[test]
+    fn test_trig_out_of_range() {
+        // asin/acos with |x| > 1 should return NaN
+        assert!(asin(2.0).is_nan());
+        assert!(asin(-2.0).is_nan());
+        assert!(acos(2.0).is_nan());
+        assert!(acos(-2.0).is_nan());
+    }
+
+    // --- exponential/logarithmic f64 tests ---
+
+    #[test]
+    fn test_sqrt_basic() {
+        let tolerance = 1e-10;
+        assert!((sqrt(4.0) - 2.0).abs() < tolerance);
+        assert!((sqrt(0.0) - 0.0).abs() < tolerance);
+        assert!((sqrt(1.0) - 1.0).abs() < tolerance);
+    }
+
+    #[test]
+    fn test_sqrt_negative() {
+        assert!(sqrt(-1.0).is_nan());
+    }
+
+    #[test]
+    fn test_cbrt_basic() {
+        let tolerance = 1e-10;
+        assert!((cbrt(27.0) - 3.0).abs() < tolerance);
+        assert!((cbrt(-8.0) - (-2.0)).abs() < tolerance);
+        assert!((cbrt(0.0) - 0.0).abs() < tolerance);
+    }
+
+    #[test]
+    fn test_exp_basic() {
+        let tolerance = 1e-10;
+        assert!((exp(0.0) - 1.0).abs() < tolerance);
+        assert!((exp(1.0) - E).abs() < tolerance);
+    }
+
+    #[test]
+    fn test_exp2_basic() {
+        let tolerance = 1e-10;
+        assert!((exp2(0.0) - 1.0).abs() < tolerance);
+        assert!((exp2(1.0) - 2.0).abs() < tolerance);
+        assert!((exp2(3.0) - 8.0).abs() < tolerance);
+    }
+
+    #[test]
+    fn test_exp_m1_basic() {
+        let tolerance = 1e-10;
+        assert!((exp_m1(0.0) - 0.0).abs() < tolerance);
+    }
+
+    #[test]
+    fn test_ln_basic() {
+        let tolerance = 1e-10;
+        assert!((ln(1.0) - 0.0).abs() < tolerance);
+        assert!((ln(E) - 1.0).abs() < tolerance);
+    }
+
+    #[test]
+    fn test_log2_basic() {
+        let tolerance = 1e-10;
+        assert!((log2(1.0) - 0.0).abs() < tolerance);
+        assert!((log2(2.0) - 1.0).abs() < tolerance);
+        assert!((log2(8.0) - 3.0).abs() < tolerance);
+    }
+
+    #[test]
+    fn test_log10_basic() {
+        let tolerance = 1e-10;
+        assert!((log10(1.0) - 0.0).abs() < tolerance);
+        assert!((log10(10.0) - 1.0).abs() < tolerance);
+        assert!((log10(100.0) - 2.0).abs() < tolerance);
+    }
+
+    #[test]
+    fn test_ln_1p_basic() {
+        let tolerance = 1e-10;
+        assert!((ln_1p(0.0) - 0.0).abs() < tolerance);
+        assert!((ln_1p(E - 1.0) - 1.0).abs() < 1e-8);
+    }
+
+    #[test]
+    fn test_pow_basic() {
+        let tolerance = 1e-10;
+        assert!((pow(2.0, 3.0) - 8.0).abs() < tolerance);
+        assert!((pow(4.0, 0.5) - 2.0).abs() < tolerance);
+    }
+
+    #[test]
+    fn test_powi_basic() {
+        let tolerance = 1e-10;
+        assert!((powi(2.0, 3) - 8.0).abs() < tolerance);
+        assert!((powi(3.0, 0) - 1.0).abs() < tolerance);
+        assert!((powi(2.0, -1) - 0.5).abs() < tolerance);
+    }
+
+    #[test]
+    fn test_exp_log_roundtrip() {
+        let tolerance = 1e-10;
+        for x in [0.5, 1.0, 2.0, 10.0, 100.0] {
+            assert!((ln(exp(x)) - x).abs() < tolerance);
+            assert!((log2(exp2(x)) - x).abs() < tolerance);
+            assert!((log10(x) - ln(x) / LN_10).abs() < tolerance);
+        }
+    }
+
+    // --- rounding f64 tests ---
+
+    #[test]
+    fn test_floor_basic() {
+        assert_eq!(floor(3.7), 3.0);
+        assert_eq!(floor(-3.7), -4.0);
+        assert_eq!(floor(0.0), 0.0);
+    }
+
+    #[test]
+    fn test_ceil_basic() {
+        assert_eq!(ceil(3.2), 4.0);
+        assert_eq!(ceil(-3.2), -3.0);
+        assert_eq!(ceil(0.0), 0.0);
+    }
+
+    #[test]
+    fn test_round_basic() {
+        assert_eq!(round(3.5), 4.0);
+        assert_eq!(round(3.4), 3.0);
+        assert_eq!(round(-3.5), -4.0);
+        assert_eq!(round(-3.4), -3.0);
+    }
+
+    #[test]
+    fn test_trunc_basic() {
+        assert_eq!(trunc(3.7), 3.0);
+        assert_eq!(trunc(-3.7), -3.0);
+        assert_eq!(trunc(0.0), 0.0);
+    }
+
+    #[test]
+    fn test_fract_basic() {
+        let tolerance = 1e-10;
+        assert!((fract(3.7) - 0.7).abs() < tolerance);
+        assert!((fract(-3.7) - (-0.7)).abs() < tolerance);
+        assert!((fract(0.0) - 0.0).abs() < tolerance);
+    }
+
+    #[test]
+    fn test_rounding_special() {
+        assert!(floor(f64::NAN).is_nan());
+        assert!(ceil(f64::NAN).is_nan());
+        assert!(round(f64::NAN).is_nan());
+        assert!(trunc(f64::NAN).is_nan());
+        assert!(fract(f64::NAN).is_nan());
+    }
+
+    // --- comparison f64 tests ---
+
+    #[test]
+    fn test_min_of_basic() {
+        assert_eq!(min_of(1.0, 2.0), 1.0);
+        assert_eq!(min_of(2.0, 1.0), 1.0);
+        assert_eq!(min_of(5.0, 5.0), 5.0);
+    }
+
+    #[test]
+    fn test_max_of_basic() {
+        assert_eq!(max_of(1.0, 2.0), 2.0);
+        assert_eq!(max_of(2.0, 1.0), 2.0);
+        assert_eq!(max_of(5.0, 5.0), 5.0);
+    }
+
+    #[test]
+    fn test_min_max_nan() {
+        // min_of/max_of should return the non-NaN value
+        assert_eq!(min_of(f64::NAN, 1.0), 1.0);
+        assert_eq!(min_of(1.0, f64::NAN), 1.0);
+        assert_eq!(max_of(f64::NAN, 1.0), 1.0);
+        assert_eq!(max_of(1.0, f64::NAN), 1.0);
+    }
+
+    // --- classification f64 tests ---
+
+    #[test]
+    fn test_is_nan() {
+        assert!(is_nan(f64::NAN));
+        assert!(!is_nan(0.0));
+        assert!(!is_nan(1.0));
+        assert!(!is_nan(f64::INFINITY));
+    }
+
+    #[test]
+    fn test_is_infinite() {
+        assert!(is_infinite(f64::INFINITY));
+        assert!(is_infinite(f64::NEG_INFINITY));
+        assert!(!is_infinite(0.0));
+        assert!(!is_infinite(f64::NAN));
+    }
+
+    #[test]
+    fn test_is_finite() {
+        assert!(is_finite(0.0));
+        assert!(is_finite(1.0));
+        assert!(is_finite(-1e100));
+        assert!(!is_finite(f64::INFINITY));
+        assert!(!is_finite(f64::NAN));
+    }
+
+    #[test]
+    fn test_is_normal() {
+        assert!(is_normal(1.0));
+        assert!(is_normal(-1.0));
+        assert!(is_normal(1e100));
+        assert!(!is_normal(0.0));
+        assert!(!is_normal(f64::INFINITY));
+        assert!(!is_normal(f64::NAN));
+    }
+
+    #[test]
+    fn test_signum() {
+        assert_eq!(signum(42.0), 1.0);
+        assert_eq!(signum(-42.0), -1.0);
+        assert_eq!(signum(0.0), 0.0);
+        assert!(signum(f64::NAN).is_nan());
+    }
+
+    #[test]
+    fn test_copysign() {
+        assert_eq!(copysign(3.0, 1.0), 3.0);
+        assert_eq!(copysign(3.0, -1.0), -3.0);
+        assert_eq!(copysign(-3.0, 1.0), 3.0);
+        assert_eq!(copysign(-3.0, -1.0), -3.0);
+    }
+
+    // --- constants tests ---
+
+    #[test]
+    fn test_constants_f64() {
+        let tolerance = 1e-10;
+        assert!((PI - 3.14159265358979323846).abs() < tolerance);
+        assert!((TAU - 2.0 * PI).abs() < tolerance);
+        assert!((E - 2.71828182845904523536).abs() < tolerance);
+        assert!((LN_2 - 0.69314718055994530942).abs() < tolerance);
+        assert!((LN_10 - 2.30258509299404568402).abs() < tolerance);
+        assert!((LOG2_E - 1.44269504088896340736).abs() < tolerance);
+        assert!((LOG10_E - 0.43429448190325182765).abs() < tolerance);
+        assert!((SQRT_2 - 1.41421356237309504880).abs() < tolerance);
+        assert!((FRAC_1_SQRT_2 - 1.0 / SQRT_2).abs() < tolerance);
+    }
+
+    #[test]
+    fn test_constants_f32() {
+        let tolerance = 1e-5;
+        assert!((PI_F32 - 3.14159265f32).abs() < tolerance);
+        assert!((TAU_F32 - 2.0f32 * PI_F32).abs() < tolerance);
+        assert!((E_F32 - 2.71828182f32).abs() < tolerance);
+    }
+
+    // --- f32 trigonometric tests ---
+
+    #[test]
+    fn test_sin_f32_basic() {
+        let tolerance = 1e-5;
+        assert!((sin_f32(0.0f32) - 0.0f32).abs() < tolerance);
+        assert!((sin_f32(PI_F32 / 2.0f32) - 1.0f32).abs() < tolerance);
+    }
+
+    #[test]
+    fn test_cos_f32_basic() {
+        let tolerance = 1e-5;
+        assert!((cos_f32(0.0f32) - 1.0f32).abs() < tolerance);
+    }
+
+    #[test]
+    fn test_tan_f32_basic() {
+        let tolerance = 1e-5;
+        assert!((tan_f32(0.0f32) - 0.0f32).abs() < tolerance);
+    }
+
+    #[test]
+    fn test_trig_f32_nan_propagation() {
+        assert!(sin_f32(f32::NAN).is_nan());
+        assert!(cos_f32(f32::NAN).is_nan());
+        assert!(tan_f32(f32::NAN).is_nan());
+        assert!(asin_f32(f32::NAN).is_nan());
+        assert!(acos_f32(f32::NAN).is_nan());
+        assert!(atan_f32(f32::NAN).is_nan());
+        assert!(sinh_f32(f32::NAN).is_nan());
+        assert!(cosh_f32(f32::NAN).is_nan());
+        assert!(tanh_f32(f32::NAN).is_nan());
+    }
+
+    // --- f32 exponential/logarithmic tests ---
+
+    #[test]
+    fn test_sqrt_f32_basic() {
+        let tolerance = 1e-5;
+        assert!((sqrt_f32(4.0f32) - 2.0f32).abs() < tolerance);
+        assert!(sqrt_f32(-1.0f32).is_nan());
+    }
+
+    #[test]
+    fn test_cbrt_f32_basic() {
+        let tolerance = 1e-5;
+        assert!((cbrt_f32(27.0f32) - 3.0f32).abs() < tolerance);
+    }
+
+    #[test]
+    fn test_exp_f32_basic() {
+        let tolerance = 1e-5;
+        assert!((exp_f32(0.0f32) - 1.0f32).abs() < tolerance);
+    }
+
+    #[test]
+    fn test_ln_f32_basic() {
+        let tolerance = 1e-5;
+        assert!((ln_f32(1.0f32) - 0.0f32).abs() < tolerance);
+    }
+
+    #[test]
+    fn test_pow_f32_basic() {
+        let tolerance = 1e-5;
+        assert!((pow_f32(2.0f32, 3.0f32) - 8.0f32).abs() < tolerance);
+    }
+
+    #[test]
+    fn test_powi_f32_basic() {
+        let tolerance = 1e-5;
+        assert!((powi_f32(2.0f32, 3) - 8.0f32).abs() < tolerance);
+    }
+
+    // --- f32 rounding tests ---
+
+    #[test]
+    fn test_floor_f32_basic() {
+        assert_eq!(floor_f32(3.7f32), 3.0f32);
+        assert_eq!(floor_f32(-3.7f32), -4.0f32);
+    }
+
+    #[test]
+    fn test_ceil_f32_basic() {
+        assert_eq!(ceil_f32(3.2f32), 4.0f32);
+        assert_eq!(ceil_f32(-3.2f32), -3.0f32);
+    }
+
+    #[test]
+    fn test_round_f32_basic() {
+        assert_eq!(round_f32(3.5f32), 4.0f32);
+    }
+
+    #[test]
+    fn test_trunc_f32_basic() {
+        assert_eq!(trunc_f32(3.7f32), 3.0f32);
+    }
+
+    #[test]
+    fn test_fract_f32_basic() {
+        let tolerance = 1e-5;
+        assert!((fract_f32(3.7f32) - 0.7f32).abs() < tolerance);
+    }
+
+    // --- f32 comparison tests ---
+
+    #[test]
+    fn test_min_of_f32_basic() {
+        assert_eq!(min_of_f32(1.0f32, 2.0f32), 1.0f32);
+    }
+
+    #[test]
+    fn test_max_of_f32_basic() {
+        assert_eq!(max_of_f32(1.0f32, 2.0f32), 2.0f32);
+    }
+
+    // --- f32 classification tests ---
+
+    #[test]
+    fn test_is_nan_f32() {
+        assert!(is_nan_f32(f32::NAN));
+        assert!(!is_nan_f32(0.0f32));
+    }
+
+    #[test]
+    fn test_is_infinite_f32() {
+        assert!(is_infinite_f32(f32::INFINITY));
+        assert!(!is_infinite_f32(1.0f32));
+    }
+
+    #[test]
+    fn test_is_finite_f32() {
+        assert!(is_finite_f32(0.0f32));
+        assert!(!is_finite_f32(f32::INFINITY));
+    }
+
+    #[test]
+    fn test_is_normal_f32() {
+        assert!(is_normal_f32(1.0f32));
+        assert!(!is_normal_f32(0.0f32));
+    }
+
+    #[test]
+    fn test_signum_f32() {
+        assert_eq!(signum_f32(42.0f32), 1.0f32);
+        assert_eq!(signum_f32(-42.0f32), -1.0f32);
+    }
+
+    #[test]
+    fn test_copysign_f32() {
+        assert_eq!(copysign_f32(3.0f32, -1.0f32), -3.0f32);
+        assert_eq!(copysign_f32(-3.0f32, 1.0f32), 3.0f32);
     }
 
     // --- capd tests ---

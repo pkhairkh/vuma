@@ -1952,6 +1952,11 @@ pub struct IRBlock {
     pub predecessors: HashSet<String>,
     /// Labels of successor blocks (populated after CFG construction).
     pub successors: HashSet<String>,
+    /// Source line number for this block (1-based; 0 = no info).
+    ///
+    /// When debug info is enabled, the emitter uses this field to emit
+    /// `.debug_line` entries mapping block addresses back to source lines.
+    pub source_line: u32,
 }
 
 impl IRBlock {
@@ -1964,6 +1969,7 @@ impl IRBlock {
             terminator: IRTerminator::Unreachable,
             predecessors: HashSet::new(),
             successors: HashSet::new(),
+            source_line: 0,
         }
     }
 
@@ -2026,6 +2032,8 @@ pub struct IRFunction {
     pub vregs: HashMap<u32, VirtualRegister>,
     /// Basic blocks, in layout order.  The first block is the entry block.
     pub blocks: Vec<IRBlock>,
+    /// Source file path (for debug info generation).
+    pub source_file: String,
 }
 
 impl IRFunction {
@@ -2040,6 +2048,7 @@ impl IRFunction {
             result_types: Vec::new(),
             vregs: HashMap::new(),
             blocks: vec![IRBlock::new(entry_label)],
+            source_file: String::new(),
         }
     }
 

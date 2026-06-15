@@ -22,8 +22,19 @@
 //!   `write_u32_le`).
 //! - **string**: String and memory operations (`strlen`, `strcmp`, `memcpy`, `memset`)
 //!   that operate on VUMA `Address` pointers.
-//! - **math**: Mathematical utility functions (`abs`, `min`, `max`, `clamp`) commonly
-//!   needed by LLMs writing real programs.
+//! - **fmt**: String formatting and output (`format_int`, `format_uint`, `format_float`,
+//!   `format_hex`, `format_binary`, `format_octal`, `format_pointer`, `pad_left`,
+//!   `pad_right`, `join`, `write_str`, `write_int`, `write_float`) — printf-style
+//!   formatting for the VUMA language.
+//! - **math**: Comprehensive mathematical utility functions: integer arithmetic
+//!   (`abs`, `min`, `max`, `clamp`), floating-point trigonometry (`sin`, `cos`, `tan`,
+//!   `asin`, `acos`, `atan`, `atan2`, `sinh`, `cosh`, `tanh`), exponentials and
+//!   logarithms (`sqrt`, `cbrt`, `exp`, `exp2`, `exp_m1`, `ln`, `log2`, `log10`,
+//!   `ln_1p`, `pow`, `powi`), rounding (`floor`, `ceil`, `round`, `trunc`, `fract`),
+//!   comparison (`min_of`, `max_of`), classification (`is_nan`, `is_infinite`,
+//!   `is_finite`, `is_normal`, `signum`, `copysign`), mathematical constants
+//!   (`PI`, `TAU`, `E`, `LN_2`, `LN_10`, `LOG2_E`, `LOG10_E`, `SQRT_2`,
+//!   `FRAC_1_SQRT_2`), and f32 variants of all floating-point functions.
 //! - **sync**: Synchronization primitives (Mutex, RwLock, Channel, Barrier) with
 //!   BD CapD annotations ensuring exclusive access patterns and SyncEdge annotations
 //!   for the Message Sequence Graph (MSG).
@@ -41,6 +52,7 @@ pub mod collections;
 pub mod crypto;
 pub mod env;
 pub mod error;
+pub mod fmt;
 pub mod fs;
 pub mod io;
 pub mod math;
@@ -130,8 +142,47 @@ pub use crypto::{
 // Re-export string/memory operations
 pub use string::{strlen, strcmp, memcpy, memset};
 
-// Re-export math utility functions
-pub use math::{abs, min, max, clamp};
+// Re-export formatting functions
+pub use fmt::{
+    fmt_capd, format_binary, format_float, format_hex, format_int, format_octal, format_pointer,
+    format_uint, join, pad_left, pad_right, write_float, write_int, write_str,
+};
+
+// Re-export math utility functions and constants
+pub use math::{
+    // Integer arithmetic
+    abs, min, max, clamp,
+    // Trigonometric (f64)
+    sin, cos, tan, asin, acos, atan, atan2, sinh, cosh, tanh,
+    // Exponential / Logarithmic (f64)
+    sqrt, cbrt, exp, exp2, exp_m1, ln, log2, log10, ln_1p, pow, powi,
+    // Rounding (f64)
+    floor, ceil, round, trunc, fract,
+    // Comparison (f64)
+    min_of, max_of,
+    // Classification (f64)
+    is_nan, is_infinite, is_finite, is_normal, signum, copysign,
+    // Constants (f64)
+    PI, TAU, E, LN_2, LN_10, LOG2_E, LOG10_E, SQRT_2, FRAC_1_SQRT_2,
+    // f32 variants — Trigonometric
+    sin_f32, cos_f32, tan_f32, asin_f32, acos_f32, atan_f32, atan2_f32,
+    sinh_f32, cosh_f32, tanh_f32,
+    // f32 variants — Exponential / Logarithmic
+    sqrt_f32, cbrt_f32, exp_f32, exp2_f32, exp_m1_f32,
+    ln_f32, log2_f32, log10_f32, ln_1p_f32, pow_f32, powi_f32,
+    // f32 variants — Rounding
+    floor_f32, ceil_f32, round_f32, trunc_f32, fract_f32,
+    // f32 variants — Comparison
+    min_of_f32, max_of_f32,
+    // f32 variants — Classification
+    is_nan_f32, is_infinite_f32, is_finite_f32, is_normal_f32,
+    signum_f32, copysign_f32,
+    // f32 constants
+    PI_F32, TAU_F32, E_F32, LN_2_F32, LN_10_F32,
+    LOG2_E_F32, LOG10_E_F32, SQRT_2_F32, FRAC_1_SQRT_2_F32,
+    // Capability descriptor
+    math_capd,
+};
 
 /// VUMA Standard Library version
 pub const VERSION: &str = "0.1.0";

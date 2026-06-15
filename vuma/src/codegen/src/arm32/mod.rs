@@ -4849,6 +4849,23 @@ impl Backend for Arm32Backend {
                         ]);
                         let patched = (existing & 0xFF000000) | ((offset_words as u32) & 0x00FF_FFFF);
                         all_code[abs_offset..abs_offset + 4].copy_from_slice(&patched.to_le_bytes());
+                    } else {
+                        // Unresolved relocation: emit an error instead of silently
+                        // leaving a placeholder at offset 0 which would cause a
+                        // runtime crash.
+                        eprintln!(
+                            "error[E037]: unresolved relocation: symbol '{}' referenced in function '{}' at offset 0x{:X} (type: {})",
+                            reloc.symbol, func.name, reloc.offset, reloc.reloc_type
+                        );
+                        let sentinel: u32 = 0xDEAD_BEEF;
+                        all_code[abs_offset..abs_offset + 4].copy_from_slice(&sentinel.to_le_bytes());
+                        return Err(BackendError::UnresolvedRelocation {
+                            isa: "arm32",
+                            symbol: reloc.symbol.clone(),
+                            function: func.name.clone(),
+                            offset: reloc.offset,
+                            reloc_type: reloc.reloc_type.clone(),
+                        });
                     }
                 } else if reloc.reloc_type == "R_ARM_BRANCH24" {
                     // Intra-function branch: look up block offset using compound symbol
@@ -4866,6 +4883,23 @@ impl Backend for Arm32Backend {
                         // Preserve condition code and L bit, patch offset24
                         let patched = (existing & 0xFF000000) | ((offset_words as u32) & 0x00FF_FFFF);
                         all_code[abs_offset..abs_offset + 4].copy_from_slice(&patched.to_le_bytes());
+                    } else {
+                        // Unresolved relocation: emit an error instead of silently
+                        // leaving a placeholder at offset 0 which would cause a
+                        // runtime crash.
+                        eprintln!(
+                            "error[E037]: unresolved relocation: symbol '{}' referenced in function '{}' at offset 0x{:X} (type: {})",
+                            reloc.symbol, func.name, reloc.offset, reloc.reloc_type
+                        );
+                        let sentinel: u32 = 0xDEAD_BEEF;
+                        all_code[abs_offset..abs_offset + 4].copy_from_slice(&sentinel.to_le_bytes());
+                        return Err(BackendError::UnresolvedRelocation {
+                            isa: "arm32",
+                            symbol: reloc.symbol.clone(),
+                            function: func.name.clone(),
+                            offset: reloc.offset,
+                            reloc_type: reloc.reloc_type.clone(),
+                        });
                     }
                 }
             }
@@ -5353,7 +5387,9 @@ mod tests {
                 terminator: crate::ir::IRTerminator::Return(vec![]),
                 predecessors: std::collections::HashSet::new(),
                 successors: std::collections::HashSet::new(),
+                source_line: 0,
             }],
+            source_file: String::new(),
         };
         let result = backend.allocate_registers(&func).unwrap();
         // Should have: prologue (PUSH, MOV FP, SUB SP) + ADD imm + MOV R0 + epilogue
@@ -5488,7 +5524,9 @@ mod tests {
                 terminator: crate::ir::IRTerminator::Return(vec![]),
                 predecessors: std::collections::HashSet::new(),
                 successors: std::collections::HashSet::new(),
+                source_line: 0,
             }],
+            source_file: String::new(),
         };
         let result = backend.allocate_registers(&func).unwrap();
         let all_code: Vec<u8> = result

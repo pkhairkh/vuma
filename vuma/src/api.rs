@@ -1044,13 +1044,35 @@ fn run_backend_codegen(
     let binary = match backend.encode_program(&allocated_program) {
         Ok(binary) => binary,
         Err(e) => {
-            return Err(vec![VumaDiagnostic::new(
-                "E020",
-                DiagnosticSeverity::Error,
-                format!("{}", e),
-                "code-emission",
-                DiagnosticSourceLocation::unknown(),
-            )]);
+            use vuma_codegen::backend::BackendError;
+            use crate::diagnostics::RelatedInfo;
+            match &e {
+                BackendError::UnresolvedRelocation { symbol, function, offset, reloc_type, .. } => {
+                    let mut diag = VumaDiagnostic::new(
+                        "E037",
+                        DiagnosticSeverity::Error,
+                        format!("unresolved relocation: symbol '{}' not found", symbol),
+                        "codegen",
+                        DiagnosticSourceLocation::unknown(),
+                    );
+                    diag = diag.with_related(
+                        RelatedInfo::new(
+                            DiagnosticSourceLocation::unknown(),
+                            format!("referenced in function '{}' at offset 0x{:X} (relocation type: {})", function, offset, reloc_type),
+                        ),
+                    );
+                    return Err(vec![diag]);
+                }
+                _ => {
+                    return Err(vec![VumaDiagnostic::new(
+                        "E020",
+                        DiagnosticSeverity::Error,
+                        format!("{}", e),
+                        "code-emission",
+                        DiagnosticSourceLocation::unknown(),
+                    )]);
+                }
+            }
         }
     };
 
