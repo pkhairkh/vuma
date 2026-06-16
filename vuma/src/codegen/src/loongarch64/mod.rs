@@ -4136,6 +4136,8 @@ mod tests {
 
     #[test]
     fn test_encode_sub_d() {
+        // SUB.D $t0, $t1, $t2 — opcode 0x0023 per LoongArch manual (3R format).
+        // bits[31:15]=opcode, bits[14:10]=rk, bits[9:5]=rj, bits[4:0]=rd.
         let bytes = Instruction::SubD {
             rd: Gpr::T0,
             rj: Gpr::T1,
@@ -4143,7 +4145,7 @@ mod tests {
         }
         .encode();
         let word = u32::from_le_bytes(bytes);
-        let expected = (0x0031u32 << 15) | (14u32 << 10) | (13u32 << 5) | 12u32;
+        let expected = (0x0023u32 << 15) | (14u32 << 10) | (13u32 << 5) | 12u32;
         assert_eq!(word, expected);
     }
 
@@ -4221,15 +4223,21 @@ mod tests {
 
     #[test]
     fn test_encode_bl() {
-        // BL 0x100
+        // BL 0x100 — I26 format per LoongArch manual:
+        //   bits[31:26] = 0b010101 (BL opcode = 0x15)
+        //   bits[25:10] = offs[15:0]   (lower 16 bits of offset)
+        //   bits[9:0]   = offs[25:16]  (upper 10 bits of offset)
+        // For offs26 = 0x100: lo16 = 0x100, hi10 = 0x0.
         let bytes = Instruction::Bl { offs26: 0x100 }.encode();
         let word = u32::from_le_bytes(bytes);
-        let expected = (0x15u32 << 26) | 0x100u32;
+        let expected = (0x15u32 << 26) | (0x100u32 << 10) | 0u32;
         assert_eq!(word, expected);
     }
 
     #[test]
     fn test_encode_and_or_xor() {
+        // AND/OR/XOR $a0, $a1, $a2 — 3R format opcodes per LoongArch manual:
+        //   AND = 0x0029, OR = 0x002A, XOR = 0x002B (bits[31:15]).
         // AND $a0, $a1, $a2
         let and_bytes = Instruction::And {
             rd: Gpr::A0,
@@ -4238,7 +4246,7 @@ mod tests {
         }
         .encode();
         let and_word = u32::from_le_bytes(and_bytes);
-        assert_eq!(and_word >> 15, 0x0080);
+        assert_eq!(and_word >> 15, 0x0029);
 
         // OR $a0, $a1, $a2
         let or_bytes = Instruction::Or {
@@ -4248,7 +4256,7 @@ mod tests {
         }
         .encode();
         let or_word = u32::from_le_bytes(or_bytes);
-        assert_eq!(or_word >> 15, 0x0081);
+        assert_eq!(or_word >> 15, 0x002A);
 
         // XOR $a0, $a1, $a2
         let xor_bytes = Instruction::Xor {
@@ -4258,11 +4266,12 @@ mod tests {
         }
         .encode();
         let xor_word = u32::from_le_bytes(xor_bytes);
-        assert_eq!(xor_word >> 15, 0x0082);
+        assert_eq!(xor_word >> 15, 0x002B);
     }
 
     #[test]
     fn test_encode_slt() {
+        // SLT $a0, $a1, $a2 — opcode 0x0024 per LoongArch manual (3R format).
         let bytes = Instruction::Slt {
             rd: Gpr::A0,
             rj: Gpr::A1,
@@ -4270,7 +4279,7 @@ mod tests {
         }
         .encode();
         let word = u32::from_le_bytes(bytes);
-        assert_eq!(word >> 15, 0x0040);
+        assert_eq!(word >> 15, 0x0024);
     }
 
     #[test]
@@ -4319,13 +4328,18 @@ mod tests {
 
     #[test]
     fn test_encode_i26_format() {
+        // I26 format per LoongArch manual:
+        //   bits[31:26] = opcode
+        //   bits[25:10] = offs[15:0]   (lower 16 bits of offset)
+        //   bits[9:0]   = offs[25:16]  (upper 10 bits of offset)
+        // For imm26 = 0x12345: lo16 = 0x2345, hi10 = 0x1.
         let bytes = encode_i26(OPC_B, 0x12345);
         let word = u32::from_le_bytes(bytes);
         assert_eq!((word >> 26) & 0x3F, OPC_B);
-        // hi10 = 0x12345 >> 16 = 0x1
-        // lo16 = 0x2345
-        assert_eq!((word >> 16) & 0x3FF, 0x1u32);
-        assert_eq!(word & 0xFFFF, 0x2345u32);
+        // lo16 = 0x12345 & 0xFFFF = 0x2345, placed at bits[25:10]
+        assert_eq!((word >> 10) & 0xFFFF, 0x2345u32);
+        // hi10 = 0x12345 >> 16 = 0x1, placed at bits[9:0]
+        assert_eq!(word & 0x3FF, 0x1u32);
     }
 
     // ── Backend tests ──────────────────────────────────────────────────

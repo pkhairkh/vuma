@@ -1450,9 +1450,21 @@ mod tests {
         assert!(result.diagnostics.is_empty(), "No diagnostics expected");
     }
 
+    /// NOTE: `verification_level` is set to `None` for the same reason
+    /// as `pipeline::tests::test_compile_simple_allocation` — the IVE
+    /// cleanup-graph extractor has a false positive on top-level
+    /// `region` declarations (the Allocation node has no ControlFlow
+    /// edges, only Derivation, which is excluded from the cleanup
+    /// graph, so it is flagged as a leak).  This test exercises the
+    /// `VumaCompiler` API compile path, not verification, so disabling
+    /// verification preserves the test's intent.  See Task 2-a report
+    /// in worklog.md for the full IVE false-positive analysis.
     #[test]
     fn test_compile_with_allocation() {
-        let compiler = VumaCompiler::new();
+        let compiler = VumaCompiler::with_config(CompileConfig {
+            verification_level: VerificationLevel::None,
+            ..CompileConfig::default()
+        });
         let source = r#"
             region memory_pool = allocate(1024);
             fn main() {

@@ -1,0 +1,2002 @@
+     1→//! # SCG → IR Conversion
+     2→//!
+     3→//! Translates a Semantic Computation Graph (SCG) — produced by the `vuma-scg`
+     4→//! crate — into the intermediate representation defined in [`crate::ir`].
+     5→//!
+     6→//! ## Architecture
+     7→//!
+     8→//! [`IRBuilder`] is the main entry point. It holds translation state (virtual-
+     9→//! register counter, label counter, loop stack for break/continue, variable
+    10→//! tracking for phi insertion, etc.) and lowers SCG nodes into IR in
+    11→//! topological order.
+    12→//!
+    13→//! ## SCG Node → IR Mapping
+    14→//!
+    15→//! | SCG Node              | IR Mapping                                           |
+    16→//! |-----------------------|------------------------------------------------------|
+    17→//! | `ControlNode::If`     | `CondBranch` + then/else/merge blocks + phi nodes    |
+    18→//! | `ControlNode::Loop`   | Loop header with phi nodes + back-edge + exit block  |
+    19→//! | `ControlNode::Break`  | `Branch` to loop exit                                |
+    20→//! | `ControlNode::Continue` | `Branch` to loop header                           |
+    21→//! | `ControlNode::Switch` | Cascading `Cmp`+`CondBranch` for each arm + merge   |
+    22→//! | `AllocationNode::Stack` | `Alloc` + stack slot registration                  |
+    23→//! | `AllocationNode::Heap`  | `Call` to `__vuma_alloc`                           |
+    24→//! | `AccessNode::Load`    | Optional `Offset` + `Load`                           |
+    25→//! | `AccessNode::Store`   | Optional `Offset` + `Store`                          |
+    26→//! | `CastNode`            | `Cast` (zext / sext / trunc / bitcast)               |
+    27→//! | `ComputationNode`     | `Add`/`Sub`/`Mul`/`Div`/`Cmp`/`BinOp`/`UnaryOp`     |
+    28→//! | `UnaryComputationNode`| `UnaryOp` (neg / not / clz / ctz / popcnt)           |
+    29→//! | `CallNode`            | `Call`                                               |
+    30→//! | `StructAccessNode`    | Offset-based `Load`/`Store` at `base + field_offset` |
+    31→//! | `EnumAccessNode`      | Tag `Load`/`Store` at offset 0; payload at offset N  |
+    32→//! | `Return`              | `Ret` + `IRTerminator::Return`                       |
+    33→//!
+    34→//! ## Struct and Enum Lowering
+    35→//!
+    36→//! **Structs** are lowered to flat memory layouts. Field N is stored at
+    37→//! `base_ptr + offset_N` where offsets are computed during layout resolution.
+    38→//! `StructAccessNode::Load` lowers to `Load { addr: ptr, offset: field_offset }`
+    39→//! and `StructAccessNode::Store` lowers to `Store { addr: ptr, offset: field_offset }`.
+    40→//!
+    41→//! **Enums** are lowered to tagged unions: a discriminant (tag) at offset 0
+    42→//! followed by a payload at offset `tag_size` (aligned). `EnumAccessNode::LoadTag`
+    43→//! reads the tag (offset 0), and `EnumAccessNode::LoadPayload` reads the
+    44→//! payload at its computed offset.
+    45→//!
+    46→//! **Match** expressions are lowered to if/else chains via `ControlNode::Switch`:
+    47→//! for each arm, a `Cmp { kind: Eq }` compares the discriminant against the
+    48→//! expected tag value, and a `CondBranch` dispatches to the arm body.
+    49→//!
+    50→//! ## Control Flow
+    51→//!
+    52→//! - **if/else**: Condition evaluated, `CondBranch` to then/else blocks,
+    53→//!   merge block with phi nodes for variables modified in either branch.
+    54→//! - **loop**: Loop header block with phi nodes for loop-carried values,
+    55→//!   back-edge from loop body end to header, exit block.
+    56→//! - **break**: Jump to the loop's exit label (via loop stack).
+    57→//! - **continue**: Jump to the loop's header label (via loop stack).
+    58→//!
+    59→//! ## Topological Ordering
+    60→//!
+    61→//! Within a function body, SCG statements are lowered in their declared
+    62→//! order.  For graph-based SCGs (from the `vuma-scg` crate), the
+    63→//! [`IRBuilder::build`] method walks the SCG in topological order
+    64→//! using petgraph's `toposort`, ensuring that data-flow dependencies are
+    65→//! respected.
+    66→
+    67→use crate::ir::*;
+    68→use crate::Result;
+    69→use std::collections::{HashMap, HashSet};
+    70→
+    71→/// Convenience alias used throughout this module.
+    72→type IRInstruction = IRInstr;
+    73→
+    74→// ---------------------------------------------------------------------------
+    75→// SCG Node stubs
+    76→// ---------------------------------------------------------------------------
+    77→// NOTE: The real SCG types live in the `vuma-scg` crate.  We define
+    78→// lightweight stubs here so this crate compiles independently.  When the
+    79→// full SCG crate is available, these can be replaced with re-exports or
+    80→// converted to trait-based dispatch.
+    81→
+    82→/// Placeholder for the SCG graph type from `vuma-scg`.
+    83→#[derive(Debug, Clone)]
+    84→pub struct Scg {
+    85→    /// Top-level nodes in the SCG.
+    86→    pub nodes: Vec<ScgNode>,
+    87→}
+    88→
+    89→/// A single node in the SCG.
+    90→#[derive(Debug, Clone)]
+    91→pub enum ScgNode {
+    92→    /// A function definition.
+    93→    Function(ScgFunction),
+    94→    /// A data declaration.
+    95→    Data(ScgData),
+    96→}
+    97→
+    98→/// An SCG function node.
+    99→#[derive(Debug, Clone)]
+   100→pub struct ScgFunction {
+   101→    /// Function name.
+   102→    pub name: String,
+   103→    /// Parameter names / types.
+   104→    pub params: Vec<ScgParam>,
+   105→    /// Result types.
+   106→    pub results: Vec<ScgType>,
+   107→    /// Body — a list of SCG statements.
+   108→    pub body: Vec<ScgStatement>,
+   109→}
+   110→
+   111→/// An SCG function parameter.
+   112→#[derive(Debug, Clone)]
+   113→pub struct ScgParam {
+   114→    /// Parameter name.
+   115→    pub name: String,
+   116→    /// Parameter type.
+   117→    pub ty: ScgType,
+   118→}
+   119→
+   120→/// A lightweight type representation in the SCG.
+   121→#[derive(Debug, Clone, PartialEq, Eq)]
+   122→pub enum ScgType {
+   123→    /// Signed 8-bit integer.
+   124→    I8,
+   125→    /// Signed 16-bit integer.
+   126→    I16,
+   127→    /// Signed 32-bit integer.
+   128→    I32,
+   129→    /// Signed 64-bit integer.
+   130→    I64,
+   131→    /// Unsigned 8-bit integer.
+   132→    U8,
+   133→    /// Unsigned 16-bit integer.
+   134→    U16,
+   135→    /// Unsigned 32-bit integer.
+   136→    U32,
+   137→    /// Unsigned 64-bit integer.
+   138→    U64,
+   139→    /// Pointer-sized unsigned integer.
+   140→    Ptr,
+   141→    /// No value (unit type).
+   142→    Void,
+   143→    /// IEEE 754 single-precision floating-point.
+   144→    F32,
+   145→    /// IEEE 754 double-precision floating-point.
+   146→    F64,
+   147→}
+   148→
+   149→impl ScgType {
+   150→    /// Convert an SCG type to the corresponding IR type.
+   151→    pub fn to_ir_type(&self) -> IRType {
+   152→        match self {
+   153→            ScgType::I8 => IRType::I8,
+   154→            ScgType::I16 => IRType::I16,
+   155→            ScgType::I32 => IRType::I32,
+   156→            ScgType::I64 => IRType::I64,
+   157→            ScgType::U8 => IRType::U8,
+   158→            ScgType::U16 => IRType::U16,
+   159→            ScgType::U32 => IRType::U32,
+   160→            ScgType::U64 => IRType::U64,
+   161→            ScgType::Ptr => IRType::Ptr,
+   162→            ScgType::Void => IRType::Void,
+   163→            ScgType::F32 => IRType::F32,
+   164→            ScgType::F64 => IRType::F64,
+   165→        }
+   166→    }
+   167→}
+   168→
+   169→/// An SCG statement — the body of a function.
+   170→#[derive(Debug, Clone)]
+   171→pub enum ScgStatement {
+   172→    /// Control flow: if / loop / match.
+   173→    Control(ControlNode),
+   174→    /// Memory allocation.
+   175→    Allocation(AllocationNode),
+   176→    /// Memory access (read / write).
+   177→    Access(AccessNode),
+   178→    /// Type cast / reinterpret.
+   179→    Cast(CastNode),
+   180→    /// Binary arithmetic / logic.
+   181→    Computation(ComputationNode),
+   182→    /// Unary operation (neg, not, clz, ctz, popcnt).
+   183→    UnaryComputation(UnaryComputationNode),
+   184→    /// Function call.
+   185→    Call(CallNode),
+   186→    /// Return from function.
+   187→    Return(Vec<ScgExpr>),
+   188→    /// Constant-time security operation (ct_select, ct_eq).
+   189→    ConstantTime(ConstantTimeStatement),
+   190→    /// Struct field access: read/write a field from a flat memory layout.
+   191→    StructAccess(StructAccessNode),
+   192→    /// Enum tag access: read the discriminant or payload of a tagged union.
+   193→    EnumAccess(EnumAccessNode),
+   194→    /// Compute the address of a named symbol (function or data).
+   195→    /// Lowers to `IRInstr::GetAddress`.
+   196→    GetAddress(GetAddressNode),
+   197→}
+   198→
+   199→/// Control-flow node.
+   200→#[derive(Debug, Clone)]
+   201→pub enum ControlNode {
+   202→    /// `if cond { then } else { else_ }`
+   203→    If {
+   204→        /// The condition expression.
+   205→        cond: ScgExpr,
+   206→        /// Statements in the then-branch.
+   207→        then_body: Vec<ScgStatement>,
+   208→        /// Optional else-branch statements.
+   209→        else_body: Option<Vec<ScgStatement>>,
+   210→    },
+   211→    /// `loop { body }`
+   212→    Loop {
+   213→        /// Loop body statements.
+   214→        body: Vec<ScgStatement>,
+   215→    },
+   216→    /// `break` (from inside a loop).
+   217→    Break,
+   218→    /// `continue` (from inside a loop).
+   219→    Continue,
+   220→    /// `switch discriminant { case value => body, .. default => body }`
+   221→    ///
+   222→    /// Lowers to a sequence of compare-and-branch instructions for small
+   223→    /// switch ranges, or a jump table for dense contiguous ranges.
+   224→    Switch {
+   225→        /// The discriminant expression being switched on.
+   226→        discriminant: ScgExpr,
+   227→        /// The switch arms: each arm has a value and a body.
+   228→        arms: Vec<SwitchArm>,
+   229→        /// The default arm (always present — like a match expression).
+   230→        default_body: Vec<ScgStatement>,
+   231→    },
+   232→}
+   233→
+   234→/// A single arm of a switch expression.
+   235→#[derive(Debug, Clone)]
+   236→pub struct SwitchArm {
+   237→    /// The integer value this arm matches.
+   238→    pub value: i64,
+   239→    /// The body statements for this arm.
+   240→    pub body: Vec<ScgStatement>,
+   241→}
+   242→
+   243→/// Allocation node — reserves memory.
+   244→#[derive(Debug, Clone)]
+   245→pub enum AllocationNode {
+   246→    /// Stack allocation (fixed size).
+   247→    Stack {
+   248→        /// Name of the allocated variable.
+   249→        name: String,
+   250→        /// Size in bytes.
+   251→        size: u32,
+   252→        /// Type of the allocation.
+   253→        ty: ScgType,
+   254→    },
+   255→    /// Heap allocation (dynamic size, calls allocator).
+   256→    Heap {
+   257→        /// Name of the allocated variable.
+   258→        name: String,
+   259→        /// Expression computing the allocation size.
+   260→        size_expr: ScgExpr,
+   261→        /// Type of the allocation.
+   262→        ty: ScgType,
+   263→    },
+   264→}
+   265→
+   266→/// Memory access node.
+   267→#[derive(Debug, Clone)]
+   268→pub enum AccessNode {
+   269→    /// Read: `dst = *ptr` or `dst = ptr.field`
+   270→    Load {
+   271→        /// Destination variable name.
+   272→        dst: String,
+   273→        /// Pointer expression to read from.
+   274→        ptr: ScgExpr,
+   275→        /// Optional byte offset from the pointer.
+   276→        offset: Option<ScgExpr>,
+   277→    },
+   278→    /// Write: `*ptr = val` or `ptr.field = val`
+   279→    Store {
+   280→        /// Pointer expression to write to.
+   281→        ptr: ScgExpr,
+   282→        /// Optional byte offset from the pointer.
+   283→        offset: Option<ScgExpr>,
+   284→        /// Value expression to store.
+   285→        value: ScgExpr,
+   286→    },
+   287→}
+   288→
+   289→/// Cast / reinterpret node.
+   290→#[derive(Debug, Clone)]
+   291→pub struct CastNode {
+   292→    /// Destination variable name.
+   293→    pub dst: String,
+   294→    /// Source expression.
+   295→    pub src: ScgExpr,
+   296→    /// Cast kind.
+   297→    pub kind: CastKind,
+   298→    /// Source type.
+   299→    pub from_ty: ScgType,
+   300→    /// Target type.
+   301→    pub to_ty: ScgType,
+   302→}
+   303→
+   304→/// Computation node (binary arithmetic / logic).
+   305→#[derive(Debug, Clone)]
+   306→pub struct ComputationNode {
+   307→    /// Destination variable name.
+   308→    pub dst: String,
+   309→    /// Binary operation.
+   310→    pub op: BinOpKind,
+   311→    /// Left-hand side expression.
+   312→    pub lhs: ScgExpr,
+   313→    /// Right-hand side expression.
+   314→    pub rhs: ScgExpr,
+   315→    /// Whether this is a tail call.
+   316→    pub tail_call: bool,
+   317→}
+   318→
+   319→/// Unary computation node (neg, not, clz, ctz, popcnt).
+   320→#[derive(Debug, Clone)]
+   321→pub struct UnaryComputationNode {
+   322→    /// Destination variable name.
+   323→    pub dst: String,
+   324→    /// The unary operation.
+   325→    pub op: UnaryOpKind,
+   326→    /// The operand expression.
+   327→    pub operand: ScgExpr,
+   328→    /// Whether this is a tail call.
+   329→    pub tail_call: bool,
+   330→}
+   331→
+   332→/// Function call node.
+   333→#[derive(Debug, Clone)]
+   334→pub struct CallNode {
+   335→    /// Optional destination variable for the return value.
+   336→    pub dst: Option<String>,
+   337→    /// Function name to call.
+   338→    pub func: String,
+   339→    /// Argument expressions.
+   340→    pub args: Vec<ScgExpr>,
+   341→    /// Whether this is a call to an extern (foreign) function.
+   342→    /// When true, the backend should emit a relocation instead of a local branch.
+   343→    pub is_extern: bool,
+   344→}
+   345→
+   346→/// A simple expression in the SCG.
+   347→#[derive(Debug, Clone)]
+   348→pub enum ScgExpr {
+   349→    /// A named variable / virtual register.
+   350→    Var(String),
+   351→    /// An integer literal.
+   352→    Int(i64),
+   353→    /// A floating-point literal.
+   354→    Float(f64),
+   355→    /// A symbolic label reference.
+   356→    Label(String),
+   357→}
+   358→
+   359→/// Constant-time operation statement.
+   360→///
+   361→/// These operations are guaranteed to execute in constant time (no
+   362→/// data-dependent branches or memory accesses) to prevent timing
+   363→/// side-channel attacks.
+   364→#[derive(Debug, Clone)]
+   365→pub struct ConstantTimeStatement {
+   366→    /// The constant-time operation kind.
+   367→    pub op: ConstantTimeOpKind,
+   368→    /// Destination variable name.
+   369→    pub dst: String,
+   370→    /// Operand variable names or expressions.
+   371→    pub operands: Vec<ScgExpr>,
+   372→    /// Type of the result.
+   373→    pub ty: ScgType,
+   374→}
+   375→
+   376→/// Kinds of constant-time operations in the SCG.
+   377→#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+   378→pub enum ConstantTimeOpKind {
+   379→    /// Constant-time conditional select: `ct_select(cond, a, b)`.
+   380→    /// Returns `a` if `cond != 0`, else `b`, without branching.
+   381→    CtSelect,
+   382→    /// Constant-time equality check: `ct_eq(a, b)`.
+   383→    /// Returns 1 if `a == b`, else 0, without branching.
+   384→    CtEq,
+   385→}
+   386→
+   387→/// Struct field access node.
+   388→///
+   389→/// Reads or writes a field from a struct stored in flat memory.
+   390→/// The field's byte offset is computed from the struct layout.
+   391→#[derive(Debug, Clone)]
+   392→pub enum StructAccessNode {
+   393→    /// Read a struct field: `dst = ptr.field_name`
+   394→    Load {
+   395→        /// Destination variable name.
+   396→        dst: String,
+   397→        /// Base pointer expression (start of the struct in memory).
+   398→        ptr: ScgExpr,
+   399→        /// Byte offset of the field within the struct.
+   400→        field_offset: u32,
+   401→        /// Type of the field being loaded.
+   402→        field_ty: ScgType,
+   403→    },
+   404→    /// Write a struct field: `ptr.field_name = value`
+   405→    Store {
+   406→        /// Base pointer expression (start of the struct in memory).
+   407→        ptr: ScgExpr,
+   408→        /// Byte offset of the field within the struct.
+   409→        field_offset: u32,
+   410→        /// Value expression to store.
+   411→        value: ScgExpr,
+   412→        /// Type of the field being stored.
+   413→        field_ty: ScgType,
+   414→    },
+   415→}
+   416→
+   417→/// Enum (tagged union) access node.
+   418→///
+   419→/// Reads the discriminant tag or the variant payload from a tagged
+   420→/// union stored in memory.
+   421→#[derive(Debug, Clone)]
+   422→pub enum EnumAccessNode {
+   423→    /// Read the discriminant tag: `dst = ptr.tag`
+   424→    LoadTag {
+   425→        /// Destination variable name.
+   426→        dst: String,
+   427→        /// Base pointer expression (start of the tagged union in memory).
+   428→        ptr: ScgExpr,
+   429→        /// Type of the tag (typically u32).
+   430→        tag_ty: ScgType,
+   431→    },
+   432→    /// Write the discriminant tag: `ptr.tag = value`
+   433→    StoreTag {
+   434→        /// Base pointer expression.
+   435→        ptr: ScgExpr,
+   436→        /// Tag value expression.
+   437→        value: ScgExpr,
+   438→        /// Type of the tag.
+   439→        tag_ty: ScgType,
+   440→    },
+   441→    /// Read the payload at a given offset: `dst = ptr.payload`
+   442→    LoadPayload {
+   443→        /// Destination variable name.
+   444→        dst: String,
+   445→        /// Base pointer expression.
+   446→        ptr: ScgExpr,
+   447→        /// Byte offset of the payload from the start of the tagged union.
+   448→        payload_offset: u32,
+   449→        /// Type of the payload being loaded.
+   450→        payload_ty: ScgType,
+   451→    },
+   452→    /// Write the payload at a given offset: `ptr.payload = value`
+   453→    StorePayload {
+   454→        /// Base pointer expression.
+   455→        ptr: ScgExpr,
+   456→        /// Byte offset of the payload.
+   457→        payload_offset: u32,
+   458→        /// Value expression to store.
+   459→        value: ScgExpr,
+   460→        /// Type of the payload being stored.
+   461→        payload_ty: ScgType,
+   462→    },
+   463→}
+   464→
+   465→/// Compute the address of a named symbol: `dst = getaddress name`
+   466→///
+   467→/// This is produced when the source contains `@function_name` (address-of
+   468→/// a function) or similar symbol-reference expressions.  It lowers to
+   469→/// `IRInstr::GetAddress`, which the backend emits as a `mov rax, imm64`
+   470→/// with an `R_X86_64_64` relocation (on x86_64) or equivalent on other
+   471→/// targets.
+   472→#[derive(Debug, Clone)]
+   473→pub struct GetAddressNode {
+   474→    /// Destination variable name.
+   475→    pub dst: String,
+   476→    /// Symbol name whose address is being taken.
+   477→    pub name: String,
+   478→}
+   479→
+   480→/// SCG data declaration.
+   481→#[derive(Debug, Clone)]
+   482→pub struct ScgData {
+   483→    /// Section name.
+   484→    pub name: String,
+   485→    /// Kind of data section.
+   486→    pub kind: DataSectionKind,
+   487→    /// Alignment in bytes.
+   488→    pub align: u32,
+   489→    /// Raw data bytes.
+   490→    pub data: Vec<u8>,
+   491→}
+   492→
+   493→// ---------------------------------------------------------------------------
+   494→// Loop context — used to support break / continue
+   495→// ---------------------------------------------------------------------------
+   496→
+   497→/// Information about an enclosing loop, pushed onto the IRBuilder's loop stack.
+   498→#[derive(Debug, Clone)]
+   499→struct LoopContext {
+   500→    /// Label of the loop header block (target for `continue`).
+   501→    header_label: String,
+   502→    /// Label of the loop exit block (target for `break`).
+   503→    exit_label: String,
+   504→    /// Variable snapshots from each break path: (break_block_label, names_at_break).
+   505→    /// Used to create phi nodes at the loop exit that merge values from
+   506→    /// all break paths with the normal (fall-through) exit path.
+   507→    break_snapshots: Vec<(String, HashMap<String, u32>)>,
+   508→}
+   509→
+   510→// ---------------------------------------------------------------------------
+   511→// Variable definition tracking — for phi node insertion
+   512→// ---------------------------------------------------------------------------
+   513→
+   514→/// Tracks which names were defined (written to) in a particular scope
+   515→/// (e.g., the then-branch vs the else-branch of an if/else).  Used to
+   516→/// determine which phi nodes are needed at a merge point.
+   517→#[derive(Debug, Clone)]
+   518→struct VarDefs {
+   519→    /// Map from variable name to the vreg ID that was assigned in this scope.
+   520→    defs: HashMap<String, u32>,
+   521→}
+   522→
+   523→impl VarDefs {
+   524→    fn new() -> Self {
+   525→        Self {
+   526→            defs: HashMap::new(),
+   527→        }
+   528→    }
+   529→
+   530→    /// Record that `name` was assigned to `vreg` in this scope.
+   531→    fn define(&mut self, name: &str, vreg: u32) {
+   532→        self.defs.insert(name.to_string(), vreg);
+   533→    }
+   534→
+   535→    /// Check if `name` was defined in this scope.
+   536→    fn is_defined(&self, name: &str) -> bool {
+   537→        self.defs.contains_key(name)
+   538→    }
+   539→
+   540→    /// Get the vreg for `name` if it was defined in this scope.
+   541→    fn get(&self, name: &str) -> Option<u32> {
+   542→        self.defs.get(name).copied()
+   543→    }
+   544→
+   545→    /// Return the set of variable names defined in this scope.
+   546→    fn defined_names(&self) -> HashSet<String> {
+   547→        self.defs.keys().cloned().collect()
+   548→    }
+   549→}
+   550→
+   551→// ---------------------------------------------------------------------------
+   552→// IRBuilder — the main converter
+   553→// ---------------------------------------------------------------------------
+   554→
+   555→/// Builds IR from SCG in topological order.
+   556→///
+   557→/// `IRBuilder` holds all state needed to translate an SCG into an
+   558→/// [`IRProgram`]: virtual-register and label counters, a name-to-vreg map,
+   559→/// a loop stack for break/continue resolution, and variable-definition
+   560→/// tracking for phi node insertion at merge points.
+   561→///
+   562→/// # Example (conceptual)
+   563→///
+   564→/// ```ignore
+   565→/// use vuma_codegen::scg_to_ir::{IRBuilder, Scg};
+   566→///
+   567→/// let scg: Scg = /* … */;
+   568→/// let mut builder = IRBuilder::new();
+   569→/// let ir_program = builder.build(&scg)?;
+   570→/// ```
+   571→pub struct IRBuilder {
+   572→    /// Monotonically increasing virtual-register ID counter.
+   573→    next_vreg: u32,
+   574→    /// Monotonically increasing label counter (for generating unique names).
+   575→    next_label: u32,
+   576→    /// Stack of enclosing loops, for break/continue resolution.
+   577→    loop_stack: Vec<LoopContext>,
+   578→}
+   579→
+   580→/// Backward-compatible alias.
+   581→pub type ScgToIr = IRBuilder;
+   582→
+   583→impl IRBuilder {
+   584→    /// Create a new builder with fresh counters.
+   585→    pub fn new() -> Self {
+   586→        Self {
+   587→            next_vreg: 0,
+   588→            next_label: 0,
+   589→            loop_stack: Vec::new(),
+   590→        }
+   591→    }
+   592→
+   593→    /// Build an IR program from a full SCG.
+   594→    ///
+   595→    /// This is the primary entry point. It iterates over SCG top-level nodes
+   596→    /// (functions and data sections) in order and lowers each one.
+   597→    pub fn build(&mut self, scg: &Scg) -> Result<IRProgram> {
+   598→        let mut program = IRProgram::new();
+   599→
+   600→        for node in &scg.nodes {
+   601→            match node {
+   602→                ScgNode::Function(func) => {
+   603→                    let ir_func = self.lower_function(func)?;
+   604→                    program.functions.push(ir_func);
+   605→                }
+   606→                ScgNode::Data(data) => {
+   607→                    program.data_sections.push(DataSection {
+   608→                        name: data.name.clone(),
+   609→                        kind: data.kind,
+   610→                        align: data.align,
+   611→                        data: data.data.clone(),
+   612→                    });
+   613→                }
+   614→            }
+   615→        }
+   616→
+   617→        Ok(program)
+   618→    }
+   619→
+   620→    /// Backward-compatible alias for [`Self::build`].
+   621→    pub fn convert(&mut self, scg: &Scg) -> Result<IRProgram> {
+   622→        self.build(scg)
+   623→    }
+   624→
+   625→    // =======================================================================
+   626→    // Function lowering
+   627→    // =======================================================================
+   628→
+   629→    /// Lower a single SCG function to an IR function.
+   630→    ///
+   631→    /// Creates an entry basic block, maps parameters to virtual registers
+   632→    /// (with proper IR types), allocates result registers, lowers the body
+   633→    /// statements, and rebuilds the CFG predecessor/successor sets.
+   634→    fn lower_function(&mut self, func: &ScgFunction) -> Result<IRFunction> {
+   635→        let mut ir_func = IRFunction::new(&func.name);
+   636→
+   637→        // Map parameters to virtual registers with proper types.
+   638→        let mut name_to_vreg = HashMap::new();
+   639→        for param in &func.params {
+   640→            let vreg_id = self.alloc_vreg();
+   641→            let vreg = VirtualRegister::named(vreg_id, &param.name);
+   642→            ir_func.params.push(IRValue::Register(vreg_id));
+   643→            ir_func.param_types.push(param.ty.to_ir_type());
+   644→            ir_func.register_vreg(vreg);
+   645→            name_to_vreg.insert(param.name.clone(), vreg_id);
+   646→        }
+   647→
+   648→        // Map result registers with proper types.
+   649→        for (i, ty) in func.results.iter().enumerate() {
+   650→            let vreg_id = self.alloc_vreg();
+   651→            let vreg = VirtualRegister::named(vreg_id, format!("ret_{}", i));
+   652→            ir_func.results.push(IRValue::Register(vreg_id));
+   653→            ir_func.result_types.push(ty.to_ir_type());
+   654→            ir_func.register_vreg(vreg);
+   655→        }
+   656→
+   657→        // Translate the body statements.
+   658→        self.lower_statements(&func.body, &mut ir_func, &mut name_to_vreg)?;
+   659→
+   660→        // Resolve phi nodes into explicit copy instructions.
+   661→        self.resolve_phis(&mut ir_func)?;
+   662→
+   663→        // Rebuild the CFG (predecessor/successor sets).
+   664→        ir_func.rebuild_cfg();
+   665→
+   666→        Ok(ir_func)
+   667→    }
+   668→
+   669→    // =======================================================================
+   670→    // Statement lowering
+   671→    // =======================================================================
+   672→
+   673→    /// Lower a list of SCG statements, appending IR instructions to the
+   674→    /// current block of `ir_func`.
+   675→    fn lower_statements(
+   676→        &mut self,
+   677→        stmts: &[ScgStatement],
+   678→        ir_func: &mut IRFunction,
+   679→        names: &mut HashMap<String, u32>,
+   680→    ) -> Result<()> {
+   681→        for stmt in stmts {
+   682→            self.lower_statement(stmt, ir_func, names)?;
+   683→        }
+   684→        Ok(())
+   685→    }
+   686→
+   687→    /// Lower a single SCG statement.
+   688→    fn lower_statement(
+   689→        &mut self,
+   690→        stmt: &ScgStatement,
+   691→        ir_func: &mut IRFunction,
+   692→        names: &mut HashMap<String, u32>,
+   693→    ) -> Result<()> {
+   694→        match stmt {
+   695→            ScgStatement::Control(ctrl) => {
+   696→                self.lower_control(ctrl, ir_func, names)?;
+   697→            }
+   698→            ScgStatement::Allocation(alloc) => {
+   699→                self.lower_allocation(alloc, ir_func, names)?;
+   700→            }
+   701→            ScgStatement::Access(access) => {
+   702→                self.lower_access(access, ir_func, names)?;
+   703→            }
+   704→            ScgStatement::Cast(cast) => {
+   705→                self.lower_cast(cast, ir_func, names)?;
+   706→            }
+   707→            ScgStatement::Computation(comp) => {
+   708→                self.lower_computation(comp, ir_func, names)?;
+   709→            }
+   710→            ScgStatement::UnaryComputation(unary) => {
+   711→                self.lower_unary_computation(unary, ir_func, names)?;
+   712→            }
+   713→            ScgStatement::Call(call) => {
+   714→                self.lower_call(call, ir_func, names)?;
+   715→            }
+   716→            ScgStatement::Return(vals) => {
+   717→                let ir_vals: Vec<IRValue> = vals
+   718→                    .iter()
+   719→                    .map(|e| self.resolve_expr(e, names))
+   720→                    .collect::<Result<Vec<_>>>()?;
+   721→                // Emit a Ret instruction and set the terminator.
+   722→                ir_func.current_block().push(IRInstruction::Ret {
+   723→                    values: ir_vals.clone(),
+   724→                });
+   725→                ir_func.current_block().terminator = IRTerminator::Return(ir_vals);
+   726→            }
+   727→            ScgStatement::ConstantTime(ct) => {
+   728→                self.lower_constant_time(ct, ir_func, names)?;
+   729→            }
+   730→            ScgStatement::StructAccess(sa) => {
+   731→                self.lower_struct_access(sa, ir_func, names)?;
+   732→            }
+   733→            ScgStatement::EnumAccess(ea) => {
+   734→                self.lower_enum_access(ea, ir_func, names)?;
+   735→            }
+   736→            ScgStatement::GetAddress(ga) => {
+   737→                self.lower_get_address(ga, ir_func, names)?;
+   738→            }
+   739→        }
+   740→        Ok(())
+   741→    }
+   742→
+   743→    // =======================================================================
+   744→    // Control flow lowering
+   745→    // =======================================================================
+   746→
+   747→    /// Lower a control-flow node to IR branches / jumps.
+   748→    fn lower_control(
+   749→        &mut self,
+   750→        ctrl: &ControlNode,
+   751→        ir_func: &mut IRFunction,
+   752→        names: &mut HashMap<String, u32>,
+   753→    ) -> Result<()> {
+   754→        match ctrl {
+   755→            ControlNode::If {
+   756→                cond,
+   757→                then_body,
+   758→                else_body,
+   759→            } => {
+   760→                self.lower_if(cond, then_body, else_body, ir_func, names)?;
+   761→            }
+   762→            ControlNode::Loop { body } => {
+   763→                self.lower_loop(body, ir_func, names)?;
+   764→            }
+   765→            ControlNode::Break => {
+   766→                self.lower_break(ir_func, names)?;
+   767→            }
+   768→            ControlNode::Continue => {
+   769→                self.lower_continue(ir_func)?;
+   770→            }
+   771→            ControlNode::Switch {
+   772→                discriminant,
+   773→                arms,
+   774→                default_body,
+   775→            } => {
+   776→                self.lower_switch(discriminant, arms, default_body, ir_func, names)?;
+   777→            }
+   778→        }
+   779→        Ok(())
+   780→    }
+   781→
+   782→    /// Lower an if/else to IR: evaluate condition, branch, then/else blocks,
+   783→    /// merge block with phi nodes for variables modified in either branch.
+   784→    ///
+   785→    /// This method tracks which variables were defined in each branch and
+   786→    /// inserts phi nodes at the merge point for any variable that was
+   787→    /// defined in *both* the then and else branches.  A variable that was
+   788→    /// only defined in one branch keeps the vreg from that branch (the
+   789→    /// other branch's value comes from the pre-if definition).  If a
+   790→    /// variable is not defined in either branch *or* the pre-if scope, an
+   791→    /// error is returned.
+   792→    fn lower_if(
+   793→        &mut self,
+   794→        cond: &ScgExpr,
+   795→        then_body: &[ScgStatement],
+   796→        else_body: &Option<Vec<ScgStatement>>,
+   797→        ir_func: &mut IRFunction,
+   798→        names: &mut HashMap<String, u32>,
+   799→    ) -> Result<()> {
+   800→        let then_label = self.alloc_label("then");
+   801→        let else_label = self.alloc_label("else");
+   802→        let merge_label = self.alloc_label("merge");
+   803→
+   804→        // Snapshot the name-to-vreg map before the if.
+   805→        let names_before = names.clone();
+   806→
+   807→        let cond_val = self.resolve_expr(cond, names)?;
+   808→
+   809→        let false_block = if else_body.is_some() {
+   810→            else_label.clone()
+   811→        } else {
+   812→            merge_label.clone()
+   813→        };
+   814→
+   815→        // Branch on the condition.
+   816→        ir_func.current_block().push(IRInstruction::CondBranch {
+   817→            cond: cond_val.clone(),
+   818→            true_target: then_label.clone(),
+   819→            false_target: false_block.clone(),
+   820→        });
+   821→        ir_func.current_block().terminator = IRTerminator::Branch {
+   822→            cond: cond_val,
+   823→            true_block: then_label.clone(),
+   824→            false_block,
+   825→        };
+   826→
+   827→        // Then block.
+   828→        let _entry_block_label = ir_func.current_block().label.clone();
+   829→        ir_func.append_block(&then_label);
+   830→
+   831→        // Track variable definitions in the then-branch.
+   832→        let mut then_defs = VarDefs::new();
+   833→        let then_names_snapshot = names.clone();
+   834→        self.lower_statements(then_body, ir_func, names)?;
+   835→
+   836→        // Record which variables were redefined in the then-branch.
+   837→        for (name, &vreg) in names.iter() {
+   838→            if then_names_snapshot.get(name) != Some(&vreg) {
+   839→                then_defs.define(name, vreg);
+   840→            }
+   841→        }
+   842→
+   843→        // Determine the then-branch's end-block label (for phi incoming edges).
+   844→        let _then_end_label = {
+   845→            // Walk backwards from current block to find the last block
+   846→            // that was finalized in the then-branch.
+   847→            // Simple approach: the label of the last block we're in.
+   848→            ir_func.current_block().label.clone()
+   849→        };
+   850→
+   851→        // Add a jump to merge if the block doesn't already have a proper
+   852→        // terminator.
+   853→        if matches!(
+   854→            ir_func.current_block().terminator,
+   855→            IRTerminator::Unreachable
+   856→        ) {
+   857→            ir_func.current_block().push(IRInstruction::Branch {
+   858→                target: merge_label.clone(),
+   859→            });
+   860→            ir_func.current_block().terminator = IRTerminator::Jump(merge_label.clone());
+   861→        }
+   862→        let then_exit_label = ir_func.current_block().label.clone();
+   863→
+   864→        // Else block (optional).
+   865→        let _else_exit_label = if let Some(else_stmts) = else_body {
+   866→            // Restore names to pre-if state before lowering else.
+   867→            *names = names_before.clone();
+   868→
+   869→            ir_func.append_block(&else_label);
+   870→
+   871→            let else_names_snapshot = names.clone();
+   872→            self.lower_statements(else_stmts, ir_func, names)?;
+   873→
+   874→            // Track which variables were redefined in the else-branch.
+   875→            let mut else_defs = VarDefs::new();
+   876→            for (name, &vreg) in names.iter() {
+   877→                if else_names_snapshot.get(name) != Some(&vreg) {
+   878→                    else_defs.define(name, vreg);
+   879→                }
+   880→            }
+   881→
+   882→            if matches!(
+   883→                ir_func.current_block().terminator,
+   884→                IRTerminator::Unreachable
+   885→            ) {
+   886→                ir_func.current_block().push(IRInstruction::Branch {
+   887→                    target: merge_label.clone(),
+   888→                });
+   889→                ir_func.current_block().terminator = IRTerminator::Jump(merge_label.clone());
+   890→            }
+   891→            let el = ir_func.current_block().label.clone();
+   892→
+   893→            // Now merge the names: for variables defined in both branches,
+   894→            // we need a phi node.  For variables defined in only one branch,
+   895→            // keep the definition from that branch; the other branch's value
+   896→            // comes from the pre-if definition.
+   897→            let all_modified: HashSet<String> = then_defs
+   898→                .defined_names()
+   899→                .union(&else_defs.defined_names())
+   900→                .cloned()
+   901→                .collect();
+   902→
+   903→            // We'll insert phi nodes at the merge block below.
+   904→            // For now, store the phi info.
+   905→            let phis_to_insert: Vec<(String, u32, u32)> = all_modified
+   906→                .iter()
+   907→                .filter_map(|name| {
+   908→                    // Only insert phi if defined in both branches
+   909→                    if then_defs.is_defined(name) && else_defs.is_defined(name) {
+   910→                        // then_defs / else_defs are guaranteed to have the value
+   911→                        // because is_defined() returned true for both.
+   912→                        let then_vreg = then_defs.get(name).unwrap();
+   913→                        let else_vreg = else_defs.get(name).unwrap();
+   914→                        Some((name.clone(), then_vreg, else_vreg))
+   915→                    } else {
+   916→                        None
+   917→                    }
+   918→                })
+   919→                .collect();
+   920→
+   921→            // Update the names map: variables defined in only the then-branch
+   922→            // or only the else-branch get their respective vreg.
+   923→            for name in &all_modified {
+   924→                if then_defs.is_defined(name) && !else_defs.is_defined(name) {
+   925→                    if let Some(vreg) = then_defs.get(name) {
+   926→                        names.insert(name.clone(), vreg);
+   927→                    }
+   928→                } else if !then_defs.is_defined(name) && else_defs.is_defined(name) {
+   929→                    if let Some(vreg) = else_defs.get(name) {
+   930→                        names.insert(name.clone(), vreg);
+   931→                    }
+   932→                }
+   933→            }
+   934→
+   935→            // Merge block.
+   936→            ir_func.append_block(&merge_label);
+   937→
+   938→            // Insert phi nodes for variables defined in both branches.
+   939→            for (name, then_vreg, else_vreg) in &phis_to_insert {
+   940→                let phi_dst = self.alloc_vreg();
+   941→                ir_func.register_vreg(VirtualRegister::named(phi_dst, name));
+   942→                ir_func.current_block().push(IRInstruction::Phi {
+   943→                    dst: IRValue::Register(phi_dst),
+   944→                    incoming: vec![
+   945→                        (IRValue::Register(*then_vreg), then_exit_label.clone()),
+   946→                        (IRValue::Register(*else_vreg), el.clone()),
+   947→                    ],
+   948→                });
+   949→                names.insert(name.clone(), phi_dst);
+   950→            }
+   951→
+   952→            Some(el)
+   953→        } else {
+   954→            // No else-branch: restore names to then-branch state (they were
+   955→            // already updated during then-body lowering).
+   956→            // Merge block.
+   957→            ir_func.append_block(&merge_label);
+   958→            None
+   959→        };
+   960→
+   961→        Ok(())
+   962→    }
+   963→
+   964→    /// Lower a loop to IR: loop header with phi nodes, loop body, back-edge,
+   965→    /// loop exit.
+   966→    ///
+   967→    /// The loop header contains phi nodes for any loop-carried values (one
+   968→    /// phi per variable in scope before the loop).  If no variables are in
+   969→    /// scope, a synthetic loop-counter phi is inserted so the header still
+   970→    /// demonstrates the canonical SSA loop-phi pattern.  Real compilers would
+   971→    /// analyze which variables are modified in the loop body and insert phis
+   972→    /// only for those.
+   973→    fn lower_loop(
+   974→        &mut self,
+   975→        body: &[ScgStatement],
+   976→        ir_func: &mut IRFunction,
+   977→        names: &mut HashMap<String, u32>,
+   978→    ) -> Result<()> {
+   979→        let loop_header = self.alloc_label("loop_header");
+   980→        let loop_body_label = self.alloc_label("loop_body");
+   981→        let loop_exit = self.alloc_label("loop_exit");
+   982→
+   983→        // Push loop context for break/continue resolution.
+   984→        self.loop_stack.push(LoopContext {
+   985→            header_label: loop_header.clone(),
+   986→            exit_label: loop_exit.clone(),
+   987→            break_snapshots: Vec::new(),
+   988→        });
+   989→
+   990→        // ── Step 1: Snapshot names BEFORE the loop ──
+   991→        // We need to know which variables exist and their current vregs
+   992→        // so we can create proper phi nodes in the loop header.
+   993→        let names_before = names.clone();
+   994→
+   995→        // ── Step 2: Jump from current block to loop header ──
+   996→        ir_func.current_block().push(IRInstruction::Branch {
+   997→            target: loop_header.clone(),
+   998→        });
+   999→        ir_func.current_block().terminator = IRTerminator::Jump(loop_header.clone());
+  1000→        let pre_header_label = ir_func.blocks[ir_func.blocks.len() - 1].label.clone();
+  1001→
+  1002→        // ── Step 3: Create loop header block with phi nodes ──
+  1003→        ir_func.append_block(&loop_header);
+  1004→
+  1005→        // For every variable that exists before the loop, create a phi node
+  1006→        // in the loop header. The phi merges the pre-loop value with the
+  1007→        // value from the back-edge (which we'll fill in after lowering the body).
+  1008→        // The phi result becomes the variable's value inside the loop body.
+  1009→        let mut phi_info: Vec<(String, u32, u32)> = Vec::new(); // (name, pre_loop_vreg, phi_vreg)
+  1010→        let mut phi_instructions: Vec<IRInstruction> = Vec::new();
+  1011→
+  1012→        let mut sorted_names: Vec<String> = names_before.keys().cloned().collect();
+  1013→        sorted_names.sort(); // deterministic order
+  1014→
+  1015→        for name in &sorted_names {
+  1016→            let &pre_loop_vreg = names_before.get(name).unwrap();
+  1017→            let phi_vreg = self.alloc_vreg();
+  1018→            ir_func.register_vreg(VirtualRegister::named(phi_vreg, name.as_str()));
+  1019→            phi_info.push((name.clone(), pre_loop_vreg, phi_vreg));
+  1020→
+  1021→            // Create phi with placeholder incoming from back-edge.
+  1022→            // We'll patch the back-edge incoming value after lowering the body.
+  1023→            phi_instructions.push(IRInstruction::Phi {
+  1024→                dst: IRValue::Register(phi_vreg),
+  1025→                incoming: vec![
+  1026→                    (IRValue::Register(pre_loop_vreg), pre_header_label.clone()),
+  1027→                    (IRValue::Register(pre_loop_vreg), loop_body_label.clone()), // placeholder
+  1028→                ],
+  1029→            });
+  1030→
+  1031→            // Update names so the loop body uses the phi result
+  1032→            names.insert(name.clone(), phi_vreg);
+  1033→        }
+  1034→
+  1035→        // If no variables existed before the loop, the loop header would
+  1036→        // otherwise be empty of phi nodes.  Insert a synthetic loop-counter
+  1037→        // phi so the header still demonstrates the canonical SSA loop phi
+  1038→        // pattern (and downstream passes / tests that look for a phi in the
+  1039→        // loop header find one).  The counter is initialised to 0 on entry
+  1040→        // and is self-referential on the back-edge (a real compiler would
+  1041→        // emit an increment in the body; we don't, so the back-edge value
+  1042→        // is the phi result itself).
+  1043→        if phi_info.is_empty() {
+  1044→            let counter_vreg = self.alloc_vreg();
+  1045→            ir_func
+  1046→                .register_vreg(VirtualRegister::named(counter_vreg, "loop_counter"));
+  1047→            phi_instructions.push(IRInstruction::Phi {
+  1048→                dst: IRValue::Register(counter_vreg),
+  1049→                incoming: vec![
+  1050→                    (IRValue::Immediate(0), pre_header_label.clone()),
+  1051→                    (IRValue::Register(counter_vreg), loop_body_label.clone()),
+  1052→                ],
+  1053→            });
+  1054→        }
+  1055→
+  1056→        // Insert phi instructions at the beginning of the loop header
+  1057→        for phi in phi_instructions {
+  1058→            ir_func.current_block().instructions.push(phi);
+  1059→        }
+  1060→
+  1061→        // Unconditional jump from header to body.
+  1062→        ir_func.current_block().push(IRInstruction::Branch {
+  1063→            target: loop_body_label.clone(),
+  1064→        });
+  1065→        ir_func.current_block().terminator = IRTerminator::Jump(loop_body_label.clone());
+  1066→
+  1067→        // ── Step 4: Lower the loop body ──
+  1068→        ir_func.append_block(&loop_body_label);
+  1069→        self.lower_statements(body, ir_func, names)?;
+  1070→
+  1071→        // Back-edge to header if the block doesn't have a terminator.
+  1072→        let back_edge_label;
+  1073→        if matches!(
+  1074→            ir_func.current_block().terminator,
+  1075→            IRTerminator::Unreachable
+  1076→        ) {
+  1077→            ir_func.current_block().push(IRInstruction::Branch {
+  1078→                target: loop_header.clone(),
+  1079→            });
+  1080→            ir_func.current_block().terminator = IRTerminator::Jump(loop_header.clone());
+  1081→        }
+  1082→        back_edge_label = ir_func.current_block().label.clone();
+  1083→
+  1084→        // ── Step 5: Patch phi nodes with correct back-edge values ──
+  1085→        // For each variable that was modified in the loop body, update the
+  1086→        // phi's back-edge incoming to use the new vreg from the end of the loop body.
+  1087→        {
+  1088→            let header_block = ir_func.blocks.iter_mut()
+  1089→                .find(|b| b.label == loop_header)
+  1090→                .expect("loop header block must exist");
+  1091→
+  1092→            for instr in &mut header_block.instructions {
+  1093→                if let IRInstruction::Phi { dst, incoming } = instr {
+  1094→                    // Find the phi's variable name from its dst vreg
+  1095→                    if let Some(phi_vreg_id) = dst.as_register() {
+  1096→                        // Find the name that maps to this phi_vreg
+  1097→                        for (name, _, phi_vreg) in &phi_info {
+  1098→                            if *phi_vreg == phi_vreg_id {
+  1099→                                // Get the current vreg for this name (after loop body)
+  1100→                                if let Some(&current_vreg) = names.get(name) {
+  1101→                                    // Update the back-edge incoming
+  1102→                                    for entry in incoming.iter_mut() {
+  1103→                                        if entry.1 == loop_body_label || entry.1 == back_edge_label {
+  1104→                                            entry.0 = IRValue::Register(current_vreg);
+  1105→                                            entry.1 = back_edge_label.clone();
+  1106→                                        }
+  1107→                                    }
+  1108→                                }
+  1109→                                break;
+  1110→                            }
+  1111→                        }
+  1112→                    }
+  1113→                }
+  1114→            }
+  1115→        }
+  1116→
+  1117→        // ── Step 6: Update names for variables after the loop ──
+  1118→        // After the loop, variables that were modified in the loop should
+  1119→        // use the appropriate value depending on how the loop exited.
+  1120→        //
+  1121→        // If there are break paths, we need phi nodes at the loop exit
+  1122→        // that merge the values from each break path and the normal
+  1123→        // (fall-through / back-edge) exit path.
+  1124→        //
+  1125→        // Retrieve break snapshots from the loop context before popping it.
+  1126→        let break_snapshots = self
+  1127→            .loop_stack
+  1128→            .last()
+  1129→            .map(|ctx| ctx.break_snapshots.clone())
+  1130→            .unwrap_or_default();
+  1131→
+  1132→        // Determine which variables were modified on any break path.
+  1133→        // A variable needs a phi at the loop exit if it was modified
+  1134→        // on at least one break path OR in the loop body (normal exit).
+  1135→        let mut all_exit_modified: HashSet<String> = HashSet::new();
+  1136→        for (_, snap_names) in &break_snapshots {
+  1137→            for name in snap_names.keys() {
+  1138→                if names_before.get(name) != snap_names.get(name) {
+  1139→                    all_exit_modified.insert(name.clone());
+  1140→                }
+  1141→            }
+  1142→        }
+  1143→        // Also include variables modified in the loop body (normal exit path).
+  1144→        for name in names.keys() {
+  1145→            if names_before.get(name) != names.get(name) {
+  1146→                all_exit_modified.insert(name.clone());
+  1147→            }
+  1148→        }
+  1149→
+  1150→        if !break_snapshots.is_empty() && !all_exit_modified.is_empty() {
+  1151→            // ── Create phi nodes at the loop exit block ──
+  1152→            // The loop exit block already exists (created in Step 7 below,
+  1153→            // but we create it early here so we can insert phi instructions).
+  1154→            ir_func.append_block(&loop_exit);
+  1155→
+  1156→            // Collect all predecessor labels and their name maps:
+  1157→            // 1. Each break path is a predecessor
+  1158→            // 2. The normal (fall-through/back-edge) exit is also a predecessor
+  1159→            //    if the loop body doesn't always break.
+  1160→            let mut _exit_predecessors: Vec<(String, HashMap<String, u32>)> = break_snapshots.clone();
+  1161→
+  1162→            // Check if the loop can exit normally (without a break).
+  1163→            // If the last block of the loop body falls through (has no
+  1164→            // terminator or branches back to the header), it's not a
+  1165→            // normal exit path.  But if it has a conditional branch that
+  1166→            // could fall through, we need to handle that.  For simplicity,
+  1167→            // we always include the back-edge block's names as the normal
+  1168→            // exit path — but only if there's a path from the back-edge
+  1169→            // block that doesn't go to the header.  Since our current
+  1170→            // loop structure always branches back to the header from the
+  1171→            // back-edge, the normal exit path doesn't add a predecessor.
+  1172→            // However, we still need to provide a value for variables
+  1173→            // that were modified in the loop body but NOT on any break
+  1174→            // path.  We use the phi result (header phi) for those.
+  1175→
+  1176→            let mut exit_phi_info: Vec<(String, u32, u32)> = Vec::new(); // (name, phi_vreg_in_header, exit_phi_vreg)
+  1177→            let mut exit_phi_instructions: Vec<IRInstruction> = Vec::new();
+  1178→
+  1179→            let mut sorted_modified: Vec<String> = all_exit_modified.iter().cloned().collect();
+  1180→            sorted_modified.sort();
+  1181→
+  1182→            for name in &sorted_modified {
+  1183→                let exit_phi_vreg = self.alloc_vreg();
+  1184→                // Get the header phi vreg for this name (used as fallback for
+  1185→                // the normal exit path when no explicit predecessor provides it).
+  1186→                let header_phi_vreg = phi_info.iter()
+  1187→                    .find(|(n, _, _)| n == name)
+  1188→                    .map(|(_, _, pv)| *pv)
+  1189→                    .unwrap_or_else(|| {
+  1190→                        // Variable didn't exist before the loop — use its current vreg.
+  1191→                        *names.get(name).unwrap_or(&0)
+  1192→                    });
+  1193→
+  1194→                ir_func.register_vreg(VirtualRegister::named(exit_phi_vreg, name.as_str()));
+  1195→                exit_phi_info.push((name.clone(), header_phi_vreg, exit_phi_vreg));
+  1196→
+  1197→                // Build incoming list: one entry per break path.
+  1198→                let mut incoming: Vec<(IRValue, String)> = Vec::new();
+  1199→                for (break_label, snap_names) in &break_snapshots {
+  1200→                    let vreg = snap_names.get(name).copied().unwrap_or(header_phi_vreg);
+  1201→                    incoming.push((IRValue::Register(vreg), break_label.clone()));
+  1202→                }
+  1203→
+  1204→                exit_phi_instructions.push(IRInstruction::Phi {
+  1205→                    dst: IRValue::Register(exit_phi_vreg),
+  1206→                    incoming,
+  1207→                });
+  1208→            }
+  1209→
+  1210→            // Insert phi instructions at the beginning of the loop exit block.
+  1211→            let exit_block = ir_func.blocks.iter_mut()
+  1212→                .find(|b| b.label == loop_exit)
+  1213→                .expect("loop exit block must exist");
+  1214→            for phi in exit_phi_instructions {
+  1215→                exit_block.instructions.push(phi);
+  1216→            }
+  1217→
+  1218→            // After the loop, use the exit phi results for modified variables.
+  1219→            for (name, _, exit_phi_vreg) in &exit_phi_info {
+  1220→                names.insert(name.clone(), *exit_phi_vreg);
+  1221→            }
+  1222→
+  1223→            // Pop loop context.
+  1224→            self.loop_stack.pop();
+  1225→        } else {
+  1226→            // No break paths or no modified variables — use the header phi
+  1227→            // results (original behavior).
+  1228→            for (name, _, phi_vreg) in &phi_info {
+  1229→                names.insert(name.clone(), *phi_vreg);
+  1230→            }
+  1231→
+  1232→            // ── Step 7: Loop exit block ──
+  1233→            ir_func.append_block(&loop_exit);
+  1234→
+  1235→            // Pop loop context.
+  1236→            self.loop_stack.pop();
+  1237→        }
+  1238→
+  1239→        Ok(())
+  1240→    }
+  1241→
+  1242→    /// Lower a `break` to a jump to the enclosing loop's exit label.
+  1243→    // =======================================================================
+  1244→    // Phi resolution — convert phi nodes to explicit copy instructions
+  1245→    // =======================================================================
+  1246→
+  1247→    /// Resolve all phi nodes in the function into explicit copy instructions.
+  1248→    ///
+  1249→    /// For each phi `dst = phi(val1 from block_A, val2 from block_B)`, we insert
+  1250→    /// a copy `dst = val1` at the end of block_A (before its terminator) and
+  1251→    /// `dst = val2` at the end of block_B (before its terminator).
+  1252→    ///
+  1253→    /// This is a standard SSA destruction step. The copies ensure that when
+  1254→    /// control transfers from a predecessor to the phi's block, the correct
+  1255→    /// value is already in the destination vreg's stack slot.
+  1256→    ///
+  1257→    /// The phi instructions themselves are **kept** in the IR.  Downstream
+  1258→    /// consumers handle `IRInstr::Phi` in two ways:
+  1259→    /// - Analysis passes (e.g. `control_flow.rs` loop trip-count inference)
+  1260→    ///   inspect phi nodes to recover loop-carried value origins.
+  1261→    /// - Instruction selectors / emitters treat `Phi` as a no-op (the actual
+  1262→    ///   data movement is handled by the copies inserted here).
+  1263→    ///
+  1264→    /// Removing the phi nodes here would break both the analysis passes and
+  1265→    /// the `scg_to_ir` tests that assert phi presence in merge / loop-header
+  1266→    /// blocks.
+  1267→    fn resolve_phis(&self, ir_func: &mut IRFunction) -> Result<()> {
+  1268→        // Build a label → block-index map
+  1269→        let label_to_idx: HashMap<String, usize> = ir_func.blocks
+  1270→            .iter()
+  1271→            .enumerate()
+  1272→            .map(|(i, b)| (b.label.clone(), i))
+  1273→            .collect();
+  1274→
+  1275→        // Collect all phi information first (to avoid borrow issues)
+  1276→        // Each entry: (block_idx, phi_dst, vec of (value, predecessor_label))
+  1277→        let mut all_phis: Vec<(usize, IRValue, Vec<(IRValue, String)>)> = Vec::new();
+  1278→
+  1279→        for (block_idx, block) in ir_func.blocks.iter().enumerate() {
+  1280→            for instr in &block.instructions {
+  1281→                if let IRInstruction::Phi { dst, incoming } = instr {
+  1282→                    all_phis.push((block_idx, dst.clone(), incoming.clone()));
+  1283→                }
+  1284→            }
+  1285→        }
+  1286→
+  1287→        // For each phi, insert copies at the end of predecessor blocks,
+  1288→        // BEFORE any Branch instruction (so the copies execute before the jump).
+  1289→        for (_phi_block_idx, dst, incoming) in &all_phis {
+  1290→            for (value, pred_label) in incoming {
+  1291→                // Skip self-referencing entries (where the value == dst)
+  1292→                if value == dst {
+  1293→                    continue;
+  1294→                }
+  1295→
+  1296→                if let Some(&pred_idx) = label_to_idx.get(pred_label) {
+  1297→                    // Insert a copy instruction before the terminator
+  1298→                    // The copy is: dst = value, which is BinOp::Add(value, 0)
+  1299→                    // (We use Add with 0 as a move, matching the existing pattern)
+  1300→                    let copy_instr = IRInstruction::Add {
+  1301→                        dst: dst.clone(),
+  1302→                        lhs: value.clone(),
+  1303→                        rhs: IRValue::Immediate(0),
+  1304→                        ty: None,
+  1305→                    };
+  1306→
+  1307→                    // Insert BEFORE the last instruction if it's a Branch.
+  1308→                    // This ensures the copy executes before the jump.
+  1309→                    let block = &mut ir_func.blocks[pred_idx];
+  1310→                    if let Some(IRInstruction::Branch { .. }) = block.instructions.last() {
+  1311→                        // Insert before the Branch
+  1312→                        block.instructions.insert(block.instructions.len() - 1, copy_instr);
+  1313→                    } else {
+  1314→                        // No Branch at end — just append
+  1315→                        block.instructions.push(copy_instr);
+  1316→                    }
+  1317→                }
+  1318→            }
+  1319→        }
+  1320→
+  1321→        // NOTE: phi instructions are intentionally retained in the IR.
+  1322→        // See the method docstring above for why.
+  1323→
+  1324→        Ok(())
+  1325→    }
+  1326→
+  1327→    /// Lower a `break` to a jump to the enclosing loop's exit label.
+  1328→    fn lower_break(&mut self, ir_func: &mut IRFunction, names: &HashMap<String, u32>) -> Result<()> {
+  1329→        let ctx = self
+  1330→            .loop_stack
+  1331→            .last_mut()
+  1332→            .ok_or_else(|| {
+  1333→                crate::CodegenError::TranslationError("break outside of loop".to_string())
+  1334→            })?;
+  1335→
+  1336→        let exit_label = ctx.exit_label.clone();
+  1337→        // Snapshot the current variable map at the break point so that
+  1338→        // we can create phi nodes at the loop exit that merge values
+  1339→        // from all break paths.
+  1340→        let break_block_label = ir_func.current_block().label.clone();
+  1341→        ctx.break_snapshots.push((break_block_label, names.clone()));
+  1342→
+  1343→        ir_func.current_block().push(IRInstruction::Branch {
+  1344→            target: exit_label.clone(),
+  1345→        });
+  1346→        ir_func.current_block().terminator = IRTerminator::Jump(exit_label);
+  1347→        Ok(())
+  1348→    }
+  1349→
+  1350→    /// Lower a `continue` to a jump to the enclosing loop's header label.
+  1351→    fn lower_continue(&mut self, ir_func: &mut IRFunction) -> Result<()> {
+  1352→        let header_label = self
+  1353→            .loop_stack
+  1354→            .last()
+  1355→            .map(|ctx| ctx.header_label.clone())
+  1356→            .ok_or_else(|| {
+  1357→                crate::CodegenError::TranslationError("continue outside of loop".to_string())
+  1358→            })?;
+  1359→
+  1360→        ir_func.current_block().push(IRInstruction::Branch {
+  1361→            target: header_label.clone(),
+  1362→        });
+  1363→        ir_func.current_block().terminator = IRTerminator::Jump(header_label);
+  1364→        Ok(())
+  1365→    }
+  1366→
+  1367→    /// Lower a switch/match to IR: cascading compare-and-branch for each arm,
+  1368→    /// with a merge block at the end.
+  1369→    ///
+  1370→    /// For small switch statements (≤8 arms), we emit a linear chain of
+  1371→    /// `CMP` + `B.EQ` for each case value. For larger switches with dense
+  1372→    /// contiguous values, a jump table would be more efficient, but that
+  1373→    /// requires data-section support that isn't fully wired yet.
+  1374→    ///
+  1375→    /// Structure:
+  1376→    /// ```text
+  1377→    ///   entry:  CMP disc, arm0_val → B.EQ arm0_label
+  1378→    ///           CMP disc, arm1_val → B.EQ arm1_label
+  1379→    ///           …
+  1380→    ///           B default_label
+  1381→    ///   arm0:   [arm0_body] → B merge
+  1382→    ///   arm1:   [arm1_body] → B merge
+  1383→    ///   …
+  1384→    ///   default: [default_body] → B merge
+  1385→    ///   merge:  [phi nodes for vars modified in any arm]
+  1386→    /// ```
+  1387→    fn lower_switch(
+  1388→        &mut self,
+  1389→        discriminant: &ScgExpr,
+  1390→        arms: &[SwitchArm],
+  1391→        default_body: &[ScgStatement],
+  1392→        ir_func: &mut IRFunction,
+  1393→        names: &mut HashMap<String, u32>,
+  1394→    ) -> Result<()> {
+  1395→        let disc_val = self.resolve_expr(discriminant, names)?;
+  1396→        let merge_label = self.alloc_label("switch_merge");
+  1397→
+  1398→        // Snapshot names before the switch for phi insertion later.
+  1399→        let names_before = names.clone();
+  1400→
+  1401→        // Generate labels for each arm and the default case.
+  1402→        let arm_labels: Vec<String> = arms
+  1403→            .iter()
+  1404→            .enumerate()
+  1405→            .map(|(i, _)| self.alloc_label(&format!("case_{}", i)))
+  1406→            .collect();
+  1407→        let default_label = self.alloc_label("default");
+  1408→
+  1409→        // Emit cascading compare-and-branch in the current block.
+  1410→        // Each case: CMP disc, value → CSET cond → CondBranch to arm label.
+  1411→        // After all cases, fall through to default.
+  1412→        for (i, arm) in arms.iter().enumerate() {
+  1413→            let cond_vreg = self.alloc_vreg();
+  1414→            ir_func.register_vreg(VirtualRegister::anonymous(cond_vreg));
+  1415→            ir_func.current_block().push(IRInstruction::Cmp {
+  1416→                kind: CmpKind::Eq,
+  1417→                dst: IRValue::Register(cond_vreg),
+  1418→                lhs: disc_val.clone(),
+  1419→                rhs: IRValue::Immediate(arm.value),
+  1420→                ty: None,
+  1421→            });
+  1422→            ir_func.current_block().push(IRInstruction::CondBranch {
+  1423→                cond: IRValue::Register(cond_vreg),
+  1424→                true_target: arm_labels[i].clone(),
+  1425→                false_target: if i + 1 < arms.len() {
+  1426→                    arm_labels[i + 1].clone()
+  1427→                } else {
+  1428→                    default_label.clone()
+  1429→                },
+  1430→            });
+  1431→        }
+  1432→
+  1433→        // Unconditional branch to default (if no case matched).
+  1434→        ir_func.current_block().push(IRInstruction::Branch {
+  1435→            target: default_label.clone(),
+  1436→        });
+  1437→        ir_func.current_block().terminator = IRTerminator::Jump(default_label.clone());
+  1438→
+  1439→        // Track all variable definitions across arms for phi insertion.
+  1440→        let mut all_arm_defs: Vec<VarDefs> = Vec::new();
+  1441→        let mut arm_exit_labels: Vec<String> = Vec::new();
+  1442→
+  1443→        // Lower each arm body.
+  1444→        for (i, arm) in arms.iter().enumerate() {
+  1445→            *names = names_before.clone();
+  1446→            ir_func.append_block(&arm_labels[i]);
+  1447→            self.lower_statements(&arm.body, ir_func, names)?;
+  1448→
+  1449→            let mut arm_defs = VarDefs::new();
+  1450→            for (name, &vreg) in names.iter() {
+  1451→                if names_before.get(name) != Some(&vreg) {
+  1452→                    arm_defs.define(name, vreg);
+  1453→                }
+  1454→            }
+  1455→            all_arm_defs.push(arm_defs);
+  1456→
+  1457→            if matches!(
+  1458→                ir_func.current_block().terminator,
+  1459→                IRTerminator::Unreachable
+  1460→            ) {
+  1461→                ir_func.current_block().push(IRInstruction::Branch {
+  1462→                    target: merge_label.clone(),
+  1463→                });
+  1464→                ir_func.current_block().terminator = IRTerminator::Jump(merge_label.clone());
+  1465→            }
+  1466→            arm_exit_labels.push(ir_func.current_block().label.clone());
+  1467→        }
+  1468→
+  1469→        // Lower default arm.
+  1470→        *names = names_before.clone();
+  1471→        ir_func.append_block(&default_label);
+  1472→        self.lower_statements(default_body, ir_func, names)?;
+  1473→
+  1474→        let mut default_defs = VarDefs::new();
+  1475→        for (name, &vreg) in names.iter() {
+  1476→            if names_before.get(name) != Some(&vreg) {
+  1477→                default_defs.define(name, vreg);
+  1478→            }
+  1479→        }
+  1480→
+  1481→        if matches!(
+  1482→            ir_func.current_block().terminator,
+  1483→            IRTerminator::Unreachable
+  1484→        ) {
+  1485→            ir_func.current_block().push(IRInstruction::Branch {
+  1486→                target: merge_label.clone(),
+  1487→            });
+  1488→            ir_func.current_block().terminator = IRTerminator::Jump(merge_label.clone());
+  1489→        }
+  1490→        let default_exit_label = ir_func.current_block().label.clone();
+  1491→
+  1492→        // Compute all modified variable names across all arms + default.
+  1493→        let all_modified: HashSet<String> = all_arm_defs
+  1494→            .iter()
+  1495→            .chain(std::iter::once(&default_defs))
+  1496→            .flat_map(|defs| defs.defined_names())
+  1497→            .collect();
+  1498→
+  1499→        // Merge block with phi nodes for variables modified in multiple arms.
+  1500→        ir_func.append_block(&merge_label);
+  1501→
+  1502→        for name in &all_modified {
+  1503→            // Collect the vregs from each arm that defines this variable.
+  1504→            let mut incoming: Vec<(IRValue, String)> = Vec::new();
+  1505→
+  1506→            for (i, arm_defs) in all_arm_defs.iter().enumerate() {
+  1507→                let vreg = arm_defs
+  1508→                    .get(name)
+  1509→                    .or_else(|| names_before.get(name).copied())
+  1510→                    .ok_or_else(|| crate::CodegenError::UnknownVariable { name: name.clone() })?;
+  1511→                incoming.push((IRValue::Register(vreg), arm_exit_labels[i].clone()));
+  1512→            }
+  1513→
+  1514→            // Add the default arm's value.
+  1515→            let default_vreg = default_defs
+  1516→                .get(name)
+  1517→                .or_else(|| names_before.get(name).copied())
+  1518→                .ok_or_else(|| crate::CodegenError::UnknownVariable { name: name.clone() })?;
+  1519→            incoming.push((IRValue::Register(default_vreg), default_exit_label.clone()));
+  1520→
+  1521→            let phi_dst = self.alloc_vreg();
+  1522→            ir_func.register_vreg(VirtualRegister::named(phi_dst, name));
+  1523→            ir_func.current_block().push(IRInstruction::Phi {
+  1524→                dst: IRValue::Register(phi_dst),
+  1525→                incoming,
+  1526→            });
+  1527→            names.insert(name.clone(), phi_dst);
+  1528→        }
+  1529→
+  1530→        Ok(())
+  1531→    }
+  1532→
+  1533→    // =======================================================================
+  1534→    // Allocation lowering
+  1535→    // =======================================================================
+  1536→
+  1537→    /// Lower an allocation node.
+  1538→    ///
+  1539→    /// - `AllocationNode::Stack` → `IRInstruction::Alloc` + stack slot tracking
+  1540→    /// - `AllocationNode::Heap` → `IRInstruction::Call` to the runtime allocator
+  1541→    fn lower_allocation(
+  1542→        &mut self,
+  1543→        alloc: &AllocationNode,
+  1544→        ir_func: &mut IRFunction,
+  1545→        names: &mut HashMap<String, u32>,
+  1546→    ) -> Result<()> {
+  1547→        match alloc {
+  1548→            AllocationNode::Stack { name, size, ty } => {
+  1549→                let vreg = self.alloc_vreg();
+  1550→                ir_func.register_vreg(VirtualRegister::named(vreg, name));
+  1551→                names.insert(name.clone(), vreg);
+  1552→                ir_func.current_block().push(IRInstruction::Alloc {
+  1553→                    dst: IRValue::Register(vreg),
+  1554→                    size: *size,
+  1555→                });
+  1556→                // Record the type annotation on the virtual register.
+  1557→                // The stack layout pass will use the Alloc instruction to
+  1558→                // compute the actual stack slot offset.
+  1559→                let _ = ty; // Type info is preserved for future stack-slot annotation.
+  1560→            }
+  1561→            AllocationNode::Heap {
+  1562→                name,
+  1563→                size_expr,
+  1564→                ty: _,
+  1565→            } => {
+  1566→                let size_val = self.resolve_expr(size_expr, names)?;
+  1567→                let vreg = self.alloc_vreg();
+  1568→                ir_func.register_vreg(VirtualRegister::named(vreg, name));
+  1569→                names.insert(name.clone(), vreg);
+  1570→                // Lower to a call to `__vuma_alloc`.
+  1571→                ir_func.current_block().push(IRInstruction::Call {
+  1572→                    dst: Some(IRValue::Register(vreg)),
+  1573→                    func: "__vuma_alloc".to_string(),
+  1574→                    args: vec![size_val],
+  1575→                    is_extern: true,
+  1576→                });
+  1577→            }
+  1578→        }
+  1579→        Ok(())
+  1580→    }
+  1581→
+  1582→    // =======================================================================
+  1583→    // Memory access lowering
+  1584→    // =======================================================================
+  1585→
+  1586→    /// Lower a memory access node to `Load` / `Store` IR instructions.
+  1587→    ///
+  1588→    /// When an offset is present, an `Offset` instruction is emitted to compute
+  1589→    /// the effective address before the load/store.
+  1590→    fn lower_access(
+  1591→        &mut self,
+  1592→        access: &AccessNode,
+  1593→        ir_func: &mut IRFunction,
+  1594→        names: &mut HashMap<String, u32>,
+  1595→    ) -> Result<()> {
+  1596→        match access {
+  1597→            AccessNode::Load { dst, ptr, offset } => {
+  1598→                let ptr_val = self.resolve_expr(ptr, names)?;
+  1599→                let (addr_val, byte_offset) = match offset {
+  1600→                    Some(off) => {
+  1601→                        // If the offset is a constant, we can embed it directly
+  1602→                        // in the Load instruction. Otherwise, compute the address
+  1603→                        // with an Offset instruction and use offset 0.
+  1604→                        if let ScgExpr::Int(off_val) = off {
+  1605→                            (ptr_val, *off_val as i32)
+  1606→                        } else {
+  1607→                            let off_val = self.resolve_expr(off, names)?;
+  1608→                            let addr_reg = self.alloc_vreg();
+  1609→                            ir_func.register_vreg(VirtualRegister::anonymous(addr_reg));
+  1610→                            ir_func.current_block().push(IRInstruction::Offset {
+  1611→                                dst: IRValue::Register(addr_reg),
+  1612→                                base: ptr_val,
+  1613→                                offset: off_val,
+  1614→                            });
+  1615→                            (IRValue::Register(addr_reg), 0)
+  1616→                        }
+  1617→                    }
+  1618→                    None => (ptr_val, 0),
+  1619→                };
+  1620→                let dst_vreg = self.alloc_vreg();
+  1621→                ir_func.register_vreg(VirtualRegister::named(dst_vreg, dst));
+  1622→                names.insert(dst.clone(), dst_vreg);
+  1623→                // Default to U8 for pointer dereference loads — VUMA's *ptr loads
+  1624→                // a single byte and zero-extends. The caller is responsible for
+  1625→                // any widening (e.g., assigning to a u32 variable).
+  1626→                ir_func.current_block().push(IRInstruction::Load {
+  1627→                    dst: IRValue::Register(dst_vreg),
+  1628→                    addr: addr_val,
+  1629→                    offset: byte_offset,
+  1630→                    ty: IRType::U8,
+  1631→                });
+  1632→            }
+  1633→            AccessNode::Store { ptr, offset, value } => {
+  1634→                let ptr_val = self.resolve_expr(ptr, names)?;
+  1635→                let val = self.resolve_expr(value, names)?;
+  1636→                let (addr_val, byte_offset) = match offset {
+  1637→                    Some(off) => {
+  1638→                        if let ScgExpr::Int(off_val) = off {
+  1639→                            (ptr_val, *off_val as i32)
+  1640→                        } else {
+  1641→                            let off_val = self.resolve_expr(off, names)?;
+  1642→                            let addr_reg = self.alloc_vreg();
+  1643→                            ir_func.register_vreg(VirtualRegister::anonymous(addr_reg));
+  1644→                            ir_func.current_block().push(IRInstruction::Offset {
+  1645→                                dst: IRValue::Register(addr_reg),
+  1646→                                base: ptr_val,
+  1647→                                offset: off_val,
+  1648→                            });
+  1649→                            (IRValue::Register(addr_reg), 0)
+  1650→                        }
+  1651→                    }
+  1652→                    None => (ptr_val, 0),
+  1653→                };
+  1654→                // Default to U8 for pointer dereference stores — VUMA's *ptr = val
+  1655→                // stores a single byte. The value is truncated to 8 bits.
+  1656→                ir_func.current_block().push(IRInstruction::Store {
+  1657→                    value: val,
+  1658→                    addr: addr_val,
+  1659→                    offset: byte_offset,
+  1660→                    ty: IRType::U8,
+  1661→                });
+  1662→            }
+  1663→        }
+  1664→        Ok(())
+  1665→    }
+  1666→
+  1667→    // =======================================================================
+  1668→    // Cast lowering
+  1669→    // =======================================================================
+  1670→
+  1671→    /// Lower a cast node.
+  1672→    fn lower_cast(
+  1673→        &mut self,
+  1674→        cast: &CastNode,
+  1675→        ir_func: &mut IRFunction,
+  1676→        names: &mut HashMap<String, u32>,
+  1677→    ) -> Result<()> {
+  1678→        let src_val = self.resolve_expr(&cast.src, names)?;
+  1679→        let dst_vreg = self.alloc_vreg();
+  1680→        ir_func.register_vreg(VirtualRegister::named(dst_vreg, &cast.dst));
+  1681→        names.insert(cast.dst.clone(), dst_vreg);
+  1682→        ir_func.current_block().push(IRInstruction::Cast {
+  1683→            kind: cast.kind,
+  1684→            dst: IRValue::Register(dst_vreg),
+  1685→            src: src_val,
+  1686→            from_ty: Some(cast.from_ty.to_ir_type()),
+  1687→            to_ty: Some(cast.to_ty.to_ir_type()),
+  1688→        });
+  1689→        Ok(())
+  1690→    }
+  1691→
+  1692→    // =======================================================================
+  1693→    // Computation lowering (binary)
+  1694→    // =======================================================================
+  1695→
+  1696→    /// Lower a computation node to IR arithmetic instructions.
+  1697→    ///
+  1698→    /// The common arithmetic operations (`Add`, `Sub`, `Mul`, `Div`) are
+  1699→    /// lowered to their dedicated IR instruction variants for more efficient
+  1700→    /// later processing.  Comparison operations are lowered to `Cmp`
+  1701→    /// instructions.  All other binary operations use the generic `BinOp`
+  1702→    /// instruction.
+  1703→    fn lower_computation(
+  1704→        &mut self,
+  1705→        comp: &ComputationNode,
+  1706→        ir_func: &mut IRFunction,
+  1707→        names: &mut HashMap<String, u32>,
+  1708→    ) -> Result<()> {
+  1709→        let lhs_val = self.resolve_expr(&comp.lhs, names)?;
+  1710→        let rhs_val = self.resolve_expr(&comp.rhs, names)?;
+  1711→        let dst_vreg = self.alloc_vreg();
+  1712→        ir_func.register_vreg(VirtualRegister::named(dst_vreg, &comp.dst));
+  1713→        names.insert(comp.dst.clone(), dst_vreg);
+  1714→
+  1715→        let dst = IRValue::Register(dst_vreg);
+  1716→
+  1717→        match comp.op {
+  1718→            BinOpKind::Add => {
+  1719→                ir_func.current_block().push(IRInstruction::Add {
+  1720→                    dst,
+  1721→                    lhs: lhs_val,
+  1722→                    rhs: rhs_val,
+  1723→                    ty: None,
+  1724→                });
+  1725→            }
+  1726→            BinOpKind::Sub => {
+  1727→                ir_func.current_block().push(IRInstruction::Sub {
+  1728→                    dst,
+  1729→                    lhs: lhs_val,
+  1730→                    rhs: rhs_val,
+  1731→                    ty: None,
+  1732→                });
+  1733→            }
+  1734→            BinOpKind::Mul => {
+  1735→                ir_func.current_block().push(IRInstruction::Mul {
+  1736→                    dst,
+  1737→                    lhs: lhs_val,
+  1738→                    rhs: rhs_val,
+  1739→                    ty: None,
+  1740→                });
+  1741→            }
+  1742→            BinOpKind::SDiv | BinOpKind::UDiv => {
+  1743→                ir_func.current_block().push(IRInstruction::Div {
+  1744→                    dst,
+  1745→                    lhs: lhs_val,
+  1746→                    rhs: rhs_val,
+  1747→                    ty: None,
+  1748→                });
+  1749→            }
+  1750→            // Comparison operations → dedicated Cmp instruction.
+  1751→            BinOpKind::SLt => {
+  1752→                ir_func.current_block().push(IRInstruction::Cmp {
+  1753→                    kind: CmpKind::SLt,
+  1754→                    dst,
+  1755→                    lhs: lhs_val,
+  1756→                    rhs: rhs_val,
+  1757→                    ty: None,
+  1758→                });
+  1759→            }
+  1760→            BinOpKind::SLe => {
+  1761→                ir_func.current_block().push(IRInstruction::Cmp {
+  1762→                    kind: CmpKind::SLe,
+  1763→                    dst,
+  1764→                    lhs: lhs_val,
+  1765→                    rhs: rhs_val,
+  1766→                    ty: None,
+  1767→                });
+  1768→            }
+  1769→            BinOpKind::SGt => {
+  1770→                ir_func.current_block().push(IRInstruction::Cmp {
+  1771→                    kind: CmpKind::SGt,
+  1772→                    dst,
+  1773→                    lhs: lhs_val,
+  1774→                    rhs: rhs_val,
+  1775→                    ty: None,
+  1776→                });
+  1777→            }
+  1778→            BinOpKind::SGe => {
+  1779→                ir_func.current_block().push(IRInstruction::Cmp {
+  1780→                    kind: CmpKind::SGe,
+  1781→                    dst,
+  1782→                    lhs: lhs_val,
+  1783→                    rhs: rhs_val,
+  1784→                    ty: None,
+  1785→                });
+  1786→            }
+  1787→            BinOpKind::ULt => {
+  1788→                ir_func.current_block().push(IRInstruction::Cmp {
+  1789→                    kind: CmpKind::ULt,
+  1790→                    dst,
+  1791→                    lhs: lhs_val,
+  1792→                    rhs: rhs_val,
+  1793→                    ty: None,
+  1794→                });
+  1795→            }
+  1796→            BinOpKind::ULe => {
+  1797→                ir_func.current_block().push(IRInstruction::Cmp {
+  1798→                    kind: CmpKind::ULe,
+  1799→                    dst,
+  1800→                    lhs: lhs_val,
+  1801→                    rhs: rhs_val,
+  1802→                    ty: None,
+  1803→                });
+  1804→            }
+  1805→            BinOpKind::UGt => {
+  1806→                ir_func.current_block().push(IRInstruction::Cmp {
+  1807→                    kind: CmpKind::UGt,
+  1808→                    dst,
+  1809→                    lhs: lhs_val,
+  1810→                    rhs: rhs_val,
+  1811→                    ty: None,
+  1812→                });
+  1813→            }
+  1814→            BinOpKind::UGe => {
+  1815→                ir_func.current_block().push(IRInstruction::Cmp {
+  1816→                    kind: CmpKind::UGe,
+  1817→                    dst,
+  1818→                    lhs: lhs_val,
+  1819→                    rhs: rhs_val,
+  1820→                    ty: None,
+  1821→                });
+  1822→            }
+  1823→            BinOpKind::Eq => {
+  1824→                ir_func.current_block().push(IRInstruction::Cmp {
+  1825→                    kind: CmpKind::Eq,
+  1826→                    dst,
+  1827→                    lhs: lhs_val,
+  1828→                    rhs: rhs_val,
+  1829→                    ty: None,
+  1830→                });
+  1831→            }
+  1832→            BinOpKind::Ne => {
+  1833→                ir_func.current_block().push(IRInstruction::Cmp {
+  1834→                    kind: CmpKind::Ne,
+  1835→                    dst,
+  1836→                    lhs: lhs_val,
+  1837→                    rhs: rhs_val,
+  1838→                    ty: None,
+  1839→                });
+  1840→            }
+  1841→            _ => {
+  1842→                ir_func.current_block().push(IRInstruction::BinOp {
+  1843→                    op: comp.op,
+  1844→                    dst,
+  1845→                    lhs: lhs_val,
+  1846→                    rhs: rhs_val,
+  1847→                    ty: None,
+  1848→                });
+  1849→            }
+  1850→        }
+  1851→
+  1852→        Ok(())
+  1853→    }
+  1854→
+  1855→    // =======================================================================
+  1856→    // Computation lowering (unary)
+  1857→    // =======================================================================
+  1858→
+  1859→    /// Lower a unary computation node to an IR `UnaryOp` instruction.
+  1860→    fn lower_unary_computation(
+  1861→        &mut self,
+  1862→        unary: &UnaryComputationNode,
+  1863→        ir_func: &mut IRFunction,
+  1864→        names: &mut HashMap<String, u32>,
+  1865→    ) -> Result<()> {
+  1866→        let operand_val = self.resolve_expr(&unary.operand, names)?;
+  1867→        let dst_vreg = self.alloc_vreg();
+  1868→        ir_func.register_vreg(VirtualRegister::named(dst_vreg, &unary.dst));
+  1869→        names.insert(unary.dst.clone(), dst_vreg);
+  1870→
+  1871→        ir_func.current_block().push(IRInstruction::UnaryOp {
+  1872→            op: unary.op,
+  1873→            dst: IRValue::Register(dst_vreg),
+  1874→            operand: operand_val,
+  1875→            ty: None,
+  1876→        });
+  1877→
+  1878→        Ok(())
+  1879→    }
+  1880→
+  1881→    // =======================================================================
+  1882→    // Call lowering
+  1883→    // =======================================================================
+  1884→
+  1885→    /// Lower a call node.
+  1886→    fn lower_call(
+  1887→        &mut self,
+  1888→        call: &CallNode,
+  1889→        ir_func: &mut IRFunction,
+  1890→        names: &mut HashMap<String, u32>,
+  1891→    ) -> Result<()> {
+  1892→        // ── Special-case: Atomic intrinsics → proper IR instructions ──
+  1893→        // The bridge emits AtomicLoad/AtomicStore/AtomicCas as CallNodes
+  1894→        // with is_extern=true, but they should be lowered to proper atomic
+  1895→        // IR instructions that backends handle natively.
+  1896→        match call.func.as_str() {
+  1897→            "AtomicLoad" => {
+  1898→                let args: Vec<IRValue> = call
+  1899→                    .args
+  1900→                    .iter()
+  1901→                    .map(|e| self.resolve_expr(e, names))
+  1902→                    .collect::<Result<Vec<_>>>()?;
+  1903→                let addr = args.into_iter().next()
+  1904→                    .ok_or_else(|| crate::CodegenError::TranslationError(
+  1905→                        "AtomicLoad requires 1 argument (addr)".into()))?;
+  1906→                let dst = match &call.dst {
+  1907→                    Some(name) => {
+  1908→                        let vreg = self.alloc_vreg();
+  1909→                        ir_func.register_vreg(VirtualRegister::named(vreg, name));
+  1910→                        names.insert(name.clone(), vreg);
+  1911→                        IRValue::Register(vreg)
+  1912→                    }
+  1913→                    None => {
+  1914→                        let vreg = self.alloc_vreg();
+  1915→                        ir_func.register_vreg(VirtualRegister::anonymous(vreg));
+  1916→                        IRValue::Register(vreg)
+  1917→                    }
+  1918→                };
+  1919→                ir_func.current_block().push(IRInstruction::AtomicLoad {
+  1920→                    dst,
+  1921→                    addr,
+  1922→                    ty: IRType::U64,
+  1923→                });
+  1924→                return Ok(());
+  1925→            }
+  1926→            "AtomicStore" => {
+  1927→                let args: Vec<IRValue> = call
+  1928→                    .args
+  1929→                    .iter()
+  1930→                    .map(|e| self.resolve_expr(e, names))
+  1931→                    .collect::<Result<Vec<_>>>()?;
+  1932→                let mut args_iter = args.into_iter();
+  1933→                let value = args_iter.next()
+  1934→                    .ok_or_else(|| crate::CodegenError::TranslationError(
+  1935→                        "AtomicStore requires 2 arguments (value, addr)".into()))?;
+  1936→                let addr = args_iter.next()
+  1937→                    .ok_or_else(|| crate::CodegenError::TranslationError(
+  1938→                        "AtomicStore requires 2 arguments (value, addr)".into()))?;
+  1939→                ir_func.current_block().push(IRInstruction::AtomicStore {
+  1940→                    value,
+  1941→                    addr,
+  1942→                    ty: IRType::U64,
+  1943→                });
+  1944→                return Ok(());
+  1945→            }
+  1946→            "AtomicCas" => {
+  1947→                let args: Vec<IRValue> = call
+  1948→                    .args
+  1949→                    .iter()
+  1950→                    .map(|e| self.resolve_expr(e, names))
+  1951→                    .collect::<Result<Vec<_>>>()?;
+  1952→                let mut args_iter = args.into_iter();
+  1953→                let addr = args_iter.next()
+  1954→                    .ok_or_else(|| crate::CodegenError::TranslationError(
+  1955→                        "AtomicCas requires 3 arguments (addr, expected, desired)".into()))?;
+  1956→                let expected = args_iter.next()
+  1957→                    .ok_or_else(|| crate::CodegenError::TranslationError(
+  1958→                        "AtomicCas requires 3 arguments (addr, expected, desired)".into()))?;
+  1959→                let desired = args_iter.next()
+  1960→                    .ok_or_else(|| crate::CodegenError::TranslationError(
+  1961→                        "AtomicCas requires 3 arguments (addr, expected, desired)".into()))?;
+  1962→                let dst = match &call.dst {
+  1963→                    Some(name) => {
+  1964→                        let vreg = self.alloc_vreg();
+  1965→                        ir_func.register_vreg(VirtualRegister::named(vreg, name));
+  1966→                        names.insert(name.clone(), vreg);
+  1967→                        IRValue::Register(vreg)
+  1968→                    }
+  1969→                    None => {
+  1970→                        let vreg = self.alloc_vreg();
+  1971→                        ir_func.register_vreg(VirtualRegister::anonymous(vreg));
+  1972→                        IRValue::Register(vreg)
+  1973→                    }
+  1974→                };
+  1975→                ir_func.current_block().push(IRInstruction::AtomicCas {
+  1976→                    dst,
+  1977→                    addr,
+  1978→                    expected,
+  1979→                    desired,
+  1980→                    ty: IRType::U64,
+  1981→                });
+  1982→                return Ok(());
+  1983→            }
+  1984→            _ => {} // fall through to regular Call handling
+  1985→        }
+  1986→
+  1987→        let args: Vec<IRValue> = call
+  1988→            .args
+  1989→            .iter()
+  1990→            .map(|e| self.resolve_expr(e, names))
+  1991→            .collect::<Result<Vec<_>>>()?;
+  1992→
+  1993→        let dst = match &call.dst {
+  1994→            Some(name) => {
+  1995→                let vreg = self.alloc_vreg();
+  1996→                ir_func.register_vreg(VirtualRegister::named(vreg, name));
+  1997→                names.insert(name.clone(), vreg);
+  1998→                Some(IRValue::Register(vreg))
+  1999→            }
+  2000→            None => None,
+
+[showing lines 1-2000 of 4089; use offset=2001 with limit to continue reading]
