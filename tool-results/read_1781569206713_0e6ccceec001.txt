@@ -1,0 +1,2002 @@
+     1→     1→//! VUMA CLI — Command-line interface for the VUMA compiler.
+     2→     2→//!
+     3→     3→//! Subcommands:
+     4→     4→//! - `vuma build <file>` — Parse + compile to ARM64 ELF (default), save to output file
+     5→     5→//! - `vuma run <file>`   — Build + execute (via QEMU aarch64 or native)
+     6→     6→//! - `vuma check <file>` — Parse + SCG + BD inference + IVE verification only
+     7→     7→//! - `vuma emit <isa> <file>` — Compile to specific ISA
+     8→     8→//! - `vuma disasm <file>` — Read binary and disassemble
+     9→     9→//! - `vuma verify <file>` — Run IVE 5-invariant verification
+    10→    10→//! - `vuma repl` — Interactive REPL (parse expr, print AST)
+    11→    11→//! - `vuma lsp`  — Start Language Server (LSP) for IDE/LLM integration
+    12→    12→
+    13→    13→use std::fs;
+    14→    14→use std::io::{self, Write as IoWrite};
+    15→    15→use std::path::{Path, PathBuf};
+    16→    16→use std::process::Command;
+    17→    17→
+    18→    18→use clap::{Parser, Subcommand, ValueEnum};
+    19→    19→
+    20→    20→use vuma::pipeline::{
+    21→    21→    compile_with_path, CompileConfig, CompileResult, CompileTarget, OptLevel, VerificationLevel, VumaError,
+    22→    22→};
+    23→    23→use vuma::telemetry::TelemetryCollector;
+    24→    24→use vuma::logging::{LogLevel, init_logger, global_logger};
+    25→    25→use vuma_codegen::backend::{create_backend, BackendKind};
+    26→    26→use vuma_codegen::ScgToIr;
+    27→    27→use vuma_codegen::scg_to_ir::{Scg, ScgNode, ScgFunction, ScgParam, ScgStatement, ScgType,
+    28→    28→    ScgExpr, ComputationNode, AllocationNode, AccessNode, CallNode, ControlNode};
+    29→    29→use vuma_codegen::ir::BinOpKind;
+    30→    30→
+    31→    31→// ═══════════════════════════════════════════════════════════════════════════
+    32→    32→// CLI definition (clap derive)
+    33→    33→// ═══════════════════════════════════════════════════════════════════════════
+    34→    34→
+    35→    35→/// VUMA — Verified-Unsafe Memory Access: AI-Native Programming Language
+    36→    36→#[derive(Parser, Debug)]
+    37→    37→#[command(name = "vuma", version, about = "VUMA compiler and toolchain")]
+    38→    38→struct Cli {
+    39→    39→    /// Optimization level (overrides subcommand default)
+    40→    40→    #[arg(long, global = true, value_enum, default_value = "O2")]
+    41→    41→    opt_level: OptLevelArg,
+    42→    42→
+    43→    43→    /// Verification level (overrides subcommand default)
+    44→    44→    #[arg(long, global = true, value_enum, default_value = "normal")]
+    45→    45→    verification: VerificationArg,
+    46→    46→
+    47→    47→    /// Include debug info in output (alias: --debug-info)
+    48→    48→    #[arg(long, global = true, visible_alias = "debug-info")]
+    49→    49→    debug: bool,
+    50→    50→
+    51→    51→    /// Emit full ELF section headers in the output binary
+    52→    52→    #[arg(long, global = true)]
+    53→    53→    sections: bool,
+    54→    54→
+    55→    55→    /// Launch the interactive REPL (shorthand for `vuma repl`)
+    56→    56→    #[arg(long, global = true)]
+    57→    57→    repl: bool,
+    58→    58→
+    59→    59→    /// Enable runtime memory safety checks (bounds checking, --safe mode)
+    60→    60→    #[arg(long, global = true)]
+    61→    61→    safe: bool,
+    62→    62→
+    63→    63→    /// Run performance benchmarks instead of compiling
+    64→    64→    #[arg(long, global = true)]
+    65→    65→    bench: bool,
+    66→    66→
+    67→    67→    /// Enable verbose/debug logging
+    68→    68→    #[arg(short = 'v', long, global = true)]
+    69→    69→    verbose: bool,
+    70→    70→
+    71→    71→    /// Suppress non-error output
+    72→    72→    #[arg(short = 'q', long, global = true)]
+    73→    73→    quiet: bool,
+    74→    74→
+    75→    75→    /// Output telemetry data as JSON
+    76→    76→    #[arg(long, global = true)]
+    77→    77→    telemetry: bool,
+    78→    78→
+    79→    79→    #[command(subcommand)]
+    80→    80→    command: Option<Commands>,
+    81→    81→}
+    82→    82→
+    83→    83→/// Optimization level CLI argument.
+    84→    84→#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+    85→    85→enum OptLevelArg {
+    86→    86→    #[value(name = "O0")]
+    87→    87→    O0,
+    88→    88→    #[value(name = "O1")]
+    89→    89→    O1,
+    90→    90→    #[value(name = "O2")]
+    91→    91→    O2,
+    92→    92→    #[value(name = "O3")]
+    93→    93→    O3,
+    94→    94→}
+    95→    95→
+    96→    96→impl From<OptLevelArg> for OptLevel {
+    97→    97→    fn from(val: OptLevelArg) -> Self {
+    98→    98→        match val {
+    99→    99→            OptLevelArg::O0 => OptLevel::O0,
+   100→   100→            OptLevelArg::O1 => OptLevel::O1,
+   101→   101→            OptLevelArg::O2 => OptLevel::O2,
+   102→   102→            OptLevelArg::O3 => OptLevel::O3,
+   103→   103→        }
+   104→   104→    }
+   105→   105→}
+   106→   106→
+   107→   107→/// Verification level CLI argument.
+   108→   108→#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+   109→   109→enum VerificationArg {
+   110→   110→    #[value(name = "none")]
+   111→   111→    None,
+   112→   112→    #[value(name = "quick")]
+   113→   113→    Quick,
+   114→   114→    #[value(name = "normal")]
+   115→   115→    Normal,
+   116→   116→    #[value(name = "exhaustive")]
+   117→   117→    Exhaustive,
+   118→   118→}
+   119→   119→
+   120→   120→impl From<VerificationArg> for VerificationLevel {
+   121→   121→    fn from(val: VerificationArg) -> Self {
+   122→   122→        match val {
+   123→   123→            VerificationArg::None => VerificationLevel::None,
+   124→   124→            VerificationArg::Quick => VerificationLevel::Quick,
+   125→   125→            VerificationArg::Normal => VerificationLevel::Normal,
+   126→   126→            VerificationArg::Exhaustive => VerificationLevel::Exhaustive,
+   127→   127→        }
+   128→   128→    }
+   129→   129→}
+   130→   130→
+   131→   131→/// Target ISA for the `emit` subcommand.
+   132→   132→#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+   133→   133→enum IsaArg {
+   134→   134→    #[value(name = "aarch64")]
+   135→   135→    Aarch64,
+   136→   136→    #[value(name = "x86_64")]
+   137→   137→    X86_64,
+   138→   138→    #[value(name = "riscv64")]
+   139→   139→    Riscv64,
+   140→   140→    #[value(name = "wasm32")]
+   141→   141→    Wasm32,
+   142→   142→    #[value(name = "loongarch64")]
+   143→   143→    Loongarch64,
+   144→   144→    #[value(name = "arm32")]
+   145→   145→    Arm32,
+   146→   146→    #[value(name = "mips64")]
+   147→   147→    Mips64,
+   148→   148→    #[value(name = "ppc64")]
+   149→   149→    Ppc64,
+   150→   150→}
+   151→   151→
+   152→   152→impl From<IsaArg> for BackendKind {
+   153→   153→    fn from(val: IsaArg) -> Self {
+   154→   154→        match val {
+   155→   155→            IsaArg::Aarch64 => BackendKind::AArch64,
+   156→   156→            IsaArg::X86_64 => BackendKind::X86_64,
+   157→   157→            IsaArg::Riscv64 => BackendKind::RiscV64,
+   158→   158→            IsaArg::Wasm32 => BackendKind::Wasm32,
+   159→   159→            IsaArg::Loongarch64 => BackendKind::LoongArch64,
+   160→   160→            IsaArg::Arm32 => BackendKind::Arm32,
+   161→   161→            IsaArg::Mips64 => BackendKind::Mips64,
+   162→   162→            IsaArg::Ppc64 => BackendKind::PowerPC64,
+   163→   163→        }
+   164→   164→    }
+   165→   165→}
+   166→   166→
+   167→   167→#[derive(Subcommand, Debug)]
+   168→   168→enum Commands {
+   169→   169→    /// Parse + compile to ARM64 ELF (default), save to output file
+   170→   170→    Build {
+   171→   171→        /// Input VUMA source file
+   172→   172→        file: PathBuf,
+   173→   173→
+   174→   174→        /// Output file path (default: <input>.o)
+   175→   175→        #[arg(short, long)]
+   176→   176→        output: Option<PathBuf>,
+   177→   177→
+   178→   178→        /// Target platform
+   179→   179→        #[arg(long, value_enum, default_value = "linux")]
+   180→   180→        target: TargetArg,
+   181→   181→    },
+   182→   182→
+   183→   183→    /// Build + execute (via QEMU aarch64 or native)
+   184→   184→    Run {
+   185→   185→        /// Input VUMA source file
+   186→   186→        file: PathBuf,
+   187→   187→
+   188→   188→        /// Arguments to pass to the executed program
+   189→   189→        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+   190→   190→        args: Vec<String>,
+   191→   191→    },
+   192→   192→
+   193→   193→    /// Parse + SCG + BD inference + IVE verification only (no codegen)
+   194→   194→    Check {
+   195→   195→        /// Input VUMA source file
+   196→   196→        file: PathBuf,
+   197→   197→    },
+   198→   198→
+   199→   199→    /// Compile to a specific ISA target
+   200→   200→    Emit {
+   201→   201→        /// Target ISA
+   202→   202→        isa: IsaArg,
+   203→   203→
+   204→   204→        /// Input VUMA source file
+   205→   205→        file: PathBuf,
+   206→   206→
+   207→   207→        /// Output file path (default: <input>.o)
+   208→   208→        #[arg(short, long)]
+   209→   209→        output: Option<PathBuf>,
+   210→   210→    },
+   211→   211→
+   212→   212→    /// Read a binary file and disassemble it
+   213→   213→    Disasm {
+   214→   214→        /// Binary file to disassemble
+   215→   215→        file: PathBuf,
+   216→   216→
+   217→   217→        /// ISA to use for disassembly (default: aarch64)
+   218→   218→        #[arg(long, value_enum, default_value = "aarch64")]
+   219→   219→        isa: IsaArg,
+   220→   220→
+   221→   221→        /// Starting virtual address (default: 0x400000)
+   222→   222→        #[arg(long, default_value = "0x400000")]
+   223→   223→        base_addr: String,
+   224→   224→    },
+   225→   225→
+   226→   226→    /// Run IVE 5-invariant verification
+   227→   227→    Verify {
+   228→   228→        /// Input VUMA source file
+   229→   229→        file: PathBuf,
+   230→   230→    },
+   231→   231→
+   232→   232→    /// Interactive REPL: parse expressions and print AST
+   233→   233→    Repl,
+   234→   234→
+   235→   235→    /// Start the Language Server (LSP) for IDE/LLM integration
+   236→   236→    Lsp,
+   237→   237→
+   238→   238→    /// Package manager subcommands
+   239→   239→    Pkg {
+   240→   240→        #[command(subcommand)]
+   241→   241→        cmd: PkgCommand,
+   242→   242→    },
+   243→   243→}
+   244→   244→
+   245→   245→/// Package manager subcommands.
+   246→   246→#[derive(Subcommand, Debug)]
+   247→   247→enum PkgCommand {
+   248→   248→    /// Initialize a new VUMA package in the current directory
+   249→   249→    Init {
+   250→   250→        /// Package name
+   251→   251→        name: String,
+   252→   252→    },
+   253→   253→    /// Build the package and its dependencies
+   254→   254→    Build,
+   255→   255→    /// Add a dependency to the package manifest
+   256→   256→    Add {
+   257→   257→        /// Dependency name
+   258→   258→        dep: String,
+   259→   259→        /// Version requirement (e.g. "0.1", "^1.0")
+   260→   260→        #[arg(default_value = "*")]
+   261→   261→        version: String,
+   262→   262→    },
+   263→   263→}
+   264→   264→
+   265→   265→/// Target platform CLI argument for the `build` subcommand.
+   266→   266→#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+   267→   267→enum TargetArg {
+   268→   268→    #[value(name = "linux")]
+   269→   269→    Linux,
+   270→   270→}
+   271→   271→
+   272→   272→impl From<TargetArg> for CompileTarget {
+   273→   273→    fn from(val: TargetArg) -> Self {
+   274→   274→        match val {
+   275→   275→            TargetArg::Linux => CompileTarget::Linux,
+   276→   276→        }
+   277→   277→    }
+   278→   278→}
+   279→   279→
+   280→   280→// ═══════════════════════════════════════════════════════════════════════════
+   281→   281→// Version information
+   282→   282→// ═══════════════════════════════════════════════════════════════════════════
+   283→   283→
+   284→   284→/// VUMA version.
+   285→   285→const VERSION: &str = env!("CARGO_PKG_VERSION");
+   286→   286→
+   287→   287→/// Supported backend list.
+   288→   288→const SUPPORTED_BACKENDS: &str =
+   289→   289→    "aarch64, x86_64, riscv64, arm32, mips64, ppc64, loongarch64, wasm32";
+   290→   290→
+   291→   291→/// Build the long version string.
+   292→   292→fn version_long() -> String {
+   293→   293→    format!(
+   294→   294→        "vuma {}\n\
+   295→   295→         supported backends: {}\n\
+   296→   296→         rustc: {}.{}.{}",
+   297→   297→        VERSION,
+   298→   298→        SUPPORTED_BACKENDS,
+   299→   299→        option_env!("RUSTC_VERSION_MAJOR").unwrap_or("?"),
+   300→   300→        option_env!("RUSTC_VERSION_MINOR").unwrap_or("?"),
+   301→   301→        option_env!("RUSTC_VERSION_PATCH").unwrap_or("?"),
+   302→   302→    )
+   303→   303→}
+   304→   304→
+   305→   305→// ═══════════════════════════════════════════════════════════════════════════
+   306→   306→// Helper functions
+   307→   307→// ═══════════════════════════════════════════════════════════════════════════
+   308→   308→
+   309→   309→/// Read source file content with a human-readable error on failure.
+   310→   310→fn read_source(path: &PathBuf) -> Result<String, String> {
+   311→   311→    fs::read_to_string(path)
+   312→   312→        .map_err(|e| format!("error: cannot read source file '{}': {}", path.display(), e))
+   313→   313→}
+   314→   314→
+   315→   315→/// Build a `CompileConfig` from the global CLI flags.
+   316→   316→fn make_config(cli: &Cli, target: CompileTarget) -> CompileConfig {
+   317→   317→    CompileConfig {
+   318→   318→        target,
+   319→   319→        opt_level: OptLevel::from(cli.opt_level),
+   320→   320→        verification_level: VerificationLevel::from(cli.verification),
+   321→   321→        debug_info: cli.debug,
+   322→   322→        section_headers: cli.sections,
+   323→   323→        runtime_bounds_checks: cli.safe,
+   324→   324→        memory_safety: true,
+   325→   325→        ..CompileConfig::default()
+   326→   326→    }
+   327→   327→}
+   328→   328→
+   329→   329→/// Print compilation errors to stderr in a human-readable format.
+   330→   330→fn print_errors(errors: &[VumaError]) {
+   331→   331→    for err in errors {
+   332→   332→        eprintln!("error[{}]: {}", err.stage(), err);
+   333→   333→    }
+   334→   334→}
+   335→   335→
+   336→   336→/// Determine the default output path for a given input file.
+   337→   337→fn default_output_path(input: &Path) -> PathBuf {
+   338→   338→    let stem = input.file_stem().unwrap_or_default().to_string_lossy();
+   339→   339→    let dir = input.parent().unwrap_or(std::path::Path::new("."));
+   340→   340→    dir.join(format!("{}.o", stem))
+   341→   341→}
+   342→   342→
+   343→   343→// ═══════════════════════════════════════════════════════════════════════════
+   344→   344→// Subcommand handlers
+   345→   345→// ═══════════════════════════════════════════════════════════════════════════
+   346→   346→
+   347→   347→/// `vuma build <file>` — Parse + compile to ELF, save to output file.
+   348→   348→fn cmd_build(
+   349→   349→    cli: &Cli,
+   350→   350→    file: &PathBuf,
+   351→   351→    output: &Option<PathBuf>,
+   352→   352→    target: &TargetArg,
+   353→   353→) -> Result<(), String> {
+   354→   354→    let source = read_source(file)?;
+   355→   355→    let config = make_config(cli, CompileTarget::from(*target));
+   356→   356→
+   357→   357→    // Initialize telemetry collector if --telemetry is set.
+   358→   358→    let mut telemetry = if cli.telemetry {
+   359→   359→        let mut tc = TelemetryCollector::new();
+   360→   360→        tc.set_opt_level(&format!("{:?}", cli.opt_level));
+   361→   361→        tc.set_verification_level(&format!("{:?}", cli.verification));
+   362→   362→        tc.set_target(&format!("{:?}", target));
+   363→   363→        tc.set_debug_info(cli.debug);
+   364→   364→        Some(tc)
+   365→   365→    } else {
+   366→   366→        None
+   367→   367→    };
+   368→   368→
+   369→   369→    if let Some(ref mut tc) = telemetry { tc.stage_start("compile"); }
+   370→   370→
+   371→   371→    let compile_result = vuma::compile_with_recovery(&source, Some(file), &config);
+   372→   372→
+   373→   373→    if let Some(ref mut tc) = telemetry { tc.stage_end("compile"); }
+   374→   374→
+   375→   375→    match compile_result {
+   376→   376→        CompileResult::Success(result) => {
+   377→   377→            if let Some(ref mut tc) = telemetry {
+   378→   378→                tc.set_scg_node_count(result.scg.node_count());
+   379→   379→                tc.set_ir_function_count(result.ir_function_count);
+   380→   380→                tc.set_ir_instruction_count(result.ir_instruction_count);
+   381→   381→                tc.set_binary_size(result.binary.len());
+   382→   382→            }
+   383→   383→
+   384→   384→            let out_path = output
+   385→   385→                .as_ref()
+   386→   386→                .cloned()
+   387→   387→                .unwrap_or_else(|| default_output_path(file));
+   388→   388→            fs::write(&out_path, &result.binary).map_err(|e| {
+   389→   389→                format!(
+   390→   390→                    "error: cannot write output file '{}': {}",
+   391→   391→                    out_path.display(),
+   392→   392→                    e
+   393→   393→                )
+   394→   394→            })?;
+   395→   395→            // Make the output file executable on Unix.
+   396→   396→            #[cfg(unix)]
+   397→   397→            {
+   398→   398→                use std::os::unix::fs::PermissionsExt;
+   399→   399→                let mut perms = fs::metadata(&out_path)
+   400→   400→                    .map_err(|e| format!("error: cannot stat '{}': {}", out_path.display(), e))?
+   401→   401→                    .permissions();
+   402→   402→                perms.set_mode(0o755);
+   403→   403→                fs::set_permissions(&out_path, perms)
+   404→   404→                    .map_err(|e| format!("error: cannot chmod '{}': {}", out_path.display(), e))?;
+   405→   405→            }
+   406→   406→
+   407→   407→            if !cli.quiet {
+   408→   408→                println!(
+   409→   409→                    "Compiled {} -> {} ({} bytes, {} SCG nodes, {} IR instructions)",
+   410→   410→                    file.display(),
+   411→   411→                    out_path.display(),
+   412→   412→                    result.binary.len(),
+   413→   413→                    result.scg.node_count(),
+   414→   414→                    result.ir_instruction_count,
+   415→   415→                );
+   416→   416→
+   417→   417→                // Print stage timings.
+   418→   418→                for (stage, ms) in &result.stage_timings {
+   419→   419→                    println!("  {:20} {}ms", stage, ms);
+   420→   420→                }
+   421→   421→            }
+   422→   422→
+   423→   423→            // Output telemetry if requested.
+   424→   424→            if let Some(tc) = telemetry {
+   425→   425→                let report = tc.finalize();
+   426→   426→                println!("\n{}", serde_json::to_string_pretty(&report).unwrap());
+   427→   427→            }
+   428→   428→
+   429→   429→            Ok(())
+   430→   430→        }
+   431→   431→        CompileResult::Partial(partial) => {
+   432→   432→            print_errors(&partial.diagnostics);
+   433→   433→
+   434→   434→            if cli.telemetry {
+   435→   435→                if let Some(tc) = telemetry {
+   436→   436→                    let report = tc.finalize();
+   437→   437→                    eprintln!("\n{}", serde_json::to_string_pretty(&report).unwrap());
+   438→   438→                }
+   439→   439→            }
+   440→   440→
+   441→   441→            Err(format!(
+   442→   442→                "compilation failed with {} error(s) (last completed stage: {})",
+   443→   443→                partial.diagnostics.len(),
+   444→   444→                partial.last_completed_stage
+   445→   445→                    .map(|s| format!("{:?}", s))
+   446→   446→                    .unwrap_or_else(|| "none".to_string())
+   447→   447→            ))
+   448→   448→        }
+   449→   449→    }
+   450→   450→}
+   451→   451→
+   452→   452→/// `vuma run <file>` — Build + execute.
+   453→   453→fn cmd_run(cli: &Cli, file: &PathBuf, args: &[String]) -> Result<(), String> {
+   454→   454→    let source = read_source(file)?;
+   455→   455→    let config = make_config(cli, CompileTarget::Linux);
+   456→   456→    let result = compile_with_path(&source, Some(file), &config).map_err(|errors| {
+   457→   457→        print_errors(&errors);
+   458→   458→        global_logger().error("compile", &format!("compilation failed with {} error(s)", errors.len()));
+   459→   459→        format!("compilation failed with {} error(s)", errors.len())
+   460→   460→    })?;
+   461→   461→    let tmp_dir = std::env::temp_dir();
+   462→   462→    let exe_path = tmp_dir.join(format!("vuma_run_{}", std::process::id()));
+   463→   463→    fs::write(&exe_path, &result.binary).map_err(|e| {
+   464→   464→        format!(
+   465→   465→            "error: cannot write temporary executable '{}': {}",
+   466→   466→            exe_path.display(),
+   467→   467→            e
+   468→   468→        )
+   469→   469→    })?;
+   470→   470→
+   471→   471→    // Make the file executable on Unix.
+   472→   472→    #[cfg(unix)]
+   473→   473→    {
+   474→   474→        use std::os::unix::fs::PermissionsExt;
+   475→   475→        let mut perms = fs::metadata(&exe_path)
+   476→   476→            .map_err(|e| format!("error: cannot stat '{}': {}", exe_path.display(), e))?
+   477→   477→            .permissions();
+   478→   478→        perms.set_mode(0o755);
+   479→   479→        fs::set_permissions(&exe_path, perms)
+   480→   480→            .map_err(|e| format!("error: cannot chmod '{}': {}", exe_path.display(), e))?;
+   481→   481→    }
+   482→   482→
+   483→   483→    // Try to execute: first natively (if on aarch64), then via qemu-aarch64.
+   484→   484→    let native_output = Command::new(&exe_path).args(args).output();
+   485→   485→
+   486→   486→    let output = match native_output {
+   487→   487→        Ok(out) => out,
+   488→   488→        Err(_) => {
+   489→   489→            // Native execution failed; try qemu-aarch64.
+   490→   490→            let qemu_output = Command::new("qemu-aarch64")
+   491→   491→                .arg(&exe_path)
+   492→   492→                .args(args)
+   493→   493→                .output()
+   494→   494→                .map_err(|e| {
+   495→   495→                    format!(
+   496→   496→                        "error: failed to execute binary (neither native nor qemu-aarch64): {}",
+   497→   497→                        e
+   498→   498→                    )
+   499→   499→                })?;
+   500→   500→            qemu_output
+   501→   501→        }
+   502→   502→    };
+   503→   503→
+   504→   504→    io::stdout()
+   505→   505→        .write_all(&output.stdout)
+   506→   506→        .map_err(|e| format!("error: failed to write program output: {}", e))?;
+   507→   507→    io::stderr()
+   508→   508→        .write_all(&output.stderr)
+   509→   509→        .map_err(|e| format!("error: failed to write program stderr: {}", e))?;
+   510→   510→
+   511→   511→    // Clean up temp file.
+   512→   512→    let _ = fs::remove_file(&exe_path);
+   513→   513→
+   514→   514→    let code = output.status.code().unwrap_or(1);
+   515→   515→    if code != 0 {
+   516→   516→        return Err(format!("program exited with code {}", code));
+   517→   517→    }
+   518→   518→
+   519→   519→    Ok(())
+   520→   520→}
+   521→   521→
+   522→   522→/// `vuma check <file>` — Parse + SCG + BD inference + IVE verification only.
+   523→   523→fn cmd_check(cli: &Cli, file: &PathBuf) -> Result<(), String> {
+   524→   524→    let source = read_source(file)?;
+   525→   525→    let mut config = make_config(cli, CompileTarget::Linux);
+   526→   526→    // check mode: always run verification, don't skip
+   527→   527→    if config.verification_level == VerificationLevel::None {
+   528→   528→        config.verification_level = VerificationLevel::Normal;
+   529→   529→    }
+   530→   530→
+   531→   531→    // Run the full compile — the check command doesn't save the binary,
+   532→   532→    // it just verifies the program compiles and passes verification.
+   533→   533→    let result = compile_with_path(&source, Some(file), &config).map_err(|errors| {
+   534→   534→        print_errors(&errors);
+   535→   535→        global_logger().error("check", &format!("check failed with {} error(s)", errors.len()));
+   536→   536→        format!("check failed with {} error(s)", errors.len())
+   537→   537→    })?;
+   538→   538→
+   539→   539→    if !cli.quiet {
+   540→   540→        println!("Check passed for {}", file.display());
+   541→   541→        println!("  SCG nodes:      {}", result.scg.node_count());
+   542→   542→        println!("  IR functions:   {}", result.ir_function_count);
+   543→   543→        println!("  IR instructions: {}", result.ir_instruction_count);
+   544→   544→
+   545→   545→        if let Some(ref verification) = result.verification {
+   546→   546→            println!("  Verification:   {}", verification.overall);
+   547→   547→        }
+   548→   548→
+   549→   549→        // Print stage timings.
+   550→   550→        for (stage, ms) in &result.stage_timings {
+   551→   551→            println!("  {:20} {}ms", stage, ms);
+   552→   552→        }
+   553→   553→    }
+   554→   554→
+   555→   555→    Ok(())
+   556→   556→}
+   557→   557→
+   558→   558→/// `vuma emit <isa> <file>` — Compile to a specific ISA target.
+   559→   559→///
+   560→   560→/// Uses the direct AST → codegen SCG → IR path for better code quality
+   561→   561→/// than the main pipeline (which goes through the semantic SCG and loses
+   562→   562→/// most program semantics in the SCG→IR bridge).
+   563→   563→fn cmd_emit(
+   564→   564→    cli: &Cli,
+   565→   565→    isa: &IsaArg,
+   566→   566→    file: &PathBuf,
+   567→   567→    output: &Option<PathBuf>,
+   568→   568→) -> Result<(), String> {
+   569→   569→    let source = read_source(file)?;
+   570→   570→    let backend_kind = BackendKind::from(*isa);
+   571→   571→
+   572→   572→    // Step 1: Parse source → AST.
+   573→   573→    let mut parser = vuma_parser::Parser::new(&source);
+   574→   574→    let parse_result = parser.parse_program();
+   575→   575→    if parse_result.is_err() {
+   576→   576→        return Err(format!("parse error: {:?}", parse_result.errors));
+   577→   577→    }
+   578→   578→    if !parse_result.errors.is_empty() {
+   579→   579→        eprintln!("[emit] WARNING: {} non-fatal parse errors:", parse_result.errors.len());
+   580→   580→        for err in &parse_result.errors {
+   581→   581→            eprintln!("[emit]   {:?}", err);
+   582→   582→        }
+   583→   583→    }
+   584→   584→    let program = parse_result.value.unwrap();
+   585→   585→
+   586→   586→    // Step 2: Bridge parser AST → codegen SCG.
+   587→   587→    let codegen_scg = bridge_ast_to_codegen_scg(&program);
+   588→   588→
+   589→   589→    // Step 3: Lower codegen SCG → IR.
+   590→   590→    let mut ir_builder = ScgToIr::new();
+   591→   591→    let ir_program = ir_builder.convert(&codegen_scg).map_err(|e| {
+   592→   592→        format!("IR conversion error: {}", e)
+   593→   593→    })?;
+   594→   594→
+   595→   595→    eprintln!("[emit] IR program has {} functions", ir_program.functions.len());
+   596→   596→    for func in &ir_program.functions {
+   597→   597→        eprintln!("[emit] Function: {} ({} params, {} vregs)", func.name, func.params.len(), func.vregs.len());
+   598→   598→        for block in &func.blocks {
+   599→   599→            eprintln!("[emit]   Block: {}", block.label);
+   600→   600→            for instr in &block.instructions {
+   601→   601→                eprintln!("[emit]     {:?}", instr);
+   602→   602→            }
+   603→   603→        }
+   604→   604→    }
+   605→   605→
+   606→   606→    // Step 4: Create backend and allocate registers (with fallback).
+   607→   607→    let backend = match create_backend(backend_kind) {
+   608→   608→        Ok(b) => b,
+   609→   609→        Err(e) => {
+   610→   610→            let err_msg = format!("{}", e);
+   611→   611→            global_logger().warn("emit", &format!("{} backend failed: {}", backend_kind.isa_name(), err_msg));
+   612→   612→            // Try fallback to AArch64 if not already trying it
+   613→   613→            if backend_kind != BackendKind::AArch64 {
+   614→   614→                global_logger().info("emit", "falling back to aarch64 backend");
+   615→   615→                create_backend(BackendKind::AArch64).map_err(|e2| {
+   616→   616→                    format!("error: cannot create {} backend: {}, aarch64 fallback also failed: {}",
+   617→   617→                        backend_kind.isa_name(), err_msg, e2)
+   618→   618→                })?
+   619→   619→            } else {
+   620→   620→                return Err(format!("error: cannot create {} backend: {}", backend_kind.isa_name(), err_msg));
+   621→   621→            }
+   622→   622→        }
+   623→   623→    };
+   624→   624→
+   625→   625→    let mut allocated_functions = Vec::new();
+   626→   626→    for func in &ir_program.functions {
+   627→   627→        match backend.allocate_registers(func) {
+   628→   628→            Ok(allocated) => allocated_functions.push(allocated),
+   629→   629→            Err(e) => {
+   630→   630→                eprintln!("warning: register allocation failed for '{}': {}", func.name, e);
+   631→   631→            }
+   632→   632→        }
+   633→   633→    }
+   634→   634→
+   635→   635→    let out_path = output
+   636→   636→        .as_ref()
+   637→   637→        .cloned()
+   638→   638→        .unwrap_or_else(|| default_output_path(file));
+   639→   639→
+   640→   640→    // Step 5: Encode and write output.
+   641→   641→    if !allocated_functions.is_empty() {
+   642→   642→        let allocated_program = vuma_codegen::backend::AllocatedProgram {
+   643→   643→            functions: allocated_functions,
+   644→   644→            total_code_size: 0,
+   645→   645→            total_data_size: 0,
+   646→   646→        };
+   647→   647→        match backend.encode_program(&allocated_program) {
+   648→   648→            Ok(bytes) => {
+   649→   649→                fs::write(&out_path, &bytes).map_err(|e| {
+   650→   650→                    format!("error: cannot write output file '{}': {}", out_path.display(), e)
+   651→   651→                })?;
+   652→   652→                // Make the output file executable on Unix.
+   653→   653→                #[cfg(unix)]
+   654→   654→                {
+   655→   655→                    use std::os::unix::fs::PermissionsExt;
+   656→   656→                    let mut perms = fs::metadata(&out_path)
+   657→   657→                        .map_err(|e| format!("error: cannot stat '{}': {}", out_path.display(), e))?
+   658→   658→                        .permissions();
+   659→   659→                    perms.set_mode(0o755);
+   660→   660→                    fs::set_permissions(&out_path, perms)
+   661→   661→                        .map_err(|e| format!("error: cannot chmod '{}': {}", out_path.display(), e))?;
+   662→   662→                }
+   663→   663→                println!(
+   664→   664→                    "Emitted {} -> {} ({} bytes, ISA: {})",
+   665→   665→                    file.display(),
+   666→   666→                    out_path.display(),
+   667→   667→                    bytes.len(),
+   668→   668→                    backend.name(),
+   669→   669→                );
+   670→   670→            }
+   671→   671→            Err(e) => {
+   672→   672→                use vuma_codegen::backend::BackendError;
+   673→   673→                let prefix = match &e {
+   674→   674→                    BackendError::UnresolvedRelocation { .. } => "E037",
+   675→   675→                    _ => "error",
+   676→   676→                };
+   677→   677→                return Err(format!("{}: {} encoding failed: {}", prefix, backend.name(), e));
+   678→   678→            }
+   679→   679→        }
+   680→   680→    } else {
+   681→   681→        return Err("no functions were successfully allocated".to_string());
+   682→   682→    }
+   683→   683→
+   684→   684→    Ok(())
+   685→   685→}
+   686→   686→
+   687→   687→/// Bridge parser AST → codegen SCG.
+   688→   688→///
+   689→   689→/// This converts the parser's AST into the codegen's SCG representation,
+   690→   690→/// which can then be lowered to IR. This bypasses the main pipeline's
+   691→   691→/// semantic SCG which loses most program semantics.
+   692→   692→///
+   693→   693→/// Key design: expressions are flattened into three-address code (TAC) by
+   694→   694→/// introducing temporary variables for sub-expressions. This preserves the
+   695→   695→/// full semantics of nested binary operations, function calls, dereferences,
+   696→   696→/// and casts.
+   697→   697→fn bridge_ast_to_codegen_scg(program: &vuma_parser::ast::Program) -> Scg {
+   698→   698→    use vuma_parser::ast::Item;
+   699→   699→
+   700→   700→    let mut nodes: Vec<ScgNode> = Vec::new();
+   701→   701→
+   702→   702→    for item in &program.items {
+   703→   703→        if let Item::FnDef(fn_def) = item {
+   704→   704→            let params: Vec<ScgParam> = fn_def
+   705→   705→                .params
+   706→   706→                .iter()
+   707→   707→                .map(|p| ScgParam {
+   708→   708→                    name: p.name.clone(),
+   709→   709→                    ty: bridge_type_to_codegen_scg(&p.ty),
+   710→   710→                })
+   711→   711→                .collect();
+   712→   712→
+   713→   713→            let results = if let Some(ref ret_ty) = fn_def.return_type {
+   714→   714→                vec![bridge_type_to_codegen_scg(&Some(ret_ty.clone()))]
+   715→   715→            } else {
+   716→   716→                vec![]
+   717→   717→            };
+   718→   718→
+   719→   719→            let mut ctx = BridgeCtx::new();
+   720→   720→            let mut body = bridge_block_to_scg_stmts(&fn_def.body, &mut ctx);
+   721→   721→
+   722→   722→            // Ensure every function ends with a Return statement.
+   723→   723→            // If the body doesn't end with a Return, add an implicit one.
+   724→   724→            // When the function has a return type and the last statement was an
+   725→   725→            // expression, use ctx.last_expr_result as the return value.
+   726→   726→            let has_return = body.last().map_or(false, |s| matches!(s, ScgStatement::Return(_)));
+   727→   727→            if !has_return {
+   728→   728→                let ret_val = if !results.is_empty() {
+   729→   729→                    // First check if the last expression was tracked.
+   730→   730→                    if let Some(ref expr) = ctx.last_expr_result {
+   731→   731→                        Some(expr.clone())
+   732→   732→                    } else {
+   733→   733→                        // Otherwise, look for the last computation/call result.
+   734→   734→                        body.iter().rev().find_map(|s| match s {
+   735→   735→                            ScgStatement::Computation(comp) => Some(ScgExpr::Var(comp.dst.clone())),
+   736→   736→                            ScgStatement::Call(call) => call.dst.as_ref().map(|d| ScgExpr::Var(d.clone())),
+   737→   737→                            _ => None,
+   738→   738→                        })
+   739→   739→                    }
+   740→   740→                } else {
+   741→   741→                    None
+   742→   742→                };
+   743→   743→                body.push(ScgStatement::Return(ret_val.into_iter().collect()));
+   744→   744→            }
+   745→   745→
+   746→   746→            nodes.push(ScgNode::Function(ScgFunction {
+   747→   747→                name: fn_def.name.clone(),
+   748→   748→                params,
+   749→   749→                results,
+   750→   750→                body,
+   751→   751→            }));
+   752→   752→        }
+   753→   753→    }
+   754→   754→
+   755→   755→    Scg { nodes }
+   756→   756→}
+   757→   757→
+   758→   758→/// Context for the AST → codegen SCG bridge, tracking a monotonic temp counter
+   759→   759→/// and the last expression result for implicit returns.
+   760→   760→struct BridgeCtx {
+   761→   761→    temp_counter: u32,
+   762→   762→    /// The result of the last expression statement, if any.
+   763→   763→    /// Used for implicit return when a function body ends with an expression.
+   764→   764→    last_expr_result: Option<ScgExpr>,
+   765→   765→}
+   766→   766→
+   767→   767→impl BridgeCtx {
+   768→   768→    fn new() -> Self {
+   769→   769→        Self { temp_counter: 0, last_expr_result: None }
+   770→   770→    }
+   771→   771→
+   772→   772→    /// Allocate a unique temporary variable name.
+   773→   773→    fn alloc_temp(&mut self) -> String {
+   774→   774→        let name = format!("__t{}", self.temp_counter);
+   775→   775→        self.temp_counter += 1;
+   776→   776→        name
+   777→   777→    }
+   778→   778→}
+   779→   779→
+   780→   780→/// Convert a parser type annotation to a codegen SCG type.
+   781→   781→fn bridge_type_to_codegen_scg(ty: &Option<vuma_parser::ast::Type>) -> ScgType {
+   782→   782→    match ty {
+   783→   783→        Some(vuma_parser::ast::Type::BDBase(name)) => match name.as_str() {
+   784→   784→            "i8" => ScgType::I8,
+   785→   785→            "i16" => ScgType::I16,
+   786→   786→            "i32" => ScgType::I32,
+   787→   787→            "i64" => ScgType::I64,
+   788→   788→            "u8" => ScgType::U8,
+   789→   789→            "u16" => ScgType::U16,
+   790→   790→            "u32" => ScgType::U32,
+   791→   791→            "u64" => ScgType::U64,
+   792→   792→            _ => ScgType::I64,
+   793→   793→        },
+   794→   794→        Some(vuma_parser::ast::Type::Ptr(_)) => ScgType::Ptr,
+   795→   795→        Some(vuma_parser::ast::Type::RegionPtr { .. }) => ScgType::Ptr,
+   796→   796→        _ => ScgType::Void,
+   797→   797→    }
+   798→   798→}
+   799→   799→
+   800→   800→
+   801→   801→/// Convert a parser block into codegen SCG statements, flattening expressions
+   802→   802→/// into three-address code with temporaries.
+   803→   803→fn bridge_block_to_scg_stmts(block: &vuma_parser::ast::Block, ctx: &mut BridgeCtx) -> Vec<ScgStatement> {
+   804→   804→    block
+   805→   805→        .statements
+   806→   806→        .iter()
+   807→   807→        .flat_map(|s| bridge_stmt_to_scg(s, ctx))
+   808→   808→        .collect()
+   809→   809→}
+   810→   810→
+   811→   811→/// Flatten an expression into three-address code. Returns the ScgExpr that
+   812→   812→/// holds the result, and appends any intermediate computation statements
+   813→   813→/// to `stmts`.
+   814→   814→///
+   815→   815→/// This is the core of the bridge: it recursively decomposes nested
+   816→   816→/// expressions into a sequence of simple computation nodes, each operating
+   817→   817→/// on at most two operands and producing one result. This preserves the
+   818→   818→/// full semantics of the original expression tree.
+   819→   819→fn flatten_expr(
+   820→   820→    expr: &vuma_parser::ast::Expr,
+   821→   821→    stmts: &mut Vec<ScgStatement>,
+   822→   822→    ctx: &mut BridgeCtx,
+   823→   823→) -> ScgExpr {
+   824→   824→    use vuma_parser::ast::{Expr, Lit, UnOp};
+   825→   825→
+   826→   826→    match expr {
+   827→   827→        // ── Leaf expressions: return directly, no flattening needed ──
+   828→   828→        Expr::Var { name, .. } => ScgExpr::Var(name.clone()),
+   829→   829→        Expr::Lit { value, .. } => match value {
+   830→   830→            Lit::Int(n) => ScgExpr::Int(*n),
+   831→   831→            Lit::Float(f) => ScgExpr::Float(*f),
+   832→   832→            Lit::Bool(b) => ScgExpr::Int(if *b { 1 } else { 0 }),
+   833→   833→            Lit::Address(a) => ScgExpr::Int(*a as i64),
+   834→   834→            Lit::String(_) => ScgExpr::Int(0),
+   835→   835→        },
+   836→   836→
+   837→   837→        // ── Binary operations: flatten lhs and rhs, then emit one Computation ──
+   838→   838→        Expr::BinOp { op, lhs, rhs, .. } => {
+   839→   839→            let lhs_expr = flatten_expr(lhs, stmts, ctx);
+   840→   840→            let rhs_expr = flatten_expr(rhs, stmts, ctx);
+   841→   841→            let dst = ctx.alloc_temp();
+   842→   842→            let binop_kind = map_ast_binop(op);
+   843→   843→            stmts.push(ScgStatement::Computation(ComputationNode {
+   844→   844→                dst: dst.clone(),
+   845→   845→                op: binop_kind,
+   846→   846→                lhs: lhs_expr,
+   847→   847→                rhs: rhs_expr,
+   848→   848→                tail_call: false,
+   849→   849→            }));
+   850→   850→            ScgExpr::Var(dst)
+   851→   851→        }
+   852→   852→
+   853→   853→        // ── Unary operations: flatten operand, then emit one Computation ──
+   854→   854→        Expr::UnOp { op, expr: operand, .. } => {
+   855→   855→            let operand_expr = flatten_expr(operand, stmts, ctx);
+   856→   856→            let dst = ctx.alloc_temp();
+   857→   857→            match op {
+   858→   858→                UnOp::BitNot => {
+   859→   859→                    stmts.push(ScgStatement::Computation(ComputationNode {
+   860→   860→                        dst: dst.clone(),
+   861→   861→                        op: BinOpKind::Xor,
+   862→   862→                        lhs: operand_expr,
+   863→   863→                        rhs: ScgExpr::Int(-1),
+   864→   864→                        tail_call: false,
+   865→   865→                    }));
+   866→   866→                }
+   867→   867→                UnOp::Neg => {
+   868→   868→                    stmts.push(ScgStatement::Computation(ComputationNode {
+   869→   869→                        dst: dst.clone(),
+   870→   870→                        op: BinOpKind::Sub,
+   871→   871→                        lhs: ScgExpr::Int(0),
+   872→   872→                        rhs: operand_expr,
+   873→   873→                        tail_call: false,
+   874→   874→                    }));
+   875→   875→                }
+   876→   876→                UnOp::Not => {
+   877→   877→                    stmts.push(ScgStatement::Computation(ComputationNode {
+   878→   878→                        dst: dst.clone(),
+   879→   879→                        op: BinOpKind::Eq,
+   880→   880→                        lhs: operand_expr,
+   881→   881→                        rhs: ScgExpr::Int(0),
+   882→   882→                        tail_call: false,
+   883→   883→                    }));
+   884→   884→                }
+   885→   885→                UnOp::Deref => {
+   886→   886→                    stmts.push(ScgStatement::Access(AccessNode::Load {
+   887→   887→                        dst: dst.clone(),
+   888→   888→                        ptr: operand_expr,
+   889→   889→                        offset: None,
+   890→   890→                    }));
+   891→   891→                }
+   892→   892→            }
+   893→   893→            ScgExpr::Var(dst)
+   894→   894→        }
+   895→   895→
+   896→   896→        // ── Function call: flatten args, emit CallNode ──
+   897→   897→        Expr::Call { callee, args, .. } => {
+   898→   898→            let func_name = match callee.as_ref() {
+   899→   899→                Expr::Var { name, .. } => name.clone(),
+   900→   900→                _ => "_unknown".into(),
+   901→   901→            };
+   902→   902→            let flat_args: Vec<ScgExpr> = args.iter()
+   903→   903→                .map(|a| flatten_expr(a, stmts, ctx))
+   904→   904→                .collect();
+   905→   905→            let dst = ctx.alloc_temp();
+   906→   906→            stmts.push(ScgStatement::Call(CallNode {
+   907→   907→                dst: Some(dst.clone()),
+   908→   908→                func: func_name,
+   909→   909→                args: flat_args,
+   910→   910→                is_extern: false,
+   911→   911→            }));
+   912→   912→            ScgExpr::Var(dst)
+   913→   913→        }
+   914→   914→
+   915→   915→        // ── Dereference: flatten the address, emit Load ──
+   916→   916→        Expr::Deref { expr, .. } => {
+   917→   917→            let addr = flatten_expr(expr, stmts, ctx);
+   918→   918→            let dst = ctx.alloc_temp();
+   919→   919→            stmts.push(ScgStatement::Access(AccessNode::Load {
+   920→   920→                dst: dst.clone(),
+   921→   921→                ptr: addr,
+   922→   922→                offset: None,
+   923→   923→            }));
+   924→   924→            ScgExpr::Var(dst)
+   925→   925→        }
+   926→   926→
+   927→   927→        // ── Offset (pointer arithmetic): flatten base and offset, emit Add ──
+   928→   928→        Expr::Offset { base, offset, .. } => {
+   929→   929→            let base_expr = flatten_expr(base, stmts, ctx);
+   930→   930→            let off_expr = flatten_expr(offset, stmts, ctx);
+   931→   931→            let dst = ctx.alloc_temp();
+   932→   932→            stmts.push(ScgStatement::Computation(ComputationNode {
+   933→   933→                dst: dst.clone(),
+   934→   934→                op: BinOpKind::Add,
+   935→   935→                lhs: base_expr,
+   936→   936→                rhs: off_expr,
+   937→   937→                tail_call: false,
+   938→   938→            }));
+   939→   939→            ScgExpr::Var(dst)
+   940→   940→        }
+   941→   941→
+   942→   942→        // ── Cast: flatten operand, pass through ──
+   943→   943→        Expr::Cast { expr, .. } => flatten_expr(expr, stmts, ctx),
+   944→   944→
+   945→   945→        // ── TypeAscription: flatten inner expression ──
+   946→   946→        Expr::TypeAscription { expr, .. } => flatten_expr(expr, stmts, ctx),
+   947→   947→
+   948→   948→        // ── Index: flatten base and index, compute addr, emit Load ──
+   949→   949→        Expr::Index { expr, index, .. } => {
+   950→   950→            let base_expr = flatten_expr(expr, stmts, ctx);
+   951→   951→            let idx_expr = flatten_expr(index, stmts, ctx);
+   952→   952→            let addr = ctx.alloc_temp();
+   953→   953→            stmts.push(ScgStatement::Computation(ComputationNode {
+   954→   954→                dst: addr.clone(),
+   955→   955→                op: BinOpKind::Add,
+   956→   956→                lhs: base_expr,
+   957→   957→                rhs: idx_expr,
+   958→   958→                tail_call: false,
+   959→   959→            }));
+   960→   960→            let dst = ctx.alloc_temp();
+   961→   961→            stmts.push(ScgStatement::Access(AccessNode::Load {
+   962→   962→                dst: dst.clone(),
+   963→   963→                ptr: ScgExpr::Var(addr),
+   964→   964→                offset: None,
+   965→   965→            }));
+   966→   966→            ScgExpr::Var(dst)
+   967→   967→        }
+   968→   968→
+   969→   969→        // ── Range: just flatten start (range is handled by For) ──
+   970→   970→        Expr::Range { start, .. } => flatten_expr(start, stmts, ctx),
+   971→   971→
+   972→   972→        // ── Allocate: emit as a heap allocation call ──
+   973→   973→        Expr::Allocate { size, .. } => {
+   974→   974→            let size_expr = flatten_expr(size, stmts, ctx);
+   975→   975→            let dst = ctx.alloc_temp();
+   976→   976→            stmts.push(ScgStatement::Call(CallNode {
+   977→   977→                dst: Some(dst.clone()),
+   978→   978→                func: "__vuma_alloc".to_string(),
+   979→   979→                args: vec![size_expr],
+   980→   980→                is_extern: true,
+   981→   981→            }));
+   982→   982→            ScgExpr::Var(dst)
+   983→   983→        }
+   984→   984→
+   985→   985→        // ── Null → 0 ──
+   986→   986→        Expr::Null { .. } => ScgExpr::Int(0),
+   987→   987→
+   988→   988→        // ── Uninitialized → 0 ──
+   989→   989→        Expr::Uninitialized { .. } => ScgExpr::Int(0),
+   990→   990→
+   991→   991→        // ── Fallback for unsupported expression types ──
+   992→   992→        _ => ScgExpr::Int(0),
+   993→   993→    }
+   994→   994→}
+   995→   995→
+   996→   996→/// Map a VUMA AST BinOp to a codegen BinOpKind.
+   997→   997→fn map_ast_binop(op: &vuma_parser::ast::BinOp) -> BinOpKind {
+   998→   998→    use vuma_parser::ast::BinOp;
+   999→   999→    match op {
+  1000→  1000→        BinOp::Add => BinOpKind::Add,
+  1001→  1001→        BinOp::Sub => BinOpKind::Sub,
+  1002→  1002→        BinOp::Mul => BinOpKind::Mul,
+  1003→  1003→        BinOp::Div => BinOpKind::SDiv,
+  1004→  1004→        BinOp::Mod => BinOpKind::SRem,
+  1005→  1005→        BinOp::And => BinOpKind::And,
+  1006→  1006→        BinOp::Or => BinOpKind::Or,
+  1007→  1007→        BinOp::BitAnd => BinOpKind::And,
+  1008→  1008→        BinOp::BitOr => BinOpKind::Or,
+  1009→  1009→        BinOp::BitXor => BinOpKind::Xor,
+  1010→  1010→        BinOp::Shl => BinOpKind::Shl,
+  1011→  1011→        BinOp::Shr => BinOpKind::ShrL,
+  1012→  1012→        BinOp::Eq => BinOpKind::Eq,
+  1013→  1013→        BinOp::Ne => BinOpKind::Ne,
+  1014→  1014→        BinOp::Lt => BinOpKind::SLt,
+  1015→  1015→        BinOp::Le => BinOpKind::SLe,
+  1016→  1016→        BinOp::Gt => BinOpKind::SGt,
+  1017→  1017→        BinOp::Ge => BinOpKind::SGe,
+  1018→  1018→    }
+  1019→  1019→}
+  1020→  1020→
+  1021→  1021→/// Convert a single parser statement into zero or more codegen SCG statements.
+  1022→  1022→/// Uses `flatten_expr` to decompose nested expressions into three-address code.
+  1023→  1023→fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) -> Vec<ScgStatement> {
+  1024→  1024→    use vuma_parser::ast::Stmt as PStmt;
+  1025→  1025→
+  1026→  1026→    match stmt {
+  1027→  1027→        // ── let x [: T] = expr ──
+  1028→  1028→        PStmt::Let(let_stmt) => {
+  1029→  1029→            let mut stmts = Vec::new();
+  1030→  1030→
+  1031→  1031→            // Check if the RHS is an allocate() call → AllocationNode::Stack
+  1032→  1032→            if let vuma_parser::ast::Expr::Call { callee, args, .. } = &let_stmt.value {
+  1033→  1033→                if let vuma_parser::ast::Expr::Var { name, .. } = callee.as_ref() {
+  1034→  1034→                    if name == "allocate" {
+  1035→  1035→                        let size: u32 = args.first()
+  1036→  1036→                            .and_then(|a| {
+  1037→  1037→                                if let vuma_parser::ast::Expr::Lit { value, .. } = a {
+  1038→  1038→                                    if let vuma_parser::ast::Lit::Int(n) = value {
+  1039→  1039→                                        return Some(*n as u32);
+  1040→  1040→                                    }
+  1041→  1041→                                }
+  1042→  1042→                                None
+  1043→  1043→                            })
+  1044→  1044→                            .unwrap_or(8);
+  1045→  1045→                        return vec![ScgStatement::Allocation(AllocationNode::Stack {
+  1046→  1046→                            name: let_stmt.name.clone(),
+  1047→  1047→                            size,
+  1048→  1048→                            ty: ScgType::Ptr,
+  1049→  1049→                        })];
+  1050→  1050→                    }
+  1051→  1051→                    // Other function calls → CallNode (flatten args)
+  1052→  1052→                    let flat_args: Vec<ScgExpr> = args.iter()
+  1053→  1053→                        .map(|a| flatten_expr(a, &mut stmts, ctx))
+  1054→  1054→                        .collect();
+  1055→  1055→                    stmts.push(ScgStatement::Call(CallNode {
+  1056→  1056→                        dst: Some(let_stmt.name.clone()),
+  1057→  1057→                        func: name.clone(),
+  1058→  1058→                        args: flat_args,
+  1059→  1059→                        is_extern: false,
+  1060→  1060→                    }));
+  1061→  1061→                    return stmts;
+  1062→  1062→                }
+  1063→  1063→            }
+  1064→  1064→
+  1065→  1065→            // Check if the RHS is an Allocate expression → AllocationNode::Stack
+  1066→  1066→            if let vuma_parser::ast::Expr::Allocate { size, .. } = &let_stmt.value {
+  1067→  1067→                let size_val: u32 = match size.as_ref() {
+  1068→  1068→                    vuma_parser::ast::Expr::Lit { value, .. } => {
+  1069→  1069→                        if let vuma_parser::ast::Lit::Int(n) = value {
+  1070→  1070→                            *n as u32
+  1071→  1071→                        } else {
+  1072→  1072→                            8
+  1073→  1073→                        }
+  1074→  1074→                    }
+  1075→  1075→                    _ => 8,
+  1076→  1076→                };
+  1077→  1077→                return vec![ScgStatement::Allocation(AllocationNode::Stack {
+  1078→  1078→                    name: let_stmt.name.clone(),
+  1079→  1079→                    size: size_val,
+  1080→  1080→                    ty: ScgType::Ptr,
+  1081→  1081→                })];
+  1082→  1082→            }
+  1083→  1083→
+  1084→  1084→            // General case: flatten the expression and assign to dst
+  1085→  1085→            let result = flatten_expr(&let_stmt.value, &mut stmts, ctx);
+  1086→  1086→            match &result {
+  1087→  1087→                ScgExpr::Var(name) if name == &let_stmt.name => {}
+  1088→  1088→                _ => {
+  1089→  1089→                    stmts.push(ScgStatement::Computation(ComputationNode {
+  1090→  1090→                        dst: let_stmt.name.clone(),
+  1091→  1091→                        op: BinOpKind::Add,
+  1092→  1092→                        lhs: result,
+  1093→  1093→                        rhs: ScgExpr::Int(0),
+  1094→  1094→                        tail_call: false,
+  1095→  1095→                    }));
+  1096→  1096→                }
+  1097→  1097→            }
+  1098→  1098→            stmts
+  1099→  1099→        }
+  1100→  1100→
+  1101→  1101→        // ── target = value ──
+  1102→  1102→        PStmt::Assign(assign_stmt) => {
+  1103→  1103→            let mut stmts = Vec::new();
+  1104→  1104→
+  1105→  1105→            // Detect dereference writes: `*expr = val` → Access::Store
+  1106→  1106→            if let vuma_parser::ast::AssignTarget::Deref { expr, .. } = &assign_stmt.target {
+  1107→  1107→                let ptr = flatten_expr(expr, &mut stmts, ctx);
+  1108→  1108→                let value = flatten_expr(&assign_stmt.value, &mut stmts, ctx);
+  1109→  1109→                stmts.push(ScgStatement::Access(AccessNode::Store {
+  1110→  1110→                    ptr,
+  1111→  1111→                    offset: None,
+  1112→  1112→                    value,
+  1113→  1113→                }));
+  1114→  1114→                return stmts;
+  1115→  1115→            }
+  1116→  1116→
+  1117→  1117→            // Handle Index target: ptr[index] = value
+  1118→  1118→            if let vuma_parser::ast::AssignTarget::Index { expr, index, .. } = &assign_stmt.target {
+  1119→  1119→                let base = flatten_expr(expr, &mut stmts, ctx);
+  1120→  1120→                let idx = flatten_expr(index, &mut stmts, ctx);
+  1121→  1121→                let addr = ctx.alloc_temp();
+  1122→  1122→                stmts.push(ScgStatement::Computation(ComputationNode {
+  1123→  1123→                    dst: addr.clone(),
+  1124→  1124→                    op: BinOpKind::Add,
+  1125→  1125→                    lhs: base,
+  1126→  1126→                    rhs: idx,
+  1127→  1127→                    tail_call: false,
+  1128→  1128→                }));
+  1129→  1129→                let value = flatten_expr(&assign_stmt.value, &mut stmts, ctx);
+  1130→  1130→                stmts.push(ScgStatement::Access(AccessNode::Store {
+  1131→  1131→                    ptr: ScgExpr::Var(addr),
+  1132→  1132→                    offset: None,
+  1133→  1133→                    value,
+  1134→  1134→                }));
+  1135→  1135→                return stmts;
+  1136→  1136→            }
+  1137→  1137→
+  1138→  1138→            let dst = match &assign_stmt.target {
+  1139→  1139→                vuma_parser::ast::AssignTarget::Var { name, .. } => name.clone(),
+  1140→  1140→                vuma_parser::ast::AssignTarget::DerefField { field, .. } => field.clone(),
+  1141→  1141→                vuma_parser::ast::AssignTarget::Deref { .. } => "_deref".into(),
+  1142→  1142→                vuma_parser::ast::AssignTarget::Index { .. } => "_index".into(),
+  1143→  1143→            };
+  1144→  1144→
+  1145→  1145→            // Detect allocate() expression → AllocationNode::Stack
+  1146→  1146→            if let vuma_parser::ast::Expr::Allocate { size, .. } = &assign_stmt.value {
+  1147→  1147→                let size_val: u32 = match size.as_ref() {
+  1148→  1148→                    vuma_parser::ast::Expr::Lit { value, .. } => {
+  1149→  1149→                        if let vuma_parser::ast::Lit::Int(n) = value {
+  1150→  1150→                            *n as u32
+  1151→  1151→                        } else {
+  1152→  1152→                            8
+  1153→  1153→                        }
+  1154→  1154→                    }
+  1155→  1155→                    _ => 8,
+  1156→  1156→                };
+  1157→  1157→                return vec![ScgStatement::Allocation(AllocationNode::Stack {
+  1158→  1158→                    name: dst,
+  1159→  1159→                    size: size_val,
+  1160→  1160→                    ty: ScgType::Ptr,
+  1161→  1161→                })];
+  1162→  1162→            }
+  1163→  1163→
+  1164→  1164→            // Detect function calls in assign: `x = foo(args)` → CallNode (flatten args)
+  1165→  1165→            if let vuma_parser::ast::Expr::Call { callee, args, .. } = &assign_stmt.value {
+  1166→  1166→                if let vuma_parser::ast::Expr::Var { name, .. } = callee.as_ref() {
+  1167→  1167→                    let flat_args: Vec<ScgExpr> = args.iter()
+  1168→  1168→                        .map(|a| flatten_expr(a, &mut stmts, ctx))
+  1169→  1169→                        .collect();
+  1170→  1170→                    stmts.push(ScgStatement::Call(CallNode {
+  1171→  1171→                        dst: Some(dst),
+  1172→  1172→                        func: name.clone(),
+  1173→  1173→                        args: flat_args,
+  1174→  1174→                        is_extern: false,
+  1175→  1175→                    }));
+  1176→  1176→                    return stmts;
+  1177→  1177→                }
+  1178→  1178→            }
+  1179→  1179→
+  1180→  1180→            // General case: flatten the value expression and assign to dst
+  1181→  1181→            let result = flatten_expr(&assign_stmt.value, &mut stmts, ctx);
+  1182→  1182→            match &result {
+  1183→  1183→                ScgExpr::Var(name) if name == &dst => {}
+  1184→  1184→                _ => {
+  1185→  1185→                    stmts.push(ScgStatement::Computation(ComputationNode {
+  1186→  1186→                        dst,
+  1187→  1187→                        op: BinOpKind::Add,
+  1188→  1188→                        lhs: result,
+  1189→  1189→                        rhs: ScgExpr::Int(0),
+  1190→  1190→                        tail_call: false,
+  1191→  1191→                    }));
+  1192→  1192→                }
+  1193→  1193→            }
+  1194→  1194→            stmts
+  1195→  1195→        }
+  1196→  1196→
+  1197→  1197→        // ── target op= value ──
+  1198→  1198→        PStmt::CompoundAssign(ca_stmt) => {
+  1199→  1199→            let mut stmts = Vec::new();
+  1200→  1200→            let dst = match &ca_stmt.target {
+  1201→  1201→                vuma_parser::ast::AssignTarget::Var { name, .. } => name.clone(),
+  1202→  1202→                vuma_parser::ast::AssignTarget::DerefField { field, .. } => field.clone(),
+  1203→  1203→                _ => "_".into(),
+  1204→  1204→            };
+  1205→  1205→            let binop = match ca_stmt.op {
+  1206→  1206→                vuma_parser::ast::CompoundOp::Add => BinOpKind::Add,
+  1207→  1207→                vuma_parser::ast::CompoundOp::Sub => BinOpKind::Sub,
+  1208→  1208→                vuma_parser::ast::CompoundOp::Mul => BinOpKind::Mul,
+  1209→  1209→                vuma_parser::ast::CompoundOp::Div => BinOpKind::SDiv,
+  1210→  1210→                vuma_parser::ast::CompoundOp::Mod => BinOpKind::SRem,
+  1211→  1211→                vuma_parser::ast::CompoundOp::BitAnd => BinOpKind::And,
+  1212→  1212→                vuma_parser::ast::CompoundOp::BitOr => BinOpKind::Or,
+  1213→  1213→                vuma_parser::ast::CompoundOp::BitXor => BinOpKind::Xor,
+  1214→  1214→                vuma_parser::ast::CompoundOp::Shl => BinOpKind::Shl,
+  1215→  1215→                vuma_parser::ast::CompoundOp::Shr => BinOpKind::ShrL,
+  1216→  1216→            };
+  1217→  1217→            let rhs = flatten_expr(&ca_stmt.value, &mut stmts, ctx);
+  1218→  1218→            stmts.push(ScgStatement::Computation(ComputationNode {
+  1219→  1219→                dst: dst.clone(),
+  1220→  1220→                op: binop,
+  1221→  1221→                lhs: ScgExpr::Var(dst),
+  1222→  1222→                rhs,
+  1223→  1223→                tail_call: false,
+  1224→  1224→            }));
+  1225→  1225→            stmts
+  1226→  1226→        }
+  1227→  1227→
+  1228→  1228→        PStmt::Allocate(_) => vec![],
+  1229→  1229→        PStmt::Free(_) => vec![],
+  1230→  1230→
+  1231→  1231→        PStmt::Cast(cast_stmt) => {
+  1232→  1232→            let mut stmts = Vec::new();
+  1233→  1233→            let _ = flatten_expr(&cast_stmt.expr, &mut stmts, ctx);
+  1234→  1234→            stmts
+  1235→  1235→        }
+  1236→  1236→
+  1237→  1237→        PStmt::Return(ret_stmt) => {
+  1238→  1238→            let mut stmts = Vec::new();
+  1239→  1239→            let values = match &ret_stmt.value {
+  1240→  1240→                Some(expr) => vec![flatten_expr(expr, &mut stmts, ctx)],
+  1241→  1241→                None => vec![],
+  1242→  1242→            };
+  1243→  1243→            stmts.push(ScgStatement::Return(values));
+  1244→  1244→            stmts
+  1245→  1245→        }
+  1246→  1246→
+  1247→  1247→        PStmt::Expr(expr_stmt) => {
+  1248→  1248→            let mut stmts = Vec::new();
+  1249→  1249→            let result = flatten_expr(&expr_stmt.expr, &mut stmts, ctx);
+  1250→  1250→            ctx.last_expr_result = Some(result);
+  1251→  1251→            stmts
+  1252→  1252→        }
+  1253→  1253→
+  1254→  1254→        PStmt::If(if_stmt) => {
+  1255→  1255→            let mut pre_stmts = Vec::new();
+  1256→  1256→            let cond = flatten_expr(&if_stmt.condition, &mut pre_stmts, ctx);
+  1257→  1257→            let then_body = bridge_block_to_scg_stmts(&if_stmt.then_block, ctx);
+  1258→  1258→            let else_body = if_stmt
+  1259→  1259→                .else_block
+  1260→  1260→                .as_ref()
+  1261→  1261→                .map(|b| bridge_block_to_scg_stmts(b, ctx));
+  1262→  1262→            let mut result = pre_stmts;
+  1263→  1263→            result.push(ScgStatement::Control(ControlNode::If {
+  1264→  1264→                cond,
+  1265→  1265→                then_body,
+  1266→  1266→                else_body,
+  1267→  1267→            }));
+  1268→  1268→            result
+  1269→  1269→        }
+  1270→  1270→
+  1271→  1271→        // while condition { body }
+  1272→  1272→        // Lowered as: Loop { <compute cond>; if cond { body } else { break } }
+  1273→  1273→        PStmt::While(while_stmt) => {
+  1274→  1274→            let then_body = bridge_block_to_scg_stmts(&while_stmt.body, ctx);
+  1275→  1275→            let mut loop_body = Vec::new();
+  1276→  1276→            let cond = flatten_expr(&while_stmt.condition, &mut loop_body, ctx);
+  1277→  1277→            loop_body.push(ScgStatement::Control(ControlNode::If {
+  1278→  1278→                cond,
+  1279→  1279→                then_body,
+  1280→  1280→                else_body: Some(vec![ScgStatement::Control(ControlNode::Break)]),
+  1281→  1281→            }));
+  1282→  1282→            vec![ScgStatement::Control(ControlNode::Loop { body: loop_body })]
+  1283→  1283→        }
+  1284→  1284→
+  1285→  1285→        // for name in start..end { body }
+  1286→  1286→        // Lowered as:
+  1287→  1287→        //   name = start
+  1288→  1288→        //   loop { _cond = name < end; if _cond { body; name = name + 1 } else { break } }
+  1289→  1289→        PStmt::For(for_stmt) => {
+  1290→  1290→            let mut pre_stmts = Vec::new();
+  1291→  1291→            let (start_expr, end_expr) = match &for_stmt.iter {
+  1292→  1292→                vuma_parser::ast::Expr::Range { start, end, .. } => {
+  1293→  1293→                    let s = flatten_expr(start, &mut pre_stmts, ctx);
+  1294→  1294→                    let e = flatten_expr(end, &mut pre_stmts, ctx);
+  1295→  1295→                    (s, e)
+  1296→  1296→                }
+  1297→  1297→                other => {
+  1298→  1298→                    (ScgExpr::Int(0), ScgExpr::Int(0))
+  1299→  1299→                }
+  1300→  1300→            };
+  1301→  1301→
+  1302→  1302→            let init_stmt = ScgStatement::Computation(ComputationNode {
+  1303→  1303→                dst: for_stmt.name.clone(),
+  1304→  1304→                op: BinOpKind::Add,
+  1305→  1305→                lhs: start_expr,
+  1306→  1306→                rhs: ScgExpr::Int(0),
+  1307→  1307→                tail_call: false,
+  1308→  1308→            });
+  1309→  1309→
+  1310→  1310→            let mut loop_body = Vec::new();
+  1311→  1311→            let cond_temp = format!("{}_cond", for_stmt.name);
+  1312→  1312→            loop_body.push(ScgStatement::Computation(ComputationNode {
+  1313→  1313→                dst: cond_temp.clone(),
+  1314→  1314→                op: BinOpKind::SLt,
+  1315→  1315→                lhs: ScgExpr::Var(for_stmt.name.clone()),
+  1316→  1316→                rhs: end_expr.clone(),
+  1317→  1317→                tail_call: false,
+  1318→  1318→            }));
+  1319→  1319→
+  1320→  1320→            let inner_body = bridge_block_to_scg_stmts(&for_stmt.body, ctx);
+  1321→  1321→            let mut full_then = inner_body;
+  1322→  1322→            full_then.push(ScgStatement::Computation(ComputationNode {
+  1323→  1323→                dst: for_stmt.name.clone(),
+  1324→  1324→                op: BinOpKind::Add,
+  1325→  1325→                lhs: ScgExpr::Var(for_stmt.name.clone()),
+  1326→  1326→                rhs: ScgExpr::Int(1),
+  1327→  1327→                tail_call: false,
+  1328→  1328→            }));
+  1329→  1329→
+  1330→  1330→            loop_body.push(ScgStatement::Control(ControlNode::If {
+  1331→  1331→                cond: ScgExpr::Var(cond_temp),
+  1332→  1332→                then_body: full_then,
+  1333→  1333→                else_body: Some(vec![ScgStatement::Control(ControlNode::Break)]),
+  1334→  1334→            }));
+  1335→  1335→
+  1336→  1336→            let mut result = pre_stmts;
+  1337→  1337→            result.push(init_stmt);
+  1338→  1338→            result.push(ScgStatement::Control(ControlNode::Loop { body: loop_body }));
+  1339→  1339→            result
+  1340→  1340→        }
+  1341→  1341→
+  1342→  1342→        PStmt::Loop(loop_stmt) => {
+  1343→  1343→            let body = bridge_block_to_scg_stmts(&loop_stmt.body, ctx);
+  1344→  1344→            vec![ScgStatement::Control(ControlNode::Loop { body })]
+  1345→  1345→        }
+  1346→  1346→
+  1347→  1347→        PStmt::Break(_) => vec![ScgStatement::Control(ControlNode::Break)],
+  1348→  1348→        PStmt::Continue(_) => vec![ScgStatement::Control(ControlNode::Continue)],
+  1349→  1349→        PStmt::BdDirective(_)
+  1350→  1350→        | PStmt::Sync(_)
+  1351→  1351→        | PStmt::UnsafeBlock { .. }
+  1352→  1352→        | PStmt::Match(_)
+  1353→  1353→        | PStmt::Access(_) => vec![],
+  1354→  1354→    }
+  1355→  1355→}
+  1356→  1356→fn cmd_disasm(file: &PathBuf, isa: &IsaArg, base_addr_str: &str) -> Result<(), String> {
+  1357→  1357→    let bytes = fs::read(file)
+  1358→  1358→        .map_err(|e| format!("error: cannot read binary file '{}': {}", file.display(), e))?;
+  1359→  1359→
+  1360→  1360→    let base_addr = u64::from_str_radix(base_addr_str.trim_start_matches("0x"), 16)
+  1361→  1361→        .map_err(|e| format!("error: invalid base address '{}': {}", base_addr_str, e))?;
+  1362→  1362→
+  1363→  1363→    let backend_kind = BackendKind::from(*isa);
+  1364→  1364→    let backend = create_backend(backend_kind).map_err(|e| {
+  1365→  1365→        format!(
+  1366→  1366→            "error: cannot create {} backend: {}",
+  1367→  1367→            backend_kind.isa_name(),
+  1368→  1368→            e
+  1369→  1369→        )
+  1370→  1370→    })?;
+  1371→  1371→
+  1372→  1372→    let instructions = backend.disassemble(&bytes, base_addr);
+  1373→  1373→
+  1374→  1374→    println!(
+  1375→  1375→        "Disassembly of {} ({} bytes, ISA: {}):",
+  1376→  1376→        file.display(),
+  1377→  1377→        bytes.len(),
+  1378→  1378→        backend.name()
+  1379→  1379→    );
+  1380→  1380→    for line in &instructions {
+  1381→  1381→        println!("{}", line);
+  1382→  1382→    }
+  1383→  1383→
+  1384→  1384→    Ok(())
+  1385→  1385→}
+  1386→  1386→
+  1387→  1387→/// `vuma verify <file>` — Run IVE 5-invariant verification.
+  1388→  1388→fn cmd_verify(cli: &Cli, file: &PathBuf) -> Result<(), String> {
+  1389→  1389→    let source = read_source(file)?;
+  1390→  1390→    let mut config = make_config(cli, CompileTarget::Linux);
+  1391→  1391→    // Force exhaustive verification for the verify subcommand.
+  1392→  1392→    config.verification_level = VerificationLevel::Exhaustive;
+  1393→  1393→
+  1394→  1394→    let result = compile_with_path(&source, Some(file), &config).map_err(|errors| {
+  1395→  1395→        print_errors(&errors);
+  1396→  1396→        format!(
+  1397→  1397→            "compilation/verification failed with {} error(s)",
+  1398→  1398→            errors.len()
+  1399→  1399→        )
+  1400→  1400→    })?;
+  1401→  1401→
+  1402→  1402→    match result.verification {
+  1403→  1403→        Some(ref verification) => {
+  1404→  1404→            println!("IVE Verification Results for {}", file.display());
+  1405→  1405→            println!("  Overall verdict: {}", verification.overall);
+  1406→  1406→            println!(
+  1407→  1407→                "  Summary: {} invariant(s) checked",
+  1408→  1408→                verification.summary.total_checked
+  1409→  1409→            );
+  1410→  1410→            println!("           {} passed", verification.summary.passed);
+  1411→  1411→            println!("           {} failed", verification.summary.failed);
+  1412→  1412→            println!("           {} unverified", verification.summary.unverified);
+  1413→  1413→
+  1414→  1414→            // Print individual invariant results.
+  1415→  1415→            for per_inv in &verification.per_invariant {
+  1416→  1416→                let status_str = match &per_inv.result.status {
+  1417→  1417→                    vuma_ive::VerificationStatus::Proven => "PROVEN",
+  1418→  1418→                    vuma_ive::VerificationStatus::ProbablySafe { .. } => "PROBABLY_SAFE",
+  1419→  1419→                    vuma_ive::VerificationStatus::Unverified { .. } => "UNVERIFIED",
+  1420→  1420→                    vuma_ive::VerificationStatus::Violated { .. } => "VIOLATED",
+  1421→  1421→                };
+  1422→  1422→                println!(
+  1423→  1423→                    "  [{}] {:?} — {}",
+  1424→  1424→                    status_str, per_inv.kind, per_inv.result.message,
+  1425→  1425→                );
+  1426→  1426→                if let Some(ref evidence) = per_inv.result.evidence {
+  1427→  1427→                    println!("    evidence: {}", evidence);
+  1428→  1428→                }
+  1429→  1429→            }
+  1430→  1430→        }
+  1431→  1431→        None => {
+  1432→  1432→            println!("Verification was skipped (verification level set to None).");
+  1433→  1433→        }
+  1434→  1434→    }
+  1435→  1435→
+  1436→  1436→    Ok(())
+  1437→  1437→}
+  1438→  1438→
+  1439→  1439→/// `vuma repl` — Interactive REPL: parse expressions and print AST.
+  1440→  1440→fn cmd_repl() -> Result<(), String> {
+  1441→  1441→    println!("VUMA REPL v0.1.0");
+  1442→  1442→    println!("Type VUMA expressions or statements. Enter ':quit' to exit, ':help' for help.");
+  1443→  1443→
+  1444→  1444→    let stdin = io::stdin();
+  1445→  1445→    let mut input = String::new();
+  1446→  1446→
+  1447→  1447→    loop {
+  1448→  1448→        print!("vuma> ");
+  1449→  1449→        io::stdout()
+  1450→  1450→            .flush()
+  1451→  1451→            .map_err(|e| format!("flush error: {}", e))?;
+  1452→  1452→
+  1453→  1453→        input.clear();
+  1454→  1454→        match stdin.read_line(&mut input) {
+  1455→  1455→            Ok(0) => break, // EOF
+  1456→  1456→            Ok(_) => {}
+  1457→  1457→            Err(e) => return Err(format!("error reading input: {}", e)),
+  1458→  1458→        }
+  1459→  1459→
+  1460→  1460→        let trimmed = input.trim();
+  1461→  1461→        if trimmed.is_empty() {
+  1462→  1462→            continue;
+  1463→  1463→        }
+  1464→  1464→        if trimmed == ":quit" || trimmed == ":q" {
+  1465→  1465→            break;
+  1466→  1466→        }
+  1467→  1467→        if trimmed == ":help" || trimmed == ":h" {
+  1468→  1468→            println!("  :quit, :q   — Exit the REPL");
+  1469→  1469→            println!("  :help, :h   — Show this help");
+  1470→  1470→            println!("  <expr>      — Parse and display the AST");
+  1471→  1471→            println!("  <stmt>      — Parse and display the AST");
+  1472→  1472→            println!("  <program>   — Parse and display the full program AST");
+  1473→  1473→            continue;
+  1474→  1474→        }
+  1475→  1475→
+  1476→  1476→        // Try to parse as a full program first.
+  1477→  1477→        let mut parser = vuma_parser::Parser::new(trimmed);
+  1478→  1478→        let result = parser.parse_program();
+  1479→  1479→        if !result.has_errors() {
+  1480→  1480→            // Successfully parsed; display the AST.
+  1481→  1481→            let program = result.unwrap();
+  1482→  1482→            println!("{:#?}", program);
+  1483→  1483→            continue;
+  1484→  1484→        }
+  1485→  1485→        // Program parse had errors; try to parse as an expression via
+  1486→  1486→        // wrapping it in a dummy program context.
+  1487→  1487→        let program_errors = result.errors.clone();
+  1488→  1488→        // Since parse_expr is private, we re-parse as a minimal program.
+  1489→  1489→        let wrapped = format!("fn _repl_expr() {{ {} }}", trimmed);
+  1490→  1490→        let mut expr_parser = vuma_parser::Parser::new(&wrapped);
+  1491→  1491→        let expr_result = expr_parser.parse_program();
+  1492→  1492→        if !expr_result.has_errors() {
+  1493→  1493→            // Print the function body AST.
+  1494→  1494→            let program = expr_result.unwrap();
+  1495→  1495→            if let Some(item) = program.items.first() {
+  1496→  1496→                println!("{:#?}", item);
+  1497→  1497→            } else {
+  1498→  1498→                println!("{:#?}", program);
+  1499→  1499→            }
+  1500→  1500→        } else {
+  1501→  1501→            // Show the original parse errors.
+  1502→  1502→            for err in &program_errors {
+  1503→  1503→                eprintln!("parse error: {}", err);
+  1504→  1504→            }
+  1505→  1505→        }
+  1506→  1506→    }
+  1507→  1507→
+  1508→  1508→    Ok(())
+  1509→  1509→}
+  1510→  1510→
+  1511→  1511→/// Start the VUMA Language Server (LSP) over stdin/stdout.
+  1512→  1512→fn cmd_lsp() -> Result<(), String> {
+  1513→  1513→    let mut server = vuma::lsp::LspServer::new();
+  1514→  1514→    server.run();
+  1515→  1515→    Ok(())
+  1516→  1516→}
+  1517→  1517→
+  1518→  1518→/// `vuma --bench` — Run the performance benchmark suite.
+  1519→  1519→fn cmd_bench(_cli: &Cli) {
+  1520→  1520→    use vuma_codegen::backend::BackendKind;
+  1521→  1521→
+  1522→  1522→    println!("╔══════════════════════════════════════════════════════════════╗");
+  1523→  1523→    println!("║           VUMA Performance Benchmark Suite                  ║");
+  1524→  1524→    println!("╚══════════════════════════════════════════════════════════════╝");
+  1525→  1525→    println!();
+  1526→  1526→
+  1527→  1527→    // ── Benchmark 1: SHA256d compile time + binary size ──
+  1528→  1528→    println!("── Benchmark 1: SHA256d ──");
+  1529→  1529→    let sha256d_path = PathBuf::from("examples/sha256d.vuma");
+  1530→  1530→    let sha256d_source = fs::read_to_string(&sha256d_path).unwrap_or_else(|_| {
+  1531→  1531→        eprintln!("  Warning: examples/sha256d.vuma not found, skipping SHA256d benchmark");
+  1532→  1532→        String::new()
+  1533→  1533→    });
+  1534→  1534→
+  1535→  1535→    if !sha256d_source.is_empty() {
+  1536→  1536→        let backends: [(BackendKind, &str); 8] = [
+  1537→  1537→            (BackendKind::AArch64, "aarch64"),
+  1538→  1538→            (BackendKind::X86_64, "x86_64"),
+  1539→  1539→            (BackendKind::RiscV64, "riscv64"),
+  1540→  1540→            (BackendKind::Arm32, "arm32"),
+  1541→  1541→            (BackendKind::Mips64, "mips64"),
+  1542→  1542→            (BackendKind::PowerPC64, "ppc64"),
+  1543→  1543→            (BackendKind::LoongArch64, "loongarch64"),
+  1544→  1544→            (BackendKind::Wasm32, "wasm32"),
+  1545→  1545→        ];
+  1546→  1546→
+  1547→  1547→        println!("  {:15} {:>12} {:>12} {:>12}", "Backend", "Time (ms)", "Size (B)", "Instrs");
+  1548→  1548→        println!("  {:15} {:>12} {:>12} {:>12}", "───────", "────────", "────────", "────────");
+  1549→  1549→
+  1550→  1550→        for (kind, name) in &backends {
+  1551→  1551→            let start = std::time::Instant::now();
+  1552→  1552→
+  1553→  1553→            // Parse
+  1554→  1554→            let mut parser = vuma_parser::Parser::new(&sha256d_source);
+  1555→  1555→            let parse_result = parser.parse_program();
+  1556→  1556→
+  1557→  1557→            let parse_time = start.elapsed();
+  1558→  1558→
+  1559→  1559→            if parse_result.is_err() {
+  1560→  1560→                println!("  {:15} {:>12} {:>12} {:>12}", name, "PARSE_ERR", "-", "-");
+  1561→  1561→                continue;
+  1562→  1562→            }
+  1563→  1563→
+  1564→  1564→            let program = parse_result.value.unwrap();
+  1565→  1565→
+  1566→  1566→            // Bridge to codegen SCG
+  1567→  1567→            let codegen_scg = bridge_ast_to_codegen_scg(&program);
+  1568→  1568→
+  1569→  1569→            // Lower to IR
+  1570→  1570→            let mut ir_builder = ScgToIr::new();
+  1571→  1571→            let ir_result = ir_builder.convert(&codegen_scg);
+  1572→  1572→
+  1573→  1573→            let ir_time = start.elapsed();
+  1574→  1574→
+  1575→  1575→            if let Ok(ir_program) = ir_result {
+  1576→  1576→                let ir_instr_count: usize = ir_program.functions.iter()
+  1577→  1577→                    .map(|f| f.blocks.iter().map(|b| b.instructions.len()).sum::<usize>())
+  1578→  1578→                    .sum();
+  1579→  1579→
+  1580→  1580→                // Create backend and allocate
+  1581→  1581→                let backend = match create_backend(*kind) {
+  1582→  1582→                    Ok(b) => b,
+  1583→  1583→                    Err(_) => {
+  1584→  1584→                        println!("  {:15} {:>12} {:>12} {:>12}", name, "NO_BACKEND", "-", "-");
+  1585→  1585→                        continue;
+  1586→  1586→                    }
+  1587→  1587→                };
+  1588→  1588→
+  1589→  1589→                let mut allocated_functions = Vec::new();
+  1590→  1590→                for func in &ir_program.functions {
+  1591→  1591→                    if let Ok(allocated) = backend.allocate_registers(func) {
+  1592→  1592→                        allocated_functions.push(allocated);
+  1593→  1593→                    }
+  1594→  1594→                }
+  1595→  1595→
+  1596→  1596→                let total_time = start.elapsed();
+  1597→  1597→                let codegen_time_ms = total_time.as_millis() as u64;
+  1598→  1598→
+  1599→  1599→                // Encode
+  1600→  1600→                let binary_size = if !allocated_functions.is_empty() {
+  1601→  1601→                    let allocated_program = vuma_codegen::backend::AllocatedProgram {
+  1602→  1602→                        functions: allocated_functions,
+  1603→  1603→                        total_code_size: 0,
+  1604→  1604→                        total_data_size: 0,
+  1605→  1605→                    };
+  1606→  1606→                    match backend.encode_program(&allocated_program) {
+  1607→  1607→                        Ok(bytes) => bytes.len(),
+  1608→  1608→                        Err(_) => 0,
+  1609→  1609→                    }
+  1610→  1610→                } else {
+  1611→  1611→                    0
+  1612→  1612→                };
+  1613→  1613→
+  1614→  1614→                println!(
+  1615→  1615→                    "  {:15} {:>12} {:>12} {:>12}",
+  1616→  1616→                    name,
+  1617→  1617→                    codegen_time_ms,
+  1618→  1618→                    binary_size,
+  1619→  1619→                    ir_instr_count
+  1620→  1620→                );
+  1621→  1621→            } else {
+  1622→  1622→                println!("  {:15} {:>12} {:>12} {:>12}", name, "IR_ERR", "-", "-");
+  1623→  1623→            }
+  1624→  1624→        }
+  1625→  1625→    }
+  1626→  1626→    println!();
+  1627→  1627→
+  1628→  1628→    // ── Benchmark 2: Compilation speed at varying program sizes ──
+  1629→  1629→    println!("── Benchmark 2: Compilation Speed ──");
+  1630→  1630→    println!("  {:20} {:>12} {:>12} {:>12}", "Program Size", "Parse (μs)", "SCG (μs)", "Total (μs)");
+  1631→  1631→    println!("  {:20} {:>12} {:>12} {:>12}", "────────────", "──────────", "────────", "─────────");
+  1632→  1632→
+  1633→  1633→    for &line_count in &[10, 50, 100, 500] {
+  1634→  1634→        // Generate a synthetic program of the given size
+  1635→  1635→        let mut source = String::from("fn main() {\n");
+  1636→  1636→        for i in 0..line_count {
+  1637→  1637→            source.push_str(&format!("    x{} = {} + {};\n", i, i, i + 1));
+  1638→  1638→        }
+  1639→  1639→        source.push_str("}\n");
+  1640→  1640→
+  1641→  1641→        let start = std::time::Instant::now();
+  1642→  1642→        let mut parser = vuma_parser::Parser::new(&source);
+  1643→  1643→        let _ = parser.parse_program();
+  1644→  1644→        let parse_time = start.elapsed().as_micros() as u64;
+  1645→  1645→
+  1646→  1646→        let scg_start = std::time::Instant::now();
+  1647→  1647→        // SCG construction would happen here
+  1648→  1648→        let scg_time = scg_start.elapsed().as_micros() as u64;
+  1649→  1649→
+  1650→  1650→        let total_time = start.elapsed().as_micros() as u64;
+  1651→  1651→
+  1652→  1652→        println!(
+  1653→  1653→            "  {:20} {:>12} {:>12} {:>12}",
+  1654→  1654→            format!("{} lines", line_count),
+  1655→  1655→            parse_time,
+  1656→  1656→            scg_time,
+  1657→  1657→            total_time
+  1658→  1658→        );
+  1659→  1659→    }
+  1660→  1660→    println!();
+  1661→  1661→
+  1662→  1662→    // ── Benchmark 3: Codegen quality (redundant loads/stores) ──
+  1663→  1663→    println!("── Benchmark 3: Codegen Quality ──");
+  1664→  1664→    if !sha256d_source.is_empty() {
+  1665→  1665→        let mut parser = vuma_parser::Parser::new(&sha256d_source);
+  1666→  1666→        let parse_result = parser.parse_program();
+  1667→  1667→        if let Some(program) = parse_result.value {
+  1668→  1668→            let codegen_scg = bridge_ast_to_codegen_scg(&program);
+  1669→  1669→            let mut ir_builder = ScgToIr::new();
+  1670→  1670→            if let Ok(ir_program) = ir_builder.convert(&codegen_scg) {
+  1671→  1671→                let mut total_loads = 0usize;
+  1672→  1672→                let mut total_stores = 0usize;
+  1673→  1673→                let mut redundant_loads = 0usize;
+  1674→  1674→                let mut redundant_stores = 0usize;
+  1675→  1675→
+  1676→  1676→                for func in &ir_program.functions {
+  1677→  1677→                    let mut last_store_target: Option<String> = None;
+  1678→  1678→                    for block in &func.blocks {
+  1679→  1679→                        for instr in &block.instructions {
+  1680→  1680→                            match instr {
+  1681→  1681→                                vuma_codegen::ir::IRInstr::Load { dst, .. } => {
+  1682→  1682→                                    total_loads += 1;
+  1683→  1683→                                    // A load is potentially redundant if it immediately
+  1684→  1684→                                    // follows a store to the same address
+  1685→  1685→                                    if last_store_target.is_some() {
+  1686→  1686→                                        redundant_loads += 1;
+  1687→  1687→                                    }
+  1688→  1688→                                    let _ = dst;
+  1689→  1689→                                }
+  1690→  1690→                                vuma_codegen::ir::IRInstr::Store { .. } => {
+  1691→  1691→                                    total_stores += 1;
+  1692→  1692→                                    // A store is redundant if the same value was just stored
+  1693→  1693→                                    // (simplified check — full analysis would need value numbering)
+  1694→  1694→                                }
+  1695→  1695→                                _ => {}
+  1696→  1696→                            }
+  1697→  1697→                        }
+  1698→  1698→                    }
+  1699→  1699→                }
+  1700→  1700→
+  1701→  1701→                println!("  Total loads:           {}", total_loads);
+  1702→  1702→                println!("  Total stores:          {}", total_stores);
+  1703→  1703→                println!("  Potentially redundant loads:  {}", redundant_loads);
+  1704→  1704→                println!("  Potentially redundant stores: {}", redundant_stores);
+  1705→  1705→            }
+  1706→  1706→        }
+  1707→  1707→    }
+  1708→  1708→    println!();
+  1709→  1709→
+  1710→  1710→    // ── Benchmark 4: Memory safety analysis ──
+  1711→  1711→    println!("── Benchmark 4: Memory Safety Analysis ──");
+  1712→  1712→    if !sha256d_source.is_empty() {
+  1713→  1713→        let mut parser = vuma_parser::Parser::new(&sha256d_source);
+  1714→  1714→        let parse_result = parser.parse_program();
+  1715→  1715→        if let Some(program) = parse_result.value {
+  1716→  1716→            let codegen_scg = bridge_ast_to_codegen_scg(&program);
+  1717→  1717→
+  1718→  1718→            let config = if _cli.safe {
+  1719→  1719→                vuma_codegen::MemorySafetyConfig::safe_mode()
+  1720→  1720→            } else {
+  1721→  1721→                vuma_codegen::MemorySafetyConfig::compile_time_only()
+  1722→  1722→            };
+  1723→  1723→
+  1724→  1724→            let start = std::time::Instant::now();
+  1725→  1725→            let analyzer = vuma_codegen::MemorySafetyAnalyzer::new(config);
+  1726→  1726→            let report = analyzer.analyze(&codegen_scg);
+  1727→  1727→            let elapsed = start.elapsed();
+  1728→  1728→
+  1729→  1729→            println!("  Analysis time:         {}μs", elapsed.as_micros());
+  1730→  1730→            println!("  Heap allocations:      {}", report.heap_allocations_analyzed);
+  1731→  1731→            println!("  Stack allocations:     {}", report.stack_allocations_analyzed);
+  1732→  1732→            println!("  Access sites:          {}", report.access_sites_analyzed);
+  1733→  1733→            println!("  Violations found:      {}", report.violations.len());
+  1734→  1734→            if !report.violations.is_empty() {
+  1735→  1735→                for v in &report.violations {
+  1736→  1736→                    println!("    {}", v);
+  1737→  1737→                }
+  1738→  1738→            } else {
+  1739→  1739→                println!("  ✓ No memory safety violations detected");
+  1740→  1740→            }
+  1741→  1741→        }
+  1742→  1742→    }
+  1743→  1743→    println!();
+  1744→  1744→
+  1745→  1745→    println!("Benchmark suite complete.");
+  1746→  1746→}
+  1747→  1747→
+  1748→  1748→// ═══════════════════════════════════════════════════════════════════════════
+  1749→  1749→// Main entry point
+  1750→  1750→// ═══════════════════════════════════════════════════════════════════════════
+  1751→  1751→
+  1752→  1752→fn main() {
+  1753→  1753→    // Determine log level from CLI flags.
+  1754→  1754→    let log_level = if std::env::args().any(|a| a == "--quiet" || a == "-q") {
+  1755→  1755→        LogLevel::Error
+  1756→  1756→    } else if std::env::args().any(|a| a == "--verbose" || a == "-v") {
+  1757→  1757→        LogLevel::Debug
+  1758→  1758→    } else {
+  1759→  1759→        LogLevel::Info
+  1760→  1760→    };
+  1761→  1761→
+  1762→  1762→    // Initialize the VUMA structured logger.
+  1763→  1763→    init_logger(log_level);
+  1764→  1764→
+  1765→  1765→    // Also set up the `log` crate bridge so that internal log::info! etc.
+  1766→  1766→    // go through our structured logger.
+  1767→  1767→    let _ = log::set_boxed_logger(Box::new(vuma::logging::VumaLogBridge));
+  1768→  1768→    log::set_max_level(match log_level {
+  1769→  1769→        LogLevel::Error => log::LevelFilter::Error,
+  1770→  1770→        LogLevel::Warn => log::LevelFilter::Warn,
+  1771→  1771→        LogLevel::Info => log::LevelFilter::Info,
+  1772→  1772→        LogLevel::Debug => log::LevelFilter::Debug,
+  1773→  1773→        LogLevel::Trace => log::LevelFilter::Trace,
+  1774→  1774→    });
+  1775→  1775→
+  1776→  1776→    let cli = Cli::parse();
+  1777→  1777→
+  1778→  1778→    // Handle --version with extended info.
+  1779→  1779→    if std::env::args().any(|a| a == "--version" || a == "-V") {
+  1780→  1780→        println!("{}", version_long());
+  1781→  1781→        return;
+  1782→  1782→    }
+  1783→  1783→
+  1784→  1784→    // Handle --bench flag: run the benchmark suite.
+  1785→  1785→    if cli.bench {
+  1786→  1786→        cmd_bench(&cli);
+  1787→  1787→        return;
+  1788→  1788→    }
+  1789→  1789→
+  1790→  1790→    // Handle --repl flag: launch the full VumaRepl instead of subcommand.
+  1791→  1791→    if cli.repl {
+  1792→  1792→        let mut repl = vuma_core::repl::VumaRepl::new();
+  1793→  1793→        if let Err(e) = repl.run() {
+  1794→  1794→            eprintln!("REPL error: {e}");
+  1795→  1795→            std::process::exit(1);
+  1796→  1796→        }
+  1797→  1797→        return;
+  1798→  1798→    }
+  1799→  1799→
+  1800→  1800→    let command = match cli.command {
+  1801→  1801→        Some(ref cmd) => cmd.clone(),
+  1802→  1802→        None => {
+  1803→  1803→            // No subcommand and no --repl: print help.
+  1804→  1804→            eprintln!("No subcommand specified. Use `vuma --help` or `vuma --repl`.");
+  1805→  1805→            std::process::exit(1);
+  1806→  1806→        }
+  1807→  1807→    };
+  1808→  1808→
+  1809→  1809→    let result = match command {
+  1810→  1810→        Commands::Build {
+  1811→  1811→            ref file,
+  1812→  1812→            ref output,
+  1813→  1813→            ref target,
+  1814→  1814→        } => cmd_build(&cli, file, output, target),
+  1815→  1815→        Commands::Run { ref file, ref args } => cmd_run(&cli, file, args),
+  1816→  1816→        Commands::Check { ref file } => cmd_check(&cli, file),
+  1817→  1817→        Commands::Emit {
+  1818→  1818→            ref isa,
+  1819→  1819→            ref file,
+  1820→  1820→            ref output,
+  1821→  1821→        } => cmd_emit(&cli, isa, file, output),
+  1822→  1822→        Commands::Disasm {
+  1823→  1823→            ref file,
+  1824→  1824→            ref isa,
+  1825→  1825→            ref base_addr,
+  1826→  1826→        } => cmd_disasm(file, isa, base_addr),
+  1827→  1827→        Commands::Verify { ref file } => cmd_verify(&cli, file),
+  1828→  1828→        Commands::Repl => cmd_repl(),
+  1829→  1829→        Commands::Lsp => cmd_lsp(),
+  1830→  1830→        Commands::Pkg { ref cmd } => cmd_pkg(cmd),
+  1831→  1831→    };
+  1832→  1832→
+  1833→  1833→    if let Err(err) = result {
+  1834→  1834→        eprintln!("{}", err);
+  1835→  1835→        std::process::exit(1);
+  1836→  1836→    }
+  1837→  1837→}
+  1838→  1838→
+  1839→  1839→/// `vuma pkg init/build/add` — Package manager subcommands.
+  1840→  1840→fn cmd_pkg(cmd: &PkgCommand) -> Result<(), String> {
+  1841→  1841→    let dir = std::env::current_dir().map_err(|e| format!("cannot get current directory: {}", e))?;
+  1842→  1842→    match cmd {
+  1843→  1843→        PkgCommand::Init { name } => {
+  1844→  1844→            vuma::init_package(&dir, name).map_err(|e| format!("pkg init failed: {}", e))?;
+  1845→  1845→            println!("Initialized VUMA package '{}' in {}", name, dir.display());
+  1846→  1846→            Ok(())
+  1847→  1847→        }
+  1848→  1848→        PkgCommand::Build => {
+  1849→  1849→            vuma::build_package(&dir).map_err(|e| format!("pkg build failed: {}", e))?;
+  1850→  1850→            println!("Package built successfully");
+  1851→  1851→            Ok(())
+  1852→  1852→        }
+  1853→  1853→        PkgCommand::Add { dep, version } => {
+  1854→  1854→            vuma::add_dependency(&dir, dep, version).map_err(|e| format!("pkg add failed: {}", e))?;
+  1855→  1855→            println!("Added dependency {} @ {}", dep, version);
+  1856→  1856→            Ok(())
+  1857→  1857→        }
+  1858→  1858→    }
+  1859→  1859→}
+  1860→  1860→
+  1861→  1861→// ═══════════════════════════════════════════════════════════════════════════
+  1862→  1862→// Tests for CLI argument parsing
+  1863→  1863→// ═══════════════════════════════════════════════════════════════════════════
+  1864→  1864→
+  1865→  1865→#[cfg(test)]
+  1866→  1866→mod tests {
+  1867→  1867→    use super::*;
+  1868→  1868→    use clap::Parser;
+  1869→  1869→
+  1870→  1870→    /// Test 1: `vuma build hello.vuma` parses correctly.
+  1871→  1871→    #[test]
+  1872→  1872→    fn test_build_basic() {
+  1873→  1873→        let cli = Cli::try_parse_from(["vuma", "build", "hello.vuma"]).unwrap();
+  1874→  1874→        match cli.command {
+  1875→  1875→            Some(Commands::Build {
+  1876→  1876→                ref file,
+  1877→  1877→                ref output,
+  1878→  1878→                ref target,
+  1879→  1879→            }) => {
+  1880→  1880→                assert_eq!(file, &PathBuf::from("hello.vuma"));
+  1881→  1881→                assert!(output.is_none());
+  1882→  1882→                assert_eq!(target, &TargetArg::Linux);
+  1883→  1883→            }
+  1884→  1884→            _ => panic!("expected Build command"),
+  1885→  1885→        }
+  1886→  1886→    }
+  1887→  1887→
+  1888→  1888→    /// Test 2: `vuma build hello.vuma -o out.o --target linux` parses correctly.
+  1889→  1889→    #[test]
+  1890→  1890→    fn test_build_with_options() {
+  1891→  1891→        let cli = Cli::try_parse_from([
+  1892→  1892→            "vuma",
+  1893→  1893→            "build",
+  1894→  1894→            "hello.vuma",
+  1895→  1895→            "-o",
+  1896→  1896→            "out.o",
+  1897→  1897→            "--target",
+  1898→  1898→            "linux",
+  1899→  1899→        ])
+  1900→  1900→        .unwrap();
+  1901→  1901→        match cli.command {
+  1902→  1902→            Some(Commands::Build {
+  1903→  1903→                ref file,
+  1904→  1904→                ref output,
+  1905→  1905→                ref target,
+  1906→  1906→            }) => {
+  1907→  1907→                assert_eq!(file, &PathBuf::from("hello.vuma"));
+  1908→  1908→                assert_eq!(output.as_ref().unwrap(), &PathBuf::from("out.o"));
+  1909→  1909→                assert_eq!(target, &TargetArg::Linux);
+  1910→  1910→            }
+  1911→  1911→            _ => panic!("expected Build command"),
+  1912→  1912→        }
+  1913→  1913→    }
+  1914→  1914→
+  1915→  1915→    /// Test 3: `vuma run hello.vuma` parses correctly.
+  1916→  1916→    #[test]
+  1917→  1917→    fn test_run_basic() {
+  1918→  1918→        let cli = Cli::try_parse_from(["vuma", "run", "hello.vuma"]).unwrap();
+  1919→  1919→        match cli.command {
+  1920→  1920→            Some(Commands::Run { ref file, ref args }) => {
+  1921→  1921→                assert_eq!(file, &PathBuf::from("hello.vuma"));
+  1922→  1922→                assert!(args.is_empty());
+  1923→  1923→            }
+  1924→  1924→            _ => panic!("expected Run command"),
+  1925→  1925→        }
+  1926→  1926→    }
+  1927→  1927→
+  1928→  1928→    /// Test 4: `vuma run hello.vuma arg1 arg2` passes trailing args.
+  1929→  1929→    #[test]
+  1930→  1930→    fn test_run_with_args() {
+  1931→  1931→        let cli = Cli::try_parse_from(["vuma", "run", "hello.vuma", "arg1", "arg2"]).unwrap();
+  1932→  1932→        match cli.command {
+  1933→  1933→            Some(Commands::Run { ref file, ref args }) => {
+  1934→  1934→                assert_eq!(file, &PathBuf::from("hello.vuma"));
+  1935→  1935→                assert_eq!(args, &vec!["arg1".to_string(), "arg2".to_string()]);
+  1936→  1936→            }
+  1937→  1937→            _ => panic!("expected Run command"),
+  1938→  1938→        }
+  1939→  1939→    }
+  1940→  1940→
+  1941→  1941→    /// Test 5: `vuma check hello.vuma` parses correctly.
+  1942→  1942→    #[test]
+  1943→  1943→    fn test_check() {
+  1944→  1944→        let cli = Cli::try_parse_from(["vuma", "check", "hello.vuma"]).unwrap();
+  1945→  1945→        match cli.command {
+  1946→  1946→            Some(Commands::Check { ref file }) => {
+  1947→  1947→                assert_eq!(file, &PathBuf::from("hello.vuma"));
+  1948→  1948→            }
+  1949→  1949→            _ => panic!("expected Check command"),
+  1950→  1950→        }
+  1951→  1951→    }
+  1952→  1952→
+  1953→  1953→    /// Test 6: `vuma emit aarch64 hello.vuma` parses correctly.
+  1954→  1954→    #[test]
+  1955→  1955→    fn test_emit_aarch64() {
+  1956→  1956→        let cli = Cli::try_parse_from(["vuma", "emit", "aarch64", "hello.vuma"]).unwrap();
+  1957→  1957→        match cli.command {
+  1958→  1958→            Some(Commands::Emit {
+  1959→  1959→                isa,
+  1960→  1960→                ref file,
+  1961→  1961→                ref output,
+  1962→  1962→            }) => {
+  1963→  1963→                assert_eq!(isa, IsaArg::Aarch64);
+  1964→  1964→                assert_eq!(file, &PathBuf::from("hello.vuma"));
+  1965→  1965→                assert!(output.is_none());
+  1966→  1966→            }
+  1967→  1967→            _ => panic!("expected Emit command"),
+  1968→  1968→        }
+  1969→  1969→    }
+  1970→  1970→
+  1971→  1971→    /// Test 7: `vuma emit x86-64 hello.vuma -o out.o` parses correctly.
+  1972→  1972→    #[test]
+  1973→  1973→    fn test_emit_x86_64_with_output() {
+  1974→  1974→        let cli =
+  1975→  1975→            Cli::try_parse_from(["vuma", "emit", "x86_64", "hello.vuma", "-o", "out.o"]).unwrap();
+  1976→  1976→        match cli.command {
+  1977→  1977→            Some(Commands::Emit {
+  1978→  1978→                isa,
+  1979→  1979→                ref file,
+  1980→  1980→                ref output,
+  1981→  1981→            }) => {
+  1982→  1982→                assert_eq!(isa, IsaArg::X86_64);
+  1983→  1983→                assert_eq!(file, &PathBuf::from("hello.vuma"));
+  1984→  1984→                assert_eq!(output.as_ref().unwrap(), &PathBuf::from("out.o"));
+  1985→  1985→            }
+  1986→  1986→            _ => panic!("expected Emit command"),
+  1987→  1987→        }
+  1988→  1988→    }
+  1989→  1989→
+  1990→  1990→    /// Test 8: `vuma disasm hello.o --isa riscv64 --base-addr 0x1000` parses correctly.
+  1991→  1991→    #[test]
+  1992→  1992→    fn test_disasm() {
+  1993→  1993→        let cli = Cli::try_parse_from([
+  1994→  1994→            "vuma",
+  1995→  1995→            "disasm",
+  1996→  1996→            "hello.o",
+  1997→  1997→            "--isa",
+  1998→  1998→            "riscv64",
+  1999→  1999→            "--base-addr",
+  2000→  2000→            "0x1000",
+
+[showing lines 1-2000 of 2002; use offset=2001 with limit to continue reading]

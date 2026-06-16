@@ -1,0 +1,810 @@
+     1→// Pipeline — Pipe-Fork-Exec Pipeline with Signal Handling
+     2→//
+     3→// This program creates a mini-shell pipeline that demonstrates
+     4→// inter-process communication through Unix pipes:
+     5→//
+     6→//   stdin ──▶ [SHA256d filter] ──pipe1──▶ [hex encoder] ──pipe2──▶ stdout
+     7→//
+     8→// The parent process sets up two pipes, forks two child processes,
+     9→// and orchestrates data flow between them:
+    10→//
+    11→//   Child 1 (SHA256d filter):
+    12→//     - Reads up to 4096 bytes from stdin
+    13→//     - Computes SHA256d (double SHA-256) of the input
+    14→//     - Writes the 32-byte digest to pipe1
+    15→//
+    16→//   Child 2 (hex encoder):
+    17→//     - Reads 32-byte digest from pipe1
+    18→//     - Converts each byte to 2 hex characters
+    19→//     - Writes 64 hex chars + newline to pipe2
+    20→//
+    21→//   Parent:
+    22→//     - Reads hex output from pipe2
+    23→//     - Writes to stdout
+    24→//     - Waits for both children via waitpid()
+    25→//     - Checks the atomic SIGCHLD flag
+    26→//     - Exits with the first byte of the hex output as exit code
+    27→//
+    28→// VUMA Key Concepts:
+    29→//   - Full SHA256d implementation (rotr32, ch, maj, sigma functions,
+    30→//     message schedule, compression, padding, double-hash)
+    31→//   - Atomic flag for SIGCHLD handler using AtomicStore / AtomicLoad
+    32→//   - Unix syscall FFI: pipe, fork, dup2, close, read, write,
+    33→//     waitpid, exit, sigaction, getpid
+    34→//   - Byte-to-hex conversion using a lookup table
+    35→//   - Pointer arithmetic for byte-level I/O buffers
+    36→//   - Error checking on all syscalls
+    37→//   - Memory cleanup: every allocate paired with free
+    38→//   - u32 arithmetic masked with & 4294967295
+    39→//   - No bitwise NOT: uses XOR with 4294967295 instead
+    40→//   - No built-in rotate: composed from shifts
+    41→
+    42→// ===========================================================================
+    43→// External C function declarations (Linux syscalls)
+    44→// ===========================================================================
+    45→// These are resolved at link time by the system linker.
+    46→
+    47→extern "C" {
+    48→    // pipe(pipefd) — create a pair of file descriptors for a pipe
+    49→    // pipefd points to int[2]: pipefd[0] = read end, pipefd[1] = write end
+    50→    fn pipe(pipefd: Address) -> i64;
+    51→
+    52→    // fork() — create a child process
+    53→    // Returns 0 in child, child PID in parent, -1 on error
+    54→    fn fork() -> i64;
+    55→
+    56→    // dup2(oldfd, newfd) — duplicate a file descriptor
+    57→    // Makes newfd point to the same file as oldfd, closing newfd first
+    58→    fn dup2(oldfd: i64, newfd: i64) -> i64;
+    59→
+    60→    // close(fd) — close a file descriptor
+    61→    fn close(fd: i64) -> i64;
+    62→
+    63→    // read(fd, buf, count) — read bytes from fd into buf
+    64→    // Returns number of bytes read, or -1 on error
+    65→    fn read(fd: i64, buf: Address, count: i64) -> i64;
+    66→
+    67→    // write(fd, buf, count) — write bytes from buf to fd
+    68→    // Returns number of bytes written, or -1 on error
+    69→    fn write(fd: i64, buf: Address, count: i64) -> i64;
+    70→
+    71→    // waitpid(pid, status, options) — wait for a child process
+    72→    // pid=-1 means wait for any child; status stores exit info
+    73→    fn waitpid(pid: i64, status: Address, options: i64) -> i64;
+    74→
+    75→    // exit(code) — terminate the current process
+    76→    fn exit(code: i64);
+    77→
+    78→    // sigaction(signum, act, oldact) — install a signal handler
+    79→    // act/oldact point to struct sigaction (kernel layout)
+    80→    fn sigaction(signum: i64, act: Address, oldact: Address) -> i64;
+    81→
+    82→    // getpid() — get the process ID of the calling process
+    83→    fn getpid() -> i64;
+    84→}
+    85→
+    86→// ===========================================================================
+    87→// Global: atomic flag for SIGCHLD handler
+    88→// ===========================================================================
+    89→// When a child process exits, the kernel delivers SIGCHLD to the parent.
+    90→// Our handler atomically sets this flag so the parent can detect
+    91→// child termination without blocking in waitpid() first.
+    92→
+    93→child_exited: Address = allocate(8);
+    94→
+    95→// ===========================================================================
+    96→// SIGCHLD handler: atomically sets the child_exited flag
+    97→// ===========================================================================
+    98→// This function is installed via sigaction() and called by the kernel
+    99→// when a child process terminates. It uses AtomicStore to safely write
+   100→// the flag without racing with the parent's AtomicLoad.
+   101→
+   102→fn sigchld_handler(signum: i64) {
+   103→    // Atomically set the flag to 1 with Release semantics.
+   104→    // This ensures the store is visible to the parent when it
+   105→    // subsequently does an Acquire load.
+   106→    AtomicStore(1, child_exited);
+   107→}
+   108→
+   109→// ===========================================================================
+   110→// Helper: write a 4-byte i32 to a buffer (little-endian, for pipefd)
+   111→// ===========================================================================
+   112→// Linux pipe() and struct sigaction use int arrays in the native
+   113→// byte order. On x86-64 and aarch64, this is little-endian.
+   114→
+   115→fn write_i32_le(buf: Address, offset: u64, val: i32) {
+   116→    *(buf + offset)     = (val as u64) & 255;
+   117→    *(buf + offset + 1) = ((val as u64) >> 8) & 255;
+   118→    *(buf + offset + 2) = ((val as u64) >> 16) & 255;
+   119→    *(buf + offset + 3) = ((val as u64) >> 24) & 255;
+   120→}
+   121→
+   122→fn read_i32_le(buf: Address, offset: u64) -> i32 {
+   123→    b0: u64 = *(buf + offset);
+   124→    b1: u64 = *(buf + offset + 1);
+   125→    b2: u64 = *(buf + offset + 2);
+   126→    b3: u64 = *(buf + offset + 3);
+   127→    return ((b3 << 24) | (b2 << 16) | (b1 << 8) | b0) as i32;
+   128→}
+   129→
+   130→// ===========================================================================
+   131→// SHA-256 Implementation (from sha256d.vuma)
+   132→// ===========================================================================
+   133→// Full SHA-256 per NIST FIPS 180-4, used for the SHA256d filter stage.
+   134→// All u32 arithmetic is masked with & 4294967295 to stay within 32 bits
+   135→// since VUMA uses 64-bit registers internally.
+   136→
+   137→// ── Helper: u32 right-rotate ───────────────────────────────────────────
+   138→// VUMA does not have a built-in rotate, so we compose from shifts.
+   139→// rotate_right(x, n) = (x >> n) | (x << (32 - n))
+   140→
+   141→fn rotr32(x: u32, n: u32) -> u32 {
+   142→    // Mask to 32 bits: left shifts in 64-bit registers produce bits
+   143→    // above bit 31 that must be cleared.
+   144→    return ((x >> n) | (x << (32 - n))) & 4294967295;
+   145→}
+   146→
+   147→// ── SHA-256 logical functions (FIPS 180-4 Section 4.1.2) ──────────────
+   148→
+   149→fn ch(x: u32, y: u32, z: u32) -> u32 {
+   150→    // Constant-time Ch function: (x & y) ^ ((x ^ 0xFFFFFFFF) & z)
+   151→    // Uses XOR with 4294967295 instead of bitwise NOT (VUMA has no ~).
+   152→    return (x & y) ^ ((x ^ 4294967295) & z);
+   153→}
+   154→
+   155→fn maj(a: u32, b: u32, c: u32) -> u32 {
+   156→    return (a & b) ^ (a & c) ^ (b & c);
+   157→}
+   158→
+   159→fn big_sigma0(x: u32) -> u32 {
+   160→    return rotr32(x, 2) ^ rotr32(x, 13) ^ rotr32(x, 22);
+   161→}
+   162→
+   163→fn big_sigma1(x: u32) -> u32 {
+   164→    return rotr32(x, 6) ^ rotr32(x, 11) ^ rotr32(x, 25);
+   165→}
+   166→
+   167→fn small_sigma0(x: u32) -> u32 {
+   168→    return (rotr32(x, 7) ^ rotr32(x, 18) ^ (x >> 3)) & 4294967295;
+   169→}
+   170→
+   171→fn small_sigma1(x: u32) -> u32 {
+   172→    return (rotr32(x, 17) ^ rotr32(x, 19) ^ (x >> 10)) & 4294967295;
+   173→}
+   174→
+   175→// ── Read/write u32 from a byte buffer (big-endian, per FIPS 180-4) ────
+   176→
+   177→fn read_u32_be(buf: Address, offset: u64) -> u32 {
+   178→    b0: u32 = *(buf + offset);
+   179→    b1: u32 = *(buf + offset + 1);
+   180→    b2: u32 = *(buf + offset + 2);
+   181→    b3: u32 = *(buf + offset + 3);
+   182→    // Mask to 32 bits: shifts of byte values in 64-bit registers
+   183→    // can set bits above bit 31.
+   184→    return ((b0 << 24) | (b1 << 16) | (b2 << 8) | b3) & 4294967295;
+   185→}
+   186→
+   187→fn write_u32_be(buf: Address, offset: u64, val: u32) {
+   188→    *(buf + offset)     = (val >> 24) & 255;
+   189→    *(buf + offset + 1) = (val >> 16) & 255;
+   190→    *(buf + offset + 2) = (val >> 8) & 255;
+   191→    *(buf + offset + 3) = val & 255;
+   192→}
+   193→
+   194→// ── Store/load a u32 from the W schedule array (stride = 4 bytes) ──────
+   195→
+   196→fn w_store(w_base: Address, idx: u64, val: u32) {
+   197→    write_u32_be(w_base, idx * 4, val);
+   198→}
+   199→
+   200→fn w_load(w_base: Address, idx: u64) -> u32 {
+   201→    return read_u32_be(w_base, idx * 4);
+   202→}
+   203→
+   204→// ── Initialize SHA-256 state (H[0..7]) into 32-byte buffer ────────────
+   205→// H values from FIPS 180-4 Section 5.3.3.
+   206→
+   207→fn sha256_init_state(state: Address) {
+   208→    write_u32_be(state, 0,  1779033703);   // 0x6a09e667
+   209→    write_u32_be(state, 4,  3144134277);   // 0xbb67ae85
+   210→    write_u32_be(state, 8,  1013904242);   // 0x3c6ef372
+   211→    write_u32_be(state, 12, 2773480762);   // 0xa54ff53a
+   212→    write_u32_be(state, 16, 1359893119);   // 0x510e527f
+   213→    write_u32_be(state, 20, 2600822924);   // 0x9b05688c
+   214→    write_u32_be(state, 24, 528734635);    // 0x1f83d9ab
+   215→    write_u32_be(state, 28, 1541459225);   // 0x5be0cd19
+   216→}
+   217→
+   218→// ── Initialize SHA-256 round constants K[0..63] into 256-byte buffer ──
+   219→// K values from FIPS 180-4 Section 4.2.2.
+   220→
+   221→fn sha256_init_k(k: Address) {
+   222→    write_u32_be(k, 0,   1116352408);   // 0x428a2f98
+   223→    write_u32_be(k, 4,   1899447441);   // 0x71374491
+   224→    write_u32_be(k, 8,   3049323471);   // 0xb5c0fbcf
+   225→    write_u32_be(k, 12,  3921009573);   // 0xe9b5dba5
+   226→    write_u32_be(k, 16,  961987163);    // 0x3956c25b
+   227→    write_u32_be(k, 20,  1508970993);   // 0x59f111f1
+   228→    write_u32_be(k, 24,  2453635748);   // 0x923f82a4
+   229→    write_u32_be(k, 28,  2870763221);   // 0xab1c5ed5
+   230→    write_u32_be(k, 32,  3624381080);   // 0xd807aa98
+   231→    write_u32_be(k, 36,  310598401);    // 0x12835b01
+   232→    write_u32_be(k, 40,  607225278);    // 0x243185be
+   233→    write_u32_be(k, 44,  1426881987);   // 0x550c7dc3
+   234→    write_u32_be(k, 48,  1925078388);   // 0x72be5d74
+   235→    write_u32_be(k, 52,  2162078206);   // 0x80deb1fe
+   236→    write_u32_be(k, 56,  2614888103);   // 0x9bdc06a7
+   237→    write_u32_be(k, 60,  3248222580);   // 0xc19bf174
+   238→    write_u32_be(k, 64,  3835390401);   // 0xe49b69c1
+   239→    write_u32_be(k, 68,  4022224774);   // 0xefbe4786
+   240→    write_u32_be(k, 72,  264347078);    // 0x0fc19dc6
+   241→    write_u32_be(k, 76,  604807628);    // 0x240ca1cc
+   242→    write_u32_be(k, 80,  770255983);    // 0x2de92c6f
+   243→    write_u32_be(k, 84,  1249150122);   // 0x4a7484aa
+   244→    write_u32_be(k, 88,  1555081692);   // 0x5cb0a9dc
+   245→    write_u32_be(k, 92,  1996064986);   // 0x76f988da
+   246→    write_u32_be(k, 96,  2554220882);   // 0x983e5152
+   247→    write_u32_be(k, 100, 2821834349);   // 0xa831c66d
+   248→    write_u32_be(k, 104, 2952996808);   // 0xb00327c8
+   249→    write_u32_be(k, 108, 3210313671);   // 0xbf597fc7
+   250→    write_u32_be(k, 112, 3336571891);   // 0xc6e00bf3
+   251→    write_u32_be(k, 116, 3584528711);   // 0xd5a79147
+   252→    write_u32_be(k, 120, 113926993);    // 0x06ca6351
+   253→    write_u32_be(k, 124, 338241895);    // 0x14292967
+   254→    write_u32_be(k, 128, 666307205);    // 0x27b70a85
+   255→    write_u32_be(k, 132, 773529912);    // 0x2e1b2138
+   256→    write_u32_be(k, 136, 1294757372);   // 0x4d2c6dfc
+   257→    write_u32_be(k, 140, 1396182291);   // 0x53380d13
+   258→    write_u32_be(k, 144, 1695183700);   // 0x650a7354
+   259→    write_u32_be(k, 148, 1986661051);   // 0x766a0abb
+   260→    write_u32_be(k, 152, 2177026350);   // 0x81c2c92e
+   261→    write_u32_be(k, 156, 2456956037);   // 0x92722c85
+   262→    write_u32_be(k, 160, 2730485921);   // 0xa2bfe8a1
+   263→    write_u32_be(k, 164, 2820302411);   // 0xa81a664b
+   264→    write_u32_be(k, 168, 3259730800);   // 0xc24b8b70
+   265→    write_u32_be(k, 172, 3345764771);   // 0xc76c51a3
+   266→    write_u32_be(k, 176, 3516065817);   // 0xd192e819
+   267→    write_u32_be(k, 180, 3600352804);   // 0xd6990624
+   268→    write_u32_be(k, 184, 4094571909);   // 0xf40e3585
+   269→    write_u32_be(k, 188, 275423344);    // 0x106aa070
+   270→    write_u32_be(k, 192, 430227734);    // 0x19a4c116
+   271→    write_u32_be(k, 196, 506948616);    // 0x1e376c08
+   272→    write_u32_be(k, 200, 659060556);    // 0x2748774c
+   273→    write_u32_be(k, 204, 883997877);    // 0x34b0bcb5
+   274→    write_u32_be(k, 208, 958139571);    // 0x391c0cb3
+   275→    write_u32_be(k, 212, 1322822218);   // 0x4ed8aa4a
+   276→    write_u32_be(k, 216, 1537002063);   // 0x5b9cca4f
+   277→    write_u32_be(k, 220, 1747873779);   // 0x682e6ff3
+   278→    write_u32_be(k, 224, 1955562222);   // 0x748f82ee
+   279→    write_u32_be(k, 228, 2024104815);   // 0x78a5636f
+   280→    write_u32_be(k, 232, 2227730452);   // 0x84c87814
+   281→    write_u32_be(k, 236, 2361852424);   // 0x8cc70208
+   282→    write_u32_be(k, 240, 2428436474);   // 0x90befffa
+   283→    write_u32_be(k, 244, 2756734187);   // 0xa4506ceb
+   284→    write_u32_be(k, 248, 3204031479);   // 0xbef9a3f7
+   285→    write_u32_be(k, 252, 3329325298);   // 0xc67178f2
+   286→}
+   287→
+   288→// ── SHA-256 compression function: process one 512-bit block ────────────
+   289→// Per FIPS 180-4 Section 6.2.2.
+   290→
+   291→fn sha256_transform(state: Address, k: Address, w: Address, block: Address) {
+   292→    // Step 1: Build message schedule W[0..63]
+   293→    i: u64 = 0;
+   294→    for i in 0..16 {
+   295→        val: u32 = read_u32_be(block, i * 4);
+   296→        w_store(w, i, val);
+   297→    }
+   298→    for i in 16..64 {
+   299→        w15: u32 = w_load(w, i - 15);
+   300→        w2: u32  = w_load(w, i - 2);
+   301→        w7: u32  = w_load(w, i - 7);
+   302→        w16: u32 = w_load(w, i - 16);
+   303→        val: u32 = (small_sigma1(w2) + w7 + small_sigma0(w15) + w16) & 4294967295;
+   304→        w_store(w, i, val);
+   305→    }
+   306→
+   307→    // Step 2: Initialize working variables from current hash state
+   308→    a: u32 = read_u32_be(state, 0);
+   309→    b: u32 = read_u32_be(state, 4);
+   310→    c: u32 = read_u32_be(state, 8);
+   311→    d: u32 = read_u32_be(state, 12);
+   312→    e: u32 = read_u32_be(state, 16);
+   313→    f: u32 = read_u32_be(state, 20);
+   314→    g: u32 = read_u32_be(state, 24);
+   315→    h: u32 = read_u32_be(state, 28);
+   316→
+   317→    // Step 3: 64-round compression
+   318→    // All u32 additions masked to 32 bits because VUMA uses 64-bit
+   319→    // registers and carry bits above bit 31 would corrupt subsequent
+   320→    // right-shift operations in rotr32.
+   321→    for i in 0..64 {
+   322→        ki: u32 = read_u32_be(k, i * 4);
+   323→        wi: u32 = w_load(w, i);
+   324→        t1: u32 = (h + big_sigma1(e) + ch(e, f, g) + ki + wi) & 4294967295;
+   325→        t2: u32 = (big_sigma0(a) + maj(a, b, c)) & 4294967295;
+   326→        h = g;
+   327→        g = f;
+   328→        f = e;
+   329→        e = (d + t1) & 4294967295;
+   330→        d = c;
+   331→        c = b;
+   332→        b = a;
+   333→        a = (t1 + t2) & 4294967295;
+   334→    }
+   335→
+   336→    // Step 4: Add compressed chunk to current hash value
+   337→    write_u32_be(state, 0,  (read_u32_be(state, 0)  + a) & 4294967295);
+   338→    write_u32_be(state, 4,  (read_u32_be(state, 4)  + b) & 4294967295);
+   339→    write_u32_be(state, 8,  (read_u32_be(state, 8)  + c) & 4294967295);
+   340→    write_u32_be(state, 12, (read_u32_be(state, 12) + d) & 4294967295);
+   341→    write_u32_be(state, 16, (read_u32_be(state, 16) + e) & 4294967295);
+   342→    write_u32_be(state, 20, (read_u32_be(state, 20) + f) & 4294967295);
+   343→    write_u32_be(state, 24, (read_u32_be(state, 24) + g) & 4294967295);
+   344→    write_u32_be(state, 28, (read_u32_be(state, 28) + h) & 4294967295);
+   345→}
+   346→
+   347→// ── Pad a message into a 64-byte block ────────────────────────────────
+   348→// Simplified: handles messages up to 55 bytes that fit in one padded block.
+   349→
+   350→fn sha256_pad_block(block: Address, msg: Address, msg_len: u64) {
+   351→    // Copy message bytes into the block buffer
+   352→    i: u64 = 0;
+   353→    for i in 0..msg_len {
+   354→        *(block + i) = *(msg + i);
+   355→    }
+   356→
+   357→    // Append the '1' bit (0x80 = 128 byte) after the message
+   358→    *(block + msg_len) = 128;
+   359→
+   360→    // Zero-fill remaining bytes (except last 8 for length)
+   361→    for i in msg_len + 1..56 {
+   362→        *(block + i) = 0;
+   363→    }
+   364→
+   365→    // Append 64-bit big-endian message length in bits
+   366→    bit_len: u64 = msg_len * 8;
+   367→    *(block + 56) = (bit_len >> 56) & 255;
+   368→    *(block + 57) = (bit_len >> 48) & 255;
+   369→    *(block + 58) = (bit_len >> 40) & 255;
+   370→    *(block + 59) = (bit_len >> 32) & 255;
+   371→    *(block + 60) = (bit_len >> 24) & 255;
+   372→    *(block + 61) = (bit_len >> 16) & 255;
+   373→    *(block + 62) = (bit_len >> 8) & 255;
+   374→    *(block + 63) = bit_len & 255;
+   375→}
+   376→
+   377→// ── Copy 32 bytes from source to destination ──────────────────────────
+   378→
+   379→fn copy32(dst: Address, src: Address) {
+   380→    i: u64 = 0;
+   381→    for i in 0..32 {
+   382→        *(dst + i) = *(src + i);
+   383→    }
+   384→}
+   385→
+   386→// ── SHA256d: SHA-256(SHA-256(message)) ────────────────────────────────
+   387→// The double-SHA-256 construction used in Bitcoin block headers,
+   388→// transaction IDs, and Merkle tree computation.
+   389→
+   390→fn sha256d(msg: Address, msg_len: u64, out: Address) {
+   391→    // Allocate working memory
+   392→    state = allocate(32);
+   393→    k = allocate(256);
+   394→    w = allocate(256);
+   395→    block = allocate(64);
+   396→    inner = allocate(32);
+   397→
+   398→    // Initialize constants (same for both passes)
+   399→    sha256_init_k(k);
+   400→
+   401→    // ---- Inner hash: SHA-256(message) ----
+   402→    sha256_init_state(state);
+   403→    sha256_pad_block(block, msg, msg_len);
+   404→    sha256_transform(state, k, w, block);
+   405→    copy32(inner, state);
+   406→
+   407→    // ---- Outer hash: SHA-256(inner_hash) ----
+   408→    sha256_init_state(state);
+   409→    sha256_pad_block(block, inner, 32);
+   410→    sha256_transform(state, k, w, block);
+   411→    copy32(out, state);
+   412→
+   413→    // Clean up all allocations
+   414→    free(state);
+   415→    free(k);
+   416→    free(w);
+   417→    free(block);
+   418→    free(inner);
+   419→}
+   420→
+   421→// ===========================================================================
+   422→// Hex Encoding
+   423→// ===========================================================================
+   424→// Converts binary data to hexadecimal string representation.
+   425→// Uses a 16-byte lookup table for the hex digit characters 0-9, a-f.
+   426→
+   427→// ── Initialize hex lookup table ───────────────────────────────────────
+   428→// table[0]='0', table[1]='1', ..., table[9]='9',
+   429→// table[10]='a', table[11]='b', ..., table[15]='f'
+   430→
+   431→fn init_hex_table(table: Address) {
+   432→    *(table + 0)  = 48;   // '0'
+   433→    *(table + 1)  = 49;   // '1'
+   434→    *(table + 2)  = 50;   // '2'
+   435→    *(table + 3)  = 51;   // '3'
+   436→    *(table + 4)  = 52;   // '4'
+   437→    *(table + 5)  = 53;   // '5'
+   438→    *(table + 6)  = 54;   // '6'
+   439→    *(table + 7)  = 55;   // '7'
+   440→    *(table + 8)  = 56;   // '8'
+   441→    *(table + 9)  = 57;   // '9'
+   442→    *(table + 10) = 97;   // 'a'
+   443→    *(table + 11) = 98;   // 'b'
+   444→    *(table + 12) = 99;   // 'c'
+   445→    *(table + 13) = 100;  // 'd'
+   446→    *(table + 14) = 101;  // 'e'
+   447→    *(table + 15) = 102;  // 'f'
+   448→}
+   449→
+   450→// ── Convert 32 bytes to 64 hex characters ─────────────────────────────
+   451→// Each input byte produces two hex characters (high nibble first).
+   452→// Output buffer must be at least 64 bytes.
+   453→
+   454→fn hex_encode(input: Address, output: Address) {
+   455→    hex_table = allocate(16);
+   456→    init_hex_table(hex_table);
+   457→
+   458→    i: u64 = 0;
+   459→    for i in 0..32 {
+   460→        byte: u64 = *(input + i);
+   461→        // High nibble: bits 7-4
+   462→        hi: u64 = byte >> 4;
+   463→        // Low nibble: bits 3-0
+   464→        lo: u64 = byte & 15;
+   465→        // Look up hex digit from table
+   466→        *(output + i * 2)     = *(hex_table + hi);
+   467→        *(output + i * 2 + 1) = *(hex_table + lo);
+   468→    }
+   469→
+   470→    free(hex_table);
+   471→}
+   472→
+   473→// ===========================================================================
+   474→// SIGCHLD handler installation via sigaction
+   475→// ===========================================================================
+   476→// struct sigaction (Linux, 64-bit) layout:
+   477→//   Offset 0:  8 bytes — sa_handler function pointer
+   478→//   Offset 8:  8 bytes — sa_flags (u64)
+   479→//   Offset 16: 128 bytes — sa_mask (1024-bit signal mask)
+   480→//
+   481→// We set:
+   482→//   sa_handler = pointer to our handler function
+   483→//   sa_flags   = SA_NOCLDSTOP (0x00000001) — only notify on child exit,
+   484→//                not stop/continue. This avoids spurious signals.
+   485→//   sa_mask    = all zeros — don't block any signals during handler.
+   486→
+   487→fn install_sigchld_handler() -> i64 {
+   488→    // Allocate struct sigaction (144 bytes is sufficient)
+   489→    act = allocate(144);
+   490→    oldact = allocate(144);
+   491→
+   492→    // Zero-initialize both structs
+   493→    i: u64 = 0;
+   494→    for i in 0..144 {
+   495→        *(act + i) = 0;
+   496→        *(oldact + i) = 0;
+   497→    }
+   498→
+   499→    // Set sa_handler: the function pointer to sigchld_handler
+   500→    // On 64-bit Linux, this is stored as an 8-byte address at offset 0
+   501→    handler_addr: u64 = @sigchld_handler;
+   502→    *(act + 0) = handler_addr & 255;
+   503→    *(act + 1) = (handler_addr >> 8) & 255;
+   504→    *(act + 2) = (handler_addr >> 16) & 255;
+   505→    *(act + 3) = (handler_addr >> 24) & 255;
+   506→    *(act + 4) = (handler_addr >> 32) & 255;
+   507→    *(act + 5) = (handler_addr >> 40) & 255;
+   508→    *(act + 6) = (handler_addr >> 48) & 255;
+   509→    *(act + 7) = (handler_addr >> 56) & 255;
+   510→
+   511→    // Set sa_flags = SA_NOCLDSTOP (1) at offset 8
+   512→    write_i32_le(act, 8, 1);
+   513→
+   514→    // SIGCHLD = signal 17 on Linux x86-64
+   515→    ret: i64 = sigaction(17, act, oldact);
+   516→
+   517→    // Clean up
+   518→    free(act);
+   519→    free(oldact);
+   520→
+   521→    return ret;
+   522→}
+   523→
+   524→// ===========================================================================
+   525→// Child 1: SHA256d Filter
+   526→// ===========================================================================
+   527→// Reads up to 4096 bytes from stdin, computes SHA256d, and writes
+   528→// the 32-byte digest to the pipe1 write end.
+   529→
+   530→fn child_sha256d_filter(pipe1_write: i64) {
+   531→    // Allocate buffer for input data (up to 4096 bytes)
+   532→    inbuf = allocate(4096);
+   533→
+   534→    // Read from stdin (fd 0)
+   535→    n: i64 = read(0, inbuf, 4096);
+   536→    if n < 0 {
+   537→        // Read error — close pipe and exit with error code 2
+   538→        close(pipe1_write);
+   539→        free(inbuf);
+   540→        exit(2);
+   541→    }
+   542→
+   543→    // Compute SHA256d of the input
+   544→    digest = allocate(32);
+   545→    sha256d(inbuf, n as u64, digest);
+   546→
+   547→    // Write the 32-byte digest to pipe1
+   548→    written: i64 = write(pipe1_write, digest, 32);
+   549→    if written < 0 {
+   550→        // Write error — clean up and exit with error code 3
+   551→        close(pipe1_write);
+   552→        free(inbuf);
+   553→        free(digest);
+   554→        exit(3);
+   555→    }
+   556→
+   557→    // Clean up: close pipe and free memory
+   558→    close(pipe1_write);
+   559→    free(inbuf);
+   560→    free(digest);
+   561→    exit(0);
+   562→}
+   563→
+   564→// ===========================================================================
+   565→// Child 2: Hex Encoder
+   566→// ===========================================================================
+   567→// Reads 32 bytes from pipe1, converts each byte to 2 hex characters,
+   568→// and writes 64 hex chars + newline to pipe2.
+   569→
+   570→fn child_hex_encoder(pipe1_read: i64, pipe2_write: i64) {
+   571→    // Allocate buffer for the 32-byte digest
+   572→    digest = allocate(32);
+   573→
+   574→    // Read 32 bytes from pipe1
+   575→    n: i64 = read(pipe1_read, digest, 32);
+   576→    if n < 0 {
+   577→        // Read error — clean up and exit with error code 4
+   578→        close(pipe1_read);
+   579→        close(pipe2_write);
+   580→        free(digest);
+   581→        exit(4);
+   582→    }
+   583→
+   584→    // If we got fewer than 32 bytes, zero-fill the remainder
+   585→    // (shouldn't happen in a correctly functioning pipeline, but
+   586→    // we must handle partial reads defensively)
+   587→    if n < 32 {
+   588→        i: i64 = n;
+   589→        while i < 32 {
+   590→            *(digest + i as u64) = 0;
+   591→            i += 1;
+   592→        }
+   593→    }
+   594→
+   595→    // Convert 32 bytes to 64 hex characters
+   596→    hex_out = allocate(65);  // 64 hex chars + 1 newline
+   597→    hex_encode(digest, hex_out);
+   598→
+   599→    // Append newline at position 64
+   600→    *(hex_out + 64) = 10;   // '\n'
+   601→
+   602→    // Write 65 bytes (64 hex + newline) to pipe2
+   603→    written: i64 = write(pipe2_write, hex_out, 65);
+   604→    if written < 0 {
+   605→        // Write error — clean up and exit with error code 5
+   606→        close(pipe1_read);
+   607→        close(pipe2_write);
+   608→        free(digest);
+   609→        free(hex_out);
+   610→        exit(5);
+   611→    }
+   612→
+   613→    // Clean up: close pipes and free memory
+   614→    close(pipe1_read);
+   615→    close(pipe2_write);
+   616→    free(digest);
+   617→    free(hex_out);
+   618→    exit(0);
+   619→}
+   620→
+   621→// ===========================================================================
+   622→// Main entry point
+   623→// ===========================================================================
+   624→// Sets up the pipeline:
+   625→//   1. Create two pipes (pipe1 for SHA256d→hex, pipe2 for hex→parent)
+   626→//   2. Install SIGCHLD handler
+   627→//   3. Fork child 1 (SHA256d filter)
+   628→//   4. Fork child 2 (hex encoder)
+   629→//   5. Parent reads hex output from pipe2, writes to stdout
+   630→//   6. Wait for both children, check atomic flag, exit
+   631→
+   632→fn main() -> i32 {
+   633→    // ── Step 1: Create pipe1 ──────────────────────────────────────────
+   634→    // pipe1: child1 writes SHA256d digest, child2 reads it
+   635→    pipefd1 = allocate(8);   // int[2]: 8 bytes
+   636→    ret1: i64 = pipe(pipefd1);
+   637→    if ret1 < 0 {
+   638→        free(pipefd1);
+   639→        free(child_exited);
+   640→        return 1;
+   641→    }
+   642→    pipe1_read: i64  = read_i32_le(pipefd1, 0) as i64;
+   643→    pipe1_write: i64 = read_i32_le(pipefd1, 4) as i64;
+   644→
+   645→    // ── Step 2: Create pipe2 ──────────────────────────────────────────
+   646→    // pipe2: child2 writes hex output, parent reads it
+   647→    pipefd2 = allocate(8);   // int[2]: 8 bytes
+   648→    ret2: i64 = pipe(pipefd2);
+   649→    if ret2 < 0 {
+   650→        close(pipe1_read);
+   651→        close(pipe1_write);
+   652→        free(pipefd1);
+   653→        free(pipefd2);
+   654→        free(child_exited);
+   655→        return 1;
+   656→    }
+   657→    pipe2_read: i64  = read_i32_le(pipefd2, 0) as i64;
+   658→    pipe2_write: i64 = read_i32_le(pipefd2, 4) as i64;
+   659→
+   660→    // ── Step 3: Install SIGCHLD handler ───────────────────────────────
+   661→    // Initialize the atomic child_exited flag to 0
+   662→    AtomicStore(0, child_exited);
+   663→
+   664→    sa_ret: i64 = install_sigchld_handler();
+   665→    if sa_ret < 0 {
+   666→        // sigaction failed — clean up pipes and exit
+   667→        close(pipe1_read);
+   668→        close(pipe1_write);
+   669→        close(pipe2_read);
+   670→        close(pipe2_write);
+   671→        free(pipefd1);
+   672→        free(pipefd2);
+   673→        free(child_exited);
+   674→        return 1;
+   675→    }
+   676→
+   677→    // ── Step 4: Fork first child (SHA256d filter) ────────────────────
+   678→    pid1: i64 = fork();
+   679→    if pid1 < 0 {
+   680→        // Fork failed — clean up everything
+   681→        close(pipe1_read);
+   682→        close(pipe1_write);
+   683→        close(pipe2_read);
+   684→        close(pipe2_write);
+   685→        free(pipefd1);
+   686→        free(pipefd2);
+   687→        free(child_exited);
+   688→        return 1;
+   689→    }
+   690→    if pid1 == 0 {
+   691→        // ── CHILD 1: SHA256d filter ──────────────────────────────────
+   692→        // Close pipe ends we don't need:
+   693→        //   - Close pipe1 read end (we write to pipe1)
+   694→        //   - Close pipe2 entirely (we don't use it)
+   695→        close(pipe1_read);
+   696→        close(pipe2_read);
+   697→        close(pipe2_write);
+   698→
+   699→        // Free parent's memory (child has its own address space)
+   700→        free(pipefd1);
+   701→        free(pipefd2);
+   702→        free(child_exited);
+   703→
+   704→        // No dup2 needed — child1 reads from stdin (fd 0),
+   705→        // which is already set up by the parent's shell/terminal
+   706→        child_sha256d_filter(pipe1_write);
+   707→
+   708→        // child_sha256d_filter calls exit(), so we never reach here
+   709→        return 0;
+   710→    }
+   711→
+   712→    // ── Step 5: Fork second child (hex encoder) ──────────────────────
+   713→    pid2: i64 = fork();
+   714→    if pid2 < 0 {
+   715→        // Fork failed — kill child1, clean up, exit
+   716→        close(pipe1_read);
+   717→        close(pipe1_write);
+   718→        close(pipe2_read);
+   719→        close(pipe2_write);
+   720→        free(pipefd1);
+   721→        free(pipefd2);
+   722→        free(child_exited);
+   723→        return 1;
+   724→    }
+   725→    if pid2 == 0 {
+   726→        // ── CHILD 2: Hex encoder ─────────────────────────────────────
+   727→        // Close pipe ends we don't need:
+   728→        //   - Close pipe1 write end (we read from pipe1)
+   729→        //   - Close pipe2 read end (we write to pipe2)
+   730→        close(pipe1_write);
+   731→        close(pipe2_read);
+   732→
+   733→        // Free parent's memory (child has its own address space)
+   734→        free(pipefd1);
+   735→        free(pipefd2);
+   736→        free(child_exited);
+   737→
+   738→        // Redirect stdin to pipe1 read end
+   739→        dup2(pipe1_read, 0);
+   740→
+   741→        // No dup2 needed for stdout — we write directly to pipe2_write
+   742→        child_hex_encoder(pipe1_read, pipe2_write);
+   743→
+   744→        // child_hex_encoder calls exit(), so we never reach here
+   745→        return 0;
+   746→    }
+   747→
+   748→    // ── Step 6: Parent process ────────────────────────────────────────
+   749→    // Close pipe ends the parent doesn't use:
+   750→    //   - Close pipe1 write end (parent doesn't write to pipe1;
+   751→    //     also, child2 needs to see EOF on pipe1 read when child1 closes)
+   752→    //   - Close pipe1 read end (child2 reads from pipe1, not parent)
+   753→    //   - Close pipe2 write end (parent reads from pipe2;
+   754→    //     also, parent needs to see EOF when child2 closes)
+   755→    close(pipe1_write);
+   756→    close(pipe1_read);
+   757→    close(pipe2_write);
+   758→
+   759→    // Read hex output from pipe2 (up to 128 bytes)
+   760→    outbuf = allocate(128);
+   761→    n: i64 = read(pipe2_read, outbuf, 128);
+   762→    if n < 0 {
+   763→        n = 0;  // Treat read error as empty output
+   764→    }
+   765→
+   766→    // Write the hex output to stdout
+   767→    if n > 0 {
+   768→        write(1, outbuf, n);
+   769→    }
+   770→
+   771→    // Close the remaining pipe end
+   772→    close(pipe2_read);
+   773→
+   774→    // ── Step 7: Wait for both children ────────────────────────────────
+   775→    status_buf = allocate(4);   // int status for waitpid
+   776→
+   777→    // Wait for child 1 (SHA256d filter)
+   778→    waitpid(pid1, status_buf, 0);
+   779→
+   780→    // Wait for child 2 (hex encoder)
+   781→    waitpid(pid2, status_buf, 0);
+   782→
+   783→    // ── Step 8: Check atomic SIGCHLD flag ─────────────────────────────
+   784→    // The handler should have set this to at least 1 (or 2 if both
+   785→    // children exited before we checked). This validates that the
+   786→    // atomic signal handler mechanism works correctly.
+   787→    exited_flag: u64 = AtomicLoad(child_exited);
+   788→
+   789→    // ── Step 9: Compute exit code ─────────────────────────────────────
+   790→    // The exit code is the first byte of the hex output.
+   791→    // This is the first hex digit of the SHA256d digest, which is
+   792→    // an ASCII character in the range '0'-'9' or 'a'-'f'.
+   793→    // For example, if the first hex char is '4' (ASCII 52), exit
+   794→    // code will be 52.
+   795→    exit_code: i32 = 0;
+   796→    if n > 0 {
+   797→        exit_code = *(outbuf + 0) as i32;
+   798→    }
+   799→
+   800→    // ── Step 10: Clean up all memory ──────────────────────────────────
+   801→    // Every allocate must be paired with a free.
+   802→    free(outbuf);
+   803→    free(status_buf);
+   804→    free(pipefd1);
+   805→    free(pipefd2);
+   806→    free(child_exited);
+   807→
+   808→    return exit_code;
+   809→}
+   810→

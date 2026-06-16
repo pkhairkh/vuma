@@ -1,0 +1,854 @@
+     1→//! # Filesystem Operations
+     2→//!
+     3→//! This module provides VUMA-verified filesystem operations with Behavioral
+     4→//! Description (BD) annotations, delegating to `std::fs` for real I/O.
+     5→//!
+     6→//! ## Types
+     7→//!
+     8→//! - **VumaFile**: Open, create, read, write, metadata, set_len, sync.
+     9→//! - **VumaMetadata**: File metadata (size, type, permissions, timestamps).
+    10→//! - **VumaDir**: Directory iteration.
+    11→//! - **VumaPermissions**: File permissions (readonly query).
+    12→//! - **VumaIoError**: Error type for all filesystem operations.
+    13→//!
+    14→//! ## Free Functions
+    15→//!
+    16→//! remove_file, remove_dir, remove_dir_all, rename, copy, create_dir,
+    17→//! create_dir_all, canonicalize, exists, hard_link, read_link.
+    18→//!
+    19→//! ## BD Annotations
+    20→//!
+    21→//! - VumaFile: CapD { Read, Write } depending on open mode
+    22→//! - VumaMetadata: CapD { Read, Serialize }
+    23→//! - VumaDir: CapD { Read, Execute }
+    24→//! - VumaPermissions: CapD { Read, Serialize }
+    25→
+    26→use crate::error::{VumaErrorChain, VumaErrorKind, VumaResult};
+    27→use crate::primitives::{CapD, CapFlag, RepD, SyncEdge, SyncEdgeKind};
+    28→use serde::{Deserialize, Serialize};
+    29→use std::fmt;
+    30→use std::io::{Read as StdRead, Seek as StdSeek, SeekFrom, Write as StdWrite};
+    31→use std::path::Path;
+    32→
+    33→// ---------------------------------------------------------------------------
+    34→// VumaIoError (fs-specific)
+    35→// ---------------------------------------------------------------------------
+    36→
+    37→/// A filesystem-specific I/O error.
+    38→///
+    39→/// Wraps `std::io::Error` with VUMA BD annotations.
+    40→#[derive(Debug, Clone)]
+    41→pub struct VumaIoError {
+    42→    /// The underlying I/O error kind.
+    43→    pub kind: VumaErrorKind,
+    44→    /// Human-readable message.
+    45→    pub message: String,
+    46→}
+    47→
+    48→impl VumaIoError {
+    49→    /// Create a new filesystem I/O error.
+    50→    // VUMA-VERIFIED: error construction is pure
+    51→    pub fn new(kind: VumaErrorKind, message: impl Into<String>) -> Self {
+    52→        Self {
+    53→            kind,
+    54→            message: message.into(),
+    55→        }
+    56→    }
+    57→
+    58→    /// Create from a `std::io::Error`.
+    59→    // VUMA-VERIFIED: conversion preserves error semantics
+    60→    pub fn from_io(e: std::io::Error, context: &str) -> Self {
+    61→        let kind = match e.kind() {
+    62→            std::io::ErrorKind::NotFound => VumaErrorKind::NotFound,
+    63→            std::io::ErrorKind::PermissionDenied => VumaErrorKind::PermissionDenied,
+    64→            std::io::ErrorKind::TimedOut => VumaErrorKind::Timeout,
+    65→            std::io::ErrorKind::InvalidInput | std::io::ErrorKind::InvalidData => {
+    66→                VumaErrorKind::InvalidArgument
+    67→            }
+    68→            _ => VumaErrorKind::Io,
+    69→        };
+    70→        Self {
+    71→            kind,
+    72→            message: format!("{}: {}", context, e),
+    73→        }
+    74→    }
+    75→}
+    76→
+    77→impl fmt::Display for VumaIoError {
+    78→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    79→        write!(f, "VumaIoError({}): {}", self.kind, self.message)
+    80→    }
+    81→}
+    82→
+    83→impl std::error::Error for VumaIoError {}
+    84→
+    85→impl From<VumaIoError> for VumaErrorChain {
+    86→    fn from(e: VumaIoError) -> Self {
+    87→        VumaErrorChain::new(e.kind, e.message)
+    88→    }
+    89→}
+    90→
+    91→impl From<std::io::Error> for VumaIoError {
+    92→    fn from(e: std::io::Error) -> Self {
+    93→        let kind = match e.kind() {
+    94→            std::io::ErrorKind::NotFound => VumaErrorKind::NotFound,
+    95→            std::io::ErrorKind::PermissionDenied => VumaErrorKind::PermissionDenied,
+    96→            std::io::ErrorKind::TimedOut => VumaErrorKind::Timeout,
+    97→            std::io::ErrorKind::InvalidInput | std::io::ErrorKind::InvalidData => {
+    98→                VumaErrorKind::InvalidArgument
+    99→            }
+   100→            std::io::ErrorKind::OutOfMemory => VumaErrorKind::OutOfMemory,
+   101→            _ => VumaErrorKind::Io,
+   102→        };
+   103→        Self {
+   104→            kind,
+   105→            message: e.to_string(),
+   106→        }
+   107→    }
+   108→}
+   109→
+   110→impl From<VumaIoError> for std::io::Error {
+   111→    fn from(e: VumaIoError) -> Self {
+   112→        let kind = match e.kind {
+   113→            VumaErrorKind::NotFound => std::io::ErrorKind::NotFound,
+   114→            VumaErrorKind::PermissionDenied => std::io::ErrorKind::PermissionDenied,
+   115→            VumaErrorKind::Timeout => std::io::ErrorKind::TimedOut,
+   116→            VumaErrorKind::InvalidArgument => std::io::ErrorKind::InvalidInput,
+   117→            VumaErrorKind::OutOfMemory => std::io::ErrorKind::OutOfMemory,
+   118→            _ => std::io::ErrorKind::Other,
+   119→        };
+   120→        std::io::Error::new(kind, e.message)
+   121→    }
+   122→}
+   123→
+   124→// ---------------------------------------------------------------------------
+   125→// VumaPermissions
+   126→// ---------------------------------------------------------------------------
+   127→
+   128→/// VUMA-verified file permissions.
+   129→///
+   130→/// ## BD Annotations
+   131→///
+   132→/// - CapD: { Read, Serialize }
+   133→#[derive(Debug, Clone, Serialize, Deserialize)]
+   134→pub struct VumaPermissions {
+   135→    /// Whether the file is read-only.
+   136→    pub readonly: bool,
+   137→}
+   138→
+   139→impl VumaPermissions {
+   140→    /// Create from `std::fs::Permissions`.
+   141→    // VUMA-VERIFIED: conversion is lossless
+   142→    pub fn from_std(p: &std::fs::Permissions) -> Self {
+   143→        Self {
+   144→            readonly: p.readonly(),
+   145→        }
+   146→    }
+   147→
+   148→    /// Returns `true` if the file is read-only.
+   149→    // VUMA-VERIFIED: pure query
+   150→    pub fn readonly(&self) -> bool {
+   151→        self.readonly
+   152→    }
+   153→
+   154→    /// Returns the CapD for this permissions.
+   155→    // VUMA-VERIFIED: capability descriptor is correct
+   156→    pub fn capd(&self) -> CapD {
+   157→        CapD::new(vec![CapFlag::Read, CapFlag::Serialize])
+   158→    }
+   159→}
+   160→
+   161→// ---------------------------------------------------------------------------
+   162→// VumaMetadata
+   163→// ---------------------------------------------------------------------------
+   164→
+   165→/// VUMA-verified file metadata.
+   166→///
+   167→/// ## BD Annotations
+   168→///
+   169→/// - CapD: { Read, Serialize }
+   170→#[derive(Debug, Clone, Serialize, Deserialize)]
+   171→pub struct VumaMetadata {
+   172→    /// File size in bytes.
+   173→    pub size: u64,
+   174→    /// Whether the path is a directory.
+   175→    pub is_dir: bool,
+   176→    /// Whether the path is a file.
+   177→    pub is_file: bool,
+   178→    /// Whether the path is a symlink.
+   179→    pub is_symlink: bool,
+   180→    /// File permissions.
+   181→    pub permissions: VumaPermissions,
+   182→    /// Modification time (seconds since Unix epoch).
+   183→    pub modified_secs: Option<u64>,
+   184→}
+   185→
+   186→impl VumaMetadata {
+   187→    /// Create from `std::fs::Metadata`.
+   188→    // VUMA-VERIFIED: conversion is lossless
+   189→    pub fn from_std(m: &std::fs::Metadata) -> Self {
+   190→        let modified_secs = m.modified().ok().map(|t| {
+   191→            t.duration_since(std::time::UNIX_EPOCH)
+   192→                .map(|d| d.as_secs())
+   193→                .unwrap_or(0)
+   194→        });
+   195→        Self {
+   196→            size: m.len(),
+   197→            is_dir: m.is_dir(),
+   198→            is_file: m.is_file(),
+   199→            is_symlink: m.is_symlink(),
+   200→            permissions: VumaPermissions::from_std(&m.permissions()),
+   201→            modified_secs,
+   202→        }
+   203→    }
+   204→
+   205→    /// Returns the file size in bytes.
+   206→    // VUMA-VERIFIED: pure accessor
+   207→    pub fn size(&self) -> u64 {
+   208→        self.size
+   209→    }
+   210→
+   211→    /// Returns `true` if this is a directory.
+   212→    // VUMA-VERIFIED: pure query
+   213→    pub fn is_dir(&self) -> bool {
+   214→        self.is_dir
+   215→    }
+   216→
+   217→    /// Returns `true` if this is a file.
+   218→    // VUMA-VERIFIED: pure query
+   219→    pub fn is_file(&self) -> bool {
+   220→        self.is_file
+   221→    }
+   222→
+   223→    /// Returns `true` if this is a symlink.
+   224→    // VUMA-VERIFIED: pure query
+   225→    pub fn is_symlink(&self) -> bool {
+   226→        self.is_symlink
+   227→    }
+   228→
+   229→    /// Returns the modification time as seconds since Unix epoch.
+   230→    // VUMA-VERIFIED: pure accessor
+   231→    pub fn modified(&self) -> Option<u64> {
+   232→        self.modified_secs
+   233→    }
+   234→
+   235→    /// Returns the file permissions.
+   236→    // VUMA-VERIFIED: pure accessor
+   237→    pub fn permissions(&self) -> &VumaPermissions {
+   238→        &self.permissions
+   239→    }
+   240→
+   241→    /// Returns the CapD for this metadata.
+   242→    // VUMA-VERIFIED: capability descriptor is correct
+   243→    pub fn capd(&self) -> CapD {
+   244→        CapD::new(vec![CapFlag::Read, CapFlag::Serialize])
+   245→    }
+   246→
+   247→    /// Returns the RepD for this metadata.
+   248→    // VUMA-VERIFIED: type descriptor is correct
+   249→    pub fn repd(&self) -> RepD {
+   250→        RepD::new("VumaMetadata", 0, 8, self.capd())
+   251→    }
+   252→
+   253→    /// Returns the SyncEdge annotations for this metadata.
+   254→    // VUMA-VERIFIED: metadata is a passive value type
+   255→    pub fn sync_edges(&self) -> Vec<SyncEdge> {
+   256→        vec![]
+   257→    }
+   258→}
+   259→
+   260→// ---------------------------------------------------------------------------
+   261→// VumaFile
+   262→// ---------------------------------------------------------------------------
+   263→
+   264→/// VUMA-verified file handle with BD annotations, delegating to `std::fs::File`.
+   265→///
+   266→/// ## BD Annotations
+   267→///
+   268→/// - CapD: { Read } for read mode, { Write } for write mode, { Read, Write } for read-write
+   269→/// - SyncEdge: open → read/write (Seq), close → read/write (Fence)
+   270→#[derive(Debug)]
+   271→pub struct VumaFile {
+   272→    /// The underlying OS file handle.
+   273→    inner: Option<std::fs::File>,
+   274→    /// The file path.
+   275→    pub path: String,
+   276→    /// Whether the file was opened for reading.
+   277→    pub can_read: bool,
+   278→    /// Whether the file was opened for writing.
+   279→    pub can_write: bool,
+   280→}
+   281→
+   282→impl VumaFile {
+   283→    /// Open a file for reading.
+   284→    // VUMA-VERIFIED: open read requires Read capability
+   285→    pub fn open(path: impl AsRef<Path>) -> VumaResult<Self> {
+   286→        let path_str = path.as_ref().to_string_lossy().to_string();
+   287→        let f = std::fs::File::open(&path)
+   288→            .map_err(|e| VumaIoError::from_io(e, &format!("open '{}'", path_str)))?;
+   289→        Ok(Self {
+   290→            inner: Some(f),
+   291→            path: path_str,
+   292→            can_read: true,
+   293→            can_write: false,
+   294→        })
+   295→    }
+   296→
+   297→    /// Create (or truncate) a file for writing.
+   298→    // VUMA-VERIFIED: create requires Write capability
+   299→    pub fn create(path: impl AsRef<Path>) -> VumaResult<Self> {
+   300→        let path_str = path.as_ref().to_string_lossy().to_string();
+   301→        let f = std::fs::File::create(&path)
+   302→            .map_err(|e| VumaIoError::from_io(e, &format!("create '{}'", path_str)))?;
+   303→        Ok(Self {
+   304→            inner: Some(f),
+   305→            path: path_str,
+   306→            can_read: false,
+   307→            can_write: true,
+   308→        })
+   309→    }
+   310→
+   311→    /// Read bytes from the file into a buffer.
+   312→    // VUMA-VERIFIED: read requires Read capability
+   313→    pub fn read(&mut self, buf: &mut [u8]) -> VumaResult<usize> {
+   314→        let f = self
+   315→            .inner
+   316→            .as_mut()
+   317→            .ok_or_else(|| VumaIoError::new(VumaErrorKind::Io, "file is not open"))?;
+   318→        f.read(buf)
+   319→            .map_err(|e| VumaIoError::from_io(e, "read").into())
+   320→    }
+   321→
+   322→    /// Write bytes to the file.
+   323→    // VUMA-VERIFIED: write requires Write capability
+   324→    pub fn write(&mut self, buf: &[u8]) -> VumaResult<usize> {
+   325→        let f = self
+   326→            .inner
+   327→            .as_mut()
+   328→            .ok_or_else(|| VumaIoError::new(VumaErrorKind::Io, "file is not open"))?;
+   329→        f.write(buf)
+   330→            .map_err(|e| VumaIoError::from_io(e, "write").into())
+   331→    }
+   332→
+   333→    /// Returns the file metadata.
+   334→    // VUMA-VERIFIED: metadata query is safe
+   335→    pub fn metadata(&self) -> VumaResult<VumaMetadata> {
+   336→        let f = self
+   337→            .inner
+   338→            .as_ref()
+   339→            .ok_or_else(|| VumaIoError::new(VumaErrorKind::Io, "file is not open"))?;
+   340→        let m = f
+   341→            .metadata()
+   342→            .map_err(|e| VumaIoError::from_io(e, "metadata"))?;
+   343→        Ok(VumaMetadata::from_std(&m))
+   344→    }
+   345→
+   346→    /// Truncate or extend the file to the specified size.
+   347→    // VUMA-VERIFIED: set_len requires Write capability
+   348→    pub fn set_len(&self, size: u64) -> VumaResult<()> {
+   349→        let f = self
+   350→            .inner
+   351→            .as_ref()
+   352→            .ok_or_else(|| VumaIoError::new(VumaErrorKind::Io, "file is not open"))?;
+   353→        f.set_len(size)
+   354→            .map_err(|e| VumaIoError::from_io(e, "set_len").into())
+   355→    }
+   356→
+   357→    /// Sync all OS-internal metadata to disk.
+   358→    // VUMA-VERIFIED: sync_all is safe
+   359→    pub fn sync_all(&self) -> VumaResult<()> {
+   360→        let f = self
+   361→            .inner
+   362→            .as_ref()
+   363→            .ok_or_else(|| VumaIoError::new(VumaErrorKind::Io, "file is not open"))?;
+   364→        f.sync_all()
+   365→            .map_err(|e| VumaIoError::from_io(e, "sync_all").into())
+   366→    }
+   367→
+   368→    /// Sync file data (but not necessarily metadata) to disk.
+   369→    // VUMA-VERIFIED: sync_data is safe
+   370→    pub fn sync_data(&self) -> VumaResult<()> {
+   371→        let f = self
+   372→            .inner
+   373→            .as_ref()
+   374→            .ok_or_else(|| VumaIoError::new(VumaErrorKind::Io, "file is not open"))?;
+   375→        f.sync_data()
+   376→            .map_err(|e| VumaIoError::from_io(e, "sync_data").into())
+   377→    }
+   378→
+   379→    /// Returns the CapD for this file.
+   380→    // VUMA-VERIFIED: capability descriptor matches open mode
+   381→    pub fn capd(&self) -> CapD {
+   382→        let mut flags = vec![];
+   383→        if self.can_read {
+   384→            flags.push(CapFlag::Read);
+   385→        }
+   386→        if self.can_write {
+   387→            flags.push(CapFlag::Write);
+   388→        }
+   389→        CapD::new(flags)
+   390→    }
+   391→
+   392→    /// Returns the RepD for this file.
+   393→    // VUMA-VERIFIED: type descriptor is correct
+   394→    pub fn repd(&self) -> RepD {
+   395→        RepD::new("VumaFile", 0, 8, self.capd())
+   396→    }
+   397→
+   398→    /// Returns the SyncEdge annotations for this file.
+   399→    // VUMA-VERIFIED: synchronization edges model file I/O ordering
+   400→    pub fn sync_edges(&self) -> Vec<SyncEdge> {
+   401→        vec![
+   402→            SyncEdge::new("fs_open", "fs_read", SyncEdgeKind::Seq),
+   403→            SyncEdge::new("fs_open", "fs_write", SyncEdgeKind::Seq),
+   404→            SyncEdge::new("fs_close", "fs_read", SyncEdgeKind::Fence),
+   405→            SyncEdge::new("fs_close", "fs_write", SyncEdgeKind::Fence),
+   406→        ]
+   407→    }
+   408→}
+   409→
+   410→// ---------------------------------------------------------------------------
+   411→// VumaFile: std::io::Read + Write + Seek
+   412→// ---------------------------------------------------------------------------
+   413→
+   414→impl StdRead for VumaFile {
+   415→    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+   416→        let f = self.inner.as_mut().ok_or_else(|| {
+   417→            std::io::Error::new(std::io::ErrorKind::NotConnected, "file is not open")
+   418→        })?;
+   419→        f.read(buf)
+   420→    }
+   421→}
+   422→
+   423→impl StdWrite for VumaFile {
+   424→    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+   425→        let f = self.inner.as_mut().ok_or_else(|| {
+   426→            std::io::Error::new(std::io::ErrorKind::NotConnected, "file is not open")
+   427→        })?;
+   428→        f.write(buf)
+   429→    }
+   430→
+   431→    fn flush(&mut self) -> std::io::Result<()> {
+   432→        if let Some(f) = self.inner.as_mut() {
+   433→            f.flush()?;
+   434→        }
+   435→        Ok(())
+   436→    }
+   437→}
+   438→
+   439→impl StdSeek for VumaFile {
+   440→    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+   441→        let f = self.inner.as_mut().ok_or_else(|| {
+   442→            std::io::Error::new(std::io::ErrorKind::NotConnected, "file is not open")
+   443→        })?;
+   444→        f.seek(pos)
+   445→    }
+   446→}
+   447→
+   448→// ---------------------------------------------------------------------------
+   449→// VumaDir
+   450→// ---------------------------------------------------------------------------
+   451→
+   452→/// VUMA-verified directory iterator.
+   453→///
+   454→/// ## BD Annotations
+   455→///
+   456→/// - CapD: { Read, Execute }
+   457→/// - SyncEdge: read_dir → next_entry (Seq)
+   458→pub struct VumaDir {
+   459→    /// The underlying directory iterator.
+   460→    inner: std::fs::ReadDir,
+   461→}
+   462→
+   463→impl fmt::Debug for VumaDir {
+   464→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+   465→        f.debug_struct("VumaDir").finish_non_exhaustive()
+   466→    }
+   467→}
+   468→
+   469→impl VumaDir {
+   470→    /// Read the contents of a directory.
+   471→    // VUMA-VERIFIED: read_dir requires Read+Execute capabilities
+   472→    pub fn read_dir(path: impl AsRef<Path>) -> VumaResult<Self> {
+   473→        let rd = std::fs::read_dir(&path).map_err(|e| VumaIoError::from_io(e, "read_dir"))?;
+   474→        Ok(Self { inner: rd })
+   475→    }
+   476→
+   477→    /// Returns the next entry in the directory.
+   478→    // VUMA-VERIFIED: next_entry is safe
+   479→    pub fn next_entry(&mut self) -> VumaResult<Option<std::fs::DirEntry>> {
+   480→        match self.inner.next() {
+   481→            None => Ok(None),
+   482→            Some(Ok(entry)) => Ok(Some(entry)),
+   483→            Some(Err(e)) => Err(VumaIoError::from_io(e, "next_entry").into()),
+   484→        }
+   485→    }
+   486→
+   487→    /// Returns the CapD for this directory iterator.
+   488→    // VUMA-VERIFIED: capability descriptor is correct
+   489→    pub fn capd(&self) -> CapD {
+   490→        CapD::new(vec![CapFlag::Read, CapFlag::Execute])
+   491→    }
+   492→
+   493→    /// Returns the SyncEdge annotations for this directory iterator.
+   494→    // VUMA-VERIFIED: synchronization edges model directory iteration
+   495→    pub fn sync_edges(&self) -> Vec<SyncEdge> {
+   496→        vec![SyncEdge::new(
+   497→            "fs_read_dir",
+   498→            "fs_next_entry",
+   499→            SyncEdgeKind::Seq,
+   500→        )]
+   501→    }
+   502→}
+   503→
+   504→// ---------------------------------------------------------------------------
+   505→// Free Functions
+   506→// ---------------------------------------------------------------------------
+   507→
+   508→/// Remove a file from the filesystem.
+   509→// VUMA-VERIFIED: remove_file requires Write capability on parent dir
+   510→pub fn remove_file(path: impl AsRef<Path>) -> VumaResult<()> {
+   511→    std::fs::remove_file(&path).map_err(|e| VumaIoError::from_io(e, "remove_file").into())
+   512→}
+   513→
+   514→/// Remove an empty directory.
+   515→// VUMA-VERIFIED: remove_dir requires Write capability on parent dir
+   516→pub fn remove_dir(path: impl AsRef<Path>) -> VumaResult<()> {
+   517→    std::fs::remove_dir(&path).map_err(|e| VumaIoError::from_io(e, "remove_dir").into())
+   518→}
+   519→
+   520→/// Remove a directory and all its contents recursively.
+   521→// VUMA-VERIFIED: remove_dir_all requires Write capability
+   522→pub fn remove_dir_all(path: impl AsRef<Path>) -> VumaResult<()> {
+   523→    std::fs::remove_dir_all(&path).map_err(|e| VumaIoError::from_io(e, "remove_dir_all").into())
+   524→}
+   525→
+   526→/// Rename a file or directory.
+   527→// VUMA-VERIFIED: rename requires Write capability on both paths
+   528→pub fn rename(from: impl AsRef<Path>, to: impl AsRef<Path>) -> VumaResult<()> {
+   529→    std::fs::rename(&from, &to).map_err(|e| VumaIoError::from_io(e, "rename").into())
+   530→}
+   531→
+   532→/// Copy a file to a new path, returning the number of bytes copied.
+   533→// VUMA-VERIFIED: copy requires Read on source, Write on destination
+   534→pub fn copy(from: impl AsRef<Path>, to: impl AsRef<Path>) -> VumaResult<u64> {
+   535→    std::fs::copy(&from, &to).map_err(|e| VumaIoError::from_io(e, "copy").into())
+   536→}
+   537→
+   538→/// Create a new directory.
+   539→// VUMA-VERIFIED: create_dir requires Write capability on parent dir
+   540→pub fn create_dir(path: impl AsRef<Path>) -> VumaResult<()> {
+   541→    std::fs::create_dir(&path).map_err(|e| VumaIoError::from_io(e, "create_dir").into())
+   542→}
+   543→
+   544→/// Create a directory and all parent directories as needed.
+   545→// VUMA-VERIFIED: create_dir_all requires Write capability
+   546→pub fn create_dir_all(path: impl AsRef<Path>) -> VumaResult<()> {
+   547→    std::fs::create_dir_all(&path).map_err(|e| VumaIoError::from_io(e, "create_dir_all").into())
+   548→}
+   549→
+   550→/// Returns the canonical, absolute form of a path.
+   551→// VUMA-VERIFIED: canonicalize requires Read capability
+   552→pub fn canonicalize(path: impl AsRef<Path>) -> VumaResult<std::path::PathBuf> {
+   553→    std::fs::canonicalize(&path).map_err(|e| VumaIoError::from_io(e, "canonicalize").into())
+   554→}
+   555→
+   556→/// Returns `true` if the path exists.
+   557→// VUMA-VERIFIED: pure query
+   558→pub fn exists(path: impl AsRef<Path>) -> bool {
+   559→    path.as_ref().exists()
+   560→}
+   561→
+   562→/// Create a hard link.
+   563→// VUMA-VERIFIED: hard_link requires Write capability on destination dir
+   564→pub fn hard_link(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> VumaResult<()> {
+   565→    std::fs::hard_link(&src, &dst).map_err(|e| VumaIoError::from_io(e, "hard_link").into())
+   566→}
+   567→
+   568→/// Read a symbolic link, returning the path it points to.
+   569→// VUMA-VERIFIED: read_link requires Read capability
+   570→pub fn read_link(path: impl AsRef<Path>) -> VumaResult<std::path::PathBuf> {
+   571→    std::fs::read_link(&path).map_err(|e| VumaIoError::from_io(e, "read_link").into())
+   572→}
+   573→
+   574→// ---------------------------------------------------------------------------
+   575→// Tests
+   576→// ---------------------------------------------------------------------------
+   577→
+   578→#[cfg(test)]
+   579→mod tests {
+   580→    use super::*;
+   581→    use std::io::Write;
+   582→    use std::sync::atomic::{AtomicU64, Ordering};
+   583→
+   584→    static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+   585→
+   586→    /// Returns a unique per-test temp directory to avoid parallel test conflicts.
+   587→    fn test_dir(name: &str) -> std::path::PathBuf {
+   588→        let id = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
+   589→        let dir = std::env::temp_dir().join(format!("vuma_fs_test_{}_{}", name, id));
+   590→        let _ = std::fs::create_dir_all(&dir);
+   591→        dir
+   592→    }
+   593→
+   594→    #[test]
+   595→    fn test_vuma_file_create_and_write() {
+   596→        let dir = test_dir("create_write");
+   597→        let path = dir.join("test_create.txt");
+   598→        let mut f = VumaFile::create(&path).unwrap();
+   599→        assert!(f.can_write);
+   600→        assert!(!f.can_read);
+   601→        let n = f.write(b"hello world").unwrap();
+   602→        assert_eq!(n, 11);
+   603→        let _ = std::fs::remove_dir_all(&dir);
+   604→    }
+   605→
+   606→    #[test]
+   607→    fn test_vuma_file_open_and_read() {
+   608→        let dir = test_dir("open_read");
+   609→        let path = dir.join("test_read.txt");
+   610→        {
+   611→            let mut f = std::fs::File::create(&path).unwrap();
+   612→            f.write_all(b"test content").unwrap();
+   613→        }
+   614→        let mut f = VumaFile::open(&path).unwrap();
+   615→        assert!(f.can_read);
+   616→        assert!(!f.can_write);
+   617→        let mut buf = [0u8; 64];
+   618→        let n = f.read(&mut buf).unwrap();
+   619→        assert_eq!(&buf[..n], b"test content");
+   620→        let _ = std::fs::remove_dir_all(&dir);
+   621→    }
+   622→
+   623→    #[test]
+   624→    fn test_vuma_file_metadata() {
+   625→        let dir = test_dir("metadata");
+   626→        let path = dir.join("test_meta.txt");
+   627→        {
+   628→            let mut f = std::fs::File::create(&path).unwrap();
+   629→            f.write_all(b"12345").unwrap();
+   630→        }
+   631→        let f = VumaFile::open(&path).unwrap();
+   632→        let meta = f.metadata().unwrap();
+   633→        assert_eq!(meta.size(), 5);
+   634→        assert!(meta.is_file());
+   635→        assert!(!meta.is_dir());
+   636→        let _ = std::fs::remove_dir_all(&dir);
+   637→    }
+   638→
+   639→    #[test]
+   640→    fn test_vuma_file_set_len() {
+   641→        let dir = test_dir("set_len");
+   642→        let path = dir.join("test_setlen.txt");
+   643→        let f = VumaFile::create(&path).unwrap();
+   644→        f.set_len(1024).unwrap();
+   645→        let meta = f.metadata().unwrap();
+   646→        assert_eq!(meta.size(), 1024);
+   647→        let _ = std::fs::remove_dir_all(&dir);
+   648→    }
+   649→
+   650→    #[test]
+   651→    fn test_vuma_file_sync() {
+   652→        let dir = test_dir("sync");
+   653→        let path = dir.join("test_sync.txt");
+   654→        let f = VumaFile::create(&path).unwrap();
+   655→        f.sync_all().unwrap();
+   656→        f.sync_data().unwrap();
+   657→        let _ = std::fs::remove_dir_all(&dir);
+   658→    }
+   659→
+   660→    #[test]
+   661→    fn test_vuma_metadata_permissions() {
+   662→        let dir = test_dir("perms");
+   663→        let path = dir.join("test_perms.txt");
+   664→        let _ = std::fs::File::create(&path).unwrap();
+   665→        let meta = std::fs::metadata(&path).unwrap();
+   666→        let vmeta = VumaMetadata::from_std(&meta);
+   667→        assert!(!vmeta.permissions().readonly());
+   668→        let _ = std::fs::remove_dir_all(&dir);
+   669→    }
+   670→
+   671→    #[test]
+   672→    fn test_vuma_dir_read_dir() {
+   673→        let dir = test_dir("read_dir");
+   674→        let sub = dir.join("sub");
+   675→        let _ = std::fs::create_dir_all(&sub);
+   676→        let _ = std::fs::File::create(sub.join("a.txt")).unwrap();
+   677→        let _ = std::fs::File::create(sub.join("b.txt")).unwrap();
+   678→
+   679→        let mut d = VumaDir::read_dir(&sub).unwrap();
+   680→        let mut count = 0;
+   681→        while let Some(_) = d.next_entry().unwrap() {
+   682→            count += 1;
+   683→        }
+   684→        assert_eq!(count, 2);
+   685→        let _ = std::fs::remove_dir_all(&dir);
+   686→    }
+   687→
+   688→    #[test]
+   689→    fn test_remove_file() {
+   690→        let dir = test_dir("rm_file");
+   691→        let path = dir.join("to_remove.txt");
+   692→        let _ = std::fs::File::create(&path).unwrap();
+   693→        assert!(path.exists());
+   694→        remove_file(&path).unwrap();
+   695→        assert!(!path.exists());
+   696→        let _ = std::fs::remove_dir_all(&dir);
+   697→    }
+   698→
+   699→    #[test]
+   700→    fn test_create_and_remove_dir() {
+   701→        let dir = test_dir("mkdir_rmdir");
+   702→        let path = dir.join("new_dir");
+   703→        create_dir(&path).unwrap();
+   704→        assert!(path.is_dir());
+   705→        remove_dir(&path).unwrap();
+   706→        assert!(!path.exists());
+   707→        let _ = std::fs::remove_dir_all(&dir);
+   708→    }
+   709→
+   710→    #[test]
+   711→    fn test_create_dir_all_and_remove_dir_all() {
+   712→        let dir = test_dir("mkdir_all");
+   713→        let path = dir.join("a/b/c");
+   714→        create_dir_all(&path).unwrap();
+   715→        assert!(path.is_dir());
+   716→        let root = dir.join("a");
+   717→        remove_dir_all(&root).unwrap();
+   718→        assert!(!root.exists());
+   719→        let _ = std::fs::remove_dir_all(&dir);
+   720→    }
+   721→
+   722→    #[test]
+   723→    fn test_rename() {
+   724→        let dir = test_dir("rename");
+   725→        let src = dir.join("orig.txt");
+   726→        let dst = dir.join("renamed.txt");
+   727→        let _ = std::fs::File::create(&src).unwrap();
+   728→        rename(&src, &dst).unwrap();
+   729→        assert!(!src.exists());
+   730→        assert!(dst.exists());
+   731→        let _ = std::fs::remove_dir_all(&dir);
+   732→    }
+   733→
+   734→    #[test]
+   735→    fn test_copy() {
+   736→        let dir = test_dir("copy");
+   737→        let src = dir.join("copy_src.txt");
+   738→        let dst = dir.join("copy_dst.txt");
+   739→        {
+   740→            let mut f = std::fs::File::create(&src).unwrap();
+   741→            f.write_all(b"copy me").unwrap();
+   742→        }
+   743→        let n = copy(&src, &dst).unwrap();
+   744→        assert_eq!(n, 7);
+   745→        assert!(dst.exists());
+   746→        let _ = std::fs::remove_dir_all(&dir);
+   747→    }
+   748→
+   749→    #[test]
+   750→    fn test_exists() {
+   751→        let dir = test_dir("exists");
+   752→        let path = dir.join("exists_check.txt");
+   753→        assert!(!exists(&path));
+   754→        let _ = std::fs::File::create(&path).unwrap();
+   755→        assert!(exists(&path));
+   756→        let _ = std::fs::remove_dir_all(&dir);
+   757→    }
+   758→
+   759→    #[test]
+   760→    fn test_canonicalize() {
+   761→        let dir = test_dir("canon");
+   762→        let path = dir.join("canonical_test.txt");
+   763→        let _ = std::fs::File::create(&path).unwrap();
+   764→        let canon = canonicalize(&path).unwrap();
+   765→        assert!(canon.is_absolute());
+   766→        let _ = std::fs::remove_dir_all(&dir);
+   767→    }
+   768→
+   769→    #[test]
+   770→    fn test_hard_link() {
+   771→        let dir = test_dir("hardlink");
+   772→        let src = dir.join("hl_src.txt");
+   773→        let dst = dir.join("hl_dst.txt");
+   774→        {
+   775→            let mut f = std::fs::File::create(&src).unwrap();
+   776→            f.write_all(b"hard link data").unwrap();
+   777→        }
+   778→        hard_link(&src, &dst).unwrap();
+   779→        assert!(dst.exists());
+   780→        let _ = std::fs::remove_dir_all(&dir);
+   781→    }
+   782→
+   783→    #[test]
+   784→    fn test_open_nonexistent_returns_error() {
+   785→        let result = VumaFile::open("/tmp/vuma_nonexistent_12345");
+   786→        assert!(result.is_err());
+   787→    }
+   788→
+   789→    // --- Tests for new trait implementations ---
+   790→
+   791→    #[test]
+   792→    fn test_vuma_file_std_read_trait() {
+   793→        let dir = test_dir("std_read");
+   794→        let path = dir.join("std_read_test.txt");
+   795→        {
+   796→            let mut f = std::fs::File::create(&path).unwrap();
+   797→            f.write_all(b"hello std::io::Read").unwrap();
+   798→        }
+   799→        let mut f = VumaFile::open(&path).unwrap();
+   800→        let mut buf = [0u8; 64];
+   801→        let n = StdRead::read(&mut f, &mut buf).unwrap();
+   802→        assert_eq!(&buf[..n], b"hello std::io::Read");
+   803→        let _ = std::fs::remove_dir_all(&dir);
+   804→    }
+   805→
+   806→    #[test]
+   807→    fn test_vuma_file_std_write_trait() {
+   808→        let dir = test_dir("std_write");
+   809→        let path = dir.join("std_write_test.txt");
+   810→        let mut f = VumaFile::create(&path).unwrap();
+   811→        let n = StdWrite::write(&mut f, b"hello from std::io::Write").unwrap();
+   812→        assert_eq!(n, 25);
+   813→        StdWrite::flush(&mut f).unwrap();
+   814→        // Read back separately with a new VumaFile
+   815→        let mut f2 = VumaFile::open(&path).unwrap();
+   816→        let mut buf = [0u8; 64];
+   817→        let n = StdRead::read(&mut f2, &mut buf).unwrap();
+   818→        assert_eq!(&buf[..n], b"hello from std::io::Write");
+   819→        let _ = std::fs::remove_dir_all(&dir);
+   820→    }
+   821→
+   822→    #[test]
+   823→    fn test_vuma_file_std_seek_trait() {
+   824→        let dir = test_dir("std_seek");
+   825→        let path = dir.join("std_seek_test.txt");
+   826→        {
+   827→            let mut f = std::fs::File::create(&path).unwrap();
+   828→            f.write_all(b"0123456789").unwrap();
+   829→        }
+   830→        let mut f = VumaFile::open(&path).unwrap();
+   831→        // Seek to offset 5
+   832→        let pos = StdSeek::seek(&mut f, SeekFrom::Start(5)).unwrap();
+   833→        assert_eq!(pos, 5);
+   834→        let mut buf = [0u8; 5];
+   835→        let n = StdRead::read(&mut f, &mut buf).unwrap();
+   836→        assert_eq!(&buf[..n], b"56789");
+   837→        let _ = std::fs::remove_dir_all(&dir);
+   838→    }
+   839→
+   840→    #[test]
+   841→    fn test_vuma_io_error_from_std_io_error() {
+   842→        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "not found");
+   843→        let vuma_err: VumaIoError = io_err.into();
+   844→        assert_eq!(vuma_err.kind, VumaErrorKind::NotFound);
+   845→    }
+   846→
+   847→    #[test]
+   848→    fn test_vuma_io_error_into_std_io_error() {
+   849→        let vuma_err = VumaIoError::new(VumaErrorKind::PermissionDenied, "denied");
+   850→        let io_err: std::io::Error = vuma_err.into();
+   851→        assert_eq!(io_err.kind(), std::io::ErrorKind::PermissionDenied);
+   852→    }
+   853→}
+   854→

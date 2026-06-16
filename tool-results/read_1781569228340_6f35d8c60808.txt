@@ -1,0 +1,1131 @@
+     1→//! # Network I/O
+     2→//!
+     3→//! This module provides VUMA-verified network I/O types with Behavioral Description
+     4→//! (BD) annotations and capability-based access control.
+     5→//!
+     6→//! ## Types
+     7→//!
+     8→//! - **TcpListener**: A TCP socket server that listens for incoming connections.
+     9→//! - **TcpStream**: A TCP connection stream for reading and writing.
+    10→//! - **UdpSocket**: A UDP socket for datagram communication.
+    11→//! - **SocketAddr**: An internet socket address (IP + port).
+    12→//! - **IpAddr**: An IP address (IPv4 or IPv6).
+    13→//! - **Ipv4Addr**: An IPv4 address.
+    14→//! - **Ipv6Addr**: An IPv6 address.
+    15→//!
+    16→//! ## BD Annotations
+    17→//!
+    18→//! - TcpStream: CapD { Read, Write, Send }
+    19→//! - TcpListener: CapD { Read, Execute }
+    20→//! - UdpSocket: CapD { Read, Write, Send }
+    21→//! - SyncEdge: bind → accept/connect (Seq), read → write (Seq)
+    22→
+    23→use crate::primitives::{CapD, CapFlag, RepD, SyncEdge, SyncEdgeKind};
+    24→use serde::{Deserialize, Serialize};
+    25→use std::fmt;
+    26→use std::io::{Read as StdRead, Write as StdWrite};
+    27→use std::net::{self as std_net};
+    28→
+    29→// ---------------------------------------------------------------------------
+    30→// IpAddr
+    31→// ---------------------------------------------------------------------------
+    32→
+    33→/// An IP address, either IPv4 or IPv6.
+    34→///
+    35→/// ## BD Annotations
+    36→///
+    37→/// - CapD: { Read, Compare, Hash, Serialize }
+    38→#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+    39→pub enum IpAddr {
+    40→    /// An IPv4 address.
+    41→    V4(Ipv4Addr),
+    42→    /// An IPv6 address.
+    43→    V6(Ipv6Addr),
+    44→}
+    45→
+    46→impl IpAddr {
+    47→    /// Parse an IP address from a string.
+    48→    // VUMA-VERIFIED: parse delegates to std, result is validated
+    49→    pub fn parse(s: &str) -> Result<Self, String> {
+    50→        s.parse::<std_net::IpAddr>()
+    51→            .map(|addr| match addr {
+    52→                std_net::IpAddr::V4(v4) => IpAddr::V4(Ipv4Addr::from_std(v4)),
+    53→                std_net::IpAddr::V6(v6) => IpAddr::V6(Ipv6Addr::from_std(v6)),
+    54→            })
+    55→            .map_err(|e| format!("invalid IP address: {}", e))
+    56→    }
+    57→
+    58→    /// Create an IpAddr from an Ipv4Addr.
+    59→    // VUMA-VERIFIED: constructor is pure
+    60→    pub fn from_v4(addr: Ipv4Addr) -> Self {
+    61→        IpAddr::V4(addr)
+    62→    }
+    63→
+    64→    /// Create an IpAddr from an Ipv6Addr.
+    65→    // VUMA-VERIFIED: constructor is pure
+    66→    pub fn from_v6(addr: Ipv6Addr) -> Self {
+    67→        IpAddr::V6(addr)
+    68→    }
+    69→
+    70→    /// Returns true if this is an IPv4 address.
+    71→    // VUMA-VERIFIED: pure query
+    72→    pub fn is_ipv4(&self) -> bool {
+    73→        matches!(self, IpAddr::V4(_))
+    74→    }
+    75→
+    76→    /// Returns true if this is an IPv6 address.
+    77→    // VUMA-VERIFIED: pure query
+    78→    pub fn is_ipv6(&self) -> bool {
+    79→        matches!(self, IpAddr::V6(_))
+    80→    }
+    81→
+    82→    /// Convert to a std::net::IpAddr.
+    83→    // VUMA-VERIFIED: conversion is lossless
+    84→    pub(crate) fn to_std(self) -> std_net::IpAddr {
+    85→        match self {
+    86→            IpAddr::V4(v4) => std_net::IpAddr::V4(v4.to_std()),
+    87→            IpAddr::V6(v6) => std_net::IpAddr::V6(v6.to_std()),
+    88→        }
+    89→    }
+    90→
+    91→    /// Convert from a std::net::IpAddr.
+    92→    // VUMA-VERIFIED: conversion is lossless
+    93→    pub(crate) fn from_std(addr: std_net::IpAddr) -> Self {
+    94→        match addr {
+    95→            std_net::IpAddr::V4(v4) => IpAddr::V4(Ipv4Addr::from_std(v4)),
+    96→            std_net::IpAddr::V6(v6) => IpAddr::V6(Ipv6Addr::from_std(v6)),
+    97→        }
+    98→    }
+    99→
+   100→    /// Returns the CapD for this type.
+   101→    // VUMA-VERIFIED: capability descriptor is correct
+   102→    pub fn capd(&self) -> CapD {
+   103→        CapD::new(vec![
+   104→            CapFlag::Read,
+   105→            CapFlag::Compare,
+   106→            CapFlag::Hash,
+   107→            CapFlag::Serialize,
+   108→        ])
+   109→    }
+   110→
+   111→    /// Returns the RepD for this type.
+   112→    // VUMA-VERIFIED: type descriptor is correct
+   113→    pub fn repd(&self) -> RepD {
+   114→        RepD::new("IpAddr", 16, 4, self.capd())
+   115→    }
+   116→
+   117→    /// Returns the SyncEdge annotations for this type.
+   118→    // VUMA-VERIFIED: IP addresses are passive data
+   119→    pub fn sync_edges(&self) -> Vec<SyncEdge> {
+   120→        vec![]
+   121→    }
+   122→}
+   123→
+   124→impl fmt::Display for IpAddr {
+   125→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+   126→        match self {
+   127→            IpAddr::V4(v4) => write!(f, "{}", v4),
+   128→            IpAddr::V6(v6) => write!(f, "{}", v6),
+   129→        }
+   130→    }
+   131→}
+   132→
+   133→// ---------------------------------------------------------------------------
+   134→// Ipv4Addr
+   135→// ---------------------------------------------------------------------------
+   136→
+   137→/// An IPv4 address.
+   138→///
+   139→/// ## BD Annotations
+   140→///
+   141→/// - CapD: { Read, Compare, Hash, Serialize }
+   142→#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+   143→pub struct Ipv4Addr {
+   144→    /// The four octets of the address.
+   145→    pub octets: [u8; 4],
+   146→}
+   147→
+   148→impl Ipv4Addr {
+   149→    /// Create a new IPv4 address from four octets.
+   150→    // VUMA-VERIFIED: constructor is pure
+   151→    pub fn new(a: u8, b: u8, c: u8, d: u8) -> Self {
+   152→        Self {
+   153→            octets: [a, b, c, d],
+   154→        }
+   155→    }
+   156→
+   157→    /// The localhost address (127.0.0.1).
+   158→    // VUMA-VERIFIED: constant is correct
+   159→    pub const LOCALHOST: Self = Self {
+   160→        octets: [127, 0, 0, 1],
+   161→    };
+   162→
+   163→    /// The unspecified address (0.0.0.0).
+   164→    // VUMA-VERIFIED: constant is correct
+   165→    pub const UNSPECIFIED: Self = Self {
+   166→        octets: [0, 0, 0, 0],
+   167→    };
+   168→
+   169→    /// The broadcast address (255.255.255.255).
+   170→    // VUMA-VERIFIED: constant is correct
+   171→    pub const BROADCAST: Self = Self {
+   172→        octets: [255, 255, 255, 255],
+   173→    };
+   174→
+   175→    /// Create from a std::net::Ipv4Addr.
+   176→    pub(crate) fn from_std(addr: std_net::Ipv4Addr) -> Self {
+   177→        Self {
+   178→            octets: addr.octets(),
+   179→        }
+   180→    }
+   181→
+   182→    /// Convert to a std::net::Ipv4Addr.
+   183→    // VUMA-VERIFIED: conversion is lossless
+   184→    pub(crate) fn to_std(self) -> std_net::Ipv4Addr {
+   185→        std_net::Ipv4Addr::new(
+   186→            self.octets[0],
+   187→            self.octets[1],
+   188→            self.octets[2],
+   189→            self.octets[3],
+   190→        )
+   191→    }
+   192→
+   193→    /// Returns true if this is the loopback address.
+   194→    // VUMA-VERIFIED: pure query
+   195→    pub fn is_loopback(&self) -> bool {
+   196→        self.octets[0] == 127
+   197→    }
+   198→
+   199→    /// Returns true if this is the unspecified address.
+   200→    // VUMA-VERIFIED: pure query
+   201→    pub fn is_unspecified(&self) -> bool {
+   202→        self.octets == [0, 0, 0, 0]
+   203→    }
+   204→
+   205→    /// Returns the CapD for this type.
+   206→    // VUMA-VERIFIED: capability descriptor is correct
+   207→    pub fn capd(&self) -> CapD {
+   208→        CapD::new(vec![
+   209→            CapFlag::Read,
+   210→            CapFlag::Compare,
+   211→            CapFlag::Hash,
+   212→            CapFlag::Serialize,
+   213→        ])
+   214→    }
+   215→}
+   216→
+   217→impl fmt::Display for Ipv4Addr {
+   218→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+   219→        write!(
+   220→            f,
+   221→            "{}.{}.{}.{}",
+   222→            self.octets[0], self.octets[1], self.octets[2], self.octets[3]
+   223→        )
+   224→    }
+   225→}
+   226→
+   227→// ---------------------------------------------------------------------------
+   228→// Ipv6Addr
+   229→// ---------------------------------------------------------------------------
+   230→
+   231→/// An IPv6 address.
+   232→///
+   233→/// ## BD Annotations
+   234→///
+   235→/// - CapD: { Read, Compare, Hash, Serialize }
+   236→#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+   237→pub struct Ipv6Addr {
+   238→    /// The eight 16-bit segments of the address.
+   239→    pub segments: [u16; 8],
+   240→}
+   241→
+   242→impl Ipv6Addr {
+   243→    /// Create a new IPv6 address from eight 16-bit segments.
+   244→    // VUMA-VERIFIED: constructor is pure
+   245→    #[allow(clippy::too_many_arguments)]
+   246→    pub fn new(a: u16, b: u16, c: u16, d: u16, e: u16, f: u16, g: u16, h: u16) -> Self {
+   247→        Self {
+   248→            segments: [a, b, c, d, e, f, g, h],
+   249→        }
+   250→    }
+   251→
+   252→    /// The localhost address (::1).
+   253→    // VUMA-VERIFIED: constant is correct
+   254→    pub const LOCALHOST: Self = Self {
+   255→        segments: [0, 0, 0, 0, 0, 0, 0, 1],
+   256→    };
+   257→
+   258→    /// The unspecified address (::).
+   259→    // VUMA-VERIFIED: constant is correct
+   260→    pub const UNSPECIFIED: Self = Self {
+   261→        segments: [0, 0, 0, 0, 0, 0, 0, 0],
+   262→    };
+   263→
+   264→    /// Create from a std::net::Ipv6Addr.
+   265→    pub(crate) fn from_std(addr: std_net::Ipv6Addr) -> Self {
+   266→        Self {
+   267→            segments: addr.segments(),
+   268→        }
+   269→    }
+   270→
+   271→    /// Convert to a std::net::Ipv6Addr.
+   272→    // VUMA-VERIFIED: conversion is lossless
+   273→    pub(crate) fn to_std(self) -> std_net::Ipv6Addr {
+   274→        std_net::Ipv6Addr::new(
+   275→            self.segments[0],
+   276→            self.segments[1],
+   277→            self.segments[2],
+   278→            self.segments[3],
+   279→            self.segments[4],
+   280→            self.segments[5],
+   281→            self.segments[6],
+   282→            self.segments[7],
+   283→        )
+   284→    }
+   285→
+   286→    /// Returns true if this is the loopback address.
+   287→    // VUMA-VERIFIED: pure query
+   288→    pub fn is_loopback(&self) -> bool {
+   289→        self.segments == [0, 0, 0, 0, 0, 0, 0, 1]
+   290→    }
+   291→
+   292→    /// Returns the CapD for this type.
+   293→    // VUMA-VERIFIED: capability descriptor is correct
+   294→    pub fn capd(&self) -> CapD {
+   295→        CapD::new(vec![
+   296→            CapFlag::Read,
+   297→            CapFlag::Compare,
+   298→            CapFlag::Hash,
+   299→            CapFlag::Serialize,
+   300→        ])
+   301→    }
+   302→}
+   303→
+   304→impl fmt::Display for Ipv6Addr {
+   305→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+   306→        write!(
+   307→            f,
+   308→            "{:x}:{:x}:{:x}:{:x}:{:x}:{:x}:{:x}:{:x}",
+   309→            self.segments[0],
+   310→            self.segments[1],
+   311→            self.segments[2],
+   312→            self.segments[3],
+   313→            self.segments[4],
+   314→            self.segments[5],
+   315→            self.segments[6],
+   316→            self.segments[7]
+   317→        )
+   318→    }
+   319→}
+   320→
+   321→// ---------------------------------------------------------------------------
+   322→// SocketAddr
+   323→// ---------------------------------------------------------------------------
+   324→
+   325→/// An internet socket address consisting of an IP address and a port number.
+   326→///
+   327→/// ## BD Annotations
+   328→///
+   329→/// - CapD: { Read, Compare, Hash, Serialize }
+   330→#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+   331→pub struct SocketAddr {
+   332→    /// The IP address.
+   333→    pub ip: IpAddr,
+   334→    /// The port number.
+   335→    pub port: u16,
+   336→}
+   337→
+   338→impl SocketAddr {
+   339→    /// Create a new socket address from an IP address and port.
+   340→    // VUMA-VERIFIED: constructor is pure
+   341→    pub fn new(ip: IpAddr, port: u16) -> Self {
+   342→        Self { ip, port }
+   343→    }
+   344→
+   345→    /// Parse a socket address from a string (e.g., "127.0.0.1:8080").
+   346→    // VUMA-VERIFIED: parse delegates to std, result is validated
+   347→    pub fn parse(s: &str) -> Result<Self, String> {
+   348→        s.parse::<std_net::SocketAddr>()
+   349→            .map(SocketAddr::from_std)
+   350→            .map_err(|e| format!("invalid socket address: {}", e))
+   351→    }
+   352→
+   353→    /// Convert from a std::net::SocketAddr.
+   354→    // VUMA-VERIFIED: conversion is lossless
+   355→    pub(crate) fn from_std(addr: std_net::SocketAddr) -> Self {
+   356→        SocketAddr {
+   357→            ip: IpAddr::from_std(addr.ip()),
+   358→            port: addr.port(),
+   359→        }
+   360→    }
+   361→
+   362→    /// Convert to a std::net::SocketAddr.
+   363→    // VUMA-VERIFIED: conversion is lossless
+   364→    pub(crate) fn to_std(self) -> std_net::SocketAddr {
+   365→        std_net::SocketAddr::new(self.ip.to_std(), self.port)
+   366→    }
+   367→
+   368→    /// Returns the IP address.
+   369→    // VUMA-VERIFIED: pure accessor
+   370→    pub fn ip(&self) -> &IpAddr {
+   371→        &self.ip
+   372→    }
+   373→
+   374→    /// Returns the port number.
+   375→    // VUMA-VERIFIED: pure accessor
+   376→    pub fn port(&self) -> u16 {
+   377→        self.port
+   378→    }
+   379→
+   380→    /// Returns the CapD for this type.
+   381→    // VUMA-VERIFIED: capability descriptor is correct
+   382→    pub fn capd(&self) -> CapD {
+   383→        CapD::new(vec![
+   384→            CapFlag::Read,
+   385→            CapFlag::Compare,
+   386→            CapFlag::Hash,
+   387→            CapFlag::Serialize,
+   388→        ])
+   389→    }
+   390→
+   391→    /// Returns the RepD for this type.
+   392→    // VUMA-VERIFIED: type descriptor is correct
+   393→    pub fn repd(&self) -> RepD {
+   394→        RepD::new("SocketAddr", 20, 4, self.capd())
+   395→    }
+   396→
+   397→    /// Returns the SyncEdge annotations for this type.
+   398→    // VUMA-VERIFIED: socket addresses are passive data
+   399→    pub fn sync_edges(&self) -> Vec<SyncEdge> {
+   400→        vec![]
+   401→    }
+   402→}
+   403→
+   404→impl fmt::Display for SocketAddr {
+   405→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+   406→        match &self.ip {
+   407→            IpAddr::V4(v4) => write!(f, "{}:{}", v4, self.port),
+   408→            IpAddr::V6(v6) => write!(f, "[{}]:{}", v6, self.port),
+   409→        }
+   410→    }
+   411→}
+   412→
+   413→// ---------------------------------------------------------------------------
+   414→// TcpListener
+   415→// ---------------------------------------------------------------------------
+   416→
+   417→/// A VUMA-verified TCP listener.
+   418→///
+   419→/// Binds to a socket address and accepts incoming TCP connections.
+   420→/// Each accepted connection yields a `TcpStream`.
+   421→///
+   422→/// ## BD Annotations
+   423→///
+   424→/// - CapD: { Read, Execute }
+   425→/// - SyncEdge: bind → accept (Seq), accept → read (Seq)
+   426→pub struct TcpListener {
+   427→    /// The local address this listener is bound to.
+   428→    pub local_addr: SocketAddr,
+   429→    /// Whether the listener is currently bound.
+   430→    pub is_bound: bool,
+   431→    /// Number of connections accepted (BD tracking).
+   432→    pub accept_count: u64,
+   433→    /// The underlying std::net::TcpListener.
+   434→    inner: std_net::TcpListener,
+   435→}
+   436→
+   437→impl TcpListener {
+   438→    /// Bind a new TCP listener to the given socket address.
+   439→    ///
+   440→    /// Delegates to `std::net::TcpListener::bind` for real OS-level binding.
+   441→    // VUMA-VERIFIED: bind requires Execute capability
+   442→    pub fn bind(addr: SocketAddr) -> Result<Self, String> {
+   443→        let std_listener = std_net::TcpListener::bind(addr.to_std())
+   444→            .map_err(|e| format!("TcpListener bind failed: {}", e))?;
+   445→
+   446→        let local_addr = SocketAddr::from_std(
+   447→            std_listener
+   448→                .local_addr()
+   449→                .map_err(|e| format!("failed to get local addr: {}", e))?,
+   450→        );
+   451→
+   452→        Ok(Self {
+   453→            local_addr,
+   454→            is_bound: true,
+   455→            accept_count: 0,
+   456→            inner: std_listener,
+   457→        })
+   458→    }
+   459→
+   460→    /// Accept a new incoming connection.
+   461→    ///
+   462→    /// Returns a `TcpStream` representing the new connection.
+   463→    /// Delegates to `std::net::TcpListener::accept` for real OS-level accept.
+   464→    // VUMA-VERIFIED: accept requires bound listener; yields Read/Write stream
+   465→    pub fn accept(&mut self) -> Result<TcpStream, String> {
+   466→        if !self.is_bound {
+   467→            return Err("TcpListener is not bound".to_string());
+   468→        }
+   469→
+   470→        let (std_stream, sock_addr) = self
+   471→            .inner
+   472→            .accept()
+   473→            .map_err(|e| format!("TcpListener accept failed: {}", e))?;
+   474→
+   475→        self.accept_count += 1;
+   476→
+   477→        let peer_addr = SocketAddr::from_std(sock_addr);
+   478→        let local_addr = SocketAddr::from_std(
+   479→            std_stream
+   480→                .local_addr()
+   481→                .map_err(|e| format!("failed to get local addr: {}", e))?,
+   482→        );
+   483→
+   484→        Ok(TcpStream {
+   485→            peer_addr,
+   486→            local_addr,
+   487→            is_connected: true,
+   488→            timeout_ms: None,
+   489→            read_count: 0,
+   490→            write_count: 0,
+   491→            inner: std_stream,
+   492→        })
+   493→    }
+   494→
+   495→    /// Returns an iterator over incoming connections.
+   496→    // VUMA-VERIFIED: iterator delegates to accept
+   497→    pub fn incoming(&mut self) -> TcpListenerIncoming<'_> {
+   498→        TcpListenerIncoming { listener: self }
+   499→    }
+   500→
+   501→    /// Returns the local address this listener is bound to.
+   502→    // VUMA-VERIFIED: pure query
+   503→    pub fn local_addr(&self) -> &SocketAddr {
+   504→        &self.local_addr
+   505→    }
+   506→
+   507→    /// Returns a reference to the underlying std::net::TcpListener.
+   508→    // VUMA-VERIFIED: access to raw socket is tracked
+   509→    pub fn inner(&self) -> &std_net::TcpListener {
+   510→        &self.inner
+   511→    }
+   512→
+   513→    /// Returns the CapD for this listener.
+   514→    // VUMA-VERIFIED: listener requires Read and Execute
+   515→    pub fn capd(&self) -> CapD {
+   516→        CapD::new(vec![CapFlag::Read, CapFlag::Execute])
+   517→    }
+   518→
+   519→    /// Returns the RepD for this listener.
+   520→    // VUMA-VERIFIED: type descriptor is correct
+   521→    pub fn repd(&self) -> RepD {
+   522→        RepD::new("TcpListener", 32, 8, self.capd())
+   523→    }
+   524→
+   525→    /// Returns the SyncEdge annotations for this listener.
+   526→    // VUMA-VERIFIED: synchronization edges model accept ordering
+   527→    pub fn sync_edges(&self) -> Vec<SyncEdge> {
+   528→        vec![
+   529→            SyncEdge::new("tcp_bind", "tcp_accept", SyncEdgeKind::Seq),
+   530→            SyncEdge::new("tcp_accept", "tcp_read", SyncEdgeKind::Seq),
+   531→        ]
+   532→    }
+   533→}
+   534→
+   535→/// Iterator over incoming TCP connections.
+   536→pub struct TcpListenerIncoming<'a> {
+   537→    listener: &'a mut TcpListener,
+   538→}
+   539→
+   540→impl<'a> Iterator for TcpListenerIncoming<'a> {
+   541→    type Item = Result<TcpStream, String>;
+   542→
+   543→    fn next(&mut self) -> Option<Self::Item> {
+   544→        Some(self.listener.accept())
+   545→    }
+   546→}
+   547→
+   548→// ---------------------------------------------------------------------------
+   549→// TcpStream
+   550→// ---------------------------------------------------------------------------
+   551→
+   552→/// A VUMA-verified TCP stream.
+   553→///
+   554→/// Represents a connected TCP socket that supports reading and writing.
+   555→/// Delegates I/O to `std::net::TcpStream` with real OS-level operations.
+   556→///
+   557→/// ## BD Annotations
+   558→///
+   559→/// - CapD: { Read, Write, Send }
+   560→/// - SyncEdge: connect → read/write (Seq), read → write (Seq)
+   561→pub struct TcpStream {
+   562→    /// The peer (remote) address.
+   563→    pub peer_addr: SocketAddr,
+   564→    /// The local address.
+   565→    pub local_addr: SocketAddr,
+   566→    /// Whether the stream is connected.
+   567→    pub is_connected: bool,
+   568→    /// Optional timeout in milliseconds.
+   569→    pub timeout_ms: Option<u64>,
+   570→    /// Number of read operations (BD tracking).
+   571→    pub read_count: u64,
+   572→    /// Number of write operations (BD tracking).
+   573→    pub write_count: u64,
+   574→    /// The underlying std::net::TcpStream.
+   575→    inner: std_net::TcpStream,
+   576→}
+   577→
+   578→impl TcpStream {
+   579→    /// Connect to a remote TCP socket address.
+   580→    ///
+   581→    /// Delegates to `std::net::TcpStream::connect` for real OS-level connection.
+   582→    // VUMA-VERIFIED: connect requires Read/Write capabilities
+   583→    pub fn connect(addr: SocketAddr) -> Result<Self, String> {
+   584→        let std_stream = std_net::TcpStream::connect(addr.to_std())
+   585→            .map_err(|e| format!("TcpStream connect failed: {}", e))?;
+   586→
+   587→        let peer_addr = addr;
+   588→        let local_addr = SocketAddr::from_std(
+   589→            std_stream
+   590→                .local_addr()
+   591→                .map_err(|e| format!("failed to get local addr: {}", e))?,
+   592→        );
+   593→
+   594→        Ok(Self {
+   595→            peer_addr,
+   596→            local_addr,
+   597→            is_connected: true,
+   598→            timeout_ms: None,
+   599→            read_count: 0,
+   600→            write_count: 0,
+   601→            inner: std_stream,
+   602→        })
+   603→    }
+   604→
+   605→    /// Read bytes from the stream into `buf`.
+   606→    ///
+   607→    /// Returns the number of bytes read.
+   608→    /// Delegates to `std::io::Read::read` on the underlying `std::net::TcpStream`.
+   609→    // VUMA-VERIFIED: read requires Read capability
+   610→    pub fn read(&mut self, buf: &mut [u8]) -> Result<usize, String> {
+   611→        if !self.is_connected {
+   612→            return Err("TcpStream is not connected".to_string());
+   613→        }
+   614→        self.read_count += 1;
+   615→        let n = self
+   616→            .inner
+   617→            .read(buf)
+   618→            .map_err(|e| format!("TcpStream read failed: {}", e))?;
+   619→        Ok(n)
+   620→    }
+   621→
+   622→    /// Write bytes from `buf` to the stream.
+   623→    ///
+   624→    /// Returns the number of bytes written.
+   625→    /// Delegates to `std::io::Write::write` on the underlying `std::net::TcpStream`.
+   626→    // VUMA-VERIFIED: write requires Write capability
+   627→    pub fn write(&mut self, buf: &[u8]) -> Result<usize, String> {
+   628→        if !self.is_connected {
+   629→            return Err("TcpStream is not connected".to_string());
+   630→        }
+   631→        self.write_count += 1;
+   632→        let n = self
+   633→            .inner
+   634→            .write(buf)
+   635→            .map_err(|e| format!("TcpStream write failed: {}", e))?;
+   636→        Ok(n)
+   637→    }
+   638→
+   639→    /// Set the read/write timeout for this stream.
+   640→    ///
+   641→    /// Delegates to `std::net::TcpStream::set_read_timeout` and
+   642→    /// `std::net::TcpStream::set_write_timeout`.
+   643→    // VUMA-VERIFIED: timeout configuration is safe
+   644→    pub fn set_timeout(&mut self, timeout_ms: Option<u64>) {
+   645→        let dur = timeout_ms.map(std::time::Duration::from_millis);
+   646→        let _ = self.inner.set_read_timeout(dur);
+   647→        let _ = self.inner.set_write_timeout(dur);
+   648→        self.timeout_ms = timeout_ms;
+   649→    }
+   650→
+   651→    /// Returns the peer (remote) address.
+   652→    // VUMA-VERIFIED: pure query
+   653→    pub fn peer_addr(&self) -> &SocketAddr {
+   654→        &self.peer_addr
+   655→    }
+   656→
+   657→    /// Returns the local address.
+   658→    // VUMA-VERIFIED: pure query
+   659→    pub fn local_addr(&self) -> &SocketAddr {
+   660→        &self.local_addr
+   661→    }
+   662→
+   663→    /// Returns a reference to the underlying std::net::TcpStream.
+   664→    // VUMA-VERIFIED: access to raw socket is tracked
+   665→    pub fn inner(&self) -> &std_net::TcpStream {
+   666→        &self.inner
+   667→    }
+   668→
+   669→    /// Returns the CapD for this stream.
+   670→    // VUMA-VERIFIED: stream has Read, Write, Send
+   671→    pub fn capd(&self) -> CapD {
+   672→        CapD::new(vec![CapFlag::Read, CapFlag::Write, CapFlag::Send])
+   673→    }
+   674→
+   675→    /// Returns the RepD for this stream.
+   676→    // VUMA-VERIFIED: type descriptor is correct
+   677→    pub fn repd(&self) -> RepD {
+   678→        RepD::new("TcpStream", 48, 8, self.capd())
+   679→    }
+   680→
+   681→    /// Returns the SyncEdge annotations for this stream.
+   682→    // VUMA-VERIFIED: synchronization edges model TCP read/write ordering
+   683→    pub fn sync_edges(&self) -> Vec<SyncEdge> {
+   684→        vec![
+   685→            SyncEdge::new("tcp_connect", "tcp_read", SyncEdgeKind::Seq),
+   686→            SyncEdge::new("tcp_connect", "tcp_write", SyncEdgeKind::Seq),
+   687→            SyncEdge::new("tcp_read", "tcp_write", SyncEdgeKind::Seq),
+   688→        ]
+   689→    }
+   690→}
+   691→
+   692→impl fmt::Display for TcpStream {
+   693→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+   694→        write!(
+   695→            f,
+   696→            "TcpStream {{ local: {}, peer: {}, connected: {} }}",
+   697→            self.local_addr, self.peer_addr, self.is_connected
+   698→        )
+   699→    }
+   700→}
+   701→
+   702→// ---------------------------------------------------------------------------
+   703→// UdpSocket
+   704→// ---------------------------------------------------------------------------
+   705→
+   706→/// A VUMA-verified UDP socket.
+   707→///
+   708→/// Supports sending and receiving datagrams without establishing a connection.
+   709→/// Delegates to `std::net::UdpSocket` for real OS-level operations.
+   710→///
+   711→/// ## BD Annotations
+   712→///
+   713→/// - CapD: { Read, Write, Send }
+   714→/// - SyncEdge: bind → send_to/recv_from (Seq)
+   715→pub struct UdpSocket {
+   716→    /// The local address this socket is bound to.
+   717→    pub local_addr: SocketAddr,
+   718→    /// Whether the socket is bound.
+   719→    pub is_bound: bool,
+   720→    /// Number of send operations (BD tracking).
+   721→    pub send_count: u64,
+   722→    /// Number of recv operations (BD tracking).
+   723→    pub recv_count: u64,
+   724→    /// The underlying std::net::UdpSocket.
+   725→    inner: std_net::UdpSocket,
+   726→}
+   727→
+   728→impl UdpSocket {
+   729→    /// Bind a new UDP socket to the given socket address.
+   730→    ///
+   731→    /// Delegates to `std::net::UdpSocket::bind` for real OS-level binding.
+   732→    // VUMA-VERIFIED: bind requires Execute capability
+   733→    pub fn bind(addr: SocketAddr) -> Result<Self, String> {
+   734→        let std_socket = std_net::UdpSocket::bind(addr.to_std())
+   735→            .map_err(|e| format!("UdpSocket bind failed: {}", e))?;
+   736→
+   737→        let local_addr = SocketAddr::from_std(
+   738→            std_socket
+   739→                .local_addr()
+   740→                .map_err(|e| format!("failed to get local addr: {}", e))?,
+   741→        );
+   742→
+   743→        Ok(Self {
+   744→            local_addr,
+   745→            is_bound: true,
+   746→            send_count: 0,
+   747→            recv_count: 0,
+   748→            inner: std_socket,
+   749→        })
+   750→    }
+   751→
+   752→    /// Send data to the given address.
+   753→    ///
+   754→    /// Returns the number of bytes sent.
+   755→    /// Delegates to `std::net::UdpSocket::send_to`.
+   756→    // VUMA-VERIFIED: send_to requires Write capability
+   757→    pub fn send_to(&mut self, buf: &[u8], addr: SocketAddr) -> Result<usize, String> {
+   758→        if !self.is_bound {
+   759→            return Err("UdpSocket is not bound".to_string());
+   760→        }
+   761→        self.send_count += 1;
+   762→        let n = self
+   763→            .inner
+   764→            .send_to(buf, addr.to_std())
+   765→            .map_err(|e| format!("UdpSocket send_to failed: {}", e))?;
+   766→        Ok(n)
+   767→    }
+   768→
+   769→    /// Receive data from the socket.
+   770→    ///
+   771→    /// Returns the number of bytes received and the sender's address.
+   772→    /// Delegates to `std::net::UdpSocket::recv_from`.
+   773→    // VUMA-VERIFIED: recv_from requires Read capability
+   774→    pub fn recv_from(&mut self, buf: &mut [u8]) -> Result<(usize, SocketAddr), String> {
+   775→        if !self.is_bound {
+   776→            return Err("UdpSocket is not bound".to_string());
+   777→        }
+   778→        self.recv_count += 1;
+   779→        let (n, addr) = self
+   780→            .inner
+   781→            .recv_from(buf)
+   782→            .map_err(|e| format!("UdpSocket recv_from failed: {}", e))?;
+   783→        Ok((n, SocketAddr::from_std(addr)))
+   784→    }
+   785→
+   786→    /// Connect the UDP socket to a remote address, allowing use of send/recv.
+   787→    ///
+   788→    /// Delegates to `std::net::UdpSocket::connect`.
+   789→    // VUMA-VERIFIED: connect restricts send/recv to a single peer
+   790→    pub fn connect(&self, addr: SocketAddr) -> Result<(), String> {
+   791→        self.inner
+   792→            .connect(addr.to_std())
+   793→            .map_err(|e| format!("UdpSocket connect failed: {}", e))
+   794→    }
+   795→
+   796→    /// Send data to the connected peer (requires prior connect).
+   797→    ///
+   798→    /// Delegates to `std::net::UdpSocket::send`.
+   799→    // VUMA-VERIFIED: send requires Write capability and prior connect
+   800→    pub fn send(&mut self, buf: &[u8]) -> Result<usize, String> {
+   801→        if !self.is_bound {
+   802→            return Err("UdpSocket is not bound".to_string());
+   803→        }
+   804→        self.send_count += 1;
+   805→        let n = self
+   806→            .inner
+   807→            .send(buf)
+   808→            .map_err(|e| format!("UdpSocket send failed: {}", e))?;
+   809→        Ok(n)
+   810→    }
+   811→
+   812→    /// Receive data from the connected peer (requires prior connect).
+   813→    ///
+   814→    /// Delegates to `std::net::UdpSocket::recv`.
+   815→    // VUMA-VERIFIED: recv requires Read capability and prior connect
+   816→    pub fn recv(&mut self, buf: &mut [u8]) -> Result<usize, String> {
+   817→        if !self.is_bound {
+   818→            return Err("UdpSocket is not bound".to_string());
+   819→        }
+   820→        self.recv_count += 1;
+   821→        let n = self
+   822→            .inner
+   823→            .recv(buf)
+   824→            .map_err(|e| format!("UdpSocket recv failed: {}", e))?;
+   825→        Ok(n)
+   826→    }
+   827→
+   828→    /// Returns the local address this socket is bound to.
+   829→    // VUMA-VERIFIED: pure query
+   830→    pub fn local_addr(&self) -> &SocketAddr {
+   831→        &self.local_addr
+   832→    }
+   833→
+   834→    /// Returns a reference to the underlying std::net::UdpSocket.
+   835→    // VUMA-VERIFIED: access to raw socket is tracked
+   836→    pub fn inner(&self) -> &std_net::UdpSocket {
+   837→        &self.inner
+   838→    }
+   839→
+   840→    /// Returns the CapD for this socket.
+   841→    // VUMA-VERIFIED: socket has Read, Write, Send
+   842→    pub fn capd(&self) -> CapD {
+   843→        CapD::new(vec![CapFlag::Read, CapFlag::Write, CapFlag::Send])
+   844→    }
+   845→
+   846→    /// Returns the RepD for this socket.
+   847→    // VUMA-VERIFIED: type descriptor is correct
+   848→    pub fn repd(&self) -> RepD {
+   849→        RepD::new("UdpSocket", 32, 8, self.capd())
+   850→    }
+   851→
+   852→    /// Returns the SyncEdge annotations for this socket.
+   853→    // VUMA-VERIFIED: synchronization edges model UDP send/recv ordering
+   854→    pub fn sync_edges(&self) -> Vec<SyncEdge> {
+   855→        vec![
+   856→            SyncEdge::new("udp_bind", "udp_send_to", SyncEdgeKind::Seq),
+   857→            SyncEdge::new("udp_bind", "udp_recv_from", SyncEdgeKind::Seq),
+   858→            SyncEdge::new("udp_recv_from", "udp_send_to", SyncEdgeKind::Seq),
+   859→        ]
+   860→    }
+   861→}
+   862→
+   863→impl fmt::Display for UdpSocket {
+   864→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+   865→        write!(
+   866→            f,
+   867→            "UdpSocket {{ local: {}, bound: {} }}",
+   868→            self.local_addr, self.is_bound
+   869→        )
+   870→    }
+   871→}
+   872→
+   873→// ---------------------------------------------------------------------------
+   874→// Network CapD Helpers
+   875→// ---------------------------------------------------------------------------
+   876→
+   877→/// Returns the CapD for network stream types.
+   878→/// Supports: Read, Write, Send.
+   879→// VUMA-VERIFIED: network stream capability descriptor
+   880→pub fn network_stream_capd() -> CapD {
+   881→    CapD::new(vec![CapFlag::Read, CapFlag::Write, CapFlag::Send])
+   882→}
+   883→
+   884→/// Returns the CapD for network listener types.
+   885→/// Supports: Read, Execute.
+   886→// VUMA-VERIFIED: network listener capability descriptor
+   887→pub fn network_listener_capd() -> CapD {
+   888→    CapD::new(vec![CapFlag::Read, CapFlag::Execute])
+   889→}
+   890→
+   891→// ---------------------------------------------------------------------------
+   892→// Tests
+   893→// ---------------------------------------------------------------------------
+   894→
+   895→#[cfg(test)]
+   896→mod tests {
+   897→    use super::*;
+   898→
+   899→    #[test]
+   900→    fn test_ipv4_addr_new_and_display() {
+   901→        let addr = Ipv4Addr::new(192, 168, 1, 1);
+   902→        assert_eq!(format!("{}", addr), "192.168.1.1");
+   903→        assert_eq!(addr.octets, [192, 168, 1, 1]);
+   904→    }
+   905→
+   906→    #[test]
+   907→    fn test_ipv4_addr_special() {
+   908→        assert!(Ipv4Addr::LOCALHOST.is_loopback());
+   909→        assert!(Ipv4Addr::UNSPECIFIED.is_unspecified());
+   910→        assert_eq!(format!("{}", Ipv4Addr::LOCALHOST), "127.0.0.1");
+   911→    }
+   912→
+   913→    #[test]
+   914→    fn test_ipv6_addr_new_and_display() {
+   915→        let addr = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1);
+   916→        assert!(addr.is_loopback() == false);
+   917→        assert!(Ipv6Addr::LOCALHOST.is_loopback());
+   918→    }
+   919→
+   920→    #[test]
+   921→    fn test_ipaddr_parse() {
+   922→        let ip = IpAddr::parse("127.0.0.1").unwrap();
+   923→        assert!(ip.is_ipv4());
+   924→        assert!(!ip.is_ipv6());
+   925→
+   926→        let ip6 = IpAddr::parse("::1").unwrap();
+   927→        assert!(ip6.is_ipv6());
+   928→        assert!(!ip6.is_ipv4());
+   929→
+   930→        assert!(IpAddr::parse("not_an_ip").is_err());
+   931→    }
+   932→
+   933→    #[test]
+   934→    fn test_socket_addr_new() {
+   935→        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080);
+   936→        assert_eq!(addr.port(), 8080);
+   937→        assert!(addr.ip().is_ipv4());
+   938→    }
+   939→
+   940→    #[test]
+   941→    fn test_socket_addr_parse() {
+   942→        let addr = SocketAddr::parse("127.0.0.1:8080").unwrap();
+   943→        assert_eq!(addr.port(), 8080);
+   944→        assert!(addr.ip().is_ipv4());
+   945→
+   946→        assert!(SocketAddr::parse("invalid").is_err());
+   947→    }
+   948→
+   949→    #[test]
+   950→    fn test_socket_addr_roundtrip() {
+   951→        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)), 9999);
+   952→        let std_addr = addr.to_std();
+   953→        let back = SocketAddr::from_std(std_addr);
+   954→        assert_eq!(addr, back);
+   955→    }
+   956→
+   957→    #[test]
+   958→    fn test_tcp_listener_bind_real() {
+   959→        // Bind to port 0 to let the OS pick a free port
+   960→        let listener =
+   961→            TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0)).unwrap();
+   962→        assert!(listener.is_bound);
+   963→        assert!(listener.local_addr.port() > 0);
+   964→    }
+   965→
+   966→    #[test]
+   967→    fn test_tcp_listener_accept_real() {
+   968→        let listener =
+   969→            TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0)).unwrap();
+   970→        let addr = listener.local_addr;
+   971→
+   972→        // Connect from another thread
+   973→        let handle = std::thread::spawn(move || {
+   974→            let _ = std_net::TcpStream::connect(addr.to_std());
+   975→        });
+   976→
+   977→        let mut listener = listener;
+   978→        let stream = listener.accept().unwrap();
+   979→        assert!(stream.is_connected);
+   980→        assert_eq!(listener.accept_count, 1);
+   981→
+   982→        handle.join().unwrap();
+   983→    }
+   984→
+   985→    #[test]
+   986→    fn test_tcp_stream_connect_real() {
+   987→        let listener =
+   988→            TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0)).unwrap();
+   989→        let addr = listener.local_addr;
+   990→
+   991→        let handle = std::thread::spawn(move || {
+   992→            let _ = listener.inner.accept();
+   993→        });
+   994→
+   995→        let stream = TcpStream::connect(addr).unwrap();
+   996→        assert!(stream.is_connected);
+   997→        assert!(stream.local_addr.port() > 0);
+   998→
+   999→        handle.join().unwrap();
+  1000→    }
+  1001→
+  1002→    #[test]
+  1003→    fn test_tcp_stream_read_write_real() {
+  1004→        let listener =
+  1005→            TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0)).unwrap();
+  1006→        let addr = listener.local_addr;
+  1007→
+  1008→        // Server thread: accept, then write a message, then read response
+  1009→        let server_handle = std::thread::spawn(move || {
+  1010→            let (mut std_stream, _) = listener.inner.accept().unwrap();
+  1011→            std_stream.write_all(b"hello from server").unwrap();
+  1012→            let mut buf = [0u8; 64];
+  1013→            let n = std_stream.read(&mut buf).unwrap();
+  1014→            let response = std::str::from_utf8(&buf[..n]).unwrap();
+  1015→            response.to_string()
+  1016→        });
+  1017→
+  1018→        // Client: connect, read, then write response
+  1019→        let mut stream = TcpStream::connect(addr).unwrap();
+  1020→        let mut buf = [0u8; 64];
+  1021→        let n = stream.read(&mut buf).unwrap();
+  1022→        assert_eq!(&buf[..n], b"hello from server");
+  1023→        assert_eq!(stream.read_count, 1);
+  1024→
+  1025→        let n = stream.write(b"hello from client").unwrap();
+  1026→        assert_eq!(n, 17);
+  1027→        assert_eq!(stream.write_count, 1);
+  1028→
+  1029→        let response = server_handle.join().unwrap();
+  1030→        assert_eq!(response, "hello from client");
+  1031→    }
+  1032→
+  1033→    #[test]
+  1034→    fn test_tcp_stream_set_timeout() {
+  1035→        let listener =
+  1036→            TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0)).unwrap();
+  1037→        let addr = listener.local_addr;
+  1038→
+  1039→        let handle = std::thread::spawn(move || {
+  1040→            let _ = listener.inner.accept();
+  1041→        });
+  1042→
+  1043→        let mut stream = TcpStream::connect(addr).unwrap();
+  1044→        assert!(stream.timeout_ms.is_none());
+  1045→        stream.set_timeout(Some(5000));
+  1046→        assert_eq!(stream.timeout_ms, Some(5000));
+  1047→
+  1048→        handle.join().unwrap();
+  1049→    }
+  1050→
+  1051→    #[test]
+  1052→    fn test_udp_socket_bind_real() {
+  1053→        let socket =
+  1054→            UdpSocket::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0)).unwrap();
+  1055→        assert!(socket.is_bound);
+  1056→        assert!(socket.local_addr.port() > 0);
+  1057→    }
+  1058→
+  1059→    #[test]
+  1060→    fn test_udp_socket_send_recv_real() {
+  1061→        let socket_a =
+  1062→            UdpSocket::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0)).unwrap();
+  1063→        let addr_a = socket_a.local_addr;
+  1064→
+  1065→        let socket_b =
+  1066→            UdpSocket::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0)).unwrap();
+  1067→        let addr_b = socket_b.local_addr;
+  1068→
+  1069→        // A sends to B
+  1070→        let mut socket_a = socket_a;
+  1071→        let n = socket_a.send_to(b"hello udp", addr_b).unwrap();
+  1072→        assert_eq!(n, 9);
+  1073→        assert_eq!(socket_a.send_count, 1);
+  1074→
+  1075→        // B receives from A
+  1076→        let mut socket_b = socket_b;
+  1077→        let mut buf = [0u8; 64];
+  1078→        let (n, sender) = socket_b.recv_from(&mut buf).unwrap();
+  1079→        assert_eq!(&buf[..n], b"hello udp");
+  1080→        assert_eq!(sender, addr_a);
+  1081→        assert_eq!(socket_b.recv_count, 1);
+  1082→    }
+  1083→
+  1084→    #[test]
+  1085→    fn test_udp_socket_connected_send_recv() {
+  1086→        let socket_a =
+  1087→            UdpSocket::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0)).unwrap();
+  1088→        let addr_a = socket_a.local_addr;
+  1089→
+  1090→        let socket_b =
+  1091→            UdpSocket::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0)).unwrap();
+  1092→        let addr_b = socket_b.local_addr;
+  1093→
+  1094→        // Connect A → B
+  1095→        socket_a.connect(addr_b).unwrap();
+  1096→
+  1097→        // A sends via connected socket
+  1098→        let mut socket_a = socket_a;
+  1099→        let n = socket_a.send(b"connected msg").unwrap();
+  1100→        assert_eq!(n, 13);
+  1101→
+  1102→        // B receives
+  1103→        let mut socket_b = socket_b;
+  1104→        let mut buf = [0u8; 64];
+  1105→        let (n, _) = socket_b.recv_from(&mut buf).unwrap();
+  1106→        assert_eq!(&buf[..n], b"connected msg");
+  1107→
+  1108→        // B connects to A and sends back
+  1109→        socket_b.connect(addr_a).unwrap();
+  1110→        let n = socket_b.send(b"reply").unwrap();
+  1111→        assert_eq!(n, 5);
+  1112→
+  1113→        // A receives via connected socket
+  1114→        let mut buf = [0u8; 64];
+  1115→        let n = socket_a.recv(&mut buf).unwrap();
+  1116→        assert_eq!(&buf[..n], b"reply");
+  1117→    }
+  1118→
+  1119→    #[test]
+  1120→    fn test_network_capd_helpers() {
+  1121→        let stream_capd = network_stream_capd();
+  1122→        assert!(stream_capd.has(CapFlag::Read));
+  1123→        assert!(stream_capd.has(CapFlag::Write));
+  1124→        assert!(stream_capd.has(CapFlag::Send));
+  1125→
+  1126→        let listener_capd = network_listener_capd();
+  1127→        assert!(listener_capd.has(CapFlag::Read));
+  1128→        assert!(listener_capd.has(CapFlag::Execute));
+  1129→    }
+  1130→}
+  1131→

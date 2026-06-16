@@ -1,0 +1,486 @@
+     1→VUMA Compilation Test Results
+     2→Started: Tue Jun 16 00:37:36 UTC 2026
+     3→
+     4→=== mips64 / pipeline ===
+     5→RESULT: FAILED (121ms, exit=1)
+     6→ERROR OUTPUT (last 20 lines):
+     7→[emit]     Call { dst: Some(Register(632)), func: "write", args: [Immediate(1), Register(627), Register(630)], is_extern: false }
+     8→[emit]     Branch { target: "merge_95" }
+     9→[emit]   Block: merge_95
+    10→[emit]     Call { dst: Some(Register(633)), func: "close", args: [Register(593)], is_extern: false }
+    11→[emit]     Alloc { dst: Register(634), size: 4 }
+    12→[emit]     Call { dst: Some(Register(635)), func: "waitpid", args: [Register(603), Register(634), Immediate(0)], is_extern: false }
+    13→[emit]     Call { dst: Some(Register(636)), func: "waitpid", args: [Register(614), Register(634), Immediate(0)], is_extern: false }
+    14→[emit]     Call { dst: Some(Register(637)), func: "AtomicLoad", args: [Immediate(0)], is_extern: false }
+    15→[emit]     Add { dst: Register(638), lhs: Immediate(0), rhs: Immediate(0), ty: None }
+    16→[emit]     Cmp { kind: SGt, dst: Register(639), lhs: Register(630), rhs: Immediate(0), ty: None }
+    17→[emit]     CondBranch { cond: Register(639), true_target: "then_96", false_target: "merge_98" }
+    18→[emit]   Block: then_96
+    19→[emit]     Add { dst: Register(640), lhs: Register(627), rhs: Immediate(0), ty: None }
+    20→[emit]     Load { dst: Register(641), addr: Register(640), offset: 0, ty: U8 }
+    21→[emit]     Add { dst: Register(642), lhs: Register(641), rhs: Immediate(0), ty: None }
+    22→[emit]     Branch { target: "merge_98" }
+    23→[emit]   Block: merge_98
+    24→[emit]     Ret { values: [Register(642)] }
+    25→error[E037]: unresolved relocation: symbol 'AtomicStore' referenced in function 'sigchld_handler' at offset 0x30 (type: R_MIPS_26)
+    26→E037: mips64 encoding failed: [mips64] unresolved relocation: symbol 'AtomicStore' referenced in function 'sigchld_handler' at offset 0x30 (relocation type: R_MIPS_26)
+    27→---
+    28→=== mips64 / mmap_sha256d ===
+    29→RESULT: FAILED (103ms, exit=1)
+    30→ERROR OUTPUT (last 20 lines):
+    31→[emit]   Block: merge_47
+    32→[emit]     Call { dst: Some(Register(468)), func: "close", args: [Register(452)], is_extern: false }
+    33→[emit]     Cmp { kind: Ne, dst: Register(469), lhs: Register(468), rhs: Immediate(0), ty: None }
+    34→[emit]     CondBranch { cond: Register(469), true_target: "then_48", false_target: "merge_50" }
+    35→[emit]   Block: then_48
+    36→[emit]     Call { dst: Some(Register(470)), func: "unlink", args: [Register(413)], is_extern: false }
+    37→[emit]     Ret { values: [Immediate(5)] }
+    38→[emit]   Block: merge_50
+    39→[emit]     Call { dst: Some(Register(471)), func: "unlink", args: [Register(413)], is_extern: false }
+    40→[emit]     Cmp { kind: Ne, dst: Register(472), lhs: Register(471), rhs: Immediate(0), ty: None }
+    41→[emit]     CondBranch { cond: Register(472), true_target: "then_51", false_target: "merge_53" }
+    42→[emit]   Block: then_51
+    43→[emit]     Ret { values: [Immediate(6)] }
+    44→[emit]   Block: merge_53
+    45→[emit]     Add { dst: Register(473), lhs: Register(462), rhs: Immediate(0), ty: None }
+    46→[emit]     Load { dst: Register(474), addr: Register(473), offset: 0, ty: U8 }
+    47→[emit]     Add { dst: Register(475), lhs: Register(474), rhs: Immediate(0), ty: None }
+    48→[emit]     Ret { values: [Register(475)] }
+    49→error[E037]: unresolved relocation: symbol 'open' referenced in function 'main' at offset 0x6AC (type: R_MIPS_26)
+    50→E037: mips64 encoding failed: [mips64] unresolved relocation: symbol 'open' referenced in function 'main' at offset 0x6AC (relocation type: R_MIPS_26)
+    51→---
+    52→=== mips64 / epoll_echo ===
+    53→RESULT: FAILED (99ms, exit=1)
+    54→ERROR OUTPUT (last 20 lines):
+    55→[emit]     Ret { values: [Immediate(0)] }
+    56→[emit]   Block: merge_59
+    57→[emit]     Cmp { kind: Eq, dst: Register(208), lhs: Register(160), rhs: Immediate(4), ty: None }
+    58→[emit]     CondBranch { cond: Register(208), true_target: "then_60", false_target: "merge_62" }
+    59→[emit]   Block: then_60
+    60→[emit]     Ret { values: [Immediate(0)] }
+    61→[emit]   Block: merge_62
+    62→[emit]     Cmp { kind: Eq, dst: Register(209), lhs: Register(160), rhs: Immediate(5), ty: None }
+    63→[emit]     CondBranch { cond: Register(209), true_target: "then_63", false_target: "merge_65" }
+    64→[emit]   Block: then_63
+    65→[emit]     Ret { values: [Immediate(0)] }
+    66→[emit]   Block: merge_65
+    67→[emit]     Cmp { kind: Eq, dst: Register(210), lhs: Register(160), rhs: Immediate(6), ty: None }
+    68→[emit]     CondBranch { cond: Register(210), true_target: "then_66", false_target: "merge_68" }
+    69→[emit]   Block: then_66
+    70→[emit]     Ret { values: [Immediate(0)] }
+    71→[emit]   Block: merge_68
+    72→[emit]     Ret { values: [Immediate(99)] }
+    73→error[E037]: unresolved relocation: symbol 'socket' referenced in function 'setup_server' at offset 0x34 (type: R_MIPS_26)
+    74→E037: mips64 encoding failed: [mips64] unresolved relocation: symbol 'socket' referenced in function 'setup_server' at offset 0x34 (relocation type: R_MIPS_26)
+    75→---
+    76→=== mips64 / self_exec ===
+    77→RESULT: FAILED (122ms, exit=1)
+    78→ERROR OUTPUT (last 20 lines):
+    79→[emit]   Block: then_78
+    80→[emit]     Branch { target: "loop_exit_74" }
+    81→[emit]   Block: merge_80
+    82→[emit]     Add { dst: Register(772), lhs: Register(765), rhs: Register(770), ty: None }
+    83→[emit]     Branch { target: "merge_77" }
+    84→[emit]   Block: else_76
+    85→[emit]     Branch { target: "loop_exit_74" }
+    86→[emit]   Block: merge_77
+    87→[emit]     Add { dst: Register(765), lhs: Register(772), rhs: Immediate(0), ty: None }
+    88→[emit]     Branch { target: "loop_header_72" }
+    89→[emit]   Block: loop_exit_74
+    90→[emit]     Call { dst: Some(Register(773)), func: "close", args: [Register(758)], is_extern: false }
+    91→[emit]     Alloc { dst: Register(774), size: 4 }
+    92→[emit]     Call { dst: Some(Register(775)), func: "waitpid", args: [Register(761), Register(774), Immediate(0)], is_extern: false }
+    93→[emit]     Add { dst: Register(776), lhs: Register(755), rhs: Immediate(0), ty: None }
+    94→[emit]     Load { dst: Register(777), addr: Register(776), offset: 0, ty: U8 }
+    95→[emit]     Add { dst: Register(778), lhs: Register(777), rhs: Immediate(0), ty: None }
+    96→[emit]     Ret { values: [Register(778)] }
+    97→error[E037]: unresolved relocation: symbol 'strcmp' referenced in function 'main' at offset 0x1C4 (type: R_MIPS_26)
+    98→E037: mips64 encoding failed: [mips64] unresolved relocation: symbol 'strcmp' referenced in function 'main' at offset 0x1C4 (relocation type: R_MIPS_26)
+    99→---
+   100→=== mips64 / signal_hash ===
+   101→RESULT: FAILED (123ms, exit=1)
+   102→ERROR OUTPUT (last 20 lines):
+   103→[emit]     Add { dst: Register(589), lhs: Register(588), rhs: Immediate(0), ty: None }
+   104→[emit]     Add { dst: Register(590), lhs: Register(583), rhs: Register(581), ty: None }
+   105→[emit]     Load { dst: Register(591), addr: Register(590), offset: 0, ty: U8 }
+   106→[emit]     Add { dst: Register(592), lhs: Register(591), rhs: Immediate(0), ty: None }
+   107→[emit]     Cmp { kind: Ne, dst: Register(593), lhs: Register(589), rhs: Register(592), ty: None }
+   108→[emit]     CondBranch { cond: Register(593), true_target: "then_63", false_target: "merge_65" }
+   109→[emit]   Block: then_63
+   110→[emit]     Branch { target: "merge_65" }
+   111→[emit]   Block: merge_65
+   112→[emit]     Add { dst: Register(594), lhs: Register(581), rhs: Immediate(1), ty: None }
+   113→[emit]     Branch { target: "merge_62" }
+   114→[emit]   Block: else_61
+   115→[emit]     Branch { target: "loop_exit_59" }
+   116→[emit]   Block: merge_62
+   117→[emit]     Add { dst: Register(581), lhs: Register(594), rhs: Immediate(0), ty: None }
+   118→[emit]     Branch { target: "loop_header_57" }
+   119→[emit]   Block: loop_exit_59
+   120→[emit]     Ret { values: [Register(563)] }
+   121→error[E037]: unresolved relocation: symbol 'AtomicStore' referenced in function 'signal_handler' at offset 0x1D8 (type: R_MIPS_26)
+   122→E037: mips64 encoding failed: [mips64] unresolved relocation: symbol 'AtomicStore' referenced in function 'signal_handler' at offset 0x1D8 (relocation type: R_MIPS_26)
+   123→---
+   124→=== ppc64 / pipeline ===
+   125→RESULT: FAILED (118ms, exit=1)
+   126→ERROR OUTPUT (last 20 lines):
+   127→[emit]     Call { dst: Some(Register(632)), func: "write", args: [Immediate(1), Register(627), Register(630)], is_extern: false }
+   128→[emit]     Branch { target: "merge_95" }
+   129→[emit]   Block: merge_95
+   130→[emit]     Call { dst: Some(Register(633)), func: "close", args: [Register(593)], is_extern: false }
+   131→[emit]     Alloc { dst: Register(634), size: 4 }
+   132→[emit]     Call { dst: Some(Register(635)), func: "waitpid", args: [Register(603), Register(634), Immediate(0)], is_extern: false }
+   133→[emit]     Call { dst: Some(Register(636)), func: "waitpid", args: [Register(614), Register(634), Immediate(0)], is_extern: false }
+   134→[emit]     Call { dst: Some(Register(637)), func: "AtomicLoad", args: [Immediate(0)], is_extern: false }
+   135→[emit]     Add { dst: Register(638), lhs: Immediate(0), rhs: Immediate(0), ty: None }
+   136→[emit]     Cmp { kind: SGt, dst: Register(639), lhs: Register(630), rhs: Immediate(0), ty: None }
+   137→[emit]     CondBranch { cond: Register(639), true_target: "then_96", false_target: "merge_98" }
+   138→[emit]   Block: then_96
+   139→[emit]     Add { dst: Register(640), lhs: Register(627), rhs: Immediate(0), ty: None }
+   140→[emit]     Load { dst: Register(641), addr: Register(640), offset: 0, ty: U8 }
+   141→[emit]     Add { dst: Register(642), lhs: Register(641), rhs: Immediate(0), ty: None }
+   142→[emit]     Branch { target: "merge_98" }
+   143→[emit]   Block: merge_98
+   144→[emit]     Ret { values: [Register(642)] }
+   145→error[E037]: unresolved relocation: symbol 'AtomicStore' referenced in function 'sigchld_handler' at offset 0x24 (type: R_PPC64_REL24)
+   146→E037: ppc64 encoding failed: [ppc64] unresolved relocation: symbol 'AtomicStore' referenced in function 'sigchld_handler' at offset 0x24 (relocation type: R_PPC64_REL24)
+   147→---
+   148→=== ppc64 / mmap_sha256d ===
+   149→RESULT: FAILED (103ms, exit=1)
+   150→ERROR OUTPUT (last 20 lines):
+   151→[emit]   Block: merge_47
+   152→[emit]     Call { dst: Some(Register(468)), func: "close", args: [Register(452)], is_extern: false }
+   153→[emit]     Cmp { kind: Ne, dst: Register(469), lhs: Register(468), rhs: Immediate(0), ty: None }
+   154→[emit]     CondBranch { cond: Register(469), true_target: "then_48", false_target: "merge_50" }
+   155→[emit]   Block: then_48
+   156→[emit]     Call { dst: Some(Register(470)), func: "unlink", args: [Register(413)], is_extern: false }
+   157→[emit]     Ret { values: [Immediate(5)] }
+   158→[emit]   Block: merge_50
+   159→[emit]     Call { dst: Some(Register(471)), func: "unlink", args: [Register(413)], is_extern: false }
+   160→[emit]     Cmp { kind: Ne, dst: Register(472), lhs: Register(471), rhs: Immediate(0), ty: None }
+   161→[emit]     CondBranch { cond: Register(472), true_target: "then_51", false_target: "merge_53" }
+   162→[emit]   Block: then_51
+   163→[emit]     Ret { values: [Immediate(6)] }
+   164→[emit]   Block: merge_53
+   165→[emit]     Add { dst: Register(473), lhs: Register(462), rhs: Immediate(0), ty: None }
+   166→[emit]     Load { dst: Register(474), addr: Register(473), offset: 0, ty: U8 }
+   167→[emit]     Add { dst: Register(475), lhs: Register(474), rhs: Immediate(0), ty: None }
+   168→[emit]     Ret { values: [Register(475)] }
+   169→error[E037]: unresolved relocation: symbol 'open' referenced in function 'main' at offset 0x3AC (type: R_PPC64_REL24)
+   170→E037: ppc64 encoding failed: [ppc64] unresolved relocation: symbol 'open' referenced in function 'main' at offset 0x3AC (relocation type: R_PPC64_REL24)
+   171→---
+   172→=== ppc64 / epoll_echo ===
+   173→RESULT: FAILED (96ms, exit=1)
+   174→ERROR OUTPUT (last 20 lines):
+   175→[emit]     Ret { values: [Immediate(0)] }
+   176→[emit]   Block: merge_59
+   177→[emit]     Cmp { kind: Eq, dst: Register(208), lhs: Register(160), rhs: Immediate(4), ty: None }
+   178→[emit]     CondBranch { cond: Register(208), true_target: "then_60", false_target: "merge_62" }
+   179→[emit]   Block: then_60
+   180→[emit]     Ret { values: [Immediate(0)] }
+   181→[emit]   Block: merge_62
+   182→[emit]     Cmp { kind: Eq, dst: Register(209), lhs: Register(160), rhs: Immediate(5), ty: None }
+   183→[emit]     CondBranch { cond: Register(209), true_target: "then_63", false_target: "merge_65" }
+   184→[emit]   Block: then_63
+   185→[emit]     Ret { values: [Immediate(0)] }
+   186→[emit]   Block: merge_65
+   187→[emit]     Cmp { kind: Eq, dst: Register(210), lhs: Register(160), rhs: Immediate(6), ty: None }
+   188→[emit]     CondBranch { cond: Register(210), true_target: "then_66", false_target: "merge_68" }
+   189→[emit]   Block: then_66
+   190→[emit]     Ret { values: [Immediate(0)] }
+   191→[emit]   Block: merge_68
+   192→[emit]     Ret { values: [Immediate(99)] }
+   193→error[E037]: unresolved relocation: symbol 'socket' referenced in function 'setup_server' at offset 0x28 (type: R_PPC64_REL24)
+   194→E037: ppc64 encoding failed: [ppc64] unresolved relocation: symbol 'socket' referenced in function 'setup_server' at offset 0x28 (relocation type: R_PPC64_REL24)
+   195→---
+   196→=== ppc64 / self_exec ===
+   197→RESULT: FAILED (116ms, exit=1)
+   198→ERROR OUTPUT (last 20 lines):
+   199→[emit]   Block: then_78
+   200→[emit]     Branch { target: "loop_exit_74" }
+   201→[emit]   Block: merge_80
+   202→[emit]     Add { dst: Register(772), lhs: Register(765), rhs: Register(770), ty: None }
+   203→[emit]     Branch { target: "merge_77" }
+   204→[emit]   Block: else_76
+   205→[emit]     Branch { target: "loop_exit_74" }
+   206→[emit]   Block: merge_77
+   207→[emit]     Add { dst: Register(765), lhs: Register(772), rhs: Immediate(0), ty: None }
+   208→[emit]     Branch { target: "loop_header_72" }
+   209→[emit]   Block: loop_exit_74
+   210→[emit]     Call { dst: Some(Register(773)), func: "close", args: [Register(758)], is_extern: false }
+   211→[emit]     Alloc { dst: Register(774), size: 4 }
+   212→[emit]     Call { dst: Some(Register(775)), func: "waitpid", args: [Register(761), Register(774), Immediate(0)], is_extern: false }
+   213→[emit]     Add { dst: Register(776), lhs: Register(755), rhs: Immediate(0), ty: None }
+   214→[emit]     Load { dst: Register(777), addr: Register(776), offset: 0, ty: U8 }
+   215→[emit]     Add { dst: Register(778), lhs: Register(777), rhs: Immediate(0), ty: None }
+   216→[emit]     Ret { values: [Register(778)] }
+   217→error[E037]: unresolved relocation: symbol 'strcmp' referenced in function 'main' at offset 0x110 (type: R_PPC64_REL24)
+   218→E037: ppc64 encoding failed: [ppc64] unresolved relocation: symbol 'strcmp' referenced in function 'main' at offset 0x110 (relocation type: R_PPC64_REL24)
+   219→---
+   220→=== ppc64 / signal_hash ===
+   221→RESULT: FAILED (116ms, exit=1)
+   222→ERROR OUTPUT (last 20 lines):
+   223→[emit]     Add { dst: Register(589), lhs: Register(588), rhs: Immediate(0), ty: None }
+   224→[emit]     Add { dst: Register(590), lhs: Register(583), rhs: Register(581), ty: None }
+   225→[emit]     Load { dst: Register(591), addr: Register(590), offset: 0, ty: U8 }
+   226→[emit]     Add { dst: Register(592), lhs: Register(591), rhs: Immediate(0), ty: None }
+   227→[emit]     Cmp { kind: Ne, dst: Register(593), lhs: Register(589), rhs: Register(592), ty: None }
+   228→[emit]     CondBranch { cond: Register(593), true_target: "then_63", false_target: "merge_65" }
+   229→[emit]   Block: then_63
+   230→[emit]     Branch { target: "merge_65" }
+   231→[emit]   Block: merge_65
+   232→[emit]     Add { dst: Register(594), lhs: Register(581), rhs: Immediate(1), ty: None }
+   233→[emit]     Branch { target: "merge_62" }
+   234→[emit]   Block: else_61
+   235→[emit]     Branch { target: "loop_exit_59" }
+   236→[emit]   Block: merge_62
+   237→[emit]     Add { dst: Register(581), lhs: Register(594), rhs: Immediate(0), ty: None }
+   238→[emit]     Branch { target: "loop_header_57" }
+   239→[emit]   Block: loop_exit_59
+   240→[emit]     Ret { values: [Register(563)] }
+   241→error[E037]: unresolved relocation: symbol 'AtomicStore' referenced in function 'signal_handler' at offset 0x120 (type: R_PPC64_REL24)
+   242→E037: ppc64 encoding failed: [ppc64] unresolved relocation: symbol 'AtomicStore' referenced in function 'signal_handler' at offset 0x120 (relocation type: R_PPC64_REL24)
+   243→---
+   244→=== loongarch64 / pipeline ===
+   245→RESULT: FAILED (113ms, exit=1)
+   246→ERROR OUTPUT (last 20 lines):
+   247→[emit]     Call { dst: Some(Register(632)), func: "write", args: [Immediate(1), Register(627), Register(630)], is_extern: false }
+   248→[emit]     Branch { target: "merge_95" }
+   249→[emit]   Block: merge_95
+   250→[emit]     Call { dst: Some(Register(633)), func: "close", args: [Register(593)], is_extern: false }
+   251→[emit]     Alloc { dst: Register(634), size: 4 }
+   252→[emit]     Call { dst: Some(Register(635)), func: "waitpid", args: [Register(603), Register(634), Immediate(0)], is_extern: false }
+   253→[emit]     Call { dst: Some(Register(636)), func: "waitpid", args: [Register(614), Register(634), Immediate(0)], is_extern: false }
+   254→[emit]     Call { dst: Some(Register(637)), func: "AtomicLoad", args: [Immediate(0)], is_extern: false }
+   255→[emit]     Add { dst: Register(638), lhs: Immediate(0), rhs: Immediate(0), ty: None }
+   256→[emit]     Cmp { kind: SGt, dst: Register(639), lhs: Register(630), rhs: Immediate(0), ty: None }
+   257→[emit]     CondBranch { cond: Register(639), true_target: "then_96", false_target: "merge_98" }
+   258→[emit]   Block: then_96
+   259→[emit]     Add { dst: Register(640), lhs: Register(627), rhs: Immediate(0), ty: None }
+   260→[emit]     Load { dst: Register(641), addr: Register(640), offset: 0, ty: U8 }
+   261→[emit]     Add { dst: Register(642), lhs: Register(641), rhs: Immediate(0), ty: None }
+   262→[emit]     Branch { target: "merge_98" }
+   263→[emit]   Block: merge_98
+   264→[emit]     Ret { values: [Register(642)] }
+   265→error[E037]: unresolved relocation: symbol 'AtomicStore' referenced in function 'sigchld_handler' at offset 0xC (type: R_LARCH_B26)
+   266→E037: loongarch64 encoding failed: [loongarch64] unresolved relocation: symbol 'AtomicStore' referenced in function 'sigchld_handler' at offset 0xC (relocation type: R_LARCH_B26)
+   267→---
+   268→=== loongarch64 / mmap_sha256d ===
+   269→RESULT: FAILED (122ms, exit=1)
+   270→ERROR OUTPUT (last 20 lines):
+   271→[emit]   Block: merge_47
+   272→[emit]     Call { dst: Some(Register(468)), func: "close", args: [Register(452)], is_extern: false }
+   273→[emit]     Cmp { kind: Ne, dst: Register(469), lhs: Register(468), rhs: Immediate(0), ty: None }
+   274→[emit]     CondBranch { cond: Register(469), true_target: "then_48", false_target: "merge_50" }
+   275→[emit]   Block: then_48
+   276→[emit]     Call { dst: Some(Register(470)), func: "unlink", args: [Register(413)], is_extern: false }
+   277→[emit]     Ret { values: [Immediate(5)] }
+   278→[emit]   Block: merge_50
+   279→[emit]     Call { dst: Some(Register(471)), func: "unlink", args: [Register(413)], is_extern: false }
+   280→[emit]     Cmp { kind: Ne, dst: Register(472), lhs: Register(471), rhs: Immediate(0), ty: None }
+   281→[emit]     CondBranch { cond: Register(472), true_target: "then_51", false_target: "merge_53" }
+   282→[emit]   Block: then_51
+   283→[emit]     Ret { values: [Immediate(6)] }
+   284→[emit]   Block: merge_53
+   285→[emit]     Add { dst: Register(473), lhs: Register(462), rhs: Immediate(0), ty: None }
+   286→[emit]     Load { dst: Register(474), addr: Register(473), offset: 0, ty: U8 }
+   287→[emit]     Add { dst: Register(475), lhs: Register(474), rhs: Immediate(0), ty: None }
+   288→[emit]     Ret { values: [Register(475)] }
+   289→error[E037]: unresolved relocation: symbol 'open' referenced in function 'main' at offset 0x5C (type: R_LARCH_B26)
+   290→E037: loongarch64 encoding failed: [loongarch64] unresolved relocation: symbol 'open' referenced in function 'main' at offset 0x5C (relocation type: R_LARCH_B26)
+   291→---
+   292→=== loongarch64 / epoll_echo ===
+   293→RESULT: FAILED (94ms, exit=1)
+   294→ERROR OUTPUT (last 20 lines):
+   295→[emit]     Ret { values: [Immediate(0)] }
+   296→[emit]   Block: merge_59
+   297→[emit]     Cmp { kind: Eq, dst: Register(208), lhs: Register(160), rhs: Immediate(4), ty: None }
+   298→[emit]     CondBranch { cond: Register(208), true_target: "then_60", false_target: "merge_62" }
+   299→[emit]   Block: then_60
+   300→[emit]     Ret { values: [Immediate(0)] }
+   301→[emit]   Block: merge_62
+   302→[emit]     Cmp { kind: Eq, dst: Register(209), lhs: Register(160), rhs: Immediate(5), ty: None }
+   303→[emit]     CondBranch { cond: Register(209), true_target: "then_63", false_target: "merge_65" }
+   304→[emit]   Block: then_63
+   305→[emit]     Ret { values: [Immediate(0)] }
+   306→[emit]   Block: merge_65
+   307→[emit]     Cmp { kind: Eq, dst: Register(210), lhs: Register(160), rhs: Immediate(6), ty: None }
+   308→[emit]     CondBranch { cond: Register(210), true_target: "then_66", false_target: "merge_68" }
+   309→[emit]   Block: then_66
+   310→[emit]     Ret { values: [Immediate(0)] }
+   311→[emit]   Block: merge_68
+   312→[emit]     Ret { values: [Immediate(99)] }
+   313→error[E037]: unresolved relocation: symbol 'socket' referenced in function 'setup_server' at offset 0xC (type: R_LARCH_B26)
+   314→E037: loongarch64 encoding failed: [loongarch64] unresolved relocation: symbol 'socket' referenced in function 'setup_server' at offset 0xC (relocation type: R_LARCH_B26)
+   315→---
+   316→=== loongarch64 / self_exec ===
+   317→RESULT: FAILED (119ms, exit=1)
+   318→ERROR OUTPUT (last 20 lines):
+   319→[emit]   Block: then_78
+   320→[emit]     Branch { target: "loop_exit_74" }
+   321→[emit]   Block: merge_80
+   322→[emit]     Add { dst: Register(772), lhs: Register(765), rhs: Register(770), ty: None }
+   323→[emit]     Branch { target: "merge_77" }
+   324→[emit]   Block: else_76
+   325→[emit]     Branch { target: "loop_exit_74" }
+   326→[emit]   Block: merge_77
+   327→[emit]     Add { dst: Register(765), lhs: Register(772), rhs: Immediate(0), ty: None }
+   328→[emit]     Branch { target: "loop_header_72" }
+   329→[emit]   Block: loop_exit_74
+   330→[emit]     Call { dst: Some(Register(773)), func: "close", args: [Register(758)], is_extern: false }
+   331→[emit]     Alloc { dst: Register(774), size: 4 }
+   332→[emit]     Call { dst: Some(Register(775)), func: "waitpid", args: [Register(761), Register(774), Immediate(0)], is_extern: false }
+   333→[emit]     Add { dst: Register(776), lhs: Register(755), rhs: Immediate(0), ty: None }
+   334→[emit]     Load { dst: Register(777), addr: Register(776), offset: 0, ty: U8 }
+   335→[emit]     Add { dst: Register(778), lhs: Register(777), rhs: Immediate(0), ty: None }
+   336→[emit]     Ret { values: [Register(778)] }
+   337→error[E037]: unresolved relocation: symbol 'strcmp' referenced in function 'main' at offset 0x8 (type: R_LARCH_B26)
+   338→E037: loongarch64 encoding failed: [loongarch64] unresolved relocation: symbol 'strcmp' referenced in function 'main' at offset 0x8 (relocation type: R_LARCH_B26)
+   339→---
+   340→=== loongarch64 / signal_hash ===
+   341→RESULT: FAILED (111ms, exit=1)
+   342→ERROR OUTPUT (last 20 lines):
+   343→[emit]     Add { dst: Register(589), lhs: Register(588), rhs: Immediate(0), ty: None }
+   344→[emit]     Add { dst: Register(590), lhs: Register(583), rhs: Register(581), ty: None }
+   345→[emit]     Load { dst: Register(591), addr: Register(590), offset: 0, ty: U8 }
+   346→[emit]     Add { dst: Register(592), lhs: Register(591), rhs: Immediate(0), ty: None }
+   347→[emit]     Cmp { kind: Ne, dst: Register(593), lhs: Register(589), rhs: Register(592), ty: None }
+   348→[emit]     CondBranch { cond: Register(593), true_target: "then_63", false_target: "merge_65" }
+   349→[emit]   Block: then_63
+   350→[emit]     Branch { target: "merge_65" }
+   351→[emit]   Block: merge_65
+   352→[emit]     Add { dst: Register(594), lhs: Register(581), rhs: Immediate(1), ty: None }
+   353→[emit]     Branch { target: "merge_62" }
+   354→[emit]   Block: else_61
+   355→[emit]     Branch { target: "loop_exit_59" }
+   356→[emit]   Block: merge_62
+   357→[emit]     Add { dst: Register(581), lhs: Register(594), rhs: Immediate(0), ty: None }
+   358→[emit]     Branch { target: "loop_header_57" }
+   359→[emit]   Block: loop_exit_59
+   360→[emit]     Ret { values: [Register(563)] }
+   361→error[E037]: unresolved relocation: symbol 'AtomicStore' referenced in function 'signal_handler' at offset 0xC (type: R_LARCH_B26)
+   362→E037: loongarch64 encoding failed: [loongarch64] unresolved relocation: symbol 'AtomicStore' referenced in function 'signal_handler' at offset 0xC (relocation type: R_LARCH_B26)
+   363→---
+   364→=== wasm32 / pipeline ===
+   365→RESULT: FAILED (145ms, exit=1)
+   366→ERROR OUTPUT (last 20 lines):
+   367→[emit]   Block: then_93
+   368→[emit]     Call { dst: Some(Register(632)), func: "write", args: [Immediate(1), Register(627), Register(630)], is_extern: false }
+   369→[emit]     Branch { target: "merge_95" }
+   370→[emit]   Block: merge_95
+   371→[emit]     Call { dst: Some(Register(633)), func: "close", args: [Register(593)], is_extern: false }
+   372→[emit]     Alloc { dst: Register(634), size: 4 }
+   373→[emit]     Call { dst: Some(Register(635)), func: "waitpid", args: [Register(603), Register(634), Immediate(0)], is_extern: false }
+   374→[emit]     Call { dst: Some(Register(636)), func: "waitpid", args: [Register(614), Register(634), Immediate(0)], is_extern: false }
+   375→[emit]     Call { dst: Some(Register(637)), func: "AtomicLoad", args: [Immediate(0)], is_extern: false }
+   376→[emit]     Add { dst: Register(638), lhs: Immediate(0), rhs: Immediate(0), ty: None }
+   377→[emit]     Cmp { kind: SGt, dst: Register(639), lhs: Register(630), rhs: Immediate(0), ty: None }
+   378→[emit]     CondBranch { cond: Register(639), true_target: "then_96", false_target: "merge_98" }
+   379→[emit]   Block: then_96
+   380→[emit]     Add { dst: Register(640), lhs: Register(627), rhs: Immediate(0), ty: None }
+   381→[emit]     Load { dst: Register(641), addr: Register(640), offset: 0, ty: U8 }
+   382→[emit]     Add { dst: Register(642), lhs: Register(641), rhs: Immediate(0), ty: None }
+   383→[emit]     Branch { target: "merge_98" }
+   384→[emit]   Block: merge_98
+   385→[emit]     Ret { values: [Register(642)] }
+   386→error: wasm32 encoding failed: [wasm32] register allocation failed: unresolved call target 'AtomicStore' — function not found in module
+   387→---
+   388→=== wasm32 / mmap_sha256d ===
+   389→RESULT: FAILED (121ms, exit=1)
+   390→ERROR OUTPUT (last 20 lines):
+   391→[emit]     Ret { values: [Immediate(4)] }
+   392→[emit]   Block: merge_47
+   393→[emit]     Call { dst: Some(Register(468)), func: "close", args: [Register(452)], is_extern: false }
+   394→[emit]     Cmp { kind: Ne, dst: Register(469), lhs: Register(468), rhs: Immediate(0), ty: None }
+   395→[emit]     CondBranch { cond: Register(469), true_target: "then_48", false_target: "merge_50" }
+   396→[emit]   Block: then_48
+   397→[emit]     Call { dst: Some(Register(470)), func: "unlink", args: [Register(413)], is_extern: false }
+   398→[emit]     Ret { values: [Immediate(5)] }
+   399→[emit]   Block: merge_50
+   400→[emit]     Call { dst: Some(Register(471)), func: "unlink", args: [Register(413)], is_extern: false }
+   401→[emit]     Cmp { kind: Ne, dst: Register(472), lhs: Register(471), rhs: Immediate(0), ty: None }
+   402→[emit]     CondBranch { cond: Register(472), true_target: "then_51", false_target: "merge_53" }
+   403→[emit]   Block: then_51
+   404→[emit]     Ret { values: [Immediate(6)] }
+   405→[emit]   Block: merge_53
+   406→[emit]     Add { dst: Register(473), lhs: Register(462), rhs: Immediate(0), ty: None }
+   407→[emit]     Load { dst: Register(474), addr: Register(473), offset: 0, ty: U8 }
+   408→[emit]     Add { dst: Register(475), lhs: Register(474), rhs: Immediate(0), ty: None }
+   409→[emit]     Ret { values: [Register(475)] }
+   410→error: wasm32 encoding failed: [wasm32] register allocation failed: unresolved call target 'open' — function not found in module
+   411→---
+   412→=== wasm32 / epoll_echo ===
+   413→RESULT: FAILED (95ms, exit=1)
+   414→ERROR OUTPUT (last 20 lines):
+   415→[emit]   Block: then_57
+   416→[emit]     Ret { values: [Immediate(0)] }
+   417→[emit]   Block: merge_59
+   418→[emit]     Cmp { kind: Eq, dst: Register(208), lhs: Register(160), rhs: Immediate(4), ty: None }
+   419→[emit]     CondBranch { cond: Register(208), true_target: "then_60", false_target: "merge_62" }
+   420→[emit]   Block: then_60
+   421→[emit]     Ret { values: [Immediate(0)] }
+   422→[emit]   Block: merge_62
+   423→[emit]     Cmp { kind: Eq, dst: Register(209), lhs: Register(160), rhs: Immediate(5), ty: None }
+   424→[emit]     CondBranch { cond: Register(209), true_target: "then_63", false_target: "merge_65" }
+   425→[emit]   Block: then_63
+   426→[emit]     Ret { values: [Immediate(0)] }
+   427→[emit]   Block: merge_65
+   428→[emit]     Cmp { kind: Eq, dst: Register(210), lhs: Register(160), rhs: Immediate(6), ty: None }
+   429→[emit]     CondBranch { cond: Register(210), true_target: "then_66", false_target: "merge_68" }
+   430→[emit]   Block: then_66
+   431→[emit]     Ret { values: [Immediate(0)] }
+   432→[emit]   Block: merge_68
+   433→[emit]     Ret { values: [Immediate(99)] }
+   434→error: wasm32 encoding failed: [wasm32] register allocation failed: unresolved call target 'socket' — function not found in module
+   435→---
+   436→=== wasm32 / self_exec ===
+   437→RESULT: FAILED (119ms, exit=1)
+   438→ERROR OUTPUT (last 20 lines):
+   439→[emit]     CondBranch { cond: Register(771), true_target: "then_78", false_target: "merge_80" }
+   440→[emit]   Block: then_78
+   441→[emit]     Branch { target: "loop_exit_74" }
+   442→[emit]   Block: merge_80
+   443→[emit]     Add { dst: Register(772), lhs: Register(765), rhs: Register(770), ty: None }
+   444→[emit]     Branch { target: "merge_77" }
+   445→[emit]   Block: else_76
+   446→[emit]     Branch { target: "loop_exit_74" }
+   447→[emit]   Block: merge_77
+   448→[emit]     Add { dst: Register(765), lhs: Register(772), rhs: Immediate(0), ty: None }
+   449→[emit]     Branch { target: "loop_header_72" }
+   450→[emit]   Block: loop_exit_74
+   451→[emit]     Call { dst: Some(Register(773)), func: "close", args: [Register(758)], is_extern: false }
+   452→[emit]     Alloc { dst: Register(774), size: 4 }
+   453→[emit]     Call { dst: Some(Register(775)), func: "waitpid", args: [Register(761), Register(774), Immediate(0)], is_extern: false }
+   454→[emit]     Add { dst: Register(776), lhs: Register(755), rhs: Immediate(0), ty: None }
+   455→[emit]     Load { dst: Register(777), addr: Register(776), offset: 0, ty: U8 }
+   456→[emit]     Add { dst: Register(778), lhs: Register(777), rhs: Immediate(0), ty: None }
+   457→[emit]     Ret { values: [Register(778)] }
+   458→error: wasm32 encoding failed: [wasm32] register allocation failed: unresolved call target 'strcmp' — function not found in module
+   459→---
+   460→=== wasm32 / signal_hash ===
+   461→RESULT: FAILED (113ms, exit=1)
+   462→ERROR OUTPUT (last 20 lines):
+   463→[emit]     Load { dst: Register(588), addr: Register(587), offset: 0, ty: U8 }
+   464→[emit]     Add { dst: Register(589), lhs: Register(588), rhs: Immediate(0), ty: None }
+   465→[emit]     Add { dst: Register(590), lhs: Register(583), rhs: Register(581), ty: None }
+   466→[emit]     Load { dst: Register(591), addr: Register(590), offset: 0, ty: U8 }
+   467→[emit]     Add { dst: Register(592), lhs: Register(591), rhs: Immediate(0), ty: None }
+   468→[emit]     Cmp { kind: Ne, dst: Register(593), lhs: Register(589), rhs: Register(592), ty: None }
+   469→[emit]     CondBranch { cond: Register(593), true_target: "then_63", false_target: "merge_65" }
+   470→[emit]   Block: then_63
+   471→[emit]     Branch { target: "merge_65" }
+   472→[emit]   Block: merge_65
+   473→[emit]     Add { dst: Register(594), lhs: Register(581), rhs: Immediate(1), ty: None }
+   474→[emit]     Branch { target: "merge_62" }
+   475→[emit]   Block: else_61
+   476→[emit]     Branch { target: "loop_exit_59" }
+   477→[emit]   Block: merge_62
+   478→[emit]     Add { dst: Register(581), lhs: Register(594), rhs: Immediate(0), ty: None }
+   479→[emit]     Branch { target: "loop_header_57" }
+   480→[emit]   Block: loop_exit_59
+   481→[emit]     Ret { values: [Register(563)] }
+   482→error: wasm32 encoding failed: [wasm32] register allocation failed: unresolved call target 'AtomicStore' — function not found in module
+   483→---
+   484→
+   485→Finished: Tue Jun 16 00:37:38 UTC 2026
+   486→
