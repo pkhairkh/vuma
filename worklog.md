@@ -1,48 +1,84 @@
-# VUMA Showcase Website — Worklog
+# VUMA Project — Detailed Examination Worklog
 
-## Project Context
+## Project
+VUMA (Verified-Unsafe Memory Access) — an AI-native programming language framework
+written in Rust. Repo: `https://github.com/pkhairkh/vuma.git`. The actual project
+lives in the `vuma/` subfolder of the clone (a Rust workspace).
 
-The user asked to "check out this project in detail" and provided the GitHub repository
-`https://github.com/pkhairkh/vuma.git`.
-
-### What VUMA is
-VUMA (Verified-Unsafe Memory Access) is an AI-native programming language framework written in Rust.
-Its radical premise: **unsafe memory operations should not be forbidden — they should be made verifiable.**
-Instead of a borrow checker rejecting programs, VUMA constructs a formal model of every memory
-operation and verifies five global invariants against it. Programs that pass run with zero overhead;
-programs that fail receive precise counterexamples.
-
-Key facts gathered from the repo:
-- 12 workspace crates (`scg`, `bd`, `vuma`, `ive`, `cor`, `projection`, `parser`, `codegen`, `proof`, `std`, `tests`, `package`)
-- 8 backend architectures: x86_64, AArch64, RISC-V 64, ARM32, MIPS64, PPC64, LoongArch64, Wasm32
-- 5 VUMA invariants: Liveness, Exclusivity, Interpretation, Origin, Cleanup
-- Core abstractions: SCG (Semantic Computation Graph), BD (Behavioral Descriptor = RepD+CapD+RelD), MSG (Memory State Graph), IVE (Inference & Verification Engine), COR (Continuous Optimization Runtime)
-- AI-native: VumaForLLM API, LSP server, REPL, Wasm32 sandbox for LLM agents
-- 20+ example programs (hello_memory, doubly_linked_list, arena_allocator, lock_free_queue, fibonacci, etc.)
-- 15 formal specification documents (~9,800 lines)
-- 65 diagnostic codes, 73 math functions, 14 fmt functions, 19 Linux syscalls
-- Standard library: math, fmt, crypto, string, alloc, io, sync, collections modules
-
-### Decision
-Build a comprehensive, single-page Next.js showcase website that documents and presents the VUMA
-project in rich detail. Dark theme with emerald/cyan/amber accents (avoiding indigo/blue per rules).
-Sections: hero, three innovations, five invariants, 6-layer architecture, compilation pipeline,
-8 backends, code examples gallery, key concepts, standard library, wave timeline, LLM integration,
-footer.
+## Scale
+- 12 workspace crates: scg, ive, vuma(core), bd, cor, projection, parser, codegen,
+  std, proof, tests, package
+- 194 Rust source files, ~265,000 lines of Rust
+- 47 example `.vuma` programs
+- 8 codegen backends: x86_64, AArch64, RISC-V 64, ARM32, MIPS64, PPC64, LoongArch64, Wasm32
+- Pinned to nightly-2026-03-01
 
 ---
 Task ID: 1
 Agent: main
-Task: Initialize worklog and gather all VUMA project data into structured data files
+Task: Check out the VUMA project in detail — build it, find real issues, fix what's fixable
 
 Work Log:
-- Cloned the vuma repository to /tmp/vuma
-- Read the full README.md (~830 lines) covering overview, features, 8 backends, architecture, pipeline, key concepts, examples, API, known limitations
-- Read example programs: hello_memory.vuma, doubly_linked_list.vuma, arena_allocator.vuma, lock_free_queue.vuma, fibonacci.vuma
-- Read the existing worklog.md from the repo (history of compiler backend fixes across 8 architectures)
-- Examined the Next.js project scaffold and confirmed available shadcn/ui components and dependencies (framer-motion, react-syntax-highlighter, recharts, lucide-react)
+- Cloned the repo; confirmed the real Rust workspace is in `vuma/` (not the
+  `download/vuma-project/` mirror, which is an older snapshot).
+- Read the full README, key crate docs (scg, ive, bd, vuma-core), pipeline.rs,
+  backend.rs, and several example programs (hello_memory, doubly_linked_list,
+  arena_allocator, lock_free_queue, fibonacci).
+- Installed the Rust nightly toolchain (rustc 1.96.0-nightly).
+- Ran `cargo check --workspace` → **FAILED** with 3 compile errors in
+  `vuma-projection` (lib): non-exhaustive pattern matches missing the newer
+  `NodeType::{StructDef, EnumDef, Match, ConstantTime}` and
+  `NodePayload::{StructDef, EnumDef, Match, ConstantTime}` variants, plus a
+  stale `operation` field reference on `ComputationNode` (renamed to `kind:
+  ComputationKind::Other(..)` some time ago).
+- Fixed the projection adapter (`src/projection/src/scg_adapter.rs`): added the
+  4 missing NodeType arms, 4 missing NodePayload arms, and corrected the
+  ComputationNode field. → `cargo check --workspace` now passes cleanly.
+- Ran `cargo test --workspace --no-run` → **FAILED** with 19+ compile errors in
+  *test* code across 5 crates (ive, projection, cor, vuma-core, bd): all the same
+  stale `operation:` field on `ComputationNode` constructions.
+- Fixed every stale `operation:` → `kind: ComputationKind::Other(..)` in test
+  modules: bd_solver.rs, interprocedural.rs, verification.rs, textual.rs,
+  conversational.rs, visual.rs, cor/bridge.rs, msg_builder.rs, scg_to_msg.rs,
+  bd/inference.rs. Added the missing `ComputationKind` import in each. Carefully
+  *reverted* 4 accidental edits in `bd/repd.rs` where `operation:` belonged to
+  `BdError::InvalidOperation` (a different struct), not `ComputationNode`.
+- All tests now compile. Ran `cargo test --workspace`.
+- Found 1 real logic bug in `src/telemetry.rs`: `stage_end()` overwrote
+  `stage_metrics` with a fresh `StageMetrics { error_count: 0, warning_count: 0 }`,
+  destroying per-stage error/warning counts accumulated *before* the stage ended;
+  additionally `increment_stage_error`/`increment_stage_warning` silently dropped
+  counts when the stage entry didn't yet exist. Fixed both with
+  `entry().or_insert(..)` semantics so counts survive. The
+  `test_telemetry_stage_errors` test now passes.
 
 Stage Summary:
-- Complete understanding of VUMA project obtained
-- Ready to build the showcase website with accurate, detailed content
-- Data to be embedded directly in React components as structured objects
+- **Workspace now compiles cleanly** (was broken: 3 lib errors + ~19 test errors).
+- **Test results after fixes: 1049 passed, 35 failed.**
+- The 35 failures are ALL pre-existing and ALL in `vuma-codegen` — I did not touch
+  codegen. Breakdown:
+  - 27 in `loongarch64` — instruction selection emits placeholder `"instr"`
+    tokens instead of real opcodes (e.g. `test_isel_add_emits_add` expects
+    `add.d` but gets a prologue + `"instr"` + return). Worse than the README's
+    "passes individual operation tests" claim.
+  - 6 in `scg_to_ir` — the SCG→IR lowering silently accepts unknown variables
+    instead of returning `Err(UnknownVariable)`; also phi/load-store issues.
+  - 1 in `arm64` — `decode_ldr_str_roundtrip`: STR instruction fails to decode.
+  - 1 in `x86_64` — `test_isel_select`.
+- Root causes of the original breakage: the SCG `NodeType`/`NodePayload` enums and
+  `ComputationNode` were extended (struct/enum/match/constant-time support) but
+  downstream consumers (projection adapter + tests) were not fully updated. This
+  is a classic "added a variant, forgot a match arm" integration regression.
+
+Unresolved / Next-phase priorities:
+1. **scg_to_ir unknown-variable bug** (correctness): the IR builder returns Ok
+   for programs referencing undeclared variables. Should return
+   `CodegenError::UnknownVariable`. Start at `src/codegen/src/scg_to_ir.rs:3984`.
+2. **LoongArch64 isel** (27 failures): emits placeholder `"instr"` instead of
+   real instructions. Either the isel table is stubbed or there's a dispatch
+   fall-through. Start at `src/codegen/src/loongarch64/mod.rs:5441`.
+3. **ARM64 STR decode** (1 failure): `decode_ldr_str_roundtrip` at
+   `src/codegen/src/arm64.rs:5442` — STR encoding/decoding asymmetry.
+4. **x86_64 isel_select** (1 failure).
+5. ~80 compiler warnings (unused imports, dead code in ppc64/riscv64/x86_64
+   backends) — cosmetic but worth a cleanup pass.

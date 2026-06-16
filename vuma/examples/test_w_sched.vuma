@@ -1,0 +1,48 @@
+// Test: Loop with memory operations (simplified SHA256d W schedule)
+// Expected: exit 79
+
+fn write_u32(buf: Address, offset: u64, val: u32) {
+    *(buf + offset) = (val >> 24) & 255;
+    *(buf + offset + 1) = (val >> 16) & 255;
+    *(buf + offset + 2) = (val >> 8) & 255;
+    *(buf + offset + 3) = val & 255;
+}
+
+fn read_u32(buf: Address, offset: u64) -> u32 {
+    b0: u32 = *(buf + offset);
+    b1: u32 = *(buf + offset + 1);
+    b2: u32 = *(buf + offset + 2);
+    b3: u32 = *(buf + offset + 3);
+    return ((b0 << 24) | (b1 << 16) | (b2 << 8) | b3) & 4294967295;
+}
+
+fn rotr32(x: u32, n: u32) -> u32 {
+    return ((x >> n) | (x << (32 - n))) & 4294967295;
+}
+
+fn small_sigma0(x: u32) -> u32 {
+    return (rotr32(x, 7) ^ rotr32(x, 18) ^ (x >> 3)) & 4294967295;
+}
+
+fn small_sigma1(x: u32) -> u32 {
+    return (rotr32(x, 17) ^ rotr32(x, 19) ^ (x >> 10)) & 4294967295;
+}
+
+fn main() -> u64 {
+    // Allocate W schedule and a block
+    w = allocate(256);
+    block = allocate(64);
+
+    // Store a known value into the block at offset 0: 0x61626380
+    write_u32(block, 0, 1668247168);  // 0x61626380
+
+    // Copy first word from block to W[0]
+    val: u32 = read_u32(block, 0);
+    write_u32(w, 0, val);
+
+    // Read it back
+    result: u32 = read_u32(w, 0);
+
+    // Return low byte
+    return result & 0xFF;
+}

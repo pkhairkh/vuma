@@ -1,0 +1,29 @@
+[package]
+name = "vuma-tests"
+version.workspace = true
+edition.workspace = true
+description = "VUMA Integration Tests — cross-backend, property-based, ABI conformance, and benchmark suites"
+repository.workspace = true
+license.workspace = true
+keywords.workspace = true
+categories.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+vuma-scg.workspace = true
+vuma-ive.workspace = true
+vuma-core.workspace = true
+vuma-bd.workspace = true
+vuma-proof.workspace = true
+vuma-parser.workspace = true
+vuma-codegen.workspace = true
+vuma-cor.workspace = true
+vuma = { path = "../.." }
+anyhow.workspace = true
+chrono.workspace = true
+log.workspace = true
+libc.workspace = true
+proptest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
