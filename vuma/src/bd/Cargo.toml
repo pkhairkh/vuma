@@ -1,0 +1,18 @@
+[package]
+name = "vuma-bd"
+version.workspace = true
+edition.workspace = true
+description = "Behavioral Descriptors — RepD, CapD, RelD descriptor lattices and BD inference"
+repository.workspace = true
+license.workspace = true
+keywords.workspace = true
+categories.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
+indexmap.workspace = true
+hashbrown.workspace = true
+vuma-scg.workspace = true
+serde_json.workspace = true

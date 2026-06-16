@@ -1,0 +1,20 @@
+[package]
+name = "vuma-std"
+version.workspace = true
+edition.workspace = true
+description = "VUMA Standard Library — primitives, collections, sync, crypto, I/O, and FFI bindings"
+repository.workspace = true
+license.workspace = true
+keywords.workspace = true
+categories.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
+libc = { version = "0.2", optional = true }
+log.workspace = true
+
+[features]
+default = []
+os-linux = ["libc"]
