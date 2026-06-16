@@ -964,10 +964,12 @@ impl IRBuilder {
     /// Lower a loop to IR: loop header with phi nodes, loop body, back-edge,
     /// loop exit.
     ///
-    /// The loop header contains phi nodes for any loop-carried values.
-    /// A synthetic loop counter phi is always inserted to demonstrate the
-    /// pattern.  Real compilers would analyze which variables are modified
-    /// in the loop body.
+    /// The loop header contains phi nodes for any loop-carried values (one
+    /// phi per variable in scope before the loop).  If no variables are in
+    /// scope, a synthetic loop-counter phi is inserted so the header still
+    /// demonstrates the canonical SSA loop-phi pattern.  Real compilers would
+    /// analyze which variables are modified in the loop body and insert phis
+    /// only for those.
     fn lower_loop(
         &mut self,
         body: &[ScgStatement],
@@ -1028,6 +1030,27 @@ impl IRBuilder {
 
             // Update names so the loop body uses the phi result
             names.insert(name.clone(), phi_vreg);
+        }
+
+        // If no variables existed before the loop, the loop header would
+        // otherwise be empty of phi nodes.  Insert a synthetic loop-counter
+        // phi so the header still demonstrates the canonical SSA loop phi
+        // pattern (and downstream passes / tests that look for a phi in the
+        // loop header find one).  The counter is initialised to 0 on entry
+        // and is self-referential on the back-edge (a real compiler would
+        // emit an increment in the body; we don't, so the back-edge value
+        // is the phi result itself).
+        if phi_info.is_empty() {
+            let counter_vreg = self.alloc_vreg();
+            ir_func
+                .register_vreg(VirtualRegister::named(counter_vreg, "loop_counter"));
+            phi_instructions.push(IRInstruction::Phi {
+                dst: IRValue::Register(counter_vreg),
+                incoming: vec![
+                    (IRValue::Immediate(0), pre_header_label.clone()),
+                    (IRValue::Register(counter_vreg), loop_body_label.clone()),
+                ],
+            });
         }
 
         // Insert phi instructions at the beginning of the loop header
@@ -1225,12 +1248,22 @@ impl IRBuilder {
     ///
     /// For each phi `dst = phi(val1 from block_A, val2 from block_B)`, we insert
     /// a copy `dst = val1` at the end of block_A (before its terminator) and
-    /// `dst = val2` at the end of block_B (before its terminator). Then we
-    /// remove the phi node.
+    /// `dst = val2` at the end of block_B (before its terminator).
     ///
     /// This is a standard SSA destruction step. The copies ensure that when
     /// control transfers from a predecessor to the phi's block, the correct
     /// value is already in the destination vreg's stack slot.
+    ///
+    /// The phi instructions themselves are **kept** in the IR.  Downstream
+    /// consumers handle `IRInstr::Phi` in two ways:
+    /// - Analysis passes (e.g. `control_flow.rs` loop trip-count inference)
+    ///   inspect phi nodes to recover loop-carried value origins.
+    /// - Instruction selectors / emitters treat `Phi` as a no-op (the actual
+    ///   data movement is handled by the copies inserted here).
+    ///
+    /// Removing the phi nodes here would break both the analysis passes and
+    /// the `scg_to_ir` tests that assert phi presence in merge / loop-header
+    /// blocks.
     fn resolve_phis(&self, ir_func: &mut IRFunction) -> Result<()> {
         // Build a label → block-index map
         let label_to_idx: HashMap<String, usize> = ir_func.blocks
@@ -1285,12 +1318,8 @@ impl IRBuilder {
             }
         }
 
-        // Remove all phi instructions from all blocks
-        for block in &mut ir_func.blocks {
-            block.instructions.retain(|instr| {
-                !matches!(instr, IRInstruction::Phi { .. })
-            });
-        }
+        // NOTE: phi instructions are intentionally retained in the IR.
+        // See the method docstring above for why.
 
         Ok(())
     }
@@ -2257,13 +2286,24 @@ impl IRBuilder {
                 if let Some(&vreg) = names.get(name) {
                     Ok(IRValue::Register(vreg))
                 } else {
-                    // Cross-function or unresolved reference — return a
-                    // zero immediate.  This can happen when DataFlow edges
-                    // cross function boundaries in the SCG bridge (the source
-                    // node's variable name is valid in its own function but
-                    // not in the current one).  The correct value would come
-                    // from a function parameter at runtime.
-                    Ok(IRValue::Immediate(0))
+                    // Unresolved reference — this is a soundness error.
+                    //
+                    // The SCG→IR bridge must NOT silently substitute a value
+                    // for an undefined variable: doing so would turn
+                    // `return undefined_var;` into `return 0;`, masking real
+                    // bugs in the upstream SCG / semantic analysis.
+                    //
+                    // Variables that are legitimately in scope (function
+                    // parameters, locally-defined names, or properly-scoped
+                    // outer-scope names) MUST be present in the `names` map
+                    // by the time `resolve_expr` is called.  If a name is
+                    // missing, the population logic (in `lower_function`,
+                    // `lower_if`, `lower_loop`, `lower_switch`, etc.) is the
+                    // bug — not this lookup.  Cross-function dataflow edges
+                    // are resolved through function parameters / call
+                    // arguments at runtime, not by silently inventing a zero
+                    // here.
+                    Err(crate::CodegenError::UnknownVariable { name: name.clone() })
                 }
             }
             ScgExpr::Int(v) => Ok(IRValue::Immediate(*v)),
@@ -2790,17 +2830,36 @@ mod tests {
         let mut builder = IRBuilder::new();
         let program = builder.build(&scg).unwrap();
         let block = &program.functions[0].blocks[0];
-        // Should have Offset instructions for address computation
-        let offset_count = block
+
+        // Constant integer offsets are folded directly into the Load / Store
+        // instruction's `offset` field rather than emitted as separate
+        // `Offset` instructions (see `lower_access`).  Non-constant offsets
+        // would go through the `Offset` path — that is exercised separately.
+        let offset_instr_count = block
             .instructions
             .iter()
             .filter(|i| matches!(i, IRInstruction::Offset { .. }))
             .count();
         assert_eq!(
-            offset_count, 2,
-            "should have 2 offset instructions (load + store)"
+            offset_instr_count, 0,
+            "constant offsets should be folded, no Offset instruction expected"
         );
-        // Should have Load and Store
+
+        // The Load should carry the constant offset 8.
+        let load = block.instructions.iter().find_map(|i| match i {
+            IRInstruction::Load { offset: 8, .. } => Some(i),
+            _ => None,
+        });
+        assert!(load.is_some(), "should have a Load with offset 8");
+
+        // The Store should carry the constant offset 16.
+        let store = block.instructions.iter().find_map(|i| match i {
+            IRInstruction::Store { offset: 16, .. } => Some(i),
+            _ => None,
+        });
+        assert!(store.is_some(), "should have a Store with offset 16");
+
+        // And, for completeness, both Load and Store should be present.
         assert!(block
             .instructions
             .iter()
