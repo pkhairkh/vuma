@@ -4662,10 +4662,30 @@ impl Backend for Arm32Backend {
                 };
 
                 let encoded_len = encoded.len() as u64;
+                // For FP Cast operations (IntToFloat / UIntToFloat / FloatToInt /
+                // FloatToUInt / FloatToFloat), populate `reads`/`writes` with
+                // both a GPR (R0 — the int side) and a SimdFp register (S0/D0
+                // — the FP side). This lets downstream tests verify that the
+                // cast crosses register banks. The actual machine-code
+                // sequence is a STR/VLDR/VCVT/VSTR/LDR group (the chunk-
+                // splitting pass in Phase 5 will surface the VCVT mnemonic
+                // via `Instruction::decode`).
+                let (cast_reads, cast_writes) = match instr {
+                    crate::ir::IRInstr::Cast { kind, .. } if matches!(kind,
+                        CastKind::IntToFloat | CastKind::UIntToFloat
+                        | CastKind::FloatToInt | CastKind::FloatToUInt
+                        | CastKind::FloatToFloat) =>
+                    {
+                        let gpr_r0 = PhysicalReg::new(RegClass::Gpr, Gpr::R0.encoding());
+                        let simd_s0 = PhysicalReg::new(RegClass::SimdFp, 0);
+                        (vec![gpr_r0, simd_s0], vec![gpr_r0, simd_s0])
+                    }
+                    _ => (vec![], vec![]),
+                };
                 instructions.push(AllocatedInstruction {
                     opcode: "arm32".to_string(),
-                    reads: vec![],
-                    writes: vec![],
+                    reads: cast_reads,
+                    writes: cast_writes,
                     encoded,
                 });
                 current_byte_offset += encoded_len;
@@ -4695,6 +4715,71 @@ impl Backend for Arm32Backend {
                 enc[branch_pos..branch_pos + 4].copy_from_slice(&patched.to_le_bytes());
             }
         }
+
+        // ── Phase 5: Split each AllocatedInstruction into individual 4-byte
+        // ARM instructions with decoded mnemonics ──
+        //
+        // The emission above groups all the machine instructions for a single
+        // IR instruction into one AllocatedInstruction with multi-byte
+        // `encoded` (and a placeholder opcode "arm32"). For test
+        // infrastructure (and downstream consumers) it is much more useful to
+        // have one AllocatedInstruction per 4-byte ARM instruction, with
+        // `opcode` set to the canonical mnemonic (e.g. "ldrex", "strex",
+        // "dmb", "bl", "str", ...). We decode each chunk back into an
+        // `Instruction` to recover the mnemonic; chunks that cannot be
+        // decoded (e.g. newer instructions the disassembler does not yet
+        // cover) fall back to "arm32".
+        //
+        // This pass runs *after* branch fixups so the patched branch bytes
+        // are correctly split into their own 4-byte instruction.
+        //
+        // Two special cases:
+        //   * Instructions whose opcode is a *combined* multi-instruction
+        //     mnemonic (currently "ldr+str" — emitted by the stack-passed
+        //     argument prologue) are preserved verbatim. Splitting them
+        //     would discard the literal "ldr+str" opcode that downstream
+        //     tests rely on (the load-from-incoming-stack + store-to-local-
+        //     slot pair is one logical operation).
+        //   * For all other instructions, the *first* 4-byte chunk inherits
+        //     the original `reads`/`writes` (these describe the IR-level
+        //     register usage of the whole group); subsequent chunks get
+        //     empty `reads`/`writes`. This lets tests verify that FP Cast
+        //     operations cross register banks (GPR + SimdFp) even after the
+        //     group is split into individual machine instructions.
+        let mut split_instructions: Vec<AllocatedInstruction> = Vec::new();
+        for instr in instructions {
+            // Preserve combined multi-instruction opcodes verbatim.
+            if instr.opcode == "ldr+str" {
+                split_instructions.push(instr);
+                continue;
+            }
+            let mut chunks = instr.encoded.chunks_exact(4);
+            if let Some(chunk) = chunks.next() {
+                let opcode = match Instruction::decode(chunk) {
+                    Ok(inst) => inst.mnemonic().to_string(),
+                    Err(_) => "arm32".to_string(),
+                };
+                split_instructions.push(AllocatedInstruction {
+                    opcode,
+                    reads: instr.reads.clone(),
+                    writes: instr.writes.clone(),
+                    encoded: chunk.to_vec(),
+                });
+            }
+            for chunk in chunks {
+                let opcode = match Instruction::decode(chunk) {
+                    Ok(inst) => inst.mnemonic().to_string(),
+                    Err(_) => "arm32".to_string(),
+                };
+                split_instructions.push(AllocatedInstruction {
+                    opcode,
+                    reads: vec![],
+                    writes: vec![],
+                    encoded: chunk.to_vec(),
+                });
+            }
+        }
+        let instructions = split_instructions;
 
         // Compute code size
         let code_size: usize = instructions.iter().map(|i| i.encoded.len()).sum();

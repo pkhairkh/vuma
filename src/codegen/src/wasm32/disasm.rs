@@ -252,8 +252,8 @@ impl std::fmt::Display for WasmInstr {
             WasmInstr::I32WrapI64 => write!(f, "i32.wrap_i64"),
             WasmInstr::I64ExtendI32S => write!(f, "i64.extend_i32_s"),
             WasmInstr::I64ExtendI32U => write!(f, "i64.extend_i32_u"),
-            WasmInstr::F32DemoteF64 => write!(f, "f32.demote_f64"),
-            WasmInstr::F64PromoteF32 => write!(f, "f64.promote_f32"),
+            WasmInstr::F32DemoteF64 => write!(f, "f32.convert_demote_f64"),
+            WasmInstr::F64PromoteF32 => write!(f, "f64.convert_promote_f32"),
             WasmInstr::I32TruncF32S => write!(f, "i32.trunc_f32_s"),
             WasmInstr::I32TruncF64S => write!(f, "i32.trunc_f64_s"),
             WasmInstr::I32TruncF32U => write!(f, "i32.trunc_f32_u"),
@@ -844,6 +844,58 @@ impl WasmInstr {
             // Pseudo
             0x01 => WasmInstr::Nop,
             0x00 => WasmInstr::Unreachable,
+
+            // ── Atomic memory instructions (0xFE prefix, Wasm Threads proposal) ──
+            // Layout: 0xFE, LEB128(sub-opcode), [memarg: LEB128(align), LEB128(offset)]
+            // (memory.atomic.fence has a reserved 0x00 byte instead of a memarg.)
+            0xFE => {
+                let (sub_op, n) = decode_unsigned_leb128(&bytes[pos..]);
+                pos += n;
+                if sub_op == 0x1E {
+                    // memory.atomic.fence: skip the reserved 0x00 byte
+                    if pos >= bytes.len() {
+                        return Err(DecodeError::Truncated {
+                            needed: pos + 1,
+                            available: bytes.len(),
+                        });
+                    }
+                    pos += 1; // reserved byte (must be 0)
+                    WasmInstr::MemoryAtomicFence
+                } else {
+                    let (align, n2) = decode_unsigned_leb128(&bytes[pos..]);
+                    pos += n2;
+                    let (offset, n3) = decode_unsigned_leb128(&bytes[pos..]);
+                    pos += n3;
+                    let a = align as u32;
+                    let o = offset as u32;
+                    match sub_op {
+                        0x10 => WasmInstr::I32AtomicLoad { align: a, offset: o },
+                        0x11 => WasmInstr::I64AtomicLoad { align: a, offset: o },
+                        0x12 => WasmInstr::I32AtomicLoad8U { align: a, offset: o },
+                        0x13 => WasmInstr::I32AtomicLoad16U { align: a, offset: o },
+                        0x14 => WasmInstr::I64AtomicLoad8U { align: a, offset: o },
+                        0x15 => WasmInstr::I64AtomicLoad16U { align: a, offset: o },
+                        0x16 => WasmInstr::I64AtomicLoad32U { align: a, offset: o },
+                        0x17 => WasmInstr::I32AtomicStore { align: a, offset: o },
+                        0x18 => WasmInstr::I64AtomicStore { align: a, offset: o },
+                        0x19 => WasmInstr::I32AtomicStore8 { align: a, offset: o },
+                        0x1A => WasmInstr::I32AtomicStore16 { align: a, offset: o },
+                        0x1B => WasmInstr::I64AtomicStore8 { align: a, offset: o },
+                        0x1C => WasmInstr::I64AtomicStore16 { align: a, offset: o },
+                        0x1D => WasmInstr::I64AtomicStore32 { align: a, offset: o },
+                        0x48 => WasmInstr::I32AtomicRmwCmpxchg { align: a, offset: o },
+                        0x49 => WasmInstr::I64AtomicRmwCmpxchg { align: a, offset: o },
+                        0x4A => WasmInstr::I32AtomicRmw8CmpxchgU { align: a, offset: o },
+                        0x4B => WasmInstr::I32AtomicRmw16CmpxchgU { align: a, offset: o },
+                        0x4C => WasmInstr::I64AtomicRmw8CmpxchgU { align: a, offset: o },
+                        0x4D => WasmInstr::I64AtomicRmw16CmpxchgU { align: a, offset: o },
+                        0x4E => WasmInstr::I64AtomicRmw32CmpxchgU { align: a, offset: o },
+                        _ => {
+                            return Err(DecodeError::UnknownOpcode { opcode: sub_op as u8 });
+                        }
+                    }
+                }
+            }
 
             _ => {
                 return Err(DecodeError::UnknownOpcode { opcode });

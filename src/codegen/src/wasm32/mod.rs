@@ -1629,6 +1629,22 @@ fn skip_one_instruction(bytes: &[u8], offset: &mut usize) {
                 *offset += 16;
             }
         }
+        0xFE => {
+            // Atomic memory prefix (Wasm Threads proposal).
+            // Layout: 0xFE, LEB128(sub-opcode), then either:
+            //   - a memarg (LEB128(align) + LEB128(offset)) for all atomic
+            //     load/store/rmw/cmpxchg ops, OR
+            //   - a single reserved 0x00 byte for memory.atomic.fence (0x1E).
+            skip_leb128(bytes, offset, 1); // sub-opcode
+            let (subop, _) = decode_unsigned_leb128(&bytes[*offset - 1..]);
+            if subop == 0x1E {
+                // memory.atomic.fence: skip the reserved 0x00 byte
+                *offset += 1;
+            } else {
+                // memarg: align + offset (both LEB128)
+                skip_leb128(bytes, offset, 2);
+            }
+        }
 
         // ── Control flow ─────────────────────────────────────────
         0x00 => {} // unreachable
@@ -2326,13 +2342,23 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
             // Bump allocator does not free; this is a no-op.
         }
 
-        IRInstr::Cast { kind, dst, src, .. } => {
-            // Infer source and destination types for proper cast lowering.
-            // The source type must come from `vreg_types` so that float
-            // registers are correctly identified (the old `infer_wasm_type`
-            // always returned I32 for registers, making FP casts behave as
-            // no-ops).
-            let src_ty = infer_wasm_type(src, &ctx.vreg_types);
+        IRInstr::Cast { kind, dst, src, from_ty, to_ty } => {
+            // Determine the source type.  For register sources, `vreg_types`
+            // has the correct Wasm type (integers are I32 on Wasm32, floats
+            // retain their width).  For immediates/labels/addresses,
+            // `infer_wasm_type` always returns I32, so we consult `from_ty`
+            // to detect float-typed values.
+            let src_ty = match src {
+                IRValue::Register(id) => {
+                    ctx.vreg_types.get(id).copied()
+                        .unwrap_or_else(|| infer_wasm_type(src, &ctx.vreg_types))
+                }
+                _ => match from_ty {
+                    Some(IRType::F32) => WasmType::F32,
+                    Some(IRType::F64) => WasmType::F64,
+                    _ => infer_wasm_type(src, &ctx.vreg_types),
+                },
+            };
 
             // Try to determine the destination type.  In SSA form the
             // destination register is typically defined here for the first
@@ -2361,11 +2387,23 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
                     WasmType::F64 => WasmType::I64,
                 },
             };
+            // For the destination, prefer the existing vreg type (if the
+            // destination vreg was already defined); otherwise consult
+            // `to_ty` for float widths (F32/F64); otherwise use the
+            // default.  Integer destinations are always I32 on Wasm32.
             let dst_ty = match dst {
                 IRValue::Register(id) => {
-                    ctx.vreg_types.get(id).copied().unwrap_or(dst_ty_default)
+                    ctx.vreg_types.get(id).copied().unwrap_or_else(|| match to_ty {
+                        Some(IRType::F32) => WasmType::F32,
+                        Some(IRType::F64) => WasmType::F64,
+                        _ => dst_ty_default,
+                    })
                 }
-                _ => dst_ty_default,
+                _ => match to_ty {
+                    Some(IRType::F32) => WasmType::F32,
+                    Some(IRType::F64) => WasmType::F64,
+                    _ => dst_ty_default,
+                },
             };
 
             ctx.push_value(src, Some(&src_ty));

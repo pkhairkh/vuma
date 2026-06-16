@@ -4043,11 +4043,15 @@ pub fn emit_elf(
     }
 
     // ---- Step 2: Handle inter-function call relocations ----
-    // For ET_REL, collect external symbols and defer to the linker.
-    // For ET_EXEC, resolve call relocations in-place.
+    // Collect external (undefined) symbols referenced by call relocations.
+    // These are added to the ELF symbol table as STT_FUNC / STB_GLOBAL /
+    // SHN_UNDEF entries so a real linker can resolve them. This is done for
+    // BOTH ET_REL (object files, where relocations are deferred to the
+    // linker) and ET_EXEC (executables, where the BL offset is left as a
+    // trap/trampoline but the symbol name is still recorded for tooling).
     let mut external_symbols: Vec<String> = Vec::new();
     let mut rela_entries: Vec<RelaEntry> = Vec::new();
-    if is_obj {
+    {
         let mut extern_set: std::collections::HashSet<String> = std::collections::HashSet::new();
         for reloc in &all_call_relocs {
             if !function_offsets.contains_key(&reloc.target_func) {
@@ -4056,7 +4060,14 @@ pub fn emit_elf(
         }
         external_symbols = extern_set.into_iter().collect();
         external_symbols.sort();
+    }
+    if is_obj {
+        // ET_REL: external symbols are referenced by .rela.text entries;
+        // the BL offset is NOT patched (left for the linker to resolve).
     } else {
+        // ET_EXEC: patch in-function BL relocations; unresolved (external)
+        // calls are left as-is (offset 0) and the symbol name is recorded
+        // in the symtab/strtab for downstream tooling / debuggers.
         resolve_call_relocs(&mut text_section, &all_call_relocs, &function_offsets)?;
     }
 

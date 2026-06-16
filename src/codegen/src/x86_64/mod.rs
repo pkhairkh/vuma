@@ -1277,6 +1277,80 @@ pub fn encode_cvtss2si_r64_xmm(dst: Gpr, src: Xmm) -> Vec<u8> {
     code
 }
 
+/// Encode CVTTSD2SI r32, xmm (F2 0F 2C /r) — convert f64 to signed 32-bit int
+/// with truncation (toward zero).  This is the truncating variant of
+/// `encode_cvtsd2si_r32_xmm`; it matches the C-style float->int cast
+/// semantics represented by the IR's `FloatToInt` / `FloatToUInt`.
+pub fn encode_cvttsd2si_r32_xmm(dst: Gpr, src: Xmm) -> Vec<u8> {
+    let mut code = Vec::with_capacity(4);
+    let r = src.needs_rex();
+    let b = dst.needs_rex();
+    if r || b {
+        if let Some(rex) = rex_prefix(false, r, false, b) {
+            code.push(rex);
+        }
+    }
+    code.push(0xF2);
+    code.push(0x0F);
+    code.push(0x2C);
+    code.push(modrm(3, src.encoding() & 7, dst.encoding() & 7));
+    code
+}
+
+/// Encode CVTTSD2SI r64, xmm (F2 REX.W 0F 2C /r) — convert f64 to signed
+/// 64-bit int with truncation (toward zero).
+pub fn encode_cvttsd2si_r64_xmm(dst: Gpr, src: Xmm) -> Vec<u8> {
+    let mut code = Vec::with_capacity(5);
+    let r = src.needs_rex();
+    let b = dst.needs_rex();
+    if let Some(rex) = rex_prefix(true, r, false, b) {
+        code.push(rex);
+    } else {
+        code.push(0x48);
+    }
+    code.push(0xF2);
+    code.push(0x0F);
+    code.push(0x2C);
+    code.push(modrm(3, src.encoding() & 7, dst.encoding() & 7));
+    code
+}
+
+/// Encode CVTTSS2SI r32, xmm (F3 0F 2C /r) — convert f32 to signed 32-bit int
+/// with truncation (toward zero).
+pub fn encode_cvttss2si_r32_xmm(dst: Gpr, src: Xmm) -> Vec<u8> {
+    let mut code = Vec::with_capacity(4);
+    let r = src.needs_rex();
+    let b = dst.needs_rex();
+    if r || b {
+        if let Some(rex) = rex_prefix(false, r, false, b) {
+            code.push(rex);
+        }
+    }
+    code.push(0xF3);
+    code.push(0x0F);
+    code.push(0x2C);
+    code.push(modrm(3, src.encoding() & 7, dst.encoding() & 7));
+    code
+}
+
+/// Encode CVTTSS2SI r64, xmm (F3 REX.W 0F 2C /r) — convert f32 to signed
+/// 64-bit int with truncation (toward zero).
+pub fn encode_cvttss2si_r64_xmm(dst: Gpr, src: Xmm) -> Vec<u8> {
+    let mut code = Vec::with_capacity(5);
+    let r = src.needs_rex();
+    let b = dst.needs_rex();
+    if let Some(rex) = rex_prefix(true, r, false, b) {
+        code.push(rex);
+    } else {
+        code.push(0x48);
+    }
+    code.push(0xF3);
+    code.push(0x0F);
+    code.push(0x2C);
+    code.push(modrm(3, src.encoding() & 7, dst.encoding() & 7));
+    code
+}
+
 /// Encode CVTSS2SD xmm, xmm (F3 0F 5A /r) — convert f32 to f64 (widen).
 pub fn encode_cvtss2sd_xmm_xmm(dst: Xmm, src: Xmm) -> Vec<u8> {
     let mut code = Vec::with_capacity(4);
@@ -3592,10 +3666,24 @@ mod tests {
             false_val: IRValue::Register(3),
             ty: None,
         });
-        // Select uses TEST + CMOVcc
+        // Select uses TEST + CMOVcc.
+        //
+        // The stack-slot isel (src/codegen/src/x86_64/stack_slot_isel.rs:640)
+        // lowers Select as: load false_val->RAX, true_val->R10, cond->R11;
+        // `TEST R11, R11` then `CMOVNZ RAX, R10`.
+        //
+        // R11 is in the high register file (R8-R15), so its encoding requires
+        // REX.R and REX.B extensions on top of REX.W. The resulting REX prefix
+        // for `TEST R11, R11` is therefore 0x4D (REX.WRB), not 0x48 (REX.W
+        // only). The CMOVcc opcode byte (0x0F 0x45 for CMOVNZ) is unaffected.
+        //
+        // Accept any REX.W+TEST encoding (REX byte 0x48..=0x4F followed by the
+        // TEST r/m64, r64 opcode 0x85) so the assertion matches the actual
+        // isel output regardless of which scratch register holds `cond`.
         assert!(
-            code.windows(2).any(|w| w[0] == 0x48 && w[1] == 0x85),
-            "TEST not found for Select"
+            code.windows(2)
+                .any(|w| (w[0] >= 0x48 && w[0] <= 0x4F) && w[1] == 0x85),
+            "TEST (REX.W + 0x85) not found for Select"
         );
         assert!(
             code.windows(2)

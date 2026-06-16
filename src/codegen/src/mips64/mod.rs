@@ -1558,6 +1558,49 @@ impl fmt::Display for Instruction {
     }
 }
 
+impl Instruction {
+    /// Return the `(reads, writes)` register effects of this instruction,
+    /// classified by register bank (`Gpr` vs `SimdFp`).
+    ///
+    /// This is used by `mips64_allocate_registers_ss` when it reconstructs
+    /// `AllocatedInstruction`s from the raw byte stream: the COP1
+    /// GPR<->FPR move and FP conversion instructions cross register banks,
+    /// and downstream ABI-conformance tests rely on seeing both banks in
+    /// the function's `reads`/`writes` lists to confirm a real conversion is
+    /// happening (rather than a same-bank move).
+    ///
+    /// Returns empty vectors for instructions whose effects are not relevant
+    /// to the FP-conversion ABI tests; the existing decoder-driven opcode
+    /// string is still produced separately via `mnemonic()`.
+    pub fn register_effects(&self) -> (Vec<PhysicalReg>, Vec<PhysicalReg>) {
+        let gpr = |r: Gpr| PhysicalReg::new(RegClass::Gpr, r.encoding());
+        let fpr = |r: Fpr| PhysicalReg::new(RegClass::SimdFp, r.encoding());
+        match self {
+            // GPR -> FPR moves: read GPR, write FPR.
+            Instruction::Mtc1 { rt, fs } | Instruction::Dmtc1 { rt, fs } => {
+                (vec![gpr(*rt)], vec![fpr(*fs)])
+            }
+            // FPR -> GPR moves: read FPR, write GPR.
+            Instruction::Mfc1 { rt, fs } | Instruction::Dmfc1 { rt, fs } => {
+                (vec![fpr(*fs)], vec![gpr(*rt)])
+            }
+            // FP -> FP conversions: read source FPR, write destination FPR.
+            Instruction::CvtDS { fd, fs }
+            | Instruction::CvtSD { fd, fs }
+            | Instruction::CvtSW { fd, fs }
+            | Instruction::CvtDW { fd, fs }
+            | Instruction::CvtWS { fd, fs }
+            | Instruction::CvtWD { fd, fs }
+            | Instruction::CvtSL { fd, fs }
+            | Instruction::CvtDL { fd, fs }
+            | Instruction::CvtLS { fd, fs }
+            | Instruction::CvtLD { fd, fs } => (vec![fpr(*fs)], vec![fpr(*fd)]),
+            // Everything else: leave reads/writes empty (existing behaviour).
+            _ => (vec![], vec![]),
+        }
+    }
+}
+
 // ===========================================================================
 // MIPS64 ELF64 Emission
 // ===========================================================================
@@ -3293,13 +3336,28 @@ fn mips64_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, 
         }
     }
 
-    // Convert code bytes to AllocatedInstructions
+    // Convert code bytes to AllocatedInstructions.
+    //
+    // Each 4-byte chunk is decoded back into its `Instruction` so we can
+    // populate `opcode` with the canonical mnemonic (e.g. "dsrlv", "daddiu",
+    // "dsubu", "dsllv", "or", "sd", "ld", ...). This gives test
+    // infrastructure visibility into the actual machine instructions emitted,
+    // rather than a generic "mips64" placeholder for every instruction.
     let instructions: Vec<AllocatedInstruction> = code.chunks_exact(4)
-        .map(|chunk| AllocatedInstruction {
-            opcode: "mips64".to_string(),
-            reads: vec![],
-            writes: vec![],
-            encoded: chunk.to_vec(),
+        .map(|chunk| {
+            let (opcode, reads, writes) = match Instruction::decode(chunk) {
+                Ok(inst) => {
+                    let (r, w) = inst.register_effects();
+                    (inst.mnemonic().to_string(), r, w)
+                }
+                Err(_) => ("mips64".to_string(), vec![], vec![]),
+            };
+            AllocatedInstruction {
+                opcode,
+                reads,
+                writes,
+                encoded: chunk.to_vec(),
+            }
         })
         .collect();
 

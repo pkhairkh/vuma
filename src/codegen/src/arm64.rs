@@ -2752,8 +2752,10 @@ impl Instruction {
             });
         }
 
-        // ---- STR (unsigned offset, 64-bit): 11111000_01_imm12_Rn_Rt ----
-        if (word >> 22) & 0x3FF == 0b1111100001 {
+        // ---- STR (unsigned offset, 64-bit): 11111001_00_imm12_Rn_Rt ----
+        // Encode side (arm64.rs:1398): base = 0xF9000000, so bits[31:22] = 0b1111100100 (0x3E4).
+        // (Bit 22 is the L bit: 0 = store, 1 = load; for 64-bit size=11, opc=00 -> STR.)
+        if (word >> 22) & 0x3FF == 0b1111100100 {
             let rt_reg = Register::from_encoding(rd)?;
             let rn_reg = Register::from_encoding(rn)?;
             let offset = (imm12 * 8) as i32;
@@ -2775,8 +2777,9 @@ impl Instruction {
             });
         }
 
-        // ---- STRB (unsigned offset): 00111000_01_imm12_Rn_Rt ----
-        if (word >> 22) & 0x3FF == 0b0011100001 {
+        // ---- STRB (unsigned offset): 00111001_00_imm12_Rn_Rt ----
+        // Encode side (arm64.rs:1545): base = 0x39000000, so bits[31:22] = 0b0011100100 (0x0E4).
+        if (word >> 22) & 0x3FF == 0b0011100100 {
             let rt_reg = Register::from_encoding(rd)?;
             let rn_reg = Register::from_encoding(rn)?;
             return Some(Instruction::STRB {
@@ -2797,8 +2800,9 @@ impl Instruction {
             });
         }
 
-        // ---- STRH (unsigned offset): 01111000_01_imm12_Rn_Rt ----
-        if (word >> 22) & 0x3FF == 0b0111100001 {
+        // ---- STRH (unsigned offset): 01111001_00_imm12_Rn_Rt ----
+        // Encode side (arm64.rs:1566+): base = 0x79000000, so bits[31:22] = 0b0111100100 (0x1E4).
+        if (word >> 22) & 0x3FF == 0b0111100100 {
             let rt_reg = Register::from_encoding(rd)?;
             let rn_reg = Register::from_encoding(rn)?;
             return Some(Instruction::STRH {
@@ -2808,8 +2812,10 @@ impl Instruction {
             });
         }
 
-        // ---- LDRSW (unsigned offset): 10111001_01_imm12_Rn_Rt ----
-        if (word >> 22) & 0x3FF == 0b1011100101 {
+        // ---- LDRSW (unsigned offset): 10111001_10_imm12_Rn_Rt ----
+        // Encode side (arm64.rs:1520): base = 0xB9800000, so bits[31:22] = 0b1011100110 (0x2E6).
+        // (size=10, opc=10 for LDRSW; bit 22 is the low opc bit.)
+        if (word >> 22) & 0x3FF == 0b1011100110 {
             let rt_reg = Register::from_encoding(rd)?;
             let rn_reg = Register::from_encoding(rn)?;
             return Some(Instruction::LDRSW {
@@ -2882,9 +2888,11 @@ impl Instruction {
         }
 
         // ---- EXTR: sf 00 100111 N 0 Rm imm6 Rn Rd ----
-        // 64-bit: (word >> 21) & 0x7FF == 0b10010011110 == 0x4BE
-        // 32-bit: (word >> 21) & 0x7FF == 0b00010011100 == 0x09C
-        if (word >> 21) & 0x7FF == 0x4BE || (word >> 21) & 0x7FF == 0x09C {
+        // 64-bit: (word >> 21) & 0x7FF == 0b10010011110 == 0x49E (base 0x93C00000)
+        // 32-bit: (word >> 21) & 0x7FF == 0b00010011100 == 0x09C (base 0x13800000)
+        // NOTE: the previous constant 0x4BE was a typo -- 0b10010011110 = 0x49E.
+        // The encoder (arm64.rs:1355) always emits the 64-bit form (0x93C00000).
+        if (word >> 21) & 0x7FF == 0x49E || (word >> 21) & 0x7FF == 0x09C {
             let rd_reg = Register::from_encoding(rd)?;
             let rn_reg = Register::from_encoding(rn)?;
             let rm_reg = Register::from_encoding(rm)?;
@@ -2906,6 +2914,74 @@ impl Instruction {
                 rd: rd_reg,
                 rn: rn_reg,
                 rm: rm_reg,
+            });
+        }
+
+        // ---- Floating-point conversion (integer <-> float) ----
+        // Encoding family: sf 00 11110 type rmode opcode 0 Rn 00000 Rd
+        // Variable bits: 31 (sf), 22 (low bit of type), 14-10 (Rn), 4-0 (Rd).
+        // Fixed-bit mask: 0x7FBF83E0.
+        //   SCVTF  base 0x1E220000 (rmode=10, opcode=0010): signed int -> float
+        //   UCVTF  base 0x1E230000 (rmode=10, opcode=0011): unsigned int -> float
+        //   FCVTZS base 0x1E380000 (rmode=11, opcode=1000): float -> signed int
+        //   FCVTZU base 0x1E390000 (rmode=11, opcode=1001): float -> unsigned int
+        let fp_conv_masked = word & 0x7FBF83E0;
+        if fp_conv_masked == 0x1E220000
+            || fp_conv_masked == 0x1E230000
+            || fp_conv_masked == 0x1E380000
+            || fp_conv_masked == 0x1E390000
+        {
+            let sf = (word >> 31) & 0x1;
+            let type_low = (word >> 22) & 0x1;
+            // For these encodings the Rn field is bits[14:10] (see encoder at
+            // arm64.rs:1848+); pull it directly rather than using the `rn`
+            // local (which is bits[9:5] and applies to register-register ops).
+            let rn_field = (word >> 10) & 0x1F;
+            let rn_reg = Register::from_encoding(rn_field)?;
+            let rd_reg = Register::from_encoding(rd)?;
+            return Some(match fp_conv_masked {
+                0x1E220000 => Instruction::SCVTF {
+                    rd: rd_reg,
+                    rn: rn_reg,
+                    src_64: sf == 1,
+                    dst_double: type_low == 1,
+                },
+                0x1E230000 => Instruction::UCVTF {
+                    rd: rd_reg,
+                    rn: rn_reg,
+                    src_64: sf == 1,
+                    dst_double: type_low == 1,
+                },
+                0x1E380000 => Instruction::FCVTZS {
+                    rd: rd_reg,
+                    rn: rn_reg,
+                    dst_64: sf == 1,
+                    src_double: type_low == 1,
+                },
+                0x1E390000 => Instruction::FCVTZU {
+                    rd: rd_reg,
+                    rn: rn_reg,
+                    dst_64: sf == 1,
+                    src_double: type_low == 1,
+                },
+                _ => unreachable!("fp_conv_masked matched one of the four bases"),
+            });
+        }
+
+        // ---- FCVT (single <-> double): Floating-point data-processing (1-source) ----
+        //   FCVT Dd, Sn (to_double=true):  base 0x1EE20000 (bit 18 = 0)
+        //   FCVT Sd, Dn (to_double=false): base 0x1EE60000 (bit 18 = 1)
+        // Variable bits: 18 (to_double discriminator), 9-5 (Rn), 4-0 (Rd).
+        // Fixed-bit mask: 0xFFFBFC00; both variants AND down to 0x1EE20000.
+        if (word & 0xFFFBFC00) == 0x1EE20000 {
+            let to_double = ((word >> 18) & 0x1) == 0;
+            // Rn is at bits[9:5] for FCVT (see encoder at arm64.rs:1932).
+            let rn_reg = Register::from_encoding(rn)?;
+            let rd_reg = Register::from_encoding(rd)?;
+            return Some(Instruction::FCVT {
+                rd: rd_reg,
+                rn: rn_reg,
+                to_double,
             });
         }
 
@@ -2932,12 +3008,15 @@ impl std::fmt::Display for Instruction {
             Instruction::LSR { rd, rn, rm } => write!(f, "lsr {}, {}, {}", rd, rn, rm),
             Instruction::ASR { rd, rn, rm } => write!(f, "asr {}, {}, {}", rd, rn, rm),
             Instruction::EXTR { rd, rn, rm, imm6 } => {
-                // Display as ROR when rn == rm (the common case for rotation)
-                if rn == rm {
-                    write!(f, "ror {}, {}, #{}", rd, rn, imm6)
-                } else {
-                    write!(f, "extr {}, {}, {}, #{}", rd, rn, rm, imm6)
-                }
+                // EXTR is the canonical mnemonic for the extract-and-rotate
+                // encoding. `ROR Rd, Rn, #amount` is encoded as
+                // `EXTR Rd, Rn, Rn, #amount` (rn == rm), and
+                // `ROL Rd, Rn, #amount` is encoded as
+                // `EXTR Rd, Rn, Rn, #(64 - amount)` (also rn == rm). The
+                // ROR/ROL distinction cannot be recovered from the encoding
+                // alone, so always disassemble as `extr` to give test
+                // infrastructure (and humans) an unambiguous mnemonic.
+                write!(f, "extr {}, {}, {}, #{}", rd, rn, rm, imm6)
             }
             Instruction::RORV { rd, rn, rm } => write!(f, "rorv {}, {}, {}", rd, rn, rm),
             Instruction::LDR { rt, rn, offset } => write!(f, "ldr {}, [{}, #{}]", rt, rn, offset),
