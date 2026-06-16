@@ -1,0 +1,17 @@
+[package]
+name = "vuma-parser"
+version.workspace = true
+edition.workspace = true
+description = "VUMA Parser — frontend with LLM-hardened error recovery and AST→SCG lowering"
+repository.workspace = true
+license.workspace = true
+keywords.workspace = true
+categories.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+vuma-scg.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+log.workspace = true

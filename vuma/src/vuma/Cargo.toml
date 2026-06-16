@@ -1,0 +1,25 @@
+[package]
+name = "vuma-core"
+version.workspace = true
+edition.workspace = true
+description = "VUMA Core — memory model, MSG construction, invariant checking, and security analysis"
+repository.workspace = true
+license.workspace = true
+keywords.workspace = true
+categories.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+log.workspace = true
+hashbrown.workspace = true
+vuma-scg.workspace = true
+vuma-parser.workspace = true
+vuma-ive.workspace = true
+vuma-bd.workspace = true
+vuma-cor.workspace = true
+vuma-codegen.workspace = true
+vuma-proof.workspace = true

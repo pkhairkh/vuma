@@ -1,0 +1,17 @@
+[package]
+name = "vuma-proof"
+version.workspace = true
+edition.workspace = true
+description = "VUMA Proof System — formal proof checker, tactics, counterexample generation, and composition"
+repository.workspace = true
+license.workspace = true
+keywords.workspace = true
+categories.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+log.workspace = true

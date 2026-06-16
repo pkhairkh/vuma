@@ -1,0 +1,17 @@
+[package]
+name = "vuma-codegen"
+version.workspace = true
+edition.workspace = true
+description = "VUMA Codegen — 8-architecture backend (x86_64, AArch64, RISC-V 64, ARM32, MIPS64, PPC64, LoongArch64, Wasm32)"
+repository.workspace = true
+license.workspace = true
+keywords.workspace = true
+categories.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+vuma-scg.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+log.workspace = true
