@@ -570,6 +570,160 @@ pub fn write_float(buf: &mut [u8], value: f64, precision: u32) -> u32 {
 }
 
 // ---------------------------------------------------------------------------
+// Low-Level Buffer Formatting (VUMA Address + offset pattern)
+// ---------------------------------------------------------------------------
+//
+// These functions write formatted output directly into a byte buffer and
+// return the number of bytes written (not including a null terminator).
+// They are the primitive building blocks for VUMA programs that need to
+// write formatted numeric output to a memory-mapped address range.
+
+/// Format a u64 value as a decimal string into the given buffer.
+///
+/// Returns the number of bytes written (not including null terminator).
+/// The buffer must be at least 21 bytes long (max u64 = 18446744073709551615 + null).
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Write } — reads input, writes to buffer
+// VUMA-VERIFIED: decimal formatting is correct for all u64 values
+pub fn format_u64(buf: &mut [u8], value: u64) -> usize {
+    if value == 0 {
+        buf[0] = b'0';
+        return 1;
+    }
+    let mut tmp = [0u8; 20];
+    let mut pos = 0;
+    let mut v = value;
+    while v > 0 {
+        tmp[pos] = b'0' + (v % 10) as u8;
+        v /= 10;
+        pos += 1;
+    }
+    // Reverse into output buffer
+    for i in 0..pos {
+        buf[i] = tmp[pos - 1 - i];
+    }
+    pos
+}
+
+/// Format an i64 value as a decimal string into the given buffer.
+///
+/// Returns the number of bytes written (not including null terminator).
+/// The buffer must be at least 22 bytes long (sign + max i64 digits + null).
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Write } — reads input, writes to buffer
+// VUMA-VERIFIED: signed decimal formatting is correct for all i64 values
+pub fn format_i64(buf: &mut [u8], value: i64) -> usize {
+    if value < 0 {
+        buf[0] = b'-';
+        1 + format_u64(&mut buf[1..], value.wrapping_neg() as u64)
+    } else {
+        format_u64(buf, value as u64)
+    }
+}
+
+/// Format a u64 value as a hexadecimal string (lowercase) into the given buffer.
+///
+/// Returns the number of bytes written.
+/// The buffer must be at least 17 bytes long (16 hex digits + null).
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Write } — reads input, writes to buffer
+// VUMA-VERIFIED: hexadecimal formatting is correct for all u64 values
+pub fn format_u64_hex(buf: &mut [u8], value: u64) -> usize {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    if value == 0 {
+        buf[0] = b'0';
+        return 1;
+    }
+    let mut tmp = [0u8; 16];
+    let mut pos = 0;
+    let mut v = value;
+    while v > 0 {
+        tmp[pos] = HEX[(v & 0xF) as usize];
+        v >>= 4;
+        pos += 1;
+    }
+    for i in 0..pos {
+        buf[i] = tmp[pos - 1 - i];
+    }
+    pos
+}
+
+/// Format a u32 value as a hexadecimal string (lowercase) into the given buffer.
+///
+/// Returns the number of bytes written.
+/// The buffer must be at least 9 bytes long (8 hex digits + null).
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Write } — reads input, writes to buffer
+// VUMA-VERIFIED: delegates to format_u64_hex which is verified
+pub fn format_u32_hex(buf: &mut [u8], value: u32) -> usize {
+    format_u64_hex(buf, value as u64)
+}
+
+/// Format a u64 value as a binary string into the given buffer.
+///
+/// Returns the number of bytes written.
+/// The buffer must be at least 65 bytes long (64 bits + null).
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Write } — reads input, writes to buffer
+// VUMA-VERIFIED: binary formatting is correct for all u64 values
+pub fn format_u64_binary(buf: &mut [u8], value: u64) -> usize {
+    if value == 0 {
+        buf[0] = b'0';
+        return 1;
+    }
+    let mut tmp = [0u8; 64];
+    let mut pos = 0;
+    let mut v = value;
+    while v > 0 {
+        tmp[pos] = b'0' + (v & 1) as u8;
+        v >>= 1;
+        pos += 1;
+    }
+    for i in 0..pos {
+        buf[i] = tmp[pos - 1 - i];
+    }
+    pos
+}
+
+/// Format a u64 value as an octal string into the given buffer.
+///
+/// Returns the number of bytes written.
+/// The buffer must be at least 23 bytes long (22 octal digits + null).
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Write } — reads input, writes to buffer
+// VUMA-VERIFIED: octal formatting is correct for all u64 values
+pub fn format_u64_octal(buf: &mut [u8], value: u64) -> usize {
+    if value == 0 {
+        buf[0] = b'0';
+        return 1;
+    }
+    let mut tmp = [0u8; 22];
+    let mut pos = 0;
+    let mut v = value;
+    while v > 0 {
+        tmp[pos] = b'0' + (v & 7) as u8;
+        v >>= 3;
+        pos += 1;
+    }
+    for i in 0..pos {
+        buf[i] = tmp[pos - 1 - i];
+    }
+    pos
+}
+
+// ---------------------------------------------------------------------------
 // Capability Descriptor for Formatting Operations
 // ---------------------------------------------------------------------------
 
@@ -581,7 +735,9 @@ pub fn write_float(buf: &mut [u8], value: f64, precision: u32) -> u32 {
 /// - **Pure** (`format_int`, `format_uint`, `format_float`, `format_hex`,
 ///   `format_binary`, `format_octal`, `format_pointer`, `pad_left`,
 ///   `pad_right`, `join`): { Read, Compare }
-/// - **Buffer-writing** (`write_str`, `write_int`, `write_float`):
+/// - **Buffer-writing** (`write_str`, `write_int`, `write_float`,
+///   `format_u64`, `format_i64`, `format_u64_hex`, `format_u32_hex`,
+///   `format_u64_binary`, `format_u64_octal`):
 ///   { Read, Write, Compare }
 ///
 /// ## BD Annotations
@@ -1421,5 +1577,108 @@ mod tests {
             let expected = format!("0x{}", format_hex(addr, 16).as_str());
             assert_eq!(format_pointer(addr).as_str(), expected);
         }
+    }
+
+    // --- Low-level buffer formatting tests ---
+
+    #[test]
+    fn test_format_u64_zero() {
+        let mut buf = [0u8; 21];
+        let n = format_u64(&mut buf, 0);
+        assert_eq!(n, 1);
+        assert_eq!(&buf[..n], b"0");
+    }
+
+    #[test]
+    fn test_format_u64_small() {
+        let mut buf = [0u8; 21];
+        let n = format_u64(&mut buf, 42);
+        assert_eq!(n, 2);
+        assert_eq!(&buf[..n], b"42");
+    }
+
+    #[test]
+    fn test_format_u64_max() {
+        let mut buf = [0u8; 21];
+        let n = format_u64(&mut buf, u64::MAX);
+        assert_eq!(n, 20);
+        assert_eq!(&buf[..n], b"18446744073709551615");
+    }
+
+    #[test]
+    fn test_format_i64_zero() {
+        let mut buf = [0u8; 22];
+        let n = format_i64(&mut buf, 0);
+        assert_eq!(n, 1);
+        assert_eq!(&buf[..n], b"0");
+    }
+
+    #[test]
+    fn test_format_i64_negative() {
+        let mut buf = [0u8; 22];
+        let n = format_i64(&mut buf, -42);
+        assert_eq!(n, 3);
+        assert_eq!(&buf[..n], b"-42");
+    }
+
+    #[test]
+    fn test_format_i64_min() {
+        let mut buf = [0u8; 22];
+        let n = format_i64(&mut buf, i64::MIN);
+        assert_eq!(&buf[..n], b"-9223372036854775808");
+    }
+
+    #[test]
+    fn test_format_u64_hex_zero() {
+        let mut buf = [0u8; 17];
+        let n = format_u64_hex(&mut buf, 0);
+        assert_eq!(n, 1);
+        assert_eq!(&buf[..n], b"0");
+    }
+
+    #[test]
+    fn test_format_u64_hex_values() {
+        let mut buf = [0u8; 17];
+        let n = format_u64_hex(&mut buf, 255);
+        assert_eq!(n, 2);
+        assert_eq!(&buf[..n], b"ff");
+
+        let n = format_u64_hex(&mut buf, 0xDEAD);
+        assert_eq!(&buf[..n], b"dead");
+    }
+
+    #[test]
+    fn test_format_u32_hex() {
+        let mut buf = [0u8; 9];
+        let n = format_u32_hex(&mut buf, 0xABCD);
+        assert_eq!(&buf[..n], b"abcd");
+    }
+
+    #[test]
+    fn test_format_u64_binary_values() {
+        let mut buf = [0u8; 65];
+        let n = format_u64_binary(&mut buf, 0);
+        assert_eq!(n, 1);
+        assert_eq!(&buf[..n], b"0");
+
+        let n = format_u64_binary(&mut buf, 5);
+        assert_eq!(&buf[..n], b"101");
+
+        let n = format_u64_binary(&mut buf, 255);
+        assert_eq!(&buf[..n], b"11111111");
+    }
+
+    #[test]
+    fn test_format_u64_octal_values() {
+        let mut buf = [0u8; 23];
+        let n = format_u64_octal(&mut buf, 0);
+        assert_eq!(n, 1);
+        assert_eq!(&buf[..n], b"0");
+
+        let n = format_u64_octal(&mut buf, 8);
+        assert_eq!(&buf[..n], b"10");
+
+        let n = format_u64_octal(&mut buf, 255);
+        assert_eq!(&buf[..n], b"377");
     }
 }

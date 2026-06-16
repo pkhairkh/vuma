@@ -612,13 +612,13 @@ fn main() -> i32 {
     // The handler wrote its result into handler_result byte-by-byte,
     // then set the atomic flag. Thanks to the release/acquire
     // ordering, all 32 bytes are guaranteed visible here.
-    match: i32 = 1;    // assume match until proven otherwise
+    hashes_match: i32 = 1;    // assume match until proven otherwise
     i: u64 = 0;
     for i in 0..32 {
         h_byte: u32 = *(handler_result + i);
         r_byte: u32 = *(ref_hash + i);
         if h_byte != r_byte {
-            match = 0;
+            hashes_match = 0;
         }
     }
 
@@ -640,7 +640,7 @@ fn main() -> i32 {
     //         hash verified — no register corruption, no state clobber)
     // Exit 1: hashes differ (BUG — signal handler corrupted state or
     //         atomic handoff failed)
-    if match == 1 {
+    if hashes_match == 1 {
         return 0;
     } else {
         return 1;

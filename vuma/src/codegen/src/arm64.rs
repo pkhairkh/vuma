@@ -2246,6 +2246,7 @@ impl Instruction {
             Instruction::EXTR { rd, rn, rm, imm6 } => {
                 let imm_mask = if width == RegWidth::X64 { 0x3F } else { 0x1F };
                 Ok((sf << 31)
+                    | (sf << 22)       // N bit must match sf for EXTR
                     | 0x13800000u32
                     | (rm.encoding() << 16)
                     | ((imm6 & imm_mask) << 10)

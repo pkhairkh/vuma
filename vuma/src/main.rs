@@ -25,8 +25,8 @@ use vuma::logging::{LogLevel, init_logger, global_logger};
 use vuma_codegen::backend::{create_backend, BackendKind};
 use vuma_codegen::ScgToIr;
 use vuma_codegen::scg_to_ir::{Scg, ScgNode, ScgFunction, ScgParam, ScgStatement, ScgType,
-    ScgExpr, ComputationNode, AllocationNode, AccessNode, CallNode, ControlNode};
-use std::collections::HashSet;
+    ScgExpr, ComputationNode, AllocationNode, AccessNode, CallNode, ControlNode, GetAddressNode};
+use std::collections::{HashMap, HashSet};
 use vuma_codegen::ir::BinOpKind;
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -902,6 +902,10 @@ fn bridge_ast_to_codegen_scg(program: &vuma_parser::ast::Program) -> Scg {
     // Collect extern function names so we can mark calls as is_extern.
     let extern_fns = extract_extern_functions_from_ast(program);
 
+    // Collect global constant definitions so they can be inlined
+    // as literal values when referenced in function bodies.
+    let global_constants = collect_global_constants(program);
+
     let mut nodes: Vec<ScgNode> = Vec::new();
 
     for item in &program.items {
@@ -923,6 +927,7 @@ fn bridge_ast_to_codegen_scg(program: &vuma_parser::ast::Program) -> Scg {
 
             let mut ctx = BridgeCtx::new();
             ctx.extern_fns = extern_fns.clone();
+            ctx.global_constants = global_constants.clone();
             let mut body = bridge_block_to_scg_stmts(&fn_def.body, &mut ctx);
 
             // Ensure every function ends with a Return statement.
@@ -971,11 +976,15 @@ struct BridgeCtx {
     /// Set of extern function names (from `extern "C" { ... }` blocks).
     /// Used to mark CallNodes as is_extern when the target is declared extern.
     extern_fns: HashSet<String>,
+    /// Global constant definitions: maps name → integer value.
+    /// Populated by scanning top-level `const`, `static`, and type-ascription
+    /// declarations before processing any function bodies.
+    global_constants: HashMap<String, i64>,
 }
 
 impl BridgeCtx {
     fn new() -> Self {
-        Self { temp_counter: 0, last_expr_result: None, extern_fns: HashSet::new() }
+        Self { temp_counter: 0, last_expr_result: None, extern_fns: HashSet::new(), global_constants: HashMap::new() }
     }
 
     /// Allocate a unique temporary variable name.
@@ -984,6 +993,94 @@ impl BridgeCtx {
         self.temp_counter += 1;
         name
     }
+}
+
+/// Try to evaluate a constant expression to an integer value.
+///
+/// Handles integer literals, boolean literals, and simple binary operations
+/// on constant sub-expressions. Returns `None` for non-constant expressions
+/// (variable references, function calls, etc.).
+fn eval_const_expr(expr: &vuma_parser::ast::Expr, consts: &HashMap<String, i64>) -> Option<i64> {
+    use vuma_parser::ast::{Expr, Lit, BinOp, UnOp};
+    match expr {
+        Expr::Lit { value, .. } => match value {
+            Lit::Int(n) => Some(*n),
+            Lit::Bool(b) => Some(if *b { 1 } else { 0 }),
+            _ => None,
+        },
+        Expr::Var { name, .. } => consts.get(name).copied(),
+        Expr::BinOp { op, lhs, rhs, .. } => {
+            let l = eval_const_expr(lhs, consts)?;
+            let r = eval_const_expr(rhs, consts)?;
+            Some(match op {
+                BinOp::Add => l.wrapping_add(r),
+                BinOp::Sub => l.wrapping_sub(r),
+                BinOp::Mul => l.wrapping_mul(r),
+                BinOp::Div => l.checked_div(r)?,
+                BinOp::Mod => l.checked_rem(r)?,
+                BinOp::BitAnd => l & r,
+                BinOp::BitOr => l | r,
+                BinOp::BitXor => l ^ r,
+                BinOp::Shl => l.wrapping_shl(r as u32),
+                BinOp::Shr => l.wrapping_shr(r as u32),
+                BinOp::And => if l != 0 && r != 0 { 1 } else { 0 },
+                BinOp::Or => if l != 0 || r != 0 { 1 } else { 0 },
+                BinOp::Eq => if l == r { 1 } else { 0 },
+                BinOp::Ne => if l != r { 1 } else { 0 },
+                BinOp::Lt => if l < r { 1 } else { 0 },
+                BinOp::Le => if l <= r { 1 } else { 0 },
+                BinOp::Gt => if l > r { 1 } else { 0 },
+                BinOp::Ge => if l >= r { 1 } else { 0 },
+            })
+        }
+        Expr::UnOp { op, expr, .. } => {
+            let v = eval_const_expr(expr, consts)?;
+            Some(match op {
+                UnOp::Neg => v.wrapping_neg(),
+                UnOp::Not => if v == 0 { 1 } else { 0 },
+                UnOp::BitNot => !v,
+                UnOp::Deref => return None, // can't const-eval deref
+            })
+        }
+        Expr::Cast { expr, .. } | Expr::TypeAscription { expr, .. } => {
+            eval_const_expr(expr, consts)
+        }
+        _ => None,
+    }
+}
+
+/// Collect global constant definitions from the top-level program items.
+///
+/// Scans for `Item::Const`, `Item::Static`, and `Item::Stmt(Stmt::Let)` that
+/// have constant-evaluable initializers and builds a name → value map.
+fn collect_global_constants(program: &vuma_parser::ast::Program) -> HashMap<String, i64> {
+    use vuma_parser::ast::Item;
+    let mut consts: HashMap<String, i64> = HashMap::new();
+
+    for item in &program.items {
+        match item {
+            Item::Const(c) => {
+                if let Some(val) = eval_const_expr(&c.value, &consts) {
+                    consts.insert(c.name.clone(), val);
+                }
+            }
+            Item::Static(s) => {
+                if let Some(val) = eval_const_expr(&s.value, &consts) {
+                    consts.insert(s.name.clone(), val);
+                }
+            }
+            Item::Stmt(stmt) => {
+                if let vuma_parser::ast::Stmt::Let(let_stmt) = stmt {
+                    if let Some(val) = eval_const_expr(&let_stmt.value, &consts) {
+                        consts.insert(let_stmt.name.clone(), val);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    consts
 }
 
 /// Convert a parser type annotation to a codegen SCG type.
@@ -1034,7 +1131,16 @@ fn flatten_expr(
 
     match expr {
         // ── Leaf expressions: return directly, no flattening needed ──
-        Expr::Var { name, .. } => ScgExpr::Var(name.clone()),
+        Expr::Var { name, .. } => {
+            // Check if this variable is a known global constant.
+            // If so, inline its literal value instead of emitting a variable
+            // reference that would be unresolved during IR lowering.
+            if let Some(&val) = ctx.global_constants.get(name) {
+                ScgExpr::Int(val)
+            } else {
+                ScgExpr::Var(name.clone())
+            }
+        }
         Expr::Lit { value, .. } => match value {
             Lit::Int(n) => ScgExpr::Int(*n),
             Lit::Float(f) => ScgExpr::Float(*f),
@@ -1245,8 +1351,24 @@ fn flatten_expr(
         // ── Uninitialized → 0 ──
         Expr::Uninitialized { .. } => ScgExpr::Int(0),
 
-        // ── Address-of: emit as a pass-through (var reference) ──
-        Expr::AddressOf { expr, .. } => flatten_expr(expr, stmts, ctx),
+        // ── Address-of: emit GetAddress for symbol references ──
+        Expr::AddressOf { expr, .. } => {
+            // If the inner expression is a variable (function name, data symbol),
+            // emit a GetAddress node that will lower to `IRInstr::GetAddress`
+            // with a proper relocation.  Otherwise, just flatten the inner expr
+            // (e.g. for @(*ptr) or other complex address-of patterns).
+            match expr.as_ref() {
+                Expr::Var { name, .. } => {
+                    let dst = ctx.alloc_temp();
+                    stmts.push(ScgStatement::GetAddress(GetAddressNode {
+                        dst: dst.clone(),
+                        name: name.clone(),
+                    }));
+                    ScgExpr::Var(dst)
+                }
+                _ => flatten_expr(expr, stmts, ctx),
+            }
+        }
 
         // ── Fallback for unsupported expression types ──
         _ => ScgExpr::Int(0),

@@ -25,7 +25,9 @@
 //! - **fmt**: String formatting and output (`format_int`, `format_uint`, `format_float`,
 //!   `format_hex`, `format_binary`, `format_octal`, `format_pointer`, `pad_left`,
 //!   `pad_right`, `join`, `write_str`, `write_int`, `write_float`) — printf-style
-//!   formatting for the VUMA language.
+//!   formatting for the VUMA language. Also provides low-level buffer-writing
+//!   formatters (`format_u64`, `format_i64`, `format_u64_hex`, `format_u32_hex`,
+//!   `format_u64_binary`, `format_u64_octal`) for direct byte-buffer output.
 //! - **math**: Comprehensive mathematical utility functions: integer arithmetic
 //!   (`abs`, `min`, `max`, `clamp`), floating-point trigonometry (`sin`, `cos`, `tan`,
 //!   `asin`, `acos`, `atan`, `atan2`, `sinh`, `cosh`, `tanh`), exponentials and
@@ -144,7 +146,8 @@ pub use string::{strlen, strcmp, memcpy, memset};
 
 // Re-export formatting functions
 pub use fmt::{
-    fmt_capd, format_binary, format_float, format_hex, format_int, format_octal, format_pointer,
+    fmt_capd, format_binary, format_float, format_hex, format_i64, format_int, format_octal,
+    format_pointer, format_u32_hex, format_u64, format_u64_binary, format_u64_hex, format_u64_octal,
     format_uint, join, pad_left, pad_right, write_float, write_int, write_str,
 };
 

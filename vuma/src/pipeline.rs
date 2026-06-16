@@ -46,7 +46,7 @@ use vuma_codegen::{
     ir::{BinOpKind as IrBinOpKind, IRProgram},
     regalloc::{AllocationResult, LinearScanAllocator},
     scg_to_ir::{
-        AccessNode, AllocationNode, CallNode, CastNode, ComputationNode, ControlNode, IRBuilder,
+        AccessNode, AllocationNode, CallNode, CastNode, ComputationNode, ControlNode, GetAddressNode, IRBuilder,
         Scg, ScgExpr, ScgFunction, ScgNode, ScgParam, ScgStatement, ScgType, SwitchArm,
     },
     CastKind as CodegenCastKind, CodegenError,
@@ -1375,6 +1375,37 @@ fn convert_node_to_statement_with_externs(
 
         NodePayload::Computation(comp) => {
             let op_label = comp.kind.label();
+
+            // Detect address-of patterns: "let x = @func_name" or bare "@func_name".
+            // These should lower to GetAddress rather than a generic computation.
+            if let Some(addr_name) = op_label.strip_prefix("let ") {
+                // "let x = @func_name" → extract "func_name"
+                if let Some(at_pos) = addr_name.find("= @") {
+                    let symbol = addr_name[at_pos + 3..].trim();
+                    if !symbol.is_empty() && !symbol.contains(' ') && !symbol.contains('(') {
+                        let var_part = addr_name[..at_pos].trim();
+                        let dst = if var_part.is_empty() {
+                            node_var(node_id, "addr")
+                        } else {
+                            var_part.to_string()
+                        };
+                        return Some(ScgStatement::GetAddress(GetAddressNode {
+                            dst,
+                            name: symbol.to_string(),
+                        }));
+                    }
+                }
+            } else if let Some(symbol) = op_label.strip_prefix("@") {
+                // Bare "@func_name"
+                let symbol = symbol.trim();
+                if !symbol.is_empty() && !symbol.contains(' ') && !symbol.contains('(') {
+                    return Some(ScgStatement::GetAddress(GetAddressNode {
+                        dst: node_var(node_id, "addr"),
+                        name: symbol.to_string(),
+                    }));
+                }
+            }
+
             let op = parse_binop(&op_label).unwrap_or(IrBinOpKind::Add);
             Some(ScgStatement::Computation(ComputationNode {
                 dst: node_var(node_id, "comp"),

@@ -618,6 +618,7 @@ impl MemorySafetyAnalyzer {
                 ScgStatement::ConstantTime(_) => {}
                 ScgStatement::StructAccess(_) => {}
                 ScgStatement::EnumAccess(_) => {}
+                ScgStatement::GetAddress(_) => {}
             }
         }
     }

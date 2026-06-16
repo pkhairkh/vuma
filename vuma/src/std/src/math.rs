@@ -8,6 +8,15 @@
 //! ## Function Categories
 //!
 //! - **Integer arithmetic**: `abs`, `min`, `max`, `clamp` — operate on `i64`
+//! - **Typed integer arithmetic**: `abs_i32`, `abs_i64`, `min_i32`, `max_i32`,
+//!   `min_u64`, `max_u64`, `clamp_i32`, `clamp_u64` — operate on specific widths
+//! - **Integer division**: `div_floor_i32`, `div_ceil_i32` — floor and ceiling
+//!   division for `i32`
+//! - **Number theory**: `gcd_u64`, `lcm_u64` — greatest common divisor and
+//!   least common multiple for `u64`
+//! - **Bit manipulation**: `is_power_of_two_u64`, `next_power_of_two_u64`,
+//!   `count_ones_u64`, `count_zeros_u64`, `leading_zeros_u64`,
+//!   `trailing_zeros_u64`, `reverse_bits_u64`, `swap_bytes_u64`
 //! - **Trigonometric (f64)**: `sin`, `cos`, `tan`, `asin`, `acos`, `atan`,
 //!   `atan2`, `sinh`, `cosh`, `tanh`
 //! - **Exponential/Logarithmic (f64)**: `sqrt`, `cbrt`, `exp`, `exp2`,
@@ -360,6 +369,538 @@ pub fn clamp(x: i64, lo: i64, hi: i64) -> i64 {
     } else {
         x
     }
+}
+
+// ===========================================================================
+// Typed Integer Arithmetic (i32, i64, u64)
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// abs_i32
+// ---------------------------------------------------------------------------
+
+/// Return the absolute value of a signed 32-bit integer.
+///
+/// If `x` is non-negative, the result is `x`. If `x` is negative, the result
+/// is `-x`.
+///
+/// ## Edge Case: i32::MIN
+///
+/// `i32::MIN` (-2147483648) has no positive counterpart in the `i32` range.
+/// Calling `abs_i32(i32::MIN)` returns `i32::MIN` itself, matching the
+/// behavior of Rust's `i32::wrapping_abs()`. This is a known overflow that
+/// callers should handle explicitly if it may occur.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: absolute value is correct for all non-MIN inputs
+pub fn abs_i32(x: i32) -> i32 {
+    if x < 0 {
+        x.wrapping_neg()
+    } else {
+        x
+    }
+}
+
+// ---------------------------------------------------------------------------
+// abs_i64
+// ---------------------------------------------------------------------------
+
+/// Return the absolute value of a signed 64-bit integer.
+///
+/// This is the explicitly-typed counterpart of [`abs`], provided for
+/// call-sites that require a named `i64`-specific function.
+///
+/// ## Edge Case: i64::MIN
+///
+/// `i64::MIN` has no positive counterpart. Calling `abs_i64(i64::MIN)`
+/// returns `i64::MIN` itself (wrapping), matching Rust's `i64::wrapping_abs()`.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: absolute value is correct for all non-MIN inputs
+pub fn abs_i64(x: i64) -> i64 {
+    if x < 0 {
+        x.wrapping_neg()
+    } else {
+        x
+    }
+}
+
+// ---------------------------------------------------------------------------
+// min_i32
+// ---------------------------------------------------------------------------
+
+/// Return the smaller of two signed 32-bit integers.
+///
+/// If both values are equal, returns either one (specifically `a`).
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: minimum selection is correct
+pub fn min_i32(a: i32, b: i32) -> i32 {
+    if a <= b {
+        a
+    } else {
+        b
+    }
+}
+
+// ---------------------------------------------------------------------------
+// max_i32
+// ---------------------------------------------------------------------------
+
+/// Return the larger of two signed 32-bit integers.
+///
+/// If both values are equal, returns either one (specifically `a`).
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: maximum selection is correct
+pub fn max_i32(a: i32, b: i32) -> i32 {
+    if a >= b {
+        a
+    } else {
+        b
+    }
+}
+
+// ---------------------------------------------------------------------------
+// min_u64
+// ---------------------------------------------------------------------------
+
+/// Return the smaller of two unsigned 64-bit integers.
+///
+/// If both values are equal, returns either one (specifically `a`).
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: minimum selection is correct
+pub fn min_u64(a: u64, b: u64) -> u64 {
+    if a <= b {
+        a
+    } else {
+        b
+    }
+}
+
+// ---------------------------------------------------------------------------
+// max_u64
+// ---------------------------------------------------------------------------
+
+/// Return the larger of two unsigned 64-bit integers.
+///
+/// If both values are equal, returns either one (specifically `a`).
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: maximum selection is correct
+pub fn max_u64(a: u64, b: u64) -> u64 {
+    if a >= b {
+        a
+    } else {
+        b
+    }
+}
+
+// ---------------------------------------------------------------------------
+// clamp_i32
+// ---------------------------------------------------------------------------
+
+/// Constrain a signed 32-bit value to lie within the inclusive range `[lo, hi]`.
+///
+/// Returns `lo` if `x < lo`, `hi` if `x > hi`, or `x` otherwise.
+///
+/// ## Panics
+///
+/// In debug builds, panics if `lo > hi`. In release builds, the behavior
+/// is `max(lo, min(hi, x))`, which effectively swaps the bounds.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: clamp is correct when lo <= hi
+pub fn clamp_i32(x: i32, lo: i32, hi: i32) -> i32 {
+    debug_assert!(lo <= hi, "clamp_i32: lo ({}) must be <= hi ({})", lo, hi);
+    if x < lo {
+        lo
+    } else if x > hi {
+        hi
+    } else {
+        x
+    }
+}
+
+// ---------------------------------------------------------------------------
+// clamp_u64
+// ---------------------------------------------------------------------------
+
+/// Constrain an unsigned 64-bit value to lie within the inclusive range `[lo, hi]`.
+///
+/// Returns `lo` if `x < lo`, `hi` if `x > hi`, or `x` otherwise.
+///
+/// ## Panics
+///
+/// In debug builds, panics if `lo > hi`. In release builds, the behavior
+/// is `max(lo, min(hi, x))`, which effectively swaps the bounds.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: clamp is correct when lo <= hi
+pub fn clamp_u64(x: u64, lo: u64, hi: u64) -> u64 {
+    debug_assert!(lo <= hi, "clamp_u64: lo ({}) must be <= hi ({})", lo, hi);
+    if x < lo {
+        lo
+    } else if x > hi {
+        hi
+    } else {
+        x
+    }
+}
+
+// ===========================================================================
+// Integer Division (i32)
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// div_floor_i32
+// ---------------------------------------------------------------------------
+
+/// Perform floor division of two signed 32-bit integers.
+///
+/// Returns the largest integer less than or equal to the exact quotient
+/// `a / b`. This differs from Rust's default integer division (`/`), which
+/// truncates toward zero.
+///
+/// ## Examples
+///
+/// - `div_floor_i32(7, 2)` returns `3` (same as truncation)
+/// - `div_floor_i32(-7, 2)` returns `-4` (truncation would give `-3`)
+/// - `div_floor_i32(7, -2)` returns `-4` (truncation would give `-3`)
+/// - `div_floor_i32(-7, -2)` returns `3` (same as truncation)
+///
+/// ## Panics
+///
+/// Panics if `b == 0` (division by zero). Also panics on overflow when
+/// dividing `i32::MIN` by `-1`.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: floor division semantics are correct
+pub fn div_floor_i32(a: i32, b: i32) -> i32 {
+    let d = a / b;
+    let r = a % b;
+    if r != 0 && (a < 0) != (b < 0) {
+        d - 1
+    } else {
+        d
+    }
+}
+
+// ---------------------------------------------------------------------------
+// div_ceil_i32
+// ---------------------------------------------------------------------------
+
+/// Perform ceiling division of two signed 32-bit integers.
+///
+/// Returns the smallest integer greater than or equal to the exact quotient
+/// `a / b`.
+///
+/// ## Examples
+///
+/// - `div_ceil_i32(7, 2)` returns `4` (truncation would give `3`)
+/// - `div_ceil_i32(-7, 2)` returns `-3` (same as truncation)
+/// - `div_ceil_i32(7, -2)` returns `-3` (same as truncation)
+/// - `div_ceil_i32(-7, -2)` returns `4` (truncation would give `3`)
+///
+/// ## Panics
+///
+/// Panics if `b == 0` (division by zero). Also panics on overflow when
+/// dividing `i32::MIN` by `-1`.
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: ceiling division semantics are correct
+pub fn div_ceil_i32(a: i32, b: i32) -> i32 {
+    let d = a / b;
+    let r = a % b;
+    if r != 0 && (a > 0) == (b > 0) {
+        d + 1
+    } else {
+        d
+    }
+}
+
+// ===========================================================================
+// Number Theory (u64)
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// gcd_u64
+// ---------------------------------------------------------------------------
+
+/// Compute the greatest common divisor (GCD) of two unsigned 64-bit integers
+/// using the Euclidean algorithm.
+///
+/// The GCD is the largest positive integer that divides both `a` and `b`
+/// without remainder. By convention, `gcd(0, 0) == 0`.
+///
+/// ## Examples
+///
+/// - `gcd_u64(12, 8)` returns `4`
+/// - `gcd_u64(7, 0)` returns `7`
+/// - `gcd_u64(0, 7)` returns `7`
+/// - `gcd_u64(0, 0)` returns `0`
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: Euclidean algorithm is correct
+pub fn gcd_u64(mut a: u64, mut b: u64) -> u64 {
+    while b != 0 {
+        let t = b;
+        b = a % b;
+        a = t;
+    }
+    a
+}
+
+// ---------------------------------------------------------------------------
+// lcm_u64
+// ---------------------------------------------------------------------------
+
+/// Compute the least common multiple (LCM) of two unsigned 64-bit integers.
+///
+/// The LCM is the smallest positive integer that is a multiple of both
+/// `a` and `b`. Returns `0` if either argument is `0`.
+///
+/// ## Overflow
+///
+/// The result may overflow `u64`. This function uses `checked_mul` and
+/// `checked_div` to avoid silent overflow; if the LCM would overflow,
+/// this function panics in debug builds.
+///
+/// ## Examples
+///
+/// - `lcm_u64(4, 6)` returns `12`
+/// - `lcm_u64(7, 0)` returns `0`
+/// - `lcm_u64(0, 7)` returns `0`
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: LCM via GCD is correct
+pub fn lcm_u64(a: u64, b: u64) -> u64 {
+    if a == 0 || b == 0 {
+        return 0;
+    }
+    let g = gcd_u64(a, b);
+    // Compute (a / g) * b to reduce overflow risk
+    a / g * b
+}
+
+// ===========================================================================
+// Bit Manipulation (u64)
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// is_power_of_two_u64
+// ---------------------------------------------------------------------------
+
+/// Return `true` if `x` is a power of two.
+///
+/// A power of two has exactly one bit set. Returns `false` for `x == 0`.
+///
+/// ## Examples
+///
+/// - `is_power_of_two_u64(1)` returns `true` (2⁰)
+/// - `is_power_of_two_u64(2)` returns `true` (2¹)
+/// - `is_power_of_two_u64(3)` returns `false`
+/// - `is_power_of_two_u64(0)` returns `false`
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: power-of-two check is correct
+pub fn is_power_of_two_u64(x: u64) -> bool {
+    x != 0 && (x & (x - 1)) == 0
+}
+
+// ---------------------------------------------------------------------------
+// next_power_of_two_u64
+// ---------------------------------------------------------------------------
+
+/// Return the smallest power of two greater than or equal to `x`.
+///
+/// If `x` is already a power of two, returns `x` itself.
+///
+/// ## Panics
+///
+/// Panics if the next power of two exceeds `u64::MAX` (i.e., when
+/// `x > 2⁶³`).
+///
+/// ## Examples
+///
+/// - `next_power_of_two_u64(1)` returns `1`
+/// - `next_power_of_two_u64(5)` returns `8`
+/// - `next_power_of_two_u64(8)` returns `8`
+/// - `next_power_of_two_u64(0)` returns `1`
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: next-power-of-two is correct for all valid inputs
+pub fn next_power_of_two_u64(x: u64) -> u64 {
+    if x == 0 {
+        return 1;
+    }
+    let mut v = x - 1;
+    v |= v >> 1;
+    v |= v >> 2;
+    v |= v >> 4;
+    v |= v >> 8;
+    v |= v >> 16;
+    v |= v >> 32;
+    v + 1
+}
+
+// ---------------------------------------------------------------------------
+// count_ones_u64
+// ---------------------------------------------------------------------------
+
+/// Count the number of set bits (population count) in a `u64`.
+///
+/// Also known as the Hamming weight or popcount.
+///
+/// ## Examples
+///
+/// - `count_ones_u64(0)` returns `0`
+/// - `count_ones_u64(1)` returns `1`
+/// - `count_ones_u64(0xFF)` returns `8`
+/// - `count_ones_u64(u64::MAX)` returns `64`
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: delegates to Rust std u64::count_ones
+pub fn count_ones_u64(x: u64) -> u32 {
+    x.count_ones()
+}
+
+// ---------------------------------------------------------------------------
+// count_zeros_u64
+// ---------------------------------------------------------------------------
+
+/// Count the number of clear (zero) bits in a `u64`.
+///
+/// Equivalent to `64 - count_ones_u64(x)`.
+///
+/// ## Examples
+///
+/// - `count_zeros_u64(0)` returns `64`
+/// - `count_zeros_u64(u64::MAX)` returns `0`
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: delegates to Rust std u64::count_zeros
+pub fn count_zeros_u64(x: u64) -> u32 {
+    x.count_zeros()
+}
+
+// ---------------------------------------------------------------------------
+// leading_zeros_u64
+// ---------------------------------------------------------------------------
+
+/// Count the number of leading zero bits in a `u64`.
+///
+/// For `x == 0`, returns `64`.
+///
+/// ## Examples
+///
+/// - `leading_zeros_u64(1)` returns `63`
+/// - `leading_zeros_u64(u64::MAX)` returns `0`
+/// - `leading_zeros_u64(0)` returns `64`
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: delegates to Rust std u64::leading_zeros
+pub fn leading_zeros_u64(x: u64) -> u32 {
+    x.leading_zeros()
+}
+
+// ---------------------------------------------------------------------------
+// trailing_zeros_u64
+// ---------------------------------------------------------------------------
+
+/// Count the number of trailing zero bits in a `u64`.
+///
+/// For `x == 0`, returns `64`.
+///
+/// ## Examples
+///
+/// - `trailing_zeros_u64(1)` returns `0`
+/// - `trailing_zeros_u64(2)` returns `1`
+/// - `trailing_zeros_u64(0)` returns `64`
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: delegates to Rust std u64::trailing_zeros
+pub fn trailing_zeros_u64(x: u64) -> u32 {
+    x.trailing_zeros()
+}
+
+// ---------------------------------------------------------------------------
+// reverse_bits_u64
+// ---------------------------------------------------------------------------
+
+/// Reverse the bit order of a `u64`.
+///
+/// Bit 0 becomes bit 63, bit 1 becomes bit 62, and so on.
+///
+/// ## Examples
+///
+/// - `reverse_bits_u64(1)` returns `1 << 63`
+/// - `reverse_bits_u64(0)` returns `0`
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: delegates to Rust std u64::reverse_bits
+pub fn reverse_bits_u64(x: u64) -> u64 {
+    x.reverse_bits()
+}
+
+// ---------------------------------------------------------------------------
+// swap_bytes_u64
+// ---------------------------------------------------------------------------
+
+/// Reverse the byte order of a `u64` (endianness conversion).
+///
+/// Converts between big-endian and little-endian representations.
+///
+/// ## Examples
+///
+/// - `swap_bytes_u64(0x0102030405060708)` returns `0x0807060504030201`
+/// - `swap_bytes_u64(0)` returns `0`
+///
+/// ## BD Annotations
+///
+/// - CapD: { Read, Compare } — pure function, no side effects
+// VUMA-VERIFIED: delegates to Rust std u64::swap_bytes
+pub fn swap_bytes_u64(x: u64) -> u64 {
+    x.swap_bytes()
 }
 
 // ===========================================================================
@@ -3076,5 +3617,248 @@ mod tests {
         // Negative range
         assert_eq!(clamp(-5, -10, -1), -5);
         assert_eq!(clamp(-15, -10, -1), -10);
+    }
+
+    // --- Typed integer arithmetic tests ---
+
+    #[test]
+    fn test_abs_i32_comprehensive() {
+        assert_eq!(abs_i32(0), 0);
+        assert_eq!(abs_i32(1), 1);
+        assert_eq!(abs_i32(-1), 1);
+        assert_eq!(abs_i32(42), 42);
+        assert_eq!(abs_i32(-42), 42);
+        assert_eq!(abs_i32(i32::MAX), i32::MAX);
+        // i32::MIN wraps
+        assert_eq!(abs_i32(i32::MIN), i32::MIN);
+    }
+
+    #[test]
+    fn test_abs_i64_comprehensive() {
+        assert_eq!(abs_i64(0), 0);
+        assert_eq!(abs_i64(1), 1);
+        assert_eq!(abs_i64(-1), 1);
+        assert_eq!(abs_i64(42), 42);
+        assert_eq!(abs_i64(-42), 42);
+        assert_eq!(abs_i64(i64::MAX), i64::MAX);
+        // i64::MIN wraps
+        assert_eq!(abs_i64(i64::MIN), i64::MIN);
+    }
+
+    #[test]
+    fn test_min_i32_comprehensive() {
+        assert_eq!(min_i32(1, 2), 1);
+        assert_eq!(min_i32(2, 1), 1);
+        assert_eq!(min_i32(-1, 1), -1);
+        assert_eq!(min_i32(0, 0), 0);
+        assert_eq!(min_i32(i32::MIN, i32::MAX), i32::MIN);
+    }
+
+    #[test]
+    fn test_max_i32_comprehensive() {
+        assert_eq!(max_i32(1, 2), 2);
+        assert_eq!(max_i32(2, 1), 2);
+        assert_eq!(max_i32(-1, 1), 1);
+        assert_eq!(max_i32(0, 0), 0);
+        assert_eq!(max_i32(i32::MIN, i32::MAX), i32::MAX);
+    }
+
+    #[test]
+    fn test_min_u64_comprehensive() {
+        assert_eq!(min_u64(1, 2), 1);
+        assert_eq!(min_u64(2, 1), 1);
+        assert_eq!(min_u64(0, 100), 0);
+        assert_eq!(min_u64(42, 42), 42);
+        assert_eq!(min_u64(0, u64::MAX), 0);
+    }
+
+    #[test]
+    fn test_max_u64_comprehensive() {
+        assert_eq!(max_u64(1, 2), 2);
+        assert_eq!(max_u64(2, 1), 2);
+        assert_eq!(max_u64(0, 100), 100);
+        assert_eq!(max_u64(42, 42), 42);
+        assert_eq!(max_u64(0, u64::MAX), u64::MAX);
+    }
+
+    #[test]
+    fn test_clamp_i32_comprehensive() {
+        // Within range
+        assert_eq!(clamp_i32(5, 0, 10), 5);
+        // Below range
+        assert_eq!(clamp_i32(-5, 0, 10), 0);
+        // Above range
+        assert_eq!(clamp_i32(15, 0, 10), 10);
+        // At boundaries
+        assert_eq!(clamp_i32(0, 0, 10), 0);
+        assert_eq!(clamp_i32(10, 0, 10), 10);
+        // Singleton range
+        assert_eq!(clamp_i32(42, 7, 7), 7);
+        assert_eq!(clamp_i32(7, 7, 7), 7);
+        // Negative range
+        assert_eq!(clamp_i32(-5, -10, -1), -5);
+        assert_eq!(clamp_i32(-15, -10, -1), -10);
+    }
+
+    #[test]
+    fn test_clamp_u64_comprehensive() {
+        // Within range
+        assert_eq!(clamp_u64(5, 0, 10), 5);
+        // Below range
+        assert_eq!(clamp_u64(0, 3, 10), 3);
+        // Above range
+        assert_eq!(clamp_u64(15, 0, 10), 10);
+        // At boundaries
+        assert_eq!(clamp_u64(0, 0, 10), 0);
+        assert_eq!(clamp_u64(10, 0, 10), 10);
+        // Singleton range
+        assert_eq!(clamp_u64(42, 7, 7), 7);
+        assert_eq!(clamp_u64(7, 7, 7), 7);
+        // Large values
+        assert_eq!(clamp_u64(u64::MAX, 0, 1000), 1000);
+    }
+
+    // --- Integer division tests ---
+
+    #[test]
+    fn test_div_floor_i32_comprehensive() {
+        // Same-sign divisions (same as truncation)
+        assert_eq!(div_floor_i32(7, 2), 3);
+        assert_eq!(div_floor_i32(-7, -2), 3);
+        assert_eq!(div_floor_i32(6, 3), 2);
+        // Different-sign divisions (floor differs from truncation)
+        assert_eq!(div_floor_i32(-7, 2), -4);
+        assert_eq!(div_floor_i32(7, -2), -4);
+        // Exact division
+        assert_eq!(div_floor_i32(8, 4), 2);
+        assert_eq!(div_floor_i32(-8, 4), -2);
+        // Zero dividend
+        assert_eq!(div_floor_i32(0, 5), 0);
+    }
+
+    #[test]
+    fn test_div_ceil_i32_comprehensive() {
+        // Same-sign divisions (ceil differs from truncation when remainder ≠ 0)
+        assert_eq!(div_ceil_i32(7, 2), 4);
+        assert_eq!(div_ceil_i32(-7, -2), 4);
+        // Different-sign divisions (same as truncation)
+        assert_eq!(div_ceil_i32(-7, 2), -3);
+        assert_eq!(div_ceil_i32(7, -2), -3);
+        // Exact division
+        assert_eq!(div_ceil_i32(8, 4), 2);
+        assert_eq!(div_ceil_i32(-8, 4), -2);
+        // Zero dividend
+        assert_eq!(div_ceil_i32(0, 5), 0);
+    }
+
+    // --- Number theory tests ---
+
+    #[test]
+    fn test_gcd_u64_comprehensive() {
+        assert_eq!(gcd_u64(12, 8), 4);
+        assert_eq!(gcd_u64(8, 12), 4); // Order doesn't matter
+        assert_eq!(gcd_u64(7, 0), 7);
+        assert_eq!(gcd_u64(0, 7), 7);
+        assert_eq!(gcd_u64(0, 0), 0);
+        assert_eq!(gcd_u64(17, 13), 1); // Both prime
+        assert_eq!(gcd_u64(100, 75), 25);
+        assert_eq!(gcd_u64(1, 1), 1);
+    }
+
+    #[test]
+    fn test_lcm_u64_comprehensive() {
+        assert_eq!(lcm_u64(4, 6), 12);
+        assert_eq!(lcm_u64(6, 4), 12); // Order doesn't matter
+        assert_eq!(lcm_u64(7, 0), 0);
+        assert_eq!(lcm_u64(0, 7), 0);
+        assert_eq!(lcm_u64(0, 0), 0);
+        assert_eq!(lcm_u64(3, 5), 15); // Both prime
+        assert_eq!(lcm_u64(1, 1), 1);
+        assert_eq!(lcm_u64(12, 18), 36);
+    }
+
+    // --- Bit manipulation tests ---
+
+    #[test]
+    fn test_is_power_of_two_u64_comprehensive() {
+        assert!(is_power_of_two_u64(1));
+        assert!(is_power_of_two_u64(2));
+        assert!(is_power_of_two_u64(4));
+        assert!(is_power_of_two_u64(1024));
+        assert!(is_power_of_two_u64(1u64 << 63));
+        assert!(!is_power_of_two_u64(0));
+        assert!(!is_power_of_two_u64(3));
+        assert!(!is_power_of_two_u64(5));
+        assert!(!is_power_of_two_u64(6));
+        assert!(!is_power_of_two_u64(u64::MAX));
+    }
+
+    #[test]
+    fn test_next_power_of_two_u64_comprehensive() {
+        assert_eq!(next_power_of_two_u64(0), 1);
+        assert_eq!(next_power_of_two_u64(1), 1);
+        assert_eq!(next_power_of_two_u64(2), 2);
+        assert_eq!(next_power_of_two_u64(3), 4);
+        assert_eq!(next_power_of_two_u64(5), 8);
+        assert_eq!(next_power_of_two_u64(8), 8);
+        assert_eq!(next_power_of_two_u64(9), 16);
+        assert_eq!(next_power_of_two_u64(1023), 1024);
+        assert_eq!(next_power_of_two_u64(1024), 1024);
+    }
+
+    #[test]
+    fn test_count_ones_u64_comprehensive() {
+        assert_eq!(count_ones_u64(0), 0);
+        assert_eq!(count_ones_u64(1), 1);
+        assert_eq!(count_ones_u64(0xFF), 8);
+        assert_eq!(count_ones_u64(0xFFFF), 16);
+        assert_eq!(count_ones_u64(u64::MAX), 64);
+        assert_eq!(count_ones_u64(0b101010), 3);
+    }
+
+    #[test]
+    fn test_count_zeros_u64_comprehensive() {
+        assert_eq!(count_zeros_u64(0), 64);
+        assert_eq!(count_zeros_u64(u64::MAX), 0);
+        assert_eq!(count_zeros_u64(1), 63);
+        assert_eq!(count_zeros_u64(0xFF), 56);
+    }
+
+    #[test]
+    fn test_leading_zeros_u64_comprehensive() {
+        assert_eq!(leading_zeros_u64(0), 64);
+        assert_eq!(leading_zeros_u64(1), 63);
+        assert_eq!(leading_zeros_u64(u64::MAX), 0);
+        assert_eq!(leading_zeros_u64(1u64 << 63), 0);
+        assert_eq!(leading_zeros_u64(1u64 << 32), 31);
+    }
+
+    #[test]
+    fn test_trailing_zeros_u64_comprehensive() {
+        assert_eq!(trailing_zeros_u64(0), 64);
+        assert_eq!(trailing_zeros_u64(1), 0);
+        assert_eq!(trailing_zeros_u64(2), 1);
+        assert_eq!(trailing_zeros_u64(4), 2);
+        assert_eq!(trailing_zeros_u64(1u64 << 63), 63);
+    }
+
+    #[test]
+    fn test_reverse_bits_u64_comprehensive() {
+        assert_eq!(reverse_bits_u64(0), 0);
+        assert_eq!(reverse_bits_u64(1), 1u64 << 63);
+        assert_eq!(reverse_bits_u64(1u64 << 63), 1);
+        assert_eq!(reverse_bits_u64(u64::MAX), u64::MAX);
+        // Double reversal is identity
+        assert_eq!(reverse_bits_u64(reverse_bits_u64(0xDEADBEEF)), 0xDEADBEEF);
+    }
+
+    #[test]
+    fn test_swap_bytes_u64_comprehensive() {
+        assert_eq!(swap_bytes_u64(0), 0);
+        assert_eq!(swap_bytes_u64(0x0102030405060708), 0x0807060504030201);
+        assert_eq!(swap_bytes_u64(0xFF00000000000000), 0x00000000000000FF);
+        assert_eq!(swap_bytes_u64(u64::MAX), u64::MAX);
+        // Double swap is identity
+        assert_eq!(swap_bytes_u64(swap_bytes_u64(0x123456789ABCDEF0)), 0x123456789ABCDEF0);
     }
 }

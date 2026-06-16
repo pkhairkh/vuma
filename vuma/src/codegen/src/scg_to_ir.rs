@@ -191,6 +191,9 @@ pub enum ScgStatement {
     StructAccess(StructAccessNode),
     /// Enum tag access: read the discriminant or payload of a tagged union.
     EnumAccess(EnumAccessNode),
+    /// Compute the address of a named symbol (function or data).
+    /// Lowers to `IRInstr::GetAddress`.
+    GetAddress(GetAddressNode),
 }
 
 /// Control-flow node.
@@ -459,6 +462,21 @@ pub enum EnumAccessNode {
     },
 }
 
+/// Compute the address of a named symbol: `dst = getaddress name`
+///
+/// This is produced when the source contains `@function_name` (address-of
+/// a function) or similar symbol-reference expressions.  It lowers to
+/// `IRInstr::GetAddress`, which the backend emits as a `mov rax, imm64`
+/// with an `R_X86_64_64` relocation (on x86_64) or equivalent on other
+/// targets.
+#[derive(Debug, Clone)]
+pub struct GetAddressNode {
+    /// Destination variable name.
+    pub dst: String,
+    /// Symbol name whose address is being taken.
+    pub name: String,
+}
+
 /// SCG data declaration.
 #[derive(Debug, Clone)]
 pub struct ScgData {
@@ -483,6 +501,10 @@ struct LoopContext {
     header_label: String,
     /// Label of the loop exit block (target for `break`).
     exit_label: String,
+    /// Variable snapshots from each break path: (break_block_label, names_at_break).
+    /// Used to create phi nodes at the loop exit that merge values from
+    /// all break paths with the normal (fall-through) exit path.
+    break_snapshots: Vec<(String, HashMap<String, u32>)>,
 }
 
 // ---------------------------------------------------------------------------
@@ -711,6 +733,9 @@ impl IRBuilder {
             ScgStatement::EnumAccess(ea) => {
                 self.lower_enum_access(ea, ir_func, names)?;
             }
+            ScgStatement::GetAddress(ga) => {
+                self.lower_get_address(ga, ir_func, names)?;
+            }
         }
         Ok(())
     }
@@ -738,7 +763,7 @@ impl IRBuilder {
                 self.lower_loop(body, ir_func, names)?;
             }
             ControlNode::Break => {
-                self.lower_break(ir_func)?;
+                self.lower_break(ir_func, names)?;
             }
             ControlNode::Continue => {
                 self.lower_continue(ir_func)?;
@@ -957,6 +982,7 @@ impl IRBuilder {
         self.loop_stack.push(LoopContext {
             header_label: loop_header.clone(),
             exit_label: loop_exit.clone(),
+            break_snapshots: Vec::new(),
         });
 
         // ── Step 1: Snapshot names BEFORE the loop ──
@@ -1067,21 +1093,125 @@ impl IRBuilder {
 
         // ── Step 6: Update names for variables after the loop ──
         // After the loop, variables that were modified in the loop should
-        // use the phi result (which merges both paths). For break exits,
-        // we'd need to track the value at the break point, but for simplicity
-        // we use the phi result (which is correct for the last iteration's value
-        // when the loop exits normally).
-        for (name, _, phi_vreg) in &phi_info {
-            // After the loop, the variable's value is the phi result
-            // (which is correct for normal loop exit)
-            names.insert(name.clone(), *phi_vreg);
+        // use the appropriate value depending on how the loop exited.
+        //
+        // If there are break paths, we need phi nodes at the loop exit
+        // that merge the values from each break path and the normal
+        // (fall-through / back-edge) exit path.
+        //
+        // Retrieve break snapshots from the loop context before popping it.
+        let break_snapshots = self
+            .loop_stack
+            .last()
+            .map(|ctx| ctx.break_snapshots.clone())
+            .unwrap_or_default();
+
+        // Determine which variables were modified on any break path.
+        // A variable needs a phi at the loop exit if it was modified
+        // on at least one break path OR in the loop body (normal exit).
+        let mut all_exit_modified: HashSet<String> = HashSet::new();
+        for (_, snap_names) in &break_snapshots {
+            for name in snap_names.keys() {
+                if names_before.get(name) != snap_names.get(name) {
+                    all_exit_modified.insert(name.clone());
+                }
+            }
+        }
+        // Also include variables modified in the loop body (normal exit path).
+        for name in names.keys() {
+            if names_before.get(name) != names.get(name) {
+                all_exit_modified.insert(name.clone());
+            }
         }
 
-        // ── Step 7: Loop exit block ──
-        ir_func.append_block(&loop_exit);
+        if !break_snapshots.is_empty() && !all_exit_modified.is_empty() {
+            // ── Create phi nodes at the loop exit block ──
+            // The loop exit block already exists (created in Step 7 below,
+            // but we create it early here so we can insert phi instructions).
+            ir_func.append_block(&loop_exit);
 
-        // Pop loop context.
-        self.loop_stack.pop();
+            // Collect all predecessor labels and their name maps:
+            // 1. Each break path is a predecessor
+            // 2. The normal (fall-through/back-edge) exit is also a predecessor
+            //    if the loop body doesn't always break.
+            let mut _exit_predecessors: Vec<(String, HashMap<String, u32>)> = break_snapshots.clone();
+
+            // Check if the loop can exit normally (without a break).
+            // If the last block of the loop body falls through (has no
+            // terminator or branches back to the header), it's not a
+            // normal exit path.  But if it has a conditional branch that
+            // could fall through, we need to handle that.  For simplicity,
+            // we always include the back-edge block's names as the normal
+            // exit path — but only if there's a path from the back-edge
+            // block that doesn't go to the header.  Since our current
+            // loop structure always branches back to the header from the
+            // back-edge, the normal exit path doesn't add a predecessor.
+            // However, we still need to provide a value for variables
+            // that were modified in the loop body but NOT on any break
+            // path.  We use the phi result (header phi) for those.
+
+            let mut exit_phi_info: Vec<(String, u32, u32)> = Vec::new(); // (name, phi_vreg_in_header, exit_phi_vreg)
+            let mut exit_phi_instructions: Vec<IRInstruction> = Vec::new();
+
+            let mut sorted_modified: Vec<String> = all_exit_modified.iter().cloned().collect();
+            sorted_modified.sort();
+
+            for name in &sorted_modified {
+                let exit_phi_vreg = self.alloc_vreg();
+                // Get the header phi vreg for this name (used as fallback for
+                // the normal exit path when no explicit predecessor provides it).
+                let header_phi_vreg = phi_info.iter()
+                    .find(|(n, _, _)| n == name)
+                    .map(|(_, _, pv)| *pv)
+                    .unwrap_or_else(|| {
+                        // Variable didn't exist before the loop — use its current vreg.
+                        *names.get(name).unwrap_or(&0)
+                    });
+
+                ir_func.register_vreg(VirtualRegister::named(exit_phi_vreg, name.as_str()));
+                exit_phi_info.push((name.clone(), header_phi_vreg, exit_phi_vreg));
+
+                // Build incoming list: one entry per break path.
+                let mut incoming: Vec<(IRValue, String)> = Vec::new();
+                for (break_label, snap_names) in &break_snapshots {
+                    let vreg = snap_names.get(name).copied().unwrap_or(header_phi_vreg);
+                    incoming.push((IRValue::Register(vreg), break_label.clone()));
+                }
+
+                exit_phi_instructions.push(IRInstruction::Phi {
+                    dst: IRValue::Register(exit_phi_vreg),
+                    incoming,
+                });
+            }
+
+            // Insert phi instructions at the beginning of the loop exit block.
+            let exit_block = ir_func.blocks.iter_mut()
+                .find(|b| b.label == loop_exit)
+                .expect("loop exit block must exist");
+            for phi in exit_phi_instructions {
+                exit_block.instructions.push(phi);
+            }
+
+            // After the loop, use the exit phi results for modified variables.
+            for (name, _, exit_phi_vreg) in &exit_phi_info {
+                names.insert(name.clone(), *exit_phi_vreg);
+            }
+
+            // Pop loop context.
+            self.loop_stack.pop();
+        } else {
+            // No break paths or no modified variables — use the header phi
+            // results (original behavior).
+            for (name, _, phi_vreg) in &phi_info {
+                names.insert(name.clone(), *phi_vreg);
+            }
+
+            // ── Step 7: Loop exit block ──
+            ir_func.append_block(&loop_exit);
+
+            // Pop loop context.
+            self.loop_stack.pop();
+        }
 
         Ok(())
     }
@@ -1166,14 +1296,20 @@ impl IRBuilder {
     }
 
     /// Lower a `break` to a jump to the enclosing loop's exit label.
-    fn lower_break(&mut self, ir_func: &mut IRFunction) -> Result<()> {
-        let exit_label = self
+    fn lower_break(&mut self, ir_func: &mut IRFunction, names: &HashMap<String, u32>) -> Result<()> {
+        let ctx = self
             .loop_stack
-            .last()
-            .map(|ctx| ctx.exit_label.clone())
+            .last_mut()
             .ok_or_else(|| {
                 crate::CodegenError::TranslationError("break outside of loop".to_string())
             })?;
+
+        let exit_label = ctx.exit_label.clone();
+        // Snapshot the current variable map at the break point so that
+        // we can create phi nodes at the loop exit that merge values
+        // from all break paths.
+        let break_block_label = ir_func.current_block().label.clone();
+        ctx.break_snapshots.push((break_block_label, names.clone()));
 
         ir_func.current_block().push(IRInstruction::Branch {
             target: exit_label.clone(),
@@ -2060,6 +2196,33 @@ impl IRBuilder {
     }
 
     // =======================================================================
+    // GetAddress lowering
+    // =======================================================================
+
+    /// Lower a `GetAddress` node to `IRInstr::GetAddress`.
+    ///
+    /// This produces `dst = getaddress @name`, which the backend lowers
+    /// to a `mov rax, imm64` with an `R_X86_64_64` relocation on x86_64
+    /// (or equivalent on other targets).
+    fn lower_get_address(
+        &mut self,
+        ga: &GetAddressNode,
+        ir_func: &mut IRFunction,
+        names: &mut HashMap<String, u32>,
+    ) -> Result<()> {
+        let dst_vreg = self.alloc_vreg();
+        ir_func.register_vreg(VirtualRegister::named(dst_vreg, &ga.dst));
+        names.insert(ga.dst.clone(), dst_vreg);
+
+        ir_func.current_block().push(IRInstruction::GetAddress {
+            dst: IRValue::Register(dst_vreg),
+            name: ga.name.clone(),
+        });
+
+        Ok(())
+    }
+
+    // =======================================================================
     // Helpers
     // =======================================================================
 
@@ -2228,6 +2391,9 @@ impl IRBuilder {
                     Self::expr_uses(off, &mut uses);
                 }
                 Self::expr_uses(value, &mut uses);
+            }
+            ScgStatement::GetAddress(ga) => {
+                defs.insert(ga.dst.clone());
             }
             ScgStatement::Cast(c) => {
                 defs.insert(c.dst.clone());

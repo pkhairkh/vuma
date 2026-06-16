@@ -36,7 +36,7 @@ use crate::backend::{
     BackendError, PhysicalReg, RegClass, RelocationEntry, TargetInfo, X86_64TargetInfo,
 };
 use crate::ir::{BinOpKind, CastKind, CmpKind, IRFunction, IRInstr, IRType, IRValue, UnaryOpKind};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 // ===========================================================================
@@ -1905,14 +1905,23 @@ fn decode_modrm_reg_rm(bytes: &[u8], pos: usize, rex_r: bool, rex_b: bool) -> (u
 
 /// Build a minimal ELF64 binary for x86_64 from raw code bytes.
 ///
-/// Produces a static executable with a single LOAD segment containing the
-/// `.text` section. Entry point is at `base_addr` + header offset.
-fn build_minimal_x86_64_elf(code: &[u8], base_addr: u64) -> Vec<u8> {
+/// Produces a static executable with up to two LOAD segments:
+/// 1. `.text` segment (PF_R | PF_X) — executable code
+/// 2. `.bss` segment (PF_R | PF_W) — zero-initialized writable data (only if `bss_size > 0`)
+///
+/// Entry point is at `base_addr` + header offset.
+///
+/// The BSS segment is placed at the next page-aligned address after the text
+/// segment. It has `p_filesz = 0` and `p_memsz = bss_size`, so the kernel
+/// zero-fills it at load time. This provides writable memory for global
+/// variables (e.g., those created by `allocate()` in VUMA source).
+fn build_minimal_x86_64_elf(code: &[u8], base_addr: u64, bss_size: u64) -> Vec<u8> {
     const PAGE_SIZE: u64 = 0x1000; // 4 KB
 
     let elf_header_size: u64 = 64;
     let phdr_size: u64 = 56;
-    let phdr_end = elf_header_size + phdr_size;
+    let num_phdrs: u64 = if bss_size > 0 { 2 } else { 1 };
+    let phdr_end = elf_header_size + phdr_size * num_phdrs;
     // Page-align the text segment start for mmap compatibility (required by QEMU).
     let text_offset = ((phdr_end + PAGE_SIZE - 1) / PAGE_SIZE) * PAGE_SIZE;
     let text_size = code.len() as u64;
@@ -1939,12 +1948,12 @@ fn build_minimal_x86_64_elf(code: &[u8], base_addr: u64) -> Vec<u8> {
     elf.extend_from_slice(&0u32.to_le_bytes()); // e_flags
     elf.extend_from_slice(&64u16.to_le_bytes()); // e_ehsize
     elf.extend_from_slice(&56u16.to_le_bytes()); // e_phentsize
-    elf.extend_from_slice(&1u16.to_le_bytes()); // e_phnum
+    elf.extend_from_slice(&(num_phdrs as u16).to_le_bytes()); // e_phnum
     elf.extend_from_slice(&64u16.to_le_bytes()); // e_shentsize
     elf.extend_from_slice(&0u16.to_le_bytes()); // e_shnum
     elf.extend_from_slice(&0u16.to_le_bytes()); // e_shstrndx
 
-    // --- Program Header (single LOAD segment: PF_R | PF_X) ---
+    // --- Program Header 1: LOAD segment for .text (PF_R | PF_X) ---
     elf.extend_from_slice(&1u32.to_le_bytes()); // p_type = PT_LOAD
     elf.extend_from_slice(&5u32.to_le_bytes()); // p_flags = PF_R | PF_X
     elf.extend_from_slice(&text_offset.to_le_bytes()); // p_offset
@@ -1954,6 +1963,22 @@ fn build_minimal_x86_64_elf(code: &[u8], base_addr: u64) -> Vec<u8> {
     elf.extend_from_slice(&text_size.to_le_bytes()); // p_memsz
     elf.extend_from_slice(&PAGE_SIZE.to_le_bytes()); // p_align
 
+    // --- Program Header 2: LOAD segment for .bss (PF_R | PF_W) ---
+    // Only emitted when there is BSS data. The BSS segment starts at the
+    // next page boundary after the text segment. p_filesz = 0 because BSS
+    // has no file content; the kernel zero-fills p_memsz bytes at load time.
+    if bss_size > 0 {
+        let bss_vaddr = ((base_addr + text_offset + text_size + PAGE_SIZE - 1) / PAGE_SIZE) * PAGE_SIZE;
+        elf.extend_from_slice(&1u32.to_le_bytes()); // p_type = PT_LOAD
+        elf.extend_from_slice(&6u32.to_le_bytes()); // p_flags = PF_R | PF_W
+        elf.extend_from_slice(&0u64.to_le_bytes()); // p_offset (no file content)
+        elf.extend_from_slice(&bss_vaddr.to_le_bytes()); // p_vaddr
+        elf.extend_from_slice(&bss_vaddr.to_le_bytes()); // p_paddr
+        elf.extend_from_slice(&0u64.to_le_bytes()); // p_filesz (BSS is zero-filled)
+        elf.extend_from_slice(&bss_size.to_le_bytes()); // p_memsz
+        elf.extend_from_slice(&PAGE_SIZE.to_le_bytes()); // p_align
+    }
+
     // --- Padding + Code section ---
     // Pad to page-aligned text_offset
     while (elf.len() as u64) < text_offset {
@@ -1962,6 +1987,351 @@ fn build_minimal_x86_64_elf(code: &[u8], base_addr: u64) -> Vec<u8> {
     elf.extend_from_slice(code);
 
     elf
+}
+
+// ===========================================================================
+// Runtime Syscall Stubs
+// ===========================================================================
+
+/// Build runtime syscall stubs for x86_64 Linux.
+///
+/// These are tiny functions that use the `syscall` instruction to implement
+/// POSIX operations without requiring libc. Each stub:
+/// 1. Loads the syscall number into RAX
+/// 2. Moves the 4th argument from RCX to R10 (for mmap, which has ≥4 args)
+/// 3. Executes `syscall`
+/// 4. Returns to the caller
+///
+/// # x86_64 Linux Syscall Numbers
+///
+/// | Function  | Syscall # | Name              |
+/// |-----------|-----------|-------------------|
+/// | read      | 0         | sys_read          |
+/// | write     | 1         | sys_write         |
+/// | open      | 2         | sys_open          |
+/// | close     | 3         | sys_close         |
+/// | sigaction | 13        | sys_rt_sigaction  |
+/// | mmap      | 9         | sys_mmap          |
+/// | munmap    | 11        | sys_munmap        |
+/// | alarm     | 37        | sys_alarm         |
+/// | exit      | 60        | sys_exit          |
+/// | unlink    | 87        | sys_unlink        |
+///
+/// # Calling Convention Notes
+///
+/// - SystemV AMD64 ABI: args in RDI, RSI, RDX, RCX, R8, R9
+/// - Linux syscall ABI: args in RDI, RSI, RDX, R10, R8, R9, number in RAX
+/// - The only difference is the 4th arg: RCX (calling) vs R10 (syscall)
+/// - For functions with ≤3 args, no register shuffling is needed
+fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
+    let mut stubs = Vec::new();
+
+    // write(fd, buf, count) → ssize_t  [syscall 1]
+    // args: RDI=fd, RSI=buf, RDX=count → same as syscall convention
+    {
+        let mut code = Vec::new();
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 1));  // sys_write
+        code.extend(encode_syscall());                     // syscall
+        code.extend(encode_ret());                         // ret
+        stubs.push(("write".to_string(), code));
+    }
+
+    // open(pathname, flags, mode) → int  [syscall 2]
+    // args: RDI=pathname, RSI=flags, RDX=mode → same as syscall convention
+    {
+        let mut code = Vec::new();
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 2));  // sys_open
+        code.extend(encode_syscall());                     // syscall
+        code.extend(encode_ret());                         // ret
+        stubs.push(("open".to_string(), code));
+    }
+
+    // close(fd) → int  [syscall 3]
+    // args: RDI=fd → same as syscall convention
+    {
+        let mut code = Vec::new();
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 3));  // sys_close
+        code.extend(encode_syscall());                     // syscall
+        code.extend(encode_ret());                         // ret
+        stubs.push(("close".to_string(), code));
+    }
+
+    // mmap(addr, length, prot, flags, fd, offset) → void*  [syscall 9]
+    // args: RDI=addr, RSI=length, RDX=prot, RCX=flags, R8=fd, R9=offset
+    // syscall: RDI=addr, RSI=length, RDX=prot, R10=flags, R8=fd, R9=offset
+    // Need to move 4th arg from RCX → R10 before syscall
+    {
+        let mut code = Vec::new();
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 9));   // sys_mmap
+        code.extend(encode_mov_reg_reg(Gpr::R10, Gpr::Rcx)); // RCX → R10
+        code.extend(encode_syscall());                      // syscall
+        code.extend(encode_ret());                          // ret
+        stubs.push(("mmap".to_string(), code));
+    }
+
+    // munmap(addr, length) → int  [syscall 11]
+    // args: RDI=addr, RSI=length → same as syscall convention
+    {
+        let mut code = Vec::new();
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 11));  // sys_munmap
+        code.extend(encode_syscall());                      // syscall
+        code.extend(encode_ret());                          // ret
+        stubs.push(("munmap".to_string(), code));
+    }
+
+    // unlink(pathname) → int  [syscall 87]
+    // args: RDI=pathname → same as syscall convention
+    {
+        let mut code = Vec::new();
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 87));  // sys_unlink
+        code.extend(encode_syscall());                      // syscall
+        code.extend(encode_ret());                          // ret
+        stubs.push(("unlink".to_string(), code));
+    }
+
+    // read(fd, buf, count) → ssize_t  [syscall 0]
+    // args: RDI=fd, RSI=buf, RDX=count → same as syscall convention
+    {
+        let mut code = Vec::new();
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 0));   // sys_read
+        code.extend(encode_syscall());                     // syscall
+        code.extend(encode_ret());                         // ret
+        stubs.push(("read".to_string(), code));
+    }
+
+    // exit(code) → void  [syscall 60]
+    // args: RDI=code → same as syscall convention
+    {
+        let mut code = Vec::new();
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 60));  // sys_exit
+        code.extend(encode_syscall());                     // syscall
+        // No ret — exit never returns.  Include INT3 as safety guard.
+        code.extend(encode_int3());
+        stubs.push(("exit".to_string(), code));
+    }
+
+    // sigaction(signum, act, oldact) → long  [syscall 13 = rt_sigaction]
+    // Kernel signature: rt_sigaction(int signum, const struct sigaction *act,
+    //                                 struct sigaction *oldact, size_t sigsetsize)
+    // VUMA declares 3 args; the 4th (sigsetsize) must be 8 on x86_64.
+    // args: RDI=signum, RSI=act, RDX=oldact → same as syscall for first 3
+    // R10 must be set to 8 (sigsetsize) before the syscall.
+    {
+        let mut code = Vec::new();
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 13));  // sys_rt_sigaction
+        code.extend(encode_mov_reg_imm32(Gpr::R10, 8));   // sigsetsize = 8
+        code.extend(encode_syscall());                     // syscall
+        code.extend(encode_ret());                         // ret
+        stubs.push(("sigaction".to_string(), code));
+    }
+
+    // alarm(seconds) → unsigned int  [syscall 37]
+    // args: RDI=seconds → same as syscall convention
+    {
+        let mut code = Vec::new();
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 37));  // sys_alarm
+        code.extend(encode_syscall());                     // syscall
+        code.extend(encode_ret());                         // ret
+        stubs.push(("alarm".to_string(), code));
+    }
+
+    // pipe(int pipefd[2]) → int  [syscall 22]
+    // args: RDI=pipefd → same as syscall convention
+    {
+        let mut code = Vec::new();
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 22));  // sys_pipe
+        code.extend(encode_syscall());                     // syscall
+        code.extend(encode_ret());                         // ret
+        stubs.push(("pipe".to_string(), code));
+    }
+
+    // dup2(int oldfd, int newfd) → int  [syscall 33]
+    // args: RDI=oldfd, RSI=newfd → same as syscall convention
+    {
+        let mut code = Vec::new();
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 33));  // sys_dup2
+        code.extend(encode_syscall());                     // syscall
+        code.extend(encode_ret());                         // ret
+        stubs.push(("dup2".to_string(), code));
+    }
+
+    // getpid() → pid_t  [syscall 39]
+    // args: none
+    {
+        let mut code = Vec::new();
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 39));  // sys_getpid
+        code.extend(encode_syscall());                     // syscall
+        code.extend(encode_ret());                         // ret
+        stubs.push(("getpid".to_string(), code));
+    }
+
+    // fork() → pid_t  [syscall 57]
+    // args: none
+    {
+        let mut code = Vec::new();
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 57));  // sys_fork
+        code.extend(encode_syscall());                     // syscall
+        code.extend(encode_ret());                         // ret
+        stubs.push(("fork".to_string(), code));
+    }
+
+    // execve(const char *pathname, char *const argv[], char *const envp[]) → int  [syscall 59]
+    // args: RDI=pathname, RSI=argv, RDX=envp → same as syscall convention
+    {
+        let mut code = Vec::new();
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 59));  // sys_execve
+        code.extend(encode_syscall());                     // syscall
+        code.extend(encode_ret());                         // ret
+        stubs.push(("execve".to_string(), code));
+    }
+
+    // wait4(pid_t pid, int *wstatus, int options, struct rusage *rusage) → pid_t  [syscall 61]
+    // VUMA declares: fn waitpid(pid: i64, status: Address, options: i64) -> i64;
+    // args: RDI=pid, RSI=wstatus, RDX=options → same as syscall for first 3
+    // R10 must be 0 (NULL rusage) before the syscall.
+    {
+        let mut code = Vec::new();
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 61));  // sys_wait4
+        code.extend(encode_xor_reg_reg(Gpr::R10, Gpr::R10)); // rusage = NULL
+        code.extend(encode_syscall());                     // syscall
+        code.extend(encode_ret());                         // ret
+        stubs.push(("waitpid".to_string(), code));
+    }
+
+    // strcmp(const char *s1, const char *s2) → int
+    // Not a syscall — implemented as a small assembly loop.
+    // Register usage: AL = byte from s1, CL = byte from s2,
+    // RDI and RSI are advanced each iteration.
+    {
+        // .loop:
+        //   8A 07           mov al, [rdi]
+        //   8A 0E           mov cl, [rsi]
+        //   38 C8           cmp al, cl
+        //   75 0C           jne .done (+12)
+        //   84 C0           test al, al
+        //   74 08           jz .done (+8)
+        //   48 FF C7        inc rdi
+        //   48 FF C6        inc rsi
+        //   EB EC           jmp .loop (-20)
+        // .done:
+        //   0F B6 C0        movzx eax, al
+        //   0F B6 C9        movzx ecx, cl
+        //   29 C8           sub eax, ecx
+        //   C3              ret
+        let code: Vec<u8> = vec![
+            0x8A, 0x07,                         // mov al, [rdi]
+            0x8A, 0x0E,                         // mov cl, [rsi]
+            0x38, 0xC8,                         // cmp al, cl
+            0x75, 0x0C,                         // jne .done (+12)
+            0x84, 0xC0,                         // test al, al
+            0x74, 0x08,                         // jz .done (+8)
+            0x48, 0xFF, 0xC7,                   // inc rdi
+            0x48, 0xFF, 0xC6,                   // inc rsi
+            0xEB, 0xEC,                         // jmp .loop (-20)
+            0x0F, 0xB6, 0xC0,                   // movzx eax, al
+            0x0F, 0xB6, 0xC9,                   // movzx ecx, cl
+            0x29, 0xC8,                         // sub eax, ecx
+            0xC3,                               // ret
+        ];
+        stubs.push(("strcmp".to_string(), code));
+    }
+
+    // ── Network / epoll syscall stubs ────────────────────────────────────
+    // These are needed by programs that use socket, epoll, etc.
+    // On x86_64 Linux, the 4th argument differs between the SystemV calling
+    // convention (RCX) and the syscall convention (R10), so any stub with
+    // ≥4 args must move RCX → R10 before the syscall instruction.
+
+    // socket(domain, type, protocol) → int  [syscall 41]
+    // args: RDI=domain, RSI=type, RDX=protocol → same as syscall convention
+    {
+        let mut code = Vec::new();
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 41));  // sys_socket
+        code.extend(encode_syscall());                     // syscall
+        code.extend(encode_ret());                         // ret
+        stubs.push(("socket".to_string(), code));
+    }
+
+    // setsockopt(sockfd, level, optname, optval, optlen) → int  [syscall 54]
+    // args: RDI=sockfd, RSI=level, RDX=optname, RCX=optval, R8=optlen
+    // syscall: RDI=sockfd, RSI=level, RDX=optname, R10=optval, R8=optlen
+    // Need to move 4th arg from RCX → R10
+    {
+        let mut code = Vec::new();
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 54));  // sys_setsockopt
+        code.extend(encode_mov_reg_reg(Gpr::R10, Gpr::Rcx)); // RCX → R10
+        code.extend(encode_syscall());                     // syscall
+        code.extend(encode_ret());                         // ret
+        stubs.push(("setsockopt".to_string(), code));
+    }
+
+    // bind(sockfd, addr, addrlen) → int  [syscall 49]
+    // args: RDI=sockfd, RSI=addr, RDX=addrlen → same as syscall convention
+    {
+        let mut code = Vec::new();
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 49));  // sys_bind
+        code.extend(encode_syscall());                     // syscall
+        code.extend(encode_ret());                         // ret
+        stubs.push(("bind".to_string(), code));
+    }
+
+    // listen(sockfd, backlog) → int  [syscall 50]
+    // args: RDI=sockfd, RSI=backlog → same as syscall convention
+    {
+        let mut code = Vec::new();
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 50));  // sys_listen
+        code.extend(encode_syscall());                     // syscall
+        code.extend(encode_ret());                         // ret
+        stubs.push(("listen".to_string(), code));
+    }
+
+    // accept(sockfd, addr, addrlen) → int  [syscall 43]
+    // args: RDI=sockfd, RSI=addr, RDX=addrlen → same as syscall convention
+    {
+        let mut code = Vec::new();
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 43));  // sys_accept
+        code.extend(encode_syscall());                     // syscall
+        code.extend(encode_ret());                         // ret
+        stubs.push(("accept".to_string(), code));
+    }
+
+    // epoll_create1(flags) → int  [syscall 291]
+    // args: RDI=flags → same as syscall convention
+    {
+        let mut code = Vec::new();
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 291)); // sys_epoll_create1
+        code.extend(encode_syscall());                     // syscall
+        code.extend(encode_ret());                         // ret
+        stubs.push(("epoll_create1".to_string(), code));
+    }
+
+    // epoll_ctl(epfd, op, fd, event) → int  [syscall 233]
+    // args: RDI=epfd, RSI=op, RDX=fd, RCX=event
+    // syscall: RDI=epfd, RSI=op, RDX=fd, R10=event
+    // Need to move 4th arg from RCX → R10
+    {
+        let mut code = Vec::new();
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 233)); // sys_epoll_ctl
+        code.extend(encode_mov_reg_reg(Gpr::R10, Gpr::Rcx)); // RCX → R10
+        code.extend(encode_syscall());                     // syscall
+        code.extend(encode_ret());                         // ret
+        stubs.push(("epoll_ctl".to_string(), code));
+    }
+
+    // epoll_wait(epfd, events, maxevents, timeout) → int  [syscall 232]
+    // args: RDI=epfd, RSI=events, RDX=maxevents, RCX=timeout
+    // syscall: RDI=epfd, RSI=events, RDX=maxevents, R10=timeout
+    // Need to move 4th arg from RCX → R10
+    {
+        let mut code = Vec::new();
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 232)); // sys_epoll_wait
+        code.extend(encode_mov_reg_reg(Gpr::R10, Gpr::Rcx)); // RCX → R10
+        code.extend(encode_syscall());                     // syscall
+        code.extend(encode_ret());                         // ret
+        stubs.push(("epoll_wait".to_string(), code));
+    }
+
+    stubs
 }
 
 // ===========================================================================
@@ -2106,25 +2476,45 @@ impl Backend for X86_64Backend {
     }
 
     fn encode_program(&self, program: &AllocatedProgram) -> Result<Vec<u8>, BackendError> {
-        // Build the _start stub: call main; mov rdi, rax; mov rax, 60; syscall
-        // This is exactly 16 bytes.
-        // E8 <rel32 to main>          ; call main       (5 bytes)
-        // 48 89 C7                    ; mov rdi, rax    (3 bytes)
-        // 48 C7 C0 3C 00 00 00       ; mov rax, 60     (7 bytes)
-        // 0F 05                       ; syscall          (2 bytes)
-        // Total: 5 + 3 + 7 + 2 = 17 bytes... wait, let me recalculate
-        // call main = E8 xx xx xx xx = 5 bytes
-        // mov rdi, rax = 48 89 C7 = 3 bytes
-        // mov rax, 60 = 48 C7 C0 3C 00 00 00 = 7 bytes
-        // syscall = 0F 05 = 2 bytes
-        // Total = 5 + 3 + 7 + 2 = 17 bytes
+        // Build the _start stub:
+        //   mov rdi, [rsp]          ; argc = *RSP       (4 bytes with SIB)
+        //   lea rsi, [rsp + 8]      ; argv = RSP + 8    (5 bytes with SIB)
+        //   E8 <rel32 to main>      ; call main         (5 bytes)
+        //   48 89 C7                ; mov rdi, rax      (3 bytes)
+        //   48 C7 C0 3C 00 00 00   ; mov rax, 60       (7 bytes)
+        //   0F 05                   ; syscall            (2 bytes)
+        // Total = 4 + 5 + 5 + 3 + 7 + 2 = 26 bytes
+        //
+        // On Linux x86_64, the process entry stack layout is:
+        //   [RSP]     = argc (8 bytes)
+        //   [RSP+8]   = argv[0] pointer
+        //   [RSP+16]  = argv[1] pointer
+        //   ...
+        //   NULL
+        //   envp[0], envp[1], ..., NULL
+        //   auxv...
 
-        let start_stub_size: usize = 17;
+        let start_stub_size: usize = 26;
 
-        // Find the main function and compute its offset within all_code
+        // Build runtime syscall stubs for common POSIX operations.
+        // These are small functions that use the `syscall` instruction
+        // directly, avoiding the need for libc linkage.
+        let runtime_stubs = build_runtime_syscall_stubs();
+        let runtime_stubs_total_size: usize = runtime_stubs.iter()
+            .map(|(_, code)| code.len())
+            .sum();
+
+        // Compute offsets: _start stub → runtime stubs → user functions
         let mut func_offsets: HashMap<String, usize> = HashMap::new();
-        let mut current_offset: usize = start_stub_size; // _start stub comes first
+        let mut current_offset: usize = start_stub_size;
 
+        // Runtime stubs come right after _start
+        for (name, code) in &runtime_stubs {
+            func_offsets.insert(name.clone(), current_offset);
+            current_offset += code.len();
+        }
+
+        // User functions follow the runtime stubs
         for func in &program.functions {
             func_offsets.insert(func.name.clone(), current_offset);
             let func_size: usize = func.blocks.iter()
@@ -2136,6 +2526,12 @@ impl Backend for X86_64Backend {
 
         // Build _start stub
         let mut start_stub = Vec::with_capacity(start_stub_size);
+
+        // mov rdi, [rsp] — load argc from top of stack
+        start_stub.extend(encode_mov_reg_mem(Gpr::Rdi, Gpr::Rsp, 0));
+
+        // lea rsi, [rsp + 8] — argv starts at RSP + 8
+        start_stub.extend(encode_lea_reg_mem(Gpr::Rsi, Gpr::Rsp, 8));
 
         // call main (E8 + rel32 placeholder)
         start_stub.extend(encode_call_rel32(0));
@@ -2150,24 +2546,26 @@ impl Backend for X86_64Backend {
         start_stub.extend(encode_syscall());
 
         // Patch the call main rel32 offset in _start stub
-        // The rel32 is at offset 1 (after the E8 opcode byte)
-        // Find the "main" function — could be named "main" or "fn_main_entry(...)"
+        // The mov rdi,[rsp] is 4 bytes, lea rsi,[rsp+8] is 5 bytes, then E8 at offset 9.
+        // The rel32 is at offset 10 (after the E8 opcode byte at offset 9)
         let main_key = func_offsets.keys()
             .find(|k| *k == "main" || k.starts_with("fn_main"))
             .cloned();
         if let Some(ref key) = main_key {
             let main_offset = func_offsets[key];
-            let rel32_patch_offset = 1usize; // offset within start_stub
+            let rel32_patch_offset = 10usize; // offset within start_stub
             // rel32 = target - (call_site + 5)
-            // The CALL instruction is at offset 0 of all_code, so the
-            // instruction after CALL is at offset 5.
-            let rel32 = (main_offset as i64) - 5i64;
+            // call_site = offset of the E8 byte = 9
+            let rel32 = (main_offset as i64) - (9i64 + 5i64);
             start_stub[rel32_patch_offset..rel32_patch_offset + 4]
                 .copy_from_slice(&(rel32 as i32).to_le_bytes());
         }
 
-        // Concatenate all function code
+        // Concatenate: _start stub → runtime stubs → user functions
         let mut all_code = start_stub;
+        for (_, code) in &runtime_stubs {
+            all_code.extend_from_slice(code);
+        }
         for func in &program.functions {
             for block in &func.blocks {
                 for instr in &block.instructions {
@@ -2176,24 +2574,68 @@ impl Backend for X86_64Backend {
             }
         }
 
-        // Patch relocations for each function
+        // ── Collect data symbols from R_X86_64_64 relocations ─────────
+        // Data symbols (global variables from `allocate()` in VUMA source)
+        // are referenced via R_X86_64_64 absolute 64-bit relocations.
+        // They need addresses in a writable BSS segment.  We assign each
+        // unique symbol a slot of 8 bytes (pointer-sized) in BSS.
+        const BSS_SLOT_SIZE: u64 = 8;
+        let mut data_symbols: Vec<String> = Vec::new();
+        {
+            let mut seen: HashSet<String> = HashSet::new();
+            for func in &program.functions {
+                for reloc in &func.relocations {
+                    if reloc.reloc_type == R_X86_64_64
+                        && !func_offsets.contains_key(&reloc.symbol)
+                        && seen.insert(reloc.symbol.clone())
+                    {
+                        data_symbols.push(reloc.symbol.clone());
+                    }
+                }
+            }
+        }
+        let bss_size: u64 = data_symbols.len() as u64 * BSS_SLOT_SIZE;
+
+        // ── Compute BSS virtual address ──────────────────────────────
+        // The BSS segment starts at the next page boundary after the text
+        // segment.  The text segment layout is computed inside
+        // build_minimal_x86_64_elf, so we mirror the same calculation here.
+        const ELF_HEADER_SIZE: u64 = 64;
+        const PHDR_SIZE: u64 = 56;
+        const PAGE_SIZE: u64 = 0x1000;
+        const BASE_ADDR: u64 = 0x400000;
+        let num_phdrs: u64 = if bss_size > 0 { 2 } else { 1 };
+        let phdr_end = ELF_HEADER_SIZE + PHDR_SIZE * num_phdrs;
+        let text_offset = ((phdr_end + PAGE_SIZE - 1) / PAGE_SIZE) * PAGE_SIZE;
+        let text_size = all_code.len() as u64;
+        let bss_vaddr: u64 = if bss_size > 0 {
+            ((BASE_ADDR + text_offset + text_size + PAGE_SIZE - 1) / PAGE_SIZE) * PAGE_SIZE
+        } else {
+            0
+        };
+
+        // Build a map: data symbol name → BSS virtual address
+        let data_symbol_addrs: HashMap<String, u64> = data_symbols
+            .iter()
+            .enumerate()
+            .map(|(i, name)| (name.clone(), bss_vaddr + i as u64 * BSS_SLOT_SIZE))
+            .collect();
+
+        // ── Patch relocations for each function ──────────────────────
         // We need to adjust relocation offsets: they are relative to the start
-        // of the function's code, but now all_code has the _start stub prepended,
-        // plus all preceding functions.
-        let mut func_code_offset: usize = start_stub_size;
+        // of the function's code, but now all_code has the _start stub, runtime
+        // stubs, and preceding functions prepended.
+        let mut func_code_offset: usize = start_stub_size + runtime_stubs_total_size;
         for func in &program.functions {
             for reloc in &func.relocations {
                 let abs_offset = func_code_offset + reloc.offset as usize;
-                if abs_offset + 4 > all_code.len() {
-                    continue; // skip invalid relocations
-                }
 
                 if reloc.reloc_type == R_X86_64_PLT32 {
+                    if abs_offset + 4 > all_code.len() {
+                        continue; // skip invalid relocations
+                    }
                     // R_X86_64_PLT32 for x86_64 CALL/JMP rel32:
-                    // The rel32 field is relative to the end of the 4-byte displacement,
-                    // i.e., the address AFTER the rel32 field (P + 4).
-                    // So: rel32 = S - (P + 4) = S - P - 4
-                    // With addend: rel32 = S + A - P - 4
+                    // rel32 = S + A - P - 4
                     // S = symbol value (target address)
                     // A = addend (current value at the relocation site)
                     // P = place (address of the relocation site)
@@ -2212,7 +2654,6 @@ impl Backend for X86_64Backend {
                             .copy_from_slice(&resolved.to_le_bytes());
                     } else {
                         // External symbol — defer to the system linker.
-                        // Leave the CALL instruction pointing to offset 0 (CALL #0 = trap).
                         // When compiled with `vuma compile --format obj`, the linker
                         // will resolve this relocation against libc or the runtime.
                         log::debug!(
@@ -2221,10 +2662,28 @@ impl Backend for X86_64Backend {
                         );
                         continue;
                     }
+                } else if reloc.reloc_type == R_X86_64_64 {
+                    // R_X86_64_64 — absolute 64-bit address relocation.
+                    // Used by GetAddress to load the address of a data symbol.
+                    if abs_offset + 8 > all_code.len() {
+                        continue; // skip invalid relocations
+                    }
+                    if let Some(&addr) = data_symbol_addrs.get(&reloc.symbol) {
+                        all_code[abs_offset..abs_offset + 8]
+                            .copy_from_slice(&addr.to_le_bytes());
+                    } else if func_offsets.contains_key(&reloc.symbol) {
+                        // Function symbol with absolute relocation — patch with
+                        // the function's virtual address (text_offset + offset).
+                        let func_addr = BASE_ADDR + text_offset + func_offsets[&reloc.symbol] as u64;
+                        all_code[abs_offset..abs_offset + 8]
+                            .copy_from_slice(&func_addr.to_le_bytes());
+                    } else {
+                        log::debug!(
+                            "unresolved R_X86_64_64 relocation: symbol '{}' in '{}' at 0x{:X} — deferring to linker",
+                            reloc.symbol, func.name, reloc.offset
+                        );
+                    }
                 }
-                // R_X86_64_64 relocations would need different handling
-                // (absolute 64-bit address), but for intra-program references
-                // we currently only use PLT32.
             }
             let func_size: usize = func.blocks.iter()
                 .flat_map(|b| b.instructions.iter())
@@ -2233,7 +2692,7 @@ impl Backend for X86_64Backend {
             func_code_offset += func_size;
         }
 
-        Ok(build_minimal_x86_64_elf(&all_code, 0x400000))
+        Ok(build_minimal_x86_64_elf(&all_code, BASE_ADDR, bss_size))
     }
 
     fn return_stub(&self) -> Vec<u8> {
@@ -2728,7 +3187,7 @@ mod tests {
     #[test]
     fn test_elf_header() {
         let code = encode_ret();
-        let elf = build_minimal_x86_64_elf(&code, 0x400000);
+        let elf = build_minimal_x86_64_elf(&code, 0x400000, 0);
 
         // Check ELF magic
         assert_eq!(&elf[0..4], &[0x7f, b'E', b'L', b'F']);
@@ -2740,11 +3199,60 @@ mod tests {
         assert_eq!(u16::from_le_bytes([elf[16], elf[17]]), 2);
         // e_machine = EM_X86_64 (62)
         assert_eq!(u16::from_le_bytes([elf[18], elf[19]]), 62);
-        // e_entry should be base + 64 + 56 = 0x400078
+        // With 1 phdr (no BSS), e_phnum = 1
+        assert_eq!(u16::from_le_bytes([elf[56], elf[57]]), 1);
+        // entry = base + page_align(64 + 56) = 0x400000 + 0x1000 = 0x401000
         let entry = u64::from_le_bytes([
             elf[24], elf[25], elf[26], elf[27], elf[28], elf[29], elf[30], elf[31],
         ]);
-        assert_eq!(entry, 0x400078);
+        assert_eq!(entry, 0x401000);
+    }
+
+    #[test]
+    fn test_elf_header_with_bss() {
+        let code = encode_ret();
+        let elf = build_minimal_x86_64_elf(&code, 0x400000, 16); // 16 bytes of BSS
+
+        // Check ELF magic
+        assert_eq!(&elf[0..4], &[0x7f, b'E', b'L', b'F']);
+        // e_type = ET_EXEC
+        assert_eq!(u16::from_le_bytes([elf[16], elf[17]]), 2);
+        // e_machine = EM_X86_64
+        assert_eq!(u16::from_le_bytes([elf[18], elf[19]]), 62);
+        // With BSS, e_phnum = 2
+        assert_eq!(u16::from_le_bytes([elf[56], elf[57]]), 2);
+        // Entry point is still in text segment
+        let entry = u64::from_le_bytes([
+            elf[24], elf[25], elf[26], elf[27], elf[28], elf[29], elf[30], elf[31],
+        ]);
+        // With 2 phdrs, text_offset = page_align(64 + 2*56) = page_align(176) = 0x1000
+        // entry = 0x400000 + 0x1000 = 0x401000
+        assert_eq!(entry, 0x401000);
+
+        // Second program header (BSS) starts at offset 64 + 56 = 120
+        // Elf64_Phdr layout: p_type(4) p_flags(4) p_offset(8) p_vaddr(8) p_paddr(8) p_filesz(8) p_memsz(8) p_align(8)
+        let ph2 = 64 + 56;
+        let p_type = u32::from_le_bytes([elf[ph2], elf[ph2+1], elf[ph2+2], elf[ph2+3]]);
+        assert_eq!(p_type, 1); // PT_LOAD
+        let p_flags = u32::from_le_bytes([elf[ph2+4], elf[ph2+5], elf[ph2+6], elf[ph2+7]]);
+        assert_eq!(p_flags, 6); // PF_R | PF_W
+        let p_filesz = u64::from_le_bytes([
+            elf[ph2+32], elf[ph2+33], elf[ph2+34], elf[ph2+35],
+            elf[ph2+36], elf[ph2+37], elf[ph2+38], elf[ph2+39],
+        ]);
+        assert_eq!(p_filesz, 0); // BSS has no file content
+        let p_memsz = u64::from_le_bytes([
+            elf[ph2+40], elf[ph2+41], elf[ph2+42], elf[ph2+43],
+            elf[ph2+44], elf[ph2+45], elf[ph2+46], elf[ph2+47],
+        ]);
+        assert_eq!(p_memsz, 16);
+        let bss_vaddr = u64::from_le_bytes([
+            elf[ph2+16], elf[ph2+17], elf[ph2+18], elf[ph2+19],
+            elf[ph2+20], elf[ph2+21], elf[ph2+22], elf[ph2+23],
+        ]);
+        // BSS vaddr should be page-aligned and after the text segment
+        assert_eq!(bss_vaddr % 0x1000, 0, "BSS vaddr should be page-aligned");
+        assert!(bss_vaddr > 0x401000, "BSS should be after text segment");
     }
 
     // ── Backend Trait Dispatch Test ─────────────────────────────────────
