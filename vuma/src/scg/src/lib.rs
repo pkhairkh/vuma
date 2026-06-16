@@ -27,7 +27,7 @@
 //! ```
 //! use vuma_scg::{
 //!     SCG, NodeId, NodeData, NodeType, NodePayload,
-//!     ComputationNode, EdgeKind, ProgramPoint,
+//!     ComputationKind, ComputationNode, EdgeKind, ProgramPoint,
 //!     SCGQuery, execute,
 //! };
 //!
@@ -36,7 +36,7 @@
 //! let n1 = scg.add_node(
 //!     NodeType::Computation,
 //!     NodePayload::Computation(ComputationNode {
-//!         operation: "add".to_string(),
+//!         kind: ComputationKind::Other("add".to_string()),
 //!         result_type: Some("i32".to_string()),
 //!         tail_call: false }),
 //!     ProgramPoint { file: None, line: None, column: None, offset: None },
@@ -164,7 +164,7 @@ mod tests {
         let comp_id = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "write_buffer".to_string(),
+                kind: ComputationKind::Other("write_buffer".to_string()),
                 result_type: None,
                 tail_call: false,
             }),

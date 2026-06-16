@@ -344,7 +344,7 @@ mod tests {
         collector.set_scg_node_count(42);
         collector.set_ir_function_count(3);
         collector.set_ir_instruction_count(100);
-        collector.set_binary_size_bytes(2048);
+        collector.set_binary_size(2048);
 
         let report = collector.finalize();
         assert_eq!(report.error_count, 1);

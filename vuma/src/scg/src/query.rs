@@ -865,7 +865,7 @@ mod tests {
     use crate::edge::EdgeKind;
     use crate::graph::SCG;
     use crate::node::{
-        AccessNode, AllocationNode, ComputationNode, DeallocationNode, NodePayload, NodeType,
+        AccessNode, AllocationNode, ComputationKind, ComputationNode, DeallocationNode, NodePayload, NodeType,
         ProgramPoint,
     };
     use crate::region::{DeploymentTarget, SCGRegion};
@@ -885,7 +885,7 @@ mod tests {
         scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "add".to_string(),
+                kind: ComputationKind::Other("add".to_string()),
                 result_type: None,
                 tail_call: false,
             }),
@@ -904,7 +904,7 @@ mod tests {
         scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "sub".to_string(),
+                kind: ComputationKind::Other("sub".to_string()),
                 result_type: None,
                 tail_call: false,
             }),
@@ -1020,7 +1020,7 @@ mod tests {
         let n1 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "a".to_string(),
+                kind: ComputationKind::Other("a".to_string()),
                 result_type: None,
                 tail_call: false,
             }),
@@ -1029,7 +1029,7 @@ mod tests {
         let n2 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "b".to_string(),
+                kind: ComputationKind::Other("b".to_string()),
                 result_type: None,
                 tail_call: false,
             }),
@@ -1051,7 +1051,7 @@ mod tests {
         let n1 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "a".to_string(),
+                kind: ComputationKind::Other("a".to_string()),
                 result_type: None,
                 tail_call: false,
             }),

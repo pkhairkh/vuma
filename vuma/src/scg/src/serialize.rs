@@ -999,7 +999,7 @@ fn read_payload(
 
     match payload_type {
         NodeType::Computation => {
-            let operation = reader.read_string(&format!("{}.operation", context))?;
+            let operation = reader.read_string(&format!("{}.kind", context))?;
             let result_type = reader.read_optional_string(&format!("{}.result_type", context))?;
             Ok(NodePayload::Computation(ComputationNode {
                 kind: ComputationKind::Other(operation),

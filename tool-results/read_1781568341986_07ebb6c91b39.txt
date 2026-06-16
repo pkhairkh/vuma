@@ -1,0 +1,629 @@
+     1→# VUMA Worklog
+     2→
+     3→## Task 6-g: Update formal specification documents for new features
+     4→
+     5→**Date**: 2026-03-06
+     6→**Agent**: Code Agent
+     7→
+     8→### Summary
+     9→
+    10→Updated three formal specification documents in `docs/specs/` to reflect the new features from Waves 1–5: DWARF debug info generation, atomic operations (LSE atomics), FP conversion casts, the E037 relocation error diagnostic, and the removal of platform-specific (Pi5) references.
+    11→
+    12→### Files Changed
+    13→
+    14→1. **`docs/specs/arm64-codegen-algorithm.md`** (MODIFIED)
+    15→   - Updated header from "Broadcom BCM2712" to "ARMv8.2-A, Cortex-A76 quad-core and compatible"
+    16→   - Expanded CastNode section with comprehensive FP conversion documentation:
+    17→     - Added `from_ty`/`to_ty` field-based dispatch (replacing old `from`/`to`/`convert` pattern)
+    18→     - Added signed integer-to-float conversions (`scvtf` variants for i32→f32, i32→f64, i64→f32, i64→f64)
+    19→     - Added unsigned integer-to-float conversions (`ucvtf` variants for u32→f64, u64→f64)
+    20→     - Added float-to-signed-integer conversions (`fcvtzs` variants for f32→i32, f64→i32, f64→i64)
+    21→     - Added float-to-unsigned-integer conversions (`fcvtzu` variants for f64→u64, f32→u32)
+    22→     - Added float precision conversions (`fcvt` for f32↔f64)
+    23→     - Added explanation of why `ucvtf`/`fcvtzu` must be used for unsigned variants
+    24→   - Expanded atomics section with ARMv8.1-A LSE (Large System Extensions) single-instruction atomics:
+    25→     - Documented `casal`, `ldaddal`, `swpal`, `clral`, `setal`, `eoral` instructions
+    26→     - Added LL/SC vs LSE selection logic based on target CPU feature flags
+    27→     - Added comprehensive atomic operation summary table (11 operations × LL/SC + LSE + ordering)
+    28→   - Added new Section 8: DWARF Debug Information Generation:
+    29→     - 8.1: DWARF sections (`.debug_abbrev`, `.debug_info`, `.debug_line`, `.debug_frame`)
+    30→     - 8.2: AArch64-specific DWARF configuration table (address_size, min_inst_length, CIE registers)
+    31→     - 8.3: Integration with code generation pipeline (`--debug-info` flag, DwarfBuilder)
+    32→     - 8.4: Cross-backend DWARF support table (8 backends with address size and min inst length)
+    33→   - Removed BCM2712 SoC references throughout (replaced with generic AArch64 terminology)
+    34→   - Removed "the AArch64's" possessive form in several places
+    35→
+    36→2. **`docs/specs/security-model-spec.md`** (MODIFIED)
+    37→   - Updated version from 1.0.0 to 1.1.0, date to 2026-03-06
+    38→   - Added item 5 to Section 5.8 (Remaining Attack Surface): E037 relocation error
+    39→     - Documents the E037 diagnostic for unresolved relocations
+    40→     - Explains security relevance: unresolved relocations could lead to arbitrary code execution
+    41→     - Notes E037 is emitted across all 8 backends
+    42→     - Documents structured suggestion for defining missing functions
+    43→   - Added "Unresolved relocations | E037 diagnostic" row to Section 6.5 comprehensive mapping table
+    44→   - Removed BCM2712 reference from Section 6.1 overview
+    45→
+    46→3. **`docs/specs/benchmark-design.md`** (MODIFIED)
+    47→   - Updated version from 1.0 to 1.1, date to 2026-03-06
+    48→   - Replaced all Pi5-implication references:
+    49→     - "AArch64's four Cortex-A76 cores" → "multi-core AArch64 processors"
+    50→     - "2x L2 cache size on Cortex-A76" → "2x L2 cache size on typical AArch64 cores"
+    51→     - "one cache line on Cortex-A76" → "one cache line on typical AArch64 cores"
+    52→     - "BCM2712, Quad-core ARM Cortex-A76 @ 2.4 GHz" → "ARM Cortex-A76 class, quad-core @ 2.4 GHz or equivalent"
+    53→     - "8 GB LPDDR4X-4267" → "8 GB DDR4 or LPDDR4X (or equivalent)"
+    54→     - "8 GB LPDDR4X-4267 RAM" → generic description
+    55→     - "15-20 cycles on Cortex-A76" → "15-20 cycles on Cortex-A76 class cores"
+    56→     - "the AArch64's specific hardware characteristics" → "AArch64 hardware characteristics"
+    57→     - "the AArch64's CPU governor" → "the CPU governor"
+    58→     - "Cortex-A76 pipeline configurations" → "AArch64 pipeline configurations"
+    59→     - "The ARM NEON SIMD unit on Cortex-A76" → "The ARM NEON SIMD unit on AArch64"
+    60→     - "the AArch64's thermal management" → "AArch64 thermal management"
+    61→   - Updated results template: ram_gb changed from hardcoded 8 to 0 (placeholder)
+    62→
+    63→4. **`docs/specs/multi-arch-isa-research.md`** (MODIFIED)
+    64→   - Fixed awkward phrasing "for the AArch64" → removed redundant phrase
+    65→
+    66→### Internal Consistency Check
+    67→
+    68→| Cross-Reference | Status |
+    69→|-----------------|--------|
+    70→| Codegen spec DWARF section ↔ `src/codegen/src/dwarf.rs` implementation | ✅ Consistent — same 4 sections, same CIE parameters, same 8-backend table |
+    71→| Codegen spec atomics ↔ security spec PAC/BTI/MTE | ✅ Consistent — both reference ARMv8.2-A feature set |
+    72→| Codegen spec FP conversions ↔ CHANGELOG Wave 3 | ✅ Consistent — `from_ty`/`to_ty` dispatch, `ucvtf`/`fcvtzu` unsigned variants |
+    73→| Security spec E037 ↔ diagnostics.rs + all backend codegen | ✅ Consistent — same error code, same "unresolved relocation" message format |
+    74→| Benchmark spec hardware config ↔ codegen spec target | ✅ Consistent — both now use generic AArch64 terminology, no Pi5-specific references |
+    75→| No remaining BCM2712/Pi5/Raspberry Pi references | ✅ Verified across all 15 spec files |
+    76→
+    77→### Design Decisions
+    78→
+    79→- Added DWARF as a new Section 8 in the codegen spec (rather than expanding Section 5) because DWARF is a cross-cutting concern that applies to all backends, not just the ELF format
+    80→- Expanded the CastNode section rather than adding a separate FP conversions section, because the CastNode is the single IR node that handles all conversion types — adding a separate section would create redundancy
+    81→- Added E037 to the "Remaining Attack Surface" section of the security spec rather than creating a new section, because unresolved relocations are a residual risk (not fully eliminated) rather than a prevented class
+    82→- Made hardware references generic ("Cortex-A76 class", "or equivalent") rather than removing them entirely, because specific microarchitecture details are still needed for pipeline scheduling and cache parameter specifications
+    83→- No test spec exists in the specs directory — the instruction said "If there's a test spec, update it" — so no test spec was created or modified
+    84→
+    85→---
+    86→
+    87→## Task 6-h: Final comprehensive sweep for inconsistencies, stale references, and issues before release
+    88→
+    89→**Date**: 2026-03-06
+    90→**Agent**: Code Agent
+    91→
+    92→### Summary
+    93→
+    94→Performed a comprehensive pre-release sweep of the entire VUMA project, checking for stale Pi5/Raspberry references, TODO/FIXME/unimplemented!/todo! macros, version number inconsistencies, example file sanity, .gitignore coverage, and LICENSE file existence. Fixed all critical issues; flagged minor ones.
+    95→
+    96→### Search Results
+    97→
+    98→| Check | Pattern | Result | Verdict |
+    99→|-------|---------|--------|---------|
+   100→| Pi5 references | `pi5`, `Pi5`, `pi 5`, `Pi 5` | Only in CHANGELOG.md (historical) and regression.rs test code | ✅ Acceptable |
+   101→| Raspberry references | `raspberry`, `Raspberry` | Only in CHANGELOG.md (historical) and regression.rs comment | ✅ Acceptable |
+   102→| `CompileTarget::Pi5` / `Pi5Bare` / `Pi5Linux` / `TestCategory::Pi5` | Production code references | Zero matches in any .rs file | ✅ Clean |
+   103→| TODO in Rust source | `TODO` | 2 comments in loongarch64/stack_slot_isel.rs (lines 1118, 1194) | ⚠️ Minor — code comments about u64→FP edge cases |
+   104→| FIXME in Rust source | `FIXME` | Zero matches | ✅ Clean |
+   105→| `todo!()` macro | `todo!(` | Zero matches in production code (only string literals in parser error messages) | ✅ Clean |
+   106→| `unimplemented!()` macro | `unimplemented!(` | Zero matches | ✅ Clean |
+   107→| Version `0.2.0` | Stale references | Found in REPL banner, language-reference.md, ROADMAP.md, architecture.md | 🔴 Fixed |
+   108→| Version `0.1.0-alpha` vs `0.1.0-alpha.1` | CHANGELOG mismatch | CHANGELOG had `[0.1.0-alpha]`, Cargo.toml had `0.1.0-alpha.1` | 🔴 Fixed |
+   109→| Duplicate version in CHANGELOG | Two `[0.1.0-alpha.1]` sections | Old 0.2.0 section renamed to 0.1.0-alpha.1 conflicted with new section | 🔴 Fixed |
+   110→| LICENSE file | Must exist per Cargo.toml `license = "MIT"` | File was missing | 🔴 Fixed |
+   111→| .gitignore coverage | Fuzz targets, proptest regressions, IDE dirs | `src/parser/fuzz/target/` and `**/proptest-regressions/` not covered | 🔴 Fixed |
+   112→| Example .vuma files | Text-level sanity check | 39 examples checked — all well-structured, consistent syntax, no Pi5/Raspberry refs | ✅ Clean |
+   113→
+   114→### Files Changed
+   115→
+   116→1. **`src/vuma/src/repl.rs`** (MODIFIED)
+   117→   - Line 1370: `"version": "0.1.0"` → `"version": "0.1.0-alpha.1"` (diagnostics JSON output)
+   118→   - Line 1797: `"VUMA REPL v0.2.0"` → `"VUMA REPL v0.1.0-alpha.1"` (banner)
+   119→
+   120→2. **`docs/language-reference.md`** (MODIFIED)
+   121→   - Line 3: `Version 0.2.0 — Last updated 2026-03-05` → `Version 0.1.0-alpha.1 — Last updated 2026-03-06`
+   122→
+   123→3. **`CHANGELOG.md`** (MODIFIED)
+   124→   - Line 10: `[0.1.0-alpha]` → `[0.1.0-alpha.1]` (align with Cargo.toml)
+   125→   - Line 111: Duplicate `[0.1.0-alpha.1]` (old 0.2.0 section) → `[0.1.0-alpha.0]` (avoid version collision)
+   126→   - Line 325: Duplicate release notes section → `[0.1.0-alpha.0]` to match
+   127→
+   128→4. **`docs/ROADMAP.md`** (MODIFIED)
+   129→   - Version: `0.2.0` → `0.1.0-alpha.1`, Status: `Phase 3` → `Phase 2`, Date: `March 5` → `March 6`
+   130→
+   131→5. **`docs/architecture.md`** (MODIFIED)
+   132→   - Version: `0.2.0` → `0.1.0-alpha.1`, Status: `Phase 3` → `Phase 2`, Date: `March 5` → `March 6`
+   133→
+   134→6. **`RELEASES.md`** (MODIFIED)
+   135→   - Added new `v0.1.0-alpha.1 — 2026-03-06` section at top with alpha highlights
+   136→   - Renamed existing `v0.1.0-alpha.1 — 2026-03-05` → `v0.1.0-alpha.0 — 2026-03-05` (previous alpha)
+   137→
+   138→7. **`LICENSE`** (CREATED)
+   139→   - MIT License file as required by `Cargo.toml license = "MIT"` and README badge
+   140→
+   141→8. **`.gitignore`** (MODIFIED)
+   142→   - Added `**/target/` (covers `src/parser/fuzz/target/` and any future nested targets)
+   143→   - Added `**/fuzz/target/` (redundant safety net for fuzz build artifacts)
+   144→   - Added `**/fuzz/corpus/` (fuzz corpus artifacts)
+   145→   - Added `**/proptest-regressions/` (proptest state files)
+   146→   - Added `perf.data*` and `flamegraph.svg` (profiling artifacts)
+   147→   - Added `.idea/`, `.vscode/`, `*.iml` (IDE/editor artifacts)
+   148→
+   149→### Flagged Minor Issues (not fixed)
+   150→
+   151→| # | Issue | Location | Risk |
+   152→|---|-------|----------|------|
+   153→| 1 | Two TODO comments about u64→FP conversion edge cases | `src/codegen/src/loongarch64/stack_slot_isel.rs:1118,1194` | Low — common cases work, edge case for u64 values > i64::MAX |
+   154→| 2 | BCM GPIO base address (0x7e200000) in example | `examples/gpio_blink.vuma:19` | Low — example code, no Pi5/Raspberry mention |
+   155→| 3 | `0.2.0` in package registry test data | `src/package/src/registry.rs` | None — intentional test fixture data |
+   156→| 4 | `0.2.0` in README.md historical worklog entry | `README.md:825` | None — documenting past work |
+   157→| 5 | `0.2.0` in worklog.md historical entries | `worklog.md` | None — historical record |
+   158→
+   159→### Version Consistency Verification
+   160→
+   161→All version declarations now consistently read `0.1.0-alpha.1`:
+   162→
+   163→| Source | Version | Status |
+   164→|--------|---------|--------|
+   165→| Root `Cargo.toml` | `0.1.0-alpha.1` | ✅ |
+   166→| All 12 workspace crate `Cargo.toml` | `0.1.0-alpha.1` (via workspace) | ✅ |
+   167→| `src/vuma/src/repl.rs` banner | `0.1.0-alpha.1` | ✅ (fixed) |
+   168→| `src/vuma/src/repl.rs` diagnostics JSON | `0.1.0-alpha.1` | ✅ (fixed) |
+   169→| `README.md` badge | `0.1.0-alpha.1` | ✅ |
+   170→| `CHANGELOG.md` current release | `[0.1.0-alpha.1]` | ✅ (fixed) |
+   171→| `RELEASES.md` current release | `v0.1.0-alpha.1` | ✅ (fixed) |
+   172→| `docs/ROADMAP.md` header | `0.1.0-alpha.1` | ✅ (fixed) |
+   173→| `docs/architecture.md` header | `0.1.0-alpha.1` | ✅ (fixed) |
+   174→| `docs/language-reference.md` header | `0.1.0-alpha.1` | ✅ (fixed) |
+   175→| CLI `--version` (via CARGO_PKG_VERSION) | `0.1.0-alpha.1` | ✅ (automatic) |
+   176→| Telemetry (via CARGO_PKG_VERSION) | `0.1.0-alpha.1` | ✅ (automatic) |
+   177→
+   178→---
+   179→
+   180→## Task 6-f: Update LLM-focused documentation for Waves 1–5 features
+   181→
+   182→**Date**: 2026-03-06
+   183→**Agent**: Code Agent
+   184→
+   185→### Summary
+   186→
+   187→Updated both LLM-focused documentation files (`llm-language-reference.md` and `llm-system-prompt.md`) to comprehensively cover all new features from Waves 1–5, including the fmt module, math module, extern "C" FFI syntax, atomic operations, the --debug flag for DWARF debug info, and updated error codes (E037).
+   188→
+   189→### Files Changed
+   190→
+   191→1. **`docs/llm-language-reference.md`** (MODIFIED — ~600 lines added)
+   192→   - Added f32/f64 types to the Types table and type annotation examples
+   193→   - Added Section 13: Standard Library Modules
+   194→     - 13.1: fmt module — format_int, format_uint, format_hex, format_binary, format_octal, format_float, format_pointer, pad_left, pad_right, join
+   195→     - 13.2: math module — constants (PI, TAU, E, etc.), trig (sin, cos, tan, asin, acos, atan, atan2, sinh, cosh, tanh), exp/log (sqrt, cbrt, exp, ln, log2, log10, pow, powi), rounding (floor, ceil, round, trunc, fract), comparison (min_of, max_of), classification (is_nan, is_infinite, etc.), integer helpers (abs, min, max, clamp), f32 variants
+   196→   - Added Section 14: Foreign Function Interface (FFI)
+   197→     - 14.1: extern "C" block syntax and rules
+   198→     - 14.2: Calling external functions
+   199→     - 14.3: Codegen details (relocations, SHN_UNDEF, linking)
+   200→     - 14.4: Built-in syscall and C library bindings
+   201→     - 14.5: FFI pitfalls
+   202→   - Added Section 15: Atomic Operations
+   203→     - 15.1: AtomicLoad with target-specific lowering
+   204→     - 15.2: AtomicStore with target-specific lowering
+   205→     - 15.3: AtomicCas with target-specific lowering
+   206→     - 15.4: Example atomic counter with retry loop
+   207→   - Added Section 16: Debug Information
+   208→     - 16.1: --debug flag and DWARF sections table
+   209→     - 16.2: Per-architecture CIE presets table
+   210→     - 16.3: Using debug info with GDB, objdump, readelf
+   211→   - Renumbered Common Patterns → 17, Pitfalls → 18, Target Platforms → 20
+   212→   - Added new Section 19: Error Codes
+   213→     - Complete error code catalog: E001–E050, W001–W010, I001–I005
+   214→     - Detailed E037 (Relocation error) documentation for FFI
+   215→   - Added new pitfalls: Pitfall 11 (FFI type mismatches), Pitfall 12 (AtomicCas retry loop)
+   216→   - Updated Quick Reference Card with fmt, math, FFI, atomics, --debug entries
+   217→   - Updated "End of Document" rules (8 rules, up from 5)
+   218→   - Updated Target Platforms table with FFI/DWARF/atomics notes and LoongArch64 → Stable
+   219→
+   220→2. **`docs/llm-system-prompt.md`** (MODIFIED — ~200 lines added)
+   221→   - Added f32/f64 types to primitive types table
+   222→   - Added Section 1.7: Standard Library — fmt Module (syntax, examples, special values)
+   223→   - Added Section 1.8: Standard Library — math Module (constants, trig, exp/log, integer helpers, rounding, classification, f32 variants)
+   224→   - Added Section 1.9: Foreign Function Interface (FFI) (extern "C" syntax, key points, built-in bindings)
+   225→   - Added Section 1.10: Atomic Operations (AtomicLoad, AtomicStore, AtomicCas with retry loop pattern)
+   226→   - Added Section 1.11: Debug Information (--debug flag, DWARF sections, usage)
+   227→   - Renumbered BD System → 1.12
+   228→   - Updated Section 1.6: Available Backends — expanded table with FFI/Atomics/DWARF columns, LoongArch64 → Stable
+   229→   - Added few-shot Example 6: Using fmt and math — Distance Between Two Points
+   230→   - Added few-shot Example 7: Trigonometry — Compute Sine Table
+   231→   - Added few-shot Example 8: FFI — Calling C Library Functions
+   232→   - Added few-shot Example 9: Atomic Counter with AtomicCas
+   233→   - Added error recovery patterns for E037 (Relocation error) and atomics on ARM32/Wasm32
+   234→   - Updated CLI global options with --debug and --sections flags
+   235→   - Updated Appendix: VUMA Idiom Quick Reference with 10 new idioms (fmt, math, FFI, atomics, debug, link step)
+   236→
+   237→### Coverage Checklist
+   238→
+   239→| Feature | llm-language-reference.md | llm-system-prompt.md |
+   240→|---------|--------------------------|---------------------|
+   241→| fmt module (format_int, format_float, format_hex, etc.) | ✅ Section 13.1 | ✅ Section 1.7 |
+   242→| math module (sin, cos, sqrt, constants, etc.) | ✅ Section 13.2 | ✅ Section 1.8 |
+   243→| extern "C" FFI syntax | ✅ Section 14 | ✅ Section 1.9 |
+   244→| Atomic operations (AtomicLoad, AtomicStore, AtomicCas) | ✅ Section 15 | ✅ Section 1.10 |
+   245→| --debug flag for DWARF debug info | ✅ Section 16 | ✅ Section 1.11 |
+   246→| Error code E037 (unresolved relocations) | ✅ Section 19 | ✅ Error recovery |
+   247→| f32/f64 floating-point types | ✅ Section 2 | ✅ Section 1.2 |
+   248→| Updated few-shot examples | N/A | ✅ Examples 6–9 |
+   249→| Updated capabilities/backend status | ✅ Section 20 table | ✅ Section 1.6 table |
+   250→
+   251→### Design Decisions
+   252→
+   253→- Structured the fmt and math modules as subsections under "Standard Library Modules" in the language reference for logical grouping, matching the module structure in `src/std/`
+   254→- Placed FFI and atomics as separate top-level sections since they are language features, not library modules
+   255→- Included per-architecture CIE presets table in the --debug section because LLMs debugging DWARF issues need this reference data
+   256→- Added E037 as a highlighted error code with detailed causes since it's the most common FFI-related error
+   257→- Used `math::` and `fmt::` namespace prefixes consistently to match the actual module paths
+   258→- Included f32 variant convention (`_f32` suffix) in both documents for completeness
+   259→- Added two new pitfalls (FFI type mismatches, AtomicCas retry) since these are the most common bugs when using the new features
+   260→
+   261→---
+   262→
+   263→## Task 5-c: Add integration tests for DWARF debug info and C FFI features
+   264→
+   265→**Date**: 2026-03-04
+   266→**Agent**: Code Agent
+   267→
+   268→### Summary
+   269→
+   270→Added comprehensive integration tests for the newly implemented DWARF debug info and C FFI features across all 8 VUMA backends.
+   271→
+   272→### Files Changed
+   273→
+   274→1. **`src/tests/src/dwarf_ffi_integration.rs`** (NEW — ~1160 lines)
+   275→   - Complete test suite covering 26 test functions across DWARF and FFI features
+   276→
+   277→2. **`src/tests/src/lib.rs`** (MODIFIED)
+   278→   - Added `pub mod dwarf_ffi_integration;` to register the new test module
+   279→
+   280→3. **`src/codegen/src/dwarf.rs`** (MODIFIED)
+   281→   - Added `pub fn cie(&self) -> Option<&CommonInformationEntry>` accessor method to `DwarfBuilder`
+   282→   - Enables external test crates to introspect the CIE configuration for validation
+   283→
+   284→### DWARF Tests (13 tests)
+   285→
+   286→| #  | Test Name                                          | What it validates                                        |
+   287→|----|----------------------------------------------------|----------------------------------------------------------|
+   288→| 1  | `test_debug_elf_sections_present`                  | ELF with debug_info=true contains .debug_info, .debug_abbrev, .debug_line, .debug_frame |
+   289→| 2  | `test_debug_line_valid_entries`                    | .debug_line has DW_LNS_COPY opcodes and DWARF v4 version |
+   290→| 3  | `test_debug_frame_cie_fde_entries`                 | .debug_frame has CIE_id=0xFFFFFFFF and valid FDE after CIE |
+   291→| 4  | `test_cie_preset_aarch64`                          | AArch64 CIE: SP=31, LR=30, FP=29, code_align=4         |
+   292→| 5  | `test_cie_preset_x86_64`                           | x86_64 CIE: RSP=7, RBP=6, code_align=1                  |
+   293→| 6  | `test_cie_preset_riscv64`                          | RISC-V 64 CIE: SP=2, RA=1, FP=8, code_align=2          |
+   294→| 7  | `test_cie_preset_arm32`                            | ARM32 CIE: SP=13, LR=14, FP=11, code_align=2, data_align=-4 |
+   295→| 8  | `test_cie_preset_mips64`                           | MIPS64 CIE: SP=29, RA=31, code_align=4                  |
+   296→| 9  | `test_cie_preset_ppc64`                            | PPC64 CIE: SP=R1, LR=65, code_align=4                   |
+   297→| 10 | `test_cie_preset_loongarch64`                      | LoongArch64 CIE: SP=r3, RA=r1, FP=r22, code_align=4    |
+   298→| 11 | `test_cie_preset_wasm32`                           | Wasm32 CIE: minimal placeholder, no saved registers      |
+   299→| 12 | `test_for_backend_config_consistency`              | All 8 backends have correct address_size + min_inst_length |
+   300→| 13 | `test_debug_sections_non_empty_all_backends`       | All 4 DWARF sections are non-empty for every native backend |
+   301→
+   302→### FFI Tests (8 tests)
+   303→
+   304→| #  | Test Name                                          | What it validates                                        |
+   305→|----|----------------------------------------------------|----------------------------------------------------------|
+   306→| 14 | `test_extern_c_block_parsing`                      | Parser produces ExternBlockDef with correct convention and functions |
+   307→| 15 | `test_extern_block_scg_propagation`                | SCG contains Phantom node for extern_block              |
+   308→| 16 | `test_extern_block_to_registry`                    | ExternRegistry: function lookup, calling conventions, relocation needs |
+   309→| 17 | `test_extern_calls_undefined_symbols_in_elf`       | ET_REL has SHN_UNDEF symbols for extern functions       |
+   310→| 18 | `test_relocations_for_extern_calls`                | .rela.text section with SHT_RELA type contains entries   |
+   311→| 19 | `test_ffi_demo_compiles_x86_64`                   | Full pipeline: source → ET_REL ELF for x86_64          |
+   312→
+   313→### Additional Infrastructure Tests (5 tests)
+   314→
+   315→| #  | Test Name                                          | What it validates                                        |
+   316→|----|----------------------------------------------------|----------------------------------------------------------|
+   317→| 20 | `test_extern_registry_default_bindings`             | Default bindings include Linux syscalls + C library       |
+   318→| 21 | `test_relocation_kind_for_arch`                    | RelocationKind::for_arch returns correct types for all ISAs |
+   319→| 22 | `test_syscall_table_x86_64`                        | x86_64 syscall numbers match Linux kernel ABI            |
+   320→| 23 | `test_syscall_table_aarch64`                       | AArch64 syscall numbers match Linux kernel ABI           |
+   321→| 24 | `test_relocation_struct`                            | Relocation struct construction and Display formatting    |
+   322→| 25 | `test_arch_from_name`                              | Arch::from_name parses all architecture strings          |
+   323→| 26 | `test_extern_type_sizes`                           | ExternType::size_64bit returns correct byte sizes        |
+   324→
+   325→### Additional DWARF Pipeline Tests (3 tests)
+   326→
+   327→| #  | Test Name                                          | What it validates                                        |
+   328→|----|----------------------------------------------------|----------------------------------------------------------|
+   329→| 27 | `test_dwarf_debug_full_pipeline`                   | Parse → SCG → codegen → ELF with all debug sections     |
+   330→| 28 | `test_no_debug_sections_without_flag`              | ELF without debug_info does NOT contain debug sections   |
+   331→| 29 | `test_calling_convention_display`                  | CallingConvention Display formatting                     |
+   332→
+   333→### Design Decisions
+   334→
+   335→- Tests use the `vuma_codegen::dwarf::DwarfBuilder` API directly for unit-level DWARF validation
+   336→- Tests use `emit_elf` with `debug_info: true` and `section_headers: true` for ELF-level integration tests
+   337→- FFI tests use both the parser (`vuma_parser::Parser`) and the `vuma::ffi` module
+   338→- ELF symbol table and relocation tests parse raw ELF bytes to validate structural correctness
+   339→- Per-backend CIE tests verify ISA-specific register numbers, alignment factors, and saved registers
+   340→
+   341→---
+   342→
+   343→## Task 6-c: Update CHANGELOG.md for v0.1-alpha release
+   344→
+   345→**Date**: 2026-03-06
+   346→**Agent**: Code Agent
+   347→
+   348→### Summary
+   349→
+   350→Updated `CHANGELOG.md` with a comprehensive `[0.1.0-alpha]` section documenting all work from Waves 1–5, organized by category (Bug Fixes, New Features, Infrastructure, Tests) in preparation for the v0.1-alpha release.
+   351→
+   352→### Files Changed
+   353→
+   354→1. **`CHANGELOG.md`** (MODIFIED)
+   355→   - Added `[0.1.0-alpha] — 2026-03-06` section at the top of the changelog (before the existing `[0.2.0]` entry)
+   356→   - Organized into 4 top-level categories: Bug Fixes, New Features, Infrastructure, Tests
+   357→   - Sub-organized by wave within each category
+   358→
+   359→### Categories Documented
+   360→
+   361→| Category        | Waves Covered | Key Items |
+   362→|-----------------|---------------|-----------|
+   363→| Bug Fixes       | W1, W2, W3, W4 | ARM64 ROR/ROL, 6-arch atomics, FP conversions across 8 backends, ARM32 AAPCS, stack-slot NOPs, Pi5 cleanup |
+   364→| New Features    | W2, W3, W4    | 49+ new atomic instructions (PPC64/Wasm32/ARM32/MIPS64/LoongArch64), FP conversion casts, math.rs (92 items), fmt.rs (13 functions), DWARF debug info, C FFI wiring |
+   365→| Infrastructure  | W1, W4        | AArch64 select_cast refactor, E037 diagnostic, GitHub Actions CI/CD, .gitignore, repo cleanup |
+   366→| Tests           | W5            | ~266 tests across 8 categories (SHA256d, regression, diagnostics, DWARF/FFI, ABI, property-based, math, fmt) |
+   367→
+   368→### Design Decisions
+   369→
+   370→- Placed the `[0.1.0-alpha]` entry before `[0.2.0]` as it represents a pre-release alpha with a newer date
+   371→- Used sub-headings per wave within Bug Fixes for chronological clarity
+   372→- Grouped New Features by topic (Atomics, FP Conversions, Stdlib, Debug Info, FFI) rather than by wave for better topical coherence
+   373→- Added a total test count (~266) at the bottom of the Tests section for quick reference
+   374→- Maintained consistent `*(WN)*` wave annotations throughout for traceability
+   375→
+   376→---
+   377→
+   378→## Task 6-e: Update version numbers and polish Cargo.toml files for v0.1-alpha release
+   379→
+   380→**Date**: 2026-03-06
+   381→**Agent**: Code Agent
+   382→
+   383→### Summary
+   384→
+   385→Updated all version numbers from `0.2.0` → `0.1.0-alpha.1` across the VUMA workspace and polished all Cargo.toml files with proper metadata, workspace inheritance, and centralized dependency management for the v0.1-alpha pre-release.
+   386→
+   387→### Files Changed
+   388→
+   389→#### Workspace Root
+   390→1. **`Cargo.toml`** (REWRITTEN)
+   391→   - Changed `version` from `0.2.0` to `0.1.0-alpha.1`
+   392→   - Added `[workspace.package]` section with shared metadata (version, description, repository, license, keywords, categories, authors, edition, rust-version)
+   393→   - Added `[workspace.dependencies]` section centralizing all external and internal crate dependency versions
+   394→   - Added `[workspace.metadata]` section with project info (release channel, homepage, documentation, bug tracker, changelog, license file)
+   395→   - Converted `[dependencies]` to use `workspace = true` for all entries
+   396→   - Added `rust-version = "1.75"` field
+   397→
+   398→#### Member Crates (12 files — all updated)
+   399→2. **`src/scg/Cargo.toml`** — version → workspace, added description/metadata, deps → workspace
+   400→3. **`src/ive/Cargo.toml`** — version → workspace, added description/metadata, deps → workspace
+   401→4. **`src/vuma/Cargo.toml`** — version → workspace, added description/metadata, deps → workspace
+   402→5. **`src/bd/Cargo.toml`** — version → workspace, added description/metadata, deps → workspace
+   403→6. **`src/cor/Cargo.toml`** — version → workspace, added description/metadata, deps → workspace
+   404→7. **`src/projection/Cargo.toml`** — version → workspace, added description/metadata, deps → workspace
+   405→8. **`src/parser/Cargo.toml`** — version → workspace, added description/metadata, deps → workspace
+   406→9. **`src/codegen/Cargo.toml`** — version → workspace, added description/metadata, deps → workspace
+   407→10. **`src/std/Cargo.toml`** — version → workspace, added description/metadata, deps → workspace (kept optional libc as-is)
+   408→11. **`src/proof/Cargo.toml`** — version → workspace, added description/metadata, deps → workspace
+   409→12. **`src/tests/Cargo.toml`** — version → workspace, added description/metadata, deps → workspace
+   410→13. **`src/package/Cargo.toml`** — version → workspace, added description/metadata, deps → workspace
+   411→
+   412→#### Documentation
+   413→14. **`README.md`** — Updated version badge from `0.2.0` (green) to `0.1.0-alpha.1` (orange), updated worklog entry
+   414→15. **`CHANGELOG.md`** — Updated `[0.2.0]` → `[0.1.0-alpha.1]` with alpha pre-release note, updated release notes section and worklog entry
+   415→16. **`RELEASES.md`** — Updated `v0.2.0` → `v0.1.0-alpha.1` with alpha pre-release note, updated section header
+   416→17. **`docs/ROADMAP.md`** — Updated version header and W32 release entry
+   417→18. **`docs/architecture.md`** — Updated version header
+   418→
+   419→### Key Changes
+   420→
+   421→| Change | Before | After |
+   422→|--------|--------|-------|
+   423→| Workspace version | `0.2.0` | `0.1.0-alpha.1` |
+   424→| Member crate versions | `0.1.0` (independent) | `0.1.0-alpha.1` (via workspace) |
+   425→| Dependency management | Inline per-crate | Centralized `[workspace.dependencies]` |
+   426→| Metadata inheritance | None | `workspace = true` for version, description, repository, license, keywords, categories, authors, rust-version |
+   427→| Workspace metadata | None | `[workspace.metadata]` with release, homepage, docs, bug tracker |
+   428→| README badge | `version-0.2.0-green` | `version-0.1.0--alpha.1-orange` |
+   429→
+   430→### Design Decisions
+   431→
+   432→- Used `0.1.0-alpha.1` (SemVer pre-release format) instead of `0.2.0` to reflect that this is a pre-release alpha, not a stable release
+   433→- Changed badge color from green to orange to visually distinguish pre-release from stable
+   434→- Centralized all dependency versions in `[workspace.dependencies]` to ensure version consistency and simplify future updates
+   435→- Each member crate inherits common metadata via `workspace = true` — single source of truth
+   436→- Added `rust-version = "1.75"` to establish MSRV policy
+   437→- Added per-crate `description` fields for crates.io readiness
+   438→- Left `0.2.0` references in test fixtures (e.g., `src/package/src/registry.rs`) unchanged — those are test data, not version declarations
+   439→
+   440→---
+   441→
+   442→## Task 6-b: Polish README.md for v0.1-alpha public release
+   443→
+   444→**Date**: 2026-03-06
+   445→**Agent**: Code Agent
+   446→
+   447→### Summary
+   448→
+   449→Comprehensive rewrite and polish of `/home/z/my-project/vuma/README.md` for the public v0.1-alpha release. The README was transformed from a v0.2.0-era document into a professional, accurate, and compelling public-facing document at 827 lines (target: 400–800, slightly over due to comprehensive content).
+   450→
+   451→### Files Changed
+   452→
+   453→1. **`README.md`** (REWRITTEN — 827 lines, up from 643 lines)
+   454→
+   455→### Key Changes
+   456→
+   457→| Section | Change | Details |
+   458→|---------|--------|---------|
+   459→| **Badges** | Added + Updated | Added Crates.io badge, Rust nightly badge; updated version badge to `0.1.0-alpha.1` (orange) |
+   460→| **Table of Contents** | Restructured | Added "What's New", "Known Limitations", moved "Installation" before "Quick Start" |
+   461→| **What's New in v0.1-alpha** | NEW section | Detailed breakdown of Waves 1–5 with feature lists, line counts, and highlights |
+   462→| **Features** | Major expansion | Added "Atomics & Concurrency" subsection with per-backend table, "Floating-Point Conversions" subsection with cast types, "DWARF v4 Debug Info" subsection, "Standard Library" summary table with function counts per module |
+   463→| **8 Backend Architectures** | Updated table | Added 3 new columns: Atomics, FP Casts, DWARF — all showing ✅ for all 8 backends |
+   464→| **Backend Test Coverage** | NEW subsection | Table summarizing 5 test categories with counts |
+   465→| **Installation** | NEW section | Added `cargo install vuma` + "Building from Source" + "Quick Build Check" |
+   466→| **Quick Start** | Major expansion | Added 4 working examples: hello.vuma, ffi_demo.vuma, math_demo.vuma, module import demo |
+   467→| **Running Tests** | Updated | Added `dwarf_ffi` test category |
+   468→| **Project Structure** | Condensed | Compressed from ~90 lines to ~53 lines by using inline lists instead of per-file entries; preserved all 8 backend modules and 18 std modules |
+   469→| **Known Limitations** | NEW section | Honest table with 9 items covering self-hosting, structs/enums, host-side stdlib, BD inference, concurrent verification, COR, LoongArch64 perf, error recovery |
+   470→| **Documentation** | Updated | Added Changelog and Release Notes links |
+   471→| **Worklog** | Updated | Added Task 6-b entry |
+   472→
+   473→### Design Decisions
+   474→
+   475→- Used "What's New in v0.1-alpha" as the first content section after badges/TOC to give new visitors an immediate sense of what's been built
+   476→- Made the "8 Backend Architectures" section prominent with a comprehensive table including Atomics/FP/DWARF columns showing all 8 backends at ✅
+   477→- Added per-backend atomic mechanism column (LL/SC vs LOCK CMPXCHG vs lwsync) for technical credibility
+   478→- Added "Known Limitations" section with honest status markers (❌ Not started / ⚠️ Partial / ⚠️ Limited / ⚠️ Slow) — no greenwashing
+   479→- Condensed project structure tree to stay within line budget while preserving all module names
+   480→- Used `0.1.0-alpha.1` version consistently (matching Cargo.toml) with orange badge color for pre-release distinction
+   481→- Added 4 quick-start examples covering the most common use cases (memory ops, FFI, math, modules)
+   482→- Kept formal specifications table and key concepts sections intact — they are core to VUMA's identity
+   483→
+   484→---
+   485→
+   486→## Task 6-d: Update examples/README.md and add new example programs
+   487→
+   488→**Date**: 2026-03-06
+   489→**Agent**: Code Agent
+   490→
+   491→### Summary
+   492→
+   493→Created three new example programs demonstrating the newly fixed features (atomics, FP conversions, DWARF debug info), updated `examples/README.md` with the new examples, added an FFI section for `ffi_demo.vuma`, added a DWARF debug info section, and updated the IVE verification table.
+   494→
+   495→### Files Changed
+   496→
+   497→1. **`examples/atomics_demo.vuma`** (NEW — ~190 lines)
+   498→   - Four self-contained demos: load/store, CAS, fetch_add/fetch_sub, compare_exchange
+   499→   - Demonstrates `atomic_load`, `atomic_store`, `atomic_cas`, `AtomicU64` with `fetch_add`/`fetch_sub`, `compare_exchange`
+   500→   - Shows Acquire/Release/Relaxed memory ordering semantics
+   501→   - Returns combined checksum (1264) as exit code
+   502→
+   503→2. **`examples/float_math.vuma`** (NEW — ~180 lines)
+   504→   - Six demos: int→float, float→int, float→float widening/narrowing, FP arithmetic, mixed int/float computation, FP memory store/load
+   505→   - Demonstrates `inttofloat`, `uinttofloat`, `floattoint`, `floattouint`, `floattofloat`
+   506→   - Shows f32/f64 arithmetic (+, -, *, /) and explicit conversion between integer and FP types
+   507→   - Returns combined checksum (100) as exit code
+   508→
+   509→3. **`examples/debug_info.vuma`** (NEW — ~110 lines)
+   510→   - Multi-function program designed to exercise `--debug` flag
+   511→   - Includes helper functions, control flow (if/else), struct operations
+   512→   - Produces rich DWARF output: subprogram DIEs, variable DIEs, line-number entries, FDE entries
+   513→   - Returns 49 as exit code
+   514→
+   515→4. **`examples/README.md`** (UPDATED — major additions)
+   516→   - Added entries #18–20 for atomics_demo, float_math, debug_info
+   517→   - Added **FFI Example** section documenting ffi_demo.vuma with compile/link instructions, FFI architecture table, and pipeline description
+   518→   - Added **DWARF Debug Info** section with sections-generated table, multi-backend support table (8 backends with address size, min inst length, CIE registers), usage instructions, encoding details
+   519→   - Updated **Running Examples** with `--debug` and FFI compile commands
+   520→   - Updated **Learning Path** with new categories: Floating-Point, FFI & Debug
+   521→   - Updated **IVE Verification Summary** table with 3 new entries (atomics_demo, float_math, debug_info) + ffi_demo
+   522→
+   523→### IVE Verification Table Additions
+   524→
+   525→| Example | Liveness | Exclusivity | Interpretation | Origin | Cleanup |
+   526→|---------|----------|-------------|----------------|--------|---------|
+   527→| atomics_demo | ✓ | ✓ | ✓ | ✓ | ✓ |
+   528→| float_math | ✓ | ✓ | ✓ | ✓ | ✓ |
+   529→| debug_info | ✓ | ✓ | ✓ | ✓ | ✓ |
+   530→| ffi_demo | ✓ | ✓ | ✓ | ✓ | ✓ |
+   531→
+   532→### Design Decisions
+   533→
+   534→- `atomics_demo.vuma` uses both low-level (`atomic_cas`, `atomic_load`, `atomic_store`) and high-level (`AtomicU64` with methods) APIs to demonstrate both styles
+   535→- `float_math.vuma` explicitly lists all 8 backend ISA instructions for FP conversions in the header comment, matching the regression test documentation style
+   536→- `debug_info.vuma` includes control flow (if/else) to produce richer line-number programs, and struct operations for variable DIEs
+   537→- The FFI section in the README documents the existing `ffi_demo.vuma` that was present in the examples directory but not previously listed in the README
+   538→- The DWARF section includes the per-backend CIE register table from the integration tests, providing users with concrete backend-specific information
+   539→- All new examples follow the existing comment style: header block, section separators, IVE verification annotations, and return verifiable exit codes
+   540→
+   541→---
+   542→
+   543→## Task 6-a: Comprehensive documentation consistency pass across all docs
+   544→
+   545→**Date**: 2026-03-06
+   546→**Agent**: Code Agent
+   547→
+   548→### Summary
+   549→
+   550→Performed a comprehensive documentation consistency pass across all VUMA docs after Waves 1–5, ensuring they accurately reflect the current state of the project. Updated 7 documentation files to fix version mismatches, missing features, stale references, and incomplete coverage of DWARF, FFI, atomics, fmt module, expanded math, and multi-backend support.
+   551→
+   552→### Files Changed
+   553→
+   554→1. **`docs/language-reference.md`** (MODIFIED — major updates)
+   555→   - Version bump: 0.1.0-alpha.1 → 0.2.0
+   556→   - Updated description from "AArch64 platform" to "8 backend architectures"
+   557→   - Added Section 10: FFI and External Functions (extern "C" block syntax, 19 syscalls, DWARF debug info)
+   558→   - Renamed Section 10 to Section 11: Platform-Specific Features (added multi-backend table)
+   559→   - Expanded Section 9: Standard Library Overview with:
+   560→     - New subsections: String Formatting (fmt), Mathematics (math), Cryptography (crypto), String Operations, Additional Modules
+   561→     - Updated Memory Management with allocation strategies
+   562→     - Updated Data Structures with Vec, HashMap, RingBuffer
+   563→     - Updated Concurrency with Mutex, RwLock, Barrier
+   564→     - Updated I/O with VumaReader/VumaWriter, buffered I/O, read_bytes/write_bytes
+   565→   - Added multi-backend support table (8 backends with endianness, pointer width, output format)
+   566→
+   567→2. **`docs/architecture.md`** (MODIFIED — significant updates)
+   568→   - Version bump: 0.1.0-alpha.1 → 0.2.0
+   569→   - Status update: Phase 2 → Phase 3 (Waves 1-32 complete)
+   570→   - Expanded codegen workspace layout from 6 files to 20+ files covering all 8 backends
+   571→   - Added: x86_64/, riscv64.rs, arm32/, mips64/, ppc64/, loongarch64/, wasm32/, dwarf.rs, backend.rs, memory_safety.rs, target_desc.rs, control_flow.rs, opt.rs
+   572→   - Updated regalloc description to mention loop-depth spill weights
+   573→   - Updated emit description to mention 3 LOAD segments
+   574→   - Expanded std workspace layout from 4 modules to 16 modules
+   575→   - Added: fmt.rs, math.rs, crypto.rs, string.rs, fs.rs, net.rs, env.rs, error.rs, path.rs, process.rs, thread.rs, time.rs
+   576→   - Updated sync.rs to include Barrier
+   577→   - Updated collections.rs to include RingBuffer
+   578→   - Updated io.rs to include read_bytes, write_bytes, read_u32_le, write_u32_le
+   579→
+   580→3. **`docs/ROADMAP.md`** (MODIFIED — consistency fixes)
+   581→   - Version bump: 0.1.0-alpha.1 → 0.2.0
+   582→   - Status update: Phase 2 → Phase 3 (Waves 1-32 complete)
+   583→   - Updated overview paragraph to reflect Phase 3 as current phase
+   584→   - Updated Phase 2 status note to mention deferred items moved to Phase 3
+   585→   - Fixed Wave 19-20: "DWARF per-backend config" → "DWARF v4 per-backend config, --debug-info flag"
+   586→   - Fixed Wave 21-22: added "debug info integration"
+   587→   - Fixed Wave 32: Cargo.toml version 0.1.0-alpha.1 → 0.2.0
+   588→
+   589→4. **`docs/CONTRIBUTING.md`** (MODIFIED — new section + updates)
+   590→   - Added Section 3: Test Infrastructure (11 test categories with crate names, commands, and descriptions)
+   591→   - Updated Table of Contents with new section and renumbered sections 3–7 → 4–8
+   592→   - Renamed "How to Add New ARM64 Instructions" → "How to Add New Backend Instructions" (covers all 8 architectures)
+   593→   - Updated codegen description from "ARM64 code generation" → "Multi-architecture code generation (8 backends)"
+   594→   - Updated instruction variant guidance to reference all backend modules
+   595→   - Updated special review rules: added FFI/syscall review rule for all 8 backends
+   596→   - Updated "ARM Architecture Reference Manual" → "architecture reference manual (ARM, x86, RISC-V, etc.)"
+   597→
+   598→5. **`docs/llm-language-reference.md`** (MODIFIED — expanded stdlib)
+   599→   - Updated Section 13 intro: "two standard library modules" → "multiple standard library modules"
+   600→   - Added Section 13.3: crypto module (SHA-256 helpers, constant-time operations, byte access)
+   601→   - Added Section 13.4: string module (strlen, strcmp, memcpy, memset)
+   602→   - Added Section 13.5: Additional Standard Library Modules (io, sync, collections, alloc, fs, net, env, path, process, thread, time)
+   603→
+   604→6. **`docs/llm-system-prompt.md`** (VERIFIED — already consistent)
+   605→   - Already covers fmt module (Section 1.7), math module (Section 1.8), FFI (Section 1.9), atomics (Section 1.10), DWARF debug info (Section 1.11)
+   606→   - Already has correct backend table with FFI/Atomics/DWARF columns
+   607→   - No changes needed
+   608→
+   609→7. **`README.md`** (MODIFIED — worklog entry only)
+   610→   - Added Task 6-a worklog entry documenting all changes
+   611→
+   612→### Issues Found and Fixed
+   613→
+   614→| Issue | File | Fix |
+   615→|-------|------|-----|
+   616→| Version 0.1.0-alpha.1 in docs, project is at 0.2.0 | language-reference.md, architecture.md, ROADMAP.md | Updated to 0.2.0 |
+   617→| "AArch64 platform" only — project has 8 backends | language-reference.md | Updated to list all 8 architectures |
+   618→| No FFI/extern "C" documentation | language-reference.md | Added Section 10 with complete FFI coverage |
+   619→| No DWARF debug info in main language reference | language-reference.md | Added DWARF v4 section with per-backend table |
+   620→| Missing fmt, math, crypto, string stdlib docs | language-reference.md | Added comprehensive subsections for all modules |
+   621→| Architecture doc showed only ARM64 in codegen layout | architecture.md | Expanded to show all 8 backend modules + DWARF + backend trait |
+   622→| Architecture doc showed only 4 stdlib modules | architecture.md | Expanded to show all 16 stdlib modules |
+   623→| ROADMAP status said "Phase 2 current" | ROADMAP.md | Updated to Phase 3 (Waves 1-32 complete) |
+   624→| Wave 32 referenced v0.1.0-alpha.1 | ROADMAP.md | Updated to v0.2.0 |
+   625→| CONTRIBUTING.md missing test infrastructure docs | CONTRIBUTING.md | Added Section 3 with 11 test categories |
+   626→| CONTRIBUTING.md only covered ARM64 instructions | CONTRIBUTING.md | Renamed to cover all 8 backends |
+   627→| vuma-codegen described as "ARM64 code generation" | CONTRIBUTING.md | Updated to "Multi-architecture code generation (8 backends)" |
+   628→| llm-language-reference.md said "two stdlib modules" | llm-language-reference.md | Updated to mention all modules |
+   629→

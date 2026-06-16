@@ -234,7 +234,7 @@ impl ComputationKind {
 ///
 /// Represents a pure computational operation such as arithmetic,
 /// function invocation, or data transformation.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ComputationNode {
     /// The specific kind of computation performed.
     ///
@@ -246,6 +246,38 @@ pub struct ComputationNode {
     /// Whether this computation is a tail call (the last action before return).
     /// Set by the TailCallOptimization transform.
     pub tail_call: bool,
+}
+
+/// Helper struct for deserializing `ComputationNode` with backward compatibility
+/// for the old `operation` string field.
+#[derive(Deserialize)]
+struct ComputationNodeHelper {
+    kind: Option<ComputationKind>,
+    /// Legacy field: the old string-based operation name.
+    /// If `kind` is absent but `operation` is present, it is converted to
+    /// `ComputationKind::Other(operation)`.
+    operation: Option<String>,
+    result_type: Option<String>,
+    #[serde(default)]
+    tail_call: bool,
+}
+
+impl<'de> Deserialize<'de> for ComputationNode {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let helper = ComputationNodeHelper::deserialize(deserializer)?;
+        let kind = helper
+            .kind
+            .or_else(|| helper.operation.map(ComputationKind::Other))
+            .ok_or_else(|| serde::de::Error::missing_field("kind"))?;
+        Ok(ComputationNode {
+            kind,
+            result_type: helper.result_type,
+            tail_call: helper.tail_call,
+        })
+    }
 }
 
 impl ComputationNode {

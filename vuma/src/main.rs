@@ -1872,11 +1872,11 @@ mod tests {
     fn test_build_basic() {
         let cli = Cli::try_parse_from(["vuma", "build", "hello.vuma"]).unwrap();
         match cli.command {
-            Commands::Build {
+            Some(Commands::Build {
                 ref file,
                 ref output,
                 ref target,
-            } => {
+            }) => {
                 assert_eq!(file, &PathBuf::from("hello.vuma"));
                 assert!(output.is_none());
                 assert_eq!(target, &TargetArg::Linux);
@@ -1899,11 +1899,11 @@ mod tests {
         ])
         .unwrap();
         match cli.command {
-            Commands::Build {
+            Some(Commands::Build {
                 ref file,
                 ref output,
                 ref target,
-            } => {
+            }) => {
                 assert_eq!(file, &PathBuf::from("hello.vuma"));
                 assert_eq!(output.as_ref().unwrap(), &PathBuf::from("out.o"));
                 assert_eq!(target, &TargetArg::Linux);
@@ -1917,7 +1917,7 @@ mod tests {
     fn test_run_basic() {
         let cli = Cli::try_parse_from(["vuma", "run", "hello.vuma"]).unwrap();
         match cli.command {
-            Commands::Run { ref file, ref args } => {
+            Some(Commands::Run { ref file, ref args }) => {
                 assert_eq!(file, &PathBuf::from("hello.vuma"));
                 assert!(args.is_empty());
             }
@@ -1930,7 +1930,7 @@ mod tests {
     fn test_run_with_args() {
         let cli = Cli::try_parse_from(["vuma", "run", "hello.vuma", "arg1", "arg2"]).unwrap();
         match cli.command {
-            Commands::Run { ref file, ref args } => {
+            Some(Commands::Run { ref file, ref args }) => {
                 assert_eq!(file, &PathBuf::from("hello.vuma"));
                 assert_eq!(args, &vec!["arg1".to_string(), "arg2".to_string()]);
             }
@@ -1943,7 +1943,7 @@ mod tests {
     fn test_check() {
         let cli = Cli::try_parse_from(["vuma", "check", "hello.vuma"]).unwrap();
         match cli.command {
-            Commands::Check { ref file } => {
+            Some(Commands::Check { ref file }) => {
                 assert_eq!(file, &PathBuf::from("hello.vuma"));
             }
             _ => panic!("expected Check command"),
@@ -1955,11 +1955,11 @@ mod tests {
     fn test_emit_aarch64() {
         let cli = Cli::try_parse_from(["vuma", "emit", "aarch64", "hello.vuma"]).unwrap();
         match cli.command {
-            Commands::Emit {
+            Some(Commands::Emit {
                 isa,
                 ref file,
                 ref output,
-            } => {
+            }) => {
                 assert_eq!(isa, IsaArg::Aarch64);
                 assert_eq!(file, &PathBuf::from("hello.vuma"));
                 assert!(output.is_none());
@@ -1974,11 +1974,11 @@ mod tests {
         let cli =
             Cli::try_parse_from(["vuma", "emit", "x86_64", "hello.vuma", "-o", "out.o"]).unwrap();
         match cli.command {
-            Commands::Emit {
+            Some(Commands::Emit {
                 isa,
                 ref file,
                 ref output,
-            } => {
+            }) => {
                 assert_eq!(isa, IsaArg::X86_64);
                 assert_eq!(file, &PathBuf::from("hello.vuma"));
                 assert_eq!(output.as_ref().unwrap(), &PathBuf::from("out.o"));
@@ -2001,11 +2001,11 @@ mod tests {
         ])
         .unwrap();
         match cli.command {
-            Commands::Disasm {
+            Some(Commands::Disasm {
                 ref file,
                 isa,
                 ref base_addr,
-            } => {
+            }) => {
                 assert_eq!(file, &PathBuf::from("hello.o"));
                 assert_eq!(isa, IsaArg::Riscv64);
                 assert_eq!(base_addr, "0x1000");
@@ -2019,7 +2019,7 @@ mod tests {
     fn test_verify() {
         let cli = Cli::try_parse_from(["vuma", "verify", "hello.vuma"]).unwrap();
         match cli.command {
-            Commands::Verify { ref file } => {
+            Some(Commands::Verify { ref file }) => {
                 assert_eq!(file, &PathBuf::from("hello.vuma"));
             }
             _ => panic!("expected Verify command"),
@@ -2097,7 +2097,7 @@ mod tests {
         for name in isa_names {
             let cli = Cli::try_parse_from(["vuma", "emit", name, "test.vuma"]).unwrap();
             match cli.command {
-                Commands::Emit { isa, .. } => {
+                Some(Commands::Emit { isa, .. }) => {
                     // Verify it parsed without error.
                     let _backend_kind = BackendKind::from(isa);
                 }

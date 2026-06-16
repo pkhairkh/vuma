@@ -852,7 +852,7 @@ impl Default for SCG {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::node::{AllocationNode, ComputationNode, DeallocationNode, PhantomNode};
+    use crate::node::{AllocationNode, ComputationKind, ComputationNode, DeallocationNode, PhantomNode};
     use crate::region::DeploymentTarget;
 
     fn make_program_point() -> ProgramPoint {
@@ -870,7 +870,7 @@ mod tests {
         let id = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "add".to_string(),
+                kind: ComputationKind::Other("add".to_string()),
                 result_type: Some("i32".to_string()),
                 tail_call: false,
             }),
@@ -909,7 +909,7 @@ mod tests {
         let n1 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "f".to_string(),
+                kind: ComputationKind::Other("f".to_string()),
                 result_type: None,
                 tail_call: false,
             }),
@@ -918,7 +918,7 @@ mod tests {
         let n2 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "g".to_string(),
+                kind: ComputationKind::Other("g".to_string()),
                 result_type: None,
                 tail_call: false,
             }),
@@ -943,7 +943,7 @@ mod tests {
         let n1 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "a".to_string(),
+                kind: ComputationKind::Other("a".to_string()),
                 result_type: None,
                 tail_call: false,
             }),
@@ -952,7 +952,7 @@ mod tests {
         let n2 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "b".to_string(),
+                kind: ComputationKind::Other("b".to_string()),
                 result_type: None,
                 tail_call: false,
             }),
@@ -961,7 +961,7 @@ mod tests {
         let n3 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "c".to_string(),
+                kind: ComputationKind::Other("c".to_string()),
                 result_type: None,
                 tail_call: false,
             }),
@@ -986,7 +986,7 @@ mod tests {
         let n1 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "x".to_string(),
+                kind: ComputationKind::Other("x".to_string()),
                 result_type: None,
                 tail_call: false,
             }),
@@ -995,7 +995,7 @@ mod tests {
         let n2 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "y".to_string(),
+                kind: ComputationKind::Other("y".to_string()),
                 result_type: None,
                 tail_call: false,
             }),
@@ -1004,7 +1004,7 @@ mod tests {
         let n3 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "z".to_string(),
+                kind: ComputationKind::Other("z".to_string()),
                 result_type: None,
                 tail_call: false,
             }),
@@ -1023,7 +1023,7 @@ mod tests {
         let n1 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "first".to_string(),
+                kind: ComputationKind::Other("first".to_string()),
                 result_type: None,
                 tail_call: false,
             }),
@@ -1032,7 +1032,7 @@ mod tests {
         let n2 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "second".to_string(),
+                kind: ComputationKind::Other("second".to_string()),
                 result_type: None,
                 tail_call: false,
             }),
@@ -1054,7 +1054,7 @@ mod tests {
         let n1 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "a".to_string(),
+                kind: ComputationKind::Other("a".to_string()),
                 result_type: None,
                 tail_call: false,
             }),
@@ -1063,7 +1063,7 @@ mod tests {
         let n2 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "b".to_string(),
+                kind: ComputationKind::Other("b".to_string()),
                 result_type: None,
                 tail_call: false,
             }),
@@ -1131,7 +1131,7 @@ mod tests {
         let n1 = scg1.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "a".to_string(),
+                kind: ComputationKind::Other("a".to_string()),
                 result_type: None,
                 tail_call: false,
             }),
@@ -1142,7 +1142,7 @@ mod tests {
         let n2_old = scg2.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "b".to_string(),
+                kind: ComputationKind::Other("b".to_string()),
                 result_type: None,
                 tail_call: false,
             }),

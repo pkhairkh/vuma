@@ -2909,7 +2909,7 @@ mod tests {
         scg.nodes()
             .find(|n| {
                 if let NodePayload::Computation(c) = &n.payload {
-                    c.operation.contains(op_substring)
+                    c.operation().contains(op_substring)
                 } else {
                     false
                 }
@@ -2983,7 +2983,7 @@ mod tests {
 
         if let Some(node) = comp {
             if let NodePayload::Computation(c) = &node.payload {
-                assert!(c.operation.contains("let x = 42"));
+                assert!(c.operation().contains("let x = 42"));
             } else {
                 panic!("expected Computation payload");
             }

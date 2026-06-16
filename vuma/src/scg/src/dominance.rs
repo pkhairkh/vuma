@@ -113,7 +113,7 @@ impl DominatorTree {
 /// # Examples
 ///
 /// ```
-/// use vuma_scg::{SCG, NodeType, NodePayload, ComputationNode, ProgramPoint, EdgeKind};
+/// use vuma_scg::{SCG, NodeType, NodePayload, ComputationKind, ComputationNode, ProgramPoint, EdgeKind};
 /// use vuma_scg::dominance::{compute_dominators, dominates};
 ///
 /// let mut scg = SCG::new();
@@ -121,9 +121,9 @@ impl DominatorTree {
 /// let n0 = scg.add_node(NodeType::Control, NodePayload::Phantom(
 ///     vuma_scg::PhantomNode { purpose: "entry".into() }), pp.clone());
 /// let n1 = scg.add_node(NodeType::Computation, NodePayload::Computation(
-///     ComputationNode { operation: "a".into(), result_type: None, tail_call: false }), pp.clone());
+///     ComputationNode { kind: ComputationKind::Other("a".into()), result_type: None, tail_call: false }), pp.clone());
 /// let n2 = scg.add_node(NodeType::Computation, NodePayload::Computation(
-///     ComputationNode { operation: "b".into(), result_type: None, tail_call: false }), pp);
+///     ComputationNode { kind: ComputationKind::Other("b".into()), result_type: None, tail_call: false }), pp);
 /// scg.add_edge(n0, n1, EdgeKind::ControlFlow).unwrap();
 /// scg.add_edge(n1, n2, EdgeKind::ControlFlow).unwrap();
 ///
@@ -384,7 +384,7 @@ impl LengauerTarjan {
 /// # Examples
 ///
 /// ```
-/// use vuma_scg::{SCG, NodeType, NodePayload, ComputationNode, ProgramPoint, EdgeKind};
+/// use vuma_scg::{SCG, NodeType, NodePayload, ComputationKind, ComputationNode, ProgramPoint, EdgeKind};
 /// use vuma_scg::dominance::compute_dominators;
 ///
 /// let mut scg = SCG::new();
@@ -392,7 +392,7 @@ impl LengauerTarjan {
 /// let entry = scg.add_node(NodeType::Control, NodePayload::Phantom(
 ///     vuma_scg::PhantomNode { purpose: "entry".into() }), pp.clone());
 /// let a = scg.add_node(NodeType::Computation, NodePayload::Computation(
-///     ComputationNode { operation: "a".into(), result_type: None, tail_call: false }), pp);
+///     ComputationNode { kind: ComputationKind::Other("a".into()), result_type: None, tail_call: false }), pp);
 ///
 /// scg.add_edge(entry, a, EdgeKind::ControlFlow).unwrap();
 ///
@@ -880,7 +880,7 @@ mod tests {
     use super::*;
     use crate::edge::EdgeKind;
     use crate::node::{
-        ComputationNode, ControlKind, ControlNode, NodePayload, NodeType, PhantomNode, ProgramPoint,
+        ComputationKind, ComputationNode, ControlKind, ControlNode, NodePayload, NodeType, PhantomNode, ProgramPoint,
     };
 
     /// Helper to create a default program point for tests.
@@ -921,7 +921,7 @@ mod tests {
         scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: op.to_string(),
+                kind: ComputationKind::Other(op.to_string()),
                 result_type: None,
                 tail_call: false,
             }),

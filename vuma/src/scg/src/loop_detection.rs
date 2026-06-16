@@ -633,7 +633,7 @@ mod tests {
     use crate::edge::EdgeKind;
     use crate::graph::SCG;
     use crate::node::{
-        ComputationNode, ControlKind, ControlNode, NodeId, NodePayload, NodeType, ProgramPoint,
+        ComputationKind, ComputationNode, ControlKind, ControlNode, NodeId, NodePayload, NodeType, ProgramPoint,
     };
 
     fn pp() -> ProgramPoint {
@@ -662,7 +662,7 @@ mod tests {
         scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: op.to_string(),
+                kind: ComputationKind::Other(op.to_string()),
                 result_type: None,
                 tail_call: false,
             }),

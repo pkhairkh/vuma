@@ -166,7 +166,7 @@ impl SCG {
     /// let n1 = scg.add_node(
     ///     NodeType::Computation,
     ///     NodePayload::Computation(ComputationNode {
-    ///         operation: "add".to_string(),
+    ///         kind: ComputationKind::Other("add".to_string()),
     ///         result_type: Some("i32".to_string()),
     ///         tail_call: false,
     ///     }),
@@ -198,7 +198,7 @@ impl SCG {
     /// let n1 = scg.add_node(
     ///     NodeType::Computation,
     ///     NodePayload::Computation(ComputationNode {
-    ///         operation: "add".to_string(),
+    ///         kind: ComputationKind::Other("add".to_string()),
     ///         result_type: Some("i32".to_string()),
     ///         tail_call: false,
     ///     }),
@@ -654,7 +654,7 @@ mod tests {
     use crate::edge::EdgeKind;
     use crate::graph::SCG;
     use crate::node::{
-        AllocationNode, ComputationNode, ControlKind, ControlNode, DeallocationNode,
+        AllocationNode, ComputationKind, ComputationNode, ControlKind, ControlNode, DeallocationNode,
         NodePayload, NodeType, ProgramPoint,
     };
     use crate::region::{DeploymentTarget, RegionId, SCGRegion};
@@ -685,7 +685,7 @@ mod tests {
         let n1 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "add".to_string(),
+                kind: ComputationKind::Other("add".to_string()),
                 result_type: Some("i32".to_string()),
                 tail_call: false,
             }),
@@ -694,7 +694,7 @@ mod tests {
         let n2 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "mul".to_string(),
+                kind: ComputationKind::Other("mul".to_string()),
                 result_type: Some("i32".to_string()),
                 tail_call: false,
             }),
@@ -733,7 +733,7 @@ mod tests {
         let comp = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "hello".to_string(),
+                kind: ComputationKind::Other("hello".to_string()),
                 result_type: None,
                 tail_call: false,
             }),
@@ -800,7 +800,7 @@ mod tests {
         scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "add".to_string(),
+                kind: ComputationKind::Other("add".to_string()),
                 result_type: Some("i32".to_string()),
                 tail_call: false,
             }),
@@ -845,7 +845,7 @@ mod tests {
         let n1 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "source".to_string(),
+                kind: ComputationKind::Other("source".to_string()),
                 result_type: None,
                 tail_call: false,
             }),
@@ -854,7 +854,7 @@ mod tests {
         let n2 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "sink".to_string(),
+                kind: ComputationKind::Other("sink".to_string()),
                 result_type: None,
                 tail_call: false,
             }),
@@ -873,7 +873,7 @@ mod tests {
         let n1 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "add".to_string(),
+                kind: ComputationKind::Other("add".to_string()),
                 result_type: Some("i32".to_string()),
                 tail_call: false,
             }),
@@ -882,7 +882,7 @@ mod tests {
         let n2 = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "sub".to_string(),
+                kind: ComputationKind::Other("sub".to_string()),
                 result_type: None,
                 tail_call: false,
             }),

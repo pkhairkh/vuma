@@ -915,7 +915,7 @@ mod tests {
     use crate::edge::EdgeKind;
     use crate::graph::SCG;
     use crate::node::{
-        AccessMode, AccessNode, AllocationNode, ComputationNode, DeallocationNode, NodePayload,
+        AccessMode, AccessNode, AllocationNode, ComputationKind, ComputationNode, DeallocationNode, NodePayload,
         NodeType, ProgramPoint,
     };
 
@@ -1089,7 +1089,7 @@ mod tests {
         let comp = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "process".to_string(),
+                kind: ComputationKind::Other("process".to_string()),
                 result_type: None,
                 tail_call: false,
             }),
@@ -1212,7 +1212,7 @@ mod tests {
         let comp_outer = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "outer_work".to_string(),
+                kind: ComputationKind::Other("outer_work".to_string()),
                 result_type: None,
                 tail_call: false,
             }),
@@ -1232,7 +1232,7 @@ mod tests {
         let comp_inner = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "inner_work".to_string(),
+                kind: ComputationKind::Other("inner_work".to_string()),
                 result_type: None,
                 tail_call: false,
             }),
@@ -1422,7 +1422,7 @@ mod tests {
         let comp_a = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "work_a".to_string(),
+                kind: ComputationKind::Other("work_a".to_string()),
                 result_type: None,
                 tail_call: false,
             }),
@@ -1453,7 +1453,7 @@ mod tests {
         let comp_b = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(ComputationNode {
-                operation: "work_b".to_string(),
+                kind: ComputationKind::Other("work_b".to_string()),
                 result_type: None,
                 tail_call: false,
             }),

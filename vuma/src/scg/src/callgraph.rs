@@ -344,7 +344,7 @@ mod tests {
         let call_site = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(crate::node::ComputationNode {
-                operation: "call foo".into(),
+                kind: crate::node::ComputationKind::Other("call foo".into()),
                 result_type: None,
                 tail_call: false,
             }),
@@ -415,7 +415,7 @@ mod tests {
         let main_call = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(crate::node::ComputationNode {
-                operation: "call foo".into(),
+                kind: crate::node::ComputationKind::Other("call foo".into()),
                 result_type: None,
                 tail_call: false,
             }),
@@ -445,7 +445,7 @@ mod tests {
         let foo_call = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(crate::node::ComputationNode {
-                operation: "call bar".into(),
+                kind: crate::node::ComputationKind::Other("call bar".into()),
                 result_type: None,
                 tail_call: false,
             }),
@@ -525,7 +525,7 @@ mod tests {
         let f_call = scg.add_node(
             NodeType::Computation,
             NodePayload::Computation(crate::node::ComputationNode {
-                operation: "call recursive_f".into(),
+                kind: crate::node::ComputationKind::Other("call recursive_f".into()),
                 result_type: None,
                 tail_call: false,
             }),

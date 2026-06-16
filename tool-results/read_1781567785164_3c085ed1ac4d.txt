@@ -1,0 +1,950 @@
+     1→//! SCG Structured Output for LLMs
+     2→//!
+     3→//! This module provides LLM-friendly serialization of the Semantic Computation
+     4→//! Graph. Unlike the raw serde-based JSON dump in `serialize`, these outputs
+     5→//! are specifically designed for consumption by large language models:
+     6→//!
+     7→//! - **`to_json()`** — Clean, structured JSON with nodes, edges, functions,
+     8→//!   regions, and type information organized for easy parsing and reasoning.
+     9→//! - **`to_text()`** — Human-readable text with function-by-function breakdown,
+    10→//!   node listings with inputs/outputs, and data flow descriptions.
+    11→//!
+    12→//! # Design Principles
+    13→//!
+    14→//! 1. **Minimal redundancy**: IDs are used for cross-referencing, but key
+    15→//!    information is inlined so LLMs don't need to resolve references.
+    16→//! 2. **Function-centric**: Functions are first-class citizens since LLMs
+    17→//!    reason best about code in terms of functions.
+    18→//! 3. **Type information**: Every node includes its type signature so LLMs
+    19→//!    can reason about type flow.
+    20→//! 4. **Direction clarity**: Edges clearly indicate data flow direction.
+    21→
+    22→use serde::{Deserialize, Serialize};
+    23→
+    24→use crate::callgraph::CallGraph;
+    25→use crate::edge::EdgeKind;
+    26→use crate::graph::SCG;
+    27→use crate::node::{
+    28→    AccessMode, NodeData, NodeId, NodePayload,
+    29→    ProgramPoint,
+    30→};
+    31→
+    32→// ── LLM-friendly JSON types ────────────────────────────────────────────
+    33→
+    34→/// LLM-friendly JSON representation of an SCG node.
+    35→#[derive(Debug, Clone, Serialize, Deserialize)]
+    36→pub struct LlmNode {
+    37→    /// The node's unique identifier.
+    38→    pub id: u64,
+    39→    /// The semantic type of this node (e.g., "Computation", "Allocation").
+    40→    pub node_type: String,
+    41→    /// A human-readable description of the operation this node performs.
+    42→    pub operation: String,
+    43→    /// The result type of this node, if applicable.
+    44→    pub result_type: Option<String>,
+    45→    /// IDs of nodes that flow data into this node (inputs).
+    46→    pub inputs: Vec<u64>,
+    47→    /// IDs of nodes that this node flows data to (outputs).
+    48→    pub outputs: Vec<u64>,
+    49→    /// Source location, if available.
+    50→    pub source_location: Option<LlmSourceLocation>,
+    51→    /// The function this node belongs to, if any.
+    52→    pub function: Option<String>,
+    53→}
+    54→
+    55→/// LLM-friendly source location.
+    56→#[derive(Debug, Clone, Serialize, Deserialize)]
+    57→pub struct LlmSourceLocation {
+    58→    pub file: Option<String>,
+    59→    pub line: Option<u64>,
+    60→    pub column: Option<u64>,
+    61→}
+    62→
+    63→/// LLM-friendly JSON representation of an SCG edge.
+    64→#[derive(Debug, Clone, Serialize, Deserialize)]
+    65→pub struct LlmEdge {
+    66→    /// The edge's unique identifier.
+    67→    pub id: u64,
+    68→    /// Source node ID.
+    69→    pub from: u64,
+    70→    /// Target node ID.
+    71→    pub to: u64,
+    72→    /// The kind of edge (e.g., "DataFlow", "ControlFlow", "Derivation").
+    73→    pub kind: String,
+    74→    /// An optional label for the edge.
+    75→    pub label: Option<String>,
+    76→}
+    77→
+    78→/// LLM-friendly JSON representation of a function in the SCG.
+    79→#[derive(Debug, Clone, Serialize, Deserialize)]
+    80→pub struct LlmFunction {
+    81→    /// The function's entry node ID.
+    82→    pub entry_node_id: u64,
+    83→    /// The function's return node ID, if known.
+    84→    pub return_node_id: Option<u64>,
+    85→    /// The function's name/label, if available.
+    86→    pub name: Option<String>,
+    87→    /// IDs of nodes belonging to this function.
+    88→    pub nodes: Vec<u64>,
+    89→    /// IDs of functions this function calls.
+    90→    pub calls: Vec<LlmCallTarget>,
+    91→    /// IDs of functions that call this function.
+    92→    pub called_by: Vec<u64>,
+    93→    /// Whether this function is recursive.
+    94→    pub is_recursive: bool,
+    95→}
+    96→
+    97→/// A call target within a function.
+    98→#[derive(Debug, Clone, Serialize, Deserialize)]
+    99→pub struct LlmCallTarget {
+   100→    /// The entry node ID of the callee.
+   101→    pub callee_entry_node_id: u64,
+   102→    /// The callee's name, if available.
+   103→    pub callee_name: Option<String>,
+   104→}
+   105→
+   106→/// LLM-friendly JSON representation of a memory region.
+   107→#[derive(Debug, Clone, Serialize, Deserialize)]
+   108→pub struct LlmRegion {
+   109→    /// The region's unique identifier.
+   110→    pub id: u64,
+   111→    /// The deployment target (e.g., "Heap", "Stack").
+   112→    pub deployment_target: String,
+   113→    /// Whether this region is a security boundary.
+   114→    pub security_boundary: bool,
+   115→    /// IDs of nodes in this region.
+   116→    pub nodes: Vec<u64>,
+   117→}
+   118→
+   119→/// The top-level LLM-friendly JSON representation of an SCG.
+   120→#[derive(Debug, Clone, Serialize, Deserialize)]
+   121→pub struct LlmScgJson {
+   122→    /// Summary statistics.
+   123→    pub summary: LlmSummary,
+   124→    /// All nodes in the graph.
+   125→    pub nodes: Vec<LlmNode>,
+   126→    /// All edges in the graph.
+   127→    pub edges: Vec<LlmEdge>,
+   128→    /// All functions in the graph.
+   129→    pub functions: Vec<LlmFunction>,
+   130→    /// All regions in the graph.
+   131→    pub regions: Vec<LlmRegion>,
+   132→}
+   133→
+   134→/// Summary statistics for the SCG.
+   135→#[derive(Debug, Clone, Serialize, Deserialize)]
+   136→pub struct LlmSummary {
+   137→    /// Total number of nodes.
+   138→    pub total_nodes: usize,
+   139→    /// Total number of edges.
+   140→    pub total_edges: usize,
+   141→    /// Total number of functions.
+   142→    pub total_functions: usize,
+   143→    /// Total number of regions.
+   144→    pub total_regions: usize,
+   145→    /// Breakdown of nodes by type.
+   146→    pub node_type_counts: std::collections::BTreeMap<String, usize>,
+   147→}
+   148→
+   149→// ── Implementation ─────────────────────────────────────────────────────
+   150→
+   151→impl SCG {
+   152→    /// Produces a clean, LLM-friendly JSON representation of the graph.
+   153→    ///
+   154→    /// The output includes:
+   155→    /// - Nodes with their types, operations, and connections
+   156→    /// - Edges with data flow direction
+   157→    /// - Function boundaries with caller/callee information
+   158→    /// - Type information for each node
+   159→    /// - Region information
+   160→    ///
+   161→    /// # Example
+   162→    ///
+   163→    /// ```rust
+   164→    /// use vuma_scg::*;
+   165→    /// let mut scg = SCG::new();
+   166→    /// let n1 = scg.add_node(
+   167→    ///     NodeType::Computation,
+   168→    ///     NodePayload::Computation(ComputationNode {
+   169→    ///         operation: "add".to_string(),
+   170→    ///         result_type: Some("i32".to_string()),
+   171→    ///         tail_call: false,
+   172→    ///     }),
+   173→    ///     ProgramPoint { file: None, line: None, column: None, offset: None },
+   174→    /// );
+   175→    /// let json = scg.to_json();
+   176→    /// assert!(json.contains("Computation"));
+   177→    /// ```
+   178→    pub fn to_json(&self) -> String {
+   179→        let llm = self.build_llm_representation();
+   180→        serde_json::to_string_pretty(&llm).unwrap_or_else(|e| {
+   181→            format!(r#"{{"error": "JSON serialization failed: {}"}}"#, e)
+   182→        })
+   183→    }
+   184→
+   185→    /// Produces a human/LLM-readable text representation of the graph.
+   186→    ///
+   187→    /// The output includes:
+   188→    /// - Function-by-function breakdown
+   189→    /// - Node listing with inputs/outputs
+   190→    /// - Data flow description
+   191→    /// - Region information
+   192→    ///
+   193→    /// # Example
+   194→    ///
+   195→    /// ```rust
+   196→    /// use vuma_scg::*;
+   197→    /// let mut scg = SCG::new();
+   198→    /// let n1 = scg.add_node(
+   199→    ///     NodeType::Computation,
+   200→    ///     NodePayload::Computation(ComputationNode {
+   201→    ///         operation: "add".to_string(),
+   202→    ///         result_type: Some("i32".to_string()),
+   203→    ///         tail_call: false,
+   204→    ///     }),
+   205→    ///     ProgramPoint { file: None, line: None, column: None, offset: None },
+   206→    /// );
+   207→    /// let text = scg.to_text();
+   208→    /// assert!(text.contains("Computation"));
+   209→    /// ```
+   210→    pub fn to_text(&self) -> String {
+   211→        let llm = self.build_llm_representation();
+   212→        format_llm_as_text(&llm)
+   213→    }
+   214→
+   215→    /// Build the LLM-friendly intermediate representation.
+   216→    fn build_llm_representation(&self) -> LlmScgJson {
+   217→        let call_graph = CallGraph::build(self);
+   218→
+   219→        // Build a mapping from NodeId to function name
+   220→        let mut node_to_function: std::collections::HashMap<NodeId, String> =
+   221→            std::collections::HashMap::new();
+   222→        for fid in call_graph.functions() {
+   223→            let func_name = call_graph
+   224→                .function_label(fid)
+   225→                .map(|s| s.to_string())
+   226→                .unwrap_or_else(|| format!("func_{}", fid.0.as_u64()));
+   227→
+   228→            // Walk function entry via ControlFlow to find all nodes in this function
+   229→            let mut visited = hashbrown::HashSet::new();
+   230→            let mut queue = std::collections::VecDeque::new();
+   231→            queue.push_back(fid.0);
+   232→            visited.insert(fid.0);
+   233→
+   234→            while let Some(current) = queue.pop_front() {
+   235→                node_to_function.insert(current, func_name.clone());
+   236→                if let Some(succs) = self.successors(current) {
+   237→                    for succ in succs {
+   238→                        if visited.insert(succ) {
+   239→                            // Only follow ControlFlow edges within the function
+   240→                            let is_cf = self.edges().any(|e| {
+   241→                                e.source == current
+   242→                                    && e.target == succ
+   243→                                    && matches!(e.kind, EdgeKind::ControlFlow)
+   244→                            });
+   245→                            let is_df = self.edges().any(|e| {
+   246→                                e.source == current
+   247→                                    && e.target == succ
+   248→                                    && matches!(e.kind, EdgeKind::DataFlow)
+   249→                            });
+   250→                            // Include nodes reachable via ControlFlow or DataFlow
+   251→                            // but stop at Call/Return edges (they cross function boundaries)
+   252→                            let is_call_or_return = self.edges().any(|e| {
+   253→                                e.source == current
+   254→                                    && e.target == succ
+   255→                                    && matches!(e.kind, EdgeKind::Call { .. } | EdgeKind::Return { .. })
+   256→                            });
+   257→                            if (is_cf || is_df) && !is_call_or_return {
+   258→                                queue.push_back(succ);
+   259→                            }
+   260→                        }
+   261→                    }
+   262→                }
+   263→            }
+   264→        }
+   265→
+   266→        // Build input/output adjacency from edges
+   267→        let mut node_inputs: std::collections::HashMap<u64, Vec<u64>> =
+   268→            std::collections::HashMap::new();
+   269→        let mut node_outputs: std::collections::HashMap<u64, Vec<u64>> =
+   270→            std::collections::HashMap::new();
+   271→
+   272→        for edge in self.edges() {
+   273→            node_inputs
+   274→                .entry(edge.target.as_u64())
+   275→                .or_default()
+   276→                .push(edge.source.as_u64());
+   277→            node_outputs
+   278→                .entry(edge.source.as_u64())
+   279→                .or_default()
+   280→                .push(edge.target.as_u64());
+   281→        }
+   282→
+   283→        // Build nodes
+   284→        let nodes: Vec<LlmNode> = self
+   285→            .nodes()
+   286→            .map(|n| LlmNode {
+   287→                id: n.id.as_u64(),
+   288→                node_type: format!("{}", n.node_type),
+   289→                operation: node_operation(n),
+   290→                result_type: node_result_type(n),
+   291→                inputs: node_inputs
+   292→                    .get(&n.id.as_u64())
+   293→                    .cloned()
+   294→                    .unwrap_or_default(),
+   295→                outputs: node_outputs
+   296→                    .get(&n.id.as_u64())
+   297→                    .cloned()
+   298→                    .unwrap_or_default(),
+   299→                source_location: format_source_location(&n.program_point),
+   300→                function: node_to_function.get(&n.id).cloned(),
+   301→            })
+   302→            .collect();
+   303→
+   304→        // Build edges
+   305→        let edges: Vec<LlmEdge> = self
+   306→            .edges()
+   307→            .map(|e| LlmEdge {
+   308→                id: e.id.as_u64(),
+   309→                from: e.source.as_u64(),
+   310→                to: e.target.as_u64(),
+   311→                kind: format!("{}", e.kind),
+   312→                label: e.label.clone(),
+   313→            })
+   314→            .collect();
+   315→
+   316→        // Build functions
+   317→        let mut functions = Vec::new();
+   318→        for fid in call_graph.functions() {
+   319→            let name = call_graph
+   320→                .function_label(fid)
+   321→                .map(|s| s.to_string());
+   322→            let return_node_id = call_graph.function_return(fid).map(|n| n.as_u64());
+   323→
+   324→            // Collect nodes belonging to this function
+   325→            let fallback_name = format!("func_{}", fid.0.as_u64());
+   326→            let expected_name = name.as_deref().unwrap_or(&fallback_name);
+   327→            let func_nodes: Vec<u64> = node_to_function
+   328→                .iter()
+   329→                .filter(|(_, fname)| *fname == expected_name)
+   330→                .map(|(nid, _)| nid.as_u64())
+   331→                .collect();
+   332→
+   333→            let calls: Vec<LlmCallTarget> = call_graph
+   334→                .callees(&fid)
+   335→                .iter()
+   336→                .map(|cge| LlmCallTarget {
+   337→                    callee_entry_node_id: cge.callee.0.as_u64(),
+   338→                    callee_name: call_graph.function_label(&cge.callee).map(|s| s.to_string()),
+   339→                })
+   340→                .collect();
+   341→
+   342→            let called_by: Vec<u64> = call_graph
+   343→                .callers(&fid)
+   344→                .iter()
+   345→                .map(|caller_fid| caller_fid.0.as_u64())
+   346→                .collect();
+   347→
+   348→            functions.push(LlmFunction {
+   349→                entry_node_id: fid.0.as_u64(),
+   350→                return_node_id,
+   351→                name,
+   352→                nodes: func_nodes,
+   353→                calls,
+   354→                called_by,
+   355→                is_recursive: call_graph.is_recursive(&fid),
+   356→            });
+   357→        }
+   358→
+   359→        // Build regions
+   360→        let regions: Vec<LlmRegion> = self
+   361→            .regions()
+   362→            .map(|r| LlmRegion {
+   363→                id: r.id.as_u64(),
+   364→                deployment_target: format!("{}", r.deployment_target),
+   365→                security_boundary: r.security_boundary,
+   366→                nodes: r.iter_nodes().map(|n| n.as_u64()).collect(),
+   367→            })
+   368→            .collect();
+   369→
+   370→        // Build summary
+   371→        let mut node_type_counts = std::collections::BTreeMap::new();
+   372→        for node in self.nodes() {
+   373→            *node_type_counts
+   374→                .entry(format!("{}", node.node_type))
+   375→                .or_insert(0) += 1;
+   376→        }
+   377→
+   378→        let summary = LlmSummary {
+   379→            total_nodes: self.node_count(),
+   380→            total_edges: self.edge_count(),
+   381→            total_functions: call_graph.function_count(),
+   382→            total_regions: self.region_count(),
+   383→            node_type_counts,
+   384→        };
+   385→
+   386→        LlmScgJson {
+   387→            summary,
+   388→            nodes,
+   389→            edges,
+   390→            functions,
+   391→            regions,
+   392→        }
+   393→    }
+   394→}
+   395→
+   396→// ── Text formatting ────────────────────────────────────────────────────
+   397→
+   398→/// Format the LLM representation as a human-readable text document.
+   399→fn format_llm_as_text(llm: &LlmScgJson) -> String {
+   400→    let mut out = String::with_capacity(8192);
+   401→
+   402→    // Summary
+   403→    out.push_str("=== SCG Semantic Computation Graph ===\n\n");
+   404→    out.push_str(&format!(
+   405→        "Summary: {} nodes, {} edges, {} functions, {} regions\n",
+   406→        llm.summary.total_nodes,
+   407→        llm.summary.total_edges,
+   408→        llm.summary.total_functions,
+   409→        llm.summary.total_regions,
+   410→    ));
+   411→
+   412→    if !llm.summary.node_type_counts.is_empty() {
+   413→        out.push_str("Node types: ");
+   414→        let parts: Vec<String> = llm
+   415→            .summary
+   416→            .node_type_counts
+   417→            .iter()
+   418→            .map(|(k, v)| format!("{}={}", k, v))
+   419→            .collect();
+   420→        out.push_str(&parts.join(", "));
+   421→        out.push('\n');
+   422→    }
+   423→    out.push('\n');
+   424→
+   425→    // Functions
+   426→    if !llm.functions.is_empty() {
+   427→        out.push_str("--- Functions ---\n\n");
+   428→        for func in &llm.functions {
+   429→            let default_name = format!("func_{}", func.entry_node_id);
+   430→            let name = func
+   431→                .name
+   432→                .as_deref()
+   433→                .unwrap_or(&default_name);
+   434→            out.push_str(&format!("Function: {}\n", name));
+   435→            out.push_str(&format!(
+   436→                "  Entry: node_{}  Return: {}\n",
+   437→                func.entry_node_id,
+   438→                func.return_node_id
+   439→                    .map(|id| format!("node_{}", id))
+   440→                    .unwrap_or_else(|| "?".to_string())
+   441→            ));
+   442→            out.push_str(&format!(
+   443→                "  Recursive: {}\n",
+   444→                if func.is_recursive { "yes" } else { "no" }
+   445→            ));
+   446→            if !func.nodes.is_empty() {
+   447→                out.push_str(&format!(
+   448→                    "  Nodes: {}\n",
+   449→                    func.nodes
+   450→                        .iter()
+   451→                        .map(|id| format!("node_{}", id))
+   452→                        .collect::<Vec<_>>()
+   453→                        .join(", ")
+   454→                ));
+   455→            }
+   456→            if !func.calls.is_empty() {
+   457→                out.push_str("  Calls:\n");
+   458→                for call in &func.calls {
+   459→                    let default_callee = format!("func_{}", call.callee_entry_node_id);
+   460→                    let callee_name = call
+   461→                        .callee_name
+   462→                        .as_deref()
+   463→                        .unwrap_or(&default_callee);
+   464→                    out.push_str(&format!("    -> {} (node_{})\n", callee_name, call.callee_entry_node_id));
+   465→                }
+   466→            }
+   467→            if !func.called_by.is_empty() {
+   468→                out.push_str(&format!(
+   469→                    "  Called by: {}\n",
+   470→                    func.called_by
+   471→                        .iter()
+   472→                        .map(|id| format!("func_{}", id))
+   473→                        .collect::<Vec<_>>()
+   474→                        .join(", ")
+   475→                ));
+   476→            }
+   477→            out.push('\n');
+   478→        }
+   479→    }
+   480→
+   481→    // Nodes
+   482→    if !llm.nodes.is_empty() {
+   483→        out.push_str("--- Nodes ---\n\n");
+   484→        for node in &llm.nodes {
+   485→            out.push_str(&format!(
+   486→                "Node_{} [{}]: {}\n",
+   487→                node.id, node.node_type, node.operation
+   488→            ));
+   489→            if let Some(ref rt) = node.result_type {
+   490→                out.push_str(&format!("  Result type: {}\n", rt));
+   491→            }
+   492→            if let Some(ref func) = node.function {
+   493→                out.push_str(&format!("  Function: {}\n", func));
+   494→            }
+   495→            if let Some(ref loc) = node.source_location {
+   496→                if loc.file.is_some() || loc.line.is_some() {
+   497→                    let file = loc.file.as_deref().unwrap_or("?");
+   498→                    let line = loc.line.map(|l| l.to_string()).unwrap_or_else(|| "?".to_string());
+   499→                    out.push_str(&format!("  Location: {}:{}\n", file, line));
+   500→                }
+   501→            }
+   502→            if !node.inputs.is_empty() {
+   503→                out.push_str(&format!(
+   504→                    "  Inputs: {}\n",
+   505→                    node.inputs
+   506→                        .iter()
+   507→                        .map(|id| format!("node_{}", id))
+   508→                        .collect::<Vec<_>>()
+   509→                        .join(", ")
+   510→                ));
+   511→            }
+   512→            if !node.outputs.is_empty() {
+   513→                out.push_str(&format!(
+   514→                    "  Outputs: {}\n",
+   515→                    node.outputs
+   516→                        .iter()
+   517→                        .map(|id| format!("node_{}", id))
+   518→                        .collect::<Vec<_>>()
+   519→                        .join(", ")
+   520→                ));
+   521→            }
+   522→            out.push('\n');
+   523→        }
+   524→    }
+   525→
+   526→    // Edges (data flow description)
+   527→    if !llm.edges.is_empty() {
+   528→        out.push_str("--- Data Flow ---\n\n");
+   529→        for edge in &llm.edges {
+   530→            let label = edge
+   531→                .label
+   532→                .as_deref()
+   533→                .unwrap_or("");
+   534→            let label_suffix = if label.is_empty() {
+   535→                String::new()
+   536→            } else {
+   537→                format!(" ({})", label)
+   538→            };
+   539→            out.push_str(&format!(
+   540→                "node_{} --[{}]--> node_{}{}\n",
+   541→                edge.from, edge.kind, edge.to, label_suffix
+   542→            ));
+   543→        }
+   544→        out.push('\n');
+   545→    }
+   546→
+   547→    // Regions
+   548→    if !llm.regions.is_empty() {
+   549→        out.push_str("--- Regions ---\n\n");
+   550→        for region in &llm.regions {
+   551→            out.push_str(&format!(
+   552→                "Region_{} [{}]{}\n",
+   553→                region.id,
+   554→                region.deployment_target,
+   555→                if region.security_boundary {
+   556→                    " [SECURITY BOUNDARY]"
+   557→                } else {
+   558→                    ""
+   559→                }
+   560→            ));
+   561→            if !region.nodes.is_empty() {
+   562→                out.push_str(&format!(
+   563→                    "  Nodes: {}\n",
+   564→                    region.nodes
+   565→                        .iter()
+   566→                        .map(|id| format!("node_{}", id))
+   567→                        .collect::<Vec<_>>()
+   568→                        .join(", ")
+   569→                ));
+   570→            }
+   571→            out.push('\n');
+   572→        }
+   573→    }
+   574→
+   575→    out
+   576→}
+   577→
+   578→// ── Node description helpers ───────────────────────────────────────────
+   579→
+   580→/// Extract a human-readable operation description from a node.
+   581→fn node_operation(node: &NodeData) -> String {
+   582→    match &node.payload {
+   583→        NodePayload::Computation(c) => c.kind.label(),
+   584→        NodePayload::Allocation(a) => {
+   585→            let tn = a
+   586→                .type_name
+   587→                .as_deref()
+   588→                .map(|t| format!(" {}", t))
+   589→                .unwrap_or_default();
+   590→            format!("alloc {}B align={}{}", a.size, a.align, tn)
+   591→        }
+   592→        NodePayload::Deallocation(_) => "dealloc".to_string(),
+   593→        NodePayload::Access(a) => {
+   594→            let mode = match a.mode {
+   595→                AccessMode::Read => "read",
+   596→                AccessMode::Write => "write",
+   597→                AccessMode::ReadWrite => "read_write",
+   598→            };
+   599→            let offset = a
+   600→                .offset
+   601→                .map(|o| format!("+{}", o))
+   602→                .unwrap_or_default();
+   603→            format!("{}{} @region_{}", mode, offset, a.region_id.as_u64())
+   604→        }
+   605→        NodePayload::Cast(c) => format!("cast {} -> {}", c.from_type, c.to_type),
+   606→        NodePayload::Effect(e) => format!("effect({})", e.effect_kind),
+   607→        NodePayload::Control(c) => {
+   608→            let lbl = c
+   609→                .label
+   610→                .as_deref()
+   611→                .map(|l| format!(" {}", l))
+   612→                .unwrap_or_default();
+   613→            format!("{:?}{}", c.kind, lbl)
+   614→        }
+   615→        NodePayload::Phantom(p) => format!("phantom({})", p.purpose),
+   616→        NodePayload::VTable(v) => format!("vtable({} for {})", v.trait_name, v.concrete_type),
+   617→        NodePayload::ClosureEnv(e) => format!("closure_env({:?})", e.captured_vars),
+   618→        NodePayload::StructDef(s) => format!("struct_def({})", s.name),
+   619→        NodePayload::EnumDef(e) => format!("enum_def({})", e.name),
+   620→        NodePayload::Match(m) => format!("match({})", m.subject),
+   621→        NodePayload::ConstantTime(ct) => format!("ct_{:?}", ct.op),
+   622→    }
+   623→}
+   624→
+   625→/// Extract the result type from a node, if applicable.
+   626→fn node_result_type(node: &NodeData) -> Option<String> {
+   627→    match &node.payload {
+   628→        NodePayload::Computation(c) => c.result_type.clone(),
+   629→        NodePayload::Allocation(a) => a.type_name.clone(),
+   630→        NodePayload::Cast(c) => Some(c.to_type.clone()),
+   631→        NodePayload::Access(a) => a.access_size.map(|s| format!("{}B", s)),
+   632→        _ => None,
+   633→    }
+   634→}
+   635→
+   636→/// Format a ProgramPoint as an LlmSourceLocation.
+   637→fn format_source_location(pp: &ProgramPoint) -> Option<LlmSourceLocation> {
+   638→    if pp.file.is_none() && pp.line.is_none() && pp.column.is_none() {
+   639→        None
+   640→    } else {
+   641→        Some(LlmSourceLocation {
+   642→            file: pp.file.clone(),
+   643→            line: pp.line,
+   644→            column: pp.column,
+   645→        })
+   646→    }
+   647→}
+   648→
+   649→// ── Tests ──────────────────────────────────────────────────────────────
+   650→
+   651→#[cfg(test)]
+   652→mod tests {
+   653→    use super::*;
+   654→    use crate::edge::EdgeKind;
+   655→    use crate::graph::SCG;
+   656→    use crate::node::{
+   657→        AllocationNode, ComputationNode, ControlKind, ControlNode, DeallocationNode,
+   658→        NodePayload, NodeType, ProgramPoint,
+   659→    };
+   660→    use crate::region::{DeploymentTarget, RegionId, SCGRegion};
+   661→
+   662→    fn pp() -> ProgramPoint {
+   663→        ProgramPoint {
+   664→            file: Some("test.vu".to_string()),
+   665→            line: Some(1),
+   666→            column: Some(1),
+   667→            offset: None,
+   668→        }
+   669→    }
+   670→
+   671→    #[test]
+   672→    fn test_to_json_empty_scg() {
+   673→        let scg = SCG::new();
+   674→        let json = scg.to_json();
+   675→        assert!(json.contains("summary"));
+   676→        assert!(json.contains("total_nodes"));
+   677→        let parsed: LlmScgJson = serde_json::from_str(&json).unwrap();
+   678→        assert_eq!(parsed.summary.total_nodes, 0);
+   679→        assert_eq!(parsed.summary.total_edges, 0);
+   680→    }
+   681→
+   682→    #[test]
+   683→    fn test_to_json_simple_graph() {
+   684→        let mut scg = SCG::new();
+   685→        let n1 = scg.add_node(
+   686→            NodeType::Computation,
+   687→            NodePayload::Computation(ComputationNode {
+   688→                operation: "add".to_string(),
+   689→                result_type: Some("i32".to_string()),
+   690→                tail_call: false,
+   691→            }),
+   692→            pp(),
+   693→        );
+   694→        let n2 = scg.add_node(
+   695→            NodeType::Computation,
+   696→            NodePayload::Computation(ComputationNode {
+   697→                operation: "mul".to_string(),
+   698→                result_type: Some("i32".to_string()),
+   699→                tail_call: false,
+   700→            }),
+   701→            pp(),
+   702→        );
+   703→        scg.add_edge(n1, n2, EdgeKind::DataFlow).unwrap();
+   704→
+   705→        let json = scg.to_json();
+   706→        let parsed: LlmScgJson = serde_json::from_str(&json).unwrap();
+   707→
+   708→        assert_eq!(parsed.summary.total_nodes, 2);
+   709→        assert_eq!(parsed.summary.total_edges, 1);
+   710→        assert_eq!(parsed.nodes.len(), 2);
+   711→        assert_eq!(parsed.edges.len(), 1);
+   712→
+   713→        // Check node operation
+   714→        let add_node = parsed.nodes.iter().find(|n| n.operation == "add").unwrap();
+   715→        assert_eq!(add_node.result_type, Some("i32".to_string()));
+   716→        assert!(add_node.outputs.contains(&n2.as_u64()));
+   717→
+   718→        let mul_node = parsed.nodes.iter().find(|n| n.operation == "mul").unwrap();
+   719→        assert!(mul_node.inputs.contains(&n1.as_u64()));
+   720→    }
+   721→
+   722→    #[test]
+   723→    fn test_to_json_with_function() {
+   724→        let mut scg = SCG::new();
+   725→        let entry = scg.add_node(
+   726→            NodeType::Control,
+   727→            NodePayload::Control(ControlNode {
+   728→                kind: ControlKind::FunctionEntry,
+   729→                label: Some("main".to_string()),
+   730→            }),
+   731→            pp(),
+   732→        );
+   733→        let comp = scg.add_node(
+   734→            NodeType::Computation,
+   735→            NodePayload::Computation(ComputationNode {
+   736→                operation: "hello".to_string(),
+   737→                result_type: None,
+   738→                tail_call: false,
+   739→            }),
+   740→            pp(),
+   741→        );
+   742→        let ret = scg.add_node(
+   743→            NodeType::Control,
+   744→            NodePayload::Control(ControlNode {
+   745→                kind: ControlKind::FunctionReturn,
+   746→                label: Some("main".to_string()),
+   747→            }),
+   748→            pp(),
+   749→        );
+   750→        scg.add_edge(entry, comp, EdgeKind::ControlFlow).unwrap();
+   751→        scg.add_edge(comp, ret, EdgeKind::ControlFlow).unwrap();
+   752→
+   753→        let json = scg.to_json();
+   754→        let parsed: LlmScgJson = serde_json::from_str(&json).unwrap();
+   755→
+   756→        assert_eq!(parsed.summary.total_functions, 1);
+   757→        let func = &parsed.functions[0];
+   758→        assert_eq!(func.name, Some("main".to_string()));
+   759→        assert_eq!(func.entry_node_id, entry.as_u64());
+   760→        assert_eq!(func.return_node_id, Some(ret.as_u64()));
+   761→    }
+   762→
+   763→    #[test]
+   764→    fn test_to_json_with_region() {
+   765→        let mut scg = SCG::new();
+   766→        let rid = RegionId::new(1);
+   767→        let alloc = scg.add_node(
+   768→            NodeType::Allocation,
+   769→            NodePayload::Allocation(AllocationNode {
+   770→                size: 256,
+   771→                align: 16,
+   772→                region_id: rid,
+   773→                type_name: Some("Buffer".to_string()),
+   774→            }),
+   775→            pp(),
+   776→        );
+   777→        let mut region = SCGRegion::new(rid, DeploymentTarget::Heap);
+   778→        region.add_node(alloc);
+   779→        scg.add_region(region);
+   780→
+   781→        let json = scg.to_json();
+   782→        let parsed: LlmScgJson = serde_json::from_str(&json).unwrap();
+   783→
+   784→        assert_eq!(parsed.regions.len(), 1);
+   785→        assert_eq!(parsed.regions[0].id, 1);
+   786→        assert_eq!(parsed.regions[0].deployment_target, "Heap");
+   787→
+   788→        // Check the allocation node has result_type set from type_name
+   789→        let alloc_node = parsed
+   790→            .nodes
+   791→            .iter()
+   792→            .find(|n| n.node_type == "Allocation")
+   793→            .unwrap();
+   794→        assert_eq!(alloc_node.result_type, Some("Buffer".to_string()));
+   795→    }
+   796→
+   797→    #[test]
+   798→    fn test_to_text_basic() {
+   799→        let mut scg = SCG::new();
+   800→        scg.add_node(
+   801→            NodeType::Computation,
+   802→            NodePayload::Computation(ComputationNode {
+   803→                operation: "add".to_string(),
+   804→                result_type: Some("i32".to_string()),
+   805→                tail_call: false,
+   806→            }),
+   807→            pp(),
+   808→        );
+   809→
+   810→        let text = scg.to_text();
+   811→        assert!(text.contains("SCG Semantic Computation Graph"));
+   812→        assert!(text.contains("Computation"));
+   813→        assert!(text.contains("add"));
+   814→    }
+   815→
+   816→    #[test]
+   817→    fn test_to_text_with_function() {
+   818→        let mut scg = SCG::new();
+   819→        let entry = scg.add_node(
+   820→            NodeType::Control,
+   821→            NodePayload::Control(ControlNode {
+   822→                kind: ControlKind::FunctionEntry,
+   823→                label: Some("my_func".to_string()),
+   824→            }),
+   825→            pp(),
+   826→        );
+   827→        let ret = scg.add_node(
+   828→            NodeType::Control,
+   829→            NodePayload::Control(ControlNode {
+   830→                kind: ControlKind::FunctionReturn,
+   831→                label: Some("my_func".to_string()),
+   832→            }),
+   833→            pp(),
+   834→        );
+   835→        scg.add_edge(entry, ret, EdgeKind::ControlFlow).unwrap();
+   836→
+   837→        let text = scg.to_text();
+   838→        assert!(text.contains("my_func"));
+   839→        assert!(text.contains("Functions"));
+   840→    }
+   841→
+   842→    #[test]
+   843→    fn test_to_text_with_data_flow() {
+   844→        let mut scg = SCG::new();
+   845→        let n1 = scg.add_node(
+   846→            NodeType::Computation,
+   847→            NodePayload::Computation(ComputationNode {
+   848→                operation: "source".to_string(),
+   849→                result_type: None,
+   850→                tail_call: false,
+   851→            }),
+   852→            pp(),
+   853→        );
+   854→        let n2 = scg.add_node(
+   855→            NodeType::Computation,
+   856→            NodePayload::Computation(ComputationNode {
+   857→                operation: "sink".to_string(),
+   858→                result_type: None,
+   859→                tail_call: false,
+   860→            }),
+   861→            pp(),
+   862→        );
+   863→        scg.add_edge(n1, n2, EdgeKind::DataFlow).unwrap();
+   864→
+   865→        let text = scg.to_text();
+   866→        assert!(text.contains("Data Flow"));
+   867→        assert!(text.contains("DataFlow"));
+   868→    }
+   869→
+   870→    #[test]
+   871→    fn test_to_json_round_trip() {
+   872→        let mut scg = SCG::new();
+   873→        let n1 = scg.add_node(
+   874→            NodeType::Computation,
+   875→            NodePayload::Computation(ComputationNode {
+   876→                operation: "add".to_string(),
+   877→                result_type: Some("i32".to_string()),
+   878→                tail_call: false,
+   879→            }),
+   880→            pp(),
+   881→        );
+   882→        let n2 = scg.add_node(
+   883→            NodeType::Computation,
+   884→            NodePayload::Computation(ComputationNode {
+   885→                operation: "sub".to_string(),
+   886→                result_type: None,
+   887→                tail_call: false,
+   888→            }),
+   889→            pp(),
+   890→        );
+   891→        scg.add_edge(n1, n2, EdgeKind::DataFlow).unwrap();
+   892→
+   893→        let json = scg.to_json();
+   894→        let parsed: LlmScgJson = serde_json::from_str(&json).unwrap();
+   895→
+   896→        assert_eq!(parsed.nodes.len(), 2);
+   897→        assert_eq!(parsed.edges.len(), 1);
+   898→        assert_eq!(parsed.summary.total_nodes, 2);
+   899→        assert_eq!(parsed.summary.total_edges, 1);
+   900→
+   901→        // Verify type counts
+   902→        assert_eq!(parsed.summary.node_type_counts.get("Computation"), Some(&2));
+   903→    }
+   904→
+   905→    #[test]
+   906→    fn test_to_json_alloc_dealloc_pair() {
+   907→        let mut scg = SCG::new();
+   908→        let rid = RegionId::new(1);
+   909→        let alloc = scg.add_node(
+   910→            NodeType::Allocation,
+   911→            NodePayload::Allocation(AllocationNode {
+   912→                size: 1024,
+   913→                align: 8,
+   914→                region_id: rid,
+   915→                type_name: Some("MyStruct".to_string()),
+   916→            }),
+   917→            pp(),
+   918→        );
+   919→        let dealloc = scg.add_node(
+   920→            NodeType::Deallocation,
+   921→            NodePayload::Deallocation(DeallocationNode {
+   922→                allocation_node: alloc,
+   923→                region_id: rid,
+   924→            }),
+   925→            pp(),
+   926→        );
+   927→        scg.add_edge(alloc, dealloc, EdgeKind::Derivation).unwrap();
+   928→
+   929→        let json = scg.to_json();
+   930→        let parsed: LlmScgJson = serde_json::from_str(&json).unwrap();
+   931→
+   932→        assert_eq!(parsed.nodes.len(), 2);
+   933→        let alloc_node = parsed
+   934→            .nodes
+   935→            .iter()
+   936→            .find(|n| n.node_type == "Allocation")
+   937→            .unwrap();
+   938→        assert_eq!(alloc_node.operation, "alloc 1024B align=8 MyStruct");
+   939→        assert_eq!(alloc_node.result_type, Some("MyStruct".to_string()));
+   940→
+   941→        let dealloc_node = parsed
+   942→            .nodes
+   943→            .iter()
+   944→            .find(|n| n.node_type == "Deallocation")
+   945→            .unwrap();
+   946→        assert_eq!(dealloc_node.operation, "dealloc");
+   947→        assert!(dealloc_node.inputs.contains(&alloc.as_u64()));
+   948→    }
+   949→}
+   950→
