@@ -1,0 +1,828 @@
+     1→     1→# VUMA — Verified-Unsafe Memory Access
+     2→     2→
+     3→     3→**An AI-native programming language framework that replaces traditional type systems with behavioral verification.**
+     4→     4→
+     5→     5→[![CI](https://github.com/vuma-lang/vuma/actions/workflows/ci.yml/badge.svg)](https://github.com/vuma-lang/vuma/actions/workflows/ci.yml)
+     6→     6→[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+     7→     7→[![Version: 0.1.0-alpha.1](https://img.shields.io/badge/version-0.1.0--alpha.1-orange.svg)](CHANGELOG.md)
+     8→     8→[![Crates.io](https://img.shields.io/badge/crates.io-vuma-blue.svg)](https://crates.io/crates/vuma)
+     9→     9→[![Rust: nightly](https://img.shields.io/badge/rust-nightly-93450a.svg)](rust-toolchain.toml)
+    10→    10→
+    11→    11→---
+    12→    12→
+    13→    13→## Table of Contents
+    14→    14→
+    15→    15→1. [What's New in v0.1-alpha](#whats-new-in-v01-alpha)
+    16→    16→2. [Overview](#overview)
+    17→    17→3. [Features](#features)
+    18→    18→4. [8 Backend Architectures](#8-backend-architectures)
+    19→    19→5. [Architecture](#architecture)
+    20→    20→6. [VUMA for LLMs](#vuma-for-llms)
+    21→    21→7. [Installation](#installation)
+    22→    22→8. [Quick Start](#quick-start)
+    23→    23→9. [Running Tests](#running-tests)
+    24→    24→10. [Project Structure](#project-structure)
+    25→    25→11. [Key Concepts](#key-concepts)
+    26→    26→12. [Example Programs](#example-programs)
+    27→    27→13. [API Examples](#api-examples)
+    28→    28→14. [Known Limitations](#known-limitations)
+    29→    29→15. [Documentation](#documentation)
+    30→    30→16. [Contributing](#contributing)
+    31→    31→17. [License](#license)
+    32→    32→
+    33→    33→---
+    34→    34→
+    35→    35→## What's New in v0.1-alpha
+    36→    36→
+    37→    37→This is the first public alpha release of the VUMA framework. It ships five waves of engineering work covering the full compilation pipeline from source text to machine code across 8 architectures, with formal verification, LLM integration, and a comprehensive standard library.
+    38→    38→
+    39→    39→### Wave 1 — Foundation & Formal Specifications
+    40→    40→
+    41→    41→- **12 workspace crates**: `scg`, `bd`, `vuma`, `ive`, `cor`, `projection`, `parser`, `codegen`, `proof`, `std`, `tests`, `package`
+    42→    42→- **15 formal specifications** (~9,800 lines): SCG model, RepD/CapD/RelD lattices, five VUMA invariants, MSG construction, BD inference algorithm, verification algorithm, ARM64 codegen algorithm, security model, benchmark design, proof systems, decidability analysis
+    43→    43→- **10 example programs**: hello_memory, doubly_linked_list, arena_allocator, gpio_blink, lock_free_queue, channel_demo, memory_arena, sorted_map, thread_pool, and more
+    44→    44→- **Full verification pipeline**: SCG → MSG → IVE verification with counterexample generation
+    45→    45→- **Proof system**: Formal proofs, checker, tactics, and counterexample generation
+    46→    46→
+    47→    47→### Wave 2 — Core Verification & Memory Model
+    48→    48→
+    49→    49→- **SCG → MSG conversion** (1,357 lines): Topological walk producing well-formed Memory State Graphs
+    50→    50→- **Incremental MSG** (1,907 lines): Delta computation and application for fast re-verification
+    51→    51→- **Invariant aggregator** (1,141 lines): Unified verification pipeline across all five invariants
+    52→    52→
+    53→    53→### Wave 3 — Standard Library & COR Enhancement
+    54→    54→
+    55→    55→- **Std primitives**: RelD, BD triple, `HasBD` trait, `Ptr<T>`, `RegionPtr<T>`, `Slice<T>`, `VumaResult`, `VumaOption`, `Range`
+    56→    56→- **COR enhancements**: `PmuCounters`, `SpeculativeExecutor`, `DeploymentManager` with hot-swap FSM
+    57→    57→- **5 allocators**: Global, Arena, Pool, Bump, FreeList with VUMA-compatible BD annotations
+    58→    58→
+    59→    59→### Wave 4 — Parser, Collections, & Benchmarks
+    60→    60→
+    61→    61→- **Parser error recovery**: 8 error kinds, 5 recovery strategies, "Did you mean?" suggestions
+    62→    62→- **Collections**: `VumaString`, `SipHasher13`, `DoublyLinkedList`, `Vec`, `HashMap`, `RingBuffer`
+    63→    63→- **Benchmark suite**: 8 categories with 40+ benchmarks
+    64→    64→
+    65→    65→### Wave 5 — Multi-Arch Codegen & LLM Integration
+    66→    66→
+    67→    67→- **8 backend architectures** all passing SHA256d or individual operation tests
+    68→    68→- **73 math functions** (f64 + f32 variants): trig, exp/log, rounding, classification, constants
+    69→    69→- **14 formatting functions**: `format_int`, `format_uint`, `format_float`, `format_hex`, `format_binary`, `format_octal`, `format_pointer`, `pad_left`, `pad_right`, `join`, `write_str`, `write_int`, `write_float`
+    70→    70→- **DWARF v4 debug info**: Per-backend address size and instruction length, `.debug_abbrev`, `.debug_info`, `.debug_line`, `.debug_frame`
+    71→    71→- **FFI & syscalls**: 19 Linux syscalls across 8 architectures, `extern "C"` blocks, architecture-specific relocations
+    72→    72→- **Atomics**: `AtomicLoad`, `AtomicStore`, `AtomicCas` across all 8 backends (LL/SC on AArch64/RISC-V, LOCK CMPXCHG on x86_64, acquire/release on PPC64)
+    73→    73→- **FP conversions**: `IntToFloat`, `UIntToFloat`, `FloatToInt`, `FloatToUInt`, `FloatToFloat` across all 8 backends
+    74→    74→- **Constant-time crypto**: Branchless `ct_select`, `ct_eq`, `ct_ne`, `ct_lt`, `ct_gte` across all 8 backends
+    75→    75→- **65 diagnostic codes**: E001–E050, W001–W010, I001–I005 with error chaining and structured suggestions
+    76→    76→- **LLM API**: `VumaForLLM` with `compile()`, `check()`, `analyze()`, `to_wasm()`, `explain_error()`, `suggest_fixes()`
+    77→    77→- **Package manager**: `vuma pkg init`, `vuma pkg build`, `vuma pkg add` with dependency resolution
+    78→    78→- **Module system**: `import "crypto.vuma"::{sha256, sha256d};` with circular import detection
+    79→    79→
+    80→    80→---
+    81→    81→
+    82→    82→## Overview
+    83→    83→
+    84→    84→VUMA is a programming language framework built on a radical premise: **unsafe memory operations should not be forbidden — they should be made verifiable.** Instead of relying on a borrow checker to reject programs that cannot be statically proven safe, VUMA constructs a formal model of every memory operation and verifies global invariants against that model. Programs that pass verification run without runtime overhead; programs that fail receive precise counterexamples showing the exact execution path to the violation.
+    85→    85→
+    86→    86→### Why VUMA?
+    87→    87→
+    88→    88→Traditional languages face a fundamental trade-off: either restrict what programmers can express (Rust's borrow checker, Java's GC) or accept memory-unsafe programs (C, C++). VUMA breaks this trade-off through three innovations:
+    89→    89→
+    90→    90→1. **Semantic Computation Graphs (SCGs)** replace source code as the primary program representation. The SCG is a directed, acyclic, attributed multigraph where nodes are operations, edges are relationships, and regions delineate scopes and deployment targets.
+    91→    91→
+    92→    92→2. **Behavioral Descriptors (BDs)** replace nominal types. A BD is the triple (RepD, CapD, RelD) — representation, capabilities, and relationships — inferred from program structure rather than declared by the programmer.
+    93→    93→
+    94→    94→3. **Verification over restriction** — instead of rejecting programs that might be unsafe, VUMA verifies that they are safe and provides precise diagnostics when they are not.
+    95→    95→
+    96→    96→### The Five VUMA Invariants
+    97→    97→
+    98→    98→Every VUMA program is verified against five global memory-safety invariants:
+    99→    99→
+   100→   100→| Invariant       | Ensures                                            |
+   101→   101→|-----------------|----------------------------------------------------|
+   102→   102→| **Liveness**    | Every access targets allocated memory              |
+   103→   103→| **Exclusivity** | No conflicting concurrent accesses                 |
+   104→   104→| **Interpretation** | Every access uses a valid representation         |
+   105→   105→| **Origin**      | Every address traces to a valid allocation         |
+   106→   106→| **Cleanup**     | Every region is eventually freed or explicitly leaked |
+   107→   107→
+   108→   108→---
+   109→   109→
+   110→   110→## Features
+   111→   111→
+   112→   112→### 8-Backend Multi-Architecture Codegen
+   113→   113→
+   114→   114→VUMA compiles to **8 CPU/platform targets** with a unified `Backend` trait architecture. All 6 native backends pass the full SHA256d execution test. Wasm32 generates valid modules. LoongArch64 passes individual operation tests.
+   115→   115→
+   116→   116→### AI-Native Design
+   117→   117→
+   118→   118→VUMA is designed from the ground up for programmatic consumption by AI agents:
+   119→   119→
+   120→   120→- **VumaForLLM API** — stateless `compile()`, `check()`, `analyze()`, `to_wasm()`, `explain_error()`, `suggest_fixes()`
+   121→   121→- **LSP Server** — full protocol: diagnostics, hover, go-to-definition, completion, semantic tokens
+   122→   122→- **Enhanced REPL** — `:wasm`, `:backends`, `:check`, `:diagnostics`, `:exports`, tab completion, color output
+   123→   123→- **Wasm32 Sandbox** — LLM agents compile to safe, sandboxed WebAssembly modules
+   124→   124→- **65 Diagnostic Codes** — E001–E050, W001–W010, I001–I005 with error chaining and structured suggestions
+   125→   125→
+   126→   126→### Memory Safety Verification
+   127→   127→
+   128→   128→- **10 violation types** detected at compile time: UseAfterFree, DoubleFree, MemoryLeak, BoundsCheckFailure, NullDereference, DanglingPointer, UninitializedRead, BufferOverflow, UseAfterScope, InvalidFree
+   129→   129→- **Runtime bounds checking** behind `--safe` flag
+   130→   130→- **Constant-time crypto**: Branchless `ct_select`, `ct_eq`, `ct_ne`, `ct_lt`, `ct_gte` across all 8 backends
+   131→   131→
+   132→   132→### Atomics & Concurrency
+   133→   133→
+   134→   134→All 8 backends support atomic operations with architecture-appropriate lowering:
+   135→   135→
+   136→   136→| Backend | Atomic Load | Atomic Store | Atomic CAS | Mechanism |
+   137→   137→|---------|-------------|-------------|------------|-----------|
+   138→   138→| x86_64 | ✅ | ✅ | ✅ | Aligned MOV + LOCK CMPXCHG |
+   139→   139→| AArch64 | ✅ | ✅ | ✅ | LDAXR / STLXR loop |
+   140→   140→| RISC-V 64 | ✅ | ✅ | ✅ | LR.D / SC.D loop |
+   141→   141→| ARM32 | ✅ | ✅ | ✅ | LDREX / STREX loop |
+   142→   142→| MIPS64 | ✅ | ✅ | ✅ | LL / SC loop |
+   143→   143→| PPC64 | ✅ | ✅ | ✅ | lwsync + aligned load/store + sync |
+   144→   144→| LoongArch64 | ✅ | ✅ | ✅ | LL.W / SC.W loop |
+   145→   145→| Wasm32 | ✅ | ✅ | ✅ | Wasm atomic instructions |
+   146→   146→
+   147→   147→### Floating-Point Conversions
+   148→   148→
+   149→   149→All 8 backends support complete FP conversion casts:
+   150→   150→
+   151→   151→| Cast | Description | Example |
+   152→   152→|------|-------------|---------|
+   153→   153→| `IntToFloat` | Signed integer → float | `SCVTF` (AArch64), `CVTSI2SD` (x86_64) |
+   154→   154→| `UIntToFloat` | Unsigned integer → float | `UCVTF` (AArch64), zero-extend + CVT (x86_64) |
+   155→   155→| `FloatToInt` | Float → signed integer | `FCVTZS` (AArch64), `CVTTSD2SI` (x86_64) |
+   156→   156→| `FloatToUInt` | Float → unsigned integer | `FCVTZU` (AArch64), via saturating path (x86_64) |
+   157→   157→| `FloatToFloat` | f32 ↔ f64 conversion | `FCVT` (AArch64), `CVTSD2SS`/`CVTSS2SD` (x86_64) |
+   158→   158→
+   159→   159→### DWARF v4 Debug Info
+   160→   160→
+   161→   161→Per-backend DWARF debug information with four sections:
+   162→   162→
+   163→   163→| Section | Contents |
+   164→   164→|---------|----------|
+   165→   165→| `.debug_abbrev` | Abbreviation tables (tag + attribute encodings) |
+   166→   166→| `.debug_info` | Compilation unit DIEs (subprograms, variables) |
+   167→   167→| `.debug_line` | Line-number program (DWARF standard opcodes) |
+   168→   168→| `.debug_frame` | Call frame information (CIE + FDE entries) |
+   169→   169→
+   170→   170→### FFI & System Calls
+   171→   171→
+   172→   172→- **19 Linux syscalls** across all 8 architectures (read, write, open, close, exit, mmap, munmap, brk, ioctl, fcntl, getpid, clone, futex, etc.)
+   173→   173→- **Architecture-specific relocations**: `Arm32Call`, `Mips26`, `Ppc64Rel24`, `LoongArchB26`, etc.
+   174→   174→- **`extern "C" { fn ...; }`** FFI blocks with `is_extern` flag propagation through IR and codegen
+   175→   175→
+   176→   176→### Standard Library
+   177→   177→
+   178→   178→| Module | Key Functions | Count |
+   179→   179→|--------|--------------|-------|
+   180→   180→| **math** | `sin`, `cos`, `tan`, `sqrt`, `exp`, `ln`, `pow`, `floor`, `ceil`, `is_nan`, `copysign` + f32 variants + 9 constants | 73 |
+   181→   181→| **fmt** | `format_int`, `format_uint`, `format_float`, `format_hex`, `format_binary`, `pad_left`, `join`, `write_str` | 14 |
+   182→   182→| **crypto** | SHA-256 constants, constant-time `ct_select`, `ct_eq`, `ct_ne`, `ct_lt`, `ct_gte` | 5 |
+   183→   183→| **string** | `strlen`, `strcmp`, `memcpy`, `memset` | 4 |
+   184→   184→| **alloc** | `heap_alloc`, `heap_free`, `heap_realloc` + 5 allocator types | 8 |
+   185→   185→| **io** | `read_bytes`, `write_bytes`, `read_u32_le`, `write_u32_le` | 4 |
+   186→   186→| **sync** | `Mutex`, `RwLock`, `Channel`, `Barrier` | 4 |
+   187→   187→| **collections** | `Vec`, `HashMap`, `DoublyLinkedList`, `RingBuffer`, `VumaString` | 5 |
+   188→   188→
+   189→   189→### Module System & Package Manager
+   190→   190→
+   191→   191→- **Multi-file compilation**: `import "crypto.vuma"::{sha256, sha256d};` with circular import detection
+   192→   192→- **Package manager**: `vuma pkg init`, `vuma pkg build`, `vuma pkg add` with dependency resolution
+   193→   193→
+   194→   194→---
+   195→   195→
+   196→   196→## 8 Backend Architectures
+   197→   197→
+   198→   198→VUMA supports multi-ISA code generation across 8 backend architectures — a unified compilation pipeline producing native machine code or WebAssembly from a single source program:
+   199→   199→
+   200→   200→| Backend | ELF Class | Endianness | Pointer Width | Calling Convention | Atomics | FP Casts | DWARF |
+   201→   201→|---------|-----------|------------|---------------|-------------------|---------|----------|-------|
+   202→   202→| **x86_64** | ELF64 | Little | 64-bit | System V AMD64 (RDI, RSI, RDX, RCX, R8, R9) | ✅ | ✅ | ✅ |
+   203→   203→| **AArch64** | ELF64 | Little | 64-bit | AAPCS64 (X0-X7, V0-V7) | ✅ | ✅ | ✅ |
+   204→   204→| **RISC-V 64** | ELF64 | Little | 64-bit | RV64G LP64D (A0-A7) | ✅ | ✅ | ✅ |
+   205→   205→| **ARM32** | ELF32 | Little | 32-bit | AAPCS (R0-R3) | ✅ | ✅ | ✅ |
+   206→   206→| **MIPS64** | ELF64 | Big | 64-bit | N64 ($a0-$a7) | ✅ | ✅ | ✅ |
+   207→   207→| **PPC64** | ELF64 | Big | 64-bit | ELFv2 (R3-R10, TOC) | ✅ | ✅ | ✅ |
+   208→   208→| **LoongArch64** | ELF64 | Little | 64-bit | LP64 ($a0-$a7) | ✅ | ✅ | ✅ |
+   209→   209→| **Wasm32** | Wasm | Little | 32-bit | Stack machine | ✅ | ✅ | ✅ |
+   210→   210→
+   211→   211→All backends share a unified `Backend` trait and produce either ELF executables (7 native targets) or Wasm modules (Wasm32). The codegen pipeline is:
+   212→   212→
+   213→   213→```
+   214→   214→SCG → IR (target-independent) → Register Allocation → Instruction Selection → Binary Emission
+   215→   215→```
+   216→   216→
+   217→   217→### Backend Test Coverage
+   218→   218→
+   219→   219→| Test Category | Count | What It Covers |
+   220→   220→|---------------|-------|----------------|
+   221→   221→| Cross-backend consistency | 9 | 4 IR programs × 8 backends |
+   222→   222→| ABI conformance | 27 | Calling conventions for all 8 backends |
+   223→   223→| ELF validation | 7 × 4 | ELF32/64, endianness, machine types |
+   224→   224→| Wasm validation | 12 | Magic, sections, globals, exports, code bodies |
+   225→   225→| SHA256d execution | 6 | Full SHA256d on all 6 stable native backends |
+   226→   226→
+   227→   227→---
+   228→   228→
+   229→   229→## Architecture
+   230→   230→
+   231→   231→VUMA implements a six-layer architecture where data flows from human intent through graph construction, inference, verification, code generation, and into execution on bare metal. Feedback flows upward at every stage.
+   232→   232→
+   233→   233→```
+   234→   234→┌─────────────────────────────────────────────────────────────────────┐
+   235→   235→│                    LLM Integration Layer                             │
+   236→   236→│    VumaForLLM API · LSP Server · REPL · Structured Diagnostics     │
+   237→   237→├─────────────────────────────────────────────────────────────────────┤
+   238→   238→│                    Layer 3 — Projection System                       │
+   239→   239→│    Textual · Visual · Conversational · Bidirectional · Diff         │
+   240→   240→├─────────────────────────────────────────────────────────────────────┤
+   241→   241→│                    Parser / Frontend (auxiliary)                     │
+   242→   242→│    Lexer → Parser → AST → AST-to-SCG Lowering · Module Resolution  │
+   243→   243→├─────────────────────────────────────────────────────────────────────┤
+   244→   244→│             Layers 2, 5, 6 — Reasoning Core                         │
+   245→   245→│    IVE (Inference + Verification) · BD (Descriptors) · MSG (Memory) │
+   246→   246→│    Invariants: Liveness · Exclusivity · Interpretation ·             │
+   247→   247→│                Origin · Cleanup                                      │
+   248→   248→├─────────────────────────────────────────────────────────────────────┤
+   249→   249→│                    Layer 1 — SCG (Core Representation)               │
+   250→   250→│    Nodes (ops, allocs, effects) · Edges (data flow, deps) · Regions │
+   251→   251→├─────────────────────────────────────────────────────────────────────┤
+   252→   252→│                    Layer 4 — Execution                               │
+   253→   253→│    COR Runtime (always-compiled, PGO, JIT) · Multi-ISA Codegen      │
+   254→   254→│    x86_64 · AArch64 · RISC-V 64 · ARM32 · MIPS64 · PPC64           │
+   255→   255→│    LoongArch64 · Wasm32                                             │
+   256→   256→└─────────────────────────────────────────────────────────────────────┘
+   257→   257→```
+   258→   258→
+   259→   259→### Pipeline
+   260→   260→
+   261→   261→```
+   262→   262→Source Text → Lexer → Parser → AST → SCG Lowering → Raw SCG
+   263→   263→    → Module Resolution (imports) → Merged SCG
+   264→   264→    → BD Inference (RepD + CapD + RelD fixpoint) → Annotated SCG
+   265→   265→    → MSG Builder → VUMA Verification (5 invariants) → Verified SCG
+   266→   266→    → Multi-Arch Codegen (IR → regalloc → emit) → Machine Code / Wasm
+   267→   267→    → COR Runtime → Execution → Profile Feedback → re-optimize
+   268→   268→```
+   269→   269→
+   270→   270→### Crate Dependency Graph
+   271→   271→
+   272→   272→```
+   273→   273→                    ┌──────────┐
+   274→   274→                    │  tests   │  (depends on everything)
+   275→   275→                    └────┬─────┘
+   276→   276→           ┌─────────────┼──────────────────┐
+   277→   277→           ▼             ▼                  ▼
+   278→   278→    ┌────────────┐ ┌──────────┐      ┌──────────┐
+   279→   279→    │ projection │ │   std    │      │  codegen  │
+   280→   280→    └─────┬──────┘ └────┬─────┘      └─────┬────┘
+   281→   281→          │              │                   │
+   282→   282→          ▼              ▼                   ▼
+   283→   283→    ┌──────────┐  ┌──────────┐  ┌──────────────────┐
+   284→   284→    │   cor    │  │  vuma    │  │    ive · proof    │
+   285→   285→    └────┬─────┘  └────┬─────┘  └────┬─────────────┘
+   286→   286→         │             │              │
+   287→   287→         └─────────────┼──────────────┘
+   288→   288→                       ▼
+   289→   289→                ┌──────────────┐
+   290→   290→                │  bd · std    │
+   291→   291→                └──────┬───────┘
+   292→   292→                       ▼
+   293→   293→                ┌──────────────┐
+   294→   294→                │     scg      │  ◄── foundation (zero workspace deps)
+   295→   295→                └──────────────┘
+   296→   296→```
+   297→   297→
+   298→   298→---
+   299→   299→
+   300→   300→## VUMA for LLMs
+   301→   301→
+   302→   302→VUMA is designed as an **AI-native** language framework. Every interface is designed for programmatic consumption by AI agents. This LLM-first design allows AI coding agents to use VUMA as a verified compilation sandbox: parse source, analyze structure, run verification, compile to any of 8 backends, and inspect results — all through clean API boundaries.
+   303→   303→
+   304→   304→### LLM-Facing Interfaces
+   305→   305→
+   306→   306→| Interface | Description | Use Case |
+   307→   307→|-----------|-------------|----------|
+   308→   308→| `VumaForLLM` API | `compile()`, `check()`, `analyze()`, `to_wasm()`, `explain_error()`, `suggest_fixes()` | LLM compiles and verifies code in a sandbox |
+   309→   309→| `VumaCompiler` API | `compile()`, `parse()`, `analyze()`, `validate()`, `verify()` | Full pipeline with verification reports |
+   310→   310→| LSP Server | Full LSP protocol: diagnostics, hover, go-to-definition, completion | IDE integration and LLM agent interaction |
+   311→   311→| REPL `:wasm` | Compile to Wasm and show binary size | Quick Wasm compilation check |
+   312→   312→| REPL `:backends` | List 8 backends with status | Discover compilation capabilities |
+   313→   313→| REPL `:check` | Run IVE verification | Instant verification feedback |
+   314→   314→| REPL `:diagnostics` | Show all diagnostics as JSON | Structured error analysis |
+   315→   315→| REPL `:exports` | List all functions and signatures | Program structure inspection |
+   316→   316→
+   317→   317→### Wasm32 Sandbox for LLM Agents
+   318→   318→
+   319→   319→The Wasm32 backend enables LLM agents to compile VUMA programs into safe, sandboxed WebAssembly modules. This is the recommended execution path for LLM-generated code: the Wasm module runs in a sandboxed environment with no access to host memory or peripherals, ensuring that LLM-generated code cannot cause harm.
+   320→   320→
+   321→   321→```rust
+   322→   322→// LLM agent compiles VUMA to Wasm
+   323→   323→let result = VumaForLLM::compile(source);
+   324→   324→if let Some(wasm) = &result.wasm_binary {
+   325→   325→    println!("Wasm module: {} bytes", wasm.len());
+   326→   326→}
+   327→   327→```
+   328→   328→
+   329→   329→### Parser Hardening for LLM-Generated Code
+   330→   330→
+   331→   331→The VUMA parser is specifically hardened for code generated by LLMs:
+   332→   332→
+   333→   333→- **LLM type aliases**: `int` → `i32`, `float` → `f32`, `double` → `f64`, `String` → `string`
+   334→   334→- **C/Rust construct detection**: `println!`, `vec!`, `format!`, `panic!` produce helpful errors
+   335→   335→- **C-style for loop detection**: `for (i=0; i<n; i++)` → specific error with VUMA suggestion
+   336→   336→- **Reference type conversion**: `&T` / `&mut T` auto-convert to `*T` (pointer type)
+   337→   337→
+   338→   338→---
+   339→   339→
+   340→   340→## Installation
+   341→   341→
+   342→   342→### Via Cargo
+   343→   343→
+   344→   344→```bash
+   345→   345→cargo install vuma
+   346→   346→```
+   347→   347→
+   348→   348→### Building from Source
+   349→   349→
+   350→   350→**Prerequisites:**
+   351→   351→
+   352→   352→- **Rust** — nightly toolchain (pinned in `rust-toolchain.toml`)
+   353→   353→- **Make** or **Just** — build orchestration
+   354→   354→- **QEMU** (optional) — emulation for testing cross-architecture backends
+   355→   355→
+   356→   356→```bash
+   357→   357→# Clone the repository
+   358→   358→git clone https://github.com/vuma-lang/vuma.git
+   359→   359→cd vuma
+   360→   360→
+   361→   361→# Install the pinned toolchain, components, and targets
+   362→   362→make setup
+   363→   363→
+   364→   364→# Build the entire workspace
+   365→   365→make build
+   366→   366→
+   367→   367→# Verify the build
+   368→   368→cargo run -- --version
+   369→   369→
+   370→   370→# Run all tests
+   371→   371→make test
+   372→   372→```
+   373→   373→
+   374→   374→### Quick Build Check
+   375→   375→
+   376→   376→```bash
+   377→   377→# Build + lint + test in one command
+   378→   378→make lint && make test
+   379→   379→```
+   380→   380→
+   381→   381→---
+   382→   382→
+   383→   383→## Quick Start
+   384→   384→
+   385→   385→### Your First VUMA Program
+   386→   386→
+   387→   387→Create `hello.vuma`:
+   388→   388→
+   389→   389→```vuma
+   390→   390→// hello.vuma — Basic memory allocation, write, read, and deallocation
+   391→   391→
+   392→   392→region main_region {
+   393→   393→    let x: ptr<u8> = allocate(1) in main_region;
+   394→   394→    write x, 42;
+   395→   395→    let val: u8 = read x;
+   396→   396→    deallocate x from main_region;
+   397→   397→}
+   398→   398→```
+   399→   399→
+   400→   400→Compile and verify:
+   401→   401→
+   402→   402→```bash
+   403→   403→# Verify against all 5 VUMA invariants
+   404→   404→vuma verify hello.vuma
+   405→   405→
+   406→   406→# Compile to a specific backend
+   407→   407→vuma build --target x86_64 hello.vuma
+   408→   408→vuma build --target aarch64 hello.vuma
+   409→   409→vuma build --target wasm32 hello.vuma
+   410→   410→
+   411→   411→# Quick syntax and semantic check
+   412→   412→vuma check hello.vuma
+   413→   413→
+   414→   414→# Run with memory safety analysis
+   415→   415→vuma run --safe hello.vuma
+   416→   416→
+   417→   417→# Compile with DWARF debug info
+   418→   418→vuma build --debug-info hello.vuma
+   419→   419→```
+   420→   420→
+   421→   421→The verifier will check all five invariants against the SCG derived from your program. If verification passes, you get zero-overhead machine code for any of the 8 backends. If it fails, you get a precise counterexample showing the exact path to the violation.
+   422→   422→
+   423→   423→### FFI Example
+   424→   424→
+   425→   425→Create `ffi_demo.vuma`:
+   426→   426→
+   427→   427→```vuma
+   428→   428→// ffi_demo.vuma — Call into C library functions via FFI
+   429→   429→
+   430→   430→extern "C" {
+   431→   431→    fn write(fd: i64, buf: Address, count: i64) -> i64;
+   432→   432→    fn exit(code: i64);
+   433→   433→}
+   434→   434→
+   435→   435→fn main() {
+   436→   436→    write(1, 0x400000, 13);
+   437→   437→    exit(0);
+   438→   438→}
+   439→   439→```
+   440→   440→
+   441→   441→### Using the Math Library
+   442→   442→
+   443→   443→```vuma
+   444→   444→// math_demo.vuma — Use standard library math functions
+   445→   445→
+   446→   446→fn compute() -> f64 {
+   447→   447→    let angle: f64 = 1.57079632679;  // π/2
+   448→   448→    let result: f64 = sin(angle);     // ≈ 1.0
+   449→   449→    return result;
+   450→   450→}
+   451→   451→```
+   452→   452→
+   453→   453→### Importing Modules
+   454→   454→
+   455→   455→```vuma
+   456→   456→// main.vuma — Import from another VUMA file
+   457→   457→
+   458→   458→import "crypto.vuma"::{sha256, sha256d};
+   459→   459→
+   460→   460→fn main() {
+   461→   461→    let hash: ptr<u8> = sha256(data, len);
+   462→   462→}
+   463→   463→```
+   464→   464→
+   465→   465→---
+   466→   466→
+   467→   467→## Running Tests
+   468→   468→
+   469→   469→### All Tests
+   470→   470→
+   471→   471→```bash
+   472→   472→make test
+   473→   473→# or: cargo test --workspace
+   474→   474→```
+   475→   475→
+   476→   476→### Per-Crate Tests
+   477→   477→
+   478→   478→```bash
+   479→   479→cargo test -p vuma-scg          # SCG core
+   480→   480→cargo test -p vuma-ive          # Inference and verification engine
+   481→   481→cargo test -p vuma-bd           # Behavioral descriptors
+   482→   482→cargo test -p vuma-core         # VUMA memory model
+   483→   483→cargo test -p vuma-codegen      # Multi-architecture code generation
+   484→   484→cargo test -p vuma-std          # Standard library
+   485→   485→cargo test -p vuma-proof        # Proof system
+   486→   486→cargo test -p vuma-parser       # Parser
+   487→   487→```
+   488→   488→
+   489→   489→### Specific Test Categories
+   490→   490→
+   491→   491→```bash
+   492→   492→# Cross-backend consistency (8 backends)
+   493→   493→cargo test -p vuma-tests -- cross_backend
+   494→   494→
+   495→   495→# ABI conformance (27 tests)
+   496→   496→cargo test -p vuma-tests -- abi_conformance
+   497→   497→
+   498→   498→# ELF validation (7 native backends)
+   499→   499→cargo test -p vuma-tests -- elf_validation
+   500→   500→
+   501→   501→# Wasm validation (12 tests)
+   502→   502→cargo test -p vuma-tests -- wasm_validation
+   503→   503→
+   504→   504→# DWARF + FFI integration
+   505→   505→cargo test -p vuma-tests -- dwarf_ffi
+   506→   506→
+   507→   507→# Property-based testing
+   508→   508→cargo test -p vuma-tests -- property
+   509→   509→
+   510→   510→# Parser roundtrip
+   511→   511→cargo test -p vuma-tests -- parser_roundtrip
+   512→   512→```
+   513→   513→
+   514→   514→### Verification Tests (Thread-Sensitive)
+   515→   515→
+   516→   516→```bash
+   517→   517→cargo test -p vuma-ive -- --test-threads=1
+   518→   518→```
+   519→   519→
+   520→   520→### Benchmarks
+   521→   521→
+   522→   522→```bash
+   523→   523→make bench
+   524→   524→# or: cargo bench --workspace
+   525→   525→
+   526→   526→# Run the benchmark suite via CLI
+   527→   527→cargo run -- --bench
+   528→   528→```
+   529→   529→
+   530→   530→The benchmark suite covers:
+   531→   531→- SHA256d across all 8 backends (timing, binary size, instruction count)
+   532→   532→- Compilation speed at varying program sizes
+   533→   533→- Backend comparison (binary sizes)
+   534→   534→- Codegen quality (redundant load/store analysis)
+   535→   535→
+   536→   536→### Code Quality
+   537→   537→
+   538→   538→```bash
+   539→   539→make fmt-check    # Format check
+   540→   540→make clippy       # Lint
+   541→   541→make lint         # Full lint
+   542→   542→make lint && make test  # Full CI check
+   543→   543→```
+   544→   544→
+   545→   545→---
+   546→   546→
+   547→   547→## Project Structure
+   548→   548→
+   549→   549→```
+   550→   550→vuma/
+   551→   551→├── Cargo.toml              # Workspace root (12 crate members)
+   552→   552→├── CHANGELOG.md             # Changelog (Waves 1–32)
+   553→   553→├── RELEASES.md              # Release notes
+   554→   554→├── Makefile / justfile      # Build/test orchestration
+   555→   555→├── rust-toolchain.toml      # Pinned nightly toolchain
+   556→   556→├── src/
+   557→   557→│   ├── lib.rs / pipeline.rs / main.rs   # Crate root, pipeline, CLI
+   558→   558→│   ├── llm_api.rs           # VumaForLLM API for LLM agents
+   559→   559→│   ├── api.rs               # VumaCompiler API
+   560→   560→│   ├── diagnostics.rs       # 65 diagnostic codes, error chaining
+   561→   561→│   ├── ffi.rs               # FFI, 19 syscalls, relocations
+   562→   562→│   ├── lsp/                 # Language Server Protocol
+   563→   563→│   ├── scg/                 # Layer 1 — Semantic Computation Graph
+   564→   564→│   │   └── node, edge, region, graph, callgraph, liveness, dominance, loop_detection
+   565→   565→│   ├── bd/                  # Layer 5 — Behavioral Descriptors
+   566→   566→│   │   └── repd, capd, reld, inference, context_solver
+   567→   567→│   ├── vuma/                # Layer 6 — VUMA Memory Model
+   568→   568→│   │   └── msg, msg_builder, msg_incremental, invariant_*
+   569→   569→│   ├── ive/                 # Layer 2 — Inference & Verification Engine
+   570→   570→│   │   └── verification, inference, escape, interprocedural, cache
+   571→   571→│   ├── cor/                 # Layer 4 — Continuous Optimization Runtime
+   572→   572→│   │   └── runtime, speculative, deployment, optimization
+   573→   573→│   ├── projection/          # Layer 3 — Projection System
+   574→   574→│   │   └── textual, visual, conversational, bidirectional, diff
+   575→   575→│   ├── parser/              # Parser / Frontend / Module Resolution
+   576→   576→│   │   └── lexer, parser, ast, resolver, to_scg
+   577→   577→│   ├── codegen/             # Multi-ISA Code Generation (8 backends)
+   578→   578→│   │   ├── backend.rs / ir.rs / scg_to_ir.rs / regalloc.rs / opt.rs
+   579→   579→│   │   ├── emit.rs / dwarf.rs / control_flow.rs / memory_safety.rs
+   580→   580→│   │   ├── x86_64/          # x86_64 backend (SysV AMD64)
+   581→   581→│   │   ├── arm64.rs         # AArch64 backend (AAPCS64)
+   582→   582→│   │   ├── riscv64.rs       # RISC-V 64 backend (LP64D)
+   583→   583→│   │   ├── arm32/           # ARM32 backend (AAPCS)
+   584→   584→│   │   ├── mips64/          # MIPS64 backend (N64)
+   585→   585→│   │   ├── ppc64/           # PowerPC64 backend (ELFv2)
+   586→   586→│   │   ├── loongarch64/     # LoongArch64 backend (LP64)
+   587→   587→│   │   └── wasm32/          # WebAssembly backend
+   588→   588→│   ├── proof/               # Formal Proof System
+   589→   589→│   │   └── proof, checker, counterexample, tactics, composition
+   590→   590→│   ├── std/                 # Standard Library (18 modules)
+   591→   591→│   │   └── primitives, alloc, collections, math (73 fns), fmt (14 fns),
+   592→   592→│   │       crypto, string, io, sync, thread, env, fs, net, path,
+   593→   593→│   │       process, time, error
+   594→   594→│   ├── package/             # Package Manager (manifest, resolver, registry)
+   595→   595→│   └── tests/               # Integration Tests & Benchmarks
+   596→   596→│       └── cross_backend, abi_conformance, elf_validation, wasm_validation,
+   597→   597→│           dwarf_ffi_integration, full_pipeline, sha256d_backends,
+   598→   598→│           property_tests, benchmarks
+   599→   599→├── examples/                # 20+ VUMA example programs (*.vuma)
+   600→   600→├── docs/                    # Documentation + 15 formal specs
+   601→   601→└── .github/workflows/       # CI (test + cross-compile for all 8 targets)
+   602→   602→```
+   603→   603→
+   604→   604→---
+   605→   605→
+   606→   606→## Key Concepts
+   607→   607→
+   608→   608→### SCG — Semantic Computation Graph
+   609→   609→
+   610→   610→The SCG is the single source of truth in VUMA. There is no "source code" that the compiler translates — the SCG *is* the program, and every other representation (textual, visual, conversational, machine code) is a **projection** of the SCG. Nodes represent computational operations (allocations, accesses, computations, casts, effects, control flow), edges represent relationships (data flow, control flow, derivation, annotation), and regions delineate scopes, phases, and deployment targets.
+   611→   611→
+   612→   612→### BD — Behavioral Descriptor
+   613→   613→
+   614→   614→A Behavioral Descriptor replaces traditional nominal types with the triple (RepD, CapD, RelD):
+   615→   615→
+   616→   616→- **RepD** (Representation Descriptor): memory layout — size, alignment, field offsets, multiple simultaneous interpretations
+   617→   617→- **CapD** (Capability Descriptor): permitted operations — read, write, execute, serialize, send, persist, derive-pointer (context-dependent)
+   618→   618→- **RelD** (Relational Descriptor): relationships — temporal co-occurrence, structural containment, dependency ordering, semantic equivalence, security-level flow
+   619→   619→
+   620→   620→BDs are **inferred**, not declared. The IVE derives them from SCG structure through iterative fixpoint computation.
+   621→   621→
+   622→   622→### MSG — Memory State Graph
+   623→   623→
+   624→   624→The Memory State Graph captures every allocation point, every pointer derivation, every deallocation point, every concurrent access, and every reinterpretation. It is constructed from the annotated SCG and serves as the formal model against which the five invariants are verified.
+   625→   625→
+   626→   626→### IVE — Inference & Verification Engine
+   627→   627→
+   628→   628→The IVE is the reasoning core. It reads the SCG, infers Behavioral Descriptors, constructs the MSG, and verifies the five global invariants. It operates through iterative fixpoint computation, resolving interdependencies between RepD, CapD, and RelD inference. It supports interprocedural analysis, escape analysis, verification caching, and incremental re-verification.
+   629→   629→
+   630→   630→### COR — Continuous Optimization Runtime
+   631→   631→
+   632→   632→The COR maintains an always-compiled invariant: every reachable SCG region is kept in compiled machine code at all times. It performs incremental compilation, profile-guided optimization (using PMU counters), speculative optimization with transparent deoptimization, and adaptive deployment across heterogeneous targets.
+   633→   633→
+   634→   634→---
+   635→   635→
+   636→   636→## Example Programs
+   637→   637→
+   638→   638→| Example                   | Lines | Demonstrates                                      |
+   639→   639→|---------------------------|-------|---------------------------------------------------|
+   640→   640→| `hello_memory.vuma`       | 40    | Basic allocate/write/read/free                    |
+   641→   641→| `doubly_linked_list.vuma` | 89    | Sentinel node pattern, derivation chains          |
+   642→   642→| `arena_allocator.vuma`    | 78    | Arena allocation with region semantics            |
+   643→   643→| `gpio_blink.vuma`         | 68    | GPIO hardware access                              |
+   644→   644→| `lock_free_queue.vuma`    | 99    | Lock-free SPSC queue with atomics                 |
+   645→   645→| `channel_demo.vuma`       | 237   | Channel-based concurrency                         |
+   646→   646→| `memory_arena.vuma`       | 197   | Region-based allocation                           |
+   647→   647→| `sorted_map.vuma`         | 192   | Sorted map with BD-verified operations            |
+   648→   648→| `thread_pool.vuma`        | 209   | Thread pool with work stealing                    |
+   649→   649→| `spinlock.vuma`           | 45    | Spinlock using atomic CAS                         |
+   650→   650→| `sha256d.vuma`            | 150+  | SHA256d hash computation                          |
+   651→   651→| `ffi_demo.vuma`           | 30    | FFI and syscall usage                             |
+   652→   652→| `fibonacci.vuma`          | 25    | Fibonacci computation                             |
+   653→   653→| `quicksort.vuma`          | 60    | Quicksort implementation                          |
+   654→   654→| `crc32.vuma`              | 50    | CRC32 checksum                                    |
+   655→   655→| `base64_encode.vuma`      | 55    | Base64 encoding                                   |
+   656→   656→
+   657→   657→---
+   658→   658→
+   659→   659→## API Examples
+   660→   660→
+   661→   661→### LLM API (VumaForLLM)
+   662→   662→
+   663→   663→```rust
+   664→   664→use vuma::VumaForLLM;
+   665→   665→
+   666→   666→// Compile VUMA source code
+   667→   667→let result = VumaForLLM::compile(source);
+   668→   668→if result.success {
+   669→   669→    println!("Compilation succeeded!");
+   670→   670→    println!("Explanation: {}", result.explanation);
+   671→   671→    if let Some(scg) = &result.scg_json {
+   672→   672→        println!("SCG: {}", scg);
+   673→   673→    }
+   674→   674→    for (target, size) in &result.binary_sizes {
+   675→   675→        println!("{}: {} bytes", target, size);
+   676→   676→    }
+   677→   677→}
+   678→   678→
+   679→   679→// Quick syntax/semantic check
+   680→   680→let diagnostics = VumaForLLM::check(source);
+   681→   681→for diag in &diagnostics {
+   682→   682→    println!("[{}] {}", diag.severity, diag.message);
+   683→   683→}
+   684→   684→
+   685→   685→// Analyze SCG structure
+   686→   686→let analysis = VumaForLLM::analyze(source)?;
+   687→   687→
+   688→   688→// Compile to Wasm sandbox
+   689→   689→let wasm = VumaForLLM::to_wasm(source)?;
+   690→   690→
+   691→   691→// Explain an error in natural language
+   692→   692→let explanation = VumaForLLM::explain_error(&diagnostic);
+   693→   693→
+   694→   694→// Get fix suggestions
+   695→   695→let fixes = VumaForLLM::suggest_fixes(&diagnostic);
+   696→   696→
+   697→   697→// List available targets
+   698→   698→let targets = VumaForLLM::targets();
+   699→   699→for t in &targets {
+   700→   700→    println!("{} ({}, {}-bit, {})", t.name, t.triple, t.pointer_width, t.endianness);
+   701→   701→}
+   702→   702→```
+   703→   703→
+   704→   704→### LSP Server
+   705→   705→
+   706→   706→```bash
+   707→   707→# Start the LSP server (for IDE integration)
+   708→   708→vuma lsp
+   709→   709→```
+   710→   710→
+   711→   711→The LSP server provides:
+   712→   712→- **Diagnostics**: real-time verification feedback with counterexamples
+   713→   713→- **Hover**: BD details, verification status, type information
+   714→   714→- **Go-to-definition**: navigate to function/variable definitions
+   715→   715→- **Completion**: VUMA keywords, functions, and types
+   716→   716→- **Document symbols**: function list with signatures
+   717→   717→- **Semantic tokens**: syntax highlighting information
+   718→   718→
+   719→   719→### REPL
+   720→   720→
+   721→   721→```bash
+   722→   722→# Start the interactive REPL
+   723→   723→vuma repl
+   724→   724→
+   725→   725→# REPL commands:
+   726→   726→:wasm            # Compile current session to Wasm32
+   727→   727→:backends        # List all 8 available backends
+   728→   728→:check           # Run IVE verification on current session
+   729→   729→:diagnostics     # Show all diagnostics as JSON
+   730→   730→:exports         # List all function signatures
+   731→   731→:verify          # Full verification pipeline
+   732→   732→:help            # Show available commands
+   733→   733→```
+   734→   734→
+   735→   735→---
+   736→   736→
+   737→   737→## Known Limitations
+   738→   738→
+   739→   739→This is an alpha release. We are transparent about what is not yet complete:
+   740→   740→
+   741→   741→| Area | Status | Details |
+   742→   742→|------|--------|---------|
+   743→   743→| **Self-hosting** | ❌ Not started | VUMA cannot compile itself yet. The compiler is written in Rust. |
+   744→   744→| **Structs / Enums** | ❌ Not started | No user-defined struct or enum types. Programs operate on primitives, pointers, and regions. |
+   745→   745→| **Stdlib is host-side only** | ⚠️ Partial | Math, fmt, string, and crypto functions execute on the host side (Rust). They are not yet compiled to target machine code. |
+   746→   746→| **BD inference completeness** | ⚠️ Partial | Some complex BD inference scenarios (M2.3) are deferred to a future release. |
+   747→   747→| **Doubly-linked list verification** | ⚠️ Partial | Full verification of doubly-linked list patterns (M2.4) is not yet complete. |
+   748→   748→| **Concurrent verification** | ⚠️ Limited | Verification is limited to single-threaded programs. Full concurrent verification is planned. |
+   749→   749→| **COR end-to-end** | ⚠️ Partial | The Continuous Optimization Runtime is not yet integrated end-to-end. |
+   750→   750→| **LoongArch64 performance** | ⚠️ Slow | Full SHA256d on QEMU is too slow; should work on native hardware. |
+   751→   751→| **Error recovery** | ⚠️ Partial | Parser has known type mismatches in AST→SCG lowering for some edge cases. |
+   752→   752→
+   753→   753→We believe in honest roadmapping. These limitations represent active development areas, not permanent constraints.
+   754→   754→
+   755→   755→---
+   756→   756→
+   757→   757→## Documentation
+   758→   758→
+   759→   759→| Document                    | Description                                           |
+   760→   760→|-----------------------------|-------------------------------------------------------|
+   761→   761→| [Architecture](docs/architecture.md) | Full architecture document with LLM integration section |
+   762→   762→| [Language Reference](docs/language-reference.md) | Complete VUMA syntax and semantics |
+   763→   763→| [LLM Language Reference](docs/llm-language-reference.md) | LLM-oriented guide with pitfalls and patterns |
+   764→   764→| [Roadmap](docs/ROADMAP.md) | 5-phase development roadmap with milestones           |
+   765→   765→| [Contributing](docs/CONTRIBUTING.md) | Build, test, add features, code review process   |
+   766→   766→| [Conventions](docs/CONVENTIONS.md) | Rust style, error handling, testing, naming, docs |
+   767→   767→| [Glossary](docs/GLOSSARY.md) | 40+ defined terms across all domains               |
+   768→   768→| [Changelog](CHANGELOG.md) | Detailed changelog (Waves 1–32)                      |
+   769→   769→| [Release Notes](RELEASES.md) | Release summaries with known limitations          |
+   770→   770→| [Formal Specs](docs/specs/) | 15 formal specification documents                   |
+   771→   771→
+   772→   772→### Formal Specifications
+   773→   773→
+   774→   774→| Specification                        | Lines | Topic                                    |
+   775→   775→|--------------------------------------|-------|------------------------------------------|
+   776→   776→| `scg-formal-spec.md`                 | 475   | SCG mathematical model                   |
+   777→   777→| `repd-formal-spec.md`                | 546   | Representation descriptor lattice        |
+   778→   778→| `capd-formal-spec.md`                | 492   | Capability descriptor lattice            |
+   779→   779→| `reld-formal-spec.md`                | 600   | Relational descriptor kinds              |
+   780→   780→| `vuma-invariants-spec.md`            | 742   | Five VUMA invariants                     |
+   781→   781→| `msg-construction-spec.md`           | 850   | MSG construction algorithm               |
+   782→   782→| `aarch64-memory-model-spec.md`      | 809   | AArch64 memory model                     |
+   783→   783→| `security-model-spec.md`             | 606   | Security model and threat categories     |
+   784→   784→| `bd-inference-algorithm.md`          | 1027  | BD inference fixpoint algorithm          |
+   785→   785→| `vuma-verification-algorithm.md`     | 1098  | VUMA verification algorithm              |
+   786→   786→| `arm64-codegen-algorithm.md`         | 1182  | ARM64 codegen algorithm                  |
+   787→   787→| `benchmark-design.md`                | 695   | Benchmark methodology and categories     |
+   788→   788→| `trivial-proofs.md`                  | 547   | Trivial program proofs                   |
+   789→   789→| `dlist-proof.md`                     | 631   | Doubly-linked list proof                 |
+   790→   790→| `decidability-analysis.md`           | 416   | Decidability analysis                    |
+   791→   791→
+   792→   792→---
+   793→   793→
+   794→   794→## Contributing
+   795→   795→
+   796→   796→See [CONTRIBUTING.md](docs/CONTRIBUTING.md) for the complete contributor guide, including:
+   797→   797→
+   798→   798→- **How to Build** — prerequisites, workspace layout, Make/just commands
+   799→   799→- **How to Run Tests** — unit, integration, verification, and benchmark tests
+   800→   800→- **How to Add SCG Node Types** — 8-step process with examples
+   801→   801→- **How to Add Verification Passes** — 9-step process with formal spec requirements
+   802→   802→- **How to Add Backend Instructions** — 7-step process with encoding verification
+   803→   803→- **Code Review Process** — 7 review criteria, timeline, special rules
+   804→   804→- **PR Template** — summary, verification impact, test plan, checklist
+   805→   805→
+   806→   806→Quick start for contributors:
+   807→   807→
+   808→   808→```bash
+   809→   809→make setup                     # Install toolchain and targets
+   810→   810→make lint && make test         # Full CI check
+   811→   811→cargo test -p vuma-scg         # Fast per-crate iteration
+   812→   812→```
+   813→   813→
+   814→   814→---
+   815→   815→
+   816→   816→## License
+   817→   817→
+   818→   818→This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
+   819→   819→
+   820→   820→---
+   821→   821→
+   822→   822→## Worklog
+   823→   823→
+   824→   824→- **2026-03-05 — Waves 1–5:** Created comprehensive README.md with overview, architecture, quick start, AArch64 build instructions, test instructions, project structure, key concepts, examples, documentation index, and contributing link.
+   825→   825→- **2026-03-05 — Waves 6–32:** Expanded README for v0.2.0 release: 8 backends, LLM integration, Wasm sandbox, API examples, REPL commands, LSP, diagnostics, module system, package manager.
+   826→   826→- **2026-03-05 — Task 6-b:** Polished README for public v0.1-alpha release: added "What's New in v0.1-alpha" section, updated features list with DWARF/FFI/atomics/FP casts/92 math functions/fmt module, added comprehensive backend status table with atomics/FP/DWARF columns, added installation instructions (cargo install + from source), added working quick-start examples (hello/FFI/math/modules), added badges, added "Known Limitations" section, updated project structure with all 8 backend modules and std module details.
+   827→   827→- **2026-03-05 — Task 6-a:** Comprehensive documentation consistency pass: updated language-reference.md (added FFI/extern section, expanded stdlib with fmt/math/crypto/string/additional modules, added multi-backend table, version bump to 0.2.0), updated architecture.md (version 0.2.0, status Phase 3, expanded codegen layout with all 8 backends + DWARF + backend trait + memory_safety, expanded std layout with all 16 modules), updated ROADMAP.md (version 0.2.0, status Phase 3, wave 19-20 DWARF v4 clarity, phase 2 status note), updated CONTRIBUTING.md (new Section 3: Test Infrastructure with 11 test categories, renamed "ARM64 Instructions" to "Backend Instructions" covering all 8 architectures, added FFI review rule, renumbered sections), updated llm-language-reference.md (expanded stdlib intro to mention all modules, added crypto module docs, string module docs, additional modules list), verified llm-system-prompt.md already covers fmt/math/FFI/atomics/DWARF.
+   828→   828→
