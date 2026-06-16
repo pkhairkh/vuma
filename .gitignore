@@ -1,2 +1,38 @@
-skills/
-node_modules/
+/target
+**/target/
+**/*.rs.bk
+Cargo.lock
+*.o
+*.wasm
+*.elf
+*.bin
+*.img
+.DS_Store
+tool-results/
+.env
+
+# Development debris
+agent-ctx/
+*.bak
+*.orig
+*.swp
+*.swo
+*~
+WORKLOG.md
+worklog.md
+WAVE_PLAN.md
+MANIFEST.md
+
+# Fuzz / Proptest artifacts
+**/fuzz/target/
+**/fuzz/corpus/
+**/proptest-regressions/
+
+# Profiling artifacts
+perf.data*
+flamegraph.svg
+
+# IDE / editor
+.idea/
+.vscode/
+*.iml

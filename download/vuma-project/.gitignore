@@ -1,8 +1,0 @@
-/target
-**/*.rs.bk
-Cargo.lock
-*.o
-*.elf
-*.bin
-*.img
-.DS_Store
