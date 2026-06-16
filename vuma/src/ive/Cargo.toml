@@ -1,0 +1,19 @@
+[package]
+name = "vuma-ive"
+version.workspace = true
+edition.workspace = true
+description = "Inference & Verification Engine — behavioral descriptor inference and invariant verification"
+repository.workspace = true
+license.workspace = true
+keywords.workspace = true
+categories.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+vuma-bd.workspace = true
+vuma-scg.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+log.workspace = true
+hashbrown.workspace = true

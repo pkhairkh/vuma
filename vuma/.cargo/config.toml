@@ -1,0 +1,59 @@
+# ============================================================================
+# VUMA — Cargo build configuration
+# ============================================================================
+
+# ---- aarch64 Linux (user-space) cross-compilation -------------------------
+
+[target.aarch64-unknown-linux-gnu]
+linker = "aarch64-linux-gnu-gcc"
+# Enable tighter optimisations for ARM64 targets
+rustflags = [
+    "-C", "target-feature=+neon",
+    "-C", "link-arg=-Wl,--as-needed",
+]
+
+# ---- aarch64 bare-metal (Pi 5) -------------------------------------------
+
+[target.aarch64-unknown-none]
+runner = "qemu-system-aarch64 -M raspi4b -serial stdio -kernel"
+rustflags = [
+    # Disable std, enable panic=abort semantics at link time
+    "-C", "link-arg=-nostartfiles",
+    # Use the custom linker script from src/pi5/link.ld
+    "-C", "link-arg=-Tsrc/pi5/link.ld",
+    # Strip unused sections for minimal binary size
+    "-C", "link-arg=-Wl,--gc-sections",
+    # No default libs on bare-metal
+    "-C", "link-arg=-nodefaultlibs",
+]
+
+# ---- x86_64 native --------------------------------------------------------
+
+[target.x86_64-unknown-linux-gnu]
+rustflags = [
+    "-C", "target-cpu=native",
+]
+
+# ---- Global build settings ------------------------------------------------
+
+[build]
+rustflags = ["-C", "target-cpu=native"]
+incremental = true
+# Default target when none is specified (override with --target)
+# target = "x86_64-unknown-linux-gnu"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
+panic = "abort"
+
+[profile.dev]
+opt-level = 0
+debug = 2
+
+# ---- Netconfig (offline / vendored builds) --------------------------------
+
+[net]
+offline = false

@@ -1,0 +1,38 @@
+# ============================================================================
+# VUMA Dependabot Configuration
+# ============================================================================
+# Automatically creates PRs to update:
+#   1. Rust (cargo) dependencies — weekly on Mondays
+#   2. GitHub Actions versions — weekly on Mondays
+# ============================================================================
+
+version: 2
+updates:
+  # ── Rust (cargo) ──────────────────────────────────────────────────────────
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - rust
+    # Group patch updates together to reduce noise; minor/major get individual PRs.
+    groups:
+      patch-updates:
+        patterns:
+          - "*"
+        update-types:
+          - patch
+
+  # ── GitHub Actions ────────────────────────────────────────────────────────
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    labels:
+      - dependencies
+      - github-actions

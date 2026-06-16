@@ -1,0 +1,19 @@
+[package]
+name = "vuma-scg"
+version.workspace = true
+edition.workspace = true
+description = "Semantic Computation Graph — formal graph IR for VUMA programs"
+repository.workspace = true
+license.workspace = true
+keywords.workspace = true
+categories.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
+petgraph.workspace = true
+indexmap.workspace = true
+smallvec.workspace = true
+hashbrown.workspace = true
+serde_json.workspace = true
