@@ -9,6 +9,7 @@ Work with existing PDFs: extract, merge, split, fill forms, convert formats, or 
 ```
 User request
   ├─ "Extract text/tables/images"     → §Extract
+  │     └─ No text extracted?         → §OCR Fallback
   ├─ "Merge/split/rotate/crop pages"  → §Pages
   ├─ "Fill a form"                    → §Forms (check fillable first)
   ├─ "Read/write metadata"            → §Metadata
@@ -16,7 +17,9 @@ User request
   │     └─ DOCX with TOC?            → §DOCX Pipeline (5-step)
   ├─ "Redesign/reformat a document"   → §Reformat
   │     └─ With a reference template? → §Template-Guided Reformat
-  └─ Edge cases (OCR, encrypt, batch) → load briefs/process-advanced.md
+  ├─ "Decrypt/repair a PDF"           → §Encrypted / §Corrupted
+  ├─ "Optimize file size"             → §Optimize
+  └─ "Batch process many PDFs"        → §Batch Processing
 ```
 
 ---
@@ -27,7 +30,7 @@ User request
 python3 "$PDF_SKILL_DIR/scripts/pdf.py" env.check
 ```
 
-Reports availability but does **not** auto-install. Required: Python 3, pikepdf, pdfplumber.
+Reports availability but does **not** auto-install. 
 
 Entry point: `python3 "$PDF_SKILL_DIR/scripts/pdf.py" <group>.<action> [options]`
 
@@ -38,22 +41,108 @@ Exit codes: 0 = success, 1 = bad args, 2 = file not found, 3 = parse error, 4 = 
 
 ## §Extract
 
+### Basic Extraction (pdf.py)
+
 ```bash
 # Text (full or page range)
 python3 "$PDF_SKILL_DIR/scripts/pdf.py" extract.text report.pdf
 python3 "$PDF_SKILL_DIR/scripts/pdf.py" extract.text report.pdf -p 1-3
 python3 "$PDF_SKILL_DIR/scripts/pdf.py" extract.text report.pdf -p 1,4,7
 
-# Tables — returns structured JSON with page/rows/cols/data
+# Tables — returns structured JSON
 python3 "$PDF_SKILL_DIR/scripts/pdf.py" extract.table report.pdf
 
 # Images — dumps embedded rasters to directory
 python3 "$PDF_SKILL_DIR/scripts/pdf.py" extract.image report.pdf -o ./images/
 ```
 
+### Precise Coordinates (pdfplumber)
+
+```python
+import pdfplumber
+
+with pdfplumber.open("document.pdf") as pdf:
+    page = pdf.pages[0]
+
+    # Characters with exact coordinates
+    for char in page.chars[:10]:
+        print(f"'{char['text']}' at x:{char['x0']:.1f} y:{char['y0']:.1f}")
+
+    # Text within a bounding box (left, top, right, bottom)
+    bbox_text = page.within_bbox((100, 100, 400, 200)).extract_text()
+
+    # Advanced table extraction with custom settings
+    table_settings = {
+        "vertical_strategy": "lines",
+        "horizontal_strategy": "lines",
+        "snap_tolerance": 3,
+        "intersection_tolerance": 15
+    }
+    tables = page.extract_tables(table_settings)
+
+    # Visual debugging
+    img = page.to_image(resolution=150)
+    img.save("debug_layout.png")
+```
+
+### Fast Rendering (pypdfium2)
+
+pypdfium2 is a Python binding for PDFium (Chromium's PDF library) — fast rendering and text extraction.
+
+```python
+import pypdfium2 as pdfium
+
+pdf = pdfium.PdfDocument("document.pdf")
+
+# Render single page
+bitmap = pdf[0].render(scale=2.0)
+bitmap.to_pil().save("page_1.png", "PNG")
+
+# Batch render all pages
+for i, page in enumerate(pdf):
+    bitmap = page.render(scale=1.5)
+    bitmap.to_pil().save(f"page_{i+1}.jpg", "JPEG", quality=90)
+
+# Extract text
+for i, page in enumerate(pdf):
+    print(f"Page {i+1}: {len(page.get_text())} chars")
+```
+
+### CLI Rendering & Extraction (poppler-utils)
+
+```bash
+# High-resolution PNG rendering
+pdftoppm -png -r 300 document.pdf output_prefix
+pdftoppm -png -r 600 -f 1 -l 3 document.pdf high_res   # specific pages
+
+# Text with bounding box coordinates
+pdftotext -bbox-layout document.pdf output.xml
+
+# Extract embedded images (faster than full-page rendering)
+pdfimages -all document.pdf images/img
+pdfimages -list document.pdf
+```
+
+### §OCR Fallback (Scanned PDFs)
+
+When `pdfplumber` extracts 0 characters, the PDF is likely a scanned image:
+
+```python
+import pytesseract
+from pdf2image import convert_from_path
+
+def extract_text_with_ocr(pdf_path):
+    images = convert_from_path(pdf_path)
+    return "".join(pytesseract.image_to_string(img) for img in images)
+```
+
+Prerequisites: `pip install pdf2image pytesseract` + install Tesseract OCR and poppler.
+
 ---
 
 ## §Pages
+
+### Basic Operations (pdf.py)
 
 ```bash
 python3 "$PDF_SKILL_DIR/scripts/pdf.py" pages.merge a.pdf b.pdf -o combined.pdf
@@ -62,6 +151,19 @@ python3 "$PDF_SKILL_DIR/scripts/pdf.py" pages.rotate doc.pdf 90 -o rotated.pdf
 python3 "$PDF_SKILL_DIR/scripts/pdf.py" pages.rotate doc.pdf 180 -o rotated.pdf -p 1-3
 python3 "$PDF_SKILL_DIR/scripts/pdf.py" pages.crop doc.pdf 50,50,550,750 -o trimmed.pdf
 python3 "$PDF_SKILL_DIR/scripts/pdf.py" pages.clean doc.pdf -o cleaned.pdf
+```
+
+### Complex Page Manipulation (qpdf)
+
+```bash
+# Split into groups of N pages
+qpdf --split-pages=3 input.pdf output_group_%02d.pdf
+
+# Extract complex page ranges
+qpdf input.pdf --pages input.pdf 1,3-5,8,10-end -- extracted.pdf
+
+# Merge specific pages from multiple PDFs
+qpdf --empty --pages doc1.pdf 1-3 doc2.pdf 5-7 doc3.pdf 2,4 -- combined.pdf
 ```
 
 ---
@@ -75,8 +177,6 @@ python3 "$PDF_SKILL_DIR/scripts/pdf.py" meta.brand doc.pdf -o branded.pdf
 ```
 
 Recognised keys: `Title`, `Author`, `Subject`, `Keywords`, `Creator`, `Producer`.
-
-`meta.brand` adds standard branding metadata (producer, creator) in one step.
 
 ---
 
@@ -93,93 +193,108 @@ If `has_fields: true` → **Fillable workflow**. If `false` → **Non-fillable w
 ### Fillable Workflow
 
 ```bash
-# Inspect fields
-python3 "$PDF_SKILL_DIR/scripts/pdf.py" form.info input.pdf
-
-# Fill (auto-maps "true"/"false" for checkboxes)
 python3 "$PDF_SKILL_DIR/scripts/pdf.py" form.fill input.pdf -o filled.pdf \
   -d '{"name": "John", "agree": "true", "country": "US"}'
 ```
 
-**Value rules:**
-
 | Type | Value | Example |
 |------|-------|---------|
 | text | Free string | `"name": "Jane Doe"` |
-| checkbox | `"true"` / `"false"` (auto-converts to PDF states) | `"agree": "true"` |
+| checkbox | `"true"` / `"false"` | `"agree": "true"` |
 | radio | One of `radio_options[].value` | `"gender": "/Choice1"` |
 | dropdown | One of `choice_options[].value` | `"country": "US"` |
 
-For complex forms, use `form.detail` and `form.render` for deeper inspection:
-
-```bash
-python3 "$PDF_SKILL_DIR/scripts/pdf.py" form.detail input.pdf -o fields.json   # full field info (types, options, defaults)
-python3 "$PDF_SKILL_DIR/scripts/pdf.py" form.render input.pdf -o ./pages/       # render pages as PNG for visual check
-```
+For complex forms: `form.detail input.pdf -o fields.json` (full field info) and `form.render input.pdf -o ./pages/` (visual check).
 
 ### Non-Fillable Workflow (Annotation-Based)
 
 For PDFs without interactive fields (scanned forms, image-based). All four steps are mandatory.
 
-**Step 1 — Render pages as PNG** (required):
+**Step 1 — Render pages as PNG**:
 ```bash
 python3 "$PDF_SKILL_DIR/scripts/pdf.py" form.render input.pdf -o ./pages/
 ```
 
-**Step 2 — Create `fields.json`** with annotation regions.
-
-To determine bbox coordinates: open the rendered PNG in an image viewer or use Python (`from PIL import Image; img = Image.open('page.png'); print(img.size)`) to get pixel dimensions. Then estimate [left, top, right, bottom] in pixels for each field by inspecting the image. The `dims` field must match the PNG dimensions exactly.
+**Step 2 — Create `fields.json`** with annotation regions. Determine bbox coordinates by inspecting the rendered PNG (use PIL to get pixel dimensions, then estimate [left, top, right, bottom] for each field). `dims` must match PNG dimensions exactly.
 
 ```json
 {
-  "sheet": [
-    {
-      "pg": 1,
-      "dims": [1000, 1400],
-      "regions": [
-        {
-          "id": "last_name",
-          "hint": "Last name field",
-          "label": {"tag": "Last name", "bbox": [30, 125, 95, 142]},
-          "target": {"bbox": [100, 125, 280, 142]},
-          "ink": {"value": "Simpson", "size": 14, "color": "000000"}
-        }
-      ]
-    }
-  ]
+  "sheet": [{
+    "pg": 1, "dims": [1000, 1400],
+    "regions": [{
+      "id": "last_name", "hint": "Last name field",
+      "label": {"tag": "Last name", "bbox": [30, 125, 95, 142]},
+      "target": {"bbox": [100, 125, 280, 142]},
+      "ink": {"value": "Simpson", "size": 14, "color": "000000"}
+    }]
+  }]
 }
 ```
 
-Schema: `pg` = 1-based page, `dims` = [w,h] in pixels, `label.bbox` / `target.bbox` = [left, top, right, bottom], `ink` = {value, size?, color?, font?}. Label and target boxes must NOT intersect.
-
-**Step 3 — Validate bounding boxes** (required):
+**Step 3 — Validate**:
 ```bash
-# Auto-check for intersections
 python3 "$PDF_SKILL_DIR/scripts/pdf.py" form.check-bbox fields.json
-
-# Visual validation (red=target, blue=label)
 python3 "$PDF_SKILL_DIR/scripts/pdf.py" form.validate 1 fields.json page1.png validation.png
 ```
 
-Fix any issues, regenerate, re-check. Red rectangles must only cover input areas.
-
-**Step 4 — Fill via annotations**:
+**Step 4 — Fill**:
 ```bash
 python3 "$PDF_SKILL_DIR/scripts/pdf.py" form.annotate input.pdf fields.json -o filled.pdf
 ```
 
 ---
 
+## §Encrypted
+
+```bash
+# Check encryption status
+qpdf --show-encryption encrypted.pdf
+
+# Decrypt with password
+qpdf --password=secret123 --decrypt encrypted.pdf decrypted.pdf
+
+# Encrypt a PDF
+qpdf --encrypt user_pass owner_pass 256 --print=none --modify=none -- input.pdf encrypted.pdf
+```
+
+Python alternative:
+```python
+from pypdf import PdfReader
+reader = PdfReader("encrypted.pdf")
+if reader.is_encrypted:
+    reader.decrypt("password")
+```
+
+---
+
+## §Corrupted
+
+```bash
+qpdf --check corrupted.pdf
+qpdf --replace-input corrupted.pdf   # in-place repair
+```
+
+---
+
+## §Optimize
+
+```bash
+qpdf --linearize input.pdf optimized.pdf           # web-optimized (fast first-page load)
+qpdf --optimize-level=all input.pdf compressed.pdf  # maximum compression
+```
+
+---
+
 ## §Reformat
 
-Take an existing document and rebuild it with a new visual design. Content is preserved; layout, typography, and visual treatment are rebuilt from scratch.
+Take an existing document and rebuild it with a new visual design. Content is preserved; layout is rebuilt.
 
 ```
-1. EXTRACT   → Extract content from source (extract.text / extract.table / read directly)
+1. EXTRACT   → Extract content from source
 2. STRUCTURE → Organize into sections (headings, body, tables, lists)
 3. DELEGATE  → Route to appropriate brief:
                  Structured → briefs/report.md (ReportLab)
-                 Visual     → briefs/creative.md (Playwright)
+                 Visual     → briefs/creative-fixed-canvas.md (Playwright)
 4. BUILD     → Follow the delegated brief's full workflow
 5. DELIVER   → New PDF, same content, new design
 ```
@@ -190,22 +305,15 @@ When user provides a reference PDF to match:
 
 ```
 1. ANALYZE  → Extract design DNA from template:
-               - python3 "$PDF_SKILL_DIR/scripts/pdf.py" meta.get template.pdf       (page size)
-               - python3 "$PDF_SKILL_DIR/scripts/pdf.py" extract.image template.pdf   (color samples)
-               - python3 "$PDF_SKILL_DIR/scripts/pdf.py" extract.text template.pdf    (text structure)
-               - pdftoppm -png -r 150 template.pdf preview           (visual reference)
-2. DOCUMENT → Record: page size, margins, colors, fonts, layout grid,
-               header/footer pattern, decorative elements
-3. DELEGATE → Route to brief WITH design constraints (not brief defaults)
+               - meta.get (page size), extract.image (color samples),
+                 extract.text (structure), pdftoppm (visual reference)
+2. DOCUMENT → Record: page size, margins, colors, fonts, layout, header/footer
+3. DELEGATE → Route to brief WITH design constraints (not defaults)
 4. BUILD    → Follow brief workflow, constrained to template DNA
 5. COMPARE  → pdftoppm both, visually compare side-by-side
 ```
 
-**Key principles:**
-- Match the spirit, not the pixels — exact replication from PDF is impractical
-- Prefer original source files (.docx/.html/.tex) over PDF when available
-- Declare font substitutions upfront; don't silently fall back
-- Template provides design direction, not content — never leak placeholder text
+**Key principles:** Match the spirit, not the pixels. Prefer source files over PDF when available. Declare font substitutions upfront.
 
 ---
 
@@ -213,15 +321,9 @@ When user provides a reference PDF to match:
 
 ### Office → PDF (LibreOffice)
 
-**Simple conversion** (no TOC needed):
 ```bash
 python3 "$PDF_SKILL_DIR/scripts/pdf.py" convert.office input.docx -o output.pdf
-```
-
-**When to use the 5-step DOCX Pipeline instead**: If the DOCX has (or should have) a Table of Contents, always use §DOCX Pipeline below. Signs: the document has 3+ headings, or the user mentions "table of contents" / "TOC", or the document already contains a TOC section. When in doubt, run `python3 "$PDF_SKILL_DIR/scripts/toc_validate.py" fix-docx input.docx -o fixed.docx` — if it returns `no_toc_needed`, a simple conversion is fine.
-
-Or directly:
-```bash
+# Or directly:
 soffice --headless --convert-to pdf --outdir ./output input.docx
 ```
 
@@ -230,90 +332,102 @@ soffice --headless --convert-to pdf --outdir ./output input.docx
 **macOS path**: `/Applications/LibreOffice.app/Contents/MacOS/soffice`
 
 **Gotchas:**
-- soffice allows only one instance at a time; close existing LibreOffice windows or use `--env:UserInstallation=file:///tmp/libreoffice_tmp`
-- Missing Chinese fonts → squares. Ensure SimHei/SimSun are installed.
+- soffice allows only one instance at a time; use `--env:UserInstallation=file:///tmp/libreoffice_tmp` if needed
+- Missing Chinese fonts → squares. Ensure Noto Sans SC/Noto Serif SC are installed
 - Large files (>50MB) may take 1-2 min; set reasonable timeout
-- soffice HTML→PDF is inferior to Playwright for complex CSS
 
-**Priority**: Always prefer soffice for Office→PDF (preserves themes, layouts, master slides). Only fall back to python-pptx/python-docx + HTML + Playwright if soffice is unavailable — fidelity will be lower.
+**Priority**: Always prefer soffice for Office→PDF. Fall back to python-pptx/python-docx + HTML + Playwright only if soffice is unavailable.
 
-### Fallback: Spreadsheet → PDF without LibreOffice
+### Spreadsheet → PDF (without LibreOffice)
 
-Use openpyxl + HTML + Playwright. Let data shape drive layout:
-
-| Factor | Decision |
-|--------|----------|
-| Columns ≤ 6 | Portrait |
-| Columns > 6 | Landscape |
-| Font size | Scale inversely with column count |
-| Styling | Follow user requirements or source file style; if unspecified, use defaults from `typesetting/palette.md` |
+Use openpyxl + HTML + Playwright. Columns ≤ 6 → portrait; > 6 → landscape. Scale font inversely with column count.
 
 ### §DOCX Pipeline (5-Step with TOC)
 
-For DOCX files that need TOC generation/correction. Required because LibreOffice `--headless` does not recalculate PAGEREF fields.
+For DOCX files that need TOC generation/correction (LibreOffice `--headless` does not recalculate PAGEREF fields).
 
-```
-Step 1: soffice     → Convert original DOCX to PDF (pass1)
-Step 2: pages.clean → Remove blank pages from pass1
-Step 3: fix-docx    → Add/fix TOC with HYPERLINK + PAGEREF + bookmarks
-Step 4: fix-pages   → Correct TOC page numbers using pass1 as reference
-Step 5: soffice     → Convert final DOCX to PDF + pages.clean
-```
+**When to use**: DOCX has 3+ headings, or mentions "table of contents" / "TOC", or already contains a TOC section. When in doubt, run `toc_validate.py fix-docx` — if it returns `no_toc_needed`, simple conversion is fine.
 
-**Step 1 — Pass 1 Convert**:
 ```bash
+# Step 1: Convert to PDF (pass1)
 python3 "$PDF_SKILL_DIR/scripts/pdf.py" convert.office input.docx -o pass1.pdf
-```
 
-**Step 2 — Clean Blank Pages**:
-```bash
+# Step 2: Clean blank pages
 python3 "$PDF_SKILL_DIR/scripts/pdf.py" pages.clean pass1.pdf -o pass1_clean.pdf
-```
-If `blank_pages_removed == 0`, use pass1.pdf directly.
 
-**Step 3 — Fix TOC**:
-```bash
+# Step 3: Fix TOC (adds HYPERLINK + PAGEREF + bookmarks)
 python3 "$PDF_SKILL_DIR/scripts/toc_validate.py" fix-docx input.docx -o fixed.docx
-```
 
-Auto-detects and fixes: placeholder TOC, stale TOC (>50% drift), empty TOC, missing TOC (≥3 headings). Each entry gets `<w:hyperlink>` + `PAGEREF` + bookmarks for clickable PDF navigation.
-
-Check output `action` field: `fixed` → use fixed.docx, `skipped` → use original, `no_toc_needed` → skip to Step 5 with pass1 PDF.
-
-**Step 4 — Fix Page Numbers**:
-```bash
+# Step 4: Correct TOC page numbers using pass1 as reference
 python3 "$PDF_SKILL_DIR/scripts/toc_validate.py" fix-pages fixed.docx pass1_clean.pdf -o final.docx
-```
 
-Corrects PAGEREF display text using actual page positions from pass1 + TOC page offset.
-
-**Step 5 — Final Convert + Clean**:
-```bash
+# Step 5: Final convert + clean
 python3 "$PDF_SKILL_DIR/scripts/pdf.py" convert.office final.docx -o output.pdf
 python3 "$PDF_SKILL_DIR/scripts/pdf.py" pages.clean output.pdf -o output_clean.pdf
 ```
 
-### Post-Conversion Validation (Optional)
+Check `fix-docx` output `action`: `fixed` → use fixed.docx, `skipped` → use original, `no_toc_needed` → skip to Step 5.
 
-```bash
-python3 "$PDF_SKILL_DIR/scripts/toc_validate.py" check-conversion final.docx output_clean.pdf
-```
-
-Issues caught: `CONV_TOC_LOST` (TOC disappeared), `CONV_HINT_LEAKED` (placeholder text in PDF), `CONV_HEADING_DRIFT` (heading count mismatch).
+Optional post-validation: `toc_validate.py check-conversion final.docx output_clean.pdf`
 
 ---
 
-## Caveats
+## §Batch Processing
+
+```python
+import os, glob, logging
+from pypdf import PdfReader, PdfWriter
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+def batch_process(input_dir, operation='merge'):
+    pdf_files = sorted(glob.glob(os.path.join(input_dir, "*.pdf")))
+    if operation == 'merge':
+        writer = PdfWriter()
+        for f in pdf_files:
+            try:
+                for page in PdfReader(f).pages:
+                    writer.add_page(page)
+                logger.info(f"Processed: {f}")
+            except Exception as e:
+                logger.error(f"Failed: {f}: {e}")
+        with open("merged.pdf", "wb") as out:
+            writer.write(out)
+    elif operation == 'extract_text':
+        for f in pdf_files:
+            try:
+                text = "".join(p.extract_text() for p in PdfReader(f).pages)
+                with open(f.replace('.pdf', '.txt'), 'w') as out:
+                    out.write(text)
+            except Exception as e:
+                logger.error(f"Failed: {f}: {e}")
+```
+
+---
+
+## Caveats & Performance
 
 | Topic | Detail |
 |-------|--------|
-| Encrypted PDFs | Not supported. User must decrypt externally first. |
 | < 50 MB | Instant |
 | 50–200 MB | 1–2 minutes |
 | > 200 MB | Split first, or extend timeout |
 | Memory | ~2-3× input file size |
-| Merge failure | Partial output may remain; delete and retry |
-| Split failure | Some page files may exist; inspect output dir |
-| Form fill | Original never modified; always writes new file |
+| Text extraction speed | `pdftotext -bbox-layout` fastest; pdfplumber for structured data |
+| Image extraction | `pdfimages` faster than full-page rendering |
+| Large PDFs | Process in chunks to manage memory |
 
-For edge cases (OCR, batch processing, poppler-utils, qpdf, performance tuning), load `briefs/process-advanced.md`.
+## Tooling Inventory
+
+| Library / Tool | Role | Licence |
+|----------------|------|---------|
+| pikepdf | Low-level PDF manipulation (forms, pages, metadata) | MPL-2.0 |
+| pdfplumber | Content extraction (text, tables) | MIT |
+| pypdfium2 | Fast rendering, text extraction (PyMuPDF alternative) | Apache/BSD |
+| pypdf | Merge, split, crop, metadata, encryption | BSD |
+| poppler-utils | CLI text/image extraction, rendering | GPL-2 |
+| qpdf | Page manipulation, optimization, encryption, repair | Apache |
+| pytesseract | OCR for scanned PDFs | Apache |
+| pdf2image | PDF-to-image conversion via poppler | MIT |
+| LibreOffice | Office format conversion engine | MPL-2.0 |

@@ -1,23 +1,23 @@
 #!/usr/bin/env node
 /**
- * html2pdf-next.js — HTML → PDF converter using Playwright + pdf-lib
+ * html2pdf-next.js — HTML → PDF converter using Playwright + Paged.js + pdf-lib
  *
- * Drop-in replacement for html2pdf.js, WITHOUT Paged.js dependency.
- * Uses Chromium native @page CSS for pagination + pdf-lib for post-processing.
+ * Uses Paged.js polyfill for pagination (break-inside/before/after, named pages,
+ * orphans/widows) and Chromium for rendering. pdf-lib for post-processing.
  *
  * Usage:
  *   node html2pdf-next.js input.html
  *   node html2pdf-next.js input.html --output result.pdf
  *   node html2pdf-next.js input.html --css extra.css
  *   node html2pdf-next.js input.html --width 720px --height 960px
- *   node html2pdf-next.js input.html --direct   (same as default now — no Paged.js to skip)
  *   node html2pdf-next.js input.html --merge a.pdf b.pdf  (merge additional PDFs after)
  *
  * Architecture:
- *   1. Playwright renders HTML → raw PDF via Chromium's native print engine
- *   2. Pre-render hooks: Mermaid, KaTeX, oversized element fixes
- *   3. Post-render: pdf-lib for merge, metadata, page count extraction
- *   4. No Paged.js, no paged.polyfill.js — CSS @page handles pagination natively
+ *   1. Playwright loads HTML, runs pre-render hooks (Mermaid, KaTeX, overflow detection)
+ *   2. Paged.js polyfill injected — reads @page rules, chunks content into .pagedjs_page containers
+ *   3. Chromium renders the Paged.js output to PDF via page.pdf()
+ *   4. pdf-lib for merge, metadata, page count extraction
+ *   5. Continuous-canvas mode (design_engine.py) skips Paged.js, uses Chromium native print
  */
 
 const fs = require('fs');
@@ -51,7 +51,7 @@ function loadPlaywright() {
     if (!fs.existsSync(pkg)) continue;
     try { return Module.createRequire(pkg)('playwright'); } catch (_) {}
   }
-  throw new Error('Playwright not found. Install: npm install -g playwright');
+  throw new Error('Playwright not found. Install: npm install -g playwright@1.50.0');
 }
 
 function loadPdfLib() {
@@ -111,7 +111,7 @@ Options:
   --css <file>          Inject extra stylesheet
   --width <px>          Custom page width  (e.g. 720px)
   --height <px>         Custom page height (e.g. 960px)
-  --direct              (no-op, kept for backward compat — always direct now)
+  --nopaged             Skip Paged.js, use Chromium native @page pagination
   --merge <files...>    Append additional PDF files after conversion
   --title <text>        Set PDF document title metadata
   --help, -h            Show help
@@ -121,7 +121,7 @@ Options:
 
   const inputFile = tokens[0];
   let outputFile = null, customCSS = null, width = null, height = null;
-  let mergeFiles = [], title = null;
+  let mergeFiles = [], title = null, noPaged = false;
 
   for (let i = 1; i < tokens.length; i++) {
     const t = tokens[i];
@@ -129,7 +129,7 @@ Options:
     else if (t === '--css') customCSS = tokens[++i];
     else if (t === '--width') width = tokens[++i];
     else if (t === '--height') height = tokens[++i];
-    else if (t === '--direct') { /* no-op, always direct */ }
+    else if (t === '--direct' || t === '--nopaged') { noPaged = true; }
     else if (t === '--title') title = tokens[++i];
     else if (t === '--merge') {
       while (i + 1 < tokens.length && !tokens[i + 1].startsWith('--')) {
@@ -143,7 +143,7 @@ Options:
     outputFile = path.join(p.dir || '.', p.name + '.pdf');
   }
 
-  return { inputFile, outputFile, customCSS, width, height, mergeFiles, title };
+  return { inputFile, outputFile, customCSS, width, height, mergeFiles, title, noPaged };
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -279,27 +279,20 @@ async function preRenderHooks(page) {
     warnings.push(`${overflows.length} element(s) have overflow`);
   }
 
-  // 4b. Fix vertical overflow on page-level containers
-  //     When html/body or the main content canvas has a fixed height + overflow:hidden,
-  //     content gets clipped. For documents (html2pdf-next.js), we DON'T expand the
-  //     container to its scrollHeight — that creates an oversized single "page" that
-  //     Playwright splits unevenly. Instead, we remove the fixed height and overflow:hidden
-  //     so content flows naturally and @page CSS handles pagination.
-  //
-  //     (The old "expand to scrollHeight" logic belongs in html2poster.js where a single
-  //     continuous canvas is the desired output.)
+  // 4b. Remove overflow:hidden BEFORE Paged.js injection.
+  //     Paged.js reads the DOM layout to chunk content into pages.
+  //     If a container has overflow:hidden + fixed height, Paged.js only sees
+  //     the visible portion and silently loses the clipped content.
+  //     We must remove overflow:hidden first so Paged.js gets the full content.
   const vOverflowFix = await page.evaluate(() => {
     const fixes = [];
-    // Candidates: html, body, and any direct child of body that acts as a full-page canvas
     const candidates = [document.documentElement, document.body];
     const bodyChildren = document.body.children;
     for (let i = 0; i < bodyChildren.length; i++) {
       const child = bodyChildren[i];
-      // Skip SVG defs, script, style elements
       const tag = child.tagName.toLowerCase();
       if (tag === 'svg' || tag === 'script' || tag === 'style' || tag === 'link') continue;
       candidates.push(child);
-      // Also check one level deeper (e.g., .canvas > .content)
       for (let j = 0; j < child.children.length; j++) {
         const grandchild = child.children[j];
         const gtag = grandchild.tagName.toLowerCase();
@@ -315,98 +308,41 @@ async function preRenderHooks(page) {
       const diff = el.scrollHeight - el.clientHeight;
 
       if (hasHiddenOverflow && diff > 5) {
-        // This element is clipping content vertically
         const tag = el.tagName.toLowerCase();
         const id = el.id ? `#${el.id}` : '';
         const cls = el.className ? `.${String(el.className).split(' ')[0]}` : '';
         const selector = `${tag}${id}${cls}`;
 
-        const oldHeight = el.clientHeight;
-
-        // Document mode: remove fixed height + overflow:hidden,
-        // let @page handle natural pagination
-        el.style.height = 'auto';
-        el.style.minHeight = 'auto';
-        el.style.maxHeight = 'none';
+        // ONLY remove overflow — do NOT touch height, position, or any
+        // other layout property (preserves absolute-positioned layouts).
         el.style.overflow = 'visible';
         el.style.overflowY = 'visible';
 
-        fixes.push({
-          selector,
-          oldHeight,
-          clipped: diff,
-        });
+        fixes.push({ selector, clipped: diff });
       }
     }
 
-    // After fixing containers, re-measure to get the final content height
     const finalHeight = Math.max(
       document.documentElement.scrollHeight,
       document.body.scrollHeight
     );
-
     return { fixes, finalHeight };
   });
 
   if (vOverflowFix.fixes.length) {
-    console.log('  ⚠️  Removed fixed height + overflow:hidden — content will paginate naturally:');
+    console.log('  ⚠️  Removed overflow:hidden (content was clipped):');
     vOverflowFix.fixes.forEach(f => {
-      console.log(`    ${f.selector}: was ${f.oldHeight}px with ${f.clipped}px clipped → now auto (content will flow to next page)`);
+      console.log(`    ${f.selector}: ${f.clipped}px clipped → overflow:visible`);
     });
   }
 
-  // 4c. Convert absolute-bottom elements to document flow
-  //     Elements with `position: absolute; bottom: Npx` inside page containers
-  //     are pinned relative to their containing block. When content paginates
-  //     across multiple @page pages, these elements either overlap with body
-  //     text or land on the wrong page. Fix: convert them to static positioning
-  //     so they participate in normal document flow and paginate naturally.
-  const absBottomFix = await page.evaluate(() => {
-    const converted = [];
-    // Scan inside page-level containers (body children and their children)
-    const containers = [];
-    for (let i = 0; i < document.body.children.length; i++) {
-      const child = document.body.children[i];
-      const tag = child.tagName.toLowerCase();
-      if (tag === 'svg' || tag === 'script' || tag === 'style' || tag === 'link') continue;
-      containers.push(child);
-    }
-
-    for (const container of containers) {
-      const descendants = container.querySelectorAll('*');
-      for (const el of descendants) {
-        const computed = getComputedStyle(el);
-        if (computed.position === 'absolute' && computed.bottom !== 'auto' && computed.bottom !== '') {
-          // Check if this element contains visible text (not just decorative)
-          const hasText = el.textContent && el.textContent.trim().length > 0;
-          if (!hasText) continue;
-
-          const tag = el.tagName.toLowerCase();
-          const id = el.id ? `#${el.id}` : '';
-          const cls = el.className ? `.${String(el.className).split(' ')[0]}` : '';
-          const selector = `${tag}${id}${cls}`;
-
-          // Convert to static flow: remove absolute positioning
-          el.style.position = 'static';
-          el.style.bottom = 'auto';
-          el.style.left = 'auto';
-          el.style.right = 'auto';
-          // Preserve horizontal padding/margin from the original left/right values
-          // by keeping any existing padding or margin on the element
-
-          converted.push({ selector, bottom: computed.bottom });
-        }
-      }
-    }
-    return converted;
-  });
-
-  if (absBottomFix.length) {
-    console.log('  ⚠️  Converted absolute-bottom elements to document flow (prevents overlap on multi-page):');
-    absBottomFix.forEach(f => {
-      console.log(`    ${f.selector}: was position:absolute;bottom:${f.bottom} → now static (flows with content)`);
-    });
-  }
+  // Measure content height for diagnostics
+  const contentHeight = vOverflowFix.fixes.length > 0
+    ? vOverflowFix.finalHeight
+    : await page.evaluate(() => Math.max(
+        document.documentElement.scrollHeight,
+        document.body.scrollHeight
+      ));
 
   // 5. Inject minimal @page CSS fallback
   await page.evaluate(() => {
@@ -419,72 +355,10 @@ async function preRenderHooks(page) {
     }
   });
 
-  // 6. Fix full-page cover sections for print
-  //    In screen mode, height:100vh = viewport height. In print mode, 100vh ≠ page height.
-  //    Detect elements using 100vh and convert to print-safe page-filling behavior.
-  const coverFixed = await page.evaluate(() => {
-    let fixed = 0;
-    // Find elements with height: 100vh (inline or computed)
-    const allEls = document.querySelectorAll('*');
-    for (const el of allEls) {
-      const style = el.style;
-      const computed = getComputedStyle(el);
-      const isVh = style.height === '100vh' || computed.height === '100vh' ||
-                   style.minHeight === '100vh' || computed.minHeight === '100vh';
-      // Also detect via class name hints
-      const isCover = el.classList.contains('cover') || el.classList.contains('cover-page') ||
-                      el.id === 'cover' || el.getAttribute('data-role') === 'cover';
-      if (isVh || (isCover && el.offsetHeight > 0)) {
-        // Force the element to fill the print page
-        el.style.height = '100vh';
-        el.style.minHeight = '100vh';
-        el.style.pageBreakAfter = 'always';
-        el.style.pageBreakInside = 'avoid';
-        el.style.boxSizing = 'border-box';
-        el.style.overflow = 'hidden';
-        fixed++;
-      }
-    }
-    // Inject print-specific CSS to make 100vh work correctly
-    if (fixed > 0) {
-      const s = document.createElement('style');
-      s.textContent = `
-        @media print {
-          .cover, .cover-page, [data-role="cover"] {
-            height: 100vh !important;
-            min-height: 100vh !important;
-            page-break-after: always !important;
-            page-break-inside: avoid !important;
-            overflow: hidden !important;
-          }
-        }
-      `;
-      document.head.appendChild(s);
-    }
-    return fixed;
-  });
-  if (coverFixed) {
-    console.log(`  ✓ Fixed ${coverFixed} full-page cover section(s) for print`);
-    // Also inject named @page rule for cover with zero margins
-    await page.evaluate(() => {
-      const s = document.createElement('style');
-      s.textContent = `
-        @page cover-page {
-          margin: 0 !important;
-        }
-        @media print {
-          .cover, .cover-page, [data-role="cover"] {
-            page: cover-page;
-            margin: 0 !important;
-            padding: 40px !important;
-          }
-        }
-      `;
-      document.head.appendChild(s);
-    });
-  }
+  // 6. (Removed) — Paged.js handles cover sections (100vh, break-after: page,
+  //     page-break-inside: avoid) natively. No manual fixup needed.
 
-  return { warnings, contentHeight: vOverflowFix.finalHeight };
+  return { warnings, contentHeight };
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -548,7 +422,7 @@ async function postProcess(pdfPath, options = {}) {
 // ═══════════════════════════════════════════════════════════════════
 
 async function convert(inputFile, outputFile, customCSS, options = {}) {
-  const { width, height, mergeFiles, title } = options;
+  const { width, height, mergeFiles, title, noPaged } = options;
 
   if (!fs.existsSync(inputFile)) {
     console.error(`✗ File not found: ${inputFile}`);
@@ -574,7 +448,7 @@ async function convert(inputFile, outputFile, customCSS, options = {}) {
   const absOut = path.resolve(outputFile);
 
   console.log(`\n🔄 Converting ${path.basename(inputFile)}...`);
-  console.log(`   Engine: Playwright + Chromium native @page (no Paged.js)`);
+  console.log(`   Engine: Playwright + ${noPaged ? 'Chromium native @page' : 'Paged.js'}`);
 
   // Read and optionally inject CSS
   let html = fs.readFileSync(absIn, 'utf-8');
@@ -631,18 +505,21 @@ async function convert(inputFile, outputFile, customCSS, options = {}) {
     });
 
     if (continuousInfo) {
-      // Creative PDF: seamless multi-page canvas
-      console.log(`\n🎨 Continuous canvas: ${continuousInfo.pages} pages @ ${continuousInfo.width} × ${continuousInfo.height}`);
+      // Creative PDF: design_engine.py output with fixed-canvas page-sections.
+      // These are already laid out as absolute-positioned pages — skip Paged.js,
+      // use Chromium native print directly.
+      console.log(`\n🎨 Creative layout: ${continuousInfo.pages} pages @ ${continuousInfo.width} × ${continuousInfo.height}`);
       await page.pdf({
         path: absOut,
         printBackground: true,
+        preferCSSPageSize: false,
         margin: { top: 0, right: 0, bottom: 0, left: 0 },
         width: continuousInfo.width,
         height: continuousInfo.height,
       });
-    } else {
-      // Standard document
-      console.log('\n📄 Rendering PDF...');
+    } else if (noPaged) {
+      // ── Chromium native pagination (--nopaged flag) ──
+      console.log('\n📄 Rendering PDF (Chromium native @page)...');
       const pdfOpts = {
         path: absOut,
         printBackground: true,
@@ -656,7 +533,6 @@ async function convert(inputFile, outputFile, customCSS, options = {}) {
         pdfOpts.margin = { top: 0, right: 0, bottom: 0, left: 0 };
         console.log(`   Custom size: ${pdfOpts.width || 'auto'} × ${pdfOpts.height || 'auto'}`);
       } else {
-        // No explicit size: check if @page CSS defines a fixed size
         const pageSize = await page.evaluate(() => {
           const styles = Array.from(document.querySelectorAll('style'));
           for (const s of styles) {
@@ -666,17 +542,205 @@ async function convert(inputFile, outputFile, customCSS, options = {}) {
           }
           return null;
         });
-
         if (pageSize) {
-          // @page defines a fixed size — use preferCSSPageSize (already set above).
-          // Playwright will paginate content at @page height boundaries seamlessly.
-          // This is correct for both posters (seamless multi-page) and documents.
           pdfOpts.margin = { top: 0, right: 0, bottom: 0, left: 0 };
           console.log(`   @page size: ${pageSize.width}px × ${pageSize.height}px`);
-          if (measuredContentHeight && measuredContentHeight > pageSize.height + 5) {
-            const estPages = Math.ceil(measuredContentHeight / pageSize.height);
-            console.log(`   Content height: ${measuredContentHeight}px → ~${estPages} pages`);
+        } else {
+          pdfOpts.format = 'A4';
+        }
+      }
+
+      await page.pdf(pdfOpts);
+    } else {
+      // Inject Paged.js polyfill to take over pagination.
+      // Paged.js reads @page rules, chunks content into .pagedjs_page containers,
+      // and handles break-inside/before/after, orphans/widows, named pages, etc.
+      console.log('\n📖 Injecting Paged.js for pagination...');
+
+      // Resolve the paged.polyfill.js path
+      const pagedPolyfillPath = (() => {
+        // Try workspace node_modules first
+        const candidates = [
+          path.resolve(__dirname, '..', '..', '..', 'node_modules', 'pagedjs', 'dist', 'paged.polyfill.js'),
+          path.resolve(process.cwd(), 'node_modules', 'pagedjs', 'dist', 'paged.polyfill.js'),
+        ];
+        for (const c of candidates) {
+          if (fs.existsSync(c)) return c;
+        }
+        // Try require.resolve
+        try {
+          const mod = require.resolve('pagedjs/dist/paged.polyfill.js');
+          return mod;
+        } catch (_) {}
+        return null;
+      })();
+
+      if (!pagedPolyfillPath) {
+        console.error('\n✗ pagedjs not found. Run: npm install pagedjs');
+        process.exit(1);
+      }
+
+      const pagedScript = fs.readFileSync(pagedPolyfillPath, 'utf-8');
+      await page.addScriptTag({ content: pagedScript });
+
+      // Wait for Paged.js to finish rendering
+      try {
+        await page.waitForSelector('.pagedjs_page', { timeout: 30000 });
+        // Give it extra time for all pages to settle
+        await sleep(2000);
+      } catch (_) {
+        console.log('  ⚠ Paged.js did not create .pagedjs_page elements (timeout 30s)');
+        console.log('    Falling back to Chromium native @page pagination.');
+        warnings.push('Paged.js rendering timed out; fell back to native pagination');
+      }
+
+      // Check Paged.js results
+      const pagedInfo = await page.evaluate(() => {
+        const pages = document.querySelectorAll('.pagedjs_page');
+        if (pages.length === 0) return null;
+        return {
+          pageCount: pages.length,
+          pageWidth: pages[0].offsetWidth,
+          pageHeight: pages[0].offsetHeight,
+        };
+      });
+
+      if (pagedInfo) {
+        console.log(`  ✓ Paged.js: ${pagedInfo.pageCount} pages @ ${pagedInfo.pageWidth}×${pagedInfo.pageHeight}px`);
+      }
+
+      // ── Post-Paged.js background & centering fix ──
+      // Paged.js creates .pagedjs_page containers that are transparent by default.
+      // If body has a background color/image, the empty areas of each page may show
+      // the wrong color. Fix: propagate background to .pagedjs_page containers.
+      const bgFix = await page.evaluate(() => {
+        const body = document.body;
+        const html = document.documentElement;
+        const bodyStyle = getComputedStyle(body);
+        const htmlStyle = getComputedStyle(html);
+        const bodyBg = bodyStyle.backgroundColor;
+        const htmlBg = htmlStyle.backgroundColor;
+        const bodyBgImg = bodyStyle.backgroundImage;
+        const htmlBgImg = htmlStyle.backgroundImage;
+
+        const isTransparent = (c) => !c || c === 'rgba(0, 0, 0, 0)' || c === 'transparent';
+        const hasGradient = (img) => img && img !== 'none';
+
+        // Check if body or html uses a gradient/image background
+        const bodyHasGradient = hasGradient(bodyBgImg);
+        const htmlHasGradient = hasGradient(htmlBgImg);
+
+        // If body uses gradient, propagate the full background shorthand
+        // (not just backgroundColor, which would be transparent for gradients)
+        if (bodyHasGradient) {
+          // Copy body's full background to each .pagedjs_page
+          const pages = document.querySelectorAll('.pagedjs_page');
+          pages.forEach(p => {
+            p.style.backgroundImage = bodyBgImg;
+            p.style.backgroundSize = bodyStyle.backgroundSize;
+            p.style.backgroundPosition = bodyStyle.backgroundPosition;
+            p.style.backgroundRepeat = bodyStyle.backgroundRepeat;
+            if (!isTransparent(bodyBg)) p.style.backgroundColor = bodyBg;
+          });
+          // Unify html to prevent color leaking
+          html.style.backgroundColor = isTransparent(bodyBg) ? '#000' : bodyBg;
+          html.style.backgroundImage = bodyBgImg;
+
+          const pagesContainer = document.querySelector('.pagedjs_pages');
+          if (pagesContainer) { pagesContainer.style.margin = '0'; pagesContainer.style.padding = '0'; }
+
+          return { pageBg: 'gradient', pagesFixed: pages.length, bodyBg, htmlBg, gradient: true };
+        }
+
+        // Solid color path: body bg > html bg > white
+        const pageBg = !isTransparent(bodyBg) ? bodyBg
+                     : !isTransparent(htmlBg) ? htmlBg
+                     : 'white';
+
+        const pages = document.querySelectorAll('.pagedjs_page');
+        let fixed = 0;
+        pages.forEach(p => {
+          if (isTransparent(getComputedStyle(p).backgroundColor)) {
+            p.style.backgroundColor = pageBg;
+            fixed++;
           }
+        });
+
+        // Unify html/body background to match (prevents color leaking around pages)
+        html.style.backgroundColor = pageBg;
+        // Only set body bg if it was transparent (don't override an intentional body bg)
+        if (isTransparent(bodyBg)) body.style.backgroundColor = pageBg;
+
+        const pagesContainer = document.querySelector('.pagedjs_pages');
+        if (pagesContainer) { pagesContainer.style.margin = '0'; pagesContainer.style.padding = '0'; }
+
+        return { pageBg, pagesFixed: fixed, bodyBg, htmlBg, gradient: false };
+      });
+
+      if (bgFix.pagesFixed > 0) {
+        console.log(`  ✓ Background fix: ${bgFix.pagesFixed} pages → ${bgFix.pageBg}`);
+      }
+
+      // ── Post-Paged.js layout alignment fix ──
+      // Paged.js renders pages inside .pagedjs_pages with padding/margin for screen
+      // preview (visual spacing between pages). In print/PDF mode this causes the
+      // .pagedjs_page to start at (40,40) instead of (0,0), shifting content.
+      // Fix: reset all Paged.js wrapper margins/paddings so pages start at origin.
+      if (pagedInfo) {
+        const alignFix = await page.evaluate(() => {
+          // Reset pagedjs_pages container
+          const pc = document.querySelector('.pagedjs_pages');
+          if (pc) {
+            pc.style.margin = '0';
+            pc.style.padding = '0';
+          }
+          // Reset all pagedjs_page wrappers
+          document.querySelectorAll('.pagedjs_page').forEach(p => {
+            p.style.margin = '0';
+          });
+          // Reset body/html margins
+          document.body.style.margin = '0';
+          document.body.style.padding = '0';
+          document.documentElement.style.margin = '0';
+          document.documentElement.style.padding = '0';
+          // Check final alignment
+          const firstPage = document.querySelector('.pagedjs_page');
+          if (!firstPage) return { fixed: false };
+          const rect = firstPage.getBoundingClientRect();
+          return { fixed: true, x: rect.x, y: rect.y, w: rect.width, h: rect.height };
+        });
+        if (alignFix.fixed && (alignFix.x > 1 || alignFix.y > 1)) {
+          console.log(`  ⚠ Page offset after reset: (${alignFix.x}, ${alignFix.y}) — may still have internal pagedjs margins`);
+        }
+      }
+
+      // Generate PDF
+      console.log('\n📄 Rendering PDF...');
+      const pdfOpts = {
+        path: absOut,
+        printBackground: true,
+        preferCSSPageSize: true,
+        tagged: true,
+        margin: { top: 0, right: 0, bottom: 0, left: 0 },
+      };
+
+      if (width || height) {
+        if (width) pdfOpts.width = width;
+        if (height) pdfOpts.height = height;
+        console.log(`   Custom size: ${pdfOpts.width || 'auto'} × ${pdfOpts.height || 'auto'}`);
+      } else if (!pagedInfo) {
+        // Paged.js didn't run (fallback) — detect @page or use A4
+        const pageSize = await page.evaluate(() => {
+          const styles = Array.from(document.querySelectorAll('style'));
+          for (const s of styles) {
+            const text = s.textContent || '';
+            const match = text.match(/@page\s*\{[^}]*size:\s*([\d.]+)px\s+([\d.]+)px/);
+            if (match) return { width: parseFloat(match[1]), height: parseFloat(match[2]) };
+          }
+          return null;
+        });
+        if (pageSize) {
+          console.log(`   @page size: ${pageSize.width}px × ${pageSize.height}px`);
         } else {
           pdfOpts.format = 'A4';
         }
@@ -706,7 +770,10 @@ async function convert(inputFile, outputFile, customCSS, options = {}) {
     console.log(`  Size:    ${prettyBytes(sz)}`);
     console.log(`  Words:   ~${stats.wordCount.toLocaleString()}`);
     console.log(`  Assets:  ${stats.figures} figures, ${stats.tables} tables`);
-    console.log(`  Engine:  Playwright (no Paged.js)`);
+    const engineLabel = continuousInfo ? 'Playwright (Creative canvas)'
+                      : noPaged ? 'Playwright (Chromium native @page)'
+                      : 'Playwright + Paged.js';
+    console.log(`  Engine:  ${engineLabel}`);
     console.log(`  Path:    ${absOut}`);
 
     if (mergeFiles && mergeFiles.length && postResult.pageCount > postResult.originalPages) {
@@ -746,6 +813,7 @@ async function convert(inputFile, outputFile, customCSS, options = {}) {
       height: args.height,
       mergeFiles: args.mergeFiles,
       title: args.title,
+      noPaged: args.noPaged,
     });
   } catch (err) {
     console.error('Error:', err.message);

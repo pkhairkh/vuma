@@ -22,19 +22,29 @@ This enables `font-variation-settings: 'wght' <value>` for smooth, non-discrete 
 
 | Variable | Stack | Usage |
 |----------|-------|-------|
-| `--font-sans` | Inter, Noto Sans SC, Helvetica Neue, Apple Color Emoji, Segoe UI Emoji, sans-serif | Body text, UI elements, stats |
-| `--font-serif` | Playfair Display, Noto Serif SC, Cormorant Garamond, Apple Color Emoji, serif | Hero text, editorial headlines |
-| `--font-mono` | SF Mono, Consolas, Apple Color Emoji, monospace | Floating meta, timestamps, codes |
+| `--font-sans` | Inter, Noto Sans SC, Liberation Sans, Noto Color Emoji, sans-serif | Body text, UI elements, stats |
+| `--font-serif` | Playfair Display, Noto Serif SC, Cormorant Garamond, Noto Color Emoji, serif | Hero text, editorial headlines |
+| `--font-mono` | Liberation Mono, DejaVu Sans Mono, Noto Color Emoji, monospace | Floating meta, timestamps, codes |
 
 ### Report Pipeline (ReportLab)
 
-ReportLab requires registered fonts. CJK support via `UniSong` / `UniHei` (built into reportlab.lib.fonts):
+ReportLab requires registered fonts. Primary Chinese font is **Noto Serif SC** (思源宋体, serif with sharp elegant strokes):
 
 ```python
 from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.cidfonts import UnicodeCIDFont
-pdfmetrics.registerFont(UnicodeCIDFont('STSong-Light'))  # Song-ti (serif-like)
-# Use 'STSong-Light' for body, headings
+from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.pdfbase.pdfmetrics import registerFontFamily
+
+# Primary Chinese font — Noto Serif SC (serif, high quality, OFL licensed)
+# FONT_DIR = '/usr/share/fonts' (Linux) or '~/.openclaw/workspace/fonts' (macOS)
+pdfmetrics.registerFont(TTFont('NotoSerifSC', f'{FONT_DIR}/truetype/noto-serif-sc/NotoSerifSC-Regular.ttf'))
+pdfmetrics.registerFont(TTFont('NotoSerifSC-Bold', f'{FONT_DIR}/truetype/noto-serif-sc/NotoSerifSC-Bold.ttf'))
+registerFontFamily('NotoSerifSC', normal='NotoSerifSC', bold='NotoSerifSC-Bold')
+
+# Fallback / legacy Chinese fonts (sans-serif, static weight)
+pdfmetrics.registerFont(TTFont('Noto Sans SC', f'{FONT_DIR}/truetype/chinese/NotoSansSC-Regular.ttf'))  # sans-serif fallback
+pdfmetrics.registerFont(TTFont('Noto Sans SC Bold', f'{FONT_DIR}/truetype/chinese/NotoSansSC-Bold.ttf'))
+# Use 'NotoSerifSC' for body, 'NotoSerifSC-Bold' for headings
 ```
 
 > **⚠️ ReportLab CANNOT render emoji.** If content has emoji, route to Creative pipeline.
@@ -57,8 +67,8 @@ For manual font selection:
 ## Emoji Font Fallback
 
 All Creative pipeline font stacks include emoji fallback:
-- **macOS**: `Apple Color Emoji` (system default, full color emoji)
-- **Windows**: `Segoe UI Emoji`
+- **macOS**: `Noto Color Emoji` (cross-platform, full color emoji)
+- **Windows**: `Noto Color Emoji`
 - **Linux**: `Noto Color Emoji` (install: `apt install fonts-noto-color-emoji`)
 
 Chromium (used by Playwright) on macOS renders emoji natively — no extra configuration needed.

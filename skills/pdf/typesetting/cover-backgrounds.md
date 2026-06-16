@@ -6,7 +6,7 @@
 
 ---
 
-## 🔴 Global Constraints
+##  Global Constraints
 
 Before executing any specific background algorithm, these three iron rules must be obeyed — they are the baseline to ensure backgrounds remain subtle and never overwhelm:
 
@@ -78,7 +78,7 @@ c.restoreState()
     transform: translateY(-50%) rotate(-90deg);
     transform-origin: center center;
     font-size: min(calc(var(--W) * 0.45), 45vw);
-    font-family: 'Helvetica', 'Arial Black', sans-serif;
+    font-family: 'FreeSerif', sans-serif;
     font-weight: 900;
     color: rgba(0,0,0,0.04);
     white-space: nowrap;
@@ -136,7 +136,7 @@ c.restoreState()
 
 | Constraint | Rule |
 |-------|------|
-| **Font** | Must use sans-serif, weight must be extra-bold (Black / Heavy / Bold). Recommended: Helvetica Black, Arial Black, Noto Sans SC Heavy |
+| **Font** | Must use sans-serif, weight must be extra-bold (Black / Heavy / Bold). Recommended: FreeSerif Bold, Noto Sans SC Heavy |
 | **Font prohibition** | **Absolutely forbidden** to use thin or serif fonts for this type of watermark |
 | **Character count** | Extracted string length `1–5` characters (e.g. year "2026", abbreviation "AI", "B2B") |
 | **Opacity** | Follow global Rule 1 (light bg 2-5%, dark bg 3-6%) |
@@ -145,7 +145,7 @@ c.restoreState()
 
 **Calculation logic**:
 - `Text` = Extract year (e.g. "2026")
-- **🔴 Font Size Adaptive Algorithm (Full Text Display Iron Rule):**
+- ** Font Size Adaptive Algorithm (Full Text Display Iron Rule):**
   1. `Max_Font_Size` = `W × 0.45` (ideal maximum)
   2. Measure total text height after rotation: `Text_Width = measure(Text, Max_Font_Size)` (after 90° rotation, original width becomes vertical height)
   3. Available vertical space = `H × 0.85` (leaving `H × 0.075` safety margin top and bottom)
@@ -168,7 +168,7 @@ c.setFillColorRGB(0, 0, 0, 0.04)
 # Adaptive font size: ensure full text display
 max_font_size = W * 0.45
 text = "2026"
-text_width = c.stringWidth(text, "Helvetica-Bold", max_font_size)
+text_width = c.stringWidth(text, "FreeSerif", max_font_size)
 available_height = H * 0.85
 if text_width > available_height:
     font_size = max_font_size * (available_height / text_width)
@@ -176,9 +176,9 @@ else:
     font_size = max_font_size
 
 # Recalculate actual width for centering
-actual_text_width = c.stringWidth(text, "Helvetica-Bold", font_size)
+actual_text_width = c.stringWidth(text, "FreeSerif", font_size)
 
-c.setFont("Helvetica-Bold", font_size)
+c.setFont("FreeSerif", font_size)
 # Vertically centered, fully within page
 center_y = (H - actual_text_width) / 2
 c.translate(W * 0.03, center_y)
@@ -193,7 +193,7 @@ c.restoreState()
 
 **Calculation logic**:
 - `Text` = Document type English initials (e.g. "REPORT")
-- **🔴 Font Size Adaptive Algorithm (Full Text Display Iron Rule):**
+- ** Font Size Adaptive Algorithm (Full Text Display Iron Rule):**
   1. `Max_Font_Size` = `W × 0.3` (ideal maximum)
   2. Measure text rendering width: `Text_Width = measure(Text, Max_Font_Size)`
   3. Available horizontal space = `W × 0.90` (leaving `W × 0.05` safety margin left and right)
@@ -216,14 +216,14 @@ c.setFillColorRGB(0, 0, 0, 0.04)
 # Adaptive font size: ensure full text display
 max_font_size = W * 0.3
 text = "REPORT"
-text_width = c.stringWidth(text, "Helvetica-Bold", max_font_size)
+text_width = c.stringWidth(text, "FreeSerif", max_font_size)
 available_width = W * 0.90
 if text_width > available_width:
     font_size = max_font_size * (available_width / text_width)
 else:
     font_size = max_font_size
 
-c.setFont("Helvetica-Bold", font_size)
+c.setFont("FreeSerif", font_size)
 # Text fully within page, baseline placed in bottom safe zone
 # ascent ≈ font_size * 0.75, ensure letter tops don't exceed page
 c.drawString(W * 0.05, font_size * 0.3, text)  # baseline slightly above bottom edge

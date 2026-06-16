@@ -461,12 +461,16 @@ def generate_cascade_palette(intent="neutral", mode="minimal", harmony=None, see
         "s", "Icons, bullet points, small UI elements")
 
     # XS tier: accent, badge, data highlight
+    # DESIGN RULE: accent uses base_hue (same as header_fill) at higher saturation.
+    # This ensures cover structural elements, body headings, table headers, and
+    # accent highlights all belong to the same color family. The geometric
+    # accent_hue is only used for accent_secondary (chart series differentiation).
     roles["accent"] = _make_role(
-        accent_hue, random.uniform(0.50, 0.70),
+        base_hue, random.uniform(0.50, 0.70),
         random.uniform(0.40, 0.55) if not is_dark else random.uniform(0.55, 0.70),
         "xs", "Primary accent: badges, tags, data point highlights, CTA")
     roles["accent_secondary"] = _make_role(
-        secondary_hue, random.uniform(0.40, 0.60),
+        accent_hue, random.uniform(0.40, 0.60),
         random.uniform(0.45, 0.58) if not is_dark else random.uniform(0.50, 0.65),
         "xs", "Secondary accent: chart series 2, secondary badge")
 
@@ -509,7 +513,7 @@ def generate_cascade_palette(intent="neutral", mode="minimal", harmony=None, see
         r, g, b = (int(page_bg_hex.lstrip('#')[i:i+2], 16) / 255.0 for i in (0, 2, 4))
         _, bg_l, _ = colorsys.rgb_to_hls(r, g, b)
         target_l = 0.35 if bg_l > 0.5 else 0.75
-        roles["accent"] = _make_role(accent_hue, random.uniform(0.50, 0.70), target_l,
+        roles["accent"] = _make_role(base_hue, random.uniform(0.50, 0.70), target_l,
                                       "xs", "Primary accent: badges, tags, data point highlights, CTA")
 
     # ── Tier saturation audit (clamp any violations) ──
@@ -625,6 +629,13 @@ def _cascade_to_css(roles, semantic):
     lines.append("  /* ── Semantic (low-sat) ── */")
     for k, v in semantic.items():
         lines.append(f"  --semantic-{k}: {v['hex']};")
+    lines.append("  /* ── Cover template aliases (--c-* compat for cover.md templates 01-07) ── */")
+    lines.append(f"  --c-bg: {roles['page_bg']['hex']};")
+    lines.append(f"  --c-accent: {roles['accent']['hex']};")
+    lines.append(f"  --c-text: {roles['text_primary']['hex']};")
+    lines.append(f"  --c-muted: {roles['text_muted']['hex']};")
+    lines.append(f"  --c-mid: {roles['header_fill']['hex']};")
+    lines.append(f"  --c-surface: {roles['card_bg']['hex']};")
     lines.append("}")
     return "\n".join(lines)
 
@@ -1500,9 +1511,9 @@ BASE_CSS = """
   margin: 0;
 }
 :root {
-  --font-sans: 'Inter', 'Noto Sans SC', 'Helvetica Neue', 'Apple Color Emoji', 'Segoe UI Emoji', sans-serif;
-  --font-serif: 'Playfair Display', 'Noto Serif SC', 'Cormorant Garamond', 'Apple Color Emoji', serif;
-  --font-mono: 'SF Mono', 'Consolas', 'Apple Color Emoji', monospace;
+  --font-sans: 'Inter', 'Noto Sans SC', 'FreeSerif', 'Noto Color Emoji', sans-serif;
+  --font-serif: 'Playfair Display', 'Noto Serif SC', 'Cormorant Garamond', 'Noto Color Emoji', serif;
+  --font-mono: 'Liberation Mono', 'DejaVu Sans Mono', 'Noto Color Emoji', monospace;
 
   /* Typographic Scale — 6-level fluid type system (Modular Scale) */
   --text-scale-6: clamp(64px, 12vw, 150px);   /* Hero / Display — oversized, single word or short phrase */
@@ -1547,28 +1558,33 @@ html, body {
 /* ═══ Continuous Canvas Mode (multi-page as one seamless surface) ═══ */
 .continuous-canvas {
   width: var(--canvas-w, 720px);
-  position: relative;
-  overflow: hidden;
   box-sizing: border-box;
-  /* height is set inline: canvas_h * total_pages */
+  /* Document-flow mode: no fixed height, no overflow:hidden.
+     Each .page-section is a block-level box that stacks naturally.
+     Playwright slices pages at break-after boundaries. */
 }
 .continuous-canvas .bg-layer-full {
   position: absolute;
   inset: 0;
   z-index: 1;
   pointer-events: none;
+  /* Note: in document-flow mode, this spans only as far as the
+     first page-section. Per-page bg-layer handles each page's bg. */
 }
 .continuous-canvas .bg-layer-full svg {
   width: 100%;
   height: 100%;
 }
 .continuous-canvas .page-section {
-  position: absolute;
-  left: 0;
+  position: relative;
   width: 100%;
   box-sizing: border-box;
   overflow: visible;
-  /* top and height set inline per page */
+  break-after: page;
+  /* height set inline per page (e.g. 960px) */
+}
+.continuous-canvas .page-section:last-child {
+  break-after: auto; /* no trailing blank page */
 }
 .continuous-canvas .page-section .safe-zone {
   position: absolute;
@@ -2664,19 +2680,17 @@ def compile_blueprint(json_path, output_html_path):
 
     # 3. Render Pages
     if use_continuous:
-        # ═══ CONTINUOUS CANVAS MODE ═══
-        # Render all pages as one seamless surface, then let Playwright's page.pdf() slice it.
-        total_height = canvas_h * total_pages
-        html += f'\n<div class="continuous-canvas" style="height: {total_height}px; background: var(--c-bg);">\n'
+        # ═══ CONTINUOUS CANVAS MODE (document-flow) ═══
+        # Each page-section is a block-level box that stacks in normal flow.
+        # Playwright slices at break-after:page boundaries — no absolute positioning.
+        html += f'\n<div class="continuous-canvas" style="background: var(--c-bg);">\n'
 
-        # Unified background SVG spanning the entire document
-        if unified_svg:
-            html += f'  <div class="bg-layer-full">{unified_svg}</div>\n'
+        # Note: unified_svg is now injected per page-section as a bg-layer
+        # (since page-sections are block-level, a single spanning div won't work)
 
-        # Render each page as an absolutely-positioned section within the continuous canvas
+        # Render each page as a block-level section in normal document flow
         for page_idx, page in enumerate(pages):
             archetype = page.get("archetype", "cover_hero")
-            page_top = page_idx * canvas_h
 
             # Auto-assign grid areas
             _auto_assign_grid_areas(archetype, page.get("components", []))
@@ -2703,8 +2717,12 @@ def compile_blueprint(json_path, output_html_path):
                 safe_inset = ""
             safe_inset_style = f" inset: {safe_inset};" if safe_inset else ""
 
-            # Page section: positioned absolutely within continuous canvas
-            html += f'\n  <div class="page-section archetype-{archetype}" style="top: {page_top}px; height: {canvas_h}px;">\n'
+            # Page section: block-level box in document flow (no top/absolute)
+            html += f'\n  <div class="page-section archetype-{archetype}" style="height: {canvas_h}px;">\n'
+
+            # Per-page unified background SVG (replaces the old single spanning bg-layer-full)
+            if unified_svg:
+                html += f'    <div class="bg-layer" style="position:absolute;inset:0;z-index:1;pointer-events:none;">{unified_svg}</div>\n'
 
             # Per-page data-driven SVG background (overlays on top of unified bg)
             if svg_type != "none":

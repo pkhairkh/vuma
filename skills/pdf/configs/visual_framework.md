@@ -169,7 +169,7 @@ Related items are close. Unrelated items are far. The gap between unrelated elem
 
 ## Intent → Visual Translation
 
-Five design intents. Each describes an **atmosphere** — the emotional field the viewer should feel. Intents do NOT prescribe specific parameters (font weight, line-height, SVG type, etc.). All concrete parameter mappings live in `briefs/creative.md` § Intent Mapping Table and `design_engine.py` INTENT_HUES/INTENT_HARMONY_MAP.
+Five design intents. Each describes an **atmosphere** — the emotional field the viewer should feel. Intents do NOT prescribe specific parameters (font weight, line-height, SVG type, etc.). All concrete parameter mappings live in `briefs/creative-fixed-canvas.md` § Intent Mapping Table and `design_engine.py` INTENT_HUES/INTENT_HARMONY_MAP.
 
 ### Calm
 Stillness. The viewer’s breathing slows. Vast open space, restrained palette, nothing competes for attention. Covers healthcare, wellness, meditation, and minimalist aesthetics. The design communicates through what it *removes*.

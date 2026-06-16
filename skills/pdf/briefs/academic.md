@@ -45,22 +45,22 @@ Confirm with the user:
 ### Phase 2 - SETUP
 
 **Title Page (Cover) Rules:**
-- **Academic route covers are generated via HTML/Playwright**, using Templates 08-11 from `typesetting/cover.md`. Templates 08-10 replicate LaTeX title page aesthetics (dark backgrounds, serif titles, symmetric layouts) in HTML/CSS. **Template 11 (Institutional)** is for thesis proposals, dissertations, and formal institutional submissions (white bg + black border frame).
-- **Pipeline:** Generate body PDF via Tectonic (no title page in `.tex`) → Generate cover HTML (Template 08/09/10/11) → Playwright `page.pdf()` → Merge cover as page 0 via pypdf
-- **Template selection:** For thesis proposals (开题报告), dissertations (毕业论文), and institutional submissions → **default to Template 11**. For research papers, preprints, journal submissions → Templates 08-10.
+- **Academic route covers are generated via HTML/Playwright**, using Templates 03-04 and 06 from `typesetting/cover.md`. Templates 03-04 replicate LaTeX title page aesthetics (dark backgrounds, serif titles, symmetric layouts) in HTML/CSS. **Template 06 (Institutional)** is for thesis proposals, dissertations, and formal institutional submissions (white bg + black border frame).
+- **Pipeline:** Generate body PDF via Tectonic (no title page in `.tex`) → Generate cover HTML (Template 03/04/05/06) → Playwright `page.pdf()` → Merge cover as page 0 via pypdf
+- **Template selection:** For thesis proposals (开题报告), dissertations (毕业论文), and institutional submissions → **default to Template 06**. For research papers, preprints, journal submissions → Templates 03-04.
 - **NEVER use `\maketitle`** - it produces ugly default output with cramped spacing
 - **NEVER use `\begin{titlepage}...\end{titlepage}`** - the cover is generated separately via HTML/Playwright
 - **NEVER use LaTeX TikZ overlay for full-page covers** - TikZ `current page` coordinates are unreliable with `margin=0pt`, causing backgrounds to not fill the page (right/bottom white edges). HTML/CSS full-bleed is pixel-exact.
 - Title page is OPTIONAL - skip it for short documents (≤ 2 pages), letters, memos, or when content scanning is priority
-- **`\tableofcontents` must be the FIRST page** of the body PDF (after merge, it becomes page 2)
-- If no TOC, content starts on page 1 of the body PDF
+- **`\tableofcontents` must be the FIRST page** of the body PDF (after merge, it becomes page 2). If no TOC, content starts on page 1 of the body PDF
+
 
 **Cover Generation Pipeline (Academic route):**
 ```
 1. Write .tex WITHOUT any title page
 2. Run poster_validate.py check-tex on .tex file - fix table overflow / image width ERRORs
 3. Compile with tectonic → body.pdf
-4. Write cover HTML using Template 08/09/10/11 from typesetting/cover.md (Template 11 for thesis proposals/dissertations)
+4. Write cover HTML using Template 03/04/05/06 from typesetting/cover.md (Template 06 for thesis proposals/dissertations)
 5. Run poster_validate.py check-html on cover HTML - fix any ERRORs
 6. Run cover_validate.js on cover HTML - fix any text-line overlaps
 7. Render cover HTML → PDF via Playwright (`html2poster.js`) — **NOT `html2pdf-next.js`** (which converts absolute→static and destroys cover layout)
@@ -98,7 +98,7 @@ def render_cover(html_path, pdf_path):
 
 **Merge cover + body:**
 ```python
-from pypdf import PdfReader, PdfWriter, Transformation
+from pypdf import PdfReader, PdfWriter
 
 A4_W, A4_H = 595.28, 841.89  # A4 in points
 
@@ -107,10 +107,7 @@ def normalize_page_to_a4(page):
     box = page.mediabox
     w, h = float(box.width), float(box.height)
     if abs(w - A4_W) > 2 or abs(h - A4_H) > 2:
-        sx, sy = A4_W / w, A4_H / h
-        page.add_transformation(Transformation().scale(sx=sx, sy=sy))
-        page.mediabox.lower_left = (0, 0)
-        page.mediabox.upper_right = (A4_W, A4_H)
+        page.scale_to(A4_W, A4_H)
     return page
 
 writer = PdfWriter()
@@ -122,7 +119,7 @@ with open('final.pdf', 'wb') as f:
     writer.write(f)
 ```
 
-**→ Full cover templates: see §PART 4.5 in `typesetting/cover.md` (Templates 08-10).**
+**→ MUST READ: `typesetting/cover.md` §PART 4.5 (Templates 03-04) before writing any cover HTML.**
 
 > **⚠️ Why HTML/Playwright covers?** LaTeX TikZ `remember picture, overlay` with `margin=0pt` frequently fails to fill the page (right/bottom edges show white). HTML/CSS with `@page { margin: 0 }` and full-bleed background is pixel-exact, with zero ambiguity. This also unifies all three routes (Report, Creative, Academic) under one cover system.
 
@@ -167,13 +164,13 @@ Write the preamble. Start from this foundation and customise per document:
 - `babel` and `polyglossia` are incompatible - load only one
 - CJK: `\usepackage{ctex}` - Tectonic auto-downloads fonts, zero manual setup
 - System fonts via `\setmainfont{}`: probe first with `fc-list :lang=XX`
-- **🔴 Margin symmetry:** `\geometry{left=X, right=X}` - left and right MUST be equal. Asymmetric margins = off-center content = critical bug
-- **🔴 Minimum margins with fancyhdr:** When using `fancyhdr` for headers/footers, `geometry` margins must leave enough room. **Minimum: `top >= 2.0cm`, `bottom >= 1.8cm`**. Also set `\setlength{\headheight}{14pt}` in the preamble. Margins smaller than this cause headers/footers to be pushed outside the page boundary (negative y-coordinates), making them invisible in print.
-- **🔴 Quotation marks (English):** NEVER use straight quotes `"..."`。English text must use LaTeX curly quotes: ` ``left quote'' ` for double, `` `single' `` for single. Straight `"` in LaTeX means right double quote only.
-- **🔴 Quotation marks (Chinese — CRITICAL):** Chinese quoted text like "北漂" MUST use Unicode smart quotes "…" (U+201C/U+201D) directly in the `.tex` source. **NEVER use ASCII `"` for Chinese quotes** — LaTeX interprets `"` as a right double quote (`"`), so `"北漂"` renders as `"北漂"` (two right quotes, no left quote). The correct LaTeX source is: `"北漂"` (literal Unicode characters). `\usepackage{csquotes}` is a safety net but does NOT fix raw ASCII `"` in Chinese text.
+- ** Margin symmetry:** `\geometry{left=X, right=X}` - left and right MUST be equal. Asymmetric margins = off-center content = critical bug
+- ** Minimum margins with fancyhdr:** When using `fancyhdr` for headers/footers, `geometry` margins must leave enough room. **Minimum: `top >= 2.0cm`, `bottom >= 1.8cm`**. Also set `\setlength{\headheight}{14pt}` in the preamble. Margins smaller than this cause headers/footers to be pushed outside the page boundary (negative y-coordinates), making them invisible in print.
+- ** Quotation marks (English):** NEVER use straight quotes `"..."`。English text must use LaTeX curly quotes: ` ``left quote'' ` for double, `` `single' `` for single. Straight `"` in LaTeX means right double quote only.
+- ** Quotation marks (Chinese — CRITICAL):** Chinese quoted text like "北漂" MUST use Unicode smart quotes "…" (U+201C/U+201D) directly in the `.tex` source. **NEVER use ASCII `"` for Chinese quotes** — LaTeX interprets `"` as a right double quote (`"`), so `"北漂"` renders as `"北漂"` (two right quotes, no left quote). The correct LaTeX source is: `"北漂"` (literal Unicode characters). `\usepackage{csquotes}` is a safety net but does NOT fix raw ASCII `"` in Chinese text.
   - **Scope:** This rule applies ONLY to Chinese-language body text. Do NOT replace `"` in English paragraphs (use ` ``...'' ` instead), `verbatim`/`lstlisting`/`minted` environments, `\texttt{}`/`\verb||`/`\url{}`/`\href{}{}` arguments, or BibTeX `.bib` field values.
-- **🔴 Title page isolation:** Cover is generated via HTML/Playwright and merged as page 0 via pypdf - isolation is inherent in the merge pipeline. `\tableofcontents` should be the first page of the `.tex` body. Verify: does TOC start on the page immediately after the cover in the merged PDF?
-- **🔴 TOC requires a cover page:** Unless the user explicitly requests no cover, if the document has `\tableofcontents`, it MUST have a cover page. Structure: Cover (page 1) → TOC (page 2) → Content (page 3+). Do not generate a TOC without a preceding cover page. This rule is consistent with `briefs/report.md`.
+- ** Title page isolation:** Cover is generated via HTML/Playwright and merged as page 0 via pypdf - isolation is inherent in the merge pipeline. `\tableofcontents` should be the first page of the `.tex` body. Verify: does TOC start on the page immediately after the cover in the merged PDF?
+- ** TOC requires a cover page:** Unless the user explicitly requests no cover, if the document has `\tableofcontents`, it MUST have a cover page. Structure: Cover (page 1) → TOC (page 2) → Content (page 3+). Do not generate a TOC without a preceding cover page. This rule is consistent with `briefs/report.md`.
 
 **When no style is specified**, apply a measured, high-craft system:
 1. **Contrast** - clear figure-ground separation
@@ -190,7 +187,7 @@ Add enrichment proactively when content benefits:
 
 Write LaTeX content: sections, equations, figures, tables, bibliography.
 
-**→ Overflow prevention**: See `typesetting/overflow.md` for the LaTeX-specific patterns (tabularx, adjustbox, widowpenalty, etc.). Key rules:
+**→ MUST READ: `typesetting/overflow.md`** for LaTeX-specific overflow patterns (tabularx, adjustbox, widowpenalty, etc.). Key rules:
 - Tables: always use `tabularx` or `tabular*` with `\columnwidth` constraint - never plain `tabular` for 5+ columns
 - Images: always `\includegraphics[max width=\columnwidth, max height=0.4\textheight]` or `adjustbox` - the `max height` prevents a single figure from occupying an entire page
 - Orphans/widows: set `\widowpenalty=10000` and `\clubpenalty=10000`
@@ -909,7 +906,7 @@ Two templates available as separate files. Load the one you need:
 2. Replace placeholder content with user's information
 3. Compile: `python3 "$PDF_SKILL_DIR/scripts/pdf.py" convert.latex resume.tex --runs 2`
 
-**🔴 Resume Text Overlap Prevention:**
+** Resume Text Overlap Prevention:**
 
 > AltaCV dual-column resumes are the #1 source of text overlap bugs. The sidebar and main column share vertical space but are positioned independently.
 
@@ -920,16 +917,16 @@ Two templates available as separate files. Load the one you need:
 - **Two-page overflow:** If content exceeds 1 page, explicitly add `\newpage` and restart column layout. Do NOT let LaTeX auto-break the `paracol` environment - it misaligns columns on page 2
 - **Compile twice:** Always `--runs 2` to resolve cross-references and stabilize column breaks
 
-**🔴 Resume Minimum Font Size:**
+** Resume Minimum Font Size:**
 - **Hard floor: 12px (9pt).** No text in the resume may render smaller than 12px, including footnotes, contact info, dates, and skill labels.
 
-**🔴 Resume Line-Break Rules:**
+** Resume Line-Break Rules:**
 - English: prefer breaking at word boundaries. Long words may be split at syllable boundaries with a hyphen (`-`) - standard typographic practice (e.g., `experi-\nence`).
 - CJK: break between characters, but never separate punctuation from preceding character.
 - Mixed content: respect both rules.
 - Dates/ranges ("Jan 2022 - Present") must stay as one unit.
 
-**🔴 Resume Page-Fill:**
+** Resume Page-Fill:**
 - Content must fill ≥85% of page height. If content is sparse, increase spacing (`\medskip` → `\bigskip`), increase font size slightly, or add sections (Summary, Awards, Projects). Never leave visible blank area > 3cm at page bottom.
 
 **Template A customisation quick-reference:**
@@ -1000,7 +997,7 @@ Two templates available as separate files. Load the one you need:
 | Platform | Install Command |
 |----------|----------------|
 | macOS (Homebrew) | `brew install tectonic` |
-| macOS (binary) | `curl -sSL https://drop-sh.fullyjustified.net \| sh` |
+| macOS (conda)  | `conda install -c conda-forge tectonic` |
 | Debian / Ubuntu | `apt install tectonic` (if available) or conda/binary |
 | Arch Linux | `pacman -S tectonic` |
 | Conda (any OS) | `conda install -c conda-forge tectonic` |
@@ -1012,7 +1009,7 @@ After installing, verify: `tectonic --version`. The `_find_tectonic()` function 
 
 ---
 
-> **⚠️ Legacy Note:** Academic covers previously used ReportLab canvas API (cover_recipe_A/B/C/D/L). This approach is **fully deprecated**. All academic covers now use HTML/Playwright Templates 08-11 (see `typesetting/cover.md` and the pipeline at line 58-118 of this file). Do NOT write ReportLab cover code.
+> **⚠️ Legacy Note:** Academic covers previously used ReportLab canvas API (cover_recipe_A/B/C/D/L). This approach is **fully deprecated**. All academic covers now use HTML/Playwright Templates 03-06 (see `typesetting/cover.md` and the pipeline at line 58-118 of this file). Do NOT write ReportLab cover code.
 
 ### ⚠️ Post-Cover Generation Checks (Mandatory)
 
@@ -1056,3 +1053,24 @@ def merge_cover_body(cover_path, body_path, output_path):
     with open(output_path, 'wb') as f:
         writer.write(f)
 ```
+
+---
+
+## Quality Checklist — Academic-Specific Items
+
+> Moved from SKILL.md to reduce context size. These rules apply specifically to the Academic pipeline.
+
+### Pagination & Layout
+
+- [ ] **Last page fill ratio ≥ 40%**: No large blank areas on the final page
+- [ ] **Major section 3/4 threshold**: H1-level headings must NOT start in the bottom 25% of a page. Use `\needspace{0.25\textheight}` in LaTeX
+- [ ] **Tables don't split across pages**: Table header and data rows must stay together
+- [ ] **No orphan headings**: Headings must not appear alone at page bottom
+
+### LaTeX-Specific
+
+- [ ] **Curly quotes (English)**: No straight `"` quotes - use `` ``text'' `` for double and `` `text' `` for single
+- [ ] **Curly quotes (Chinese)**: Chinese quoted text MUST use Unicode smart quotes `“…”` (U+201C/U+201D) directly — NEVER ASCII `"` adjacent to CJK characters
+- [ ] **Title page isolation**: `\end{titlepage}` followed by `\newpage`/`\clearpage` - TOC/body NEVER on same page as title
+- [ ] **Resume column overlap**: AltaCV `paracol` entries checked for vertical overflow; max 3-4 bullets per `\cvevent`; explicit `\newpage` for 2-page resumes
+- [ ] **`\geometry` symmetry**: `left=X, right=X` must be equal values

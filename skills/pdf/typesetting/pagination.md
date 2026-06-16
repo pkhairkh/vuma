@@ -284,7 +284,7 @@ from reportlab.platypus.frames import Frame
 def footer_with_arabic(canvas, doc):
     """Standard Arabic page number in footer."""
     canvas.saveState()
-    canvas.setFont('Helvetica', 9)
+    canvas.setFont('FreeSerif', 9)
     canvas.drawCentredString(doc.pagesize[0] / 2, 0.5 * inch,
                              str(doc.page))
     canvas.restoreState()
@@ -294,7 +294,7 @@ def footer_with_roman(canvas, doc):
     roman_map = {1:'i',2:'ii',3:'iii',4:'iv',5:'v',6:'vi',7:'vii',8:'viii',9:'ix',10:'x'}
     page_num = roman_map.get(doc.page, str(doc.page))
     canvas.saveState()
-    canvas.setFont('Helvetica', 9)
+    canvas.setFont('FreeSerif', 9)
     canvas.drawCentredString(doc.pagesize[0] / 2, 0.5 * inch, page_num)
     canvas.restoreState()
 

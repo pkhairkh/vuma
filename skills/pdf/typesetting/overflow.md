@@ -44,7 +44,7 @@ If a Block's calculated width > Max_Width, apply fallback strategies (see §5).
 
 ---
 
-## 1.5 🔴 Page Content Centering (Horizontal Centering Iron Rule)
+## 1.5  Page Content Centering (Horizontal Centering Iron Rule)
 
 > **Symptom:** Cover or body content is shifted left on the page, with noticeably more whitespace on the right than left.
 
@@ -53,7 +53,7 @@ If a Block's calculated width > Max_Width, apply fallback strategies (see §5).
 **Iron rule:**
 
 1. **Left/right margins must be symmetric:** `left_margin == right_margin`. No asymmetric margins allowed.
-2. **Cover:** For left-aligned templates (e.g., Template 01/02/03/05/07), the text starting point should be within `0.10*W ~ 0.15*W`, and the right margin should be between `0.05*W ~ 0.15*W`. Center-aligned templates (Template 04/06) must be absolutely centered.
+2. **Cover:** For left-aligned templates (e.g., Template 01/02), the text starting point should be within `0.10*W ~ 0.15*W`, and the right margin should be between `0.05*W ~ 0.15*W`. Center-aligned templates (Template 04/05/06) must be absolutely centered.
 3. **Body:** ReportLab's `Frame` / `SimpleDocTemplate` must have `leftMargin == rightMargin`. LaTeX's `\geometry{left=X, right=X}` must be symmetric. HTML must use `margin: 0 auto` or `padding-left == padding-right`.
 
 ```python
@@ -95,13 +95,13 @@ from reportlab.platypus import Paragraph
 from reportlab.lib.styles import ParagraphStyle
 
 # Measure actual rendered width
-text_width = stringWidth("Your text here", "Microsoft YaHei", 10)
+text_width = stringWidth("Your text here", "Noto Sans SC", 10)
 
 if text_width > max_width:
     # Use Paragraph for automatic wrapping — NEVER plain strings in tables
     style = ParagraphStyle(
         'CellText',
-        fontName='Microsoft YaHei',
+        fontName='Noto Sans SC',
         fontSize=10,
         leading=14,
         wordWrap='CJK',  # Enables CJK-aware line breaking
@@ -329,7 +329,7 @@ def calculate_col_widths(data, font_name, font_size, available_width, min_col=30
         return [w * scale for w in col_widths]
 
 
-def build_safe_table(data, available_width, font_name='Microsoft YaHei', font_size=9):
+def build_safe_table(data, available_width, font_name='Noto Sans SC', font_size=9):
     """Build a table guaranteed not to overflow horizontally.
     
     All text cells are wrapped in Paragraph() for automatic line-breaking.

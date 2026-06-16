@@ -1,4 +1,4 @@
-# Cover Design V3.0 - Cover Layout Engine Specification
+# Cover Design - Cover Layout Engine Specification
 
 > The cover is the first impression. Either skip it, or build it like architecture.
 
@@ -7,7 +7,7 @@
 ## ⚠️ Critical Rules (Read First)
 
 1. **Cover is OPTIONAL.** Do NOT force a cover on documents that don't need one. When in doubt, skip.
-2. **Unified cover system.** All routes (Report, Creative, Academic) use the HTML/Playwright cover system. Templates 01-07 are general-purpose; Templates 08-10 are academic-specific (dark backgrounds, scholarly typography); **Template 11 is institutional (white bg, black border frame, structured fields)**. All routes generate covers via Playwright and merge via pypdf.
+2. **Unified cover system.** All routes (Report, Creative, Academic) use the HTML/Playwright cover system. **Template 01** is general-purpose (also covers government/bidding scenarios); **Template 07 is Crystal Blue (dark cover + light-blue body)**; **Templates 03-04** are academic-specific (dark backgrounds, scholarly typography; 04 also covers Chinese journal/keyword scenarios); **Template 06 is institutional (white bg, black border frame, structured fields)**. All routes generate covers via Playwright and merge via pypdf.
 3. **Single PDF output.** Never deliver a separate cover PDF.
    - **Creative route**: Cover is part of the same HTML document → single PDF output inherently.
    - **Report route**: Cover PDF (Playwright) + body PDF (ReportLab) → merged via pypdf into one final PDF.
@@ -92,11 +92,11 @@ Use **weight**, **letter-spacing**, and **opacity** to create hierarchy - not ju
 | Role | Size | Weight | Letter-Spacing | Line-Height | Opacity | Purpose |
 |------|------|--------|----------------|-------------|---------|---------|
 | **Kicker / Footer** (decorative text) | 16pt | Regular | 3pt (very wide) | - | 60% | Wide spacing + transparency makes 16pt text feel delicate and recessive |
-| **Summary / Description** (summary paragraph) 🆕 | 16-18pt | Regular | normal | **1.6** | 85% | **Fill visual space** - 2-4 lines of descriptive text that prevents empty covers |
+| **Summary / Description** (summary paragraph)  | 16-18pt | Regular | normal | **1.6** | 85% | **Fill visual space** - 2-4 lines of descriptive text that prevents empty covers |
 | **Meta / Subtitle** (secondary text) | 20-22pt | Light / Regular | normal | 1.4 | 85% | Comfortable reading rhythm, clear secondary hierarchy |
-| **Hero Title** (main title) | 45-65pt (CJK: 50-80pt) | Black / Heavy (extra bold) | normal-tight | **1.15** (multi-line) | 100% | Must create overwhelming scale contrast; visually dominates the page. CJK characters need +15-20% size to match Latin visual weight |
+| **Hero Title** (main title) | 32-65pt (CJK: 32-80pt) | Black / Heavy (extra bold) | normal-tight | **1.15** (multi-line) | 100% | Must create overwhelming scale contrast; visually dominates the page. CJK characters need +15-20% size to match Latin visual weight. **⚠️ For 3-line CJK titles with subtitle, max ~42pt (see S3.1 table).** |
 
-### 🔴 Data-to-Drawer Binding Rule
+###  Data-to-Drawer Binding Rule
 
 > **Hero Title = Company/entity name. Kicker = Report type/subtitle. Never reverse.**
 
@@ -116,7 +116,7 @@ When users provide structured information (company name + report name/type), the
 3. If user explicitly labels "title" and "subtitle" → title → Hero Title, subtitle → Kicker
 4. **Never use report type names (e.g. "Annual Report", "White Paper") as Hero Title's largest text** - report type is always Kicker-level decorative text
 
-### The Summary Block Rule (Anti-Void Iron Rule) 🆕
+### The Summary Block Rule (Anti-Void Iron Rule) 
 
 > Every cover MUST include a Summary/Description text block. If the user provides no summary, the system MUST auto-generate one.
 
@@ -140,7 +140,7 @@ if not summary_text:
 
 - If font family lacks Black/Heavy weight → use Bold + slightly larger size (+4pt)
 - If font family lacks Light weight → use Regular + increased letter-spacing (+1pt)
-- CJK fonts: STSong-Light for Regular/Light roles; for Heavy/Black → increase size by 15% to compensate for single-weight CJK fonts
+- CJK fonts: Noto Serif SC for Regular/Light roles; for Heavy/Black → increase size by 15% to compensate for single-weight CJK fonts
 - English kickers/footers: **FORCE UPPERCASE** via code (`text.upper()` / `toUpperCase()`)
 
 ---
@@ -158,10 +158,8 @@ All cover elements must be rendered in strict layer order. No exceptions.
 
 ### Clip-Path Enforcement
 
-> **Since V2.1, all covers are rendered via HTML/CSS.** The canonical clip pattern is CSS `overflow: hidden`. The ReportLab Python example below is kept as legacy reference for body-page background elements only.
-
 ```css
-/* HTML/CSS cover (CANONICAL): clip background overflow */
+/* clip background overflow — ONLY on Layer 1 */
 .cover-bg-layer {
   position: absolute;
   inset: 0;
@@ -170,27 +168,15 @@ All cover elements must be rendered in strict layer order. No exceptions.
 }
 ```
 
-```python
-# ReportLab (legacy reference, body pages only): clip background elements to page bounds
-canvas.saveState()
-p = canvas.beginPath()
-p.rect(0, 0, W, H)
-canvas.clipPath(p, stroke=0)
-# ... render background elements (Layer 1 ONLY) ...
-canvas.restoreState()
-```
+> ⚠️ **Clip scope = Layer 1 ONLY.** `overflow: hidden` must ONLY be on the Layer 1 background container. Layer 2 (lines) and Layer 3 (text) containers must NOT have `overflow: hidden`.
 
-> ⚠️ **Clip scope = Layer 1 ONLY。** In HTML/CSS covers, `overflow: hidden` must ONLY be on the Layer 1 background container. Layer 2 (lines) and Layer 3 (text) containers must NOT have `overflow: hidden`.
-> For ReportLab body pages: `saveState()`/`restoreState()` must close immediately after Layer 1 background rendering.
-> Layer 2 (lines) and Layer 3 (text) must never be rendered within a clip scope, otherwise text will be clipped.
+###  Anti-Clip Bug (Layer 3 Text Truncation Fix)
 
-### 🔴 Anti-Clip Bug (Layer 3 Text Truncation Fix)
+**Symptom:** Cover text is visible but truncated by an invisible boundary.
 
-**Symptom:** Cover text is visible but truncated by an invisible boundary, only half visible.
+**Root cause:** `overflow: hidden` scope too broad, clipping text in Layer 3.
 
-**Root cause:** clip/overflow scope not closed in time, causing subsequently rendered text to be clipped by the same clip rect.
-
-**Iron rule (HTML/CSS - canonical cover implementation):**
+**Iron rule:**
 ```html
 <!-- ✅ CORRECT - overflow:hidden only on Layer 1 -->
 <div class="cover-layer-1" style="position:absolute; inset:0; overflow:hidden; z-index:1;">
@@ -211,53 +197,12 @@ canvas.restoreState()
 </div>
 ```
 
-**Iron rule (ReportLab - body page background element reference):**
-```python
-# ✅ CORRECT - clip only wraps Layer 1
-canvas.saveState()
-canvas.clipPath(page_clip, stroke=0)
-render_layer_1_background(canvas)   # Background decoration
-canvas.restoreState()                # ← Must close here immediately!
+###  No Page Border/Frame
 
-render_layer_2_lines(canvas)         # Structure lines - not inside clip
-render_layer_3_text(canvas)          # Text content - not inside clip
-
-# ❌ WRONG - text clipped by clip scope
-canvas.saveState()
-canvas.clipPath(page_clip, stroke=0)
-render_layer_1_background(canvas)
-render_layer_2_lines(canvas)         # ← Gets clipped
-render_layer_3_text(canvas)          # ← Gets clipped! Text only half visible
-canvas.restoreState()
-```
-
-```css
-/* Creative (HTML): Same principle */
-.cover-bg-layer  { overflow: hidden; z-index: 1; }  /* clip only on background layer */
-.cover-line-layer { overflow: visible; z-index: 2; } /* lines not clipped */
-.cover-text-layer { overflow: visible; z-index: 3; } /* text not clipped */
-```
-
-### 🔴 No Page Border/Frame
-
-**Symptom:** A rectangular border appears around the entire cover page, looking like a table.
-
-**Root cause:** ReportLab's `Frame()` defaults to `showBoundary=0`, but if set to `1` or `True`, it shows a border. Also `canvas.rect()` may accidentally draw a full-page rectangle.
+**Symptom:** A rectangular border appears around the entire cover page.
 
 **Iron rule:**
-```python
-# Cover page Frame must have showBoundary=0
-Frame(x, y, w, h, showBoundary=0)  # Always 0
-
-# Never draw a full-page border on the cover
-canvas.rect(0, 0, W, H)  # ❌ BANNED on cover page
-
-# If using doc.showBoundary, cover page must be skipped
-doc = SimpleDocTemplate(..., showBoundary=0)  # Always 0 in production
-```
-
 ```css
-/* Creative: No outer border on covers */
 .cover-page {
   border: none !important;
   outline: none !important;
@@ -265,7 +210,7 @@ doc = SimpleDocTemplate(..., showBoundary=0)  # Always 0 in production
 }
 ```
 
-### 🔴 Minimum Spacing Between Decorative Lines and Text (Line-to-Text Spacing)
+###  Minimum Spacing Between Decorative Lines and Text (Line-to-Text Spacing)
 
 **Symptom:** Decorative lines on the cover (Layer 2 dividers, corner marks, sidebar edges) are flush against or overlapping with text.
 
@@ -279,19 +224,11 @@ i.e., at least 1 U of whitespace between line edges and text edges
 |---------|---------|------|
 | Horizontal divider | `U` above and below the line | Line must not be flush against title or body text |
 | Vertical sidebar edge | `U` to the right of the line | Text inside sidebar must maintain spacing from the edge |
-| Corner marks / crop marks | `1.5 * U` from mark endpoint to nearest text | Marks must not touch text |
 | Ultra-thick anchor line (Template 01) | `2 * U` to the right of the line | Thick line and title need ample breathing room |
-
-```python
-# Example: Template 01 vertical thick line to title spacing
-thick_line_x = 0.10 * W
-title_x = thick_line_x + 2 * U  # 2U spacing to the right of the thick line
-# ❌ WRONG: title_x = thick_line_x + 5  # 5pt is too close, will overlap
-```
 
 ---
 
-# PART 1: SEVEN COVER TEMPLATES (7 Cover Rendering Specifications)
+# PART 1: 5 Cover Templates (Cover Rendering Specifications)
 
 Coordinates use `W` (page width) and `H` (page height). `U = W * 0.05` (base spacing unit).
 
@@ -312,7 +249,7 @@ All templates inherit the A0.0-A0.3 architecture rules above.
 
 ### Layer 2 - Structure
 - **Left anchor line:** Start `(0.12*W, 0.1*H)`, End `(0.12*W, 0.9*H)`. Line width = **6pt**, primary color.
-- **Meta separator line:** At `Y_meta - 10pt`, from `X_content` to `X_content + W*0.4`, line width = **1pt**, primary color at 40% opacity.
+
 
 ### Layer 3 - Content
 
@@ -322,237 +259,32 @@ All templates inherit the A0.0-A0.3 architecture rules above.
 |--------|----------|---------|-------------|
 | **A - Kicker** | `0.15 * H` | Report type / subtitle (e.g. "2025 Annual Report Summary") | 16pt, Regular, letter-spacing 3pt, opacity 60%, uppercase |
 | **B - Hero Title** | `0.30 * H` | **Company/entity name** (e.g. "GREENTECH") | 45-65pt (CJK: 50-80pt), Heavy. Company name is the visual center |
-| **C - Summary** 🆕 | `0.50 * H` | 2-3 lines descriptive text about the report | 16-18pt, Regular, line-height 1.6, opacity 85%. **Width limit: `W * 0.6`**, auto-wrap. This drawer fills the mid-page void |
-| **D - Meta/Date** | `0.75 * H` | Author, org, date | 16-20pt, Regular. Top edge separated by the 1pt meta line |
+| **C - Summary**  | `0.50 * H` | 2-3 lines descriptive text about the report | 16-18pt, Regular, line-height 1.6, opacity 85%. **Width limit: `W * 0.6`**, auto-wrap. This drawer fills the mid-page void |
+| **D - Meta/Date** | `0.75 * H` | Author, org, date | 16-20pt, Regular |
 
 ### Best For
 Technology reports, data analysis, dashboard summaries, technical white papers
 
 ---
 
-## Template 02: Corporate Editorial - Top Bar with Bottom Accent
-
-**Design intent:** Top-bottom symmetry. Top bar provides structural weight, bottom-right info block creates diagonal balance. Solves the "empty edges" problem.
-
-### Layer 1 - Background
-- **Background giant year watermark:** Text = current year (e.g. "2026"), **Max font size = 180pt**, measure rendered width - if it exceeds `W * 0.85`, scale down proportionally. Position: `X = W - 20pt` (right edge), `Y = 0.15*H`. Color = primary at **4% opacity**. Font weight = Black. ⚠️ **Full-display iron rule: watermark text must be 100% within the visible page area - cropping is strictly forbidden. Prefer reducing font size over truncation.**
-
-### Layer 2 - Structure
-- **Top bar (skyline):** Rectangle at `(0, 0)`, width = `W`, height = **15pt**, primary color fill. Edge-to-edge.
-- **Right info accent line (edge seal):** Vertical line at `X = 0.88*W`, from `Y = 0.75*H` to `Y = 0.88*H`. Line width = **4pt**, primary color.
-
-### Layer 3 - Content
-
-| Drawer | Position | Content | Constraints |
-|--------|----------|---------|-------------|
-| **Left upper - Title group** | `X = 0.12*W`, `Y = 0.15*H` | Kicker (report type/subtitle, 16pt) → Hero Title (company/entity name, 45-65pt / CJK 50-80pt, Heavy) | Stack downward from anchor |
-| **Mid-left - Summary** 🆕 | `X = 0.12*W`, `Y = 0.50*H` | Descriptive paragraph | 16-18pt, Regular, line-height 1.6. **Width limit: `W * 0.5`** |
-| **Right lower - Meta** | Right-aligned at `X = 0.88*W - 20pt`, `Y = 0.70*H` | Date, version, author | **Right-aligned**, 16-20pt. Must hug the 4pt accent line |
-
-### Best For
-Annual reports, financial summaries, investor documents, corporate governance reports
-
----
-
-## Template 03: The Monolith - Hard-Left Alignment + Right-Side Giant Watermark Counterweight
-
-**Design intent:** Everything hard-left. Right-side watermark counterbalances the asymmetry. Solves the "right half is empty" bug.
-
-### Layer 1 - Background
-- **Right-side vertical watermark (load-bearing wall):** Extract a short English word (e.g. "REPORT"). **Auto-scaling font size:** `Max_Font_Size = 180pt`, measure total height after rotation - if it exceeds `H * 0.85`, scale down proportionally. **Rotate 90° clockwise** (or use vertical text mode). Anchor at `X = 0.85*W`, vertically centered: `Y = (H - rendered_text_width) / 2`. Color = primary at **3% opacity**. ⚠️ **Full-display iron rule: watermark text must be 100% within the visible page area - cropping is strictly forbidden. Prefer reducing font size over truncation.**
-
-### Layer 2 - Structure
-- **Color dash (visual guide line):** At `(0.12*W, 0.15*H)`, draw a horizontal bar: width = **50pt**, height = **5pt**, primary color.
-- **Meta accent line:** At `(0.12*W, Y_meta)`, vertical line: height = meta text block height, width = **2pt**, primary color at 50% opacity.
-
-### Layer 3 - Content
-
-**Unified left edge: `X = 0.12*W`**
-
-| Drawer | Y-Anchor | Content | Constraints |
-|--------|----------|---------|-------------|
-| **A - Color dash** | `0.15 * H` | Structure element (not text) | 50pt × 5pt bar |
-| **B - Kicker** | `0.20 * H` | Report type / subtitle | 16pt, Regular, letter-spacing 3pt, uppercase, opacity 60% |
-| **C - Hero Title** | `0.28 * H` | **Company/entity name** | 45-65pt (CJK: 50-80pt), Heavy |
-| **D - Summary** 🆕 | `0.45 * H` | Descriptive paragraph (key anti-void element) | 16-18pt, Regular, line-height 1.6. **Width limit: `W * 0.55`** (must not collide with right watermark) |
-| **E - Meta** | `0.70 * H` | Author, org, version | 20pt, Regular, line-height 2.0. Left of the 2pt accent line |
-| **F - Footer** | `0.90 * H` | Date + doc number, right-aligned at `X = 0.88*W` | 16pt, Regular, opacity 60% |
-
-### Best For
-White papers, project proposals, government documents, technical standards
-
----
-
-## Template 04: Museum Minimal - Refined Corner Crop Marks
-
-**Design intent:** Abandon all-over scattered layout. Four corner crop marks form an invisible "force field box" that concentrates all content dead center.
-
-### Layer 2 - Structure
-- Set safety margin `M = 0.08 * W`
-- **Four corner marks** at inner corners: `(M, M)`, `(W-M, M)`, `(M, H-M)`, `(W-M, H-M)`
-- Each mark: L-shaped, arm length = **30pt**, line width = **2pt**, primary color at 60% opacity
-- Marks point **inward** (top-left: right arm + down arm)
-
-### Layer 3 - Content
-
-**This template FORBIDS hardcoded absolute Y coordinates.**
-
-**Centering algorithm (mandatory):**
-1. Pre-compose ALL text elements (kicker + title + summary + meta) into a single virtual Text Block
-2. Calculate the block's total rendered height `Block_H`
-3. Position block: `X = 0` (full width, center-aligned text), `Y = (H - Block_H) / 2`
-4. **This guarantees the content group is vertically centered regardless of how much content there is**
-
-**Internal spacing within the centered block:**
-- Kicker → Title: `24pt`
-- Title → Summary: `20pt`
-- Summary → Meta: `40pt`
-
-### Type Scale
-| Role | Size | Notes |
-|------|------|-------|
-| Kicker | 16pt | Uppercase, letter-spacing 4pt, opacity 50%. Bound to report type/subtitle |
-| Hero Title | 48-60pt | Heavy - slightly smaller than other templates to fit center composition. **Bound to company/entity name** |
-| Summary 🆕 | 16-18pt | Regular, line-height 1.6, center-aligned, width ≤ `W * 0.6` |
-| Meta | 16pt | Regular, opacity 60%, at bottom of group |
-
-### Best For
-Gallery catalogs, design portfolios, exhibition materials, luxury brand documents
-
----
-
-## Template 05: Floating Diagonal - Premium Whitespace with Binding Line
-
-**Design intent:** "Left-upper to right-lower" diagonal visual flow. The two text groups create tension across whitespace. The gap IS the design.
-
-### Layer 2 - Structure
-- **Binding dashed line:** At `X = 0.08*W`, from `Y = 0.05*H` to `Y = 0.95*H`. Line width = **1pt**, dashed (dash 6pt, gap 8pt), color = light gray (#d0d0d0, 40% opacity).
-
-### Layer 3 - Content
-
-| Group | Position | Content | Constraints |
-|-------|----------|---------|-------------|
-| **Upper-left group** | Anchor: `X = 0.15*W`, `Y = 0.20*H` | Kicker (report type/subtitle, 16pt gap) → Hero Title (company/entity name, 45-65pt / CJK 50-80pt, Heavy) | Left-aligned. Width limit: `W * 0.7` |
-| **Lower-right group** 🆕 | Anchor: `X = 0.45*W`, `Y = 0.60*H` | Summary + Meta + Footer | **Left-aligned** (NOT right-aligned - intentional asymmetry). A **3pt vertical accent line** of height = group text height is drawn at `X = 0.45*W - 12pt` as a visual anchor. Line-height 2.0 for meta, 24pt gap before footer |
-
-**Visual effect:** Upper-left and lower-right groups are "pulled apart" across the diagonal. The empty top-right and bottom-left create tension, not emptiness.
-
-### Best For
-Creative reports, editorial layouts, art direction documents, brand guidelines
-
----
-
-## Template 06: Swiss Grid - Ultimate Precision, Curing All Misalignment
-
-**Design intent:** The typographic "multiplication table." Thick lines physically slice the page into cells. Content fills its assigned cell. Impossible to misalign.
-
-### Layer 2 - Structure (ABSOLUTE - non-negotiable)
-
-```
-Horizontal line 1: (0.1*W, 0.25*H) → (0.9*W, 0.25*H), width 2pt, primary
-Horizontal line 2: (0.1*W, 0.75*H) → (0.9*W, 0.75*H), width 2pt, primary
-Vertical line 1:   (0.45*W, 0.25*H) → (0.45*W, 0.75*H), width 2pt, primary
-```
-
-These create 4 zones:
-
-```
-┌──────────────────────────────────────┐
-│         Zone A - Top Strip           │  ← Kicker / report type
-├──────────────────┬───────────────────┤
-│   Zone B         │   Zone C          │
-│   (left cell)    │   (right cell)    │  ← B: Hero Title (MUST fill)
-│   X: 0.1W-0.43W │   X: 0.48W-0.9W  │  ← C: Summary text (MUST fill)
-├──────────────────┴───────────────────┤
-│         Zone D - Bottom Strip        │  ← Footer / year / doc number
-└──────────────────────────────────────┘
-```
-
-### Layer 3 - Content (STRICT zone containment)
-
-| Zone | Content | X Range | Y Range | Notes |
-|------|---------|---------|---------|-------|
-| **A** | Kicker / report type | `0.10*W` - `0.90*W` | `0.15*H` - `0.23*H` | Left-aligned at `X = 0.12*W` |
-| **B** | **Hero Title (company/entity name)** | `0.10*W` - `0.43*W` | `0.28*H` - `0.70*H` | **Width = `0.33*W`**. Font must be large enough to physically fill the cell. Text wraps at boundary. |
-| **C** | **Summary text** 🆕 | `0.48*W` - `0.90*W` | `0.28*H` - `0.70*H` | **Must contain substantial descriptive text** - this zone MUST be filled. 16-18pt, Regular, line-height 1.6. This is the primary anti-empty-page mechanism. |
-| **D** | Footer / date / number | `0.10*W` - `0.90*W` | `0.78*H` - `0.88*H` | Can split: left part + right-aligned part |
-
-### Zone Overflow Protection (MANDATORY)
-
-If text in Zone B or C exceeds the vertical boundary (Y > `0.70*H`):
-1. **Step 1:** Reduce font size by 2pt increments (minimum: 16pt for summary, 40pt for title)
-2. **Step 2:** If still overflows, truncate with `...` ellipsis
-3. **NEVER** let text cross a grid line - the grid is sacred
-
-**Hard width enforcement:**
-```python
-# Zone B: title MUST wrap within its cell width
-zone_b_max_width = 0.33 * W
-# If title renders wider → word-wrap, NEVER let it bleed into Zone C
-
-# Zone C: summary MUST wrap within its cell width
-zone_c_max_width = 0.42 * W  # (0.90 - 0.48) * W
-# Wrap at boundary, add lines, NEVER cross the vertical grid line
-```
-
-### Best For
-Swiss-style design, data-heavy reports, structured corporate documents, annual reports
-
----
-
-## Template 07: Solid Sidebar - Massive Pillar Anchoring the Page
-
-**Design intent:** A massive solid-color sidebar provides gravitas. The right side can be loosely arranged - the pillar holds everything together.
-
-### Layer 1 - Background
-- **Left sidebar block (giant sidebar pillar):** Rectangle at `(0, 0)`, width = **`0.1*W`** (~80pt on A4), height = `H`. Primary color fill.
-- **Sidebar watermark:** Inside the sidebar, render a short word (doc type or year) rotated **-90°**, white at **15% opacity**, vertically centered within the sidebar. **Auto-scaling font size:** `Max_Font_Size = H * 0.5`, measure total height after rotation - if it exceeds `H * 0.85`, scale down proportionally. ⚠️ **Full-display iron rule: watermark text must be 100% within the visible page area - cropping is strictly forbidden.**
-
-### Layer 2 - Structure
-- **Bottom horizontal line:** At `Y = 0.90*H`, from `X = Left_Edge` to `X = 0.90*W`. Line width = **1pt**, primary color at 30% opacity.
-
-### Layer 3 - Content
-
-**Safety boundary: `Left_Edge = 0.1*W + 40pt`** - ALL text must start at or right of this line. Zero tolerance for collision with sidebar.
-
-**Layout uses relative vertical centering:**
-1. Compose full text group: Kicker + Hero Title + Summary + Meta
-2. Calculate total group height
-3. Position group at `X = Left_Edge`, `Y = (H - group_height) / 2` (vertically centered)
-
-| Element | Notes |
-|---------|-------|
-| Kicker | 16pt, Regular, uppercase, letter-spacing 3pt, opacity 60%. Bound to report type/subtitle |
-| Hero Title | 45-65pt, Heavy. **Bound to company/entity name** |
-| Summary 🆕 | 16-18pt, Regular, line-height 1.6. Width ≤ `0.90*W - Left_Edge` |
-| Meta | 20pt, Regular, line-height 1.8 |
-
-**Footer (separate from centered group):**
-- On/just above the bottom horizontal line at `Y = 0.90*H - 10pt`
-- Left-aligned date at `X = Left_Edge`, right-aligned org name at `X = 0.90*W`
-- 16pt, Regular, opacity 60%
-
-### Best For
-Government/institutional reports, legal documents, formal project deliverables, bidding documents
-
 ---
 
 # PART 2: TEMPLATE SELECTION GUIDE
 
-Template selection uses a two-dimensional matrix: **Intent** (from `visual_framework.md` 5-intent system) × **Document Type**. This replaces the old "Document Tone" classification and aligns with the Intent Mapping Table in `creative.md`.
+Template selection uses a two-dimensional matrix: **Intent** (from `visual_framework.md` 5-intent system) × **Document Type**. This replaces the old "Document Tone" classification and aligns with the Intent Mapping Table in `creative-fixed-canvas.md`.
 
 | Intent | Document Type | Recommended Templates | Default |
 |--------|---------------|----------------------|---------|
-| **Calm** | Healthcare / Wellness / Minimalist | 04 Museum, 01 HUD | **04** |
-| **Calm** | Academic / Research | 06 Swiss Grid, 03 Monolith | **06** |
-| **Tension** | Crisis / Alert / Disruption | 01 HUD, 05 Diagonal | **01** |
-| **Energy** | Marketing / Creative / Design | 05 Diagonal, 06 Swiss Grid | **05** |
-| **Energy** | Technology / Data | 01 HUD, 06 Swiss Grid | **01** |
-| **Authority** | Formal / Corporate / Financial | 02 Corporate, 03 Monolith | **03** |
-| **Authority** | Government / Bidding | 07 Sidebar, 03 Monolith, **11 Institutional** | **07** |
-| **Authority** | Thesis proposal / Dissertation cover | **11 Institutional** | **11** |
-| **Authority** | Luxury / Editorial | 03 Monolith, 05 Diagonal | **03** |
-| **Warmth** | Food / Lifestyle / Home | 04 Museum, 05 Diagonal | **04** |
+| **Calm** | Healthcare / Wellness / Minimalist | 07 Crystal Blue, 01 HUD | **07** |
+| **Calm** | Academic / Research | 07 Crystal Blue, 04 Academic Symmetric | **07** |
+| **Tension** | Crisis / Alert / Disruption | 01 HUD, 04 Academic Symmetric | **01** |
+| **Energy** | Marketing / Creative / Design | 07 Crystal Blue, 04 Academic Symmetric | **07** |
+| **Energy** | Technology / Data | 01 HUD, **07 Crystal Blue** | **07** |
+| **Authority** | Formal / Corporate / Financial | 07 Crystal Blue, 04 Academic Symmetric | **04** |
+| **Authority** | Government / Bidding | 01 HUD, 04 Academic Symmetric, **06 Institutional** | **01** |
+| **Authority** | Thesis proposal / Dissertation cover | **06 Institutional** | **06** |
+| **Authority** | Luxury / Editorial | 04 Academic Symmetric, 07 Crystal Blue | **04** |
+| **Warmth** | Food / Lifestyle / Home | 07 Crystal Blue, 01 HUD | **07** |
 
 > **Legacy mapping:** "Formal/Corporate" tone → Authority intent, "Minimalist" tone → Calm intent, "Luxurious/Editorial" tone → Authority intent.
 
@@ -589,227 +321,106 @@ The minimum gap between any text element and any decorative line is **1U (= 5% o
 
 **Rule:** Hero title must NEVER exceed its template's width boundary.
 
-**Algorithm:**
-1. Measure the rendered width of the hero title string at the target font size
-2. If `rendered_width > max_width`:
-   - Word-wrap at boundary (CJK: any character; Latin: space/hyphen; Mixed: CJK/Latin boundaries)
-   - Multi-line hero titles: **lock line-height to 1.15**
-3. Maximum lines: **3** - if title needs 4+ lines, reduce font size by 4pt increments until ≤ 3 lines
-4. Minimum font size floor: **40pt** (below this, truncate with `...`)
+1. If rendered width > max_width → word-wrap (CJK: any character; Latin: space/hyphen)
+2. Multi-line hero titles: **lock line-height to 1.15**
+3. Maximum lines: **3** — if 4+ lines needed, reduce font size by 4pt increments
+4. Minimum font size floor: **32pt** (below this, truncate with `...`)
 
-```python
-def safe_hero_title(text, font, max_size, max_width, min_size=40):
-    size = max_size
-    while size >= min_size:
-        lines = word_wrap(text, font, size, max_width)
-        if len(lines) <= 3:
-            return lines, size
-        size -= 4
-    return truncate_with_ellipsis(text, font, min_size, max_width, max_lines=3), min_size
-```
+### Title Size vs Lines Quick-Reference (Template 01, zone B→C ≈ 225px)
+
+| Lines | With subtitle | Without subtitle |
+|-------|--------------|------------------|
+| 1 | ≤ 80pt | ≤ 80pt |
+| 2 | ≤ 55pt | ≤ 70pt |
+| 3 | ≤ 42pt | ≤ 48pt |
+
+**⚠️ CJK 3-line titles must reduce to ~42pt.** Do NOT use 50-80pt for 3-line CJK titles — it WILL overlap the Summary zone.
 
 ---
 
 ## S3.2 - Zone Collision Detection
 
-After rendering each text block, check if its bottom edge penetrates the next zone boundary:
+After placing each text block, check if its bottom edge penetrates the next zone's top:
 
-1. **Step 1 - Font reduction:** Decrease by 2pt. Floor: 16pt for meta/summary, 40pt for titles.
-2. **Step 2 - Truncation:** If font reduction fails, truncate with `...`
-3. **Step 3 - Log warning:** Output a warning about content truncation
-
-```python
-def enforce_zone_bounds(text, font, size, zone_y_max, min_size=16):
-    while size >= min_size:
-        rendered_height = measure_text_height(text, font, size)
-        if current_y + rendered_height <= zone_y_max:
-            return text, size
-        size -= 2
-    return truncate_to_fit(text, font, min_size, zone_y_max - current_y), min_size
-```
+1. **Reposition first:** Push the collided zone down by `overlap + 20px` gap. All downstream zones shift together.
+2. **Font reduction (if reposition insufficient):** Decrease title by 2pt increments. Floor: **32pt** for titles, 14pt for meta/summary.
+3. **Truncation (last resort):** If font reduction hits floor and still collides, truncate with `...`
 
 ---
 
 ## S3.3 - Uppercase Lock
 
-**The following text roles MUST be force-uppercased when content is English/Latin:**
-
+**Force-uppercase when content is English/Latin:**
 - Kicker (category label / lead-in text)
 - Footer (closing date / document number)
 - Background watermark text
 - Any Layer 1 decorative text
 
-```python
-kicker_text = kicker_text.upper() if is_latin(kicker_text) else kicker_text
-footer_text = footer_text.upper() if is_latin(footer_text) else footer_text
-watermark_text = watermark_text.upper()  # Always uppercase
-```
-
-**Exception:** CJK text is exempt. Mixed CJK+Latin strings: uppercase only the Latin portions.
+CJK text is exempt. Mixed CJK+Latin strings: uppercase only the Latin portions. Use `text-transform: uppercase` in CSS or `.upper()` in code.
 
 ---
 
-## S3.4 - Hard Width Boundary Enforcement 🆕
+## S3.4 - Hard Width Boundary Enforcement 
 
-**Every drawer/zone has a maximum width. Text wrapping MUST respect this width exactly.**
+**Every drawer/zone has a maximum width. Text MUST respect this width exactly.** Use CSS `max-width` on text containers.
 
-```python
-# WRONG - text bleeds past boundary
-draw_text(x=0.12*W, text=long_title, width=None)  # width unconstrained!
-
-# RIGHT - hard clamp
-max_width = 0.6 * W  # or zone-specific value
-wrapped_lines = word_wrap(text, font, size, max_width)
-for i, line in enumerate(wrapped_lines):
-    draw_text(x=x_anchor, y=y_anchor + i * line_height, text=line)
-```
-
-**Rule:** It is acceptable for text to add extra lines (grow vertically). It is NEVER acceptable for text to exceed its horizontal boundary (grow horizontally). Vertical overflow triggers S3.2; horizontal overflow is a critical bug.
+Vertical growth (more lines) is acceptable. Horizontal overflow is a **critical bug**.
 
 ---
 
-## S3.5 - Mandatory Summary Auto-Generation 🆕
+## S3.5 - Mandatory Summary Auto-Generation 
 
-**If the user provides only a title and no description/summary, the system MUST generate placeholder text.**
-
-```python
-if not summary_text or summary_text.strip() == "":
-    if lang == "zh":
-        summary_text = f"本报告由{org_name or '系统'}自动生成,包含了综合数据分析与洞察结论。"
-    else:
-        summary_text = f"This report presents comprehensive analysis and key insights prepared by {org_name or 'the organization'}."
-```
-
-**Why:** A title-only cover looks barren. The Summary drawer physically occupies 2-4 lines, filling mid-page void and making the cover look intentionally designed rather than half-finished.
+**If the user provides only a title and no description/summary, auto-generate a 2-4 line placeholder.** A title-only cover looks barren. The Summary drawer physically fills mid-page void.
 
 ---
 
-## S3.6 - Background Watermark Full-Display Enforcement 🆕
+## S3.6 - Background Watermark Full-Display Enforcement 
 
-**All watermark text in the background layer (Layer 1) must be 100% within the visible page area. Cropping, truncation, or extending beyond page boundaries is strictly forbidden.**
+**All watermark text in Layer 1 must be 100% within the visible page area. Cropping is strictly forbidden.**
 
 **Applicable scope:**
-- Template 02 giant year watermark
-- Template 03 right-side vertical watermark
-- Template 07 sidebar watermark
 - `cover-backgrounds.md` Recipe 2.1 giant sidebar pillar
 - `cover-backgrounds.md` Recipe 2.2 bottom full-size text
 - Any other decorative text in the background layer
 
-**Adaptive algorithm (mandatory):**
-
-```python
-def safe_watermark_size(text, font, max_size, available_space):
-    """
-    Ensure watermark text is fully displayed within available space.
-    available_space: available width/height (depending on text direction)
-    """
-    rendered = measure_text(text, font, max_size)
-    if rendered > available_space:
-        return max_size * (available_space / rendered)
-    return max_size
-```
-
 **Rules:**
-1. Horizontal text: rendered width must not exceed `W * 0.90` (5% safety margin on each side)
-2. Vertical/rotated text: rendered height must not exceed `H * 0.85` (7.5% safety margin top and bottom)
-3. If exceeded, scale down font size proportionally - never truncate
-4. **Anchor coordinates must never exceed page boundaries** (no negative X/Y values or values exceeding W/H)
-
-**This is a visual quality red line: a truncated "REPO" is worse than no watermark at all. A complete "REPORT" is the design.**
+1. Horizontal text: rendered width must not exceed `W * 0.90` (5% safety margin each side)
+2. Vertical/rotated text: rendered height must not exceed `H * 0.85` (7.5% safety margin top/bottom)
+3. If exceeded, scale down font size proportionally — never truncate
+4. Anchor coordinates must never exceed page boundaries
 
 ---
 
 ## S3.7 - Line-Length Alignment (Line Must Match Text Span)
 
-**Problem:** Decorative lines (vertical accent lines, horizontal dividers, underlines) are arbitrary lengths that don't relate to the text they accompany, creating visual disconnect.
+**Decorative lines must be sized relative to the text they serve:**
 
-**Iron Rule:** Lines must be sized relative to the text they serve:
+- **Vertical lines:** height = text block height (± 1U padding above/below first/last element)
+- **Horizontal lines:** width ≥ widest text element in its zone (up to 120%, NEVER shorter)
 
-### Vertical Lines (e.g., Template 01 thick line, Template 08 accent line)
-
-**Vertical line height = text block height** (from first text element to last text element in the same column).
-
-```
-# WRONG - arbitrary fixed height
-vline_top = 0.1 * H
-vline_bottom = 0.9 * H  # ← line runs full page regardless of content
-
-# RIGHT - measure text block, then draw line
-text_top = first_element_y        # e.g., label at 0.12*H
-text_bottom = last_element_y + last_element_height  # e.g., footer at 0.88*H
-vline_top = text_top - U           # 1U padding above first element
-vline_bottom = text_bottom + U     # 1U padding below last element
-```
-
-### Horizontal Lines (e.g., Template 08 hline, dividers)
-
-**Horizontal line width ≥ text width of the widest text element in its zone.** Lines may be slightly longer (up to 120% of text width) but NEVER shorter.
-
-```python
-# WRONG - fixed short line
-hline_width = 200  # ← might be shorter than the title
-
-# RIGHT - measure, then draw
-max_text_width = max(measure(title), measure(subtitle), measure(authors))
-hline_width = max(max_text_width, max_text_width * 1.1)  # at least as wide, up to 110%
-# Clamp to available space
-hline_width = min(hline_width, available_width)
-```
-
-### HTML/CSS Implementation
-
-For HTML/Playwright covers, use relative sizing:
 ```css
-/* Vertical line spans the content block */
 .vline {
   position: absolute;
   top: var(--content-top);     /* align with first text element */
   bottom: var(--content-bottom); /* align with last text element */
 }
-
-/* Horizontal divider: min-width matches text container */
 .hline {
   width: max(100%, 200px);     /* at least as wide as parent text container */
 }
 ```
 
 **Checklist:**
-- [ ] Every vertical line's height matches its adjacent text block span (± 1U padding)
-- [ ] Every horizontal line's width ≥ widest text element in its zone
+- [ ] Every vertical line’s height matches its adjacent text block span
+- [ ] Every horizontal line’s width ≥ widest text element in its zone
 - [ ] No decorative line is shorter than the text it accompanies
 
 ---
 
 ## S3.8 - Vertical Balance (Anti-Top-Heavy Layout)
 
-**Problem:** Content clusters at the top of the page, leaving the bottom 40%+ as dead whitespace. This happens when anchor points are set too high and don't adapt to content volume.
+**Problem:** Content clusters at top of page, bottom 40%+ is dead whitespace.
 
-**Root cause:** Fixed anchor grid with `ANCHOR_TITLE_Y = 0.20*H` pushes everything upward regardless of how much content there is.
-
-### Solution: Adaptive Vertical Centering
-
-**When total content height < 50% of page height, switch to centered distribution mode:**
-
-```python
-# Step 1: Calculate total content height
-content_elements = [title, subtitle, summary, meta, footer]
-total_content_h = sum(elem.height for elem in content_elements) + total_gaps
-
-# Step 2: Check fill ratio
-fill_ratio = total_content_h / (H * 0.80)  # usable height (excluding margins)
-
-if fill_ratio < 0.50:
-    # LOW CONTENT MODE - vertically center the entire block
-    start_y = (H - total_content_h) / 2
-    # Distribute elements from start_y downward with standard gaps
-else:
-    # NORMAL MODE - use anchor grid
-    # But shift anchors down: title at H*0.30-0.35 (not 0.20-0.25)
-    pass
-```
-
-### Anchor Adjustment Rules
+**Rule:** When total content height < 50% of page height, switch to centered distribution (flexbox `justify-content: center`). Otherwise use anchor grid:
 
 | Content Volume | Title Anchor | Summary Anchor | Meta Anchor |
 |---------------|-------------|----------------|-------------|
@@ -817,87 +428,45 @@ else:
 | **Normal** (fill 50-80%) | `H * 0.30` | `H * 0.48` | `H * 0.70` |
 | **Dense** (fill > 80%) | `H * 0.20` | `H * 0.40` | `H * 0.65` |
 
-### CJK Title Size Compensation
-
-CJK characters at the same pt size as Latin characters appear visually smaller due to denser stroke structure. Compensate:
-
-```
-CJK Hero Title:    50-80pt (Latin: 45-65pt) - increase by 15-20%
-CJK Kicker:        11-12pt (Latin: 9pt)
-CJK Summary:       17-20pt (Latin: 16-18pt)
-```
-
-**Detection:** If title string contains CJK characters (`\u4e00-\u9fff`), apply CJK size multiplier.
-
-### HTML/CSS Implementation
-
-```css
-/* Vertical centering mode for sparse content */
-.cover.sparse-content .center-block {
-  justify-content: center;  /* flexbox vertical center */
-}
-
-/* CJK title size bump */
-.title:lang(zh), .title:lang(ja), .title:lang(ko) {
-  font-size: clamp(50pt, 8vw, 80pt);  /* larger than Latin range */
-}
-```
+**CJK Title Size Compensation:** CJK characters appear smaller at same pt size. Increase by 15-20%:
+- CJK Hero Title: 50-80pt (Latin: 45-65pt)
+- CJK Kicker: 11-12pt (Latin: 9pt)
+- CJK Summary: 17-20pt (Latin: 16-18pt)
 
 **Checklist:**
 - [ ] No cover has >40% dead whitespace at the bottom
-- [ ] Content is visually centered on the page (optical center, not mathematical)
 - [ ] CJK titles are 15-20% larger than equivalent Latin titles
-- [ ] Sparse-content covers use centered distribution, not fixed anchors
+- [ ] Sparse-content covers use centered distribution
 
 ---
 
 ## S3.9 - Percentage Positioning Requires Known-Size Container
 
-**Root cause of bad case:** A wrapper div (e.g. `.content-left`) with `position: absolute` but **no explicit height** contains children positioned with `top: XX%`. CSS percentage `top` resolves against the containing block's **height** — if that height is zero or undefined (because all children are also absolutely positioned, contributing no content height), the percentage values collapse and elements stack on top of each other.
+**Problem:** `top: XX%` resolves against containing block’s height. If height is undefined (all children absolutely positioned), percentages collapse and elements stack.
 
-**Iron rule:** When using `top: XX%` (or `bottom: XX%`) to position child elements, the containing block MUST have a **deterministic height** — one of:
+**Iron rule:** Container with `top: XX%` children MUST have deterministic height (`height: 100%`, `inset: 0`, or `top` + `bottom` pair).
 
-| Method | Example | When to use |
-|--------|---------|-------------|
-| Explicit `height` | `height: 100%` or `height: var(--h)` | Wrapper spans full page |
-| `top` + `bottom` pair | `top: 0; bottom: 0;` | Wrapper stretches between two edges |
-| `inset: 0` | `inset: 0;` | Shorthand for full-page wrapper |
-
-**Preferred pattern — flat structure with px values (safest):**
 ```css
-/* ✅ CORRECT: children positioned directly in .cover with px values */
+/* ✅ Safest: flat structure with px values */
 .cover { position: relative; width: 794px; height: 1123px; }
-.kicker   { position: absolute; top: 225px;  left: 95px; }
-.title    { position: absolute; top: 292px;  left: 95px; }
-.summary  { position: absolute; top: 539px;  left: 95px; }
-.meta     { position: absolute; top: 786px;  left: 95px; }
-```
+.kicker { position: absolute; top: 225px; left: 95px; }
+.title  { position: absolute; top: 292px; left: 95px; }
 
-**Acceptable — wrapper with deterministic height:**
-```css
-/* ✅ OK: wrapper has inset:0, so height = parent height = 1123px */
+/* ✅ OK: wrapper with inset:0 gives it known height */
 .content-left { position: absolute; inset: 0; width: 55%; }
-.title   { position: absolute; top: 26%; }  /* 26% of 1123px = 292px ✓ */
-```
+.title { position: absolute; top: 26%; }  /* 26% of 1123px ✓ */
 
-**Forbidden — wrapper with no height:**
-```css
-/* ❌ BANNED: .content-left has no height/bottom, percentage top is undefined */
+/* ❌ BANNED: wrapper without height, percentage is undefined */
 .content-left { position: absolute; left: 12%; top: 0; width: 55%; }
-.title   { position: absolute; top: 26%; }  /* 26% of WHAT? → collapse → overlap */
-.summary { position: absolute; top: 48%; }  /* stacks on top of title */
+.title { position: absolute; top: 26%; }  /* 26% of WHAT? → overlap */
 ```
-
-**Quick self-check before writing cover CSS:**
-1. For every element with `top: XX%` — trace upward: does the containing block have a known height?
-2. If unsure → use `px` values instead (calculate from `var(--h)` manually: `26% × 1123 = 292px`)
-3. If using a grouping wrapper → give it `inset: 0` or explicit `height: 100%`
 
 ---
 
 # PART 4: COVER COLOR RULES
 
 > Cover colors must be consistent with the body color system - they cannot exist independently.
+> **The cascade palette CSS output includes `--c-*` aliases** that map directly to cover template variables. Paste the CSS output into cover HTML's `:root` block — template 01 works without any manual color translation.
 
 ```
 Cover primary    = Body theme color
@@ -920,6 +489,17 @@ Cover background = Pure white / very light gray / primary at 5-8% opacity
 
 > ⚠️ These are **examples for reference**. In normal workflow, run `palette.cascade --title "<title>" --mode minimal --format css` to generate the actual cover colors. Do NOT copy these hex values directly.
 
+> ✅ **Cascade CSS output includes `--c-*` aliases.** The `--format css` output automatically appends cover-compatible aliases (`--c-bg`, `--c-accent`, `--c-text`, `--c-muted`, `--c-mid`, `--c-surface`) mapped from cascade roles. Template 01 can consume the CSS output directly — no manual variable translation needed.
+>
+> | Cover alias | Cascade source | Tier | Purpose |
+> |------------|---------------|------|---------|
+> | `--c-bg` | `--page-bg` | XL | Cover background |
+> | `--c-accent` | `--accent` | XS | Decorative lines, labels |
+> | `--c-text` | `--text-primary` | text | Title text |
+> | `--c-muted` | `--text-muted` | text | Subtitle, footer |
+> | `--c-mid` | `--header-fill` | M | Structural fills |
+> | `--c-surface` | `--card-bg` | L | Card/container bg |
+
 | Name | Primary | Secondary | Background | Use Case |
 |------|---------|-----------|------------|----------|
 | Ink Stone | `#1a1a2e` | `#4a4a5e` | `#fafafa` | Business, formal |
@@ -930,11 +510,11 @@ Cover background = Pure white / very light gray / primary at 5-8% opacity
 
 ---
 
-# PART 4.5: ACADEMIC COVER TEMPLATES (Templates 08-10)
+# PART 4.5: ACADEMIC COVER TEMPLATES (Templates 03-04)
 
-> **Academic covers are exempt from PART 4 color rules.** Academic papers, theses, and research reports traditionally use dark backgrounds with light text - this is the established scholarly visual language. Templates 08-10 follow LaTeX title page conventions translated to HTML/CSS.
+> **Academic covers are exempt from PART 4 color rules.** Academic papers, theses, and research reports traditionally use dark backgrounds with light text - this is the established scholarly visual language. Templates 03-04 follow LaTeX title page conventions translated to HTML/CSS.
 
-**All 3 templates share these rules:**
+**All 2 templates share these rules:**
 - Page size: `width: 794px; height: 1123px` (A4 at 96dpi)
 - Full-bleed dark background (edge-to-edge, no margins)
 - Serif font for titles (Playfair Display / Noto Serif SC), sans-serif for metadata
@@ -955,7 +535,7 @@ Cover background = Pure white / very light gray / primary at 5-8% opacity
 
 ---
 
-## Template 08: Academic Vertical Anchor - Dark bg + Left vertical line + Left-aligned
+## Template 03: Academic Vertical Anchor - Dark bg + Left vertical line + Left-aligned
 
 **Design intent:** Emulates the classic arXiv/preprint cover. A bold vertical accent line anchors the left edge, all text left-aligned with generous vertical rhythm. Serious, no-frills.
 
@@ -972,7 +552,6 @@ Cover background = Pure white / very light gray / primary at 5-8% opacity
 │ ┃  Authors (12pt, white)    │  ← y = H - 18cm
 │ ┃  Institution (10pt)       │
 │ ┃                           │
-│ ┃───────────────────      │  ← accent line y=3.5cm
 │ ┃  Footer L       Footer R  │
 └─────────────────────────────┘
 ┃ = vertical accent line at x=1.5cm, 2.5pt width
@@ -1003,7 +582,6 @@ Cover background = Pure white / very light gray / primary at 5-8% opacity
     }
     .cover { width: 794px; height: 1123px; position: relative; box-sizing: border-box; }
     .vline { position: absolute; left: 57px; top: 76px; bottom: 76px; width: 2.5px; background: var(--c-accent); }
-    .hline { position: absolute; left: 83px; right: 76px; bottom: 132px; height: 0.5px; background: var(--c-accent); }
     .content { position: absolute; left: 83px; right: 76px; top: 0; bottom: 0; }
     .label { position: absolute; top: 132px; font-size: 9pt; color: var(--c-accent); letter-spacing: 3px; text-transform: uppercase; font-family: 'Inter', 'Noto Sans SC', sans-serif; }
     .title { position: absolute; top: 228px; font-size: 32pt; font-weight: 700; line-height: 1.3; font-family: 'Playfair Display', 'Noto Serif SC', serif; color: var(--c-text); max-width: 580px; }
@@ -1016,7 +594,6 @@ Cover background = Pure white / very light gray / primary at 5-8% opacity
 <body>
   <div class="cover">
     <div class="vline"></div>
-    <div class="hline"></div>
     <div class="content">
       <div class="label"><!-- LABEL --></div>
       <div class="title"><!-- TITLE --></div>
@@ -1044,7 +621,7 @@ Cover background = Pure white / very light gray / primary at 5-8% opacity
 
 ---
 
-## Template 09: Academic Symmetric - Dark bg + Top/bottom lines + Centered
+## Template 04: Academic Symmetric - Dark bg + Top/bottom lines + Centered
 
 **Design intent:** Emulates the classic IEEE/ACM Transactions title page. Perfect bilateral symmetry, thick horizontal rules frame the content zone. Formal and authoritative.
 
@@ -1059,9 +636,7 @@ Cover background = Pure white / very light gray / primary at 5-8% opacity
 │                             │
 │        Subtitle             │
 │                             │
-│          ───                │  ← Thin divider 3cm, centered
-│                             │
-│        Authors              │
+│          Authors              │
 │       Institution           │
 │                             │
 │   ══════════════════════    │  ← Bottom rule y=3cm, 2pt
@@ -1099,7 +674,6 @@ Cover background = Pure white / very light gray / primary at 5-8% opacity
     .label { font-size: 9pt; color: var(--c-accent); letter-spacing: 3px; text-transform: uppercase; margin-bottom: 40px; font-family: 'Inter', 'Noto Sans SC', sans-serif; }
     .title { font-size: 30pt; font-weight: 700; line-height: 1.3; font-family: 'Playfair Display', 'Noto Serif SC', serif; margin-bottom: 24px; max-width: 500px; }
     .subtitle { font-size: 14pt; color: var(--c-muted); margin-bottom: 40px; max-width: 450px; line-height: 1.5; }
-    .divider { width: 114px; height: 0.5px; background: var(--c-accent); margin-bottom: 40px; }
     .authors { font-size: 12pt; margin-bottom: 12px; }
     .institution { font-size: 10pt; color: var(--c-muted); line-height: 1.4; }
     .footer { position: absolute; bottom: 57px; left: 114px; right: 114px; text-align: center; font-size: 9pt; color: var(--c-muted); }
@@ -1113,7 +687,6 @@ Cover background = Pure white / very light gray / primary at 5-8% opacity
       <div class="label"><!-- LABEL --></div>
       <div class="title"><!-- TITLE --></div>
       <div class="subtitle"><!-- SUBTITLE --></div>
-      <div class="divider"></div>
       <div class="authors"><!-- AUTHORS --></div>
       <div class="institution"><!-- INSTITUTION --></div>
     </div>
@@ -1134,87 +707,9 @@ Cover background = Pure white / very light gray / primary at 5-8% opacity
 
 ---
 
-## Template 10: Academic Journal - Dark bg + Top/bottom lines + Centered + Keywords
-
-**Design intent:** Extended version of Template 09, with dedicated keyword block. Matches the layout of top-tier Chinese journal submissions and thesis covers.
-
-```
-┌─────────────────────────────┐
-│                             │
-│   ══════════════════════    │  ← Top rule
-│                             │
-│        LABEL (centered)     │
-│                             │
-│        Title (34pt)         │
-│                             │
-│        Subtitle             │
-│                             │
-│          ───                │  ← Thin divider
-│                             │
-│        Keywords             │
-│                             │
-│   ══════════════════════    │  ← Bottom rule
-│         Footer              │
-└─────────────────────────────┘
-```
-
-**Best for:** Chinese journal submissions, theses with keywords, formal academic reports
-
-**HTML structure:**
-```html
-<!DOCTYPE html>
-<html lang="zh">
-<head>
-  <meta charset="UTF-8">
-  <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;700;900&family=Noto+Sans+SC:wght@300;400;500;700&display=swap" rel="stylesheet">
-  <style>
-    @page { size: 794px 1123px; margin: 0; }
-    :root {
-      --c-bg: #162032;
-      --c-accent: #4A90C4;
-      --c-text: #FFFFFF;
-      --c-muted: #90A8C0;
-    }
-    html, body { margin: 0; padding: 0; width: 794px; height: 1123px; background: var(--c-bg); color: var(--c-text); font-family: 'Noto Sans SC', 'Inter', sans-serif; }
-    .cover { width: 794px; height: 1123px; position: relative; display: flex; flex-direction: column; align-items: center; box-sizing: border-box; }
-    .rule-top, .rule-bottom { position: absolute; left: 114px; right: 114px; height: 2px; background: var(--c-accent); }
-    .rule-top { top: 114px; }
-    .rule-bottom { bottom: 114px; }
-    .center-block { position: absolute; top: 0; bottom: 0; left: 114px; right: 114px; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; }
-    .label { font-size: 9pt; color: var(--c-accent); letter-spacing: 3px; text-transform: uppercase; margin-bottom: 40px; }
-    .title { font-size: 34pt; font-weight: 700; line-height: 1.3; font-family: 'Noto Serif SC', serif; margin-bottom: 20px; max-width: 500px; }
-    .subtitle { font-size: 14pt; color: var(--c-muted); margin-bottom: 40px; max-width: 450px; line-height: 1.5; }
-    .divider { width: 152px; height: 0.5px; background: var(--c-accent); margin-bottom: 40px; }
-    .keywords { font-size: 11pt; color: var(--c-muted); line-height: 1.8; max-width: 400px; }
-    .footer { position: absolute; bottom: 57px; left: 114px; right: 114px; text-align: center; font-size: 9pt; color: var(--c-muted); }
-  </style>
-</head>
-<body>
-  <div class="cover">
-    <div class="rule-top"></div>
-    <div class="rule-bottom"></div>
-    <div class="center-block">
-      <div class="label"><!-- LABEL --></div>
-      <div class="title"><!-- TITLE --></div>
-      <div class="subtitle"><!-- SUBTITLE --></div>
-      <div class="divider"></div>
-      <div class="keywords">
-        <!-- KEYWORD 1 --><br>
-        <!-- KEYWORD 2 --><br>
-        <!-- KEYWORD 3 -->
-      </div>
-    </div>
-    <div class="footer"><!-- FOOTER --></div>
-  </div>
-</body>
-</html>
-```
-
-**Recommended palettes:** Same as Template 09.
-
 ---
 
-## Template 11: Institutional - White bg + Black border frame + Structured field slots
+## Template 06: Institutional - White bg + Black border frame + Structured field slots
 
 **Design intent:** The universal institutional cover. White background with a thick black border frame, all content centered, structured field slots with underline placeholders. Matches the style required by most universities worldwide for thesis proposals, dissertations, and formal institutional documents. Also suitable for government reports and official submissions. Zero decorative elements - the formality IS the design.
 
@@ -1393,7 +888,7 @@ Cover background = Pure white / very light gray / primary at 5-8% opacity
 **Field auto-detection:**
 When the user provides structured metadata (name, student ID, advisor, etc.), auto-populate the fields block. When no fields are provided, omit the fields-block entirely and let the title expand vertically into the freed space.
 
-**Variant 11B - Double border:**
+**Variant 06B - Double border:**
 For extra formality (government documents, official submissions), replace the single border with a double border (outer 2.5pt + inner 1pt, 6px gap):
 ```css
 .border-frame {
@@ -1407,15 +902,74 @@ For extra formality (government documents, official submissions), replace the si
 
 ---
 
+## Template 07: Crystal Blue - Deep Blue Night Sky with Luminous Accents
+
+**Design intent:** Crystalline, translucent deep blue with glowing accents. Dark cover transitions to light-blue body. The entire document lives in one blue hue family (~215°). Subtle radial glow hints create glass-like depth without being flashy.
+
+### Color System
+
+**Cover (dark):**
+| Role | Hex | Description |
+|------|-----|-------------|
+| Background | `#0a1628` | Deep blue night sky |
+| Accent line/label | `#4da8da` | Luminous bright blue |
+| Title text | `#e8f0f8` | Cool white with blue tint |
+| Muted text | `#7a9bb8` | Blue-gray |
+| Glow/sidebar | `#2d7ab3` | Mid-blue (gradient source) |
+
+**Body (light) — same hue family:**
+| Role | Cascade Tier | Hex | Usage |
+|------|-------------|-----|-------|
+| Page background | XL | `#f5f8fc` | Ultra-light blue-white |
+| Section background | XL | `#edf2f9` | Light blue-gray |
+| Card background | L | `#e4ecf5` | Soft blue card |
+| Table stripe | L | `#eef3fa` | Subtle blue row |
+| Table header | M | `#1a4a7a` | Deep blue (bridges to cover) |
+| Border | S | `#c0d0e2` | Blue-gray lines |
+| Accent | XS | `#2d7ab3` | = cover glow color |
+| Text primary | text | `#142840` | Deep blue-black (not pure black) |
+| Text muted | text | `#5a7a96` | Blue-gray secondary |
+
+### Layer 2 - Structure
+- **Rectangular frame:** A single continuous rectangular border, inset 60px from all edges (top/bottom = 80px). Stroke = **2px**, color = `#4da8da` (accent). This forms a clean luminous blue frame around the entire cover content area.
+  - Top edge: `Y = 80px`, from `X = 60px` to `X = W - 60px`
+  - Bottom edge: `Y = H - 80px`, from `X = 60px` to `X = W - 60px`
+  - Left edge: `X = 60px`, from `Y = 80px` to `Y = H - 80px`
+  - Right edge: `X = W - 60px`, from `Y = 80px` to `Y = H - 80px`
+- **Background glow (optional):** Two subtle `radial-gradient` circles (6-8% opacity) positioned at upper-left and lower-right. Creates depth without visible shapes.
+
+### Layer 3 - Content
+
+| Element | Position | Constraints |
+|---------|----------|-------------|
+| Kicker | `X = 90px`, `Y = 0.12*H` | 11pt, accent color (#4da8da), letter-spacing 5px, uppercase, font-weight 300 |
+| Hero Title | `X = 90px`, `Y = 0.21*H` | 50pt (CJK 55pt), weight 900, Noto Serif SC, cool white (#e8f0f8), subtle text-shadow with blue glow |
+| Summary | `X = 90px`, `Y = 0.45*H` | 15pt, line-height 1.7, muted (#7a9bb8), max-width 520px |
+| Organization | `X = 90px`, `Y = 0.64*H` | 18pt, cool white |
+| Date | `X = 90px`, `Y = H - 80px` | 10pt, muted, letter-spacing 3px |
+
+### Recommended Palette Generation
+
+```bash
+# For documents using this template, the palette is fixed (not auto-generated).
+# Copy the body palette values directly from the table above.
+# Cover colors are hardcoded in the template HTML.
+```
+
+### Best For
+Technology reports, data analysis, AI/ML research, fintech, SaaS product reports, anything that benefits from a modern, polished, slightly premium blue aesthetic.
+
+---
+
 ### Academic Template Selection Guide
 
 | Scenario | Template | Rationale |
 |----------|----------|-----------|
-| arXiv preprint, technical report | **08** (Vertical Anchor) | Left-aligned, data-dense feel |
-| IEEE/ACM paper, English thesis | **09** (Symmetric) | Classic bilateral symmetry |
-| Chinese thesis, journal with keywords | **10** (Journal) | CJK-optimized, keyword block |
-| **Thesis proposal, institutional cover, government doc** | **11** (Institutional) | **White bg, black border frame, structured field slots** |
-| Light/formal academic (white bg) | **01-07** (standard templates) | Use standard cover system |
+| arXiv preprint, technical report | **03** (Vertical Anchor) | Left-aligned, data-dense feel |
+| IEEE/ACM paper, English thesis | **04** (Symmetric) | Classic bilateral symmetry |
+| Chinese thesis, journal with keywords | **04** (Symmetric) | Classic symmetry + keyword support via subtitle/summary slots |
+| **Thesis proposal, institutional cover, government doc** | **06** (Institutional) | **White bg, black border frame, structured field slots** |
+| Light/formal academic (white bg) | **01** (HUD) | Use standard cover system |
 
 
 Covers support a **background decoration layer** rendered behind all foreground content (Layer 1). This layer adds subtle depth through supergraphics, typographic watermarks, and blueprint hairlines.
@@ -1427,16 +981,5 @@ See → `typesetting/cover-backgrounds.md` - complete specification with modules
 - **Recipe B (Engineering Academic)**: Coordinate cross + vertical spine text - precision, engineering feel
 - **Recipe C (Stable & Authoritative)**: Angle slash + bottom bleed text - heavy, authoritative
 
-**Background layer is OPTIONAL.** Not every cover needs one. Templates 01-07 already define their own Layer 1 backgrounds - use the recipes only when a template's built-in background is insufficient.
+**Background layer is OPTIONAL.** Not every cover needs one. Template 01 already defines its own Layer 1 background - use the recipes only when a template's built-in background is insufficient.
 
----
-
-# PART 6: CHANGELOG
-
-| Version | Date | Changes |
-|---------|------|---------|
-| V1.0 | - | Initial 7 layouts (Diagonal Tension, Vertical Axis, etc.) |
-| V2.0 | 2026-04-03 | Complete rewrite. Absolute Anchor Grid; Z-index layers; Typography Weight System; 7 new templates with percentage coordinates; Code-level safety. |
-| **V2.1** | **2026-04-03** | **Summary Block upgrade.** Added mandatory Summary/Description drawer to all 7 templates (anti-void iron rule). Introduced base spacing unit `U = W * 0.05`. Refined Hero Title range to 45-65pt. Added S3.4 Hard Width Boundary Enforcement + S3.5 Mandatory Summary Auto-Generation. Template 01: added Summary drawer at Y=0.45*H. Template 02: added Summary at Y=0.45*H + refined watermark to 180pt. Template 03: added Summary at Y=0.40*H with W*0.55 width guard. Template 04: Summary included in center-calculated block. Template 05: lower-right group expanded with Summary + 3pt accent line. Template 06: Zone C explicitly designated for substantial summary text. Template 07: sidebar width changed to `0.1*W` (~80pt), content uses relative vertical centering. |
-| **V2.2** | **2026-04-07** | **Intent system unification + Template 11.** Part 2 Template Selection Guide migrated from "Document Tone" to Intent × Document Type matrix (aligned with `visual_framework.md` 5-intent system and `creative.md` Intent Mapping Table). Added Template 11 (Institutional) - white bg + black border frame + structured field slots for thesis proposals, dissertations, and institutional documents. Academic Template Selection Guide updated. |
-| **V3.0** | **2026-04-07** | **Color unification + Layout balance overhaul.** (1) All template CSS variables renamed to `--c-` prefix (`--c-bg`, `--c-accent`, `--c-text`, `--c-muted`) for palette system alignment. Hardcoded hex values replaced with CSS variables. Palette tables marked as fallback defaults with `palette.cascade` as canonical source. (2) Added S3.7 Line-Length Alignment - vertical/horizontal lines must match text span. (3) Added S3.8 Vertical Balance - adaptive centering for sparse content, CJK title size compensation (50-80pt vs Latin 45-65pt), anchor points shifted down (title H*0.30, summary H*0.50, meta H*0.70). (4) Output cleanliness rules - no version numbers, draft labels, or process artifacts in final PDF. |

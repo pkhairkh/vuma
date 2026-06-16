@@ -26,6 +26,7 @@ import json
 import math
 import os
 import re
+import subprocess
 import sys
 from html.parser import HTMLParser
 from pathlib import Path
@@ -41,21 +42,21 @@ GENERIC_FAMILIES = frozenset(
 )
 
 SERIF_FONTS = frozenset(f.lower() for f in [
-    "Playfair Display", "Georgia", "Times New Roman", "Times", "Noto Serif",
+    "Playfair Display", "Georgia", "FreeSerif", "Times", "Noto Serif",
     "Noto Serif SC", "Noto Serif TC", "Noto Serif JP", "Noto Serif KR",
     "Source Serif Pro", "Source Serif 4", "Merriweather", "Lora", "PT Serif",
     "Libre Baskerville", "EB Garamond", "Cormorant Garamond", "Crimson Text",
-    "STSong", "FangSong", "KaiTi", "STKaiti", "Songti SC",
+    "LXGW WenKai", "Tinos",
 ])
 
 CHINESE_FONTS = frozenset(f.lower() for f in [
-    "SimHei", "Microsoft YaHei", "Noto Sans SC", "Noto Sans TC",
-    "Noto Sans CJK SC", "Noto Sans CJK TC", "PingFang SC", "PingFang TC",
+    "Noto Sans SC", "Noto Sans TC",
+    "Noto Sans CJK SC", "Noto Sans CJK TC",
     "Source Han Sans SC", "Source Han Sans TC", "WenQuanYi Micro Hei",
-    "WenQuanYi Zen Hei", "Hiragino Sans GB", "STHeiti", "STXihei",
+    "WenQuanYi Zen Hei",
     "Noto Serif SC", "Noto Serif TC", "Noto Serif CJK SC",
-    "Source Han Serif SC", "SimSun", "NSimSun", "FangSong", "KaiTi",
-    "STSong", "STFangsong", "STKaiti", "Songti SC", "Heiti SC",
+    "Source Han Serif SC",
+    "LXGW WenKai", "FreeSerif", "Sarasa Mono SC",
 ])
 
 # Selectors we treat as "main containers" whose overflow:hidden is dangerous.
@@ -804,6 +805,82 @@ def check_html(html_path: str, *, fix: bool = False, output_path: str | None = N
         for old_text, new_text in _all_fixes:
             if old_text in raw:
                 raw = raw.replace(old_text, new_text, 1)
+
+    # ---- 12. COVER_OVERLAP_DETECTION (auto-trigger cover_validate.js) ----
+    # If this HTML is a cover page (contains .cover or .cover-page class),
+    # automatically run cover_validate.js for text collision detection.
+    # This eliminates the need for the model to remember a separate step.
+    _is_cover_html = bool(
+        re.search(r'class\s*=\s*["\'][^"\']*\bcover\b', raw, re.IGNORECASE)
+        or re.search(r'class\s*=\s*["\'][^"\']*\bcover-page\b', raw, re.IGNORECASE)
+    )
+    if _is_cover_html:
+        _scripts_dir = os.path.dirname(os.path.abspath(__file__))
+        _cv_script = os.path.join(_scripts_dir, 'cover_validate.js')
+        if os.path.isfile(_cv_script):
+            info.append(_issue(
+                "COVER_DETECTED",
+                "Cover page detected — running cover_validate.js for text collision detection.",
+                severity="info",
+            ))
+            try:
+                _cv_result = subprocess.run(
+                    ['node', _cv_script, html_path],
+                    capture_output=True, text=True, timeout=60,
+                )
+                _cv_stdout = _cv_result.stdout.strip()
+                _cv_stderr = _cv_result.stderr.strip()
+                _cv_output = _cv_stderr or _cv_stdout  # cover_validate.js prints to stderr on errors
+
+                if _cv_result.returncode == 1:
+                    # Overlap detected — parse the output for specific issues
+                    # Extract ERROR lines from output
+                    _overlap_lines = [
+                        line.strip() for line in _cv_output.split('\n')
+                        if 'ERROR' in line or 'overlap' in line.lower() or 'overflow' in line.lower()
+                    ]
+                    _detail = '; '.join(_overlap_lines[:5]) if _overlap_lines else _cv_output[:500]
+                    errors.append(_issue(
+                        "COVER_TEXT_OVERLAP",
+                        f"cover_validate.js detected text overlap/collision on the cover page. "
+                        f"Details: {_detail}. "
+                        f"Fix the cover HTML to resolve overlaps before rendering.",
+                    ))
+                elif _cv_result.returncode == 2:
+                    # Script error (e.g., no Playwright) — warn but don't block
+                    warnings.append(_issue(
+                        "COVER_VALIDATE_UNAVAILABLE",
+                        f"cover_validate.js could not run (exit code 2): {_cv_output[:200]}. "
+                        f"Text collision detection was skipped. "
+                        f"Install playwright to enable: npm install -g playwright",
+                        severity="warning",
+                    ))
+                elif _cv_result.returncode == 0:
+                    info.append(_issue(
+                        "COVER_OVERLAP_PASS",
+                        "cover_validate.js: No text overlaps detected ✓",
+                        severity="info",
+                    ))
+            except subprocess.TimeoutExpired:
+                warnings.append(_issue(
+                    "COVER_VALIDATE_TIMEOUT",
+                    "cover_validate.js timed out after 60s. Text collision detection was skipped.",
+                    severity="warning",
+                ))
+            except FileNotFoundError:
+                warnings.append(_issue(
+                    "COVER_VALIDATE_NO_NODE",
+                    "Node.js not found — cover_validate.js requires Node.js. "
+                    "Text collision detection was skipped.",
+                    severity="warning",
+                ))
+        else:
+            info.append(_issue(
+                "COVER_VALIDATE_MISSING",
+                f"Cover page detected but cover_validate.js not found at {_cv_script}. "
+                "Text collision detection was skipped.",
+                severity="info",
+            ))
 
     # ---- Build report ----
     has_errors = len(errors) > 0

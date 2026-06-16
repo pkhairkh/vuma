@@ -851,11 +851,21 @@ def check_pdf(pdf_path: str) -> Dict[str, Any]:
                 pass
 
         if not has_links:
-            warnings.append(make_item(
-                "TOC_LINKS_MISSING",
-                "TOC entries found but no clickable links detected.",
-                "warning"
-            ))
+            # ≥5 pages: report as error (our generated PDFs must have clickable TOC)
+            # <5 pages: keep as warning (short docs may legitimately lack links)
+            if total_pages >= 5:
+                errors.append(make_item(
+                    "TOC_LINKS_MISSING",
+                    "TOC entries found but no clickable links detected. "
+                    f"Document has {total_pages} pages — TOC links are required.",
+                    "error"
+                ))
+            else:
+                warnings.append(make_item(
+                    "TOC_LINKS_MISSING",
+                    "TOC entries found but no clickable links detected.",
+                    "warning"
+                ))
 
     pdf.close()
     return make_result(source, "pdf-toc", errors, warnings, info)

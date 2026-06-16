@@ -87,7 +87,7 @@ def calculate_fill_ratio(content_blocks, available_height, default_styles):
 | **≥ 80%** | ✅ Full | No adjustment, render normally |
 | **65%–80%** | ⚠️ Slightly empty | Light inflation (line-height + paragraph spacing only) |
 | **40%–65%** | 🔶 Noticeably empty | Full inflation (line-height + spacing + slight font increase + component inflation) |
-| **< 40%** | 🔴 Extremely empty | Full inflation + Y-axis golden ratio anchoring (Safety Net 4) |
+| **< 40%** |  Extremely empty | Full inflation + Y-axis golden ratio anchoring (Safety Net 4) |
 
 ### Inflation Parameters (Triggered when fill ratio < 65%)
 

@@ -1,9 +1,9 @@
 # Poster Scene Rules — Creative Pipeline (Poster-Specific Constraints)
 
-> When poster / 海报 / 传单 / flyer / 宣传页 keywords are detected, load these rules on top of `creative.md`.
-> These rules take priority over `creative.md` generic rules; in case of conflict, this file prevails.
+> When poster / 海报 / 传单 / flyer / 宣传页 keywords are detected, load these rules on top of `creative-fixed-canvas.md`.
+> These rules take priority over `creative-fixed-canvas.md` generic rules; in case of conflict, this file prevails.
 >
-> **Positioning**: This is a scene-layer patch on `creative.md` (the generic Creative pipeline) — only covers poster-specific constraints, does not repeat generic rules.
+> **Positioning**: This is a scene-layer patch on `creative-fixed-canvas.md` (the generic Creative pipeline) — only covers poster-specific constraints, does not repeat generic rules.
 
 ---
 
@@ -426,7 +426,7 @@ When creating posters, actively use images to enrich visual effects. Good images
 | Purpose | Recommended Font | Google Fonts Name | Style |
 |------|---------|-------------------|------|
 | English/number title | Futura | System / `Futura` | Classic geometric |
-| English body | PingFang HK | System | Clean, modern |
+| English body | Noto Sans SC | `Noto Sans SC:wght@400` | Clean, modern |
 | English title (Google) | Inter Black | `Inter:wght@900` | Modern geometric |
 | English serif | Playfair Display | `Playfair+Display:wght@900` | Classic editorial |
 | Number emphasis | Inter Black | `Inter:wght@900` | Data sculpture |

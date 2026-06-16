@@ -161,7 +161,7 @@ if node -e "require('playwright')" 2>/dev/null; then
     ok "playwright ($PW_VER)"
 else
     fail "playwright not installed"
-    info "Install: npm install -g playwright"
+    info "Install: npm install -g playwright@1.50.0"
 fi
 
 # Check Chromium
@@ -198,7 +198,7 @@ if [ -x "$BUNDLED" ]; then
             case "$OS" in
                 Darwin) info "Install: brew install tectonic" ;;
                 Linux)  info "Install: conda install -c conda-forge tectonic"
-                        info "     or: curl -fsSL https://drop-sh.fullyjustified.net | sh" ;;
+                        info "     or: conda config --add channels https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud/conda-forge/ && conda install tectonic" ;;
                 MINGW*|MSYS*|CYGWIN*) info "Install: scoop install tectonic  /  choco install tectonic" ;;
             esac
         fi
@@ -213,7 +213,7 @@ else
     case "$OS" in
         Darwin) info "Install: brew install tectonic" ;;
         Linux)  info "Install: conda install -c conda-forge tectonic"
-                info "     or: curl -fsSL https://drop-sh.fullyjustified.net | sh" ;;
+                info "     or: conda config --add channels https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud/conda-forge/ && conda install tectonic" ;;
         MINGW*|MSYS*|CYGWIN*) info "Install: scoop install tectonic  /  choco install tectonic" ;;
     esac
 fi
@@ -245,10 +245,9 @@ else
 fi
 # Check system CJK fonts
 if [ "$OS" = "Darwin" ]; then
-    if ls /System/Library/Fonts/PingFang.ttc &>/dev/null 2>&1 \
-       || ls /System/Library/Fonts/STHeiti*.ttc &>/dev/null 2>&1 \
-       || ls "$HOME/Library/Fonts/"*SimHei* &>/dev/null 2>&1; then
-        ok "macOS CJK system fonts available"
+    if [ -f "$HOME/Library/Fonts/NotoSansSC[wght].ttf" ] || fc-list :lang=zh 2>/dev/null | head -1 | grep -q . \
+       || ls "$HOME/Library/Fonts/"*NotoSansSC* &>/dev/null 2>&1; then
+        ok "CJK fonts available (Noto Sans SC or system)"
     else
         warn "no common CJK system fonts found"
     fi
@@ -257,6 +256,67 @@ elif [ "$OS" = "Linux" ]; then
         ok "system CJK fonts available (fc-list)"
     else
         warn "no CJK fonts found. Install: sudo apt install fonts-noto-cjk"
+    fi
+fi
+
+# ── 9b. Noto Serif SC (Chinese serif for covers / academic docs) ──
+echo ""
+echo "--- Noto Serif SC (Chinese serif, covers/academic) ---"
+ENV_SETUP_FONT="$(cd "$SCRIPT_DIR/../.." && pwd)/env-setup/fonts/noto-serif-sc/NotoSerifSC-Regular.ttf"
+NOTO_SERIF_FOUND=0
+
+# Method 1: Check via fc-list
+if command -v fc-list &>/dev/null; then
+    if fc-list | grep -qi "Noto Serif SC"; then
+        ok "Noto Serif SC (fc-list)"
+        NOTO_SERIF_FOUND=1
+    fi
+fi
+
+# Method 2: Check common font directories
+if [ $NOTO_SERIF_FOUND -eq 0 ]; then
+    for CHECK_PATH in \
+        "$HOME/Library/Fonts/NotoSerifSC"*.ttf \
+        "/Library/Fonts/NotoSerifSC"*.ttf \
+        "$HOME/.local/share/fonts/NotoSerifSC"*.ttf \
+        "/usr/share/fonts/"*"/NotoSerifSC"*.ttf; do
+        if ls $CHECK_PATH &>/dev/null 2>&1; then
+            ok "Noto Serif SC ($CHECK_PATH)"
+            NOTO_SERIF_FOUND=1
+            break
+        fi
+    done
+fi
+
+# Method 3: Check env-setup bundled font
+if [ $NOTO_SERIF_FOUND -eq 0 ]; then
+    if [ -f "$ENV_SETUP_FONT" ]; then
+        warn "Noto Serif SC not installed system-wide, but available in env-setup bundle"
+        info "Run this setup interactively to auto-install, or copy manually"
+        if [ -t 0 ]; then
+            read -p "  Install Noto Serif SC to user fonts? [Y/n] " -n 1 -r REPLY
+            echo ""
+            REPLY=${REPLY:-Y}
+            if [[ ! $REPLY =~ ^[Nn]$ ]]; then
+                USER_FONT_DIR="$HOME/Library/Fonts"
+                if [ "$OS" = "Linux" ]; then
+                    USER_FONT_DIR="$HOME/.local/share/fonts"
+                fi
+                mkdir -p "$USER_FONT_DIR"
+                cp "$ENV_SETUP_FONT" "$USER_FONT_DIR/"
+                if command -v fc-cache &>/dev/null; then
+                    fc-cache -f "$USER_FONT_DIR" 2>/dev/null
+                fi
+                ok "Noto Serif SC installed to $USER_FONT_DIR"
+                NOTO_SERIF_FOUND=1
+            fi
+        fi
+    else
+        fail "Noto Serif SC not found"
+        info "Download from: https://fonts.google.com/noto/specimen/Noto+Serif+SC"
+        case "$OS" in
+            Linux) info "Or install: sudo apt install fonts-noto-cjk" ;;
+        esac
     fi
 fi
 

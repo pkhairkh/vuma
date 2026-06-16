@@ -358,11 +358,11 @@ def env_check(argv: list):
 
     print("\n=== Install Commands ===")
     print("  Node.js:     brew install node (macOS) / apt install nodejs (Ubuntu)")
-    print("  Playwright:  npm install -g playwright && npx playwright install chromium")
+    print("  Playwright:  npm install -g playwright@1.50.0 && npx playwright install chromium")
     print("  Python:      brew install python3 (macOS) / apt install python3 (Ubuntu)")
     print("  pikepdf:     pip install pikepdf pdfplumber --user")
     print("  LibreOffice: brew install --cask libreoffice (macOS)")
-    print("  Tectonic:    curl -fsSL https://drop-sh.fullyjustified.net | sh")
+    print("  Tectonic:    conda install -c conda-forge tectonic  # Tsinghua mirror: conda config --add channels https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud/conda-forge/")
     raise SystemExit(rc)
 
 
@@ -1497,7 +1497,7 @@ def form_annotate(argv: list):
                 pdf_width, pdf_height
             )
 
-            font_name = ink.get("font", "Arial")
+            font_name = ink.get("font", "FreeSerif")
             font_size = str(ink.get("size", 14)) + "pt"
             font_color = ink.get("color", "000000")
 
@@ -1757,13 +1757,13 @@ def convert_office(argv: list):
 
 @cmd("convert.html")
 def convert_html(argv: list):
-    """Convert HTML to PDF via node html2pdf.js."""
+    """Convert HTML to PDF via node html2pdf-next.js."""
     if not argv:
         Output.error("MissingArg", "input file required")
 
-    js_path = _SCRIPT_DIR / "html2pdf.js"
+    js_path = _SCRIPT_DIR / "html2pdf-next.js"
     if not js_path.exists():
-        Output.error("DependencyMissing", "html2pdf.js not found in scripts directory")
+        Output.error("DependencyMissing", "html2pdf-next.js not found in scripts directory")
 
     node_path = shutil.which("node")
     if not node_path:
@@ -1965,9 +1965,9 @@ def convert_blueprint(argv: list):
     except subprocess.CalledProcessError:
         Output.error("CompileError", "design_engine.py failed to compile the blueprint.", code=4)
 
-    # 4. Call html2pdf.js to render PDF
+    # 4. Call html2pdf-next.js to render PDF
     print("📄 [2/2] Rendering HTML to High-Res PDF via Playwright...", flush=True)
-    js_script = _SCRIPT_DIR / "html2pdf.js"
+    js_script = _SCRIPT_DIR / "html2pdf-next.js"
     node_path = shutil.which("node")
     if not node_path:
         Output.error("DependencyMissing", "node not found in PATH")
@@ -1978,7 +1978,7 @@ def convert_blueprint(argv: list):
             "--width", "720px", "--height", "960px"
         ], check=True)
     except subprocess.CalledProcessError:
-        Output.error("RenderError", "html2pdf.js failed to render the PDF.", code=4)
+        Output.error("RenderError", "html2pdf-next.js failed to render the PDF.", code=4)
 
     print(f"\n🎉 Success! Masterpiece generated at: {out_pdf}")
     raise SystemExit(0)
@@ -2013,14 +2013,12 @@ def convert_latex(argv: list):
         sys_name = platform.system()
         if sys_name == "Darwin":
             print("  macOS (Homebrew):  brew install tectonic")
-            print("  macOS (binary):    curl -sSL https://drop-sh.fullyjustified.net | sh")
-            print("                     mv tectonic ~/tectonic && chmod +x ~/tectonic")
+            print("  macOS (conda):     conda install -c conda-forge tectonic")
         elif sys_name == "Linux":
             print("  Debian/Ubuntu:     apt install tectonic         (if available)")
             print("  Arch Linux:        pacman -S tectonic")
             print("  Conda:             conda install -c conda-forge tectonic")
-            print("  Binary download:   curl -sSL https://drop-sh.fullyjustified.net | sh")
-            print("                     mv tectonic ~/tectonic && chmod +x ~/tectonic")
+            print("  Conda (Tsinghua):  conda config --add channels https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud/conda-forge/ && conda install tectonic")
         elif sys_name == "Windows":
             print("  Windows (scoop):   scoop install tectonic")
             print("  Windows (choco):   choco install tectonic")
@@ -2119,21 +2117,30 @@ def convert_latex(argv: list):
 # -- Data structures --------------------------------------------------------
 
 FONT_FALLBACK_CHAIN: Dict[str, List[str]] = {
-    "Times New Roman": ["SimHei"],
-    "Calibri":         ["SimHei"],
-    "DejaVuSans":      ["SimHei"],
-    "SimHei":          ["Times New Roman"],
-    "Microsoft YaHei": ["Times New Roman"],
+    "FreeSerif": ["NotoSerifSC", "Noto Sans SC"],
+    "DejaVuSans":      ["NotoSerifSC", "Noto Sans SC"],
+    "NotoSerifSC":     ["FreeSerif"],
+    "NotoSerifSC-Bold": ["FreeSerif"],
+    "Noto Sans SC":     ["FreeSerif"],
+    "Noto Sans SC Bold": ["FreeSerif"],
 }
 
 FONT_PREFER_RANGES: Dict[str, List[Tuple[int, int, str]]] = {
-    "SimHei": [
-        (0x0400, 0x04FF, "Times New Roman"),   # Cyrillic
-        (0x0500, 0x052F, "Times New Roman"),   # Cyrillic Supplement
+    "NotoSerifSC": [
+        (0x0400, 0x04FF, "FreeSerif"),   # Cyrillic
+        (0x0500, 0x052F, "FreeSerif"),   # Cyrillic Supplement
     ],
-    "Microsoft YaHei": [
-        (0x0400, 0x04FF, "Times New Roman"),
-        (0x0500, 0x052F, "Times New Roman"),
+    "NotoSerifSC-Bold": [
+        (0x0400, 0x04FF, "FreeSerif"),
+        (0x0500, 0x052F, "FreeSerif"),
+    ],
+    "Noto Sans SC": [
+        (0x0400, 0x04FF, "FreeSerif"),   # Cyrillic
+        (0x0500, 0x052F, "FreeSerif"),   # Cyrillic Supplement
+    ],
+    "Noto Sans SC Bold": [
+        (0x0400, 0x04FF, "FreeSerif"),
+        (0x0500, 0x052F, "FreeSerif"),
     ],
 }
 
@@ -2207,7 +2214,7 @@ def content_sanitize(text: str, dry_run: bool = False) -> str:
         _content_sanitize_warnings = []
 
     # Split text into tags and plain-text segments to avoid mangling XML tags
-    # e.g. '<font name="SimHei">你好</font>' → ['', '<font name="SimHei">', '你好', '</font>', '']
+    # e.g. '<font name="Noto Sans SC">你好</font>' → ['', '<font name="Noto Sans SC">', '你好', '</font>', '']
     parts = _TAG_RE.split(text)
     tags = _TAG_RE.findall(text)
 
@@ -2620,24 +2627,49 @@ def toc_check(argv: list):
 # ═══════════════════════════════════════════════════════════════
 
 # --- Step 0: restore literal unicode escapes/entities to real chars ---
+# SAFETY: Only restore escapes for codepoints that the pipeline actually
+# handles (superscripts, subscripts).  Blindly restoring ALL \uXXXX escapes
+# turns e.g. \u201c/\u201d (Chinese curly quotes) into real " " characters
+# which break Python string syntax → "unterminated string literal".
 _RE_UNICODE_ESC = re.compile(r"(\\u[0-9a-fA-F]{4})|(\\U[0-9a-fA-F]{8})|(\\x[0-9a-fA-F]{2})")
+
+# Allowlist of codepoints safe to restore (built lazily after maps are defined)
+_RESTORE_ALLOWLIST: Optional[Set[int]] = None
+
+
+def _build_restore_allowlist() -> Set[int]:
+    """Build the allowlist from super/sub maps. Called once on first use."""
+    global _RESTORE_ALLOWLIST
+    _RESTORE_ALLOWLIST = set()
+    for ch in _SUPERSCRIPT_MAP:
+        _RESTORE_ALLOWLIST.add(ord(ch))
+    for ch in _SUBSCRIPT_MAP:
+        _RESTORE_ALLOWLIST.add(ord(ch))
+    return _RESTORE_ALLOWLIST
 
 
 def _restore_escapes(s: str) -> str:
     # HTML entities: &#179; &#x2264; &alpha; ...
     s = html.unescape(s)
 
-    # Literal backslash escapes: "\\u00B3" -> "³"
+    allowlist = _RESTORE_ALLOWLIST if _RESTORE_ALLOWLIST is not None else _build_restore_allowlist()
+
+    # Literal backslash escapes: only restore super/sub codepoints
     def _dec(m: re.Match) -> str:
         esc = m.group(0)
         try:
             if esc.startswith("\\u") or esc.startswith("\\U"):
-                return chr(int(esc[2:], 16))
-            if esc.startswith("\\x"):
-                return chr(int(esc[2:], 16))
+                cp = int(esc[2:], 16)
+            elif esc.startswith("\\x"):
+                cp = int(esc[2:], 16)
+            else:
+                return esc
+            # Only restore if this codepoint is in the super/sub allowlist
+            if cp in allowlist:
+                return chr(cp)
+            return esc  # keep original escape for everything else
         except Exception:
             return esc
-        return esc
 
     return _RE_UNICODE_ESC.sub(_dec, s)
 
@@ -2673,7 +2705,7 @@ def _replace_super_sub(s: str) -> str:
     return "".join(out)
 
 
-# --- Step 2: symbol fallback for SimHei (protect tags, then replace) ---
+# --- Step 2: symbol fallback for Noto Sans SC (protect tags, then replace) ---
 _SYMBOL_FALLBACK: Dict[str, str] = {
     # Currently empty - enable entries as needed for fonts missing specific glyphs
 }

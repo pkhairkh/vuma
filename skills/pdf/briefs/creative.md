@@ -4,7 +4,7 @@
 
 Because LLMs lack spatial awareness and struggle to maintain perfectly nested, complex CSS over thousands of tokens, you are strictly forbidden from outputting raw HTML/CSS/Python.
 
-**→ Overflow prevention**: See `typesetting/overflow.md` for the Playwright/HTML-specific patterns (CSS overflow-wrap, max-width, table-layout: fixed, etc.).
+**→ MUST READ: `typesetting/overflow.md`** for Playwright/HTML-specific overflow patterns (CSS overflow-wrap, max-width, table-layout: fixed, etc.).
 
 Your sole responsibility is to act as the **Brain (Art Director)**:
 1. Brutally edit and pace the raw text.
@@ -160,7 +160,7 @@ A container where text flows around a non-rectangular shape. The empty space cre
 
 ### Chart & Data Visualization Styling
 
-**→ Full spec: `typesetting/charts.md`** - read it before designing any chart/data page.
+**→ MUST READ: `typesetting/charts.md`** before designing any chart/data page.
 
 Key rules for Creative pipeline charts:
 - **Donut > Pie**: Always use ring charts (hole ratio 60-70%), center area displays total/metric
@@ -176,7 +176,7 @@ Key rules for Creative pipeline charts:
 
 For each page in your JSON, you must declare an `archetype`. This tells `design_engine.py` how to arrange the components you provided.
 
-- `"cover_hero"`: Cover page. **Must follow `typesetting/cover.md` 7-template system** - pick Layout 1-7 based on document tone. See "Cover Page Constitution" below for iron rules.
+- `"cover_hero"`: Cover page. **Must follow `typesetting/cover.md` 5-template system** - pick Layout 01/03/04/06/07 based on document tone. See "Cover Page Constitution" below for iron rules.
 - `"split_vertical"`: Page split strictly 50/50 vertically. Left side image/svg, right side Glass_Canvas.
 - `"editorial_flow"`: Top-down reading experience. Centered columns, generous margins. Use for main content.
 - `"scattered_canvas"`: No grid. Elements placed via absolute positioning based on spatial weights.
@@ -199,11 +199,11 @@ The layout engine uses a **12-track CSS Grid** for element placement. The grid l
 
 **40% whitespace rule**: At least 40% of grid cells (≥58 out of 144) must be left empty. Count your occupied cells.
 
-### ★ Cover Page Constitution (7 Layout System)
+### ★ Cover Page Constitution (5 Layout System)
 
 Cover pages (`archetype: "cover_hero"`) are the first impression. They must be ruthlessly sparse and spatially sophisticated.
 
-**→ Full spec: `typesetting/cover.md`** - read it before designing any cover.
+**→ MUST READ: `typesetting/cover.md`** before designing any cover.
 
 #### Global Iron Rules (Always Apply)
 
@@ -381,11 +381,11 @@ This table is the **sole authority** for mapping document intent to concrete des
 
 | Intent | palette_mode | color_harmony | background_svg | Cover Templates | Cover BG Recipe | Base Hue |
 |--------|-------------|---------------|----------------|-----------------|-----------------|----------|
-| **Calm** | minimal | analogous | flow / none | 04 Museum, 01 HUD, 02 Corporate | A (极简弧线) | 210° (steel blue-grey) |
+| **Calm** | minimal | analogous | flow / none | 12 Crystal Blue, 01 HUD | A (极简弧线) | 210° (steel blue-grey) |
 | **Tension** | dark | complementary | grid | 01 HUD, 05 Diagonal | C (锐角切割) | 0° (warm vs cold) |
-| **Energy** | pastel / light | triadic | flow (5+ curves) | 05 Diagonal, 06 Swiss Grid, 03 Monolith | B (工程十字轴) | 30° (amber) |
-| **Authority** | minimal | split_complementary | noise | 03 Monolith, 07 Sidebar, 02 Corporate | A or B | 280° (muted violet) |
-| **Warmth** | pastel / light | analogous | flow (soft) | 04 Museum, 05 Diagonal | A (极简弧线) | 20° (terracotta) |
+| **Energy** | pastel / light | triadic | flow (5+ curves) | 12 Crystal Blue, 09 Academic Symmetric | B (工程十字轴) | 30° (amber) |
+| **Authority** | minimal | split_complementary | noise | 09 Academic Symmetric, 07 Sidebar, 12 Crystal Blue | A or B | 280° (muted violet) |
+| **Warmth** | pastel / light | analogous | flow (soft) | 12 Crystal Blue, 01 HUD | A (极简弧线) | 20° (terracotta) |
 
 **How to use this table:**
 1. Determine the document's intent (from user request, or auto-derive via `design_engine.py derive`)
@@ -623,7 +623,7 @@ Study these examples to understand how to translate raw requests into perfect bl
 ## Pre-Flight Checklist (Self-Correction before generating output)
 
 Before you output the JSON block, verify:
-0. **🚨 VECTOR OUTPUT IRON RULE:** The final PDF MUST be generated via `page.pdf()` / `convert.blueprint` - NEVER `page.screenshot()` → image → wrap as PDF. Screenshot PDFs are blurry raster images. `page.pdf()` produces vector text that stays sharp at any zoom level.
+0. ** VECTOR OUTPUT IRON RULE:** The final PDF MUST be generated via `page.pdf()` / `convert.blueprint` - NEVER `page.screenshot()` → image → wrap as PDF. Screenshot PDFs are blurry raster images. `page.pdf()` produces vector text that stays sharp at any zoom level.
 1. **Did I write ANY HTML or CSS?** If yes, delete it. Only output JSON.
 2. **Is any `Glass_Canvas` markdown content too long?** Count the words. Over 150? Summarize it or push to the next page.
 3. **Is the JSON perfectly formatted?** Missing commas or unescaped quotes will crash the `design_engine.py` parser.
@@ -645,8 +645,8 @@ Before you output the JSON block, verify:
 17. **Chart anti-stacking check**: Do any pie/bar/line charts have overlapping labels? Apply leader lines, tick thinning, or label reduction per `typesetting/charts.md`.
 18. **Chart axis cleanup check**: Are top/right spines deleted? Grid lines dashed at 20% opacity (or hidden)? No solid grid lines.
 19. **Donut default check**: Are pie charts rendered as donuts (hole ratio 60-70%)? Solid pies = FAIL unless explicitly requested.
-20. **🚨 Triple Delivery check (MANDATORY)**: Creative pipeline must deliver **three files** to the user: (1) PDF - the final vector PDF; (2) HTML - the compiled `*_rendered.html` file; (3) Image - a full-page screenshot preview (PNG/JPG). After `convert.blueprint` generates the PDF and HTML, take a screenshot of the HTML for preview. Report all three file paths to the user.
-21. **🚨 HTML Pre-Render Validation (MANDATORY for ALL HTML→PDF paths)**: Before calling `html2pdf-next.js`, `html2poster.js`, or `convert.blueprint`, run `poster_validate.py check-html` on the HTML file. This catches overflow:hidden on containers, missing @media screen auto-scale, font fallback gaps, contrast issues, and more. **Any ERROR-level issue must be fixed before generating the PDF.** Warnings are non-blocking but should be reviewed.
+20. ** Triple Delivery check (MANDATORY)**: Creative pipeline must deliver **three files** to the user: (1) PDF - the final vector PDF; (2) HTML - the compiled `*_rendered.html` file; (3) Image - a full-page screenshot preview (PNG/JPG). After `convert.blueprint` generates the PDF and HTML, take a screenshot of the HTML for preview. Report all three file paths to the user.
+21. ** HTML Pre-Render Validation (MANDATORY for ALL HTML→PDF paths)**: Before calling `html2pdf-next.js`, `html2poster.js`, or `convert.blueprint`, run `poster_validate.py check-html` on the HTML file. This catches overflow:hidden on containers, missing @media screen auto-scale, font fallback gaps, contrast issues, and more. **Any ERROR-level issue must be fixed before generating the PDF.** Warnings are non-blocking but should be reviewed.
     ```bash
     python3 "$PDF_SKILL_DIR/scripts/poster_validate.py" check-html page.html
     # If errors found, auto-fix:
@@ -761,10 +761,50 @@ node "$PDF_SKILL_DIR/scripts/html2pdf-next.js" input.html --output output.pdf --
    ```
    System CJK fonts vary across macOS/Linux - Google Fonts guarantee glyph coverage without relying on system fonts. `design_engine.py` already handles this automatically via `<link>` tag.
 4. **Post-Generation Text Verification**: After Playwright renders the PDF, extract text from every page and scan for `?` or `\ufffd`. If found, the source HTML has encoding-corrupted characters that must be replaced in the Python source.
-5. **🚨 HTML Pre-Render Validation (MANDATORY)**: After writing the HTML file and before running `html2pdf-next.js`, always run the HTML validator:
+5. ** HTML Pre-Render Validation (MANDATORY)**: After writing the HTML file and before running `html2pdf-next.js`, always run the HTML validator:
    ```bash
    python3 "$PDF_SKILL_DIR/scripts/poster_validate.py" check-html <your_file>.html
    ```
    - **ERROR** items (e.g. `OVERFLOW_HIDDEN_CONTAINER`, `FONT_NO_FALLBACK`) → must fix before PDF generation. Use `--fix --output <file>.html` for auto-repair.
    - **WARNING** items (e.g. `FIXED_SIZE_NO_SCREEN_ADAPT`, `SCREEN_ADAPT_NO_SCALE`, `COLOR_CONTRAST`) → review and fix where appropriate.
    - This catches the most common bypass HTML bugs: `overflow:hidden` on containers, missing `@media screen` auto-scale for fixed-size pages, font-family without generic fallback, low contrast text, etc.
+
+---
+
+## Quality Checklist — Creative-Specific Items
+
+> Moved from SKILL.md to reduce context size. These rules apply specifically to the Creative pipeline.
+
+### Color (palette.md)
+
+- [ ] **Entire document ≤ 5 colors**: Primary + secondary + accent + neutral + background
+- [ ] **All colors traceable to primary**: Secondary and accent derived via lightness/saturation/micro-hue shift
+- [ ] **Sibling elements not differentiated by different hues**: Use opacity/lightness/borders instead
+- [ ] **Gradient endpoints hue difference < 20°**: No warm-to-cool gradients
+- [ ] **No high-saturation color blocks**: Avoid eye strain
+
+### Geometric Anchors (geometry.md)
+
+- [ ] **Anchors use only the primary color**: Layer via opacity, don't mix colors
+- [ ] **Strokes over fills**: Solid elements ≤ 30%
+- [ ] **Ultra-thin lines**: stroke-width 0.3-0.8px
+- [ ] **Asymmetric placement**: Offset creates tension
+- [ ] **Elements ≤ 8**: Restraint, don't clutter
+
+### Global Layout
+
+- [ ] **Full-bleed enforcement**: `@page { size: <w> <h>; margin: 0; }` and `html,body { margin:0; padding:0; }`
+- [ ] **Background color consistency**: `html, body { background }` set explicitly. Single-color docs: match content canvas. Multi-page mixed docs: use darkest page's background
+- [ ] **Content centering**: Symmetric inset/padding, no left/right drift
+- [ ] **Anti-void edges**: Content fills ≥ 60% (multi-page) or ≥ 70% (single-page poster/infographic)
+- [ ] **Fill Engine applied**: Pages with < 80% fill ratio trigger the fill engine
+
+### Design Restraint (Anti-Gaudy)
+
+- [ ] **Decorative elements ≤ 3 per page**: Cover page exempt
+- [ ] **No rainbow/multi-color schemes**: Stick to single-family palette
+- [ ] **No texture/pattern backgrounds**: Solid or ultra-light tinted only
+- [ ] **Whitespace is design**: Don't fill every gap with decorative elements
+- [ ] **Typography over decoration**: Create hierarchy through font size/weight/spacing/color
+- [ ] **2-typeface maximum**: At most 2 font families
+- [ ] **🚫 NO stock images / clipart / AI-generated decorations**: Only user-provided content images allowed

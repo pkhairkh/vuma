@@ -4,12 +4,12 @@ Structured documents via ReportLab: reports, proposals, contracts, white papers,
 
 ---
 
-> ### 🚨 EMOJI CHECK - STOP HERE IF CONTENT HAS EMOJI
+> ###  EMOJI CHECK - STOP HERE IF CONTENT HAS EMOJI
 >
 > ReportLab renders emoji (📊🎯🔥💡 etc.) as **□ tofu squares**. This is unfixable.
 >
 > **If the user's content contains intentional emoji** → **STOP. Do NOT use this brief.**
-> Route to `briefs/creative.md` instead (Playwright renders emoji natively).
+> Route to `briefs/creative-fixed-canvas.md` instead (Playwright renders emoji natively).
 >
 > This applies even if the document is a "report" - emoji + ReportLab = broken output.
 
@@ -19,20 +19,104 @@ Structured documents via ReportLab: reports, proposals, contracts, white papers,
 
 ```
 1. BRIEF    → Confirm document type, audience, page count, outline
-2. DESIGN   → Run `pdf.py palette.generate --title "..."` → copy-paste output into script
+2. DESIGN   → Run `pdf.py palette.cascade --title "..."` → copy-paste output into script
 3. EDIT     → Content transformation (extract data, define typographic roles)
-4. COVER    → Read typesetting/cover.md → render HTML cover via Playwright (default ON for reports ≥ 3 pages; skip only for resumes/letters/memos/forms)
-5. BUILD    → Write ReportLab code (fonts → styles → content → tables → charts)
+3.5 NUMBERING → ⚠️ Chapter Numbering Plan (see below) — MUST output mapping table before writing code
+4. COVER    → ⚠️ MANDATORY READ: `typesetting/cover.md` — MUST read BEFORE writing any cover HTML
+5. BUILD    → ⚠️ TOC GATE first (see below) → Write ReportLab code
 6. PREFLIGHT → code.sanitize → execute → meta.brand → font.check → toc.check → pages.clean → pdf_qa.py
 7. DELIVER  → Merge cover + body → final PDF
 ```
 
+> **⚠️ Word (.docx) dual-delivery rule:** If the user also requests a Word version, you MUST generate it through the **docx skill** (load `docx/SKILL.md` → read `references/design-system.md` → use a validated cover recipe R1-R7). Do NOT hand-write a python-docx script with freehand cover code — freehand covers produce blank pages, wrong heights, and broken layouts in MS Office/WPS. The docx skill's cover system exists to prevent these exact problems.
+
 **Typesetting assets** (load when you reach that step):
 - `typesetting/palette.md` - color system, typography rules, anti-patterns
-- `typesetting/cover.md` - 7 cover layouts with variants, typography scale, bounding box rules
+- `typesetting/cover.md` - 5 cover layouts with variants, typography scale, bounding box rules
 - `typesetting/charts.md` - chart styling, anti-stacking rules, axis/grid/legend treatment
 
 **Cover is DEFAULT ON for reports.** Skip cover only for: resumes, letters, memos, forms, checklists, or documents ≤ 2 pages.
+
+---
+
+### ⚠️ Step 4 COVER — MANDATORY Pre-Read Gate
+
+**You MUST read `typesetting/cover.md` BEFORE writing any cover HTML.** Do NOT write cover HTML from memory or from pre-trained knowledge. The cover system has 5 specific templates with precise zone coordinates, layer structure, and bounding box rules that change over time.
+
+```bash
+# MANDATORY: Read cover.md first. Do NOT skip this.
+cat "$PDF_SKILL_DIR/typesetting/cover.md"
+```
+
+After reading cover.md:
+1. Select a template (01-07) based on document tone and type
+2. Follow the template's HTML structure exactly
+3. Run `poster_validate.py check-html` on the result
+4. Run `cover_validate.js` on the result (checks text-text overlap + text-line overlap)
+5. Only then render via `html2poster.js --width 794px`
+
+**Common failure mode:** Model reads report.md, skips cover.md, writes freehand HTML → broken layout, missing zones, overflow issues, decorative elements outside page bounds. The cover templates exist to prevent these exact problems.
+
+---
+
+### ⚠️ Step 5 BUILD — MANDATORY TOC Gate
+
+**Before writing ANY ReportLab code, answer this question:**
+
+> **Does this document have a Table of Contents?**
+
+| Answer | DocTemplate | Build Method | TOC Implementation |
+|--------|-------------|--------------|--------------------|
+| **YES** | `TocDocTemplate` | `doc.multiBuild(story)` | `TableOfContents()` + heading `bookmark_name/level/text/key` attributes |
+| **NO** | `SimpleDocTemplate` | `doc.build(story)` | N/A |
+
+**⚠️ If you answered YES, these are ALL mandatory — missing any one = broken TOC:**
+
+```python
+# 1. MUST define TocDocTemplate (NOT SimpleDocTemplate)
+class TocDocTemplate(SimpleDocTemplate):
+    def afterFlowable(self, flowable):
+        if hasattr(flowable, 'bookmark_name'):
+            level = getattr(flowable, 'bookmark_level', 0)
+            text = getattr(flowable, 'bookmark_text', '')
+            key = getattr(flowable, 'bookmark_key', '')
+            self.notify('TOCEntry', (level, text, self.page, key))
+
+# 2. MUST add TableOfContents to story
+toc = TableOfContents()
+toc.levelStyles = [toc_level0, toc_level1]  # define your styles
+story.append(toc)
+story.append(PageBreak())
+
+# 3. MUST set bookmark attributes on every heading
+def add_heading(text, style, level=0):
+    key = f'h_{hashlib.md5(text.encode()).hexdigest()[:8]}'
+    p = Paragraph(f'<a name="{key}"/>{text}', style)
+    p.bookmark_name = key
+    p.bookmark_level = level
+    p.bookmark_text = text
+    p.bookmark_key = key
+    return p
+
+# 4. MUST use multiBuild (NOT build)
+doc = TocDocTemplate(output_path, pagesize=A4, ...)
+doc.multiBuild(story)
+```
+
+**🚫 FORBIDDEN patterns (these produce broken/fake TOC):**
+```python
+# ❌ Hard-coded TOC items with manual page numbers
+toc_items = [('Chapter 1', '3'), ('Chapter 2', '5')]  # WRONG - not clickable, page numbers will be wrong
+
+# ❌ SimpleDocTemplate + build() with TOC
+doc = SimpleDocTemplate(...)  # WRONG if you have TOC
+doc.build(story)              # WRONG - TOC entries won't populate
+
+# ❌ TableOfContents without TocDocTemplate
+toc = TableOfContents()
+story.append(toc)
+doc = SimpleDocTemplate(...)  # WRONG - no afterFlowable to feed TOC
+```
 
 ---
 
@@ -45,34 +129,52 @@ Structured documents via ReportLab: reports, proposals, contracts, white papers,
 **Run this command FIRST. Copy-paste its output directly into your Python script:**
 
 ```bash
-python3 "$PDF_SKILL_DIR/scripts/pdf.py" palette.generate --title "<document title>" --mode minimal
+python3 "$PDF_SKILL_DIR/scripts/pdf.py" palette.cascade --title "<document title>" --mode minimal --format reportlab
 ```
+
+> ⚠️ **Use `palette.cascade` (V2), NOT the old `palette.generate`.** Cascade palette outputs unified color roles for cover, body, charts, and tables from one base hue.
 
 The command auto-derives the design intent from the document title, computes a mathematically harmonious palette, and outputs ready-to-paste ReportLab Python code:
 
 ```python
-# ━━ Color Palette (auto-generated by pdf.py palette.generate) ━━
-# Intent: neutral | Mode: minimal | Harmony: split_complementary
-# Contrast: text:bg=14.12 | accent:bg=3.06
+# ━━ Cascade Palette (auto-generated by design_engine.py palette-cascade) ━━
 from reportlab.lib import colors
-ACCENT       = colors.HexColor('#2f97b9')
+
+# XL tier: backgrounds (area > 50%, S ≤ 0.08)
+PAGE_BG       = colors.HexColor('#f5f4f3')
+SECTION_BG    = colors.HexColor('#f0efed')
+
+# L tier: surfaces (area 20-50%, S ≤ 0.15)
+CARD_BG       = colors.HexColor('#eae8e4')
+TABLE_STRIPE  = colors.HexColor('#edebe8')
+
+# M tier: structural fills (area 5-20%, S ≤ 0.30)
+HEADER_FILL   = colors.HexColor('#3d5a6e')
+COVER_BLOCK   = colors.HexColor('#4a6575')
+
+# S tier: edges & icons (area 1-5%, S ≤ 0.50)
+BORDER        = colors.HexColor('#b8c0c7')
+ICON          = colors.HexColor('#4e6d7a')
+
+# XS tier: emphasis (area < 1%, S ≤ 0.75)
+ACCENT        = colors.HexColor('#2f97b9')
+ACCENT_2      = colors.HexColor('#3a8a7d')
+
+# Typography
 TEXT_PRIMARY  = colors.HexColor('#252422')
 TEXT_MUTED    = colors.HexColor('#8d8981')
-BG_SURFACE    = colors.HexColor('#dfdad2')
-BG_PAGE       = colors.HexColor('#f5f4f3')
-SURFACE_RGBA  = 'rgba(0,0,0,0.03)'
 
-# ReportLab table colors
-TABLE_HEADER_COLOR = ACCENT
-TABLE_HEADER_TEXT  = colors.white
-TABLE_ROW_EVEN     = colors.white
-TABLE_ROW_ODD      = BG_SURFACE
+# Table colors (derived from cascade tiers — NOT from ACCENT)
+TABLE_HEADER_COLOR = HEADER_FILL          # M tier, low-sat — harmonious with body
+TABLE_HEADER_TEXT  = colors.white          # White text on dark header
+TABLE_ROW_EVEN     = colors.white          # Clean white
+TABLE_ROW_ODD      = TABLE_STRIPE          # L tier, very subtle stripe
 ```
 
 **Options:**
 - `--mode minimal` (default, recommended for 50%+ of documents) | `dark` | `pastel` | `jewel` | `light`
 - `--harmony auto` (default, recommended) | `complementary` | `split_complementary` | `analogous` | `triadic` | `monochrome`
-- `--format python` (default) | `json` | `css`
+- `--format reportlab` (recommended) | `json` | `css` | `summary`
 - `--seed <int>` - for reproducible palettes across regenerations
 
 **⚠️ FORBIDDEN:**
@@ -80,20 +182,25 @@ TABLE_ROW_ODD      = BG_SURFACE
 - ❌ Using `colors.red`, `colors.blue`, or any ReportLab named color for design elements
 - ❌ Skipping this step and picking colors "that look good"
 - ❌ Using different palettes for different sections of the same document
+- ❌ Using `ACCENT` (XS tier, high saturation) for table headers — use `HEADER_FILL` (M tier)
+- ❌ Using the old `palette.generate` — always use `palette.cascade`
 
-**✅ The ONLY acceptable way to get colors:** Run `palette.generate`, copy the output.
+**✅ The ONLY acceptable way to get colors:** Run `palette.cascade`, copy the output.
 
 ### 2b. Color Application Rules
 
-| Element | Color Source | Notes |
-|---------|-------------|-------|
-| Table headers | ACCENT (bg) + white (text) | High contrast required |
-| Table odd rows | BG_SURFACE at 50% opacity | Subtle striping |
-| Section titles | ACCENT or TEXT_PRIMARY | Match heading hierarchy |
-| Body text | TEXT_PRIMARY | Never use pure #000000 |
-| Muted/meta text | TEXT_MUTED | Dates, captions, footnotes |
-| Horizontal rules | ACCENT at 30% opacity | Thin, unobtrusive |
-| Chart colors | Derive from ACCENT (see charts.md) | Consistent with palette |
+| Element | Color Source | Tier | Notes |
+|---------|-------------|------|-------|
+| Table headers | `HEADER_FILL` (bg) + white (text) | M | Low-sat, harmonious with body |
+| Table odd rows | `TABLE_STRIPE` | L | Very subtle same-hue stripe |
+| Table even rows | `colors.white` | — | Clean white |
+| Section titles | `HEADER_FILL` or `TEXT_PRIMARY` | M/text | Match heading hierarchy |
+| Body text | `TEXT_PRIMARY` | text | Never use pure #000000 |
+| Muted/meta text | `TEXT_MUTED` | text | Dates, captions, footnotes |
+| Horizontal rules | `BORDER` at 30% opacity | S | Thin, unobtrusive |
+| Chart colors | `ACCENT` → `ACCENT_2` → `HEADER_FILL` → `ICON` | XS/M/S | Series colors (see charts.md) |
+| Badges / tags | `ACCENT` | XS | Small area, high sat OK |
+| Card backgrounds | `CARD_BG` | L | Container fills |
 
 ### 2c. Forbidden
 
@@ -130,6 +237,64 @@ Parse raw text and categorize content into visual roles:
 - Aim for at least 1 visual element (table/chart/callout) per 2-3 pages of body text
 - Dense text walls are the #1 sign of poor report design
 
+### 3c. Content Sanitization for External Sources (MANDATORY when source is PDF/OCR/web)
+
+When content is extracted from an external PDF, OCR output, or web scrape, it may contain invisible garbage characters that cause garbled rendering. **You MUST sanitize the text content before writing it into any `Paragraph()` or `canvas.drawString()`.**
+
+This is different from `code.sanitize` (which cleans Python source code). Content sanitization cleans the **text data itself**.
+
+```python
+import re
+
+def content_sanitize(text: str) -> str:
+    """Strip invisible/control chars from externally-sourced text."""
+    # Remove control chars (except \n \t)
+    text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
+    # Remove zero-width chars
+    text = re.sub(r'[\u200b-\u200f\u2028-\u202f\u2060\ufeff]', '', text)
+    # Remove replacement char (upstream encoding error)
+    text = text.replace('\ufffd', '')
+    # Remove variation selectors
+    text = re.sub(r'[\ufe00-\ufe0f]', '', text)
+    # Remove private use area chars
+    text = re.sub(r'[\ue000-\uf8ff]', '', text)
+    return text
+```
+
+**When to use:**
+| Source | Must sanitize? |
+|--------|---------------|
+| User typed text in prompt | No (usually clean) |
+| Extracted from PDF via `pdf.py extract.text` | **YES** |
+| OCR output | **YES** |
+| Web scrape / HTML strip | **YES** |
+| LLM-generated content | No (usually clean) |
+
+⚠️ **Do NOT confuse** `code.sanitize` (Step 6, cleans Python code) with `content_sanitize()` (Step 3, cleans text data). They solve different problems.
+
+---
+
+## Step 3.5: NUMBERING — 正文才是第一章 (MANDATORY)
+
+> ⚠️ **封面、目录、摘要、前言都不是章节。正文第一节 = 第一章/Chapter 1，永远。** Outline 的 `index` 是排序序号，不是章节号。混淆两者会导致文档从“第三章”或“第四章”开始。
+
+**写代码前必须输出编号映射表：**
+
+```
+| Outline Index | Type    | Chapter # | Title            |
+|---------------|---------|-----------|------------------|
+| 1             | cover   | —         | 封面               |
+| 2             | toc     | —         | 目录               |
+| 3             | content | 第一章    | 概要               |
+| 4             | content | 第二章    | 引言               |
+| ...           | ...     | ...       | ...              |
+```
+
+**铁律：**
+- cover/toc/back_cover/摘要/前言 → 无编号
+- 第一个 content 节点 = 第一章，永远从 1 开始
+- `page_title()` 必须用此表的章节号，不是 Outline `index`
+
 ---
 
 ---
@@ -142,9 +307,25 @@ Three rules for safe character handling in ReportLab PDFs:
 
 **b) Emoji**: ReportLab cannot render emoji. If content contains emoji, use Creative brief (HTML + Playwright).
 
-**c) Font fallback for mixed CJK/Latin text**: After registering fonts, call `install_font_fallback()` once. This automatically wraps missing-glyph characters in `<font>` tags inside every `Paragraph()`. No manual `<font name="...">` wrapping needed for mixed Chinese-English text.
+**c) Font fallback for mixed CJK/Latin text (MANDATORY)**: After registering fonts, you **MUST** call `install_font_fallback()` once. This automatically wraps missing-glyph characters in `<font>` tags inside every `Paragraph()`. No manual `<font name="...">` wrapping needed for mixed Chinese-English text. **Skipping this call is the #1 cause of Helvetica garbled text in CJK documents.**
 
-Mathematical/relational operators (×, ÷, ±, ≤, √, ∑, ≅, ∫, π, ∠, Δ, etc.) are safe to use as literal characters in `Paragraph()` - both SimHei and Times New Roman have these glyphs.
+**d) canvas.drawString / drawRightString CJK font rule (MANDATORY)**: `install_font_fallback()` only works on `Paragraph()` objects. It does NOT affect `canvas.drawString()` / `canvas.drawRightString()` / `canvas.drawCentredString()`. If the text passed to any `canvas.draw*String()` call contains CJK characters (Chinese/Japanese/Korean), you **MUST** call `canvas.setFont('NotoSerifSC', size)` (or another registered CJK font) before drawing. Using FreeSerif / Helvetica / Times for CJK canvas text = garbled output.
+
+```python
+# ❌ WRONG — FreeSerif has no CJK glyphs, '科大讯飞' will be garbled
+canvas.setFont('FreeSerif-Italic', 8)
+canvas.drawRightString(x, y, 'SZSE: 002230  ·  科大讯飞')
+
+# ✅ CORRECT — use CJK font for mixed text
+canvas.setFont('NotoSerifSC', 8)
+canvas.drawRightString(x, y, 'SZSE: 002230  ·  科大讯飞')
+
+# ✅ ALSO CORRECT — pure English text can use FreeSerif
+canvas.setFont('FreeSerif-Italic', 8)
+canvas.drawString(x, y, 'Prepared by Strategy Advisory Team')
+```
+
+Mathematical/relational operators (×, ÷, ±, ≤, √, ∑, ≅, ∫, π, ∠, Δ, etc.) are safe to use as literal characters in `Paragraph()` - both Noto Sans SC and FreeSerif have these glyphs.
 
 | Need | Correct Method | Correct Example |
 |------|---------------|---------|
@@ -161,10 +342,19 @@ from reportlab.lib.enums import TA_LEFT, TA_CENTER, TA_JUSTIFY
 
 body_style = ParagraphStyle(
     name="ENBodyStyle",
-    fontName="Times New Roman",
+    fontName="FreeSerif",
     fontSize=10.5,
     leading=18,
     alignment=TA_JUSTIFY,
+)
+
+# CJK Body (Chinese documents)
+cn_body_style = ParagraphStyle(
+    name="CNBodyStyle",
+    fontName="NotoSerifSC", fontSize=10.5, leading=18,
+    alignment=TA_LEFT,      # ← NEVER TA_JUSTIFY for CJK
+    wordWrap='CJK',         # ← MANDATORY for CJK
+    firstLineIndent=2*4.5*mm,
 )
 
 # Superscript: area unit
@@ -208,11 +398,12 @@ Paragraph('When ∠ A = 90°, AB ⊥ AC and ΔABC ≅ ΔDEF', body_style)
 
 | Font Name | Usage | Path |
 |-----------|-------|------|
-| `Microsoft YaHei` | Chinese headings | `/usr/share/fonts/truetype/chinese/msyh.ttf` |
-| `SimHei` | Chinese body text | `/usr/share/fonts/truetype/chinese/SimHei.ttf` |
+| `NotoSerifSC` | **Chinese body text (primary)** |  `/usr/share/fonts/truetype/noto-serif-sc/NotoSerifSC-Regular.ttf` |
+| `NotoSerifSC-Bold` | **Chinese headings (primary)** |  `/usr/share/fonts/truetype/noto-serif-sc/NotoSerifSC-Bold.ttf` |
+| `Noto Sans SC` | Chinese fallback / sans-serif | `/usr/share/fonts/truetype/chinese/NotoSansSC-Regular.ttf` |
+| `Noto Sans SC Bold` | Chinese headings (sans-serif) | `/usr/share/fonts/truetype/chinese/NotoSansSC-Bold.ttf` |
 | `SarasaMonoSC` | Chinese code blocks | `/usr/share/fonts/truetype/chinese/SarasaMonoSC-Regular.ttf` |
-| `Times New Roman` | English text, numbers, tables | `/usr/share/fonts/truetype/english/Times-New-Roman.ttf` |
-| `Calibri` | English alternative | `/usr/share/fonts/truetype/english/calibri-regular.ttf` |
+| `FreeSerif` | English text, numbers, tables | `freefont/FreeSerif.ttf` |
 | `DejaVuSans` | Formulas, symbols, code | `/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf` |
 
 **FORBIDDEN fonts (DO NOT USE):**
@@ -221,46 +412,60 @@ Paragraph('When ∠ A = 90°, AB ⊥ AC and ΔABC ≅ ΔDEF', body_style)
 - ❌ Courier, Courier-Bold
 - ❌ Any font not listed in the table above
 
+> **Font file locations note:** On macOS, font paths may be under `~/.openclaw/workspace/fonts/` or `~/Library/Fonts/` instead of `/usr/share/fonts/`. The registration code below uses a single `FONT_DIR` variable — set it to the correct base path for your system. All font sub-paths (e.g. `truetype/noto-serif-sc/NotoSerifSC-Regular.ttf`) are appended to `FONT_DIR`.
+
 ### Font Registration Template
 ```python
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfbase.pdfmetrics import registerFontFamily
 
-# Chinese fonts
-pdfmetrics.registerFont(TTFont('Microsoft YaHei', '/usr/share/fonts/truetype/chinese/msyh.ttf'))
-pdfmetrics.registerFont(TTFont('SimHei', '/usr/share/fonts/truetype/chinese/SimHei.ttf'))
-pdfmetrics.registerFont(TTFont("SarasaMonoSC", '/usr/share/fonts/truetype/chinese/SarasaMonoSC-Regular.ttf'))
+import platform
+_IS_MAC = platform.system() == 'Darwin'
+if _IS_MAC:
+    FONT_DIR = os.path.expanduser('~/.openclaw/workspace/fonts')
+else:  # Linux
+    FONT_DIR = '/usr/share/fonts'
 
-# English fonts
-pdfmetrics.registerFont(TTFont('Times New Roman', '/usr/share/fonts/truetype/english/Times-New-Roman.ttf'))
-pdfmetrics.registerFont(TTFont('Calibri', '/usr/share/fonts/truetype/english/calibri-regular.ttf'))
+# Chinese fonts — Noto Serif SC (primary, serif, high quality)
+pdfmetrics.registerFont(TTFont('NotoSerifSC', f'{FONT_DIR}/truetype/noto-serif-sc/NotoSerifSC-Regular.ttf'))
+pdfmetrics.registerFont(TTFont('NotoSerifSC-Bold', f'{FONT_DIR}/truetype/noto-serif-sc/NotoSerifSC-Bold.ttf'))
+# Chinese fonts — fallback / sans-serif (static weight files, NOT variable font)
+pdfmetrics.registerFont(TTFont('Noto Sans SC', f'{FONT_DIR}/truetype/chinese/NotoSansSC-Regular.ttf'))
+pdfmetrics.registerFont(TTFont('Noto Sans SC Bold', f'{FONT_DIR}/truetype/chinese/NotoSansSC-Bold.ttf'))
+pdfmetrics.registerFont(TTFont('SarasaMonoSC', f'{FONT_DIR}/truetype/chinese/SarasaMonoSC-Regular.ttf'))
+
+# English fonts — FreeSerif (4 weights)
+pdfmetrics.registerFont(TTFont('FreeSerif', f'{FONT_DIR}/truetype/freefont/FreeSerif.ttf'))
+pdfmetrics.registerFont(TTFont('FreeSerif-Bold', f'{FONT_DIR}/truetype/freefont/FreeSerifBold.ttf'))
+pdfmetrics.registerFont(TTFont('FreeSerif-Italic', f'{FONT_DIR}/truetype/freefont/FreeSerifItalic.ttf'))
+pdfmetrics.registerFont(TTFont('FreeSerif-BoldItalic', f'{FONT_DIR}/truetype/freefont/FreeSerifBoldItalic.ttf'))
 
 # Symbol/Formula font
-pdfmetrics.registerFont(TTFont("DejaVuSans", '/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf'))
+pdfmetrics.registerFont(TTFont('DejaVuSans', f'{FONT_DIR}/truetype/dejavu/DejaVuSansMono.ttf'))
 
-# CRITICAL: Register font families to enable <b>, <super>, <sub> tags
-registerFontFamily('Microsoft YaHei', normal='Microsoft YaHei', bold='Microsoft YaHei')
-registerFontFamily('SimHei', normal='SimHei', bold='SimHei')
-registerFontFamily('Times New Roman', normal='Times New Roman', bold='Times New Roman')
-registerFontFamily('Calibri', normal='Calibri', bold='Calibri')
+# CRITICAL: Register font families to enable <b>, <i>, <super>, <sub> tags
+registerFontFamily('NotoSerifSC', normal='NotoSerifSC', bold='NotoSerifSC-Bold')
+registerFontFamily('Noto Sans SC', normal='Noto Sans SC', bold='Noto Sans SC Bold')
+registerFontFamily('FreeSerif', normal='FreeSerif', bold='FreeSerif-Bold', italic='FreeSerif-Italic', boldItalic='FreeSerif-BoldItalic')
 registerFontFamily('DejaVuSans', normal='DejaVuSans', bold='DejaVuSans')
 ```
 
 ### Font Configuration by Document Type
 
 **For Chinese PDFs:**
-- Body text: `SimHei` or `Microsoft YaHei`
-- Headings: `Microsoft YaHei` (MUST use for Chinese headings)
+- Body text: `NotoSerifSC` (primary) — serif font with sharp, elegant strokes
+- Headings: `NotoSerifSC-Bold` (MUST use for Chinese headings) — same family, bolder weight for clear hierarchy
 - Code blocks: `SarasaMonoSC`
 - Formulas/symbols: `DejaVuSans`
-- **In tables: ALL Chinese content and numbers MUST use `SimHei`**
+- **In tables: ALL Chinese content MUST use `NotoSerifSC`, numbers use `FreeSerif`**
+- Fallback: `Noto Sans SC` (if NotoSerifSC unavailable)
 
 **For English PDFs:**
-- Body text: `Times New Roman`
-- Headings: `Times New Roman` (MUST use for English headings)
+- Body text: `FreeSerif`
+- Headings: `FreeSerif` (MUST use for English headings)
 - Code blocks: `DejaVuSans`
-- **In tables: ALL English content and numbers MUST use `Times New Roman`**
+- **In tables: ALL English content and numbers MUST use `FreeSerif`**
 
 **For Mixed Chinese-English PDFs:**
 - Call `install_font_fallback()` once after registering fonts - it automatically wraps characters in `<font>` tags so you don't need to do it manually.
@@ -276,21 +481,25 @@ from pdf import install_font_fallback
 install_font_fallback()
 
 # 3. Just write naturally - no manual <font> wrapping needed!
-en_style = ParagraphStyle(name="EN", fontName="Times New Roman", fontSize=10.5, leading=18)
-cn_style = ParagraphStyle(name="CN", fontName="SimHei", fontSize=10.5, leading=18)
+en_style = ParagraphStyle(name="EN", fontName="FreeSerif", fontSize=10.5, leading=18)
+cn_style = ParagraphStyle(name="CN", fontName="NotoSerifSC", fontSize=10.5, leading=18, wordWrap='CJK')
 
-Paragraph('MySQL、PostgreSQL、Redis', en_style)           # ✅ CJK comma auto-fallback to SimHei
+Paragraph('MySQL、PostgreSQL、Redis', en_style)           # ✅ CJK comma auto-fallback to NotoSerifSC
 Paragraph('Beijing (北京) has 21M people', en_style)       # ✅ CJK chars auto-fallback
 Paragraph('价格:¥2,200~5,800/月', en_style)               # ✅ all CJK chars handled
 Paragraph('《巴黎协定》签署于2015年', en_style)               # ✅ CJK book title marks handled
 ```
 
-**How it works:** `install_font_fallback()` monkey-patches `Paragraph.__init__` to scan each character against the font's `charToGlyph` table. Characters missing from the base font are automatically wrapped in `<font name="FallbackFont">`. The fallback chain is: English fonts → SimHei, Chinese fonts → Times New Roman. For aesthetic optimization, Cyrillic text in SimHei is automatically routed to Times New Roman (serif looks better for Cyrillic).
+**How it works:** `install_font_fallback()` monkey-patches `Paragraph.__init__` to scan each character against the font's `charToGlyph` table. Characters missing from the base font are automatically wrapped in `<font name="FallbackFont">`. The fallback chain is: English fonts → NotoSerifSC (primary) or Noto Sans SC (legacy), Chinese fonts → FreeSerif. For aesthetic optimization, Cyrillic text in NotoSerifSC/Noto Sans SC is automatically routed to FreeSerif (serif looks better for Cyrillic).
 
 ### Chinese Plot PNG Method
 ```python
+import matplotlib
 import matplotlib.pyplot as plt
-plt.rcParams['font.sans-serif'] = ['SimHei']
+matplotlib.font_manager.fontManager.addfont('/usr/share/fonts/truetype/chinese/NotoSansSC-Regular.ttf')
+matplotlib.font_manager.fontManager.addfont('/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf')
+# Noto Sans SC for Chinese, DejaVu Sans catches symbols Noto Sans SC lacks (²³♠ etc.)
+plt.rcParams['font.sans-serif'] = ['Noto Sans SC', 'DejaVu Sans']
 plt.rcParams['axes.unicode_minus'] = False
 ```
 
@@ -385,17 +594,17 @@ ReportLab pushes the **entire block** to the next page, leaving the current page
 
 ### Cover Page: HTML/Playwright Unified Cover System
 
-**⚠️ Report route covers are ALWAYS generated via HTML/Playwright**, using the same 7-template system defined in `typesetting/cover.md`. This ensures visual consistency across all routes (Report, Creative, Academic) and avoids the limitations of ReportLab for complex cover layouts.
+**⚠️ Report route covers are ALWAYS generated via HTML/Playwright**, using the same 5-template system defined in `typesetting/cover.md`. This ensures visual consistency across all routes (Report, Creative, Academic) and avoids the limitations of ReportLab for complex cover layouts.
 
 **Pipeline (Report route):**
 1. Generate **body PDF** via ReportLab (start with TOC or content - **no cover in story[]**)  
-2. Generate **cover HTML** following `typesetting/cover.md` 7-template system  
+2. Generate **cover HTML** following `typesetting/cover.md` 5-template system  
 3. **Run `poster_validate.py check-html` on cover HTML** — fix any ERRORs before rendering (overflow:hidden, font fallback, etc.)  
 4. **Run `cover_validate.js` on cover HTML** — detects text-vs-decorative-line overlaps. Non-zero exit = must fix before proceeding.
    ```bash
    node "$PDF_SKILL_DIR/scripts/cover_validate.js" cover.html
    ```
-5. Render cover HTML → single-page PDF via Playwright (`html2poster.js`) — **NOT `html2pdf-next.js`** (which converts absolute→static and destroys cover layout)  
+5. Render cover HTML → single-page PDF via Playwright (`html2poster.js`) — **NOT `html2pdf-next.js`** (which converts absolute→static and destroys cover layout). **⚠️ MUST pass `--width 794px` for A4 documents** (A4 = 210mm = 794px @96dpi). Without this, `html2poster.js` defaults to 720px (=540pt), which is narrower than A4 (595pt) and causes page size mismatch after merging with the body PDF.  
 6. **Merge: insert cover as page 0** of body PDF using pypdf → output single final PDF
 
 > **Why not ReportLab covers?** ReportLab is excellent for structured content (tables, paragraphs, flowables) but painful for visual design (geometric accents, precise absolute positioning, web fonts). HTML/CSS handles these natively. One cover system, one visual standard, zero inconsistency.
@@ -429,12 +638,21 @@ Build the ReportLab document starting directly with TOC or first section. **Do N
 ```python
 # Body PDF - starts with TOC or first section, NO cover
 story = []
-# story.append(toc)  # if applicable
+
+# ⚠️ If document has TOC: use TocDocTemplate + multiBuild (see TOC Gate above)
+# If no TOC: use SimpleDocTemplate + build
+
+# WITH TOC (most reports):
+# doc = TocDocTemplate(output, pagesize=A4, ...)
+# story.append(toc)
 # story.append(PageBreak())
 # story.append(first_section_content)
-# ...
-doc.build(story)
-# Output: body.pdf (no cover)
+# doc.multiBuild(story)
+
+# WITHOUT TOC:
+# doc = SimpleDocTemplate(output, pagesize=A4, ...)
+# story.append(first_section_content)
+# doc.build(story)
 ```
 
 #### Step 2: Generate Cover PDF via html2poster.js
@@ -468,7 +686,7 @@ def render_cover(html_path, pdf_path):
 
 **Insertion script (single output PDF):**
 ```python
-from pypdf import PdfReader, PdfWriter, Transformation
+from pypdf import PdfReader, PdfWriter
 
 A4_W, A4_H = 595.28, 841.89  # A4 in points
 
@@ -477,10 +695,7 @@ def normalize_page_to_a4(page):
     box = page.mediabox
     w, h = float(box.width), float(box.height)
     if abs(w - A4_W) > 2 or abs(h - A4_H) > 2:
-        sx, sy = A4_W / w, A4_H / h
-        page.add_transformation(Transformation().scale(sx=sx, sy=sy))
-        page.mediabox.lower_left = (0, 0)
-        page.mediabox.upper_right = (A4_W, A4_H)
+        page.scale_to(A4_W, A4_H)
     return page
 
 def insert_cover(cover_pdf, body_pdf, output_pdf):
@@ -499,9 +714,9 @@ def insert_cover(cover_pdf, body_pdf, output_pdf):
 
 > **⚠️ Size pitfall:** Playwright `page.pdf(width='794px', height='1123px')` output PDF dimensions may differ from A4 (595.28×841.89pt) by 1-2pt. **Do not use PIL Image.save('x.pdf')** for PNG→PDF conversion — DPI mapping causes severe size errors. You must call `normalize_page_to_a4()` to unify dimensions before insertion.
 
-**Cover HTML template reference**: See `typesetting/cover.md` for the complete 7-Layout System with variants, typography scale, and bounding box rules.
+**Cover HTML template reference**: See `typesetting/cover.md` for the complete 5-Layout System with variants, typography scale, and bounding box rules.
 
-**→ Full cover spec: `typesetting/cover.md`** - read it before designing any cover.
+**→ MUST READ: `typesetting/cover.md`** — read the complete 5-Layout System with variants, typography scale, and bounding box rules before writing any cover HTML.
 
 **Cover design rules (summary - see cover.md for details):**
 - Page size: `width: 794px; height: 1123px` (A4 at 96dpi)
@@ -511,8 +726,8 @@ def insert_cover(cover_pdf, body_pdf, output_pdf):
 - Primary color used only for text, lines, geometric accents - never as large-area background
 - Sophistication = whitespace + typography + restrained geometric accents
 
-**Cover Constitution (7-Layout System):**
-- **Pick a layout (1-7)** from `typesetting/cover.md` that matches the document tone. No global default - every selection must be a deliberate design decision. Layout 7 for government/bidding/proposal documents.
+**Cover Constitution (5-Layout System):**
+- **Pick a layout (01/03/04/06/07)** from `typesetting/cover.md` that matches the document tone. No global default - every selection must be a deliberate design decision.
 - **Maximum 4 components** on any cover. Typical recipe: Title + subtitle + 1 geometric accent + metadata.
 - **Typography Scale**: Title ≈ 45pt, Subtitle ≈ 25pt, Meta ≥ 18pt (never below 14pt). Tiny text = FAIL.
 - **Background layer (optional)**: See `typesetting/cover-backgrounds.md` for 3 recipes (A=极简弧线, B=工程十字轴+立柱, C=锐角切割+出血文字). Background renders BELOW all foreground content at 2-5% opacity.
@@ -520,15 +735,7 @@ def insert_cover(cover_pdf, body_pdf, output_pdf):
 - **Bounding Box spatial dispersion**: Group elements into 2-3 bounding boxes at opposite regions (e.g., top-left + bottom-right). Never cluster everything into middle 40%.
 - **Safe Zone**: 12% top/bottom, 14% left/right padding on cover pages.
 - **No body text on cover**: Cover = title + subtitle + date + optional geometric decoration. All content goes to page 2+.
-
-### ⚠️ Cover Page Isolation Rule (MANDATORY)
-
-**The cover page must ALWAYS be on its own page.** Cover content and subsequent content (TOC, body text, etc.) must NEVER appear on the same page. This is a hard rule.
-
-- **Report route (HTML/Playwright cover)**: The cover is a separate rendered page inserted as page 0 via pypdf - isolation is inherent in the merge pipeline
-- **Creative route**: Cover is part of the same HTML document but on its own `<section>` with page-break - isolation is handled by CSS
-
-If a generated PDF shows cover + TOC on the same page, it is a **critical bug** - regenerate immediately.
+- **Cover page isolation**: Cover NEVER shares a page with TOC or body content. In Report route this is inherent (separate PDFs merged via pypdf). If output shows cover + TOC on same page = **critical bug**, regenerate immediately.
 
 ### Alignment and Typography
 - **CJK body**: Use `TA_LEFT` + 2-char indent. Headings: no indent.
@@ -536,12 +743,12 @@ If a generated PDF shows cover + TOC on the same page, it is a **critical bug** 
 - **Line height**: 1.5-1.6 (leading at **1.4x font size minimum**, recommended 1.5x for CJK)
   - CJK characters are taller than Latin - 1.2x causes cramped lines
   - Quick reference: 10pt→14pt min/18pt rec; 14pt→20pt min/22pt rec; 36pt→50pt min/54pt rec
-- **⛔ Prohibited: fixed `rowHeights` in Table()**. Use `TOPPADDING` / `BOTTOMPADDING` to control row spacing. Fixed rowHeights cause content overflow clipping - the text renders but gets invisibly cut off.
+- ** Prohibited: fixed `rowHeights` in Table()**. Use `TOPPADDING` / `BOTTOMPADDING` to control row spacing. Fixed rowHeights cause content overflow clipping - the text renders but gets invisibly cut off.
 - **CRITICAL: Alignment Selection Rule**:
   - Use `TA_JUSTIFY` only when ALL of:
     * Text is predominantly English (≥ 90%)
     * Column width is sufficiently wide (A4 single-column body)
-    * Font: Western fonts (Times New Roman / Calibri)
+    * Font: Western fonts (FreeSerif)
     * Chinese content: None or negligible
   - Otherwise, always default to `TA_LEFT`
   - For Chinese text, always add `wordWrap='CJK'` to ParagraphStyle
@@ -559,23 +766,26 @@ If a generated PDF shows cover + TOC on the same page, it is a **critical bug** 
 
 ### Standard Table Color Scheme (MUST USE for ALL tables)
 
-> **Colors MUST come from the palette generated in Step 2.** The values below are examples - replace them with your actual palette output.
+> **Colors MUST come from the `palette.cascade` output (Step 2).** The values below are variable names - they are populated by the cascade palette, never hardcoded.
 
 ```python
-# Colors from design_engine.py palette (Step 2) - NEVER hardcode these
-TABLE_HEADER_COLOR = ACCENT               # From palette --c-accent
-TABLE_HEADER_TEXT = colors.white           # White text for header (fixed)
-TABLE_ROW_EVEN = colors.white              # White for even rows
-TABLE_ROW_ODD = BG_SURFACE                 # From palette --c-mid (light stripe)
+# Colors from palette.cascade (Step 2) — NEVER hardcode hex values
+# Table header uses HEADER_FILL (M tier, S ≤ 0.30) — NOT ACCENT (XS tier, too vivid)
+TABLE_HEADER_COLOR = HEADER_FILL          # M tier — low-sat, blends with document body
+TABLE_HEADER_TEXT  = colors.white          # White text for header (fixed)
+TABLE_ROW_EVEN     = colors.white          # White for even rows
+TABLE_ROW_ODD      = TABLE_STRIPE          # L tier — very subtle same-hue stripe
 ```
+
+> **⚠️ Why NOT `ACCENT` for table headers?** `ACCENT` is XS tier (S = 0.50-0.75), designed for tiny elements like badges and tags. Table headers occupy 5-20% of visual area (M tier). Using high-saturation `ACCENT` on table headers creates jarring color blocks that clash with the low-saturation body. `HEADER_FILL` (S ≤ 0.30) is specifically designed for this area ratio.
 
 ### Table Rules
 - Caption must be centered, added immediately after the table
 - Entire table must be centered on the page
-- **Header Row**: Dark background (from palette `header_fill`), white bold text
+- **Header Row**: Dark background (from palette `HEADER_FILL`, M tier), white bold text
 - **Cell Margins**: Left/Right at least 120-200 twips
 - **Alignment**: Each body element within the same table must be aligned the same method
-- **Color consistency**: All tables in one PDF must use the same color scheme
+- **Color consistency**: All tables in one PDF must use the same `HEADER_FILL` + `TABLE_STRIPE` scheme
 - **Spacing**: `Spacer(1, 18)` → Table → `Spacer(1, 6)` → Caption → `Spacer(1, 18)`
 
 ### Table Centering Enforcement (MANDATORY)
@@ -650,11 +860,11 @@ from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT, TA_JUSTIFY
 
 header_style = ParagraphStyle(
-    name='TableHeader', fontName='Times New Roman', fontSize=11,
+    name='TableHeader', fontName='FreeSerif', fontSize=11,
     textColor=colors.white, alignment=TA_CENTER
 )
 cell_style = ParagraphStyle(
-    name='TableCell', fontName='Times New Roman', fontSize=10,
+    name='TableCell', fontName='FreeSerif', fontSize=10,
     textColor=colors.black, alignment=TA_CENTER
 )
 
@@ -786,7 +996,7 @@ To use `<b>`, `<super>`, `<sub>` tags, you **must**:
 text = Paragraph("Professors (K.G.\u00A0Palepu) proposed...", style)
 
 # Use wordWrap='CJK' for proper Chinese typography
-styles.add(ParagraphStyle(name='BodyStyle', fontName='SimHei', fontSize=10.5,
+styles.add(ParagraphStyle(name='BodyStyle', fontName='Noto Sans SC', fontSize=10.5,
     leading=18, alignment=TA_LEFT, wordWrap='CJK'))
 
 # Use <br/> for intentional line breaks (NOT \n)
@@ -825,8 +1035,8 @@ story = []
 
 toc = TableOfContents()
 toc.levelStyles = [
-    ParagraphStyle(name='TOCHeading1', fontSize=14, leftIndent=20, fontName='Times New Roman'),
-    ParagraphStyle(name='TOCHeading2', fontSize=12, leftIndent=40, fontName='Times New Roman'),
+    ParagraphStyle(name='TOCHeading1', fontSize=14, leftIndent=20, fontName='FreeSerif'),
+    ParagraphStyle(name='TOCHeading2', fontSize=12, leftIndent=40, fontName='FreeSerif'),
 ]
 story.append(Paragraph("<b>Table of Contents</b>", styles['Title']))
 story.append(toc)
@@ -885,7 +1095,7 @@ from reportlab.lib.units import inch
 doc = SimpleDocTemplate("report.pdf", pagesize=A4,
                        leftMargin=0.75*inch, rightMargin=0.75*inch)
 styles = getSampleStyleSheet()
-styles['Heading1'].fontName = 'Times New Roman'
+styles['Heading1'].fontName = 'FreeSerif'
 styles['Heading1'].textColor = colors.black
 
 story = []
@@ -899,9 +1109,9 @@ optimal_dot_count = int(dots_column_width / 4.5)  # ~4.5pt per dot at 7pt font
 
 # Define styles
 toc_style = ParagraphStyle('TOCEntry', parent=styles['Normal'],
-                          fontName='Times New Roman', fontSize=11, leading=16)
+                          fontName='FreeSerif', fontSize=11, leading=16)
 dots_style = ParagraphStyle('LeaderDots', parent=styles['Normal'],
-                           fontName='Times New Roman', fontSize=7, leading=16)
+                           fontName='FreeSerif', fontSize=7, leading=16)
 
 # Build TOC
 toc_data = [
@@ -1030,7 +1240,7 @@ story.append(img)                       # block-level Flowable
 
 Pie charts become ellipses, radar charts become diamonds, photos get stretched if you set arbitrary width/height.
 
-**→ Full overflow prevention spec: `typesetting/overflow.md`** - read for the complete bounding box system.
+**→ MUST READ: `typesetting/overflow.md`** — read the complete bounding box system before writing layout code.
 
 ```python
 from PIL import Image as PILImage
@@ -1152,7 +1362,7 @@ python generate_pdf.py  # Missing sanitization!
 
 ## Debug Tips for Layout Issues
 
-**→ Full overflow prevention spec: `typesetting/overflow.md`** - read it for the complete bounding box system, two-pass rendering, fallback strategies, and all three route implementations.
+**→ MUST READ: `typesetting/overflow.md`** — read the complete bounding box system, two-pass rendering, fallback strategies, and all three route implementations.
 
 ```python
 from reportlab.platypus import HRFlowable
@@ -1169,228 +1379,11 @@ story.append(caption)
 
 ---
 
-## Resume / CV Template (ATS-Friendly)
+## Resume / CV
 
-Single-column, clean layout optimised for Applicant Tracking Systems (ATS). No graphics, no sidebars, no colour blocks - just well-structured text that parses perfectly by HR software.
+Resume/CV content has been moved to a dedicated brief: **`briefs/resume.md`**
 
-**When to use this template:**
-- Applying to corporate jobs through online portals
-- Any scenario where the PDF will be machine-parsed before a human reads it
-- When the recruiter explicitly asks for "a standard resume"
-
-**When NOT to use (use Academic brief instead):**
-- Creative/design industry positions → Academic brief (AltaCV-style)
-- Academic CV with publications → Academic brief (Academic CV)
-
-### Resume Design Rules
-- **Target 1 page** unless user specifies otherwise
-- **Margins**: `left=1.5cm, right=1.5cm, top=1.5cm, bottom=1.5cm`
-- **No cover page** - content starts immediately
-- **No TOC** - too short for table of contents
-- **Font**: Times New Roman (English) or SimHei (Chinese)
-- **Body font size**: 10-10.5pt; Name: 22-26pt; Section titles: 13-14pt
-- **⚠️ Minimum font size: 12px (9pt) - HARD FLOOR.** No text in the entire resume may render smaller than 12px. This includes contact info, meta text, footnotes, and captions. Anything below 12px is unreadable in print and fails accessibility checks.
-- **Section separator**: thin horizontal rule (`HRFlowable`)
-- **Bullet style**: `•` with tight spacing
-
-### Resume Line-Break Rules (Language-Aware)
-- **English**: Prefer breaking at word boundaries (spaces, hyphens). If a long word must be split to avoid excessive whitespace, break at a valid syllable boundary and insert a hyphen (`-`) - this is standard typographic practice (e.g., `experi-\nence`, `develop-\nment`). ReportLab supports `wordWrap='CJK'` only for CJK content; for English use default paragraph wrapping with `allowWidows=0, allowOrphans=0`.
-- **Chinese/CJK**: Break allowed between any two CJK characters. Never break between a CJK character and its adjacent punctuation (、。,)》 etc. must stay with the preceding character).
-- **Mixed content** (e.g., "Python 开发工程师"): Break at CJK boundaries or English word boundaries. Never split an English word in a CJK paragraph unless hyphenated.
-- **Contact line**: Email, phone, location separated by `|` or `·`. Each segment must stay on one line - if too long, move to next line at the separator, not mid-segment.
-- **Dates and ranges**: "Jan 2022 - Present" must stay as one unit. Never break a date range across lines.
-
-### Resume Page-Fill Rules (Anti-Blank-Space)
-- **Goal: Fill ≥85% of the page height.** Content should reach at least the bottom quarter of the page. A resume that stops at 60% height with blank space below = FAIL.
-- **Adaptive spacing strategy** (apply in order until page is ≥85% filled):
-  1. Increase `spaceBefore` / `spaceAfter` on section headers (from 10pt up to 18pt)
-  2. Increase `leading` (line height) on body text (from 14pt up to 18pt)
-  3. Increase body `fontSize` by 0.5-1pt (from 10pt up to 11.5pt max)
-  4. Add a "Professional Summary" or "Key Achievements" section if none exists
-  5. Increase margins slightly (from 1.5cm up to 2cm) to reduce line width and push content downward
-- **Never leave a visible blank area > 3cm at the bottom of the page.**
-- **If content overflows to page 2**: do the reverse - reduce spacing, tighten leading (min 12pt), reduce fontSize (min 9pt / 12px), before removing content.
-
-### Complete Resume Template
-
-```python
-from reportlab.lib.pagesizes import A4
-from reportlab.lib.units import cm, mm
-from reportlab.lib.styles import ParagraphStyle
-from reportlab.lib.enums import TA_LEFT, TA_CENTER
-from reportlab.lib import colors
-from reportlab.platypus import (
-    SimpleDocTemplate, Paragraph, Spacer, HRFlowable, Table, TableStyle
-)
-from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.ttfonts import TTFont
-from reportlab.pdfbase.pdfmetrics import registerFontFamily
-
-# ── Font Registration ──
-pdfmetrics.registerFont(TTFont('TimesNewRoman', '/usr/share/fonts/truetype/english/Times-New-Roman.ttf'))
-registerFontFamily('TimesNewRoman', normal='TimesNewRoman', bold='TimesNewRoman')
-# For Chinese resumes, also register SimHei:
-# pdfmetrics.registerFont(TTFont('SimHei', '/usr/share/fonts/truetype/chinese/SimHei.ttf'))
-# registerFontFamily('SimHei', normal='SimHei', bold='SimHei')
-
-# ── Styles ──
-# ACCENT must come from palette.generate (Step 2)
-# Run: python3 "$PDF_SKILL_DIR/scripts/pdf.py" palette.generate --title "Resume" --mode minimal
-ACCENT = colors.HexColor('<accent from palette>')  # Replace with palette output
-
-name_style = ParagraphStyle(
-    'ResumeName', fontName='TimesNewRoman', fontSize=24,
-    leading=28, alignment=TA_CENTER, spaceAfter=2
-)
-contact_style = ParagraphStyle(
-    'ResumeContact', fontName='TimesNewRoman', fontSize=10,
-    leading=14, alignment=TA_CENTER, textColor=TEXT_MUTED,  # From palette --c-muted
-    spaceAfter=8
-)
-section_title_style = ParagraphStyle(
-    'ResumeSectionTitle', fontName='TimesNewRoman', fontSize=13,
-    leading=16, spaceBefore=10, spaceAfter=4,
-    textColor=ACCENT
-)
-job_title_style = ParagraphStyle(
-    'ResumeJobTitle', fontName='TimesNewRoman', fontSize=11,
-    leading=14, spaceAfter=1
-)
-job_meta_style = ParagraphStyle(
-    'ResumeJobMeta', fontName='TimesNewRoman', fontSize=10,
-    leading=13, textColor=TEXT_MUTED, spaceAfter=4  # From palette --c-muted
-)
-bullet_style = ParagraphStyle(
-    'ResumeBullet', fontName='TimesNewRoman', fontSize=10,
-    leading=14, leftIndent=14, bulletIndent=0,
-    spaceBefore=1, spaceAfter=1
-)
-body_style = ParagraphStyle(
-    'ResumeBody', fontName='TimesNewRoman', fontSize=10,
-    leading=14, spaceAfter=2
-)
-
-# ── Helpers ──
-def section_header(title):
-    """Section title + thin rule separator."""
-    return [
-        Paragraph(f'<b>{title}</b>', section_title_style),
-        HRFlowable(width='100%', thickness=0.8, color=ACCENT,
-                    spaceBefore=0, spaceAfter=6),
-    ]
-
-def experience_entry(title, company, dates, location, bullets):
-    """One work experience block."""
-    elements = [
-        Paragraph(f'<b>{title}</b>', job_title_style),
-        Paragraph(f'{company}  |  {dates}  |  {location}', job_meta_style),
-    ]
-    for b in bullets:
-        elements.append(Paragraph(f'• {b}', bullet_style))
-    elements.append(Spacer(1, 4))
-    return elements
-
-def education_entry(degree, school, dates, details=None):
-    """One education block."""
-    elements = [
-        Paragraph(f'<b>{degree}</b>', job_title_style),
-        Paragraph(f'{school}  |  {dates}', job_meta_style),
-    ]
-    if details:
-        elements.append(Paragraph(details, body_style))
-    elements.append(Spacer(1, 4))
-    return elements
-
-def skills_row(categories):
-    """
-    Skills as compact label: value pairs.
-    categories = [('Programming', 'Python, Java, C++'), ('Tools', 'Git, Docker')]
-    """
-    elements = []
-    for cat, vals in categories:
-        elements.append(Paragraph(f'<b>{cat}:</b>  {vals}', body_style))
-    return elements
-
-# ── Build Document ──
-doc = SimpleDocTemplate(
-    'resume.pdf', pagesize=A4,
-    leftMargin=1.5*cm, rightMargin=1.5*cm,
-    topMargin=1.5*cm, bottomMargin=1.5*cm,
-    title='Resume - Your Name',
-    author='Z.ai', creator='Z.ai'
-)
-
-story = []
-
-# Header
-story.append(Paragraph('<b>YOUR NAME</b>', name_style))
-story.append(Paragraph(
-    'email@example.com  |  +86 138-0000-0000  |  Shanghai, China  |  github.com/yourname',
-    contact_style
-))
-
-# Summary
-story.extend(section_header('PROFESSIONAL SUMMARY'))
-story.append(Paragraph(
-    'Results-driven software engineer with 5+ years of experience in backend systems, '
-    'distributed computing, and cloud-native architectures. Led a team of 8 engineers '
-    'delivering a real-time data pipeline processing 2M+ events/sec.',
-    body_style
-))
-
-# Experience
-story.extend(section_header('WORK EXPERIENCE'))
-story.extend(experience_entry(
-    'Senior Software Engineer', 'Tech Company Inc.', 'Jan 2022 - Present', 'Shanghai',
-    [
-        'Designed and deployed a microservices architecture serving 10M daily active users',
-        'Reduced API latency by 40% through query optimisation and caching strategies',
-        'Mentored 3 junior engineers; established code review standards adopted team-wide',
-    ]
-))
-story.extend(experience_entry(
-    'Software Engineer', 'Startup Co.', 'Jul 2019 - Dec 2021', 'Beijing',
-    [
-        'Built real-time recommendation engine using collaborative filtering (CTR +25%)',
-        'Implemented CI/CD pipeline reducing deployment time from 2 hours to 15 minutes',
-    ]
-))
-
-# Education
-story.extend(section_header('EDUCATION'))
-story.extend(education_entry(
-    'M.Sc. Computer Science', 'Tsinghua University', '2017 - 2019',
-    'GPA: 3.8/4.0 | Thesis: Distributed Graph Processing on Heterogeneous Clusters'
-))
-story.extend(education_entry(
-    'B.Eng. Software Engineering', 'Zhejiang University', '2013 - 2017'
-))
-
-# Skills
-story.extend(section_header('SKILLS'))
-story.extend(skills_row([
-    ('Languages', 'Python, Java, Go, SQL, TypeScript'),
-    ('Frameworks', 'Spring Boot, FastAPI, React, Kubernetes, Kafka'),
-    ('Tools', 'Git, Docker, Terraform, AWS (EC2/S3/Lambda), PostgreSQL, Redis'),
-]))
-
-doc.build(story)
-```
-
-### Resume Checklist
-- [ ] **1 page** (unless user says otherwise)
-- [ ] **No cover page, no TOC**
-- [ ] Tight margins (1.5cm all sides)
-- [ ] Name prominent at top (22-26pt)
-- [ ] Contact info single line, centered
-- [ ] Section headers with consistent separator style
-- [ ] Bullets concise - start with action verbs
-- [ ] Quantified achievements (%, $, count)
-- [ ] No photos, no icons, no colour blocks (ATS-safe)
-- [ ] Font: only registered fonts (Times New Roman / SimHei)
-- [ ] **⚠️ Minimum font size 12px (9pt)** - no text smaller than this anywhere
-- [ ] **Line breaks are language-aware** - no mid-word English breaks, no CJK punctuation orphans, no date range splits
-- [ ] **Page fill ≥85%** - no large blank area at bottom. If sparse, increase spacing/leading/font size adaptively
+This brief is automatically loaded when the triage routes to Resume. For ATS-friendly single-column resumes, see that file.
 
 ---
 
@@ -1410,7 +1403,7 @@ doc.build(story)
 | code | Courier 8.5pt + accent left border | Optional language label |
 | divider | Accent 1.2pt rule | Use sparingly |
 | caption | 8.5pt muted, centered | Below images/tables |
-| chart | matplotlib figure saved as PNG → `Image()` flowable | Generate chart in-script, `fig.savefig()` → embed. Set `plt.rcParams['font.sans-serif']=['SimHei']` for CJK. Always `tight_layout()`. **Must follow `typesetting/charts.md` rules**: delete top/right spines, dashed grid 20% opacity, donut default for pie, anti-stacking labels. |
+| chart | matplotlib figure saved as PNG → `Image()` flowable | Generate chart in-script, `fig.savefig()` → embed. Set `plt.rcParams['font.sans-serif']=['Noto Sans SC', 'DejaVu Sans']` for CJK + symbol fallback. Always `tight_layout()`. **Must follow `typesetting/charts.md` rules**: delete top/right spines, dashed grid 20% opacity, donut default for pie, anti-stacking labels. |
 | quote | Body italic + left indent 24pt + muted accent left border 2px | For blockquotes / testimonials |
 | bibliography | Hanging indent (firstLineIndent=-24pt, leftIndent=24pt) | GB/T 7714 or APA format per language |
 | math | Rendered via `<super>` `<sub>` tags in Paragraph | For inline math; complex equations → use academic brief instead |
@@ -1604,11 +1597,11 @@ Use this pattern for extracted metrics - it's visually clean and takes only 5 li
 
 ```python
 stat_style = ParagraphStyle(
-    name='StatBig', fontName='Times New Roman', fontSize=22,
+    name='StatBig', fontName='FreeSerif', fontSize=22,
     leading=26, textColor=ACCENT, alignment=TA_CENTER  # From palette
 )
 label_style = ParagraphStyle(
-    name='StatLabel', fontName='Times New Roman', fontSize=9,
+    name='StatLabel', fontName='FreeSerif', fontSize=9,
     leading=12, textColor=TEXT_MUTED, alignment=TA_CENTER  # From palette
 )
 
@@ -1627,33 +1620,84 @@ callout.setStyle(TableStyle([
 story.append(KeepTogether(callout))
 ```
 
-### Cover Pages (HTML/Playwright)
-When the cover routes through Playwright:
-- Use `Delta_Widget` components for KPIs and metrics.
-- Use `Process_List` components for workflows and timelines.
-- Use `Sidenote_Block` components (in `tufte_report` archetype) for citations and supplementary data.
-- For data-heavy pages, add `data_points` arrays to any component - the engine renders them as content-aware background curves.
-
 ---
 
-## Critical Reminders Checklist
+## Final Checklist (Mandatory before delivery)
 
-Before submitting code, verify:
+### Code & Build
 
 - [ ] **Font restriction**: Only 6 registered fonts used
 - [ ] **Font family registered**: `registerFontFamily()` called for all used fonts
-- [ ] **Mixed language**: `install_font_fallback()` called after font registration (auto handles `<font>` wrapping)
+- [ ] **⚠️ MANDATORY font fallback**: `install_font_fallback()` called after font registration — **#1 cause of Helvetica garbled text (乱码)**
 - [ ] **Rich text tags**: Only inside `Paragraph()` objects
-- [ ] **Table cells**: ALL text wrapped in `Paragraph()`
+- [ ] **Table cells**: ALL text wrapped in `Paragraph()` — no plain strings
 - [ ] **Scientific notation**: Large/small numbers use `<super>` tags
 - [ ] **Chinese text**: `wordWrap='CJK'` in ParagraphStyle
 - [ ] **Line breaks**: Using `<br/>` not `\n`
 - [ ] **Headings**: Bold with `<b>` tags
-- [ ] **Table headers**: White bold text on dark blue (#1F4E79)
-- [ ] **Metadata**: Title matches filename, Author/Creator = "Z.ai"
 - [ ] **Sanitization**: Code sanitized before execution
-- [ ] **Post-build metadata**: `pdf.py meta.brand` called after build
-- [ ] **Post-build blank page cleanup**: `pdf.py pages.clean` called after build
-- [ ] **Glyph check**: `pdf.py font.check` run to verify no missing glyphs
-- [ ] **TOC check**: `pdf.py toc.check` run if document has TOC (entries, pages, links)
-- [ ] **PDF QA scan**: `pdf_qa.py` run to verify page consistency, CJK punctuation, overflow, margins, table centering, font embedding, metadata
+
+### Pagination & Overflow
+
+- [ ] **Last page fill ratio ≥ 40%**: No large blank areas on final page
+- [ ] **Major section 3/4 threshold**: H1 headings must NOT start in bottom 25% of page. Use `CondPageBreak(available_height * 0.25)`
+- [ ] **Tables don't split**: Small tables `break-inside: avoid`. Large tables `thead { display: table-header-group }`
+- [ ] **No orphan headings**: Use `break-after: avoid` / KeepTogether
+- [ ] **sum(colWidths) ≤ available_width**: Verified in code
+- [ ] **Images/charts scaled**: Always `fit_image()` or `max-width: 100%`
+- [ ] **Long tables repeatRows=1**
+- [ ] **CJK wordWrap='CJK'**
+- [ ] **URLs word-break**: `overflow-wrap: break-word`
+
+### Color & Design
+
+- [ ] **Entire document ≤ 5 colors**: Primary + secondary + accent + neutral + background
+- [ ] **All colors from palette**: Secondary/accent derived via lightness/saturation shift
+- [ ] **Table headers use `HEADER_FILL`** (M tier, S ≤ 0.30) — NOT `ACCENT`
+- [ ] **Table stripes use `TABLE_STRIPE`** (L tier, S ≤ 0.15)
+- [ ] **Decorative elements ≤ 3 per page** (cover exempt)
+- [ ] **No rainbow/multi-color schemes**: Single-family palette only
+- [ ] **No decorative borders/textures on body pages**
+- [ ] **2-typeface maximum**
+- [ ] **🚫 NO stock images / clipart / AI decorations**
+
+### Cover
+
+- [ ] **正文编号从 1 开始**: 封面/目录不是章节，Step 3.5 映射表已输出
+- [ ] **Cover default ON** for reports/proposals/analysis ≥ 3 pages
+- [ ] **Single PDF output**: Cover merged as page 0 via pypdf
+- [ ] **Page isolation**: Cover never shares page with TOC/body
+- [ ] **🚫 NEVER use ReportLab for covers** — HTML/Playwright only
+- [ ] **Z-Index Layers**: Layer 0 (bg) → 1 (decorative, CLIPPED) → 2 (lines) → 3 (text)
+- [ ] **No dark/gradient backgrounds**
+- [ ] **Cover whitespace ≥ 60%**
+- [ ] **Cover colors from palette.cascade** `:root` CSS variables
+
+### Tables
+
+- [ ] **ALL tables horizontally centered** (`hAlign='CENTER'`)
+- [ ] **Table width 85-100%** of content area
+- [ ] **Table headers**: White bold text on `HEADER_FILL`
+
+### Charts
+
+- [ ] **No text overlap**: Labels, values, legends collision-free
+- [ ] **Chart-to-text separation**: 24pt above/below, 8pt to caption
+- [ ] **Legend outside chart area**: `bbox_to_anchor`
+- [ ] **Pie → Donut** by default (hole_ratio 60-70%)
+- [ ] **Axis cleanup**: Top/right spines deleted
+
+### Layout
+
+- [ ] **Margin symmetry**: `left_margin == right_margin`
+- [ ] **Full-bleed (Playwright)**: `@page { margin: 0 }`
+- [ ] **Content centering**: No left/right drift
+- [ ] **Anti-void edges**: Content fills ≥ 60%
+
+### Post-Build
+
+- [ ] **Metadata**: `pdf.py meta.brand` — Title matches filename, Author/Creator = "Z.ai"
+- [ ] **Blank page cleanup**: `pdf.py pages.clean`
+- [ ] **Glyph check**: `pdf.py font.check`
+- [ ] **TOC check**: `pdf.py toc.check` (if document has TOC)
+- [ ] **PDF QA scan**: `pdf_qa.py`

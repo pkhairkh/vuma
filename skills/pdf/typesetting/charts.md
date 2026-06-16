@@ -189,6 +189,7 @@ For points that must be highlighted:
 - **Main title**: Left-aligned above the chart, bold, 14-16pt
 - **Subtitle**: Below main title, regular weight, smaller (11-12pt), describes data source/period/units
 - Title and chart body must have clear visual separation (≥16px gap)
+- **⚠️ Caption vs Title rule**: When the chart has an external caption (figure caption / 图注, e.g. “图 1: XXX” below the chart), **do NOT add a title inside the chart** (`ax.set_title()`). The caption already serves as the chart’s identifier — an internal title would duplicate it and waste vertical space. Only add an internal title when the chart is standalone (no caption).
 
 #### Legend Rules
 
