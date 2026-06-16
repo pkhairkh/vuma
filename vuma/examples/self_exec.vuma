@@ -1,0 +1,615 @@
+// Self-Executing Fork+Exec Pipeline — VUMA Meta-Recursive Test
+//
+// A VUMA program that fork()s, the child execve()s *itself* with different
+// arguments, and they communicate via pipes.
+//
+// Mode Detection (via argv[1]):
+//   Parent mode (no args or argv[1] != "child"):
+//     Creates two pipes, forks, child redirects fds and execs itself with
+//     "child" arg. Parent writes "VUMA-SELF-EXEC-TEST" through pipe1, reads
+//     SHA256d hex digest back through pipe2, waits for child, exits with
+//     the first byte of the child's hex output as exit code.
+//
+//   Child mode (argv[1] == "child"):
+//     Reads from stdin (pipe read end after dup2), computes SHA256d,
+//     writes 64-char hex digest + newline to stdout (pipe write end), exits 0.
+//
+// VUMA Concepts Exercised:
+//   - fork() + execve() — process creation and replacement
+//   - pipe() — inter-process communication
+//   - dup2() — fd redirection before exec
+//   - argv layout in memory — constructing execve argument array
+//   - write_u64_le / read_u64_le — pointer arrays built byte-by-byte
+//   - Process coordination — parent writes, child reads after exec
+//   - waitpid() — parent reaps child
+//   - Full SHA256d with all u32 arithmetic masked
+//   - Byte-to-hex conversion, memory cleanup, error checking on syscalls
+//
+// Expected: exit code = ASCII value of first hex char of SHA256d("VUMA-SELF-EXEC-TEST")
+
+// ===========================================================================
+// External C function declarations
+// ===========================================================================
+
+extern "C" {
+    fn pipe(pipefd: Address) -> i64;           // create pipe; pipefd[0]=read, [1]=write
+    fn fork() -> i64;                          // 0 in child, child PID in parent
+    fn dup2(oldfd: i64, newfd: i64) -> i64;    // duplicate fd
+    fn close(fd: i64) -> i64;                  // close file descriptor
+    fn read(fd: i64, buf: Address, count: i64) -> i64;
+    fn write(fd: i64, buf: Address, count: i64) -> i64;
+    fn execve(pathname: Address, argv: Address, envp: Address) -> i64;
+    fn waitpid(pid: i64, status: Address, options: i64) -> i64;
+    fn exit(code: i64);
+    fn strcmp(s1: Address, s2: Address) -> i64; // 0 if equal
+}
+
+// ===========================================================================
+// Helper: u32 right-rotate
+// ===========================================================================
+// VUMA has no built-in rotate; compose from shifts.
+// rotate_right(x, n) = (x >> n) | (x << (32 - n))
+
+fn rotr32(x: u32, n: u32) -> u32 {
+    return ((x >> n) | (x << (32 - n))) & 4294967295;
+}
+
+// ===========================================================================
+// SHA-256 logical functions (FIPS 180-4 Section 4.1.2)
+// ===========================================================================
+
+fn ch(x: u32, y: u32, z: u32) -> u32 {
+    // Constant-time Ch: (x & y) ^ ((x ^ 0xFFFFFFFF) & z)
+    // VUMA has no bitwise NOT; use XOR with 4294967295.
+    return (x & y) ^ ((x ^ 4294967295) & z);
+}
+
+fn maj(a: u32, b: u32, c: u32) -> u32 {
+    return (a & b) ^ (a & c) ^ (b & c);
+}
+
+fn big_sigma0(x: u32) -> u32 {
+    return rotr32(x, 2) ^ rotr32(x, 13) ^ rotr32(x, 22);
+}
+
+fn big_sigma1(x: u32) -> u32 {
+    return rotr32(x, 6) ^ rotr32(x, 11) ^ rotr32(x, 25);
+}
+
+fn small_sigma0(x: u32) -> u32 {
+    return (rotr32(x, 7) ^ rotr32(x, 18) ^ (x >> 3)) & 4294967295;
+}
+
+fn small_sigma1(x: u32) -> u32 {
+    return (rotr32(x, 17) ^ rotr32(x, 19) ^ (x >> 10)) & 4294967295;
+}
+
+// ===========================================================================
+// Read/write u32 from a byte buffer (big-endian, per FIPS 180-4)
+// ===========================================================================
+
+fn read_u32_be(buf: Address, offset: u64) -> u32 {
+    b0: u32 = *(buf + offset);
+    b1: u32 = *(buf + offset + 1);
+    b2: u32 = *(buf + offset + 2);
+    b3: u32 = *(buf + offset + 3);
+    return ((b0 << 24) | (b1 << 16) | (b2 << 8) | b3) & 4294967295;
+}
+
+fn write_u32_be(buf: Address, offset: u64, val: u32) {
+    *(buf + offset) = (val >> 24) & 255;
+    *(buf + offset + 1) = (val >> 16) & 255;
+    *(buf + offset + 2) = (val >> 8) & 255;
+    *(buf + offset + 3) = val & 255;
+}
+
+// ===========================================================================
+// Store/load u32 from W schedule array (stride = 4 bytes)
+// ===========================================================================
+
+fn w_store(w_base: Address, idx: u64, val: u32) {
+    write_u32_be(w_base, idx * 4, val);
+}
+
+fn w_load(w_base: Address, idx: u64) -> u32 {
+    return read_u32_be(w_base, idx * 4);
+}
+
+// ===========================================================================
+// Initialize SHA-256 state H[0..7] (FIPS 180-4 Section 5.3.3)
+// ===========================================================================
+
+fn sha256_init_state(state: Address) {
+    write_u32_be(state, 0,  1779033703);   // 0x6a09e667
+    write_u32_be(state, 4,  3144134277);   // 0xbb67ae85
+    write_u32_be(state, 8,  1013904242);   // 0x3c6ef372
+    write_u32_be(state, 12, 2773480762);   // 0xa54ff53a
+    write_u32_be(state, 16, 1359893119);   // 0x510e527f
+    write_u32_be(state, 20, 2600822924);   // 0x9b05688c
+    write_u32_be(state, 24, 528734635);    // 0x1f83d9ab
+    write_u32_be(state, 28, 1541459225);   // 0x5be0cd19
+}
+
+// ===========================================================================
+// Initialize SHA-256 round constants K[0..63] (FIPS 180-4 Section 4.2.2)
+// ===========================================================================
+
+fn sha256_init_k(k: Address) {
+    write_u32_be(k, 0,   1116352408);   // 0x428a2f98
+    write_u32_be(k, 4,   1899447441);   // 0x71374491
+    write_u32_be(k, 8,   3049323471);   // 0xb5c0fbcf
+    write_u32_be(k, 12,  3921009573);   // 0xe9b5dba5
+    write_u32_be(k, 16,  961987163);    // 0x3956c25b
+    write_u32_be(k, 20,  1508970993);   // 0x59f111f1
+    write_u32_be(k, 24,  2453635748);   // 0x923f82a4
+    write_u32_be(k, 28,  2870763221);   // 0xab1c5ed5
+    write_u32_be(k, 32,  3624381080);   // 0xd807aa98
+    write_u32_be(k, 36,  310598401);    // 0x12835b01
+    write_u32_be(k, 40,  607225278);    // 0x243185be
+    write_u32_be(k, 44,  1426881987);   // 0x550c7dc3
+    write_u32_be(k, 48,  1925078388);   // 0x72be5d74
+    write_u32_be(k, 52,  2162078206);   // 0x80deb1fe
+    write_u32_be(k, 56,  2614888103);   // 0x9bdc06a7
+    write_u32_be(k, 60,  3248222580);   // 0xc19bf174
+    write_u32_be(k, 64,  3835390401);   // 0xe49b69c1
+    write_u32_be(k, 68,  4022224774);   // 0xefbe4786
+    write_u32_be(k, 72,  264347078);    // 0x0fc19dc6
+    write_u32_be(k, 76,  604807628);    // 0x240ca1cc
+    write_u32_be(k, 80,  770255983);    // 0x2de92c6f
+    write_u32_be(k, 84,  1249150122);   // 0x4a7484aa
+    write_u32_be(k, 88,  1555081692);   // 0x5cb0a9dc
+    write_u32_be(k, 92,  1996064986);   // 0x76f988da
+    write_u32_be(k, 96,  2554220882);   // 0x983e5152
+    write_u32_be(k, 100, 2821834349);   // 0xa831c66d
+    write_u32_be(k, 104, 2952996808);   // 0xb00327c8
+    write_u32_be(k, 108, 3210313671);   // 0xbf597fc7
+    write_u32_be(k, 112, 3336571891);   // 0xc6e00bf3
+    write_u32_be(k, 116, 3584528711);   // 0xd5a79147
+    write_u32_be(k, 120, 113926993);    // 0x06ca6351
+    write_u32_be(k, 124, 338241895);    // 0x14292967
+    write_u32_be(k, 128, 666307205);    // 0x27b70a85
+    write_u32_be(k, 132, 773529912);    // 0x2e1b2138
+    write_u32_be(k, 136, 1294757372);   // 0x4d2c6dfc
+    write_u32_be(k, 140, 1396182291);   // 0x53380d13
+    write_u32_be(k, 144, 1695183700);   // 0x650a7354
+    write_u32_be(k, 148, 1986661051);   // 0x766a0abb
+    write_u32_be(k, 152, 2177026350);   // 0x81c2c92e
+    write_u32_be(k, 156, 2456956037);   // 0x92722c85
+    write_u32_be(k, 160, 2730485921);   // 0xa2bfe8a1
+    write_u32_be(k, 164, 2820302411);   // 0xa81a664b
+    write_u32_be(k, 168, 3259730800);   // 0xc24b8b70
+    write_u32_be(k, 172, 3345764771);   // 0xc76c51a3
+    write_u32_be(k, 176, 3516065817);   // 0xd192e819
+    write_u32_be(k, 180, 3600352804);   // 0xd6990624
+    write_u32_be(k, 184, 4094571909);   // 0xf40e3585
+    write_u32_be(k, 188, 275423344);    // 0x106aa070
+    write_u32_be(k, 192, 430227734);    // 0x19a4c116
+    write_u32_be(k, 196, 506948616);    // 0x1e376c08
+    write_u32_be(k, 200, 659060556);    // 0x2748774c
+    write_u32_be(k, 204, 883997877);    // 0x34b0bcb5
+    write_u32_be(k, 208, 958139571);    // 0x391c0cb3
+    write_u32_be(k, 212, 1322822218);   // 0x4ed8aa4a
+    write_u32_be(k, 216, 1537002063);   // 0x5b9cca4f
+    write_u32_be(k, 220, 1747873779);   // 0x682e6ff3
+    write_u32_be(k, 224, 1955562222);   // 0x748f82ee
+    write_u32_be(k, 228, 2024104815);   // 0x78a5636f
+    write_u32_be(k, 232, 2227730452);   // 0x84c87814
+    write_u32_be(k, 236, 2361852424);   // 0x8cc70208
+    write_u32_be(k, 240, 2428436474);   // 0x90befffa
+    write_u32_be(k, 244, 2756734187);   // 0xa4506ceb
+    write_u32_be(k, 248, 3204031479);   // 0xbef9a3f7
+    write_u32_be(k, 252, 3329325298);   // 0xc67178f2
+}
+
+// ===========================================================================
+// SHA-256 compression: process one 512-bit block (FIPS 180-4 Section 6.2.2)
+// ===========================================================================
+
+fn sha256_transform(state: Address, k: Address, w: Address, block: Address) {
+    // Build message schedule W[0..63]
+    i: u64 = 0;
+    for i in 0..16 {
+        val: u32 = read_u32_be(block, i * 4);
+        w_store(w, i, val);
+    }
+    for i in 16..64 {
+        w15: u32 = w_load(w, i - 15);
+        w2: u32 = w_load(w, i - 2);
+        w7: u32 = w_load(w, i - 7);
+        w16: u32 = w_load(w, i - 16);
+        val: u32 = (small_sigma1(w2) + w7 + small_sigma0(w15) + w16) & 4294967295;
+        w_store(w, i, val);
+    }
+
+    // Initialize working variables from current hash state
+    a: u32 = read_u32_be(state, 0);
+    b: u32 = read_u32_be(state, 4);
+    c: u32 = read_u32_be(state, 8);
+    d: u32 = read_u32_be(state, 12);
+    e: u32 = read_u32_be(state, 16);
+    f: u32 = read_u32_be(state, 20);
+    g: u32 = read_u32_be(state, 24);
+    h: u32 = read_u32_be(state, 28);
+
+    // 64-round compression — all u32 additions masked to 32 bits
+    for i in 0..64 {
+        ki: u32 = read_u32_be(k, i * 4);
+        wi: u32 = w_load(w, i);
+        t1: u32 = (h + big_sigma1(e) + ch(e, f, g) + ki + wi) & 4294967295;
+        t2: u32 = (big_sigma0(a) + maj(a, b, c)) & 4294967295;
+        h = g;
+        g = f;
+        f = e;
+        e = (d + t1) & 4294967295;
+        d = c;
+        c = b;
+        b = a;
+        a = (t1 + t2) & 4294967295;
+    }
+
+    // Add compressed chunk to current hash value
+    write_u32_be(state, 0,  (read_u32_be(state, 0)  + a) & 4294967295);
+    write_u32_be(state, 4,  (read_u32_be(state, 4)  + b) & 4294967295);
+    write_u32_be(state, 8,  (read_u32_be(state, 8)  + c) & 4294967295);
+    write_u32_be(state, 12, (read_u32_be(state, 12) + d) & 4294967295);
+    write_u32_be(state, 16, (read_u32_be(state, 16) + e) & 4294967295);
+    write_u32_be(state, 20, (read_u32_be(state, 20) + f) & 4294967295);
+    write_u32_be(state, 24, (read_u32_be(state, 24) + g) & 4294967295);
+    write_u32_be(state, 28, (read_u32_be(state, 28) + h) & 4294967295);
+}
+
+// ===========================================================================
+// Pad message into 64-byte block (handles messages up to 55 bytes)
+// ===========================================================================
+
+fn sha256_pad_block(block: Address, msg: Address, msg_len: u64) {
+    // Copy message bytes
+    i: u64 = 0;
+    for i in 0..msg_len {
+        *(block + i) = *(msg + i);
+    }
+    // Append '1' bit (0x80 byte)
+    *(block + msg_len) = 128;
+    // Zero-fill (except last 8 for length)
+    for i in msg_len + 1..56 {
+        *(block + i) = 0;
+    }
+    // Append 64-bit big-endian message length in bits
+    bit_len: u64 = msg_len * 8;
+    *(block + 56) = (bit_len >> 56) & 255;
+    *(block + 57) = (bit_len >> 48) & 255;
+    *(block + 58) = (bit_len >> 40) & 255;
+    *(block + 59) = (bit_len >> 32) & 255;
+    *(block + 60) = (bit_len >> 24) & 255;
+    *(block + 61) = (bit_len >> 16) & 255;
+    *(block + 62) = (bit_len >> 8) & 255;
+    *(block + 63) = bit_len & 255;
+}
+
+// ===========================================================================
+// Copy 32 bytes
+// ===========================================================================
+
+fn copy32(dst: Address, src: Address) {
+    i: u64 = 0;
+    for i in 0..32 {
+        *(dst + i) = *(src + i);
+    }
+}
+
+// ===========================================================================
+// SHA256d: SHA-256(SHA-256(message))
+// ===========================================================================
+// Double-SHA-256 used in Bitcoin and many cryptographic protocols.
+// Memory: state(32) + k(256) + w(256) + block(64) + inner(32) = 640 bytes
+
+fn sha256d(msg: Address, msg_len: u64, out: Address) {
+    state = allocate(32);
+    k = allocate(256);
+    w = allocate(256);
+    block = allocate(64);
+    inner = allocate(32);
+
+    sha256_init_k(k);
+
+    // Inner hash: SHA-256(message)
+    sha256_init_state(state);
+    sha256_pad_block(block, msg, msg_len);
+    sha256_transform(state, k, w, block);
+    copy32(inner, state);
+
+    // Outer hash: SHA-256(inner_hash)
+    sha256_init_state(state);
+    sha256_pad_block(block, inner, 32);
+    sha256_transform(state, k, w, block);
+    copy32(out, state);
+
+    free(state);
+    free(k);
+    free(w);
+    free(block);
+    free(inner);
+}
+
+// ===========================================================================
+// Byte-to-hex conversion
+// ===========================================================================
+
+fn nibble_to_hex(n: u32) -> u32 {
+    // 0..9 → '0'..'9' (48..57), 10..15 → 'a'..'f' (97..102)
+    // u32 addition must be masked per VUMA rules.
+    if n < 10 {
+        return (48 + n) & 4294967295;
+    } else {
+        return (87 + n) & 4294967295;   // 87 = 97 - 10
+    }
+}
+
+fn bytes_to_hex(data: Address, len: u64, out: Address) {
+    i: u64 = 0;
+    for i in 0..len {
+        byte: u32 = *(data + i);
+        hi: u32 = nibble_to_hex((byte >> 4) & 15);
+        lo: u32 = nibble_to_hex(byte & 15);
+        *(out + i * 2) = hi & 255;
+        *(out + i * 2 + 1) = lo & 255;
+    }
+}
+
+// ===========================================================================
+// Little-endian byte helpers for pointer and fd access
+// ===========================================================================
+// VUMA only provides byte-level pointer access; multi-byte reads/writes
+// must be composed from individual byte loads and stores.
+
+fn read_i32_le(buf: Address, offset: u64) -> i64 {
+    b0: i64 = *(buf + offset) as i64;
+    b1: i64 = *(buf + offset + 1) as i64;
+    b2: i64 = *(buf + offset + 2) as i64;
+    b3: i64 = *(buf + offset + 3) as i64;
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+}
+
+fn read_u64_le(buf: Address, offset: u64) -> u64 {
+    b0: u64 = *(buf + offset) as u64;
+    b1: u64 = *(buf + offset + 1) as u64;
+    b2: u64 = *(buf + offset + 2) as u64;
+    b3: u64 = *(buf + offset + 3) as u64;
+    b4: u64 = *(buf + offset + 4) as u64;
+    b5: u64 = *(buf + offset + 5) as u64;
+    b6: u64 = *(buf + offset + 6) as u64;
+    b7: u64 = *(buf + offset + 7) as u64;
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
+}
+
+fn write_u64_le(buf: Address, offset: u64, val: u64) {
+    *(buf + offset) = val & 255;
+    *(buf + offset + 1) = (val >> 8) & 255;
+    *(buf + offset + 2) = (val >> 16) & 255;
+    *(buf + offset + 3) = (val >> 24) & 255;
+    *(buf + offset + 4) = (val >> 32) & 255;
+    *(buf + offset + 5) = (val >> 40) & 255;
+    *(buf + offset + 6) = (val >> 48) & 255;
+    *(buf + offset + 7) = (val >> 56) & 255;
+}
+
+// ===========================================================================
+// Main entry point
+// ===========================================================================
+// Checks argv[1]: "child" → child mode, otherwise → parent mode.
+
+fn main(argc: i64, argv: Address) -> i32 {
+
+    // --- Determine mode by checking argv[1] against "child" ---
+    is_child: bool = false;
+    if argc >= 2 {
+        arg1_ptr: u64 = read_u64_le(argv, 8);   // argv[1] pointer
+        child_str = allocate(6);
+        *(child_str + 0) = 99;    // 'c'
+        *(child_str + 1) = 104;   // 'h'
+        *(child_str + 2) = 105;   // 'i'
+        *(child_str + 3) = 108;   // 'l'
+        *(child_str + 4) = 100;   // 'd'
+        *(child_str + 5) = 0;     // '\0'
+        cmp: i64 = strcmp(arg1_ptr as Address, child_str);
+        free(child_str);
+        if cmp == 0 {
+            is_child = true;
+        }
+    }
+
+    // =======================================================================
+    // CHILD MODE: read stdin, compute SHA256d, write hex to stdout
+    // =======================================================================
+    // After parent's dup2, fd 0 = pipe1 read end, fd 1 = pipe2 write end.
+
+    if is_child {
+        in_buf = allocate(256);
+        n: i64 = read(0, in_buf, 256);
+        if n <= 0 {
+            free(in_buf);
+            exit(1);
+        }
+
+        digest = allocate(32);
+        sha256d(in_buf, n as u64, digest);
+        free(in_buf);
+
+        hex_out = allocate(65);
+        bytes_to_hex(digest, 32, hex_out);
+        free(digest);
+        *(hex_out + 64) = 10;   // '\n'
+        write(1, hex_out, 65);
+        free(hex_out);
+
+        exit(0);
+        return 0;   // unreachable — exit() does not return
+    }
+
+    // =======================================================================
+    // PARENT MODE: create pipes, fork, exec child, communicate
+    // =======================================================================
+
+    // Step 1: Create two pipes
+    //   pipe1: parent → child  (parent writes, child reads via stdin)
+    //   pipe2: child → parent  (child writes via stdout, parent reads)
+    pipe1fd = allocate(8);
+    pipe2fd = allocate(8);
+
+    ret: i64 = pipe(pipe1fd);
+    if ret < 0 {
+        free(pipe1fd);
+        free(pipe2fd);
+        exit(2);
+    }
+    ret = pipe(pipe2fd);
+    if ret < 0 {
+        free(pipe1fd);
+        free(pipe2fd);
+        exit(3);
+    }
+
+    p1_read:  i64 = read_i32_le(pipe1fd, 0);
+    p1_write: i64 = read_i32_le(pipe1fd, 4);
+    p2_read:  i64 = read_i32_le(pipe2fd, 0);
+    p2_write: i64 = read_i32_le(pipe2fd, 4);
+
+    // Step 2: Fork
+    pid: i64 = fork();
+    if pid < 0 {
+        close(p1_read);
+        close(p1_write);
+        close(p2_read);
+        close(p2_write);
+        free(pipe1fd);
+        free(pipe2fd);
+        exit(4);
+    }
+
+    if pid == 0 {
+        // --- CHILD PROCESS (before exec) ---
+        // Redirect fds: stdin → pipe1 read, stdout → pipe2 write
+        dup2(p1_read, 0);
+        dup2(p2_write, 1);
+
+        // Close all original pipe fds (dup2'd copies remain open)
+        close(p1_read);
+        close(p1_write);
+        close(p2_read);
+        close(p2_write);
+
+        // Build argv array: ["./self_exec", "child", null]
+        // 3 pointers × 8 bytes = 24 bytes
+        argv_arr = allocate(24);
+
+        // "./self_exec\0" — 12 chars + null = 13 bytes
+        path_str = allocate(13);
+        *(path_str + 0)  = 46;    // '.'
+        *(path_str + 1)  = 47;    // '/'
+        *(path_str + 2)  = 115;   // 's'
+        *(path_str + 3)  = 101;   // 'e'
+        *(path_str + 4)  = 108;   // 'l'
+        *(path_str + 5)  = 102;   // 'f'
+        *(path_str + 6)  = 95;    // '_'
+        *(path_str + 7)  = 101;   // 'e'
+        *(path_str + 8)  = 120;   // 'x'
+        *(path_str + 9)  = 101;   // 'e'
+        *(path_str + 10) = 99;    // 'c'
+        *(path_str + 11) = 0;     // '\0'
+
+        // "child\0" — 5 chars + null = 6 bytes
+        arg_str = allocate(6);
+        *(arg_str + 0) = 99;     // 'c'
+        *(arg_str + 1) = 104;    // 'h'
+        *(arg_str + 2) = 105;    // 'i'
+        *(arg_str + 3) = 108;    // 'l'
+        *(arg_str + 4) = 100;    // 'd'
+        *(arg_str + 5) = 0;      // '\0'
+
+        // Write pointers into argv (little-endian, 8 bytes each)
+        write_u64_le(argv_arr, 0,  path_str as u64);   // argv[0]
+        write_u64_le(argv_arr, 8,  arg_str as u64);    // argv[1]
+        write_u64_le(argv_arr, 16, 0);                 // argv[2] = null
+
+        // Build envp: [null] — minimal environment
+        envp_arr = allocate(8);
+        write_u64_le(envp_arr, 0, 0);
+
+        // Execute! execve replaces process; does not return on success.
+        execve(path_str, argv_arr, envp_arr);
+
+        // execve failed — clean up and exit
+        free(path_str);
+        free(arg_str);
+        free(argv_arr);
+        free(envp_arr);
+        free(pipe1fd);
+        free(pipe2fd);
+        exit(5);
+        return 5;   // unreachable
+    }
+
+    // --- PARENT PROCESS ---
+
+    // Close ends the parent doesn't use
+    close(p1_read);
+    close(p2_write);
+
+    // Step 3: Write "VUMA-SELF-EXEC-TEST" (20 bytes) to child via pipe1
+    msg_buf = allocate(20);
+    *(msg_buf + 0)  = 86;    // 'V'
+    *(msg_buf + 1)  = 85;    // 'U'
+    *(msg_buf + 2)  = 77;    // 'M'
+    *(msg_buf + 3)  = 65;    // 'A'
+    *(msg_buf + 4)  = 45;    // '-'
+    *(msg_buf + 5)  = 83;    // 'S'
+    *(msg_buf + 6)  = 69;    // 'E'
+    *(msg_buf + 7)  = 76;    // 'L'
+    *(msg_buf + 8)  = 70;    // 'F'
+    *(msg_buf + 9)  = 45;    // '-'
+    *(msg_buf + 10) = 69;    // 'E'
+    *(msg_buf + 11) = 88;    // 'X'
+    *(msg_buf + 12) = 69;    // 'E'
+    *(msg_buf + 13) = 67;    // 'C'
+    *(msg_buf + 14) = 45;    // '-'
+    *(msg_buf + 15) = 84;    // 'T'
+    *(msg_buf + 16) = 69;    // 'E'
+    *(msg_buf + 17) = 83;    // 'S'
+    *(msg_buf + 18) = 84;    // 'T'
+
+    written: i64 = write(p1_write, msg_buf, 20);
+    free(msg_buf);
+    close(p1_write);   // signal EOF to child's stdin
+
+    if written != 20 {
+        close(p2_read);
+        free(pipe1fd);
+        free(pipe2fd);
+        exit(6);
+    }
+
+    // Step 4: Read child's hex digest from pipe2 (64 hex chars + newline)
+    out_buf = allocate(65);
+    total_read: i64 = 0;
+    while total_read < 65 {
+        nread: i64 = read(p2_read, out_buf + (total_read as u64), 65 - total_read);
+        if nread <= 0 {
+            break;
+        }
+        total_read += nread;
+    }
+    close(p2_read);
+
+    // Step 5: Wait for child
+    status_buf = allocate(4);
+    waitpid(pid, status_buf, 0);
+    free(status_buf);
+
+    // Step 6: Return first byte of child output as exit code
+    result: i32 = *(out_buf + 0);
+    free(out_buf);
+    free(pipe1fd);
+    free(pipe2fd);
+
+    return result;
+}

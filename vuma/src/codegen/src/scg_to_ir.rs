@@ -1724,6 +1724,101 @@ impl IRBuilder {
         ir_func: &mut IRFunction,
         names: &mut HashMap<String, u32>,
     ) -> Result<()> {
+        // ── Special-case: Atomic intrinsics → proper IR instructions ──
+        // The bridge emits AtomicLoad/AtomicStore/AtomicCas as CallNodes
+        // with is_extern=true, but they should be lowered to proper atomic
+        // IR instructions that backends handle natively.
+        match call.func.as_str() {
+            "AtomicLoad" => {
+                let args: Vec<IRValue> = call
+                    .args
+                    .iter()
+                    .map(|e| self.resolve_expr(e, names))
+                    .collect::<Result<Vec<_>>>()?;
+                let addr = args.into_iter().next()
+                    .ok_or_else(|| crate::CodegenError::TranslationError(
+                        "AtomicLoad requires 1 argument (addr)".into()))?;
+                let dst = match &call.dst {
+                    Some(name) => {
+                        let vreg = self.alloc_vreg();
+                        ir_func.register_vreg(VirtualRegister::named(vreg, name));
+                        names.insert(name.clone(), vreg);
+                        IRValue::Register(vreg)
+                    }
+                    None => {
+                        let vreg = self.alloc_vreg();
+                        ir_func.register_vreg(VirtualRegister::anonymous(vreg));
+                        IRValue::Register(vreg)
+                    }
+                };
+                ir_func.current_block().push(IRInstruction::AtomicLoad {
+                    dst,
+                    addr,
+                    ty: IRType::U64,
+                });
+                return Ok(());
+            }
+            "AtomicStore" => {
+                let args: Vec<IRValue> = call
+                    .args
+                    .iter()
+                    .map(|e| self.resolve_expr(e, names))
+                    .collect::<Result<Vec<_>>>()?;
+                let mut args_iter = args.into_iter();
+                let value = args_iter.next()
+                    .ok_or_else(|| crate::CodegenError::TranslationError(
+                        "AtomicStore requires 2 arguments (value, addr)".into()))?;
+                let addr = args_iter.next()
+                    .ok_or_else(|| crate::CodegenError::TranslationError(
+                        "AtomicStore requires 2 arguments (value, addr)".into()))?;
+                ir_func.current_block().push(IRInstruction::AtomicStore {
+                    value,
+                    addr,
+                    ty: IRType::U64,
+                });
+                return Ok(());
+            }
+            "AtomicCas" => {
+                let args: Vec<IRValue> = call
+                    .args
+                    .iter()
+                    .map(|e| self.resolve_expr(e, names))
+                    .collect::<Result<Vec<_>>>()?;
+                let mut args_iter = args.into_iter();
+                let addr = args_iter.next()
+                    .ok_or_else(|| crate::CodegenError::TranslationError(
+                        "AtomicCas requires 3 arguments (addr, expected, desired)".into()))?;
+                let expected = args_iter.next()
+                    .ok_or_else(|| crate::CodegenError::TranslationError(
+                        "AtomicCas requires 3 arguments (addr, expected, desired)".into()))?;
+                let desired = args_iter.next()
+                    .ok_or_else(|| crate::CodegenError::TranslationError(
+                        "AtomicCas requires 3 arguments (addr, expected, desired)".into()))?;
+                let dst = match &call.dst {
+                    Some(name) => {
+                        let vreg = self.alloc_vreg();
+                        ir_func.register_vreg(VirtualRegister::named(vreg, name));
+                        names.insert(name.clone(), vreg);
+                        IRValue::Register(vreg)
+                    }
+                    None => {
+                        let vreg = self.alloc_vreg();
+                        ir_func.register_vreg(VirtualRegister::anonymous(vreg));
+                        IRValue::Register(vreg)
+                    }
+                };
+                ir_func.current_block().push(IRInstruction::AtomicCas {
+                    dst,
+                    addr,
+                    expected,
+                    desired,
+                    ty: IRType::U64,
+                });
+                return Ok(());
+            }
+            _ => {} // fall through to regular Call handling
+        }
+
         let args: Vec<IRValue> = call
             .args
             .iter()

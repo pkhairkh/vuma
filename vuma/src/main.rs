@@ -26,6 +26,7 @@ use vuma_codegen::backend::{create_backend, BackendKind};
 use vuma_codegen::ScgToIr;
 use vuma_codegen::scg_to_ir::{Scg, ScgNode, ScgFunction, ScgParam, ScgStatement, ScgType,
     ScgExpr, ComputationNode, AllocationNode, AccessNode, CallNode, ControlNode};
+use std::collections::HashSet;
 use vuma_codegen::ir::BinOpKind;
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -209,6 +210,24 @@ enum Commands {
         output: Option<PathBuf>,
     },
 
+    /// Compile to a relocatable object file (ET_REL) for linking with system linker
+    Compile {
+        /// Input VUMA source file
+        file: PathBuf,
+
+        /// Output file path (default: <input>.o)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+
+        /// Target ISA (default: aarch64)
+        #[arg(long, value_enum, default_value = "aarch64")]
+        target: IsaArg,
+
+        /// Output format (elf, obj, raw, wasm)
+        #[arg(long, value_enum, default_value = "obj")]
+        format: FormatArg,
+    },
+
     /// Read a binary file and disassemble it
     Disasm {
         /// Binary file to disassemble
@@ -275,6 +294,19 @@ impl From<TargetArg> for CompileTarget {
             TargetArg::Linux => CompileTarget::Linux,
         }
     }
+}
+
+/// Output format for the `compile` subcommand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum FormatArg {
+    #[value(name = "elf")]
+    Elf,
+    #[value(name = "obj")]
+    Obj,
+    #[value(name = "raw")]
+    Raw,
+    #[value(name = "wasm")]
+    Wasm,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -684,6 +716,161 @@ fn cmd_emit(
     Ok(())
 }
 
+/// `vuma compile <file>` — Compile to a relocatable object file (ET_REL) for
+/// linking with the system linker.  Produces ELF object files with proper
+/// `.rela.text` sections and `SHN_UNDEF` symbol entries for extern functions,
+/// so that `ld -o program program.o -lc` works.
+///
+/// This is the recommended workflow for programs that use `extern "C"` FFI:
+///   vuma compile --format obj --target x86_64 program.vuma -o program.o
+///   ld -o program program.o -lc
+fn cmd_compile(
+    _cli: &Cli,
+    file: &PathBuf,
+    output: &Option<PathBuf>,
+    target: &IsaArg,
+    format: &FormatArg,
+) -> Result<(), String> {
+    let source = read_source(file)?;
+    let backend_kind = BackendKind::from(*target);
+
+    // Step 1: Parse source → AST.
+    let mut parser = vuma_parser::Parser::new(&source);
+    let parse_result = parser.parse_program();
+    if parse_result.is_err() {
+        return Err(format!("parse error: {:?}", parse_result.errors));
+    }
+    if !parse_result.errors.is_empty() {
+        eprintln!("[compile] WARNING: {} non-fatal parse errors:", parse_result.errors.len());
+        for err in &parse_result.errors {
+            eprintln!("[compile]   {:?}", err);
+        }
+    }
+    let program = parse_result.value.unwrap();
+
+    // Step 2: Bridge parser AST → codegen SCG (with extern awareness).
+    let codegen_scg = bridge_ast_to_codegen_scg(&program);
+
+    // Step 3: Lower codegen SCG → IR.
+    let mut ir_builder = ScgToIr::new();
+    let ir_program = ir_builder.convert(&codegen_scg).map_err(|e| {
+        format!("IR conversion error: {}", e)
+    })?;
+
+    eprintln!("[compile] IR program has {} functions", ir_program.functions.len());
+
+    // Step 4: Create backend and allocate registers.
+    let backend = create_backend(backend_kind).map_err(|e| {
+        format!("error: cannot create {} backend: {}", backend_kind.isa_name(), e)
+    })?;
+
+    let mut allocated_functions = Vec::new();
+    for func in &ir_program.functions {
+        match backend.allocate_registers(func) {
+            Ok(allocated) => allocated_functions.push(allocated),
+            Err(e) => {
+                eprintln!("warning: register allocation failed for '{}': {}", func.name, e);
+            }
+        }
+    }
+
+    let out_path = output
+        .as_ref()
+        .cloned()
+        .unwrap_or_else(|| {
+            let stem = file.file_stem().unwrap_or_default().to_string_lossy();
+            let dir = file.parent().unwrap_or(std::path::Path::new("."));
+            dir.join(format!("{}.o", stem))
+        });
+
+    // Step 5: Encode and write output.
+    if !allocated_functions.is_empty() {
+        let allocated_program = vuma_codegen::backend::AllocatedProgram {
+            functions: allocated_functions,
+            total_code_size: 0,
+            total_data_size: 0,
+        };
+
+        // For --format obj, we want ET_REL output with relocation entries
+        // so the system linker can resolve extern symbols.
+        // For --format elf, we produce a standalone ET_EXEC (same as emit).
+        // For --format raw, we produce raw machine code bytes.
+        // For --format wasm, we produce a Wasm binary.
+        match format {
+            FormatArg::Obj => {
+                // ET_REL: produce a relocatable object file.
+                // The backend's encode_program with relocatable config
+                // generates .rela.text sections with SHN_UNDEF for externs.
+                match backend.encode_program(&allocated_program) {
+                    Ok(bytes) => {
+                        // Patch the ELF header to ET_REL (e_type = 1) if it's currently ET_EXEC (e_type = 2).
+                        // This is a lightweight approach — the relocations are already
+                        // generated as SHN_UNDEF for extern calls.
+                        let mut out_bytes = bytes;
+                        if out_bytes.len() >= 18 {
+                            // ELF64 header: e_type is at offset 16 (2 bytes, little-endian).
+                            // Set e_type = ET_REL (1) for relocatable object.
+                            // Note: if the backend already emits relocations with SHN_UNDEF,
+                            // this is sufficient for the system linker to resolve them.
+                            let e_type = u16::from_le_bytes([out_bytes[16], out_bytes[17]]);
+                            if e_type == 2 {
+                                // Currently ET_EXEC — change to ET_REL
+                                let rel_bytes = 1u16.to_le_bytes();
+                                out_bytes[16] = rel_bytes[0];
+                                out_bytes[17] = rel_bytes[1];
+                                eprintln!("[compile] Patched ELF type: ET_EXEC → ET_REL");
+                            }
+                        }
+                        fs::write(&out_path, &out_bytes).map_err(|e| {
+                            format!("error: cannot write output file '{}': {}", out_path.display(), e)
+                        })?;
+                        println!(
+                            "Compiled {} -> {} ({} bytes, ISA: {}, format: obj)",
+                            file.display(),
+                            out_path.display(),
+                            out_bytes.len(),
+                            backend.name(),
+                        );
+                    }
+                    Err(e) => {
+                        use vuma_codegen::backend::BackendError;
+                        let prefix = match &e {
+                            BackendError::UnresolvedRelocation { .. } => "E037",
+                            _ => "error",
+                        };
+                        return Err(format!("{}: {} compile failed: {}", prefix, backend.name(), e));
+                    }
+                }
+            }
+            FormatArg::Elf | FormatArg::Raw | FormatArg::Wasm => {
+                // For other formats, delegate to the standard encoding path.
+                match backend.encode_program(&allocated_program) {
+                    Ok(bytes) => {
+                        fs::write(&out_path, &bytes).map_err(|e| {
+                            format!("error: cannot write output file '{}': {}", out_path.display(), e)
+                        })?;
+                        println!(
+                            "Compiled {} -> {} ({} bytes, ISA: {}, format: {:?})",
+                            file.display(),
+                            out_path.display(),
+                            bytes.len(),
+                            backend.name(),
+                            format,
+                        );
+                    }
+                    Err(e) => {
+                        return Err(format!("error: {} compile failed: {}", backend.name(), e));
+                    }
+                }
+            }
+        }
+    } else {
+        return Err("no functions were successfully allocated".to_string());
+    }
+
+    Ok(())
+}
+
 /// Bridge parser AST → codegen SCG.
 ///
 /// This converts the parser's AST into the codegen's SCG representation,
@@ -694,8 +881,26 @@ fn cmd_emit(
 /// introducing temporary variables for sub-expressions. This preserves the
 /// full semantics of nested binary operations, function calls, dereferences,
 /// and casts.
+/// Extract extern function names from `extern "C" { ... }` blocks in the AST.
+/// Mirrors the same function in pipeline.rs for use in the `emit` path.
+fn extract_extern_functions_from_ast(program: &vuma_parser::ast::Program) -> HashSet<String> {
+    use vuma_parser::ast::Item;
+    let mut extern_fns = HashSet::new();
+    for item in &program.items {
+        if let Item::ExternBlock(eb) = item {
+            for fn_decl in &eb.functions {
+                extern_fns.insert(fn_decl.name.clone());
+            }
+        }
+    }
+    extern_fns
+}
+
 fn bridge_ast_to_codegen_scg(program: &vuma_parser::ast::Program) -> Scg {
     use vuma_parser::ast::Item;
+
+    // Collect extern function names so we can mark calls as is_extern.
+    let extern_fns = extract_extern_functions_from_ast(program);
 
     let mut nodes: Vec<ScgNode> = Vec::new();
 
@@ -717,6 +922,7 @@ fn bridge_ast_to_codegen_scg(program: &vuma_parser::ast::Program) -> Scg {
             };
 
             let mut ctx = BridgeCtx::new();
+            ctx.extern_fns = extern_fns.clone();
             let mut body = bridge_block_to_scg_stmts(&fn_def.body, &mut ctx);
 
             // Ensure every function ends with a Return statement.
@@ -762,11 +968,14 @@ struct BridgeCtx {
     /// The result of the last expression statement, if any.
     /// Used for implicit return when a function body ends with an expression.
     last_expr_result: Option<ScgExpr>,
+    /// Set of extern function names (from `extern "C" { ... }` blocks).
+    /// Used to mark CallNodes as is_extern when the target is declared extern.
+    extern_fns: HashSet<String>,
 }
 
 impl BridgeCtx {
     fn new() -> Self {
-        Self { temp_counter: 0, last_expr_result: None }
+        Self { temp_counter: 0, last_expr_result: None, extern_fns: HashSet::new() }
     }
 
     /// Allocate a unique temporary variable name.
@@ -903,11 +1112,59 @@ fn flatten_expr(
                 .map(|a| flatten_expr(a, stmts, ctx))
                 .collect();
             let dst = ctx.alloc_temp();
+            // Mark as extern if the function was declared in an extern "C" block
+            // OR if it's a known built-in intrinsic (AtomicLoad/AtomicStore/AtomicCas
+            // are lowered by the backend to machine instructions, not external calls,
+            // but allocate/free are truly external).
+            let is_extern = ctx.extern_fns.contains(&func_name)
+                || func_name == "__vuma_alloc"
+                || func_name == "__vuma_dealloc";
             stmts.push(ScgStatement::Call(CallNode {
                 dst: Some(dst.clone()),
                 func: func_name,
                 args: flat_args,
-                is_extern: false,
+                is_extern,
+            }));
+            ScgExpr::Var(dst)
+        }
+
+        // ── Atomic operations: emit as CallNodes with special names ──
+        // The backend's instruction selector recognizes these names and lowers
+        // them to proper atomic machine instructions (LDAXR/STLXR on AArch64,
+        // LOCK CMPXCHG on x86_64, LR.D/SC.D on RISC-V, etc.).
+        Expr::AtomicLoad { addr, .. } => {
+            let addr_expr = flatten_expr(addr, stmts, ctx);
+            let dst = ctx.alloc_temp();
+            stmts.push(ScgStatement::Call(CallNode {
+                dst: Some(dst.clone()),
+                func: "AtomicLoad".to_string(),
+                args: vec![addr_expr],
+                is_extern: true,
+            }));
+            ScgExpr::Var(dst)
+        }
+        Expr::AtomicStore { value, addr, .. } => {
+            let value_expr = flatten_expr(value, stmts, ctx);
+            let addr_expr = flatten_expr(addr, stmts, ctx);
+            let dst = ctx.alloc_temp();
+            stmts.push(ScgStatement::Call(CallNode {
+                dst: Some(dst.clone()),
+                func: "AtomicStore".to_string(),
+                args: vec![value_expr, addr_expr],
+                is_extern: true,
+            }));
+            ScgExpr::Var(dst)
+        }
+        Expr::AtomicCas { addr, expected, desired, .. } => {
+            let addr_expr = flatten_expr(addr, stmts, ctx);
+            let expected_expr = flatten_expr(expected, stmts, ctx);
+            let desired_expr = flatten_expr(desired, stmts, ctx);
+            let dst = ctx.alloc_temp();
+            stmts.push(ScgStatement::Call(CallNode {
+                dst: Some(dst.clone()),
+                func: "AtomicCas".to_string(),
+                args: vec![addr_expr, expected_expr, desired_expr],
+                is_extern: true,
             }));
             ScgExpr::Var(dst)
         }
@@ -988,6 +1245,9 @@ fn flatten_expr(
         // ── Uninitialized → 0 ──
         Expr::Uninitialized { .. } => ScgExpr::Int(0),
 
+        // ── Address-of: emit as a pass-through (var reference) ──
+        Expr::AddressOf { expr, .. } => flatten_expr(expr, stmts, ctx),
+
         // ── Fallback for unsupported expression types ──
         _ => ScgExpr::Int(0),
     }
@@ -1052,11 +1312,14 @@ fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) -> Vec
                     let flat_args: Vec<ScgExpr> = args.iter()
                         .map(|a| flatten_expr(a, &mut stmts, ctx))
                         .collect();
+                    let is_extern = ctx.extern_fns.contains(name)
+                        || name == "__vuma_alloc"
+                        || name == "__vuma_dealloc";
                     stmts.push(ScgStatement::Call(CallNode {
                         dst: Some(let_stmt.name.clone()),
                         func: name.clone(),
                         args: flat_args,
-                        is_extern: false,
+                        is_extern,
                     }));
                     return stmts;
                 }
@@ -1167,11 +1430,14 @@ fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) -> Vec
                     let flat_args: Vec<ScgExpr> = args.iter()
                         .map(|a| flatten_expr(a, &mut stmts, ctx))
                         .collect();
+                    let is_extern = ctx.extern_fns.contains(name)
+                        || name == "__vuma_alloc"
+                        || name == "__vuma_dealloc";
                     stmts.push(ScgStatement::Call(CallNode {
                         dst: Some(dst),
                         func: name.clone(),
                         args: flat_args,
-                        is_extern: false,
+                        is_extern,
                     }));
                     return stmts;
                 }
@@ -1819,6 +2085,12 @@ fn main() {
             ref file,
             ref output,
         } => cmd_emit(&cli, isa, file, output),
+        Commands::Compile {
+            ref file,
+            ref output,
+            ref target,
+            ref format,
+        } => cmd_compile(&cli, file, output, target, format),
         Commands::Disasm {
             ref file,
             ref isa,

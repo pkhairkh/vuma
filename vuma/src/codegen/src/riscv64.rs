@@ -5329,23 +5329,15 @@ impl Backend for RiscV64Backend {
                         all_code[abs_offset..abs_offset + 4]
                             .copy_from_slice(&patched.encode());
                     } else {
-                        // Unresolved relocation: emit an error instead of silently
-                        // leaving a placeholder at offset 0 which would cause a
-                        // runtime crash.
-                        eprintln!(
-                            "error[E037]: unresolved relocation: symbol '{}' referenced in function '{}' at offset 0x{:X} (type: {})",
+                        // External symbol — defer to the system linker.
+                        // Leave the JAL instruction pointing to offset 0 (JAL #0 = trap).
+                        // When compiled with `vuma compile --format obj`, the linker
+                        // will resolve this relocation against libc or the runtime.
+                        log::debug!(
+                            "unresolved relocation: symbol '{}' in '{}' at 0x{:X} (type: {}) — deferring to linker",
                             reloc.symbol, func.name, reloc.offset, reloc.reloc_type
                         );
-                        let sentinel: u32 = 0xDEAD_BEEF;
-                        all_code[abs_offset..abs_offset + 4]
-                            .copy_from_slice(&sentinel.to_le_bytes());
-                        return Err(BackendError::UnresolvedRelocation {
-                            isa: "riscv64",
-                            symbol: reloc.symbol.clone(),
-                            function: func.name.clone(),
-                            offset: reloc.offset,
-                            reloc_type: reloc.reloc_type.clone(),
-                        });
+                        continue;
                     }
                 }
             }

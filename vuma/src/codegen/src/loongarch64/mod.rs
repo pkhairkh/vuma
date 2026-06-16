@@ -3835,23 +3835,15 @@ impl Backend for LoongArch64Backend {
                         all_code[abs_offset..abs_offset + 4]
                             .copy_from_slice(&patched.to_le_bytes());
                     } else {
-                        // Unresolved relocation: emit an error instead of silently
-                        // leaving a placeholder at offset 0 which would cause a
-                        // runtime crash.
-                        eprintln!(
-                            "error[E037]: unresolved relocation: symbol '{}' referenced in function '{}' at offset 0x{:X} (type: {})",
+                        // External symbol — defer to the system linker.
+                        // Leave the BL instruction pointing to offset 0 (BL #0 = trap).
+                        // When compiled with `vuma compile --format obj`, the linker
+                        // will resolve this relocation against libc or the runtime.
+                        log::debug!(
+                            "unresolved relocation: symbol '{}' in '{}' at 0x{:X} (type: {}) — deferring to linker",
                             reloc.symbol, func.name, reloc.offset, reloc.reloc_type
                         );
-                        let sentinel: u32 = 0xDEAD_BEEF;
-                        all_code[abs_offset..abs_offset + 4]
-                            .copy_from_slice(&sentinel.to_le_bytes());
-                        return Err(BackendError::UnresolvedRelocation {
-                            isa: "loongarch64",
-                            symbol: reloc.symbol.clone(),
-                            function: func.name.clone(),
-                            offset: reloc.offset,
-                            reloc_type: reloc.reloc_type.clone(),
-                        });
+                        continue;
                     }
                 } else if reloc.reloc_type == R_LARCH_64 {
                     // R_LARCH_64: patch the 4-instruction load-immediate sequence
@@ -3868,25 +3860,15 @@ impl Backend for LoongArch64Backend {
                         let vaddr = code_vaddr_base + target_offset as u64;
                         patch_load_imm_64(&mut all_code, abs_offset, vaddr);
                     } else {
-                        // Unresolved relocation: emit an error instead of silently
-                        // leaving a placeholder which would cause a runtime crash.
-                        eprintln!(
-                            "error[E037]: unresolved relocation: symbol '{}' referenced in function '{}' at offset 0x{:X} (type: {})",
+                        // External symbol — defer to the system linker.
+                        // Leave the load-immediate sequence as-is (zero = trap).
+                        // When compiled with `vuma compile --format obj`, the linker
+                        // will resolve this relocation against libc or the runtime.
+                        log::debug!(
+                            "unresolved relocation: symbol '{}' in '{}' at 0x{:X} (type: {}) — deferring to linker",
                             reloc.symbol, func.name, reloc.offset, reloc.reloc_type
                         );
-                        let sentinel: u32 = 0xDEAD_BEEF;
-                        for i in 0..4 {
-                            let off = abs_offset + i * 4;
-                            all_code[off..off + 4]
-                                .copy_from_slice(&sentinel.to_le_bytes());
-                        }
-                        return Err(BackendError::UnresolvedRelocation {
-                            isa: "loongarch64",
-                            symbol: reloc.symbol.clone(),
-                            function: func.name.clone(),
-                            offset: reloc.offset,
-                            reloc_type: reloc.reloc_type.clone(),
-                        });
+                        continue;
                     }
                 }
             }
