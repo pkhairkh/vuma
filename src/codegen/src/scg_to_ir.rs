@@ -4169,4 +4169,137 @@ mod tests {
             }
         }
     }
+
+    // ── W7: Return with a constant integer value ────────────────────
+
+    /// Regression test for W7: `IRBuilder::convert` must lower
+    /// `ScgStatement::Return(vec![ScgExpr::Int(42)])` to an IR block whose
+    /// `instructions` contains `IRInstruction::Ret { values:
+    /// [Immediate(42)] }` and whose `terminator` is
+    /// `IRTerminator::Return(vec![Immediate(42)])`.
+    ///
+    /// This models `fn main() -> i32 { return 42; }`.  The IR builder's
+    /// `Return` arm in `lower_statement` calls `resolve_expr` on each
+    /// value (mapping `ScgExpr::Int(42)` -> `IRValue::Immediate(42)`),
+    /// then pushes a `Ret` instruction carrying the resolved values and
+    /// sets the block terminator to `Return(values)`.  Both must carry
+    /// the *resolved* values -- not an empty list, not a placeholder, and
+    /// not a silent zero substitution.
+    ///
+    /// This test also implicitly verifies that `lower_statements` (the
+    /// topological-sort wrapper) does NOT skip the `Return` statement:
+    /// `topological_sort_statements` includes every statement (the
+    /// `stmt_def_use` arm for `Return` collects only uses, no defs, so a
+    /// `Return` whose values are all immediates has in-degree 0 and is
+    /// always first in the sort order; even with use-before-def the
+    /// cycle fallback re-appends any unreachable statement).
+    #[test]
+    fn w7_return_constant_int_emits_ret_with_immediate() {
+        let scg = Scg {
+            nodes: vec![ScgNode::Function(ScgFunction {
+                name: "main".to_string(),
+                params: vec![],
+                results: vec![ScgType::I32],
+                body: vec![ScgStatement::Return(vec![ScgExpr::Int(42)])],
+            })],
+        };
+
+        let mut builder = IRBuilder::new();
+        let program = builder.convert(&scg).expect("IR build should succeed");
+
+        assert_eq!(program.functions.len(), 1);
+        let func = &program.functions[0];
+        assert_eq!(func.name, "main");
+
+        // The function must have at least one block; the entry block is first.
+        assert!(!func.blocks.is_empty(), "function must have an entry block");
+        let entry = &func.blocks[0];
+
+        // The entry block must contain a Ret instruction carrying
+        // `Immediate(42)` (not an empty list, not a register, not a
+        // different immediate).
+        let ret_vals = entry
+            .instructions
+            .iter()
+            .find_map(|i| match i {
+                IRInstruction::Ret { values } => Some(values.clone()),
+                _ => None,
+            })
+            .expect("entry block should contain a Ret instruction");
+        assert_eq!(
+            ret_vals,
+            vec![IRValue::Immediate(42)],
+            "Ret instruction must carry [Immediate(42)] -- got {:?}",
+            ret_vals
+        );
+
+        // The entry block's terminator must be `Return([Immediate(42)])`.
+        match &entry.terminator {
+            IRTerminator::Return(vals) => {
+                assert_eq!(
+                    vals,
+                    &vec![IRValue::Immediate(42)],
+                    "Return terminator must carry [Immediate(42)] -- got {:?}",
+                    vals
+                );
+            }
+            other => {
+                panic!(
+                    "expected IRTerminator::Return([Immediate(42)]), got {:?}",
+                    other
+                );
+            }
+        }
+    }
+
+    /// Regression test for W7: confirm the `Ret` instruction survives any
+    /// downstream IR mutation within `lower_function` (i.e. `resolve_phis`
+    /// and `rebuild_cfg` do not strip or relocate it).  Builds a function
+    /// whose body has a single `Return([Int(7)])` and asserts both the
+    /// `Ret` instruction and the `Return` terminator are present on the
+    /// *same* block (the entry block), with matching values.
+    #[test]
+    fn w7_ret_instruction_and_return_terminator_on_same_block() {
+        let scg = Scg {
+            nodes: vec![ScgNode::Function(ScgFunction {
+                name: "main".to_string(),
+                params: vec![],
+                results: vec![ScgType::I32],
+                body: vec![ScgStatement::Return(vec![ScgExpr::Int(7)])],
+            })],
+        };
+
+        let mut builder = IRBuilder::new();
+        let program = builder.build(&scg).expect("IR build should succeed");
+        let func = &program.functions[0];
+
+        // Find the block that carries the Return terminator.
+        let ret_block = func
+            .blocks
+            .iter()
+            .find(|b| matches!(b.terminator, IRTerminator::Return(_)))
+            .expect("some block should have a Return terminator");
+
+        // That same block must also contain the matching Ret instruction.
+        let ret_instr = ret_block.instructions.iter().find_map(|i| match i {
+            IRInstruction::Ret { values } => Some(values.clone()),
+            _ => None,
+        });
+        assert!(
+            ret_instr.is_some(),
+            "the block with a Return terminator must also contain a Ret instruction"
+        );
+
+        // And the values must match between the instruction and the terminator.
+        let instr_vals = ret_instr.unwrap();
+        let term_vals = match &ret_block.terminator {
+            IRTerminator::Return(v) => v.clone(),
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            instr_vals, term_vals,
+            "Ret instruction values must match Return terminator values"
+        );
+        assert_eq!(instr_vals, vec![IRValue::Immediate(7)]);
+    }
 }

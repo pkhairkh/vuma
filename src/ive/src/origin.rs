@@ -84,7 +84,7 @@ impl fmt::Display for Address {
 // ---------------------------------------------------------------------------
 
 /// Unique identifier for a memory region.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
 pub struct RegionId(pub u64);
 
 impl fmt::Display for RegionId {
@@ -94,7 +94,7 @@ impl fmt::Display for RegionId {
 }
 
 /// Unique identifier for a derivation step.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
 pub struct DerivationId(pub u64);
 
 impl fmt::Display for DerivationId {

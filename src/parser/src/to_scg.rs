@@ -391,26 +391,60 @@ impl AstToScg {
         }
 
         // FunctionReturn node — enhanced with return type label.
-        let ret_label = format!("fn_{}_return({})", f.name, ret_type_str);
-        let ret_id = scg.add_node(
-            NodeType::Control,
-            NodePayload::Control(ControlNode {
-                kind: ControlKind::FunctionReturn,
-                label: Some(ret_label),
-            }),
-            self.span_to_pp(&f.span),
-        );
-        fn_region.add_node(ret_id);
+        //
+        // If the last body statement was itself a `return <expr>`, the
+        // `Stmt::Return` handler already created a FunctionReturn node
+        // (with a DataFlow edge from the return-value Computation node,
+        // e.g. `lit_42`). Reuse that node as the function's exit instead
+        // of creating a duplicate.
+        //
+        // A duplicate would leave TWO FunctionReturn nodes chained via
+        // ControlFlow (statement-level -> function-level). The pipeline
+        // bridge's `find_function_return` returns the *first*
+        // FunctionReturn reachable via BFS from the entry -- i.e. the
+        // statement-level one -- and then starts `walk_control_flow`
+        // *from* that node with it in `stop_at`, so the walk terminates
+        // immediately and the return value's DataFlow edge is never
+        // resolved. Reusing the statement-level FunctionReturn yields a
+        // single exit node with a clear ControlFlow path
+        // (FunctionEntry -> FunctionReturn) and the return-value
+        // DataFlow edge intact.
+        //
+        // (Note: `prev_node` is initialised to `Some(entry_id)` and is
+        // therefore never `None` here; the previous "link entry directly
+        // to return" fallback was dead code.)
+        let last_is_return = prev_node
+            .and_then(|n| scg.get_node(n))
+            .map(|d| {
+                matches!(
+                    &d.payload,
+                    NodePayload::Control(c) if c.kind == ControlKind::FunctionReturn
+                )
+            })
+            .unwrap_or(false);
 
-        // Link last body node to return.
-        // If there is no previous body node (e.g. the function body is just
-        // 'return <expr>'), link the entry directly to the return so the
-        // bridge's control-flow walk can reach the FunctionReturn node.
-        if let Some(prev) = prev_node {
-            let _ = scg.add_edge(prev, ret_id, EdgeKind::ControlFlow);
+        let ret_id = if last_is_return {
+            // Reuse the statement-level FunctionReturn as the function exit.
+            prev_node.expect("last_is_return is only true when prev_node is Some")
         } else {
-            let _ = scg.add_edge(entry_id, ret_id, EdgeKind::ControlFlow);
-        }
+            let ret_label = format!("fn_{}_return({})", f.name, ret_type_str);
+            let new_ret_id = scg.add_node(
+                NodeType::Control,
+                NodePayload::Control(ControlNode {
+                    kind: ControlKind::FunctionReturn,
+                    label: Some(ret_label),
+                }),
+                self.span_to_pp(&f.span),
+            );
+            fn_region.add_node(new_ret_id);
+
+            // Link the last body node (or the entry, if the body is
+            // empty) to the new FunctionReturn so the bridge's
+            // control-flow walk can reach the function exit.
+            let pred = prev_node.unwrap_or(entry_id);
+            let _ = scg.add_edge(pred, new_ret_id, EdgeKind::ControlFlow);
+            new_ret_id
+        };
 
         self.pop_alloc_scope();
         self.pop_scope();

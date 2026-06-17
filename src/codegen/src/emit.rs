@@ -1318,6 +1318,23 @@ impl Emitter {
             }
 
             // ── Instruction-level control flow ──
+            //
+            // W8 note: `IRInstr::Ret` and `IRTerminator::Return` BOTH carry
+            // the return values — the SCG→IR bridge (`scg_to_ir.rs::
+            // lower_statement`'s `ScgStatement::Return` arm) pushes a `Ret`
+            // instruction AND sets the `Return` terminator with the same
+            // values.  This arm moves the return values into X0–X7; the
+            // `IRTerminator::Return` arm in `emit_terminator` (line ~1702)
+            // does the same move AND emits the epilogue + `RET`.
+            //
+            // So when both are present the move is emitted twice (redundant
+            // but correct).  If W7's IR-builder fix removes the `Ret`
+            // instruction, the `Return` terminator arm still emits the move,
+            // so the return value still reaches X0.  The regression tests
+            // `test_arm64_ret_immediate_emission_greedy`,
+            // `test_arm64_return_terminator_only_emission_greedy`, and
+            // `test_arm64_ret_immediate_emission_stack_slot` lock in this
+            // behaviour.
             IRInstr::Ret { values } => {
                 for (i, val) in values.iter().enumerate() {
                     if i >= 8 {
@@ -2984,6 +3001,20 @@ impl Emitter {
             }
 
             // ── Ret (instruction-level) ──
+            //
+            // W8 note: mirror of the greedy `Ret` arm above.  The SCG→IR
+            // bridge emits both a `Ret` instruction and a `Return`
+            // terminator with the same values; this arm and the
+            // `IRTerminator::Return` arm in `ss_emit_terminator`
+            // (line ~3598) both call `ss_load_value` to move the return
+            // value into X0–X7.  For an `Immediate`, `ss_load_value`
+            // emits `MOVZ Xd, #imm` directly (no X9 scratch), so the
+            // stack-slot path produces `MOVZ X0, #42` (not the
+            // `MOVZ X9, #42; MOV X0, X9` pair the greedy path produces).
+            // The move is emitted twice when both `Ret` and `Return` are
+            // present (redundant but correct); if W7's IR-builder fix
+            // removes the `Ret` instruction, the `Return` terminator arm
+            // still emits the move.
             IRInstr::Ret { values } => {
                 for (i, val) in values.iter().enumerate() {
                     if i >= 8 {
@@ -5978,6 +6009,155 @@ mod tests {
         assert_eq!(relocs[0].offset % 4, 0);
         assert_eq!(relocs[1].offset % 4, 0);
         assert!(relocs[1].offset > relocs[0].offset);
+    }
+
+    // -----------------------------------------------------------------------
+    // W8: Ret / Return return-value emission regression tests
+    // -----------------------------------------------------------------------
+    //
+    // For `fn main() -> i32 { return 42; }`, the SCG→IR bridge produces
+    // both an `IRInstr::Ret { values: [Immediate(42)] }` instruction and
+    // an `IRTerminator::Return([Immediate(42)])` terminator.  The emitter
+    // must lower at least one of them to a return-value move into X0
+    // (`MOVZ X0, #42` on the stack-slot path, or `MOVZ X9, #42; MOV X0,
+    // X9` on the greedy path) BEFORE the `RET` instruction.
+    //
+    // These tests construct the IR directly (bypassing the parser / SCG /
+    // IR-builder) so they isolate the emit path from W7's IR-builder
+    // concerns.  If the emit path ever stops emitting the return-value
+    // move, these tests fail — regardless of whether the IR builder
+    // produces a `Ret` instruction.
+
+    /// Helper: scan emitted ARM64 code words and verify that a
+    /// return-value move carrying `imm` into X0 appears before the `RET`.
+    ///
+    /// Accepts either:
+    ///   - `MOVZ X0, #imm` (stack-slot path's direct load via
+    ///     `ss_load_value` → `emit_load_immediate`), or
+    ///   - `MOVZ X9, #imm` followed (later in the stream) by
+    ///     `MOV X0, X9` (greedy path's `resolve_reg(Immediate)` →
+    ///     `emit_load_immediate(X9, imm)` + `MOV X0, X9`).
+    fn assert_ret_value_in_x0_before_ret(code: &[u32], imm: u16) {
+        let movz_x0 = Instruction::MOVZ {
+            rd: Register::X0,
+            imm16: imm,
+            shift: 0,
+        }
+        .encode()
+        .expect("MOVZ X0 encoding");
+        let movz_x9 = Instruction::MOVZ {
+            rd: Register::X9,
+            imm16: imm,
+            shift: 0,
+        }
+        .encode()
+        .expect("MOVZ X9 encoding");
+        let mov_x0_x9 = Instruction::MOV {
+            rd: Register::X0,
+            rm: Register::X9,
+        }
+        .encode()
+        .expect("MOV X0, X9 encoding");
+        let ret = Instruction::RET { rn: None }
+            .encode()
+            .expect("RET encoding");
+
+        // Locate the RET instruction.
+        let ret_pos = code
+            .iter()
+            .position(|&w| w == ret)
+            .unwrap_or_else(|| panic!("RET (0x{:08X}) not found in emitted code", ret));
+
+        // Only consider instructions BEFORE the RET.
+        let prefix = &code[..ret_pos];
+
+        let has_direct = prefix.contains(&movz_x0);
+        let movz_x9_pos = prefix.iter().position(|&w| w == movz_x9);
+        let mov_x0_x9_pos = prefix.iter().position(|&w| w == mov_x0_x9);
+        let has_indirect = match (movz_x9_pos, mov_x0_x9_pos) {
+            (Some(mz), Some(mv)) => mz < mv,
+            _ => false,
+        };
+
+        assert!(
+            has_direct || has_indirect,
+            "expected MOVZ X0, #{imm} (direct={has_direct}) OR \
+             MOVZ X9, #{imm} + MOV X0, X9 (indirect={has_indirect}, \
+             movz_x9_pos={movz_x9_pos:?}, mov_x0_x9_pos={mov_x0_x9_pos:?}) \
+             before RET at word index {ret_pos}; \
+             emitted words: {code:#?}",
+        );
+    }
+
+    /// W8: Greedy path with both `Ret` instruction and `Return` terminator.
+    /// `count_vregs == 0` so `emit_function_greedy` is used.  Both the
+    /// `Ret` arm (emit_ir_instr) and the `Return` arm (emit_terminator)
+    /// emit `MOVZ X9, #42; MOV X0, X9` before the epilogue + `RET`.
+    #[test]
+    fn test_arm64_ret_immediate_emission_greedy() {
+        let mut func = IRFunction::new("main");
+        func.current_block().push(IRInstr::Ret {
+            values: vec![IRValue::Immediate(42)],
+        });
+        func.current_block().terminator =
+            IRTerminator::Return(vec![IRValue::Immediate(42)]);
+
+        assert_eq!(count_vregs(&func), 0, "this test exercises the greedy path");
+
+        let mut emitter = Emitter::new();
+        let code = emitter.emit_function(&func).unwrap();
+        assert!(!code.is_empty(), "emitter should produce code");
+
+        assert_ret_value_in_x0_before_ret(&code, 42);
+    }
+
+    /// W8: Greedy path with ONLY the `Return` terminator (no `Ret`
+    /// instruction).  This is the fallback path: if W7's IR-builder fix
+    /// removes the redundant `Ret` instruction, the `Return` terminator
+    /// arm in `emit_terminator` must still move the return value to X0.
+    #[test]
+    fn test_arm64_return_terminator_only_emission_greedy() {
+        let mut func = IRFunction::new("main");
+        // No Ret instruction — only the Return terminator.
+        func.current_block().terminator =
+            IRTerminator::Return(vec![IRValue::Immediate(42)]);
+
+        assert_eq!(count_vregs(&func), 0, "this test exercises the greedy path");
+
+        let mut emitter = Emitter::new();
+        let code = emitter.emit_function(&func).unwrap();
+        assert!(!code.is_empty(), "emitter should produce code");
+
+        assert_ret_value_in_x0_before_ret(&code, 42);
+    }
+
+    /// W8: Stack-slot path with both `Ret` instruction and `Return`
+    /// terminator.  `count_vregs > 0` (we add a result vreg) so
+    /// `emit_function_stack_slot` is used.  Both the `Ret` arm
+    /// (ss_emit_instr) and the `Return` arm (ss_emit_terminator) call
+    /// `ss_load_value(Immediate(42), X0, slots)` which emits
+    /// `MOVZ X0, #42` directly.
+    #[test]
+    fn test_arm64_ret_immediate_emission_stack_slot() {
+        let mut func = IRFunction::new("main");
+        // Add a result vreg to force count_vregs > 0 → stack-slot path.
+        func.results.push(IRValue::Register(0));
+        func.current_block().push(IRInstr::Ret {
+            values: vec![IRValue::Immediate(42)],
+        });
+        func.current_block().terminator =
+            IRTerminator::Return(vec![IRValue::Immediate(42)]);
+
+        assert!(
+            count_vregs(&func) > 0,
+            "this test exercises the stack-slot path"
+        );
+
+        let mut emitter = Emitter::new();
+        let code = emitter.emit_function(&func).unwrap();
+        assert!(!code.is_empty(), "emitter should produce code");
+
+        assert_ret_value_in_x0_before_ret(&code, 42);
     }
 
     /// Verify that the RISC-V64 ADDI instruction encodes correctly.

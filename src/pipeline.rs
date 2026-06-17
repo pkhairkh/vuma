@@ -1797,16 +1797,38 @@ pub fn bridge_scg_to_codegen_with_externs(scg: &SCG, extern_functions: &HashSet<
             let params = extract_function_params(*entry_id, scg, &edge_idx);
 
             let mut body = if let Some(first_cf) = edge_idx.outgoing_cf(*entry_id).first() {
-                let mut stop_at = HashSet::new();
-                if let Some(ret) = return_node {
-                    stop_at.insert(ret);
-                }
+                // Do NOT add the FunctionReturn node to `stop_at`.
+                //
+                // The walk's `ControlKind::FunctionReturn` arm resolves the
+                // return value's DataFlow inputs (e.g. the `lit_<n>`
+                // Computation node created by the AST->SCG bridge for literal
+                // returns) and emits an `ScgStatement::Return` carrying the
+                // resolved `ScgExpr`s.  Adding the return node to `stop_at`
+                // causes the walk to `break` *before* processing that node,
+                // so the arm never runs; the fallback below then emits an
+                // empty `Return(vec![])` and the return value is silently
+                // dropped (the binary exits 0 instead of the intended code).
+                //
+                // The FunctionReturn arm itself sets `current = None`, which
+                // ends the walk naturally after the return is emitted, so
+                // there is no risk of walking past the function boundary.
+                // Sub-walks (Branch arms, Loop bodies) likewise process any
+                // return nodes they reach, producing correct per-arm
+                // `Return` statements (e.g. for `if c { return 1; } else
+                // { return 2; }`).
+                let stop_at: HashSet<NodeId> = HashSet::new();
                 walk_control_flow_with_externs(first_cf.target, scg, &edge_idx, &mut consumed, &stop_at, extern_functions)
             } else {
                 vec![]
             };
 
-            // Add return statement if the function has a FunctionReturn
+            // Mark the BFS-discovered FunctionReturn node as consumed so it
+            // is not revisited by the "remaining nodes" sweep below.  If the
+            // walk already reached and consumed it (the common case), this is
+            // a no-op; if it did not (e.g. an early `return` in the body
+            // ended the walk before reaching the function-exit return), this
+            // prevents the structural exit-return from being spuriously
+            // re-emitted as an empty `Return`.
             if let Some(ret) = return_node {
                 consumed.insert(ret);
             }
