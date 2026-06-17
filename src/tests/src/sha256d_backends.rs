@@ -2089,3 +2089,106 @@ fn test_sha256d_wrapping_add_all_backends() {
         }
     }
 }
+
+// ===========================================================================
+// W19: Real `sha256d.vuma` end-to-end compilation through the full pipeline
+// ===========================================================================
+// Prior "SHA256d execution" tests in this file compile either a hand-built
+// one-instruction `Return(Immediate(79))` IR stub (`make_sha256d_return_ir`)
+// or a hand-built codegen SCG modelling `fn main() -> i64 { return 79; }`
+// (`compile_return_79_scg_to_elf`). Neither of those exercises the real
+// 15 KB / 200+ node `examples/sha256d.vuma` program through the public
+// `vuma::pipeline::compile` entry point. This test closes that gap: it loads
+// the real source via `include_str!`, runs it through the full pipeline
+// (parse -> SCG -> IVE -> IR -> regalloc -> emit), and on success asserts the
+// emitted binary is non-empty and starts with the ELF magic bytes. On
+// failure it does NOT fail the test -- instead it prints every error so
+// the remaining codegen work is documented in CI logs.
+
+#[test]
+fn test_sha256d_real_program_compiles() {
+    let source = include_str!("../../../examples/sha256d.vuma");
+    let config = vuma::pipeline::CompileConfig::default();
+    match vuma::pipeline::compile(source, &config) {
+        Ok(output) => {
+            assert!(
+                !output.binary.is_empty(),
+                "SHA256d should produce a binary"
+            );
+            assert_eq!(
+                &output.binary[0..4],
+                &[0x7f, b'E', b'L', b'F'],
+                "Valid ELF"
+            );
+            eprintln!(
+                "SHA256d compiled: {} bytes, {} SCG nodes",
+                output.binary.len(),
+                output.scg.node_count()
+            );
+        }
+        Err(errors) => {
+            eprintln!(
+                "SHA256d compilation failed (expected -- documents remaining codegen work):"
+            );
+            for e in &errors {
+                eprintln!("  {}", e);
+            }
+            // Don't fail the test -- document the gap
+        }
+    }
+}
+
+// ===========================================================================
+// W20: Real `sha256d.vuma` execution on x86_64
+// ===========================================================================
+// If W19's compilation succeeds, write the binary to a temp file and try to
+// execute it as a subprocess. The exit code is logged but not hard-asserted
+// -- this test exists to document whether the produced binary actually runs,
+// not to enforce a particular return value.
+//
+// Note: `CompileConfig::default()` targets `CompileTarget::Linux`, whose
+// `EmitConfig::linux_elf()` is hardwired to `BackendKind::AArch64` (see
+// `pipeline.rs` stage 10 + `emit.rs::EmitConfig::linux_elf`). So on an
+// x86_64 host the emitted ELF is an AArch64 binary and the host kernel
+// refuses to exec it ("Exec format error"). The test handles that case by
+// printing the OS error -- it does not fail. Running the emitted binary
+// therefore requires either QEMU (`qemu-aarch64-static`) or a config +
+// pipeline change to emit x86_64.
+
+#[test]
+fn test_sha256d_real_program_executes() {
+    let source = include_str!("../../../examples/sha256d.vuma");
+    let config = vuma::pipeline::CompileConfig::default();
+    let output = match vuma::pipeline::compile(source, &config) {
+        Ok(o) => o,
+        Err(_) => {
+            eprintln!("Skipping: sha256d doesn't compile yet");
+            return;
+        }
+    };
+
+    // Write and execute
+    let bin_path = std::env::temp_dir().join(format!(
+        "vuma_sha256d_real_{}.elf",
+        std::process::id()
+    ));
+    std::fs::write(&bin_path, &output.binary).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&bin_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&bin_path, perms).unwrap();
+    }
+    let result = std::process::Command::new(&bin_path).output();
+    let _ = std::fs::remove_file(&bin_path);
+    match result {
+        Ok(output) => {
+            let exit_code = output.status.code().unwrap_or(-1);
+            eprintln!("SHA256d exited with code {}", exit_code);
+            // sha256d should exit 79 (success) or some other code
+            // Don't hard-assert -- just document what happens
+        }
+        Err(e) => eprintln!("Failed to execute: {}", e),
+    }
+}

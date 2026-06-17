@@ -640,6 +640,24 @@ impl AstToScg {
                     self.span_to_pp(&a.span),
                 );
                 region.add_node(id);
+                // `tail_id` tracks the last ControlFlow node produced by
+                // this statement. For most assignments this is just `id`
+                // (the Computation node). For assignments through a
+                // dereference / field / index, an Access (Write) node is
+                // created below and chained after `id` via ControlFlow;
+                // in that case `tail_id` becomes the Access node so the
+                // caller's `prev --CF--> stmt_id` chaining connects the
+                // Access node (not the Computation) to the next
+                // statement. This is the W17 fix for the Exclusivity
+                // false positive on `doubly_linked_list.vuma`'s `link()`
+                // pattern: two sequential writes (`(*last).next = node;
+                // (*sentinel).prev = node;`) were flagged as a
+                // write-write conflict because the Access nodes hung off
+                // their Computation nodes via Derivation only, so the
+                // Exclusivity verifier's program-order BFS (which
+                // follows ControlFlow edges between Access nodes) could
+                // not see the sequential ordering.
+                let mut tail_id = id;
 
                 // Enhanced: if assigning through a dereference or index,
                 // this is also a Write (or ReadWrite if the target is read
@@ -663,6 +681,16 @@ impl AstToScg {
                     );
                     region.add_node(access_id);
                     let _ = scg.add_edge(id, access_id, EdgeKind::Derivation);
+                    // W17 fix: also chain the Access node into the
+                    // ControlFlow sequence (`id --CF--> access_id`) so
+                    // the Exclusivity verifier's program-order BFS can
+                    // reach the next statement's Access node from this
+                    // one. Without this edge, the Access node has no
+                    // outgoing ControlFlow edge and the BFS terminates
+                    // immediately, producing a false "write-write
+                    // conflict" on sequential writes within one function
+                    // body.
+                    let _ = scg.add_edge(id, access_id, EdgeKind::ControlFlow);
 
                     // Enhanced: Derivation from the pointer variable to the access.
                     for var_name in &self.assign_target_uses(&a.target) {
@@ -670,6 +698,10 @@ impl AstToScg {
                             let _ = scg.add_edge(source, access_id, EdgeKind::Derivation);
                         }
                     }
+                    // The Access node is the last ControlFlow node of
+                    // this statement; return it so the caller chains
+                    // the next statement from here.
+                    tail_id = access_id;
                 }
 
                 // Update variable definition for simple assignments.
@@ -752,7 +784,7 @@ impl AstToScg {
                     }
                 }
 
-                Ok(id)
+                Ok(tail_id)
             }
 
             // 3. Alloc expressions → Allocation nodes (enhanced: type-based size/align)
@@ -1458,6 +1490,13 @@ impl AstToScg {
                 );
                 region.add_node(id);
                 self.add_data_flow_edges(&e.expr, id, scg);
+                // `tail_id` is the last ControlFlow node of this
+                // statement (W17 fix). Defaults to `id` (Computation);
+                // updated to the Access node when the expression is a
+                // dereference, so the caller chains the next statement
+                // from the Access node and the Exclusivity verifier's
+                // program-order BFS can see sequential ordering.
+                let mut tail_id = id;
 
                 // 10. Function calls → FunctionEntry/FunctionReturn nodes
                 if let Expr::Call { callee, args, .. } = &e.expr {
@@ -1521,6 +1560,12 @@ impl AstToScg {
                     );
                     region.add_node(access_id);
                     let _ = scg.add_edge(id, access_id, EdgeKind::Derivation);
+                    // W17 fix: chain the Access node into the ControlFlow
+                    // sequence so the Exclusivity verifier's program-order
+                    // BFS can reach the next statement's Access node from
+                    // this one (see the `tail_id` comment above).
+                    let _ = scg.add_edge(id, access_id, EdgeKind::ControlFlow);
+                    tail_id = access_id;
                 }
 
                 // If the expression is a cast, add a Cast node.
@@ -1603,7 +1648,7 @@ impl AstToScg {
                     let _ = scg.add_edge(id, align_id, EdgeKind::Derivation);
                 }
 
-                Ok(id)
+                Ok(tail_id)
             }
 
             // Compound assignment: target op= value

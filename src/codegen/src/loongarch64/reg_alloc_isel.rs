@@ -51,7 +51,6 @@ const CALLEE_SAVED_ALLOC: &[Gpr] = &[
 
 // FPR scratch registers (caller-saved temporaries, not allocated to vregs)
 const FS0: Fpr = Fpr::F0; // $f0 / $fa0 — primary FPR scratch
-const FS1: Fpr = Fpr::F1; // $f1 / $fa1 — secondary FPR scratch
 
 // =============================================================================
 // Helpers
@@ -112,9 +111,8 @@ fn emit_ai_rw(
 
 #[derive(Clone, Copy, Debug)]
 enum VregLoc {
-    Stack(i32),
+    Stack,
     Reg(Gpr, bool), // (register, dirty)
-    Undef,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -216,7 +214,7 @@ impl RegCache {
                     code.extend_from_slice(&Instruction::StD { rd: reg, rj: Gpr::T0, imm12: 0 }.encode());
                 }
             }
-            self.vreg_loc.insert(vid, VregLoc::Stack(self.slot_offset(vid)));
+            self.vreg_loc.insert(vid, VregLoc::Stack);
         }
         self.reg_state[idx] = RegState { vreg: None, dirty: false, last_used: 0 };
         code
@@ -225,7 +223,7 @@ impl RegCache {
     fn assign_vreg(&mut self, vid: u32, reg: Gpr, dirty: bool) {
         let idx = reg.encoding() as usize;
         if let Some(old_vid) = self.reg_state[idx].vreg {
-            if old_vid != vid { self.vreg_loc.insert(old_vid, VregLoc::Stack(self.slot_offset(old_vid))); }
+            if old_vid != vid { self.vreg_loc.insert(old_vid, VregLoc::Stack); }
         }
         self.reg_state[idx] = RegState { vreg: Some(vid), dirty, last_used: 0 };
         self.vreg_loc.insert(vid, VregLoc::Reg(reg, dirty));
@@ -287,7 +285,7 @@ impl RegCache {
         for &reg in CALLER_SAVED {
             let idx = reg.encoding() as usize;
             if let Some(vid) = self.reg_state[idx].vreg {
-                self.vreg_loc.insert(vid, VregLoc::Stack(self.slot_offset(vid)));
+                self.vreg_loc.insert(vid, VregLoc::Stack);
             }
             self.reg_state[idx] = RegState { vreg: None, dirty: false, last_used: 0 };
         }
@@ -299,9 +297,9 @@ impl RegCache {
             let idx = reg.encoding() as usize;
             self.reg_state[idx].vreg = Some(new_vid);
             self.vreg_loc.insert(new_vid, VregLoc::Reg(reg, dirty));
-            self.vreg_loc.insert(old_vid, VregLoc::Stack(self.slot_offset(old_vid)));
+            self.vreg_loc.insert(old_vid, VregLoc::Stack);
         } else {
-            self.vreg_loc.insert(new_vid, VregLoc::Stack(self.slot_offset(new_vid)));
+            self.vreg_loc.insert(new_vid, VregLoc::Stack);
         }
         Vec::new()
     }
@@ -362,19 +360,6 @@ fn resolve_val(val: &IRValue, cache: &mut RegCache, fp: Gpr) -> (Gpr, Vec<u8>) {
             (reg, code)
         }
     }
-}
-
-/// Free a temp register that was allocated for a non-vreg value (immediate/address).
-fn free_temp_reg(cache: &mut RegCache, reg: Gpr) {
-    // Only free if it's not currently holding a named vreg
-    let idx = reg.encoding() as usize;
-    // If it holds a vreg, don't free. Otherwise, clear it.
-    // We track this: if we allocated this for an immediate, it shouldn't
-    // have a vreg assigned. But resolve_val doesn't assign one.
-    // Actually, resolve_val calls alloc_reg which doesn't assign a vreg.
-    // But the register could have been assigned by something else.
-    // For safety, just leave it — the eviction logic will handle it.
-    let _ = (cache, reg);
 }
 
 // =============================================================================

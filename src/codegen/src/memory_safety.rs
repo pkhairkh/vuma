@@ -23,7 +23,7 @@
 //! with the diagnostics system (error codes E041–E050).  The `--safe` CLI
 //! flag enables runtime bounds-checking instrumentation.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fmt;
 
 // ─── Re-export liveness types from vuma-scg ──────────────────────────────────
@@ -31,8 +31,7 @@ use std::fmt;
 // dead-allocation detection. We depend on it through the codegen SCG bridge.
 
 use crate::scg_to_ir::{
-    AccessNode, AllocationNode, CallNode, ControlNode, Scg, ScgExpr, ScgFunction, ScgNode,
-    ScgStatement, ScgType, SwitchArm,
+    AccessNode, AllocationNode, ControlNode, Scg, ScgExpr, ScgFunction, ScgNode, ScgStatement,
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -382,6 +381,7 @@ impl fmt::Display for MemorySafetyReport {
 
 /// Information about a tracked allocation within the codegen SCG.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct AllocationInfo {
     /// Variable name of the allocation.
     name: String,
@@ -401,6 +401,7 @@ struct AllocationInfo {
 
 /// Information about a free/deallocation operation.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct FreeInfo {
     /// Variable name being freed.
     name: String,
@@ -412,6 +413,7 @@ struct FreeInfo {
 
 /// Information about an access (load/store) to an allocation.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct AccessInfo {
     /// Variable name being accessed.
     name: String,
@@ -495,6 +497,7 @@ impl MemorySafetyAnalyzer {
     }
 
     /// Recursively walk SCG statements to collect allocation/access/free info.
+    #[allow(clippy::only_used_in_recursion)]
     fn walk_statements(
         &self,
         stmts: &[ScgStatement],
@@ -710,24 +713,20 @@ impl MemorySafetyAnalyzer {
     ) {
         for stmt in stmts {
             match stmt {
-                ScgStatement::Call(call) => {
-                    if is_deallocation_call(&call.func) {
-                        for arg in &call.args {
-                            if expr_to_name(arg) == alloc_name {
-                                *freed = true;
-                            }
+                ScgStatement::Call(call) if is_deallocation_call(&call.func) => {
+                    for arg in &call.args {
+                        if expr_to_name(arg) == alloc_name {
+                            *freed = true;
                         }
                     }
                 }
-                ScgStatement::Access(access) => {
-                    if *freed {
-                        let ptr_name = match access {
-                            AccessNode::Load { ptr, .. } => expr_to_name(ptr),
-                            AccessNode::Store { ptr, .. } => expr_to_name(ptr),
-                        };
-                        if ptr_name == alloc_name {
-                            *count += 1;
-                        }
+                ScgStatement::Access(access) if *freed => {
+                    let ptr_name = match access {
+                        AccessNode::Load { ptr, .. } => expr_to_name(ptr),
+                        AccessNode::Store { ptr, .. } => expr_to_name(ptr),
+                    };
+                    if ptr_name == alloc_name {
+                        *count += 1;
                     }
                 }
                 ScgStatement::Control(ctrl) => {
@@ -1108,7 +1107,7 @@ mod tests {
 
     #[test]
     fn test_double_free_detection() {
-        use crate::scg_to_ir::CallNode;
+        use crate::scg_to_ir::{CallNode, ScgType};
 
         // Create a function that allocates and frees twice
         let scg = Scg {
@@ -1148,6 +1147,7 @@ mod tests {
 
     #[test]
     fn test_memory_leak_detection() {
+        use crate::scg_to_ir::ScgType;
         // Create a function that allocates but never frees
         let scg = Scg {
             nodes: vec![ScgNode::Function(ScgFunction {
@@ -1171,7 +1171,7 @@ mod tests {
 
     #[test]
     fn test_use_after_free_detection() {
-        use crate::scg_to_ir::CallNode;
+        use crate::scg_to_ir::{CallNode, ScgType};
 
         // Create a function that frees then accesses
         let scg = Scg {
@@ -1209,7 +1209,7 @@ mod tests {
 
     #[test]
     fn test_no_violation_for_proper_usage() {
-        use crate::scg_to_ir::CallNode;
+        use crate::scg_to_ir::{CallNode, ScgType};
 
         // Create a function that allocates, uses, and properly frees
         let scg = Scg {
@@ -1247,6 +1247,7 @@ mod tests {
 
     #[test]
     fn test_bounds_check_site_detection() {
+        use crate::scg_to_ir::ScgType;
         let scg = Scg {
             nodes: vec![ScgNode::Function(ScgFunction {
                 name: "test_bounds".to_string(),

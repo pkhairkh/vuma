@@ -2771,8 +2771,8 @@ impl LoopDetector {
                     let has_const = match (lhs, rhs) {
                         (IRValue::Register(id), IRValue::Immediate(_)) if *id == vreg => true,
                         (IRValue::Immediate(_), IRValue::Register(id)) if *id == vreg => true,
-                        (IRValue::Register(id), IRValue::Immediate(_)) => true,
-                        (IRValue::Immediate(_), IRValue::Register(id)) => true,
+                        (IRValue::Register(_), IRValue::Immediate(_)) => true,
+                        (IRValue::Immediate(_), IRValue::Register(_)) => true,
                         _ => false,
                     };
                     if self_referencing && has_const {
@@ -2954,11 +2954,9 @@ pub fn compute_vreg_loop_depths(func: &IRFunction) -> HashMap<IRValueId, u32> {
         }
         // Also check terminator uses.
         match &block.terminator {
-            IRTerminator::Branch { cond, .. } => {
-                if let IRValue::Register(vreg) = cond {
-                    let entry = vreg_depths.entry(*vreg).or_insert(0);
-                    *entry = (*entry).max(depth);
-                }
+            IRTerminator::Branch { cond: IRValue::Register(vreg), .. } => {
+                let entry = vreg_depths.entry(*vreg).or_insert(0);
+                *entry = (*entry).max(depth);
             }
             IRTerminator::Return(vals) => {
                 for val in vals {
@@ -2968,11 +2966,9 @@ pub fn compute_vreg_loop_depths(func: &IRFunction) -> HashMap<IRValueId, u32> {
                     }
                 }
             }
-            IRTerminator::Switch { discr, .. } => {
-                if let IRValue::Register(vreg) = discr {
-                    let entry = vreg_depths.entry(*vreg).or_insert(0);
-                    *entry = (*entry).max(depth);
-                }
+            IRTerminator::Switch { discr: IRValue::Register(vreg), .. } => {
+                let entry = vreg_depths.entry(*vreg).or_insert(0);
+                *entry = (*entry).max(depth);
             }
             _ => {}
         }
@@ -3696,6 +3692,7 @@ impl TargetAgnosticRegAlloc {
     }
 
     /// Try to allocate a register using enhanced weights for eviction decisions.
+    #[allow(clippy::too_many_arguments)]
     fn try_alloc_reg_enhanced(
         &self,
         interval: &LiveInterval,
@@ -3732,6 +3729,7 @@ impl TargetAgnosticRegAlloc {
     }
 
     /// Spill or evict with enhanced weight comparison.
+    #[allow(clippy::too_many_arguments)]
     fn spill_or_evict_enhanced(
         &self,
         interval: &LiveInterval,
@@ -3891,12 +3889,10 @@ impl LivenessAnalysis {
             }
             // Terminator uses.
             match &block.terminator {
-                IRTerminator::Branch { cond, .. } => {
-                    if let IRValue::Register(vreg) = cond {
-                        if !block_def[idx].contains(vreg) {
-                            block_use[idx].insert(*vreg);
-                        }
-                    }
+                IRTerminator::Branch { cond: IRValue::Register(vreg), .. }
+                    if !block_def[idx].contains(vreg) =>
+                {
+                    block_use[idx].insert(*vreg);
                 }
                 IRTerminator::Return(vals) => {
                     for val in vals {
@@ -3907,12 +3903,10 @@ impl LivenessAnalysis {
                         }
                     }
                 }
-                IRTerminator::Switch { discr, .. } => {
-                    if let IRValue::Register(vreg) = discr {
-                        if !block_def[idx].contains(vreg) {
-                            block_use[idx].insert(*vreg);
-                        }
-                    }
+                IRTerminator::Switch { discr: IRValue::Register(vreg), .. }
+                    if !block_def[idx].contains(vreg) =>
+                {
+                    block_use[idx].insert(*vreg);
                 }
                 _ => {}
             }

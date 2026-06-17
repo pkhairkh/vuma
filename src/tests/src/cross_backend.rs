@@ -2074,6 +2074,40 @@ fn test_cross_backend_x86_64_execution_exit_code() {
     );
 }
 
+/// Locate an available `qemu-aarch64` binary for cross-arch execution tests.
+///
+/// Probes in this order:
+/// 1. `qemu-aarch64` on `PATH`
+/// 2. `qemu-aarch64-static` on `PATH`
+/// 3. `/tmp/qemu_bin/usr/bin/qemu-aarch64` (left over from a prior session's
+///    manual `dpkg-deb -x qemu-user ...` install — useful in minimal
+///    containers where QEMU is not on the system PATH)
+///
+/// Returns `Some(path)` if a working binary (one that responds to
+/// `--version` with exit 0) is found, `None` otherwise.
+///
+/// Used by [`test_cross_backend_aarch64_qemu_execution_exit_code`] (Test 17)
+/// and [`test_aarch64_sha256d_exit_79_via_qemu`] (W24).
+fn find_qemu_aarch64() -> Option<String> {
+    let candidates: [&str; 3] = [
+        "qemu-aarch64",
+        "qemu-aarch64-static",
+        "/tmp/qemu_bin/usr/bin/qemu-aarch64",
+    ];
+
+    for bin in &candidates {
+        let ok = std::process::Command::new(bin)
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if ok {
+            return Some((*bin).to_string());
+        }
+    }
+    None
+}
+
 /// Test 17: If QEMU user-mode emulation is available, do the same for aarch64.
 ///
 /// Compiles `fn main() -> i32 { return 42; }` to AArch64, then runs the
@@ -2081,25 +2115,37 @@ fn test_cross_backend_x86_64_execution_exit_code() {
 /// exit code is 42.
 ///
 /// This test is **skipped** (not failed) when `qemu-aarch64` is not on the
-/// PATH.  When QEMU is available, the test provides cross-architecture
-/// semantic verification — proving that the AArch64 backend produces code
-/// whose observable behavior matches the source program.
+/// PATH and the fallback `/tmp/qemu_bin/usr/bin/qemu-aarch64` (from a prior
+/// session's manual install) is also missing.  When QEMU is available, the
+/// test provides cross-architecture semantic verification — proving that the
+/// AArch64 backend produces code whose observable behavior matches the source
+/// program.
+///
+/// **W23-24**: Now that the W5-6 return-value-propagation fix is in, the
+/// AArch64 `_start` stub correctly propagates `main`'s return value (in `X0`)
+/// through `sys_exit` (syscall 93).  This test asserts `exit_code == 42`
+/// unconditionally; the previous defensive "partial pass for exit 0" branch
+/// has been removed because it is now dead code (the binary really does exit
+/// 42 under QEMU — verified with `qemu-aarch64` 10.0.8 from the Debian
+/// `qemu-user` package).
 #[test]
 fn test_cross_backend_aarch64_qemu_execution_exit_code() {
-    // Probe for qemu-aarch64 availability.
-    let qemu_available = std::process::Command::new("qemu-aarch64")
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
+    let qemu_bin = match find_qemu_aarch64() {
+        Some(bin) => bin,
+        None => {
+            eprintln!(
+                "  skipping aarch64 QEMU semantic test: \
+                 qemu-aarch64 not found on PATH and \
+                 /tmp/qemu_bin/usr/bin/qemu-aarch64 not present"
+            );
+            return;
+        }
+    };
 
-    if !qemu_available {
-        eprintln!(
-            "  skipping aarch64 QEMU semantic test: \
-             qemu-aarch64 not found on PATH"
-        );
-        return;
-    }
+    eprintln!(
+        "  test_cross_backend_aarch64_qemu_execution_exit_code: using {}",
+        qemu_bin
+    );
 
     let (status, bytes_opt) =
         compile_example_for_backend(SEMANTIC_TEST_SOURCE, BackendKind::AArch64);
@@ -2112,15 +2158,11 @@ fn test_cross_backend_aarch64_qemu_execution_exit_code() {
     let bytes = bytes_opt.expect("successful compilation should produce bytes");
 
     let _ = std::fs::write("/tmp/vuma_aarch64_debug.elf", &bytes);
-    // Also dump the first 40 bytes of .text as hex
-    let text_off = 0x1000usize;
-    if text_off + 40 <= bytes.len() {
-    }
 
     // Verify the binary is a valid AArch64 ELF executable.
     assert!(
         bytes.len() >= 64,
-        "aarch64: ELF too short ({} bytes, need ≥64)",
+        "aarch64: ELF too short ({} bytes, need >=64)",
         bytes.len()
     );
     assert_eq!(
@@ -2163,35 +2205,154 @@ fn test_cross_backend_aarch64_qemu_execution_exit_code() {
             .unwrap_or_else(|e| panic!("set_permissions for {:?}: {}", bin_path, e));
     }
 
-    let output = std::process::Command::new("qemu-aarch64")
+    let output = std::process::Command::new(&qemu_bin)
         .arg(&bin_path)
         .output()
         .unwrap_or_else(|e| {
             let _ = std::fs::remove_file(&bin_path);
             panic!(
-                "failed to spawn qemu-aarch64 {:?}: {}",
-                bin_path, e
+                "failed to spawn {} {:?}: {}",
+                qemu_bin, bin_path, e
             )
         });
 
     let exit_code = output.status.code().unwrap_or(-1);
     let _ = std::fs::remove_file(&bin_path);
 
-    // The AArch64 _start stub calls main and exits via sys_exit_group,
-    // but the return-value propagation from main's Return terminator through
-    // the SCG->IR bridge is not yet complete for literal return values.
-    // We accept exit 0 (binary ran without crashing) as a documented partial
-    // pass, and hard-fail only on a crash (signal).
-    // See W33-38 worklog for the root cause analysis.
-    if exit_code == 0 {
-        eprintln!(
-            "aarch64 QEMU execution: binary ran but exited 0 (expected 42).              Return-value propagation from main to _start is a known codegen limitation."
-        );
-        return; // partial pass
-    }
+    // W23-24: Now that the W5-6 return-value-propagation fix is in, the
+    // AArch64 _start stub correctly passes main's return value (in X0) to
+    // sys_exit (syscall 93).  We assert exit_code == 42 unconditionally;
+    // the previous "partial pass for exit 0" branch has been removed
+    // because it is now dead code (the binary really does exit 42 under
+    // QEMU).  Any other exit code — including 0 or a crash signal
+    // (negative on Unix) — is a regression and must fail loudly.
     assert_eq!(
         exit_code, 42,
-        "aarch64 (via qemu-aarch64): binary should exit with code 42 (got {}, stdout={:?}, stderr={:?})",
+        "aarch64 (via {}): binary should exit with code 42 (got {}, stdout={:?}, stderr={:?}). \
+         If you see exit 0, the W5-6 return-value-propagation fix may not be fully working on \
+         AArch64 — investigate.",
+        qemu_bin,
+        exit_code,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Test 17b (W24): Validate the SHA256d exit-code convention on AArch64.
+///
+/// Compiles `fn main() -> i32 { return 79; }` to AArch64 and runs the
+/// resulting ELF under `qemu-aarch64`.  Asserts the exit code is 79.
+///
+/// Exit code 79 is the convention used by the SHA256d proof-carrying code
+/// path to signal "proof verified successfully."  Verifying that this
+/// convention works end-to-end on AArch64 (not just x86_64) ensures the
+/// cross-arch return-value propagation is robust to different immediate
+/// values, not just the canonical 42 used by Test 17.
+///
+/// Skipped (not failed) when QEMU is unavailable — see
+/// [`find_qemu_aarch64`].
+#[test]
+fn test_aarch64_sha256d_exit_79_via_qemu() {
+    let qemu_bin = match find_qemu_aarch64() {
+        Some(bin) => bin,
+        None => {
+            eprintln!(
+                "  skipping aarch64 SHA256d exit-79 test: \
+                 qemu-aarch64 not found on PATH and \
+                 /tmp/qemu_bin/usr/bin/qemu-aarch64 not present"
+            );
+            return;
+        }
+    };
+
+    eprintln!(
+        "  test_aarch64_sha256d_exit_79_via_qemu: using {}",
+        qemu_bin
+    );
+
+    const SHA256D_TEST_SOURCE: &str = "fn main() -> i32 { return 79; }";
+
+    let (status, bytes_opt) =
+        compile_example_for_backend(SHA256D_TEST_SOURCE, BackendKind::AArch64);
+    assert!(
+        status.is_success(),
+        "aarch64: compilation of `fn main() -> i32 {{ return 79; }}` failed: {:?}",
+        status
+    );
+    let bytes = bytes_opt.expect("successful compilation should produce bytes");
+
+    // Verify the binary is a valid AArch64 ELF executable.
+    assert!(
+        bytes.len() >= 64,
+        "aarch64: ELF too short ({} bytes, need >=64)",
+        bytes.len()
+    );
+    assert_eq!(
+        &bytes[0..4],
+        &[0x7f, b'E', b'L', b'F'],
+        "aarch64: bad ELF magic"
+    );
+    assert_eq!(bytes[4], 2, "aarch64: should be ELFCLASS64");
+
+    let e_type = u16::from_le_bytes([bytes[16], bytes[17]]);
+    assert_eq!(
+        e_type, 2,
+        "aarch64: e_type should be ET_EXEC (2), got {}",
+        e_type
+    );
+
+    let e_machine = u16::from_le_bytes([bytes[18], bytes[19]]);
+    assert_eq!(
+        e_machine, 183,
+        "aarch64: e_machine should be EM_AARCH64 (183), got {}",
+        e_machine
+    );
+
+    // Write to a temp file and run via qemu-aarch64.
+    let bin_path = std::env::temp_dir().join(format!(
+        "vuma_aarch64_sha256d_{}.elf",
+        std::process::id()
+    ));
+    std::fs::write(&bin_path, &bytes)
+        .unwrap_or_else(|e| panic!("should write temp binary to {:?}: {}", bin_path, e));
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&bin_path)
+            .unwrap_or_else(|e| panic!("metadata for {:?}: {}", bin_path, e))
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&bin_path, perms)
+            .unwrap_or_else(|e| panic!("set_permissions for {:?}: {}", bin_path, e));
+    }
+
+    let output = std::process::Command::new(&qemu_bin)
+        .arg(&bin_path)
+        .output()
+        .unwrap_or_else(|e| {
+            let _ = std::fs::remove_file(&bin_path);
+            panic!(
+                "failed to spawn {} {:?}: {}",
+                qemu_bin, bin_path, e
+            )
+        });
+
+    let exit_code = output.status.code().unwrap_or(-1);
+    let _ = std::fs::remove_file(&bin_path);
+
+    // W24: The AArch64 _start stub propagates main's return value (79) to
+    // sys_exit (syscall 93).  We assert exit_code == 79 unconditionally.
+    // This validates that the SHA256d exit-code convention works on
+    // AArch64, not just the canonical 42 used by Test 17.  If you see
+    // exit 0, the return-value-propagation fix may not be fully working
+    // on AArch64 — investigate.
+    assert_eq!(
+        exit_code, 79,
+        "aarch64 (via {}): SHA256d binary should exit with code 79 (got {}, stdout={:?}, stderr={:?}). \
+         If you see exit 0, the return-value-propagation fix may not be fully working on AArch64 \
+         — investigate.",
+        qemu_bin,
         exit_code,
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)

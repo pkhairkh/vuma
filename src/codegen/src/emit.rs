@@ -90,6 +90,7 @@ enum BranchFormat {
     /// CBZ / CBNZ: 19-bit offset in bits[23:5] (word-aligned, offset = imm19 * 4)
     Cond19,
     /// B.cond: 19-bit offset in bits[23:5] (word-aligned)
+    #[allow(dead_code)]
     BCond19,
 }
 
@@ -174,6 +175,7 @@ const STT_FUNC: u8 = 2;
 /// Symbol type: section.
 const STT_SECTION: u8 = 3;
 /// Symbol type: no type (undefined/external symbol).
+#[allow(dead_code)]
 const STT_NOTYPE: u8 = 0;
 
 /// Default base address for Linux LOAD segment.
@@ -928,7 +930,6 @@ impl Emitter {
                 ];
 
                 let mut src_regs: Vec<Register> = Vec::new();
-                let mut immediate_scratch_used: Vec<usize> = Vec::new(); // which scratch reg each immediate uses
                 let mut next_scratch = 0;
 
                 for (i, arg) in args.iter().enumerate() {
@@ -1844,7 +1845,7 @@ impl Emitter {
         // LDR X: scale=3, imm12 0..4095 → offset 0..32760, multiple of 8
         match ty {
             IRType::I8 | IRType::U8 => {
-                if offset >= 0 && offset <= 4095 {
+                if (0..=4095).contains(&offset) {
                     self.emit_instruction(Instruction::LDRB { rt, rn, offset })?;
                 } else {
                     self.emit_address_with_offset(rn, offset)?;
@@ -1865,7 +1866,7 @@ impl Emitter {
                 }
             }
             IRType::I16 | IRType::U16 => {
-                if offset >= 0 && offset <= 8190 && offset % 2 == 0 {
+                if (0..=8190).contains(&offset) && offset % 2 == 0 {
                     self.emit_instruction(Instruction::LDRH { rt, rn, offset })?;
                 } else {
                     self.emit_address_with_offset(rn, offset)?;
@@ -1887,7 +1888,7 @@ impl Emitter {
             }
             IRType::I32 | IRType::U32 => {
                 // 32-bit load uses LDR Wt encoding (scale=2, offset must be multiple of 4)
-                if offset >= 0 && offset <= 16380 && offset % 4 == 0 {
+                if (0..=16380).contains(&offset) && offset % 4 == 0 {
                     self.emit_instruction(Instruction::LDR_W { rt, rn, offset })?;
                 } else {
                     self.emit_address_with_offset(rn, offset)?;
@@ -1909,7 +1910,7 @@ impl Emitter {
             }
             IRType::I64 | IRType::U64 | IRType::Ptr | IRType::Func => {
                 // 64-bit load uses LDR Xt encoding (scale=3, offset must be multiple of 8)
-                if offset >= 0 && offset <= 32760 && offset % 8 == 0 {
+                if (0..=32760).contains(&offset) && offset % 8 == 0 {
                     self.emit_instruction(Instruction::LDR { rt, rn, offset })?;
                 } else {
                     self.emit_address_with_offset(rn, offset)?;
@@ -1922,7 +1923,7 @@ impl Emitter {
             }
             _ => {
                 // Default: treat as 64-bit load
-                if offset >= 0 && offset <= 32760 && offset % 8 == 0 {
+                if (0..=32760).contains(&offset) && offset % 8 == 0 {
                     self.emit_instruction(Instruction::LDR { rt, rn, offset })?;
                 } else {
                     self.emit_address_with_offset(rn, offset)?;
@@ -1952,7 +1953,7 @@ impl Emitter {
     fn emit_store(&mut self, rt: Register, rn: Register, offset: i32, ty: &IRType) -> Result<()> {
         match ty {
             IRType::I8 | IRType::U8 => {
-                if offset >= 0 && offset <= 4095 {
+                if (0..=4095).contains(&offset) {
                     self.emit_instruction(Instruction::STRB { rt, rn, offset })?;
                 } else {
                     self.emit_address_with_offset(rn, offset)?;
@@ -1964,7 +1965,7 @@ impl Emitter {
                 }
             }
             IRType::I16 | IRType::U16 => {
-                if offset >= 0 && offset <= 8190 && offset % 2 == 0 {
+                if (0..=8190).contains(&offset) && offset % 2 == 0 {
                     self.emit_instruction(Instruction::STRH { rt, rn, offset })?;
                 } else {
                     self.emit_address_with_offset(rn, offset)?;
@@ -1977,7 +1978,7 @@ impl Emitter {
             }
             IRType::I32 | IRType::U32 => {
                 // 32-bit store uses STR Wt encoding (scale=2, offset must be multiple of 4)
-                if offset >= 0 && offset <= 16380 && offset % 4 == 0 {
+                if (0..=16380).contains(&offset) && offset % 4 == 0 {
                     self.emit_instruction(Instruction::STR_W { rt, rn, offset })?;
                 } else {
                     self.emit_address_with_offset(rn, offset)?;
@@ -1990,7 +1991,7 @@ impl Emitter {
             }
             IRType::I64 | IRType::U64 | IRType::Ptr | IRType::Func => {
                 // 64-bit store uses STR Xt encoding (scale=3, offset must be multiple of 8)
-                if offset >= 0 && offset <= 32760 && offset % 8 == 0 {
+                if (0..=32760).contains(&offset) && offset % 8 == 0 {
                     self.emit_instruction(Instruction::STR { rt, rn, offset })?;
                 } else {
                     self.emit_address_with_offset(rn, offset)?;
@@ -2003,7 +2004,7 @@ impl Emitter {
             }
             _ => {
                 // Default: treat as 64-bit store
-                if offset >= 0 && offset <= 32760 && offset % 8 == 0 {
+                if (0..=32760).contains(&offset) && offset % 8 == 0 {
                     self.emit_instruction(Instruction::STR { rt, rn, offset })?;
                 } else {
                     self.emit_address_with_offset(rn, offset)?;
@@ -2029,7 +2030,7 @@ impl Emitter {
         rn: Register,
         offset: i32,
     ) -> Result<()> {
-        if offset >= 0 && offset <= 4095 {
+        if (0..=4095).contains(&offset) {
             // Small positive offset: ADD X9, rn, #offset
             self.emit_instruction(Instruction::ADD {
                 rd: Register::X9,
@@ -2364,7 +2365,7 @@ impl Emitter {
                 if let IRInstr::Alloc { dst, size } = instr {
                     if let Some(id) = dst.as_register() {
                         stack_alloc_vregs.insert(id);
-                        let aligned_size = ((*size as i32 + 15) & !15) as i32;
+                        let aligned_size = (*size as i32 + 15) & !15;
                         alloc_sizes.insert(id, aligned_size);
                     }
                 }
@@ -2882,13 +2883,7 @@ impl Emitter {
                     .iter()
                     .filter(|(val, _)| val != dst)
                     .collect();
-                if non_self.len() == 1 {
-                    let (val, _) = non_self[0];
-                    let dst_id = dst.as_register().unwrap_or(0);
-                    let dst_offset = slots.get(&dst_id).copied().unwrap_or(0);
-                    self.ss_load_value(val, Register::X9, slots)?;
-                    self.ss_store_to_slot(Register::X9, dst_offset)?;
-                } else if !non_self.is_empty() {
+                if !non_self.is_empty() {
                     let (val, _) = non_self[0];
                     let dst_id = dst.as_register().unwrap_or(0);
                     let dst_offset = slots.get(&dst_id).copied().unwrap_or(0);
@@ -3954,11 +3949,7 @@ fn compute_frame_size(func: &IRFunction) -> u32 {
     }
     // Number of potential spills: max(0, vreg_count - available_registers)
     let available_regs: u32 = 23; // 13 caller-saved + 10 callee-saved
-    let potential_spills = if max_vreg > available_regs {
-        max_vreg - available_regs
-    } else {
-        0
-    };
+    let potential_spills = max_vreg.saturating_sub(available_regs);
     let spill_bytes = potential_spills * 8; // 8 bytes per spill slot
 
     total += spill_bytes;
@@ -4080,7 +4071,7 @@ pub fn emit_elf(
     // BOTH ET_REL (object files, where relocations are deferred to the
     // linker) and ET_EXEC (executables, where the BL offset is left as a
     // trap/trampoline but the symbol name is still recorded for tooling).
-    let mut external_symbols: Vec<String> = Vec::new();
+    let mut external_symbols: Vec<String>;
     let mut rela_entries: Vec<RelaEntry> = Vec::new();
     {
         let mut extern_set: std::collections::HashSet<String> = std::collections::HashSet::new();
