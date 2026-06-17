@@ -403,8 +403,13 @@ impl AstToScg {
         fn_region.add_node(ret_id);
 
         // Link last body node to return.
+        // If there is no previous body node (e.g. the function body is just
+        // 'return <expr>'), link the entry directly to the return so the
+        // bridge's control-flow walk can reach the FunctionReturn node.
         if let Some(prev) = prev_node {
             let _ = scg.add_edge(prev, ret_id, EdgeKind::ControlFlow);
+        } else {
+            let _ = scg.add_edge(entry_id, ret_id, EdgeKind::ControlFlow);
         }
 
         self.pop_alloc_scope();
@@ -1375,7 +1380,32 @@ impl AstToScg {
                 region.add_node(id);
 
                 if let Some(v) = &r.value {
-                    self.add_data_flow_edges(v, id, scg);
+                    // For literal return values, create a Computation node
+                    // representing the literal and link it via DataFlow.
+                    // This ensures the pipeline bridge can resolve the return
+                    // value to an ScgExpr (instead of defaulting to 0).
+                    if let Expr::Lit { value, .. } = v {
+                        let lit_str = match value {
+                            crate::ast::Lit::Int(n) => format!("lit_{}", n),
+                            crate::ast::Lit::Float(f) => format!("lit_{}", f),
+                            crate::ast::Lit::String(s) => format!("lit_str_{}", s),
+                            crate::ast::Lit::Bool(b) => format!("lit_{}", b),
+                            crate::ast::Lit::Address(a) => format!("lit_{}", a),
+                        };
+                        let lit_id = scg.add_node(
+                            NodeType::Computation,
+                            NodePayload::Computation(ComputationNode {
+                                kind: ComputationKind::Other(lit_str),
+                                result_type: None,
+                                tail_call: false,
+                            }),
+                            self.span_to_pp(&r.span),
+                        );
+                        region.add_node(lit_id);
+                        let _ = scg.add_edge(lit_id, id, EdgeKind::DataFlow);
+                    } else {
+                        self.add_data_flow_edges(v, id, scg);
+                    }
                 }
 
                 Ok(id)

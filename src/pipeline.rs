@@ -64,7 +64,7 @@ use vuma_parser::{AstToScg, Item, ModuleResolver, ParseError, Parser, Program as
 use vuma_scg::{
     AccessMode, CommonSubexpressionElimination, ConstantFolding, ControlKind, DeadCodeElimination,
     EdgeData, EdgeKind, InliningPass, NodeData, NodeId, NodePayload, NodeType, PassManager,
-    PipelineResult as ScgPipelineResult, SCG,
+    PipelineResult as ScgPipelineResult, SCG, ComputationKind,
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -746,6 +746,19 @@ fn resolve_df_input(
                     // Non-productive source — use 0 as placeholder
                     ScgExpr::Int(0)
                 }
+                NodePayload::Computation(comp) => {
+                    // Check if this is a literal computation node (label "lit_<n>")
+                    // created by the AST→SCG bridge for literal return values.
+                    if let ComputationKind::Other(ref label) = comp.kind {
+                        if let Some(num_str) = label.strip_prefix("lit_") {
+                            if let Ok(num) = num_str.parse::<i64>() {
+                                return ScgExpr::Int(num);
+                            }
+                        }
+                    }
+                    // Otherwise, it's a regular computation — reference by vreg
+                    ScgExpr::Var(format!("v_{}", source.as_u64()))
+                }
                 _ => ScgExpr::Var(format!("v_{}", source.as_u64())),
             }
         } else {
@@ -1236,7 +1249,15 @@ fn walk_control_flow_with_externs(
                 },
 
                 ControlKind::FunctionReturn => {
-                    stmts.push(ScgStatement::Return(vec![]));
+                    // Resolve the return value from the incoming DataFlow edge(s).
+                    // The FunctionReturn node has one DataFlow input per return value.
+                    let df_inputs = edge_idx.incoming_df(node_id);
+                    let ret_vals: Vec<ScgExpr> = df_inputs
+                        .iter()
+                        .enumerate()
+                        .map(|(i, _)| resolve_df_input(node_id, i, edge_idx, scg))
+                        .collect();
+                    stmts.push(ScgStatement::Return(ret_vals));
                     current = None;
                     continue;
                 }

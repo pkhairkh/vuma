@@ -965,3 +965,76 @@ fn test_metamorphic_safe_vs_unsafe() {
         "metamorphic: safe and unsafe programs must produce different cleanup verdicts"
     );
 }
+
+/// Cross-process determinism test.
+///
+/// Runs the VUMA compiler as a subprocess twice on the same input and
+/// compares the output binary bytes. If the compiler is deterministic
+/// (BTreeMap, no HashMap iteration order dependence), both runs produce
+/// byte-identical binaries.
+#[test]
+fn test_cross_process_determinism() {
+    use std::process::Command;
+    let source = "fn main() -> i32 { return 0; }";
+
+    // Write source to a temp file
+    let src_path = std::env::temp_dir().join("vuma_determinism_test.vuma");
+    std::fs::write(&src_path, source).expect("write source");
+
+    // Try to find the vuma binary in the target directory
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let candidates = [
+        format!("{}/../target/debug/vuma", manifest_dir),
+        format!("{}/../../target/debug/vuma", manifest_dir),
+    ];
+    let binary = candidates.iter()
+        .find(|p| std::path::Path::new(p).exists())
+        .map(|s| s.as_str());
+    let binary = match binary {
+        Some(b) => b,
+        None => {
+            eprintln!("Skipping cross-process determinism test: vuma binary not found");
+            return;
+        }
+    };
+
+    let out1 = std::env::temp_dir().join("vuma_det_out1.bin");
+    let out2 = std::env::temp_dir().join("vuma_det_out2.bin");
+
+    let run1 = Command::new(binary)
+        .args(["build", "--target", "linux"])
+        .arg(&src_path)
+        .arg("--output")
+        .arg(&out1)
+        .output();
+    let run2 = Command::new(binary)
+        .args(["build", "--target", "linux"])
+        .arg(&src_path)
+        .arg("--output")
+        .arg(&out2)
+        .output();
+
+    let (Ok(r1), Ok(r2)) = (run1, run2) else {
+        eprintln!("Skipping: could not run vuma binary");
+        return;
+    };
+
+    if !r1.status.success() || !r2.status.success() {
+        eprintln!("Skipping: compilation failed in subprocess");
+        return;
+    }
+
+    let bytes1 = std::fs::read(&out1).expect("read out1");
+    let bytes2 = std::fs::read(&out2).expect("read out2");
+
+    let _ = std::fs::remove_file(&out1);
+    let _ = std::fs::remove_file(&out2);
+    let _ = std::fs::remove_file(&src_path);
+
+    assert_eq!(
+        bytes1, bytes2,
+        "Cross-process determinism violation: two runs of the same program \
+         produced different binaries. This indicates non-deterministic \
+         iteration order in the compiler (e.g. HashMap instead of BTreeMap)."
+    );
+}

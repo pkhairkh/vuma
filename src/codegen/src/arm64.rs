@@ -4408,7 +4408,19 @@ impl InstructionSelector {
                 self.select_branch_zero(rt, 0, false); // CBNZ to true
                 self.select_branch_unconditional(0); // B to false
             }
-            IRTerminator::Return(_vals) => {
+            IRTerminator::Return(vals) => {
+                // Move the return value (if any) into X0 (the AArch64
+                // return-value register) before emitting RET.
+                if let Some(val) = vals.first() {
+                    let src = resolve(val);
+                    if src != Register::X0 {
+                        // MOV X0, src  (ORR X0, XZR, src)
+                        self.push(Instruction::MOV {
+                            rd: Register::X0,
+                            rm: src,
+                        });
+                    }
+                }
                 // Return sequence: restore frame, RET
                 // The emitter handles the full epilogue.
                 self.push(Instruction::RET { rn: None });
