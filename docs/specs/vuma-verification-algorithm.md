@@ -822,7 +822,7 @@ This means that interpretation, origin, and cleanup can all begin as soon as the
 
 ### 6.4 Proof Generation
 
-For each proven invariant, the IVE generates a formal proof witness that can be independently checked. The proof format depends on the invariant:
+For each proven invariant, the IVE generates a paper proof witness (a proof sketch) that can be independently checked by the syntactic proof checker. This is **not** a machine-checked proof in a proof assistant (Coq/Isabelle/Lean); mechanization is future work. The proof format depends on the invariant:
 
 | Invariant | Proof Format |
 |-----------|-------------|
@@ -1097,7 +1097,14 @@ Where: A = accesses, R = regions, P = paths, S = sync edges, H = RepD history si
 
 ## Appendix D: Soundness Theorem
 
-**Theorem (Soundness).** If `verify_all(input) == Pass`, then the program satisfies all 5 VUMA invariants (Liveness, Exclusivity, Interpretation, Origin, and Cleanup).
+**Theorem (Soundness) — Paper Proof Sketch.** If `verify_all(input) == Pass`, then the program satisfies all 5 VUMA invariants (Liveness, Exclusivity, Interpretation, Origin, and Cleanup).
+
+> **Honesty Note.** This proof is a paper sketch. Mechanization in a proof
+> assistant (Coq/Isabelle/Lean) is future work. The checker validates
+> syntactic consistency, not semantic soundness. The `AxiomId` enum (6 axioms)
+> is a fixed enumerated set referenced by the checker; it is not connected to a
+> proof assistant. A `Proven` verdict means the IVE verifiers found no
+> violations, not that a proof assistant has certified the program.
 
 **Proof sketch.** By case analysis on each invariant verifier. `verify_all` dispatches to the five per-invariant verifiers (`verify_liveness`, `verify_exclusivity`, `verify_interpretation`, `verify_origin`, `verify_cleanup`) and returns `Pass` only when every one of them yields a `Proven` (or soundly-conditional) result. Each verifier's acceptance condition reduces, by construction, to the corresponding formal definition in `vuma-invariants-spec.md`:
 

@@ -2958,24 +2958,6 @@ fn resolve_gpr_arm32(
     }
 }
 
-/// Compute the stack frame size for an IR function on ARM32.
-///
-/// Sums `Alloc` instruction sizes, adds 8 bytes for the FP/LR save pair,
-/// and rounds up to 8-byte alignment.
-fn arm32_compute_frame_size(func: &IRFunction) -> usize {
-    let mut total: usize = 8; // FP/LR save pair
-    for block in &func.blocks {
-        for instr in &block.instructions {
-            if let crate::ir::IRInstr::Alloc { size, .. } = instr {
-                let aligned = (*size as usize).div_ceil(8) * 8;
-                total += aligned;
-            }
-        }
-    }
-    // Round up to 8-byte alignment
-    (total + 7) & !7
-}
-
 // ===========================================================================
 // ARM32 Mnemonic Decoder
 // ===========================================================================
@@ -3548,8 +3530,6 @@ impl Backend for Arm32Backend {
             instr_idx: usize,
             abs_byte_offset: u64,
             target_label: String,
-            is_unconditional: bool, // true for B, false for Bcc (BNE etc.)
-            condition: Condition,   // condition code (AL for unconditional)
         }
         let mut branch_fixups: Vec<BranchFixup> = Vec::new();
 
@@ -4008,8 +3988,6 @@ impl Backend for Arm32Backend {
                             instr_idx: instructions.len(),
                             abs_byte_offset: branch_offset_in_func,
                             target_label: target.clone(),
-                            is_unconditional: true,
-                            condition: Condition::Al,
                         });
                         code
                     }
@@ -4031,8 +4009,6 @@ impl Backend for Arm32Backend {
                             instr_idx: instructions.len(),
                             abs_byte_offset: bne_offset_in_func,
                             target_label: true_target.clone(),
-                            is_unconditional: false,
-                            condition: Condition::Ne,
                         });
                         // B false_target (placeholder)
                         let b_offset_in_func = current_byte_offset + code.len() as u64;
@@ -4041,8 +4017,6 @@ impl Backend for Arm32Backend {
                             instr_idx: instructions.len(),
                             abs_byte_offset: b_offset_in_func,
                             target_label: false_target.clone(),
-                            is_unconditional: true,
-                            condition: Condition::Al,
                         });
                         code
                     }

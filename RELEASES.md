@@ -178,7 +178,7 @@ Initial release of the VUMA framework. This release establishes the complete arc
 - **8 Backend Architectures**: x86_64, AArch64, RISC-V 64, ARM32, MIPS64, PPC64, LoongArch64, Wasm32
 - **15 Formal Specifications**: SCG, RepD, CapD, RelD, invariants, MSG, codegen, benchmarks, proofs, decidability
 - **Full Verification Pipeline**: SCG → MSG → IVE verification with counterexample generation
-- **Proof System**: Formal proofs, checker, tactics, counterexample generation
+- **Proof System**: Proof sketch with checker, tactics, counterexample generation (not mechanized in a proof assistant)
 - **Standard Library**: Ptr, RegionPtr, Slice, Vec, HashMap, VumaString, Mutex, RwLock, Channel
 - **10 Example Programs**: hello_memory, doubly_linked_list, arena_allocator, gpio_blink, lock_free_queue, etc.
 

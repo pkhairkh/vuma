@@ -3051,26 +3051,12 @@ mod tests {
 
     /// Test 1: Full pipeline with a simple allocation program.
     ///
-    /// NOTE: `verification_level` is set to `None` because the IVE
-    /// cleanup-graph extractor (`src/ive/src/verification.rs::
-    /// extract_cleanup_graph`) currently has a false positive on
-    /// top-level `region` declarations: the Allocation node for a
-    /// top-level `region` has no ControlFlow predecessors/successors
-    /// (only a Derivation edge from its Phantom marker, and Derivation
-    /// edges are deliberately excluded from the cleanup graph), so it
-    /// is treated as both a start node and a terminal node by the DFS,
-    /// and `check_leaks` flags it as a leak.  Additionally, the IVE
-    /// does not yet implement the spec §5.4 "Global scope / Static
-    /// lifetime" inference that should mark program-lifetime arenas
-    /// as intentionally leaked.  Both are IVE bugs (see Task 2-a
-    /// report in worklog.md); until they are fixed, programs that use
-    /// the canonical top-level `region` pattern cannot pass Normal
-    /// verification.  This test exercises the *full code-generation
-    /// pipeline* (parse → SCG → IR → regalloc → emit → COR), not
-    /// verification, so disabling verification preserves the test's
-    /// intent.  Adding `free(memory_pool)` to the program does NOT
-    /// work around the false positive: the Deallocation node would
-    /// still only be linked to the Allocation via a Derivation edge.
+    /// W9: Re-enabled `VerificationLevel::Normal` (was `None`).  W1-W2
+    /// fixed the IVE Liveness extractor to skip top-level `region`
+    /// allocations (program-lifetime, spec-allowed explicit leak) and
+    /// G4 fixed the Cleanup extractor the same way.  Top-level
+    /// `region memory_pool = allocate(1024);` is therefore no longer
+    /// flagged as a leak, and the full verification pipeline can run.
     #[test]
     fn test_compile_simple_allocation() {
         let source = r#"
@@ -3080,11 +3066,10 @@ mod tests {
                 header = node_ptr as *NodeHeader;
             }
         "#;
-        // Verification disabled: top-level `region` declarations trigger a
-        // known IVE false positive (Liveness reports "never deallocated" for
-        // program-lifetime allocations). See Gap 4 in worklog.
+        // W9: Normal verification is now enabled (was None) — top-level
+        // regions are no longer flagged by Liveness/Cleanup extractors.
         let config = CompileConfig {
-            verification_level: VerificationLevel::None,
+            verification_level: VerificationLevel::Normal,
             ..CompileConfig::default()
         };
         let result = compile(source, &config);
@@ -3093,13 +3078,13 @@ mod tests {
         assert!(!output.binary.is_empty(), "Should produce binary output");
         assert!(output.scg.node_count() > 0, "SCG should have nodes");
         assert!(
-            output.verification.is_none(),
-            "Verification is disabled for this test (IVE cleanup false positive on top-level regions)"
+            output.verification.is_some(),
+            "Normal verification should produce a result"
         );
         assert_eq!(
             output.stage_timings.len(),
             11,
-            "All 11 stages should report timing (the ive-verification stage still runs even when level is None)"
+            "All 11 stages should report timing (the ive-verification stage runs with Normal)"
         );
         assert!(
             output.cor_runtime.is_some(),
@@ -3129,13 +3114,11 @@ mod tests {
 
     /// Test 3: Compile with O3 (aggressive optimisation).
     ///
-    /// NOTE: `verification_level` is set to `None` for the same reason
-    /// as `test_compile_simple_allocation` — the IVE cleanup-graph
-    /// extractor has a false positive on top-level `region` declarations
-    /// (the Allocation node has no ControlFlow edges, only Derivation,
-    /// which is excluded from the cleanup graph).  This test exercises
-    /// O3 optimisation, not verification, so disabling verification
-    /// preserves the test's intent.
+    /// W9: Re-enabled `VerificationLevel::Normal` (was `None`).  W1-W2
+    /// fixed the IVE Liveness extractor to skip top-level `region`
+    /// allocations, and G4 fixed the Cleanup extractor the same way,
+    /// so top-level `region buf = allocate(256);` is no longer flagged
+    /// as a leak.  Verification now runs alongside O3 optimisation.
     #[test]
     fn test_compile_aggressive_optimisation() {
         let source = r#"
@@ -3145,11 +3128,10 @@ mod tests {
                 header = node_ptr as *NodeHeader;
             }
         "#;
-        // Verification disabled: top-level `region` declarations trigger a
-        // known IVE false positive (Liveness reports "never deallocated").
+        // W9: Normal verification is now enabled (was None).
         let config = CompileConfig {
             opt_level: OptLevel::O3,
-            verification_level: VerificationLevel::None,
+            verification_level: VerificationLevel::Normal,
             ..CompileConfig::default()
         };
         let result = compile(source, &config);

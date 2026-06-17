@@ -347,7 +347,7 @@ Initial release of the VUMA framework — Verified-Unsafe Memory Access AI-Nativ
 - **`vuma-projection`** — Projection System (~8,090 lines)
 - **`vuma-parser`** — Parser/Frontend (~9,461 lines)
 - **`vuma-codegen`** — ARM64 Code Generation (~11,879 lines)
-- **`vuma-proof`** — Formal Proof System (~9,124 lines)
+- **`vuma-proof`** — Proof Sketch System (~9,124 lines; not mechanized in a proof assistant)
 - **`vuma-std`** — Standard Library (~10,303 lines)
 - **`vuma-tests`** — Integration Tests & Benchmarks (~3,962 lines)
 

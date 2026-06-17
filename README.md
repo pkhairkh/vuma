@@ -63,7 +63,7 @@ This is the first public alpha release of the VUMA framework. It ships five wave
 - **15 formal specifications** (~9,800 lines): SCG model, RepD/CapD/RelD lattices, five VUMA invariants, MSG construction, BD inference algorithm, verification algorithm, ARM64 codegen algorithm, security model, benchmark design, proof systems, decidability analysis
 - **10 example programs**: hello_memory, doubly_linked_list, arena_allocator, gpio_blink, lock_free_queue, channel_demo, memory_arena, sorted_map, thread_pool, and more
 - **Full verification pipeline**: SCG → MSG → IVE verification with counterexample generation
-- **Proof system**: Formal proofs, checker, tactics, and counterexample generation
+- **Proof system**: Proof sketch with checker, tactics, and counterexample generation (not mechanized in a proof assistant)
 
 ### Wave 2 — Core Verification & Memory Model
 
@@ -97,6 +97,19 @@ This is the first public alpha release of the VUMA framework. It ships five wave
 - **LLM API**: `VumaForLLM` with `compile()`, `check()`, `analyze()`, `to_wasm()`, `explain_error()`, `suggest_fixes()`
 - **Package manager**: `vuma pkg init`, `vuma pkg build`, `vuma pkg add` with dependency resolution
 - **Module system**: `import "crypto.vuma"::{sha256, sha256d};` with circular import detection
+
+#### Proof System — Limitations
+
+The proof system is **not** a mechanized formal verification. It produces
+**paper proofs** (proof sketches) checked by a syntactic checker; it is not
+mechanized in Coq, Isabelle, or Lean, and full mechanization is future work.
+The proof checker validates that proof steps are syntactically consistent and
+that axioms are drawn from a fixed enumerated set (`AxiomId`, 6 axioms). It
+does **not** validate semantic soundness — a `Proven` verdict means the IVE
+verifiers found no violations, not that a proof assistant has certified the
+program. The SOUND-1 soundness theorem (see
+`docs/specs/vuma-verification-algorithm.md`, Appendix D) is a paper proof
+sketch, not a machine-checked proof.
 
 ---
 
@@ -617,7 +630,7 @@ vuma/
 │   │   ├── ppc64/           # PowerPC64 backend (ELFv2)
 │   │   ├── loongarch64/     # LoongArch64 backend (LP64)
 │   │   └── wasm32/          # WebAssembly backend
-│   ├── proof/               # Formal Proof System
+│   ├── proof/               # Proof Sketch System (not mechanized in a proof assistant)
 │   │   └── proof, checker, counterexample, tactics, composition
 │   ├── std/                 # Standard Library (18 modules)
 │   │   └── primitives, alloc, collections, math (73 fns), fmt (14 fns),

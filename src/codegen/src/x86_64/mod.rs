@@ -32,10 +32,9 @@
 //! - System V Application Binary Interface, AMD64 Architecture Processor Supplement
 
 use crate::backend::{
-    AllocatedBlock, AllocatedFunction, AllocatedInstruction, AllocatedProgram, Backend,
-    BackendError, PhysicalReg, RegClass, RelocationEntry, TargetInfo, X86_64TargetInfo,
+    AllocatedFunction, AllocatedProgram, Backend, BackendError, TargetInfo, X86_64TargetInfo,
 };
-use crate::ir::{BinOpKind, CastKind, CmpKind, IRFunction, IRInstr, IRType, IRValue, UnaryOpKind};
+use crate::ir::{BinOpKind, CmpKind, IRFunction};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
@@ -2432,24 +2431,6 @@ impl Default for X86_64Backend {
     }
 }
 
-/// Compute the stack frame size for an IR function on x86_64.
-///
-/// Sums `Alloc` instruction sizes, adds 8 bytes for the RBP save,
-/// and rounds up to 16-byte alignment.
-fn x86_64_compute_frame_size(func: &IRFunction) -> usize {
-    let mut total: usize = 8; // Saved RBP
-    for block in &func.blocks {
-        for instr in &block.instructions {
-            if let crate::ir::IRInstr::Alloc { size, .. } = instr {
-                let aligned = (*size as usize).div_ceil(16) * 16;
-                total += aligned;
-            }
-        }
-    }
-    // Round up to 16-byte alignment
-    (total + 15) & !15
-}
-
 // ── x86_64 ELF Relocation Types ─────────────────────────────────────────
 
 /// R_X86_64_64 — S + A, 64-bit absolute relocation.
@@ -2458,33 +2439,6 @@ const R_X86_64_64: &str = "R_X86_64_64";
 const R_X86_64_PLT32: &str = "R_X86_64_PLT32";
 
 // ── ISel helpers ─────────────────────────────────────────────────────────
-
-/// Resolve an IRValue to a physical GPR.
-/// For registers, looks up in the reg_map. For immediates, loads the value
-/// into `scratch` and returns `scratch`. For addresses, loads into `scratch`.
-fn resolve_gpr(val: &IRValue, reg_map: &HashMap<u32, Gpr>, scratch: Gpr) -> (Gpr, Vec<u8>) {
-    match val {
-        IRValue::Register(id) => (reg_map.get(id).copied().unwrap_or(Gpr::Rax), Vec::new()),
-        IRValue::Immediate(imm) => {
-            let imm = *imm;
-            let code = if (-2147483648..=2147483647).contains(&imm) {
-                encode_mov_reg_imm32(scratch, imm as i32)
-            } else {
-                encode_mov_reg_imm64(scratch, imm as u64)
-            };
-            (scratch, code)
-        }
-        IRValue::Address(addr) => {
-            let code = encode_mov_reg_imm64(scratch, *addr);
-            (scratch, code)
-        }
-        IRValue::Label(_) => {
-            // Labels need relocation; emit a placeholder mov for now
-            let code = encode_mov_reg_imm64(scratch, 0);
-            (scratch, code)
-        }
-    }
-}
 
 /// Map an IR CmpKind to an x86_64 condition code.
 fn cmp_kind_to_cc(kind: &CmpKind) -> Cc {
@@ -2517,17 +2471,6 @@ fn binop_cmp_to_cc(op: &BinOpKind) -> Cc {
         BinOpKind::UGe => Cc::AboveEqual,
         _ => Cc::Equal, // fallback, shouldn't be reached
     }
-}
-
-/// Emit a CMP + SETcc + zero-extend sequence for a comparison that produces
-/// a boolean (0 or 1) in the destination register.
-fn emit_cmp_setcc(dst: Gpr, lhs: Gpr, rhs: Gpr, cc: Cc) -> Vec<u8> {
-    let mut code = Vec::new();
-    code.extend(encode_cmp_reg_reg(lhs, rhs));
-    code.extend(encode_setcc(cc, dst));
-    // Zero-extend the byte result to 64 bits to clear upper bits
-    code.extend(encode_movzx_reg8(dst, dst));
-    code
 }
 
 impl Backend for X86_64Backend {
@@ -2798,6 +2741,7 @@ impl Backend for X86_64Backend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ir::{CastKind, IRInstr, IRType, IRValue, UnaryOpKind};
 
     // ── REX Prefix Tests ────────────────────────────────────────────────
 

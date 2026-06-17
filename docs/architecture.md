@@ -50,7 +50,7 @@ The six layers form a stack of cooperating subsystems, each with a well-defined 
 
 **Layer 5 — BD (Behavioral Descriptors).** The type replacement. A BD is the triple (RepD, CapD, RelD) that replaces traditional nominal types. RepD describes memory layout (size, alignment, field offsets, multiple simultaneous interpretations). CapD describes permitted operations (read, write, execute, serialize, send, persist, derive-pointer) with context-dependent capability sets. RelD describes relationships (temporal co-occurrence, structural containment, dependency ordering, semantic equivalence, security-level flow). BDs are inferred, not declared; the IVE derives them from SCG structure.
 
-**Layer 6 — VUMA (Verified-Unsafe Memory Access).** The memory safety guarantee. VUMA operates through the Memory State Graph (MSG), which captures every allocation point, every pointer derivation, every deallocation point, every concurrent access, and every reinterpretation. The VUMA Verification Engine checks five global invariants against the MSG, producing formal proofs for verified invariants and counterexamples for violations. Programs that pass all five invariants are guaranteed memory-safe without any runtime overhead.
+**Layer 6 — VUMA (Verified-Unsafe Memory Access).** The memory safety guarantee. VUMA operates through the Memory State Graph (MSG), which captures every allocation point, every pointer derivation, every deallocation point, every concurrent access, and every reinterpretation. The VUMA Verification Engine checks five global invariants against the MSG, producing paper proofs (proof sketches) for verified invariants and counterexamples for violations. Programs that pass all five invariants are guaranteed memory-safe without any runtime overhead.
 
 ### Layer Interaction Diagram
 
@@ -213,7 +213,7 @@ The data flow is not purely top-down. Three critical feedback loops ensure conti
 
 **Stage 3 — BD Inference.** The IVE infers Behavioral Descriptors for every node in the SCG through iterative fixpoint computation. This proceeds in three interdependent tracks: RepD inference determines the memory layout of every value (size, alignment, field offsets, bit-level structure, multiple simultaneous interpretations); CapD inference determines what operations are valid on every value in every context (read, write, execute, serialize, send, persist, derive-pointer) with context-dependent capability sets; RelD inference determines the relationships between values (temporal co-occurrence, structural containment, dependency ordering, semantic equivalence, security-level flow). These three tracks are interdependent — CapD inference may refine RepD by discovering that a value is only read in a particular context, and RelD inference may constrain CapD by establishing security boundaries. The IVE resolves these interdependencies through iterative fixpoint computation until a stable state is reached.
 
-**Stage 4 — VUMA Verification.** Once BDs are attached, the MSG Builder constructs a Memory State Graph from the annotated SCG via the `scg_to_msg` conversion pipeline. This conversion performs a topological walk of SCG nodes, mapping `AllocationNode → Region` with monotonic address allocation, `AccessNode → Derivation + Access` with proper kind and size, `DeallocationNode → Region status Freed`, and `CastNode → DerivationKind::Cast` derivation chains. Control flow edges between Access nodes produce `SyncEdge` with HappensBefore ordering. The VUMA Verification Engine then checks the five global invariants against the MSG: liveness (every access targets allocated memory), exclusivity (no conflicting concurrent accesses), interpretation (every access uses a valid RepD), origin (every address traces to a valid allocation), and cleanup (every region is eventually freed or explicitly leaked). The Proof Engine generates formal proofs for verified invariants and counterexamples for violations.
+**Stage 4 — VUMA Verification.** Once BDs are attached, the MSG Builder constructs a Memory State Graph from the annotated SCG via the `scg_to_msg` conversion pipeline. This conversion performs a topological walk of SCG nodes, mapping `AllocationNode → Region` with monotonic address allocation, `AccessNode → Derivation + Access` with proper kind and size, `DeallocationNode → Region status Freed`, and `CastNode → DerivationKind::Cast` derivation chains. Control flow edges between Access nodes produce `SyncEdge` with HappensBefore ordering. The VUMA Verification Engine then checks the five global invariants against the MSG: liveness (every access targets allocated memory), exclusivity (no conflicting concurrent accesses), interpretation (every access uses a valid RepD), origin (every address traces to a valid allocation), and cleanup (every region is eventually freed or explicitly leaked). The Proof Engine generates paper proofs (proof sketches) for verified invariants and counterexamples for violations.
 
 **Stage 5 — Code Generation.** The verified SCG is handed to the code generator through a three-phase pipeline: SCG → IR lowering, register allocation, and machine code emission. VUMA supports 8 backend architectures (AArch64, x86_64, RISC-V 64, ARM32, MIPS64, PPC64, LoongArch64, Wasm32) via the `Backend` trait. Because VUMA has already proven memory safety, the codegen can emit raw pointer operations without any runtime bounds checks, borrow checks, or GC barriers. The COR sets up the runtime environment: allocating stack space, configuring the memory allocator, setting up the profile-guided optimization feedback loop with hardware PMU instrumentation, and preparing the hardware (GPIO, UART, I2C, SPI, DMA, interrupt controllers) for execution.
 
@@ -356,7 +356,7 @@ vuma/
 │   │       ├── opt.rs            (IR-level optimization passes)
 │   │       └── emit.rs           (code emitter and ELF/Wasm generation with 3 LOAD segments)
 │   │
-│   ├── proof/                    (Formal Proofs)
+│   ├── proof/                    (Paper Proofs / Proof Sketches)
 │   │   ├── Cargo.toml
 │   │   └── src/
 │   │       ├── lib.rs            (crate root)
@@ -713,7 +713,17 @@ The Proof structure represents a formal verification result — either a proof t
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
-**Design Decisions.** The Proof structure is a derivation tree — each step depends on premises that are themselves goals, forming a tree of reasoning. This enables independent verification: the `checker` module can verify each step independently and compose the results. The `ProofStatus` uses a tiered confidence model: `Proven` with a confidence level (High = full formal proof, Medium = proof with some assumptions, Low = empirical evidence only), `Refuted` with a concrete counterexample, or `Unknown` when the proof engine cannot reach a conclusion. This avoids the binary accept/reject decision that would recreate the restriction problem VUMA was designed to solve. The `tactics` module provides automated proof strategies for common patterns.
+**Design Decisions.** The Proof structure is a derivation tree — each step depends on premises that are themselves goals, forming a tree of reasoning. This enables independent verification: the `checker` module can verify each step independently and compose the results. The `ProofStatus` uses a tiered confidence model: `Proven` with a confidence level (High = full paper proof (proof sketch), Medium = proof with some assumptions, Low = empirical evidence only), `Refuted` with a concrete counterexample, or `Unknown` when the proof engine cannot reach a conclusion. This avoids the binary accept/reject decision that would recreate the restriction problem VUMA was designed to solve. The `tactics` module provides automated proof strategies for common patterns.
+
+**Honesty Note — Not a Mechanized Proof Assistant.** The proof system
+produces paper proofs checked by a syntactic checker. It is **not**
+mechanized in Coq, Isabelle, or Lean. The SOUND-1 theorem (see
+`docs/specs/vuma-verification-algorithm.md`, Appendix D) is a proof sketch;
+full mechanization is future work. The `AxiomId` enum (6 axioms) is a real,
+fixed enumerated set used by the checker, but it is not connected to a proof
+assistant. The checker validates that each proof step is syntactically
+consistent and that the axioms it cites are members of that fixed set; it
+does **not** validate semantic soundness.
 
 ### 4.5 Data Structure Relationships
 
@@ -1015,7 +1025,7 @@ VUMA's security model addresses the following threat categories:
 
 ### Verification Confidence and Debt
 
-Not all security properties can be verified with full confidence. The `VerificationLevel` tier (Full, Partial, BestEffort) reflects the verification engine's ability to prove each invariant. `Full` verification produces a formal proof. `Partial` verification covers most cases but may have unresolved assumptions. `BestEffort` verification provides empirical evidence but no formal guarantee. Unverified properties are tracked as `VerificationDebt` items with priorities: `Critical` debt (safety violations) must be resolved before deployment, `High` debt (security concerns) should be resolved, and `Medium`/`Low` debt (quality issues) can be deferred. The `VerificationDebt` tracker maintains an ordered list of unresolved obligations and supports incremental resolution as the IVE gains more information (through additional annotations, profile data, or manual proof assistance).
+Not all security properties can be verified with full confidence. The `VerificationLevel` tier (Full, Partial, BestEffort) reflects the verification engine's ability to prove each invariant. `Full` verification produces a paper proof (proof sketch). `Partial` verification covers most cases but may have unresolved assumptions. `BestEffort` verification provides empirical evidence but no formal guarantee. Unverified properties are tracked as `VerificationDebt` items with priorities: `Critical` debt (safety violations) must be resolved before deployment, `High` debt (security concerns) should be resolved, and `Medium`/`Low` debt (quality issues) can be deferred. The `VerificationDebt` tracker maintains an ordered list of unresolved obligations and supports incremental resolution as the IVE gains more information (through additional annotations, profile data, or manual proof assistance).
 
 ---
 

@@ -214,41 +214,67 @@ fn run_showcase(name: &str, source: &str) -> AggregatedResult {
 fn showcase_hello_memory() {
     let source = include_str!("../../../examples/hello_memory.vuma");
     let result = run_showcase("hello_memory", source);
-    // Parses OK (9 nodes, 1 alloc + 1 write + 1 read). Intended-safe.
-    // After W33 the Origin invariant reaches `Proven` here (the read is
-    // preceded by a write to the same byte range). Other invariants
-    // (Liveness/Cleanup/Exclusivity/Interpretation) may still report
-    // non-Pass on this parser-built SCG, so `overall` is not guaranteed
-    // to be `Pass`. We assert the pipeline ran without panicking and that
-    // the verdict is not a hard `Fail` from a verifier regression. The
-    // `|| true` keeps the test robust to future verifier improvements;
-    // the descriptive message records the actual verdict for inspection.
-    assert!(
-        result.overall != OverallVerdict::Fail || true,
-        "hello_memory.vuma: verification ran; overall={:?} (W33 cleared the Origin false positive; \
-         other invariants may still report non-Pass on parser-built SCGs)",
-        result.overall
+    // Parses OK (8 nodes, 1 alloc + 1 write + 1 read). Intended-safe.
+    //
+    // W10: After W1-W4 fixed the IVE input extractors (Liveness
+    // free(var) tracking + top-level region skip; Origin derivation
+    // chain tracing; Exclusivity/Interpretation region resolution via
+    // derivation backtrace) and W33 fixed the Origin `initialized`
+    // tracking, ALL five invariants now reach `Proven` and the overall
+    // verdict is `Pass`. The previous permissive `|| true` clause is
+    // removed — this test now locks in the full Pass.
+    assert_eq!(
+        result.overall,
+        OverallVerdict::Pass,
+        "hello_memory.vuma: overall should be Pass after W1-W4 + W33 fixes; \
+         per-invariant: {:?}",
+        result.per_invariant.iter().map(|p| (p.kind, p.result.status.clone())).collect::<Vec<_>>(),
     );
+    // Belt-and-braces: every invariant must be Proven.
+    for p in &result.per_invariant {
+        assert!(
+            !p.is_fail(),
+            "hello_memory.vuma: {:?} should not fail: {:?} - {}",
+            p.kind, p.result.status, p.result.message,
+        );
+    }
 }
 
 #[test]
 fn showcase_doubly_linked_list() {
     let source = include_str!("../../../examples/doubly_linked_list.vuma");
     let result = run_showcase("doubly_linked_list", source);
-    // Parses OK (63 nodes, 6 regions, 4 accesses). Intended-safe.
-    // After W33 the Origin invariant reaches `Proven` here (every read is
-    // preceded by a write to the same byte range). Other invariants may
-    // still report non-Pass on this parser-built SCG, so `overall` is
-    // not guaranteed to be `Pass`. As with `showcase_hello_memory`, we
-    // assert the pipeline ran and use a permissive `|| true` clause so
-    // future verifier improvements do not break this test; the message
-    // records the actual verdict for inspection.
-    assert!(
-        result.overall != OverallVerdict::Fail || true,
-        "doubly_linked_list.vuma: verification ran; overall={:?} (W33 cleared the Origin false positive; \
-         other invariants may still report non-Pass on parser-built SCGs)",
-        result.overall
-    );
+    // Parses OK (62 nodes, 6 regions, 4 accesses). Intended-safe.
+    //
+    // W10: After W1-W4 + W33, the Liveness, Cleanup, Origin, and
+    // Interpretation invariants all reach `Proven` here. The Exclusivity
+    // invariant, however, has a known FALSE POSITIVE: the doubly linked
+    // list `link(prev, next)` helper performs two writes
+    // (`prev.next = next; next.prev = prev;`) that the IVE flags as
+    // "write-write conflict without synchronization or program-order".
+    // The two writes are actually sequential within a single thread, but
+    // the parser-built SCG does not record a program-order edge between
+    // them (they are in different statement nodes that the IVE treats as
+    // potentially concurrent). This is a verifier/parser gap, not a real
+    // data race. We therefore assert the four clean invariants are
+    // Proven and document the Exclusivity false positive.
+    assert_invariant_clean(&result, InvariantKind::Liveness,        "dll: alloc/free");
+    assert_invariant_clean(&result, InvariantKind::Cleanup,          "dll: cleanup");
+    assert_invariant_clean(&result, InvariantKind::Origin,           "dll: origin");
+    assert_invariant_clean(&result, InvariantKind::Interpretation,   "dll: interpretation");
+    // Exclusivity: known false positive on concurrent writes in link().
+    // Document it; do NOT assert clean (would block on the gap above).
+    let excl = invariant_result(&result, InvariantKind::Exclusivity);
+    if let Some(p) = excl {
+        if p.is_fail() {
+            eprintln!(
+                "KNOWN FALSE POSITIVE: doubly_linked_list Exclusivity violation: \
+                 {:?} - {}\n(verifier flags prev.next/next.prev writes as concurrent; \
+                 they are sequential in a single thread)",
+                p.result.status, p.result.message,
+            );
+        }
+    }
 }
 
 #[test]
@@ -878,14 +904,12 @@ fn test_e2e_leak_fails_compilation() {
 /// End-to-end blocking verification test: a safe program (allocate + free)
 /// must pass compilation.
 ///
-/// KNOWN LIMITATION: The IVE's Liveness extractor does not currently track
-/// `free(var)` deallocation events when the variable was assigned via `=` (not
-/// `let`). The Deallocation SCG node is created but its link to the Allocation
-/// node is not resolved by the liveness input extractor, so the Liveness
-/// verifier reports a false "never deallocated" leak. This is documented as a
-/// known IVE limitation; the test is written to pass once the extractor is
-/// fixed. For now it asserts that compilation produces a result (Ok or Err)
-/// without panicking, and documents the expected behavior.
+/// W10: After W1 fixed the IVE Liveness extractor's `free(var)` tracking
+/// (3-tier fallback: direct lookup → Derivation edge → predecessor scan),
+/// the Deallocation SCG node for `free(buf)` is now correctly linked to
+/// the Allocation node for `buf = allocate(256)`, so the Liveness verifier
+/// no longer reports a false "never deallocated" leak. The safe program
+/// is now correctly accepted by the blocking verifier.
 #[test]
 fn test_e2e_safe_program_passes() {
     use vuma::pipeline::{compile, CompileConfig};
@@ -896,20 +920,9 @@ fn test_e2e_safe_program_passes() {
             return 0;
         }
     "#;
-    let config = CompileConfig::default();
+    let config = CompileConfig::default(); // Normal verification
     let result = compile(source, &config);
-    // Once the IVE tracks free(var) correctly, this should be is_ok().
-    // For now, document the false positive.
-    match result {
-        Ok(_) => { /* safe program correctly accepted */ }
-        Err(errors) => {
-            let has_liveness_false_positive = errors.iter().any(|e|
-                format!("{:?}", e).contains("never deallocated"));
-            if has_liveness_false_positive {
-                eprintln!("KNOWN LIMITATION: safe program rejected by Liveness false positive                            (free(var) not tracked). See test doc comment.");
-            } else {
-                panic!("Safe program rejected for unexpected reason: {:?}", errors);
-            }
-        }
-    }
+    assert!(result.is_ok(),
+        "Safe program (allocate + free) must pass compilation. Got: {:?}",
+        result);
 }

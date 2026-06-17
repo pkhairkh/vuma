@@ -22,7 +22,7 @@ use crate::backend::{
     AllocatedBlock, AllocatedFunction, AllocatedInstruction,
     BackendError, PhysicalReg, RegClass, RelocationEntry,
 };
-use crate::ir::{BinOpKind, CastKind, CmpKind, IRFunction, IRInstr, IRType, IRValue, UnaryOpKind};
+use crate::ir::{BinOpKind, CastKind, IRFunction, IRInstr, IRType, IRValue, UnaryOpKind};
 use std::collections::HashMap;
 
 #[allow(unused_imports)]
