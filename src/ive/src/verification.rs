@@ -49,6 +49,33 @@ use vuma_scg::node::{AccessMode, EffectNode, NodeId, NodePayload, NodeType};
 use vuma_scg::region::RegionId;
 
 // ---------------------------------------------------------------------------
+// Panic-payload helper (used by the fail-closed advanced-analysis wrappers)
+// ---------------------------------------------------------------------------
+
+/// Best-effort extraction of a human-readable message from a panic payload
+/// captured by [`std::panic::catch_unwind`].
+///
+/// The standard library sets the panic payload to either a `&'static str`
+/// (for `panic!("literal")`) or a `String` (for `panic!("{}", fmt)`). Other
+/// types are possible via `panic_any` but are rare in this crate; when the
+/// payload cannot be downcast to a string, a placeholder is returned so the
+/// caller can still report *that* a panic occurred.
+///
+/// This is used by the advanced-analysis wrappers (`verify_hardened`,
+/// `verify_interprocedural`, `verify_liveness_path_sensitive`) to attach
+/// panic context to their fail-closed [`VerificationStatus::Violated`]
+/// results.
+fn panic_payload_to_string(payload: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&'static str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "<non-string panic payload>".to_string()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // VerificationInput
 // ---------------------------------------------------------------------------
 
@@ -216,10 +243,22 @@ impl VerificationEngine {
     //
     // The following methods wrap the previously dead "hardened",
     // path-sensitive, and interprocedural analyses so they actually run
-    // during the live verification pipeline. Each method is panic-safe:
-    // a panic in the underlying analysis is caught, logged as a warning,
-    // and converted into an `Unverified` result so the rest of the
-    // pipeline is unaffected.
+    // during the live verification pipeline. Each method is panic-safe
+    // in the *fail-closed* sense: a panic in the underlying analysis is
+    // caught, logged as an **error**, and escalated into a
+    // [`VerificationStatus::Violated`] result. The invariant aggregator
+    // maps `Violated` to [`OverallVerdict::Fail`]
+    // ([`crate::invariant_aggregator::OverallVerdict::Fail`]), which the
+    // pipeline gate treats as a hard stop — compilation is blocked.
+    //
+    // Rationale (fail-closed, not fail-open): if the verifier itself
+    // panics, it has *not* proven safety. The previous behaviour degraded
+    // the panic to `Unverified`, which the aggregator maps to
+    // [`OverallVerdict::Inconclusive`] and which the pipeline gate treats
+    // as "not Fail" — so compilation would proceed despite the verifier
+    // having failed in an uncontrolled way. That was a soundness gap; a
+    // real violation could be hidden by a panic. Escalating to `Violated`
+    // closes the gap.
     // -----------------------------------------------------------------------
 
     /// Run the **hardened** invariant checks as an advanced pass.
@@ -230,9 +269,16 @@ impl VerificationEngine {
     /// into a single [`VerificationResult`].
     ///
     /// Intended to be invoked at `Normal` and `Exhaustive` verification
-    /// levels as a supplement to the five basic invariants. Panics from
-    /// the underlying analyses are caught and reported as `Unverified`
-    /// so the rest of the pipeline continues.
+    /// levels as a supplement to the five basic invariants.
+    ///
+    /// # Fail-closed policy
+    ///
+    /// If the underlying analysis panics, the panic is caught and
+    /// escalated to a [`VerificationStatus::Violated`] result (which the
+    /// aggregator maps to `OverallVerdict::Fail`), **not** `Unverified`.
+    /// A panicking verifier has not proven safety, so compilation is
+    /// blocked. See the "Advanced analyses" block comment above for the
+    /// full rationale.
     pub fn verify_hardened(&self, input: &VerificationInput) -> VerificationResult {
         // The hardened checks require a BD map; if none was supplied,
         // pass an empty map. `verify_all_hardened` falls back to
@@ -284,16 +330,26 @@ impl VerificationEngine {
                     )
                 }
             }
-            Err(_) => {
-                log::warn!(
-                    "IVE: verify_all_hardened panicked; skipping advanced hardened analysis"
+            Err(payload) => {
+                let panic_info = panic_payload_to_string(&payload);
+                log::error!(
+                    "IVE: verify_all_hardened panicked — escalating to Fail (fail-closed): {}",
+                    panic_info
+                );
+                let message = format!(
+                    "Advanced analysis panicked — verification failed (fail-closed): {}",
+                    panic_info
                 );
                 VerificationResult::new(
                     "hardened_invariants",
-                    VerificationStatus::Unverified {
-                        reason: "hardened analysis panicked and was skipped".to_string(),
+                    VerificationStatus::Violated {
+                        counterexample: CounterExample::new(
+                            Vec::new(),
+                            "hardened-invariants (panic)".to_string(),
+                            message.clone(),
+                        ),
                     },
-                    "hardened analysis skipped due to internal error",
+                    message,
                 )
             }
         }
@@ -309,7 +365,16 @@ impl VerificationEngine {
     /// lock-discipline violations.
     ///
     /// Intended to be invoked at `Normal` and `Exhaustive` verification
-    /// levels. Panics are caught and reported as `Unverified`.
+    /// levels.
+    ///
+    /// # Fail-closed policy
+    ///
+    /// If the underlying analysis panics, the panic is caught and
+    /// escalated to a [`VerificationStatus::Violated`] result (which the
+    /// aggregator maps to `OverallVerdict::Fail`), **not** `Unverified`.
+    /// A panicking verifier has not proven safety, so compilation is
+    /// blocked. See the "Advanced analyses" block comment above for the
+    /// full rationale.
     pub fn verify_interprocedural(&self, input: &VerificationInput) -> VerificationResult {
         let result = catch_unwind(AssertUnwindSafe(|| {
             let call_graph = vuma_scg::callgraph::CallGraph::build(&input.scg);
@@ -355,16 +420,26 @@ impl VerificationEngine {
                     )
                 }
             }
-            Err(_) => {
-                log::warn!(
-                    "IVE: interprocedural verification panicked; skipping advanced analysis"
+            Err(payload) => {
+                let panic_info = panic_payload_to_string(&payload);
+                log::error!(
+                    "IVE: interprocedural verification panicked — escalating to Fail (fail-closed): {}",
+                    panic_info
+                );
+                let message = format!(
+                    "Advanced analysis panicked — verification failed (fail-closed): {}",
+                    panic_info
                 );
                 VerificationResult::new(
                     "interprocedural",
-                    VerificationStatus::Unverified {
-                        reason: "interprocedural analysis panicked and was skipped".to_string(),
+                    VerificationStatus::Violated {
+                        counterexample: CounterExample::new(
+                            Vec::new(),
+                            "interprocedural (panic)".to_string(),
+                            message.clone(),
+                        ),
                     },
-                    "interprocedural analysis skipped due to internal error",
+                    message,
                 )
             }
         }
@@ -383,8 +458,16 @@ impl VerificationEngine {
     ///
     /// This is more precise than the basic may-analysis (which uses
     /// join/union) and reduces false positives. Intended to be invoked
-    /// at `Normal` and `Exhaustive` verification levels. Panics are
-    /// caught and reported as `Unverified`.
+    /// at `Normal` and `Exhaustive` verification levels.
+    ///
+    /// # Fail-closed policy
+    ///
+    /// If the underlying analysis panics, the panic is caught and
+    /// escalated to a [`VerificationStatus::Violated`] result (which the
+    /// aggregator maps to `OverallVerdict::Fail`), **not** `Unverified`.
+    /// A panicking verifier has not proven safety, so compilation is
+    /// blocked. See the "Advanced analyses" block comment above for the
+    /// full rationale.
     pub fn verify_liveness_path_sensitive(
         &self,
         input: &VerificationInput,
@@ -480,18 +563,26 @@ impl VerificationEngine {
                     )
                 }
             }
-            Err(_) => {
-                log::warn!(
-                    "IVE: path-sensitive liveness panicked; skipping refinement pass"
+            Err(payload) => {
+                let panic_info = panic_payload_to_string(&payload);
+                log::error!(
+                    "IVE: path-sensitive liveness panicked — escalating to Fail (fail-closed): {}",
+                    panic_info
+                );
+                let message = format!(
+                    "Advanced analysis panicked — verification failed (fail-closed): {}",
+                    panic_info
                 );
                 VerificationResult::new(
                     "path_sensitive_liveness",
-                    VerificationStatus::Unverified {
-                        reason: "path-sensitive liveness analysis panicked \
-                                 and was skipped"
-                            .to_string(),
+                    VerificationStatus::Violated {
+                        counterexample: CounterExample::new(
+                            Vec::new(),
+                            "path-sensitive-liveness (panic)".to_string(),
+                            message.clone(),
+                        ),
                     },
-                    "path-sensitive liveness skipped due to internal error",
+                    message,
                 )
             }
         }
@@ -1107,15 +1198,132 @@ impl VerificationEngine {
         let mut graph = CleanupGraph::new();
         let mut node_map: BTreeMap<NodeId, CleanupNodeId> = BTreeMap::new();
 
+        // -----------------------------------------------------------------
+        // G4 fix: detect top-level (module-scope) allocations.
+        //
+        // A top-level `region memory_pool = allocate(N);` declaration
+        // produces an Allocation node that is NOT inside any function
+        // body: its only SCG edge is a `Derivation` from its Phantom
+        // marker (which the cleanup graph deliberately excludes), so it
+        // has no incoming `ControlFlow` edge and is not reachable from
+        // any `FunctionEntry`. The spec permits such program-lifetime
+        // allocations as "explicitly leaked" (`RegionStatus::Leaked`,
+        // Invariant 5 Part A: "freed or explicitly leaked"). Without
+        // this fix, the cleanup DFS treats the allocation as both a
+        // start node and a terminal, and `check_leaks` flags it as a
+        // `ViolationKind::Leak` — a false positive that forces 4
+        // pipeline/api tests to set `VerificationLevel::None`.
+        //
+        // We compute the set of SCG nodes reachable from any
+        // `FunctionEntry` via the same forward edges the cleanup graph
+        // keeps below (`ControlFlow`, excluding the intraprocedural
+        // call-return stub edges into `FunctionEntry` / out of
+        // `FunctionReturn`, plus interprocedural `Call` and `Return`).
+        // Allocation nodes NOT in this reachable set are module-scope
+        // and are emitted as `OperationKind::Leak` instead of
+        // `OperationKind::Acquire`; a `Leak` node moves the resource
+        // directly into the leaked set, exempting it from the leak
+        // violation at terminal nodes (see `PathState::process_node`'s
+        // `OperationKind::Leak` arm in `cleanup.rs`).
+        // -----------------------------------------------------------------
+        let fn_entry_scg_ids: BTreeSet<NodeId> = scg
+            .nodes()
+            .filter(|n| {
+                matches!(n.node_type, NodeType::Control)
+                    && matches!(
+                        &n.payload,
+                        NodePayload::Control(c)
+                            if c.kind == vuma_scg::node::ControlKind::FunctionEntry
+                    )
+            })
+            .map(|n| n.id)
+            .collect();
+        let fn_return_scg_ids: BTreeSet<NodeId> = scg
+            .nodes()
+            .filter(|n| {
+                matches!(n.node_type, NodeType::Control)
+                    && matches!(
+                        &n.payload,
+                        NodePayload::Control(c)
+                            if c.kind == vuma_scg::node::ControlKind::FunctionReturn
+                    )
+            })
+            .map(|n| n.id)
+            .collect();
+
+        // Build forward adjacency over the edges the cleanup graph
+        // keeps, so reachability here matches reachability in the
+        // constructed cleanup graph.
+        let mut forward_adj: BTreeMap<NodeId, BTreeSet<NodeId>> = BTreeMap::new();
+        for edge in scg.edges() {
+            let keep = match &edge.kind {
+                vuma_scg::edge::EdgeKind::ControlFlow => {
+                    // Skip the same intraprocedural call-return stub
+                    // edges that the cleanup graph skips below (edges
+                    // into `FunctionEntry` nodes and edges out of
+                    // `FunctionReturn` nodes).
+                    !(fn_entry_scg_ids.contains(&edge.target)
+                        || fn_return_scg_ids.contains(&edge.source))
+                }
+                vuma_scg::edge::EdgeKind::Call { .. } | vuma_scg::edge::EdgeKind::Return { .. } => {
+                    true
+                }
+                _ => false,
+            };
+            if keep {
+                forward_adj
+                    .entry(edge.source)
+                    .or_default()
+                    .insert(edge.target);
+            }
+        }
+
+        // BFS from all `FunctionEntry` nodes to compute the set of
+        // function-reachable SCG nodes.
+        let mut function_reachable: BTreeSet<NodeId> = BTreeSet::new();
+        let mut queue: std::collections::VecDeque<NodeId> =
+            fn_entry_scg_ids.iter().copied().collect();
+        for &id in &fn_entry_scg_ids {
+            function_reachable.insert(id);
+        }
+        while let Some(cur) = queue.pop_front() {
+            if let Some(succs) = forward_adj.get(&cur) {
+                for &s in succs {
+                    if function_reachable.insert(s) {
+                        queue.push_back(s);
+                    }
+                }
+            }
+        }
+        // If there are no `FunctionEntry` nodes at all (degenerate
+        // SCG), fall back to the original `Acquire` behaviour for
+        // every allocation — don't risk hiding real leaks in
+        // pathological functionless programs.
+        let has_functions = !fn_entry_scg_ids.is_empty();
+
         // Add nodes for each SCG node
         for node in scg.nodes() {
             let op = match node.node_type {
                 NodeType::Allocation => {
                     if let NodePayload::Allocation(alloc) = &node.payload {
-                        Some(OperationKind::Acquire {
-                            resource: CleanupResourceId(alloc.region_id.as_u64()),
-                            kind: CleanupResourceKind::Memory,
-                        })
+                        // G4: top-level (module-scope) allocations are
+                        // program-lifetime and the spec permits them
+                        // as "explicitly leaked" (`RegionStatus::Leaked`,
+                        // Invariant 5 Part A). Emit a `Leak` node so
+                        // the cleanup DFS exempts them from the leak
+                        // violation. Function-internal allocations keep
+                        // the original `Acquire` semantics.
+                        if has_functions && !function_reachable.contains(&node.id) {
+                            Some(OperationKind::Leak {
+                                resource: CleanupResourceId(alloc.region_id.as_u64()),
+                                kind: CleanupResourceKind::Memory,
+                            })
+                        } else {
+                            Some(OperationKind::Acquire {
+                                resource: CleanupResourceId(alloc.region_id.as_u64()),
+                                kind: CleanupResourceKind::Memory,
+                            })
+                        }
                     } else {
                         None
                     }

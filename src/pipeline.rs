@@ -3058,6 +3058,9 @@ mod tests {
                 header = node_ptr as *NodeHeader;
             }
         "#;
+        // Verification disabled: top-level `region` declarations trigger a
+        // known IVE false positive (Liveness reports "never deallocated" for
+        // program-lifetime allocations). See Gap 4 in worklog.
         let config = CompileConfig {
             verification_level: VerificationLevel::None,
             ..CompileConfig::default()
@@ -3120,6 +3123,8 @@ mod tests {
                 header = node_ptr as *NodeHeader;
             }
         "#;
+        // Verification disabled: top-level `region` declarations trigger a
+        // known IVE false positive (Liveness reports "never deallocated").
         let config = CompileConfig {
             opt_level: OptLevel::O3,
             verification_level: VerificationLevel::None,

@@ -1,7 +1,6 @@
 /target
 **/target/
 **/*.rs.bk
-Cargo.lock
 *.o
 *.wasm
 *.elf

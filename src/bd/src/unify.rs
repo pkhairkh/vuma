@@ -38,7 +38,7 @@ use crate::capd::CapD;
 use crate::descriptor::BD;
 use crate::reld::RelD;
 use crate::repd::{ArrayRep, ByteRep, EnumRep, FuncRep, PtrRep, RepD, StructRep, UnionRep};
-use hashbrown::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -50,7 +50,7 @@ use std::fmt;
 ///
 /// Variables are identified by a unique `id` and may carry a human-readable
 /// `name` for debugging.  Two variables are equal iff their `id`s match.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct BDVariable {
     /// Unique identifier for this variable.
     pub id: u64,
@@ -318,7 +318,7 @@ impl std::error::Error for UnificationError {}
 /// (different RepD constructors, empty capability meet, or inconsistent
 /// relational merge).
 pub fn unify(bd1: &BD, bd2: &BD) -> Result<BD, UnificationError> {
-    let mut visited = HashSet::new();
+    let mut visited = BTreeSet::new();
     let repd = unify_repd_with_occurs(&bd1.repd, &bd2.repd, &mut visited)?;
     let capd = unify_capd(&bd1.capd, &bd2.capd)?;
     let reld = unify_reld(&bd1.reld, &bd2.reld)?;
@@ -339,7 +339,7 @@ pub fn unify(bd1: &BD, bd2: &BD) -> Result<BD, UnificationError> {
 fn unify_repd_with_occurs(
     r1: &RepD,
     r2: &RepD,
-    visited: &mut HashSet<(usize, usize)>,
+    visited: &mut BTreeSet<(usize, usize)>,
 ) -> Result<RepD, UnificationError> {
     // Occurs-check: if we've already started unifying this exact pair,
     // assume they unify coinductively (standard treatment for recursive types).
@@ -368,7 +368,7 @@ fn unify_repd_with_occurs(
 fn unify_repd_inner(
     r1: &RepD,
     r2: &RepD,
-    visited: &mut HashSet<(usize, usize)>,
+    visited: &mut BTreeSet<(usize, usize)>,
 ) -> Result<RepD, UnificationError> {
     match (r1, r2) {
         // Byte: sizes and alignments must match exactly.
@@ -580,14 +580,14 @@ fn unify_reld(r1: &RelD, r2: &RelD) -> Result<RelD, UnificationError> {
 /// Since `BD` itself does not contain variables (it is fully concrete),
 /// this function returns the BD unchanged.  It is included for API
 /// completeness and for use with extended BD types that may embed variables.
-pub fn substitute(bd: &BD, _subst: &HashMap<BDVariable, BD>) -> BD {
+pub fn substitute(bd: &BD, _subst: &BTreeMap<BDVariable, BD>) -> BD {
     bd.clone()
 }
 
 /// Apply a substitution to a [`BDTerm`], resolving variables through the
 /// substitution map by chasing variable chains until a concrete BD or an
 /// unbound variable is reached.
-pub fn substitute_term(term: &BDTerm, subst: &HashMap<BDVariable, BDTerm>) -> BDTerm {
+pub fn substitute_term(term: &BDTerm, subst: &BTreeMap<BDVariable, BDTerm>) -> BDTerm {
     match term {
         BDTerm::Concrete(bd) => BDTerm::Concrete(bd.clone()),
         BDTerm::Var(v) => match subst.get(v) {
@@ -605,10 +605,10 @@ pub fn substitute_term(term: &BDTerm, subst: &HashMap<BDVariable, BDTerm>) -> BD
 /// - If `v` appears only in `s2`, the result maps `v` to `s2[v]`.
 /// - If `v` appears in neither, it is absent from the result.
 pub fn compose_subst(
-    s1: &HashMap<BDVariable, BDTerm>,
-    s2: &HashMap<BDVariable, BDTerm>,
-) -> HashMap<BDVariable, BDTerm> {
-    let mut result = HashMap::new();
+    s1: &BTreeMap<BDVariable, BDTerm>,
+    s2: &BTreeMap<BDVariable, BDTerm>,
+) -> BTreeMap<BDVariable, BDTerm> {
+    let mut result = BTreeMap::new();
     // All bindings from s1, with s2 applied to their right-hand sides.
     for (v, t) in s1 {
         result.insert(v.clone(), substitute_term(t, s2));
@@ -632,7 +632,7 @@ pub fn compose_subst(
 /// `X`).  For concrete BDs the check always returns `false` since BDs do
 /// not contain variables.  For variable terms, we check transitively through
 /// the substitution.
-fn occurs_in(var: &BDVariable, term: &BDTerm, subst: &HashMap<BDVariable, BDTerm>) -> bool {
+fn occurs_in(var: &BDVariable, term: &BDTerm, subst: &BTreeMap<BDVariable, BDTerm>) -> bool {
     match term {
         BDTerm::Concrete(_) => false,
         BDTerm::Var(v) => {
@@ -695,19 +695,19 @@ fn occurs_in(var: &BDVariable, term: &BDTerm, subst: &HashMap<BDVariable, BDTerm
 #[derive(Debug, Clone)]
 pub struct BDSolver {
     /// Current substitution: variable → term.
-    subst: HashMap<BDVariable, BDTerm>,
+    subst: BTreeMap<BDVariable, BDTerm>,
 }
 
 impl BDSolver {
     /// Create a new solver with an empty substitution.
     pub fn new() -> Self {
         Self {
-            subst: HashMap::new(),
+            subst: BTreeMap::new(),
         }
     }
 
     /// Returns a reference to the current substitution.
-    pub fn substitution(&self) -> &HashMap<BDVariable, BDTerm> {
+    pub fn substitution(&self) -> &BTreeMap<BDVariable, BDTerm> {
         &self.subst
     }
 
@@ -724,7 +724,7 @@ impl BDSolver {
         match self.subst.get(var) {
             Some(BDTerm::Var(v2)) => {
                 // Chase the chain; avoid infinite loops for circular refs.
-                let mut visited = HashMap::new();
+                let mut visited = BTreeMap::new();
                 visited.insert(var.id, ());
                 let mut current = v2;
                 loop {
@@ -861,7 +861,7 @@ impl BDSolver {
     pub fn solve(
         &mut self,
         constraints: &[BDConstraint],
-    ) -> Result<HashMap<BDVariable, BD>, Vec<UnificationError>> {
+    ) -> Result<BTreeMap<BDVariable, BD>, Vec<UnificationError>> {
         let mut errors = Vec::new();
         for constraint in constraints {
             if let Err(e) = self.add_constraint(constraint) {
@@ -874,7 +874,7 @@ impl BDSolver {
 
         // Collect all variables that appear in the substitution.
         let vars: Vec<BDVariable> = self.subst.keys().cloned().collect();
-        let mut result = HashMap::new();
+        let mut result = BTreeMap::new();
         for var in vars {
             let resolved = self.resolve(&BDTerm::Var(var.clone()));
             match resolved {
@@ -924,7 +924,7 @@ impl Default for BDSolver {
 /// Returns a vector of all unification errors encountered during solving.
 pub fn solve_constraints(
     constraints: Vec<BDConstraint>,
-) -> Result<HashMap<BDVariable, BD>, Vec<UnificationError>> {
+) -> Result<BTreeMap<BDVariable, BD>, Vec<UnificationError>> {
     let mut solver = BDSolver::new();
     solver.solve(&constraints)
 }
@@ -1103,7 +1103,7 @@ mod tests {
     fn substitute_term_resolves_variable() {
         let var = BDVariable::new(0, "T");
         let bd = make_bd(byte_rep(4, 4), read_cap(), empty_reld());
-        let mut subst = HashMap::new();
+        let mut subst = BTreeMap::new();
         subst.insert(var.clone(), BDTerm::Concrete(bd.clone()));
 
         let term = BDTerm::Var(var);
@@ -1119,10 +1119,10 @@ mod tests {
         let var_y = BDVariable::new(1, "Y");
         let bd = make_bd(byte_rep(8, 8), read_cap(), empty_reld());
 
-        let mut s1 = HashMap::new();
+        let mut s1 = BTreeMap::new();
         s1.insert(var_x.clone(), BDTerm::Var(var_y.clone()));
 
-        let mut s2 = HashMap::new();
+        let mut s2 = BTreeMap::new();
         s2.insert(var_y.clone(), BDTerm::Concrete(bd.clone()));
 
         let composed = compose_subst(&s1, &s2);
@@ -1144,7 +1144,7 @@ mod tests {
             total_size: 8,
             align: 4,
         });
-        let result = unify_repd_with_occurs(&s1, &s2, &mut HashSet::new())
+        let result = unify_repd_with_occurs(&s1, &s2, &mut BTreeSet::new())
             .expect("identical structs should unify");
         assert_eq!(result.size(), 8);
     }
@@ -1161,7 +1161,7 @@ mod tests {
             element: Box::new(byte_rep(4, 4)),
             count: 20,
         });
-        let result = unify_repd_with_occurs(&a1, &a2, &mut HashSet::new());
+        let result = unify_repd_with_occurs(&a1, &a2, &mut BTreeSet::new());
         assert!(result.is_err());
     }
 
@@ -1175,7 +1175,7 @@ mod tests {
         let p2 = RepD::Ptr(PtrRep {
             pointee: Box::new(byte_rep(4, 4)),
         });
-        let result = unify_repd_with_occurs(&p1, &p2, &mut HashSet::new())
+        let result = unify_repd_with_occurs(&p1, &p2, &mut BTreeSet::new())
             .expect("identical ptrs should unify");
         assert_eq!(result.size(), 8); // pointer size
     }
@@ -1238,7 +1238,7 @@ mod tests {
     #[test]
     fn substitute_concrete_is_identity() {
         let bd = make_bd(byte_rep(4, 4), read_cap(), empty_reld());
-        let subst = HashMap::new();
+        let subst = BTreeMap::new();
         let result = substitute(&bd, &subst);
         assert_eq!(result, bd);
     }
@@ -1307,7 +1307,7 @@ mod tests {
             params: vec![byte_rep(4, 4), byte_rep(8, 8)],
             result: Box::new(byte_rep(4, 4)),
         });
-        let result = unify_repd_with_occurs(&f1, &f2, &mut HashSet::new())
+        let result = unify_repd_with_occurs(&f1, &f2, &mut BTreeSet::new())
             .expect("identical func sigs should unify");
         assert_eq!(result.size(), 8); // function pointer size
     }
@@ -1322,7 +1322,7 @@ mod tests {
         let e2 = RepD::Enum(EnumRep {
             variants: vec![(0u64, byte_rep(4, 4)), (2u64, byte_rep(4, 4))],
         });
-        let result = unify_repd_with_occurs(&e1, &e2, &mut HashSet::new());
+        let result = unify_repd_with_occurs(&e1, &e2, &mut BTreeSet::new());
         assert!(result.is_err());
     }
 
