@@ -4044,12 +4044,31 @@ pub fn emit_elf(
     let is_obj = config.format == OutputFormat::Obj;
     let sec_align = section_alignment_for_backend(config.backend);
 
-    // ---- Step 1: Emit all functions ----
+    // ---- Step 1: Emit _start stub (for ET_EXEC only) ----
+    // The _start stub calls main, then exits via sys_exit_group.
+    // Without this, main's RET falls through to the next function.
     let mut emitter = Emitter::new();
     let mut text_section: Vec<u8> = Vec::new();
     let mut function_offsets: HashMap<String, u64> = HashMap::new();
     let mut function_sizes: HashMap<String, u64> = HashMap::new();
     let mut all_call_relocs: Vec<CallRelocation> = Vec::new();
+
+    let start_stub_size: u64 = if is_obj { 0 } else { 16 }; // 4 × 4-byte instructions
+
+    if !is_obj {
+        // _start stub (AArch64):
+        //   BL <main>        ; call main, return value in X0
+        //   MOV X0, X0       ; nop (keep return value)
+        //   MOV X8, #93      ; sys_exit_group
+        //   SVC #0           ; syscall (X0 = exit code)
+        // The BL offset will be patched after we know main's offset.
+        text_section.extend_from_slice(&0x94000000u32.to_le_bytes()); // BL #0 (placeholder)
+        text_section.extend_from_slice(&0xAA0003E0u32.to_le_bytes()); // MOV X0, X0
+        text_section.extend_from_slice(&0xD2800BA8u32.to_le_bytes()); // MOVZ X8, #93
+        text_section.extend_from_slice(&0xD4000001u32.to_le_bytes()); // SVC #0
+        function_offsets.insert("_start".to_string(), 0);
+        function_sizes.insert("_start".to_string(), start_stub_size);
+    }
 
     for func in functions {
         let func_offset = text_section.len() as u64;
@@ -4093,6 +4112,20 @@ pub fn emit_elf(
         resolve_call_relocs(&mut text_section, &all_call_relocs, &function_offsets)?;
     }
 
+    // ---- Step 2b: Patch _start BL to main ----
+    if !is_obj {
+        if let Some(&main_offset) = function_offsets.get("main")
+            .or_else(|| function_offsets.get(&config.entry_name))
+        {
+            // BL is at offset 0 in text_section
+            // imm26 = (target - bl_addr) / 4 = (main_offset - 0) / 4
+            let bl_offset = (main_offset as i64) / 4;
+            let imm26 = (bl_offset as u32) & 0x03FFFFFF;
+            let bl_word: u32 = 0x94000000 | imm26;
+            text_section[0..4].copy_from_slice(&bl_word.to_le_bytes());
+        }
+    }
+
     // ---- Step 3: Collect data sections (with proper alignment) ----
     let (rodata_section, data_section, bss_size) =
         collect_data_sections(data_sections, config.backend);
@@ -4122,8 +4155,9 @@ pub fn emit_elf(
     let text_vaddr = if is_obj { 0 } else { base_addr + text_offset };
 
     let entry_offset = function_offsets
-        .get(&config.entry_name)
+        .get("_start")
         .copied()
+        .or_else(|| function_offsets.get(&config.entry_name).copied())
         .unwrap_or(0);
     let entry_point = if is_obj { 0 } else { text_vaddr + entry_offset };
 
