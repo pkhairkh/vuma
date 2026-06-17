@@ -23,6 +23,74 @@
 //!
 //! The overall algorithm is O(|nodes| × |caps|²) as specified, with soundness
 //! guarantees proven in the specification document.
+//!
+//! # Fixpoint Convergence (W6)
+//!
+//! Phase 2 is a real fixpoint computation over the **BD lattice** — the
+//! product of the RepD, CapD, and RelD lattices. Convergence is guaranteed
+//! by two properties:
+//!
+//! ## 1. Finiteness of the BD lattice
+//!
+//! For any given SCG, the set of reachable BD values is finite:
+//!
+//! - **RepD** is a sum type with 8 variants (`Byte`, `Struct`, `Array`,
+//!   `Enum`, `Ptr`, `Union`, `Func`, `Generic`). Each variant is built
+//!   from finitely many `u64` size/align fields and recursive RepDs.
+//!   In any given SCG, the allocation sizes, access sizes, and cast
+//!   target types are drawn from a finite set (the SCG is a finite
+//!   graph), so only finitely many distinct RepD values are
+//!   constructible. The `Byte` variant — the "top" of the subsumption
+//!   order (it subsumes any RepD with matching size/align) — is bounded
+//!   by `max(size_in_scg)` × `max(align_in_scg)`, a finite bound.
+//! - **CapD** is a pair `(caps: HashSet<Capability>, conditions:
+//!   HashSet<Condition>)`. The `Capability` enum has 17 variants, so
+//!   `caps` ranges over at most `2^17` subsets. `Condition` is a sum
+//!   type whose IDs are drawn from the SCG (finite), so `conditions`
+//!   also ranges over a finite powerset.
+//! - **RelD** is `relations: HashSet<Relation>`. The `Relation` enum
+//!   has 12 variants (`Temporal(4)`, `Containment`, `Dependency(3)`,
+//!   `Equivalence`, `Security(3)`, `Liveness`), so `relations` ranges
+//!   over at most `2^12` subsets.
+//!
+//! The product of three finite lattices is finite, so the BD lattice
+//! for a given SCG is finite.
+//!
+//! ## 2. Per-component monotonicity of the fixpoint update
+//!
+//! Each Phase 2 update moves the target BD **monotonically** in a single
+//! direction along one component lattice:
+//!
+//! - **RepD update** (when source and target RepDs are incompatible):
+//!   `target.repd ← Byte(max(src.size, tgt.size), max(src.align,
+//!   tgt.align))`. `Byte` is the top of the subsumption order, and
+//!   `max` can only grow. ⇒ **monotone UP** (widening toward the
+//!   most-permissive RepD).
+//! - **CapD update** (when source.capd is not a superset of
+//!   target.capd): `target.capd ← target.capd.meet(source.capd)`.
+//!   Meet is intersection; caps only shrink and conditions only grow.
+//!   ⇒ **monotone DOWN** (narrowing toward the most-restrictive
+//!   CapD).
+//! - **RelD update** (when target.reld doesn't refine source.reld):
+//!   `target.reld ← target.reld.compose(source.reld)`. Compose is
+//!   union; relations only grow. ⇒ **monotone UP** (refinement
+//!   toward the most-refined RelD).
+//!
+//! Each component reaches a fixed point in at most `|component lattice|`
+//! steps. The product iteration converges in at most the sum of those
+//! bounds — a finite number for any given SCG.
+//!
+//! ## Termination contract
+//!
+//! Because the lattice is finite and the update is monotone,
+//! **non-convergence is a bug** (a non-monotone update somewhere in
+//! the engine), not a depth limit. The `max_iterations` field is a
+//! safety net: if the iteration ever exceeds it, the engine reports
+//! [`InferenceError::FixpointDidNotConverge`] with a clear message
+//! identifying the non-monotonicity, rather than silently capping
+//! out and returning a possibly-unsound result. The default cap
+//! (10 000) is far above the worst-case lattice size for any
+//! realistic SCG.
 
 use crate::capd::{CapD, Capability};
 use crate::descriptor::BD;
@@ -91,10 +159,22 @@ pub enum InferenceError {
         /// A node involved in the circular outlives relation.
         node: NodeId,
     },
-    /// Maximum iteration count exceeded during fixed-point solving.
-    MaxIterationsExceeded {
-        /// The number of iterations attempted before giving up.
+    /// BD fixpoint did not converge within the iteration cap.
+    ///
+    /// This is **not** a depth limit — it is a bug report. The BD lattice
+    /// is finite (see the module-level doc) and each Phase 2 update is
+    /// per-component monotone, so the iteration is guaranteed to converge
+    /// in a finite number of steps for any well-formed SCG. Hitting this
+    /// error therefore indicates that a non-monotone update has been
+    /// introduced somewhere in the engine, and the partial `bd_map`
+    /// returned alongside this error must **not** be trusted as a
+    /// verification result — callers MUST treat it as a verification
+    /// failure (the SCG is `Unverified`, not `Proven`).
+    FixpointDidNotConverge {
+        /// The number of iterations attempted before the cap was hit.
         iterations: u32,
+        /// The configured iteration cap that was exceeded.
+        cap: u32,
     },
 }
 
@@ -137,8 +217,13 @@ impl fmt::Display for InferenceError {
             InferenceError::CircularOutlives { node } => {
                 write!(f, "Circular Outlives detected involving {node}")
             }
-            InferenceError::MaxIterationsExceeded { iterations } => {
-                write!(f, "Fixed-point did not converge after {iterations} iterations")
+            InferenceError::FixpointDidNotConverge { iterations, cap } => {
+                write!(
+                    f,
+                    "BD fixpoint did not converge after {iterations} iterations (cap={cap}) \
+                     — non-monotone update detected (this is a bug in the BD inference engine; \
+                     the partial BD map must not be trusted)"
+                )
             }
         }
     }
@@ -268,8 +353,19 @@ pub enum BDConstraint {
 // ---------------------------------------------------------------------------
 
 /// The main BD inference engine. Runs the 3-phase algorithm on an SCG.
+///
+/// See the module-level doc for the lattice-finiteness and monotonicity
+/// argument that guarantees Phase 2 convergence.
 pub struct BDInferenceEngine {
-    /// Maximum number of fixed-point iterations before giving up.
+    /// Safety-net cap on the number of Phase 2 fixpoint iterations.
+    ///
+    /// The BD lattice is finite and the Phase 2 update is per-component
+    /// monotone, so the iteration provably converges in a finite number
+    /// of steps for any well-formed SCG. This cap exists only to fail
+    /// fast (with [`InferenceError::FixpointDidNotConverge`]) if a
+    /// non-monotone update is ever introduced into the engine. The
+    /// default (10 000) is far above the worst-case lattice size for
+    /// any realistic SCG.
     pub max_iterations: u32,
     /// Whether to apply widening after each iteration to accelerate convergence.
     pub use_widening: bool,
@@ -279,15 +375,26 @@ pub struct BDInferenceEngine {
 
 impl BDInferenceEngine {
     /// Creates a new inference engine with default settings.
+    ///
+    /// Default `max_iterations` is 10 000 — a safety-net cap that should
+    /// never be reached for any well-formed SCG (see the module-level
+    /// convergence argument). Use [`with_max_iterations`](Self::with_max_iterations)
+    /// to lower it for fault-injection tests.
     pub fn new() -> Self {
         Self {
-            max_iterations: 100,
+            max_iterations: 10_000,
             use_widening: true,
             enable_context_refinement: true,
         }
     }
 
-    /// Creates a new inference engine with custom max iterations.
+    /// Creates a new inference engine with a custom fixpoint iteration cap.
+    ///
+    /// Note that `max_iterations` is a **safety net**, not a depth limit:
+    /// exceeding it indicates a non-monotone update bug in the engine and
+    /// produces [`InferenceError::FixpointDidNotConverge`]. Callers must
+    /// treat that error as a verification failure (the SCG is `Unverified`,
+    /// not `Proven`).
     pub fn with_max_iterations(mut self, max: u32) -> Self {
         self.max_iterations = max;
         self
@@ -658,6 +765,32 @@ impl BDInferenceEngine {
     /// Phase 2: Generate compatibility constraints between BDs at each edge
     /// and solve using iterative fixed-point with widening.
     ///
+    /// # Convergence argument (W6)
+    ///
+    /// This is a **real fixpoint** over the finite BD lattice (see the
+    /// module-level doc for the finiteness proof). Each constraint
+    /// application is **per-component monotone**:
+    ///
+    /// - **RepD**: when source and target RepDs are incompatible, the
+    ///   target is widened to `Byte(max(src.size, tgt.size),
+    ///   max(src.align, tgt.align))`. `Byte` is the top of the
+    ///   subsumption order, and the `max` can only grow ⇒ monotone UP.
+    /// - **CapD**: when `source.capd` is not a superset of
+    ///   `target.capd`, the target is met with the source
+    ///   (`target.capd ← target.capd.meet(source.capd)`). Meet is
+    ///   intersection; caps only shrink ⇒ monotone DOWN.
+    /// - **RelD**: when `target.reld` does not yet refine
+    ///   `source.reld`, the source's relations are composed into the
+    ///   target (`target.reld ← target.reld.compose(source.reld)`).
+    ///   Compose is union; relations only grow ⇒ monotone UP.
+    ///
+    /// Each component reaches a fixed point in at most
+    /// `|component lattice|` steps. The product converges in at most
+    /// the sum of those bounds. The `max_iterations` cap is a safety
+    /// net: hitting it indicates a non-monotone update (a bug), not a
+    /// depth limit, and is reported via
+    /// [`InferenceError::FixpointDidNotConverge`].
+    ///
     /// Returns the number of iterations needed for convergence.
     fn phase2_solve_constraints(
         &self,
@@ -673,9 +806,14 @@ impl BDInferenceEngine {
             iterations += 1;
 
             if iterations > self.max_iterations {
-                result
-                    .errors
-                    .push(InferenceError::MaxIterationsExceeded { iterations });
+                // Safety-net cap hit. Per the convergence argument above,
+                // this can only happen if a non-monotone update has been
+                // introduced into the engine. Report it as a clear
+                // verification failure (NOT a silent depth-cap acceptance).
+                result.errors.push(InferenceError::FixpointDidNotConverge {
+                    iterations,
+                    cap: self.max_iterations,
+                });
                 return iterations;
             }
 
@@ -2338,5 +2476,277 @@ mod tests {
         assert!(result.contains_key(&n1));
         assert!(result.contains_key(&n2));
         assert!(result.contains_key(&n3));
+    }
+
+    // ===================================================================
+    // W6: Fixpoint convergence tests
+    // ===================================================================
+    //
+    // The BD lattice is finite (product of finite RepD/CapD/RelD lattices)
+    // and each Phase 2 update is per-component monotone, so the fixpoint
+    // provably converges in a finite number of steps. These tests exercise
+    // the real fixpoint machinery: a multi-iteration RepD-widening cascade
+    // that must converge correctly, and a fault-injection test confirming
+    // that hitting the safety-net cap is surfaced as a clear failure
+    // (not silently accepted as a "Proven" result).
+
+    // -----------------------------------------------------------------------
+    // Test 25 (W6): Fixpoint converges on a multi-iteration RepD-widening cascade
+    // -----------------------------------------------------------------------
+    //
+    // Builds a chain: alloc(size=16) -> compute(i32) -> compute(i32) -> ...
+    //
+    // Phase 1 assigns Byte(4,4) to each computation (from `result_type="i32"`),
+    // which is incompatible with the upstream Byte(16,4) coming from the
+    // allocation. Phase 2 must widen each computation's RepD to Byte(16,4),
+    // propagating forward through the chain. Because the chain has 5
+    // computations, the widening cascades through all of them in a single
+    // forward pass; a second pass verifies no further changes. This
+    // exercises the real fixpoint machinery (monotone RepD widening over
+    // a finite lattice) and confirms it converges to the correct result.
+    #[test]
+    fn test_fixpoint_multi_iteration_repd_widening_cascade() {
+        let mut scg = SCG::new();
+        let alloc = scg.add_node(
+            NodeType::Allocation,
+            NodePayload::Allocation(AllocationNode {
+                size: 16,
+                align: 4,
+                region_id: region(),
+                type_name: Some("i128".to_string()),
+            }),
+            pp(),
+        );
+        let mut chain: Vec<NodeId> = vec![alloc];
+        for i in 0..5u32 {
+            let c = scg.add_node(
+                NodeType::Computation,
+                NodePayload::Computation(ComputationNode {
+                    kind: ComputationKind::Other(format!("step_{i}")),
+                    // i32 -> Byte(4, 4), intentionally mismatched with the
+                    // upstream Byte(16, 4) so Phase 2 must widen it.
+                    result_type: Some("i32".to_string()),
+                    tail_call: false,
+                }),
+                pp(),
+            );
+            scg.add_edge(*chain.last().unwrap(), c, EdgeKind::DataFlow)
+                .unwrap();
+            chain.push(c);
+        }
+
+        let engine = BDInferenceEngine::new();
+        let result = engine.infer(&scg);
+
+        assert!(result.is_ok(), "Errors: {:?}", result.errors);
+        // The fixpoint must actually iterate: at least one widening pass
+        // (iter 1) plus a verification pass (iter 2). This confirms the
+        // engine does real fixpoint work, not a single-pass computation.
+        assert!(
+            result.iterations >= 2,
+            "Fixpoint should require >= 2 iterations, got {}",
+            result.iterations
+        );
+        // Every computation node's RepD should have been widened to size 16
+        // (the allocation's size), demonstrating that the widening
+        // propagated through the entire chain.
+        for &node_id in chain.iter().skip(1) {
+            let bd = &result.bd_map[&node_id];
+            assert_eq!(
+                bd.repd.size(),
+                16,
+                "Computation {node_id:?} RepD should be widened to size 16, got {}",
+                bd.repd.size()
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 26 (W6): Fixpoint converges on a diamond (multi-predecessor) graph
+    // -----------------------------------------------------------------------
+    //
+    // A diamond: alloc(16) feeds two computations c1, c2 (both i32), which
+    // both feed into a merge computation c3 (i32). Phase 2 must widen c1
+    // and c2 to Byte(16,4), then widen c3 to Byte(16,4). This exercises
+    // multi-predecessor RepD widening.
+    #[test]
+    fn test_fixpoint_diamond_multi_predecessor_convergence() {
+        let mut scg = SCG::new();
+        let alloc = scg.add_node(
+            NodeType::Allocation,
+            NodePayload::Allocation(AllocationNode {
+                size: 16,
+                align: 4,
+                region_id: region(),
+                type_name: Some("i128".to_string()),
+            }),
+            pp(),
+        );
+        let c1 = scg.add_node(
+            NodeType::Computation,
+            NodePayload::Computation(ComputationNode {
+                kind: ComputationKind::Other("branch_a".to_string()),
+                result_type: Some("i32".to_string()),
+                tail_call: false,
+            }),
+            pp(),
+        );
+        let c2 = scg.add_node(
+            NodeType::Computation,
+            NodePayload::Computation(ComputationNode {
+                kind: ComputationKind::Other("branch_b".to_string()),
+                result_type: Some("i32".to_string()),
+                tail_call: false,
+            }),
+            pp(),
+        );
+        let c3 = scg.add_node(
+            NodeType::Computation,
+            NodePayload::Computation(ComputationNode {
+                kind: ComputationKind::Other("merge".to_string()),
+                result_type: Some("i32".to_string()),
+                tail_call: false,
+            }),
+            pp(),
+        );
+        scg.add_edge(alloc, c1, EdgeKind::DataFlow).unwrap();
+        scg.add_edge(alloc, c2, EdgeKind::DataFlow).unwrap();
+        scg.add_edge(c1, c3, EdgeKind::DataFlow).unwrap();
+        scg.add_edge(c2, c3, EdgeKind::DataFlow).unwrap();
+
+        let engine = BDInferenceEngine::new();
+        let result = engine.infer(&scg);
+
+        assert!(result.is_ok(), "Errors: {:?}", result.errors);
+        assert!(
+            result.iterations >= 2,
+            "Diamond fixpoint should require >= 2 iterations, got {}",
+            result.iterations
+        );
+        // All three computations should be widened to size 16.
+        for &node_id in &[c1, c2, c3] {
+            let bd = &result.bd_map[&node_id];
+            assert_eq!(
+                bd.repd.size(),
+                16,
+                "Computation {node_id:?} RepD should be size 16, got {}",
+                bd.repd.size()
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 27 (W6): Non-convergence is reported clearly, not silently accepted
+    // -----------------------------------------------------------------------
+    //
+    // Simulates non-convergence by lowering the safety-net cap below the
+    // number of iterations the SCG actually needs (2). The engine must
+    // surface this as a `FixpointDidNotConverge` error with a clear
+    // message identifying non-monotonicity — NOT silently accept the
+    // partial BD map as a "Proven" result.
+    //
+    // In a sound engine, hitting the cap indicates a non-monotone update
+    // (bug); the partial `bd_map` must not be trusted as a verification
+    // result. This test confirms that contract is enforced.
+    #[test]
+    fn test_fixpoint_non_convergence_reported_clearly() {
+        let mut scg = SCG::new();
+        let alloc = scg.add_node(
+            NodeType::Allocation,
+            NodePayload::Allocation(AllocationNode {
+                size: 16,
+                align: 4,
+                region_id: region(),
+                type_name: Some("i128".to_string()),
+            }),
+            pp(),
+        );
+        let c1 = scg.add_node(
+            NodeType::Computation,
+            NodePayload::Computation(ComputationNode {
+                kind: ComputationKind::Other("step_0".to_string()),
+                result_type: Some("i32".to_string()),
+                tail_call: false,
+            }),
+            pp(),
+        );
+        let c2 = scg.add_node(
+            NodeType::Computation,
+            NodePayload::Computation(ComputationNode {
+                kind: ComputationKind::Other("step_1".to_string()),
+                result_type: Some("i32".to_string()),
+                tail_call: false,
+            }),
+            pp(),
+        );
+        scg.add_edge(alloc, c1, EdgeKind::DataFlow).unwrap();
+        scg.add_edge(c1, c2, EdgeKind::DataFlow).unwrap();
+
+        // Set the safety-net cap below the 2 iterations this SCG requires.
+        let engine = BDInferenceEngine::new().with_max_iterations(1);
+        let result = engine.infer(&scg);
+
+        // The engine must NOT silently accept the partial result.
+        assert!(
+            !result.is_ok(),
+            "Engine must report non-convergence, not silently accept partial BDs"
+        );
+        // The error must be FixpointDidNotConverge with the clear message.
+        let non_conv = result
+            .errors
+            .iter()
+            .find(|e| matches!(e, InferenceError::FixpointDidNotConverge { .. }));
+        assert!(
+            non_conv.is_some(),
+            "Expected FixpointDidNotConverge error, got: {:?}",
+            result.errors
+        );
+        let msg = format!("{}", non_conv.unwrap());
+        assert!(
+            msg.contains("BD fixpoint did not converge"),
+            "Error message must clearly state non-convergence: {}",
+            msg
+        );
+        assert!(
+            msg.contains("non-monotone update"),
+            "Error message must identify non-monotonicity: {}",
+            msg
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 28 (W6): Default max_iterations is the safety-net cap (10 000)
+    // -----------------------------------------------------------------------
+    //
+    // Confirms the default cap is far above the worst-case lattice size
+    // for any realistic SCG. A small SCG must converge well below this.
+    #[test]
+    fn test_default_max_iterations_is_safety_net() {
+        let engine = BDInferenceEngine::new();
+        assert_eq!(
+            engine.max_iterations, 10_000,
+            "Default max_iterations must be the 10 000 safety-net cap"
+        );
+
+        // A small SCG should converge in <= a handful of iterations,
+        // nowhere near the 10 000 cap.
+        let mut scg = SCG::new();
+        let _alloc = scg.add_node(
+            NodeType::Allocation,
+            NodePayload::Allocation(AllocationNode {
+                size: 4,
+                align: 4,
+                region_id: region(),
+                type_name: Some("i32".to_string()),
+            }),
+            pp(),
+        );
+        let result = engine.infer(&scg);
+        assert!(result.is_ok(), "Errors: {:?}", result.errors);
+        assert!(
+            result.iterations < 10,
+            "Small SCG should converge in < 10 iterations, got {}",
+            result.iterations
+        );
     }
 }

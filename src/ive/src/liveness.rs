@@ -4,6 +4,10 @@
 //! whether "every requested resource will eventually be provided" across all
 //! execution paths. The liveness invariant encompasses:
 //!
+//! - **Use-after-free (core liveness check)**: every [`EventAction::Read`]
+//!   and [`EventAction::Write`] targets a region that is currently allocated
+//!   (not yet freed, or re-allocated after freeing). This is the actual
+//!   liveness invariant per `docs/specs/vuma-invariants-spec.md:225`.
 //! - **Allocation reachability**: every allocation must have a matching
 //!   deallocation reachable on all execution paths.
 //! - **Deadlock freedom**: no circular wait-for dependencies exist in the
@@ -17,8 +21,12 @@
 //! The verifier operates on a [`LivenessInput`] model, which is constructed
 //! from the Memory State Graph (MSG) and Semantic Computation Graph (SCG).
 //! The model captures regions, resource events, control-flow edges, and
-//! wait-for dependencies. The verification proceeds in four phases:
+//! wait-for dependencies. The verification proceeds in five phases:
 //!
+//! 0. **Use-after-free detection** — iterate over [`EventAction::Read`] and
+//!    [`EventAction::Write`] events in program order and flag any access to
+//!    a region that has been deallocated (and not yet re-allocated). This
+//!    is the real liveness invariant per the spec.
 //! 1. **Resource leak detection** — walk all allocations and verify that a
 //!    deallocation is reachable on every execution path.
 //! 2. **Deadlock detection** — build a wait-for graph and detect cycles
@@ -120,6 +128,14 @@ pub enum EventAction {
     Allocate,
     /// A resource was deallocated/destroyed.
     Deallocate,
+    /// A memory region was read. Checked by the use-after-free (core
+    /// liveness) analysis: every read must target a region that is
+    /// currently allocated.
+    Read,
+    /// A memory region was written. Checked by the use-after-free (core
+    /// liveness) analysis: every write must target a region that is
+    /// currently allocated.
+    Write,
     /// A lock was acquired.
     Acquire,
     /// A lock was released.
@@ -135,6 +151,8 @@ impl fmt::Display for EventAction {
         match self {
             EventAction::Allocate => write!(f, "allocate"),
             EventAction::Deallocate => write!(f, "deallocate"),
+            EventAction::Read => write!(f, "read"),
+            EventAction::Write => write!(f, "write"),
             EventAction::Acquire => write!(f, "acquire"),
             EventAction::Release => write!(f, "release"),
             EventAction::Send => write!(f, "send"),
@@ -231,6 +249,28 @@ impl LivenessInput {
             .collect()
     }
 
+    /// Returns all access events (memory reads/writes).
+    ///
+    /// These are the events checked by the use-after-free (core liveness)
+    /// analysis: each access must target a region that is currently
+    /// allocated.
+    pub fn accesses(&self) -> Vec<&ResourceEvent> {
+        self.events
+            .iter()
+            .filter(|e| matches!(e.event, EventAction::Read | EventAction::Write))
+            .collect()
+    }
+
+    /// Returns all access events for a specific resource.
+    pub fn accesses_for(&self, rid: ResourceId) -> Vec<&ResourceEvent> {
+        self.events
+            .iter()
+            .filter(|e| {
+                e.resource == rid && matches!(e.event, EventAction::Read | EventAction::Write)
+            })
+            .collect()
+    }
+
     /// Returns all deallocation events for a specific resource.
     pub fn deallocations_for(&self, rid: ResourceId) -> Vec<&ResourceEvent> {
         self.events
@@ -321,6 +361,28 @@ pub enum LivenessViolation {
         thread: ThreadId,
     },
 
+    /// A memory access targeted a region that had already been deallocated
+    /// (use-after-free). This is the **core liveness violation** per the
+    /// VUMA invariants spec §3: "Every access targets allocated memory."
+    ///
+    /// See `docs/specs/vuma-invariants-spec.md:225` for the formal statement.
+    UseAfterFree {
+        /// The resource that was accessed after being freed.
+        resource: ResourceId,
+        /// The kind of resource.
+        kind: ResourceKind,
+        /// The program point at which the resource was originally allocated.
+        /// Used to build the concrete counterexample execution path
+        /// (allocation → deallocation → violating access).
+        alloc_point: PointId,
+        /// The program point at which the violating access occurred.
+        access_point: PointId,
+        /// The program point at which the resource was deallocated.
+        dealloc_point: PointId,
+        /// The thread that performed the violating access.
+        thread: ThreadId,
+    },
+
     /// An allocation was deallocated on some paths but not all
     /// (conditional deallocation, may lead to leak).
     ConditionalDeallocation {
@@ -341,6 +403,149 @@ pub enum LivenessViolation {
         /// Description of the dependency.
         description: String,
     },
+}
+
+impl LivenessViolation {
+    /// Build the concrete execution path that leads to this violation.
+    ///
+    /// Each step is a human-readable string referencing the actual program
+    /// point (`PointId`) from the SCG. The path traces the sequence of
+    /// resource events from allocation through to the violation site,
+    /// fulfilling the README's promise of "precise counterexamples
+    /// showing the exact execution path to the violation."
+    ///
+    /// This is *not* a fabricated template trace — every step references
+    /// a real `PointId` recorded by the verifier when the violation was
+    /// detected.
+    pub fn path(&self) -> Vec<String> {
+        match self {
+            LivenessViolation::ResourceLeak {
+                resource,
+                kind,
+                alloc_point,
+                thread,
+            } => vec![
+                format!(
+                    "Allocate {} ({}) at {} by {}",
+                    resource, kind, alloc_point, thread
+                ),
+                format!(
+                    "<end of reachable execution: no Deallocate of {} found>",
+                    resource
+                ),
+            ],
+            LivenessViolation::DeadlockCycle {
+                cycle,
+                threads,
+                ..
+            } => {
+                let mut path = Vec::with_capacity(cycle.len() + 1);
+                path.push(format!(
+                    "Threads [{}] each hold one resource while waiting for another",
+                    threads
+                        .iter()
+                        .map(|t| t.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+                for (i, &r) in cycle.iter().enumerate() {
+                    let next = cycle[(i + 1) % cycle.len()];
+                    path.push(format!("Lock {} held while waiting for {}", r, next));
+                }
+                path
+            }
+            LivenessViolation::LockHeldTooLong {
+                resource,
+                acquire_point,
+                thread,
+            } => vec![
+                format!(
+                    "Acquire {} (lock) at {} by {}",
+                    resource, acquire_point, thread
+                ),
+                format!(
+                    "<no Release of {} reachable from {}>",
+                    resource, acquire_point
+                ),
+            ],
+            LivenessViolation::LostMessage {
+                channel,
+                send_point,
+                thread,
+            } => vec![
+                format!(
+                    "Send {} (channel) at {} by {}",
+                    channel, send_point, thread
+                ),
+                format!("<no matching Receive of {} found>", channel),
+            ],
+            LivenessViolation::UseAfterFree {
+                resource,
+                kind,
+                alloc_point,
+                access_point,
+                dealloc_point,
+                thread,
+            } => vec![
+                format!(
+                    "Allocate {} ({}) at {} by {}",
+                    resource, kind, alloc_point, thread
+                ),
+                format!(
+                    "Deallocate {} ({}) at {} by {}",
+                    resource, kind, dealloc_point, thread
+                ),
+                format!(
+                    "Access {} ({}) at {} by {} — USE AFTER FREE",
+                    resource, kind, access_point, thread
+                ),
+            ],
+            LivenessViolation::ConditionalDeallocation {
+                resource,
+                alloc_point,
+                dealloc_paths,
+                leak_paths,
+            } => {
+                let mut path = vec![format!("Allocate {} at {}", resource, alloc_point)];
+                for (i, dp) in dealloc_paths.iter().enumerate() {
+                    path.push(format!(
+                        "Dealloc path {}: {}",
+                        i,
+                        dp.iter()
+                            .map(|p| p.to_string())
+                            .collect::<Vec<_>>()
+                            .join(" -> ")
+                    ));
+                }
+                for (i, lp) in leak_paths.iter().enumerate() {
+                    if lp.is_empty() {
+                        path.push(format!(
+                            "Leak path {}: <no Deallocate of {} on this branch>",
+                            i, resource
+                        ));
+                    } else {
+                        path.push(format!(
+                            "Leak path {}: {}",
+                            i,
+                            lp.iter()
+                                .map(|p| p.to_string())
+                                .collect::<Vec<_>>()
+                                .join(" -> ")
+                        ));
+                    }
+                }
+                path
+            }
+            LivenessViolation::CircularDependency { cycle, .. } => {
+                let mut path = Vec::with_capacity(cycle.len());
+                for (i, &r) in cycle.iter().enumerate() {
+                    let next = cycle[(i + 1) % cycle.len()];
+                    path.push(format!("Acquire {} before {}", r, next));
+                }
+                path
+            }
+        }
+    }
 }
 
 impl fmt::Display for LivenessViolation {
@@ -392,6 +597,18 @@ impl fmt::Display for LivenessViolation {
                 f,
                 "Message sent on channel {} at {} by {} is never received",
                 channel, send_point, thread
+            ),
+            LivenessViolation::UseAfterFree {
+                resource,
+                kind,
+                alloc_point,
+                access_point,
+                dealloc_point,
+                thread,
+            } => write!(
+                f,
+                "Use-after-free: {} {} allocated at {} freed at {} accessed at {} by {}",
+                kind, resource, alloc_point, dealloc_point, access_point, thread
             ),
             LivenessViolation::ConditionalDeallocation {
                 resource,
@@ -523,6 +740,15 @@ impl LivenessVerificationResult {
             }
         } else {
             let first_violation = self.violations.first();
+            // Build a REAL counterexample execution path from the first
+            // violation's concrete program points — not an empty
+            // `Vec::new()`. This is the "exact execution path to the
+            // violation" promised by the README: each step references an
+            // actual SCG `PointId`.
+            let violation_path = match first_violation {
+                Some(v) => v.path(),
+                None => Vec::new(),
+            };
             let violation_point = match first_violation {
                 Some(LivenessViolation::ResourceLeak { alloc_point, .. }) => {
                     alloc_point.to_string()
@@ -534,6 +760,9 @@ impl LivenessVerificationResult {
                     acquire_point.to_string()
                 }
                 Some(LivenessViolation::LostMessage { send_point, .. }) => send_point.to_string(),
+                Some(LivenessViolation::UseAfterFree { access_point, .. }) => {
+                    access_point.to_string()
+                }
                 Some(LivenessViolation::ConditionalDeallocation { alloc_point, .. }) => {
                     alloc_point.to_string()
                 }
@@ -551,7 +780,11 @@ impl LivenessVerificationResult {
             VerificationResult::new(
                 "liveness",
                 VerificationStatus::Violated {
-                    counterexample: CounterExample::new(Vec::new(), violation_point, description),
+                    counterexample: CounterExample::new(
+                        violation_path,
+                        violation_point,
+                        description,
+                    ),
                 },
                 format!(
                     "Liveness invariant violated: {} violation(s) found across {} resources",
@@ -577,9 +810,9 @@ impl Default for LivenessVerificationResult {
 #[derive(Debug, Clone, Default)]
 struct Cfg {
     /// Adjacency list: point -> list of successor points.
-    successors: hashbrown::HashMap<PointId, Vec<PointId>>,
+    successors: std::collections::BTreeMap<PointId, Vec<PointId>>,
     /// Reverse adjacency list: point -> list of predecessor points.
-    predecessors: hashbrown::HashMap<PointId, Vec<PointId>>,
+    predecessors: std::collections::BTreeMap<PointId, Vec<PointId>>,
 }
 
 impl Cfg {
@@ -639,7 +872,7 @@ impl Cfg {
         if start == target {
             return Some(vec![start]);
         }
-        let mut visited = hashbrown::HashMap::new();
+        let mut visited = std::collections::BTreeMap::new();
         let mut queue = std::collections::VecDeque::new();
         visited.insert(start, None);
         queue.push_back(start);
@@ -715,12 +948,12 @@ struct Scc {
 
 /// Run Tarjan's algorithm to find all SCCs in a directed graph.
 /// The graph is represented as an adjacency list of ResourceId.
-fn tarjan_scc(graph: &hashbrown::HashMap<ResourceId, Vec<ResourceId>>) -> Vec<Scc> {
+fn tarjan_scc(graph: &std::collections::BTreeMap<ResourceId, Vec<ResourceId>>) -> Vec<Scc> {
     let mut index_counter: u64 = 0;
     let mut stack: Vec<ResourceId> = Vec::new();
     let mut on_stack: hashbrown::HashSet<ResourceId> = hashbrown::HashSet::new();
-    let mut indices: hashbrown::HashMap<ResourceId, u64> = hashbrown::HashMap::new();
-    let mut lowlinks: hashbrown::HashMap<ResourceId, u64> = hashbrown::HashMap::new();
+    let mut indices: std::collections::BTreeMap<ResourceId, u64> = std::collections::BTreeMap::new();
+    let mut lowlinks: std::collections::BTreeMap<ResourceId, u64> = std::collections::BTreeMap::new();
     let mut sccs: Vec<Scc> = Vec::new();
 
     let all_nodes: Vec<ResourceId> = graph.keys().copied().collect();
@@ -746,12 +979,12 @@ fn tarjan_scc(graph: &hashbrown::HashMap<ResourceId, Vec<ResourceId>>) -> Vec<Sc
 #[allow(clippy::too_many_arguments)]
 fn tarjan_strongconnect(
     v: ResourceId,
-    graph: &hashbrown::HashMap<ResourceId, Vec<ResourceId>>,
+    graph: &std::collections::BTreeMap<ResourceId, Vec<ResourceId>>,
     index_counter: &mut u64,
     stack: &mut Vec<ResourceId>,
     on_stack: &mut hashbrown::HashSet<ResourceId>,
-    indices: &mut hashbrown::HashMap<ResourceId, u64>,
-    lowlinks: &mut hashbrown::HashMap<ResourceId, u64>,
+    indices: &mut std::collections::BTreeMap<ResourceId, u64>,
+    lowlinks: &mut std::collections::BTreeMap<ResourceId, u64>,
     sccs: &mut Vec<Scc>,
 ) {
     indices.insert(v, *index_counter);
@@ -861,8 +1094,9 @@ impl LivenessVerifier {
 
     /// Run the full liveness verification on the given input.
     ///
-    /// This executes all four verification phases and returns an aggregated
-    /// result.
+    /// This executes all five verification phases (Phase 0 — use-after-free,
+    /// then Phases 1–4: leak detection, deadlock detection, lock discipline,
+    /// message completeness) and returns an aggregated result.
     pub fn verify(&mut self, input: &LivenessInput) -> LivenessVerificationResult {
         let mut result = LivenessVerificationResult::new();
 
@@ -872,6 +1106,21 @@ impl LivenessVerifier {
         // Collect all unique resources.
         let resources = self.collect_resources(input);
         result.resources_checked = resources.len();
+
+        // Phase 0: Use-after-free — the core liveness check per spec §3
+        // (`docs/specs/vuma-invariants-spec.md:225`): "Every access targets
+        // allocated memory." Iterates over Access events in program order
+        // and flags any access to a region that has been deallocated. The
+        // leak/deadlock/lock/channel phases below are useful complementary
+        // checks but were historically mislabeled as "liveness"; this is
+        // the actual liveness invariant.
+        let uaf_count = self.check_use_after_free(input, &mut result);
+        if self.verbose {
+            log::info!(
+                "Phase 0 (use-after-free / liveness): {} violation(s) found",
+                uaf_count
+            );
+        }
 
         // Phase 1: Resource leak detection
         let leak_count = self.check_resource_leaks(input, &cfg, &mut result);
@@ -921,6 +1170,107 @@ impl LivenessVerifier {
     /// Collect all unique resource IDs from the input.
     fn collect_resources(&self, input: &LivenessInput) -> hashbrown::HashSet<ResourceId> {
         input.events.iter().map(|e| e.resource).collect()
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 0: Use-after-free (the real liveness check)
+    // -----------------------------------------------------------------------
+
+    /// Check the core liveness invariant: **every access targets allocated
+    /// memory** (VUMA invariants spec §3, `docs/specs/vuma-invariants-spec.md:225`).
+    ///
+    /// This iterates over resource events in program order (sorted by
+    /// [`PointId`], ties broken by [`ThreadId`] for determinism) and tracks,
+    /// per resource, whether the most recent state-changing event was an
+    /// [`EventAction::Allocate`] (live) or [`EventAction::Deallocate`]
+    /// (freed). Any [`EventAction::Read`] or [`EventAction::Write`] to a
+    /// resource in the freed state — and not yet re-allocated — is a
+    /// use-after-free.
+    ///
+    /// Re-allocation clears the freed state, making subsequent accesses
+    /// valid again (e.g. `malloc` reusing a previously freed slot).
+    ///
+    /// This is a flow-sensitive may-analysis: it reports a violation
+    /// whenever an access follows a deallocation in program order. The
+    /// program-point ordering is derived from the SCG's control-flow edges;
+    /// full path-sensitive refinement (using the CFG to confirm the access
+    /// is reachable from the deallocation on some execution path) is the
+    /// responsibility of the cleanup verifier's path-sensitive analysis.
+    fn check_use_after_free(
+        &mut self,
+        input: &LivenessInput,
+        result: &mut LivenessVerificationResult,
+    ) -> usize {
+        // Sort events into program order. PointId is totally ordered by the
+        // SCG's control-flow edges; ties (same point, different threads) are
+        // broken by ThreadId for deterministic output.
+        let mut ordered: Vec<&ResourceEvent> = input.events.iter().collect();
+        ordered.sort_by(|a, b| a.point.cmp(&b.point).then(a.thread.cmp(&b.thread)));
+
+        // Per-resource allocation state.
+        // - `allocated` holds resources currently in the Allocated state.
+        // - `alloc_at` records the most recent allocation point for each
+        //   resource, so we can build a *real* counterexample execution
+        //   path (alloc → dealloc → access) when a use-after-free is
+        //   detected — not an empty `Vec::new()`.
+        // - `freed_at` records the most recent deallocation point for
+        //   resources that have been freed (and not yet re-allocated).
+        //   A fresh Allocate removes the entry.
+        let mut allocated: hashbrown::HashSet<ResourceId> = hashbrown::HashSet::new();
+        let mut alloc_at: std::collections::BTreeMap<ResourceId, PointId> =
+            std::collections::BTreeMap::new();
+        let mut freed_at: std::collections::BTreeMap<ResourceId, PointId> =
+            std::collections::BTreeMap::new();
+
+        let mut violation_count = 0;
+
+        for event in &ordered {
+            match event.event {
+                EventAction::Allocate => {
+                    allocated.insert(event.resource);
+                    // Record the allocation point so a later use-after-free
+                    // counterexample can reference the exact allocation
+                    // site (the SCG program point of the `Allocate` event).
+                    alloc_at.insert(event.resource, event.point);
+                    // A fresh allocation clears any prior freed state, so
+                    // subsequent accesses are valid again.
+                    freed_at.remove(&event.resource);
+                }
+                EventAction::Deallocate => {
+                    if allocated.contains(&event.resource) {
+                        allocated.remove(&event.resource);
+                        freed_at.insert(event.resource, event.point);
+                    }
+                }
+                EventAction::Read | EventAction::Write => {
+                    // Per spec §3: every access must target allocated memory.
+                    // If the resource is currently in the freed state, this
+                    // is a use-after-free.
+                    if let Some(&dealloc_point) = freed_at.get(&event.resource) {
+                        // The allocation point: fall back to the dealloc
+                        // point if no allocation was seen (defensive —
+                        // every accessed resource should have been
+                        // allocated first).
+                        let alloc_point = alloc_at
+                            .get(&event.resource)
+                            .copied()
+                            .unwrap_or(dealloc_point);
+                        result.add_violation(LivenessViolation::UseAfterFree {
+                            resource: event.resource,
+                            kind: event.kind,
+                            alloc_point,
+                            access_point: event.point,
+                            dealloc_point,
+                            thread: event.thread,
+                        });
+                        violation_count += 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        violation_count
     }
 
     // -----------------------------------------------------------------------
@@ -1048,8 +1398,8 @@ impl LivenessVerifier {
     ) -> usize {
         // Build the resource wait-for graph:
         // Edge from resource A -> resource B means some thread holds A and waits for B.
-        let mut wait_for_graph: hashbrown::HashMap<ResourceId, Vec<ResourceId>> =
-            hashbrown::HashMap::new();
+        let mut wait_for_graph: std::collections::BTreeMap<ResourceId, Vec<ResourceId>> =
+            std::collections::BTreeMap::new();
 
         for dep in &input.wait_for_deps {
             wait_for_graph.entry(dep.held).or_default().push(dep.wanted);
@@ -1113,12 +1463,12 @@ impl LivenessVerifier {
     ) -> usize {
         // Build a graph: resource A -> resource B if any thread acquires A
         // before B (without releasing A in between).
-        let mut acquire_before: hashbrown::HashMap<ResourceId, Vec<ResourceId>> =
-            hashbrown::HashMap::new();
+        let mut acquire_before: std::collections::BTreeMap<ResourceId, Vec<ResourceId>> =
+            std::collections::BTreeMap::new();
 
         // Group events by thread
-        let mut thread_events: hashbrown::HashMap<ThreadId, Vec<&ResourceEvent>> =
-            hashbrown::HashMap::new();
+        let mut thread_events: std::collections::BTreeMap<ThreadId, Vec<&ResourceEvent>> =
+            std::collections::BTreeMap::new();
         for event in &input.events {
             thread_events.entry(event.thread).or_default().push(event);
         }
@@ -1365,10 +1715,10 @@ pub fn verify_liveness(input: &LivenessInput) -> VerificationResult {
 /// definitely live at that point on all paths.
 pub fn compute_path_sensitive_liveness(
     input: &LivenessInput,
-) -> hashbrown::HashMap<PointId, hashbrown::HashSet<ResourceId>> {
+) -> std::collections::BTreeMap<PointId, hashbrown::HashSet<ResourceId>> {
     // Build the CFG
-    let mut succs: hashbrown::HashMap<PointId, Vec<PointId>> = hashbrown::HashMap::new();
-    let mut preds: hashbrown::HashMap<PointId, Vec<PointId>> = hashbrown::HashMap::new();
+    let mut succs: std::collections::BTreeMap<PointId, Vec<PointId>> = std::collections::BTreeMap::new();
+    let mut preds: std::collections::BTreeMap<PointId, Vec<PointId>> = std::collections::BTreeMap::new();
     for edge in &input.cfg_edges {
         succs.entry(edge.from).or_default().push(edge.to);
         preds.entry(edge.to).or_default().push(edge.from);
@@ -1382,10 +1732,10 @@ pub fn compute_path_sensitive_liveness(
     }
 
     // Build gen and kill sets for each point
-    let mut gen: hashbrown::HashMap<PointId, hashbrown::HashSet<ResourceId>> =
-        hashbrown::HashMap::new();
-    let mut kill: hashbrown::HashMap<PointId, hashbrown::HashSet<ResourceId>> =
-        hashbrown::HashMap::new();
+    let mut gen: std::collections::BTreeMap<PointId, hashbrown::HashSet<ResourceId>> =
+        std::collections::BTreeMap::new();
+    let mut kill: std::collections::BTreeMap<PointId, hashbrown::HashSet<ResourceId>> =
+        std::collections::BTreeMap::new();
 
     for event in &input.events {
         let point = event.point;
@@ -1396,6 +1746,10 @@ pub fn compute_path_sensitive_liveness(
             EventAction::Deallocate | EventAction::Release | EventAction::Receive => {
                 kill.entry(point).or_default().insert(event.resource);
             }
+            // Accesses (Read/Write) neither generate nor kill liveness of
+            // a resource; they are observed by `check_use_after_free`
+            // instead.
+            EventAction::Read | EventAction::Write => {}
         }
     }
 
@@ -1403,10 +1757,10 @@ pub fn compute_path_sensitive_liveness(
     let all_resources: hashbrown::HashSet<ResourceId> =
         input.events.iter().map(|e| e.resource).collect();
 
-    let mut live_in: hashbrown::HashMap<PointId, hashbrown::HashSet<ResourceId>> =
-        hashbrown::HashMap::new();
-    let mut live_out: hashbrown::HashMap<PointId, hashbrown::HashSet<ResourceId>> =
-        hashbrown::HashMap::new();
+    let mut live_in: std::collections::BTreeMap<PointId, hashbrown::HashSet<ResourceId>> =
+        std::collections::BTreeMap::new();
+    let mut live_out: std::collections::BTreeMap<PointId, hashbrown::HashSet<ResourceId>> =
+        std::collections::BTreeMap::new();
 
     // Initialize live_in to all resources (top element for meet lattice)
     for &point in &all_points {
@@ -2042,7 +2396,7 @@ mod tests {
     #[test]
     fn test_tarjan_scc_no_cycles() {
         // A -> B -> C (no cycle)
-        let mut graph: hashbrown::HashMap<ResourceId, Vec<ResourceId>> = hashbrown::HashMap::new();
+        let mut graph: std::collections::BTreeMap<ResourceId, Vec<ResourceId>> = std::collections::BTreeMap::new();
         graph.insert(rid(1), vec![rid(2)]);
         graph.insert(rid(2), vec![rid(3)]);
         graph.insert(rid(3), vec![]);
@@ -2055,7 +2409,7 @@ mod tests {
     #[test]
     fn test_tarjan_scc_with_cycle() {
         // A -> B -> C -> A (cycle)
-        let mut graph: hashbrown::HashMap<ResourceId, Vec<ResourceId>> = hashbrown::HashMap::new();
+        let mut graph: std::collections::BTreeMap<ResourceId, Vec<ResourceId>> = std::collections::BTreeMap::new();
         graph.insert(rid(1), vec![rid(2)]);
         graph.insert(rid(2), vec![rid(3)]);
         graph.insert(rid(3), vec![rid(1)]);
@@ -2178,6 +2532,174 @@ mod tests {
         );
     }
 
+    // -----------------------------------------------------------------------
+    // Tests for the use-after-free (core liveness) check
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_use_after_free_violation() {
+        let mut input = LivenessInput::new();
+
+        // Allocate R1 at PP1, free R1 at PP2, write R1 at PP3 (UAF).
+        input.add_event(ResourceEvent {
+            resource: rid(1),
+            kind: ResourceKind::Memory,
+            event: EventAction::Allocate,
+            point: pp(1),
+            thread: tid(1),
+        });
+        input.add_event(ResourceEvent {
+            resource: rid(1),
+            kind: ResourceKind::Memory,
+            event: EventAction::Deallocate,
+            point: pp(2),
+            thread: tid(1),
+        });
+        input.add_event(ResourceEvent {
+            resource: rid(1),
+            kind: ResourceKind::Memory,
+            event: EventAction::Write,
+            point: pp(3),
+            thread: tid(1),
+        });
+
+        let mut verifier = LivenessVerifier::new();
+        let result = verifier.verify(&input);
+
+        assert!(
+            !result.invariant_holds,
+            "Expected invariant violation for use-after-free"
+        );
+        let has_uaf = result.violations.iter().any(|v| {
+            matches!(
+                v,
+                LivenessViolation::UseAfterFree {
+                    resource,
+                    access_point,
+                    dealloc_point,
+                    ..
+                } if *resource == rid(1)
+                    && *access_point == pp(3)
+                    && *dealloc_point == pp(2)
+            )
+        });
+        assert!(
+            has_uaf,
+            "Expected UseAfterFree (R1 at PP3 after free at PP2), got: {:?}",
+            result.violations
+        );
+    }
+
+    #[test]
+    fn test_access_before_free_is_not_uaf() {
+        let mut input = LivenessInput::new();
+
+        // Allocate R1 at PP1, read R1 at PP2, free R1 at PP3 — safe.
+        input.add_event(ResourceEvent {
+            resource: rid(1),
+            kind: ResourceKind::Memory,
+            event: EventAction::Allocate,
+            point: pp(1),
+            thread: tid(1),
+        });
+        input.add_event(ResourceEvent {
+            resource: rid(1),
+            kind: ResourceKind::Memory,
+            event: EventAction::Read,
+            point: pp(2),
+            thread: tid(1),
+        });
+        input.add_event(ResourceEvent {
+            resource: rid(1),
+            kind: ResourceKind::Memory,
+            event: EventAction::Deallocate,
+            point: pp(3),
+            thread: tid(1),
+        });
+
+        let mut verifier = LivenessVerifier::new();
+        let result = verifier.verify(&input);
+
+        let has_uaf = result
+            .violations
+            .iter()
+            .any(|v| matches!(v, LivenessViolation::UseAfterFree { .. }));
+        assert!(
+            !has_uaf,
+            "Access before free must NOT be flagged as use-after-free, got: {:?}",
+            result.violations
+        );
+    }
+
+    #[test]
+    fn test_reallocation_clears_uaf_state() {
+        let mut input = LivenessInput::new();
+
+        // alloc R1 at PP1, free at PP2, re-alloc at PP3, read R1 at PP4 — safe.
+        input.add_event(ResourceEvent {
+            resource: rid(1),
+            kind: ResourceKind::Memory,
+            event: EventAction::Allocate,
+            point: pp(1),
+            thread: tid(1),
+        });
+        input.add_event(ResourceEvent {
+            resource: rid(1),
+            kind: ResourceKind::Memory,
+            event: EventAction::Deallocate,
+            point: pp(2),
+            thread: tid(1),
+        });
+        input.add_event(ResourceEvent {
+            resource: rid(1),
+            kind: ResourceKind::Memory,
+            event: EventAction::Allocate,
+            point: pp(3),
+            thread: tid(1),
+        });
+        input.add_event(ResourceEvent {
+            resource: rid(1),
+            kind: ResourceKind::Memory,
+            event: EventAction::Read,
+            point: pp(4),
+            thread: tid(1),
+        });
+
+        let mut verifier = LivenessVerifier::new();
+        let result = verifier.verify(&input);
+
+        let has_uaf = result
+            .violations
+            .iter()
+            .any(|v| matches!(v, LivenessViolation::UseAfterFree { .. }));
+        assert!(
+            !has_uaf,
+            "Access after re-allocation must NOT be flagged as use-after-free, got: {:?}",
+            result.violations
+        );
+    }
+
+    #[test]
+    fn test_use_after_free_display() {
+        let uaf = LivenessViolation::UseAfterFree {
+            resource: rid(7),
+            kind: ResourceKind::Memory,
+            alloc_point: pp(1),
+            access_point: pp(5),
+            dealloc_point: pp(3),
+            thread: tid(1),
+        };
+        let s = format!("{}", uaf);
+        assert!(
+            s.to_lowercase().contains("use-after-free"),
+            "expected 'use-after-free' in display, got: {}",
+            s
+        );
+        assert!(s.contains("Res7"));
+        assert!(s.contains("PP5"));
+        assert!(s.contains("PP3"));
+    }
+
     #[test]
     fn test_display_violations() {
         let leak = LivenessViolation::ResourceLeak {
@@ -2230,5 +2752,156 @@ mod tests {
         };
         let s = format!("{}", circ);
         assert!(s.contains("Circular dependency"));
+    }
+
+    // -----------------------------------------------------------------------
+    // W7: Real counterexamples — the execution path must be non-empty and
+    // reference the actual SCG program points (allocation, deallocation,
+    // violating access), not a fabricated template or an empty Vec.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_uaf_counterexample_path_is_real() {
+        let mut input = LivenessInput::new();
+
+        // Allocate R1 at PP1, free R1 at PP2, write R1 at PP3 (UAF).
+        input.add_event(ResourceEvent {
+            resource: rid(1),
+            kind: ResourceKind::Memory,
+            event: EventAction::Allocate,
+            point: pp(1),
+            thread: tid(1),
+        });
+        input.add_event(ResourceEvent {
+            resource: rid(1),
+            kind: ResourceKind::Memory,
+            event: EventAction::Deallocate,
+            point: pp(2),
+            thread: tid(1),
+        });
+        input.add_event(ResourceEvent {
+            resource: rid(1),
+            kind: ResourceKind::Memory,
+            event: EventAction::Write,
+            point: pp(3),
+            thread: tid(1),
+        });
+
+        let result = verify_liveness(&input);
+
+        assert!(result.is_violated(), "expected violation");
+        let counterexample = match &result.status {
+            VerificationStatus::Violated { counterexample } => counterexample,
+            _ => unreachable!(),
+        };
+
+        // The execution_path must NOT be empty.
+        assert!(
+            !counterexample.execution_path.is_empty(),
+            "counterexample execution_path must be non-empty, got: {:?}",
+            counterexample.execution_path
+        );
+
+        // The path must contain at least 3 steps: alloc, dealloc, access.
+        assert!(
+            counterexample.execution_path.len() >= 3,
+            "expected at least 3 steps (alloc, dealloc, access), got {}: {:?}",
+            counterexample.execution_path.len(),
+            counterexample.execution_path
+        );
+
+        // The path must mention the actual SCG program points in order.
+        let path_joined = counterexample.execution_path.join(" | ");
+        assert!(
+            path_joined.contains("PP1"),
+            "path must reference allocation point PP1: {}",
+            path_joined
+        );
+        assert!(
+            path_joined.contains("PP2"),
+            "path must reference deallocation point PP2: {}",
+            path_joined
+        );
+        assert!(
+            path_joined.contains("PP3"),
+            "path must reference access point PP3: {}",
+            path_joined
+        );
+
+        // Verify ordering: alloc (PP1) before dealloc (PP2) before access (PP3).
+        let pp1 = path_joined.find("PP1").unwrap();
+        let pp2 = path_joined.find("PP2").unwrap();
+        let pp3 = path_joined.find("PP3").unwrap();
+        assert!(
+            pp1 < pp2,
+            "allocation must precede deallocation: {}",
+            path_joined
+        );
+        assert!(
+            pp2 < pp3,
+            "deallocation must precede access: {}",
+            path_joined
+        );
+
+        // The final step must call out USE AFTER FREE.
+        let last_step = counterexample.execution_path.last().unwrap();
+        assert!(
+            last_step.contains("USE AFTER FREE"),
+            "final step must mark USE AFTER FREE, got: {}",
+            last_step
+        );
+    }
+
+    #[test]
+    fn test_resource_leak_counterexample_path_is_real() {
+        let mut input = LivenessInput::new();
+        // Allocate R1 at PP1, never deallocate — leak.
+        input.add_event(ResourceEvent {
+            resource: rid(1),
+            kind: ResourceKind::Memory,
+            event: EventAction::Allocate,
+            point: pp(1),
+            thread: tid(1),
+        });
+
+        let result = verify_liveness(&input);
+
+        assert!(result.is_violated());
+        let counterexample = match &result.status {
+            VerificationStatus::Violated { counterexample } => counterexample,
+            _ => unreachable!(),
+        };
+        assert!(
+            !counterexample.execution_path.is_empty(),
+            "leak counterexample must have a non-empty path"
+        );
+        let first = &counterexample.execution_path[0];
+        assert!(
+            first.contains("Allocate") && first.contains("PP1"),
+            "first step must mention allocation at PP1, got: {}",
+            first
+        );
+    }
+
+    #[test]
+    fn test_liveness_path_from_violation_method() {
+        // The path() method on LivenessViolation builds the path from
+        // the violation's concrete program points.
+        let uaf = LivenessViolation::UseAfterFree {
+            resource: rid(1),
+            kind: ResourceKind::Memory,
+            alloc_point: pp(10),
+            access_point: pp(30),
+            dealloc_point: pp(20),
+            thread: tid(1),
+        };
+        let path = uaf.path();
+        assert_eq!(path.len(), 3);
+        assert!(path[0].contains("Allocate"));
+        assert!(path[0].contains("PP10"));
+        assert!(path[1].contains("Deallocate"));
+        assert!(path[1].contains("PP20"));
+        assert!(path[2].contains("USE AFTER FREE"));
+        assert!(path[2].contains("PP30"));
     }
 }

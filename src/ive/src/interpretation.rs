@@ -1066,29 +1066,30 @@ impl InterpretationVerifier {
                 ],
             })
         } else if !violations.is_empty() {
-            // Hard violations exist
-            let descriptions: Vec<String> = violations.iter().map(|v| v.to_string()).collect();
-            let violation_point = match violations.first() {
-                Some(InterpretationViolation::IncompatibleRepD { read_point, .. })
-                | Some(InterpretationViolation::InvalidCapDStrengthening { read_point, .. })
-                | Some(InterpretationViolation::EmptyCapabilityMeet { read_point, .. })
-                | Some(InterpretationViolation::RelDNotPreserved { read_point, .. })
-                | Some(InterpretationViolation::TypeConfusion { read_point, .. })
-                | Some(InterpretationViolation::PointerReinterpretation { read_point, .. })
-                | Some(InterpretationViolation::UninitializedRead { read_point, .. }) => {
-                    read_point.to_string()
-                }
-                None => "unknown".to_string(),
-            };
+            // Hard violations exist — build a REAL counterexample from the
+            // first violation. The counterexample's `execution_path` is a
+            // `Vec<ProgramPoint>` of structured proof-step strings that
+            // reference the allocation node (write point) and the access
+            // node (read point), the declared vs. used RepDs/CapDs/RelDs,
+            // and the mismatch between them. Previously this was just the
+            // `Display` of every violation dumped into a `Vec<String>`,
+            // which is a list of error messages rather than a real
+            // execution path.
+            let first = violations
+                .first()
+                .expect("violations is non-empty in this branch");
+            let mut counterexample = Self::build_real_counterexample(first);
+            // Augment the description with the total violation count so
+            // callers know how many other violations were elided (the full
+            // list is still available via `verify_detailed()`).
+            counterexample.description = format!(
+                "{} (1 of {} violation(s); see verify_detailed() for the rest)",
+                counterexample.description,
+                violations.len()
+            );
             VerificationResult::new(
                 "interpretation",
-                VerificationStatus::Violated {
-                    counterexample: CounterExample::new(
-                        descriptions,
-                        violation_point,
-                        format!("{} violation(s)", violations.len()),
-                    ),
-                },
+                VerificationStatus::Violated { counterexample },
                 format!("{} interpretation violation(s) found", violations.len()),
             )
         } else {
@@ -1116,6 +1117,219 @@ impl InterpretationVerifier {
             warnings,
             unverified_pairs,
         }
+    }
+
+    /// Build a REAL [`CounterExample`] for a single interpretation violation.
+    ///
+    /// The counterexample's `execution_path` is a `Vec<ProgramPoint>` of
+    /// structured proof-step strings that reference:
+    ///
+    /// 1. The **allocation node** (the write point — where the data was
+    ///    stored under a specific RepD/CapD/RelD). For
+    ///    [`InterpretationViolation::UninitializedRead`] there is no
+    ///    allocation node; the path notes this explicitly.
+    /// 2. The **declared** behavioral description at the allocation node
+    ///    (the RepD the data was written under, with size and alignment).
+    /// 3. The **access node** (the read point — where the data is read
+    ///    with a different interpretation).
+    /// 4. The **used** behavioral description at the access node (the
+    ///    RepD the data is read under).
+    /// 5. The **mismatch** between the two — the concrete reason the
+    ///    interpretation invariant is violated (size mismatch, type
+    ///    confusion, empty capability meet, etc.).
+    /// 6. The **memory location** (`LocationId`) where the conflict occurs.
+    /// 7. The execution path through the program (allocation → access).
+    ///
+    /// The `violation_point` is the program point of the access node
+    /// (the read), since that is where the wrong interpretation is used.
+    ///
+    /// The previous implementation built the path as
+    /// `violations.iter().map(|v| v.to_string()).collect()` — a list of
+    /// `Display` strings, which is a list of error messages rather than
+    /// a real execution path. This made the counterexample useless for
+    /// downstream consumers expecting to navigate to the allocation and
+    /// access nodes.
+    fn build_real_counterexample(violation: &InterpretationViolation) -> CounterExample {
+        use InterpretationViolation as IV;
+
+        // Decompose the violation into:
+        //   - the allocation node (write point) — `None` for UninitializedRead
+        //   - the access node (read point) — always present
+        //   - the memory location
+        //   - a short kind label (e.g. "IncompatibleRepD")
+        //   - the declared description (what was written)
+        //   - the used description (what was read)
+        //   - the mismatch explanation
+        let (alloc_node, access_node, location, kind, declared, used, mismatch) = match violation {
+            IV::IncompatibleRepD {
+                write_point,
+                read_point,
+                location,
+                write_repd,
+                read_repd,
+                reason,
+            } => (
+                Some(write_point),
+                read_point,
+                location,
+                "IncompatibleRepD",
+                format!(
+                    "RepD {} (size={}, align={})",
+                    write_repd,
+                    write_repd.size(),
+                    write_repd.alignment()
+                ),
+                format!(
+                    "RepD {} (size={}, align={})",
+                    read_repd,
+                    read_repd.size(),
+                    read_repd.alignment()
+                ),
+                reason.clone(),
+            ),
+            IV::InvalidCapDStrengthening {
+                write_point,
+                read_point,
+                location,
+                added_caps,
+            } => (
+                Some(write_point),
+                read_point,
+                location,
+                "InvalidCapDStrengthening",
+                "CapD with the original capabilities at the write".to_string(),
+                format!(
+                    "CapD with illegally-added capabilities {:?} at the read",
+                    added_caps
+                ),
+                format!("capabilities illegally added at the read: {:?}", added_caps),
+            ),
+            IV::EmptyCapabilityMeet {
+                write_point,
+                read_point,
+                location,
+            } => (
+                Some(write_point),
+                read_point,
+                location,
+                "EmptyCapabilityMeet",
+                "CapD at the write".to_string(),
+                "CapD at the read (no shared capability with the write)".to_string(),
+                "no shared capability between write and read \
+                 (the read has no authority to access this data)"
+                    .to_string(),
+            ),
+            IV::RelDNotPreserved {
+                write_point,
+                read_point,
+                location,
+                reason,
+            } => (
+                Some(write_point),
+                read_point,
+                location,
+                "RelDNotPreserved",
+                "RelD at the write".to_string(),
+                "RelD at the read (composition is inconsistent)".to_string(),
+                reason.clone(),
+            ),
+            IV::TypeConfusion {
+                write_point,
+                read_point,
+                location,
+                write_repd_kind,
+                read_repd_kind,
+            } => (
+                Some(write_point),
+                read_point,
+                location,
+                "TypeConfusion",
+                format!("RepD kind `{}` at the write", write_repd_kind),
+                format!("RepD kind `{}` at the read", read_repd_kind),
+                format!(
+                    "wrote as `{}`, read as `{}` — fundamentally different \
+                     interpretations of the same bytes",
+                    write_repd_kind, read_repd_kind
+                ),
+            ),
+            IV::PointerReinterpretation {
+                write_point,
+                read_point,
+                location,
+                reason,
+            } => (
+                Some(write_point),
+                read_point,
+                location,
+                "PointerReinterpretation",
+                "pointer RepD at the write".to_string(),
+                "non-pointer RepD at the read (no explicit cast derivation)".to_string(),
+                reason.clone(),
+            ),
+            IV::UninitializedRead {
+                read_point,
+                location,
+            } => (
+                None,
+                read_point,
+                location,
+                "UninitializedRead",
+                "(no preceding write — the location was never initialized)".to_string(),
+                "read interprets uninitialized memory".to_string(),
+                "read occurs without any preceding write to this location".to_string(),
+            ),
+        };
+
+        let mut steps: Vec<crate::result::ProgramPoint> = Vec::with_capacity(6);
+
+        // Step 1: Allocation node — what was declared at the write.
+        match alloc_node {
+            Some(wp) => steps.push(format!(
+                "Allocation node {}: data written under {} (the declared \
+                 behavioral description at the write/allocate point)",
+                wp, declared
+            )),
+            None => steps.push(
+                "Allocation node: (none — the read has no preceding write, \
+                 so the location was never initialized"
+                    .to_string(),
+            ),
+        }
+
+        // Step 2: Access node — what interpretation was used at the read.
+        steps.push(format!(
+            "Access node {}: data read under {} (the interpretation used at \
+             the read point)",
+            access_node, used
+        ));
+
+        // Step 3: The mismatch.
+        steps.push(format!("Mismatch ({}): {}", kind, mismatch));
+
+        // Step 4: The memory location.
+        steps.push(format!("Memory location: {}", location));
+
+        // Step 5: The execution path through the program.
+        match alloc_node {
+            Some(wp) => steps.push(format!(
+                "Execution path: {} (write/allocate) → {} (read/access) at {} — \
+                 the read interprets the bytes written under `{}` using `{}`",
+                wp, access_node, location, declared, used
+            )),
+            None => steps.push(format!(
+                "Execution path: {} (read) at {} — no preceding write found",
+                access_node, location
+            )),
+        }
+
+        // The violation_point is the access node (read), since that is
+        // where the wrong interpretation is used. For UninitializedRead
+        // the read point is also the only point we have.
+        let violation_point = access_node.to_string();
+
+        let description = format!("{}: {}", kind, mismatch);
+
+        CounterExample::new(steps, violation_point, description)
     }
 
     /// Verify the interpretation invariant and return all violations found.
@@ -2166,5 +2380,309 @@ mod tests {
 
         let detail = verifier.verify_detailed_full();
         assert_eq!(detail.unverified_pairs.len(), 1);
+    }
+
+    // =======================================================================
+    // W8: Real counterexamples for Interpretation.
+    //
+    // These tests pin down the new behavior introduced by W8: when an
+    // interpretation violation is detected (e.g. reading a u32 from a
+    // region allocated for u8), the counterexample's `execution_path`
+    // is a real `Vec<ProgramPoint>` referencing:
+    //   - the allocation node (the write point — what RepD was declared),
+    //   - the access node (the read point — what interpretation was used),
+    //   - the mismatch between them.
+    // =======================================================================
+
+    // Test W8-A: An IncompatibleRepD violation (write u8, read u32) must
+    // produce a counterexample whose execution_path references BOTH the
+    // allocation node (pp#1, where the u8 was written) and the access
+    // node (pp#2, where the u32 was read), and mentions the declared vs.
+    // used RepD sizes.
+    #[test]
+    fn test_w8_incompatible_repd_counterexample_references_alloc_and_access() {
+        let mut verifier = InterpretationVerifier::new();
+
+        // Allocation: write a u8 (size=1).
+        let write_bd = make_bd(
+            byte_repd(1, 1),
+            capd_with(&[Capability::Read, Capability::Write]),
+            empty_reld(),
+        );
+        // Access: read as u32 (size=4) — mismatch.
+        let read_bd = make_bd(
+            byte_repd(4, 4),
+            capd_with(&[Capability::Read]),
+            empty_reld(),
+        );
+
+        verifier.record_write(LocationId(1), write_bd, ProgramPointId(1));
+        verifier.record_read(LocationId(1), read_bd, ProgramPointId(2));
+
+        let result = verifier.verify();
+        assert!(result.is_violated(), "expected a violation: {}", result);
+
+        let counterexample = match &result.status {
+            VerificationStatus::Violated { counterexample } => counterexample,
+            other => panic!("expected Violated, got {:?}", other),
+        };
+
+        assert!(
+            !counterexample.execution_path.is_empty(),
+            "execution_path should not be empty"
+        );
+
+        let path_joined = counterexample.execution_path.join("\n");
+
+        // Must reference BOTH the allocation node and the access node.
+        assert!(
+            path_joined.contains("pp#1"),
+            "execution_path should reference allocation node pp#1: {}",
+            path_joined
+        );
+        assert!(
+            path_joined.contains("pp#2"),
+            "execution_path should reference access node pp#2: {}",
+            path_joined
+        );
+
+        // Must mention the declared RepD size (1) and the used RepD size (4).
+        assert!(
+            path_joined.contains("size=1"),
+            "execution_path should mention the declared RepD size=1: {}",
+            path_joined
+        );
+        assert!(
+            path_joined.contains("size=4"),
+            "execution_path should mention the used RepD size=4: {}",
+            path_joined
+        );
+
+        // Must explicitly mention "Allocation node" and "Access node".
+        assert!(
+            path_joined.contains("Allocation node"),
+            "execution_path should label the allocation node: {}",
+            path_joined
+        );
+        assert!(
+            path_joined.contains("Access node"),
+            "execution_path should label the access node: {}",
+            path_joined
+        );
+
+        // Must mention the mismatch.
+        assert!(
+            path_joined.to_lowercase().contains("mismatch")
+                || path_joined.to_lowercase().contains("incompatib"),
+            "execution_path should mention the mismatch: {}",
+            path_joined
+        );
+
+        // Must mention the memory location (loc#1).
+        assert!(
+            path_joined.contains("loc#1"),
+            "execution_path should mention the memory location loc#1: {}",
+            path_joined
+        );
+
+        // Must mention the execution path through the program.
+        assert!(
+            path_joined.contains("pp#1") && path_joined.contains("pp#2"),
+            "execution_path should show the path pp#1 → pp#2: {}",
+            path_joined
+        );
+
+        // The violation_point should be the access node (pp#2), since
+        // that is where the wrong interpretation is used.
+        assert_eq!(
+            counterexample.violation_point, "pp#2",
+            "violation_point should be the access node, got: {}",
+            counterexample.violation_point
+        );
+
+        // The description should mention the violation kind and the count.
+        assert!(
+            counterexample.description.contains("IncompatibleRepD"),
+            "description should mention the violation kind: {}",
+            counterexample.description
+        );
+        assert!(
+            counterexample.description.contains("1 of"),
+            "description should mention the violation count: {}",
+            counterexample.description
+        );
+    }
+
+    // Test W8-B: A TypeConfusion violation (write array, read struct)
+    // must produce a counterexample referencing the allocation and
+    // access nodes plus the two RepD kinds.
+    #[test]
+    fn test_w8_type_confusion_counterexample_references_alloc_and_access() {
+        let mut verifier = InterpretationVerifier::new();
+
+        // Allocation: write an array of two u32s (size=8).
+        let write_bd = make_bd(
+            RepD::Array(vuma_bd::repd::ArrayRep {
+                element: Box::new(byte_repd(4, 4)),
+                count: 2,
+            }),
+            capd_with(&[Capability::Read, Capability::Write]),
+            empty_reld(),
+        );
+        // Access: read as a struct — type confusion.
+        let read_bd = make_bd(
+            RepD::Struct(StructRep {
+                fields: vec![(0, byte_repd(4, 4)), (4, byte_repd(4, 4))],
+                total_size: 8,
+                align: 4,
+            }),
+            capd_with(&[Capability::Read]),
+            empty_reld(),
+        );
+
+        verifier.record_write(LocationId(7), write_bd, ProgramPointId(11));
+        verifier.record_read(LocationId(7), read_bd, ProgramPointId(12));
+
+        let result = verifier.verify();
+        assert!(result.is_violated(), "expected a violation: {}", result);
+
+        let counterexample = match &result.status {
+            VerificationStatus::Violated { counterexample } => counterexample,
+            other => panic!("expected Violated, got {:?}", other),
+        };
+
+        let path_joined = counterexample.execution_path.join("\n");
+
+        // Must reference BOTH nodes.
+        assert!(
+            path_joined.contains("pp#11") && path_joined.contains("pp#12"),
+            "execution_path should reference both pp#11 and pp#12: {}",
+            path_joined
+        );
+
+        // Must label them as allocation/access.
+        assert!(
+            path_joined.contains("Allocation node"),
+            "execution_path should label the allocation node: {}",
+            path_joined
+        );
+        assert!(
+            path_joined.contains("Access node"),
+            "execution_path should label the access node: {}",
+            path_joined
+        );
+
+        // Must mention the two RepD kinds (Array and Struct).
+        assert!(
+            path_joined.contains("Array"),
+            "execution_path should mention the Array RepD kind: {}",
+            path_joined
+        );
+        assert!(
+            path_joined.contains("Struct"),
+            "execution_path should mention the Struct RepD kind: {}",
+            path_joined
+        );
+
+        // Must mention the memory location (loc#7).
+        assert!(
+            path_joined.contains("loc#7"),
+            "execution_path should mention the memory location loc#7: {}",
+            path_joined
+        );
+
+        // The description should mention TypeConfusion.
+        assert!(
+            counterexample.description.contains("TypeConfusion"),
+            "description should mention TypeConfusion: {}",
+            counterexample.description
+        );
+
+        // The violation_point should be the access node.
+        assert_eq!(
+            counterexample.violation_point, "pp#12",
+            "violation_point should be the access node pp#12, got: {}",
+            counterexample.violation_point
+        );
+    }
+
+    // Test W8-C: An UninitializedRead violation (no preceding write)
+    // must produce a counterexample referencing the access node and
+    // noting that there is no allocation node.
+    #[test]
+    fn test_w8_uninitialized_read_counterexample_notes_no_allocation() {
+        let mut verifier = InterpretationVerifier::new();
+
+        let read_bd = make_bd(
+            byte_repd(4, 4),
+            capd_with(&[Capability::Read]),
+            empty_reld(),
+        );
+
+        // Read without any preceding write.
+        verifier.record_read(LocationId(3), read_bd, ProgramPointId(99));
+
+        let result = verifier.verify();
+        assert!(result.is_violated(), "expected a violation: {}", result);
+
+        let counterexample = match &result.status {
+            VerificationStatus::Violated { counterexample } => counterexample,
+            other => panic!("expected Violated, got {:?}", other),
+        };
+
+        let path_joined = counterexample.execution_path.join("\n");
+
+        // Must reference the access node.
+        assert!(
+            path_joined.contains("pp#99"),
+            "execution_path should reference the access node pp#99: {}",
+            path_joined
+        );
+
+        // Must explicitly note that there is no allocation node.
+        assert!(
+            path_joined.to_lowercase().contains("no preceding write")
+                || path_joined.to_lowercase().contains("none"),
+            "execution_path should note the absence of a preceding write: {}",
+            path_joined
+        );
+
+        // Must mention UninitializedRead.
+        assert!(
+            counterexample.description.contains("UninitializedRead"),
+            "description should mention UninitializedRead: {}",
+            counterexample.description
+        );
+
+        // The violation_point should be the read point.
+        assert_eq!(
+            counterexample.violation_point, "pp#99",
+            "violation_point should be the read point pp#99, got: {}",
+            counterexample.violation_point
+        );
+    }
+
+    // Test W8-D: A clean program (matching BDs) must NOT produce a
+    // counterexample — the status should be Proven.
+    #[test]
+    fn test_w8_clean_program_has_no_counterexample() {
+        let mut verifier = InterpretationVerifier::new();
+
+        let bd = make_bd(
+            byte_repd(8, 8),
+            capd_with(&[Capability::Read, Capability::Write]),
+            empty_reld(),
+        );
+
+        verifier.record_write(LocationId(1), bd.clone(), ProgramPointId(1));
+        verifier.record_read(LocationId(1), bd.clone(), ProgramPointId(2));
+
+        let result = verifier.verify();
+        assert!(
+            result.is_proven(),
+            "clean program should be Proven: {}",
+            result
+        );
+        assert!(!result.is_violated());
     }
 }

@@ -15,15 +15,38 @@
 //! # Algorithm
 //!
 //! 1. Collect all access records from the input.
-//! 2. Compute the `ordered` relation (transitive closure of sync edges).
-//! 3. For every pair of accesses `(a1, a2)`:
+//! 2. Compute two ordering relations (each a transitive closure):
+//!    - `sync_ordered`: pairs ordered by **synchronization** edges
+//!      (mutex lock/unlock, atomic acquire/release, channel send/recv).
+//!      These establish cross-thread happens-before.
+//!    - `program_ordered`: pairs ordered by **sequential control flow**
+//!      (single-threaded program order). These order accesses within
+//!      one thread but do **not** establish happens-before across threads.
+//! 3. Collect the `mutually_exclusive` set — pairs of accesses that can
+//!    never both execute on any single run (e.g., accesses in different
+//!    arms of an `if`).
+//! 4. For every pair of accesses `(a1, a2)`:
 //!    a. Skip if both are reads (reads never conflict).
 //!    b. Skip if their byte ranges do not overlap.
 //!    c. Skip if they are ordered by a sync edge (in either direction).
-//!    d. Otherwise, check CapD permissions: if both have Write → write-write
+//!    d. Skip if they are ordered by program-order (in either direction).
+//!       Sequential execution provides ordering for single-threaded code.
+//!    e. Skip if they are mutually exclusive (cannot both execute).
+//!    f. Otherwise, check CapD permissions: if both have Write → write-write
 //!    data race; if one Write + one Read → read-write race.
-//! 4. Build an interference graph from all detected conflicts.
-//! 5. Return a structured [`VerificationResult`].
+//! 5. Build an interference graph from all detected conflicts.
+//! 6. Return a structured [`VerificationResult`].
+//!
+//! # Why program-order is separate from sync edges
+//!
+//! Treating ordinary ControlFlow as a *synchronization* edge is wrong: a
+//! well-formed single-threaded CFG transitively orders all accesses, which
+//! would make Exclusivity vacuously `Proven` and hide real data races.
+//! Sync edges must come from *actual* synchronization operations
+//! (mutex lock/unlock, atomic RMWs, channel send/recv) — only these
+//! establish happens-before across threads. Program-order edges capture
+//! sequential ordering, which is sufficient to rule out conflicts in
+//! single-threaded code but does *not* synchronize concurrent threads.
 //!
 //! # Interference Graph
 //!
@@ -579,14 +602,35 @@ impl fmt::Display for InterferenceGraph {
 
 /// The input to the exclusivity verifier.
 ///
-/// Contains all memory accesses, synchronization edges, and capability
+/// Contains all memory accesses, synchronization edges, capability
 /// descriptors needed to perform the exclusivity check.
 #[derive(Debug, Clone, Default)]
 pub struct ExclusivityInput {
     /// All memory access events.
     pub accesses: Vec<AccessRecord>,
-    /// All synchronization edges.
+    /// All **synchronization** edges (mutex lock/unlock, atomic
+    /// acquire/release, channel send/recv). These establish cross-thread
+    /// happens-before ordering between two accesses.
+    ///
+    /// Ordinary sequential ControlFlow between two accesses must **not**
+    /// be modeled as a sync edge — that would make Exclusivity vacuously
+    /// `Proven` for any well-formed single-threaded CFG. Use
+    /// [`program_order`](Self::program_order) for that.
     pub sync_edges: Vec<SyncEdgeRecord>,
+    /// **Program-order** (sequential ControlFlow) edges between accesses.
+    ///
+    /// These order accesses within a single thread of execution. For
+    /// single-threaded programs, two accesses ordered by program-order do
+    /// not conflict (sequential execution provides ordering). However,
+    /// program-order does **not** synchronize concurrent threads — so
+    /// for multi-threaded code, only `sync_edges` can rule out a
+    /// conflict between accesses on different threads.
+    pub program_order: Vec<(AccessId, AccessId)>,
+    /// Pairs of accesses that **cannot both execute** on any single run
+    /// of the program (e.g., accesses in different arms of an `if`, or
+    /// in different match arms). Such pairs never conflict regardless of
+    /// overlap, because the program can execute at most one of them.
+    pub mutually_exclusive: Vec<(AccessId, AccessId)>,
     /// Capability descriptors indexed by access ID.
     pub capabilities: HashMap<AccessId, CapDInfo>,
     /// The set of locks currently held (for CapD condition resolution).
@@ -604,9 +648,28 @@ impl ExclusivityInput {
         self.accesses.push(access);
     }
 
-    /// Add a synchronization edge.
+    /// Add a **synchronization** edge (cross-thread happens-before,
+    /// mutex, atomic acquire/release, or channel send/recv) between two
+    /// accesses.
+    ///
+    /// Do **not** use this for ordinary sequential ControlFlow — use
+    /// [`add_program_order_edge`](Self::add_program_order_edge) instead.
     pub fn add_sync_edge(&mut self, edge: SyncEdgeRecord) {
         self.sync_edges.push(edge);
+    }
+
+    /// Add a **program-order** (sequential ControlFlow) edge between two
+    /// accesses. This orders the accesses within a single thread but
+    /// does *not* establish happens-before across threads.
+    pub fn add_program_order_edge(&mut self, before: AccessId, after: AccessId) {
+        self.program_order.push((before, after));
+    }
+
+    /// Mark two accesses as **mutually exclusive** — they cannot both
+    /// execute on any single run of the program (e.g., they live in
+    /// different arms of an `if`). Such pairs never conflict.
+    pub fn add_mutually_exclusive_pair(&mut self, a1: AccessId, a2: AccessId) {
+        self.mutually_exclusive.push((a1, a2));
     }
 
     /// Set the CapD for an access.
@@ -653,8 +716,17 @@ impl ExclusivityVerifier {
     /// - `Violated` with a counterexample if conflicts exist.
     /// - `ProbablySafe` if conflicts exist but are protected by lock conditions.
     pub fn verify(&self, input: &ExclusivityInput) -> ExclusivityOutput {
-        // Step 1: Compute the `ordered` relation (transitive closure of sync edges).
-        let ordered = self.compute_ordered_relation(&input.sync_edges);
+        // Step 1: Compute the two ordering relations (transitive closures):
+        //   - `sync_ordered`: from synchronization edges (cross-thread HB).
+        //   - `program_ordered`: from sequential ControlFlow (intra-thread).
+        // And the `mutually_exclusive` set (pairs that can't both execute).
+        let sync_ordered = self.compute_ordered_relation(&input.sync_edges);
+        let program_ordered = self.compute_pair_closure(&input.program_order);
+        let mutex_excl: HashSet<(AccessId, AccessId)> = input
+            .mutually_exclusive
+            .iter()
+            .map(|&(a, b)| if a < b { (a, b) } else { (b, a) })
+            .collect();
 
         // Step 2: Check every pair of accesses for conflicts.
         let mut graph = InterferenceGraph::new();
@@ -675,8 +747,27 @@ impl ExclusivityVerifier {
                     continue;
                 }
 
-                // Skip if they are ordered (in either direction).
-                if self.are_ordered(a1.id, a2.id, &ordered) {
+                // Skip if they are mutually exclusive (cannot both execute).
+                let pair_key = if a1.id < a2.id {
+                    (a1.id, a2.id)
+                } else {
+                    (a2.id, a1.id)
+                };
+                if mutex_excl.contains(&pair_key) {
+                    continue;
+                }
+
+                // Skip if they are ordered by a sync edge (in either direction).
+                // Sync edges establish cross-thread happens-before.
+                if self.are_ordered(a1.id, a2.id, &sync_ordered) {
+                    continue;
+                }
+
+                // Skip if they are ordered by program-order (in either direction).
+                // Program-order is the sequential ControlFlow within a single
+                // thread — for single-threaded programs, this provides
+                // sufficient ordering to rule out a data race.
+                if self.are_ordered(a1.id, a2.id, &program_ordered) {
                     continue;
                 }
 
@@ -728,7 +819,8 @@ impl ExclusivityVerifier {
                     )
                 } else {
                     format!(
-                        "{} {} at {} and {} {} at {} overlap at [0x{:x}, 0x{:x}) without synchronization",
+                        "{} {} at {} and {} {} at {} overlap at [0x{:x}, 0x{:x}) \
+                         without synchronization or program-order",
                         a1.kind, a1.id, a1.program_point,
                         a2.kind, a2.id, a2.program_point,
                         overlap_start, overlap_end
@@ -770,23 +862,22 @@ impl ExclusivityVerifier {
                 !self.both_protected_by_same_lock(cap1, cap2)
             });
 
-            let counterexample = first_hard.map(|c| {
-                CounterExample::new(
-                    vec![format!("{}", c.access1), format!("{}", c.access2)],
-                    format!("{}", c.access1),
-                    c.description.clone(),
-                )
-            });
-
-            VerificationStatus::Violated {
-                counterexample: counterexample.unwrap_or_else(|| {
+            // Build a REAL counterexample whose execution_path references the
+            // actual access node IDs, program points, regions, byte offsets,
+            // and the lack of a synchronization/program-order edge between
+            // them. Previously this was just `vec![A1, A2]` — two opaque IDs
+            // with no execution context.
+            let counterexample = first_hard
+                .map(|c| self.build_real_counterexample(c, input, conflicts.len()))
+                .unwrap_or_else(|| {
                     CounterExample::new(
-                        vec![],
+                        Vec::new(),
                         "unknown".to_string(),
-                        "exclusivity violation".to_string(),
+                        "exclusivity violation (no conflict record found)".to_string(),
                     )
-                }),
-            }
+                });
+
+            VerificationStatus::Violated { counterexample }
         } else if lock_protected_count > 0 {
             VerificationStatus::ProbablySafe {
                 assumptions: vec![format!(
@@ -815,11 +906,12 @@ impl ExclusivityVerifier {
         }
     }
 
-    /// Compute the `ordered` relation as a set of (AccessId, AccessId) pairs.
+    /// Compute the `sync_ordered` relation as a set of (AccessId, AccessId)
+    /// pairs.
     ///
-    /// Two accesses are ordered if there exists a path of sync edges from
-    /// one to the other. We compute the transitive closure using a simple
-    /// reachability algorithm.
+    /// Two accesses are sync-ordered if there exists a path of sync edges
+    /// from one to the other. We compute the transitive closure using a
+    /// simple reachability algorithm.
     fn compute_ordered_relation(
         &self,
         sync_edges: &[SyncEdgeRecord],
@@ -869,6 +961,51 @@ impl ExclusivityVerifier {
         ordered
     }
 
+    /// Compute the transitive closure of a set of `(AccessId, AccessId)`
+    /// pairs (used for `program_order`). Same algorithm as
+    /// [`compute_ordered_relation`](Self::compute_ordered_relation), but
+    /// over plain pairs instead of `SyncEdgeRecord`s.
+    fn compute_pair_closure(
+        &self,
+        pairs: &[(AccessId, AccessId)],
+    ) -> HashSet<(AccessId, AccessId)> {
+        let mut adj: HashMap<AccessId, Vec<AccessId>> = HashMap::new();
+        for &(before, after) in pairs {
+            adj.entry(before).or_default().push(after);
+        }
+
+        let mut closure: HashSet<(AccessId, AccessId)> = HashSet::new();
+        let all_nodes: Vec<AccessId> = adj.keys().copied().collect();
+
+        for &start in &all_nodes {
+            let mut visited = HashSet::new();
+            let mut queue = std::collections::VecDeque::new();
+            queue.push_back(start);
+
+            while let Some(current) = queue.pop_front() {
+                if !visited.insert(current) {
+                    continue;
+                }
+                if current != start {
+                    closure.insert((start, current));
+                }
+                if let Some(neighbors) = adj.get(&current) {
+                    for &next in neighbors {
+                        if !visited.contains(&next) {
+                            queue.push_back(next);
+                        }
+                    }
+                }
+            }
+        }
+
+        for &(before, after) in pairs {
+            closure.insert((before, after));
+        }
+
+        closure
+    }
+
     /// Check if two accesses are ordered (in either direction).
     fn are_ordered(
         &self,
@@ -912,6 +1049,141 @@ impl ExclusivityVerifier {
             },
             _ => false,
         }
+    }
+
+    /// Build a REAL [`CounterExample`] for a detected exclusivity conflict.
+    ///
+    /// The counterexample's `execution_path` is a `Vec<ProgramPoint>` of
+    /// structured proof-step strings that reference:
+    ///
+    /// 1. Access 1: its node ID (`A{id}`), access mode (read/write), the
+    ///    program point where it occurs, the region ID, the derivation ID,
+    ///    and the exact byte range it touches.
+    /// 2. Access 2: the same fields.
+    /// 3. The lack of a synchronization edge between the two accesses
+    ///    (no happens-before, atomic acquire/release, or mutex ordering).
+    /// 4. The lack of a program-order edge (no single-threaded sequential
+    ///    ordering rules out the race).
+    /// 5. The fact that the pair is not marked mutually exclusive (both
+    ///    accesses may execute on the same run).
+    /// 6. The overlap range and the kind of data race (`write-write` or
+    ///    `write-read`).
+    ///
+    /// The `violation_point` is set to the program point of the first
+    /// access (or the second, if the first record is missing), so callers
+    /// can navigate directly to the source location.
+    ///
+    /// The previous implementation built the path as `vec![format!("{}", c.access1),
+    /// format!("{}", c.access2)]` — just two opaque IDs (`"A1"` and `"A2"`) with
+    /// no execution context. That made the counterexample useless for
+    /// debugging or for downstream consumers expecting a real program
+    /// path.
+    fn build_real_counterexample(
+        &self,
+        conflict: &Conflict,
+        input: &ExclusivityInput,
+        total_conflicts: usize,
+    ) -> CounterExample {
+        // Look up the access records by ID. The conflict stores AccessIds;
+        // we need the full AccessRecord to extract program points, region,
+        // byte range, etc.
+        let a1 = input.accesses.iter().find(|a| a.id == conflict.access1);
+        let a2 = input.accesses.iter().find(|a| a.id == conflict.access2);
+
+        let mut steps: Vec<ProgramPoint> = Vec::with_capacity(6);
+
+        // Step 1: Access 1 — node ID, mode, program point, region, byte range.
+        if let Some(a1) = a1 {
+            steps.push(format!(
+                "Access {}: {} at program point `{}` (region={}, derivation_id={}, \
+                 byte range=[0x{:x}, 0x{:x}), base=0x{:x}, size={})",
+                a1.id,
+                a1.kind,
+                a1.program_point,
+                a1.region_id,
+                a1.derivation_id,
+                a1.base_address,
+                a1.base_address + a1.size,
+                a1.base_address,
+                a1.size,
+            ));
+        } else {
+            steps.push(format!(
+                "Access {}: (access record not found in input — id only)",
+                conflict.access1
+            ));
+        }
+
+        // Step 2: Access 2 — same fields.
+        if let Some(a2) = a2 {
+            steps.push(format!(
+                "Access {}: {} at program point `{}` (region={}, derivation_id={}, \
+                 byte range=[0x{:x}, 0x{:x}), base=0x{:x}, size={})",
+                a2.id,
+                a2.kind,
+                a2.program_point,
+                a2.region_id,
+                a2.derivation_id,
+                a2.base_address,
+                a2.base_address + a2.size,
+                a2.base_address,
+                a2.size,
+            ));
+        } else {
+            steps.push(format!(
+                "Access {}: (access record not found in input — id only)",
+                conflict.access2
+            ));
+        }
+
+        // Step 3: No synchronization edge.
+        steps.push(format!(
+            "No synchronization edge between {} and {} \
+             (no happens-before, atomic acquire/release, or mutex ordering)",
+            conflict.access1, conflict.access2
+        ));
+
+        // Step 4: No program-order edge.
+        steps.push(format!(
+            "No program-order edge between {} and {} \
+             (not sequentialized within a single thread of execution)",
+            conflict.access1, conflict.access2
+        ));
+
+        // Step 5: Not mutually exclusive.
+        steps.push(format!(
+            "{} and {} are not marked mutually exclusive \
+             (both may execute on the same program run)",
+            conflict.access1, conflict.access2
+        ));
+
+        // Step 6: The overlap and conflict conclusion.
+        steps.push(format!(
+            "Byte ranges overlap at [0x{:x}, 0x{:x}) — {} on the shared region \
+             (these accesses are potentially concurrent)",
+            conflict.overlap_start, conflict.overlap_end, conflict.kind
+        ));
+
+        // The violation point: the program point of access 1 if available,
+        // otherwise access 2. This is the source location a developer
+        // would navigate to first to investigate the race.
+        let violation_point = a1
+            .map(|a| a.program_point.clone())
+            .or_else(|| a2.map(|a| a.program_point.clone()))
+            .unwrap_or_else(|| format!("{}", conflict.access1));
+
+        let description = format!(
+            "{}: {} and {} access overlapping bytes [0x{:x}, 0x{:x}) without \
+             synchronization or program-order (1 of {} conflict(s))",
+            conflict.kind,
+            conflict.access1,
+            conflict.access2,
+            conflict.overlap_start,
+            conflict.overlap_end,
+            total_conflicts,
+        );
+
+        CounterExample::new(steps, violation_point, description)
     }
 }
 
@@ -1581,5 +1853,535 @@ mod tests {
         let components = output.interference_graph.connected_components();
         assert_eq!(components.len(), 1);
         assert_eq!(components[0].len(), 3);
+    }
+
+    // -----------------------------------------------------------------------
+    // W5: Program-order vs. sync-edge semantics.
+    //
+    // These tests pin down the new behavior introduced by W5: ordinary
+    // sequential ControlFlow between two accesses does NOT establish a
+    // sync edge (cross-thread happens-before), but it DOES establish
+    // program-order, which is sufficient to rule out conflicts in
+    // single-threaded code. Genuine conflicts arise only when two
+    // overlapping accesses have neither sync-ordering, nor
+    // program-ordering, nor mutual exclusivity between them.
+    // -----------------------------------------------------------------------
+
+    // Test W5-A: Conflicting writes to the same region with no ordering
+    // at all should be flagged as a real data race.
+    #[test]
+    fn test_w5_conflicting_writes_to_same_region_flagged() {
+        let mut input = ExclusivityInput::new();
+
+        // Two writes to the same byte range, no sync edge, no program-order
+        // edge, and not marked mutually exclusive. These could execute in
+        // either order, so this is a genuine write-write data race.
+        input.add_access(AccessRecord::new(
+            AccessId(1),
+            AccessKind::Write,
+            0x1000,
+            4,
+            pp("race.vu:1"),
+            1,
+            1,
+        ));
+        input.add_access(AccessRecord::new(
+            AccessId(2),
+            AccessKind::Write,
+            0x1000,
+            4,
+            pp("race.vu:2"),
+            1,
+            1,
+        ));
+
+        let verifier = ExclusivityVerifier::new();
+        let output = verifier.verify(&input);
+
+        assert!(
+            output.is_violated(),
+            "Two unordered writes to the same region should be a data race"
+        );
+        assert_eq!(output.write_write_count(), 1);
+        assert_eq!(output.conflict_count(), 1);
+    }
+
+    // Test W5-B: Read-then-write ordered by program-order (sequential
+    // ControlFlow) is safe in a single-threaded program — no flag.
+    #[test]
+    fn test_w5_ordered_read_then_write_no_flag() {
+        let mut input = ExclusivityInput::new();
+
+        // Read then Write to the same address. They overlap and one is a
+        // write, so naively they conflict — but they are ordered by
+        // program-order (sequential ControlFlow), which is sufficient
+        // ordering for single-threaded code.
+        input.add_access(AccessRecord::new(
+            AccessId(1),
+            AccessKind::Read,
+            0x1000,
+            4,
+            pp("seq.vu:1"),
+            1,
+            1,
+        ));
+        input.add_access(AccessRecord::new(
+            AccessId(2),
+            AccessKind::Write,
+            0x1000,
+            4,
+            pp("seq.vu:2"),
+            1,
+            1,
+        ));
+        input.add_program_order_edge(AccessId(1), AccessId(2));
+
+        let verifier = ExclusivityVerifier::new();
+        let output = verifier.verify(&input);
+
+        assert!(
+            output.is_proven(),
+            "Sequential read-then-write ordered by program-order should not conflict"
+        );
+        assert_eq!(output.conflict_count(), 0);
+    }
+
+    // Test W5-C: Two writes to the same address in mutually exclusive
+    // branches (e.g., different arms of an `if`) should NOT conflict.
+    #[test]
+    fn test_w5_writes_in_different_branches_no_flag() {
+        let mut input = ExclusivityInput::new();
+
+        // Two writes to the same byte range. They have no sync or
+        // program-order edge between them, but they are marked mutually
+        // exclusive — only one can execute on any single run, so there
+        // is no data race.
+        input.add_access(AccessRecord::new(
+            AccessId(1),
+            AccessKind::Write,
+            0x1000,
+            4,
+            pp("branch.vu:then"),
+            1,
+            1,
+        ));
+        input.add_access(AccessRecord::new(
+            AccessId(2),
+            AccessKind::Write,
+            0x1000,
+            4,
+            pp("branch.vu:else"),
+            1,
+            1,
+        ));
+        input.add_mutually_exclusive_pair(AccessId(1), AccessId(2));
+
+        let verifier = ExclusivityVerifier::new();
+        let output = verifier.verify(&input);
+
+        assert!(
+            output.is_proven(),
+            "Mutually exclusive writes (different branches) should not conflict"
+        );
+        assert_eq!(output.conflict_count(), 0);
+        assert!(output.interference_graph.is_empty());
+    }
+
+    // Test W5-D: Sync edges (e.g., Mutex) still rule out conflicts
+    // independently of program-order — this guards against regressions
+    // where we might accidentally drop sync-edge handling.
+    #[test]
+    fn test_w5_sync_edge_still_orders_pair() {
+        let mut input = ExclusivityInput::new();
+
+        input.add_access(AccessRecord::new(
+            AccessId(1),
+            AccessKind::Write,
+            0x1000,
+            4,
+            pp("sync.vu:1"),
+            1,
+            1,
+        ));
+        input.add_access(AccessRecord::new(
+            AccessId(2),
+            AccessKind::Write,
+            0x1000,
+            4,
+            pp("sync.vu:2"),
+            1,
+            1,
+        ));
+        // No program-order edge — only a sync edge.
+        input.add_sync_edge(SyncEdgeRecord::new(
+            AccessId(1),
+            AccessId(2),
+            SyncOrdering::HappensBefore,
+        ));
+
+        let verifier = ExclusivityVerifier::new();
+        let output = verifier.verify(&input);
+
+        assert!(
+            output.is_proven(),
+            "Sync edge alone (without program-order) should still rule out the conflict"
+        );
+        assert_eq!(output.conflict_count(), 0);
+    }
+
+    // Test W5-E: Program-order transitive closure. If A → B → C in
+    // program-order, then A and C are ordered (transitively) and do not
+    // conflict, even though there is no direct program-order edge A → C.
+    #[test]
+    fn test_w5_program_order_transitive_closure() {
+        let mut input = ExclusivityInput::new();
+
+        // A1 (write) → A2 (write, different addr) → A3 (write, same addr as A1).
+        // A1 and A3 are transitively program-ordered, so no conflict.
+        input.add_access(AccessRecord::new(
+            AccessId(1),
+            AccessKind::Write,
+            0x1000,
+            4,
+            pp("t.vu:1"),
+            1,
+            1,
+        ));
+        input.add_access(AccessRecord::new(
+            AccessId(2),
+            AccessKind::Write,
+            0x2000,
+            4,
+            pp("t.vu:2"),
+            2,
+            2,
+        ));
+        input.add_access(AccessRecord::new(
+            AccessId(3),
+            AccessKind::Write,
+            0x1000,
+            4,
+            pp("t.vu:3"),
+            1,
+            1,
+        ));
+        input.add_program_order_edge(AccessId(1), AccessId(2));
+        input.add_program_order_edge(AccessId(2), AccessId(3));
+
+        let verifier = ExclusivityVerifier::new();
+        let output = verifier.verify(&input);
+
+        assert!(
+            output.is_proven(),
+            "Transitively program-ordered accesses should not conflict"
+        );
+        assert_eq!(output.conflict_count(), 0);
+    }
+
+    // Test W5-F: A program-order edge in one direction does NOT rule
+    // out a conflict if the underlying pair could still race across
+    // threads — but for single-threaded semantics, even one-directional
+    // program-order is enough. This test confirms the verifier does not
+    // spuriously flag a pair that is ordered A → B just because we
+    // happened to query the pair as (B, A) in the iteration.
+    #[test]
+    fn test_w5_program_order_either_direction_rules_out_conflict() {
+        let mut input = ExclusivityInput::new();
+
+        input.add_access(AccessRecord::new(
+            AccessId(1),
+            AccessKind::Write,
+            0x1000,
+            4,
+            pp("d.vu:1"),
+            1,
+            1,
+        ));
+        input.add_access(AccessRecord::new(
+            AccessId(2),
+            AccessKind::Read,
+            0x1000,
+            4,
+            pp("d.vu:2"),
+            1,
+            1,
+        ));
+        // Program-order edge 2 → 1 (i.e., A2 happens before A1 in
+        // sequential order). Either direction should rule out the
+        // conflict.
+        input.add_program_order_edge(AccessId(2), AccessId(1));
+
+        let verifier = ExclusivityVerifier::new();
+        let output = verifier.verify(&input);
+
+        assert!(
+            output.is_proven(),
+            "Program-order in either direction should rule out the conflict"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // W8: Real counterexamples for Exclusivity.
+    //
+    // These tests pin down the new behavior introduced by W8: when a
+    // conflict (data race) is detected between two accesses, the
+    // counterexample's `execution_path` is a real `Vec<ProgramPoint>`
+    // referencing both access nodes (their IDs, program points, regions,
+    // byte offsets), the lack of a synchronization edge, the lack of a
+    // program-order edge, the absence of mutual exclusion, and the
+    // overlap that triggers the race.
+    // -----------------------------------------------------------------------
+
+    // Test W8-A: A real data race (two unordered writes to the same
+    // region) must produce a counterexample whose execution_path:
+    //   - references BOTH access IDs (A1 and A2),
+    //   - references BOTH program points,
+    //   - explicitly mentions the lack of a synchronization edge,
+    //   - explicitly mentions the lack of program-order,
+    //   - explicitly mentions the overlap.
+    #[test]
+    fn test_w8_counterexample_references_both_access_nodes() {
+        let mut input = ExclusivityInput::new();
+
+        input.add_access(AccessRecord::new(
+            AccessId(1),
+            AccessKind::Write,
+            0x1000,
+            4,
+            pp("race.vu:1"),
+            1,
+            1,
+        ));
+        input.add_access(AccessRecord::new(
+            AccessId(2),
+            AccessKind::Write,
+            0x1000,
+            4,
+            pp("race.vu:2"),
+            1,
+            1,
+        ));
+
+        let verifier = ExclusivityVerifier::new();
+        let output = verifier.verify(&input);
+
+        assert!(output.is_violated(), "expected a violation: {}", output);
+
+        let counterexample = match &output.result.status {
+            VerificationStatus::Violated { counterexample } => counterexample,
+            other => panic!("expected Violated, got {:?}", other),
+        };
+
+        // Execution path must be non-empty.
+        assert!(
+            !counterexample.execution_path.is_empty(),
+            "execution_path should not be empty"
+        );
+
+        let path_joined = counterexample.execution_path.join("\n");
+
+        // Must reference BOTH access node IDs.
+        assert!(
+            path_joined.contains("A1"),
+            "execution_path should reference Access A1: {}",
+            path_joined
+        );
+        assert!(
+            path_joined.contains("A2"),
+            "execution_path should reference Access A2: {}",
+            path_joined
+        );
+
+        // Must reference BOTH program points.
+        assert!(
+            path_joined.contains("race.vu:1"),
+            "execution_path should reference program point `race.vu:1`: {}",
+            path_joined
+        );
+        assert!(
+            path_joined.contains("race.vu:2"),
+            "execution_path should reference program point `race.vu:2`: {}",
+            path_joined
+        );
+
+        // Must mention the lack of synchronization.
+        assert!(
+            path_joined
+                .to_lowercase()
+                .contains("no synchronization edge"),
+            "execution_path should mention the lack of synchronization: {}",
+            path_joined
+        );
+
+        // Must mention the lack of program-order.
+        assert!(
+            path_joined.to_lowercase().contains("no program-order edge"),
+            "execution_path should mention the lack of program-order: {}",
+            path_joined
+        );
+
+        // Must mention mutual exclusion (or its absence).
+        assert!(
+            path_joined.to_lowercase().contains("mutually exclusive"),
+            "execution_path should mention mutual exclusion: {}",
+            path_joined
+        );
+
+        // Must mention the byte-range overlap.
+        assert!(
+            path_joined.contains("overlap"),
+            "execution_path should mention the byte-range overlap: {}",
+            path_joined
+        );
+
+        // Must reference the region id (region=1).
+        assert!(
+            path_joined.contains("region=1"),
+            "execution_path should mention the region id: {}",
+            path_joined
+        );
+
+        // The violation_point should be one of the access program points.
+        assert!(
+            counterexample.violation_point == "race.vu:1"
+                || counterexample.violation_point == "race.vu:2",
+            "violation_point should be one of the access program points, got: {}",
+            counterexample.violation_point
+        );
+
+        // The description should mention both access IDs.
+        assert!(
+            counterexample.description.contains("A1"),
+            "description should reference A1: {}",
+            counterexample.description
+        );
+        assert!(
+            counterexample.description.contains("A2"),
+            "description should reference A2: {}",
+            counterexample.description
+        );
+    }
+
+    // Test W8-B: A write-read race must produce a counterexample
+    // referencing the read access and its program point too — not just
+    // the write. This guards against a regression where only one of the
+    // two accesses is mentioned.
+    #[test]
+    fn test_w8_write_read_counterexample_references_read_access() {
+        let mut input = ExclusivityInput::new();
+
+        input.add_access(AccessRecord::new(
+            AccessId(7),
+            AccessKind::Write,
+            0x2000,
+            8,
+            pp("wr.vu:write"),
+            5,
+            9,
+        ));
+        input.add_access(AccessRecord::new(
+            AccessId(8),
+            AccessKind::Read,
+            0x2004,
+            4,
+            pp("wr.vu:read"),
+            5,
+            9,
+        ));
+
+        let verifier = ExclusivityVerifier::new();
+        let output = verifier.verify(&input);
+
+        assert!(output.is_violated(), "expected a write-read violation");
+
+        let counterexample = match &output.result.status {
+            VerificationStatus::Violated { counterexample } => counterexample,
+            other => panic!("expected Violated, got {:?}", other),
+        };
+
+        let path_joined = counterexample.execution_path.join("\n");
+
+        // Both access IDs.
+        assert!(
+            path_joined.contains("A7") && path_joined.contains("A8"),
+            "execution_path should reference both A7 and A8: {}",
+            path_joined
+        );
+
+        // Both access KINDS (write and read).
+        assert!(
+            path_joined.contains("write"),
+            "execution_path should mention the write access kind: {}",
+            path_joined
+        );
+        assert!(
+            path_joined.contains("read"),
+            "execution_path should mention the read access kind: {}",
+            path_joined
+        );
+
+        // Both program points.
+        assert!(
+            path_joined.contains("wr.vu:write") && path_joined.contains("wr.vu:read"),
+            "execution_path should reference both program points: {}",
+            path_joined
+        );
+
+        // The conflict kind in the description should be write-read.
+        assert!(
+            counterexample
+                .description
+                .to_lowercase()
+                .contains("write-read"),
+            "description should mention write-read conflict: {}",
+            counterexample.description
+        );
+    }
+
+    // Test W8-C: A clean program (no violations) must NOT produce a
+    // counterexample — the status should be Proven, not Violated. This
+    // guards against a regression where the real-counterexample builder
+    // might be called on an empty conflict list.
+    #[test]
+    fn test_w8_clean_program_has_no_counterexample() {
+        let mut input = ExclusivityInput::new();
+
+        input.add_access(AccessRecord::new(
+            AccessId(1),
+            AccessKind::Write,
+            0x1000,
+            4,
+            pp("ok.vu:1"),
+            1,
+            1,
+        ));
+        input.add_access(AccessRecord::new(
+            AccessId(2),
+            AccessKind::Read,
+            0x1000,
+            4,
+            pp("ok.vu:2"),
+            1,
+            1,
+        ));
+        // Sync edge rules out the race.
+        input.add_sync_edge(SyncEdgeRecord::new(
+            AccessId(1),
+            AccessId(2),
+            SyncOrdering::HappensBefore,
+        ));
+
+        let verifier = ExclusivityVerifier::new();
+        let output = verifier.verify(&input);
+
+        assert!(
+            output.is_proven(),
+            "clean program should be Proven, got: {}",
+            output
+        );
+        assert!(
+            !output.is_violated(),
+            "clean program should not be Violated"
+        );
     }
 }

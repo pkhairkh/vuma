@@ -36,23 +36,77 @@ use std::time::Instant;
 /// The five VUMA invariant kinds.
 ///
 /// Each variant corresponds to one of the core safety invariants that
-/// every VUMA program must satisfy.
+/// every VUMA program must satisfy, as defined in
+/// `docs/specs/vuma-invariants-spec.md`. The canonical order below is the
+/// order in which the spec lists the invariants (and the recommended
+/// verification order is topological: Origin → Liveness →
+/// (Exclusivity, Interpretation) → Cleanup).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
 pub enum InvariantKind {
-    /// Every requested resource will eventually be provided.
+    /// **Liveness** — every access targets allocated memory.
+    ///
+    /// Guarantees the absence of use-after-free and out-of-bounds access:
+    /// for each access `a`, the region of `a.target` must be in an
+    /// allocated state at `a.program_point`, and the accessed byte range
+    /// must be fully contained within that region.
     Liveness,
-    /// At most one owner for exclusive resources.
+    /// **Exclusivity** — no conflicting concurrent accesses exist without
+    /// synchronization.
+    ///
+    /// Any two accesses that conflict (at least one is a write, target the
+    /// same region, and have overlapping byte ranges) must be ordered by a
+    /// `SyncEdge` (HappensBefore / Atomic / Locked), preventing data races.
     Exclusivity,
-    /// Every read interprets data under the correct BD.
+    /// **Interpretation** — every access respects the Representation
+    /// Descriptor (RepD) of its target.
+    ///
+    /// The effective RepD of the access's target derivation must be
+    /// compatible with the RepD expected by the operation. Reading
+    /// uninitialized memory as a pointer type is forbidden.
     Interpretation,
-    /// Every piece of data has a well-defined provenance.
+    /// **Origin** — every address traces to a valid allocation, and
+    /// arithmetic derivations stay within bounds.
+    ///
+    /// Every derivation chain must terminate at a `Region` (no fabricated
+    /// addresses), and offset arithmetic must remain within the source
+    /// region's bounds.
     Origin,
-    /// Every acquired resource is eventually released.
+    /// **Cleanup** — every allocation is eventually freed or explicitly
+    /// leaked; no region is freed twice.
+    ///
+    /// Catches memory leaks (regions with no `free_point` and not marked
+    /// `Leaked`) and double-frees (more than one free operation on the
+    /// same region on any execution path).
     Cleanup,
+    /// **Hardened invariants** — advanced flow-sensitive analyses that
+    /// supplement the five basic invariants. Runs escape analysis,
+    /// flow-sensitive CapD checking, aliasing integrity verification,
+    /// and derivation-chain validation. Invoked at `Normal` and
+    /// `Exhaustive` verification levels.
+    Hardened,
+    /// **Interprocedural invariants** — summary-based cross-function
+    /// analysis. Builds a call graph, computes per-function summaries
+    /// bottom-up, and detects cross-function leaks, data races,
+    /// recursive leaks, and lock-discipline violations. Invoked at
+    /// `Normal` and `Exhaustive` verification levels.
+    Interprocedural,
+    /// **Path-sensitive liveness** — refinement of the basic liveness
+    /// check using meet-at-join dataflow. Computes per-point
+    /// "definitely live on all paths" resource sets and flags
+    /// use-after-free where a resource is accessed at a point at
+    /// which it is not provably live. Invoked at `Normal` and
+    /// `Exhaustive` verification levels.
+    PathSensitiveLiveness,
 }
 
 impl InvariantKind {
-    /// Return all five invariant kinds in canonical order.
+    /// Return all five **basic** invariant kinds in canonical (spec)
+    /// order: Liveness, Exclusivity, Interpretation, Origin, Cleanup.
+    ///
+    /// This is the set used by both the `Normal` and `Exhaustive`
+    /// verification levels for the core checks. Advanced analyses
+    /// (hardened, interprocedural, path-sensitive) are returned
+    /// separately by [`InvariantKind::advanced`].
     pub fn all() -> &'static [InvariantKind; 5] {
         &[
             InvariantKind::Liveness,
@@ -63,10 +117,30 @@ impl InvariantKind {
         ]
     }
 
+    /// Return the three **advanced** invariant kinds (hardened,
+    /// interprocedural, path-sensitive liveness).
+    ///
+    /// These are run as supplements to the basic invariants at
+    /// `Normal` and `Exhaustive` verification levels. They are not
+    /// part of [`InvariantKind::all`] so that the basic five-check
+    /// loop remains stable, and they are never cached for incremental
+    /// re-verification (they are always recomputed).
+    pub fn advanced() -> &'static [InvariantKind; 3] {
+        &[
+            InvariantKind::Hardened,
+            InvariantKind::Interprocedural,
+            InvariantKind::PathSensitiveLiveness,
+        ]
+    }
+
     /// Return the cheap (quick-check) invariants.
     ///
-    /// Exclusivity and origin can be verified by syntactic analysis
-    /// without deep semantic reasoning.
+    /// [`Exclusivity`] and [`Origin`](InvariantKind::Origin) can be
+    /// verified by syntactic / structural analysis of the SCG and MSG
+    /// (derivation forest well-formedness for Origin; conflict-pair /
+    /// sync-edge reachability for Exclusivity) without the deep
+    /// path-sensitive reasoning required for Liveness, Interpretation, and
+    /// Cleanup. The `Quick` verification level runs only these two.
     pub fn quick_set() -> &'static [InvariantKind; 2] {
         &[InvariantKind::Exclusivity, InvariantKind::Origin]
     }
@@ -79,7 +153,21 @@ impl InvariantKind {
             InvariantKind::Interpretation => "interpretation",
             InvariantKind::Origin => "origin",
             InvariantKind::Cleanup => "cleanup",
+            InvariantKind::Hardened => "hardened_invariants",
+            InvariantKind::Interprocedural => "interprocedural",
+            InvariantKind::PathSensitiveLiveness => "path_sensitive_liveness",
         }
+    }
+
+    /// Returns `true` if this is one of the advanced (non-basic)
+    /// invariant kinds returned by [`InvariantKind::advanced`].
+    pub fn is_advanced(&self) -> bool {
+        matches!(
+            self,
+            InvariantKind::Hardened
+                | InvariantKind::Interprocedural
+                | InvariantKind::PathSensitiveLiveness
+        )
     }
 }
 
@@ -237,8 +325,21 @@ impl PerInvariantResult {
 /// summary of statistics.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AggregatedResult {
-    /// Per-invariant results, in canonical order.
+    /// Per-invariant results for the five basic invariants, in canonical
+    /// order. This is always exactly 5 entries at `Normal`/`Exhaustive`
+    /// levels (or 2 at `Quick` level).
     pub per_invariant: Vec<PerInvariantResult>,
+    /// Results from the advanced supplementary analyses (hardened,
+    /// interprocedural, path-sensitive liveness). Populated at
+    /// `Normal` and `Exhaustive` verification levels; empty at
+    /// `Quick` level.
+    ///
+    /// These are merged into the `overall` verdict and `summary`
+    /// statistics: if any advanced analysis finds a violation, the
+    /// overall verdict is `Fail`; if any is `Unverified`, the overall
+    /// verdict is `Inconclusive` (unless a violation was also found).
+    #[serde(default)]
+    pub advanced_results: Vec<PerInvariantResult>,
     /// The overall verdict.
     pub overall: OverallVerdict,
     /// The verification level that was used.
@@ -414,27 +515,23 @@ pub struct DiagnosticEntry {
 
 impl DiagnosticsReport {
     /// Build a diagnostics report from an aggregated result.
+    ///
+    /// The report includes both the basic per-invariant results and the
+    /// advanced supplementary analyses (hardened, interprocedural,
+    /// path-sensitive liveness), so that violations found by the
+    /// advanced analyses are visible in the rendered report.
     pub fn from_aggregated(result: &AggregatedResult) -> Self {
-        let mut entries = Vec::with_capacity(result.per_invariant.len());
+        let mut entries =
+            Vec::with_capacity(result.per_invariant.len() + result.advanced_results.len());
 
         for pir in &result.per_invariant {
-            let (icon, status_label) = match &pir.result.status {
-                VerificationStatus::Proven => ("PASS".to_string(), "PROVEN".into()),
-                VerificationStatus::ProbablySafe { .. } => {
-                    ("PROB".to_string(), "PROBABLY_SAFE".into())
-                }
-                VerificationStatus::Unverified { .. } => ("????".to_string(), "UNVERIFIED".into()),
-                VerificationStatus::Violated { .. } => ("FAIL".to_string(), "VIOLATED".into()),
-            };
+            entries.push(build_diagnostic_entry(pir));
+        }
 
-            entries.push(DiagnosticEntry {
-                kind: pir.kind,
-                icon,
-                status_label,
-                message: pir.result.message.clone(),
-                cached: pir.cached,
-                elapsed_ms: pir.elapsed_ms,
-            });
+        // Append the advanced supplementary analyses so their results
+        // appear in the rendered diagnostics report.
+        for pir in &result.advanced_results {
+            entries.push(build_diagnostic_entry(pir));
         }
 
         Self {
@@ -543,6 +640,14 @@ impl InvariantAggregator {
 
     /// Run all invariant checks (at the configured verification level)
     /// and return the aggregated result.
+    ///
+    /// At `Normal` and `Exhaustive` levels, this also runs the three
+    /// advanced supplementary analyses (hardened, interprocedural,
+    /// path-sensitive liveness) and merges their results into the
+    /// `advanced_results` field, the `overall` verdict, and the
+    /// `summary` statistics. At `Quick` level only the cheap syntactic
+    /// checks (exclusivity, origin) are run and `advanced_results` is
+    /// empty.
     pub fn verify_all(&self, input: &VerificationInput) -> AggregatedResult {
         let run_start = Instant::now();
 
@@ -557,12 +662,24 @@ impl InvariantAggregator {
             per_invariant.push(PerInvariantResult::new(kind, result, elapsed));
         }
 
+        // Run the advanced supplementary analyses at Normal+ levels.
+        let advanced_results = self.run_advanced_checks(input);
+
         let total_elapsed = run_start.elapsed().as_millis() as u64;
-        let summary = VerificationSummary::from_results(&per_invariant);
-        let overall = compute_overall_verdict(&per_invariant);
+        // Combine basic + advanced results for the summary and overall
+        // verdict so that advanced violations are reflected in the
+        // aggregated output.
+        let combined: Vec<PerInvariantResult> = per_invariant
+            .iter()
+            .chain(advanced_results.iter())
+            .cloned()
+            .collect();
+        let summary = VerificationSummary::from_results(&combined);
+        let overall = compute_overall_verdict(&combined);
 
         AggregatedResult {
             per_invariant,
+            advanced_results,
             overall,
             level: self.level,
             total_elapsed_ms: total_elapsed,
@@ -572,6 +689,11 @@ impl InvariantAggregator {
 
     /// Run incremental verification: only re-check invariants affected
     /// by the given delta, reusing cached results for the rest.
+    ///
+    /// At `Normal` and `Exhaustive` levels the three advanced analyses
+    /// are also run (they are never cached, so they are always
+    /// recomputed) and merged into the result, just as in
+    /// [`Self::verify_all`].
     pub fn verify_incremental(
         &mut self,
         input: &VerificationInput,
@@ -614,12 +736,25 @@ impl InvariantAggregator {
             }
         }
 
+        // Run the advanced supplementary analyses at Normal+ levels.
+        // These are never cached — they are always recomputed.
+        let advanced_results = self.run_advanced_checks(input);
+
         let total_elapsed = run_start.elapsed().as_millis() as u64;
-        let summary = VerificationSummary::from_results(&per_invariant);
-        let overall = compute_overall_verdict(&per_invariant);
+        // Combine basic + advanced results for the summary and overall
+        // verdict so that advanced violations are reflected in the
+        // aggregated output.
+        let combined: Vec<PerInvariantResult> = per_invariant
+            .iter()
+            .chain(advanced_results.iter())
+            .cloned()
+            .collect();
+        let summary = VerificationSummary::from_results(&combined);
+        let overall = compute_overall_verdict(&combined);
 
         AggregatedResult {
             per_invariant,
+            advanced_results,
             overall,
             level: self.level,
             total_elapsed_ms: total_elapsed,
@@ -646,16 +781,55 @@ impl InvariantAggregator {
     // Private helpers
     // -----------------------------------------------------------------------
 
-    /// Return the set of invariants to check for the current level.
+    /// Return the set of **basic** invariants to check for the current
+    /// level.
+    ///
+    /// At `Quick` level, only the cheap syntactic checks (exclusivity,
+    /// origin) are run. At `Normal` and `Exhaustive` levels, all five
+    /// basic invariants are run. The three advanced analyses (hardened,
+    /// interprocedural, path-sensitive liveness) are run separately as
+    /// a supplement at `Normal`+ levels — see
+    /// [`InvariantAggregator::run_advanced_checks`].
     fn invariants_for_level(&self) -> Vec<InvariantKind> {
         match self.level {
             VerificationLevel::Quick => InvariantKind::quick_set().to_vec(),
-            VerificationLevel::Normal => InvariantKind::all().to_vec(),
-            VerificationLevel::Exhaustive => InvariantKind::all().to_vec(),
+            VerificationLevel::Normal | VerificationLevel::Exhaustive => {
+                InvariantKind::all().to_vec()
+            }
         }
     }
 
+    /// Run the advanced supplementary analyses (hardened, interprocedural,
+    /// path-sensitive liveness) at `Normal` and `Exhaustive` verification
+    /// levels. Returns an empty vec at `Quick` level.
+    ///
+    /// Each advanced analysis is panic-safe: a panic in the underlying
+    /// analysis is caught inside the `VerificationEngine` wrapper and
+    /// returned as an `Unverified` result, so one failing analysis does
+    /// not prevent the others from running.
+    fn run_advanced_checks(&self, input: &VerificationInput) -> Vec<PerInvariantResult> {
+        if self.level == VerificationLevel::Quick {
+            return Vec::new();
+        }
+
+        let mut advanced = Vec::with_capacity(InvariantKind::advanced().len());
+        for &kind in InvariantKind::advanced() {
+            let check_start = Instant::now();
+            let result = self.run_single_check(kind, input);
+            let elapsed = check_start.elapsed().as_millis() as u64;
+            advanced.push(PerInvariantResult::new(kind, result, elapsed));
+        }
+        advanced
+    }
+
     /// Run a single invariant check by kind.
+    ///
+    /// For the five basic invariant kinds this dispatches to the
+    /// corresponding `VerificationEngine::verify_*` method. For the
+    /// three advanced kinds (Hardened, Interprocedural,
+    /// PathSensitiveLiveness) this dispatches to the engine's advanced
+    /// analysis methods, which are panic-safe (a panic in the underlying
+    /// analysis is caught and returned as an `Unverified` result).
     fn run_single_check(
         &self,
         kind: InvariantKind,
@@ -671,16 +845,40 @@ impl InvariantAggregator {
             InvariantKind::Interpretation => self.engine.verify_interpretation(input),
             InvariantKind::Origin => self.engine.verify_origin(input),
             InvariantKind::Cleanup => self.engine.verify_cleanup(input),
+            InvariantKind::Hardened => self.engine.verify_hardened(input),
+            InvariantKind::Interprocedural => self.engine.verify_interprocedural(input),
+            InvariantKind::PathSensitiveLiveness => {
+                self.engine.verify_liveness_path_sensitive(input)
+            }
         };
 
-        // In exhaustive mode, attempt to attach proof evidence for
-        // proven properties.
+        // In exhaustive mode, attach a formal-proof evidence record that
+        // summarises the IVE's verification finding. The full proof
+        // object (with goal, steps, and conclusion) is constructed
+        // downstream in `vuma::api::build_proof_bundle`, which wraps
+        // this evidence into a typed `LivenessProof` / `ExclusivityProof`
+        // / ... struct. The steps below capture the key facts that the
+        // downstream proof will reference — previously this was a
+        // single-line placeholder string with no substantive content.
         if self.level == VerificationLevel::Exhaustive && result.is_proven() {
+            let inv_label = kind.label();
+            let level_str = format!("{}", self.level);
+            let status_str = format!("{}", result.status);
+            let confidence_str = format!("{}", result.confidence());
+            let message = result.message.clone();
             result = result.with_evidence(Evidence::FormalProof {
-                steps: vec![ProofStep::from(format!(
-                    "proof of {} verified by IVE",
-                    kind.label()
-                ))],
+                steps: vec![
+                    format!(
+                        "goal: prove {inv_label} for the full program (target = FullProgram)"
+                    ),
+                    format!("method: IVE verification engine at {level_str} level"),
+                    format!("status: {status_str}"),
+                    format!("confidence: {confidence_str}"),
+                    format!("finding: {message}"),
+                    format!(
+                        "downstream: see vuma::api::build_proof_bundle for the constructed proof object"
+                    ),
+                ],
             });
         }
 
@@ -726,7 +924,14 @@ fn compute_overall_verdict(results: &[PerInvariantResult]) -> OverallVerdict {
     }
 }
 
-/// Map an invariant kind to a cache index (0..5).
+/// Map an invariant kind to a cache index (0..5) for the basic
+/// invariants, or `None` for the advanced analyses.
+///
+/// Advanced analyses (Hardened, Interprocedural, PathSensitiveLiveness)
+/// return `None` because they are not cached between runs — they are
+/// always recomputed. This is by design: the advanced analyses are
+/// relatively expensive and may depend on global state that the
+/// incremental delta does not track.
 fn invariant_index(kind: InvariantKind) -> Option<usize> {
     match kind {
         InvariantKind::Liveness => Some(0),
@@ -734,6 +939,33 @@ fn invariant_index(kind: InvariantKind) -> Option<usize> {
         InvariantKind::Interpretation => Some(2),
         InvariantKind::Origin => Some(3),
         InvariantKind::Cleanup => Some(4),
+        InvariantKind::Hardened
+        | InvariantKind::Interprocedural
+        | InvariantKind::PathSensitiveLiveness => None,
+    }
+}
+
+/// Build a [`DiagnosticEntry`] from a [`PerInvariantResult`].
+///
+/// Used by [`DiagnosticsReport::from_aggregated`] for both the basic
+/// per-invariant results and the advanced supplementary analyses, so
+/// that violations found by either set of checks appear in the
+/// rendered report.
+fn build_diagnostic_entry(pir: &PerInvariantResult) -> DiagnosticEntry {
+    let (icon, status_label) = match &pir.result.status {
+        VerificationStatus::Proven => ("PASS".to_string(), "PROVEN".into()),
+        VerificationStatus::ProbablySafe { .. } => ("PROB".to_string(), "PROBABLY_SAFE".into()),
+        VerificationStatus::Unverified { .. } => ("????".to_string(), "UNVERIFIED".into()),
+        VerificationStatus::Violated { .. } => ("FAIL".to_string(), "VIOLATED".into()),
+    };
+
+    DiagnosticEntry {
+        kind: pir.kind,
+        icon,
+        status_label,
+        message: pir.result.message.clone(),
+        cached: pir.cached,
+        elapsed_ms: pir.elapsed_ms,
     }
 }
 
@@ -757,6 +989,40 @@ mod tests {
         assert_eq!(InvariantKind::quick_set().len(), 2);
         assert!(InvariantKind::quick_set().contains(&InvariantKind::Exclusivity));
         assert!(InvariantKind::quick_set().contains(&InvariantKind::Origin));
+    }
+
+    #[test]
+    fn invariant_kind_advanced_has_three() {
+        // The advanced set is the three analyses wired in by task W3
+        // (hardened, interprocedural, path-sensitive liveness).
+        assert_eq!(InvariantKind::advanced().len(), 3);
+        assert!(InvariantKind::advanced().contains(&InvariantKind::Hardened));
+        assert!(InvariantKind::advanced().contains(&InvariantKind::Interprocedural));
+        assert!(
+            InvariantKind::advanced().contains(&InvariantKind::PathSensitiveLiveness)
+        );
+    }
+
+    #[test]
+    fn invariant_kind_is_advanced_flag() {
+        // Basic invariants are not advanced.
+        for kind in InvariantKind::all() {
+            assert!(!kind.is_advanced(), "{:?} should not be advanced", kind);
+        }
+        // Advanced invariants are advanced.
+        for kind in InvariantKind::advanced() {
+            assert!(kind.is_advanced(), "{:?} should be advanced", kind);
+        }
+    }
+
+    #[test]
+    fn invariant_kind_advanced_labels() {
+        assert_eq!(InvariantKind::Hardened.label(), "hardened_invariants");
+        assert_eq!(InvariantKind::Interprocedural.label(), "interprocedural");
+        assert_eq!(
+            InvariantKind::PathSensitiveLiveness.label(),
+            "path_sensitive_liveness"
+        );
     }
 
     #[test]
@@ -811,29 +1077,57 @@ mod tests {
     }
 
     #[test]
-    fn verify_all_normal_returns_five_results() {
+    fn verify_all_normal_returns_five_results_plus_advanced() {
+        // At Normal level, the aggregator runs the 5 basic invariants
+        // (in `per_invariant`) plus the 3 advanced analyses (in
+        // `advanced_results`). The `per_invariant` field stays at 5
+        // for backward compatibility with external consumers.
         let aggregator = InvariantAggregator::new();
         let input = VerificationInput::from_scg(SCG::new());
         let result = aggregator.verify_all(&input);
         assert_eq!(result.per_invariant.len(), 5);
+        assert_eq!(result.advanced_results.len(), 3);
         assert_eq!(result.level, VerificationLevel::Normal);
+
+        // The advanced results should be present and proven on an
+        // empty SCG.
+        for kind in InvariantKind::advanced() {
+            let pir = result
+                .advanced_results
+                .iter()
+                .find(|r| r.kind == *kind)
+                .unwrap_or_else(|| panic!("advanced result {:?} missing", kind));
+            assert!(
+                pir.result.is_proven(),
+                "advanced result {:?} should be proven on empty SCG, got: {}",
+                kind,
+                pir.result.status
+            );
+        }
     }
 
     #[test]
-    fn verify_all_quick_returns_two_results() {
+    fn verify_all_quick_returns_two_results_no_advanced() {
+        // At Quick level, only the 2 cheap syntactic checks run,
+        // and the advanced analyses are NOT run (advanced_results is
+        // empty).
         let aggregator = InvariantAggregator::new().with_level(VerificationLevel::Quick);
         let input = VerificationInput::from_scg(SCG::new());
         let result = aggregator.verify_all(&input);
         assert_eq!(result.per_invariant.len(), 2);
+        assert_eq!(result.advanced_results.len(), 0);
         assert_eq!(result.level, VerificationLevel::Quick);
     }
 
     #[test]
-    fn verify_all_exhaustive_returns_five_results() {
+    fn verify_all_exhaustive_returns_five_results_plus_advanced() {
+        // At Exhaustive level, the aggregator runs the 5 basic + 3
+        // advanced invariants. per_invariant stays at 5.
         let aggregator = InvariantAggregator::new().with_level(VerificationLevel::Exhaustive);
         let input = VerificationInput::from_scg(SCG::new());
         let result = aggregator.verify_all(&input);
         assert_eq!(result.per_invariant.len(), 5);
+        assert_eq!(result.advanced_results.len(), 3);
         assert_eq!(result.level, VerificationLevel::Exhaustive);
     }
 
@@ -841,7 +1135,9 @@ mod tests {
     fn free_function_verify_all() {
         let input = VerificationInput::from_scg(SCG::new());
         let result = verify_all(&input);
+        // 5 basic in per_invariant + 3 advanced in advanced_results.
         assert_eq!(result.per_invariant.len(), 5);
+        assert_eq!(result.advanced_results.len(), 3);
         assert_eq!(result.level, VerificationLevel::Normal);
     }
 
@@ -895,9 +1191,11 @@ mod tests {
         let delta = InvariantDelta::new();
         let second = aggregator.verify_incremental(&input, &delta);
 
-        // All results should be cached.
+        // The 5 basic invariants should be cached. The 3 advanced
+        // analyses are never cached (invariant_index returns None),
+        // so they are recomputed on every incremental run.
         assert_eq!(second.summary.cached_count, 5);
-        assert_eq!(second.summary.fresh_count, 0);
+        assert_eq!(second.summary.fresh_count, 3);
     }
 
     #[test]
@@ -1002,7 +1300,8 @@ mod tests {
         let result = aggregator.verify_all(&input);
         let text = format!("{}", result.summary);
         assert!(text.contains("Verification Summary"));
-        assert!(text.contains("Total checked : 5"));
+        // At Normal level we run the 5 basic + 3 advanced invariants.
+        assert!(text.contains("Total checked : 8"));
     }
 
     #[test]

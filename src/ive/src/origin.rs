@@ -559,15 +559,34 @@ pub struct OriginViolation {
     pub kind: ViolationKind,
     /// Human-readable description.
     pub description: String,
+    /// The concrete execution/derivation path leading to this violation.
+    ///
+    /// Each step is a human-readable string referencing the actual
+    /// derivation ID, region ID, or program point from the SCG. This
+    /// fulfills the README's promise of "precise counterexamples
+    /// showing the exact execution path to the violation."
+    #[serde(default)]
+    pub path: Vec<String>,
 }
 
 impl OriginViolation {
-    /// Create a new violation.
+    /// Create a new violation with an empty execution path.
     pub fn new(kind: ViolationKind, description: impl Into<String>) -> Self {
         Self {
             kind,
             description: description.into(),
+            path: Vec::new(),
         }
+    }
+
+    /// Attach a concrete execution path to this violation.
+    ///
+    /// The path is a list of human-readable steps, each referencing an
+    /// actual SCG program point, derivation ID, or region. Used by the
+    /// origin verifier to build a real counterexample trace.
+    pub fn with_path(mut self, path: Vec<String>) -> Self {
+        self.path = path;
+        self
     }
 }
 
@@ -631,13 +650,23 @@ impl OriginReport {
             )
         } else {
             let descriptions: Vec<String> = self.violations.iter().map(|v| v.to_string()).collect();
-            let _first = self.violations.first().unwrap();
+            let first = self.violations.first().unwrap();
+            // Build a REAL counterexample path from the first violation's
+            // concrete derivation chain — not an empty `Vec::new()`.
+            // This is the "exact execution path to the violation" promised
+            // by the README: each step references an actual SCG
+            // derivation, region, or program point.
+            let ce_path = first.path.clone();
+            let violation_point = match &first.kind {
+                ViolationKind::UninitializedRead { program_point, .. } => program_point.clone(),
+                _ => "origin_violation".to_string(),
+            };
             VerificationResult::new(
                 "origin",
                 VerificationStatus::Violated {
                     counterexample: CounterExample::new(
-                        Vec::new(),
-                        "origin_violation".to_string(),
+                        ce_path,
+                        violation_point,
                         descriptions.join("; "),
                     ),
                 },
@@ -801,6 +830,43 @@ impl OriginVerifier {
         chain
     }
 
+    /// Build a human-readable execution path from a derivation's chain.
+    ///
+    /// Each step describes one derivation in the chain, referencing the
+    /// actual derivation ID, source, and kind. The chain is walked from
+    /// root to leaf, mirroring how the value was constructed.
+    fn build_chain_path(&self, derivation_id: DerivationId) -> Vec<String> {
+        let chain = self.trace_chain(derivation_id);
+        let mut path = Vec::with_capacity(chain.len());
+        for &did in &chain {
+            let step = match self.derivation(did) {
+                Some(d) => {
+                    let source_str = match &d.source {
+                        DerivationSource::Region(rid) => format!("region {}", rid),
+                        DerivationSource::AnotherDerivation(parent) => {
+                            format!("derivation {}", parent)
+                        }
+                        DerivationSource::Fabricated { raw_value } => {
+                            format!("fabricated from raw 0x{:x}", raw_value)
+                        }
+                    };
+                    let kind_str = match &d.kind {
+                        DerivationKind::Direct => "direct".to_string(),
+                        DerivationKind::Offset { by } => format!("offset by {}", by),
+                        DerivationKind::Cast { from_repr, to_repr } => {
+                            format!("cast {} -> {}", from_repr, to_repr)
+                        }
+                        DerivationKind::Arithmetic { description } => description.clone(),
+                    };
+                    format!("Derivation {}: {} from {}", did, kind_str, source_str)
+                }
+                None => format!("Derivation {} (missing)", did),
+            };
+            path.push(step);
+        }
+        path
+    }
+
     /// Compute the taint level for a derivation by tracing to its root.
     fn compute_taint(&self, derivation_id: DerivationId) -> TaintLevel {
         let chain = self.trace_chain(derivation_id);
@@ -858,12 +924,18 @@ impl OriginVerifier {
 
             loop {
                 if path.contains(&current_id) {
-                    violations.push(OriginViolation::new(
-                        ViolationKind::CyclicDerivation {
-                            derivation_id: current_id,
-                        },
-                        format!("derivation {} is involved in a cycle", current_id),
-                    ));
+                    // Build a concrete path showing the derivation chain
+                    // that participates in the cycle.
+                    let ce_path = self.build_chain_path(derivation.id);
+                    violations.push(
+                        OriginViolation::new(
+                            ViolationKind::CyclicDerivation {
+                                derivation_id: current_id,
+                            },
+                            format!("derivation {} is involved in a cycle", current_id),
+                        )
+                        .with_path(ce_path),
+                    );
                     break;
                 }
                 if global_visited.contains(&current_id) {
@@ -900,16 +972,25 @@ impl OriginVerifier {
         for derivation in &self.derivations {
             if let DerivationSource::AnotherDerivation(parent_id) = &derivation.source {
                 if self.derivation(*parent_id).is_none() {
-                    violations.push(OriginViolation::new(
-                        ViolationKind::BrokenChain {
-                            derivation_id: derivation.id,
-                            missing_parent: *parent_id,
-                        },
-                        format!(
-                            "derivation {} references parent {} which does not exist",
-                            derivation.id, parent_id
-                        ),
+                    // Build a path showing the chain up to the missing parent.
+                    let mut ce_path = self.build_chain_path(derivation.id);
+                    ce_path.push(format!(
+                        "Derivation {}: references missing parent {} — BROKEN CHAIN",
+                        derivation.id, parent_id
                     ));
+                    violations.push(
+                        OriginViolation::new(
+                            ViolationKind::BrokenChain {
+                                derivation_id: derivation.id,
+                                missing_parent: *parent_id,
+                            },
+                            format!(
+                                "derivation {} references parent {} which does not exist",
+                                derivation.id, parent_id
+                            ),
+                        )
+                        .with_path(ce_path),
+                    );
                 }
             }
         }
@@ -923,16 +1004,23 @@ impl OriginVerifier {
 
         for derivation in &self.derivations {
             if let DerivationSource::Fabricated { raw_value } = &derivation.source {
-                violations.push(OriginViolation::new(
-                    ViolationKind::FabricatedPointer {
-                        derivation_id: derivation.id,
-                        raw_value: *raw_value,
-                    },
-                    format!(
-                        "derivation {} fabricated from raw integer 0x{:x} with no allocation",
-                        derivation.id, raw_value
-                    ),
-                ));
+                let ce_path = vec![format!(
+                    "Derivation {}: fabricated from raw integer 0x{:x} with no allocation — FABRICATED POINTER",
+                    derivation.id, raw_value
+                )];
+                violations.push(
+                    OriginViolation::new(
+                        ViolationKind::FabricatedPointer {
+                            derivation_id: derivation.id,
+                            raw_value: *raw_value,
+                        },
+                        format!(
+                            "derivation {} fabricated from raw integer 0x{:x} with no allocation",
+                            derivation.id, raw_value
+                        ),
+                    )
+                    .with_path(ce_path),
+                );
             }
         }
 
@@ -945,15 +1033,22 @@ impl OriginVerifier {
 
         for derivation in &self.derivations {
             if !derivation.is_within_bounds() {
-                violations.push(OriginViolation::new(
-                    ViolationKind::IllFormedProvenance {
-                        derivation_id: derivation.id,
-                    },
-                    format!(
-                        "derivation {} has ill-formed provenance range [{}, {})",
-                        derivation.id, derivation.proven_range.0, derivation.proven_range.1
-                    ),
-                ));
+                let ce_path = vec![format!(
+                    "Derivation {}: provenance range [{}, {}) is ill-formed (lo >= hi) — ILL-FORMED PROVENANCE",
+                    derivation.id, derivation.proven_range.0, derivation.proven_range.1
+                )];
+                violations.push(
+                    OriginViolation::new(
+                        ViolationKind::IllFormedProvenance {
+                            derivation_id: derivation.id,
+                        },
+                        format!(
+                            "derivation {} has ill-formed provenance range [{}, {})",
+                            derivation.id, derivation.proven_range.0, derivation.proven_range.1
+                        ),
+                    )
+                    .with_path(ce_path),
+                );
             }
         }
 
@@ -976,21 +1071,34 @@ impl OriginVerifier {
 
             // Check that the provenance range falls within the region.
             if derivation.proven_range.0 < region.base || derivation.proven_range.1 > region.end() {
-                violations.push(OriginViolation::new(
-                    ViolationKind::OutOfBounds {
-                        derivation_id: derivation.id,
-                        region_id: rid,
-                    },
-                    format!(
-                        "derivation {} provenance [{}, {}) exceeds region {} [{}, {})",
-                        derivation.id,
-                        derivation.proven_range.0,
-                        derivation.proven_range.1,
-                        rid,
-                        region.base,
-                        region.end()
-                    ),
+                let mut ce_path = self.build_chain_path(derivation.id);
+                ce_path.push(format!(
+                    "Region {} bounds [{}, {}); derivation {} provenance [{}, {}) — OUT OF BOUNDS",
+                    rid,
+                    region.base,
+                    region.end(),
+                    derivation.id,
+                    derivation.proven_range.0,
+                    derivation.proven_range.1
                 ));
+                violations.push(
+                    OriginViolation::new(
+                        ViolationKind::OutOfBounds {
+                            derivation_id: derivation.id,
+                            region_id: rid,
+                        },
+                        format!(
+                            "derivation {} provenance [{}, {}) exceeds region {} [{}, {})",
+                            derivation.id,
+                            derivation.proven_range.0,
+                            derivation.proven_range.1,
+                            rid,
+                            region.base,
+                            region.end()
+                        ),
+                    )
+                    .with_path(ce_path),
+                );
             }
         }
 
@@ -1014,28 +1122,39 @@ impl OriginVerifier {
                             // Already reported by detect_broken_chains.
                         } else {
                             // Parent exists but chain doesn't terminate at a region.
-                            violations.push(OriginViolation::new(
-                                ViolationKind::OrphanValue {
-                                    derivation_id: derivation.id,
-                                },
-                                format!(
-                                    "derivation {} has no traceable origin to an allocation site",
-                                    derivation.id
-                                ),
-                            ));
+                            let ce_path = self.build_chain_path(derivation.id);
+                            violations.push(
+                                OriginViolation::new(
+                                    ViolationKind::OrphanValue {
+                                        derivation_id: derivation.id,
+                                    },
+                                    format!(
+                                        "derivation {} has no traceable origin to an allocation site",
+                                        derivation.id
+                                    ),
+                                )
+                                .with_path(ce_path),
+                            );
                         }
                     }
                     DerivationSource::Region(rid) => {
                         if self.region(*rid).is_none() {
-                            violations.push(OriginViolation::new(
-                                ViolationKind::OrphanValue {
-                                    derivation_id: derivation.id,
-                                },
-                                format!(
-                                    "derivation {} references region {} which does not exist",
-                                    derivation.id, rid
-                                ),
-                            ));
+                            let ce_path = vec![format!(
+                                "Derivation {}: references region {} which does not exist — ORPHAN",
+                                derivation.id, rid
+                            )];
+                            violations.push(
+                                OriginViolation::new(
+                                    ViolationKind::OrphanValue {
+                                        derivation_id: derivation.id,
+                                    },
+                                    format!(
+                                        "derivation {} references region {} which does not exist",
+                                        derivation.id, rid
+                                    ),
+                                )
+                                .with_path(ce_path),
+                            );
                         }
                     }
                 }
@@ -1051,16 +1170,25 @@ impl OriginVerifier {
 
         for access in &self.accesses {
             if access.kind == AccessKind::Read && !access.is_initialized {
-                violations.push(OriginViolation::new(
-                    ViolationKind::UninitializedRead {
-                        access_id: access.id,
-                        program_point: access.program_point.clone(),
-                    },
-                    format!(
-                        "read access {} at {} reads uninitialized memory",
-                        access.id, access.program_point
-                    ),
+                // Build path: derivation chain of the target + the read site.
+                let mut ce_path = self.build_chain_path(access.target);
+                ce_path.push(format!(
+                    "Read access {} at {} reads uninitialized memory — UNINITIALIZED READ",
+                    access.id, access.program_point
                 ));
+                violations.push(
+                    OriginViolation::new(
+                        ViolationKind::UninitializedRead {
+                            access_id: access.id,
+                            program_point: access.program_point.clone(),
+                        },
+                        format!(
+                            "read access {} at {} reads uninitialized memory",
+                            access.id, access.program_point
+                        ),
+                    )
+                    .with_path(ce_path),
+                );
             }
         }
 
@@ -1081,16 +1209,24 @@ impl OriginVerifier {
                 None => continue,
             };
             if !region.is_allocated {
-                violations.push(OriginViolation::new(
-                    ViolationKind::FreedRegionAccess {
-                        access_id: access.id,
-                        region_id: rid,
-                    },
-                    format!(
-                        "access {} at {} targets freed region {}",
-                        access.id, access.program_point, rid
-                    ),
+                let mut ce_path = self.build_chain_path(access.target);
+                ce_path.push(format!(
+                    "Region {} [{}, {}) has been freed; access {} at {} targets it — FREED REGION ACCESS",
+                    rid, region.base, region.end(), access.id, access.program_point
                 ));
+                violations.push(
+                    OriginViolation::new(
+                        ViolationKind::FreedRegionAccess {
+                            access_id: access.id,
+                            region_id: rid,
+                        },
+                        format!(
+                            "access {} at {} targets freed region {}",
+                            access.id, access.program_point, rid
+                        ),
+                    )
+                    .with_path(ce_path),
+                );
             }
         }
 
@@ -1777,5 +1913,178 @@ mod tests {
         let vr = report.to_verification_result();
         assert!(vr.is_violated());
         assert!(!vr.is_proven());
+    }
+
+    // -----------------------------------------------------------------------
+    // W7: Real counterexamples — the execution path must be non-empty and
+    // reference the actual SCG derivation chain, not a fabricated template
+    // or an empty Vec.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn orphan_value_counterexample_path_is_real() {
+        let mut v = OriginVerifier::new();
+        // Derivation references a non-existent region — orphan.
+        v.add_derivation(Derivation::new(
+            DerivationId(1),
+            DerivationSource::Region(RegionId(99)),
+            DerivationKind::Direct,
+            (Address::from(0x1000u64), Address::from(0x1100u64)),
+        ));
+
+        let report = v.verify();
+        assert!(!report.is_clean());
+
+        let vr = report.to_verification_result();
+        assert!(vr.is_violated());
+        let ce = match &vr.status {
+            VerificationStatus::Violated { counterexample } => counterexample,
+            _ => unreachable!(),
+        };
+        assert!(
+            !ce.execution_path.is_empty(),
+            "orphan counterexample path must be non-empty, got: {:?}",
+            ce.execution_path
+        );
+        // The path must reference the orphaned derivation D1 and region R99.
+        let joined = ce.execution_path.join(" | ");
+        assert!(
+            joined.contains("D1") || joined.contains("Derivation 1"),
+            "path must reference Derivation 1: {}",
+            joined
+        );
+        assert!(
+            joined.contains("R99") || joined.contains("region 99"),
+            "path must reference the missing region 99: {}",
+            joined
+        );
+    }
+
+    #[test]
+    fn fabricated_pointer_counterexample_path_is_real() {
+        let mut v = OriginVerifier::new();
+        v.add_region(Region::new(RegionId(1), Address::from(0x1000u64), 256));
+        v.add_derivation(Derivation::new(
+            DerivationId(1),
+            DerivationSource::Fabricated {
+                raw_value: 0xDEADBEEF,
+            },
+            DerivationKind::Direct,
+            (Address::from(0xDEADBEEFu64), Address::from(0xDEADBFF3u64)),
+        ));
+
+        let report = v.verify();
+        assert!(!report.is_clean());
+
+        let vr = report.to_verification_result();
+        assert!(vr.is_violated());
+        let ce = match &vr.status {
+            VerificationStatus::Violated { counterexample } => counterexample,
+            _ => unreachable!(),
+        };
+        assert!(
+            !ce.execution_path.is_empty(),
+            "fabricated-pointer counterexample path must be non-empty"
+        );
+        let joined = ce.execution_path.join(" | ");
+        assert!(
+            joined.contains("FABRICATED"),
+            "path must mark fabrication: {}",
+            joined
+        );
+        assert!(
+            joined.to_lowercase().contains("deadbeef"),
+            "path must reference the raw value 0xdeadbeef: {}",
+            joined
+        );
+    }
+
+    #[test]
+    fn derivation_chain_path_has_multiple_steps() {
+        let mut v = OriginVerifier::new();
+        v.add_region(Region::new(RegionId(1), Address::from(0x1000u64), 1024));
+        // D1: direct from region
+        v.add_derivation(Derivation::new(
+            DerivationId(1),
+            DerivationSource::Region(RegionId(1)),
+            DerivationKind::Direct,
+            (Address::from(0x1000u64), Address::from(0x1400u64)),
+        ));
+        // D2: offset from D1
+        v.add_derivation(Derivation::new(
+            DerivationId(2),
+            DerivationSource::AnotherDerivation(DerivationId(1)),
+            DerivationKind::Offset { by: 64 },
+            (Address::from(0x1040u64), Address::from(0x1080u64)),
+        ));
+        // D3: references missing parent D99 — broken chain (gives us a path)
+        v.add_derivation(Derivation::new(
+            DerivationId(3),
+            DerivationSource::AnotherDerivation(DerivationId(99)), // missing
+            DerivationKind::Offset { by: 32 },
+            (Address::from(0x1020u64), Address::from(0x1040u64)),
+        ));
+
+        let report = v.verify();
+        // Find the broken-chain violation; its path must be non-empty
+        // and reference the missing parent D99.
+        let broken = report
+            .violations
+            .iter()
+            .find(|v| matches!(&v.kind, ViolationKind::BrokenChain { .. }))
+            .expect("expected a BrokenChain violation");
+        assert!(
+            !broken.path.is_empty(),
+            "broken-chain path must be non-empty"
+        );
+        let joined = broken.path.join(" | ");
+        assert!(
+            joined.contains("BROKEN CHAIN"),
+            "path must mark broken chain: {}",
+            joined
+        );
+        assert!(
+            joined.contains("99"),
+            "path must reference missing parent D99: {}",
+            joined
+        );
+    }
+
+    #[test]
+    fn out_of_bounds_counterexample_path_is_real() {
+        let mut v = OriginVerifier::new();
+        v.add_region(Region::new(RegionId(1), Address::from(0x1000u64), 64));
+        // Derivation with provenance range exceeding the region.
+        v.add_derivation(Derivation::new(
+            DerivationId(1),
+            DerivationSource::Region(RegionId(1)),
+            DerivationKind::Offset { by: 32 },
+            (Address::from(0x1020u64), Address::from(0x2000u64)), // Goes past 0x1040.
+        ));
+
+        let report = v.verify();
+        assert!(!report.is_clean());
+
+        let vr = report.to_verification_result();
+        assert!(vr.is_violated());
+        let ce = match &vr.status {
+            VerificationStatus::Violated { counterexample } => counterexample,
+            _ => unreachable!(),
+        };
+        assert!(
+            !ce.execution_path.is_empty(),
+            "out-of-bounds counterexample path must be non-empty"
+        );
+        let joined = ce.execution_path.join(" | ");
+        assert!(
+            joined.contains("OUT OF BOUNDS"),
+            "path must mark out of bounds: {}",
+            joined
+        );
+        assert!(
+            joined.contains("R1") || joined.contains("region 1"),
+            "path must reference region R1: {}",
+            joined
+        );
     }
 }

@@ -35,13 +35,18 @@ use crate::origin::{
     Derivation, DerivationId, DerivationKind, DerivationSource, OriginVerifier,
     Region as OriginRegion, RegionId as OriginRegionId,
 };
-use crate::result::{BatchedViolations, InvariantViolation, Severity, VerificationResult};
-use std::collections::HashMap;
+use crate::result::{
+    BatchedViolations, CounterExample, InvariantViolation, Severity, VerificationResult,
+    VerificationStatus,
+};
+use std::collections::BTreeMap;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use vuma_bd::capd::{CapD, Capability};
 use vuma_bd::descriptor::BD;
 use vuma_scg::edge::EdgeKind;
 use vuma_scg::graph::SCG;
-use vuma_scg::node::{AccessMode, NodeId, NodePayload, NodeType};
+use vuma_scg::node::{AccessMode, EffectNode, NodeId, NodePayload, NodeType};
+use vuma_scg::region::RegionId;
 
 // ---------------------------------------------------------------------------
 // VerificationInput
@@ -55,7 +60,7 @@ pub struct VerificationInput {
     /// The SCG to verify.
     pub scg: SCG,
     /// Pre-inferred BD map (optional — will be inferred if absent).
-    pub bd_map: Option<HashMap<NodeId, BD>>,
+    pub bd_map: Option<BTreeMap<NodeId, BD>>,
 }
 
 impl VerificationInput {
@@ -65,7 +70,7 @@ impl VerificationInput {
     }
 
     /// Create verification input with a pre-inferred BD map.
-    pub fn with_bd_map(scg: SCG, bd_map: HashMap<NodeId, BD>) -> Self {
+    pub fn with_bd_map(scg: SCG, bd_map: BTreeMap<NodeId, BD>) -> Self {
         Self {
             scg,
             bd_map: Some(bd_map),
@@ -207,6 +212,292 @@ impl VerificationEngine {
     }
 
     // -----------------------------------------------------------------------
+    // Advanced analyses (Normal+ verification level)
+    //
+    // The following methods wrap the previously dead "hardened",
+    // path-sensitive, and interprocedural analyses so they actually run
+    // during the live verification pipeline. Each method is panic-safe:
+    // a panic in the underlying analysis is caught, logged as a warning,
+    // and converted into an `Unverified` result so the rest of the
+    // pipeline is unaffected.
+    // -----------------------------------------------------------------------
+
+    /// Run the **hardened** invariant checks as an advanced pass.
+    ///
+    /// This wraps [`verify_all_hardened`] (which runs escape analysis,
+    /// flow-sensitive capability checking, aliasing integrity, and
+    /// derivation-chain validation) and converts its `BatchedViolations`
+    /// into a single [`VerificationResult`].
+    ///
+    /// Intended to be invoked at `Normal` and `Exhaustive` verification
+    /// levels as a supplement to the five basic invariants. Panics from
+    /// the underlying analyses are caught and reported as `Unverified`
+    /// so the rest of the pipeline continues.
+    pub fn verify_hardened(&self, input: &VerificationInput) -> VerificationResult {
+        // The hardened checks require a BD map; if none was supplied,
+        // pass an empty map. `verify_all_hardened` falls back to
+        // `CapD::all()` for nodes missing from the map.
+        let bd_map = input.bd_map.clone().unwrap_or_default();
+
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            verify_all_hardened(&input.scg, &bd_map)
+        }));
+
+        match result {
+            Ok(batched) => {
+                if batched.is_empty() {
+                    VerificationResult::new(
+                        "hardened_invariants",
+                        VerificationStatus::Proven,
+                        "hardened checks (escape, capability_flow, aliasing, \
+                         derivation_chain) found no violations",
+                    )
+                } else {
+                    let total = batched.total();
+                    let high = batched.by_severity_level(Severity::High).len();
+                    let medium = batched.by_severity_level(Severity::Medium).len();
+                    let low = batched.by_severity_level(Severity::Low).len();
+                    let preview: Vec<String> = batched
+                        .all()
+                        .iter()
+                        .take(5)
+                        .map(|v| format!("{}", v))
+                        .collect();
+                    let message = format!(
+                        "{} hardened violation(s) [H={}, M={}, L={}]: {}",
+                        total,
+                        high,
+                        medium,
+                        low,
+                        preview.join("; ")
+                    );
+                    VerificationResult::new(
+                        "hardened_invariants",
+                        VerificationStatus::Violated {
+                            counterexample: CounterExample::new(
+                                Vec::new(),
+                                "hardened-invariant".to_string(),
+                                message.clone(),
+                            ),
+                        },
+                        message,
+                    )
+                }
+            }
+            Err(_) => {
+                log::warn!(
+                    "IVE: verify_all_hardened panicked; skipping advanced hardened analysis"
+                );
+                VerificationResult::new(
+                    "hardened_invariants",
+                    VerificationStatus::Unverified {
+                        reason: "hardened analysis panicked and was skipped".to_string(),
+                    },
+                    "hardened analysis skipped due to internal error",
+                )
+            }
+        }
+    }
+
+    /// Run **summary-based interprocedural** invariant verification.
+    ///
+    /// Builds a [`CallGraph`] from the SCG, computes per-function
+    /// summaries bottom-up via
+    /// [`crate::interprocedural::compute_summaries`], and then runs
+    /// [`crate::interprocedural::verify_interprocedural_invariants`] to
+    /// detect cross-function leaks, data races, recursive leaks, and
+    /// lock-discipline violations.
+    ///
+    /// Intended to be invoked at `Normal` and `Exhaustive` verification
+    /// levels. Panics are caught and reported as `Unverified`.
+    pub fn verify_interprocedural(&self, input: &VerificationInput) -> VerificationResult {
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let call_graph = vuma_scg::callgraph::CallGraph::build(&input.scg);
+            let summaries =
+                crate::interprocedural::compute_summaries(&input.scg, &call_graph);
+            crate::interprocedural::verify_interprocedural_invariants(
+                &input.scg,
+                &call_graph,
+                &summaries,
+            )
+        }));
+
+        match result {
+            Ok(violations) => {
+                if violations.is_empty() {
+                    VerificationResult::new(
+                        "interprocedural",
+                        VerificationStatus::Proven,
+                        "no cross-function invariant violations detected",
+                    )
+                } else {
+                    let total = violations.len();
+                    let preview: Vec<String> = violations
+                        .iter()
+                        .take(5)
+                        .map(|v| format!("{}", v))
+                        .collect();
+                    let message = format!(
+                        "{} interprocedural violation(s): {}",
+                        total,
+                        preview.join("; ")
+                    );
+                    VerificationResult::new(
+                        "interprocedural",
+                        VerificationStatus::Violated {
+                            counterexample: CounterExample::new(
+                                Vec::new(),
+                                "interprocedural".to_string(),
+                                message.clone(),
+                            ),
+                        },
+                        message,
+                    )
+                }
+            }
+            Err(_) => {
+                log::warn!(
+                    "IVE: interprocedural verification panicked; skipping advanced analysis"
+                );
+                VerificationResult::new(
+                    "interprocedural",
+                    VerificationStatus::Unverified {
+                        reason: "interprocedural analysis panicked and was skipped".to_string(),
+                    },
+                    "interprocedural analysis skipped due to internal error",
+                )
+            }
+        }
+    }
+
+    /// Run **path-sensitive liveness** as a refinement of the basic
+    /// liveness check.
+    ///
+    /// Invokes [`crate::liveness::compute_path_sensitive_liveness`]
+    /// (meet-at-join dataflow) to compute per-point "definitely live on
+    /// all paths" resource sets, then uses these sets to flag potential
+    /// use-after-free violations: any `Read`/`Write` access whose
+    /// resource is allocated somewhere in the program but not provably
+    /// live at the access point indicates that the resource is dead on
+    /// at least one reaching path.
+    ///
+    /// This is more precise than the basic may-analysis (which uses
+    /// join/union) and reduces false positives. Intended to be invoked
+    /// at `Normal` and `Exhaustive` verification levels. Panics are
+    /// caught and reported as `Unverified`.
+    pub fn verify_liveness_path_sensitive(
+        &self,
+        input: &VerificationInput,
+    ) -> VerificationResult {
+        let liveness_input = self.extract_liveness_input(&input.scg);
+
+        let live_in_result = catch_unwind(AssertUnwindSafe(|| {
+            crate::liveness::compute_path_sensitive_liveness(&liveness_input)
+        }));
+
+        match live_in_result {
+            Ok(live_in) => {
+                // Collect the set of resources that are allocated
+                // somewhere in the program. Only these can be the
+                // subject of a use-after-free.
+                let mut allocated_resources: std::collections::HashSet<ResourceId> =
+                    std::collections::HashSet::new();
+                let mut accesses: Vec<(PointId, ResourceId, EventAction)> = Vec::new();
+
+                for event in &liveness_input.events {
+                    match event.event {
+                        EventAction::Allocate | EventAction::Acquire | EventAction::Send => {
+                            allocated_resources.insert(event.resource);
+                        }
+                        EventAction::Read | EventAction::Write => {
+                            accesses.push((event.point, event.resource, event.event.clone()));
+                        }
+                        _ => {}
+                    }
+                }
+
+                let mut violations: Vec<String> = Vec::new();
+                for (point, rid, action) in &accesses {
+                    if !allocated_resources.contains(rid) {
+                        // Resource is not an allocated resource — skip
+                        // (e.g., stack/static memory modeled without an
+                        // Allocation in the SCG).
+                        continue;
+                    }
+                    match live_in.get(point) {
+                        Some(live_set) => {
+                            if !live_set.contains(rid) {
+                                // The resource is allocated somewhere
+                                // but is not provably live on all paths
+                                // reaching this access — there is a
+                                // path on which the resource was
+                                // deallocated (or never allocated)
+                                // before the access.
+                                violations.push(format!(
+                                    "{:?} of {} at {} may be use-after-free \
+                                     (resource not provably live on all paths)",
+                                    action, rid, point
+                                ));
+                            }
+                        }
+                        None => {
+                            // No CFG information for this point —
+                            // cannot determine liveness. Skip rather
+                            // than risk a false positive.
+                        }
+                    }
+                }
+
+                if violations.is_empty() {
+                    VerificationResult::new(
+                        "path_sensitive_liveness",
+                        VerificationStatus::Proven,
+                        format!(
+                            "path-sensitive liveness refinement passed \
+                             ({} program points analyzed)",
+                            live_in.len()
+                        ),
+                    )
+                } else {
+                    let total = violations.len();
+                    let preview: Vec<String> =
+                        violations.iter().take(5).cloned().collect();
+                    let message = format!(
+                        "{} path-sensitive liveness violation(s): {}",
+                        total,
+                        preview.join("; ")
+                    );
+                    VerificationResult::new(
+                        "path_sensitive_liveness",
+                        VerificationStatus::Violated {
+                            counterexample: CounterExample::new(
+                                Vec::new(),
+                                "path-sensitive-liveness".to_string(),
+                                message.clone(),
+                            ),
+                        },
+                        message,
+                    )
+                }
+            }
+            Err(_) => {
+                log::warn!(
+                    "IVE: path-sensitive liveness panicked; skipping refinement pass"
+                );
+                VerificationResult::new(
+                    "path_sensitive_liveness",
+                    VerificationStatus::Unverified {
+                        reason: "path-sensitive liveness analysis panicked \
+                                 and was skipped"
+                            .to_string(),
+                    },
+                    "path-sensitive liveness skipped due to internal error",
+                )
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // SCG → Verifier Input Extraction
     // -----------------------------------------------------------------------
 
@@ -217,22 +508,53 @@ impl VerificationEngine {
         // Map from SCG allocation NodeId to the ResourceId assigned for
         // liveness tracking, so that deallocations can reference the same
         // resource ID as their corresponding allocation.
-        let mut alloc_node_to_rid: HashMap<NodeId, ResourceId> = HashMap::new();
+        let mut alloc_node_to_rid: BTreeMap<NodeId, ResourceId> = BTreeMap::new();
+        // Map from RegionId to the ResourceId of the allocation that owns
+        // the region. Used to correlate Access events with their owning
+        // allocation so the LivenessVerifier can detect use-after-free
+        // (a Read/Write on a resource that has already been Deallocated
+        // along the path reaching the access). Populated in pass 1 below
+        // so that accesses are correctly correlated regardless of the
+        // SCG's node-index ordering.
+        let mut region_to_rid: BTreeMap<RegionId, ResourceId> = BTreeMap::new();
 
+        // Pass 1: assign ResourceIds to all allocation nodes and build the
+        // region→resource map. Doing this in a separate pass before
+        // emitting events ensures that an Access referring to a region is
+        // correlated with its allocation even when the SCG is not strictly
+        // topologically ordered (e.g., an access that appears before its
+        // allocation in node-index order). When multiple allocations
+        // share a region (unusual), the first one's ResourceId wins so
+        // all events on that region share a single resource identity.
+        for node in scg.nodes() {
+            if let NodeType::Allocation = node.node_type {
+                if let NodePayload::Allocation(alloc) = &node.payload {
+                    let rid = ResourceId(next_resource_id);
+                    next_resource_id += 1;
+                    alloc_node_to_rid.insert(node.id, rid);
+                    region_to_rid.entry(alloc.region_id).or_insert(rid);
+                }
+            }
+        }
+
+        // Pass 2: emit events in SCG (node-index) order, which is the
+        // program order for typical SCGs. The resulting event sequence is
+        // allocations, accesses, and deallocations interleaved in program
+        // order, which the LivenessVerifier walks to detect leaks and
+        // use-after-free.
         for node in scg.nodes() {
             match node.node_type {
                 NodeType::Allocation => {
                     if let NodePayload::Allocation(_alloc) = &node.payload {
-                        let rid = ResourceId(next_resource_id);
-                        next_resource_id += 1;
-                        alloc_node_to_rid.insert(node.id, rid);
-                        input.add_event(ResourceEvent {
-                            resource: rid,
-                            kind: ResourceKind::Memory,
-                            event: EventAction::Allocate,
-                            point: PointId(node.id.as_u64()),
-                            thread: ThreadId(0),
-                        });
+                        if let Some(&rid) = alloc_node_to_rid.get(&node.id) {
+                            input.add_event(ResourceEvent {
+                                resource: rid,
+                                kind: ResourceKind::Memory,
+                                event: EventAction::Allocate,
+                                point: PointId(node.id.as_u64()),
+                                thread: ThreadId(0),
+                            });
+                        }
                     }
                 }
                 NodeType::Deallocation => {
@@ -251,8 +573,57 @@ impl VerificationEngine {
                     }
                 }
                 NodeType::Access => {
-                    // Access events don't directly affect liveness
-                    // but they create resource usage points
+                    // Emit Read and/or Write events for each memory access.
+                    // The LivenessVerifier uses these events — correlated
+                    // with Allocate/Deallocate events on the same resource
+                    // via the `resource` field — to detect use-after-free:
+                    // a Read or Write event whose resource has already
+                    // been Deallocated on the path reaching the access.
+                    if let NodePayload::Access(access) = &node.payload {
+                        // Look up the ResourceId for the region being
+                        // accessed. If the region has no known allocation
+                        // (e.g., an access to stack/static memory not
+                        // modeled as an Allocation in the SCG), allocate
+                        // a fresh ResourceId so the access is still
+                        // recorded for the verifier; accesses to the same
+                        // unknown region share that ResourceId.
+                        let rid = *region_to_rid
+                            .entry(access.region_id)
+                            .or_insert_with(|| {
+                                let r = ResourceId(next_resource_id);
+                                next_resource_id += 1;
+                                r
+                            });
+                        // Map AccessMode to one or two EventActions and
+                        // emit each as a ResourceEvent. ReadWrite emits
+                        // both Read and Write so the verifier sees each
+                        // individual memory operation (this matters for
+                        // distinguishing read-after-free from
+                        // write-after-free).
+                        let mut modes: [Option<EventAction>; 2] =
+                            [None, None];
+                        match access.mode {
+                            AccessMode::Read => {
+                                modes[0] = Some(EventAction::Read);
+                            }
+                            AccessMode::Write => {
+                                modes[0] = Some(EventAction::Write);
+                            }
+                            AccessMode::ReadWrite => {
+                                modes[0] = Some(EventAction::Read);
+                                modes[1] = Some(EventAction::Write);
+                            }
+                        }
+                        for ev in modes.into_iter().flatten() {
+                            input.add_event(ResourceEvent {
+                                resource: rid,
+                                kind: ResourceKind::Memory,
+                                event: ev,
+                                point: PointId(node.id.as_u64()),
+                                thread: ThreadId(0),
+                            });
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -338,15 +709,51 @@ impl VerificationEngine {
     }
 
     /// Extract exclusivity-relevant input from the SCG.
+    ///
+    /// # W5 fix: sync edges vs. program-order edges
+    ///
+    /// Previously this method treated *any* `ControlFlow` edge between
+    /// two `Access` nodes as a synchronization (happens-before) edge.
+    /// That was wrong: a well-formed single-threaded CFG transitively
+    /// orders all accesses, so Exclusivity was vacuously `Proven` and
+    /// real data races were undetectable.
+    ///
+    /// The fix splits the two concepts:
+    ///
+    /// - **Program-order** edges (`ExclusivityInput::program_order`):
+    ///   derived from `ControlFlow` reachability between `Access` nodes.
+    ///   These order accesses within a single thread of execution. For
+    ///   single-threaded programs, two accesses ordered by program-order
+    ///   do not conflict (sequential execution provides ordering).
+    ///
+    /// - **Sync** edges (`ExclusivityInput::sync_edges`): derived only
+    ///   from actual synchronization operations — `Effect` nodes whose
+    ///   `effect_kind` indicates a mutex lock/unlock, an atomic
+    ///   load/store/CAS, or a channel send/recv. Only these establish
+    ///   cross-thread happens-before. For each sync `Effect` node `E`,
+    ///   we add a sync edge from every `Access` that can reach `E` via
+    ///   `ControlFlow` to every `Access` reachable from `E` via
+    ///   `ControlFlow`.
     fn extract_exclusivity_input(&self, scg: &SCG) -> ExclusivityInput {
+        use std::collections::{HashMap, HashSet, VecDeque};
+
         let mut input = ExclusivityInput::new();
         let mut next_access_id: u64 = 1;
+        // Map from SCG NodeId to the AccessId we assigned for it. The
+        // old code used NodeId values directly as AccessIds, which never
+        // matched the actual AccessRecords (whose IDs start at 1), so
+        // the sync edges it created were effectively dead.
+        let mut node_to_access: HashMap<NodeId, crate::exclusivity::AccessId> = HashMap::new();
+        let mut access_node_ids: Vec<NodeId> = Vec::new();
 
+        // Step 1: Collect all Access nodes and assign AccessIds.
         for node in scg.nodes() {
             if node.node_type == NodeType::Access {
                 if let NodePayload::Access(access) = &node.payload {
                     let access_id = crate::exclusivity::AccessId(next_access_id);
                     next_access_id += 1;
+                    node_to_access.insert(node.id, access_id);
+                    access_node_ids.push(node.id);
 
                     let kind = match access.mode {
                         AccessMode::Read => ExclusivityAccessKind::Read,
@@ -354,7 +761,11 @@ impl VerificationEngine {
                         AccessMode::ReadWrite => ExclusivityAccessKind::Write, // Conservative
                     };
 
-                    let base_address = 0; // SCG doesn't track concrete addresses
+                    // Use the access offset (if any) as the base address
+                    // so that accesses to different offsets within the
+                    // same region don't spuriously overlap. Falls back
+                    // to 0 (the SCG doesn't track concrete addresses).
+                    let base_address = access.offset.unwrap_or(0);
                     let size = access.access_size.unwrap_or(8);
 
                     let pp = format!(
@@ -376,20 +787,121 @@ impl VerificationEngine {
             }
         }
 
-        // Extract synchronization edges from ControlFlow edges between Access nodes
+        // Step 2: Build ControlFlow adjacency lists (forward and reverse)
+        // restricted to ControlFlow edges. Other edge kinds (DataFlow,
+        // Derivation, Annotation, Call, Return) do not represent
+        // sequential execution and must not contribute to program-order.
+        let mut cf_succ: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+        let mut cf_pred: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
         for edge in scg.edges() {
-            if edge.kind == vuma_scg::edge::EdgeKind::ControlFlow {
-                let src = scg.get_node(edge.source);
-                let dst = scg.get_node(edge.target);
-                if let (Some(s), Some(d)) = (src, dst) {
-                    if s.node_type == NodeType::Access && d.node_type == NodeType::Access {
-                        // Control flow between two accesses creates a happens-before ordering
-                        input.add_sync_edge(SyncEdgeRecord::new(
-                            crate::exclusivity::AccessId(edge.source.as_u64()),
-                            crate::exclusivity::AccessId(edge.target.as_u64()),
-                            SyncOrdering::HappensBefore,
-                        ));
+            if edge.kind == EdgeKind::ControlFlow {
+                cf_succ.entry(edge.source).or_default().push(edge.target);
+                cf_pred.entry(edge.target).or_default().push(edge.source);
+            }
+        }
+
+        // Step 3: Build program-order edges from ControlFlow reachability
+        // between Access nodes. Sequential ControlFlow orders accesses
+        // within a single thread — but it does NOT establish cross-thread
+        // happens-before, so we use `program_order` (not `sync_edges`).
+        //
+        // For each Access node, BFS forward over ControlFlow and add a
+        // program-order edge to every other Access node reachable. The
+        // exclusivity verifier takes the transitive closure, so we could
+        // emit only direct edges — but emitting the full reachability
+        // here keeps the verifier's closure logic simple and robust to
+        // graphs that mix Access and non-Access nodes on a path.
+        for &a_src in &access_node_ids {
+            let src_access_id = node_to_access[&a_src];
+            let mut visited: HashSet<NodeId> = HashSet::new();
+            let mut queue: VecDeque<NodeId> = VecDeque::new();
+            queue.push_back(a_src);
+            while let Some(current) = queue.pop_front() {
+                if !visited.insert(current) {
+                    continue;
+                }
+                let succs = match cf_succ.get(&current) {
+                    Some(s) => s,
+                    None => continue,
+                };
+                for &succ in succs {
+                    if succ == a_src {
+                        continue;
                     }
+                    if let Some(&succ_access_id) = node_to_access.get(&succ) {
+                        if succ_access_id != src_access_id {
+                            input.add_program_order_edge(src_access_id, succ_access_id);
+                        }
+                        // Continue past this Access node — further
+                        // Access nodes downstream are also ordered
+                        // relative to `a_src`.
+                    }
+                    queue.push_back(succ);
+                }
+            }
+        }
+
+        // Step 4: Build sync edges from synchronization Effect nodes.
+        //
+        // An `Effect` node whose `effect_kind` mentions lock/unlock/mutex,
+        // atomic, or channel send/recv is treated as a synchronization
+        // point. For each such node E, every Access that can reach E via
+        // ControlFlow happens-before every Access reachable from E via
+        // ControlFlow. The ordering kind is inferred from `effect_kind`:
+        //
+        // - "atomic"            → SyncOrdering::Atomic
+        // - "mutex"/"lock"/"unlock" → SyncOrdering::Mutex(effect_node_id)
+        // - "channel"/"send"/"recv" → SyncOrdering::HappensBefore
+        //
+        // Ordinary Effect nodes (e.g., "print", "log") do NOT create
+        // sync edges — they are not synchronization operations.
+        for node in scg.nodes() {
+            if node.node_type != NodeType::Effect {
+                continue;
+            }
+            let effect_kind = match &node.payload {
+                NodePayload::Effect(EffectNode { effect_kind, .. }) => effect_kind.as_str(),
+                _ => continue,
+            };
+            let ek = effect_kind.to_lowercase();
+            let is_sync = ek.contains("lock")
+                || ek.contains("unlock")
+                || ek.contains("mutex")
+                || ek.contains("atomic")
+                || ek.contains("channel")
+                || ek.contains("send")
+                || ek.contains("recv");
+            if !is_sync {
+                continue;
+            }
+
+            let ordering = if ek.contains("atomic") {
+                SyncOrdering::Atomic
+            } else if ek.contains("mutex") || ek.contains("lock") || ek.contains("unlock") {
+                // Use the Effect node's NodeId as the lock identifier.
+                // Distinct lock/unlock Effect nodes get distinct IDs,
+                // which is sufficient for the verifier's
+                // both_protected_by_same_lock check (it compares lock
+                // IDs for equality).
+                SyncOrdering::Mutex(node.id.as_u64())
+            } else {
+                // channel send/recv → happens-before.
+                SyncOrdering::HappensBefore
+            };
+
+            // Access predecessors (BFS backward over ControlFlow).
+            let pred_accesses =
+                Self::cf_reachable_accesses(node.id, &cf_pred, &node_to_access);
+            // Access successors (BFS forward over ControlFlow).
+            let succ_accesses =
+                Self::cf_reachable_accesses(node.id, &cf_succ, &node_to_access);
+
+            for &p in &pred_accesses {
+                for &s in &succ_accesses {
+                    if p == s {
+                        continue;
+                    }
+                    input.add_sync_edge(SyncEdgeRecord::new(p, s, ordering.clone()));
                 }
             }
         }
@@ -397,12 +909,47 @@ impl VerificationEngine {
         input
     }
 
+    /// BFS over a ControlFlow adjacency map starting from `start`,
+    /// returning the AccessIds of every Access node reachable from
+    /// `start` (excluding `start` itself if it is an Access node).
+    ///
+    /// `adj` is either `cf_succ` (forward reachability) or `cf_pred`
+    /// (backward reachability).
+    fn cf_reachable_accesses(
+        start: NodeId,
+        adj: &std::collections::HashMap<NodeId, Vec<NodeId>>,
+        node_to_access: &std::collections::HashMap<NodeId, crate::exclusivity::AccessId>,
+    ) -> Vec<crate::exclusivity::AccessId> {
+        use std::collections::{HashSet, VecDeque};
+
+        let mut visited: HashSet<NodeId> = HashSet::new();
+        let mut queue: VecDeque<NodeId> = VecDeque::new();
+        let mut result: Vec<crate::exclusivity::AccessId> = Vec::new();
+        queue.push_back(start);
+        while let Some(current) = queue.pop_front() {
+            if !visited.insert(current) {
+                continue;
+            }
+            let neighbors = match adj.get(&current) {
+                Some(n) => n,
+                None => continue,
+            };
+            for &nb in neighbors {
+                if let Some(&access_id) = node_to_access.get(&nb) {
+                    result.push(access_id);
+                }
+                queue.push_back(nb);
+            }
+        }
+        result
+    }
+
     /// Feed interpretation events from the SCG into the InterpretationVerifier.
     fn feed_interpretation_events(
         &self,
         verifier: &mut InterpretationVerifier,
         scg: &SCG,
-        bd_map: &Option<HashMap<NodeId, BD>>,
+        bd_map: &Option<BTreeMap<NodeId, BD>>,
     ) {
         // If we have BDs, use them; otherwise use default BDs
         let default_bd = BD::new(
@@ -441,7 +988,7 @@ impl VerificationEngine {
     fn feed_origin_data(&self, verifier: &mut OriginVerifier, scg: &SCG) {
         let mut next_region_id: u64 = 1;
         let mut next_derivation_id: u64 = 1;
-        let mut allocation_regions: HashMap<NodeId, OriginRegionId> = HashMap::new();
+        let mut allocation_regions: BTreeMap<NodeId, OriginRegionId> = BTreeMap::new();
 
         // Add regions for allocations
         for node in scg.nodes() {
@@ -508,7 +1055,7 @@ impl VerificationEngine {
     /// Construct a CleanupGraph from the SCG.
     fn extract_cleanup_graph(&self, scg: &SCG) -> CleanupGraph {
         let mut graph = CleanupGraph::new();
-        let mut node_map: HashMap<NodeId, CleanupNodeId> = HashMap::new();
+        let mut node_map: BTreeMap<NodeId, CleanupNodeId> = BTreeMap::new();
 
         // Add nodes for each SCG node
         for node in scg.nodes() {
@@ -663,11 +1210,11 @@ impl std::fmt::Display for HardenedViolation {
 ///
 /// Tracks CapD transitions through every SCG edge and detects use-after-cap-drop
 /// violations — reading a value after its Write capability has been dropped.
-pub fn check_capability_flow(scg: &SCG, bd_map: &HashMap<NodeId, BD>) -> Vec<HardenedViolation> {
+pub fn check_capability_flow(scg: &SCG, bd_map: &BTreeMap<NodeId, BD>) -> Vec<HardenedViolation> {
     let mut violations = Vec::new();
 
     // Track the effective CapD at each node (initially from BD map or all())
-    let mut effective_capd: HashMap<NodeId, CapD> = HashMap::new();
+    let mut effective_capd: BTreeMap<NodeId, CapD> = BTreeMap::new();
 
     // Initialize CapD from BD map
     for node in scg.nodes() {
@@ -739,12 +1286,12 @@ pub fn check_capability_flow(scg: &SCG, bd_map: &HashMap<NodeId, BD>) -> Vec<Har
 ///
 /// Verifies aliasing RelD guarantees at every write. Detects write-through-alias
 /// violations where two pointers alias the same region and one writes.
-pub fn check_aliasing_integrity(scg: &SCG, bd_map: &HashMap<NodeId, BD>) -> Vec<HardenedViolation> {
+pub fn check_aliasing_integrity(scg: &SCG, bd_map: &BTreeMap<NodeId, BD>) -> Vec<HardenedViolation> {
     let mut violations = Vec::new();
 
     // Collect all access nodes grouped by region
-    let mut accesses_by_region: HashMap<u64, Vec<(NodeId, AccessMode, Option<BD>)>> =
-        HashMap::new();
+    let mut accesses_by_region: BTreeMap<u64, Vec<(NodeId, AccessMode, Option<BD>)>> =
+        BTreeMap::new();
 
     for node in scg.nodes() {
         if node.node_type == NodeType::Access {
@@ -828,7 +1375,7 @@ pub fn check_aliasing_integrity(scg: &SCG, bd_map: &HashMap<NodeId, BD>) -> Vec<
 /// transitive derivation chains (A→B→C where C.capd ≤ A.capd).
 pub fn validate_derivation_chain(
     scg: &SCG,
-    bd_map: &HashMap<NodeId, BD>,
+    bd_map: &BTreeMap<NodeId, BD>,
 ) -> Vec<HardenedViolation> {
     let mut violations = Vec::new();
 
@@ -867,7 +1414,7 @@ pub fn validate_derivation_chain(
 
     // Validate transitive chains: for A→B→C, verify C.capd ⊆ A.capd
     // Build an adjacency list for derivation edges
-    let mut deriv_successors: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+    let mut deriv_successors: BTreeMap<NodeId, Vec<NodeId>> = BTreeMap::new();
     for (source, target) in &derivation_edges {
         deriv_successors.entry(*source).or_default().push(*target);
     }
@@ -931,7 +1478,7 @@ pub fn validate_derivation_chain(
 /// Unlike the individual verify_* methods that stop at the first issue,
 /// this method collects every violation found across all checks into a
 /// `BatchedViolations` structure.
-pub fn verify_all_hardened(scg: &SCG, bd_map: &HashMap<NodeId, BD>) -> BatchedViolations {
+pub fn verify_all_hardened(scg: &SCG, bd_map: &BTreeMap<NodeId, BD>) -> BatchedViolations {
     let mut batched = BatchedViolations::new();
 
     // Invariant 1: Escape analysis
@@ -991,6 +1538,49 @@ mod tests {
         let input = VerificationInput::from_scg(SCG::new());
         let results = engine.verify_all(&input);
         assert_eq!(results.len(), 5);
+    }
+
+    #[test]
+    fn verify_hardened_on_empty_scg_is_proven() {
+        // The hardened pass (escape + capability_flow + aliasing +
+        // derivation_chain) should report no violations on an empty SCG.
+        let engine = VerificationEngine::new();
+        let input = VerificationInput::from_scg(SCG::new());
+        let result = engine.verify_hardened(&input);
+        assert_eq!(result.invariant, "hardened_invariants");
+        assert!(
+            result.is_proven(),
+            "hardened pass on empty SCG should be proven, got: {}",
+            result.status
+        );
+    }
+
+    #[test]
+    fn verify_interprocedural_on_empty_scg_is_proven() {
+        // No functions in the SCG → no cross-function violations.
+        let engine = VerificationEngine::new();
+        let input = VerificationInput::from_scg(SCG::new());
+        let result = engine.verify_interprocedural(&input);
+        assert_eq!(result.invariant, "interprocedural");
+        assert!(
+            result.is_proven(),
+            "interprocedural on empty SCG should be proven, got: {}",
+            result.status
+        );
+    }
+
+    #[test]
+    fn verify_path_sensitive_liveness_on_empty_scg_is_proven() {
+        // No allocations → no use-after-free possible.
+        let engine = VerificationEngine::new();
+        let input = VerificationInput::from_scg(SCG::new());
+        let result = engine.verify_liveness_path_sensitive(&input);
+        assert_eq!(result.invariant, "path_sensitive_liveness");
+        assert!(
+            result.is_proven(),
+            "path-sensitive liveness on empty SCG should be proven, got: {}",
+            result.status
+        );
     }
 
     #[test]
@@ -1212,7 +1802,7 @@ mod tests {
     #[test]
     fn verification_input_with_bd_map() {
         let scg = SCG::new();
-        let bd_map = HashMap::new();
+        let bd_map = BTreeMap::new();
         let input = VerificationInput::with_bd_map(scg, bd_map);
         assert!(input.bd_map.is_some());
     }

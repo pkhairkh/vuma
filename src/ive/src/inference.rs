@@ -20,7 +20,13 @@ use crate::constraint::{
     ComplexityConstraint, Constraint, LivenessConstraint, ResourceFlowConstraint,
     SecurityConstraint, TemporalConstraint,
 };
-use hashbrown::HashMap;
+// NOTE(W1-c): `HashMap` was replaced by `BTreeMap` for the `bd_map` fixpoint
+// data to guarantee deterministic iteration order (HashMap iteration order
+// is randomized, which led to non-deterministic fixpoint convergence).
+// `BdInferenceResult.bd_map` (defined externally in `vuma_bd::inference`)
+// still uses `hashbrown::HashMap`, so we convert at the seam via
+// `.into_iter().collect()` when flowing into this `InferenceResult`.
+use std::collections::BTreeMap;
 use std::fmt;
 use vuma_bd::descriptor::BD;
 use vuma_bd::inference::{
@@ -90,7 +96,7 @@ pub enum InferenceError {
 #[derive(Debug, Clone)]
 pub struct InferenceResult {
     /// Inferred BD for each node.
-    pub bd_map: HashMap<NodeId, BD>,
+    pub bd_map: BTreeMap<NodeId, BD>,
     /// IVE-level constraints derived from the SCG structure.
     pub constraints: Vec<Constraint>,
     /// Number of BD inference iterations.
@@ -228,14 +234,14 @@ impl InferenceEngine {
                         summary,
                     });
                 }
-                (result.bd_map, result.iterations)
+                (result.bd_map.into_iter().collect(), result.iterations)
             }
             Err(e) => {
                 errors.push(InferenceError::BdErrors {
                     count: 1,
                     summary: format!("{}", e),
                 });
-                (HashMap::new(), 0)
+                (BTreeMap::new(), 0)
             }
         };
 
@@ -295,8 +301,8 @@ impl InferenceEngine {
     /// - **Liveness**: progress guarantees from the graph topology.
     pub fn infer_constraints(&self, scg: &SCG) -> Vec<Constraint> {
         let bd_map = match self.run_bd_inference(scg) {
-            Ok(result) => result.bd_map,
-            Err(_) => HashMap::new(),
+            Ok(result) => result.bd_map.into_iter().collect(),
+            Err(_) => BTreeMap::new(),
         };
         self.derive_constraints(scg, &bd_map)
     }
@@ -346,7 +352,7 @@ impl InferenceEngine {
     }
 
     /// Derive IVE-level constraints from the SCG structure and inferred BDs.
-    fn derive_constraints(&self, scg: &SCG, bd_map: &HashMap<NodeId, BD>) -> Vec<Constraint> {
+    fn derive_constraints(&self, scg: &SCG, bd_map: &BTreeMap<NodeId, BD>) -> Vec<Constraint> {
         let mut constraints = Vec::new();
 
         // Derive constraints from edges
@@ -595,7 +601,7 @@ mod tests {
     #[test]
     fn inference_result_display() {
         let result = InferenceResult {
-            bd_map: HashMap::new(),
+            bd_map: BTreeMap::new(),
             constraints: vec![],
             iterations: 5,
             warnings: vec![],
@@ -609,7 +615,7 @@ mod tests {
     #[test]
     fn inference_result_is_ok() {
         let result = InferenceResult {
-            bd_map: HashMap::new(),
+            bd_map: BTreeMap::new(),
             constraints: vec![],
             iterations: 0,
             warnings: vec![],
@@ -621,7 +627,7 @@ mod tests {
     #[test]
     fn inference_result_has_errors() {
         let result = InferenceResult {
-            bd_map: HashMap::new(),
+            bd_map: BTreeMap::new(),
             constraints: vec![],
             iterations: 0,
             warnings: vec![],

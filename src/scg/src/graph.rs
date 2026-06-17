@@ -4,7 +4,7 @@
 //! `petgraph::DiGraph` and provides high-level operations for
 //! constructing, querying, and manipulating the Semantic Computation Graph.
 
-use hashbrown::HashMap;
+use std::collections::BTreeMap;
 use indexmap::IndexSet;
 use petgraph::algo::{has_path_connecting, toposort};
 use petgraph::graph::{DiGraph, EdgeIndex, NodeIndex};
@@ -125,15 +125,15 @@ pub struct SCG {
     /// The underlying directed graph.
     graph: DiGraph<NodeData, EdgeData>,
     /// Mapping from external `NodeId` to petgraph `NodeIndex`.
-    node_id_to_index: HashMap<NodeId, NodeIndex>,
+    node_id_to_index: BTreeMap<NodeId, NodeIndex>,
     /// Mapping from petgraph `NodeIndex` to external `NodeId`.
-    node_index_to_id: HashMap<NodeIndex, NodeId>,
+    node_index_to_id: BTreeMap<NodeIndex, NodeId>,
     /// Mapping from external `EdgeId` to petgraph `EdgeIndex`.
-    edge_id_to_index: HashMap<EdgeId, EdgeIndex>,
+    edge_id_to_index: BTreeMap<EdgeId, EdgeIndex>,
     /// Mapping from petgraph `EdgeIndex` to external `EdgeId`.
-    edge_index_to_id: HashMap<EdgeIndex, EdgeId>,
+    edge_index_to_id: BTreeMap<EdgeIndex, EdgeId>,
     /// Regions defined within this SCG.
-    regions: HashMap<RegionId, SCGRegion>,
+    regions: BTreeMap<RegionId, SCGRegion>,
     /// Counter for generating the next `NodeId`.
     next_node_id: u64,
     /// Counter for generating the next `EdgeId`.
@@ -145,11 +145,11 @@ impl SCG {
     pub fn new() -> Self {
         Self {
             graph: DiGraph::new(),
-            node_id_to_index: HashMap::new(),
-            node_index_to_id: HashMap::new(),
-            edge_id_to_index: HashMap::new(),
-            edge_index_to_id: HashMap::new(),
-            regions: HashMap::new(),
+            node_id_to_index: BTreeMap::new(),
+            node_index_to_id: BTreeMap::new(),
+            edge_id_to_index: BTreeMap::new(),
+            edge_index_to_id: BTreeMap::new(),
+            regions: BTreeMap::new(),
             next_node_id: 0,
             next_edge_id: 0,
         }
@@ -736,9 +736,9 @@ impl SCG {
     ///
     /// Returns a mapping from old `NodeId`s (in `other`) to new `NodeId`s
     /// (in the merged graph).
-    pub fn merge(&mut self, other: SCG) -> HashMap<NodeId, NodeId> {
-        let mut node_map: HashMap<NodeId, NodeId> = HashMap::new();
-        let mut edge_map: HashMap<EdgeId, EdgeId> = HashMap::new();
+    pub fn merge(&mut self, other: SCG) -> BTreeMap<NodeId, NodeId> {
+        let mut node_map: BTreeMap<NodeId, NodeId> = BTreeMap::new();
+        let mut edge_map: BTreeMap<EdgeId, EdgeId> = BTreeMap::new();
 
         // Add all nodes from other, creating new IDs
         for node_data in other.nodes() {

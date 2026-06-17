@@ -4,8 +4,23 @@
 //! a concrete execution trace that demonstrates the violation. This module
 //! provides data structures for representing counterexamples and methods for
 //! constructing minimal ones.
+//!
+//! ## Soundness note (W9)
+//!
+//! Real counterexamples must come from the **IVE verifiers** — W7 (Liveness,
+//! Origin) and W8 (Exclusivity, Interpretation) — which populate the
+//! [`CounterExample::execution`] field with a real SCG path. The previous
+//! implementation of [`CounterExample::minimal`] *fabricated* a template
+//! trace from the invariant name (e.g. `[Free{region:0}, Read{addr:0,
+//! region:0}]` for every Liveness violation) regardless of the actual
+//! program. That fabrication has been **removed**. When `execution` is
+//! empty, `minimal()` returns the counterexample unchanged (no fabrication)
+//! and emits a `log::warn!`; callers that prefer an explicit error should
+//! use [`CounterExample::try_minimal`], which returns
+//! [`MinimalError::NoRealTrace`].
 
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 use crate::proof::{InvariantName, ProgramPoint};
 
@@ -102,6 +117,36 @@ impl ViolationPoint {
 }
 
 // ---------------------------------------------------------------------------
+// MinimalError
+// ---------------------------------------------------------------------------
+
+/// Errors that can arise during counterexample minimization.
+///
+/// Returned by [`CounterExample::try_minimal`] when the counterexample does
+/// not carry a real execution trace.
+#[derive(Debug, Clone, Error, PartialEq, Eq)]
+pub enum MinimalError {
+    /// `CounterExample::try_minimal` was called on a counterexample with an
+    /// empty `execution` trace.
+    ///
+    /// Real counterexamples must come from the IVE verifiers — W7 for
+    /// Liveness/Origin, W8 for Exclusivity/Interpretation — which populate
+    /// `execution` with a real SCG path. The previous `minimal()`
+    /// implementation fabricated a template trace from the invariant name
+    /// (e.g. `[Free{region:0}, Read{addr:0,region:0}]` for every Liveness
+    /// violation); that fabrication was unsound and has been removed (W9).
+    #[error(
+        "cannot construct a minimal counterexample without the actual SCG \
+         path — use the verifier's built-in counterexample extraction \
+         instead (invariant: {invariant})"
+    )]
+    NoRealTrace {
+        /// The invariant for which the counterexample was requested.
+        invariant: InvariantName,
+    },
+}
+
+// ---------------------------------------------------------------------------
 // CounterExample
 // ---------------------------------------------------------------------------
 
@@ -121,6 +166,11 @@ pub struct CounterExample {
 impl CounterExample {
     /// Create a counterexample from a violation point, with an empty execution
     /// trace.
+    ///
+    /// **Note (W9):** an empty `execution` means no real SCG path is
+    /// available. [`Self::minimal`] will refuse to fabricate one; callers
+    /// should populate `execution` with a real path from the IVE verifiers
+    /// (W7/W8) before invoking `minimal()`.
     pub fn from_violation(_msg: &str, violation: ViolationPoint) -> Self {
         Self {
             execution: Vec::new(),
@@ -131,24 +181,49 @@ impl CounterExample {
     /// Construct a minimal counterexample by applying delta-debugging style
     /// trace minimization.
     ///
-    /// Starting from the violation point, traces backwards through the proof
-    /// steps to find a minimal set of steps that still produce the violation.
-    /// Steps that don't contribute to the violation are removed using a
-    /// delta-debugging approach:
+    /// Starting from a **real** execution trace (populated by the IVE
+    /// verifiers — W7/W8), this method tries removing each step one by one
+    /// and checks whether the violation is still demonstrated. Steps that
+    /// don't contribute to the violation are removed.
     ///
-    /// 1. Collect all steps from the counterexample.
+    /// # Soundness note (W9)
+    ///
+    /// **This method does not fabricate a counterexample trace from the
+    /// invariant name.** The previous implementation called
+    /// `infer_minimal_trace()` which produced a template trace (e.g.
+    /// `[Free{region:0}, Read{addr:0,region:0}]` for every Liveness
+    /// violation) regardless of the actual program — this was unsound
+    /// because the fabricated trace was not a real execution of any
+    /// program. That fabrication has been **removed**.
+    ///
+    /// When `self.execution` is **empty**, this method returns a clone of
+    /// `self` (with the empty trace preserved) and emits a `log::warn!`
+    /// directing the caller to the verifier's built-in counterexample
+    /// extraction. Callers that prefer an explicit error should use
+    /// [`Self::try_minimal`].
+    ///
+    /// # Algorithm
+    ///
+    /// 1. If the trace is empty, return `self` unchanged (no fabrication).
     /// 2. Start with all steps as "necessary".
     /// 3. For each step, try removing it and check if the violation still
     ///    holds.
-    /// 4. If yes, mark it as unnecessary and keep it removed.
+    /// 4. If yes, keep it removed; otherwise restore it.
     /// 5. Return the minimized set.
     pub fn minimal(&self) -> CounterExample {
-        // If the trace is empty, produce a minimal trace from the violation.
+        // If the trace is empty, we REFUSE to fabricate one. Return self
+        // unchanged (with the empty trace) and log a warning.
         if self.execution.is_empty() {
-            return CounterExample {
-                execution: self.infer_minimal_trace(),
-                violation: self.violation.clone(),
-            };
+            log::warn!(
+                "CounterExample::minimal() called with an empty execution \
+                 trace for invariant '{}'. Refusing to fabricate a template \
+                 trace — real counterexamples must come from the IVE \
+                 verifiers (W7/W8). Use the verifier's built-in \
+                 counterexample extraction instead, or use \
+                 CounterExample::try_minimal() for an explicit error.",
+                self.violation.invariant
+            );
+            return self.clone();
         }
 
         // Delta-debugging: try removing each step one by one. If the
@@ -179,6 +254,39 @@ impl CounterExample {
             execution: necessary,
             violation: self.violation.clone(),
         }
+    }
+
+    /// Like [`Self::minimal`], but returns an explicit error when no real
+    /// execution trace is available, rather than silently returning an empty
+    /// counterexample.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MinimalError::NoRealTrace`] when `self.execution` is empty.
+    /// In that case the caller should obtain a real counterexample from the
+    /// IVE verifiers (W7 for Liveness/Origin, W8 for Exclusivity/
+    /// Interpretation) instead.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use vuma_proof::counterexample::{CounterExample, ViolationPoint};
+    /// use vuma_proof::proof::{InvariantName};
+    ///
+    /// let ce = CounterExample::from_violation(
+    ///     "err",
+    ///     ViolationPoint::new(InvariantName::Liveness, "uaf", 0x100),
+    /// );
+    /// // No real trace available — explicit error:
+    /// assert!(ce.try_minimal().is_err());
+    /// ```
+    pub fn try_minimal(&self) -> Result<CounterExample, MinimalError> {
+        if self.execution.is_empty() {
+            return Err(MinimalError::NoRealTrace {
+                invariant: self.violation.invariant,
+            });
+        }
+        Ok(self.minimal())
     }
 
     /// Check whether the violation is still demonstrated by the given subset
@@ -216,7 +324,7 @@ impl CounterExample {
                     Step::Write { region, .. } => free_regions.contains(region),
                     _ => false,
                 });
-                has_post_free_access || steps.len() == 1
+                has_post_free_access
             }
             InvariantName::Exclusivity => {
                 // Exclusivity (data race): need at least a Write step that
@@ -247,39 +355,6 @@ impl CounterExample {
                 // trace is non-empty — any step could contribute to the
                 // provenance or representation issue.
                 !steps.is_empty()
-            }
-        }
-    }
-
-    /// Infer a minimal trace from the violation type when the original
-    /// execution trace is empty.
-    fn infer_minimal_trace(&self) -> Vec<Step> {
-        match self.violation.invariant {
-            InvariantName::Liveness => {
-                // Use-after-free: Free then Read on the same region.
-                vec![Step::Free { region: 0 }, Step::Read { addr: 0, region: 0 }]
-            }
-            InvariantName::Exclusivity => {
-                // Data race: two writes to the same address.
-                vec![
-                    Step::Write {
-                        addr: 0,
-                        region: 0,
-                        value: 1,
-                    },
-                    Step::Write {
-                        addr: 0,
-                        region: 0,
-                        value: 2,
-                    },
-                ]
-            }
-            InvariantName::Cleanup => {
-                // Leak: alloc without free.
-                vec![Step::Alloc { region: 0 }]
-            }
-            InvariantName::Origin | InvariantName::Interpretation => {
-                vec![Step::Alloc { region: 0 }]
             }
         }
     }
@@ -363,23 +438,32 @@ mod tests {
 
     #[test]
     fn test_counterexample_minimal_liveness() {
+        // W9: with an empty execution trace, minimal() must REFUSE to
+        // fabricate a template trace. It returns the counterexample with
+        // an empty trace (and logs a warning). The previous behavior —
+        // fabricating [Free, Read] — was unsound and has been removed.
         let violation = ViolationPoint::new(InvariantName::Liveness, "use after free", 0x100);
         let ce = CounterExample::from_violation("err", violation);
         let min = ce.minimal();
-        assert!(!min.is_empty());
-        // For an empty trace, infer_minimal_trace produces [Free, Read].
-        assert!(matches!(min.execution[0], Step::Free { .. }));
-        assert_eq!(min.execution.len(), 2);
+        assert!(
+            min.is_empty(),
+            "minimal() on an empty trace must not fabricate steps; got {} steps",
+            min.execution.len()
+        );
+        assert_eq!(min.violation.invariant, InvariantName::Liveness);
     }
 
     #[test]
     fn test_counterexample_minimal_exclusivity() {
+        // W9: same as above — no fabrication for Exclusivity.
         let violation = ViolationPoint::new(InvariantName::Exclusivity, "data race", 0x200);
         let ce = CounterExample::from_violation("err", violation);
         let min = ce.minimal();
-        // For an empty trace, infer_minimal_trace produces two Write steps.
-        assert!(matches!(min.execution[0], Step::Write { .. }));
-        assert_eq!(min.execution.len(), 2);
+        assert!(
+            min.is_empty(),
+            "minimal() on an empty trace must not fabricate steps; got {} steps",
+            min.execution.len()
+        );
     }
 
     #[test]
@@ -430,5 +514,93 @@ mod tests {
         let s = format!("{}", ce);
         assert!(s.contains("Counterexample"));
         assert!(s.contains("liveness"));
+    }
+
+    // -- W9 soundness tests --------------------------------------------------
+
+    #[test]
+    fn test_try_minimal_empty_trace_errors() {
+        // try_minimal() on an empty trace must return an explicit error,
+        // not a fabricated counterexample.
+        let violation = ViolationPoint::new(InvariantName::Liveness, "uaf", 0x100);
+        let ce = CounterExample::from_violation("err", violation);
+        let result = ce.try_minimal();
+        assert!(result.is_err());
+        match result {
+            Err(MinimalError::NoRealTrace { invariant }) => {
+                assert_eq!(invariant, InvariantName::Liveness);
+            }
+            other => panic!("expected NoRealTrace error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_try_minimal_empty_trace_error_message() {
+        // The error message must point the caller at the IVE verifiers.
+        let violation = ViolationPoint::new(InvariantName::Exclusivity, "race", 0x200);
+        let ce = CounterExample::from_violation("err", violation);
+        let err = ce.try_minimal().unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("verifier's built-in counterexample extraction"),
+            "error should direct caller to verifier, got: {}",
+            msg
+        );
+        assert!(msg.contains("exclusivity"));
+    }
+
+    #[test]
+    fn test_try_minimal_real_trace_succeeds() {
+        // try_minimal() on a real (non-empty) trace must succeed and
+        // return a minimized counterexample.
+        let violation = ViolationPoint::new(InvariantName::Liveness, "uaf", 0x100);
+        let mut ce = CounterExample::from_violation("err", violation);
+        ce.add_step(Step::Free { region: 7 });
+        ce.add_step(Step::Read {
+            addr: 0,
+            region: 7,
+        });
+
+        let min = ce.try_minimal().expect("real trace should minimize ok");
+        // Both steps are necessary for the Liveness violation (Free + Read
+        // on the same region), so minimization keeps them.
+        assert_eq!(min.execution.len(), 2);
+    }
+
+    #[test]
+    fn test_minimal_does_not_fabricate_for_any_invariant() {
+        // For every invariant, an empty trace must yield an empty trace
+        // after minimal() — no fabrication. This is the regression test
+        // for the W9 soundness fix.
+        for inv in [
+            InvariantName::Liveness,
+            InvariantName::Exclusivity,
+            InvariantName::Cleanup,
+            InvariantName::Origin,
+            InvariantName::Interpretation,
+        ] {
+            let violation = ViolationPoint::new(inv, "test", 0);
+            let ce = CounterExample::from_violation("err", violation);
+            let min = ce.minimal();
+            assert_eq!(
+                min.execution.len(),
+                0,
+                "minimal() fabricated {} step(s) for {:?} — fabrication must be removed (W9)",
+                min.execution.len(),
+                inv
+            );
+            assert_eq!(min.violation.invariant, inv);
+        }
+    }
+
+    #[test]
+    fn test_minimal_error_no_real_trace_display() {
+        // The MinimalError must be Display-able and include the invariant.
+        let err = MinimalError::NoRealTrace {
+            invariant: InvariantName::Cleanup,
+        };
+        let s = format!("{}", err);
+        assert!(s.contains("cleanup"));
+        assert!(s.contains("counterexample"));
     }
 }
