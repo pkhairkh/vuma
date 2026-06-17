@@ -1058,10 +1058,14 @@ fn execute_code_aarch64(code: &[u8]) -> Result<i64, RuntimeError> {
 #[cfg(all(unix, target_arch = "x86_64"))]
 fn execute_code_x86_64(code: &[u8]) -> Result<i64, RuntimeError> {
     // Safety check: if the code was compiled for a non-x86_64 target (e.g., AArch64),
-    // executing it on x86_64 would cause SIGSEGV. Detect this by checking for
+    // executing it on x86_64 would cause SIGILL/SIGSEGV. Detect this by checking for
     // AArch64 instruction patterns (all AArch64 instructions are 4-byte aligned
-    // and have specific encodings). If we detect non-x86_64 code, return 0 instead
-    // of crashing.
+    // and have specific encodings). COR compiles regions to AArch64 only — so on
+    // an x86_64 CI host, the bytes received here are AArch64 machine code, which
+    // cannot be executed natively. Instead of silently returning Ok(0) (which
+    // masks the cross-arch execution failure and breaks any test that depends on
+    // the JIT return value), surface a hard error so callers know they need QEMU
+    // or another AArch64 execution environment.
     if code.len() >= 4 {
         // AArch64 RET instruction is 0xD65F03C0 (little-endian: C0 03 5F D6)
         // AArch64 NOP is 0xD503201F (little-endian: 1F 20 03 D5)
@@ -1076,8 +1080,13 @@ fn execute_code_x86_64(code: &[u8]) -> Result<i64, RuntimeError> {
             || (first_word & 0xFF000000) == 0xD6000000  // BR/BLR/RET
             || (first_word & 0xFF000000) == 0xD5000000; // System/MRS/MSR
         if is_likely_aarch64 {
-            log::debug!("execute_code_x86_64: code appears to be AArch64, skipping execution");
-            return Ok(0);
+            log::debug!(
+                "execute_code_x86_64: code appears to be AArch64, refusing to execute natively"
+            );
+            return Err(RuntimeError::ExecutionFailed(
+                0,
+                "Cannot execute AArch64 code on x86_64 host — use QEMU".to_string(),
+            ));
         }
     }
 

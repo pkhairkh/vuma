@@ -5,23 +5,33 @@
 //!
 //! # Benchmark Categories
 //!
-//! | # | Benchmark                 | What it measures                                    |
-//! |---|---------------------------|-----------------------------------------------------|
-//! | 1 | SHA256d                   | Compile time, binary size, estimated instruction count per backend |
-//! | 2 | Compilation Speed         | Parse→SCG→IR→codegen time for programs of varying size |
-//! | 3 | Backend Comparison        | Same program, binary sizes across all 8 backends    |
-//! | 4 | Codegen Quality           | Count redundant loads/stores in stack-slot output   |
+//! The suite currently has **4 categories** producing a total of **29
+//! benchmark results** when every backend succeeds:
+//!
+//! | # | Category              | Results | What it measures                                                          |
+//! |---|-----------------------|---------|---------------------------------------------------------------------------|
+//! | 1 | `sha256d`             | 8       | Compile time, binary size, instruction count per backend for the real `examples/sha256d.vuma` program (with `fibonacci.vuma` fallback). |
+//! | 2 | `compilation_speed`   | 10      | Parse→SCG→IR + full-pipeline time at 5 program sizes (10/50/100/500/1000 stmts), 2 measurements each. |
+//! | 3 | `backend_comparison`  | 8       | Same reference program compiled through all 8 backends; binary size + IR instruction count. |
+//! | 4 | `codegen_quality`     | 3       | Redundant load/store analysis at 3 program sizes (10/50/100).            |
+//! |   | **Total**             | **29**  |                                                                           |
+//!
+//! Note: the per-backend counts above assume every backend successfully
+//! lowers and encodes the chosen program.  If a backend's `encode_program`
+//! fails, the result is still emitted but `binary_size` is reported as
+//! `None` (JSON `null`) rather than `0` — see [`sha256d`] for details.
 //!
 //! # Methodology
 //!
 //! - **Warmup**: 3 iterations (results discarded).
-//! - **Measurement**: 10 iterations (all recorded, median reported).
-//! - **Reporting**: [`BenchmarkResult`] with mean_ns, median_ns, iterations.
+//! - **Measurement**: 5–10 iterations (all recorded, mean + median reported).
+//! - **Reporting**: [`BenchmarkResult`] with mean_ns, median_ns, iterations,
+//!   and a JSON `extra` object for category-specific metrics.
 //!
 //! # Integration
 //!
 //! The benchmark suite can be invoked via `vuma --bench` or used
-//! programmatically from the `vuma-tests` crate.
+//! programmatically from the `vuma-tests` crate via [`run_full_suite`].
 
 pub mod sha256d;
 pub mod compilation_speed;
@@ -169,20 +179,24 @@ pub fn measure<F: Fn()>(f: F, iterations: usize) -> (u64, u64) {
 }
 
 /// Run the full benchmark suite and return a report.
+///
+/// Aggregates results from all 4 benchmark categories (`sha256d`,
+/// `compilation_speed`, `backend_comparison`, `codegen_quality`).
+/// The expected total is 29 results when every backend succeeds.
 pub fn run_full_suite() -> BenchmarkSuiteReport {
     let mut report = BenchmarkSuiteReport::new();
     let suite_start = std::time::Instant::now();
 
-    // SHA256d benchmarks
+    // SHA256d benchmarks (8 results: one per backend)
     report.results.extend(sha256d::run_benchmarks());
 
-    // Compilation speed benchmarks
+    // Compilation speed benchmarks (10 results: 5 sizes × 2 measurements)
     report.results.extend(compilation_speed::run_benchmarks());
 
-    // Backend comparison
+    // Backend comparison (8 results: one per backend)
     report.results.extend(backend_comparison::run_benchmarks());
 
-    // Codegen quality
+    // Codegen quality (3 results: one per program size)
     report.results.extend(codegen_quality::run_benchmarks());
 
     report.total_time_ms = suite_start.elapsed().as_millis() as u64;
@@ -224,5 +238,28 @@ mod tests {
         let (mean, median) = measure(|| { let _ = 1 + 1; }, 10);
         assert!(mean > 0);
         assert!(median > 0);
+    }
+
+    /// Sanity check: `run_full_suite` should produce results from all 4
+    /// categories, totaling 29 results when every backend succeeds.
+    /// We assert at least 1 result per category to guard against silent
+    /// breakage of any individual benchmark module.
+    #[test]
+    fn test_full_suite_has_all_categories() {
+        let report = run_full_suite();
+        assert!(
+            !report.results.is_empty(),
+            "full benchmark suite should produce at least one result"
+        );
+
+        let categories = ["sha256d", "compilation_speed", "backend_comparison", "codegen_quality"];
+        for cat in &categories {
+            let count = report.results.iter().filter(|r| r.name.starts_with(cat)).count();
+            assert!(
+                count > 0,
+                "category '{}' should produce at least one result (got 0)",
+                cat
+            );
+        }
     }
 }

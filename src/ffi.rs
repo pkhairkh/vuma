@@ -145,10 +145,20 @@ impl fmt::Display for ExternType {
 // ---------------------------------------------------------------------------
 
 /// Returns the standard Linux syscall bindings as an `ExternBlock`.
+///
+/// This declares the FFI-level signature (parameter and return types) for every
+/// syscall in [`SyscallName`]. The per-architecture syscall numbers themselves
+/// live in [`SyscallTable::for_arch`] — see `x86_64_syscalls`,
+/// `aarch64_syscalls`, `riscv64_syscalls`, `arm32_syscalls`, `mips64_syscalls`,
+/// `ppc64_syscalls`, and `loongarch64_syscalls` below for the actual numeric
+/// values (e.g. x86_64: open=2, close=3, exit_group=231, ioctl=16, fcntl=72,
+/// getpid=39, kill=62, mprotect=10, clock_gettime=228, sched_yield=24,
+/// clone=56, futex=202, set_tid_address=218).
 pub fn linux_syscall_bindings() -> ExternBlock {
     ExternBlock {
         convention: CallingConvention::C,
         functions: vec![
+            // ---- Original 6 bindings (write/read/exit/mmap/munmap/brk) ----
             ExternFn {
                 name: "write".to_string(),
                 param_types: vec![ExternType::I64, ExternType::Ptr, ExternType::I64],
@@ -185,6 +195,127 @@ pub fn linux_syscall_bindings() -> ExternBlock {
                 name: "brk".to_string(),
                 param_types: vec![ExternType::Ptr],
                 return_type: Some(ExternType::Ptr),
+            },
+            // ---- 13 additional syscall bindings ----
+            // open(const char *pathname, int flags, mode_t mode) -> int
+            // x86_64 #2, aarch64/riscv64/loongarch64 #35 (openat), arm32 #5,
+            // mips64 #5002, ppc64 #5
+            ExternFn {
+                name: "open".to_string(),
+                param_types: vec![ExternType::Ptr, ExternType::I64, ExternType::I64],
+                return_type: Some(ExternType::I64),
+            },
+            // close(int fd) -> int
+            // x86_64 #3, aarch64/riscv64/loongarch64 #57, arm32 #6,
+            // mips64 #5003, ppc64 #6
+            ExternFn {
+                name: "close".to_string(),
+                param_types: vec![ExternType::I64],
+                return_type: Some(ExternType::I64),
+            },
+            // exit_group(int status) -> void (noreturn)
+            // x86_64 #231, aarch64/riscv64/loongarch64 #94, arm32 #248,
+            // mips64 #5206, ppc64 #234
+            ExternFn {
+                name: "exit_group".to_string(),
+                param_types: vec![ExternType::I64],
+                return_type: None,
+            },
+            // ioctl(int fd, unsigned long request, ...) -> int
+            // x86_64 #16, aarch64/riscv64/loongarch64 #29, arm32 #54,
+            // mips64 #5015, ppc64 #54
+            ExternFn {
+                name: "ioctl".to_string(),
+                param_types: vec![ExternType::I64, ExternType::I64, ExternType::I64],
+                return_type: Some(ExternType::I64),
+            },
+            // fcntl(int fd, int cmd, ...) -> int
+            // x86_64 #72, aarch64/riscv64/loongarch64 #25, arm32 #55,
+            // mips64 #5070, ppc64 #55
+            ExternFn {
+                name: "fcntl".to_string(),
+                param_types: vec![ExternType::I64, ExternType::I64, ExternType::I64],
+                return_type: Some(ExternType::I64),
+            },
+            // getpid() -> int
+            // x86_64 #39, aarch64/riscv64/loongarch64 #172, arm32 #20,
+            // mips64 #5038, ppc64 #20
+            ExternFn {
+                name: "getpid".to_string(),
+                param_types: vec![],
+                return_type: Some(ExternType::I64),
+            },
+            // kill(int pid, int sig) -> int
+            // x86_64 #62, aarch64/riscv64/loongarch64 #129, arm32 #37,
+            // mips64 #5060, ppc64 #37
+            ExternFn {
+                name: "kill".to_string(),
+                param_types: vec![ExternType::I64, ExternType::I64],
+                return_type: Some(ExternType::I64),
+            },
+            // mprotect(void *addr, size_t len, int prot) -> int
+            // x86_64 #10, aarch64/riscv64/loongarch64 #226, arm32 #125,
+            // mips64 #5010, ppc64 #125
+            ExternFn {
+                name: "mprotect".to_string(),
+                param_types: vec![ExternType::Ptr, ExternType::I64, ExternType::I64],
+                return_type: Some(ExternType::I64),
+            },
+            // clock_gettime(clockid_t clk_id, struct timespec *tp) -> int
+            // x86_64 #228, aarch64/riscv64/loongarch64 #115, arm32 #263,
+            // mips64 #5223, ppc64 #246
+            ExternFn {
+                name: "clock_gettime".to_string(),
+                param_types: vec![ExternType::I64, ExternType::Ptr],
+                return_type: Some(ExternType::I64),
+            },
+            // sched_yield() -> int
+            // x86_64 #24, aarch64/riscv64/loongarch64 #124, arm32 #158,
+            // mips64 #5023, ppc64 #158
+            ExternFn {
+                name: "sched_yield".to_string(),
+                param_types: vec![],
+                return_type: Some(ExternType::I64),
+            },
+            // clone(unsigned long flags, void *stack, int *parent_tid,
+            //       int *child_tid, unsigned long tls) -> int
+            // x86_64 #56, aarch64/riscv64/loongarch64 #220, arm32 #120,
+            // mips64 #5055, ppc64 #120
+            ExternFn {
+                name: "clone".to_string(),
+                param_types: vec![
+                    ExternType::I64,  // flags
+                    ExternType::Ptr,  // stack
+                    ExternType::Ptr,  // parent_tid
+                    ExternType::Ptr,  // child_tid
+                    ExternType::I64,  // tls
+                ],
+                return_type: Some(ExternType::I64),
+            },
+            // futex(uint32_t *uaddr, int futex_op, uint32_t val,
+            //       const struct timespec *timeout, uint32_t *uaddr2,
+            //       uint32_t val3) -> int
+            // x86_64 #202, aarch64/riscv64/loongarch64 #98, arm32 #240,
+            // mips64 #5194, ppc64 #221
+            ExternFn {
+                name: "futex".to_string(),
+                param_types: vec![
+                    ExternType::Ptr,  // uaddr
+                    ExternType::I64,  // futex_op
+                    ExternType::I64,  // val
+                    ExternType::Ptr,  // timeout
+                    ExternType::Ptr,  // uaddr2
+                    ExternType::I64,  // val3
+                ],
+                return_type: Some(ExternType::I64),
+            },
+            // set_tid_address(int *tidptr) -> int
+            // x86_64 #218, aarch64/riscv64/loongarch64 #96, arm32 #256,
+            // mips64 #5210, ppc64 #232
+            ExternFn {
+                name: "set_tid_address".to_string(),
+                param_types: vec![ExternType::Ptr],
+                return_type: Some(ExternType::I64),
             },
         ],
     }

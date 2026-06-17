@@ -60,11 +60,11 @@ This is the first public alpha release of the VUMA framework. It ships five wave
 
 - **Parser error recovery**: 8 error kinds, 5 recovery strategies, "Did you mean?" suggestions
 - **Collections**: `VumaString`, `SipHasher13`, `DoublyLinkedList`, `Vec`, `HashMap`, `RingBuffer`
-- **Benchmark suite**: 8 categories with 40+ benchmarks
+- **Benchmark suite**: 4 categories with 29 benchmarks (SHA256d real-program, compilation speed, backend comparison, codegen quality)
 
 ### Wave 5 — Multi-Arch Codegen & LLM Integration
 
-- **8 backend architectures** all passing SHA256d or individual operation tests
+- **8 backend architectures** — x86_64 has a real end-to-end execution test (exit 79); the other 6 native backends pass ELF header + IR/SCG validation; cross-arch QEMU execution is gated on `qemu-<arch>-static` being installed
 - **73 math functions** (f64 + f32 variants): trig, exp/log, rounding, classification, constants
 - **14 formatting functions**: `format_int`, `format_uint`, `format_float`, `format_hex`, `format_binary`, `format_octal`, `format_pointer`, `pad_left`, `pad_right`, `join`, `write_str`, `write_int`, `write_float`
 - **DWARF v4 debug info**: Per-backend address size and instruction length, `.debug_abbrev`, `.debug_info`, `.debug_line`, `.debug_frame`
@@ -111,7 +111,9 @@ Every VUMA program is verified against five global memory-safety invariants:
 
 ### 8-Backend Multi-Architecture Codegen
 
-VUMA compiles to **8 CPU/platform targets** with a unified `Backend` trait architecture. All 6 native backends pass the full SHA256d execution test. Wasm32 generates valid modules. LoongArch64 passes individual operation tests.
+VUMA compiles to **8 CPU/platform targets** with a unified `Backend` trait architecture. The **x86_64 backend** has a real end-to-end execution test: a return-79 codegen SCG is lowered through `IRBuilder`, compiled by the backend, written to a temp ELF, and executed as a subprocess to assert exit code 79 (0x4F, the first byte of SHA256d("abc")). The other 6 native backends (AArch64, RISC-V 64, ARM32, MIPS64, PPC64, LoongArch64) pass ELF header + IR/SCG validation; cross-architecture execution via QEMU is gated on `qemu-<arch>-static` being installed on the host (a CI target, not a unit test). Wasm32 generates valid modules. LoongArch64 passes individual operation tests.
+
+> **Known front-end limitation (W11-12):** the `AstToScg` front-end (`src/parser/src/to_scg.rs`) drops `return <expr>` values during AST→SCG lowering, so a binary compiled from `fn main() -> i32 { return 79; }` via the full pipeline exits with 0, not 79. The x86_64 execution test bypasses this by constructing the codegen SCG directly, validating the codegen backend independently. Fixing the front-end is tracked as a separate task.
 
 ### AI-Native Design
 
@@ -218,11 +220,11 @@ SCG → IR (target-independent) → Register Allocation → Instruction Selectio
 
 | Test Category | Count | What It Covers |
 |---------------|-------|----------------|
-| Cross-backend consistency | 9 | 4 IR programs × 8 backends |
+| Cross-backend consistency | 18 | 4 IR programs × 8 backends (Phase A) + full-pipeline example matrix (Phase B) + end-to-end exit-code execution on x86_64; aarch64/RISC-V/ARM32/MIPS64/PPC64 QEMU execution gated on `qemu-<arch>-static` (Phase C) |
 | ABI conformance | 27 | Calling conventions for all 8 backends |
 | ELF validation | 7 × 4 | ELF32/64, endianness, machine types |
 | Wasm validation | 12 | Magic, sections, globals, exports, code bodies |
-| SHA256d execution | 6 | Full SHA256d on all 6 stable native backends |
+| SHA256d execution | 1 (x86_64) + 6 QEMU-gated | x86_64: real execution of a VUMA-codegen binary (exit 79). Other native backends: ELF header validation; QEMU execution runs only when `qemu-<arch>-static` is installed |
 
 ---
 
@@ -527,11 +529,20 @@ make bench
 cargo run -- --bench
 ```
 
-The benchmark suite covers:
-- SHA256d across all 8 backends (timing, binary size, instruction count)
-- Compilation speed at varying program sizes
-- Backend comparison (binary sizes)
-- Codegen quality (redundant load/store analysis)
+The benchmark suite has **4 categories** producing **29 results** when
+every backend succeeds:
+
+| # | Category | Results | What it measures |
+|---|----------|---------|------------------|
+| 1 | `sha256d` | 8 | Compile time, binary size (`Option<usize>`, `None` on encode failure), instruction count per backend for the real `examples/sha256d.vuma` program (falls back to `fibonacci.vuma` if sha256d doesn't lower). |
+| 2 | `compilation_speed` | 10 | Parse→SCG→IR + full-pipeline time at 5 program sizes. |
+| 3 | `backend_comparison` | 8 | Same reference program through all 8 backends; binary size + IR instruction count. |
+| 4 | `codegen_quality` | 3 | Redundant load/store analysis at 3 program sizes. |
+
+Cross-backend semantic equivalence is covered by `cargo test -p vuma-tests -- cross_backend`:
+Phase A (structural, 9 tests), Phase B (full-pipeline example matrix, 6 tests),
+and Phase C (end-to-end execution: x86_64 exit code 42, aarch64 under QEMU,
+full-pipeline machine-type consistency, 3 tests).
 
 ### Code Quality
 
@@ -747,7 +758,7 @@ This is an alpha release. We are transparent about what is not yet complete:
 | **Doubly-linked list verification** | ⚠️ Partial | Full verification of doubly-linked list patterns (M2.4) is not yet complete. |
 | **Concurrent verification** | ⚠️ Limited | Verification is limited to single-threaded programs. Full concurrent verification is planned. |
 | **COR end-to-end** | ⚠️ Partial | The Continuous Optimization Runtime is not yet integrated end-to-end. |
-| **LoongArch64 performance** | ⚠️ Slow | Full SHA256d on QEMU is too slow; should work on native hardware. |
+| **LoongArch64 execution** | ⚠️ Not executed | No `qemu-loongarch64-static` path is wired up (mainstream distros lack it as of 2026); the LoongArch64 backend passes ELF header + IR/SCG validation only. Native-hardware or QEMU execution is a future CI target. |
 | **Error recovery** | ⚠️ Partial | Parser has known type mismatches in AST→SCG lowering for some edge cases. |
 
 We believe in honest roadmapping. These limitations represent active development areas, not permanent constraints.
