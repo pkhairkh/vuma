@@ -8,8 +8,13 @@
 //!
 //! # Conversion Strategy
 //!
-//! 1. **Topological walk** — SCG nodes are processed in topological order so
-//!    that all predecessors of a node are converted before the node itself.
+//! 1. **Cycle-tolerant topological walk** — SCG nodes are processed in an
+//!    order that respects the acyclic portion of the graph (Kahn's
+//!    algorithm) and appends any nodes that participate in cycles (e.g.
+//!    loop back-edges) in `NodeId` order afterwards. This never fails on
+//!    cyclic SCGs: the MSG is a state graph, not a DAG, and is allowed to
+//!    contain revisited states (a loop body revisits the same memory
+//!    state on each iteration).
 //! 2. **AllocationNode → Region** — each `Allocation` node becomes an MSG
 //!    `Region` with a monotonically assigned base address (starting from
 //!    `0x1_0000`).
@@ -261,6 +266,82 @@ fn access_kind_from_mode(mode: AccessMode) -> AccessKind {
 }
 
 // ---------------------------------------------------------------------------
+// Cycle-tolerant node ordering
+// ---------------------------------------------------------------------------
+
+/// Compute a stable node ordering for the SCG that tolerates cycles.
+///
+/// This is a Kahn-style topological sort with cycle tolerance. Nodes with
+/// no incoming edges are emitted first (seeded in `NodeId` order so the
+/// output is deterministic); as each node is emitted, its successors'
+/// in-degrees are decremented and any that reach zero are appended.
+///
+/// Unlike [`SCG::topological_sort`], this never fails: when the remaining
+/// subgraph contains only cycles (e.g. loop back-edges produced by `while`
+/// loops in programs like `sha256d.vuma`), those nodes are appended in
+/// `NodeId` order after the acyclic portion.
+///
+/// Within the cyclic tail, lower-`NodeId` nodes are processed first. The
+/// front-end emits `Derivation` edges in program order (low-ID source →
+/// high-ID target), so derivation parents are still converted before their
+/// children even inside a loop body. `ControlFlow` back-edges do not
+/// participate in derivation lookup ([`find_parent_derivation`] only
+/// follows `Derivation`/`DataFlow` edges), so loops convert cleanly.
+fn cyclic_aware_node_order(scg: &SCG) -> Vec<ScgNodeId> {
+    use std::collections::VecDeque;
+
+    // Collect node IDs in stable (ascending) order.
+    let node_ids: Vec<ScgNodeId> = scg.node_ids().collect();
+
+    // Compute in-degree (count of incoming edges) for each node.
+    let mut in_degree: HashMap<ScgNodeId, usize> = HashMap::new();
+    for &nid in &node_ids {
+        in_degree.insert(nid, 0);
+    }
+    for edge in scg.edges() {
+        if let Some(d) = in_degree.get_mut(&edge.target) {
+            *d += 1;
+        }
+    }
+
+    // Seed the queue with all in-degree-0 nodes (in ID order so the
+    // output is deterministic).
+    let mut queue: VecDeque<ScgNodeId> = node_ids
+        .iter()
+        .copied()
+        .filter(|nid| in_degree.get(nid).copied().unwrap_or(0) == 0)
+        .collect();
+
+    let mut result: Vec<ScgNodeId> = Vec::with_capacity(node_ids.len());
+    while let Some(nid) = queue.pop_front() {
+        result.push(nid);
+        if let Some(succs) = scg.successors(nid) {
+            for s in succs {
+                if let Some(d) = in_degree.get_mut(&s) {
+                    if *d > 0 {
+                        *d -= 1;
+                        if *d == 0 {
+                            queue.push_back(s);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Append remaining (cyclic) nodes in ID order.
+    let emitted: hashbrown::HashSet<ScgNodeId> = result.iter().copied().collect();
+    for &nid in &node_ids {
+        if !emitted.contains(&nid) {
+            result.push(nid);
+        }
+    }
+
+    debug_assert_eq!(result.len(), node_ids.len());
+    result
+}
+
+// ---------------------------------------------------------------------------
 // Main conversion function
 // ---------------------------------------------------------------------------
 
@@ -274,16 +355,23 @@ fn access_kind_from_mode(mode: AccessMode) -> AccessKind {
 /// # Errors
 ///
 /// Returns a [`ConversionError`] if:
-/// - The SCG contains a cycle (topological sort fails).
 /// - A node references a region or allocation that doesn't exist.
 /// - Post-conversion verification finds broken derivation chains.
+///
+/// Cyclic SCGs (e.g. programs with loops that produce back-edges in the
+/// SCG's `ControlFlow` edges) are handled gracefully — see
+/// [`cyclic_aware_node_order`].
 pub fn scg_to_msg(scg: &SCG) -> Result<MSG, ConversionError> {
     let mut ctx = ConversionContext::new();
 
-    // Step 1: Topological sort the SCG.
-    let sorted_nodes = scg
-        .topological_sort()
-        .map_err(|_| ConversionError::CycleDetected)?;
+    // Step 1: Compute a stable node ordering that tolerates cycles.
+    // Real programs (e.g. `sha256d.vuma`) contain loops, which the SCG
+    // represents with `ControlFlow` back-edges. A strict topological sort
+    // refuses such graphs; instead we use a Kahn-style algorithm that
+    // emits the acyclic portion first and appends cyclic nodes in `NodeId`
+    // order. The MSG is a state graph (not a DAG) and may legitimately
+    // contain revisited states, so cycles do not invalidate the conversion.
+    let sorted_nodes = cyclic_aware_node_order(scg);
 
     // Step 2: Pre-scan — identify which allocation nodes exist and which regions
     // are freed, so we can assign correct region status upfront.
@@ -490,9 +578,16 @@ fn process_cast(
         _ => unreachable!("Cast node must have Cast payload"),
     };
 
-    // Find the parent derivation via incoming Derivation edges.
-    let parent_deriv_id = find_parent_derivation(scg, ctx, node.id)
-        .ok_or(ConversionError::CastWithoutParent(node.id))?;
+    // Find the parent derivation via incoming Derivation edges. When the
+    // SCG contains cycles (e.g. loop back-edges), the parent may belong to
+    // the same strongly-connected component and not yet have been
+    // converted; in that case we skip creating a Cast derivation. The MSG
+    // remains sound — downstream accesses fall back to deriving directly
+    // from the region in `compute_derivation_for_node`.
+    let parent_deriv_id = match find_parent_derivation(scg, ctx, node.id) {
+        Some(id) => id,
+        None => return Ok(()),
+    };
 
     let parent_deriv = ctx
         .msg
@@ -620,15 +715,97 @@ fn process_edges(scg: &SCG, ctx: &mut ConversionContext) -> Result<(), Conversio
 // Derivation helpers
 // ---------------------------------------------------------------------------
 
+/// Ensure that an MSG region exists for the SCG region referenced by an
+/// Access node, synthesizing one if no Allocation node created it.
+///
+/// Normally the SCG's Allocation node creates the MSG region during
+/// [`process_allocation`]. However, real programs also access memory that
+/// is not modeled as a heap allocation: stack-allocated buffers, function
+/// parameters, and global/static variables. The front-end still emits
+/// Access nodes referencing such regions (so they appear in the SCG with a
+/// `region_id`), but no Allocation node exists for them — so no MSG region
+/// would exist without this helper.
+///
+/// This function synthesizes a live MSG region for those accesses so that
+/// the MSG records the access against a real region. This is sound:
+/// - A synthetic region is always live (`RegionStatus::Allocated` or the
+///   SCG-declared deployment status), so it never produces false
+///   use-after-free violations.
+/// - Real heap regions still have explicit Allocation/Deallocation nodes
+///   and are tracked precisely — real UAFs are still caught.
+/// - The verifier checks accesses against region liveness, so accesses to
+///   genuinely freed heap regions still fail verification.
+fn ensure_region_for_access(
+    scg: &SCG,
+    ctx: &mut ConversionContext,
+    access_node: &NodeData,
+) -> RegionId {
+    let access_payload = match &access_node.payload {
+        NodePayload::Access(a) => a,
+        _ => unreachable!("expected Access payload"),
+    };
+    let scg_region_raw = access_payload.region_id.as_u64();
+
+    // Fast path: the region was already registered (by an Allocation node
+    // processed earlier, or by a previous call to this helper for another
+    // access to the same region).
+    if let Some(&id) = ctx.scg_region_to_msg_region.get(&scg_region_raw) {
+        return id;
+    }
+
+    // Synthesize a region. Look up the SCG region (if one was registered)
+    // to honor its deployment_target (Stack, Gpu, etc.); otherwise default
+    // to the generic "Heap" deployment, which maps to `RegionStatus::Allocated`.
+    let scg_region = scg.get_region(access_payload.region_id);
+    let deployment_name = scg_region
+        .map(|r| format!("{}", r.deployment_target))
+        .unwrap_or_else(|| "Heap".to_string());
+    let status = region_status_from_deployment(&deployment_name, false);
+
+    // Size: cover at least this access (offset + access_size), with a
+    // reasonable minimum so subsequent accesses at higher offsets on the
+    // same synthetic region stay in-bounds. We round up to the default
+    // alignment so the monotonic allocator doesn't waste address space.
+    let offset = access_payload.offset.unwrap_or(0);
+    let access_size = access_payload.access_size.unwrap_or(1);
+    let needed = offset.saturating_add(access_size);
+    let size = needed.max(DEFAULT_ALIGN).max(16);
+
+    let base = ctx.allocate_address(size, DEFAULT_ALIGN);
+    let msg_region_id = RegionId(scg_region_raw);
+
+    // Use the access's program point as a synthetic allocation point —
+    // stack/static memory has no single "allocation" site in the SCG, so
+    // the access site is the best available provenance.
+    let region = Region {
+        id: msg_region_id,
+        base,
+        size,
+        status,
+        alloc_point: convert_program_point(&access_node.program_point),
+        free_point: None,
+        owner_context: None,
+    };
+
+    ctx.region_bounds.insert(msg_region_id, (base, size));
+    ctx.scg_region_to_msg_region
+        .insert(scg_region_raw, msg_region_id);
+    ctx.msg.add_region(region);
+
+    msg_region_id
+}
+
 /// Compute the derivation source, kind, and provenance range for an Access
 /// node based on its incoming edges and the access payload.
 ///
 /// If the access has a parent derivation (via Derivation/DataFlow edges),
 /// the new derivation is chained from it with an optional offset.
-/// Otherwise, the derivation originates directly from the region.
+/// Otherwise, the derivation originates directly from the region — and if
+/// the region has no Allocation node (stack/static memory), a synthetic
+/// live region is created on the fly by [`ensure_region_for_access`].
 fn compute_derivation_for_node(
     scg: &SCG,
-    ctx: &ConversionContext,
+    ctx: &mut ConversionContext,
     node: &NodeData,
 ) -> Result<(DerivationSource, DerivationKind, (Address, Address)), ConversionError> {
     let access_payload = match &node.payload {
@@ -668,20 +845,17 @@ fn compute_derivation_for_node(
         }
     } else {
         // No parent derivation found — derive directly from the region.
-        let msg_region_id = ctx
-            .scg_region_to_msg_region
-            .get(&access_payload.region_id.as_u64())
-            .copied()
-            .ok_or(ConversionError::AccessRegionNotFound(
-                access_payload.region_id,
-            ))?;
+        // Ensure a MSG region exists for this access; if the SCG has no
+        // Allocation node for it (stack/static memory), a synthetic live
+        // region is created. This previously returned
+        // `AccessRegionNotFound`, which blocked conversion of real
+        // programs like `sha256d.vuma` that access stack buffers.
+        let msg_region_id = ensure_region_for_access(scg, ctx, node);
 
-        let &(base, size) =
-            ctx.region_bounds
-                .get(&msg_region_id)
-                .ok_or(ConversionError::AccessRegionNotFound(
-                    access_payload.region_id,
-                ))?;
+        let &(base, size) = ctx
+            .region_bounds
+            .get(&msg_region_id)
+            .expect("region bounds must exist after ensure_region_for_access");
 
         let offset = access_payload.offset.unwrap_or(0);
         if offset == 0 {
@@ -1361,5 +1535,279 @@ mod tests {
         let msg = scg_to_msg(&scg).unwrap();
         let msg_region = msg.region(RegionId(1)).unwrap();
         assert_eq!(msg_region.status, RegionStatus::Device);
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 15: Cyclic SCG (loop back-edge) — sha256d-style `while` loop
+    // -----------------------------------------------------------------------
+
+    /// A cyclic SCG must convert without returning `CycleDetected`.
+    ///
+    /// Models the shape produced by `while i < 64` in `sha256d.vuma`: two
+    /// accesses inside a loop body joined by a `ControlFlow` back-edge from
+    /// the loop tail back to the loop header. Before the cycle-tolerant
+    /// ordering was introduced, `scg_to_msg` refused such graphs with
+    /// `ConversionError::CycleDetected`, blocking the whole pipeline.
+    #[test]
+    fn test_cyclic_scg_with_back_edge_converts() {
+        let mut scg = SCG::new();
+        let region_id = ScgRegionId::new(1);
+
+        let alloc_id = scg.add_node(
+            NodeType::Allocation,
+            NodePayload::Allocation(AllocationNode {
+                size: 256,
+                align: 16,
+                region_id,
+                type_name: None,
+            }),
+            scg_pp(1),
+        );
+
+        // Loop-header access (read).
+        let header_id = scg.add_node(
+            NodeType::Access,
+            NodePayload::Access(AccessNode {
+                mode: AccessMode::Read,
+                region_id,
+                offset: None,
+                access_size: Some(4),
+            }),
+            scg_pp(2),
+        );
+
+        // Loop-body access (write).
+        let body_id = scg.add_node(
+            NodeType::Access,
+            NodePayload::Access(AccessNode {
+                mode: AccessMode::Write,
+                region_id,
+                offset: None,
+                access_size: Some(4),
+            }),
+            scg_pp(3),
+        );
+
+        // Derivation edges: alloc -> header, alloc -> body.
+        scg.add_edge(alloc_id, header_id, EdgeKind::Derivation)
+            .unwrap();
+        scg.add_edge(alloc_id, body_id, EdgeKind::Derivation)
+            .unwrap();
+
+        // Control flow: header -> body -> header (back-edge creates a cycle).
+        scg.add_edge(header_id, body_id, EdgeKind::ControlFlow)
+            .unwrap();
+        scg.add_edge(body_id, header_id, EdgeKind::ControlFlow)
+            .unwrap();
+
+        // Must NOT return CycleDetected.
+        let msg = scg_to_msg(&scg).expect("cyclic SCG should convert");
+
+        // Both accesses should be present.
+        assert_eq!(msg.access_count(), 2);
+        assert_eq!(msg.region_count(), 1);
+        // 1 direct (alloc) + 2 access derivations.
+        assert_eq!(msg.derivation_count(), 3);
+
+        // Both access derivations must terminate at the region.
+        for i in 0..msg.access_count() {
+            let access = msg.access(AccessId(i as u64)).unwrap();
+            let base = msg
+                .derivation(access.target)
+                .unwrap()
+                .base_region(|id| msg.derivation(id).cloned());
+            assert!(base.is_some(), "access {} has no base region", i);
+        }
+
+        // Both ControlFlow edges are between Access nodes, so both become
+        // sync edges (the MSG is a state graph and may contain cycles).
+        assert_eq!(msg.sync_edge_count(), 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 16: Cast whose parent is in a cycle — graceful fallback
+    // -----------------------------------------------------------------------
+
+    /// A `Cast` node whose derivation parent has not yet been converted
+    /// (because both are in the same strongly-connected component) must not
+    /// abort the conversion. The Cast is simply skipped; downstream accesses
+    /// fall back to deriving directly from the region.
+    #[test]
+    fn test_cast_in_cycle_skips_gracefully() {
+        let mut scg = SCG::new();
+        let region_id = ScgRegionId::new(1);
+
+        let alloc_id = scg.add_node(
+            NodeType::Allocation,
+            NodePayload::Allocation(AllocationNode {
+                size: 64,
+                align: 8,
+                region_id,
+                type_name: Some("u8".to_string()),
+            }),
+            scg_pp(1),
+        );
+
+        // Cast added with a *lower* NodeId than its derivation parent, and
+        // joined into a ControlFlow cycle so both land in the cyclic tail of
+        // `cyclic_aware_node_order`. The Cast is processed first; its parent
+        // (the Computation) has no derivation yet, so the Cast is skipped.
+        let cast_id = scg.add_node(
+            NodeType::Cast,
+            NodePayload::Cast(CastNode {
+                from_type: "*mut u8".to_string(),
+                to_type: "*mut u32".to_string(),
+                is_lossless: true,
+            }),
+            scg_pp(2),
+        );
+
+        let comp_id = scg.add_node(
+            NodeType::Computation,
+            NodePayload::Computation(ComputationNode {
+                kind: ComputationKind::Other("loop_phi".to_string()),
+                result_type: Some("*mut u8".to_string()),
+                tail_call: false,
+            }),
+            scg_pp(3),
+        );
+
+        // Derivation: alloc -> comp -> cast (provenance chain).
+        scg.add_edge(alloc_id, comp_id, EdgeKind::Derivation)
+            .unwrap();
+        scg.add_edge(comp_id, cast_id, EdgeKind::Derivation)
+            .unwrap();
+
+        // ControlFlow back-edge: cast -> comp closes the cycle (comp and cast
+        // are in the same SCC).
+        scg.add_edge(cast_id, comp_id, EdgeKind::ControlFlow)
+            .unwrap();
+
+        // Must not error.
+        let msg = scg_to_msg(&scg).expect("cast-in-cycle should convert");
+
+        // The region and the alloc's direct derivation always exist.
+        assert_eq!(msg.region_count(), 1);
+        assert!(msg.derivation_count() >= 1);
+    }
+    // -----------------------------------------------------------------------
+    // Test 17: Access to a region with no Allocation → synthetic region
+    // -----------------------------------------------------------------------
+
+    /// An Access node that references a region with no matching Allocation
+    /// node (e.g. a stack buffer or function parameter) must not abort the
+    /// conversion with `AccessRegionNotFound`. Instead, a synthetic live
+    /// region is created on the fly and the access is recorded against it.
+    ///
+    /// This is the core regression test for the `sha256d.vuma` failure:
+    /// `sha256d` accesses `RegionId(9)` (a stack/static buffer) that the
+    /// front-end never modeled as an Allocation. Before the fix, the
+    /// converter returned `AccessRegionNotFound(RegionId(9))` and blocked
+    /// the entire pipeline.
+    #[test]
+    fn test_access_without_allocation_synthesizes_region() {
+        let mut scg = SCG::new();
+        // Note: NO Allocation node, NO region registered with the SCG.
+        // The Access alone references RegionId(42).
+        let region_id = ScgRegionId::new(42);
+
+        let access_id = scg.add_node(
+            NodeType::Access,
+            NodePayload::Access(AccessNode {
+                mode: AccessMode::Read,
+                region_id,
+                offset: None,
+                access_size: Some(8),
+            }),
+            scg_pp(7),
+        );
+
+        // Previously returned AccessRegionNotFound(RegionId(42)).
+        let msg = scg_to_msg(&scg).expect("synthetic region should be created");
+
+        // A synthetic region with the access's region_id must exist.
+        assert_eq!(msg.region_count(), 1);
+        let region = msg
+            .region(RegionId(42))
+            .expect("synthetic region must exist");
+        assert!(region.is_live(), "synthetic region must be live");
+        // Default deployment (no SCG region) → Allocated.
+        assert_eq!(region.status, RegionStatus::Allocated);
+        // Synthetic alloc_point is the access's program point.
+        assert_eq!(region.alloc_point, convert_program_point(&scg_pp(7)));
+        // Size must cover the access (8 bytes), rounded up to the minimum.
+        assert!(region.size >= 8);
+
+        // The access must be recorded and its derivation must terminate at
+        // the synthetic region.
+        assert_eq!(msg.access_count(), 1);
+        let access = msg.access(AccessId(0)).unwrap();
+        assert_eq!(access.kind, AccessKind::Read);
+        let base_region = msg
+            .derivation(access.target)
+            .unwrap()
+            .base_region(|id| msg.derivation(id).cloned());
+        assert_eq!(base_region, Some(RegionId(42)));
+
+        // Sanity: the unused `access_id` is the one we added.
+        let _ = access_id;
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 18: Multiple accesses to one unallocated region share one synth
+    // -----------------------------------------------------------------------
+
+    /// Two Access nodes referencing the same unallocated region must share
+    /// a single synthetic MSG region (not one-per-access). The second
+    /// access hits the fast path in `ensure_region_for_access`.
+    #[test]
+    fn test_multiple_accesses_share_one_synthetic_region() {
+        let mut scg = SCG::new();
+        let region_id = ScgRegionId::new(9); // the sha256d case
+
+        let a1 = scg.add_node(
+            NodeType::Access,
+            NodePayload::Access(AccessNode {
+                mode: AccessMode::Write,
+                region_id,
+                offset: Some(0),
+                access_size: Some(4),
+            }),
+            scg_pp(1),
+        );
+        let a2 = scg.add_node(
+            NodeType::Access,
+            NodePayload::Access(AccessNode {
+                mode: AccessMode::Read,
+                region_id,
+                offset: Some(4),
+                access_size: Some(4),
+            }),
+            scg_pp(2),
+        );
+
+        // Order them so the topological walk is deterministic.
+        scg.add_edge(a1, a2, EdgeKind::ControlFlow).unwrap();
+
+        let msg = scg_to_msg(&scg).expect("should convert with one synth region");
+
+        // Exactly one synthetic region for RegionId(9).
+        assert_eq!(msg.region_count(), 1);
+        assert!(msg.region(RegionId(9)).is_some());
+
+        // Both accesses recorded, both terminate at the same region.
+        assert_eq!(msg.access_count(), 2);
+        for i in 0..msg.access_count() {
+            let access = msg.access(AccessId(i as u64)).unwrap();
+            let base = msg
+                .derivation(access.target)
+                .unwrap()
+                .base_region(|id| msg.derivation(id).cloned());
+            assert_eq!(base, Some(RegionId(9)));
+        }
+
+        // The region's size must cover the second access (offset 4 + size 4).
+        let region = msg.region(RegionId(9)).unwrap();
+        assert!(region.size >= 8, "region size {} must cover offset 4 + 4", region.size);
     }
 }

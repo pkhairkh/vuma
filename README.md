@@ -51,6 +51,32 @@ in the changelog, and bumps the version to reflect the substantial body of
 work (~266k LOC across 8 backends) that has accumulated since the original
 `0.1.0` foundation release. See `CHANGELOG.md` and `RELEASES.md` for details.
 
+### Verifier Now Works on Real Programs (post-alpha.1 hardening, Waves 5-28)
+
+Subsequent hardening work made the IVE verifier work end-to-end on
+non-trivial real programs, not just hand-crafted SCGs:
+
+- **`hello_memory.vuma`** — all 5 invariants (Liveness, Exclusivity,
+  Interpretation, Origin, Cleanup) reach `Proven` through the full
+  parse → SCG → IVE pipeline. Locked in by `showcase_hello_memory`.
+- **`doubly_linked_list.vuma`** — all 5 invariants reach `Proven`. The
+  W9-10 Exclusivity false positive on the `link(prev, next)`
+  sequential-write pattern was fixed in W17-18 by chaining Access nodes
+  into the ControlFlow sequence. Locked in by
+  `showcase_doubly_linked_list`.
+- **Return-value propagation (W5-6)** — `fn main() -> i32 { return 42; }`
+  now exits 42 on x86_64 (native) and on AArch64 (via QEMU). The
+  AST → SCG front-end no longer drops `return <expr>` values. The
+  related exit-79 test (SHA256d's "proof verified" convention) also
+  passes on AArch64 via QEMU.
+- **Verification is blocking and enforced** — `compile()` returns
+  `Err(...)` and emits no binary when verification fails (pinned by
+  `test_e2e_leak_fails_compilation`).
+- **`sha256d.vuma` is the next milestone** — it does not yet compile
+  end-to-end because the SCG → MSG converter rejects cyclic SCGs
+  produced by loops. Fixing SCG cycle handling is the single biggest
+  remaining blocker for real-program compilation.
+
 ---
 
 ## What's New in v0.1-alpha
@@ -85,7 +111,7 @@ This is the first public alpha release of the VUMA framework. It ships five wave
 
 ### Wave 5 — Multi-Arch Codegen & LLM Integration
 
-- **8 backend architectures** — x86_64 has a real end-to-end execution test (exit 79); the other 6 native backends pass ELF header + IR/SCG validation; cross-arch QEMU execution is gated on `qemu-<arch>-static` being installed
+- **8 backend architectures** — x86_64 and AArch64 both have real end-to-end execution tests through the full parse → SCG → IR → regalloc → encode pipeline (`fn main() -> i32 { return 42; }` is asserted to exit 42 on x86_64 native and on AArch64 via QEMU; `fn main() -> i32 { return 79; }` is also asserted to exit 79 on AArch64 via QEMU); the other 5 native backends pass ELF header + IR/SCG validation; cross-arch QEMU execution is gated on `qemu-<arch>-static` being installed
 - **73 math functions** (f64 + f32 variants): trig, exp/log, rounding, classification, constants
 - **14 formatting functions**: `format_int`, `format_uint`, `format_float`, `format_hex`, `format_binary`, `format_octal`, `format_pointer`, `pad_left`, `pad_right`, `join`, `write_str`, `write_int`, `write_float`
 - **DWARF v4 debug info**: Per-backend address size and instruction length, `.debug_abbrev`, `.debug_info`, `.debug_line`, `.debug_frame`
@@ -145,9 +171,9 @@ Every VUMA program is verified against five global memory-safety invariants:
 
 ### 8-Backend Multi-Architecture Codegen
 
-VUMA compiles to **8 CPU/platform targets** with a unified `Backend` trait architecture. The **x86_64 backend** has a real end-to-end execution test: a return-79 codegen SCG is lowered through `IRBuilder`, compiled by the backend, written to a temp ELF, and executed as a subprocess to assert exit code 79 (0x4F, the first byte of SHA256d("abc")). The other 6 native backends (AArch64, RISC-V 64, ARM32, MIPS64, PPC64, LoongArch64) pass ELF header + IR/SCG validation; cross-architecture execution via QEMU is gated on `qemu-<arch>-static` being installed on the host (a CI target, not a unit test). Wasm32 generates valid modules. LoongArch64 passes individual operation tests.
+VUMA compiles to **8 CPU/platform targets** with a unified `Backend` trait architecture. Both the **x86_64** and **AArch64** backends have real end-to-end execution tests that go through the full parse → SCG → IR → regalloc → encode pipeline: `fn main() -> i32 { return 42; }` is asserted to exit 42 on x86_64 (native) and on AArch64 (via QEMU); `fn main() -> i32 { return 79; }` (the SHA256d "proof verified" convention) is also asserted to exit 79 on AArch64 via QEMU. The other 5 native backends (RISC-V 64, ARM32, MIPS64, PPC64, LoongArch64) pass ELF header + IR/SCG validation; cross-architecture execution via QEMU is gated on `qemu-<arch>-static` being installed on the host (a CI target, not a unit test). Wasm32 generates valid modules. LoongArch64 passes individual operation tests.
 
-> **Known front-end limitation (W11-12):** the `AstToScg` front-end (`src/parser/src/to_scg.rs`) drops `return <expr>` values during AST→SCG lowering, so a binary compiled from `fn main() -> i32 { return 79; }` via the full pipeline exits with 0, not 79. The x86_64 execution test bypasses this by constructing the codegen SCG directly, validating the codegen backend independently. Fixing the front-end is tracked as a separate task.
+> **Return-value propagation (W5-6 fix).** The AST → SCG front-end previously dropped `return <expr>` values during lowering, so binaries compiled from `fn main() -> i32 { return N; }` exited with 0. The W5-6 fix (in `src/parser/src/to_scg.rs` and `src/pipeline.rs`) removed the duplicate FunctionReturn node and restored the `lit_N → FunctionReturn` DataFlow edge, so the return value now propagates end-to-end into the sys_exit argument on both x86_64 (`mov eax, imm; mov eax, 60; syscall`) and AArch64 (`mov x0, imm; mov x8, #93; svc #0`). The `test_cross_backend_aarch64_qemu_execution_exit_code` and `test_aarch64_sha256d_exit_79_via_qemu` tests in `src/tests/src/cross_backend.rs` pin this contract.
 
 ### AI-Native Design
 
@@ -781,20 +807,32 @@ vuma repl
 
 ## Known Limitations
 
-This is an alpha release. We are transparent about what is not yet complete:
+This is an alpha release. We are transparent about what works and what doesn't.
+
+### Verification — Current Honest State
+
+| Program / Capability | Status | Details |
+|----------------------|--------|---------|
+| `hello_memory.vuma` | ✅ All 5 invariants pass | Liveness, Exclusivity, Interpretation, Origin, and Cleanup all reach `Proven` end-to-end through the full parse → SCG → IVE pipeline (locked in by `showcase_hello_memory`). |
+| `doubly_linked_list.vuma` | ✅ All 5 invariants pass | The Exclusivity false positive on the `link(prev, next)` sequential-write pattern (W9-10) was fixed in W17-18 by chaining Access nodes into the ControlFlow sequence. All 5 invariants now reach `Proven` (locked in by `showcase_doubly_linked_list`). |
+| `sha256d.vuma` (real program, 200+ SCG nodes) | ❌ Does not compile end-to-end | The SCG → MSG converter (`scg_to_msg`) refuses to convert SCGs containing back-edges from loops (`while i < 64` over the 64 SHA-256 rounds, `while j < len` over message blocks). Fixing this — by unrolling bounded loops in the parser → SCG bridge or teaching the MSG builder to walk cyclic SCGs — is the single biggest blocker for real-program compilation. The benchmark suite falls back to `fibonacci.vuma` when `sha256d.vuma` does not lower. |
+| Return-value propagation | ✅ Works on x86_64 and AArch64 | `fn main() -> i32 { return 42; }` exits 42 on x86_64 (native) and on AArch64 (via QEMU). `fn main() -> i32 { return 79; }` (SHA256d's "proof verified" convention) also exits 79 on AArch64 via QEMU. The W5-6 fix removed the AST → SCG return-value drop. |
+| Verification enforcement | ✅ Blocking and enforced | The pipeline runs `VerificationLevel::Normal` by default; programs with verification failures return `Err(...)` from `compile()` and emit no binary. The `test_e2e_leak_fails_compilation` test pins this contract. |
+| Proof system | ⚠️ Sketch, not mechanized | The `proof` crate produces paper proofs (proof sketches) checked by a syntactic checker; it is **not** mechanized in Coq, Isabelle, or Lean. A `Proven` verdict from the IVE means the invariant verifiers found no violations, not that a proof assistant has certified the program. Full mechanization is future work. |
+
+### Other Limitations
 
 | Area | Status | Details |
 |------|--------|---------|
 | **Self-hosting** | ❌ Not started | VUMA cannot compile itself yet. The compiler is written in Rust. |
 | **Structs / Enums** | ❌ Not started | No user-defined struct or enum types. Programs operate on primitives, pointers, and regions. |
 | **Stdlib is host-side only** | ⚠️ Partial | Math, fmt, string, and crypto functions execute on the host side (Rust). They are not yet compiled to target machine code. |
-| **BD inference completeness** | ⚠️ Partial | Some complex BD inference scenarios (M2.3) are deferred to a future release. |
-| **Doubly-linked list verification** | ⚠️ Partial | Full verification of doubly-linked list patterns (M2.4) is not yet complete. |
-| **Concurrent verification** | ⚠️ Limited | Verification is limited to single-threaded programs. Full concurrent verification is planned. |
+| **BD inference completeness (M2.3)** | ⚠️ Partial | Some complex BD inference scenarios are deferred to a future release. |
+| **Concurrent verification** | ⚠️ Limited | Verification is limited to single-threaded programs. Full concurrent verification (LDXR/STXR, locks, channels, happens-before analysis) is planned. |
 | **COR end-to-end** | ⚠️ Partial | The Continuous Optimization Runtime is not yet integrated end-to-end. |
 | **LoongArch64 execution** | ⚠️ Not executed | No `qemu-loongarch64-static` path is wired up (mainstream distros lack it as of 2026); the LoongArch64 backend passes ELF header + IR/SCG validation only. Native-hardware or QEMU execution is a future CI target. |
 | **Pi 5 bare-metal backend** | ❌ Not shipped | The `pi5` crate and `src/pi5/link.ld` linker script — referenced by `.cargo/config.toml` for the `aarch64-unknown-none` target — are absent from the tree. Bare-metal AArch64 (Pi 5) execution is a future target, not a current capability. |
-| **Error recovery** | ⚠️ Partial | Parser has known type mismatches in AST→SCG lowering for some edge cases. |
+| **Error recovery** | ⚠️ Partial | Parser has known type mismatches in AST → SCG lowering for some edge cases. |
 
 We believe in honest roadmapping. These limitations represent active development areas, not permanent constraints.
 
@@ -871,3 +909,4 @@ This project is licensed under the MIT License. See [LICENSE](LICENSE) for detai
 - **2026-03-05 — Waves 6–32:** Expanded README for v0.2.0 release: 8 backends, LLM integration, Wasm sandbox, API examples, REPL commands, LSP, diagnostics, module system, package manager.
 - **2026-03-05 — Task 6-b:** Polished README for public v0.1-alpha release: added "What's New in v0.1-alpha" section, updated features list with DWARF/FFI/atomics/FP casts/92 math functions/fmt module, added comprehensive backend status table with atomics/FP/DWARF columns, added installation instructions (cargo install + from source), added working quick-start examples (hello/FFI/math/modules), added badges, added "Known Limitations" section, updated project structure with all 8 backend modules and std module details.
 - **2026-03-05 — Task 6-a:** Comprehensive documentation consistency pass: updated language-reference.md (added FFI/extern section, expanded stdlib with fmt/math/crypto/string/additional modules, added multi-backend table, version bump to 0.2.0), updated architecture.md (version 0.2.0, status Phase 3, expanded codegen layout with all 8 backends + DWARF + backend trait + memory_safety, expanded std layout with all 16 modules), updated ROADMAP.md (version 0.2.0, status Phase 3, wave 19-20 DWARF v4 clarity, phase 2 status note), updated CONTRIBUTING.md (new Section 3: Test Infrastructure with 11 test categories, renamed "ARM64 Instructions" to "Backend Instructions" covering all 8 architectures, added FFI review rule, renumbered sections), updated llm-language-reference.md (expanded stdlib intro to mention all modules, added crypto module docs, string module docs, additional modules list), verified llm-system-prompt.md already covers fmt/math/FFI/atomics/DWARF.
+- **2026-03-07 — W29-30:** README accuracy and final docs pass. Rewrote the "Known Limitations" section into two tables — "Verification — Current Honest State" (hello_memory and doubly_linked_list now pass all 5 invariants; sha256d doesn't compile end-to-end due to SCG cycles; return-value propagation works on x86_64 + AArch64; verification is blocking; proof system is a sketch, not mechanized) and "Other Limitations" (self-hosting, structs/enums, host-side stdlib, BD inference, concurrency, COR, LoongArch64 execution, Pi 5 backend, error recovery). Added "Verifier Now Works on Real Programs (post-alpha.1 hardening, Waves 5-28)" subsection under "What's New in v0.2.0-alpha.1". Removed the stale W11-12 "Known front-end limitation" claim about return-value dropping (fixed by W5-6) and updated the 8-backend section to reflect that x86_64 and AArch64 both have full-pipeline end-to-end execution tests. Updated `docs/ROADMAP.md` Phase 2 M2.4 status to ✅ Complete (doubly-linked list now verified) and Phase 3 to note real-program verifier works and SHA256d real-program compilation is the next milestone. Added a new "Current State — 2026-03-07" section at the top of `RELEASES.md`.

@@ -2,8 +2,8 @@
 
 **Project:** VUMA — Verified-Unsafe Memory Access Framework  
 **Version:** 0.2.0  
-**Status:** Phase 3 — Hardening & Optimization (in progress, Waves 1-32 complete)  
-**Date:** March 6, 2026  
+**Status:** Phase 3 — Hardening & Optimization (in progress, Waves 1-32 of the original plan complete; subsequent hardening waves W1-W28 have made the IVE verifier work end-to-end on `hello_memory.vuma` and `doubly_linked_list.vuma`, both passing all 5 invariants; `sha256d.vuma` real-program compilation is the next major milestone — SCG cycles from loops still block MSG construction)  
+**Date:** March 7, 2026  
 
 ---
 
@@ -11,7 +11,7 @@
 
 The VUMA project implements a six-layer AI-native programming language framework: (1) Semantic Computation Graph (SCG), (2) Inference and Verification Engine (IVE), (3) Projection System, (4) Continuous Optimization Runtime (COR), (5) Behavioral Descriptors (BD), and (6) Verified-Unsafe Memory Access (VUMA). The project targets multi-architecture backends (AArch64, x86_64, RISC-V 64, ARM32, MIPS64, PPC64, LoongArch64, Wasm32) with AArch64 as the primary platform.
 
-The implementation follows a bottom-up strategy organized into five phases, each building on the output of previous phases. Phase 1 (COMPLETE) established foundational data structures and the minimal pipeline. Phase 2 (SUBSTANTIALLY COMPLETE) implemented core verification, multi-backend code generation, and LLM integration. Phase 3 (IN PROGRESS — Waves 6-32 completed) hardens the system, adds concurrency support, DWARF debug info, FFI/syscalls, constant-time crypto, and expanded test infrastructure. Phase 4 adds outcome spaces and ecosystem. Phase 5 achieves self-hosting compiler status. Each phase has specific milestones and deliverables that are objectively verifiable.
+The implementation follows a bottom-up strategy organized into five phases, each building on the output of previous phases. Phase 1 (COMPLETE) established foundational data structures and the minimal pipeline. Phase 2 (SUBSTANTIALLY COMPLETE) implemented core verification, multi-backend code generation, and LLM integration; subsequent hardening waves (W1-W28) cleared the verifier's false positives on top-level `region` declarations and on `doubly_linked_list.vuma`'s sequential-write pattern, so M2.4 (verified doubly-linked list) is now ✅ Complete — both `hello_memory.vuma` and `doubly_linked_list.vuma` pass all 5 invariants through the full parse → SCG → IVE pipeline, and verification is blocking and enforced (`compile()` returns `Err` and emits no binary on verification failure). Phase 3 (IN PROGRESS) hardens the system: real-program verifier works, return-value propagation works on x86_64 + AArch64 via QEMU, but `sha256d.vuma` (the next real-program milestone) does not yet compile end-to-end because the SCG → MSG converter rejects cyclic SCGs produced by loops. Phase 4 adds outcome spaces and ecosystem. Phase 5 achieves self-hosting compiler status. Each phase has specific milestones and deliverables that are objectively verifiable.
 
 ### Key Differentiator: LLM Integration
 
@@ -68,7 +68,7 @@ Phase 1 established the complete architectural foundation of the VUMA framework,
 
 **Goal:** Complete the verification engine, strengthen BD inference, expand multi-architecture codegen to handle complex programs, add LLM integration features, and demonstrate non-trivial verified programs. At the end of Phase 2, the IVE can verify all five invariants for single-threaded programs with dynamic allocation, 8 backends handle complex programs, and LLM agents can use VUMA as a verified compilation sandbox.
 
-**Status:** ✅ Substantially Complete (9/11 milestones achieved; deferred items moved to Phase 3)
+**Status:** ✅ Substantially Complete (10/11 milestones achieved; M2.3 BD inference completeness remains the only deferred item)
 
 ### Milestones
 
@@ -77,7 +77,7 @@ Phase 1 established the complete architectural foundation of the VUMA framework,
 | M2.1 | Exclusivity and interpretation verification passes pass all integration tests | ✅ Complete |
 | M2.2 | Cleanup verification and full invariant pipeline with incremental re-verification | ✅ Complete |
 | M2.3 | BD inference subsumes Rust type system (all Rust-typable programs have valid BDs) | 📋 Deferred |
-| M2.4 | Doubly-linked list verified by IVE with no unsafe blocks | 📋 Deferred |
+| M2.4 | Doubly-linked list verified by IVE with no unsafe blocks | ✅ Complete (W17-18) |
 | M2.5 | Multi-architecture codegen handles complex programs (SHA256d, factorial, Fibonacci) | ✅ Complete |
 | M2.6 | Profile-guided optimization improves benchmarks by ≥15% | ✅ Complete |
 | M2.7 | LLM API (`VumaCompiler`) for programmatic compilation and analysis | ✅ Complete |
@@ -94,7 +94,7 @@ Phase 1 established the complete architectural foundation of the VUMA framework,
 
 **2.3 — BD Inference Completeness.** 📋 Pending. RepD inference that derives representation descriptors from SCG structure is partially implemented. CapD inference that derives capability sets from usage patterns is implemented. RelD inference that derives relationships from SCG edges is implemented. BD consistency checking and subsumption testing remain to be completed.
 
-**2.4 — Verified Data Structures.** 📋 Pending. The doubly-linked list verification remains a key milestone. The framework has all the necessary infrastructure (five invariant verifiers, proof system, counterexample generation) but demonstration of non-trivial data structure verification is still needed.
+**2.4 — Verified Data Structures.** ✅ Complete (W17-18). The doubly-linked list verification milestone is met: `examples/doubly_linked_list.vuma` now passes all five VUMA invariants (Liveness, Exclusivity, Interpretation, Origin, Cleanup) end-to-end through the full parse → SCG → IVE pipeline. The W9-10 Exclusivity false positive on the `link(prev, next)` sequential-write pattern (`(*last).next = node; (*sentinel).prev = node;` flagged as a write-write conflict) was root-caused to missing ControlFlow edges between Access nodes in the AST → SCG bridge and fixed in W17-18 by chaining Access nodes into the ControlFlow sequence in `src/parser/src/to_scg.rs`. The `showcase_doubly_linked_list` test in `src/tests/src/showcase_verification.rs` locks in the clean `Proven` verdict on all 5 invariants. The earlier Liveness/Cleanup false positives on top-level `region` declarations were fixed in W1-W4 + G4 (3-tier `free(var)` tracking; skip top-level region allocations). The `showcase_hello_memory` test similarly locks in the clean Pass on `hello_memory.vuma`. M2.3 (BD inference completeness) remains the only Phase 2 milestone still deferred.
 
 **2.5 — Multi-Architecture Codegen.** ✅ Complete. All 8 backends handle complex programs. SHA256d passes on 6 native backends (x86_64, AArch64, RISC-V 64, ARM32, MIPS64, PPC64). Wasm32 generates valid Wasm modules. LoongArch64 passes individual operation tests. The `Backend` trait architecture enables easy addition of new targets. Cross-backend validation tests ensure consistency.
 
@@ -114,8 +114,8 @@ Phase 1 established the complete architectural foundation of the VUMA framework,
 
 - [x] All five VUMA invariant verifiers pass their integration test suites
 - [x] Incremental verification re-verifies affected subgraphs only
-- [ ] Doubly-linked list requires no `unsafe` blocks (VUMA-VERIFIED instead) — *Deferred to Phase 3*
-- [ ] BD inference subsumes the Rust type system (subsumption test passes) — *Deferred to Phase 3*
+- [x] Doubly-linked list requires no `unsafe` blocks (VUMA-VERIFIED instead) — ✅ Done in W17-18 (the Exclusivity false positive on `link(prev, next)` sequential writes was fixed by chaining Access nodes into the ControlFlow sequence; `showcase_doubly_linked_list` now locks in a clean Pass on all 5 invariants)
+- [ ] BD inference subsumes the Rust type system (subsumption test passes) — *Deferred (M2.3)*
 - [x] 8 backend codegens correctly compile SHA256d, factorial, Fibonacci, and data structure operations
 - [x] Profile-guided optimization improves benchmark performance by ≥15%
 - [x] LLM API (`VumaCompiler`) enables programmatic compilation and analysis
@@ -132,11 +132,24 @@ Phase 1 established the complete architectural foundation of the VUMA framework,
 
 ---
 
-## Phase 3: Hardening & Optimization (IN PROGRESS — Waves 6-32)
+## Phase 3: Hardening & Optimization (IN PROGRESS — Waves 6-32 of original plan complete; subsequent W1-W28 hardening waves landed)
 
 **Goal:** Add concurrency support, expand codegen to include atomics and barriers, implement the full Continuous Optimization Runtime, add comprehensive peripheral support, and harden the verification pipeline. At the end of Phase 3, the IVE can verify multi-threaded programs and the codegen can produce efficient code for concurrent algorithms.
 
-**Status:** 🔄 In Progress (significant progress from Waves 6-32)
+**Status:** 🔄 In Progress (significant progress from Waves 6-32; subsequent W1-W28 hardening waves cleared the verifier's real-program false positives)
+
+### Real-Program Verifier Progress (W1-W28 hardening)
+
+The W1-W28 hardening waves (subsequent to the original W1-W32 plan) made the IVE verifier work end-to-end on real VUMA source programs, not just hand-crafted SCGs:
+
+- **W1-W4 + G4** — Fixed Liveness/Cleanup/Origin/Exclusivity/Interpretation input extractors to skip top-level `region` allocations and to track `free(var)` deallocations via a 3-tier resolver (direct lookup → Derivation edge → predecessor scan). Cleared the false-positive leak reports that previously forced `VerificationLevel::None` in pipeline and API tests.
+- **W5-W6** — Fixed AST → SCG return-value propagation. `fn main() -> i32 { return 42; }` now exits 42 on x86_64 (native) and on AArch64 (via QEMU); `fn main() -> i32 { return 79; }` exits 79 on AArch64 via QEMU. The pipeline-level duplicate FunctionReturn node was removed and the `lit_N → FunctionReturn` DataFlow edge restored.
+- **W9-W10** — Re-enabled `VerificationLevel::Normal` in `pipeline.rs`, `api.rs`, `e2e_cor.rs`, and tightened `showcase_hello_memory` to assert a clean Pass on all 5 invariants (locked in: Liveness, Exclusivity, Interpretation, Origin, Cleanup all reach `Proven`).
+- **W17-W18** — Fixed the Exclusivity false positive on `doubly_linked_list.vuma`'s `link(prev, next)` sequential-write pattern by chaining Access nodes into the ControlFlow sequence in `src/parser/src/to_scg.rs`. `showcase_doubly_linked_list` now locks in a clean Pass on all 5 invariants.
+- **W19-W20** — Documented (not hidden) that `sha256d.vuma` does **not** compile end-to-end yet. The SCG → MSG converter rejects cyclic SCGs produced by loops (`while i < 64` over the 64 SHA-256 rounds). Two diagnostic tests (`test_sha256d_real_program_compiles`, `test_sha256d_real_program_executes`) surface the failure rather than masking it.
+- **W23-W24** — Removed the defensive partial-pass branch in `test_cross_backend_aarch64_qemu_execution_exit_code` (the binary really does exit 42 under QEMU) and added `test_aarch64_sha256d_exit_79_via_qemu` to pin the exit-79 contract on AArch64. Both tests skip gracefully when QEMU is not installed.
+
+**Next major milestone: SHA256d real-program compilation.** Fixing the SCG cycle handling — either by unrolling bounded loops in the parser → SCG bridge, or by teaching the MSG builder to walk cyclic SCGs by treating loop back-edges as revisits rather than refusing the conversion — is the single biggest blocker for real-program compilation. This unblocks M3.5 (lock-free demonstration on bare metal) and the SHA256d real-program benchmark category (currently falls back to `fibonacci.vuma`).
 
 ### Milestones
 
@@ -150,6 +163,9 @@ Phase 1 established the complete architectural foundation of the VUMA framework,
 | M3.6 | Verification pipeline hardening: interprocedural analysis, escape analysis, caching | Sprint 9-10 | ✅ Complete |
 | M3.7 | Cross-backend validation and consistency testing | Sprint 9-10 | ✅ Complete |
 | M3.8 | Diagnostics system with structured error reporting | Sprint 9-10 | ✅ Complete |
+| M3.9 | Real-program verifier works end-to-end on `hello_memory.vuma` and `doubly_linked_list.vuma` (all 5 invariants reach `Proven`) | W1-W18 | ✅ Complete |
+| M3.10 | Return-value propagation works end-to-end on x86_64 (native) and AArch64 (via QEMU) | W5-W6, W23-W24 | ✅ Complete |
+| M3.11 | SHA256d real-program compilation (cyclic SCG → MSG conversion) | TBD | ❌ Not started — single biggest remaining blocker |
 
 ### Deliverables
 
@@ -182,6 +198,10 @@ Phase 1 established the complete architectural foundation of the VUMA framework,
 - [x] Verification pipeline handles interprocedural analysis and caching
 - [x] Cross-backend validation ensures consistency across all 8 backends
 - [x] Structured diagnostics system provides LLM-friendly error reporting
+- [x] Real-program verifier works end-to-end on `hello_memory.vuma` and `doubly_linked_list.vuma` (all 5 invariants reach `Proven`) — W1-W18
+- [x] Return-value propagation works end-to-end on x86_64 (native) and AArch64 (via QEMU) — W5-W6, W23-W24
+- [x] Verification is blocking and enforced (`compile()` returns `Err` and emits no binary on verification failure; pinned by `test_e2e_leak_fails_compilation`)
+- [ ] SHA256d real-program compiles end-to-end (cyclic SCG → MSG conversion) — *single biggest remaining blocker*
 - [ ] GPIO can toggle an LED (blink test)
 - [ ] UART produces reliable console output at 115200 baud
 - [ ] Full boot sequence completes in under 2 seconds on target hardware
@@ -312,24 +332,24 @@ The Wasm32 backend enables LLM agents to compile VUMA programs into safe, sandbo
 ## Dependency Graph
 
 ```
-Phase 1 (COMPLETED) ──┬── Phase 2 (SUBSTANTIALLY COMPLETE) ──── Phase 3 (IN PROGRESS) ──── Phase 4 ──── Phase 5
-                       │                                       │                          │            │
-  SCG Foundation ──────┤                            Concurrency &           LSP (DONE)    Self-hosting
-  MSG Construction ────┤                            Hardening                Projections   compiler
-  IVE Core ────────────┤                            COR Integration          Stdlib
-  Multi-Arch Codegen ──┤                            Diagnostics
-  BD Types             │
-  COR Framework        │
-  Parser & AST ────────┤
+Phase 1 (COMPLETED) ──┬── Phase 2 (SUBSTANTIALLY COMPLETE — M2.4 dlist verified) ──── Phase 3 (IN PROGRESS) ──── Phase 4 ──── Phase 5
+                       │                                                            │                       │            │
+  SCG Foundation ──────┤                                                 Concurrency &             LSP (DONE)    Self-hosting
+  MSG Construction ────┤                                                 Hardening                 Projections   compiler
+  IVE Core ────────────┤                                                 COR Integration           Stdlib
+  Multi-Arch Codegen ──┤                                                 Diagnostics
+  BD Types             │                                                 ✅ Real-program verifier  (W1-W18)
+  COR Framework        │                                                 ✅ Return-value propagation (W5-W6, W23-W24)
+  Parser & AST ────────┤                                                 ❌ SHA256d real-program (SCG cycles) ← next milestone
   Proof System ────────┤
   LLM API ─────────────┤
   LSP Server ──────────┤
   Module Resolution ───┘
 ```
 
-**Critical path:** Phase 1 → Phase 2 (BD inference completeness) → Phase 3 (concurrent verification) → Phase 4 (stdlib/ecosystem) → Phase 5 (self-hosting).
+**Critical path:** Phase 1 → Phase 2 (BD inference completeness — M2.3, the only remaining Phase 2 deferral) → Phase 3 (concurrent verification + SHA256d real-program compilation) → Phase 4 (stdlib/ecosystem) → Phase 5 (self-hosting).
 
-The longest sequential dependency chain is in the verification pipeline: BD inference must be complete before concurrent verification can be extended, which must be complete before the IVE can verify itself in Phase 5.
+The longest sequential dependency chain is in the verification pipeline: BD inference must be complete before concurrent verification can be extended, which must be complete before the IVE can verify itself in Phase 5. The SHA256d real-program compilation milestone (M3.11) is the most immediate blocker for demonstrating the framework on a non-trivial real program — it requires either bounded-loop unrolling in the parser → SCG bridge, or a cyclic-SCG-aware MSG builder.
 
 ---
 
@@ -337,13 +357,15 @@ The longest sequential dependency chain is in the verification pipeline: BD infe
 
 | Risk | Impact | Mitigation |
 |------|--------|-----------|
+| **SCG cycles from loops block real-program compilation** (M3.11) | Blocks SHA256d real-program compilation, M3.5 lock-free bare-metal demo, and the SHA256d benchmark category (currently falls back to `fibonacci.vuma`) | Two candidate fixes documented in W19-W20: (a) unroll bounded loops in the parser → SCG bridge, or (b) teach the MSG builder to walk cyclic SCGs by treating loop back-edges as revisits rather than refusing the conversion. Diagnostic tests `test_sha256d_real_program_compiles` / `_executes` already surface the failure rather than masking it. |
 | IVE verification too slow for large programs | Blocks Phase 3+ | Verification cache and incremental verification implemented; profile and optimize hot paths continuously; use verification debt to prioritize |
 | Backend instruction encoding bugs | Blocks execution | Cross-backend validation tests; SHA256d benchmark; QEMU testing for native backends; Wasm validation for Wasm32 |
-| BD inference incompleteness | Blocks Phase 2+ | Subsumption test against Rust type system; fallback to explicit annotations; iterative refinement via profile feedback |
+| BD inference incompleteness (M2.3) | Blocks Phase 2 full completion | Subsumption test against Rust type system; fallback to explicit annotations; iterative refinement via profile feedback |
 | Target hardware availability | Blocks Phase 3 peripheral testing | QEMU-based testing as primary; hardware testing as validation |
 | Concurrent verification undecidability | Blocks Phase 3 | Limit to finite-state abstraction; use tiered verification confidence; accept partial verification with explicit debt |
 | Self-hosting complexity | Blocks Phase 5 | Incremental approach: self-verify subsystem by subsystem; use Rust-compiled compiler to verify each step |
 | LLM API stability | Blocks LLM adoption | Stable API surface with JSON-serializable results; backward-compatible changes only; LLM agents can rely on structured output |
+| **Proof system not mechanized** | A `Proven` verdict means "no IVE violations found", not "a proof assistant has certified this program" | Documented honestly in `README.md` Known Limitations and in the `proof` crate's crate-level docs. Mechanization in Coq/Isabelle/Lean is future work (Phase 5+). |
 
 ---
 
@@ -352,8 +374,8 @@ The longest sequential dependency chain is in the verification pipeline: BD infe
 | Phase | Milestone Name | Key Metric | Status |
 |-------|---------------|------------|--------|
 | Phase 1 | Foundation Complete | 8 backends, parser, proof system, all 5 invariants | ✅ Complete |
-| Phase 2 | Core Implementation | LLM API, LSP, REPL, Wasm32 sandbox, verification pipeline | ✅ Substantially Complete |
-| Phase 3 | Hardening | Concurrent verification, COR integration, diagnostics | 🔄 In Progress |
+| Phase 2 | Core Implementation | LLM API, LSP, REPL, Wasm32 sandbox, verification pipeline; **M2.4 doubly-linked list verified** (W17-18) | ✅ Substantially Complete (10/11 milestones; only M2.3 BD inference deferred) |
+| Phase 3 | Hardening | Concurrent verification, COR integration, diagnostics; **real-program verifier works on `hello_memory` + `dlist`; return-value propagation on x86_64 + AArch64; SHA256d real-program compilation is the next milestone** (SCG cycles block MSG) | 🔄 In Progress |
 | Phase 4 | VUMA IDE | Projections (done), outcome spaces, stdlib, ecosystem | 📋 Planned |
 | Phase 5 | Self-Hosting | VUMA compiler verifies and compiles itself | 📋 Planned |
 

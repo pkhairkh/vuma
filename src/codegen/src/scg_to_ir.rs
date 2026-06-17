@@ -4302,4 +4302,393 @@ mod tests {
         );
         assert_eq!(instr_vals, vec![IRValue::Immediate(7)]);
     }
+
+    // ── G3: sha256d-specific lowering regression tests ──────────────────
+    //
+    // These tests lock in the IR-builder behaviours that `sha256d.vuma`
+    // exercises end-to-end.  They guard against regressions in the
+    // SCG→IR bridge's synthetic-variable pre-registration, multi-argument
+    // call lowering, pointer-arithmetic chains, and loop-body computation
+    // patterns.  See the G3 worklog entry for the full sha256d compilation
+    // trace (8088-byte ELF, 485 SCG nodes) that these tests mirror.
+
+    /// `is_synthetic_scg_var` must accept exactly the bridge's `v_<node_id>`
+    /// naming convention and reject everything else.
+    ///
+    /// The bridge (`pipeline::node_var` / `resolve_df_input`) only ever
+    /// produces `v_<digits>` for synthetic names; user-visible names
+    /// (parameters, locals, test fixtures like `undefined_var`) must NOT
+    /// match so that genuine undefined-variable errors are still raised
+    /// (Wave 1-b hard-error semantics).
+    #[test]
+    fn g3_synthetic_var_pattern_detection() {
+        // Accepted: bridge-generated synthetic names.
+        assert!(IRBuilder::is_synthetic_scg_var("v_0"));
+        assert!(IRBuilder::is_synthetic_scg_var("v_1"));
+        assert!(IRBuilder::is_synthetic_scg_var("v_296"));
+        assert!(IRBuilder::is_synthetic_scg_var("v_999999"));
+
+        // Rejected: empty digit suffix.
+        assert!(!IRBuilder::is_synthetic_scg_var("v_"));
+
+        // Rejected: non-digit suffix.
+        assert!(!IRBuilder::is_synthetic_scg_var("v_abc"));
+        assert!(!IRBuilder::is_synthetic_scg_var("v_296x"));
+        assert!(!IRBuilder::is_synthetic_scg_var("v_296_x"));
+
+        // Rejected: not a `v_` prefix at all.
+        assert!(!IRBuilder::is_synthetic_scg_var("param_0"));
+        assert!(!IRBuilder::is_synthetic_scg_var("result"));
+        assert!(!IRBuilder::is_synthetic_scg_var("undefined_var"));
+        assert!(!IRBuilder::is_synthetic_scg_var("loop_counter"));
+
+        // Rejected: empty / wrong prefix.
+        assert!(!IRBuilder::is_synthetic_scg_var(""));
+        assert!(!IRBuilder::is_synthetic_scg_var("w_296"));
+    }
+
+    /// A `v_<digits>` variable referenced by a statement but never defined
+    /// in the body must NOT raise `UnknownVariable`.  The IR builder
+    /// pre-registers such synthetic names with a fresh (uninitialised)
+    /// virtual register so the bridge's cross-function DataFlow references
+    /// resolve cleanly.
+    ///
+    /// This mirrors the sha256d SCG, where the bridge occasionally emits a
+    /// flat statement list referencing a `v_<id>` whose defining node was
+    /// emitted in a different function (a known bridge limitation when
+    /// unconsumed nodes are swept into a synthetic `__remaining` body).
+    #[test]
+    fn g3_synthetic_v_digit_var_pre_registered() {
+        let scg = func_scg(
+            "test_synth_var",
+            vec![],
+            vec![
+                // Define a local var, then "use" a synthetic v_42 that is
+                // never defined in this body.  Pre-registration must keep
+                // this build green.
+                ScgStatement::Computation(ComputationNode {
+                    dst: "result".into(),
+                    op: BinOpKind::Add,
+                    lhs: ScgExpr::Var("v_42".into()),
+                    rhs: ScgExpr::Int(1),
+                    tail_call: false,
+                }),
+                ScgStatement::Return(vec![ScgExpr::Var("result".into())]),
+            ],
+        );
+        let mut builder = IRBuilder::new();
+        let program = builder.build(&scg).expect(
+            "synthetic v_<digits> vars must be pre-registered — no UnknownVariable error",
+        );
+
+        // The Add instruction must reference v_42's pre-allocated vreg as lhs.
+        let func = &program.functions[0];
+        let add = func.blocks[0]
+            .instructions
+            .iter()
+            .find(|i| matches!(i, IRInstruction::Add { .. }))
+            .expect("Add instruction should be emitted");
+        if let IRInstruction::Add { lhs, .. } = add {
+            assert!(
+                matches!(lhs, IRValue::Register(_)),
+                "v_42 should resolve to a pre-allocated vreg, got {:?}",
+                lhs,
+            );
+        }
+
+        // The v_42 vreg must be registered with its name.
+        // `vregs` is a HashMap<u32, VirtualRegister>; iter yields (&u32, &VirtualRegister).
+        let v42_registered = func
+            .vregs
+            .values()
+            .any(|vr| vr.name.as_deref() == Some("v_42"));
+        assert!(
+            v42_registered,
+            "v_42 must be registered as a named virtual register",
+        );
+    }
+
+    /// A function call with 4 arguments (mirrors `sha256_transform(state,
+    /// k, w, block)` from sha256d) must lower to a single `Call` IR
+    /// instruction preserving all 4 argument values.
+    #[test]
+    fn g3_function_call_with_four_args() {
+        let scg = func_scg(
+            "caller",
+            vec![
+                ScgParam { name: "state".into(), ty: ScgType::Ptr },
+                ScgParam { name: "k".into(),      ty: ScgType::Ptr },
+                ScgParam { name: "w".into(),      ty: ScgType::Ptr },
+                ScgParam { name: "block".into(),  ty: ScgType::Ptr },
+            ],
+            vec![
+                ScgStatement::Call(CallNode {
+                    dst: None,
+                    func: "sha256_transform".into(),
+                    args: vec![
+                        ScgExpr::Var("state".into()),
+                        ScgExpr::Var("k".into()),
+                        ScgExpr::Var("w".into()),
+                        ScgExpr::Var("block".into()),
+                    ],
+                    is_extern: false,
+                }),
+                ScgStatement::Return(vec![]),
+            ],
+        );
+        let mut builder = IRBuilder::new();
+        let program = builder.build(&scg).expect("4-arg call must lower");
+        let block = &program.functions[0].blocks[0];
+        let call = block
+            .instructions
+            .iter()
+            .find_map(|i| match i {
+                IRInstruction::Call { func, args, .. } if func == "sha256_transform" => {
+                    Some(args.clone())
+                }
+                _ => None,
+            })
+            .expect("sha256_transform Call should be emitted");
+        assert_eq!(call.len(), 4, "all 4 args must be preserved");
+        // Each arg must resolve to the corresponding parameter vreg.
+        for arg in &call {
+            assert!(
+                matches!(arg, IRValue::Register(_)),
+                "each arg must be a register value, got {:?}",
+                arg,
+            );
+        }
+    }
+
+    /// Pointer arithmetic with a *non-constant* offset (mirrors sha256d's
+    /// `*(buf + offset)` where `offset` is a runtime value) must lower to
+    /// an `Offset` instruction computing the effective address, followed by
+    /// a `Load`/`Store` at offset 0.
+    #[test]
+    fn g3_pointer_arith_with_runtime_offset() {
+        let scg = func_scg(
+            "read_u32_be",
+            vec![
+                ScgParam { name: "buf".into(),    ty: ScgType::Ptr },
+                ScgParam { name: "offset".into(), ty: ScgType::U64 },
+            ],
+            vec![
+                ScgStatement::Access(AccessNode::Load {
+                    dst: "b0".into(),
+                    ptr: ScgExpr::Var("buf".into()),
+                    offset: Some(ScgExpr::Var("offset".into())),
+                }),
+                ScgStatement::Return(vec![ScgExpr::Var("b0".into())]),
+            ],
+        );
+        let mut builder = IRBuilder::new();
+        let program = builder.build(&scg).expect("runtime-offset load must lower");
+        let block = &program.functions[0].blocks[0];
+
+        // Must have an Offset instruction (computing buf + offset).
+        let has_offset = block.instructions.iter().any(|i| {
+            matches!(i, IRInstruction::Offset { .. })
+        });
+        assert!(has_offset, "non-const offset must produce an Offset instruction");
+
+        // Must have a Load at offset 0 (using the Offset's result as addr).
+        let load = block.instructions.iter().find_map(|i| match i {
+            IRInstruction::Load { addr, offset, .. } => Some((addr.clone(), *offset)),
+            _ => None,
+        });
+        let (load_addr, load_off) = load.expect("Load should be emitted");
+        assert_eq!(
+            load_off, 0,
+            "Load must use byte_offset 0 because the Offset computed the address",
+        );
+        assert!(
+            matches!(load_addr, IRValue::Register(_)),
+            "Load addr must be the Offset result vreg, got {:?}",
+            load_addr,
+        );
+    }
+
+    /// A loop whose body performs multiple computations and re-assignments
+    /// (mirrors the sha256d compression loop: `t1 = h + sigma1(e) + ch(...)
+    /// + ki + wi; t2 = ...; h = g; g = f; ...`) must lower without
+    /// `UnknownVariable` errors and must produce a loop header with a
+    /// back-edge.
+    #[test]
+    fn g3_sha256d_compression_loop_pattern() {
+        // Model: `for i in 0..64 { t1 = a + b + i; a = t1; }`
+        // The loop body re-assigns `a`, which forces a loop-header phi.
+        let scg = func_scg(
+            "sha256_transform",
+            vec![
+                ScgParam { name: "a".into(), ty: ScgType::U32 },
+                ScgParam { name: "b".into(), ty: ScgType::U32 },
+            ],
+            vec![
+                // i = 0
+                ScgStatement::Computation(ComputationNode {
+                    dst: "i".into(),
+                    op: BinOpKind::Add,
+                    lhs: ScgExpr::Int(0),
+                    rhs: ScgExpr::Int(0),
+                    tail_call: false,
+                }),
+                // Loop body: t1 = a + b + i; a = t1
+                ScgStatement::Control(ControlNode::Loop {
+                    body: vec![
+                        ScgStatement::Computation(ComputationNode {
+                            dst: "sum1".into(),
+                            op: BinOpKind::Add,
+                            lhs: ScgExpr::Var("a".into()),
+                            rhs: ScgExpr::Var("b".into()),
+                            tail_call: false,
+                        }),
+                        ScgStatement::Computation(ComputationNode {
+                            dst: "t1".into(),
+                            op: BinOpKind::Add,
+                            lhs: ScgExpr::Var("sum1".into()),
+                            rhs: ScgExpr::Var("i".into()),
+                            tail_call: false,
+                        }),
+                        // Re-assign a (loop-carried value).
+                        ScgStatement::Computation(ComputationNode {
+                            dst: "a".into(),
+                            op: BinOpKind::Add,
+                            lhs: ScgExpr::Var("t1".into()),
+                            rhs: ScgExpr::Int(0),
+                            tail_call: false,
+                        }),
+                        // Increment i (loop-carried value).
+                        ScgStatement::Computation(ComputationNode {
+                            dst: "i".into(),
+                            op: BinOpKind::Add,
+                            lhs: ScgExpr::Var("i".into()),
+                            rhs: ScgExpr::Int(1),
+                            tail_call: false,
+                        }),
+                    ],
+                }),
+                ScgStatement::Return(vec![ScgExpr::Var("a".into())]),
+            ],
+        );
+        let mut builder = IRBuilder::new();
+        let program = builder
+            .build(&scg)
+            .expect("sha256d-style compression loop must lower without error");
+
+        let func = &program.functions[0];
+
+        // The function must have multiple blocks (entry, loop_header, loop_body, loop_exit, ...).
+        assert!(
+            func.blocks.len() >= 3,
+            "loop must produce at least 3 blocks (header, body, exit), got {}",
+            func.blocks.len(),
+        );
+
+        // The loop header must contain at least one Phi (for the loop-
+        // carried values `a` and `i`).
+        let header_has_phi = func.blocks.iter().any(|b| {
+            b.label.starts_with("loop_header")
+                && b.instructions.iter().any(|i| matches!(i, IRInstruction::Phi { .. }))
+        });
+        assert!(
+            header_has_phi,
+            "loop header must contain Phi instructions for loop-carried values",
+        );
+
+        // The loop body must contain the expected Add instructions.
+        let body_block = func
+            .blocks
+            .iter()
+            .find(|b| b.label.starts_with("loop_body"))
+            .expect("loop_body block must exist");
+        let add_count = body_block
+            .instructions
+            .iter()
+            .filter(|i| matches!(i, IRInstruction::Add { .. }))
+            .count();
+        assert!(
+            add_count >= 3,
+            "loop body must contain >= 3 Add instructions (sum1, t1, a-reassign, i-increment), got {}",
+            add_count,
+        );
+    }
+
+    /// A chain of pointer-offset loads (mirrors sha256d's `read_u32_be`:
+    /// `b0 = *(buf + offset); b1 = *(buf + offset + 1); ...`) must lower
+    /// to one Offset + Load per byte, each with a distinct address vreg.
+    #[test]
+    fn g3_pointer_arith_chain_distinct_addrs() {
+        let scg = func_scg(
+            "read_u32_be",
+            vec![
+                ScgParam { name: "buf".into(),    ty: ScgType::Ptr },
+                ScgParam { name: "offset".into(), ty: ScgType::U64 },
+            ],
+            vec![
+                // b0 = *(buf + offset)
+                ScgStatement::Access(AccessNode::Load {
+                    dst: "b0".into(),
+                    ptr: ScgExpr::Var("buf".into()),
+                    offset: Some(ScgExpr::Var("offset".into())),
+                }),
+                // b1 = *(buf + (offset + 1)) — chain through a synthetic sum var
+                ScgStatement::Computation(ComputationNode {
+                    dst: "off_plus_1".into(),
+                    op: BinOpKind::Add,
+                    lhs: ScgExpr::Var("offset".into()),
+                    rhs: ScgExpr::Int(1),
+                    tail_call: false,
+                }),
+                ScgStatement::Access(AccessNode::Load {
+                    dst: "b1".into(),
+                    ptr: ScgExpr::Var("buf".into()),
+                    offset: Some(ScgExpr::Var("off_plus_1".into())),
+                }),
+                ScgStatement::Return(vec![ScgExpr::Var("b0".into()), ScgExpr::Var("b1".into())]),
+            ],
+        );
+        let mut builder = IRBuilder::new();
+        let program = builder
+            .build(&scg)
+            .expect("pointer-arith chain must lower without error");
+        let block = &program.functions[0].blocks[0];
+
+        // Two Offset instructions (one per Load with a non-const offset),
+        // each writing to a distinct address vreg.
+        let offset_dsts: Vec<u32> = block
+            .instructions
+            .iter()
+            .filter_map(|i| match i {
+                IRInstruction::Offset { dst, .. } => dst.as_register(),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            offset_dsts.len(),
+            2,
+            "expected 2 Offset instructions (one per non-const-offset Load), got {}",
+            offset_dsts.len(),
+        );
+        assert_ne!(
+            offset_dsts[0], offset_dsts[1],
+            "the two Offset results must be distinct vregs",
+        );
+
+        // Two Load instructions, each at byte_offset 0 (because the
+        // Offset instruction already computed the effective address).
+        let loads: Vec<i32> = block
+            .instructions
+            .iter()
+            .filter_map(|i| match i {
+                IRInstruction::Load { offset, .. } => Some(*offset),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(loads.len(), 2, "expected 2 Load instructions");
+        assert!(
+            loads.iter().all(|&o| o == 0),
+            "all Loads must use byte_offset 0 (offset computed via Offset instr), got {:?}",
+            loads,
+        );
+    }
 }

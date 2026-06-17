@@ -4,6 +4,150 @@ This document summarizes each VUMA release with key changes and known limitation
 
 ---
 
+## Current State — 2026-03-07 (post-v0.2.0-alpha.1 hardening, Waves 5-28)
+
+**Honest snapshot of what works and what doesn't, after the W1-W28 hardening
+waves that followed the v0.2.0-alpha.1 scientific-integrity release.**
+
+This is not a new version tag — `Cargo.toml` remains at `0.2.0-alpha.1`. It
+is a status snapshot documenting the real state of the framework so that
+users, contributors, and downstream LLM agents can plan against accurate
+claims rather than the v0.2.0-alpha.1 release notes (which described only
+the scientific-integrity pass and carried forward older "deferred to Phase 3"
+limitations that have since been resolved).
+
+### What works (verified by tests)
+
+- **Verifier works on real programs.** `examples/hello_memory.vuma` and
+  `examples/doubly_linked_list.vuma` both pass **all 5 VUMA invariants**
+  (Liveness, Exclusivity, Interpretation, Origin, Cleanup) end-to-end
+  through the full parse → SCG → IVE pipeline. Locked in by
+  `showcase_hello_memory` and `showcase_doubly_linked_list` in
+  `src/tests/src/showcase_verification.rs`.
+  - The W9-10 Exclusivity false positive on `doubly_linked_list.vuma`'s
+    `link(prev, next)` sequential-write pattern
+    (`(*last).next = node; (*sentinel).prev = node;` flagged as a
+    write-write conflict) was fixed in W17-18 by chaining Access nodes
+    into the ControlFlow sequence in `src/parser/src/to_scg.rs`.
+  - The earlier Liveness/Cleanup false positives on top-level `region`
+    declarations were fixed in W1-W4 + G4 (3-tier `free(var)` tracking;
+    skip top-level region allocations).
+- **Return-value propagation works** on x86_64 (native) and AArch64 (via
+  QEMU). `fn main() -> i32 { return 42; }` exits 42 on both architectures
+  (Test 17 in `cross_backend.rs`); `fn main() -> i32 { return 79; }`
+  (SHA256d's "proof verified" convention, 0x4F = first byte of
+  SHA256d("abc")) exits 79 on AArch64 via QEMU (W24). The W5-6 fix
+  removed the AST → SCG return-value drop by eliminating the duplicate
+  FunctionReturn node and restoring the `lit_N → FunctionReturn`
+  DataFlow edge.
+- **Verification is blocking and enforced.** `compile()` returns
+  `Err(Vec<VumaError>)` and emits no binary when verification fails.
+  Pinned by `test_e2e_leak_fails_compilation` in
+  `src/tests/src/showcase_verification.rs`.
+- **3700+ tests pass** across the workspace (`cargo test --workspace`).
+  Per-crate breakdowns: `vuma` core 140+, `vuma-tests` 486+,
+  `vuma-parser` 36+, plus `vuma-scg`, `vuma-ive`, `vuma-bd`,
+  `vuma-codegen`, `vuma-proof`, `vuma-std`, `vuma-cor`,
+  `vuma-projection`, `vuma-package`.
+- **8 backend architectures** — x86_64 and AArch64 both have real
+  end-to-end execution tests through the full parse → SCG → IR →
+  regalloc → encode pipeline. RISC-V 64, ARM32, MIPS64, PPC64,
+  LoongArch64 pass ELF header + IR/SCG validation. Wasm32 generates
+  valid modules. Cross-architecture execution via QEMU is gated on
+  `qemu-<arch>-static` being installed.
+
+### What doesn't work yet (documented honestly)
+
+- **`sha256d.vuma` does not compile end-to-end.** The SCG → MSG converter
+  (`vuma_core::scg_to_msg::scg_to_msg`) refuses to convert SCGs that
+  contain back-edges from loops — `sha256d.vuma` has `while i < 64` over
+  the 64 SHA-256 rounds and `while j < len` over message blocks, both of
+  which the parser-built SCG represents with control-flow cycles. This
+  blocks MSG construction, BD inference, IVE verification feeding off the
+  MSG, and COR init. The benchmark suite falls back to `fibonacci.vuma`
+  when `sha256d.vuma` does not lower. Two diagnostic tests
+  (`test_sha256d_real_program_compiles`,
+  `test_sha256d_real_program_executes`) surface the failure rather than
+  masking it. **SHA256d real-program compilation is the next major
+  milestone** (M3.11 in `docs/ROADMAP.md`). The fix is either (a) unroll
+  bounded loops in the parser → SCG bridge, or (b) teach the MSG builder
+  to walk cyclic SCGs by treating loop back-edges as revisits.
+- **Proof system is a sketch, not mechanized.** The `proof` crate
+  produces paper proofs (proof sketches) checked by a syntactic checker.
+  It is **not** mechanized in Coq, Isabelle, or Lean. A `Proven` verdict
+  from the IVE means the invariant verifiers found no violations, not
+  that a proof assistant has certified the program. Full mechanization
+  is future work (Phase 5+).
+- **Concurrent verification is limited to single-threaded programs.**
+  LDXR/STXR, locks, channels, and happens-before analysis are Phase 3
+  targets (M3.1, M3.2) and not yet implemented.
+- **Self-hosting is not started.** VUMA cannot compile itself; the
+  compiler is written in Rust.
+- **No user-defined structs or enums.** Programs operate on primitives,
+  pointers, and regions.
+- **Standard library is host-side only.** Math, fmt, string, and crypto
+  functions execute on the host (Rust); they are not yet compiled to
+  target machine code.
+- **BD inference completeness (M2.3) is deferred.** Some complex BD
+  inference scenarios remain unfinished — this is the only Phase 2
+  milestone still deferred (M2.4 doubly-linked list verification is now
+  ✅ Complete as of W17-18).
+- **COR is not integrated end-to-end.** The Continuous Optimization
+  Runtime has ProfileCollector, SpeculativeExecutor, OptimizationEngine,
+  and DeploymentManager components, but the end-to-end optimization loop
+  is not wired into the default compilation pipeline.
+- **LoongArch64 execution is not validated.** No `qemu-loongarch64-static`
+  path is wired up; the LoongArch64 backend passes ELF header + IR/SCG
+  validation only.
+- **Pi 5 bare-metal backend is not shipped.** The `pi5` crate and
+  `src/pi5/link.ld` linker script are absent from the tree.
+
+### Test count
+
+`cargo test --workspace` reports **3700+ tests passing** across all 12
+workspace crates. The largest single contributors are `vuma-tests`
+(integration tests, 486+ tests covering cross-backend, ABI, ELF/Wasm
+validation, DWARF/FFI, full-pipeline, SHA256d, property-based, and
+benchmark categories) and `vuma` core (140+ tests covering pipeline,
+API, and unit-level SCG/MSG/IVE/BD integration).
+
+### Files touched in W29-30 (this snapshot)
+
+- `README.md` — rewrote "Known Limitations" into two tables
+  ("Verification — Current Honest State" and "Other Limitations"); added
+  "Verifier Now Works on Real Programs (post-alpha.1 hardening, Waves
+  5-28)" subsection under "What's New in v0.2.0-alpha.1"; removed the
+  stale W11-12 "Known front-end limitation" claim about return-value
+  dropping (fixed by W5-6); updated the 8-backend section to reflect
+  that x86_64 and AArch64 both have full-pipeline end-to-end execution
+  tests; added a Worklog entry.
+- `docs/ROADMAP.md` — updated Phase 2 status to "10/11 milestones
+  achieved" with M2.4 (doubly-linked list verified) now ✅ Complete;
+  updated Phase 2 success criteria to mark the dlist checkbox `[x]`;
+  added a "Real-Program Verifier Progress (W1-W28 hardening)" subsection
+  to Phase 3; added three new Phase 3 milestones (M3.9 real-program
+  verifier, M3.10 return-value propagation, M3.11 SHA256d real-program
+  compilation); added new Phase 3 success criteria; updated the
+  dependency graph and risk-mitigation table; updated the Success
+  Criteria Summary table.
+- `RELEASES.md` — added this "Current State — 2026-03-07" section at
+  the top.
+
+### Next actions
+
+1. **Fix SCG cycle handling** (M3.11) — unblock SHA256d real-program
+   compilation. This is the single highest-leverage task in the project
+   right now.
+2. **Mechanize the proof system** in Coq, Isabelle, or Lean (long-term,
+   Phase 5+ track).
+3. **Implement concurrent verification** (M3.1, M3.2) — LDXR/STXR,
+   happens-before analysis, deadlock detection.
+4. **Add user-defined structs and enums** — currently a hard front-end
+   limitation.
+5. **Wire COR end-to-end** into the default compilation pipeline.
+
+---
+
 ## v0.2.0-alpha.1 — 2026-03-07
 
 **Scientific Integrity, Provenance, and Versioning Correction**
