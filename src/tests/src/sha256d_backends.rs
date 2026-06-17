@@ -2184,8 +2184,6 @@ fn test_sha256d_real_program_executes() {
         std::process::id()
     ));
     std::fs::write(&bin_path, &output.binary).unwrap();
-    std::fs::write("/tmp/sha256d_dump.elf", &output.binary).unwrap();
-    eprintln!("Dumped to /tmp/sha256d_dump.elf");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

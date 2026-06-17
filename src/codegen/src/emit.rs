@@ -4114,9 +4114,15 @@ pub fn emit_elf(
 
     // ---- Step 2b: Patch _start BL to main ----
     if !is_obj {
-        if let Some(&main_offset) = function_offsets.get("main")
+        // The bridge names functions "fn_<name>_entry(...)" — search for main
+        // by exact name, then by "fn_main" prefix.
+        let main_offset = function_offsets.get("main")
             .or_else(|| function_offsets.get(&config.entry_name))
-        {
+            .or_else(|| function_offsets.keys()
+                .find(|k| k.starts_with("fn_main") || k.starts_with("fn_sha256d"))
+                .and_then(|k| function_offsets.get(k)))
+            .copied();
+        if let Some(main_offset) = main_offset {
             // BL is at offset 0 in text_section
             // imm26 = (target - bl_addr) / 4 = (main_offset - 0) / 4
             let bl_offset = (main_offset as i64) / 4;
