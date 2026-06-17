@@ -143,7 +143,7 @@ cross-aarch64-release:
 
 # Install the pinned nightly toolchain
 toolchain:
-    rustup toolchain install nightly
+    rustup toolchain install nightly-2026-03-01
 
 # Install required components and targets
 setup: toolchain

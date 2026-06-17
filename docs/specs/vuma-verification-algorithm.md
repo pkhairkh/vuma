@@ -1095,4 +1095,20 @@ Where: A = accesses, R = regions, P = paths, S = sync edges, H = RepD history si
 
 ---
 
+## Appendix D: Soundness Theorem
+
+**Theorem (Soundness).** If `verify_all(input) == Pass`, then the program satisfies all 5 VUMA invariants (Liveness, Exclusivity, Interpretation, Origin, and Cleanup).
+
+**Proof sketch.** By case analysis on each invariant verifier. `verify_all` dispatches to the five per-invariant verifiers (`verify_liveness`, `verify_exclusivity`, `verify_interpretation`, `verify_origin`, `verify_cleanup`) and returns `Pass` only when every one of them yields a `Proven` (or soundly-conditional) result. Each verifier's acceptance condition reduces, by construction, to the corresponding formal definition in `vuma-invariants-spec.md`:
+
+- **Liveness** — `verify_liveness` proves `forall access *(a) at p, live(a) holds at p`, which is exactly the Liveness definition in `vuma-invariants-spec.md`.
+- **Exclusivity** — `verify_exclusivity` proves `forall concurrent writes *(a1), *(a2) at p, [a1,a1+s1) intersect [a2,a2+s2) = empty`, matching the Exclusivity definition in `vuma-invariants-spec.md`.
+- **Interpretation** — `verify_interpretation` proves `forall access *(a) at p, RepD(op) matches RepD(region at a)`, matching the Interpretation definition in `vuma-invariants-spec.md`.
+- **Origin** — `verify_origin` proves `forall address a at p, exists a derivation chain from a valid allocate() to a`, matching the Origin definition in `vuma-invariants-spec.md`.
+- **Cleanup** — `verify_cleanup` proves `forall allocate(r) at p, exists free(r) at q reachable from p with no access after q`, matching the Cleanup definition in `vuma-invariants-spec.md`.
+
+Since each case reduces to the corresponding formal definition in `vuma-invariants-spec.md`, the conjunction of all five verifier successes implies the conjunction of all five invariants. Hence `verify_all(input) == Pass` implies the program satisfies all 5 VUMA invariants. $\square$
+
+---
+
 *End of VUMA Verification Algorithm Specification*

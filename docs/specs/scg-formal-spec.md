@@ -472,4 +472,12 @@ This theorem is the formal guarantee that the IVE's optimization and refactoring
 
 ---
 
+## Appendix C: Related Work
+
+- **Bisimulation and process equivalence.** The SCG's bisimulation-based equivalence relation ($\sim$) and canonical-form computation follow the classical tradition of Milner's *A Calculus of Communicating Systems* (CCS, Milner 1980) and Park's notion of bisimulation equivalence (Park 1981). Milner & Park's partition-refinement algorithm underpins the SCG canonicalization procedure described in Section 3.
+- **Multi-Level Intermediate Representation (MLIR).** The SCG's role as a target-independent, machine-reasonable IR that sits above a lower-level codegen IR echoes the design philosophy of **MLIR** (Lattner, Amini, Shpeisman, et al. 2021), which similarly advocates composable, hierarchical IR dialects rather than a single monolithic IR.
+- **Sea of Nodes.** The SCG's explicit data-flow and control-flow edges with first-class side-effect ordering draws on the **Sea of Nodes** intermediate representation (Click & Paleczky 1995; Click 1995), in which dependencies and effects are explicit graph edges rather than implicit in statement ordering.
+
+---
+
 *End of specification.*

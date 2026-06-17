@@ -157,7 +157,7 @@ setup: toolchain
 
 ## toolchain: Install the pinned nightly toolchain
 toolchain:
-        $(RUSTUP) toolchain install nightly
+        $(RUSTUP) toolchain install nightly-2026-03-01
 
 # ============================================================================
 # Miscellaneous

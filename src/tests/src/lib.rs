@@ -98,6 +98,10 @@ pub mod dwarf_ffi_integration;
 pub mod sha256d_backends;
 #[cfg(test)]
 pub mod regression;
+#[cfg(test)]
+pub mod showcase_verification;
+#[cfg(test)]
+pub mod determinism;
 
 // Re-export the helper macros from the framework module.
 // Note: #[macro_export] macros are already at the crate root, so no

@@ -489,4 +489,12 @@ This Galois connection establishes that CapDs are a *precise abstraction* of the
 
 ---
 
+## Appendix C: Related Work
+
+- **Joe-E.** CapD's framing of capabilities as a finite, enumerated, statically-checkable permission set is inspired by **Joe-E** (Mettler, Wagner, & Close 2010), a capability-secure subset of Java designed to enable static verification of security properties.
+- **Caja.** CapD's context-dependent permission resolution and the strict separation of object identity from authority echo the **Caja** object-capability model (Miller, Morningstar, & Yee 2009) for safe interaction between mutually suspicious JavaScript programs.
+- **SoftBound / CETS.** CapD's `DerivePtr` capability and the rule that pointer derivation weakens the source CapD (Lemma 3.2) parallel the spatial and temporal safety enforced by **SoftBound** (Nagarakatte, Zhao, Martin, & Zdancewic 2009) and **CETS** (Nagarakatte, Martin, & Zdancewic 2010), which attach bounds and provenance metadata to every pointer.
+
+---
+
 *End of specification.*

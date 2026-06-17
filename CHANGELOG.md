@@ -5,6 +5,67 @@ All notable changes to the VUMA project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+> **Authorship note.** The VUMA codebase, including this changelog, was
+> developed primarily through AI-assisted sessions using
+> [GLM-5.1](https://z.ai) and other AI coding agents, with human oversight
+> throughout. See `README.md` → *Authorship Disclosure* for the full statement.
+
+---
+
+## [0.2.0-alpha.1] — 2026-03-07
+
+**Scientific integrity, provenance, and versioning correction.** This
+pre-release bumps the version from `0.1.0-alpha.1` to `0.2.0-alpha.1` to
+reflect the substantial body of work (~266k LOC across 8 backends, 32 waves)
+that has accumulated since the original `0.1.0` foundation release. It also
+adds an explicit *Authorship Disclosure* acknowledging that the project was
+developed primarily through AI-assisted sessions, and corrects the
+non-monotonic version history in this file (see *Versioning Note* below).
+
+### Added — Provenance & Disclosure
+
+- **Authorship Disclosure section** in `README.md` (prominent, immediately
+  after the title and badges) explicitly acknowledging AI-assisted development
+  using [GLM-5.1](https://z.ai) and other AI coding agents. *(W27-28)*
+- **AI-assisted development note** in `docs/CONTRIBUTING.md` requesting that
+  PRs authored or substantially assisted by AI tools disclose this in the PR
+  description. *(W27-28)*
+- **Authorship note** at the top of this changelog (see blockquote above) and
+  in `docs/architecture.md` (updated `Authors` field). *(W27-28)*
+- **Versioning Note** (see below) documenting the historical `0.1.0` →
+  `0.1.0-alpha.X` → `0.2.0-alpha.1` progression. *(W27-28)*
+
+### Changed — Versioning
+
+- **`Cargo.toml`**: bumped `version` in both `[package]` and
+  `[workspace.package]` from `0.1.0-alpha.1` to `0.2.0-alpha.1`. The minor
+  bump reflects the substantial work done since `0.1.0` (8 backends, FFI,
+  package manager, LLM integration, ~266 tests) — keeping the version pinned
+  at `0.1.0-alpha.1` was artificially low. *(W27-28)*
+- **`README.md`** version badge updated to `0.2.0-alpha.1`. *(W27-28)*
+- **`RELEASES.md`**: new `v0.2.0-alpha.1` entry at the top. *(W27-28)*
+
+### Fixed — Changelog Integrity
+
+- **Non-monotonic version entries**: restructured the `2026-03-05` entries so
+  the chronological order is unambiguous. The `0.1.0` initial release is now
+  explicitly annotated as the *first* release of that day (Phase 1
+  foundation), and `0.1.0-alpha.0` as a *later* pre-release branched for
+  Phase 2 work. See the *Versioning Note* below each entry. *(W27-28)*
+
+### Versioning Note
+
+SemVer precedence for the `0.1.0` series is `0.1.0-alpha.0 < 0.1.0-alpha.1 <
+0.1.0`, which would place the stable `0.1.0` *after* both alphas. However,
+the actual release chronology is the opposite: `0.1.0` was the initial
+public release (Phase 1 foundation, 2026-03-05), and the `0.1.0-alpha.X`
+pre-releases were branched *afterwards* as pre-releases for the next minor
+cycle (Phase 2 work). This was a misuse of SemVer pre-release tags. The
+`0.2.0-alpha.1` bump in this entry corrects the trajectory: future Phase 2 /
+Phase 3 pre-releases will use the `0.2.0-alpha.X` series, and the eventual
+stable release will be `0.2.0`. Entries below are ordered newest-first by
+**release date**, not by SemVer precedence.
+
 ---
 
 ## [0.1.0-alpha.1] — 2026-03-06
@@ -108,9 +169,17 @@ Pre-release alpha build incorporating Waves 1–5 of critical bug fixes, atomics
 
 ---
 
-## [0.1.0-alpha.0] — 2026-03-05
+## [0.1.0-alpha.0] — 2026-03-05 (later — Phase 2 pre-release)
 
-> **Note**: This is a pre-release (alpha) version. The API is not yet stabilized and may change before v0.1.0.
+> **Note**: This is a pre-release (alpha) version. The API is not yet
+> stabilized and may change before the next stable release.
+>
+> **Same-day clarification**: This pre-release was branched *after* the
+> `0.1.0` initial release earlier on 2026-03-05. Despite the SemVer
+> precedence (`0.1.0-alpha.0` < `0.1.0`), it chronologically *follows*
+> `0.1.0` and contains substantially more work (Phase 2: 8 backends, LLM
+> integration, FFI, package manager, etc.). See the *Versioning Note* under
+> `0.2.0-alpha.1` above.
 
 ---
 
@@ -234,9 +303,15 @@ Pre-release alpha build incorporating Waves 1–5 of critical bug fixes, atomics
 
 ---
 
-## [0.1.0] — 2026-03-05
+## [0.1.0] — 2026-03-05 (earlier — initial public release)
 
 Initial release of the VUMA framework — Verified-Unsafe Memory Access AI-Native Programming Language.
+
+> **Same-day clarification**: This is the *first* release of 2026-03-05
+> (Phase 1 foundation: 12 crates, 15 formal specs, 10 examples). The
+> `0.1.0-alpha.0` entry above was branched *later* the same day as a
+> pre-release for Phase 2 work. See the *Versioning Note* under
+> `0.2.0-alpha.1` for the SemVer-vs-chronology discussion.
 
 ---
 
@@ -322,7 +397,7 @@ Initial release of the VUMA framework — Verified-Unsafe Memory Access AI-Nativ
 
 ## Release Notes
 
-### [0.1.0-alpha.0] — 2026-03-05
+### [0.1.0-alpha.0] — 2026-03-05 (later — Phase 2 pre-release)
 
 This release represents Phase 2 (substantially complete) of the VUMA framework. Major additions include:
 
@@ -343,7 +418,7 @@ This release represents Phase 2 (substantially complete) of the VUMA framework. 
 - ARM64 atomics and concurrent verification are Phase 3 targets
 - COR end-to-end integration not yet complete
 
-### [0.1.0] — 2026-03-05
+### [0.1.0] — 2026-03-05 (earlier — initial public release)
 
 This is the initial public release of the VUMA framework. It contains the complete architectural foundation: all 12 workspace crates, 15 formal specifications, 10 example programs, a comprehensive benchmark suite, and full documentation.
 
@@ -376,3 +451,4 @@ This is the initial public release of the VUMA framework. It contains the comple
 - **2026-03-05 — Wave 28:** Constant-time crypto operations across all 8 backends.
 - **2026-03-05 — Wave 29-31:** Final hardening, documentation updates, release preparation.
 - **2026-03-05 — Wave 32:** Release preparation: Cargo.toml v0.1.0-alpha.1, CHANGELOG, README, ROADMAP, RELEASES.md.
+- **2026-03-07 — W27-28:** Scientific integrity pass — added Authorship Disclosure to README/CONTRIBUTING/CHANGELOG/architecture.md acknowledging AI-assisted development (GLM-5.1); bumped version 0.1.0-alpha.1 → 0.2.0-alpha.1 in Cargo.toml (both [package] and [workspace.package]); fixed non-monotonic changelog entries with same-day clarifications and a Versioning Note; added v0.2.0-alpha.1 entry to RELEASES.md.

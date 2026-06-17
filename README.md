@@ -4,9 +4,19 @@
 
 [![CI](https://github.com/vuma-lang/vuma/actions/workflows/ci.yml/badge.svg)](https://github.com/vuma-lang/vuma/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Version: 0.1.0-alpha.1](https://img.shields.io/badge/version-0.1.0--alpha.1-orange.svg)](CHANGELOG.md)
+[![Version: 0.2.0-alpha.1](https://img.shields.io/badge/version-0.2.0--alpha.1-orange.svg)](CHANGELOG.md)
 [![Crates.io](https://img.shields.io/badge/crates.io-vuma-blue.svg)](https://crates.io/crates/vuma)
 [![Rust: nightly](https://img.shields.io/badge/rust-nightly-93450a.svg)](rust-toolchain.toml)
+
+---
+
+## Authorship Disclosure
+
+This project was developed primarily through AI-assisted development using 
+[GLM-5.1](https://z.ai) and other AI coding agents. The `authors` field in 
+`Cargo.toml` reflects this. All code, documentation, and formal specifications 
+were generated through iterative AI-assisted sessions and have been reviewed 
+for correctness. Human oversight was provided throughout.
 
 ---
 
@@ -29,6 +39,17 @@
 15. [Documentation](#documentation)
 16. [Contributing](#contributing)
 17. [License](#license)
+
+---
+
+## What's New in v0.2.0-alpha.1
+
+**v0.2.0-alpha.1** (this release) is a pre-release focused on **scientific
+integrity and provenance**: it adds an explicit Authorship Disclosure
+acknowledging AI-assisted development, corrects non-monotonic version entries
+in the changelog, and bumps the version to reflect the substantial body of
+work (~266k LOC across 8 backends) that has accumulated since the original
+`0.1.0` foundation release. See `CHANGELOG.md` and `RELEASES.md` for details.
 
 ---
 
@@ -230,7 +251,7 @@ SCG → IR (target-independent) → Register Allocation → Instruction Selectio
 
 ## Architecture
 
-VUMA implements a six-layer architecture where data flows from human intent through graph construction, inference, verification, code generation, and into execution on bare metal. Feedback flows upward at every stage.
+VUMA implements a six-layer architecture where data flows from human intent through graph construction, inference, verification, code generation, and into execution on hardware targets (Linux user-space and Wasm32 today; bare-metal Pi 5 is an aspirational target, not a shipped backend — see Known Limitations). Feedback flows upward at every stage.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -759,6 +780,7 @@ This is an alpha release. We are transparent about what is not yet complete:
 | **Concurrent verification** | ⚠️ Limited | Verification is limited to single-threaded programs. Full concurrent verification is planned. |
 | **COR end-to-end** | ⚠️ Partial | The Continuous Optimization Runtime is not yet integrated end-to-end. |
 | **LoongArch64 execution** | ⚠️ Not executed | No `qemu-loongarch64-static` path is wired up (mainstream distros lack it as of 2026); the LoongArch64 backend passes ELF header + IR/SCG validation only. Native-hardware or QEMU execution is a future CI target. |
+| **Pi 5 bare-metal backend** | ❌ Not shipped | The `pi5` crate and `src/pi5/link.ld` linker script — referenced by `.cargo/config.toml` for the `aarch64-unknown-none` target — are absent from the tree. Bare-metal AArch64 (Pi 5) execution is a future target, not a current capability. |
 | **Error recovery** | ⚠️ Partial | Parser has known type mismatches in AST→SCG lowering for some edge cases. |
 
 We believe in honest roadmapping. These limitations represent active development areas, not permanent constraints.

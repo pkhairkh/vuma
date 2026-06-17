@@ -1025,3 +1025,8 @@ The VUMA framework extends this philosophy by providing multiple levels of analy
 - Hindley-Milner type inference: "Principal type-schemes for functional programs" (Damas & Milner, 1982)
 - Lattice-based dataflow analysis: "Monotone frameworks" (Kam & Ullman, 1977)
 - Taint analysis: "A Dynamic Technique for Eliminating Taint Vulnerabilities" (Newsome & Song, 2005)
+
+## Appendix D: Related Work
+
+- **Abstract interpretation.** The BD inference algorithm's monotone fixpoint iteration over a bounded lattice (Section 4) is an instance of **abstract interpretation** (Cousot & Cousot 1977, 1979), the standard framework for constructing sound static analyses by interpreting program semantics over an abstract domain.
+- **Type inference.** The constraint-based, principal-BD resolution phase draws on classical **type inference** theory, in particular the constraint-generation and unification approach of Palsberg & Schwartzbach (*Object-Oriented Type Systems*, Wiley 1994), and the Hindley-Milner tradition (Damas & Milner 1982) already cited in Appendix C.

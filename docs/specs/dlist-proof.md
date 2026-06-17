@@ -3,7 +3,7 @@
 **Task ID:** W1-24  
 **Author:** Agent W1-24, VUMA Project  
 **Date:** 2026-03-04  
-**Status:** Formal Proof — Complete  
+**Status:** Formal Proof — Specification Complete; Implementation Partial (see RELEASES.md)  
 **Reference:** *Beyond Human Syntax* (Proposal §3.6, §3.6.3)
 
 ---

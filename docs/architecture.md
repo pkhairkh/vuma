@@ -1,10 +1,20 @@
 # VUMA Architecture Document
 
 **Project:** VUMA — Verified-Unsafe Memory Access Framework  
-**Version:** 0.2.0  
+**Version:** 0.2.0-alpha.1  
 **Status:** Phase 3 — Hardening & Optimization (in progress, Waves 1-32 complete)  
-**Date:** March 6, 2026  
-**Authors:** VUMA Project Team
+**Date:** March 7, 2026  
+**Authors:** Developed primarily through AI-assisted sessions using
+[GLM-5.1](https://z.ai) and other AI coding agents, with human oversight
+throughout. See `README.md` → *Authorship Disclosure* for the full statement.
+
+> **Authorship note.** This architecture document, like the rest of the VUMA
+> codebase, was generated through iterative AI-assisted development sessions.
+> The `authors` field in `Cargo.toml` reflects this provenance. All technical
+> claims, crate boundaries, and data-flow relationships described below have
+> been reviewed for correctness, but readers should treat the document as
+> AI-authored technical prose and verify against the source code when making
+> engineering decisions.
 
 ---
 

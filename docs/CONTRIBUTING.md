@@ -4,6 +4,15 @@ Thank you for contributing to the VUMA project — the Verified-Unsafe Memory Ac
 framework for AI-native programming language design. This guide explains how to set
 up your development environment, make changes, and get them merged.
 
+> **Note on AI-assisted development.** The VUMA codebase was developed primarily
+> through AI-assisted sessions using [GLM-5.1](https://z.ai) and other AI coding
+> agents, with human oversight throughout. Contributions are welcome regardless of
+> whether they are authored by humans, AI agents, or a combination of both. When
+> submitting a PR that was authored or substantially assisted by an AI tool, please
+> disclose this in the PR description (a one-line note such as *"Authored with
+> assistance from GLM-5.1"* is sufficient). All contributions are held to the same
+> correctness, testing, and review standards described in this document.
+
 ---
 
 ## Table of Contents
@@ -25,7 +34,7 @@ up your development environment, make changes, and get them merged.
 
 | Tool | Minimum Version | Purpose |
 |------|----------------|---------|
-| Rust toolchain (stable) | Per `rust-toolchain.toml` | Core language; VUMA uses the stable channel |
+| Rust toolchain (nightly) | Per `rust-toolchain.toml` (`nightly-2026-03-01`) | Core language; VUMA requires the nightly channel (inline asm, bare-metal features, advanced const generics) |
 | `rustup` | Latest | Rust toolchain management |
 | `cargo` | Included with Rust | Build system |
 | Git | 2.30+ | Version control |
@@ -42,8 +51,8 @@ repository, `rustup` will automatically select the correct channel and component
 # Install rustup if not already installed
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
-# The targets are listed in rust-toolchain.toml and will be auto-installed:
-#   stable, components: rustfmt, clippy
+# The toolchain and targets are listed in rust-toolchain.toml and will be auto-installed:
+#   nightly-2026-03-01, components: rustfmt, clippy, rust-src
 #   targets: aarch64-unknown-linux-gnu, aarch64-unknown-none
 
 # Verify the toolchain

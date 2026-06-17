@@ -4,6 +4,66 @@ This document summarizes each VUMA release with key changes and known limitation
 
 ---
 
+## v0.2.0-alpha.1 — 2026-03-07
+
+**Scientific Integrity, Provenance, and Versioning Correction**
+
+This pre-release is a scientific-integrity pass over the project: it adds
+explicit AI-authorship disclosure, corrects non-monotonic version history, and
+bumps the version to reflect the substantial work done since the original
+`0.1.0` foundation release.
+
+### Why the version bump?
+
+The project had accumulated ~266k LOC across 8 backend architectures, 32
+engineering waves, an FFI/syscall layer, a package manager, LLM integration,
+and ~266 tests — yet the `Cargo.toml` version was still pinned at
+`0.1.0-alpha.1`. That number was artificially low and gave a misleading
+impression of project maturity. The bump to `0.2.0-alpha.1` reflects the
+minor-version worth of work done since `0.1.0`, while keeping the `-alpha.1`
+pre-release tag to honestly signal that the API is not yet stabilized.
+
+### Highlights — Scientific Integrity Improvements
+
+- **Authorship Disclosure**: prominent new section in `README.md`
+  (immediately after the title and badges) explicitly acknowledging that the
+  project was developed primarily through AI-assisted sessions using
+  [GLM-5.1](https://z.ai) and other AI coding agents, with human oversight
+  throughout. The `authors` field in `Cargo.toml` (`["Super Z (GLM-5.1)"]`)
+  is now consistent with the documentation.
+- **CONTRIBUTING.md**: added a note requesting that PRs authored or
+  substantially assisted by AI tools disclose this in the PR description.
+- **CHANGELOG.md**: added an authorship blockquote at the top, a new
+  `0.2.0-alpha.1` entry, and a *Versioning Note* explaining the historical
+  `0.1.0` → `0.1.0-alpha.X` → `0.2.0-alpha.1` progression. Same-day entries
+  (`0.1.0` and `0.1.0-alpha.0`, both 2026-03-05) are now explicitly annotated
+  as *earlier* (initial public release) and *later* (Phase 2 pre-release) to
+  remove the previous ambiguity.
+- **architecture.md**: updated the `Authors` field from "VUMA Project Team" to
+  an explicit AI-authorship statement, and bumped the document version to
+  `0.2.0-alpha.1` to match `Cargo.toml`.
+- **Cargo.toml**: bumped `version` in both `[package]` and
+  `[workspace.package]` from `0.1.0-alpha.1` to `0.2.0-alpha.1`.
+
+### What did *not* change in this release
+
+No source code (`src/`) was modified in this pass — only documentation,
+metadata, and versioning files. The 8 backends, verification pipeline, parser,
+FFI, package manager, and standard library are unchanged from
+`0.1.0-alpha.1`. The next pre-release (`0.2.0-alpha.2`) will resume
+functional work.
+
+### Known Limitations
+
+Carried forward unchanged from `v0.1.0-alpha.1`:
+- BD inference completeness (M2.3) deferred to Phase 3
+- Doubly-linked list verification (M2.4) deferred to Phase 3
+- ARM64 atomics and concurrent verification are Phase 3 targets
+- COR end-to-end integration not yet complete
+- LoongArch64 full SHA256d too slow for QEMU (should work natively)
+
+---
+
 ## v0.1.0-alpha.1 — 2026-03-06
 
 **Alpha Pre-Release: Critical Bug Fixes, Atomics, FP Conversions, Test Hardening**
@@ -33,7 +93,7 @@ Pre-release alpha incorporating Waves 1–5 of critical bug fixes, atomics/ABI s
 
 ---
 
-## v0.1.0-alpha.0 — 2026-03-05
+## v0.1.0-alpha.0 — 2026-03-05 (later — Phase 2 pre-release)
 
 **Phase 2: Multi-Architecture Codegen, LLM Integration, Wasm Sandbox**
 
@@ -105,7 +165,7 @@ This release represents the substantial completion of Phase 2 of the VUMA framew
 
 ---
 
-## v0.1.0 — 2026-03-05
+## v0.1.0 — 2026-03-05 (earlier — initial public release)
 
 **Phase 1: Foundation**
 
