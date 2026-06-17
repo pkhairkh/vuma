@@ -1679,10 +1679,10 @@ fn get_const_df_predecessor(graph: &SCG, id: NodeId) -> Option<u64> {
         }
         if let Some(pn) = graph.get_node(pred) {
             if let NodePayload::Computation(c) = &pn.payload {
-                if let Some(v) = (match &c.kind {
+                if let Some(v) = match &c.kind {
                     ComputationKind::Other(ref op) => StrengthReduction::try_parse_const_int(op),
                     _ => None,
-                }) {
+                } {
                     return Some(v);
                 }
             }

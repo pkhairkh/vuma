@@ -52,7 +52,6 @@ const S3: Gpr = Gpr::T1; // $r13 — quaternary scratch
 
 // FPR scratch registers (caller-saved temporaries)
 const FS0: Fpr = Fpr::F0; // $f0 / $fa0 — primary FPR scratch
-const FS1: Fpr = Fpr::F1; // $f1 / $fa1 — secondary FPR scratch
 
 // =============================================================================
 // Helpers for instruction emission
@@ -65,11 +64,6 @@ fn emit(code: Vec<u8>, name: &str) -> AllocatedInstruction {
         writes: vec![],
         encoded: code,
     }
-}
-
-/// Encode a single instruction into an AllocatedInstruction.
-fn emit_instr(inst: Instruction, name: &str) -> AllocatedInstruction {
-    emit(inst.encode().to_vec(), name)
 }
 
 /// Load a 64-bit immediate into a register using the canonical LoongArch sequence.

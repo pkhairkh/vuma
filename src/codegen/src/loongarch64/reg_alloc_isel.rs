@@ -396,7 +396,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
             if let IRInstr::Alloc { dst, size } = instr {
                 if let Some(id) = dst.as_register() {
                     stack_alloc_vregs.insert(id);
-                    alloc_sizes.insert(id, ((*size as i32 + 15) & !15));
+                    alloc_sizes.insert(id, (*size as i32 + 15) & !15);
                 }
             }
         }
@@ -969,7 +969,7 @@ fn cast_fp_rw(instr: &IRInstr) -> Option<(Vec<PhysicalReg>, Vec<PhysicalReg>)> {
 
 fn lower_instr(
     instr: &IRInstr, cache: &mut RegCache, fp: Gpr,
-    vreg_slots: &HashMap<u32, i32>, alloc_offsets: &HashMap<u32, i32>,
+    _vreg_slots: &HashMap<u32, i32>, alloc_offsets: &HashMap<u32, i32>,
     relocations: &mut Vec<RelocationEntry>,
 ) -> Vec<u8> {
     match instr {
