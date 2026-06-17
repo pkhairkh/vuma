@@ -17,8 +17,8 @@
 //! ```
 
 use crate::context::Context;
-use hashbrown::HashSet;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::cmp::Ordering;
 use std::fmt;
 
@@ -46,7 +46,7 @@ pub type RegionId = u64;
 // ---------------------------------------------------------------------------
 
 /// A fine-grained capability that may be held on a value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum Capability {
     /// Permission to read the value.
     Read,
@@ -113,7 +113,7 @@ impl fmt::Display for Capability {
 // ---------------------------------------------------------------------------
 
 /// A runtime condition that gates the activation of one or more capabilities.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum Condition {
     /// Capability is active only during the given phase.
     InPhase(PhaseId),
@@ -161,17 +161,23 @@ impl fmt::Display for Condition {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapD {
     /// The set of capabilities granted.
-    pub caps: HashSet<Capability>,
+    ///
+    /// Stored as a `BTreeSet` (not `HashSet`) so iteration order is
+    /// deterministic — required for the BD inference fixpoint to be
+    /// reproducible across runs (W35: full determinism).
+    pub caps: BTreeSet<Capability>,
     /// The set of conditions that must hold for any capability to be active.
-    pub conditions: HashSet<Condition>,
+    ///
+    /// Stored as a `BTreeSet` for the same determinism reason as `caps`.
+    pub conditions: BTreeSet<Condition>,
 }
 
 impl CapD {
     /// Construct an empty `CapD` (bottom element of the lattice).
     pub fn empty() -> Self {
         Self {
-            caps: HashSet::new(),
-            conditions: HashSet::new(),
+            caps: BTreeSet::new(),
+            conditions: BTreeSet::new(),
         }
     }
 
@@ -200,7 +206,7 @@ impl CapD {
             ]
             .into_iter()
             .collect(),
-            conditions: HashSet::new(),
+            conditions: BTreeSet::new(),
         }
     }
 
@@ -249,7 +255,7 @@ impl CapD {
     /// A capability is *active* only when **all** attached conditions are
     /// satisfied by the context.  Conditions that are not relevant to the
     /// current context are conservatively assumed to be unsatisfied.
-    pub fn resolve(&self, context: &Context) -> HashSet<Capability> {
+    pub fn resolve(&self, context: &Context) -> BTreeSet<Capability> {
         let all_conditions_active = self
             .conditions
             .iter()
@@ -257,7 +263,7 @@ impl CapD {
         if all_conditions_active {
             self.caps.clone()
         } else {
-            HashSet::new()
+            BTreeSet::new()
         }
     }
 
@@ -265,7 +271,7 @@ impl CapD {
     ///
     /// Returns a new `CapD` with those capabilities excluded.
     pub fn weaken(&self, remove: &[Capability]) -> CapD {
-        let remove_set: HashSet<Capability> = remove.iter().copied().collect();
+        let remove_set: BTreeSet<Capability> = remove.iter().copied().collect();
         CapD {
             caps: self.caps.difference(&remove_set).copied().collect(),
             conditions: self.conditions.clone(),
@@ -373,13 +379,13 @@ mod tests {
     fn meet_join_laws() {
         let a = CapD {
             caps: [Capability::Read, Capability::Write].into_iter().collect(),
-            conditions: HashSet::new(),
+            conditions: BTreeSet::new(),
         };
         let b = CapD {
             caps: [Capability::Read, Capability::Execute]
                 .into_iter()
                 .collect(),
-            conditions: HashSet::new(),
+            conditions: BTreeSet::new(),
         };
         let m = a.meet(&b);
         assert!(m.caps.contains(&Capability::Read));
@@ -406,11 +412,11 @@ mod tests {
     fn partial_ord_incomparable() {
         let a = CapD {
             caps: [Capability::Read].into_iter().collect(),
-            conditions: HashSet::new(),
+            conditions: BTreeSet::new(),
         };
         let b = CapD {
             caps: [Capability::Write].into_iter().collect(),
-            conditions: HashSet::new(),
+            conditions: BTreeSet::new(),
         };
         assert_eq!(a.partial_cmp(&b), None);
     }

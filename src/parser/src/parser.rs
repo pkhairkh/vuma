@@ -1306,7 +1306,15 @@ impl<'src> Parser<'src> {
     fn parse_if_stmt(&mut self) -> Result<Stmt, ParseError> {
         let start = self.current.span.start;
         self.expect(TokenKind::If)?;
-        let condition = self.parse_expr()?;
+        // Suppress struct-literal parsing inside the condition so that
+        // `if x { y }` is read as `if (x) { y }` (block) rather than
+        // `if (x { y })` (struct literal). Struct literals are still
+        // allowed inside parenthesised sub-expressions of the condition.
+        let prev = self.no_struct_literal;
+        self.no_struct_literal = true;
+        let condition = self.parse_expr();
+        self.no_struct_literal = prev;
+        let condition = condition?;
         let then_block = self.parse_block()?;
         let else_block = if self.at(TokenKind::Else) {
             self.advance();
@@ -1336,7 +1344,12 @@ impl<'src> Parser<'src> {
     fn parse_while_stmt(&mut self) -> Result<Stmt, ParseError> {
         let start = self.current.span.start;
         self.expect(TokenKind::While)?;
-        let condition = self.parse_expr()?;
+        // Suppress struct-literal parsing inside the condition (see parse_if_stmt).
+        let prev = self.no_struct_literal;
+        self.no_struct_literal = true;
+        let condition = self.parse_expr();
+        self.no_struct_literal = prev;
+        let condition = condition?;
         let body = self.parse_block()?;
         Ok(Stmt::While(WhileStmt {
             condition,
@@ -1383,7 +1396,13 @@ impl<'src> Parser<'src> {
                 self.current.span,
             ));
         }
-        let iter = self.parse_expr()?;
+        // Suppress struct-literal parsing inside the iterator expression
+        // (see parse_if_stmt) — the `{` after the iterator opens the loop body.
+        let prev = self.no_struct_literal;
+        self.no_struct_literal = true;
+        let iter = self.parse_expr();
+        self.no_struct_literal = prev;
+        let iter = iter?;
         let body = self.parse_block()?;
         Ok(Stmt::For(ForStmt {
             name,
@@ -1419,7 +1438,16 @@ impl<'src> Parser<'src> {
     fn parse_match_stmt(&mut self) -> Result<Stmt, ParseError> {
         let start = self.current.span.start;
         self.expect(TokenKind::Match)?;
-        let subject = self.parse_expr()?;
+        // Suppress struct-literal parsing inside the match subject so that
+        // `match x { … }` is read as `match (x) { … }` (block of arms)
+        // rather than `match (x { … })` (struct literal). Struct literals
+        // are still allowed inside parenthesised sub-expressions of the
+        // subject, and inside arm guards / arm bodies.
+        let prev = self.no_struct_literal;
+        self.no_struct_literal = true;
+        let subject = self.parse_expr();
+        self.no_struct_literal = prev;
+        let subject = subject?;
         self.expect(TokenKind::LBrace)?;
 
         let mut arms = Vec::new();
@@ -1931,16 +1959,35 @@ impl<'src> Parser<'src> {
                         let saved_lbrace = self.current.clone();
                         self.advance(); // consume '{'
 
-                        // Disambiguation: if the first token inside the braces
-                        // is NOT `ident :`, this is not a struct literal.
-                        // Rewind and let the caller (if/while/for/match) handle the block.
+                        // Disambiguation: decide whether the `{` opens a struct
+                        // literal or a block statement (e.g. `if cond { … }`).
+                        //
+                        // A struct literal is recognised when the first token
+                        // inside the braces is one of:
+                        //   - `}`                       (empty: `Foo {}`)
+                        //   - `ident :`                  (named field: `Foo { x: 1 }`)
+                        //   - `ident ,`                  (shorthand field with more
+                        //                                  fields: `Foo { x, y: 2 }`)
+                        //   - `ident }`                  (single shorthand field:
+                        //                                  `Foo { x }`)
+                        // In every other case the `{` belongs to a block statement
+                        // (e.g. `if cond { stmt; … }`, `match s { Pat => … }`)
+                        // and we rewind so the caller can parse the block.
+                        //
+                        // Block-following constructs (`if`/`while`/`for`/`match`)
+                        // additionally set `no_struct_literal = true` while parsing
+                        // their condition/subject so that `if x { y }` is never
+                        // misread as a struct literal.
                         let is_struct_literal = if self.at(TokenKind::RBrace) {
                             // Empty braces: `Foo {}` is a valid struct literal
                             true
                         } else if self.current.kind == TokenKind::Ident {
                             // Peek at the token after the field name
                             let after_field = self.peek_next();
-                            after_field.kind == TokenKind::Colon
+                            matches!(
+                                after_field.kind,
+                                TokenKind::Colon | TokenKind::Comma | TokenKind::RBrace
+                            )
                         } else {
                             false
                         };
@@ -1951,21 +1998,34 @@ impl<'src> Parser<'src> {
                             break;
                         }
 
+                        // Parse field list. Each field is either:
+                        //   - `name : expr`   (explicit value), or
+                        //   - `name`           (shorthand — sugar for `name: name`,
+                        //                       resolved to a Var of the same name).
                         let mut fields = Vec::new();
                         if !self.at(TokenKind::RBrace) {
-                            let fname = self.expect_name()?;
-                            self.expect(TokenKind::Colon)?;
-                            let fval = self.parse_expr()?;
-                            fields.push((fname, fval));
-                            while self.at(TokenKind::Comma) {
-                                self.advance();
-                                if self.at(TokenKind::RBrace) {
-                                    break; // trailing comma
-                                }
+                            loop {
+                                let fspan = self.current.span;
                                 let fname = self.expect_name()?;
-                                self.expect(TokenKind::Colon)?;
-                                let fval = self.parse_expr()?;
+                                let fval = if self.at(TokenKind::Colon) {
+                                    self.advance(); // consume ':'
+                                    self.parse_expr()?
+                                } else {
+                                    // Shorthand: `field` is sugar for `field: field`.
+                                    Expr::Var {
+                                        name: fname.clone(),
+                                        span: fspan,
+                                    }
+                                };
                                 fields.push((fname, fval));
+                                if self.at(TokenKind::Comma) {
+                                    self.advance();
+                                    if self.at(TokenKind::RBrace) {
+                                        break; // trailing comma
+                                    }
+                                } else {
+                                    break;
+                                }
                             }
                         }
                         self.expect(TokenKind::RBrace)?;
@@ -2362,7 +2422,14 @@ impl<'src> Parser<'src> {
                 // Match expression: `match expr { pattern => body, ... }`
                 let span = self.current.span;
                 self.advance(); // consume 'match'
-                let scrutinee = self.parse_expr()?;
+                // Suppress struct-literal parsing inside the scrutinee (see
+                // parse_match_stmt) — the `{` after the scrutinee opens the
+                // arm list, not a struct literal.
+                let prev = self.no_struct_literal;
+                self.no_struct_literal = true;
+                let scrutinee = self.parse_expr();
+                self.no_struct_literal = prev;
+                let scrutinee = scrutinee?;
                 self.expect(TokenKind::LBrace)?;
 
                 let mut arms = Vec::new();
@@ -6505,6 +6572,264 @@ fn process(buf: *Buffer) -> u32 {
             }
             other => panic!("expected FnDef, got {:?}", other),
         }
+    }
+
+    // =========================================================================
+    // W34: struct-literal shorthand + generic types (arena_allocator.vuma /
+    // lock_free_queue.vuma showcase syntax)
+    // =========================================================================
+
+    /// `Arena { base, size, offset: 0 }` — mixed shorthand (`base`, `size`)
+    /// and named (`offset: 0`) fields. Shorthand fields must resolve to a
+    /// `Var` of the same name.
+    #[test]
+    fn parse_struct_literal_mixed_shorthand_and_named() {
+        let source = "fn f() { let a = Arena { base, size, offset: 0 }; }";
+        let mut parser = Parser::new(source);
+        let program = parser.parse_program().expect("parse should succeed");
+        assert!(parser.errors().is_empty(), "unexpected parse errors: {:?}", parser.errors());
+        match &program.items[0] {
+            Item::FnDef(f) => match &f.body.statements[0] {
+                Stmt::Let(l) => match &l.value {
+                    Expr::StructInit { name, fields, .. } => {
+                        assert_eq!(name, "Arena");
+                        assert_eq!(fields.len(), 3);
+                        // base (shorthand) -> Var(base)
+                        assert_eq!(fields[0].0, "base");
+                        assert!(matches!(&fields[0].1, Expr::Var { name, .. } if name == "base"),
+                            "shorthand `base` should resolve to Var(base), got {:?}",
+                            fields[0].1);
+                        // size (shorthand) -> Var(size)
+                        assert_eq!(fields[1].0, "size");
+                        assert!(matches!(&fields[1].1, Expr::Var { name, .. } if name == "size"),
+                            "shorthand `size` should resolve to Var(size), got {:?}",
+                            fields[1].1);
+                        // offset: 0 (named) -> Lit(0)
+                        assert_eq!(fields[2].0, "offset");
+                        assert!(matches!(&fields[2].1, Expr::Lit { .. }),
+                            "named `offset: 0` should be a Lit, got {:?}",
+                            fields[2].1);
+                    }
+                    other => panic!("expected StructInit, got {:?}", other),
+                },
+                other => panic!("expected Let, got {:?}", other),
+            },
+            other => panic!("expected FnDef, got {:?}", other),
+        }
+    }
+
+    /// `Foo { x }` — single shorthand field, the trickiest disambiguation
+    /// case because it could be mistaken for a block with a single bare
+    /// expression. Must parse as a struct literal here (let-binding RHS).
+    #[test]
+    fn parse_struct_literal_single_shorthand() {
+        let source = "fn f() { let a = Foo { x }; }";
+        let mut parser = Parser::new(source);
+        let program = parser.parse_program().expect("parse should succeed");
+        assert!(parser.errors().is_empty(), "unexpected parse errors: {:?}", parser.errors());
+        match &program.items[0] {
+            Item::FnDef(f) => match &f.body.statements[0] {
+                Stmt::Let(l) => match &l.value {
+                    Expr::StructInit { name, fields, .. } => {
+                        assert_eq!(name, "Foo");
+                        assert_eq!(fields.len(), 1);
+                        assert_eq!(fields[0].0, "x");
+                        assert!(matches!(&fields[0].1, Expr::Var { name, .. } if name == "x"));
+                    }
+                    other => panic!("expected StructInit, got {:?}", other),
+                },
+                other => panic!("expected Let, got {:?}", other),
+            },
+            other => panic!("expected FnDef, got {:?}", other),
+        }
+    }
+
+    /// `if x { y }` must still parse as an if-statement with `x` as the
+    /// condition and `{ y }` as the then-block — NOT as a struct literal
+    /// `x { y }`. This is the regression guard for the
+    /// `no_struct_literal = true` flag set on if/while/for/match conditions.
+    #[test]
+    fn parse_if_with_bare_expr_block_not_struct_literal() {
+        let source = "fn f(x: i64) { if x { y } }";
+        let mut parser = Parser::new(source);
+        let program = parser.parse_program().expect("parse should succeed");
+        assert!(parser.errors().is_empty(), "unexpected parse errors: {:?}", parser.errors());
+        match &program.items[0] {
+            Item::FnDef(f) => match &f.body.statements[0] {
+                Stmt::If(if_stmt) => {
+                    assert!(matches!(&if_stmt.condition, Expr::Var { name, .. } if name == "x"),
+                        "condition should be Var(x), got {:?}",
+                        if_stmt.condition);
+                    assert_eq!(if_stmt.then_block.statements.len(), 1);
+                }
+                other => panic!("expected If, got {:?}", other),
+            },
+            other => panic!("expected FnDef, got {:?}", other),
+        }
+    }
+
+    /// `while x { y }` — same regression guard as the if-case.
+    #[test]
+    fn parse_while_with_bare_expr_block_not_struct_literal() {
+        let source = "fn f(x: i64) { while x { y } }";
+        let mut parser = Parser::new(source);
+        let program = parser.parse_program().expect("parse should succeed");
+        assert!(parser.errors().is_empty(), "unexpected parse errors: {:?}", parser.errors());
+        match &program.items[0] {
+            Item::FnDef(f) => match &f.body.statements[0] {
+                Stmt::While(while_stmt) => {
+                    assert!(matches!(&while_stmt.condition, Expr::Var { name, .. } if name == "x"),
+                        "condition should be Var(x), got {:?}",
+                        while_stmt.condition);
+                    assert_eq!(while_stmt.body.statements.len(), 1);
+                }
+                other => panic!("expected While, got {:?}", other),
+            },
+            other => panic!("expected FnDef, got {:?}", other),
+        }
+    }
+
+    /// `for i in items { body }` — `items` must remain a Var (not a struct
+    /// literal), and `{ body }` must remain the loop body.
+    #[test]
+    fn parse_for_iter_not_struct_literal() {
+        let source = "fn f() { for i in items { x } }";
+        let mut parser = Parser::new(source);
+        let program = parser.parse_program().expect("parse should succeed");
+        assert!(parser.errors().is_empty(), "unexpected parse errors: {:?}", parser.errors());
+        match &program.items[0] {
+            Item::FnDef(f) => match &f.body.statements[0] {
+                Stmt::For(for_stmt) => {
+                    assert_eq!(for_stmt.name, "i");
+                    assert!(matches!(&for_stmt.iter, Expr::Var { name, .. } if name == "items"),
+                        "iterator should be Var(items), got {:?}",
+                        for_stmt.iter);
+                    assert_eq!(for_stmt.body.statements.len(), 1);
+                }
+                other => panic!("expected For, got {:?}", other),
+            },
+            other => panic!("expected FnDef, got {:?}", other),
+        }
+    }
+
+    /// `match x { Foo => 1 }` — `x` must remain a Var (not a struct literal),
+    /// and `{ Foo => 1 }` must be the match arm list.
+    #[test]
+    fn parse_match_subject_not_struct_literal() {
+        let source = "fn f() { match x { Foo => 1 } }";
+        let mut parser = Parser::new(source);
+        let program = parser.parse_program().expect("parse should succeed");
+        assert!(parser.errors().is_empty(), "unexpected parse errors: {:?}", parser.errors());
+        match &program.items[0] {
+            Item::FnDef(f) => match &f.body.statements[0] {
+                Stmt::Match(m) => {
+                    assert!(matches!(&m.subject, Expr::Var { name, .. } if name == "x"),
+                        "match subject should be Var(x), got {:?}",
+                        m.subject);
+                    assert_eq!(m.arms.len(), 1);
+                }
+                other => panic!("expected Match, got {:?}", other),
+            },
+            other => panic!("expected FnDef, got {:?}", other),
+        }
+    }
+
+    /// `struct Queue<T> { buffer: Address, capacity: u64 }` — generic struct
+    /// declaration. Verifies that `Queue<T>` parses with one type parameter.
+    #[test]
+    fn parse_generic_struct_decl_queue() {
+        let source = "struct Queue<T> { buffer: Address, capacity: u64 }";
+        let mut parser = Parser::new(source);
+        let program = parser.parse_program().expect("parse should succeed");
+        assert!(parser.errors().is_empty(), "unexpected parse errors: {:?}", parser.errors());
+        match &program.items[0] {
+            Item::StructDef(s) => {
+                assert_eq!(s.name, "Queue");
+                assert_eq!(s.type_params.len(), 1);
+                assert_eq!(s.type_params[0].name, "T");
+                assert_eq!(s.fields.len(), 2);
+                assert_eq!(s.fields[0].name, "buffer");
+                assert_eq!(s.fields[1].name, "capacity");
+            }
+            other => panic!("expected StructDef, got {:?}", other),
+        }
+    }
+
+    /// `let q: Queue<u64> = ...;` — generic type usage in a let-binding type
+    /// annotation. Verifies `Queue<u64>` parses as `Type::Generic`.
+    #[test]
+    fn parse_generic_type_usage_in_let() {
+        let source = "fn f() { let q: Queue<u64> = x; }";
+        let mut parser = Parser::new(source);
+        let program = parser.parse_program().expect("parse should succeed");
+        assert!(parser.errors().is_empty(), "unexpected parse errors: {:?}", parser.errors());
+        match &program.items[0] {
+            Item::FnDef(f) => match &f.body.statements[0] {
+                Stmt::Let(l) => {
+                    let ty = l.ty.as_ref().expect("let-binding should have a type");
+                    match ty {
+                        Type::Generic { name, args } => {
+                            assert_eq!(name, "Queue");
+                            assert_eq!(args.len(), 1);
+                            assert!(matches!(&args[0], Type::BDBase(n) if n == "u64"));
+                        }
+                        other => panic!("expected Type::Generic, got {:?}", other),
+                    }
+                }
+                other => panic!("expected Let, got {:?}", other),
+            },
+            other => panic!("expected FnDef, got {:?}", other),
+        }
+    }
+
+    /// End-to-end: parse the arena_allocator.vuma showcase syntax shape
+    /// (struct decl + struct-literal return with shorthand + named fields).
+    #[test]
+    fn parse_arena_allocator_showcase_shape() {
+        let source = r#"
+            struct Arena { base: Address, size: u64, offset: u64 }
+            fn arena_create(size: u64) -> Arena {
+                base = allocate(size);
+                return Arena { base, size, offset: 0 };
+            }
+            fn arena_destroy(arena: Arena) {
+                free(arena.base);
+            }
+        "#;
+        let mut parser = Parser::new(source);
+        let program = parser.parse_program().expect("parse should succeed");
+        assert!(parser.errors().is_empty(), "unexpected parse errors: {:?}", parser.errors());
+        assert_eq!(program.items.len(), 3);
+    }
+
+    /// End-to-end: parse the lock_free_queue.vuma showcase syntax shape
+    /// (generic struct decl + struct-literal assignment with mixed
+    /// shorthand/named fields + AtomicU64::new(0) namespace-call).
+    #[test]
+    fn parse_lock_free_queue_showcase_shape() {
+        let source = r#"
+            struct Queue<T> {
+                buffer: Address,
+                capacity: u64,
+                head: AtomicU64,
+                tail: AtomicU64,
+            }
+            fn queue_new(capacity: u64) -> Address {
+                q = allocate(32);
+                buf = allocate(capacity * 8);
+                *q = Queue {
+                    buffer: buf,
+                    capacity,
+                    head: AtomicU64::new(0),
+                    tail: AtomicU64::new(0),
+                };
+                return q;
+            }
+        "#;
+        let mut parser = Parser::new(source);
+        let program = parser.parse_program().expect("parse should succeed");
+        assert!(parser.errors().is_empty(), "unexpected parse errors: {:?}", parser.errors());
+        assert_eq!(program.items.len(), 2);
     }
 }
 

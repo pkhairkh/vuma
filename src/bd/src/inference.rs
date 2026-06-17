@@ -43,12 +43,12 @@
 //!   constructible. The `Byte` variant — the "top" of the subsumption
 //!   order (it subsumes any RepD with matching size/align) — is bounded
 //!   by `max(size_in_scg)` × `max(align_in_scg)`, a finite bound.
-//! - **CapD** is a pair `(caps: HashSet<Capability>, conditions:
-//!   HashSet<Condition>)`. The `Capability` enum has 17 variants, so
+//! - **CapD** is a pair `(caps: BTreeSet<Capability>, conditions:
+//!   BTreeSet<Condition>)`. The `Capability` enum has 17 variants, so
 //!   `caps` ranges over at most `2^17` subsets. `Condition` is a sum
 //!   type whose IDs are drawn from the SCG (finite), so `conditions`
 //!   also ranges over a finite powerset.
-//! - **RelD** is `relations: HashSet<Relation>`. The `Relation` enum
+//! - **RelD** is `relations: BTreeSet<Relation>`. The `Relation` enum
 //!   has 12 variants (`Temporal(4)`, `Containment`, `Dependency(3)`,
 //!   `Equivalence`, `Security(3)`, `Liveness`), so `relations` ranges
 //!   over at most `2^12` subsets.
@@ -99,7 +99,7 @@ use crate::repd::{
     ArrayRep, BDConstraint as RepDConstraint, ByteRep, EnumRep, FuncRep, PtrRep, RepD, StructRep,
     UnionRep,
 };
-use hashbrown::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use vuma_scg::edge::EdgeKind;
 use vuma_scg::graph::SCG;
@@ -239,7 +239,11 @@ impl std::error::Error for InferenceError {}
 #[derive(Debug, Clone)]
 pub struct InferenceResult {
     /// The inferred BD for each node, if inference succeeded.
-    pub bd_map: HashMap<NodeId, BD>,
+    ///
+    /// `BTreeMap` (not `HashMap`) for deterministic iteration order
+    /// (W35: full determinism — the BD engine is now fully deterministic,
+    /// not just at the IVE seam).
+    pub bd_map: BTreeMap<NodeId, BD>,
     /// Any errors encountered during inference.
     pub errors: Vec<InferenceError>,
     /// Any warnings (non-fatal issues).
@@ -257,7 +261,7 @@ impl InferenceResult {
     /// Creates a failed result with a single error.
     pub fn from_error(err: InferenceError) -> Self {
         Self {
-            bd_map: HashMap::new(),
+            bd_map: BTreeMap::new(),
             errors: vec![err],
             warnings: Vec::new(),
             iterations: 0,
@@ -270,7 +274,7 @@ impl InferenceResult {
 // ---------------------------------------------------------------------------
 
 /// Describes how a value is used at a particular usage site.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum UsageContext {
     /// The value is only read.
     ReadOnly,
@@ -308,7 +312,7 @@ impl UsageContext {
     /// Returns capabilities that are *not* needed by this context,
     /// and can therefore be weakened away.
     pub fn unnecessary_capabilities(&self) -> Vec<Capability> {
-        let required: HashSet<Capability> = self.required_capabilities().into_iter().collect();
+        let required: BTreeSet<Capability> = self.required_capabilities().into_iter().collect();
         CapD::all()
             .caps
             .iter()
@@ -411,7 +415,7 @@ impl BDInferenceEngine {
     /// Phase 3: Context Refinement.
     pub fn infer(&self, scg: &SCG) -> InferenceResult {
         let mut result = InferenceResult {
-            bd_map: HashMap::new(),
+            bd_map: BTreeMap::new(),
             errors: Vec::new(),
             warnings: Vec::new(),
             iterations: 0,
@@ -487,7 +491,7 @@ impl BDInferenceEngine {
         scg: &SCG,
         node_id: NodeId,
         node_data: &vuma_scg::node::NodeData,
-        bd_map: &HashMap<NodeId, BD>,
+        bd_map: &BTreeMap<NodeId, BD>,
     ) -> Option<BD> {
         match node_data.node_type {
             NodeType::Allocation => self.compute_allocation_bd(node_id, &node_data.payload),
@@ -530,7 +534,7 @@ impl BDInferenceEngine {
         scg: &SCG,
         node_id: NodeId,
         payload: &NodePayload,
-        bd_map: &HashMap<NodeId, BD>,
+        bd_map: &BTreeMap<NodeId, BD>,
     ) -> Option<BD> {
         let input_bds = self.collect_input_bds(scg, node_id, bd_map);
 
@@ -579,7 +583,7 @@ impl BDInferenceEngine {
         &self,
         scg: &SCG,
         node_id: NodeId,
-        bd_map: &HashMap<NodeId, BD>,
+        bd_map: &BTreeMap<NodeId, BD>,
     ) -> Option<BD> {
         let input_bds = self.collect_input_bds(scg, node_id, bd_map);
         if let Some(first_bd) = input_bds.first() {
@@ -606,7 +610,7 @@ impl BDInferenceEngine {
         scg: &SCG,
         node_id: NodeId,
         payload: &NodePayload,
-        bd_map: &HashMap<NodeId, BD>,
+        bd_map: &BTreeMap<NodeId, BD>,
     ) -> Option<BD> {
         let input_bds = self.collect_input_bds(scg, node_id, bd_map);
         let base_bd = input_bds.first()?;
@@ -647,7 +651,7 @@ impl BDInferenceEngine {
         scg: &SCG,
         node_id: NodeId,
         payload: &NodePayload,
-        bd_map: &HashMap<NodeId, BD>,
+        bd_map: &BTreeMap<NodeId, BD>,
     ) -> Option<BD> {
         let input_bds = self.collect_input_bds(scg, node_id, bd_map);
         let source_bd = input_bds.first()?;
@@ -690,7 +694,7 @@ impl BDInferenceEngine {
         &self,
         scg: &SCG,
         node_id: NodeId,
-        bd_map: &HashMap<NodeId, BD>,
+        bd_map: &BTreeMap<NodeId, BD>,
     ) -> Option<BD> {
         let input_bds = self.collect_input_bds(scg, node_id, bd_map);
         if let Some(first_bd) = input_bds.first() {
@@ -715,7 +719,7 @@ impl BDInferenceEngine {
         &self,
         scg: &SCG,
         node_id: NodeId,
-        bd_map: &HashMap<NodeId, BD>,
+        bd_map: &BTreeMap<NodeId, BD>,
     ) -> Option<BD> {
         let input_bds = self.collect_input_bds(scg, node_id, bd_map);
 
@@ -747,7 +751,7 @@ impl BDInferenceEngine {
         &self,
         scg: &SCG,
         node_id: NodeId,
-        bd_map: &HashMap<NodeId, BD>,
+        bd_map: &BTreeMap<NodeId, BD>,
     ) -> Option<BD> {
         let input_bds = self.collect_input_bds(scg, node_id, bd_map);
         if let Some(first_bd) = input_bds.first() {
@@ -919,7 +923,7 @@ impl BDInferenceEngine {
         result: &mut InferenceResult,
     ) {
         // Collect usage contexts for each node
-        let mut usage_contexts: HashMap<NodeId, Vec<UsageContext>> = HashMap::new();
+        let mut usage_contexts: BTreeMap<NodeId, Vec<UsageContext>> = BTreeMap::new();
 
         for node_id in scg.node_ids() {
             // Include the node's own intrinsic usage context
@@ -943,7 +947,7 @@ impl BDInferenceEngine {
 
             if let Some(bd) = result.bd_map.get_mut(node_id) {
                 // Compute the union of required capabilities across all usage sites
-                let mut all_required: HashSet<Capability> = HashSet::new();
+                let mut all_required: BTreeSet<Capability> = BTreeSet::new();
                 for ctx in contexts {
                     for cap in ctx.required_capabilities() {
                         all_required.insert(cap);
@@ -953,7 +957,7 @@ impl BDInferenceEngine {
                 // Weaken the CapD by removing capabilities that are not needed
                 // at any usage site. However, we never remove Drop, Move, Fork,
                 // or Share capabilities as they are inherent ownership ops.
-                let never_remove: HashSet<Capability> = [
+                let never_remove: BTreeSet<Capability> = [
                     Capability::Drop,
                     Capability::Move,
                     Capability::Fork,
@@ -1043,7 +1047,7 @@ impl BDInferenceEngine {
         &self,
         scg: &SCG,
         node_id: NodeId,
-        bd_map: &HashMap<NodeId, BD>,
+        bd_map: &BTreeMap<NodeId, BD>,
     ) -> Vec<BD> {
         let mut inputs = Vec::new();
         if let Some(preds) = scg.predecessors(node_id) {
@@ -1139,7 +1143,7 @@ pub fn infer_bd(scg: &SCG) -> InferenceResult {
 /// let entries = vec![NodeId::new(1)];
 /// let bd_map = infer_interprocedural(&scg, &entries);
 /// ```
-pub fn infer_interprocedural(scg: &SCG, entries: &[NodeId]) -> HashMap<NodeId, BD> {
+pub fn infer_interprocedural(scg: &SCG, entries: &[NodeId]) -> BTreeMap<NodeId, BD> {
     let engine = BDInferenceEngine::new();
     let result = engine.infer(scg);
     let mut bd_map = result.bd_map;
@@ -1178,18 +1182,18 @@ pub fn infer_interprocedural(scg: &SCG, entries: &[NodeId]) -> HashMap<NodeId, B
 /// use vuma_bd::capd::CapD;
 /// use vuma_bd::reld::RelD;
 /// use vuma_bd::repd::{RepD, ByteRep};
-/// use hashbrown::HashMap;
+/// use std::collections::BTreeMap;
 ///
 /// let template = BD::new(
 ///     RepD::Byte(ByteRep { size: 4, align: 4 }),
 ///     CapD::all(),
 ///     RelD::empty(),
 /// );
-/// let type_args: HashMap<String, RepD> = HashMap::new();
+/// let type_args: BTreeMap<String, RepD> = BTreeMap::new();
 /// let instantiated = instantiate_generic(&template, &type_args);
 /// assert_eq!(instantiated.repd.size(), 4);
 /// ```
-pub fn instantiate_generic(template: &BD, type_args: &HashMap<String, RepD>) -> BD {
+pub fn instantiate_generic(template: &BD, type_args: &BTreeMap<String, RepD>) -> BD {
     BD::new(
         instantiate_repd(&template.repd, type_args),
         template.capd.clone(),
@@ -1199,7 +1203,7 @@ pub fn instantiate_generic(template: &BD, type_args: &HashMap<String, RepD>) -> 
 
 /// Recursively instantiate type arguments in a RepD.
 #[allow(clippy::only_used_in_recursion)]
-fn instantiate_repd(repd: &RepD, type_args: &HashMap<String, RepD>) -> RepD {
+fn instantiate_repd(repd: &RepD, type_args: &BTreeMap<String, RepD>) -> RepD {
     match repd {
         RepD::Byte(b) => RepD::Byte(b.clone()),
         RepD::Ptr(p) => RepD::Ptr(PtrRep {
@@ -1294,22 +1298,22 @@ fn instantiate_repd(repd: &RepD, type_args: &HashMap<String, RepD>) -> RepD {
 /// use vuma_bd::descriptor::BD;
 /// use vuma_scg::graph::SCG;
 /// use vuma_scg::node::NodeId;
-/// use hashbrown::{HashMap, HashSet};
+/// use std::collections::{BTreeMap, BTreeSet};
 ///
 /// let scg = SCG::new();
-/// let dirty: HashSet<NodeId> = [NodeId::new(3)].into_iter().collect();
-/// let existing: HashMap<NodeId, BD> = HashMap::new();
+/// let dirty: BTreeSet<NodeId> = [NodeId::new(3)].into_iter().collect();
+/// let existing: BTreeMap<NodeId, BD> = BTreeMap::new();
 /// let updated = reinfer_incremental(&scg, &dirty, &existing);
 /// ```
 pub fn reinfer_incremental(
     scg: &SCG,
-    dirty: &HashSet<NodeId>,
-    existing: &HashMap<NodeId, BD>,
-) -> HashMap<NodeId, BD> {
+    dirty: &BTreeSet<NodeId>,
+    existing: &BTreeMap<NodeId, BD>,
+) -> BTreeMap<NodeId, BD> {
     let mut result = existing.clone();
 
     // Compute the transitive closure of dirty nodes (all dependents)
-    let mut visited: HashSet<NodeId> = dirty.iter().copied().collect();
+    let mut visited: BTreeSet<NodeId> = dirty.iter().copied().collect();
     let mut worklist: Vec<NodeId> = dirty.iter().copied().collect();
 
     while let Some(node_id) = worklist.pop() {
@@ -2014,7 +2018,7 @@ mod tests {
     #[test]
     fn test_inference_result_helpers() {
         let ok_result = InferenceResult {
-            bd_map: HashMap::new(),
+            bd_map: BTreeMap::new(),
             errors: Vec::new(),
             warnings: Vec::new(),
             iterations: 3,
@@ -2227,7 +2231,7 @@ mod tests {
             CapD::all(),
             RelD::empty(),
         );
-        let type_args: HashMap<String, RepD> = HashMap::new();
+        let type_args: BTreeMap<String, RepD> = BTreeMap::new();
         let result = instantiate_generic(&template, &type_args);
         assert_eq!(result.repd.size(), 4);
         assert_eq!(result.capd, template.capd);
@@ -2244,7 +2248,7 @@ mod tests {
             capd.clone(),
             reld.clone(),
         );
-        let type_args: HashMap<String, RepD> = HashMap::new();
+        let type_args: BTreeMap<String, RepD> = BTreeMap::new();
         let result = instantiate_generic(&template, &type_args);
         assert_eq!(result.capd, capd);
         assert_eq!(result.reld, reld);
@@ -2262,7 +2266,7 @@ mod tests {
             CapD::all(),
             RelD::empty(),
         );
-        let type_args: HashMap<String, RepD> = HashMap::new();
+        let type_args: BTreeMap<String, RepD> = BTreeMap::new();
         let result = instantiate_generic(&template, &type_args);
         assert_eq!(result.repd.size(), 8);
     }
@@ -2277,7 +2281,7 @@ mod tests {
             CapD::all(),
             RelD::empty(),
         );
-        let type_args: HashMap<String, RepD> = HashMap::new();
+        let type_args: BTreeMap<String, RepD> = BTreeMap::new();
         let result = instantiate_generic(&template, &type_args);
         assert_eq!(result.repd.size(), 8); // pointer size
     }
@@ -2294,7 +2298,7 @@ mod tests {
             CapD::all(),
             RelD::empty(),
         );
-        let type_args: HashMap<String, RepD> = HashMap::new();
+        let type_args: BTreeMap<String, RepD> = BTreeMap::new();
         let result = instantiate_generic(&template, &type_args);
         assert_eq!(result.repd.size(), 8); // function pointer size
     }
@@ -2316,8 +2320,8 @@ mod tests {
             }),
             pp(),
         );
-        let dirty: HashSet<NodeId> = HashSet::new();
-        let existing: HashMap<NodeId, BD> = HashMap::new();
+        let dirty: BTreeSet<NodeId> = BTreeSet::new();
+        let existing: BTreeMap<NodeId, BD> = BTreeMap::new();
         let result = reinfer_incremental(&scg, &dirty, &existing);
         // With no dirty nodes, existing should be preserved
         assert!(result.is_empty());
@@ -2336,9 +2340,9 @@ mod tests {
             }),
             pp(),
         );
-        let mut dirty: HashSet<NodeId> = HashSet::new();
+        let mut dirty: BTreeSet<NodeId> = BTreeSet::new();
         dirty.insert(n1);
-        let existing: HashMap<NodeId, BD> = HashMap::new();
+        let existing: BTreeMap<NodeId, BD> = BTreeMap::new();
         let result = reinfer_incremental(&scg, &dirty, &existing);
         assert!(result.contains_key(&n1));
         assert_eq!(result[&n1].repd.size(), 4);
@@ -2371,10 +2375,10 @@ mod tests {
         scg.add_edge(n1, n2, EdgeKind::DataFlow).unwrap();
 
         // Mark n1 as dirty - n2 should also get re-inferred (it's a dependent)
-        let mut dirty: HashSet<NodeId> = HashSet::new();
+        let mut dirty: BTreeSet<NodeId> = BTreeSet::new();
         dirty.insert(n1);
 
-        let mut existing: HashMap<NodeId, BD> = HashMap::new();
+        let mut existing: BTreeMap<NodeId, BD> = BTreeMap::new();
         // Pre-populate n2 with a stale BD
         existing.insert(
             n2,
@@ -2417,10 +2421,10 @@ mod tests {
         );
         // No edge between n1 and n2
 
-        let mut dirty: HashSet<NodeId> = HashSet::new();
+        let mut dirty: BTreeSet<NodeId> = BTreeSet::new();
         dirty.insert(n1);
 
-        let mut existing: HashMap<NodeId, BD> = HashMap::new();
+        let mut existing: BTreeMap<NodeId, BD> = BTreeMap::new();
         let existing_bd = BD::new(
             RepD::Byte(ByteRep { size: 99, align: 1 }),
             CapD::empty(),
@@ -2467,10 +2471,10 @@ mod tests {
         scg.add_edge(n1, n2, EdgeKind::DataFlow).unwrap();
         scg.add_edge(n2, n3, EdgeKind::DataFlow).unwrap();
 
-        let mut dirty: HashSet<NodeId> = HashSet::new();
+        let mut dirty: BTreeSet<NodeId> = BTreeSet::new();
         dirty.insert(n1);
 
-        let existing: HashMap<NodeId, BD> = HashMap::new();
+        let existing: BTreeMap<NodeId, BD> = BTreeMap::new();
         let result = reinfer_incremental(&scg, &dirty, &existing);
         // n1, n2, n3 should all be re-inferred (n2 and n3 are transitive dependents)
         assert!(result.contains_key(&n1));

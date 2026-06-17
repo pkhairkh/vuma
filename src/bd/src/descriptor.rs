@@ -27,7 +27,7 @@ use std::fmt;
 ///
 /// Used as a key in registries and during composition so that structural
 /// equality is not needed to identify descriptors.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct BDId(pub u64);
 
 impl fmt::Display for BDId {
@@ -206,7 +206,7 @@ mod tests {
     use crate::capd::{CapD, Capability};
     use crate::reld::{RelD, Relation};
     use crate::repd::{ByteRep, RepD};
-    use hashbrown::HashSet;
+    use std::collections::BTreeSet;
 
     use super::*;
 
@@ -215,21 +215,21 @@ mod tests {
     }
 
     fn read_cap() -> CapD {
-        let mut caps = HashSet::new();
+        let mut caps = BTreeSet::new();
         caps.insert(Capability::Read);
         CapD {
             caps,
-            conditions: HashSet::new(),
+            conditions: BTreeSet::new(),
         }
     }
 
     fn read_write_cap() -> CapD {
-        let mut caps = HashSet::new();
+        let mut caps = BTreeSet::new();
         caps.insert(Capability::Read);
         caps.insert(Capability::Write);
         CapD {
             caps,
-            conditions: HashSet::new(),
+            conditions: BTreeSet::new(),
         }
     }
 

@@ -30,7 +30,7 @@
 //! satisfying the sub also satisfies the sup, but not necessarily vice versa.
 
 use crate::reld::{DepKind, FlowPolicy, RelD, Relation, TemporalKind};
-use hashbrown::HashSet;
+use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -39,7 +39,7 @@ use std::fmt;
 // ---------------------------------------------------------------------------
 
 /// Detailed temporal ordering variants.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
 pub enum TemporalRel {
     /// First value ends before second begins.
     Before,
@@ -126,7 +126,7 @@ impl fmt::Display for TemporalRel {
 // ---------------------------------------------------------------------------
 
 /// Structural containment / overlap variants.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
 pub enum StructuralRel {
     /// First value contains the second.
     Contains,
@@ -224,7 +224,7 @@ impl fmt::Display for StructuralRel {
 // ---------------------------------------------------------------------------
 
 /// Security / information-flow variants.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
 pub enum SecurityRel {
     /// Value is trusted at a given level (strongest guarantee).
     TrustedAs,
@@ -312,7 +312,7 @@ impl fmt::Display for SecurityRel {
 // ---------------------------------------------------------------------------
 
 /// Ownership model variants.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
 pub enum OwnershipRel {
     /// Exclusive ownership (most restrictive).
     OwnedBy,
@@ -372,7 +372,7 @@ impl fmt::Display for OwnershipRel {
 // ---------------------------------------------------------------------------
 
 /// Lifetime constraint variants.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
 pub enum LifetimeRel {
     /// Value outlives another (most restrictive lifetime guarantee).
     Outlives,
@@ -447,7 +447,7 @@ impl fmt::Display for LifetimeRel {
 // ---------------------------------------------------------------------------
 
 /// Dependency edge variants.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
 pub enum DependencyRel {
     /// Value depends on another (more restrictive — constrains the dependent).
     DependsOn,
@@ -500,7 +500,7 @@ impl fmt::Display for DependencyRel {
 // ---------------------------------------------------------------------------
 
 /// A single detailed relation from one of the six categories.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
 pub enum DetailedRelation {
     /// Temporal ordering relation (e.g., happens-before, sequential).
     Temporal(TemporalRel),
@@ -579,17 +579,17 @@ impl fmt::Display for DetailedRelation {
 ///
 /// This extends the base `RelD` with finer-grained relation types suitable
 /// for the refinement partial order and detailed constraint checking.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Ord, PartialOrd, Serialize, Deserialize)]
 pub struct RelDRefined {
     /// The set of detailed relations.
-    pub relations: HashSet<DetailedRelation>,
+    pub relations: BTreeSet<DetailedRelation>,
 }
 
 impl RelDRefined {
     /// Construct an empty `RelDRefined`.
     pub fn empty() -> Self {
         Self {
-            relations: HashSet::new(),
+            relations: BTreeSet::new(),
         }
     }
 
@@ -672,7 +672,7 @@ impl fmt::Display for RelDRefined {
 // ---------------------------------------------------------------------------
 
 /// Result of checking temporal constraints within a RelD.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Ord, PartialOrd)]
 pub struct TemporalResult {
     /// Whether all temporal constraints are consistent.
     pub consistent: bool,
@@ -683,7 +683,7 @@ pub struct TemporalResult {
 }
 
 /// Result of checking structural constraints within a RelD.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Ord, PartialOrd)]
 pub struct StructuralResult {
     /// Whether all structural constraints are consistent.
     pub consistent: bool,
@@ -694,7 +694,7 @@ pub struct StructuralResult {
 }
 
 /// Result of checking security constraints within a RelD.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Ord, PartialOrd)]
 pub struct SecurityResult {
     /// Whether all security constraints are consistent.
     pub consistent: bool,
@@ -794,7 +794,7 @@ pub fn weaken(r: &RelD) -> RelD {
     let refined = RelDRefined::from_reld(r);
     let weakened = weaken_refined(&refined);
     // Convert back: map each detailed relation to the weakest base Relation.
-    let mut relations = HashSet::new();
+    let mut relations = BTreeSet::new();
     for dr in &weakened.relations {
         match dr {
             // Weaken temporal to the most general: Concurrent maps to Coincides

@@ -814,6 +814,95 @@ This is the incremental version of CEGAR: instead of refining the entire abstrac
 
 ---
 
+
+---
+
+## 6. Formal Definitions (Consolidated)
+
+Sections 0–5 introduce the MSG's domains, construction rules, path-sensitivity, abstraction, and incremental update piecewise. This section consolidates the *construction algorithm* and its correctness criteria into a single formal vocabulary used by the theorems of §7.
+
+### 6.1 Construction Trace
+
+Let $\mathsf{SCGNodes}(G) = N_G$ denote the node set of well-formed SCG $G$, and let $\mathsf{memOpNodes}(G) = \{n \in N_G \mid \text{kind}(n) \in \{N\_\text{Alloc}, N\_\text{Dealloc}, N\_\text{Access}\}\}$ denote the subset of memory-operation nodes. Because the DataFlow subgraph of a well-formed SCG is a DAG (SCG Condition 2, §5.3 of the SCG formal spec), $G$ admits at least one topological order $\tau$. A **construction trace** for $G$ is any topological order $\tau = \langle n_1, \ldots, n_k \rangle$ of $N_G$.
+
+### 6.2 Construction Algorithm
+
+The MSG construction algorithm $\mathcal{C}$ is the fold of the per-node step function over $\tau$:
+
+```
+C(G) = fold(step, M_empty, tau)
+
+M_empty = (∅, ∅, ∅, ∅)              -- empty MSG (R, D, A, φ)
+
+step(M, n) =
+  case kind(n) of
+    N_Alloc   -> apply Rule ALLOC      (§1.1)
+    N_Dealloc -> apply Rule DEALLOC    (§1.2)
+    N_Access  -> apply Rule ACCESS     (§1.3)
+    N_Cast    -> apply Rule CAST       (§1.4)
+    N_Arith   -> apply Rule CHAIN-OFFSET (§2.2)
+    N_Call    -> apply Rule CALL       (§1.6)
+    N_Control -> apply Rule CONTROL    (§1.7)
+    other     -> M                     -- identity
+```
+
+Both $G$ and the choice of $\tau$ are inputs to $\mathcal{C}$; we suppress the $\tau$ argument when the choice is immaterial.
+
+### 6.3 Presence Predicate
+
+The **presence predicate** $\mathsf{present}(n, M)$ asserts that the MSG $M$ contains the entity corresponding to SCG node $n$:
+
+```
+present(n, M) =
+  case kind(n) of
+    N_Alloc   -> ∃ r ∈ M.R : r.owner = n.id
+    N_Dealloc -> ∃ r ∈ M.R : r.death = n.programPoint
+    N_Access  -> ∃ a ∈ M.A : a.pp = n.programPoint ∧ a.mode = n.mode
+    other     -> true   -- non-memory nodes have no MSG entity
+```
+
+A node $n$ is **represented** in $M$ iff $\mathsf{present}(n, M)$ holds.
+
+### 6.4 Monotonicity of Construction
+
+The step function is **additive** on $R$, $D$, $A$: regions, derivations, and accesses are only ever inserted, never removed. The only in-place mutation is to a region's `status` (Allocated → Freed) and `death` field (⊥ → pp) by Rule DEALLOC. Formally, for each component $X \in \{R, D, A\}$ and each step:
+
+```
+step(M, n).X ⊇ M.X
+```
+
+This monotonicity is the structural keystone of the Completeness Theorem below.
+
+---
+
+## 7. Theorems
+
+**Theorem 7.1 (Construction Completeness).** *For every well-formed SCG $G$, every allocation, access, and deallocation in $G$ has a corresponding entity in the MSG $M = \mathcal{C}(G)$:*
+
+```
+∀ n ∈ memOpNodes(G) : present(n, C(G))
+```
+
+**Proof sketch.** By case analysis on $\text{kind}(n)$, combined with induction on the position of $n$ in the construction trace $\tau$.
+
+- $\text{kind}(n) = N\_\text{Alloc}$: When $\text{step}$ processes $n$ at position $i$ in $\tau$, Rule ALLOC (§1.1) creates region $r = (\mathsf{freshRegionId}(), a, s, \text{Allocated}, n.\text{id}, \rho, \kappa, n.\text{pp}, \bot)$ and adds it to $R$. By §6.4 (monotonicity), no subsequent step removes $r$ from $R$ — only `status` and `death` are mutated. Hence $r \in M.R$ with $r.\text{owner} = n.\text{id}$ at the end of construction, so $\mathsf{present}(n, M)$ holds.
+- $\text{kind}(n) = N\_\text{Dealloc}$: Rule DEALLOC (§1.2) resolves $n.\text{targetDeriv}$ to region $r$ (via $\text{resolveRegion}$, which is well-defined by the Origin Theorem of §2.3), then mutates $r.\text{death} := n.\text{pp}$ and $r.\text{status} := \text{Freed}$. The region is not removed from $R$, so $r \in M.R$ with $r.\text{death} = n.\text{pp}$ at the end. Hence $\mathsf{present}(n, M)$ holds. (If $\text{resolveRegion}$ fails, the rule signals an error and the algorithm halts — so the theorem is vacuously true of any successful run $M$.)
+- $\text{kind}(n) = N\_\text{Access}$: Rule ACCESS (§1.3) creates access $a = (\mathsf{freshAccessId}(), n.\text{derivId}, r.\text{rid}, n.\text{mode}, n.\text{size}, n.\text{pp}, n.\text{path})$ and adds it to $A$. Accesses are leaves in the MSG dependency structure and are never removed (§6.4). Hence $a \in M.A$ with $a.\text{pp} = n.\text{pp} \wedge a.\text{mode} = n.\text{mode}$, so $\mathsf{present}(n, M)$ holds.
+
+*Induction on position in $\tau$*: each $\text{step}$ only inserts (or mutates `status` of) MSG entities — never removes — and every memory-operation node is processed exactly once because $\tau$ is a permutation of $\mathsf{SCGNodes}(G)$. Therefore the final MSG $M$ contains a present entity for every $n \in \mathsf{memOpNodes}(G)$. $\square$
+
+**Theorem 7.2 (Construction Determinism up to Fresh Identifiers).** *$\mathcal{C}(G)$ is unique up to the choice of fresh identifiers (which are not semantically observable): if $\tau$ and $\tau'$ are two topological orders of $G$, the resulting MSGs are isomorphic after quotienting by fresh-identifier renaming.*
+
+**Proof sketch.** Each rule ($\text{ALLOC}, \text{DEALLOC}, \text{ACCESS}, \text{CAST}, \text{CHAIN-OFFSET}$) has output determined entirely by (a) the triggering node's payload and (b) the prior MSG state. The only shared mutable state is a region's `status` field (mutated only by $\text{DEALLOC}$). Well-formedness of $G$ (SCG Condition 1, derivation completeness) guarantees that every $\text{DEALLOC}$ node $n_d$ has its corresponding $\text{ALLOC}$ node $n_a$ preceding it in *any* topological order (because $n_d$ depends via DataFlow on a derivation that traces back to $n_a$). Hence the partial order of `status` mutations on any single region is the same across all topological orders: $r.\text{status}$ transitions from $\text{Allocated}$ to $\text{Freed}$ exactly once, at the position of $n_d$. The insertion orders of distinct regions/derivations/accesses may differ, but the resulting sets are equal up to fresh-identifier renaming. $\square$
+
+**Theorem 7.3 (Verification Coverage).** *Every access recorded in the MSG has a verification verdict:*
+
+```
+∀ a ∈ M.A : φ(a) ∈ {✓, ✗, ?}
+```
+
+**Proof sketch.** Rule ACCESS (§1.3) computes $v = \text{verify}(a, R, D, A) \in \{\checkmark, \times, ?\}$ at construction time and adds $(a.\text{aid}, v)$ to $\varphi$. By §6.4, $\varphi$ entries are never deleted (only updated by Rule DEALLOC's $\varphi'$, which assigns $\times$ — still in the codomain). Hence every $a \in M.A$ has a verdict in $\{\checkmark, \times, ?\}$ at the end of construction. $\square$
+
 ## Appendix A: Notation Summary
 
 | Symbol | Meaning |

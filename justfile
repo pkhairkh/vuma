@@ -62,6 +62,29 @@ test-doc:
 test-filter filter:
     cargo test --workspace {{filter }}
 
+# Run cross-backend tests requiring QEMU user-mode emulation (aarch64).
+# Reports clearly if qemu-aarch64 / qemu-aarch64-static is missing so the
+# cross-arch execution tests are not silently skipped.
+test-qemu:
+    #!/usr/bin/env sh
+    if command -v qemu-aarch64 >/dev/null 2>&1 || command -v qemu-aarch64-static >/dev/null 2>&1; then
+        echo "==> QEMU user-mode emulation available; running cross-backend QEMU tests"
+        cargo test -p vuma-tests cross_backend::test_qemu_aarch64_execution_available_in_ci -- --nocapture
+    else
+        echo "================================================================"
+        echo "  QEMU user-mode emulation not found on PATH."
+        echo "  The cross-backend QEMU execution tests will be SKIPPED."
+        echo ""
+        echo "  Install QEMU to run them locally:"
+        echo "    sudo apt-get install -y qemu-user qemu-user-static   # Debian/Ubuntu"
+        echo "    brew install qemu                                     # macOS"
+        echo ""
+        echo "  In CI, the 'test-qemu' job installs these packages so cross-arch"
+        echo "  execution is a gated path, not a manual option."
+        echo "================================================================"
+        exit 1
+    fi
+
 # ============================================================================
 # Benchmark
 # ============================================================================

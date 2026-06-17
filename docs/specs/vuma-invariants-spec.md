@@ -18,7 +18,8 @@
 6. [Invariant 4: Origin](#6-invariant-4-origin)
 7. [Invariant 5: Cleanup](#7-invariant-5-cleanup)
 8. [Invariant Dependency Graph](#8-invariant-dependency-graph)
-9. [References](#9-references)
+9. [Formal Theorems](#9-formal-theorems)
+10. [References](#10-references)
 
 ---
 
@@ -728,7 +729,80 @@ The five invariants are not independent. The following diagram shows their logic
 
 ---
 
-## 9. References
+
+---
+
+## 9. Formal Theorems
+
+The previous sections state each of the five invariants formally (§§3.1, 4.1, 5.1, 6.1, 7.1) and §8 sketches their *dependency* graph (one invariant can be checked only after another has been established). This section establishes the *independence* of the invariants — a complementary result showing that none is redundant.
+
+### 9.1 Formal Definitions
+
+Let $\mathcal{I}_1, \mathcal{I}_2, \mathcal{I}_3, \mathcal{I}_4, \mathcal{I}_5$ denote the predicates on MSGs corresponding to **Liveness**, **Exclusivity**, **Interpretation**, **Origin**, and **Cleanup** respectively (formal statements in §§3.1, 4.1, 5.1, 6.1, 7.1). Let $\mathsf{MSGs}$ denote the universe of well-typed MSGs — tuples $(\mathcal{R}, \mathcal{D}, \mathcal{A}, \mathcal{S})$ whose components satisfy the type constraints of §2. For a predicate $P$ on MSGs, let
+$$
+\llbracket P \rrbracket = \{ M \in \mathsf{MSGs} \mid P(M) \}
+$$
+denote its satisfying set. Two invariants $P, Q$ are **equivalent** ($P \equiv Q$) iff $\llbracket P \rrbracket = \llbracket Q \rrbracket$; $P$ **implies** $Q$ ($P \Rightarrow Q$) iff $\llbracket P \rrbracket \subseteq \llbracket Q \rrbracket$. The invariants are **logically independent** iff for every $i$, $\bigcap_{j \neq i} \llbracket \mathcal{I}_j \rrbracket \not\subseteq \llbracket \mathcal{I}_i \rrbracket$.
+
+### 9.2 Theorem (Invariant Independence)
+
+**The five invariants are logically independent: no invariant is implied by the conjunction of the other four.** Formally, for each $i \in \{1, 2, 3, 4, 5\}$,
+$$
+\bigcap_{j \neq i} \llbracket \mathcal{I}_j \rrbracket \;\not\subseteq\; \llbracket \mathcal{I}_i \rrbracket.
+$$
+
+**Proof sketch.** By explicit counterexample MSG $M_i$ for each $i$, in which every $\mathcal{I}_j$ with $j \neq i$ holds but $\mathcal{I}_i$ fails. Each $M_i$ is a witness that $\bigcap_{j \neq i} \llbracket \mathcal{I}_j \rrbracket \not\subseteq \llbracket \mathcal{I}_i \rrbracket$.
+
+- **$M_1$ (Liveness fails, rest hold) — use-after-free.** Region $r$ allocated at PP1, freed at PP2; access $a$ targeting $r$ at PP3 with $\text{PP2} <_{pp} \text{PP3}$.
+  - $\mathcal{I}_1$ **fails**: $\text{is\_allocated}(r, \text{PP3})$ is false because $r.\text{free\_point} = \text{PP2} \leq \text{PP3}$ (§3.1).
+  - $\mathcal{I}_2$ **holds**: only one access, so $\text{conflicts}$ is vacuously false.
+  - $\mathcal{I}_3$ **holds**: the bytes at $a$'s offset within $r$ carry a valid RepD from before the free (the bytes are not erased by deallocation; the *interpretation* check is about the byte layout, not liveness).
+  - $\mathcal{I}_4$ **holds**: $\text{region\_of}(a.\text{target}) = r$, a valid region.
+  - $\mathcal{I}_5$ **holds**: $r$ has a valid $\text{free\_point}$ at PP2 (single free, no leak).
+
+- **$M_2$ (Exclusivity fails, rest hold) — data race.** Region $r$ allocated at PP1, live throughout. Two Write accesses $a_1, a_2$ on concurrent paths $\pi_1, \pi_2$ (so $\text{ordered}(a_1, a_2)$ is false), targeting overlapping byte ranges of $r$.
+  - $\mathcal{I}_1$ **holds**: $r$ is live at both access points.
+  - $\mathcal{I}_2$ **fails**: $\text{conflicts}(a_1, a_2)$ (two Writes, overlapping ranges, no SyncEdge) and $\neg\text{ordered}(a_1, a_2)$.
+  - $\mathcal{I}_3$ **holds**: both Writes carry valid RepDs.
+  - $\mathcal{I}_4$ **holds**: both accesses target valid derivations rooted at $r$.
+  - $\mathcal{I}_5$ **holds**: $r$ is later freed at PP4.
+
+- **$M_3$ (Interpretation fails, rest hold) — type confusion.** Region $r$ allocated with $\text{RepD} = \text{bytes}[4]$; access $a$ reads 8 bytes at offset 0 interpreting them as a pointer (an 8-byte RepD), violating the layout.
+  - $\mathcal{I}_1$ **holds**: $r$ is live at $a$'s program point.
+  - $\mathcal{I}_2$ **holds**: single access.
+  - $\mathcal{I}_3$ **fails**: $a$'s target RepD (8-byte pointer) does not match the region's stored RepD (4-byte); the bytes-interpretable-as-RepD condition fails.
+  - $\mathcal{I}_4$ **holds**: derivation rooted at $r$.
+  - $\mathcal{I}_5$ **holds**: $r$ is freed at end.
+
+- **$M_4$ (Origin fails, rest hold) — dangling raw pointer.** An access $a$ whose derivation chain does not terminate at any region (e.g., a literal integer cast to a pointer with no allocation root). The byte range accessed falls within a coincidentally-live allocated region $r$.
+  - $\mathcal{I}_1$ **holds**: $r$ is live at $a$'s program point, and $a$'s byte range is within $r$'s range — by construction, $a$ happens to land on allocated memory.
+  - $\mathcal{I}_2$ **holds**: single access.
+  - $\mathcal{I}_3$ **holds**: bytes are interpretable (we choose the access RepD to match).
+  - $\mathcal{I}_4$ **fails**: $\text{region\_of}(a.\text{target})$ is undefined because the derivation chain has no root region.
+  - $\mathcal{I}_5$ **holds**: $r$ is properly freed (the leaked derivation is not a region).
+
+- **$M_5$ (Cleanup fails, rest hold) — memory leak.** Region $r$ allocated at PP1, never freed, not marked $\text{Leaked}$; one access $a$ to $r$ at PP2.
+  - $\mathcal{I}_1$ **holds**: $r$ is live throughout the program (no $\text{free\_point}$), so every access is live.
+  - $\mathcal{I}_2$ **holds**: single access.
+  - $\mathcal{I}_3$ **holds**: bytes interpretable.
+  - $\mathcal{I}_4$ **holds**: derivation rooted at $r$.
+  - $\mathcal{I}_5$ **fails**: $r.\text{free\_point} = \text{null}$ and $r.\text{status} \neq \text{Leaked}$, so no $\text{free}$ operation on any execution path and no intentional-leak annotation.
+
+Each $M_i$ is well-typed (its components satisfy §2) and is a witness to $\bigcap_{j \neq i} \llbracket \mathcal{I}_j \rrbracket \not\subseteq \llbracket \mathcal{I}_i \rrbracket$. Hence no invariant is implied by the conjunction of the other four; the five invariants are logically independent. $\square$
+
+### 9.3 Theorem (Pairwise Non-Equivalence)
+
+**Any two distinct invariants $\mathcal{I}_i, \mathcal{I}_j$ with $i \neq j$ are non-equivalent:** $\llbracket \mathcal{I}_i \rrbracket \neq \llbracket \mathcal{I}_j \rrbracket$.
+
+**Proof sketch.** For the ordered pair $(i, j)$, the counterexample $M_i$ above (§9.2) satisfies $\mathcal{I}_j$ but not $\mathcal{I}_i$, witnessing $M_i \in \llbracket \mathcal{I}_j \rrbracket \setminus \llbracket \mathcal{I}_i \rrbracket$. Hence $\llbracket \mathcal{I}_i \rrbracket \neq \llbracket \mathcal{I}_j \rrbracket$. $\square$
+
+### 9.4 Corollary (Minimal Invariant Set)
+
+The set $\{\mathcal{I}_1, \ldots, \mathcal{I}_5\}$ is **minimal**: no proper subset entails all five invariants. By §9.2, removing any $\mathcal{I}_i$ admits the counterexample $M_i$, in which the remaining four hold but the safety property corresponding to $\mathcal{I}_i$ is violated. Therefore the IVE must verify all five; omitting any one would leave a soundness gap.
+
+---
+
+## 10. References
 
 1. Proposal: "Beyond Human Syntax: A Proposal for AI-Native Programming Language Design" (Section 2.9: The Safety Through Restriction Fallacy; Section 3.6: Verified-Unsafe Memory Access).
 2. VUMA Source: `vuma/src/vuma/src/address.rs` — Address type definition.

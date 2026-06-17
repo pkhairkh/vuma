@@ -16,8 +16,8 @@
 //! | `Security`    | Information-flow / boundary constraints             |
 //! | `Liveness`    | The value is guaranteed to eventually be usable     |
 
-use hashbrown::HashSet;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::fmt;
 
 // ---------------------------------------------------------------------------
@@ -25,7 +25,7 @@ use std::fmt;
 // ---------------------------------------------------------------------------
 
 /// Kinds of temporal ordering between two lifetimes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum TemporalKind {
     /// The first lifetime outlives the second.
     Outlives,
@@ -53,7 +53,7 @@ impl fmt::Display for TemporalKind {
 // ---------------------------------------------------------------------------
 
 /// Kinds of dependency between two operations or values.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum DepKind {
     /// Data dependency — one value flows into the other.
     DataDep,
@@ -78,7 +78,7 @@ impl fmt::Display for DepKind {
 // ---------------------------------------------------------------------------
 
 /// Information-flow policies governing how data may move.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum FlowPolicy {
     /// Data must not be downgraded to a less-restrictive label.
     NoDowngrade,
@@ -108,7 +108,7 @@ impl fmt::Display for FlowPolicy {
 /// (optionally) the flavour of the relation.  The actual *endpoints* of
 /// each relation are tracked externally — the `RelD` merely enumerates
 /// *which* relations exist.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum Relation {
     /// Temporal ordering constraint.
     Temporal(TemporalKind),
@@ -148,14 +148,18 @@ impl fmt::Display for Relation {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RelD {
     /// The set of relations.
-    pub relations: HashSet<Relation>,
+    ///
+    /// Stored as a `BTreeSet` (not `HashSet`) so iteration order is
+    /// deterministic — required for the BD inference fixpoint to be
+    /// reproducible across runs (W35: full determinism).
+    pub relations: BTreeSet<Relation>,
 }
 
 impl RelD {
     /// Construct an empty `RelD` (no relations).
     pub fn empty() -> Self {
         Self {
-            relations: HashSet::new(),
+            relations: BTreeSet::new(),
         }
     }
 

@@ -99,6 +99,7 @@
 // `hashbrown::HashSet<...>`. The `valid_nodes: HashSet<NodeId>` locals only use
 // `.contains()` (no iteration-dependent soundness), so they are left as-is.
 use hashbrown::HashSet;
+use std::collections::BTreeSet;
 use std::collections::BTreeMap;
 use std::fmt;
 use vuma_bd::capd::CapD;
@@ -987,7 +988,7 @@ fn is_default_repd(repd: &RepD) -> bool {
 fn widen_capd(capd: &CapD) -> CapD {
     CapD {
         caps: capd.caps.clone(),
-        conditions: HashSet::new(),
+        conditions: BTreeSet::new(),
     }
 }
 
@@ -1031,7 +1032,7 @@ mod tests {
             RepD::Byte(ByteRep { size, align }),
             CapD {
                 caps: caps.iter().copied().collect(),
-                conditions: HashSet::new(),
+                conditions: BTreeSet::new(),
             },
             RelD::empty(),
         )

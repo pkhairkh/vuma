@@ -37,7 +37,7 @@
 //! the current context.
 
 use crate::capd::{CapD, Capability, Condition};
-use hashbrown::HashSet;
+use std::collections::BTreeSet;
 use std::fmt;
 
 // ---------------------------------------------------------------------------
@@ -326,9 +326,9 @@ pub fn join(c1: &CapD, c2: &CapD) -> CapD {
 /// ```
 pub fn weaken(c: &CapD, target: &CapD) -> Result<CapD, WeakeningError> {
     // Compute which capabilities the target adds beyond the source
-    let extra_caps: HashSet<Capability> = target.caps.difference(&c.caps).copied().collect();
+    let extra_caps: BTreeSet<Capability> = target.caps.difference(&c.caps).copied().collect();
     // Compute which conditions the target removes relative to the source
-    let removed_conditions: HashSet<Condition> = c
+    let removed_conditions: BTreeSet<Condition> = c
         .conditions
         .difference(&target.conditions)
         .copied()
@@ -387,9 +387,9 @@ pub fn weaken(c: &CapD, target: &CapD) -> Result<CapD, WeakeningError> {
 /// ```
 pub fn strengthen(c: &CapD, target: &CapD) -> Result<CapD, StrengtheningError> {
     // Compute which capabilities the target has that the source lacks
-    let missing_caps: HashSet<Capability> = target.caps.difference(&c.caps).copied().collect();
+    let missing_caps: BTreeSet<Capability> = target.caps.difference(&c.caps).copied().collect();
     // Compute which conditions the source has that the target does not
-    let relaxed_conditions: HashSet<Condition> = c
+    let relaxed_conditions: BTreeSet<Condition> = c
         .conditions
         .difference(&target.conditions)
         .copied()
@@ -404,8 +404,8 @@ pub fn strengthen(c: &CapD, target: &CapD) -> Result<CapD, StrengtheningError> {
 
     // Actually, let's check: if the target removes capabilities or adds
     // conditions compared to the source, that's weakening, not strengthening.
-    let removed_caps: HashSet<Capability> = c.caps.difference(&target.caps).copied().collect();
-    let added_conditions: HashSet<Condition> = target
+    let removed_caps: BTreeSet<Capability> = c.caps.difference(&target.caps).copied().collect();
+    let added_conditions: BTreeSet<Condition> = target
         .conditions
         .difference(&c.conditions)
         .copied()
@@ -591,7 +591,7 @@ const PTR_COMPATIBLE_CAPS: &[Capability] = &[
 /// assert!(!ro.caps.contains(&Capability::Write));
 /// ```
 pub fn context_weaken(c: &CapD, usage: UsageContext) -> CapD {
-    let retained: HashSet<Capability> = match usage {
+    let retained: BTreeSet<Capability> = match usage {
         UsageContext::Observation => [Capability::Read, Capability::Compare, Capability::Hash]
             .into_iter()
             .collect(),
@@ -659,7 +659,7 @@ pub fn context_weaken(c: &CapD, usage: UsageContext) -> CapD {
         .into_iter()
         .collect(),
         UsageContext::PointerDerivation => {
-            let ptr_set: HashSet<Capability> = PTR_COMPATIBLE_CAPS.iter().copied().collect();
+            let ptr_set: BTreeSet<Capability> = PTR_COMPATIBLE_CAPS.iter().copied().collect();
             c.caps.intersection(&ptr_set).copied().collect()
         }
     };

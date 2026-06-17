@@ -36,8 +36,8 @@
 use crate::capd::{CapD, Capability, Condition};
 use crate::context::Context;
 use crate::descriptor::{BDId, BD};
-use hashbrown::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 // ---------------------------------------------------------------------------
@@ -48,7 +48,7 @@ use std::fmt;
 ///
 /// This is the *compile-time* view of usage; it drives capability weakening
 /// and strengthening rules, distinct from the *runtime* [`Context`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum UsageContext {
     /// The value is only read (e.g. `let y = x.field`).
     ReadOnly,
@@ -167,12 +167,12 @@ pub struct UsageSite {
     pub usage: UsageContext,
     /// Additional capabilities required at this site beyond those implied
     /// by [`usage`](UsageSite::usage).
-    pub extra_required: HashSet<Capability>,
+    pub extra_required: BTreeSet<Capability>,
     /// Capabilities that should be suppressed at this site even if they
     /// are present in the BD's CapD.
-    pub extra_suppressed: HashSet<Capability>,
+    pub extra_suppressed: BTreeSet<Capability>,
     /// Runtime conditions that must be active for usage at this site.
-    pub required_conditions: HashSet<Condition>,
+    pub required_conditions: BTreeSet<Condition>,
     /// The name of the function or scope containing this usage site
     /// (used for diagnostic purposes).
     pub scope_name: Option<String>,
@@ -185,9 +185,9 @@ impl UsageSite {
             site_id,
             bd_id,
             usage,
-            extra_required: HashSet::new(),
-            extra_suppressed: HashSet::new(),
-            required_conditions: HashSet::new(),
+            extra_required: BTreeSet::new(),
+            extra_suppressed: BTreeSet::new(),
+            required_conditions: BTreeSet::new(),
             scope_name: None,
         }
     }
@@ -220,8 +220,8 @@ impl UsageSite {
     /// the union of [`UsageContext::required_capabilities`] and
     /// [`extra_required`](UsageSite::extra_required), minus the
     /// [`extra_suppressed`](UsageSite::extra_suppressed) set.
-    pub fn effective_required_capabilities(&self) -> HashSet<Capability> {
-        let mut required: HashSet<Capability> =
+    pub fn effective_required_capabilities(&self) -> BTreeSet<Capability> {
+        let mut required: BTreeSet<Capability> =
             self.usage.required_capabilities().into_iter().collect();
         for cap in &self.extra_required {
             required.insert(*cap);
@@ -236,8 +236,8 @@ impl UsageSite {
     /// at this site: the union of [`UsageContext::incompatible_capabilities`]
     /// and [`extra_suppressed`](UsageSite::extra_suppressed), minus
     /// [`extra_required`](UsageSite::extra_required).
-    pub fn effective_suppressed_capabilities(&self) -> HashSet<Capability> {
-        let mut suppressed: HashSet<Capability> =
+    pub fn effective_suppressed_capabilities(&self) -> BTreeSet<Capability> {
+        let mut suppressed: BTreeSet<Capability> =
             self.usage.incompatible_capabilities().into_iter().collect();
         for cap in &self.extra_suppressed {
             suppressed.insert(*cap);
@@ -280,11 +280,11 @@ pub struct ContextRule {
     /// Which usage context this rule applies to.
     pub context: UsageContext,
     /// Capabilities to add (strengthen) when this rule fires.
-    pub add_caps: HashSet<Capability>,
+    pub add_caps: BTreeSet<Capability>,
     /// Capabilities to remove (weaken) when this rule fires.
-    pub remove_caps: HashSet<Capability>,
+    pub remove_caps: BTreeSet<Capability>,
     /// Conditions to add when this rule fires.
-    pub add_conditions: HashSet<Condition>,
+    pub add_conditions: BTreeSet<Condition>,
     /// Priority — higher values take precedence over lower ones.
     pub priority: RulePriority,
     /// Optional human-readable description of the rule.
@@ -297,9 +297,9 @@ impl ContextRule {
     pub fn new(context: UsageContext) -> Self {
         Self {
             context,
-            add_caps: HashSet::new(),
-            remove_caps: HashSet::new(),
-            add_conditions: HashSet::new(),
+            add_caps: BTreeSet::new(),
+            remove_caps: BTreeSet::new(),
+            add_conditions: BTreeSet::new(),
             priority: 0,
             description: None,
         }
@@ -413,7 +413,7 @@ pub struct ContextSolver {
     /// This enables polymorphic resolution — different sites for the same BD
     /// may produce different results, but the same BD+UsageContext pair
     /// always yields the same result.
-    cache: HashMap<(BDId, UsageContext), CapD>,
+    cache: BTreeMap<(BDId, UsageContext), CapD>,
 }
 
 impl ContextSolver {
@@ -434,7 +434,7 @@ impl ContextSolver {
     pub fn new() -> Self {
         let mut solver = Self {
             rules: Vec::new(),
-            cache: HashMap::new(),
+            cache: BTreeMap::new(),
         };
         solver.add_default_rules();
         solver
@@ -589,7 +589,7 @@ impl ContextSolver {
         };
 
         // Step 3: weaken incompatible capabilities
-        let incompatible: HashSet<Capability> =
+        let incompatible: BTreeSet<Capability> =
             usage.incompatible_capabilities().into_iter().collect();
         if !incompatible.is_empty() {
             let to_remove: Vec<Capability> = effective
@@ -611,7 +611,7 @@ impl ContextSolver {
         };
 
         // Step 5: re-strengthen to ensure required capabilities are present
-        let required: HashSet<Capability> = usage.required_capabilities().into_iter().collect();
+        let required: BTreeSet<Capability> = usage.required_capabilities().into_iter().collect();
         let missing: Vec<Capability> = required.difference(&effective.caps).copied().collect();
         if !missing.is_empty() {
             effective = effective.strengthen(&missing);
@@ -653,8 +653,8 @@ impl ContextSolver {
         bd: &BD,
         usages: &[UsageContext],
         runtime_ctx: &Context,
-    ) -> HashMap<UsageContext, CapD> {
-        let mut results = HashMap::new();
+    ) -> BTreeMap<UsageContext, CapD> {
+        let mut results = BTreeMap::new();
         for usage in usages {
             let capd = self.resolve(bd, usage, runtime_ctx);
             results.insert(*usage, capd);
@@ -757,7 +757,7 @@ pub fn infer_context(usage: &UsageSite) -> Context {
 /// This is the *inverse* of [`UsageContext::required_capabilities`]:
 /// given a set of capabilities, we classify the most specific usage
 /// context that subsumes them.
-pub fn infer_usage_context(exercised_caps: &HashSet<Capability>) -> UsageContext {
+pub fn infer_usage_context(exercised_caps: &BTreeSet<Capability>) -> UsageContext {
     let has_read = exercised_caps.contains(&Capability::Read);
     let has_write = exercised_caps.contains(&Capability::Write);
     let has_execute = exercised_caps.contains(&Capability::Execute);
@@ -1079,31 +1079,31 @@ mod tests {
 
     #[test]
     fn infer_usage_from_read_only() {
-        let caps: HashSet<Capability> = [Capability::Read].into_iter().collect();
+        let caps: BTreeSet<Capability> = [Capability::Read].into_iter().collect();
         assert_eq!(infer_usage_context(&caps), UsageContext::ReadOnly);
     }
 
     #[test]
     fn infer_usage_from_read_write() {
-        let caps: HashSet<Capability> = [Capability::Read, Capability::Write].into_iter().collect();
+        let caps: BTreeSet<Capability> = [Capability::Read, Capability::Write].into_iter().collect();
         assert_eq!(infer_usage_context(&caps), UsageContext::ReadWrite);
     }
 
     #[test]
     fn infer_usage_from_execute() {
-        let caps: HashSet<Capability> = [Capability::Execute].into_iter().collect();
+        let caps: BTreeSet<Capability> = [Capability::Execute].into_iter().collect();
         assert_eq!(infer_usage_context(&caps), UsageContext::Execute);
     }
 
     #[test]
     fn infer_usage_from_move() {
-        let caps: HashSet<Capability> = [Capability::Move].into_iter().collect();
+        let caps: BTreeSet<Capability> = [Capability::Move].into_iter().collect();
         assert_eq!(infer_usage_context(&caps), UsageContext::Consume);
     }
 
     #[test]
     fn infer_usage_from_observe() {
-        let caps: HashSet<Capability> = [Capability::Hash, Capability::Compare]
+        let caps: BTreeSet<Capability> = [Capability::Hash, Capability::Compare]
             .into_iter()
             .collect();
         assert_eq!(infer_usage_context(&caps), UsageContext::Observe);

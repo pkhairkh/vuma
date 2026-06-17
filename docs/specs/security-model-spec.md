@@ -573,6 +573,47 @@ The combined overhead of PAC + BTI + MTE is typically 3-8% for most workloads on
 
 ---
 
+
+---
+
+## 7. Formal Definitions (Taint and Information Flow)
+
+This section consolidates the formal model of taint and information flow that underpins §2. No earlier definition is overridden; the concepts here are used directly by the new theorems in Appendix A (Theorems 4–5).
+
+### 7.1 Value Universe and Taint Function
+
+Let $\Sigma$ denote the universe of program values (every value node in the SCG). Let $\mathsf{Source} = \{ \mathsf{UserInput}, \mathsf{Network}, \mathsf{UntrustedFile} \}$ be the set of taint sources (§2.2). The **taint function** $T : \Sigma \to \mathcal{P}(\mathsf{Source})$ maps each value to its set of taint sources; $T(v) = \emptyset$ means $v$ is clean. The **security-level function** $\ell : \Sigma \to L$ maps each value to its lattice level (§1.2).
+
+### 7.2 Information-Flow Relation
+
+The **information-flow relation** $\mathcal{F} \subseteq \Sigma \times \Sigma$ is the reflexive-transitive closure of:
+1. **Direct data-flow edges** of the SCG: $(v_1, v_2) \in \mathcal{F}_0$ if a DataFlow edge $v_1 \to v_2$ exists.
+2. **Implicit (control-flow) edges** (§2.3): $(v_c, v_2) \in \mathcal{F}_0$ if $v_c$ is a branch condition and $v_2$ is assigned inside the branch.
+3. **Container-element edges** (§2.3): $(v_e, v_c) \in \mathcal{F}_0$ if $v_e$ is an element of container $v_c$.
+4. **Pointer-deref edges** (§2.3): $(v_p, v_d) \in \mathcal{F}_0$ if $v_p$ is a pointer and $v_d$ is the value obtained by dereferencing $v_p$.
+
+So $\mathcal{F} = (\mathcal{F}_0)^*$, the reflexive-transitive closure. For an execution $\rho$, the **execution-restricted flow** $\mathcal{F}|_\rho$ is $\mathcal{F}$ restricted to values that exist on $\rho$.
+
+### 7.3 Security Policy
+
+The **security policy** $\mathcal{P}$ is the conjunction of:
+- **No-downgrade**: $\forall (v_1, v_2) \in \mathcal{F}.\; \ell(v_1) \leq_L \ell(v_2)$.
+- **Sink cleanliness**: for every sink $v_s$ requiring cleanliness (system call, eval, database write, etc.), $T(v_s) = \emptyset$.
+
+An **actual policy violation** is an execution $\rho$ on which either (a) $\exists (v_1, v_2) \in \mathcal{F}|_\rho$ with $\ell(v_1) >_L \ell(v_2)$, or (b) $\exists$ sink $v_s$ on $\rho$ with $T(v_s) \neq \emptyset$.
+
+### 7.4 IVE Taint Analysis
+
+The IVE computes a **static taint over-approximation** $T^+ : \Sigma \to \mathcal{P}(\mathsf{Source})$ by fixed-point propagation over the SCG (§2.3, §2.5). The over-approximation satisfies, for every value $v$ and every execution $\rho$ on which $v$ exists:
+$$
+T_\rho(v) \subseteq T^+(v)
+$$
+where $T_\rho$ is the *concrete* taint function on execution $\rho$. Equivalently: $T^+$ never misses a real taint source (no false negatives), but may flag extra ones (false positives allowed). The corresponding static level approximation $\ell^+$ similarly over-approximates: $\ell(v) \leq_L \ell^+(v)$ for all $v$.
+
+### 7.5 Definite vs. Possible Reports
+
+A **security violation report** is a triple $\mathsf{report}(v_1, v_2, \text{reason})$ emitted when $T^+(v_2) \neq \emptyset$ reaches a clean-required sink, or when $\ell^+(v_1) >_L \ell^+(v_2)$ on a flow $(v_1, v_2)$. The report is **definite** iff every step of the propagation derivation is *tight* — i.e., the IVE has established that the relevant edge exists on every execution that reaches $v_2$. Otherwise the report is flagged **possible** (over-approximation, may be a false positive).
+
 ## Appendix A: Formal Security Theorems
 
 **Theorem 1 (Noninterference):** For any VUMA program P that passes IVE verification, if two executions of P differ only in their High-level inputs, then their Low-level outputs are identical.
@@ -586,6 +627,32 @@ The combined overhead of PAC + BTI + MTE is typically 3-8% for most workloads on
 **Theorem 3 (Memory Safety):** For any VUMA program P that passes IVE verification, all memory accesses are within bounds, target live allocations, and are properly typed.
 
 *Proof sketch:* The Bounds Invariant (Section 5.2), Liveness Invariant (Section 5.3), and Interpretation Invariant (Section 5.5) are verified by the IVE for every memory access in P. If any invariant is not statically provable, the code generator inserts a runtime check that traps on violation.
+
+**Theorem 4 (Taint Soundness).** *If the IVE emits a **definite** security violation report $\mathsf{report}(v_1, v_2, \text{taint-flow})$, then there exists an actual information flow on some execution $\rho$ that violates the security policy $\mathcal{P}$:*
+$$
+\mathsf{definite}(v_1, v_2) \;\implies\; \exists \rho.\; (v_1, v_2) \in \mathcal{F}\big|_\rho \;\wedge\; T_\rho(v_2) \neq \emptyset.
+$$
+
+*Proof sketch.* By induction on the structure of the IVE's taint-propagation derivation $\mathcal{D}$ that produced the report.
+
+- **Base case (source introduction):** The propagation begins at a source node $v_1$ where $T^+(v_1) = \{s\}$ for some source $s \in \mathsf{Source}$. By §2.2, this is justified by $v_1$ being a value directly read from $s$. Hence on every execution that reaches $v_1$, $T_\rho(v_1) = \{s\}$ (the source taints the value by construction). The base case therefore witnesses a real flow: $(v_1, v_1) \in \mathcal{F}|_\rho$ by reflexivity, with $T_\rho(v_1) \neq \emptyset$.
+
+- **Inductive case (direct data-flow propagation):** A step extends $T^+(v_2) \supseteq T^+(v_1)$ because a DataFlow edge $v_1 \to v_2$ exists in the SCG (§2.3). For the report to be **definite**, the IVE must have established that this edge fires on every execution reaching $v_2$. By the IH, on some execution $\rho$ reaching $v_1$, $T_\rho(v_1) \neq \emptyset$. By the SCG operational semantics, the DataFlow edge $v_1 \to v_2$ on $\rho$ places $(v_1, v_2) \in \mathcal{F}|_\rho$. Taint propagation in the concrete semantics (§2.3, "if $v_{\text{src}}$ is tainted, $v_{\text{dst}}$ inherits the taint") gives $T_\rho(v_2) \supseteq T_\rho(v_1) \neq \emptyset$. Hence the real flow carries non-empty taint.
+
+- **Inductive case (implicit / control-flow propagation):** A step adds taint from branch condition $v_c$ to assignment $v_2$ inside the branch (§2.3, control-flow taint). Definiteness requires the IVE to have established that $v_2$'s assignment is reachable only via the branch on $v_c$. By the IH, $T_\rho(v_c) \neq \emptyset$ on some execution $\rho$. On $\rho$, whether $v_2$ receives a value at all depends on $v_c$'s value — so $(v_c, v_2) \in \mathcal{F}|_\rho$ by the definition of implicit flow (§7.2(2)). The attacker who controls $v_c$'s taint source can influence $v_2$'s existence/value, so $T_\rho(v_2) \supseteq T_\rho(v_c) \neq \emptyset$.
+
+- **Inductive case (container propagation):** A step extends taint from element $v_e$ to container $v_c$ (§2.3, container taint). Definiteness requires that $v_e$ is an element of $v_c$ on every execution reaching $v_c$. By §7.2(3), $(v_e, v_c) \in \mathcal{F}_0 \subseteq \mathcal{F}$. By the IH, $T_\rho(v_e) \neq \emptyset$ on some $\rho$. The concrete container-taint rule gives $T_\rho(v_c) \supseteq T_\rho(v_e) \neq \emptyset$.
+
+- **Inductive case (pointer-deref propagation):** Symmetric to the container case using §7.2(4); $(v_p, v_d) \in \mathcal{F}_0$ by definition, and the concrete deref-taint rule propagates $T_\rho(v_p)$ into $T_\rho(v_d)$.
+
+- **Reporting step:** A report is emitted when $T^+(v_2) \neq \emptyset$ reaches a clean-required sink, or when $\ell^+(v_1) >_L \ell^+(v_2)$ on a flow $(v_1, v_2)$. If the report is **definite**, every step in $\mathcal{D}$ was tight (no over-approximation), so the chain of $\mathcal{F}_0$-edges from source to $v_2$ is real on some execution $\rho$. The accumulated concrete taint $T_\rho(v_2) \neq \emptyset$ witnesses a real policy violation: either (b) $v_2$ is a sink reached with non-empty taint, or (a) $\ell_\rho(v_1) >_L \ell_\rho(v_2)$ (because $\ell^+$ over-approximates and the chain is tight, so the downgrade is real, not an artifact of $\ell^+$).
+
+By induction on $\mathcal{D}$, every definite report corresponds to a real $\mathcal{F}$-chain on some execution $\rho$, witnessing an actual policy violation. $\square$
+
+**Theorem 5 (Taint Conservativity — No False Negatives).** *If a real information flow violates $\mathcal{P}$ on some execution $\rho$, then either (i) the IVE emits a (definite or possible) report identifying the violation, or (ii) the IVE flags the relevant flow as unanalyzable (verification debt).*
+
+*Proof sketch.* $T^+$ is a sound over-approximation of $T$ (§7.4): $T_\rho(v) \subseteq T^+(v)$ for every $v$ on every $\rho$. If $T_\rho(v_2) \neq \emptyset$ on some $\rho$ reaching a clean-required sink $v_2$, then $T^+(v_2) \neq \emptyset$ statically. By §2.5 the IVE either (i) emits a report at $v_2$, or (ii) — if static analysis could not establish reachability of $\rho$ — records the flow as verification debt. Either way, no real violation is silently ignored. The dual argument applies to level downgrades via the over-approximation $\ell^+$. $\square$
+
 
 ---
 

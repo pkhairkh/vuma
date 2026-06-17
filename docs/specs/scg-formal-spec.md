@@ -443,6 +443,79 @@ This theorem is the formal guarantee that the IVE's optimization and refactoring
 
 ---
 
+
+---
+
+## 6. Formal Definitions (Consolidated)
+
+Sections 1–5 introduce the SCG's node/edge universes, composition operators, equivalence relation, and well-formedness conditions piecewise. This section consolidates the *structural* concepts needed for the theorems of §7 into a single formal vocabulary. No earlier definition is overridden; this section only sharpens terms that previously appeared in prose.
+
+### 6.1 Construction Operations
+
+Every well-formed SCG is the denotation of a finite construction sequence $\sigma$ over the following operations, starting from the empty SCG $G_\emptyset = (\emptyset, \emptyset, \emptyset, \emptyset)$:
+
+- $\mathsf{addNode}(n)$ — adds $n \in \mathcal{N}$ to the node set: $G \mapsto G[N \mapsto N \cup \{n\}]$. Precondition: $n$ is fresh (i.e., $\text{id}(n) \notin \text{ids}(N)$).
+- $\mathsf{addEdge}(e)$ — adds $e = \langle n_s, \ell, n_t \rangle \in \mathcal{E}$ to the edge set: $G \mapsto G[E \mapsto E \cup \{e\}]$. Precondition: $n_s, n_t \in N$.
+- $\mathbin{;}$, $\parallel$, $\mathsf{cond}$, $\mu$ — the composition operators of §3.
+
+A construction sequence $\sigma = op_1 \cdots op_k$ denotes $G = \llbracket \sigma \rrbracket$ where each $op_i$ is applied to the result of $op_{i-1}$. We write $\mathsf{Seq}(G)$ for the (non-empty) set of construction sequences that denote $G$.
+
+### 6.2 Edge Validity
+
+For an SCG $G = (N, E, \iota, o)$ and edge $e \in E$, the **edge-validity** predicate is:
+$$
+\mathsf{edgeValid}(e, G) \;\iff\; \mathsf{src}(e) \in N \;\wedge\; \mathsf{tgt}(e) \in N \;\wedge\; \mathsf{label}(e) \in \mathcal{L}
+$$
+i.e., both endpoints are nodes of $G$ and the label is one of the four allowed labels. This is a *structural* property of $G$, independent of any construction sequence.
+
+### 6.3 Payload Type Matching
+
+Each constructor in §1.1 fixes an expected **sort signature** for its payload. For instance, $\text{AccessNode}$ requires a payload of sort $\mathcal{A} \times \mathcal{M} \times \mathcal{BD}$. Let $\mathsf{Payload}(n)$ denote the payload tuple of $n$ and $\mathsf{Sig}(\text{kind}(n))$ denote the expected sort signature. The **payload type matching** predicate is:
+$$
+\mathsf{payloadTypeOK}(n) \;\iff\; \mathsf{Payload}(n) \in \mathsf{Sig}(\text{kind}(n))
+$$
+Concretely, this requires: (i) the function arity $k$ matches the length of the argument vector for ComputationNodes; (ii) $\mathcal{R}^*$ in DeallocationNode is a valid region reference; (iii) every BD component is a well-formed triple $(\text{RepD}, \text{CapD}, \text{RelD})$; (iv) the access mode $m \in \mathcal{M}$, the control construct $c \in \mathcal{C}$, etc.
+
+### 6.4 Consolidated Well-Formedness
+
+Restating §5.1 as a single formula:
+$$
+\mathsf{wellFormed}(G) \;\iff\; \mathsf{DerivComplete}(G) \;\wedge\; \mathsf{DFAcyclic}(G) \;\wedge\; \mathsf{InputSat}(G) \;\wedge\; \mathsf{TypeCons}(G)
+$$
+where each conjunct is the predicate of §5.2, §5.3, §5.4, §5.5 respectively. In particular, $\mathsf{wellFormed}(G)$ does *not* a priori include $\mathsf{edgeValid}$ or $\mathsf{payloadTypeOK}$; these are consequences derived in §7 below.
+
+---
+
+## 7. Theorems
+
+**Theorem 7.1 (Well-formedness).** *If SCG $S$ is well-formed, then every edge references a valid node and every node's payload matches its type:*
+$$
+\mathsf{wellFormed}(S) \;\implies\; \bigl(\forall e \in S.E.\; \mathsf{edgeValid}(e, S)\bigr) \;\wedge\; \bigl(\forall n \in S.N.\; \mathsf{payloadTypeOK}(n)\bigr).
+$$
+
+**Proof sketch.** By induction on the construction sequence $\sigma$ producing $S$, with $S_i = \llbracket op_1 \cdots op_i \rrbracket$.
+
+*Base case* ($\sigma = \epsilon$): $S = G_\emptyset = (\emptyset, \emptyset, \emptyset, \emptyset)$. Both universal claims are vacuously true (quantification over the empty set).
+
+*Inductive step*: assume $\mathsf{wellFormed}(S_i) \implies (\text{edges-valid} \wedge \text{payloads-OK})$ holds for $S_i$; show it for $S_{i+1} = op_{i+1}(S_i)$, supposing $\mathsf{wellFormed}(S_{i+1})$.
+
+- $\mathsf{addNode}(n)$: Well-formedness of $S_{i+1}$ invokes $\mathsf{InputSat}(S_{i+1})$ (§5.4), which requires every required input port of $n$ to be satisfiable; $\mathsf{inputPorts}(n)$ is defined (§5.4) by case analysis on $\text{kind}(n)$ and *presupposes* $\mathsf{payloadTypeOK}(n)$ (otherwise $\mathsf{inputPorts}$ is undefined). Hence $\mathsf{payloadTypeOK}(n)$ holds; payloads of pre-existing nodes are unchanged. The edge set is unchanged, so the edge-validity conjunct follows from the IH.
+- $\mathsf{addEdge}(e = \langle n_s, \ell, n_t \rangle)$: $\mathsf{InputSat}(S_{i+1})$ (§5.4) requires $n_t \in S_{i+1}.N$ (the edge targets a port of $n_t$) and the existence of a producer $n_s$; therefore $n_s, n_t \in S_{i+1}.N$, so $\mathsf{edgeValid}(e, S_{i+1})$ holds. $\mathsf{TypeCons}(S_{i+1})$ (§5.5) further requires $\text{outBD}(n_s)$ to be defined, which presupposes $\mathsf{payloadTypeOK}(n_s)$. Both endpoints' payloads are unchanged by edge addition.
+- Sequential composition $S_i \mathbin{;} S'$: by §3.2 the new edges are $o_i(k) \xrightarrow{\text{DF}(k)} \iota'(k)$ with $o_i(k) \in S_i.N$, $\iota'(k) \in S'.N$ — both valid. BD compatibility $\text{outBD}(o_i(k)) \sqsubseteq_{\text{BD}} \text{expectedBD}(\iota'(k))$ is a precondition of $\mathbin{;}$ and is undefined unless both endpoints' payloads are well-typed. Both components are well-formed (precondition of composition); the IH applies to each.
+- Parallel composition $\parallel$: introduces no cross-component edges; both universal claims follow from the IH applied to each component.
+- Conditional composition $\mathsf{cond}$: introduces a $\text{Branch}$ and a $\text{Merge}$ ControlNode with payloads drawn from $\mathcal{C}$ (well-typed by §1.2), and new edges connect only to existing valid nodes. The IH applies to each branch.
+- Recursive composition $\mu$: introduces a fixed-point; by induction on the fixed-point iteration (each iterate is built from the body's construction sequence, to which the IH applies).
+
+Since $\mathsf{wellFormed}(S)$ presupposes the existence of a construction sequence producing $S$ in which every step preserves the invariant, the conclusion follows by induction on $\sigma \in \mathsf{Seq}(S)$. $\square$
+
+**Theorem 7.2 (Edge-label determinism).** *For any well-formed SCG $S$, the label of every edge is constrained by the kinds of its endpoints:*
+$$
+\forall e = \langle n_s, \ell, n_t \rangle \in S.E.\; \ell \in \mathsf{allowedLabels}(\text{kind}(n_s), \text{kind}(n_t))
+$$
+*where $\mathsf{allowedLabels}$ is the kind-pair → label-set table derived from §2.2 (e.g., a Derivation edge requires $\text{kind}(n_s) = \text{Alloc}$).*
+
+**Proof sketch.** Direct case analysis on $\text{kind}(n_s)$, then induction on the construction sequence. Each composition operator in §3 creates edges only of the allowed labels: $\mathbin{;}$ creates DataFlow; $\parallel$ creates no cross-edges; $\mathsf{cond}$ creates ControlFlow (to branch entries) and DataFlow (condition → branch); $\mu$ creates ControlFlow (loop back-edge) and DataFlow (loop-carried value through Merge). $\mathsf{addEdge}$ is constrained by the precondition $\mathsf{TypeCons}$ (§5.5), which requires BD propagation consistent with the edge's label semantics. Hence no construction step can introduce an edge whose label is outside $\mathsf{allowedLabels}(\text{kind}(n_s), \text{kind}(n_t))$. $\square$
+
 ## Appendix A: Summary of Formal Objects
 
 | Object | Domain | Description |

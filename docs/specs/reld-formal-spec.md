@@ -568,6 +568,92 @@ This incremental approach reduces the average-case cost of re-inference from `O(
 
 ---
 
+
+---
+
+## 6. Formal Definitions (Composition Algebra)
+
+Section 3 defines how RelDs combine under each program operation (function call, assignment, branch, loop, concurrent composition). This section abstracts those rules into a single binary composition operator on RelDs, formalizing the algebraic structure needed for the Compositionality Theorem of §7.
+
+### 6.1 RelD Universe
+
+Let $\mathsf{RelD} = \mathcal{P}(\mathsf{Relation})$ denote the set of all RelDs (sets of relations, per §1.1). The well-formedness predicate `wf` (§1.3) and the consistency predicate `consistent` (§4.2) lift to sets: `wf(d)` iff every relation in `d` is well-formed and the intra-RelD consistency conditions hold; `consistent({d₁, …, dₙ})` iff there exists a trace satisfying all of them simultaneously.
+
+### 6.2 Composition Operator
+
+Define the **binary composition operator** $\otimes : \mathsf{RelD} \times \mathsf{RelD} \rightharpoonup \mathsf{RelD}$ as the **meet under refinement** (the operator used by assignment composition in §3.3):
+
+```
+d₁ ⊗ d₂ = close(d₁ ∪ d₂)
+```
+
+where `close` performs the following deterministic operations on the union:
+
+1. **Sort by kind**: partition `d₁ ∪ d₂` into the six relation families (Temporal, Containment, Dependency, Semantic/Equivalence, Security, Liveness).
+2. **Apply per-kind closure rules** (§2.2):
+   - Temporal: `Outlives(x,y) ∧ Outlives(y,x) ⟹ Coincides(x,y)`.
+   - Security: collapse to a single `SecurityRel{max(ℓ₁, ℓ₂), most-restrictive-flow}`.
+   - Containment: collapse to the prefix-minimal path per `(container, value)` pair.
+   - Dependency: collapse to the maximum-specificity kind per `source` (AliasDep ≻ DataDep, ControlDep incomparable).
+   - Equivalence: union the RepMappings per `equivalence class`, rejecting inconsistent mappings.
+   - Liveness: collapse to the narrowest phase per `scope`.
+3. **Consistency check**: if any of the consistency conditions of §4.2 are violated, return `⊥` (undefined). Otherwise return the closed set.
+
+The operator is defined only when `d₁ ⊗ d₂ ≠ ⊥`; we write `defined(d₁, d₂)` for this precondition. By construction, `d₁ ⊗ d₂` is the **greatest lower bound** of `d₁` and `d₂` in the refinement lattice of §2.4 (i.e., the most-refined RelD that both `d₁` and `d₂` refine).
+
+### 6.3 Duality with Join
+
+The **branch composition** of §3.4 uses the **join** $\sqcup$ (least upper bound) instead of meet. By the lattice theorem of §2.5, $\sqcup$ exists and is dual to $\otimes$; the same associativity proof below applies *mutatis mutandis* to $\sqcup$. We state the theorem for $\otimes$ and note the dual.
+
+### 6.4 Well-Definedness
+
+For well-formed inputs `d₁, d₂`, the closure `close(d₁ ∪ d₂)` is uniquely determined: the per-kind closure rules are confluent (each rule reduces a syntactic normal form per kind), and the consistency check is deterministic. Hence $\otimes$ is a partial function on `RelD × RelD`, total on the subset of pairs whose union is consistent.
+
+---
+
+## 7. Theorems
+
+**Theorem 6 (Compositionality / Associativity).** *RelD composition $\otimes$ is associative: for all $d_1, d_2, d_3 \in \mathsf{RelD}$ such that $\mathsf{defined}(d_1, d_2)$, $\mathsf{defined}(d_2, d_3)$, and $\mathsf{defined}(d_1 \otimes d_2, d_3)$ (equivalently $\mathsf{defined}(d_1, d_2 \otimes d_3)$),*
+$$
+(d_1 \otimes d_2) \otimes d_3 \;=\; d_1 \otimes (d_2 \otimes d_3).
+$$
+
+**Proof sketch.** By case analysis on the relation kinds present in $d_1 \cup d_2 \cup d_3$, using the per-kind closure rules of §2.2 and the well-definedness of §6.4.
+
+- **Case A — all relations have distinct kinds (or distinct targets within a kind):** No closure rule fires; `close` is the identity on the union. So $d_1 \otimes d_2 = d_1 \cup d_2$, $d_2 \otimes d_3 = d_2 \cup d_3$, and
+  $$(d_1 \otimes d_2) \otimes d_3 = (d_1 \cup d_2) \cup d_3 = d_1 \cup (d_2 \cup d_3) = d_1 \otimes (d_2 \otimes d_3)$$
+  by associativity of set union.
+
+- **Case B — same-kind temporal relations (e.g., `Outlives(x,y)` and `Outlives(y,x)` in different operands):** The closure rule `Outlives(x,y) ∧ Outlives(y,x) ⟹ Coincides(x,y)` (§2.2) fires iff both directions are present in the union. Whether they are present depends only on the set $d_1 \cup d_2 \cup d_3$, not on the parenthesization. If both directions are present (say `Outlives(x,y) ∈ d_1` and `Outlives(y,x) ∈ d_3`), then:
+  - In $(d_1 \otimes d_2) \otimes d_3$: the first `⊗` may not fire the rule (if $d_2$ lacks the opposite direction), but the second `⊗` (combining with $d_3$) does, producing `Coincides(x,y)`.
+  - In $d_1 \otimes (d_2 \otimes d_3)$: the first `⊗` (combining $d_2, d_3$) may or may not fire depending on $d_2$'s contents, but the second `⊗` (combining with $d_1$) does, producing `Coincides(x,y)`.
+  Either way the final closed set contains `Coincides(x,y)` and the residual relations, identical in both parenthesizations. The case where only one direction is present is subsumed by Case A.
+
+- **Case C — same-kind security relations for the same value:** Closure takes the join `max(ℓ₁, ℓ₂)` in the totally-ordered security lattice (§2.2, §1.2 of the Security Model spec). The `max` operation on a total order is associative: `max(max(ℓ₁, ℓ₂), ℓ₃) = max(ℓ₁, max(ℓ₂, ℓ₃)) = max(ℓ₁, ℓ₂, ℓ₃)`. Hence the security-relation closure is associative.
+
+- **Case D — same-kind containment relations for the same `(container, value)`:** Closure selects the prefix-minimal path (§2.2). The prefix relation on `Path` (finite sequences of field selectors) forms a tree under prefix; the prefix-minimal element of a finite set is unique and independent of the order in which elements are added. Hence the containment closure depends only on the set of paths in $d_1 \cup d_2 \cup d_3$, and is associative.
+
+- **Case E — same-kind dependency relations for the same `source`:** Closure selects the maximum-specificity kind (AliasDep ≻ DataDep; ControlDep incomparable, in which case the input is inconsistent and `⊗` returns `⊥`). The maximum of a totally-ordered chain is associative. (If ControlDep coexists with DataDep for the same source, `defined` fails and both parenthesizations return `⊥`, so equality holds trivially.)
+
+- **Case F — same-kind equivalence relations for the same equivalence class:** Closure unions the RepMappings: `m₁ ∪ m₂`, rejecting inconsistent mappings (§2.2). Set union is associative, so the closure is associative. If the mappings are inconsistent, `defined` fails for both parenthesizations and equality holds trivially.
+
+- **Case G — cross-kind interactions via the global consistency check (§4.2):** The consistency conditions are predicates on the full closed set, not on the parenthesization. By §6.4 the closure is uniquely determined by $d_1 \cup d_2 \cup d_3$ (independent of parenthesization), and the consistency check is applied to this uniquely-determined closed set. Hence if either parenthesization yields a non-`⊥` result, both do, and they yield the same closed set.
+
+In every case, $(d_1 \otimes d_2) \otimes d_3 = d_1 \otimes (d_2 \otimes d_3)$. Hence $\otimes$ is associative on its domain of definition. $\square$
+
+**Corollary 6.1 (Join Associativity).** *The join composition $\sqcup$ of §3.4 (used by branch composition) is also associative, by duality with $\otimes$ in the refinement lattice of §2.4.*
+
+**Corollary 6.2 (Compositionality of program fragments).** *When composing the RelDs of three sequentially-composed program fragments $e_1 \mathbin{;} e_2 \mathbin{;} e_3$, the order of pairwise composition does not affect the resulting RelD:*
+$$
+\text{RelD}(e_1 \mathbin{;} (e_2 \mathbin{;} e_3)) \;=\; \text{RelD}((e_1 \mathbin{;} e_2) \mathbin{;} e_3).
+$$
+
+*Proof sketch.* Sequential composition of fragments corresponds to meet-composition of their RelDs (§3.3, assignment rule lifted to fragment boundaries), which by Theorem 6 is associative. $\square$
+
+**Theorem 7 (Composition Soundness).** *If $d_1$ and $d_2$ are each individually satisfiable (each has at least one satisfying trace) and $\mathsf{defined}(d_1, d_2)$, then $d_1 \otimes d_2$ is satisfiable. Moreover, every trace satisfying $d_1 \otimes d_2$ satisfies both $d_1$ and $d_2$.*
+
+*Proof sketch.* `defined(d₁, d₂)` holds iff `close(d₁ ∪ d₂) ≠ ⊥`, which by §6.2 step 3 holds iff `consistent({d₁, d₂})` — i.e., there exists a trace $T$ with $T \vDash d_1 \wedge T \vDash d_2$ (§4.1). Hence $d_1 \otimes d_2$ is satisfiable. The "moreover" follows from §2.3: $d_1 \otimes d_2 \sqsubseteq d_1$ and $d_1 \otimes d_2 \sqsubseteq d_2$ (it is the meet), so by definition of $\sqsubseteq$, every trace satisfying $d_1 \otimes d_2$ also satisfies $d_1$ and $d_2$. $\square$
+
 ## Appendix A: Notation Summary
 
 | Symbol | Meaning |

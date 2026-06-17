@@ -39,7 +39,7 @@ use crate::result::{
     BatchedViolations, CounterExample, InvariantViolation, Severity, VerificationResult,
     VerificationStatus,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use vuma_bd::capd::{CapD, Capability};
 use vuma_bd::descriptor::BD;
@@ -1020,7 +1020,21 @@ impl VerificationEngine {
             }
         }
 
-        // Add accesses
+        // Add accesses, tracking which (region, offset, size) ranges have
+        // been written to so that reads can be marked as initialized when
+        // they overlap a prior write. We walk the SCG nodes in insertion
+        // (node-index) order, which for parser-built SCGs is program
+        // order — the order in which accesses execute. A read is
+        // "initialized" iff its byte range `[offset, offset+size)` overlaps
+        // some previously-written range in the same region; otherwise it
+        // is a genuine uninitialized read (Origin violation).
+        //
+        // Previously this method hardcoded `initialized: false` for every
+        // access, which caused false-positive "uninitialized read"
+        // violations on any program that writes to a region and then
+        // reads it back (e.g. the `hello_memory.vuma` showcase).
+        let mut written_ranges: BTreeMap<RegionId, BTreeSet<(u64, u64)>> = BTreeMap::new();
+
         let mut next_access_id: u64 = 1;
         for node in scg.nodes() {
             if node.node_type == NodeType::Access {
@@ -1031,10 +1045,46 @@ impl VerificationEngine {
                     // Find the derivation for this access's region
                     let target_derivation = DerivationId(access.region_id.as_u64());
 
-                    let kind = match access.mode {
-                        AccessMode::Read => OriginAccessKind::Read,
-                        AccessMode::Write => OriginAccessKind::Write,
-                        AccessMode::ReadWrite => OriginAccessKind::Write, // Conservative
+                    let size = access.access_size.unwrap_or(8);
+                    let offset = access.offset.unwrap_or(0);
+
+                    // Helper: does `[offset, offset+size)` overlap `(wo, wo+ws)`?
+                    let overlaps = |wo: u64, ws: u64| -> bool {
+                        offset < wo.wrapping_add(ws) && wo < offset.wrapping_add(size)
+                    };
+
+                    let (kind, initialized) = match access.mode {
+                        AccessMode::Write => {
+                            // The write itself initializes the byte range.
+                            // Record it so subsequent reads in the same
+                            // region/offset see it as initialized.
+                            written_ranges
+                                .entry(access.region_id)
+                                .or_default()
+                                .insert((offset, size));
+                            (OriginAccessKind::Write, true)
+                        }
+                        AccessMode::ReadWrite => {
+                            // Modelled as write-then-read (conservative,
+                            // matching the prior mapping to `Write`): the
+                            // write half initializes the range, the read
+                            // half sees the freshly-written value.
+                            written_ranges
+                                .entry(access.region_id)
+                                .or_default()
+                                .insert((offset, size));
+                            (OriginAccessKind::Write, true)
+                        }
+                        AccessMode::Read => {
+                            // Initialized iff this read's byte range
+                            // overlaps any previously-written range in the
+                            // same region.
+                            let init = written_ranges
+                                .get(&access.region_id)
+                                .map(|ranges| ranges.iter().any(|&(wo, ws)| overlaps(wo, ws)))
+                                .unwrap_or(false);
+                            (OriginAccessKind::Read, init)
+                        }
                     };
 
                     let pp = format!("node_{}", node.id.as_u64());
@@ -1043,9 +1093,9 @@ impl VerificationEngine {
                         aid,
                         target_derivation,
                         kind,
-                        access.access_size.unwrap_or(8),
+                        size,
                         pp,
-                        false, // initialized — to be checked by verifier
+                        initialized,
                     ));
                 }
             }

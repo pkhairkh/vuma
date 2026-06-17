@@ -25,9 +25,9 @@ FEATURES      ?=
 # Phony targets
 # ============================================================================
 .PHONY: all build check test bench doc fmt clippy \
-        x86-64-run riscv64-run \
-        clean install verify-examples \
-        setup toolchain
+	x86-64-run riscv64-run test-qemu \
+	clean install verify-examples \
+	setup toolchain
 
 # ============================================================================
 # Default: build + test
@@ -40,15 +40,15 @@ all: build test
 
 ## build: Compile the entire workspace (debug mode)
 build:
-        $(CARGO) build --workspace
+	$(CARGO) build --workspace
 
 ## check: Type-check the workspace without producing artifacts
 check:
-        $(CARGO) check --workspace
+	$(CARGO) check --workspace
 
 ## check-fast: Type-check only the core crates (skip slow ones)
 check-fast:
-        $(CARGO) check -p vuma -p vuma-scg -p vuma-ive -p vuma-bd
+	$(CARGO) check -p vuma -p vuma-scg -p vuma-ive -p vuma-bd
 
 # ============================================================================
 # Testing
@@ -56,19 +56,41 @@ check-fast:
 
 ## test: Run all workspace tests
 test:
-        $(CARGO) test --workspace
+	$(CARGO) test --workspace
 
 ## test-verbose: Run all workspace tests with full output
 test-verbose:
-        $(CARGO) test --workspace -- --nocapture
+	$(CARGO) test --workspace -- --nocapture
 
 ## test-single CRATE=<crate>: Run tests for a single crate
 test-single:
-        $(CARGO) test -p $(CRATE)
+	$(CARGO) test -p $(CRATE)
 
 ## test-doc: Run doc tests across the workspace
 test-doc:
-        $(CARGO) test --workspace --doc
+	$(CARGO) test --workspace --doc
+
+## test-qemu: Run cross-backend tests requiring QEMU user-mode emulation (aarch64).
+##            Installs nothing; reports clearly if qemu-aarch64 / qemu-aarch64-static
+##            is missing so the cross-arch execution tests are not silently skipped.
+test-qemu:
+	@if command -v qemu-aarch64 >/dev/null 2>&1 || command -v qemu-aarch64-static >/dev/null 2>&1; then \
+	    echo "==> QEMU user-mode emulation available; running cross-backend QEMU tests"; \
+	    $(CARGO) test -p vuma-tests cross_backend::test_qemu_aarch64_execution_available_in_ci -- --nocapture; \
+	else \
+	    echo "================================================================"; \
+	    echo "  QEMU user-mode emulation not found on PATH."; \
+	    echo "  The cross-backend QEMU execution tests will be SKIPPED."; \
+	    echo ""; \
+	    echo "  Install QEMU to run them locally:"; \
+	    echo "    sudo apt-get install -y qemu-user qemu-user-static   # Debian/Ubuntu"; \
+	    echo "    brew install qemu                                     # macOS"; \
+	    echo ""; \
+	    echo "  In CI, the 'test-qemu' job installs these packages so cross-arch"; \
+	    echo "  execution is a gated path, not a manual option."; \
+	    echo "================================================================"; \
+	    exit 1; \
+	fi
 
 # ============================================================================
 # Benchmarking
@@ -76,11 +98,11 @@ test-doc:
 
 ## bench: Run all benchmarks
 bench:
-        $(CARGO) bench --workspace
+	$(CARGO) bench --workspace
 
 ## bench-single CRATE=<crate>: Run benchmarks for a single crate
 bench-single:
-        $(CARGO) bench -p $(CRATE)
+	$(CARGO) bench -p $(CRATE)
 
 # ============================================================================
 # Documentation
@@ -88,15 +110,15 @@ bench-single:
 
 ## doc: Build workspace documentation (no dependencies)
 doc:
-        $(CARGO) doc --workspace --no-deps
+	$(CARGO) doc --workspace --no-deps
 
 ## doc-open: Build documentation and open in browser
 doc-open:
-        $(CARGO) doc --workspace --no-deps --open
+	$(CARGO) doc --workspace --no-deps --open
 
 ## doc-private: Build documentation including private items
 doc-private:
-        $(CARGO) doc --workspace --no-deps --document-private-items
+	$(CARGO) doc --workspace --no-deps --document-private-items
 
 # ============================================================================
 # Code quality
@@ -104,19 +126,19 @@ doc-private:
 
 ## fmt: Auto-format all Rust source files
 fmt:
-        $(CARGO) fmt --all
+	$(CARGO) fmt --all
 
 ## fmt-check: Check formatting without making changes (CI-friendly)
 fmt-check:
-        $(CARGO) fmt --all -- --check
+	$(CARGO) fmt --all -- --check
 
 ## clippy: Run Clippy lints with deny-warnings
 clippy:
-        $(CARGO) clippy --workspace -- -D warnings
+	$(CARGO) clippy --workspace -- -D warnings
 
 ## clippy-fix: Auto-fix Clippy warnings where possible
 clippy-fix:
-        $(CARGO) clippy --workspace --fix --allow-dirty
+	$(CARGO) clippy --workspace --fix --allow-dirty
 
 ## lint: Run all code-quality checks (fmt + clippy)
 lint: fmt-check clippy
@@ -127,11 +149,11 @@ lint: fmt-check clippy
 
 ## clean: Remove all build artifacts
 clean:
-        $(CARGO) clean
+	$(CARGO) clean
 
 ## clean-doc: Remove generated documentation
 clean-doc:
-        rm -rf target/doc
+	rm -rf target/doc
 
 # ============================================================================
 # Install
@@ -139,11 +161,11 @@ clean-doc:
 
 ## install: Build in release mode and install to PREFIX
 install: build-release
-        $(CARGO) install --path . --root $(PREFIX) --locked
+	$(CARGO) install --path . --root $(PREFIX) --locked
 
 ## build-release: Compile the workspace in release mode
 build-release:
-        $(CARGO) build --workspace --release
+	$(CARGO) build --workspace --release
 
 # ============================================================================
 # Setup / toolchain
@@ -151,13 +173,13 @@ build-release:
 
 ## setup: Install required toolchain, components, and targets
 setup: toolchain
-        $(RUSTUP) component add rustfmt clippy
-        $(RUSTUP) target add aarch64-unknown-linux-gnu
-        $(RUSTUP) target add aarch64-unknown-none
+	$(RUSTUP) component add rustfmt clippy
+	$(RUSTUP) target add aarch64-unknown-linux-gnu
+	$(RUSTUP) target add aarch64-unknown-none
 
 ## toolchain: Install the pinned nightly toolchain
 toolchain:
-        $(RUSTUP) toolchain install nightly-2026-03-01
+	$(RUSTUP) toolchain install nightly-2026-03-01
 
 # ============================================================================
 # Miscellaneous
@@ -169,25 +191,25 @@ toolchain:
 
 ## x86-64-run: Run x86_64 target in QEMU
 x86-64-run:
-        qemu-system-x86_64 -drive format=raw,file=target/x86_64-unknown-none/release/vuma-x86_64.bin -serial stdio
+	qemu-system-x86_64 -drive format=raw,file=target/x86_64-unknown-none/release/vuma-x86_64.bin -serial stdio
 
 ## riscv64-run: Run RISC-V 64 target in QEMU (virt machine)
 riscv64-run:
-        qemu-system-riscv64 -machine virt -nographic -bios default -kernel target/riscv64gc-unknown-none-elf/release/vuma-riscv64
+	qemu-system-riscv64 -machine virt -nographic -bios default -kernel target/riscv64gc-unknown-none-elf/release/vuma-riscv64
 
 ## verify-examples: List all example programs
 verify-examples:
-        @echo "Verifying example programs..."
-        @for f in examples/*.vuma; do echo "  $$f"; done
+	@echo "Verifying example programs..."
+	@for f in examples/*.vuma; do echo "  $$f"; done
 
 ## help: Show this help message
 help:
-        @echo "VUMA Build System"
-        @echo "================="
-        @echo ""
-        @echo "Usage: make <target>"
-        @echo ""
-        @echo "Targets:"
-        @grep -E '^## ' $(MAKEFILE_LIST) | sort | \
-                awk 'BEGIN {FS = ": "}; {printf "  %-18s %s\n", $$1, $$2}' | \
-                sed 's/^## //'
+	@echo "VUMA Build System"
+	@echo "================="
+	@echo ""
+	@echo "Usage: make <target>"
+	@echo ""
+	@echo "Targets:"
+	@grep -E '^## ' $(MAKEFILE_LIST) | sort | \
+	        awk 'BEGIN {FS = ": "}; {printf "  %-18s %s\n", $$1, $$2}' | \
+	        sed 's/^## //'

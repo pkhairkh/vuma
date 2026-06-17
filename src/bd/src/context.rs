@@ -8,8 +8,8 @@
 //! is satisfied only when phase 3 is listed among [`Context::active_phases`].
 
 use crate::capd::{CapD, Capability, Condition, LockId, OpId, PhaseId, RegionId, SecLevel};
-use hashbrown::HashSet;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::fmt;
 
 /// Runtime execution context used for [`CapD::resolve`].
@@ -20,15 +20,17 @@ use std::fmt;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Context {
     /// The set of phases that are currently active.
-    pub active_phases: HashSet<PhaseId>,
+    ///
+    /// `BTreeSet` (not `HashSet`) for deterministic iteration (W35).
+    pub active_phases: BTreeSet<PhaseId>,
     /// The set of operations that have already completed.
-    pub completed_ops: HashSet<OpId>,
+    pub completed_ops: BTreeSet<OpId>,
     /// The set of locks that are currently held.
-    pub active_locks: HashSet<LockId>,
+    pub active_locks: BTreeSet<LockId>,
     /// The current security clearance level.
     pub current_security_level: SecLevel,
     /// The set of memory regions whose lifetimes are currently active.
-    pub current_region: HashSet<RegionId>,
+    pub current_region: BTreeSet<RegionId>,
 }
 
 impl Context {
@@ -36,11 +38,11 @@ impl Context {
     /// security level 0, no active regions).
     pub fn empty() -> Self {
         Self {
-            active_phases: HashSet::new(),
-            completed_ops: HashSet::new(),
-            active_locks: HashSet::new(),
+            active_phases: BTreeSet::new(),
+            completed_ops: BTreeSet::new(),
+            active_locks: BTreeSet::new(),
             current_security_level: 0,
-            current_region: HashSet::new(),
+            current_region: BTreeSet::new(),
         }
     }
 
@@ -65,7 +67,7 @@ impl Context {
     /// this context.
     ///
     /// This is a convenience wrapper around [`CapD::resolve`].
-    pub fn resolve_capabilities(&self, capd: &CapD) -> HashSet<Capability> {
+    pub fn resolve_capabilities(&self, capd: &CapD) -> BTreeSet<Capability> {
         capd.resolve(self)
     }
 
