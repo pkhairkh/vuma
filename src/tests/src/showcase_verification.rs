@@ -271,16 +271,9 @@ fn showcase_doubly_linked_list() {
     // overall verdict (`Fail`) and lock in the base-invariant behaviour
     // with belt-and-braces assertions so a future regression on the five
     // base invariants — or on which advanced invariant fails — is caught.
-    assert_eq!(
-        result.overall,
-        OverallVerdict::Fail,
-        "doubly_linked_list.vuma: overall should be Fail (Hardened + Interprocedural false \
-         positives on intentional pointer escapes / cross-function retention); got {:?}; \
-         per-invariant {:?}; advanced {:?}",
-        result.overall,
-        result.per_invariant.iter().map(|p| (p.kind, p.result.status.clone())).collect::<Vec<_>>(),
-        result.advanced_results.iter().map(|p| (p.kind, p.result.status.clone())).collect::<Vec<_>>(),
-    );
+    assert_eq!(result.overall, OverallVerdict::Pass,
+        "doubly_linked_list: all 8 invariants pass (F3 fixed advanced false positives); got {:?}",
+        result.overall);
     // Belt-and-braces: all five BASE invariants must be clean (W17 fixed
     // the last remaining false positive on Exclusivity).
     for kind in [

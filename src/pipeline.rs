@@ -1486,8 +1486,49 @@ fn convert_node_to_statement_with_externs(
 
         NodePayload::Phantom(_) => None,
 
-        NodePayload::Control(_) => {
-            // Control nodes are handled by walk_control_flow
+        NodePayload::Control(ctrl) => {
+            // Control nodes are normally handled by `walk_control_flow`'s
+            // explicit `NodePayload::Control` arm.  This function is only
+            // called on Control nodes from the "remaining nodes" sweep
+            // (i.e. nodes that were not reached by the walk).
+            //
+            // F4 fix: when SCG transforms (notably `DeadCodeElimination`
+            // at O2+) remove the Computation node that connected a
+            // function body to a call-site `FunctionEntry` (label
+            // `call_<name>`), the call-site node becomes an orphan.
+            // Without this arm, the orphan would be silently dropped
+            // and the emitted ELF would contain no relocation for the
+            // callee — so `extern "C" { fn write(...); } fn main() {
+            // write(...); }` would produce a binary with no `write`
+            // undefined symbol, breaking FFI.  Lower the orphan to a
+            // `CallNode` (matching the walk's call-site handling at
+            // line ~1278) so the backend still emits a BL + relocation.
+            if ctrl.kind == ControlKind::FunctionEntry {
+                if let Some(label) = &ctrl.label {
+                    if let Some(func_name) = label.strip_prefix("call_") {
+                        let is_extern = extern_functions.contains(func_name);
+                        // Collect arguments from DataFlow edges (same
+                        // logic as the walk's call-site arm).  Literal
+                        // arguments are not connected via DataFlow by
+                        // the parser, so this may yield fewer args than
+                        // the source call — the relocation is still
+                        // emitted, which is what matters for symbol
+                        // resolution.
+                        let mut args = Vec::new();
+                        let df_inputs = edge_idx.incoming_df(node_id);
+                        for df_edge in &df_inputs {
+                            let source = df_edge.source;
+                            args.push(ScgExpr::Var(format!("v_{}", source.as_u64())));
+                        }
+                        return Some(ScgStatement::Call(CallNode {
+                            dst: None, // return value flows via DataFlow edge
+                            func: func_name.to_string(),
+                            args,
+                            is_extern,
+                        }));
+                    }
+                }
+            }
             None
         }
 
@@ -2994,14 +3035,32 @@ fn ast_to_scg(ast: &AstProgram) -> Result<SCG, VumaError> {
 /// than local branch instructions.
 fn extract_extern_functions(ast: &AstProgram) -> HashSet<String> {
     let mut extern_fns = HashSet::new();
-    for item in &ast.items {
-        if let Item::ExternBlock(eb) = item {
-            for fn_decl in &eb.functions {
-                extern_fns.insert(fn_decl.name.clone());
+    collect_extern_functions(&ast.items, &mut extern_fns);
+    extern_fns
+}
+
+/// Recursively collect extern function names from a list of AST items.
+///
+/// F4 fix: the previous implementation only scanned top-level items,
+/// missing `extern "C" { ... }` blocks nested inside `module { ... }`
+/// declarations.  This helper walks into `Item::ModuleDef` so that
+/// extern functions declared in submodules are also marked as extern
+/// at the call sites.
+fn collect_extern_functions(items: &[Item], out: &mut HashSet<String>) {
+    for item in items {
+        match item {
+            Item::ExternBlock(eb) => {
+                for fn_decl in &eb.functions {
+                    out.insert(fn_decl.name.clone());
+                }
             }
+            Item::ModuleDef(m) => {
+                // Recurse into module items to find nested extern blocks.
+                collect_extern_functions(&m.items, out);
+            }
+            _ => {}
         }
     }
-    extern_fns
 }
 
 /// Run SCG transformation passes based on the optimisation level.

@@ -2191,15 +2191,49 @@ fn test_sha256d_real_program_executes() {
         perms.set_mode(0o755);
         std::fs::set_permissions(&bin_path, perms).unwrap();
     }
-    let result = std::process::Command::new(&bin_path).output();
+    // The binary is AArch64 — use QEMU if available, otherwise document the gap.
+    let qemu = ["qemu-aarch64", "qemu-aarch64-static"]
+        .iter()
+        .map(|s| which(s))
+        .find(|p| p.is_some())
+        .flatten()
+        .or_else(|| {
+            // Check known QEMU install location from prior sessions
+            let p = "/tmp/qemu_bin/usr/bin/qemu-aarch64";
+            if std::path::Path::new(p).exists() { Some(p.to_string()) } else { None }
+        });
+
+    let result = match &qemu {
+        Some(q) => std::process::Command::new(q).arg(&bin_path).output(),
+        None => {
+            // Try direct execution (works if the binary matches the host arch)
+            std::process::Command::new(&bin_path).output()
+        }
+    };
     let _ = std::fs::remove_file(&bin_path);
     match result {
         Ok(output) => {
             let exit_code = output.status.code().unwrap_or(-1);
-            eprintln!("SHA256d exited with code {}", exit_code);
-            // sha256d should exit 79 (success) or some other code
-            // Don't hard-assert -- just document what happens
+            use std::os::unix::process::ExitStatusExt; let signal = output.status.signal();
+            eprintln!("SHA256d exited: code={:?}, signal={:?}, stdout={} bytes, stderr={}",
+                exit_code, signal,
+                output.stdout.len(),
+                String::from_utf8_lossy(&output.stderr));
+            if signal.is_some() {
+                eprintln!("  → Binary crashed (signal) — codegen bug in the _start stub or calling convention");
+            }
         }
-        Err(e) => eprintln!("Failed to execute: {}", e),
+        Err(e) => eprintln!("Failed to execute: {} (binary is likely wrong arch; install QEMU)", e),
     }
+}
+
+fn which(cmd: &str) -> Option<String> {
+    std::process::Command::new("which")
+        .arg(cmd)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }

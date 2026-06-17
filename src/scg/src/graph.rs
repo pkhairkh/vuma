@@ -493,6 +493,40 @@ impl SCG {
         (entries, returns)
     }
 
+    /// Collects the set of `NodeId`s referenced by *other nodes' payloads*.
+    ///
+    /// Several node payloads carry `NodeId` references to peer nodes:
+    /// - [`NodePayload::Deallocation`] → `allocation_node`
+    /// - [`NodePayload::VTable`] → `method_entries`
+    /// - [`NodePayload::ClosureEnv`] → `closure_entry`
+    ///
+    /// Removing a node that is referenced by another node's payload would
+    /// leave a dangling reference and invalidate the graph (see
+    /// [`SCG::validate`]). Transforms such as dead-code elimination must
+    /// therefore treat every node in this set as live.
+    pub fn payload_referenced_node_ids(&self) -> IndexSet<NodeId> {
+        let mut refs: IndexSet<NodeId> = IndexSet::new();
+        for node in self.nodes() {
+            match &node.payload {
+                NodePayload::Deallocation(d) => {
+                    refs.insert(d.allocation_node);
+                }
+                NodePayload::VTable(v) => {
+                    for &m in &v.method_entries {
+                        refs.insert(m);
+                    }
+                }
+                NodePayload::ClosureEnv(c) => {
+                    if let Some(id) = c.closure_entry {
+                        refs.insert(id);
+                    }
+                }
+                _ => {}
+            }
+        }
+        refs
+    }
+
     /// Given a FunctionEntry node, finds the corresponding FunctionReturn node
     /// by looking for the FunctionReturn node reachable via ControlFlow edges
     /// from the entry.

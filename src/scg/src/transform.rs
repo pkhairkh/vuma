@@ -186,6 +186,13 @@ impl SCGPass for DeadCodeElimination {
 
         while iteration_changed {
             iteration_changed = false;
+            // Nodes referenced by another node's payload (e.g. an
+            // allocation pointed at by a `DeallocationNode`, or a method
+            // entry listed in a `VTableNode`) must never be removed — doing
+            // so would leave a dangling payload reference and invalidate the
+            // graph. Recompute each iteration because removing a node may
+            // drop the last payload reference to another node.
+            let payload_referenced = scg.payload_referenced_node_ids();
             let node_ids: Vec<NodeId> = scg.node_ids().collect();
 
             for id in node_ids {
@@ -199,8 +206,17 @@ impl SCGPass for DeadCodeElimination {
                     continue;
                 }
 
+                // Don't remove a node that is referenced by another node's
+                // payload, even if its result is unused.
+                if payload_referenced.contains(&id) {
+                    continue;
+                }
+
                 if Self::has_no_dataflow_successors(scg, id) {
-                    // Count edges that will be removed with this node
+                    // Count edges that will be removed with this node.
+                    // `SCG::remove_node` drops *all* connected edges
+                    // (incoming and outgoing, of every kind), which keeps
+                    // the graph free of dangling edge endpoints.
                     let outgoing = scg.successors(id).map_or(0, |s| s.len());
                     let incoming = scg.predecessors(id).map_or(0, |p| p.len());
 
@@ -391,9 +407,24 @@ impl CommonSubexpressionElimination {
 
     /// Computes a key that uniquely identifies a computation's expression:
     /// (operation, result_type, sorted predecessor NodeIds).
+    ///
+    /// Returns `None` for any node that is not a pure data-flow computation —
+    /// specifically, nodes that have a non-`DataFlow` edge (incoming *or*
+    /// outgoing). Merging such a node would require redirecting those
+    /// ControlFlow / Derivation / Dispatch / Annotation edges to the kept
+    /// node, which is semantically incorrect for a CSE merge (the kept node
+    /// is merely an *equivalent value producer*, not a structural substitute
+    /// in the control / derivation graph). Skipping them keeps CSE sound.
     fn expression_key(scg: &SCG, id: NodeId) -> Option<(String, Option<String>, Vec<NodeId>)> {
         let node = scg.get_node(id)?;
         if node.node_type != NodeType::Computation {
+            return None;
+        }
+        // Reject nodes carrying any non-DataFlow edge.
+        let has_non_dataflow_edge = scg.edges().any(|e| {
+            (e.source == id || e.target == id) && e.kind != EdgeKind::DataFlow
+        });
+        if has_non_dataflow_edge {
             return None;
         }
         match &node.payload {
@@ -428,15 +459,17 @@ impl SCGPass for CommonSubexpressionElimination {
         // Map from expression key to the first NodeId that computes it.
         let mut seen: HashMap<(String, Option<String>, Vec<NodeId>), NodeId> = HashMap::new();
 
-        // Process in topological order so we prefer keeping earlier nodes
+        // Process in topological order so we prefer keeping earlier nodes.
+        //
+        // The SCG is *not* a DAG — loops introduce back-edges, so
+        // `topological_sort` legitimately fails on any program that contains
+        // a loop. CSE requires a topological order to safely redirect edges
+        // (we must process a computation before its users), so when the graph
+        // is cyclic we simply skip the pass: no changes, no errors. The
+        // downstream DCE pass still runs and cleans up whatever it can.
         let topo = match scg.topological_sort() {
             Ok(t) => t,
-            Err(_) => {
-                result
-                    .errors
-                    .push("cannot run CSE on cyclic graph".to_string());
-                return result;
-            }
+            Err(_) => return result,
         };
 
         // Collect nodes to remove and edges to redirect
@@ -957,9 +990,24 @@ impl PassManager {
                 break;
             }
 
-            // Optionally run verification after each pass
+            // Optionally run verification after each pass.
+            //
+            // We use [`VerificationPass::minimal`], which delegates only to
+            // [`SCG::validate`]. This checks the *structural* invariants a
+            // transform must preserve — that every edge still references an
+            // existing node, that deallocation payloads still point at live
+            // allocations, etc. It deliberately does *not* check acyclicity
+            // or duplicate edges: the SCG is not a DAG (loops create
+            // back-edges) and the front end may emit duplicate data-flow
+            // edges that the transforms neither created nor are responsible
+            // for removing. Running the full [`VerificationPass::new`] here
+            // would re-report those pre-existing conditions after every pass
+            // and swamp the real signal (e.g. 37 spurious "errors" on
+            // `sha256d.vuma` at O2). Callers that want the strict checks can
+            // append an explicit `VerificationPass::new()` at the end of the
+            // pipeline.
             if self.verify_between {
-                let verify = VerificationPass::new();
+                let verify = VerificationPass::minimal();
                 let vpr = verify.run(scg);
                 let v_had_errors = vpr.has_errors();
                 pipeline_result.record(vpr);
@@ -2232,6 +2280,211 @@ mod tests {
         let pipeline = pm.run(&mut scg);
         // Should have DCE result + verification result (2 total)
         assert_eq!(pipeline.pass_results.len(), 2);
+    }
+
+    // ── F1: O2 transforms must not error on cyclic / duplicate-edge SCGs ──
+    //
+    // Regression for the `sha256d.vuma` O2 failure: the front end emits an
+    // SCG that legitimately contains cycles (loops) and, independently, a
+    // handful of duplicate data-flow edges. The O2 pipeline (DCE + CF + CSE
+    // + DCE) with `verify_between(true)` used to re-report those pre-existing
+    // conditions after every pass — 37 spurious "errors" in total — because
+    // the between-pass verifier used the strict `VerificationPass::new()`
+    // (acyclic + duplicate-edge checks). The fix is twofold:
+    //   1. `verify_between` now uses `VerificationPass::minimal()` which only
+    //      delegates to `SCG::validate()` (structural integrity).
+    //   2. CSE silently skips cyclic graphs instead of pushing an error.
+
+    /// A cyclic SCG (two-node loop) running through the O2 pipeline must
+    /// produce **zero** errors. Before the fix this emitted "graph contains a
+    /// cycle" after every pass plus "cannot run CSE on cyclic graph".
+    #[test]
+    fn test_o2_pipeline_cyclic_graph_no_errors() {
+        let mut scg = SCG::new();
+        let n1 = scg.add_node(
+            NodeType::Computation,
+            NodePayload::Computation(ComputationNode {
+                kind: ComputationKind::Other("a".to_string()),
+                result_type: None,
+                tail_call: false,
+            }),
+            pp(),
+        );
+        let n2 = scg.add_node(
+            NodeType::Computation,
+            NodePayload::Computation(ComputationNode {
+                kind: ComputationKind::Other("b".to_string()),
+                result_type: None,
+                tail_call: false,
+            }),
+            pp(),
+        );
+        // Back-edges create a cycle (mimics a loop).
+        scg.add_edge(n1, n2, EdgeKind::DataFlow).unwrap();
+        scg.add_edge(n2, n1, EdgeKind::DataFlow).unwrap();
+
+        let mut pm = PassManager::new().verify_between(true).stop_on_error(false);
+        pm.add_pass(DeadCodeElimination)
+            .add_pass(ConstantFolding)
+            .add_pass(CommonSubexpressionElimination)
+            .add_pass(DeadCodeElimination);
+
+        let pipeline = pm.run(&mut scg);
+        let total_errors: usize = pipeline
+            .pass_results
+            .iter()
+            .map(|pr| pr.errors.len())
+            .sum();
+        assert_eq!(
+            total_errors, 0,
+            "O2 pipeline on a cyclic graph must not produce errors, got: {:?}",
+            pipeline
+        );
+    }
+
+    /// A graph with a pre-existing duplicate data-flow edge must not produce
+    /// errors from the O2 pipeline. Before the fix the between-pass verifier
+    /// re-reported the duplicate after every pass.
+    #[test]
+    fn test_o2_pipeline_duplicate_edge_no_errors() {
+        let mut scg = SCG::new();
+        // An Effect node (always live) so DCE doesn't strip the graph bare.
+        let eff = scg.add_node(
+            NodeType::Effect,
+            NodePayload::Effect(EffectNode {
+                effect_kind: "log".to_string(),
+                is_observable: true,
+            }),
+            pp(),
+        );
+        let src = scg.add_node(
+            NodeType::Computation,
+            NodePayload::Computation(ComputationNode {
+                kind: ComputationKind::Other("const.i32:1".to_string()),
+                result_type: Some("i32".to_string()),
+                tail_call: false,
+            }),
+            pp(),
+        );
+        // Two identical data-flow edges src -> eff (pre-existing duplicate,
+        // as seen in the sha256d front-end output).
+        scg.add_edge(src, eff, EdgeKind::DataFlow).unwrap();
+        scg.add_edge(src, eff, EdgeKind::DataFlow).unwrap();
+
+        let mut pm = PassManager::new().verify_between(true).stop_on_error(false);
+        pm.add_pass(DeadCodeElimination)
+            .add_pass(ConstantFolding)
+            .add_pass(CommonSubexpressionElimination)
+            .add_pass(DeadCodeElimination);
+
+        let pipeline = pm.run(&mut scg);
+        let total_errors: usize = pipeline
+            .pass_results
+            .iter()
+            .map(|pr| pr.errors.len())
+            .sum();
+        assert_eq!(
+            total_errors, 0,
+            "O2 pipeline must not flag pre-existing duplicate edges, got: {:?}",
+            pipeline
+        );
+    }
+
+    /// `SCG::payload_referenced_node_ids` must report every `NodeId` that
+    /// appears inside another node's payload (`DeallocationNode`,
+    /// `VTableNode`, `ClosureEnvNode`). DCE consults this set to avoid
+    /// deleting a node that would leave a dangling payload reference.
+    #[test]
+    fn test_payload_referenced_node_ids_helper() {
+        use crate::node::{AllocationNode, DeallocationNode, VTableNode};
+        use crate::region::RegionId;
+
+        let mut scg = SCG::new();
+        let alloc = scg.add_node(
+            NodeType::Allocation,
+            NodePayload::Allocation(AllocationNode {
+                size: 16,
+                align: 8,
+                region_id: RegionId::new(0),
+                type_name: None,
+            }),
+            pp(),
+        );
+        let dealloc = scg.add_node(
+            NodeType::Deallocation,
+            NodePayload::Deallocation(DeallocationNode {
+                allocation_node: alloc,
+                region_id: RegionId::new(0),
+            }),
+            pp(),
+        );
+        let method = scg.add_node(
+            NodeType::Computation,
+            NodePayload::Computation(ComputationNode {
+                kind: ComputationKind::Other("m".to_string()),
+                result_type: None,
+                tail_call: false,
+            }),
+            pp(),
+        );
+        let _vtable = scg.add_node(
+            NodeType::VTable,
+            NodePayload::VTable(VTableNode {
+                trait_name: "Tr".to_string(),
+                concrete_type: "Foo".to_string(),
+                method_entries: vec![method],
+            }),
+            pp(),
+        );
+
+        let refs = scg.payload_referenced_node_ids();
+        assert!(refs.contains(&alloc), "allocation referenced by dealloc");
+        assert!(refs.contains(&method), "method referenced by vtable");
+        // Sanity: the referencing nodes themselves are not in the set.
+        assert!(!refs.contains(&dealloc));
+        assert!(!refs.contains(&_vtable));
+    }
+
+    /// DCE on an alloc/dealloc pair must leave both nodes (and the
+    /// `allocation_node` payload reference) intact, and the SCG must remain
+    /// valid. This exercises the integration of `payload_referenced_node_ids`
+    /// with the always-live `Allocation`/`Deallocation` types.
+    #[test]
+    fn test_dce_preserves_alloc_dealloc_pair() {
+        use crate::node::{AllocationNode, DeallocationNode};
+        use crate::region::RegionId;
+
+        let mut scg = SCG::new();
+        let alloc = scg.add_node(
+            NodeType::Allocation,
+            NodePayload::Allocation(AllocationNode {
+                size: 16,
+                align: 8,
+                region_id: RegionId::new(0),
+                type_name: None,
+            }),
+            pp(),
+        );
+        let dealloc = scg.add_node(
+            NodeType::Deallocation,
+            NodePayload::Deallocation(DeallocationNode {
+                allocation_node: alloc,
+                region_id: RegionId::new(0),
+            }),
+            pp(),
+        );
+        scg.add_edge(alloc, dealloc, EdgeKind::Derivation).unwrap();
+
+        let res = DeadCodeElimination.run(&mut scg);
+        assert_eq!(res.nodes_removed, 0, "alloc/dealloc pair is always live");
+        assert!(scg.get_node(alloc).is_some());
+        assert!(scg.get_node(dealloc).is_some());
+        let v = scg.validate();
+        assert!(
+            v.is_valid,
+            "SCG must remain valid after DCE, errors: {:?}",
+            v.errors
+        );
     }
 
     // ── PassResult Tests ──────────────────────────────────────────────
