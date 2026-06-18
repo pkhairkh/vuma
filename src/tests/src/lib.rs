@@ -106,3 +106,6 @@ pub mod determinism;
 // Re-export the helper macros from the framework module.
 // Note: #[macro_export] macros are already at the crate root, so no
 // pub use is needed. These re-exports are kept as documentation anchors.
+
+#[cfg(test)]
+mod all_backends_test;
