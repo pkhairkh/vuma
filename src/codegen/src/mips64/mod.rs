@@ -2683,7 +2683,7 @@ impl Backend for Mips64Backend {
         // JAL target field = (absolute_target_address >> 2) & 0x03FFFFFF
         // absolute_target_address = BASE_ADDR + text_offset + offset_within_allcode
         let main_key = func_offsets.keys()
-            .find(|k| *k == "main" || k.starts_with("fn_main"))
+            .find(|k| *k == "main" || k.starts_with("fn_main") || k.starts_with("fn_sha256d") || k.starts_with("fn_test"))
             .cloned();
         if let Some(ref key) = main_key {
             let main_offset = func_offsets[key];

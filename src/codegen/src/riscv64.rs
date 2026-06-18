@@ -5271,7 +5271,7 @@ impl Backend for RiscV64Backend {
 
         // ── Patch _start JAL to main ──
         let main_key = func_offsets.keys()
-            .find(|k| *k == "main" || k.starts_with("fn_main"))
+            .find(|k| *k == "main" || k.starts_with("fn_main") || k.starts_with("fn_sha256d") || k.starts_with("fn_test"))
             .cloned();
         if let Some(ref key) = main_key {
             let main_offset = func_offsets[key];

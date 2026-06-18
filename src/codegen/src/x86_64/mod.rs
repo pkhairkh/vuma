@@ -2566,7 +2566,7 @@ impl Backend for X86_64Backend {
         // The mov rdi,[rsp] is 4 bytes, lea rsi,[rsp+8] is 5 bytes, then E8 at offset 9.
         // The rel32 is at offset 10 (after the E8 opcode byte at offset 9)
         let main_key = func_offsets.keys()
-            .find(|k| *k == "main" || k.starts_with("fn_main"))
+            .find(|k| *k == "main" || k.starts_with("fn_main") || k.starts_with("fn_sha256d") || k.starts_with("fn_test"))
             .cloned();
         if let Some(ref key) = main_key {
             let main_offset = func_offsets[key];
