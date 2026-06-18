@@ -887,31 +887,102 @@ fn resolve_branch(
 ) -> (NodeId, Option<NodeId>, Option<NodeId>) {
     let cf_edges = edge_idx.outgoing_cf(branch_id);
 
-    // Look for labeled edges
+    // Helper: is the given target a structural convergence node (Join or
+    // LoopExit) rather than an executable branch arm?
+    let is_convergence = |tgt: NodeId| -> bool {
+        if let Some(NodePayload::Control(c)) = scg.get_node(tgt).map(|n| &n.payload) {
+            c.kind == ControlKind::Join || c.kind == ControlKind::LoopExit
+        } else {
+            false
+        }
+    };
+
+    // ── then-arm ───────────────────────────────────────────────────
+    // Prefer an explicit "then" label; otherwise pick the first
+    // non-convergence edge (for 3+ edge branches where the first edge
+    // might be the Join).
     let then_target = cf_edges
         .iter()
         .find(|e| e.label.as_deref() == Some("then"))
         .map(|e| e.target)
-        .or_else(|| cf_edges.first().map(|e| e.target));
+        .or_else(|| {
+            if cf_edges.len() >= 3 {
+                cf_edges
+                    .iter()
+                    .find(|e| !is_convergence(e.target))
+                    .map(|e| e.target)
+            } else {
+                cf_edges.first().map(|e| e.target)
+            }
+        });
 
-    let else_target = cf_edges
+    // ── Join / convergence ────────────────────────────────────────
+    // The AST->SCG bridge labels the edge from a Branch to its Join
+    // (merge point) as "else_fallthrough".  This is misleading: the
+    // label does NOT point to the actual else-arm; it points to the
+    // dead merge node where the then/else arms converge.  When the
+    // then-arm returns (e.g. `if c { return x; }`), the Join is
+    // unreachable and has no outgoing ControlFlow — so the walk would
+    // dead-end there.
+    //
+    // V1 fix: recognise the "else_fallthrough"-labelled Join
+    // explicitly so that the actual else/fall-through arm can be
+    // identified separately (below).
+    let join_from_label = cf_edges
         .iter()
         .find(|e| {
-            e.label.as_deref() == Some("else") || e.label.as_deref() == Some("else_fallthrough")
+            e.label.as_deref() == Some("else_fallthrough") && is_convergence(e.target)
         })
+        .map(|e| e.target);
+
+    // ── else-arm ──────────────────────────────────────────────────
+    // Prefer an explicit "else" label; otherwise pick the unlabeled,
+    // non-convergence edge that is not the then-arm.  This is the
+    // actual fall-through target (e.g. `return result_iter;` after an
+    // `if c { return -1; }`).  Without this, the else-arm is silently
+    // dropped from the walk — manifesting as `Return(vec![])` and the
+    // program exiting 0 instead of the intended value.
+    let else_target = cf_edges
+        .iter()
+        .find(|e| e.label.as_deref() == Some("else"))
         .map(|e| e.target)
         .or_else(|| {
-            // If there are exactly 2 CF edges and one is "then", the other is "else"
+            let then = then_target?;
+            // Skip edges whose target is the then-arm, the labelled
+            // Join, or any convergence node.  The remaining unlabeled
+            // edge is the fall-through continuation.
+            cf_edges
+                .iter()
+                .find(|e| {
+                    if e.target == then {
+                        return false;
+                    }
+                    if e.label.as_deref() == Some("else_fallthrough") {
+                        return false;
+                    }
+                    if is_convergence(e.target) {
+                        return false;
+                    }
+                    true
+                })
+                .map(|e| e.target)
+        })
+        // Fallback for the original 2-edge case: if there are exactly 2
+        // CF edges and no convergence, the non-then edge is the else.
+        .or_else(|| {
             if cf_edges.len() == 2 {
                 let then = then_target?;
-                cf_edges.iter().find(|e| e.target != then).map(|e| e.target)
+                cf_edges
+                    .iter()
+                    .find(|e| e.target != then)
+                    .map(|e| e.target)
             } else {
                 None
             }
         });
 
     let then_tgt = then_target.unwrap_or(branch_id);
-    let join = find_join_for_branch(then_tgt, else_target, scg, edge_idx);
+    let join = join_from_label.or_else(|| find_join_for_branch(then_tgt, else_target, scg, edge_idx));
 
     (then_tgt, else_target, join)
 }
@@ -1290,8 +1361,22 @@ fn walk_control_flow_with_externs(
                                 let source = df_edge.source;
                                 args.push(ScgExpr::Var(format!("v_{}", source.as_u64())));
                             }
+                            // Capture the return value: the FunctionReturn node
+                            // has a DataFlow edge from the return-value Computation
+                            // node. Resolve it to a variable name and set as dst.
+                            let ret_node = find_function_return(node_id, scg, edge_idx);
+                            let call_dst = if let Some(ret) = ret_node {
+                                let ret_df = edge_idx.incoming_df(ret);
+                                if let Some(first_df) = ret_df.first() {
+                                    Some(format!("v_{}", first_df.source.as_u64()))
+                                } else { None }
+                            } else { None };
+                            let call_dst = call_dst.unwrap_or_else(|| {
+                                // No DataFlow edge — create a synthetic dst
+                                format!("v_{}_ret", node_id.as_u64())
+                            });
                             stmts.push(ScgStatement::Call(CallNode {
-                                dst: None, // return value flows via DataFlow edge
+                                dst: Some(call_dst.clone()),
                                 func: func_name.to_string(),
                                 args,
                                 is_extern,
@@ -1304,6 +1389,67 @@ fn walk_control_flow_with_externs(
                                 current = edge_idx.outgoing_cf(ret).first().map(|e| e.target);
                             } else {
                                 current = edge_idx.outgoing_cf(node_id).first().map(|e| e.target);
+                            }
+                            // V1 fix: call sites are frequently modeled by
+                            // the AST->SCG bridge as *side branches* off the
+                            // caller's main control flow.  In this pattern,
+                            // the Computation node that represents the call
+                            // statement (e.g. `result = foo(arg)`) has TWO
+                            // outgoing ControlFlow edges: one to the call-
+                            // site FunctionEntry (`call_foo`) and one to the
+                            // next statement.  The call-site's own
+                            // FunctionReturn is a leaf with NO outgoing CF
+                            // edge — the call's return value flows back to
+                            // the Computation via a DataFlow edge, not via
+                            // ControlFlow.
+                            //
+                            // Without this fallback, the walk would dead-end
+                            // at the call-site's FunctionReturn: `current`
+                            // would become `None`, the walk would stop, and
+                            // every statement after the first call
+                            // (including the function's real FunctionReturn)
+                            // would be silently dropped into `__remaining`.
+                            // The function body would then get a fallback
+                            // `Return(vec![])` — manifesting as the program
+                            // exiting 0 instead of the intended value, even
+                            // for a correct `return variable;` statement.
+                            //
+                            // When the call's FunctionReturn has no CF
+                            // successor, recover by looking at the call-
+                            // site's ControlFlow *source* (the Computation
+                            // that represents the call statement) and
+                            // picking its next CF target that is neither
+                            // the call-site itself nor already consumed.
+                            // This resumes the walk at the statement that
+                            // follows the call in the caller's body.
+                            if current.is_none() {
+                                let cf_sources: Vec<NodeId> = edge_idx
+                                    .incoming
+                                    .get(&node_id)
+                                    .map(|edges| {
+                                        edges
+                                            .iter()
+                                            .filter(|e| e.kind == EdgeKind::ControlFlow)
+                                            .map(|e| e.source)
+                                            .collect()
+                                    })
+                                    .unwrap_or_default();
+                                'find_next: for src in &cf_sources {
+                                    for tgt_edge in edge_idx.outgoing_cf(*src) {
+                                        let tgt = tgt_edge.target;
+                                        if tgt == node_id {
+                                            continue; // skip the call-site itself
+                                        }
+                                        if consumed.contains(&tgt) {
+                                            continue;
+                                        }
+                                        if stop_at.contains(&tgt) {
+                                            continue;
+                                        }
+                                        current = Some(tgt);
+                                        break 'find_next;
+                                    }
+                                }
                             }
                             continue;
                         }
@@ -3333,6 +3479,106 @@ mod tests {
         assert_eq!(config.verification_level, VerificationLevel::Normal);
         assert_eq!(config.entry_name, "main");
         assert!(!config.debug_info);
+    }
+
+    /// V1 regression test: `return variable;` after a call must propagate
+    /// the variable (not emit an empty `Return([])`).
+    ///
+    /// Before the V1 fix, `walk_control_flow` dead-ended at the first
+    /// call-site's FunctionReturn (which has no outgoing ControlFlow
+    /// edge in the AST->SCG "side-branch" call model).  Every statement
+    /// after the first call — including the function's real
+    /// FunctionReturn — was silently dropped into `__remaining`, and the
+    /// function body got a fallback `Return(vec![])`.  The program then
+    /// exited 0 regardless of the intended return value.
+    ///
+    /// After the fix, the walk continues past call sites (via the
+    /// caller's next CF successor) and past 3-edge Branches (then /
+    /// else_fallthrough-Join / continuation), so the real
+    /// FunctionReturn is reached and `Return([Var("v_<id>")])` is
+    /// emitted.
+    #[test]
+    fn test_v1_return_variable_after_call() {
+        let source = std::fs::read_to_string(
+            concat!(env!("CARGO_MANIFEST_DIR"), "/examples/fibonacci.vuma"),
+        )
+        .unwrap();
+        let config = CompileConfig {
+            opt_level: OptLevel::O0,
+            verification_level: VerificationLevel::None,
+            ..CompileConfig::default()
+        };
+        let output = compile(&source, &config).expect("compile fibonacci");
+        let externs = std::collections::HashSet::new();
+        let codegen_scg = bridge_scg_to_codegen_with_externs(&output.scg, &externs);
+
+        // Walk all functions recursively, looking for any Return that
+        // carries a Var (the propagated variable).  Before V1, every
+        // Return in `fn_main_entry` was either `Return([])` (fallback)
+        // or `Return([Int(0)])` (literal); none carried a Var.
+        fn has_var_return(stmts: &[ScgStatement]) -> bool {
+            for s in stmts {
+                match s {
+                    ScgStatement::Return(vals) => {
+                        if vals.iter().any(|v| matches!(v, ScgExpr::Var(_))) {
+                            return true;
+                        }
+                    }
+                    ScgStatement::Control(ControlNode::If {
+                        then_body,
+                        else_body,
+                        ..
+                    }) => {
+                        if has_var_return(then_body) {
+                            return true;
+                        }
+                        if let Some(eb) = else_body {
+                            if has_var_return(eb) {
+                                return true;
+                            }
+                        }
+                    }
+                    ScgStatement::Control(ControlNode::Loop { body }) => {
+                        if has_var_return(body) {
+                            return true;
+                        }
+                    }
+                    ScgStatement::Control(ControlNode::Switch {
+                        arms,
+                        default_body,
+                        ..
+                    }) => {
+                        for arm in arms {
+                            if has_var_return(&arm.body) {
+                                return true;
+                            }
+                        }
+                        if has_var_return(default_body) {
+                            return true;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            false
+        }
+
+        let mut found = false;
+        for node in &codegen_scg.nodes {
+            if let vuma_codegen::scg_to_ir::ScgNode::Function(f) = node {
+                if f.name.contains("main") {
+                    if has_var_return(&f.body) {
+                        found = true;
+                    }
+                }
+            }
+        }
+        assert!(
+            found,
+            "fn_main_entry must contain a Return([Var(..)]) after V1 fix — \
+             `return result_iter;` should propagate the variable, not emit \
+             an empty Return"
+        );
     }
 
     /// Test 12: Error display formatting.

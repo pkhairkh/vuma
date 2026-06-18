@@ -4106,10 +4106,25 @@ pub fn emit_elf(
         // ET_REL: external symbols are referenced by .rela.text entries;
         // the BL offset is NOT patched (left for the linker to resolve).
     } else {
-        // ET_EXEC: patch in-function BL relocations; unresolved (external)
-        // calls are left as-is (offset 0) and the symbol name is recorded
-        // in the symtab/strtab for downstream tooling / debuggers.
+        // ET_EXEC: patch in-function BL relocations for LOCAL functions.
+        // External (undefined) symbols keep their original BL placeholder
+        // here -- `resolve_syscall_relocs` (below) will patch any that
+        // correspond to known Linux syscalls; the rest are left as-is
+        // (offset 0 -- a trap) and the symbol name is recorded in the
+        // symtab/strtab for downstream tooling / debuggers.
         resolve_call_relocs(&mut text_section, &all_call_relocs, &function_offsets)?;
+        // ET_EXEC: for standalone executables (no system linker), resolve
+        // calls to known Linux syscalls (write, read, exit, mmap, ...) by
+        // appending synthetic syscall trampolines to the text section and
+        // patching the corresponding BL/CALL instructions to jump to them.
+        // Without this, an FFI call like `write(1, buf, len)` would BL to
+        // offset 0 (a trap) and the program would hang.
+        resolve_syscall_relocs(
+            &mut text_section,
+            &all_call_relocs,
+            &function_offsets,
+            config.backend,
+        )?;
     }
 
     // ---- Step 2b: Patch _start BL to main ----
@@ -4741,6 +4756,443 @@ fn resolve_call_relocs(
         let patched = (bl_word & !0x03FFFFFF) | ((offset_words as u32) & 0x03FFFFFF);
         text_section[bl_byte_idx..bl_byte_idx + 4].copy_from_slice(&patched.to_le_bytes());
     }
+    Ok(())
+}
+
+/// Look up the AArch64 (Linux) syscall number for a well-known extern
+/// function name.
+///
+/// Returns `Some(num)` for the set of C library functions that map directly
+/// to a single Linux AArch64 syscall with no argument reshuffling (the
+/// AArch64 C calling convention passes args in X0..X7 and the syscall
+/// convention reads them from X0..X5, so the trampoline only needs to load
+/// the syscall number into X8 and issue SVC #0).
+fn aarch64_syscall_num_for_name(name: &str) -> Option<u32> {
+    // Linux AArch64 syscall numbers (from asm-generic/unistd.h).
+    match name {
+        "io_setup" => Some(0),
+        "io_destroy" => Some(1),
+        "io_submit" => Some(2),
+        "io_cancel" => Some(3),
+        "io_getevents" => Some(4),
+        "setxattr" => Some(5),
+        "lsetxattr" => Some(6),
+        "fsetxattr" => Some(7),
+        "getxattr" => Some(8),
+        "lgetxattr" => Some(9),
+        "fgetxattr" => Some(10),
+        "listxattr" => Some(11),
+        "llistxattr" => Some(12),
+        "flistxattr" => Some(13),
+        "removexattr" => Some(14),
+        "lremovexattr" => Some(15),
+        "fremovexattr" => Some(16),
+        "getcwd" => Some(17),
+        "eventfd2" => Some(19),
+        "epoll_create1" => Some(20),
+        "epoll_ctl" => Some(21),
+        "epoll_pwait" => Some(22),
+        "dup" => Some(23),
+        "dup3" => Some(24),
+        "fcntl" => Some(25),
+        "inotify_init1" => Some(26),
+        "inotify_add_watch" => Some(27),
+        "inotify_rm_watch" => Some(28),
+        "ioctl" => Some(29),
+        "mmap" => Some(222),
+        "munmap" => Some(215),
+        "brk" => Some(214),
+        "openat" => Some(56),
+        "close" => Some(57),
+        "read" => Some(63),
+        "write" => Some(64),
+        "lseek" => Some(62),
+        "fstat" => Some(80),
+        "newfstatat" => Some(79),
+        "readv" => Some(65),
+        "writev" => Some(66),
+        "readlinkat" => Some(78),
+        "exit" => Some(93),
+        "exit_group" => Some(94),
+        "rt_sigreturn" => Some(139),
+        "rt_sigaction" => Some(134),
+        "rt_sigprocmask" => Some(135),
+        "rt_sigpending" => Some(136),
+        "rt_sigtimedwait" => Some(137),
+        "rt_sigqueueinfo" => Some(138),
+        "getpid" => Some(172),
+        "gettid" => Some(178),
+        "getuid" => Some(174),
+        "geteuid" => Some(175),
+        "getgid" => Some(176),
+        "getegid" => Some(177),
+        "getppid" => Some(173),
+        "setsid" => Some(157),
+        "setuid" => Some(146),
+        "setgid" => Some(144),
+        "nanosleep" => Some(101),
+        "clock_gettime" => Some(113),
+        "clock_nanosleep" => Some(115),
+        "uname" => Some(160),
+        "clone" => Some(220),
+        "execve" => Some(221),
+        "wait4" => Some(260),
+        "kill" => Some(129),
+        "tgkill" => Some(131),
+        "tkill" => Some(130),
+        "sched_yield" => Some(124),
+        _ => None,
+    }
+}
+
+/// Look up the x86_64 (Linux) syscall number for a well-known extern
+/// function name.
+///
+/// Returns `Some(num)` for the set of C library functions that map directly
+/// to a single Linux x86_64 syscall. The x86_64 trampoline additionally
+/// moves arg4 from RCX (C calling convention) to R10 (syscall convention)
+/// so that syscalls with 4+ arguments (e.g. mmap, openat) work correctly.
+fn x86_64_syscall_num_for_name(name: &str) -> Option<u32> {
+    // Linux x86_64 syscall numbers (from arch/x86/entry/syscalls/syscall_64.tbl).
+    match name {
+        "read" => Some(0),
+        "write" => Some(1),
+        "open" => Some(2),
+        "close" => Some(3),
+        "stat" => Some(4),
+        "fstat" => Some(5),
+        "lstat" => Some(6),
+        "poll" => Some(7),
+        "lseek" => Some(8),
+        "mmap" => Some(9),
+        "mprotect" => Some(10),
+        "munmap" => Some(11),
+        "brk" => Some(12),
+        "rt_sigaction" => Some(13),
+        "rt_sigprocmask" => Some(14),
+        "rt_sigreturn" => Some(15),
+        "ioctl" => Some(16),
+        "pread64" => Some(17),
+        "pwrite64" => Some(18),
+        "readv" => Some(19),
+        "writev" => Some(20),
+        "access" => Some(21),
+        "pipe" => Some(22),
+        "select" => Some(23),
+        "sched_yield" => Some(24),
+        "dup" => Some(32),
+        "dup2" => Some(33),
+        "pause" => Some(34),
+        "nanosleep" => Some(35),
+        "getpid" => Some(39),
+        "fork" => Some(57),
+        "vfork" => Some(58),
+        "execve" => Some(59),
+        "exit" => Some(60),
+        "wait4" => Some(61),
+        "kill" => Some(62),
+        "uname" => Some(63),
+        "fcntl" => Some(72),
+        "getuid" => Some(102),
+        "getgid" => Some(104),
+        "geteuid" => Some(107),
+        "getegid" => Some(108),
+        "setuid" => Some(105),
+        "setgid" => Some(106),
+        "getppid" => Some(110),
+        "setsid" => Some(112),
+        "gettid" => Some(186),
+        "tgkill" => Some(234),
+        "tkill" => Some(200),
+        "exit_group" => Some(231),
+        "openat" => Some(257),
+        "clock_gettime" => Some(228),
+        "clock_nanosleep" => Some(230),
+        "newfstatat" => Some(262),
+        "readlinkat" => Some(267),
+        "epoll_create1" => Some(291),
+        "epoll_ctl" => Some(233),
+        "epoll_pwait" => Some(281),
+        "eventfd2" => Some(290),
+        "inotify_init1" => Some(294),
+        "inotify_add_watch" => Some(254),
+        "inotify_rm_watch" => Some(255),
+        _ => None,
+    }
+}
+
+/// Resolve external function calls to known Linux syscalls by appending
+/// synthetic syscall trampolines to the text section and patching BL / CALL
+/// instructions to jump to them.
+///
+/// # Motivation
+///
+/// For standalone `ET_EXEC` binaries (no system linker), an external symbol
+/// like `write` cannot be resolved at runtime -- the BL instruction emitted
+/// by [`Emitter`](crate::emit::Emitter) would branch to offset 0 (a trap),
+/// causing the program to hang silently. This pass detects calls to a small
+/// set of well-known C library functions that map 1:1 to a Linux syscall
+/// and replaces the unresolved BL/CALL with a jump to a tiny synthetic
+/// trampoline that performs the syscall directly.
+///
+/// # Trampoline shape
+///
+/// Each trampoline is appended once at the end of the text section (one
+/// trampoline per syscall name, regardless of how many call sites reference
+/// it) and has the following shape:
+///
+/// ## AArch64 (12 bytes / 3 instructions)
+///
+/// ```text
+///   MOVZ X8, #<syscall_num>   ; load syscall number into X8
+///   SVC  #0                   ; invoke syscall
+///   RET                       ; return to caller
+/// ```
+///
+/// The caller's arguments in X0..X5 are passed through unchanged (which
+/// matches the Linux AArch64 syscall argument convention). The trampoline
+/// clobbers X0 (return value), X8, X16, X17 -- all of which are
+/// caller-saved by the AArch64 C calling convention.
+///
+/// Encodings:
+/// - `MOVZ X8, #imm16` = `0xD2800008 | ((imm16 & 0xFFFF) << 5)`
+/// - `SVC #0`          = `0xD4000001`
+/// - `RET`             = `0xD65F03C0`
+///
+/// ## x86_64 (11 bytes)
+///
+/// ```text
+///   MOV EAX, #<syscall_num>   ; load syscall number into EAX (zero-extends)
+///   MOV R10, RCX              ; arg4: C convention (RCX) -> syscall (R10)
+///   SYSCALL                   ; invoke syscall
+///   RET                       ; return to caller
+/// ```
+///
+/// The x86_64 C calling convention passes arg4 in RCX, but the syscall
+/// convention reads arg4 from R10 (because SYSCALL clobbers RCX with the
+/// saved RIP). The trampoline therefore copies RCX to R10 to bridge the
+/// two conventions -- this is correct for all syscalls (1..6 args) and is
+/// a no-op for syscalls with fewer than 4 arguments.
+///
+/// The trampoline clobbers RAX (return value), RCX (saved RIP), R10, R11
+/// (saved RFLAGS) -- all of which are caller-saved by the System V AMD64
+/// C calling convention.
+///
+/// Encodings:
+/// - `MOV EAX, #imm32` = `B8 <imm32 LE>` (5 bytes)
+/// - `MOV R10, RCX`    = `49 89 CA`      (3 bytes, REX.W + MOV r/m64,r64)
+/// - `SYSCALL`         = `0F 05`         (2 bytes)
+/// - `RET`             = `C3`            (1 byte)
+///
+/// # Other backends
+///
+/// For backends other than AArch64 and x86_64 (RISC-V, ARM32, MIPS, PPC64,
+/// LoongArch64) this function is a no-op -- their FFI calls are left
+/// unresolved (will trap). The caller is responsible for using a real
+/// linker or the backend's own `encode_program` for those targets.
+///
+/// # Unknown externs
+///
+/// External symbols that do not match any known syscall name are left
+/// untouched -- their BL/CALL keeps branching to offset 0 (a trap). This
+/// is the same behavior as before this pass; the program will crash rather
+/// than hang, and the symbol name is still recorded in the ELF symbol
+/// table as `SHN_UNDEF` for downstream tooling / debuggers.
+fn resolve_syscall_relocs(
+    text_section: &mut Vec<u8>,
+    relocs: &[CallRelocation],
+    function_offsets: &HashMap<String, u64>,
+    backend: BackendKind,
+) -> Result<()> {
+    // Pick the syscall-number lookup function for this backend. Backends
+    // without a lookup table (RISC-V, ARM32, MIPS, PPC64, LoongArch64, ...)
+    // bail out early -- their FFI calls remain unresolved.
+    let syscall_lookup: fn(&str) -> Option<u32> = match backend {
+        BackendKind::AArch64 => aarch64_syscall_num_for_name,
+        BackendKind::X86_64 => x86_64_syscall_num_for_name,
+        _ => {
+            log::debug!(
+                "resolve_syscall_relocs: backend {:?} has no syscall trampoline support -- skipping",
+                backend
+            );
+            return Ok(());
+        }
+    };
+
+    // -------------------------------------------------------------------
+    // Phase 1: Allocate trampolines for each unique known-syscall extern.
+    // -------------------------------------------------------------------
+    // Map from syscall name -> trampoline byte offset within text_section.
+    let mut trampoline_offsets: HashMap<String, u64> = HashMap::new();
+
+    for reloc in relocs {
+        // Skip calls to locally-defined functions (already patched by
+        // resolve_call_relocs).
+        if function_offsets.contains_key(&reloc.target_func) {
+            continue;
+        }
+        // Skip externs that aren't known syscalls.
+        if syscall_lookup(&reloc.target_func).is_none() {
+            continue;
+        }
+        // Skip if we've already allocated a trampoline for this name.
+        if trampoline_offsets.contains_key(&reloc.target_func) {
+            continue;
+        }
+
+        // Allocate the trampoline at the current end of text_section.
+        let tramp_offset = text_section.len() as u64;
+        trampoline_offsets.insert(reloc.target_func.clone(), tramp_offset);
+
+        let syscall_num = syscall_lookup(&reloc.target_func).unwrap();
+        match backend {
+            BackendKind::AArch64 => {
+                // MOVZ X8, #<syscall_num>  -> 0xD2800008 | ((num & 0xFFFF) << 5)
+                // (valid for syscall numbers <= 0xFFFF; all known Linux
+                // AArch64 syscalls are well below this limit.)
+                let movz: u32 =
+                    0xD2800008u32 | (((syscall_num & 0xFFFF) << 5) as u32);
+                // SVC #0  -> 0xD4000001
+                let svc: u32 = 0xD4000001;
+                // RET     -> 0xD65F03C0
+                let ret: u32 = 0xD65F03C0;
+                text_section.extend_from_slice(&movz.to_le_bytes());
+                text_section.extend_from_slice(&svc.to_le_bytes());
+                text_section.extend_from_slice(&ret.to_le_bytes());
+            }
+            BackendKind::X86_64 => {
+                // MOV EAX, #<syscall_num>  -> B8 <imm32 LE>  (5 bytes)
+                text_section.push(0xB8);
+                text_section.extend_from_slice(&syscall_num.to_le_bytes());
+                // MOV R10, RCX             -> 49 89 CA       (3 bytes)
+                text_section.push(0x49);
+                text_section.push(0x89);
+                text_section.push(0xCA);
+                // SYSCALL                  -> 0F 05          (2 bytes)
+                text_section.push(0x0F);
+                text_section.push(0x05);
+                // RET                      -> C3             (1 byte)
+                text_section.push(0xC3);
+            }
+            _ => unreachable!(
+                "syscall_lookup already returned None for unsupported backends"
+            ),
+        }
+
+        log::debug!(
+            "resolve_syscall_relocs: appended {} trampoline for extern '{}' at text byte 0x{:X} (syscall #{})",
+            match backend {
+                BackendKind::AArch64 => "AArch64",
+                BackendKind::X86_64 => "x86_64",
+                _ => "?",
+            },
+            reloc.target_func,
+            tramp_offset,
+            syscall_num,
+        );
+    }
+
+    // No trampolines needed -> nothing to patch.
+    if trampoline_offsets.is_empty() {
+        return Ok(());
+    }
+
+    // -------------------------------------------------------------------
+    // Phase 2: Patch each unresolved BL/CALL to jump to its trampoline.
+    // -------------------------------------------------------------------
+    for reloc in relocs {
+        // Skip calls to locally-defined functions.
+        if function_offsets.contains_key(&reloc.target_func) {
+            continue;
+        }
+        // Skip externs without a trampoline (unknown syscall name).
+        let tramp_offset = match trampoline_offsets.get(&reloc.target_func) {
+            Some(&off) => off,
+            None => continue,
+        };
+
+        let bl_byte_idx = reloc.text_byte_offset as usize;
+        match backend {
+            BackendKind::AArch64 => {
+                // BL is exactly 4 bytes. The original instruction was
+                // emitted by Emitter::emit_function as `BL #0` (encoding
+                // 0x94000000) -- we preserve the opcode bits and replace
+                // only the 26-bit immediate.
+                if bl_byte_idx + 4 > text_section.len() {
+                    return Err(CodegenError::ElfError(format!(
+                        "syscall call relocation at byte {} is out of bounds (text section is {} bytes)",
+                        bl_byte_idx,
+                        text_section.len()
+                    )));
+                }
+                let bl_word = u32::from_le_bytes([
+                    text_section[bl_byte_idx],
+                    text_section[bl_byte_idx + 1],
+                    text_section[bl_byte_idx + 2],
+                    text_section[bl_byte_idx + 3],
+                ]);
+                // BL imm26 is a signed PC-relative offset in 4-byte words.
+                let offset_bytes =
+                    (tramp_offset as i64) - (reloc.text_byte_offset as i64);
+                let offset_words = (offset_bytes >> 2) as i32;
+                // Sanity-check the offset fits in 26 signed bits (±128 MiB).
+                if !(-(1 << 25)..(1 << 25)).contains(&offset_words) {
+                    return Err(CodegenError::ElfError(format!(
+                        "syscall trampoline for '{}' is out of BL range (offset {} words; max +/-{})",
+                        reloc.target_func,
+                        offset_words,
+                        (1 << 25) - 1
+                    )));
+                }
+                let patched = (bl_word & !0x03FFFFFFu32)
+                    | ((offset_words as u32) & 0x03FFFFFFu32);
+                text_section[bl_byte_idx..bl_byte_idx + 4]
+                    .copy_from_slice(&patched.to_le_bytes());
+            }
+            BackendKind::X86_64 => {
+                // CALL rel32 is exactly 5 bytes (E8 <rel32 LE>). The
+                // original instruction was emitted by the x86_64 backend
+                // as `E8 00 00 00 00` (CALL to offset 0). We verify the
+                // opcode byte and patch only the 32-bit displacement.
+                if bl_byte_idx + 5 > text_section.len() {
+                    return Err(CodegenError::ElfError(format!(
+                        "syscall call relocation at byte {} is out of bounds (text section is {} bytes)",
+                        bl_byte_idx,
+                        text_section.len()
+                    )));
+                }
+                if text_section[bl_byte_idx] != 0xE8 {
+                    // Not a CALL rel32 -- leave as-is to avoid corrupting
+                    // an unrelated instruction. This is a defensive check;
+                    // in practice the x86_64 backend always emits E8 for
+                    // extern calls.
+                    log::warn!(
+                        "syscall call relocation at byte {} is not a CALL (E8) instruction (got 0x{:02X}); leaving as-is",
+                        bl_byte_idx,
+                        text_section[bl_byte_idx]
+                    );
+                    continue;
+                }
+                // rel32 = target - (call_addr + 5). The +5 accounts for
+                // the CALL instruction's own length (RIP-relative addressing).
+                let rel32 = ((tramp_offset as i64)
+                    - (reloc.text_byte_offset as i64 + 5)) as i32;
+                text_section[bl_byte_idx + 1..bl_byte_idx + 5]
+                    .copy_from_slice(&rel32.to_le_bytes());
+            }
+            _ => unreachable!(
+                "syscall_lookup already returned None for unsupported backends"
+            ),
+        }
+
+        log::trace!(
+            "resolve_syscall_relocs: patched call to '{}' at text byte 0x{:X} -> trampoline at 0x{:X}",
+            reloc.target_func,
+            reloc.text_byte_offset,
+            tramp_offset,
+        );
+    }
+
     Ok(())
 }
 
