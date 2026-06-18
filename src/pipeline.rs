@@ -720,13 +720,103 @@ fn node_var(id: NodeId, _prefix: &str) -> String {
 /// If the source node is a Control node (FunctionEntry, etc.) that does not
 /// produce a named variable, falls back to `ScgExpr::Int(0)` to avoid
 /// referencing a non-existent variable in the codegen IR.
+
+/// Resolve ALL inputs (DataFlow + Derivation fallback) for a node,
+/// returning (source_node_id, resolved_expr) pairs.
+fn resolve_all_inputs(
+    node_id: NodeId,
+    edge_idx: &EdgeIndex,
+    scg: &SCG,
+) -> Vec<(NodeId, ScgExpr)> {
+    let df_inputs = edge_idx.incoming_df(node_id);
+    let inputs: Vec<vuma_scg::EdgeData> = if df_inputs.is_empty() {
+        edge_idx.incoming
+            .get(&node_id)
+            .map(|edges| edges.iter().filter(|e| e.kind == EdgeKind::Derivation).cloned().collect())
+            .unwrap_or_default()
+    } else {
+        df_inputs.iter().map(|e| (*e).clone()).collect()
+    };
+    inputs.iter().map(|e| {
+        let expr = resolve_df_input(node_id, 0, edge_idx, scg); // placeholder
+        (e.source, resolve_df_input_for_source(e.source, edge_idx, scg))
+    }).collect()
+}
+
+/// Check if a node has a Derivation edge to an Allocation node.
+fn has_derivation_to_allocation(
+    node_id: NodeId,
+    edge_idx: &EdgeIndex,
+    scg: &SCG,
+) -> bool {
+    if let Some(edges) = edge_idx.outgoing.get(&node_id) {
+        for e in edges {
+            if e.kind == EdgeKind::Derivation {
+                if let Some(target) = scg.get_node(e.target) {
+                    if matches!(target.payload, NodePayload::Allocation(_)) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Resolve a specific source node to an ScgExpr (extracted from resolve_df_input).
+fn resolve_df_input_for_source(
+    source: NodeId,
+    edge_idx: &EdgeIndex,
+    scg: &SCG,
+) -> ScgExpr {
+    if let Some(src_data) = scg.get_node(source) {
+        match &src_data.payload {
+            NodePayload::Control(_) | NodePayload::Phantom(_)
+            | NodePayload::Deallocation(_) | NodePayload::Effect(_)
+            | NodePayload::VTable(_) | NodePayload::ClosureEnv(_) => ScgExpr::Int(0),
+            NodePayload::Computation(comp) => {
+                if let ComputationKind::Other(ref label) = comp.kind {
+                    if let Some(num_str) = label.strip_prefix("lit_") {
+                        if let Ok(num) = num_str.parse::<i64>() { return ScgExpr::Int(num); }
+                    }
+                    if let Ok(num) = label.parse::<i64>() { return ScgExpr::Int(num); }
+                }
+                // Follow Derivation to Allocation
+                for deriv_edge in edge_idx.outgoing.get(&source).map(|v| v.as_slice()).unwrap_or(&[]) {
+                    if deriv_edge.kind == EdgeKind::Derivation {
+                        if let Some(alloc_node) = scg.get_node(deriv_edge.target) {
+                            if matches!(alloc_node.payload, NodePayload::Allocation(_)) {
+                                return ScgExpr::Var(format!("v_{}", deriv_edge.target.as_u64()));
+                            }
+                        }
+                    }
+                }
+                ScgExpr::Var(format!("v_{}", source.as_u64()))
+            }
+            _ => ScgExpr::Var(format!("v_{}", source.as_u64())),
+        }
+    } else {
+        ScgExpr::Int(0)
+    }
+}
+
 fn resolve_df_input(
     node_id: NodeId,
     position: usize,
     edge_idx: &EdgeIndex,
     scg: &SCG,
 ) -> ScgExpr {
+    // Try DataFlow edges first
     let df_inputs = edge_idx.incoming_df(node_id);
+    // If no DataFlow edges, fall back to Derivation edges
+    let df_inputs: Vec<vuma_scg::EdgeData> = if df_inputs.is_empty() {
+        edge_idx.incoming
+            .get(&node_id)
+            .map(|edges| edges.iter().filter(|e| e.kind == EdgeKind::Derivation).cloned().collect())
+            .unwrap_or_default()
+    } else {
+        df_inputs.iter().map(|e| (*e).clone()).collect()
+    };
     if position < df_inputs.len() {
         let source = df_inputs[position].source;
         // Check if the source node is a productive node that defines a variable.
@@ -760,6 +850,19 @@ fn resolve_df_input(
                         // like `fn main() { 42 }` where the label is just "42")
                         if let Ok(num) = label.parse::<i64>() {
                             return ScgExpr::Int(num);
+                        }
+                    }
+                    // Check if this Computation has a Derivation edge to an
+                    // Allocation node. If so, the allocation pointer is in
+                    // the Allocation's variable (v_<alloc_id>), not in this
+                    // Computation's variable (v_<comp_id>).
+                    for deriv_edge in edge_idx.outgoing.get(&source).map(|v| v.as_slice()).unwrap_or(&[]) {
+                        if deriv_edge.kind == EdgeKind::Derivation {
+                            if let Some(alloc_node) = scg.get_node(deriv_edge.target) {
+                                if matches!(alloc_node.payload, NodePayload::Allocation(_)) {
+                                    return ScgExpr::Var(format!("v_{}", deriv_edge.target.as_u64()));
+                                }
+                            }
                         }
                     }
                     // Otherwise, it's a regular computation — reference by vreg
@@ -1482,6 +1585,28 @@ fn walk_control_flow_with_externs(
 
             // ── Non-control nodes: convert to statements ───────────
             _ => {
+                // First, check for Allocation nodes reachable via Derivation
+                // edges from this node. These represent heap allocations that
+                // must be emitted as statements before the current node.
+                // Without this, allocations end up in __remaining and the
+                // allocation pointer is lost (causing null pointer crashes).
+                for deriv_edge in edge_idx.outgoing.get(&node_id).map(|v| v.as_slice()).unwrap_or(&[]) {
+                    if deriv_edge.kind == EdgeKind::Derivation {
+                        if let Some(alloc_node) = scg.get_node(deriv_edge.target) {
+                            if matches!(alloc_node.payload, NodePayload::Allocation(_)) {
+                                if !consumed.contains(&deriv_edge.target) {
+                                    consumed.insert(deriv_edge.target);
+                                    if let Some(alloc_stmt) = convert_node_to_statement_with_externs(
+                                        deriv_edge.target, alloc_node, edge_idx, scg, extern_functions
+                                    ) {
+                                        stmts.push(alloc_stmt);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 if let Some(stmt) = convert_node_to_statement_with_externs(node_id, node_data, edge_idx, scg, extern_functions) {
                     stmts.push(stmt);
                 }
@@ -1543,10 +1668,26 @@ fn convert_node_to_statement_with_externs(
                 offset: access.offset.map(|o| ScgExpr::Int(o as i64)),
             })),
             AccessMode::Write | AccessMode::ReadWrite => {
+                // For Store, we need to identify which input is the pointer
+                // and which is the value. The pointer source has a Derivation
+                // edge to an Allocation node; the value source does not.
+                let inputs = resolve_all_inputs(node_id, edge_idx, scg);
+                let (ptr, value) = if inputs.len() >= 2 {
+                    // Check which input has a Derivation to an Allocation
+                    let ptr_idx = inputs.iter().position(|(src, _)| {
+                        has_derivation_to_allocation(*src, edge_idx, scg)
+                    }).unwrap_or(0);
+                    let val_idx = if ptr_idx == 0 { 1 } else { 0 };
+                    (inputs[ptr_idx].1.clone(), inputs[val_idx].1.clone())
+                } else if inputs.len() == 1 {
+                    (inputs[0].1.clone(), ScgExpr::Int(0))
+                } else {
+                    (ScgExpr::Int(0), ScgExpr::Int(0))
+                };
                 Some(ScgStatement::Access(AccessNode::Store {
-                    ptr: resolve_df_input(node_id, 0, edge_idx, scg),
+                    ptr,
                     offset: access.offset.map(|o| ScgExpr::Int(o as i64)),
-                    value: resolve_df_input(node_id, 1, edge_idx, scg),
+                    value,
                 }))
             }
         },

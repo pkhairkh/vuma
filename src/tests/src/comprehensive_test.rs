@@ -108,7 +108,7 @@ fn test_comprehensive_all_programs_all_backends() {
             }
             
             let binary = compile_per_backend(&source, *kind).unwrap();
-            let (code, stdout, crashed) = execute_binary(&binary, *qemu, 2);
+            let (code, stdout, crashed) = execute_binary(&binary, *qemu, 1);
             
             if crashed {
                 exec_crash += 1;
@@ -147,7 +147,7 @@ fn test_comprehensive_all_programs_all_backends() {
         match compile(&source, &config) {
             Err(_) => { eprintln!("❌ COMPILE  {} failed", label); continue; }
             Ok(output) => {
-                let (code, stdout, crashed) = execute_binary(&output.binary, Some(qemu_aarch64), 5);
+                let (code, stdout, crashed) = execute_binary(&output.binary, Some(qemu_aarch64), 2);
                 if crashed { pipe_crash += 1; eprintln!("💥 CRASH    {} signal 11", label); }
                 else if code == 124 { pipe_timeout += 1; 
                     if !stdout.is_empty() { pipe_stdout += 1; eprintln!("⏰ TIMEOUT  {} stdout={}B: {:?}", label, stdout.len(), &String::from_utf8_lossy(&stdout)[..stdout.len().min(50)]); }
