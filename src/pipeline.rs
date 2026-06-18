@@ -750,10 +750,16 @@ fn resolve_df_input(
                     // Check if this is a literal computation node (label "lit_<n>")
                     // created by the AST→SCG bridge for literal return values.
                     if let ComputationKind::Other(ref label) = comp.kind {
+                        // Check for lit_<n> format (explicit return literals)
                         if let Some(num_str) = label.strip_prefix("lit_") {
                             if let Ok(num) = num_str.parse::<i64>() {
                                 return ScgExpr::Int(num);
                             }
+                        }
+                        // Check for bare number format (tail expression literals
+                        // like `fn main() { 42 }` where the label is just "42")
+                        if let Ok(num) = label.parse::<i64>() {
+                            return ScgExpr::Int(num);
                         }
                     }
                     // Otherwise, it's a regular computation — reference by vreg

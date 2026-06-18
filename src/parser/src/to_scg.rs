@@ -423,6 +423,46 @@ impl AstToScg {
             })
             .unwrap_or(false);
 
+        // Handle tail expressions: if the last body statement is a
+        // Computation node (from Stmt::Expr), convert it to an implicit
+        // return by creating a FunctionReturn node with a DataFlow edge
+        // from the Computation node. This handles `fn main() -> u64 { 42 }`
+        // where `42` is a tail expression, not an explicit `return 42;`.
+        let last_is_tail_expr = !last_is_return && prev_node
+            .and_then(|n| scg.get_node(n))
+            .map(|d| matches!(&d.payload, NodePayload::Computation(_)))
+            .unwrap_or(false);
+        if last_is_tail_expr {
+            if let Some(tail_node) = prev_node {
+                // Create a FunctionReturn node and link the tail expression
+                // via DataFlow so the bridge can resolve the return value.
+                let ret_id = scg.add_node(
+                    NodeType::Control,
+                    NodePayload::Control(ControlNode {
+                        kind: ControlKind::FunctionReturn,
+                        label: Some("return".to_string()),
+                    }),
+                    self.span_to_pp(&f.span),
+                );
+                fn_region.add_node(ret_id);
+                let _ = scg.add_edge(tail_node, ret_id, EdgeKind::DataFlow);
+                if let Some(prev) = prev_node {
+                    let _ = scg.add_edge(prev, ret_id, EdgeKind::ControlFlow);
+                }
+                prev_node = Some(ret_id);
+            }
+        }
+
+        let last_is_return = prev_node
+            .and_then(|n| scg.get_node(n))
+            .map(|d| {
+                matches!(
+                    &d.payload,
+                    NodePayload::Control(c) if c.kind == ControlKind::FunctionReturn
+                )
+            })
+            .unwrap_or(false);
+
         let ret_id = if last_is_return {
             // Reuse the statement-level FunctionReturn as the function exit.
             prev_node.expect("last_is_return is only true when prev_node is Some")
