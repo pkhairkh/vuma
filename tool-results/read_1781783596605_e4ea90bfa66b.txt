@@ -1,0 +1,2002 @@
+     1→//! # VUMA Compilation Pipeline
+     2→//!
+     3→//! The full compilation pipeline that wires together every workspace crate:
+     4→//!
+     5→//! ```text
+     6→//! Source → Parse → AST → SCG → BD Inference → MSG Construction
+     7→//!        → IVE Verification → SCG Transforms → IR Lowering
+     8→//!        → Register Allocation → ARM64 Codegen → ELF Emission
+     9→//! ```
+    10→//!
+    11→//! ## Quick Start
+    12→//!
+    13→//! ```rust
+    14→//! use vuma::pipeline::{compile, CompileConfig, CompileTarget, OptLevel, VerificationLevel};
+    15→//!
+    16→//! let source = r#"
+    17→//!     region buf = allocate(256);
+    18→//!     fn main() {
+    19→//!         ptr = buf + 64;
+    20→//!         header = ptr as *NodeHeader;
+    21→//!     }
+    22→//! "#;
+    23→//!
+    24→//! let config = CompileConfig::default();
+    25→//! let output = compile(source, &config);
+    26→//! match output {
+    27→//!     Ok(out) => println!("Compiled {} bytes, {} SCG nodes", out.binary.len(), out.scg.node_count()),
+    28→//!     Err(errors) => {
+    29→//!         for err in &errors {
+    30→//!             eprintln!("{}", err);
+    31→//!         }
+    32→//!     }
+    33→//! }
+    34→//! ```
+    35→
+    36→use std::collections::{HashMap, HashSet, VecDeque};
+    37→use std::fmt;
+    38→use std::path::Path;
+    39→use std::time::Instant;
+    40→
+    41→// ── Workspace crate imports ──────────────────────────────────────────────
+    42→
+    43→use vuma_bd::{repd::RepD, BD};
+    44→use vuma_codegen::{
+    45→    emit::{emit_binary, EmitConfig},
+    46→    ir::{BinOpKind as IrBinOpKind, IRProgram},
+    47→    regalloc::{AllocationResult, LinearScanAllocator},
+    48→    scg_to_ir::{
+    49→        AccessNode, AllocationNode, CallNode, CastNode, ComputationNode, ControlNode, GetAddressNode, IRBuilder,
+    50→        Scg, ScgExpr, ScgFunction, ScgNode, ScgParam, ScgStatement, ScgType, SwitchArm,
+    51→    },
+    52→    CastKind as CodegenCastKind, CodegenError,
+    53→};
+    54→use vuma_cor::{CORuntime, Config as CorConfig};
+    55→use vuma_core::{
+    56→    scg_to_msg::{scg_to_msg, ConversionError},
+    57→    MSG,
+    58→};
+    59→use vuma_ive::{
+    60→    AggregatedResult, InferenceEngine, InvariantAggregator, OverallVerdict,
+    61→    VerificationLevel as IveVerificationLevel,
+    62→};
+    63→use vuma_parser::{AstToScg, Item, ModuleResolver, ParseError, Parser, Program as AstProgram, ResolveError};
+    64→use vuma_scg::{
+    65→    AccessMode, CommonSubexpressionElimination, ConstantFolding, ControlKind, DeadCodeElimination,
+    66→    EdgeData, EdgeKind, InliningPass, NodeData, NodeId, NodePayload, NodeType, PassManager,
+    67→    PipelineResult as ScgPipelineResult, SCG, ComputationKind,
+    68→};
+    69→
+    70→// ═══════════════════════════════════════════════════════════════════════════
+    71→// CompileConfig
+    72→// ═══════════════════════════════════════════════════════════════════════════
+    73→
+    74→/// The compilation target platform.
+    75→#[derive(
+    76→    Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, Default,
+    77→)]
+    78→pub enum CompileTarget {
+    79→    /// Generic Linux user-space on AArch64.
+    80→    #[default]
+    81→    Linux,
+    82→    /// WebAssembly 32-bit (WASI preview 1).
+    83→    /// Produces a `.wasm` binary executable with `wasmer`, `wasmtime`, or Node.js.
+    84→    Wasm32,
+    85→}
+    86→
+    87→impl fmt::Display for CompileTarget {
+    88→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    89→        match self {
+    90→            CompileTarget::Linux => write!(f, "linux"),
+    91→            CompileTarget::Wasm32 => write!(f, "wasm32"),
+    92→        }
+    93→    }
+    94→}
+    95→
+    96→/// Optimization level.
+    97→#[derive(
+    98→    Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, Default,
+    99→)]
+   100→pub enum OptLevel {
+   101→    /// No optimisation — fastest compilation, best debuggability.
+   102→    O0,
+   103→    /// Basic optimisations (DCE, constant folding).
+   104→    O1,
+   105→    /// Full optimisations (DCE, CSE, constant folding, inlining).
+   106→    #[default]
+   107→    O2,
+   108→    /// Aggressive optimisations (O2 + inlining of larger functions).
+   109→    O3,
+   110→}
+   111→
+   112→impl fmt::Display for OptLevel {
+   113→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+   114→        match self {
+   115→            OptLevel::O0 => write!(f, "O0"),
+   116→            OptLevel::O1 => write!(f, "O1"),
+   117→            OptLevel::O2 => write!(f, "O2"),
+   118→            OptLevel::O3 => write!(f, "O3"),
+   119→        }
+   120→    }
+   121→}
+   122→
+   123→/// Verification thoroughness level.
+   124→#[derive(
+   125→    Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, Default,
+   126→)]
+   127→pub enum VerificationLevel {
+   128→    /// Skip verification entirely.
+   129→    None,
+   130→    /// Quick: only cheap syntactic checks.
+   131→    Quick,
+   132→    /// Normal: all five invariant checks.
+   133→    #[default]
+   134→    Normal,
+   135→    /// Exhaustive: all checks + formal proof attempts.
+   136→    Exhaustive,
+   137→}
+   138→
+   139→impl fmt::Display for VerificationLevel {
+   140→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+   141→        match self {
+   142→            VerificationLevel::None => write!(f, "none"),
+   143→            VerificationLevel::Quick => write!(f, "quick"),
+   144→            VerificationLevel::Normal => write!(f, "normal"),
+   145→            VerificationLevel::Exhaustive => write!(f, "exhaustive"),
+   146→        }
+   147→    }
+   148→}
+   149→
+   150→/// Full compilation configuration.
+   151→#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+   152→pub struct CompileConfig {
+   153→    /// Target platform.
+   154→    pub target: CompileTarget,
+   155→    /// Optimisation level.
+   156→    pub opt_level: OptLevel,
+   157→    /// Verification thoroughness.
+   158→    pub verification_level: VerificationLevel,
+   159→    /// Entry-point function name (default: "main" for hosted, "_start" for bare).
+   160→    pub entry_name: String,
+   161→    /// Include debug info in the output.
+   162→    pub debug_info: bool,
+   163→    /// Stop compilation at the first error.
+   164→    pub stop_on_first_error: bool,
+   165→    /// Maximum inline size (number of SCG nodes) for the inlining pass.
+   166→    pub max_inline_size: usize,
+   167→    /// Enable memory safety checks (use-after-free, double-free, leaks, etc.).
+   168→    pub memory_safety: bool,
+   169→    /// Enable runtime bounds checks for array accesses (--safe flag).
+   170→    pub runtime_bounds_checks: bool,
+   171→    /// Force section headers in the ELF output (--sections flag).
+   172→    pub section_headers: bool,
+   173→}
+   174→
+   175→impl CompileConfig {
+   176→    /// Fast-compilation debug configuration.
+   177→    ///
+   178→    /// Note: verification still runs at `Normal` level (all five invariants)
+   179→    /// because skipping invariants would silently allow unsafe programs
+   180→    /// through, defeating VUMA's core safety guarantee.  The "fast" aspect
+   181→    /// of this preset comes from `OptLevel::O0`, not from reduced verification.
+   182→    pub fn debug() -> Self {
+   183→        Self {
+   184→            opt_level: OptLevel::O0,
+   185→            debug_info: true,
+   186→            verification_level: VerificationLevel::Normal,
+   187→            ..Self::default()
+   188→        }
+   189→    }
+   190→
+   191→    /// Release configuration with full optimisation and exhaustive verification.
+   192→    pub fn release() -> Self {
+   193→        Self {
+   194→            opt_level: OptLevel::O3,
+   195→            verification_level: VerificationLevel::Exhaustive,
+   196→            ..Self::default()
+   197→        }
+   198→    }
+   199→
+   200→    /// Returns the emit config for this compile config.
+   201→    fn emit_config(&self) -> EmitConfig {
+   202→        match self.target {
+   203→            CompileTarget::Linux => {
+   204→                let mut cfg = EmitConfig::linux_elf();
+   205→                cfg.section_headers = cfg.section_headers || self.section_headers;
+   206→                cfg.debug_info = self.debug_info;
+   207→                cfg
+   208→            }
+   209→            CompileTarget::Wasm32 => EmitConfig::wasm_binary(),
+   210→        }
+   211→    }
+   212→}
+   213→
+   214→impl Default for CompileConfig {
+   215→    fn default() -> Self {
+   216→        Self {
+   217→            target: CompileTarget::Linux,
+   218→            opt_level: OptLevel::O2,
+   219→            verification_level: VerificationLevel::Normal,
+   220→            entry_name: "main".to_string(),
+   221→            debug_info: false,
+   222→            stop_on_first_error: true,
+   223→            max_inline_size: 50,
+   224→            memory_safety: true,
+   225→            runtime_bounds_checks: false,
+   226→            section_headers: false,
+   227→        }
+   228→    }
+   229→}
+   230→
+   231→// ═══════════════════════════════════════════════════════════════════════════
+   232→// VumaError
+   233→// ═══════════════════════════════════════════════════════════════════════════
+   234→
+   235→/// A unified error type for the VUMA compilation pipeline.
+   236→///
+   237→/// Each variant captures the pipeline stage where the error occurred
+   238→/// and the underlying cause.
+   239→#[derive(Debug, Clone)]
+   240→pub enum VumaError {
+   241→    /// Error during lexing or parsing.
+   242→    Parse {
+   243→        /// The parse errors.
+   244→        errors: Vec<ParseError>,
+   245→    },
+   246→    /// Error converting AST to SCG.
+   247→    AstToScg {
+   248→        /// Error message.
+   249→        message: String,
+   250→    },
+   251→    /// SCG validation failed.
+   252→    ScgValidation {
+   253→        /// Validation error messages.
+   254→        errors: Vec<String>,
+   255→    },
+   256→    /// SCG → MSG conversion error.
+   257→    ScgToMsg {
+   258→        /// The conversion error.
+   259→        error: ConversionError,
+   260→    },
+   261→    /// BD inference error.
+   262→    BdInference {
+   263→        /// Node ID where inference failed, if known.
+   264→        node_id: Option<u64>,
+   265→        /// Error message.
+   266→        message: String,
+   267→    },
+   268→    /// IVE verification failure (one or more invariants violated).
+   269→    Verification {
+   270→        /// The aggregated verification result.
+   271→        result: AggregatedResult,
+   272→    },
+   273→    /// SCG transformation pass error.
+   274→    Transform {
+   275→        /// Name of the pass that failed.
+   276→        pass_name: String,
+   277→        /// Error messages from the pass.
+   278→        errors: Vec<String>,
+   279→    },
+   280→    /// IR lowering / codegen error.
+   281→    Codegen {
+   282→        /// The codegen error.
+   283→        error: CodegenError,
+   284→    },
+   285→    /// Register allocation failure.
+   286→    RegisterAlloc {
+   287→        /// Error message.
+   288→        message: String,
+   289→    },
+   290→    /// ELF emission failure.
+   291→    Emission {
+   292→        /// Error message.
+   293→        message: String,
+   294→    },
+   295→    /// COR initialization failure.
+   296→    CorInit {
+   297→        /// Error message.
+   298→        message: String,
+   299→    },
+   300→    /// Module resolution error (import not found, circular import, etc.).
+   301→    ModuleResolution {
+   302→        /// The resolution errors.
+   303→        errors: Vec<ResolveError>,
+   304→    },
+   305→    /// A collection of errors accumulated across stages.
+   306→    Multi {
+   307→        /// The collected errors.
+   308→        errors: Vec<VumaError>,
+   309→    },
+   310→    /// Backend failed; fallback to next available backend was attempted.
+   311→    BackendFallback {
+   312→        /// Name of the backend that failed.
+   313→        failed_backend: String,
+   314→        /// Name of the fallback backend that was tried (if any).
+   315→        fallback_backend: Option<String>,
+   316→        /// Error message from the failed backend.
+   317→        error: String,
+   318→    },
+   319→    /// Internal panic caught during compilation (crash recovery).
+   320→    PanicCaught {
+   321→        /// The pipeline stage where the panic occurred.
+   322→        stage: String,
+   323→        /// The panic message.
+   324→        message: String,
+   325→    },
+   326→}
+   327→
+   328→impl VumaError {
+   329→    /// Returns the pipeline stage that produced this error.
+   330→    pub fn stage(&self) -> &'static str {
+   331→        match self {
+   332→            VumaError::Parse { .. } => "parse",
+   333→            VumaError::AstToScg { .. } => "ast-to-scg",
+   334→            VumaError::ScgValidation { .. } => "scg-validation",
+   335→            VumaError::ScgToMsg { .. } => "scg-to-msg",
+   336→            VumaError::BdInference { .. } => "bd-inference",
+   337→            VumaError::Verification { .. } => "ive-verification",
+   338→            VumaError::Transform { .. } => "scg-transform",
+   339→            VumaError::Codegen { .. } => "codegen",
+   340→            VumaError::RegisterAlloc { .. } => "register-alloc",
+   341→            VumaError::Emission { .. } => "elf-emission",
+   342→            VumaError::CorInit { .. } => "cor-init",
+   343→            VumaError::ModuleResolution { .. } => "module-resolution",
+   344→            VumaError::Multi { .. } => "multi",
+   345→            VumaError::BackendFallback { .. } => "backend-fallback",
+   346→            VumaError::PanicCaught { .. } => "panic-caught",
+   347→        }
+   348→    }
+   349→}
+   350→
+   351→impl fmt::Display for VumaError {
+   352→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+   353→        match self {
+   354→            VumaError::Parse { errors } => {
+   355→                write!(f, "[parse] {} error(s):", errors.len())?;
+   356→                for e in errors {
+   357→                    write!(f, "\n  - {}", e)?;
+   358→                }
+   359→                Ok(())
+   360→            }
+   361→            VumaError::AstToScg { message } => write!(f, "[ast-to-scg] {}", message),
+   362→            VumaError::ScgValidation { errors } => {
+   363→                write!(f, "[scg-validation] {} error(s):", errors.len())?;
+   364→                for e in errors {
+   365→                    write!(f, "\n  - {}", e)?;
+   366→                }
+   367→                Ok(())
+   368→            }
+   369→            VumaError::ScgToMsg { error } => write!(f, "[scg-to-msg] {}", error),
+   370→            VumaError::BdInference { node_id, message } => {
+   371→                write!(f, "[bd-inference] {}", message)?;
+   372→                if let Some(id) = node_id {
+   373→                    write!(f, " (node {})", id)?;
+   374→                }
+   375→                Ok(())
+   376→            }
+   377→            VumaError::Verification { result } => {
+   378→                write!(f, "[ive-verification] verdict: {}", result.overall)
+   379→            }
+   380→            VumaError::Transform { pass_name, errors } => {
+   381→                write!(f, "[scg-transform:{}] {} error(s)", pass_name, errors.len())
+   382→            }
+   383→            VumaError::Codegen { error } => write!(f, "[codegen] {}", error),
+   384→            VumaError::RegisterAlloc { message } => write!(f, "[register-alloc] {}", message),
+   385→            VumaError::Emission { message } => write!(f, "[elf-emission] {}", message),
+   386→            VumaError::CorInit { message } => write!(f, "[cor-init] {}", message),
+   387→            VumaError::ModuleResolution { errors } => {
+   388→                write!(f, "[module-resolution] {} error(s):", errors.len())?;
+   389→                for e in errors {
+   390→                    write!(f, "\n  - {}", e)?;
+   391→                }
+   392→                Ok(())
+   393→            }
+   394→            VumaError::Multi { errors } => {
+   395→                write!(f, "multiple errors ({}):", errors.len())?;
+   396→                for (i, e) in errors.iter().enumerate() {
+   397→                    write!(f, "\n{}. {}", i + 1, e)?;
+   398→                }
+   399→                Ok(())
+   400→            }
+   401→            VumaError::BackendFallback { failed_backend, fallback_backend, error } => {
+   402→                write!(f, "[backend-fallback] {} failed: {}", failed_backend, error)?;
+   403→                if let Some(fb) = fallback_backend {
+   404→                    write!(f, ", attempting fallback to {}", fb)?;
+   405→                }
+   406→                Ok(())
+   407→            }
+   408→            VumaError::PanicCaught { stage, message } => {
+   409→                write!(f, "[panic-caught] panic in stage '{}': {}", stage, message)
+   410→            }
+   411→        }
+   412→    }
+   413→}
+   414→
+   415→impl std::error::Error for VumaError {}
+   416→
+   417→// ═══════════════════════════════════════════════════════════════════════════
+   418→// CompilationOutput
+   419→// ═══════════════════════════════════════════════════════════════════════════
+   420→
+   421→/// The output of a successful compilation.
+   422→#[derive(Debug)]
+   423→pub struct CompilationOutput {
+   424→    /// The emitted binary (ELF or raw, depending on target).
+   425→    pub binary: Vec<u8>,
+   426→    /// The final SCG after all transformation passes.
+   427→    pub scg: SCG,
+   428→    /// The Memory State Graph built from the SCG.
+   429→    pub msg: MSG,
+   430→    /// IVE verification results (if verification was requested).
+   431→    pub verification: Option<AggregatedResult>,
+   432→    /// Per-stage timing information (stage name → milliseconds).
+   433→    pub stage_timings: Vec<(String, u64)>,
+   434→    /// Number of IR functions generated.
+   435→    pub ir_function_count: usize,
+   436→    /// Total number of IR instructions across all functions.
+   437→    pub ir_instruction_count: usize,
+   438→    /// Number of ARM64 machine-code words emitted.
+   439→    pub code_words: usize,
+   440→    /// Debug information (if requested).
+   441→    pub debug_info: Option<DebugInfo>,
+   442→    /// The Continuous Optimization Runtime, initialized from the compiled SCG.
+   443→    /// Present when COR initialization succeeds (after the CorInit stage).
+   444→    pub cor_runtime: Option<CORuntime>,
+   445→}
+   446→
+   447→/// Partial compilation output, returned when compilation fails but some
+   448→/// intermediate results are available (crash recovery).
+   449→///
+   450→/// Contains all data that was successfully produced before the error,
+   451→/// along with any diagnostics collected.
+   452→#[derive(Debug)]
+   453→pub struct PartialCompilationOutput {
+   454→    /// The parsed AST, if parsing succeeded.
+   455→    pub ast: Option<AstProgram>,
+   456→    /// The SCG, if SCG construction succeeded.
+   457→    pub scg: Option<SCG>,
+   458→    /// The MSG, if MSG construction succeeded.
+   459→    pub msg: Option<MSG>,
+   460→    /// IVE verification results, if verification ran.
+   461→    pub verification: Option<AggregatedResult>,
+   462→    /// Per-stage timing information.
+   463→    pub stage_timings: Vec<(String, u64)>,
+   464→    /// IR function count, if IR lowering succeeded.
+   465→    pub ir_function_count: Option<usize>,
+   466→    /// IR instruction count, if IR lowering succeeded.
+   467→    pub ir_instruction_count: Option<usize>,
+   468→    /// The last pipeline stage that completed successfully.
+   469→    pub last_completed_stage: Option<PipelineStage>,
+   470→    /// Diagnostics (errors + warnings) collected during compilation.
+   471→    pub diagnostics: Vec<VumaError>,
+   472→}
+   473→
+   474→/// Result of a compilation attempt with crash recovery.
+   475→///
+   476→/// On success, contains the full [`CompilationOutput`].
+   477→/// On failure, contains a [`PartialCompilationOutput`] with whatever
+   478→/// intermediate results were produced, plus all diagnostics.
+   479→#[derive(Debug)]
+   480→pub enum CompileResult {
+   481→    /// Compilation succeeded.
+   482→    Success(CompilationOutput),
+   483→    /// Compilation failed, but partial results are available.
+   484→    Partial(PartialCompilationOutput),
+   485→}
+   486→
+   487→impl CompileResult {
+   488→    /// Returns true if compilation succeeded.
+   489→    pub fn is_success(&self) -> bool {
+   490→        matches!(self, CompileResult::Success(_))
+   491→    }
+   492→
+   493→    /// Returns the diagnostics (empty on success).
+   494→    pub fn diagnostics(&self) -> &[VumaError] {
+   495→        match self {
+   496→            CompileResult::Success(_) => &[],
+   497→            CompileResult::Partial(p) => &p.diagnostics,
+   498→        }
+   499→    }
+   500→}
+   501→
+   502→/// Debug information captured during compilation.
+   503→#[derive(Debug, Clone)]
+   504→pub struct DebugInfo {
+   505→    /// The parsed AST.
+   506→    pub ast: Option<AstProgram>,
+   507→    /// The IR program before register allocation.
+   508→    pub ir_pre_regalloc: Option<IRProgram>,
+   509→    /// Register allocation results per function.
+   510→    pub regalloc_results: Vec<AllocationResult>,
+   511→    /// SCG transformation pipeline results.
+   512→    pub transform_results: Option<ScgPipelineResult>,
+   513→}
+   514→
+   515→// ═══════════════════════════════════════════════════════════════════════════
+   516→// Incremental compilation support
+   517→// ═══════════════════════════════════════════════════════════════════════════
+   518→
+   519→/// A fingerprint of a source file, used to detect changes for
+   520→/// incremental compilation.
+   521→#[derive(Debug, Clone, PartialEq, Eq)]
+   522→pub struct SourceFingerprint {
+   523→    /// A hash of the source text.
+   524→    pub hash: u64,
+   525→    /// Byte length of the source.
+   526→    pub len: usize,
+   527→}
+   528→
+   529→impl SourceFingerprint {
+   530→    /// Compute a fingerprint from source text.
+   531→    pub fn from_source(source: &str) -> Self {
+   532→        // Simple FNV-1a hash — sufficient for change detection.
+   533→        let mut hash: u64 = 0xcbf29ce484222325;
+   534→        for byte in source.bytes() {
+   535→            hash ^= byte as u64;
+   536→            hash = hash.wrapping_mul(0x100000001b3);
+   537→        }
+   538→        Self {
+   539→            hash,
+   540→            len: source.len(),
+   541→        }
+   542→    }
+   543→}
+   544→
+   545→/// Cached compilation state from a previous run, used for incremental
+   546→/// re-compilation.
+   547→#[derive(Debug, Clone)]
+   548→pub struct IncrementalCache {
+   549→    /// The fingerprint of the source that produced this cache.
+   550→    pub source_fingerprint: SourceFingerprint,
+   551→    /// The parsed AST (reusable if source unchanged).
+   552→    pub ast: Option<AstProgram>,
+   553→    /// The SCG before optimisation passes.
+   554→    pub pre_opt_scg: Option<SCG>,
+   555→    /// The SCG after optimisation passes.
+   556→    pub post_opt_scg: Option<SCG>,
+   557→    /// The MSG from the previous run.
+   558→    pub msg: Option<MSG>,
+   559→    /// IVE verification cache.
+   560→    pub verification_cache: Option<AggregatedResult>,
+   561→    /// Which pipeline stages need to be re-run.
+   562→    pub invalidated_stages: Vec<PipelineStage>,
+   563→}
+   564→
+   565→/// Identifies a pipeline stage for incremental invalidation.
+   566→#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+   567→pub enum PipelineStage {
+   568→    /// Lexing + parsing.
+   569→    Parse,
+   570→    /// AST → SCG conversion.
+   571→    AstToScg,
+   572→    /// SCG validation.
+   573→    ScgValidation,
+   574→    /// BD inference.
+   575→    BdInference,
+   576→    /// SCG → MSG construction.
+   577→    MsgConstruction,
+   578→    /// IVE verification.
+   579→    IveVerification,
+   580→    /// SCG transformation passes.
+   581→    ScgTransforms,
+   582→    /// IR lowering (SCG → IR).
+   583→    IrLowering,
+   584→    /// Register allocation.
+   585→    RegisterAlloc,
+   586→    /// ARM64 code emission.
+   587→    CodeEmission,
+   588→    /// COR (Continuous Optimization Runtime) initialization.
+   589→    CorInit,
+   590→}
+   591→
+   592→impl PipelineStage {
+   593→    /// All stages in order.
+   594→    pub fn all() -> &'static [PipelineStage; 11] {
+   595→        &[
+   596→            PipelineStage::Parse,
+   597→            PipelineStage::AstToScg,
+   598→            PipelineStage::ScgValidation,
+   599→            PipelineStage::BdInference,
+   600→            PipelineStage::MsgConstruction,
+   601→            PipelineStage::IveVerification,
+   602→            PipelineStage::ScgTransforms,
+   603→            PipelineStage::IrLowering,
+   604→            PipelineStage::RegisterAlloc,
+   605→            PipelineStage::CodeEmission,
+   606→            PipelineStage::CorInit,
+   607→        ]
+   608→    }
+   609→
+   610→    /// Returns all stages from (and including) the given stage onwards.
+   611→    pub fn from(stage: PipelineStage) -> Vec<PipelineStage> {
+   612→        PipelineStage::all()
+   613→            .iter()
+   614→            .filter(|&&s| s >= stage)
+   615→            .copied()
+   616→            .collect()
+   617→    }
+   618→}
+   619→
+   620→impl fmt::Display for PipelineStage {
+   621→    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+   622→        match self {
+   623→            PipelineStage::Parse => write!(f, "parse"),
+   624→            PipelineStage::AstToScg => write!(f, "ast-to-scg"),
+   625→            PipelineStage::ScgValidation => write!(f, "scg-validation"),
+   626→            PipelineStage::BdInference => write!(f, "bd-inference"),
+   627→            PipelineStage::MsgConstruction => write!(f, "msg-construction"),
+   628→            PipelineStage::IveVerification => write!(f, "ive-verification"),
+   629→            PipelineStage::ScgTransforms => write!(f, "scg-transforms"),
+   630→            PipelineStage::IrLowering => write!(f, "ir-lowering"),
+   631→            PipelineStage::RegisterAlloc => write!(f, "register-alloc"),
+   632→            PipelineStage::CodeEmission => write!(f, "code-emission"),
+   633→            PipelineStage::CorInit => write!(f, "cor-init"),
+   634→        }
+   635→    }
+   636→}
+   637→
+   638→// ═══════════════════════════════════════════════════════════════════════════
+   639→// SCG → Codegen SCG bridge
+   640→// ═══════════════════════════════════════════════════════════════════════════
+   641→
+   642→// ── Edge Index ─────────────────────────────────────────────────────────
+   643→
+   644→/// Pre-computed edge index for efficient graph traversal during bridge
+   645→/// conversion. Built once from all edges in the SCG and then queried
+   646→/// by node ID and edge kind.
+   647→struct EdgeIndex {
+   648→    /// Outgoing edges keyed by source node.
+   649→    outgoing: HashMap<NodeId, Vec<EdgeData>>,
+   650→    /// Incoming edges keyed by target node.
+   651→    incoming: HashMap<NodeId, Vec<EdgeData>>,
+   652→}
+   653→
+   654→impl EdgeIndex {
+   655→    /// Build the edge index from all edges in the SCG.
+   656→    fn build(scg: &SCG) -> Self {
+   657→        let mut outgoing: HashMap<NodeId, Vec<EdgeData>> = HashMap::new();
+   658→        let mut incoming: HashMap<NodeId, Vec<EdgeData>> = HashMap::new();
+   659→        for edge in scg.edges() {
+   660→            outgoing.entry(edge.source).or_default().push(edge.clone());
+   661→            incoming.entry(edge.target).or_default().push(edge.clone());
+   662→        }
+   663→        Self { outgoing, incoming }
+   664→    }
+   665→
+   666→    /// Get outgoing ControlFlow edges from a node.
+   667→    fn outgoing_cf(&self, id: NodeId) -> Vec<&EdgeData> {
+   668→        self.outgoing
+   669→            .get(&id)
+   670→            .map(|edges| {
+   671→                edges
+   672→                    .iter()
+   673→                    .filter(|e| e.kind == EdgeKind::ControlFlow)
+   674→                    .collect()
+   675→            })
+   676→            .unwrap_or_default()
+   677→    }
+   678→
+   679→    /// Get incoming DataFlow edges to a node.
+   680→    fn incoming_df(&self, id: NodeId) -> Vec<&EdgeData> {
+   681→        self.incoming
+   682→            .get(&id)
+   683→            .map(|edges| {
+   684→                edges
+   685→                    .iter()
+   686→                    .filter(|e| e.kind == EdgeKind::DataFlow)
+   687→                    .collect()
+   688→            })
+   689→            .unwrap_or_default()
+   690→    }
+   691→
+   692→    /// Get outgoing DataFlow edges from a node.
+   693→    fn outgoing_df(&self, id: NodeId) -> Vec<&EdgeData> {
+   694→        self.outgoing
+   695→            .get(&id)
+   696→            .map(|edges| {
+   697→                edges
+   698→                    .iter()
+   699→                    .filter(|e| e.kind == EdgeKind::DataFlow)
+   700→                    .collect()
+   701→            })
+   702→            .unwrap_or_default()
+   703→    }
+   704→}
+   705→
+   706→// ── Variable naming helpers ────────────────────────────────────────────
+   707→
+   708→/// Generate a variable name for a node with a given prefix.
+   709→fn node_var(id: NodeId, _prefix: &str) -> String {
+   710→    // Must match the naming convention in resolve_df_input so that
+   711→    // source references (v_{source_id}) resolve correctly in the
+   712→    // codegen IR builder's names map.
+   713→    format!("v_{}", id.as_u64())
+   714→}
+   715→
+   716→/// Resolve a DataFlow input for a node, returning a `ScgExpr` referencing
+   717→/// the variable produced by the source node of the DataFlow edge at the
+   718→/// given position.
+   719→///
+   720→/// If the source node is a Control node (FunctionEntry, etc.) that does not
+   721→/// produce a named variable, falls back to `ScgExpr::Int(0)` to avoid
+   722→/// referencing a non-existent variable in the codegen IR.
+   723→fn resolve_df_input(
+   724→    node_id: NodeId,
+   725→    position: usize,
+   726→    edge_idx: &EdgeIndex,
+   727→    scg: &SCG,
+   728→) -> ScgExpr {
+   729→    let df_inputs = edge_idx.incoming_df(node_id);
+   730→    if position < df_inputs.len() {
+   731→        let source = df_inputs[position].source;
+   732→        // Check if the source node is a productive node that defines a variable.
+   733→        // Control nodes (FunctionEntry, Branch, etc.) and Phantom nodes do not
+   734→        // produce named variables — skip them to avoid UnknownVariable errors.
+   735→        if let Some(src_data) = scg.get_node(source) {
+   736→            match &src_data.payload {
+   737→                // These node types do NOT produce named variables in the
+   738→                // codegen SCG.  Control/Phantom are structural; Deallocation
+   739→                // and Effect are lowered to runtime calls (no dst vreg).
+   740→                NodePayload::Control(_)
+   741→                | NodePayload::Phantom(_)
+   742→                | NodePayload::Deallocation(_)
+   743→                | NodePayload::Effect(_)
+   744→                | NodePayload::VTable(_)
+   745→                | NodePayload::ClosureEnv(_) => {
+   746→                    // Non-productive source — use 0 as placeholder
+   747→                    ScgExpr::Int(0)
+   748→                }
+   749→                NodePayload::Computation(comp) => {
+   750→                    // Check if this is a literal computation node (label "lit_<n>")
+   751→                    // created by the AST→SCG bridge for literal return values.
+   752→                    if let ComputationKind::Other(ref label) = comp.kind {
+   753→                        // Check for lit_<n> format (explicit return literals)
+   754→                        if let Some(num_str) = label.strip_prefix("lit_") {
+   755→                            if let Ok(num) = num_str.parse::<i64>() {
+   756→                                return ScgExpr::Int(num);
+   757→                            }
+   758→                        }
+   759→                        // Check for bare number format (tail expression literals
+   760→                        // like `fn main() { 42 }` where the label is just "42")
+   761→                        if let Ok(num) = label.parse::<i64>() {
+   762→                            return ScgExpr::Int(num);
+   763→                        }
+   764→                    }
+   765→                    // Otherwise, it's a regular computation — reference by vreg
+   766→                    ScgExpr::Var(format!("v_{}", source.as_u64()))
+   767→                }
+   768→                _ => ScgExpr::Var(format!("v_{}", source.as_u64())),
+   769→            }
+   770→        } else {
+   771→            ScgExpr::Int(0)
+   772→        }
+   773→    } else {
+   774→        // No DataFlow edge at this position — use 0 as placeholder
+   775→        ScgExpr::Int(0)
+   776→    }
+   777→}
+   778→
+   779→/// Resolve the condition expression for a Branch node by looking at its
+   780→/// incoming DataFlow edges.
+   781→fn resolve_branch_cond(branch_id: NodeId, edge_idx: &EdgeIndex, scg: &SCG) -> ScgExpr {
+   782→    resolve_df_input(branch_id, 0, edge_idx, scg)
+   783→}
+   784→
+   785→// ── Control flow resolution helpers ────────────────────────────────────
+   786→
+   787→/// Find the `FunctionReturn` node reachable from a `FunctionEntry` via
+   788→/// ControlFlow edges, using BFS.
+   789→fn find_function_return(entry_id: NodeId, scg: &SCG, edge_idx: &EdgeIndex) -> Option<NodeId> {
+   790→    let mut visited = HashSet::new();
+   791→    let mut queue = VecDeque::new();
+   792→    queue.push_back(entry_id);
+   793→    visited.insert(entry_id);
+   794→
+   795→    while let Some(current) = queue.pop_front() {
+   796→        for edge in edge_idx.outgoing_cf(current) {
+   797→            let target = edge.target;
+   798→            if visited.contains(&target) {
+   799→                continue;
+   800→            }
+   801→            visited.insert(target);
+   802→            if let Some(node) = scg.get_node(target) {
+   803→                if let NodePayload::Control(c) = &node.payload {
+   804→                    if c.kind == ControlKind::FunctionReturn {
+   805→                        return Some(target);
+   806→                    }
+   807→                }
+   808→            }
+   809→            queue.push_back(target);
+   810→        }
+   811→    }
+   812→
+   813→    None
+   814→}
+   815→
+   816→/// Find all `Join` nodes reachable from `start` via ControlFlow edges,
+   817→/// stopping at the first Join encountered on each path (Joins are
+   818→/// convergence points, not passed through during search).
+   819→fn find_reachable_joins(start: NodeId, scg: &SCG, edge_idx: &EdgeIndex) -> Vec<NodeId> {
+   820→    let mut joins = Vec::new();
+   821→    let mut visited = HashSet::new();
+   822→    let mut queue = VecDeque::new();
+   823→    queue.push_back(start);
+   824→    visited.insert(start);
+   825→
+   826→    let max_steps = 500;
+   827→    let mut steps = 0;
+   828→
+   829→    while let Some(current) = queue.pop_front() {
+   830→        steps += 1;
+   831→        if steps > max_steps {
+   832→            break;
+   833→        }
+   834→
+   835→        if let Some(node) = scg.get_node(current) {
+   836→            if let NodePayload::Control(c) = &node.payload {
+   837→                if c.kind == ControlKind::Join {
+   838→                    joins.push(current);
+   839→                    continue; // Don't walk past Join
+   840→                }
+   841→            }
+   842→        }
+   843→
+   844→        for edge in edge_idx.outgoing_cf(current) {
+   845→            let target = edge.target;
+   846→            if !visited.contains(&target) {
+   847→                visited.insert(target);
+   848→                queue.push_back(target);
+   849→            }
+   850→        }
+   851→    }
+   852→
+   853→    joins
+   854→}
+   855→
+   856→/// Find the `Join` node where a Branch's then and else arms converge.
+   857→fn find_join_for_branch(
+   858→    then_start: NodeId,
+   859→    else_start: Option<NodeId>,
+   860→    scg: &SCG,
+   861→    edge_idx: &EdgeIndex,
+   862→) -> Option<NodeId> {
+   863→    let then_joins = find_reachable_joins(then_start, scg, edge_idx);
+   864→
+   865→    if let Some(else_start) = else_start {
+   866→        let else_joins = find_reachable_joins(else_start, scg, edge_idx);
+   867→        // Find the first Join reachable from both arms
+   868→        for jid in &then_joins {
+   869→            if else_joins.contains(jid) {
+   870→                return Some(*jid);
+   871→            }
+   872→        }
+   873→    }
+   874→
+   875→    // Fallback: first Join reachable from then_start
+   876→    then_joins.into_iter().next()
+   877→}
+   878→
+   879→/// Resolve a Branch node's then/else targets and Join convergence point.
+   880→///
+   881→/// Looks for labeled ControlFlow edges ("then", "else", "else_fallthrough")
+   882→/// and falls back to positional ordering if labels are missing.
+   883→fn resolve_branch(
+   884→    branch_id: NodeId,
+   885→    scg: &SCG,
+   886→    edge_idx: &EdgeIndex,
+   887→) -> (NodeId, Option<NodeId>, Option<NodeId>) {
+   888→    let cf_edges = edge_idx.outgoing_cf(branch_id);
+   889→
+   890→    // Look for labeled edges
+   891→    let then_target = cf_edges
+   892→        .iter()
+   893→        .find(|e| e.label.as_deref() == Some("then"))
+   894→        .map(|e| e.target)
+   895→        .or_else(|| cf_edges.first().map(|e| e.target));
+   896→
+   897→    let else_target = cf_edges
+   898→        .iter()
+   899→        .find(|e| {
+   900→            e.label.as_deref() == Some("else") || e.label.as_deref() == Some("else_fallthrough")
+   901→        })
+   902→        .map(|e| e.target)
+   903→        .or_else(|| {
+   904→            // If there are exactly 2 CF edges and one is "then", the other is "else"
+   905→            if cf_edges.len() == 2 {
+   906→                let then = then_target?;
+   907→                cf_edges.iter().find(|e| e.target != then).map(|e| e.target)
+   908→            } else {
+   909→                None
+   910→            }
+   911→        });
+   912→
+   913→    let then_tgt = then_target.unwrap_or(branch_id);
+   914→    let join = find_join_for_branch(then_tgt, else_target, scg, edge_idx);
+   915→
+   916→    (then_tgt, else_target, join)
+   917→}
+   918→
+   919→/// Resolve a LoopHeader node's body and exit targets.
+   920→///
+   921→/// Classifies outgoing ControlFlow edges: edges targeting a `LoopExit`
+   922→/// node are the exit; all other edges are the loop body.
+   923→fn resolve_loop(header_id: NodeId, scg: &SCG, edge_idx: &EdgeIndex) -> (NodeId, Option<NodeId>) {
+   924→    let cf_edges = edge_idx.outgoing_cf(header_id);
+   925→
+   926→    let mut body_target = None;
+   927→    let mut exit_target = None;
+   928→
+   929→    for edge in &cf_edges {
+   930→        if let Some(target_node) = scg.get_node(edge.target) {
+   931→            if let NodePayload::Control(c) = &target_node.payload {
+   932→                if c.kind == ControlKind::LoopExit {
+   933→                    exit_target = Some(edge.target);
+   934→                    continue;
+   935→                }
+   936→            }
+   937→        }
+   938→        if body_target.is_none() {
+   939→            body_target = Some(edge.target);
+   940→        }
+   941→    }
+   942→
+   943→    // Fallbacks
+   944→    if body_target.is_none() {
+   945→        body_target = cf_edges.first().map(|e| e.target);
+   946→    }
+   947→    if exit_target.is_none() && cf_edges.len() > 1 {
+   948→        exit_target = cf_edges.get(1).map(|e| e.target);
+   949→    }
+   950→
+   951→    (body_target.unwrap_or(header_id), exit_target)
+   952→}
+   953→
+   954→// ── Match/switch case-value extraction ──────────────────────────────────
+   955→
+   956→/// Extract the integer case value for a match/switch arm from the branch
+   957→/// condition and surrounding SCG context.
+   958→///
+   959→/// A match arm `42 => body` produces a branch whose condition is typically
+   960→/// the result of an equality comparison `disc == 42`. This function traces
+   961→/// back through the DataFlow edges to find the constant operand, which is
+   962→/// the case value from the AST's MatchArm pattern.
+   963→///
+   964→/// Extraction strategy (in priority order):
+   965→///
+   966→/// 1. If `cond` is already an `ScgExpr::Int(n)`, return `n`.
+   967→/// 2. Trace the first DataFlow edge of the Branch back to its source node.
+   968→///    If the source is a Computation node with an equality operation
+   969→///    (`eq` / `==`), inspect its second DataFlow input — the RHS of the
+   970→///    comparison is the case value. If that RHS source node is a
+   971→///    Computation whose `operation` string parses as an integer, use it.
+   972→/// 3. Try to parse an integer from the control node's label string.
+   973→///    Recognised formats: `"match disc == 42"`, `"case 2: 42"`.
+   974→/// 4. Fall back to `arm_index` — each arm in a match expression receives
+   975→///    a distinct fallback value so that unknown case values don't collide.
+   976→fn extract_case_value(
+   977→    branch_id: NodeId,
+   978→    cond: &ScgExpr,
+   979→    ctrl_label: Option<&str>,
+   980→    scg: &SCG,
+   981→    edge_idx: &EdgeIndex,
+   982→    arm_index: usize,
+   983→) -> i64 {
+   984→    // Strategy 1: direct integer condition.
+   985→    if let ScgExpr::Int(n) = cond {
+   986→        return *n;
+   987→    }
+   988→
+   989→    // Strategy 2: trace back through the equality comparison node.
+   990→    let df_inputs = edge_idx.incoming_df(branch_id);
+   991→    if let Some(df_edge) = df_inputs.first() {
+   992→        let cond_source = df_edge.source;
+   993→        if let Some(source_node) = scg.get_node(cond_source) {
+   994→            if let NodePayload::Computation(comp) = &source_node.payload {
+   995→                let op_label = comp.kind.label();
+   996→                let is_eq = op_label == "eq" || op_label == "==";
+   997→                if is_eq {
+   998→                    // The RHS of the equality is the case value.
+   999→                    let rhs_inputs = edge_idx.incoming_df(cond_source);
+  1000→                    if rhs_inputs.len() >= 2 {
+  1001→                        let rhs_source = rhs_inputs[1].source;
+  1002→                        if let Some(rhs_node) = scg.get_node(rhs_source) {
+  1003→                            // The RHS node might be a Computation whose
+  1004→                            // operation string is a literal integer.
+  1005→                            if let NodePayload::Computation(rhs_comp) = &rhs_node.payload {
+  1006→                                if let Ok(val) = rhs_comp.kind.label().parse::<i64>() {
+  1007→                                    return val;
+  1008→                                }
+  1009→                            }
+  1010→                        }
+  1011→                    }
+  1012→                }
+  1013→            }
+  1014→        }
+  1015→    }
+  1016→
+  1017→    // Strategy 3: parse from the control node label.
+  1018→    if let Some(label) = ctrl_label {
+  1019→        // Format: "match <disc> == <value>"
+  1020→        if let Some(idx) = label.find("==") {
+  1021→            let after_eq = label[idx + 2..].trim();
+  1022→            // Take the first token (stop at whitespace / punctuation)
+  1023→            let token = after_eq
+  1024→                .split(|c: char| c.is_whitespace() || c == ')')
+  1025→                .next()
+  1026→                .unwrap_or(after_eq);
+  1027→            if let Ok(val) = token.parse::<i64>() {
+  1028→                return val;
+  1029→            }
+  1030→        }
+  1031→        // Format: "case <idx>: <value>"
+  1032→        if label.starts_with("case ") {
+  1033→            let parts: Vec<&str> = label.splitn(2, ':').collect();
+  1034→            if parts.len() == 2 {
+  1035→                let value_str = parts[1].trim();
+  1036→                let token = value_str
+  1037→                    .split(|c: char| c.is_whitespace() || c == ')')
+  1038→                    .next()
+  1039→                    .unwrap_or(value_str);
+  1040→                if let Ok(val) = token.parse::<i64>() {
+  1041→                    return val;
+  1042→                }
+  1043→            }
+  1044→        }
+  1045→    }
+  1046→
+  1047→    // Strategy 4: fallback to arm_index so each arm gets a distinct value.
+  1048→    arm_index as i64
+  1049→}
+  1050→
+  1051→// ── Control flow walk ──────────────────────────────────────────────────
+  1052→
+  1053→/// Walk control flow starting from `start`, producing `ScgStatement`s.
+  1054→///
+  1055→/// Stops when reaching a node in `stop_at` (does NOT consume that node;
+  1056→/// the caller is responsible for handling it). Adds processed nodes to
+  1057→/// `consumed`.
+  1058→///
+  1059→/// # Control Flow Reconstruction
+  1060→///
+  1061→/// - **Branch → If**: Follows "then"/"else" labeled CF edges, walks each
+  1062→///   arm until reaching a Join, produces `ControlNode::If`.
+  1063→/// - **LoopHeader → Loop**: Follows body/exit CF edges, walks the body
+  1064→///   until back-edge or LoopExit, produces `ControlNode::Loop`.
+  1065→/// - **Jump("break")**: Produces `ControlNode::Break`.
+  1066→/// - **Jump("continue")**: Produces `ControlNode::Continue`.
+  1067→/// - **FunctionReturn**: Produces `ScgStatement::Return`.
+  1068→fn walk_control_flow(
+  1069→    start: NodeId,
+  1070→    scg: &SCG,
+  1071→    edge_idx: &EdgeIndex,
+  1072→    consumed: &mut HashSet<NodeId>,
+  1073→    stop_at: &HashSet<NodeId>,
+  1074→) -> Vec<ScgStatement> {
+  1075→    walk_control_flow_with_externs(start, scg, edge_idx, consumed, stop_at, &HashSet::new())
+  1076→}
+  1077→
+  1078→/// Walk control flow starting from `start`, producing `ScgStatement`s,
+  1079→/// with knowledge of extern functions for marking foreign calls.
+  1080→fn walk_control_flow_with_externs(
+  1081→    start: NodeId,
+  1082→    scg: &SCG,
+  1083→    edge_idx: &EdgeIndex,
+  1084→    consumed: &mut HashSet<NodeId>,
+  1085→    stop_at: &HashSet<NodeId>,
+  1086→    extern_functions: &HashSet<String>,
+  1087→) -> Vec<ScgStatement> {
+  1088→    let mut stmts = Vec::new();
+  1089→    let mut current = Some(start);
+  1090→
+  1091→    while let Some(node_id) = current {
+  1092→        // Stop if we've reached a merge point
+  1093→        if stop_at.contains(&node_id) {
+  1094→            break;
+  1095→        }
+  1096→        // Skip already-consumed nodes
+  1097→        if consumed.contains(&node_id) {
+  1098→            break;
+  1099→        }
+  1100→        consumed.insert(node_id);
+  1101→
+  1102→        let node_data = match scg.get_node(node_id) {
+  1103→            Some(n) => n,
+  1104→            None => break,
+  1105→        };
+  1106→
+  1107→        match &node_data.payload {
+  1108→            // ── Control nodes ──────────────────────────────────────
+  1109→            NodePayload::Control(ctrl) => match ctrl.kind {
+  1110→                ControlKind::Branch => {
+  1111→                    let (then_tgt, else_tgt, join_node) = resolve_branch(node_id, scg, edge_idx);
+  1112→                    let cond = resolve_branch_cond(node_id, edge_idx, scg);
+  1113→
+  1114→                    // Check if this is a match/switch branch (label starts
+  1115→                    // with "match") vs a simple if/else. For match branches,
+  1116→                    // we look for multiple Branch→Join diamonds that share
+  1117→                    // the same Join and collapse them into a Switch node.
+  1118→                    let is_match = ctrl
+  1119→                        .label
+  1120→                        .as_ref()
+  1121→                        .map(|l| l.starts_with("match"))
+  1122→                        .unwrap_or(false);
+  1123→
+  1124→                    if is_match {
+  1125→                        // For match/switch, collect all arms that lead to
+  1126→                        // the same Join node. Each arm is a then/else pair
+  1127→                        // where the then branch is the matched case.
+  1128→                        // We walk the then arm to find the case value and body.
+  1129→                        let mut arms = Vec::new();
+  1130→                        let mut default_body = Vec::new();
+  1131→
+  1132→                        // Build stop-at for both arms (includes Join)
+  1133→                        let mut arm_stop = stop_at.clone();
+  1134→                        if let Some(join) = join_node {
+  1135→                            arm_stop.insert(join);
+  1136→                        }
+  1137→
+  1138→                        // Generate a simple switch from the then arm
+  1139→                        // with a discriminant expression.
+  1140→                        let then_body_stmts =
+  1141→                            walk_control_flow_with_externs(then_tgt, scg, edge_idx, consumed, &arm_stop, extern_functions);
+  1142→
+  1143→                        // Extract the case value from the AST's MatchArm pattern.
+  1144→                        // The branch condition for a match arm is typically
+  1145→                        // `disc == value`. We trace back through the DataFlow
+  1146→                        // edges to find the constant being compared against.
+  1147→                        let case_value = extract_case_value(
+  1148→                            node_id,
+  1149→                            &cond,
+  1150→                            ctrl.label.as_deref(),
+  1151→                            scg,
+  1152→                            edge_idx,
+  1153→                            arms.len(),
+  1154→                        );
+  1155→                        arms.push(SwitchArm {
+  1156→                            value: case_value,
+  1157→                            body: then_body_stmts,
+  1158→                        });
+  1159→
+  1160→                        if let Some(tgt) = else_tgt {
+  1161→                            let else_stmts =
+  1162→                                walk_control_flow_with_externs(tgt, scg, edge_idx, consumed, &arm_stop, extern_functions);
+  1163→                            default_body = else_stmts;
+  1164→                        }
+  1165→
+  1166→                        // Use the first operand of the condition as discriminant
+  1167→                        let disc = if let ScgExpr::Var(_) = &cond {
+  1168→                            cond.clone()
+  1169→                        } else {
+  1170→                            ScgExpr::Var("disc".to_string())
+  1171→                        };
+  1172→
+  1173→                        stmts.push(ScgStatement::Control(ControlNode::Switch {
+  1174→                            discriminant: disc,
+  1175→                            arms,
+  1176→                            default_body,
+  1177→                        }));
+  1178→                    } else {
+  1179→                        // Standard if/else
+  1180→                        let mut arm_stop = stop_at.clone();
+  1181→                        if let Some(join) = join_node {
+  1182→                            arm_stop.insert(join);
+  1183→                        }
+  1184→
+  1185→                        let then_body =
+  1186→                            walk_control_flow_with_externs(then_tgt, scg, edge_idx, consumed, &arm_stop, extern_functions);
+  1187→
+  1188→                        let else_body = else_tgt
+  1189→                            .map(|tgt| walk_control_flow_with_externs(tgt, scg, edge_idx, consumed, &arm_stop, extern_functions));
+  1190→
+  1191→                        stmts.push(ScgStatement::Control(ControlNode::If {
+  1192→                            cond,
+  1193→                            then_body,
+  1194→                            else_body,
+  1195→                        }));
+  1196→                    }
+  1197→
+  1198→                    // Continue from the Join
+  1199→                    if let Some(join) = join_node {
+  1200→                        consumed.insert(join);
+  1201→                        current = edge_idx.outgoing_cf(join).first().map(|e| e.target);
+  1202→                    } else {
+  1203→                        current = None;
+  1204→                    }
+  1205→                    continue;
+  1206→                }
+  1207→
+  1208→                ControlKind::LoopHeader => {
+  1209→                    let (body_tgt, exit_tgt) = resolve_loop(node_id, scg, edge_idx);
+  1210→
+  1211→                    // Stop the body walk at back-edges (LoopHeader) and LoopExit
+  1212→                    let mut loop_stop = stop_at.clone();
+  1213→                    loop_stop.insert(node_id); // back-edge target
+  1214→                    if let Some(exit) = exit_tgt {
+  1215→                        loop_stop.insert(exit);
+  1216→                    }
+  1217→
+  1218→                    let body = walk_control_flow_with_externs(body_tgt, scg, edge_idx, consumed, &loop_stop, extern_functions);
+  1219→
+  1220→                    stmts.push(ScgStatement::Control(ControlNode::Loop { body }));
+  1221→
+  1222→                    // Continue from the LoopExit
+  1223→                    if let Some(exit) = exit_tgt {
+  1224→                        consumed.insert(exit);
+  1225→                        current = edge_idx.outgoing_cf(exit).first().map(|e| e.target);
+  1226→                    } else {
+  1227→                        current = None;
+  1228→                    }
+  1229→                    continue;
+  1230→                }
+  1231→
+  1232→                ControlKind::Jump => match ctrl.label.as_deref() {
+  1233→                    Some("break") => {
+  1234→                        stmts.push(ScgStatement::Control(ControlNode::Break));
+  1235→                        current = None;
+  1236→                        continue;
+  1237→                    }
+  1238→                    Some("continue") => {
+  1239→                        stmts.push(ScgStatement::Control(ControlNode::Continue));
+  1240→                        current = None;
+  1241→                        continue;
+  1242→                    }
+  1243→                    _ => {
+  1244→                        // Unconditional jump — follow the CF edge
+  1245→                        let target = edge_idx.outgoing_cf(node_id).first().map(|e| e.target);
+  1246→                        if let Some(tgt) = target {
+  1247→                            if !consumed.contains(&tgt) && !stop_at.contains(&tgt) {
+  1248→                                current = Some(tgt);
+  1249→                                continue;
+  1250→                            }
+  1251→                        }
+  1252→                        current = None;
+  1253→                        continue;
+  1254→                    }
+  1255→                },
+  1256→
+  1257→                ControlKind::FunctionReturn => {
+  1258→                    // Resolve the return value from the incoming DataFlow edge(s).
+  1259→                    // The FunctionReturn node has one DataFlow input per return value.
+  1260→                    let df_inputs = edge_idx.incoming_df(node_id);
+  1261→                    let ret_vals: Vec<ScgExpr> = df_inputs
+  1262→                        .iter()
+  1263→                        .enumerate()
+  1264→                        .map(|(i, _)| resolve_df_input(node_id, i, edge_idx, scg))
+  1265→                        .collect();
+  1266→                    stmts.push(ScgStatement::Return(ret_vals));
+  1267→                    current = None;
+  1268→                    continue;
+  1269→                }
+  1270→
+  1271→                ControlKind::Join | ControlKind::LoopExit => {
+  1272→                    // Structural nodes handled by Branch/LoopHeader.
+  1273→                    // Pass through to the next node.
+  1274→                    current = edge_idx.outgoing_cf(node_id).first().map(|e| e.target);
+  1275→                    continue;
+  1276→                }
+  1277→
+  1278→                ControlKind::FunctionEntry => {
+  1279→                    // Call-site FunctionEntry nodes (label "call_<name>")
+  1280→                    // are lowered to CallNode statements.  Top-level
+  1281→                    // function-definition entries are handled in Phase 1
+  1282→                    // and should not appear here.
+  1283→                    if let Some(label) = &ctrl.label {
+  1284→                        if let Some(func_name) = label.strip_prefix("call_") {
+  1285→                            let is_extern = extern_functions.contains(func_name);
+  1286→                            // Collect arguments from DataFlow edges
+  1287→                            let mut args = Vec::new();
+  1288→                            let df_inputs = edge_idx.incoming_df(node_id);
+  1289→                            for df_edge in &df_inputs {
+  1290→                                let source = df_edge.source;
+  1291→                                args.push(ScgExpr::Var(format!("v_{}", source.as_u64())));
+  1292→                            }
+  1293→                            stmts.push(ScgStatement::Call(CallNode {
+  1294→                                dst: None, // return value flows via DataFlow edge
+  1295→                                func: func_name.to_string(),
+  1296→                                args,
+  1297→                                is_extern,
+  1298→                            }));
+  1299→                            // Consume the corresponding FunctionReturn node
+  1300→                            // and continue from its outgoing CF edge.
+  1301→                            let ret_node = find_function_return(node_id, scg, edge_idx);
+  1302→                            if let Some(ret) = ret_node {
+  1303→                                consumed.insert(ret);
+  1304→                                current = edge_idx.outgoing_cf(ret).first().map(|e| e.target);
+  1305→                            } else {
+  1306→                                current = edge_idx.outgoing_cf(node_id).first().map(|e| e.target);
+  1307→                            }
+  1308→                            continue;
+  1309→                        }
+  1310→                    }
+  1311→                    // Non-call-site FunctionEntry: pass through
+  1312→                    current = edge_idx.outgoing_cf(node_id).first().map(|e| e.target);
+  1313→                    continue;
+  1314→                }
+  1315→
+  1316→                ControlKind::Switch | ControlKind::SwitchCase => {
+  1317→                    // Switch/switch-case nodes are handled like Branch
+  1318→                    current = edge_idx.outgoing_cf(node_id).first().map(|e| e.target);
+  1319→                    continue;
+  1320→                }
+  1321→
+  1322→                ControlKind::ClosureEntry | ControlKind::ClosureReturn => {
+  1323→                    // Closure entry/return handled like function entry/return
+  1324→                    current = edge_idx.outgoing_cf(node_id).first().map(|e| e.target);
+  1325→                    continue;
+  1326→                }
+  1327→
+  1328→                ControlKind::FuturePoll
+  1329→                | ControlKind::WakerRegistration
+  1330→                | ControlKind::StateTransition => {
+  1331→                    // Async state machine nodes: pass through
+  1332→                    current = edge_idx.outgoing_cf(node_id).first().map(|e| e.target);
+  1333→                    continue;
+  1334→                }
+  1335→            },
+  1336→
+  1337→            // ── Non-control nodes: convert to statements ───────────
+  1338→            _ => {
+  1339→                if let Some(stmt) = convert_node_to_statement_with_externs(node_id, node_data, edge_idx, scg, extern_functions) {
+  1340→                    stmts.push(stmt);
+  1341→                }
+  1342→
+  1343→                // Continue to the next node via ControlFlow
+  1344→                current = edge_idx.outgoing_cf(node_id).first().map(|e| e.target);
+  1345→            }
+  1346→        }
+  1347→    }
+  1348→
+  1349→    stmts
+  1350→}
+  1351→
+  1352→// ── Node-to-statement conversion ───────────────────────────────────────
+  1353→
+  1354→/// Convert a non-control SCG node into an `ScgStatement`.
+  1355→///
+  1356→/// Handles all node types except `Control` (which is handled by
+  1357→/// `walk_control_flow`) and `Phantom` (which is skipped).
+  1358→fn convert_node_to_statement(
+  1359→    node_id: NodeId,
+  1360→    node_data: &NodeData,
+  1361→    edge_idx: &EdgeIndex,
+  1362→    scg: &SCG,
+  1363→) -> Option<ScgStatement> {
+  1364→    convert_node_to_statement_with_externs(node_id, node_data, edge_idx, scg, &HashSet::new())
+  1365→}
+  1366→
+  1367→/// Convert a non-control SCG node into an `ScgStatement`, with knowledge
+  1368→/// of which functions are declared as extern.
+  1369→///
+  1370→/// Handles all node types except `Control` (which is handled by
+  1371→/// `walk_control_flow`) and `Phantom` (which is skipped).
+  1372→fn convert_node_to_statement_with_externs(
+  1373→    node_id: NodeId,
+  1374→    node_data: &NodeData,
+  1375→    edge_idx: &EdgeIndex,
+  1376→    scg: &SCG,
+  1377→    extern_functions: &HashSet<String>,
+  1378→) -> Option<ScgStatement> {
+  1379→    match &node_data.payload {
+  1380→        NodePayload::Allocation(alloc) => {
+  1381→            let ty = alloc
+  1382→                .type_name
+  1383→                .as_deref()
+  1384→                .and_then(parse_scg_type)
+  1385→                .unwrap_or(ScgType::U8);
+  1386→            Some(ScgStatement::Allocation(AllocationNode::Stack {
+  1387→                name: node_var(node_id, "alloc"),
+  1388→                size: alloc.size as u32,
+  1389→                ty,
+  1390→            }))
+  1391→        }
+  1392→
+  1393→        NodePayload::Access(access) => match access.mode {
+  1394→            AccessMode::Read => Some(ScgStatement::Access(AccessNode::Load {
+  1395→                dst: node_var(node_id, "val"),
+  1396→                ptr: resolve_df_input(node_id, 0, edge_idx, scg),
+  1397→                offset: access.offset.map(|o| ScgExpr::Int(o as i64)),
+  1398→            })),
+  1399→            AccessMode::Write | AccessMode::ReadWrite => {
+  1400→                Some(ScgStatement::Access(AccessNode::Store {
+  1401→                    ptr: resolve_df_input(node_id, 0, edge_idx, scg),
+  1402→                    offset: access.offset.map(|o| ScgExpr::Int(o as i64)),
+  1403→                    value: resolve_df_input(node_id, 1, edge_idx, scg),
+  1404→                }))
+  1405→            }
+  1406→        },
+  1407→
+  1408→        NodePayload::Computation(comp) => {
+  1409→            let op_label = comp.kind.label();
+  1410→
+  1411→            // Detect address-of patterns: "let x = @func_name" or bare "@func_name".
+  1412→            // These should lower to GetAddress rather than a generic computation.
+  1413→            if let Some(addr_name) = op_label.strip_prefix("let ") {
+  1414→                // "let x = @func_name" → extract "func_name"
+  1415→                if let Some(at_pos) = addr_name.find("= @") {
+  1416→                    let symbol = addr_name[at_pos + 3..].trim();
+  1417→                    if !symbol.is_empty() && !symbol.contains(' ') && !symbol.contains('(') {
+  1418→                        let var_part = addr_name[..at_pos].trim();
+  1419→                        let dst = if var_part.is_empty() {
+  1420→                            node_var(node_id, "addr")
+  1421→                        } else {
+  1422→                            var_part.to_string()
+  1423→                        };
+  1424→                        return Some(ScgStatement::GetAddress(GetAddressNode {
+  1425→                            dst,
+  1426→                            name: symbol.to_string(),
+  1427→                        }));
+  1428→                    }
+  1429→                }
+  1430→            } else if let Some(symbol) = op_label.strip_prefix("@") {
+  1431→                // Bare "@func_name"
+  1432→                let symbol = symbol.trim();
+  1433→                if !symbol.is_empty() && !symbol.contains(' ') && !symbol.contains('(') {
+  1434→                    return Some(ScgStatement::GetAddress(GetAddressNode {
+  1435→                        dst: node_var(node_id, "addr"),
+  1436→                        name: symbol.to_string(),
+  1437→                    }));
+  1438→                }
+  1439→            }
+  1440→
+  1441→            let op = parse_binop(&op_label).unwrap_or(IrBinOpKind::Add);
+  1442→            Some(ScgStatement::Computation(ComputationNode {
+  1443→                dst: node_var(node_id, "comp"),
+  1444→                op,
+  1445→                lhs: resolve_df_input(node_id, 0, edge_idx, scg),
+  1446→                rhs: resolve_df_input(node_id, 1, edge_idx, scg),
+  1447→                tail_call: false,
+  1448→            }))
+  1449→        }
+  1450→
+  1451→        NodePayload::Cast(cast) => {
+  1452→            let to_ty = parse_scg_type(&cast.to_type).unwrap_or(ScgType::Ptr);
+  1453→            let from_ty = parse_scg_type(&cast.from_type).unwrap_or(ScgType::Ptr);
+  1454→            Some(ScgStatement::Cast(CastNode {
+  1455→                dst: node_var(node_id, "cast"),
+  1456→                src: resolve_df_input(node_id, 0, edge_idx, scg),
+  1457→                kind: if cast.is_lossless {
+  1458→                    CodegenCastKind::ZExt
+  1459→                } else {
+  1460→                    CodegenCastKind::BitCast
+  1461→                },
+  1462→                from_ty,
+  1463→                to_ty,
+  1464→            }))
+  1465→        }
+  1466→
+  1467→        NodePayload::Deallocation(_dealloc) => {
+  1468→            // Lower deallocation as a proper runtime call rather than
+  1469→            // a semantic no-op (`*ptr = 0`).  This ensures the memory
+  1470→            // is actually freed at runtime and is more correct than
+  1471→            // simply zeroing the pointer.
+  1472→            Some(ScgStatement::Call(CallNode {
+  1473→                dst: None,
+  1474→                func: "__vuma_dealloc".to_string(),
+  1475→                args: vec![resolve_df_input(node_id, 0, edge_idx, scg)],
+  1476→                is_extern: true,
+  1477→            }))
+  1478→        }
+  1479→
+  1480→        NodePayload::Effect(eff) => {
+  1481→            // Effect nodes may represent function calls.  If the
+  1482→            // effect_kind matches a name in the extern set, mark it
+  1483→            // as an extern call so the backend emits a relocation.
+  1484→            let is_extern = extern_functions.contains(&eff.effect_kind);
+  1485→            Some(ScgStatement::Call(CallNode {
+  1486→                dst: Some(node_var(node_id, "eff")),
+  1487→                func: eff.effect_kind.clone(),
+  1488→                args: vec![],
+  1489→                is_extern,
+  1490→            }))
+  1491→        }
+  1492→
+  1493→        NodePayload::Phantom(_) => None,
+  1494→
+  1495→        NodePayload::Control(ctrl) => {
+  1496→            // Control nodes are normally handled by `walk_control_flow`'s
+  1497→            // explicit `NodePayload::Control` arm.  This function is only
+  1498→            // called on Control nodes from the "remaining nodes" sweep
+  1499→            // (i.e. nodes that were not reached by the walk).
+  1500→            //
+  1501→            // F4 fix: when SCG transforms (notably `DeadCodeElimination`
+  1502→            // at O2+) remove the Computation node that connected a
+  1503→            // function body to a call-site `FunctionEntry` (label
+  1504→            // `call_<name>`), the call-site node becomes an orphan.
+  1505→            // Without this arm, the orphan would be silently dropped
+  1506→            // and the emitted ELF would contain no relocation for the
+  1507→            // callee — so `extern "C" { fn write(...); } fn main() {
+  1508→            // write(...); }` would produce a binary with no `write`
+  1509→            // undefined symbol, breaking FFI.  Lower the orphan to a
+  1510→            // `CallNode` (matching the walk's call-site handling at
+  1511→            // line ~1278) so the backend still emits a BL + relocation.
+  1512→            if ctrl.kind == ControlKind::FunctionEntry {
+  1513→                if let Some(label) = &ctrl.label {
+  1514→                    if let Some(func_name) = label.strip_prefix("call_") {
+  1515→                        let is_extern = extern_functions.contains(func_name);
+  1516→                        // Collect arguments from DataFlow edges (same
+  1517→                        // logic as the walk's call-site arm).  Literal
+  1518→                        // arguments are not connected via DataFlow by
+  1519→                        // the parser, so this may yield fewer args than
+  1520→                        // the source call — the relocation is still
+  1521→                        // emitted, which is what matters for symbol
+  1522→                        // resolution.
+  1523→                        let mut args = Vec::new();
+  1524→                        let df_inputs = edge_idx.incoming_df(node_id);
+  1525→                        for df_edge in &df_inputs {
+  1526→                            let source = df_edge.source;
+  1527→                            args.push(ScgExpr::Var(format!("v_{}", source.as_u64())));
+  1528→                        }
+  1529→                        return Some(ScgStatement::Call(CallNode {
+  1530→                            dst: None, // return value flows via DataFlow edge
+  1531→                            func: func_name.to_string(),
+  1532→                            args,
+  1533→                            is_extern,
+  1534→                        }));
+  1535→                    }
+  1536→                }
+  1537→            }
+  1538→            None
+  1539→        }
+  1540→
+  1541→        NodePayload::VTable(_) | NodePayload::ClosureEnv(_) => {
+  1542→            // VTable and ClosureEnv are structural nodes; no IR statement
+  1543→            None
+  1544→        }
+  1545→
+  1546→        NodePayload::StructDef(_) | NodePayload::EnumDef(_) | NodePayload::Match(_) 
+  1547→        | NodePayload::ConstantTime(_) => {
+  1548→            // Type definitions, match nodes, and constant-time ops are
+  1549→            // not lowered to IR statements in the bridge
+  1550→            None
+  1551→        }
+  1552→    }
+  1553→}
+  1554→
+  1555→// ── Function parameter extraction ──────────────────────────────────────
+  1556→
+  1557→/// Extract function parameters from DataFlow edges leaving the
+  1558→/// FunctionEntry node.
+  1559→///
+  1560→/// Parameter types are inferred from the target node's payload, which
+  1561→/// has been refined by BD inference (via `refine_scg_types_with_bd`).
+  1562→/// If no type info is available, defaults to `ScgType::I64`.
+  1563→fn extract_function_params(entry_id: NodeId, scg: &SCG, edge_idx: &EdgeIndex) -> Vec<ScgParam> {
+  1564→    let df_edges = edge_idx.outgoing_df(entry_id);
+  1565→    let mut params = Vec::new();
+  1566→
+  1567→    for (i, edge) in df_edges.iter().enumerate() {
+  1568→        let (name, ty) = if let Some(target_node) = scg.get_node(edge.target) {
+  1569→            match &target_node.payload {
+  1570→                NodePayload::Allocation(alloc) => {
+  1571→                    let name = alloc
+  1572→                        .type_name
+  1573→                        .clone()
+  1574→                        .unwrap_or_else(|| format!("param_{}", i));
+  1575→                    let ty = alloc
+  1576→                        .type_name
+  1577→                        .as_deref()
+  1578→                        .and_then(parse_scg_type)
+  1579→                        .unwrap_or(ScgType::I64);
+  1580→                    (name, ty)
+  1581→                }
+  1582→                NodePayload::Computation(comp) => {
+  1583→                    let name = comp
+  1584→                        .result_type
+  1585→                        .clone()
+  1586→                        .unwrap_or_else(|| format!("param_{}", i));
+  1587→                    let ty = comp
+  1588→                        .result_type
+  1589→                        .as_deref()
+  1590→                        .and_then(parse_scg_type)
+  1591→                        .unwrap_or(ScgType::I64);
+  1592→                    (name, ty)
+  1593→                }
+  1594→                NodePayload::Cast(cast) => {
+  1595→                    let name = format!("param_{}", i);
+  1596→                    let ty = parse_scg_type(&cast.to_type).unwrap_or(ScgType::I64);
+  1597→                    (name, ty)
+  1598→                }
+  1599→                _ => (format!("param_{}", i), ScgType::I64),
+  1600→            }
+  1601→        } else {
+  1602→            (format!("param_{}", i), ScgType::I64)
+  1603→        };
+  1604→
+  1605→        params.push(ScgParam { name, ty });
+  1606→    }
+  1607→
+  1608→    params
+  1609→}
+  1610→
+  1611→// ── Type parsing helper ────────────────────────────────────────────────
+  1612→
+  1613→/// Parse a type string into a `ScgType`.
+  1614→fn parse_scg_type(type_str: &str) -> Option<ScgType> {
+  1615→    match type_str {
+  1616→        "i8" | "I8" => Some(ScgType::I8),
+  1617→        "i16" | "I16" => Some(ScgType::I16),
+  1618→        "i32" | "I32" => Some(ScgType::I32),
+  1619→        "i64" | "I64" => Some(ScgType::I64),
+  1620→        "u8" | "U8" => Some(ScgType::U8),
+  1621→        "u16" | "U16" => Some(ScgType::U16),
+  1622→        "u32" | "U32" => Some(ScgType::U32),
+  1623→        "u64" | "U64" => Some(ScgType::U64),
+  1624→        "ptr" | "*void" | "*u8" | "*i8" => Some(ScgType::Ptr),
+  1625→        "void" => Some(ScgType::Void),
+  1626→        _ => None,
+  1627→    }
+  1628→}
+  1629→
+  1630→// ── BD type refinement ─────────────────────────────────────────────────
+  1631→
+  1632→/// Map a BD `RepD` to the codegen's `ScgType`.
+  1633→///
+  1634→/// Uses the RepD's size and kind to pick the most specific `ScgType`:
+  1635→/// - Pointer RepDs → `ScgType::Ptr`
+  1636→/// - Byte RepDs → integer types by size (u8, u16, u32, u64)
+  1637→/// - Struct/Array/Enum/Union → `ScgType::Ptr` (passed by reference)
+  1638→/// - Generic → `ScgType::I64` (fallback)
+  1639→fn repd_to_scg_type(repd: &RepD) -> ScgType {
+  1640→    match repd {
+  1641→        RepD::Ptr(_) | RepD::Func(_) => ScgType::Ptr,
+  1642→        RepD::Byte(byte_rep) => match byte_rep.size {
+  1643→            1 => ScgType::U8,
+  1644→            2 => ScgType::U16,
+  1645→            4 => ScgType::U32,
+  1646→            _ => ScgType::U64,
+  1647→        },
+  1648→        RepD::Struct(_) | RepD::Array(_) | RepD::Enum(_) | RepD::Union(_) => ScgType::Ptr,
+  1649→        RepD::Generic { .. } => ScgType::I64,
+  1650→    }
+  1651→}
+  1652→
+  1653→/// Convert a `ScgType` to its canonical string name for storing in SCG
+  1654→/// node payloads (e.g., `AllocationNode.type_name`, `CastNode.from_type`).
+  1655→fn scg_type_to_name(ty: &ScgType) -> &'static str {
+  1656→    match ty {
+  1657→        ScgType::I8 => "i8",
+  1658→        ScgType::I16 => "i16",
+  1659→        ScgType::I32 => "i32",
+  1660→        ScgType::I64 => "i64",
+  1661→        ScgType::U8 => "u8",
+  1662→        ScgType::U16 => "u16",
+  1663→        ScgType::U32 => "u32",
+  1664→        ScgType::U64 => "u64",
+  1665→        ScgType::Ptr => "ptr",
+  1666→        ScgType::Void => "void",
+  1667→        ScgType::F32 => "f32",
+  1668→        ScgType::F64 => "f64",
+  1669→    }
+  1670→}
+  1671→
+  1672→/// Refine SCG node type metadata using BD inference results.
+  1673→///
+  1674→/// After BD inference, each node's `RepD` describes the actual memory
+  1675→/// representation.  This function maps those RepDs back to `ScgType`s
+  1676→/// and stores the result in the SCG node payloads so that downstream
+  1677→/// bridge code (`convert_node_to_statement`, `extract_function_params`)
+  1678→/// can pick up the refined types instead of using defaults.
+  1679→///
+  1680→/// # What is refined
+  1681→///
+  1682→/// - **Allocation nodes**: `type_name` is set if it was previously `None`.
+  1683→/// - **Cast nodes**: `from_type` / `to_type` are updated if they couldn't
+  1684→///   previously be parsed by `parse_scg_type`.
+  1685→/// - **Computation nodes**: `result_type` is set if it was previously `None`.
+  1686→pub fn refine_scg_types_with_bd(scg: &mut SCG, bd_results: &[(NodeId, BD)]) {
+  1687→    let bd_map: HashMap<NodeId, &BD> = bd_results.iter().map(|(id, bd)| (*id, bd)).collect();
+  1688→
+  1689→    let node_ids: Vec<_> = scg.node_ids().collect();
+  1690→    for node_id in node_ids {
+  1691→        let Some(bd) = bd_map.get(&node_id) else {
+  1692→            continue;
+  1693→        };
+  1694→        let inferred_type = repd_to_scg_type(&bd.repd);
+  1695→        let type_name = scg_type_to_name(&inferred_type);
+  1696→
+  1697→        if let Some(node) = scg.get_node_mut(node_id) {
+  1698→            match &mut node.payload {
+  1699→                NodePayload::Allocation(alloc)
+  1700→                    // Update type_name if it was previously unset.
+  1701→                    if alloc.type_name.is_none() => {
+  1702→                        alloc.type_name = Some(type_name.to_string());
+  1703→                    }
+  1704→                NodePayload::Cast(cast) => {
+  1705→                    // Update from_type / to_type if they couldn't previously
+  1706→                    // be parsed by `parse_scg_type` (i.e., they were opaque
+  1707→                    // type names from the AST that don't map directly).
+  1708→                    if parse_scg_type(&cast.from_type).is_none() {
+  1709→                        cast.from_type = type_name.to_string();
+  1710→                    }
+  1711→                    if parse_scg_type(&cast.to_type).is_none() {
+  1712→                        cast.to_type = type_name.to_string();
+  1713→                    }
+  1714→                }
+  1715→                NodePayload::Computation(comp)
+  1716→                    if comp.result_type.is_none() => {
+  1717→                        comp.result_type = Some(type_name.to_string());
+  1718→                    }
+  1719→                _ => {}
+  1720→            }
+  1721→        }
+  1722→    }
+  1723→}
+  1724→
+  1725→// ── Entry-point detection ──────────────────────────────────────────────
+  1726→
+  1727→/// Find entry-point nodes (no incoming ControlFlow edges) for a function
+  1728→/// that lacks an explicit FunctionEntry node.
+  1729→fn find_entry_points(scg: &SCG, edge_idx: &EdgeIndex) -> Vec<NodeId> {
+  1730→    let mut entry_points = Vec::new();
+  1731→
+  1732→    for node_id in scg.node_ids() {
+  1733→        let has_incoming_cf = edge_idx
+  1734→            .incoming
+  1735→            .get(&node_id)
+  1736→            .map(|edges| edges.iter().any(|e| e.kind == EdgeKind::ControlFlow))
+  1737→            .unwrap_or(false);
+  1738→
+  1739→        if !has_incoming_cf {
+  1740→            if let Some(node_data) = scg.get_node(node_id) {
+  1741→                // Skip Phantom nodes
+  1742→                if matches!(node_data.node_type, NodeType::Phantom) {
+  1743→                    continue;
+  1744→                }
+  1745→                entry_points.push(node_id);
+  1746→            }
+  1747→        }
+  1748→    }
+  1749→
+  1750→    // If no entry points found, use the first node
+  1751→    if entry_points.is_empty() {
+  1752→        if let Some(first_id) = scg.node_ids().next() {
+  1753→            entry_points.push(first_id);
+  1754→        }
+  1755→    }
+  1756→
+  1757→    entry_points
+  1758→}
+  1759→
+  1760→// ── Main bridge function ───────────────────────────────────────────────
+  1761→
+  1762→/// Convert a `vuma_scg::SCG` into the codegen's stub `Scg` type.
+  1763→///
+  1764→/// This function reconstructs real control flow (if/else, loops, function
+  1765→/// boundaries, break/continue) from the SCG's graph structure, instead of
+  1766→/// just flattening everything into a single linear "main" function.
+  1767→///
+  1768→/// # Algorithm
+  1769→///
+  1770→/// 1. **Phase 1: Function boundary detection** — Group nodes by
+  1771→///    FunctionEntry→FunctionReturn regions.
+  1772→/// 2. **Phase 2: Control flow reconstruction** — Within each function,
+  1773→///    detect Branch+Join diamonds (if/else) and LoopHeader+LoopExit
+  1774→///    patterns (loops).
+  1775→/// 3. **Phase 3: Statement generation** — Convert non-control nodes into
+  1776→///    ScgStatements with DataFlow-based variable naming.
+  1777→pub fn bridge_scg_to_codegen(scg: &SCG) -> Scg {
+  1778→    bridge_scg_to_codegen_with_externs(scg, &HashSet::new())
+  1779→}
+  1780→
+  1781→/// Bridge the `vuma-scg` SCG to the codegen SCG, with knowledge of which
+  1782→/// functions are declared as extern (foreign) in the source program.
+  1783→///
+  1784→/// When a function call targets a name in `extern_functions`, the resulting
+  1785→/// `CallNode` gets `is_extern: true`, which causes the backend to emit
+  1786→/// a relocation entry instead of a local `BL` instruction.
+  1787→pub fn bridge_scg_to_codegen_with_externs(scg: &SCG, extern_functions: &HashSet<String>) -> Scg {
+  1788→    let edge_idx = EdgeIndex::build(scg);
+  1789→    let mut consumed: HashSet<NodeId> = HashSet::new();
+  1790→    let mut scg_nodes: Vec<ScgNode> = Vec::new();
+  1791→
+  1792→    // ── Phase 0: Identify call-site FunctionEntry nodes ─────────────
+  1793→    //
+  1794→    // The AST→SCG conversion emits a FunctionEntry+FunctionReturn pair
+  1795→    // for every call site (e.g. `call_write` / `return_write`).  These
+  1796→    // must NOT be treated as function definitions — they represent call
+  1797→    // sites and should be lowered to `CallNode` statements.
+  1798→    //
+  1799→    // We distinguish them by label prefix ("call_") or by the presence
+  1800→    // of an incoming ControlFlow edge from a non-FunctionEntry node
+  1801→    // (a call site's FunctionEntry is reached from the caller's body,
+  1802→    // whereas a function definition's FunctionEntry is an SCG entry
+  1803→    // point with no incoming CF edges).
+  1804→    let mut call_site_entries: HashSet<NodeId> = HashSet::new();
+  1805→    let mut call_site_names: HashMap<NodeId, String> = HashMap::new();
+  1806→    for n in scg.nodes() {
+  1807→        if let NodePayload::Control(c) = &n.payload {
+  1808→            if c.kind == ControlKind::FunctionEntry {
+  1809→                if let Some(label) = &c.label {
+  1810→                    // Call-site FunctionEntry nodes have labels like "call_write"
+  1811→                    if let Some(func_name) = label.strip_prefix("call_") {
+  1812→                        call_site_entries.insert(n.id);
+  1813→                        call_site_names.insert(n.id, func_name.to_string());
+  1814→                    }
+  1815→                }
+  1816→            }
+  1817→        }
+  1818→    }
+  1819→
+  1820→    // ── Phase 1: Function boundary detection ─────────────────────
+  1821→    // Only collect FunctionEntry nodes that are NOT call sites.
+  1822→    let function_entries: Vec<(NodeId, String)> = scg
+  1823→        .nodes()
+  1824→        .filter_map(|n| {
+  1825→            if call_site_entries.contains(&n.id) {
+  1826→                return None; // skip call-site entries
+  1827→            }
+  1828→            if let NodePayload::Control(c) = &n.payload {
+  1829→                if c.kind == ControlKind::FunctionEntry {
+  1830→                    let name = c.label.clone().unwrap_or_else(|| "unknown".to_string());
+  1831→                    return Some((n.id, name));
+  1832→                }
+  1833→            }
+  1834→            None
+  1835→        })
+  1836→        .collect();
+  1837→
+  1838→    if !function_entries.is_empty() {
+  1839→        // Process each function defined by a FunctionEntry node
+  1840→        for (entry_id, func_name) in &function_entries {
+  1841→            consumed.insert(*entry_id);
+  1842→
+  1843→            let return_node = find_function_return(*entry_id, scg, &edge_idx);
+  1844→            let params = extract_function_params(*entry_id, scg, &edge_idx);
+  1845→
+  1846→            let mut body = if let Some(first_cf) = edge_idx.outgoing_cf(*entry_id).first() {
+  1847→                // Do NOT add the FunctionReturn node to `stop_at`.
+  1848→                //
+  1849→                // The walk's `ControlKind::FunctionReturn` arm resolves the
+  1850→                // return value's DataFlow inputs (e.g. the `lit_<n>`
+  1851→                // Computation node created by the AST->SCG bridge for literal
+  1852→                // returns) and emits an `ScgStatement::Return` carrying the
+  1853→                // resolved `ScgExpr`s.  Adding the return node to `stop_at`
+  1854→                // causes the walk to `break` *before* processing that node,
+  1855→                // so the arm never runs; the fallback below then emits an
+  1856→                // empty `Return(vec![])` and the return value is silently
+  1857→                // dropped (the binary exits 0 instead of the intended code).
+  1858→                //
+  1859→                // The FunctionReturn arm itself sets `current = None`, which
+  1860→                // ends the walk naturally after the return is emitted, so
+  1861→                // there is no risk of walking past the function boundary.
+  1862→                // Sub-walks (Branch arms, Loop bodies) likewise process any
+  1863→                // return nodes they reach, producing correct per-arm
+  1864→                // `Return` statements (e.g. for `if c { return 1; } else
+  1865→                // { return 2; }`).
+  1866→                let stop_at: HashSet<NodeId> = HashSet::new();
+  1867→                walk_control_flow_with_externs(first_cf.target, scg, &edge_idx, &mut consumed, &stop_at, extern_functions)
+  1868→            } else {
+  1869→                vec![]
+  1870→            };
+  1871→
+  1872→            // Mark the BFS-discovered FunctionReturn node as consumed so it
+  1873→            // is not revisited by the "remaining nodes" sweep below.  If the
+  1874→            // walk already reached and consumed it (the common case), this is
+  1875→            // a no-op; if it did not (e.g. an early `return` in the body
+  1876→            // ended the walk before reaching the function-exit return), this
+  1877→            // prevents the structural exit-return from being spuriously
+  1878→            // re-emitted as an empty `Return`.
+  1879→            if let Some(ret) = return_node {
+  1880→                consumed.insert(ret);
+  1881→            }
+  1882→            if !body.iter().any(|s| matches!(s, ScgStatement::Return(_))) {
+  1883→                body.push(ScgStatement::Return(vec![]));
+  1884→            }
+  1885→
+  1886→            scg_nodes.push(ScgNode::Function(ScgFunction {
+  1887→                name: func_name.clone(),
+  1888→                params,
+  1889→                results: vec![],
+  1890→                body,
+  1891→            }));
+  1892→        }
+  1893→    } else {
+  1894→        // No FunctionEntry nodes — find entry points and walk control flow
+  1895→        let entry_points = find_entry_points(scg, &edge_idx);
+  1896→
+  1897→        let mut body = Vec::new();
+  1898→        for start in &entry_points {
+  1899→            let stop_at = HashSet::new();
+  1900→            let mut partial = walk_control_flow_with_externs(*start, scg, &edge_idx, &mut consumed, &stop_at, extern_functions);
+  1901→            body.append(&mut partial);
+  1902→        }
+  1903→
+  1904→        // Process any remaining unconsumed nodes (connected only via DataFlow)
+  1905→        let remaining: Vec<NodeId> = scg.node_ids().filter(|id| !consumed.contains(id)).collect();
+  1906→        for nid in &remaining {
+  1907→            if consumed.contains(nid) {
+  1908→                continue;
+  1909→            }
+  1910→            consumed.insert(*nid);
+  1911→            if let Some(node_data) = scg.get_node(*nid) {
+  1912→                if let Some(stmt) = convert_node_to_statement_with_externs(*nid, node_data, &edge_idx, scg, extern_functions) {
+  1913→                    body.push(stmt);
+  1914→                }
+  1915→            }
+  1916→        }
+  1917→
+  1918→        if !body.iter().any(|s| matches!(s, ScgStatement::Return(_))) {
+  1919→            body.push(ScgStatement::Return(vec![]));
+  1920→        }
+  1921→
+  1922→        scg_nodes.push(ScgNode::Function(ScgFunction {
+  1923→            name: "main".to_string(),
+  1924→            params: vec![],
+  1925→            results: vec![],
+  1926→            body,
+  1927→        }));
+  1928→    }
+  1929→
+  1930→    // Handle remaining nodes not consumed by any function (multi-function case)
+  1931→    let remaining: Vec<NodeId> = scg.node_ids().filter(|id| !consumed.contains(id)).collect();
+  1932→    if !remaining.is_empty() {
+  1933→        let mut stmts = Vec::new();
+  1934→        for nid in &remaining {
+  1935→            if consumed.contains(nid) {
+  1936→                continue;
+  1937→            }
+  1938→            consumed.insert(*nid);
+  1939→            if let Some(node_data) = scg.get_node(*nid) {
+  1940→                if let Some(stmt) = convert_node_to_statement_with_externs(*nid, node_data, &edge_idx, scg, extern_functions) {
+  1941→                    stmts.push(stmt);
+  1942→                }
+  1943→            }
+  1944→        }
+  1945→        if !stmts.is_empty() {
+  1946→            if !stmts.iter().any(|s| matches!(s, ScgStatement::Return(_))) {
+  1947→                stmts.push(ScgStatement::Return(vec![]));
+  1948→            }
+  1949→            scg_nodes.push(ScgNode::Function(ScgFunction {
+  1950→                name: "__remaining".to_string(),
+  1951→                params: vec![],
+  1952→                results: vec![],
+  1953→                body: stmts,
+  1954→            }));
+  1955→        }
+  1956→    }
+  1957→
+  1958→    // Ensure at least one function exists
+  1959→    if scg_nodes.is_empty() {
+  1960→        scg_nodes.push(ScgNode::Function(ScgFunction {
+  1961→            name: "main".to_string(),
+  1962→            params: vec![],
+  1963→            results: vec![],
+  1964→            body: vec![ScgStatement::Return(vec![])],
+  1965→        }));
+  1966→    }
+  1967→
+  1968→    Scg { nodes: scg_nodes }
+  1969→}
+  1970→
+  1971→/// Try to parse an operation string into a BinOpKind.
+  1972→fn parse_binop(op: &str) -> Option<IrBinOpKind> {
+  1973→    match op {
+  1974→        "add" | "+" => Some(IrBinOpKind::Add),
+  1975→        "sub" | "-" => Some(IrBinOpKind::Sub),
+  1976→        "mul" | "*" => Some(IrBinOpKind::Mul),
+  1977→        "sdiv" | "/" => Some(IrBinOpKind::SDiv),
+  1978→        "udiv" => Some(IrBinOpKind::UDiv),
+  1979→        "srem" | "%" => Some(IrBinOpKind::SRem),
+  1980→        "urem" => Some(IrBinOpKind::URem),
+  1981→        "and" | "&" => Some(IrBinOpKind::And),
+  1982→        "or" | "|" => Some(IrBinOpKind::Or),
+  1983→        "xor" | "^" => Some(IrBinOpKind::Xor),
+  1984→        "shl" | "<<" => Some(IrBinOpKind::Shl),
+  1985→        "shr.l" | ">>" => Some(IrBinOpKind::ShrL),
+  1986→        "shr.a" => Some(IrBinOpKind::ShrA),
+  1987→        "slt" | "<" => Some(IrBinOpKind::SLt),
+  1988→        "sle" | "<=" => Some(IrBinOpKind::SLe),
+  1989→        "sgt" | ">" => Some(IrBinOpKind::SGt),
+  1990→        "sge" | ">=" => Some(IrBinOpKind::SGe),
+  1991→        "ult" => Some(IrBinOpKind::ULt),
+  1992→        "ule" => Some(IrBinOpKind::ULe),
+  1993→        "ugt" => Some(IrBinOpKind::UGt),
+  1994→        "uge" => Some(IrBinOpKind::UGe),
+  1995→        "eq" | "==" => Some(IrBinOpKind::Eq),
+  1996→        "ne" | "!=" => Some(IrBinOpKind::Ne),
+  1997→        _ => None,
+  1998→    }
+  1999→}
+  2000→
+
+[showing lines 1-2000 of 3365; use offset=2001 with limit to continue reading]
