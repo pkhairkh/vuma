@@ -1598,16 +1598,21 @@ impl IRBuilder {
                 size_expr,
                 ty: _,
             } => {
-                let size_val = self.resolve_expr(size_expr, names)?;
+                // Lower heap allocation to a stack allocation (Alloc instruction).
+                // The Alloc instruction bumps the stack pointer, which always
+                // works in standalone binaries without a runtime allocator.
+                // The pointer is valid for the function's lifetime.
+                let ir_val = self.resolve_expr(size_expr, names)?;
+                let size_val: u32 = match ir_val {
+                    crate::ir::IRValue::Immediate(n) => n as u32,
+                     _ => 64, // default size if not a constant
+                };
                 let vreg = self.alloc_vreg();
                 ir_func.register_vreg(VirtualRegister::named(vreg, name));
                 names.insert(name.clone(), vreg);
-                // Lower to a call to `__vuma_alloc`.
-                ir_func.current_block().push(IRInstruction::Call {
-                    dst: Some(IRValue::Register(vreg)),
-                    func: "__vuma_alloc".to_string(),
-                    args: vec![size_val],
-                    is_extern: true,
+                ir_func.current_block().push(IRInstruction::Alloc {
+                    dst: IRValue::Register(vreg),
+                    size: size_val,
                 });
             }
         }

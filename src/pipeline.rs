@@ -1611,16 +1611,11 @@ fn convert_node_to_statement_with_externs(
         }
 
         NodePayload::Deallocation(_dealloc) => {
-            // Lower deallocation as a proper runtime call rather than
-            // a semantic no-op (`*ptr = 0`).  This ensures the memory
-            // is actually freed at runtime and is more correct than
-            // simply zeroing the pointer.
-            Some(ScgStatement::Call(CallNode {
-                dst: None,
-                func: "__vuma_dealloc".to_string(),
-                args: vec![resolve_df_input(node_id, 0, edge_idx, scg)],
-                is_extern: true,
-            }))
+            // Stack-based allocation: deallocation is a no-op.
+            // The stack frame is restored on function return.
+            // (Previously: called __vuma_dealloc which crashed in
+            // standalone binaries with no runtime allocator.)
+            None
         }
 
         NodePayload::Effect(eff) => {

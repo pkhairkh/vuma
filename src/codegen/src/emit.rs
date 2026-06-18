@@ -4800,6 +4800,9 @@ fn aarch64_syscall_num_for_name(name: &str) -> Option<u32> {
         "inotify_rm_watch" => Some(28),
         "ioctl" => Some(29),
         "mmap" => Some(222),
+        "__vuma_alloc" => Some(222), // mmap
+        "__vuma_dealloc" => Some(215), // munmap
+        "free" => Some(215), // munmap
         "munmap" => Some(215),
         "brk" => Some(214),
         "openat" => Some(56),
@@ -4865,6 +4868,9 @@ fn x86_64_syscall_num_for_name(name: &str) -> Option<u32> {
         "poll" => Some(7),
         "lseek" => Some(8),
         "mmap" => Some(9),
+        "__vuma_alloc" => Some(9), // mmap
+        "__vuma_dealloc" => Some(11), // munmap
+        "free" => Some(11), // munmap
         "mprotect" => Some(10),
         "munmap" => Some(11),
         "brk" => Some(12),
