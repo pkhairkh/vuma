@@ -1509,8 +1509,40 @@ impl AstToScg {
                         );
                         region.add_node(lit_id);
                         let _ = scg.add_edge(lit_id, id, EdgeKind::DataFlow);
+                    } else if let Expr::Call { callee, args, .. } = v {
+                        // Return value is a function call — emit call nodes
+                        // and link the call's return value via DataFlow.
+                        let call_comp_id = scg.add_node(
+                            NodeType::Computation,
+                            NodePayload::Computation(ComputationNode {
+                                kind: ComputationKind::Other(
+                                    self.expr_to_string(v),
+                                ),
+                                result_type: None,
+                                tail_call: true,
+                            }),
+                            self.span_to_pp(&r.span),
+                        );
+                        region.add_node(call_comp_id);
+                        // Emit the call's FunctionEntry/FunctionReturn nodes
+                        self.emit_call_nodes(callee, args, call_comp_id, scg, region)?;
+                        // Link the call computation to the return via DataFlow
+                        let _ = scg.add_edge(call_comp_id, id, EdgeKind::DataFlow);
                     } else {
-                        self.add_data_flow_edges(v, id, scg);
+                        // For other expressions (variables, binary ops, etc.),
+                        // create a Computation node and link via DataFlow.
+                        let comp_id = scg.add_node(
+                            NodeType::Computation,
+                            NodePayload::Computation(ComputationNode {
+                                kind: ComputationKind::Other(self.expr_to_string(v)),
+                                result_type: None,
+                                tail_call: false,
+                            }),
+                            self.span_to_pp(&r.span),
+                        );
+                        region.add_node(comp_id);
+                        self.add_data_flow_edges(v, comp_id, scg);
+                        let _ = scg.add_edge(comp_id, id, EdgeKind::DataFlow);
                     }
                 }
 

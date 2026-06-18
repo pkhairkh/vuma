@@ -2884,13 +2884,14 @@ mod tests {
         let mut builder = IRBuilder::new();
         let program = builder.build(&scg).unwrap();
         let block = &program.functions[0].blocks[0];
-        let call_instr = block
+        // Heap allocation now uses Alloc (stack-based) instead of Call(__vuma_alloc)
+        let alloc_instr = block
             .instructions
             .iter()
-            .find(|i| matches!(i, IRInstruction::Call { func, .. } if func == "__vuma_alloc"));
+            .find(|i| matches!(i, IRInstruction::Alloc { .. }));
         assert!(
-            call_instr.is_some(),
-            "heap allocation should call __vuma_alloc"
+            alloc_instr.is_some(),
+            "heap allocation should produce an Alloc instruction"
         );
     }
 
