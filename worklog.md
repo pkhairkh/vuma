@@ -2431,3 +2431,168 @@ Source: `extern "C" { fn Ok(x: i64) -> i64; } fn main() { Ok(42); }`
   emitted bytes). No downstream consumer of `encoded` bytes is
   affected. The only consumers of `opcode` are tests asserting on
   mnemonic substrings — all of which my fix satisfies.
+
+---
+
+## Task ID: V4
+## Agent: sub-agent (general-purpose)
+## Task: Fix stdout/FFI for output verification — resolve extern calls to known Linux syscalls in `emit_elf`
+
+### Problem
+Programs that call `write()` (or any libc function) via FFI time out when
+compiled to a standalone `ET_EXEC` binary via `emit_elf`. The extern symbol
+(e.g. `write`) is correctly recorded as `SHN_UNDEF` in the ELF symbol
+table, but the `BL` instruction at the call site branches to offset 0 (a
+trap) because `resolve_call_relocs` skips external symbols (line ~4728:
+`continue`). With no system linker in the standalone-execution path, the
+`BL` is never resolved, the program hangs at the `BL`, and any test that
+runs the binary under a 3-second `timeout` reports a hang.
+
+### Root cause
+`emit_elf` (emit.rs:4031) builds the text section, then calls
+`resolve_call_relocs` to patch `BL` instructions for **locally-defined**
+functions only. For external symbols it logs a debug message and leaves
+the `BL #0` placeholder in place. This is correct for `ET_REL` (object
+files — the system linker resolves them later) but wrong for `ET_EXEC`
+(standalone executables — there is no linker).
+
+### Fix
+Added a new pass, `resolve_syscall_relocs`, called in `emit_elf`'s `else`
+(ET_EXEC) branch immediately after `resolve_call_relocs`. The new pass:
+
+1. **Phase 1 — allocate trampolines.** Iterates `all_call_relocs`. For
+   each relocation whose `target_func` is NOT in `function_offsets` (i.e.
+   external) AND whose name matches a known Linux syscall, appends a
+   synthetic 12-byte (AArch64) or 11-byte (x86_64) trampoline at the
+   current end of `text_section`. One trampoline per unique syscall name
+   (deduplicated via a `HashMap<String, u64>`).
+
+2. **Phase 2 — patch call sites.** Iterates `all_call_relocs` again. For
+   each external call that now has a trampoline, patches the `BL`
+   (AArch64, 4 bytes) or `CALL rel32` (x86_64, 5 bytes) instruction to
+   branch to the trampoline's offset.
+
+### Trampoline shapes
+
+**AArch64 (12 bytes, 3 instructions):**
+```
+MOVZ X8, #<syscall_num>   ; 0xD2800008 | ((num & 0xFFFF) << 5)
+SVC  #0                   ; 0xD4000001
+RET                       ; 0xD65F03C0
+```
+The caller's args in X0..X5 pass through unchanged (matches the Linux
+AArch64 syscall convention). Clobbers X0 (return), X8, X16, X17 — all
+caller-saved by the AArch64 C calling convention. Verified: the MOVZ
+encoding for `write` (num=64) produces `0xD2800808`, identical to the
+encoding used in `build_aarch64_runtime` (backend.rs:2038) and the
+`_start` stub's `MOV X8, #93` (emit.rs:4067, `0xD2800BA8`).
+
+**x86_64 (11 bytes):**
+```
+MOV EAX, #<syscall_num>   ; B8 <imm32 LE>   (5 bytes)
+MOV R10, RCX              ; 49 89 CA         (3 bytes)
+SYSCALL                   ; 0F 05            (2 bytes)
+RET                       ; C3               (1 byte)
+```
+The `MOV R10, RCX` bridges the C calling convention (arg4 in RCX) to the
+syscall convention (arg4 in R10, because `SYSCALL` clobbers RCX with the
+saved RIP). This is correct for all syscalls (1..6 args) and a no-op for
+syscalls with < 4 args. Clobbers RAX, RCX, R10, R11 — all caller-saved
+by the System V AMD64 convention.
+
+### BL / CALL patching
+- **AArch64:** preserves the opcode bits of the existing `BL #0`
+  (`0x94000000`) and replaces only the 26-bit immediate:
+  `(bl_word & !0x03FFFFFF) | ((offset_words as u32) & 0x03FFFFFF)`,
+  where `offset_words = (tramp_offset - bl_offset) >> 2`. Includes a
+  range check (`-(1<<25)..(1<<25)`, ±128 MiB) that returns
+  `CodegenError::ElfError` if the trampoline is unreachable.
+- **x86_64:** verifies the call-site opcode byte is `0xE8` (CALL rel32)
+  and patches the 32-bit displacement: `rel32 = tramp_offset - (bl_offset + 5)`.
+  If the opcode is not `0xE8`, logs a warning and leaves the instruction
+  untouched (defensive — avoids corrupting unrelated code).
+
+### Syscall tables
+Added two lookup functions covering the common Linux syscalls used by
+VUMA's FFI examples (`write`, `read`, `exit`, `exit_group`, `mmap`,
+`munmap`, `brk`, `openat`, `close`, `fstat`, `lseek`, `readv`, `writev`,
+`rt_sigaction`, `rt_sigprocmask`, `rt_sigreturn`, `getpid`, `getuid`,
+`getgid`, `nanosleep`, `clock_gettime`, `uname`, `execve`, `wait4`,
+`kill`, `sched_yield`, `ioctl`, `fcntl`, `epoll_create1`, `epoll_ctl`,
+`epoll_pwait`, `eventfd2`, `inotify_*`, `dup`, `dup3`, etc.):
+
+- `aarch64_syscall_num_for_name(name: &str) -> Option<u32>` — AArch64
+  numbers from `asm-generic/unistd.h`.
+- `x86_64_syscall_num_for_name(name: &str) -> Option<u32>` — x86_64
+  numbers from `arch/x86/entry/syscalls/syscall_64.tbl`.
+
+Unknown externs return `None` and are left as-is (BL/CALL to offset 0 —
+a trap, not a hang). The symbol is still recorded as `SHN_UNDEF` in the
+ELF symbol table for downstream tooling / debuggers.
+
+### Backend coverage
+- **AArch64, X86_64:** fully supported.
+- **RISC-V, ARM32, MIPS64, PPC64, LoongArch64:** `resolve_syscall_relocs`
+  returns `Ok(())` early (no trampoline support). Their FFI calls remain
+  unresolved — use `emit_obj` + system linker, or the backend's own
+  `encode_program`, for those targets.
+- **Wasm32:** rejected at the top of `emit_elf` (unchanged).
+
+### Files changed
+- `/tmp/vuma/src/codegen/src/emit.rs` ONLY:
+  - Lines 4108–4128: added `resolve_syscall_relocs(...)` call in
+    `emit_elf`'s ET_EXEC branch, right after `resolve_call_relocs`.
+  - Lines 4762–5198: added `aarch64_syscall_num_for_name`,
+    `x86_64_syscall_num_for_name`, and `resolve_syscall_relocs`.
+
+### Safety / non-regression
+- The new pass only runs for `ET_EXEC` (inside the `else` of `if is_obj`).
+  `ET_REL` object files are unchanged — external symbols are still
+  recorded as `SHN_UNDEF` with `.rela.text` entries for the linker.
+- `resolve_call_relocs` (local function patching) is unchanged and runs
+  first; `resolve_syscall_relocs` only touches relocations that
+  `resolve_call_relocs` skipped (externals).
+- The `external_symbols` list (used to build the symtab) is computed
+  BEFORE the new pass and is NOT filtered — resolved syscall names
+  remain as `SHN_UNDEF` entries. This preserves existing test behavior
+  (e.g. `fuzz_ffi_extern_symbol_simple`, `prop_ffi_extern_symbols_are_undef`).
+- Trampolines are appended AFTER all function code, so existing
+  `function_offsets` / `function_sizes` are unaffected. The trampolines
+  are included in `text_size` (computed after the pass at line ~4175)
+  and thus in the `.text` segment's `PT_LOAD` program header — they are
+  mapped R-X and reachable by `BL`/`CALL`.
+- Trampolines are NOT added to `function_offsets` or `function_sizes`, so
+  they do not get symtab entries (they are anonymous internal helpers).
+- Brace/paren balance: +43 `{`/`}`, +277 `(`/`)` — all balanced.
+- `rustfmt --check` parses the file without syntax errors (78 cosmetic
+  style diffs, of which 72 pre-existed in the backup and 6 are in the
+  new code — all are minor line-wrapping preferences, not errors).
+
+### Verification
+- Could not run `cargo` (per instructions — other agents editing
+  concurrently). Verified by:
+  - Manual encoding check: MOVZ X8, #64 = `0xD2800808` (matches
+    `build_aarch64_runtime`); SVC #0 = `0xD4000001`; RET = `0xD65F03C0`.
+  - Manual BL patching check: `imm26 = (target - src) >> 2`, encoded as
+    `(bl_word & !0x03FFFFFF) | (imm26 & 0x03FFFFFF)` — identical formula
+    to the existing `resolve_call_relocs`.
+  - `rustfmt --edition 2021 --check` confirms the file parses.
+  - Confirmed `BackendKind`, `CodegenError`, `Result`, `HashMap`,
+    `log::debug!`/`warn!`/`trace!` are all already in scope (used by
+    existing code in the same file).
+
+### Known limitations
+- Only AArch64 and x86_64 trampolines are supported. Other backends'
+  FFI calls still trap in standalone `ET_EXEC` builds.
+- The fix is in `emit_elf` (the `vuma::pipeline::compile` /
+  `emit_binary` path). The `VumaCompiler::compile` API path
+  (api.rs:1066) and `execution_test.rs` use `backend.encode_program`
+  directly (backend.rs), which builds its own ELF via
+  `build_aarch64_elf_2seg` — that path does NOT go through `emit_elf`
+  and is unaffected by this fix. A future task could apply the same
+  trampoline approach to `build_aarch64_elf_2seg` (backend.rs) and the
+  x86_64 `encode_program` (x86_64/mod.rs:2495).
+- The trampoline uses `MOVZ X8, #imm16` (single-instruction immediate
+  load), valid for syscall numbers ≤ 65535. All current Linux AArch64
+  syscalls are well below this limit. If a future syscall exceeds it,
+  the encoding would need `MOVZ` + `MOVK` (2 instructions).

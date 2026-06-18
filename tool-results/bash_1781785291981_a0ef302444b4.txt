@@ -1,0 +1,732 @@
+warning: unused import: `ProofStep`
+  --> src/ive/src/invariant_aggregator.rs:26:48
+   |
+26 | use crate::result::{ConfidenceLevel, Evidence, ProofStep, VerificationResult, VerificationStatus};
+   |                                                ^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `config` is never read
+   --> src/cor/src/deployment.rs:517:5
+    |
+513 | pub struct DeploymentPlanner {
+    |            ----------------- field in this struct
+...
+517 |     config: Config,
+    |     ^^^^^^
+    |
+    = note: `DeploymentPlanner` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `vuma-ive` (lib) generated 1 warning (run `cargo fix --lib -p vuma-ive` to apply 1 suggestion)
+warning: `vuma-cor` (lib) generated 1 warning
+warning: unused variable: `ret_id`
+   --> src/parser/src/to_scg.rs:466:13
+    |
+466 |         let ret_id = if last_is_return {
+    |             ^^^^^^ help: if this is intentional, prefix it with an underscore: `_ret_id`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: `vuma-parser` (lib) generated 1 warning (run `cargo fix --lib -p vuma-parser` to apply 1 suggestion)
+warning: unused import: `vuma_codegen::regalloc::RegAllocator`
+    --> src/api.rs:1013:9
+     |
+1013 |     use vuma_codegen::regalloc::RegAllocator;
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `CompileTarget`
+  --> src/llm_api.rs:44:44
+   |
+44 | use crate::pipeline::{self, CompileConfig, CompileTarget};
+   |                                            ^^^^^^^^^^^^^
+
+warning: unused import: `serde::de::Error`
+   --> src/api.rs:747:9
+    |
+747 |     use serde::de::Error;
+    |         ^^^^^^^^^^^^^^^^
+
+warning: value assigned to `last_completed` is never read
+    --> src/pipeline.rs:2585:5
+     |
+2585 |     last_completed = Some(PipelineStage::AstToScg);
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+     = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `last_completed` is never read
+    --> src/pipeline.rs:2598:5
+     |
+2598 |     last_completed = Some(PipelineStage::ScgValidation);
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+
+warning: value assigned to `last_completed` is never read
+    --> src/pipeline.rs:2606:5
+     |
+2606 |     last_completed = Some(PipelineStage::BdInference);
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+
+warning: value assigned to `last_completed` is never read
+    --> src/pipeline.rs:2663:5
+     |
+2663 |     last_completed = Some(PipelineStage::IveVerification);
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+
+warning: value assigned to `last_completed` is never read
+    --> src/pipeline.rs:2783:5
+     |
+2783 |     last_completed = Some(PipelineStage::CodeEmission);
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+
+warning: field `next_id` is never read
+   --> src/lsp/mod.rs:501:5
+    |
+493 | pub struct LspServer {
+    |            --------- field in this struct
+...
+501 |     next_id: i64,
+    |     ^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `walk_control_flow` is never used
+    --> src/pipeline.rs:1139:4
+     |
+1139 | fn walk_control_flow(
+     |    ^^^^^^^^^^^^^^^^^
+
+warning: function `convert_node_to_statement` is never used
+    --> src/pipeline.rs:1490:4
+     |
+1490 | fn convert_node_to_statement(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a macro
+   --> src/logging.rs:229:1
+    |
+229 | macro_rules! log_warn {
+    | ^^^^^^^^^^^^^^^^^^^^^
+    |
+note: the lint level is defined here
+   --> src/lib.rs:40:9
+    |
+ 40 | #![warn(missing_docs)]
+    |         ^^^^^^^^^^^^
+
+warning: missing documentation for a macro
+   --> src/logging.rs:236:1
+    |
+236 | macro_rules! log_info {
+    | ^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a macro
+   --> src/logging.rs:243:1
+    |
+243 | macro_rules! log_debug {
+    | ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a macro
+   --> src/logging.rs:250:1
+    |
+250 | macro_rules! log_trace {
+    | ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `vuma` (lib) generated 15 warnings (run `cargo fix --lib -p vuma` to apply 2 suggestions)
+warning: unused import: `ScgParam`
+ --> src/tests/src/benchmarks/compilation_speed.rs:6:32
+  |
+6 |     Scg, ScgNode, ScgFunction, ScgParam, ScgStatement, ScgType, ScgExpr,
+  |                                ^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `ScgParam`
+ --> src/tests/src/benchmarks/backend_comparison.rs:7:32
+  |
+7 |     Scg, ScgNode, ScgFunction, ScgParam, ScgStatement, ScgType, ScgExpr,
+  |                                ^^^^^^^^
+
+warning: unused import: `ScgParam`
+  --> src/tests/src/benchmarks/codegen_quality.rs:10:32
+   |
+10 |     Scg, ScgNode, ScgFunction, ScgParam, ScgStatement, ScgType, ScgExpr,
+   |                                ^^^^^^^^
+
+warning: unused imports: `DeploymentTarget` and `SCGRegion`
+  --> src/tests/src/property_tests.rs:31:39
+   |
+31 |     AccessNode, AccessMode, RegionId, SCGRegion, DeploymentTarget,
+   |                                       ^^^^^^^^^  ^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::path::Path`
+  --> src/tests/src/final_integration.rs:15:5
+   |
+15 | use std::path::Path;
+   |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `LLMCompileResult`
+  --> src/tests/src/final_integration.rs:17:21
+   |
+17 | use vuma::llm_api::{LLMCompileResult, VumaForLLM};
+   |                     ^^^^^^^^^^^^^^^^
+
+warning: unused import: `compile_to_wasm`
+  --> src/tests/src/final_integration.rs:20:31
+   |
+20 | use vuma::pipeline::{compile, compile_to_wasm, compile_with_path, CompileConfig};
+   |                               ^^^^^^^^^^^^^^^
+
+warning: unused imports: `IRFunction`, `IRInstr`, `IRTerminator`, `IRType`, `IRValue`, and `VirtualRegister`
+  --> src/tests/src/final_integration.rs:25:16
+   |
+25 |     BinOpKind, IRFunction, IRInstr, IRTerminator, IRType, IRValue, VirtualRegister,
+   |                ^^^^^^^^^^  ^^^^^^^  ^^^^^^^^^^^^  ^^^^^^  ^^^^^^^  ^^^^^^^^^^^^^^^
+
+warning: unused import: `vuma_codegen::ScgToIr`
+  --> src/tests/src/final_integration.rs:30:5
+   |
+30 | use vuma_codegen::ScgToIr;
+   |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `IRBlock` and `OutputFormat`
+  --> src/tests/src/sha256d_backends.rs:77:71
+   |
+77 |     backend::{create_backend, AllocatedProgram, Backend, BackendKind, OutputFormat},
+   |                                                                       ^^^^^^^^^^^^
+78 |     ir::{BinOpKind, IRBlock, IRFunction, IRInstr, IRTerminator, IRType, IRValue, VirtualRegister},
+   |                     ^^^^^^^
+
+warning: unused imports: `Parser` and `to_scg::AstToScg`
+  --> src/tests/src/sha256d_backends.rs:82:19
+   |
+82 | use vuma_parser::{to_scg::AstToScg, Parser};
+   |                   ^^^^^^^^^^^^^^^^  ^^^^^^
+
+warning: unused import: `CmpKind`
+  --> src/tests/src/regression.rs:45:26
+   |
+45 |     BinOpKind, CastKind, CmpKind, IRBlock, IRFunction, IRInstr, IRTerminator, IRType, IRValue,
+   |                          ^^^^^^^
+
+warning: unused import: `std::collections::HashMap`
+  --> src/tests/src/regression.rs:48:5
+   |
+48 | use std::collections::HashMap;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: variable does not need to be mutable
+   --> src/tests/src/e2e_cor.rs:365:9
+    |
+365 |     let mut rt = build_runtime_from_vuma_scg();
+    |         ----^^
+    |         |
+    |         help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `has_ldp`
+   --> src/tests/src/execution_validation.rs:389:13
+    |
+389 |         let has_ldp = words.iter().any(|&w| {
+    |             ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_has_ldp`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `e_shstrndx`
+    --> src/tests/src/property_tests.rs:1268:41
+     |
+1268 |     let (e_shoff, e_shentsize, e_shnum, e_shstrndx) = if is_64 {
+     |                                         ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_e_shstrndx`
+
+warning: unused variable: `has_str`
+   --> src/tests/src/regression.rs:634:9
+    |
+634 |     let has_str = opcodes.iter().any(|op| op.to_lowercase().contains("str"));
+    |         ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_has_str`
+
+warning: fields `e_flags` and `e_shstrndx` are never read
+  --> src/tests/src/elf_validation.rs:66:5
+   |
+58 | struct ElfHeader {
+   |        --------- fields in this struct
+...
+66 |     e_flags: u32,
+   |     ^^^^^^^
+...
+72 |     e_shstrndx: u16,
+   |     ^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `p_paddr` is never read
+  --> src/tests/src/elf_validation.rs:81:5
+   |
+76 | struct ElfPhdr {
+   |        ------- field in this struct
+...
+81 |     p_paddr: u64,
+   |     ^^^^^^^
+
+warning: fields `sh_name`, `sh_flags`, `sh_addr`, `sh_link`, `sh_info`, and `sh_entsize` are never read
+  --> src/tests/src/elf_validation.rs:89:5
+   |
+88 | struct ElfShdr {
+   |        ------- fields in this struct
+89 |     sh_name: u32,
+   |     ^^^^^^^
+90 |     sh_type: u32,
+91 |     sh_flags: u64,
+   |     ^^^^^^^^
+92 |     sh_addr: u64,
+   |     ^^^^^^^
+...
+95 |     sh_link: u32,
+   |     ^^^^^^^
+96 |     sh_info: u32,
+   |     ^^^^^^^
+97 |     sh_addralign: u64,
+98 |     sh_entsize: u64,
+   |     ^^^^^^^^^^
+
+warning: field `index` is never read
+   --> src/tests/src/wasm_validation.rs:222:5
+    |
+219 | struct ExportInfo {
+    |        ---------- field in this struct
+...
+222 |     index: u32, // Not read directly but kept for structural completeness
+    |     ^^^^^
+    |
+    = note: `ExportInfo` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: variant `BridgeFailed` is never constructed
+    --> src/tests/src/cross_backend.rs:1094:5
+     |
+1086 | enum CompileStatus {
+     |      ------------- variant in this enum
+...
+1094 |     BridgeFailed(String),
+     |     ^^^^^^^^^^^^
+     |
+     = note: `CompileStatus` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: function `arb_node_type` is never used
+   --> src/tests/src/property_tests.rs:174:4
+    |
+174 | fn arb_node_type() -> impl Strategy<Value = NodeType> {
+    |    ^^^^^^^^^^^^^
+
+warning: constant `ALL_BACKENDS` is never used
+  --> src/tests/src/dwarf_ffi_integration.rs:93:7
+   |
+93 | const ALL_BACKENDS: &[BackendKind] = &[
+   |       ^^^^^^^^^^^^
+
+warning: `vuma-tests` (lib test) generated 24 warnings (run `cargo fix --lib -p vuma-tests --tests` to apply 17 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.06s
+     Running unittests src/lib.rs (target/debug/deps/vuma_tests-bce478e7117313e8)
+
+=== Execution Test: 47 examples x 8 backends ===
+Executable backends (2): [("x86_64", false), ("aarch64", true)]
+Compile-only backends (5): ["riscv64", "loongarch64", "arm32", "mips64", "ppc64"]
+Wasm32 runner: node
+  OK EXEC  arena_allocator.vuma x86_64: exit=-1 stdout=0B
+  OK EXEC  arena_allocator.vuma aarch64: exit=124 stdout=0B
+  ~ SKIP   arena_allocator.vuma riscv64 (no QEMU; compiled 8192B)
+  ~ SKIP   arena_allocator.vuma loongarch64 (no QEMU; compiled 196608B)
+  ~ SKIP   arena_allocator.vuma arm32 (no QEMU; compiled 8192B)
+  ~ SKIP   arena_allocator.vuma mips64 (no QEMU; compiled 131072B)
+  ~ SKIP   arena_allocator.vuma ppc64 (no QEMU; compiled 131072B)
+  ! CRASH  arena_allocator.vuma wasm32: instantiate: WebAssembly.instantiate(): Compiling function #3 failed: expected 0 elements on the stack for fallthru, found 1 @+557
+  OK EXEC  atomics_demo.vuma x86_64: exit=-1 stdout=0B
+  OK EXEC  atomics_demo.vuma aarch64: exit=124 stdout=0B
+  ~ SKIP   atomics_demo.vuma riscv64 (no QEMU; compiled 8192B)
+  ~ SKIP   atomics_demo.vuma loongarch64 (no QEMU; compiled 196608B)
+  ~ SKIP   atomics_demo.vuma arm32 (no QEMU; compiled 8192B)
+  ~ SKIP   atomics_demo.vuma mips64 (no QEMU; compiled 131072B)
+  ~ SKIP   atomics_demo.vuma ppc64 (no QEMU; compiled 131072B)
+  ! CRASH  atomics_demo.vuma wasm32: instantiate: WebAssembly.instantiate(): Compiling function #3 failed: expected 0 elements on the stack for fallthru, found 1 @+735
+  OK EXEC  base64_encode.vuma x86_64: exit=-1 stdout=0B
+  ! CRASH  base64_encode.vuma aarch64: signal 11 (SIGSEGV)
+  ~ SKIP   base64_encode.vuma riscv64 (no QEMU; compiled 8192B)
+  ~ SKIP   base64_encode.vuma loongarch64 (no QEMU; compiled 196608B)
+  ~ SKIP   base64_encode.vuma arm32 (no QEMU; compiled 8192B)
+  ~ SKIP   base64_encode.vuma mips64 (no QEMU; compiled 131072B)
+  ~ SKIP   base64_encode.vuma ppc64 (no QEMU; compiled 131072B)
+  ! CRASH  base64_encode.vuma wasm32: instantiate: WebAssembly.instantiate(): Compiling function #3 failed: expected 0 elements on the stack for fallthru, found 1 @+590
+  OK EXEC  bsearch.vuma x86_64: exit=0 stdout=0B
+  OK EXEC  bsearch.vuma aarch64: exit=124 stdout=0B
+  ~ SKIP   bsearch.vuma riscv64 (no QEMU; compiled 8192B)
+  ~ SKIP   bsearch.vuma loongarch64 (no QEMU; compiled 196608B)
+  ~ SKIP   bsearch.vuma arm32 (no QEMU; compiled 8192B)
+  ~ SKIP   bsearch.vuma mips64 (no QEMU; compiled 131072B)
+  ~ SKIP   bsearch.vuma ppc64 (no QEMU; compiled 131072B)
+  ! CRASH  bsearch.vuma wasm32: instantiate: WebAssembly.instantiate(): Compiling function #3 failed: expected 0 elements on the stack for fallthru, found 1 @+552
+  OK EXEC  channel_demo.vuma x86_64: exit=-1 stdout=0B
+  OK EXEC  channel_demo.vuma aarch64: exit=124 stdout=0B
+  ~ SKIP   channel_demo.vuma riscv64 (no QEMU; compiled 8192B)
+  ~ SKIP   channel_demo.vuma loongarch64 (no QEMU; compiled 196608B)
+  ~ SKIP   channel_demo.vuma arm32 (no QEMU; compiled 8192B)
+  ~ SKIP   channel_demo.vuma mips64 (no QEMU; compiled 131072B)
+  ~ SKIP   channel_demo.vuma ppc64 (no QEMU; compiled 131072B)
+  ! CRASH  channel_demo.vuma wasm32: instantiate: WebAssembly.instantiate(): Compiling function #3 failed: expected 0 elements on the stack for fallthru, found 1 @+725
+  OK EXEC  crc32.vuma x86_64: exit=-1 stdout=0B
+  ! CRASH  crc32.vuma aarch64: signal 11 (SIGSEGV)
+  ~ SKIP   crc32.vuma riscv64 (no QEMU; compiled 8192B)
+  ~ SKIP   crc32.vuma loongarch64 (no QEMU; compiled 196608B)
+  ~ SKIP   crc32.vuma arm32 (no QEMU; compiled 8192B)
+  ~ SKIP   crc32.vuma mips64 (no QEMU; compiled 131072B)
+  ~ SKIP   crc32.vuma ppc64 (no QEMU; compiled 131072B)
+  ! CRASH  crc32.vuma wasm32: instantiate: WebAssembly.instantiate(): Compiling function #3 failed: expected 0 elements on the stack for fallthru, found 1 @+621
+  OK EXEC  debug_info.vuma x86_64: exit=-1 stdout=0B
+  OK EXEC  debug_info.vuma aarch64: exit=124 stdout=0B
+  ~ SKIP   debug_info.vuma riscv64 (no QEMU; compiled 8192B)
+  ~ SKIP   debug_info.vuma loongarch64 (no QEMU; compiled 196608B)
+  ~ SKIP   debug_info.vuma arm32 (no QEMU; compiled 8192B)
+  ~ SKIP   debug_info.vuma mips64 (no QEMU; compiled 131072B)
+  ~ SKIP   debug_info.vuma ppc64 (no QEMU; compiled 131072B)
+  ! CRASH  debug_info.vuma wasm32: instantiate: WebAssembly.instantiate(): Compiling function #3 failed: expected 0 elements on the stack for fallthru, found 1 @+546
+  OK EXEC  doubly_linked_list.vuma x86_64: exit=-1 stdout=0B
+  OK EXEC  doubly_linked_list.vuma aarch64: exit=124 stdout=0B
+  ~ SKIP   doubly_linked_list.vuma riscv64 (no QEMU; compiled 8192B)
+  ~ SKIP   doubly_linked_list.vuma loongarch64 (no QEMU; compiled 196608B)
+  ~ SKIP   doubly_linked_list.vuma arm32 (no QEMU; compiled 8192B)
+  ~ SKIP   doubly_linked_list.vuma mips64 (no QEMU; compiled 131072B)
+  ~ SKIP   doubly_linked_list.vuma ppc64 (no QEMU; compiled 131072B)
+  ! CRASH  doubly_linked_list.vuma wasm32: instantiate: WebAssembly.instantiate(): Compiling function #3 failed: expected 0 elements on the stack for fallthru, found 1 @+583
+  OK EXEC  enum_demo.vuma x86_64: exit=-1 stdout=0B
+  OK EXEC  enum_demo.vuma aarch64: exit=124 stdout=0B
+  ~ SKIP   enum_demo.vuma riscv64 (no QEMU; compiled 8192B)
+  ~ SKIP   enum_demo.vuma loongarch64 (no QEMU; compiled 196608B)
+  ~ SKIP   enum_demo.vuma arm32 (no QEMU; compiled 8192B)
+  ~ SKIP   enum_demo.vuma mips64 (no QEMU; compiled 131072B)
+  ~ SKIP   enum_demo.vuma ppc64 (no QEMU; compiled 131072B)
+  ! CRASH  enum_demo.vuma wasm32: instantiate: WebAssembly.instantiate(): Compiling function #3 failed: expected 0 elements on the stack for fallthru, found 1 @+550
+  OK EXEC  epoll_echo.vuma x86_64: exit=0 stdout=0B
+  OK EXEC  epoll_echo.vuma aarch64: exit=124 stdout=0B
+  ~ SKIP   epoll_echo.vuma riscv64 (no QEMU; compiled 12288B)
+  ~ SKIP   epoll_echo.vuma loongarch64 (no QEMU; compiled 196608B)
+  ~ SKIP   epoll_echo.vuma arm32 (no QEMU; compiled 16384B)
+  ~ SKIP   epoll_echo.vuma mips64 (no QEMU; compiled 131072B)
+  ~ SKIP   epoll_echo.vuma ppc64 (no QEMU; compiled 131072B)
+  ! CRASH  epoll_echo.vuma wasm32: instantiate: WebAssembly.instantiate(): Compiling function #3 failed: expected 0 elements on the stack for fallthru, found 1 @+644
+  OK EXEC  ffi_demo.vuma x86_64: exit=1 stdout=0B
+  OK EXEC  ffi_demo.vuma aarch64: exit=124 stdout=0B
+  ~ SKIP   ffi_demo.vuma riscv64 (no QEMU; compiled 8192B)
+  ~ SKIP   ffi_demo.vuma loongarch64 (no QEMU; compiled 196608B)
+  ~ SKIP   ffi_demo.vuma arm32 (no QEMU; compiled 8192B)
+  ~ SKIP   ffi_demo.vuma mips64 (no QEMU; compiled 131072B)
+  ~ SKIP   ffi_demo.vuma ppc64 (no QEMU; compiled 131072B)
+  ! CRASH  ffi_demo.vuma wasm32: instantiate: WebAssembly.instantiate(): Compiling function #3 failed: expected 0 elements on the stack for fallthru, found 1 @+427
+  OK EXEC  fibonacci.vuma x86_64: exit=-1 stdout=0B
+  OK EXEC  fibonacci.vuma aarch64: exit=124 stdout=0B
+  ~ SKIP   fibonacci.vuma riscv64 (no QEMU; compiled 8192B)
+  ~ SKIP   fibonacci.vuma loongarch64 (no QEMU; compiled 196608B)
+  ~ SKIP   fibonacci.vuma arm32 (no QEMU; compiled 8192B)
+  ~ SKIP   fibonacci.vuma mips64 (no QEMU; compiled 131072B)
+  ~ SKIP   fibonacci.vuma ppc64 (no QEMU; compiled 131072B)
+  ! CRASH  fibonacci.vuma wasm32: instantiate: WebAssembly.instantiate(): Compiling function #3 failed: expected 0 elements on the stack for fallthru, found 1 @+516
+  OK EXEC  float_math.vuma x86_64: exit=-1 stdout=0B
+  OK EXEC  float_math.vuma aarch64: exit=124 stdout=0B
+  ~ SKIP   float_math.vuma riscv64 (no QEMU; compiled 8192B)
+  ~ SKIP   float_math.vuma loongarch64 (no QEMU; compiled 196608B)
+  ~ SKIP   float_math.vuma arm32 (no QEMU; compiled 8192B)
+  ~ SKIP   float_math.vuma mips64 (no QEMU; compiled 131072B)
+  ~ SKIP   float_math.vuma ppc64 (no QEMU; compiled 131072B)
+  ! CRASH  float_math.vuma wasm32: instantiate: WebAssembly.instantiate(): Compiling function #3 failed: expected 0 elements on the stack for fallthru, found 1 @+679
+  OK EXEC  gpio_blink.vuma x86_64: exit=0 stdout=0B
+  OK EXEC  gpio_blink.vuma aarch64: exit=124 stdout=0B
+  ~ SKIP   gpio_blink.vuma riscv64 (no QEMU; compiled 8192B)
+  ~ SKIP   gpio_blink.vuma loongarch64 (no QEMU; compiled 196608B)
+  ~ SKIP   gpio_blink.vuma arm32 (no QEMU; compiled 8192B)
+  ~ SKIP   gpio_blink.vuma mips64 (no QEMU; compiled 131072B)
+  ~ SKIP   gpio_blink.vuma ppc64 (no QEMU; compiled 131072B)
+  ! CRASH  gpio_blink.vuma wasm32: instantiate: WebAssembly.instantiate(): Compiling function #3 failed: expected 0 elements on the stack for fallthru, found 1 @+548
+  OK EXEC  hello_memory.vuma x86_64: exit=-1 stdout=0B
+  ! CRASH  hello_memory.vuma aarch64: signal 11 (SIGSEGV)
+  ~ SKIP   hello_memory.vuma riscv64 (no QEMU; compiled 8192B)
+  ~ SKIP   hello_memory.vuma loongarch64 (no QEMU; compiled 196608B)
+  ~ SKIP   hello_memory.vuma arm32 (no QEMU; compiled 8192B)
+  ~ SKIP   hello_memory.vuma mips64 (no QEMU; compiled 131072B)
+  ~ SKIP   hello_memory.vuma ppc64 (no QEMU; compiled 131072B)
+  ! CRASH  hello_memory.vuma wasm32: instantiate: WebAssembly.instantiate(): Compiling function #3 failed: expected 0 elements on the stack for fallthru, found 1 @+445
+  OK EXEC  hex_dump.vuma x86_64: exit=-1 stdout=0B
+  ! CRASH  hex_dump.vuma aarch64: signal 11 (SIGSEGV)
+  ~ SKIP   hex_dump.vuma riscv64 (no QEMU; compiled 8192B)
+  ~ SKIP   hex_dump.vuma loongarch64 (no QEMU; compiled 196608B)
+  ~ SKIP   hex_dump.vuma arm32 (no QEMU; compiled 8192B)
+  ~ SKIP   hex_dump.vuma mips64 (no QEMU; compiled 131072B)
+  ~ SKIP   hex_dump.vuma ppc64 (no QEMU; compiled 131072B)
+  ! CRASH  hex_dump.vuma wasm32: instantiate: WebAssembly.instantiate(): Compiling function #3 failed: expected 0 elements on the stack for fallthru, found 1 @+548
+  OK EXEC  linked_list.vuma x86_64: exit=-1 stdout=0B
+  OK EXEC  linked_list.vuma aarch64: exit=124 stdout=0B
+  ~ SKIP   linked_list.vuma riscv64 (no QEMU; compiled 8192B)
+  ~ SKIP   linked_list.vuma loongarch64 (no QEMU; compiled 196608B)
+  ~ SKIP   linked_list.vuma arm32 (no QEMU; compiled 8192B)
+  ~ SKIP   linked_list.vuma mips64 (no QEMU; compiled 131072B)
+  ~ SKIP   linked_list.vuma ppc64 (no QEMU; compiled 131072B)
+  ! CRASH  linked_list.vuma wasm32: instantiate: WebAssembly.instantiate(): Compiling function #3 failed: expected 0 elements on the stack for fallthru, found 1 @+580
+  OK EXEC  lock_free_queue.vuma x86_64: exit=0 stdout=0B
+  OK EXEC  lock_free_queue.vuma aarch64: exit=124 stdout=0B
+  ~ SKIP   lock_free_queue.vuma riscv64 (no QEMU; compiled 8192B)
+  ~ SKIP   lock_free_queue.vuma loongarch64 (no QEMU; compiled 196608B)
+  ~ SKIP   lock_free_queue.vuma arm32 (no QEMU; compiled 8192B)
+  ~ SKIP   lock_free_queue.vuma mips64 (no QEMU; compiled 131072B)
+  ~ SKIP   lock_free_queue.vuma ppc64 (no QEMU; compiled 131072B)
+  ! CRASH  lock_free_queue.vuma wasm32: instantiate: WebAssembly.instantiate(): Compiling function #3 failed: expected 0 elements on the stack for fallthru, found 1 @+529
+  OK EXEC  matrix.vuma x86_64: exit=-1 stdout=0B
+  OK EXEC  matrix.vuma aarch64: exit=124 stdout=0B
+  ~ SKIP   matrix.vuma riscv64 (no QEMU; compiled 8192B)
+  ~ SKIP   matrix.vuma loongarch64 (no QEMU; compiled 196608B)
+  ~ SKIP   matrix.vuma arm32 (no QEMU; compiled 8192B)
+  ~ SKIP   matrix.vuma mips64 (no QEMU; compiled 131072B)
+  ~ SKIP   matrix.vuma ppc64 (no QEMU; compiled 131072B)
+  ! CRASH  matrix.vuma wasm32: instantiate: WebAssembly.instantiate(): Compiling function #3 failed: expected 0 elements on the stack for fallthru, found 1 @+579
+  OK EXEC  memory_arena.vuma x86_64: exit=-1 stdout=0B
+  OK EXEC  memory_arena.vuma aarch64: exit=124 stdout=0B
+  ~ SKIP   memory_arena.vuma riscv64 (no QEMU; compiled 8192B)
+  ~ SKIP   memory_arena.vuma loongarch64 (no QEMU; compiled 196608B)
+  ~ SKIP   memory_arena.vuma arm32 (no QEMU; compiled 8192B)
+  ~ SKIP   memory_arena.vuma mips64 (no QEMU; compiled 131072B)
+  ~ SKIP   memory_arena.vuma ppc64 (no QEMU; compiled 131072B)
+  ! CRASH  memory_arena.vuma wasm32: instantiate: WebAssembly.instantiate(): Compiling function #3 failed: expected 0 elements on the stack for fallthru, found 1 @+708
+  OK EXEC  minimal.vuma x86_64: exit=0 stdout=0B
+  OK EXEC  minimal.vuma aarch64: exit=0 stdout=0B
+  ~ SKIP   minimal.vuma riscv64 (no QEMU; compiled 8192B)
+  ~ SKIP   minimal.vuma loongarch64 (no QEMU; compiled 196608B)
+  ~ SKIP   minimal.vuma arm32 (no QEMU; compiled 8192B)
+  ~ SKIP   minimal.vuma mips64 (no QEMU; compiled 131072B)
+  ~ SKIP   minimal.vuma ppc64 (no QEMU; compiled 131072B)
+  ! CRASH  minimal.vuma wasm32: instantiate: WebAssembly.instantiate(): Compiling function #3 failed: expected 0 elements on the stack for fallthru, found 1 @+445
+  OK EXEC  mmap_sha256d.vuma x86_64: exit=0 stdout=0B
+  ! CRASH  mmap_sha256d.vuma aarch64: signal 11 (SIGSEGV)
+  ~ SKIP   mmap_sha256d.vuma riscv64 (no QEMU; compiled 12288B)
+  ~ SKIP   mmap_sha256d.vuma loongarch64 (no QEMU; compiled 196608B)
+  ~ SKIP   mmap_sha256d.vuma arm32 (no QEMU; compiled 12288B)
+  ~ SKIP   mmap_sha256d.vuma mips64 (no QEMU; compiled 131072B)
+  ~ SKIP   mmap_sha256d.vuma ppc64 (no QEMU; compiled 131072B)
+  ! CRASH  mmap_sha256d.vuma wasm32: instantiate: WebAssembly.instantiate(): Compiling function #3 failed: expected 0 elements on the stack for fallthru, found 1 @+1013
+  OK EXEC  pipeline.vuma x86_64: exit=0 stdout=0B
+  OK EXEC  pipeline.vuma aarch64: exit=124 stdout=0B
+  ~ SKIP   pipeline.vuma riscv64 (no QEMU; compiled 16384B)
+  ~ SKIP   pipeline.vuma loongarch64 (no QEMU; compiled 196608B)
+  ~ SKIP   pipeline.vuma arm32 (no QEMU; compiled 20480B)
+  ~ SKIP   pipeline.vuma mips64 (no QEMU; compiled 131072B)
+  ~ SKIP   pipeline.vuma ppc64 (no QEMU; compiled 131072B)
+  ! CRASH  pipeline.vuma wasm32: instantiate: WebAssembly.instantiate(): Compiling function #3 failed: expected 0 elements on the stack for fallthru, found 1 @+1322
+  OK EXEC  quicksort.vuma x86_64: exit=-1 stdout=0B
+  OK EXEC  quicksort.vuma aarch64: exit=124 stdout=0B
+  ~ SKIP   quicksort.vuma riscv64 (no QEMU; compiled 8192B)
+  ~ SKIP   quicksort.vuma loongarch64 (no QEMU; compiled 196608B)
+  ~ SKIP   quicksort.vuma arm32 (no QEMU; compiled 8192B)
+  ~ SKIP   quicksort.vuma mips64 (no QEMU; compiled 131072B)
+  ~ SKIP   quicksort.vuma ppc64 (no QEMU; compiled 131072B)
+  ! CRASH  quicksort.vuma wasm32: instantiate: WebAssembly.instantiate(): Compiling function #3 failed: expected 0 elements on the stack for fallthru, found 1 @+611
+  OK EXEC  self_exec.vuma x86_64: exit=0 stdout=0B
+  OK EXEC  self_exec.vuma aarch64: exit=124 stdout=0B
+  ~ SKIP   self_exec.vuma riscv64 (no QEMU; compiled 16384B)
+  ~ SKIP   self_exec.vuma loongarch64 (no QEMU; compiled 196608B)
+  ~ SKIP   self_exec.vuma arm32 (no QEMU; compiled 16384B)
+  ~ SKIP   self_exec.vuma mips64 (no QEMU; compiled 131072B)
+  ~ SKIP   self_exec.vuma ppc64 (no QEMU; compiled 131072B)
+  ! CRASH  self_exec.vuma wasm32: instantiate: WebAssembly.instantiate(): Compiling function #3 failed: expected 0 elements on the stack for fallthru, found 1 @+1193
+  OK EXEC  sha256d.vuma x86_64: exit=0 stdout=0B
+  ! CRASH  sha256d.vuma aarch64: signal 11 (SIGSEGV)
+  ~ SKIP   sha256d.vuma riscv64 (no QEMU; compiled 12288B)
+  ~ SKIP   sha256d.vuma loongarch64 (no QEMU; compiled 196608B)
+  ~ SKIP   sha256d.vuma arm32 (no QEMU; compiled 12288B)
+  ~ SKIP   sha256d.vuma mips64 (no QEMU; compiled 131072B)
+  ~ SKIP   sha256d.vuma ppc64 (no QEMU; compiled 131072B)
+  ! CRASH  sha256d.vuma wasm32: instantiate: WebAssembly.instantiate(): Compiling function #3 failed: expected 0 elements on the stack for fallthru, found 1 @+1013
+  OK EXEC  signal_hash.vuma x86_64: exit=-1 stdout=0B
+  ! CRASH  signal_hash.vuma aarch64: signal 11 (SIGSEGV)
+  ~ SKIP   signal_hash.vuma riscv64 (no QEMU; compiled 12288B)
+  ~ SKIP   signal_hash.vuma loongarch64 (no QEMU; compiled 196608B)
+  ~ SKIP   signal_hash.vuma arm32 (no QEMU; compiled 16384B)
+  ~ SKIP   signal_hash.vuma mips64 (no QEMU; compiled 131072B)
+  ~ SKIP   signal_hash.vuma ppc64 (no QEMU; compiled 131072B)
+  ! CRASH  signal_hash.vuma wasm32: instantiate: WebAssembly.instantiate(): Compiling function #3 failed: expected 0 elements on the stack for fallthru, found 1 @+1156
+  OK EXEC  sorted_map.vuma x86_64: exit=-1 stdout=0B
+  ! CRASH  sorted_map.vuma aarch64: signal 11 (SIGSEGV)
+  ~ SKIP   sorted_map.vuma riscv64 (no QEMU; compiled 8192B)
+  ~ SKIP   sorted_map.vuma loongarch64 (no QEMU; compiled 196608B)
+  ~ SKIP   sorted_map.vuma arm32 (no QEMU; compiled 8192B)
+  ~ SKIP   sorted_map.vuma mips64 (no QEMU; compiled 131072B)
+  ~ SKIP   sorted_map.vuma ppc64 (no QEMU; compiled 131072B)
+  ! CRASH  sorted_map.vuma wasm32: instantiate: WebAssembly.instantiate(): Compiling function #3 failed: expected 0 elements on the stack for fallthru, found 1 @+724
+  OK EXEC  spinlock.vuma x86_64: exit=-1 stdout=0B
+  ! CRASH  spinlock.vuma aarch64: signal 11 (SIGSEGV)
+  ~ SKIP   spinlock.vuma riscv64 (no QEMU; compiled 8192B)
+  ~ SKIP   spinlock.vuma loongarch64 (no QEMU; compiled 196608B)
+  ~ SKIP   spinlock.vuma arm32 (no QEMU; compiled 8192B)
+  ~ SKIP   spinlock.vuma mips64 (no QEMU; compiled 131072B)
+  ~ SKIP   spinlock.vuma ppc64 (no QEMU; compiled 131072B)
+  ! CRASH  spinlock.vuma wasm32: instantiate: WebAssembly.instantiate(): Compiling function #3 failed: expected 0 elements on the stack for fallthru, found 1 @+639
+  OK EXEC  struct_demo.vuma x86_64: exit=-1 stdout=0B
+  ! CRASH  struct_demo.vuma aarch64: signal 11 (SIGSEGV)
+  ~ SKIP   struct_demo.vuma riscv64 (no QEMU; compiled 8192B)
+  ~ SKIP   struct_demo.vuma loongarch64 (no QEMU; compiled 196608B)
+  ~ SKIP   struct_demo.vuma arm32 (no QEMU; compiled 8192B)
+  ~ SKIP   struct_demo.vuma mips64 (no QEMU; compiled 131072B)
+  ~ SKIP   struct_demo.vuma ppc64 (no QEMU; compiled 131072B)
+  ! CRASH  struct_demo.vuma wasm32: instantiate: WebAssembly.instantiate(): Compiling function #3 failed: expected 0 elements on the stack for fallthru, found 1 @+477
+  OK EXEC  test_alloc.vuma x86_64: exit=0 stdout=0B
+  OK EXEC  test_alloc.vuma aarch64: exit=0 stdout=0B
+  ~ SKIP   test_alloc.vuma riscv64 (no QEMU; compiled 8192B)
+  ~ SKIP   test_alloc.vuma loongarch64 (no QEMU; compiled 196608B)
+  ~ SKIP   test_alloc.vuma arm32 (no QEMU; compiled 8192B)
+  ~ SKIP   test_alloc.vuma mips64 (no QEMU; compiled 131072B)
+  ~ SKIP   test_alloc.vuma ppc64 (no QEMU; compiled 131072B)
+  ! CRASH  test_alloc.vuma wasm32: instantiate: WebAssembly.instantiate(): Compiling function #3 failed: expected 0 elements on the stack for fallthru, found 1 @+445
+  OK EXEC  test_call.vuma x86_64: exit=0 stdout=0B
+  OK EXEC  test_call.vuma aarch64: exit=0 stdout=0B
+  ~ SKIP   test_call.vuma riscv64 (no QEMU; compiled 8192B)
+  ~ SKIP   test_call.vuma loongarch64 (no QEMU; compiled 196608B)
+  ~ SKIP   test_call.vuma arm32 (no QEMU; compiled 8192B)
+  ~ SKIP   test_call.vuma mips64 (no QEMU; compiled 131072B)
+  ~ SKIP   test_call.vuma ppc64 (no QEMU; compiled 131072B)
+  ! CRASH  test_call.vuma wasm32: instantiate: WebAssembly.instantiate(): Compiling function #3 failed: expected 0 elements on the stack for fallthru, found 1 @+453
+  OK EXEC  test_endian.vuma x86_64: exit=-1 stdout=0B
+  ! CRASH  test_endian.vuma aarch64: signal 11 (SIGSEGV)
+  ~ SKIP   test_endian.vuma riscv64 (no QEMU; compiled 8192B)
+  ~ SKIP   test_endian.vuma loongarch64 (no QEMU; compiled 196608B)
+  ~ SKIP   test_endian.vuma arm32 (no QEMU; compiled 8192B)
+  ~ SKIP   test_endian.vuma mips64 (no QEMU; compiled 131072B)
+  ~ SKIP   test_endian.vuma ppc64 (no QEMU; compiled 131072B)
+  ! CRASH  test_endian.vuma wasm32: instantiate: WebAssembly.instantiate(): Compiling function #3 failed: expected 0 elements on the stack for fallthru, found 1 @+480
+  OK EXEC  test_exit.vuma x86_64: exit=42 stdout=0B
+  OK EXEC  test_exit.vuma aarch64: exit=42 stdout=0B
+  ~ SKIP   test_exit.vuma riscv64 (no QEMU; compiled 8192B)
+  ~ SKIP   test_exit.vuma loongarch64 (no QEMU; compiled 196608B)
+  ~ SKIP   test_exit.vuma arm32 (no QEMU; compiled 8192B)
+  ~ SKIP   test_exit.vuma mips64 (no QEMU; compiled 131072B)
+  ~ SKIP   test_exit.vuma ppc64 (no QEMU; compiled 131072B)
+  ! CRASH  test_exit.vuma wasm32: instantiate: WebAssembly.instantiate(): Compiling function #3 failed: expected 0 elements on the stack for fallthru, found 1 @+427
+  OK EXEC  test_hex.vuma x86_64: exit=-1 stdout=0B
+  ! CRASH  test_hex.vuma aarch64: signal 11 (SIGSEGV)
+  ~ SKIP   test_hex.vuma riscv64 (no QEMU; compiled 8192B)
+  ~ SKIP   test_hex.vuma loongarch64 (no QEMU; compiled 196608B)
+  ~ SKIP   test_hex.vuma arm32 (no QEMU; compiled 8192B)
+  ~ SKIP   test_hex.vuma mips64 (no QEMU; compiled 131072B)
+  ~ SKIP   test_hex.vuma ppc64 (no QEMU; compiled 131072B)
+  ! CRASH  test_hex.vuma wasm32: instantiate: WebAssembly.instantiate(): Compiling function #3 failed: expected 0 elements on the stack for fallthru, found 1 @+445
+  OK EXEC  test_hex2.vuma x86_64: exit=-1 stdout=0B
+  ! CRASH  test_hex2.vuma aarch64: signal 11 (SIGSEGV)
+  ~ SKIP   test_hex2.vuma riscv64 (no QEMU; compiled 8192B)
+  ~ SKIP   test_hex2.vuma loongarch64 (no QEMU; compiled 196608B)
+  ~ SKIP   test_hex2.vuma arm32 (no QEMU; compiled 8192B)
+  ~ SKIP   test_hex2.vuma mips64 (no QEMU; compiled 131072B)
+  ~ SKIP   test_hex2.vuma ppc64 (no QEMU; compiled 131072B)
+  ! CRASH  test_hex2.vuma wasm32: instantiate: WebAssembly.instantiate(): Compiling function #3 failed: expected 0 elements on the stack for fallthru, found 1 @+445
+  OK EXEC  test_loop.vuma x86_64: exit=124 stdout=0B
+  OK EXEC  test_loop.vuma aarch64: exit=124 stdout=0B
+  ~ SKIP   test_loop.vuma riscv64 (no QEMU; compiled 8192B)
+  ~ SKIP   test_loop.vuma loongarch64 (no QEMU; compiled 196608B)
+  ~ SKIP   test_loop.vuma arm32 (no QEMU; compiled 8192B)
+  ~ SKIP   test_loop.vuma mips64 (no QEMU; compiled 131072B)
+  ~ SKIP   test_loop.vuma ppc64 (no QEMU; compiled 131072B)
+  ! CRASH  test_loop.vuma wasm32: instantiate: WebAssembly.instantiate(): Compiling function #3 failed: expected 0 elements on the stack for fallthru, found 1 @+445
+  OK EXEC  test_print.vuma x86_64: exit=-1 stdout=0B
+  OK EXEC  test_print.vuma aarch64: exit=124 stdout=0B
+  ~ SKIP   test_print.vuma riscv64 (no QEMU; compiled 8192B)
+  ~ SKIP   test_print.vuma loongarch64 (no QEMU; compiled 196608B)
+  ~ SKIP   test_print.vuma arm32 (no QEMU; compiled 8192B)
+  ~ SKIP   test_print.vuma mips64 (no QEMU; compiled 131072B)
+  ~ SKIP   test_print.vuma ppc64 (no QEMU; compiled 131072B)
+  ! CRASH  test_print.vuma wasm32: instantiate: WebAssembly.instantiate(): Compiling function #3 failed: expected 0 elements on the stack for fallthru, found 1 @+445
+  OK EXEC  test_print2.vuma x86_64: exit=-1 stdout=0B
+  OK EXEC  test_print2.vuma aarch64: exit=124 stdout=0B
+  ~ SKIP   test_print2.vuma riscv64 (no QEMU; compiled 8192B)
+  ~ SKIP   test_print2.vuma loongarch64 (no QEMU; compiled 196608B)
+  ~ SKIP   test_print2.vuma arm32 (no QEMU; compiled 8192B)
+  ~ SKIP   test_print2.vuma mips64 (no QEMU; compiled 131072B)
+  ~ SKIP   test_print2.vuma ppc64 (no QEMU; compiled 131072B)
+  ! CRASH  test_print2.vuma wasm32: instantiate: WebAssembly.instantiate(): Compiling function #3 failed: expected 0 elements on the stack for fallthru, found 1 @+445
+  OK EXEC  test_rotr.vuma x86_64: exit=-1 stdout=0B
+  OK EXEC  test_rotr.vuma aarch64: exit=124 stdout=0B
+  ~ SKIP   test_rotr.vuma riscv64 (no QEMU; compiled 8192B)
+  ~ SKIP   test_rotr.vuma loongarch64 (no QEMU; compiled 196608B)
+  ~ SKIP   test_rotr.vuma arm32 (no QEMU; compiled 8192B)
+  ~ SKIP   test_rotr.vuma mips64 (no QEMU; compiled 131072B)
+  ~ SKIP   test_rotr.vuma ppc64 (no QEMU; compiled 131072B)
+  ! CRASH  test_rotr.vuma wasm32: instantiate: WebAssembly.instantiate(): Compiling function #3 failed: expected 0 elements on the stack for fallthru, found 1 @+472
+  OK EXEC  test_sha_manual.vuma x86_64: exit=-1 stdout=0B
+  OK EXEC  test_sha_manual.vuma aarch64: exit=124 stdout=0B
+  ~ SKIP   test_sha_manual.vuma riscv64 (no QEMU; compiled 8192B)
+  ~ SKIP   test_sha_manual.vuma loongarch64 (no QEMU; compiled 196608B)
+  ~ SKIP   test_sha_manual.vuma arm32 (no QEMU; compiled 8192B)
+  ~ SKIP   test_sha_manual.vuma mips64 (no QEMU; compiled 131072B)
+  ~ SKIP   test_sha_manual.vuma ppc64 (no QEMU; compiled 131072B)
+  ! CRASH  test_sha_manual.vuma wasm32: instantiate: WebAssembly.instantiate(): Compiling function #3 failed: expected 0 elements on the stack for fallthru, found 1 @+725
+  OK EXEC  test_sha_round.vuma x86_64: exit=-1 stdout=0B
+  OK EXEC  test_sha_round.vuma aarch64: exit=124 stdout=0B
+  ~ SKIP   test_sha_round.vuma riscv64 (no QEMU; compiled 8192B)
+  ~ SKIP   test_sha_round.vuma loongarch64 (no QEMU; compiled 196608B)
+  ~ SKIP   test_sha_round.vuma arm32 (no QEMU; compiled 8192B)
+  ~ SKIP   test_sha_round.vuma mips64 (no QEMU; compiled 131072B)
+  ~ SKIP   test_sha_round.vuma ppc64 (no QEMU; compiled 131072B)
+  ! CRASH  test_sha_round.vuma wasm32: instantiate: WebAssembly.instantiate(): Compiling function #3 failed: expected 0 elements on the stack for fallthru, found 1 @+564
+  OK EXEC  test_store.vuma x86_64: exit=-1 stdout=0B
+  ! CRASH  test_store.vuma aarch64: signal 11 (SIGSEGV)
+  ~ SKIP   test_store.vuma riscv64 (no QEMU; compiled 8192B)
+  ~ SKIP   test_store.vuma loongarch64 (no QEMU; compiled 196608B)
+  ~ SKIP   test_store.vuma arm32 (no QEMU; compiled 8192B)
+  ~ SKIP   test_store.vuma mips64 (no QEMU; compiled 131072B)
+  ~ SKIP   test_store.vuma ppc64 (no QEMU; compiled 131072B)
+  ! CRASH  test_store.vuma wasm32: instantiate: WebAssembly.instantiate(): Compiling function #3 failed: expected 0 elements on the stack for fallthru, found 1 @+445
+  OK EXEC  test_u32_arith.vuma x86_64: exit=-1 stdout=0B
+  OK EXEC  test_u32_arith.vuma aarch64: exit=124 stdout=0B
+  ~ SKIP   test_u32_arith.vuma riscv64 (no QEMU; compiled 8192B)
+  ~ SKIP   test_u32_arith.vuma loongarch64 (no QEMU; compiled 196608B)
+  ~ SKIP   test_u32_arith.vuma arm32 (no QEMU; compiled 8192B)
+  ~ SKIP   test_u32_arith.vuma mips64 (no QEMU; compiled 131072B)
+  ~ SKIP   test_u32_arith.vuma ppc64 (no QEMU; compiled 131072B)
+  ! CRASH  test_u32_arith.vuma wasm32: instantiate: WebAssembly.instantiate(): Compiling function #3 failed: expected 0 elements on the stack for fallthru, found 1 @+549
+  OK EXEC  test_u32_mem.vuma x86_64: exit=-1 stdout=0B
+  OK EXEC  test_u32_mem.vuma aarch64: exit=124 stdout=0B
+  ~ SKIP   test_u32_mem.vuma riscv64 (no QEMU; compiled 8192B)
+  ~ SKIP   test_u32_mem.vuma loongarch64 (no QEMU; compiled 196608B)
+  ~ SKIP   test_u32_mem.vuma arm32 (no QEMU; compiled 8192B)
+  ~ SKIP   test_u32_mem.vuma mips64 (no QEMU; compiled 131072B)
+  ~ SKIP   test_u32_mem.vuma ppc64 (no QEMU; compiled 131072B)
+  ! CRASH  test_u32_mem.vuma wasm32: instantiate: WebAssembly.instantiate(): Compiling function #3 failed: expected 0 elements on the stack for fallthru, found 1 @+540
+  OK EXEC  test_w_sched.vuma x86_64: exit=-1 stdout=0B
+  OK EXEC  test_w_sched.vuma aarch64: exit=124 stdout=0B
+  ~ SKIP   test_w_sched.vuma riscv64 (no QEMU; compiled 8192B)
+  ~ SKIP   test_w_sched.vuma loongarch64 (no QEMU; compiled 196608B)
+  ~ SKIP   test_w_sched.vuma arm32 (no QEMU; compiled 8192B)
+  ~ SKIP   test_w_sched.vuma mips64 (no QEMU; compiled 131072B)
+  ~ SKIP   test_w_sched.vuma ppc64 (no QEMU; compiled 131072B)
+  ! CRASH  test_w_sched.vuma wasm32: instantiate: WebAssembly.instantiate(): Compiling function #3 failed: expected 0 elements on the stack for fallthru, found 1 @+608
+  OK EXEC  thread_pool.vuma x86_64: exit=-1 stdout=0B
+  OK EXEC  thread_pool.vuma aarch64: exit=124 stdout=0B
+  ~ SKIP   thread_pool.vuma riscv64 (no QEMU; compiled 8192B)
+  ~ SKIP   thread_pool.vuma loongarch64 (no QEMU; compiled 196608B)
+  ~ SKIP   thread_pool.vuma arm32 (no QEMU; compiled 8192B)
+  ~ SKIP   thread_pool.vuma mips64 (no QEMU; compiled 131072B)
+  ~ SKIP   thread_pool.vuma ppc64 (no QEMU; compiled 131072B)
+  ! CRASH  thread_pool.vuma wasm32: instantiate: WebAssembly.instantiate(): Compiling function #3 failed: expected 0 elements on the stack for fallthru, found 1 @+747
+
+=== Results: 80 pass, 0 fail, 61 crash, 235 skip ===
+=== Lines starting with === ===
+=== Lines starting with Executable/Compile-only/Wasm32 ===
+=== Lines starting with 2-space indent ===
+=== Last 10 lines ===
+
+running 1 test
+test execution_test::test_execute_all_examples_all_executable_backends has been running for over 60 seconds
+test execution_test::test_execute_all_examples_all_executable_backends ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 492 filtered out; finished in 93.31s
