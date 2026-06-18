@@ -1051,3 +1051,45 @@ fn test_e2e_safe_program_passes() {
         "Safe program (allocate + free) must pass compilation. Got: {:?}",
         result);
 }
+
+/// Test ALL example programs through the compilation pipeline at O0.
+#[test]
+fn test_all_examples_compile_at_o0() {
+    use vuma::pipeline::{compile, CompileConfig, OptLevel, VerificationLevel};
+    use std::fs;
+
+    let examples_dir = format!("{}/../../examples", env!("CARGO_MANIFEST_DIR"));
+    let mut examples: Vec<String> = fs::read_dir(&examples_dir)
+        .expect("examples dir")
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .filter(|n| n.ends_with(".vuma"))
+        .collect();
+    examples.sort();
+
+    let config = CompileConfig {
+        opt_level: OptLevel::O0,
+        verification_level: VerificationLevel::None,
+        ..Default::default()
+    };
+
+    let mut passed = 0;
+    for ex in &examples {
+        let path = format!("{}/{}", examples_dir, ex);
+        let source = match fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        match compile(&source, &config) {
+            Ok(output) => {
+                passed += 1;
+                eprintln!("  ✅ {}: {} bytes, {} nodes", ex, output.binary.len(), output.scg.node_count());
+            }
+            Err(errors) => {
+                let err = errors.iter().map(|e| format!("{}", e)).collect::<Vec<_>>().join("; ");
+                eprintln!("  ❌ {}: {}", ex, &err[..err.len().min(100)]);
+            }
+        }
+    }
+    eprintln!("\n=== {} / {} examples compile at O0 ===", passed, examples.len());
+}

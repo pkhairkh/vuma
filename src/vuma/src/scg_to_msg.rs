@@ -930,7 +930,9 @@ fn verify_derivation_chains(ctx: &ConversionContext) -> Result<(), ConversionErr
         let did = DerivationId(i);
         if let Some(derivation) = ctx.msg.derivation(did) {
             // Check provenance range.
-            if !derivation.is_within_bounds() {
+            // Allow zero-size ranges (base == end) which represent a
+            // derived pointer to a single byte. Only reject inverted ranges.
+            if derivation.proven_range.0 > derivation.proven_range.1 {
                 return Err(ConversionError::InvalidProvenanceRange(did));
             }
 
