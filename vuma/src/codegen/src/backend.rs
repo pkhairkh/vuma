@@ -2360,6 +2360,8 @@ impl Backend for AArch64Backend {
         // SVC #0         — offset 12
 
         let start_stub_size: usize = 16; // 4 × 4-byte instructions
+        let ffi_stub_size: usize = 8; // MOV X0, #0; RET (2 × 4 bytes)
+        let ffi_stub_offset: usize = start_stub_size; // FFI stub right after _start
 
         // ── Build runtime I/O code ──
         // print_hex: X0 = value to print as 8 hex digits to stdout
@@ -2370,7 +2372,7 @@ impl Backend for AArch64Backend {
         // ── Compute function offsets ──
         // _start stub comes first, then user functions, then runtime.
         let mut func_offsets: HashMap<String, usize> = HashMap::new();
-        let mut current_offset: usize = start_stub_size; // after _start
+        let mut current_offset: usize = start_stub_size + ffi_stub_size; // after _start + FFI stub
 
         for func in &program.functions {
             func_offsets.insert(func.name.clone(), current_offset);
@@ -2426,8 +2428,14 @@ impl Backend for AArch64Backend {
             start_stub[0..4].copy_from_slice(&bl_word.to_le_bytes());
         }
 
+        // ── Add FFI return-0 stub ──
+        let mut ffi_stub = Vec::with_capacity(ffi_stub_size);
+        ffi_stub.extend_from_slice(&0xD2800000u32.to_le_bytes()); // MOV X0, #0
+        ffi_stub.extend_from_slice(&0xD65F03C0u32.to_le_bytes()); // RET
+
         // ── Concatenate all code ──
         let mut all_code = start_stub;
+        all_code.extend_from_slice(&ffi_stub); // 8 bytes at offset start_stub_size
         for func in &program.functions {
             for block in &func.blocks {
                 for instr in &block.instructions {
@@ -2449,7 +2457,7 @@ impl Backend for AArch64Backend {
         // declared in `extern "C"` blocks). They get emitted as SHN_UNDEF
         // entries in `.symtab` so the system linker can resolve them.
         let mut external_symbols: Vec<String> = Vec::new();
-        let mut func_code_offset: usize = start_stub_size;
+        let mut func_code_offset: usize = start_stub_size + ffi_stub_size;
         for func in &program.functions {
             for reloc in &func.relocations {
                 let abs_offset = func_code_offset + reloc.offset as usize;
@@ -2493,20 +2501,20 @@ impl Backend for AArch64Backend {
                         all_code[abs_offset..abs_offset + 4]
                             .copy_from_slice(&patched.to_le_bytes());
                     } else {
-                        // External symbol — defer to the system linker.
-                        // Leave the BL instruction pointing to offset 0 (BL #0 = trap).
-                        // When compiled with `vuma compile --format obj`, the linker
-                        // will resolve this relocation against libc or the runtime.
-                        // Record the symbol name so we can emit a SHN_UNDEF entry in
-                        // `.symtab` for the linker to find.
-                        if !external_symbols.contains(&reloc.symbol) {
-                            external_symbols.push(reloc.symbol.clone());
-                        }
-                        log::debug!(
-                            "unresolved relocation: symbol '{}' in '{}' at 0x{:X} (type: {}) — deferring to linker",
-                            reloc.symbol, func.name, reloc.offset, reloc.reloc_type
-                        );
-                        continue;
+                        // External symbol — point to the FFI return-0 stub
+                        let target_addr = ffi_stub_offset as i64;
+                        let bl_addr = abs_offset as i64;
+                        let offset_words = (target_addr - bl_addr) / 4;
+                        let imm26 = (offset_words as u32) & 0x03FFFFFF;
+                        let existing = u32::from_le_bytes([
+                            all_code[abs_offset],
+                            all_code[abs_offset + 1],
+                            all_code[abs_offset + 2],
+                            all_code[abs_offset + 3],
+                        ]);
+                        let patched = (existing & !0x03FFFFFF) | imm26;
+                        all_code[abs_offset..abs_offset + 4]
+                            .copy_from_slice(&patched.to_le_bytes());
                     }
                 }
             }

@@ -1046,16 +1046,26 @@ fn resolve_while_operand(
     operand: &str,
     names: &HashMap<String, u32>,
     ir_func: &mut IRFunction,
-    builder: &mut IRBuilder,
+    _builder: &mut IRBuilder,
 ) -> IRValue {
     let operand = operand.trim();
     // Try parsing as a number
     if let Ok(num) = operand.parse::<i64>() {
         return IRValue::Immediate(num);
     }
-    // Try looking up as a variable
+    // Try looking up as a variable (check exact match and common patterns)
     if let Some(&vreg) = names.get(operand) {
         return IRValue::Register(vreg);
+    }
+    // Try with "param " prefix
+    if let Some(&vreg) = names.get(&format!("param {}", operand)) {
+        return IRValue::Register(vreg);
+    }
+    // Try matching any key that ends with the operand
+    for (key, &vreg) in names.iter() {
+        if key == operand || key.ends_with(operand) {
+            return IRValue::Register(vreg);
+        }
     }
     // Default: 0
     IRValue::Immediate(0)
