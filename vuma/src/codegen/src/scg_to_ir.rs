@@ -208,10 +208,12 @@ pub enum ControlNode {
         /// Optional else-branch statements.
         else_body: Option<Vec<ScgStatement>>,
     },
-    /// `loop { body }`
+    /// `loop { body }` or `for i in start..end { body }`
     Loop {
         /// Loop body statements.
         body: Vec<ScgStatement>,
+        /// Optional for-loop range: (var_name, start, end)
+        for_range: Option<(String, i64, i64)>,
     },
     /// `break` (from inside a loop).
     Break,
@@ -802,8 +804,8 @@ impl IRBuilder {
             } => {
                 self.lower_if(cond, then_body, else_body, ir_func, names)?;
             }
-            ControlNode::Loop { body } => {
-                self.lower_loop(body, ir_func, names)?;
+            ControlNode::Loop { body, for_range } => {
+                self.lower_loop(body, for_range, ir_func, names)?;
             }
             ControlNode::Break => {
                 self.lower_break(ir_func, names)?;
@@ -1016,6 +1018,7 @@ impl IRBuilder {
     fn lower_loop(
         &mut self,
         body: &[ScgStatement],
+        for_range: &Option<(String, i64, i64)>,
         ir_func: &mut IRFunction,
         names: &mut HashMap<String, u32>,
     ) -> Result<()> {
@@ -1030,9 +1033,20 @@ impl IRBuilder {
             break_snapshots: Vec::new(),
         });
 
+        // ── Step 0: For-loop — initialize loop counter ──
+        if let Some((var, start, _end)) = for_range {
+            let counter_init = self.alloc_vreg();
+            ir_func.register_vreg(VirtualRegister::named(counter_init, var.as_str()));
+            ir_func.current_block().instructions.push(IRInstruction::Add {
+                dst: IRValue::Register(counter_init),
+                lhs: IRValue::Immediate(*start),
+                rhs: IRValue::Immediate(0),
+                ty: None,
+            });
+            names.insert(var.clone(), counter_init);
+        }
+
         // ── Step 1: Snapshot names BEFORE the loop ──
-        // We need to know which variables exist and their current vregs
-        // so we can create proper phi nodes in the loop header.
         let names_before = names.clone();
 
         // ── Step 2: Jump from current block to loop header ──
@@ -1101,15 +1115,73 @@ impl IRBuilder {
             ir_func.current_block().instructions.push(phi);
         }
 
-        // Unconditional jump from header to body.
-        ir_func.current_block().push(IRInstruction::Branch {
-            target: loop_body_label.clone(),
-        });
-        ir_func.current_block().terminator = IRTerminator::Jump(loop_body_label.clone());
+        // For-loop: add condition check (counter < end) and conditional branch.
+        if let Some((var, start, end)) = for_range {
+            // The counter was initialized in the pre-header block.
+            // The phi for the counter should have been created above.
+            // Get the counter vreg from names (it should be the phi result).
+            let counter_vreg = names.get(var).copied().unwrap_or(0);
+
+            // Load end value
+            let end_vreg = self.alloc_vreg();
+            ir_func.register_vreg(VirtualRegister::named(end_vreg, "loop_end"));
+            ir_func.current_block().instructions.push(IRInstruction::Add {
+                dst: IRValue::Register(end_vreg),
+                lhs: IRValue::Immediate(*end),
+                rhs: IRValue::Immediate(0),
+                ty: None,
+            });
+
+            // Compare counter < end
+            let cmp_vreg = self.alloc_vreg();
+            ir_func.register_vreg(VirtualRegister::named(cmp_vreg, "loop_cmp"));
+            ir_func.current_block().instructions.push(IRInstruction::Cmp {
+                kind: CmpKind::SLt,
+                dst: IRValue::Register(cmp_vreg),
+                lhs: IRValue::Register(counter_vreg),
+                rhs: IRValue::Register(end_vreg),
+                ty: None,
+            });
+
+            // Conditional branch: if cmp != 0, go to body; else go to exit
+            // Emit BOTH the IRInstr::CondBranch (for ISels that process instructions)
+            // AND the IRTerminator::Branch (for ISels that process terminators).
+            ir_func.current_block().instructions.push(IRInstruction::CondBranch {
+                cond: IRValue::Register(cmp_vreg),
+                true_target: loop_body_label.clone(),
+                false_target: loop_exit.clone(),
+            });
+            ir_func.current_block().terminator = IRTerminator::Branch {
+                cond: IRValue::Register(cmp_vreg),
+                true_block: loop_body_label.clone(),
+                false_block: loop_exit.clone(),
+            };
+        } else {
+            // Infinite loop: unconditional jump to body
+            ir_func.current_block().push(IRInstruction::Branch {
+                target: loop_body_label.clone(),
+            });
+            ir_func.current_block().terminator = IRTerminator::Jump(loop_body_label.clone());
+        }
 
         // ── Step 4: Lower the loop body ──
         ir_func.append_block(&loop_body_label);
         self.lower_statements(body, ir_func, names)?;
+
+        // For-loop: increment the counter at the end of the body.
+        if let Some((var, _start, _end)) = for_range {
+            if let Some(&counter_vreg) = names.get(var) {
+                let inc_vreg = self.alloc_vreg();
+                ir_func.register_vreg(VirtualRegister::named(inc_vreg, "loop_inc"));
+                ir_func.current_block().instructions.push(IRInstruction::Add {
+                    dst: IRValue::Register(inc_vreg),
+                    lhs: IRValue::Register(counter_vreg),
+                    rhs: IRValue::Immediate(1),
+                    ty: None,
+                });
+                names.insert(var.clone(), inc_vreg);
+            }
+        }
 
         // Back-edge to header if the block doesn't have a terminator.
         let back_edge_label;
@@ -2577,7 +2649,7 @@ impl IRBuilder {
                     }
                 }
             }
-            ScgStatement::Control(ControlNode::Loop { body }) => {
+            ScgStatement::Control(ControlNode::Loop { body, .. }) => {
                 for s in body {
                     let (d, u) = Self::stmt_def_use(s);
                     defs.extend(d);
