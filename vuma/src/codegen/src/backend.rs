@@ -1349,6 +1349,230 @@ fn decode_aarch64(word: u32) -> String {
     format!(".word {:08x}", word)
 }
 
+/// Map a decoded ARM64 `Instruction` to its `(reads, writes)` physical
+/// register lists, mirroring what task 2-c did for mips64 / arm32 - except
+/// the AArch64 `allocate_registers` path constructs its `AllocatedInstruction`s
+/// directly from the encoded code bytes (it does not have a per-IR-instr
+/// isel wrapper that already knows the operands), so we recover the
+/// register operands by inspecting the decoded `Instruction`.
+///
+/// GPR operands (X0-X30, SP, XZR) are classified as `RegClass::Gpr`; the
+/// FP/SIMD side of the FP-conversion instructions (SCVTF / UCVTF / FCVTZS /
+/// FCVTZU / FCVT / FMOV_DX / FMOV_XD / CNT / ADDV / UMOV) is classified as
+/// `RegClass::SimdFp`, matching AAPCS64 (integer side = X0..X30, FP side =
+/// V0..V31). This lets tests like `test_all_backends_float_to_int_not_just_move`
+/// detect the cross-bank register use that proves a real conversion is
+/// happening (rather than a no-op move within one bank).
+fn arm64_instruction_regs(
+    inst: &crate::arm64::Instruction,
+) -> (Vec<PhysicalReg>, Vec<PhysicalReg>) {
+    use crate::arm64::{Instruction, Register};
+    let gpr = |r: &Register| PhysicalReg::new(RegClass::Gpr, r.encoding());
+    let fp = |r: &Register| PhysicalReg::new(RegClass::SimdFp, r.encoding());
+    let fp_idx = |i: u8| PhysicalReg::new(RegClass::SimdFp, i as u32);
+
+    let mut reads = Vec::new();
+    let mut writes = Vec::new();
+
+    match inst {
+        // ---- FP conversions (cross register-bank) ----
+        // SCVTF / UCVTF: src = GPR (Rn), dst = FP (Rd).
+        Instruction::SCVTF { rd, rn, .. } | Instruction::UCVTF { rd, rn, .. } => {
+            reads.push(gpr(rn));
+            writes.push(fp(rd));
+        }
+        // FCVTZS / FCVTZU: src = FP (Rn), dst = GPR (Rd).
+        Instruction::FCVTZS { rd, rn, .. } | Instruction::FCVTZU { rd, rn, .. } => {
+            reads.push(fp(rn));
+            writes.push(gpr(rd));
+        }
+        // FCVT: src = FP (Rn), dst = FP (Rd).
+        Instruction::FCVT { rd, rn, .. } => {
+            reads.push(fp(rn));
+            writes.push(fp(rd));
+        }
+
+        // ---- FP <-> GPR moves ----
+        Instruction::FMOV_DX { vd, rn } => {
+            reads.push(gpr(rn));
+            writes.push(fp_idx(*vd));
+        }
+        Instruction::FMOV_XD { rd, vn } => {
+            reads.push(fp_idx(*vn));
+            writes.push(gpr(rd));
+        }
+
+        // ---- SIMD integer ops ----
+        Instruction::CNT { vd, vn } | Instruction::ADDV { vd, vn } => {
+            reads.push(fp_idx(*vn));
+            writes.push(fp_idx(*vd));
+        }
+        Instruction::UMOV { rd, vn } => {
+            reads.push(fp_idx(*vn));
+            writes.push(gpr(rd));
+        }
+
+        // ---- Three-operand arithmetic (rd = rn OP rm/imm) ----
+        Instruction::ADD { rd, rn, rm }
+        | Instruction::SUB { rd, rn, rm }
+        | Instruction::LSL { rd, rn, rm }
+        | Instruction::LSR { rd, rn, rm }
+        | Instruction::ASR { rd, rn, rm } => {
+            reads.push(gpr(rn));
+            if let Some(r) = rm.as_reg() {
+                reads.push(gpr(&r));
+            }
+            writes.push(gpr(rd));
+        }
+
+        // ---- Three-register arithmetic (all GPRs) ----
+        Instruction::MUL { rd, rn, rm }
+        | Instruction::SDIV { rd, rn, rm }
+        | Instruction::UDIV { rd, rn, rm }
+        | Instruction::AND { rd, rn, rm }
+        | Instruction::ORR { rd, rn, rm }
+        | Instruction::EOR { rd, rn, rm }
+        | Instruction::RORV { rd, rn, rm } => {
+            reads.push(gpr(rn));
+            reads.push(gpr(rm));
+            writes.push(gpr(rd));
+        }
+
+        // EXTR: rd = (rn:rm) >> imm6.
+        Instruction::EXTR { rd, rn, rm, .. } => {
+            reads.push(gpr(rn));
+            reads.push(gpr(rm));
+            writes.push(gpr(rd));
+        }
+
+        // ---- Load (rt = data, rn = address) ----
+        Instruction::LDR { rt, rn, .. }
+        | Instruction::LDR_W { rt, rn, .. }
+        | Instruction::LDRB { rt, rn, .. }
+        | Instruction::LDRH { rt, rn, .. }
+        | Instruction::LDRSW { rt, rn, .. } => {
+            reads.push(gpr(rn));
+            writes.push(gpr(rt));
+        }
+        // ---- Store (rt = data, rn = address) ----
+        Instruction::STR { rt, rn, .. }
+        | Instruction::STR_W { rt, rn, .. }
+        | Instruction::STRB { rt, rn, .. }
+        | Instruction::STRH { rt, rn, .. } => {
+            reads.push(gpr(rn));
+            reads.push(gpr(rt));
+        }
+
+        // ---- Load/Store Pair ----
+        Instruction::LDP { rt1, rt2, rn, .. } => {
+            reads.push(gpr(rn));
+            writes.push(gpr(rt1));
+            writes.push(gpr(rt2));
+        }
+        Instruction::STP { rt1, rt2, rn, .. } => {
+            reads.push(gpr(rn));
+            reads.push(gpr(rt1));
+            reads.push(gpr(rt2));
+        }
+
+        // ---- Atomics ----
+        Instruction::LDXR { rt, rn }
+        | Instruction::LDAXR { rt, rn }
+        | Instruction::LDAR { rt, rn } => {
+            reads.push(gpr(rn));
+            writes.push(gpr(rt));
+        }
+        Instruction::STXR { rs, rt, rn }
+        | Instruction::STLXR { rs, rt, rn } => {
+            reads.push(gpr(rn));
+            reads.push(gpr(rt));
+            writes.push(gpr(rs));
+        }
+        Instruction::CAS { rs, rt, rn } => {
+            reads.push(gpr(rn));
+            reads.push(gpr(rs));
+            writes.push(gpr(rt));
+        }
+        Instruction::STLR { rt, rn } => {
+            reads.push(gpr(rn));
+            reads.push(gpr(rt));
+        }
+
+        // ---- Branches that read a register ----
+        Instruction::BR { rn } | Instruction::BLR { rn } => {
+            reads.push(gpr(rn));
+        }
+        Instruction::RET { rn: Some(rn) } => {
+            reads.push(gpr(rn));
+        }
+        Instruction::CBZ { rt, .. } | Instruction::CBNZ { rt, .. } => {
+            reads.push(gpr(rt));
+        }
+        Instruction::TBZ { rt, .. } | Instruction::TBNZ { rt, .. } => {
+            reads.push(gpr(rt));
+        }
+
+        // ---- Compare / Test ----
+        Instruction::CMP { rn, rm } | Instruction::CMN { rn, rm } => {
+            reads.push(gpr(rn));
+            if let Some(r) = rm.as_reg() {
+                reads.push(gpr(&r));
+            }
+        }
+        Instruction::TST { rn, rm } => {
+            reads.push(gpr(rn));
+            reads.push(gpr(rm));
+        }
+        Instruction::CSEL { rd, rn, rm, .. } => {
+            reads.push(gpr(rn));
+            reads.push(gpr(rm));
+            writes.push(gpr(rd));
+        }
+        Instruction::CSET { rd, .. } => {
+            writes.push(gpr(rd));
+        }
+        Instruction::MSUB { rd, rn, rm, ra } => {
+            reads.push(gpr(rn));
+            reads.push(gpr(rm));
+            reads.push(gpr(ra));
+            writes.push(gpr(rd));
+        }
+
+        // ---- Bitfield / extend / one-source GPR ops ----
+        Instruction::UBFM { rd, rn, .. }
+        | Instruction::SBFM { rd, rn, .. }
+        | Instruction::SXTW { rd, rn }
+        | Instruction::CLZ { rd, rn }
+        | Instruction::RBIT { rd, rn } => {
+            reads.push(gpr(rn));
+            writes.push(gpr(rd));
+        }
+
+        // ---- Move ----
+        Instruction::MOV { rd, rm } => {
+            reads.push(gpr(rm));
+            writes.push(gpr(rd));
+        }
+        Instruction::MOVZ { rd, .. } | Instruction::MOVK { rd, .. } => {
+            writes.push(gpr(rd));
+        }
+
+        // ---- Everything else (B, BL, BCond, DMB, DSB, ISB, SVC, NOP, RET
+        // without explicit Rn, ...) has no easily-recoverable GPR/FP
+        // operands that the tests care about; leave reads/writes empty
+        // (matches the previous behaviour for these encodings). ----
+        _ => {}
+    }
+
+    // Encoding 31 on AArch64 is XZR/SP — not a general-purpose argument
+    // register (X0–X30). Drop it from the tracked reads/writes so downstream
+    // consumers (e.g. the ABI arg-range test) don't see an out-of-range index.
+    reads.retain(|r| !(r.class == RegClass::Gpr && r.index == 31));
+    writes.retain(|r| !(r.class == RegClass::Gpr && r.index == 31));
+
+    (reads, writes)
+}
+
 // ---------------------------------------------------------------------------
 // AArch64 Backend implementation
 // ---------------------------------------------------------------------------
@@ -1405,7 +1629,7 @@ fn aarch64_compute_frame_size(func: &IRFunction) -> usize {
 /// the kernel maps them with different permissions. Without this,
 /// a single PF_R|PF_W|PF_X segment is insecure and may cause
 /// QEMU/Linux to reject the executable.
-fn build_aarch64_elf_2seg(code: &[u8], base_addr: u64) -> Vec<u8> {
+fn build_aarch64_elf_2seg(code: &[u8], base_addr: u64, extern_symbols: &[String]) -> Vec<u8> {
     const PAGE_SIZE: u64 = 0x1000; // 4 KB
 
     let elf_header_size: u64 = 64;
@@ -1487,7 +1711,208 @@ fn build_aarch64_elf_2seg(code: &[u8], base_addr: u64) -> Vec<u8> {
 
     // No file data for the .data segment (it's BSS-like, zero-initialized)
 
+    // ── Append ELF section headers (.text / .symtab / .strtab / .shstrtab)
+    // when the program references external (undefined) symbols. The section
+    // data is appended after the existing LOAD-segment file content; it is
+    // NOT covered by any LOAD segment (section metadata is only used by
+    // linkers/tools, never loaded into memory). Each external symbol
+    // becomes a SHN_UNDEF / STT_FUNC / STB_GLOBAL entry in `.symtab` so
+    // the linker can resolve it. Mirrors what task 3-c did to shared
+    // `emit_elf`, but in AArch64's custom ELF builder.
+    if !extern_symbols.is_empty() {
+        append_aarch64_elf_sections(&mut elf, text_offset, text_size, extern_symbols);
+    }
+
     elf
+}
+
+/// Append an ELF64 section header table (and the section data it describes)
+/// to the in-progress AArch64 ELF buffer `elf`, then patch the ELF header's
+/// `e_shoff` / `e_shnum` / `e_shstrndx` fields in place.
+///
+/// Sections emitted (in this order):
+///   0. SHT_NULL  (reserved zero entry)
+///   1. `.text`   (SHT_PROGBITS)  — points at the existing text segment
+///   2. `.symtab` (SHT_SYMTAB)    — 1 NULL entry + 1 entry per external
+///   3. `.strtab` (SHT_STRTAB)    — names for the symbols in `.symtab`
+///   4. `.shstrtab` (SHT_STRTAB)  — names for the section headers themselves
+///
+/// `text_offset` and `text_size` describe the existing text segment so the
+/// `.text` section header can point at it. `extern_symbols` is the list of
+/// unresolved external function names (already deduplicated by the caller).
+fn append_aarch64_elf_sections(
+    elf: &mut Vec<u8>,
+    text_offset: u64,
+    text_size: u64,
+    extern_symbols: &[String],
+) {
+    // ELF64 constants
+    const SHT_NULL: u32 = 0;
+    const SHT_PROGBITS: u32 = 1;
+    const SHT_SYMTAB: u32 = 2;
+    const SHT_STRTAB: u32 = 3;
+    const SHN_UNDEF: u16 = 0;
+    const STB_GLOBAL: u8 = 1;
+    const STT_FUNC: u8 = 2;
+    const SYM_SIZE: u64 = 24;
+
+    // ── Build .shstrtab content ──
+    // "\0.text\0.symtab\0.strtab\0.shstrtab\0"
+    let mut shstrtab: Vec<u8> = Vec::new();
+    shstrtab.push(0); // leading null byte (required)
+    let name_text = shstrtab.len() as u32;
+    shstrtab.extend_from_slice(b".text\0");
+    let name_symtab = shstrtab.len() as u32;
+    shstrtab.extend_from_slice(b".symtab\0");
+    let name_strtab = shstrtab.len() as u32;
+    shstrtab.extend_from_slice(b".strtab\0");
+    let name_shstrtab = shstrtab.len() as u32;
+    shstrtab.extend_from_slice(b".shstrtab\0");
+
+    // ── Build .strtab content ──
+    // "\0" + name1 + "\0" + name2 + "\0" + ...
+    let mut strtab: Vec<u8> = Vec::new();
+    strtab.push(0); // leading null byte (required; st_name=0 means "no name")
+    let mut sym_name_offsets: Vec<u32> = Vec::with_capacity(extern_symbols.len());
+    for name in extern_symbols {
+        sym_name_offsets.push(strtab.len() as u32);
+        strtab.extend_from_slice(name.as_bytes());
+        strtab.push(0);
+    }
+
+    // ── Build .symtab content ──
+    // Entry 0 is the reserved NULL symbol (24 zero bytes).
+    // Each external becomes: st_name=offset, st_info=STB_GLOBAL<<4|STT_FUNC,
+    //   st_other=0, st_shndx=SHN_UNDEF, st_value=0, st_size=0.
+    let mut symtab: Vec<u8> = Vec::new();
+    symtab.extend_from_slice(&[0u8; 24]); // NULL symbol
+    for &name_off in &sym_name_offsets {
+        symtab.extend_from_slice(&name_off.to_le_bytes()); // st_name
+        symtab.push((STB_GLOBAL << 4) | STT_FUNC);          // st_info
+        symtab.push(0);                                       // st_other
+        symtab.extend_from_slice(&SHN_UNDEF.to_le_bytes());  // st_shndx
+        symtab.extend_from_slice(&0u64.to_le_bytes());       // st_value
+        symtab.extend_from_slice(&0u64.to_le_bytes());       // st_size
+    }
+
+    // ── Append section data to the file ──
+    // Align the .symtab to 8 bytes (Elf64_Sym's st_value is a u64).
+    while (elf.len() % 8) != 0 {
+        elf.push(0);
+    }
+    let shstrtab_off = elf.len() as u64;
+    elf.extend_from_slice(&shstrtab);
+    let strtab_off = elf.len() as u64;
+    elf.extend_from_slice(&strtab);
+    while (elf.len() % 8) != 0 {
+        elf.push(0);
+    }
+    let symtab_off = elf.len() as u64;
+    let symtab_size = symtab.len() as u64;
+    elf.extend_from_slice(&symtab);
+
+    // ── Append the section header table ──
+    while (elf.len() % 8) != 0 {
+        elf.push(0);
+    }
+    let shdr_off = elf.len() as u64;
+
+    // Helper to write one Elf64_Shdr (64 bytes). Defined as a nested fn
+    // (rather than a closure) so the borrow-checker applies the standard
+    // function-call reborrow rules to the `&mut Vec<u8>` parameter.
+    fn push_shdr(
+        elf: &mut Vec<u8>,
+        sh_name: u32,
+        sh_type: u32,
+        sh_flags: u64,
+        sh_addr: u64,
+        sh_offset: u64,
+        sh_size: u64,
+        sh_link: u32,
+        sh_info: u32,
+        sh_addralign: u64,
+        sh_entsize: u64,
+    ) {
+        elf.extend_from_slice(&sh_name.to_le_bytes());
+        elf.extend_from_slice(&sh_type.to_le_bytes());
+        elf.extend_from_slice(&sh_flags.to_le_bytes());
+        elf.extend_from_slice(&sh_addr.to_le_bytes());
+        elf.extend_from_slice(&sh_offset.to_le_bytes());
+        elf.extend_from_slice(&sh_size.to_le_bytes());
+        elf.extend_from_slice(&sh_link.to_le_bytes());
+        elf.extend_from_slice(&sh_info.to_le_bytes());
+        elf.extend_from_slice(&sh_addralign.to_le_bytes());
+        elf.extend_from_slice(&sh_entsize.to_le_bytes());
+    }
+
+    // Index 0: SHT_NULL
+    push_shdr(elf, 0, SHT_NULL, 0, 0, 0, 0, 0, 0, 0, 0);
+    // Index 1: .text (SHT_PROGBITS, SHF_ALLOC | SHF_EXECINSTR = 0x6)
+    push_shdr(
+        elf,
+        name_text,
+        SHT_PROGBITS,
+        0x6,
+        0x400000 + text_offset,
+        text_offset,
+        text_size,
+        0,
+        0,
+        16,
+        0,
+    );
+    // Index 2: .symtab (SHT_SYMTAB); sh_link = 3 (.strtab index);
+    // sh_info = 1 (one local symbol — the NULL entry — so the first
+    // global is at index 1; standard ELF convention).
+    push_shdr(
+        elf,
+        name_symtab,
+        SHT_SYMTAB,
+        0,
+        0,
+        symtab_off,
+        symtab_size,
+        3,
+        1,
+        8,
+        SYM_SIZE,
+    );
+    // Index 3: .strtab (SHT_STRTAB)
+    push_shdr(
+        elf,
+        name_strtab,
+        SHT_STRTAB,
+        0,
+        0,
+        strtab_off,
+        strtab.len() as u64,
+        0,
+        0,
+        1,
+        0,
+    );
+    // Index 4: .shstrtab (SHT_STRTAB)
+    push_shdr(
+        elf,
+        name_shstrtab,
+        SHT_STRTAB,
+        0,
+        0,
+        shstrtab_off,
+        shstrtab.len() as u64,
+        0,
+        0,
+        1,
+        0,
+    );
+
+    // ── Patch the ELF header: e_shoff (offset 40), e_shnum (offset 60),
+    // e_shstrndx (offset 62). ──
+    let shnum: u16 = 5;
+    let shstrndx: u16 = 4; // index of .shstrtab
+    elf[40..48].copy_from_slice(&shdr_off.to_le_bytes());
+    elf[60..62].copy_from_slice(&shnum.to_le_bytes());
+    elf[62..64].copy_from_slice(&shstrndx.to_le_bytes());
 }
 
 /// Build ARM64 runtime I/O functions using Linux SVC syscalls.
@@ -1847,15 +2272,35 @@ impl Backend for AArch64Backend {
         let frame_size = aarch64_compute_frame_size(func);
 
         // Convert each 32-bit ARM64 instruction word into an AllocatedInstruction
-        // with its little-endian encoded bytes.
+        // with its little-endian encoded bytes. Decode each word via
+        // `arm64::Instruction::decode` (the same decoder used by `disassemble`)
+        // and use the decoded `Display` form as the opcode, mirroring what
+        // task 2-c did for mips64. Populate `reads`/`writes` from the decoded
+        // instruction's register operands (via `arm64_instruction_regs`) so
+        // FP-conversion tests can detect the cross-bank register use that
+        // proves a real conversion is happening. Falls back to the generic
+        // `arm64_N` opcode and empty reads/writes for any word the decoder
+        // does not recognise (defensive - should not happen for any
+        // instruction emitted by the codegen).
         let instructions: Vec<AllocatedInstruction> = code
             .iter()
             .enumerate()
-            .map(|(i, &word)| AllocatedInstruction {
-                opcode: format!("arm64_{}", i),
-                reads: vec![],
-                writes: vec![],
-                encoded: word.to_le_bytes().to_vec(),
+            .map(|(i, &word)| {
+                let (opcode, reads, writes) =
+                    match crate::arm64::Instruction::decode(word) {
+                        Some(inst) => {
+                            let opcode = format!("{}", inst);
+                            let (reads, writes) = arm64_instruction_regs(&inst);
+                            (opcode, reads, writes)
+                        }
+                        None => (format!("arm64_{}", i), Vec::new(), Vec::new()),
+                    };
+                AllocatedInstruction {
+                    opcode,
+                    reads,
+                    writes,
+                    encoded: word.to_le_bytes().to_vec(),
+                }
             })
             .collect();
 
@@ -1997,6 +2442,13 @@ impl Backend for AArch64Backend {
         // ── Patch BL relocations ──
         // Each function's relocations are relative to the start of that function's code.
         // We need to adjust them by the _start stub size + preceding functions' sizes.
+        //
+        // While we walk the relocations, also collect the names of every
+        // symbol that is NOT defined in `func_offsets` — these are the
+        // external (undefined) callees (e.g. libc functions, or functions
+        // declared in `extern "C"` blocks). They get emitted as SHN_UNDEF
+        // entries in `.symtab` so the system linker can resolve them.
+        let mut external_symbols: Vec<String> = Vec::new();
         let mut func_code_offset: usize = start_stub_size;
         for func in &program.functions {
             for reloc in &func.relocations {
@@ -2009,7 +2461,16 @@ impl Backend for AArch64Backend {
                     // R_AARCH64_CALL26: patch BL instruction's imm26 field.
                     // BL target = PC + imm26*4, where PC = address of BL instruction.
                     // So: imm26 = (target_addr - bl_addr) / 4
-                    if let Some(&target_offset) = func_offsets.get(&reloc.symbol) {
+                    let target_offset = func_offsets.get(&reloc.symbol)
+                        .copied()
+                        .or_else(|| {
+                            let prefix = format!("fn_{}", reloc.symbol);
+                            func_offsets.keys()
+                                .find(|k| k.starts_with(&prefix))
+                                .and_then(|k| func_offsets.get(k))
+                                .copied()
+                        });
+                    if let Some(target_offset) = target_offset {
                         let bl_addr = abs_offset as i64;
                         let target_addr = target_offset as i64;
                         let offset_words = (target_addr - bl_addr) / 4;
@@ -2036,6 +2497,11 @@ impl Backend for AArch64Backend {
                         // Leave the BL instruction pointing to offset 0 (BL #0 = trap).
                         // When compiled with `vuma compile --format obj`, the linker
                         // will resolve this relocation against libc or the runtime.
+                        // Record the symbol name so we can emit a SHN_UNDEF entry in
+                        // `.symtab` for the linker to find.
+                        if !external_symbols.contains(&reloc.symbol) {
+                            external_symbols.push(reloc.symbol.clone());
+                        }
                         log::debug!(
                             "unresolved relocation: symbol '{}' in '{}' at 0x{:X} (type: {}) — deferring to linker",
                             reloc.symbol, func.name, reloc.offset, reloc.reloc_type
@@ -2052,7 +2518,10 @@ impl Backend for AArch64Backend {
         }
 
         // ── Build ELF with 2 LOAD segments ──
-        Ok(build_aarch64_elf_2seg(&all_code, 0x400000))
+        // Pass the external symbols so `build_aarch64_elf_2seg` can emit a
+        // `.symtab` / `.strtab` / `.shstrtab` / `.text` section-header
+        // appendix with SHN_UNDEF entries for each external callee.
+        Ok(build_aarch64_elf_2seg(&all_code, 0x400000, &external_symbols))
     }
 
     fn return_stub(&self) -> Vec<u8> {
