@@ -4894,7 +4894,16 @@ impl Backend for Arm32Backend {
 
                 if reloc.reloc_type == "R_ARM_CALL" || reloc.reloc_type == "R_ARM_PC24" {
                     // Inter-function call: look up target function offset
-                    if let Some(&target_offset) = func_offsets.get(&reloc.symbol) {
+                    let target_offset = func_offsets.get(&reloc.symbol)
+                        .copied()
+                        .or_else(|| {
+                            let prefix = format!("fn_{}", reloc.symbol);
+                            func_offsets.keys()
+                                .find(|k| k.starts_with(&prefix))
+                                .and_then(|k| func_offsets.get(k))
+                                .copied()
+                        });
+                    if let Some(target_offset) = target_offset {
                         let bl_addr = abs_offset as i32;
                         let target_addr = target_offset as i32;
                         let offset_words = (target_addr - (bl_addr + 8)) / 4;

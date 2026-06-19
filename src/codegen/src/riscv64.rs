@@ -5310,7 +5310,16 @@ impl Backend for RiscV64Backend {
                 }
 
                 if reloc.reloc_type == "R_RISCV_JAL" {
-                    if let Some(&target_offset) = func_offsets.get(&reloc.symbol) {
+                    let target_offset = func_offsets.get(&reloc.symbol)
+                        .copied()
+                        .or_else(|| {
+                            let prefix = format!("fn_{}", reloc.symbol);
+                            func_offsets.keys()
+                                .find(|k| k.starts_with(&prefix))
+                                .and_then(|k| func_offsets.get(k))
+                                .copied()
+                        });
+                    if let Some(target_offset) = target_offset {
                         let jal_addr = abs_offset as i32;
                         let target_addr = target_offset as i32;
                         let offset = target_addr - jal_addr;

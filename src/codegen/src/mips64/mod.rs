@@ -2720,7 +2720,20 @@ impl Backend for Mips64Backend {
                 }
 
                 if reloc.reloc_type == R_MIPS_26 {
-                    if let Some(&target_offset) = func_offsets.get(&reloc.symbol) {
+                    // Try exact match first, then prefix matching.
+                    // The relocation symbol is typically the bare function name
+                    // (e.g. "add1"), but the function is stored as "fn_add1_entry".
+                    let target_offset = func_offsets.get(&reloc.symbol)
+                        .copied()
+                        .or_else(|| {
+                            // Try prefix matching: "fn_" + symbol
+                            let prefix = format!("fn_{}", reloc.symbol);
+                            func_offsets.keys()
+                                .find(|k| k.starts_with(&prefix))
+                                .and_then(|k| func_offsets.get(k))
+                                .copied()
+                        });
+                    if let Some(target_offset) = target_offset {
                         let abs_addr = BASE_ADDR + text_offset + target_offset as u64;
                         let target_field = ((abs_addr >> 2) & 0x03FFFFFF) as u32;
                         // Read existing instruction (big-endian)

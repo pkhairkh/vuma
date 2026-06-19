@@ -2461,7 +2461,16 @@ impl Backend for AArch64Backend {
                     // R_AARCH64_CALL26: patch BL instruction's imm26 field.
                     // BL target = PC + imm26*4, where PC = address of BL instruction.
                     // So: imm26 = (target_addr - bl_addr) / 4
-                    if let Some(&target_offset) = func_offsets.get(&reloc.symbol) {
+                    let target_offset = func_offsets.get(&reloc.symbol)
+                        .copied()
+                        .or_else(|| {
+                            let prefix = format!("fn_{}", reloc.symbol);
+                            func_offsets.keys()
+                                .find(|k| k.starts_with(&prefix))
+                                .and_then(|k| func_offsets.get(k))
+                                .copied()
+                        });
+                    if let Some(target_offset) = target_offset {
                         let bl_addr = abs_offset as i64;
                         let target_addr = target_offset as i64;
                         let offset_words = (target_addr - bl_addr) / 4;

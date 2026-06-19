@@ -2656,7 +2656,16 @@ impl Backend for X86_64Backend {
                     // S = symbol value (target address)
                     // A = addend (current value at the relocation site)
                     // P = place (address of the relocation site)
-                    if let Some(&target_offset) = func_offsets.get(&reloc.symbol) {
+                    let target_offset = func_offsets.get(&reloc.symbol)
+                        .copied()
+                        .or_else(|| {
+                            let prefix = format!("fn_{}", reloc.symbol);
+                            func_offsets.keys()
+                                .find(|k| k.starts_with(&prefix))
+                                .and_then(|k| func_offsets.get(k))
+                                .copied()
+                        });
+                    if let Some(target_offset) = target_offset {
                         let current_val = i32::from_le_bytes([
                             all_code[abs_offset],
                             all_code[abs_offset + 1],
