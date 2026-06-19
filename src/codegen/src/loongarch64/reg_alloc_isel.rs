@@ -415,7 +415,14 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
     alloc_ids.sort();
     for &id in &alloc_ids { let s = alloc_sizes[&id]; alloc_offsets.insert(id, -(alloc_running + s)); alloc_running += s; }
 
-    let frame_size = ((alloc_running + 15) & !15) as usize;
+    // Frame must include space for:
+    //   - 9 callee-saved GPRs (S0-S8) stored at sp+0..sp+71  (72 bytes)
+    //   - vreg slots (at fp - 24 - 8*i)
+    //   - stack allocations
+    //   - saved ra (at sp + fs - 8) and saved fp (at sp + fs - 16)
+    // The callee-saved area must NOT overlap with the ra/fp saves.
+    let callee_saved_area = 72i32; // 9 callee-saved GPRs x 8 bytes
+    let frame_size = ((alloc_running + callee_saved_area + 15) & !15) as usize;
 
     // ── Phase 2: Generate code ──
     let mut instrs: Vec<AllocatedInstruction> = Vec::new();

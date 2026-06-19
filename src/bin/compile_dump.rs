@@ -1,8 +1,24 @@
-//! Standalone test binary to compile a .vuma file and dump the resulting AArch64 ELF bytes.
+//! Standalone tool to compile a .vuma file and dump the resulting ELF bytes.
 use vuma_codegen::backend::{create_backend, BackendKind, AllocatedProgram};
 use vuma_codegen::scg_to_ir::IRBuilder;
 use vuma_parser::{Parser, AstToScg};
 use vuma::pipeline::{CompileConfig, run_scg_transforms, CompileTarget, OptLevel, VerificationLevel, bridge_scg_to_codegen};
+use std::process::Command;
+use std::fs;
+
+fn backend_from_name(name: &str) -> Result<BackendKind, String> {
+    match name.to_ascii_lowercase().as_str() {
+        "x86_64" | "x86-64" | "x64" => Ok(BackendKind::X86_64),
+        "aarch64" | "arm64" => Ok(BackendKind::AArch64),
+        "riscv64" | "riscv" => Ok(BackendKind::RiscV64),
+        "arm32" | "arm" => Ok(BackendKind::Arm32),
+        "mips64" | "mips" => Ok(BackendKind::Mips64),
+        "ppc64" | "powerpc64" | "ppc" => Ok(BackendKind::PowerPC64),
+        "loongarch64" | "loongarch" => Ok(BackendKind::LoongArch64),
+        "wasm32" | "wasm" => Ok(BackendKind::Wasm32),
+        _ => Err(format!("unknown backend: {}", name)),
+    }
+}
 
 fn compile_for_backend(source: &str, kind: BackendKind) -> Result<Vec<u8>, String> {
     let mut parser = Parser::new(source);
@@ -27,12 +43,102 @@ fn compile_for_backend(source: &str, kind: BackendKind) -> Result<Vec<u8>, Strin
     backend.encode_program(&program).map_err(|e| format!("encode: {}", e))
 }
 
+fn execute_binary(binary: &[u8], qemu: &str, timeout_secs: u64) -> (i32, Vec<u8>, Vec<u8>, bool) {
+    let bin_path = std::env::temp_dir().join(format!("vuma_diag_{}.bin", std::process::id()));
+    let _ = fs::write(&bin_path, binary);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&bin_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        let _ = fs::set_permissions(&bin_path, perms);
+    }
+    let output = Command::new("timeout")
+        .arg(format!("{}", timeout_secs))
+        .arg(qemu)
+        .arg(&bin_path)
+        .output();
+    let _ = fs::remove_file(&bin_path);
+    match output {
+        Ok(o) => {
+            let code = o.status.code().unwrap_or(-1);
+            let stderr = String::from_utf8_lossy(&o.stderr).to_string();
+            let crashed = stderr.contains("Segmentation fault")
+                || stderr.contains("uncaught target signal")
+                || code == 139 || code == 134;
+            (code, o.stdout, o.stderr, crashed)
+        }
+        Err(_) => (-1, vec![], vec![], true),
+    }
+}
+
+fn run_diag(backend_name: &str, examples_dir: &str, qemu: Option<&str>) {
+    let kind = match backend_from_name(backend_name) {
+        Ok(k) => k,
+        Err(e) => { eprintln!("{}", e); std::process::exit(2); }
+    };
+    let mut examples: Vec<String> = fs::read_dir(examples_dir).unwrap()
+        .filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().to_string())
+        .filter(|n| n.ends_with(".vuma")).collect();
+    examples.sort();
+    let mut compile_fail = Vec::new();
+    let mut crash = Vec::new();
+    let mut pass = Vec::new();
+    let mut timeout = Vec::new();
+    let mut exec_fail = Vec::new();
+    for ex in &examples {
+        let path = format!("{}/{}", examples_dir, ex);
+        let source = fs::read_to_string(&path).unwrap();
+        let binary = match compile_for_backend(&source, kind) {
+            Ok(b) => b,
+            Err(e) => { compile_fail.push((ex.clone(), e)); continue; }
+        };
+        if let Some(q) = qemu {
+            let (code, _stdout, stderr, crashed) = execute_binary(&binary, q, 2);
+            if crashed {
+                let err_str = String::from_utf8_lossy(&stderr);
+                let err_short: String = err_str.chars().take(200).collect();
+                crash.push((ex.clone(), code, err_short));
+            } else if code == 124 {
+                timeout.push((ex.clone(), code));
+            } else if code != 0 && code != 42 {
+                exec_fail.push((ex.clone(), code));
+            } else {
+                pass.push((ex.clone(), code));
+            }
+        } else {
+            pass.push((ex.clone(), 0));
+        }
+    }
+    println!("\n=== {} diagnostic results ===", backend_name);
+    println!("Total: {} examples", examples.len());
+    println!("Compile failures ({}):", compile_fail.len());
+    for (n, e) in &compile_fail { println!("  X {} : {}", n, e); }
+    println!("Crashes ({}):", crash.len());
+    for (n, c, e) in &crash { println!("  CRASH {} (code={}): {}", n, c, e); }
+    println!("Timeouts ({}):", timeout.len());
+    for (n, c) in &timeout { println!("  TIMEOUT {} (code={})", n, c); }
+    println!("Exec fail ({}):", exec_fail.len());
+    for (n, c) in &exec_fail { println!("  FAIL {} (code={})", n, c); }
+    println!("Pass ({}):", pass.len());
+    for (n, c) in &pass { println!("  OK {} (code={})", n, c); }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if args.len() > 1 && args[1] == "diag" {
+        let backend = if args.len() > 2 { args[2].as_str() } else { "mips64" };
+        let examples_dir = if args.len() > 3 { args[3].as_str() } else { "/tmp/vuma/examples" };
+        let qemu: Option<&str> = if args.len() > 4 { Some(args[4].as_str()) } else { None };
+        run_diag(backend, examples_dir, qemu);
+        return;
+    }
     let path = &args[1];
     let out_path = &args[2];
+    let backend_name = if args.len() > 3 { args[3].as_str() } else { "aarch64" };
+    let kind = backend_from_name(backend_name).unwrap_or(BackendKind::AArch64);
     let source = std::fs::read_to_string(path).unwrap();
-    let binary = compile_for_backend(&source, BackendKind::AArch64).unwrap();
+    let binary = compile_for_backend(&source, kind).unwrap();
     std::fs::write(out_path, &binary).unwrap();
     eprintln!("Wrote {} bytes to {}", binary.len(), out_path);
 }

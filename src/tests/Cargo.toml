@@ -27,3 +27,7 @@ libc.workspace = true
 proptest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+
+[[bin]]
+name = "standalone_print_test"
+path = "src/standalone_print_test.rs"
