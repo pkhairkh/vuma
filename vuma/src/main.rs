@@ -1667,7 +1667,7 @@ fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) -> Vec
                 then_body,
                 else_body: Some(vec![ScgStatement::Control(ControlNode::Break)]),
             }));
-            vec![ScgStatement::Control(ControlNode::Loop { body: loop_body })]
+            vec![ScgStatement::Control(ControlNode::Loop { body: loop_body, for_range: None })]
         }
 
         // for name in start..end { body }
@@ -1723,13 +1723,13 @@ fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) -> Vec
 
             let mut result = pre_stmts;
             result.push(init_stmt);
-            result.push(ScgStatement::Control(ControlNode::Loop { body: loop_body }));
+            result.push(ScgStatement::Control(ControlNode::Loop { body: loop_body, for_range: None }));
             result
         }
 
         PStmt::Loop(loop_stmt) => {
             let body = bridge_block_to_scg_stmts(&loop_stmt.body, ctx);
-            vec![ScgStatement::Control(ControlNode::Loop { body })]
+            vec![ScgStatement::Control(ControlNode::Loop { body, for_range: None })]
         }
 
         PStmt::Break(_) => vec![ScgStatement::Control(ControlNode::Break)],

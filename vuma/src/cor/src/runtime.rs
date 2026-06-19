@@ -793,6 +793,7 @@ impl CORuntime {
                 ))]));
                 vec![ScgStatement::Control(CgControlNode::Loop {
                     body: loop_body,
+                    for_range: None,
                 })]
             }
             NodeKind::Branch => {
