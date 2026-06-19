@@ -1391,7 +1391,13 @@ fn walk_control_flow_with_externs(
 
                     let body = walk_control_flow_with_externs(body_tgt, scg, edge_idx, consumed, &loop_stop, extern_functions);
 
-                    stmts.push(ScgStatement::Control(ControlNode::Loop { body }));
+                    // Parse for-loop range from the LoopHeader label.
+                    // Label format: "for <var> in <start>..<end>"
+                    let for_range = ctrl.label.as_ref().and_then(|label| {
+                        parse_for_range(label)
+                    });
+
+                    stmts.push(ScgStatement::Control(ControlNode::Loop { body, for_range }));
 
                     // Continue from the LoopExit
                     if let Some(exit) = exit_tgt {
@@ -2118,6 +2124,31 @@ fn find_entry_points(scg: &SCG, edge_idx: &EdgeIndex) -> Vec<NodeId> {
 ///    patterns (loops).
 /// 3. **Phase 3: Statement generation** — Convert non-control nodes into
 ///    ScgStatements with DataFlow-based variable naming.
+/// Parse a for-loop range from a LoopHeader label.
+/// Label format: "for <var> in <start>..<end>"
+/// Returns (var_name, start, end) or None if not a for-loop.
+fn parse_for_range(label: &str) -> Option<(String, i64, i64)> {
+    let label = label.trim();
+    if !label.starts_with("for ") {
+        return None;
+    }
+    let rest = &label[4..]; // skip "for "
+    let in_pos = rest.find(" in ")?;
+    let var_name = rest[..in_pos].trim().to_string();
+    let range_str = rest[in_pos + 4..].trim();
+    if let Some(dot_pos) = range_str.find("..") {
+        let start_str = range_str[..dot_pos].trim();
+        let end_part = &range_str[dot_pos + 2..];
+        let inclusive = end_part.starts_with('=');
+        let end_str = if inclusive { &end_part[1..] } else { end_part }.trim();
+        let start: i64 = start_str.parse().ok()?;
+        let end: i64 = end_str.parse().ok()?;
+        let end = if inclusive { end + 1 } else { end };
+        return Some((var_name, start, end));
+    }
+    None
+}
+
 pub fn bridge_scg_to_codegen(scg: &SCG) -> Scg {
     bridge_scg_to_codegen_with_externs(scg, &HashSet::new())
 }

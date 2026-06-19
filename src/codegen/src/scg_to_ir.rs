@@ -208,10 +208,13 @@ pub enum ControlNode {
         /// Optional else-branch statements.
         else_body: Option<Vec<ScgStatement>>,
     },
-    /// `loop { body }`
+    /// `loop { body }` or `for i in start..end { body }`
     Loop {
         /// Loop body statements.
         body: Vec<ScgStatement>,
+        /// Optional for-loop range: (var_name, start, end)
+        /// When present, the loop runs from start to end-1.
+        for_range: Option<(String, i64, i64)>,
     },
     /// `break` (from inside a loop).
     Break,
@@ -794,8 +797,8 @@ impl IRBuilder {
             } => {
                 self.lower_if(cond, then_body, else_body, ir_func, names)?;
             }
-            ControlNode::Loop { body } => {
-                self.lower_loop(body, ir_func, names)?;
+            ControlNode::Loop { body, ref for_range } => {
+                self.lower_loop(body, for_range, ir_func, names)?;
             }
             ControlNode::Break => {
                 self.lower_break(ir_func, names)?;
@@ -1008,6 +1011,7 @@ impl IRBuilder {
     fn lower_loop(
         &mut self,
         body: &[ScgStatement],
+        for_range: &Option<(String, i64, i64)>,
         ir_func: &mut IRFunction,
         names: &mut HashMap<String, u32>,
     ) -> Result<()> {
@@ -1021,6 +1025,21 @@ impl IRBuilder {
             exit_label: loop_exit.clone(),
             break_snapshots: Vec::new(),
         });
+
+        // ── Step 0: For-loop — initialize loop counter ──
+        // Create a vreg for the loop variable and initialize it to `start`
+        // BEFORE the phi snapshot, so it gets a phi node in the header.
+        if let Some((var, start, _end)) = for_range {
+            let counter_init = self.alloc_vreg();
+            ir_func.register_vreg(VirtualRegister::named(counter_init, var.as_str()));
+            ir_func.current_block().instructions.push(IRInstruction::Add {
+                dst: IRValue::Register(counter_init),
+                lhs: IRValue::Immediate(*start),
+                rhs: IRValue::Immediate(0),
+                ty: None,
+            });
+            names.insert(var.clone(), counter_init);
+        }
 
         // ── Step 1: Snapshot names BEFORE the loop ──
         // We need to know which variables exist and their current vregs
@@ -1093,15 +1112,89 @@ impl IRBuilder {
             ir_func.current_block().instructions.push(phi);
         }
 
-        // Unconditional jump from header to body.
-        ir_func.current_block().push(IRInstruction::Branch {
-            target: loop_body_label.clone(),
-        });
-        ir_func.current_block().terminator = IRTerminator::Jump(loop_body_label.clone());
+        // For-loop: add condition check (counter < end) and conditional branch.
+        // If for_range is Some((var, start, end)), the loop runs from start to end-1.
+        if let Some((var, start, end)) = for_range {
+            // The loop counter is the phi result for the loop variable.
+            // Find the phi vreg for this variable (if it exists in names).
+            let counter_vreg = names.get(var)
+                .copied()
+                .unwrap_or_else(|| {
+                    // If the variable isn't in names yet, create a new vreg
+                    let vreg = self.alloc_vreg();
+                    ir_func.register_vreg(VirtualRegister::named(vreg, var.as_str()));
+                    // Initialize counter to start value
+                    ir_func.current_block().instructions.push(IRInstruction::Add {
+                        dst: IRValue::Register(vreg),
+                        lhs: IRValue::Immediate(*start),
+                        rhs: IRValue::Immediate(0),
+                        ty: None,
+                    });
+                    names.insert(var.clone(), vreg);
+                    vreg
+                });
+
+            // Load end value into a temp register
+            let end_vreg = self.alloc_vreg();
+            ir_func.register_vreg(VirtualRegister::named(end_vreg, "loop_end"));
+            ir_func.current_block().instructions.push(IRInstruction::Add {
+                dst: IRValue::Register(end_vreg),
+                lhs: IRValue::Immediate(*end),
+                rhs: IRValue::Immediate(0),
+                ty: None,
+            });
+
+            // Compare counter < end
+            let cmp_vreg = self.alloc_vreg();
+            ir_func.register_vreg(VirtualRegister::named(cmp_vreg, "loop_cmp"));
+            ir_func.current_block().instructions.push(IRInstruction::Cmp {
+                kind: CmpKind::SLt,
+                dst: IRValue::Register(cmp_vreg),
+                lhs: IRValue::Register(counter_vreg),
+                rhs: IRValue::Register(end_vreg),
+                ty: None,
+            });
+
+            // Conditional branch: if cmp != 0, go to body; else go to exit
+            // Push BOTH the IRInstr::CondBranch (for ISels that process instructions)
+            // AND the IRTerminator::Branch (for ISels that process terminators).
+            ir_func.current_block().instructions.push(IRInstruction::CondBranch {
+                cond: IRValue::Register(cmp_vreg),
+                true_target: loop_body_label.clone(),
+                false_target: loop_exit.clone(),
+            });
+            ir_func.current_block().terminator = IRTerminator::Branch {
+                cond: IRValue::Register(cmp_vreg),
+                true_block: loop_body_label.clone(),
+                false_block: loop_exit.clone(),
+            };
+        } else {
+            // Infinite loop: unconditional jump to body
+            ir_func.current_block().push(IRInstruction::Branch {
+                target: loop_body_label.clone(),
+            });
+            ir_func.current_block().terminator = IRTerminator::Jump(loop_body_label.clone());
+        }
 
         // ── Step 4: Lower the loop body ──
         ir_func.append_block(&loop_body_label);
         self.lower_statements(body, ir_func, names)?;
+
+        // For-loop: increment the counter at the end of the body.
+        if let Some((var, _start, _end)) = for_range {
+            if let Some(&counter_vreg) = names.get(var) {
+                let inc_vreg = self.alloc_vreg();
+                ir_func.register_vreg(VirtualRegister::named(inc_vreg, "loop_inc"));
+                ir_func.current_block().instructions.push(IRInstruction::Add {
+                    dst: IRValue::Register(inc_vreg),
+                    lhs: IRValue::Register(counter_vreg),
+                    rhs: IRValue::Immediate(1),
+                    ty: None,
+                });
+                // Update the counter variable
+                names.insert(var.clone(), inc_vreg);
+            }
+        }
 
         // Back-edge to header if the block doesn't have a terminator.
         let back_edge_label;
@@ -2562,7 +2655,7 @@ impl IRBuilder {
                     }
                 }
             }
-            ScgStatement::Control(ControlNode::Loop { body }) => {
+            ScgStatement::Control(ControlNode::Loop { body, for_range: _ }) => {
                 for s in body {
                     let (d, u) = Self::stmt_def_use(s);
                     defs.extend(d);
@@ -2782,6 +2875,7 @@ mod tests {
             vec![],
             vec![ScgStatement::Control(ControlNode::Loop {
                 body: vec![ScgStatement::Return(vec![])],
+            for_range: None,
             })],
         );
         let mut builder = IRBuilder::new();
@@ -2806,6 +2900,7 @@ mod tests {
             vec![],
             vec![ScgStatement::Control(ControlNode::Loop {
                 body: vec![ScgStatement::Control(ControlNode::Break)],
+            for_range: None,
             })],
         );
         let mut builder = IRBuilder::new();
@@ -2828,6 +2923,7 @@ mod tests {
             vec![],
             vec![ScgStatement::Control(ControlNode::Loop {
                 body: vec![ScgStatement::Control(ControlNode::Continue)],
+            for_range: None,
             })],
         );
         let mut builder = IRBuilder::new();
@@ -4068,6 +4164,7 @@ mod tests {
                             lhs: ScgExpr::Var("n".into()),
                             rhs: ScgExpr::Int(1),
                             tail_call: false,
+                        for_range: None,
                         }),
                         ScgStatement::Control(ControlNode::Break),
                     ],
@@ -4549,6 +4646,7 @@ mod tests {
                             lhs: ScgExpr::Var("a".into()),
                             rhs: ScgExpr::Var("b".into()),
                             tail_call: false,
+                        for_range: None,
                         }),
                         ScgStatement::Computation(ComputationNode {
                             dst: "t1".into(),
