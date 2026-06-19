@@ -1017,60 +1017,6 @@ impl IRBuilder {
     /// demonstrates the canonical SSA loop-phi pattern.  Real compilers would
     /// analyze which variables are modified in the loop body and insert phis
     /// only for those.
-
-/// Parse a while-loop condition string like "i < 256" into (CmpKind, lhs, rhs)
-fn parse_while_cond(cond: &str) -> (CmpKind, String, String) {
-    let cond = cond.trim();
-    // Check two-char operators first
-    for (pat, kind) in [
-        ("<=", CmpKind::SLe), (">=", CmpKind::SGe),
-        ("==", CmpKind::Eq), ("!=", CmpKind::Ne),
-    ] {
-        if let Some(pos) = cond.find(pat) {
-            return (kind, cond[..pos].trim().to_string(), cond[pos+pat.len()..].trim().to_string());
-        }
-    }
-    // Single-char operators
-    for (pat, kind) in [
-        ("<", CmpKind::SLt), (">", CmpKind::SGt),
-    ] {
-        if let Some(pos) = cond.find(pat) {
-            return (kind, cond[..pos].trim().to_string(), cond[pos+1..].trim().to_string());
-        }
-    }
-    (CmpKind::Eq, cond.to_string(), "0".to_string())
-}
-
-/// Resolve a while-loop operand (variable name or literal) to an IRValue
-fn resolve_while_operand(
-    operand: &str,
-    names: &HashMap<String, u32>,
-    ir_func: &mut IRFunction,
-    _builder: &mut IRBuilder,
-) -> IRValue {
-    let operand = operand.trim();
-    // Try parsing as a number
-    if let Ok(num) = operand.parse::<i64>() {
-        return IRValue::Immediate(num);
-    }
-    // Try looking up as a variable (check exact match and common patterns)
-    if let Some(&vreg) = names.get(operand) {
-        return IRValue::Register(vreg);
-    }
-    // Try with "param " prefix
-    if let Some(&vreg) = names.get(&format!("param {}", operand)) {
-        return IRValue::Register(vreg);
-    }
-    // Try matching any key that ends with the operand
-    for (key, &vreg) in names.iter() {
-        if key == operand || key.ends_with(operand) {
-            return IRValue::Register(vreg);
-        }
-    }
-    // Default: 0
-    IRValue::Immediate(0)
-}
-
     fn lower_loop(
         &mut self,
         body: &[ScgStatement],
@@ -1175,9 +1121,7 @@ fn resolve_while_operand(
 
         // For-loop: add condition check (counter < end) and conditional branch.
         if let Some((var, start, end)) = for_range {
-            // The counter was initialized in the pre-header block.
-            // The phi for the counter should have been created above.
-            // Get the counter vreg from names (it should be the phi result).
+            // Counter was initialized in the pre-header block.
             let counter_vreg = names.get(var).copied().unwrap_or(0);
 
             // Load end value
@@ -1201,34 +1145,7 @@ fn resolve_while_operand(
                 ty: None,
             });
 
-            // Conditional branch: if cmp != 0, go to body; else go to exit
-            // Emit BOTH the IRInstr::CondBranch (for ISels that process instructions)
-            // AND the IRTerminator::Branch (for ISels that process terminators).
-            ir_func.current_block().instructions.push(IRInstruction::CondBranch {
-                cond: IRValue::Register(cmp_vreg),
-                true_target: loop_body_label.clone(),
-                false_target: loop_exit.clone(),
-            });
-            ir_func.current_block().terminator = IRTerminator::Branch {
-                cond: IRValue::Register(cmp_vreg),
-                true_block: loop_body_label.clone(),
-                false_block: loop_exit.clone(),
-            };
-        } else if let Some(cond_str) = while_cond {
-            // While loop: parse condition and add check in header
-            // Parse "i < 256" or "j < 8" etc.
-            let (cmp_op, lhs_str, rhs_str) = Self::parse_while_cond(cond_str);
-            let lhs_val = Self::resolve_while_operand(&lhs_str, names, ir_func, self);
-            let rhs_val = Self::resolve_while_operand(&rhs_str, names, ir_func, self);
-            let cmp_vreg = self.alloc_vreg();
-            ir_func.register_vreg(VirtualRegister::named(cmp_vreg, "while_cmp"));
-            ir_func.current_block().instructions.push(IRInstruction::Cmp {
-                kind: cmp_op,
-                dst: IRValue::Register(cmp_vreg),
-                lhs: lhs_val,
-                rhs: rhs_val,
-                ty: None,
-            });
+            // Conditional branch
             ir_func.current_block().instructions.push(IRInstruction::CondBranch {
                 cond: IRValue::Register(cmp_vreg),
                 true_target: loop_body_label.clone(),
@@ -1240,7 +1157,7 @@ fn resolve_while_operand(
                 false_block: loop_exit.clone(),
             };
         } else {
-            // Infinite loop: unconditional jump to body
+            // Infinite/while loop: unconditional jump to body
             ir_func.current_block().push(IRInstruction::Branch {
                 target: loop_body_label.clone(),
             });
@@ -1252,14 +1169,8 @@ fn resolve_while_operand(
         self.lower_statements(body, ir_func, names)?;
 
         // For-loop: increment the counter at the end of the body.
-        // Use the SAME vreg as the counter (not a new one) so the stack-slot
-        // ISel overwrites the counter's stack slot. This ensures the Cmp in
-        // the header reads the updated value.
         if let Some((var, _start, _end)) = for_range {
             if let Some(&counter_vreg) = names.get(var) {
-                // Compute counter = counter + 1, storing back to the same vreg
-                // This is not valid SSA, but the stack-slot ISel handles it
-                // correctly by loading from and storing to the same stack slot.
                 let tmp_vreg = self.alloc_vreg();
                 ir_func.register_vreg(VirtualRegister::anonymous(tmp_vreg));
                 ir_func.current_block().instructions.push(IRInstruction::Add {
@@ -1268,7 +1179,6 @@ fn resolve_while_operand(
                     rhs: IRValue::Immediate(1),
                     ty: None,
                 });
-                // Copy tmp back to counter (overwrites counter's stack slot)
                 ir_func.current_block().instructions.push(IRInstruction::Add {
                     dst: IRValue::Register(counter_vreg),
                     lhs: IRValue::Register(tmp_vreg),
