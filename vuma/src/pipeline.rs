@@ -1310,7 +1310,24 @@ fn walk_control_flow_with_externs(
 
                     let body = walk_control_flow_with_externs(body_tgt, scg, edge_idx, consumed, &loop_stop, extern_functions);
 
-                    stmts.push(ScgStatement::Control(ControlNode::Loop { body, for_range: ctrl.label.as_ref().and_then(|label| parse_for_range(label)) }));
+                    let for_range = ctrl.label.as_ref().and_then(|label| parse_for_range(label));
+                    let while_cond = if for_range.is_none() {
+                        ctrl.label.as_ref().and_then(|label| {
+                            if label.starts_with("while ") {
+                                let rest = &label[6..].trim();
+                                if rest.starts_with('(') && rest.ends_with(')') {
+                                    Some(rest[1..rest.len()-1].to_string())
+                                } else {
+                                    Some(rest.to_string())
+                                }
+                            } else {
+                                None
+                            }
+                        })
+                    } else {
+                        None
+                    };
+                    stmts.push(ScgStatement::Control(ControlNode::Loop { body, for_range, while_cond }));
 
                     // Continue from the LoopExit
                     if let Some(exit) = exit_tgt {
