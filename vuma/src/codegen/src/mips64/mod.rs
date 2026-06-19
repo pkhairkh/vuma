@@ -1,7 +1,7 @@
 //! # MIPS 64-bit Backend
 //!
 //! Implements the `Backend` trait for the MIPS 64-bit target (N64 ABI,
-//! big-endian).  This module provides:
+//! little-endian).  This module provides:
 //!
 //! - `Gpr` — General-purpose register enum ($0–$31)
 //! - `Fpr` — Floating-point register enum ($f0–$f31)
@@ -35,7 +35,7 @@
 //!
 //! ## Instruction Encoding
 //!
-//! All instructions are 32 bits, **big-endian**, with three formats:
+//! All instructions are 32 bits, **little-endian**, with three formats:
 //!
 //! - **R-type**: `opcode[31:26] | rs[25:21] | rt[20:16] | rd[15:11] | sa[10:6] | funct[5:0]`
 //! - **I-type**: `opcode[31:26] | rs[25:21] | rt[20:16] | imm[15:0]`
@@ -469,7 +469,7 @@ impl fmt::Display for Fpr {
 // Instruction Encoding Helpers
 // ===========================================================================
 
-/// Encode an R-type instruction (big-endian).
+/// Encode an R-type instruction (little-endian).
 ///
 /// Format: `opcode[31:26] | rs[25:21] | rt[20:16] | rd[15:11] | sa[10:6] | funct[5:0]`
 fn encode_r_type(opcode: u32, rs: u32, rt: u32, rd: u32, sa: u32, funct: u32) -> [u8; 4] {
@@ -479,10 +479,10 @@ fn encode_r_type(opcode: u32, rs: u32, rt: u32, rd: u32, sa: u32, funct: u32) ->
         | ((rd & 0x1F) << 11)
         | ((sa & 0x1F) << 6)
         | (funct & 0x3F);
-    word.to_be_bytes()
+    word.to_le_bytes()
 }
 
-/// Encode a COP1 R-type instruction (big-endian).
+/// Encode a COP1 R-type instruction (little-endian).
 ///
 /// Format: `COP1[31:26] | fmt[25:21] | 0[20:16] | fs[15:11] | fd[10:6] | func[5:0]`
 fn encode_cop1_r_type(fmt: u32, ft: u32, fs: u32, fd: u32, funct: u32) -> [u8; 4] {
@@ -492,28 +492,28 @@ fn encode_cop1_r_type(fmt: u32, ft: u32, fs: u32, fd: u32, funct: u32) -> [u8; 4
         | ((fs & 0x1F) << 11)
         | ((fd & 0x1F) << 6)
         | (funct & 0x3F);
-    word.to_be_bytes()
+    word.to_le_bytes()
 }
 
-/// Encode an I-type instruction (big-endian).
+/// Encode an I-type instruction (little-endian).
 ///
 /// Format: `opcode[31:26] | rs[25:21] | rt[20:16] | imm[15:0]`
 fn encode_i_type(opcode: u32, rs: u32, rt: u32, imm: u32) -> [u8; 4] {
     let word = ((opcode & 0x3F) << 26) | ((rs & 0x1F) << 21) | ((rt & 0x1F) << 16) | (imm & 0xFFFF);
-    word.to_be_bytes()
+    word.to_le_bytes()
 }
 
-/// Encode a J-type instruction (big-endian).
+/// Encode a J-type instruction (little-endian).
 ///
 /// Format: `opcode[31:26] | target[25:0]`
 fn encode_j_type(opcode: u32, target: u32) -> [u8; 4] {
     let word = ((opcode & 0x3F) << 26) | (target & 0x03FF_FFFF);
-    word.to_be_bytes()
+    word.to_le_bytes()
 }
 
 /// Encode a NOP instruction (0x00000000).
 fn encode_nop() -> [u8; 4] {
-    0x00000000u32.to_be_bytes()
+    0x00000000u32.to_le_bytes()
 }
 
 // ===========================================================================
@@ -524,7 +524,7 @@ fn encode_nop() -> [u8; 4] {
 ///
 /// Covers key R-type, I-type, and J-type instructions from the MIPS64 ISA.
 /// Each variant captures the operands needed for encoding and disassembly.
-/// The `encode()` method produces a 4-byte **big-endian** machine code word.
+/// The `encode()` method produces a 4-byte **little-endian** machine code word.
 ///
 /// Branch delay slots are handled by the `has_delay_slot()` method: when it
 /// returns `true`, the caller must insert a NOP after the instruction.
@@ -776,7 +776,7 @@ pub enum Instruction {
 }
 
 impl Instruction {
-    /// Encode this instruction into a 4-byte **big-endian** machine code word.
+    /// Encode this instruction into a 4-byte **little-endian** machine code word.
     ///
     /// Encoding follows the MIPS64 ISA Specification.
     pub fn encode(&self) -> [u8; 4] {
@@ -1063,12 +1063,12 @@ impl Instruction {
             Instruction::Syscall { code } => {
                 // syscall: bits[25:6] = code, funct = 0x0C
                 let word = (OPC_SPECIAL << 26) | ((*code & 0xFFFFF) << 6) | FN_SYSCALL;
-                word.to_be_bytes()
+                word.to_le_bytes()
             }
             Instruction::Break { code } => {
                 // break: bits[25:6] = code, funct = 0x0D
                 let word = (OPC_SPECIAL << 26) | ((*code & 0xFFFFF) << 6) | FN_BREAK;
-                word.to_be_bytes()
+                word.to_le_bytes()
             }
 
             // ── I-type: Immediate Arithmetic (32-bit) ─────────────────
@@ -1605,13 +1605,13 @@ impl Instruction {
 // MIPS64 ELF64 Emission
 // ===========================================================================
 
-/// Build a proper ELF64 binary for MIPS64 (big-endian) with 2 LOAD segments.
+/// Build a proper ELF64 binary for MIPS64 (little-endian) with 2 LOAD segments.
 ///
 /// Produces a static executable with:
 /// - Segment 1: LOAD RX — `.text` section (code)
 /// - Segment 2: LOAD RW — `.data` / BSS (writable memory for stack/data)
 ///
-/// All header fields are written in big-endian byte order.
+/// All header fields are written in little-endian byte order.
 /// e_flags is set to EF_MIPS_ARCH_64 (0x60000000) for the MIPS64 N64 ABI.
 fn build_mips64_elf_2seg(code: &[u8], base_addr: u64) -> Vec<u8> {
     const PAGE_SIZE: u64 = 0x10000; // 64 KB (MIPS typical page size)
@@ -1636,38 +1636,38 @@ fn build_mips64_elf_2seg(code: &[u8], base_addr: u64) -> Vec<u8> {
     // --- e_ident ---
     elf.extend_from_slice(&[0x7f, b'E', b'L', b'F']); // magic
     elf.push(2); // ELFCLASS64
-    elf.push(2); // ELFDATA2MSB (big-endian)
+    elf.push(1); // ELFDATA2LSB (little-endian)
     elf.push(1); // EV_CURRENT
     elf.push(3); // ELFOSABI_LINUX
     elf.push(0); // padding
     elf.extend_from_slice(&[0u8; 7]); // padding
 
-    // --- ELF header fields (big-endian) ---
-    elf.extend_from_slice(&2u16.to_be_bytes()); // e_type = ET_EXEC
-    elf.extend_from_slice(&8u16.to_be_bytes()); // e_machine = EM_MIPS
-    elf.extend_from_slice(&1u32.to_be_bytes()); // e_version
-    elf.extend_from_slice(&entry_point.to_be_bytes()); // e_entry
-    elf.extend_from_slice(&elf_header_size.to_be_bytes()); // e_phoff
-    elf.extend_from_slice(&0u64.to_be_bytes()); // e_shoff (no section headers)
+    // --- ELF header fields (little-endian) ---
+    elf.extend_from_slice(&2u16.to_le_bytes()); // e_type = ET_EXEC
+    elf.extend_from_slice(&8u16.to_le_bytes()); // e_machine = EM_MIPS
+    elf.extend_from_slice(&1u32.to_le_bytes()); // e_version
+    elf.extend_from_slice(&entry_point.to_le_bytes()); // e_entry
+    elf.extend_from_slice(&elf_header_size.to_le_bytes()); // e_phoff
+    elf.extend_from_slice(&0u64.to_le_bytes()); // e_shoff (no section headers)
     // e_flags: EF_MIPS_ARCH_64 = 0x60000000 (MIPS64 ISA, N64 ABI implied by ELFCLASS64)
-    elf.extend_from_slice(&0x60008000u32.to_be_bytes()); // e_flags: EF_MIPS_ARCH_64 | EF_MIPS_ABI64
+    elf.extend_from_slice(&0x60008000u32.to_le_bytes()); // e_flags: EF_MIPS_ARCH_64 | EF_MIPS_ABI64
     // Note: EF_MIPS_ABI64 (0x20000000) should also be set for N64 ABI,
-    elf.extend_from_slice(&64u16.to_be_bytes()); // e_ehsize
-    elf.extend_from_slice(&56u16.to_be_bytes()); // e_phentsize
-    elf.extend_from_slice(&1u16.to_be_bytes()); // e_phnum = 1
-    elf.extend_from_slice(&64u16.to_be_bytes()); // e_shentsize
-    elf.extend_from_slice(&0u16.to_be_bytes()); // e_shnum
-    elf.extend_from_slice(&0u16.to_be_bytes()); // e_shstrndx
+    elf.extend_from_slice(&64u16.to_le_bytes()); // e_ehsize
+    elf.extend_from_slice(&56u16.to_le_bytes()); // e_phentsize
+    elf.extend_from_slice(&1u16.to_le_bytes()); // e_phnum = 1
+    elf.extend_from_slice(&64u16.to_le_bytes()); // e_shentsize
+    elf.extend_from_slice(&0u16.to_le_bytes()); // e_shnum
+    elf.extend_from_slice(&0u16.to_le_bytes()); // e_shstrndx
 
     // --- Program Header 1: LOAD (PF_R | PF_X) — .text ---
-    elf.extend_from_slice(&1u32.to_be_bytes()); // p_type = PT_LOAD
-    elf.extend_from_slice(&5u32.to_be_bytes()); // p_flags = PF_R | PF_X
-    elf.extend_from_slice(&0u64.to_be_bytes()); // p_offset = 0 (include ELF header in LOAD segment)
-    elf.extend_from_slice(&base_addr.to_be_bytes()); // p_vaddr = base_addr (include ELF header)
-    elf.extend_from_slice(&base_addr.to_be_bytes()); // p_paddr = base_addr
-    elf.extend_from_slice(&((text_offset + text_size) as u64).to_be_bytes()); // p_filesz (headers + code)
-    elf.extend_from_slice(&((text_offset + text_size) as u64).to_be_bytes()); // p_memsz
-    elf.extend_from_slice(&PAGE_SIZE.to_be_bytes()); // p_align
+    elf.extend_from_slice(&1u32.to_le_bytes()); // p_type = PT_LOAD
+    elf.extend_from_slice(&5u32.to_le_bytes()); // p_flags = PF_R | PF_X
+    elf.extend_from_slice(&0u64.to_le_bytes()); // p_offset = 0 (include ELF header in LOAD segment)
+    elf.extend_from_slice(&base_addr.to_le_bytes()); // p_vaddr = base_addr (include ELF header)
+    elf.extend_from_slice(&base_addr.to_le_bytes()); // p_paddr = base_addr
+    elf.extend_from_slice(&((text_offset + text_size) as u64).to_le_bytes()); // p_filesz (headers + code)
+    elf.extend_from_slice(&((text_offset + text_size) as u64).to_le_bytes()); // p_memsz
+    elf.extend_from_slice(&PAGE_SIZE.to_le_bytes()); // p_align
 
     // Data segment PH removed — QEMU-mips64 doesn't handle 2 LOAD segments
 
@@ -1692,7 +1692,7 @@ fn build_mips64_elf_2seg(code: &[u8], base_addr: u64) -> Vec<u8> {
 
 /// MIPS 64-bit code generation backend.
 ///
-/// Implements the `Backend` trait for MIPS64 (N64 ABI, big-endian).
+/// Implements the `Backend` trait for MIPS64 (N64 ABI, little-endian).
 /// Branch delay slots are handled by inserting a NOP after every branch or
 /// jump instruction.
 pub struct Mips64Backend {
@@ -3320,10 +3320,10 @@ fn mips64_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, 
     for (fixup_offset, label, _adj) in &branch_fixups {
         if let Some(&target_offset) = label_offsets.get(label) {
             let branch_offset = (target_offset as i32 - *fixup_offset as i32) / 4 - 1; // -1 for delay slot
-            let existing = u32::from_be_bytes([code[*fixup_offset], code[*fixup_offset+1], code[*fixup_offset+2], code[*fixup_offset+3]]);
+            let existing = u32::from_le_bytes([code[*fixup_offset], code[*fixup_offset+1], code[*fixup_offset+2], code[*fixup_offset+3]]);
             let imm16 = (branch_offset as u32) & 0xFFFF;
             let patched = (existing & 0xFFFF0000) | imm16;
-            code[*fixup_offset..*fixup_offset+4].copy_from_slice(&patched.to_be_bytes());
+            code[*fixup_offset..*fixup_offset+4].copy_from_slice(&patched.to_le_bytes());
         }
     }
 
@@ -4241,13 +4241,13 @@ impl Backend for Mips64Backend {
             let main_offset = func_offsets[key];
             let abs_addr = BASE_ADDR + text_offset + main_offset as u64;
             let target_field = ((abs_addr >> 2) & 0x03FFFFFF) as u32;
-            // Read the existing JAL word (big-endian)
-            let existing = u32::from_be_bytes([
+            // Read the existing JAL word (little-endian)
+            let existing = u32::from_le_bytes([
                 start_stub[0], start_stub[1], start_stub[2], start_stub[3],
             ]);
             // Patch the 26-bit target field (bits 25:0)
             let patched = (existing & 0xFC000000) | target_field;
-            start_stub[0..4].copy_from_slice(&patched.to_be_bytes());
+            start_stub[0..4].copy_from_slice(&patched.to_le_bytes());
         }
 
         // ── Concatenate all code ──
@@ -4284,8 +4284,8 @@ impl Backend for Mips64Backend {
                     if let Some(target_offset) = target_offset {
                         let abs_addr = BASE_ADDR + text_offset + target_offset as u64;
                         let target_field = ((abs_addr >> 2) & 0x03FFFFFF) as u32;
-                        // Read existing instruction (big-endian)
-                        let existing = u32::from_be_bytes([
+                        // Read existing instruction (little-endian)
+                        let existing = u32::from_le_bytes([
                             all_code[abs_offset],
                             all_code[abs_offset + 1],
                             all_code[abs_offset + 2],
@@ -4294,7 +4294,7 @@ impl Backend for Mips64Backend {
                         // Patch the 26-bit target field (bits 25:0)
                         let patched = (existing & 0xFC000000) | target_field;
                         all_code[abs_offset..abs_offset + 4]
-                            .copy_from_slice(&patched.to_be_bytes());
+                            .copy_from_slice(&patched.to_le_bytes());
                     } else {
                         // External symbol — defer to the system linker.
                         // Leave the BAL instruction pointing to offset 0 (BAL #0 = trap).
@@ -4412,12 +4412,12 @@ impl Backend for Mips64Backend {
 
     fn disassemble(&self, bytes: &[u8], addr: u64) -> Vec<String> {
         // Simple hex-based disassembler for MIPS64 (4-byte fixed-width,
-        // big-endian instructions).
+        // little-endian instructions).
         let mut lines = Vec::new();
         let mut offset = 0usize;
         let mut pc = addr;
         while offset + 4 <= bytes.len() {
-            let word = u32::from_be_bytes([
+            let word = u32::from_le_bytes([
                 bytes[offset],
                 bytes[offset + 1],
                 bytes[offset + 2],
@@ -4569,7 +4569,7 @@ mod tests {
         };
         let encoded = add.encode();
         let expected: u32 = (0x00 << 26) | (8 << 21) | (9 << 16) | (16 << 11) | (0 << 6) | 0x20;
-        assert_eq!(u32::from_be_bytes(encoded), expected);
+        assert_eq!(u32::from_le_bytes(encoded), expected);
     }
 
     #[test]
@@ -4581,7 +4581,7 @@ mod tests {
         };
         let encoded = addu.encode();
         let expected: u32 = (0 << 26) | (4 << 21) | (5 << 16) | (2 << 11) | (0 << 6) | 0x21;
-        assert_eq!(u32::from_be_bytes(encoded), expected);
+        assert_eq!(u32::from_le_bytes(encoded), expected);
     }
 
     #[test]
@@ -4593,7 +4593,7 @@ mod tests {
         };
         let encoded = lui.encode();
         let expected: u32 = (0x0F << 26) | (0 << 21) | (25 << 16) | 0x1000;
-        assert_eq!(u32::from_be_bytes(encoded), expected);
+        assert_eq!(u32::from_le_bytes(encoded), expected);
     }
 
     #[test]
@@ -4606,7 +4606,7 @@ mod tests {
         };
         let encoded = beq.encode();
         let expected: u32 = (0x04 << 26) | (4 << 21) | (5 << 16) | 2;
-        assert_eq!(u32::from_be_bytes(encoded), expected);
+        assert_eq!(u32::from_le_bytes(encoded), expected);
     }
 
     #[test]
@@ -4619,7 +4619,7 @@ mod tests {
         };
         let encoded = ld.encode();
         let expected: u32 = (0x37 << 26) | (29 << 21) | (2 << 16) | 16;
-        assert_eq!(u32::from_be_bytes(encoded), expected);
+        assert_eq!(u32::from_le_bytes(encoded), expected);
     }
 
     #[test]
@@ -4628,7 +4628,7 @@ mod tests {
         let jr = Instruction::Jr { rs: Gpr::Ra };
         let encoded = jr.encode();
         let expected: u32 = (0 << 26) | (31 << 21) | (0 << 16) | (0 << 11) | (0 << 6) | 0x08;
-        assert_eq!(u32::from_be_bytes(encoded), expected);
+        assert_eq!(u32::from_le_bytes(encoded), expected);
     }
 
     #[test]
@@ -4641,7 +4641,7 @@ mod tests {
         };
         let encoded = sll.encode();
         let expected: u32 = (0 << 26) | (0 << 21) | (3 << 16) | (2 << 11) | (5 << 6) | 0x00;
-        assert_eq!(u32::from_be_bytes(encoded), expected);
+        assert_eq!(u32::from_le_bytes(encoded), expected);
     }
 
     #[test]
@@ -4653,7 +4653,7 @@ mod tests {
         };
         let encoded = dsll.encode();
         let expected: u32 = (0 << 26) | (0 << 21) | (25 << 16) | (25 << 11) | (16 << 6) | 0x38;
-        assert_eq!(u32::from_be_bytes(encoded), expected);
+        assert_eq!(u32::from_le_bytes(encoded), expected);
     }
 
     #[test]
@@ -4663,7 +4663,7 @@ mod tests {
         let jal = Instruction::Jal { target: 0x400 };
         let encoded = jal.encode();
         let expected: u32 = (0x03 << 26) | 0x400;
-        assert_eq!(u32::from_be_bytes(encoded), expected);
+        assert_eq!(u32::from_le_bytes(encoded), expected);
     }
 
     // ── Branch delay slot tests ───────────────────────────────────────
@@ -4762,9 +4762,9 @@ mod tests {
         assert_eq!(&elf[0..4], &[0x7f, b'E', b'L', b'F']);
         // Check ELFCLASS64
         assert_eq!(elf[4], 2);
-        // Check ELFDATA2MSB (big-endian)
+        // Check ELFDATA2LSB (little-endian)
         assert_eq!(elf[5], 2);
-        // Check e_machine = EM_MIPS = 8 (big-endian u16)
+        // Check e_machine = EM_MIPS = 8 (little-endian u16)
         assert_eq!(&elf[18..20], &[0x00, 0x08]);
     }
 
@@ -4863,7 +4863,7 @@ mod tests {
         );
         // The alloc daddiu should not be a NOP (0x00000000)
         let alloc_encoded = &alloc_instrs[1].encoded;
-        let word = u32::from_be_bytes([
+        let word = u32::from_le_bytes([
             alloc_encoded[0],
             alloc_encoded[1],
             alloc_encoded[2],
@@ -4881,7 +4881,7 @@ mod tests {
             rt: Gpr::A0,
         };
         let encoded = neg.encode();
-        let word = u32::from_be_bytes(encoded);
+        let word = u32::from_le_bytes(encoded);
         // dsubu is R-type: opcode=0, rs=$zero(0), rt=$a0(4), rd=$v0(2), sa=0, funct=0x2F
         let expected: u32 = (0 << 26) | (0 << 21) | (4 << 16) | (2 << 11) | (0 << 6) | 0x2F;
         assert_eq!(
@@ -4899,7 +4899,7 @@ mod tests {
             rt: Gpr::Zero,
         };
         let encoded = not.encode();
-        let word = u32::from_be_bytes(encoded);
+        let word = u32::from_le_bytes(encoded);
         // nor is R-type: opcode=0, rs=$a0(4), rt=$zero(0), rd=$v0(2), sa=0, funct=0x27
         let expected: u32 = (0 << 26) | (4 << 21) | (0 << 16) | (2 << 11) | (0 << 6) | 0x27;
         assert_eq!(
