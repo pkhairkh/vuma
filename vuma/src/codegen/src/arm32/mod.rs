@@ -2298,7 +2298,7 @@ fn build_arm32_elf_2seg(code: &[u8], base_addr: u64) -> Vec<u8> {
 
     // --- Program Header 2: LOAD (PF_R | PF_W) — .data / stack ---
     elf.extend_from_slice(&1u32.to_le_bytes()); // p_type = PT_LOAD
-    elf.extend_from_slice(&(data_offset as u32).to_le_bytes()); // p_offset
+    elf.extend_from_slice(&(text_file_end as u32).to_le_bytes()); // p_offset (use text end, not page-aligned data_offset)
     elf.extend_from_slice(&(data_vaddr as u32).to_le_bytes()); // p_vaddr
     elf.extend_from_slice(&(data_vaddr as u32).to_le_bytes()); // p_paddr
     elf.extend_from_slice(&0u32.to_le_bytes()); // p_filesz
