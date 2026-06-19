@@ -1690,7 +1690,7 @@ fn build_aarch64_elf_2seg(code: &[u8], base_addr: u64, extern_symbols: &[String]
     // --- Program Header 2: LOAD (PF_R | PF_W) — .data / stack ---
     elf.extend_from_slice(&1u32.to_le_bytes()); // p_type = PT_LOAD
     elf.extend_from_slice(&6u32.to_le_bytes()); // p_flags = PF_R | PF_W
-    elf.extend_from_slice(&data_offset.to_le_bytes()); // p_offset
+    elf.extend_from_slice(&(text_file_end as u64).to_le_bytes()); // p_offset
     elf.extend_from_slice(&data_vaddr.to_le_bytes()); // p_vaddr
     elf.extend_from_slice(&data_vaddr.to_le_bytes()); // p_paddr
     elf.extend_from_slice(&0u64.to_le_bytes()); // p_filesz (no initialized data)
