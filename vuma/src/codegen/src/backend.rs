@@ -1704,8 +1704,10 @@ fn build_aarch64_elf_2seg(code: &[u8], base_addr: u64, extern_symbols: &[String]
     }
     elf.extend_from_slice(code);
 
-    // Don't pad to data segment offset (data has p_filesz=0, trailing
-    // bytes confuse QEMU's ELF loader on some architectures)
+    // --- Pad to data segment offset (if needed) ---
+    while (elf.len() as u64) < data_offset {
+        elf.push(0);
+    }
 
     // No file data for the .data segment (it's BSS-like, zero-initialized)
 
