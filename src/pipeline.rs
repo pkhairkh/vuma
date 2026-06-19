@@ -1457,27 +1457,56 @@ fn walk_control_flow_with_externs(
                     if let Some(label) = &ctrl.label {
                         if let Some(func_name) = label.strip_prefix("call_") {
                             let is_extern = extern_functions.contains(func_name);
-                            // Collect arguments from DataFlow edges
+                            // Collect arguments from DataFlow edges.
+                            // Each DataFlow edge source is either a variable's
+                            // defining node (→ Var) or a literal Computation
+                            // node with label "lit_<n>" (→ Int).
                             let mut args = Vec::new();
                             let df_inputs = edge_idx.incoming_df(node_id);
                             for df_edge in &df_inputs {
                                 let source = df_edge.source;
+                                if let Some(src_data) = scg.get_node(source) {
+                                    if let NodePayload::Computation(comp) = &src_data.payload {
+                                        if let ComputationKind::Other(ref lbl) = comp.kind {
+                                            // Check for literal nodes
+                                            if let Some(num_str) = lbl.strip_prefix("lit_") {
+                                                if let Ok(num) = num_str.parse::<i64>() {
+                                                    args.push(ScgExpr::Int(num));
+                                                    continue;
+                                                }
+                                            }
+                                            if let Ok(num) = lbl.parse::<i64>() {
+                                                args.push(ScgExpr::Int(num));
+                                                continue;
+                                            }
+                                        }
+                                    }
+                                }
                                 args.push(ScgExpr::Var(format!("v_{}", source.as_u64())));
                             }
-                            // Capture the return value: the FunctionReturn node
-                            // has a DataFlow edge from the return-value Computation
-                            // node. Resolve it to a variable name and set as dst.
-                            let ret_node = find_function_return(node_id, scg, edge_idx);
-                            let call_dst = if let Some(ret) = ret_node {
-                                let ret_df = edge_idx.incoming_df(ret);
-                                if let Some(first_df) = ret_df.first() {
-                                    Some(format!("v_{}", first_df.source.as_u64()))
-                                } else { None }
-                            } else { None };
-                            let call_dst = call_dst.unwrap_or_else(|| {
-                                // No DataFlow edge — create a synthetic dst
-                                format!("v_{}_ret", node_id.as_u64())
-                            });
+                            // Set the call's destination to the caller
+                            // Computation node's variable.  The caller node
+                            // has a CF edge TO this FunctionEntry.
+                            let caller_node = edge_idx.incoming
+                                .get(&node_id)
+                                .and_then(|edges| edges.iter().find(|e| e.kind == EdgeKind::ControlFlow))
+                                .map(|e| e.source);
+                            let call_dst = if let Some(caller) = caller_node {
+                                format!("v_{}", caller.as_u64())
+                            } else {
+                                // Fallback: use a synthetic dst
+                                let ret_node = find_function_return(node_id, scg, edge_idx);
+                                if let Some(ret) = ret_node {
+                                    let ret_df = edge_idx.incoming_df(ret);
+                                    if let Some(first_df) = ret_df.first() {
+                                        format!("v_{}", first_df.source.as_u64())
+                                    } else {
+                                        format!("v_{}_ret", node_id.as_u64())
+                                    }
+                                } else {
+                                    format!("v_{}_ret", node_id.as_u64())
+                                }
+                            };
                             stmts.push(ScgStatement::Call(CallNode {
                                 dst: Some(call_dst.clone()),
                                 func: func_name.to_string(),
@@ -1694,6 +1723,39 @@ fn convert_node_to_statement_with_externs(
 
         NodePayload::Computation(comp) => {
             let op_label = comp.kind.label();
+
+            // Skip parameter nodes — they are already represented in the
+            // function signature and should not be converted to computation
+            // statements.  Their sole purpose is to serve as DataFlow sources
+            // for expressions that reference the parameter variable.
+            if op_label.starts_with("param ") {
+                return None;
+            }
+
+            // Skip "uninitialized" placeholder nodes — they carry no useful
+            // computation and would produce a spurious Add(0, 0).
+            if op_label == "uninitialized" {
+                return None;
+            }
+
+            // Skip Computation nodes that represent call expressions.
+            // These have an outgoing ControlFlow edge to a "call_" FunctionEntry
+            // node.  The actual call is lowered by the FunctionEntry handler;
+            // the Computation node itself is just a placeholder for the call
+            // expression's result variable.
+            for cf_edge in edge_idx.outgoing_cf(node_id) {
+                if let Some(target_data) = scg.get_node(cf_edge.target) {
+                    if let NodePayload::Control(c) = &target_data.payload {
+                        if c.kind == ControlKind::FunctionEntry {
+                            if let Some(label) = &c.label {
+                                if label.starts_with("call_") {
+                                    return None; // skip — handled by FunctionEntry
+                                }
+                            }
+                        }
+                    }
+                }
+            }
 
             // Detect address-of patterns: "let x = @func_name" or bare "@func_name".
             // These should lower to GetAddress rather than a generic computation.
@@ -2252,32 +2314,57 @@ pub fn bridge_scg_to_codegen_with_externs(scg: &SCG, extern_functions: &HashSet<
 
 /// Try to parse an operation string into a BinOpKind.
 fn parse_binop(op: &str) -> Option<IrBinOpKind> {
+    // Exact match first
     match op {
-        "add" | "+" => Some(IrBinOpKind::Add),
-        "sub" | "-" => Some(IrBinOpKind::Sub),
-        "mul" | "*" => Some(IrBinOpKind::Mul),
-        "sdiv" | "/" => Some(IrBinOpKind::SDiv),
-        "udiv" => Some(IrBinOpKind::UDiv),
-        "srem" | "%" => Some(IrBinOpKind::SRem),
-        "urem" => Some(IrBinOpKind::URem),
-        "and" | "&" => Some(IrBinOpKind::And),
-        "or" | "|" => Some(IrBinOpKind::Or),
-        "xor" | "^" => Some(IrBinOpKind::Xor),
-        "shl" | "<<" => Some(IrBinOpKind::Shl),
-        "shr.l" | ">>" => Some(IrBinOpKind::ShrL),
-        "shr.a" => Some(IrBinOpKind::ShrA),
-        "slt" | "<" => Some(IrBinOpKind::SLt),
-        "sle" | "<=" => Some(IrBinOpKind::SLe),
-        "sgt" | ">" => Some(IrBinOpKind::SGt),
-        "sge" | ">=" => Some(IrBinOpKind::SGe),
-        "ult" => Some(IrBinOpKind::ULt),
-        "ule" => Some(IrBinOpKind::ULe),
-        "ugt" => Some(IrBinOpKind::UGt),
-        "uge" => Some(IrBinOpKind::UGe),
-        "eq" | "==" => Some(IrBinOpKind::Eq),
-        "ne" | "!=" => Some(IrBinOpKind::Ne),
-        _ => None,
+        "add" | "+" => return Some(IrBinOpKind::Add),
+        "sub" | "-" => return Some(IrBinOpKind::Sub),
+        "mul" | "*" => return Some(IrBinOpKind::Mul),
+        "sdiv" | "/" => return Some(IrBinOpKind::SDiv),
+        "udiv" => return Some(IrBinOpKind::UDiv),
+        "srem" | "%" => return Some(IrBinOpKind::SRem),
+        "urem" => return Some(IrBinOpKind::URem),
+        "and" | "&" => return Some(IrBinOpKind::And),
+        "or" | "|" => return Some(IrBinOpKind::Or),
+        "xor" | "^" => return Some(IrBinOpKind::Xor),
+        "shl" | "<<" => return Some(IrBinOpKind::Shl),
+        "shr.l" | ">>" => return Some(IrBinOpKind::ShrL),
+        "shr.a" => return Some(IrBinOpKind::ShrA),
+        "slt" | "<" => return Some(IrBinOpKind::SLt),
+        "sle" | "<=" => return Some(IrBinOpKind::SLe),
+        "sgt" | ">" => return Some(IrBinOpKind::SGt),
+        "sge" | ">=" => return Some(IrBinOpKind::SGe),
+        "ult" => return Some(IrBinOpKind::ULt),
+        "ule" => return Some(IrBinOpKind::ULe),
+        "ugt" => return Some(IrBinOpKind::UGt),
+        "uge" => return Some(IrBinOpKind::UGe),
+        "eq" | "==" => return Some(IrBinOpKind::Eq),
+        "ne" | "!=" => return Some(IrBinOpKind::Ne),
+        _ => {}
     }
+    // Try to parse operator from an expression string like "x + 1" or "a <= b".
+    // We look for two-character operators first, then single-character.
+    let op_str = op.trim();
+    for (pat, kind) in [
+        ("<=", IrBinOpKind::SLe), (">=", IrBinOpKind::SGe),
+        ("==", IrBinOpKind::Eq), ("!=", IrBinOpKind::Ne),
+        ("<<", IrBinOpKind::Shl), (">>", IrBinOpKind::ShrL),
+    ] {
+        if op_str.contains(&format!(" {} ", pat)) {
+            return Some(kind);
+        }
+    }
+    for (pat, kind) in [
+        ("+", IrBinOpKind::Add), ("-", IrBinOpKind::Sub),
+        ("*", IrBinOpKind::Mul), ("/", IrBinOpKind::SDiv),
+        ("%", IrBinOpKind::SRem), ("&", IrBinOpKind::And),
+        ("|", IrBinOpKind::Or), ("^", IrBinOpKind::Xor),
+        ("<", IrBinOpKind::SLt), (">", IrBinOpKind::SGt),
+    ] {
+        if op_str.contains(&format!(" {} ", pat)) {
+            return Some(kind);
+        }
+    }
+    None
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

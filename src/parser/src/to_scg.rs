@@ -1528,6 +1528,11 @@ impl AstToScg {
                         self.emit_call_nodes(callee, args, call_comp_id, scg, region)?;
                         // Link the call computation to the return via DataFlow
                         let _ = scg.add_edge(call_comp_id, id, EdgeKind::DataFlow);
+                        // Also add a ControlFlow edge so the bridge's CF walk
+                        // visits the call Computation node and converts it to
+                        // a CallNode statement in the correct function body.
+                        let _ = scg.add_edge(call_comp_id, id, EdgeKind::ControlFlow);
+                        return Ok(call_comp_id);
                     } else {
                         // For other expressions (variables, binary ops, etc.),
                         // create a Computation node and link via DataFlow.
@@ -1543,6 +1548,18 @@ impl AstToScg {
                         region.add_node(comp_id);
                         self.add_data_flow_edges(v, comp_id, scg);
                         let _ = scg.add_edge(comp_id, id, EdgeKind::DataFlow);
+                        // Also add a ControlFlow edge from the Computation
+                        // to the FunctionReturn, so the bridge's CF walk
+                        // visits the Computation node and converts it to a
+                        // statement.  Without this, the Computation is a
+                        // "floating" node only connected via DataFlow, and
+                        // the bridge never emits it — the return value
+                        // references an undefined variable.
+                        let _ = scg.add_edge(comp_id, id, EdgeKind::ControlFlow);
+                        // Return the Computation node ID so the caller
+                        // chains the CF edge from the previous statement
+                        // through the Computation to the FunctionReturn.
+                        return Ok(comp_id);
                     }
                 }
 
@@ -1850,20 +1867,11 @@ impl AstToScg {
         let _ = scg.add_edge(caller_node, entry_id, EdgeKind::ControlFlow);
 
         // Enhanced: per-argument DataFlow edges from caller variables
-        // to the FunctionEntry node.
+        // and literal nodes to the FunctionEntry node.
         for (i, arg) in args.iter().enumerate() {
-            let uses = self.expr_uses(arg);
-            for var_name in &uses {
-                if let Some(source) = self.lookup_var(var_name) {
-                    let eid = scg.add_edge(source, entry_id, EdgeKind::DataFlow);
-                    // Enhanced: label with argument position.
-                    if let Ok(id) = eid {
-                        if let Some(edge) = scg.get_edge_mut(id) {
-                            edge.label = Some(format!("arg{}", i));
-                        }
-                    }
-                }
-            }
+            // Use the recursive DataFlow edge adder which handles both
+            // variables and literals correctly.
+            self.add_df_edges_recursive(arg, entry_id, scg);
         }
 
         let ret_id = scg.add_node(
@@ -2543,9 +2551,78 @@ impl AstToScg {
     // -- data-flow edge helpers ----------------------------------------------
 
     fn add_data_flow_edges(&self, expr: &Expr, target_node: NodeId, scg: &mut SCG) {
-        for var_name in self.expr_uses(expr) {
-            if let Some(source_node) = self.lookup_var(&var_name) {
-                let _ = scg.add_edge(source_node, target_node, EdgeKind::DataFlow);
+        self.add_df_edges_recursive(expr, target_node, scg);
+    }
+
+    /// Recursively add DataFlow edges for an expression's operands.
+    ///
+    /// For binary operations, this processes lhs (position 0) then rhs
+    /// (position 1), preserving operand order so the bridge can resolve
+    /// `resolve_df_input(node, 0, ...)` as lhs and `resolve_df_input(node, 1, ...)`
+    /// as rhs.
+    ///
+    /// For literals, a `lit_<n>` Computation node is created and linked via
+    /// DataFlow, so the bridge can resolve the literal value.
+    ///
+    /// For variables, a DataFlow edge is added from the variable's defining
+    /// node.
+    fn add_df_edges_recursive(&self, expr: &Expr, target_node: NodeId, scg: &mut SCG) {
+        match expr {
+            Expr::BinOp { lhs, rhs, .. } => {
+                self.add_df_edges_recursive(lhs, target_node, scg);
+                self.add_df_edges_recursive(rhs, target_node, scg);
+            }
+            Expr::UnOp { expr: inner, .. } => {
+                self.add_df_edges_recursive(inner, target_node, scg);
+            }
+            Expr::Var { name, .. } => {
+                if let Some(source_node) = self.lookup_var(name) {
+                    let _ = scg.add_edge(source_node, target_node, EdgeKind::DataFlow);
+                }
+            }
+            Expr::Lit { value, .. } => {
+                let lit_str = match value {
+                    crate::ast::Lit::Int(n) => format!("lit_{}", n),
+                    crate::ast::Lit::Float(f) => format!("lit_{}", f),
+                    crate::ast::Lit::String(s) => format!("lit_str_{}", s),
+                    crate::ast::Lit::Bool(b) => format!("lit_{}", b),
+                    crate::ast::Lit::Address(a) => format!("lit_{}", a),
+                };
+                let lit_id = scg.add_node(
+                    NodeType::Computation,
+                    NodePayload::Computation(ComputationNode {
+                        kind: ComputationKind::Other(lit_str),
+                        result_type: None,
+                        tail_call: false,
+                    }),
+                    ProgramPoint { file: None, line: None, column: None, offset: None },
+                );
+                let _ = scg.add_edge(lit_id, target_node, EdgeKind::DataFlow);
+            }
+            Expr::Cast { expr: inner, .. } => {
+                self.add_df_edges_recursive(inner, target_node, scg);
+            }
+            Expr::Deref { expr: inner, .. } => {
+                self.add_df_edges_recursive(inner, target_node, scg);
+            }
+            Expr::AddressOf { expr: inner, .. } => {
+                self.add_df_edges_recursive(inner, target_node, scg);
+            }
+            Expr::FieldAccess { expr: inner, .. } => {
+                self.add_df_edges_recursive(inner, target_node, scg);
+            }
+            Expr::Index { expr: inner, index, .. } => {
+                self.add_df_edges_recursive(inner, target_node, scg);
+                self.add_df_edges_recursive(index, target_node, scg);
+            }
+            // For other expression types (Call, StructInit, Allocate, etc.),
+            // fall back to collecting variable uses and adding edges for them.
+            _ => {
+                for var_name in self.expr_uses(expr) {
+                    if let Some(source_node) = self.lookup_var(&var_name) {
+                        let _ = scg.add_edge(source_node, target_node, EdgeKind::DataFlow);
+                    }
+                }
             }
         }
     }
