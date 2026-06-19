@@ -2532,33 +2532,10 @@ pub fn bridge_scg_to_codegen_with_externs(scg: &SCG, extern_functions: &HashSet<
         }));
     }
 
-    // Handle remaining nodes not consumed by any function (multi-function case)
-    let remaining: Vec<NodeId> = scg.node_ids().filter(|id| !consumed.contains(id)).collect();
-    if !remaining.is_empty() {
-        let mut stmts = Vec::new();
-        for nid in &remaining {
-            if consumed.contains(nid) {
-                continue;
-            }
-            consumed.insert(*nid);
-            if let Some(node_data) = scg.get_node(*nid) {
-                if let Some(stmt) = convert_node_to_statement_with_externs(*nid, node_data, &edge_idx, scg, extern_functions) {
-                    stmts.push(stmt);
-                }
-            }
-        }
-        if !stmts.is_empty() {
-            if !stmts.iter().any(|s| matches!(s, ScgStatement::Return(_))) {
-                stmts.push(ScgStatement::Return(vec![]));
-            }
-            scg_nodes.push(ScgNode::Function(ScgFunction {
-                name: "__remaining".to_string(),
-                params: vec![],
-                results: vec![],
-                body: stmts,
-            }));
-        }
-    }
+    // Skip remaining nodes — they are disconnected expression fragments
+    // that reference variables from other functions' scopes. Including them
+    // as a __remaining function causes crashes because the variables don't
+    // exist in the __remaining function's scope.
 
     // Ensure at least one function exists
     if scg_nodes.is_empty() {
