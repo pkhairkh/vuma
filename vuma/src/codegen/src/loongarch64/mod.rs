@@ -1773,7 +1773,7 @@ fn build_loongarch64_elf_2seg(code: &[u8], base_addr: u64) -> Vec<u8> {
     let num_phdrs: u64 = 2;
     let phdr_end = elf_header_size + num_phdrs * phdr_size;
     // Page-align the text segment start in the file.
-    let text_offset = ((phdr_end + PAGE_SIZE - 1) / PAGE_SIZE) * PAGE_SIZE;
+    let text_offset = phdr_end; // No page alignment — code right after headers
     let text_size = code.len() as u64;
 
     // The data segment starts on the next page after the text.
@@ -1814,7 +1814,7 @@ fn build_loongarch64_elf_2seg(code: &[u8], base_addr: u64) -> Vec<u8> {
     let text_memsz = ((text_size + PAGE_SIZE - 1) / PAGE_SIZE) * PAGE_SIZE;
     elf.extend_from_slice(&1u32.to_le_bytes()); // p_type = PT_LOAD
     elf.extend_from_slice(&5u32.to_le_bytes()); // p_flags = PF_R | PF_X
-    elf.extend_from_slice(&text_offset.to_le_bytes()); // p_offset
+    elf.extend_from_slice(&0u64.to_le_bytes()); // p_offset = 0 (include ELF header)
     elf.extend_from_slice(&(base_addr + text_offset).to_le_bytes()); // p_vaddr
     elf.extend_from_slice(&(base_addr + text_offset).to_le_bytes()); // p_paddr
     elf.extend_from_slice(&text_memsz.to_le_bytes()); // p_filesz (cover full page for QEMU)
@@ -1824,7 +1824,7 @@ fn build_loongarch64_elf_2seg(code: &[u8], base_addr: u64) -> Vec<u8> {
     // --- Program Header 2: LOAD (PF_R | PF_W) — .data / stack ---
     elf.extend_from_slice(&1u32.to_le_bytes()); // p_type = PT_LOAD
     elf.extend_from_slice(&6u32.to_le_bytes()); // p_flags = PF_R | PF_W
-    elf.extend_from_slice(&(text_file_end as u64).to_le_bytes()); // p_offset
+    elf.extend_from_slice(&0u64.to_le_bytes()); // p_offset = 0
     elf.extend_from_slice(&data_vaddr.to_le_bytes()); // p_vaddr
     elf.extend_from_slice(&data_vaddr.to_le_bytes()); // p_paddr
     elf.extend_from_slice(&data_size.to_le_bytes()); // p_filesz (write zeros so QEMU can mmap)
