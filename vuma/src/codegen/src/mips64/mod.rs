@@ -1618,10 +1618,10 @@ fn build_mips64_elf_2seg(code: &[u8], base_addr: u64) -> Vec<u8> {
 
     let elf_header_size: u64 = 64;
     let phdr_size: u64 = 56;
-    let num_phdrs: u64 = 2;
+    let num_phdrs: u64 = 1; // Only text segment — data segment not needed (p_filesz=0)
     let phdr_end = elf_header_size + num_phdrs * phdr_size;
     // Page-align the text segment start in the file.
-    let text_offset = ((phdr_end + PAGE_SIZE - 1) / PAGE_SIZE) * PAGE_SIZE;
+    let text_offset = phdr_end; // No page alignment — code right after headers
     let text_size = code.len() as u64;
 
     // The data segment starts on the next page after the text.
@@ -1654,7 +1654,7 @@ fn build_mips64_elf_2seg(code: &[u8], base_addr: u64) -> Vec<u8> {
     // Note: EF_MIPS_ABI64 (0x20000000) should also be set for N64 ABI,
     elf.extend_from_slice(&64u16.to_be_bytes()); // e_ehsize
     elf.extend_from_slice(&56u16.to_be_bytes()); // e_phentsize
-    elf.extend_from_slice(&2u16.to_be_bytes()); // e_phnum = 2
+    elf.extend_from_slice(&1u16.to_be_bytes()); // e_phnum = 1
     elf.extend_from_slice(&64u16.to_be_bytes()); // e_shentsize
     elf.extend_from_slice(&0u16.to_be_bytes()); // e_shnum
     elf.extend_from_slice(&0u16.to_be_bytes()); // e_shstrndx
@@ -1662,22 +1662,14 @@ fn build_mips64_elf_2seg(code: &[u8], base_addr: u64) -> Vec<u8> {
     // --- Program Header 1: LOAD (PF_R | PF_X) — .text ---
     elf.extend_from_slice(&1u32.to_be_bytes()); // p_type = PT_LOAD
     elf.extend_from_slice(&5u32.to_be_bytes()); // p_flags = PF_R | PF_X
-    elf.extend_from_slice(&text_offset.to_be_bytes()); // p_offset
-    elf.extend_from_slice(&(base_addr + text_offset).to_be_bytes()); // p_vaddr
-    elf.extend_from_slice(&(base_addr + text_offset).to_be_bytes()); // p_paddr
-    elf.extend_from_slice(&text_size.to_be_bytes()); // p_filesz
-    elf.extend_from_slice(&text_size.to_be_bytes()); // p_memsz
+    elf.extend_from_slice(&0u64.to_be_bytes()); // p_offset = 0 (include ELF header in LOAD segment)
+    elf.extend_from_slice(&base_addr.to_be_bytes()); // p_vaddr = base_addr (include ELF header)
+    elf.extend_from_slice(&base_addr.to_be_bytes()); // p_paddr = base_addr
+    elf.extend_from_slice(&((text_offset + text_size) as u64).to_be_bytes()); // p_filesz (headers + code)
+    elf.extend_from_slice(&((text_offset + text_size) as u64).to_be_bytes()); // p_memsz
     elf.extend_from_slice(&PAGE_SIZE.to_be_bytes()); // p_align
 
-    // --- Program Header 2: LOAD (PF_R | PF_W) — .data / stack ---
-    elf.extend_from_slice(&1u32.to_be_bytes()); // p_type = PT_LOAD
-    elf.extend_from_slice(&6u32.to_be_bytes()); // p_flags = PF_R | PF_W
-    elf.extend_from_slice(&(text_file_end as u64).to_be_bytes()); // p_offset
-    elf.extend_from_slice(&data_vaddr.to_be_bytes()); // p_vaddr
-    elf.extend_from_slice(&data_vaddr.to_be_bytes()); // p_paddr
-    elf.extend_from_slice(&0u64.to_be_bytes()); // p_filesz (no initialized data)
-    elf.extend_from_slice(&data_size.to_be_bytes()); // p_memsz (writable pages)
-    elf.extend_from_slice(&PAGE_SIZE.to_be_bytes()); // p_align
+    // Data segment PH removed — QEMU-mips64 doesn't handle 2 LOAD segments
 
     // --- .text section ---
     // Pad to page-aligned text_offset
@@ -4190,15 +4182,15 @@ impl Backend for Mips64Backend {
         // After that come all user functions.
 
         const R_MIPS_26: &str = "R_MIPS_26";
-        const BASE_ADDR: u64 = 0x100000000;
+        const BASE_ADDR: u64 = 0x400000;
         const PAGE_SIZE: u64 = 0x10000; // 64 KB (MIPS typical)
 
         // Compute text_offset (must match build_mips64_elf_2seg)
         let elf_header_size: u64 = 64;
         let phdr_size: u64 = 56;
-        let num_phdrs: u64 = 2;
+        let num_phdrs: u64 = 1; // Only text segment — data segment not needed (p_filesz=0)
         let phdr_end = elf_header_size + num_phdrs * phdr_size;
-        let text_offset: u64 = ((phdr_end + PAGE_SIZE - 1) / PAGE_SIZE) * PAGE_SIZE;
+        let text_offset: u64 = phdr_end; // No page alignment — match ELF builder
 
         // ── _start stub ──
         let start_stub_size: usize = 20; // 5 × 4-byte instructions
