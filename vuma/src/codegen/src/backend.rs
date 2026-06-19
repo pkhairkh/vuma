@@ -1641,7 +1641,7 @@ fn build_aarch64_elf_2seg(code: &[u8], base_addr: u64, extern_symbols: &[String]
     // congruent with the virtual address modulo the page size.  The
     // simplest way to guarantee this is to place the text at a
     // page-aligned file offset, with vaddr = base_addr.
-    let text_offset = ((phdr_end + PAGE_SIZE - 1) / PAGE_SIZE) * PAGE_SIZE;
+    let text_offset = phdr_end; // No page alignment — code right after headers
     let text_size = code.len() as u64;
 
     // The data segment starts on the next page after the text.
@@ -1680,17 +1680,17 @@ fn build_aarch64_elf_2seg(code: &[u8], base_addr: u64, extern_symbols: &[String]
     // --- Program Header 1: LOAD (PF_R | PF_X) — .text ---
     elf.extend_from_slice(&1u32.to_le_bytes()); // p_type = PT_LOAD
     elf.extend_from_slice(&5u32.to_le_bytes()); // p_flags = PF_R | PF_X
-    elf.extend_from_slice(&text_offset.to_le_bytes()); // p_offset
+    elf.extend_from_slice(&0u64.to_le_bytes()); // p_offset = 0 (include ELF header)
     elf.extend_from_slice(&(base_addr + text_offset).to_le_bytes()); // p_vaddr
     elf.extend_from_slice(&(base_addr + text_offset).to_le_bytes()); // p_paddr
-    elf.extend_from_slice(&text_size.to_le_bytes()); // p_filesz
-    elf.extend_from_slice(&text_size.to_le_bytes()); // p_memsz
+    elf.extend_from_slice(&((text_offset + text_size) as u64).to_le_bytes()); // p_filesz (headers + code)
+    elf.extend_from_slice(&((text_offset + text_size) as u64).to_le_bytes()); // p_memsz
     elf.extend_from_slice(&PAGE_SIZE.to_le_bytes()); // p_align
 
     // --- Program Header 2: LOAD (PF_R | PF_W) — .data / stack ---
     elf.extend_from_slice(&1u32.to_le_bytes()); // p_type = PT_LOAD
     elf.extend_from_slice(&6u32.to_le_bytes()); // p_flags = PF_R | PF_W
-    elf.extend_from_slice(&(text_file_end as u64).to_le_bytes()); // p_offset
+    elf.extend_from_slice(&0u64.to_le_bytes()); // p_offset = 0
     elf.extend_from_slice(&data_vaddr.to_le_bytes()); // p_vaddr
     elf.extend_from_slice(&data_vaddr.to_le_bytes()); // p_paddr
     elf.extend_from_slice(&0u64.to_le_bytes()); // p_filesz (no initialized data)
