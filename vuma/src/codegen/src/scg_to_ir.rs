@@ -214,6 +214,8 @@ pub enum ControlNode {
         body: Vec<ScgStatement>,
         /// Optional for-loop range: (var_name, start, end)
         for_range: Option<(String, i64, i64)>,
+        /// Optional while-loop condition string (e.g., "i < 256")
+        while_cond: Option<String>,
     },
     /// `break` (from inside a loop).
     Break,
@@ -804,8 +806,8 @@ impl IRBuilder {
             } => {
                 self.lower_if(cond, then_body, else_body, ir_func, names)?;
             }
-            ControlNode::Loop { body, for_range } => {
-                self.lower_loop(body, for_range, ir_func, names)?;
+            ControlNode::Loop { body, for_range, while_cond } => {
+                self.lower_loop(body, for_range, while_cond, ir_func, names)?;
             }
             ControlNode::Break => {
                 self.lower_break(ir_func, names)?;
@@ -1015,10 +1017,55 @@ impl IRBuilder {
     /// demonstrates the canonical SSA loop-phi pattern.  Real compilers would
     /// analyze which variables are modified in the loop body and insert phis
     /// only for those.
+
+/// Parse a while-loop condition string like "i < 256" into (CmpKind, lhs, rhs)
+fn parse_while_cond(cond: &str) -> (CmpKind, String, String) {
+    let cond = cond.trim();
+    // Check two-char operators first
+    for (pat, kind) in [
+        ("<=", CmpKind::SLe), (">=", CmpKind::SGe),
+        ("==", CmpKind::Eq), ("!=", CmpKind::Ne),
+    ] {
+        if let Some(pos) = cond.find(pat) {
+            return (kind, cond[..pos].trim().to_string(), cond[pos+pat.len()..].trim().to_string());
+        }
+    }
+    // Single-char operators
+    for (pat, kind) in [
+        ("<", CmpKind::SLt), (">", CmpKind::SGt),
+    ] {
+        if let Some(pos) = cond.find(pat) {
+            return (kind, cond[..pos].trim().to_string(), cond[pos+1..].trim().to_string());
+        }
+    }
+    (CmpKind::Eq, cond.to_string(), "0".to_string())
+}
+
+/// Resolve a while-loop operand (variable name or literal) to an IRValue
+fn resolve_while_operand(
+    operand: &str,
+    names: &HashMap<String, u32>,
+    ir_func: &mut IRFunction,
+    builder: &mut IRBuilder,
+) -> IRValue {
+    let operand = operand.trim();
+    // Try parsing as a number
+    if let Ok(num) = operand.parse::<i64>() {
+        return IRValue::Immediate(num);
+    }
+    // Try looking up as a variable
+    if let Some(&vreg) = names.get(operand) {
+        return IRValue::Register(vreg);
+    }
+    // Default: 0
+    IRValue::Immediate(0)
+}
+
     fn lower_loop(
         &mut self,
         body: &[ScgStatement],
         for_range: &Option<(String, i64, i64)>,
+        while_cond: &Option<String>,
         ir_func: &mut IRFunction,
         names: &mut HashMap<String, u32>,
     ) -> Result<()> {
@@ -1147,6 +1194,31 @@ impl IRBuilder {
             // Conditional branch: if cmp != 0, go to body; else go to exit
             // Emit BOTH the IRInstr::CondBranch (for ISels that process instructions)
             // AND the IRTerminator::Branch (for ISels that process terminators).
+            ir_func.current_block().instructions.push(IRInstruction::CondBranch {
+                cond: IRValue::Register(cmp_vreg),
+                true_target: loop_body_label.clone(),
+                false_target: loop_exit.clone(),
+            });
+            ir_func.current_block().terminator = IRTerminator::Branch {
+                cond: IRValue::Register(cmp_vreg),
+                true_block: loop_body_label.clone(),
+                false_block: loop_exit.clone(),
+            };
+        } else if let Some(cond_str) = while_cond {
+            // While loop: parse condition and add check in header
+            // Parse "i < 256" or "j < 8" etc.
+            let (cmp_op, lhs_str, rhs_str) = Self::parse_while_cond(cond_str);
+            let lhs_val = Self::resolve_while_operand(&lhs_str, names, ir_func, self);
+            let rhs_val = Self::resolve_while_operand(&rhs_str, names, ir_func, self);
+            let cmp_vreg = self.alloc_vreg();
+            ir_func.register_vreg(VirtualRegister::named(cmp_vreg, "while_cmp"));
+            ir_func.current_block().instructions.push(IRInstruction::Cmp {
+                kind: cmp_op,
+                dst: IRValue::Register(cmp_vreg),
+                lhs: lhs_val,
+                rhs: rhs_val,
+                ty: None,
+            });
             ir_func.current_block().instructions.push(IRInstruction::CondBranch {
                 cond: IRValue::Register(cmp_vreg),
                 true_target: loop_body_label.clone(),
