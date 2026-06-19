@@ -1288,12 +1288,35 @@ fn walk_control_flow_with_externs(
                         }));
                     }
 
-                    // Continue from the Join
+                    // Continue from the Join, or from the Branch's other CF edges
                     if let Some(join) = join_node {
                         consumed.insert(join);
-                        current = edge_idx.outgoing_cf(join).first().map(|e| e.target);
+                        // First try the join's outgoing CF
+                        let join_next = edge_idx.outgoing_cf(join).first().map(|e| e.target);
+                        if let Some(tgt) = join_next {
+                            current = Some(tgt);
+                        } else {
+                            // Join has no outgoing CF — try the Branch's other
+                            // CF edges (the else branch or direct continuation)
+                            let branch_cf: Vec<_> = edge_idx.outgoing_cf(node_id)
+                                .iter()
+                                .filter(|e| !consumed.contains(&e.target) && e.target != join)
+                                .map(|e| e.target)
+                                .collect();
+                            current = branch_cf.first().copied();
+                        }
+                    } else if let Some(else_t) = else_tgt {
+                        // No join — the then branch likely has a return.
+                        // Continue from the else branch's outgoing CF edge.
+                        current = edge_idx.outgoing_cf(else_t).first().map(|e| e.target);
                     } else {
-                        current = None;
+                        // No join, no else — try Branch's other CF edges
+                        let branch_cf: Vec<_> = edge_idx.outgoing_cf(node_id)
+                            .iter()
+                            .filter(|e| !consumed.contains(&e.target))
+                            .map(|e| e.target)
+                            .collect();
+                        current = branch_cf.first().copied();
                     }
                     continue;
                 }
