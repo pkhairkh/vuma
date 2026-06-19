@@ -1656,6 +1656,31 @@ fn strip_outer_parens(expr: &str) -> &str {
 /// - A variable name (matched to a DataFlow source)
 /// - A literal number (converted to ScgExpr::Int)
 /// - A complex expression (recursively parsed — for now, returns Int(0))
+
+/// Map IrBinOpKind to vuma_codegen::ir::BinOpKind
+fn map_binop_kind(op: IrBinOpKind) -> vuma_codegen::ir::BinOpKind {
+    match op {
+        IrBinOpKind::Add => vuma_codegen::ir::BinOpKind::Add,
+        IrBinOpKind::Sub => vuma_codegen::ir::BinOpKind::Sub,
+        IrBinOpKind::Mul => vuma_codegen::ir::BinOpKind::Mul,
+        IrBinOpKind::SDiv => vuma_codegen::ir::BinOpKind::SDiv,
+        IrBinOpKind::SRem => vuma_codegen::ir::BinOpKind::SRem,
+        IrBinOpKind::And => vuma_codegen::ir::BinOpKind::And,
+        IrBinOpKind::Or => vuma_codegen::ir::BinOpKind::Or,
+        IrBinOpKind::Xor => vuma_codegen::ir::BinOpKind::Xor,
+        IrBinOpKind::Shl => vuma_codegen::ir::BinOpKind::Shl,
+        IrBinOpKind::ShrL => vuma_codegen::ir::BinOpKind::ShrL,
+        IrBinOpKind::ShrA => vuma_codegen::ir::BinOpKind::ShrA,
+        IrBinOpKind::SLt => vuma_codegen::ir::BinOpKind::SLt,
+        IrBinOpKind::SLe => vuma_codegen::ir::BinOpKind::SLe,
+        IrBinOpKind::SGt => vuma_codegen::ir::BinOpKind::SGt,
+        IrBinOpKind::SGe => vuma_codegen::ir::BinOpKind::SGe,
+        IrBinOpKind::Eq => vuma_codegen::ir::BinOpKind::Eq,
+        IrBinOpKind::Ne => vuma_codegen::ir::BinOpKind::Ne,
+        _ => vuma_codegen::ir::BinOpKind::Add,
+    }
+}
+
 fn resolve_subexpr(
     subexpr: &str,
     sources: &[NodeId],
@@ -1873,31 +1898,110 @@ fn convert_node_to_statement_with_externs(
                                     }
                                     AccessMode::Write | AccessMode::ReadWrite => {
                                         // For Store, we need to identify the pointer and value.
-                                        // The value comes from the Computation node's DataFlow inputs.
-                                        // The pointer comes from the Access node's Derivation edges.
-                                        let access_id = deriv_edge.target; // The Access node
+                                        // The label is like "*(mat + offset) = val" or "*region = 42".
+                                        // We parse the label to extract the pointer expression and value.
+                                        let access_id = deriv_edge.target;
 
-                                        // Get value from Computation's DataFlow inputs
+                                        // Collect all DataFlow sources for resolving sub-expressions
                                         let df_inputs = edge_idx.incoming_df(node_id);
-                                        let value = if let Some(first_df) = df_inputs.first() {
-                                            resolve_df_input(node_id, 0, edge_idx, scg)
-                                        } else {
-                                            ScgExpr::Int(0)
-                                        };
+                                        let sources: Vec<NodeId> = df_inputs.iter().map(|e| e.source).collect();
 
-                                        // Get pointer from Access node's incoming Derivation edges
-                                        let mut ptr = ScgExpr::Int(0);
+                                        // Also collect Derivation sources from the Access node
+                                        let mut all_sources = sources.clone();
                                         if let Some(access_incoming) = edge_idx.incoming.get(&access_id) {
                                             for e in access_incoming {
                                                 if e.kind == EdgeKind::Derivation {
-                                                    // Check if this source has Derivation to Allocation
-                                                    if has_derivation_to_allocation(e.source, edge_idx, scg) {
-                                                        ptr = resolve_df_input_for_node(e.source, edge_idx, scg);
-                                                        break;
-                                                    }
+                                                    all_sources.push(e.source);
                                                 }
                                             }
                                         }
+
+                                        // Only process as Store if the label starts with '*'
+                                        // (indicating a dereference/store operation).
+                                        // Other Computation nodes with Derivation to Access
+                                        // (e.g., "let offset = ...") should be handled by the
+                                        // generic Computation handler with expression decomposition.
+                                        if !op_label.starts_with("*") {
+                                            // Not a store — use expression decomposition
+                                            let df_inputs2: Vec<vuma_scg::EdgeData> = edge_idx.incoming_df(node_id)
+                                                .iter().map(|e| (*e).clone()).collect();
+                                            let sources2: Vec<NodeId> = df_inputs2.iter().map(|e| e.source).collect();
+                                            
+                                            let expr_str2: String = if op_label.starts_with("let ") {
+                                                if let Some(eq_pos) = op_label.find("= ") {
+                                                    op_label[eq_pos + 2..].to_string()
+                                                } else {
+                                                    op_label.to_string()
+                                                }
+                                            } else {
+                                                op_label.to_string()
+                                            };
+                                            
+                                            if let Some((op2, lhs_str2, rhs_str2)) = parse_expr_split(&expr_str2) {
+                                                let lhs2 = resolve_subexpr(&lhs_str2, &sources2, edge_idx, scg);
+                                                let rhs2 = resolve_subexpr(&rhs_str2, &sources2, edge_idx, scg);
+                                                let binop_kind2 = map_binop_kind(op2);
+                                                return Some(ScgStatement::Computation(ComputationNode {
+                                                    dst: node_var(node_id, "comp"),
+                                                    op: binop_kind2,
+                                                    lhs: lhs2,
+                                                    rhs: rhs2,
+                                                    tail_call: false,
+                                                }));
+                                            } else {
+                                                let op2 = parse_binop(&op_label).unwrap_or(IrBinOpKind::Add);
+                                                return Some(ScgStatement::Computation(ComputationNode {
+                                                    dst: node_var(node_id, "comp"),
+                                                    op: op2,
+                                                    lhs: resolve_df_input(node_id, 0, edge_idx, scg),
+                                                    rhs: resolve_df_input(node_id, 1, edge_idx, scg),
+                                                    tail_call: false,
+                                                }));
+                                            }
+                                        }
+
+                                        // Parse the label to extract pointer and value expressions.
+                                        let (ptr, value) = if let Some(eq_pos) = op_label.rfind("= ") {
+                                            let lhs = op_label[..eq_pos].trim();
+                                            let rhs = op_label[eq_pos + 2..].trim();
+                                            
+                                            // Strip leading '*' from lhs to get pointer expression
+                                            let ptr_expr = if lhs.starts_with("*") {
+                                                let inner = lhs[1..].trim();
+                                                // Strip outer parens: "*(mat + offset)" -> "mat + offset"
+                                                strip_outer_parens(inner)
+                                            } else {
+                                                lhs
+                                            };
+                                            
+                                            // Resolve pointer expression
+                                            let ptr = if let Some((op, l, r)) = parse_expr_split(ptr_expr) {
+                                                let lhs_val = resolve_subexpr(&l, &all_sources, edge_idx, scg);
+                                                let rhs_val = resolve_subexpr(&r, &all_sources, edge_idx, scg);
+                                                let binop_kind = map_binop_kind(op);
+                                                ScgExpr::BinOp {
+                                                    op: binop_kind,
+                                                    lhs: Box::new(lhs_val),
+                                                    rhs: Box::new(rhs_val),
+                                                }
+                                            } else {
+                                                resolve_subexpr(ptr_expr, &all_sources, edge_idx, scg)
+                                            };
+                                            
+                                            // Resolve value expression
+                                            let value = resolve_subexpr(rhs, &all_sources, edge_idx, scg);
+                                            
+                                            (ptr, value)
+                                        } else {
+                                            // Fallback: use DataFlow inputs
+                                            let value = resolve_df_input(node_id, 0, edge_idx, scg);
+                                            let ptr = if let Some(&src) = all_sources.last() {
+                                                resolve_df_input_for_node(src, edge_idx, scg)
+                                            } else {
+                                                ScgExpr::Int(0)
+                                            };
+                                            (ptr, value)
+                                        };
 
                                         return Some(ScgStatement::Access(AccessNode::Store {
                                             ptr,
