@@ -64,7 +64,7 @@ chrono = "0.4"
 indexmap = "2"
 smallvec = "1"
 hashbrown = { version = "0.14", features = ["serde"] }
-toml = "0.8"
+toml = "1.1"
 libc = "0.2"
 tempfile = "3"
 proptest = "1"
