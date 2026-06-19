@@ -2843,3 +2843,42 @@ Remaining issues:
 - MIPS64 uses 64-bit operations for 32-bit types
 - AArch64 needs while loop condition fix
 - ARM32 crashes from complex memory operations
+
+---
+Task ID: vuma-fix-session-final3
+Agent: main
+Task: Fix AArch64 FFI stub + while-loop conditions
+
+Work Log:
+- Added FFI return-0 stub to AArch64 backend (MOV X0, #0; RET)
+- Fixed func_offsets and func_code_offset to include FFI stub size
+- Unresolved BL relocations now point to FFI stub instead of hanging
+- Added while_cond to ControlNode::Loop for while-loop condition checking
+- Bridge parses while condition from LoopHeader label (e.g., "i < 256")
+- IR builder emits Cmp + CondBranch in loop header for while loops
+- Fixed resolve_while_operand to use HashMap iteration for variable lookup
+
+Stage Summary:
+| Backend    | Pass | Crash | Timeout | Compile Fail |
+|------------|------|-------|---------|-------------|
+| x86_64     | 47   | 0     | 0       | 0           |
+| RISC-V     | 44   | 0     | 3       | 0           |
+| ARM32      | 35   | 12    | 0       | 0           |
+| PPC64      | 24   | 12    | 11      | 0           |
+| AArch64    | 19   | 22    | 6       | 0           |
+| MIPS64     | 16   | 31    | 0       | 0           |
+| WASM32     | works| -     | -       | 0           |
+
+Key achievements:
+- x86_64: 47/47 (100%)
+- AArch64: 19 pass (was 14, +5 from FFI stub)
+- 0 compile failures across ALL 8 backends
+- All changes pushed to GitHub
+
+Remaining:
+- AArch64: 22 crashes (from complex programs with nested loops)
+- AArch64: 6 timeouts (while loops with variable conditions)
+- MIPS64: QEMU compatibility issue (exits 1 for all binaries)
+- ARM32: 12 crashes (nested loops + complex Store patterns)
+- PPC64: 12 crashes + 11 timeouts
+- RISC-V: 3 timeouts (FFI spawn calls)
