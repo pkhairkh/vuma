@@ -940,6 +940,7 @@ fn expr_to_name(expr: &ScgExpr) -> String {
         ScgExpr::Int(_) => "<const>".to_string(),
         ScgExpr::Float(_) => "<const>".to_string(),
         ScgExpr::Label(name) => format!("<label:{}>", name),
+        ScgExpr::BinOp { .. } => "<binop>".to_string(),
     }
 }
 

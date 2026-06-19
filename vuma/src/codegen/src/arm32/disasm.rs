@@ -469,6 +469,163 @@ impl Instruction {
             return Ok(Instruction::Svc { imm24, cond });
         }
 
+        // ── Synchronisation primitives: LDREX / STREX / DMB ──
+        //
+        // These are emitted by the ARM32 AtomicCas / AtomicLoad / AtomicStore
+        // lowering. Recognising them lets the chunk-based opcode recovery in
+        // `allocate_registers` produce canonical mnemonics ("ldrex", "strex",
+        // "dmb") so test infrastructure can verify atomic operations.
+        //
+        // Bit layouts (see ARM ARM A8.8.71–A8.8.78):
+        //   LDREX:  cond 0001_1011 Rn Rd 1111 1001 1111
+        //   LDREXB: cond 0001_1101 Rn Rd 1111 1001 1111
+        //   LDREXH: cond 0001_1111 Rn Rd 1111 1001 1111
+        //   STREX:  cond 0001_1000 Rn Rd 1111 1001 Rt
+        //   STREXB: cond 0001_1100 Rn Rd 1111 1001 Rt
+        //   STREXH: cond 0001_1110 Rn Rd 1111 1001 Rt
+        //   DMB:    cond 0101_0111 1111 1111 1111 0101 option
+
+        // LDREX family — bits [27:20] distinguishes the variant; bits [11:8]
+        // are 1111, bits [7:4] are 1001, bits [3:0] are 1111 (the "Rt"
+        // position is hardwired to 0b1111 for the exclusive-load forms).
+        if (word & 0x0FF0_0FFF) == 0x01B0_0F9F {
+            let rn = (word >> 16) & 0xF;
+            let rd = (word >> 12) & 0xF;
+            return Ok(Instruction::Ldrex {
+                rd: gpr_from_bits(rd),
+                rn: gpr_from_bits(rn),
+                cond,
+            });
+        }
+        if (word & 0x0FF0_0FFF) == 0x01D0_0F9F {
+            let rn = (word >> 16) & 0xF;
+            let rd = (word >> 12) & 0xF;
+            return Ok(Instruction::Ldrexb {
+                rd: gpr_from_bits(rd),
+                rn: gpr_from_bits(rn),
+                cond,
+            });
+        }
+        if (word & 0x0FF0_0FFF) == 0x01F0_0F9F {
+            let rn = (word >> 16) & 0xF;
+            let rd = (word >> 12) & 0xF;
+            return Ok(Instruction::Ldrexh {
+                rd: gpr_from_bits(rd),
+                rn: gpr_from_bits(rn),
+                cond,
+            });
+        }
+
+        // STREX family — same bit layout as LDREX but bits [3:0] hold the
+        // source register Rt, so the mask drops the low nibble.
+        if (word & 0x0FF0_0FF0) == 0x0180_0F90 {
+            let rn = (word >> 16) & 0xF;
+            let rd = (word >> 12) & 0xF;
+            let rt = word & 0xF;
+            return Ok(Instruction::Strex {
+                rd: gpr_from_bits(rd),
+                rt: gpr_from_bits(rt),
+                rn: gpr_from_bits(rn),
+                cond,
+            });
+        }
+        if (word & 0x0FF0_0FF0) == 0x01C0_0F90 {
+            let rn = (word >> 16) & 0xF;
+            let rd = (word >> 12) & 0xF;
+            let rt = word & 0xF;
+            return Ok(Instruction::Strexb {
+                rd: gpr_from_bits(rd),
+                rt: gpr_from_bits(rt),
+                rn: gpr_from_bits(rn),
+                cond,
+            });
+        }
+        if (word & 0x0FF0_0FF0) == 0x01E0_0F90 {
+            let rn = (word >> 16) & 0xF;
+            let rd = (word >> 12) & 0xF;
+            let rt = word & 0xF;
+            return Ok(Instruction::Strexh {
+                rd: gpr_from_bits(rd),
+                rt: gpr_from_bits(rt),
+                rn: gpr_from_bits(rn),
+                cond,
+            });
+        }
+
+        // DMB — Data Memory Barrier.
+        if (word & 0x0FFF_FFF0) == 0x057F_FF50 {
+            let option = word & 0xF;
+            return Ok(Instruction::Dmb { option, cond });
+        }
+
+        // ── VFP conversion: VCVT.F32.S32 / VCVT.F32.U32 /
+        //    VCVT.S32.F32 / VCVT.U32.F32 / VCVT.F64.F32 / VCVT.F32.F64 ──
+        //
+        // These are emitted by the ARM32 Cast lowering (IntToFloat /
+        // FloatToInt / FloatToFloat etc.). Recognising them lets the chunk-
+        // based opcode recovery in `allocate_registers` produce the canonical
+        // "vcvt.f32.s32" / "vcvt.s32.f32" / ... mnemonics so test
+        // infrastructure can verify FP conversions are emitted (and not
+        // silently dropped as no-ops).
+        //
+        // ARM VFPv3 A1 encoding (see ARM ARM A8.6.30 / VCVT between FP and
+        // integer, and VCVT between FP types):
+        //   cond 1110 1D11 op2   Vd 101 sz op 1 M 0 Vm
+        //   [27:24]=1110  [23]=1  [21:20]=11  [11:9]=101  [6]=1  [4]=0
+        //   op2=[19:16] distinguishes the conversion family:
+        //     0b1000 = int→float   (VCVT.F32.S32 / VCVT.F32.U32)
+        //     0b1101 = float→int   (VCVT.S32.F32 / VCVT.U32.F32)
+        //     0b0110 = float→float (VCVT.F64.F32 / VCVT.F32.F64)
+        //   sz=[8] selects destination width (f32=0 / f64=1)
+        //   op=[7] selects signedness (signed=0 / unsigned=1) for int<->float
+        //
+        // The common-bit mask is 0x0FB00E50; the common value is 0x0EB00A40.
+        // Verified against the encoder functions `encode_vcvt_f32_s32`,
+        // `encode_vcvt_f32_u32`, `encode_vcvt_s32_f32`, `encode_vcvt_u32_f32`,
+        // `encode_vcvt_f64_f32`, `encode_vcvt_f32_f64` (for S0,S0 / D0,S0).
+        if (word & 0x0FB00E50) == 0x0EB00A40 {
+            let d_bit = ((word >> 22) & 1) as u8;
+            let vd = ((word >> 12) & 0xF) as u8;
+            let m_bit = ((word >> 5) & 1) as u8;
+            let vm = (word & 0xF) as u8;
+            let op2 = (word >> 16) & 0xF;
+            let sz = (word >> 8) & 1;
+            let op = (word >> 7) & 1;
+            let sd = (d_bit << 4) | vd; // Sd = D:Vd
+            let sm = (m_bit << 4) | vm; // Sm = M:Vm
+            match (op2, sz, op) {
+                (0b1000, 0, 0) => {
+                    // VCVT.F32.S32 Sd, Sm
+                    return Ok(Instruction::VcvtF32S32 { sd, sm, cond });
+                }
+                (0b1000, 0, 1) => {
+                    // VCVT.F32.U32 Sd, Sm
+                    return Ok(Instruction::VcvtF32U32 { sd, sm, cond });
+                }
+                (0b1101, 0, 0) => {
+                    // VCVT.S32.F32 Sd, Sm
+                    return Ok(Instruction::VcvtS32F32 { sd, sm, cond });
+                }
+                (0b1101, 0, 1) => {
+                    // VCVT.U32.F32 Sd, Sm
+                    return Ok(Instruction::VcvtU32F32 { sd, sm, cond });
+                }
+                (0b0110, 1, 0) => {
+                    // VCVT.F64.F32 Dd, Sm  (Dd = D:Vd, Sm = M:Vm)
+                    return Ok(Instruction::VcvtF64F32 { dd: sd, sm, cond });
+                }
+                (0b0110, 0, 0) => {
+                    // VCVT.F32.F64 Sd, Dm  (Sd = D:Vd, Dm = M:Vm)
+                    return Ok(Instruction::VcvtF32F64 { sd, dm: sm, cond });
+                }
+                _ => {
+                    // Other (op2, sz, op) combinations (e.g. VCVT.F64.U32,
+                    // VCVT.S32.F64) are not emitted by the current codegen;
+                    // fall through to the unknown-encoding error below.
+                }
+            }
+        }
+
         Err(DecodeError::UnknownEncoding { word })
     }
 }
