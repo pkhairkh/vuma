@@ -1288,35 +1288,12 @@ fn walk_control_flow_with_externs(
                         }));
                     }
 
-                    // Continue from the Join, or from the Branch's other CF edges
+                    // Continue from the Join
                     if let Some(join) = join_node {
                         consumed.insert(join);
-                        // First try the join's outgoing CF
-                        let join_next = edge_idx.outgoing_cf(join).first().map(|e| e.target);
-                        if let Some(tgt) = join_next {
-                            current = Some(tgt);
-                        } else {
-                            // Join has no outgoing CF — try the Branch's other
-                            // CF edges (the else branch or direct continuation)
-                            let branch_cf: Vec<_> = edge_idx.outgoing_cf(node_id)
-                                .iter()
-                                .filter(|e| !consumed.contains(&e.target) && e.target != join)
-                                .map(|e| e.target)
-                                .collect();
-                            current = branch_cf.first().copied();
-                        }
-                    } else if let Some(else_t) = else_tgt {
-                        // No join — the then branch likely has a return.
-                        // Continue from the else branch's outgoing CF edge.
-                        current = edge_idx.outgoing_cf(else_t).first().map(|e| e.target);
+                        current = edge_idx.outgoing_cf(join).first().map(|e| e.target);
                     } else {
-                        // No join, no else — try Branch's other CF edges
-                        let branch_cf: Vec<_> = edge_idx.outgoing_cf(node_id)
-                            .iter()
-                            .filter(|e| !consumed.contains(&e.target))
-                            .map(|e| e.target)
-                            .collect();
-                        current = branch_cf.first().copied();
+                        current = None;
                     }
                     continue;
                 }
@@ -1333,24 +1310,7 @@ fn walk_control_flow_with_externs(
 
                     let body = walk_control_flow_with_externs(body_tgt, scg, edge_idx, consumed, &loop_stop, extern_functions);
 
-                    let for_range = ctrl.label.as_ref().and_then(|label| parse_for_range(label));
-                    let while_cond = if for_range.is_none() {
-                        ctrl.label.as_ref().and_then(|label| {
-                            if label.starts_with("while ") {
-                                let rest = &label[6..].trim();
-                                if rest.starts_with('(') && rest.ends_with(')') {
-                                    Some(rest[1..rest.len()-1].to_string())
-                                } else {
-                                    Some(rest.to_string())
-                                }
-                            } else {
-                                None
-                            }
-                        })
-                    } else {
-                        None
-                    };
-                    stmts.push(ScgStatement::Control(ControlNode::Loop { body, for_range, while_cond }));
+                    stmts.push(ScgStatement::Control(ControlNode::Loop { body, for_range: ctrl.label.as_ref().and_then(|label| parse_for_range(label)), while_cond: None }));
 
                     // Continue from the LoopExit
                     if let Some(exit) = exit_tgt {
@@ -1696,31 +1656,6 @@ fn strip_outer_parens(expr: &str) -> &str {
 /// - A variable name (matched to a DataFlow source)
 /// - A literal number (converted to ScgExpr::Int)
 /// - A complex expression (recursively parsed — for now, returns Int(0))
-
-/// Map IrBinOpKind to vuma_codegen::ir::BinOpKind
-fn map_binop_kind(op: IrBinOpKind) -> vuma_codegen::ir::BinOpKind {
-    match op {
-        IrBinOpKind::Add => vuma_codegen::ir::BinOpKind::Add,
-        IrBinOpKind::Sub => vuma_codegen::ir::BinOpKind::Sub,
-        IrBinOpKind::Mul => vuma_codegen::ir::BinOpKind::Mul,
-        IrBinOpKind::SDiv => vuma_codegen::ir::BinOpKind::SDiv,
-        IrBinOpKind::SRem => vuma_codegen::ir::BinOpKind::SRem,
-        IrBinOpKind::And => vuma_codegen::ir::BinOpKind::And,
-        IrBinOpKind::Or => vuma_codegen::ir::BinOpKind::Or,
-        IrBinOpKind::Xor => vuma_codegen::ir::BinOpKind::Xor,
-        IrBinOpKind::Shl => vuma_codegen::ir::BinOpKind::Shl,
-        IrBinOpKind::ShrL => vuma_codegen::ir::BinOpKind::ShrL,
-        IrBinOpKind::ShrA => vuma_codegen::ir::BinOpKind::ShrA,
-        IrBinOpKind::SLt => vuma_codegen::ir::BinOpKind::SLt,
-        IrBinOpKind::SLe => vuma_codegen::ir::BinOpKind::SLe,
-        IrBinOpKind::SGt => vuma_codegen::ir::BinOpKind::SGt,
-        IrBinOpKind::SGe => vuma_codegen::ir::BinOpKind::SGe,
-        IrBinOpKind::Eq => vuma_codegen::ir::BinOpKind::Eq,
-        IrBinOpKind::Ne => vuma_codegen::ir::BinOpKind::Ne,
-        _ => vuma_codegen::ir::BinOpKind::Add,
-    }
-}
-
 fn resolve_subexpr(
     subexpr: &str,
     sources: &[NodeId],
@@ -1938,74 +1873,31 @@ fn convert_node_to_statement_with_externs(
                                     }
                                     AccessMode::Write | AccessMode::ReadWrite => {
                                         // For Store, we need to identify the pointer and value.
-                                        // The label is like "*(buf + offset) = ((val >> 24) & 255)".
-                                        // The pointer expression (buf + offset) is in the label.
-                                        // The value expression is after the "= ".
-                                        let access_id = deriv_edge.target;
+                                        // The value comes from the Computation node's DataFlow inputs.
+                                        // The pointer comes from the Access node's Derivation edges.
+                                        let access_id = deriv_edge.target; // The Access node
 
-                                        // Collect ALL sources: DataFlow to Computation + Derivation to Access
+                                        // Get value from Computation's DataFlow inputs
                                         let df_inputs = edge_idx.incoming_df(node_id);
-                                        let mut all_sources: Vec<NodeId> = df_inputs.iter().map(|e| e.source).collect();
+                                        let value = if let Some(first_df) = df_inputs.first() {
+                                            resolve_df_input(node_id, 0, edge_idx, scg)
+                                        } else {
+                                            ScgExpr::Int(0)
+                                        };
+
+                                        // Get pointer from Access node's incoming Derivation edges
+                                        let mut ptr = ScgExpr::Int(0);
                                         if let Some(access_incoming) = edge_idx.incoming.get(&access_id) {
                                             for e in access_incoming {
                                                 if e.kind == EdgeKind::Derivation {
-                                                    all_sources.push(e.source);
+                                                    // Check if this source has Derivation to Allocation
+                                                    if has_derivation_to_allocation(e.source, edge_idx, scg) {
+                                                        ptr = resolve_df_input_for_node(e.source, edge_idx, scg);
+                                                        break;
+                                                    }
                                                 }
                                             }
                                         }
-
-                                        // Parse the label to extract pointer and value expressions.
-                                        let (ptr, value) = if let Some(eq_pos) = op_label.rfind("= ") {
-                                            let lhs = op_label[..eq_pos].trim();
-                                            let rhs = op_label[eq_pos + 2..].trim();
-                                            
-                                            // Strip leading '*' from lhs to get pointer expression
-                                            let ptr_expr = if lhs.starts_with("*") {
-                                                let inner = lhs[1..].trim();
-                                                strip_outer_parens(inner)
-                                            } else {
-                                                lhs
-                                            };
-                                            
-                                            // Resolve pointer expression
-                                            let ptr = if let Some((op, l, r)) = parse_expr_split(ptr_expr) {
-                                                let lhs_val = resolve_subexpr(&l, &all_sources, edge_idx, scg);
-                                                let rhs_val = resolve_subexpr(&r, &all_sources, edge_idx, scg);
-                                                let binop_kind = map_binop_kind(op);
-                                                ScgExpr::BinOp {
-                                                    op: binop_kind,
-                                                    lhs: Box::new(lhs_val),
-                                                    rhs: Box::new(rhs_val),
-                                                }
-                                            } else {
-                                                resolve_subexpr(ptr_expr, &all_sources, edge_idx, scg)
-                                            };
-                                            
-                                            // Resolve value expression
-                                            let value = if let Some((op, l, r)) = parse_expr_split(rhs) {
-                                                let lhs_val = resolve_subexpr(&l, &all_sources, edge_idx, scg);
-                                                let rhs_val = resolve_subexpr(&r, &all_sources, edge_idx, scg);
-                                                let binop_kind = map_binop_kind(op);
-                                                ScgExpr::BinOp {
-                                                    op: binop_kind,
-                                                    lhs: Box::new(lhs_val),
-                                                    rhs: Box::new(rhs_val),
-                                                }
-                                            } else {
-                                                resolve_subexpr(rhs, &all_sources, edge_idx, scg)
-                                            };
-                                            
-                                            (ptr, value)
-                                        } else {
-                                            // Fallback
-                                            let value = resolve_df_input(node_id, 0, edge_idx, scg);
-                                            let ptr = if let Some(&src) = all_sources.last() {
-                                                resolve_df_input_for_node(src, edge_idx, scg)
-                                            } else {
-                                                ScgExpr::Int(0)
-                                            };
-                                            (ptr, value)
-                                        };
 
                                         return Some(ScgStatement::Access(AccessNode::Store {
                                             ptr,
@@ -2377,7 +2269,6 @@ fn find_entry_points(scg: &SCG, edge_idx: &EdgeIndex) -> Vec<NodeId> {
 ///    ScgStatements with DataFlow-based variable naming.
 
 /// Parse a for-loop range from a LoopHeader label.
-/// Label format: "for <var> in <start>..<end>"
 fn parse_for_range(label: &str) -> Option<(String, i64, i64)> {
     let label = label.trim();
     if !label.starts_with("for ") { return None; }
@@ -2388,7 +2279,7 @@ fn parse_for_range(label: &str) -> Option<(String, i64, i64)> {
     if let Some(dot_pos) = range_str.find("..") {
         let start_str = range_str[..dot_pos].trim();
         let end_part = &range_str[dot_pos + 2..];
-        let inclusive = end_part.starts_with('=');
+        let inclusive = end_part.starts_with("=");
         let end_str = if inclusive { &end_part[1..] } else { end_part }.trim();
         let start: i64 = start_str.parse().ok()?;
         let end: i64 = end_str.parse().ok()?;
@@ -2532,10 +2423,33 @@ pub fn bridge_scg_to_codegen_with_externs(scg: &SCG, extern_functions: &HashSet<
         }));
     }
 
-    // Skip remaining nodes — they are disconnected expression fragments
-    // that reference variables from other functions' scopes. Including them
-    // as a __remaining function causes crashes because the variables don't
-    // exist in the __remaining function's scope.
+    // Handle remaining nodes not consumed by any function (multi-function case)
+    let remaining: Vec<NodeId> = scg.node_ids().filter(|id| !consumed.contains(id)).collect();
+    if !remaining.is_empty() {
+        let mut stmts = Vec::new();
+        for nid in &remaining {
+            if consumed.contains(nid) {
+                continue;
+            }
+            consumed.insert(*nid);
+            if let Some(node_data) = scg.get_node(*nid) {
+                if let Some(stmt) = convert_node_to_statement_with_externs(*nid, node_data, &edge_idx, scg, extern_functions) {
+                    stmts.push(stmt);
+                }
+            }
+        }
+        if !stmts.is_empty() {
+            if !stmts.iter().any(|s| matches!(s, ScgStatement::Return(_))) {
+                stmts.push(ScgStatement::Return(vec![]));
+            }
+            scg_nodes.push(ScgNode::Function(ScgFunction {
+                name: "__remaining".to_string(),
+                params: vec![],
+                results: vec![],
+                body: stmts,
+            }));
+        }
+    }
 
     // Ensure at least one function exists
     if scg_nodes.is_empty() {
