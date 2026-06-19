@@ -45,6 +45,33 @@ const OPC_SDC1: u32 = 0x3D;
 const OPC_J: u32 = 0x02;
 const OPC_JAL: u32 = 0x03;
 
+// COP1 (coprocessor 1 / FPU) opcode and field constants — must match the
+// encoder constants in the parent module. COP1 R-type format is:
+//   `COP1[31:26] | fmt[25:21] | ft[20:16] | fs[15:11] | fd[10:6] | func[5:0]`
+// For the GPR<->FPR move instructions, `ft` holds the GPR (`rt`) and `fs`
+// holds the FPR; `fd` and `func` are zero.
+const OPC_COP1: u32 = 0x11;
+
+// COP1 fmt field values (bits 25:21) for type conversions.
+const FMT_S: u32 = 16; // single
+const FMT_D: u32 = 17; // double
+const FMT_W: u32 = 20; // word (32-bit integer)
+const FMT_L: u32 = 21; // long  (64-bit integer)
+
+// COP1 fmt field values for the GPR<->FPR move instructions.
+const FMT_MF: u32 = 0x00; // MFC1
+const FMT_DMF: u32 = 0x01; // DMFC1
+const FMT_MT: u32 = 0x04; // MTC1
+const FMT_DMT: u32 = 0x05; // DMTC1
+
+// COP1 function codes for FP conversion instructions. Several conversions
+// share the same funct code (e.g. all `cvt.*.s` use 0x20); the (fmt, funct)
+// pair is the unique key.
+const FN_CVT_S: u32 = 0x20; // cvt.*.s  (cvt.s.d / cvt.s.w / cvt.s.l)
+const FN_CVT_D: u32 = 0x21; // cvt.*.d  (cvt.d.s / cvt.d.w / cvt.d.l)
+const FN_CVT_W: u32 = 0x24; // cvt.*.w  (cvt.w.s / cvt.w.d)
+const FN_CVT_L: u32 = 0x25; // cvt.*.l  (cvt.l.s / cvt.l.d)
+
 const FN_ADD: u32 = 0x20;
 const FN_ADDU: u32 = 0x21;
 const FN_SUB: u32 = 0x22;
@@ -581,6 +608,82 @@ impl Instruction {
             // J-type
             OPC_J => Ok(Instruction::J { target }),
             OPC_JAL => Ok(Instruction::Jal { target }),
+
+            // COP1 (coprocessor 1 / FPU) — FP moves and conversions.
+            //
+            // Field layout for our encodings:
+            //   fmt[25:21] (== `rs`) | ft/rt[20:16] (== `rt`)
+            //   | fs[15:11] (== `rd`) | fd[10:6] (== `sa`) | func[5:0]
+            // For GPR<->FPR moves: funct == 0, ft holds the GPR (`rt`), fs
+            // holds the FPR, fd == 0. For CVT.*.*: ft == 0, fs is the source
+            // FPR, fd is the destination FPR, and (fmt, funct) is the
+            // unique key (several conversions share a funct code).
+            OPC_COP1 => {
+                let fmt = rs;
+                let fs_bits = rd;
+                let fd_bits = sa;
+                match (fmt, funct) {
+                    // GPR<-FPR / GPR->FPR moves (funct == 0)
+                    (FMT_MF, 0) => Ok(Instruction::Mfc1 {
+                        rt: gpr_from_bits(rt),
+                        fs: fpr_from_bits(fs_bits),
+                    }),
+                    (FMT_DMF, 0) => Ok(Instruction::Dmfc1 {
+                        rt: gpr_from_bits(rt),
+                        fs: fpr_from_bits(fs_bits),
+                    }),
+                    (FMT_MT, 0) => Ok(Instruction::Mtc1 {
+                        rt: gpr_from_bits(rt),
+                        fs: fpr_from_bits(fs_bits),
+                    }),
+                    (FMT_DMT, 0) => Ok(Instruction::Dmtc1 {
+                        rt: gpr_from_bits(rt),
+                        fs: fpr_from_bits(fs_bits),
+                    }),
+                    // FP type conversions: (fmt, funct) is the unique key.
+                    (FMT_S, FN_CVT_D) => Ok(Instruction::CvtDS {
+                        fd: fpr_from_bits(fd_bits),
+                        fs: fpr_from_bits(fs_bits),
+                    }),
+                    (FMT_D, FN_CVT_S) => Ok(Instruction::CvtSD {
+                        fd: fpr_from_bits(fd_bits),
+                        fs: fpr_from_bits(fs_bits),
+                    }),
+                    (FMT_W, FN_CVT_S) => Ok(Instruction::CvtSW {
+                        fd: fpr_from_bits(fd_bits),
+                        fs: fpr_from_bits(fs_bits),
+                    }),
+                    (FMT_W, FN_CVT_D) => Ok(Instruction::CvtDW {
+                        fd: fpr_from_bits(fd_bits),
+                        fs: fpr_from_bits(fs_bits),
+                    }),
+                    (FMT_S, FN_CVT_W) => Ok(Instruction::CvtWS {
+                        fd: fpr_from_bits(fd_bits),
+                        fs: fpr_from_bits(fs_bits),
+                    }),
+                    (FMT_D, FN_CVT_W) => Ok(Instruction::CvtWD {
+                        fd: fpr_from_bits(fd_bits),
+                        fs: fpr_from_bits(fs_bits),
+                    }),
+                    (FMT_L, FN_CVT_S) => Ok(Instruction::CvtSL {
+                        fd: fpr_from_bits(fd_bits),
+                        fs: fpr_from_bits(fs_bits),
+                    }),
+                    (FMT_L, FN_CVT_D) => Ok(Instruction::CvtDL {
+                        fd: fpr_from_bits(fd_bits),
+                        fs: fpr_from_bits(fs_bits),
+                    }),
+                    (FMT_S, FN_CVT_L) => Ok(Instruction::CvtLS {
+                        fd: fpr_from_bits(fd_bits),
+                        fs: fpr_from_bits(fs_bits),
+                    }),
+                    (FMT_D, FN_CVT_L) => Ok(Instruction::CvtLD {
+                        fd: fpr_from_bits(fd_bits),
+                        fs: fpr_from_bits(fs_bits),
+                    }),
+                    _ => Err(DecodeError::UnknownEncoding { word }),
+                }
+            }
 
             _ => Err(DecodeError::UnknownEncoding { word }),
         }

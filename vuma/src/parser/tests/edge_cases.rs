@@ -6,12 +6,24 @@
 use vuma_parser::Parser;
 
 /// Helper: assert that parsing `source` does not panic (Ok or Err is fine).
+///
+/// Runs in a dedicated thread with a 32 MB stack so that deeply-nested
+/// (but legitimate) inputs like 50-level parentheses do not trigger a
+/// hard stack-overflow abort in debug builds where stack frames are large.
 fn assert_no_panic(source: &str) {
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let mut parser = Parser::new(source);
-        let _ = parser.parse_program();
-    }));
-    assert!(result.is_ok(), "parser panicked on input: {:?}", source);
+    let src = source.to_string();
+    let src_for_msg = src.clone();
+    let handle = std::thread::Builder::new()
+        .stack_size(32 * 1024 * 1024)
+        .spawn(move || {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let mut parser = Parser::new(&src);
+                let _ = parser.parse_program();
+            }))
+        })
+        .expect("failed to spawn parser thread");
+    let result = handle.join().expect("parser thread panicked");
+    assert!(result.is_ok(), "parser panicked on input: {:?}", src_for_msg);
 }
 
 /// Helper: assert that parsing `source` succeeds (Ok with or without errors).

@@ -56,9 +56,23 @@ const ARG_COUNT_EDGE_CASES: [usize; 5] = [0, 4, 5, 8, 16];
 // Random Program Generation Strategies
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Generate a random valid VUMA identifier.
+/// Reserved VUMA keywords that cannot be used as identifiers.
+const VUMA_KEYWORDS: &[&str] = &[
+    "fn", "let", "pub", "crate", "if", "else", "while", "for", "return", "as",
+    "match", "struct", "enum", "break", "continue", "loop", "type", "const",
+    "static", "mut", "ref", "where", "impl", "trait", "ptr", "region", "alloc",
+    "allocate", "free", "derive", "cast", "read", "write", "sync", "async",
+    "await", "spawn", "lock", "unlock", "channel", "send", "recv", "extern",
+    "unsafe", "safe", "bd", "repd", "capd", "reld", "import", "export", "mod",
+    "use", "self", "super", "true", "false", "null", "sizeof", "alignof",
+    "Option", "Some", "None", "Result", "Ok", "Err",
+    "atomic_load", "atomic_store", "atomic_cas", "ct_select", "ct_eq",
+];
+
+/// Generate a random valid VUMA identifier (never a reserved keyword).
 fn arb_identifier() -> impl Strategy<Value = String> {
     "[a-zA-Z][a-zA-Z0-9_]{0,15}"
+        .prop_filter("not a reserved keyword", |s| !VUMA_KEYWORDS.contains(&s.as_str()))
 }
 
 /// Generate a random integer literal.

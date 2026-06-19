@@ -1277,6 +1277,80 @@ pub fn encode_cvtss2si_r64_xmm(dst: Gpr, src: Xmm) -> Vec<u8> {
     code
 }
 
+/// Encode CVTTSD2SI r32, xmm (F2 0F 2C /r) — convert f64 to signed 32-bit int
+/// with truncation (toward zero).  This is the truncating variant of
+/// `encode_cvtsd2si_r32_xmm`; it matches the C-style float->int cast
+/// semantics represented by the IR's `FloatToInt` / `FloatToUInt`.
+pub fn encode_cvttsd2si_r32_xmm(dst: Gpr, src: Xmm) -> Vec<u8> {
+    let mut code = Vec::with_capacity(4);
+    let r = src.needs_rex();
+    let b = dst.needs_rex();
+    if r || b {
+        if let Some(rex) = rex_prefix(false, r, false, b) {
+            code.push(rex);
+        }
+    }
+    code.push(0xF2);
+    code.push(0x0F);
+    code.push(0x2C);
+    code.push(modrm(3, src.encoding() & 7, dst.encoding() & 7));
+    code
+}
+
+/// Encode CVTTSD2SI r64, xmm (F2 REX.W 0F 2C /r) — convert f64 to signed
+/// 64-bit int with truncation (toward zero).
+pub fn encode_cvttsd2si_r64_xmm(dst: Gpr, src: Xmm) -> Vec<u8> {
+    let mut code = Vec::with_capacity(5);
+    let r = src.needs_rex();
+    let b = dst.needs_rex();
+    if let Some(rex) = rex_prefix(true, r, false, b) {
+        code.push(rex);
+    } else {
+        code.push(0x48);
+    }
+    code.push(0xF2);
+    code.push(0x0F);
+    code.push(0x2C);
+    code.push(modrm(3, src.encoding() & 7, dst.encoding() & 7));
+    code
+}
+
+/// Encode CVTTSS2SI r32, xmm (F3 0F 2C /r) — convert f32 to signed 32-bit int
+/// with truncation (toward zero).
+pub fn encode_cvttss2si_r32_xmm(dst: Gpr, src: Xmm) -> Vec<u8> {
+    let mut code = Vec::with_capacity(4);
+    let r = src.needs_rex();
+    let b = dst.needs_rex();
+    if r || b {
+        if let Some(rex) = rex_prefix(false, r, false, b) {
+            code.push(rex);
+        }
+    }
+    code.push(0xF3);
+    code.push(0x0F);
+    code.push(0x2C);
+    code.push(modrm(3, src.encoding() & 7, dst.encoding() & 7));
+    code
+}
+
+/// Encode CVTTSS2SI r64, xmm (F3 REX.W 0F 2C /r) — convert f32 to signed
+/// 64-bit int with truncation (toward zero).
+pub fn encode_cvttss2si_r64_xmm(dst: Gpr, src: Xmm) -> Vec<u8> {
+    let mut code = Vec::with_capacity(5);
+    let r = src.needs_rex();
+    let b = dst.needs_rex();
+    if let Some(rex) = rex_prefix(true, r, false, b) {
+        code.push(rex);
+    } else {
+        code.push(0x48);
+    }
+    code.push(0xF3);
+    code.push(0x0F);
+    code.push(0x2C);
+    code.push(modrm(3, src.encoding() & 7, dst.encoding() & 7));
+    code
+}
+
 /// Encode CVTSS2SD xmm, xmm (F3 0F 5A /r) — convert f32 to f64 (widen).
 pub fn encode_cvtss2sd_xmm_xmm(dst: Xmm, src: Xmm) -> Vec<u8> {
     let mut code = Vec::with_capacity(4);
@@ -2331,6 +2405,117 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         stubs.push(("epoll_wait".to_string(), code));
     }
 
+    // print_int(n) → void
+    // Converts integer to decimal string and writes to stdout.
+    // Args: RDI = integer value
+    // Uses raw x86_64 byte encoding for portability.
+    {
+        let mut code = Vec::new();
+        // push rbp; mov rbp, rsp; sub rsp, 32
+        code.extend_from_slice(&[0x55]); // push rbp
+        code.extend_from_slice(&[0x48, 0x89, 0xE5]); // mov rbp, rsp
+        code.extend_from_slice(&[0x48, 0x83, 0xEC, 0x20]); // sub rsp, 32
+
+        // mov r8, rdi (save n in r8)
+        code.extend_from_slice(&[0x49, 0x89, 0xF8]); // mov r8, rdi
+        // lea rcx, [rsp+20] (point to end of buffer)
+        code.extend_from_slice(&[0x48, 0x8D, 0x4C, 0x24, 0x14]); // lea rcx, [rsp+20]
+        // mov byte [rcx], 0x0a (newline)
+        code.extend_from_slice(&[0xC6, 0x01, 0x0A]); // mov byte [rcx], 10
+        // sub rcx, 1
+        code.extend_from_slice(&[0x48, 0x83, 0xE9, 0x01]); // sub rcx, 1
+
+        // Handle n=0: test r8, r8; jnz loop; mov byte [rcx], '0'; jmp done
+        code.extend_from_slice(&[0x4D, 0x85, 0xC0]); // test r8, r8
+        code.extend_from_slice(&[0x75, 0x05]); // jnz +5 (to loop)
+        code.extend_from_slice(&[0xC6, 0x01, 0x30]); // mov byte [rcx], '0'
+        code.extend_from_slice(&[0xEB, 0x25]); // jmp +37 (to write code, past add rcx,1)
+
+        // loop: (offset 0x0B from jnz target)
+        // mov rax, r8; xor rdx, rdx; mov r9, 10; div r9
+        code.extend_from_slice(&[0x4C, 0x89, 0xC0]); // mov rax, r8
+        code.extend_from_slice(&[0x48, 0x31, 0xD2]); // xor rdx, rdx
+        code.extend_from_slice(&[0x49, 0xC7, 0xC1, 0x0A, 0x00, 0x00, 0x00]); // mov r9, 10
+        code.extend_from_slice(&[0x49, 0xF7, 0xF1]); // div r9
+        // mov r8, rax; add dl, 0x30; mov [rcx], dl; sub rcx, 1
+        code.extend_from_slice(&[0x49, 0x89, 0xC0]); // mov r8, rax
+        code.extend_from_slice(&[0x80, 0xC2, 0x30]); // add dl, 0x30
+        code.extend_from_slice(&[0x88, 0x11]); // mov [rcx], dl
+        code.extend_from_slice(&[0x48, 0x83, 0xE9, 0x01]); // sub rcx, 1
+        // test r8, r8; jnz loop
+        code.extend_from_slice(&[0x4D, 0x85, 0xC0]); // test r8, r8
+        code.extend_from_slice(&[0x75, 0xDF]); // jnz -33 (back to loop)
+
+        // done:
+        // add rcx, 1; lea rdx, [rsp+21]; sub rdx, rcx; mov rsi, rcx
+        code.extend_from_slice(&[0x48, 0x83, 0xC1, 0x01]); // add rcx, 1
+        code.extend_from_slice(&[0x48, 0x8D, 0x54, 0x24, 0x15]); // lea rdx, [rsp+21]
+        code.extend_from_slice(&[0x48, 0x29, 0xCA]); // sub rdx, rcx
+        code.extend_from_slice(&[0x48, 0x89, 0xCE]); // mov rsi, rcx
+        // mov rdi, 1; mov rax, 1; syscall
+        code.extend_from_slice(&[0xBF, 0x01, 0x00, 0x00, 0x00]); // mov edi, 1
+        code.extend_from_slice(&[0x48, 0xC7, 0xC0, 0x01, 0x00, 0x00, 0x00]); // mov rax, 1
+        code.extend_from_slice(&[0x0F, 0x05]); // syscall
+
+        // Epilogue: add rsp, 32; pop rbp; ret
+        code.extend_from_slice(&[0x48, 0x83, 0xC4, 0x20]); // add rsp, 32
+        code.extend_from_slice(&[0x5D]); // pop rbp
+        code.extend_from_slice(&[0xC3]); // ret
+        stubs.push(("print_int".to_string(), code));
+    }
+
+    // print_hex(value: i32, width: i32) -> void
+    // Simple stub: just calls print_int for now (placeholder)
+    // Args: RDI = value, RSI = width
+    {
+        let mut code = Vec::new();
+        // For now, just call print_int with the value
+        // push rsi (width) — not used
+        // call print_int (will be resolved by relocation)
+        // The actual print_int function is at a known offset
+        // For simplicity, just convert to decimal and print
+        code.extend_from_slice(&[0x55]); // push rbp
+        code.extend_from_slice(&[0x48, 0x89, 0xE5]); // mov rbp, rsp
+        // Convert value (rdi) to hex string on stack
+        // lea rcx, [rsp+16] (end of buffer)
+        code.extend_from_slice(&[0x48, 0x8D, 0x4C, 0x24, 0x10]); // lea rcx, [rsp+16]
+        // mov byte [rcx], 0x0a (newline)
+        code.extend_from_slice(&[0xC6, 0x01, 0x0A]); // mov byte [rcx], 10
+        // sub rcx, 1
+        code.extend_from_slice(&[0x48, 0x83, 0xE9, 0x01]); // sub rcx, 1
+        // mov r8, rdi (save value)
+        code.extend_from_slice(&[0x49, 0x89, 0xF8]); // mov r8, rdi
+        // mov r9, 4 (bytes to process = 4 for i32)
+        code.extend_from_slice(&[0x49, 0xC7, 0xC1, 0x04, 0x00, 0x00, 0x00]); // mov r9, 4
+        // loop:
+        // mov rax, r8; and rax, 0xF; add al, 0x30; cmp al, 0x3A; jl digit; add al, 7
+        code.extend_from_slice(&[0x4C, 0x89, 0xC0]); // mov rax, r8
+        code.extend_from_slice(&[0x48, 0x83, 0xE0, 0x0F]); // and rax, 0xF
+        code.extend_from_slice(&[0x04, 0x30]); // add al, 0x30
+        code.extend_from_slice(&[0x3C, 0x3A]); // cmp al, 0x3A
+        code.extend_from_slice(&[0x7C, 0x02]); // jl +2 (skip add)
+        code.extend_from_slice(&[0x04, 0x07]); // add al, 7 (a-f)
+        // mov [rcx], al; sub rcx, 1; shr r8, 4; sub r9, 1; jnz loop
+        code.extend_from_slice(&[0x88, 0x01]); // mov [rcx], al
+        code.extend_from_slice(&[0x48, 0x83, 0xE9, 0x01]); // sub rcx, 1
+        code.extend_from_slice(&[0x49, 0xC1, 0xE8, 0x04]); // shr r8, 4
+        code.extend_from_slice(&[0x49, 0x83, 0xE9, 0x01]); // sub r9, 1
+        code.extend_from_slice(&[0x75, 0xE5]); // jnz -27 (back to loop)
+        // done: add rcx, 1; lea rdx, [rsp+17]; sub rdx, rcx; mov rsi, rcx
+        code.extend_from_slice(&[0x48, 0x83, 0xC1, 0x01]); // add rcx, 1
+        code.extend_from_slice(&[0x48, 0x8D, 0x54, 0x24, 0x11]); // lea rdx, [rsp+17]
+        code.extend_from_slice(&[0x48, 0x29, 0xCA]); // sub rdx, rcx
+        code.extend_from_slice(&[0x48, 0x89, 0xCE]); // mov rsi, rcx
+        // mov edi, 1; mov rax, 1; syscall
+        code.extend_from_slice(&[0xBF, 0x01, 0x00, 0x00, 0x00]); // mov edi, 1
+        code.extend_from_slice(&[0x48, 0xC7, 0xC0, 0x01, 0x00, 0x00, 0x00]); // mov rax, 1
+        code.extend_from_slice(&[0x0F, 0x05]); // syscall
+        // pop rbp; ret
+        code.extend_from_slice(&[0x5D]); // pop rbp
+        code.extend_from_slice(&[0xC3]); // ret
+        stubs.push(("print_hex".to_string(), code));
+    }
+
     stubs
 }
 
@@ -2639,7 +2824,16 @@ impl Backend for X86_64Backend {
                     // S = symbol value (target address)
                     // A = addend (current value at the relocation site)
                     // P = place (address of the relocation site)
-                    if let Some(&target_offset) = func_offsets.get(&reloc.symbol) {
+                    let target_offset = func_offsets.get(&reloc.symbol)
+                        .copied()
+                        .or_else(|| {
+                            let prefix = format!("fn_{}", reloc.symbol);
+                            func_offsets.keys()
+                                .find(|k| k.starts_with(&prefix))
+                                .and_then(|k| func_offsets.get(k))
+                                .copied()
+                        });
+                    if let Some(target_offset) = target_offset {
                         let current_val = i32::from_le_bytes([
                             all_code[abs_offset],
                             all_code[abs_offset + 1],
@@ -3592,10 +3786,24 @@ mod tests {
             false_val: IRValue::Register(3),
             ty: None,
         });
-        // Select uses TEST + CMOVcc
+        // Select uses TEST + CMOVcc.
+        //
+        // The stack-slot isel (src/codegen/src/x86_64/stack_slot_isel.rs:640)
+        // lowers Select as: load false_val->RAX, true_val->R10, cond->R11;
+        // `TEST R11, R11` then `CMOVNZ RAX, R10`.
+        //
+        // R11 is in the high register file (R8-R15), so its encoding requires
+        // REX.R and REX.B extensions on top of REX.W. The resulting REX prefix
+        // for `TEST R11, R11` is therefore 0x4D (REX.WRB), not 0x48 (REX.W
+        // only). The CMOVcc opcode byte (0x0F 0x45 for CMOVNZ) is unaffected.
+        //
+        // Accept any REX.W+TEST encoding (REX byte 0x48..=0x4F followed by the
+        // TEST r/m64, r64 opcode 0x85) so the assertion matches the actual
+        // isel output regardless of which scratch register holds `cond`.
         assert!(
-            code.windows(2).any(|w| w[0] == 0x48 && w[1] == 0x85),
-            "TEST not found for Select"
+            code.windows(2)
+                .any(|w| (w[0] >= 0x48 && w[0] <= 0x4F) && w[1] == 0x85),
+            "TEST (REX.W + 0x85) not found for Select"
         );
         assert!(
             code.windows(2)

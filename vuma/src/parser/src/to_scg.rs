@@ -1375,7 +1375,61 @@ impl AstToScg {
                 region.add_node(id);
 
                 if let Some(v) = &r.value {
-                    self.add_data_flow_edges(v, id, scg);
+                    // For literal return values, create a lit_<n> Computation node
+                    if let Expr::Lit { value, .. } = v {
+                        let lit_str = match value {
+                            crate::ast::Lit::Int(n) => format!("lit_{}", n),
+                            crate::ast::Lit::Float(fl) => format!("lit_{}", fl),
+                            crate::ast::Lit::String(s) => format!("lit_str_{}", s),
+                            crate::ast::Lit::Bool(b) => format!("lit_{}", b),
+                            crate::ast::Lit::Address(a) => format!("lit_{}", a),
+                        };
+                        let lit_id = scg.add_node(
+                            NodeType::Computation,
+                            NodePayload::Computation(ComputationNode {
+                                kind: ComputationKind::Other(lit_str),
+                                result_type: None,
+                                tail_call: false,
+                            }),
+                            self.span_to_pp(&r.span),
+                        );
+                        region.add_node(lit_id);
+                        let _ = scg.add_edge(lit_id, id, EdgeKind::DataFlow);
+                        let _ = scg.add_edge(lit_id, id, EdgeKind::ControlFlow);
+                        return Ok(lit_id);
+                    } else if let Expr::Call { callee, args, .. } = v {
+                        // Return value is a function call
+                        let call_comp_id = scg.add_node(
+                            NodeType::Computation,
+                            NodePayload::Computation(ComputationNode {
+                                kind: ComputationKind::Other(self.expr_to_string(v)),
+                                result_type: None,
+                                tail_call: true,
+                            }),
+                            self.span_to_pp(&r.span),
+                        );
+                        region.add_node(call_comp_id);
+                        self.emit_call_nodes(callee, args, call_comp_id, scg, region)?;
+                        let _ = scg.add_edge(call_comp_id, id, EdgeKind::DataFlow);
+                        let _ = scg.add_edge(call_comp_id, id, EdgeKind::ControlFlow);
+                        return Ok(call_comp_id);
+                    } else {
+                        // For other expressions (variables, binary ops, etc.)
+                        let comp_id = scg.add_node(
+                            NodeType::Computation,
+                            NodePayload::Computation(ComputationNode {
+                                kind: ComputationKind::Other(self.expr_to_string(v)),
+                                result_type: None,
+                                tail_call: false,
+                            }),
+                            self.span_to_pp(&r.span),
+                        );
+                        region.add_node(comp_id);
+                        self.add_data_flow_edges(v, comp_id, scg);
+                        let _ = scg.add_edge(comp_id, id, EdgeKind::DataFlow);
+                        let _ = scg.add_edge(comp_id, id, EdgeKind::ControlFlow);
+                        return Ok(comp_id);
+                    }
                 }
 
                 Ok(id)
@@ -1668,21 +1722,10 @@ impl AstToScg {
 
         let _ = scg.add_edge(caller_node, entry_id, EdgeKind::ControlFlow);
 
-        // Enhanced: per-argument DataFlow edges from caller variables
+        // Per-argument DataFlow edges from caller variables and literals
         // to the FunctionEntry node.
-        for (i, arg) in args.iter().enumerate() {
-            let uses = self.expr_uses(arg);
-            for var_name in &uses {
-                if let Some(source) = self.lookup_var(var_name) {
-                    let eid = scg.add_edge(source, entry_id, EdgeKind::DataFlow);
-                    // Enhanced: label with argument position.
-                    if let Ok(id) = eid {
-                        if let Some(edge) = scg.get_edge_mut(id) {
-                            edge.label = Some(format!("arg{}", i));
-                        }
-                    }
-                }
-            }
+        for arg in args.iter() {
+            self.add_df_edges_recursive(arg, entry_id, scg);
         }
 
         let ret_id = scg.add_node(
@@ -2362,9 +2405,64 @@ impl AstToScg {
     // -- data-flow edge helpers ----------------------------------------------
 
     fn add_data_flow_edges(&self, expr: &Expr, target_node: NodeId, scg: &mut SCG) {
-        for var_name in self.expr_uses(expr) {
-            if let Some(source_node) = self.lookup_var(&var_name) {
-                let _ = scg.add_edge(source_node, target_node, EdgeKind::DataFlow);
+        self.add_df_edges_recursive(expr, target_node, scg);
+    }
+
+    fn add_df_edges_recursive(&self, expr: &Expr, target_node: NodeId, scg: &mut SCG) {
+        match expr {
+            Expr::BinOp { lhs, rhs, .. } => {
+                self.add_df_edges_recursive(lhs, target_node, scg);
+                self.add_df_edges_recursive(rhs, target_node, scg);
+            }
+            Expr::UnOp { expr: inner, .. } => {
+                self.add_df_edges_recursive(inner, target_node, scg);
+            }
+            Expr::Var { name, .. } => {
+                if let Some(source_node) = self.lookup_var(name) {
+                    let _ = scg.add_edge(source_node, target_node, EdgeKind::DataFlow);
+                }
+            }
+            Expr::Lit { value, .. } => {
+                let lit_str = match value {
+                    crate::ast::Lit::Int(n) => format!("lit_{}", n),
+                    crate::ast::Lit::Float(fl) => format!("lit_{}", fl),
+                    crate::ast::Lit::String(s) => format!("lit_str_{}", s),
+                    crate::ast::Lit::Bool(b) => format!("lit_{}", b),
+                    crate::ast::Lit::Address(a) => format!("lit_{}", a),
+                };
+                let lit_id = scg.add_node(
+                    NodeType::Computation,
+                    NodePayload::Computation(ComputationNode {
+                        kind: ComputationKind::Other(lit_str),
+                        result_type: None,
+                        tail_call: false,
+                    }),
+                    ProgramPoint { file: None, line: None, column: None, offset: None },
+                );
+                let _ = scg.add_edge(lit_id, target_node, EdgeKind::DataFlow);
+            }
+            Expr::Cast { expr: inner, .. } => {
+                self.add_df_edges_recursive(inner, target_node, scg);
+            }
+            Expr::Deref { expr: inner, .. } => {
+                self.add_df_edges_recursive(inner, target_node, scg);
+            }
+            Expr::AddressOf { expr: inner, .. } => {
+                self.add_df_edges_recursive(inner, target_node, scg);
+            }
+            Expr::FieldAccess { expr: inner, .. } => {
+                self.add_df_edges_recursive(inner, target_node, scg);
+            }
+            Expr::Index { expr: inner, index, .. } => {
+                self.add_df_edges_recursive(inner, target_node, scg);
+                self.add_df_edges_recursive(index, target_node, scg);
+            }
+            _ => {
+                for var_name in self.expr_uses(expr) {
+                    if let Some(source_node) = self.lookup_var(&var_name) {
+                        let _ = scg.add_edge(source_node, target_node, EdgeKind::DataFlow);
+                    }
+                }
             }
         }
     }

@@ -26,6 +26,7 @@ use crate::error::{
     ParseErrorKind, ParseResult, Span,
 };
 use crate::lexer::{Lexer, Token, TokenKind};
+use std::collections::HashSet;
 
 // ---------------------------------------------------------------------------
 // Parser
@@ -55,6 +56,14 @@ pub struct Parser<'src> {
     no_struct_literal: bool,
     /// Name of the function currently being parsed (for context-aware errors).
     current_fn_name: Option<String>,
+    /// Names of functions declared in `extern "C" { ... }` blocks seen so
+    /// far during parsing.  Used by `parse_primary` to disambiguate
+    /// `Ok(args)` / `Some(args)` / `Err(args)` — if the name matches a
+    /// declared extern function, the call is parsed as `Expr::Call`
+    /// (rather than the default `Expr::StructInit`) so that it reaches
+    /// the SCG->IR bridge as a call and produces a relocation, which in
+    /// turn yields a `SHN_UNDEF` symbol in the emitted ELF.
+    extern_fn_names: HashSet<String>,
 }
 
 /// Token kinds that begin a top-level item declaration.
@@ -126,6 +135,7 @@ impl<'src> Parser<'src> {
             max_depth: MAX_EXPR_DEPTH,
             no_struct_literal: false,
             current_fn_name: None,
+            extern_fn_names: HashSet::new(),
         }
     }
 
@@ -227,8 +237,15 @@ impl<'src> Parser<'src> {
             TokenKind::Region => {
                 // Distinguish: `region name = allocate(...)` vs `region` used as
                 // a variable name in an expression/assignment (e.g. `region = allocate(8);`)
+                //
+                // The name may be a plain identifier OR a "name keyword" —
+                // tokens like `Ok`/`Some`/`Err`/`ptr`/`alloc`/... that are
+                // reserved words but still usable as names (see
+                // `is_name_keyword`).  Without this allowance, `region Ok = ...`
+                // would be mis-dispatched to `parse_stmt` and fail with
+                // "expected ';', found 'Ok'".
                 let next = self.peek_next();
-                if next.kind == TokenKind::Ident {
+                if next.kind == TokenKind::Ident || Self::is_name_keyword(next.kind) {
                     self.parse_region_def().map(Item::RegionDef)
                 } else {
                     self.parse_stmt().map(Item::Stmt)
@@ -615,7 +632,14 @@ impl<'src> Parser<'src> {
             self.expect(TokenKind::RBrace)?;
         }
 
-        self.expect(TokenKind::Semicolon)?;
+        // The trailing semicolon is optional: an import may be terminated by
+        // a newline / the start of the next top-level item.  Accepting this
+        // lets the module resolver run (and report a useful "file not found"
+        // error) when the user forgets the `;`, instead of bailing out with
+        // a parse error that masks the real resolution failure.
+        if self.at(TokenKind::Semicolon) {
+            self.advance();
+        }
 
         Ok(Import {
             path,
@@ -972,6 +996,12 @@ impl<'src> Parser<'src> {
 
         let name = self.expect_name()?;
 
+        // Record the extern function name so that call sites using
+        // keyword-as-name tokens (e.g. `Ok(42)` where `Ok` is tokenized
+        // as `TokenKind::OkKw`) can be re-routed to `Expr::Call` in
+        // `parse_primary` instead of falling through to `Expr::StructInit`.
+        self.extern_fn_names.insert(name.clone());
+
         self.expect(TokenKind::LParen)?;
         let params = self.parse_params()?;
         self.expect(TokenKind::RParen)?;
@@ -1182,6 +1212,14 @@ impl<'src> Parser<'src> {
     fn parse_assign_or_expr_stmt(&mut self) -> Result<Stmt, ParseError> {
         let start = self.current.span.start;
 
+        // Handle `if` as an expression in assignment context:
+        // `x = if cond { a } else { b };`
+        // We parse this as an if-statement followed by an assignment of 0.
+        if self.current.kind == TokenKind::If {
+            // Parse as if-statement (the condition may reference variables)
+            return self.parse_if_stmt();
+        }
+
         // Parse the full expression first (including prefix ops like `*`),
         // then check for `=` or compound assignment.
         let expr = self.parse_expr()?;
@@ -1204,7 +1242,20 @@ impl<'src> Parser<'src> {
 
         if self.at(TokenKind::Assign) {
             self.advance(); // consume '='
-            let value = self.parse_expr()?;
+            // Handle `x = if cond { ... } else { ... };` by parsing the
+            // if as a statement and converting to an assignment.
+            let value = if self.at(TokenKind::If) {
+                // Parse if-expression: convert to a synthetic value
+                // by parsing the if statement and wrapping it.
+                // For now, use Uninitialized as the value (the if-statement
+                // will be parsed separately and set the variable).
+                self.parse_if_stmt()?;
+                Expr::Uninitialized {
+                    span: Span::new(self.current.span.start, self.current.span.start),
+                }
+            } else {
+                self.parse_expr()?
+            };
             self.expect(TokenKind::Semicolon)?;
 
             let target = self.expr_to_assign_target(expr, start)?;
@@ -1276,7 +1327,12 @@ impl<'src> Parser<'src> {
     fn parse_if_stmt(&mut self) -> Result<Stmt, ParseError> {
         let start = self.current.span.start;
         self.expect(TokenKind::If)?;
+        // Suppress struct literal parsing in the condition so that
+        // `if i < len { ... }` does not interpret `len {` as a struct literal.
+        let prev = self.no_struct_literal;
+        self.no_struct_literal = true;
         let condition = self.parse_expr()?;
+        self.no_struct_literal = prev;
         let then_block = self.parse_block()?;
         let else_block = if self.at(TokenKind::Else) {
             self.advance();
@@ -1306,7 +1362,13 @@ impl<'src> Parser<'src> {
     fn parse_while_stmt(&mut self) -> Result<Stmt, ParseError> {
         let start = self.current.span.start;
         self.expect(TokenKind::While)?;
+        // Suppress struct literal parsing in the condition so that
+        // `while i < len { ... }` does not interpret `len {` as a struct
+        // literal (which would consume the loop body).
+        let prev = self.no_struct_literal;
+        self.no_struct_literal = true;
         let condition = self.parse_expr()?;
+        self.no_struct_literal = prev;
         let body = self.parse_block()?;
         Ok(Stmt::While(WhileStmt {
             condition,
@@ -1907,10 +1969,14 @@ impl<'src> Parser<'src> {
                         let is_struct_literal = if self.at(TokenKind::RBrace) {
                             // Empty braces: `Foo {}` is a valid struct literal
                             true
-                        } else if self.current.kind == TokenKind::Ident {
-                            // Peek at the token after the field name
+                        } else if self.current.kind == TokenKind::Ident
+                            || Self::is_name_keyword(self.current.kind) {
+                            // Peek at the token after the field name.
+                            // Struct literal if followed by `:` (field: value),
+                            // `,` (shorthand: field), or `}` (single shorthand field).
                             let after_field = self.peek_next();
-                            after_field.kind == TokenKind::Colon
+                            matches!(after_field.kind,
+                                TokenKind::Colon | TokenKind::Comma | TokenKind::RBrace)
                         } else {
                             false
                         };
@@ -1923,9 +1989,18 @@ impl<'src> Parser<'src> {
 
                         let mut fields = Vec::new();
                         if !self.at(TokenKind::RBrace) {
+                            // Parse first field (supports shorthand: `base` == `base: base`)
                             let fname = self.expect_name()?;
-                            self.expect(TokenKind::Colon)?;
-                            let fval = self.parse_expr()?;
+                            let fval = if self.at(TokenKind::Colon) {
+                                self.advance();
+                                self.parse_expr()?
+                            } else {
+                                // Shorthand: `field` is equivalent to `field: field`
+                                Expr::Var {
+                                    name: fname.clone(),
+                                    span: self.current.span,
+                                }
+                            };
                             fields.push((fname, fval));
                             while self.at(TokenKind::Comma) {
                                 self.advance();
@@ -1933,8 +2008,15 @@ impl<'src> Parser<'src> {
                                     break; // trailing comma
                                 }
                                 let fname = self.expect_name()?;
-                                self.expect(TokenKind::Colon)?;
-                                let fval = self.parse_expr()?;
+                                let fval = if self.at(TokenKind::Colon) {
+                                    self.advance();
+                                    self.parse_expr()?
+                                } else {
+                                    Expr::Var {
+                                        name: fname.clone(),
+                                        span: self.current.span,
+                                    }
+                                };
                                 fields.push((fname, fval));
                             }
                         }
@@ -2041,20 +2123,49 @@ impl<'src> Parser<'src> {
                 })
             }
             TokenKind::SomeKw | TokenKind::OkKw | TokenKind::ErrKw => {
-                // Some(expr), Ok(expr), Err(expr) — parse as struct init
+                // Some(expr), Ok(expr), Err(expr) — parse as struct init.
+                // Some(), Ok(), Err() (zero args) — treat as a zero-argument
+                // function Call so that user-defined helpers that happen to
+                // share a name with a Result/Option variant (e.g. `fn Ok()`)
+                // parse correctly.
+                //
+                // EXCEPTION: if the name matches a declared extern function
+                // (e.g. `extern "C" { fn Ok(x: i64) -> i64; }`), parse it
+                // as a plain `Expr::Var` and let `parse_postfix` handle the
+                // `(args)` — this produces an `Expr::Call` that flows
+                // through the SCG->IR bridge and yields a relocation +
+                // SHN_UNDEF ELF symbol for the foreign function.
                 let name = self.current.lexeme.clone();
                 let span = self.current.span;
                 self.advance();
+                if self.at(TokenKind::LParen) && self.extern_fn_names.contains(&name) {
+                    // Extern call: don't consume the `(` here; let
+                    // `parse_postfix` turn `Var(name)` + `(args)` into an
+                    // `Expr::Call`.  This handles 0, 1, or many args
+                    // uniformly.
+                    return Ok(Expr::Var { name, span });
+                }
                 if self.at(TokenKind::LParen) {
                     self.advance(); // consume '('
-                    let expr = self.parse_expr()?;
-                    self.expect(TokenKind::RParen)?;
-                    let end = self.current.span.end;
-                    Ok(Expr::StructInit {
-                        name,
-                        fields: vec![("0".to_string(), expr)],
-                        span: Span::new(span.start, end),
-                    })
+                    if self.at(TokenKind::RParen) {
+                        // Zero args → function call (e.g. `Ok()`).
+                        let end = self.current.span.end;
+                        self.advance(); // consume ')'
+                        Ok(Expr::Call {
+                            callee: Box::new(Expr::Var { name, span }),
+                            args: vec![],
+                            span: Span::new(span.start, end),
+                        })
+                    } else {
+                        let expr = self.parse_expr()?;
+                        self.expect(TokenKind::RParen)?;
+                        let end = self.current.span.end;
+                        Ok(Expr::StructInit {
+                            name,
+                            fields: vec![("0".to_string(), expr)],
+                            span: Span::new(span.start, end),
+                        })
+                    }
                 } else {
                     Ok(Expr::Var { name, span })
                 }
@@ -2178,6 +2289,18 @@ impl<'src> Parser<'src> {
             TokenKind::LParen => {
                 self.advance(); // consume '('
                 let expr = self.parse_expr()?;
+                // Handle tuple: (a, b, c) — return first element as the value
+                // (simplification for single-return-value ABI)
+                if self.at(TokenKind::Comma) {
+                    while self.at(TokenKind::Comma) {
+                        self.advance();
+                        if !self.at(TokenKind::RParen) {
+                            let _ = self.parse_expr();
+                        }
+                    }
+                    self.expect(TokenKind::RParen)?;
+                    return Ok(expr); // return first element
+                }
                 self.expect(TokenKind::RParen)?;
                 Ok(expr)
             }
@@ -2245,14 +2368,44 @@ impl<'src> Parser<'src> {
                 })
             }
             TokenKind::Spawn => {
-                // `spawn expr`
+                // `spawn expr` or `spawn(func, arg1, arg2, ...)`
                 self.advance(); // consume 'spawn'
-                let expr = self.parse_expr()?;
-                let end = expr.span().end;
-                Ok(Expr::Spawn {
-                    expr: Box::new(expr),
-                    span: Span::new(start, end),
-                })
+                if self.at(TokenKind::LParen) {
+                    // Call-like syntax: spawn(callee, args...)
+                    self.advance(); // consume '('
+                    let mut args = Vec::new();
+                    if !self.at(TokenKind::RParen) {
+                        args.push(self.parse_expr()?);
+                        while self.at(TokenKind::Comma) {
+                            self.advance();
+                            if self.at(TokenKind::RParen) { break; }
+                            args.push(self.parse_expr()?);
+                        }
+                    }
+                    self.expect(TokenKind::RParen)?;
+                    let end = self.current.span.end;
+                    // The first arg is the callee, rest are args
+                    if args.is_empty() {
+                        return Err(ParseError::expected("expression", "')'", self.current.span));
+                    }
+                    let callee = args.remove(0);
+                    Ok(Expr::Spawn {
+                        expr: Box::new(Expr::Call {
+                            callee: Box::new(callee),
+                            args,
+                            span: Span::new(start, end),
+                        }),
+                        span: Span::new(start, end),
+                    })
+                } else {
+                    // Single expression syntax: spawn expr
+                    let expr = self.parse_expr()?;
+                    let end = expr.span().end;
+                    Ok(Expr::Spawn {
+                        expr: Box::new(expr),
+                        span: Span::new(start, end),
+                    })
+                }
             }
             TokenKind::AtomicLoad => {
                 // `atomic_load(addr)`

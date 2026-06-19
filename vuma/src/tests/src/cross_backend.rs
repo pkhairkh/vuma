@@ -1448,22 +1448,41 @@ fn test_cross_backend_elf_section_validation() {
                 name
             );
 
-            // Validate that at least one PT_LOAD segment exists
+            // Validate that at least one PT_LOAD segment exists.
+            //
+            // ELF multi-byte header & program-header fields are encoded in the
+            // byte order given by `ei_data` (e_ident[5]): ELFDATA2MSB (=2,
+            // big-endian) for MIPS64 & PPC64, ELFDATA2LSB (=1, little-endian)
+            // for all other backends.  Decoding these fields with a fixed
+            // little-endian interpretation makes the PT_LOAD scan fail for
+            // big-endian ELFs — e.g. MIPS64 writes e_phoff=64 as the big-endian
+            // u64 `[0,0,0,0,0,0,0,0x40]`, which little-endian decodes to
+            // 0x4000_0000_0000_0000, so the loop immediately runs past EOF and
+            // never inspects a real program header.  Decode every field with
+            // the endianness matching `ei_data` (same approach already used
+            // for `e_machine` above).
             let is_64 = expected_class == 2;
+            let be = ei_data == 2; // ELFDATA2MSB (big-endian)
             let e_phoff = if is_64 {
-                u64::from_le_bytes(bytes[32..40].try_into().unwrap())
+                let a: [u8; 8] = bytes[32..40].try_into().unwrap();
+                if be { u64::from_be_bytes(a) } else { u64::from_le_bytes(a) }
             } else {
-                u32::from_le_bytes(bytes[28..32].try_into().unwrap()) as u64
+                let a: [u8; 4] = bytes[28..32].try_into().unwrap();
+                if be { u32::from_be_bytes(a) as u64 } else { u32::from_le_bytes(a) as u64 }
             };
             let e_phentsize = if is_64 {
-                u16::from_le_bytes(bytes[54..56].try_into().unwrap())
+                let a: [u8; 2] = bytes[54..56].try_into().unwrap();
+                if be { u16::from_be_bytes(a) } else { u16::from_le_bytes(a) }
             } else {
-                u16::from_le_bytes(bytes[42..44].try_into().unwrap())
+                let a: [u8; 2] = bytes[42..44].try_into().unwrap();
+                if be { u16::from_be_bytes(a) } else { u16::from_le_bytes(a) }
             };
             let e_phnum = if is_64 {
-                u16::from_le_bytes(bytes[56..58].try_into().unwrap())
+                let a: [u8; 2] = bytes[56..58].try_into().unwrap();
+                if be { u16::from_be_bytes(a) } else { u16::from_le_bytes(a) }
             } else {
-                u16::from_le_bytes(bytes[44..46].try_into().unwrap())
+                let a: [u8; 2] = bytes[44..46].try_into().unwrap();
+                if be { u16::from_be_bytes(a) } else { u16::from_le_bytes(a) }
             };
 
             let mut has_load_segment = false;
@@ -1472,7 +1491,8 @@ fn test_cross_backend_elf_section_validation() {
                 if off + 4 > bytes.len() {
                     break;
                 }
-                let p_type = u32::from_le_bytes(bytes[off..off + 4].try_into().unwrap());
+                let a: [u8; 4] = bytes[off..off + 4].try_into().unwrap();
+                let p_type = if be { u32::from_be_bytes(a) } else { u32::from_le_bytes(a) };
                 if p_type == 1 {
                     // PT_LOAD
                     has_load_segment = true;
