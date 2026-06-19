@@ -1656,6 +1656,30 @@ fn strip_outer_parens(expr: &str) -> &str {
 /// - A variable name (matched to a DataFlow source)
 /// - A literal number (converted to ScgExpr::Int)
 /// - A complex expression (recursively parsed — for now, returns Int(0))
+
+fn map_binop_kind(op: IrBinOpKind) -> vuma_codegen::ir::BinOpKind {
+    match op {
+        IrBinOpKind::Add => vuma_codegen::ir::BinOpKind::Add,
+        IrBinOpKind::Sub => vuma_codegen::ir::BinOpKind::Sub,
+        IrBinOpKind::Mul => vuma_codegen::ir::BinOpKind::Mul,
+        IrBinOpKind::SDiv => vuma_codegen::ir::BinOpKind::SDiv,
+        IrBinOpKind::SRem => vuma_codegen::ir::BinOpKind::SRem,
+        IrBinOpKind::And => vuma_codegen::ir::BinOpKind::And,
+        IrBinOpKind::Or => vuma_codegen::ir::BinOpKind::Or,
+        IrBinOpKind::Xor => vuma_codegen::ir::BinOpKind::Xor,
+        IrBinOpKind::Shl => vuma_codegen::ir::BinOpKind::Shl,
+        IrBinOpKind::ShrL => vuma_codegen::ir::BinOpKind::ShrL,
+        IrBinOpKind::ShrA => vuma_codegen::ir::BinOpKind::ShrA,
+        IrBinOpKind::SLt => vuma_codegen::ir::BinOpKind::SLt,
+        IrBinOpKind::SLe => vuma_codegen::ir::BinOpKind::SLe,
+        IrBinOpKind::SGt => vuma_codegen::ir::BinOpKind::SGt,
+        IrBinOpKind::SGe => vuma_codegen::ir::BinOpKind::SGe,
+        IrBinOpKind::Eq => vuma_codegen::ir::BinOpKind::Eq,
+        IrBinOpKind::Ne => vuma_codegen::ir::BinOpKind::Ne,
+        _ => vuma_codegen::ir::BinOpKind::Add,
+    }
+}
+
 fn resolve_subexpr(
     subexpr: &str,
     sources: &[NodeId],
@@ -1872,32 +1896,62 @@ fn convert_node_to_statement_with_externs(
                                         }));
                                     }
                                     AccessMode::Write | AccessMode::ReadWrite => {
-                                        // For Store, we need to identify the pointer and value.
-                                        // The value comes from the Computation node's DataFlow inputs.
-                                        // The pointer comes from the Access node's Derivation edges.
-                                        let access_id = deriv_edge.target; // The Access node
+                                        let access_id = deriv_edge.target;
 
-                                        // Get value from Computation's DataFlow inputs
+                                        // Collect ALL sources: DataFlow + Derivation
                                         let df_inputs = edge_idx.incoming_df(node_id);
-                                        let value = if let Some(first_df) = df_inputs.first() {
-                                            resolve_df_input(node_id, 0, edge_idx, scg)
-                                        } else {
-                                            ScgExpr::Int(0)
-                                        };
-
-                                        // Get pointer from Access node's incoming Derivation edges
-                                        let mut ptr = ScgExpr::Int(0);
+                                        let mut all_sources: Vec<NodeId> = df_inputs.iter().map(|e| e.source).collect();
                                         if let Some(access_incoming) = edge_idx.incoming.get(&access_id) {
                                             for e in access_incoming {
                                                 if e.kind == EdgeKind::Derivation {
-                                                    // Check if this source has Derivation to Allocation
-                                                    if has_derivation_to_allocation(e.source, edge_idx, scg) {
-                                                        ptr = resolve_df_input_for_node(e.source, edge_idx, scg);
-                                                        break;
-                                                    }
+                                                    all_sources.push(e.source);
                                                 }
                                             }
                                         }
+
+                                        // Parse the label to extract pointer and value expressions.
+                                        let (ptr, value) = if op_label.starts_with("*") {
+                                            if let Some(eq_pos) = op_label.rfind("= ") {
+                                                let lhs = op_label[..eq_pos].trim();
+                                                let rhs = op_label[eq_pos + 2..].trim();
+                                                let ptr_expr = strip_outer_parens(&lhs[1..].trim());
+
+                                                let ptr = if let Some((op, l, r)) = parse_expr_split(ptr_expr) {
+                                                    let lhs_val = resolve_subexpr(&l, &all_sources, edge_idx, scg);
+                                                    let rhs_val = resolve_subexpr(&r, &all_sources, edge_idx, scg);
+                                                    ScgExpr::BinOp {
+                                                        op: map_binop_kind(op),
+                                                        lhs: Box::new(lhs_val),
+                                                        rhs: Box::new(rhs_val),
+                                                    }
+                                                } else {
+                                                    resolve_subexpr(ptr_expr, &all_sources, edge_idx, scg)
+                                                };
+
+                                                let value = if let Some((op, l, r)) = parse_expr_split(rhs) {
+                                                    let lhs_val = resolve_subexpr(&l, &all_sources, edge_idx, scg);
+                                                    let rhs_val = resolve_subexpr(&r, &all_sources, edge_idx, scg);
+                                                    ScgExpr::BinOp {
+                                                        op: map_binop_kind(op),
+                                                        lhs: Box::new(lhs_val),
+                                                        rhs: Box::new(rhs_val),
+                                                    }
+                                                } else {
+                                                    resolve_subexpr(rhs, &all_sources, edge_idx, scg)
+                                                };
+                                                (ptr, value)
+                                            } else {
+                                                (ScgExpr::Int(0), ScgExpr::Int(0))
+                                            }
+                                        } else {
+                                            let value = resolve_df_input(node_id, 0, edge_idx, scg);
+                                            let ptr = if let Some(&src) = all_sources.last() {
+                                                resolve_df_input_for_node(src, edge_idx, scg)
+                                            } else {
+                                                ScgExpr::Int(0)
+                                            };
+                                            (ptr, value)
+                                        };
 
                                         return Some(ScgStatement::Access(AccessNode::Store {
                                             ptr,
