@@ -2335,9 +2335,7 @@ fn build_minimal_riscv64_elf_2seg(code: &[u8], base_addr: u64) -> Vec<u8> {
     elf.extend_from_slice(code);
 
     // --- Pad to data segment offset ---
-    while (elf.len() as u64) < data_offset {
-        elf.push(0);
-    }
+    // Don't pad to data segment offset (data has p_filesz=0)
 
     elf
 }

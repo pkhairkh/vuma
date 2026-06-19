@@ -1838,12 +1838,7 @@ fn build_loongarch64_elf_2seg(code: &[u8], base_addr: u64) -> Vec<u8> {
     }
     elf.extend_from_slice(code);
 
-    // --- Pad to data segment offset and write data segment ---
-    while (elf.len() as u64) < data_offset {
-        elf.push(0);
-    }
-    // Write data segment (all zeros, but must exist in file for QEMU mmap)
-    elf.extend_from_slice(&vec![0u8; data_size as usize]);
+    // Don't pad to data segment offset (trailing bytes confuse QEMU)
 
     elf
 }

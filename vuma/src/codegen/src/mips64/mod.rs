@@ -1686,10 +1686,8 @@ fn build_mips64_elf_2seg(code: &[u8], base_addr: u64) -> Vec<u8> {
     }
     elf.extend_from_slice(code);
 
-    // --- Pad to data segment offset (if needed) ---
-    while (elf.len() as u64) < data_offset {
-        elf.push(0);
-    }
+    // Don't pad to data segment offset (data has p_filesz=0, trailing
+    // bytes confuse QEMU's ELF loader on some architectures)
 
     // No file data for the .data segment (it's BSS-like, zero-initialized)
 
