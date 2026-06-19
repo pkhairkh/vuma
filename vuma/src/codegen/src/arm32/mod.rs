@@ -2313,10 +2313,9 @@ fn build_arm32_elf_2seg(code: &[u8], base_addr: u64) -> Vec<u8> {
     }
     elf.extend_from_slice(code);
 
-    // --- Pad to data segment offset ---
-    while (elf.len() as u64) < data_offset {
-        elf.push(0);
-    }
+    // Don't pad to data segment offset — the data segment has p_filesz=0
+    // so there's no file content. Extra trailing bytes confuse QEMU's
+    // ELF loader on ARM32.
 
     elf
 }
