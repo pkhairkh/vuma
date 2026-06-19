@@ -633,16 +633,18 @@ impl AstToScg {
                     }
                 }
 
-                // Update variable definition for simple assignments.
-                if let AssignTarget::Var { name, .. } = &a.target {
-                    self.define_var(name, id);
-                }
-
+                // Add DataFlow edges BEFORE updating variable definition,
+                // so that lookup_var finds the PREVIOUS definition.
                 self.add_data_flow_edges(&a.value, id, scg);
 
                 // Check if the RHS is a function call.
                 if let Expr::Call { callee, args, .. } = &a.value {
                     self.emit_call_nodes(callee, args, id, scg, region)?;
+                }
+
+                // Update variable definition for simple assignments.
+                if let AssignTarget::Var { name, .. } = &a.target {
+                    self.define_var(name, id);
                 }
 
                 // Pointer offset via assignment: `ptr = base + offset`
