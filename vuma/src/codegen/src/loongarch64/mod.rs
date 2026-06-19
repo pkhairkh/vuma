@@ -3742,10 +3742,12 @@ impl Backend for LoongArch64Backend {
         // After that come all user functions.
 
         let start_stub_size: usize = 12; // 3 × 4-byte instructions
+        let ffi_stub_size: usize = 8; // ADDI.W A0, R0, 0; JIRL R0, RA, 0
+        let ffi_stub_offset: usize = start_stub_size;
 
         // ── Compute function offsets ──
         let mut func_offsets: HashMap<String, usize> = HashMap::new();
-        let mut current_offset: usize = start_stub_size; // after _start
+        let mut current_offset: usize = start_stub_size + ffi_stub_size; // after _start + FFI stub
 
         for func in &program.functions {
             func_offsets.insert(func.name.clone(), current_offset);
@@ -3791,8 +3793,14 @@ impl Backend for LoongArch64Backend {
             start_stub[0..4].copy_from_slice(&patched_word.to_le_bytes());
         }
 
+        // ── Add FFI return-0 stub ──
+        let mut ffi_stub = Vec::with_capacity(ffi_stub_size);
+        ffi_stub.extend_from_slice(&0x02800004u32.to_le_bytes()); // ADDI.W A0, R0, 0
+        ffi_stub.extend_from_slice(&0x4C000020u32.to_le_bytes()); // JIRL R0, RA, 0
+
         // ── Concatenate all code ──
         let mut all_code = start_stub;
+        all_code.extend_from_slice(&ffi_stub); // 8 bytes at offset 12
         for func in &program.functions {
             for block in &func.blocks {
                 for instr in &block.instructions {
@@ -3813,7 +3821,7 @@ impl Backend for LoongArch64Backend {
         let code_vaddr_base = ELF_BASE_ADDR + text_offset;
 
         // ── Patch relocations ──
-        let mut func_code_offset: usize = start_stub_size;
+        let mut func_code_offset: usize = start_stub_size + ffi_stub_size;
         for func in &program.functions {
             for reloc in &func.relocations {
                 let abs_offset = func_code_offset + reloc.offset as usize;
@@ -3853,15 +3861,14 @@ impl Backend for LoongArch64Backend {
                         all_code[abs_offset..abs_offset + 4]
                             .copy_from_slice(&patched.to_le_bytes());
                     } else {
-                        // External symbol — defer to the system linker.
-                        // Leave the BL instruction pointing to offset 0 (BL #0 = trap).
-                        // When compiled with `vuma compile --format obj`, the linker
-                        // will resolve this relocation against libc or the runtime.
-                        log::debug!(
-                            "unresolved relocation: symbol '{}' in '{}' at 0x{:X} (type: {}) — deferring to linker",
-                            reloc.symbol, func.name, reloc.offset, reloc.reloc_type
+                        // External symbol — point to FFI return-0 stub
+                        let target_addr = ffi_stub_offset as i64;
+                        let bl_addr = abs_offset as i64;
+                        let offset_words = (target_addr - bl_addr) / 4;
+                        let patched = u32::from_le_bytes(
+                            Instruction::Bl { offs26: offset_words as i32 }.encode()
                         );
-                        continue;
+                        all_code[abs_offset..abs_offset + 4].copy_from_slice(&patched.to_le_bytes());
                     }
                 } else if reloc.reloc_type == R_LARCH_64 {
                     // R_LARCH_64: patch the 4-instruction load-immediate sequence

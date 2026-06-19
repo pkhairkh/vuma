@@ -4826,13 +4826,15 @@ impl Backend for Arm32Backend {
         // MOV r7, #1   — 4 bytes (sys_exit = 1 on ARM Linux)
         // SVC #0        — 4 bytes
         let start_stub_size: usize = 12; // 3 × 4-byte instructions
+        let ffi_stub_size: usize = 8; // MOV R0, #0; BX LR (2 × 4 bytes)
+        let ffi_stub_offset: usize = start_stub_size;
 
         // ── Build runtime I/O code ──
         let runtime_code = build_arm32_runtime();
 
         // ── Compute function offsets ──
         let mut func_offsets: HashMap<String, usize> = HashMap::new();
-        let mut current_offset: usize = start_stub_size;
+        let mut current_offset: usize = start_stub_size + ffi_stub_size;
 
         for func in &program.functions {
             func_offsets.insert(func.name.clone(), current_offset);
@@ -4885,8 +4887,14 @@ impl Backend for Arm32Backend {
             start_stub[0..4].copy_from_slice(&patched_bl);
         }
 
+        // ── Add FFI return-0 stub ──
+        let mut ffi_stub = Vec::with_capacity(ffi_stub_size);
+        ffi_stub.extend_from_slice(&0xE3A00000u32.to_le_bytes()); // MOV R0, #0
+        ffi_stub.extend_from_slice(&0xE12FFF1Eu32.to_le_bytes()); // BX LR
+
         // ── Concatenate all code ──
         let mut all_code = start_stub;
+        all_code.extend_from_slice(&ffi_stub); // 8 bytes at offset 12
         for func in &program.functions {
             for block in &func.blocks {
                 for instr in &block.instructions {
@@ -4909,7 +4917,7 @@ impl Backend for Arm32Backend {
             }
         }
 
-        let mut func_code_offset: usize = start_stub_size;
+        let mut func_code_offset: usize = start_stub_size + ffi_stub_size;
         for func in &program.functions {
             for reloc in &func.relocations {
                 let abs_offset = func_code_offset + reloc.offset as usize;
@@ -4941,15 +4949,18 @@ impl Backend for Arm32Backend {
                         let patched = (existing & 0xFF000000) | ((offset_words as u32) & 0x00FF_FFFF);
                         all_code[abs_offset..abs_offset + 4].copy_from_slice(&patched.to_le_bytes());
                     } else {
-                        // External symbol — defer to the system linker.
-                        // Leave the BL instruction pointing to offset 0 (BL #0 = trap).
-                        // When compiled with `vuma compile --format obj`, the linker
-                        // will resolve this relocation against libc or the runtime.
-                        log::debug!(
-                            "unresolved relocation: symbol '{}' in '{}' at 0x{:X} (type: {}) — deferring to linker",
-                            reloc.symbol, func.name, reloc.offset, reloc.reloc_type
-                        );
-                        continue;
+                        // External symbol — point to FFI return-0 stub
+                        let target_addr = ffi_stub_offset as i32;
+                        let bl_addr = abs_offset as i32;
+                        let offset_words = (target_addr - (bl_addr + 8)) / 4;
+                        let existing = u32::from_le_bytes([
+                            all_code[abs_offset],
+                            all_code[abs_offset + 1],
+                            all_code[abs_offset + 2],
+                            all_code[abs_offset + 3],
+                        ]);
+                        let patched = (existing & 0xFF000000) | ((offset_words as u32) & 0x00FFFFFF);
+                        all_code[abs_offset..abs_offset + 4].copy_from_slice(&patched.to_le_bytes());
                     }
                 } else if reloc.reloc_type == "R_ARM_BRANCH24" {
                     // Intra-function branch: look up block offset using compound symbol
@@ -4968,15 +4979,18 @@ impl Backend for Arm32Backend {
                         let patched = (existing & 0xFF000000) | ((offset_words as u32) & 0x00FF_FFFF);
                         all_code[abs_offset..abs_offset + 4].copy_from_slice(&patched.to_le_bytes());
                     } else {
-                        // External symbol — defer to the system linker.
-                        // Leave the BL instruction pointing to offset 0 (BL #0 = trap).
-                        // When compiled with `vuma compile --format obj`, the linker
-                        // will resolve this relocation against libc or the runtime.
-                        log::debug!(
-                            "unresolved relocation: symbol '{}' in '{}' at 0x{:X} (type: {}) — deferring to linker",
-                            reloc.symbol, func.name, reloc.offset, reloc.reloc_type
-                        );
-                        continue;
+                        // External symbol — point to FFI return-0 stub
+                        let target_addr = ffi_stub_offset as i32;
+                        let bl_addr = abs_offset as i32;
+                        let offset_words = (target_addr - (bl_addr + 8)) / 4;
+                        let existing = u32::from_le_bytes([
+                            all_code[abs_offset],
+                            all_code[abs_offset + 1],
+                            all_code[abs_offset + 2],
+                            all_code[abs_offset + 3],
+                        ]);
+                        let patched = (existing & 0xFF000000) | ((offset_words as u32) & 0x00FFFFFF);
+                        all_code[abs_offset..abs_offset + 4].copy_from_slice(&patched.to_le_bytes());
                     }
                 }
             }
