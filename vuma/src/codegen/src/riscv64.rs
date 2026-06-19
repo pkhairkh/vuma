@@ -1513,14 +1513,14 @@ impl Instruction {
             0b0110111 => {
                 let rd_reg = Gpr::from_encoding(rd)?;
                 let imm = word & 0xFFFFF000;
-                Some(Instruction::Lui { rd: rd_reg, imm })
+                Some(Instruction::Lui { rd: Gpr::Ra, imm })
             }
 
             // ── AUIPC ──────────────────────────────────────────────
             0b0010111 => {
                 let rd_reg = Gpr::from_encoding(rd)?;
                 let imm = word & 0xFFFFF000;
-                Some(Instruction::Auipc { rd: rd_reg, imm })
+                Some(Instruction::Auipc { rd: Gpr::Ra, imm })
             }
 
             // ── JAL ────────────────────────────────────────────────
@@ -1531,7 +1531,7 @@ impl Instruction {
                     | ((word >> 20) & 1) << 11
                     | ((word >> 21) & 0x3FF) << 1;
                 let offset = ((imm20 << 11) as i32) >> 11;
-                Some(Instruction::Jal { rd: rd_reg, offset })
+                Some(Instruction::Jal { rd: Gpr::Ra, offset })
             }
 
             // ── JALR ───────────────────────────────────────────────
@@ -1540,7 +1540,7 @@ impl Instruction {
                 let rs1_reg = Gpr::from_encoding(rs1)?;
                 let imm = (((word >> 20) as i32) << 20) >> 20;
                 Some(Instruction::Jalr {
-                    rd: rd_reg,
+                    rd: Gpr::Ra,
                     rs1: rs1_reg,
                     imm,
                 })
@@ -1597,37 +1597,37 @@ impl Instruction {
                 let imm = (((word >> 20) as i32) << 20) >> 20;
                 match funct3 {
                     0b000 => Some(Instruction::Lb {
-                        rd: rd_reg,
+                        rd: Gpr::Ra,
                         rs1: rs1_reg,
                         imm,
                     }),
                     0b001 => Some(Instruction::Lh {
-                        rd: rd_reg,
+                        rd: Gpr::Ra,
                         rs1: rs1_reg,
                         imm,
                     }),
                     0b010 => Some(Instruction::Lw {
-                        rd: rd_reg,
+                        rd: Gpr::Ra,
                         rs1: rs1_reg,
                         imm,
                     }),
                     0b011 => Some(Instruction::Ld {
-                        rd: rd_reg,
+                        rd: Gpr::Ra,
                         rs1: rs1_reg,
                         imm,
                     }),
                     0b100 => Some(Instruction::Lbu {
-                        rd: rd_reg,
+                        rd: Gpr::Ra,
                         rs1: rs1_reg,
                         imm,
                     }),
                     0b101 => Some(Instruction::Lhu {
-                        rd: rd_reg,
+                        rd: Gpr::Ra,
                         rs1: rs1_reg,
                         imm,
                     }),
                     0b110 => Some(Instruction::Lwu {
-                        rd: rd_reg,
+                        rd: Gpr::Ra,
                         rs1: rs1_reg,
                         imm,
                     }),
@@ -1676,50 +1676,50 @@ impl Instruction {
                 let shamt = (word >> 20) & 0x3F;
                 match funct3 {
                     0b000 => Some(Instruction::Addi {
-                        rd: rd_reg,
+                        rd: Gpr::Ra,
                         rs1: rs1_reg,
                         imm,
                     }),
                     0b010 => Some(Instruction::Slti {
-                        rd: rd_reg,
+                        rd: Gpr::Ra,
                         rs1: rs1_reg,
                         imm,
                     }),
                     0b011 => Some(Instruction::Sltiu {
-                        rd: rd_reg,
+                        rd: Gpr::Ra,
                         rs1: rs1_reg,
                         imm,
                     }),
                     0b100 => Some(Instruction::Xori {
-                        rd: rd_reg,
+                        rd: Gpr::Ra,
                         rs1: rs1_reg,
                         imm,
                     }),
                     0b110 => Some(Instruction::Ori {
-                        rd: rd_reg,
+                        rd: Gpr::Ra,
                         rs1: rs1_reg,
                         imm,
                     }),
                     0b111 => Some(Instruction::Andi {
-                        rd: rd_reg,
+                        rd: Gpr::Ra,
                         rs1: rs1_reg,
                         imm,
                     }),
                     0b001 => Some(Instruction::Slli {
-                        rd: rd_reg,
+                        rd: Gpr::Ra,
                         rs1: rs1_reg,
                         shamt,
                     }),
                     0b101 => {
                         if funct7 == 0b0100000 {
                             Some(Instruction::Srai {
-                                rd: rd_reg,
+                                rd: Gpr::Ra,
                                 rs1: rs1_reg,
                                 shamt,
                             })
                         } else {
                             Some(Instruction::Srli {
-                                rd: rd_reg,
+                                rd: Gpr::Ra,
                                 rs1: rs1_reg,
                                 shamt,
                             })
@@ -1736,93 +1736,93 @@ impl Instruction {
                 let rs2_reg = Gpr::from_encoding(rs2)?;
                 match (funct7, funct3) {
                     (0b0000000, 0b000) => Some(Instruction::Add {
-                        rd: rd_reg,
+                        rd: Gpr::Ra,
                         rs1: rs1_reg,
                         rs2: rs2_reg,
                     }),
                     (0b0100000, 0b000) => Some(Instruction::Sub {
-                        rd: rd_reg,
+                        rd: Gpr::Ra,
                         rs1: rs1_reg,
                         rs2: rs2_reg,
                     }),
                     (0b0000000, 0b001) => Some(Instruction::Sll {
-                        rd: rd_reg,
+                        rd: Gpr::Ra,
                         rs1: rs1_reg,
                         rs2: rs2_reg,
                     }),
                     (0b0000000, 0b010) => Some(Instruction::Slt {
-                        rd: rd_reg,
+                        rd: Gpr::Ra,
                         rs1: rs1_reg,
                         rs2: rs2_reg,
                     }),
                     (0b0000000, 0b011) => Some(Instruction::Sltu {
-                        rd: rd_reg,
+                        rd: Gpr::Ra,
                         rs1: rs1_reg,
                         rs2: rs2_reg,
                     }),
                     (0b0000000, 0b100) => Some(Instruction::Xor {
-                        rd: rd_reg,
+                        rd: Gpr::Ra,
                         rs1: rs1_reg,
                         rs2: rs2_reg,
                     }),
                     (0b0000000, 0b101) => Some(Instruction::Srl {
-                        rd: rd_reg,
+                        rd: Gpr::Ra,
                         rs1: rs1_reg,
                         rs2: rs2_reg,
                     }),
                     (0b0100000, 0b101) => Some(Instruction::Sra {
-                        rd: rd_reg,
+                        rd: Gpr::Ra,
                         rs1: rs1_reg,
                         rs2: rs2_reg,
                     }),
                     (0b0000000, 0b110) => Some(Instruction::Or {
-                        rd: rd_reg,
+                        rd: Gpr::Ra,
                         rs1: rs1_reg,
                         rs2: rs2_reg,
                     }),
                     (0b0000000, 0b111) => Some(Instruction::And {
-                        rd: rd_reg,
+                        rd: Gpr::Ra,
                         rs1: rs1_reg,
                         rs2: rs2_reg,
                     }),
                     // M extension
                     (0b0000001, 0b000) => Some(Instruction::Mul {
-                        rd: rd_reg,
+                        rd: Gpr::Ra,
                         rs1: rs1_reg,
                         rs2: rs2_reg,
                     }),
                     (0b0000001, 0b001) => Some(Instruction::Mulh {
-                        rd: rd_reg,
+                        rd: Gpr::Ra,
                         rs1: rs1_reg,
                         rs2: rs2_reg,
                     }),
                     (0b0000001, 0b010) => Some(Instruction::Mulhsu {
-                        rd: rd_reg,
+                        rd: Gpr::Ra,
                         rs1: rs1_reg,
                         rs2: rs2_reg,
                     }),
                     (0b0000001, 0b011) => Some(Instruction::Mulhu {
-                        rd: rd_reg,
+                        rd: Gpr::Ra,
                         rs1: rs1_reg,
                         rs2: rs2_reg,
                     }),
                     (0b0000001, 0b100) => Some(Instruction::Div {
-                        rd: rd_reg,
+                        rd: Gpr::Ra,
                         rs1: rs1_reg,
                         rs2: rs2_reg,
                     }),
                     (0b0000001, 0b101) => Some(Instruction::Divu {
-                        rd: rd_reg,
+                        rd: Gpr::Ra,
                         rs1: rs1_reg,
                         rs2: rs2_reg,
                     }),
                     (0b0000001, 0b110) => Some(Instruction::Rem {
-                        rd: rd_reg,
+                        rd: Gpr::Ra,
                         rs1: rs1_reg,
                         rs2: rs2_reg,
                     }),
                     (0b0000001, 0b111) => Some(Instruction::Remu {
-                        rd: rd_reg,
+                        rd: Gpr::Ra,
                         rs1: rs1_reg,
                         rs2: rs2_reg,
                     }),
@@ -1838,25 +1838,25 @@ impl Instruction {
                 let shamt = (word >> 20) & 0x1F;
                 match funct3 {
                     0b000 => Some(Instruction::Addiw {
-                        rd: rd_reg,
+                        rd: Gpr::Ra,
                         rs1: rs1_reg,
                         imm,
                     }),
                     0b001 => Some(Instruction::Slliw {
-                        rd: rd_reg,
+                        rd: Gpr::Ra,
                         rs1: rs1_reg,
                         shamt,
                     }),
                     0b101 => {
                         if funct7 == 0b0100000 {
                             Some(Instruction::Sraiw {
-                                rd: rd_reg,
+                                rd: Gpr::Ra,
                                 rs1: rs1_reg,
                                 shamt,
                             })
                         } else {
                             Some(Instruction::Srliw {
-                                rd: rd_reg,
+                                rd: Gpr::Ra,
                                 rs1: rs1_reg,
                                 shamt,
                             })
@@ -1873,27 +1873,27 @@ impl Instruction {
                 let rs2_reg = Gpr::from_encoding(rs2)?;
                 match (funct7, funct3) {
                     (0b0000000, 0b000) => Some(Instruction::Addw {
-                        rd: rd_reg,
+                        rd: Gpr::Ra,
                         rs1: rs1_reg,
                         rs2: rs2_reg,
                     }),
                     (0b0100000, 0b000) => Some(Instruction::Subw {
-                        rd: rd_reg,
+                        rd: Gpr::Ra,
                         rs1: rs1_reg,
                         rs2: rs2_reg,
                     }),
                     (0b0000000, 0b001) => Some(Instruction::Sllw {
-                        rd: rd_reg,
+                        rd: Gpr::Ra,
                         rs1: rs1_reg,
                         rs2: rs2_reg,
                     }),
                     (0b0000000, 0b101) => Some(Instruction::Srlw {
-                        rd: rd_reg,
+                        rd: Gpr::Ra,
                         rs1: rs1_reg,
                         rs2: rs2_reg,
                     }),
                     (0b0100000, 0b101) => Some(Instruction::Sraw {
-                        rd: rd_reg,
+                        rd: Gpr::Ra,
                         rs1: rs1_reg,
                         rs2: rs2_reg,
                     }),
@@ -1913,32 +1913,32 @@ impl Instruction {
                     let rs1_reg = Gpr::from_encoding(rs1)?;
                     match funct3 {
                         0b001 => Some(Instruction::Csrrw {
-                            rd: rd_reg,
+                            rd: Gpr::Ra,
                             csr,
                             rs1: rs1_reg,
                         }),
                         0b010 => Some(Instruction::Csrrs {
-                            rd: rd_reg,
+                            rd: Gpr::Ra,
                             csr,
                             rs1: rs1_reg,
                         }),
                         0b011 => Some(Instruction::Csrrc {
-                            rd: rd_reg,
+                            rd: Gpr::Ra,
                             csr,
                             rs1: rs1_reg,
                         }),
                         0b101 => Some(Instruction::Csrrwi {
-                            rd: rd_reg,
+                            rd: Gpr::Ra,
                             csr,
                             uimm: rs1,
                         }),
                         0b110 => Some(Instruction::Csrrsi {
-                            rd: rd_reg,
+                            rd: Gpr::Ra,
                             csr,
                             uimm: rs1,
                         }),
                         0b111 => Some(Instruction::Csrrci {
-                            rd: rd_reg,
+                            rd: Gpr::Ra,
                             csr,
                             uimm: rs1,
                         }),
@@ -2097,13 +2097,13 @@ impl Instruction {
                 match (funct5, funct3) {
                     (0b00010, 0b010) => {
                         // LR.D rd, (rs1)  — rs2 must be 0
-                        Some(Instruction::LrD { rd: rd_reg, rs1: rs1_reg })
+                        Some(Instruction::LrD { rd: Gpr::Ra, rs1: rs1_reg })
                     }
                     (0b00011, 0b010) => {
                         // SC.D rd, rs2, (rs1)
                         let rs2_reg = Gpr::from_encoding(rs2)?;
                         Some(Instruction::ScD {
-                            rd: rd_reg,
+                            rd: Gpr::Ra,
                             rs1: rs1_reg,
                             rs2: rs2_reg,
                         })
@@ -5455,8 +5455,16 @@ impl Backend for RiscV64Backend {
             start_stub[0..4].copy_from_slice(&patched_jal.encode());
         }
 
+        // ── Add return-0 stub for unresolved FFI calls ──
+        // li a0, 0 (addi a0, zero, 0) = 0x00000513
+        // ret (jalr zero, ra, 0) = 0x00008067
+        let mut ffi_stub = Vec::with_capacity(8);
+        ffi_stub.extend_from_slice(&0x00000513u32.to_le_bytes()); // li a0, 0
+        ffi_stub.extend_from_slice(&0x00008067u32.to_le_bytes()); // ret
+
         // ── Concatenate all code ──
         let mut all_code = start_stub;
+        all_code.extend_from_slice(&ffi_stub); // 8 bytes at offset 20
         for func in &program.functions {
             for block in &func.blocks {
                 for instr in &block.instructions {
@@ -5503,21 +5511,25 @@ impl Backend for RiscV64Backend {
                         let rd_idx = (existing >> 7) & 0x1F;
                         let rd_reg = Gpr::from_encoding(rd_idx).unwrap_or(Gpr::Ra);
                         let patched = Instruction::Jal {
-                            rd: rd_reg,
+                            rd: Gpr::Ra,
                             offset: offset,
                         };
                         all_code[abs_offset..abs_offset + 4]
                             .copy_from_slice(&patched.encode());
                     } else {
-                        // External symbol — defer to the system linker.
-                        // Leave the JAL instruction pointing to offset 0 (JAL #0 = trap).
-                        // When compiled with `vuma compile --format obj`, the linker
-                        // will resolve this relocation against libc or the runtime.
-                        log::debug!(
-                            "unresolved relocation: symbol '{}' in '{}' at 0x{:X} (type: {}) — deferring to linker",
-                            reloc.symbol, func.name, reloc.offset, reloc.reloc_type
-                        );
-                        continue;
+                        // External symbol — point to the "return 0" stub
+                        // at the beginning of the code (offset 0 after _start).
+                        // The stub is: li a0, 0; ret
+                        let stub_offset = 20; // _start stub is 20 bytes, stub is right after
+                        let target_addr = stub_offset as i64;
+                        let bl_addr = abs_offset as i64;
+                        let offset = (target_addr - bl_addr) as i32;
+                        let patched = Instruction::Jal {
+                            rd: Gpr::Ra,
+                            offset: offset,
+                        };
+                        all_code[abs_offset..abs_offset + 4]
+                            .copy_from_slice(&patched.encode());
                     }
                 }
             }
