@@ -1629,6 +1629,22 @@ fn skip_one_instruction(bytes: &[u8], offset: &mut usize) {
                 *offset += 16;
             }
         }
+        0xFE => {
+            // Atomic memory prefix (Wasm Threads proposal).
+            // Layout: 0xFE, LEB128(sub-opcode), then either:
+            //   - a memarg (LEB128(align) + LEB128(offset)) for all atomic
+            //     load/store/rmw/cmpxchg ops, OR
+            //   - a single reserved 0x00 byte for memory.atomic.fence (0x1E).
+            skip_leb128(bytes, offset, 1); // sub-opcode
+            let (subop, _) = decode_unsigned_leb128(&bytes[*offset - 1..]);
+            if subop == 0x1E {
+                // memory.atomic.fence: skip the reserved 0x00 byte
+                *offset += 1;
+            } else {
+                // memarg: align + offset (both LEB128)
+                skip_leb128(bytes, offset, 2);
+            }
+        }
 
         // ── Control flow ─────────────────────────────────────────
         0x00 => {} // unreachable
@@ -1924,13 +1940,22 @@ fn lower_function(
             ctx.block_labels.insert(block.label.clone(), 0);
         }
 
-        // Lower instructions
+        // Lower instructions — stop after Ret (dead code after return)
+        let mut seen_ret = false;
         for instr in &block.instructions {
+            if seen_ret {
+                break; // skip dead code after Ret
+            }
+            if matches!(instr, IRInstr::Ret { .. }) {
+                seen_ret = true;
+            }
             lower_instruction(instr, &mut ctx)?;
         }
 
-        // Lower terminator
-        lower_terminator(&block.terminator, &mut ctx, block_idx)?;
+        // Lower terminator (skip if we already emitted Ret)
+        if !seen_ret {
+            lower_terminator(&block.terminator, &mut ctx, block_idx)?;
+        }
 
         // End the block
         if block_idx > 0 {
@@ -2283,15 +2308,24 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
                 ctx.push_value(arg, None);
             }
             // Record the call target for later resolution in `encode_program`.
-            // We emit a placeholder index that will be patched once the
-            // module's function index space is fully known.
             let instr_idx = ctx.instrs.len();
             ctx.call_targets.push((instr_idx, func.clone()));
             ctx.emit(WasmInstr::Call(UNRESOLVED_CALL_IDX));
-            if let Some(IRValue::Register(id)) = dst {
-                ctx.pop_to_vreg(*id, WasmType::I32);
+            // Known void functions don't return a value. If dst is Some,
+            // push a dummy 0 so the pop_to_vreg doesn't fail.
+            let void_functions = ["print_int", "print_hex", "print_newline",
+                "__vuma_print_int", "__vuma_print_hex", "__vuma_print_newline",
+                "write", "exit", "free", "__vuma_dealloc", "__vuma_free"];
+            if void_functions.contains(&func.as_str()) {
+                if let Some(IRValue::Register(id)) = dst {
+                    ctx.emit(WasmInstr::I32Const(0));
+                    ctx.pop_to_vreg(*id, WasmType::I32);
+                }
+            } else {
+                if let Some(IRValue::Register(id)) = dst {
+                    ctx.pop_to_vreg(*id, WasmType::I32);
+                }
             }
-            // If the function returns void, nothing to drop
         }
 
         IRInstr::Alloc { dst, size } => {
@@ -2326,13 +2360,23 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
             // Bump allocator does not free; this is a no-op.
         }
 
-        IRInstr::Cast { kind, dst, src, .. } => {
-            // Infer source and destination types for proper cast lowering.
-            // The source type must come from `vreg_types` so that float
-            // registers are correctly identified (the old `infer_wasm_type`
-            // always returned I32 for registers, making FP casts behave as
-            // no-ops).
-            let src_ty = infer_wasm_type(src, &ctx.vreg_types);
+        IRInstr::Cast { kind, dst, src, from_ty, to_ty } => {
+            // Determine the source type.  For register sources, `vreg_types`
+            // has the correct Wasm type (integers are I32 on Wasm32, floats
+            // retain their width).  For immediates/labels/addresses,
+            // `infer_wasm_type` always returns I32, so we consult `from_ty`
+            // to detect float-typed values.
+            let src_ty = match src {
+                IRValue::Register(id) => {
+                    ctx.vreg_types.get(id).copied()
+                        .unwrap_or_else(|| infer_wasm_type(src, &ctx.vreg_types))
+                }
+                _ => match from_ty {
+                    Some(IRType::F32) => WasmType::F32,
+                    Some(IRType::F64) => WasmType::F64,
+                    _ => infer_wasm_type(src, &ctx.vreg_types),
+                },
+            };
 
             // Try to determine the destination type.  In SSA form the
             // destination register is typically defined here for the first
@@ -2361,11 +2405,23 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
                     WasmType::F64 => WasmType::I64,
                 },
             };
+            // For the destination, prefer the existing vreg type (if the
+            // destination vreg was already defined); otherwise consult
+            // `to_ty` for float widths (F32/F64); otherwise use the
+            // default.  Integer destinations are always I32 on Wasm32.
             let dst_ty = match dst {
                 IRValue::Register(id) => {
-                    ctx.vreg_types.get(id).copied().unwrap_or(dst_ty_default)
+                    ctx.vreg_types.get(id).copied().unwrap_or_else(|| match to_ty {
+                        Some(IRType::F32) => WasmType::F32,
+                        Some(IRType::F64) => WasmType::F64,
+                        _ => dst_ty_default,
+                    })
                 }
-                _ => dst_ty_default,
+                _ => match to_ty {
+                    Some(IRType::F32) => WasmType::F32,
+                    Some(IRType::F64) => WasmType::F64,
+                    _ => dst_ty_default,
+                },
             };
 
             ctx.push_value(src, Some(&src_ty));
@@ -2768,9 +2824,14 @@ fn lower_terminator(
 ) -> Result<(), BackendError> {
     match term {
         IRTerminator::Return(values) => {
-            for (i, val) in values.iter().enumerate() {
-                let ty = ctx.result_types.get(i).copied().unwrap_or(WasmType::I32);
-                ctx.push_value(val, Some(&ty));
+            // Only push return values if the function has result types.
+            // If result_types is empty, the function returns void — don't
+            // push anything (WASM requires 0 stack elements for void return).
+            if !ctx.result_types.is_empty() {
+                for (i, val) in values.iter().enumerate() {
+                    let ty = ctx.result_types.get(i).copied().unwrap_or(WasmType::I32);
+                    ctx.push_value(val, Some(&ty));
+                }
             }
             ctx.emit(WasmInstr::Return);
         }
@@ -2869,21 +2930,14 @@ impl Backend for Wasm32Backend {
         // and Wasm-specific metadata stored in typed fields.
         let mut instructions = Vec::new();
 
-        // Disassemble the body bytes into per-instruction AllocatedInstructions
-        // for debugging / inspection purposes.
-        let disasm = self.disassemble(&func_body.body, 0);
-        let mut offset = 0usize;
-        for mnemonic in &disasm {
-            let start = offset;
-            skip_one_instruction(&func_body.body, &mut offset);
-            let instr_bytes = func_body.body[start..offset].to_vec();
-            instructions.push(AllocatedInstruction {
-                opcode: mnemonic.clone(),
-                reads: vec![],
-                writes: vec![],
-                encoded: instr_bytes,
-            });
-        }
+        // Store the body bytes as a single instruction to preserve
+        // exact byte offsets for call relocation patching.
+        instructions.push(AllocatedInstruction {
+            opcode: "wasm_body".to_string(),
+            reads: vec![],
+            writes: vec![],
+            encoded: func_body.body.clone(),
+        });
 
         let code_size: usize = instructions.iter().map(|i| i.encoded.len()).sum();
 
@@ -2951,6 +3005,14 @@ impl Backend for Wasm32Backend {
             min: 2,
             max: Some(256),
             shared: true,
+        });
+
+        // Export memory so the host runtime can read/write linear memory
+        // (needed for fd_write callback to access string buffers).
+        module.add_export(WasmExport {
+            name: "memory".to_string(),
+            kind: WasmExportKind::Memory,
+            index: 0,
         });
 
         // Add the __heap_ptr global (mutable i32, initialised to HEAP_START = start of page 2)
@@ -3033,6 +3095,12 @@ impl Backend for Wasm32Backend {
         func_name_to_idx.insert("__vuma_print_int".to_string(), print_int_func_idx);
         func_name_to_idx.insert("__vuma_print_hex".to_string(), print_hex_func_idx);
         func_name_to_idx.insert("__vuma_print_newline".to_string(), print_newline_func_idx);
+        // Map common FFI function names to runtime/import indices
+        func_name_to_idx.insert("print_int".to_string(), print_int_func_idx);
+        func_name_to_idx.insert("print_hex".to_string(), print_hex_func_idx);
+        func_name_to_idx.insert("print_newline".to_string(), print_newline_func_idx);
+        func_name_to_idx.insert("write".to_string(), 0); // fd_write import = index 0
+        func_name_to_idx.insert("exit".to_string(), 1);  // proc_exit import = index 1
 
         // ── Program functions ──────────────────────────────────────
         // Track the main function so the _start wrapper can call it.
@@ -3055,7 +3123,8 @@ impl Backend for Wasm32Backend {
             let type_idx = module.add_type(func_type.clone());
             let func_idx = module.add_function(type_idx);
 
-            if func.name == "main" {
+            if func.name == "main" || func.name.starts_with("fn_main") 
+               || func.name.starts_with("fn_test") || func.name.starts_with("fn_sha256d") {
                 main_func_idx = Some(func_idx);
                 main_func_type = Some(func_type);
             }
@@ -3158,7 +3227,8 @@ impl Backend for Wasm32Backend {
 
         // Set _start as the Wasm start function (executed automatically
         // on module instantiation).
-        module.set_start(start_func_idx);
+        // Do not set start section - _start is exported and called by host
+        // module.set_start(start_func_idx);
 
         Ok(module.encode())
     }
@@ -3231,7 +3301,11 @@ fn resolve_call_relocations(
     relocations: &[RelocationEntry],
     func_name_to_idx: &HashMap<String, u32>,
 ) -> Result<(), BackendError> {
-    for reloc in relocations {
+    // Process relocations in reverse order (highest offset first) so that
+    // splicing earlier relocations doesn't invalidate later offsets.
+    let mut sorted_relocs: Vec<&RelocationEntry> = relocations.iter().collect();
+    sorted_relocs.sort_by(|a, b| b.offset.cmp(&a.offset));
+    for reloc in &sorted_relocs {
         if reloc.reloc_type != "R_WASM_FUNCTION_INDEX_LEB" {
             continue;
         }
@@ -3454,7 +3528,7 @@ fn emit_print_hex_runtime() -> WasmFuncBody {
     // if nibble < 10: char = '0' + nibble, else char = 'a' + nibble - 10
     WasmInstr::I32Const(10).encode(&mut body);
     WasmInstr::I32LtU.encode(&mut body);
-    WasmInstr::If(None).encode(&mut body);
+    WasmInstr::If(Some(WasmType::I32)).encode(&mut body);
     // nibble < 10: char = 48 + nibble
     WasmInstr::I32Const(48).encode(&mut body);
     WasmInstr::LocalGet(2).encode(&mut body);

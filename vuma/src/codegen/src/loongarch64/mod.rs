@@ -3830,7 +3830,16 @@ impl Backend for LoongArch64Backend {
                     if abs_offset + 4 > all_code.len() {
                         continue; // skip invalid relocations
                     }
-                    if let Some(&target_offset) = func_offsets.get(&reloc.symbol) {
+                    let target_offset = func_offsets.get(&reloc.symbol)
+                        .copied()
+                        .or_else(|| {
+                            let prefix = format!("fn_{}", reloc.symbol);
+                            func_offsets.keys()
+                                .find(|k| k.starts_with(&prefix))
+                                .and_then(|k| func_offsets.get(k))
+                                .copied()
+                        });
+                    if let Some(target_offset) = target_offset {
                         let bl_addr = abs_offset as i64;
                         let target_addr = target_offset as i64;
                         let offset_words = (target_addr - bl_addr) / 4;
@@ -3870,7 +3879,16 @@ impl Backend for LoongArch64Backend {
                         );
                         continue;
                     }
-                    if let Some(&target_offset) = func_offsets.get(&reloc.symbol) {
+                    let target_offset = func_offsets.get(&reloc.symbol)
+                        .copied()
+                        .or_else(|| {
+                            let prefix = format!("fn_{}", reloc.symbol);
+                            func_offsets.keys()
+                                .find(|k| k.starts_with(&prefix))
+                                .and_then(|k| func_offsets.get(k))
+                                .copied()
+                        });
+                    if let Some(target_offset) = target_offset {
                         let vaddr = code_vaddr_base + target_offset as u64;
                         patch_load_imm_64(&mut all_code, abs_offset, vaddr);
                     } else {

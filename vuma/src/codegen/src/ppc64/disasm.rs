@@ -832,6 +832,43 @@ impl Instruction {
             }
         }
 
+        // ── FP X-form (primary=59 single-precision, primary=63 double-precision) ──
+        // FP conversion and move instructions. The rt field holds the
+        // destination FPR (ft), and the rb field holds the source FPR (fb).
+        // ra is 0 for these instructions. xo is in bits [10:1].
+        if primary == 63 {
+            let ft = fpr_from_bits(rt);
+            let fb = fpr_from_bits(rb);
+            match xo_xform {
+                // FRSP: xo=12 (round to single precision)
+                12 => return Ok(Instruction::Frsp { ft, fb }),
+                // FCTIW: xo=14 (float -> int word)
+                14 => return Ok(Instruction::Fctiw { ft, fb }),
+                // FCTIWZ: xo=15 (float -> int word, round toward zero)
+                15 => return Ok(Instruction::Fctiwz { ft, fb }),
+                // FCTIDZ: xo=815 (float -> int doubleword, round toward zero)
+                815 => return Ok(Instruction::Fctidz { ft, fb }),
+                // FCFID: xo=846 (int doubleword -> float)
+                846 => return Ok(Instruction::Fcfid { ft, fb }),
+                // FCFIDU: xo=847 (unsigned int doubleword -> float)
+                847 => return Ok(Instruction::Fcfidu { ft, fb }),
+                // FMR: xo=72 (move between FPRs)
+                72 => return Ok(Instruction::Fmr { ft, fb }),
+                _ => {}
+            }
+        }
+        if primary == 59 {
+            let ft = fpr_from_bits(rt);
+            let fb = fpr_from_bits(rb);
+            match xo_xform {
+                // FCFIDS: xo=846 (int word -> single-precision float)
+                846 => return Ok(Instruction::Fcfids { ft, fb }),
+                // FCFIDUS: xo=847 (unsigned int word -> single-precision float)
+                847 => return Ok(Instruction::Fcfidus { ft, fb }),
+                _ => {}
+            }
+        }
+
         Err(DecodeError::UnknownEncoding { word })
     }
 }

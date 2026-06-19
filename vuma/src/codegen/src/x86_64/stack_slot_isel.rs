@@ -42,6 +42,8 @@ use super::{
     encode_cvtsi2ss_xmm_r32, encode_cvtsi2ss_xmm_r64,
     encode_cvtss2sd_xmm_xmm,
     encode_cvtss2si_r32_xmm, encode_cvtss2si_r64_xmm,
+    encode_cvttsd2si_r32_xmm, encode_cvttsd2si_r64_xmm,
+    encode_cvttss2si_r32_xmm, encode_cvttss2si_r64_xmm,
     encode_addsd_xmm_xmm, encode_addss_xmm_xmm,
     encode_div_reg,
     encode_idiv_reg,
@@ -304,6 +306,15 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
         block_offsets.insert(block.label.clone(), byte_offset);
 
         for instr in &block.instructions {
+            // Per-instruction overrides for the AllocatedInstruction's
+            // opcode / reads / writes.  Populated by select match arms
+            // (currently `IRInstr::Cast` for FP-conversion mnemonics); the
+            // generic `format!("{:?}", instr).split_whitespace().next()`
+            // fallback is used when these remain unset.
+            let mut instr_opcode: Option<String> = None;
+            let mut instr_reads: Vec<PhysicalReg> = Vec::new();
+            let mut instr_writes: Vec<PhysicalReg> = Vec::new();
+
             let encoded = match instr {
                 // ── Add ──
                 IRInstr::Add { dst, lhs, rhs, .. } => {
@@ -868,6 +879,53 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                         None  // default: assume 32-bit destination
                     );
 
+                    // Compute the real x86_64 mnemonic for this cast and record
+                    // the registers it touches.  This makes the
+                    // AllocatedInstruction's `opcode` reflect the actual
+                    // conversion instruction (e.g. "cvtsi2sd", "cvttsd2si")
+                    // rather than the generic "cast", and marks BOTH the
+                    // GPR (Rax, used to ferry the value to/from the stack
+                    // slot) and the FP unit (Xmm0, used for the actual
+                    // conversion) as read/written.  The cross-bank register
+                    // usage is what proves this is a real conversion rather
+                    // than a same-bank move — mirroring what task 2-d did
+                    // for riscv64/ppc64/wasm32.
+                    let xmm0 = PhysicalReg::new(RegClass::SimdFp, Xmm::Xmm0.encoding() as u32);
+                    let rax = PhysicalReg::new(RegClass::Gpr, Gpr::Rax.encoding() as u32);
+                    let (mnemonic, uses_fp) = match kind {
+                        CastKind::IntToFloat => {
+                            (if dst_is_f32 { "cvtsi2ss" } else { "cvtsi2sd" }, true)
+                        }
+                        CastKind::UIntToFloat => {
+                            // UIntToFloat reuses the CVTSI2SD/CVTSI2SS
+                            // signed-conversion encoding after zero-extension
+                            // (and an ADDSD/ADDSS fix-up for the u64 case).
+                            (if dst_is_f32 { "cvtsi2ss" } else { "cvtsi2sd" }, true)
+                        }
+                        CastKind::FloatToInt => {
+                            (if src_is_f32 { "cvttss2si" } else { "cvttsd2si" }, true)
+                        }
+                        CastKind::FloatToUInt => {
+                            // FloatToUInt uses the same truncating conversion
+                            // as FloatToInt (positive-range-correct).
+                            (if src_is_f32 { "cvttss2si" } else { "cvttsd2si" }, true)
+                        }
+                        CastKind::FloatToFloat => {
+                            (if src_is_f32 { "cvtss2sd" } else { "cvtsd2ss" }, true)
+                        }
+                        _ => ("cast", false),
+                    };
+                    instr_opcode = Some(mnemonic.to_string());
+                    // Rax is always read (load_value) and written (store_vreg
+                    // or the conversion's MOVQ/MOVD r,x output) by every
+                    // Cast lowering below.
+                    instr_reads.push(rax);
+                    instr_writes.push(rax);
+                    if uses_fp {
+                        instr_reads.push(xmm0);
+                        instr_writes.push(xmm0);
+                    }
+
                     match kind {
                         CastKind::ZExt => {
                             if let IRValue::Immediate(imm) = src {
@@ -1011,20 +1069,20 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                         CastKind::FloatToInt => {
                             code.extend(load_value(src, Gpr::Rax));
                             if src_is_f32 {
-                                // f32 → signed int
+                                // f32 → signed int (truncate toward zero)
                                 code.extend(encode_movd_xmm_gpr(Xmm::Xmm0, Gpr::Rax));
                                 if dst_is_32bit_int {
-                                    code.extend(encode_cvtss2si_r32_xmm(Gpr::Rax, Xmm::Xmm0));
+                                    code.extend(encode_cvttss2si_r32_xmm(Gpr::Rax, Xmm::Xmm0));
                                 } else {
-                                    code.extend(encode_cvtss2si_r64_xmm(Gpr::Rax, Xmm::Xmm0));
+                                    code.extend(encode_cvttss2si_r64_xmm(Gpr::Rax, Xmm::Xmm0));
                                 }
                             } else {
-                                // f64 → signed int (default)
+                                // f64 → signed int (default, truncate toward zero)
                                 code.extend(encode_movq_xmm_gpr(Xmm::Xmm0, Gpr::Rax));
                                 if dst_is_32bit_int {
-                                    code.extend(encode_cvtsd2si_r32_xmm(Gpr::Rax, Xmm::Xmm0));
+                                    code.extend(encode_cvttsd2si_r32_xmm(Gpr::Rax, Xmm::Xmm0));
                                 } else {
-                                    code.extend(encode_cvtsd2si_r64_xmm(Gpr::Rax, Xmm::Xmm0));
+                                    code.extend(encode_cvttsd2si_r64_xmm(Gpr::Rax, Xmm::Xmm0));
                                 }
                             }
                         }
@@ -1057,16 +1115,16 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                             if src_is_f32 {
                                 code.extend(encode_movd_xmm_gpr(Xmm::Xmm0, Gpr::Rax));
                                 if dst_is_32bit_int {
-                                    code.extend(encode_cvtss2si_r32_xmm(Gpr::Rax, Xmm::Xmm0));
+                                    code.extend(encode_cvttss2si_r32_xmm(Gpr::Rax, Xmm::Xmm0));
                                 } else {
-                                    code.extend(encode_cvtss2si_r64_xmm(Gpr::Rax, Xmm::Xmm0));
+                                    code.extend(encode_cvttss2si_r64_xmm(Gpr::Rax, Xmm::Xmm0));
                                 }
                             } else {
                                 code.extend(encode_movq_xmm_gpr(Xmm::Xmm0, Gpr::Rax));
                                 if dst_is_32bit_int {
-                                    code.extend(encode_cvtsd2si_r32_xmm(Gpr::Rax, Xmm::Xmm0));
+                                    code.extend(encode_cvttsd2si_r32_xmm(Gpr::Rax, Xmm::Xmm0));
                                 } else {
-                                    code.extend(encode_cvtsd2si_r64_xmm(Gpr::Rax, Xmm::Xmm0));
+                                    code.extend(encode_cvttsd2si_r64_xmm(Gpr::Rax, Xmm::Xmm0));
                                 }
                             }
                         }
@@ -1248,14 +1306,17 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
 
             if !encoded.is_empty() {
                 byte_offset += encoded.len();
-                encoded_instrs.push(AllocatedInstruction {
-                    opcode: format!("{:?}", instr)
+                let opcode = instr_opcode.unwrap_or_else(|| {
+                    format!("{:?}", instr)
                         .split_whitespace()
                         .next()
                         .unwrap_or("unknown")
-                        .to_string(),
-                    reads: vec![],
-                    writes: vec![],
+                        .to_string()
+                });
+                encoded_instrs.push(AllocatedInstruction {
+                    opcode,
+                    reads: instr_reads,
+                    writes: instr_writes,
                     encoded,
                 });
             }
