@@ -2268,7 +2268,6 @@ fn find_entry_points(scg: &SCG, edge_idx: &EdgeIndex) -> Vec<NodeId> {
 /// 3. **Phase 3: Statement generation** — Convert non-control nodes into
 ///    ScgStatements with DataFlow-based variable naming.
 
-/// Parse a for-loop range from a LoopHeader label.
 fn parse_for_range(label: &str) -> Option<(String, i64, i64)> {
     let label = label.trim();
     if !label.starts_with("for ") { return None; }
@@ -2423,33 +2422,7 @@ pub fn bridge_scg_to_codegen_with_externs(scg: &SCG, extern_functions: &HashSet<
         }));
     }
 
-    // Handle remaining nodes not consumed by any function (multi-function case)
-    let remaining: Vec<NodeId> = scg.node_ids().filter(|id| !consumed.contains(id)).collect();
-    if !remaining.is_empty() {
-        let mut stmts = Vec::new();
-        for nid in &remaining {
-            if consumed.contains(nid) {
-                continue;
-            }
-            consumed.insert(*nid);
-            if let Some(node_data) = scg.get_node(*nid) {
-                if let Some(stmt) = convert_node_to_statement_with_externs(*nid, node_data, &edge_idx, scg, extern_functions) {
-                    stmts.push(stmt);
-                }
-            }
-        }
-        if !stmts.is_empty() {
-            if !stmts.iter().any(|s| matches!(s, ScgStatement::Return(_))) {
-                stmts.push(ScgStatement::Return(vec![]));
-            }
-            scg_nodes.push(ScgNode::Function(ScgFunction {
-                name: "__remaining".to_string(),
-                params: vec![],
-                results: vec![],
-                body: stmts,
-            }));
-        }
-    }
+    // Skip remaining nodes — they are disconnected expression fragments
 
     // Ensure at least one function exists
     if scg_nodes.is_empty() {

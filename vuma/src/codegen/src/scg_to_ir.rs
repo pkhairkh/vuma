@@ -208,13 +208,10 @@ pub enum ControlNode {
         /// Optional else-branch statements.
         else_body: Option<Vec<ScgStatement>>,
     },
-    /// `loop { body }` or `for i in start..end { body }`
+    /// `loop { body }`
     Loop {
-        /// Loop body statements.
         body: Vec<ScgStatement>,
-        /// Optional for-loop range: (var_name, start, end)
         for_range: Option<(String, i64, i64)>,
-        /// Optional while-loop condition string (e.g., "i < 256")
         while_cond: Option<String>,
     },
     /// `break` (from inside a loop).
@@ -728,6 +725,7 @@ impl IRBuilder {
         for &idx in &order {
             self.lower_statement(&stmts[idx], ir_func, names)?;
         }
+
         Ok(())
     }
 
@@ -1036,10 +1034,6 @@ impl IRBuilder {
             break_snapshots: Vec::new(),
         });
 
-        // ── Step 1: Snapshot names BEFORE the loop ──
-        // (loop counter is added AFTER snapshot so it doesn't get a phi)
-        let names_before = names.clone();
-
         // ── Step 0: For-loop — initialize loop counter ──
         if let Some((var, start, _end)) = for_range {
             let counter_init = self.alloc_vreg();
@@ -1052,6 +1046,9 @@ impl IRBuilder {
             });
             names.insert(var.clone(), counter_init);
         }
+
+        // ── Step 1: Snapshot names BEFORE the loop ──
+        let names_before = names.clone();
 
         // ── Step 2: Jump from current block to loop header ──
         ir_func.current_block().push(IRInstruction::Branch {
@@ -1119,12 +1116,8 @@ impl IRBuilder {
             ir_func.current_block().instructions.push(phi);
         }
 
-        // For-loop: add condition check (counter < end) and conditional branch.
-        if let Some((var, start, end)) = for_range {
-            // Counter was initialized in the pre-header block.
+        if let Some((var, _start, end)) = for_range {
             let counter_vreg = names.get(var).copied().unwrap_or(0);
-
-            // Load end value
             let end_vreg = self.alloc_vreg();
             ir_func.register_vreg(VirtualRegister::named(end_vreg, "loop_end"));
             ir_func.current_block().instructions.push(IRInstruction::Add {
@@ -1133,8 +1126,6 @@ impl IRBuilder {
                 rhs: IRValue::Immediate(0),
                 ty: None,
             });
-
-            // Compare counter < end
             let cmp_vreg = self.alloc_vreg();
             ir_func.register_vreg(VirtualRegister::named(cmp_vreg, "loop_cmp"));
             ir_func.current_block().instructions.push(IRInstruction::Cmp {
@@ -1144,8 +1135,6 @@ impl IRBuilder {
                 rhs: IRValue::Register(end_vreg),
                 ty: None,
             });
-
-            // Conditional branch
             ir_func.current_block().instructions.push(IRInstruction::CondBranch {
                 cond: IRValue::Register(cmp_vreg),
                 true_target: loop_body_label.clone(),
@@ -1157,7 +1146,6 @@ impl IRBuilder {
                 false_block: loop_exit.clone(),
             };
         } else {
-            // Infinite/while loop: unconditional jump to body
             ir_func.current_block().push(IRInstruction::Branch {
                 target: loop_body_label.clone(),
             });
@@ -1168,23 +1156,17 @@ impl IRBuilder {
         ir_func.append_block(&loop_body_label);
         self.lower_statements(body, ir_func, names)?;
 
-        // For-loop: increment the counter at the end of the body.
         if let Some((var, _start, _end)) = for_range {
             if let Some(&counter_vreg) = names.get(var) {
-                let tmp_vreg = self.alloc_vreg();
-                ir_func.register_vreg(VirtualRegister::anonymous(tmp_vreg));
+                let inc_vreg = self.alloc_vreg();
+                ir_func.register_vreg(VirtualRegister::named(inc_vreg, "loop_inc"));
                 ir_func.current_block().instructions.push(IRInstruction::Add {
-                    dst: IRValue::Register(tmp_vreg),
+                    dst: IRValue::Register(inc_vreg),
                     lhs: IRValue::Register(counter_vreg),
                     rhs: IRValue::Immediate(1),
                     ty: None,
                 });
-                ir_func.current_block().instructions.push(IRInstruction::Add {
-                    dst: IRValue::Register(counter_vreg),
-                    lhs: IRValue::Register(tmp_vreg),
-                    rhs: IRValue::Immediate(0),
-                    ty: None,
-                });
+                names.insert(var.clone(), inc_vreg);
             }
         }
 
@@ -1438,8 +1420,10 @@ impl IRBuilder {
             }
         }
 
-        // NOTE: phi instructions are intentionally retained in the IR.
-        // See the method docstring above for why.
+        // Remove phi instructions after inserting copies.
+        for block in &mut ir_func.blocks {
+            block.instructions.retain(|instr| !matches!(instr, IRInstruction::Phi { .. }));
+        }
 
         Ok(())
     }
@@ -1747,7 +1731,7 @@ impl IRBuilder {
                     dst: IRValue::Register(dst_vreg),
                     addr: addr_val,
                     offset: byte_offset,
-                    ty: IRType::U8,
+                    ty: IRType::I64,
                 });
             }
             AccessNode::Store { ptr, offset, value } => {
@@ -1771,12 +1755,12 @@ impl IRBuilder {
                     }
                     None => (ptr_val, 0),
                 };
-                // Use U8 for pointer dereference stores (byte-level access)
+                // Use I64 for pointer dereference stores (64-bit values)
                 ir_func.current_block().push(IRInstruction::Store {
                     value: val,
                     addr: addr_val,
                     offset: byte_offset,
-                    ty: IRType::U8,
+                    ty: IRType::I64,
                 });
             }
         }
