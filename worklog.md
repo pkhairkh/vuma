@@ -2882,3 +2882,44 @@ Remaining:
 - ARM32: 12 crashes (nested loops + complex Store patterns)
 - PPC64: 12 crashes + 11 timeouts
 - RISC-V: 3 timeouts (FFI spawn calls)
+
+---
+Task ID: vuma-fix-session-final4
+Agent: main
+Task: Fix ELF data segment p_offset + if/else continuation + for-loop counter
+
+Work Log:
+- Fixed ELF data segment p_offset: use text_file_end instead of page-aligned
+  data_offset. QEMU validates p_offset + p_filesz <= file_size, and the
+  page-aligned offset was beyond EOF for smaller programs.
+- Fixed if/else without Join: continue from Branch's CF edges instead of
+  stopping. This fixes functions where code comes after if/return guards.
+- Fixed for-loop counter placement: initialized in pre-header block (not
+  in loop header), added AFTER names_before snapshot (no phi for counter).
+- Added while_cond field to ControlNode::Loop (not yet functional —
+  variable name resolution from source names to SCG variable names needed)
+- Added FFI return-0 stub to AArch64 backend
+
+Stage Summary:
+| Backend    | Pass | Crash | Timeout | Compile Fail |
+|------------|------|-------|---------|-------------|
+| x86_64     | 47   | 0     | 0       | 0           |
+| RISC-V     | 44   | 0     | 3       | 0           |
+| AArch64    | 20   | 21    | 6       | 0           |
+| ARM32      | 30   | 17    | 0       | 0           |
+| PPC64      | 21   | 14    | 12      | 0           |
+| MIPS64     | 16   | 31    | 0       | 0           |
+| WASM32     | works| -     | -       | 0           |
+
+Key achievements:
+- x86_64: 47/47 (100%)
+- 0 compile failures across ALL 8 backends
+- AArch64: 20 pass (was 14, +6)
+- All changes pushed to GitHub
+
+Remaining:
+- ARM32: 17 crashes (complex control flow + Store patterns)
+- AArch64: 21 crashes + 6 timeouts (while loop variable resolution)
+- MIPS64: QEMU compatibility issue
+- PPC64: 14 crashes + 12 timeouts
+- RISC-V: 3 FFI spawn timeouts
