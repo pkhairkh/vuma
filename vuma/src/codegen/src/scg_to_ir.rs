@@ -1033,6 +1033,10 @@ impl IRBuilder {
             break_snapshots: Vec::new(),
         });
 
+        // ── Step 1: Snapshot names BEFORE the loop ──
+        // (loop counter is added AFTER snapshot so it doesn't get a phi)
+        let names_before = names.clone();
+
         // ── Step 0: For-loop — initialize loop counter ──
         if let Some((var, start, _end)) = for_range {
             let counter_init = self.alloc_vreg();
@@ -1045,9 +1049,6 @@ impl IRBuilder {
             });
             names.insert(var.clone(), counter_init);
         }
-
-        // ── Step 1: Snapshot names BEFORE the loop ──
-        let names_before = names.clone();
 
         // ── Step 2: Jump from current block to loop header ──
         ir_func.current_block().push(IRInstruction::Branch {
@@ -1169,17 +1170,29 @@ impl IRBuilder {
         self.lower_statements(body, ir_func, names)?;
 
         // For-loop: increment the counter at the end of the body.
+        // Use the SAME vreg as the counter (not a new one) so the stack-slot
+        // ISel overwrites the counter's stack slot. This ensures the Cmp in
+        // the header reads the updated value.
         if let Some((var, _start, _end)) = for_range {
             if let Some(&counter_vreg) = names.get(var) {
-                let inc_vreg = self.alloc_vreg();
-                ir_func.register_vreg(VirtualRegister::named(inc_vreg, "loop_inc"));
+                // Compute counter = counter + 1, storing back to the same vreg
+                // This is not valid SSA, but the stack-slot ISel handles it
+                // correctly by loading from and storing to the same stack slot.
+                let tmp_vreg = self.alloc_vreg();
+                ir_func.register_vreg(VirtualRegister::anonymous(tmp_vreg));
                 ir_func.current_block().instructions.push(IRInstruction::Add {
-                    dst: IRValue::Register(inc_vreg),
+                    dst: IRValue::Register(tmp_vreg),
                     lhs: IRValue::Register(counter_vreg),
                     rhs: IRValue::Immediate(1),
                     ty: None,
                 });
-                names.insert(var.clone(), inc_vreg);
+                // Copy tmp back to counter (overwrites counter's stack slot)
+                ir_func.current_block().instructions.push(IRInstruction::Add {
+                    dst: IRValue::Register(counter_vreg),
+                    lhs: IRValue::Register(tmp_vreg),
+                    rhs: IRValue::Immediate(0),
+                    ty: None,
+                });
             }
         }
 
