@@ -1731,7 +1731,7 @@ impl IRBuilder {
                     dst: IRValue::Register(dst_vreg),
                     addr: addr_val,
                     offset: byte_offset,
-                    ty: IRType::I64,
+                    ty: IRType::U8,
                 });
             }
             AccessNode::Store { ptr, offset, value } => {
@@ -1760,7 +1760,7 @@ impl IRBuilder {
                     value: val,
                     addr: addr_val,
                     offset: byte_offset,
-                    ty: IRType::I64,
+                    ty: IRType::U8,
                 });
             }
         }
