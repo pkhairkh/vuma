@@ -782,12 +782,12 @@ fn resolve_df_input_for_node(
                         return ScgExpr::Int(num);
                     }
                 }
-                // Follow Derivation to Allocation
+                // Follow Derivation to Allocation — return Computation node var
                 for deriv_edge in edge_idx.outgoing.get(&source).map(|v| v.as_slice()).unwrap_or(&[]) {
                     if deriv_edge.kind == EdgeKind::Derivation {
                         if let Some(alloc_node) = scg.get_node(deriv_edge.target) {
                             if matches!(alloc_node.payload, NodePayload::Allocation(_)) {
-                                return ScgExpr::Var(format!("v_{}", deriv_edge.target.as_u64()));
+                                return ScgExpr::Var(format!("v_{}", source.as_u64()));
                             }
                         }
                     }
@@ -851,7 +851,7 @@ fn resolve_df_input(
                         if deriv_edge.kind == EdgeKind::Derivation {
                             if let Some(alloc_node) = scg.get_node(deriv_edge.target) {
                                 if matches!(alloc_node.payload, NodePayload::Allocation(_)) {
-                                    return ScgExpr::Var(format!("v_{}", deriv_edge.target.as_u64()));
+                                    return ScgExpr::Var(format!("v_{}", source.as_u64()));  // Return Computation node var
                                 }
                             }
                         }
@@ -1856,7 +1856,7 @@ fn convert_node_to_statement_with_externs(
                                     .and_then(parse_scg_type)
                                     .unwrap_or(ScgType::U8);
                                 return Some(ScgStatement::Allocation(AllocationNode::Stack {
-                                    name: node_var(deriv_edge.target, "alloc"),
+                                    name: node_var(node_id, "comp"),  // Use Computation node var so Call refs find it
                                     size: alloc.size as u32,
                                     ty,
                                 }));
