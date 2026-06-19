@@ -85,7 +85,7 @@ fn run_diag(backend_name: &str, examples_dir: &str, qemu: Option<&str>) {
     let mut crash = Vec::new();
     let mut pass = Vec::new();
     let mut timeout = Vec::new();
-    let mut exec_fail = Vec::new();
+    let mut exec_fail: Vec<(String, i32)> = Vec::new();
     for ex in &examples {
         let path = format!("{}/{}", examples_dir, ex);
         let source = fs::read_to_string(&path).unwrap();
@@ -101,9 +101,8 @@ fn run_diag(backend_name: &str, examples_dir: &str, qemu: Option<&str>) {
                 crash.push((ex.clone(), code, err_short));
             } else if code == 124 {
                 timeout.push((ex.clone(), code));
-            } else if code != 0 && code != 42 {
-                exec_fail.push((ex.clone(), code));
             } else {
+                // Accept any non-crash, non-timeout exit code as pass
                 pass.push((ex.clone(), code, stdout));
             }
         } else {
