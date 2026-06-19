@@ -1650,7 +1650,7 @@ fn build_mips64_elf_2seg(code: &[u8], base_addr: u64) -> Vec<u8> {
     elf.extend_from_slice(&elf_header_size.to_be_bytes()); // e_phoff
     elf.extend_from_slice(&0u64.to_be_bytes()); // e_shoff (no section headers)
     // e_flags: EF_MIPS_ARCH_64 = 0x60000000 (MIPS64 ISA, N64 ABI implied by ELFCLASS64)
-    elf.extend_from_slice(&0x80000000u32.to_be_bytes()); // e_flags: EF_MIPS_ARCH_64 | EF_MIPS_ABI64
+    elf.extend_from_slice(&0x60008000u32.to_be_bytes()); // e_flags: EF_MIPS_ARCH_64 | EF_MIPS_ABI64
     // Note: EF_MIPS_ABI64 (0x20000000) should also be set for N64 ABI,
     elf.extend_from_slice(&64u16.to_be_bytes()); // e_ehsize
     elf.extend_from_slice(&56u16.to_be_bytes()); // e_phentsize
