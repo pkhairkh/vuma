@@ -2730,14 +2730,14 @@ fn mips64_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, 
 
                     match actual_op {
                         BinOpKind::Add => {
+                            // Use 64-bit DADDU (preserves 64-bit pointers)
                             code.extend_from_slice(&Instruction::Daddu { rd: Gpr::T0, rs: Gpr::T0, rt: Gpr::T1 }.encode());
-                            code.extend_from_slice(&Instruction::Dsll { rd: Gpr::T0, rt: Gpr::T0, sa: 32 }.encode());
-                            code.extend_from_slice(&Instruction::Dsrl { rd: Gpr::T0, rt: Gpr::T0, sa: 32 }.encode());
+                            code.extend_from_slice(&encode_nop());
                         }
                         BinOpKind::Sub => {
+                            // Use 64-bit DSUBU
                             code.extend_from_slice(&Instruction::Dsubu { rd: Gpr::T0, rs: Gpr::T0, rt: Gpr::T1 }.encode());
-                            code.extend_from_slice(&Instruction::Dsll { rd: Gpr::T0, rt: Gpr::T0, sa: 32 }.encode());
-                            code.extend_from_slice(&Instruction::Dsrl { rd: Gpr::T0, rt: Gpr::T0, sa: 32 }.encode());
+                            code.extend_from_slice(&encode_nop());
                         }
                         BinOpKind::Mul | BinOpKind::SDiv | BinOpKind::UDiv |
                         BinOpKind::SRem | BinOpKind::URem => {
@@ -2765,16 +2765,16 @@ fn mips64_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, 
                         BinOpKind::Or => { code.extend_from_slice(&Instruction::Or { rd: Gpr::T0, rs: Gpr::T0, rt: Gpr::T1 }.encode()); }
                         BinOpKind::Xor => { code.extend_from_slice(&Instruction::Xor { rd: Gpr::T0, rs: Gpr::T0, rt: Gpr::T1 }.encode()); }
                         BinOpKind::Shl => {
-                            // Shift left then mask to 32 bits to avoid 64-bit spillover
+                            // 64-bit shift left
                             code.extend_from_slice(&Instruction::Dsllv { rd: Gpr::T0, rt: Gpr::T0, rs: Gpr::T1 }.encode());
-                            code.extend_from_slice(&Instruction::Dsll { rd: Gpr::T0, rt: Gpr::T0, sa: 32 }.encode());
-                            code.extend_from_slice(&Instruction::Dsrl { rd: Gpr::T0, rt: Gpr::T0, sa: 32 }.encode());
+                            code.extend_from_slice(&encode_nop());
                         }
                         BinOpKind::ShrL => {
-                            // Zero-extend to 64 bits, then shift right, result is already correct
+                            // Zero-extend to 64 bits, then shift right
                             code.extend_from_slice(&Instruction::Dsll { rd: Gpr::T0, rt: Gpr::T0, sa: 32 }.encode());
                             code.extend_from_slice(&Instruction::Dsrl { rd: Gpr::T0, rt: Gpr::T0, sa: 32 }.encode());
                             code.extend_from_slice(&Instruction::Dsrlv { rd: Gpr::T0, rt: Gpr::T0, rs: Gpr::T1 }.encode());
+                            code.extend_from_slice(&encode_nop());
                         }
                         BinOpKind::ShrA => { code.extend_from_slice(&Instruction::Dsrav { rd: Gpr::T0, rt: Gpr::T0, rs: Gpr::T1 }.encode()); }
                         BinOpKind::Ror => {
