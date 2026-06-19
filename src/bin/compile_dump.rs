@@ -43,7 +43,7 @@ fn compile_for_backend(source: &str, kind: BackendKind) -> Result<Vec<u8>, Strin
     backend.encode_program(&program).map_err(|e| format!("encode: {}", e))
 }
 
-fn execute_binary(binary: &[u8], qemu: &str, timeout_secs: u64) -> (i32, Vec<u8>, Vec<u8>, bool) {
+fn execute_binary(binary: &[u8], qemu: Option<&str>, timeout_secs: u64) -> (i32, Vec<u8>, Vec<u8>, bool) {
     let bin_path = std::env::temp_dir().join(format!("vuma_diag_{}.bin", std::process::id()));
     let _ = fs::write(&bin_path, binary);
     #[cfg(unix)]
@@ -53,11 +53,11 @@ fn execute_binary(binary: &[u8], qemu: &str, timeout_secs: u64) -> (i32, Vec<u8>
         perms.set_mode(0o755);
         let _ = fs::set_permissions(&bin_path, perms);
     }
-    let output = Command::new("timeout")
-        .arg(format!("{}", timeout_secs))
-        .arg(qemu)
-        .arg(&bin_path)
-        .output();
+    let mut cmd = Command::new("timeout");
+    cmd.arg(format!("{}", timeout_secs));
+    if let Some(q) = qemu { if !q.is_empty() { cmd.arg(q); } }
+    cmd.arg(&bin_path);
+    let output = cmd.output();
     let _ = fs::remove_file(&bin_path);
     match output {
         Ok(o) => {
@@ -94,7 +94,7 @@ fn run_diag(backend_name: &str, examples_dir: &str, qemu: Option<&str>) {
             Err(e) => { compile_fail.push((ex.clone(), e)); continue; }
         };
         if let Some(q) = qemu {
-            let (code, _stdout, stderr, crashed) = execute_binary(&binary, q, 2);
+            let (code, _stdout, stderr, crashed) = execute_binary(&binary, Some(q), 2);
             if crashed {
                 let err_str = String::from_utf8_lossy(&stderr);
                 let err_short: String = err_str.chars().take(200).collect();
