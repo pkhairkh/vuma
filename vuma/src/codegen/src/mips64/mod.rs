@@ -4194,11 +4194,13 @@ impl Backend for Mips64Backend {
 
         // ── _start stub ──
         let start_stub_size: usize = 20; // 5 × 4-byte instructions
+        let ffi_stub_size: usize = 12; // ADDIU V0, ZERO, 0; JR RA; NOP (3 × 4 bytes)
+        let ffi_stub_offset: usize = start_stub_size;
 
         // ── Compute function offsets ──
         // _start stub comes first, then user functions.
         let mut func_offsets: HashMap<String, usize> = HashMap::new();
-        let mut current_offset: usize = start_stub_size;
+        let mut current_offset: usize = start_stub_size + ffi_stub_size;
 
         for func in &program.functions {
             func_offsets.insert(func.name.clone(), current_offset);
@@ -4250,8 +4252,15 @@ impl Backend for Mips64Backend {
             start_stub[0..4].copy_from_slice(&patched.to_le_bytes());
         }
 
+        // ── Add FFI return-0 stub ──
+        let mut ffi_stub = Vec::with_capacity(ffi_stub_size);
+        ffi_stub.extend_from_slice(&0x24020000u32.to_le_bytes()); // ADDIU V0, ZERO, 0
+        ffi_stub.extend_from_slice(&0x03E00008u32.to_le_bytes()); // JR RA
+        ffi_stub.extend_from_slice(&0x00000000u32.to_le_bytes()); // NOP (delay slot)
+
         // ── Concatenate all code ──
         let mut all_code = start_stub;
+        all_code.extend_from_slice(&ffi_stub); // 12 bytes at offset 20
         for func in &program.functions {
             for block in &func.blocks {
                 for instr in &block.instructions {
@@ -4263,7 +4272,7 @@ impl Backend for Mips64Backend {
         // ── Patch J/JAL relocations for inter-function calls ──
         // R_MIPS_26: patch J/JAL instruction's 26-bit target field.
         // target_field = (absolute_target_address >> 2) & 0x03FFFFFF
-        let mut func_code_offset: usize = start_stub_size;
+        let mut func_code_offset: usize = start_stub_size + ffi_stub_size;
         for func in &program.functions {
             for reloc in &func.relocations {
                 let abs_offset = func_code_offset + reloc.offset as usize;
@@ -4296,15 +4305,18 @@ impl Backend for Mips64Backend {
                         all_code[abs_offset..abs_offset + 4]
                             .copy_from_slice(&patched.to_le_bytes());
                     } else {
-                        // External symbol — defer to the system linker.
-                        // Leave the BAL instruction pointing to offset 0 (BAL #0 = trap).
-                        // When compiled with `vuma compile --format obj`, the linker
-                        // will resolve this relocation against libc or the runtime.
-                        log::debug!(
-                            "unresolved relocation: symbol '{}' in '{}' at 0x{:X} (type: {}) — deferring to linker",
-                            reloc.symbol, func.name, reloc.offset, reloc.reloc_type
-                        );
-                        continue;
+                        // External symbol — point to the FFI return-0 stub
+                        let abs_addr = BASE_ADDR + text_offset + ffi_stub_offset as u64;
+                        let target_field = ((abs_addr >> 2) & 0x03FFFFFF) as u32;
+                        let existing = u32::from_le_bytes([
+                            all_code[abs_offset],
+                            all_code[abs_offset + 1],
+                            all_code[abs_offset + 2],
+                            all_code[abs_offset + 3],
+                        ]);
+                        let patched = (existing & 0xFC000000) | target_field;
+                        all_code[abs_offset..abs_offset + 4]
+                            .copy_from_slice(&patched.to_le_bytes());
                     }
                 }
             }

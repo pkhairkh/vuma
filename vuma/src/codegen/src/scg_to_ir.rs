@@ -1747,7 +1747,7 @@ impl IRBuilder {
                     dst: IRValue::Register(dst_vreg),
                     addr: addr_val,
                     offset: byte_offset,
-                    ty: IRType::I64,
+                    ty: IRType::U8,
                 });
             }
             AccessNode::Store { ptr, offset, value } => {
@@ -1771,12 +1771,12 @@ impl IRBuilder {
                     }
                     None => (ptr_val, 0),
                 };
-                // Use I64 for pointer dereference stores (64-bit values)
+                // Use U8 for pointer dereference stores (byte-level access)
                 ir_func.current_block().push(IRInstruction::Store {
                     value: val,
                     addr: addr_val,
                     offset: byte_offset,
-                    ty: IRType::I64,
+                    ty: IRType::U8,
                 });
             }
         }
