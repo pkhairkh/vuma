@@ -1,0 +1,17 @@
+// ls_traverse.vuma — create 2 nodes, load value from first
+// Expected exit code: 42
+//
+// Creates two independent 8-byte nodes, stores 42 in node1 and 99 in
+// node2, then loads and returns node1's value. Verifies that having
+// a second allocation does not disturb the first.
+
+fn main() -> i32 {
+    n1 = allocate(8);
+    n2 = allocate(8);
+    *(n1 + 0) = 42;
+    *(n2 + 0) = 99;
+    val: u64 = *(n1 + 0);
+    free(n1);
+    free(n2);
+    return val;
+}

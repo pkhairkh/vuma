@@ -1,0 +1,16 @@
+// mem_alloc_loop.vuma — allocate in a loop
+// Expected exit code: 0
+//
+// Allocates and frees a buffer 5 times in a loop. Tests repeated
+// allocation cycles. Returns 0 on success.
+
+fn main() -> i32 {
+    i: u32 = 0;
+    while i < 5 {
+        buf = allocate(64);
+        *buf = i;
+        free(buf);
+        i = i + 1;
+    }
+    return 0;
+}

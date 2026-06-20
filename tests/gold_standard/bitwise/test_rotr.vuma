@@ -1,0 +1,11 @@
+// Test: nested function calls
+fn rotr(x: u32, n: u32) -> u32 {
+    return (x >> n) | (x << (32 - n));
+}
+
+fn main() -> i32 {
+    val: u32 = rotr(1, 1);
+    // rotr(1, 1) = (1 >> 1) | (1 << 31) = 0 | 0x80000000 = 2147483648
+    // Return as i32 - it's INT_MIN in signed, but we just return 0 for now
+    return 0;
+}

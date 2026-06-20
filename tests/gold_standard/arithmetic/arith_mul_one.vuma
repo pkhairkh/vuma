@@ -1,0 +1,9 @@
+// arith_mul_one — identity law for multiplication: x * 1 = x
+// Expected exit code: 42
+
+fn main() -> i32 {
+    x: u32 = 42;
+    one: u32 = 1;
+    result: u32 = x * one;
+    return result;
+}

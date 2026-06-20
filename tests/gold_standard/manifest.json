@@ -1,0 +1,318 @@
+{
+  "schema_version": 1,
+  "suite": "vuma-gold-standard",
+  "description": "Gold-standard test programs for the VUMA compiler, organized by the language feature or codegen path they primarily exercise. Each .vuma file is a copy of an example from /tmp/my-project/examples/; originals are preserved there. New test programs added to a category should follow the conventions described in that category's README.md.",
+  "source_dir": "examples/",
+  "total_programs": 77,
+  "categories": [
+    {
+      "name": "arithmetic",
+      "title": "Basic Integer Arithmetic",
+      "description": "Tests covering the fundamental integer arithmetic operators (`+`, `-`, `*`, `/`, `%`) on `i32`, `i64`, `u64` values, including literal returns, single-operator expressions, and small function-call arithmetic. These are the simplest possible programs - they should compile, execute, and exit with a predictable code on every backend.",
+      "features": [
+        "Addition / subtraction / multiplication of integer literals and locals",
+        "Constant returns (smallest valid programs)",
+        "Single-expression function bodies (`fn add1(x) -> x + 1`)",
+        "Smoke tests for the register allocator and prologue/epilogue codegen"
+      ],
+      "program_count": 3,
+      "programs": [
+        "minimal.vuma",
+        "test_call.vuma",
+        "test_exit.vuma"
+      ]
+    },
+    {
+      "name": "bitwise",
+      "title": "Bitwise Operations",
+      "description": "Tests for bitwise operators (`&`, `|`, `^`, `<<`, `>>`) and the bit-manipulation patterns built on top of them \u2014 masks, rotations, popcount, Gray codes, byte swaps, priority encoders, and more. Every program is straight-line code only (no if/else, no for/while) to avoid known VUMA codegen bugs around assignments inside control-flow bodies; see the category README.md for the full list of workarounds.",
+      "features": [
+        "AND, OR, XOR on u32 / u64 / i64",
+        "Left / right shifts (`<<`, `>>`)",
+        "Bit-rotation patterns (`rotl`/`rotr` via shift-and-OR)",
+        "Nybble / byte extraction with shift-and-mask",
+        "Bit set / clear / toggle / test",
+        "SWAR popcount, parity, bit-reversal, byte-swap",
+        "Gray-code encode/decode",
+        "Power-of-2 check, floor(log2), round-up-to-power-of-2",
+        "Hamming distance, priority encoder, bit-interleave",
+        "Bit-twiddle abs via `(x ^ (x>>63)) - (x>>63)` on i64"
+      ],
+      "program_count": 31,
+      "programs": [
+        "test_rotr.vuma",
+        "bit_and_basic.vuma",
+        "bit_or_basic.vuma",
+        "bit_xor_basic.vuma",
+        "bit_shl_basic.vuma",
+        "bit_shr_basic.vuma",
+        "bit_mask_create.vuma",
+        "bit_mask_apply.vuma",
+        "bit_extract_byte.vuma",
+        "bit_extract_nibble.vuma",
+        "bit_set_bit.vuma",
+        "bit_clear_bit.vuma",
+        "bit_toggle_bit.vuma",
+        "bit_test_bit.vuma",
+        "bit_count_ones.vuma",
+        "bit_count_zeros.vuma",
+        "bit_reverse.vuma",
+        "bit_byte_swap.vuma",
+        "bit_rotate_left.vuma",
+        "bit_rotate_right.vuma",
+        "bit_parity.vuma",
+        "bit_gray_encode.vuma",
+        "bit_gray_decode.vuma",
+        "bit_is_pow2.vuma",
+        "bit_log2.vuma",
+        "bit_abs.vuma",
+        "bit_swap.vuma",
+        "bit_round_up_pow2.vuma",
+        "bit_hamming_distance.vuma",
+        "bit_priority_encoder.vuma",
+        "bit_interleave.vuma"
+      ]
+    },
+    {
+      "name": "memory",
+      "title": "Memory Allocation, Load, and Store",
+      "description": "Tests exercising VUMA's `allocate` / `free` intrinsics and the `*ptr` load/store syntax. Ranges from the canonical 4-operation program (allocate / write / read / free) through arena-style region allocators. These are the core programs that exercise IVE's Liveness, Exclusivity, Origin, and Cleanup invariants.",
+      "features": [
+        "Single-cell allocate / store / load / free",
+        "Multi-buffer allocations with independent lifetimes",
+        "Arena (bump-allocator) pattern with bulk invalidation",
+        "Typed arena with nested scopes and O(1) reset"
+      ],
+      "program_count": 5,
+      "programs": [
+        "arena_allocator.vuma",
+        "hello_memory.vuma",
+        "memory_arena.vuma",
+        "test_alloc.vuma",
+        "test_store.vuma"
+      ]
+    },
+    {
+      "name": "control_flow",
+      "title": "Control Flow: if/else, while, for, break, continue",
+      "description": "Tests for branching and looping constructs. Covers `if`/`else` branches, `while` loops with mid-loop condition updates, and `for i in 0..N` ranges. Includes nested conditionals and loops with early-exit / sentinel patterns.",
+      "features": [
+        "for-range loops with accumulator update",
+        "while loops with three-way branch (binary search)",
+        "if/else if/else chains",
+        "Loop termination via sentinel comparison"
+      ],
+      "program_count": 2,
+      "programs": [
+        "bsearch.vuma",
+        "test_loop.vuma"
+      ]
+    },
+    {
+      "name": "pointers",
+      "title": "Pointer Arithmetic and Dereference",
+      "description": "Tests focused on `Address`-typed values, pointer arithmetic (`base + offset`), and `*ptr` dereference. These programs stress the backend's address-computation instruction selection (LEA / ADD with shift, etc.) and the IVE bounds-check on derived pointers.",
+      "features": [
+        "Byte-stride pointer arithmetic (`*(buf + i)`)",
+        "Multi-byte buffer population via computed offsets",
+        "Round-trip write-then-read through a pointer",
+        "Pointer + length idioms used by hex dumpers and serializers"
+      ],
+      "program_count": 3,
+      "programs": [
+        "hex_dump.vuma",
+        "test_hex.vuma",
+        "test_hex2.vuma"
+      ]
+    },
+    {
+      "name": "functions",
+      "title": "Function Calls, Recursion, and Parameters",
+      "description": "Tests exercising VUMA's calling convention: parameter passing, return values, recursion (with base cases), and the call/ret prologue/epilogue. Includes both leaf functions and recursive callers that stress the stack.",
+      "features": [
+        "Leaf function calls with arithmetic return",
+        "Recursive Fibonacci with two recursive calls per frame",
+        "Recursive quicksort with partition helper",
+        "Built-in runtime calls (`print_int`)"
+      ],
+      "program_count": 4,
+      "programs": [
+        "fibonacci.vuma",
+        "quicksort.vuma",
+        "test_print.vuma",
+        "test_print2.vuma"
+      ]
+    },
+    {
+      "name": "structs",
+      "title": "Struct and Enum (Tagged Union) Types",
+      "description": "Tests for `struct` definitions, struct-literal initialization (`Foo { a: 1, b: 2 }`), field access via `(*ptr).field`, and `enum` (tagged-union) types with `match` expressions. These exercise the struct layout / field-offset computation in codegen and the discriminant + payload memory model for enums.",
+      "features": [
+        "Plain struct definitions and field access",
+        "Struct literals with shorthand field init",
+        "Enum (tagged union) with `Some` / `None`-style variants",
+        "`match` expressions for pattern matching on enum tag"
+      ],
+      "program_count": 2,
+      "programs": [
+        "enum_demo.vuma",
+        "struct_demo.vuma"
+      ]
+    },
+    {
+      "name": "atomics",
+      "title": "Atomic Operations and Memory Ordering",
+      "description": "Tests for VUMA's atomic primitives: `atomic_load`, `atomic_store`, `atomic_cas`, `AtomicU64` with `fetch_add` / `fetch_sub` / `compare_exchange`, and the `Acquire` / `Release` / `Relaxed` orderings. These lower to `LDXR`/`STXR` (AArch64), `LOCK CMPXCHG` (x86_64), and equivalent atomic sequences on the other backends.",
+      "features": [
+        "atomic_load / atomic_store with Acquire/Release",
+        "atomic_cas (compare-and-swap) returning old value",
+        "AtomicU64::fetch_add / fetch_sub",
+        "compare_exchange with success/failure orderings",
+        "Spinlock built on atomic_cas"
+      ],
+      "program_count": 2,
+      "programs": [
+        "atomics_demo.vuma",
+        "spinlock.vuma"
+      ]
+    },
+    {
+      "name": "u32_arith",
+      "title": "32-bit Arithmetic with Overflow Masking",
+      "description": "Tests for `u32` arithmetic that explicitly masks results with `& 4294967295` to defeat 64-bit host widening. This is the dominant pattern in SHA-256 / SHA256d code and any code that must preserve exact 32-bit wrap-around semantics on a 64-bit ISA.",
+      "features": [
+        "u32 add / xor / and / rotate with `& 4294967295`",
+        "u32 store/load via 4 individual byte stores (big-endian)",
+        "W-schedule style u32 word copy through byte buffers",
+        "Endianness helpers (`read_u32_be`)"
+      ],
+      "program_count": 4,
+      "programs": [
+        "test_endian.vuma",
+        "test_u32_arith.vuma",
+        "test_u32_mem.vuma",
+        "test_w_sched.vuma"
+      ]
+    },
+    {
+      "name": "edge_cases",
+      "title": "Boundary Conditions and Unusual Features",
+      "description": "Tests that exercise unusual corners of the language: hardware register access via `map_device`, floating-point type conversions (`f32`/`f64`, `inttofloat`, `floattoint`), and the `extern \"C\"` FFI block syntax. These probe edge cases of the codegen, linker, and IVE that the core categories don't reach.",
+      "features": [
+        "Hardware register access via `map_device()` (embedded)",
+        "f32 / f64 conversion intrinsics on all 8 backends",
+        "`extern \"C\" { fn write(...); }` FFI block + relocations",
+        "FP arithmetic and FP store/load"
+      ],
+      "program_count": 3,
+      "programs": [
+        "ffi_demo.vuma",
+        "float_math.vuma",
+        "gpio_blink.vuma"
+      ]
+    },
+    {
+      "name": "multi_function",
+      "title": "Many Functions Calling Each Other",
+      "description": "Tests with large function counts and dense call graphs. These stress the Static Call Graph (SCG) builder, the function-offset resolution pass (`resolve_call_relocs`), and the `BL`/`CALL` relocation range checks. Also useful for verifying DWARF subprogram DIE generation.",
+      "features": [
+        "SHA256d with ~10 helper functions (rotr, ch, maj, sigma, ...)",
+        "Multi-function program designed to exercise DWARF debug info",
+        "Cross-function pointer passing and return"
+      ],
+      "program_count": 2,
+      "programs": [
+        "debug_info.vuma",
+        "sha256d.vuma"
+      ]
+    },
+    {
+      "name": "complex_stores",
+      "title": "Multi-byte Stores and Computed Addresses",
+      "description": "Tests whose primary characteristic is writing multi-byte values (u32, u64) as sequences of byte stores, or writing to addresses computed from complex expressions. These exercise the codegen's store-lowering paths and the IVE bounds analysis on non-trivial address expressions.",
+      "features": [
+        "u32 written as 4 big-endian bytes (`write_u32` helper)",
+        "6-bit-group extraction and table-driven byte output (Base64)",
+        "Padding / alignment logic for variable-length output",
+        "Computed destination addresses (`*(buf + i*stride + off)`)"
+      ],
+      "program_count": 2,
+      "programs": [
+        "base64_encode.vuma",
+        "test_sha_manual.vuma"
+      ]
+    },
+    {
+      "name": "nested_loops",
+      "title": "Two- and Three-Level Nested Loops",
+      "description": "Tests with deeply nested loops - the classic matrix-multiply shape (`for i { for j { for k { ... } } }`). These stress the backend's loop-label register allocation, branch-target encoding, and instruction-cache footprint.",
+      "features": [
+        "4x4 matrix multiply (triple-nested while loops)",
+        "Row-major 2D indexing via 1D memory",
+        "Accumulator patterns across inner loops"
+      ],
+      "program_count": 1,
+      "programs": [
+        "matrix.vuma"
+      ]
+    },
+    {
+      "name": "linked_structures",
+      "title": "Linked Lists, Trees, and Ring Buffers",
+      "description": "Tests for pointer-linked data structures: singly- and doubly-linked lists, AVL-balanced trees with rotations, and any structure where nodes reference each other via `Address` fields. These are the showcase programs for VUMA's IVE - they require `unsafe` in Rust but verify cleanly in VUMA.",
+      "features": [
+        "Singly-linked list with head-only prepend",
+        "Doubly-linked list with sentinel (cyclic pointer updates)",
+        "AVL tree with rotations (parent-pointer cycles)",
+        "Iterative free walking the link chain"
+      ],
+      "program_count": 3,
+      "programs": [
+        "doubly_linked_list.vuma",
+        "linked_list.vuma",
+        "sorted_map.vuma"
+      ]
+    },
+    {
+      "name": "crypto_patterns",
+      "title": "Cryptographic Hash and Checksum Patterns",
+      "description": "Tests implementing cryptographic primitives: SHA-256 (full and single-round), SHA256d (double SHA-256), CRC32, and memory-mapped file hashing. These combine u32 arithmetic, multi-byte stores, and table-driven lookups - they are the most algorithmically dense programs in the suite.",
+      "features": [
+        "Full SHA-256 (NIST FIPS 180-4) compression",
+        "SHA256d = SHA-256(SHA-256(message))",
+        "Single SHA-256 round with known test vectors",
+        "CRC32 (IEEE 802.3, polynomial 0xEDB88320) with lookup table",
+        "mmap + SHA256d over a memory-mapped file"
+      ],
+      "program_count": 3,
+      "programs": [
+        "crc32.vuma",
+        "mmap_sha256d.vuma",
+        "test_sha_round.vuma"
+      ]
+    },
+    {
+      "name": "concurrency",
+      "title": "Lock-Free Structures, Atomics, and Channels",
+      "description": "Tests for concurrent programming: lock-free queues, thread pools with mutex/condvar, MPSC channels, fork/exec pipelines, epoll servers, and signal handlers. These exercise VUMA's `spawn`/`join`, `Mutex`/`Condvar`, `Channel`, FFI to Linux syscalls, and IVE's concurrent-access verification.",
+      "features": [
+        "SPSC lock-free ring buffer with AtomicU64 head/tail",
+        "Thread pool with shared mutex-protected task queue",
+        "MPSC channel with CAS-based slot claiming",
+        "Fork/exec pipeline with pipes",
+        "Epoll-based TCP echo server",
+        "SIGALRM handler with atomic handoff to main thread"
+      ],
+      "program_count": 7,
+      "programs": [
+        "channel_demo.vuma",
+        "epoll_echo.vuma",
+        "lock_free_queue.vuma",
+        "pipeline.vuma",
+        "self_exec.vuma",
+        "signal_hash.vuma",
+        "thread_pool.vuma"
+      ]
+    }
+  ]
+}

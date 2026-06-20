@@ -1,0 +1,21 @@
+// ptr_func_modify.vuma — function modifies caller's buffer
+// Expected exit code: 99
+//
+// main allocates a buffer and passes it (by Address value) to a
+// helper. The helper stores 99 at offset 0 of the buffer via *buf.
+// main then loads the value from the same buffer. Verifies that a
+// callee's store to a passed-in buffer is visible to the caller
+// after the call returns.
+
+fn write_99(buf: Address) -> i32 {
+    *buf = 99;
+    return 0;
+}
+
+fn main() -> i32 {
+    buf = allocate(64);
+    write_99(buf);
+    val: i32 = *buf;
+    free(buf);
+    return val;
+}

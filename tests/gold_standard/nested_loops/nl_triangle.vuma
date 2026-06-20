@@ -1,0 +1,18 @@
+// nl_triangle.vuma — triangular: sum 1+2+3+4 = 10
+// Expected exit code (correct): 10
+// Expected exit code (current buggy backend): 0
+//
+// Outer loop i goes 0..5, inner loop j goes 0..i. The total number of
+// inner-loop iterations is 0+1+2+3+4 = 10 (the 4th triangular number,
+// when summing 1..4 as i=1..4).
+// EXPECTED TO FAIL until the for-body assignment propagation bug is fixed.
+
+fn main() -> i32 {
+    sum: u32 = 0;
+    for i in 0..5 {
+        for j in 0..i {
+            sum = sum + 1;
+        }
+    }
+    return sum;
+}

@@ -1,0 +1,20 @@
+// struct_func_returns.vuma — function allocates struct and returns address
+// Expected exit code: 42
+//
+// A helper function allocates a struct, stores 42 at offset 0, and
+// returns the struct's Address to the caller. main loads the field
+// from the returned address, frees it, and returns the loaded value.
+// Exercises Address-typed return values and ownership transfer.
+
+fn make_struct() -> Address {
+    p = allocate(16);
+    *(p + 0) = 42;
+    return p;
+}
+
+fn main() -> i32 {
+    p = make_struct();
+    val: u64 = *(p + 0);
+    free(p);
+    return val;
+}

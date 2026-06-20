@@ -1,0 +1,22 @@
+// ptr_chain_store.vuma — chain stores across 3 buffers
+// Expected exit code: 7
+//
+// Stores 7 in buf1 (at offset 0 via *buf), copies the value to buf2,
+// then to buf3, loads buf3, and returns it. Verifies that values
+// propagate through a chain of pointer stores/loads.
+
+fn main() -> i32 {
+    buf1 = allocate(8);
+    buf2 = allocate(8);
+    buf3 = allocate(8);
+    *buf1 = 7;
+    tmp1: i32 = *buf1;
+    *buf2 = tmp1;
+    tmp2: i32 = *buf2;
+    *buf3 = tmp2;
+    val: i32 = *buf3;
+    free(buf1);
+    free(buf2);
+    free(buf3);
+    return val;
+}

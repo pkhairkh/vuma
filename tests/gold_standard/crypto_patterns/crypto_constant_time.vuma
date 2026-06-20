@@ -1,0 +1,24 @@
+// crypto_constant_time.vuma — constant-time select: (a & mask) | (b & ~mask)
+// Expected exit code: 42
+//
+// Constant-time selection is the standard primitive for branchless
+// code that avoids timing side channels: when mask = 0xFF, select a;
+// when mask = 0x00, select b. The formula (a & mask) | (b & ~mask)
+// works because (a & 0xFF) | (b & 0x00) = a, and (a & 0x00) | (b &
+// 0xFF) = b. With a = 42, b = 99, mask = 0xFF, the result is 42.
+//
+// VUMA codegen workaround: ~mask is computed as mask ^ 0xFF (the
+// current codegen drops unary NOT). All masks are loaded into named
+// variables per the bitwise-immediate-RHS workaround.
+
+fn main() -> i32 {
+    a: u64 = 42;
+    b: u64 = 99;
+    mask: u64 = 0xFF;
+    mFF: u64 = 0xFF;
+    notMask: u64 = mask ^ mFF;     // 0xFF ^ 0xFF = 0x00
+    lhs: u64 = a & mask;           // 42 & 0xFF = 42
+    rhs: u64 = b & notMask;        // 99 & 0x00 = 0
+    result: u64 = lhs | rhs;       // 42 | 0 = 42
+    return result;
+}

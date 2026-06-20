@@ -1,0 +1,18 @@
+// struct_field_update.vuma — store initial values, update one field
+// Expected exit code: 100
+//
+// Allocates a 3-field struct {a=10, b=20, c=30}. Updates only field c
+// to 100. Returns the updated c. Verifies that an individual field
+// can be overwritten while the others retain their original values.
+
+fn main() -> i32 {
+    p = allocate(24);
+    *(p + 0) = 10;
+    *(p + 8) = 20;
+    *(p + 16) = 30;
+    // Update only field c (offset 16)
+    *(p + 16) = 100;
+    val: u64 = *(p + 16);
+    free(p);
+    return val;
+}

@@ -1,0 +1,35 @@
+// mem_double_buffered.vuma — double-buffered write/read
+// Expected exit code: 0
+//
+// Uses two buffers for double buffering. Writes pattern A to buf_a and
+// pattern B to buf_b. Then "swaps" them by reading from buf_b (the back
+// buffer) and verifies its contents.
+
+fn main() -> i32 {
+    front = allocate(4);
+    back = allocate(4);
+    // Initial: front = [1,2,3,4], back = [0,0,0,0]
+    *(front + 0) = 1; *(front + 1) = 2; *(front + 2) = 3; *(front + 3) = 4;
+    *(back + 0) = 0; *(back + 1) = 0; *(back + 2) = 0; *(back + 3) = 0;
+    // Render to back buffer
+    *(back + 0) = 5; *(back + 1) = 6; *(back + 2) = 7; *(back + 3) = 8;
+    // Verify back buffer has new contents
+    b0: u32 = *(back + 0);
+    b1: u32 = *(back + 1);
+    b2: u32 = *(back + 2);
+    b3: u32 = *(back + 3);
+    // Verify front buffer is unchanged
+    f0: u32 = *(front + 0);
+    free(front);
+    free(back);
+    if b0 == 5 {
+        if b1 == 6 {
+            if b2 == 7 {
+                if b3 == 8 {
+                    if f0 == 1 { return 0; }
+                }
+            }
+        }
+    }
+    return 1;
+}

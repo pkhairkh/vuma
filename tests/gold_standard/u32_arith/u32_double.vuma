@@ -1,0 +1,11 @@
+// u32_double — double a value: 100 * 2
+// Expected exit code: 200
+//
+// 100 * 2 = 200. Masked to u32 = 200.
+
+fn main() -> i32 {
+    val: u32 = 100;
+    two: u32 = 2;
+    doubled: u32 = (val * two) & 4294967295;
+    return doubled;
+}

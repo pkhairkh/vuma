@@ -1,0 +1,19 @@
+// crypto_fletcher_simple.vuma — simplified Fletcher checksum (single value)
+// Expected exit code: 42
+//
+// Fletcher's checksum maintains two accumulators: sum1 = (sum1 + byte)
+// mod 255 and sum2 = (sum2 + sum1) mod 255. For a single input byte
+// with sum1=sum2=0, after one iteration sum1 = v and sum2 = v. The
+// combined checksum is (sum2 << 8) | sum1; we return sum1 + sum2 here.
+// With v = 21: sum1 = 21, sum2 = 21, total = 42. The modular reduction
+// is omitted because the inputs are tiny.
+
+fn main() -> i32 {
+    v: u64 = 21;
+    sum1: u64 = 0;
+    sum2: u64 = 0;
+    sum1b: u64 = sum1 + v;         // 0 + 21 = 21
+    sum2b: u64 = sum2 + sum1b;     // 0 + 21 = 21
+    result: u64 = sum1b + sum2b;   // 21 + 21 = 42
+    return result;
+}

@@ -1,0 +1,19 @@
+// struct_point_y.vuma — load second field of Point struct
+// Expected exit code: 20
+//
+// Same Point {x=10, y=20} layout as struct_point.vuma, but returns y
+// (the field at offset 8). Exercises non-zero constant-offset loads.
+
+struct Point {
+    x: u64,
+    y: u64,
+}
+
+fn main() -> i32 {
+    p = allocate(16);
+    *(p + 0) = 10;
+    *(p + 8) = 20;
+    y: u64 = *(p + 8);
+    free(p);
+    return y;
+}

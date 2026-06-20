@@ -1,0 +1,21 @@
+// fn_sum_squares.vuma — sum_squares(3, 4) = 9 + 16 = 25
+// Expected exit code: 25
+//
+// Tests a helper function (square) called twice inside another function
+// (sum_squares). The two squared results are summed: 3*3 + 4*4 = 25.
+// Uses intermediate variables for the nested calls.
+
+fn square(x: u32) -> u32 {
+    return x * x;
+}
+
+fn sum_squares(a: u32, b: u32) -> u32 {
+    sa: u32 = square(a);
+    sb: u32 = square(b);
+    return sa + sb;
+}
+
+fn main() -> i32 {
+    v: u32 = sum_squares(3, 4);
+    return v;
+}

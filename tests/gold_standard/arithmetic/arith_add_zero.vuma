@@ -1,0 +1,12 @@
+// arith_add_zero — identity law for addition: x + 0 = x
+// Expected exit code: 42
+//
+// Verifies that adding zero to a u32 leaves the value unchanged. The zero is
+// stored in a local to defeat any constant-folding shortcut in the backend.
+
+fn main() -> i32 {
+    x: u32 = 42;
+    zero: u32 = 0;
+    result: u32 = x + zero;
+    return result;
+}

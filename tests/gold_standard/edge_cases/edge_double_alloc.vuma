@@ -1,0 +1,16 @@
+// edge_double_alloc — two allocations, store in first, load from first
+// Expected exit code: 42
+//
+// Edge case: two live allocations at once. Stores 42 in the first
+// buffer and loads it back from the same buffer. Verifies that having
+// a second allocation does not corrupt the first.
+
+fn main() -> i32 {
+    buf1 = allocate(8);
+    buf2 = allocate(8);
+    *buf1 = 42;
+    val: i32 = *buf1;
+    free(buf1);
+    free(buf2);
+    return val;
+}

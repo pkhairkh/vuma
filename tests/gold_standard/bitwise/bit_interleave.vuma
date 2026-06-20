@@ -1,0 +1,16 @@
+// bit_interleave.vuma — Interleave the low bits of two values (1 and 1).
+// Expected exit code: 3
+//
+// For inputs a=1, b=1: bit 0 of a goes to position 0, bit 0 of b goes to
+// position 1. Result = 0b11 = 3.
+//   result = (a & 1) | ((b & 1) << 1) = 1 | 2 = 3
+fn main() -> i32 {
+    a: u64 = 1;
+    b: u64 = 1;
+    one: u64 = 1;
+    bit_a: u64 = a & one;
+    bit_b: u64 = b & one;
+    b_shifted: u64 = bit_b << one;
+    result: u64 = bit_a | b_shifted;
+    return result;
+}

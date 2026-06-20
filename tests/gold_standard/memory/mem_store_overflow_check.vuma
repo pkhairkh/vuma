@@ -1,0 +1,13 @@
+// mem_store_overflow_check.vuma — store at edge of buffer
+// Expected exit code: 99
+//
+// Allocates a 4-byte buffer and stores at the very last valid offset
+// (offset 3). Verifies the byte round-trips correctly.
+
+fn main() -> i32 {
+    buf = allocate(4);
+    *(buf + 3) = 99;
+    v: u32 = *(buf + 3);
+    free(buf);
+    return v;
+}

@@ -1,0 +1,13 @@
+// crypto_checksum.vuma — simple additive checksum of one value
+// Expected exit code: 42
+//
+// The simplest possible checksum: accumulate a single byte value into a
+// zero-initialized accumulator. Real checksums iterate over a buffer;
+// this single-value form isolates the additive-accumulate codegen path.
+
+fn main() -> i32 {
+    acc: u64 = 0;
+    v: u64 = 42;
+    sum: u64 = acc + v;            // 0 + 42 = 42
+    return sum;
+}

@@ -1,0 +1,27 @@
+// conc_compute.vuma — store 3, load, add 7 in a var, store, load
+// Expected exit code: 10
+//
+// Atomic-compute pattern: load the current value of a cell, compute a
+// new value (val + 7), store the new value back, then load and return
+// it. This is the canonical atomic read-modify-write (RMW) primitive
+// that atomic_fetch_add and CAS-based loops are built on.
+//
+// KNOWN WORKAROUND: storing a register that holds the result of a
+// binary operation works correctly when the binary op is written inline
+// in the store statement (`*ptr = a + b`), but fails when an
+// intermediate variable is used (`tmp = a + b; *ptr = tmp`). This test
+// writes the add inline in the store to make the RMW observable today.
+//
+// Uses non-atomic `*ptr` per the bridge-gap workaround documented in
+// conc_atomic_basic.vuma.
+
+fn main() -> i32 {
+    cell = allocate(8);
+    *cell = 3;
+    v: i32 = *cell;
+    seven: i32 = 7;
+    *cell = v + seven;      // RMW: store 3 + 7 = 10 (inline expression)
+    result: i32 = *cell;
+    free(cell);
+    return result;
+}

@@ -1,0 +1,9 @@
+// arith_mod_basic — modulo: 17 % 5 = 2
+// Expected exit code: 2
+
+fn main() -> i32 {
+    x: u32 = 17;
+    y: u32 = 5;
+    result: u32 = x % y;
+    return result;
+}

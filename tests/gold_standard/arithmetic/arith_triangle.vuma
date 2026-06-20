@@ -1,0 +1,10 @@
+// arith_triangle — triangular number: T(n) = n*(n+1)/2
+// Expected exit code: 55
+//
+// T(10) = 10*11/2 = 55.
+
+fn main() -> i32 {
+    n: u32 = 10;
+    t: u32 = n * (n + 1) / 2;
+    return t;
+}

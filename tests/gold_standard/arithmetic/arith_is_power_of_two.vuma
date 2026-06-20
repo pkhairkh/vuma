@@ -1,0 +1,19 @@
+// arith_is_power_of_two — check if n is a power of 2
+// Expected exit code: 1
+//
+// A power of 2 has exactly one bit set, so (n & (n - 1)) == 0.
+// 64 = 2^6 is a power of two, so the test returns 1.
+
+fn main() -> i32 {
+    n: u32 = 64;
+    zero: u32 = 0;
+    one: u32 = 1;
+    if n == zero {
+        return zero;
+    }
+    masked: u32 = n & (n - one);
+    if masked == zero {
+        return one;
+    }
+    return zero;
+}

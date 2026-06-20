@@ -1,0 +1,19 @@
+// fn_store_via_param.vuma — function stores 99 via address param, main loads
+// Expected exit code: 99
+//
+// Tests that a store performed through an Address parameter inside a
+// function is visible to the caller after the function returns. The
+// function stores 99 at *p; main then reads *buf and observes 99.
+
+fn store_val(p: Address) -> u32 {
+    *p = 99;
+    return 0;
+}
+
+fn main() -> i32 {
+    buf = allocate(8);
+    store_val(buf);
+    v: u32 = *buf;
+    free(buf);
+    return v;
+}

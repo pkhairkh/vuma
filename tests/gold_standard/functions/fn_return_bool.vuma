@@ -1,0 +1,24 @@
+// fn_return_bool.vuma — function returns bool, main returns 1 if true
+// EXPECTED TO FAIL — documents a known VUMA bug.
+//
+// Expected (theoretical) exit code: 1
+// Actual exit code (observed):     0
+//
+// VUMA currently drops the bool return value when main assigns it to a
+// local variable: `b: bool = get_true();` always sees `b == false` in
+// the subsequent `if`. This test is a regression test for the day the
+// if/bool-return bug is fixed. It necessarily uses `if` (the only way
+// to inspect a bool), so it is not strictly "straight-line" — included
+// here because the task spec calls for it as a documented-failure case.
+
+fn get_true() -> bool {
+    return true;
+}
+
+fn main() -> i32 {
+    b: bool = get_true();
+    if b {
+        return 1;
+    }
+    return 0;
+}

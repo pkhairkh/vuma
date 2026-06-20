@@ -1,0 +1,24 @@
+// arith_clamp — clamp a value to the range [lo, hi]
+// Expected exit code: 100
+//
+// clamp(150, 0, 100) = 100 (clamped to upper bound).
+// clamp(-5, 0, 100) = 0   (clamped to lower bound).
+// clamp(50, 0, 100) = 50  (already in range).
+// Here we only test the upper-bound clamp and return 100.
+
+fn main() -> i32 {
+    val: u32 = 150;
+    lo: u32 = 0;
+    hi: u32 = 100;
+    result: u32 = val;
+    if val < lo {
+        result = lo;
+    } else {
+        if val > hi {
+            result = hi;
+        } else {
+            result = val;
+        }
+    }
+    return result;
+}

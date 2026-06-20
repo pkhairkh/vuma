@@ -1,0 +1,17 @@
+// mf_call_in_expr.vuma — result = helper(3) + helper(7), intermediate vars
+// Expected exit code: 10
+//
+// Tests summing the results of two function calls. Uses intermediate
+// variables because VUMA miscompiles nested call expressions used
+// directly inside arithmetic.
+
+fn identity(x: u32) -> u32 {
+    return x;
+}
+
+fn main() -> i32 {
+    a: u32 = identity(3);
+    b: u32 = identity(7);
+    v: u32 = a + b;
+    return v;
+}

@@ -1,0 +1,36 @@
+// mf_deep_nesting.vuma — 5 levels of calls, each adds 2
+// Expected exit code: 10
+//
+// Tests a five-level deep call chain where each level adds 2 to its
+// argument and passes the result to the next level. Starting from 0:
+// 0 -> 2 -> 4 -> 6 -> 8 -> 10. Uses intermediate variables because
+// VUMA miscompiles nested call expressions used directly as arguments.
+
+fn level5(x: u32) -> u32 {
+    return x + 2;
+}
+fn level4(x: u32) -> u32 {
+    r: u32 = x + 2;
+    s: u32 = level5(r);
+    return s;
+}
+fn level3(x: u32) -> u32 {
+    r: u32 = x + 2;
+    s: u32 = level4(r);
+    return s;
+}
+fn level2(x: u32) -> u32 {
+    r: u32 = x + 2;
+    s: u32 = level3(r);
+    return s;
+}
+fn level1(x: u32) -> u32 {
+    r: u32 = x + 2;
+    s: u32 = level2(r);
+    return s;
+}
+
+fn main() -> i32 {
+    v: u32 = level1(0);
+    return v;
+}

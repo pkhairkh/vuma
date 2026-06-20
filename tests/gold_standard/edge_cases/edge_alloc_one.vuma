@@ -1,0 +1,13 @@
+// edge_alloc_one — allocate(1), store 42, load, return
+// Expected exit code: 42
+//
+// Edge case: smallest meaningful allocation (1 byte). Store 42 at
+// offset 0, load it back, return. Verifies 1-byte buffers work.
+
+fn main() -> i32 {
+    buf = allocate(1);
+    *buf = 42;
+    val: i32 = *buf;
+    free(buf);
+    return val;
+}

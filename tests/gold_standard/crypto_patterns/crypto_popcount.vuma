@@ -1,0 +1,34 @@
+// crypto_popcount.vuma — popcount of 0xFF (8 ones) = 8
+// Expected exit code: 8
+//
+// Population count (number of set bits) underlies Hamming-weight
+// side-channel countermeasures and SHA-3's RC bit. The SWAR popcount
+// algorithm folds a 64-bit value into 2-bit, then 4-bit, then 8-bit
+// lane sums in 3 straight-line shift-mask-add stages. With v = 0xFF
+// (8 set bits), the final per-byte sum is 8. All masks and shifts use
+// named variables; each shift-then-mask is split into its own
+// statement to avoid the nested-shift-mask miscompilation noted in the
+// bit_count_ones workaround.
+
+fn main() -> i32 {
+    x: u64 = 0xFF;
+    m1: u64 = 0x5555555555555555;
+    m2: u64 = 0x3333333333333333;
+    m3: u64 = 0x0F0F0F0F0F0F0F0F;
+    one: u64 = 1;
+    two: u64 = 2;
+    four: u64 = 4;
+    x0: u64 = x & m1;
+    xs: u64 = x >> one;
+    x1: u64 = xs & m1;
+    s0: u64 = x0 + x1;             // 170 (each 2-bit lane = 2)
+    y0: u64 = s0 & m2;
+    ys: u64 = s0 >> two;
+    y1: u64 = ys & m2;
+    s1: u64 = y0 + y1;             // 68 (each 4-bit lane = 4)
+    z0: u64 = s1 & m3;
+    zs: u64 = s1 >> four;
+    z1: u64 = zs & m3;
+    s2: u64 = z0 + z1;             // 8
+    return s2;
+}

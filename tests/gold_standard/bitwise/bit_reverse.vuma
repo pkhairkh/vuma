@@ -1,0 +1,39 @@
+// bit_reverse.vuma — Reverse the 8 bits of u8=15.
+// Expected exit code: 240
+// 15 = 0b00001111 reversed (8-bit) = 0b11110000 = 240
+//
+// Uses the classic three-stage SWAR bit-reversal:
+//   v = ((v & 0xF0) >> 4) | ((v & 0x0F) << 4)  // swap nibbles
+//   v = ((v & 0xCC) >> 2) | ((v & 0x33) << 2)  // swap pairs
+//   v = ((v & 0xAA) >> 1) | ((v & 0x55) << 1)  // swap bits
+fn main() -> i32 {
+    v: u64 = 15;
+    mF0: u64 = 0xF0;
+    m0F: u64 = 0x0F;
+    mCC: u64 = 0xCC;
+    m33: u64 = 0x33;
+    mAA: u64 = 0xAA;
+    m55: u64 = 0x55;
+    four: u64 = 4;
+    two: u64 = 2;
+    one: u64 = 1;
+    // Stage 1: swap nibbles
+    a1: u64 = v & mF0;
+    a2: u64 = a1 >> four;
+    b1: u64 = v & m0F;
+    b2: u64 = b1 << four;
+    v1: u64 = a2 | b2;
+    // Stage 2: swap pairs
+    c1: u64 = v1 & mCC;
+    c2: u64 = c1 >> two;
+    d1: u64 = v1 & m33;
+    d2: u64 = d1 << two;
+    v2: u64 = c2 | d2;
+    // Stage 3: swap bits
+    e1: u64 = v2 & mAA;
+    e2: u64 = e1 >> one;
+    f1: u64 = v2 & m55;
+    f2: u64 = f1 << one;
+    v3: u64 = e2 | f2;
+    return v3;
+}

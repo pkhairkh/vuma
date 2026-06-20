@@ -1,0 +1,17 @@
+// cf_nested_loop_sum — nested for loops: total = sum_{i=0}^{9} i = 45
+// Expected exit code: 45
+//
+// Inner loop runs i times for each outer i (i=0..9).
+// total = 0+1+2+...+9 = 45.
+//
+// Exposes: for-body + nested-loop assignment propagation bugs.
+
+fn main() -> i32 {
+    total: u32 = 0;
+    for i in 0..10 {
+        for j in 0..i {
+            total = total + 1;
+        }
+    }
+    return total;
+}

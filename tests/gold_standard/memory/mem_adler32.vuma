@@ -1,0 +1,29 @@
+// mem_adler32.vuma — Adler-32 checksum
+// Expected exit code: 22
+//
+// Computes Adler-32 of a small buffer and returns the low byte.
+// For [1,2,3,4,5,6,0,0]: a starts at 1 and sums bytes, so a = 1+1+2+3+4+5+6+0+0 = 22.
+
+fn main() -> i32 {
+    buf = allocate(8);
+    *(buf + 0) = 1;
+    *(buf + 1) = 2;
+    *(buf + 2) = 3;
+    *(buf + 3) = 4;
+    *(buf + 4) = 5;
+    *(buf + 5) = 6;
+    *(buf + 6) = 0;
+    *(buf + 7) = 0;
+    a: u32 = 1;  // Adler-32 starts at 1
+    b: u32 = 0;
+    i: u32 = 0;
+    while i < 8 {
+        v: u32 = *(buf + i);
+        a = (a + v) & 65535;
+        b = (b + a) & 65535;
+        i = i + 1;
+    }
+    free(buf);
+    // Return low byte of a (which is the sum of bytes + 1)
+    return a & 255;
+}

@@ -1,0 +1,14 @@
+// arith_add_overflow — u8 wrapping: 255 + 1 = 0 (masked to low 8 bits)
+// Expected exit code: 0
+//
+// VUMA does not have a u8 type, so we emulate byte arithmetic by adding two
+// u32 values and masking to 0xFF. 0xFF + 1 wraps to 0x100, and (0x100 & 0xFF)
+// == 0.
+
+fn main() -> i32 {
+    a: u32 = 255;
+    b: u32 = 1;
+    sum: u32 = a + b;          // 256
+    byte_result: u32 = sum & 255;
+    return byte_result;
+}

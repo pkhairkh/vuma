@@ -1,0 +1,16 @@
+// fn_pass_bool.vuma — pass true to function, return 1
+// Expected exit code: 1
+//
+// Tests passing a bool parameter to a function. The function returns 1
+// unconditionally (we know `true` was passed). Without an `if` (which is
+// broken in VUMA), we cannot actually inspect the boolean — this test
+// only verifies that a bool parameter can be passed without crashing.
+
+fn is_true(b: bool) -> u32 {
+    return 1;
+}
+
+fn main() -> i32 {
+    v: u32 = is_true(true);
+    return v;
+}

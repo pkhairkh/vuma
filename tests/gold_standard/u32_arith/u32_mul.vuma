@@ -1,0 +1,11 @@
+// u32_mul — u32 multiplication with masking: (6 * 7) & 0xFFFFFFFF
+// Expected exit code: 42
+//
+// 6 * 7 = 42. No overflow. Masked to u32 = 42.
+
+fn main() -> i32 {
+    a: u32 = 6;
+    b: u32 = 7;
+    product: u32 = (a * b) & 4294967295;
+    return product;
+}

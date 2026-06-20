@@ -1,0 +1,29 @@
+// mem_store_array.vuma — store array of values
+// Expected exit code: 0
+//
+// Stores 8 byte values (0..7) into a buffer at consecutive offsets,
+// then verifies integrity by re-loading and summing. Sum should be 28.
+
+fn main() -> i32 {
+    buf = allocate(16);
+    *(buf + 0) = 0;
+    *(buf + 1) = 1;
+    *(buf + 2) = 2;
+    *(buf + 3) = 3;
+    *(buf + 4) = 4;
+    *(buf + 5) = 5;
+    *(buf + 6) = 6;
+    *(buf + 7) = 7;
+    sum: u32 = 0;
+    b0: u32 = *(buf + 0); sum = sum + b0;
+    b1: u32 = *(buf + 1); sum = sum + b1;
+    b2: u32 = *(buf + 2); sum = sum + b2;
+    b3: u32 = *(buf + 3); sum = sum + b3;
+    b4: u32 = *(buf + 4); sum = sum + b4;
+    b5: u32 = *(buf + 5); sum = sum + b5;
+    b6: u32 = *(buf + 6); sum = sum + b6;
+    b7: u32 = *(buf + 7); sum = sum + b7;
+    free(buf);
+    if sum == 28 { return 0; }
+    return 1;
+}

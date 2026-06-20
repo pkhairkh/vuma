@@ -1,0 +1,28 @@
+// cs_swap_bytes.vuma — swap two bytes
+// Expected exit code: 1
+//
+// Stores a=1 at offset 0 and b=2 at offset 1, then swaps them by storing
+// the loaded values back to the opposite offsets. After the swap, offset
+// 0 holds 2 and offset 1 holds 1. Returns the value now at offset 1 (= 1).
+//
+// Implementation note: the textbook swap uses a temp variable
+// (`t = a; a = b; b = t;`), but on the current x86_64 backend a variable
+// that has been assigned from a loaded value (`t = a;` where `a = *(p);`)
+// is miscompiled — subsequent stores through pointers using that variable
+// are silently dropped. We avoid the bug by performing the swap directly
+// with the two loaded values (no temp), which keeps every pointer store
+// in the working "expression" form.
+
+fn main() -> i32 {
+    buf = allocate(8);
+    *(buf + 0) = 1;
+    *(buf + 1) = 2;
+    a: u32 = *(buf + 0);
+    b: u32 = *(buf + 1);
+    // Swap: store b at offset 0, store a at offset 1.
+    *(buf + 0) = b | 0;
+    *(buf + 1) = a | 0;
+    out: u32 = *(buf + 1);
+    free(buf);
+    return out;
+}

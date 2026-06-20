@@ -1,0 +1,30 @@
+// mem_shift_buffer.vuma — shift buffer left/right
+// Expected exit code: 0
+//
+// Fills a 4-byte buffer with [1, 2, 3, 4], shifts left by 1 (drops the
+// first element, leaves 0 at the end): [2, 3, 4, 0].
+// Verifies position 0 = 2 and position 3 = 0.
+
+fn main() -> i32 {
+    buf = allocate(4);
+    *(buf + 0) = 1;
+    *(buf + 1) = 2;
+    *(buf + 2) = 3;
+    *(buf + 3) = 4;
+    // Shift left by 1
+    i: u32 = 0;
+    while i < 3 {
+        v: u32 = *(buf + (i + 1));
+        *(buf + i) = v;
+        i = i + 1;
+    }
+    *(buf + 3) = 0;
+    // Verify
+    v0: u32 = *(buf + 0);
+    v3: u32 = *(buf + 3);
+    free(buf);
+    if v0 == 2 {
+        if v3 == 0 { return 0; }
+    }
+    return 1;
+}
