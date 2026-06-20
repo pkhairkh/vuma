@@ -1,0 +1,15 @@
+// s94_arith_mul_then_mod.vuma — (13 * 11) % 50 = 143 % 50 = 43
+// Expected exit code: 43
+//
+// Two-stage arithmetic: multiply then modulo. 13 * 11 = 143;
+// 143 % 50 = 43. All operands kept as i32 locals. Straight-line
+// arithmetic. Distinct from s90_arith_mul_then_sub (54),
+// s86_arith_mul_then_sub (126) and s82_arith_mul_then_add (115).
+fn main() -> i32 {
+    a: i32 = 13;
+    b: i32 = 11;
+    c: i32 = 50;
+    m: i32 = a * b;        // 143
+    r: i32 = m % c;        // 43
+    return r;
+}

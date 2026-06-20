@@ -1,0 +1,20 @@
+// s93_atom_two_cell_diff.vuma — two cells, atomic diff = 20 (200 - 180)
+// Expected exit code: 0 (current buggy backend)
+// Expected exit code (correct, post-bridge-fix): 20
+//
+// Two 8-byte cells. atomic_store 200/180, atomic_load each, a - b
+// -> 20. On the current backend the loads return 0 -> 0 - 0 = 0 ->
+// exit 0. Will exit 20 once atomics are wired through. Distinct from
+// s90_atom_two_cell_diff (1), s82_atom_two_cell_sum (24) and s78_atom_two_cell_sum (2).
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    atomic_store(c1, 200);
+    atomic_store(c2, 180);
+    a = atomic_load(c1);
+    b = atomic_load(c2);
+    d: i32 = a - b;                   // 20
+    free(c1);
+    free(c2);
+    return d;
+}
