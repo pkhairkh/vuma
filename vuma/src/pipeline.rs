@@ -1013,11 +1013,12 @@ fn resolve_branch(
 ///
 /// Classifies outgoing ControlFlow edges: edges targeting a `LoopExit`
 /// node are the exit; all other edges are the loop body.
-fn resolve_loop(header_id: NodeId, scg: &SCG, edge_idx: &EdgeIndex) -> (NodeId, Option<NodeId>) {
+fn resolve_loop(header_id: NodeId, scg: &SCG, edge_idx: &EdgeIndex) -> (NodeId, Option<NodeId>, Option<NodeId>) {
     let cf_edges = edge_idx.outgoing_cf(header_id);
 
     let mut body_target = None;
     let mut exit_target = None;
+    let mut after_loop_target = None;
 
     for edge in &cf_edges {
         if let Some(target_node) = scg.get_node(edge.target) {
@@ -1030,10 +1031,11 @@ fn resolve_loop(header_id: NodeId, scg: &SCG, edge_idx: &EdgeIndex) -> (NodeId, 
         }
         if body_target.is_none() {
             body_target = Some(edge.target);
+        } else if after_loop_target.is_none() {
+            after_loop_target = Some(edge.target);
         }
     }
 
-    // Fallbacks
     if body_target.is_none() {
         body_target = cf_edges.first().map(|e| e.target);
     }
@@ -1041,7 +1043,7 @@ fn resolve_loop(header_id: NodeId, scg: &SCG, edge_idx: &EdgeIndex) -> (NodeId, 
         exit_target = cf_edges.get(1).map(|e| e.target);
     }
 
-    (body_target.unwrap_or(header_id), exit_target)
+    (body_target.unwrap_or(header_id), exit_target, after_loop_target)
 }
 
 // ── Match/switch case-value extraction ──────────────────────────────────
@@ -1299,7 +1301,7 @@ fn walk_control_flow_with_externs(
                 }
 
                 ControlKind::LoopHeader => {
-                    let (body_tgt, exit_tgt) = resolve_loop(node_id, scg, edge_idx);
+                    let (body_tgt, exit_tgt, after_loop_tgt) = resolve_loop(node_id, scg, edge_idx);
 
                     // Stop the body walk at back-edges (LoopHeader) and LoopExit
                     let mut loop_stop = stop_at.clone();
@@ -1310,7 +1312,55 @@ fn walk_control_flow_with_externs(
 
                     let body = walk_control_flow_with_externs(body_tgt, scg, edge_idx, consumed, &loop_stop, extern_functions);
 
-                    stmts.push(ScgStatement::Control(ControlNode::Loop { body, for_range: ctrl.label.as_ref().and_then(|label| parse_for_range(label)), while_cond: None }));
+                    // ── While-loop → for-range conversion ──
+                    //
+                    // While-loops in this SCG have no exit condition
+                    // (while_cond=None, for_range=None), making them infinite.
+                    // The LoopHeader label is e.g. "while (i < 4)".  We try to
+                    // convert this to a for-range (var, start, end) so that
+                    // lower_loop emits the counter init, condition check, AND
+                    // increment — making the loop terminate without needing
+                    // the after-loop code (which is unreachable via CF).
+                    //
+                    // If conversion fails (complex condition, non-literal
+                    // bound, etc.), fall back to the while-condition guard
+                    // (If + Break at the start of the body).
+                    let mut for_range = ctrl.label.as_ref().and_then(|label| parse_for_range(label));
+                    let mut needs_guard = false;
+                    if for_range.is_none() {
+                        // Try to parse a while-loop condition into a for-range.
+                        if let Some(label) = &ctrl.label {
+                            if let Some(fr) = parse_while_to_for_range(node_id, label, edge_idx, scg) {
+                                for_range = Some(fr);
+                            } else if let Some(neg_cond) = parse_while_condition(node_id, label, edge_idx, scg) {
+                                // Fallback: inject a Break guard.
+                                let guard = ScgStatement::Control(ControlNode::If {
+                                    cond: neg_cond,
+                                    then_body: vec![ScgStatement::Control(ControlNode::Break)],
+                                    else_body: None,
+                                });
+                                needs_guard = true;
+                                let _ = guard; // suppress unused
+                            }
+                        }
+                    }
+                    let body = if needs_guard {
+                        let mut b = body;
+                        if let Some(label) = &ctrl.label {
+                            if let Some(neg_cond) = parse_while_condition(node_id, label, edge_idx, scg) {
+                                b.insert(0, ScgStatement::Control(ControlNode::If {
+                                    cond: neg_cond,
+                                    then_body: vec![ScgStatement::Control(ControlNode::Break)],
+                                    else_body: None,
+                                }));
+                            }
+                        }
+                        b
+                    } else {
+                        body
+                    };
+
+                    stmts.push(ScgStatement::Control(ControlNode::Loop { body, for_range, while_cond: None }));
 
                     // Continue from the LoopExit
                     if let Some(exit) = exit_tgt {
@@ -1886,16 +1936,31 @@ fn convert_node_to_statement_with_externs(
                                 }));
                             }
                             NodePayload::Access(access) => {
-                                // Convert to Load or Store
+                                // Convert to Load or Store.
+                                //
+                                // IMPORTANT: Multiple Computation nodes may have
+                                // Derivation edges to the SAME Access node (e.g. the
+                                // pointer computation, the value computation, and the
+                                // store itself all derive to the Access(Write) node).
+                                // Only the Computation node whose label represents an
+                                // actual memory operation should be converted to a
+                                // Load/Store; the others are regular computations
+                                // (e.g. "let offset = ...") and must fall through to
+                                // the expression-decomposition handler below.
+                                //
+                                // Store labels start with '*' (e.g. "*(ptr) = value").
+                                // Load labels contain '= *' (e.g. "let v = *ptr").
+                                let is_store_label = op_label.starts_with("*") && op_label.contains("= ");
+                                let is_load_label = op_label.contains("= *") && !op_label.starts_with("*");
                                 match access.mode {
-                                    AccessMode::Read => {
+                                    AccessMode::Read if is_load_label => {
                                         return Some(ScgStatement::Access(AccessNode::Load {
                                             dst: node_var(node_id, "val"),
                                             ptr: resolve_df_input(node_id, 0, edge_idx, scg),
                                             offset: access.offset.map(|o| ScgExpr::Int(o as i64)),
                                         }));
                                     }
-                                    AccessMode::Write | AccessMode::ReadWrite => {
+                                    AccessMode::Write | AccessMode::ReadWrite if is_store_label => {
                                         let access_id = deriv_edge.target;
 
                                         // Collect ALL sources: DataFlow + Derivation
@@ -1959,6 +2024,12 @@ fn convert_node_to_statement_with_externs(
                                             value,
                                         }));
                                     }
+                                    // Label does not represent a memory operation
+                                    // (e.g. "let offset = ..."). Skip this Derivation
+                                    // edge; the node is processed as a regular
+                                    // Computation by the expression-decomposition
+                                    // handler below.
+                                    _ => {}
                                 }
                             }
                             _ => {}
@@ -2340,6 +2411,134 @@ fn parse_for_range(label: &str) -> Option<(String, i64, i64)> {
         return Some((var_name, start, end));
     }
     None
+}
+
+/// Parse a while-loop condition from the LoopHeader label and return the
+/// *negated* condition as an `ScgExpr`, so that inserting
+/// `If { cond: negated, then_body: [Break] }` at the start of the loop body
+/// makes the loop exit when the original condition becomes false.
+///
+/// The label looks like `"while (i < 4)"`.  The LoopHeader node receives
+/// exactly two DataFlow inputs: input 0 is the LHS operand, input 1 is the
+/// RHS operand.  The comparison operator is extracted from the label text.
+///
+/// Returns `None` if the label is not a while-loop, if no comparison
+/// operator is found, or if the DataFlow inputs are missing.
+fn parse_while_condition(
+    header_id: NodeId,
+    label: &str,
+    edge_idx: &EdgeIndex,
+    scg: &SCG,
+) -> Option<ScgExpr> {
+    let label = label.trim();
+    // Strip "while (" prefix and ")" suffix to get the condition expression.
+    let cond_str = label.strip_prefix("while")?.trim();
+    let cond_str = cond_str.strip_prefix('(').unwrap_or(cond_str);
+    let cond_str = cond_str.strip_suffix(')').unwrap_or(cond_str);
+    let cond_str = cond_str.trim();
+
+    // Find the comparison operator.  Check two-character operators first
+    // (<=, >=, ==, !=) before single-character ones (<, >).
+    let (op_str, lhs_str, rhs_str) = if let Some(pos) = find_operator(cond_str, "<=") {
+        ("<=", &cond_str[..pos], &cond_str[pos + 2..])
+    } else if let Some(pos) = find_operator(cond_str, ">=") {
+        (">=", &cond_str[..pos], &cond_str[pos + 2..])
+    } else if let Some(pos) = find_operator(cond_str, "==") {
+        ("==", &cond_str[..pos], &cond_str[pos + 2..])
+    } else if let Some(pos) = find_operator(cond_str, "!=") {
+        ("!=", &cond_str[..pos], &cond_str[pos + 2..])
+    } else if let Some(pos) = find_operator(cond_str, "<") {
+        ("<", &cond_str[..pos], &cond_str[pos + 1..])
+    } else if let Some(pos) = find_operator(cond_str, ">") {
+        (">", &cond_str[..pos], &cond_str[pos + 1..])
+    } else {
+        return None;
+    };
+
+    // Resolve lhs and rhs operands.
+    //
+    // The LoopHeader has exactly two DataFlow inputs: input 0 = lhs,
+    // input 1 = rhs.  We resolve them to ScgExprs via resolve_df_input.
+    // As a fallback, if a DataFlow input is missing, we try to parse the
+    // operand string as an integer literal or a variable name.
+    let lhs = resolve_df_input(header_id, 0, edge_idx, scg);
+    let rhs = resolve_df_input(header_id, 1, edge_idx, scg);
+
+    // Map the operator to its negation (so "break when negated" works).
+    // If the resolved ScgExprs are Int literals (e.g. resolve_df_input fell
+    // back to Int(0)), also try parsing the label operand strings.
+    let lhs = improve_expr(&lhs, lhs_str.trim());
+    let rhs = improve_expr(&rhs, rhs_str.trim());
+
+    let neg_op = match op_str {
+        "<" => IrBinOpKind::SGe,   // !(a < b)  ≡  a >= b
+        "<=" => IrBinOpKind::SGt,  // !(a <= b) ≡  a >  b
+        ">" => IrBinOpKind::SLe,   // !(a > b)  ≡  a <= b
+        ">=" => IrBinOpKind::SLt,  // !(a >= b) ≡  a <  b
+        "==" => IrBinOpKind::Ne,   // !(a == b) ≡  a != b
+        "!=" => IrBinOpKind::Eq,   // !(a != b) ≡  a == b
+        _ => return None,
+    };
+
+    Some(ScgExpr::BinOp {
+        op: map_binop_kind(neg_op),
+        lhs: Box::new(lhs),
+        rhs: Box::new(rhs),
+    })
+}
+
+/// Find the position of a comparison operator in a condition string,
+/// respecting nested parentheses (operators inside parens are skipped).
+fn find_operator(s: &str, op: &str) -> Option<usize> {
+    let mut depth = 0i32;
+    let bytes = s.as_bytes();
+    let op_bytes = op.as_bytes();
+    let mut i = 0;
+    while i + op_bytes.len() <= bytes.len() {
+        let c = bytes[i] as char;
+        if c == '(' {
+            depth += 1;
+        } else if c == ')' {
+            depth -= 1;
+        } else if depth == 0 {
+            if bytes[i..i + op_bytes.len()] == *op_bytes {
+                // Avoid matching "<" inside "<=" or ">" inside ">=".
+                if op == "<" && i + 1 < bytes.len() && bytes[i + 1] == b'=' {
+                    i += 1;
+                } else if op == ">" && i + 1 < bytes.len() && bytes[i + 1] == b'=' {
+                    i += 1;
+                } else if op == "<" && i + 1 < bytes.len() && bytes[i + 1] == b'<' {
+                    i += 1;
+                } else if op == ">" && i + 1 < bytes.len() && bytes[i + 1] == b'>' {
+                    i += 1;
+                } else {
+                    return Some(i);
+                }
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// If `expr` is a fallback `Int(0)` (the default when resolve_df_input can't
+/// find a real source), try to parse `str_repr` as an integer or use it as a
+/// variable name.  Otherwise, return `expr` unchanged.
+fn improve_expr(expr: &ScgExpr, str_repr: &str) -> ScgExpr {
+    // If the expr is already a Var or a non-zero Int, keep it.
+    match expr {
+        ScgExpr::Int(0) => {
+            // Fallback value — try to improve.
+            if let Ok(n) = str_repr.parse::<i64>() {
+                ScgExpr::Int(n)
+            } else if !str_repr.is_empty() {
+                ScgExpr::Var(str_repr.to_string())
+            } else {
+                expr.clone()
+            }
+        }
+        _ => expr.clone(),
+    }
 }
 
 pub fn bridge_scg_to_codegen(scg: &SCG) -> Scg {
@@ -3897,4 +4096,51 @@ mod tests {
         assert!(display2.contains("bad inference"));
         assert!(display2.contains("bad emit"));
     }
+}/// Try to convert a while-loop condition into a for-range tuple.
+///
+/// Recognises patterns like "while (i < 4)" and converts them to
+/// (var_name, start, end).
+fn parse_while_to_for_range(
+    header_id: NodeId,
+    label: &str,
+    edge_idx: &EdgeIndex,
+    scg: &SCG,
+) -> Option<(String, i64, i64)> {
+    let label = label.trim();
+    let cond_str = label.strip_prefix("while")?.trim();
+    let cond_str = cond_str.strip_prefix('(').unwrap_or(cond_str);
+    let cond_str = cond_str.strip_suffix(')').unwrap_or(cond_str);
+    let cond_str = cond_str.trim();
+
+    let pos = find_operator(cond_str, "<")?;
+    if pos + 1 < cond_str.len() && cond_str.as_bytes()[pos + 1] == b'=' {
+        return None;
+    }
+    let rhs_str = cond_str[pos + 1..].trim();
+    let end: i64 = rhs_str.parse().ok()?;
+
+    let lhs_expr = resolve_df_input(header_id, 0, edge_idx, scg);
+    let var_name = match &lhs_expr {
+        ScgExpr::Var(name) => name.clone(),
+        _ => return None,
+    };
+
+    let df_inputs = edge_idx.incoming_df(header_id);
+    if df_inputs.is_empty() {
+        return None;
+    }
+    let source = df_inputs[0].source;
+    let start = if let Some(src_data) = scg.get_node(source) {
+        if let NodePayload::Computation(comp) = &src_data.payload {
+            if let ComputationKind::Other(lbl) = &comp.kind {
+                if let Some(eq_pos) = lbl.find("= ") {
+                    lbl[eq_pos + 2..].trim().parse::<i64>().unwrap_or(0)
+                } else { 0 }
+            } else { 0 }
+        } else { 0 }
+    } else { 0 };
+
+    Some((var_name, start, end))
 }
+
+
