@@ -1,0 +1,17 @@
+// s106_struct_overwrite_field.vuma — overwrite to 28, load = 28
+// Expected exit code: 28
+//
+// Single 8-byte struct allocation. Store 14, then overwrite to 28, load and return 28 (the overwritten value). Uses `*p = literal` form. Straight-line code only.
+// Distinct from s102_struct_overwrite_field (6), s101_struct_overwrite_field (19), s100_struct_overwrite_field (17).
+struct Single {
+    a: u64,
+}
+
+fn main() -> i32 {
+    p = allocate(8);
+    *p = 14;
+    *p = 28;
+    v: u64 = *p;           // 28
+    free(p);
+    return v;
+}

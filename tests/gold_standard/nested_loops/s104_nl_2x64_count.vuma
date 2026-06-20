@@ -1,0 +1,15 @@
+// s104_nl_2x64_count.vuma — 2x64 nested loop, count = 2*64 = 128
+// Expected exit code (correct): 128
+// Observed on current x86_64 backend: 0 (FAIL — known bug)
+//
+// Outer loop runs 2 iterations, inner loop runs 64 iterations each -> 2*64 = 128 total. Counter is a scalar accumulator updated inside the inner loop. Known "for-body assignments don't propagate" bug keeps count at 0 -> exit 0. Will exit 128 once fixed.
+// Distinct from s102_nl_2x53_count (106), s102_nl_2x61_count (122), s102_nl_2x62_count (124), s102_nl_5x25_count (125).
+fn main() -> i32 {
+    count: u32 = 0;
+    for i in 0..2 {
+        for j in 0..64 {
+            count = count + 1;
+        }
+    }
+    return count;
+}
