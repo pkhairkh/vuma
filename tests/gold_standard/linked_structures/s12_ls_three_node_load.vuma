@@ -1,0 +1,25 @@
+// s12_ls_three_node_load.vuma — three nodes, sum loads = 66 (12 + 22 + 32)
+// Expected exit code: 66
+//
+// Three independent 8-byte allocations treated as three "nodes".
+// Store 12/22/32 via `*ptr = literal` form (deterministic on the
+// current backend), load all three, sum -> 66. Distinct from
+// s4_ls_three_nodes (uses *(block+N) form, values 10/20/60 = 90)
+// and s9_ls_two_node_sum (2 nodes).
+
+fn main() -> i32 {
+    n1 = allocate(8);
+    n2 = allocate(8);
+    n3 = allocate(8);
+    *n1 = 12;
+    *n2 = 22;
+    *n3 = 32;
+    a: u64 = *n1;
+    b: u64 = *n2;
+    c: u64 = *n3;
+    s: u64 = a + b + c;
+    free(n1);
+    free(n2);
+    free(n3);
+    return s;
+}

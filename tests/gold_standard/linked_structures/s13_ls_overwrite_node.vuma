@@ -1,0 +1,17 @@
+// s13_ls_overwrite_node.vuma — store 19, overwrite 73, load 73
+// Expected exit code: 73
+//
+// Single 8-byte allocation treated as one "node". Store 19 via
+// `*p = literal`, overwrite with 73 (last write wins). Load and
+// return 73. Uses `*p = literal` form (no offsets). Distinct from
+// s9_ls_overwrite_node (values 8/200) and s4_ls_overwrite_node
+// (uses *(block+N) form).
+
+fn main() -> i32 {
+    n = allocate(8);
+    *n = 19;
+    *n = 73;
+    v: u64 = *n;
+    free(n);
+    return v;
+}

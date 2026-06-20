@@ -1,0 +1,20 @@
+// s13_cf_while_inc_5.vuma — while loop runs 5 iterations, count = 5
+// Expected exit code (correct): 5
+// Observed on current x86_64 backend: 0 (FAIL — known bug)
+//
+// Counter starts at 0. Loop guard is `i < 5` (literal) where i is
+// incremented each iteration. Each iteration also adds 1 to count.
+// After 5 iterations i == 5 and the loop exits; count should be 5.
+// Known "while-body assignments don't propagate" bug keeps count at 0.
+// Distinct from s10_cf_while_inc_4 (4 iterations) and
+// s6_cf_while_dec_count (6 iterations, decrementing).
+
+fn main() -> i32 {
+    i: u32 = 0;
+    count: u32 = 0;
+    while i < 5 {
+        count = count + 1;
+        i = i + 1;
+    }
+    return count;
+}

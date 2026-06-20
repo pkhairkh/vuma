@@ -1,0 +1,18 @@
+// s11_arith_sub_mul_mod.vuma — (100 - 30) * 2 % 50 = 140 % 50 = 40
+// Expected exit code: 40
+//
+// Three-stage computation: sub then mul then mod. (100 - 30) = 70;
+// 70 * 2 = 140; 140 % 50 = 40. All operands loaded into u32 variables
+// first. Distinct from s8_arith_mul_div_chain (mul-then-div) and
+// s9_arith_mod_then_add (mod-then-add).
+
+fn main() -> i32 {
+    a: u32 = 100;
+    b: u32 = 30;
+    c: u32 = 2;
+    d: u32 = 50;
+    s: u32 = a - b;       // 70
+    p: u32 = s * c;       // 140
+    r: u32 = p % d;       // 40
+    return r;
+}

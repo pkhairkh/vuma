@@ -1,0 +1,27 @@
+// s12_mf_double_half_sum.vuma — double(10) + half(20) = 20 + 10 = 30
+// Expected exit code: 30
+//
+// double(x) = x * 2; half(x) = x / 2. main calls double(10) -> 20
+// and half(20) -> 10, sums -> 30. Two helpers with different ops
+// (mul and div) called independently, results combined. Distinct
+// from s7_mf_double_then_inc (inc instead of half, chained not
+// summed) and s10_mf_two_helpers_sum (add5 + double, no div).
+
+fn double(x: u32) -> u32 {
+    two: u32 = 2;
+    r: u32 = x * two;
+    return r;
+}
+
+fn half(x: u32) -> u32 {
+    two: u32 = 2;
+    r: u32 = x / two;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = double(10);   // 20
+    b: u32 = half(20);     // 10
+    s: u32 = a + b;        // 30
+    return s;
+}
