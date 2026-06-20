@@ -1,0 +1,27 @@
+// s65_mem_overwrite_first.vuma — overwrite first to 70, sum = 190 (70 + 40 + 80)
+// Expected exit code: 190
+//
+// Three 8-byte cells. Store 60/40/80 via `*ptr = literal`, then
+// overwrite the first cell with 70. Load all three, sum -> 190.
+// Uses `*ptr = literal` form (no offsets). Distinct from s51_mem_
+// overwrite_first (220), s58_mem_overwrite_last (180) and s62_mem_
+// overwrite_middle (170).
+
+fn main() -> i32 {
+    p1 = allocate(8);
+    p2 = allocate(8);
+    p3 = allocate(8);
+    *p1 = 60;
+    *p2 = 40;
+    *p3 = 80;
+    *p1 = 70;
+    a: u64 = *p1;
+    b: u64 = *p2;
+    c: u64 = *p3;
+    t: u64 = a + b;
+    s: u64 = t + c;        // 190
+    free(p1);
+    free(p2);
+    free(p3);
+    return s;
+}

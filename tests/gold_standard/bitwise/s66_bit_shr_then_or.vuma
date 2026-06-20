@@ -1,0 +1,16 @@
+// s66_bit_shr_then_or.vuma — (192 >> 3) | 0x03 = 24 | 3 = 0x1B = 27
+// Expected exit code: 27
+//
+// Two-stage bitwise: shift right then OR. (192 >> 3) = 24 (0x18);
+// 24 | 3 = 27 (0x1B). All operands loaded into u64 variables first
+// (immediate-RHS bitwise drop bug workaround). Distinct from
+// s62_bit_xor_then_shr (31), s58_bit_or_then_shr (48) and s55_
+// bit_shr_then_xor (15).
+fn main() -> i32 {
+    a: u64 = 192;          // 0xC0
+    b: u64 = 3;
+    c: u64 = 3;            // 0x03
+    x: u64 = a >> b;       // 0x18 = 24
+    r: u64 = x | c;        // 0x1B = 27
+    return r;
+}

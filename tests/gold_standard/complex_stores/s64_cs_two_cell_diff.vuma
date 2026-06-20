@@ -1,0 +1,20 @@
+// s64_cs_two_cell_diff.vuma — two cells, diff = 135 (210 - 75)
+// Expected exit code: 135
+//
+// Two 8-byte cells. Store 210/75 via `*ptr = literal`, load both,
+// diff -> 135. Uses `*ptr = literal` form (no offsets). Distinct from
+// s62_cs_overwrite_last (130), s62_cs_three_cell_sum (195) and s62_cs_
+// two_cell_diff (140).
+
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    *c1 = 210;
+    *c2 = 75;
+    a: u64 = *c1;
+    b: u64 = *c2;
+    d: u64 = a - b;        // 135
+    free(c1);
+    free(c2);
+    return d;
+}

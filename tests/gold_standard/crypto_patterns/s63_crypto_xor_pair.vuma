@@ -1,0 +1,15 @@
+// s63_crypto_xor_pair.vuma — 0x6E ^ 0x39 = 0x57 = 87
+// Expected exit code: 87
+//
+// Two-byte XOR. 110 ^ 57 = 87 (0x57). Distinct-bit pair (0x6E /
+// 0x39) produces the byte pattern 0x57. All operands loaded into
+// u64 variables first (immediate-RHS bitwise drop bug workaround).
+// Distinct from s51_crypto_xor_pair (85), s58_crypto_xor_pair (255)
+// and s55_crypto_xor_pair (153).
+
+fn main() -> i32 {
+    a: u64 = 110;          // 0x6E
+    b: u64 = 57;           // 0x39
+    r: u64 = a ^ b;        // 0x57 = 87
+    return r;
+}

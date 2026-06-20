@@ -1,0 +1,25 @@
+// s65_mf_two_helpers_add.vuma — helper_a(20)=30, helper_b(35)=55, sum = 85
+// Expected exit code: 85
+//
+// Two single-arg helpers: helper_a(x)=x+10, helper_b(x)=x+20.
+// main calls helper_a(20) -> 30, helper_b(35) -> 55, returns 30+55=85.
+// Distinct from s51_mf_two_helpers_add (80), s58_mf_two_helpers_sub
+// (112) and s62_mf_two_helpers_add (150).
+
+fn helper_a(x: u32) -> u32 {
+    n: u32 = 10;
+    r: u32 = x + n;
+    return r;
+}
+fn helper_b(x: u32) -> u32 {
+    n: u32 = 20;
+    r: u32 = x + n;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = helper_a(20);     // 30
+    b: u32 = helper_b(35);     // 55
+    r: u32 = a + b;            // 85
+    return r;
+}
