@@ -1,0 +1,17 @@
+// s101_fn_one_arg_mul.vuma — scaled(11) = 11 * 5 = 55
+// Expected exit code: 55
+//
+// Helper scaled(x) = x * 5. main calls scaled(11) -> 55. Single-arg
+// function multiplying by a constant. Distinct from
+// s98_fn_one_arg_sub (49), s97_fn_one_arg_add (24) and
+// s94_fn_one_arg_sub (41).
+fn scaled(x: u32) -> u32 {
+    k: u32 = 5;
+    r: u32 = x * k;
+    return r;
+}
+
+fn main() -> i32 {
+    v: u32 = scaled(11);    // 55
+    return v;
+}

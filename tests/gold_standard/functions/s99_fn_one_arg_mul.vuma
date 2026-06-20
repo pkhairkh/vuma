@@ -1,0 +1,17 @@
+// s99_fn_one_arg_mul.vuma — dbl(12) = 12 * 5 = 60
+// Expected exit code: 60
+//
+// Helper dbl(x) = x * 5. main calls dbl(12) -> 60. Single-arg
+// function multiplying by a constant. Distinct from
+// s95_fn_one_arg_add (74), s91_fn_one_arg_add (16) and
+// s87_fn_one_arg_add (190).
+fn dbl(x: u32) -> u32 {
+    k: u32 = 5;
+    r: u32 = x * k;
+    return r;
+}
+
+fn main() -> i32 {
+    v: u32 = dbl(12);        // 60
+    return v;
+}

@@ -1,0 +1,24 @@
+// s101_mf_two_helpers_sum.vuma — helperA(20) + helperB(30) = 33 + 47 = 80
+// Expected exit code: 80
+//
+// Two single-arg helpers, helperA(x) = x + 13 and helperB(x) = x +
+// 17. main calls both and sums: helperA(20) + helperB(30) = 33 +
+// 47 = 80. Distinct from s98_mf_two_helpers_mul (63),
+// s97_mf_two_calls_add (78) and s94_mf_two_helpers_mul (96).
+fn helperA(x: u32) -> u32 {
+    k: u32 = 13;
+    r: u32 = x + k;
+    return r;
+}
+fn helperB(x: u32) -> u32 {
+    k: u32 = 17;
+    r: u32 = x + k;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = helperA(20);   // 33
+    b: u32 = helperB(30);   // 47
+    s: u32 = a + b;         // 80
+    return s;
+}

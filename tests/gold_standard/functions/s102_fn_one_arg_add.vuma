@@ -1,0 +1,15 @@
+// s102_fn_one_arg_add.vuma — inc(18) = 18 + 1 = 19
+// Expected exit code: 19
+//
+// Helper inc(x) = x + 1. main calls inc(18) -> 19. Single-arg function adding a constant.
+// Distinct from s101_fn_one_arg_mul (55), s101_fn_two_args_add (75), s101_fn_zero_arg_lit (33).
+fn inc(x: u32) -> u32 {
+    k: u32 = 1;
+    r: u32 = x + k;
+    return r;
+}
+
+fn main() -> i32 {
+    v: u32 = inc(18);      // 19
+    return v;
+}
