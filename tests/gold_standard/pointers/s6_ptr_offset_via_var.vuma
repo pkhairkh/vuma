@@ -1,0 +1,16 @@
+// s6_ptr_offset_via_var.vuma — store at offset 8 via var, load = 33
+// Expected exit code: 33
+//
+// Single 16-byte buffer. Store 33 at *(p + 8) where 8 is loaded into
+// a variable first (offset is constant literal but exercised via the
+// variable form). Load back from same offset via variable. Distinct
+// from s4_ptr_offset_store (uses literal offset).
+
+fn main() -> i32 {
+    p = allocate(16);
+    off: i32 = 8;
+    *(p + off) = 33;
+    v: i32 = *(p + off);
+    free(p);
+    return v;
+}

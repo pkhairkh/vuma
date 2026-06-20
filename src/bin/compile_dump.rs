@@ -49,11 +49,9 @@ fn execute_binary(binary: &[u8], qemu: Option<&str>, timeout_secs: u64) -> (i32,
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        if let Ok(meta) = fs::metadata(&bin_path) {
-            let mut perms = meta.permissions();
-            perms.set_mode(0o755);
-            let _ = fs::set_permissions(&bin_path, perms);
-        }
+        let mut perms = fs::metadata(&bin_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        let _ = fs::set_permissions(&bin_path, perms);
     }
     let mut cmd = Command::new("timeout");
     cmd.arg(format!("{}", timeout_secs));

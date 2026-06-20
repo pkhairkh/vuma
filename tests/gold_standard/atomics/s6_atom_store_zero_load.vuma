@@ -1,0 +1,15 @@
+// s6_atom_store_zero_load.vuma — atomic_store 0, atomic_load -> 0
+// Expected exit code: 0
+//
+// Single 8-byte cell. atomic_store 0 (zero). atomic_load should
+// return 0. Distinct from s5_atom_two_cells_diff (different pattern:
+// both stores explicit zero on one cell). On the current backend the
+// load also returns 0 (correct by accident).
+
+fn main() -> i32 {
+    c = allocate(8);
+    atomic_store(c, 0);
+    v = atomic_load(c);
+    free(c);
+    return v;
+}

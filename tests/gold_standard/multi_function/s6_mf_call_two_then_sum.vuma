@@ -1,0 +1,24 @@
+// s6_mf_call_two_then_sum.vuma — half(40) + third(30) = 20 + 10 = 30
+// Expected exit code: 30
+//
+// half(x) = x / 2; third(x) = x / 3. main calls half(40) -> 20 and
+// third(30) -> 10, sums -> 30. Distinct from s5_mf_diff_op_funcs.
+
+fn half(x: u32) -> u32 {
+    two: u32 = 2;
+    r: u32 = x / two;
+    return r;
+}
+
+fn third(x: u32) -> u32 {
+    three: u32 = 3;
+    r: u32 = x / three;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = half(40);    // 20
+    b: u32 = third(30);   // 10
+    s: u32 = a + b;       // 30
+    return s;
+}
