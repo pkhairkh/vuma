@@ -1,0 +1,16 @@
+// s5_fn_return_constant.vuma — get_const() returns 77
+// Expected exit code: 77
+//
+// Helper ignores its argument and returns a constant 77. Tests
+// that the codegen can return a function-local constant even when
+// the function takes a parameter that's unused.
+
+fn get_const(unused: u32) -> u32 {
+    c: u32 = 77;
+    return c;
+}
+
+fn main() -> i32 {
+    v: u32 = get_const(0);
+    return v;
+}

@@ -1,0 +1,26 @@
+// s5_edge_quad_doubled.vuma — (1+1) + (2+2) + (3+3) + (4+4) = 20
+// Expected exit code: 20
+//
+// Four pairs of identical literals, each summed, then all four
+// pair-sums summed. Stresses register/stack-slot allocation for
+// many simultaneously-live locals. Distinct from s4_edge_long_expr
+// (single 7-element chain).
+
+fn main() -> i32 {
+    a1: u32 = 1;
+    a2: u32 = 1;
+    b1: u32 = 2;
+    b2: u32 = 2;
+    c1: u32 = 3;
+    c2: u32 = 3;
+    d1: u32 = 4;
+    d2: u32 = 4;
+    pa: u32 = a1 + a2;
+    pb: u32 = b1 + b2;
+    pc: u32 = c1 + c2;
+    pd: u32 = d1 + d2;
+    t1: u32 = pa + pb;
+    t2: u32 = pc + pd;
+    total: u32 = t1 + t2;
+    return total;
+}

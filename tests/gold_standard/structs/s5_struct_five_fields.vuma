@@ -1,0 +1,34 @@
+// s5_struct_five_fields.vuma — 5 fields, sum = 100
+// Expected exit code: 100  (10 + 20 + 30 + 15 + 25)
+//
+// 40-byte struct (five u64 fields). Stores 10/20/30/15/25 at
+// offsets 0/8/16/24/32, loads all five, sums, returns 100. Distinct
+// from struct_four_fields / struct_eight_fields (different sizes).
+
+struct Five {
+    a: u64,
+    b: u64,
+    c: u64,
+    d: u64,
+    e: u64,
+}
+
+fn main() -> i32 {
+    p = allocate(40);
+    *(p + 0) = 10;
+    *(p + 8) = 20;
+    *(p + 16) = 30;
+    *(p + 24) = 15;
+    *(p + 32) = 25;
+    a: u64 = *(p + 0);
+    b: u64 = *(p + 8);
+    c: u64 = *(p + 16);
+    d: u64 = *(p + 24);
+    e: u64 = *(p + 32);
+    t1: u64 = a + b;
+    t2: u64 = t1 + c;
+    t3: u64 = t2 + d;
+    s: u64 = t3 + e;
+    free(p);
+    return s;
+}

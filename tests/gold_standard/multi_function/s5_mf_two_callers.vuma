@@ -1,0 +1,19 @@
+// s5_mf_two_callers.vuma — square(4) + square(7) = 16 + 49 = 65
+// Expected exit code: 65
+//
+// square(x) = x * x. main calls square(4) -> 16 and square(7) -> 49,
+// sums them. Tests that one helper can be called twice from main
+// with different arguments, with both results kept distinct.
+// Distinct from s4_mf_shared_helper (caller_a/caller_b wrappers).
+
+fn square(x: u32) -> u32 {
+    r: u32 = x * x;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = square(4);
+    b: u32 = square(7);
+    s: u32 = a + b;
+    return s;
+}

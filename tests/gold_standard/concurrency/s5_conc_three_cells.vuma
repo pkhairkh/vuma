@@ -1,0 +1,24 @@
+// s5_conc_three_cells.vuma — three cells, sum loads = 60
+// Expected exit code: 60  (10 + 20 + 30)
+//
+// Three independent 8-byte cells. Each gets a different literal
+// value at offset 0. All three loaded back and summed. Simulates
+// three independent "shared variables" without atomic ops.
+// Distinct from s4_conc_basic_publish (single cell).
+
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    c3 = allocate(8);
+    *c1 = 10;
+    *c2 = 20;
+    *c3 = 30;
+    v1: i32 = *c1;
+    v2: i32 = *c2;
+    v3: i32 = *c3;
+    s: i32 = v1 + v2 + v3;
+    free(c1);
+    free(c2);
+    free(c3);
+    return s;
+}

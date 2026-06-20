@@ -1,0 +1,18 @@
+// s5_cf_while_acc.vuma — while loop accumulates 5 increments of 10
+// Expected exit code (correct): 50
+// Observed on current x86_64 backend: 0 (FAIL — known bug)
+//
+// Accumulator starts at 0. While i < 5, add 10 each iteration ->
+// 50 total. Known "while-body assignments don't propagate" bug
+// keeps acc at 0 -> exit 0. Will exit 50 once fixed. Distinct from
+// cf_while_sum (sum-of-counter pattern).
+
+fn main() -> i32 {
+    acc: u32 = 0;
+    i: u32 = 0;
+    while i < 5 {
+        acc = acc + 10;
+        i = i + 1;
+    }
+    return acc;
+}

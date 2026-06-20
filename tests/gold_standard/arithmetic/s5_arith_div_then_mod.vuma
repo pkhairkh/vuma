@@ -1,0 +1,17 @@
+// s5_arith_div_then_mod.vuma — (80 / 5) + (80 % 7) = 16 + 3 = 19
+// Expected exit code: 19
+//
+// Same dividend (80), two divisors (5 and 7). The quotient 16 and
+// the remainder 3 (since 7 * 11 = 77, 80 - 77 = 3) are summed.
+// Tests both `div` and `mod` on the same operand, using distinct
+// intermediates. Distinct from s4_arith_div_chain (chain of divs).
+
+fn main() -> i32 {
+    n: u32 = 80;
+    d1: u32 = 5;
+    d2: u32 = 7;
+    q: u32 = n / d1;
+    r: u32 = n % d2;
+    total: u32 = q + r;
+    return total;
+}

@@ -1,0 +1,16 @@
+// s5_arith_mul_then_add3.vuma — 4 * 9 + 7 = 43
+// Expected exit code: 43
+//
+// Multiplication produces 36, then a third operand (7) is added
+// for a final value of 43. All values inside U8 range. Distinct
+// from s4_arith_mul_then_sub (sub instead of add) and
+// s4_arith_double_add (two adds).
+
+fn main() -> i32 {
+    a: u32 = 4;
+    b: u32 = 9;
+    c: u32 = 7;
+    p: u32 = a * b;
+    total: u32 = p + c;
+    return total;
+}

@@ -1,0 +1,16 @@
+// s5_conc_overwrite_observed.vuma — overwrite then observe = 77
+// Expected exit code: 77
+//
+// Single 8-byte cell. "Producer" writes 11, then "produces" 77
+// (overwrite). "Consumer" observes (loads) the final value 77.
+// Single-threaded simulation; uses non-atomic *ptr. Distinct from
+// s4_conc_basic_publish (single store).
+
+fn main() -> i32 {
+    cell = allocate(8);
+    *cell = 11;
+    *cell = 77;
+    v: i32 = *cell;
+    free(cell);
+    return v;
+}
