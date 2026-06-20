@@ -1,0 +1,16 @@
+// s50_arith_div_then_add.vuma — (200 / 5) + 90 = 40 + 90 = 130
+// Expected exit code: 130
+//
+// Two-stage u32 computation: divide then add. 200 / 5 = 40;
+// 40 + 90 = 130. All operands loaded into u32 variables first.
+// Straight-line arithmetic. Distinct from s46_arith_add_then_mul
+// (200) and s43_arith_add_mul_sub (106).
+
+fn main() -> i32 {
+    a: u32 = 200;
+    b: u32 = 5;
+    c: u32 = 90;
+    q: u32 = a / b;        // 40
+    r: u32 = q + c;        // 130
+    return r;
+}

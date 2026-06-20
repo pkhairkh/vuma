@@ -1,0 +1,25 @@
+// s50_mf_two_helpers_mul.vuma — dbl(25) + triple(20) = 50 + 60 = 110
+// Expected exit code: 110
+//
+// Two single-arg helpers called on different literals then summed.
+// dbl(x) = x * 2; triple(x) = x * 3. main calls dbl(25) -> 50 and
+// triple(20) -> 60; sum = 110. Distinct from s46_mf_two_helpers_add
+// (70) and s43_mf_two_helpers_mul (109).
+
+fn dbl(x: u32) -> u32 {
+    n: u32 = 2;
+    r: u32 = x * n;
+    return r;
+}
+fn triple(x: u32) -> u32 {
+    n: u32 = 3;
+    r: u32 = x * n;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = dbl(25);          // 50
+    b: u32 = triple(20);       // 60
+    r: u32 = a + b;            // 110
+    return r;
+}
