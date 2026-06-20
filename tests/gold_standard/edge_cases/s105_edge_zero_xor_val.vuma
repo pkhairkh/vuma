@@ -1,0 +1,11 @@
+// s105_edge_zero_xor_val.vuma — 0 ^ 154 = 154 (XOR with zero is identity)
+// Expected exit code: 154
+// 
+// Edge case: XOR with zero is the identity. 0 ^ 154 = 154. All operands loaded into u32 variables first (immediate-RHS bitwise drop bug workaround).
+// Distinct from s102_edge_zero_or_val (18), s101_edge_zero_and_val (0), s100_edge_zero_xor_val (73).
+fn main() -> i32 {
+    z: u32 = 0;
+    a: u32 = 154;
+    r: u32 = z ^ a;        // 154
+    return r;
+}

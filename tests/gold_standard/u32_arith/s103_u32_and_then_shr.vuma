@@ -1,0 +1,12 @@
+// s103_u32_and_then_shr.vuma — (0xFF & 0xB2) >> 2 = 0xB2 >> 2 = 0x2C = 44
+// Expected exit code: 44
+//
+// Two-stage bitwise: AND then shift-right. (255 & 178) = 178 (0xB2); 178 >> 2 = 44 (0x2C). All operands loaded into u32 variables first (immediate-RHS bitwise drop bug workaround).
+fn main() -> i32 {
+    a: u32 = 255;         // 0xFF
+    b: u32 = 178;         // 0xB2
+    c: u32 = 2;
+    x: u32 = a & b;       // 0xB2 = 178
+    r: u32 = x >> c;      // 0x2C = 44
+    return r;
+}

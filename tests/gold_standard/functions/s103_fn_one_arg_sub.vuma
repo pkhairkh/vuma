@@ -1,0 +1,15 @@
+// s103_fn_one_arg_sub.vuma — dec(50) = 50 - 1 = 49
+// Expected exit code: 49
+//
+// Helper dec(x) = x - 1. main calls dec(50) -> 49. Single-arg function subtracting a constant.
+// Distinct from s94_fn_one_arg_sub (41).
+fn dec(x: u32) -> u32 {
+    k: u32 = 1;
+    r: u32 = x - k;
+    return r;
+}
+
+fn main() -> i32 {
+    v: u32 = dec(50);      // 49
+    return v;
+}
