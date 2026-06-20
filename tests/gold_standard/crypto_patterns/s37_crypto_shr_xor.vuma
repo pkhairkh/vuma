@@ -1,0 +1,15 @@
+// s37_crypto_shr_xor.vuma — (0xF0 >> 4) ^ 0x07 = 0x0F ^ 0x07 = 0x08 = 8
+// Expected exit code: 8
+//
+// Deterministic test in the crypto_patterns category. All operands loaded into typed
+// variables before any bitwise op; all stores use `*ptr = literal` (or the
+// `*ptr = variable + 0` workaround). Result lands in 0-255.
+// Distinct from s33_crypto_shl_xor (shl-then-xor, 127) and s30_crypto_shl_then_mask (shl-then-mask).
+fn main() -> i32 {
+    a: u64 = 240;          // 0xF0
+    b: u64 = 4;
+    c: u64 = 7;            // 0x07
+    x: u64 = a >> b;       // 0x0F = 15
+    r: u64 = x ^ c;        // 0x08 = 8
+    return r;
+}

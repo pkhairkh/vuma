@@ -1,0 +1,17 @@
+// s38_fn_one_arg_sub.vuma — sub_three(50) = 47
+// Expected exit code: 47
+//
+// Helper sub_three(x) = x - 3. main calls sub_three(50) -> 47.
+// Single-arg function that subtracts a literal. Distinct from
+// s34_fn_one_arg_add (65) and s30_fn_one_arg_sub (different value).
+
+fn sub_three(x: u32) -> u32 {
+    n: u32 = 3;
+    r: u32 = x - n;
+    return r;
+}
+
+fn main() -> i32 {
+    v: u32 = sub_three(50);
+    return v;
+}

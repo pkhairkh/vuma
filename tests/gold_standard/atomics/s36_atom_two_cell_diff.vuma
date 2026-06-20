@@ -1,0 +1,22 @@
+// s36_atom_two_cell_diff.vuma — cells 240/15, diff = 225
+// Expected exit code (correct): 225
+// Observed on current x86_64 backend: 0 (FAIL — known bug)
+//
+// Two 8-byte cells store 240/15. Difference of the loaded
+// values should be 225. On the current backend both
+// atomic_loads return 0 -> exit 0. Will exit 225 once
+// atomics are wired through.
+// Distinct from s30_atom_two_cell_xor (xor, 0) and s27_atom_two_cell_diff (different values).
+
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    atomic_store(c1, 240);
+    atomic_store(c2, 15);
+    a = atomic_load(c1);
+    b = atomic_load(c2);
+    d = a - b;
+    free(c1);
+    free(c2);
+    return d;
+}

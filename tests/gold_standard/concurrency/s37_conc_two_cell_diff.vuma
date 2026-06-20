@@ -1,0 +1,19 @@
+// s37_conc_two_cell_diff.vuma — two cells, diff = 240 - 90 = 150
+// Expected exit code: 150
+//
+// Deterministic test in the concurrency category. All operands loaded into typed
+// variables before any bitwise op; all stores use `*ptr = literal` (or the
+// `*ptr = variable + 0` workaround). Result lands in 0-255.
+// Distinct from s33_conc_two_cell_sum (sum, 180) and s30_conc_two_cell_product (product, 156).
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    *c1 = 240;
+    *c2 = 90;
+    v1: i32 = *c1;
+    v2: i32 = *c2;
+    d: i32 = v1 - v2;       // 150
+    free(c1);
+    free(c2);
+    return d;
+}

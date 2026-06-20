@@ -1,0 +1,24 @@
+// s37_mem_overwrite_first.vuma — overwrite first cell, sum = 85 + 60 + 70 = 215
+// Expected exit code: 215
+//
+// Deterministic test in the memory category. All operands loaded into typed
+// variables before any bitwise op; all stores use `*ptr = literal` (or the
+// `*ptr = variable + 0` workaround). Result lands in 0-255.
+// Distinct from s33_mem_overwrite_middle (overwrites middle, 150) and s30_mem_overwrite_last (overwrites last).
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    c3 = allocate(8);
+    *c1 = 30;
+    *c2 = 60;
+    *c3 = 70;
+    *c1 = 85;
+    a: i32 = *c1;
+    b: i32 = *c2;
+    c: i32 = *c3;
+    s: i32 = a + b + c;     // 215
+    free(c1);
+    free(c2);
+    free(c3);
+    return s;
+}

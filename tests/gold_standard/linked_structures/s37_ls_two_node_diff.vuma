@@ -1,0 +1,19 @@
+// s37_ls_two_node_diff.vuma — two nodes, diff = 200 - 75 = 125
+// Expected exit code: 125
+//
+// Deterministic test in the linked_structures category. All operands loaded into typed
+// variables before any bitwise op; all stores use `*ptr = literal` (or the
+// `*ptr = variable + 0` workaround). Result lands in 0-255.
+// Distinct from s33_ls_two_node_sum (sum, 145) and s30_ls_two_node_sum (45+65=110).
+fn main() -> i32 {
+    n1 = allocate(8);
+    n2 = allocate(8);
+    *n1 = 200;
+    *n2 = 75;
+    a: u64 = *n1;
+    b: u64 = *n2;
+    d: u64 = a - b;         // 125
+    free(n1);
+    free(n2);
+    return d;
+}

@@ -1,0 +1,14 @@
+// s35_edge_max_minus_two.vuma — 255 - 2 = 253
+// Expected exit code: 253
+//
+// Subtract two from the maximum u8 value. 255 - 2 = 253. All
+// operands loaded into u32 variables first. Distinct from
+// s34_edge_max_minus_one (255 - 1 = 254) and s26_edge_max_minus_one
+// (254).
+
+fn main() -> i32 {
+    a: u32 = 255;
+    b: u32 = 2;
+    r: u32 = a - b;        // 253
+    return r;
+}

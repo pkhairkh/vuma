@@ -1,0 +1,17 @@
+// s35_crypto_shl_then_mask.vuma — (1 << 6) & 0x7F = 64 & 127 = 64
+// Expected exit code: 64
+//
+// Shift-then-mask byte mix. (1 << 6) = 64 (0x40); 64 & 127 = 64.
+// All operands loaded into u64 variables first (immediate-RHS
+// bitwise drop bug workaround). Distinct from s34_crypto_shl_then_
+// xor (shl-then-xor, 186) and s30_crypto_shl_then_mask (different
+// values).
+
+fn main() -> i32 {
+    a: u64 = 1;
+    b: u64 = 6;
+    c: u64 = 127;          // 0x7F
+    s: u64 = a << b;       // 0x40 = 64
+    r: u64 = s & c;        // 0x40 = 64
+    return r;
+}

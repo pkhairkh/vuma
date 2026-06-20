@@ -1,0 +1,13 @@
+// s36_edge_max_minus_two.vuma — 255 - 2 = 253
+// Expected exit code: 253
+//
+// Boundary arithmetic near the u8 maximum: 255 - 2 = 253.
+// All operands loaded into u32 variables first.
+// Distinct from s30_edge_max_minus_one (255 - 1 = 254) and s27_edge_half_max (127).
+
+fn main() -> i32 {
+    a: u32 = 255;
+    b: u32 = 2;
+    r: u32 = a - b;        // 253
+    return r;
+}

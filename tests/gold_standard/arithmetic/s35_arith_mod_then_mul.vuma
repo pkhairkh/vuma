@@ -1,0 +1,16 @@
+// s35_arith_mod_then_mul.vuma — (200 % 11) * 12 = 2 * 12 = 24
+// Expected exit code: 24
+//
+// Two-stage u32 computation: modulus then multiply. 200 % 11 = 2
+// (since 18 * 11 = 198, 200 - 198 = 2); 2 * 12 = 24. All operands
+// loaded into u32 variables first. Distinct from s34_arith_mul_then_
+// mod (mul-then-mod, 7) and s30_arith_sub_then_mod (sub-then-mod, 70).
+
+fn main() -> i32 {
+    a: u32 = 200;
+    b: u32 = 11;
+    c: u32 = 12;
+    m: u32 = a % b;       // 2
+    r: u32 = m * c;       // 24
+    return r;
+}

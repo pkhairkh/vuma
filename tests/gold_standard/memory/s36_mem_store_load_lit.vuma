@@ -1,0 +1,15 @@
+// s36_mem_store_load_lit.vuma — store 175, load = 175
+// Expected exit code: 175
+//
+// Single 8-byte cell. Store the literal 175 via `*p =
+// literal`, load it back, return 175. Uses `*p = literal`
+// form (no offsets).
+// Distinct from s30_mem_store_load_lit (value 0) and s27_mem_store_load_lit (different value).
+
+fn main() -> i32 {
+    p = allocate(8);
+    *p = 175;
+    v: u64 = *p;
+    free(p);
+    return v;
+}

@@ -1,0 +1,15 @@
+// s37_crypto_xor_pair.vuma — 0x5A ^ 0xA5 = 0xFF = 255, | 0x10 = 0xFF = 255
+// Expected exit code: 255
+//
+// Deterministic test in the crypto_patterns category. All operands loaded into typed
+// variables before any bitwise op; all stores use `*ptr = literal` (or the
+// `*ptr = variable + 0` workaround). Result lands in 0-255.
+// Distinct from s33_crypto_xor_pair (0xA5^0x3C=153, 217) and s30_crypto_xor_pair (0xC3^0x3C=255).
+fn main() -> i32 {
+    a: u64 = 90;           // 0x5A
+    b: u64 = 165;          // 0xA5
+    c: u64 = 16;           // 0x10
+    x: u64 = a ^ b;        // 0xFF = 255
+    r: u64 = x | c;        // 0xFF = 255
+    return r;
+}

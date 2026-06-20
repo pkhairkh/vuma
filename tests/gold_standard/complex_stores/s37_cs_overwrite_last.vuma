@@ -1,0 +1,24 @@
+// s37_cs_overwrite_last.vuma — overwrite last cell, sum = 30 + 40 + 90 = 160
+// Expected exit code: 160
+//
+// Deterministic test in the complex_stores category. All operands loaded into typed
+// variables before any bitwise op; all stores use `*ptr = literal` (or the
+// `*ptr = variable + 0` workaround). Result lands in 0-255.
+// Distinct from s33_cs_overwrite_first (overwrites first, 140) and s30_cs_overwrite_middle (overwrites middle).
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    c3 = allocate(8);
+    *c1 = 30;
+    *c2 = 40;
+    *c3 = 50;
+    *c3 = 90;
+    a: u64 = *c1;
+    b: u64 = *c2;
+    c: u64 = *c3;
+    s: u64 = a + b + c;     // 160
+    free(c1);
+    free(c2);
+    free(c3);
+    return s;
+}
