@@ -1,0 +1,18 @@
+// s78_cf_while_acc.vuma — while loop accumulates 1*2 = 2
+// Expected exit code (correct): 2
+// Observed on current x86_64 backend: 0 (FAIL — known bug)
+//
+// Accumulator starts at 0. While i < 1, add 2 each iteration
+// -> 1 * 2 = 2 total. i increments by 1 each iteration.
+// Known "while-body assignments don't propagate" bug keeps acc at 0
+// -> exit 0. Will exit 2 once fixed. Distinct from s74_cf_while_acc
+// (73), s73_cf_while_acc_7_step_9 (63) and s72_cf_while_acc (29).
+fn main() -> i32 {
+    acc: u32 = 0;
+    i: u32 = 0;
+    while i < 1 {
+        acc = acc + 2;
+        i = i + 1;
+    }
+    return acc;
+}
