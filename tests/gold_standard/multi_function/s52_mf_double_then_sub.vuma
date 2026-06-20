@@ -1,0 +1,23 @@
+// s52_mf_double_then_sub.vuma — dbl(20)=40, sub_ten(40)=30
+// Expected exit code: 30
+//
+// Two single-arg helpers: dbl(x)=x*2, sub_ten(x)=x-10. main calls
+// dbl(20) -> 40, then sub_ten(40) -> 30. Distinct from
+// s50_mf_double_then_sub (100) and s46_mf_double_then_sub (80).
+
+fn dbl(x: u32) -> u32 {
+    n: u32 = 2;
+    r: u32 = x * n;
+    return r;
+}
+fn sub_ten(x: u32) -> u32 {
+    n: u32 = 10;
+    r: u32 = x - n;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = dbl(20);          // 40
+    r: u32 = sub_ten(a);       // 30
+    return r;
+}

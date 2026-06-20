@@ -1,0 +1,17 @@
+// s51_crypto_shl_mask.vuma — (0x0B << 4) & 0xF0 = 0xB0 & 0xF0 = 0xB0 = 176
+// Expected exit code: 176
+//
+// Shift the low nibble 0x0B up into the high nibble then mask off
+// any stray low bits. (11 << 4) = 176 (0xB0); 176 & 240 = 176.
+// All operands loaded into u64 variables first (immediate-RHS
+// bitwise drop bug workaround). Distinct from s50_crypto_high_
+// nibble (160) and s47_crypto_shl_extract (144).
+
+fn main() -> i32 {
+    a: u64 = 11;           // 0x0B
+    b: u64 = 4;
+    c: u64 = 240;          // 0xF0
+    x: u64 = a << b;       // 0xB0 = 176
+    r: u64 = x & c;        // 0xB0 = 176
+    return r;
+}

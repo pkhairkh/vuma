@@ -1,0 +1,16 @@
+// s52_fn_two_args_mul.vuma — mul(7, 9) = 63
+// Expected exit code: 63
+//
+// Helper mul(x, y) = x * y. main calls mul(7, 9) -> 63. Two-arg
+// function that multiplies its arguments. Distinct from
+// s50_fn_two_args_sub (85) and s46_fn_two_args_add (90).
+
+fn mul(x: u32, y: u32) -> u32 {
+    r: u32 = x * y;
+    return r;
+}
+
+fn main() -> i32 {
+    v: u32 = mul(7, 9);
+    return v;
+}

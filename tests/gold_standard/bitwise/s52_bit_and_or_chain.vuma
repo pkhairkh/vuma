@@ -1,0 +1,16 @@
+// s52_bit_and_or_chain.vuma — (0xFF & 0xF0) | 0x0F = 0xF0 | 0x0F = 0xFF = 255
+// Expected exit code: 255
+//
+// Two-stage bitwise: AND then OR. 255 & 240 = 240 (0xF0);
+// 240 | 15 = 255 (0xFF). All operands loaded into u64 variables first
+// (immediate-RHS bitwise drop bug workaround). Distinct from
+// s50_bit_and_or_chain (48) and s46_bit_and_then_shl (192).
+
+fn main() -> i32 {
+    a: u64 = 255;          // 0xFF
+    b: u64 = 240;          // 0xF0
+    c: u64 = 15;           // 0x0F
+    x: u64 = a & b;        // 0xF0 = 240
+    r: u64 = x | c;        // 0xFF = 255
+    return r;
+}
