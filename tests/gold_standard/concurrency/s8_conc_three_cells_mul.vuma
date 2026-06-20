@@ -1,0 +1,24 @@
+// s8_conc_three_cells_mul.vuma — three cells, mul loads = 210 (5 * 6 * 7)
+// Expected exit code: 210
+//
+// Three independent 8-byte cells with distinct literal values (5/6/7).
+// All three loaded back and multiplied. 5 * 6 * 7 = 210. Distinct from
+// s6_conc_sum_three_diff (sum, not product).
+
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    c3 = allocate(8);
+    *c1 = 5;
+    *c2 = 6;
+    *c3 = 7;
+    v1: i32 = *c1;
+    v2: i32 = *c2;
+    v3: i32 = *c3;
+    p1: i32 = v1 * v2;
+    s: i32 = p1 * v3;
+    free(c1);
+    free(c2);
+    free(c3);
+    return s;
+}

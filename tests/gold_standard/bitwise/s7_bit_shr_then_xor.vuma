@@ -1,0 +1,17 @@
+// s7_bit_shr_then_xor.vuma — (0xF0 >> 4) ^ 0x05 = 0x0F ^ 0x05 = 0x0A = 10
+// Expected exit code: 10
+//
+// Shift 0xF0 right by 4 to extract the high nibble (0x0F), then XOR
+// with 0x05 -> 0x0A = 10. All operands loaded into variables first
+// to dodge the immediate-RHS bitwise drop bug. Distinct from
+// s5_bit_shr_mask (shift then AND mask, not XOR) and s5_bit_xor_then_not
+// (XOR then XOR, no shift).
+
+fn main() -> i32 {
+    v: u64 = 240;    // 0xF0
+    sh: u64 = 4;
+    x: u64 = 5;      // 0x05
+    shifted: u64 = v >> sh;   // 0x0F = 15
+    r: u64 = shifted ^ x;     // 0x0A = 10
+    return r;
+}

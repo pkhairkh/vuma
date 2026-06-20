@@ -1,0 +1,20 @@
+// s8_nl_2x2_product.vuma — 2x2 nested loop, sum of i*j = 0+0+0+1 = 1
+// Expected exit code (correct): 1
+// Observed on current x86_64 backend: 0 (FAIL — known bug)
+//
+// Outer loop 2 iterations, inner loop 2 iterations. Each inner
+// iteration adds i*j to acc. (i,j) pairs: (0,0),(0,1),(1,0),(1,1)
+// giving 0+0+0+1 = 1. Known bug keeps acc at 0. Distinct from
+// s5_nl_2x2_product (different operand pair, same shape but this
+// test verifies the (1,1) corner).
+
+fn main() -> i32 {
+    acc: u32 = 0;
+    for i in 0..2 {
+        for j in 0..2 {
+            p: u32 = i * j;
+            acc = acc + p;
+        }
+    }
+    return acc;
+}

@@ -1,0 +1,21 @@
+// s7_conc_overwrite_first.vuma — overwrite first cell, sum = 90 + 20 = 110
+// Expected exit code: 110
+//
+// Two independent 8-byte cells. Store 10 then 90 in cell1 (overwrite),
+// store 20 in cell2. Load both, sum -> 90 + 20 = 110. Distinct from
+// s5_conc_overwrite_observed (single cell overwrite + observe) and
+// s5_conc_triple_overwrite (three overwrites).
+
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    *c1 = 10;
+    *c1 = 90;
+    *c2 = 20;
+    v1: i32 = *c1;
+    v2: i32 = *c2;
+    s: i32 = v1 + v2;
+    free(c1);
+    free(c2);
+    return s;
+}

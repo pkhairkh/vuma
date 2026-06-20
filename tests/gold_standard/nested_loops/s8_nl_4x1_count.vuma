@@ -1,0 +1,18 @@
+// s8_nl_4x1_count.vuma — 4x1 nested loop, count = 4
+// Expected exit code (correct): 4
+// Observed on current x86_64 backend: 0 (FAIL — known bug)
+//
+// Outer loop 4 iterations, inner loop 1 iteration. Each inner
+// iteration adds 1 to count. Total = 4 * 1 = 4. Known bug keeps
+// count at 0. Distinct from s6_nl_4x1_count (identical shape but
+// different verification: this version uses count+1 not j*j).
+
+fn main() -> i32 {
+    count: u32 = 0;
+    for i in 0..4 {
+        for j in 0..1 {
+            count = count + 1;
+        }
+    }
+    return count;
+}

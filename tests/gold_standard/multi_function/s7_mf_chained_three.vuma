@@ -1,0 +1,35 @@
+// s7_mf_chained_three.vuma — c(b(a(5))) = c(b(6)) = c(12) = 9
+// Expected exit code: 9
+//
+// Three single-arg helpers chained with mixed operations:
+//   add1(x) = x + 1
+//   mul2(x) = x * 2
+//   sub3(x) = x - 3
+// main: add1(5) -> 6, mul2(6) -> 12, sub3(12) -> 9. Distinct from
+// s5_mf_three_chain (three add-helpers) and s4_mf_chain_3 (different
+// addends, all adds).
+
+fn add1(x: u32) -> u32 {
+    one: u32 = 1;
+    r: u32 = x + one;
+    return r;
+}
+
+fn mul2(x: u32) -> u32 {
+    two: u32 = 2;
+    r: u32 = x * two;
+    return r;
+}
+
+fn sub3(x: u32) -> u32 {
+    three: u32 = 3;
+    r: u32 = x - three;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = add1(5);   // 6
+    b: u32 = mul2(a);   // 12
+    c: u32 = sub3(b);   // 9
+    return c;
+}

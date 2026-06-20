@@ -1,0 +1,18 @@
+// s7_bit_shl_add.vuma — (1 << 3) + (1 << 2) = 8 + 4 = 12
+// Expected exit code: 12
+//
+// Two shift-lefts of 1 by different amounts, then add. (1<<3) = 8;
+// (1<<2) = 4; 8 + 4 = 12. All operands loaded into variables first
+// to dodge the immediate-RHS bitwise drop bug. Distinct from
+// s5_bit_shr_mask (shift then mask, no add) and s6_bit_shl_then_shr
+// (shl then shr, no add).
+
+fn main() -> i32 {
+    one: u64 = 1;
+    sh3: u64 = 3;
+    sh2: u64 = 2;
+    a: u64 = one << sh3;   // 8
+    b: u64 = one << sh2;   // 4
+    r: u64 = a + b;        // 12
+    return r;
+}

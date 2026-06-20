@@ -1,0 +1,23 @@
+// s7_atom_overwrite_first.vuma — overwrite cell1 then sum = 90 + 30 = 120
+// Expected exit code: 0 (current buggy backend)
+// Expected exit code (correct, post-bridge-fix): 120  (90 + 30)
+//
+// Two 8-byte cells. atomic_store 50 then 90 into cell1 (overwrite),
+// atomic_store 30 into cell2. Load both, sum should be 120.
+// Current backend returns 0+0=0. Distinct from s5_atom_overwrite_load
+// (single-cell overwrite) and s6_atom_overwrite_load (different
+// values).
+
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    atomic_store(c1, 50);
+    atomic_store(c1, 90);
+    atomic_store(c2, 30);
+    a = atomic_load(c1);
+    b = atomic_load(c2);
+    s = a + b;
+    free(c1);
+    free(c2);
+    return s;
+}

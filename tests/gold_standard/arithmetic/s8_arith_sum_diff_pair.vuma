@@ -1,0 +1,15 @@
+// s8_arith_sum_diff_pair.vuma — 100 + 50 - 30 = 120
+// Expected exit code: 120
+//
+// Add then subtract: 100 + 50 = 150, then 150 - 30 = 120. All operands
+// within U8 range, straight-line code. Distinct from s6_arith_sub_then_add
+// (sub first) and s5_arith_mul_then_add3 (mul instead of add).
+
+fn main() -> i32 {
+    a: u32 = 100;
+    b: u32 = 50;
+    c: u32 = 30;
+    t: u32 = a + b;     // 150
+    r: u32 = t - c;     // 120
+    return r;
+}

@@ -1,0 +1,18 @@
+// s10_nl_2x4_count.vuma — 2x4 nested loop, count = 8
+// Expected exit code (correct): 8
+// Observed on current x86_64 backend: 0 (FAIL — known bug)
+//
+// Outer loop 2 iterations, inner loop 4 iterations each -> 8 total.
+// Counter increments by 1 each inner iteration. Known "for-body
+// assignments don't propagate" bug keeps count at 0. Distinct from
+// s4_nl_2x3_count (2x3) and s6_nl_3x3_with_j (3x3 with j*j accumulator).
+
+fn main() -> i32 {
+    count: u32 = 0;
+    for i in 0..2 {
+        for j in 0..4 {
+            count = count + 1;
+        }
+    }
+    return count;
+}

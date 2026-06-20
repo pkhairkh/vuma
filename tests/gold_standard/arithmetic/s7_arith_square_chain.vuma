@@ -1,0 +1,20 @@
+// s7_arith_square_chain.vuma — 3^2 + 4^2 + 5^2 = 9 + 16 + 25 = 50
+// Expected exit code: 50
+//
+// Sum of three squares. Each square is computed as a*a via a u32
+// multiplication, then chained additions produce the final 50. All
+// values well inside U8 range. Distinct from s6_arith_mul_chain_3
+// (chain of distinct multipliers, not squares) and s5_arith_quad_sum
+// (four-way add of identical values).
+
+fn main() -> i32 {
+    a: u32 = 3;
+    b: u32 = 4;
+    c: u32 = 5;
+    sa: u32 = a * a;      // 9
+    sb: u32 = b * b;      // 16
+    sc: u32 = c * c;      // 25
+    t1: u32 = sa + sb;    // 25
+    total: u32 = t1 + sc; // 50
+    return total;
+}

@@ -1,0 +1,16 @@
+// s7_arith_div_then_mul.vuma — (60 / 5) * 3 = 12 * 3 = 36
+// Expected exit code: 36
+//
+// Integer division then multiplication. 60 / 5 = 12; 12 * 3 = 36.
+// All values inside U8 range. Distinct from s4_arith_div_chain
+// (chain of divisions, no mul) and s6_arith_div_mod_combined
+// (div + mod, no mul).
+
+fn main() -> i32 {
+    n: u32 = 60;
+    d: u32 = 5;
+    m: u32 = 3;
+    q: u32 = n / d;   // 12
+    r: u32 = q * m;   // 36
+    return r;
+}
