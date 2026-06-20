@@ -1,0 +1,20 @@
+// s20_conc_two_cell_diff.vuma — two cells, diff = 75 (120 - 45)
+// Expected exit code: 75
+//
+// Two independent 8-byte cells. Each gets a distinct literal at offset 0
+// (120/45). Both loaded back and subtracted -> 75. Uses `*ptr = literal`
+// form. Distinct from s18_conc_two_cell_sum (sum, 28+52=80) and
+// s14_conc_two_cell_diff (17-34 form).
+
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    *c1 = 120;
+    *c2 = 45;
+    v1: i32 = *c1;
+    v2: i32 = *c2;
+    s: i32 = v1 - v2;
+    free(c1);
+    free(c2);
+    return s;
+}

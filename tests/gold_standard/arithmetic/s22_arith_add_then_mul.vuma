@@ -1,0 +1,16 @@
+// s22_arith_add_then_mul.vuma — (17 + 23) * 4 = 40 * 4 = 160
+// Expected exit code: 160
+//
+// Two-stage u32 computation: add then mul. 17 + 23 = 40; 40 * 4 = 160.
+// All operands loaded into u32 variables first. Distinct from
+// s18_arith_mul_add_sub (mul-then-add-then-sub, value 82) and
+// s14_arith_double_add (add-then-add shape).
+
+fn main() -> i32 {
+    a: u32 = 17;
+    b: u32 = 23;
+    c: u32 = 4;
+    s: u32 = a + b;       // 40
+    r: u32 = s * c;       // 160
+    return r;
+}

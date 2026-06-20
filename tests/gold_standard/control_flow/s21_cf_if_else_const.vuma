@@ -1,0 +1,20 @@
+// s21_cf_if_else_const.vuma — if true { x = 38 } else { x = 190 }; return x
+// Expected exit code (correct): 38
+// Observed on current x86_64 backend: 190 (FAIL — known bug)
+//
+// If-true branch should set x = 38, else branch sets x = 190. With a
+// literal `true` condition the true branch should win -> 38. On the
+// current backend the if-true body's single assignment is dropped, so
+// the else body's assignment (190) survives instead. Will exit 38 once
+// the if-body drop bug is fixed. Distinct from s18_cf_if_else_const
+// (values 55/110) and s14_cf_if_else_const (42/99).
+
+fn main() -> i32 {
+    x: u32 = 0;
+    if true {
+        x = 38;
+    } else {
+        x = 190;
+    }
+    return x;
+}

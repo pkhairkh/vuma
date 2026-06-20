@@ -1,0 +1,31 @@
+// s20_mf_three_helpers_sum.vuma — a(10)+b(10)+c(10) = 13+15+17 = 45
+// Expected exit code: 45
+//
+// Three single-arg helpers each add a distinct constant: a(x)=x+3,
+// b(x)=x+5, c(x)=x+7. main calls all three with 10 and sums -> 45.
+// Distinct from s18_mf_three_helpers_sum (different offsets) and
+// s14_mf_three_helpers_sum (three helpers summed).
+
+fn a(x: u32) -> u32 {
+    n: u32 = 3;
+    r: u32 = x + n;
+    return r;
+}
+fn b(x: u32) -> u32 {
+    n: u32 = 5;
+    r: u32 = x + n;
+    return r;
+}
+fn c(x: u32) -> u32 {
+    n: u32 = 7;
+    r: u32 = x + n;
+    return r;
+}
+
+fn main() -> i32 {
+    r1: u32 = a(10);      // 13
+    r2: u32 = b(10);      // 15
+    r3: u32 = c(10);      // 17
+    s: u32 = r1 + r2 + r3; // 45
+    return s;
+}

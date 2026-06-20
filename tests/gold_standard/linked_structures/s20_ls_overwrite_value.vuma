@@ -1,0 +1,16 @@
+// s20_ls_overwrite_value.vuma — store 14 then overwrite 140, load = 140
+// Expected exit code: 140
+//
+// Single 8-byte allocation treated as one "node". Store 14, overwrite
+// with 140 (last write wins). Load and return 140. Uses `*ptr = literal`
+// form. Distinct from s18_ls_overwrite_first (two-node overwrite) and
+// s14_ls_overwrite_node (different values).
+
+fn main() -> i32 {
+    n = allocate(8);
+    *n = 14;
+    *n = 140;
+    v: u64 = *n;
+    free(n);
+    return v;
+}

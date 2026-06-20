@@ -1,0 +1,17 @@
+// s21_fn_zero_arg_lit.vuma — get_88() returns 88
+// Expected exit code: 88
+//
+// Helper takes no parameters and returns the constant 88. Tests that
+// the codegen can compile and call a zero-argument function that returns
+// a function-local constant. Distinct from s18_fn_zero_arg_lit (returns
+// 77) and s14_fn_zero_arg_lit (returns 99).
+
+fn get_88() -> u32 {
+    c: u32 = 88;
+    return c;
+}
+
+fn main() -> i32 {
+    v: u32 = get_88();
+    return v;
+}

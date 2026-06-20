@@ -1,0 +1,17 @@
+// s20_fn_one_arg_add.vuma — add8(34) = 42
+// Expected exit code: 42
+//
+// Helper add8(x) = x + 8. main calls add8(34) -> 42. Single function
+// call, single literal argument, addition. Distinct from s18_fn_one_arg_mul
+// (triple(14) = 42, multiplication) and s14_fn_one_arg_add (add_one, +1).
+
+fn add8(x: u32) -> u32 {
+    n: u32 = 8;
+    r: u32 = x + n;
+    return r;
+}
+
+fn main() -> i32 {
+    v: u32 = add8(34);
+    return v;
+}

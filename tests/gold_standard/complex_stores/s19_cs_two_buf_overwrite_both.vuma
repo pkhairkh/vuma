@@ -1,0 +1,22 @@
+// s19_cs_two_buf_overwrite_both.vuma — overwrite both cells, sum = 20 (5 + 15)
+// Expected exit code: 20
+//
+// Two 8-byte cells. Store 70/80 in c1/c2, then overwrite BOTH with
+// 5/15. Load both, sum -> 20. Uses `*ptr = literal` form (no offsets).
+// Distinct from s18_cs_two_buf_overwrite_one (overwrites only one cell)
+// and s14_cs_two_buf_overwrite_both (different values).
+
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    *c1 = 70;
+    *c2 = 80;
+    *c1 = 5;
+    *c2 = 15;
+    a: u64 = *c1;
+    b: u64 = *c2;
+    s: u64 = a + b;
+    free(c1);
+    free(c2);
+    return s;
+}

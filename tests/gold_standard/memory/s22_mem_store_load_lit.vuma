@@ -1,0 +1,15 @@
+// s22_mem_store_load_lit.vuma — store 95, load 95
+// Expected exit code: 95
+//
+// Single 8-byte cell. Store literal 95 via `*p = 95`, load it back,
+// return 95. Most basic store-load round trip via pointer. Distinct
+// from s18_mem_store_load_lit (value 73) and s14_mem_store_load_lit
+// (value 64).
+
+fn main() -> i32 {
+    p = allocate(8);
+    *p = 95;
+    v: u64 = *p;
+    free(p);
+    return v;
+}

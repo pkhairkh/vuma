@@ -1,0 +1,16 @@
+// s22_fn_two_args_mul.vuma — mul(9, 11) = 99
+// Expected exit code: 99
+//
+// Helper mul(a, b) = a * b. main calls mul(9, 11) -> 99. Two-arg
+// function with multiplication. Distinct from s18_fn_two_args_add
+// (add(37, 48) = 85, addition) and s14_fn_two_args_diff (diff, sub).
+
+fn mul(a: u32, b: u32) -> u32 {
+    r: u32 = a * b;
+    return r;
+}
+
+fn main() -> i32 {
+    v: u32 = mul(9, 11);
+    return v;
+}

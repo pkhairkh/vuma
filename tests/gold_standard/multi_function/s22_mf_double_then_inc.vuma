@@ -1,0 +1,25 @@
+// s22_mf_double_then_inc.vuma — inc(dbl(20)) = (20*2)+1 = 41
+// Expected exit code: 41
+//
+// Two single-arg helpers chained: dbl(x) = x * 2; inc(x) = x + 1.
+// main calls dbl(20) -> 40, then inc(40) -> 41. Each call uses an
+// intermediate local. Distinct from s18_mf_two_helpers_chain
+// (inner+12, outer*3 -> 51) and s14_mf_two_helpers_chain (inner+10,
+// outer*2 -> 30).
+
+fn dbl(x: u32) -> u32 {
+    n: u32 = 2;
+    r: u32 = x * n;
+    return r;
+}
+fn inc(x: u32) -> u32 {
+    n: u32 = 1;
+    r: u32 = x + n;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = dbl(20);     // 40
+    b: u32 = inc(a);      // 41
+    return b;
+}

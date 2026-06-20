@@ -1,0 +1,18 @@
+// s19_arith_sub_mul_add.vuma — ((100 - 30) * 2) + 15 = 70 * 2 + 15 = 155
+// Expected exit code: 155
+//
+// Three-stage u32 computation: sub then mul then add. 100 - 30 = 70;
+// 70 * 2 = 140; 140 + 15 = 155. All operands loaded into u32 variables
+// first. Distinct from s18_arith_mul_add_sub (mul-add-sub, different
+// op order) and s12_arith_div_then_add (div-then-add).
+
+fn main() -> i32 {
+    a: u32 = 100;
+    b: u32 = 30;
+    c: u32 = 2;
+    d: u32 = 15;
+    p: u32 = a - b;       // 70
+    q: u32 = p * c;       // 140
+    r: u32 = q + d;       // 155
+    return r;
+}

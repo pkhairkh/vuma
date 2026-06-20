@@ -1,0 +1,20 @@
+// s20_cs_two_cell_sum.vuma — two cells, sum = 110 (44 + 66)
+// Expected exit code: 110
+//
+// Two 8-byte cells. Store 44/66 via `*ptr = literal`, load both, sum ->
+// 110. Uses `*ptr = literal` form (no offsets). Distinct from
+// s18_cs_three_cells_inc (three cells, ascending) and s14_cs_two_cell_sum
+// (different values).
+
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    *c1 = 44;
+    *c2 = 66;
+    a: u64 = *c1;
+    b: u64 = *c2;
+    s: u64 = a + b;
+    free(c1);
+    free(c2);
+    return s;
+}

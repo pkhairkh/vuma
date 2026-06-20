@@ -1,0 +1,19 @@
+// s20_atom_overwrite_three.vuma — atomic_store 8 then 80 then 180, load sees 180
+// Expected exit code: 0 (current buggy backend)
+// Expected exit code (correct, post-bridge-fix): 180
+//
+// Single 8-byte cell. atomic_store 8, overwrite with 80, overwrite with
+// 180 (last write wins). atomic_load should observe 180. On the current
+// backend the load returns 0 -> exit 0. Will exit 180 once atomics are
+// wired. Distinct from s18_atom_overwrite_then_load (two writes, 5/75)
+// and s14_atom_overwrite_load (two writes, 17/73).
+
+fn main() -> i32 {
+    c = allocate(8);
+    atomic_store(c, 8);
+    atomic_store(c, 80);
+    atomic_store(c, 180);
+    v = atomic_load(c);
+    free(c);
+    return v;
+}

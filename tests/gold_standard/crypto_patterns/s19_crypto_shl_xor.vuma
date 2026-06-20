@@ -1,0 +1,17 @@
+// s19_crypto_shl_xor.vuma — (0x05 << 3) ^ 0x2A = 0x28 ^ 0x2A = 0x02 = 2
+// Expected exit code: 2
+//
+// Shift a small value left then XOR with a key. (5 << 3) = 40 (0x28);
+// 40 ^ 42 = 2 (0x02). All operands (including the shift amount) loaded
+// into u64 variables first. Distinct from s18_crypto_shl_mask
+// (shl-then-mask, no XOR) and s14_crypto_shl_then_xor (different
+// values 0x03<<4 ^ 0x55).
+
+fn main() -> i32 {
+    v: u64 = 5;           // 0x05
+    s: u64 = 3;
+    k: u64 = 42;          // 0x2A
+    x: u64 = v << s;      // 0x28 = 40
+    r: u64 = x ^ k;       // 0x02 = 2
+    return r;
+}

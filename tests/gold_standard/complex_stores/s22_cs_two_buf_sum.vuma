@@ -1,0 +1,20 @@
+// s22_cs_two_buf_sum.vuma — two cells, sum = 80 (33 + 47)
+// Expected exit code: 80
+//
+// Two 8-byte cells. Store 33/47 via `*ptr = literal`, load both,
+// sum -> 80. Uses `*ptr = literal` form (no offsets). Distinct from
+// s18_cs_two_buf_overwrite_one (overwrites one cell, 18/82 -> 50/82 = 132)
+// and s14_cs_two_buf_overwrite_one (15/25 -> 100/25 = 125).
+
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    *c1 = 33;
+    *c2 = 47;
+    v1: u64 = *c1;
+    v2: u64 = *c2;
+    s: u64 = v1 + v2;
+    free(c1);
+    free(c2);
+    return s;
+}
