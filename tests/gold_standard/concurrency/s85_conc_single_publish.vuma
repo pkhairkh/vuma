@@ -1,0 +1,15 @@
+// s85_conc_single_publish.vuma — publish 88, observe, return 88
+// Expected exit code: 88
+//
+// Single 8-byte "atomic-like" cell. Store 88 via `*ptr =
+// literal` (publish), load it back (observe), return 88. Uses
+// non-atomic `*ptr` per the bridge-gap workaround. Distinct
+// from s82_conc_single_publish, s78_conc_single_publish and
+// s74_conc_single_publish.
+fn main() -> i32 {
+    cell = allocate(8);
+    *cell = 88;
+    val: i32 = *cell;
+    free(cell);
+    return val;
+}
