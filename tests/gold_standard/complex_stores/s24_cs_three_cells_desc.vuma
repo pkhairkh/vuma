@@ -1,0 +1,26 @@
+// s24_cs_three_cells_desc.vuma — three cells, descending 85/60/35, sum = 180
+// Expected exit code: 180  (85 + 60 + 35)
+//
+// Three independent 8-byte cells. Store 85/60/35 (descending by 25) via
+// `*ptr = literal`. Load all three, sum, return 180. Uses separate
+// allocations per "slot" because the current x86_64 backend drops stores
+// through the `*(ptr + N) = literal` form (only `*ptr = literal` and
+// `*ptr = variable + 0` round-trip). Distinct from s22_cs_three_cells_asc
+// (ascending 12/34/56 = 102) and s14_cs_three_cells_desc (30/20/10 = 60).
+
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    c3 = allocate(8);
+    *c1 = 85;
+    *c2 = 60;
+    *c3 = 35;
+    a: u64 = *c1;
+    b: u64 = *c2;
+    c: u64 = *c3;
+    s: u64 = a + b + c;
+    free(c1);
+    free(c2);
+    free(c3);
+    return s;
+}

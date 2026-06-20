@@ -1,0 +1,21 @@
+// s24_conc_two_cell_or.vuma — two cells, or = 79 (0x40 | 0x0F)
+// Expected exit code: 79
+//
+// Two independent 8-byte cells. Each gets a distinct literal at offset 0
+// (64/15). Both loaded back and ORed. All operands loaded into typed
+// locals before the OR (immediate-RHS bitwise drop bug workaround).
+// Distinct from s22_conc_two_cell_xor (xor, 41^98=75) and
+// s18_conc_two_cell_sum (28/52 = 80).
+
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    *c1 = 64;            // 0x40
+    *c2 = 15;            // 0x0F
+    v1: u64 = *c1;
+    v2: u64 = *c2;
+    s: u64 = v1 | v2;    // 0x4F = 79
+    free(c1);
+    free(c2);
+    return s;
+}
