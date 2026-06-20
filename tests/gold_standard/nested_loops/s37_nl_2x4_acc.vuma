@@ -1,0 +1,17 @@
+// s37_nl_2x4_acc.vuma — 2x4 nested loop, acc = 8
+// Expected exit code (correct): 8
+// Observed on current x86_64 backend: 0 (FAIL — known bug)
+//
+// Nested for-loop produces 8 iterations total. Known
+// "for-body assignments don't propagate" bug keeps the result at 0. Will exit
+// 8 once fixed.
+// Distinct from s33_nl_2x3_acc (2x3=6) and s30_nl_2x4_count (2x4=8).
+fn main() -> i32 {
+    acc: u32 = 0;
+    for i in 0..2 {
+        for j in 0..4 {
+            acc = acc + 1;
+        }
+    }
+    return acc;
+}

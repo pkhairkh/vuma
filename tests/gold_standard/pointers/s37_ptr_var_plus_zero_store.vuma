@@ -1,0 +1,16 @@
+// s37_ptr_var_plus_zero_store.vuma — store via *p = v + 0 = 117
+// Expected exit code: 117
+//
+// Deterministic test in the pointers category. All operands loaded into typed
+// variables before any bitwise op; all stores use `*ptr = literal` (or the
+// `*ptr = variable + 0` workaround). Result lands in 0-255.
+// Distinct from s33_ptr_var_plus_zero_store (value 73) and s30_ptr_var_plus_zero_store (value 91).
+fn main() -> i32 {
+    p = allocate(8);
+    *p = 5;
+    v: i32 = 117;
+    *p = v + 0;
+    r: i32 = *p;
+    free(p);
+    return r;
+}

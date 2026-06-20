@@ -1,0 +1,19 @@
+// s35_cf_while_acc_5.vuma — while loop accumulates 5*4 = 20
+// Expected exit code (correct): 20
+// Observed on current x86_64 backend: 0 (FAIL — known bug)
+//
+// Accumulator starts at 0. While i < 5, add 4 each iteration ->
+// 5 * 4 = 20 total. i increments by 1 each iteration. Known
+// "while-body assignments don't propagate" bug keeps acc at 0 ->
+// exit 0. Will exit 20 once fixed. Distinct from s34_cf_while_acc_6
+// (6*3 = 18) and s30_cf_while_acc_5 (5*5 = 25).
+
+fn main() -> i32 {
+    acc: u32 = 0;
+    i: u32 = 0;
+    while i < 5 {
+        acc = acc + 4;
+        i = i + 1;
+    }
+    return acc;
+}

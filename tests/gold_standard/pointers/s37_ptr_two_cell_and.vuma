@@ -1,0 +1,19 @@
+// s37_ptr_two_cell_and.vuma — two cells, and = 0xC0 & 0x70 = 0x40 = 64
+// Expected exit code: 64
+//
+// Deterministic test in the pointers category. All operands loaded into typed
+// variables before any bitwise op; all stores use `*ptr = literal` (or the
+// `*ptr = variable + 0` workaround). Result lands in 0-255.
+// Distinct from s33_ptr_two_cell_xor (xor, 255) and s30_ptr_two_cell_xor (0xAA^0x55=255).
+fn main() -> i32 {
+    p1 = allocate(8);
+    p2 = allocate(8);
+    *p1 = 192;             // 0xC0
+    *p2 = 112;             // 0x70
+    a: i32 = *p1;
+    b: i32 = *p2;
+    r: i32 = a & b;        // 0x40 = 64
+    free(p1);
+    free(p2);
+    return r;
+}

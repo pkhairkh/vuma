@@ -1,0 +1,16 @@
+// s35_arith_add_sub_chain.vuma — (120 + 30) - 50 = 150 - 50 = 100
+// Expected exit code: 100
+//
+// Two-stage u32 computation: add then subtract. (120 + 30) = 150;
+// 150 - 50 = 100. All operands loaded into u32 variables first.
+// Distinct from s34_arith_add_mul_sub (add-mul-sub, 75) and
+// s30_arith_sub_then_mod (sub-then-mod, 70).
+
+fn main() -> i32 {
+    a: u32 = 120;
+    b: u32 = 30;
+    c: u32 = 50;
+    s: u32 = a + b;       // 150
+    r: u32 = s - c;       // 100
+    return r;
+}

@@ -1,0 +1,20 @@
+// s37_atom_two_cell_product.vuma — two cells, atomic product = 15 * 10 = 150
+// Expected exit code (correct): 150
+// Observed on current x86_64 backend: 0 (FAIL — known bug)
+//
+// Atomics test. On the current x86_64 backend atomic_load returns 0, so the
+// documented correct value (150) is not observed. Will exit
+// 150 once the atomics bridge is wired through.
+// Distinct from s33_atom_two_cell_sum (sum, 255) and s30_atom_two_cell_xor (xor, 255).
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    atomic_store(c1, 15);
+    atomic_store(c2, 10);
+    a = atomic_load(c1);
+    b = atomic_load(c2);
+    r: i32 = a * b;          // 150
+    free(c1);
+    free(c2);
+    return r;
+}
