@@ -1,0 +1,14 @@
+// s39_crypto_high_nibble_keep.vuma — 0xE7 & 0xF0 = 0xE0 = 224
+// Expected exit code: 224
+//
+// Keep the high nibble. 231 (0xE7) & 240 (0xF0) = 224 (0xE0). All
+// operands loaded into u64 variables first (immediate-RHS bitwise
+// drop bug workaround). Distinct from s38_crypto_nibble_clear
+// (0xCD & 0xF0 = 0xC0 = 192) and s34_crypto_nibble_clear.
+
+fn main() -> i32 {
+    a: u64 = 231;          // 0xE7
+    b: u64 = 240;          // 0xF0
+    r: u64 = a & b;        // 0xE0 = 224
+    return r;
+}
