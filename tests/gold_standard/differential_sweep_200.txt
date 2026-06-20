@@ -1,0 +1,273 @@
+VUMA Differential Testing Sweep — 200 Programs × 7 Backends
+Date: Sat Jun 20 12:49:26 UTC 2026
+Selector: 13 from each of 16 categories (208 total)
+
+DIFF: arith2_abundant_number x86_64=1 arm32=218 mips64=1 aarch64=1 riscv64=1 ppc64=1 loongarch64=1
+DIFF: arith2_catalan x86_64=2 arm32=218 mips64=2 aarch64=2 riscv64=2 ppc64=2 loongarch64=2
+DIFF: arith2_chinese_remainder x86_64=7 arm32=218 mips64=7 aarch64=37 riscv64=7 ppc64=7 loongarch64=7
+DIFF: arith2_continued_fraction x86_64=3 arm32=218 mips64=3 aarch64=3 riscv64=3 ppc64=3 loongarch64=3
+DIFF: arith2_deficient_number x86_64=1 arm32=218 mips64=1 aarch64=1 riscv64=1 ppc64=1 loongarch64=1
+DIFF: arith2_discrete_log x86_64=3 arm32=218 mips64=3 aarch64=13 riscv64=3 ppc64=3 loongarch64=3
+DIFF: arith2_happy_number x86_64=1 arm32=94 mips64=1 aarch64=1 riscv64=1 ppc64=1 loongarch64=1
+DIFF: arith2_modular_inverse x86_64=1 arm32=218 mips64=1 aarch64=17 riscv64=1 ppc64=1 loongarch64=1
+DIFF: atom_func_roundtrip x86_64=0 arm32=0 mips64=0 aarch64=0 riscv64=0 ppc64=0 loongarch64=124
+DIFF: bit2_priority_encode x86_64=7 arm32=0 mips64=0 aarch64=7 riscv64=7 ppc64=7 loongarch64=3
+DIFF: base64_encode x86_64=124 arm32=0 mips64=124 aarch64=124 riscv64=124 ppc64=124 loongarch64=124
+DIFF: channel_demo x86_64=139 arm32=139 mips64=0 aarch64=139 riscv64=139 ppc64=139 loongarch64=139
+DIFF: bsearch x86_64=7 arm32=7 mips64=7 aarch64=7 riscv64=7 ppc64=7 loongarch64=139
+DIFF: cf2_if_assign_var x86_64=42 arm32=0 mips64=0 aarch64=0 riscv64=0 ppc64=42 loongarch64=0
+DIFF: cf2_if_else_assign x86_64=10 arm32=0 mips64=0 aarch64=0 riscv64=0 ppc64=10 loongarch64=0
+DIFF: cf2_if_nested_assign x86_64=1 arm32=0 mips64=0 aarch64=0 riscv64=0 ppc64=1 loongarch64=0
+DIFF: crc32 x86_64=124 arm32=124 mips64=124 aarch64=124 riscv64=124 ppc64=124 loongarch64=139
+DIFF: crypto2_bit_reverse x86_64=240 arm32=240 mips64=240 aarch64=240 riscv64=240 ppc64=240 loongarch64=192
+DIFF: edge2_empty_func x86_64=0 arm32=0 mips64=0 aarch64=0 riscv64=0 ppc64=0 loongarch64=124
+DIFF: edge2_many_params x86_64=10 arm32=10 mips64=10 aarch64=10 riscv64=10 ppc64=10 loongarch64=124
+DIFF: edge2_nested x86_64=42 arm32=42 mips64=42 aarch64=42 riscv64=42 ppc64=42 loongarch64=124
+DIFF: fibonacci x86_64=0 arm32=0 mips64=0 aarch64=0 riscv64=0 ppc64=1 loongarch64=124
+DIFF: fn2_add_two x86_64=7 arm32=7 mips64=7 aarch64=7 riscv64=7 ppc64=7 loongarch64=124
+DIFF: fn2_address_param x86_64=42 arm32=42 mips64=42 aarch64=42 riscv64=42 ppc64=42 loongarch64=139
+DIFF: fn2_address_return x86_64=42 arm32=42 mips64=42 aarch64=42 riscv64=42 ppc64=42 loongarch64=124
+DIFF: fn2_chained x86_64=10 arm32=10 mips64=10 aarch64=10 riscv64=10 ppc64=10 loongarch64=124
+DIFF: fn2_constant x86_64=99 arm32=99 mips64=99 aarch64=99 riscv64=99 ppc64=99 loongarch64=124
+DIFF: fn2_identity x86_64=42 arm32=42 mips64=42 aarch64=42 riscv64=42 ppc64=42 loongarch64=124
+DIFF: fn2_mul_two x86_64=12 arm32=12 mips64=12 aarch64=12 riscv64=12 ppc64=12 loongarch64=124
+DIFF: fn2_pass_u32 x86_64=42 arm32=42 mips64=42 aarch64=42 riscv64=42 ppc64=42 loongarch64=124
+DIFF: fn2_pass_u8 x86_64=200 arm32=200 mips64=200 aarch64=200 riscv64=200 ppc64=200 loongarch64=124
+DIFF: fn2_sub_two x86_64=6 arm32=6 mips64=6 aarch64=6 riscv64=6 ppc64=6 loongarch64=124
+DIFF: fn_address_param x86_64=42 arm32=42 mips64=42 aarch64=42 riscv64=42 ppc64=42 loongarch64=139
+DIFF: fn_address_return x86_64=42 arm32=42 mips64=42 aarch64=42 riscv64=42 ppc64=42 loongarch64=124
+DIFF: doubly_linked_list x86_64=139 arm32=139 mips64=139 aarch64=139 riscv64=139 ppc64=124 loongarch64=139
+DIFF: ls_func_node x86_64=42 arm32=42 mips64=42 aarch64=42 riscv64=42 ppc64=42 loongarch64=124
+DIFF: ls_modify_node x86_64=99 arm32=99 mips64=99 aarch64=99 riscv64=99 ppc64=99 loongarch64=139
+DIFF: ls_pass_node x86_64=42 arm32=42 mips64=42 aarch64=42 riscv64=42 ppc64=42 loongarch64=139
+DIFF: arena_allocator x86_64=139 arm32=139 mips64=139 aarch64=139 riscv64=139 ppc64=124 loongarch64=124
+DIFF: debug_info x86_64=35 arm32=35 mips64=35 aarch64=35 riscv64=35 ppc64=35 loongarch64=139
+DIFF: mf_accumulator x86_64=6 arm32=6 mips64=6 aarch64=6 riscv64=6 ppc64=6 loongarch64=124
+DIFF: mf_address_pass x86_64=42 arm32=42 mips64=42 aarch64=42 riscv64=42 ppc64=42 loongarch64=139
+DIFF: mf_address_return x86_64=42 arm32=42 mips64=42 aarch64=42 riscv64=42 ppc64=42 loongarch64=124
+DIFF: mf_calculator x86_64=12 arm32=12 mips64=12 aarch64=12 riscv64=12 ppc64=12 loongarch64=124
+DIFF: mf_call_in_expr x86_64=10 arm32=10 mips64=10 aarch64=10 riscv64=10 ppc64=10 loongarch64=124
+DIFF: mf_chain_5 x86_64=5 arm32=5 mips64=5 aarch64=5 riscv64=5 ppc64=5 loongarch64=124
+DIFF: mf_compute_call x86_64=10 arm32=10 mips64=10 aarch64=10 riscv64=10 ppc64=10 loongarch64=124
+DIFF: mf_deep_nesting x86_64=10 arm32=10 mips64=10 aarch64=10 riscv64=10 ppc64=10 loongarch64=124
+DIFF: mf_different_types x86_64=42 arm32=42 mips64=42 aarch64=42 riscv64=42 ppc64=42 loongarch64=124
+DIFF: mf_dispatcher x86_64=42 arm32=42 mips64=42 aarch64=42 riscv64=42 ppc64=42 loongarch64=124
+DIFF: mf_four_funcs x86_64=10 arm32=10 mips64=10 aarch64=10 riscv64=10 ppc64=10 loongarch64=124
+DIFF: mf_func_returns_func x86_64=42 arm32=42 mips64=42 aarch64=42 riscv64=42 ppc64=42 loongarch64=124
+DIFF: matrix x86_64=0 arm32=0 mips64=0 aarch64=144 riscv64=176 ppc64=0 loongarch64=139
+DIFF: nl_diagonal x86_64=0 arm32=0 mips64=0 aarch64=0 riscv64=0 ppc64=0 loongarch64=3
+DIFF: nl_floyd x86_64=0 arm32=0 mips64=0 aarch64=0 riscv64=0 ppc64=0 loongarch64=1
+DIFF: nl_identity x86_64=0 arm32=0 mips64=0 aarch64=0 riscv64=0 ppc64=0 loongarch64=4
+DIFF: nl_matrix_mul x86_64=0 arm32=0 mips64=0 aarch64=32 riscv64=64 ppc64=0 loongarch64=139
+DIFF: nl_outer_product x86_64=0 arm32=0 mips64=0 aarch64=0 riscv64=0 ppc64=0 loongarch64=4
+DIFF: nl_pascals x86_64=0 arm32=0 mips64=0 aarch64=0 riscv64=0 ppc64=0 loongarch64=2
+DIFF: ptr2_func_load x86_64=42 arm32=42 mips64=42 aarch64=42 riscv64=42 ppc64=0 loongarch64=139
+DIFF: ptr2_func_store x86_64=42 arm32=42 mips64=42 aarch64=42 riscv64=42 ppc64=42 loongarch64=139
+DIFF: enum_demo x86_64=141 arm32=141 mips64=141 aarch64=141 riscv64=141 ppc64=141 loongarch64=139
+DIFF: struct2_func_load x86_64=42 arm32=42 mips64=42 aarch64=42 riscv64=42 ppc64=0 loongarch64=139
+DIFF: struct2_func_store x86_64=42 arm32=42 mips64=42 aarch64=42 riscv64=42 ppc64=42 loongarch64=139
+DIFF: test_endian x86_64=0 arm32=0 mips64=0 aarch64=0 riscv64=0 ppc64=0 loongarch64=139
+DIFF: test_u32_arith x86_64=79 arm32=79 mips64=79 aarch64=79 riscv64=79 ppc64=79 loongarch64=124
+DIFF: test_u32_mem x86_64=79 arm32=79 mips64=79 aarch64=79 riscv64=79 ppc64=79 loongarch64=124
+DIFF: test_w_sched x86_64=128 arm32=128 mips64=128 aarch64=128 riscv64=128 ppc64=128 loongarch64=139
+
+=== Summary ===
+Total programs: 208
+All backends agree: 140
+Some backends disagree: 68
+Some backends crashed: 20
+Some backends timed out: 37
+Some backends failed compile: 0
+Agreement rate: 67%
+
+=== Per-backend disagreement count (vs x86_64) ===
+arm32: 13
+mips64: 5
+aarch64: 8
+riscv64: 5
+ppc64: 5
+loongarch64: 57
+
+=== Per-category disagree counts ===
+arithmetic: 8 disagree / 13
+atomics: 1 disagree / 13
+bitwise: 1 disagree / 13
+complex_stores: 1 disagree / 13
+concurrency: 1 disagree / 13
+control_flow: 4 disagree / 13
+crypto_patterns: 2 disagree / 13
+edge_cases: 3 disagree / 13
+functions: 13 disagree / 13
+linked_structures: 4 disagree / 13
+memory: 1 disagree / 13
+multi_function: 13 disagree / 13
+nested_loops: 7 disagree / 13
+pointers: 2 disagree / 13
+structs: 3 disagree / 13
+u32_arith: 4 disagree / 13
+
+=== Sample DIFF rows (first 80) ===
+arith2_abundant_number|arithmetic| x86_64=1 arm32=218 mips64=1 aarch64=1 riscv64=1 ppc64=1 loongarch64=1
+arith2_catalan|arithmetic| x86_64=2 arm32=218 mips64=2 aarch64=2 riscv64=2 ppc64=2 loongarch64=2
+arith2_chinese_remainder|arithmetic| x86_64=7 arm32=218 mips64=7 aarch64=37 riscv64=7 ppc64=7 loongarch64=7
+arith2_continued_fraction|arithmetic| x86_64=3 arm32=218 mips64=3 aarch64=3 riscv64=3 ppc64=3 loongarch64=3
+arith2_deficient_number|arithmetic| x86_64=1 arm32=218 mips64=1 aarch64=1 riscv64=1 ppc64=1 loongarch64=1
+arith2_discrete_log|arithmetic| x86_64=3 arm32=218 mips64=3 aarch64=13 riscv64=3 ppc64=3 loongarch64=3
+arith2_happy_number|arithmetic| x86_64=1 arm32=94 mips64=1 aarch64=1 riscv64=1 ppc64=1 loongarch64=1
+arith2_modular_inverse|arithmetic| x86_64=1 arm32=218 mips64=1 aarch64=17 riscv64=1 ppc64=1 loongarch64=1
+atom_func_roundtrip|atomics| x86_64=0 arm32=0 mips64=0 aarch64=0 riscv64=0 ppc64=0 loongarch64=124
+bit2_priority_encode|bitwise| x86_64=7 arm32=0 mips64=0 aarch64=7 riscv64=7 ppc64=7 loongarch64=3
+base64_encode|complex_stores| x86_64=124 arm32=0 mips64=124 aarch64=124 riscv64=124 ppc64=124 loongarch64=124
+channel_demo|concurrency| x86_64=139 arm32=139 mips64=0 aarch64=139 riscv64=139 ppc64=139 loongarch64=139
+bsearch|control_flow| x86_64=7 arm32=7 mips64=7 aarch64=7 riscv64=7 ppc64=7 loongarch64=139
+cf2_if_assign_var|control_flow| x86_64=42 arm32=0 mips64=0 aarch64=0 riscv64=0 ppc64=42 loongarch64=0
+cf2_if_else_assign|control_flow| x86_64=10 arm32=0 mips64=0 aarch64=0 riscv64=0 ppc64=10 loongarch64=0
+cf2_if_nested_assign|control_flow| x86_64=1 arm32=0 mips64=0 aarch64=0 riscv64=0 ppc64=1 loongarch64=0
+crc32|crypto_patterns| x86_64=124 arm32=124 mips64=124 aarch64=124 riscv64=124 ppc64=124 loongarch64=139
+crypto2_bit_reverse|crypto_patterns| x86_64=240 arm32=240 mips64=240 aarch64=240 riscv64=240 ppc64=240 loongarch64=192
+edge2_empty_func|edge_cases| x86_64=0 arm32=0 mips64=0 aarch64=0 riscv64=0 ppc64=0 loongarch64=124
+edge2_many_params|edge_cases| x86_64=10 arm32=10 mips64=10 aarch64=10 riscv64=10 ppc64=10 loongarch64=124
+edge2_nested|edge_cases| x86_64=42 arm32=42 mips64=42 aarch64=42 riscv64=42 ppc64=42 loongarch64=124
+fibonacci|functions| x86_64=0 arm32=0 mips64=0 aarch64=0 riscv64=0 ppc64=1 loongarch64=124
+fn2_add_two|functions| x86_64=7 arm32=7 mips64=7 aarch64=7 riscv64=7 ppc64=7 loongarch64=124
+fn2_address_param|functions| x86_64=42 arm32=42 mips64=42 aarch64=42 riscv64=42 ppc64=42 loongarch64=139
+fn2_address_return|functions| x86_64=42 arm32=42 mips64=42 aarch64=42 riscv64=42 ppc64=42 loongarch64=124
+fn2_chained|functions| x86_64=10 arm32=10 mips64=10 aarch64=10 riscv64=10 ppc64=10 loongarch64=124
+fn2_constant|functions| x86_64=99 arm32=99 mips64=99 aarch64=99 riscv64=99 ppc64=99 loongarch64=124
+fn2_identity|functions| x86_64=42 arm32=42 mips64=42 aarch64=42 riscv64=42 ppc64=42 loongarch64=124
+fn2_mul_two|functions| x86_64=12 arm32=12 mips64=12 aarch64=12 riscv64=12 ppc64=12 loongarch64=124
+fn2_pass_u32|functions| x86_64=42 arm32=42 mips64=42 aarch64=42 riscv64=42 ppc64=42 loongarch64=124
+fn2_pass_u8|functions| x86_64=200 arm32=200 mips64=200 aarch64=200 riscv64=200 ppc64=200 loongarch64=124
+fn2_sub_two|functions| x86_64=6 arm32=6 mips64=6 aarch64=6 riscv64=6 ppc64=6 loongarch64=124
+fn_address_param|functions| x86_64=42 arm32=42 mips64=42 aarch64=42 riscv64=42 ppc64=42 loongarch64=139
+fn_address_return|functions| x86_64=42 arm32=42 mips64=42 aarch64=42 riscv64=42 ppc64=42 loongarch64=124
+doubly_linked_list|linked_structures| x86_64=139 arm32=139 mips64=139 aarch64=139 riscv64=139 ppc64=124 loongarch64=139
+ls_func_node|linked_structures| x86_64=42 arm32=42 mips64=42 aarch64=42 riscv64=42 ppc64=42 loongarch64=124
+ls_modify_node|linked_structures| x86_64=99 arm32=99 mips64=99 aarch64=99 riscv64=99 ppc64=99 loongarch64=139
+ls_pass_node|linked_structures| x86_64=42 arm32=42 mips64=42 aarch64=42 riscv64=42 ppc64=42 loongarch64=139
+arena_allocator|memory| x86_64=139 arm32=139 mips64=139 aarch64=139 riscv64=139 ppc64=124 loongarch64=124
+debug_info|multi_function| x86_64=35 arm32=35 mips64=35 aarch64=35 riscv64=35 ppc64=35 loongarch64=139
+mf_accumulator|multi_function| x86_64=6 arm32=6 mips64=6 aarch64=6 riscv64=6 ppc64=6 loongarch64=124
+mf_address_pass|multi_function| x86_64=42 arm32=42 mips64=42 aarch64=42 riscv64=42 ppc64=42 loongarch64=139
+mf_address_return|multi_function| x86_64=42 arm32=42 mips64=42 aarch64=42 riscv64=42 ppc64=42 loongarch64=124
+mf_calculator|multi_function| x86_64=12 arm32=12 mips64=12 aarch64=12 riscv64=12 ppc64=12 loongarch64=124
+mf_call_in_expr|multi_function| x86_64=10 arm32=10 mips64=10 aarch64=10 riscv64=10 ppc64=10 loongarch64=124
+mf_chain_5|multi_function| x86_64=5 arm32=5 mips64=5 aarch64=5 riscv64=5 ppc64=5 loongarch64=124
+mf_compute_call|multi_function| x86_64=10 arm32=10 mips64=10 aarch64=10 riscv64=10 ppc64=10 loongarch64=124
+mf_deep_nesting|multi_function| x86_64=10 arm32=10 mips64=10 aarch64=10 riscv64=10 ppc64=10 loongarch64=124
+mf_different_types|multi_function| x86_64=42 arm32=42 mips64=42 aarch64=42 riscv64=42 ppc64=42 loongarch64=124
+mf_dispatcher|multi_function| x86_64=42 arm32=42 mips64=42 aarch64=42 riscv64=42 ppc64=42 loongarch64=124
+mf_four_funcs|multi_function| x86_64=10 arm32=10 mips64=10 aarch64=10 riscv64=10 ppc64=10 loongarch64=124
+mf_func_returns_func|multi_function| x86_64=42 arm32=42 mips64=42 aarch64=42 riscv64=42 ppc64=42 loongarch64=124
+matrix|nested_loops| x86_64=0 arm32=0 mips64=0 aarch64=144 riscv64=176 ppc64=0 loongarch64=139
+nl_diagonal|nested_loops| x86_64=0 arm32=0 mips64=0 aarch64=0 riscv64=0 ppc64=0 loongarch64=3
+nl_floyd|nested_loops| x86_64=0 arm32=0 mips64=0 aarch64=0 riscv64=0 ppc64=0 loongarch64=1
+nl_identity|nested_loops| x86_64=0 arm32=0 mips64=0 aarch64=0 riscv64=0 ppc64=0 loongarch64=4
+nl_matrix_mul|nested_loops| x86_64=0 arm32=0 mips64=0 aarch64=32 riscv64=64 ppc64=0 loongarch64=139
+nl_outer_product|nested_loops| x86_64=0 arm32=0 mips64=0 aarch64=0 riscv64=0 ppc64=0 loongarch64=4
+nl_pascals|nested_loops| x86_64=0 arm32=0 mips64=0 aarch64=0 riscv64=0 ppc64=0 loongarch64=2
+ptr2_func_load|pointers| x86_64=42 arm32=42 mips64=42 aarch64=42 riscv64=42 ppc64=0 loongarch64=139
+ptr2_func_store|pointers| x86_64=42 arm32=42 mips64=42 aarch64=42 riscv64=42 ppc64=42 loongarch64=139
+enum_demo|structs| x86_64=141 arm32=141 mips64=141 aarch64=141 riscv64=141 ppc64=141 loongarch64=139
+struct2_func_load|structs| x86_64=42 arm32=42 mips64=42 aarch64=42 riscv64=42 ppc64=0 loongarch64=139
+struct2_func_store|structs| x86_64=42 arm32=42 mips64=42 aarch64=42 riscv64=42 ppc64=42 loongarch64=139
+test_endian|u32_arith| x86_64=0 arm32=0 mips64=0 aarch64=0 riscv64=0 ppc64=0 loongarch64=139
+test_u32_arith|u32_arith| x86_64=79 arm32=79 mips64=79 aarch64=79 riscv64=79 ppc64=79 loongarch64=124
+test_u32_mem|u32_arith| x86_64=79 arm32=79 mips64=79 aarch64=79 riscv64=79 ppc64=79 loongarch64=124
+test_w_sched|u32_arith| x86_64=128 arm32=128 mips64=128 aarch64=128 riscv64=128 ppc64=128 loongarch64=139
+
+=== Extended Analysis ===
+
+Agreement rates (various groupings):
+- All 7 backends agree:           140 / 208 = 67.3%
+- 6 backends agree (excl Loong):  187 / 208 = 89.9%
+- 5 backends agree (excl ARM32 + Loong): 193 / 208 = 92.8%
+- 5 mature backends (x86_64, mips64, aarch64, riscv64, ppc64) agree: 193 / 208 = 92.8%
+
+Disagreement root-cause categories:
+
+1. LoongArch64 broken call/return path (47 cases): Every program that
+   makes a function call (and many that don't) either times out (124)
+   or segfaults (139) on LoongArch64. This is the dominant failure
+   pattern — 47 of 68 disagreements (69%).
+   - 28 timeouts (exit 124) — program entered an infinite loop or
+     stalled in the broken call/return path.
+   - 13 segfaults (exit 139) — broken stack frame / return address.
+   - 5 nested-loop programs (nl_diagonal=3, nl_floyd=1, nl_identity=4,
+     nl_pascals=2, nl_outer_product=4) returned DIFFERENT non-zero
+     values than the other backends' 0. These tests document the
+     "for-body assignment drop" bug; LoongArch64 seems to execute the
+     for body partially, producing small values that differ from x86_64's
+     (also buggy) 0.
+   - 1 case (crypto2_bit_reverse) returned 192 vs others' 240.
+
+2. ARM32 division/modulo bug (8 cases): ARM32 returns 218 for any
+   u32/u8/u64 division or modulo. Confirmed by direct minimal tests:
+     - `4/4` (u32) → x86_64 returns 1, ARM32 returns 218
+     - `22%15` (u32) → x86_64 returns 7, ARM32 returns 218
+     - `4/4` (u8) → ARM32 returns 218
+     - `4/4` (u64) → ARM32 returns 218
+   The 218 result is consistent across types and operands — it appears
+   to be a fixed value emitted by the ARM32 backend for div/mod ops
+   (possibly an unimplemented-instruction trap return value or a
+   compiler-inserted placeholder). 7 of the 8 affected tests are
+   arith2_* programs that use div/mod for primality, modular-inverse,
+   CRT, etc. arith2_happy_number returns 94 instead of 1 — likely
+   the same div/mod bug surfacing as an intermediate computation
+   producing a wrong sum.
+
+3. cf2_if_*_assign tests (3 cases: cf2_if_assign_var, cf2_if_else_assign,
+   cf2_if_nested_assign): Only x86_64 and ppc64 return the "expected"
+   non-zero value. ARM32, mips64, aarch64, riscv64, loongarch64 all
+   return 0. This is the inverse of pattern #1 — here x86_64+ppc64
+   are in the minority. The 5 returning-0 backends all suffer from
+   the same if-body assignment-drop bug; x86_64 and ppc64 happen to
+   propagate the assignment. This is a documented VUMA bug; the
+   "correct" answer per the test headers is the non-zero value.
+
+4. AArch64 + RISC-V matrix/nested-matrix bugs (2 cases each):
+   - matrix: x86_64=mips64=arm32=ppc64=0, but aarch64=144, riscv64=176
+   - nl_matrix_mul: same pattern — aarch64=32, riscv64=64
+   The aarch64 and riscv64 backends produce non-zero (and distinct)
+   values for 2D-matrix nested loops where x86_64/mips64/ppc64 produce
+   0. This suggests both backends partially execute the inner loop
+   body (whereas the others' inner-body assignments get dropped
+   silently). aarch64 and riscv64 give DIFFERENT non-zero values,
+   so they disagree with each other too — neither matches x86_64.
+
+5. ARM32 bitwise bug (1 case): bit2_priority_encode returns 0 on ARM32
+   and mips64, but 7 on x86_64/aarch64/riscv64/ppc64. Isolated
+   bit-manipulation discrepancy.
+
+6. PPC64 quirks (5 cases):
+   - fibonacci: ppc64 returns 1 instead of 0 (off-by-one — likely
+     the same loop-body-drop bug but with different propagation).
+   - doubly_linked_list + arena_allocator: ppc64 times out (124)
+     instead of crashing (139) like the others. Both are documented
+     universal codegen bugs (Tasks 6-d/6-e/7-d); ppc64 enters an
+     infinite loop instead of segfaulting.
+   - ptr2_func_load + struct2_func_load: ppc64 returns 0 instead of
+     42. These two tests pass a pointer to a function that loads
+     from it; ppc64 seems to drop the loaded value (returns 0).
+
+7. Universal crash agreement (3 cases): channel_demo, doubly_linked_list,
+   arena_allocator all crash (exit 139) on every backend that doesn't
+   time out — confirming Tasks 6-d/6-e/7-d's "universal codegen bug"
+   finding that these are NOT backend-specific.
+
+Most common disagreement patterns (top 5):
+
+  Pattern                                          Count
+  loong=124 (timeout), others agree                   28
+  loong=139 (crash), others agree                     13
+  arm32=218 (div/mod bug), others agree                7
+  5 backends return 0, only x86+ppc return expected    3
+  aarch64 + riscv64 return non-zero matrix results     2
+
+Backends ranked by reliability (agreement with x86_64):
+  mips64:     203/208 = 97.6% (best non-x86 backend)
+  riscv64:    203/208 = 97.6%
+  ppc64:      203/208 = 97.6%
+  aarch64:    200/208 = 96.2%
+  arm32:      195/208 = 93.8%
+  loongarch64: 151/208 = 72.6% (clearly broken)

@@ -1,0 +1,17 @@
+// s5_conc_triple_overwrite.vuma — three overwrites on one cell, observe final = 99
+// Expected exit code: 99
+//
+// Single 8-byte cell. Three sequential writes (11, 22, 99). Reader
+// observes only the final value 99. Single-threaded; simulates a
+// shared variable being mutated across multiple "producer" steps.
+// Distinct from s5_conc_overwrite_observed (only two writes).
+
+fn main() -> i32 {
+    cell = allocate(8);
+    *cell = 11;
+    *cell = 22;
+    *cell = 99;
+    v: i32 = *cell;
+    free(cell);
+    return v;
+}

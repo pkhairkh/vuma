@@ -1,0 +1,18 @@
+// s5_crypto_nibble_extract.vuma — lo(0xAB) + hi(0xAB) = 11 + 10 = 21
+// Expected exit code: 21
+//
+// Take 0xAB (171). Low nibble = 171 & 15 = 11. High nibble =
+// (171 >> 4) & 15 = 10. Sum = 21. All operands loaded into
+// variables first to dodge the immediate-RHS bitwise drop bug.
+// Distinct from bit_extract_nibble (returns one nibble, not sum).
+
+fn main() -> i32 {
+    v: u64 = 171;    // 0xAB
+    four: u64 = 4;
+    mask: u64 = 15;  // 0x0F
+    lo: u64 = v & mask;          // 11
+    shifted: u64 = v >> four;    // 10
+    hi: u64 = shifted & mask;    // 10
+    s: u64 = lo + hi;            // 21
+    return s;
+}
