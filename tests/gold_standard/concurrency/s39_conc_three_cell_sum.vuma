@@ -1,0 +1,25 @@
+// s39_conc_three_cell_sum.vuma — three cells, sum = 160 (35 + 50 + 75)
+// Expected exit code: 160
+//
+// Three independent 8-byte cells. Store 35/50/75 via `*ptr =
+// literal`, load all, sum -> 160. Uses `*ptr = literal` form.
+// Distinct from s38_conc_three_cell_sum (170) and s34_conc_three_
+// cell_sum (180).
+
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    c3 = allocate(8);
+    *c1 = 35;
+    *c2 = 50;
+    *c3 = 75;
+    v1: i32 = *c1;
+    v2: i32 = *c2;
+    v3: i32 = *c3;
+    t: i32 = v1 + v2;
+    s: i32 = t + v3;       // 160
+    free(c1);
+    free(c2);
+    free(c3);
+    return s;
+}

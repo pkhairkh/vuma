@@ -1,0 +1,16 @@
+// s39_bit_or_xor_chain.vuma — (0x11 | 0x22) ^ 0x04 = 0x33 ^ 0x04 = 0x37 = 55
+// Expected exit code: 55
+//
+// Two-stage bitwise: OR then XOR. (17 | 34) = 51 (0x33); 51 ^ 4 =
+// 55 (0x37). All operands loaded into u64 variables first
+// (immediate-RHS bitwise drop bug workaround). Distinct from
+// s38_bit_and_then_xor (and-then-xor, 243) and s34_bit_or_xor_chain.
+
+fn main() -> i32 {
+    a: u64 = 17;           // 0x11
+    b: u64 = 34;           // 0x22
+    c: u64 = 4;            // 0x04
+    x: u64 = a | b;        // 0x33 = 51
+    r: u64 = x ^ c;        // 0x37 = 55
+    return r;
+}

@@ -1,0 +1,25 @@
+// s42_mf_double_then_sub.vuma — dbl(40) + sub_eight(40) = 80 + 32 = 112
+// Expected exit code: 112
+//
+// Two single-arg helpers called on the same literal then summed.
+// dbl(x) = x * 2; sub_eight(x) = x - 8. main calls dbl(40) -> 80
+// and sub_eight(40) -> 32; sum = 112. Distinct from s38_mf_double_
+// then_add (97) and s34_mf_double_then_add (80).
+
+fn dbl(x: u32) -> u32 {
+    n: u32 = 2;
+    r: u32 = x * n;
+    return r;
+}
+fn sub_eight(x: u32) -> u32 {
+    n: u32 = 8;
+    r: u32 = x - n;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = dbl(40);          // 80
+    b: u32 = sub_eight(40);    // 32
+    r: u32 = a + b;            // 112
+    return r;
+}

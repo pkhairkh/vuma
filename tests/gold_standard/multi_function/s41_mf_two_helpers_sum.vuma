@@ -1,0 +1,25 @@
+// s41_mf_two_helpers_sum.vuma - add_seven(45) + mul_three(20) = 52 + 60 = 112
+// Expected exit code: 112
+//
+// Two single-arg helpers, each called once from main, results
+// added. add_seven(x) = x + 7; mul_three(x) = x * 3. main calls
+// add_seven(45) -> 52 and mul_three(20) -> 60; sum = 112. Distinct
+// from s38_mf_two_helpers_sum (116) and s34_mf_two_helpers_sum (105).
+
+fn add_seven(x: u32) -> u32 {
+    n: u32 = 7;
+    r: u32 = x + n;
+    return r;
+}
+fn mul_three(x: u32) -> u32 {
+    n: u32 = 3;
+    r: u32 = x * n;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = add_seven(45);   // 52
+    b: u32 = mul_three(20);   // 60
+    r: u32 = a + b;           // 112
+    return r;
+}
