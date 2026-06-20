@@ -1,0 +1,13 @@
+// s17_edge_zero_or_max.vuma — 0 | 255 = 255
+// Expected exit code: 255
+//
+// Zero OR all-ones -> all-ones. Distinct from
+// s17_edge_max_xor_zero (XOR framing) and s14_edge_zero_minus_zero
+// (0 - 0 = 0).
+
+fn main() -> i32 {
+    a: u32 = 0;
+    b: u32 = 255;
+    r: u32 = a | b;       // 255
+    return r;
+}

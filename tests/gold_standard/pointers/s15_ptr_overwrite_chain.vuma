@@ -1,0 +1,18 @@
+// s15_ptr_overwrite_chain.vuma — overwrite twice, final load = 100
+// Expected exit code: 100
+//
+// Single 8-byte cell. Store literal 5, overwrite with literal 50, overwrite
+// again with literal 100 (last write wins). Load and return 100. Uses
+// `*p = literal` form (no offsets). Distinct from
+// s14_ptr_overwrite_via_workaround (single overwrite, variable+0 form) and
+// s12_ptr_overwrite_three_times (three overwrites, 10/40/70).
+
+fn main() -> i32 {
+    p = allocate(8);
+    *p = 5;
+    *p = 50;
+    *p = 100;
+    v: i32 = *p;
+    free(p);
+    return v;
+}

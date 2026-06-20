@@ -1,0 +1,20 @@
+// s16_cf_if_else_two_var.vuma — if true picks x=42 else x=99; return x
+// Expected exit code (correct): 42
+// Observed on current x86_64 backend: 99 (FAIL — known bug)
+//
+// Single variable x. if-true branch sets x = 42; else branch sets x = 99.
+// With a literal `true` condition the true branch should win -> 42. On
+// the current backend the if-true body's assignment is dropped, so the
+// else body's assignment (99) survives instead. Distinct from
+// s14_cf_if_else_const (values 42/99 same but standalone) and
+// s11_cf_if_else_branches (values 30/90).
+
+fn main() -> i32 {
+    x: u32 = 0;
+    if true {
+        x = 42;
+    } else {
+        x = 99;
+    }
+    return x;
+}

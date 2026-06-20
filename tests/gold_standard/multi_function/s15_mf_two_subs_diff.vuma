@@ -1,0 +1,26 @@
+// s15_mf_two_subs_diff.vuma — sub3(20) - sub2(10) = 17 - 8 = 9
+// Expected exit code: 9
+//
+// Two distinct single-arg helpers, each called once from main, results
+// subtracted. sub3(x) = x - 3; sub2(x) = x - 2. main calls sub3(20) -> 17,
+// sub2(10) -> 8; diff = 9. Distinct from s13_mf_two_helpers_diff
+// (sub3(20) - sub5(10) = 5) and s14_mf_two_helpers_chain (chained, not
+// subtracted).
+
+fn sub3(x: u32) -> u32 {
+    n: u32 = 3;
+    r: u32 = x - n;
+    return r;
+}
+fn sub2(x: u32) -> u32 {
+    n: u32 = 2;
+    r: u32 = x - n;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = sub3(20);    // 17
+    b: u32 = sub2(10);    // 8
+    d: u32 = a - b;       // 9
+    return d;
+}

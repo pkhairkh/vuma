@@ -1,0 +1,17 @@
+// s18_fn_zero_arg_lit.vuma — get_77() returns 77
+// Expected exit code: 77
+//
+// Helper takes no parameters and returns the constant 77. Tests that
+// the codegen can compile and call a zero-argument function that
+// returns a function-local constant. Distinct from s14_fn_zero_arg_lit
+// (returns 99) and s10_fn_returns_constant (returns 42).
+
+fn get_77() -> u32 {
+    c: u32 = 77;
+    return c;
+}
+
+fn main() -> i32 {
+    v: u32 = get_77();
+    return v;
+}

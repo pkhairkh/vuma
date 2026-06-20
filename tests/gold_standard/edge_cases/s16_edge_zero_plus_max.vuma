@@ -1,0 +1,13 @@
+// s16_edge_zero_plus_max.vuma — 0 + 255 = 255
+// Expected exit code: 255
+//
+// Zero plus max U8 -> max U8 (identity under addition). All operands
+// loaded into u32 variables first. Distinct from s3_edge_value_plus_zero
+// (value + 0, opposite order) and s7_edge_add_to_max (adds to reach max).
+
+fn main() -> i32 {
+    a: u32 = 0;
+    b: u32 = 255;
+    r: u32 = a + b;       // 255
+    return r;
+}

@@ -1,0 +1,13 @@
+// s15_edge_one_shl_three.vuma — 1 << 3 = 8
+// Expected exit code: 8
+//
+// One shifted left by three -> 8 (smallest power of two greater than 1
+// reachable by shifting). Distinct from s11_edge_one_shift_left
+// (1 << 1 = 2) and s13_edge_one_mul_zero (1 * 0 = 0).
+
+fn main() -> i32 {
+    a: u32 = 1;
+    sh: u32 = 3;
+    r: u32 = a << sh;     // 8
+    return r;
+}
