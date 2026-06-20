@@ -1,0 +1,18 @@
+// s68_cs_overwrite_last.vuma — overwrite c2 to 187, load = 187
+// Expected exit code: 187
+//
+// Two 8-byte cells. Store 90 at c1, store 40 at c2 then overwrite
+// c2 to 187. Load c2 -> 187 (the overwritten value). Uses `*ptr
+// = literal` form. Distinct from s66_cs_overwrite_first (175),
+// s62_cs_overwrite_last (130) and s58_cs_overwrite_first (200).
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    *c1 = 90;
+    *c2 = 40;
+    *c2 = 187;
+    v: u64 = *c2;          // 187
+    free(c1);
+    free(c2);
+    return v;
+}

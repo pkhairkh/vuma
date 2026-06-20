@@ -1,0 +1,16 @@
+// s68_fn_one_arg_add.vuma — add_n(100, 16) = 116
+// Expected exit code: 116
+//
+// Helper add_n(x, n) = x + n. main calls add_n(100, 16) -> 116.
+// Two-arg function returning the sum. Distinct from s66_fn_one_
+// arg_sub (80), s62_fn_one_arg_add (115) and s58_fn_one_arg_add
+// (85).
+fn add_n(x: u32, n: u32) -> u32 {
+    r: u32 = x + n;
+    return r;
+}
+
+fn main() -> i32 {
+    v: u32 = add_n(100, 16);
+    return v;
+}
