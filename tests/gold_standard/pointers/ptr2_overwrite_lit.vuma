@@ -1,0 +1,15 @@
+// ptr2_overwrite_lit.vuma — store 42 then overwrite with 99; load
+// Expected exit code: 99
+//
+// Allocates an 8-byte buffer, stores 42 at offset 0 via *buf, then
+// overwrites the same slot with 99, loads it back, frees, returns.
+// Verifies that a literal overwrite supersedes the prior stored value.
+
+fn main() -> i32 {
+    buf = allocate(8);
+    *buf = 42;
+    *buf = 99;
+    val: i32 = *buf;
+    free(buf);
+    return val;
+}

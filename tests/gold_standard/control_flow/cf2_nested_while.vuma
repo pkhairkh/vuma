@@ -1,0 +1,20 @@
+// cf2_nested_while — nested while loops count to 9 (3x3).
+// Expected exit code: 9
+//
+// Exposes VUMA bug: while-body assignments (including those in a nested
+// while loop) do not propagate. On buggy codegen, c stays 0 and the outer
+// loop may never terminate (i never advances).
+
+fn main() -> i32 {
+    i: u32 = 0;
+    c: u32 = 0;
+    while (i < 3) {
+        j: u32 = 0;
+        while (j < 3) {
+            c = c + 1;
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    return c;
+}

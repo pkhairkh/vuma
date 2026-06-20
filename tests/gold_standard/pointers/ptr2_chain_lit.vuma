@@ -1,0 +1,19 @@
+// ptr2_chain_lit.vuma — chain value across two buffers (literal stores)
+// Expected exit code: 55
+//
+// Allocates two 8-byte buffers buf1 and buf2, stores the literal 55 in
+// buf1, loads it back, stores the literal 55 in buf2, loads buf2, and
+// returns. Uses literal stores in both buffers (not the loaded
+// variable) to avoid the known `*ptr = variable` silent-drop bug.
+
+fn main() -> i32 {
+    buf1 = allocate(8);
+    buf2 = allocate(8);
+    *buf1 = 55;
+    v1: i32 = *buf1;
+    *buf2 = 55;
+    v2: i32 = *buf2;
+    free(buf1);
+    free(buf2);
+    return v2;
+}

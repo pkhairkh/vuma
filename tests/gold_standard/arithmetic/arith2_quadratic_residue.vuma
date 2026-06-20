@@ -1,0 +1,17 @@
+// arith2_quadratic_residue — quadratic residue check
+// Expected exit code: 1
+//
+// 2 is a quadratic residue mod 7 because 3^2 = 9 ≡ 2 (mod 7).
+// We compute (3*3) % 7 = 2, compare to target 2 (equal → diff 0),
+// and return 1 - 0 = 1 to encode "is a QR" in straight-line code (no if).
+
+fn main() -> i32 {
+    p: u32 = 7;
+    x: u32 = 3;
+    target: u32 = 2;
+    candidate: u32 = (x * x) % p;   // 9 % 7 = 2
+    diff: u32 = candidate - target; // 0 (equal)
+    one: u32 = 1;
+    is_qr: u32 = one - diff;        // 1 - 0 = 1
+    return is_qr;
+}
