@@ -1,0 +1,16 @@
+// s86_ls_overwrite_value.vuma — store 35, overwrite with 225, load = 225
+// Expected exit code: 225
+//
+// Single 8-byte allocation treated as a "node". Store 35 via
+// `*ptr = literal`, overwrite with 225 via `*ptr = literal`,
+// load and return 225. Uses `*ptr = literal` form (no offsets).
+// Distinct from s82_ls_overwrite_value (215), s78_ls_overwrite_
+// value (3) and s74_ls_overwrite_value (85).
+fn main() -> i32 {
+    n1 = allocate(8);
+    *n1 = 35;
+    *n1 = 225;
+    r: u64 = *n1;          // 225
+    free(n1);
+    return r;
+}

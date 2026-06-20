@@ -1,0 +1,24 @@
+// s86_mf_two_helpers_add.vuma — f1(60) + f2(30) = 80 + 70 = 150
+// Expected exit code: 150
+//
+// Two single-arg helpers. f1(x) = x + 20; f2(y) = y + 40. main
+// calls both and adds: f1(60) + f2(30) = 80 + 70 = 150.
+// Distinct from s82_mf_two_helpers_add (105), s78_mf_two_helpers_
+// add (4) and s74_mf_two_helpers_add (130).
+fn f1(x: u32) -> u32 {
+    k: u32 = 20;
+    r: u32 = x + k;
+    return r;
+}
+fn f2(y: u32) -> u32 {
+    k: u32 = 40;
+    r: u32 = y + k;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = f1(60);         // 80
+    b: u32 = f2(30);         // 70
+    s: u32 = a + b;          // 150
+    return s;
+}

@@ -1,0 +1,15 @@
+// s85_edge_store_max.vuma — store 255 (u8 max), load, return 255
+// Expected exit code: 255
+//
+// Edge case: the maximum u8 value (0xFF). Verifies the high
+// bit of the byte survives the store/load round trip without
+// spurious sign-extension. Uses `*ptr = literal` form (no
+// offsets). Distinct from s82_edge_store_max,
+// s78_edge_store_max and s74_edge_store_max.
+fn main() -> i32 {
+    buf = allocate(8);
+    *buf = 255;
+    val: i32 = *buf;
+    free(buf);
+    return val;
+}

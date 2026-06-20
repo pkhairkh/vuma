@@ -1,0 +1,16 @@
+// s84_crypto_shr_then_or.vuma — (0xA0 >> 3) | 0x17 = 0x14 | 0x17 = 0x17 = 23
+// Expected exit code: 23
+//
+// Two-stage crypto-style bitwise: shift right then OR. (160 >> 3)
+// = 20 (0x14); 20 | 23 = 23 (0x17). All operands loaded into
+// u64 variables first (immediate-RHS bitwise drop bug
+// workaround). Distinct from s82_crypto_and_then_or (37),
+// s78_crypto_and_then_shl (4) and s74_crypto_xor_pair (156).
+fn main() -> i32 {
+    a: u64 = 160;          // 0xA0
+    b: u64 = 3;            // shift amount
+    c: u64 = 23;           // 0x17
+    x: u64 = a >> b;       // 0x14 = 20
+    r: u64 = x | c;        // 0x17 = 23
+    return r;
+}

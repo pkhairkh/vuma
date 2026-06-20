@@ -1,0 +1,14 @@
+// s86_edge_max_and_low.vuma — 255 & 9 = 9
+// Expected exit code: 9
+//
+// AND the max byte value 255 (0xFF) with the low-bit mask 9
+// (0x09). 255 & 9 = 9. All operands loaded into u32 variables
+// first (immediate-RHS bitwise drop bug workaround). Distinct
+// from s82_edge_max_and_seven (7), s78_edge_max_and (6) and
+// s74_edge_max_and_low (5).
+fn main() -> i32 {
+    a: u32 = 255;          // 0xFF
+    b: u32 = 9;            // 0x09
+    r: u32 = a & b;        // 0x09 = 9
+    return r;
+}

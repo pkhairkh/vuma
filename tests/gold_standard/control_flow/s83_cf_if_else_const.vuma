@@ -1,0 +1,20 @@
+// s83_cf_if_else_const.vuma — if true { x = 136 } else { x = 250 }; return x
+// Expected exit code (correct): 136
+// Observed on current x86_64 backend: 250 (FAIL — known bug)
+//
+// If-true branch should set x = 136, else branch sets x = 250.
+// With a literal `true` condition the true branch should win
+// -> 136. On the current backend the if-true body's single
+// assignment is dropped, so the else body's assignment (250)
+// survives instead. Will exit 136 once the if-body drop bug is
+// fixed. Distinct from s78_cf_if_else_const (10), s74_cf_if_
+// else_const (19) and s72_cf_if_else_const (109).
+fn main() -> i32 {
+    x: u32 = 0;
+    if true {
+        x = 136;
+    } else {
+        x = 250;
+    }
+    return x;
+}

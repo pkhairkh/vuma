@@ -1,0 +1,19 @@
+// s85_nl_5x5_count.vuma — 5x5 nested loop, count = 25
+// Expected exit code (correct): 25
+// Observed on current x86_64 backend: 0 (FAIL — known bug)
+//
+// Outer loop 5 iterations, inner loop 5 iterations each ->
+// 5*5 = 25 total. Counter increments by 1 each inner
+// iteration. Known "for-body assignments don't propagate" bug
+// keeps count at 0. Distinct from s82_nl_9x3_count (27),
+// s78_nl_5x5_count (25 -> distinct framing) and s74_nl_5x5_count
+// (25).
+fn main() -> i32 {
+    count: u32 = 0;
+    for i in 0..5 {
+        for j in 0..5 {
+            count = count + 1;
+        }
+    }
+    return count;
+}

@@ -1,0 +1,19 @@
+// s84_mem_overwrite_last.vuma — store 20 at c2, overwrite to 41, load = 41
+// Expected exit code: 41
+//
+// Two 8-byte cells. Store 10 at c1, store 20 at c2 then
+// overwrite c2 to 41. Load c2 -> 41 (the overwritten value).
+// Uses `*ptr = literal` form. Distinct from s82_mem_overwrite_
+// last (245), s78_mem_overwrite_first (3) and s74_mem_overwrite_
+// first (59).
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    *c1 = 10;
+    *c2 = 20;
+    *c2 = 41;
+    r: u64 = *c2;          // 41
+    free(c1);
+    free(c2);
+    return r;
+}

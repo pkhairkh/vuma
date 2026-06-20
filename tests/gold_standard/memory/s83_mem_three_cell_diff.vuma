@@ -1,0 +1,23 @@
+// s83_mem_three_cell_diff.vuma — three cells, diff = 201 (240 - 30 - 9)
+// Expected exit code: 201
+//
+// Three 8-byte cells. Store 240/30/9 via `*ptr = literal`,
+// load all three, a - b - c -> 201. Uses `*ptr = literal` form
+// (no offsets). Distinct from s78_mem_three_cell_diff (148),
+// s74_mem_three_cell_diff (40) and s72_mem_three_cell_diff (30).
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    c3 = allocate(8);
+    *c1 = 240;
+    *c2 = 30;
+    *c3 = 9;
+    a: u64 = *c1;
+    b: u64 = *c2;
+    c: u64 = *c3;
+    r: u64 = a - b - c;    // 201
+    free(c1);
+    free(c2);
+    free(c3);
+    return r;
+}
