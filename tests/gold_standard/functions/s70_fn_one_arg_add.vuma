@@ -1,0 +1,17 @@
+// s70_fn_one_arg_add.vuma — add_fifteen(150) = 165
+// Expected exit code: 165
+//
+// Helper add_fifteen(x) = x + 15. main calls add_fifteen(150)
+// -> 165. Single-arg function that adds a literal. Distinct
+// from s66_fn_one_arg_sub (80), s65_fn_one_arg_add (140) and
+// s62_fn_one_arg_add (115).
+fn add_fifteen(x: u32) -> u32 {
+    n: u32 = 15;
+    r: u32 = x + n;
+    return r;
+}
+
+fn main() -> i32 {
+    v: u32 = add_fifteen(150);
+    return v;
+}

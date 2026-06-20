@@ -1,0 +1,13 @@
+// s67_edge_zero_or_one.vuma — 0 | 1 = 1
+// Expected exit code: 1
+//
+// OR zero with one. 0 | 1 = 1. All operands loaded into u32
+// variables first (immediate-RHS bitwise drop bug workaround).
+// Distinct from s66_edge_zero_xor_max (255), s62_edge_zero_
+// or_max (255) and s58_edge_zero_or_zero (0).
+fn main() -> i32 {
+    a: u32 = 0;
+    b: u32 = 1;
+    r: u32 = a | b;        // 1
+    return r;
+}

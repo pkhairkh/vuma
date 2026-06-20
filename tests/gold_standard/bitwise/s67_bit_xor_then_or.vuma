@@ -1,0 +1,16 @@
+// s67_bit_xor_then_or.vuma — (0x33 ^ 0x55) | 0xAA = 0x66 | 0xAA = 0xEE = 238
+// Expected exit code: 238
+//
+// Two-stage bitwise: XOR then OR. (51 ^ 85) = 102 (0x66);
+// 102 | 170 = 238 (0xEE). All operands loaded into u64
+// variables first (immediate-RHS bitwise drop bug workaround).
+// Distinct from s66_bit_xor_then_and (80), s62_bit_xor_then_
+// shr (31) and s58_bit_or_then_shr (48).
+fn main() -> i32 {
+    a: u64 = 51;           // 0x33
+    b: u64 = 85;           // 0x55
+    c: u64 = 170;          // 0xAA
+    x: u64 = a ^ b;        // 0x66 = 102
+    r: u64 = x | c;        // 0xEE = 238
+    return r;
+}

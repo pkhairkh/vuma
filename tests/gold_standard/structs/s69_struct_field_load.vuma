@@ -1,0 +1,18 @@
+// s69_struct_field_load.vuma -- store 190, load = 190
+// Expected exit code: 190
+//
+// Single 8-byte allocation treated as a one-field struct. Store 190
+// via `*p = literal`, load the field, return 190. Uses `*p = literal`
+// form (no offsets). Distinct from s66_struct_field_load (205), s65_
+// struct_field_load (169) and s64_struct_field_load (177).
+struct Single {
+    a: u64,
+}
+
+fn main() -> i32 {
+    p = allocate(8);
+    *p = 190;
+    a: u64 = *p;
+    free(p);
+    return a;
+}

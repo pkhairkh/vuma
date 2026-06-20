@@ -1,0 +1,13 @@
+// s70_edge_one_shl_two.vuma — 1 << 2 = 4
+// Expected exit code: 4
+//
+// Shift the literal 1 left by 2. 1 << 2 = 4 (0x04). All operands
+// loaded into u32 variables first (immediate-RHS bitwise drop
+// bug workaround). Distinct from s66_edge_one_shl_five (32),
+// s65_edge_max_and_three (3) and s62_edge_one_shl_four (16).
+fn main() -> i32 {
+    a: u32 = 1;
+    b: u32 = 2;
+    r: u32 = a << b;       // 4
+    return r;
+}

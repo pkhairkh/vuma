@@ -1,0 +1,25 @@
+// s67_conc_three_cell_diff.vuma — three cells, diff = 110 (200 - 60 - 30)
+// Expected exit code: 110
+//
+// Three independent 8-byte cells. Store 200/60/30 via `*ptr =
+// literal`, load all three, diff -> 200 - 60 - 30 = 110. Uses
+// `*ptr = literal` form. Distinct from s66_conc_three_cell_
+// sum (240), s62_conc_three_cell_diff (110) and s58_conc_
+// three_cell_sum (230).
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    c3 = allocate(8);
+    *c1 = 200;
+    *c2 = 60;
+    *c3 = 30;
+    v1: i32 = *c1;
+    v2: i32 = *c2;
+    v3: i32 = *c3;
+    t: i32 = v1 - v2;      // 140
+    r: i32 = t - v3;       // 110
+    free(c1);
+    free(c2);
+    free(c3);
+    return r;
+}

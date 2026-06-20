@@ -1,0 +1,14 @@
+// s69_ptr_single_store_load.vuma -- store 225, load = 225
+// Expected exit code: 225
+//
+// Single 8-byte cell. Store 225 via `*p = literal`, load and return
+// 225. Uses `*p = literal` form. Distinct from s66_ptr_single_store_
+// load (195), s65_ptr_single_store_load (178) and s64_ptr_single_
+// store_load (198).
+fn main() -> i32 {
+    p = allocate(8);
+    *p = 225;
+    r: u64 = *p;
+    free(p);
+    return r;
+}

@@ -1,0 +1,16 @@
+// s68_ls_overwrite_value.vuma — overwrite to 188, load = 188
+// Expected exit code: 188
+//
+// Single 8-byte allocation treated as a one-field "node". Store
+// 50 then 188 via `*ptr = literal` (overwrite), load and return
+// 188. Uses `*ptr = literal` form (no offsets). Distinct from
+// s66_ls_overwrite_value (230), s62_ls_overwrite_value (175) and
+// s58_ls_overwrite_value (180).
+fn main() -> i32 {
+    n1 = allocate(8);
+    *n1 = 50;
+    *n1 = 188;
+    v: u64 = *n1;          // 188
+    free(n1);
+    return v;
+}

@@ -1,0 +1,15 @@
+// s67_arith_add_then_mul.vuma — (15 + 6) * 9 = 21 * 9 = 189
+// Expected exit code: 189
+//
+// Two-stage arithmetic: add then multiply. 15 + 6 = 21;
+// 21 * 9 = 189. All operands kept as i32 locals. Straight-line
+// arithmetic. Distinct from s66_arith_mul_then_sub (168),
+// s62_arith_mul_then_add (135) and s58_arith_mul_then_div (35).
+fn main() -> i32 {
+    a: i32 = 15;
+    b: i32 = 6;
+    c: i32 = 9;
+    s: i32 = a + b;        // 21
+    r: i32 = s * c;        // 189
+    return r;
+}
