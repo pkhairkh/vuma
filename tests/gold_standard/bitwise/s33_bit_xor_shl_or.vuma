@@ -1,0 +1,17 @@
+// s33_bit_xor_shl_or.vuma — (0x33 ^ 0x0F) << 2 | 0x05 = 0x3C << 2 = 0xF0 | 0x05 = 0xF5 = 245
+// Expected exit code: 245
+//
+// Deterministic test in the bitwise category. All operands loaded into typed
+// variables before any bitwise op; all stores use `*ptr = literal` (or the
+// `*ptr = variable + 0` workaround). Result lands in 0-255.
+// Distinct from s30_bit_xor_then_and (xor-then-and, 12) and s26_bit_shl_or_xor (shl-or-xor).
+fn main() -> i32 {
+    a: u64 = 51;           // 0x33
+    b: u64 = 15;           // 0x0F
+    c: u64 = 2;
+    d: u64 = 5;            // 0x05
+    x: u64 = a ^ b;        // 0x3C = 60
+    y: u64 = x << c;       // 0xF0 = 240
+    r: u64 = y | d;        // 0xF5 = 245
+    return r;
+}

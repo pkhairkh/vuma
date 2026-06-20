@@ -1,0 +1,15 @@
+// s33_cf_for_count_4.vuma — for loop runs 4 iterations, count = 4
+// Expected exit code (correct): 4
+// Observed on current x86_64 backend: 0 (FAIL — known bug)
+//
+// For loop runs to produce 4. Known "for-body assignments
+// don't propagate" bug keeps the result at 0. Will exit 4
+// once fixed.
+// Distinct from s30_cf_for_count_3 (3 iterations) and s26_cf_for_count_4 (4 iterations, observed 0).
+fn main() -> i32 {
+    count: u32 = 0;
+    for i in 0..4 {
+        count = count + 1;
+    }
+    return count;
+}

@@ -1,0 +1,19 @@
+// s33_struct_overwrite_field.vuma — overwrite field, load = 220
+// Expected exit code: 220
+//
+// Deterministic test in the structs category. All operands loaded into typed
+// variables before any bitwise op; all stores use `*ptr = literal` (or the
+// `*ptr = variable + 0` workaround). Result lands in 0-255.
+// Distinct from s30_struct_overwrite_field (different values) and s26_struct_overwrite_field (different values).
+struct Single {
+    a: u64,
+}
+
+fn main() -> i32 {
+    p1 = allocate(8);
+    *p1 = 100;
+    *p1 = 220;
+    a: u64 = *p1;          // 220
+    free(p1);
+    return a;
+}

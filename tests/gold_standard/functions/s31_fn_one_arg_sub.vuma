@@ -1,0 +1,18 @@
+// s31_fn_one_arg_sub.vuma — sub_eight(60) = 52
+// Expected exit code: 52
+//
+// Helper sub_eight(x) = x - 8. main calls sub_eight(60) -> 52. Single
+// function call, single literal argument, subtraction. Distinct from
+// s30_fn_one_arg_add (add_five(40) = 45) and s28_fn_one_arg_mul
+// (mul_by_two(35) = 70).
+
+fn sub_eight(x: u32) -> u32 {
+    n: u32 = 8;
+    r: u32 = x - n;
+    return r;
+}
+
+fn main() -> i32 {
+    v: u32 = sub_eight(60);
+    return v;
+}

@@ -1,0 +1,13 @@
+// s33_edge_zero_and_max.vuma — 0 & 255 = 0
+// Expected exit code: 0
+//
+// Deterministic test in the edge_cases category. All operands loaded into typed
+// variables before any bitwise op; all stores use `*ptr = literal` (or the
+// `*ptr = variable + 0` workaround). Result lands in 0-255.
+// Distinct from s30_edge_zero_xor_max (xor, 255) and s26_edge_max_and_zero (and, 0).
+fn main() -> i32 {
+    a: u32 = 0;
+    b: u32 = 255;
+    r: u32 = a & b;        // 0
+    return r;
+}

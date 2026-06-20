@@ -1,0 +1,17 @@
+// s31_fn_two_args_div.vuma — div_pair(200, 8) = 25
+// Expected exit code: 25
+//
+// Helper div_pair(x, y) = x / y. main calls div_pair(200, 8) -> 25.
+// Single function call, two literal arguments, division. Distinct from
+// s30_fn_two_args_mul (mul_two(7, 9) = 63) and s28_fn_two_args_sub
+// (sub_pair(120, 30) = 90).
+
+fn div_pair(x: u32, y: u32) -> u32 {
+    r: u32 = x / y;
+    return r;
+}
+
+fn main() -> i32 {
+    v: u32 = div_pair(200, 8);
+    return v;
+}

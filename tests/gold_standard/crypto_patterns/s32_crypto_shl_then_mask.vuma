@@ -1,0 +1,18 @@
+// s32_crypto_shl_then_mask.vuma - (0x0F << 4) & 0xF0 = 0xF0 & 0xF0 = 0xF0 = 240
+// Expected exit code: 240
+//
+// (0x0F << 4) & 0xF0 = 0xF0 & 0xF0 = 0xF0 = 240. All operands loaded into
+// typed variables before any bitwise op (immediate-RHS drop workaround where
+// applicable); stores use the `*ptr = literal` (or `*ptr = variable + 0`)
+// form with no `*(ptr + offset)` indexing. Distinct from
+// s30_crypto_shl_then_mask (shl-then-mask) and s26_crypto_shl_then_mask
+// (different operands).
+
+fn main() -> i32 {
+    a: u64 = 15;          // 0x0F
+    b: u64 = 4;
+    c: u64 = 240;         // 0xF0
+    x: u64 = a << b;      // 0xF0 = 240
+    r: u64 = x & c;       // 0xF0 = 240
+    return r;
+}

@@ -1,0 +1,16 @@
+// s33_fn_zero_arg_lit.vuma — get_const() = 99
+// Expected exit code: 99
+//
+// Deterministic test in the functions category. All operands loaded into typed
+// variables before any bitwise op; all stores use `*ptr = literal` (or the
+// `*ptr = variable + 0` workaround). Result lands in 0-255.
+// Distinct from s30_fn_zero_arg_lit (returns 7) and s26_fn_zero_arg_lit (returns 13).
+fn get_const() -> u32 {
+    r: u32 = 99;
+    return r;
+}
+
+fn main() -> i32 {
+    v: u32 = get_const();
+    return v;
+}

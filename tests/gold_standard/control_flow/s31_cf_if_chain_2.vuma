@@ -1,0 +1,20 @@
+// s31_cf_if_chain_2.vuma — chain of two ifs, last sets x=140
+// Expected exit code (correct): 140
+// Observed on current x86_64 backend: 0 (FAIL — known bug)
+//
+// Two sequential if-true blocks. Each overwrites x: 35, then 140. With
+// all conditions `true`, x should end at 140. On the current backend the
+// if-true body assignments are dropped, so x stays 0. Distinct from
+// s30_cf_if_single_assign (single if-true, 50) and s28_cf_if_chain_2
+// (two-if chain, 90).
+
+fn main() -> i32 {
+    x: u32 = 0;
+    if true {
+        x = 35;
+    }
+    if true {
+        x = 140;
+    }
+    return x;
+}

@@ -1,0 +1,17 @@
+// s32_bit_shr_then_and.vuma - (0xFF >> 4) & 0x0F = 0x0F & 0x0F = 0x0F = 15
+// Expected exit code: 15
+//
+// (0xFF >> 4) & 0x0F = 0x0F & 0x0F = 0x0F = 15. All operands loaded into
+// typed variables before any bitwise op (immediate-RHS drop workaround where
+// applicable); stores use the `*ptr = literal` (or `*ptr = variable + 0`)
+// form with no `*(ptr + offset)` indexing. Distinct from s30_bit_shr_then_or
+// (shr-then-or) and s26_bit_and_then_shl (and-then-shl).
+
+fn main() -> i32 {
+    a: u64 = 255;          // 0xFF
+    b: u64 = 4;
+    c: u64 = 15;           // 0x0F
+    x: u64 = a >> b;       // 0x0F = 15
+    r: u64 = x & c;        // 0x0F = 15
+    return r;
+}

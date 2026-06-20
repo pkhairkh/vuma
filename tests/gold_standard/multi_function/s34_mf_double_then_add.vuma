@@ -1,0 +1,25 @@
+// s34_mf_double_then_add.vuma — dbl(25) + add_five(25) = 50 + 30 = 80
+// Expected exit code: 80
+//
+// Two single-arg helpers called on the same literal then summed.
+// dbl(x) = x * 2; add_five(x) = x + 5. main calls dbl(25) -> 50
+// and add_five(25) -> 30; sum = 80. Distinct from s30_mf_double_
+// then_add (different values) and s27_mf_inc_then_double.
+
+fn dbl(x: u32) -> u32 {
+    n: u32 = 2;
+    r: u32 = x * n;
+    return r;
+}
+fn add_five(x: u32) -> u32 {
+    n: u32 = 5;
+    r: u32 = x + n;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = dbl(25);       // 50
+    b: u32 = add_five(25);  // 30
+    r: u32 = a + b;         // 80
+    return r;
+}

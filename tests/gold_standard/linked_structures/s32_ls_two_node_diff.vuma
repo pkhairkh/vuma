@@ -1,0 +1,21 @@
+// s32_ls_two_node_diff.vuma - two nodes, diff = 125 (200 - 75)
+// Expected exit code: 125
+//
+// two nodes, diff = 125 (200 - 75). All operands loaded into typed variables
+// before any bitwise op (immediate-RHS drop workaround where applicable);
+// stores use the `*ptr = literal` (or `*ptr = variable + 0`) form with no
+// `*(ptr + offset)` indexing. Distinct from s30_ls_two_node_sum (sum, 110)
+// and s26_ls_two_node_xor (xor).
+
+fn main() -> i32 {
+    n1 = allocate(8);
+    n2 = allocate(8);
+    *n1 = 200;
+    *n2 = 75;
+    a: u64 = *n1;
+    b: u64 = *n2;
+    r: u64 = a - b;        // 125
+    free(n1);
+    free(n2);
+    return r;
+}

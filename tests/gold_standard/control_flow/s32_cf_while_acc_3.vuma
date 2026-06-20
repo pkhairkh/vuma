@@ -1,0 +1,18 @@
+// s32_cf_while_acc_3.vuma - while loop accumulates 3 * 7 = 21
+// Expected exit code (correct): 21
+// Observed on current x86_64 backend: 0 (FAIL - known bug)
+//
+// Body assignment(s) should propagate to the return value. On the current
+// backend if-true-body and loop-body assignments are dropped, so the result
+// stays 0. Will exit 21 once the SCG/bridge bug is fixed. Distinct from
+// s27_cf_while_acc_4 (4*5=20) and s26_cf_while_acc_6 (6*3=18).
+
+fn main() -> i32 {
+    acc: u32 = 0;
+    i: u32 = 0;
+    while i < 3 {
+        acc = acc + 7;
+        i = i + 1;
+    }
+    return acc;
+}

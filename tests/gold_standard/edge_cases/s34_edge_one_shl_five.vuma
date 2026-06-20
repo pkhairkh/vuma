@@ -1,0 +1,14 @@
+// s34_edge_one_shl_five.vuma — 1 << 5 = 32
+// Expected exit code: 32
+//
+// Single-bit shift. 1 << 5 = 32 (0x20). All operands loaded into
+// u32 variables first (immediate-RHS bitwise drop bug workaround).
+// Distinct from s30_edge_one_shl_three (1 << 3 = 8) and s27_edge_
+// half_max (127).
+
+fn main() -> i32 {
+    a: u32 = 1;
+    b: u32 = 5;
+    r: u32 = a << b;       // 32
+    return r;
+}
