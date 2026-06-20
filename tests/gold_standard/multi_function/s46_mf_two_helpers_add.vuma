@@ -1,0 +1,25 @@
+// s46_mf_two_helpers_add.vuma — add_four(40) + add_six(20) = 44 + 26 = 70
+// Expected exit code: 70
+//
+// Two single-arg helpers, each called once from main, results added.
+// add_four(x) = x + 4; add_six(x) = x + 6. main calls add_four(40)
+// -> 44 and add_six(20) -> 26; sum = 70. Distinct from s42_mf_two_
+// helpers_sub (82) and s38_mf_two_helpers_sum (116).
+
+fn add_four(x: u32) -> u32 {
+    n: u32 = 4;
+    r: u32 = x + n;
+    return r;
+}
+fn add_six(x: u32) -> u32 {
+    n: u32 = 6;
+    r: u32 = x + n;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = add_four(40);   // 44
+    b: u32 = add_six(20);    // 26
+    r: u32 = a + b;          // 70
+    return r;
+}

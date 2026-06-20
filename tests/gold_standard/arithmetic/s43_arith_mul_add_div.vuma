@@ -1,0 +1,18 @@
+// s43_arith_mul_add_div.vuma — ((12 * 5) + 8) / 4 = 68 / 4 = 17
+// Expected exit code: 17
+//
+// Three-stage u32 computation: multiply, then add, then divide.
+// (12 * 5) = 60; 60 + 8 = 68; 68 / 4 = 17. All operands loaded into
+// u32 variables first. Straight-line arithmetic. Distinct from
+// s42_arith_mul_add_div (25) and s38_arith_mul_then_div (60).
+
+fn main() -> i32 {
+    a: u32 = 12;
+    b: u32 = 5;
+    c: u32 = 8;
+    d: u32 = 4;
+    m: u32 = a * b;       // 60
+    s: u32 = m + c;       // 68
+    r: u32 = s / d;       // 17
+    return r;
+}

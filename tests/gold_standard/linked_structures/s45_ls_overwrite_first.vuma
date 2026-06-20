@@ -1,0 +1,16 @@
+// s45_ls_overwrite_first.vuma — overwrite node to 150, load = 150
+// Expected exit code: 150
+//
+// Single 8-byte allocation treated as one "node". Store 50 via
+// `*ptr = literal`, then overwrite with 150. Load and return 150.
+// Uses `*ptr = literal` form (no offsets). Distinct from s42_ls_
+// overwrite_value (80 -> 140) and s38_ls_overwrite_first (170).
+
+fn main() -> i32 {
+    n1 = allocate(8);
+    *n1 = 50;
+    *n1 = 150;
+    v: u64 = *n1;
+    free(n1);
+    return v;
+}

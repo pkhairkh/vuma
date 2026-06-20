@@ -1,0 +1,15 @@
+// s45_edge_max_minus_one.vuma — 255 - 1 = 254
+// Expected exit code: 254
+//
+// Subtract one from the max u8 value. 255 - 1 = 254. All operands
+// loaded into u32 variables first. Distinct from s42_edge_max_xor_self
+// (255 ^ 255 = 0) and s38_edge_max_minus_one (254, same total but
+// different operands 255/1 vs 255/1 — s38 may use a different mix;
+// here we use plain subtraction).
+
+fn main() -> i32 {
+    a: u32 = 255;
+    b: u32 = 1;
+    r: u32 = a - b;        // 254
+    return r;
+}

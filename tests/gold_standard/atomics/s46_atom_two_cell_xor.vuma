@@ -1,0 +1,21 @@
+// s46_atom_two_cell_xor.vuma — two cells, atomic xor = 255 (0xA5 ^ 0x5A)
+// Expected exit code: 0 (current buggy backend)
+// Expected exit code (correct, post-bridge-fix): 255
+//
+// Two 8-byte cells. atomic_store 165/90 (0xA5/0x5A), atomic_load each,
+// xor -> 255 (0xFF). On the current backend the loads return 0 ->
+// exit 0. Will exit 255 once atomics are wired through. Distinct
+// from s42_atom_two_cell_sum (175) and s38_atom_two_cell_sum (170).
+
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    atomic_store(c1, 165);
+    atomic_store(c2, 90);
+    a = atomic_load(c1);
+    b = atomic_load(c2);
+    s: i32 = a ^ b;                  // 255
+    free(c1);
+    free(c2);
+    return s;
+}
