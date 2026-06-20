@@ -1,0 +1,20 @@
+// s26_cs_two_buf_xor.vuma — two cells, xor = 102 (0x55 ^ 0x33 = 0x66)
+// Expected exit code: 102
+//
+// Two 8-byte cells. Store 0x55/0x33 via `*ptr = literal`, load both, XOR
+// -> 102. Uses `*ptr = literal` form (no offsets). All operands loaded
+// into typed locals before the XOR. Distinct from s22_cs_two_buf_sum
+// (two-cell add) and s18_cs_overwrite_last (overwrite pattern).
+
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    *c1 = 85;            // 0x55
+    *c2 = 51;            // 0x33
+    a: u64 = *c1;
+    b: u64 = *c2;
+    s: u64 = a ^ b;       // 0x66 = 102
+    free(c1);
+    free(c2);
+    return s;
+}

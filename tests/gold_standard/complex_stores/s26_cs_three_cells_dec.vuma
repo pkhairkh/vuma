@@ -1,0 +1,26 @@
+// s26_cs_three_cells_dec.vuma — overwrite middle, sum = 190 (100 + 60 + 30)
+// Expected exit code: 190
+//
+// Three 8-byte cells. Store 100/15/30 in c1/c2/c3, then overwrite c2 (the
+// middle cell) with 60. Load all three, sum -> 190. Uses `*ptr = literal`
+// form (no offsets). Distinct from s22_cs_overwrite_first (overwrites the
+// first cell, value 110) and s18_cs_overwrite_last (overwrites the last
+// cell).
+
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    c3 = allocate(8);
+    *c1 = 100;
+    *c2 = 15;
+    *c3 = 30;
+    *c2 = 60;
+    a: u64 = *c1;
+    b: u64 = *c2;
+    c: u64 = *c3;
+    s: u64 = a + b + c;
+    free(c1);
+    free(c2);
+    free(c3);
+    return s;
+}

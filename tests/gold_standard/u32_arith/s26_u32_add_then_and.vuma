@@ -1,0 +1,17 @@
+// s26_u32_add_then_and.vuma — (200 + 100) & 0xFF = 300 & 255 = 44
+// Expected exit code: 44
+//
+// Add then AND-mask. 200 + 100 = 300; 300 & 0xFF = 44 (low byte of 300).
+// Demonstrates masking to extract the low byte after an add that exceeds
+// 8 bits. All operands loaded into u32 variables first. Distinct from
+// s22_u32_sub_then_xor (sub-then-xor) and s18_u32_add_xor_chain
+// (add-xor chain).
+
+fn main() -> i32 {
+    a: u32 = 200;
+    b: u32 = 100;
+    c: u32 = 255;         // 0xFF
+    s: u32 = a + b;       // 300
+    r: u32 = s & c;       // 44
+    return r;
+}

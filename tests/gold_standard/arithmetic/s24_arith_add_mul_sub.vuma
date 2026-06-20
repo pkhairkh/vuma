@@ -1,0 +1,18 @@
+// s24_arith_add_mul_sub.vuma — (15 + 25) * 3 - 10 = 40 * 3 - 10 = 120 - 10 = 110
+// Expected exit code: 110
+//
+// Three-stage u32 computation: add then mul then sub. 15 + 25 = 40;
+// 40 * 3 = 120; 120 - 10 = 110. All operands loaded into u32 variables
+// first. Distinct from s22_arith_add_then_mul (add-then-mul, value 160)
+// and s18_arith_mul_add_sub (mul-then-add-then-sub, value 82).
+
+fn main() -> i32 {
+    a: u32 = 15;
+    b: u32 = 25;
+    c: u32 = 3;
+    d: u32 = 10;
+    s: u32 = a + b;       // 40
+    p: u32 = s * c;       // 120
+    r: u32 = p - d;       // 110
+    return r;
+}

@@ -1,0 +1,25 @@
+// s23_mf_double_then_sub.vuma — sub5(dbl(15)) = sub5(30) = 25
+// Expected exit code: 25
+//
+// Two single-arg helpers chained: dbl(x) = x * 2; sub5(x) = x - 5.
+// main calls dbl(15) -> 30, then sub5(30) -> 25. Each call uses an
+// intermediate local. Distinct from s22_mf_double_then_inc (dbl then
+// inc, value 41) and s24_mf_double_then_dec (dbl then dec, value 49).
+
+fn dbl(x: u32) -> u32 {
+    n: u32 = 2;
+    r: u32 = x * n;
+    return r;
+}
+fn sub5(x: u32) -> u32 {
+    n: u32 = 5;
+    r: u32 = x - n;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = dbl(15);     // 30
+    b: u32 = sub5(a);     // 25
+    return b;
+}
+

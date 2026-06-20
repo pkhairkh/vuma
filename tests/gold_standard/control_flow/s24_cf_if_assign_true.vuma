@@ -1,0 +1,17 @@
+// s24_cf_if_assign_true.vuma — if-true sets x=90, return = 90
+// Expected exit code (correct): 90
+// Observed on current x86_64 backend: 0 (FAIL — known bug)
+//
+// Standalone if-true body sets x = 90. With a literal `true` condition
+// x should become 90. On the current backend the if-true body assignment
+// is dropped, so x keeps its init value 0. Distinct from
+// s22_cf_if_assign_true (if-true x=81) and s18_cf_if_assign_true
+// (if-true x=64).
+
+fn main() -> i32 {
+    x: u32 = 0;
+    if true {
+        x = 90;
+    }
+    return x;
+}

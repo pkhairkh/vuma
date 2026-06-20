@@ -1,0 +1,18 @@
+// s23_fn_one_arg_inc.vuma — inc(50) = 51
+// Expected exit code: 51
+//
+// Helper inc(x) = x + 1. main calls inc(50) -> 51. Single function call,
+// single literal argument, addition. Distinct from s22_fn_one_arg_add
+// (add_six(36) = 42) and s24_fn_one_arg_sub (sub_seven(50) = 43).
+
+fn inc(x: u32) -> u32 {
+    n: u32 = 1;
+    r: u32 = x + n;
+    return r;
+}
+
+fn main() -> i32 {
+    v: u32 = inc(50);
+    return v;
+}
+

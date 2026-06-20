@@ -1,0 +1,16 @@
+// s24_arith_div_then_add.vuma — (200 / 8) + 13 = 25 + 13 = 38
+// Expected exit code: 38
+//
+// Two-stage u32 computation: div then add. 200 / 8 = 25; 25 + 13 = 38.
+// All operands loaded into u32 variables first. Distinct from
+// s22_arith_sub_then_div (sub-then-div, value 30) and
+// s18_arith_div_mod_sum (div-then-mod-then-sum, value 41).
+
+fn main() -> i32 {
+    a: u32 = 200;
+    b: u32 = 8;
+    c: u32 = 13;
+    d: u32 = a / b;       // 25
+    r: u32 = d + c;       // 38
+    return r;
+}

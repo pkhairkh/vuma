@@ -1,0 +1,22 @@
+// s23_cs_two_cell_xor.vuma — two cells, xor = 91 (110 ^ 53 = 0x6E ^ 0x35 = 0x5B)
+// Expected exit code: 91
+//
+// Two 8-byte cells. Store 110/53 via `*ptr = literal`, load both, XOR
+// -> 91. Uses `*ptr = literal` form (no offsets). All operands loaded
+// into typed locals before the XOR (immediate-RHS bitwise drop bug
+// workaround). Distinct from s22_cs_two_buf_sum (sum, 33+47=80) and
+// s20_cs_three_cells_xor (3-cell xor).
+
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    *c1 = 110;            // 0x6E
+    *c2 = 53;             // 0x35
+    a: u64 = *c1;
+    b: u64 = *c2;
+    s: u64 = a ^ b;       // 0x5B = 91
+    free(c1);
+    free(c2);
+    return s;
+}
+

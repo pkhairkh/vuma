@@ -1,0 +1,16 @@
+// s24_crypto_xor_or_chain.vuma — (0x10 ^ 0x0F) | 0x40 = 0x1F | 0x40 = 0x5F = 95
+// Expected exit code: 95
+//
+// XOR then OR with a high-bit base. (16 ^ 15) = 31 (0x1F); 31 | 64 = 95
+// (0x5F). All operands loaded into u64 variables first (immediate-RHS
+// bitwise drop bug workaround). Distinct from s22_crypto_or_xor_chain
+// (or-then-xor, value 83) and s18_crypto_high_nibble_extract.
+
+fn main() -> i32 {
+    a: u64 = 16;          // 0x10
+    b: u64 = 15;          // 0x0F
+    c: u64 = 64;          // 0x40
+    x: u64 = a ^ b;       // 0x1F = 31
+    r: u64 = x | c;       // 0x5F = 95
+    return r;
+}

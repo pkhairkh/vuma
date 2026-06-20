@@ -1,0 +1,18 @@
+// s26_fn_one_arg_sub.vuma — sub_seven(50) = 43
+// Expected exit code: 43
+//
+// Helper sub_seven(x) = x - 7. main calls sub_seven(50) -> 43. Single
+// function call, single literal argument, subtraction. Distinct from
+// s22_fn_one_arg_add (add_six(36) = 42) and s18_fn_one_arg_mul
+// (triple(14) = 42).
+
+fn sub_seven(x: u32) -> u32 {
+    n: u32 = 7;
+    r: u32 = x - n;
+    return r;
+}
+
+fn main() -> i32 {
+    v: u32 = sub_seven(50);
+    return v;
+}
