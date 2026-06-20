@@ -1,0 +1,24 @@
+// s24_mf_double_then_dec.vuma — dec(dbl(25)) = (25*2)-1 = 49
+// Expected exit code: 49
+//
+// Two single-arg helpers chained: dbl(x) = x * 2; dec(x) = x - 1.
+// main calls dbl(25) -> 50, then dec(50) -> 49. Each call uses an
+// intermediate local. Distinct from s22_mf_double_then_inc
+// (inc(dbl(20)) = 41) and s18_mf_two_helpers_chain (inner+12, outer*3).
+
+fn dbl(x: u32) -> u32 {
+    n: u32 = 2;
+    r: u32 = x * n;
+    return r;
+}
+fn dec(x: u32) -> u32 {
+    n: u32 = 1;
+    r: u32 = x - n;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = dbl(25);     // 50
+    b: u32 = dec(a);      // 49
+    return b;
+}

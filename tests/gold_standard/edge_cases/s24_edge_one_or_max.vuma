@@ -1,0 +1,14 @@
+// s24_edge_one_or_max.vuma — 1 | 255 = 255
+// Expected exit code: 255
+//
+// OR with all-ones saturates: 1 | 0xFF = 0xFF (OR with 0xFF forces all
+// bits high). All operands loaded into u32 variables first. Distinct
+// from s22_edge_max_or_zero (255 | 0 = 255) and s14_edge_max_and_zero
+// (255 & 0 = 0).
+
+fn main() -> i32 {
+    a: u32 = 1;
+    b: u32 = 255;
+    r: u32 = a | b;       // 255
+    return r;
+}
