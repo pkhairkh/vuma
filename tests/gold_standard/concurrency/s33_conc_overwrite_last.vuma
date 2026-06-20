@@ -1,0 +1,24 @@
+// s33_conc_overwrite_last.vuma — overwrite last cell, sum = 30 + 40 + 100 = 170
+// Expected exit code: 170
+//
+// Deterministic test in the concurrency category. All operands loaded into typed
+// variables before any bitwise op; all stores use `*ptr = literal` (or the
+// `*ptr = variable + 0` workaround). Result lands in 0-255.
+// Distinct from s30_conc_overwrite_last (different values) and s26_conc_overwrite_middle (overwrites middle).
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    c3 = allocate(8);
+    *c1 = 30;
+    *c2 = 40;
+    *c3 = 50;
+    *c3 = 100;
+    v1: i32 = *c1;
+    v2: i32 = *c2;
+    v3: i32 = *c3;
+    s: i32 = v1 + v2 + v3;  // 170
+    free(c1);
+    free(c2);
+    free(c3);
+    return s;
+}

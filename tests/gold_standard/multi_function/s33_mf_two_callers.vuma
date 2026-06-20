@@ -1,0 +1,19 @@
+// s33_mf_two_callers.vuma — h(20) + h(50) = 30 + 60 = 90
+// Expected exit code: 90
+//
+// Deterministic test in the multi_function category. All operands loaded into typed
+// variables before any bitwise op; all stores use `*ptr = literal` (or the
+// `*ptr = variable + 0` workaround). Result lands in 0-255.
+// Distinct from s30_mf_two_callers (different helper) and s26_mf_two_callers (different helper).
+fn h(x: u32) -> u32 {
+    n: u32 = 10;
+    r: u32 = x + n;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = h(20);       // 30
+    b: u32 = h(50);       // 60
+    r: u32 = a + b;       // 90
+    return r;
+}
