@@ -1,0 +1,21 @@
+// s13_ls_two_node_sum.vuma — two independent nodes, sum = 80 (27 + 53)
+// Expected exit code: 80
+//
+// Two 8-byte allocations, each treated as a single "node". Store
+// 27/53 via `*p = literal`, load both, sum -> 80. Uses `*p =
+// literal` form (no offsets) to avoid the *(ptr+N) store-drop bug.
+// Distinct from s9_ls_two_node_sum (values 15/25 = 40) and
+// s4_ls_two_nodes (uses *(block+N) form, values 10/20).
+
+fn main() -> i32 {
+    n1 = allocate(8);
+    n2 = allocate(8);
+    *n1 = 27;
+    *n2 = 53;
+    a: u64 = *n1;
+    b: u64 = *n2;
+    s: u64 = a + b;
+    free(n1);
+    free(n2);
+    return s;
+}

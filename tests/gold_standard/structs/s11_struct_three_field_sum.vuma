@@ -1,0 +1,29 @@
+// s11_struct_three_field_sum.vuma — 3 fields, sum = 60 (10 + 20 + 30)
+// Expected exit code (correct): 60
+// Observed on current x86_64 backend: non-deterministic (FAIL — known
+//   U8-truncation bug on `*(p+offset)` stores/loads with u64 type)
+//
+// 24-byte struct (three u64 fields). Store 10/20/30 at offsets 0/8/16.
+// Load all three, sum -> 10 + 20 + 30 = 60. Distinct from
+// s10_struct_overwrite_three_fields (overwrites all 3 to 50) and
+// s8_struct_four_fields_sum (4 fields).
+
+struct Triple {
+    a: u64,
+    b: u64,
+    c: u64,
+}
+
+fn main() -> i32 {
+    p = allocate(24);
+    *(p + 0) = 10;
+    *(p + 8) = 20;
+    *(p + 16) = 30;
+    a: u64 = *(p + 0);
+    b: u64 = *(p + 8);
+    c: u64 = *(p + 16);
+    t: u64 = a + b;
+    s: u64 = t + c;
+    free(p);
+    return s;
+}

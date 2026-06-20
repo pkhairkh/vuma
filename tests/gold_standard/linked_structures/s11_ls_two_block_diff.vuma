@@ -1,0 +1,29 @@
+// s11_ls_two_block_diff.vuma — two 16-byte blocks, sum = 80
+// Expected exit code (correct): 80  (5 + 15 + 25 + 35)
+// Observed on current x86_64 backend: non-deterministic (FAIL — known
+//   U8-truncation bug on `*(p+offset)` stores/loads with u64 type)
+//
+// Two 16-byte allocations A and B treated as two-node chains.
+// Stores 5/15 at A+0/A+8 and 25/35 at B+0/B+8. Loads all four, sums
+// -> 5 + 15 + 25 + 35 = 80. Distinct from s10_ls_two_node_independent
+// (two single-node blocks) and s8_ls_two_blocks_independent (different
+// vals, no sum).
+
+fn main() -> i32 {
+    a = allocate(16);
+    b = allocate(16);
+    *(a + 0) = 5;
+    *(a + 8) = 15;
+    *(b + 0) = 25;
+    *(b + 8) = 35;
+    a0: u64 = *(a + 0);
+    a1: u64 = *(a + 8);
+    b0: u64 = *(b + 0);
+    b1: u64 = *(b + 8);
+    t1: u64 = a0 + a1;
+    t2: u64 = t1 + b0;
+    s: u64 = t2 + b1;
+    free(a);
+    free(b);
+    return s;
+}

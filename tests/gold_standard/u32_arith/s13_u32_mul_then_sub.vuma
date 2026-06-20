@@ -1,0 +1,15 @@
+// s13_u32_mul_then_sub.vuma — (12 * 7) - 30 = 84 - 30 = 54
+// Expected exit code: 54
+//
+// Multiply then subtract. 12 * 7 = 84; 84 - 30 = 54. All operands
+// loaded into u32 variables first. Distinct from s9_u32_mul_pair
+// (pure multiply) and s10_u32_add_chain_4 (pure add).
+
+fn main() -> i32 {
+    a: u32 = 12;
+    b: u32 = 7;
+    c: u32 = 30;
+    m: u32 = a * b;       // 84
+    r: u32 = m - c;       // 54
+    return r;
+}

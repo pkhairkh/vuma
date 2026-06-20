@@ -1,0 +1,20 @@
+// s12_crypto_nibble_swap.vuma — swap nibbles of 0x3C -> 0xC3 = 195
+// Expected exit code: 195
+//
+// Swap the high and low nibbles of 0x3C. Computed as
+// ((v >> 4) | ((v & 0x0F) << 4)). (0x3C >> 4) = 0x03; (0x3C & 0x0F)
+// = 0x0C; (0x0C << 4) = 0xC0; 0x03 | 0xC0 = 0xC3 = 195. All operands
+// loaded into u64 variables first. Distinct from s6_crypto_nibble_swap
+// (if it exists, different operand) and s10_crypto_high_nibble_only
+// (extract high nibble, no swap).
+
+fn main() -> i32 {
+    v: u64 = 60;          // 0x3C
+    four: u64 = 4;
+    mask_lo: u64 = 15;    // 0x0F
+    hi: u64 = v >> four;          // 0x03
+    lo_part: u64 = v & mask_lo;   // 0x0C
+    lo_shifted: u64 = lo_part << four;  // 0xC0
+    r: u64 = hi | lo_shifted;     // 0xC3 = 195
+    return r;
+}
