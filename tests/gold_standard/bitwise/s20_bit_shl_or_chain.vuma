@@ -1,0 +1,16 @@
+// s20_bit_shl_or_chain.vuma — (0x07 << 4) | 0x03 = 0x70 | 0x03 = 0x73 = 115
+// Expected exit code: 115
+//
+// Shift-left-then-OR chain. (7 << 4) = 112 (0x70); 112 | 3 = 115
+// (0x73). All operands loaded into u64 variables first. Distinct from
+// s18_bit_shl_xor_shr (shl-xor-shr) and s14_bit_shl_then_or
+// (shl-then-or, different values).
+
+fn main() -> i32 {
+    a: u64 = 7;           // 0x07
+    sh: u64 = 4;
+    b: u64 = 3;           // 0x03
+    x: u64 = a << sh;     // 0x70 = 112
+    r: u64 = x | b;       // 0x73 = 115
+    return r;
+}
