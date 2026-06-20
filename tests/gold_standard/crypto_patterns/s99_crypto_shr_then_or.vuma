@@ -1,0 +1,16 @@
+// s99_crypto_shr_then_or.vuma — (0xF0 >> 4) | 0x60 = 0x0F | 0x60 = 0x6F = 111
+// Expected exit code: 111
+//
+// Two-stage crypto-style bitwise: shift-right then OR.
+// 240 >> 4 = 15 (0x0F); 15 | 96 = 111 (0x6F). All operands loaded
+// into u64 variables first (immediate-RHS bitwise drop bug
+// workaround). Distinct from s95_crypto_or_then_xor (88),
+// s91_crypto_and_then_shr (56) and s87_crypto_and_then_xor (60).
+fn main() -> i32 {
+    a: u64 = 240;         // 0xF0
+    s: u64 = 4;
+    c: u64 = 96;          // 0x60
+    x: u64 = a >> s;      // 0x0F = 15
+    r: u64 = x | c;       // 0x6F = 111
+    return r;
+}

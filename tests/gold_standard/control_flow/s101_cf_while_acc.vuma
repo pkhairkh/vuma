@@ -1,0 +1,18 @@
+// s101_cf_while_acc.vuma — while loop accumulates 2 * 67 = 134
+// Expected exit code (correct): 134
+// Observed on current x86_64 backend: 0 (FAIL — known bug)
+//
+// Accumulator starts at 0. While i < 67, add 2 each iteration and
+// increment i -> 2 * 67 = 134 total. Known "while-body assignments
+// don't propagate" bug keeps acc at 0 -> exit 0. Will exit 134 once
+// fixed. Distinct from s98_cf_while_acc (29), s97_cf_while_acc
+// (116) and s94_cf_while_acc (44).
+fn main() -> i32 {
+    acc: u32 = 0;
+    i: u32 = 0;
+    while i < 67 {
+        acc = acc + 2;
+        i = i + 1;
+    }
+    return acc;
+}

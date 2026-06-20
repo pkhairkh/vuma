@@ -1,0 +1,16 @@
+// s99_bit_or_then_and.vuma — (0x33 | 0x44) & 0x77 = 0x77 & 0x77 = 0x77 = 119
+// Expected exit code: 119
+//
+// Two-stage bitwise: OR then AND. (51 | 68) = 119 (0x77);
+// 119 & 119 = 119 (0x77). All operands loaded into u64 variables
+// first (immediate-RHS bitwise drop bug workaround). Distinct from
+// s95_bit_xor_then_or (47), s91_bit_or_then_and (195) and
+// s87_bit_or_then_shl (124).
+fn main() -> i32 {
+    a: u64 = 51;           // 0x33
+    b: u64 = 68;           // 0x44
+    c: u64 = 119;          // 0x77
+    x: u64 = a | b;        // 0x77 = 119
+    r: u64 = x & c;        // 0x77 = 119
+    return r;
+}

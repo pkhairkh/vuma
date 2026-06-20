@@ -1,0 +1,13 @@
+// s102_arith_mod_then_mul.vuma — (100 % 6) * 22 = 4 * 22 = 88
+// Expected exit code: 88
+//
+// Two-stage arithmetic: modulo then multiply. 100 % 6 = 4; 4 * 22 = 88. All operands kept as i32 locals. Straight-line arithmetic.
+// Distinct from s101_arith_add_then_mod (51), s101_arith_mul_then_add (131), s101_arith_sub_then_mul (240).
+fn main() -> i32 {
+    a: i32 = 100;
+    b: i32 = 6;
+    c: i32 = 22;
+    m: i32 = a % b;        // 4
+    r: i32 = m * c;        // 88
+    return r;
+}

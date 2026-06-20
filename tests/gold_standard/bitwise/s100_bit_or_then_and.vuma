@@ -1,0 +1,16 @@
+// s100_bit_or_then_and.vuma — (0x0B | 0x20) & 0x2F = 0x2B & 0x2F = 0x2B = 43
+// Expected exit code: 43
+//
+// Two-stage bitwise: OR then AND. (11 | 32) = 43 (0x2B);
+// 43 & 47 = 43 (0x2B). All operands loaded into u64
+// variables first (immediate-RHS bitwise drop bug
+// workaround).
+// Distinct from s97_bit_or_then_and (41), s94_bit_xor_then_and (240), s90_bit_or_then_xor (19).
+fn main() -> i32 {
+    a: u64 = 11;           // 0x0B
+    b: u64 = 32;           // 0x20
+    c: u64 = 47;           // 0x2F
+    x: u64 = a | b;        // 0x2B = 43
+    r: u64 = x & c;        // 0x2B = 43
+    return r;
+}
