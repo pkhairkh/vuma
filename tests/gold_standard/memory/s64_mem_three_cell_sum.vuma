@@ -1,0 +1,25 @@
+// s64_mem_three_cell_sum.vuma — three cells, sum = 195 (58 + 64 + 73)
+// Expected exit code: 195
+//
+// Three 8-byte cells. Store 58/64/73 via `*ptr = literal`, load all
+// three, sum -> 195. Uses `*ptr = literal` form (no offsets). Distinct
+// from s62_mem_overwrite_middle (170), s62_mem_three_cell_xor (72) and
+// s62_mem_two_cell_diff (130).
+
+fn main() -> i32 {
+    p1 = allocate(8);
+    p2 = allocate(8);
+    p3 = allocate(8);
+    *p1 = 58;
+    *p2 = 64;
+    *p3 = 73;
+    a: u64 = *p1;
+    b: u64 = *p2;
+    c: u64 = *p3;
+    t: u64 = a + b;
+    s: u64 = t + c;        // 195
+    free(p1);
+    free(p2);
+    free(p3);
+    return s;
+}

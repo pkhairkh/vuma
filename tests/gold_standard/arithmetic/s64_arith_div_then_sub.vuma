@@ -1,0 +1,16 @@
+// s64_arith_div_then_sub.vuma — (240 / 6) - 20 = 40 - 20 = 20
+// Expected exit code: 20
+//
+// Two-stage u32 computation: divide then subtract. 240 / 6 = 40;
+// 40 - 20 = 20. All operands loaded into u32 variables first.
+// Straight-line arithmetic. Distinct from s62_arith_add_then_div (50),
+// s62_arith_mul_then_add (135) and s62_arith_sub_then_add (180).
+
+fn main() -> i32 {
+    a: u32 = 240;
+    b: u32 = 6;
+    c: u32 = 20;
+    s: u32 = a / b;        // 40
+    r: u32 = s - c;        // 20
+    return r;
+}

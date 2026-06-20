@@ -1,0 +1,14 @@
+// s64_edge_max_shr_four.vuma — 255 >> 4 = 15
+// Expected exit code: 15
+//
+// Shift the max u8 value right by 4. 255 >> 4 = 15 (0x0F). All
+// operands loaded into u32 variables first (immediate-RHS bitwise
+// drop bug workaround). Distinct from s62_edge_max_shr_two (63),
+// s62_edge_one_shl_four (16) and s62_edge_zero_xor_high_bit (128).
+
+fn main() -> i32 {
+    a: u32 = 255;
+    b: u32 = 4;
+    r: u32 = a >> b;       // 15
+    return r;
+}
