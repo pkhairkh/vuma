@@ -1,0 +1,16 @@
+// s90_bit_shl_then_and.vuma — (5 << 2) & 0x1F = 20 & 31 = 20
+// Expected exit code: 20
+//
+// Two-stage bitwise: shift-left then AND. 5 << 2 = 20;
+// 20 & 31 = 20. All operands loaded into u64 variables first
+// (immediate-RHS bitwise drop bug workaround). Distinct from
+// s86_bit_shl_then_xor (33), s82_bit_or_then_xor (76) and
+// s78_bit_and_then_xor (2).
+fn main() -> i32 {
+    a: u64 = 5;
+    b: u64 = 2;
+    c: u64 = 31;           // 0x1F
+    x: u64 = a << b;       // 20
+    r: u64 = x & c;        // 20
+    return r;
+}

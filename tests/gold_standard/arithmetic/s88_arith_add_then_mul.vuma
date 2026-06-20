@@ -1,0 +1,16 @@
+// s88_arith_add_then_mul.vuma — (50 + 30) * 3 = 80 * 3 = 240
+// Expected exit code: 240
+//
+// Two-stage arithmetic: add then multiply. 50 + 30 = 80;
+// 80 * 3 = 240. All operands kept as i32 locals. Straight-
+// line arithmetic. Distinct from s86_arith_add_then_div
+// (10), s82_arith_add_then_mul (200) and s78_arith_add_
+// then_div (11).
+fn main() -> i32 {
+    a: i32 = 50;
+    b: i32 = 30;
+    c: i32 = 3;
+    s: i32 = a + b;        // 80
+    r: i32 = s * c;        // 240
+    return r;
+}
