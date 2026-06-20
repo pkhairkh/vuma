@@ -1,0 +1,26 @@
+// s59_mf_two_helpers_add.vuma — add_four(110) + add_seven(50) = 114 + 57 = 171
+// Expected exit code: 171
+//
+// Two single-arg helpers called on different literals then summed.
+// add_four(x) = x + 4; add_seven(x) = x + 7. main calls add_four(110)
+// -> 114 and add_seven(50) -> 57; sum = 171. Distinct from s58_mf_two_
+// helpers_sub (112), s58_mf_three_chain (50) and s58_mf_triple_then_
+// add (120).
+
+fn add_four(x: u32) -> u32 {
+    n: u32 = 4;
+    r: u32 = x + n;
+    return r;
+}
+fn add_seven(x: u32) -> u32 {
+    n: u32 = 7;
+    r: u32 = x + n;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = add_four(110);     // 114
+    b: u32 = add_seven(50);     // 57
+    r: u32 = a + b;             // 171
+    return r;
+}

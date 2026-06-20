@@ -1,0 +1,14 @@
+// s61_edge_one_shl_six.vuma — 1 << 6 = 64
+// Expected exit code: 64
+// 
+// Shift the value 1 left by 6. 1 << 6 = 64 (0x40). All operands
+// loaded into u32 variables first (immediate-RHS bitwise drop bug
+// workaround). Distinct from s58_edge_zero_or_zero (0), s58_edge_
+// one_shl_seven (128) and s58_edge_max_shr_one (127).
+
+fn main() -> i32 {
+    a: u32 = 1;
+    b: u32 = 6;
+    r: u32 = a << b;       // 64
+    return r;
+}
