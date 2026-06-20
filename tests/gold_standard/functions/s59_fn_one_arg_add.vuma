@@ -1,0 +1,17 @@
+// s59_fn_one_arg_add.vuma — add_ten(60) = 70
+// Expected exit code: 70
+//
+// Helper add_ten(x) = x + 10. main calls add_ten(60) -> 70. Single-
+// arg function that adds a literal. Distinct from s58_fn_zero_arg_lit
+// (150), s58_fn_one_arg_sub (92) and s58_fn_two_args_add (155).
+
+fn add_ten(x: u32) -> u32 {
+    n: u32 = 10;
+    r: u32 = x + n;
+    return r;
+}
+
+fn main() -> i32 {
+    v: u32 = add_ten(60);
+    return v;
+}

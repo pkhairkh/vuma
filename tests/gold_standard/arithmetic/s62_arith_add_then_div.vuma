@@ -1,0 +1,17 @@
+// s62_arith_add_then_div.vuma — (140 + 60) / 4 = 200 / 4 = 50
+// Expected exit code: 50
+// 
+// Two-stage u32 computation: add then divide. 140 + 60 = 200;
+// 200 / 4 = 50. All operands loaded into u32 variables first.
+// Straight-line arithmetic. Distinct from s51_arith_add_mod_then_
+// add (140), s58_arith_div_then_mul (120) and s55_arith_div_then_
+// mul (90).
+
+fn main() -> i32 {
+    a: u32 = 140;
+    b: u32 = 60;
+    c: u32 = 4;
+    s: u32 = a + b;        // 200
+    r: u32 = s / c;        // 50
+    return r;
+}
