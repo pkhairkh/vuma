@@ -1,0 +1,17 @@
+// s71_fn_one_arg_sub.vuma — sub_thirteen(200) = 187
+// Expected exit code: 187
+//
+// Helper sub_thirteen(x) = x - 13. main calls sub_thirteen(200)
+// -> 187. Single-arg function that subtracts a literal. Distinct
+// from s69_fn_one_arg_add (125), s70_fn_one_arg_add (165) and s66
+// _fn_one_arg_sub (80).
+fn sub_thirteen(x: u32) -> u32 {
+    n: u32 = 13;
+    r: u32 = x - n;
+    return r;
+}
+
+fn main() -> i32 {
+    v: u32 = sub_thirteen(200);
+    return v;
+}
