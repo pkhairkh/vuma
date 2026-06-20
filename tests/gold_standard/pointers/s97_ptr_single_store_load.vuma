@@ -1,0 +1,13 @@
+// s97_ptr_single_store_load.vuma — store 4, load = 4
+// Expected exit code: 4
+//
+// Single 8-byte cell. Store 4 via `*p = literal`, load and
+// return 4. Uses `*p = literal` form.
+// Distinct from s94_ptr_single_store_load (68), s90_ptr_single_store_load (45), s86_ptr_single_store_load (180).
+fn main() -> i32 {
+    p = allocate(8);
+    *p = 4;
+    v: i32 = *p;           // 4
+    free(p);
+    return v;
+}

@@ -1,0 +1,16 @@
+// s98_cf_for_count.vuma — for loop runs 24 iterations, count = 24
+// Expected exit code (correct): 24
+// Observed on current x86_64 backend: 0 (FAIL — known bug)
+//
+// Counter starts at 0 and increments by 1 each iteration of a for
+// loop with range 0..24. Known "for-body assignments don't
+// propagate" bug keeps count at 0 -> exit 0. Will exit 24 once
+// fixed. Distinct from s94_cf_for_count (37), s90_cf_for_count (69)
+// and s86_cf_for_count (9).
+fn main() -> i32 {
+    count: u32 = 0;
+    for i in 0..24 {
+        count = count + 1;
+    }
+    return count;
+}

@@ -1,0 +1,16 @@
+// s97_bit_shl_then_xor.vuma — (0x05 << 3) ^ 0x69 = 0x28 ^ 0x69 = 0x41 = 65
+// Expected exit code: 65
+//
+// Two-stage bitwise: shift-left then XOR. (5 << 3) = 40
+// (0x28); 40 ^ 105 = 65 (0x41). All operands loaded into u64
+// variables first (immediate-RHS bitwise drop bug
+// workaround).
+// Distinct from s94_bit_and_then_shl (224), s90_bit_or_then_xor (19), s86_bit_shl_then_xor (56).
+fn main() -> i32 {
+    a: u64 = 5;            // 0x05
+    s: u64 = 3;
+    b: u64 = 105;          // 0x69
+    x: u64 = a << s;       // 0x28 = 40
+    r: u64 = x ^ b;        // 0x41 = 65
+    return r;
+}

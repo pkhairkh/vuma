@@ -1,0 +1,15 @@
+// s96_arith_add_then_div.vuma — (140 + 40) / 9 = 180 / 9 = 20
+// Expected exit code: 20
+//
+// Two-stage arithmetic: add then divide. 140 + 40 = 180; 180 / 9 = 20.
+// All operands kept as i32 locals. Straight-line arithmetic. Distinct
+// from s94_arith_div_then_add (80), s90_arith_add_then_mod (53) and
+// s86_arith_add_then_div (10).
+fn main() -> i32 {
+    a: i32 = 140;
+    b: i32 = 40;
+    c: i32 = 9;
+    s: i32 = a + b;        // 180
+    r: i32 = s / c;        // 20
+    return r;
+}
