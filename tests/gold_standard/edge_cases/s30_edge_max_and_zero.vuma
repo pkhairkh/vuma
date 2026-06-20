@@ -1,0 +1,13 @@
+// s30_edge_max_and_zero.vuma — 255 & 0 = 0
+// Expected exit code: 0
+//
+// AND of the maximum u8 value with zero. 255 & 0 = 0. All operands
+// loaded into u32 variables first. Distinct from s26_edge_zero_or_one
+// (0 | 1 = 1) and s22_edge_max_or_zero (255 | 0 = 255).
+
+fn main() -> i32 {
+    a: u32 = 255;
+    b: u32 = 0;
+    r: u32 = a & b;       // 0
+    return r;
+}

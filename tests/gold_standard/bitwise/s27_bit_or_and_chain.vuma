@@ -1,0 +1,16 @@
+// s27_bit_or_and_chain.vuma — (0xAA | 0x55) & 0xF0 = 0xFF & 0xF0 = 240
+// Expected exit code: 240
+//
+// OR then AND. 170 | 85 = 255 (0xFF); 255 & 240 = 240 (0xF0). All
+// operands loaded into u64 variables first (immediate-RHS bitwise drop
+// bug workaround). Distinct from s26_bit_and_or_xor (and-or-xor) and
+// s22_bit_shl_and_mask (shl-then-and).
+
+fn main() -> i32 {
+    a: u64 = 170;         // 0xAA
+    b: u64 = 85;          // 0x55
+    c: u64 = 240;         // 0xF0
+    x: u64 = a | b;       // 0xFF = 255
+    r: u64 = x & c;       // 0xF0 = 240
+    return r;
+}

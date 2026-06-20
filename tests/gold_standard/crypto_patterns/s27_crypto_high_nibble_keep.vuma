@@ -1,0 +1,14 @@
+// s27_crypto_high_nibble_keep.vuma — 0xCD & 0xF0 = 0xC0 = 192
+// Expected exit code: 192
+//
+// Keep the high nibble, clear the low nibble. 205 & 240 = 192 (0xC0).
+// All operands loaded into u64 variables first (immediate-RHS bitwise
+// drop bug workaround). Distinct from s26_crypto_nibble_swap (swap
+// nibbles) and s22_crypto_shl_mask_high (shl-then-and).
+
+fn main() -> i32 {
+    a: u64 = 205;         // 0xCD
+    m: u64 = 240;         // 0xF0
+    r: u64 = a & m;       // 0xC0 = 192
+    return r;
+}

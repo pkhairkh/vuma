@@ -1,0 +1,13 @@
+// s29_u32_xor_then_and.vuma — (0xAA ^ 0x55) & 0x3F = 0xFF & 0x3F = 0x3F = 63
+// Expected exit code: 63
+//
+// XOR then AND-mask. (170 ^ 85) = 255 (0xFF); 255 & 63 = 63 (0x3F). Demonstrates XOR-then-mask-to-6-bit-field pattern. All operands loaded into u32 variables first (immediate-RHS bitwise drop bug workaround). Distinct from s26_u32_xor_then_shl (xor-then-shl, 240) and s22_u32_xor_then_or (xor-then-or, 218).
+
+fn main() -> i32 {
+    a: u32 = 170;         // 0xAA
+    b: u32 = 85;          // 0x55
+    c: u32 = 63;          // 0x3F
+    x: u32 = a ^ b;       // 0xFF = 255
+    r: u32 = x & c;       // 0x3F = 63
+    return r;
+}

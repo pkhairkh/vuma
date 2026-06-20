@@ -1,0 +1,26 @@
+// s28_ls_three_node_xor.vuma — three nodes, xor = 0 (0x11 ^ 0x22 ^ 0x33)
+// Expected exit code: 0
+//
+// Three 8-byte allocations treated as three independent "nodes". Store
+// 0x11/0x22/0x33 via `*ptr = literal`, load all three, XOR -> 0
+// (0x11 ^ 0x22 = 0x33; 0x33 ^ 0x33 = 0x00). Uses `*ptr = literal` form
+// (no offsets). Distinct from s26_ls_three_node_sum (sum, 120) and
+// s22_ls_single_load (single load).
+
+fn main() -> i32 {
+    n1 = allocate(8);
+    n2 = allocate(8);
+    n3 = allocate(8);
+    *n1 = 17;            // 0x11
+    *n2 = 34;            // 0x22
+    *n3 = 51;            // 0x33
+    a: u64 = *n1;
+    b: u64 = *n2;
+    c: u64 = *n3;
+    t: u64 = a ^ b;       // 0x33 = 51
+    s: u64 = t ^ c;       // 0x00 = 0
+    free(n1);
+    free(n2);
+    free(n3);
+    return s;
+}

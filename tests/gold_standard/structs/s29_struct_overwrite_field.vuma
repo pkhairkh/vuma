@@ -1,0 +1,17 @@
+// s29_struct_overwrite_field.vuma — overwrite field, load = 90
+// Expected exit code: 90
+//
+// Single 8-byte allocation treated as a one-field struct. Store 40, then overwrite the field with 90 via `*p = literal`. Load and return 90. Uses `*p = literal` form (no offsets). Distinct from s26_struct_overwrite_field (value 100) and s22_struct_overwrite_field (different value).
+
+struct Single {
+    a: u64,
+}
+
+fn main() -> i32 {
+    p1 = allocate(8);
+    *p1 = 40;
+    *p1 = 90;
+    a: u64 = *p1;
+    free(p1);
+    return a;
+}

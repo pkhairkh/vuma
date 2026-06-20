@@ -1,0 +1,17 @@
+// s29_mf_double_then_add.vuma — dbl(15) + dbl(35) = 30 + 70 = 100
+// Expected exit code: 100
+//
+// One single-arg helper called twice from main, results added. dbl(x) = x * 2. main calls dbl(15) -> 30 and dbl(35) -> 70; sum = 100. Distinct from s26_mf_inc_then_double (double(inc(20))=42) and s22_mf_double_then_inc (reversed order).
+
+fn dbl(x: u32) -> u32 {
+    n: u32 = 2;
+    r: u32 = x * n;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = dbl(15);     // 30
+    b: u32 = dbl(35);     // 70
+    r: u32 = a + b;       // 100
+    return r;
+}

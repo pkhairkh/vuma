@@ -1,0 +1,16 @@
+// s28_u32_or_then_xor.vuma — (0x33 | 0x44) ^ 0x11 = 0x77 ^ 0x11 = 0x66 = 102
+// Expected exit code: 102
+//
+// OR then XOR. (51 | 68) = 119 (0x77); 119 ^ 17 = 102 (0x66). All
+// operands loaded into u32 variables first (immediate-RHS bitwise drop
+// bug workaround). Distinct from s26_u32_xor_then_shl (xor-then-shl)
+// and s22_u32_xor_then_or (xor-then-or).
+
+fn main() -> i32 {
+    a: u32 = 51;          // 0x33
+    b: u32 = 68;          // 0x44
+    c: u32 = 17;          // 0x11
+    x: u32 = a | b;       // 0x77 = 119
+    r: u32 = x ^ c;       // 0x66 = 102
+    return r;
+}

@@ -1,0 +1,22 @@
+// s29_conc_three_cell_and.vuma — three cells, and = 240 (0xF0 & 0xF0 & 0xFF)
+// Expected exit code: 240
+//
+// Three independent 8-byte cells. Each gets a distinct literal (240/240/255). All three loaded back and ANDed. Uses `*ptr = literal` form (no offsets). All operands loaded into typed locals before the AND (immediate-RHS bitwise drop bug workaround). Distinct from s26_conc_three_cell_or (or, 1|2|4=7) and s22_conc_three_cell_dec (descending sum).
+
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    c3 = allocate(8);
+    *c1 = 240;            // 0xF0
+    *c2 = 240;            // 0xF0
+    *c3 = 255;            // 0xFF
+    v1: u64 = *c1;
+    v2: u64 = *c2;
+    v3: u64 = *c3;
+    t: u64 = v1 & v2;     // 0xF0
+    s: u64 = t & v3;      // 0xF0 = 240
+    free(c1);
+    free(c2);
+    free(c3);
+    return s;
+}

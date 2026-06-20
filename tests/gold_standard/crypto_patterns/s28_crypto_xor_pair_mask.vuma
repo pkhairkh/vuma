@@ -1,0 +1,17 @@
+// s28_crypto_xor_pair_mask.vuma — (0xC3 ^ 0x3C) & 0x0F = 0xFF & 0x0F = 15
+// Expected exit code: 15
+//
+// XOR then mask. 195 ^ 60 = 255 (0xFF); 255 & 15 = 15. Complementary
+// nibbles XOR to all ones, then mask keeps low nibble. All operands
+// loaded into u64 variables first (immediate-RHS bitwise drop bug
+// workaround). Distinct from s26_crypto_xor_pair (xor-pair, 255) and
+// s22_crypto_xor_three (three-byte xor).
+
+fn main() -> i32 {
+    a: u64 = 195;         // 0xC3
+    b: u64 = 60;          // 0x3C
+    c: u64 = 15;          // 0x0F
+    x: u64 = a ^ b;       // 0xFF = 255
+    r: u64 = x & c;       // 0x0F = 15
+    return r;
+}

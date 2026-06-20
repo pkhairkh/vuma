@@ -1,0 +1,11 @@
+// s29_edge_one_shl_six.vuma — 1 << 6 = 64
+// Expected exit code: 64
+//
+// Single-bit shift into position 6. 1 << 6 = 64 (0x40). All operands loaded into u32 variables first. Distinct from s26_edge_one_shl_four (1 << 4 = 16) and s20_edge_one_shl_seven (1 << 7 = 128).
+
+fn main() -> i32 {
+    a: u32 = 1;
+    b: u32 = 6;
+    r: u32 = a << b;      // 64
+    return r;
+}

@@ -1,0 +1,24 @@
+// s30_mf_three_chain.vuma — inc(double(5)) = inc(10) = 11
+// Expected exit code: 11
+//
+// Two single-arg helpers chained via a nested call. double(x) = x * 2;
+// inc(x) = x + 1. main calls inc(double(5)) -> inc(10) -> 11.
+// Distinct from s26_mf_three_chain (three-chain, 19) and
+// s22_mf_three_chain (different operands).
+
+fn double(x: u32) -> u32 {
+    n: u32 = 2;
+    r: u32 = x * n;
+    return r;
+}
+fn inc(x: u32) -> u32 {
+    n: u32 = 1;
+    r: u32 = x + n;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = double(5);   // 10
+    r: u32 = inc(a);      // 11
+    return r;
+}

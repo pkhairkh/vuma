@@ -1,0 +1,20 @@
+// s28_cs_two_buf_and.vuma — two cells, and = 48 (0xF0 & 0x3C = 0x30)
+// Expected exit code: 48
+//
+// Two 8-byte cells. Store 0xF0/0x3C via `*ptr = literal`, load both,
+// AND -> 48. Uses `*ptr = literal` form (no offsets). All operands
+// loaded into typed locals before the AND. Distinct from
+// s26_cs_two_buf_xor (xor, 102) and s22_cs_two_buf_sum (two-cell add).
+
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    *c1 = 240;           // 0xF0
+    *c2 = 60;            // 0x3C
+    a: u64 = *c1;
+    b: u64 = *c2;
+    s: u64 = a & b;       // 0x30 = 48
+    free(c1);
+    free(c2);
+    return s;
+}
