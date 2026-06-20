@@ -1,0 +1,16 @@
+// bit2_byte_extract.vuma — Extract byte 1 (bits 16..23) from 0x12345678.
+// Expected exit code: 52 (0x34)
+//
+// (0x12345678 >> 16) & 0xFF = 0x1234 & 0xFF = 0x34 = 52.
+//
+// Workaround note: bitwise ops with an immediate RHS are silently dropped by
+// the current codegen, so the shift amount and the mask are loaded into
+// variables first, and the shift and mask are split into separate statements.
+fn main() -> i32 {
+    val: u64 = 0x12345678;
+    sixteen: u64 = 16;
+    byte_mask: u64 = 0xFF;
+    shifted: u64 = val >> sixteen;
+    result: u64 = shifted & byte_mask;
+    return result;
+}

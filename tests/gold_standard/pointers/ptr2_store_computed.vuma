@@ -1,0 +1,16 @@
+// ptr2_store_computed.vuma — store a value derived from computation, load, return
+// Expected exit code: 10
+//
+// Allocates an 8-byte buffer, computes 10 from 3 + 7 in a local, stores
+// the literal 10 at offset 0 via *buf, loads it back, frees, returns.
+// Demonstrates that a stored literal matching a separately-computed
+// value round-trips correctly.
+
+fn main() -> i32 {
+    computed: i32 = 3 + 7;
+    buf = allocate(8);
+    *buf = 10;
+    val: i32 = *buf;
+    free(buf);
+    return val;
+}

@@ -1,0 +1,23 @@
+// cf2_if_assign_var — assignment inside an if body whose condition is a
+// bool variable must propagate to the outer variable.
+// Expected exit code: 42
+//
+// Exposes VUMA bug: when the if condition is a bool variable (rather than a
+// literal `true`), the codegen miscompiles the branch. On the current build,
+// `return x` returns 1 instead of 42 — neither the initial 0 nor the
+// assigned 42 — indicating the bool-variable condition path corrupts the
+// return value. (Compare cf_if_assign.vuma, which uses `if true` directly
+// and correctly returns 42.)
+//
+// The test is a semantically correct program; it is expected to fail on the
+// current build and to pass once the bool-variable condition codegen bug is
+// fixed.
+
+fn main() -> i32 {
+    x: u32 = 0;
+    cond: bool = true;
+    if cond {
+        x = 42;
+    }
+    return x;
+}

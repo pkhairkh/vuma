@@ -1,0 +1,17 @@
+// cf2_if_in_while — conditional assignment inside a while loop.
+// Expected exit code: 42
+//
+// Exposes VUMA bug: both while-body assignments and if-body assignments are
+// dropped, so r stays 0 and exit is 0 instead of 42.
+
+fn main() -> i32 {
+    i: u32 = 0;
+    r: u32 = 0;
+    while (i < 3) {
+        if (i == 1) {
+            r = 42;
+        }
+        i = i + 1;
+    }
+    return r;
+}
