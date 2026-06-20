@@ -1,0 +1,16 @@
+// s89_u32_xor_then_and.vuma — (0xF0 ^ 0x0F) & 0x1C = 0xFF & 0x1C = 0x1C = 28
+// Expected exit code: 28
+//
+// Two-stage bitwise: XOR then AND. (240 ^ 15) = 255 (0xFF);
+// 255 & 28 = 28 (0x1C). All operands loaded into u32
+// variables first (immediate-RHS bitwise drop bug workaround).
+// Distinct from s86_u32_xor_then_and (51), s82_u32_xor_then_shr
+// (45) and s78_u32_or_then_shr (4).
+fn main() -> i32 {
+    a: u32 = 240;          // 0xF0
+    b: u32 = 15;          // 0x0F
+    m: u32 = 28;          // 0x1C
+    x: u32 = a ^ b;        // 0xFF = 255
+    r: u32 = x & m;        // 0x1C = 28
+    return r;
+}

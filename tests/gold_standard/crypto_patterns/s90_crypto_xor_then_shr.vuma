@@ -1,0 +1,16 @@
+// s90_crypto_xor_then_shr.vuma — (0xAA ^ 0x22) >> 3 = 0x88 >> 3 = 0x11 = 17
+// Expected exit code: 17
+//
+// Two-stage crypto mix: XOR then shift-right. (170 ^ 34) = 136
+// (0x88); 136 >> 3 = 17 (0x11). All operands loaded into u32
+// variables first (immediate-RHS bitwise drop bug workaround).
+// Distinct from s86_crypto_xor_pair (230), s82_crypto_xor_then_and
+// (130) and s78_crypto_xor_then_shr (4).
+fn main() -> i32 {
+    a: u32 = 170;          // 0xAA
+    b: u32 = 34;           // 0x22
+    s: u32 = 3;
+    x: u32 = a ^ b;        // 0x88 = 136
+    r: u32 = x >> s;       // 0x11 = 17
+    return r;
+}

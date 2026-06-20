@@ -1,0 +1,15 @@
+// s89_arith_mul_then_add.vuma — 2 * 16 + 35 = 32 + 35 = 67
+// Expected exit code: 67
+//
+// Two-stage arithmetic: multiply then add. 2 * 16 = 32;
+// 32 + 35 = 67. All operands kept as i32 locals. Straight-
+// line arithmetic. Distinct from s86_arith_mul_then_sub (250),
+// s82_arith_mul_then_add (200) and s78_arith_mul_then_sub (3).
+fn main() -> i32 {
+    a: i32 = 2;
+    b: i32 = 16;
+    k: i32 = 35;
+    p: i32 = a * b;        // 32
+    r: i32 = p + k;        // 67
+    return r;
+}
