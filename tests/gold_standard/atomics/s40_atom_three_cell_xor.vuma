@@ -1,0 +1,27 @@
+// s40_atom_three_cell_xor.vuma — three cells, atomic xor = 54 (110 ^ 70 ^ 30)
+// Expected exit code: 0 (current buggy backend)
+// Expected exit code (correct, post-bridge-fix): 54
+//
+// Three 8-byte cells. atomic_store 110/70/30, atomic_load each, XOR
+// -> 54. 110 ^ 70 = 40 (0x28); 40 ^ 30 = 54 (0x36). On the current
+// backend the loads return 0 -> exit 0. Will exit 54 once atomics
+// are wired through. Distinct from s38_atom_three_cell_sum (150)
+// and s34_atom_three_cell_xor.
+
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    c3 = allocate(8);
+    atomic_store(c1, 110);
+    atomic_store(c2, 70);
+    atomic_store(c3, 30);
+    a = atomic_load(c1);
+    b = atomic_load(c2);
+    c = atomic_load(c3);
+    t: i32 = a ^ b;                  // 0x28 = 40
+    r: i32 = t ^ c;                  // 0x36 = 54
+    free(c1);
+    free(c2);
+    free(c3);
+    return r;
+}

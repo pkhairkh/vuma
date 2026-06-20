@@ -1,0 +1,23 @@
+// s40_cf_if_chain_3.vuma — chain of three ifs, last sets x = 200
+// Expected exit code (correct): 200
+// Observed on current x86_64 backend: 0 (FAIL — known bug)
+//
+// Three sequential if-true blocks. Each overwrites x: 65, then 115,
+// then 200. With all conditions `true`, x should end at 200. On the
+// current backend the if-true body assignments are dropped, so x
+// stays 0. Distinct from s35_cf_if_chain_3 (88) and s34_cf_if_chain_2
+// (66).
+
+fn main() -> i32 {
+    x: u32 = 0;
+    if true {
+        x = 65;
+    }
+    if true {
+        x = 115;
+    }
+    if true {
+        x = 200;
+    }
+    return x;
+}

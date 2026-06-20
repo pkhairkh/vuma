@@ -1,0 +1,25 @@
+// s40_struct_two_instances_diff.vuma — two instances, diff = 155 (240 - 85)
+// Expected exit code: 155
+//
+// Two 8-byte allocations treated as two independent struct
+// instances. Store 240/85 via `*p = literal`, load both fields,
+// subtract -> 155. Uses `*p = literal` form (no offsets). Distinct
+// from s38_struct_two_instances_sum (225) and s34_struct_two_
+// instances_sum (205).
+
+struct Single {
+    a: u64,
+}
+
+fn main() -> i32 {
+    p1 = allocate(8);
+    p2 = allocate(8);
+    *p1 = 240;
+    *p2 = 85;
+    a: u64 = *p1;
+    b: u64 = *p2;
+    d: u64 = a - b;        // 155
+    free(p1);
+    free(p2);
+    return d;
+}
