@@ -1,0 +1,13 @@
+// s105_bit_shl_then_or.vuma — (0x0A << 4) | 0x07 = 0xA0 | 0x07 = 0xA7 = 167
+// Expected exit code: 167
+// 
+// Two-stage bitwise: shift-left then OR. (10 << 4) = 160 (0xA0); 160 | 7 = 167 (0xA7). All operands loaded into u32 variables first (immediate-RHS bitwise drop bug workaround). Operands nonzero & distinct.
+// Distinct from s102_bit_shl_then_xor (52), s101_bit_shl_then_or (55), s100_bit_and_then_or (37).
+fn main() -> i32 {
+    a: u32 = 10;           // 0x0A
+    n: u32 = 4;
+    b: u32 = 7;            // 0x07
+    s: u32 = a << n;       // 0xA0 = 160
+    r: u32 = s | b;        // 0xA7 = 167
+    return r;
+}

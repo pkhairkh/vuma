@@ -1,0 +1,14 @@
+// s103_nl_4x33_count.vuma — 4x33 nested loop, count = 4*33 = 132
+// Expected exit code (correct): 132
+// Observed on current x86_64 backend: 0 (FAIL — known bug)
+//
+// Outer loop runs 4 iterations, inner loop runs 33 iterations each -> 4*33 = 132 total. Counter is a scalar accumulator updated inside the inner loop. Known "for-body assignments don't propagate" bug keeps count at 0 -> exit 0. Will exit 132 once fixed.
+fn main() -> i32 {
+    count: u32 = 0;
+    for i in 0..4 {
+        for j in 0..33 {
+            count = count + 1;
+        }
+    }
+    return count;
+}
