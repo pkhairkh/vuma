@@ -1,0 +1,15 @@
+// s8_conc_overwrite_load.vuma — overwrite then load = 80
+// Expected exit code: 80
+//
+// Single 8-byte cell. Store 50 then overwrite with 80. Load observes
+// 80 (last write wins). Distinct from s5_conc_overwrite_observed
+// (different values 11/77).
+
+fn main() -> i32 {
+    cell = allocate(8);
+    *cell = 50;
+    *cell = 80;
+    v: i32 = *cell;
+    free(cell);
+    return v;
+}

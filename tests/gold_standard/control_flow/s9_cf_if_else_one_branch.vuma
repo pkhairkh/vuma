@@ -1,0 +1,21 @@
+// s9_cf_if_else_one_branch.vuma — if true { x = 50 } else { x = 200 }; return x
+// Expected exit code (correct): 50
+// Observed on current x86_64 backend: 200 (FAIL — known bug)
+//
+// Historically (Task 13-b worklog) the simple if-form returned the
+// correct value 50. On the current backend the if-body assignment
+// is silently dropped, so x takes the else-branch value 200 (exit
+// 200). Will exit 50 once the if-body drop bug is fixed. Distinct
+// from s4_cf_if_assign_simple (values 10/20, currently also
+// regressed to exit 20) and s5_cf_if_then_else_3way (two
+// assignments in true branch).
+
+fn main() -> i32 {
+    x: u32 = 0;
+    if true {
+        x = 50;
+    } else {
+        x = 200;
+    }
+    return x;
+}

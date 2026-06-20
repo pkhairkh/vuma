@@ -1,0 +1,28 @@
+// s8_atom_chain_load_sum.vuma — four atomic cells, sum loads = 100 (20 + 30 + 10 + 40)
+// Expected exit code: 0 (current buggy backend)
+// Expected exit code (correct, post-bridge-fix): 100  (20 + 30 + 10 + 40)
+//
+// Four 8-byte cells. atomic_store 20/30/10/40 into each, then atomic_load
+// all four and sum. On the current backend all loads return 0 -> exit 0.
+// Distinct from s5_atom_three_cells_sum (three cells).
+
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    c3 = allocate(8);
+    c4 = allocate(8);
+    atomic_store(c1, 20);
+    atomic_store(c2, 30);
+    atomic_store(c3, 10);
+    atomic_store(c4, 40);
+    a = atomic_load(c1);
+    b = atomic_load(c2);
+    c = atomic_load(c3);
+    d = atomic_load(c4);
+    s = a + b + c + d;
+    free(c1);
+    free(c2);
+    free(c3);
+    free(c4);
+    return s;
+}
