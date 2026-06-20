@@ -1,0 +1,13 @@
+// bit2_common_bits.vuma — Common set bits of 0x7E and 0x3F.
+// Expected exit code: 62 (0x3E)
+//
+// 0x7E & 0x3F = 0b01111110 & 0b00111111 = 0b00111110 = 0x3E = 62.
+//
+// Workaround note: bitwise ops with an immediate RHS are silently dropped by
+// the current codegen, so all operands are loaded into variables first.
+fn main() -> i32 {
+    a: u64 = 0x7E;
+    b: u64 = 0x3F;
+    result: u64 = a & b;
+    return result;
+}

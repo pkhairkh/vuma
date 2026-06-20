@@ -1,0 +1,19 @@
+// cs2_double_buf.vuma — store 42 in buf1, 42 in buf2, load both, return sum
+// Expected exit code: 84  (42 + 42)
+//
+// Double-buffer store/load: two independent allocations, each loaded
+// and summed. Verifies that two simultaneously live buffers each
+// preserve their stored value through their respective loads.
+
+fn main() -> i32 {
+    buf1 = allocate(8);
+    buf2 = allocate(8);
+    *(buf1 + 0) = 42;
+    *(buf2 + 0) = 42;
+    a: u32 = *(buf1 + 0);
+    b: u32 = *(buf2 + 0);
+    s: u32 = a + b;
+    free(buf1);
+    free(buf2);
+    return s;
+}

@@ -1,0 +1,14 @@
+// edge2_alloc_large — allocate(256), store 42, load, return
+// Expected exit code: 42
+//
+// Edge case: 256-byte allocation (the upper bound on small-buffer
+// fast paths in most allocators). Stores 42 at offset 0 and loads it
+// back to confirm the first byte of a larger buffer is not corrupted.
+
+fn main() -> i32 {
+    buf = allocate(256);
+    *buf = 42;
+    val: i32 = *buf;
+    free(buf);
+    return val;
+}

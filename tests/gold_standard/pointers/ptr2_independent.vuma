@@ -1,0 +1,17 @@
+// ptr2_independent.vuma — two independent buffers; verify independence
+// Expected exit code: 42
+//
+// Allocates two 8-byte buffers buf1 and buf2, stores 42 in buf1 and 99
+// in buf2 (each at offset 0 via *buf), then loads buf1 to verify the
+// second store did not interfere with the first.
+
+fn main() -> i32 {
+    buf1 = allocate(8);
+    buf2 = allocate(8);
+    *buf1 = 42;
+    *buf2 = 99;
+    val: i32 = *buf1;
+    free(buf1);
+    free(buf2);
+    return val;
+}

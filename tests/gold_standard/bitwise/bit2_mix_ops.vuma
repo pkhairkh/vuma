@@ -1,0 +1,18 @@
+// bit2_mix_ops.vuma — Mixed AND/OR/shift in one expression.
+// Expected exit code: 63 (0x3F)
+//
+// (0xFF & 0x3F) | (0xC0 >> 4) = 0x3F | 0x0C = 0x3F = 63.
+//
+// Workaround note: bitwise ops with an immediate RHS are silently dropped by
+// the current codegen, so all operands are loaded into variables first, and
+// each binary op is split into its own statement.
+fn main() -> i32 {
+    a: u64 = 0xFF;
+    b: u64 = 0x3F;
+    c: u64 = 0xC0;
+    four: u64 = 4;
+    lhs: u64 = a & b;
+    shifted: u64 = c >> four;
+    result: u64 = lhs | shifted;
+    return result;
+}

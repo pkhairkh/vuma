@@ -1,0 +1,15 @@
+// cf2_if_nested_assign — assignment inside a nested if body must propagate.
+// Expected exit code: 1
+//
+// Exposes VUMA bug: if-body assignments (especially nested) are silently
+// dropped. On buggy codegen, x remains 0 and exit is 0 instead of 1.
+
+fn main() -> i32 {
+    x: u32 = 0;
+    if true {
+        if true {
+            x = 1;
+        }
+    }
+    return x;
+}

@@ -1,0 +1,15 @@
+// crypto2_checksum.vuma — simple checksum: store 42, load, return
+// Expected exit code: 42
+//
+// The simplest possible checksum: store a single byte, load it back,
+// return the loaded value. Real checksums iterate over a buffer and
+// accumulate; this single-byte form isolates the store-load codegen
+// path that any accumulator would build on.
+
+fn main() -> i32 {
+    buf = allocate(8);
+    *(buf + 0) = 42;
+    val: u32 = *(buf + 0);
+    free(buf);
+    return val;
+}

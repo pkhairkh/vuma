@@ -360,7 +360,8 @@ impl StmtGen {
 
         // then-branch
         self.indent += 1;
-        let then_body = self.gen_block(self.rng.gen_range(1..=3), depth + 1);
+        let n_then = self.rng.gen_range(1..=3);
+        let then_body = self.gen_block(n_then, depth + 1);
         self.indent -= 1;
         // Restore scope before else-branch so branch-local vars don't leak.
         self.scope.truncate(saved_scope);
@@ -368,7 +369,8 @@ impl StmtGen {
         let has_else = self.rng.gen_bool(0.6);
         let else_body = if has_else {
             self.indent += 1;
-            let b = self.gen_block(self.rng.gen_range(1..=3), depth + 1);
+            let n_else = self.rng.gen_range(1..=3);
+            let b = self.gen_block(n_else, depth + 1);
             self.indent -= 1;
             self.scope.truncate(saved_scope);
             b
@@ -403,7 +405,8 @@ impl StmtGen {
 
         let saved_scope = self.scope.len();
         self.indent += 1;
-        let mut body = self.gen_block(self.rng.gen_range(1..=3), depth + 1);
+        let n_body = self.rng.gen_range(1..=3);
+        let mut body = self.gen_block(n_body, depth + 1);
         // Always end the body with a counter increment.
         body.push_str(&format!(
             "{}{} = {} + 1;\n",
@@ -437,7 +440,8 @@ impl StmtGen {
         // examples like bsearch.vuma).
         self.scope.push((loop_var.clone(), VumaType::U64));
         self.indent += 1;
-        let body = self.gen_block(self.rng.gen_range(1..=3), depth + 1);
+        let n_body = self.rng.gen_range(1..=3);
+        let body = self.gen_block(n_body, depth + 1);
         self.indent -= 1;
         self.scope.truncate(saved_scope);
         format!("{}for {} in 0..{} {{\n{}}}\n", self.indent_str(), loop_var, n, body)
@@ -477,7 +481,8 @@ impl StmtGen {
         if self.ret_type == VumaType::Void {
             format!("{}return;\n", self.indent_str())
         } else {
-            let e = self.gen_expr(&self.ret_type, 0);
+            let ret_ty = self.ret_type.clone();
+            let e = self.gen_expr(&ret_ty, 0);
             format!("{}return {};\n", self.indent_str(), e)
         }
     }

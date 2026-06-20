@@ -1,0 +1,17 @@
+// cf2_while_with_break — break out of an infinite while loop when i==3.
+// Expected exit code: 3
+//
+// Exposes VUMA bug: while-body assignment + break propagation. On buggy
+// codegen, i never advances (assignment dropped) so the loop never
+// terminates, or the loop terminates with i = 0.
+
+fn main() -> i32 {
+    i: u32 = 0;
+    while (true) {
+        if (i == 3) {
+            break;
+        }
+        i = i + 1;
+    }
+    return i;
+}

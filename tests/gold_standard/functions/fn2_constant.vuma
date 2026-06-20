@@ -1,0 +1,15 @@
+// fn2_constant.vuma — function returns constant 99
+// Expected exit code: 99
+//
+// Tests a zero-argument function that returns a constant literal.
+// Verifies that a function with no parameters can still return a
+// value through the call/return path.
+
+fn get_constant() -> u32 {
+    return 99;
+}
+
+fn main() -> i32 {
+    v: u32 = get_constant();
+    return v;
+}

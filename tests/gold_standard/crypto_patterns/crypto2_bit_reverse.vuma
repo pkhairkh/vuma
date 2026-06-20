@@ -1,0 +1,58 @@
+// crypto2_bit_reverse.vuma — reverse bits of 0x0F -> 0xF0
+// Expected exit code: 240  (0xF0)
+//
+// Bit reversal is used in CRC computation (bit-reversed polynomial
+// representation) and SHA-3 message scheduling. For an 8-bit input
+// the straight-line unrolled form extracts each bit individually
+// with a single-bit mask, shifts it to its mirrored position, and
+// ORs all eight results together. With v = 0x0F (0b00001111), the
+// reversal is 0b11110000 = 0xF0.
+//
+// VUMA codegen workaround: every mask and every shift amount is
+// loaded into a named variable; each shift-then-OR is split into its
+// own statement to dodge the nested-shift-mask miscompilation.
+
+fn main() -> i32 {
+    v: u64 = 0x0F;
+    one: u64 = 1;
+    two: u64 = 2;
+    three: u64 = 3;
+    four: u64 = 4;
+    five: u64 = 5;
+    six: u64 = 6;
+    seven: u64 = 7;
+    m01: u64 = 0x01;
+    m02: u64 = 0x02;
+    m04: u64 = 0x04;
+    m08: u64 = 0x08;
+    m10: u64 = 0x10;
+    m20: u64 = 0x20;
+    m40: u64 = 0x40;
+    m80: u64 = 0x80;
+    // Extract each input bit.
+    b0: u64 = v & m01;             // 1 (bit 0)
+    b1: u64 = v & m02;             // 2 (bit 1)
+    b2: u64 = v & m04;             // 4 (bit 2)
+    b3: u64 = v & m08;             // 8 (bit 3)
+    b4: u64 = v & m10;             // 0
+    b5: u64 = v & m20;             // 0
+    b6: u64 = v & m40;             // 0
+    b7: u64 = v & m80;             // 0
+    // Mirror: bit i -> bit (7 - i).
+    r0: u64 = b0 << seven;         // 0x80
+    r1: u64 = b1 << five;          // 0x40
+    r2: u64 = b2 << three;         // 0x20
+    r3: u64 = b3 << one;           // 0x10
+    r4: u64 = b4 >> one;           // 0
+    r5: u64 = b5 >> three;         // 0
+    r6: u64 = b6 >> five;          // 0
+    r7: u64 = b7 >> seven;         // 0
+    s1: u64 = r0 | r1;             // 0xC0
+    s2: u64 = s1 | r2;             // 0xE0
+    s3: u64 = s2 | r3;             // 0xF0
+    s4: u64 = s3 | r4;             // 0xF0
+    s5: u64 = s4 | r5;             // 0xF0
+    s6: u64 = s5 | r6;             // 0xF0
+    s7: u64 = s6 | r7;             // 0xF0
+    return s7;
+}

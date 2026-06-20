@@ -1,0 +1,17 @@
+// mem2_independent_bufs — two buffers; verify no cross-contamination
+// Expected exit code: 42
+//
+// Allocates two independent buffers, stores 42 in buf1 and 99 in buf2,
+// then loads from buf1.  Confirms that a store to buf2 doesn't disturb
+// buf1 (no register-spill or aliasing bug).  Straight-line code only.
+
+fn main() -> i32 {
+    buf1 = allocate(8);
+    buf2 = allocate(8);
+    *(buf1 + 0) = 42;
+    *(buf2 + 0) = 99;
+    v1: u32 = *(buf1 + 0);   // should be 42 (unaffected by buf2 store)
+    free(buf1);
+    free(buf2);
+    return v1;
+}

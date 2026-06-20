@@ -1,0 +1,17 @@
+// cs2_pattern.vuma — store 7 at 4 offsets, load first
+// Expected exit code: 7
+//
+// Memset-like pattern fill: write the byte 7 to offsets 0,1,2,3, then
+// load offset 0 to confirm the fill worked. The other three offsets
+// are written purely to exercise the multi-store code path.
+
+fn main() -> i32 {
+    buf = allocate(8);
+    *(buf + 0) = 7;
+    *(buf + 1) = 7;
+    *(buf + 2) = 7;
+    *(buf + 3) = 7;
+    val: u32 = *(buf + 0);
+    free(buf);
+    return val;
+}

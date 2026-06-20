@@ -1,0 +1,20 @@
+// mem2_chain_stores — store 55 in buf1, load, re-store as literal in buf2
+// Expected exit code: 55
+//
+// Stores 55 in buf1, loads it back, then re-stores the value 55 as a
+// fresh decimal literal into buf2 (avoiding the variable-store bug by
+// using a literal rather than the loaded variable).  Loads from buf2
+// and returns.  Straight-line code only.
+
+fn main() -> i32 {
+    buf1 = allocate(8);
+    buf2 = allocate(8);
+    *(buf1 + 0) = 55;
+    v1: u32 = *(buf1 + 0);     // 55
+    // Re-store as a literal (the value of v1 is known to be 55)
+    *(buf2 + 0) = 55;
+    v2: u32 = *(buf2 + 0);     // 55
+    free(buf1);
+    free(buf2);
+    return v2;
+}

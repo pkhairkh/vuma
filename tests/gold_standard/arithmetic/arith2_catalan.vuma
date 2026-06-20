@@ -1,0 +1,17 @@
+// arith2_catalan — Catalan number C(2)
+// Expected exit code: 2
+//
+// C(n) = (2n)! / (n! * (n+1)!).  For n = 2:
+//   C(2) = 4! / (2! * 3!) = 24 / (2 * 6) = 24 / 12 = 2
+// Straight-line code only.
+
+fn main() -> i32 {
+    n: u32 = 2;
+    // Hard-coded factorials (no loops)
+    factorial_2: u32 = 2;       // 2!
+    factorial_3: u32 = 6;       // 3!
+    factorial_4: u32 = 24;      // 4!
+    denom: u32 = factorial_2 * factorial_3;     // 12
+    catalan: u32 = factorial_4 / denom;          // 24 / 12 = 2
+    return catalan;
+}
