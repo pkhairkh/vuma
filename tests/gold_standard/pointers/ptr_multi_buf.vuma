@@ -1,0 +1,18 @@
+// ptr_multi_buf.vuma — multiple buffers, independent accesses
+// Expected exit code: 42
+//
+// Allocates two independent buffers, stores 42 in one and 99 in the
+// other (each at offset 0 via *buf), then loads from the first buffer
+// and returns it. Verifies that stores to one buffer do not disturb
+// the contents of another.
+
+fn main() -> i32 {
+    buf1 = allocate(8);
+    buf2 = allocate(8);
+    *buf1 = 42;
+    *buf2 = 99;
+    val: i32 = *buf1;
+    free(buf1);
+    free(buf2);
+    return val;
+}

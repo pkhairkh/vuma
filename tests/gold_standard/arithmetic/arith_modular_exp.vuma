@@ -1,0 +1,23 @@
+// arith_modular_exp — modular exponentiation: base^exp % mod
+// Expected exit code: 1
+//
+// Computes 2^10 mod 1023 = 1024 mod 1023 = 1.
+
+fn main() -> i32 {
+    base: u32 = 2;
+    exp: u32 = 10;
+    modulus: u32 = 1023;
+    zero: u32 = 0;
+    one: u32 = 1;
+    two: u32 = 2;
+    result: u32 = 1;
+    b: u32 = base % modulus;
+    while exp > zero {
+        if exp % two == one {
+            result = (result * b) % modulus;
+        }
+        exp = exp / two;
+        b = (b * b) % modulus;
+    }
+    return result;
+}

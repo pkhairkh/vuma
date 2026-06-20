@@ -1,0 +1,16 @@
+// crypto_shift_xor.vuma — (val >> 1) ^ val
+// Expected exit code: 42
+//
+// The shift-XOR (XorShift1) primitive is the simplest member of the
+// xorshift PRNG family and a building block of block-cipher key
+// schedules. We pick val = 51 (= 0b110011) so that (51 >> 1) ^ 51 =
+// 25 ^ 51 = 42. The shift amount is loaded into a named variable per
+// the bitwise-immediate-RHS workaround.
+
+fn main() -> i32 {
+    val: u64 = 51;                 // 0b110011
+    one: u64 = 1;
+    shifted: u64 = val >> one;     // 25 (0b011001)
+    result: u64 = shifted ^ val;   // 42 (0b101010)
+    return result;
+}

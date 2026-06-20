@@ -1,0 +1,23 @@
+// mem_checksum.vuma — compute checksum of buffer
+// Expected exit code: 36
+//
+// Computes a simple sum-of-bytes checksum of a 4-byte buffer containing
+// [10, 20, 30, 40]. Checksum = 10+20+30+40 = 100, but exit codes wrap to
+// 8 bits so we use a smaller pattern: [5, 7, 9, 15] = 36.
+
+fn main() -> i32 {
+    buf = allocate(4);
+    *(buf + 0) = 5;
+    *(buf + 1) = 7;
+    *(buf + 2) = 9;
+    *(buf + 3) = 15;
+    sum: u32 = 0;
+    i: u32 = 0;
+    while i < 4 {
+        v: u32 = *(buf + i);
+        sum = sum + v;
+        i = i + 1;
+    }
+    free(buf);
+    return sum;
+}

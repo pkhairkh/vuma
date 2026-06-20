@@ -1,0 +1,21 @@
+// struct_point_sum.vuma — sum two fields of a Point struct
+// Expected exit code: 30
+//
+// Allocates Point {x=10, y=20}, loads both fields into scalar
+// intermediates, adds them, and returns the sum (10 + 20 = 30).
+
+struct Point {
+    x: u64,
+    y: u64,
+}
+
+fn main() -> i32 {
+    p = allocate(16);
+    *(p + 0) = 10;
+    *(p + 8) = 20;
+    x: u64 = *(p + 0);
+    y: u64 = *(p + 8);
+    sum: u64 = x + y;
+    free(p);
+    return sum;
+}

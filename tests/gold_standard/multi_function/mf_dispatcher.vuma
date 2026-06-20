@@ -1,0 +1,18 @@
+// mf_dispatcher.vuma — main calls helper, helper does computation, returns 42
+// Expected exit code: 42
+//
+// Tests that a helper can perform a small computation (not just return
+// a constant) and that main can return its result. helper computes
+// 6 * 7 = 42 and returns it.
+
+fn compute() -> u32 {
+    a: u32 = 6;
+    b: u32 = 7;
+    r: u32 = a * b;
+    return r;
+}
+
+fn main() -> i32 {
+    v: u32 = compute();
+    return v;
+}

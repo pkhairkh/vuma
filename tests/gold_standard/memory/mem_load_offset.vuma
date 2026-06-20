@@ -1,0 +1,19 @@
+// mem_load_offset.vuma — load from computed offset
+// Expected exit code: 9
+//
+// Stores multiple values, then loads from a computed offset (3 + 1 = 4).
+// Value at offset 4 should be 9.
+
+fn main() -> i32 {
+    buf = allocate(16);
+    *(buf + 0) = 1;
+    *(buf + 1) = 3;
+    *(buf + 2) = 5;
+    *(buf + 3) = 7;
+    *(buf + 4) = 9;
+    *(buf + 5) = 11;
+    off: u64 = 3 + 1;  // = 4
+    val: u32 = *(buf + off);
+    free(buf);
+    return val;
+}

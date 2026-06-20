@@ -1,0 +1,17 @@
+// crypto_rot13_byte.vuma — ROT13 on 'A' (65) -> 'N' (78)
+// Expected exit code: 78
+//
+// ROT13 is the Caesar cipher with shift 13, used in Usenet for spoiler
+// obfuscation. For uppercase ASCII letters A-Z (65-90), ROT13 wraps
+// within A-Z. 'A' (65) + 13 = 78 ('N'); no wraparound is needed for
+// this specific input, so the straight-line code below is correct
+// without any conditional. (Inputs near M would need a wraparound
+// modulo 26, which would require `if` and is out of scope for these
+// straight-line crypto tests.)
+
+fn main() -> i32 {
+    c: u64 = 65;            // 'A'
+    shift: u64 = 13;
+    n: u64 = c + shift;     // 65 + 13 = 78 ('N')
+    return n;
+}

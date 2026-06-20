@@ -1,0 +1,12 @@
+// cf_for_count — for loop increments a counter that outlives the loop
+// Expected exit code: 10
+//
+// Exposes: for-body assignments to outer variable (count) don't propagate.
+
+fn main() -> i32 {
+    count: u32 = 0;
+    for i in 0..10 {
+        count = count + 1;
+    }
+    return count;
+}

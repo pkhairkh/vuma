@@ -1,0 +1,12 @@
+// cf_if_chain — else-if chain falls through to final else
+// Expected exit code: 3
+
+fn main() -> i32 {
+    if false {
+        return 1;
+    } else if false {
+        return 2;
+    } else {
+        return 3;
+    }
+}

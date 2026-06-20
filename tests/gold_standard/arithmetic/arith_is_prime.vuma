@@ -1,0 +1,27 @@
+// arith_is_prime — primality test
+// Expected exit code: 1
+//
+// Tests whether 17 is prime. Returns 1 (true) if prime, 0 (false) otherwise.
+// 17 is prime, so exit code is 1.
+
+fn is_prime(n: u32) -> u32 {
+    zero: u32 = 0;
+    one: u32 = 1;
+    two: u32 = 2;
+    if n < two {
+        return 0;
+    }
+    i: u32 = 2;
+    while i < n {
+        if n % i == zero {
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn main() -> i32 {
+    result: u32 = is_prime(17);
+    return result;
+}

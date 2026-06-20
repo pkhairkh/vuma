@@ -1,0 +1,17 @@
+// fn_call_in_expr.vuma — add(3,4) + add(1,2) = 7 + 3 = 10
+// Expected exit code: 10
+//
+// Tests that two function call results can be summed in main. Uses
+// intermediate variables because VUMA miscompiles nested call expressions
+// used directly inside arithmetic.
+
+fn add(a: u32, b: u32) -> u32 {
+    return a + b;
+}
+
+fn main() -> i32 {
+    a: u32 = add(3, 4);
+    b: u32 = add(1, 2);
+    v: u32 = a + b;
+    return v;
+}

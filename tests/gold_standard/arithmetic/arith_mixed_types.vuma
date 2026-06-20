@@ -1,0 +1,14 @@
+// arith_mixed_types — mixing u32 and u64 arithmetic
+// Expected exit code: 100
+//
+// Computes (u64_val + u32_val) and returns the low 8 bits.
+// u64_val = 0x100000000 (2^32), u32_val = 100. Sum = 0x100000064.
+// Low 8 bits = 0x64 = 100.
+
+fn main() -> i32 {
+    big: u64 = 4294967296;   // 2^32
+    small: u32 = 100;
+    sum: u64 = big + small;
+    low8: u32 = sum & 255;
+    return low8;
+}

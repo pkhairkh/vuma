@@ -1,0 +1,21 @@
+// arith_gcd — greatest common divisor via Euclidean algorithm
+// Expected exit code: 6
+//
+// gcd(48, 18) = gcd(18, 12) = gcd(12, 6) = gcd(6, 0) = 6.
+
+fn gcd(a: u32, b: u32) -> u32 {
+    x: u32 = a;
+    y: u32 = b;
+    zero: u32 = 0;
+    while y > zero {
+        t: u32 = x % y;
+        x = y;
+        y = t;
+    }
+    return x;
+}
+
+fn main() -> i32 {
+    g: u32 = gcd(48, 18);
+    return g;
+}
