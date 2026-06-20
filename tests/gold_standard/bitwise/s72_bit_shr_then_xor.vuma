@@ -1,0 +1,16 @@
+// s72_bit_shr_then_xor.vuma — (0xF8 >> 2) ^ 0x33 = 0x3E ^ 0x33 = 0x0D = 13
+// Expected exit code: 13
+//
+// Two-stage bitwise: shift right then XOR. (248 >> 2) = 62 (0x3E);
+// 62 ^ 51 = 13 (0x0D). All operands loaded into u64 variables
+// first (immediate-RHS bitwise drop bug workaround). Distinct
+// from s70_bit_shl_then_and (160), s69_bit_and_then_shr (126) and
+// s66_bit_and_then_xor (204).
+fn main() -> i32 {
+    a: u64 = 248;          // 0xF8
+    b: u64 = 2;
+    c: u64 = 51;           // 0x33
+    x: u64 = a >> b;       // 0x3E = 62
+    r: u64 = x ^ c;        // 0x0D = 13
+    return r;
+}

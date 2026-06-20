@@ -1,0 +1,24 @@
+// s73_struct_two_instances_sum.vuma — two instances, sum = 114 (76 + 38)
+// Expected exit code: 114
+//
+// Two 8-byte allocations treated as two independent struct
+// instances. Store 76/38 via `*p = literal`, load both fields,
+// sum -> 114. Uses `*p = literal` form (no offsets). Distinct
+// from s70_struct_two_instances_sum (250), s69_struct_two_
+// instances_sum (185) and s66_struct_two_instances_diff (130).
+struct Single {
+    a: u64,
+}
+
+fn main() -> i32 {
+    p1 = allocate(8);
+    p2 = allocate(8);
+    *p1 = 76;
+    *p2 = 38;
+    a: u64 = *p1;
+    b: u64 = *p2;
+    s: u64 = a + b;        // 114
+    free(p1);
+    free(p2);
+    return s;
+}

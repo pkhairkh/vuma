@@ -1,0 +1,23 @@
+// s72_mf_double_then_add.vuma — add_nine(double(45)) = add_nine(90) = 99
+// Expected exit code: 99
+//
+// Two single-arg helpers chained. double(x) = x * 2; add_nine(x)
+// = x + 9. main calls add_nine(double(45)) -> 90 + 9 = 99.
+// Distinct from s70_mf_double_then_add (95), s69_mf_double_then_
+// add (170) and s66_mf_double_then_sub (140).
+fn double(x: u32) -> u32 {
+    n: u32 = 2;
+    r: u32 = x * n;
+    return r;
+}
+fn add_nine(x: u32) -> u32 {
+    n: u32 = 9;
+    r: u32 = x + n;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = double(45);         // 90
+    r: u32 = add_nine(a);        // 99
+    return r;
+}
