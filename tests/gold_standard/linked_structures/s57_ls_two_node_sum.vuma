@@ -1,0 +1,20 @@
+// s57_ls_two_node_sum.vuma — two nodes, sum = 235 (115 + 120)
+// Expected exit code: 235
+//
+// Two 8-byte allocations treated as two independent "nodes".
+// Store 115/120 via `*ptr = literal`, load both, sum -> 235. Uses
+// `*ptr = literal` form (no offsets). Distinct from s54_ls_two_
+// node_sum (255) and s50_ls_two_node_sum (245).
+
+fn main() -> i32 {
+    n1 = allocate(8);
+    n2 = allocate(8);
+    *n1 = 115;
+    *n2 = 120;
+    a: u64 = *n1;
+    b: u64 = *n2;
+    s: u64 = a + b;        // 235
+    free(n1);
+    free(n2);
+    return s;
+}
