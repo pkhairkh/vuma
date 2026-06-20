@@ -1,0 +1,15 @@
+// s79_arith_div_then_sub.vuma — (100 / 2) - 8 = 50 - 8 = 42
+// Expected exit code: 42
+//
+// Two-stage arithmetic: divide then subtract (exact). 100 / 2 =
+// 50; 50 - 8 = 42. All operands kept as i32 locals. Straight-line
+// arithmetic. Distinct from s78_arith_add_then_div (11),
+// s77_arith_add_then_div (9) and s76_arith_add_then_div (6).
+fn main() -> i32 {
+    a: i32 = 100;
+    b: i32 = 2;
+    c: i32 = 8;
+    q: i32 = a / b;        // 50
+    r: i32 = q - c;        // 42
+    return r;
+}

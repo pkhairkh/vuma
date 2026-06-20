@@ -1,0 +1,15 @@
+// s81_conc_overwrite_last.vuma — store 100, overwrite with 188, load = 188
+// Expected exit code: 188
+//
+// Single 8-byte cell. Store 100 via `*ptr = literal`, overwrite
+// with 188 via `*ptr = literal`, load and return 188. Uses
+// `*ptr = literal` form. Distinct from s78_conc_overwrite_last (3),
+// s77_conc_overwrite_last (206) and s76_conc_overwrite_first (139).
+fn main() -> i32 {
+    c1 = allocate(8);
+    *c1 = 100;
+    *c1 = 188;
+    r: i32 = *c1;          // 188
+    free(c1);
+    return r;
+}

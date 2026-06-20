@@ -1,0 +1,16 @@
+// s81_fn_two_args_sub.vuma — sub(200, 58) = 200 - 58 = 142
+// Expected exit code: 142
+//
+// Helper sub(x, y) = x - y. main calls sub(200, 58) -> 142.
+// Two-arg function that subtracts. Distinct from s78_fn_two_
+// args_sub (3), s77_fn_two_args_mul (76) and s76_fn_two_args_mul
+// (123).
+fn sub(x: u32, y: u32) -> u32 {
+    r: u32 = x - y;
+    return r;
+}
+
+fn main() -> i32 {
+    v: u32 = sub(200, 58);
+    return v;
+}
