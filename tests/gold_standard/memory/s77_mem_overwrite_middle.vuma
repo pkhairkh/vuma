@@ -1,0 +1,22 @@
+// s77_mem_overwrite_middle.vuma — overwrite c2 to 157, load = 157
+// Expected exit code: 157
+//
+// Three independent 8-byte cells. Store 50/100/80 then overwrite
+// c2 to 157. Load c2 -> 157 (the overwritten value). Uses `*ptr
+// = literal` form. Distinct from s70_mem_overwrite_first (235),
+// s66_mem_overwrite_first (220) and s74_mem_overwrite_first (59).
+
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    c3 = allocate(8);
+    *c1 = 50;
+    *c2 = 100;
+    *c3 = 80;
+    *c2 = 157;
+    v: i32 = *c2;          // 157
+    free(c1);
+    free(c2);
+    free(c3);
+    return v;
+}

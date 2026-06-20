@@ -1,0 +1,16 @@
+// s78_u32_and_then_xor.vuma — (0x00 & 0x00) ^ 0x01 = 0x00 ^ 0x01 = 0x01 = 1
+// Expected exit code: 1
+//
+// Two-stage bitwise: AND then XOR. (0 & 0) = 0
+// (0x00); 0 ^ 1 = 1 (0x01). All operands
+// loaded into u32 variables first (immediate-RHS bitwise drop bug
+// workaround). Distinct from s74_u32_and_then_shr (28),
+// s73_u32_xor_then_and (98) and s72_u32_and_then_xor (140).
+fn main() -> i32 {
+    a: u32 = 0;           // 0x00
+    b: u32 = 0;           // 0x00
+    c: u32 = 1;           // 0x01
+    x: u32 = a & b;        // 0x00 = 0
+    r: u32 = x ^ c;        // 0x01 = 1
+    return r;
+}

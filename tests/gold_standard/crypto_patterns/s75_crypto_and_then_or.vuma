@@ -1,0 +1,16 @@
+// s75_crypto_and_then_or.vuma — (0x88 & 0xC0) | 0x33 = 0x80 | 0x33 = 0xB3 = 179
+// Expected exit code: 179
+//
+// Two-stage crypto op: AND then OR. 136 & 192 = 128 (0x80);
+// 128 | 51 = 179 (0xB3). All operands loaded into u64 variables
+// first (immediate-RHS bitwise drop bug workaround). Distinct from
+// s74_crypto_xor_then_and (203), s70_crypto_xor_then_and (99) and
+// s66_crypto_xor_pair (249).
+fn main() -> i32 {
+    a: u64 = 136;          // 0x88
+    b: u64 = 192;          // 0xC0
+    c: u64 = 51;           // 0x33
+    x: u64 = a & b;        // 0x80 = 128
+    r: u64 = x | c;        // 0xB3 = 179
+    return r;
+}

@@ -1,0 +1,17 @@
+// s75_fn_one_arg_add.vuma — add_nineteen(60) = 79
+// Expected exit code: 79
+//
+// Helper add_nineteen(x) = x + 19. main calls
+// add_nineteen(60) -> 79. Single-arg function that adds a
+// literal. Distinct from s74_fn_one_arg_add (167), s70_fn_one_
+// arg_add (165) and s66_fn_one_arg_sub (80).
+fn add_nineteen(x: u32) -> u32 {
+    n: u32 = 19;
+    r: u32 = x + n;
+    return r;
+}
+
+fn main() -> i32 {
+    v: u32 = add_nineteen(60);
+    return v;
+}
