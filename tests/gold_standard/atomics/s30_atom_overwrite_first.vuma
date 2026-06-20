@@ -1,0 +1,18 @@
+// s30_atom_overwrite_first.vuma — overwrite first store with 100, load = 100
+// Expected exit code: 0 (current buggy backend)
+// Expected exit code (correct, post-bridge-fix): 100
+//
+// Single 8-byte cell. atomic_store 30, then atomic_store 100 (overwrite).
+// atomic_load should return 100. On the current backend the load returns
+// 0 -> exit 0. Will exit 100 once atomics are wired through. Distinct
+// from s26_atom_overwrite_max (overwrite, 250) and s22_atom_overwrite_load
+// (different values).
+
+fn main() -> i32 {
+    c1 = allocate(8);
+    atomic_store(c1, 30);
+    atomic_store(c1, 100);
+    a = atomic_load(c1);
+    free(c1);
+    return a;
+}

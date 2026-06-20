@@ -1,0 +1,17 @@
+// s30_cf_if_single_assign.vuma — if true { x = 70 }; return x
+// Expected exit code (correct): 70
+// Observed on current x86_64 backend: 0 (FAIL — known bug)
+//
+// Single if-true block sets x = 70. With a literal `true` condition x
+// should end at 70. On the current backend the if-true body's single
+// assignment is dropped, so x stays 0 -> exit 0. Will exit 70 once the
+// if-body drop bug is fixed. Distinct from s26_cf_if_chain_3 (three-if
+// chain, observed 0) and s22_cf_if_assign_true (single-if, observed 0).
+
+fn main() -> i32 {
+    x: u32 = 0;
+    if true {
+        x = 70;
+    }
+    return x;
+}

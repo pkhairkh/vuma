@@ -1,0 +1,15 @@
+// s27_mem_store_load_lit.vuma — store 173, load = 173
+// Expected exit code: 173
+//
+// Single 8-byte cell. Store the literal 173 via `*ptr = literal`, load
+// it back, return. Uses `*ptr = literal` form (no offsets). Distinct
+// from s26_mem_store_load_lit (different value, 200) and
+// s22_mem_store_load_lit (different value).
+
+fn main() -> i32 {
+    p1 = allocate(8);
+    *p1 = 173;
+    a: u64 = *p1;
+    free(p1);
+    return a;
+}

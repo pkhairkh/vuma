@@ -1,0 +1,18 @@
+// s27_atom_overwrite_load.vuma — atomic_store 100, overwrite 200, load = 200
+// Expected exit code (correct): 200
+// Observed on current x86_64 backend: 0 (FAIL — known bug)
+//
+// Single 8-byte cell. atomic_store 100, then atomic_store 200 (overwrite),
+// then atomic_load. On the current backend loads return 0 -> exit 0. Will
+// exit 200 once atomic ops are wired through. Distinct from
+// s26_atom_overwrite_max (overwrite with 255) and s22_atom_overwrite_load
+// (different values).
+
+fn main() -> i32 {
+    c1 = allocate(8);
+    atomic_store(c1, 100);
+    atomic_store(c1, 200);
+    a = atomic_load(c1);
+    free(c1);
+    return a;
+}

@@ -1,0 +1,18 @@
+// s27_arith_add_mul_sub.vuma — ((10 + 20) * 3) - 25 = 90 - 25 = 65
+// Expected exit code: 65
+//
+// ADD then MUL then SUB. (10 + 20) = 30; 30 * 3 = 90; 90 - 25 = 65. All
+// operands loaded into u32 variables first. Distinct from
+// s26_arith_add_mul_sub (different operands) and s22_arith_add_then_mul
+// (no final sub).
+
+fn main() -> i32 {
+    a: u32 = 10;
+    b: u32 = 20;
+    c: u32 = 3;
+    d: u32 = 25;
+    s: u32 = a + b;       // 30
+    p: u32 = s * c;       // 90
+    r: u32 = p - d;       // 65
+    return r;
+}
