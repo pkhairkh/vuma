@@ -1,0 +1,17 @@
+// s51_crypto_and_then_xor.vuma — (0xF0 & 0xC0) ^ 0x03 = 0xC0 ^ 0x03 = 0xC3 = 195
+// Expected exit code: 195
+//
+// Two-stage crypto mix: AND two high-nibble masks then XOR a small
+// constant into the low bits. (240 & 192) = 192 (0xC0);
+// 192 ^ 3 = 195 (0xC3). All operands loaded into u64 variables first
+// (immediate-RHS bitwise drop bug workaround). Distinct from
+// s50_crypto_shr_extract (15) and s47_crypto_or_mask (240).
+
+fn main() -> i32 {
+    a: u64 = 240;          // 0xF0
+    b: u64 = 192;          // 0xC0
+    c: u64 = 3;            // 0x03
+    x: u64 = a & b;        // 0xC0 = 192
+    r: u64 = x ^ c;        // 0xC3 = 195
+    return r;
+}

@@ -1,0 +1,30 @@
+// s52_mf_three_chain.vuma — add_eight(5)=13, dbl(13)=26, add_fifteen(26)=41
+// Expected exit code: 41
+//
+// Three single-arg helpers chained: add_eight(x)=x+8, dbl(x)=x*2,
+// add_fifteen(x)=x+15. main calls add_eight(5) -> 13, dbl(13) -> 26,
+// add_fifteen(26) -> 41. Distinct from s50_mf_three_chain (50) and
+// s47_mf_three_chain (68).
+
+fn add_eight(x: u32) -> u32 {
+    n: u32 = 8;
+    r: u32 = x + n;
+    return r;
+}
+fn dbl(x: u32) -> u32 {
+    n: u32 = 2;
+    r: u32 = x * n;
+    return r;
+}
+fn add_fifteen(x: u32) -> u32 {
+    n: u32 = 15;
+    r: u32 = x + n;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = add_eight(5);     // 13
+    b: u32 = dbl(a);           // 26
+    r: u32 = add_fifteen(b);   // 41
+    return r;
+}
