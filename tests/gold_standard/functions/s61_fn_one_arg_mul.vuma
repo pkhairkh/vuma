@@ -1,0 +1,18 @@
+// s61_fn_one_arg_mul.vuma — mul_three(40) = 40 * 3 = 120
+// Expected exit code: 120
+// 
+// Helper mul_three(x) = x * 3. main calls mul_three(40) -> 120.
+// One-arg function returning the argument times three. Distinct
+// from s58_fn_zero_arg_lit (150), s58_fn_one_arg_sub (92) and s58_
+// fn_two_args_add (155).
+
+fn mul_three(x: u32) -> u32 {
+    n: u32 = 3;
+    r: u32 = x * n;
+    return r;
+}
+
+fn main() -> i32 {
+    v: u32 = mul_three(40);
+    return v;
+}

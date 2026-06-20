@@ -1,0 +1,16 @@
+// s60_arith_div_then_mul.vuma — (200 / 8) * 3 = 25 * 3 = 75
+// Expected exit code: 75
+//
+// Two-stage u32 computation: divide then multiply. 200 / 8 = 25;
+// 25 * 3 = 75. All operands loaded into u32 variables first.
+// Straight-line arithmetic. Distinct from s58_arith_div_then_mul
+// (120) and s58_arith_mul_then_div (35).
+
+fn main() -> i32 {
+    a: u32 = 200;
+    b: u32 = 8;
+    c: u32 = 3;
+    q: u32 = a / b;        // 25
+    r: u32 = q * c;        // 75
+    return r;
+}

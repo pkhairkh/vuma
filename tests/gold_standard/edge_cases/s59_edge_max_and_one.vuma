@@ -1,0 +1,14 @@
+// s59_edge_max_and_one.vuma — 255 & 1 = 1
+// Expected exit code: 1
+//
+// AND the max byte with a single low bit. 255 & 1 = 1. All operands
+// loaded into u32 variables first (immediate-RHS bitwise drop bug
+// workaround). Distinct from s58_edge_max_shr_one (127), s58_edge_one_
+// shl_seven (128) and s58_edge_zero_or_zero (0).
+
+fn main() -> i32 {
+    a: u32 = 255;
+    b: u32 = 1;
+    r: u32 = a & b;        // 1
+    return r;
+}

@@ -1,0 +1,18 @@
+// s62_crypto_or_then_and.vuma — (0xF0 | 0x0F) & 0xAA = 0xFF & 0xAA = 0xAA = 170
+// Expected exit code: 170
+// 
+// Two-stage crypto mix: OR the nibble masks to build 0xFF, then AND
+// with the alternating-bit mask 0xAA. (240 | 15) = 255 (0xFF);
+// 255 & 170 = 170 (0xAA). All operands loaded into u64 variables
+// first (immediate-RHS bitwise drop bug workaround). Distinct from
+// s51_crypto_and_then_xor (195), s58_crypto_or_then_xor (127) and
+// s55_crypto_nibble_clear (15).
+
+fn main() -> i32 {
+    a: u64 = 240;          // 0xF0
+    b: u64 = 15;           // 0x0F
+    c: u64 = 170;          // 0xAA
+    x: u64 = a | b;        // 0xFF = 255
+    r: u64 = x & c;        // 0xAA = 170
+    return r;
+}

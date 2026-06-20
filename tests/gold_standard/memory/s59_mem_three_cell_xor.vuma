@@ -1,0 +1,26 @@
+// s59_mem_three_cell_xor.vuma — three cells, xor = 85 (0xAA ^ 0x0F ^ 0xF0)
+// Expected exit code: 85
+//
+// Three 8-byte cells. Store 170/15/240 via `*ptr = literal`, load all
+// three, xor -> 85 (0x55). 170 ^ 15 = 165 (0xA5); 165 ^ 240 = 85
+// (0x55). Uses `*ptr = literal` form (no offsets). Distinct from
+// s58_mem_two_cell_sum (230), s58_mem_three_cell_or (112) and s58_mem_
+// overwrite_last (180).
+
+fn main() -> i32 {
+    p1 = allocate(8);
+    p2 = allocate(8);
+    p3 = allocate(8);
+    *p1 = 170;             // 0xAA
+    *p2 = 15;              // 0x0F
+    *p3 = 240;             // 0xF0
+    a: u64 = *p1;
+    b: u64 = *p2;
+    c: u64 = *p3;
+    t: u64 = a ^ b;        // 0xA5 = 165
+    s: u64 = t ^ c;        // 0x55 = 85
+    free(p1);
+    free(p2);
+    free(p3);
+    return s;
+}
