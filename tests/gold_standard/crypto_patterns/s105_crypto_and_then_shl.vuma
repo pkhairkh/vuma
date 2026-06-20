@@ -1,0 +1,13 @@
+// s105_crypto_and_then_shl.vuma — (0xFF & 0x13) << 3 = 0x13 << 3 = 0x98 = 152
+// Expected exit code: 152
+// 
+// Two-stage crypto mix: AND then shift-left. (255 & 19) = 19 (0x13); 19 << 3 = 152 (0x98). All operands loaded into u32 variables first (immediate-RHS bitwise drop bug workaround). Operands nonzero & distinct.
+// Distinct from s102_crypto_or_then_shl (68), s101_crypto_or_then_xor (175), s100_crypto_shr_then_or (61).
+fn main() -> i32 {
+    a: u32 = 255;          // 0xFF
+    b: u32 = 19;           // 0x13
+    n: u32 = 3;
+    x: u32 = a & b;        // 0x13 = 19
+    r: u32 = x << n;       // 0x98 = 152
+    return r;
+}

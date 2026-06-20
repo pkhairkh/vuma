@@ -1,0 +1,10 @@
+// s103_edge_max_or_val.vuma — 255 | 19 = 255 (OR with all-ones is all-ones)
+// Expected exit code: 255
+//
+// Edge case: OR with the max byte (0xFF) sets every bit. 255 | 19 = 255. All operands loaded into u32 variables first (immediate-RHS bitwise drop bug workaround).
+fn main() -> i32 {
+    a: u32 = 19;
+    m: u32 = 255;          // 0xFF
+    r: u32 = m | a;        // 255
+    return r;
+}

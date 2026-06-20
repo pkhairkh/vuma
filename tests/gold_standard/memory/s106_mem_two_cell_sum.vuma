@@ -1,0 +1,17 @@
+// s106_mem_two_cell_sum.vuma — store 8 + 4 in 2 cells, load and sum = 12
+// Expected exit code: 12
+//
+// Two 8-byte cells. Store 8 at c1, store 4 at c2, load each and return the sum (12). Uses `*ptr = literal` form. Straight-line code only.
+// Distinct from s102_mem_two_cell_sum (4), s101_mem_two_cell_sum (155), s100_mem_two_cell_diff (14).
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    *c1 = 8;
+    *c2 = 4;
+    a: u64 = *c1;          // 8
+    b: u64 = *c2;          // 4
+    s: u64 = a + b;        // 12
+    free(c1);
+    free(c2);
+    return s;
+}

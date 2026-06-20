@@ -1,0 +1,22 @@
+// s103_atom_three_cell_sum.vuma — atomic_store 3 cells (1, 2, 152), load and sum = 1+2+152 = 155
+// Expected exit code (correct): 155
+// Observed on current x86_64 backend: 0 (FAIL — known bug)
+//
+// Three 8-byte cells. atomic_store 1, 2, 152; atomic_load each and return the sum (1 + 2 + 152 = 155). On the current backend atomic_load returns 0 -> sum 0 -> exit 0. Will exit 155 once atomics are wired through.
+// Distinct from s94_atom_three_cell_sum (98).
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    c3 = allocate(8);
+    atomic_store(c1, 1);
+    atomic_store(c2, 2);
+    atomic_store(c3, 152);
+    a = atomic_load(c1);          // 1
+    b = atomic_load(c2);          // 2
+    c = atomic_load(c3);          // 152
+    s = a + b + c;                // 155
+    free(c1);
+    free(c2);
+    free(c3);
+    return s;
+}

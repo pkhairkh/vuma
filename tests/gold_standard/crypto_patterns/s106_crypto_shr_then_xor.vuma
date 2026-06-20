@@ -1,0 +1,13 @@
+// s106_crypto_shr_then_xor.vuma — (0xFF >> 1) ^ 0x1E = 0x7F ^ 0x1E = 0x61 = 97
+// Expected exit code: 97
+//
+// Two-stage crypto mix: shift-right then XOR. (255 >> 1) = 127 (0x7F); 127 ^ 30 = 97 (0x61). All operands loaded into u32 variables first (immediate-RHS bitwise drop bug workaround).
+// Distinct from s102_crypto_shr_then_xor (59), s101_crypto_or_then_xor (175), s100_crypto_shr_then_xor (57).
+fn main() -> i32 {
+    a: u32 = 255;         // 0xFF
+    b: u32 = 1;           // shift amount
+    c: u32 = 30;          // 0x1E
+    x: u32 = a >> b;        // 0x7F = 127
+    r: u32 = x ^ c;        // 0x61 = 97
+    return r;
+}

@@ -1,0 +1,21 @@
+// s105_mem_three_cell_diff.vuma — store 250, 30, 14 in 3 cells, 250-30-14 = 206
+// Expected exit code: 206
+// 
+// Three 8-byte cells. Store 250, 30, 14; load each, return 250 - 30 - 14 = 206. Uses `*ptr = literal` form. Straight-line code only.
+// Distinct from s102_mem_three_cell_diff (197), s101_mem_three_cell_diff (100), s100_mem_three_cell_sum (93).
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    c3 = allocate(8);
+    *c1 = 250;
+    *c2 = 30;
+    *c3 = 14;
+    a: u64 = *c1;          // 250
+    b: u64 = *c2;          // 30
+    c: u64 = *c3;          // 14
+    d: u64 = a - b - c;    // 206
+    free(c1);
+    free(c2);
+    free(c3);
+    return d;
+}

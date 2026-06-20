@@ -1,0 +1,21 @@
+// s103_struct_two_instances_diff.vuma — store 100 in s1, 1 in s2, diff = 100-1 = 99
+// Expected exit code: 99
+//
+// Two 8-byte struct instances. Store 100 in s1, store 1 in s2, load each, return the difference (99). Uses `*p = literal` form. Straight-line code only.
+// Distinct from s100_struct_two_instances_diff (22), s94_struct_two_instances_diff (58).
+struct Single {
+    a: u64,
+}
+
+fn main() -> i32 {
+    s1 = allocate(8);
+    s2 = allocate(8);
+    *s1 = 100;
+    *s2 = 1;
+    a: u64 = *s1;          // 100
+    b: u64 = *s2;          // 1
+    d: u64 = a - b;        // 99
+    free(s1);
+    free(s2);
+    return d;
+}

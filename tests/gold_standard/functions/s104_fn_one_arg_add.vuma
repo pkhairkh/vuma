@@ -1,0 +1,15 @@
+// s104_fn_one_arg_add.vuma — inc(81) = 81 + 1 = 82
+// Expected exit code: 82
+//
+// Helper inc(x) = x + 1. main calls inc(81) -> 82. Single-arg function adding a constant.
+// Distinct from s102_fn_zero_arg_lit (6), s102_fn_one_arg_add (19), s102_fn_two_args_mul (26).
+fn inc(x: u32) -> u32 {
+    k: u32 = 1;
+    r: u32 = x + k;
+    return r;
+}
+
+fn main() -> i32 {
+    v: u32 = inc(81);      // 82
+    return v;
+}

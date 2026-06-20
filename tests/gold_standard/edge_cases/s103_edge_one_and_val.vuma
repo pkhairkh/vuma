@@ -1,0 +1,10 @@
+// s103_edge_one_and_val.vuma — 1 & 37 = 1 (AND with one keeps only the low bit)
+// Expected exit code: 1
+//
+// Edge case: AND with one isolates the low bit. 1 & 37 = 1 (37 = 0b100101, low bit is 1). All operands loaded into u32 variables first (immediate-RHS bitwise drop bug workaround).
+fn main() -> i32 {
+    a: u32 = 37;
+    o: u32 = 1;
+    r: u32 = o & a;        // 1
+    return r;
+}

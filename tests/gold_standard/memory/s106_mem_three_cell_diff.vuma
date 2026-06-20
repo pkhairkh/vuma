@@ -1,0 +1,21 @@
+// s106_mem_three_cell_diff.vuma — store 200,80,99 in 3 cells, 200-80-99 = 21
+// Expected exit code: 21
+//
+// Three 8-byte cells. Store 200, 80, 99; load each, return 200 - 80 - 99 = 21. Uses `*ptr = literal` form. Straight-line code only.
+// Distinct from s102_mem_three_cell_diff (197), s101_mem_three_cell_diff (100), s100_mem_three_cell_sum (93).
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    c3 = allocate(8);
+    *c1 = 200;
+    *c2 = 80;
+    *c3 = 99;
+    a: u64 = *c1;          // 200
+    b: u64 = *c2;          // 80
+    c: u64 = *c3;          // 99
+    d: u64 = a - b - c;    // 21
+    free(c1);
+    free(c2);
+    free(c3);
+    return d;
+}
