@@ -1,0 +1,14 @@
+// s48_crypto_shr_extract.vuma — 0xD8 >> 4 = 0x0D = 13
+// Expected exit code: 13
+//
+// Right-shift extract of the high nibble. 216 >> 4 = 13 (0x0D). All
+// operands loaded into u64 variables first (immediate-RHS bitwise
+// drop bug workaround). Distinct from s46_crypto_shr_extract (11)
+// and s42_crypto_shl_xor.
+
+fn main() -> i32 {
+    a: u64 = 216;          // 0xD8
+    b: u64 = 4;
+    r: u64 = a >> b;       // 0x0D = 13
+    return r;
+}

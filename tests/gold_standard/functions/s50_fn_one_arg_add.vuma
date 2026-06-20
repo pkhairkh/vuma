@@ -1,0 +1,17 @@
+// s50_fn_one_arg_add.vuma — add_nine(60) = 69
+// Expected exit code: 69
+//
+// Helper add_nine(x) = x + 9. main calls add_nine(60) -> 69.
+// Single-arg function that adds a literal. Distinct from
+// s46_fn_one_arg_sub (73) and s43_fn_one_arg_add (87).
+
+fn add_nine(x: u32) -> u32 {
+    n: u32 = 9;
+    r: u32 = x + n;
+    return r;
+}
+
+fn main() -> i32 {
+    v: u32 = add_nine(60);
+    return v;
+}

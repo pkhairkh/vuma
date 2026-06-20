@@ -1,0 +1,23 @@
+// s50_mf_double_then_sub.vuma — dbl(60)=120, sub_twenty(120)=100
+// Expected exit code: 100
+//
+// Two single-arg helpers chained: dbl(x)=x*2, sub_twenty(x)=x-20.
+// main calls dbl(60) -> 120, sub_twenty(120) -> 100. Distinct from
+// s46_mf_double_then_add (115) and s43_mf_double_then_add (156).
+
+fn dbl(x: u32) -> u32 {
+    n: u32 = 2;
+    r: u32 = x * n;
+    return r;
+}
+fn sub_twenty(x: u32) -> u32 {
+    n: u32 = 20;
+    r: u32 = x - n;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = dbl(60);          // 120
+    r: u32 = sub_twenty(a);    // 100
+    return r;
+}
