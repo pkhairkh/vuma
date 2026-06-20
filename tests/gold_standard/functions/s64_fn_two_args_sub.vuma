@@ -1,0 +1,16 @@
+// s64_fn_two_args_sub.vuma — sub(210, 60) = 150
+// Expected exit code: 150
+//
+// Helper sub(x, y) = x - y. main calls sub(210, 60) -> 150. Two-arg
+// function returning the difference. Distinct from s62_fn_one_arg_add
+// (115), s62_fn_two_args_mul (180) and s62_fn_zero_arg_lit (145).
+
+fn sub(x: u32, y: u32) -> u32 {
+    r: u32 = x - y;
+    return r;
+}
+
+fn main() -> i32 {
+    v: u32 = sub(210, 60);
+    return v;
+}

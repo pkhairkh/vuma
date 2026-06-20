@@ -1,0 +1,14 @@
+// s65_edge_max_minus_three.vuma — 255 - 3 = 252
+// Expected exit code: 252
+//
+// Subtract three from the max u8 value. 255 - 3 = 252 (0xFC). All
+// operands loaded into u32 variables first. Straight-line arithmetic
+// on the max byte. Distinct from s51_edge_max_shr_three (31), s58_
+// edge_max_shr_one (127) and s62_edge_max_shr_two (63).
+
+fn main() -> i32 {
+    a: u32 = 255;
+    b: u32 = 3;
+    r: u32 = a - b;        // 252
+    return r;
+}

@@ -1,0 +1,30 @@
+// s63_mf_three_chain.vuma — add_six(50)=56, triple(56)=168, sub_eight(168)=160
+// Expected exit code: 160
+//
+// Three single-arg helpers chained: add_six(x)=x+6, triple(x)=x*3,
+// sub_eight(x)=x-8. main calls add_six(50) -> 56, triple(56) -> 168,
+// sub_eight(168) -> 160. Distinct from s51_mf_three_chain (53), s58_
+// mf_three_chain (50) and s55_mf_three_chain (53).
+
+fn add_six(x: u32) -> u32 {
+    n: u32 = 6;
+    r: u32 = x + n;
+    return r;
+}
+fn triple(x: u32) -> u32 {
+    n: u32 = 3;
+    r: u32 = x * n;
+    return r;
+}
+fn sub_eight(x: u32) -> u32 {
+    n: u32 = 8;
+    r: u32 = x - n;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = add_six(50);       // 56
+    b: u32 = triple(a);         // 168
+    r: u32 = sub_eight(b);      // 160
+    return r;
+}
