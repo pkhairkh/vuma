@@ -1,0 +1,16 @@
+// s28_fn_two_args_sub.vuma — sub_pair(150, 60) = 90
+// Expected exit code: 90
+//
+// Helper sub_pair(x, y) = x - y. main calls sub_pair(150, 60) -> 90.
+// Two literal arguments, subtraction. Distinct from s26_fn_two_args_div
+// (div(60, 4) = 15) and s22_fn_two_args_mul (mul(7, 6) = 42).
+
+fn sub_pair(x: u32, y: u32) -> u32 {
+    r: u32 = x - y;
+    return r;
+}
+
+fn main() -> i32 {
+    v: u32 = sub_pair(150, 60);
+    return v;
+}

@@ -1,0 +1,16 @@
+// s27_fn_zero_arg_lit.vuma — get_const() returns 130
+// Expected exit code: 130
+//
+// Helper get_const() takes no args and returns the literal 130. main
+// calls get_const() -> 130. Distinct from s26_fn_zero_arg_lit (returns
+// 99) and s22_fn_zero_arg_lit (returns 42).
+
+fn get_const() -> u32 {
+    r: u32 = 130;
+    return r;
+}
+
+fn main() -> i32 {
+    v: u32 = get_const();
+    return v;
+}

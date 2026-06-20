@@ -1,0 +1,25 @@
+// s30_mf_two_helpers_sum.vuma — add4(30) + mul3(15) = 34 + 45 = 79
+// Expected exit code: 79
+//
+// Two single-arg helpers, each called once from main, results added.
+// add4(x) = x + 4; mul3(x) = x * 3. main calls add4(30) -> 34 and
+// mul3(15) -> 45; sum = 79. Distinct from s26_mf_two_helpers_sum
+// (add3+mul2 = 53) and s22_mf_two_helpers_diff (dbl-half).
+
+fn add4(x: u32) -> u32 {
+    n: u32 = 4;
+    r: u32 = x + n;
+    return r;
+}
+fn mul3(x: u32) -> u32 {
+    n: u32 = 3;
+    r: u32 = x * n;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = add4(30);    // 34
+    b: u32 = mul3(15);    // 45
+    r: u32 = a + b;       // 79
+    return r;
+}
