@@ -1,0 +1,16 @@
+// s5_bit_xor_then_not.vuma — (240 ^ 15) ^ 255 = 0
+// Expected exit code: 0
+//
+// 240 (0xF0) XOR 15 (0x0F) = 255 (0xFF). XORing that with 255
+// cancels to 0. A two-stage XOR self-cancel. All operands loaded
+// into variables first to dodge the immediate-RHS bitwise drop bug.
+// Distinct from s4_bit_xor3_chain (3-operand single chain).
+
+fn main() -> i32 {
+    a: u64 = 240;    // 0xF0
+    b: u64 = 15;     // 0x0F
+    c: u64 = 255;    // 0xFF
+    x: u64 = a ^ b;  // 0xFF
+    y: u64 = x ^ c;  // 0x00
+    return y;
+}

@@ -49,9 +49,11 @@ fn execute_binary(binary: &[u8], qemu: Option<&str>, timeout_secs: u64) -> (i32,
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mut perms = fs::metadata(&bin_path).unwrap().permissions();
-        perms.set_mode(0o755);
-        let _ = fs::set_permissions(&bin_path, perms);
+        if let Ok(meta) = fs::metadata(&bin_path) {
+            let mut perms = meta.permissions();
+            perms.set_mode(0o755);
+            let _ = fs::set_permissions(&bin_path, perms);
+        }
     }
     let mut cmd = Command::new("timeout");
     cmd.arg(format!("{}", timeout_secs));
@@ -152,5 +154,14 @@ fn main() {
     let source = std::fs::read_to_string(path).unwrap();
     let binary = compile_for_backend(&source, kind).unwrap();
     std::fs::write(out_path, &binary).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(out_path) {
+            let mut perms = meta.permissions();
+            perms.set_mode(0o755);
+            let _ = std::fs::set_permissions(out_path, perms);
+        }
+    }
     eprintln!("Wrote {} bytes to {}", binary.len(), out_path);
 }

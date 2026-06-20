@@ -1,0 +1,20 @@
+// s5_ptr_two_cell_publish.vuma — publish value from back to front cell = 77
+// Expected exit code: 77
+//
+// Two 8-byte cells. front=11, back=77. We want to "publish" the
+// back value into the front cell. We read back into a variable,
+// then write it to front using `*ptr = variable + 0` (the
+// documented workaround for the silent-drop bug on `*ptr = variable`).
+
+fn main() -> i32 {
+    front = allocate(8);
+    back = allocate(8);
+    *front = 11;
+    *back = 77;
+    tmp: i32 = *back;
+    *front = tmp + 0;
+    v: i32 = *front;
+    free(front);
+    free(back);
+    return v;
+}
