@@ -1,0 +1,20 @@
+// s59_cf_if_else_const.vuma — if true { x = 120 } else { x = 15 }; return x
+// Expected exit code (correct): 120
+// Observed on current x86_64 backend: 15 (FAIL — known bug)
+//
+// If-true branch should set x = 120, else branch sets x = 15. With a
+// literal `true` condition the true branch should win -> 120. On the
+// current backend the if-true body's single assignment is dropped, so
+// the else body's assignment (15) survives instead. Will exit 120
+// once the if-body drop bug is fixed. Distinct from s58_cf_for_count_8
+// (8), s58_cf_while_acc_5 (40) and s58_cf_if_else_const (64).
+
+fn main() -> i32 {
+    x: u32 = 0;
+    if true {
+        x = 120;
+    } else {
+        x = 15;
+    }
+    return x;
+}
