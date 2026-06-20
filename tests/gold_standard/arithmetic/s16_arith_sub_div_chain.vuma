@@ -1,0 +1,15 @@
+// s16_arith_sub_div_chain.vuma — (200 - 50) / 5 = 30
+// Expected exit code: 30
+//
+// Two-stage sub-then-div. (200 - 50) = 150; 150 / 5 = 30. All operands
+// loaded into u32 variables first. Distinct from s13_arith_sub_div_mul
+// (three-stage sub-div-mul) and s12_arith_div_then_add (div-then-add).
+
+fn main() -> i32 {
+    a: u32 = 200;
+    b: u32 = 50;
+    d: u32 = 5;
+    s: u32 = a - b;       // 150
+    r: u32 = s / d;       // 30
+    return r;
+}

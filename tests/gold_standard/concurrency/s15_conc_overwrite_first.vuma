@@ -1,0 +1,26 @@
+// s15_conc_overwrite_first.vuma — overwrite first cell, sum = 72 (32 + 16 + 24)
+// Expected exit code: 72
+//
+// Three independent 8-byte cells. Store 8/16/24 in c1/c2/c3, then overwrite
+// c1 (the first cell) with 32. Load all three, sum -> 72. Distinct from
+// s14_conc_overwrite_middle (overwrites the middle cell) and
+// s7_conc_overwrite_first (values 5/10/15 -> 50/10/15).
+
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    c3 = allocate(8);
+    *c1 = 8;
+    *c2 = 16;
+    *c3 = 24;
+    *c1 = 32;
+    v1: i32 = *c1;
+    v2: i32 = *c2;
+    v3: i32 = *c3;
+    t: i32 = v1 + v2;
+    s: i32 = t + v3;
+    free(c1);
+    free(c2);
+    free(c3);
+    return s;
+}

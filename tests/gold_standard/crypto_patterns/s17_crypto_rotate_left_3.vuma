@@ -1,0 +1,20 @@
+// s17_crypto_rotate_left_3.vuma — rotate 0x1F left by 3 = 0xF8 = 248
+// Expected exit code: 248
+//
+// 8-bit rotate-left by 3: (0x1F << 3) | (0x1F >> 5) = 0xF8 | 0 = 0xF8.
+// Value 31 (0x1F) rotated left 3 bits within an 8-bit field gives 248
+// (0xF8). All operands loaded into variables first. Distinct from
+// s8_crypto_rotate_left_3 (rotates 0x09) and s6_crypto_rotate_right_4
+// (right rotation).
+
+fn main() -> i32 {
+    v: u64 = 31;          // 0x1F
+    sh_l: u64 = 3;
+    sh_r: u64 = 5;
+    m: u64 = 255;         // 0xFF
+    hi: u64 = v << sh_l;  // 0xF8 = 248
+    lo: u64 = v >> sh_r;  // 0x00 = 0
+    t: u64 = hi | lo;     // 0xF8
+    r: u64 = t & m;       // 0xF8 = 248
+    return r;
+}

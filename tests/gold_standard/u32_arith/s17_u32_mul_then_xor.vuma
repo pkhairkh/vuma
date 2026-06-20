@@ -1,0 +1,15 @@
+// s17_u32_mul_then_xor.vuma — (5 * 6) ^ 0x33 = 30 ^ 51 = 0x2D = 45
+// Expected exit code: 45
+//
+// Multiply-then-XOR. (5 * 6) = 30 (0x1E); 30 ^ 51 = 45 (0x2D). All
+// operands loaded into u32 variables first. Distinct from
+// s14_u32_or_then_xor (OR-then-XOR) and s10_u32_mul_add (mul-then-add).
+
+fn main() -> i32 {
+    a: u32 = 5;
+    b: u32 = 6;
+    c: u32 = 51;          // 0x33
+    p: u32 = a * b;       // 30 = 0x1E
+    r: u32 = p ^ c;       // 0x2D = 45
+    return r;
+}
