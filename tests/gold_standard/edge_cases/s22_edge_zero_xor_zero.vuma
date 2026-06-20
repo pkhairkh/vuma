@@ -1,0 +1,13 @@
+// s22_edge_zero_xor_zero.vuma — 0 ^ 0 = 0
+// Expected exit code: 0
+//
+// XOR identity: a ^ a = 0 (and 0 ^ 0 = 0). All operands loaded into u32
+// variables first. Distinct from s18_edge_max_xor_zero (255 ^ 0 = 255)
+// and s14_edge_xor_self (self-xor annihilation, 0xAA ^ 0xAA = 0).
+
+fn main() -> i32 {
+    a: u32 = 0;
+    b: u32 = 0;
+    r: u32 = a ^ b;       // 0
+    return r;
+}

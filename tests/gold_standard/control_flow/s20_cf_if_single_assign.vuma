@@ -1,0 +1,17 @@
+// s20_cf_if_single_assign.vuma — standalone if true sets x=128, return x
+// Expected exit code (correct): 128
+// Observed on current x86_64 backend: 0 (FAIL — known bug)
+//
+// Standalone if-true body sets x = 128. With a literal `true` condition
+// x should become 128. On the current backend the if-true body
+// assignment is dropped, so x keeps its init value 0. Distinct from
+// s18_cf_if_assign_true (if-true x=64) and s16_cf_if_single_assign
+// (if-true x=100).
+
+fn main() -> i32 {
+    x: u32 = 0;
+    if true {
+        x = 128;
+    }
+    return x;
+}
