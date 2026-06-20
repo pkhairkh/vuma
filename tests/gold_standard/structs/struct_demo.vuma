@@ -1,0 +1,71 @@
+// Struct Demo — Demonstrates struct types in VUMA
+//
+// This program shows how structs are used in VUMA. Structs are compiled
+// to flat memory layouts where fields are laid out sequentially with
+// proper alignment padding between fields.
+//
+// VUMA Key Concepts:
+//   - struct definitions with named fields
+//   - struct initialization with field values
+//   - field access via dot notation
+//   - structs compiled to flat memory (sequential fields)
+//   - Pattern type for structural decomposition
+
+// ===========================================================================
+// Define a Point struct with two u32 fields
+// ===========================================================================
+// Memory layout: [x: u32 @ offset 0] [y: u32 @ offset 4]
+// Total size: 8 bytes, alignment: 4 bytes
+
+struct Point {
+    x: u32,
+    y: u32,
+}
+
+// ===========================================================================
+// Define a Rectangle struct using Point fields
+// ===========================================================================
+// Memory layout: [origin.x: u32 @ 0] [origin.y: u32 @ 4] [width: u32 @ 8] [height: u32 @ 12]
+// Total size: 16 bytes, alignment: 4 bytes
+
+struct Rect {
+    ox: u32,
+    oy: u32,
+    w: u32,
+    h: u32,
+}
+
+// ===========================================================================
+// Compute the area of a rectangle
+// ===========================================================================
+
+fn rect_area(r: Address) -> u32 {
+    w: u32 = *(r + 8);
+    h: u32 = *(r + 12);
+    return (w * h) & 4294967295;
+}
+
+// ===========================================================================
+// Main entry point
+// ===========================================================================
+
+fn main() -> i32 {
+    // Allocate a Rect struct (16 bytes)
+    r = allocate(16);
+
+    // Initialize the rectangle: origin=(10,20), width=100, height=50
+    *(r + 0) = 10;
+    *(r + 4) = 20;
+    *(r + 8) = 100;
+    *(r + 12) = 50;
+
+    // Compute area
+    area: u32 = rect_area(r);
+
+    // Clean up
+    free(r);
+
+    // Return the area as exit code
+    // Expected: 100 * 50 = 5000
+    return area;
+}

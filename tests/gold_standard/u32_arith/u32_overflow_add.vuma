@@ -1,0 +1,11 @@
+// u32_overflow_add — u32 add overflow: 0xFFFFFFFF + 1 wraps to 0
+// Expected exit code: 0
+//
+// 4294967295 + 1 = 0x100000000. Masked to u32 = 0.
+
+fn main() -> i32 {
+    max: u32 = 4294967295;
+    one: u32 = 1;
+    overflow: u32 = (max + one) & 4294967295;
+    return overflow & 255;
+}

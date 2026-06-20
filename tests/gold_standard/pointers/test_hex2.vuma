@@ -1,0 +1,7 @@
+// Minimal hex test: allocate a 1-byte buffer and print_hex it
+fn main() -> i32 {
+    buf = allocate(1);
+    *(buf + 0) = 0x41;
+    print_hex(buf, 1);
+    return 0;
+}

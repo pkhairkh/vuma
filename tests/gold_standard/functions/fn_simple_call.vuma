@@ -1,0 +1,14 @@
+// fn_simple_call.vuma — call a function that returns 42
+// Expected exit code: 42
+//
+// Tests the most basic function call: a leaf function with no parameters
+// that returns a constant. Straight-line code; no branches, no loops.
+
+fn get_value() -> u32 {
+    return 42;
+}
+
+fn main() -> i32 {
+    v: u32 = get_value();
+    return v;
+}

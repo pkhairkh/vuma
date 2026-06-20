@@ -1,0 +1,20 @@
+// ptr_store_in_func.vuma — function-local allocate, store, and load
+// Expected exit code: 42
+//
+// A helper function allocates its own buffer, stores 42 at offset 0
+// via *buf, loads it back, frees the buffer, and returns the loaded
+// value. main simply calls the helper and returns its result.
+// Exercises self-contained buffer lifetime inside a single function.
+
+fn make_and_load() -> i32 {
+    buf = allocate(8);
+    *buf = 42;
+    val: i32 = *buf;
+    free(buf);
+    return val;
+}
+
+fn main() -> i32 {
+    result: i32 = make_and_load();
+    return result;
+}

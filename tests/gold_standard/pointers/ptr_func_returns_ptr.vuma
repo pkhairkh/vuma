@@ -1,0 +1,20 @@
+// ptr_func_returns_ptr.vuma — function allocates and returns Address
+// Expected exit code: 42
+//
+// A helper function allocates a buffer, stores 42 at offset 0, and
+// returns the buffer's Address to the caller. main then loads from
+// the returned address, frees it, and returns the loaded value.
+// Exercises Address-typed return values and ownership transfer.
+
+fn make_buf() -> Address {
+    buf = allocate(64);
+    *buf = 42;
+    return buf;
+}
+
+fn main() -> i32 {
+    buf = make_buf();
+    val: i32 = *buf;
+    free(buf);
+    return val;
+}

@@ -1,0 +1,16 @@
+// mf_compute_call.vuma — main computes 3+4=7, helper adds 3, returns 10
+// Expected exit code: 10
+//
+// Tests that main can compute a value with arithmetic, then pass it
+// to a helper which further transforms it. helper(x) = x + 3; main
+// passes 7, so result = 10.
+
+fn add_three(x: u32) -> u32 {
+    return x + 3;
+}
+
+fn main() -> i32 {
+    a: u32 = 3 + 4;
+    v: u32 = add_three(a);
+    return v;
+}

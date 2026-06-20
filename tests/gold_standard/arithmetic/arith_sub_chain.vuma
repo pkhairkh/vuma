@@ -1,0 +1,16 @@
+// arith_sub_chain — chain of subtractions: 100 - 1 - 2 - ... - 10 = 45
+// Expected exit code: 45
+//
+// Starts with 100 and subtracts each integer in [1, 10]. The result is
+// 100 - (1+2+...+10) = 100 - 55 = 45.
+
+fn main() -> i32 {
+    acc: u32 = 100;
+    i: u32 = 1;
+    n: u32 = 11;
+    while i < n {
+        acc = acc - i;
+        i = i + 1;
+    }
+    return acc;
+}

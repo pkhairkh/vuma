@@ -1,0 +1,15 @@
+// crypto_xor_checksum.vuma — XOR checksum of one value
+// Expected exit code: 42
+//
+// The XOR checksum is the additive checksum's XOR analog: fold every
+// byte into a running XOR accumulator. For a single value v with an
+// initial accumulator of 0, the result is just v. (Because XOR is
+// self-cancelling, XOR checksums detect any odd number of bit flips
+// but not even numbers.)
+
+fn main() -> i32 {
+    acc: u64 = 0;
+    v: u64 = 42;
+    sum: u64 = acc ^ v;            // 0 ^ 42 = 42
+    return sum;
+}

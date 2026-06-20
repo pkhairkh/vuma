@@ -1,0 +1,15 @@
+// fn_return_u32.vuma — function returns u32
+// Expected exit code: 201
+//
+// Tests a function that returns a u32 value. Verifies u32 return type
+// propagates through the call/return boundary. Spec called for 300, but
+// exit codes are 8-bit (300 mod 256 = 44), so 201 is used instead.
+
+fn get_u32() -> u32 {
+    return 201;
+}
+
+fn main() -> i32 {
+    v: u32 = get_u32();
+    return v;
+}

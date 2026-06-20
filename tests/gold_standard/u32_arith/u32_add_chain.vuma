@@ -1,0 +1,15 @@
+// u32_add_chain — chain of u32 additions: 1 + 2 + 3 + 4
+// Expected exit code: 10
+//
+// Each addition is masked to u32. The final sum is 10.
+
+fn main() -> i32 {
+    a: u32 = 1;
+    b: u32 = 2;
+    c: u32 = 3;
+    d: u32 = 4;
+    s1: u32 = (a + b) & 4294967295;
+    s2: u32 = (s1 + c) & 4294967295;
+    s3: u32 = (s2 + d) & 4294967295;
+    return s3;
+}

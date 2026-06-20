@@ -1,0 +1,21 @@
+// conc_double_store.vuma — store 55 twice into the same cell, load
+// Expected exit code: 55
+//
+// Idempotent-store pattern: write the same value to the cell twice.
+// The observed loaded value is the same as if the store had happened
+// once. This is the expected behavior of every atomic store (Relaxed,
+// Release, SeqCst): duplicate writes are coalesced observable-to-
+// observable. Single-threaded here; multi-threaded, the same property
+// is what makes lock-free counters work.
+//
+// Uses non-atomic `*ptr` per the bridge-gap workaround documented in
+// conc_atomic_basic.vuma.
+
+fn main() -> i32 {
+    cell = allocate(8);
+    *cell = 55;
+    *cell = 55;
+    val: i32 = *cell;
+    free(cell);
+    return val;
+}

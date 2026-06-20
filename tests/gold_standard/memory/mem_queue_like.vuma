@@ -1,0 +1,26 @@
+// mem_queue_like.vuma — simulate a queue (enqueue/dequeue)
+// Expected exit code: 0
+//
+// Simulates a queue in a memory buffer. Enqueues 3 values, then dequeues
+// them and verifies FIFO order. Uses head and tail pointers.
+
+fn main() -> i32 {
+    queue = allocate(8);
+    head: u32 = 0;
+    tail: u32 = 0;
+    // Enqueue 11, 22, 33
+    *(queue + tail) = 11; tail = tail + 1;
+    *(queue + tail) = 22; tail = tail + 1;
+    *(queue + tail) = 33; tail = tail + 1;
+    // Dequeue three times (FIFO: 11, 22, 33)
+    d1: u32 = *(queue + head); head = head + 1;
+    d2: u32 = *(queue + head); head = head + 1;
+    d3: u32 = *(queue + head); head = head + 1;
+    free(queue);
+    if d1 == 11 {
+        if d2 == 22 {
+            if d3 == 33 { return 0; }
+        }
+    }
+    return 1;
+}
