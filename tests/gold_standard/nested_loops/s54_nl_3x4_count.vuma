@@ -1,0 +1,18 @@
+// s54_nl_3x4_count.vuma — 3x4 nested loop, count = 12
+// Expected exit code (correct): 12
+// Observed on current x86_64 backend: 0 (FAIL — known bug)
+//
+// Outer loop 3 iterations, inner loop 4 iterations each -> 3*4 = 12
+// total. Counter increments by 1 each inner iteration. Known
+// "for-body assignments don't propagate" bug keeps count at 0.
+// Distinct from s50_nl_3x7_count (21) and s49_nl_3x2_count (6).
+
+fn main() -> i32 {
+    count: u32 = 0;
+    for i in 0..3 {
+        for j in 0..4 {
+            count = count + 1;
+        }
+    }
+    return count;
+}
