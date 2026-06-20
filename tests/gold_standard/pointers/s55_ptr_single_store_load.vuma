@@ -1,0 +1,14 @@
+// s55_ptr_single_store_load.vuma — store 185, load 185
+// Expected exit code: 185
+//
+// Single 8-byte cell. Store 185 via `*p = literal`, load and return
+// 185. Uses `*ptr = literal` form. Distinct from s50_ptr_single_
+// store_load (155) and s53_ptr_single_store_load (142).
+
+fn main() -> i32 {
+    p = allocate(8);
+    *p = 185;
+    r: i32 = *p;
+    free(p);
+    return r;
+}
