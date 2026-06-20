@@ -1,0 +1,16 @@
+// s46_u32_or_then_and.vuma — (0xF0 | 0x0F) & 0xC3 = 0xFF & 0xC3 = 0xC3 = 195
+// Expected exit code: 195
+//
+// Two-stage bitwise: OR then AND. (240 | 15) = 255 (0xFF); 255 & 195
+// = 195 (0xC3). All operands loaded into u32 variables first
+// (immediate-RHS bitwise drop bug workaround). Distinct from s42_
+// u32_shl_then_add (26) and s38_u32_or_then_and.
+
+fn main() -> i32 {
+    a: u32 = 240;          // 0xF0
+    b: u32 = 15;           // 0x0F
+    c: u32 = 195;          // 0xC3
+    o: u32 = a | b;        // 0xFF = 255
+    r: u32 = o & c;        // 0xC3 = 195
+    return r;
+}

@@ -1,0 +1,16 @@
+// s43_u32_mul_then_xor.vuma — (12 * 5) ^ 0xAA = 60 ^ 170 = 150
+// Expected exit code: 150
+//
+// Two-stage u32 computation: multiply then XOR. (12 * 5) = 60;
+// 60 ^ 170 = 150 (0x96). All operands loaded into u32 variables
+// first (immediate-RHS bitwise drop bug workaround). Distinct from
+// s42_u32_mul_then_xor (210) and s38_u32_add_then_and (200).
+
+fn main() -> i32 {
+    a: u32 = 12;
+    b: u32 = 5;
+    c: u32 = 170;          // 0xAA
+    m: u32 = a * b;        // 60
+    r: u32 = m ^ c;        // 150
+    return r;
+}

@@ -1,0 +1,16 @@
+// s43_ls_overwrite_value.vuma — overwrite 50 -> 180, load 180
+// Expected exit code: 180
+//
+// Single 8-byte "node". Store 50 via `*ptr = literal`, then
+// overwrite to 180 via `*ptr = literal`, load and return 180.
+// Uses `*ptr = literal` form. Distinct from s42_ls_overwrite_value
+// (200) and s38_ls_overwrite_first (130).
+
+fn main() -> i32 {
+    n1 = allocate(8);
+    *n1 = 50;
+    *n1 = 180;
+    v: u64 = *n1;          // 180
+    free(n1);
+    return v;
+}

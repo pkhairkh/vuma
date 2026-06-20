@@ -1,0 +1,14 @@
+// s45_edge_one_shl_three.vuma — 1 << 3 = 8
+// Expected exit code: 8
+//
+// Single-bit shift into the fourth position. 1 << 3 = 8 (0x08). All
+// operands loaded into u32 variables first (immediate-RHS bitwise
+// drop bug workaround). Distinct from s42_edge_one_shl_four (16) and
+// s34_edge_one_shl_five (32).
+
+fn main() -> i32 {
+    a: u32 = 1;
+    b: u32 = 3;
+    r: u32 = a << b;       // 8
+    return r;
+}

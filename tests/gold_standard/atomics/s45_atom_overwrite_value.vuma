@@ -1,0 +1,18 @@
+// s45_atom_overwrite_value.vuma — overwrite to 200, atomic_load = 200
+// Expected exit code: 0 (current buggy backend)
+// Expected exit code (correct, post-bridge-fix): 200
+//
+// Single 8-byte cell. atomic_store 60, then atomic_store 200.
+// atomic_load should return 200. On the current backend the load
+// returns 0 -> exit 0. Will exit 200 once atomics are wired through.
+// Distinct from s42_atom_overwrite_max (start 90, overwrite 255) and
+// s38_atom_overwrite_value (start 50, overwrite 200).
+
+fn main() -> i32 {
+    c1 = allocate(8);
+    atomic_store(c1, 60);
+    atomic_store(c1, 200);
+    v = atomic_load(c1);
+    free(c1);
+    return v;
+}
