@@ -1,0 +1,16 @@
+// s44_u32_shl_then_and.vuma — (1 << 5) & 0xFE = 32 & 254 = 32
+// Expected exit code: 32
+//
+// Two-stage bitwise: shift left then AND. (1 << 5) = 32 (0x20);
+// 32 & 254 = 32 (0x20). All operands loaded into u32 variables first
+// (immediate-RHS bitwise drop bug workaround). Distinct from s42_u32_
+// shl_then_add (26) and s38_u32_shl_then_xor (37).
+
+fn main() -> i32 {
+    a: u32 = 1;
+    b: u32 = 5;
+    c: u32 = 254;          // 0xFE
+    s: u32 = a << b;       // 32
+    r: u32 = s & c;        // 32
+    return r;
+}

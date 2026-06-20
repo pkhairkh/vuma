@@ -1,0 +1,18 @@
+// s46_arith_mul_mod_add.vuma — (12 * 7) % 50 + 15 = 34 + 15 = 49
+// Expected exit code: 49
+//
+// Four-stage u32 computation: multiply, mod, then add. 12 * 7 = 84;
+// 84 % 50 = 34; 34 + 15 = 49. All operands loaded into u32
+// variables first. Straight-line arithmetic. Distinct from
+// s42_arith_add_mul_sub (add-mul-sub, 200) and s38_arith_mul_then_div.
+
+fn main() -> i32 {
+    a: u32 = 12;
+    b: u32 = 7;
+    c: u32 = 50;
+    d: u32 = 15;
+    p: u32 = a * b;        // 84
+    m: u32 = p % c;        // 34
+    r: u32 = m + d;        // 49
+    return r;
+}

@@ -1,0 +1,14 @@
+// s43_crypto_nibble_clear.vuma — 0xFF & 0xF0 = 0xF0 = 240
+// Expected exit code: 240
+//
+// Mask off the low nibble. 255 & 240 = 240. All operands loaded
+// into u64 variables first (immediate-RHS bitwise drop bug
+// workaround). Distinct from s42_crypto_nibble_clear (0xF0) and
+// s38_crypto_nibble_clear.
+
+fn main() -> i32 {
+    a: u64 = 255;          // 0xFF
+    b: u64 = 240;          // 0xF0
+    r: u64 = a & b;        // 0xF0 = 240
+    return r;
+}

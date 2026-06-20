@@ -1,0 +1,16 @@
+// s46_u32_xor_then_shr.vuma — (0xAA ^ 0x55) >> 1 = 0xFF >> 1 = 0x7F = 127
+// Expected exit code: 127
+//
+// Two-stage bitwise: XOR then shift right. (170 ^ 85) = 255 (0xFF);
+// 255 >> 1 = 127 (0x7F). All operands loaded into u32 variables
+// first (immediate-RHS bitwise drop bug workaround). Distinct from
+// s42_u32_xor_then_or (255) and s38_u32_shl_then_xor (37).
+
+fn main() -> i32 {
+    a: u32 = 170;          // 0xAA
+    b: u32 = 85;           // 0x55
+    c: u32 = 1;
+    x: u32 = a ^ b;        // 0xFF = 255
+    r: u32 = x >> c;       // 0x7F = 127
+    return r;
+}
