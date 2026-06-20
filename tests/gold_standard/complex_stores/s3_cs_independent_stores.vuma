@@ -1,0 +1,18 @@
+// s3_cs_independent_stores.vuma — store at non-adjacent offsets, sum
+// Expected exit code: 33  (3 + 30)
+//
+// 32-byte buffer; stores happen at offset 0 and offset 24 (skipping
+// the middle 16 bytes). main loads both stored slots and returns sum.
+
+fn main() -> i32 {
+    buf = allocate(32);
+    *(buf + 0) = 3;
+    *(buf + 24) = 30;
+
+    a: u64 = *(buf + 0);
+    b: u64 = *(buf + 24);
+    s: u64 = a + b;
+
+    free(buf);
+    return s;
+}

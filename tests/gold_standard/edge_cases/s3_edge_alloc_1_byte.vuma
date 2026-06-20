@@ -1,0 +1,12 @@
+// s3_edge_alloc_1_byte.vuma — allocate(1), store 0, free, return 0
+// Expected exit code: 0
+//
+// Edge case: minimum-size allocation of a single byte. Stores 0, frees
+// the buffer, returns 0. Verifies the allocator handles size-1 requests.
+
+fn main() -> i32 {
+    buf = allocate(1);
+    *(buf + 0) = 0;
+    free(buf);
+    return 0;
+}
