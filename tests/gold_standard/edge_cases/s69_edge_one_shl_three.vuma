@@ -1,0 +1,13 @@
+// s69_edge_one_shl_three.vuma -- 1 << 3 = 8
+// Expected exit code: 8
+//
+// Shift the literal 1 left by 3. 1 << 3 = 8 (0x08). All operands
+// loaded into u32 variables first (immediate-RHS bitwise drop bug
+// workaround). Distinct from s66_edge_one_shl_five (32), s65_edge_
+// one_shl_six (64) and s64_edge_one_shl_seven (128).
+fn main() -> i32 {
+    a: u32 = 1;
+    b: u32 = 3;
+    r: u32 = a << b;       // 8
+    return r;
+}

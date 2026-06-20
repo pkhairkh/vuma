@@ -1,0 +1,14 @@
+// s70_edge_half_max_and_low.vuma — 127 & 7 = 7
+// Expected exit code: 7
+//
+// AND the half-max value 127 (0x7F) with the low-nibble mask 7
+// (0x07). 127 & 7 = 7. All operands loaded into u32 variables
+// first (immediate-RHS bitwise drop bug workaround). Distinct
+// from s66_edge_zero_xor_max (255), s65_edge_max_xor_sixteen
+// (239) and s62_edge_zero_xor_high_bit (128).
+fn main() -> i32 {
+    a: u32 = 127;          // 0x7F
+    b: u32 = 7;            // 0x07
+    r: u32 = a & b;        // 0x07 = 7
+    return r;
+}

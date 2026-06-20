@@ -1,0 +1,19 @@
+// s67_mem_overwrite_first.vuma — overwrite c1 to 235, load = 235
+// Expected exit code: 235
+//
+// Two 8-byte cells. Store 90 at c1, store 40 at c2 then
+// overwrite c1 to 235. Load c1 -> 235 (the overwritten
+// value). Uses `*ptr = literal` form. Distinct from s66_mem_
+// overwrite_last (200), s62_mem_overwrite_middle (170) and
+// s58_mem_overwrite_last (180).
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    *c1 = 90;
+    *c2 = 40;
+    *c1 = 235;
+    v: u64 = *c1;          // 235
+    free(c1);
+    free(c2);
+    return v;
+}

@@ -1,0 +1,24 @@
+// s67_mf_double_then_add.vuma — add_twenty(double(70)) = add_twenty(140) = 160
+// Expected exit code: 160
+//
+// Two single-arg helpers chained. double(x) = x * 2;
+// add_twenty(x) = x + 20. main calls add_twenty(double(70))
+// -> 140 + 20 = 160. Distinct from s66_mf_double_then_sub
+// (140), s62_mf_double_then_add (115) and s58_mf_double_then_
+// add (120).
+fn double(x: u32) -> u32 {
+    n: u32 = 2;
+    r: u32 = x * n;
+    return r;
+}
+fn add_twenty(x: u32) -> u32 {
+    n: u32 = 20;
+    r: u32 = x + n;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = double(70);          // 140
+    r: u32 = add_twenty(a);       // 160
+    return r;
+}
