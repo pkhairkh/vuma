@@ -1,0 +1,15 @@
+// s102_cf_while_acc.vuma — while loop accumulates 1 * 130 = 130
+// Expected exit code (correct): 130
+// Observed on current x86_64 backend: 0 (FAIL — known bug)
+//
+// Accumulator starts at 0. While i < 130, add 1 each iteration -> 1 * 130 = 130 total. i increments by 1 each iteration. Known "while-body assignments don't propagate" bug keeps acc at 0 -> exit 0. Will exit 130 once fixed.
+// Distinct from s101_cf_for_count (83), s101_cf_if_else_const (19), s101_cf_if_single_assign (56).
+fn main() -> i32 {
+    acc: u32 = 0;
+    i: u32 = 0;
+    while i < 130 {
+        acc = acc + 1;
+        i = i + 1;
+    }
+    return acc;
+}

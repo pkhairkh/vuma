@@ -1,0 +1,13 @@
+// s102_arith_add_then_div.vuma — (100 + 48) / 2 = 148 / 2 = 74
+// Expected exit code: 74
+//
+// Two-stage arithmetic: add then integer-divide. 100 + 48 = 148; 148 / 2 = 74. All operands kept as i32 locals. Straight-line arithmetic.
+// Distinct from s101_arith_add_then_mod (51), s101_arith_mul_then_add (131), s101_arith_sub_then_mul (240).
+fn main() -> i32 {
+    a: i32 = 100;
+    b: i32 = 48;
+    c: i32 = 2;
+    s: i32 = a + b;        // 148
+    r: i32 = s / c;        // 74
+    return r;
+}

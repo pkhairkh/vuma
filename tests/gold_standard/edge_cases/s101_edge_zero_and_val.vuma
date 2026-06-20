@@ -1,0 +1,13 @@
+// s101_edge_zero_and_val.vuma — 0 & 73 = 0 (AND with zero clears all bits)
+// Expected exit code: 0
+//
+// Edge case: AND with the zero byte clears every bit. 0 & 73 = 0.
+// All operands loaded into u32 variables first (immediate-RHS
+// bitwise drop bug workaround). Distinct from s98_edge_zero_xor_val
+// (13), s97_edge_zero_or_val (90) and s94_edge_zero_xor_val (75).
+fn main() -> i32 {
+    a: u32 = 0;
+    b: u32 = 73;           // 0x49
+    r: u32 = a & b;        // 0x00 = 0
+    return r;
+}

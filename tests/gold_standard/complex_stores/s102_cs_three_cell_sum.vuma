@@ -1,0 +1,21 @@
+// s102_cs_three_cell_sum.vuma — store 1+1+24 in 3 cells, load and sum = 26
+// Expected exit code: 26
+//
+// Three 8-byte cells. Store 1, 1, 24; load each and return the sum (26). Uses `*ptr = literal` form. Straight-line code only.
+// Distinct from s101_cs_overwrite_first (28), s101_cs_three_cell_sum (150), s101_cs_two_cell_xor (192).
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    c3 = allocate(8);
+    *c1 = 1;
+    *c2 = 1;
+    *c3 = 24;
+    a: u64 = *c1;          // 1
+    b: u64 = *c2;          // 1
+    c: u64 = *c3;          // 24
+    s: u64 = a + b + c;    // 26
+    free(c1);
+    free(c2);
+    free(c3);
+    return s;
+}
