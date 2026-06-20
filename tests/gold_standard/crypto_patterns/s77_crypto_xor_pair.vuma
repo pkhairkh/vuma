@@ -1,0 +1,15 @@
+// s77_crypto_xor_pair.vuma — 0xC9 ^ 0x18 = 0xD1 = 209
+// Expected exit code: 209
+//
+// Two-byte XOR. 201 ^ 24 = 209 (0xD1). High-bit / low-nibble
+// pair (0xC9 / 0x18) produces the byte 0xD1. All operands loaded
+// into u64 variables first (immediate-RHS bitwise drop bug
+// workaround). Distinct from s70_crypto_xor_pair (42), s66_
+// crypto_xor_pair (249) and s74_crypto_xor_pair (156).
+
+fn main() -> i32 {
+    a: u64 = 201;          // 0xC9
+    b: u64 = 24;           // 0x18
+    r: u64 = a ^ b;        // 0xD1 = 209
+    return r;
+}

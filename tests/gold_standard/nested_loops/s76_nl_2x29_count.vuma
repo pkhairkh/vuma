@@ -1,0 +1,18 @@
+// s76_nl_2x29_count.vuma — 2x29 nested loop, count = 58
+// Expected exit code (correct): 58
+// Observed on current x86_64 backend: 0 (FAIL — known bug)
+//
+// Outer loop 2 iterations, inner loop 29 iterations each ->
+// 2*29 = 58 total. Counter increments by 1 each inner iteration.
+// Known "for-body assignments don't propagate" bug keeps count
+// at 0. Distinct from s74_nl_2x19_count (38), s73_nl_3x17_count
+// (51) and s72_nl_3x13_count (39).
+fn main() -> i32 {
+    count: u32 = 0;
+    for i in 0..2 {
+        for j in 0..29 {
+            count = count + 1;
+        }
+    }
+    return count;
+}

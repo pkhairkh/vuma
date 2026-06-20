@@ -1,0 +1,16 @@
+// s75_arith_mul_then_mod.vuma — (17 * 7) % 30 = 119 % 30 = 29
+// Expected exit code: 29
+//
+// Two-stage arithmetic: multiply then modulus. 17 * 7 = 119;
+// 119 % 30 = 29 (119 = 3*30 + 29). All operands kept as i32 locals.
+// Straight-line arithmetic. Distinct from s74_arith_mul_then_sub
+// (109), s70_arith_mul_then_mod (100) and s62_arith_mul_then_add
+// (135).
+fn main() -> i32 {
+    a: i32 = 17;
+    b: i32 = 7;
+    c: i32 = 30;
+    m: i32 = a * b;        // 119
+    r: i32 = m % c;        // 29
+    return r;
+}

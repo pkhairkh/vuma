@@ -1,0 +1,20 @@
+// s76_struct_overwrite_field.vuma — overwrite field to 84, load = 84
+// Expected exit code: 84
+//
+// Single 8-byte allocation treated as a one-field struct. Store
+// 100 then 84 via `*p = literal` (overwrite), load and return
+// 84. Uses `*p = literal` form (no offsets). Distinct from
+// s74_struct_overwrite_field (69), s73_struct_overwrite_field
+// (149) and s72_struct_overwrite_field (150).
+struct Single {
+    a: u64,
+}
+
+fn main() -> i32 {
+    p = allocate(8);
+    *p = 100;
+    *p = 84;
+    a: u64 = *p;           // 84
+    free(p);
+    return a;
+}

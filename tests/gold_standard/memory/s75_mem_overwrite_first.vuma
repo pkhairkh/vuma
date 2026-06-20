@@ -1,0 +1,21 @@
+// s75_mem_overwrite_first.vuma — overwrite c1 to 89, load = 89
+// Expected exit code: 89
+//
+// Three independent 8-byte cells. Store 50/100/80 then overwrite
+// c1 to 89. Load c1 -> 89 (the overwritten value). Uses `*ptr
+// = literal` form. Distinct from s74_mem_overwrite_first (59),
+// s70_mem_overwrite_first (235) and s66_mem_overwrite_first (220).
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    c3 = allocate(8);
+    *c1 = 50;
+    *c2 = 100;
+    *c3 = 80;
+    *c1 = 89;
+    v: i32 = *c1;          // 89
+    free(c1);
+    free(c2);
+    free(c3);
+    return v;
+}

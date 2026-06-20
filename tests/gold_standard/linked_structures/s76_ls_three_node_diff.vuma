@@ -1,0 +1,25 @@
+// s76_ls_three_node_diff.vuma — three nodes, diff = 35 (255 - 120 - 100)
+// Expected exit code: 35
+//
+// Three 8-byte allocations treated as three independent "nodes".
+// Store 255/120/100 via `*ptr = literal`, load all three, diff
+// -> 35. Uses `*ptr = literal` form (no offsets). Distinct from
+// s74_ls_three_node_diff (34), s73_ls_three_node_diff (131) and
+// s72_ls_three_node_diff (205).
+fn main() -> i32 {
+    n1 = allocate(8);
+    n2 = allocate(8);
+    n3 = allocate(8);
+    *n1 = 255;
+    *n2 = 120;
+    *n3 = 100;
+    a: u64 = *n1;
+    b: u64 = *n2;
+    c: u64 = *n3;
+    t: u64 = a - b;        // 135
+    r: u64 = t - c;        // 35
+    free(n1);
+    free(n2);
+    free(n3);
+    return r;
+}
