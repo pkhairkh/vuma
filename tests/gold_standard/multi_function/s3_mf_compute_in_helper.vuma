@@ -1,0 +1,16 @@
+// s3_mf_compute_in_helper.vuma — helper computes (x + 5), main calls it
+// Expected exit code: 15  ((10 + 5))
+//
+// Helper takes an argument, adds 5 to it, and returns the result.
+// main calls helper(10) and returns 15.
+
+fn add5(x: u32) -> u32 {
+    five: u32 = 5;
+    r: u32 = x + five;
+    return r;
+}
+
+fn main() -> i32 {
+    v: u32 = add5(10);
+    return v;
+}
