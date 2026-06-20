@@ -1,0 +1,18 @@
+// s32_fn_zero_arg_lit.vuma - ret() = 77
+// Expected exit code: 77
+//
+// ret() = 77. All operands loaded into typed variables before any bitwise op
+// (immediate-RHS drop workaround where applicable); stores use the `*ptr =
+// literal` (or `*ptr = variable + 0`) form with no `*(ptr + offset)`
+// indexing. Distinct from s30_fn_zero_arg_lit (value 0/constant) and
+// s26_fn_zero_arg_lit (different value).
+
+fn ret() -> u32 {
+    n: u32 = 77;
+    return n;
+}
+
+fn main() -> i32 {
+    v: u32 = ret();
+    return v;
+}

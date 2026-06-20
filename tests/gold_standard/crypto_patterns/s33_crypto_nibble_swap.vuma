@@ -1,0 +1,17 @@
+// s33_crypto_nibble_swap.vuma — swap nibbles of 0xA3 -> 0x3A = 58
+// Expected exit code: 58
+//
+// Deterministic test in the crypto_patterns category. All operands loaded into typed
+// variables before any bitwise op; all stores use `*ptr = literal` (or the
+// `*ptr = variable + 0` workaround). Result lands in 0-255.
+// Distinct from s30_crypto_nibble_clear (clears nibble) and s26_crypto_nibble_swap (different input byte).
+fn main() -> i32 {
+    a: u64 = 163;          // 0xA3
+    lo_mask: u64 = 15;     // 0x0F
+    hi_mask: u64 = 240;    // 0xF0
+    shf: u64 = 4;
+    lo: u64 = a & lo_mask;          // 0x03
+    hi: u64 = (a & hi_mask) >> shf; // 0x0A
+    r: u64 = (lo << shf) | hi;      // 0x3A = 58
+    return r;
+}

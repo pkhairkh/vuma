@@ -1,0 +1,18 @@
+// s32_fn_two_args_add.vuma - add_two(110, 95) = 205
+// Expected exit code: 205
+//
+// add_two(110, 95) = 205. All operands loaded into typed variables before
+// any bitwise op (immediate-RHS drop workaround where applicable); stores
+// use the `*ptr = literal` (or `*ptr = variable + 0`) form with no `*(ptr +
+// offset)` indexing. Distinct from s30_fn_two_args_mul (mul, 63) and
+// s26_fn_two_args_div (div).
+
+fn add_two(x: u32, y: u32) -> u32 {
+    r: u32 = x + y;
+    return r;
+}
+
+fn main() -> i32 {
+    v: u32 = add_two(110, 95);
+    return v;
+}
