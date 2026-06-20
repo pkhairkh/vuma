@@ -1,0 +1,18 @@
+// s71_cf_while_acc_7.vuma — while loop accumulates 7*13 = 91
+// Expected exit code (correct): 91
+// Observed on current x86_64 backend: 0 (FAIL — known bug)
+//
+// Accumulator starts at 0. While i < 7, add 13 each iteration ->
+// 7 * 13 = 91 total. i increments by 1 each iteration. Known
+// "while-body assignments don't propagate" bug keeps acc at 0 ->
+// exit 0. Will exit 91 once fixed. Distinct from s69_cf_while_acc_
+// 4 (52), s70_cf_while_acc_6 (66) and s66_cf_while_acc_3 (33).
+fn main() -> i32 {
+    acc: u32 = 0;
+    i: u32 = 0;
+    while i < 7 {
+        acc = acc + 13;
+        i = i + 1;
+    }
+    return acc;
+}

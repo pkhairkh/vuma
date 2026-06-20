@@ -1,0 +1,22 @@
+// s72_mem_overwrite_middle.vuma — overwrite c2 to 185, load = 185
+// Expected exit code: 185
+//
+// Three 8-byte cells. Store 80 at c1, store 40 at c2 then
+// overwrite c2 to 185, store 60 at c3. Load c2 -> 185 (the
+// overwritten value). Uses `*ptr = literal` form. Distinct from
+// s70_mem_overwrite_first (235), s69_mem_overwrite_first (110)
+// and s66_mem_overwrite_last (200).
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    c3 = allocate(8);
+    *c1 = 80;
+    *c2 = 40;
+    *c2 = 185;
+    *c3 = 60;
+    v: u64 = *c2;          // 185
+    free(c1);
+    free(c2);
+    free(c3);
+    return v;
+}

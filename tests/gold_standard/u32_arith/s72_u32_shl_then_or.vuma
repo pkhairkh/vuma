@@ -1,0 +1,16 @@
+// s72_u32_shl_then_or.vuma — (0x05 << 3) | 0x40 = 0x28 | 0x40 = 0x68 = 104
+// Expected exit code: 104
+//
+// Two-stage bitwise: shift left then OR. (5 << 3) = 40 (0x28);
+// 40 | 64 = 104 (0x68). All operands loaded into u32 variables
+// first (immediate-RHS bitwise drop bug workaround). Distinct
+// from s70_u32_and_then_shl (100), s69_u32_shl_then_xor (83) and
+// s66_u32_shr_then_xor (55).
+fn main() -> i32 {
+    a: u32 = 5;            // 0x05
+    b: u32 = 3;
+    c: u32 = 64;           // 0x40
+    x: u32 = a << b;       // 0x28 = 40
+    r: u32 = x | c;        // 0x68 = 104
+    return r;
+}

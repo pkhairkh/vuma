@@ -1,0 +1,15 @@
+// s73_arith_div_then_sub.vuma — 200 / 4 - 11 = 50 - 11 = 39
+// Expected exit code: 39
+//
+// Two-stage arithmetic: divide then subtract. 200 / 4 = 50;
+// 50 - 11 = 39. All operands kept as i32 locals. Straight-line
+// arithmetic. Distinct from s70_arith_add_then_div (22),
+// s69_arith_add_then_mul (200) and s66_arith_sub_then_div (28).
+fn main() -> i32 {
+    a: i32 = 200;
+    b: i32 = 4;
+    c: i32 = 11;
+    q: i32 = a / b;        // 50
+    r: i32 = q - c;        // 39
+    return r;
+}

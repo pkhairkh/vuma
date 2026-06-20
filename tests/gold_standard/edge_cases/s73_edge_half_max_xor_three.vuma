@@ -1,0 +1,14 @@
+// s73_edge_half_max_xor_three.vuma — 127 ^ 3 = 124
+// Expected exit code: 124
+//
+// XOR the half-max u8 value 127 with 3. 127 ^ 3 = 124 (0x7C).
+// All operands loaded into u32 variables first (immediate-RHS
+// bitwise drop bug workaround). Distinct from s70_edge_half_max_
+// and_low (7), s69_edge_max_and_170 (170) and s66_edge_one_shl_
+// five (32).
+fn main() -> i32 {
+    a: u32 = 127;
+    b: u32 = 3;
+    r: u32 = a ^ b;        // 124
+    return r;
+}

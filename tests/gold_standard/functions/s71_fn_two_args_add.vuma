@@ -1,0 +1,16 @@
+// s71_fn_two_args_add.vuma — add(79, 50) = 129
+// Expected exit code: 129
+//
+// Helper add(x, y) = x + y. main calls add(79, 50) -> 129.
+// Two-arg function returning the sum. Distinct from s69_fn_two_
+// args_sub (105), s70_fn_two_args_mul (220) and s66_fn_two_args_
+// add (175).
+fn add(x: u32, y: u32) -> u32 {
+    r: u32 = x + y;
+    return r;
+}
+
+fn main() -> i32 {
+    v: u32 = add(79, 50);
+    return v;
+}

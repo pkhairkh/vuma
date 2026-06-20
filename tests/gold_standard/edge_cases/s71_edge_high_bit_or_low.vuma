@@ -1,0 +1,14 @@
+// s71_edge_high_bit_or_low.vuma — 128 | 0x11 = 0x91 = 145
+// Expected exit code: 145
+//
+// OR the high bit 128 (0x80) with the low value 17 (0x11).
+// 128 | 17 = 145 (0x91). All operands loaded into u32 variables
+// first (immediate-RHS bitwise drop bug workaround). Distinct from
+// s69_edge_max_xor_six (249), s70_edge_half_max_and_low (7) and
+// s66_edge_max_xor_three (252).
+fn main() -> i32 {
+    a: u32 = 128;          // 0x80
+    b: u32 = 17;           // 0x11
+    r: u32 = a | b;        // 0x91 = 145
+    return r;
+}
