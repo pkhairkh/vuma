@@ -1,0 +1,15 @@
+// s95_arith_sub_then_mul.vuma — (40 - 21) * 2 = 19 * 2 = 38
+// Expected exit code: 38
+//
+// Two-stage arithmetic: subtract then multiply. 40 - 21 = 19;
+// 19 * 2 = 38. All operands kept as i32 locals. Straight-line
+// arithmetic. Distinct from s94_arith_sub_then_mul (210),
+// s90_arith_sub_then_div (56) and s82_arith_sub_then_mod (70).
+fn main() -> i32 {
+    a: i32 = 40;
+    b: i32 = 21;
+    c: i32 = 2;
+    s: i32 = a - b;        // 19
+    r: i32 = s * c;        // 38
+    return r;
+}

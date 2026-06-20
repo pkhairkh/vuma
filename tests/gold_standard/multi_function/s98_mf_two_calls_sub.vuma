@@ -1,0 +1,18 @@
+// s98_mf_two_calls_sub.vuma — f(50) - f(20) = 57 - 27 = 30
+// Expected exit code: 30
+//
+// Single helper f(x) = x + 7. main calls it twice and subtracts:
+// f(50) - f(20) = 57 - 27 = 30. Distinct from s94_mf_two_calls_sub
+// (23), s90_mf_two_calls_add (59) and s86_mf_double_then_add (65).
+fn f(x: u32) -> u32 {
+    k: u32 = 7;
+    r: u32 = x + k;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = f(50);          // 57
+    b: u32 = f(20);          // 27
+    d: u32 = a - b;          // 30
+    return d;
+}

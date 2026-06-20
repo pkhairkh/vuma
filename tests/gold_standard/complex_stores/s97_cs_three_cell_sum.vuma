@@ -1,0 +1,23 @@
+// s97_cs_three_cell_sum.vuma — three cells, sum = 40 (12 + 18 + 10)
+// Expected exit code: 40
+//
+// Three 8-byte cells. Store 12/18/10 via `*ptr = literal`,
+// load all, a + b + c -> 40. Uses `*ptr = literal` form
+// (no offsets).
+// Distinct from s94_cs_three_cell_sum (90), s90_cs_overwrite_last (8), s86_cs_overwrite_first (230).
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    c3 = allocate(8);
+    *c1 = 12;
+    *c2 = 18;
+    *c3 = 10;
+    a: u64 = *c1;
+    b: u64 = *c2;
+    c: u64 = *c3;
+    s: u64 = a + b + c;    // 40
+    free(c1);
+    free(c2);
+    free(c3);
+    return s;
+}

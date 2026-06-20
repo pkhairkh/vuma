@@ -1,0 +1,15 @@
+// s98_arith_sub_then_div.vuma — (100 - 28) / 4 = 72 / 4 = 18
+// Expected exit code: 18
+//
+// Two-stage arithmetic: subtract then divide. 100 - 28 = 72;
+// 72 / 4 = 18. All operands kept as i32 locals. Straight-line
+// arithmetic. Distinct from s94_arith_sub_then_mul (210),
+// s90_arith_sub_then_div (56) and s86_arith_sub_then_mod (50).
+fn main() -> i32 {
+    a: i32 = 100;
+    b: i32 = 28;
+    c: i32 = 4;
+    x: i32 = a - b;        // 72
+    r: i32 = x / c;        // 18
+    return r;
+}

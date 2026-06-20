@@ -1,0 +1,18 @@
+// s98_nl_8x9_count.vuma — 8x9 nested loop, count = 72
+// Expected exit code (correct): 72
+// Observed on current x86_64 backend: 0 (FAIL — known bug)
+//
+// Outer loop 8 iterations, inner loop 9 iterations each ->
+// 8*9 = 72 total. Counter increments by 1 each inner iteration.
+// Known "for-body assignments don't propagate" bug keeps count at
+// 0. Distinct from s94_nl_5x7_count (35), s90_nl_4x21_count (84)
+// and s86_nl_3x11_count (33).
+fn main() -> i32 {
+    count: u32 = 0;
+    for i in 0..8 {
+        for j in 0..9 {
+            count = count + 1;
+        }
+    }
+    return count;
+}

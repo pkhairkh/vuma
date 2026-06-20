@@ -1,0 +1,16 @@
+// s98_bit_shl_then_and.vuma — (0x0D << 1) & 0x1E = 0x1A & 0x1E = 0x1A = 26
+// Expected exit code: 26
+//
+// Two-stage bitwise: shift-left then AND. 13 << 1 = 26 (0x1A);
+// 26 & 30 = 26 (0x1A). All operands loaded into u64 variables first
+// (immediate-RHS bitwise drop bug workaround). Distinct from
+// s94_bit_shr_then_or (24), s90_bit_shl_then_and (20) and
+// s86_bit_shl_then_xor (56).
+fn main() -> i32 {
+    a: u64 = 13;          // 0x0D
+    s: u64 = 1;
+    c: u64 = 30;          // 0x1E
+    x: u64 = a << s;      // 0x1A = 26
+    r: u64 = x & c;       // 0x1A = 26
+    return r;
+}

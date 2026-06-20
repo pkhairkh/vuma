@@ -1,0 +1,22 @@
+// s96_cs_overwrite_first.vuma — overwrite c1 to 155, load = 155
+// Expected exit code: 155
+//
+// Three 8-byte cells. Store 200 at c1, store 100 at c2, store 50 at
+// c3, then overwrite c1 to 155. Load c1 -> 155 (the overwritten
+// value). Uses `*ptr = literal` form. Distinct from
+// s94_cs_overwrite_middle (42), s90_cs_overwrite_last (8) and
+// s86_cs_overwrite_first (230).
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    c3 = allocate(8);
+    *c1 = 200;
+    *c2 = 100;
+    *c3 = 50;
+    *c1 = 155;
+    v: u64 = *c1;          // 155
+    free(c1);
+    free(c2);
+    free(c3);
+    return v;
+}

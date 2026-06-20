@@ -1,0 +1,14 @@
+// s98_edge_max_and_val.vuma — 255 & 46 = 46 (AND with max preserves bits)
+// Expected exit code: 46
+//
+// Edge case: AND with the max byte (0xFF) preserves the other
+// operand. 255 & 46 = 46 (0x2E). All operands loaded into u32
+// variables first (immediate-RHS bitwise drop bug workaround).
+// Distinct from s94_edge_max_and_val (108), s90_edge_max_xor_val
+// (23) and s86_edge_max_and_low (9).
+fn main() -> i32 {
+    a: u32 = 255;          // 0xFF
+    b: u32 = 46;           // 0x2E
+    r: u32 = a & b;        // 0x2E = 46
+    return r;
+}
