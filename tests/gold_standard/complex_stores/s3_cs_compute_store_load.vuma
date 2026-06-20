@@ -1,0 +1,16 @@
+// s3_cs_compute_store_load.vuma — compute sum, store, load, return
+// Expected exit code: 50  (20 + 30)
+//
+// Compute the sum of two constants in a variable, store that variable
+// (via `+ 0` workaround) to memory, load it back, return it.
+
+fn main() -> i32 {
+    a: u32 = 20;
+    b: u32 = 30;
+    s: u32 = a + b;
+    buf = allocate(8);
+    *(buf + 0) = s + 0;
+    out: u64 = *(buf + 0);
+    free(buf);
+    return out;
+}
