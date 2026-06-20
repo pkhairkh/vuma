@@ -1,0 +1,30 @@
+// s47_mf_three_chain.vuma — f1(20)=26, f2(26)=78, f3(78)=68
+// Expected exit code: 68
+//
+// Three single-arg helpers chained: f1(x)=x+6, f2(x)=x*3,
+// f3(x)=x-10. main calls f3(f2(f1(20))) -> f1(20)=26, f2(26)=78,
+// f3(78)=68. Distinct from s46_mf_three_chain (51) and s42_mf_
+// three_chain (55).
+
+fn f1(x: u32) -> u32 {
+    n: u32 = 6;
+    r: u32 = x + n;
+    return r;
+}
+fn f2(x: u32) -> u32 {
+    n: u32 = 3;
+    r: u32 = x * n;
+    return r;
+}
+fn f3(x: u32) -> u32 {
+    n: u32 = 10;
+    r: u32 = x - n;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = f1(20);    // 26
+    b: u32 = f2(a);     // 78
+    c: u32 = f3(b);     // 68
+    return c;
+}

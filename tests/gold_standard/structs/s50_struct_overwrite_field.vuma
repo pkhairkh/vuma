@@ -1,0 +1,21 @@
+// s50_struct_overwrite_field.vuma — store 40, overwrite to 190, load = 190
+// Expected exit code: 190
+//
+// Single 8-byte allocation treated as a one-field struct. Store 40
+// via `*p = literal`, then overwrite the field with 190. Load and
+// return 190. Uses `*p = literal` form (no offsets). Distinct from
+// s46_struct_overwrite_field (155) and s43_struct_overwrite_field
+// (170).
+
+struct Single {
+    a: u64,
+}
+
+fn main() -> i32 {
+    p = allocate(8);
+    *p = 40;
+    *p = 190;
+    a: u64 = *p;
+    free(p);
+    return a;
+}

@@ -1,0 +1,20 @@
+// s48_ls_two_node_sum.vuma — two nodes, sum = 210 (95 + 115)
+// Expected exit code: 210
+//
+// Two 8-byte allocations treated as two independent "nodes".
+// Store 95/115 via `*ptr = literal`, load both, sum -> 210. Uses
+// `*ptr = literal` form (no offsets). Distinct from s46_ls_three_
+// node_sum (180) and s42_ls_two_node_diff.
+
+fn main() -> i32 {
+    n1 = allocate(8);
+    n2 = allocate(8);
+    *n1 = 95;
+    *n2 = 115;
+    a: u64 = *n1;
+    b: u64 = *n2;
+    s: u64 = a + b;
+    free(n1);
+    free(n2);
+    return s;
+}

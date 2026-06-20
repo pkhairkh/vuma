@@ -1,0 +1,16 @@
+// s49_crypto_shl_xor.vuma — (0x0F << 2) ^ 0x10 = 0x3C ^ 0x10 = 0x2C = 44
+// Expected exit code: 44
+//
+// Shift-then-XOR byte mix. 15 << 2 = 60 (0x3C); 60 ^ 16 = 44 (0x2C).
+// All operands loaded into u64 variables first (immediate-RHS
+// bitwise drop bug workaround). Distinct from s46_crypto_shr_extract
+// (11, shr-extract) and s42_crypto_shl_xor (47, shl-xor).
+
+fn main() -> i32 {
+    a: u64 = 15;           // 0x0F
+    b: u64 = 2;
+    c: u64 = 16;           // 0x10
+    s: u64 = a << b;       // 0x3C = 60
+    r: u64 = s ^ c;        // 0x2C = 44
+    return r;
+}
