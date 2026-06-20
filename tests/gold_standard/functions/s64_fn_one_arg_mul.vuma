@@ -1,0 +1,17 @@
+// s64_fn_one_arg_mul.vuma — triple(45) = 135
+// Expected exit code: 135
+//
+// Helper triple(x) = x * 3. main calls triple(45) -> 135. Single-arg
+// function that multiplies by a literal. Distinct from s62_fn_one_arg_
+// add (115), s62_fn_two_args_mul (180) and s62_fn_zero_arg_lit (145).
+
+fn triple(x: u32) -> u32 {
+    n: u32 = 3;
+    r: u32 = x * n;
+    return r;
+}
+
+fn main() -> i32 {
+    v: u32 = triple(45);
+    return v;
+}

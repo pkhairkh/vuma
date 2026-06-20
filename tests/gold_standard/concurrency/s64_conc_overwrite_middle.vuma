@@ -1,0 +1,27 @@
+// s64_conc_overwrite_middle.vuma — overwrite middle to 88, sum = 144 (18 + 88 + 38)
+// Expected exit code: 144
+//
+// Three independent 8-byte cells. Store 18/28/38 via `*ptr = literal`,
+// then overwrite the middle cell with 88. Load all three, sum -> 144.
+// Uses `*ptr = literal` form. Distinct from s62_conc_overwrite_first
+// (150), s62_conc_three_cell_diff (110) and s62_conc_two_cell_sum
+// (230).
+
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    c3 = allocate(8);
+    *c1 = 18;
+    *c2 = 28;
+    *c3 = 38;
+    *c2 = 88;
+    v1: i32 = *c1;
+    v2: i32 = *c2;
+    v3: i32 = *c3;
+    t: i32 = v1 + v2;
+    s: i32 = t + v3;       // 144
+    free(c1);
+    free(c2);
+    free(c3);
+    return s;
+}
