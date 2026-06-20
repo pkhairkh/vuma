@@ -1,0 +1,19 @@
+// s39_arith_add_mul_sub.vuma — ((10 + 20) * 3) - 25 = 90 - 25 = 65
+// Expected exit code: 65
+//
+// Three-stage u32 computation: add, then multiply, then subtract.
+// (10 + 20) = 30; 30 * 3 = 90; 90 - 25 = 65. All operands loaded
+// into u32 variables first. Straight-line arithmetic. Distinct from
+// s38_arith_add_sub_mul (add-sub-mul, 180) and s34_arith_add_mul_sub
+// (75).
+
+fn main() -> i32 {
+    a: u32 = 10;
+    b: u32 = 20;
+    c: u32 = 3;
+    d: u32 = 25;
+    s: u32 = a + b;       // 30
+    t: u32 = s * c;       // 90
+    r: u32 = t - d;       // 65
+    return r;
+}

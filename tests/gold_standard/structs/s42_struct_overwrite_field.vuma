@@ -1,0 +1,21 @@
+// s42_struct_overwrite_field.vuma — store 60, overwrite to 140, load = 140
+// Expected exit code: 140
+//
+// Single 8-byte allocation treated as one struct instance. Store 60
+// via `*p = literal`, then overwrite with 140. Load and return 140.
+// Uses `*p = literal` form (no offsets). Distinct from s38_struct_
+// overwrite_field (170) and s34_struct_overwrite_field (140, same
+// total but different operands 50/140).
+
+struct Single {
+    a: u64,
+}
+
+fn main() -> i32 {
+    p1 = allocate(8);
+    *p1 = 60;
+    *p1 = 140;
+    a: u64 = *p1;
+    free(p1);
+    return a;
+}
