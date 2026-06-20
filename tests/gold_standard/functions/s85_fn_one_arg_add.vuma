@@ -1,0 +1,18 @@
+// s85_fn_one_arg_add.vuma — add7(80) = 87
+// Expected exit code: 87
+//
+// Single-argument helper: add7(x) = x + 7. main calls
+// add7(80) -> 80 + 7 = 87. Verifies a single u32 parameter
+// and a literal offset round-trip through the call/return
+// path. Distinct from s82_fn_one_arg_add, s78_fn_one_arg_add
+// and s74_fn_one_arg_add.
+fn add7(x: u32) -> u32 {
+    n: u32 = 7;
+    r: u32 = x + n;
+    return r;
+}
+
+fn main() -> i32 {
+    v: u32 = add7(80);
+    return v;
+}

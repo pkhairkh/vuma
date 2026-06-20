@@ -1,0 +1,19 @@
+// s85_nl_3x7_count.vuma — 3x7 nested loop, count = 21
+// Expected exit code (correct): 21
+// Observed on current x86_64 backend: 0 (FAIL — known bug)
+//
+// Outer loop 3 iterations, inner loop 7 iterations each ->
+// 3*7 = 21 total. Counter increments by 1 each inner
+// iteration. Known "for-body assignments don't propagate" bug
+// keeps count at 0. Distinct from s82_nl_6x9_count (54),
+// s78_nl_3x7_count (21 -> renamed framing) and s74_nl_3x7_count
+// (21).
+fn main() -> i32 {
+    count: u32 = 0;
+    for i in 0..3 {
+        for j in 0..7 {
+            count = count + 1;
+        }
+    }
+    return count;
+}
