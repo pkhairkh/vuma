@@ -1,0 +1,19 @@
+// s34_cf_while_acc_6.vuma — while loop accumulates 6*3 = 18
+// Expected exit code (correct): 18
+// Observed on current x86_64 backend: 0 (FAIL — known bug)
+//
+// Accumulator starts at 0. While i < 6, add 3 each iteration ->
+// 6 * 3 = 18 total. i increments by 1 each iteration. Known
+// "while-body assignments don't propagate" bug keeps acc at 0 ->
+// exit 0. Will exit 18 once fixed. Distinct from s30_cf_while_acc_5
+// (5*5 = 25) and s27_cf_while_acc_4 (4*4 = 16).
+
+fn main() -> i32 {
+    acc: u32 = 0;
+    i: u32 = 0;
+    while i < 6 {
+        acc = acc + 3;
+        i = i + 1;
+    }
+    return acc;
+}
