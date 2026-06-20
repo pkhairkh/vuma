@@ -1,0 +1,18 @@
+// s12_fn_one_arg_dec.vuma — dec(50) = 49
+// Expected exit code: 49
+//
+// Helper dec(x) = x - 1. main calls dec(50) -> 49. Single-argument
+// helper with subtraction by a constant loaded into a local.
+// Distinct from s13_fn_double_arg (mul by 2) and s13_fn_inc_by
+// (two args, add).
+
+fn dec(x: u32) -> u32 {
+    one: u32 = 1;
+    r: u32 = x - one;
+    return r;
+}
+
+fn main() -> i32 {
+    v: u32 = dec(50);
+    return v;
+}

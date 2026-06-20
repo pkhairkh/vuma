@@ -1,0 +1,19 @@
+// s13_mf_shared_squarer.vuma — square(5) + square(6) = 25 + 36 = 61
+// Expected exit code: 61
+//
+// square(x) = x * x. main calls square twice (5 and 6) and sums the
+// results: 25 + 36 = 61. Tests one helper called twice with distinct
+// arguments. Distinct from s9_mf_one_helper_called_thrice (three calls,
+// args 2/3/4) and s10_mf_helper_returns_arg (pass-through helper).
+
+fn square(x: u32) -> u32 {
+    r: u32 = x * x;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = square(5);   // 25
+    b: u32 = square(6);   // 36
+    s: u32 = a + b;       // 61
+    return s;
+}

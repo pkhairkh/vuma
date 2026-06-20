@@ -1,0 +1,16 @@
+// s11_crypto_shift_xor_inverse.vuma — (0x0F << 4) ^ 0xAA = 90
+// Expected exit code: 90
+//
+// Shift-then-XOR mix. (15 << 4) = 240 (0xF0); 240 ^ 170 = 90 (0x5A).
+// All operands loaded into u64 variables first. Distinct from
+// s9_crypto_xor_with_key (single XOR with key) and s8_crypto_rotate_left_3
+// (rotate, not shift).
+
+fn main() -> i32 {
+    a: u64 = 15;          // 0x0F
+    sh: u64 = 4;
+    b: u64 = 170;         // 0xAA
+    s: u64 = a << sh;     // 0xF0 = 240
+    r: u64 = s ^ b;       // 0x5A = 90
+    return r;
+}

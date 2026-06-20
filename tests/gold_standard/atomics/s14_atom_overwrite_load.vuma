@@ -1,0 +1,19 @@
+// s14_atom_overwrite_load.vuma — atomic_store 17 then 73, load sees 73
+// Expected exit code: 0 (current buggy backend)
+// Expected exit code (correct, post-bridge-fix): 73
+//
+// Single 8-byte cell. atomic_store 17, then overwrite with 73.
+// atomic_load should observe 73 (last write wins). On the current
+// backend the load returns 0 (atomic_store/load not bridged) ->
+// exit 0. Will exit 73 once atomics are wired. Distinct from
+// s10_atom_overwrite_twice (three writes, 10/80/90) and
+// s10_atom_zero_one_pair (0 then 50).
+
+fn main() -> i32 {
+    c = allocate(8);
+    atomic_store(c, 17);
+    atomic_store(c, 73);
+    v = atomic_load(c);
+    free(c);
+    return v;
+}

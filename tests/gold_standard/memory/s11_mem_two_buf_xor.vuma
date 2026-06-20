@@ -1,0 +1,21 @@
+// s11_mem_two_buf_xor.vuma — two cells, xor loads = 255 (0xAA ^ 0x55)
+// Expected exit code: 255
+//
+// Two independent 8-byte buffers each receive a distinct literal via
+// the `*ptr = literal` form (deterministic on the current backend).
+// Both loaded back and XORed -> 170 ^ 85 = 255 (0xFF). Distinct from
+// s10_mem_quad_buf_sum (4 buffers, sum) and s8_mem_two_buf_add (2 bufs,
+// sum).
+
+fn main() -> i32 {
+    a = allocate(8);
+    b = allocate(8);
+    *a = 170;            // 0xAA
+    *b = 85;             // 0x55
+    va: u64 = *a;
+    vb: u64 = *b;
+    r: u64 = va ^ vb;    // 0xFF = 255
+    free(a);
+    free(b);
+    return r;
+}

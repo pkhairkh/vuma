@@ -1,0 +1,20 @@
+// s11_conc_two_cell_product.vuma — two cells, product = 180
+// Expected exit code: 180
+//
+// Two independent 8-byte cells. Each gets a distinct literal at
+// offset 0 (12 / 15). Both loaded back and multiplied -> 12 * 15 = 180.
+// Distinct from s10_conc_two_cells_diff (two cells, sum) and
+// s8_conc_three_cells_mul (three cells, product).
+
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    *c1 = 12;
+    *c2 = 15;
+    v1: i32 = *c1;
+    v2: i32 = *c2;
+    p: i32 = v1 * v2;   // 180
+    free(c1);
+    free(c2);
+    return p;
+}

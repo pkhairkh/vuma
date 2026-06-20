@@ -1,0 +1,19 @@
+// s12_cf_while_acc_3.vuma — while loop runs 4 iterations, acc += 3 each = 12
+// Expected exit code (correct): 12
+// Observed on current x86_64 backend: 0 (FAIL — known bug)
+//
+// Accumulator starts at 0. While i < 4, add 3 each iteration and
+// increment i. After 4 iterations acc = 4 * 3 = 12. Known
+// "while-body assignments don't propagate" bug keeps acc at 0 ->
+// exit 0. Will exit 12 once fixed. Distinct from s9_cf_while_mul2
+// (mul-by-2 accumulator) and s7_cf_while_acc_5 (acc += 5).
+
+fn main() -> i32 {
+    acc: u32 = 0;
+    i: u32 = 0;
+    while i < 4 {
+        acc = acc + 3;
+        i = i + 1;
+    }
+    return acc;
+}

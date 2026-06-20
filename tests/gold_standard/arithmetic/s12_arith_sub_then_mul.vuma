@@ -1,0 +1,15 @@
+// s12_arith_sub_then_mul.vuma — (100 - 30) * 2 = 70 * 2 = 140
+// Expected exit code: 140
+//
+// Subtract then multiply. 100 - 30 = 70; 70 * 2 = 140. Two-stage
+// arithmetic with one intermediate. Distinct from s6_arith_sub_then_add
+// (sub-then-add) and s4_arith_mul_then_sub (mul-then-sub).
+
+fn main() -> i32 {
+    a: u32 = 100;
+    b: u32 = 30;
+    c: u32 = 2;
+    d: u32 = a - b;      // 70
+    r: u32 = d * c;      // 140
+    return r;
+}

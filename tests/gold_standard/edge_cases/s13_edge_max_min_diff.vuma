@@ -1,0 +1,14 @@
+// s13_edge_max_min_diff.vuma — 255 - 0 = 255
+// Expected exit code: 255
+//
+// Difference of max and min U8 values. 255 - 0 = 255. Pure arithmetic
+// edge case (no memory). All operands loaded into u32 variables first.
+// Distinct from s9_edge_max_then_zero (memory overwrite 255->0) and
+// s10_edge_max_xor_zero (255 ^ 0 = 255).
+
+fn main() -> i32 {
+    a: u32 = 255;
+    b: u32 = 0;
+    r: u32 = a - b;
+    return r;
+}

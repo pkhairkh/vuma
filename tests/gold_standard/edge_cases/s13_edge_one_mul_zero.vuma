@@ -1,0 +1,14 @@
+// s13_edge_one_mul_zero.vuma — 1 * 0 = 0
+// Expected exit code: 0
+//
+// Multiply identity by zero. 1 * 0 = 0. Pure arithmetic edge case
+// (no memory). All operands loaded into u32 variables first. Distinct
+// from s9_edge_max_then_zero (memory overwrite) and s4_edge_zero_sum
+// (sum of zero locals).
+
+fn main() -> i32 {
+    a: u32 = 1;
+    b: u32 = 0;
+    r: u32 = a * b;
+    return r;
+}

@@ -1,0 +1,17 @@
+// s11_ptr_store_xor_load.vuma — store 0xAA, load, xor 0x55 -> 255
+// Expected exit code: 255
+//
+// Single 8-byte cell. Store 0xAA (170) via `*ptr` form (deterministic).
+// Load into variable, XOR with constant 0x55 (loaded into a variable
+// first) -> 0xFF = 255. Distinct from s10_ptr_alias_load (alias load)
+// and s8_ptr_var_plus_zero (var + 0 store).
+
+fn main() -> i32 {
+    p = allocate(8);
+    *p = 170;            // 0xAA
+    v: i32 = *p;
+    k: i32 = 85;         // 0x55
+    r: i32 = v ^ k;      // 0xFF = 255
+    free(p);
+    return r;
+}

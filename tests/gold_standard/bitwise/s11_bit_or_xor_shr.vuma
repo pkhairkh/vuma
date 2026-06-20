@@ -1,0 +1,18 @@
+// s11_bit_or_xor_shr.vuma — ((0xF0 | 0x0F) ^ 0x55) >> 1 = 85
+// Expected exit code: 85
+//
+// Three-stage bitwise chain. (240 | 15) = 255 (0xFF); 255 ^ 85 = 170
+// (0xAA); 170 >> 1 = 85 (0x55). All operands loaded into u64 variables
+// first. Distinct from s7_bit_and_or_combine (AND-then-OR) and
+// s10_bit_xor_then_or (XOR-then-OR).
+
+fn main() -> i32 {
+    a: u64 = 240;         // 0xF0
+    b: u64 = 15;          // 0x0F
+    c: u64 = 85;          // 0x55
+    sh: u64 = 1;
+    o: u64 = a | b;       // 0xFF = 255
+    x: u64 = o ^ c;       // 0xAA = 170
+    r: u64 = x >> sh;     // 0x55 = 85
+    return r;
+}

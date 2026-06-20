@@ -1,0 +1,25 @@
+// s13_mf_inc_then_double.vuma — double(inc(10)) = double(11) = 22
+// Expected exit code: 22
+//
+// inc(x) = x + 1; double(x) = x * 2. main calls double(inc(10)) ->
+// double(11) -> 22. Nested call: result of inc feeds double. Distinct
+// from s8_mf_call_chain_3 (3-helper chain) and s10_mf_two_helpers_sum
+// (two independent helpers, summed).
+
+fn inc(x: u32) -> u32 {
+    c: u32 = 1;
+    r: u32 = x + c;
+    return r;
+}
+
+fn double(x: u32) -> u32 {
+    c: u32 = 2;
+    r: u32 = x * c;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = inc(10);     // 11
+    b: u32 = double(a);   // 22
+    return b;
+}

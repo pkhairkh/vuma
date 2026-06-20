@@ -1,0 +1,18 @@
+// s13_bit_and_or_mix.vuma — (0xAA & 0x0F) | (0xF0 & 0x33) = 0x0A | 0x30 = 58
+// Expected exit code: 58
+//
+// Mixed AND-then-OR. (170 & 15) = 10 (0x0A); (240 & 51) = 48 (0x30);
+// 10 | 48 = 58 (0x3A). All operands loaded into u64 variables first.
+// Distinct from s10_bit_and_then_xor (AND-then-XOR) and
+// s6_bit_and_chain_3 (pure AND chain).
+
+fn main() -> i32 {
+    a: u64 = 170;         // 0xAA
+    b: u64 = 15;          // 0x0F
+    c: u64 = 240;         // 0xF0
+    d: u64 = 51;          // 0x33
+    x: u64 = a & b;       // 0x0A = 10
+    y: u64 = c & d;       // 0x30 = 48
+    r: u64 = x | y;       // 0x3A = 58
+    return r;
+}

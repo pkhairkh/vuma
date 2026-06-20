@@ -1,0 +1,17 @@
+// s12_fn_no_arg_max_byte.vuma — max_byte() returns 255
+// Expected exit code: 255
+//
+// Helper max_byte() takes no arguments and returns the literal 255
+// (max u8 value). main calls max_byte() and returns its result.
+// Distinct from s10_fn_returns_constant (returns 42) and
+// s5_fn_return_constant (takes an unused arg, returns 77).
+
+fn max_byte() -> u32 {
+    v: u32 = 255;
+    return v;
+}
+
+fn main() -> i32 {
+    r: u32 = max_byte();
+    return r;
+}

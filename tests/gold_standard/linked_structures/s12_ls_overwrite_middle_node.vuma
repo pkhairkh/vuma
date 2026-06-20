@@ -1,0 +1,26 @@
+// s12_ls_overwrite_middle_node.vuma — overwrite middle node, sum = 129
+// Expected exit code: 129  (5 + 99 + 25)
+//
+// Three independent 8-byte allocations treated as three "nodes".
+// Store 5/15/25 via `*ptr = literal` form, then overwrite the middle
+// node (n2) with 99. Load all three, sum -> 5 + 99 + 25 = 129.
+// Distinct from s6_ls_overwrite_first (overwrites first via offsets)
+// and s7_ls_overwrite_last (overwrites last).
+
+fn main() -> i32 {
+    n1 = allocate(8);
+    n2 = allocate(8);
+    n3 = allocate(8);
+    *n1 = 5;
+    *n2 = 15;
+    *n3 = 25;
+    *n2 = 99;
+    a: u64 = *n1;
+    b: u64 = *n2;
+    c: u64 = *n3;
+    s: u64 = a + b + c;
+    free(n1);
+    free(n2);
+    free(n3);
+    return s;
+}

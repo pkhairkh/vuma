@@ -1,0 +1,20 @@
+// s12_mf_three_inc_chain.vuma — inc(inc(inc(5))) = 6 -> 7 -> 8
+// Expected exit code: 8
+//
+// Helper inc(x) = x + 1, called three times in a chain. inc(5) = 6;
+// inc(6) = 7; inc(7) = 8. Each call uses an intermediate local.
+// Distinct from s5_mf_three_chain (three different adders, add3/add2/
+// add1) and s7_mf_chained_three (add1/mul2/sub3, mixed ops).
+
+fn inc(x: u32) -> u32 {
+    one: u32 = 1;
+    r: u32 = x + one;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = inc(5);   // 6
+    b: u32 = inc(a);   // 7
+    c: u32 = inc(b);   // 8
+    return c;
+}

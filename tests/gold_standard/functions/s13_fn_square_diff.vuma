@@ -1,0 +1,20 @@
+// s13_fn_square_diff.vuma — square(9) - square(4) = 81 - 16 = 65
+// Expected exit code: 65
+//
+// Helper square(x) = x * x. main calls square twice (9 and 4) and
+// subtracts: 81 - 16 = 65. Tests that one helper can be called twice
+// with distinct arguments and the results combined. Distinct from
+// s9_fn_zero_arg_const (no args) and s10_fn_square_then_add
+// (square-then-add, not square-diff).
+
+fn square(x: u32) -> u32 {
+    r: u32 = x * x;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = square(9);   // 81
+    b: u32 = square(4);   // 16
+    d: u32 = a - b;       // 65
+    return d;
+}

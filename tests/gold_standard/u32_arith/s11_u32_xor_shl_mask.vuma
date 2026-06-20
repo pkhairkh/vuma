@@ -1,0 +1,18 @@
+// s11_u32_xor_shl_mask.vuma — ((0x12 ^ 0x34) << 1) & 0xFE = 76
+// Expected exit code: 76
+//
+// Three-stage u32 chain. (0x12 ^ 0x34) = 0x26 (38); 38 << 1 = 76 (0x4C);
+// 76 & 0xFE = 76 (0x4C). All operands loaded into u32 variables first.
+// Distinct from s10_u32_shl_then_xor (shl-then-xor, no mask) and
+// s8_u32_xor_add (xor-then-add).
+
+fn main() -> i32 {
+    a: u32 = 18;          // 0x12
+    b: u32 = 52;          // 0x34
+    sh: u32 = 1;
+    mask: u32 = 254;      // 0xFE
+    x: u32 = a ^ b;       // 0x26 = 38
+    s: u32 = x << sh;     // 0x4C = 76
+    r: u32 = s & mask;    // 0x4C = 76
+    return r;
+}

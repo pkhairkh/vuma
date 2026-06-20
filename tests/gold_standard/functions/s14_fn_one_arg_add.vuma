@@ -1,0 +1,18 @@
+// s14_fn_one_arg_add.vuma — add_one(41) = 42
+// Expected exit code: 42
+//
+// Helper add_one(x) = x + 1. main calls add_one(41) -> 42. Single
+// function call, single literal argument, addition. Distinct from
+// s9_fn_one_arg_sub (sub5(100) = 95) and s10_fn_returns_constant
+// (zero-arg helper).
+
+fn add_one(x: u32) -> u32 {
+    n: u32 = 1;
+    r: u32 = x + n;
+    return r;
+}
+
+fn main() -> i32 {
+    v: u32 = add_one(41);
+    return v;
+}

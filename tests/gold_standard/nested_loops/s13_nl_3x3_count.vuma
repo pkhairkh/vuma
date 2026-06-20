@@ -1,0 +1,19 @@
+// s13_nl_3x3_count.vuma — 3x3 nested loop, count iterations = 9
+// Expected exit code (correct): 9
+// Observed on current x86_64 backend: 0 (FAIL — known bug)
+//
+// Outer loop 3 iterations, inner loop 3 iterations each -> 3*3 = 9
+// total iterations. Counter is a scalar accumulator updated inside
+// the inner loop body. Known "for-body assignments don't propagate"
+// bug keeps count at 0. Distinct from s4_nl_3x3_sum (3x3 with sum,
+// not count) and s7_nl_3x3_count (3x3 = 9, different framing).
+
+fn main() -> i32 {
+    count: u32 = 0;
+    for i in 0..3 {
+        for j in 0..3 {
+            count = count + 1;
+        }
+    }
+    return count;
+}

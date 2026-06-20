@@ -1,0 +1,16 @@
+// s13_fn_inc_by.vuma — inc_by(40, 17) = 40 + 17 = 57
+// Expected exit code: 57
+//
+// Helper inc_by(x, n) = x + n. main calls inc_by(40, 17) -> 57. Two
+// arguments, one addition. Distinct from s9_fn_one_arg_sub (one arg,
+// subtract) and s10_fn_three_args_mul (three args, multiply).
+
+fn inc_by(x: u32, n: u32) -> u32 {
+    r: u32 = x + n;
+    return r;
+}
+
+fn main() -> i32 {
+    v: u32 = inc_by(40, 17);
+    return v;
+}
