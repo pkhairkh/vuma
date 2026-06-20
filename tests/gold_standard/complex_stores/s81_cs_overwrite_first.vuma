@@ -1,0 +1,16 @@
+// s81_cs_overwrite_first.vuma — store 100, overwrite with 211, load = 211
+// Expected exit code: 211
+//
+// Single 8-byte cell. Store 100 via `*ptr = literal`, overwrite
+// with 211 via `*ptr = literal`, load and return 211. Uses
+// `*ptr = literal` form (no offsets). Distinct from
+// s78_cs_overwrite_first (3), s77_cs_overwrite_last (108) and
+// s76_cs_overwrite_last (138).
+fn main() -> i32 {
+    c1 = allocate(8);
+    *c1 = 100;
+    *c1 = 211;
+    r: u64 = *c1;          // 211
+    free(c1);
+    return r;
+}

@@ -1,0 +1,15 @@
+// s79_arith_mul_then_add.vuma — (6 * 6) + 1 = 36 + 1 = 37
+// Expected exit code: 37
+//
+// Two-stage arithmetic: multiply then add. 6 * 6 = 36;
+// 36 + 1 = 37. All operands kept as i32 locals. Straight-line
+// arithmetic. Distinct from s78_arith_mul_then_mod (12),
+// s77_arith_mul_then_mod (5) and s76_arith_mul_then_mod (3).
+fn main() -> i32 {
+    a: i32 = 6;
+    b: i32 = 6;
+    c: i32 = 1;
+    p: i32 = a * b;        // 36
+    r: i32 = p + c;        // 37
+    return r;
+}
