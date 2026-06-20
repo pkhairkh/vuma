@@ -1,0 +1,12 @@
+// s6_u32_add_pair.vuma — 25 + 35 = 60
+// Expected exit code: 60
+//
+// Simple pair of u32 literals summed. Distinct from s5_u32_sub_chain_3
+// (3-way sub) and s5_u32_add_then_shift (add-then-shift).
+
+fn main() -> i32 {
+    a: u32 = 25;
+    b: u32 = 35;
+    r: u32 = a + b;
+    return r;
+}
