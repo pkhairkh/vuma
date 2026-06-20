@@ -1,0 +1,15 @@
+// s37_cf_for_count_5.vuma — for loop runs 5 iterations, count = 5
+// Expected exit code (correct): 5
+// Observed on current x86_64 backend: 0 (FAIL — known bug)
+//
+// For loop runs to produce 5. Known "for-body assignments
+// don't propagate" bug keeps the result at 0. Will exit 5
+// once fixed.
+// Distinct from s33_cf_for_count_4 (4 iterations, observed 0) and s30_cf_for_count_3 (3 iterations).
+fn main() -> i32 {
+    count: u32 = 0;
+    for i in 0..5 {
+        count = count + 1;
+    }
+    return count;
+}

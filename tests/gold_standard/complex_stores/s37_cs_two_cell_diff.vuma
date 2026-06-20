@@ -1,0 +1,19 @@
+// s37_cs_two_cell_diff.vuma — two cells, diff = 200 - 80 = 120
+// Expected exit code: 120
+//
+// Deterministic test in the complex_stores category. All operands loaded into typed
+// variables before any bitwise op; all stores use `*ptr = literal` (or the
+// `*ptr = variable + 0` workaround). Result lands in 0-255.
+// Distinct from s33_cs_two_cell_sum (sum, 135) and s30_cs_two_cell_sum (different values).
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    *c1 = 200;
+    *c2 = 80;
+    a: u64 = *c1;
+    b: u64 = *c2;
+    d: u64 = a - b;         // 120
+    free(c1);
+    free(c2);
+    return d;
+}

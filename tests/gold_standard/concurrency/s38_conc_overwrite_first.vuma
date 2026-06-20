@@ -1,0 +1,21 @@
+// s38_conc_overwrite_first.vuma — overwrite first to 155, sum = 185 (155 + 30)
+// Expected exit code: 185
+//
+// Two independent 8-byte cells. Store 80 then overwrite to 155 in
+// c1; store 30 in c2. Load both, sum -> 185. Uses `*ptr = literal`
+// form. Distinct from s34_conc_overwrite_last (130) and s30_conc_
+// three_cell_sum.
+
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    *c1 = 80;
+    *c2 = 30;
+    *c1 = 155;
+    v1: i32 = *c1;
+    v2: i32 = *c2;
+    s: i32 = v1 + v2;      // 185
+    free(c1);
+    free(c2);
+    return s;
+}

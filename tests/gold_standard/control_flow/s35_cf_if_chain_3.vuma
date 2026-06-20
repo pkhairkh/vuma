@@ -1,0 +1,23 @@
+// s35_cf_if_chain_3.vuma — chain of three ifs, last sets x = 88
+// Expected exit code (correct): 88
+// Observed on current x86_64 backend: 0 (FAIL — known bug)
+//
+// Three sequential if-true blocks. Each overwrites x: 11, then 44,
+// then 88. With all conditions `true`, x should end at 88. On the
+// current backend the if-true body assignments are dropped, so x
+// stays 0. Distinct from s34_cf_if_chain_2 (two-if chain, 66) and
+// s30_cf_if_single_assign (single-if, 70).
+
+fn main() -> i32 {
+    x: u32 = 0;
+    if true {
+        x = 11;
+    }
+    if true {
+        x = 44;
+    }
+    if true {
+        x = 88;
+    }
+    return x;
+}

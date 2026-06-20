@@ -1,0 +1,16 @@
+// s38_crypto_shl_xor.vuma — (1 << 5) ^ 0x05 = 32 ^ 5 = 37
+// Expected exit code: 37
+//
+// Shift-then-XOR mixing step. (1 << 5) = 32 (0x20); 32 ^ 5 = 37
+// (0x25). All operands loaded into u64 variables first (immediate-
+// RHS bitwise drop bug workaround). Distinct from s34_crypto_shl_
+// then_xor (186) and s30_crypto_shl_then_xor.
+
+fn main() -> i32 {
+    a: u64 = 1;
+    b: u64 = 5;
+    c: u64 = 5;            // 0x05
+    s: u64 = a << b;       // 32
+    r: u64 = s ^ c;        // 37
+    return r;
+}
