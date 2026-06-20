@@ -1,0 +1,24 @@
+// s4_struct_field_sum.vuma — {a=10, b=20, c=30}; sum = 60
+// Expected exit code: 60
+//
+// 24-byte struct (three u64 fields), stores 10/20/30 at offsets
+// 0/8/16, loads all three, sums, returns 60.
+
+struct Triple {
+    a: u64,
+    b: u64,
+    c: u64,
+}
+
+fn main() -> i32 {
+    p = allocate(24);
+    *(p + 0) = 10;
+    *(p + 8) = 20;
+    *(p + 16) = 30;
+    a: u64 = *(p + 0);
+    b: u64 = *(p + 8);
+    c: u64 = *(p + 16);
+    s: u64 = a + b + c;
+    free(p);
+    return s;
+}

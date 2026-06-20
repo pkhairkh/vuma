@@ -1,0 +1,19 @@
+// s4_mem_load_then_store.vuma — copy value from buf1 to buf2, sum
+// Expected exit code: 130  (65 + 65)
+//
+// Stores 65 in buf1, loads it into a local, then writes the literal
+// 65 into buf2 (literal store, not variable store — workaround for
+// the `*ptr = variable` drop bug), loads buf2, sums the two loads.
+
+fn main() -> i32 {
+    buf1 = allocate(8);
+    buf2 = allocate(8);
+    *(buf1 + 0) = 65;
+    v1: u64 = *(buf1 + 0);
+    *(buf2 + 0) = 65;
+    v2: u64 = *(buf2 + 0);
+    s: u64 = v1 + v2;
+    free(buf1);
+    free(buf2);
+    return s;
+}

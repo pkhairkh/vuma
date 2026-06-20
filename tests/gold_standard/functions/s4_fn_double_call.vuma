@@ -1,0 +1,18 @@
+// s4_fn_double_call.vuma — call same fn twice, sum results
+// Expected exit code: 100  (40 + 60)
+//
+// `doubler(x) = x * 2`. main calls doubler(20) → 40 and doubler(30)
+// → 60, sums them. Tests that repeated calls to the same function
+// with different arguments produce correct, distinct results.
+
+fn doubler(x: u32) -> u32 {
+    r: u32 = x * 2;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = doubler(20);
+    b: u32 = doubler(30);
+    s: u32 = a + b;
+    return s;
+}

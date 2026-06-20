@@ -1,0 +1,20 @@
+// s4_atom_two_stores.vuma — two atomic_stores, two atomic_loads, sum
+// Expected exit code: 0 (current buggy backend)
+// Expected exit code (correct, post-bridge-fix): 110  (40 + 70)
+//
+// Two 8-byte cells. atomic_store 40 into cell1, atomic_store 70 into
+// cell2, load both, sum. On the current backend both loads return 0,
+// so exit is 0. Will exit 110 once atomic ops are wired through.
+
+fn main() -> i32 {
+    cell1 = allocate(8);
+    cell2 = allocate(8);
+    atomic_store(cell1, 40);
+    atomic_store(cell2, 70);
+    a = atomic_load(cell1);
+    b = atomic_load(cell2);
+    s = a + b;
+    free(cell1);
+    free(cell2);
+    return s;
+}

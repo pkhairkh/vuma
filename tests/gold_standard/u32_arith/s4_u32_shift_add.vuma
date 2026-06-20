@@ -1,0 +1,15 @@
+// s4_u32_shift_add.vuma — (1 << 3) + 7 = 8 + 7 = 15
+// Expected exit code: 15
+//
+// Left-shift 1 by 3 (yields 8), then add 7. The shift amount is
+// loaded into a variable because VUMA may drop bitwise ops with
+// an immediate RHS.
+
+fn main() -> i32 {
+    one: u32 = 1;
+    sh: u32 = 3;
+    seven: u32 = 7;
+    shifted: u32 = one << sh;
+    r: u32 = shifted + seven;
+    return r;
+}

@@ -1,0 +1,19 @@
+// s4_nl_2x3_count.vuma — 2x3 nested loop, count iterations = 6
+// Expected exit code (correct): 6
+// Observed on current x86_64 backend: 0 (FAIL — known bug)
+//
+// Outer loop 2 iterations, inner loop 3 iterations each → 2*3 = 6
+// total iterations. Counter is a scalar accumulator updated inside
+// the inner loop body. The known "for-body assignments don't
+// propagate" bug means count stays 0 → exit 0. Will pass (exit 6)
+// once that bug is fixed.
+
+fn main() -> i32 {
+    count: u32 = 0;
+    for i in 0..2 {
+        for j in 0..3 {
+            count = count + 1;
+        }
+    }
+    return count;
+}

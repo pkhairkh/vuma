@@ -1,0 +1,28 @@
+// s4_mf_shared_helper.vuma — one helper called by two callers, summed
+// Expected exit code: 90  (40 + 50)
+//
+// `adder(x) = x + 10`. `caller_a(x) = adder(x)`; `caller_b(x) =
+// adder(x)`. main calls caller_a(30) → 40 and caller_b(40) → 50,
+// sums them. Tests that a shared helper invoked from two distinct
+// callers works correctly.
+
+fn adder(x: u32) -> u32 {
+    ten: u32 = 10;
+    r: u32 = x + ten;
+    return r;
+}
+fn caller_a(x: u32) -> u32 {
+    r: u32 = adder(x);
+    return r;
+}
+fn caller_b(x: u32) -> u32 {
+    r: u32 = adder(x);
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = caller_a(30);
+    b: u32 = caller_b(40);
+    s: u32 = a + b;
+    return s;
+}

@@ -1,0 +1,78 @@
+# ============================================================================
+# VUMA Compiler Tests — gold-standard cross-backend CI
+# ============================================================================
+# Simple workflow that builds the VUMA compiler + test-driver binaries and
+# runs the full gold-standard test suite on every push and pull request.
+# All 7 native QEMU backends are exercised: x86_64 (native), aarch64,
+# riscv64, arm32, mips64el, ppc64, loongarch64. Raw output and a summary
+# are uploaded as a CI artifact for post-hoc analysis.
+# ============================================================================
+
+name: VUMA Compiler Tests
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+  workflow_dispatch:
+
+# Cancel in-flight runs when a new commit lands on the same ref.
+concurrency:
+  group: vuma-tests-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  test:
+    name: Build & Run Gold-Standard Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install QEMU user-mode emulators
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-user qemu-user-static
+          # Sanity check: every emulator we need is on PATH.
+          for q in qemu-aarch64 qemu-riscv64 qemu-arm qemu-mips64el \
+                   qemu-ppc64 qemu-loongarch64; do
+            command -v "$q" || { echo "missing $q"; exit 1; }
+          done
+
+      - name: Stage QEMU binaries under /tmp/qemu_bins/
+        # The Rust `differential_test` binary hard-codes the path
+        # /tmp/qemu_bins/qemu-<arch>. Provide it via symlinks so the same
+        # binary works in CI and on developer machines.
+        run: |
+          mkdir -p /tmp/qemu_bins
+          for q in qemu-aarch64 qemu-riscv64 qemu-arm qemu-mips64el \
+                   qemu-ppc64 qemu-loongarch64; do
+            src=$(command -v "$q")
+            ln -sf "$src" "/tmp/qemu_bins/$q"
+          done
+          ls -l /tmp/qemu_bins/
+
+      - name: Cache Cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: vuma-tests-${{ runner.os }}
+
+      - name: Run CI test suite
+        run: ./scripts/ci_run_tests.sh
+
+      - name: Upload test results artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: test_results/
+          retention-days: 30

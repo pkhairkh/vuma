@@ -1,0 +1,19 @@
+// s4_mem_two_buf_sum.vuma — two buffers, sum of values = 30 + 70 = 100
+// Expected exit code: 100
+//
+// Allocates two independent 8-byte buffers, stores 30 in the first and
+// 70 in the second, loads both back, returns their sum. Tests that
+// the allocator/loads correctly distinguish two distinct allocations.
+
+fn main() -> i32 {
+    buf1 = allocate(8);
+    buf2 = allocate(8);
+    *(buf1 + 0) = 30;
+    *(buf2 + 0) = 70;
+    a: u64 = *(buf1 + 0);
+    b: u64 = *(buf2 + 0);
+    s: u64 = a + b;
+    free(buf1);
+    free(buf2);
+    return s;
+}
