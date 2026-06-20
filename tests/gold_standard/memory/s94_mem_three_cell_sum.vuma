@@ -1,0 +1,23 @@
+// s94_mem_three_cell_sum.vuma — three cells, sum = 109 (50 + 40 + 19)
+// Expected exit code: 109
+//
+// Three 8-byte cells. Store 50/40/19 via `*ptr = literal`, load all
+// three, a + b + c -> 109. Uses `*ptr = literal` form (no offsets).
+// Distinct from s90_mem_three_cell_diff (29), s86_mem_three_cell_
+// diff (140) and s82_mem_three_cell_diff (230).
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    c3 = allocate(8);
+    *c1 = 50;
+    *c2 = 40;
+    *c3 = 19;
+    a: u64 = *c1;
+    b: u64 = *c2;
+    c: u64 = *c3;
+    r: u64 = a + b + c;    // 109
+    free(c1);
+    free(c2);
+    free(c3);
+    return r;
+}

@@ -1,0 +1,16 @@
+// s91_crypto_and_then_shr.vuma — (0xFE & 0x70) >> 1 = 0x70 >> 1 = 0x38 = 56
+// Expected exit code: 56
+//
+// Two-stage crypto mix: AND then shift-right. (254 & 112) = 112
+// (0x70); 112 >> 1 = 56 (0x38). All operands loaded into u32
+// variables first (immediate-RHS bitwise drop bug workaround).
+// Distinct from s90_crypto_xor_then_shr (17),
+// s86_crypto_xor_pair (230) and s82_crypto_xor_then_and (130).
+fn main() -> i32 {
+    a: u32 = 254;          // 0xFE
+    b: u32 = 112;          // 0x70
+    s: u32 = 1;
+    x: u32 = a & b;        // 0x70 = 112
+    r: u32 = x >> s;       // 0x38 = 56
+    return r;
+}

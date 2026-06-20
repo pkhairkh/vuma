@@ -1,0 +1,15 @@
+// s91_arith_sub_then_mod.vuma — (250 - 30) % 90 = 220 % 90 = 40
+// Expected exit code: 40
+//
+// Two-stage arithmetic: subtract then modulo. 250 - 30 = 220;
+// 220 % 90 = 40. All operands kept as i32 locals. Straight-line
+// arithmetic. Distinct from s90_arith_sub_then_div (56),
+// s86_arith_sub_then_mod (20) and s82_arith_sub_then_div (180).
+fn main() -> i32 {
+    a: i32 = 250;
+    b: i32 = 30;
+    c: i32 = 90;
+    s: i32 = a - b;        // 220
+    r: i32 = s % c;        // 40
+    return r;
+}

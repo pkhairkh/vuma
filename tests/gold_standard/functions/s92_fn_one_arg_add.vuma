@@ -1,0 +1,16 @@
+// s92_fn_one_arg_add.vuma — inc(60) = 60 + 6 = 66
+// Expected exit code: 66
+//
+// Helper inc(x) = x + 6. main calls inc(60) -> 66. Single-arg
+// function adding a constant. Distinct from s90_fn_one_arg_add (14),
+// s86_fn_one_arg_add (241) and s82_fn_one_arg_add (196).
+fn inc(x: u32) -> u32 {
+    k: u32 = 6;
+    r: u32 = x + k;
+    return r;
+}
+
+fn main() -> i32 {
+    v: u32 = inc(60);        // 66
+    return v;
+}

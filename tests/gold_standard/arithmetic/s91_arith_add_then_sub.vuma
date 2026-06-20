@@ -1,0 +1,15 @@
+// s91_arith_add_then_sub.vuma — (180 + 50) - 120 = 230 - 120 = 110
+// Expected exit code: 110
+//
+// Two-stage arithmetic: add then subtract. 180 + 50 = 230;
+// 230 - 120 = 110. All operands kept as i32 locals. Straight-line
+// arithmetic. Distinct from s90_arith_add_then_mod (53),
+// s86_arith_add_then_div (10) and s82_arith_add_then_mul (200).
+fn main() -> i32 {
+    a: i32 = 180;
+    b: i32 = 50;
+    c: i32 = 120;
+    s: i32 = a + b;        // 230
+    r: i32 = s - c;        // 110
+    return r;
+}
