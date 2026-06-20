@@ -1,0 +1,24 @@
+// s3_mf_constant_returns.vuma — 3 functions return constants, main sums
+// Expected exit code: 60  (10 + 20 + 30)
+//
+// Three functions each return a distinct constant; main calls all
+// three and returns their sum.
+
+fn f1() -> u32 {
+    return 10;
+}
+fn f2() -> u32 {
+    return 20;
+}
+fn f3() -> u32 {
+    return 30;
+}
+
+fn main() -> i32 {
+    a: u32 = f1();
+    b: u32 = f2();
+    c: u32 = f3();
+    s1: u32 = a + b;
+    s2: u32 = s1 + c;
+    return s2;
+}

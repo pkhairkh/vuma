@@ -1,0 +1,23 @@
+// s3_ls_offset_traverse.vuma — store offset in node1, traverse to node2
+// Expected exit code: 81
+//
+// Two-node linked layout inside a single 24-byte allocation. node1
+// stores a next_offset (16) and a placeholder value (0); node2 stores
+// 81. main reads node1.next_offset, dereferences node2 via
+// (block + offset), returns node2.val. All values <= 255.
+
+fn main() -> i32 {
+    block = allocate(24);
+    // node1.val = 0
+    *(block + 0) = 0;
+    // node1.next_offset = 16
+    *(block + 8) = 16;
+    // node2.val = 81
+    *(block + 16) = 81;
+
+    off: u64 = *(block + 8);
+    val: u64 = *(block + off);
+
+    free(block);
+    return val;
+}

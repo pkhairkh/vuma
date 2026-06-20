@@ -1,0 +1,25 @@
+// s3_ls_two_node_swap.vuma — node1 stores A, node2 stores B, swap & sum
+// Expected exit code: 150  (60 + 90)
+//
+// Two 8-byte nodes inside a 16-byte allocation. node1 holds 60, node2
+// holds 90. main reads both, swaps them in local variables, sums them.
+// Verifies loading from two distinct nodes in one function.
+
+fn main() -> i32 {
+    block = allocate(16);
+    // node1.val = 60
+    *(block + 0) = 60;
+    // node2.val = 90
+    *(block + 8) = 90;
+
+    a: u64 = *(block + 0);
+    b: u64 = *(block + 8);
+    // Swap in locals
+    tmp: u64 = a + 0;
+    a2: u64 = b + 0;
+    b2: u64 = tmp + 0;
+    s: u64 = a2 + b2;
+
+    free(block);
+    return s;
+}

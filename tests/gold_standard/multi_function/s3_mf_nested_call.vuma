@@ -1,0 +1,20 @@
+// s3_mf_nested_call.vuma — main calls f1, f1 calls f2, returns sum
+// Expected exit code: 30  (10 + 20)
+//
+// f2 returns 20. f1 calls f2, adds 10 to its result, returns 30.
+// main calls f1 and returns the result.
+
+fn f2() -> u32 {
+    return 20;
+}
+fn f1() -> u32 {
+    a: u32 = f2();
+    ten: u32 = 10;
+    s: u32 = a + ten;
+    return s;
+}
+
+fn main() -> i32 {
+    v: u32 = f1();
+    return v;
+}

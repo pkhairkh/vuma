@@ -1,0 +1,14 @@
+// s3_ls_overwrite_value.vuma — store then overwrite same node field
+// Expected exit code: 73
+//
+// Single 8-byte node: store 11, then overwrite with 73, then load.
+// Verifies that overwriting a value field within a node works.
+
+fn main() -> i32 {
+    node = allocate(8);
+    *(node + 0) = 11;
+    *(node + 0) = 73;
+    v: u64 = *(node + 0);
+    free(node);
+    return v;
+}

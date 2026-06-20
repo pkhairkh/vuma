@@ -1,0 +1,21 @@
+// s3_ls_value_roundtrip.vuma — store value at head, traverse, retrieve
+// Expected exit code: 64
+//
+// Three 8-byte nodes inside a single 24-byte allocation:
+//   node1 stores value 64 (offset 0) and next_offset 16 (offset 8).
+//   node2 (offset 16) holds a marker value 0.
+// main returns node1's value (64).
+
+fn main() -> i32 {
+    block = allocate(24);
+    // node1.val = 64
+    *(block + 0) = 64;
+    // node1.next_offset = 16
+    *(block + 8) = 16;
+    // node2.val = 0 (marker)
+    *(block + 16) = 0;
+
+    v: u64 = *(block + 0);
+    free(block);
+    return v;
+}
