@@ -1,0 +1,5 @@
+// Test: allocate and return 0
+fn main() -> i32 {
+    msg = allocate(3);
+    return 0;
+}

@@ -1,0 +1,16 @@
+// arith_add_large — large u64 addition that does not overflow
+// Expected exit code: 2
+//
+// Adds two u64 values whose sum exceeds 2^32 but fits in u64. We use
+// 4000000001 + 4000000001 = 8000000002. Both addends are > 2^32 / 2, so
+// the sum crosses the 32-bit boundary; this exercises the backend's u64
+// addition code path. The exit code is the low 8 bits of the sum, which
+// is 2.
+
+fn main() -> i32 {
+    a: u64 = 4000000001;
+    b: u64 = 4000000001;
+    sum: u64 = a + b;            // 8000000002, fits in u64
+    low: u32 = sum & 4294967295;
+    return low & 255;
+}

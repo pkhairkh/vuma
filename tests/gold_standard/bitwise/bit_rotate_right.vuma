@@ -1,0 +1,13 @@
+// bit_rotate_right.vuma — Rotate u16=256 right by 1 (16-bit rotation).
+// Expected exit code: 128
+// ((256 >> 1) | ((256 & 1) << 15)) = 128 | 0 = 128
+fn main() -> i32 {
+    val: u64 = 256;
+    one: u64 = 1;
+    fifteen: u64 = 15;
+    right: u64 = val >> one;
+    lowbit: u64 = val & one;
+    wrap: u64 = lowbit << fifteen;
+    result: u64 = right | wrap;
+    return result;
+}

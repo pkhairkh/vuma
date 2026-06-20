@@ -1,0 +1,11 @@
+// u32_add — u32 addition with masking: (50 + 50) & 0xFFFFFFFF
+// Expected exit code: 100
+//
+// 50 + 50 = 100. No overflow. Masked to u32 = 100.
+
+fn main() -> i32 {
+    a: u32 = 50;
+    b: u32 = 50;
+    sum: u32 = (a + b) & 4294967295;
+    return sum;
+}

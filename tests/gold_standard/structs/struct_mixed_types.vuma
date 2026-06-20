@@ -1,0 +1,31 @@
+// struct_mixed_types.vuma — struct with mixed-size field types
+// Expected exit code: 42
+//
+// Allocates a Mixed struct with u8, u32, and u64 fields. Stores
+// a=10 (u8), b=20 (u32), c=12 (u64), then loads each back as u64
+// and sums: 10 + 20 + 12 = 42.
+//
+// Memory layout (with natural alignment):
+//   a: u8  @ offset 0
+//   b: u32 @ offset 4 (3 bytes padding)
+//   c: u64 @ offset 8 (4 bytes padding)
+// Total: 16 bytes
+
+struct Mixed {
+    a: u8,
+    b: u32,
+    c: u64,
+}
+
+fn main() -> i32 {
+    m = allocate(16);
+    *(m + 0) = 10;
+    *(m + 4) = 20;
+    *(m + 8) = 12;
+    a: u64 = *(m + 0);
+    b: u64 = *(m + 4);
+    c: u64 = *(m + 8);
+    sum: u64 = a + b + c;
+    free(m);
+    return sum;
+}

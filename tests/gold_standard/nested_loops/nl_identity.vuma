@@ -1,0 +1,23 @@
+// nl_identity.vuma — 2x2 identity matrix, return [0][0]
+// Expected exit code (correct): 1
+// Expected exit code (current buggy backend): 0
+//
+// Builds a 2x2 identity matrix in memory via nested loops. Each cell at
+// (i,j) is set to (i == j) cast to u32 — 1 on the diagonal, 0 elsewhere.
+// Returns cell (0,0), which should be 1.
+// EXPECTED TO FAIL until the for-body assignment propagation bug is fixed.
+
+fn main() -> i32 {
+    m = allocate(16);
+    for i in 0..2 {
+        for j in 0..2 {
+            eq: bool = (i == j);
+            v: u64 = eq;
+            off: u64 = (i * 2 + j) * 4;
+            *(m + off) = v;
+        }
+    }
+    out: u32 = *(m + 0);
+    free(m);
+    return out;
+}

@@ -1,0 +1,13 @@
+// u32_mul_chain — chain of u32 multiplications: 2 * 3 * 4
+// Expected exit code: 24
+//
+// 2 * 3 = 6; 6 * 4 = 24. Each step masked to u32.
+
+fn main() -> i32 {
+    a: u32 = 2;
+    b: u32 = 3;
+    c: u32 = 4;
+    p1: u32 = (a * b) & 4294967295;
+    p2: u32 = (p1 * c) & 4294967295;
+    return p2;
+}

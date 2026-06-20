@@ -1,0 +1,28 @@
+// mem_load_array.vuma — load array of values
+// Expected exit code: 45
+//
+// Stores values 0..9 into a buffer, then sums them on load.
+// Sum = 0+1+2+...+9 = 45.
+
+fn main() -> i32 {
+    buf = allocate(16);
+    *(buf + 0) = 0;
+    *(buf + 1) = 1;
+    *(buf + 2) = 2;
+    *(buf + 3) = 3;
+    *(buf + 4) = 4;
+    *(buf + 5) = 5;
+    *(buf + 6) = 6;
+    *(buf + 7) = 7;
+    *(buf + 8) = 8;
+    *(buf + 9) = 9;
+    sum: u32 = 0;
+    i: u32 = 0;
+    while i < 10 {
+        v: u32 = *(buf + i);
+        sum = sum + v;
+        i = i + 1;
+    }
+    free(buf);
+    return sum;
+}

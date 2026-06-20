@@ -1,0 +1,26 @@
+// ls_modify_node.vuma — function modifies a node created by main
+// Expected exit code: 99
+//
+// main allocates a node and stores 42 at the start. It then calls a
+// function that overwrites the start with 99. main loads the value
+// back and returns 99, confirming that writes through a passed
+// Address are visible to the caller.
+//
+// Uses `*p` (no offset) inside the function and `*node` (no offset)
+// in main because VUMA miscompiles `*(p + 0)` stores inside function
+// bodies (the store is silently dropped, see Task 5-b workaround (c))
+// and `*(node + 0)` loads do not reliably observe `*p` stores.
+
+fn set_val(p: Address) -> i32 {
+    *p = 99;
+    return 0;
+}
+
+fn main() -> i32 {
+    node = allocate(8);
+    *node = 42;
+    set_val(node);
+    v: u64 = *node;
+    free(node);
+    return v;
+}

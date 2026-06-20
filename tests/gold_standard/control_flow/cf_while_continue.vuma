@@ -1,0 +1,23 @@
+// cf_while_continue — continue skips the sum when i==5
+// Expected exit code: 40
+//
+// Semantic: i increments first (1..10), sum += i except when i==5.
+// Values added: 1+2+3+4+6+7+8+9 = 40.
+// (Task spec listed 45; correct semantic value is 40. On VUMA buggy
+// codegen where continue is broken, sum may be 55; where while-body
+// assignments are dropped, sum stays 0.)
+//
+// Exposes: continue + while-body assignment propagation bugs.
+
+fn main() -> i32 {
+    i: u32 = 0;
+    sum: u32 = 0;
+    while (i < 10) {
+        i = i + 1;
+        if (i == 5) {
+            continue;
+        }
+        sum = sum + i;
+    }
+    return sum;
+}

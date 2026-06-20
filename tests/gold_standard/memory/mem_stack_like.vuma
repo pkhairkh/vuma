@@ -1,0 +1,28 @@
+// mem_stack_like.vuma — simulate a stack (push/pop in memory)
+// Expected exit code: 0
+//
+// Simulates a stack in a memory buffer. Pushes 3 values, then pops them
+// and verifies LIFO order. Top of stack pointer advances/retreats.
+
+fn main() -> i32 {
+    stack = allocate(8);
+    top: u32 = 0;
+    // Push 10, 20, 30
+    *(stack + top) = 10; top = top + 1;
+    *(stack + top) = 20; top = top + 1;
+    *(stack + top) = 30; top = top + 1;
+    // Pop three times (LIFO: 30, 20, 10)
+    top = top - 1;
+    pop3: u32 = *(stack + top);
+    top = top - 1;
+    pop2: u32 = *(stack + top);
+    top = top - 1;
+    pop1: u32 = *(stack + top);
+    free(stack);
+    if pop3 == 30 {
+        if pop2 == 20 {
+            if pop1 == 10 { return 0; }
+        }
+    }
+    return 1;
+}
