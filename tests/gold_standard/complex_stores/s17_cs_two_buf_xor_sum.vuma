@@ -1,0 +1,20 @@
+// s17_cs_two_buf_xor_sum.vuma — two cells, 0x22 ^ 0x11 = 0x33 = 51
+// Expected exit code: 51
+//
+// Two independent 8-byte cells. Store 0x22 (34) / 0x11 (17) via
+// `*ptr = literal`, load both, XOR -> 51. Uses `*ptr = literal` form
+// (no offsets). Distinct from s14_cs_two_buf_overwrite_one (overwrite
+// framing) and s9_cs_two_bufs_cross (different ops).
+
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    *c1 = 34;
+    *c2 = 17;
+    a: u64 = *c1;
+    b: u64 = *c2;
+    r: u64 = a ^ b;       // 0x33 = 51
+    free(c1);
+    free(c2);
+    return r;
+}

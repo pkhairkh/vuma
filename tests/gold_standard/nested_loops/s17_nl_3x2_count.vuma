@@ -1,0 +1,19 @@
+// s17_nl_3x2_count.vuma — 3x2 nested loop, count = 6
+// Expected exit code (correct): 6
+// Observed on current x86_64 backend: 0 (FAIL — known bug)
+//
+// Outer loop 3 iterations, inner loop 2 iterations each -> 3*2 = 6
+// total iterations. Counter is a scalar accumulator updated inside the
+// inner loop body. Known "for-body assignments don't propagate" bug
+// keeps count at 0. Distinct from s14_nl_2x5_sum (2x5 = 10) and
+// s9_nl_2x4_count (2x4 = 8).
+
+fn main() -> i32 {
+    count: u32 = 0;
+    for i in 0..3 {
+        for j in 0..2 {
+            count = count + 1;
+        }
+    }
+    return count;
+}

@@ -1,0 +1,17 @@
+// s16_ls_overwrite_value.vuma — single node, store 33 then overwrite with 200
+// Expected exit code: 200
+//
+// 8-byte allocation treated as a single "node". Store 33 via `*node = 33`,
+// then overwrite with 200 via `*node = 200` (literal overwrite, last write
+// wins). Load and return 200. Uses `*ptr = literal` form (no offsets).
+// Distinct from s9_ls_overwrite_node (10 then 50) and s4_ls_overwrite_node
+// (different value pair).
+
+fn main() -> i32 {
+    node = allocate(8);
+    *node = 33;
+    *node = 200;
+    v: u64 = *node;
+    free(node);
+    return v;
+}

@@ -1,0 +1,16 @@
+// s16_u32_xor_chain_3.vuma — 0x11 ^ 0x22 ^ 0x33 = 0x33 ^ 0x33 = 0
+// Expected exit code: 0
+//
+// Three-way XOR chain. (17 ^ 34) = 51 (0x33); 51 ^ 51 = 0. All operands
+// loaded into u32 variables first (immediate-RHS bitwise drop bug
+// workaround). Distinct from s14_bit_xor_chain_3 (0xAA^0x55^0xFF = 0) and
+// s13_bit_xor_chain_3 (different operands).
+
+fn main() -> i32 {
+    a: u32 = 17;          // 0x11
+    b: u32 = 34;          // 0x22
+    c: u32 = 51;          // 0x33
+    x: u32 = a ^ b;       // 0x33
+    r: u32 = x ^ c;       // 0x00 = 0
+    return r;
+}

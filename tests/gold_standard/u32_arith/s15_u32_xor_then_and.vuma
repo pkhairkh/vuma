@@ -1,0 +1,16 @@
+// s15_u32_xor_then_and.vuma — ((0x33 ^ 0x0F) & 0xF0) = 0x30 = 48
+// Expected exit code: 48
+//
+// XOR-then-AND. (51 ^ 15) = 60 (0x3C); 60 & 240 = 48 (0x30). All operands
+// loaded into u32 variables first (immediate-RHS bitwise drop bug
+// workaround). Distinct from s14_u32_xor_then_shl (XOR-then-shift) and
+// s11_u32_xor_shl_mask (XOR-shift-mask chain).
+
+fn main() -> i32 {
+    a: u32 = 51;          // 0x33
+    b: u32 = 15;          // 0x0F
+    m: u32 = 240;         // 0xF0
+    x: u32 = a ^ b;       // 0x3C = 60
+    r: u32 = x & m;       // 0x30 = 48
+    return r;
+}

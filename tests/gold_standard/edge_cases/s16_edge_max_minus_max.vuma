@@ -1,0 +1,13 @@
+// s16_edge_max_minus_max.vuma — 255 - 255 = 0
+// Expected exit code: 0
+//
+// Max U8 minus itself -> 0 (subtraction self-cancellation). Distinct
+// from s14_edge_max_minus_one (255 - 1 = 254) and s14_edge_zero_minus_zero
+// (0 - 0 = 0, smaller operands).
+
+fn main() -> i32 {
+    a: u32 = 255;
+    b: u32 = 255;
+    r: u32 = a - b;       // 0
+    return r;
+}
