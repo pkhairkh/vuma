@@ -1,0 +1,17 @@
+// s51_fn_one_arg_add.vuma — add_seven(55) = 62
+// Expected exit code: 62
+//
+// Helper add_seven(x) = x + 7. main calls add_seven(55) -> 62.
+// Single-arg function that adds a literal. Distinct from
+// s50_fn_one_arg_add (69) and s47_fn_one_arg_add (80).
+
+fn add_seven(x: u32) -> u32 {
+    n: u32 = 7;
+    r: u32 = x + n;
+    return r;
+}
+
+fn main() -> i32 {
+    v: u32 = add_seven(55);
+    return v;
+}

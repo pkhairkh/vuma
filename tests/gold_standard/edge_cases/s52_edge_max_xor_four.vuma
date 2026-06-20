@@ -1,0 +1,14 @@
+// s52_edge_max_xor_four.vuma — 255 ^ 4 = 251
+// Expected exit code: 251
+//
+// XOR the max u8 value with 4 (toggle bit 2). 255 ^ 4 = 251.
+// All operands loaded into u32 variables first (immediate-RHS
+// bitwise drop bug workaround). Distinct from s50_edge_max_xor_one
+// (254) and s47_edge_max_xor_one (254).
+
+fn main() -> i32 {
+    a: u32 = 255;
+    b: u32 = 4;
+    r: u32 = a ^ b;        // 251
+    return r;
+}

@@ -1,0 +1,15 @@
+// s52_crypto_xor_pair.vuma — 0xAA ^ 0x0F = 0xA5 = 165
+// Expected exit code: 165
+//
+// Two-byte XOR. 170 ^ 15 = 165 (0xA5). Non-complement pair produces
+// a mixed bit pattern. All operands loaded into u64 variables first
+// (immediate-RHS bitwise drop bug workaround). Distinct from
+// s50_crypto_xor_pair (0x3C ^ 0xC3 = 255) and s47_crypto_xor_pair
+// (0x96 ^ 0x69 = 255).
+
+fn main() -> i32 {
+    a: u64 = 170;          // 0xAA
+    b: u64 = 15;           // 0x0F
+    r: u64 = a ^ b;        // 0xA5 = 165
+    return r;
+}

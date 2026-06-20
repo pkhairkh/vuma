@@ -1,0 +1,16 @@
+// s54_ls_overwrite_value.vuma — store 60, overwrite to 200, load = 200
+// Expected exit code: 200
+//
+// Single 8-byte allocation treated as a one-field "node". Store 60
+// via `*p = literal`, then overwrite the field with 200. Load and
+// return 200. Uses `*p = literal` form (no offsets). Distinct from
+// s50_ls_overwrite_value (190) and s49_ls_overwrite_value (195).
+
+fn main() -> i32 {
+    n = allocate(8);
+    *n = 60;
+    *n = 200;
+    a: u64 = *n;
+    free(n);
+    return a;
+}
