@@ -1,0 +1,17 @@
+// s93_nl_3x41_count.vuma — 3x41 nested loop, count = 123
+// Expected exit code (correct): 123
+// Observed on current x86_64 backend: 0 (FAIL — known bug)
+//
+// Outer loop 3 iterations, inner loop 41 iterations each ->
+// 3*41 = 123 total. Counter increments by 1 each inner iteration.
+// Known "for-body assignments don't propagate" bug keeps count at
+// 0. Distinct from s90_nl_3x44_count (132), s82_nl_9x3_count (27) and s78_nl_5x19_count (95).
+fn main() -> i32 {
+    count: u32 = 0;
+    for i in 0..3 {
+        for j in 0..41 {
+            count = count + 1;
+        }
+    }
+    return count;
+}

@@ -1,0 +1,29 @@
+// s91_mf_three_chain.vuma — f3(f2(f1(5))) = 5 + 10 + 10 + 10 = 35
+// Expected exit code: 35
+//
+// Three single-arg helpers, each adds 10. main calls them in
+// sequence, threading the result: a = f1(5) = 15; b = f2(a) = 25;
+// c = f3(b) = 35. Distinct from s90_mf_three_chain (34),
+// s86_mf_three_chain (130) and s82_mf_three_chain (155).
+fn f1(x: u32) -> u32 {
+    k: u32 = 10;
+    r: u32 = x + k;
+    return r;
+}
+fn f2(x: u32) -> u32 {
+    k: u32 = 10;
+    r: u32 = x + k;
+    return r;
+}
+fn f3(x: u32) -> u32 {
+    k: u32 = 10;
+    r: u32 = x + k;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = f1(5);          // 15
+    b: u32 = f2(a);          // 25
+    c: u32 = f3(b);          // 35
+    return c;
+}
