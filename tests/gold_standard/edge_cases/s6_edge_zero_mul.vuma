@@ -1,0 +1,13 @@
+// s6_edge_zero_mul.vuma — 0 * 7 = 0
+// Expected exit code: 0
+//
+// Multiply zero by any constant -> 0. Tests the codegen's handling
+// of a zero left operand in multiplication. Distinct from
+// s5_edge_zero_sum (sum of zeros, not mul).
+
+fn main() -> i32 {
+    a: u32 = 0;
+    b: u32 = 7;
+    r: u32 = a * b;
+    return r;
+}

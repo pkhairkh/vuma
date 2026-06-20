@@ -1,0 +1,17 @@
+// s6_ptr_alias_two.vuma — two names for same cell, last write wins = 44
+// Expected exit code: 44
+//
+// Allocate one cell, assign its pointer to two variables p and q
+// (alias). Store 11 via p. Store 44 via q. Load via p -> 44 (last
+// write wins). Distinct from s5_ptr_two_cell_publish (two distinct
+// cells with publishing).
+
+fn main() -> i32 {
+    p = allocate(8);
+    q = p;
+    *p = 11;
+    *q = 44;
+    v: i32 = *p;
+    free(p);
+    return v;
+}
