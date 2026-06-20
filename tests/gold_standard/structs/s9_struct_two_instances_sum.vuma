@@ -1,0 +1,26 @@
+// s9_struct_two_instances_sum.vuma — two struct instances, sum = 110 (33 + 77)
+// Expected exit code: 110
+//
+// Two 8-byte allocations, each treated as a one-field struct
+// instance. Store 33/77 via `*p = literal`, load both, sum -> 110.
+// Uses `*p = literal` form (no offsets). Distinct from
+// s4_struct_two_instances (uses *(p+N) form, 2-field structs,
+// values 30+50 = 80) and s6_struct_two_fields_sum (single 2-field
+// struct via offsets, values 40+50 = 90).
+
+struct Single {
+    a: u64,
+}
+
+fn main() -> i32 {
+    p1 = allocate(8);
+    p2 = allocate(8);
+    *p1 = 33;
+    *p2 = 77;
+    a1: u64 = *p1;
+    a2: u64 = *p2;
+    s: u64 = a1 + a2;
+    free(p1);
+    free(p2);
+    return s;
+}

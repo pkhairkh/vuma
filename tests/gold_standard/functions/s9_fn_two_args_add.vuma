@@ -1,0 +1,16 @@
+// s9_fn_two_args_add.vuma — add(40, 50) = 90
+// Expected exit code: 90
+//
+// Helper add(a, b) = a + b. main calls add(40, 50) -> 90. Two-arg
+// function with addition. Distinct from s6_fn_two_args_mul (mul,
+// not add) and s5_fn_three_args_sum (three args).
+
+fn add(a: u32, b: u32) -> u32 {
+    r: u32 = a + b;
+    return r;
+}
+
+fn main() -> i32 {
+    v: u32 = add(40, 50);
+    return v;
+}

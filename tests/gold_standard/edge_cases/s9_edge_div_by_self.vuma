@@ -1,0 +1,14 @@
+// s9_edge_div_by_self.vuma — 100 / 100 = 1
+// Expected exit code: 1
+//
+// Divide a value by itself -> 1 (the identity for division). No
+// memory access, so the *(buf+offset) U8-truncation bug doesn't
+// apply. Distinct from s6_edge_zero_mul (mul-by-zero) and
+// s5_edge_255_minus_1 (subtraction boundary).
+
+fn main() -> i32 {
+    a: u32 = 100;
+    b: u32 = 100;
+    r: u32 = a / b;
+    return r;
+}

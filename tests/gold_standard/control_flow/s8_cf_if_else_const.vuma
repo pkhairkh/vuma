@@ -1,0 +1,19 @@
+// s8_cf_if_else_const.vuma — if-true picks x=42, return = 42
+// Expected exit code (correct): 42
+// Observed on current x86_64 backend: 88 (FAIL — known bug, else branch wins)
+//
+// Literal-true condition selects the if-true branch (x = 42); the else
+// branch (x = 88) is dead. Correct return is 42. On the current backend
+// the if-true body assignment is dropped and the else assignment wins,
+// so the observed exit is 88. Distinct from s6_cf_if_two_branches_const
+// (different else value 99, same bug class).
+
+fn main() -> i32 {
+    x: u32 = 0;
+    if true {
+        x = 42;
+    } else {
+        x = 88;
+    }
+    return x;
+}

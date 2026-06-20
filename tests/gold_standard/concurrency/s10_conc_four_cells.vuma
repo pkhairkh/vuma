@@ -1,0 +1,30 @@
+// s10_conc_four_cells.vuma — four cells, sum loads = 100 (10+20+30+40)
+// Expected exit code: 100
+//
+// Four independent 8-byte cells. Each gets a distinct literal at
+// offset 0 (10/20/30/40). All four loaded back and summed. Distinct
+// from s5_conc_three_cells (3 cells) and s6_conc_sum_three_diff (3
+// cells with values 15/45/60).
+
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    c3 = allocate(8);
+    c4 = allocate(8);
+    *c1 = 10;
+    *c2 = 20;
+    *c3 = 30;
+    *c4 = 40;
+    v1: i32 = *c1;
+    v2: i32 = *c2;
+    v3: i32 = *c3;
+    v4: i32 = *c4;
+    t1: i32 = v1 + v2;
+    t2: i32 = t1 + v3;
+    s: i32 = t2 + v4;
+    free(c1);
+    free(c2);
+    free(c3);
+    free(c4);
+    return s;
+}

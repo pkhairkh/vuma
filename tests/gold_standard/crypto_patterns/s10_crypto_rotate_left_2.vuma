@@ -1,0 +1,20 @@
+// s10_crypto_rotate_left_2.vuma — rotate 0x81 left 2 = 0x06 = 6
+// Expected exit code: 6
+//
+// Rotate left by 2 bits of an 8-bit value 0x81 (129). Computed as
+// ((v << 2) | (v >> 6)) & 0xFF. (0x81 << 2) = 0x204; (0x81 >> 6) = 2;
+// 0x204 | 0x02 = 0x206; & 0xFF = 0x06 = 6. All operands loaded into
+// u64 variables first. Distinct from s5_crypto_rotate_left_4 (4 bits)
+// and s6_crypto_rotate_right_4 (rotate right).
+
+fn main() -> i32 {
+    v: u64 = 129;         // 0x81
+    sh_l: u64 = 2;
+    sh_r: u64 = 6;
+    mask: u64 = 255;      // 0xFF
+    hi: u64 = v << sh_l;  // 0x204
+    lo: u64 = v >> sh_r;  // 0x02
+    combined: u64 = hi | lo;  // 0x206
+    r: u64 = combined & mask; // 0x06 = 6
+    return r;
+}

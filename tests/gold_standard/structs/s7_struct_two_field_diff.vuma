@@ -1,0 +1,26 @@
+// s7_struct_two_field_diff.vuma — 2 fields, diff = 35 - 25 = 10
+// Expected exit code: 10
+//
+// 16-byte struct (two u64 fields). Store 25/35 at offsets 0/8, load
+// both, compute diff -> 35 - 25 = 10. Uses pointer-arithmetic aliases
+// (f0 = p, f1 = p + 8) so all stores/loads go through `*fN`.
+// Distinct from s6_struct_two_fields_sum (sum, not diff) and
+// s5_struct_first_field_only (loads only first field).
+
+struct Pair {
+    a: u64,
+    b: u64,
+}
+
+fn main() -> i32 {
+    p = allocate(16);
+    f0 = p;
+    f1 = p + 8;
+    *f0 = 25;
+    *f1 = 35;
+    a: u64 = *f0;
+    b: u64 = *f1;
+    d: u64 = b - a;     // 35 - 25 = 10
+    free(p);
+    return d;
+}
