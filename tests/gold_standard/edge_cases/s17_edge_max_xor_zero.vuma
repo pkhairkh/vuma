@@ -1,0 +1,14 @@
+// s17_edge_max_xor_zero.vuma — 255 ^ 0 = 255
+// Expected exit code: 255
+//
+// Max U8 XOR zero -> unchanged max. Distinct from
+// s14_edge_xor_self (85 ^ 85 = 0) and s10_edge_max_xor_zero (same
+// arithmetic, different framing — this entry pairs with the AND/OR
+// variants below).
+
+fn main() -> i32 {
+    a: u32 = 255;
+    b: u32 = 0;
+    r: u32 = a ^ b;       // 255
+    return r;
+}

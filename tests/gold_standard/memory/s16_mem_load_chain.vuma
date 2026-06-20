@@ -1,0 +1,25 @@
+// s16_mem_load_chain.vuma — three cells 10/20/30, sum = 60
+// Expected exit code: 60
+//
+// Three 8-byte cells. Store 10/20/30 via `*ptr = literal`, load all
+// three, sum -> 60. Uses `*ptr = literal` form (no offsets). Distinct
+// from s5_mem_load_chain (different values) and s11_mem_load_chain_sum
+// (different operand values).
+
+fn main() -> i32 {
+    p1 = allocate(8);
+    p2 = allocate(8);
+    p3 = allocate(8);
+    *p1 = 10;
+    *p2 = 20;
+    *p3 = 30;
+    a: u64 = *p1;
+    b: u64 = *p2;
+    c: u64 = *p3;
+    t: u64 = a + b;
+    s: u64 = t + c;
+    free(p1);
+    free(p2);
+    free(p3);
+    return s;
+}

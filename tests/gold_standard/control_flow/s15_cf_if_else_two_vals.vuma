@@ -1,0 +1,19 @@
+// s15_cf_if_else_two_vals.vuma — if true { x = 33 } else { x = 66 }; return x
+// Expected exit code (correct): 33
+// Observed on current x86_64 backend: 66 (FAIL — known bug)
+//
+// If-true branch should set x = 33 (and win). On the current backend the
+// if-true body's single assignment is dropped, so the else body's
+// assignment (66) survives instead -> exit 66. Will exit 33 once the
+// if-body drop bug is fixed. Distinct from s14_cf_if_else_const
+// (values 42/99) and s11_cf_if_else_branches (values 30/90).
+
+fn main() -> i32 {
+    x: u32 = 0;
+    if true {
+        x = 33;
+    } else {
+        x = 66;
+    }
+    return x;
+}

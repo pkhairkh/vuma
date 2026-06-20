@@ -1,0 +1,19 @@
+// s15_conc_two_cell_xor.vuma — two cells, XOR loads = 255 (0x55 ^ 0xAA)
+// Expected exit code: 255
+//
+// Two independent 8-byte cells. Store 0x55 in c1, 0xAA in c2, load both
+// and XOR. Distinct from s14_conc_two_cell_diff (sum framing, 17/34 = 51)
+// and s11_conc_three_cells_xor (three-cell XOR).
+
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    *c1 = 85;            // 0x55
+    *c2 = 170;           // 0xAA
+    v1: i32 = *c1;
+    v2: i32 = *c2;
+    s: i32 = v1 ^ v2;    // 0xFF = 255
+    free(c1);
+    free(c2);
+    return s;
+}

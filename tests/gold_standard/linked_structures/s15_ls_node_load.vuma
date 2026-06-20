@@ -1,0 +1,15 @@
+// s15_ls_node_load.vuma — single 8-byte node, load = 64
+// Expected exit code: 64
+//
+// 8-byte allocation treated as a single "node". Store 64 via `*p = 64`,
+// load it back, return 64. Uses `*p = literal` form (no offsets) to avoid
+// the *(ptr+N) store-drop bug. Distinct from s14_ls_single_load (value 27)
+// and s9_ls_node_load (value 15).
+
+fn main() -> i32 {
+    node = allocate(8);
+    *node = 64;
+    v: u64 = *node;
+    free(node);
+    return v;
+}

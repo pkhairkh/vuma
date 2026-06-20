@@ -1,0 +1,25 @@
+// s17_mem_load_chain_sum.vuma — three cells, 11 + 22 + 33 = 66
+// Expected exit code: 66
+//
+// Three 8-byte cells. Store 11/22/33 (ascending by 11) via
+// `*p = literal`, load all three, sum -> 66. Uses `*p = literal` form.
+// Distinct from s14_mem_load_then_add (two cells) and
+// s11_mem_load_chain_sum (different values).
+
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    c3 = allocate(8);
+    *c1 = 11;
+    *c2 = 22;
+    *c3 = 33;
+    a: u64 = *c1;
+    b: u64 = *c2;
+    c: u64 = *c3;
+    t: u64 = a + b;       // 33
+    s: u64 = t + c;       // 66
+    free(c1);
+    free(c2);
+    free(c3);
+    return s;
+}

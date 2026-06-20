@@ -1,0 +1,20 @@
+// s17_ls_two_node_xor.vuma — two nodes, 0x10 ^ 0x20 = 0x30 = 48
+// Expected exit code: 48
+//
+// Two 8-byte allocations treated as two independent "nodes". Store
+// 0x10 (16) / 0x20 (32) via `*ptr = literal`, load both, XOR -> 48.
+// Uses `*ptr = literal` form (no offsets). Distinct from
+// s14_ls_two_node_sum (sum, not XOR) and s9_ls_two_node_sum (15+25=40).
+
+fn main() -> i32 {
+    n1 = allocate(8);
+    n2 = allocate(8);
+    *n1 = 16;
+    *n2 = 32;
+    a: u64 = *n1;
+    b: u64 = *n2;
+    r: u64 = a ^ b;       // 0x30 = 48
+    free(n1);
+    free(n2);
+    return r;
+}

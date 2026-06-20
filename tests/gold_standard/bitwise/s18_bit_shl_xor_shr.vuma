@@ -1,0 +1,18 @@
+// s18_bit_shl_xor_shr.vuma — ((0x05 << 4) ^ 0x33) >> 1 = (80 ^ 51) >> 1 = 99 >> 1 = 49
+// Expected exit code: 49
+//
+// Three-stage bitwise: SHL then XOR then SHR. (5 << 4) = 80 (0x50);
+// 80 ^ 51 = 99 (0x63); 99 >> 1 = 49 (0x31). All operands loaded into
+// u64 variables first. Distinct from s14_bit_shl_then_shr (no XOR
+// middle stage) and s11_bit_shl_or_clear (shl-or-clear).
+
+fn main() -> i32 {
+    a: u64 = 5;           // 0x05
+    s1: u64 = 4;
+    b: u64 = 51;          // 0x33
+    s2: u64 = 1;
+    x: u64 = a << s1;     // 0x50 = 80
+    y: u64 = x ^ b;       // 0x63 = 99
+    r: u64 = y >> s2;     // 0x31 = 49
+    return r;
+}

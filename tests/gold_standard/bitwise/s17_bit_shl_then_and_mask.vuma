@@ -1,0 +1,16 @@
+// s17_bit_shl_then_and_mask.vuma — (0x05 << 4) & 0xF0 = 0x50 & 0xF0 = 0x50 = 80
+// Expected exit code: 80
+//
+// Shift-left then AND-mask. (5 << 4) = 80 (0x50); 80 & 240 = 80 (0x50).
+// All operands loaded into u64 variables first. Distinct from
+// s14_bit_shl_then_shr (shl-then-shr) and s10_bit_shl_and_mask
+// (similar shape, different values).
+
+fn main() -> i32 {
+    a: u64 = 5;           // 0x05
+    sh: u64 = 4;
+    m: u64 = 240;         // 0xF0
+    x: u64 = a << sh;     // 0x50 = 80
+    r: u64 = x & m;       // 0x50 = 80
+    return r;
+}
