@@ -1,0 +1,16 @@
+// s38_bit_xor_chain_3.vuma — 0x55 ^ 0x33 ^ 0x0F = 0x69 = 105
+// Expected exit code: 105
+//
+// Three-way XOR chain. 85 ^ 51 = 102 (0x66); 102 ^ 15 = 105 (0x69).
+// All operands loaded into u64 variables first (immediate-RHS
+// bitwise drop bug workaround). Distinct from s34_bit_or_xor_chain
+// (or-xor-chain, 85) and s30_bit_xor_then_and (xor-then-and).
+
+fn main() -> i32 {
+    a: u64 = 85;           // 0x55
+    b: u64 = 51;           // 0x33
+    c: u64 = 15;           // 0x0F
+    x: u64 = a ^ b;        // 0x66 = 102
+    r: u64 = x ^ c;        // 0x69 = 105
+    return r;
+}

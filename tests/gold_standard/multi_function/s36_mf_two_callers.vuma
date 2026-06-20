@@ -1,0 +1,20 @@
+// s36_mf_two_callers.vuma — h(30) + h(60) = 40 + 70 = 110
+// Expected exit code: 110
+//
+// Single helper h(x) = x + 10 called twice from main with
+// different arguments. h(30) -> 40; h(60) -> 70; sum =
+// 110. Uses intermediate variables for each call result.
+// Distinct from s30_mf_two_callers (different helper) and s27_mf_two_callers (different helper).
+
+fn h(x: u32) -> u32 {
+    n: u32 = 10;
+    r: u32 = x + n;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = h(30);        // 40
+    b: u32 = h(60);        // 70
+    r: u32 = a + b;        // 110
+    return r;
+}
