@@ -1,0 +1,24 @@
+// s85_mf_two_helpers_add.vuma — h1(40) + h2(50) = 55 + 78 = 133
+// Expected exit code: 133
+//
+// Two independent single-arg helpers. h1(x) = x + 15;
+// h2(x) = x + 28. main calls h1(40) = 55 and h2(50) = 78,
+// then sums -> 133. Distinct from s82_mf_two_helpers_add,
+// s78_mf_two_helpers_add and s74_mf_two_helpers_add.
+fn h1(x: u32) -> u32 {
+    n: u32 = 15;
+    r: u32 = x + n;
+    return r;
+}
+fn h2(x: u32) -> u32 {
+    n: u32 = 28;
+    r: u32 = x + n;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = h1(40);         // 55
+    b: u32 = h2(50);         // 78
+    s: u32 = a + b;          // 133
+    return s;
+}
