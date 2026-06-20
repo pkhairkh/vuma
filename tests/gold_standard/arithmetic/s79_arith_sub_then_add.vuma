@@ -1,0 +1,15 @@
+// s79_arith_sub_then_add.vuma — (50 - 30) + 1 = 20 + 1 = 21
+// Expected exit code: 21
+//
+// Two-stage arithmetic: subtract then add. 50 - 30 = 20;
+// 20 + 1 = 21. All operands kept as i32 locals. Straight-line
+// arithmetic. Distinct from s78_arith_sub_then_mul (78),
+// s77_arith_sub_then_mul (196) and s76_arith_sub_then_mul (200).
+fn main() -> i32 {
+    a: i32 = 50;
+    b: i32 = 30;
+    c: i32 = 1;
+    d: i32 = a - b;        // 20
+    r: i32 = d + c;        // 21
+    return r;
+}

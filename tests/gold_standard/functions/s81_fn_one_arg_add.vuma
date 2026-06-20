@@ -1,0 +1,17 @@
+// s81_fn_one_arg_add.vuma — add(100) = 100 + 33 = 133
+// Expected exit code: 133
+//
+// Helper add(x) = x + 33. main calls add(100) -> 100 + 33 =
+// 133. One-arg function that adds a constant. Distinct from
+// s78_fn_one_arg_add (2), s77_fn_one_arg_add (127) and
+// s76_fn_one_arg_add (87).
+fn add(x: u32) -> u32 {
+    k: u32 = 33;
+    r: u32 = x + k;
+    return r;
+}
+
+fn main() -> i32 {
+    v: u32 = add(100);
+    return v;
+}

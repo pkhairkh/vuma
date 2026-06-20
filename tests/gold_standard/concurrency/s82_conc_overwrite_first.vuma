@@ -1,0 +1,19 @@
+// s82_conc_overwrite_first.vuma — overwrite c1 to 175, load = 175
+// Expected exit code: 175
+//
+// Two 8-byte cells. Store 30 at c1, store 60 at c2, then
+// overwrite c1 to 175. Load c1 -> 175 (the overwritten value).
+// Uses `*ptr = literal` form. Distinct from s78_conc_overwrite_
+// last (3), s74_conc_overwrite_last (165) and s72_conc_overwrite_
+// first (115).
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    *c1 = 30;
+    *c2 = 60;
+    *c1 = 175;
+    r: i32 = *c1;          // 175
+    free(c1);
+    free(c2);
+    return r;
+}

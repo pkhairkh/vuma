@@ -1,0 +1,25 @@
+// s81_atom_three_cell_diff.vuma — three cells, atomic diff = 135 (200 - 40 - 25)
+// Expected exit code: 0 (current buggy backend)
+// Expected exit code (correct, post-bridge-fix): 135
+//
+// Three 8-byte cells. atomic_store 200/40/25, atomic_load each,
+// a - b - c -> 135. On the current backend the loads return 0
+// -> 0 - 0 - 0 = 0 -> exit 0. Will exit 135 once atomics are
+// wired through. Distinct from s78_atom_three_cell_diff (148),
+// s77_atom_three_cell_diff (171) and s76_atom_three_cell_diff (32).
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    c3 = allocate(8);
+    atomic_store(c1, 200);
+    atomic_store(c2, 40);
+    atomic_store(c3, 25);
+    a = atomic_load(c1);
+    b = atomic_load(c2);
+    c = atomic_load(c3);
+    r: i32 = a - b - c;               // 135
+    free(c1);
+    free(c2);
+    free(c3);
+    return r;
+}

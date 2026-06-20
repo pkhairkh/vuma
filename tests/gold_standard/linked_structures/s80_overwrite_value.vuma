@@ -1,0 +1,16 @@
+// s80_ls_overwrite_value.vuma — store 1, overwrite with 31, load = 31
+// Expected exit code: 31
+//
+// Single 8-byte allocation treated as a "node". Store 1 via
+// `*ptr = literal`, overwrite with 31 via `*ptr = literal`, load
+// and return 31. Uses `*ptr = literal` form (no offsets). Distinct
+// from s78_ls_overwrite_value (3), s74_ls_overwrite_value (85) and
+// s73_ls_overwrite_value (155).
+fn main() -> i32 {
+    n1 = allocate(8);
+    *n1 = 1;
+    *n1 = 31;
+    r: u64 = *n1;          // 31
+    free(n1);
+    return r;
+}

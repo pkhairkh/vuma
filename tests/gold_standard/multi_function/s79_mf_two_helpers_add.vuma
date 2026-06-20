@@ -1,0 +1,24 @@
+// s79_mf_two_helpers_add.vuma — f1(11) + f2(13) = 14 + 38 = 52
+// Expected exit code: 52
+//
+// Two single-arg helpers. f1(x) = x + 3; f2(y) = y + 25.
+// main calls both and adds: f1(11) + f2(13) = 14 + 38 = 52.
+// Distinct from s78_mf_two_helpers_add (4),
+// s77_mf_two_helpers_add (3) and s76_mf_two_helpers_add (2).
+fn f1(x: u32) -> u32 {
+    k: u32 = 3;
+    r: u32 = x + k;
+    return r;
+}
+fn f2(y: u32) -> u32 {
+    k: u32 = 25;
+    r: u32 = y + k;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = f1(11);          // 14
+    b: u32 = f2(13);          // 38
+    s: u32 = a + b;            // 52
+    return s;
+}

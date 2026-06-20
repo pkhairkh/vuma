@@ -1,0 +1,17 @@
+// s79_fn_one_arg_add.vuma — add(7) = 7 + 21 = 28
+// Expected exit code: 28
+//
+// Helper add(x) = x + 21. main calls add(7) -> 7 + 21 = 28.
+// One-arg function that adds a constant. Distinct from
+// s78_fn_one_arg_add (2), s77_fn_one_arg_add (3) and
+// s76_fn_one_arg_add (2).
+fn add(x: u32) -> u32 {
+    k: u32 = 21;
+    r: u32 = x + k;
+    return r;
+}
+
+fn main() -> i32 {
+    v: u32 = add(7);
+    return v;
+}
