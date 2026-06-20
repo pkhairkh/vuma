@@ -1,0 +1,16 @@
+// s89_fn_one_arg_add.vuma — add_one(11) = 12
+// Expected exit code: 12
+//
+// Helper add_one(x) = x + 1. main calls add_one(11) -> 12.
+// One-arg function returning arg + 1. Distinct from
+// s86_fn_one_arg_add (235), s82_fn_one_arg_add (200) and
+// s78_fn_one_arg_add (3).
+fn add_one(x: u32) -> u32 {
+    r: u32 = x + 1;
+    return r;
+}
+
+fn main() -> i32 {
+    v: u32 = add_one(11);  // 12
+    return v;
+}

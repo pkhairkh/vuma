@@ -1,0 +1,15 @@
+// s90_arith_add_then_mod.vuma — (150 + 100) % 197 = 250 % 197 = 53
+// Expected exit code: 53
+//
+// Two-stage arithmetic: add then modulo. 150 + 100 = 250; 250 % 197
+// = 53. All operands kept as i32 locals. Straight-line arithmetic.
+// Distinct from s86_arith_add_then_div (10), s82_arith_add_then_mul
+// (200) and s78_arith_add_then_div (11).
+fn main() -> i32 {
+    a: i32 = 150;
+    b: i32 = 100;
+    c: i32 = 197;
+    s: i32 = a + b;        // 250
+    r: i32 = s % c;        // 53
+    return r;
+}

@@ -1,0 +1,16 @@
+// s89_bit_and_then_shr.vuma — (80 & 255) >> 1 = 80 >> 1 = 40
+// Expected exit code: 40
+//
+// Two-stage bitwise: AND then shift right. (80 & 255) = 80;
+// 80 >> 1 = 40. All operands loaded into u64 variables first
+// (immediate-RHS bitwise drop bug workaround). Distinct from
+// s86_bit_or_then_shl (220), s82_bit_xor_then_shl (76) and
+// s78_bit_and_then_xor (2).
+fn main() -> i32 {
+    a: u64 = 80;
+    m: u64 = 255;           // 0xFF
+    s: u64 = 1;
+    x: u64 = a & m;        // 80
+    r: u64 = x >> s;       // 40
+    return r;
+}

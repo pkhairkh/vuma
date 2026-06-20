@@ -1,0 +1,19 @@
+// s90_mem_two_cell_diff.vuma — two cells, diff = 7 (200 - 193)
+// Expected exit code: 7
+//
+// Two 8-byte cells. Store 200/193 via `*ptr = literal`, load both,
+// a - b -> 7. Uses `*ptr = literal` form (no offsets). Distinct
+// from s86_mem_two_cell_sum (205), s82_mem_two_cell_sum (145) and
+// s78_mem_two_cell_sum (2).
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    *c1 = 200;
+    *c2 = 193;
+    a: u64 = *c1;
+    b: u64 = *c2;
+    d: u64 = a - b;        // 7
+    free(c1);
+    free(c2);
+    return d;
+}

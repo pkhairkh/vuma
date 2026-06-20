@@ -1,0 +1,18 @@
+// s87_mf_double_then_add.vuma — double(30) + 25 = 60 + 25 = 85
+// Expected exit code: 85
+//
+// Helper double(x) = x + x. main doubles 30 then adds 25:
+// double(30) + 25 = 60 + 25 = 85. Distinct from s86_mf_double_
+// then_add (65), s82_mf_double_then_add (50) and s78_mf_double_
+// then_add (3).
+fn double(x: u32) -> u32 {
+    r: u32 = x + x;
+    return r;
+}
+
+fn main() -> i32 {
+    d: u32 = double(30);     // 60
+    k: u32 = 25;
+    s: u32 = d + k;          // 85
+    return s;
+}

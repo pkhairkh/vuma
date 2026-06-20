@@ -1,0 +1,17 @@
+// s88_cf_if_single_assign.vuma — x=0; if true { x = 31 }; return x
+// Expected exit code (correct): 31
+// Observed on current x86_64 backend: 0 (FAIL — known bug)
+//
+// Single-assignment in an if-true body. With a literal
+// `true` condition x should become 31. Known "if-body
+// assignments don't propagate" bug keeps x at 0 -> exit 0.
+// Will exit 31 once the bug is fixed. Distinct from s86_cf_
+// if_single_assign (25), s82_cf_if_single_assign (18) and
+// s78_cf_if_single_assign (22).
+fn main() -> i32 {
+    x: u32 = 0;
+    if true {
+        x = 31;
+    }
+    return x;
+}

@@ -1,0 +1,14 @@
+// s87_edge_zero_xor_high.vuma — 0 ^ 230 = 230
+// Expected exit code: 230
+//
+// XOR the zero value 0 (0x00) with the high-bit value 230
+// (0xE6). 0 ^ 230 = 230 (0xE6). All operands loaded into u32
+// variables first (immediate-RHS bitwise drop bug workaround).
+// Distinct from s86_edge_zero_xor_high (250), s82_edge_zero_
+// xor_high (128) and s78_edge_high_bit_or (129).
+fn main() -> i32 {
+    a: u32 = 0;            // 0x00
+    b: u32 = 230;          // 0xE6
+    r: u32 = a ^ b;        // 0xE6 = 230
+    return r;
+}

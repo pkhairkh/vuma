@@ -1,0 +1,14 @@
+// s89_edge_max_and_low.vuma — 255 & 34 = 34
+// Expected exit code: 34
+//
+// AND the max byte value 255 (0xFF) with the low value 34
+// (0x22). 255 & 34 = 34 (0x22). All operands loaded
+// into u32 variables first (immediate-RHS bitwise drop bug
+// workaround). Distinct from s86_edge_max_and_low (255),
+// s82_edge_max_and_low (250) and s78_edge_high_bit_or (129).
+fn main() -> i32 {
+    a: u32 = 255;          // 0xFF
+    b: u32 = 34;          // 0x22
+    r: u32 = a & b;        // 0x22 = 34
+    return r;
+}

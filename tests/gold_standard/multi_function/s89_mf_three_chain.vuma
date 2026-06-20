@@ -1,0 +1,18 @@
+// s89_mf_three_chain.vuma — inc(inc(inc(63))) = 63+3 = 66
+// Expected exit code: 66
+//
+// Helper inc(x) = x + 1. main calls inc three times chained:
+// inc(inc(inc(63))) = 63 + 3 = 66. Distinct from
+// s86_mf_three_chain (220), s82_mf_three_chain (210) and
+// s78_mf_three_chain (3).
+fn inc(x: u32) -> u32 {
+    r: u32 = x + 1;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = inc(63);       // 64
+    b: u32 = inc(a);       // 65
+    c2: u32 = inc(b);      // 66
+    return c2;
+}
