@@ -1,0 +1,15 @@
+// s68_arith_add_then_div.vuma — (175 + 30) / 5 = 205 / 5 = 41
+// Expected exit code: 41
+//
+// Two-stage arithmetic: add then divide. 175 + 30 = 205;
+// 205 / 5 = 41. All operands kept as i32 locals. Straight-line
+// arithmetic. Distinct from s66_arith_add_then_mod (10), s62_arith_
+// add_then_div (50) and s58_arith_add_then_sub (150).
+fn main() -> i32 {
+    a: i32 = 175;
+    b: i32 = 30;
+    c: i32 = 5;
+    s: i32 = a + b;        // 205
+    r: i32 = s / c;        // 41
+    return r;
+}
