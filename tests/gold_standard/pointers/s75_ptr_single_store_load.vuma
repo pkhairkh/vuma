@@ -1,0 +1,14 @@
+// s75_ptr_single_store_load.vuma — store 151, load = 151
+// Expected exit code: 151
+//
+// Single 8-byte cell. Store 151 via `*p = literal`, load and
+// return 151. Uses `*p = literal` form (no offsets). Distinct
+// from s74_ptr_single_store_load (161), s70_ptr_single_store_
+// load (100) and s66_ptr_single_store_load (195).
+fn main() -> i32 {
+    p = allocate(8);
+    *p = 151;
+    v: i32 = *p;
+    free(p);
+    return v;
+}
