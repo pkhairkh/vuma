@@ -1,0 +1,14 @@
+// s20_edge_one_shl_seven.vuma — 1 << 7 = 128
+// Expected exit code: 128
+//
+// Single-bit shift to the high bit of a byte: 1 << 7 = 128 (0x80). All
+// operands loaded into u32 variables first (immediate-RHS bitwise drop
+// bug workaround). Distinct from s17_edge_one_and_max (1 & 255 = 1) and
+// s15_edge_one_shl_three (1 << 3 = 8).
+
+fn main() -> i32 {
+    a: u32 = 1;
+    sh: u32 = 7;
+    r: u32 = a << sh;     // 0x80 = 128
+    return r;
+}

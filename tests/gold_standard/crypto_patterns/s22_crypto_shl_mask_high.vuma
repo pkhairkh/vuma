@@ -1,0 +1,17 @@
+// s22_crypto_shl_mask_high.vuma — (1 << 3) & 0xF0 = 0x08 & 0xF0 = 0x00 = 0
+// Expected exit code: 0
+//
+// Shift then high-nibble mask. 1 << 3 = 8 (0x08); 8 & 240 = 0 (the high
+// nibble of 0x08 is zero). Demonstrates that a low-bit-shifted value
+// is annihilated by a high-nibble mask. All operands loaded into u64
+// variables first. Distinct from s18_crypto_shl_mask (different mask
+// value, non-zero result) and s14_crypto_shl_then_xor (shl-then-xor).
+
+fn main() -> i32 {
+    a: u64 = 1;
+    s: u64 = 3;
+    m: u64 = 240;         // 0xF0
+    x: u64 = a << s;      // 0x08 = 8
+    r: u64 = x & m;       // 0x00 = 0
+    return r;
+}

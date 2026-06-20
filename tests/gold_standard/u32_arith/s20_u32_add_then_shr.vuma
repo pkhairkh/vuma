@@ -1,0 +1,15 @@
+// s20_u32_add_then_shr.vuma — (100 + 28) >> 2 = 128 >> 2 = 32
+// Expected exit code: 32
+//
+// Add-then-shift-right. (100 + 28) = 128; 128 >> 2 = 32. All operands
+// loaded into u32 variables first. Distinct from s18_u32_xor_then_and
+// (xor-then-and) and s15_u32_add_then_shr (different values).
+
+fn main() -> i32 {
+    a: u32 = 100;
+    b: u32 = 28;
+    sh: u32 = 2;
+    s: u32 = a + b;       // 128
+    r: u32 = s >> sh;     // 32
+    return r;
+}
