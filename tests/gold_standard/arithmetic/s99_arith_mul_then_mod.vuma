@@ -1,0 +1,15 @@
+// s99_arith_mul_then_mod.vuma — (9 * 8) % 11 = 72 % 11 = 6
+// Expected exit code: 6
+//
+// Two-stage arithmetic: multiply then modulus. 9 * 8 = 72;
+// 72 % 11 = 6. All operands kept as i32 locals. Straight-line
+// arithmetic. Distinct from s95_arith_mul_then_mod (13),
+// s91_arith_mul_then_add (127) and s87_arith_mul_then_sub (104).
+fn main() -> i32 {
+    a: i32 = 9;
+    b: i32 = 8;
+    m: i32 = 11;
+    x: i32 = a * b;        // 72
+    r: i32 = x % m;        // 6
+    return r;
+}
