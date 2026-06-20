@@ -1,0 +1,18 @@
+// s79_nl_8x13_count.vuma — 8x13 nested loop, count = 104
+// Expected exit code (correct): 104
+// Observed on current x86_64 backend: 0 (FAIL — known bug: for-body assignments don't propagate)
+//
+// Outer loop 8 iterations, inner loop 13 iterations each ->
+// 8*13 = 104 total. Counter increments by 1 each inner
+// iteration. Known "for-body assignments don't propagate" bug
+// keeps count at 0. Distinct from s78_nl_5x17_count (85),
+// s77_nl_5x17_count (6) and s76_nl_5x17_count (3).
+fn main() -> i32 {
+    count: u32 = 0;
+    for i in 0..8 {
+        for j in 0..13 {
+            count = count + 1;
+        }
+    }
+    return count;
+}
