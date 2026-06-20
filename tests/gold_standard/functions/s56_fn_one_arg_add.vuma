@@ -1,0 +1,17 @@
+// s56_fn_one_arg_add.vuma — add_one(154) = 155
+// Expected exit code: 155
+//
+// Helper add_one(x) = x + 1. main calls add_one(154) -> 155.
+// One-arg function returning the sum. Distinct from s54_fn_one_arg_
+// sub (75) and s50_fn_one_arg_add (125).
+
+fn add_one(x: u32) -> u32 {
+    one: u32 = 1;
+    r: u32 = x + one;
+    return r;
+}
+
+fn main() -> i32 {
+    v: u32 = add_one(154);
+    return v;
+}

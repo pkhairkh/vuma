@@ -1,0 +1,17 @@
+// s55_fn_one_arg_add.vuma — add_twenty(75) = 95
+// Expected exit code: 95
+//
+// Helper add_twenty(x) = x + 20. main calls add_twenty(75) -> 95.
+// Single-arg function that adds a literal. Distinct from
+// s54_fn_one_arg_sub (88) and s53_fn_one_arg_sub (88).
+
+fn add_twenty(x: u32) -> u32 {
+    n: u32 = 20;
+    r: u32 = x + n;
+    return r;
+}
+
+fn main() -> i32 {
+    v: u32 = add_twenty(75);
+    return v;
+}

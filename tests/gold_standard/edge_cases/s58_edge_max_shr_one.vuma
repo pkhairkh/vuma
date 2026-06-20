@@ -1,0 +1,14 @@
+// s58_edge_max_shr_one.vuma — 255 >> 1 = 127
+// Expected exit code: 127
+// 
+// Shift the max u8 value right by 1. 255 >> 1 = 127 (0x7F). All
+// operands loaded into u32 variables first (immediate-RHS bitwise
+// drop bug workaround). Distinct from s51_edge_zero_and_max (0),
+// s51_edge_one_shl_six (64) and s51_edge_max_shr_three (31).
+
+fn main() -> i32 {
+    a: u32 = 255;
+    b: u32 = 1;
+    r: u32 = a >> b;       // 127
+    return r;
+}

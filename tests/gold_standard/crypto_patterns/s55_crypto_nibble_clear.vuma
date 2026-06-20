@@ -1,0 +1,14 @@
+// s55_crypto_nibble_clear.vuma — 0x9C & 0x0F = 0x0C = 12
+// Expected exit code: 12
+//
+// Clear the high nibble. 156 & 15 = 12 (0x0C). All operands loaded
+// into u64 variables first (immediate-RHS bitwise drop bug
+// workaround). Distinct from s54_crypto_nibble_clear (7) and
+// s53_crypto_nibble_clear (208).
+
+fn main() -> i32 {
+    a: u64 = 156;           // 0x9C
+    b: u64 = 15;            // 0x0F
+    r: u64 = a & b;         // 0x0C = 12
+    return r;
+}

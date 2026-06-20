@@ -1,0 +1,26 @@
+// s58_mf_triple_then_add.vuma — triple(25)=75, add_twenty(25)=45; 75+45=120
+// Expected exit code: 120
+// 
+// Two single-arg helpers called on the same literal then summed:
+// triple(x) = x * 3; add_twenty(x) = x + 20. main calls triple(25)
+// -> 75 and add_twenty(25) -> 45; sum = 120. Distinct from s51_mf_two_
+// helpers_add (80), s51_mf_three_chain (53) and s51_mf_double_then_
+// add (120).
+
+fn triple(x: u32) -> u32 {
+    n: u32 = 3;
+    r: u32 = x * n;
+    return r;
+}
+fn add_twenty(x: u32) -> u32 {
+    n: u32 = 20;
+    r: u32 = x + n;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = triple(25);        // 75
+    b: u32 = add_twenty(25);    // 45
+    r: u32 = a + b;             // 120
+    return r;
+}
