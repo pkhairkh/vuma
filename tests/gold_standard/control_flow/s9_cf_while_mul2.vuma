@@ -1,0 +1,19 @@
+// s9_cf_while_mul2.vuma — while loop accumulates 5 doublings-of-2 = 10
+// Expected exit code (correct): 10
+// Observed on current x86_64 backend: 0 (FAIL — known bug)
+//
+// Accumulator starts at 0. While i < 5, add 2 each iteration ->
+// 5 * 2 = 10 total. i increments by 1 each iteration. Known
+// "while-body assignments don't propagate" bug keeps acc at 0 ->
+// exit 0. Will exit 10 once fixed. Distinct from s5_cf_while_acc
+// (adds 10) and s6_cf_while_dec_count.
+
+fn main() -> i32 {
+    acc: u32 = 0;
+    i: u32 = 0;
+    while i < 5 {
+        acc = acc + 2;
+        i = i + 1;
+    }
+    return acc;
+}

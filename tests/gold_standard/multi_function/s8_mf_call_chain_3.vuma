@@ -1,0 +1,31 @@
+// s8_mf_call_chain_3.vuma — h(g(f(5))) = h(g(6)) = h(16) = 32
+// Expected exit code: 32
+//
+// Three-function call chain: f(x)=x+1, g(x)=f(x)+10, h(x)=g(x)*2.
+// main calls h(5) which calls g(5) which calls f(5). f(5)=6, g(5)=16,
+// h(5)=32. Distinct from s4_mf_chain_3 (linear adders).
+
+fn f(x: u32) -> u32 {
+    one: u32 = 1;
+    r: u32 = x + one;
+    return r;
+}
+
+fn g(x: u32) -> u32 {
+    ten: u32 = 10;
+    y: u32 = f(x);
+    r: u32 = y + ten;
+    return r;
+}
+
+fn h(x: u32) -> u32 {
+    two: u32 = 2;
+    y: u32 = g(x);
+    r: u32 = y * two;
+    return r;
+}
+
+fn main() -> i32 {
+    v: u32 = h(5);   // 32
+    return v;
+}

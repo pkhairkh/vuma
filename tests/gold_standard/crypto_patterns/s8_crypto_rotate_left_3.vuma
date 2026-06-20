@@ -1,0 +1,17 @@
+// s8_crypto_rotate_left_3.vuma — rotate 0x09 left by 3 = 0x48 = 72
+// Expected exit code: 72
+//
+// 8-bit rotate-left by 3: (9 << 3) | (9 >> 5) = 72 | 0 = 72. Value
+// 9 (0x09) rotated left 3 bits within an 8-bit field gives 72 (0x48).
+// All operands loaded into variables first. Distinct from
+// s6_crypto_rotate_right_4 (right rotation, different amount).
+
+fn main() -> i32 {
+    v: u64 = 9;        // 0x09
+    sh_l: u64 = 3;
+    sh_r: u64 = 5;
+    hi: u64 = v << sh_l;  // 0x48 = 72
+    lo: u64 = v >> sh_r;  // 0x00 = 0
+    r: u64 = hi | lo;     // 0x48 = 72
+    return r;
+}

@@ -1,0 +1,22 @@
+// s9_mf_one_helper_called_thrice.vuma — square(2)+square(3)+square(4) = 4+9+16 = 29
+// Expected exit code: 29
+//
+// square(x) = x * x. main calls square three times with different
+// arguments (2, 3, 4) and sums the results. Tests that one helper
+// can be called multiple times from main with distinct arguments
+// and the results kept distinct. Distinct from s5_mf_two_callers
+// (two calls).
+
+fn square(x: u32) -> u32 {
+    r: u32 = x * x;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = square(2);  // 4
+    b: u32 = square(3);  // 9
+    c: u32 = square(4);  // 16
+    t: u32 = a + b;
+    s: u32 = t + c;
+    return s;
+}

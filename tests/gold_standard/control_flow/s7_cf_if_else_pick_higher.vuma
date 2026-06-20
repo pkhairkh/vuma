@@ -1,0 +1,23 @@
+// s7_cf_if_else_pick_higher.vuma — if-true picks x=88, return = 88
+// Expected exit code (correct): 88
+// Observed on current x86_64 backend: 33 (FAIL — known bug)
+//
+// Outer if-true branch sets x = 88; else branch sets x = 33. With a
+// literal `true` condition, the true branch should win, so x = 88.
+// On the current x86_64 backend the if-true body assignment is
+// dropped and the else-body assignment wins, so x = 33. This is the
+// same regression that affects s4_cf_if_assign_simple,
+// s5_cf_if_then_else_3way, and s6_cf_if_two_branches_const (which
+// were previously documented as PASS but now also fail on the
+// current backend). Kept as a regression guard: any future fix to
+// the if-true body drop will turn this exit into 88.
+
+fn main() -> i32 {
+    x: u32 = 0;
+    if true {
+        x = 88;
+    } else {
+        x = 33;
+    }
+    return x;
+}

@@ -1,0 +1,17 @@
+// s10_ptr_alias_load.vuma — alias observes single write, load = 55
+// Expected exit code: 55
+//
+// Allocate one cell, assign its pointer to two variables p and q
+// (alias). Store 55 via p. Load via q -> 55 (alias observes the
+// write). Uses `*ptr` form (deterministic on the current backend).
+// Distinct from s6_ptr_alias_two (stores via both p and q, tests
+// last-write-wins) and s5_ptr_two_cell_publish (two distinct cells).
+
+fn main() -> i32 {
+    p = allocate(8);
+    q = p;
+    *p = 55;
+    v: i32 = *q;
+    free(p);
+    return v;
+}
