@@ -777,28 +777,9 @@ fn resolve_df_input_for_node(
                         if let Ok(num) = num_str.parse::<i64>() {
                             return ScgExpr::Int(num);
                         }
-                        // Handle boolean literals: lit_true -> 1, lit_false -> 0
-                        if num_str == "true" {
-                            return ScgExpr::Int(1);
-                        }
-                        if num_str == "false" {
-                            return ScgExpr::Int(0);
-                        }
                     }
                     if let Ok(num) = label.parse::<i64>() {
                         return ScgExpr::Int(num);
-                    }
-                }
-                // Follow "reassignment" Derivation edge to previous definition.
-                for deriv_edge in edge_idx.outgoing.get(&source).map(|v| v.as_slice()).unwrap_or(&[]) {
-                    if deriv_edge.kind == EdgeKind::Derivation {
-                        if let Some(prev_node) = scg.get_node(deriv_edge.target) {
-                            if matches!(prev_node.payload, NodePayload::Computation(_)) {
-                                if deriv_edge.label.as_deref() == Some("reassignment") {
-                                    return ScgExpr::Var(format!("v_{}", deriv_edge.target.as_u64()));
-                                }
-                            }
-                        }
                     }
                 }
                 // Follow Derivation to Allocation — return Computation node var
@@ -858,35 +839,10 @@ fn resolve_df_input(
                             if let Ok(num) = num_str.parse::<i64>() {
                                 return ScgExpr::Int(num);
                             }
-                            // Handle boolean literals: lit_true -> 1, lit_false -> 0
-                            if num_str == "true" {
-                                return ScgExpr::Int(1);
-                            }
-                            if num_str == "false" {
-                                return ScgExpr::Int(0);
-                            }
                         }
                         // Check for bare number format (tail expression literals)
                         if let Ok(num) = label.parse::<i64>() {
                             return ScgExpr::Int(num);
-                        }
-                    }
-                    // Check if this Computation has a "reassignment" Derivation
-                    // edge to a previous definition.  If so, reference the
-                    // PREVIOUS definition's variable (v_<prev_id>) so that all
-                    // reassignments of the same source-level variable share a
-                    // single name in the names map.  This lets lower_if /
-                    // lower_loop track redefinitions correctly and emit proper
-                    // phi nodes at merge points.
-                    for deriv_edge in edge_idx.outgoing.get(&source).map(|v| v.as_slice()).unwrap_or(&[]) {
-                        if deriv_edge.kind == EdgeKind::Derivation {
-                            if let Some(prev_node) = scg.get_node(deriv_edge.target) {
-                                if matches!(prev_node.payload, NodePayload::Computation(_)) {
-                                    if deriv_edge.label.as_deref() == Some("reassignment") {
-                                        return ScgExpr::Var(format!("v_{}", deriv_edge.target.as_u64()));
-                                    }
-                                }
-                            }
                         }
                     }
                     // Check if this Computation has a Derivation edge to an
@@ -1021,7 +977,7 @@ fn resolve_branch(
     branch_id: NodeId,
     scg: &SCG,
     edge_idx: &EdgeIndex,
-) -> (NodeId, Option<NodeId>, Option<NodeId>, Option<NodeId>) {
+) -> (NodeId, Option<NodeId>, Option<NodeId>) {
     let cf_edges = edge_idx.outgoing_cf(branch_id);
 
     // Look for labeled edges
@@ -1050,36 +1006,7 @@ fn resolve_branch(
     let then_tgt = then_target.unwrap_or(branch_id);
     let join = find_join_for_branch(then_tgt, else_target, scg, edge_idx);
 
-    // Find the "after-branch" target: a CF edge from the Branch that is
-    // NOT the then or else target, and NOT a Join/LoopExit control node.
-    // This is the code that executes after the if/else, which may be
-    // unreachable via the Join node (which sometimes has no outgoing CF).
-    let known_targets: std::collections::HashSet<NodeId> = cf_edges
-        .iter()
-        .filter(|e| {
-            let is_then = Some(e.target) == then_target;
-            let is_else = Some(e.target) == else_target;
-            let is_join = Some(e.target) == join;
-            // Skip then, else, and join targets
-            if is_then || is_else || is_join {
-                return false;
-            }
-            // Skip Join and LoopExit control nodes
-            if let Some(target_node) = scg.get_node(e.target) {
-                if let NodePayload::Control(c) = &target_node.payload {
-                    if c.kind == ControlKind::Join || c.kind == ControlKind::LoopExit {
-                        return false;
-                    }
-                }
-            }
-            true
-        })
-        .map(|e| e.target)
-        .collect();
-
-    let after_branch_target = known_targets.into_iter().next();
-
-    (then_tgt, else_target, join, after_branch_target)
+    (then_tgt, else_target, join)
 }
 
 /// Resolve a LoopHeader node's body and exit targets.
@@ -1276,7 +1203,7 @@ fn walk_control_flow_with_externs(
             // ── Control nodes ──────────────────────────────────────
             NodePayload::Control(ctrl) => match ctrl.kind {
                 ControlKind::Branch => {
-                    let (then_tgt, else_tgt, join_node, after_branch_target) = resolve_branch(node_id, scg, edge_idx);
+                    let (then_tgt, else_tgt, join_node) = resolve_branch(node_id, scg, edge_idx);
                     let cond = resolve_branch_cond(node_id, edge_idx, scg);
 
                     // Check if this is a match/switch branch (label starts
@@ -1970,65 +1897,19 @@ fn convert_node_to_statement_with_externs(
                 }
             }
 
-            // Detect Load patterns: "let value = *region", "X = *Y", or
-            // "X = *(buf + 8)" / "X = *(buf + off)". These don't have
-            // Access(Read) nodes in the SCG, so we detect them from the label.
+            // Detect Load patterns: "let value = *region" or "X = *Y"
+            // These don't have Access(Read) nodes in the SCG, so we detect
+            // them from the label.
             // IMPORTANT: "*region = 42" is a Store, NOT a Load. We only
-            // treat it as a Load if the label matches "= *<expr>" where the
-            // entire RHS is a single dereference expression (the dereference
-            // is the value being assigned). A label like "X = *ptr + 1" is
-            // NOT a pure Load — the dereference is part of a larger
-            // expression — so it must fall through to other handlers.
-            if op_label.contains("= *") {
+            // treat it as a Load if the label matches "= *<var>" at the END
+            // of the string (i.e., the dereference is the value being assigned).
+            if op_label.contains("= *") && !op_label.contains("= *") == false {
+                // Check if the part after "= *" is a simple variable (not an assignment)
                 if let Some(pos) = op_label.find("= *") {
                     let after = op_label[pos + 3..].trim();
-                    // Resolve `ptr` for the Load. Two shapes are recognised:
-                    //   1. Simple variable dereference:  `*ptr`   → after = "ptr"
-                    //   2. Parenthesised dereference:    `*(e)`   → after = "(e)"
-                    //      (the inner expression `e` may be a BinOp such as
-                    //       `buf + 8` or `buf + off`).
-                    // Any other shape (e.g. `*ptr + 1`) is left for later
-                    // handlers, preserving the previous fall-through behaviour.
-                    let simple_var = !after.contains(' ')
-                        && !after.contains('=')
-                        && !after.is_empty();
-                    let paren_expr = after.starts_with('(') && after.ends_with(')');
-                    if simple_var || paren_expr {
-                        let df_inputs = edge_idx.incoming_df(node_id);
-                        let sources: Vec<NodeId> =
-                            df_inputs.iter().map(|e| e.source).collect();
-                        let ptr_expr = strip_outer_parens(after);
-                        let ptr = if let Some((op, l, r)) = parse_expr_split(ptr_expr) {
-                            // Complex pointer expression — resolve as a BinOp
-                            // (e.g. "buf + 8" → BinOp(Add, Var(buf), Int(8))).
-                            let lhs_val = resolve_subexpr(&l, &sources, edge_idx, scg);
-                            let rhs_val = resolve_subexpr(&r, &sources, edge_idx, scg);
-                            ScgExpr::BinOp {
-                                op: map_binop_kind(op),
-                                lhs: Box::new(lhs_val),
-                                rhs: Box::new(rhs_val),
-                            }
-                        } else {
-                            // No top-level operator — either a simple variable
-                            // name (e.g. "ptr") or a single parenthesised name
-                            // (e.g. "(buf)" already stripped to "buf"). Resolve
-                            // via DataFlow source lookup; fall back to the
-                            // first DataFlow input for backward compatibility.
-                            if is_simple_var(ptr_expr) {
-                                let resolved = resolve_subexpr(ptr_expr, &sources, edge_idx, scg);
-                                // resolve_subexpr returns Int(0) when no
-                                // source matches; in that case prefer the
-                                // first DataFlow input to preserve the
-                                // pre-fix behaviour for `*ptr`.
-                                if matches!(resolved, ScgExpr::Int(0)) {
-                                    resolve_df_input(node_id, 0, edge_idx, scg)
-                                } else {
-                                    resolved
-                                }
-                            } else {
-                                resolve_df_input(node_id, 0, edge_idx, scg)
-                            }
-                        };
+                    // If "after" is a simple variable name (no spaces, no =), it's a Load
+                    if !after.contains(' ') && !after.contains('=') && !after.is_empty() {
+                        let ptr = resolve_df_input(node_id, 0, edge_idx, scg);
                         return Some(ScgStatement::Access(AccessNode::Load {
                             dst: node_var(node_id, "val"),
                             ptr,

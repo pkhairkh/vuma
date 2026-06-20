@@ -1,0 +1,12 @@
+// s6_edge_max_byte.vuma — return literal 255
+// Expected exit code: 255
+//
+// Single literal 255 (max U8) returned directly. Tests that the
+// codegen can return the highest U8 value without truncation or
+// sign-extension issues. Distinct from s5_edge_255_minus_1 (254
+// via subtraction).
+
+fn main() -> i32 {
+    v: u32 = 255;
+    return v;
+}
