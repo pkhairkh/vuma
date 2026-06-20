@@ -62,11 +62,24 @@ fn execute_binary(binary: &[u8], qemu: Option<&str>, timeout_secs: u64) -> (i32,
     match output {
         Ok(o) => {
             let code = o.status.code().unwrap_or(-1);
-            let stderr = String::from_utf8_lossy(&o.stderr).to_string();
-            let crashed = stderr.contains("Segmentation fault")
-                || stderr.contains("uncaught target signal")
-                || code == 139 || code == 134;
-            (code, o.stdout, o.stderr, crashed)
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::ExitStatusExt;
+                let signal = o.status.signal();
+                let stderr = String::from_utf8_lossy(&o.stderr).to_string();
+                let crashed = stderr.contains("Segmentation fault")
+                    || stderr.contains("uncaught target signal")
+                    || code == 139 || code == 134
+                    || signal.is_some();
+                (code, o.stdout, o.stderr, crashed)
+            }
+            #[cfg(not(unix))]
+            {
+                let stderr = String::from_utf8_lossy(&o.stderr).to_string();
+                let crashed = stderr.contains("Segmentation fault")
+                    || code == 139 || code == 134;
+                (code, o.stdout, o.stderr, crashed)
+            }
         }
         Err(_) => (-1, vec![], vec![], true),
     }

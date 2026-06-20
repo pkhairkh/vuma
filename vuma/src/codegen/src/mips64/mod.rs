@@ -4243,11 +4243,20 @@ impl Backend for Mips64Backend {
             let main_offset = func_offsets[key];
             let abs_addr = BASE_ADDR + text_offset + main_offset as u64;
             let target_field = ((abs_addr >> 2) & 0x03FFFFFF) as u32;
-            // Read the existing JAL word (little-endian)
             let existing = u32::from_le_bytes([
                 start_stub[0], start_stub[1], start_stub[2], start_stub[3],
             ]);
-            // Patch the 26-bit target field (bits 25:0)
+            let patched = (existing & 0xFC000000) | target_field;
+            start_stub[0..4].copy_from_slice(&patched.to_le_bytes());
+        } else {
+            // No main function — point JAL to the FFI return-0 stub so
+            // the program exits cleanly with code 0 instead of jumping to
+            // address 0 and segfaulting.
+            let abs_addr = BASE_ADDR + text_offset + ffi_stub_offset as u64;
+            let target_field = ((abs_addr >> 2) & 0x03FFFFFF) as u32;
+            let existing = u32::from_le_bytes([
+                start_stub[0], start_stub[1], start_stub[2], start_stub[3],
+            ]);
             let patched = (existing & 0xFC000000) | target_field;
             start_stub[0..4].copy_from_slice(&patched.to_le_bytes());
         }
