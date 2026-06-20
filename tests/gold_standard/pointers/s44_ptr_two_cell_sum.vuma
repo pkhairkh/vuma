@@ -1,0 +1,19 @@
+// s44_ptr_two_cell_sum.vuma — two cells, sum = 240 (115 + 125)
+// Expected exit code: 240
+//
+// Two 8-byte cells. Store 115/125 via `*ptr = literal`, load both,
+// sum -> 240. Uses `*ptr = literal` form. Distinct from s42_ptr_two_
+// cell_sum (230) and s38_ptr_two_cell_diff (40).
+
+fn main() -> i32 {
+    p1 = allocate(8);
+    p2 = allocate(8);
+    *p1 = 115;
+    *p2 = 125;
+    a: i32 = *p1;
+    b: i32 = *p2;
+    s: i32 = a + b;        // 240
+    free(p1);
+    free(p2);
+    return s;
+}

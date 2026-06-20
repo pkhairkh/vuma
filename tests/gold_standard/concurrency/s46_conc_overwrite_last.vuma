@@ -1,0 +1,26 @@
+// s46_conc_overwrite_last.vuma — overwrite last to 90, sum = 180 (40 + 50 + 90)
+// Expected exit code: 180
+//
+// Three independent 8-byte cells. Store 40/50/60 via `*ptr = literal`,
+// then overwrite the last cell with 90. Load all three, sum -> 180.
+// Uses `*ptr = literal` form. Distinct from s42_conc_overwrite_
+// middle (220) and s38_conc_overwrite_first (185).
+
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    c3 = allocate(8);
+    *c1 = 40;
+    *c2 = 50;
+    *c3 = 60;
+    *c3 = 90;
+    v1: i32 = *c1;
+    v2: i32 = *c2;
+    v3: i32 = *c3;
+    t: i32 = v1 + v2;
+    s: i32 = t + v3;       // 180
+    free(c1);
+    free(c2);
+    free(c3);
+    return s;
+}
