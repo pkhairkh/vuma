@@ -1,0 +1,15 @@
+// fn2_identity.vuma — identity(42) = 42
+// Expected exit code: 42
+//
+// Tests a single-argument identity function: pass 42, return it
+// unchanged. Verifies that a single u32 parameter round-trips through
+// the call/return path.
+
+fn identity(x: u32) -> u32 {
+    return x;
+}
+
+fn main() -> i32 {
+    v: u32 = identity(42);
+    return v;
+}

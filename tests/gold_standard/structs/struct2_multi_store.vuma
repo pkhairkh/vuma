@@ -1,0 +1,26 @@
+// struct2_multi_store.vuma — store 1, 1, 1 at offsets 0, 8, 16; sum
+// Expected exit code: 3
+//
+// Allocates a 24-byte struct (3 × u64 fields), stores the literal 1 at
+// offsets 0, 8, 16 via *(p + N), loads all three back, sums them,
+// returns 3. Verifies multi-field literal store/load at constant
+// offsets.
+
+struct Triple {
+    a: u64,
+    b: u64,
+    c: u64,
+}
+
+fn main() -> i32 {
+    p = allocate(24);
+    *(p + 0) = 1;
+    *(p + 8) = 1;
+    *(p + 16) = 1;
+    a: u64 = *(p + 0);
+    b: u64 = *(p + 8);
+    c: u64 = *(p + 16);
+    sum: u64 = a + b + c;
+    free(p);
+    return sum;
+}

@@ -1,0 +1,20 @@
+// mem2_copy_literal — copy a stored value buf1 → buf2 via +0 workaround
+// Expected exit code: 42
+//
+// Stores 42 in buf1, loads it, then re-stores the loaded value into buf2
+// using the documented `*(buf2 + 0) = loaded + 0` workaround (storing a
+// bare loaded variable is silently dropped on the current backend — the
+// inline `+ 0` expression forces a different codegen path that works).
+// Loads from buf2 and returns it.  Straight-line code only.
+
+fn main() -> i32 {
+    buf1 = allocate(8);
+    buf2 = allocate(8);
+    *(buf1 + 0) = 42;
+    loaded: u32 = *(buf1 + 0);          // 42
+    *(buf2 + 0) = loaded + 0;           // workaround: forces expression-store path
+    out: u32 = *(buf2 + 0);             // 42
+    free(buf1);
+    free(buf2);
+    return out;
+}
