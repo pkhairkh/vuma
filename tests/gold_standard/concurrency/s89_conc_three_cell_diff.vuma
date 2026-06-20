@@ -1,0 +1,23 @@
+// s89_conc_three_cell_diff.vuma — three cells, diff = 6 (86 - 55 - 25)
+// Expected exit code: 6
+//
+// Three independent 8-byte cells. Store 86/55/25 via `*ptr
+// = literal`, load all three, a - b - d -> 6. Uses `*ptr =
+// literal` form. Distinct from s86_conc_three_cell_diff (190),
+// s82_conc_three_cell_diff (215) and s78_conc_three_cell_diff (150).
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    c3 = allocate(8);
+    *c1 = 86;
+    *c2 = 55;
+    *c3 = 25;
+    v1: i32 = *c1;
+    v2: i32 = *c2;
+    v3: i32 = *c3;
+    r: i32 = v1 - v2 - v3; // 6
+    free(c1);
+    free(c2);
+    free(c3);
+    return r;
+}

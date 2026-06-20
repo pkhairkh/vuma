@@ -1,0 +1,14 @@
+// s90_edge_max_xor_val.vuma — 255 ^ 232 = 23 (XOR with max flips all bits)
+// Expected exit code: 23
+//
+// Edge case: XOR with the max byte (0xFF) flips every bit
+// (one's complement). 255 ^ 232 = 23 (0x17). All operands loaded
+// into u32 variables first (immediate-RHS bitwise drop bug
+// workaround). Distinct from s86_edge_max_and_low (9),
+// s82_edge_max_and_seven (7) and s78_edge_max_and (6).
+fn main() -> i32 {
+    a: u32 = 255;          // 0xFF
+    b: u32 = 232;          // 0xE8
+    r: u32 = a ^ b;        // 0x17 = 23
+    return r;
+}
