@@ -1,0 +1,19 @@
+// s11_atom_four_writes.vuma — atomic_store 10, 20, 30, 40, load sees 40
+// Expected exit code: 0 (current buggy backend)
+// Expected exit code (correct, post-bridge-fix): 40
+//
+// Single 8-byte cell. atomic_store 10, then 20, then 30, then 40.
+// Load should observe 40 (last write wins, four writes total). On the
+// current backend the load returns 0. Distinct from s10_atom_overwrite_twice
+// (three writes) and s8_atom_three_diff_values (three writes, diff vals).
+
+fn main() -> i32 {
+    c = allocate(8);
+    atomic_store(c, 10);
+    atomic_store(c, 20);
+    atomic_store(c, 30);
+    atomic_store(c, 40);
+    v = atomic_load(c);
+    free(c);
+    return v;
+}

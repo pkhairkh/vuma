@@ -1,0 +1,15 @@
+// s13_ptr_store_load_basic.vuma — single cell, store 55, load, return 55
+// Expected exit code: 55
+//
+// Single 8-byte cell. Store literal 55 via `*p = 55`, load it back,
+// return 55. Baseline round-trip through memory. Uses `*p = literal`
+// form (no offsets). Distinct from s9_ptr_single_store_load (value 44)
+// and s4_ptr_basic_store_load (value 42).
+
+fn main() -> i32 {
+    p = allocate(8);
+    *p = 55;
+    v: i32 = *p;
+    free(p);
+    return v;
+}

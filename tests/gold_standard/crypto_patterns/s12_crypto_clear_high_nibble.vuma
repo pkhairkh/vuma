@@ -1,0 +1,15 @@
+// s12_crypto_clear_high_nibble.vuma — 0xAB & 0x0F = 0x0B = 11
+// Expected exit code: 11
+//
+// Mask off the high nibble, keeping only the low nibble. 0xAB & 0x0F
+// = 0x0B = 11. Tests the "clear high nibble" idiom common in byte-
+// manipulation code. All operands loaded into u64 variables first.
+// Distinct from s10_crypto_high_nibble_only (extracts HIGH nibble
+// via shift) and s9_crypto_nibble_clear (different value).
+
+fn main() -> i32 {
+    v: u64 = 171;         // 0xAB
+    mask: u64 = 15;       // 0x0F
+    r: u64 = v & mask;    // 0x0B = 11
+    return r;
+}
