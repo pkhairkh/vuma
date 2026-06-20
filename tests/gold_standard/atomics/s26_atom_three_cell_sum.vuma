@@ -1,0 +1,26 @@
+// s26_atom_three_cell_sum.vuma — three cells, atomic_store 50/60/70, sum = 180
+// Expected exit code: 0 (current buggy backend)
+// Expected exit code (correct, post-bridge-fix): 180  (50 + 60 + 70)
+//
+// Three 8-byte cells. atomic_store 50/60/70 into each, then atomic_load
+// all three and sum. On the current backend all loads return 0 -> exit 0.
+// Will exit 180 once atomics are wired through. Distinct from
+// s22_atom_three_cell_inc (inc-pattern, different values) and
+// s16_atom_triple_sum (60/70/80 = 210).
+
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    c3 = allocate(8);
+    atomic_store(c1, 50);
+    atomic_store(c2, 60);
+    atomic_store(c3, 70);
+    a = atomic_load(c1);
+    b = atomic_load(c2);
+    c = atomic_load(c3);
+    s = a + b + c;
+    free(c1);
+    free(c2);
+    free(c3);
+    return s;
+}

@@ -1,0 +1,16 @@
+// s26_arith_div_mod_chain.vuma — 200 / 7 + 200 % 7 = 28 + 4 = 32
+// Expected exit code: 32
+//
+// Two-stage u32 computation: div and mod of the same operands, then add.
+// 200 / 7 = 28; 200 % 7 = 4; 28 + 4 = 32. All operands loaded into u32
+// variables first. Distinct from s22_arith_mul_mod_add (mul-mod-add) and
+// s18_arith_div_mod_sum (different operands).
+
+fn main() -> i32 {
+    a: u32 = 200;
+    b: u32 = 7;
+    q: u32 = a / b;       // 28
+    r: u32 = a % b;       // 4
+    s: u32 = q + r;       // 32
+    return s;
+}

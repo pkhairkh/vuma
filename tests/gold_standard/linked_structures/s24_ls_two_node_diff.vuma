@@ -1,0 +1,20 @@
+// s24_ls_two_node_diff.vuma — two nodes, diff = 40 (70 - 30)
+// Expected exit code: 40
+//
+// Two 8-byte allocations treated as two independent "nodes". Store
+// 70/30 via `*ptr = literal`, load both, subtract -> 40. Uses `*ptr =
+// literal` form (no offsets). Distinct from s22_ls_two_node_sum
+// (37/53 = 90, add) and s14_ls_three_node_sum (11/22/33 = 66).
+
+fn main() -> i32 {
+    n1 = allocate(8);
+    n2 = allocate(8);
+    *n1 = 70;
+    *n2 = 30;
+    a: u64 = *n1;
+    b: u64 = *n2;
+    d: u64 = a - b;
+    free(n1);
+    free(n2);
+    return d;
+}

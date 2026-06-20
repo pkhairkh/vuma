@@ -1,0 +1,19 @@
+// s23_arith_div_mul_add.vuma — (144 / 12) * 10 + 35 = 12 * 10 + 35 = 155
+// Expected exit code: 155
+//
+// Three-stage u32 computation: div then mul then add. 144 / 12 = 12;
+// 12 * 10 = 120; 120 + 35 = 155. All operands loaded into u32 variables
+// first. Distinct from s22_arith_add_then_mul (add-then-mul, value 160)
+// and s18_arith_div_mod_sum (div-then-mod-then-sum, value 41).
+
+fn main() -> i32 {
+    a: u32 = 144;
+    b: u32 = 12;
+    c: u32 = 10;
+    d: u32 = 35;
+    q: u32 = a / b;       // 12
+    p: u32 = q * c;       // 120
+    r: u32 = p + d;       // 155
+    return r;
+}
+

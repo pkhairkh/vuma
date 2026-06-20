@@ -1,0 +1,14 @@
+// s23_edge_zero_plus_one.vuma — 0 + 1 = 1
+// Expected exit code: 1
+//
+// Smallest non-zero result: 0 + 1 = 1 (additive identity plus one). All
+// operands loaded into u32 variables first. Distinct from s22_edge_one_and_max
+// (1 & 255 = 1) and s21_edge_one_plus_zero (1 + 0 = 1).
+
+fn main() -> i32 {
+    a: u32 = 0;
+    b: u32 = 1;
+    r: u32 = a + b;       // 1
+    return r;
+}
+
