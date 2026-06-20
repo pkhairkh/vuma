@@ -1,0 +1,19 @@
+// s5_nl_2x2_product.vuma — 2x2 nested loop, sum j = (0+1)*2 = 2
+// Expected exit code (correct): 2
+// Observed on current x86_64 backend: 0 (FAIL — known bug)
+//
+// Outer loop 2 iterations, inner loop 2 iterations. Each inner
+// iteration adds j to acc. j takes 0,1 in each outer iteration, so
+// sum = (0+1) * 2 = 2. Known "for-body assignments don't propagate"
+// bug keeps acc at 0 -> exit 0. Distinct from nl_2x2 (different
+// accumulator pattern).
+
+fn main() -> i32 {
+    acc: u32 = 0;
+    for i in 0..2 {
+        for j in 0..2 {
+            acc = acc + j;
+        }
+    }
+    return acc;
+}

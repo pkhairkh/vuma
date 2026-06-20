@@ -1,0 +1,22 @@
+// s5_cf_if_then_else_3way.vuma — if-true branch with two assignments
+// Expected exit code (correct): 30
+// Observed on current x86_64 backend: 30 (PASS)
+//
+// Outer if-else: the "true" branch performs two assignments (x=10,
+// then x=30). Historically documented as "if-body assignments are
+// silently dropped" (exit 0). On the current backend this form
+// returns the correct value 30 (the last assignment wins), so the
+// bug does not manifest here. Kept as a regression guard: any
+// future change that reintroduces the drop will turn this exit
+// into 0. Mirrors the s4_cf_if_assign_simple convention.
+
+fn main() -> i32 {
+    x: u32 = 0;
+    if true {
+        x = 10;
+        x = 30;
+    } else {
+        x = 20;
+    }
+    return x;
+}

@@ -1,0 +1,23 @@
+// s5_mf_diff_op_funcs.vuma — mul2(add3(7)) = (7+3)*2 = 20
+// Expected exit code: 20
+//
+// add3(x) = x + 3, mul2(x) = x * 2. main calls add3(7) -> 10, then
+// mul2(10) -> 20. Different operations in each helper. Distinct
+// from s4_mf_two_helpers (both helpers add).
+
+fn add3(x: u32) -> u32 {
+    n: u32 = 3;
+    r: u32 = x + n;
+    return r;
+}
+fn mul2(x: u32) -> u32 {
+    n: u32 = 2;
+    r: u32 = x * n;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = add3(7);   // 10
+    b: u32 = mul2(a);   // 20
+    return b;
+}
