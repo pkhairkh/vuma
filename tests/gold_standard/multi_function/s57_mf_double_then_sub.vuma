@@ -1,0 +1,19 @@
+// s57_mf_double_then_sub.vuma — dbl(60) - 30 = 120 - 30 = 90
+// Expected exit code: 90
+//
+// Single helper dbl(x) = x * 2 called on 60 -> 120, then subtract
+// literal 30 -> 90. Distinct from s54_mf_double_then_sub (135) and
+// s50_mf_double_then_sub (115).
+
+fn dbl(x: u32) -> u32 {
+    n: u32 = 2;
+    r: u32 = x * n;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = dbl(60);          // 120
+    b: u32 = 30;
+    r: u32 = a - b;            // 90
+    return r;
+}
