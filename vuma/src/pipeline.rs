@@ -2008,12 +2008,14 @@ fn convert_node_to_statement_with_externs(
             // IMPORTANT: "*region = 42" is a Store, NOT a Load. We only
             // treat it as a Load if the label matches "= *<var>" at the END
             // of the string (i.e., the dereference is the value being assigned).
-            if op_label.contains("= *") && !op_label.contains("= *") == false {
-                // Check if the part after "= *" is a simple variable (not an assignment)
+            if op_label.contains("= *") && !op_label.starts_with("*") {
                 if let Some(pos) = op_label.find("= *") {
                     let after = op_label[pos + 3..].trim();
-                    // If "after" is a simple variable name (no spaces, no =), it's a Load
-                    if !after.contains(' ') && !after.contains('=') && !after.is_empty() {
+                    if !after.is_empty() && !after.contains('=') {
+                        // It's a Load. The expression after "= *" can be:
+                        //   - A simple variable: "buf"
+                        //   - Pointer arithmetic: "(buf + 0)" or "(buf + offset)"
+                        // Use resolve_df_input to get the pointer from DataFlow.
                         let ptr = resolve_df_input(node_id, 0, edge_idx, scg);
                         return Some(ScgStatement::Access(AccessNode::Load {
                             dst: node_var(node_id, "val"),
