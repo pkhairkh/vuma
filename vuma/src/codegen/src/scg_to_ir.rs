@@ -2014,20 +2014,23 @@ impl IRBuilder {
         ir_func.register_vreg(VirtualRegister::named(dst_vreg, &comp.dst));
         names.insert(comp.dst.clone(), dst_vreg);
 
-        // If the lhs is a Register (variable reference), update ALL
-        // existing names entries that point to the same vreg as lhs.
-        // This ensures reassignments like "sum = sum + i" update the
-        // ORIGINAL variable's entry (e.g., "v_1"), not just the new
-        // SCG node ID entry (e.g., "v_4"). This is critical for
-        // lower_loop's phi back-edge patching to find the updated value.
-        if let IRValue::Register(lhs_vreg) = &lhs_val {
-            let lhs_vreg = *lhs_vreg;
-            let keys_to_update: Vec<String> = names.iter()
-                .filter(|(_, &v)| v == lhs_vreg)
-                .map(|(k, _)| k.clone())
-                .collect();
-            for key in keys_to_update {
-                names.insert(key, dst_vreg);
+        // If inside a loop body and the lhs is a Register (variable
+        // reference), update ALL existing names entries that point to
+        // the same vreg as lhs. This ensures reassignments like
+        // "sum = sum + i" update the ORIGINAL variable's entry (e.g.,
+        // "v_1"), not just the new SCG node ID entry (e.g., "v_4").
+        // This is critical for lower_loop's phi back-edge patching.
+        // Only apply inside loops to avoid interfering with let bindings.
+        if !self.loop_stack.is_empty() {
+            if let IRValue::Register(lhs_vreg) = &lhs_val {
+                let lhs_vreg = *lhs_vreg;
+                let keys_to_update: Vec<String> = names.iter()
+                    .filter(|(_, &v)| v == lhs_vreg)
+                    .map(|(k, _)| k.clone())
+                    .collect();
+                for key in keys_to_update {
+                    names.insert(key, dst_vreg);
+                }
             }
         }
 
