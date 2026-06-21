@@ -1818,7 +1818,17 @@ fn resolve_subexpr(
                 }
             }
         }
-        // If still no match, use the first source as fallback
+        // If still no match, return the variable name as a Var expression
+        // for valid variable names. The IR builder will resolve it from its
+        // names map (e.g., for-loop iterators registered by lower_loop).
+        // Invalid identifiers (hex literals, numbers, etc.) fall back to
+        // the first source.
+        let is_valid_var = subexpr.chars().next().map_or(false, |c| c.is_alphabetic() || c == '_')
+            && subexpr.chars().all(|c| c.is_alphanumeric() || c == '_');
+        if is_valid_var {
+            return ScgExpr::Var(subexpr.to_string());
+        }
+        // Fallback: use the first source
         if let Some(&src) = sources.first() {
             return resolve_df_input_for_node(src, edge_idx, scg);
         }
@@ -2173,9 +2183,19 @@ fn convert_node_to_statement_with_externs(
             // Collect the source nodes from DataFlow edges
             let sources: Vec<NodeId> = df_inputs.iter().map(|e| e.source).collect();
             
-            // Strip "let <var> = " prefix from the label to get the expression
-            let expr_str: String = if op_label.starts_with("let ") {
-                if let Some(eq_pos) = op_label.find("= ") {
+            // Strip "<var> = " or "let <var> = " prefix from the label
+            // to get the expression. This handles both let bindings
+            // ("let sum = 0") and reassignments ("sum = sum + i").
+            let expr_str: String = if let Some(eq_pos) = op_label.find("= ") {
+                // Check that the "=" is not part of "==" or "<=" or ">=" or "!="
+                let before_eq = &op_label[..eq_pos];
+                let after_eq = &op_label[eq_pos+1..]; // starts with "= "
+                let is_assignment_eq = !before_eq.ends_with('<')
+                    && !before_eq.ends_with('>')
+                    && !before_eq.ends_with('!')
+                    && !before_eq.ends_with('=')
+                    && !after_eq.starts_with("= ");
+                if is_assignment_eq {
                     op_label[eq_pos + 2..].to_string()
                 } else {
                     op_label.to_string()
