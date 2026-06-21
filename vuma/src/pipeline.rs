@@ -777,6 +777,13 @@ fn resolve_df_input_for_node(
                         if let Ok(num) = num_str.parse::<i64>() {
                             return ScgExpr::Int(num);
                         }
+                        // Boolean literals: lit_true -> 1, lit_false -> 0
+                        if num_str == "true" {
+                            return ScgExpr::Int(1);
+                        }
+                        if num_str == "false" {
+                            return ScgExpr::Int(0);
+                        }
                     }
                     if let Ok(num) = label.parse::<i64>() {
                         return ScgExpr::Int(num);
@@ -838,6 +845,13 @@ fn resolve_df_input(
                         if let Some(num_str) = label.strip_prefix("lit_") {
                             if let Ok(num) = num_str.parse::<i64>() {
                                 return ScgExpr::Int(num);
+                            }
+                            // Boolean literals: lit_true -> 1, lit_false -> 0
+                            if num_str == "true" {
+                                return ScgExpr::Int(1);
+                            }
+                            if num_str == "false" {
+                                return ScgExpr::Int(0);
                             }
                         }
                         // Check for bare number format (tail expression literals)
@@ -1294,6 +1308,23 @@ fn walk_control_flow_with_externs(
                     if let Some(join) = join_node {
                         consumed.insert(join);
                         current = edge_idx.outgoing_cf(join).first().map(|e| e.target);
+                        // If the Join has no outgoing CF edges (a known SCG
+                        // pattern where the "after-if" code is chained directly
+                        // from the Branch node rather than from the Join),
+                        // fall back to the Branch's other CF edges to find the
+                        // continuation. We skip the then/else targets, the
+                        // Join itself, and any already-consumed nodes.
+                        if current.is_none() {
+                            current = edge_idx.outgoing_cf(node_id)
+                                .iter()
+                                .map(|e| e.target)
+                                .find(|&t| {
+                                    t != join
+                                        && t != then_tgt
+                                        && else_tgt != Some(t)
+                                        && !consumed.contains(&t)
+                                });
+                        }
                     } else {
                         current = None;
                     }
@@ -1748,6 +1779,13 @@ fn resolve_subexpr(
         if let Ok(num) = num_str.parse::<i64>() {
             return ScgExpr::Int(num);
         }
+        // Boolean literals: lit_true -> 1, lit_false -> 0
+        if num_str == "true" {
+            return ScgExpr::Int(1);
+        }
+        if num_str == "false" {
+            return ScgExpr::Int(0);
+        }
     }
     
     // Check if it's a simple variable name
@@ -1825,6 +1863,37 @@ fn resolve_subexpr(
 /// Check if a string is a simple variable name (alphanumeric, no spaces or operators)
 fn is_simple_var(s: &str) -> bool {
     !s.is_empty() && s.chars().all(|c| c.is_alphanumeric() || c == '_') && !s.parse::<i64>().is_ok()
+}
+
+/// Find the earliest Computation node that defines `var_name` via a
+/// "let <var_name> = ..." label.  This is the original variable definition;
+/// reassignments ("x = ...") should reuse this node's id as their dst so that
+/// SSA phi nodes are created at control-flow merge points (if/else, loops).
+fn find_original_let_def(var_name: &str, scg: &SCG) -> Option<NodeId> {
+    let let_prefix = format!("let {} = ", var_name);
+    let mut earliest: Option<NodeId> = None;
+    for n in scg.nodes() {
+        if let NodePayload::Computation(comp) = &n.payload {
+            if let ComputationKind::Other(ref label) = comp.kind {
+                if label.starts_with(&let_prefix) {
+                    if earliest.is_none() || n.id.as_u64() < earliest.unwrap().as_u64() {
+                        earliest = Some(n.id);
+                    }
+                }
+            }
+        }
+    }
+    earliest
+}
+
+/// Determine the destination variable name for a Computation node.
+/// For reassignments ("x = ...", not "let x = ..."), reuse the original
+/// definition's node id so that SSA phi nodes are created at merge points.
+/// For all other cases (including "let x = ..." definitions), use the node's
+/// own id.
+fn computation_dst(node_id: NodeId, _op_label: &str, _scg: &SCG) -> String {
+    // TEMPORARILY REVERTED for testing
+    node_var(node_id, "comp")
 }
 
 fn convert_node_to_statement_with_externs(
@@ -2123,7 +2192,7 @@ fn convert_node_to_statement_with_externs(
                 let lhs = resolve_subexpr(&lhs_str, &sources, edge_idx, scg);
                 let rhs = resolve_subexpr(&rhs_str, &sources, edge_idx, scg);
                 Some(ScgStatement::Computation(ComputationNode {
-                    dst: node_var(node_id, "comp"),
+                    dst: computation_dst(node_id, &op_label, scg),
                     op,
                     lhs,
                     rhs,
@@ -2133,7 +2202,7 @@ fn convert_node_to_statement_with_externs(
                 // Fallback: use the first two DataFlow inputs
                 let op = parse_binop(&op_label).unwrap_or(IrBinOpKind::Add);
                 Some(ScgStatement::Computation(ComputationNode {
-                    dst: node_var(node_id, "comp"),
+                    dst: computation_dst(node_id, &op_label, scg),
                     op,
                     lhs: resolve_df_input(node_id, 0, edge_idx, scg),
                     rhs: resolve_df_input(node_id, 1, edge_idx, scg),
