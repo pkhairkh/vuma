@@ -2374,7 +2374,14 @@ fn convert_node_to_statement_with_externs(
             // Strip "<var> = " or "let <var> = " prefix from the label
             // to get the expression. This handles both let bindings
             // ("let sum = 0") and reassignments ("sum = sum + i").
-            let expr_str: String = if let Some(eq_pos) = op_label.find("= ") {
+            //
+            // We also extract the user-visible variable name being
+            // assigned (`user_var`), so the codegen `lower_computation`
+            // can update the variable's entry in the `names` map (in
+            // addition to the SCG-node-id entry `dst`).  This is what
+            // lets `lower_if` detect reassignments inside branches and
+            // create proper phi nodes at if/else merge points.
+            let (expr_str, user_var): (String, Option<String>) = if let Some(eq_pos) = op_label.find("= ") {
                 // Check that the "=" is not part of "==" or "<=" or ">=" or "!="
                 let before_eq = &op_label[..eq_pos];
                 let after_eq = &op_label[eq_pos+1..]; // starts with "= "
@@ -2384,12 +2391,27 @@ fn convert_node_to_statement_with_externs(
                     && !before_eq.ends_with('=')
                     && !after_eq.starts_with("= ");
                 if is_assignment_eq {
-                    op_label[eq_pos + 2..].to_string()
+                    // Extract the user-visible variable name being assigned.
+                    // For "let x = ..." the var name is "x" (after stripping "let ").
+                    // For "x = ..." the var name is "x".
+                    // For complex lvalues ("obj.field = ...", "*p = ...", etc.)
+                    // we leave `user_var = None` so we don't pollute the names
+                    // map with non-variable keys.
+                    let var_part = before_eq.strip_prefix("let ").unwrap_or(before_eq).trim();
+                    let is_simple_ident = !var_part.is_empty()
+                        && var_part.chars().all(|c| c.is_alphanumeric() || c == '_')
+                        && !var_part.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false);
+                    let uv = if is_simple_ident {
+                        Some(var_part.to_string())
+                    } else {
+                        None
+                    };
+                    (op_label[eq_pos + 2..].to_string(), uv)
                 } else {
-                    op_label.to_string()
+                    (op_label.to_string(), None)
                 }
             } else {
-                op_label.to_string()
+                (op_label.to_string(), None)
             };
             
             // Parse the expression to find the top-level operator
@@ -2405,6 +2427,7 @@ fn convert_node_to_statement_with_externs(
                     lhs,
                     rhs,
                     tail_call: false,
+                    reassigns: user_var.clone(),
                 }))
             } else {
                 // Fallback: use the first two DataFlow inputs
@@ -2415,6 +2438,7 @@ fn convert_node_to_statement_with_externs(
                     lhs: resolve_df_input(node_id, 0, edge_idx, scg),
                     rhs: resolve_df_input(node_id, 1, edge_idx, scg),
                     tail_call: false,
+                    reassigns: user_var.clone(),
                 }))
             }
         }
