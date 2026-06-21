@@ -1439,9 +1439,34 @@ fn walk_control_flow_with_externs(
 
                     stmts.push(ScgStatement::Control(ControlNode::Loop { body, for_range, while_cond: None }));
 
-                    // Continue from the LoopExit
+                    // Continue from the statement AFTER the loop.
+                    //
+                    // The SCG construction (see `to_scg::convert_block_ids` +
+                    // `Stmt::For`/`Stmt::While`) adds a ControlFlow edge from
+                    // the LoopHeader to the *next sibling statement* in the
+                    // enclosing block (this is `after_loop_tgt` returned by
+                    // `resolve_loop`).  The LoopExit node itself has NO
+                    // outgoing CF edges, so following `outgoing_cf(exit)` —
+                    // as the previous code did — always yields `None` and
+                    // silently drops every statement that comes after the
+                    // loop (e.g. `i = i - 1` at the end of a while body, or
+                    // `ten: u32 = 10; return n - ten;` after the outer loop).
+                    //
+                    // This was the root cause of the nested-loop timeouts:
+                    // the inner loop's back-edge variable (e.g. `i`) was
+                    // never decremented because `i = i - 1` lived after the
+                    // inner loop and was discarded, turning the outer loop
+                    // into an infinite loop.
+                    //
+                    // Fix: prefer `after_loop_tgt`.  Fall back to the
+                    // LoopExit's outgoing edge for SCG variants that wire it
+                    // up (defensive — current codegen never does).
                     if let Some(exit) = exit_tgt {
                         consumed.insert(exit);
+                    }
+                    if let Some(after) = after_loop_tgt {
+                        current = Some(after);
+                    } else if let Some(exit) = exit_tgt {
                         current = edge_idx.outgoing_cf(exit).first().map(|e| e.target);
                     } else {
                         current = None;
@@ -1921,6 +1946,78 @@ fn is_simple_var(s: &str) -> bool {
     !s.is_empty() && s.chars().all(|c| c.is_alphanumeric() || c == '_') && !s.parse::<i64>().is_ok()
 }
 
+/// Try to extract the size expression from a dynamic-size `allocate(<expr>)`
+/// call, given the parent Computation node's label and DataFlow sources.
+///
+/// The label typically looks like one of:
+///   - `let buf = allocate(n)`
+///   - `buf = allocate(n + 8)`
+///   - `buf = allocate(capacity * msg_size)`
+///
+/// Returns `Some(ScgExpr)` if a non-trivial size expression is found, or
+/// `None` if the size is a literal 0 (or the label doesn't match the
+/// `allocate(...)` pattern).  The caller should fall back to a stack
+/// allocation in the `None` case.
+fn extract_dynamic_alloc_size(
+    comp_label: &str,
+    sources: &[NodeId],
+    edge_idx: &EdgeIndex,
+    scg: &SCG,
+) -> Option<ScgExpr> {
+    // Locate "allocate(" in the label.
+    let alloc_pos = comp_label.find("allocate(")?;
+    let after = &comp_label[alloc_pos + "allocate(".len()..];
+    // Find the matching closing paren (handle nested parens, e.g. for
+    // `allocate(f(x))` — though that's rare in practice).
+    let mut depth: i32 = 1;
+    let mut end: usize = 0;
+    for (i, c) in after.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = i;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    if depth != 0 {
+        return None;
+    }
+    let size_str = after[..end].trim();
+    if size_str.is_empty() {
+        return None;
+    }
+    // If the size is a literal integer, leave it to the stack-allocation
+    // path (the SCG AllocationNode.size should already hold the value).
+    if size_str.parse::<i64>().is_ok() {
+        return None;
+    }
+    // Resolve the size expression to a ScgExpr using the parent
+    // Computation node's DataFlow sources.
+    let size_expr = if let Some((op, lhs_str, rhs_str)) = parse_expr_split(size_str) {
+        let lhs = resolve_subexpr(&lhs_str, sources, edge_idx, scg);
+        let rhs = resolve_subexpr(&rhs_str, sources, edge_idx, scg);
+        ScgExpr::BinOp {
+            op: map_binop_kind(op),
+            lhs: Box::new(lhs),
+            rhs: Box::new(rhs),
+        }
+    } else {
+        resolve_subexpr(size_str, sources, edge_idx, scg)
+    };
+    // If the resolved expression fell back to Int(0) (e.g., the variable
+    // wasn't found), don't emit a heap allocation — it would call
+    // __vuma_alloc(0) which is wasteful and may return NULL.
+    if matches!(size_expr, ScgExpr::Int(0)) {
+        return None;
+    }
+    Some(size_expr)
+}
+
 /// Find the earliest Computation node that defines `var_name` via a
 /// "let <var_name> = ..." label.  This is the original variable definition;
 /// reassignments ("x = ...") should reuse this node's id as their dst so that
@@ -1966,6 +2063,21 @@ fn convert_node_to_statement_with_externs(
                 .as_deref()
                 .and_then(parse_scg_type)
                 .unwrap_or(ScgType::U8);
+            // Dynamic-size allocate() (bare `allocate(expr);` statement).
+            // The Allocation node receives DataFlow edges directly from the
+            // size expression's variables; if there is a non-literal
+            // DataFlow input and the static size is 0, emit a Heap
+            // allocation that calls `__vuma_alloc`.
+            if alloc.size == 0 {
+                let size_expr = resolve_df_input(node_id, 0, edge_idx, scg);
+                if !matches!(size_expr, ScgExpr::Int(0)) {
+                    return Some(ScgStatement::Allocation(AllocationNode::Heap {
+                        name: node_var(node_id, "alloc"),
+                        size_expr,
+                        ty,
+                    }));
+                }
+            }
             Some(ScgStatement::Allocation(AllocationNode::Stack {
                 name: node_var(node_id, "alloc"),
                 size: alloc.size as u32,
@@ -2078,10 +2190,38 @@ fn convert_node_to_statement_with_externs(
                     if let Some(target_data) = scg.get_node(deriv_edge.target) {
                         match &target_data.payload {
                             NodePayload::Allocation(alloc) => {
-                                // Convert to Allocation statement
+                                // Convert to Allocation statement.
+                                //
+                                // If `alloc.size == 0` the size argument was a
+                                // dynamic expression (variable, binop, etc.)
+                                // that `eval_const_int` couldn't fold at AST→SCG
+                                // time.  In that case we parse the size
+                                // expression out of the parent Computation
+                                // node's label (e.g. `buf = allocate(n + 8)`)
+                                // and emit a Heap allocation that lowers to a
+                                // call to the `__vuma_alloc` runtime stub.
                                 let ty = alloc.type_name.as_deref()
                                     .and_then(parse_scg_type)
                                     .unwrap_or(ScgType::U8);
+                                if alloc.size == 0 {
+                                    // Collect DataFlow sources for the parent
+                                    // Computation node so we can resolve the
+                                    // size expression's variable references.
+                                    let df_inputs = edge_idx.incoming_df(node_id);
+                                    let sources: Vec<NodeId> = df_inputs
+                                        .iter().map(|e| e.source).collect();
+                                    if let Some(size_expr) = extract_dynamic_alloc_size(
+                                        &op_label, &sources, edge_idx, scg,
+                                    ) {
+                                        return Some(ScgStatement::Allocation(
+                                            AllocationNode::Heap {
+                                                name: node_var(node_id, "comp"),
+                                                size_expr,
+                                                ty,
+                                            },
+                                        ));
+                                    }
+                                }
                                 return Some(ScgStatement::Allocation(AllocationNode::Stack {
                                     name: node_var(node_id, "comp"),  // Use Computation node var so Call refs find it
                                     size: alloc.size as u32,
