@@ -886,6 +886,52 @@ fn resolve_df_input(
 /// Resolve the condition expression for a Branch node by looking at its
 /// incoming DataFlow edges.
 fn resolve_branch_cond(branch_id: NodeId, edge_idx: &EdgeIndex, scg: &SCG) -> ScgExpr {
+    // First, try to parse the branch label (e.g., "if (a > b)")
+    // to extract the condition expression.
+    if let Some(node_data) = scg.get_node(branch_id) {
+        if let NodePayload::Control(ctrl) = &node_data.payload {
+            if let Some(label) = &ctrl.label {
+                // Strip "if " prefix and outer parentheses
+                let cond_str = label.trim();
+                let cond_str = cond_str.strip_prefix("if").unwrap_or(cond_str).trim();
+                let cond_str = cond_str.strip_prefix('(').unwrap_or(cond_str);
+                let cond_str = cond_str.strip_suffix(')').unwrap_or(cond_str);
+                let cond_str = cond_str.trim();
+
+                // Try to parse as a comparison expression
+                if let Some((op, lhs_str, rhs_str)) = parse_expr_split(cond_str) {
+                    let df_inputs = edge_idx.incoming_df(branch_id);
+                    let sources: Vec<NodeId> = df_inputs.iter().map(|e| e.source).collect();
+                    let lhs = resolve_subexpr(&lhs_str, &sources, edge_idx, scg);
+                    let rhs = resolve_subexpr(&rhs_str, &sources, edge_idx, scg);
+                    return ScgExpr::BinOp {
+                        op: map_binop_kind(op),
+                        lhs: Box::new(lhs),
+                        rhs: Box::new(rhs),
+                    };
+                }
+
+                // For "if true" or "if false", return Int(1) or Int(0)
+                if cond_str == "true" {
+                    return ScgExpr::Int(1);
+                }
+                if cond_str == "false" {
+                    return ScgExpr::Int(0);
+                }
+
+                // For simple variable conditions, resolve via DataFlow
+                let df_inputs = edge_idx.incoming_df(branch_id);
+                let sources: Vec<NodeId> = df_inputs.iter().map(|e| e.source).collect();
+                let is_valid_var = cond_str.chars().next().map_or(false, |c| c.is_alphabetic() || c == '_')
+                    && cond_str.chars().all(|c| c.is_alphanumeric() || c == '_');
+                if is_valid_var {
+                    return resolve_subexpr(cond_str, &sources, edge_idx, scg);
+                }
+            }
+        }
+    }
+
+    // Fallback: use the first DataFlow input
     resolve_df_input(branch_id, 0, edge_idx, scg)
 }
 
@@ -1635,10 +1681,12 @@ fn parse_expr_split(expr: &str) -> Option<(IrBinOpKind, String, String)> {
     ];
     
     // Check for single-character operators in precedence order (lowest first)
-    let single_ops: [(&str, IrBinOpKind); 8] = [
+    let single_ops: [(&str, IrBinOpKind); 10] = [
         ("|", IrBinOpKind::Or),
         ("^", IrBinOpKind::Xor),
         ("&", IrBinOpKind::And),
+        ("<", IrBinOpKind::SLt),
+        (">", IrBinOpKind::SGt),
         ("+", IrBinOpKind::Add),
         ("-", IrBinOpKind::Sub),
         ("*", IrBinOpKind::Mul),

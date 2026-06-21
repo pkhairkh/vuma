@@ -2656,18 +2656,41 @@ impl IRBuilder {
             }
             ScgExpr::Label(name) => Ok(IRValue::Label(name.clone())),
             ScgExpr::BinOp { op, lhs, rhs } => {
-                // Recursively resolve lhs and rhs, then emit a BinOp instruction
                 let lhs_val = self.resolve_expr(lhs, names, ir_func)?;
                 let rhs_val = self.resolve_expr(rhs, names, ir_func)?;
                 let dst_vreg = self.alloc_vreg();
                 ir_func.register_vreg(VirtualRegister::anonymous(dst_vreg));
-                ir_func.current_block().push(IRInstruction::BinOp {
-                    op: *op,
-                    dst: IRValue::Register(dst_vreg),
-                    lhs: lhs_val,
-                    rhs: rhs_val,
-                    ty: None,
-                });
+                // Comparison operators → Cmp instruction
+                match op {
+                    BinOpKind::SLt | BinOpKind::SLe | BinOpKind::SGt | BinOpKind::SGe
+                    | BinOpKind::Eq | BinOpKind::Ne => {
+                        let cmp_kind = match op {
+                            BinOpKind::SLt => CmpKind::SLt,
+                            BinOpKind::SLe => CmpKind::SLe,
+                            BinOpKind::SGt => CmpKind::SGt,
+                            BinOpKind::SGe => CmpKind::SGe,
+                            BinOpKind::Eq => CmpKind::Eq,
+                            BinOpKind::Ne => CmpKind::Ne,
+                            _ => unreachable!(),
+                        };
+                        ir_func.current_block().push(IRInstruction::Cmp {
+                            kind: cmp_kind,
+                            dst: IRValue::Register(dst_vreg),
+                            lhs: lhs_val,
+                            rhs: rhs_val,
+                            ty: None,
+                        });
+                    }
+                    _ => {
+                        ir_func.current_block().push(IRInstruction::BinOp {
+                            op: *op,
+                            dst: IRValue::Register(dst_vreg),
+                            lhs: lhs_val,
+                            rhs: rhs_val,
+                            ty: None,
+                        });
+                    }
+                }
                 Ok(IRValue::Register(dst_vreg))
             }
         }
