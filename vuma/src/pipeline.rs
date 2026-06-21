@@ -1681,12 +1681,10 @@ fn parse_expr_split(expr: &str) -> Option<(IrBinOpKind, String, String)> {
     ];
     
     // Check for single-character operators in precedence order (lowest first)
-    let single_ops: [(&str, IrBinOpKind); 10] = [
+    let single_ops: [(&str, IrBinOpKind); 8] = [
         ("|", IrBinOpKind::Or),
         ("^", IrBinOpKind::Xor),
         ("&", IrBinOpKind::And),
-        ("<", IrBinOpKind::SLt),
-        (">", IrBinOpKind::SGt),
         ("+", IrBinOpKind::Add),
         ("-", IrBinOpKind::Sub),
         ("*", IrBinOpKind::Mul),
