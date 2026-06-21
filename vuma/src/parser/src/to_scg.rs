@@ -2459,6 +2459,18 @@ impl AstToScg {
                 self.add_df_edges_recursive(inner, target_node, scg);
                 self.add_df_edges_recursive(index, target_node, scg);
             }
+            Expr::AtomicLoad { addr, .. } => {
+                self.add_df_edges_recursive(addr, target_node, scg);
+            }
+            Expr::AtomicStore { addr, value, .. } => {
+                self.add_df_edges_recursive(addr, target_node, scg);
+                self.add_df_edges_recursive(value, target_node, scg);
+            }
+            Expr::AtomicCas { addr, expected, desired, .. } => {
+                self.add_df_edges_recursive(addr, target_node, scg);
+                self.add_df_edges_recursive(expected, target_node, scg);
+                self.add_df_edges_recursive(desired, target_node, scg);
+            }
             _ => {
                 for var_name in self.expr_uses(expr) {
                     if let Some(source_node) = self.lookup_var(&var_name) {

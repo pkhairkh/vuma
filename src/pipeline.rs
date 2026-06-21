@@ -1882,6 +1882,32 @@ fn convert_node_to_statement_with_externs(
                 return None;
             }
 
+            // Check for atomic operations (atomic_store/atomic_load labels).
+            // These are parsed as Computation nodes with labels like
+            // "atomic_store(...)" or "v = atomic_load(...)". Convert them
+            // to CallNode statements so the IR builder can lower them to
+            // proper AtomicStore/AtomicLoad IR instructions.
+            if op_label.contains("atomic_store") {
+                // Resolve addr and value from DataFlow inputs
+                let addr = resolve_df_input(node_id, 0, edge_idx, scg);
+                let value = resolve_df_input(node_id, 1, edge_idx, scg);
+                return Some(ScgStatement::Call(CallNode {
+                    dst: None,
+                    func: "AtomicStore".to_string(),
+                    args: vec![value, addr],
+                    is_extern: false,
+                }));
+            }
+            if op_label.contains("atomic_load") {
+                let addr = resolve_df_input(node_id, 0, edge_idx, scg);
+                return Some(ScgStatement::Call(CallNode {
+                    dst: Some(node_var(node_id, "val")),
+                    func: "AtomicLoad".to_string(),
+                    args: vec![addr],
+                    is_extern: false,
+                }));
+            }
+
             // Skip Computation nodes that represent call expressions.
             for cf_edge in edge_idx.outgoing_cf(node_id) {
                 if let Some(target_data) = scg.get_node(cf_edge.target) {
