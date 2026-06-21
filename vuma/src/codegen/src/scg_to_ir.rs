@@ -714,19 +714,108 @@ impl IRBuilder {
         ir_func: &mut IRFunction,
         names: &mut HashMap<String, u32>,
     ) -> Result<()> {
-        // Lower statements in topological order so that every variable is
-        // defined before it is used.  The SCG->codegen bridge occasionally
-        // emits a flat statement list where a use precedes its def (e.g.
-        // DataFlow-only nodes appended after the main control-flow walk);
-        // the topological sort reorders such uses after their defs,
-        // eliminating spurious `UnknownVariable` errors without masking
-        // them by substituting a value.
-        let order = Self::topological_sort_statements(stmts);
+        // Separate Return statements from non-Return statements.
+        // Return statements must be lowered LAST (after all computations,
+        // loops, and control flow) to ensure the return value reflects
+        // the latest variable values. The topological sort doesn't
+        // understand control-flow dependencies and might reorder a
+        // Return before a Loop if the Return's variable was defined
+        // before the Loop.
+        let mut non_return_indices: Vec<usize> = Vec::new();
+        let mut return_indices: Vec<usize> = Vec::new();
+        for (i, stmt) in stmts.iter().enumerate() {
+            if matches!(stmt, ScgStatement::Return(_)) {
+                return_indices.push(i);
+            } else {
+                non_return_indices.push(i);
+            }
+        }
+
+        // Lower non-Return statements in topological order.
+        let order = Self::topological_sort_statements_subset(stmts, &non_return_indices);
         for &idx in &order {
             self.lower_statement(&stmts[idx], ir_func, names)?;
         }
 
+        // Lower Return statements last, in their original order.
+        for &idx in &return_indices {
+            self.lower_statement(&stmts[idx], ir_func, names)?;
+        }
+
         Ok(())
+    }
+
+    /// Topological sort for a subset of statements (specified by indices).
+    /// Same algorithm as topological_sort_statements but only considers
+    /// the given indices.
+    pub fn topological_sort_statements_subset(
+        stmts: &[ScgStatement],
+        indices: &[usize],
+    ) -> Vec<usize> {
+        let n = indices.len();
+        if n == 0 {
+            return vec![];
+        }
+
+        let mut defines: Vec<HashSet<String>> = Vec::with_capacity(n);
+        let mut uses: Vec<HashSet<String>> = Vec::with_capacity(n);
+
+        for &idx in indices {
+            let (def, use_) = Self::stmt_def_use(&stmts[idx]);
+            defines.push(def);
+            uses.push(use_);
+        }
+
+        let mut deps: Vec<HashSet<usize>> = vec![HashSet::new(); n];
+        for j in 0..n {
+            for var in &uses[j] {
+                let mut found = false;
+                for i in (0..j).rev() {
+                    if defines[i].contains(var) {
+                        deps[j].insert(i);
+                        found = true;
+                        break;
+                    }
+                }
+                if !found {
+                    for i in (j + 1)..n {
+                        if defines[i].contains(var) {
+                            deps[j].insert(i);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut in_degree: Vec<usize> = vec![0; n];
+        for j in 0..n {
+            in_degree[j] = deps[j].len();
+        }
+
+        let mut queue: Vec<usize> = (0..n).filter(|&i| in_degree[i] == 0).collect();
+        let mut result = Vec::with_capacity(n);
+        while let Some(i) = queue.first().copied() {
+            queue.remove(0);
+            result.push(indices[i]);
+            for j in 0..n {
+                if deps[j].contains(&i) {
+                    in_degree[j] -= 1;
+                    if in_degree[j] == 0 {
+                        queue.push(j);
+                    }
+                }
+            }
+        }
+
+        // Append any remaining (cyclic) statements in original order
+        for k in 0..n {
+            if !result.contains(&indices[k]) {
+                result.push(indices[k]);
+            }
+        }
+
+        result
     }
 
     /// Lower a single SCG statement.
@@ -759,10 +848,25 @@ impl IRBuilder {
                 self.lower_call(call, ir_func, names)?;
             }
             ScgStatement::Return(vals) => {
-                let ir_vals: Vec<IRValue> = vals
+                let mut ir_vals: Vec<IRValue> = vals
                     .iter()
                     .map(|e| self.resolve_expr(e, names, ir_func))
                     .collect::<Result<Vec<_>>>()?;
+                // Tail-expression fallthrough: when the SCG bridge emits an
+                // empty Return(vec![]) (functions with bare tail expressions),
+                // propagate the last instruction's defined register as the
+                // return value so backends can move it to the ABI return
+                // register.
+                if ir_vals.is_empty() {
+                    if let Some(block) = ir_func.blocks.last() {
+                        if let Some(last_instr) = block.instructions.last() {
+                            let defined = last_instr.defined_regs();
+                            if defined.len() == 1 {
+                                ir_vals.push(IRValue::Register(defined[0]));
+                            }
+                        }
+                    }
+                }
                 // Emit a Ret instruction and set the terminator.
                 ir_func.current_block().push(IRInstruction::Ret {
                     values: ir_vals.clone(),
@@ -870,7 +974,7 @@ impl IRBuilder {
         };
 
         // Then block.
-        let _entry_block_label = ir_func.current_block().label.clone();
+        let entry_block_label = ir_func.current_block().label.clone();
         ir_func.append_block(&then_label);
 
         // Track variable definitions in the then-branch.
@@ -905,6 +1009,15 @@ impl IRBuilder {
             ir_func.current_block().terminator = IRTerminator::Jump(merge_label.clone());
         }
         let then_exit_label = ir_func.current_block().label.clone();
+        // Determine whether the then-branch falls through to the merge block
+        // (i.e., its terminator is a Jump to merge_label).  If the then-branch
+        // ends with a Return/exit, it does NOT fall through, and phi nodes for
+        // then-only modifications must not be created (the then-branch's value
+        // is never observed at the merge point).
+        let then_falls_through = matches!(
+            ir_func.current_block().terminator,
+            IRTerminator::Jump(ref l) if l == &merge_label
+        );
 
         // Else block (optional).
         let _else_exit_label = if let Some(else_stmts) = else_body {
@@ -934,45 +1047,84 @@ impl IRBuilder {
                 ir_func.current_block().terminator = IRTerminator::Jump(merge_label.clone());
             }
             let el = ir_func.current_block().label.clone();
+            // Determine whether the else-branch falls through to the merge block.
+            let else_falls_through = matches!(
+                ir_func.current_block().terminator,
+                IRTerminator::Jump(ref l) if l == &merge_label
+            );
 
-            // Now merge the names: for variables defined in both branches,
-            // we need a phi node.  For variables defined in only one branch,
-            // keep the definition from that branch; the other branch's value
-            // comes from the pre-if definition.
+            // Now merge the names.  We insert phi nodes at the merge block for
+            // every variable modified in either branch:
+            //   - defined in BOTH branches: phi(then_vreg, else_vreg)
+            //   - defined in then ONLY:     phi(then_vreg, pre_if_vreg)
+            //   - defined in else ONLY:     phi(pre_if_vreg, else_vreg)
+            // The pre-if value comes from `names_before` (the state before the
+            // if).  Variables without a pre-if definition that are only defined
+            // in one branch cannot get a valid phi (the other path has no
+            // value); these keep their branch vreg without a phi.
             let all_modified: HashSet<String> = then_defs
                 .defined_names()
                 .union(&else_defs.defined_names())
                 .cloned()
                 .collect();
 
-            // We'll insert phi nodes at the merge block below.
-            // For now, store the phi info.
+            // Build the phi list: (name, then_incoming_vreg, else_incoming_vreg).
             let phis_to_insert: Vec<(String, u32, u32)> = all_modified
                 .iter()
                 .filter_map(|name| {
-                    // Only insert phi if defined in both branches
-                    if then_defs.is_defined(name) && else_defs.is_defined(name) {
-                        // then_defs / else_defs are guaranteed to have the value
-                        // because is_defined() returned true for both.
-                        let then_vreg = then_defs.get(name).unwrap();
-                        let else_vreg = else_defs.get(name).unwrap();
-                        Some((name.clone(), then_vreg, else_vreg))
+                    let in_then = then_defs.is_defined(name);
+                    let in_else = else_defs.is_defined(name);
+                    if in_then && in_else {
+                        // Both branches modified: only create phi if both fall
+                        // through to merge.  If one branch returns, the existing
+                        // both-branch phi would have an invalid edge; skip it
+                        // (the falling-through branch's value is used directly).
+                        if then_falls_through && else_falls_through {
+                            Some((name.clone(), then_defs.get(name).unwrap(), else_defs.get(name).unwrap()))
+                        } else if then_falls_through && !else_falls_through {
+                            // else returns; only then reaches merge.
+                            names_before.get(name).map(|pre| (name.clone(), then_defs.get(name).unwrap(), *pre))
+                        } else if !then_falls_through && else_falls_through {
+                            // then returns; only else reaches merge.
+                            names_before.get(name).map(|pre| (name.clone(), *pre, else_defs.get(name).unwrap()))
+                        } else {
+                            None
+                        }
+                    } else if in_then {
+                        // then-only: create phi only if then falls through.
+                        if then_falls_through {
+                            names_before.get(name).map(|pre| (name.clone(), then_defs.get(name).unwrap(), *pre))
+                        } else {
+                            None
+                        }
+                    } else if in_else {
+                        // else-only: create phi only if else falls through.
+                        if else_falls_through {
+                            names_before.get(name).map(|pre| (name.clone(), *pre, else_defs.get(name).unwrap()))
+                        } else {
+                            None
+                        }
                     } else {
                         None
                     }
                 })
                 .collect();
 
-            // Update the names map: variables defined in only the then-branch
-            // or only the else-branch get their respective vreg.
+            // For single-branch modifications WITHOUT a pre-if definition
+            // (e.g. a new variable declared inside one branch), keep the
+            // branch's vreg without a phi.
             for name in &all_modified {
-                if then_defs.is_defined(name) && !else_defs.is_defined(name) {
-                    if let Some(vreg) = then_defs.get(name) {
-                        names.insert(name.clone(), vreg);
-                    }
-                } else if !then_defs.is_defined(name) && else_defs.is_defined(name) {
-                    if let Some(vreg) = else_defs.get(name) {
-                        names.insert(name.clone(), vreg);
+                let in_then = then_defs.is_defined(name);
+                let in_else = else_defs.is_defined(name);
+                if (in_then ^ in_else) && !names_before.contains_key(name) {
+                    if in_then {
+                        if let Some(vreg) = then_defs.get(name) {
+                            names.insert(name.clone(), vreg);
+                        }
+                    } else {
+                        if let Some(vreg) = else_defs.get(name) {
+                            names.insert(name.clone(), vreg);
+                        }
                     }
                 }
             }
@@ -980,7 +1132,8 @@ impl IRBuilder {
             // Merge block.
             ir_func.append_block(&merge_label);
 
-            // Insert phi nodes for variables defined in both branches.
+            // Insert phi nodes for all modified variables (both-branch and
+            // single-branch).
             for (name, then_vreg, else_vreg) in &phis_to_insert {
                 let phi_dst = self.alloc_vreg();
                 ir_func.register_vreg(VirtualRegister::named(phi_dst, name));
@@ -996,10 +1149,40 @@ impl IRBuilder {
 
             Some(el)
         } else {
-            // No else-branch: restore names to then-branch state (they were
-            // already updated during then-body lowering).
-            // Merge block.
+            // No else-branch: create phi nodes for variables modified in the
+            // then-branch. Each phi merges the then-branch value with the
+            // pre-if value. On the false path, the entry block (containing
+            // the CondBranch) jumps directly to merge_label, so the phi's
+            // else-incoming edge is from the entry block.
             ir_func.append_block(&merge_label);
+
+            // Collect variables modified in the then-branch that also have a
+            // pre-if definition (so we can create a valid phi).  Only create
+            // phis if the then-branch falls through to merge; if the then-branch
+            // returns, its modifications are never observed at merge.
+            let mut modified: Vec<String> = if then_falls_through {
+                then_defs.defined_names()
+                    .into_iter()
+                    .filter(|n| names_before.contains_key(n))
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            modified.sort(); // deterministic order
+            for name in &modified {
+                let then_vreg = then_defs.get(name).unwrap();
+                let pre_vreg = *names_before.get(name).unwrap();
+                let phi_dst = self.alloc_vreg();
+                ir_func.register_vreg(VirtualRegister::named(phi_dst, name));
+                ir_func.current_block().push(IRInstruction::Phi {
+                    dst: IRValue::Register(phi_dst),
+                    incoming: vec![
+                        (IRValue::Register(then_vreg), then_exit_label.clone()),
+                        (IRValue::Register(pre_vreg), entry_block_label.clone()),
+                    ],
+                });
+                names.insert(name.clone(), phi_dst);
+            }
             None
         };
 
@@ -1186,21 +1369,37 @@ impl IRBuilder {
         // ── Step 5: Patch phi nodes with correct back-edge values ──
         // For each variable that was modified in the loop body, update the
         // phi's back-edge incoming to use the new vreg from the end of the loop body.
+        //
+        // The loop body's lower_computation creates NEW names entries (e.g.,
+        // "v_4" for a reassignment) instead of updating existing entries
+        // (e.g., "v_1"). So we need to find the LATEST vreg for each phi
+        // variable by checking if names[name] changed, AND by checking if
+        // any new names were created that correspond to reassignments of
+        // the phi variable.
         {
+            // Build a map from original name to latest vreg
+            let mut name_to_latest: HashMap<String, u32> = HashMap::new();
+            for (name, pre_vreg, _phi_vreg) in &phi_info {
+                if let Some(&current_vreg) = names.get(name) {
+                    if current_vreg != *pre_vreg {
+                        name_to_latest.insert(name.clone(), current_vreg);
+                    }
+                }
+            }
+
             let header_block = ir_func.blocks.iter_mut()
                 .find(|b| b.label == loop_header)
                 .expect("loop header block must exist");
 
             for instr in &mut header_block.instructions {
                 if let IRInstruction::Phi { dst, incoming } = instr {
-                    // Find the phi's variable name from its dst vreg
                     if let Some(phi_vreg_id) = dst.as_register() {
-                        // Find the name that maps to this phi_vreg
                         for (name, _, phi_vreg) in &phi_info {
                             if *phi_vreg == phi_vreg_id {
-                                // Get the current vreg for this name (after loop body)
-                                if let Some(&current_vreg) = names.get(name) {
-                                    // Update the back-edge incoming
+                                // Get the latest vreg for this name
+                                let latest_vreg = name_to_latest.get(name).copied()
+                                    .or_else(|| names.get(name).copied());
+                                if let Some(current_vreg) = latest_vreg {
                                     for entry in incoming.iter_mut() {
                                         if entry.1 == loop_body_label || entry.1 == back_edge_label {
                                             entry.0 = IRValue::Register(current_vreg);
@@ -2387,7 +2586,7 @@ impl IRBuilder {
         match expr {
             ScgExpr::Var(name) => {
                 if let Some(&vreg) = names.get(name) {
-                    Ok(IRValue::Register(vreg))
+                        Ok(IRValue::Register(vreg))
                 } else {
                     // Unresolved reference — this is a soundness error.
                     //
