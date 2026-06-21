@@ -731,19 +731,21 @@ impl IRBuilder {
             }
         }
 
-        // Check if any statement is an atomic operation. If so, use
-        // SOURCE ORDER instead of topological sort — the topological
+        // Check if any statement is an atomic or memory operation. If so,
+        // use SOURCE ORDER instead of topological sort — the topological
         // sort doesn't understand control-flow dependencies and can
-        // reorder atomic_load before atomic_store, breaking the chain.
-        let has_atomics = non_return_indices.iter().any(|&i| {
-            if let ScgStatement::Call(call) = &stmts[i] {
-                call.func == "AtomicStore" || call.func == "AtomicLoad"
-            } else {
-                false
+        // reorder loads before stores, breaking memory chains.
+        let has_memory_ops = non_return_indices.iter().any(|&i| {
+            match &stmts[i] {
+                ScgStatement::Call(call) => {
+                    call.func == "AtomicStore" || call.func == "AtomicLoad"
+                }
+                ScgStatement::Access(_) => true,
+                _ => false,
             }
         });
 
-        if has_atomics {
+        if has_memory_ops {
             // Use source order for functions with atomics
             for &idx in &non_return_indices {
                 self.lower_statement(&stmts[idx], ir_func, names)?;
