@@ -1196,6 +1196,23 @@ impl IRBuilder {
                     ],
                 });
                 names.insert(name.clone(), phi_dst);
+                // Redirect ALL alias entries that still point to either
+                // branch-local vreg (then_vreg or else_vreg) to phi_dst.
+                // The SCG→codegen bridge often resolves user-level variable
+                // references (e.g. `return x`) to the SCG-node-id of the
+                // most-recent assignment in source order (e.g. Var("v_7")
+                // from the else-branch).  After the merge, those references
+                // must read the phi result, not the branch-local vreg, so
+                // we update every names entry whose value is then_vreg or
+                // else_vreg.  vregs are unique per computation, so this
+                // never clobbers an unrelated variable.
+                let alias_keys: Vec<String> = names.iter()
+                    .filter(|(_, &v)| v == *then_vreg || v == *else_vreg)
+                    .map(|(k, _)| k.clone())
+                    .collect();
+                for key in alias_keys {
+                    names.insert(key, phi_dst);
+                }
             }
 
             Some(el)
@@ -1233,6 +1250,18 @@ impl IRBuilder {
                     ],
                 });
                 names.insert(name.clone(), phi_dst);
+                // Redirect alias entries that still point to the then-branch
+                // vreg to phi_dst.  (See the both-branch case above for the
+                // rationale: SCG-level Var("v_N") references to the
+                // then-branch's reassignment must read the phi result after
+                // the merge, not the branch-local vreg.)
+                let alias_keys: Vec<String> = names.iter()
+                    .filter(|(_, &v)| v == then_vreg)
+                    .map(|(k, _)| k.clone())
+                    .collect();
+                for key in alias_keys {
+                    names.insert(key, phi_dst);
+                }
             }
             None
         };
@@ -1304,21 +1333,37 @@ impl IRBuilder {
         let mut sorted_names: Vec<String> = names_before.keys().cloned().collect();
         sorted_names.sort(); // deterministic order
 
+        // Deduplicate phi nodes by pre_loop_vreg: if two names share the
+        // same pre-loop vreg (e.g. "v_1" and "sum" both refer to the same
+        // variable — one is the SCG node id, the other the user-visible
+        // name), they must share the SAME phi vreg.  Without this, the two
+        // aliases would get separate phi vregs, and lower_computation's
+        // reassignment update (which finds entries matching
+        // names[reassigns]) would only update one alias, leaving the other
+        // stale — breaking loop-carried variable propagation.
+        let mut vreg_to_phi: HashMap<u32, u32> = HashMap::new();
         for name in &sorted_names {
             let &pre_loop_vreg = names_before.get(name).unwrap();
-            let phi_vreg = self.alloc_vreg();
-            ir_func.register_vreg(VirtualRegister::named(phi_vreg, name.as_str()));
-            phi_info.push((name.clone(), pre_loop_vreg, phi_vreg));
+            let phi_vreg = if let Some(&existing_phi) = vreg_to_phi.get(&pre_loop_vreg) {
+                // Reuse the existing phi vreg for this pre_loop_vreg.
+                existing_phi
+            } else {
+                let new_phi = self.alloc_vreg();
+                ir_func.register_vreg(VirtualRegister::named(new_phi, name.as_str()));
+                vreg_to_phi.insert(pre_loop_vreg, new_phi);
 
-            // Create phi with placeholder incoming from back-edge.
-            // We'll patch the back-edge incoming value after lowering the body.
-            phi_instructions.push(IRInstruction::Phi {
-                dst: IRValue::Register(phi_vreg),
-                incoming: vec![
-                    (IRValue::Register(pre_loop_vreg), pre_header_label.clone()),
-                    (IRValue::Register(pre_loop_vreg), loop_body_label.clone()), // placeholder
-                ],
-            });
+                // Create phi with placeholder incoming from back-edge.
+                // We'll patch the back-edge incoming value after lowering the body.
+                phi_instructions.push(IRInstruction::Phi {
+                    dst: IRValue::Register(new_phi),
+                    incoming: vec![
+                        (IRValue::Register(pre_loop_vreg), pre_header_label.clone()),
+                        (IRValue::Register(pre_loop_vreg), loop_body_label.clone()), // placeholder
+                    ],
+                });
+                new_phi
+            };
+            phi_info.push((name.clone(), pre_loop_vreg, phi_vreg));
 
             // Update names so the loop body uses the phi result
             names.insert(name.clone(), phi_vreg);
@@ -2065,11 +2110,26 @@ impl IRBuilder {
         ir_func.register_vreg(VirtualRegister::named(dst_vreg, &comp.dst));
         names.insert(comp.dst.clone(), dst_vreg);
 
-        // If the lhs is a Register (variable reference), update ALL existing
-        // names entries that point to the same vreg as lhs. This ensures
-        // reassignments like "x = 10" or "sum = sum + i" update the ORIGINAL
-        // variable's entry (e.g., "v_1"), not just the new SCG node ID entry
-        // (e.g., "v_5"). This is critical for:
+        // Reassignment propagation: update the `names` map so that the
+        // user-visible variable being assigned (and any aliases sharing the
+        // same previous vreg) now point to the freshly-allocated dst_vreg.
+        //
+        // Two sources of "previous vreg" are considered:
+        //   1. `comp.reassigns` — the user-visible variable name being
+        //      assigned (e.g. "x" in `x = 10` or `let x = 0`).  This is
+        //      populated by the SCG→codegen bridge for both let-bindings
+        //      and reassignments.  We look up `names[reassigns]` to find
+        //      the variable's current vreg.
+        //   2. `lhs_val` (if it is a `Register`) — handles cases like
+        //      `sum = sum + i` where the lhs reads the same variable.
+        //
+        // We then update EVERY names entry whose value equals that previous
+        // vreg (this catches both the user-var-name entry, e.g. "x", and the
+        // SCG-node-id entry, e.g. "v_1").  Finally, if `comp.reassigns` is
+        // set, we also establish/update `names[reassigns] = dst_vreg` so the
+        // user-visible name is always tracked.
+        //
+        // This is critical for:
         //   - lower_loop's phi back-edge patching (loop-carried variables)
         //   - lower_if's then_defs/else_defs detection, so it records the
         //     original variable's name (not just the new comp.dst key) and
@@ -2080,15 +2140,24 @@ impl IRBuilder {
         // instead of a proper phi).  The earlier regression on bitwise/crypto
         // tests has been independently addressed by using source order for
         // memory operations, so it is now safe to always apply this update.
-        if let IRValue::Register(lhs_vreg) = &lhs_val {
-            let lhs_vreg = *lhs_vreg;
+        let prev_vreg: Option<u32> = if let Some(name) = &comp.reassigns {
+            names.get(name).copied()
+        } else if let IRValue::Register(lhs_vreg) = &lhs_val {
+            Some(*lhs_vreg)
+        } else {
+            None
+        };
+        if let Some(prev_vreg) = prev_vreg {
             let keys_to_update: Vec<String> = names.iter()
-                .filter(|(_, &v)| v == lhs_vreg)
+                .filter(|(_, &v)| v == prev_vreg)
                 .map(|(k, _)| k.clone())
                 .collect();
             for key in keys_to_update {
                 names.insert(key, dst_vreg);
             }
+        }
+        if let Some(name) = &comp.reassigns {
+            names.insert(name.clone(), dst_vreg);
         }
 
         let dst = IRValue::Register(dst_vreg);
