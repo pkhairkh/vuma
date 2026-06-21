@@ -2184,6 +2184,40 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         stubs.push(("exit".to_string(), code));
     }
 
+    // __vuma_alloc(size) → void*  [mmap wrapper]
+    // args: RDI=size → mmap(NULL, size, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0)
+    // mmap args: RDI=addr(NULL=0), RSI=length, RDX=prot, R10=flags, R8=fd, R9=offset
+    {
+        let mut code = Vec::new();
+        // Save size in RSI (length)
+        code.extend(encode_mov_reg_reg(Gpr::Rsi, Gpr::Rdi));  // RSI = size
+        // RDI = 0 (addr = NULL)
+        code.extend(encode_xor_reg_reg(Gpr::Rdi, Gpr::Rdi));  // RDI = 0
+        // RDX = 3 (PROT_READ|PROT_WRITE)
+        code.extend(encode_mov_reg_imm32(Gpr::Rdx, 3));
+        // R10 = 0x22 (MAP_PRIVATE|MAP_ANONYMOUS)
+        code.extend(encode_mov_reg_imm32(Gpr::R10, 0x22));
+        // R8 = -1 (fd = -1)
+        code.extend(encode_mov_reg_imm32(Gpr::R8, -1i32));
+        // R9 = 0 (offset = 0)
+        code.extend(encode_xor_reg_reg(Gpr::R9, Gpr::R9));
+        // RAX = 9 (sys_mmap)
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 9));
+        code.extend(encode_syscall());
+        code.extend(encode_ret());
+        stubs.push(("__vuma_alloc".to_string(), code));
+    }
+
+    // __vuma_free(addr, size) → void  [munmap wrapper]
+    // args: RDI=addr, RSI=size → same as munmap syscall
+    {
+        let mut code = Vec::new();
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 11));  // sys_munmap
+        code.extend(encode_syscall());
+        code.extend(encode_ret());
+        stubs.push(("__vuma_free".to_string(), code));
+    }
+
     // sigaction(signum, act, oldact) → long  [syscall 13 = rt_sigaction]
     // Kernel signature: rt_sigaction(int signum, const struct sigaction *act,
     //                                 struct sigaction *oldact, size_t sigsetsize)
