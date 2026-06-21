@@ -731,10 +731,29 @@ impl IRBuilder {
             }
         }
 
-        // Lower non-Return statements in topological order.
-        let order = Self::topological_sort_statements_subset(stmts, &non_return_indices);
-        for &idx in &order {
-            self.lower_statement(&stmts[idx], ir_func, names)?;
+        // Check if any statement is an atomic operation. If so, use
+        // SOURCE ORDER instead of topological sort — the topological
+        // sort doesn't understand control-flow dependencies and can
+        // reorder atomic_load before atomic_store, breaking the chain.
+        let has_atomics = non_return_indices.iter().any(|&i| {
+            if let ScgStatement::Call(call) = &stmts[i] {
+                call.func == "AtomicStore" || call.func == "AtomicLoad"
+            } else {
+                false
+            }
+        });
+
+        if has_atomics {
+            // Use source order for functions with atomics
+            for &idx in &non_return_indices {
+                self.lower_statement(&stmts[idx], ir_func, names)?;
+            }
+        } else {
+            // Use topological sort for other functions
+            let order = Self::topological_sort_statements_subset(stmts, &non_return_indices);
+            for &idx in &order {
+                self.lower_statement(&stmts[idx], ir_func, names)?;
+            }
         }
 
         // Lower Return statements last, in their original order.
