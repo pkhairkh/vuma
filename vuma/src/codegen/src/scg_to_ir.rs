@@ -305,7 +305,7 @@ pub struct CastNode {
 /// Computation node (binary arithmetic / logic).
 #[derive(Debug, Clone)]
 pub struct ComputationNode {
-    /// Destination variable name.
+    /// Destination variable name (SCG node id, e.g. "v_5").
     pub dst: String,
     /// Binary operation.
     pub op: BinOpKind,
@@ -315,6 +315,13 @@ pub struct ComputationNode {
     pub rhs: ScgExpr,
     /// Whether this is a tail call.
     pub tail_call: bool,
+    /// For reassignments ("x = expr"), the user-visible variable name
+    /// being reassigned (e.g. "x").  This lets `lower_computation`
+    /// update the variable's entry in the `names` map (in addition to
+    /// the SCG-node-id entry `dst`) so that `lower_if` can detect the
+    /// reassignment and create a proper phi node at if/else merge points.
+    /// `None` for let-bindings and non-assignment computations.
+    pub reassigns: Option<String>,
 }
 
 /// Unary computation node (neg, not, clz, ctz, popcnt).
@@ -1004,9 +1011,24 @@ impl IRBuilder {
         self.lower_statements(then_body, ir_func, names)?;
 
         // Record which variables were redefined in the then-branch.
+        // Two cases are detected:
+        //   1. NEW keys (created by lower_computation for the comp.dst SCG
+        //      node id, e.g. "v_5") — caught by the snapshot returning None.
+        //   2. EXISTING keys whose value changed (lower_computation updates
+        //      the original variable's entry, e.g. "x" -> new vreg, when the
+        //      lhs is a Register) — caught by iterating the snapshot and
+        //      comparing values.  This is the case that allows proper phi
+        //      nodes at the merge point for `if cond { x = ... } else { x = ... }`.
         for (name, &vreg) in names.iter() {
             if then_names_snapshot.get(name) != Some(&vreg) {
                 then_defs.define(name, vreg);
+            }
+        }
+        for (name, &pre_vreg) in then_names_snapshot.iter() {
+            if let Some(&cur_vreg) = names.get(name) {
+                if pre_vreg != cur_vreg {
+                    then_defs.define(name, cur_vreg);
+                }
             }
         }
 
@@ -1051,10 +1073,18 @@ impl IRBuilder {
             self.lower_statements(else_stmts, ir_func, names)?;
 
             // Track which variables were redefined in the else-branch.
+            // (See the then-branch above for the dual-case detection logic.)
             let mut else_defs = VarDefs::new();
             for (name, &vreg) in names.iter() {
                 if else_names_snapshot.get(name) != Some(&vreg) {
                     else_defs.define(name, vreg);
+                }
+            }
+            for (name, &pre_vreg) in else_names_snapshot.iter() {
+                if let Some(&cur_vreg) = names.get(name) {
+                    if pre_vreg != cur_vreg {
+                        else_defs.define(name, cur_vreg);
+                    }
                 }
             }
 
@@ -2035,23 +2065,29 @@ impl IRBuilder {
         ir_func.register_vreg(VirtualRegister::named(dst_vreg, &comp.dst));
         names.insert(comp.dst.clone(), dst_vreg);
 
-        // If inside a loop body and the lhs is a Register (variable
-        // reference), update ALL existing names entries that point to
-        // the same vreg as lhs. This ensures reassignments like
-        // "sum = sum + i" update the ORIGINAL variable's entry (e.g.,
-        // "v_1"), not just the new SCG node ID entry (e.g., "v_4").
-        // This is critical for lower_loop's phi back-edge patching.
-        // Only apply inside loops to avoid interfering with let bindings.
-        if !self.loop_stack.is_empty() {
-            if let IRValue::Register(lhs_vreg) = &lhs_val {
-                let lhs_vreg = *lhs_vreg;
-                let keys_to_update: Vec<String> = names.iter()
-                    .filter(|(_, &v)| v == lhs_vreg)
-                    .map(|(k, _)| k.clone())
-                    .collect();
-                for key in keys_to_update {
-                    names.insert(key, dst_vreg);
-                }
+        // If the lhs is a Register (variable reference), update ALL existing
+        // names entries that point to the same vreg as lhs. This ensures
+        // reassignments like "x = 10" or "sum = sum + i" update the ORIGINAL
+        // variable's entry (e.g., "v_1"), not just the new SCG node ID entry
+        // (e.g., "v_5"). This is critical for:
+        //   - lower_loop's phi back-edge patching (loop-carried variables)
+        //   - lower_if's then_defs/else_defs detection, so it records the
+        //     original variable's name (not just the new comp.dst key) and
+        //     allows proper phi nodes to be created at if/else merge points.
+        // Previously this was restricted to loop bodies only, which caused
+        // if/else reassignments to silently lose the then-branch value (the
+        // merge block would use the else-branch value or the pre-if value
+        // instead of a proper phi).  The earlier regression on bitwise/crypto
+        // tests has been independently addressed by using source order for
+        // memory operations, so it is now safe to always apply this update.
+        if let IRValue::Register(lhs_vreg) = &lhs_val {
+            let lhs_vreg = *lhs_vreg;
+            let keys_to_update: Vec<String> = names.iter()
+                .filter(|(_, &v)| v == lhs_vreg)
+                .map(|(k, _)| k.clone())
+                .collect();
+            for key in keys_to_update {
+                names.insert(key, dst_vreg);
             }
         }
 
@@ -3041,6 +3077,7 @@ mod tests {
                     lhs: ScgExpr::Var("x".into()),
                     rhs: ScgExpr::Int(1),
                     tail_call: false,
+                    reassigns: None,
                 }),
                 ScgStatement::Return(vec![ScgExpr::Var("result".into())]),
             ],
@@ -3094,6 +3131,7 @@ mod tests {
                         lhs: ScgExpr::Int(1),
                         rhs: ScgExpr::Int(2),
                         tail_call: false,
+                    reassigns: None,
                     })],
                     else_body: None,
                 }),
@@ -3381,6 +3419,7 @@ mod tests {
                     lhs: ScgExpr::Var("a".into()),
                     rhs: ScgExpr::Int(1),
                     tail_call: false,
+                    reassigns: None,
                 }),
                 ScgStatement::Computation(ComputationNode {
                     dst: "m".into(),
@@ -3388,6 +3427,7 @@ mod tests {
                     lhs: ScgExpr::Var("s".into()),
                     rhs: ScgExpr::Int(2),
                     tail_call: false,
+                    reassigns: None,
                 }),
                 ScgStatement::Computation(ComputationNode {
                     dst: "d".into(),
@@ -3395,6 +3435,7 @@ mod tests {
                     lhs: ScgExpr::Var("m".into()),
                     rhs: ScgExpr::Int(4),
                     tail_call: false,
+                    reassigns: None,
                 }),
                 ScgStatement::Return(vec![ScgExpr::Var("d".into())]),
             ],
@@ -3475,6 +3516,7 @@ mod tests {
                     lhs: ScgExpr::Var("input".into()),
                     rhs: ScgExpr::Int(10),
                     tail_call: false,
+                    reassigns: None,
                 }),
                 ScgStatement::Return(vec![ScgExpr::Var("output".into())]),
             ],
@@ -3549,6 +3591,7 @@ mod tests {
                         lhs: ScgExpr::Int(1),
                         rhs: ScgExpr::Int(2),
                         tail_call: false,
+                    reassigns: None,
                     })],
                     else_body: Some(vec![ScgStatement::Computation(ComputationNode {
                         dst: "y".into(),
@@ -3556,6 +3599,7 @@ mod tests {
                         lhs: ScgExpr::Int(5),
                         rhs: ScgExpr::Int(3),
                         tail_call: false,
+                    reassigns: None,
                     })]),
                 }),
                 ScgStatement::Return(vec![]),
@@ -3709,6 +3753,7 @@ mod tests {
                     lhs: ScgExpr::Var("a".into()),
                     rhs: ScgExpr::Int(10),
                     tail_call: false,
+                    reassigns: None,
                 }),
                 ScgStatement::Computation(ComputationNode {
                     dst: "equal".into(),
@@ -3716,6 +3761,7 @@ mod tests {
                     lhs: ScgExpr::Var("a".into()),
                     rhs: ScgExpr::Int(0),
                     tail_call: false,
+                    reassigns: None,
                 }),
                 ScgStatement::Return(vec![
                     ScgExpr::Var("less".into()),
@@ -3769,6 +3815,7 @@ mod tests {
                     lhs: ScgExpr::Var("a".into()),
                     rhs: ScgExpr::Int(10),
                     tail_call: false,
+                    reassigns: None,
                 }),
                 ScgStatement::Computation(ComputationNode {
                     dst: "uge".into(),
@@ -3776,6 +3823,7 @@ mod tests {
                     lhs: ScgExpr::Var("a".into()),
                     rhs: ScgExpr::Int(5),
                     tail_call: false,
+                    reassigns: None,
                 }),
                 ScgStatement::Return(vec![ScgExpr::Var("ult".into()), ScgExpr::Var("uge".into())]),
             ],
@@ -3868,6 +3916,7 @@ mod tests {
                         lhs: ScgExpr::Int(1),
                         rhs: ScgExpr::Int(2),
                         tail_call: false,
+                    reassigns: None,
                     })],
                     else_body: Some(vec![ScgStatement::Computation(ComputationNode {
                         dst: "x".into(),
@@ -3875,6 +3924,7 @@ mod tests {
                         lhs: ScgExpr::Int(10),
                         rhs: ScgExpr::Int(3),
                         tail_call: false,
+                    reassigns: None,
                     })]),
                 }),
                 ScgStatement::Return(vec![ScgExpr::Var("x".into())]),
@@ -3909,6 +3959,7 @@ mod tests {
                 lhs: ScgExpr::Int(1),
                 rhs: ScgExpr::Int(2),
                 tail_call: false,
+                    reassigns: None,
             }),
             ScgStatement::Computation(ComputationNode {
                 dst: "b".into(),
@@ -3916,6 +3967,7 @@ mod tests {
                 lhs: ScgExpr::Var("a".into()),
                 rhs: ScgExpr::Int(3),
                 tail_call: false,
+                    reassigns: None,
             }),
             ScgStatement::Return(vec![ScgExpr::Var("b".into())]),
         ];
@@ -3938,6 +3990,7 @@ mod tests {
                 lhs: ScgExpr::Int(1),
                 rhs: ScgExpr::Int(2),
                 tail_call: false,
+                    reassigns: None,
             }),
             ScgStatement::Computation(ComputationNode {
                 dst: "b".into(),
@@ -3945,6 +3998,7 @@ mod tests {
                 lhs: ScgExpr::Int(3),
                 rhs: ScgExpr::Int(4),
                 tail_call: false,
+                    reassigns: None,
             }),
             ScgStatement::Computation(ComputationNode {
                 dst: "c".into(),
@@ -3952,6 +4006,7 @@ mod tests {
                 lhs: ScgExpr::Var("a".into()),
                 rhs: ScgExpr::Var("b".into()),
                 tail_call: false,
+                    reassigns: None,
             }),
         ];
         let order = IRBuilder::topological_sort_statements(&stmts);
@@ -4148,6 +4203,7 @@ mod tests {
                     lhs: ScgExpr::Var("x".into()),
                     rhs: ScgExpr::Int(0xFF),
                     tail_call: false,
+                    reassigns: None,
                 }),
                 ScgStatement::Computation(ComputationNode {
                     dst: "or_result".into(),
@@ -4155,6 +4211,7 @@ mod tests {
                     lhs: ScgExpr::Var("x".into()),
                     rhs: ScgExpr::Int(0x100),
                     tail_call: false,
+                    reassigns: None,
                 }),
                 ScgStatement::Return(vec![
                     ScgExpr::Var("and_result".into()),
@@ -4314,6 +4371,7 @@ mod tests {
                     lhs: ScgExpr::Var("x".into()),
                     rhs: ScgExpr::Int(0),
                     tail_call: false,
+                    reassigns: None,
                 }),
                 ScgStatement::Computation(ComputationNode {
                     dst: "sge".into(),
@@ -4321,6 +4379,7 @@ mod tests {
                     lhs: ScgExpr::Var("x".into()),
                     rhs: ScgExpr::Int(0),
                     tail_call: false,
+                    reassigns: None,
                 }),
                 ScgStatement::Return(vec![ScgExpr::Var("ne".into()), ScgExpr::Var("sge".into())]),
             ],
@@ -4406,6 +4465,7 @@ mod tests {
                             lhs: ScgExpr::Var("n".into()),
                             rhs: ScgExpr::Int(1),
                             tail_call: false,
+                    reassigns: None,
                         }),
                         ScgStatement::Control(ControlNode::Break),
                     ],
@@ -4496,6 +4556,7 @@ mod tests {
                     lhs: ScgExpr::Var("x".to_string()),
                     rhs: ScgExpr::Var("y".to_string()), // undefined
                     tail_call: false,
+                    reassigns: None,
                 })],
             })],
         };
