@@ -2311,8 +2311,8 @@ fn build_minimal_riscv64_elf_2seg(code: &[u8], base_addr: u64) -> Vec<u8> {
     elf.extend_from_slice(&1u32.to_le_bytes()); // p_type = PT_LOAD
     elf.extend_from_slice(&5u32.to_le_bytes()); // p_flags = PF_R | PF_X
     elf.extend_from_slice(&0u64.to_le_bytes()); // p_offset = 0 (include ELF header)
-    elf.extend_from_slice(&base_addr.to_le_bytes()); // p_vaddr (page-aligned)
-    elf.extend_from_slice(&base_addr.to_le_bytes()); // p_paddr
+    elf.extend_from_slice(&(base_addr + text_offset).to_le_bytes()); // p_vaddr
+    elf.extend_from_slice(&(base_addr + text_offset).to_le_bytes()); // p_paddr
     elf.extend_from_slice(&((text_offset + text_size) as u64).to_le_bytes()); // p_filesz (headers + code)
     elf.extend_from_slice(&((text_offset + text_size) as u64).to_le_bytes()); // p_memsz
     elf.extend_from_slice(&PAGE_SIZE.to_le_bytes()); // p_align
