@@ -5385,13 +5385,21 @@ impl Backend for RiscV64Backend {
         // ECALL             — 4 bytes
 
         let start_stub_size: usize = 16; // 4 × 4-byte instructions
+        // `ffi_stub` (li a0,0; ret) is appended right after _start in
+        // `all_code` (see below), so the first user function actually
+        // starts at offset `start_stub_size + ffi_stub_size` in
+        // `all_code`. We must account for this when computing function
+        // offsets, otherwise the _start JAL jumps into the ffi_stub
+        // (li a0,0; ret) and every program returns exit code 0.
+        let ffi_stub_size: usize = 8; // li a0,0 (4) + ret (4)
+        let header_size: usize = start_stub_size + ffi_stub_size;
 
         // ── Build runtime I/O code ──
         let runtime_code = build_riscv64_runtime();
 
         // ── Compute function offsets ──
         let mut func_offsets: HashMap<String, usize> = HashMap::new();
-        let mut current_offset: usize = start_stub_size;
+        let mut current_offset: usize = header_size;
 
         for func in &program.functions {
             func_offsets.insert(func.name.clone(), current_offset);
@@ -5462,7 +5470,9 @@ impl Backend for RiscV64Backend {
 
         // ── Concatenate all code ──
         let mut all_code = start_stub;
-        all_code.extend_from_slice(&ffi_stub); // 8 bytes at offset 20
+        // ffi_stub is 8 bytes at offset `start_stub_size` (= 16) in
+        // all_code; main begins at offset `header_size` (= 24).
+        all_code.extend_from_slice(&ffi_stub);
         for func in &program.functions {
             for block in &func.blocks {
                 for instr in &block.instructions {
@@ -5476,7 +5486,10 @@ impl Backend for RiscV64Backend {
 
         // ── Patch JAL relocations for inter-function calls ──
         // RISC-V uses JAL for direct calls within ±1MB
-        let mut func_code_offset: usize = start_stub_size;
+        // Functions begin at offset `header_size` (= start_stub + ffi_stub)
+        // in `all_code`, not `start_stub_size`, because `ffi_stub` is
+        // inserted between _start and the first function.
+        let mut func_code_offset: usize = header_size;
         for func in &program.functions {
             for reloc in &func.relocations {
                 let abs_offset = func_code_offset + reloc.offset as usize;
@@ -5516,9 +5529,10 @@ impl Backend for RiscV64Backend {
                             .copy_from_slice(&patched.encode());
                     } else {
                         // External symbol — point to the "return 0" stub
-                        // at the beginning of the code (offset 0 after _start).
-                        // The stub is: li a0, 0; ret
-                        let stub_offset = 20; // _start stub is 20 bytes, stub is right after
+                        // (li a0, 0; ret) which sits at offset
+                        // `start_stub_size` (= 16) in `all_code`, right
+                        // after the 16-byte _start stub.
+                        let stub_offset = start_stub_size; // = 16
                         let target_addr = stub_offset as i64;
                         let bl_addr = abs_offset as i64;
                         let offset = (target_addr - bl_addr) as i32;
