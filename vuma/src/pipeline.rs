@@ -870,40 +870,6 @@ fn resolve_df_input(
                             }
                         }
                     }
-                    // For bare variable references (labels like "i", "x", etc.),
-                    // follow DataFlow edges to find the actual definition.
-                    // This is needed because the SCG creates a Computation
-                    // node for variable references (e.g., "return x" creates
-                    // a node with label "x"), and the DataFlow edge from
-                    // this node points to the variable's definition.
-                    if let ComputationKind::Other(ref label) = comp.kind {
-                        // Skip "let ..." and "... = ..." (assignments) and
-                        // "param ..." and "lit_*" and function calls
-                        let is_simple_var = !label.starts_with("let ")
-                            && !label.starts_with("param ")
-                            && !label.starts_with("lit_")
-                            && !label.contains(" = ")
-                            && !label.contains("(")
-                            && !label.parse::<i64>().is_ok()
-                            && !label.is_empty();
-                        if is_simple_var {
-                            // Follow DataFlow edges to find the actual definition
-                            let df_sources = edge_idx.incoming_df(source);
-                            if !df_sources.is_empty() {
-                                let actual_source = df_sources[0].source;
-                                if let Some(actual_data) = scg.get_node(actual_source) {
-                                    if let NodePayload::Computation(actual_comp) = &actual_data.payload {
-                                        if let ComputationKind::Other(ref actual_label) = actual_comp.kind {
-                                            // If the actual source is "let x = ...", use its vreg
-                                            if actual_label.starts_with("let ") || actual_label.contains(" = ") {
-                                                return ScgExpr::Var(format!("v_{}", actual_source.as_u64()));
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
                     // Regular computation — reference by vreg
                     ScgExpr::Var(format!("v_{}", source.as_u64()))
                 }
@@ -2760,39 +2726,50 @@ pub fn bridge_scg_to_codegen_with_externs(scg: &SCG, extern_functions: &HashSet<
                 // The walk didn't reach the FunctionReturn (e.g., loop
                 // exit with no outgoing CF). Try to process the
                 // FunctionReturn directly to resolve the return value.
+                // Only use the reassignment search for functions with loops
+                // (where the walk is known to stop at LoopExit).
+                let has_loop = body.iter().any(|s| {
+                    matches!(s, ScgStatement::Control(ControlNode::Loop { .. }))
+                });
                 if let Some(ret) = return_node {
                     let df_inputs = edge_idx.incoming_df(ret);
-                    let ret_vals: Vec<ScgExpr> = if df_inputs.is_empty() {
-                        vec![]
+                    let ret_vals: Vec<ScgExpr> = if df_inputs.is_empty() || !has_loop {
+                        // No DataFlow inputs or no loops — use simple resolution
+                        df_inputs.iter()
+                            .enumerate()
+                            .map(|(i, _)| resolve_df_input(ret, i, &edge_idx, scg))
+                            .collect()
                     } else {
-                        // For each DataFlow input, try to find the LATEST
-                        // reassignment of the variable. The DataFlow source
-                        // might be a bare variable reference (e.g., "i")
-                        // whose DataFlow edge points to the ORIGINAL
-                        // definition, not the latest reassignment inside a
-                        // loop body. Search all Computation nodes for labels
-                        // matching "varname = ..." and use the last one.
                         df_inputs.iter()
                             .enumerate()
                             .map(|(i, _)| {
-                                let expr = resolve_df_input(ret, i, &edge_idx, scg);
-                                // If the resolved expr is a Var, try to find
-                                // a later reassignment
-                                if let ScgExpr::Var(var_name) = &expr {
-                                    // Search for Computation nodes with label "var_name = ..."
-                                    let reassign_label = format!("{} =", var_name);
-                                    for node in scg.nodes() {
-                                        if let NodePayload::Computation(comp) = &node.payload {
-                                            if let ComputationKind::Other(ref label) = comp.kind {
-                                                if label.starts_with(&reassign_label) && !label.starts_with("let ") {
-                                                    // Found a reassignment — use this node's var
-                                                    return ScgExpr::Var(format!("v_{}", node.id.as_u64()));
+                                let source = df_inputs[i].source;
+                                if let Some(source_data) = scg.get_node(source) {
+                                    if let NodePayload::Computation(comp) = &source_data.payload {
+                                        if let ComputationKind::Other(ref label) = comp.kind {
+                                            let var_name = label.trim();
+                                            let reassign_prefix = format!("{} =", var_name);
+                                            let let_prefix = format!("let {}", var_name);
+                                            let mut latest_reassign: Option<NodeId> = None;
+                                            for node in scg.nodes() {
+                                                if !consumed.contains(&node.id) {
+                                                    continue;
                                                 }
+                                                if let NodePayload::Computation(c) = &node.payload {
+                                                    if let ComputationKind::Other(ref l) = c.kind {
+                                                        if l.starts_with(&reassign_prefix) && !l.starts_with(&let_prefix) {
+                                                            latest_reassign = Some(node.id);
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            if let Some(reassign_id) = latest_reassign {
+                                                return ScgExpr::Var(format!("v_{}", reassign_id.as_u64()));
                                             }
                                         }
                                     }
                                 }
-                                expr
+                                resolve_df_input(ret, i, &edge_idx, scg)
                             })
                             .collect()
                     };
