@@ -643,8 +643,10 @@ impl AstToScg {
                 }
 
                 // Update variable definition for simple assignments.
+                // Use update_var (not define_var) so that reassignments inside
+                // if/while bodies update the original scope, not the inner scope.
                 if let AssignTarget::Var { name, .. } = &a.target {
-                    self.define_var(name, id);
+                    self.update_var(name, id);
                 }
 
                 // Pointer offset via assignment: `ptr = base + offset`
@@ -2338,6 +2340,24 @@ impl AstToScg {
     }
 
     fn define_var(&mut self, name: &str, node_id: NodeId) {
+        if let Some(scope) = self.scopes.last_mut() {
+            scope.insert(name.to_string(), node_id);
+        }
+    }
+
+    /// Update an existing variable's definition in whichever scope it was
+    /// originally defined. This is used for reassignments (x = 42) inside
+    /// if/while bodies — the variable should be updated in its original
+    /// scope, not the current (inner) scope which will be popped.
+    fn update_var(&mut self, name: &str, node_id: NodeId) {
+        // Search from innermost to outermost for the variable
+        for scope in self.scopes.iter_mut().rev() {
+            if scope.contains_key(name) {
+                scope.insert(name.to_string(), node_id);
+                return;
+            }
+        }
+        // If not found in any scope, define in current scope
         if let Some(scope) = self.scopes.last_mut() {
             scope.insert(name.to_string(), node_id);
         }
