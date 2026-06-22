@@ -1,0 +1,15 @@
+// s68_cf_for_count_14.vuma — for loop runs 14 iterations, count = 14
+// Observed on current x86_64 backend: 0 (FAIL — known bug)
+//
+// Counter starts at 0 and increments by 1 each iteration of a for
+// loop with range 0..14. Known "for-body assignments don't
+// propagate" bug keeps count at 0 -> exit 0. Will exit 14 once
+// fixed. Distinct from s66_cf_for_count_9 (9), s62_cf_for_count_
+// 5 (5) and s58_cf_for_count_8 (8).
+fn main() -> i32 {
+    count: u32 = 0;
+    for i in 0..14 {
+        count = count + 1;
+    }
+    return count;
+}

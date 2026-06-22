@@ -1,0 +1,15 @@
+// s6_bit_shl_then_shr.vuma — (1 << 4) >> 2 = 16 >> 2 = 4
+// Expected exit code: 4
+//
+// Shift left 4 bits then right 2 bits, leaving 2 bits shifted from
+// bit 0 to bit 2. (1 << 4) = 16; (16 >> 2) = 4. All operands loaded
+// into variables. Distinct from s5_bit_shr_mask (single shift).
+
+fn main() -> i32 {
+    v: u64 = 1;
+    sh_l: u64 = 4;
+    sh_r: u64 = 2;
+    a: u64 = v << sh_l;   // 16
+    b: u64 = a >> sh_r;   // 4
+    return b;
+}

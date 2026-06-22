@@ -1,0 +1,18 @@
+// s13_arith_sub_div_mul.vuma — (90 - 18) / 8 * 5 = 72 / 8 * 5 = 9 * 5 = 45
+// Expected exit code: 45
+//
+// Three-stage straight-line computation: subtract, divide, multiply.
+// (90 - 18) = 72; 72 / 8 = 9; 9 * 5 = 45. All operands loaded into u32
+// variables first. Distinct from s10_arith_add_then_mul (add-then-mul)
+// and s9_arith_div_then_mul (div-then-mul, no leading subtract).
+
+fn main() -> i32 {
+    a: u32 = 90;
+    b: u32 = 18;
+    c: u32 = 8;
+    d: u32 = 5;
+    s: u32 = a - b;       // 72
+    q: u32 = s / c;       // 9
+    r: u32 = q * d;       // 45
+    return r;
+}

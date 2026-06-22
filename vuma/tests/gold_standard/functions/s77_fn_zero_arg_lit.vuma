@@ -1,0 +1,17 @@
+// s77_fn_zero_arg_lit.vuma — get_const() = 148
+// Expected exit code: 148
+//
+// Helper get_const() returns the literal 148. main calls
+// get_const() -> 148. Zero-arg function returning a literal.
+// Distinct from s70_fn_zero_arg_lit (110), s66_fn_zero_arg_lit
+// (200) and s74_fn_zero_arg_lit (86).
+
+fn get_const() -> u32 {
+    v: u32 = 148;
+    return v;
+}
+
+fn main() -> i32 {
+    v: u32 = get_const();
+    return v;
+}

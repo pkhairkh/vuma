@@ -1,0 +1,16 @@
+// s12_u32_add_then_xor.vuma — (10 + 20) ^ 5 = 30 ^ 5 = 27
+// Expected exit code: 27
+//
+// Add-then-XOR. (10 + 20) = 30; 30 ^ 5 = 27 (0x1B). All operands
+// loaded into u32 variables first. Distinct from s8_u32_xor_add
+// (XOR-then-add, reverse order) and s10_u32_xor_chain_4 (pure XOR
+// chain).
+
+fn main() -> i32 {
+    a: u32 = 10;
+    b: u32 = 20;
+    c: u32 = 5;
+    s: u32 = a + b;       // 30
+    r: u32 = s ^ c;       // 27
+    return r;
+}

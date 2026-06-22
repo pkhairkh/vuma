@@ -1,0 +1,14 @@
+// s92_edge_one_xor_val.vuma — 1 ^ 48 = 49 (XOR with one flips bit 0)
+// Expected exit code: 49
+//
+// Edge case: XOR with one toggles the lowest bit. 1 ^ 48 = 49
+// (0x31). All operands loaded into u32 variables first
+// (immediate-RHS bitwise drop bug workaround). Distinct from
+// s90_edge_one_xor_val (25), s86_edge_one_shl_five (234) and
+// s82_edge_max_and_seven (7).
+fn main() -> i32 {
+    a: u32 = 1;            // 0x01
+    b: u32 = 48;           // 0x30
+    r: u32 = a ^ b;        // 0x31 = 49
+    return r;
+}

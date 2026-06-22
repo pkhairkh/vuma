@@ -1,0 +1,18 @@
+// s9_mem_overwrite_then_load.vuma — store 50, overwrite with 120, read = 120
+// Expected exit code: 120
+//
+// Writes the literal 50 via `*p = 50`, then overwrites the same
+// cell with 120 via `*p = 120`, loads it back, returns 120.
+// Verifies that a subsequent store to the same cell clobbers the
+// earlier one. Uses `*p = literal` form (no offsets). Distinct
+// from s4_mem_overwrite_read (uses *(buf+N) form, values 50/80)
+// and s6_mem_overwrite_3x (three stores via *(p+N)).
+
+fn main() -> i32 {
+    buf = allocate(8);
+    *buf = 50;
+    *buf = 120;
+    v: u64 = *buf;
+    free(buf);
+    return v;
+}

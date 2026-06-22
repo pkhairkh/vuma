@@ -1,0 +1,46 @@
+// nl_pascals.vuma — Pascal's triangle row 3, return element [1]
+// Expected exit code: 3
+//
+// Builds Pascal's triangle row-by-row using the recurrence
+// C(n,k) = C(n-1,k-1) + C(n-1,k). Stores each row in a buffer (4 u32 cells).
+// After 4 iterations (rows 0..3), row 3 = [1,3,3,1]. Returns cell [1] = 3.
+// NOW PASSING until the for-body assignment propagation bug is fixed.
+
+fn main() -> i32 {
+    cur = allocate(16);  // current row, 4 u32 cells
+    nxt = allocate(16);  // next row,    4 u32 cells
+
+    // Row 0 = [1, 0, 0, 0]
+    *(cur + 0)  = 1;
+    *(cur + 4)  = 0;
+    *(cur + 8)  = 0;
+    *(cur + 12) = 0;
+
+    // Build rows 1, 2, 3 via the Pascal recurrence.
+    for r in 0..3 {
+        // Edges are always 1
+        *(nxt + 0)  = 1;
+        *(nxt + 12) = 1;
+        // Interior cells
+        for k in 0..2 {
+            off_in:  u64 = k * 4;
+            off_in2: u64 = (k + 1) * 4;
+            off_out: u64 = (k + 1) * 4;
+            a: u32 = *(cur + off_in);
+            b: u32 = *(cur + off_in2);
+            *(nxt + off_out) = a + b;
+        }
+        // Copy nxt -> cur
+        for k in 0..4 {
+            off: u64 = k * 4;
+            v: u32 = *(nxt + off);
+            *(cur + off) = v;
+        }
+    }
+
+    // Return cell [1] of row 3, which is C(3,1) = 3.
+    out: u32 = *(cur + 4);
+    free(cur);
+    free(nxt);
+    return out;
+}

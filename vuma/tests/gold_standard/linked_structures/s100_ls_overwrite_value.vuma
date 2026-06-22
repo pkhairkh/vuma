@@ -1,0 +1,15 @@
+// s100_ls_overwrite_value.vuma — overwrite n1 to 51, load = 51
+// Expected exit code: 51
+//
+// Single 8-byte "node". Store 5, then overwrite to 51,
+// load -> 51 (the overwritten value). Uses `*ptr =
+// literal` form.
+// Distinct from s97_ls_overwrite_value (37), s94_ls_overwrite_value (73), s90_ls_overwrite_value (32).
+fn main() -> i32 {
+    n1 = allocate(8);
+    *n1 = 5;
+    *n1 = 51;
+    v: u64 = *n1;          // 51
+    free(n1);
+    return v;
+}

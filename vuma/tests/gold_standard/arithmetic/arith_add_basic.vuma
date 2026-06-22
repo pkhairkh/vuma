@@ -1,0 +1,12 @@
+// arith_add_basic — simple addition: 3 + 4 = 7
+// Expected exit code: 7
+//
+// Tests the most basic integer addition operator on u32 literals stored in
+// locals. Straight-line code: no loops, no branches, no calls.
+
+fn main() -> i32 {
+    x: u32 = 3;
+    y: u32 = 4;
+    result: u32 = x + y;
+    return result;
+}

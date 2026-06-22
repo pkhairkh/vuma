@@ -1,0 +1,26 @@
+// s44_conc_overwrite_last.vuma — overwrite last to 100, sum = 175 (25 + 50 + 100)
+// Expected exit code: 175
+//
+// Three independent 8-byte cells. Store 25/50/75 via `*ptr = literal`,
+// then overwrite the last cell with 100. Load all three, sum -> 175.
+// Uses `*ptr = literal` form. Distinct from s42_conc_overwrite_middle
+// (220) and s38_conc_overwrite_first (185).
+
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    c3 = allocate(8);
+    *c1 = 25;
+    *c2 = 50;
+    *c3 = 75;
+    *c3 = 100;
+    v1: i32 = *c1;
+    v2: i32 = *c2;
+    v3: i32 = *c3;
+    t: i32 = v1 + v2;
+    s: i32 = t + v3;       // 175
+    free(c1);
+    free(c2);
+    free(c3);
+    return s;
+}

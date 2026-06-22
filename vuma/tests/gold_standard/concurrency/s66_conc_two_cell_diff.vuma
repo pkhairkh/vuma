@@ -1,0 +1,19 @@
+// s66_conc_two_cell_diff.vuma — two cells, diff = 125 (200 - 75)
+// Expected exit code: 125
+//
+// Two independent 8-byte cells. Store 200/75 via `*ptr =
+// literal`, load both, diff -> 125. Uses `*ptr = literal` form.
+// Distinct from s62_conc_two_cell_sum (230), s58_conc_two_cell_
+// diff (140) and s55_conc_two_cell_sum (245).
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    *c1 = 200;
+    *c2 = 75;
+    v1: i32 = *c1;
+    v2: i32 = *c2;
+    d: i32 = v1 - v2;      // 125
+    free(c1);
+    free(c2);
+    return d;
+}

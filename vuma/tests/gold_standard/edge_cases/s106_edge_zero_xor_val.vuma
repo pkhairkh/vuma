@@ -1,0 +1,11 @@
+// s106_edge_zero_xor_val.vuma — 0 ^ 41 = 41 (XOR with zero is identity)
+// Expected exit code: 41
+//
+// Edge case: XOR with zero is the identity. 0 ^ 41 = 41. All operands loaded into u32 variables first (immediate-RHS bitwise drop bug workaround).
+// Distinct from s102_edge_zero_or_val (18), s101_edge_zero_and_val (0), s100_edge_zero_xor_val (73).
+fn main() -> i32 {
+    a: u32 = 41;
+    z: u32 = 0;
+    r: u32 = z ^ a;        // 41
+    return r;
+}

@@ -1,0 +1,20 @@
+// s3_mf_compute_both.vuma — main calls two helpers, multiplies results
+// Expected exit code: 200  (10 * 20)
+//
+// Helper A returns 10, helper B returns 20. main calls both and
+// returns their product. Tests arithmetic on function-call results
+// with intermediate variables.
+
+fn ha() -> u32 {
+    return 10;
+}
+fn hb() -> u32 {
+    return 20;
+}
+
+fn main() -> i32 {
+    a: u32 = ha();
+    b: u32 = hb();
+    p: u32 = a * b;
+    return p;
+}

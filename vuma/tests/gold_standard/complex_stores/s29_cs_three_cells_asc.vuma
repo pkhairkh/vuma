@@ -1,0 +1,21 @@
+// s29_cs_three_cells_asc.vuma — three cells, ascending sum = 105 (25 + 35 + 45)
+// Expected exit code: 105
+//
+// Three 8-byte cells. Store 25/35/45 via `*ptr = literal`, load all three, sum -> 105. Uses `*ptr = literal` form (no offsets). Distinct from s26_cs_three_cells_dec (descending, 190) and s22_cs_three_cells_asc (ascending, different values).
+
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    c3 = allocate(8);
+    *c1 = 25;
+    *c2 = 35;
+    *c3 = 45;
+    a: u64 = *c1;
+    b: u64 = *c2;
+    c: u64 = *c3;
+    s: u64 = a + b + c;
+    free(c1);
+    free(c2);
+    free(c3);
+    return s;
+}

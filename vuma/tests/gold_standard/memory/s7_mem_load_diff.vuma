@@ -1,0 +1,22 @@
+// s7_mem_load_diff.vuma — 2 cells in 16-byte buf, diff = 80 - 15 = 65
+// Expected exit code: 65
+//
+// 16-byte buffer treated as two 8-byte slots. Store 80 in slot 0 and
+// 15 in slot 8. Load both, subtract -> 80 - 15 = 65. Tests that two
+// memory cells can be used as operands in a subtraction. Uses
+// pointer-arithmetic aliases. Distinct from s6_mem_two_buf_diff (two
+// separate buffers, sum not diff) and s5_mem_load_chain (multiplies,
+// not subtracts).
+
+fn main() -> i32 {
+    buf = allocate(16);
+    p0 = buf;
+    p8 = buf + 8;
+    *p0 = 80;
+    *p8 = 15;
+    a: u64 = *p0;
+    b: u64 = *p8;
+    d: u64 = a - b;    // 65
+    free(buf);
+    return d;
+}

@@ -1,0 +1,15 @@
+// s63_edge_max_xor_one.vuma — 255 ^ 1 = 254
+// Expected exit code: 254
+//
+// XOR the max u8 value with 1 to flip the low bit. 255 ^ 1 = 254
+// (0xFE). All operands loaded into u32 variables first
+// (immediate-RHS bitwise drop bug workaround). Distinct from s51_
+// edge_zero_and_max (0), s58_edge_zero_or_zero (0) and s55_edge_
+// zero_and_max (0).
+
+fn main() -> i32 {
+    a: u32 = 255;
+    b: u32 = 1;
+    r: u32 = a ^ b;        // 254
+    return r;
+}

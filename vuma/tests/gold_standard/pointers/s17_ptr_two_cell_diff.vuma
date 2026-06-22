@@ -1,0 +1,20 @@
+// s17_ptr_two_cell_diff.vuma — two cells, 100 - 30 = 70
+// Expected exit code: 70
+//
+// Two 8-byte cells. Store 100/30 via `*ptr = literal`, load both,
+// subtract -> 70. Uses `*ptr = literal` form (no offsets). Distinct
+// from s14_ptr_two_cell_sum (sum, 33+44=77) and s11_ptr_two_buf_xor
+// (XOR).
+
+fn main() -> i32 {
+    p1 = allocate(8);
+    p2 = allocate(8);
+    *p1 = 100;
+    *p2 = 30;
+    a: i32 = *p1;
+    b: i32 = *p2;
+    r: i32 = a - b;       // 70
+    free(p1);
+    free(p2);
+    return r;
+}

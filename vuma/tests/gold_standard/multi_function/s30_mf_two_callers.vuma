@@ -1,0 +1,20 @@
+// s30_mf_two_callers.vuma — helper(20) + helper(50) = 27 + 57 = 84
+// Expected exit code: 84
+//
+// Single helper add7(x) = x + 7 called twice from main with different
+// arguments. add7(20) -> 27; add7(50) -> 57; sum = 84. Distinct from
+// s26_mf_inc_then_double (inc-then-double, 42) and s22_mf_two_callers
+// (different values).
+
+fn add7(x: u32) -> u32 {
+    n: u32 = 7;
+    r: u32 = x + n;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = add7(20);    // 27
+    b: u32 = add7(50);    // 57
+    r: u32 = a + b;       // 84
+    return r;
+}

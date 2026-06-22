@@ -1,0 +1,25 @@
+// s73_mf_two_helpers_add.vuma — add_seven(80)=87, add_nine(50)=59; 87+59=146
+// Expected exit code: 146
+//
+// Two single-arg helpers called on different literals then summed.
+// add_seven(x) = x + 7; add_nine(x) = x + 9. main calls
+// add_seven(80) -> 87 and add_nine(50) -> 59; sum = 146. Distinct
+// from s70_mf_two_helpers_add (210), s69_mf_two_helpers_add (147)
+// and s66_mf_two_helpers_sub (185).
+fn add_seven(x: u32) -> u32 {
+    n: u32 = 7;
+    r: u32 = x + n;
+    return r;
+}
+fn add_nine(x: u32) -> u32 {
+    n: u32 = 9;
+    r: u32 = x + n;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = add_seven(80);     // 87
+    b: u32 = add_nine(50);      // 59
+    r: u32 = a + b;             // 146
+    return r;
+}

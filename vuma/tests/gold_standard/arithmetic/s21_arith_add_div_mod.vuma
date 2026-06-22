@@ -1,0 +1,18 @@
+// s21_arith_add_div_mod.vuma — (180 + 20) / 8 % 7 = 200 / 8 % 7 = 25 % 7 = 4
+// Expected exit code: 4
+//
+// Three-stage add-div-mod. (180 + 20) = 200; 200 / 8 = 25; 25 % 7 = 4.
+// All operands loaded into u32 variables first. Distinct from
+// s18_arith_div_mod_sum (div-mod-add, different order) and
+// s17_arith_add_then_mod (add-then-mod, two-stage).
+
+fn main() -> i32 {
+    a: u32 = 180;
+    b: u32 = 20;
+    d: u32 = 8;
+    m: u32 = 7;
+    s: u32 = a + b;       // 200
+    q: u32 = s / d;       // 25
+    r: u32 = q % m;       // 4
+    return r;
+}

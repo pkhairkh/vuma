@@ -1,0 +1,14 @@
+// s70_edge_max_xor_seven.vuma — 255 ^ 7 = 248
+// Expected exit code: 248
+//
+// XOR the max u8 value 255 with 7. 255 ^ 7 = 248 (0xF8). All
+// operands loaded into u32 variables first (immediate-RHS
+// bitwise drop bug workaround). Distinct from s66_edge_max_xor_
+// three (252), s65_edge_max_minus_three (252) and s55_edge_max_
+// xor_one (254).
+fn main() -> i32 {
+    a: u32 = 255;
+    b: u32 = 7;
+    r: u32 = a ^ b;        // 248
+    return r;
+}

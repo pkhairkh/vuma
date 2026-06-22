@@ -1,0 +1,16 @@
+// s48_arith_div_then_add.vuma — (224 / 7) + 8 = 32 + 8 = 40
+// Expected exit code: 40
+//
+// Two-stage u32 computation: divide then add. 224 / 7 = 32;
+// 32 + 8 = 40. All operands loaded into u32 variables first.
+// Straight-line arithmetic. Distinct from s46_arith_add_then_mul
+// (add-then-mul, 120) and s42_arith_div_then_mul.
+
+fn main() -> i32 {
+    a: u32 = 224;
+    b: u32 = 7;
+    c: u32 = 8;
+    q: u32 = a / b;       // 32
+    r: u32 = q + c;       // 40
+    return r;
+}

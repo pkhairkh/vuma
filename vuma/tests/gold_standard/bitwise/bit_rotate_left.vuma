@@ -1,0 +1,12 @@
+// bit_rotate_left.vuma — Rotate u8=1 left by 1 (8-bit rotation).
+// Expected exit code: 2
+// ((1 << 1) | (1 >> 7)) & 0xFF = 2 | 0 = 2
+fn main() -> i32 {
+    val: u64 = 1;
+    one: u64 = 1;
+    seven: u64 = 7;
+    left: u64 = val << one;
+    right: u64 = val >> seven;
+    result: u64 = left | right;
+    return result;
+}

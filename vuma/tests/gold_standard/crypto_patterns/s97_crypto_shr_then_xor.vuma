@@ -1,0 +1,16 @@
+// s97_crypto_shr_then_xor.vuma — (0xF0 >> 2) ^ 0x7F = 0x3C ^ 0x7F = 0x43 = 67
+// Expected exit code: 67
+//
+// Two-stage crypto mix: shift-right then XOR. (240 >> 2) =
+// 60 (0x3C); 60 ^ 127 = 67 (0x43). All operands loaded into
+// u32 variables first (immediate-RHS bitwise drop bug
+// workaround).
+// Distinct from s94_crypto_and_then_shr (30), s90_crypto_and_then_xor (27), s86_crypto_and_then_xor (63).
+fn main() -> i32 {
+    a: u32 = 240;          // 0xF0
+    s: u32 = 2;
+    b: u32 = 127;          // 0x7F
+    x: u32 = a >> s;       // 0x3C = 60
+    r: u32 = x ^ b;        // 0x43 = 67
+    return r;
+}

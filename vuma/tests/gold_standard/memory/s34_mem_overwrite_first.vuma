@@ -1,0 +1,16 @@
+// s34_mem_overwrite_first.vuma — overwrite first store with 210, load = 210
+// Expected exit code: 210
+//
+// Single 8-byte cell. Store 30, then overwrite with 210 via
+// `*ptr = literal`. Load and return 210. Uses `*ptr = literal`
+// form (no offsets). Distinct from s30_mem_overwrite_last (210)
+// and s27_mem_overwrite_first (different value).
+
+fn main() -> i32 {
+    p = allocate(8);
+    *p = 30;
+    *p = 210;
+    v: u64 = *p;
+    free(p);
+    return v;
+}

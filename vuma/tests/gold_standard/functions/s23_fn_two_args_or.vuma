@@ -1,0 +1,18 @@
+// s23_fn_two_args_or.vuma — or(64, 3) = 67
+// Expected exit code: 67
+//
+// Helper or(a, b) = a | b. main calls or(64, 3) -> 67 (0x40 | 0x03 =
+// 0x43). Two-arg function with bitwise OR. All operands loaded into
+// u32 params (no immediate RHS). Distinct from s22_fn_two_args_mul
+// (mul(9, 11) = 99) and s24_fn_two_args_sub (sub(90, 5) = 85).
+
+fn or(a: u32, b: u32) -> u32 {
+    r: u32 = a | b;
+    return r;
+}
+
+fn main() -> i32 {
+    v: u32 = or(64, 3);
+    return v;
+}
+

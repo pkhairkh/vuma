@@ -1,0 +1,16 @@
+// s32_ptr_single_store_load.vuma - store 165, load = 165
+// Expected exit code: 165
+//
+// store 165, load = 165. All operands loaded into typed variables before any
+// bitwise op (immediate-RHS drop workaround where applicable); stores use
+// the `*ptr = literal` (or `*ptr = variable + 0`) form with no `*(ptr +
+// offset)` indexing. Distinct from s30_ptr_single_store_load (different
+// value) and s26_ptr_single_store_load (different value).
+
+fn main() -> i32 {
+    p = allocate(8);
+    *p = 165;
+    r: i32 = *p;
+    free(p);
+    return r;
+}

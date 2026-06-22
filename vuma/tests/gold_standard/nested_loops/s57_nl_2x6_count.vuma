@@ -1,0 +1,17 @@
+// s57_nl_2x6_count.vuma — 2x6 nested loop, count = 12
+// Observed on current x86_64 backend: 0 (FAIL — known bug)
+//
+// Outer loop 2 iterations, inner loop 6 iterations each -> 2*6 = 12
+// total. Counter increments by 1 each inner iteration. Known
+// "for-body assignments don't propagate" bug keeps count at 0.
+// Distinct from s54_nl_3x4_count (12) and s50_nl_3x7_count (21).
+
+fn main() -> i32 {
+    count: u32 = 0;
+    for i in 0..2 {
+        for j in 0..6 {
+            count = count + 1;
+        }
+    }
+    return count;
+}

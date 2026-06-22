@@ -1,0 +1,15 @@
+// s4_ptr_overwrite_chain.vuma — three sequential overwrites, final = 99
+// Expected exit code: 99
+//
+// Allocate a single cell, write 11, then 22, then 99 (each clobbers
+// the previous). Load the cell — should be 99.
+
+fn main() -> i32 {
+    p = allocate(8);
+    *p = 11;
+    *p = 22;
+    *p = 99;
+    v: i32 = *p;
+    free(p);
+    return v;
+}

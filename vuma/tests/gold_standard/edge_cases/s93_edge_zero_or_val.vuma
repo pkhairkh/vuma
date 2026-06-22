@@ -1,0 +1,12 @@
+// s93_edge_zero_or_val.vuma — 0 | 30 = 30 (OR with zero is identity)
+// Expected exit code: 30
+//
+// Edge case: OR with zero is the identity. 0 | 30 = 30. All
+// operands loaded into u32 variables first (immediate-RHS bitwise
+// drop bug workaround). Distinct from s90_edge_zero_or_val (22), s82_edge_max_and_seven (7) and s78_edge_max_and (6).
+fn main() -> i32 {
+    a: u32 = 0;
+    b: u32 = 30;           // 0x1E
+    r: u32 = a | b;        // 0x1E = 30
+    return r;
+}

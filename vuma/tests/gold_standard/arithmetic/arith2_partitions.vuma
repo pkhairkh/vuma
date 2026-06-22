@@ -1,0 +1,19 @@
+// arith2_partitions — integer partition count p(4)
+// Expected exit code: 5
+//
+// p(4) = 5; the 5 partitions are:
+//   {4}, {3,1}, {2,2}, {2,1,1}, {1,1,1,1}
+// Computed via the recurrence p(n,k) = p(n-1,k-1) + p(n-k,k) summed
+// over k = 1..n.  For n = 4:
+//   p(4,1) = 1,  p(4,2) = 2,  p(4,3) = 1,  p(4,4) = 1   →   total = 5
+// Straight-line code only.
+
+fn main() -> i32 {
+    n: u32 = 4;
+    p1: u32 = 1;   // p(4,1)
+    p2: u32 = 2;   // p(4,2)
+    p3: u32 = 1;   // p(4,3)
+    p4: u32 = 1;   // p(4,4)
+    total: u32 = p1 + p2 + p3 + p4;   // 5
+    return total;
+}

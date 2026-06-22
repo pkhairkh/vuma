@@ -1,0 +1,16 @@
+// s70_crypto_xor_then_and.vuma — (0xAA ^ 0x55) & 0x63 = 0xFF & 0x63 = 0x63 = 99
+// Expected exit code: 99
+//
+// Two-stage crypto op: XOR then AND. (170 ^ 85) = 255 (0xFF);
+// 255 & 99 = 99 (0x63). All operands loaded into u64 variables
+// first (immediate-RHS bitwise drop bug workaround). Distinct
+// from s66_crypto_or_mask (253), s65_crypto_shl_mask (144) and
+// s62_crypto_or_then_and (170).
+fn main() -> i32 {
+    a: u64 = 170;          // 0xAA
+    b: u64 = 85;           // 0x55
+    m: u64 = 99;           // 0x63
+    x: u64 = a ^ b;        // 0xFF = 255
+    r: u64 = x & m;        // 0x63 = 99
+    return r;
+}

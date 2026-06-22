@@ -1,0 +1,28 @@
+// struct_two_instances.vuma — two Point instances, modify one, return other
+// Expected exit code: 42
+//
+// Allocates two Point structs p1 and p2. Both initially get x=42, y=200.
+// main then modifies p1.x to 88. Loading p2.x returns the original
+// value (42), proving that the two instances occupy independent memory
+// and writes to one do not affect the other.
+
+struct Point {
+    x: u64,
+    y: u64,
+}
+
+fn main() -> i32 {
+    p1 = allocate(16);
+    p2 = allocate(16);
+    *(p1 + 0) = 42;
+    *(p1 + 8) = 200;
+    *(p2 + 0) = 42;
+    *(p2 + 8) = 200;
+    // Modify p1 only
+    *(p1 + 0) = 88;
+    // p2.x must be unchanged
+    val: u64 = *(p2 + 0);
+    free(p1);
+    free(p2);
+    return val;
+}

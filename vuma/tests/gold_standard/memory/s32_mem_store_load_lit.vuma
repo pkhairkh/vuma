@@ -1,0 +1,16 @@
+// s32_mem_store_load_lit.vuma - store 145, load = 145
+// Expected exit code: 145
+//
+// store 145, load = 145. All operands loaded into typed variables before any
+// bitwise op (immediate-RHS drop workaround where applicable); stores use
+// the `*ptr = literal` (or `*ptr = variable + 0`) form with no `*(ptr +
+// offset)` indexing. Distinct from s30_mem_store_load_lit (value 175) and
+// s26_mem_store_load_lit (different value).
+
+fn main() -> i32 {
+    p = allocate(8);
+    *p = 145;
+    r: i32 = *p;
+    free(p);
+    return r;
+}

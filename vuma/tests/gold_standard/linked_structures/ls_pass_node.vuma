@@ -1,0 +1,21 @@
+// ls_pass_node.vuma — main creates node, function loads and returns
+// Expected exit code: 42
+//
+// main allocates a node and stores 42 at offset 0, then passes the
+// node's Address to a function. The function loads the value and
+// returns it. main then frees the node and returns the function's
+// result. Verifies that an Address-typed parameter can be deref'd
+// inside a callee to observe a value the caller stored.
+
+fn load_val(p: Address) -> u32 {
+    v: u64 = *(p + 0);
+    return v;
+}
+
+fn main() -> i32 {
+    node = allocate(16);
+    *(node + 0) = 42;
+    v: u32 = load_val(node);
+    free(node);
+    return v;
+}

@@ -1,0 +1,14 @@
+// s30_crypto_xor_pair.vuma — 0xC3 ^ 0x3C = 0xFF = 255
+// Expected exit code: 255
+//
+// Two-byte XOR. 195 ^ 60 = 255 (0xFF). Complementary nibbles XOR to all
+// ones. All operands loaded into u64 variables first (immediate-RHS
+// bitwise drop bug workaround). Distinct from s26_crypto_xor_pair
+// (0xA5 ^ 0x5A = 0xFF) and s22_crypto_xor_three (three-byte xor).
+
+fn main() -> i32 {
+    a: u64 = 195;         // 0xC3
+    b: u64 = 60;          // 0x3C
+    r: u64 = a ^ b;       // 0xFF = 255
+    return r;
+}

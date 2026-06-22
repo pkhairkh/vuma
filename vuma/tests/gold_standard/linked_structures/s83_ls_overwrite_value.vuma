@@ -1,0 +1,16 @@
+// s83_ls_overwrite_value.vuma — store 5, overwrite with 197, load = 197
+// Expected exit code: 197
+//
+// Single 8-byte allocation treated as a "node". Store 5 via
+// `*ptr = literal`, overwrite with 197 via `*ptr = literal`,
+// load and return 197. Uses `*ptr = literal` form (no offsets).
+// Distinct from s78_ls_overwrite_value (3), s74_ls_overwrite_
+// value (85) and s72_ls_overwrite_value (115).
+fn main() -> i32 {
+    n1 = allocate(8);
+    *n1 = 5;
+    *n1 = 197;
+    r: u64 = *n1;          // 197
+    free(n1);
+    return r;
+}

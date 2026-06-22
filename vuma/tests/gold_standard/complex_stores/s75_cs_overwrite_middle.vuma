@@ -1,0 +1,21 @@
+// s75_cs_overwrite_middle.vuma — overwrite c2 to 167, load = 167
+// Expected exit code: 167
+//
+// Three independent 8-byte cells. Store 50/100/80 then overwrite
+// c2 to 167. Load c2 -> 167 (the overwritten value). Uses `*ptr
+// = literal` form. Distinct from s74_cs_overwrite_last (191),
+// s70_cs_overwrite_last (230) and s66_cs_overwrite_last (175).
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    c3 = allocate(8);
+    *c1 = 50;
+    *c2 = 100;
+    *c3 = 80;
+    *c2 = 167;
+    v: i32 = *c2;          // 167
+    free(c1);
+    free(c2);
+    free(c3);
+    return v;
+}

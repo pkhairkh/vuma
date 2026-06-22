@@ -1,0 +1,19 @@
+// mf_three_funcs.vuma — main → f1 → f2, f2 returns 42
+// Expected exit code: 42
+//
+// Tests a three-function call chain: main calls f1, f1 calls f2, f2
+// returns 42 and the value propagates back up through f1 to main.
+
+fn f2() -> u32 {
+    return 42;
+}
+
+fn f1() -> u32 {
+    v: u32 = f2();
+    return v;
+}
+
+fn main() -> i32 {
+    v: u32 = f1();
+    return v;
+}

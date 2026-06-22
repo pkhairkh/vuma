@@ -1,0 +1,17 @@
+// s59_crypto_shl_mask.vuma — (1 << 6) & 0xFF = 64
+// Expected exit code: 64
+//
+// Shift a single bit into position 6, then mask to the low byte.
+// (1 << 6) = 64 (0x40); 64 & 255 = 64. All operands loaded into u64
+// variables first (immediate-RHS bitwise drop bug workaround).
+// Distinct from s58_crypto_xor_pair (255), s58_crypto_shr_extract
+// (12) and s58_crypto_or_then_xor (127).
+
+fn main() -> i32 {
+    a: u64 = 1;
+    b: u64 = 6;
+    m: u64 = 255;          // 0xFF
+    x: u64 = a << b;       // 0x40 = 64
+    r: u64 = x & m;        // 0x40 = 64
+    return r;
+}

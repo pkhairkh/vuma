@@ -1,0 +1,17 @@
+// s33_arith_mul_add_div.vuma — (12 * 15 + 10) / 2 = 190 / 2 = 95
+// Expected exit code: 95
+//
+// Deterministic test in the arithmetic category. All operands loaded into typed
+// variables before any bitwise op; all stores use `*ptr = literal` (or the
+// `*ptr = variable + 0` workaround). Result lands in 0-255.
+// Distinct from s30_arith_mul_then_add (mul-then-add) and s26_arith_add_div_mod (add-div-mod).
+fn main() -> i32 {
+    a: u32 = 12;
+    b: u32 = 15;
+    c: u32 = 10;
+    d: u32 = 2;
+    p: u32 = a * b;          // 180
+    s: u32 = p + c;          // 190
+    r: u32 = s / d;          // 95
+    return r;
+}

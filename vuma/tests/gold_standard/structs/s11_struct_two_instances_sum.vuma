@@ -1,0 +1,33 @@
+// s11_struct_two_instances_sum.vuma — two 16-byte structs, sum = 50
+// Expected exit code (correct): 50  (5 + 10 + 15 + 20)
+// Observed on current x86_64 backend: non-deterministic (FAIL — known
+//   U8-truncation bug on `*(p+offset)` stores/loads with u64 type)
+//
+// Two 16-byte struct allocations (two u64 fields each). Store 5/10 in
+// first, 15/20 in second. Load all four fields, sum -> 5 + 10 + 15 + 20
+// = 50. Distinct from s10_struct_two_field_swap (single struct, swap)
+// and s8_struct_two_instances (different vals, no sum).
+
+struct Pair {
+    a: u64,
+    b: u64,
+}
+
+fn main() -> i32 {
+    p = allocate(16);
+    q = allocate(16);
+    *(p + 0) = 5;
+    *(p + 8) = 10;
+    *(q + 0) = 15;
+    *(q + 8) = 20;
+    a0: u64 = *(p + 0);
+    a1: u64 = *(p + 8);
+    b0: u64 = *(q + 0);
+    b1: u64 = *(q + 8);
+    t1: u64 = a0 + a1;
+    t2: u64 = t1 + b0;
+    s: u64 = t2 + b1;
+    free(p);
+    free(q);
+    return s;
+}

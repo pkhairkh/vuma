@@ -1,0 +1,17 @@
+// s4_arith_double_add.vuma — (10 + 20) + (30 + 40) = 100
+// Expected exit code: 100
+//
+// Two independent additions whose results are added together. Tests
+// that the codegen correctly handles subexpression results stored in
+// distinct locals. All values well within U8 range.
+
+fn main() -> i32 {
+    a: u32 = 10;
+    b: u32 = 20;
+    c: u32 = 30;
+    d: u32 = 40;
+    left: u32 = a + b;
+    right: u32 = c + d;
+    total: u32 = left + right;
+    return total;
+}

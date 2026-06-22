@@ -1,0 +1,16 @@
+// s28_u32_and_then_shl.vuma — (0xCC & 0x0F) << 3 = 0x0C << 3 = 0x60 = 96
+// Expected exit code: 96
+//
+// AND then SHL. (204 & 15) = 12 (0x0C); 12 << 3 = 96 (0x60). All
+// operands loaded into u32 variables first (immediate-RHS bitwise drop
+// bug workaround). Distinct from s26_u32_add_then_and (add-then-and)
+// and s22_u32_and_then_xor (and-then-xor).
+
+fn main() -> i32 {
+    a: u32 = 204;         // 0xCC
+    b: u32 = 15;          // 0x0F
+    c: u32 = 3;
+    x: u32 = a & b;       // 0x0C = 12
+    r: u32 = x << c;      // 0x60 = 96
+    return r;
+}

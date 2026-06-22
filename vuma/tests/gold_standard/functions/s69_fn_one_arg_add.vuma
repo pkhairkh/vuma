@@ -1,0 +1,16 @@
+// s69_fn_one_arg_add.vuma -- add_45(80) = 125
+// Expected exit code: 125
+//
+// Helper add_45(x) = x + 45. main calls add_45(80) -> 125. Single-arg
+// function that adds a literal. Distinct from s66_fn_one_arg_sub (80),
+// s65_fn_one_arg_add (140) and s64_fn_one_arg_mul (150).
+fn add_45(x: u32) -> u32 {
+    n: u32 = 45;
+    r: u32 = x + n;
+    return r;
+}
+
+fn main() -> i32 {
+    v: u32 = add_45(80);
+    return v;
+}

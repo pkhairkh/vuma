@@ -1,0 +1,27 @@
+// s8_struct_overwrite_middle.vuma — overwrite middle field, sum = 119
+// Expected exit code: 119  (5 + 99 + 15)
+//
+// 24-byte struct (three u64 fields). Store 5/10/15 at offsets 0/8/16,
+// then overwrite offset 8 with 99. Load all three, sum, return
+// 5 + 99 + 15 = 119. Distinct from s6_struct_overwrite_two_fields
+// (overwrites two fields).
+
+struct Triple {
+    a: u64,
+    b: u64,
+    c: u64,
+}
+
+fn main() -> i32 {
+    p = allocate(24);
+    *(p + 0) = 5;
+    *(p + 8) = 10;
+    *(p + 16) = 15;
+    *(p + 8) = 99;
+    a: u64 = *(p + 0);
+    b: u64 = *(p + 8);
+    c: u64 = *(p + 16);
+    s: u64 = a + b + c;
+    free(p);
+    return s;
+}

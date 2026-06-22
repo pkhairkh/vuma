@@ -1,0 +1,16 @@
+// s5_crypto_xor_two_bytes.vuma — (0x33 ^ 0x0F) << 1 = 60 << 1 = 120
+// Expected exit code: 120
+//
+// a = 0x33 (51), b = 0x0F (15). a ^ b = 0x3C (60). Shift left by
+// 1 -> 120. All operands loaded into variables to dodge the
+// immediate-RHS bitwise drop bug. Distinct from s4_crypto_byte_mix
+// (different operands + result).
+
+fn main() -> i32 {
+    a: u64 = 51;     // 0x33
+    b: u64 = 15;     // 0x0F
+    one: u64 = 1;
+    x: u64 = a ^ b;        // 0x3C = 60
+    y: u64 = x << one;     // 120
+    return y;
+}

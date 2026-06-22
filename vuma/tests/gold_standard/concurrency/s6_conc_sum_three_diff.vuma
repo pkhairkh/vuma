@@ -1,0 +1,23 @@
+// s6_conc_sum_three_diff.vuma — three cells, sum loads = 120 (15 + 45 + 60)
+// Expected exit code: 120
+//
+// Three independent 8-byte cells with distinct literal values (15/45/60).
+// All three loaded back and summed. Distinct from s5_conc_three_cells
+// (different values 10/20/30).
+
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    c3 = allocate(8);
+    *c1 = 15;
+    *c2 = 45;
+    *c3 = 60;
+    v1: i32 = *c1;
+    v2: i32 = *c2;
+    v3: i32 = *c3;
+    s: i32 = v1 + v2 + v3;
+    free(c1);
+    free(c2);
+    free(c3);
+    return s;
+}

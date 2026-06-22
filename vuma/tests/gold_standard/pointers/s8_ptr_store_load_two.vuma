@@ -1,0 +1,19 @@
+// s8_ptr_store_load_two.vuma — two cells, sum loads = 54 (18 + 36)
+// Expected exit code: 54
+//
+// Two 8-byte cells. Store 18 in the first, 36 in the second. Load
+// both, sum, return 54. Distinct from s4_ptr_two_buf_roundtrip
+// (different values 11/22).
+
+fn main() -> i32 {
+    p = allocate(8);
+    q = allocate(8);
+    *p = 18;
+    *q = 36;
+    v1: i32 = *p;
+    v2: i32 = *q;
+    s: i32 = v1 + v2;
+    free(p);
+    free(q);
+    return s;
+}

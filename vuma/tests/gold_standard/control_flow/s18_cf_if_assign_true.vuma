@@ -1,0 +1,16 @@
+// s18_cf_if_assign_true.vuma — if-true sets x=64, return = 64
+// Observed on current x86_64 backend: 0 (FAIL — known bug)
+//
+// Standalone if-true body sets x = 64. With a literal `true`
+// condition x should become 64. On the current backend the if-true
+// body assignment is dropped, so x keeps its init value 0. Distinct
+// from s11_cf_if_chain_2 (if-true x=15) and s4_cf_if_assign_simple
+// (if-true x=10, else x=20).
+
+fn main() -> i32 {
+    x: u32 = 0;
+    if true {
+        x = 64;
+    }
+    return x;
+}

@@ -1,0 +1,15 @@
+// arith2_discrete_log — discrete logarithm verification
+// Expected exit code: 3
+//
+// The discrete log of 3 base 2 modulo 5 is 3, since 2^3 = 8 ≡ 3 (mod 5).
+// This test verifies by computing 2^3 mod 5 step-by-step (straight-line,
+// no loop). The result equals 3.
+
+fn main() -> i32 {
+    base: u32 = 2;
+    modulus: u32 = 5;
+    // Compute 2^3 mod 5 = 8 mod 5 = 3
+    p1: u32 = (base * base) % modulus;   // 4
+    p2: u32 = (p1 * base) % modulus;     // 8 % 5 = 3
+    return p2;
+}

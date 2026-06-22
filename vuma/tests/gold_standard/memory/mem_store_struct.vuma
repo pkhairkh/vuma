@@ -1,0 +1,23 @@
+// mem_store_struct.vuma — store a struct (multiple fields)
+// Expected exit code: 0
+//
+// Stores a simple 3-field "struct" (3 bytes) into a buffer and verifies
+// each field round-trips correctly.
+
+fn main() -> i32 {
+    buf = allocate(8);
+    // Store "struct" {a=11, b=22, c=33}
+    *(buf + 0) = 11;
+    *(buf + 1) = 22;
+    *(buf + 2) = 33;
+    a: u32 = *(buf + 0);
+    b: u32 = *(buf + 1);
+    c: u32 = *(buf + 2);
+    free(buf);
+    if a == 11 {
+        if b == 22 {
+            if c == 33 { return 0; }
+        }
+    }
+    return 1;
+}

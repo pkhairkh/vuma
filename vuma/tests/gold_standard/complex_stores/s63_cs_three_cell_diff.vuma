@@ -1,0 +1,25 @@
+// s63_cs_three_cell_diff.vuma — three cells, diff = 120 (200 - 60 - 20)
+// Expected exit code: 120
+//
+// Three 8-byte cells. Store 200/60/20 via `*ptr = literal`, load
+// all three, 200 - 60 - 20 = 120. Uses `*ptr = literal` form (no
+// offsets). Distinct from s51_cs_overwrite_middle (220), s58_cs_
+// overwrite_first (200) and s55_cs_two_cell_diff (100).
+
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    c3 = allocate(8);
+    *c1 = 200;
+    *c2 = 60;
+    *c3 = 20;
+    a: u64 = *c1;
+    b: u64 = *c2;
+    c: u64 = *c3;
+    t: u64 = a - b;
+    d: u64 = t - c;        // 120
+    free(c1);
+    free(c2);
+    free(c3);
+    return d;
+}

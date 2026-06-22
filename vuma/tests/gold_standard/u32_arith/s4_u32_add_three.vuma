@@ -1,0 +1,14 @@
+// s4_u32_add_three.vuma — 100 + 50 + 25 = 175
+// Expected exit code: 175
+//
+// Three-way u32 addition chain. All values within U8 range so the
+// known *(buf+offset) U8-truncation bug doesn't apply (no memory).
+
+fn main() -> i32 {
+    a: u32 = 100;
+    b: u32 = 50;
+    c: u32 = 25;
+    t1: u32 = a + b;
+    total: u32 = t1 + c;
+    return total;
+}

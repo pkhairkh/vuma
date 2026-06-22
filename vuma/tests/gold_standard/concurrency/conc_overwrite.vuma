@@ -1,0 +1,17 @@
+// conc_overwrite.vuma — store 42 then 99 into the same cell, load
+// Expected exit code: 99
+//
+// Mirrors the canonical "atomic store overwrites previous value"
+// semantics: the most recent store wins. Single-threaded, but the
+// expected behavior under any memory ordering (Relaxed, Release,
+// SeqCst) is the same. Uses non-atomic `*ptr` per the bridge-gap
+// workaround documented in conc_atomic_basic.vuma.
+
+fn main() -> i32 {
+    cell = allocate(8);
+    *cell = 42;
+    *cell = 99;
+    val: i32 = *cell;
+    free(cell);
+    return val;
+}

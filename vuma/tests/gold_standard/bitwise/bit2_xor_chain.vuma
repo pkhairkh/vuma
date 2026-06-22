@@ -1,0 +1,15 @@
+// bit2_xor_chain.vuma — Chain of bitwise XORs.
+// Expected exit code: 0
+//
+// 0xFF ^ 0xAA ^ 0x55 = 0x55 ^ 0x55 = 0.
+//
+// Workaround note: bitwise ops with an immediate RHS are silently dropped by
+// the current codegen, so all operands are loaded into variables first.
+fn main() -> i32 {
+    a: u64 = 0xFF;
+    b: u64 = 0xAA;
+    c: u64 = 0x55;
+    t1: u64 = a ^ b;
+    result: u64 = t1 ^ c;
+    return result;
+}

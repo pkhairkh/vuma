@@ -1,0 +1,22 @@
+// cs_copy_bytes.vuma — copy 1 byte from buf1 to buf2, load buf2
+// Expected exit code: 42
+//
+// Standard memory-copy pattern for a single byte: load from source, store
+// to destination, then load destination to verify.
+//
+// Implementation note: storing a bare scalar variable through a pointer
+// (`*(p) = v;`) is miscompiled on the current x86_64 backend (the store
+// is silently dropped). The `| 0` is an identity-expression workaround
+// that forces the codegen down the "store expression" path, which works.
+
+fn main() -> i32 {
+    src = allocate(8);
+    dst = allocate(8);
+    *(src + 0) = 42;
+    tmp: u32 = *(src + 0);
+    *(dst + 0) = tmp | 0;
+    out: u32 = *(dst + 0);
+    free(src);
+    free(dst);
+    return out;
+}

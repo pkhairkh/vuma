@@ -1,0 +1,20 @@
+// conc_clear.vuma — store 42 then 0, load
+// Expected exit code: 0
+//
+// The "clear cell" pattern: store a non-zero value, then store zero,
+// then load. Verifies that the second store overwrites the first and
+// that zero is observable through the load. This is the foundation of
+// every "signal shutdown" pattern where a writer stores 0 to tell the
+// reader to exit.
+//
+// Uses non-atomic `*ptr` per the bridge-gap workaround documented in
+// conc_atomic_basic.vuma.
+
+fn main() -> i32 {
+    cell = allocate(8);
+    *cell = 42;
+    *cell = 0;
+    val: i32 = *cell;
+    free(cell);
+    return val;
+}

@@ -1,0 +1,24 @@
+// s42_cs_three_cell_xor.vuma — three cells, xor = 195 (0xA5 ^ 0x3C ^ 0x5A)
+// Expected exit code: 195
+//
+// Three 8-byte cells. Store 165/60/90 via `*ptr = literal`, load all,
+// xor -> 195 (0xC3). Uses `*ptr = literal` form (no offsets). Distinct
+// from s38_cs_three_cell_sum (220) and s34_cs_three_cell_sum (180).
+
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    c3 = allocate(8);
+    *c1 = 165;             // 0xA5
+    *c2 = 60;              // 0x3C
+    *c3 = 90;              // 0x5A
+    a: u64 = *c1;
+    b: u64 = *c2;
+    c: u64 = *c3;
+    t: u64 = a ^ b;
+    r: u64 = t ^ c;        // 0xC3 = 195
+    free(c1);
+    free(c2);
+    free(c3);
+    return r;
+}

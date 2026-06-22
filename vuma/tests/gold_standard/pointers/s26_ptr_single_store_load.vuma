@@ -1,0 +1,15 @@
+// s26_ptr_single_store_load.vuma — store 123, load = 123
+// Expected exit code: 123
+//
+// Single 8-byte cell. Store the literal 123 via `*ptr = literal`, load
+// it back, return. Uses `*ptr = literal` form (no offsets). Distinct
+// from s22_ptr_single_store_load (different value) and
+// s18_ptr_single_store_load (different value).
+
+fn main() -> i32 {
+    p = allocate(8);
+    *p = 123;
+    r: i32 = *p;
+    free(p);
+    return r;
+}

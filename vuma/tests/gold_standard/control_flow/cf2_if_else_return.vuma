@@ -1,0 +1,14 @@
+// cf2_if_else_return — early return inside both branches of an if/else.
+// Expected exit code: 1
+//
+// Exposes VUMA bug: return inside an if/else body may not actually return;
+// on buggy codegen, control falls through past the if/else and exit is 0
+// (the implicit return).
+
+fn main() -> i32 {
+    if true {
+        return 1;
+    } else {
+        return 2;
+    }
+}

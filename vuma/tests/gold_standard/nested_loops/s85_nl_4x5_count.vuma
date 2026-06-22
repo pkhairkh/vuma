@@ -1,0 +1,17 @@
+// s85_nl_4x5_count.vuma — 4x5 nested loop, count = 20
+// Observed on current x86_64 backend: 0 (FAIL — known bug)
+//
+// Outer loop 4 iterations, inner loop 5 iterations each ->
+// 4*5 = 20 total. Counter increments by 1 each inner
+// iteration. Known "for-body assignments don't propagate" bug
+// keeps count at 0. Distinct from s82_nl_3x16_count (48),
+// s78_nl_4x9_count (36) and s74_nl_3x7_count (21).
+fn main() -> i32 {
+    count: u32 = 0;
+    for i in 0..4 {
+        for j in 0..5 {
+            count = count + 1;
+        }
+    }
+    return count;
+}

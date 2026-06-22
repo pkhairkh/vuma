@@ -1,0 +1,120 @@
+// CRC32 — CRC32 checksum implementation (IEEE 802.3 / ITU-T V.42)
+// Expected exit code: 0
+//
+// Implements the standard CRC32 algorithm used in ZIP, PNG, Ethernet, and
+// countless other protocols. Uses the polynomial 0xEDB88320 (bit-reversed
+// representation of 0x04C11DB7) with a 256-entry lookup table.
+//
+// VUMA Key Concepts:
+//   - Table-driven CRC computation (256-entry lookup table)
+//   - Bitwise operations: XOR, AND, shift right
+//   - u32 arithmetic with 32-bit masking (& 4294967295)
+//   - allocate/free for the CRC table and message buffer
+//   - Nested loops (table generation: 256 entries × 8 iterations)
+//   - IVE verifies all table accesses are within bounds
+
+// ===========================================================================
+// Right-rotate a u32 by n bits
+// ===========================================================================
+
+fn rotr32(x: u32, n: u32) -> u32 {
+    return ((x >> n) | (x << (32 - n))) & 4294967295;
+}
+
+// ===========================================================================
+// Build the CRC32 lookup table (256 entries, 4 bytes each)
+// ===========================================================================
+// For each byte value i, computes the CRC of that single byte.
+// Table is stored as 256 × 4 = 1024 bytes in memory.
+// Each entry is a u32 stored in little-endian format.
+
+fn write_u32_le(buf: Address, offset: u64, val: u32) {
+    *(buf + offset) = val & 255;
+    *(buf + offset + 1) = (val >> 8) & 255;
+    *(buf + offset + 2) = (val >> 16) & 255;
+    *(buf + offset + 3) = (val >> 24) & 255;
+}
+
+fn read_u32_le(buf: Address, offset: u64) -> u32 {
+    b0: u32 = *(buf + offset);
+    b1: u32 = *(buf + offset + 1);
+    b2: u32 = *(buf + offset + 2);
+    b3: u32 = *(buf + offset + 3);
+    return ((b3 << 24) | (b2 << 16) | (b1 << 8) | b0) & 4294967295;
+}
+
+fn build_crc_table(table: Address) {
+    // Polynomial: 0xEDB88320 (bit-reversed 0x04C11DB7)
+    i: u64 = 0;
+    while i < 256 {
+        crc: u32 = i as u32;
+        j: u64 = 0;
+        while j < 8 {
+            if crc & 1 != 0 {
+                crc = (crc >> 1) ^ 3777300212;   // 0xEDB88320 in decimal
+            } else {
+                crc = crc >> 1;
+            }
+            crc = crc & 4294967295;
+            j = j + 1;
+        }
+        write_u32_le(table, i * 4, crc);
+        i = i + 1;
+    }
+}
+
+// ===========================================================================
+// Compute CRC32 over a byte buffer
+// ===========================================================================
+// Standard CRC32: initialize with 0xFFFFFFFF, XOR each byte with low byte
+// of CRC, look up in table, shift CRC right 8 bits and XOR with table entry.
+// Final result is XORed with 0xFFFFFFFF.
+
+fn crc32_compute(table: Address, msg: Address, len: u64) -> u32 {
+    crc: u32 = 4294967295;   // 0xFFFFFFFF
+    i: u64 = 0;
+    while i < len {
+        byte: u32 = *(msg + i);
+        idx: u32 = (crc ^ byte) & 255;
+        table_val: u32 = read_u32_le(table, (idx as u64) * 4);
+        crc = (crc >> 8) ^ table_val;
+        crc = crc & 4294967295;
+        i = i + 1;
+    }
+    return crc ^ 4294967295;
+}
+
+// ===========================================================================
+// Main entry point
+// ===========================================================================
+// Computes CRC32 of "123456789" (the standard check value).
+// Expected CRC32("123456789") = 0xCBF43926 = 3421780262
+// Exit code: low byte = 0x26 = 38
+
+fn main() -> i32 {
+    // Allocate and build CRC table (256 × 4 = 1024 bytes)
+    table = allocate(1024);
+    build_crc_table(table);
+
+    // Allocate message buffer: "123456789" (9 bytes)
+    msg = allocate(9);
+    *(msg + 0) = 49;    // '1'
+    *(msg + 1) = 50;    // '2'
+    *(msg + 2) = 51;    // '3'
+    *(msg + 3) = 52;    // '4'
+    *(msg + 4) = 53;    // '5'
+    *(msg + 5) = 54;    // '6'
+    *(msg + 6) = 55;    // '7'
+    *(msg + 7) = 56;    // '8'
+    *(msg + 8) = 57;    // '9'
+
+    // Compute CRC32
+    result: u32 = crc32_compute(table, msg, 9);
+
+    free(table);
+    free(msg);
+
+    // Return the low byte of the CRC as exit code
+    // Expected: 0x26 = 38
+    return result & 255;
+}

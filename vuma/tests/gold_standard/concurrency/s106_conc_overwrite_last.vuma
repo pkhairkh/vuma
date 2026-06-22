@@ -1,0 +1,19 @@
+// s106_conc_overwrite_last.vuma — overwrite c3 to 64, load = 64
+// Expected exit code: 64
+//
+// Three independent 8-byte cells. Store 100 at c1, store 200 at c2, store 50 at c3, then overwrite c3 to 64. Load c3 -> 64 (the overwritten value). Uses `*ptr = literal` form. Straight-line code only.
+// Distinct from s102_conc_overwrite_middle (1), s101_conc_overwrite_first (27), s100_conc_overwrite_first (47).
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    c3 = allocate(8);
+    *c1 = 100;
+    *c2 = 200;
+    *c3 = 50;
+    *c3 = 64;
+    v: i32 = *c3;          // 64
+    free(c1);
+    free(c2);
+    free(c3);
+    return v;
+}

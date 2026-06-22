@@ -1,0 +1,17 @@
+// fn2_chained.vuma — add(add(3,4),3) = 10 with intermediate variables
+// Expected exit code: 10
+//
+// Tests chaining function calls with intermediate variables: compute
+// add(3, 4) into a local, then call add again with that local and 3.
+// Uses an intermediate variable because VUMA miscompiles nested call
+// expressions used directly as arguments.
+
+fn add(a: u32, b: u32) -> u32 {
+    return a + b;
+}
+
+fn main() -> i32 {
+    inner: u32 = add(3, 4);
+    v: u32 = add(inner, 3);
+    return v;
+}

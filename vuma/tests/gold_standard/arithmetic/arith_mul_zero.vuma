@@ -1,0 +1,9 @@
+// arith_mul_zero — multiplication by zero: x * 0 = 0
+// Expected exit code: 0
+
+fn main() -> i32 {
+    x: u32 = 12345;
+    zero: u32 = 0;
+    result: u32 = x * zero;
+    return result;
+}

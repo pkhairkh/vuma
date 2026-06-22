@@ -1,0 +1,21 @@
+// s74_conc_overwrite_first.vuma — overwrite c1 to 222, load = 222
+// Expected exit code: 222
+//
+// Three independent 8-byte cells. Store 50/100/80 then overwrite
+// c1 to 222. Load c1 -> 222 (the overwritten value). Uses `*ptr
+// = literal` form. Distinct from s70_conc_overwrite_first (215),
+// s66_conc_overwrite_middle (190) and s62_conc_overwrite_first (150).
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    c3 = allocate(8);
+    *c1 = 50;
+    *c2 = 100;
+    *c3 = 80;
+    *c1 = 222;
+    v: i32 = *c1;          // 222
+    free(c1);
+    free(c2);
+    free(c3);
+    return v;
+}

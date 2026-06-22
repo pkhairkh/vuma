@@ -1,0 +1,21 @@
+// s104_struct_two_instances_sum.vuma — store 30 in s1, 68 in s2, sum = 98
+// Expected exit code: 98
+//
+// Two 8-byte struct instances. Store 30 in s1, store 68 in s2, load each, return the sum (98). Uses `*p = literal` form. Straight-line code only.
+// Distinct from s102_struct_field_load (5), s102_struct_overwrite_field (6), s102_struct_two_instances_sum (7).
+struct Single {
+    a: u64,
+}
+
+fn main() -> i32 {
+    s1 = allocate(8);
+    s2 = allocate(8);
+    *s1 = 30;
+    *s2 = 68;
+    a: u64 = *s1;          // 30
+    b: u64 = *s2;          // 68
+    s: u64 = a + b;        // 98
+    free(s1);
+    free(s2);
+    return s;
+}

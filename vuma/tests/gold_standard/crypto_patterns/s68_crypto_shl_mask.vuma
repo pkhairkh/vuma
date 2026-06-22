@@ -1,0 +1,16 @@
+// s68_crypto_shl_mask.vuma — (5 << 3) & 0x78 = 40 & 120 = 40
+// Expected exit code: 40
+//
+// Shift-left then mask. 5 << 3 = 40 (0x28); 40 & 0x78 = 40
+// (0x28). All operands loaded into u64 variables first
+// (immediate-RHS bitwise drop bug workaround). Distinct from
+// s66_crypto_shr_extract (10), s62_crypto_or_then_and (170) and
+// s58_crypto_shr_extract (11).
+fn main() -> i32 {
+    a: u64 = 5;
+    b: u64 = 3;
+    c: u64 = 120;          // 0x78
+    x: u64 = a << b;       // 0x28 = 40
+    r: u64 = x & c;        // 0x28 = 40
+    return r;
+}

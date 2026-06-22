@@ -1,0 +1,26 @@
+// s48_conc_overwrite_first.vuma — overwrite first to 100, sum = 230 (100 + 50 + 80)
+// Expected exit code: 230
+//
+// Three independent 8-byte cells. Store 20/50/80 via `*ptr =
+// literal`, then overwrite the first cell with 100. Load all
+// three, sum -> 230. Uses `*ptr = literal` form. Distinct from
+// s46_conc_overwrite_last (180) and s42_conc_overwrite_middle.
+
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    c3 = allocate(8);
+    *c1 = 20;
+    *c2 = 50;
+    *c3 = 80;
+    *c1 = 100;
+    v1: i32 = *c1;
+    v2: i32 = *c2;
+    v3: i32 = *c3;
+    t: i32 = v1 + v2;
+    s: i32 = t + v3;       // 230
+    free(c1);
+    free(c2);
+    free(c3);
+    return s;
+}

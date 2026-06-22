@@ -1,0 +1,19 @@
+// s91_conc_two_cell_diff.vuma — two cells, diff = 3 (250 - 247)
+// Expected exit code: 3
+//
+// Two independent 8-byte cells. Store 250/247 via `*ptr = literal`,
+// load both, a - b -> 3. Uses `*ptr = literal` form. Distinct from
+// s90_conc_two_cell_diff (5), s86_conc_two_cell_sum (210) and
+// s82_conc_two_cell_sum (190).
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    *c1 = 250;
+    *c2 = 247;
+    v1: i32 = *c1;
+    v2: i32 = *c2;
+    d: i32 = v1 - v2;      // 3
+    free(c1);
+    free(c2);
+    return d;
+}

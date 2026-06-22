@@ -1,0 +1,17 @@
+// s64_crypto_and_then_or.vuma — (0xCC & 0x0F) | 0x10 = 0x0C | 0x10 = 0x1C = 28
+// Expected exit code: 28
+//
+// Two-stage bitwise: AND then OR. (204 & 15) = 12 (0x0C);
+// 12 | 16 = 28 (0x1C). All operands loaded into u64 variables first
+// (immediate-RHS bitwise drop bug workaround). Distinct from s62_crypto_
+// xor_pair (204), s62_crypto_shr_extract (11) and s62_crypto_or_then_
+// and (170).
+
+fn main() -> i32 {
+    a: u64 = 204;          // 0xCC
+    b: u64 = 15;           // 0x0F
+    c: u64 = 16;           // 0x10
+    x: u64 = a & b;        // 0x0C = 12
+    r: u64 = x | c;        // 0x1C = 28
+    return r;
+}

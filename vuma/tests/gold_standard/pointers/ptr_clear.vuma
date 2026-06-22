@@ -1,0 +1,15 @@
+// ptr_clear.vuma — clear buffer (store 0)
+// Expected exit code: 0
+//
+// Stores 42 at offset 0 via *buf, then stores 0 (clearing), loads
+// the result. Verifies that storing zero over a previously-stored
+// value yields zero.
+
+fn main() -> i32 {
+    buf = allocate(8);
+    *buf = 42;
+    *buf = 0;
+    val: i32 = *buf;
+    free(buf);
+    return val;
+}

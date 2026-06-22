@@ -1,0 +1,13 @@
+// s17_edge_one_and_max.vuma — 1 & 255 = 1
+// Expected exit code: 1
+//
+// Single-bit AND with all-ones mask preserves the single bit.
+// Distinct from s14_edge_xor_self (XOR cancellation) and
+// s10_edge_max_xor_zero (XOR with zero).
+
+fn main() -> i32 {
+    a: u32 = 1;
+    b: u32 = 255;
+    r: u32 = a & b;       // 1
+    return r;
+}

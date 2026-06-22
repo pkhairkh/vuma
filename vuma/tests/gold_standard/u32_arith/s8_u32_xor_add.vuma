@@ -1,0 +1,15 @@
+// s8_u32_xor_add.vuma — (100 ^ 50) + 13 = 86 + 13 = 99
+// Expected exit code: 99
+//
+// Bitwise XOR then arithmetic add: 100 (0x64) ^ 50 (0x32) = 86 (0x56),
+// then 86 + 13 = 99. Distinct from s5_u32_xor_two_stages (double XOR)
+// and s6_u32_xor_with_self (self-cancel).
+
+fn main() -> i32 {
+    a: u32 = 100;
+    b: u32 = 50;
+    c: u32 = 13;
+    x: u32 = a ^ b;    // 86
+    r: u32 = x + c;    // 99
+    return r;
+}

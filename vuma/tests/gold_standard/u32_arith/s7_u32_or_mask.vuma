@@ -1,0 +1,15 @@
+// s7_u32_or_mask.vuma — 0xA0 | 0x0B = 0xAB = 171
+// Expected exit code: 171
+//
+// Combine high nibble (0xA0 = 160) and low nibble (0x0B = 11) via
+// OR -> 0xAB = 171. All operands loaded into variables first to
+// dodge the immediate-RHS bitwise drop bug. Distinct from
+// s5_u32_mask_high_nibble (ANDs to extract low nibble, not OR to
+// combine) and s6_u32_xor_with_self (XOR, not OR).
+
+fn main() -> i32 {
+    hi: u32 = 160;    // 0xA0
+    lo: u32 = 11;     // 0x0B
+    r: u32 = hi | lo; // 0xAB = 171
+    return r;
+}

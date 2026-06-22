@@ -1,0 +1,17 @@
+// s91_nl_6x13_count.vuma — 6x13 nested loop, count = 78
+// Observed on current x86_64 backend: 0 (FAIL — known bug)
+//
+// Outer loop 6 iterations, inner loop 13 iterations each ->
+// 6*13 = 78 total. Counter increments by 1 each inner iteration.
+// Known "for-body assignments don't propagate" bug keeps count at
+// 0. Distinct from s90_nl_6x16_count (96), s86_nl_5x5_count (25)
+// and s82_nl_9x3_count (27).
+fn main() -> i32 {
+    count: u32 = 0;
+    for i in 0..6 {
+        for j in 0..13 {
+            count = count + 1;
+        }
+    }
+    return count;
+}

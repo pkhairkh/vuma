@@ -1,0 +1,19 @@
+// s27_bit_shl_or_xor.vuma — ((0x0F << 4) | 0x03) ^ 0xFF = 0xF3 ^ 0xFF = 12
+// Expected exit code: 12
+//
+// SHL then OR then XOR. (15 << 4) = 240 (0xF0); 240 | 3 = 243 (0xF3);
+// 243 ^ 255 = 12 (0x0C). All operands loaded into u64 variables first
+// (immediate-RHS bitwise drop bug workaround). Distinct from
+// s26_bit_shl_then_xor (shl-then-xor, no or) and s22_bit_xor_or_xor
+// (xor-or-xor, no shl).
+
+fn main() -> i32 {
+    a: u64 = 15;          // 0x0F
+    b: u64 = 4;
+    c: u64 = 3;           // 0x03
+    d: u64 = 255;         // 0xFF
+    x: u64 = a << b;      // 0xF0 = 240
+    y: u64 = x | c;       // 0xF3 = 243
+    r: u64 = y ^ d;       // 0x0C = 12
+    return r;
+}

@@ -1,0 +1,17 @@
+// s37_arith_mod_sub_div.vuma — (255 % 8 - 3) / 2 = (7 - 3) / 2 = 2
+// Expected exit code: 2
+//
+// Deterministic test in the arithmetic category. All operands loaded into typed
+// variables before any bitwise op; all stores use `*ptr = literal` (or the
+// `*ptr = variable + 0` workaround). Result lands in 0-255.
+// Distinct from s33_arith_div_mod_combined (div-mod, 30) and s30_arith_sub_then_mod (sub-then-mod).
+fn main() -> i32 {
+    a: u32 = 255;
+    b: u32 = 8;
+    c: u32 = 3;
+    d: u32 = 2;
+    m: u32 = a % b;          // 7
+    s: u32 = m - c;          // 4
+    r: u32 = s / d;          // 2
+    return r;
+}

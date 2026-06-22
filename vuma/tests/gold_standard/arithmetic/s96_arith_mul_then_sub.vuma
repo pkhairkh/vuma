@@ -1,0 +1,15 @@
+// s96_arith_mul_then_sub.vuma — 30 * 9 - 50 = 270 - 50 = 220
+// Expected exit code: 220
+//
+// Two-stage arithmetic: multiply then subtract. 30 * 9 = 270;
+// 270 - 50 = 220. All operands kept as i32 locals. Straight-line
+// arithmetic. Distinct from s94_arith_mul_then_mod (43),
+// s90_arith_mul_then_sub (54) and s86_arith_mul_then_sub (126).
+fn main() -> i32 {
+    a: i32 = 30;
+    b: i32 = 9;
+    c: i32 = 50;
+    p: i32 = a * b;        // 270
+    r: i32 = p - c;        // 220
+    return r;
+}

@@ -1,0 +1,22 @@
+// s10_cf_if_else_compound.vuma — if-true picks x=20, return = 20
+// Observed on current x86_64 backend: 80 (FAIL — known bug)
+//
+// Outer if-true branch sets x = 20; else branch sets x = 80. With a
+// literal `true` condition the true branch should win -> 20. On the
+// current backend the if-true body's single assignment is dropped,
+// so the else body's assignment (80) survives instead. This is the
+// same single-assignment-per-branch if-true-body-drop bug seen in
+// s6_cf_if_two_branches_const (which also returns its else value 99).
+// Distinct from s5_cf_if_then_else_3way (TWO assignments in if-true
+// body, which works correctly) and s6_cf_if_two_branches_const
+// (different branch values 42/99).
+
+fn main() -> i32 {
+    x: u32 = 0;
+    if true {
+        x = 20;
+    } else {
+        x = 80;
+    }
+    return x;
+}

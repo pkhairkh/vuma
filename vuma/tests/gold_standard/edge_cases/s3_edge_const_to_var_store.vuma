@@ -1,0 +1,15 @@
+// s3_edge_const_to_var_store.vuma — load constant into var, store, retrieve
+// Expected exit code: 88
+//
+// Edge case: assign a literal to a variable, store the variable into
+// memory via `+ 0` idiom, load it back, and return. Tests the full
+// constant->variable->memory->variable->return pipeline.
+
+fn main() -> i32 {
+    val: u32 = 88;
+    buf = allocate(8);
+    *(buf + 0) = val + 0;
+    out: u64 = *(buf + 0);
+    free(buf);
+    return out;
+}

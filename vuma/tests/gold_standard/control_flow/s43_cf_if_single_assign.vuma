@@ -1,0 +1,16 @@
+// s43_cf_if_single_assign.vuma — single if-true sets x = 66
+// Observed on current x86_64 backend: 0 (FAIL — known bug)
+//
+// One if-true block that overwrites x = 0 to x = 66. With a literal
+// `true` condition x should end at 66. On the current backend the
+// if-true body's assignment is dropped, so x stays 0 -> exit 0.
+// Will exit 66 once the if-body drop bug is fixed. Distinct from
+// s42_cf_if_single_assign (77) and s38_cf_if_single_assign (88).
+
+fn main() -> i32 {
+    x: u32 = 0;
+    if true {
+        x = 66;
+    }
+    return x;
+}

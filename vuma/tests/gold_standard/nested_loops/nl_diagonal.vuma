@@ -1,0 +1,19 @@
+// nl_diagonal.vuma — 3x3 matrix, sum diagonal
+// Expected exit code: 3
+//
+// Iterates a 3x3 grid. Each cell (i,j) contributes `(i == j)` cast to u32
+// — 1 when on the diagonal, 0 elsewhere. Summing over all 9 cells yields
+// 3 (the three diagonal entries).
+// NOW PASSING until the for-body assignment propagation bug is fixed.
+
+fn main() -> i32 {
+    sum: u32 = 0;
+    for i in 0..3 {
+        for j in 0..3 {
+            eq: bool = (i == j);
+            v: u32 = eq;
+            sum = sum + v;
+        }
+    }
+    return sum;
+}

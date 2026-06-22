@@ -1,0 +1,23 @@
+// struct2_independent.vuma — two structs; verify independence
+// Expected exit code: 42
+//
+// Allocates two 16-byte structs p1 and p2, stores 42 in p1's first
+// field and 99 in p2's first field (each at offset 0 via *(p + 0)),
+// then loads p1's first field. Verifies that the second struct's
+// store does not interfere with the first struct's value.
+
+struct Point {
+    x: u64,
+    y: u64,
+}
+
+fn main() -> i32 {
+    p1 = allocate(16);
+    p2 = allocate(16);
+    *(p1 + 0) = 42;
+    *(p2 + 0) = 99;
+    val: u64 = *(p1 + 0);
+    free(p1);
+    free(p2);
+    return val;
+}

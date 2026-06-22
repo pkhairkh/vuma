@@ -1,0 +1,14 @@
+// s69_crypto_xor_pair.vuma -- 0xC9 ^ 0x6A = 0xA3 = 163
+// Expected exit code: 163
+//
+// Two-byte XOR. 201 ^ 106 = 163 (0xA3). Mid-bit-heavy pair (0xC9 /
+// 0x6A) produces the byte 0xA3. All operands loaded into u64
+// variables first (immediate-RHS bitwise drop bug workaround).
+// Distinct from s66_crypto_xor_pair (249), s65_crypto_xor_pair (173)
+// and s64_crypto_xor_pair (153).
+fn main() -> i32 {
+    a: u64 = 201;          // 0xC9
+    b: u64 = 106;          // 0x6A
+    r: u64 = a ^ b;        // 0xA3 = 163
+    return r;
+}

@@ -1,0 +1,30 @@
+// s59_mf_three_chain.vuma — add_nine(40)=49, double(49)=98, sub_eight(98)=90
+// Expected exit code: 90
+//
+// Three single-arg helpers chained: add_nine(x)=x+9, double(x)=x*2,
+// sub_eight(x)=x-8. main calls add_nine(40) -> 49, double(49) -> 98,
+// sub_eight(98) -> 90. Distinct from s58_mf_two_helpers_sub (112),
+// s58_mf_three_chain (50) and s58_mf_triple_then_add (120).
+
+fn add_nine(x: u32) -> u32 {
+    n: u32 = 9;
+    r: u32 = x + n;
+    return r;
+}
+fn double(x: u32) -> u32 {
+    n: u32 = 2;
+    r: u32 = x * n;
+    return r;
+}
+fn sub_eight(x: u32) -> u32 {
+    n: u32 = 8;
+    r: u32 = x - n;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = add_nine(40);     // 49
+    b: u32 = double(a);        // 98
+    r: u32 = sub_eight(b);     // 90
+    return r;
+}

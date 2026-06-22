@@ -1,0 +1,16 @@
+// s15_arith_div_mod_sum.vuma — (50 / 7) + (50 % 7) = 7 + 1 = 8
+// Expected exit code: 8
+//
+// Two-stage computation: divide and modulo the same operands, then sum the
+// two results. 50 / 7 = 7; 50 % 7 = 1; 7 + 1 = 8. All operands loaded into
+// u32 variables first. Distinct from s6_arith_div_mod_combined (div-then-mod
+// without sum) and s9_arith_mod_then_add (mod-then-add, single div).
+
+fn main() -> i32 {
+    a: u32 = 50;
+    b: u32 = 7;
+    q: u32 = a / b;       // 7
+    r: u32 = a % b;       // 1
+    s: u32 = q + r;       // 8
+    return s;
+}

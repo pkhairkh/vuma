@@ -1,0 +1,20 @@
+// s4_conc_double_buf.vuma — double-buffer publish: write front, read back
+// Expected exit code: 99
+//
+// Two 8-byte cells simulating a double-buffer: "front" gets the new
+// value (99), "back" keeps the old value (11). After the swap the
+// reader is supposed to observe the front buffer. Single-threaded
+// simulation; uses non-atomic *ptr stores.
+
+fn main() -> i32 {
+    front = allocate(8);
+    back = allocate(8);
+    *front = 11;
+    *back = 22;
+    // "Swap": write the new value into front (literal store).
+    *front = 99;
+    v: i32 = *front;
+    free(front);
+    free(back);
+    return v;
+}

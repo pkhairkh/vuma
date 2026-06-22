@@ -1,0 +1,17 @@
+// s31_nl_5x2_count.vuma — 5x2 nested loop, count = 10
+// Observed on current x86_64 backend: 0 (FAIL — known bug)
+//
+// Outer loop 5 iterations, inner loop 2 iterations each -> 5*2 = 10 total.
+// Counter increments by 1 each inner iteration. Known "for-body
+// assignments don't propagate" bug keeps count at 0. Distinct from
+// s30_nl_3x3_count (3x3 = 9) and s28_nl_3x2_count (3x2 = 6).
+
+fn main() -> i32 {
+    count: u32 = 0;
+    for i in 0..5 {
+        for j in 0..2 {
+            count = count + 1;
+        }
+    }
+    return count;
+}

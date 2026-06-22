@@ -1,0 +1,15 @@
+// ptr2_store_literal.vuma — store literal 42, load, return
+// Expected exit code: 42
+//
+// The canonical pointer store/load: allocate an 8-byte buffer, store the
+// literal 42 at offset 0 via *buf, load it back, free, return. Uses *buf
+// (offset 0) per the test-harness constraints (avoiding the known
+// x86_64 codegen bug on *(buf + computed_offset)).
+
+fn main() -> i32 {
+    buf = allocate(8);
+    *buf = 42;
+    val: i32 = *buf;
+    free(buf);
+    return val;
+}

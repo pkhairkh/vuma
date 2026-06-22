@@ -1,0 +1,28 @@
+// bit_count_zeros.vuma — Count zero bits in u64=15.
+// Expected exit code: 60
+// 15 = 0b...01111 has 4 ones and 60 zeros in a u64. We compute
+// popcount(15) = 4 via the SWAR algorithm, then subtract from 64.
+fn main() -> i32 {
+    x: u64 = 15;
+    m1: u64 = 0x5555555555555555;
+    m2: u64 = 0x3333333333333333;
+    m3: u64 = 0x0F0F0F0F0F0F0F0F;
+    one: u64 = 1;
+    two: u64 = 2;
+    four: u64 = 4;
+    sixtyfour: u64 = 64;
+    x0: u64 = x & m1;
+    xs: u64 = x >> one;
+    x1: u64 = xs & m1;
+    s0: u64 = x0 + x1;
+    y0: u64 = s0 & m2;
+    ys: u64 = s0 >> two;
+    y1: u64 = ys & m2;
+    s1: u64 = y0 + y1;
+    z0: u64 = s1 & m3;
+    zs: u64 = s1 >> four;
+    z1: u64 = zs & m3;
+    s2: u64 = z0 + z1;
+    result: u64 = sixtyfour - s2;
+    return result;
+}

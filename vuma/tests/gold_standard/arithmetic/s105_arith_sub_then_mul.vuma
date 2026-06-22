@@ -1,0 +1,13 @@
+// s105_arith_sub_then_mul.vuma — (50 - 7) * 3 = 43 * 3 = 129
+// Expected exit code: 129
+// 
+// Two-stage arithmetic: subtract then multiply. 50 - 7 = 43; 43 * 3 = 129. All operands kept as i32 locals. Straight-line arithmetic; intermediate 43 stays within 0-255.
+// Distinct from s102_arith_mod_then_mul (88), s101_arith_sub_then_mul (240), s100_arith_sub_then_div (114).
+fn main() -> i32 {
+    a: i32 = 50;
+    b: i32 = 7;
+    c: i32 = 3;
+    d: i32 = a - b;        // 43
+    r: i32 = d * c;        // 129
+    return r;
+}

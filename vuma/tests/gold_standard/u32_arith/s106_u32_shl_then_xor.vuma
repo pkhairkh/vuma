@@ -1,0 +1,13 @@
+// s106_u32_shl_then_xor.vuma — (0x13 << 2) ^ 0x03 = 0x4C ^ 0x03 = 0x4F = 79
+// Expected exit code: 79
+//
+// Two-stage bitwise: shift-left then XOR. (19 << 2) = 76 (0x4C); 76 ^ 3 = 79 (0x4F). All operands loaded into u32 variables first (immediate-RHS bitwise drop bug workaround).
+// Distinct from s102_u32_shr_then_and (5), s101_u32_shl_then_xor (8), s100_u32_shl_then_or (29).
+fn main() -> i32 {
+    a: u32 = 19;          // 0x13
+    b: u32 = 2;           // shift amount
+    c: u32 = 3;           // 0x03
+    x: u32 = a << b;        // 0x4C = 76
+    r: u32 = x ^ c;        // 0x4F = 79
+    return r;
+}

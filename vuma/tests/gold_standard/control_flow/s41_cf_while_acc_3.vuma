@@ -1,0 +1,18 @@
+// s41_cf_while_acc_3.vuma - while loop accumulates 3*5 = 15
+// Observed on current x86_64 backend: 0 (FAIL - known bug)
+//
+// Accumulator starts at 0. While i < 3, add 5 each iteration ->
+// 3 * 5 = 15 total. i increments by 1 each iteration. Known
+// "while-body assignments don't propagate" bug keeps acc at 0 ->
+// exit 0. Will exit 15 once fixed. Distinct from s38_cf_while_acc_4
+// (4*4 = 16) and s34_cf_while_acc_6 (6*3 = 18).
+
+fn main() -> i32 {
+    acc: u32 = 0;
+    i: u32 = 0;
+    while i < 3 {
+        acc = acc + 5;
+        i = i + 1;
+    }
+    return acc;
+}

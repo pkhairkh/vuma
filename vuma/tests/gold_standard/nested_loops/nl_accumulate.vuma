@@ -1,0 +1,17 @@
+// nl_accumulate.vuma — accumulate sum 0..9 via nested loops
+// Expected exit code: 45
+//
+// Outer loop runs 10 iterations; inner loop runs once per outer (a degenerate
+// nested loop). Each inner iteration adds the outer index `i` to `sum`, so
+// sum = 0+1+2+...+9 = 45.
+// NOW PASSING until the for-body assignment propagation bug is fixed.
+
+fn main() -> i32 {
+    sum: u32 = 0;
+    for i in 0..10 {
+        for k in 0..1 {
+            sum = sum + i;
+        }
+    }
+    return sum;
+}

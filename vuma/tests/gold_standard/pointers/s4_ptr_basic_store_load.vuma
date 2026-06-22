@@ -1,0 +1,14 @@
+// s4_ptr_basic_store_load.vuma — *p = 42; v = *p; return v = 42
+// Expected exit code: 42
+//
+// Smallest pointer roundtrip: allocate an 8-byte cell, store literal
+// 42 at offset 0, load it back into a local, return. Uses literal
+// store to avoid the `*ptr = variable` silent-drop bug.
+
+fn main() -> i32 {
+    p = allocate(8);
+    *p = 42;
+    v: i32 = *p;
+    free(p);
+    return v;
+}

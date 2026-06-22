@@ -1,0 +1,17 @@
+// cs_multi_buf_stores.vuma — store 1 in buf1, 2 in buf2, load both, return sum
+// Expected exit code: 3  (1 + 2)
+//
+// Two independent single-byte stores in two buffers; sum the loaded
+// values.
+
+fn main() -> i32 {
+    b1 = allocate(8);
+    b2 = allocate(8);
+    *(b1 + 0) = 1;
+    *(b2 + 0) = 2;
+    v1: u32 = *(b1 + 0);
+    v2: u32 = *(b2 + 0);
+    free(b1);
+    free(b2);
+    return v1 + v2;
+}

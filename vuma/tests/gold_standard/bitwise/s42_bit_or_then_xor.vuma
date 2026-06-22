@@ -1,0 +1,16 @@
+// s42_bit_or_then_xor.vuma — (0xF0 | 0x0F) ^ 0xAA = 0xFF ^ 0xAA = 0x55 = 85
+// Expected exit code: 85
+//
+// Two-stage bitwise: OR then XOR. (240 | 15) = 255 (0xFF);
+// 255 ^ 170 = 85 (0x55). All operands loaded into u64 variables
+// first (immediate-RHS bitwise drop bug workaround). Distinct from
+// s38_bit_or_then_shl and s34_bit_or_xor_chain.
+
+fn main() -> i32 {
+    a: u64 = 240;          // 0xF0
+    b: u64 = 15;           // 0x0F
+    c: u64 = 170;          // 0xAA
+    o: u64 = a | b;        // 0xFF = 255
+    r: u64 = o ^ c;        // 0x55 = 85
+    return r;
+}

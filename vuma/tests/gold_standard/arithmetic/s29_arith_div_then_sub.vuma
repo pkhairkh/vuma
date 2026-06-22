@@ -1,0 +1,13 @@
+// s29_arith_div_then_sub.vuma — 250 / 11 - 5 = 22 - 5 = 17
+// Expected exit code: 17
+//
+// Two-stage u32 computation: div then sub. 250 / 11 = 22 (11 * 22 = 242); 22 - 5 = 17. All operands loaded into u32 variables first. Distinct from s26_arith_sub_then_div (sub-then-div, 30) and s22_arith_sub_then_div (sub-then-div, different values).
+
+fn main() -> i32 {
+    a: u32 = 250;
+    b: u32 = 11;
+    c: u32 = 5;
+    q: u32 = a / b;       // 22
+    r: u32 = q - c;       // 17
+    return r;
+}

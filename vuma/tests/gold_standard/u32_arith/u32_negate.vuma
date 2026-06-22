@@ -1,0 +1,13 @@
+// u32_negate — (0 - 1) & 0xFFFFFFFF returns upper-byte-only masked value
+// Expected exit code: 0
+//
+// 0 - 1 = -1 in i32; masked to u32 = 0xFFFFFFFF = 4294967295.
+// Masking with 0xFF00 yields 0xFF00; the shell exit code (low 8 bits) is 0.
+
+fn main() -> i32 {
+    zero: u32 = 0;
+    one: u32 = 1;
+    neg: u32 = (zero - one) & 4294967295;   // 0xFFFFFFFF
+    masked: u32 = neg & 65280;              // 0xFF00 — low byte is 0
+    return masked;
+}

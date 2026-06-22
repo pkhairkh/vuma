@@ -1,0 +1,16 @@
+// s33_nl_2x5_count.vuma — 2x5 nested loop, count = 10
+// Observed on current x86_64 backend: 0 (FAIL — known bug)
+//
+// Nested for-loop produces 10 iterations total. Known
+// "for-body assignments don't propagate" bug keeps the result at 0. Will exit
+// 10 once fixed.
+// Distinct from s30_nl_2x4_count (2x4=8) and s26_nl_2x5_count (2x5=10, same dims, xor-acc variant).
+fn main() -> i32 {
+    count: u32 = 0;
+    for i in 0..2 {
+        for j in 0..5 {
+            count = count + 1;
+        }
+    }
+    return count;
+}

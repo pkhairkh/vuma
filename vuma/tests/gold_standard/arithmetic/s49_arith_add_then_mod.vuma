@@ -1,0 +1,16 @@
+// s49_arith_add_then_mod.vuma — (120 + 80) % 90 = 200 % 90 = 20
+// Expected exit code: 20
+//
+// Two-stage u32 computation: add then modulo. 120 + 80 = 200;
+// 200 % 90 = 20. All operands loaded into u32 variables first.
+// Straight-line arithmetic. Distinct from s46_arith_mul_mod_add
+// (49, mul-mod-add) and s42_arith_div_then_mod (3, div-then-mod).
+
+fn main() -> i32 {
+    a: u32 = 120;
+    b: u32 = 80;
+    c: u32 = 90;
+    s: u32 = a + b;        // 200
+    r: u32 = s % c;        // 20
+    return r;
+}

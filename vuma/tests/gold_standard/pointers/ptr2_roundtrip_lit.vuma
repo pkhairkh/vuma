@@ -1,0 +1,20 @@
+// ptr2_roundtrip_lit.vuma — double round-trip with literal stores
+// Expected exit code: 123
+//
+// Allocates two 8-byte buffers buf1 and buf2, stores the literal 123 in
+// buf1, loads it back, stores the literal 123 (not the loaded
+// variable) in buf2, loads buf2, and returns. Uses literal stores in
+// both buffers to avoid the known `*ptr = variable` silent-drop bug
+// (which breaks the equivalent variable-store roundtrip).
+
+fn main() -> i32 {
+    buf1 = allocate(8);
+    buf2 = allocate(8);
+    *buf1 = 123;
+    v1: i32 = *buf1;
+    *buf2 = 123;
+    v2: i32 = *buf2;
+    free(buf1);
+    free(buf2);
+    return v2;
+}

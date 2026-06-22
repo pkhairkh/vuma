@@ -1,0 +1,24 @@
+// s17_cs_three_cells_even_asc.vuma — three cells, ascending evens, sum = 48
+// Expected exit code: 48  (8 + 16 + 24)
+//
+// Three independent 8-byte cells. Store 8/16/24 (ascending evens) via
+// `*ptr = literal`. Load all three, sum, return 48. Uses separate
+// allocations per slot. Distinct from s14_cs_three_cells_desc
+// (descending 75/50/25 = 150) and s9_cs_three_cells_asc (5/15/25 = 45).
+
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    c3 = allocate(8);
+    *c1 = 8;
+    *c2 = 16;
+    *c3 = 24;
+    a: u64 = *c1;
+    b: u64 = *c2;
+    c: u64 = *c3;
+    s: u64 = a + b + c;   // 48
+    free(c1);
+    free(c2);
+    free(c3);
+    return s;
+}

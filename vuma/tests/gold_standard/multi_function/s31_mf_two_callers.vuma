@@ -1,0 +1,20 @@
+// s31_mf_two_callers.vuma — mul2(40) + mul2(60) = 80 + 120 = 200
+// Expected exit code: 200
+//
+// Single helper mul2(x) = x * 2 called twice from main with different
+// arguments. mul2(40) -> 80; mul2(60) -> 120; sum = 200. Distinct from
+// s30_mf_two_callers (add7(20)+add7(50) = 84) and s28_mf_two_callers
+// (different values).
+
+fn mul2(x: u32) -> u32 {
+    n: u32 = 2;
+    r: u32 = x * n;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = mul2(40);    // 80
+    b: u32 = mul2(60);    // 120
+    r: u32 = a + b;       // 200
+    return r;
+}

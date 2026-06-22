@@ -1,0 +1,19 @@
+// s51_cs_two_cell_diff.vuma — two cells, diff = 100 (200 - 100)
+// Expected exit code: 100
+//
+// Two 8-byte cells. Store 200/100 via `*ptr = literal`, load both,
+// subtract -> 100. Uses `*ptr = literal` form (no offsets). Distinct
+// from s50_cs_two_cell_sum (235) and s47_cs_two_cell_sum (205).
+
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    *c1 = 200;
+    *c2 = 100;
+    a: u64 = *c1;
+    b: u64 = *c2;
+    d: u64 = a - b;        // 100
+    free(c1);
+    free(c2);
+    return d;
+}

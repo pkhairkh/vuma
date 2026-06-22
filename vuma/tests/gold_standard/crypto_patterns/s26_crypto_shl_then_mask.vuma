@@ -1,0 +1,17 @@
+// s26_crypto_shl_then_mask.vuma — (1 << 4) & 0x3F = 16 & 63 = 16
+// Expected exit code: 16
+//
+// SHL then AND-mask. (1 << 4) = 16; 16 & 0x3F = 16. Demonstrates a
+// typical "shift a bit into position then mask to a 6-bit field"
+// pattern. All operands loaded into u64 variables first. Distinct from
+// s22_crypto_shl_mask_high (shl-mask high) and s18_crypto_shl_mask
+// (shl-mask, different values).
+
+fn main() -> i32 {
+    a: u64 = 1;
+    b: u64 = 4;
+    c: u64 = 63;          // 0x3F
+    x: u64 = a << b;      // 16
+    r: u64 = x & c;       // 16
+    return r;
+}

@@ -1,0 +1,11 @@
+// s105_edge_max_xor_val.vuma — 255 ^ 103 = 152 (XOR with all-ones is bitwise NOT)
+// Expected exit code: 152
+// 
+// Edge case: XOR with the max byte (0xFF) is the bitwise NOT. 255 ^ 103 = 152. All operands loaded into u32 variables first (immediate-RHS bitwise drop bug workaround).
+// Distinct from s102_edge_max_and_val (38), s101_edge_max_xor_val (155), s100_edge_max_xor_val (52).
+fn main() -> i32 {
+    m: u32 = 255;          // 0xFF
+    a: u32 = 103;
+    r: u32 = m ^ a;        // 152
+    return r;
+}

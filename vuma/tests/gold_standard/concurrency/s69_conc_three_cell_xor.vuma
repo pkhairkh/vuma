@@ -1,0 +1,25 @@
+// s69_conc_three_cell_xor.vuma -- three cells, xor = 95 (0xF0 ^ 0x0F ^ 0xA0)
+// Expected exit code: 95
+//
+// Three independent 8-byte cells. Store 240/15/160 via `*ptr =
+// literal`, load all, xor -> 0xF0 ^ 0x0F ^ 0xA0 = 0xFF ^ 0xA0 =
+// 0x5F = 95. Uses `*ptr = literal` form. Distinct from s66_conc_
+// three_cell_sum (240), s65_conc_three_cell_diff (135) and s64_conc_
+// three_cell_sum (154).
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    c3 = allocate(8);
+    *c1 = 240;             // 0xF0
+    *c2 = 15;              // 0x0F
+    *c3 = 160;             // 0xA0
+    v1: i32 = *c1;
+    v2: i32 = *c2;
+    v3: i32 = *c3;
+    t: i32 = v1 ^ v2;      // 0xFF = 255
+    r: i32 = t ^ v3;       // 0x5F = 95
+    free(c1);
+    free(c2);
+    free(c3);
+    return r;
+}

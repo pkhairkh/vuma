@@ -1,0 +1,18 @@
+// s9_nl_3x3_sum_i.vuma — 3x3 nested loop, sum of i = (0+1+2)*3 = 9
+// Observed on current x86_64 backend: 0 (FAIL — known bug)
+//
+// Outer loop 3 iterations, inner loop 3 iterations each. Each inner
+// iteration adds the OUTER index i to the accumulator. i takes
+// values 0, 1, 2 — each repeated 3 times by the inner loop — so
+// the sum is (0+1+2) * 3 = 9. Known bug keeps acc at 0. Distinct
+// from s4_nl_3x3_sum (sums inner index j, not outer index i).
+
+fn main() -> i32 {
+    acc: u32 = 0;
+    for i in 0..3 {
+        for j in 0..3 {
+            acc = acc + i;
+        }
+    }
+    return acc;
+}

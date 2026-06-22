@@ -1,0 +1,18 @@
+// s100_mf_two_calls_add.vuma — f(50) + f(50) = 59 + 59 = 118
+// Expected exit code: 118
+//
+// Single helper f(x) = x + 9. main calls it twice and
+// adds: f(50) + f(50) = 59 + 59 = 118.
+// Distinct from s97_mf_two_calls_add (78), s94_mf_three_chain (70), s90_mf_two_calls_add (59).
+fn f(x: u32) -> u32 {
+    k: u32 = 9;
+    r: u32 = x + k;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = f(50);          // 59
+    b: u32 = f(50);          // 59
+    s: u32 = a + b;          // 118
+    return s;
+}

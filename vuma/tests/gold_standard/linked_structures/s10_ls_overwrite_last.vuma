@@ -1,0 +1,27 @@
+// s10_ls_overwrite_last.vuma — overwrite last node, sum = 159
+// Expected exit code (correct): 159  (10 + 20 + 30 + 99)
+// Observed on current x86_64 backend: non-deterministic (FAIL — known
+//   U8-truncation bug on `*(p+offset)` stores/loads with u64 type)
+//
+// 32-byte allocation, four 8-byte nodes. Store 10/20/30/40 at offsets
+// 0/8/16/24, then overwrite offset 24 (last node) with 99. Load all
+// four, sum -> 10 + 20 + 30 + 99 = 159. Distinct from
+// s6_ls_overwrite_first (overwrites offset 0) and s5_ls_overwrite_middle.
+
+fn main() -> i32 {
+    block = allocate(32);
+    *(block + 0) = 10;
+    *(block + 8) = 20;
+    *(block + 16) = 30;
+    *(block + 24) = 40;
+    *(block + 24) = 99;
+    a: u64 = *(block + 0);
+    b: u64 = *(block + 8);
+    c: u64 = *(block + 16);
+    d: u64 = *(block + 24);
+    t1: u64 = a + b;
+    t2: u64 = t1 + c;
+    s: u64 = t2 + d;
+    free(block);
+    return s;
+}

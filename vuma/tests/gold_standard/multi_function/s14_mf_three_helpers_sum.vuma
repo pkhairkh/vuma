@@ -1,0 +1,33 @@
+// s14_mf_three_helpers_sum.vuma — inc(5) + dbl(10) + sub3(20) = 6 + 20 + 17 = 43
+// Expected exit code: 43
+//
+// Three distinct single-arg helpers, each called once from main,
+// results summed. inc(x) = x + 1; dbl(x) = x * 2; sub3(x) = x - 3.
+// main calls inc(5) -> 6, dbl(10) -> 20, sub3(20) -> 17; sum = 43.
+// Distinct from s9_mf_one_helper_called_thrice (same helper thrice)
+// and s10_mf_three_chain_diff (three chained, not summed).
+
+fn inc(x: u32) -> u32 {
+    n: u32 = 1;
+    r: u32 = x + n;
+    return r;
+}
+fn dbl(x: u32) -> u32 {
+    n: u32 = 2;
+    r: u32 = x * n;
+    return r;
+}
+fn sub3(x: u32) -> u32 {
+    n: u32 = 3;
+    r: u32 = x - n;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = inc(5);      // 6
+    b: u32 = dbl(10);     // 20
+    c: u32 = sub3(20);    // 17
+    t: u32 = a + b;       // 26
+    s: u32 = t + c;       // 43
+    return s;
+}

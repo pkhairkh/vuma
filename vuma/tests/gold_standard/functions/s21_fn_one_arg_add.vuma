@@ -1,0 +1,18 @@
+// s21_fn_one_arg_add.vuma — add10(35) = 45
+// Expected exit code: 45
+//
+// Helper add10(x) = x + 10. main calls add10(35) -> 45. Single function
+// call, single literal argument, addition. Distinct from s18_fn_one_arg_mul
+// (triple(14) = 42, multiplication) and s14_fn_one_arg_add (add_one(41)
+// = 42).
+
+fn add10(x: u32) -> u32 {
+    n: u32 = 10;
+    r: u32 = x + n;
+    return r;
+}
+
+fn main() -> i32 {
+    v: u32 = add10(35);
+    return v;
+}

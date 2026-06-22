@@ -1,0 +1,16 @@
+// s14_arith_mod_then_add.vuma — (100 % 7) + 11 = 2 + 11 = 13
+// Expected exit code: 13
+//
+// Two-stage computation: modulo then add. (100 % 7) = 2; 2 + 11 = 13.
+// All operands loaded into u32 variables first. Distinct from
+// s10_arith_quad_then_sub (quad-sum-then-sub) and
+// s10_arith_add_then_mul (add-then-mul).
+
+fn main() -> i32 {
+    n: u32 = 100;
+    d: u32 = 7;
+    a: u32 = 11;
+    m: u32 = n % d;       // 2
+    r: u32 = m + a;       // 13
+    return r;
+}

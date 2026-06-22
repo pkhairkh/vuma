@@ -1,0 +1,16 @@
+// s69_u32_xor_then_or.vuma -- (0xAA ^ 0x0F) | 0x10 = 0xA5 | 0x10 = 0xB5 = 181
+// Expected exit code: 181
+//
+// Two-stage bitwise: XOR then OR. (170 ^ 15) = 165 (0xA5); 165 | 16 =
+// 181 (0xB5). All operands loaded into u32 variables first
+// (immediate-RHS bitwise drop bug workaround). Distinct from s66_u32_
+// xor_then_and (51), s65_u32_xor_then_shl (210) and s64_u32_xor_then_
+// shl (127).
+fn main() -> i32 {
+    a: u32 = 170;          // 0xAA
+    b: u32 = 15;           // 0x0F
+    c: u32 = 16;           // 0x10
+    x: u32 = a ^ b;        // 0xA5 = 165
+    r: u32 = x | c;        // 0xB5 = 181
+    return r;
+}

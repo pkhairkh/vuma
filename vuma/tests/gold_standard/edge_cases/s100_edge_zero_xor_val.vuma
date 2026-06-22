@@ -1,0 +1,14 @@
+// s100_edge_zero_xor_val.vuma — 0 ^ 73 = 73 (XOR with zero preserves bits)
+// Expected exit code: 73
+//
+// Edge case: XOR with zero preserves the other operand.
+// 0 ^ 73 = 73 (0x49). All operands loaded into u32
+// variables first (immediate-RHS bitwise drop bug
+// workaround).
+// Distinct from s97_edge_max_and_val (90), s94_edge_zero_xor_val (75), s90_edge_max_xor_val (23).
+fn main() -> i32 {
+    a: u32 = 0;
+    b: u32 = 73;           // 0x49
+    r: u32 = a ^ b;        // 0x49 = 73
+    return r;
+}

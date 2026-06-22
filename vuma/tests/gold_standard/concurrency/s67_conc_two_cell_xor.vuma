@@ -1,0 +1,19 @@
+// s67_conc_two_cell_xor.vuma — two cells, xor = 255 (170 ^ 85)
+// Expected exit code: 255
+//
+// Two independent 8-byte cells. Store 170/85 via `*ptr =
+// literal`, load both, xor -> 255 (0xFF). Uses `*ptr =
+// literal` form. Distinct from s66_conc_two_cell_diff (125),
+// s62_conc_two_cell_sum (230) and s58_conc_two_cell_diff (140).
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    *c1 = 170;             // 0xAA
+    *c2 = 85;              // 0x55
+    v1: i32 = *c1;
+    v2: i32 = *c2;
+    r: i32 = v1 ^ v2;      // 0xFF = 255
+    free(c1);
+    free(c2);
+    return r;
+}

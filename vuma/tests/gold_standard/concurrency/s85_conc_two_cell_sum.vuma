@@ -1,0 +1,19 @@
+// s85_conc_two_cell_sum.vuma — two cells, sum = 203 (95 + 108)
+// Expected exit code: 203
+//
+// Two independent 8-byte cells. Store 95/108 via `*ptr =
+// literal`, load both, sum -> 203. Uses non-atomic `*ptr` per
+// the bridge-gap workaround. Distinct from s82_conc_two_cell_
+// sum, s78_conc_two_cell_sum and s74_conc_two_cell_sum.
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    *c1 = 95;
+    *c2 = 108;
+    v1: i32 = *c1;
+    v2: i32 = *c2;
+    r: i32 = v1 + v2;     // 203
+    free(c1);
+    free(c2);
+    return r;
+}

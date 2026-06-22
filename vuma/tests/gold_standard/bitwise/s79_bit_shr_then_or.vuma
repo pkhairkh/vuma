@@ -1,0 +1,16 @@
+// s79_bit_shr_then_or.vuma — (0x10 >> 1) | 0x08 = 0x08 | 0x08 = 0x08 = 8
+// Expected exit code: 8
+//
+// Two-stage bitwise: shift right then OR. (16 >> 1) = 8
+// (0x08); 8 | 8 = 8 (0x08). All operands loaded into u64
+// variables first (immediate-RHS bitwise drop bug workaround).
+// Distinct from s78_bit_shl_then_or (4), s77_bit_shr_then_or
+// (1) and s76_bit_shr_then_or (2).
+fn main() -> i32 {
+    a: u64 = 16;           // 0x10
+    b: u64 = 1;
+    c: u64 = 8;            // 0x08
+    x: u64 = a >> b;       // 0x08 = 8
+    r: u64 = x | c;        // 0x08 = 8
+    return r;
+}

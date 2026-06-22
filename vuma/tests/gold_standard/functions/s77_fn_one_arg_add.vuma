@@ -1,0 +1,18 @@
+// s77_fn_one_arg_add.vuma — add_thirty_seven(90) = 127
+// Expected exit code: 127
+//
+// Helper add_thirty_seven(x) = x + 37. main calls
+// add_thirty_seven(90) -> 127. Single-arg function that adds a
+// literal. Distinct from s70_fn_one_arg_add (165), s66_fn_one_
+// arg_sub (80) and s74_fn_one_arg_add (167).
+
+fn add_thirty_seven(x: u32) -> u32 {
+    n: u32 = 37;
+    r: u32 = x + n;
+    return r;
+}
+
+fn main() -> i32 {
+    v: u32 = add_thirty_seven(90);
+    return v;
+}

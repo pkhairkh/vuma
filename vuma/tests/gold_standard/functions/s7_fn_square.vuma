@@ -1,0 +1,16 @@
+// s7_fn_square.vuma — square(9) = 81
+// Expected exit code: 81
+//
+// Helper square(x) = x * x. main calls square(9) -> 81. Distinct
+// from s5_fn_three_args_sum (three args, sum, not square) and
+// s6_fn_two_args_mul (two args, product, not self-square).
+
+fn square(x: u32) -> u32 {
+    r: u32 = x * x;
+    return r;
+}
+
+fn main() -> i32 {
+    v: u32 = square(9);   // 81
+    return v;
+}

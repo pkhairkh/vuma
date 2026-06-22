@@ -1,0 +1,15 @@
+// fn_return_i32.vuma — function returns i32
+// Expected exit code: 203
+//
+// Tests a function that returns an i32 value. Verifies i32 return type
+// propagates through the call/return boundary. Spec called for 500, but
+// exit codes are 8-bit (500 mod 256 = 244), so 203 is used instead.
+
+fn get_i32() -> i32 {
+    return 203;
+}
+
+fn main() -> i32 {
+    v: i32 = get_i32();
+    return v;
+}

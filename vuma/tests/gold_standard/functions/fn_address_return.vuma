@@ -1,0 +1,19 @@
+// fn_address_return.vuma — function allocates, stores 42, returns Address
+// Expected exit code: 42
+//
+// Tests a function that allocates a buffer, stores 42 at the start, and
+// returns the Address. main then loads the value back. Verifies that
+// Address return values cross the call/return boundary intact.
+
+fn make_buf() -> Address {
+    buf = allocate(8);
+    *buf = 42;
+    return buf;
+}
+
+fn main() -> i32 {
+    p = make_buf();
+    v: u32 = *p;
+    free(p);
+    return v;
+}

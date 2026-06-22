@@ -1,0 +1,16 @@
+// cs_independent_stores.vuma — store in buf1, store in buf2, load buf1
+// Expected exit code: 42
+//
+// Verifies that stores to two independent buffers don't interfere — a
+// store into buf2 must not corrupt buf1.
+
+fn main() -> i32 {
+    buf1 = allocate(8);
+    buf2 = allocate(8);
+    *(buf1 + 0) = 42;
+    *(buf2 + 0) = 99;
+    val: u32 = *(buf1 + 0);
+    free(buf1);
+    free(buf2);
+    return val;
+}

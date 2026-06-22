@@ -1,0 +1,9 @@
+// edge_return_max_i32 — return 2147483647 (low byte = 255)
+// Expected exit code: 255
+//
+// Edge case: returning i32::MAX. The shell exit code is the low 8 bits
+// of the i32 return value, which for 0x7FFFFFFF is 0xFF = 255.
+
+fn main() -> i32 {
+    return 2147483647;
+}

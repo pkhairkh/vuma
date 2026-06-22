@@ -1,0 +1,22 @@
+// s9_struct_overwrite_field.vuma — overwrite single field, final = 90
+// Expected exit code: 90
+//
+// 8-byte allocation treated as a one-field struct. Store 5 via
+// `*p = 5`, then overwrite with 90 via `*p = 90` (literal overwrite,
+// last write wins). Load and return 90. Uses `*p = literal` form
+// (no offsets). Distinct from s4_struct_overwrite_field (uses
+// *(p+N) form, 2-field struct, overwrites x) and
+// s6_struct_overwrite_two_fields (overwrites 2 of 3 fields).
+
+struct Single {
+    a: u64,
+}
+
+fn main() -> i32 {
+    p = allocate(8);
+    *p = 5;
+    *p = 90;
+    a: u64 = *p;
+    free(p);
+    return a;
+}

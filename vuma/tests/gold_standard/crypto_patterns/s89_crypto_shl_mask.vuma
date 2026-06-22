@@ -1,0 +1,15 @@
+// s89_crypto_shl_mask.vuma — (35 << 0) & 0xFF = 35 & 0xFF = 35
+// Expected exit code: 35
+//
+// Shift left then mask. (35 << 0) = 35; 35 & 0xFF = 35.
+// All operands loaded into u32 variables first (immediate-RHS
+// bitwise drop bug workaround). Distinct from s86_crypto_shl_mask
+// (210), s82_crypto_xor_then_and (76) and s78_crypto_xor_pair (90).
+fn main() -> i32 {
+    a: u32 = 35;
+    s: u32 = 0;
+    m: u32 = 255;          // 0xFF
+    x: u32 = a << s;       // 35
+    r: u32 = x & m;        // 35
+    return r;
+}

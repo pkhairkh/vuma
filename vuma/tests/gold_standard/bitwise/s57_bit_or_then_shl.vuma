@@ -1,0 +1,16 @@
+// s57_bit_or_then_shl.vuma — (40 | 80) << 1 = 120 << 1 = 240
+// Expected exit code: 240
+//
+// Two-stage bitwise: OR then shift left. 40 | 80 = 120 (0x78);
+// 120 << 1 = 240 (0xF0). All operands loaded into u64 variables
+// first (immediate-RHS bitwise drop bug workaround). Distinct from
+// s54_bit_shl_then_xor (28) and s50_bit_or_then_shr (63).
+
+fn main() -> i32 {
+    a: u64 = 40;
+    b: u64 = 80;
+    c: u64 = 1;
+    x: u64 = a | b;        // 120
+    r: u64 = x << c;       // 240
+    return r;
+}

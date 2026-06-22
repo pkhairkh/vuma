@@ -1,0 +1,15 @@
+// s33_bit_and_or_chain.vuma — (0xF0 & 0xCC) | 0x0A = 0xC0 | 0x0A = 0xCA = 202
+// Expected exit code: 202
+//
+// Deterministic test in the bitwise category. All operands loaded into typed
+// variables before any bitwise op; all stores use `*ptr = literal` (or the
+// `*ptr = variable + 0` workaround). Result lands in 0-255.
+// Distinct from s30_bit_and_then_shl (and-then-shl, 80) and s26_bit_or_and_chain (or-and-chain).
+fn main() -> i32 {
+    a: u64 = 240;          // 0xF0
+    b: u64 = 204;          // 0xCC
+    c: u64 = 10;           // 0x0A
+    x: u64 = a & b;        // 0xC0 = 192
+    r: u64 = x | c;        // 0xCA = 202
+    return r;
+}

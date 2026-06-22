@@ -1,0 +1,21 @@
+// s27_atom_two_cell_xor.vuma — atomic_store 0xAA/0x55, xor = 255
+// Observed on current x86_64 backend: 0 (FAIL — known bug)
+//
+// Two 8-byte cells. atomic_store 170/15 into each, then atomic_load both
+// and XOR. On the current backend all loads return 0 (atomic_store/load
+// not bridged through to x86_64) -> exit 0. Will exit 255 once atomic
+// ops are wired through. Distinct from s26_atom_two_cell_or (or,
+// 240|15=255) and s22_atom_two_cell_xor (xor, 41^98=75).
+
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    atomic_store(c1, 170);
+    atomic_store(c2, 85);
+    a = atomic_load(c1);
+    b = atomic_load(c2);
+    s = a ^ b;
+    free(c1);
+    free(c2);
+    return s;
+}

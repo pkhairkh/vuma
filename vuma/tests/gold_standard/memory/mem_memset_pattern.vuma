@@ -1,0 +1,36 @@
+// mem_memset_pattern.vuma — fill with repeating pattern
+// Expected exit code: 0
+//
+// Fills an 8-byte buffer with a repeating 2-byte pattern [0xAA, 0x55]
+// and verifies the pattern is correct at each position.
+
+fn main() -> i32 {
+    buf = allocate(8);
+    i: u32 = 0;
+    while i < 8 {
+        // Pattern: even positions get 0xAA, odd positions get 0x55
+        bit: u32 = i & 1;
+        if bit == 0 {
+            *(buf + i) = 0xAA;
+        } else {
+            *(buf + i) = 0x55;
+        }
+        i = i + 1;
+    }
+    // Verify
+    ok: u32 = 1;
+    j: u32 = 0;
+    while j < 8 {
+        v: u32 = *(buf + j);
+        bit2: u32 = j & 1;
+        if bit2 == 0 {
+            if v != 0xAA { ok = 0; }
+        } else {
+            if v != 0x55 { ok = 0; }
+        }
+        j = j + 1;
+    }
+    free(buf);
+    if ok == 1 { return 0; }
+    return 1;
+}

@@ -1,0 +1,18 @@
+// s14_arith_quad_ascending.vuma — 7 + 14 + 21 + 28 = 70
+// Expected exit code: 70
+//
+// Four-way u32 sum built via chained intermediates, with operands
+// in ascending arithmetic progression (7, 14, 21, 28). Distinct
+// from s10_u32_add_chain_4 (values 10/20/30/40) and
+// s10_arith_quad_then_sub (quad-sum minus 50).
+
+fn main() -> i32 {
+    a: u32 = 7;
+    b: u32 = 14;
+    c: u32 = 21;
+    d: u32 = 28;
+    t1: u32 = a + b;      // 21
+    t2: u32 = t1 + c;     // 42
+    r: u32 = t2 + d;      // 70
+    return r;
+}

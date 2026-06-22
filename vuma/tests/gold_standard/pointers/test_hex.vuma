@@ -1,0 +1,15 @@
+// Test program: print hex output to stdout
+fn main() -> i32 {
+    // Create a small buffer with known bytes
+    buf = allocate(4);
+    *(buf + 0) = 0x4f;
+    *(buf + 1) = 0x8b;
+    *(buf + 2) = 0x42;
+    *(buf + 3) = 0xc2;
+
+    // Print as hex
+    print_hex(buf, 4);
+
+    free(buf);
+    return 0;
+}

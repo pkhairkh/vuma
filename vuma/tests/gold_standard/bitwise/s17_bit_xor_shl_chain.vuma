@@ -1,0 +1,16 @@
+// s17_bit_xor_shl_chain.vuma — (0x33 ^ 0x0F) << 1 = 0x3C << 1 = 0x78 = 120
+// Expected exit code: 120
+//
+// XOR-then-shift-left chain. (51 ^ 15) = 60 (0x3C); 60 << 1 = 120
+// (0x78). All operands loaded into u64 variables first (immediate-RHS
+// bitwise drop bug workaround). Distinct from s14_bit_xor_chain_3
+// (pure XOR chain) and s10_bit_shl_then_xor (shift-then-XOR).
+
+fn main() -> i32 {
+    a: u64 = 51;          // 0x33
+    b: u64 = 15;          // 0x0F
+    sh: u64 = 1;
+    x: u64 = a ^ b;       // 0x3C = 60
+    r: u64 = x << sh;     // 0x78 = 120
+    return r;
+}

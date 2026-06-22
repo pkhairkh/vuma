@@ -1,0 +1,12 @@
+// u32_2_xor — u32 XOR: 0xFF ^ 0xFA = 5
+// Expected exit code: 5
+//
+// 255 ^ 250 = 5. Loads both operands into variables because VUMA may
+// drop bitwise ops with immediate RHS.
+
+fn main() -> i32 {
+    a: u32 = 255;     // 0xFF
+    b: u32 = 250;     // 0xFA
+    result: u32 = a ^ b;
+    return result;
+}

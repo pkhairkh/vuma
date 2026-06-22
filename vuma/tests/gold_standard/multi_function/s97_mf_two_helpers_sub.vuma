@@ -1,0 +1,24 @@
+// s97_mf_two_helpers_sub.vuma — f1(100) - f2(16) = 108 - 20 = 88
+// Expected exit code: 88
+//
+// Two single-arg helpers. f1(x) = x + 8; f2(y) = y + 4.
+// main calls both and subtracts: f1(100) - f2(16) = 108 -
+// 20 = 88.
+// Distinct from s94_mf_three_chain (70), s90_mf_two_helpers_sub (2), s86_mf_double_then_add (65).
+fn f1(x: u32) -> u32 {
+    k: u32 = 8;
+    r: u32 = x + k;
+    return r;
+}
+fn f2(y: u32) -> u32 {
+    k: u32 = 4;
+    r: u32 = y + k;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = f1(100);        // 108
+    b: u32 = f2(16);         // 20
+    d: u32 = a - b;          // 88
+    return d;
+}

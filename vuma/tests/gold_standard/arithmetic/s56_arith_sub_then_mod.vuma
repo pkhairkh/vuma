@@ -1,0 +1,16 @@
+// s56_arith_sub_then_mod.vuma — (200 - 50) % 7 = 150 % 7 = 3
+// Expected exit code: 3
+//
+// Two-stage u32 computation: subtract then modulo. 200 - 50 = 150;
+// 150 % 7 = 3. All operands loaded into u32 variables first.
+// Straight-line arithmetic. Distinct from s54_arith_sub_then_div (45)
+// and s49_arith_add_then_mod (180).
+
+fn main() -> i32 {
+    a: u32 = 200;
+    b: u32 = 50;
+    c: u32 = 7;
+    d: u32 = a - b;         // 150
+    r: u32 = d % c;         // 3
+    return r;
+}

@@ -1,0 +1,12 @@
+// cf_while_with_counter — while loop increments a named counter
+// Expected exit code: 10
+//
+// Exposes: while-body assignments to counter variable may not propagate.
+
+fn main() -> i32 {
+    count: u32 = 0;
+    while (count < 10) {
+        count = count + 1;
+    }
+    return count;
+}

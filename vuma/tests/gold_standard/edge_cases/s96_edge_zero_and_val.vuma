@@ -1,0 +1,14 @@
+// s96_edge_zero_and_val.vuma — 0 & 244 = 0 (AND with zero clears all bits)
+// Expected exit code: 0
+//
+// Edge case: AND with zero clears every bit -> result is always 0.
+// 0 & 244 = 0. All operands loaded into u32 variables first
+// (immediate-RHS bitwise drop bug workaround). Distinct from
+// s94_edge_max_and_val (108), s90_edge_zero_or_val (22) and
+// s86_edge_zero_xor_high (250).
+fn main() -> i32 {
+    a: u32 = 0;            // 0x00
+    b: u32 = 244;          // 0xF4
+    r: u32 = a & b;        // 0x00 = 0
+    return r;
+}

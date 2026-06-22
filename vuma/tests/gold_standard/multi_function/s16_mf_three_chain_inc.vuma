@@ -1,0 +1,30 @@
+// s16_mf_three_chain_inc.vuma — add10(dbl(inc(2))) = add10(dbl(3)) = add10(6) = 16
+// Expected exit code: 16
+//
+// Three helpers chained: inc(x) = x + 1; dbl(x) = x * 2; add10(x) = x + 10.
+// main calls inc(2) -> 3, then dbl(3) -> 6, then add10(6) -> 16. Distinct
+// from s11_mf_three_helpers_chain (inc(5) -> dbl -> dec = 11) and
+// s10_mf_three_chain_diff (different ops).
+
+fn inc(x: u32) -> u32 {
+    c: u32 = 1;
+    r: u32 = x + c;
+    return r;
+}
+fn dbl(x: u32) -> u32 {
+    c: u32 = 2;
+    r: u32 = x * c;
+    return r;
+}
+fn add10(x: u32) -> u32 {
+    c: u32 = 10;
+    r: u32 = x + c;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = inc(2);      // 3
+    b: u32 = dbl(a);      // 6
+    c: u32 = add10(b);    // 16
+    return c;
+}

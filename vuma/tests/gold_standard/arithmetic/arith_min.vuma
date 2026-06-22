@@ -1,0 +1,14 @@
+// arith_min — minimum of two values
+// Expected exit code: 3
+//
+// min(3, 8) = 3.
+
+fn main() -> i32 {
+    a: u32 = 3;
+    b: u32 = 8;
+    result: u32 = a;
+    if b < a {
+        result = b;
+    }
+    return result;
+}

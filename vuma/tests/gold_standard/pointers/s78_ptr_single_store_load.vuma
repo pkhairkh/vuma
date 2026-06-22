@@ -1,0 +1,14 @@
+// s78_ptr_single_store_load.vuma — store 1, load = 1
+// Expected exit code: 1
+//
+// Single 8-byte cell. Store 1 via `*p = literal`, load and
+// return 1. Uses `*p = literal` form (no offsets). Distinct from
+// s74_ptr_single_store_load (161), s73_ptr_single_store_load (119)
+// and s72_ptr_single_store_load (155).
+fn main() -> i32 {
+    p = allocate(8);
+    *p = 1;
+    v: i32 = *p;
+    free(p);
+    return v;
+}

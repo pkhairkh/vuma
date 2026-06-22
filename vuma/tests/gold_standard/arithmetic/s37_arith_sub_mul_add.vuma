@@ -1,0 +1,17 @@
+// s37_arith_sub_mul_add.vuma — (90 - 30) * 2 + 5 = 60 * 2 + 5 = 125
+// Expected exit code: 125
+//
+// Deterministic test in the arithmetic category. All operands loaded into typed
+// variables before any bitwise op; all stores use `*ptr = literal` (or the
+// `*ptr = variable + 0` workaround). Result lands in 0-255.
+// Distinct from s33_arith_add_sub_mul (add-sub-mul, 200) and s30_arith_sub_then_mul (sub-then-mul).
+fn main() -> i32 {
+    a: u32 = 90;
+    b: u32 = 30;
+    c: u32 = 2;
+    d: u32 = 5;
+    x: u32 = a - b;          // 60
+    y: u32 = x * c;          // 120
+    r: u32 = y + d;          // 125
+    return r;
+}

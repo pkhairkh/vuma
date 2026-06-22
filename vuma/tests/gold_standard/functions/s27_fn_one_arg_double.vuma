@@ -1,0 +1,17 @@
+// s27_fn_one_arg_double.vuma — double(60) = 120
+// Expected exit code: 120
+//
+// Helper double(x) = x * 2. main calls double(60) -> 120. Single literal
+// argument, multiplication. Distinct from s26_fn_one_arg_sub (sub) and
+// s22_fn_one_arg_add (add).
+
+fn double(x: u32) -> u32 {
+    n: u32 = 2;
+    r: u32 = x * n;
+    return r;
+}
+
+fn main() -> i32 {
+    v: u32 = double(60);
+    return v;
+}

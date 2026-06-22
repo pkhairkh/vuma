@@ -1,0 +1,13 @@
+// s8_edge_one_minus_one.vuma — 1 - 1 = 0
+// Expected exit code: 0
+//
+// Subtraction to zero. Edge case: smallest non-zero value minus
+// itself yields zero. Distinct from s5_edge_255_minus_1 (different
+// operands, non-zero result).
+
+fn main() -> i32 {
+    a: u32 = 1;
+    b: u32 = 1;
+    r: u32 = a - b;
+    return r;
+}

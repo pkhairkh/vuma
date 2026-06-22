@@ -1,0 +1,18 @@
+// struct_independent.vuma — two structs, independent modifications
+// Expected exit code: 42
+//
+// Allocates two single-field structs p1 and p2, both initially set to
+// 42. main then overwrites p1 with 99. Loading p2 returns 42,
+// confirming that two independently-allocated structs do not alias.
+
+fn main() -> i32 {
+    p1 = allocate(8);
+    p2 = allocate(8);
+    *(p1 + 0) = 42;
+    *(p2 + 0) = 42;
+    *(p1 + 0) = 99;
+    val: u64 = *(p2 + 0);
+    free(p1);
+    free(p2);
+    return val;
+}

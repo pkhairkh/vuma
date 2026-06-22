@@ -1,0 +1,22 @@
+// s84_cs_overwrite_middle.vuma — overwrite c2 to 16, load = 16
+// Expected exit code: 16
+//
+// Three 8-byte cells. Store 10 at c1, store 8 at c2 then
+// overwrite c2 to 16, store 20 at c3. Load c2 -> 16 (the
+// overwritten value). Uses `*ptr = literal` form. Distinct
+// from s82_cs_overwrite_middle (220), s78_cs_overwrite_first
+// (3) and s74_cs_overwrite_last (191).
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    c3 = allocate(8);
+    *c1 = 10;
+    *c2 = 8;
+    *c2 = 16;
+    *c3 = 20;
+    v: u64 = *c2;          // 16
+    free(c1);
+    free(c2);
+    free(c3);
+    return v;
+}

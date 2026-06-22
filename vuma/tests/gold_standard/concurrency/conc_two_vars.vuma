@@ -1,0 +1,23 @@
+// conc_two_vars.vuma — two "atomic" cells, store in one, load from it
+// Expected exit code: 42
+//
+// Allocates two independent 8-byte cells (representing two atomic
+// variables). Stores 42 into the first, 99 into the second (to confirm
+// both allocations are live and independent), then loads from the first
+// and returns it. The "two vars" framing mirrors typical two-counter
+// patterns (e.g. head + tail in a ring buffer); only one counter is
+// observed here for simplicity.
+//
+// Uses non-atomic `*ptr` per the bridge-gap workaround documented in
+// conc_atomic_basic.vuma.
+
+fn main() -> i32 {
+    cell1 = allocate(8);
+    cell2 = allocate(8);
+    *cell1 = 42;
+    *cell2 = 99;
+    val: i32 = *cell1;
+    free(cell1);
+    free(cell2);
+    return val;
+}

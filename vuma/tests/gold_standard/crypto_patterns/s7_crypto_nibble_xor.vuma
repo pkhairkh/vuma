@@ -1,0 +1,18 @@
+// s7_crypto_nibble_xor.vuma — hi(0xAB) ^ lo(0xAB) = 0xA ^ 0xB = 0x1 = 1
+// Expected exit code: 1
+//
+// Take 0xAB (171). High nibble = (171 >> 4) & 0x0F = 10. Low nibble
+// = 171 & 0x0F = 11. XOR the two nibbles: 10 ^ 11 = 1. All operands
+// loaded into variables first to dodge the immediate-RHS bitwise
+// drop bug. Distinct from s5_crypto_nibble_extract (sums nibbles,
+// not XORs) and s6_crypto_nibble_swap (swaps nibbles).
+
+fn main() -> i32 {
+    v: u64 = 171;       // 0xAB
+    four: u64 = 4;
+    mask: u64 = 15;     // 0x0F
+    hi: u64 = (v >> four) & mask;   // 0x0A = 10
+    lo: u64 = v & mask;             // 0x0B = 11
+    r: u64 = hi ^ lo;               // 0x01 = 1
+    return r;
+}

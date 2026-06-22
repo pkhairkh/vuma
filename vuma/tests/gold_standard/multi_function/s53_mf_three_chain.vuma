@@ -1,0 +1,30 @@
+// s53_mf_three_chain.vuma — add_three(15)=18, dbl(18)=36, sub_six(36)=30
+// Expected exit code: 30
+//
+// Three single-arg helpers chained: add_three(x)=x+3, dbl(x)=x*2,
+// sub_six(x)=x-6. main calls add_three(15) -> 18, dbl(18) -> 36,
+// sub_six(36) -> 30. Distinct from s49_mf_three_chain (40) and
+// s50_mf_three_chain (50).
+
+fn add_three(x: u32) -> u32 {
+    n: u32 = 3;
+    r: u32 = x + n;
+    return r;
+}
+fn dbl(x: u32) -> u32 {
+    n: u32 = 2;
+    r: u32 = x * n;
+    return r;
+}
+fn sub_six(x: u32) -> u32 {
+    n: u32 = 6;
+    r: u32 = x - n;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = add_three(15);    // 18
+    b: u32 = dbl(a);           // 36
+    r: u32 = sub_six(b);       // 30
+    return r;
+}

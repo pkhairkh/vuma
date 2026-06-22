@@ -1,0 +1,18 @@
+// s45_nl_3x5_count.vuma — 3x5 nested loop, count = 15
+// Observed on current x86_64 backend: 0 (FAIL — known bug)
+//
+// Outer loop 3 iterations, inner loop 5 iterations each -> 3*5 = 15
+// total. Counter increments by 1 each inner iteration. Known
+// "for-body assignments don't propagate" bug keeps count at 0.
+// Distinct from s42_nl_5x3_count (15, same total but swapped
+// dimensions) and s34_nl_3x3_count (9).
+
+fn main() -> i32 {
+    count: u32 = 0;
+    for i in 0..3 {
+        for j in 0..5 {
+            count = count + 1;
+        }
+    }
+    return count;
+}

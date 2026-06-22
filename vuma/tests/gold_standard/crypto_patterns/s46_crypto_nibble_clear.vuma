@@ -1,0 +1,15 @@
+// s46_crypto_nibble_clear.vuma — 0xCD & 0xF0 = 0xC0 = 192
+// Expected exit code: 192
+//
+// Mask off the low nibble, keeping the high nibble. 205 & 240 = 192
+// (0xC0). All operands loaded into u64 variables first (immediate-
+// RHS bitwise drop bug workaround). Distinct from s42_crypto_nibble
+// _clear (0xAB & 0x0F = 11, clears high nibble) and s38_crypto_
+// nibble_clear.
+
+fn main() -> i32 {
+    a: u64 = 205;          // 0xCD
+    m: u64 = 240;          // 0xF0
+    r: u64 = a & m;        // 0xC0 = 192
+    return r;
+}

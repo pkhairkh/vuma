@@ -1,0 +1,18 @@
+// s11_fn_square_plus_one.vuma — square(7) + 1 = 49 + 1 = 50
+// Expected exit code: 50
+//
+// Helper square(x) = x * x. main calls square(7) -> 49, then adds 1
+// (constant loaded into a variable first) -> 50. Distinct from
+// s9_fn_one_arg_sub (single-arg sub) and s7_fn_square (square, no +1).
+
+fn square(x: u32) -> u32 {
+    r: u32 = x * x;
+    return r;
+}
+
+fn main() -> i32 {
+    v: u32 = square(7);   // 49
+    one: u32 = 1;
+    s: u32 = v + one;     // 50
+    return s;
+}

@@ -1,0 +1,20 @@
+// ptr2_multi_store_lit.vuma — store 1, 2, 3 at offsets 0, 1, 2; sum
+// Expected exit code: 6
+//
+// Allocates an 8-byte buffer, stores literals 1, 2, 3 at offsets 0, 1,
+// and 2 via *(buf + N), loads all three back, and returns the sum
+// (1 + 2 + 3 = 6). All stored values are within the U8 range, so the
+// known *(buf + offset) U8-truncation bug does not affect them.
+
+fn main() -> i32 {
+    buf = allocate(8);
+    *(buf + 0) = 1;
+    *(buf + 1) = 2;
+    *(buf + 2) = 3;
+    v0: i32 = *(buf + 0);
+    v1: i32 = *(buf + 1);
+    v2: i32 = *(buf + 2);
+    sum: i32 = v0 + v1 + v2;
+    free(buf);
+    return sum;
+}

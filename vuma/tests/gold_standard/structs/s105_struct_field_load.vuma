@@ -1,0 +1,16 @@
+// s105_struct_field_load.vuma — store 211, load = 211
+// Expected exit code: 211
+// 
+// Single 8-byte struct allocation. Store 211, load and return 211. Uses `*p = literal` form. Straight-line code only.
+// Distinct from s102_struct_field_load (5), s101_struct_field_load (71), s100_struct_field_load (8).
+struct Single {
+    a: u64,
+}
+
+fn main() -> i32 {
+    p = allocate(8);
+    *p = 211;
+    v: u64 = *p;           // 211
+    free(p);
+    return v;
+}

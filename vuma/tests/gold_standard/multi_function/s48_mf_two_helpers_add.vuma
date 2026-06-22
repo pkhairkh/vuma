@@ -1,0 +1,23 @@
+// s48_mf_two_helpers_add.vuma — f1(30)=38, f2(38)=46
+// Expected exit code: 46
+//
+// Two single-arg helpers chained: f1(x)=x+8, f2(x)=x+8. main
+// calls f2(f1(30)) -> f1(30)=38, f2(38)=46. Distinct from s46_mf_
+// two_helpers_add and s42_mf_two_helpers_add.
+
+fn f1(x: u32) -> u32 {
+    n: u32 = 8;
+    r: u32 = x + n;
+    return r;
+}
+fn f2(x: u32) -> u32 {
+    n: u32 = 8;
+    r: u32 = x + n;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = f1(30);    // 38
+    b: u32 = f2(a);     // 46
+    return b;
+}

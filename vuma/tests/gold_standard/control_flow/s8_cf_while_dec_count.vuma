@@ -1,0 +1,18 @@
+// s8_cf_while_dec_count.vuma — while loop runs 6 iterations, count = 6
+// Observed on current x86_64 backend: 0 (FAIL — known bug)
+//
+// Counter starts at 0. Loop guard is `i < 6` (literal) where i is
+// incremented each iteration. Each iteration also adds 1 to count.
+// After 6 iterations, i == 6 and the loop exits; count should be 6.
+// Known "while-body assignments don't propagate" bug keeps count at 0.
+// Distinct from s6_cf_while_dec_count (different limit).
+
+fn main() -> i32 {
+    i: u32 = 0;
+    count: u32 = 0;
+    while i < 6 {
+        count = count + 1;
+        i = i + 1;
+    }
+    return count;
+}

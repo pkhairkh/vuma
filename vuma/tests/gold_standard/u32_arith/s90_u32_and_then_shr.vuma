@@ -1,0 +1,16 @@
+// s90_u32_and_then_shr.vuma — (0xFF & 0x96) >> 1 = 0x96 >> 1 = 0x4B = 75
+// Expected exit code: 75
+//
+// Two-stage bitwise: AND then shift-right. (255 & 150) = 150
+// (0x96); 150 >> 1 = 75 (0x4B). All operands loaded into u32
+// variables first (immediate-RHS bitwise drop bug workaround).
+// Distinct from s86_u32_and_then_shr (53), s82_u32_or_then_and
+// (46) and s78_u32_and_then_xor (4).
+fn main() -> i32 {
+    a: u32 = 255;          // 0xFF
+    b: u32 = 150;          // 0x96
+    c: u32 = 1;
+    x: u32 = a & b;        // 0x96 = 150
+    r: u32 = x >> c;       // 0x4B = 75
+    return r;
+}

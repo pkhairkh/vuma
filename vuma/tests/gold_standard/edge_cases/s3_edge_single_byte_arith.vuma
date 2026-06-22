@@ -1,0 +1,14 @@
+// s3_edge_single_byte_arith.vuma — small-value arithmetic via vars
+// Expected exit code: 6  (1 + 2 + 3)
+//
+// Edge case: arithmetic on small literal values (1, 2, 3). Uses
+// intermediate variables to avoid any dropped-subexpression issue.
+
+fn main() -> i32 {
+    a: u32 = 1;
+    b: u32 = 2;
+    c: u32 = 3;
+    s1: u32 = a + b;
+    s2: u32 = s1 + c;
+    return s2;
+}

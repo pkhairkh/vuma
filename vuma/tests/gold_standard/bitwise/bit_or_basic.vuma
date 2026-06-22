@@ -1,0 +1,9 @@
+// bit_or_basic.vuma — Bitwise OR of two values.
+// Expected exit code: 255 (0xFF)
+// 0xF0 | 0x0F = 0xFF = 255
+fn main() -> i32 {
+    val: u64 = 0xF0;
+    mask: u64 = 0x0F;
+    result: u64 = val | mask;
+    return result;
+}

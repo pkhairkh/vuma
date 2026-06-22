@@ -1,0 +1,16 @@
+// s34_arith_mul_then_mod.vuma — (13 * 11) % 17 = 143 % 17 = 7
+// Expected exit code: 7
+//
+// Two-stage u32 computation: multiply then modulus. 13 * 11 = 143;
+// 143 % 17 = 7 (since 8 * 17 = 136, 143 - 136 = 7). All operands
+// loaded into u32 variables first. Distinct from s30_arith_div_then_
+// mul (div-then-mul) and s27_arith_mul_then_mod (different values, 5).
+
+fn main() -> i32 {
+    a: u32 = 13;
+    b: u32 = 11;
+    c: u32 = 17;
+    m: u32 = a * b;       // 143
+    r: u32 = m % c;       // 7
+    return r;
+}

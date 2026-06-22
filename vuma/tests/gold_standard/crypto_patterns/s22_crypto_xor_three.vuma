@@ -1,0 +1,17 @@
+// s22_crypto_xor_three.vuma — 0x55 ^ 0x33 ^ 0x0F = 0x66 ^ 0x0F = 0x69 = 105
+// Expected exit code: 105
+//
+// Three-byte XOR chain. (85 ^ 51) = 102 (0x66); 102 ^ 15 = 105 (0x69).
+// All operands loaded into u64 variables first (immediate-RHS bitwise
+// drop bug workaround). Distinct from s18_crypto_xor_pair (two-byte
+// 0xA5^0x3C = 153) and s14_crypto_xor_two_keys (three-way xor, different
+// values).
+
+fn main() -> i32 {
+    a: u64 = 85;          // 0x55
+    b: u64 = 51;          // 0x33
+    c: u64 = 15;          // 0x0F
+    x: u64 = a ^ b;       // 0x66 = 102
+    r: u64 = x ^ c;       // 0x69 = 105
+    return r;
+}

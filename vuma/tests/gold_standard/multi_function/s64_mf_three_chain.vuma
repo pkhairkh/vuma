@@ -1,0 +1,30 @@
+// s64_mf_three_chain.vuma — add_seven(40)=47, triple(47)=141, sub_twenty(141)=121
+// Expected exit code: 121
+//
+// Three single-arg helpers chained: add_seven(x)=x+7, triple(x)=x*3,
+// sub_twenty(x)=x-20. main calls add_seven(40) -> 47, triple(47) ->
+// 141, sub_twenty(141) -> 121. Distinct from s62_mf_double_then_add
+// (115), s62_mf_three_chain (80) and s62_mf_two_helpers_add (150).
+
+fn add_seven(x: u32) -> u32 {
+    n: u32 = 7;
+    r: u32 = x + n;
+    return r;
+}
+fn triple(x: u32) -> u32 {
+    n: u32 = 3;
+    r: u32 = x * n;
+    return r;
+}
+fn sub_twenty(x: u32) -> u32 {
+    n: u32 = 20;
+    r: u32 = x - n;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = add_seven(40);     // 47
+    b: u32 = triple(a);         // 141
+    r: u32 = sub_twenty(b);     // 121
+    return r;
+}

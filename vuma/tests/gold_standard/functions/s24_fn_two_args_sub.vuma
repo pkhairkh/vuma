@@ -1,0 +1,16 @@
+// s24_fn_two_args_sub.vuma — sub(120, 35) = 85
+// Expected exit code: 85
+//
+// Helper sub(a, b) = a - b. main calls sub(120, 35) -> 85. Two-arg
+// function with subtraction. Distinct from s22_fn_two_args_mul
+// (mul(9, 11) = 99, mul) and s14_fn_two_args_diff (diff, sub).
+
+fn sub(a: u32, b: u32) -> u32 {
+    r: u32 = a - b;
+    return r;
+}
+
+fn main() -> i32 {
+    v: u32 = sub(120, 35);
+    return v;
+}

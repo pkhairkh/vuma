@@ -1,0 +1,14 @@
+// s79_edge_high_bit_or.vuma — 128 | 2 = 130
+// Expected exit code: 130
+//
+// OR the high-bit value 128 (0x80) with 2. 128 | 2 = 130
+// (0x82). Sets bit 1 of 128 -> 130. All operands loaded into
+// u32 variables first (immediate-RHS bitwise drop bug
+// workaround). Distinct from s78_edge_high_bit_or (129),
+// s77_edge_high_bit_or (128) and s76_edge_high_bit_or (129).
+fn main() -> i32 {
+    a: u32 = 128;
+    b: u32 = 2;
+    r: u32 = a | b;        // 130
+    return r;
+}

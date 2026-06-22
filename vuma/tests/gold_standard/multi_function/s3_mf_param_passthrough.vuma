@@ -1,0 +1,15 @@
+// s3_mf_param_passthrough.vuma — function takes 2 params, returns sum
+// Expected exit code: 70  (30 + 40)
+//
+// Helper takes two arguments and returns their sum. main calls it
+// with (30, 40) and returns the result (70).
+
+fn add_two(a: u32, b: u32) -> u32 {
+    s: u32 = a + b;
+    return s;
+}
+
+fn main() -> i32 {
+    v: u32 = add_two(30, 40);
+    return v;
+}

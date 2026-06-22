@@ -1,0 +1,15 @@
+// s73_cf_for_count_17.vuma — for loop runs 17 iterations, count = 17
+// Observed on current x86_64 backend: 0 (FAIL — known bug)
+//
+// Counter starts at 0 and increments by 1 each iteration of a for
+// loop with range 0..17. Known "for-body assignments don't
+// propagate" bug keeps count at 0 -> exit 0. Will exit 17 once
+// fixed. Distinct from s70_cf_for_count_12 (12), s69_cf_for_count_
+// 13 (13) and s74_cf_if_else_const (19).
+fn main() -> i32 {
+    count: u32 = 0;
+    for i in 0..17 {
+        count = count + 1;
+    }
+    return count;
+}

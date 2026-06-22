@@ -1,0 +1,13 @@
+// arith_u32_mul — u32 multiplication with masking
+// Expected exit code: 4
+//
+// 0x10000 * 0x10000 = 0x100000000. Masked to u32 = 0. We add 4 to make the
+// exit code non-zero: result = ((0x10000 * 0x10000) & 0xFFFFFFFF) + 4 = 4.
+
+fn main() -> i32 {
+    a: u32 = 65536;            // 0x10000
+    b: u32 = 65536;            // 0x10000
+    product: u32 = (a * b) & 4294967295;
+    result: u32 = product + 4;
+    return result;
+}

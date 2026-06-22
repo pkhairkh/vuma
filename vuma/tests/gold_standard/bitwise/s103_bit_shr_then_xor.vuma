@@ -1,0 +1,13 @@
+// s103_bit_shr_then_xor.vuma — (0x80 >> 4) ^ 0x09 = 0x08 ^ 0x09 = 0x01 = 1
+// Expected exit code: 1
+//
+// Two-stage bitwise: shift-right then XOR. (128 >> 4) = 8 (0x08); 8 ^ 9 = 1 (0x01). All operands loaded into u32 variables first (immediate-RHS bitwise drop bug workaround).
+// Distinct from s99_bit_shr_then_xor (11).
+fn main() -> i32 {
+    a: u32 = 128;         // 0x80
+    b: u32 = 4;
+    c: u32 = 9;           // 0x09
+    x: u32 = a >> b;      // 0x08 = 8
+    r: u32 = x ^ c;       // 0x01 = 1
+    return r;
+}

@@ -1,0 +1,15 @@
+// cs_store_load_store.vuma — store 42, load, store 99, load again
+// Expected exit code: 99
+//
+// Exercises the store→load→store→load sequence on a single byte slot.
+// After the second store the slot holds 99, so the final load yields 99.
+
+fn main() -> i32 {
+    buf = allocate(8);
+    *(buf + 0) = 42;
+    first: u32 = *(buf + 0);
+    *(buf + 0) = 99;
+    second: u32 = *(buf + 0);
+    free(buf);
+    return second;
+}

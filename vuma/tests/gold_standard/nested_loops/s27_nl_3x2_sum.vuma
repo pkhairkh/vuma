@@ -1,0 +1,17 @@
+// s27_nl_3x2_sum.vuma — 3x2 nested loop, acc = 60 (6 * 10)
+// Observed on current x86_64 backend: 0 (FAIL — known bug)
+//
+// Outer loop 3 iterations, inner loop 2 iterations each -> 6 total. acc
+// increments by 10 each inner iteration -> 60. Known "for-body
+// assignments don't propagate" bug keeps acc at 0. Distinct from
+// s26_nl_3x3_acc (3x3=9) and s22_nl_2x4_count (2x4=8).
+
+fn main() -> i32 {
+    acc: u32 = 0;
+    for i in 0..3 {
+        for j in 0..2 {
+            acc = acc + 10;
+        }
+    }
+    return acc;
+}

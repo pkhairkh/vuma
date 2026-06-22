@@ -1,0 +1,20 @@
+// fn_independent.vuma — two independent functions, sum their results
+// Expected exit code: 7 (3 + 4)
+//
+// Tests two independent leaf functions that do not call each other.
+// main sums their results: f1() + f2() = 3 + 4 = 7.
+
+fn f1() -> u32 {
+    return 3;
+}
+
+fn f2() -> u32 {
+    return 4;
+}
+
+fn main() -> i32 {
+    a: u32 = f1();
+    b: u32 = f2();
+    v: u32 = a + b;
+    return v;
+}

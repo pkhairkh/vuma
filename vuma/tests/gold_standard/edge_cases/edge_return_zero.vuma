@@ -1,0 +1,9 @@
+// edge_return_zero — return 0
+// Expected exit code: 0
+//
+// Edge case: the smallest possible program — main returns the literal
+// 0. Verifies the entry/exit path produces a clean 0 exit code.
+
+fn main() -> i32 {
+    return 0;
+}

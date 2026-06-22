@@ -1,0 +1,11 @@
+// cf_if_false — if with false condition falls through
+// Expected exit code: 0
+//
+// Sanity: false if-body should be skipped.
+
+fn main() -> i32 {
+    if false {
+        return 42;
+    }
+    return 0;
+}

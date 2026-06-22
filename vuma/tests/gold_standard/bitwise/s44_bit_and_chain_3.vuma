@@ -1,0 +1,16 @@
+// s44_bit_and_chain_3.vuma — 0xFF & 0xCC & 0xF0 = 0xC0 = 192
+// Expected exit code: 192
+//
+// Three-way AND chain. 255 & 204 = 204 (0xCC); 204 & 240 = 192 (0xC0).
+// All operands loaded into u64 variables first (immediate-RHS bitwise
+// drop bug workaround). Distinct from s42_bit_xor_chain_3 (xor chain,
+// 240) and s38_bit_xor_chain_3 (xor chain, 105).
+
+fn main() -> i32 {
+    a: u64 = 255;          // 0xFF
+    b: u64 = 204;          // 0xCC
+    c: u64 = 240;          // 0xF0
+    x: u64 = a & b;        // 0xCC = 204
+    r: u64 = x & c;        // 0xC0 = 192
+    return r;
+}

@@ -1,0 +1,14 @@
+// s7_edge_add_to_max.vuma — 200 + 55 = 255 (max U8)
+// Expected exit code: 255
+//
+// Add two values to reach the maximum U8 value (255). Tests that
+// the codegen can produce and return the highest U8 via addition
+// without truncation. Distinct from s5_edge_255_minus_1 (254 via
+// subtraction) and s6_edge_max_byte (literal 255 returned directly).
+
+fn main() -> i32 {
+    a: u32 = 200;
+    b: u32 = 55;
+    r: u32 = a + b;   // 255
+    return r;
+}

@@ -1,0 +1,14 @@
+// s47_crypto_or_mask.vuma — 0xC0 | 0x30 = 0xF0 = 240
+// Expected exit code: 240
+//
+// OR-combine of the high nibble positions. 192 | 48 = 240 (0xF0).
+// All operands loaded into u64 variables first (immediate-RHS
+// bitwise drop bug workaround). Distinct from s46_crypto_nibble_
+// clear (192) and s42_crypto_shl_then_xor.
+
+fn main() -> i32 {
+    a: u64 = 192;          // 0xC0
+    b: u64 = 48;           // 0x30
+    r: u64 = a | b;        // 0xF0 = 240
+    return r;
+}

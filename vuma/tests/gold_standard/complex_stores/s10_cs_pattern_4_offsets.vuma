@@ -1,0 +1,26 @@
+// s10_cs_pattern_4_offsets.vuma — 4 offsets in 32-byte buf, sum = 100
+// Expected exit code (correct): 100  (10 + 20 + 30 + 40)
+// Observed on current x86_64 backend: non-deterministic (FAIL — known
+//   U8-truncation bug on `*(p+offset)` stores/loads with u64 type)
+//
+// 32-byte buffer. Store 10/20/30/40 at offsets 0/8/16/24, load all
+// four, sum -> 100. Distinct from s6_cs_four_offsets (same structure
+// but also non-deterministic on current backend; this test documents
+// the bug explicitly) and s5_cs_long_scatter (different values).
+
+fn main() -> i32 {
+    p = allocate(32);
+    *(p + 0) = 10;
+    *(p + 8) = 20;
+    *(p + 16) = 30;
+    *(p + 24) = 40;
+    a: u64 = *(p + 0);
+    b: u64 = *(p + 8);
+    c: u64 = *(p + 16);
+    d: u64 = *(p + 24);
+    t1: u64 = a + b;
+    t2: u64 = t1 + c;
+    s: u64 = t2 + d;
+    free(p);
+    return s;
+}

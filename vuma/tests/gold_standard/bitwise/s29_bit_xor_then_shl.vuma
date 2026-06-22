@@ -1,0 +1,13 @@
+// s29_bit_xor_then_shl.vuma — (0x0F ^ 0x30) << 2 = 0x3F << 2 = 0xFC = 252
+// Expected exit code: 252
+//
+// Two-stage bitwise: XOR then SHL. (15 ^ 48) = 63 (0x3F); 63 << 2 = 252 (0xFC). All operands loaded into u64 variables first (immediate-RHS bitwise drop bug workaround). Distinct from s26_bit_shl_then_xor (shl-then-xor, 117) and s22_bit_shl_and_mask (shl-then-and).
+
+fn main() -> i32 {
+    a: u64 = 15;          // 0x0F
+    b: u64 = 48;          // 0x30
+    c: u64 = 2;
+    x: u64 = a ^ b;       // 0x3F = 63
+    r: u64 = x << c;      // 0xFC = 252
+    return r;
+}

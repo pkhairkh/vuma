@@ -1,0 +1,25 @@
+// s77_mf_double_then_add.vuma — add_fourteen(double(70)) + add_fourteen(50) = 140 + 64 = 204
+// Expected exit code: 204
+//
+// Two single-arg helpers. double(x) = x * 2; add_fourteen(x) =
+// x + 14. main calls double(70) -> 140 and add_fourteen(50) ->
+// 64; sum = 204. Distinct from s70_mf_double_then_add (95),
+// s66_mf_double_then_sub (140) and s74_mf_double_then_add (226).
+
+fn double(x: u32) -> u32 {
+    n: u32 = 2;
+    r: u32 = x * n;
+    return r;
+}
+fn add_fourteen(x: u32) -> u32 {
+    n: u32 = 14;
+    r: u32 = x + n;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = double(70);          // 140
+    b: u32 = add_fourteen(50);    // 64
+    r: u32 = a + b;               // 204
+    return r;
+}

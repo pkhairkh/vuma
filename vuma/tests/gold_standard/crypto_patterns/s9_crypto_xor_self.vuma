@@ -1,0 +1,13 @@
+// s9_crypto_xor_self.vuma — 0x42 ^ 0x42 = 0
+// Expected exit code: 0
+//
+// Any byte XORed with itself cancels to 0 — the basic
+// self-cancellation property used in XOR-based stream ciphers.
+// All operands loaded into variables first. Distinct from
+// s5_crypto_parity_xor (multi-byte fold, non-zero result).
+
+fn main() -> i32 {
+    v: u64 = 66;      // 0x42
+    r: u64 = v ^ v;   // 0x00 = 0
+    return r;
+}

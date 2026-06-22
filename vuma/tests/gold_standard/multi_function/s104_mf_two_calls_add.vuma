@@ -1,0 +1,17 @@
+// s104_mf_two_calls_add.vuma — f(5) + f(11) = 6 + 12 = 18
+// Expected exit code: 18
+//
+// Single helper f(x) = x + 1. main calls it twice and adds: f(5) + f(11) = 6 + 12 = 18.
+// Distinct from s102_mf_three_chain (13), s102_mf_two_calls_add (6), s102_mf_two_helpers_sub (1).
+fn f(x: u32) -> u32 {
+    k: u32 = 1;
+    r: u32 = x + k;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = f(5);          // 6
+    b: u32 = f(11);          // 12
+    s: u32 = a + b;          // 18
+    return s;
+}

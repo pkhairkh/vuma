@@ -1,0 +1,13 @@
+// s100_edge_and_self.vuma — 0x55 & 0x55 = 0x55 = 85 (AND with self preserves bits)
+// Expected exit code: 85
+//
+// Edge case: AND with self preserves all bits. 85 & 85 =
+// 85 (0x55). All operands loaded into u32 variables first
+// (immediate-RHS bitwise drop bug workaround).
+// Distinct from s97_edge_max_and_val (90), s94_edge_max_and_val (108), s90_edge_max_xor_val (23).
+fn main() -> i32 {
+    a: u32 = 85;           // 0x55
+    b: u32 = 85;           // 0x55
+    r: u32 = a & b;        // 0x55 = 85
+    return r;
+}

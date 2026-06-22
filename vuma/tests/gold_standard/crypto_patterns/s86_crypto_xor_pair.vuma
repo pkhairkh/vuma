@@ -1,0 +1,13 @@
+// s86_crypto_xor_pair.vuma — 0xA5 ^ 0x3C = 0x99 = 153
+// Expected exit code: 153
+//
+// XOR two byte constants: 165 ^ 60 = 153 (0x99). All operands
+// loaded into u32 variables first (immediate-RHS bitwise drop
+// bug workaround). Distinct from s82_crypto_xor_then_and (76),
+// s78_crypto_xor_pair (90) and s74_crypto_xor_pair (130).
+fn main() -> i32 {
+    a: u32 = 165;          // 0xA5
+    b: u32 = 60;           // 0x3C
+    r: u32 = a ^ b;        // 0x99 = 153
+    return r;
+}

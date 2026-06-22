@@ -1,0 +1,26 @@
+// s13_mem_three_buf_sum.vuma — three cells, sum of loads = 180 (30+60+90)
+// Expected exit code: 180
+//
+// Three independent 8-byte cells. Store 30/60/90 via `*ptr = literal`,
+// load all three, sum -> 180. Uses `*ptr = literal` form (no offsets)
+// to avoid the *(ptr+N) store-drop bug. Distinct from
+// s9_mem_two_buf_sum (2 cells, values 11/22) and s10_mem_quad_buf_sum
+// (4 cells, values 10/20/30/40).
+
+fn main() -> i32 {
+    a = allocate(8);
+    b = allocate(8);
+    c = allocate(8);
+    *a = 30;
+    *b = 60;
+    *c = 90;
+    va: u64 = *a;
+    vb: u64 = *b;
+    vc: u64 = *c;
+    t: u64 = va + vb;
+    s: u64 = t + vc;
+    free(a);
+    free(b);
+    free(c);
+    return s;
+}

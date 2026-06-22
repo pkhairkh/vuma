@@ -1,0 +1,21 @@
+// s12_atom_pair_sum.vuma — two atomic cells, sum loads = 90 (25 + 65)
+// Expected exit code: 0 (current buggy backend)
+// Expected exit code (correct, post-bridge-fix): 90
+//
+// Two 8-byte cells. atomic_store 25 in c1, 65 in c2. Load both,
+// sum -> 90. Current backend returns 0 + 0 = 0. Distinct from
+// s13_atom_two_cells_sum (values 50/70) and s9_atom_two_cells_xor
+// (XOR, not sum).
+
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    atomic_store(c1, 25);
+    atomic_store(c2, 65);
+    a = atomic_load(c1);
+    b = atomic_load(c2);
+    s = a + b;
+    free(c1);
+    free(c2);
+    return s;
+}

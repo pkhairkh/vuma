@@ -1,0 +1,14 @@
+// s60_edge_zero_and_zero.vuma — 0 & 0 = 0
+// Expected exit code: 0
+//
+// AND two zero operands. 0 & 0 = 0. All operands loaded into u32
+// variables first (immediate-RHS bitwise drop bug workaround).
+// Distinct from s58_edge_zero_or_zero (0) and s57_edge_zero_or_max
+// (255).
+
+fn main() -> i32 {
+    a: u32 = 0;
+    b: u32 = 0;
+    r: u32 = a & b;        // 0
+    return r;
+}

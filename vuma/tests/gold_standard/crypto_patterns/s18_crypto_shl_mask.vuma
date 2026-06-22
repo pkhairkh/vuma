@@ -1,0 +1,17 @@
+// s18_crypto_shl_mask.vuma — (0x07 << 5) & 0xF0 = 0xE0 & 0xF0 = 0xE0 = 224
+// Expected exit code: 224
+//
+// Shift a small value into the high nibble then mask off the low
+// nibble. (7 << 5) = 224 (0xE0); 224 & 240 = 224 (0xE0). The mask is
+// loaded into a variable first to dodge the immediate-RHS bitwise
+// drop bug. Distinct from s14_crypto_shl_then_xor (shl-then-xor) and
+// s14_crypto_low_nibble (mask-low-nibble via &).
+
+fn main() -> i32 {
+    v: u64 = 7;           // 0x07
+    s: u64 = 5;
+    m: u64 = 240;         // 0xF0
+    x: u64 = v << s;      // 0xE0 = 224
+    r: u64 = x & m;       // 0xE0 = 224
+    return r;
+}

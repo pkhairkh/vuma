@@ -1,0 +1,11 @@
+// arith_u32_overflow — u32 overflow behavior
+// Expected exit code: 0
+//
+// 0xFFFFFFFF + 1 wraps to 0 in u32 arithmetic. The result is masked to 0.
+
+fn main() -> i32 {
+    max_u32: u32 = 4294967295;
+    one: u32 = 1;
+    overflow: u32 = (max_u32 + one) & 4294967295;
+    return overflow & 255;
+}

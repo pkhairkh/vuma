@@ -1,0 +1,15 @@
+// s17_crypto_nibble_clear_high.vuma — 0xCD & 0x0F = 0x0D = 13
+// Expected exit code: 13
+//
+// Mask out the high nibble of 0xCD (205) to isolate the low nibble.
+// (205 & 15) = 13 (0x0D). The mask is loaded into a variable first to
+// dodge the immediate-RHS bitwise drop bug. Distinct from
+// s14_crypto_low_nibble (extracts low nibble of 0x9E) and
+// s9_crypto_nibble_clear (clears low nibble via & 0xF0).
+
+fn main() -> i32 {
+    v: u64 = 205;         // 0xCD
+    m: u64 = 15;          // 0x0F
+    r: u64 = v & m;       // 0x0D = 13
+    return r;
+}

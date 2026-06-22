@@ -1,0 +1,18 @@
+// s60_crypto_and_then_xor.vuma — (0xFF & 0xF0) ^ 0x30 = 0xF0 ^ 0x30 = 0xC0 = 192
+// Expected exit code: 192
+//
+// Two-stage crypto mix: AND the all-ones byte with the high-nibble
+// mask to build 0xF0, then XOR 0x30 to flip two bits. (255 & 240) =
+// 240 (0xF0); 240 ^ 48 = 192 (0xC0). All operands loaded into u64
+// variables first (immediate-RHS bitwise drop bug workaround).
+// Distinct from s58_crypto_or_then_xor (127) and s57_crypto_nibble_
+// clear (5).
+
+fn main() -> i32 {
+    a: u64 = 255;          // 0xFF
+    b: u64 = 240;          // 0xF0
+    c: u64 = 48;           // 0x30
+    x: u64 = a & b;        // 0xF0 = 240
+    r: u64 = x ^ c;        // 0xC0 = 192
+    return r;
+}

@@ -1,0 +1,16 @@
+// s60_ls_overwrite_value.vuma — store 50, overwrite to 200, load = 200
+// Expected exit code: 200
+//
+// Single 8-byte allocation treated as one "node". Store 50 via
+// `*ptr = literal`, then overwrite with 200. Load and return 200.
+// Uses `*ptr = literal` form (no offsets). Distinct from s58_ls_
+// overwrite_value (180) and s57_ls_overwrite_value (90).
+
+fn main() -> i32 {
+    n1 = allocate(8);
+    *n1 = 50;
+    *n1 = 200;
+    a: u64 = *n1;
+    free(n1);
+    return a;
+}

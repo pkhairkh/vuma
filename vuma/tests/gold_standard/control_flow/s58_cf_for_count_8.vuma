@@ -1,0 +1,16 @@
+// s58_cf_for_count_8.vuma — for loop runs 8 iterations, count = 8
+// Observed on current x86_64 backend: 0 (FAIL — known bug)
+// 
+// Counter starts at 0 and increments by 1 each iteration of a for
+// loop with range 0..8. Known "for-body assignments don't propagate"
+// bug keeps count at 0 -> exit 0. Will exit 8 once fixed. Distinct
+// from s51_cf_while_acc_4 (24), s51_cf_for_count_7 (7) and s51_cf_if_
+// else_const (70).
+
+fn main() -> i32 {
+    count: u32 = 0;
+    for i in 0..8 {
+        count = count + 1;
+    }
+    return count;
+}

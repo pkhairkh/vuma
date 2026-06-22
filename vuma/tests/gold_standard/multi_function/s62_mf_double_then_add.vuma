@@ -1,0 +1,26 @@
+// s62_mf_double_then_add.vuma — double(35)=70, add_ten(35)=45; 70+45=115
+// Expected exit code: 115
+// 
+// Two single-arg helpers called on the same literal then summed:
+// double(x) = x * 2; add_ten(x) = x + 10. main calls double(35)
+// -> 70 and add_ten(35) -> 45; sum = 115. Distinct from s51_mf_double_
+// then_add (120), s58_mf_triple_then_add (120) and s55_mf_double_then_
+// add (120).
+
+fn double(x: u32) -> u32 {
+    n: u32 = 2;
+    r: u32 = x * n;
+    return r;
+}
+fn add_ten(x: u32) -> u32 {
+    n: u32 = 10;
+    r: u32 = x + n;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = double(35);        // 70
+    b: u32 = add_ten(35);       // 45
+    r: u32 = a + b;             // 115
+    return r;
+}

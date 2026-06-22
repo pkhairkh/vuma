@@ -1,0 +1,24 @@
+// s19_conc_three_cells_step4.vuma — three cells, step-4 ascending, sum = 24 (4 + 8 + 12)
+// Expected exit code: 24
+//
+// Three 8-byte cells. Store 4/8/12 (ascending by 4) in c1/c2/c3.
+// Load all three, sum -> 24. Uses `*ptr = literal` form (no offsets).
+// Distinct from s18_conc_three_cells_prime (11/13/17 = 41) and
+// s14_conc_three_cells_even (10/20/30 = 60).
+
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    c3 = allocate(8);
+    *c1 = 4;
+    *c2 = 8;
+    *c3 = 12;
+    a: u64 = *c1;
+    b: u64 = *c2;
+    c: u64 = *c3;
+    s: u64 = a + b + c;
+    free(c1);
+    free(c2);
+    free(c3);
+    return s;
+}

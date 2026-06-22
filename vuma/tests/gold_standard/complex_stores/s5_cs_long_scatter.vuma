@@ -1,0 +1,23 @@
+// s5_cs_long_scatter.vuma — scatter 4 values across 32 bytes, sum = 130
+// Expected exit code: 130  (10 + 20 + 40 + 60)
+//
+// 32-byte buffer. Store 10/20/40/60 at offsets 0/8/16/24. Load all
+// four, sum, return 130. Distinct from s4_cs_three_offsets
+// (3 offsets) and s3_cs_scatter_3_vals (different values).
+
+fn main() -> i32 {
+    buf = allocate(32);
+    *(buf + 0) = 10;
+    *(buf + 8) = 20;
+    *(buf + 16) = 40;
+    *(buf + 24) = 60;
+    a: u64 = *(buf + 0);
+    b: u64 = *(buf + 8);
+    c: u64 = *(buf + 16);
+    d: u64 = *(buf + 24);
+    t1: u64 = a + b;
+    t2: u64 = c + d;
+    s: u64 = t1 + t2;
+    free(buf);
+    return s;
+}

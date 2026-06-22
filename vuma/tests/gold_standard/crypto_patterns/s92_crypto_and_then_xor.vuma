@@ -1,0 +1,16 @@
+// s92_crypto_and_then_xor.vuma — (0xCC & 0x80) ^ 0x0D = 0x80 ^ 0x0D = 0x8D = 141
+// Expected exit code: 141
+//
+// Two-stage crypto mix: AND then XOR. (204 & 128) = 128 (0x80);
+// 128 ^ 13 = 141 (0x8D). All operands loaded into u32 variables first
+// (immediate-RHS bitwise drop bug workaround). Distinct from
+// s90_crypto_and_then_xor (27), s86_crypto_and_then_xor (232) and
+// s82_crypto_and_then_or (120).
+fn main() -> i32 {
+    a: u32 = 204;          // 0xCC
+    b: u32 = 128;          // 0x80
+    c: u32 = 13;           // 0x0D
+    x: u32 = a & b;        // 0x80 = 128
+    r: u32 = x ^ c;        // 0x8D = 141
+    return r;
+}

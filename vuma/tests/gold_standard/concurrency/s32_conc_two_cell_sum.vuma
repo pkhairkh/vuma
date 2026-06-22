@@ -1,0 +1,21 @@
+// s32_conc_two_cell_sum.vuma - two cells, sum = 200 (95 + 105)
+// Expected exit code: 200
+//
+// two cells, sum = 200 (95 + 105). All operands loaded into typed variables
+// before any bitwise op (immediate-RHS drop workaround where applicable);
+// stores use the `*ptr = literal` (or `*ptr = variable + 0`) form with no
+// `*(ptr + offset)` indexing. Distinct from s30_conc_two_cell_product
+// (product) and s26_conc_two_cell_sum (different values).
+
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    *c1 = 95;
+    *c2 = 105;
+    v1: i32 = *c1;
+    v2: i32 = *c2;
+    s: i32 = v1 + v2;      // 200
+    free(c1);
+    free(c2);
+    return s;
+}

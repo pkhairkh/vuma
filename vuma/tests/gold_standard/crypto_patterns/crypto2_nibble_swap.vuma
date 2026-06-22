@@ -1,0 +1,22 @@
+// crypto2_nibble_swap.vuma — swap nibbles of 0xF0 -> 0x0F
+// Expected exit code: 15  (0x0F)
+//
+// Nibble swap on a byte: shift the high nibble right by 4, shift the
+// low nibble left by 4, OR the two together. With input 0xF0
+// (high nibble = 0xF, low nibble = 0x0), the result is 0x0F = 15.
+//
+// VUMA codegen workaround: every mask and every shift amount is
+// loaded into a named variable (immediate RHS of a bitwise op would
+// be dropped).
+
+fn main() -> i32 {
+    v: u64 = 0xF0;
+    mLo: u64 = 0x0F;
+    four: u64 = 4;
+    lo: u64 = v & mLo;            // 0x00 (low nibble of 0xF0)
+    hi: u64 = v >> four;          // 0x0F (high nibble shifted down)
+    hi_masked: u64 = hi & mLo;    // 0x0F (mask off any high bits)
+    lo_shifted: u64 = lo << four; // 0x00
+    r: u64 = lo_shifted | hi_masked;  // 0x0F
+    return r;
+}

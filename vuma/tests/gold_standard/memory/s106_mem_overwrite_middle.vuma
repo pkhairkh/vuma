@@ -1,0 +1,19 @@
+// s106_mem_overwrite_middle.vuma — overwrite c2 to 51, load = 51
+// Expected exit code: 51
+//
+// Three 8-byte cells. Store 100 at c1, store 200 at c2, store 50 at c3, then overwrite c2 to 51. Load c2 -> 51 (the overwritten value). Uses `*ptr = literal` form. Straight-line code only.
+// Distinct from s102_mem_overwrite_last (1), s101_mem_overwrite_middle (33), s100_mem_overwrite_first (71).
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    c3 = allocate(8);
+    *c1 = 100;
+    *c2 = 200;
+    *c3 = 50;
+    *c2 = 51;
+    v: u64 = *c2;          // 51
+    free(c1);
+    free(c2);
+    free(c3);
+    return v;
+}

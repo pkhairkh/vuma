@@ -1,0 +1,15 @@
+// s100_arith_mul_then_add.vuma — (9 * 8) + 5 = 72 + 5 = 77
+// Expected exit code: 77
+//
+// Two-stage arithmetic: multiply then add. 9 * 8 = 72;
+// 72 + 5 = 77. All operands kept as i32 locals. Straight-
+// line arithmetic.
+// Distinct from s97_arith_add_then_div (72), s94_arith_div_then_add (80), s90_arith_add_then_mod (53).
+fn main() -> i32 {
+    a: i32 = 9;
+    b: i32 = 8;
+    c: i32 = 5;
+    m: i32 = a * b;        // 72
+    r: i32 = m + c;        // 77
+    return r;
+}

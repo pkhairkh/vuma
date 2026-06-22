@@ -1,0 +1,21 @@
+// s61_cs_overwrite_first.vuma — store 30, overwrite to 160, plus 50 -> 210
+// Expected exit code: 210
+// 
+// Two 8-byte cells. Store 30 to c1, then overwrite c1 with 160 via
+// `*ptr = literal`; store 50 to c2. Load both, sum -> 210. Uses
+// `*ptr = literal` form. Distinct from s58_cs_two_cell_sum (200),
+// s58_cs_three_cell_diff (120) and s58_cs_overwrite_first (200).
+
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    *c1 = 30;
+    *c1 = 160;
+    *c2 = 50;
+    a: u64 = *c1;
+    b: u64 = *c2;
+    s: u64 = a + b;        // 210
+    free(c1);
+    free(c2);
+    return s;
+}

@@ -1,0 +1,21 @@
+// s100_atom_two_cell_sum.vuma — two cells, atomic sum = 31 (19 + 12)
+// Expected exit code: 0 (current buggy backend)
+// Expected exit code (correct, post-bridge-fix): 31
+//
+// Two 8-byte cells. atomic_store 19/12, atomic_load
+// each, a + b -> 31. On the current backend the loads
+// return 0 -> 0 + 0 = 0 -> exit 0. Will exit 31 once
+// atomics are wired through.
+// Distinct from s97_atom_two_cell_sum (29), s94_atom_overwrite_value (201), s90_atom_overwrite_value (13).
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    atomic_store(c1, 19);
+    atomic_store(c2, 12);
+    a = atomic_load(c1);
+    b = atomic_load(c2);
+    s: i32 = a + b;                   // 31
+    free(c1);
+    free(c2);
+    return s;
+}

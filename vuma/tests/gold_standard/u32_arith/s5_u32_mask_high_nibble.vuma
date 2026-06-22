@@ -1,0 +1,13 @@
+// s5_u32_mask_high_nibble.vuma — 0xAB & 0x0F = 11
+// Expected exit code: 11
+//
+// Mask the high nibble of 0xAB (171). 171 & 15 = 11. The mask is
+// loaded into a variable first to dodge the immediate-RHS bitwise
+// drop bug. Distinct from u32_mask (masks a value to 0xFF).
+
+fn main() -> i32 {
+    v: u32 = 171;    // 0xAB
+    m: u32 = 15;     // 0x0F
+    r: u32 = v & m;  // 0x0B = 11
+    return r;
+}

@@ -1,0 +1,17 @@
+// s23_crypto_and_then_xor.vuma — (0xFF & 0x3C) ^ 0x03 = 0x3C ^ 0x03 = 0x3F = 63
+// Expected exit code: 63
+//
+// AND then XOR. (255 & 60) = 60 (0x3C); 60 ^ 3 = 63 (0x3F). All
+// operands loaded into u64 variables first (immediate-RHS bitwise drop
+// bug workaround). Distinct from s22_crypto_xor_three (3-way xor, value
+// 105) and s24_crypto_and_xor_low (and-then-xor with low byte).
+
+fn main() -> i32 {
+    a: u64 = 255;         // 0xFF
+    b: u64 = 60;          // 0x3C
+    c: u64 = 3;           // 0x03
+    x: u64 = a & b;       // 0x3C = 60
+    r: u64 = x ^ c;       // 0x3F = 63
+    return r;
+}
+

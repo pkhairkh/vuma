@@ -1,0 +1,26 @@
+// conc_func_atomic.vuma — function stores to shared cell, main loads
+// Expected exit code: 42
+//
+// A helper function takes the shared cell by Address and writes 42 to
+// it. main then loads the cell and returns the value. This is the
+// shape of a "writer thread" entry point in a producer-consumer setup;
+// here it is single-threaded but exercises the same calling-convention
+// + cross-function mutation codegen path that real multi-thread code
+// would use.
+//
+// Uses non-atomic `*ptr` per the bridge-gap workaround documented in
+// conc_atomic_basic.vuma. The function stores an immediate (42), which
+// the current codegen handles correctly.
+
+fn store_val(cell: Address) -> i32 {
+    *cell = 42;
+    return 0;
+}
+
+fn main() -> i32 {
+    cell = allocate(8);
+    store_val(cell);
+    val: i32 = *cell;
+    free(cell);
+    return val;
+}

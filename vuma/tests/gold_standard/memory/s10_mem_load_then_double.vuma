@@ -1,0 +1,18 @@
+// s10_mem_load_then_double.vuma — load 50 from buf, return 50*2 = 100
+// Expected exit code: 100
+//
+// Single 8-byte cell. Store 50 via `*ptr` form, load into variable,
+// multiply by 2 (constant loaded into a variable first), return 100.
+// Tests that a loaded value can drive a follow-up arithmetic op.
+// Deterministic on the current backend. Distinct from
+// s4_mem_load_then_store (load-then-store) and s5_mem_load_chain.
+
+fn main() -> i32 {
+    p = allocate(8);
+    *p = 50;
+    v: u64 = *p;
+    two: u64 = 2;
+    r: u64 = v * two;     // 100
+    free(p);
+    return r;
+}

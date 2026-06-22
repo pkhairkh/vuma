@@ -1,0 +1,25 @@
+// s3_ls_marker_tail.vuma — head stores offset + marker, tail stores value
+// Expected exit code: 42
+//
+// 32-byte allocation split into head (offsets 0,8) and tail (offsets 16,24).
+// head.next_offset = 16, head.marker = 7. tail.val = 42, tail.marker = 8.
+// main reads head.next_offset, walks to tail, returns tail.val = 42.
+// All values <= 255.
+
+fn main() -> i32 {
+    block = allocate(32);
+    // head.next_offset = 16
+    *(block + 0) = 16;
+    // head.marker = 7
+    *(block + 8) = 7;
+    // tail.val = 42
+    *(block + 16) = 42;
+    // tail.marker = 8
+    *(block + 24) = 8;
+
+    off: u64 = *(block + 0);
+    val: u64 = *(block + off);
+
+    free(block);
+    return val;
+}

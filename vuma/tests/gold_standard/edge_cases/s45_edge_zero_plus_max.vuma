@@ -1,0 +1,13 @@
+// s45_edge_zero_plus_max.vuma — 0 + 255 = 255
+// Expected exit code: 255
+//
+// Add zero to the max u8 value. 0 + 255 = 255. All operands loaded
+// into u32 variables first. Distinct from s42_edge_zero_or_max (0 |
+// 255 = 255) and s38_edge_zero_plus_one (1).
+
+fn main() -> i32 {
+    a: u32 = 0;
+    b: u32 = 255;
+    r: u32 = a + b;        // 255
+    return r;
+}

@@ -1,0 +1,27 @@
+// s4_struct_two_instances.vuma — two struct instances, sum same field = 80
+// Expected exit code: 80  (30 + 50)
+//
+// Allocates two 16-byte structs (two u64 fields each). Stores
+// {30, 99} in p1, {50, 99} in p2. Loads the x field of each,
+// sums, returns 80. Tests that two distinct struct allocations
+// do not alias.
+
+struct Point {
+    x: u64,
+    y: u64,
+}
+
+fn main() -> i32 {
+    p1 = allocate(16);
+    p2 = allocate(16);
+    *(p1 + 0) = 30;
+    *(p1 + 8) = 99;
+    *(p2 + 0) = 50;
+    *(p2 + 8) = 99;
+    x1: u64 = *(p1 + 0);
+    x2: u64 = *(p2 + 0);
+    s: u64 = x1 + x2;
+    free(p1);
+    free(p2);
+    return s;
+}

@@ -1,0 +1,17 @@
+// s18_arith_div_mod_sum.vuma — (200 / 9) + (200 % 9) = 22 + 2 = 24
+// Expected exit code: 24
+//
+// Two-stage u32 computation: div and mod of the same operands, then
+// sum. 200 / 9 = 22; 200 % 9 = 2; 22 + 2 = 24. All operands loaded
+// into u32 variables first. Distinct from s14_arith_mod_then_add
+// (mod-then-add, single quotient unused) and s13_arith_div_rem_sum
+// (different operands 250/7).
+
+fn main() -> i32 {
+    n: u32 = 200;
+    d: u32 = 9;
+    q: u32 = n / d;       // 22
+    m: u32 = n % d;       // 2
+    s: u32 = q + m;       // 24
+    return s;
+}

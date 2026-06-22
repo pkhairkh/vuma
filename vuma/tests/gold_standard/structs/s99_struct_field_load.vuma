@@ -1,0 +1,18 @@
+// s99_struct_field_load.vuma — store 138, load = 138
+// Expected exit code: 138
+//
+// Single 8-byte struct allocation. Store 138 via `*p = literal`,
+// load and return 138. Uses `*p = literal` form. Distinct from
+// s95_struct_field_load (24), s91_struct_field_load (51) and
+// s87_struct_field_load (135).
+struct Single {
+    a: u64,
+}
+
+fn main() -> i32 {
+    p = allocate(8);
+    *p = 138;
+    v: u64 = *p;           // 138
+    free(p);
+    return v;
+}

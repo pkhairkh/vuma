@@ -1,0 +1,18 @@
+// s7_cf_while_acc_5.vuma — while loop runs 5 iterations, acc = 5
+// Observed on current x86_64 backend: 0 (FAIL — known bug)
+//
+// Counter `i` increments each iteration; `acc` also increments by
+// 1. After 5 iterations i == 5 (loop guard `i < 5` literal becomes
+// false), acc should be 5. Known "while-body assignments don't
+// propagate" bug keeps acc at 0. Distinct from s6_cf_while_dec_count
+// (6 iterations, count) and s5_cf_while_acc (acc accumulates 10s).
+
+fn main() -> i32 {
+    i: u32 = 0;
+    acc: u32 = 0;
+    while i < 5 {
+        acc = acc + 1;
+        i = i + 1;
+    }
+    return acc;
+}

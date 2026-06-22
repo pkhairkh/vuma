@@ -1,0 +1,18 @@
+// s5_nl_2x3_acc.vuma — 2x3 nested loop, sum of all (i + j) = 9
+// Observed on current x86_64 backend: 0 (FAIL — known bug)
+//
+// Outer 2, inner 3. Each iteration adds both i and j to acc.
+// Pairs (i,j): (0,0),(0,1),(0,2),(1,0),(1,1),(1,2). Sum of i+j
+// across all = 0+1+2+1+2+3 = 9. Known bug keeps acc at 0.
+// Distinct from s4_nl_2x3_count (counts iters, doesn't sum i+j).
+
+fn main() -> i32 {
+    acc: u32 = 0;
+    for i in 0..2 {
+        for j in 0..3 {
+            acc = acc + i;
+            acc = acc + j;
+        }
+    }
+    return acc;
+}

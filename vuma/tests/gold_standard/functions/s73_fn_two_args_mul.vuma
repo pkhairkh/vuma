@@ -1,0 +1,16 @@
+// s73_fn_two_args_mul.vuma — mul(11, 12) = 132
+// Expected exit code: 132
+//
+// Helper mul(x, y) = x * y. main calls mul(11, 12) -> 132.
+// Two-arg function that multiplies. Distinct from s70_fn_two_
+// args_mul (220), s69_fn_two_args_sub (105) and s66_fn_two_args_
+// add (175).
+fn mul(x: u32, y: u32) -> u32 {
+    r: u32 = x * y;
+    return r;
+}
+
+fn main() -> i32 {
+    v: u32 = mul(11, 12);
+    return v;
+}

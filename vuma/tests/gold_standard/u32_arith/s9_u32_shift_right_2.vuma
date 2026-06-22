@@ -1,0 +1,14 @@
+// s9_u32_shift_right_2.vuma — 200 >> 2 = 50
+// Expected exit code: 50
+//
+// Shift 200 right by 2 bits -> 50. Shift amount loaded into a
+// variable first to dodge the immediate-RHS bitwise drop bug.
+// Distinct from s6_u32_shift_left_3 (shift left) and
+// s5_u32_add_then_shift (add-then-shift).
+
+fn main() -> i32 {
+    v: u32 = 200;
+    sh: u32 = 2;
+    r: u32 = v >> sh;
+    return r;
+}

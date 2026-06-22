@@ -1,0 +1,21 @@
+// s32_atom_two_cell_or.vuma - two cells, atomic or = 255 (0xAA | 0x55)
+// Observed on current x86_64 backend: 0 (FAIL - known bug)
+//
+// Uses atomic_store/atomic_load on the cell(s). On the current backend
+// atomic_load returns 0, so the computed result is 0 rather than 255. Will
+// exit 255 once the atomics bridge is wired through. Distinct from
+// s30_atom_two_cell_xor (xor, 255) and s26_atom_two_cell_or (different
+// values).
+
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    atomic_store(c1, 170);          // 0xAA
+    atomic_store(c2, 85);           // 0x55
+    a = atomic_load(c1);
+    b = atomic_load(c2);
+    r: i32 = a | b;                 // 0xFF = 255
+    free(c1);
+    free(c2);
+    return r;
+}

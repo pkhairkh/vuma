@@ -1,0 +1,22 @@
+// s24_atom_two_cell_sum.vuma — atomic_store 38/57, sum = 95 (38 + 57)
+// Expected exit code: 0 (current buggy backend)
+// Expected exit code (correct, post-bridge-fix): 95  (38 + 57)
+//
+// Two 8-byte cells. atomic_store 38/57 into each, then atomic_load both
+// and sum. On the current backend all loads return 0 (atomic_store/load
+// not bridged through to x86_64) -> exit 0. Will exit 95 once atomic ops
+// are wired through. Distinct from s22_atom_two_cell_xor (xor, 41^98=75)
+// and s18_atom_two_cell_sum (sum, 23+67=90).
+
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    atomic_store(c1, 38);
+    atomic_store(c2, 57);
+    a = atomic_load(c1);
+    b = atomic_load(c2);
+    s = a + b;
+    free(c1);
+    free(c2);
+    return s;
+}

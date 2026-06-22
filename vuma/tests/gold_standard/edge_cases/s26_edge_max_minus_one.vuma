@@ -1,0 +1,13 @@
+// s26_edge_max_minus_one.vuma — 255 - 1 = 254
+// Expected exit code: 254
+//
+// Decrement of max u8 value. 255 - 1 = 254. All operands loaded into u32
+// variables first. Distinct from s22_edge_max_or_zero (255 | 0 = 255)
+// and s16_edge_max_and_zero (255 & 0 = 0).
+
+fn main() -> i32 {
+    a: u32 = 255;
+    b: u32 = 1;
+    r: u32 = a - b;       // 254
+    return r;
+}

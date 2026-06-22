@@ -1,0 +1,23 @@
+// s6_mf_pass_result.vuma — square_then_inc(3) = 3*3 + 1 = 10
+// Expected exit code: 10
+//
+// square(x) = x * x; inc(x) = x + 1. main calls square(3) -> 9,
+// passes that into inc -> 10. Distinct from s5_mf_three_chain
+// (three helpers).
+
+fn square(x: u32) -> u32 {
+    r: u32 = x * x;
+    return r;
+}
+
+fn inc(x: u32) -> u32 {
+    one: u32 = 1;
+    r: u32 = x + one;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = square(3);   // 9
+    b: u32 = inc(a);      // 10
+    return b;
+}

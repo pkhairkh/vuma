@@ -1,0 +1,22 @@
+// s7_mem_load_xor_two.vuma — 2 cells in 16-byte buf, XOR = 0xAA ^ 0x55 = 0xFF = 255
+// Expected exit code: 255
+//
+// 16-byte buffer treated as two 8-byte slots. Store 0xAA (170) in
+// slot 0 and 0x55 (85) in slot 8. Load both, XOR -> 0xFF = 255.
+// Tests that two distinct byte values stored in memory can be XORed
+// via the u64 type after reload. Uses pointer-arithmetic aliases.
+// Distinct from s5_mem_load_chain (multiplies + adds, no XOR) and
+// s6_mem_load_store_diff (sum, not XOR).
+
+fn main() -> i32 {
+    buf = allocate(16);
+    p0 = buf;
+    p8 = buf + 8;
+    *p0 = 170;    // 0xAA
+    *p8 = 85;     // 0x55
+    a: u64 = *p0;
+    b: u64 = *p8;
+    r: u64 = a ^ b;   // 0xFF = 255
+    free(buf);
+    return r;
+}

@@ -1,0 +1,25 @@
+// s79_atom_three_cell_diff.vuma — three cells, atomic diff = 11 (15 - 2 - 2)
+// Observed on current x86_64 backend: 0 (FAIL — known bug: atomic_load returns 0)
+//
+// Three 8-byte cells. atomic_store 15/2/2, atomic_load each,
+// a - b - c -> 11. On the current backend the loads return 0
+// -> 0 - 0 - 0 = 0 -> exit 0. Will exit 11 once atomics are
+// wired through. Distinct from s78_atom_three_cell_diff (148),
+// s77_atom_three_cell_diff (172) and s76_atom_three_cell_diff
+// (140).
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    c3 = allocate(8);
+    atomic_store(c1, 15);
+    atomic_store(c2, 2);
+    atomic_store(c3, 2);
+    a = atomic_load(c1);
+    b = atomic_load(c2);
+    c = atomic_load(c3);
+    r: i32 = a - b - c;               // 11
+    free(c1);
+    free(c2);
+    free(c3);
+    return r;
+}

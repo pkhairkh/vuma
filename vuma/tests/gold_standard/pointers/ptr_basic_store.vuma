@@ -1,0 +1,15 @@
+// ptr_basic_store.vuma — basic pointer store/load
+// Expected exit code: 42
+//
+// The canonical 4-operation pointer program: allocate, store 42 at
+// offset 0, load it back, free, return. Uses *buf (offset 0) per the
+// test harness constraints (avoiding the known x86_64 codegen bug on
+// *(buf + computed_offset)).
+
+fn main() -> i32 {
+    buf = allocate(8);
+    *buf = 42;
+    val: i32 = *buf;
+    free(buf);
+    return val;
+}

@@ -1,0 +1,24 @@
+// s59_mf_double_then_add.vuma — double(45)=90, add_twelve(90)=102
+// Expected exit code: 102
+//
+// Two single-arg helpers chained: double(x)=x*2, add_twelve(x)=x+12.
+// main calls double(45) -> 90, add_twelve(90) -> 102. Distinct from
+// s58_mf_two_helpers_sub (112), s58_mf_three_chain (50) and s58_mf_
+// triple_then_add (120).
+
+fn double(x: u32) -> u32 {
+    n: u32 = 2;
+    r: u32 = x * n;
+    return r;
+}
+fn add_twelve(x: u32) -> u32 {
+    n: u32 = 12;
+    r: u32 = x + n;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = double(45);       // 90
+    r: u32 = add_twelve(a);    // 102
+    return r;
+}

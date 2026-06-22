@@ -1,0 +1,16 @@
+// s74_crypto_xor_then_shr.vuma — (0xE4 ^ 0x78) >> 2 = 0x9C >> 2 = 0x27 = 39
+// Expected exit code: 39
+//
+// Two-stage crypto op: XOR then shift right. 228 ^ 120 = 156
+// (0x9C); 156 >> 2 = 39 (0x27). All operands loaded into u64
+// variables first (immediate-RHS bitwise drop bug workaround).
+// Distinct from s70_crypto_shr_xor (231), s66_crypto_xor_then_
+// and (99) and s62_crypto_xor_pair (204).
+fn main() -> i32 {
+    a: u64 = 228;          // 0xE4
+    b: u64 = 120;          // 0x78
+    c: u64 = 2;
+    x: u64 = a ^ b;        // 0x9C = 156
+    r: u64 = x >> c;       // 0x27 = 39
+    return r;
+}

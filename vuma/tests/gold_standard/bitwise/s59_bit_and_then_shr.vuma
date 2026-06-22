@@ -1,0 +1,17 @@
+// s59_bit_and_then_shr.vuma — (0xCC & 0xF0) >> 4 = 0xC0 >> 4 = 12
+// Expected exit code: 12
+//
+// Two-stage bitwise: AND then shift right. (204 & 240) = 192 (0xC0);
+// 192 >> 4 = 12 (0x0C). All operands loaded into u64 variables first
+// (immediate-RHS bitwise drop bug workaround). Distinct from s58_bit_
+// and_then_xor (127), s58_bit_or_then_shr (48) and s58_bit_xor_then_
+// and (255).
+
+fn main() -> i32 {
+    a: u64 = 204;          // 0xCC
+    b: u64 = 240;          // 0xF0
+    c: u64 = 4;
+    x: u64 = a & b;        // 0xC0 = 192
+    r: u64 = x >> c;       // 0x0C = 12
+    return r;
+}

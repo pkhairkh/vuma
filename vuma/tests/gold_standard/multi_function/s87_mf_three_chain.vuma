@@ -1,0 +1,29 @@
+// s87_mf_three_chain.vuma — f3(f2(f1(0))) = f3(f2(5)) = f3(35) = 105
+// Expected exit code: 105
+//
+// Three single-arg helpers chained. f1(x) = x + 5; f2(x) = x +
+// 30; f3(x) = x + 70. main calls f3(f2(f1(0))) -> 0 + 5 + 30
+// + 70 = 105. Distinct from s86_mf_three_chain (130), s82_mf_
+// three_chain (155) and s78_mf_three_chain (5).
+fn f1(x: u32) -> u32 {
+    n: u32 = 5;
+    r: u32 = x + n;
+    return r;
+}
+fn f2(x: u32) -> u32 {
+    n: u32 = 30;
+    r: u32 = x + n;
+    return r;
+}
+fn f3(x: u32) -> u32 {
+    n: u32 = 70;
+    r: u32 = x + n;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = f1(0);          // 5
+    b: u32 = f2(a);          // 35
+    c: u32 = f3(b);          // 105
+    return c;
+}

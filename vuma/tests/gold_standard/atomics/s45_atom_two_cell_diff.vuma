@@ -1,0 +1,22 @@
+// s45_atom_two_cell_diff.vuma — two cells, atomic diff = 135 (180 - 45)
+// Expected exit code: 0 (current buggy backend)
+// Expected exit code (correct, post-bridge-fix): 135
+//
+// Two 8-byte cells. atomic_store 180/45, atomic_load each, subtract
+// -> 135. On the current backend the loads return 0 -> exit 0. Will
+// exit 135 once atomics are wired through. Distinct from
+// s42_atom_two_cell_sum (sum, 175) and s38_atom_two_cell_diff (diff,
+// 95).
+
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    atomic_store(c1, 180);
+    atomic_store(c2, 45);
+    a = atomic_load(c1);
+    b = atomic_load(c2);
+    d: i32 = a - b;                  // 135
+    free(c1);
+    free(c2);
+    return d;
+}

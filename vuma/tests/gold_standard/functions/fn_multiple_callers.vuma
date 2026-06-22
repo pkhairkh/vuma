@@ -1,0 +1,25 @@
+// fn_multiple_callers.vuma — two functions both call a third, sum results
+// Expected exit code: 9
+//
+// Tests that a single helper function can be invoked from two distinct
+// callers (caller1, caller2), each with different arguments. The results
+// are summed in main: helper(4) + helper(5) = 4 + 5 = 9.
+
+fn helper(x: u32) -> u32 {
+    return x;
+}
+
+fn caller1() -> u32 {
+    return helper(4);
+}
+
+fn caller2() -> u32 {
+    return helper(5);
+}
+
+fn main() -> i32 {
+    a: u32 = caller1();
+    b: u32 = caller2();
+    v: u32 = a + b;
+    return v;
+}

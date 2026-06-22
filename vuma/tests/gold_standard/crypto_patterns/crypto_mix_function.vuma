@@ -1,0 +1,17 @@
+// crypto_mix_function.vuma — simple hash mix: a + b * 2
+// Expected exit code: 42
+//
+// A trivial 2-input mix function: hash(a, b) = a + b*2. Used as a
+// poor-man's combiner in non-cryptographic hash tables and as a smoke
+// test for the multiply-add codegen path. With a = 40, b = 1:
+//   b*2 = 2
+//   a + b*2 = 40 + 2 = 42.
+
+fn main() -> i32 {
+    a: u64 = 40;
+    b: u64 = 1;
+    two: u64 = 2;
+    b2: u64 = b * two;             // 1 * 2 = 2
+    result: u64 = a + b2;          // 40 + 2 = 42
+    return result;
+}

@@ -1,0 +1,13 @@
+// edge2_store_zero — store 0, load, return
+// Expected exit code: 0
+//
+// Edge case: storing the literal zero. Confirms that 0 is not confused
+// with an uninitialized slot during the load.
+
+fn main() -> i32 {
+    buf = allocate(8);
+    *buf = 0;
+    val: i32 = *buf;
+    free(buf);
+    return val;
+}

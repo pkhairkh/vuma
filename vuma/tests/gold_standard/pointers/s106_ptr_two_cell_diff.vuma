@@ -1,0 +1,17 @@
+// s106_ptr_two_cell_diff.vuma — store 128, 69 in 2 cells, 128-69 = 59
+// Expected exit code: 59
+//
+// Two 8-byte cells. Store 128 at p1, store 69 at p2, load each, return 128 - 69 = 59. Uses `*ptr = literal` form. Straight-line code only.
+// Distinct from s102_ptr_two_cell_diff (127), s101_ptr_two_cell_or (192), s100_ptr_two_cell_sum (37).
+fn main() -> i32 {
+    p1 = allocate(8);
+    p2 = allocate(8);
+    *p1 = 128;
+    *p2 = 69;
+    a: i32 = *p1;          // 128
+    b: i32 = *p2;          // 69
+    d: i32 = a - b;        // 59
+    free(p1);
+    free(p2);
+    return d;
+}

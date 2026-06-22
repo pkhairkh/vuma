@@ -1,0 +1,17 @@
+// s19_u32_shl_then_and.vuma — (0x07 << 3) & 0x3C = 0x38 & 0x3C = 0x38 = 56
+// Expected exit code: 56
+//
+// SHL-then-AND. (7 << 3) = 56 (0x38); 56 & 60 = 56 (0x38). All
+// operands (including the shift amount) loaded into u32 variables
+// first (immediate-RHS bitwise drop bug workaround). Distinct from
+// s18_u32_shl_then_or (shl-then-or) and s14_u32_xor_then_shl
+// (xor-then-shl).
+
+fn main() -> i32 {
+    v: u32 = 7;           // 0x07
+    s: u32 = 3;
+    m: u32 = 60;          // 0x3C
+    x: u32 = v << s;      // 0x38 = 56
+    r: u32 = x & m;       // 0x38 = 56
+    return r;
+}

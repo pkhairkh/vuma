@@ -1,0 +1,16 @@
+// s43_u32_shl_then_add.vuma — (3 << 4) + 20 = 48 + 20 = 68
+// Expected exit code: 68
+//
+// Two-stage u32 computation: shift-left then add. (3 << 4) = 48;
+// 48 + 20 = 68. All operands loaded into u32 variables first
+// (immediate-RHS bitwise drop bug workaround). Distinct from
+// s42_u32_shl_then_add (210) and s38_u32_shl_then_xor (210).
+
+fn main() -> i32 {
+    a: u32 = 3;
+    b: u32 = 4;
+    c: u32 = 20;
+    x: u32 = a << b;       // 48
+    r: u32 = x + c;        // 68
+    return r;
+}

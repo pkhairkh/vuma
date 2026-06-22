@@ -1,0 +1,15 @@
+// edge2_empty_func — call empty function, return 0
+// Expected exit code: 0
+//
+// Edge case: a void function with no body (just returns). main calls
+// it for its side effect (none) and returns 0. Exercises the call /
+// ret path with an empty callee frame.
+
+fn noop() {
+    return;
+}
+
+fn main() -> i32 {
+    noop();
+    return 0;
+}

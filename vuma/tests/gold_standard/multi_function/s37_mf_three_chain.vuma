@@ -1,0 +1,29 @@
+// s37_mf_three_chain.vuma — f3(f2(f1(40))) = f3(f2(45)) = f3(90) = 86
+// Expected exit code: 86
+//
+// Deterministic test in the multi_function category. All operands loaded into typed
+// variables before any bitwise op; all stores use `*ptr = literal` (or the
+// `*ptr = variable + 0` workaround). Result lands in 0-255.
+// Distinct from s33_mf_three_chain (add-mul-sub, 67) and s30_mf_three_chain (different ops).
+fn f1(x: u32) -> u32 {
+    n: u32 = 5;
+    r: u32 = x + n;
+    return r;
+}
+fn f2(x: u32) -> u32 {
+    n: u32 = 2;
+    r: u32 = x * n;
+    return r;
+}
+fn f3(x: u32) -> u32 {
+    n: u32 = 4;
+    r: u32 = x - n;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = f1(40);      // 45
+    b: u32 = f2(a);       // 90
+    c: u32 = f3(b);       // 86
+    return c;
+}

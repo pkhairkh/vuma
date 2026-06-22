@@ -1,0 +1,13 @@
+// s4_bit_clear_with_mask.vuma — 0xFF & 0xF0 = 0xF0 = 240
+// Expected exit code: 240
+//
+// "Clear low nibble" pattern implemented as AND with a mask of 0xF0.
+// Both operands are loaded into variables to dodge the immediate-RHS
+// bitwise drop bug.
+
+fn main() -> i32 {
+    a: u64 = 255;     // 0xFF
+    m: u64 = 240;     // 0xF0
+    r: u64 = a & m;   // 0xF0 = 240
+    return r;
+}

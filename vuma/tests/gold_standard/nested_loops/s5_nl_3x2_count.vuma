@@ -1,0 +1,16 @@
+// s5_nl_3x2_count.vuma — 3x2 nested loop, count iterations = 6
+// Observed on current x86_64 backend: 0 (FAIL — known bug)
+//
+// Outer 3 iterations, inner 2 each -> 6 total iterations. Counter
+// increments by 1 each iteration. Known bug keeps count at 0.
+// Distinct from s4_nl_3x3_sum (3x3, sums j).
+
+fn main() -> i32 {
+    count: u32 = 0;
+    for i in 0..3 {
+        for j in 0..2 {
+            count = count + 1;
+        }
+    }
+    return count;
+}

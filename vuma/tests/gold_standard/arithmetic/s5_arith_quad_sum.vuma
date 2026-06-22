@@ -1,0 +1,18 @@
+// s5_arith_quad_sum.vuma — 5 + 5 + 5 + 5 = 20
+// Expected exit code: 20
+//
+// Four-way addition chain. Each addition yields an intermediate
+// local, then the chain bottoms out in `total`. All values well
+// inside U8 range; no memory access, so the *(buf+offset) U8
+// truncation bug doesn't apply.
+
+fn main() -> i32 {
+    a: u32 = 5;
+    b: u32 = 5;
+    c: u32 = 5;
+    d: u32 = 5;
+    t1: u32 = a + b;
+    t2: u32 = t1 + c;
+    total: u32 = t2 + d;
+    return total;
+}

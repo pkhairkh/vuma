@@ -1,0 +1,13 @@
+// s102_fn_zero_arg_lit.vuma — z() = 6
+// Expected exit code: 6
+//
+// Zero-argument helper z() returns the literal 6. main calls z() and returns 6. Straight-line call path.
+// Distinct from s101_fn_one_arg_mul (55), s101_fn_two_args_add (75), s101_fn_zero_arg_lit (33).
+fn z() -> u32 {
+    return 6;
+}
+
+fn main() -> i32 {
+    v: u32 = z();          // 6
+    return v;
+}

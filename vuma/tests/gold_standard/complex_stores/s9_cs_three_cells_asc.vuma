@@ -1,0 +1,27 @@
+// s9_cs_three_cells_asc.vuma — three cells, ascending values, sum = 45
+// Expected exit code: 45  (5 + 15 + 25)
+//
+// Three independent 8-byte cells. Store 5/15/25 (ascending by 10)
+// via `*ptr = literal`. Load all three, sum, return 45. Uses
+// separate allocations per "slot" because the current x86_64
+// backend drops stores through the `*(ptr + N) = literal` form
+// (only `*ptr = literal` and `*ptr = variable + 0` round-trip).
+// Distinct from s4_cs_three_offsets (uses *(buf+N) form, values
+// 15/25/50 = 90) and s5_conc_three_cells (values 10/20/30).
+
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    c3 = allocate(8);
+    *c1 = 5;
+    *c2 = 15;
+    *c3 = 25;
+    a: u64 = *c1;
+    b: u64 = *c2;
+    c: u64 = *c3;
+    s: u64 = a + b + c;
+    free(c1);
+    free(c2);
+    free(c3);
+    return s;
+}

@@ -1,0 +1,42 @@
+// mem_bitmap.vuma — bitmap operations in memory
+// Expected exit code: 0
+//
+// Uses a 1-byte buffer as an 8-bit bitmap. Sets bits 0, 2, 4, 6 and
+// verifies they are set. Then clears bit 2 and verifies it's clear.
+// Bitmap value with bits 0,2,4,6 set = 0b01010101 = 0x55.
+// After clearing bit 2: 0b01010001 = 0x51.
+
+fn main() -> i32 {
+    buf = allocate(1);
+    *(buf + 0) = 0;
+    // Set bits 0, 2, 4, 6
+    bit0: u32 = 1 << 0;
+    bit2: u32 = 1 << 2;
+    bit4: u32 = 1 << 4;
+    bit6: u32 = 1 << 6;
+    cur: u32 = *(buf + 0);
+    cur = cur | bit0;
+    cur = cur | bit2;
+    cur = cur | bit4;
+    cur = cur | bit6;
+    *(buf + 0) = cur;
+    // Verify bit 0 is set
+    v: u32 = *(buf + 0);
+    if (v & bit0) == 0 { return 1; }
+    if (v & bit2) == 0 { return 1; }
+    if (v & bit4) == 0 { return 1; }
+    if (v & bit6) == 0 { return 1; }
+    // Clear bit 2
+    cur2: u32 = *(buf + 0);
+    cur2 = cur2 & (~bit2);
+    *(buf + 0) = cur2;
+    v2: u32 = *(buf + 0);
+    if (v2 & bit2) != 0 { return 1; }
+    // Final value should be 0x51 (0b01010001)
+    if v2 == 0x51 {
+        free(buf);
+        return 0;
+    }
+    free(buf);
+    return 1;
+}

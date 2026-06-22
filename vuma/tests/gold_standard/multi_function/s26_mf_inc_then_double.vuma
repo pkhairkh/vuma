@@ -1,0 +1,24 @@
+// s26_mf_inc_then_double.vuma — double(inc(20)) = double(21) = 42
+// Expected exit code: 42
+//
+// Two single-arg helpers composed: inc(x) = x + 1; double(x) = x * 2.
+// main calls double(inc(20)) -> 42. Distinct from s22_mf_double_then_inc
+// (inc(double(x)), reversed order) and s18_mf_helper_double (single
+// helper, single call).
+
+fn inc(x: u32) -> u32 {
+    n: u32 = 1;
+    r: u32 = x + n;
+    return r;
+}
+fn double(x: u32) -> u32 {
+    n: u32 = 2;
+    r: u32 = x * n;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = inc(20);     // 21
+    r: u32 = double(a);   // 42
+    return r;
+}

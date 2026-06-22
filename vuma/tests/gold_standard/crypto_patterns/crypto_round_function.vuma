@@ -1,0 +1,30 @@
+// crypto_round_function.vuma — simple round function: XOR + shift + add
+// Expected exit code: 42
+//
+// A Feistel-like round function typically combines the input with a
+// round key via XOR, then mixes with a shift, then adds a constant.
+// This straight-line test simulates one round on a single 8-bit half:
+//   t1 = x ^ k          // XOR with round key
+//   t2 = t1 << 1        // shift-mix
+//   t3 = t2 + c         // add constant
+// We pick x = 5, k = 12, c = 20:
+//   t1 = 5 ^ 12 = 9
+//   t2 = 9 << 1 = 18
+//   t3 = 18 + 20 = 38  (off by 4)
+// Adjusting: x = 6, k = 12, c = 20:
+//   t1 = 6 ^ 12 = 10
+//   t2 = 10 << 1 = 20
+//   t3 = 20 + 22 = 42  (with c = 22)
+// Final chosen inputs: x = 6, k = 12, c = 22.
+// All shift amounts and constants are loaded into named variables.
+
+fn main() -> i32 {
+    x: u64 = 6;
+    k: u64 = 12;
+    c: u64 = 22;
+    one: u64 = 1;
+    t1: u64 = x ^ k;               // 6 ^ 12 = 10
+    t2: u64 = t1 << one;           // 10 << 1 = 20
+    t3: u64 = t2 + c;              // 20 + 22 = 42
+    return t3;
+}

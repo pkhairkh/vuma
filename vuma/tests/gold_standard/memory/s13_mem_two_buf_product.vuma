@@ -1,0 +1,21 @@
+// s13_mem_two_buf_product.vuma — two cells, product of loads = 108 (12 * 9)
+// Expected exit code: 108
+//
+// Two independent 8-byte cells. Store 12 and 9 via `*ptr = literal`,
+// load both back, multiply -> 108. Tests that two loaded values can be
+// used as multiplication operands. Uses `*ptr = literal` form (no
+// offsets). Distinct from s9_mem_two_buf_sum (sum, not product) and
+// s10_mem_quad_buf_sum (4 buffers, sum).
+
+fn main() -> i32 {
+    a = allocate(8);
+    b = allocate(8);
+    *a = 12;
+    *b = 9;
+    va: u64 = *a;
+    vb: u64 = *b;
+    r: u64 = va * vb;
+    free(a);
+    free(b);
+    return r;
+}

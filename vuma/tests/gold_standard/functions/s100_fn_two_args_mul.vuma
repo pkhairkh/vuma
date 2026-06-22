@@ -1,0 +1,15 @@
+// s100_fn_two_args_mul.vuma — mul(8, 5) = 8 * 5 = 40
+// Expected exit code: 40
+//
+// Helper mul(a, b) = a * b. main calls mul(8, 5) -> 40.
+// Two-arg function multiplying its arguments.
+// Distinct from s97_fn_two_args_mul (24), s94_fn_one_arg_sub (41), s90_fn_two_args_mul (16).
+fn mul(a: u32, b: u32) -> u32 {
+    r: u32 = a * b;
+    return r;
+}
+
+fn main() -> i32 {
+    v: u32 = mul(8, 5);      // 40
+    return v;
+}

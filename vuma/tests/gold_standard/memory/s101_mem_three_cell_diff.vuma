@@ -1,0 +1,24 @@
+// s101_mem_three_cell_diff.vuma — three cells, diff = 100 (250 - 100 - 50)
+// Expected exit code: 100
+//
+// Three 8-byte cells. Store 250/100/50 via `*ptr = literal`, load
+// all three, a - b - c -> 100. Uses `*ptr = literal` form (no
+// offsets). Distinct from s98_mem_three_cell_sum (58),
+// s97_mem_three_cell_diff (24) and s94_mem_three_cell_sum (109).
+
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    c3 = allocate(8);
+    *c1 = 250;
+    *c2 = 100;
+    *c3 = 50;
+    a: u64 = *c1;
+    b: u64 = *c2;
+    c: u64 = *c3;
+    r: u64 = a - b - c;    // 100
+    free(c1);
+    free(c2);
+    free(c3);
+    return r;
+}

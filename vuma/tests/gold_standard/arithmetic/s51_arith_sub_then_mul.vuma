@@ -1,0 +1,16 @@
+// s51_arith_sub_then_mul.vuma — (160 - 40) * 2 = 120 * 2 = 240
+// Expected exit code: 240
+//
+// Two-stage u32 computation: subtract then multiply. 160 - 40 = 120;
+// 120 * 2 = 240. All operands loaded into u32 variables first.
+// Straight-line arithmetic. Distinct from s50_arith_mul_then_sub
+// (76) and s47_arith_mul_then_sub (160).
+
+fn main() -> i32 {
+    a: u32 = 160;
+    b: u32 = 40;
+    c: u32 = 2;
+    d: u32 = a - b;        // 120
+    r: u32 = d * c;        // 240
+    return r;
+}

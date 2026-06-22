@@ -1,0 +1,25 @@
+// s66_mf_two_helpers_sub.vuma — sub_five(80)=75, sub_ten(120)=110; 75+110=185
+// Expected exit code: 185
+//
+// Two single-arg helpers called on different literals then summed.
+// sub_five(x) = x - 5; sub_ten(x) = x - 10. main calls
+// sub_five(80) -> 75 and sub_ten(120) -> 110; sum = 185. Distinct
+// from s62_mf_two_helpers_add (150), s58_mf_two_helpers_sub (112)
+// and s55_mf_two_helpers_add (130).
+fn sub_five(x: u32) -> u32 {
+    n: u32 = 5;
+    r: u32 = x - n;
+    return r;
+}
+fn sub_ten(x: u32) -> u32 {
+    n: u32 = 10;
+    r: u32 = x - n;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = sub_five(80);      // 75
+    b: u32 = sub_ten(120);      // 110
+    r: u32 = a + b;             // 185
+    return r;
+}

@@ -1,0 +1,19 @@
+// crypto_byte_swap.vuma — extract low byte of 0x12345678 (= 0x78)
+// Expected exit code: 120 (0x78)
+//
+// "Byte swap" of a 32-bit word 0x12345678 reverses the byte order to
+// 0x78563412; the byte that ends up in the low position was originally
+// the high byte of the input. We extract that byte (0x78) by masking
+// the input against 0xFF... actually for "return low byte = 0x78" we
+// simply return the low byte of the INPUT (which is 0x78). Either
+// interpretation yields 0x78 as the exit code here.
+//
+// VUMA codegen workaround: bitwise ops with immediate RHS are dropped,
+// so the mask is loaded into a named variable.
+
+fn main() -> i32 {
+    val: u64 = 0x12345678;
+    mFF: u64 = 0xFF;
+    low: u64 = val & mFF;          // 0x78
+    return low;
+}

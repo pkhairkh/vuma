@@ -1,0 +1,27 @@
+// s32_conc_three_cell_xor.vuma - three cells, xor = 255 (0xAA ^ 0x55 ^ 0x00)
+// Expected exit code: 255
+//
+// three cells, xor = 255 (0xAA ^ 0x55 ^ 0x00). All operands loaded into
+// typed variables before any bitwise op (immediate-RHS drop workaround where
+// applicable); stores use the `*ptr = literal` (or `*ptr = variable + 0`)
+// form with no `*(ptr + offset)` indexing. Distinct from
+// s30_conc_three_cell_sum (sum, 180) and s26_conc_three_cell_xor (different
+// values).
+
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    c3 = allocate(8);
+    *c1 = 170;             // 0xAA
+    *c2 = 85;              // 0x55
+    *c3 = 0;               // 0x00
+    v1: i32 = *c1;
+    v2: i32 = *c2;
+    v3: i32 = *c3;
+    t: i32 = v1 ^ v2;
+    r: i32 = t ^ v3;       // 0xFF = 255
+    free(c1);
+    free(c2);
+    free(c3);
+    return r;
+}

@@ -1,0 +1,18 @@
+// s42_ls_overwrite_value.vuma — overwrite node to 140, load = 140
+// Expected exit code: 140
+//
+// Single 8-byte allocation treated as one "node". Store 80 via
+// `*ptr = literal`, then overwrite with 140. Load and return 140.
+// Uses `*ptr = literal` form (no offsets). Distinct from s38_ls_
+// overwrite_first (170) and s34_ls_overwrite_last (140, same total
+// but different shape: single-node overwrite vs three-node
+// overwrite-last).
+
+fn main() -> i32 {
+    n1 = allocate(8);
+    *n1 = 80;
+    *n1 = 140;
+    v: u64 = *n1;
+    free(n1);
+    return v;
+}

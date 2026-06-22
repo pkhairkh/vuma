@@ -1,0 +1,19 @@
+// struct_roundtrip.vuma — store, load, store loaded value elsewhere, load
+// Expected exit code: 123
+//
+// Allocates two single-field structs p1 and p2. Stores 123 in p1,
+// loads it back into a scalar, stores that scalar into p2, then loads
+// p2. The returned value (123) confirms a full store→load→store→load
+// roundtrip preserves the value across two struct instances.
+
+fn main() -> i32 {
+    p1 = allocate(8);
+    p2 = allocate(8);
+    *(p1 + 0) = 123;
+    v1: u64 = *(p1 + 0);
+    *(p2 + 0) = v1;
+    v2: u64 = *(p2 + 0);
+    free(p1);
+    free(p2);
+    return v2;
+}

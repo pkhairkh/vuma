@@ -1,0 +1,15 @@
+// cf_while_accumulate — while loop sums 1..10
+// Expected exit code: 55
+//
+// i=1; sum=0; while(i<=10){ sum+=i; i++; } → sum = 1+2+...+10 = 55.
+// Exposes: while-body assignment propagation bugs.
+
+fn main() -> i32 {
+    i: u32 = 1;
+    sum: u32 = 0;
+    while (i <= 10) {
+        sum = sum + i;
+        i = i + 1;
+    }
+    return sum;
+}

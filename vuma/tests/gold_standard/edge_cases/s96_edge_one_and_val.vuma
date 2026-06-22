@@ -1,0 +1,14 @@
+// s96_edge_one_and_val.vuma — 1 & 211 = 1 (AND with one isolates bit 0)
+// Expected exit code: 1
+//
+// Edge case: AND with 1 isolates bit 0. 211 is odd (0b11010011),
+// bit 0 is set -> 1 & 211 = 1. All operands loaded into u32
+// variables first (immediate-RHS bitwise drop bug workaround).
+// Distinct from s94_edge_one_or_val (87), s90_edge_one_xor_val (25)
+// and s86_edge_one_shl_five (32).
+fn main() -> i32 {
+    a: u32 = 1;            // 0x01
+    b: u32 = 211;          // 0xD3
+    r: u32 = a & b;        // 0x01 = 1
+    return r;
+}

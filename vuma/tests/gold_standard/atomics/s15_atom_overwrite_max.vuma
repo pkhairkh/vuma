@@ -1,0 +1,18 @@
+// s15_atom_overwrite_max.vuma — atomic_store 7 then 250, load sees 250
+// Expected exit code: 0 (current buggy backend)
+// Expected exit code (correct, post-bridge-fix): 250
+//
+// Single 8-byte cell. atomic_store 7, then overwrite with 250. atomic_load
+// should observe 250 (last write wins). On the current backend the load
+// returns 0 -> exit 0. Will exit 250 once atomics are wired. Distinct from
+// s14_atom_overwrite_load (17 then 73) and s11_atom_zero_then_max
+// (0 then 255).
+
+fn main() -> i32 {
+    c = allocate(8);
+    atomic_store(c, 7);
+    atomic_store(c, 250);
+    v = atomic_load(c);
+    free(c);
+    return v;
+}

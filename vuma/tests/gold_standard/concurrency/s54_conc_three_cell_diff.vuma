@@ -1,0 +1,25 @@
+// s54_conc_three_cell_diff.vuma — three cells, diff = 110 (250-90-50)
+// Expected exit code: 110
+//
+// Three independent 8-byte cells. Store 250/90/50 via `*ptr =
+// literal`, load all three, subtract sequentially -> 110. Uses
+// `*ptr = literal` form. Distinct from s50_conc_three_cell_diff
+// (120) and s49_conc_three_cell_diff (110).
+
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    c3 = allocate(8);
+    *c1 = 250;
+    *c2 = 90;
+    *c3 = 50;
+    v1: i32 = *c1;
+    v2: i32 = *c2;
+    v3: i32 = *c3;
+    t: i32 = v1 - v2;
+    s: i32 = t - v3;       // 110
+    free(c1);
+    free(c2);
+    free(c3);
+    return s;
+}

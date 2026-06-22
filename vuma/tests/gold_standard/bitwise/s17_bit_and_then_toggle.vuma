@@ -1,0 +1,16 @@
+// s17_bit_and_then_toggle.vuma — (0xAA & 0x0F) ^ 0xFF = 0x0A ^ 0xFF = 0xF5 = 245
+// Expected exit code: 245
+//
+// AND-then-XOR-with-all-ones (bit toggle). (170 & 15) = 10 (0x0A);
+// 10 ^ 255 = 245 (0xF5). All operands loaded into u64 variables first.
+// Distinct from s14_bit_and_then_or (AND-then-OR) and s9_bit_not_via_xor
+// (single-operand NOT via XOR).
+
+fn main() -> i32 {
+    a: u64 = 170;         // 0xAA
+    b: u64 = 15;          // 0x0F
+    c: u64 = 255;         // 0xFF
+    x: u64 = a & b;       // 0x0A = 10
+    r: u64 = x ^ c;       // 0xF5 = 245
+    return r;
+}

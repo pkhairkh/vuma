@@ -1,0 +1,14 @@
+// s63_edge_max_shr_five.vuma — 255 >> 5 = 7
+// Expected exit code: 7
+//
+// Shift the max u8 value right by 5. 255 >> 5 = 7 (0x07). All
+// operands loaded into u32 variables first (immediate-RHS bitwise
+// drop bug workaround). Distinct from s51_edge_max_shr_three (31),
+// s58_edge_max_shr_one (127) and s55_edge_max_xor_eight (247).
+
+fn main() -> i32 {
+    a: u32 = 255;
+    b: u32 = 5;
+    r: u32 = a >> b;       // 7
+    return r;
+}

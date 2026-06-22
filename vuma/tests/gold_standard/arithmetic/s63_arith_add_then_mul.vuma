@@ -1,0 +1,17 @@
+// s63_arith_add_then_mul.vuma — (60 + 25) * 2 = 85 * 2 = 170
+// Expected exit code: 170
+//
+// Two-stage u32 computation: add then multiply. 60 + 25 = 85;
+// 85 * 2 = 170. All operands loaded into u32 variables first.
+// Straight-line arithmetic. Distinct from s51_arith_mul_add_div
+// (30), s58_arith_mul_then_div (35) and s55_arith_add_then_sub
+// (140).
+
+fn main() -> i32 {
+    a: u32 = 60;
+    b: u32 = 25;
+    c: u32 = 2;
+    s: u32 = a + b;        // 85
+    r: u32 = s * c;        // 170
+    return r;
+}

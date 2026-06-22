@@ -1,0 +1,26 @@
+// s31_conc_overwrite_last.vuma — overwrite last cell, sum = 220 (5+15+200)
+// Expected exit code: 220
+//
+// Three independent 8-byte cells. Store 5/15/25, then overwrite the last
+// cell with 200. Load all three, sum -> 220. Uses `*ptr = literal` form.
+// Distinct from s30_conc_overwrite_last (10+20+100 = 130) and
+// s28_conc_overwrite_middle (overwrite middle, 65).
+
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    c3 = allocate(8);
+    *c1 = 5;
+    *c2 = 15;
+    *c3 = 25;
+    *c3 = 200;
+    v1: i32 = *c1;
+    v2: i32 = *c2;
+    v3: i32 = *c3;
+    t: i32 = v1 + v2;
+    s: i32 = t + v3;        // 220
+    free(c1);
+    free(c2);
+    free(c3);
+    return s;
+}

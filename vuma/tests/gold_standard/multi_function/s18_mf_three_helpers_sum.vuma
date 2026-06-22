@@ -1,0 +1,33 @@
+// s18_mf_three_helpers_sum.vuma — inc(4) + dbl(7) + sub2(20) = 5 + 14 + 18 = 37
+// Expected exit code: 37
+//
+// Three distinct single-arg helpers, each called once from main,
+// results summed. inc(x) = x + 1; dbl(x) = x * 2; sub2(x) = x - 2.
+// main calls inc(4) -> 5, dbl(7) -> 14, sub2(20) -> 18; sum = 37.
+// Distinct from s14_mf_three_helpers_sum (inc/dbl/sub3 -> 43) and
+// s10_mf_three_chain_diff (three chained, not summed).
+
+fn inc(x: u32) -> u32 {
+    n: u32 = 1;
+    r: u32 = x + n;
+    return r;
+}
+fn dbl(x: u32) -> u32 {
+    n: u32 = 2;
+    r: u32 = x * n;
+    return r;
+}
+fn sub2(x: u32) -> u32 {
+    n: u32 = 2;
+    r: u32 = x - n;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = inc(4);      // 5
+    b: u32 = dbl(7);      // 14
+    c: u32 = sub2(20);    // 18
+    t: u32 = a + b;       // 19
+    s: u32 = t + c;       // 37
+    return s;
+}

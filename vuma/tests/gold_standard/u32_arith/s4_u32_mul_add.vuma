@@ -1,0 +1,13 @@
+// s4_u32_mul_add.vuma — 7 * 8 + 4 = 60
+// Expected exit code: 60
+//
+// Multiplication followed by addition: 7 * 8 = 56, then 56 + 4 = 60.
+
+fn main() -> i32 {
+    a: u32 = 7;
+    b: u32 = 8;
+    c: u32 = 4;
+    p: u32 = a * b;
+    r: u32 = p + c;
+    return r;
+}

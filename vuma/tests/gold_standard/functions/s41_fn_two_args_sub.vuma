@@ -1,0 +1,16 @@
+// s41_fn_two_args_sub.vuma - sub(180, 60) = 120
+// Expected exit code: 120
+//
+// Helper sub(x, y) = x - y. main calls sub(180, 60) -> 120. Two-arg
+// function returning the difference. Distinct from s38_fn_two_args_
+// mul (63) and s34_fn_two_args_mul (72).
+
+fn sub(x: u32, y: u32) -> u32 {
+    r: u32 = x - y;
+    return r;
+}
+
+fn main() -> i32 {
+    v: u32 = sub(180, 60);
+    return v;
+}

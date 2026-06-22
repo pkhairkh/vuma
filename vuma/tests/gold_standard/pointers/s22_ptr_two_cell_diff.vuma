@@ -1,0 +1,20 @@
+// s22_ptr_two_cell_diff.vuma — two cells, diff = 24 (96 - 72)
+// Expected exit code: 24
+//
+// Two 8-byte cells. Store 96/72 via `*ptr = literal`, load both,
+// subtract -> 24. Uses `*ptr = literal` form (no offsets). Distinct
+// from s18_ptr_two_cell_sum (two-cell add) and s14_ptr_two_cell_diff
+// (different values).
+
+fn main() -> i32 {
+    p1 = allocate(8);
+    p2 = allocate(8);
+    *p1 = 96;
+    *p2 = 72;
+    a: i32 = *p1;
+    b: i32 = *p2;
+    d: i32 = a - b;       // 24
+    free(p1);
+    free(p2);
+    return d;
+}

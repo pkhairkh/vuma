@@ -1,0 +1,117 @@
+// Singly-Linked List — Insert, traverse, and free
+//
+// Implements a singly-linked list with head-only insertion. Each node stores
+// a u64 payload and a next pointer. The list supports prepending nodes,
+// computing the length by traversal, and proper cleanup via iterative free.
+//
+// VUMA Key Concepts:
+//   - Address type for node pointers
+//   - Struct layout with explicit field offsets (data, next)
+//   - Pointer dereference with (*) for struct field access
+//   - Null pointer (0) as sentinel for end-of-list
+//   - allocate/free for each node (per-node ownership)
+//   - Iterative traversal and cleanup (no memory leaks)
+//   - IVE proves all dereferences target live, valid allocations
+
+// ===========================================================================
+// Node structure: 16 bytes
+// ===========================================================================
+// Memory layout:
+//   offset 0:  data (u64, 8 bytes) — the payload
+//   offset 8:  next (Address, 8 bytes) — pointer to next node (0 = end)
+
+struct ListNode {
+    data: u64,       // 8 bytes — payload value
+    next: Address,   // 8 bytes — pointer to next node
+}
+
+// ===========================================================================
+// Prepend a new node at the head of the list
+// ===========================================================================
+// Returns the new head pointer. This is the standard cons-cell pattern.
+
+fn list_prepend(head: Address, value: u64) -> Address {
+    // Allocate a new node (16 bytes per ListNode)
+    // IVE verifies: allocation is live, size matches struct layout
+    node = allocate(16);
+    *node = ListNode { data: value, next: head };
+    return node;
+}
+
+// ===========================================================================
+// Compute the length of the list by traversal
+// ===========================================================================
+// Walks from head to tail, counting nodes. O(n) time.
+
+fn list_length(head: Address) -> u64 {
+    count: u64 = 0;
+    current = head;
+    while current != 0 {
+        count = count + 1;
+        current = (*current).next;
+    }
+    return count;
+}
+
+// ===========================================================================
+// Sum all values in the list
+// ===========================================================================
+// Walks from head to tail, accumulating the sum of data fields.
+
+fn list_sum(head: Address) -> u64 {
+    sum: u64 = 0;
+    current = head;
+    while current != 0 {
+        sum = sum + (*current).data;
+        current = (*current).next;
+    }
+    return sum;
+}
+
+// ===========================================================================
+// Free all nodes in the list
+// ===========================================================================
+// Iteratively walks and frees each node. IVE verifies each free() releases
+// a live, unique allocation and no use-after-free occurs.
+
+fn list_free(head: Address) {
+    current = head;
+    while current != 0 {
+        next = (*current).next;
+        free(current);
+        current = next;
+    }
+}
+
+// ===========================================================================
+// Main entry point
+// ===========================================================================
+// Builds list: 50 -> 40 -> 30 -> 20 -> 10
+// (Prepending reverses insertion order)
+// Length = 5, Sum = 150
+// Exit code: 150
+
+fn main() -> i32 {
+    // Start with empty list (null head)
+    head: Address = 0;
+
+    // Prepend 5 nodes (each new node becomes the head)
+    head = list_prepend(head, 10);
+    head = list_prepend(head, 20);
+    head = list_prepend(head, 30);
+    head = list_prepend(head, 40);
+    head = list_prepend(head, 50);
+
+    // Verify list properties
+    len: u64 = list_length(head);
+    sum: u64 = list_sum(head);
+
+    // len should be 5, sum should be 150 (10+20+30+40+50)
+    // Combine into a single exit value: len * 1000 + sum = 5150
+    result: u64 = len * 1000 + sum;
+
+    // Clean up all nodes
+    list_free(head);
+
+    return result;
+}

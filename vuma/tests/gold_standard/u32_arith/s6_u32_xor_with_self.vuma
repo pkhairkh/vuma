@@ -1,0 +1,12 @@
+// s6_u32_xor_with_self.vuma — 123 ^ 123 = 0
+// Expected exit code: 0
+//
+// Any value XORed with itself cancels to 0. Both operands are the
+// same variable, loaded into a u32 first. Distinct from
+// s5_u32_xor_two_stages (two different XOR operands).
+
+fn main() -> i32 {
+    v: u32 = 123;
+    r: u32 = v ^ v;
+    return r;
+}

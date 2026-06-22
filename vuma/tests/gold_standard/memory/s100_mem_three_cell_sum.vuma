@@ -1,0 +1,22 @@
+// s100_mem_three_cell_sum.vuma — three cells, sum = 93 (19 + 41 + 33)
+// Expected exit code: 93
+//
+// Three 8-byte cells. Store 19/41/33 via `*ptr = literal`,
+// load all, a + b + c -> 93. Uses `*ptr = literal` form.
+// Distinct from s97_mem_overwrite_last (46), s94_mem_three_cell_sum (109), s90_mem_overwrite_middle (31).
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    c3 = allocate(8);
+    *c1 = 19;
+    *c2 = 41;
+    *c3 = 33;
+    a: u64 = *c1;
+    b: u64 = *c2;
+    c: u64 = *c3;
+    s: u64 = a + b + c;    // 93
+    free(c1);
+    free(c2);
+    free(c3);
+    return s;
+}

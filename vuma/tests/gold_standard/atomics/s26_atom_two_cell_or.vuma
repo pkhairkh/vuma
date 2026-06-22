@@ -1,0 +1,22 @@
+// s26_atom_two_cell_or.vuma — atomic_store 0xF0/0x0F, or = 255
+// Expected exit code: 0 (current buggy backend)
+// Expected exit code (correct, post-bridge-fix): 255  (240 | 15)
+//
+// Two 8-byte cells. atomic_store 240/15 into each, then atomic_load both
+// and OR. On the current backend all loads return 0 (atomic_store/load
+// not bridged through to x86_64) -> exit 0. Will exit 255 once atomic
+// ops are wired through. Distinct from s22_atom_two_cell_xor (xor,
+// 41^98=75) and s18_atom_two_cell_sum (sum, 23+67=90).
+
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    atomic_store(c1, 240);
+    atomic_store(c2, 15);
+    a = atomic_load(c1);
+    b = atomic_load(c2);
+    s = a | b;
+    free(c1);
+    free(c2);
+    return s;
+}

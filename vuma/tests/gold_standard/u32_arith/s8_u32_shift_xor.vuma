@@ -1,0 +1,15 @@
+// s8_u32_shift_xor.vuma — (1 << 5) ^ 1 = 32 ^ 1 = 33
+// Expected exit code: 33
+//
+// Shift left then XOR: 1 << 5 = 32, 32 ^ 1 = 33. Distinct from
+// s5_u32_add_then_shift (add-then-shift) and s6_u32_shift_left_3
+// (pure shift).
+
+fn main() -> i32 {
+    v: u32 = 1;
+    sh: u32 = 5;
+    x: u32 = 1;
+    a: u32 = v << sh;   // 32
+    r: u32 = a ^ x;     // 33
+    return r;
+}

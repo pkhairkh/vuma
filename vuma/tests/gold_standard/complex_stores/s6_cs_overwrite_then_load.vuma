@@ -1,0 +1,15 @@
+// s6_cs_overwrite_then_load.vuma — overwrite single offset, load = 33
+// Expected exit code: 33
+//
+// 16-byte buffer. Store 11 at offset 0, then overwrite offset 0 with
+// 33. Load offset 0 -> 33. Distinct from s5_cs_overwrite_then_sum
+// (overwrites and then sums across offsets).
+
+fn main() -> i32 {
+    buf = allocate(16);
+    *(buf + 0) = 11;
+    *(buf + 0) = 33;
+    v: u64 = *(buf + 0);
+    free(buf);
+    return v;
+}

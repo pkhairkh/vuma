@@ -1,0 +1,23 @@
+// s3_mf_pass_through_chain.vuma — chain of 3 pass-through calls
+// Expected exit code: 7
+//
+// main calls f1(7) -> f2 -> f3 -> returns the value. Each function
+// just forwards its argument. Verifies parameter passing through a
+// chain of wrappers.
+
+fn f3(x: u32) -> u32 {
+    return x;
+}
+fn f2(x: u32) -> u32 {
+    r: u32 = f3(x);
+    return r;
+}
+fn f1(x: u32) -> u32 {
+    r: u32 = f2(x);
+    return r;
+}
+
+fn main() -> i32 {
+    v: u32 = f1(7);
+    return v;
+}
