@@ -2369,6 +2369,30 @@ impl Backend for AArch64Backend {
         //   Converts each nibble to hex char, writes to stack buffer, then sys_write.
         let runtime_code = build_aarch64_runtime();
 
+        // ── Build __vuma_alloc / __vuma_free syscall stubs (mmap/munmap) ──
+        // __vuma_alloc(size in X0) -> X0 = mmap(NULL, size, PROT_READ|PROT_WRITE,
+        //                                       MAP_PRIVATE|MAP_ANONYMOUS, -1, 0)
+        //   AArch64 Linux: mmap = syscall 222, args X0-X5, syscall # in X8, SVC #0
+        // __vuma_free(addr in X0) -> munmap(addr, 0)
+        //   AArch64 Linux: munmap = syscall 215, args X0/X1, syscall # in X8, SVC #0
+        let vuma_alloc_stub: Vec<u8> = vec![
+            0xE1, 0x03, 0x00, 0xAA,  // MOV X1, X0       (size -> length)
+            0xE0, 0x03, 0x1F, 0xAA,  // MOV X0, XZR      (addr = NULL)
+            0x62, 0x00, 0x80, 0xD2,  // MOV X2, #3       (PROT_READ|PROT_WRITE)
+            0x43, 0x04, 0x80, 0xD2,  // MOV X3, #0x22    (MAP_PRIVATE|MAP_ANONYMOUS)
+            0x04, 0x00, 0x80, 0x92,  // MOVN X4, #0      (fd = -1)
+            0xE5, 0x03, 0x1F, 0xAA,  // MOV X5, XZR      (offset = 0)
+            0xC8, 0x1B, 0x80, 0xD2,  // MOV X8, #222     (sys_mmap)
+            0x01, 0x00, 0x00, 0xD4,  // SVC #0
+            0xC0, 0x03, 0x5F, 0xD6,  // RET
+        ];
+        let vuma_free_stub: Vec<u8> = vec![
+            0xE1, 0x03, 0x1F, 0xAA,  // MOV X1, XZR      (size = 0)
+            0xE8, 0x1A, 0x80, 0xD2,  // MOV X8, #215     (sys_munmap)
+            0x01, 0x00, 0x00, 0xD4,  // SVC #0
+            0xC0, 0x03, 0x5F, 0xD6,  // RET
+        ];
+
         // ── Compute function offsets ──
         // _start stub comes first, then user functions, then runtime.
         let mut func_offsets: HashMap<String, usize> = HashMap::new();
@@ -2391,6 +2415,12 @@ impl Backend for AArch64Backend {
         // Actually, let's put them sequentially:
         // We'll just embed the runtime as a single blob and not reference individual offsets
         // since user code calls them via BL with relocation.
+
+        // __vuma_alloc / __vuma_free stubs go after the runtime blob.
+        let vuma_alloc_offset = current_offset + runtime_code.len();
+        let vuma_free_offset = vuma_alloc_offset + vuma_alloc_stub.len();
+        func_offsets.insert("__vuma_alloc".to_string(), vuma_alloc_offset);
+        func_offsets.insert("__vuma_free".to_string(), vuma_free_offset);
 
         // ── Build _start stub bytes ──
         let mut start_stub = Vec::with_capacity(start_stub_size);
@@ -2446,6 +2476,9 @@ impl Backend for AArch64Backend {
 
         // Append runtime I/O code
         all_code.extend_from_slice(&runtime_code);
+        // Append __vuma_alloc / __vuma_free syscall stubs.
+        all_code.extend_from_slice(&vuma_alloc_stub);
+        all_code.extend_from_slice(&vuma_free_stub);
 
         // ── Patch BL relocations ──
         // Each function's relocations are relative to the start of that function's code.
