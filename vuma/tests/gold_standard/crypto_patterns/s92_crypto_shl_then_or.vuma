@@ -1,0 +1,16 @@
+// s92_crypto_shl_then_or.vuma — (3 << 5) | 0x0A = 0x60 | 0x0A = 0x6A = 106
+// Expected exit code: 106
+//
+// Two-stage crypto mix: shift-left then OR. 3 << 5 = 96 (0x60);
+// 96 | 10 = 106 (0x6A). All operands loaded into u32 variables first
+// (immediate-RHS bitwise drop bug workaround). Distinct from
+// s90_crypto_shl_then_or (18), s86_crypto_shl_mask (231) and
+// s82_crypto_shl_then_xor (45).
+fn main() -> i32 {
+    a: u32 = 3;
+    s: u32 = 5;
+    c: u32 = 10;           // 0x0A
+    x: u32 = a << s;       // 0x60 = 96
+    r: u32 = x | c;        // 0x6A = 106
+    return r;
+}

@@ -1,0 +1,13 @@
+// s21_edge_one_plus_zero.vuma — 1 + 0 = 1
+// Expected exit code: 1
+//
+// Additive identity: 1 + 0 = 1. All operands loaded into u32 variables
+// first. Distinct from s18_edge_one_mul_one (1 * 1 = 1, multiplicative
+// identity) and s10_edge_one_minus_one (1 - 1 = 0).
+
+fn main() -> i32 {
+    a: u32 = 1;
+    b: u32 = 0;
+    r: u32 = a + b;       // 1
+    return r;
+}

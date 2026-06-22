@@ -1,0 +1,17 @@
+// s32_bit_xor_then_or.vuma - (0xC3 ^ 0x0C) | 0x30 = 0xCF | 0x30 = 0xFF = 255
+// Expected exit code: 255
+//
+// (0xC3 ^ 0x0C) | 0x30 = 0xCF | 0x30 = 0xFF = 255. All operands loaded into
+// typed variables before any bitwise op (immediate-RHS drop workaround where
+// applicable); stores use the `*ptr = literal` (or `*ptr = variable + 0`)
+// form with no `*(ptr + offset)` indexing. Distinct from
+// s30_bit_xor_then_and (xor-then-and) and s26_bit_shl_or_xor (shl-or-xor).
+
+fn main() -> i32 {
+    a: u64 = 195;          // 0xC3
+    b: u64 = 12;           // 0x0C
+    c: u64 = 48;           // 0x30
+    x: u64 = a ^ b;        // 0xCF = 207
+    r: u64 = x | c;        // 0xFF = 255
+    return r;
+}

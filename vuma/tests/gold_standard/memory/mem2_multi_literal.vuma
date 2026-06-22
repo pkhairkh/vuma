@@ -1,0 +1,19 @@
+// mem2_multi_literal — store 1, 2, 3 at offsets 0/1/2; load & sum
+// Expected exit code: 6
+//
+// Confirms that stores to distinct byte offsets don't alias each other
+// and that loads from each offset retrieve the correct value.  The sum
+// 1 + 2 + 3 = 6 is the exit code.  Straight-line code only.
+
+fn main() -> i32 {
+    buf = allocate(8);
+    *(buf + 0) = 1;
+    *(buf + 1) = 2;
+    *(buf + 2) = 3;
+    v0: u32 = *(buf + 0);
+    v1: u32 = *(buf + 1);
+    v2: u32 = *(buf + 2);
+    sum: u32 = v0 + v1 + v2;   // 6
+    free(buf);
+    return sum;
+}

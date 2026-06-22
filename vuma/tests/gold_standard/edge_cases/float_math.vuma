@@ -1,0 +1,210 @@
+// Float Math — Demonstrates FP conversion and math operations in VUMA
+//
+// This program showcases VUMA's floating-point capabilities: type
+// conversions between integer and floating-point types, and arithmetic
+// operations on f32 and f64 values.
+//
+// VUMA's codegen emits proper FP conversion instructions on all 8
+// backends (not no-op bit reinterpretation):
+//   - x86_64:     CVTSI2SS/CVTSI2SD/CVTSS2SI/CVTSD2SI/CVTSS2SD/CVTSD2SS
+//   - AArch64:    SCVTF/UCVTF/FCVTZS/FCVTZU/FCVT
+//   - RISC-V 64:  fcvt.s.l/fcvt.l.s/fcvt.d.l/fcvt.l.d/fcvt.d.s/fcvt.s.d
+//   - ARM32:      VCVT.S32.F32/VCVT.F32.S32/VCVT.F64.F32/VCVT.F32.F64
+//   - MIPS64:     CVT.S.D/CVT.D.S/CVT.S.W/CVT.D.W/CVT.W.S/CVT.W.D
+//   - PPC64:      FCFID/FCTID/FCTIDZ/FRSP/FCTIDU
+//   - LoongArch64: FFINT.D.L/FTINT.L.D/FFINT.S.W/FTINT.W.S
+//   - Wasm32:     f32.convert_i32_s/f64.convert_i32_s/i32.trunc_f64_s
+//
+// VUMA Key Concepts:
+//   - f32: 32-bit IEEE 754 single-precision (4 bytes)
+//   - f64: 64-bit IEEE 754 double-precision (8 bytes)
+//   - inttofloat: signed integer → floating-point conversion
+//   - uinttofloat: unsigned integer → floating-point conversion
+//   - floattoint: floating-point → signed integer (truncation)
+//   - floattouint: floating-point → unsigned integer (truncation)
+//   - floattofloat: f32 ↔ f64 widening/narrowing conversion
+//   - IVE verifies Interpretation: type of stored value matches pointer type
+
+// ===========================================================================
+// Demo 1: Integer-to-Float conversion
+// ===========================================================================
+// VUMA's CastKind::IntToFloat converts a signed integer to its
+// floating-point representation. This is NOT a bit reinterpretation —
+// the value 1 becomes 1.0, not 0x3FF0000000000000.
+//
+// Similarly, CastKind::UIntToFloat handles unsigned integers.
+
+fn demo_int_to_float() -> f64 {
+    // Convert signed integer 7 to f64
+    // Result: 7.0
+    a: f64 = inttofloat(7);
+
+    // Convert unsigned integer 3 to f64
+    // Result: 3.0
+    b: f64 = uinttofloat(3);
+
+    // Return their sum
+    // Expected: 7.0 + 3.0 = 10.0
+    return a + b;
+}
+
+// ===========================================================================
+// Demo 2: Float-to-Integer conversion
+// ===========================================================================
+// CastKind::FloatToInt converts a floating-point value to a signed
+// integer by truncation (rounding toward zero). For example,
+// 3.7 → 3, -2.9 → -2.
+//
+// CastKind::FloatToUInt converts to unsigned integer by truncation.
+
+fn demo_float_to_int() -> i64 {
+    // Convert 9.7 to signed integer (truncates to 9)
+    a: i64 = floattoint(9.7);
+
+    // Convert 2.9 to unsigned integer (truncates to 2)
+    b: i64 = floattouint(2.9);
+
+    // Return their sum
+    // Expected: 9 + 2 = 11
+    return a + b;
+}
+
+// ===========================================================================
+// Demo 3: Float-to-Float conversion (widening and narrowing)
+// ===========================================================================
+// CastKind::FloatToFloat handles:
+//   - f32 → f64 (widening, lossless)
+//   - f64 → f32 (narrowing, may lose precision)
+
+fn demo_float_to_float() -> f64 {
+    // Start with an f32 value
+    x: f32 = 3.14159;
+
+    // Widen f32 → f64 (lossless)
+    x_wide: f64 = floattofloat(x);
+
+    // Narrow f64 → f32 (may lose precision for large/detailed values)
+    x_narrow: f32 = floattofloat(x_wide);
+
+    // Widen back to f64 for return
+    result: f64 = floattofloat(x_narrow);
+
+    // Expected: approximately 3.14159 (f32 precision)
+    return result;
+}
+
+// ===========================================================================
+// Demo 4: Floating-point arithmetic
+// ===========================================================================
+// Standard arithmetic: +, -, *, / on f32 and f64 values.
+// IVE verifies: all FP values at a memory location match the stored
+// type (Interpretation invariant) — no accidental bit reinterpretation.
+
+fn demo_fp_arithmetic() -> f64 {
+    // Addition
+    sum: f64 = 10.0 + 5.5;     // 15.5
+
+    // Subtraction
+    diff: f64 = 10.0 - 3.5;    // 6.5
+
+    // Multiplication
+    prod: f64 = 4.0 * 2.5;     // 10.0
+
+    // Division
+    quot: f64 = 20.0 / 4.0;    // 5.0
+
+    // Combined: 15.5 + 6.5 + 10.0 + 5.0 = 37.0
+    return sum + diff + prod + quot;
+}
+
+// ===========================================================================
+// Demo 5: Mixed integer/float computation
+// ===========================================================================
+// A common pattern: integer loop counter drives floating-point
+// computation. The conversion is explicit in VUMA — no implicit
+// coercion.
+
+fn demo_mixed_computation() -> f64 {
+    // Compute sum of 1/i for i = 1..5
+    // Using explicit int→float conversion for each iteration
+    total: f64 = 0.0;
+    i: i64 = 1;
+    while i <= 5 {
+        fi: f64 = inttofloat(i);
+        term: f64 = 1.0 / fi;
+        total = total + term;
+        i = i + 1;
+    }
+    // Expected: 1/1 + 1/2 + 1/3 + 1/4 + 1/5
+    //         = 1.0 + 0.5 + 0.333... + 0.25 + 0.2
+    //         ≈ 2.2833...
+    return total;
+}
+
+// ===========================================================================
+// Demo 6: Storing and loading floats from memory
+// ===========================================================================
+// FP values can be stored in allocated memory just like integers.
+// IVE verifies the Interpretation invariant: the stored type matches
+// what is later read from that address.
+
+fn demo_fp_memory() -> f64 {
+    // Allocate 8 bytes for an f64
+    // IVE verifies: allocation is live (Liveness)
+    ptr = allocate(8);
+
+    // Store an f64 value
+    // IVE verifies: store type matches allocation interpretation
+    *ptr = 42.5;
+
+    // Load it back
+    // IVE verifies: loaded type matches stored type (Interpretation)
+    // IVE verifies: value originated from a valid write (Origin)
+    val: f64 = *ptr;
+
+    free(ptr);
+    // IVE verifies: allocation freed exactly once (Cleanup)
+
+    return val;
+    // Expected: 42.5
+}
+
+// ===========================================================================
+// Main entry point
+// ===========================================================================
+// Runs all demos and produces a combined integer result by converting
+// the floating-point sums back to integers.
+
+fn main() -> i32 {
+    // Demo 1: int→float — expected 10.0
+    r1: f64 = demo_int_to_float();
+
+    // Demo 2: float→int — expected 11
+    r2: i64 = demo_float_to_int();
+
+    // Demo 3: float→float — expected ~3.14159
+    r3: f64 = demo_float_to_float();
+
+    // Demo 4: FP arithmetic — expected 37.0
+    r4: f64 = demo_fp_arithmetic();
+
+    // Demo 5: mixed computation — expected ~2.2833
+    r5: f64 = demo_mixed_computation();
+
+    // Demo 6: FP memory — expected 42.5
+    r6: f64 = demo_fp_memory();
+
+    // Convert key results to integers and combine
+    // r1 = 10.0 → floattoint = 10
+    // r2 = 11 (already integer)
+    // r4 = 37.0 → floattoint = 37
+    // r6 = 42.5 → floattoint = 42
+    i1: i64 = floattoint(r1);  // 10
+    i4: i64 = floattoint(r4);  // 37
+    i6: i64 = floattoint(r6);  // 42
+
+    // Combined: 10 + 11 + 37 + 42 = 100
+    checksum = i1 + r2 + i4 + i6;
+    return checksum;
+}
+// IVE verification: Liveness ✓, Exclusivity ✓, Interpretation ✓, Origin ✓, Cleanup ✓

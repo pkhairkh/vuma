@@ -1,0 +1,17 @@
+// s10_atom_zero_one_pair.vuma — atomic_store 0 then 50, load sees 50
+// Expected exit code: 0 (current buggy backend)
+// Expected exit code (correct, post-bridge-fix): 50
+//
+// Single 8-byte cell. atomic_store 0 (zero), then atomic_store 50
+// (nonzero). Load should observe 50 (last write wins). On the current
+// backend the load returns 0. Distinct from s6_atom_store_zero_load
+// (single zero store, no overwrite) and s6_atom_overwrite_load (10->60).
+
+fn main() -> i32 {
+    c = allocate(8);
+    atomic_store(c, 0);
+    atomic_store(c, 50);
+    v = atomic_load(c);
+    free(c);
+    return v;
+}

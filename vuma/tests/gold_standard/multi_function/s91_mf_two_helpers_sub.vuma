@@ -1,0 +1,24 @@
+// s91_mf_two_helpers_sub.vuma — f1(60) - f2(55) = 61 - 56 = 5
+// Expected exit code: 5
+//
+// Two single-arg helpers. f1(x) = x + 1; f2(y) = y + 1. main calls
+// both and subtracts: f1(60) - f2(55) = 61 - 56 = 5. Distinct from
+// s90_mf_two_helpers_sub (2), s86_mf_two_helpers_add (150) and
+// s82_mf_two_helpers_add (105).
+fn f1(x: u32) -> u32 {
+    k: u32 = 1;
+    r: u32 = x + k;
+    return r;
+}
+fn f2(y: u32) -> u32 {
+    k: u32 = 1;
+    r: u32 = y + k;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = f1(60);         // 61
+    b: u32 = f2(55);         // 56
+    d: u32 = a - b;          // 5
+    return d;
+}

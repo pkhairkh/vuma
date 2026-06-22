@@ -1,0 +1,19 @@
+// mem2_pattern_255 — fill 4 bytes with 255, load first
+// Expected exit code: 255
+//
+// Same as mem2_pattern_42 but with the maximum U8 value (255).  This is
+// the highest byte value that the U8-truncating `*(buf + offset)` path
+// can faithfully preserve; values > 255 would be truncated.  Exit code
+// 255 (8-bit) corresponds to the value 255 stored & loaded.
+// Straight-line code only.
+
+fn main() -> i32 {
+    buf = allocate(8);
+    *(buf + 0) = 255;
+    *(buf + 1) = 255;
+    *(buf + 2) = 255;
+    *(buf + 3) = 255;
+    val: u32 = *(buf + 0);
+    free(buf);
+    return val;
+}

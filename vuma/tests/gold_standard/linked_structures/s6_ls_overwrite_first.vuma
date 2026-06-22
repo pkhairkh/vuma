@@ -1,0 +1,20 @@
+// s6_ls_overwrite_first.vuma — overwrite first node, sum = 110 (88 + 20 + 2)
+// Expected exit code: 110
+//
+// 24-byte allocation (3 nodes). Store 10/20/2 at offsets 0/8/16, then
+// overwrite the first node (offset 0) with 88. Load all three, sum ->
+// 110. Distinct from s5_ls_overwrite_middle (overwrites middle).
+
+fn main() -> i32 {
+    block = allocate(24);
+    *(block + 0) = 10;
+    *(block + 8) = 20;
+    *(block + 16) = 2;
+    *(block + 0) = 88;
+    a: u64 = *(block + 0);
+    b: u64 = *(block + 8);
+    c: u64 = *(block + 16);
+    s: u64 = a + b + c;
+    free(block);
+    return s;
+}

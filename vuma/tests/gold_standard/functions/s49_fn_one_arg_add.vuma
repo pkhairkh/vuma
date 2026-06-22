@@ -1,0 +1,18 @@
+// s49_fn_one_arg_add.vuma — add_nine(50) = 59
+// Expected exit code: 59
+//
+// Helper add_nine(x) = x + 9. main calls add_nine(50) -> 59.
+// Single-arg function returning the sum. Distinct from s46_fn_one_
+// arg_sub (sub_seven(80) = 73) and s42_fn_one_arg_add (add(45) =
+// 58).
+
+fn add_nine(x: u32) -> u32 {
+    n: u32 = 9;
+    r: u32 = x + n;
+    return r;
+}
+
+fn main() -> i32 {
+    v: u32 = add_nine(50);
+    return v;
+}

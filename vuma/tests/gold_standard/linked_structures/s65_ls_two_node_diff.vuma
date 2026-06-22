@@ -1,0 +1,20 @@
+// s65_ls_two_node_diff.vuma — two nodes, diff = 140 (225 - 85)
+// Expected exit code: 140
+//
+// Two 8-byte allocations treated as two independent "nodes".
+// Store 225/85 via `*ptr = literal`, load both, diff -> 140. Uses
+// `*ptr = literal` form (no offsets). Distinct from s51_ls_two_node_
+// diff (70), s58_ls_two_node_sum (220) and s62_ls_two_node_sum (225).
+
+fn main() -> i32 {
+    n1 = allocate(8);
+    n2 = allocate(8);
+    *n1 = 225;
+    *n2 = 85;
+    a: u64 = *n1;
+    b: u64 = *n2;
+    d: u64 = a - b;        // 140
+    free(n1);
+    free(n2);
+    return d;
+}

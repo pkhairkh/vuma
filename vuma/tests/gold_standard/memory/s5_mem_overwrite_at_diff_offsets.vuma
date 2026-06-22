@@ -1,0 +1,23 @@
+// s5_mem_overwrite_at_diff_offsets.vuma — overwrite each offset once, sum = 150
+// Expected exit code: 150  (40 + 50 + 60)
+//
+// 24-byte buffer. Three offsets 0, 8, 16 each get an initial store
+// (1/2/3), then a second store overwrites each one. Final values
+// 40, 50, 60. Verifies that all three offsets retain their latest
+// written values.
+
+fn main() -> i32 {
+    buf = allocate(24);
+    *(buf + 0) = 1;
+    *(buf + 8) = 2;
+    *(buf + 16) = 3;
+    *(buf + 0) = 40;
+    *(buf + 8) = 50;
+    *(buf + 16) = 60;
+    a: u64 = *(buf + 0);
+    b: u64 = *(buf + 8);
+    c: u64 = *(buf + 16);
+    s: u64 = a + b + c;
+    free(buf);
+    return s;
+}

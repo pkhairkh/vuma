@@ -1,0 +1,14 @@
+// s12_edge_max_and_zero.vuma — 255 & 0 = 0
+// Expected exit code: 0
+//
+// AND with zero always yields zero, even for the max u8 value 255.
+// Tests the codegen's handling of a zero RHS in AND (annihilator).
+// Distinct from s10_edge_max_xor_zero (XOR, returns 255) and
+// s5_edge_zero_sum (ADD of zeros).
+
+fn main() -> i32 {
+    a: u32 = 255;
+    b: u32 = 0;
+    r: u32 = a & b;
+    return r;
+}

@@ -1,0 +1,20 @@
+// cf_if_in_while — if-body assignment inside while must persist after loop
+// Expected exit code: 42
+//
+// Semantic: r starts 0; when i==5, r=42; loop runs to i=10; return r=42.
+// (Task spec listed 5 but parenthetical says "expected 42 if if-body
+// works, 0 if not" — 5 was a typo from cf_while_break. Correct value 42.)
+//
+// Exposes: if-body assignments dropped → r stays 0, exit 0 instead of 42.
+
+fn main() -> i32 {
+    i: u32 = 0;
+    r: u32 = 0;
+    while (i < 10) {
+        if (i == 5) {
+            r = 42;
+        }
+        i = i + 1;
+    }
+    return r;
+}

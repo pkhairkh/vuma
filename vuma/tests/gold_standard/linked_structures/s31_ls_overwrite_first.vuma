@@ -1,0 +1,26 @@
+// s31_ls_overwrite_first.vuma — overwrite first node, sum = 150 (100+20+30)
+// Expected exit code: 150
+//
+// Three 8-byte allocations treated as three independent "nodes". Store
+// 10/20/30, then overwrite the first node with 100. Load all three, sum
+// -> 150. Uses `*ptr = literal` form (no offsets). Distinct from
+// s30_ls_overwrite_middle (overwrite middle, 80) and s28_ls_overwrite_last
+// (overwrite last, 95).
+
+fn main() -> i32 {
+    n1 = allocate(8);
+    n2 = allocate(8);
+    n3 = allocate(8);
+    *n1 = 10;
+    *n2 = 20;
+    *n3 = 30;
+    *n1 = 100;
+    a: u64 = *n1;
+    b: u64 = *n2;
+    c: u64 = *n3;
+    s: u64 = a + b + c;
+    free(n1);
+    free(n2);
+    free(n3);
+    return s;
+}

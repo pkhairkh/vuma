@@ -1,0 +1,17 @@
+// s101_nl_3x17_count.vuma — 3x17 nested loop, count = 51
+// Observed on current x86_64 backend: 0 (FAIL — known bug)
+//
+// Outer loop 3 iterations, inner loop 17 iterations each ->
+// 3*17 = 51 total. Counter increments by 1 each inner iteration.
+// Known "for-body assignments don't propagate" bug keeps count at
+// 0. Distinct from s98_nl_7x10_count (70), s97_nl_2x51_count (102)
+// and s94_nl_5x7_count (35).
+fn main() -> i32 {
+    count: u32 = 0;
+    for i in 0..3 {
+        for j in 0..17 {
+            count = count + 1;
+        }
+    }
+    return count;
+}

@@ -1,0 +1,18 @@
+// s22_arith_mul_mod_add.vuma — (11 * 7) % 5 + 100 = 77 % 5 + 100 = 2 + 100 = 102
+// Expected exit code: 102
+//
+// Three-stage u32 computation: mul then mod then add. 11 * 7 = 77;
+// 77 % 5 = 2; 2 + 100 = 102. All operands loaded into u32 variables first.
+// Distinct from s18_arith_add_mul_mod (add-then-mul-then-mod) and
+// s14_arith_mod_then_mul (mod-then-mul).
+
+fn main() -> i32 {
+    a: u32 = 11;
+    b: u32 = 7;
+    c: u32 = 5;
+    d: u32 = 100;
+    p: u32 = a * b;       // 77
+    m: u32 = p % c;       // 2
+    r: u32 = m + d;       // 102
+    return r;
+}

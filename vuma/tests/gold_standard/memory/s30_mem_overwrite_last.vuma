@@ -1,0 +1,25 @@
+// s30_mem_overwrite_last.vuma — overwrite last cell, sum = 230 (10+20+200)
+// Expected exit code: 230
+//
+// Three 8-byte cells. Store 10/20/30, then overwrite the last cell with
+// 200. Load all three, sum -> 230. Uses `*ptr = literal` form (no
+// offsets). Distinct from s26_mem_overwrite_middle (overwrite middle,
+// 90) and s22_mem_overwrite_first (overwrite first).
+
+fn main() -> i32 {
+    p1 = allocate(8);
+    p2 = allocate(8);
+    p3 = allocate(8);
+    *p1 = 10;
+    *p2 = 20;
+    *p3 = 30;
+    *p3 = 200;
+    a: u64 = *p1;
+    b: u64 = *p2;
+    c: u64 = *p3;
+    s: u64 = a + b + c;
+    free(p1);
+    free(p2);
+    free(p3);
+    return s;
+}

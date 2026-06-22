@@ -1,0 +1,12 @@
+// u32_shift_left — u32 left shift: 1 << 2
+// Expected exit code: 4
+//
+// 1 << 2 = 4. Uses variables for both operands because VUMA may drop
+// bitwise ops with immediate RHS.
+
+fn main() -> i32 {
+    val: u32 = 1;
+    n: u32 = 2;
+    shifted: u32 = val << n;
+    return shifted;
+}

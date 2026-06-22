@@ -1,0 +1,26 @@
+// s73_mf_double_then_add.vuma — f2(f1(25)) + 14 = 100 + 14 = 114
+// Expected exit code: 114
+//
+// Two single-arg helpers chained then add a literal. f1(x) = x * 2
+// (double once); f2(x) = x * 2 (double again). main calls
+// f2(f1(25)) = 25 * 4 = 100, then adds 14 -> 114. Distinct from
+// s70_mf_double_then_add (95), s69_mf_double_then_add (170) and
+// s66_mf_double_then_sub (140).
+fn f1(x: u32) -> u32 {
+    n: u32 = 2;
+    r: u32 = x * n;
+    return r;
+}
+fn f2(x: u32) -> u32 {
+    n: u32 = 2;
+    r: u32 = x * n;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = f1(25);           // 50
+    b: u32 = f2(a);            // 100
+    c: u32 = 14;
+    r: u32 = b + c;            // 114
+    return r;
+}

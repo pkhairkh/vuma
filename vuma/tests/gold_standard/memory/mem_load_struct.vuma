@@ -1,0 +1,16 @@
+// mem_load_struct.vuma — load a struct
+// Expected exit code: 66
+//
+// Stores a "struct" with two fields, then loads them back and returns
+// their sum. Fields: x=20, y=46. Sum = 66.
+
+fn main() -> i32 {
+    buf = allocate(8);
+    *(buf + 0) = 20;
+    *(buf + 1) = 46;
+    x: u32 = *(buf + 0);
+    y: u32 = *(buf + 1);
+    sum: u32 = x + y;
+    free(buf);
+    return sum;
+}

@@ -1,0 +1,27 @@
+// s3_cs_long_chain_stores.vuma — 5 stores, 5 loads, sum
+// Expected exit code: 150  (10 + 20 + 30 + 40 + 50)
+//
+// 40-byte buffer; stores five values at 8-byte offsets, loads each
+// back and sums them. Tests store/load chain across multiple slots.
+
+fn main() -> i32 {
+    buf = allocate(40);
+    *(buf + 0) = 10;
+    *(buf + 8) = 20;
+    *(buf + 16) = 30;
+    *(buf + 24) = 40;
+    *(buf + 32) = 50;
+
+    a: u64 = *(buf + 0);
+    b: u64 = *(buf + 8);
+    c: u64 = *(buf + 16);
+    d: u64 = *(buf + 24);
+    e: u64 = *(buf + 32);
+    s1: u64 = a + b;
+    s2: u64 = s1 + c;
+    s3: u64 = s2 + d;
+    s4: u64 = s3 + e;
+
+    free(buf);
+    return s4;
+}

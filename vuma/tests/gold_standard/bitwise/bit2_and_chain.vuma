@@ -1,0 +1,15 @@
+// bit2_and_chain.vuma — Chain of bitwise ANDs.
+// Expected exit code: 3
+//
+// 0xFF & 0x0F & 0x03 = 0x0F & 0x03 = 0x03 = 3.
+//
+// Workaround note: bitwise ops with an immediate RHS are silently dropped by
+// the current codegen, so all operands are loaded into variables first.
+fn main() -> i32 {
+    a: u64 = 0xFF;
+    b: u64 = 0x0F;
+    c: u64 = 0x03;
+    t1: u64 = a & b;
+    result: u64 = t1 & c;
+    return result;
+}

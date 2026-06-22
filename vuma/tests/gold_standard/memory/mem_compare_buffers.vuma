@@ -1,0 +1,38 @@
+// mem_compare_buffers.vuma — compare two buffers
+// Expected exit code: 0
+//
+// Allocates two buffers, fills both with the same pattern, compares them.
+// Returns 0 if they match, 1 if they differ.
+
+fn main() -> i32 {
+    a = allocate(8);
+    b = allocate(8);
+    *(a + 0) = 10;
+    *(a + 1) = 20;
+    *(a + 2) = 30;
+    *(a + 3) = 40;
+    *(a + 4) = 50;
+    *(a + 5) = 60;
+    *(a + 6) = 70;
+    *(a + 7) = 80;
+    *(b + 0) = 10;
+    *(b + 1) = 20;
+    *(b + 2) = 30;
+    *(b + 3) = 40;
+    *(b + 4) = 50;
+    *(b + 5) = 60;
+    *(b + 6) = 70;
+    *(b + 7) = 80;
+    equal: u32 = 1;
+    i: u32 = 0;
+    while i < 8 {
+        va: u32 = *(a + i);
+        vb: u32 = *(b + i);
+        if va != vb { equal = 0; }
+        i = i + 1;
+    }
+    free(a);
+    free(b);
+    if equal == 1 { return 0; }
+    return 1;
+}

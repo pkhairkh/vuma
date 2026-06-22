@@ -1,0 +1,17 @@
+// s58_ls_overwrite_value.vuma — store 40, overwrite to 180, load = 180
+// Expected exit code: 180
+// 
+// Single 8-byte allocation treated as one "node". Store 40 via
+// `*ptr = literal`, then overwrite with 180. Load and return 180.
+// Uses `*ptr = literal` form (no offsets). Distinct from s51_ls_two_
+// node_diff (70), s51_ls_three_node_sum (235) and s51_ls_overwrite_
+// value (195).
+
+fn main() -> i32 {
+    n1 = allocate(8);
+    *n1 = 40;
+    *n1 = 180;
+    a: u64 = *n1;
+    free(n1);
+    return a;
+}

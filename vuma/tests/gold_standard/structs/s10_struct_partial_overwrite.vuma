@@ -1,0 +1,34 @@
+// s10_struct_partial_overwrite.vuma — 4 fields, overwrite offset 8, sum = 179
+// Expected exit code (correct): 179  (10 + 99 + 30 + 40)
+// Observed on current x86_64 backend: non-deterministic (FAIL — known
+//   U8-truncation bug on `*(p+offset)` stores/loads with u64 type)
+//
+// 32-byte struct (four u64 fields). Store 10/20/30/40 at offsets
+// 0/8/16/24, then overwrite offset 8 with 99. Load all four, sum ->
+// 10 + 99 + 30 + 40 = 179. Distinct from s5_struct_five_fields (5
+// fields, no overwrite) and s6_struct_three_field_middle (3 fields).
+
+struct Quad {
+    a: u64,
+    b: u64,
+    c: u64,
+    d: u64,
+}
+
+fn main() -> i32 {
+    p = allocate(32);
+    *(p + 0) = 10;
+    *(p + 8) = 20;
+    *(p + 16) = 30;
+    *(p + 24) = 40;
+    *(p + 8) = 99;
+    a: u64 = *(p + 0);
+    b: u64 = *(p + 8);
+    c: u64 = *(p + 16);
+    d: u64 = *(p + 24);
+    t1: u64 = a + b;
+    t2: u64 = t1 + c;
+    s: u64 = t2 + d;
+    free(p);
+    return s;
+}

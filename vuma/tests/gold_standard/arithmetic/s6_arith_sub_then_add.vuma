@@ -1,0 +1,15 @@
+// s6_arith_sub_then_add.vuma — (100 - 30) + 5 = 75
+// Expected exit code: 75
+//
+// Subtraction first (100 - 30 = 70), then add 5 -> 75. All values
+// inside U8 range. Distinct from s5_arith_quad_sum (pure adds) and
+// s4_arith_mul_then_sub (mul-then-sub).
+
+fn main() -> i32 {
+    a: u32 = 100;
+    b: u32 = 30;
+    c: u32 = 5;
+    d: u32 = a - b;       // 70
+    e: u32 = d + c;       // 75
+    return e;
+}

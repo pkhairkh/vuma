@@ -1,0 +1,11 @@
+// s106_edge_max_and_val.vuma — 255 & 48 = 48 (AND with all-ones is identity)
+// Expected exit code: 48
+//
+// Edge case: AND with the max byte (0xFF) is the identity. 255 & 48 = 48. All operands loaded into u32 variables first (immediate-RHS bitwise drop bug workaround).
+// Distinct from s102_edge_max_and_val (38), s101_edge_max_xor_val (155), s100_edge_max_xor_val (52).
+fn main() -> i32 {
+    a: u32 = 48;
+    m: u32 = 255;          // 0xFF
+    r: u32 = m & a;        // 48
+    return r;
+}

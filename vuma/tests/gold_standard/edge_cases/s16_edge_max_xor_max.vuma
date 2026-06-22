@@ -1,0 +1,13 @@
+// s16_edge_max_xor_max.vuma — 255 ^ 255 = 0
+// Expected exit code: 0
+//
+// Max U8 XORed with itself -> 0 (XOR self-cancellation). Distinct from
+// s14_edge_xor_self (85 ^ 85 = 0, smaller operand) and s10_edge_max_xor_zero
+// (255 ^ 0 = 255, XOR with zero).
+
+fn main() -> i32 {
+    a: u32 = 255;
+    b: u32 = 255;
+    r: u32 = a ^ b;       // 0
+    return r;
+}

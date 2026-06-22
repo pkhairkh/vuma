@@ -1,0 +1,15 @@
+// ptr_overwrite.vuma — overwrite previously stored value
+// Expected exit code: 99
+//
+// Stores 42 at offset 0 via *buf, then overwrites it with 99, loads
+// the result. Verifies that a later store to the same offset replaces
+// the earlier value.
+
+fn main() -> i32 {
+    buf = allocate(8);
+    *buf = 42;
+    *buf = 99;
+    val: i32 = *buf;
+    free(buf);
+    return val;
+}

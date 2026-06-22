@@ -1,0 +1,31 @@
+// s7_conc_four_cells.vuma — four cells, sum loads = 5+10+15+20 = 50
+// Expected exit code: 50
+//
+// Four independent 8-byte cells (separate allocations). Each gets a
+// distinct literal via `*p = literal`. All four loaded back and
+// summed. Simulates four independent "shared variables" without
+// atomic ops. Distinct from s5_conc_three_cells (three cells) and
+// s6_conc_sum_three_diff (three cells, different values).
+
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    c3 = allocate(8);
+    c4 = allocate(8);
+    *c1 = 5;
+    *c2 = 10;
+    *c3 = 15;
+    *c4 = 20;
+    v1: i32 = *c1;
+    v2: i32 = *c2;
+    v3: i32 = *c3;
+    v4: i32 = *c4;
+    t1: i32 = v1 + v2;
+    t2: i32 = v3 + v4;
+    s: i32 = t1 + t2;
+    free(c1);
+    free(c2);
+    free(c3);
+    free(c4);
+    return s;
+}

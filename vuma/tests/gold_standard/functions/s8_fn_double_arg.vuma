@@ -1,0 +1,18 @@
+// s8_fn_double_arg.vuma — square(7) + square(8) = 49 + 64 = 113
+// Expected exit code: 113
+//
+// Helper square(x) = x * x. main calls square(7) -> 49 and
+// square(8) -> 64, sums them. Distinct from s6_fn_double_call_diff
+// (inc helper, not square).
+
+fn square(x: u32) -> u32 {
+    r: u32 = x * x;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = square(7);   // 49
+    b: u32 = square(8);   // 64
+    s: u32 = a + b;       // 113
+    return s;
+}

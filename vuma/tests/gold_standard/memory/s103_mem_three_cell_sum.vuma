@@ -1,0 +1,21 @@
+// s103_mem_three_cell_sum.vuma — store 1, 2, 50 in 3 cells, load and sum = 1+2+50 = 53
+// Expected exit code: 53
+//
+// Three 8-byte cells. Store 1, 2, 50; load each and return the sum (53). Uses `*ptr = literal` form. Straight-line code only.
+// Distinct from s100_mem_three_cell_sum (93), s99_mem_three_cell_sum (130), s94_mem_three_cell_sum (109).
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    c3 = allocate(8);
+    *c1 = 1;
+    *c2 = 2;
+    *c3 = 50;
+    a: u64 = *c1;          // 1
+    b: u64 = *c2;          // 2
+    c: u64 = *c3;          // 50
+    s: u64 = a + b + c;    // 53
+    free(c1);
+    free(c2);
+    free(c3);
+    return s;
+}

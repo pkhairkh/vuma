@@ -1,0 +1,14 @@
+// s48_edge_max_and_zero.vuma — 255 & 0 = 0
+// Expected exit code: 0
+//
+// AND with zero clears all bits. 255 & 0 = 0. All operands loaded
+// into u32 variables first (immediate-RHS bitwise drop bug
+// workaround). Distinct from s46_edge_zero_and_max and s42_edge_
+// max_xor_zero.
+
+fn main() -> i32 {
+    a: u32 = 255;
+    b: u32 = 0;
+    r: u32 = a & b;        // 0
+    return r;
+}

@@ -1,0 +1,19 @@
+// s22_struct_field_load.vuma — single-field struct, load field = 69
+// Expected exit code: 69
+//
+// 8-byte allocation treated as a one-field struct. Store 69 via
+// `*p = 69`, load it back, return 69. Uses `*p = literal` form (no
+// offsets) to avoid the *(ptr+N) store-drop bug. Distinct from
+// s18_struct_field_load (value 58) and s14_struct_field_load (value 56).
+
+struct Single {
+    a: u64,
+}
+
+fn main() -> i32 {
+    p = allocate(8);
+    *p = 69;
+    a: u64 = *p;
+    free(p);
+    return a;
+}

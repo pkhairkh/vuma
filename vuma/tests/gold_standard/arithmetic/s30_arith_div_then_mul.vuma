@@ -1,0 +1,16 @@
+// s30_arith_div_then_mul.vuma — (224 / 7) * 2 = 32 * 2 = 64
+// Expected exit code: 64
+//
+// Two-stage u32 computation: divide then multiply. 224 / 7 = 32;
+// 32 * 2 = 64. All operands loaded into u32 variables first.
+// Distinct from s26_arith_sub_then_div (sub-then-div, 30) and
+// s22_arith_mul_mod_add (mul-mod-add).
+
+fn main() -> i32 {
+    a: u32 = 224;
+    b: u32 = 7;
+    c: u32 = 2;
+    q: u32 = a / b;       // 32
+    r: u32 = q * c;       // 64
+    return r;
+}

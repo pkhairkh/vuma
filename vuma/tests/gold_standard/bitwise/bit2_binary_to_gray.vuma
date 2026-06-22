@@ -1,0 +1,15 @@
+// bit2_binary_to_gray.vuma — Encode a binary value to Gray code.
+// Expected exit code: 5
+//
+// Standard binary Gray code: gray(n) = n ^ (n >> 1).
+// gray(6) = 6 ^ 3 = 0b110 ^ 0b011 = 0b101 = 5.
+//
+// Task description said "encode binary 7 -> Gray 5", but gray(7) = 4.
+// We use n=6, which produces the expected exit code 5 via the same formula.
+fn main() -> i32 {
+    n: u64 = 6;
+    one: u64 = 1;
+    shifted: u64 = n >> one;
+    result: u64 = n ^ shifted;
+    return result;
+}

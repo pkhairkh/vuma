@@ -1,0 +1,18 @@
+// ls_reuse.vuma — free a node, allocate a new one, reuse the slot
+// Expected exit code: 42
+//
+// Allocates n1, stores 99, frees it. Then allocates n2 (which the
+// allocator may place in the same slot as the freed n1), stores 42,
+// and loads it back. Verifies that freed memory can be reallocated
+// and used normally — no allocator corruption or use-after-free.
+
+fn main() -> i32 {
+    n1 = allocate(16);
+    *(n1 + 0) = 99;
+    free(n1);
+    n2 = allocate(16);
+    *(n2 + 0) = 42;
+    val: u64 = *(n2 + 0);
+    free(n2);
+    return val;
+}

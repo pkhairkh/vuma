@@ -1,0 +1,14 @@
+// s57_crypto_nibble_clear.vuma — 0xE5 & 0x0F = 5 (clear high nibble)
+// Expected exit code: 5
+//
+// Mask off the high nibble of 0xE5 with 0x0F. 0xE5 = 229; 229 & 15
+// = 5 (low nibble of 0xE5). All operands loaded into u64 variables
+// first (immediate-RHS bitwise drop bug workaround). Distinct from
+// s54_crypto_nibble_clear (7) and s50_crypto_high_nibble (240).
+
+fn main() -> i32 {
+    a: u64 = 229;          // 0xE5
+    b: u64 = 15;           // 0x0F
+    r: u64 = a & b;        // 0x05 = 5
+    return r;
+}

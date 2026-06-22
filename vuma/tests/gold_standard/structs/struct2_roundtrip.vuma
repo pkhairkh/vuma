@@ -1,0 +1,24 @@
+// struct2_roundtrip.vuma — store 123, load, store 123 in another struct, load
+// Expected exit code: 123
+//
+// Allocates two 8-byte structs p1 and p2, stores the literal 123 in
+// p1 at offset 0, loads it back, stores the literal 123 (not the
+// loaded variable) in p2 at offset 0, loads p2, returns. Uses
+// literal stores in both structs to avoid the known `*ptr = variable`
+// silent-drop bug.
+
+struct Single {
+    a: u64,
+}
+
+fn main() -> i32 {
+    p1 = allocate(8);
+    p2 = allocate(8);
+    *(p1 + 0) = 123;
+    v1: u64 = *(p1 + 0);
+    *(p2 + 0) = 123;
+    v2: u64 = *(p2 + 0);
+    free(p1);
+    free(p2);
+    return v2;
+}

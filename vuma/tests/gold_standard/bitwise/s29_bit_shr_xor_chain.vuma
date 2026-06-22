@@ -1,0 +1,13 @@
+// s29_bit_shr_xor_chain.vuma — (0xCC >> 2) ^ 0x05 = 0x33 ^ 0x05 = 0x36 = 54
+// Expected exit code: 54
+//
+// Two-stage bitwise: SHR then XOR. (204 >> 2) = 51 (0x33); 51 ^ 5 = 54 (0x36). All operands loaded into u64 variables first. Distinct from s26_bit_or_chain_3 (or-chain, 119) and s22_bit_shl_xor (shl-xor).
+
+fn main() -> i32 {
+    a: u64 = 204;         // 0xCC
+    b: u64 = 2;
+    c: u64 = 5;           // 0x05
+    x: u64 = a >> b;      // 0x33 = 51
+    r: u64 = x ^ c;       // 0x36 = 54
+    return r;
+}

@@ -1,0 +1,36 @@
+// edge2_nested — 5 levels of function calls, return 42
+// Expected exit code: 42
+//
+// Edge case: a 5-level chain of identity functions. Each call uses an
+// intermediate variable because VUMA miscompiles nested call
+// expressions used directly as arguments. The value 42 must pass
+// through all 5 levels unchanged.
+
+fn l5(x: u32) -> u32 {
+    return x;
+}
+
+fn l4(x: u32) -> u32 {
+    return x;
+}
+
+fn l3(x: u32) -> u32 {
+    return x;
+}
+
+fn l2(x: u32) -> u32 {
+    return x;
+}
+
+fn l1(x: u32) -> u32 {
+    return x;
+}
+
+fn main() -> i32 {
+    a: u32 = l1(42);
+    b: u32 = l2(a);
+    c: u32 = l3(b);
+    d: u32 = l4(c);
+    v: u32 = l5(d);
+    return v;
+}

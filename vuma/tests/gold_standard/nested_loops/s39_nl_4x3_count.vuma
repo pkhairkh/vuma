@@ -1,0 +1,18 @@
+// s39_nl_4x3_count.vuma — 4x3 nested loop, count = 12
+// Observed on current x86_64 backend: 0 (FAIL — known bug)
+//
+// Outer loop 4 iterations, inner loop 3 iterations each -> 4*3 = 12
+// total. Counter increments by 1 each inner iteration. Known
+// "for-body assignments don't propagate" bug keeps count at 0.
+// Distinct from s38_nl_4x2_count (4x2 = 8) and s37_nl_4x3_count
+// (4x3 = 12, same dims, different set).
+
+fn main() -> i32 {
+    count: u32 = 0;
+    for i in 0..4 {
+        for j in 0..3 {
+            count = count + 1;
+        }
+    }
+    return count;
+}

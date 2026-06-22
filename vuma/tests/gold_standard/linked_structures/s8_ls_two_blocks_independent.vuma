@@ -1,0 +1,26 @@
+// s8_ls_two_blocks_independent.vuma — two 16-byte blocks, sum = 100
+// Expected exit code: 100  ((10 + 20) + (30 + 40))
+//
+// Two independent 16-byte allocations. Block A: 10 at offset 0,
+// 20 at offset 8. Block B: 30 at offset 0, 40 at offset 8. SumA = 30,
+// SumB = 70, Total = 100. Distinct from s6_ls_two_blocks_independent
+// (different values).
+
+fn main() -> i32 {
+    a = allocate(16);
+    b = allocate(16);
+    *(a + 0) = 10;
+    *(a + 8) = 20;
+    *(b + 0) = 30;
+    *(b + 8) = 40;
+    a0: u64 = *(a + 0);
+    a1: u64 = *(a + 8);
+    b0: u64 = *(b + 0);
+    b1: u64 = *(b + 8);
+    sa: u64 = a0 + a1;     // 30
+    sb: u64 = b0 + b1;     // 70
+    s: u64 = sa + sb;      // 100
+    free(a);
+    free(b);
+    return s;
+}

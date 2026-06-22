@@ -1,0 +1,15 @@
+// s26_cf_for_count_4.vuma — for loop runs 4 iterations, count = 4
+// Observed on current x86_64 backend: 0 (FAIL — known bug)
+//
+// Counter starts at 0 and increments by 1 each iteration of a for loop
+// with range 0..4. Known "for-body assignments don't propagate" bug
+// keeps count at 0 -> exit 0. Will exit 4 once fixed. Distinct from
+// s22_cf_for_count_5 (5 iterations) and s16_cf_for_count_6 (6 iters).
+
+fn main() -> i32 {
+    count: u32 = 0;
+    for i in 0..4 {
+        count = count + 1;
+    }
+    return count;
+}

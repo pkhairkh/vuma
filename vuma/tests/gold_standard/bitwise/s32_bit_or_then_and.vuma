@@ -1,0 +1,18 @@
+// s32_bit_or_then_and.vuma - (0xF0 | 0x0F) & 0xCC = 0xFF & 0xCC = 0xCC = 204
+// Expected exit code: 204
+//
+// (0xF0 | 0x0F) & 0xCC = 0xFF & 0xCC = 0xCC = 204. All operands loaded into
+// typed variables before any bitwise op (immediate-RHS drop workaround where
+// applicable); stores use the `*ptr = literal` (or `*ptr = variable + 0`)
+// form with no `*(ptr + offset)` indexing. Distinct from
+// s30_bit_and_then_shl (and-then-shl, 80) and s26_bit_or_and_chain
+// (different operands).
+
+fn main() -> i32 {
+    a: u64 = 240;          // 0xF0
+    b: u64 = 15;           // 0x0F
+    c: u64 = 204;          // 0xCC
+    x: u64 = a | b;        // 0xFF = 255
+    r: u64 = x & c;        // 0xCC = 204
+    return r;
+}

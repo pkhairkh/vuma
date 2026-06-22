@@ -1,0 +1,15 @@
+// s33_cf_if_single_assign.vuma — if true { x = 50 }; return x
+// Observed on current x86_64 backend: 0 (FAIL — known bug)
+//
+// Single if-true block sets x = 50. With a literal `true`
+// condition x should end at 50. On the current backend the
+// if-true body's single assignment is dropped, so x stays 0 -> exit 0.
+// Will exit 50 once the if-body drop bug is fixed.
+// Distinct from s30_cf_if_single_assign (value 70, observed 0) and s26_cf_if_chain_3 (three-if chain, observed 0).
+fn main() -> i32 {
+    x: u32 = 0;
+    if true {
+        x = 50;
+    }
+    return x;
+}

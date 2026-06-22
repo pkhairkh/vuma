@@ -1,0 +1,22 @@
+// s56_mf_double_then_sub.vuma — double(80)=160, then sub(160,30)=130
+// Expected exit code: 130
+//
+// Two helpers chained. double(x) = x * 2; sub(x, y) = x - y. main
+// calls double(80) -> 160, then sub(160, 30) -> 130. Distinct from
+// s54_mf_double_then_sub (115) and s50_mf_double_then_sub (110).
+
+fn double(x: u32) -> u32 {
+    n: u32 = 2;
+    r: u32 = x * n;
+    return r;
+}
+fn sub(x: u32, y: u32) -> u32 {
+    r: u32 = x - y;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = double(80);       // 160
+    r: u32 = sub(a, 30);       // 130
+    return r;
+}

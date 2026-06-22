@@ -1,0 +1,16 @@
+// s47_arith_div_mod_add.vuma — 200 / 6 + 18 = 33 + 18 = 51
+// Expected exit code: 51
+//
+// Three-stage u32 computation: divide then add. 200 / 6 = 33 (integer
+// division, remainder 2); 33 + 18 = 51. All operands loaded into
+// u32 variables first. Straight-line arithmetic. Distinct from
+// s46_arith_mul_mod_add (49) and s42_arith_sub_then_mod.
+
+fn main() -> i32 {
+    a: u32 = 200;
+    b: u32 = 6;
+    c: u32 = 18;
+    q: u32 = a / b;        // 33
+    r: u32 = q + c;        // 51
+    return r;
+}

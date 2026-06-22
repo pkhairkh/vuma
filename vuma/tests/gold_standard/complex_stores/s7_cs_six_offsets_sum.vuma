@@ -1,0 +1,38 @@
+// s7_cs_six_offsets_sum.vuma — scatter 6 values across 48 bytes, sum = 105
+// Expected exit code: 105  (5 + 10 + 15 + 20 + 25 + 30)
+//
+// 48-byte buffer treated as six 8-byte slots at offsets 0/8/16/24/
+// 32/40. Stores 5/10/15/20/25/30, loads all six, sums, returns 105.
+// Uses pointer-arithmetic aliases (p0 = p, p8 = p + 8, ...) for each
+// slot so that all stores/loads go through `*pN` (no offset on the
+// dereference itself). Distinct from s5_cs_long_scatter (4 offsets)
+// and s6_cs_four_offsets (4 offsets, different values).
+
+fn main() -> i32 {
+    buf = allocate(48);
+    p0 = buf;
+    p8 = buf + 8;
+    p16 = buf + 16;
+    p24 = buf + 24;
+    p32 = buf + 32;
+    p40 = buf + 40;
+    *p0 = 5;
+    *p8 = 10;
+    *p16 = 15;
+    *p24 = 20;
+    *p32 = 25;
+    *p40 = 30;
+    a: u64 = *p0;
+    b: u64 = *p8;
+    c: u64 = *p16;
+    d: u64 = *p24;
+    e: u64 = *p32;
+    f: u64 = *p40;
+    t1: u64 = a + b;
+    t2: u64 = t1 + c;
+    t3: u64 = t2 + d;
+    t4: u64 = t3 + e;
+    s: u64 = t4 + f;
+    free(buf);
+    return s;
+}

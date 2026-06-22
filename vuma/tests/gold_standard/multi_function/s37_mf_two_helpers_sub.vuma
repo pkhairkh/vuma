@@ -1,0 +1,24 @@
+// s37_mf_two_helpers_sub.vuma — sub3(50) + sub5(30) = 47 + 25 = 72
+// Expected exit code: 72
+//
+// Deterministic test in the multi_function category. All operands loaded into typed
+// variables before any bitwise op; all stores use `*ptr = literal` (or the
+// `*ptr = variable + 0` workaround). Result lands in 0-255.
+// Distinct from s33_mf_two_helpers_mul (mul2+mul3, 125) and s30_mf_two_helpers_sum (add4+mul3=79).
+fn sub3(x: u32) -> u32 {
+    n: u32 = 3;
+    r: u32 = x - n;
+    return r;
+}
+fn sub5(x: u32) -> u32 {
+    n: u32 = 5;
+    r: u32 = x - n;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = sub3(50);    // 47
+    b: u32 = sub5(30);    // 25
+    r: u32 = a + b;       // 72
+    return r;
+}

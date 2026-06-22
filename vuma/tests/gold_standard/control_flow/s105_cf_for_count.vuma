@@ -1,0 +1,12 @@
+// s105_cf_for_count.vuma — for loop runs 175 iterations, count = 175
+// Observed on current x86_64 backend: 0 (FAIL — known bug)
+// 
+// Counter starts at 0 and increments by 1 each iteration of a for loop with range 0..175. Known "for-body assignments don't propagate" bug keeps count at 0 -> exit 0. Will exit 175 once fixed.
+// Distinct from s102_cf_for_count (127), s101_cf_for_count (83), s100_cf_for_count (123).
+fn main() -> i32 {
+    count: u32 = 0;
+    for i in 0..175 {
+        count = count + 1;
+    }
+    return count;
+}

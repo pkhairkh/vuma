@@ -1,0 +1,19 @@
+// s7_bit_and_or_combine.vuma — (0xFF & 0x0F) | (0xF0 & 0xAA) = 0x0F | 0xA0 = 0xAF = 175
+// Expected exit code: 175
+//
+// Two parallel ANDs feed into an OR. (255 & 15) = 15 (0x0F);
+// (240 & 170) = 160 (0xA0); 15 | 160 = 175 (0xAF). All operands
+// loaded into variables first to dodge the immediate-RHS bitwise
+// drop bug. Distinct from s5_bit_and_or_chain (single AND then OR
+// with a constant) and s4_bit_or_then_and (OR then single AND).
+
+fn main() -> i32 {
+    a: u64 = 255;    // 0xFF
+    b: u64 = 15;     // 0x0F
+    c: u64 = 240;    // 0xF0
+    d: u64 = 170;    // 0xAA
+    lo: u64 = a & b;    // 0x0F = 15
+    hi: u64 = c & d;    // 0xA0 = 160
+    r: u64 = lo | hi;   // 0xAF = 175
+    return r;
+}

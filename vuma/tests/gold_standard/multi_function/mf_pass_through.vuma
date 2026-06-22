@@ -1,0 +1,20 @@
+// mf_pass_through.vuma — main → f1(42) → f2(val) → return val
+// Expected exit code: 42
+//
+// Tests value pass-through across a two-function chain: main passes 42
+// to f1, which passes it to f2, which returns it. The value should
+// arrive back at main unchanged.
+
+fn f2(x: u32) -> u32 {
+    return x;
+}
+
+fn f1(x: u32) -> u32 {
+    v: u32 = f2(x);
+    return v;
+}
+
+fn main() -> i32 {
+    v: u32 = f1(42);
+    return v;
+}

@@ -1,0 +1,13 @@
+// s8_crypto_high_nibble.vuma — 0xAB & 0xF0 = 0xA0 = 160
+// Expected exit code: 160
+//
+// Mask-and-extract the high nibble: 171 (0xAB) AND 240 (0xF0) =
+// 160 (0xA0). All operands loaded into variables first. Distinct
+// from s5_crypto_nibble_extract (low nibble).
+
+fn main() -> i32 {
+    v: u64 = 171;      // 0xAB
+    m: u64 = 240;      // 0xF0
+    r: u64 = v & m;    // 0xA0 = 160
+    return r;
+}

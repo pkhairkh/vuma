@@ -1,0 +1,16 @@
+// s30_u32_and_then_add.vuma — (0xAA & 0x0F) + 100 = 0x0A + 100 = 110
+// Expected exit code: 110
+//
+// AND then ADD. (170 & 15) = 10 (0x0A); 10 + 100 = 110. All operands
+// loaded into u32 variables first (immediate-RHS bitwise drop bug
+// workaround). Distinct from s26_u32_mul_then_xor (mul-then-xor, 15)
+// and s22_u32_and_then_shr (and-then-shr).
+
+fn main() -> i32 {
+    a: u32 = 170;          // 0xAA
+    b: u32 = 15;           // 0x0F
+    c: u32 = 100;
+    x: u32 = a & b;       // 0x0A = 10
+    r: u32 = x + c;       // 110
+    return r;
+}

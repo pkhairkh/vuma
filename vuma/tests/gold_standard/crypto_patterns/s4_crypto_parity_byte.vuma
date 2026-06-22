@@ -1,0 +1,26 @@
+// s4_crypto_parity_byte.vuma — even-parity bit of 0xAA = 0
+// Expected exit code: 0
+//
+// Computes the parity (XOR of all bits) of 0xAA = 10101010 → XOR of
+// four 1 bits = 0. Implemented as repeated XOR with shifted copies
+// of the byte, which folds all bits down to bit 0. 0xAA ^ (0xAA>>1)
+// ^ (0xAA>>2) ^ (0xAA>>4) ... actually the standard "fold" reduces
+// 8 bits to 1 via: x ^= x>>4; x ^= x>>2; x ^= x>>1; parity = x & 1.
+// For 0xAA: x=0xAA; x^=x>>4 → 0xAA ^ 0x0A = 0xA0; x^=x>>2 →
+// 0xA0 ^ 0x28 = 0x88; x^=x>>1 → 0x88 ^ 0x44 = 0xCC; parity = 0xCC&1
+// = 0.
+
+fn main() -> i32 {
+    x: u64 = 170;     // 0xAA
+    four: u64 = 4;
+    two: u64 = 2;
+    one: u64 = 1;
+    s4: u64 = x >> four;     // 0x0A
+    x2: u64 = x ^ s4;        // 0xA0
+    s2: u64 = x2 >> two;     // 0x28
+    x3: u64 = x2 ^ s2;       // 0x88
+    s1: u64 = x3 >> one;     // 0x44
+    x4: u64 = x3 ^ s1;       // 0xCC
+    parity: u64 = x4 & one;  // 0
+    return parity;
+}

@@ -1,0 +1,14 @@
+// s12_edge_255_minus_zero.vuma — 255 - 0 = 255
+// Expected exit code: 255
+//
+// Subtraction with a zero RHS is the identity function. Tests the
+// codegen's handling of a zero RHS in SUB for the max u8 value.
+// Distinct from s5_edge_255_minus_1 (255 - 1 = 254) and
+// s10_edge_one_minus_one (1 - 1 = 0).
+
+fn main() -> i32 {
+    a: u32 = 255;
+    b: u32 = 0;
+    r: u32 = a - b;
+    return r;
+}

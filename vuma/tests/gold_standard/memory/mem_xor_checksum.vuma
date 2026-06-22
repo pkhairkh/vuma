@@ -1,0 +1,25 @@
+// mem_xor_checksum.vuma — XOR checksum of all bytes
+// Expected exit code: 4
+//
+// Computes the XOR of all bytes in a buffer.
+// Buffer = [0x0F, 0x0A, 0x05, 0x0C]. XOR = 0x0F ^ 0x0A ^ 0x05 ^ 0x0C
+//   = 0x05 ^ 0x05 ^ 0x0C = 0x00 ^ 0x0C = 0x0C = 12.
+// Actually we want exit 4 so buffer = [1, 2, 4, 7] → 1^2=3, 3^4=7, 7^7=0... no.
+// Buffer = [4, 0, 0, 0] → XOR = 4.
+
+fn main() -> i32 {
+    buf = allocate(4);
+    *(buf + 0) = 4;
+    *(buf + 1) = 0;
+    *(buf + 2) = 0;
+    *(buf + 3) = 0;
+    x: u32 = 0;
+    i: u32 = 0;
+    while i < 4 {
+        v: u32 = *(buf + i);
+        x = x ^ v;
+        i = i + 1;
+    }
+    free(buf);
+    return x;
+}

@@ -1,0 +1,25 @@
+// s27_cs_overwrite_last.vuma — overwrite last of three, sum = 210 (10 + 70 + 130)
+// Expected exit code: 210
+//
+// Three 8-byte cells. Store 10/70/90 in c1/c2/c3, then overwrite c3 (the
+// last cell) with 130. Load all three, sum -> 210. Uses `*ptr = literal`
+// form (no offsets). Distinct from s26_cs_overwrite_middle (overwrites
+// the middle cell) and s22_cs_overwrite_first (overwrites the first).
+
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    c3 = allocate(8);
+    *c1 = 10;
+    *c2 = 70;
+    *c3 = 90;
+    *c3 = 130;
+    a: u64 = *c1;
+    b: u64 = *c2;
+    c: u64 = *c3;
+    s: u64 = a + b + c;
+    free(c1);
+    free(c2);
+    free(c3);
+    return s;
+}

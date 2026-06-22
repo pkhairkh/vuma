@@ -1,0 +1,23 @@
+// arith_sign — sign function: -1, 0, or 1
+// Expected exit code: 1
+//
+// sign(n): returns 1 if n > 0, 0 if n == 0, -1 (which wraps to 255 as a
+// u8 exit code) if n < 0. Here we use unsigned comparison and return 1 for
+// positive n.
+
+fn main() -> i32 {
+    n: i32 = 42;
+    zero: i32 = 0;
+    one: i32 = 1;
+    result: i32 = 0;
+    if n > zero {
+        result = one;
+    } else {
+        if n < zero {
+            result = 0 - one;
+        } else {
+            result = zero;
+        }
+    }
+    return result;
+}

@@ -1,0 +1,15 @@
+// s6_ptr_store_load_basic.vuma — store 55, load 55
+// Expected exit code: 55
+//
+// Single 8-byte cell. Store literal 55, load back, return. Most
+// basic store-load round trip via pointer. Distinct from
+// s5_ptr_two_cell_publish (two cells) and s4_ptr_basic_store_load
+// (different value).
+
+fn main() -> i32 {
+    p = allocate(8);
+    *p = 55;
+    v: i32 = *p;
+    free(p);
+    return v;
+}

@@ -1,0 +1,14 @@
+// s72_edge_max_and_low.vuma — 255 & 5 = 5
+// Expected exit code: 5
+//
+// AND the max u8 value 255 (0xFF) with the low-nibble value 5
+// (0x05). 255 & 5 = 5. All operands loaded into u32 variables
+// first (immediate-RHS bitwise drop bug workaround). Distinct
+// from s70_edge_half_max_and_low (7), s69_edge_max_and_170 (170)
+// and s66_edge_max_xor_three (252).
+fn main() -> i32 {
+    a: u32 = 255;          // 0xFF
+    b: u32 = 5;            // 0x05
+    r: u32 = a & b;        // 0x05 = 5
+    return r;
+}

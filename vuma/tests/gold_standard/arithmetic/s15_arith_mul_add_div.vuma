@@ -1,0 +1,18 @@
+// s15_arith_mul_add_div.vuma — (6 * 7 + 8) / 5 = 50 / 5 = 10
+// Expected exit code: 10
+//
+// Three-stage computation: multiply then add then divide. (6 * 7) = 42;
+// 42 + 8 = 50; 50 / 5 = 10. All operands loaded into u32 variables first.
+// Distinct from s14_arith_mul_then_div (mul-then-div, no add) and
+// s9_arith_div_then_mul (div-then-mul).
+
+fn main() -> i32 {
+    a: u32 = 6;
+    b: u32 = 7;
+    c: u32 = 8;
+    d: u32 = 5;
+    p: u32 = a * b;       // 42
+    s: u32 = p + c;       // 50
+    r: u32 = s / d;       // 10
+    return r;
+}

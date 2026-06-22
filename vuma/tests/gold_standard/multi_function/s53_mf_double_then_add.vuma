@@ -1,0 +1,23 @@
+// s53_mf_double_then_add.vuma — dbl(70)=140, add_eight(140)=148
+// Expected exit code: 148
+//
+// Two single-arg helpers chained: dbl(x)=x*2, add_eight(x)=x+8.
+// main calls dbl(70) -> 140, add_eight(140) -> 148. Distinct from
+// s49_mf_double_then_add (132) and s50_mf_double_then_sub (100).
+
+fn dbl(x: u32) -> u32 {
+    n: u32 = 2;
+    r: u32 = x * n;
+    return r;
+}
+fn add_eight(x: u32) -> u32 {
+    n: u32 = 8;
+    r: u32 = x + n;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = dbl(70);          // 140
+    r: u32 = add_eight(a);     // 148
+    return r;
+}

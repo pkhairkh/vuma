@@ -1,0 +1,12 @@
+// s9_u32_mul_pair.vuma — 7 * 9 = 63
+// Expected exit code: 63
+//
+// Simple pair of u32 literals multiplied. Distinct from
+// s6_u32_add_pair (sum, not mul) and s5_u32_sub_chain_3 (sub chain).
+
+fn main() -> i32 {
+    a: u32 = 7;
+    b: u32 = 9;
+    r: u32 = a * b;
+    return r;
+}

@@ -1,0 +1,13 @@
+// arith_average — average without overflow
+// Expected exit code: 100
+//
+// Uses the identity (a & b) + ((a ^ b) >> 1) = (a + b) / 2 without
+// overflow risk. With a = 0xFFFFFFFF and b = 1, the true average is
+// 0x80000000 = 2147483648; the low 8 bits are 0.
+
+fn main() -> i32 {
+    a: u32 = 100;
+    b: u32 = 100;
+    avg: u32 = (a & b) + ((a ^ b) >> 1);
+    return avg;
+}

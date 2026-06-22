@@ -1,0 +1,16 @@
+// s13_crypto_xor_inverse.vuma — (0x3C ^ 0xC3) ^ 0xC3 = 0x3C = 60
+// Expected exit code: 60
+//
+// Double-XOR with the same key recovers the original byte (XOR
+// self-inverse property). (60 ^ 195) = 255; 255 ^ 195 = 60. Models
+// the encrypt-then-decrypt step of an XOR stream cipher. All operands
+// loaded into u64 variables first. Distinct from s10_crypto_xor_inverse
+// (different key/values) and s9_crypto_xor_self (single self-XOR -> 0).
+
+fn main() -> i32 {
+    v: u64 = 60;          // 0x3C
+    k: u64 = 195;         // 0xC3
+    e: u64 = v ^ k;       // 0xFF = 255
+    r: u64 = e ^ k;       // 0x3C = 60
+    return r;
+}

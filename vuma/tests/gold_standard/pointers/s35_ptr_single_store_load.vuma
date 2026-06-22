@@ -1,0 +1,15 @@
+// s35_ptr_single_store_load.vuma — store 167, load = 167
+// Expected exit code: 167
+//
+// Single 8-byte cell. Store 167 via `*p = literal`, load and
+// return 167. Uses `*p = literal` form (no offsets). Distinct from
+// s34_ptr_single_store_load (145) and s30_ptr_single_store_load
+// (different value).
+
+fn main() -> i32 {
+    p = allocate(8);
+    *p = 167;
+    r: i32 = *p;
+    free(p);
+    return r;
+}

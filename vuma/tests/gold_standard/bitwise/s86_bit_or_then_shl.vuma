@@ -1,0 +1,16 @@
+// s86_bit_or_then_shl.vuma — (0x10 | 0x07) << 2 = 0x17 << 2 = 0x5C = 92
+// Expected exit code: 92
+//
+// Two-stage bitwise: OR then shift left. (16 | 7) = 23 (0x17);
+// 23 << 2 = 92 (0x5C). All operands loaded into u64 variables
+// first (immediate-RHS bitwise drop bug workaround). Distinct
+// from s82_bit_xor_then_shl (120), s78_bit_or_then_shl (1) and
+// s74_bit_shl_then_or (4).
+fn main() -> i32 {
+    a: u64 = 16;           // 0x10
+    b: u64 = 7;            // 0x07
+    c: u64 = 2;            // shift amount
+    x: u64 = a | b;        // 0x17 = 23
+    r: u64 = x << c;       // 0x5C = 92
+    return r;
+}

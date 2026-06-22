@@ -1,0 +1,11 @@
+// cf_if_true — if with true condition returns immediately
+// Expected exit code: 42
+//
+// Exposes: if-body return must actually return out of main.
+
+fn main() -> i32 {
+    if true {
+        return 42;
+    }
+    return 0;
+}

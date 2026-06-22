@@ -1,0 +1,15 @@
+// s69_crypto_and_then_xor.vuma -- (0xAA & 0x0F) ^ 0x95 = 0x0A ^ 0x95 = 0x9F = 159
+// Expected exit code: 159
+//
+// Mask-then-xor: (170 & 15) = 10 (0x0A); 10 ^ 149 = 159 (0x9F). All
+// operands loaded into u64 variables first (immediate-RHS bitwise
+// drop bug workaround). Distinct from s66_crypto_or_mask (253),
+// s65_crypto_or_then_xor (104) and s64_crypto_and_then_or (202).
+fn main() -> i32 {
+    a: u64 = 170;          // 0xAA
+    b: u64 = 15;           // 0x0F
+    c: u64 = 149;          // 0x95
+    x: u64 = a & b;        // 0x0A = 10
+    r: u64 = x ^ c;        // 0x9F = 159
+    return r;
+}

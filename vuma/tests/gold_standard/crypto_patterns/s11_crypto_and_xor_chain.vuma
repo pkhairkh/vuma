@@ -1,0 +1,16 @@
+// s11_crypto_and_xor_chain.vuma — (0xF0 & 0xCC) ^ 0x33 = 243
+// Expected exit code: 243
+//
+// AND-then-XOR mix. (240 & 204) = 192 (0xC0); 192 ^ 51 = 243 (0xF3).
+// All operands loaded into u64 variables first. Distinct from
+// s10_crypto_high_nibble_only (extract high nibble) and s8_crypto_xor_three_bytes
+// (3-way XOR, no AND).
+
+fn main() -> i32 {
+    a: u64 = 240;         // 0xF0
+    b: u64 = 204;         // 0xCC
+    c: u64 = 51;          // 0x33
+    x: u64 = a & b;       // 0xC0 = 192
+    r: u64 = x ^ c;       // 0xF3 = 243
+    return r;
+}

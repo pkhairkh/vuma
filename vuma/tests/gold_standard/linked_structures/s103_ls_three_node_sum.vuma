@@ -1,0 +1,21 @@
+// s103_ls_three_node_sum.vuma — store 1, 1, 18 in 3 nodes, load and sum = 1+1+18 = 20
+// Expected exit code: 20
+//
+// Three 8-byte "nodes". Store 1, 1, 18; load each and return the sum (20). Uses `*ptr = literal` form. Straight-line code only.
+// Distinct from s102_ls_three_node_sum (5), s101_ls_three_node_sum (150), s100_ls_three_node_sum (58).
+fn main() -> i32 {
+    n1 = allocate(8);
+    n2 = allocate(8);
+    n3 = allocate(8);
+    *n1 = 1;
+    *n2 = 1;
+    *n3 = 18;
+    a: u64 = *n1;          // 1
+    b: u64 = *n2;          // 1
+    c: u64 = *n3;          // 18
+    s: u64 = a + b + c;    // 20
+    free(n1);
+    free(n2);
+    free(n3);
+    return s;
+}

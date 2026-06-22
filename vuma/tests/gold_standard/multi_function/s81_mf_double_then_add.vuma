@@ -1,0 +1,18 @@
+// s81_mf_double_then_add.vuma — double(48) + 7 = 96 + 7 = 103
+// Expected exit code: 103
+//
+// Helper double(x) = x + x. main doubles 48 then adds 7:
+// double(48) + 7 = 96 + 7 = 103. Distinct from s78_mf_double_
+// then_add (3), s77_mf_double_then_add (204) and s76_mf_double_
+// then_add (162).
+fn double(x: u32) -> u32 {
+    r: u32 = x + x;
+    return r;
+}
+
+fn main() -> i32 {
+    d: u32 = double(48);     // 96
+    k: u32 = 7;
+    s: u32 = d + k;            // 103
+    return s;
+}

@@ -1,0 +1,14 @@
+// s4_cf_for_count_5.vuma — count iterations of a for loop
+// Observed on current x86_64 backend: 0 (FAIL — known bug)
+//
+// Loops 5 times incrementing a counter. Known "for-body assignments
+// don't propagate" bug means the counter stays at 0 → exit 0.
+// Will pass (exit 5) once that bug is fixed.
+
+fn main() -> i32 {
+    count: u32 = 0;
+    for i in 0..5 {
+        count = count + 1;
+    }
+    return count;
+}

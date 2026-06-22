@@ -1,0 +1,23 @@
+// s8_mem_three_cells_sum.vuma — three cells, sum loads = 30 (5 + 10 + 15)
+// Expected exit code: 30
+//
+// Three independent 8-byte cells with distinct literal values (5/10/15).
+// All three loaded back and summed. Distinct from s5_mem_triple_buf_sum
+// (different values 30/60/90, uses *(p + 0) syntax).
+
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    c3 = allocate(8);
+    *c1 = 5;
+    *c2 = 10;
+    *c3 = 15;
+    v1: i32 = *c1;
+    v2: i32 = *c2;
+    v3: i32 = *c3;
+    s: i32 = v1 + v2 + v3;
+    free(c1);
+    free(c2);
+    free(c3);
+    return s;
+}

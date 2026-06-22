@@ -1,0 +1,13 @@
+// s11_edge_xor_self_zero.vuma — 0xAB ^ 0xAB = 0
+// Expected exit code: 0
+//
+// XOR is its own inverse: x ^ x = 0 for any x. Edge case: both operands
+// are the same nonzero value (0xAB). Distinct from s8_edge_zero_xor
+// (0 ^ 0 = 0) and s7_edge_zero_xor (also zero XOR, different operands).
+
+fn main() -> i32 {
+    a: u32 = 171;         // 0xAB
+    b: u32 = 171;         // 0xAB (same as a)
+    r: u32 = a ^ b;       // 0
+    return r;
+}

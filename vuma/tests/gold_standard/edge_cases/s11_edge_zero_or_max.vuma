@@ -1,0 +1,13 @@
+// s11_edge_zero_or_max.vuma — 0 | 255 = 255
+// Expected exit code: 255
+//
+// OR with the all-ones byte -> saturates to 255. Edge case: one operand
+// is 0, the other is 0xFF. Distinct from s10_edge_max_xor_zero (XOR with
+// zero, identity) and s6_edge_ones_constant (literal 0xFF return).
+
+fn main() -> i32 {
+    a: u32 = 0;
+    b: u32 = 255;
+    r: u32 = a | b;
+    return r;
+}

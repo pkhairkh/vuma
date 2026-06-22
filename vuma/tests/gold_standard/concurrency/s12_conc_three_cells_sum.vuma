@@ -1,0 +1,25 @@
+// s12_conc_three_cells_sum.vuma — three cells, sum loads = 75 (15 + 25 + 35)
+// Expected exit code: 75
+//
+// Three independent 8-byte cells. Each gets a different literal at
+// offset 0 (15/25/35). All three loaded back and summed. Distinct
+// from s5_conc_three_cells (values 10/20/30 = 60) and
+// s10_conc_four_cells (4 cells).
+
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    c3 = allocate(8);
+    *c1 = 15;
+    *c2 = 25;
+    *c3 = 35;
+    v1: i32 = *c1;
+    v2: i32 = *c2;
+    v3: i32 = *c3;
+    t: i32 = v1 + v2;
+    s: i32 = t + v3;
+    free(c1);
+    free(c2);
+    free(c3);
+    return s;
+}

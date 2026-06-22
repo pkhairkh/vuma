@@ -1,0 +1,20 @@
+// s47_cf_if_else_const.vuma — if true { x = 42 } else { x = 200 }; return x
+// Observed on current x86_64 backend: 200 (FAIL — known bug)
+//
+// If-true branch should set x = 42, else branch sets x = 200. With a
+// literal `true` condition the true branch should win -> 42. On the
+// current backend the if-true body's single assignment is dropped,
+// so the else body's assignment (200) survives instead. Will exit
+// 42 once the if-body drop bug is fixed. Distinct from s46_cf_if_
+// else_const (true=55/else=120, observed 120) and s42_cf_if_else_
+// const (true=42/else=99).
+
+fn main() -> i32 {
+    x: u32 = 0;
+    if true {
+        x = 42;
+    } else {
+        x = 200;
+    }
+    return x;
+}

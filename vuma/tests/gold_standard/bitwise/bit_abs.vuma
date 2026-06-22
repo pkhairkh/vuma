@@ -1,0 +1,15 @@
+// bit_abs.vuma — Compute abs(-42) using bit operations on i64.
+// Expected exit code: 42
+//
+// Standard bit-twiddle absolute value:
+//   sign = x >> 63   (arithmetic shift: -1 if negative, 0 if non-negative)
+//   abs  = (x ^ sign) - sign
+// For x = -42: sign = -1, x^sign = 41, 41 - (-1) = 42.
+fn main() -> i32 {
+    x: i64 = -42;
+    sixtythree: i64 = 63;
+    sign: i64 = x >> sixtythree;
+    flipped: i64 = x ^ sign;
+    abs: i64 = flipped - sign;
+    return abs;
+}

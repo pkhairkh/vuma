@@ -1,0 +1,16 @@
+// s59_conc_overwrite_first.vuma — overwrite first to 215, load = 215
+// Expected exit code: 215
+//
+// Single 8-byte cell. Store 100 via `*ptr = literal`, then overwrite
+// the cell with 215. Load and return 215. Uses `*ptr = literal` form.
+// Distinct from s58_conc_two_cell_diff (140), s58_conc_three_cell_sum
+// (230) and s58_conc_overwrite_middle (200).
+
+fn main() -> i32 {
+    c1 = allocate(8);
+    *c1 = 100;
+    *c1 = 215;
+    v: i32 = *c1;
+    free(c1);
+    return v;
+}

@@ -1,0 +1,17 @@
+// s80_atom_overwrite_value.vuma — overwrite to 6, atomic_load = 6
+// Expected exit code: 0 (current buggy backend)
+// Expected exit code (correct, post-bridge-fix): 6
+//
+// Single 8-byte cell. atomic_store 1, then atomic_store 6.
+// atomic_load should return 6. On the current backend the load
+// returns 0 -> exit 0. Will exit 6 once atomics are wired
+// through. Distinct from s78_atom_overwrite_value (3),
+// s74_atom_overwrite_value (23) and s73_atom_overwrite_value (131).
+fn main() -> i32 {
+    c1 = allocate(8);
+    atomic_store(c1, 1);
+    atomic_store(c1, 6);
+    r = atomic_load(c1);
+    free(c1);
+    return r;
+}

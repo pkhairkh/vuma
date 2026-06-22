@@ -1,0 +1,17 @@
+// cs_struct_store.vuma — store 3 "fields" at offsets 0, 8, 16, return sum
+// Expected exit code: 3  (1 + 1 + 1)
+//
+// Models a struct with three fields spread out (stride 8). Verifies that
+// stores at wider offsets are independent and loadable.
+
+fn main() -> i32 {
+    buf = allocate(24);
+    *(buf + 0)  = 1;
+    *(buf + 8)  = 1;
+    *(buf + 16) = 1;
+    f0: u32 = *(buf + 0);
+    f1: u32 = *(buf + 8);
+    f2: u32 = *(buf + 16);
+    free(buf);
+    return f0 + f1 + f2;
+}

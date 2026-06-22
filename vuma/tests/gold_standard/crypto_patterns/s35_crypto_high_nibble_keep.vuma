@@ -1,0 +1,14 @@
+// s35_crypto_high_nibble_keep.vuma — 0x9E & 0xF0 = 0x90 = 144 (keep high nibble)
+// Expected exit code: 144
+//
+// Keep the high nibble, clear the low nibble. 158 & 240 = 144
+// (0x90). All operands loaded into u64 variables first (immediate-
+// RHS bitwise drop bug workaround). Distinct from s34_crypto_nibble_
+// clear (clear-high, 11) and s27_crypto_high_nibble_keep (192).
+
+fn main() -> i32 {
+    a: u64 = 158;          // 0x9E
+    m: u64 = 240;          // 0xF0
+    r: u64 = a & m;        // 0x90 = 144
+    return r;
+}

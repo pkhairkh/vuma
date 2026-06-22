@@ -1,0 +1,17 @@
+// s13_edge_store_zero_load.vuma — store 0, load, return 0
+// Expected exit code: 0
+//
+// Allocate an 8-byte cell, store literal 0 via `*p = 0`, load it
+// back, return 0. Tests the codegen's handling of a zero store
+// round-tripping through memory. Uses `*p = literal` form (no
+// offsets). Distinct from s9_edge_zero_load (value 0, same shape,
+// included for set-13 coverage) and s9_edge_max_then_zero
+// (255 then 0).
+
+fn main() -> i32 {
+    p = allocate(8);
+    *p = 0;
+    v: u64 = *p;
+    free(p);
+    return v;
+}

@@ -1,0 +1,26 @@
+// s44_cs_overwrite_first.vuma — overwrite first to 90, sum = 220 (90 + 50 + 80)
+// Expected exit code: 220
+//
+// Three 8-byte cells. Store 20/50/80 via `*ptr = literal`, then
+// overwrite the first cell with 90. Load all three, sum -> 220. Uses
+// `*ptr = literal` form (no offsets). Distinct from s42_cs_overwrite_
+// last (210) and s38_cs_overwrite_middle (210).
+
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    c3 = allocate(8);
+    *c1 = 20;
+    *c2 = 50;
+    *c3 = 80;
+    *c1 = 90;
+    a: u64 = *c1;
+    b: u64 = *c2;
+    c: u64 = *c3;
+    t: u64 = a + b;
+    s: u64 = t + c;        // 220
+    free(c1);
+    free(c2);
+    free(c3);
+    return s;
+}

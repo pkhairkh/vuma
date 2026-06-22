@@ -1,0 +1,25 @@
+// s45_mem_three_cell_and.vuma — three cells, and = 11 (0xFB & 0x0F & 0xFF)
+// Expected exit code: 11
+//
+// Three 8-byte cells. Store 251/15/255 via `*ptr = literal`, load
+// all, and -> 11 (0x0B). Uses `*ptr = literal` form (no offsets).
+// Distinct from s42_mem_three_cell_xor (xor, 195) and s38_mem_three_
+// cell_and.
+
+fn main() -> i32 {
+    p1 = allocate(8);
+    p2 = allocate(8);
+    p3 = allocate(8);
+    *p1 = 251;             // 0xFB
+    *p2 = 15;              // 0x0F
+    *p3 = 255;             // 0xFF
+    a: u64 = *p1;
+    b: u64 = *p2;
+    c: u64 = *p3;
+    t: u64 = a & b;
+    r: u64 = t & c;        // 0x0B = 11
+    free(p1);
+    free(p2);
+    free(p3);
+    return r;
+}

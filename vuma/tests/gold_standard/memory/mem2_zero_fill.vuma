@@ -1,0 +1,17 @@
+// mem2_zero_fill — fill 4 bytes with 0, load first
+// Expected exit code: 0
+//
+// Confirms that the value 0 survives the store→load round-trip (i.e.,
+// a stored 0 is not conflated with "uninitialized").  Straight-line
+// code only.
+
+fn main() -> i32 {
+    buf = allocate(8);
+    *(buf + 0) = 0;
+    *(buf + 1) = 0;
+    *(buf + 2) = 0;
+    *(buf + 3) = 0;
+    val: u32 = *(buf + 0);
+    free(buf);
+    return val;
+}
