@@ -1,5 +1,5 @@
 // s7_atom_load_distinct.vuma — two atomic cells, diff = 80 - 15 = 65
-// Expected exit code: 0 (current buggy backend)
+// Expected exit code: 65
 // Expected exit code (correct, post-bridge-fix): 65  (80 - 15)
 //
 // Two 8-byte cells. atomic_store 80/15, then atomic_load both and

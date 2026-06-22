@@ -1,5 +1,5 @@
 // s28_atom_three_cell_sum.vuma — three cells, atomic_store 40/50/60, sum = 150
-// Expected exit code: 0 (current buggy backend)
+// Expected exit code: 150
 // Expected exit code (correct, post-bridge-fix): 150  (40 + 50 + 60)
 //
 // Three 8-byte cells. atomic_store 40/50/60 into each, then atomic_load

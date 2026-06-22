@@ -1,5 +1,5 @@
 // s14_atom_store_three_load.vuma — three cells, atomic_store 33/44/55, sum = 132
-// Expected exit code: 0 (current buggy backend)
+// Expected exit code: 132
 // Expected exit code (correct, post-bridge-fix): 132  (33 + 44 + 55)
 //
 // Three 8-byte cells. atomic_store 33/44/55 into each, then

@@ -1,6 +1,5 @@
 // s44_atom_overwrite_max.vuma — overwrite to 250, atomic_load = 250
-// Expected exit code: 0 (current buggy backend)
-// Expected exit code (correct, post-bridge-fix): 250
+// Expected exit code: 250
 //
 // Single 8-byte cell. atomic_store 70, then atomic_store 250 (near-max
 // u8). atomic_load should return 250. On the current backend the load

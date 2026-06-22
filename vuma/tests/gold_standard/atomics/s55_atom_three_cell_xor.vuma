@@ -1,6 +1,5 @@
 // s55_atom_three_cell_xor.vuma — three cells, atomic XOR = 204 (0x66^0x99^0x33)
-// Expected exit code: 0 (current buggy backend)
-// Expected exit code (correct, post-bridge-fix): 204
+// Expected exit code: 204
 //
 // Three 8-byte cells. atomic_store 102/153/51, atomic_load each, XOR
 // sequentially -> 204 (0xCC). On the current backend the loads return

@@ -1,6 +1,5 @@
 // s10_atom_zero_one_pair.vuma — atomic_store 0 then 50, load sees 50
-// Expected exit code: 0 (current buggy backend)
-// Expected exit code (correct, post-bridge-fix): 50
+// Expected exit code: 50
 //
 // Single 8-byte cell. atomic_store 0 (zero), then atomic_store 50
 // (nonzero). Load should observe 50 (last write wins). On the current

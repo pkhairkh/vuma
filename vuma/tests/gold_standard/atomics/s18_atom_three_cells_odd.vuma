@@ -1,5 +1,5 @@
 // s18_atom_three_cells_odd.vuma — atomic_store 11/33/55, sum = 99
-// Expected exit code: 0 (current buggy backend)
+// Expected exit code: 99
 // Expected exit code (correct, post-bridge-fix): 99  (11 + 33 + 55)
 //
 // Three 8-byte cells. atomic_store 11/33/55 (ascending odd multiples
