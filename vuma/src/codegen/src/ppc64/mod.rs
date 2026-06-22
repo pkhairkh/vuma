@@ -4656,6 +4656,13 @@ impl Backend for PPC64Backend {
             current_offset += func_size;
         }
 
+        // __vuma_alloc / __vuma_free stubs go at the end of all_code.
+        // alloc stub = 9 instrs × 4 = 36 B.
+        let vuma_alloc_offset = current_offset;
+        let vuma_free_offset = vuma_alloc_offset + 36;
+        func_offsets.insert("__vuma_alloc".to_string(), vuma_alloc_offset);
+        func_offsets.insert("__vuma_free".to_string(), vuma_free_offset);
+
         // ── Build _start stub bytes ──
         let mut start_stub = Vec::with_capacity(start_stub_size);
 
@@ -4686,6 +4693,28 @@ impl Backend for PPC64Backend {
             start_stub[0..4].copy_from_slice(&bl_word.to_be_bytes());
         }
 
+        // ── Build __vuma_alloc / __vuma_free syscall stubs (mmap/munmap) ──
+        // __vuma_alloc(size in R3) -> R3 = mmap(NULL, size, 3, 0x22, -1, 0)
+        //   PPC64 ABI: syscall # in R0, args R3-R8, return in R3
+        //   __NR_mmap = 90
+        let mut vuma_alloc_stub: Vec<u8> = Vec::new();
+        vuma_alloc_stub.extend_from_slice(&Instruction::Mr { ra: Gpr::R4, rs: Gpr::R3 }.encode());        // R4 = R3 (size -> length)
+        vuma_alloc_stub.extend_from_slice(&Instruction::Li { rt: Gpr::R3, simm: 0 }.encode());            // R3 = 0 (addr = NULL)
+        vuma_alloc_stub.extend_from_slice(&Instruction::Li { rt: Gpr::R5, simm: 3 }.encode());            // R5 = 3 (prot)
+        vuma_alloc_stub.extend_from_slice(&Instruction::Li { rt: Gpr::R6, simm: 0x22 }.encode());         // R6 = 0x22 (flags)
+        vuma_alloc_stub.extend_from_slice(&Instruction::Li { rt: Gpr::R7, simm: -1 }.encode());           // R7 = -1 (fd)
+        vuma_alloc_stub.extend_from_slice(&Instruction::Li { rt: Gpr::R8, simm: 0 }.encode());            // R8 = 0 (offset)
+        vuma_alloc_stub.extend_from_slice(&Instruction::Li { rt: Gpr::R0, simm: 90 }.encode());           // R0 = 90 (sys_mmap)
+        vuma_alloc_stub.extend_from_slice(&Instruction::Sc.encode());
+        vuma_alloc_stub.extend_from_slice(&Instruction::Bclr { bo: 20, bi: 0, bh: 0 }.encode());         // BLR
+        // __vuma_free(addr in R3) -> munmap(addr, 0)
+        //   __NR_munmap = 91
+        let mut vuma_free_stub: Vec<u8> = Vec::new();
+        vuma_free_stub.extend_from_slice(&Instruction::Li { rt: Gpr::R4, simm: 0 }.encode());             // R4 = 0 (size)
+        vuma_free_stub.extend_from_slice(&Instruction::Li { rt: Gpr::R0, simm: 91 }.encode());            // R0 = 91 (sys_munmap)
+        vuma_free_stub.extend_from_slice(&Instruction::Sc.encode());
+        vuma_free_stub.extend_from_slice(&Instruction::Bclr { bo: 20, bi: 0, bh: 0 }.encode());          // BLR
+
         // ── Concatenate all code ──
         let mut all_code = start_stub;
         for func in &program.functions {
@@ -4695,6 +4724,9 @@ impl Backend for PPC64Backend {
                 }
             }
         }
+        // Append __vuma_alloc / __vuma_free syscall stubs.
+        all_code.extend_from_slice(&vuma_alloc_stub);
+        all_code.extend_from_slice(&vuma_free_stub);
 
         // ── Patch BL relocations ──
         // Each function's relocations are relative to the start of that function's code.

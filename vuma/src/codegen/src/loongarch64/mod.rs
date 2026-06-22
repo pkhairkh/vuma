@@ -3760,6 +3760,13 @@ impl Backend for LoongArch64Backend {
             current_offset += func_size;
         }
 
+        // __vuma_alloc / __vuma_free stubs go at the end of all_code.
+        // alloc stub = 9 instrs × 4 = 36 B.
+        let vuma_alloc_offset = current_offset;
+        let vuma_free_offset = vuma_alloc_offset + 36;
+        func_offsets.insert("__vuma_alloc".to_string(), vuma_alloc_offset);
+        func_offsets.insert("__vuma_free".to_string(), vuma_free_offset);
+
         // ── Build _start stub bytes ──
         let mut start_stub = Vec::with_capacity(start_stub_size);
 
@@ -3798,6 +3805,27 @@ impl Backend for LoongArch64Backend {
         ffi_stub.extend_from_slice(&0x02800004u32.to_le_bytes()); // ADDI.W A0, R0, 0
         ffi_stub.extend_from_slice(&0x4C000020u32.to_le_bytes()); // JIRL R0, RA, 0
 
+        // __vuma_alloc(size in a0) -> a0 = mmap(NULL, size, 3, 0x22, -1, 0)
+        //   LoongArch64 Linux: mmap = syscall 222, args a0-a5,
+        //   syscall # in a7, `syscall 0x0` instruction.
+        let mut vuma_alloc_stub: Vec<u8> = Vec::new();
+        vuma_alloc_stub.extend_from_slice(&Instruction::Or { rd: Gpr::A1, rj: Gpr::A0, rk: Gpr::R0 }.encode());      // a1 = a0 (size -> length)
+        vuma_alloc_stub.extend_from_slice(&Instruction::Or { rd: Gpr::A0, rj: Gpr::R0, rk: Gpr::R0 }.encode());      // a0 = 0 (addr = NULL)
+        vuma_alloc_stub.extend_from_slice(&Instruction::AddiD { rd: Gpr::A2, rj: Gpr::R0, imm12: 3 }.encode());      // a2 = 3 (prot)
+        vuma_alloc_stub.extend_from_slice(&Instruction::AddiD { rd: Gpr::A3, rj: Gpr::R0, imm12: 0x22 }.encode());    // a3 = 0x22 (flags)
+        vuma_alloc_stub.extend_from_slice(&Instruction::AddiD { rd: Gpr::A4, rj: Gpr::R0, imm12: -1 }.encode());      // a4 = -1 (fd)
+        vuma_alloc_stub.extend_from_slice(&Instruction::Or { rd: Gpr::A5, rj: Gpr::R0, rk: Gpr::R0 }.encode());       // a5 = 0 (offset)
+        vuma_alloc_stub.extend_from_slice(&Instruction::AddiD { rd: Gpr::A7, rj: Gpr::R0, imm12: 222 }.encode());     // a7 = 222 (sys_mmap)
+        vuma_alloc_stub.extend_from_slice(&Instruction::Syscall.encode());
+        vuma_alloc_stub.extend_from_slice(&Instruction::Jirl { rd: Gpr::R0, rj: Gpr::Ra, offs16: 0 }.encode());      // return
+        // __vuma_free(addr in a0) -> munmap(addr, 0)
+        //   __NR_munmap = 215
+        let mut vuma_free_stub: Vec<u8> = Vec::new();
+        vuma_free_stub.extend_from_slice(&Instruction::Or { rd: Gpr::A1, rj: Gpr::R0, rk: Gpr::R0 }.encode());       // a1 = 0 (size)
+        vuma_free_stub.extend_from_slice(&Instruction::AddiD { rd: Gpr::A7, rj: Gpr::R0, imm12: 215 }.encode());     // a7 = 215 (sys_munmap)
+        vuma_free_stub.extend_from_slice(&Instruction::Syscall.encode());
+        vuma_free_stub.extend_from_slice(&Instruction::Jirl { rd: Gpr::R0, rj: Gpr::Ra, offs16: 0 }.encode());      // return
+
         // ── Concatenate all code ──
         let mut all_code = start_stub;
         all_code.extend_from_slice(&ffi_stub); // 8 bytes at offset 12
@@ -3808,6 +3836,9 @@ impl Backend for LoongArch64Backend {
                 }
             }
         }
+        // Append __vuma_alloc / __vuma_free syscall stubs.
+        all_code.extend_from_slice(&vuma_alloc_stub);
+        all_code.extend_from_slice(&vuma_free_stub);
 
         // ── Compute code virtual-address base ──
         // Must match the layout in build_loongarch64_elf_2seg.
