@@ -1,0 +1,28 @@
+// s6_struct_overwrite_two_fields.vuma — overwrite fields 0 and 2, sum = 120
+// Expected exit code: 120  (50 + 20 + 50)
+//
+// 24-byte struct (three u64 fields). Store 10/20/30 at offsets 0/8/16,
+// then overwrite offset 0 with 50 and offset 16 with 50. Load all
+// three, sum -> 50 + 20 + 50 = 120. Distinct from
+// s5_struct_overwrite_one_field (overwrites only one field).
+
+struct Triple {
+    a: u64,
+    b: u64,
+    c: u64,
+}
+
+fn main() -> i32 {
+    p = allocate(24);
+    *(p + 0) = 10;
+    *(p + 8) = 20;
+    *(p + 16) = 30;
+    *(p + 0) = 50;
+    *(p + 16) = 50;
+    a: u64 = *(p + 0);
+    b: u64 = *(p + 8);
+    c: u64 = *(p + 16);
+    s: u64 = a + b + c;
+    free(p);
+    return s;
+}

@@ -1,0 +1,20 @@
+// s18_conc_two_cell_sum.vuma — two cells, sum = 80 (28 + 52)
+// Expected exit code: 80
+//
+// Two independent 8-byte cells. Each gets a distinct literal at offset
+// 0 (28/52). Both loaded back and summed. Distinct from
+// s14_conc_two_cell_diff (values 17/34 = 51) and s10_conc_two_cells_diff
+// (35/45 = 80, different operands).
+
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    *c1 = 28;
+    *c2 = 52;
+    v1: i32 = *c1;
+    v2: i32 = *c2;
+    s: i32 = v1 + v2;
+    free(c1);
+    free(c2);
+    return s;
+}

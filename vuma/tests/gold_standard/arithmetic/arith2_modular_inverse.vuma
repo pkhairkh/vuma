@@ -1,0 +1,16 @@
+// arith2_modular_inverse — modular inverse verification
+// Expected exit code: 1
+//
+// The modular inverse of 3 mod 8 is 3, because 3*3 = 9 ≡ 1 (mod 8).
+// This test verifies the inverse by computing (3 * inv) mod 8 and
+// confirming it equals 1. Straight-line code only — no loops or ifs
+// (which are subject to the known VUMA codegen propagation bugs).
+
+fn main() -> i32 {
+    a: u32 = 3;
+    m: u32 = 8;
+    inv: u32 = 3;
+    // Verify: (a * inv) mod m should be 1
+    product: u32 = (a * inv) % m;   // 9 % 8 = 1
+    return product;
+}

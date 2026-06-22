@@ -1,0 +1,10 @@
+// cf_if_else_true — if/else with true condition takes if-branch
+// Expected exit code: 1
+
+fn main() -> i32 {
+    if true {
+        return 1;
+    } else {
+        return 2;
+    }
+}

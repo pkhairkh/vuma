@@ -1,0 +1,11 @@
+// u32_halve — halve a value: 100 / 2
+// Expected exit code: 50
+//
+// 100 / 2 = 50.
+
+fn main() -> i32 {
+    val: u32 = 100;
+    two: u32 = 2;
+    halved: u32 = val / two;
+    return halved;
+}

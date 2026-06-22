@@ -1,0 +1,30 @@
+// s57_mf_three_chain.vuma — h(10)=18, g(18)=36, f(36)=45
+// Expected exit code: 45
+//
+// Three single-arg helpers chained sequentially. h(x) = x + 8;
+// g(x) = x * 2; f(x) = x + 9. main calls h(10) -> 18, g(18) -> 36,
+// f(36) -> 45. Distinct from s54_mf_three_chain (35) and s50_mf_
+// three_chain (50).
+
+fn h(x: u32) -> u32 {
+    n: u32 = 8;
+    r: u32 = x + n;
+    return r;
+}
+fn g(x: u32) -> u32 {
+    n: u32 = 2;
+    r: u32 = x * n;
+    return r;
+}
+fn f(x: u32) -> u32 {
+    n: u32 = 9;
+    r: u32 = x + n;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = h(10);             // 18
+    b: u32 = g(a);              // 36
+    r: u32 = f(b);              // 45
+    return r;
+}

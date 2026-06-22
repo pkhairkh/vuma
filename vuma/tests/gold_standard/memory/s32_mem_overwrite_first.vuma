@@ -1,0 +1,17 @@
+// s32_mem_overwrite_first.vuma - overwrite cell, load = 235
+// Expected exit code: 235
+//
+// overwrite cell, load = 235. All operands loaded into typed variables
+// before any bitwise op (immediate-RHS drop workaround where applicable);
+// stores use the `*ptr = literal` (or `*ptr = variable + 0`) form with no
+// `*(ptr + offset)` indexing. Distinct from s30_mem_overwrite_last
+// (different value) and s26_mem_overwrite_first (different value).
+
+fn main() -> i32 {
+    p = allocate(8);
+    *p = 55;
+    *p = 235;
+    r: i32 = *p;
+    free(p);
+    return r;
+}

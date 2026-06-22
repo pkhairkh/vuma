@@ -1,0 +1,16 @@
+// s89_crypto_and_then_xor.vuma — (0x33 & 0x33) ^ 0x2D = 0x33 ^ 0x2D = 0x1E = 30
+// Expected exit code: 30
+//
+// Two-stage crypto-style op: AND then XOR. (51 & 51) = 51;
+// 51 ^ 45 = 30. All operands loaded into u32 variables first
+// (immediate-RHS bitwise drop bug workaround). Distinct from
+// s86_crypto_and_then_xor (180), s82_crypto_xor_then_and (76)
+// and s78_crypto_xor_pair (90).
+fn main() -> i32 {
+    a: u32 = 51;          // 0x33
+    m: u32 = 51;          // 0x33
+    x: u32 = 45;          // 0x2D
+    t: u32 = a & m;        // 0x33 = 51
+    r: u32 = t ^ x;        // 0x1E = 30
+    return r;
+}

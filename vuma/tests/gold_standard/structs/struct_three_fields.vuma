@@ -1,0 +1,25 @@
+// struct_three_fields.vuma — three-field struct, sum all fields
+// Expected exit code: 6
+//
+// Allocates a Triple {a, b, c: u64} struct (24 bytes), stores
+// a=1, b=2, c=3 at offsets 0, 8, 16, then loads and sums them.
+// 1 + 2 + 3 = 6.
+
+struct Triple {
+    a: u64,
+    b: u64,
+    c: u64,
+}
+
+fn main() -> i32 {
+    t = allocate(24);
+    *(t + 0) = 1;
+    *(t + 8) = 2;
+    *(t + 16) = 3;
+    a: u64 = *(t + 0);
+    b: u64 = *(t + 8);
+    c: u64 = *(t + 16);
+    sum: u64 = a + b + c;
+    free(t);
+    return sum;
+}

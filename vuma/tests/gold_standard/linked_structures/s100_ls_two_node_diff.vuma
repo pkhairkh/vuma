@@ -1,0 +1,19 @@
+// s100_ls_two_node_diff.vuma — two nodes, diff = 16 (25 - 9)
+// Expected exit code: 16
+//
+// Two 8-byte allocations treated as two independent "nodes".
+// Store 25/9 via `*ptr = literal`, load both, a - b -> 16.
+// Uses `*ptr = literal` form (no offsets).
+// Distinct from s97_ls_overwrite_value (37), s94_ls_overwrite_value (73), s90_ls_two_node_diff (24).
+fn main() -> i32 {
+    n1 = allocate(8);
+    n2 = allocate(8);
+    *n1 = 25;
+    *n2 = 9;
+    a: u64 = *n1;
+    b: u64 = *n2;
+    d: u64 = a - b;        // 16
+    free(n1);
+    free(n2);
+    return d;
+}

@@ -1,0 +1,19 @@
+// s55_mf_double_then_add.vuma — dbl(70) + 18 = 140 + 18 = 158
+// Expected exit code: 158
+//
+// Single helper dbl(x) = x * 2 called on 70 -> 140, then add literal
+// 18 -> 158. Distinct from s54_mf_double_then_sub (135) and
+// s53_mf_double_then_add (148).
+
+fn dbl(x: u32) -> u32 {
+    n: u32 = 2;
+    r: u32 = x * n;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = dbl(70);          // 140
+    b: u32 = 18;
+    r: u32 = a + b;            // 158
+    return r;
+}

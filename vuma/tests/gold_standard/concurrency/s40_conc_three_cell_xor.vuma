@@ -1,0 +1,25 @@
+// s40_conc_three_cell_xor.vuma — three cells, xor = 190 (130 ^ 40 ^ 20)
+// Expected exit code: 190
+//
+// Three independent 8-byte cells. Store 130/40/20 via `*ptr =
+// literal`, load all, XOR -> 190. 130 ^ 40 = 170 (0xAA); 170 ^ 20 =
+// 190 (0xBE). Uses `*ptr = literal` form. Distinct from s38_conc_
+// three_cell_sum (170) and s34_conc_three_cell_sum (180).
+
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    c3 = allocate(8);
+    *c1 = 130;
+    *c2 = 40;
+    *c3 = 20;
+    v1: i32 = *c1;
+    v2: i32 = *c2;
+    v3: i32 = *c3;
+    t: i32 = v1 ^ v2;      // 0xAA = 170
+    r: i32 = t ^ v3;       // 0xBE = 190
+    free(c1);
+    free(c2);
+    free(c3);
+    return r;
+}

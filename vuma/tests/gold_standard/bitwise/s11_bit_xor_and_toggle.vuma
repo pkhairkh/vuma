@@ -1,0 +1,18 @@
+// s11_bit_xor_and_toggle.vuma — ((0xCC ^ 0x33) & 0xAA) ^ 0x0F = 165
+// Expected exit code: 165
+//
+// Three-stage bitwise chain. (204 ^ 51) = 255 (0xFF); 255 & 170 = 170
+// (0xAA); 170 ^ 15 = 165 (0xA5). All operands loaded into u64 variables
+// first. Distinct from s8_bit_xor_shr_combine (XOR-then-SHR) and
+// s9_bit_xor_then_and (XOR-then-AND, no final toggle).
+
+fn main() -> i32 {
+    a: u64 = 204;         // 0xCC
+    b: u64 = 51;          // 0x33
+    c: u64 = 170;         // 0xAA
+    d: u64 = 15;          // 0x0F
+    x: u64 = a ^ b;       // 0xFF = 255
+    y: u64 = x & c;       // 0xAA = 170
+    r: u64 = y ^ d;       // 0xA5 = 165
+    return r;
+}

@@ -1,0 +1,20 @@
+// s5_mem_load_chain.vuma — store 7 at off0, 8 at off8, compute (a*b)+b = 64
+// Expected exit code: 64
+//
+// 16-byte buffer. Store 7 at offset 0, 8 at offset 8. Load a=7,
+// b=8, then compute (a * b) + b = 56 + 8 = 64. Tests that loaded
+// values can be used as both multiplication and addition operands
+// in a multi-step computation. Distinct from s4_mem_load_then_store
+// (store-after-load pattern).
+
+fn main() -> i32 {
+    buf = allocate(16);
+    *(buf + 0) = 7;
+    *(buf + 8) = 8;
+    a: u64 = *(buf + 0);
+    b: u64 = *(buf + 8);
+    p: u64 = a * b;        // 56
+    total: u64 = p + b;    // 64
+    free(buf);
+    return total;
+}

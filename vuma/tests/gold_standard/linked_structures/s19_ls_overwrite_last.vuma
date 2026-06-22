@@ -1,0 +1,26 @@
+// s19_ls_overwrite_last.vuma — overwrite last node, sum = 100 (40 + 50 + 10)
+// Expected exit code: 100
+//
+// Three 8-byte allocations treated as three "nodes". Store 40/50/60
+// in n1/n2/n3, then overwrite n3 (the last node) with 10. Load all
+// three, sum -> 100. Uses `*ptr = literal` form (no offsets). Distinct
+// from s18_ls_overwrite_first (overwrites first node) and
+// s14_ls_overwrite_last (different values).
+
+fn main() -> i32 {
+    n1 = allocate(8);
+    n2 = allocate(8);
+    n3 = allocate(8);
+    *n1 = 40;
+    *n2 = 50;
+    *n3 = 60;
+    *n3 = 10;
+    a: u64 = *n1;
+    b: u64 = *n2;
+    c: u64 = *n3;
+    s: u64 = a + b + c;
+    free(n1);
+    free(n2);
+    free(n3);
+    return s;
+}

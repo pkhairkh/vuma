@@ -1,0 +1,15 @@
+// s62_crypto_xor_pair.vuma — 0x96 ^ 0x5A = 0xCC = 204
+// Expected exit code: 204
+// 
+// Two-byte XOR. 150 ^ 90 = 204 (0xCC). Distinct-bit pair (0x96 /
+// 0x5A) produces the byte pattern 0xCC. All operands loaded into
+// u64 variables first (immediate-RHS bitwise drop bug workaround).
+// Distinct from s51_crypto_xor_pair (85), s58_crypto_xor_pair (255)
+// and s55_crypto_xor_pair (153).
+
+fn main() -> i32 {
+    a: u64 = 150;          // 0x96
+    b: u64 = 90;           // 0x5A
+    r: u64 = a ^ b;        // 0xCC = 204
+    return r;
+}

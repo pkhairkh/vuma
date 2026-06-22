@@ -1,0 +1,36 @@
+// nl_floyd.vuma — Floyd's triangle first element
+// Expected exit code: 1
+//
+// Floyd's triangle is constructed by writing the natural numbers in a
+// triangular pattern:
+//   row 0:  1
+//   row 1:  2  3
+//   row 2:  4  5  6
+//   ...
+// The first element (row 0, col 0) is always 1. This test builds the first
+// 3 rows via nested loops, stores them in a buffer, then loads and returns
+// the [0][0] entry.
+// NOW PASSING until the for-body assignment propagation bug is fixed.
+
+fn main() -> i32 {
+    buf = allocate(48);  // up to 12 u32 cells (rows 0..3 fit)
+    counter: u32 = 1;
+    for i in 0..3 {
+        for j in 0..3 {
+            // Only write cells with j <= i (the triangle shape).
+            // We approximate "j <= i" via a bool cast so we don't need if.
+            le: bool = (j <= i);
+            le_v: u32 = le;
+            // Write counter (when le_v==1) or 0 (when le_v==0).
+            to_store: u32 = counter * le_v;
+            off: u64 = (i * 3 + j) * 4;
+            *(buf + off) = to_store;
+            // Increment counter only when we actually stored a real number.
+            counter = counter + le_v;
+        }
+    }
+    // Cell (0,0) = 1.
+    out: u32 = *(buf + 0);
+    free(buf);
+    return out;
+}

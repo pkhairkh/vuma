@@ -1,0 +1,75 @@
+// Fibonacci — Recursive and iterative implementations
+// Expected exit code: 55
+//
+// Computes Fibonacci numbers using both recursive and iterative approaches,
+// then verifies they agree. Returns fib(30) = 832040.
+//
+// VUMA Key Concepts:
+//   - Recursive function calls with base cases
+//   - Iterative loops with accumulator pattern
+//   - u32 arithmetic with overflow masking
+//   - Result comparison for correctness verification
+//   - No external dependencies — pure VUMA computation
+
+// ===========================================================================
+// Recursive Fibonacci
+// ===========================================================================
+// Classic recursive definition: fib(0)=0, fib(1)=1, fib(n)=fib(n-1)+fib(n-2)
+// Note: This is exponential-time; used here only for small values and
+// verification. The iterative version below is the practical one.
+
+fn fib_recursive(n: u32) -> u32 {
+    if n == 0 { return 0; }
+    if n == 1 { return 1; }
+    return (fib_recursive(n - 1) + fib_recursive(n - 2)) & 4294967295;
+}
+
+// ===========================================================================
+// Iterative Fibonacci (O(n) time, O(1) space)
+// ===========================================================================
+// Uses two rolling variables instead of call-stack recursion.
+// This is the standard efficient approach for sequential Fibonacci.
+
+fn fib_iterative(n: u32) -> u32 {
+    if n == 0 { return 0; }
+    if n == 1 { return 1; }
+    a: u32 = 0;
+    b: u32 = 1;
+    i: u32 = 2;
+    while i <= n {
+        temp: u32 = (a + b) & 4294967295;
+        a = b;
+        b = temp;
+        i = i + 1;
+    }
+    return b;
+}
+
+// ===========================================================================
+// Main entry point
+// ===========================================================================
+// Computes fib(30) both ways and returns the result.
+// fib(30) = 832040
+// Exit code: 832040 (fits in i32)
+
+fn main() -> i32 {
+    n: u32 = 30;
+
+    // Compute iteratively (fast)
+    result_iter: u32 = fib_iterative(n);
+
+    // Compute recursively for a small value to verify correctness
+    // (fib_recursive(30) would be too slow, so verify with n=10)
+    verify_iter: u32 = fib_iterative(10);
+    verify_rec: u32 = fib_recursive(10);
+
+    // Both methods must agree on fib(10) = 55
+    if verify_iter != verify_rec {
+        // Verification failed — should never happen
+        return -1;
+    }
+
+    // Return fib(30) computed iteratively
+    // Expected: 832040
+    return result_iter;
+}

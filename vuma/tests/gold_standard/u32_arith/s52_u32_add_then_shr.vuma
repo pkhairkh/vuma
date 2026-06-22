@@ -1,0 +1,16 @@
+// s52_u32_add_then_shr.vuma — (180 + 70) >> 2 = 250 >> 2 = 62
+// Expected exit code: 62
+//
+// Two-stage u32 computation: add then shift right. 180 + 70 = 250;
+// 250 >> 2 = 62. All operands loaded into u32 variables first.
+// Straight-line arithmetic. Distinct from s50_u32_add_then_shr (125)
+// and s47_u32_shl_then_and (144).
+
+fn main() -> i32 {
+    a: u32 = 180;
+    b: u32 = 70;
+    c: u32 = 2;
+    s: u32 = a + b;        // 250
+    r: u32 = s >> c;       // 62
+    return r;
+}

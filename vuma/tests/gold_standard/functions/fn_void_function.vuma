@@ -1,0 +1,14 @@
+// fn_void_function.vuma — call void function, return 0
+// Expected exit code: 0
+//
+// Tests a void function (no return type) called for its side effect.
+// The function does nothing and returns no value; main returns 0.
+
+fn noop() {
+    return;
+}
+
+fn main() -> i32 {
+    noop();
+    return 0;
+}

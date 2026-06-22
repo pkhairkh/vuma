@@ -1,0 +1,21 @@
+// s105_conc_three_cell_diff.vuma — store 240, 20, 8 in 3 cells, 240-20-8 = 212
+// Expected exit code: 212
+// 
+// Three independent 8-byte cells. Store 240, 20, 8; load each, return 240 - 20 - 8 = 212. Uses `*ptr = literal` form. Straight-line code only.
+// Distinct from s102_conc_three_cell_diff (198), s101_conc_three_cell_diff (110), s100_conc_three_cell_sum (52).
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    c3 = allocate(8);
+    *c1 = 240;
+    *c2 = 20;
+    *c3 = 8;
+    a: i32 = *c1;          // 240
+    b: i32 = *c2;          // 20
+    c: i32 = *c3;          // 8
+    d: i32 = a - b - c;    // 212
+    free(c1);
+    free(c2);
+    free(c3);
+    return d;
+}

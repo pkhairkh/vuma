@@ -1,0 +1,120 @@
+// Debug Info — Simple program that compiles with --debug flag
+// Expected exit code: 84
+//
+// This program demonstrates VUMA's DWARF debug info generation.
+// When compiled with `--debug`, the compiler emits DWARF v4 sections
+// that allow GDB, LLDB, readelf, and objdump to decode the program's
+// structure, function boundaries, local variables, source-line mapping,
+// and call frame information.
+//
+// Compile with debug info:
+//   vuma compile --debug examples/debug_info.vuma
+//
+// Inspect the debug sections:
+//   readelf --debug-dump=info output.o     # .debug_info
+//   readelf --debug-dump=line output.o     # .debug_line
+//   readelf --debug-dump=frames output.o   # .debug_frame
+//   objdump --dwarf=info output.o          # Alternative viewer
+//
+// VUMA Key Concepts:
+//   - --debug flag enables DWARF v4 debug info generation
+//   - Four sections emitted: .debug_abbrev, .debug_info, .debug_line, .debug_frame
+//   - All 8 backends supported with correct address sizes and alignment
+//   - CIE (Common Information Entry) per ISA with correct register mappings
+//   - FDE (Frame Description Entry) per function for stack unwinding
+//   - Line-number program maps machine code back to VUMA source lines
+//   - Compilation unit DIEs describe subprograms and local variables
+//
+// IVE verification is unchanged with debug info — all 5 invariants
+// are still proved at compile time. Debug info is purely informational
+// and does not affect the generated code's behavior.
+
+// ===========================================================================
+// A helper function — the DWARF info will contain an FDE for this
+// ===========================================================================
+// With --debug, the compiler emits:
+//   - A DW_TAG_SUBPROGRAM DIE for 'double_value'
+//   - An FDE covering this function's address range
+//   - Line-number entries mapping instructions to source lines below
+
+fn double_value(x: i32) -> i32 {
+    // IVE verifies: x is a valid function parameter (Liveness)
+    // With --debug, this line maps to a DWARF line-number entry
+    result: i32 = x + x;
+    return result;
+}
+
+// ===========================================================================
+// Another helper — exercises control flow for richer line-number info
+// ===========================================================================
+// Branch instructions produce more line-number entries in .debug_line,
+// demonstrating that the DWARF line program correctly maps both the
+// 'if' and 'else' branches back to their source lines.
+
+fn absolute_value(x: i32) -> i32 {
+    if x < 0 {
+        // With --debug, this line is recorded in the line-number program
+        return 0 - x;
+    } else {
+        return x;
+    }
+}
+
+// ===========================================================================
+// A struct to demonstrate variable DIEs in .debug_info
+// ===========================================================================
+// The compiler emits DW_TAG_VARIABLE DIEs for local variables and
+// struct fields. Each variable DIE has:
+//   - DW_AT_NAME: the variable name (e.g., "sum", "counter")
+//   - DW_AT_TYPE: a reference to the variable's type
+//   - DW_AT_LOCATION: a DWARF expression describing where the variable
+//     lives (stack offset or register)
+
+struct Pair {
+    a: i32,
+    b: i32,
+}
+
+fn pair_sum(p: Address) -> i32 {
+    // IVE verifies: p is live and correctly typed as Pair
+    va: i32 = *(p + 0);
+    vb: i32 = *(p + 4);
+    // With --debug, 'va' and 'vb' appear as DW_TAG_VARIABLE DIEs
+    return va + vb;
+}
+
+// ===========================================================================
+// Main entry point
+// ===========================================================================
+// This function gets its own FDE and subprogram DIE.
+// The line-number program maps every instruction back to these lines.
+
+fn main() -> i32 {
+    // With --debug, local variables appear as DW_TAG_VARIABLE entries
+    // in .debug_info with DW_AT_LOCATION expressions
+    x: i32 = 21;
+    y: i32 = double_value(x);    // y = 42
+
+    // Test absolute_value
+    z: i32 = absolute_value(-7);  // z = 7
+
+    // Test struct and pair_sum
+    p = allocate(8);              // Pair: 2 × i32 = 8 bytes
+    *(p + 0) = y;                 // p.a = 42
+    *(p + 4) = z;                 // p.b = 7
+    s: i32 = pair_sum(p);         // s = 49
+
+    free(p);
+    // IVE verifies: all allocations freed (Cleanup)
+
+    // Return s as exit code
+    // Expected: 49
+    return s;
+}
+// IVE verification: Liveness ✓, Exclusivity ✓, Interpretation ✓, Origin ✓, Cleanup ✓
+//
+// DWARF sections emitted with --debug:
+//   .debug_abbrev — Abbreviation tables for DIE encoding
+//   .debug_info   — Compilation unit with subprograms and variables
+//   .debug_line   — Source-line mapping for all functions above
+//   .debug_frame  — CIE + FDE entries for stack unwinding

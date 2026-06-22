@@ -1,0 +1,32 @@
+// s8_mf_three_helpers.vuma — f1(5)+f2(5)+f3(5) = 6+7+8 = 21
+// Expected exit code: 21
+//
+// Three helpers each adding a different constant: f1(x)=x+1,
+// f2(x)=x+2, f3(x)=x+3. main calls each with 5, sums the results.
+// Distinct from s4_mf_two_helpers (only two helpers).
+
+fn f1(x: u32) -> u32 {
+    one: u32 = 1;
+    r: u32 = x + one;
+    return r;
+}
+
+fn f2(x: u32) -> u32 {
+    two: u32 = 2;
+    r: u32 = x + two;
+    return r;
+}
+
+fn f3(x: u32) -> u32 {
+    three: u32 = 3;
+    r: u32 = x + three;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = f1(5);   // 6
+    b: u32 = f2(5);   // 7
+    c: u32 = f3(5);   // 8
+    s: u32 = a + b + c;  // 21
+    return s;
+}

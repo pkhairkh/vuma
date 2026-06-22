@@ -1,0 +1,21 @@
+// mem_store_load_u32.vuma — store/load u32 as 4 bytes
+// Expected exit code: 120
+//
+// Stores a u32 (0x12345678) as 4 little-endian bytes and loads it back,
+// returning the low byte (0x78 = 120).
+
+fn main() -> i32 {
+    buf = allocate(8);
+    val: u32 = 0x12345678;
+    *(buf + 0) = (val & 255);
+    *(buf + 1) = ((val >> 8) & 255);
+    *(buf + 2) = ((val >> 16) & 255);
+    *(buf + 3) = ((val >> 24) & 255);
+    b0: u32 = *(buf + 0);
+    b1: u32 = *(buf + 1);
+    b2: u32 = *(buf + 2);
+    b3: u32 = *(buf + 3);
+    result: u32 = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+    free(buf);
+    return result;
+}

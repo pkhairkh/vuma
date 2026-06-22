@@ -1,0 +1,21 @@
+// s32_mf_two_callers.vuma - add3(50) + add3(150) = 53 + 153 = 206
+// Expected exit code: 206
+//
+// add3(50) + add3(150) = 53 + 153 = 206. All operands loaded into typed
+// variables before any bitwise op (immediate-RHS drop workaround where
+// applicable); stores use the `*ptr = literal` (or `*ptr = variable + 0`)
+// form with no `*(ptr + offset)` indexing. Distinct from s30_mf_two_callers
+// (add7, 84) and s26_mf_two_callers (different values).
+
+fn add3(x: u32) -> u32 {
+    n: u32 = 3;
+    r: u32 = x + n;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = add3(50);     // 53
+    b: u32 = add3(150);    // 153
+    r: u32 = a + b;        // 206
+    return r;
+}

@@ -1,0 +1,19 @@
+// s44_struct_field_load.vuma — store 165, load = 165
+// Expected exit code: 165
+//
+// Single 8-byte allocation treated as one struct instance. Store 165
+// via `*p = literal`, load and return 165. Uses `*p = literal` form.
+// Distinct from s42_struct_field_load (175) and s38_struct_field_load
+// (165, same total but different operand 155).
+
+struct Single {
+    a: u64,
+}
+
+fn main() -> i32 {
+    p1 = allocate(8);
+    *p1 = 165;
+    a: u64 = *p1;
+    free(p1);
+    return a;
+}

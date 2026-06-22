@@ -1,0 +1,14 @@
+// crypto_bit_extract.vuma — extract bit 0 from a value
+// Expected exit code: 1
+//
+// Bit extraction is the foundation of every block cipher's S-box input
+// stage: split the input word into per-bit lane signals. Here we
+// extract bit 0 (LSB) of 43 (0b101011). The mask 0x01 is loaded into
+// a named variable to dodge the bitwise-immediate-RHS codegen bug.
+
+fn main() -> i32 {
+    v: u64 = 43;                   // 0b101011
+    one: u64 = 1;                  // mask for bit 0
+    bit0: u64 = v & one;           // 1
+    return bit0;
+}

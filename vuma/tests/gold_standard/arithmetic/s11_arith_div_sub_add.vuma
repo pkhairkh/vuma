@@ -1,0 +1,18 @@
+// s11_arith_div_sub_add.vuma — (200 / 4) - 20 + 5 = 50 - 20 + 5 = 35
+// Expected exit code: 35
+//
+// Three-stage computation: div then sub then add. (200 / 4) = 50;
+// 50 - 20 = 30; 30 + 5 = 35. All operands loaded into u32 variables
+// first. Distinct from s7_arith_div_then_mul (div-then-mul) and
+// s6_arith_sub_then_add (sub-then-add).
+
+fn main() -> i32 {
+    a: u32 = 200;
+    b: u32 = 4;
+    c: u32 = 20;
+    d: u32 = 5;
+    q: u32 = a / b;       // 50
+    s: u32 = q - c;       // 30
+    r: u32 = s + d;       // 35
+    return r;
+}

@@ -1,0 +1,16 @@
+// arith2_perfect_number — perfect number check
+// Expected exit code: 6
+//
+// A perfect number equals the sum of its proper divisors.  For 6:
+//   proper divisors: 1, 2, 3   sum = 6   → 6 is perfect.
+// This test returns the divisor sum (6), which equals the input number.
+// Straight-line code only.
+
+fn main() -> i32 {
+    n: u32 = 6;
+    d1: u32 = 1;
+    d2: u32 = 2;
+    d3: u32 = 3;
+    sum: u32 = d1 + d2 + d3;   // 6
+    return sum;
+}

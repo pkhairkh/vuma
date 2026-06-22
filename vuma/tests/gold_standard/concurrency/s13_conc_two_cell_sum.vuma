@@ -1,0 +1,21 @@
+// s13_conc_two_cell_sum.vuma — two cells, sum loads = 75 (28 + 47)
+// Expected exit code: 75
+//
+// Two independent 8-byte cells with distinct literal values 28 and 47.
+// Both loaded back and summed. Simulates two independent "shared
+// variables" without atomic ops. Uses `*ptr = literal` form (no
+// offsets). Distinct from s9_conc_two_cell_sum (values 25/35) and
+// s6_conc_two_cell (values 30/40).
+
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    *c1 = 28;
+    *c2 = 47;
+    v1: i32 = *c1;
+    v2: i32 = *c2;
+    s: i32 = v1 + v2;
+    free(c1);
+    free(c2);
+    return s;
+}

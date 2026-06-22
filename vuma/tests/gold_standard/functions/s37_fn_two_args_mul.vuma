@@ -1,0 +1,16 @@
+// s37_fn_two_args_mul.vuma — mul_vals(8, 15) = 120
+// Expected exit code: 120
+//
+// Deterministic test in the functions category. All operands loaded into typed
+// variables before any bitwise op; all stores use `*ptr = literal` (or the
+// `*ptr = variable + 0` workaround). Result lands in 0-255.
+// Distinct from s33_fn_two_args_sub (sub_vals(150,70)=80) and s30_fn_two_args_mul (mul_two(10,15)=150).
+fn mul_vals(x: u32, y: u32) -> u32 {
+    r: u32 = x * y;
+    return r;
+}
+
+fn main() -> i32 {
+    v: u32 = mul_vals(8, 15);
+    return v;
+}

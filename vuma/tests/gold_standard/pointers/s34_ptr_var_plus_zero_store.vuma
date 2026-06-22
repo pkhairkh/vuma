@@ -1,0 +1,19 @@
+// s34_ptr_var_plus_zero_store.vuma — store via *p = v + 0 = 113
+// Expected exit code: 113
+//
+// Single 8-byte cell. Store literal 9 via `*p = 9`. Load 113 into
+// a local, then overwrite the cell via `*p = variable + 0` (the
+// documented workaround for the silent-drop bug on `*p =
+// variable`). Load and return 113 (the overwritten value).
+// Distinct from s30_ptr_var_plus_zero_store (value 91) and s27_ptr_
+// var_plus_zero_store (different value).
+
+fn main() -> i32 {
+    p = allocate(8);
+    *p = 9;
+    v: i32 = 113;
+    *p = v + 0;
+    r: i32 = *p;
+    free(p);
+    return r;
+}

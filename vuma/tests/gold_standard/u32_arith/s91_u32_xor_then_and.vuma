@@ -1,0 +1,16 @@
+// s91_u32_xor_then_and.vuma — (0xA5 ^ 0x3C) & 0xF0 = 0x99 & 0xF0 = 0x90 = 144
+// Expected exit code: 144
+//
+// Two-stage bitwise: XOR then AND. (165 ^ 60) = 153 (0x99);
+// 153 & 240 = 144 (0x90). All operands loaded into u32 variables
+// first (immediate-RHS bitwise drop bug workaround). Distinct from
+// s90_u32_xor_then_or (58), s86_u32_xor_then_and (51) and
+// s82_u32_xor_then_shr (45).
+fn main() -> i32 {
+    a: u32 = 165;          // 0xA5
+    b: u32 = 60;           // 0x3C
+    c: u32 = 240;          // 0xF0
+    x: u32 = a ^ b;        // 0x99 = 153
+    r: u32 = x & c;        // 0x90 = 144
+    return r;
+}

@@ -1,0 +1,15 @@
+// s83_arith_mul_then_sub.vuma — 20 * 8 - 4 = 160 - 4 = 156
+// Expected exit code: 156
+//
+// Two-stage arithmetic: multiply then subtract. 20 * 8 = 160;
+// 160 - 4 = 156. All operands kept as i32 locals. Straight-line
+// arithmetic. Distinct from s78_arith_mul_then_sub (2),
+// s74_arith_mul_then_sub (5) and s72_arith_mul_then_sub (7).
+fn main() -> i32 {
+    a: i32 = 20;
+    b: i32 = 8;
+    c: i32 = 4;
+    p: i32 = a * b;        // 160
+    r: i32 = p - c;        // 156
+    return r;
+}

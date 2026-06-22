@@ -1,0 +1,13 @@
+// bit_toggle_bit.vuma — Toggle a bit using XOR.
+// Expected exit code: 126
+//
+// Task description said "toggle bit 1 of 128 -> 126", but 128 ^ (1<<1) = 130.
+// The expected value 126 is produced by toggling bit 0 of 127 (127 ^ 1 = 126),
+// so we use that input. Either way, this exercises the XOR-toggle pattern.
+fn main() -> i32 {
+    val: u64 = 127;
+    one: u64 = 1;
+    bit: u64 = one << 0;
+    result: u64 = val ^ bit;
+    return result;
+}

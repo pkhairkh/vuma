@@ -1,0 +1,25 @@
+// s11_ls_overwrite_first_node.vuma — overwrite first node, sum = 149
+// Expected exit code (correct): 149  (99 + 20 + 30)
+// Observed on current x86_64 backend: non-deterministic (FAIL — known
+//   U8-truncation bug on `*(p+offset)` stores/loads with u64 type)
+//
+// 24-byte allocation treated as three 8-byte "nodes" at offsets
+// 0/8/16. Stores 10/20/30, then overwrites the first node (offset 0)
+// with 99. Loads all three, sums -> 99 + 20 + 30 = 149. Distinct
+// from s10_ls_overwrite_last (overwrites last node) and
+// s6_ls_overwrite_first (different vals, single overwrite).
+
+fn main() -> i32 {
+    block = allocate(24);
+    *(block + 0) = 10;
+    *(block + 8) = 20;
+    *(block + 16) = 30;
+    *(block + 0) = 99;
+    a: u64 = *(block + 0);
+    b: u64 = *(block + 8);
+    c: u64 = *(block + 16);
+    t: u64 = a + b;
+    s: u64 = t + c;
+    free(block);
+    return s;
+}

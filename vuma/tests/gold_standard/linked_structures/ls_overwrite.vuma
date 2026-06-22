@@ -1,0 +1,15 @@
+// ls_overwrite.vuma — create node, store 42, overwrite with 99, load
+// Expected exit code: 99
+//
+// Tests that overwriting a node's value via a second store replaces
+// the original value. After storing 42 then 99, the loaded value is
+// 99 — the latest store wins.
+
+fn main() -> i32 {
+    node = allocate(16);
+    *(node + 0) = 42;
+    *(node + 0) = 99;
+    val: u64 = *(node + 0);
+    free(node);
+    return val;
+}

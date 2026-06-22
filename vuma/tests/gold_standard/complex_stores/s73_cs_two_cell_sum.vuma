@@ -1,0 +1,19 @@
+// s73_cs_two_cell_sum.vuma — two cells, sum = 114 (53 + 61)
+// Expected exit code: 114
+//
+// Two 8-byte cells. Store 53/61 via `*ptr = literal`, load both,
+// sum -> 114. Uses `*ptr = literal` form (no offsets). Distinct
+// from s70_cs_two_cell_diff (90), s69_cs_two_cell_sum (145) and
+// s66_cs_two_cell_sum (250).
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    *c1 = 53;
+    *c2 = 61;
+    a: u64 = *c1;
+    b: u64 = *c2;
+    s: u64 = a + b;        // 114
+    free(c1);
+    free(c2);
+    return s;
+}

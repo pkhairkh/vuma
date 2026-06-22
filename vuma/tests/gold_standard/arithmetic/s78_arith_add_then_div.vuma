@@ -1,0 +1,15 @@
+// s78_arith_add_then_div.vuma — (11 + 11) / 2 = 22 / 2 = 11
+// Expected exit code: 11
+//
+// Two-stage arithmetic: add then divide (exact). 11 + 11 = 22;
+// 22 / 2 = 11. All operands kept as i32 locals. Straight-line
+// arithmetic. Distinct from s74_arith_add_then_div (170),
+// s73_arith_add_then_mod (23) and s72_arith_div_then_add (135).
+fn main() -> i32 {
+    a: i32 = 11;
+    b: i32 = 11;
+    c: i32 = 2;
+    s: i32 = a + b;        // 22
+    r: i32 = s / c;        // 11
+    return r;
+}

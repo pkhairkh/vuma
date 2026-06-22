@@ -1,0 +1,29 @@
+// s8_struct_four_fields_sum.vuma — four u64 fields, sum = 100
+// Expected exit code: 100  (10 + 20 + 30 + 40)
+//
+// 32-byte struct (four u64 fields). Store 10/20/30/40 at offsets
+// 0/8/16/24. Load all four, sum, return 100. Distinct from
+// s5_struct_five_fields (five fields) and s4_struct_field_sum
+// (three fields).
+
+struct Quad {
+    a: u64,
+    b: u64,
+    c: u64,
+    d: u64,
+}
+
+fn main() -> i32 {
+    p = allocate(32);
+    *(p + 0) = 10;
+    *(p + 8) = 20;
+    *(p + 16) = 30;
+    *(p + 24) = 40;
+    a: u64 = *(p + 0);
+    b: u64 = *(p + 8);
+    c: u64 = *(p + 16);
+    d: u64 = *(p + 24);
+    s: u64 = a + b + c + d;
+    free(p);
+    return s;
+}

@@ -1,0 +1,16 @@
+// s33_nl_3x4_count.vuma — 3x4 nested loop, count = 12
+// Observed on current x86_64 backend: 0 (FAIL — known bug)
+//
+// Nested for-loop produces 12 iterations total. Known
+// "for-body assignments don't propagate" bug keeps the result at 0. Will exit
+// 12 once fixed.
+// Distinct from s30_nl_3x3_count (3x3=9) and s26_nl_3x4_count (3x4=12, same dims, observed 0).
+fn main() -> i32 {
+    count: u32 = 0;
+    for i in 0..3 {
+        for j in 0..4 {
+            count = count + 1;
+        }
+    }
+    return count;
+}

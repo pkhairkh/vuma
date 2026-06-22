@@ -1,0 +1,14 @@
+// s11_edge_one_shift_left.vuma — 1 << 7 = 128
+// Expected exit code: 128
+//
+// Single-bit set via shift. 1 << 7 = 128 (0x80, the MSB of a u8).
+// Edge case: minimal nonzero operand (1) shifted to max u8 power.
+// Distinct from s10_edge_one_minus_one (1 - 1 = 0) and
+// s6_edge_max_byte (literal 255 return).
+
+fn main() -> i32 {
+    a: u32 = 1;
+    sh: u32 = 7;
+    r: u32 = a << sh;     // 128
+    return r;
+}

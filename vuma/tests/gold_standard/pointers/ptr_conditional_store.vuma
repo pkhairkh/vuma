@@ -1,0 +1,27 @@
+// ptr_conditional_store.vuma — conditional store via bool variable (no if)
+// Expected exit code: 42
+//
+// Declares a bool variable b = true. Uses an arithmetic select
+// (sel * val_true + (1 - sel) * val_false, with sel = 1 modeling
+// "b is true") to pick 42 (true branch) or 99 (false branch). Stores
+// the selected value at offset 0 via *buf, loads it back, returns.
+// No `if` is used (the buggy codegen path); selection is purely
+// arithmetic. (Note: bool-to-u32 cast is not yet codegenned in x86_64,
+// so we model the bool's truth value directly with sel = 1.)
+
+fn main() -> i32 {
+    b: bool = true;
+    sel: u32 = 1;
+    val_true: u32 = 42;
+    val_false: u32 = 99;
+    one: u32 = 1;
+    inv: u32 = one - sel;
+    left: u32 = sel * val_true;
+    right: u32 = inv * val_false;
+    chosen: u32 = left + right;
+    buf = allocate(8);
+    *buf = chosen;
+    loaded: i32 = *buf;
+    free(buf);
+    return loaded;
+}

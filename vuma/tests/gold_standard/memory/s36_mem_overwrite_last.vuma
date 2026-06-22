@@ -1,0 +1,21 @@
+// s36_mem_overwrite_last.vuma — cells 40 and 40, overwrite last to 180, sum = 220
+// Expected exit code: 220
+//
+// Two 8-byte cells. Store 40 in each, then overwrite the
+// last cell to 180 via `*p2 = literal`; load both, sum ->
+// 220. Uses `*ptr = literal` form (no offsets).
+// Distinct from s30_mem_overwrite_first (overwrite, 0) and s27_mem_overwrite_last (different cell).
+
+fn main() -> i32 {
+    p1 = allocate(8);
+    p2 = allocate(8);
+    *p1 = 40;
+    *p2 = 40;
+    *p2 = 180;
+    a: u64 = *p1;
+    b: u64 = *p2;
+    s: u64 = a + b;        // 220
+    free(p1);
+    free(p2);
+    return s;
+}

@@ -1,0 +1,15 @@
+// s8_bit_or_clear_mask.vuma — (200 | 15) & 240 = 207 & 240 = 192
+// Expected exit code: 192
+//
+// OR 200 (0xC8) with 15 (0x0F) = 207 (0xCF), then AND with 240 (0xF0)
+// clears the low nibble -> 192 (0xC0). All operands loaded into variables
+// first. Distinct from s6_bit_clear_low_nibble (clears via &-with-complement).
+
+fn main() -> i32 {
+    v: u64 = 200;      // 0xC8
+    lo: u64 = 15;      // 0x0F
+    hi_mask: u64 = 240; // 0xF0
+    o: u64 = v | lo;   // 0xCF = 207
+    r: u64 = o & hi_mask; // 0xC0 = 192
+    return r;
+}

@@ -1,0 +1,22 @@
+// s66_conc_overwrite_middle.vuma — overwrite c2 to 190, load = 190
+// Expected exit code: 190
+//
+// Three independent 8-byte cells. Store 100/50/80 then overwrite
+// c2 to 190. Load c2 -> 190 (the overwritten value). Uses `*ptr
+// = literal` form. Distinct from s62_conc_overwrite_first (150),
+// s58_conc_overwrite_middle (200) and s55_conc_overwrite_last
+// (235).
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    c3 = allocate(8);
+    *c1 = 100;
+    *c2 = 50;
+    *c3 = 80;
+    *c2 = 190;
+    v: i32 = *c2;          // 190
+    free(c1);
+    free(c2);
+    free(c3);
+    return v;
+}

@@ -1,0 +1,25 @@
+// s26_mem_overwrite_middle.vuma — overwrite middle, sum = 90 (5 + 60 + 25)
+// Expected exit code: 90
+//
+// Three 8-byte cells. Store 5/15/25, then overwrite the middle cell with
+// 60. Load all three, sum -> 90. Uses `*ptr = literal` form (no offsets).
+// Distinct from s22_mem_overwrite_middle (different values) and
+// s18_mem_overwrite_load (overwrite pattern, two cells).
+
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    c3 = allocate(8);
+    *c1 = 5;
+    *c2 = 15;
+    *c3 = 25;
+    *c2 = 60;
+    a: u64 = *c1;
+    b: u64 = *c2;
+    c: u64 = *c3;
+    s: u64 = a + b + c;
+    free(c1);
+    free(c2);
+    free(c3);
+    return s;
+}

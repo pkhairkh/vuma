@@ -1,0 +1,15 @@
+// s37_u32_and_then_xor.vuma — (0xF0 & 0xC0) ^ 0x30 = 0xC0 ^ 0x30 = 0xF0 = 240
+// Expected exit code: 240
+//
+// Deterministic test in the u32_arith category. All operands loaded into typed
+// variables before any bitwise op; all stores use `*ptr = literal` (or the
+// `*ptr = variable + 0` workaround). Result lands in 0-255.
+// Distinct from s33_u32_xor_and_chain (xor-and, 254) and s30_u32_and_then_add (and-then-add).
+fn main() -> i32 {
+    a: u32 = 240;          // 0xF0
+    b: u32 = 192;          // 0xC0
+    c: u32 = 48;           // 0x30
+    x: u32 = a & b;        // 0xC0 = 192
+    r: u32 = x ^ c;        // 0xF0 = 240
+    return r;
+}

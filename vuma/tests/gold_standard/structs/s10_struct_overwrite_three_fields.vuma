@@ -1,0 +1,31 @@
+// s10_struct_overwrite_three_fields.vuma — overwrite all 3 fields to 50, sum = 150
+// Expected exit code (correct): 150  (50 + 50 + 50)
+// Observed on current x86_64 backend: non-deterministic (FAIL — known
+//   U8-truncation bug on `*(p+offset)` stores/loads with u64 type)
+//
+// 24-byte struct (three u64 fields). Store 5/10/15 at offsets 0/8/16,
+// then overwrite all three with 50. Load all three, sum -> 150.
+// Distinct from s6_struct_overwrite_two_fields (overwrites 2 of 3)
+// and s5_struct_overwrite_one_field (overwrites 1).
+
+struct Triple {
+    a: u64,
+    b: u64,
+    c: u64,
+}
+
+fn main() -> i32 {
+    p = allocate(24);
+    *(p + 0) = 5;
+    *(p + 8) = 10;
+    *(p + 16) = 15;
+    *(p + 0) = 50;
+    *(p + 8) = 50;
+    *(p + 16) = 50;
+    a: u64 = *(p + 0);
+    b: u64 = *(p + 8);
+    c: u64 = *(p + 16);
+    s: u64 = a + b + c;
+    free(p);
+    return s;
+}

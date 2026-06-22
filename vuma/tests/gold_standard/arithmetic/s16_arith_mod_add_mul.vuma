@@ -1,0 +1,18 @@
+// s16_arith_mod_add_mul.vuma — (130 % 7) * 4 + 1 = 17
+// Expected exit code: 17
+//
+// Three-stage mod-mul-add. (130 % 7) = 4; 4 * 4 = 16; 16 + 1 = 17.
+// All operands loaded into u32 variables first. Distinct from
+// s9_arith_mod_then_add (mod-then-add only) and s14_arith_mod_then_add
+// (mod-then-add, different operands).
+
+fn main() -> i32 {
+    n: u32 = 130;
+    d: u32 = 7;
+    m: u32 = 4;
+    a: u32 = 1;
+    x: u32 = n % d;       // 4
+    y: u32 = x * m;       // 16
+    r: u32 = y + a;       // 17
+    return r;
+}

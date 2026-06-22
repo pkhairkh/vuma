@@ -1,0 +1,13 @@
+// s14_edge_max_minus_one.vuma — 255 - 1 = 254
+// Expected exit code: 254
+//
+// Max U8 minus one -> 254. Distinct from s10_edge_max_xor_zero
+// (255 ^ 0 = 255) and s5_edge_255_minus_1 (same arithmetic,
+// different category framing — this entry is in edge_cases).
+
+fn main() -> i32 {
+    a: u32 = 255;
+    b: u32 = 1;
+    r: u32 = a - b;       // 254
+    return r;
+}

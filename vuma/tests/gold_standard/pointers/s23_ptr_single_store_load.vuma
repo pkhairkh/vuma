@@ -1,0 +1,16 @@
+// s23_ptr_single_store_load.vuma — store 100, load 100
+// Expected exit code: 100
+//
+// Single 8-byte cell. Store literal 100, load back, return. Most basic
+// store-load round trip via pointer. Distinct from
+// s22_ptr_single_store_load (value 78) and s24_ptr_single_store_load
+// (value 71).
+
+fn main() -> i32 {
+    p = allocate(8);
+    *p = 100;
+    v: i32 = *p;
+    free(p);
+    return v;
+}
+

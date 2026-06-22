@@ -1,0 +1,17 @@
+// s67_fn_one_arg_mul.vuma — mul_three(50) = 150
+// Expected exit code: 150
+//
+// Helper mul_three(x) = x * 3. main calls mul_three(50) ->
+// 150. Single-arg function that multiplies by a literal.
+// Distinct from s66_fn_one_arg_sub (80), s62_fn_one_arg_add
+// (115) and s58_fn_one_arg_sub (92).
+fn mul_three(x: u32) -> u32 {
+    n: u32 = 3;
+    r: u32 = x * n;
+    return r;
+}
+
+fn main() -> i32 {
+    v: u32 = mul_three(50);
+    return v;
+}

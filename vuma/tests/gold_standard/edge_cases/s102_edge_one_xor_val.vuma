@@ -1,0 +1,11 @@
+// s102_edge_one_xor_val.vuma — 1 ^ 38 = 39 (XOR with one flips the low bit)
+// Expected exit code: 39
+//
+// Edge case: XOR with one flips the low bit. 1 ^ 38 = 39. All operands loaded into u32 variables first (immediate-RHS bitwise drop bug workaround).
+// Distinct from s101_edge_max_xor_val (155), s101_edge_one_shl_val (16), s101_edge_zero_and_val (0).
+fn main() -> i32 {
+    a: u32 = 38;
+    o: u32 = 1;
+    r: u32 = o ^ a;        // 39
+    return r;
+}

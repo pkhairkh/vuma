@@ -1,0 +1,16 @@
+// s5_bit_and_or_chain.vuma — (12 & 10) | 5 = 8 | 5 = 13
+// Expected exit code: 13
+//
+// AND of 12 (0b1100) and 10 (0b1010) = 8 (0b1000). Then OR with 5
+// (0b0101) = 13 (0b1101). All operands loaded into variables first
+// to dodge the immediate-RHS bitwise drop bug. Distinct from
+// s4_bit_or_then_and (op order swapped).
+
+fn main() -> i32 {
+    a: u64 = 12;
+    b: u64 = 10;
+    c: u64 = 5;
+    anded: u64 = a & b;
+    ored: u64 = anded | c;
+    return ored;
+}

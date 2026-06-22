@@ -1,0 +1,23 @@
+// s33_atom_three_cell_xor.vuma — three cells, atomic xor = 0xAA ^ 0x55 ^ 0xF0 = 0x0F = 15
+// Observed on current x86_64 backend: 0 (FAIL — known bug)
+//
+// Atomics test. On the current x86_64 backend atomic_load returns 0, so the
+// documented correct value (15) is not observed. Will exit
+// 15 once the atomics bridge is wired through.
+// Distinct from s30_atom_three_cell_sum (sum, 0) and s26_atom_three_cell_sum (sum, 0).
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    c3 = allocate(8);
+    atomic_store(c1, 170);          // 0xAA
+    atomic_store(c2, 85);           // 0x55
+    atomic_store(c3, 240);          // 0xF0
+    a = atomic_load(c1);
+    b = atomic_load(c2);
+    c = atomic_load(c3);
+    r: i32 = a ^ b ^ c;            // 0x0F = 15
+    free(c1);
+    free(c2);
+    free(c3);
+    return r;
+}

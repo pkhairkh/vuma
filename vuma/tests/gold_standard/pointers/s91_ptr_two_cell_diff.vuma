@@ -1,0 +1,19 @@
+// s91_ptr_two_cell_diff.vuma — two cells, diff = 30 (200 - 170)
+// Expected exit code: 30
+//
+// Two 8-byte cells. Store 200/170 via `*ptr = literal`, load both,
+// a - b -> 30. Uses `*ptr = literal` form (no offsets). Distinct
+// from s90_ptr_two_cell_diff (28), s86_ptr_two_cell_diff (215) and
+// s82_ptr_two_cell_diff (205).
+fn main() -> i32 {
+    p1 = allocate(8);
+    p2 = allocate(8);
+    *p1 = 200;
+    *p2 = 170;
+    a: i32 = *p1;
+    b: i32 = *p2;
+    d: i32 = a - b;        // 30
+    free(p1);
+    free(p2);
+    return d;
+}

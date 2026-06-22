@@ -1,0 +1,17 @@
+// s102_conc_two_cell_sum.vuma — store 1 + 21 in 2 cells, load and sum = 22
+// Expected exit code: 22
+//
+// Two independent 8-byte cells. Store 1 at c1, store 21 at c2, load each and return the sum (22). Uses `*ptr = literal` form. Straight-line code only.
+// Distinct from s101_conc_overwrite_first (27), s101_conc_three_cell_diff (110), s101_conc_two_cell_sum (230).
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    *c1 = 1;
+    *c2 = 21;
+    a: i32 = *c1;          // 1
+    b: i32 = *c2;          // 21
+    s: i32 = a + b;        // 22
+    free(c1);
+    free(c2);
+    return s;
+}

@@ -1,0 +1,25 @@
+// s49_mf_double_then_add.vuma — dbl(40) + add_twelve(40) = 80 + 52 = 132
+// Expected exit code: 132
+//
+// Two single-arg helpers called on the same literal then summed.
+// dbl(x) = x * 2; add_twelve(x) = x + 12. main calls dbl(40) -> 80
+// and add_twelve(40) -> 52; sum = 132. Distinct from s46_mf_double_
+// then_add (115) and s42_mf_double_then_sub (112).
+
+fn dbl(x: u32) -> u32 {
+    n: u32 = 2;
+    r: u32 = x * n;
+    return r;
+}
+fn add_twelve(x: u32) -> u32 {
+    n: u32 = 12;
+    r: u32 = x + n;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = dbl(40);          // 80
+    b: u32 = add_twelve(40);   // 52
+    r: u32 = a + b;            // 132
+    return r;
+}

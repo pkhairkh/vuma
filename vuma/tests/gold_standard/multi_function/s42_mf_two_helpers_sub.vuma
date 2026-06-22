@@ -1,0 +1,26 @@
+// s42_mf_two_helpers_sub.vuma — sub_three(60) + sub_five(30) = 57 + 25 = 82
+// Expected exit code: 82
+//
+// Two single-arg helpers, each called once from main, results added.
+// sub_three(x) = x - 3; sub_five(x) = x - 5. main calls
+// sub_three(60) -> 57 and sub_five(30) -> 25; sum = 82. Distinct
+// from s38_mf_two_helpers_sum (add+mul, 116) and s34_mf_two_helpers_
+// sum (105).
+
+fn sub_three(x: u32) -> u32 {
+    n: u32 = 3;
+    r: u32 = x - n;
+    return r;
+}
+fn sub_five(x: u32) -> u32 {
+    n: u32 = 5;
+    r: u32 = x - n;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = sub_three(60);   // 57
+    b: u32 = sub_five(30);    // 25
+    r: u32 = a + b;           // 82
+    return r;
+}

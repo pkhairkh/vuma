@@ -1,0 +1,15 @@
+// s18_mem_store_load_lit.vuma — store 73, load 73
+// Expected exit code: 73
+//
+// Single 8-byte cell. Store literal 73 via `*p = 73`, load it back,
+// return 73. Most basic store-load round trip via pointer. Distinct
+// from s14_mem_store_load_lit (value 64) and s9_mem_load_then_double
+// (load-then-double, value 50).
+
+fn main() -> i32 {
+    p = allocate(8);
+    *p = 73;
+    v: u64 = *p;
+    free(p);
+    return v;
+}

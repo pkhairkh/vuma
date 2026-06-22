@@ -1,0 +1,15 @@
+// s12_arith_mul_then_div.vuma — (8 * 7) / 4 = 56 / 4 = 14
+// Expected exit code: 14
+//
+// Multiply then divide. 8 * 7 = 56; 56 / 4 = 14. Two-stage
+// arithmetic with one intermediate. Distinct from s9_arith_div_then_mul
+// (div-then-mul) and s10_arith_div_then_mul (different operands).
+
+fn main() -> i32 {
+    a: u32 = 8;
+    b: u32 = 7;
+    c: u32 = 4;
+    p: u32 = a * b;      // 56
+    r: u32 = p / c;      // 14
+    return r;
+}

@@ -1,0 +1,25 @@
+// s13_ls_three_node_sum.vuma — three independent nodes, sum = 96 (16+32+48)
+// Expected exit code: 96
+//
+// Three 8-byte allocations, each treated as a single "node". Store
+// 16/32/48 via `*p = literal`, load all three, sum -> 96. Uses `*p =
+// literal` form (no offsets). Distinct from s9_ls_two_node_sum (two
+// nodes) and s4_ls_three_nodes (uses *(block+N) form).
+
+fn main() -> i32 {
+    n1 = allocate(8);
+    n2 = allocate(8);
+    n3 = allocate(8);
+    *n1 = 16;
+    *n2 = 32;
+    *n3 = 48;
+    a: u64 = *n1;
+    b: u64 = *n2;
+    c: u64 = *n3;
+    t: u64 = a + b;
+    s: u64 = t + c;
+    free(n1);
+    free(n2);
+    free(n3);
+    return s;
+}

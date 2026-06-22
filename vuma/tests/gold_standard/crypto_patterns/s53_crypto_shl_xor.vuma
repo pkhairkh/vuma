@@ -1,0 +1,17 @@
+// s53_crypto_shl_xor.vuma — (1 << 6) ^ 0x55 = 0x40 ^ 0x55 = 0x15 = 21
+// Expected exit code: 21
+//
+// Shift literal 1 left by 6, then XOR with 0x55. (1 << 6) = 64
+// (0x40); 64 ^ 85 = 21 (0x15). All operands loaded into u64
+// variables first (immediate-RHS bitwise drop bug workaround).
+// Distinct from s49_crypto_shl_xor (44) and s50_crypto_shr_extract
+// (15).
+
+fn main() -> i32 {
+    a: u64 = 1;
+    b: u64 = 6;
+    c: u64 = 85;           // 0x55
+    x: u64 = a << b;       // 0x40 = 64
+    r: u64 = x ^ c;        // 0x15 = 21
+    return r;
+}

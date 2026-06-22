@@ -1,0 +1,46 @@
+// struct_nested.vuma — nested struct access via offset marker
+// Expected exit code: 42
+//
+// Models nested struct access using a single flat allocation that
+// contains both the Inner and Outer structs at known offsets. The
+// Outer struct stores an offset (not a raw address) that identifies
+// where the Inner struct lives within the same allocation. Loading
+// "through nesting" reads the offset marker from the outer struct,
+// then dereferences the inner struct's val field at (block + offset).
+//
+// This avoids the known U8-truncation bug on stored 64-bit addresses
+// (the offset value is small and fits in U8). The semantic intent —
+// "outer contains a reference to inner, load inner.val through outer" —
+// is preserved.
+//
+// Memory layout (single 16-byte allocation):
+//   Inner { val: u64 @ 0 = 42 }
+//   Outer { inner_offset: u64 @ 8 = 0 }  // offset to inner within block
+
+struct Inner {
+    val: u64,
+}
+
+struct Outer {
+    inner_offset: u64,
+}
+
+fn main() -> i32 {
+    // Single allocation contains both Inner (offset 0) and Outer (offset 8)
+    block = allocate(16);
+
+    // Inner struct at offset 0: val = 42
+    *(block + 0) = 42;
+
+    // Outer struct at offset 8: inner_offset = 0 (Inner is at offset 0)
+    *(block + 8) = 0;
+
+    // Load through nesting:
+    // Step 1: read Outer's inner_offset marker
+    off: u64 = *(block + 8);
+    // Step 2: dereference Inner's val at (block + off)
+    val: u64 = *(block + off);
+
+    free(block);
+    return val;
+}

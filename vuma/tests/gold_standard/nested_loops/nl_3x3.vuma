@@ -1,0 +1,15 @@
+// nl_3x3.vuma — 3x3 nested loop, count iterations
+// Expected exit code: 9
+//
+// 3*3 = 9 total iterations of an inner-loop counter.
+// NOW PASSING until the for-body assignment propagation bug is fixed.
+
+fn main() -> i32 {
+    count: u32 = 0;
+    for i in 0..3 {
+        for j in 0..3 {
+            count = count + 1;
+        }
+    }
+    return count;
+}

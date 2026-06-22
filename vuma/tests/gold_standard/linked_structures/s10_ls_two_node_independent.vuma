@@ -1,0 +1,21 @@
+// s10_ls_two_node_independent.vuma — two 8-byte allocs, sum = 100 (30 + 70)
+// Expected exit code: 100
+//
+// Two independent 8-byte allocations treated as two "nodes". Store
+// 30/70 via `*ptr` form (deterministic on the current backend), load
+// both, sum -> 100. Distinct from s6_ls_two_blocks_independent
+// (uses `*(p+0)` form, non-deterministic) and s4_ls_two_nodes
+// (single allocation, two nodes via offsets).
+
+fn main() -> i32 {
+    a = allocate(8);
+    b = allocate(8);
+    *a = 30;
+    *b = 70;
+    va: u64 = *a;
+    vb: u64 = *b;
+    s: u64 = va + vb;
+    free(a);
+    free(b);
+    return s;
+}

@@ -1,0 +1,17 @@
+// arith_add_chain — chain of additions: 1 + 2 + ... + 10 = 55
+// Expected exit code: 55
+//
+// Accumulates the sum of integers 1..=10 in a while loop. Uses the verified
+// counter pattern (loop counter compared to a variable bound) so it should
+// execute correctly on backends whose for-loop body codegen is buggy.
+
+fn main() -> i32 {
+    sum: u32 = 0;
+    i: u32 = 1;
+    n: u32 = 11;   // upper bound (exclusive)
+    while i < n {
+        sum = sum + i;
+        i = i + 1;
+    }
+    return sum;
+}

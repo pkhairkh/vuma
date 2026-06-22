@@ -1,0 +1,16 @@
+// s43_arith_sub_then_mul.vuma — (180 - 80) * 2 = 100 * 2 = 200
+// Expected exit code: 200
+//
+// Two-stage u32 computation: subtract, then multiply. (180 - 80) =
+// 100; 100 * 2 = 200. All operands loaded into u32 variables first.
+// Straight-line arithmetic. Distinct from s42_arith_div_then_mod (3)
+// and s38_arith_sub_then_mod (5).
+
+fn main() -> i32 {
+    a: u32 = 180;
+    b: u32 = 80;
+    c: u32 = 2;
+    s: u32 = a - b;       // 100
+    r: u32 = s * c;       // 200
+    return r;
+}

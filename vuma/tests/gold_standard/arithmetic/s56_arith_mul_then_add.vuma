@@ -1,0 +1,16 @@
+// s56_arith_mul_then_add.vuma — 12 * 5 + 30 = 60 + 30 = 90
+// Expected exit code: 90
+//
+// Two-stage u32 computation: multiply then add. 12 * 5 = 60; 60 + 30
+// = 90. All operands loaded into u32 variables first. Straight-line
+// arithmetic. Distinct from s54_arith_add_then_mul (110) and
+// s50_arith_mul_then_sub (76).
+
+fn main() -> i32 {
+    a: u32 = 12;
+    b: u32 = 5;
+    c: u32 = 30;
+    p: u32 = a * b;         // 60
+    r: u32 = p + c;         // 90
+    return r;
+}

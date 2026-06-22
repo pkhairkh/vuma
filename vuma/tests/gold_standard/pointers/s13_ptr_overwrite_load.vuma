@@ -1,0 +1,16 @@
+// s13_ptr_overwrite_load.vuma — store 22, overwrite 88, load 88
+// Expected exit code: 88
+//
+// Single 8-byte cell. Store literal 22 via `*p = 22`, then overwrite
+// with 88 (last write wins). Load and return 88. Uses `*p = literal`
+// form (no offsets). Distinct from s9_ptr_single_store_load (no
+// overwrite) and s10_ptr_overwrite_one (two-cell overwrite).
+
+fn main() -> i32 {
+    p = allocate(8);
+    *p = 22;
+    *p = 88;
+    v: i32 = *p;
+    free(p);
+    return v;
+}

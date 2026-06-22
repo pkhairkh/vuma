@@ -1,0 +1,16 @@
+// s4_crypto_byte_mix.vuma — mix two bytes via XOR and shift
+// Expected exit code: 204
+//
+// Mix function: take bytes a=0xAB (171) and b=0xCD (205). Compute
+// (a ^ b) << 1. 171 ^ 205 = 102 (0x66). (102 << 1) & 0xFF = 204
+// (0xCC). All operands loaded into variables to dodge the
+// immediate-RHS bitwise drop bug.
+
+fn main() -> i32 {
+    a: u64 = 171;    // 0xAB
+    b: u64 = 205;    // 0xCD
+    one: u64 = 1;
+    x: u64 = a ^ b;       // 0x66 = 102
+    y: u64 = x << one;    // 0xCC = 204
+    return y;
+}

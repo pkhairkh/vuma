@@ -1,0 +1,26 @@
+// s16_cs_three_cells_asc.vuma — three cells, ascending 10/30/50, sum = 90
+// Expected exit code: 90  (10 + 30 + 50)
+//
+// Three independent 8-byte cells. Store 10/30/50 (ascending by 20) via
+// `*ptr = literal`. Load all three, sum, return 90. Uses separate
+// allocations per "slot" because the current x86_64 backend drops stores
+// through the `*(ptr + N) = literal` form (only `*ptr = literal` and
+// `*ptr = variable + 0` round-trip). Distinct from s9_cs_three_cells_asc
+// (values 5/15/25 = 45) and s14_cs_three_cells_desc (descending 75/50/25).
+
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    c3 = allocate(8);
+    *c1 = 10;
+    *c2 = 30;
+    *c3 = 50;
+    a: u64 = *c1;
+    b: u64 = *c2;
+    c: u64 = *c3;
+    s: u64 = a + b + c;
+    free(c1);
+    free(c2);
+    free(c3);
+    return s;
+}

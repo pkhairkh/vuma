@@ -1,0 +1,20 @@
+// s9_mem_two_buf_sum.vuma — two buffers, sum loads = 33 (11 + 22)
+// Expected exit code: 33
+//
+// Two independent 8-byte buffers. Store 11 and 22 via `*p =
+// literal`, load both, sum -> 33. Uses `*p = literal` form (no
+// offsets). Distinct from s4_mem_two_buf_sum (values 30/70 = 100,
+// uses *(buf+N) form) and s6_mem_two_buf_diff (values 30/40 = 70).
+
+fn main() -> i32 {
+    a = allocate(8);
+    b = allocate(8);
+    *a = 11;
+    *b = 22;
+    va: u64 = *a;
+    vb: u64 = *b;
+    s: u64 = va + vb;
+    free(a);
+    free(b);
+    return s;
+}

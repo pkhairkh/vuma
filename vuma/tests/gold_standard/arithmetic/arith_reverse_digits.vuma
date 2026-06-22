@@ -1,0 +1,17 @@
+// arith_reverse_digits — reverse decimal digits of a number
+// Expected exit code: 54
+//
+// reverse(450) = 54 (leading zeros are dropped).
+
+fn main() -> i32 {
+    n: u32 = 450;
+    ten: u32 = 10;
+    zero: u32 = 0;
+    reversed: u32 = 0;
+    while n > zero {
+        digit: u32 = n % ten;
+        reversed = reversed * ten + digit;
+        n = n / ten;
+    }
+    return reversed;
+}

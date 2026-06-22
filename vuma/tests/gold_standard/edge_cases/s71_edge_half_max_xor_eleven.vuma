@@ -1,0 +1,14 @@
+// s71_edge_half_max_xor_eleven.vuma — 127 ^ 11 = 0x74 = 116
+// Expected exit code: 116
+//
+// XOR the half-max value 127 (0x7F) with 11 (0x0B). 127 ^ 11 =
+// 116 (0x74). All operands loaded into u32 variables first
+// (immediate-RHS bitwise drop bug workaround). Distinct from
+// s69_edge_one_shl_three (8), s70_edge_one_shl_two (4) and s66_
+// edge_zero_xor_max (255).
+fn main() -> i32 {
+    a: u32 = 127;          // 0x7F
+    b: u32 = 11;           // 0x0B
+    r: u32 = a ^ b;        // 0x74 = 116
+    return r;
+}

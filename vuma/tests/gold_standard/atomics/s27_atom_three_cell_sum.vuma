@@ -1,0 +1,25 @@
+// s27_atom_three_cell_sum.vuma — atomic_store 10/20/30, sum = 60
+// Observed on current x86_64 backend: 0 (FAIL — known bug)
+//
+// Three 8-byte cells. atomic_store 10/20/30, atomic_load all three, sum
+// -> 60. On the current backend all loads return 0 -> exit 0. Will exit
+// 60 once atomic ops are wired through. Distinct from
+// s26_atom_three_cell_sum (different values) and s22_atom_three_cell_inc
+// (incrementing values).
+
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    c3 = allocate(8);
+    atomic_store(c1, 10);
+    atomic_store(c2, 20);
+    atomic_store(c3, 30);
+    a = atomic_load(c1);
+    b = atomic_load(c2);
+    c = atomic_load(c3);
+    s = a + b + c;
+    free(c1);
+    free(c2);
+    free(c3);
+    return s;
+}

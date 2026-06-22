@@ -1,0 +1,21 @@
+// mem_store_load_u64.vuma — store/load u64 as 8 bytes
+// Expected exit code: 255
+//
+// Stores a u64 value (0xFF) as 8 little-endian bytes and loads the low byte
+// back. Exit codes are 8-bit, so 0xFF wraps to 255.
+
+fn main() -> i32 {
+    buf = allocate(16);
+    val: u64 = 0xFF;
+    *(buf + 0) = (val & 255);
+    *(buf + 1) = ((val >> 8) & 255);
+    *(buf + 2) = ((val >> 16) & 255);
+    *(buf + 3) = ((val >> 24) & 255);
+    *(buf + 4) = ((val >> 32) & 255);
+    *(buf + 5) = ((val >> 40) & 255);
+    *(buf + 6) = ((val >> 48) & 255);
+    *(buf + 7) = ((val >> 56) & 255);
+    b0: u64 = *(buf + 0);
+    free(buf);
+    return b0;
+}

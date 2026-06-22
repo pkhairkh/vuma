@@ -1,0 +1,15 @@
+// s32_edge_zero_or_max.vuma - 0 | 255 = 255
+// Expected exit code: 255
+//
+// 0 | 255 = 255. All operands loaded into typed variables before any bitwise
+// op (immediate-RHS drop workaround where applicable); stores use the `*ptr
+// = literal` (or `*ptr = variable + 0`) form with no `*(ptr + offset)`
+// indexing. Distinct from s30_edge_max_and_zero (255 & 0 = 0) and
+// s26_edge_zero_or_one (0 | 1 = 1).
+
+fn main() -> i32 {
+    a: u32 = 0;
+    b: u32 = 255;
+    r: u32 = a | b;       // 255
+    return r;
+}

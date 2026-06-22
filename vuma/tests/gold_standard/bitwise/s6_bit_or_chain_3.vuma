@@ -1,0 +1,14 @@
+// s6_bit_or_chain_3.vuma — 0x01 | 0x40 | 0x80 = 0xC1 = 193
+// Expected exit code: 193
+//
+// Three-way OR chain. Bits 0, 6, 7 set -> 1 | 64 | 128 = 193 (0xC1).
+// All operands loaded into variables first. Distinct from s5_bit_and_or_chain.
+
+fn main() -> i32 {
+    a: u64 = 1;     // 0x01
+    b: u64 = 64;    // 0x40
+    c: u64 = 128;   // 0x80
+    t1: u64 = a | b;   // 0x41
+    t2: u64 = t1 | c;  // 0xC1
+    return t2;
+}

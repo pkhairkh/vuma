@@ -1,0 +1,19 @@
+// s6_ls_three_node_chain.vuma — three 8-byte nodes, sum = 90 (20 + 30 + 40)
+// Expected exit code: 90
+//
+// 24-byte allocation treated as three 8-byte "nodes" at offsets
+// 0/8/16. Stores 20/30/40, loads all three, sums, returns 90. Distinct
+// from s5_ls_five_node_chain (5 nodes) and s5_ls_four_node_chain.
+
+fn main() -> i32 {
+    block = allocate(24);
+    *(block + 0) = 20;
+    *(block + 8) = 30;
+    *(block + 16) = 40;
+    a: u64 = *(block + 0);
+    b: u64 = *(block + 8);
+    c: u64 = *(block + 16);
+    s: u64 = a + b + c;
+    free(block);
+    return s;
+}

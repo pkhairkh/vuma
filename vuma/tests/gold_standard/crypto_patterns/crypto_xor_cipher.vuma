@@ -1,0 +1,15 @@
+// crypto_xor_cipher.vuma — XOR cipher: 0xFF ^ 0xAA = 0x55
+// Expected exit code: 85 (0x55)
+//
+// The XOR cipher is the canonical symmetric stream cipher primitive:
+// ciphertext = plaintext XOR key, plaintext = ciphertext XOR key. This
+// test exercises the bitwise-XOR-via-variables codegen path (immediate
+// RHS bitwise ops are dropped by the current codegen, so both operands
+// are first loaded into named variables per the documented workaround).
+
+fn main() -> i32 {
+    a: u64 = 0xFF;
+    b: u64 = 0xAA;
+    c: u64 = a ^ b;          // 0xFF ^ 0xAA = 0x55 = 85
+    return c;
+}

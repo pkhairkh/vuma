@@ -1,0 +1,21 @@
+// s27_conc_two_cell_or.vuma — two cells, or = 255 (0xF0 | 0x0F)
+// Expected exit code: 255
+//
+// Two independent 8-byte cells. Each gets a distinct literal at offset 0
+// (240/15). Both loaded back and ORed. All operands loaded into typed
+// locals before the OR (immediate-RHS bitwise drop bug workaround).
+// Distinct from s26_conc_two_cell_and (and, 255&15=15) and
+// s22_conc_two_cell_xor (xor, 41^98=75).
+
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    *c1 = 240;            // 0xF0
+    *c2 = 15;             // 0x0F
+    v1: u64 = *c1;
+    v2: u64 = *c2;
+    s: u64 = v1 | v2;     // 0xFF = 255
+    free(c1);
+    free(c2);
+    return s;
+}

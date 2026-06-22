@@ -1,0 +1,26 @@
+// s23_mem_overwrite_middle.vuma — overwrite middle cell, sum = 120 (10 + 80 + 30)
+// Expected exit code: 120
+//
+// Three 8-byte cells. Store 10/20/30, then overwrite the middle cell
+// (p2) with 80. Load all three, sum -> 120. Uses `*ptr = literal` form
+// (no offsets). Distinct from s22_mem_overwrite_first (overwrites first
+// cell) and s24_mem_overwrite_last (overwrites last cell).
+
+fn main() -> i32 {
+    p1 = allocate(8);
+    p2 = allocate(8);
+    p3 = allocate(8);
+    *p1 = 10;
+    *p2 = 20;
+    *p3 = 30;
+    *p2 = 80;
+    a: u64 = *p1;
+    b: u64 = *p2;
+    c: u64 = *p3;
+    s: u64 = a + b + c;   // 120
+    free(p1);
+    free(p2);
+    free(p3);
+    return s;
+}
+

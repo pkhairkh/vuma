@@ -1,0 +1,23 @@
+// s100_ls_three_node_sum.vuma — three nodes, sum = 58 (15 + 31 + 12)
+// Expected exit code: 58
+//
+// Three 8-byte allocations treated as three independent
+// "nodes". Store 15/31/12 via `*ptr = literal`, load all,
+// a + b + c -> 58. Uses `*ptr = literal` form.
+// Distinct from s97_ls_three_node_sum (22), s94_ls_three_node_sum (100), s90_ls_overwrite_value (32).
+fn main() -> i32 {
+    n1 = allocate(8);
+    n2 = allocate(8);
+    n3 = allocate(8);
+    *n1 = 15;
+    *n2 = 31;
+    *n3 = 12;
+    a: u64 = *n1;
+    b: u64 = *n2;
+    c: u64 = *n3;
+    s: u64 = a + b + c;    // 58
+    free(n1);
+    free(n2);
+    free(n3);
+    return s;
+}

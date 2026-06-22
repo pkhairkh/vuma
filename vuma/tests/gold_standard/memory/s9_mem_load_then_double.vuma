@@ -1,0 +1,18 @@
+// s9_mem_load_then_double.vuma — store 30, load, multiply by 2 = 60
+// Expected exit code: 60
+//
+// 8-byte cell. Store literal 30 via `*p = 30`, load it back into a
+// local, multiply by 2 -> 60. Tests that a loaded value can be
+// used as a multiplication operand. Uses `*p = literal` form (no
+// offsets). Distinct from s5_mem_load_chain (uses *(buf+N) form,
+// computes (a*b)+b across two offsets).
+
+fn main() -> i32 {
+    buf = allocate(8);
+    *buf = 30;
+    v: u64 = *buf;
+    two: u64 = 2;
+    r: u64 = v * two;
+    free(buf);
+    return r;
+}

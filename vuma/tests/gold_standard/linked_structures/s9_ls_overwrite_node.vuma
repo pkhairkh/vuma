@@ -1,0 +1,17 @@
+// s9_ls_overwrite_node.vuma — overwrite single node, final = 50
+// Expected exit code: 50
+//
+// 8-byte allocation treated as a single "node". Store 5, then
+// overwrite with 50 (both via `*p = literal`). Load and return 50
+// (last write wins). Uses `*p = literal` form (no offsets).
+// Distinct from s6_ls_overwrite_first (uses *(block+N) form,
+// overwrites first node of a 3-node chain).
+
+fn main() -> i32 {
+    node = allocate(8);
+    *node = 5;
+    *node = 50;
+    v: u64 = *node;
+    free(node);
+    return v;
+}

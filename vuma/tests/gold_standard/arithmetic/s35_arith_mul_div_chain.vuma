@@ -1,0 +1,16 @@
+// s35_arith_mul_div_chain.vuma — (15 * 8) / 6 = 120 / 6 = 20
+// Expected exit code: 20
+//
+// Two-stage u32 computation: multiply then divide. 15 * 8 = 120;
+// 120 / 6 = 20. All operands loaded into u32 variables first.
+// Distinct from s34_arith_div_then_add (div-then-add, 55) and
+// s30_arith_div_then_mul (div-then-mul, 64).
+
+fn main() -> i32 {
+    a: u32 = 15;
+    b: u32 = 8;
+    c: u32 = 6;
+    m: u32 = a * b;       // 120
+    r: u32 = m / c;       // 20
+    return r;
+}

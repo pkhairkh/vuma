@@ -1,0 +1,13 @@
+// s6_u32_shift_left_3.vuma — 5 << 3 = 40
+// Expected exit code: 40
+//
+// Shift 5 left by 3 bits -> 40. Shift amount loaded into a variable
+// first to dodge the immediate-RHS bitwise drop bug. Distinct from
+// s5_u32_add_then_shift (add-then-shift).
+
+fn main() -> i32 {
+    v: u32 = 5;
+    sh: u32 = 3;
+    r: u32 = v << sh;
+    return r;
+}

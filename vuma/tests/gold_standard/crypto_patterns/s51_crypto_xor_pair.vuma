@@ -1,0 +1,15 @@
+// s51_crypto_xor_pair.vuma — 0x6C ^ 0x39 = 0x55 = 85
+// Expected exit code: 85
+//
+// Two-byte XOR. 108 ^ 57 = 85 (0x55). Alternating-bit-style pair
+// (0x6C / 0x39) produces a 0x55 / 0b01010101 bit pattern. All
+// operands loaded into u64 variables first (immediate-RHS bitwise
+// drop bug workaround). Distinct from s50_crypto_xor_pair
+// (0x3C ^ 0xC3 = 255) and s47_crypto_xor_pair (0x96 ^ 0x69 = 255).
+
+fn main() -> i32 {
+    a: u64 = 108;          // 0x6C
+    b: u64 = 57;           // 0x39
+    r: u64 = a ^ b;        // 0x55 = 85
+    return r;
+}

@@ -1,0 +1,22 @@
+// s19_mf_sq_then_add.vuma — sq(11) = 121; add(121, 50) = 171
+// Expected exit code: 171
+//
+// Two helpers: sq(x) = x * x (square), add(a, b) = a + b. main calls
+// sq(11) -> 121, then add(121, 50) -> 171. Distinct from
+// s18_mf_helper_double (single helper) and s14_mf_sq_then_add
+// (sq(12)=144, add(144, 30) = 174, different operands).
+
+fn sq(x: u32) -> u32 {
+    r: u32 = x * x;
+    return r;
+}
+fn add(a: u32, b: u32) -> u32 {
+    r: u32 = a + b;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = sq(11);      // 121
+    b: u32 = add(a, 50);  // 171
+    return b;
+}

@@ -1,0 +1,15 @@
+// s10_bit_and_then_xor.vuma — (0xAA & 0x0F) ^ 0x05 = 15
+// Expected exit code: 15
+//
+// AND-then-XOR. (170 & 15) = 10 (0x0A); 10 ^ 5 = 15 (0x0F). All
+// operands loaded into u64 variables first. Distinct from
+// s5_bit_and_or_chain (AND-then-OR) and s6_bit_and_chain_3 (AND chain).
+
+fn main() -> i32 {
+    a: u64 = 170;         // 0xAA
+    b: u64 = 15;          // 0x0F
+    c: u64 = 5;           // 0x05
+    x: u64 = a & b;       // 0x0A
+    r: u64 = x ^ c;       // 0x0F = 15
+    return r;
+}

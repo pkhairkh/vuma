@@ -1,0 +1,20 @@
+// s48_struct_overwrite_field.vuma — store 25, overwrite to 205, load = 205
+// Expected exit code: 205
+//
+// Single 8-byte allocation treated as one struct instance. Store 25
+// via `*p = literal`, then overwrite with 205. Load and return 205.
+// Uses `*ptr = literal` form (no offsets). Distinct from s46_struct
+// _overwrite_field (155) and s42_struct_overwrite_field (140).
+
+struct Single {
+    a: u64,
+}
+
+fn main() -> i32 {
+    p1 = allocate(8);
+    *p1 = 25;
+    *p1 = 205;
+    a: u64 = *p1;
+    free(p1);
+    return a;
+}

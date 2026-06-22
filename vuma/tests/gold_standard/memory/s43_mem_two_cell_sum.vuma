@@ -1,0 +1,20 @@
+// s43_mem_two_cell_sum.vuma — two cells, sum = 220 (140 + 80)
+// Expected exit code: 220
+//
+// Two 8-byte cells. Store 140/80 via `*ptr = literal`, load both,
+// sum -> 220. Uses `*ptr = literal` form (no offsets). Distinct from
+// s42_mem_two_cell_sum (200) and s38_mem_two_cell_sum (220, same
+// total but different operands 130/90).
+
+fn main() -> i32 {
+    p1 = allocate(8);
+    p2 = allocate(8);
+    *p1 = 140;
+    *p2 = 80;
+    a: u64 = *p1;
+    b: u64 = *p2;
+    s: u64 = a + b;        // 220
+    free(p1);
+    free(p2);
+    return s;
+}

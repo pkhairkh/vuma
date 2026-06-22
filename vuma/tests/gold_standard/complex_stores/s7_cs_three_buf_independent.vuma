@@ -1,0 +1,25 @@
+// s7_cs_three_buf_independent.vuma — 3 buffers, sum = 30 + 40 + 50 = 120
+// Expected exit code: 120
+//
+// Three independent 8-byte buffers. Each gets a distinct literal via
+// `*p = literal` (no offset). All three loaded back and summed -> 120.
+// Distinct from s5_cs_two_bufs_cross (two bufs) and
+// s6_cs_two_buf_overwrite (two bufs with overwrite).
+
+fn main() -> i32 {
+    a = allocate(8);
+    b = allocate(8);
+    c = allocate(8);
+    *a = 30;
+    *b = 40;
+    *c = 50;
+    va: u64 = *a;
+    vb: u64 = *b;
+    vc: u64 = *c;
+    t1: u64 = va + vb;
+    s: u64 = t1 + vc;
+    free(a);
+    free(b);
+    free(c);
+    return s;
+}

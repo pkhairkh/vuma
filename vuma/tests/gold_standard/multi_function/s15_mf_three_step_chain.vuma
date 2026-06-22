@@ -1,0 +1,30 @@
+// s15_mf_three_step_chain.vuma — inc(5) -> dbl(6) -> sub3(12) = 9
+// Expected exit code: 9
+//
+// Three single-arg helpers chained via intermediates: inc(x) = x + 1;
+// dbl(x) = x * 2; sub3(x) = x - 3. main calls inc(5) -> 6, dbl(6) -> 12,
+// sub3(12) -> 9. Distinct from s14_mf_two_helpers_chain (two-helper chain)
+// and s11_mf_three_helpers_chain (three summed, not chained).
+
+fn inc(x: u32) -> u32 {
+    n: u32 = 1;
+    r: u32 = x + n;
+    return r;
+}
+fn dbl(x: u32) -> u32 {
+    n: u32 = 2;
+    r: u32 = x * n;
+    return r;
+}
+fn sub3(x: u32) -> u32 {
+    n: u32 = 3;
+    r: u32 = x - n;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = inc(5);      // 6
+    b: u32 = dbl(a);      // 12
+    c: u32 = sub3(b);     // 9
+    return c;
+}

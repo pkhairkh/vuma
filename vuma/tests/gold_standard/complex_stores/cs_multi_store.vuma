@@ -1,0 +1,17 @@
+// cs_multi_store.vuma — store 3 values at offsets 0,1,2, load all, return sum
+// Expected exit code: 10  (2 + 3 + 5)
+//
+// Writes three small bytes at consecutive offsets, loads them all back,
+// sums them. Verifies multi-byte scatter stores and independent loads.
+
+fn main() -> i32 {
+    buf = allocate(8);
+    *(buf + 0) = 2;
+    *(buf + 1) = 3;
+    *(buf + 2) = 5;
+    a: u32 = *(buf + 0);
+    b: u32 = *(buf + 1);
+    c: u32 = *(buf + 2);
+    free(buf);
+    return a + b + c;
+}

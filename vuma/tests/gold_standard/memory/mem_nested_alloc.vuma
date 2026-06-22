@@ -1,0 +1,32 @@
+// mem_nested_alloc.vuma — allocate within a function, pass to another
+// Expected exit code: 0
+//
+// Allocates a buffer in main(), passes it to a helper that fills it, then
+// to another helper that verifies it.
+
+fn fill_buf(buf: Address, n: u32) {
+    i: u32 = 0;
+    while i < n {
+        *(buf + i) = (i + 1) & 255;
+        i = i + 1;
+    }
+}
+
+fn verify_buf(buf: Address, n: u32) -> u32 {
+    i: u32 = 0;
+    while i < n {
+        v: u32 = *(buf + i);
+        expected: u32 = i + 1;
+        if v != expected { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn main() -> i32 {
+    buf = allocate(8);
+    fill_buf(buf, 4);
+    result: u32 = verify_buf(buf, 4);
+    free(buf);
+    return result;
+}
