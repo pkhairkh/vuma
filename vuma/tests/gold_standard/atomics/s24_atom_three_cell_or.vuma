@@ -1,5 +1,5 @@
 // s24_atom_three_cell_or.vuma — atomic_store 16/32/64, or = 112 (0x10|0x20|0x40)
-// Expected exit code: 0 (current buggy backend)
+// Expected exit code: 112
 // Expected exit code (correct, post-bridge-fix): 112  (16 | 32 | 64)
 //
 // Three 8-byte cells. atomic_store 16/32/64 (ascending powers of two)

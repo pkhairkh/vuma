@@ -1,5 +1,5 @@
 // s19_atom_three_cells_even.vuma — atomic_store 20/40/60, sum = 120
-// Expected exit code: 0 (current buggy backend)
+// Expected exit code: 120
 // Expected exit code (correct, post-bridge-fix): 120  (20 + 40 + 60)
 //
 // Three 8-byte cells. atomic_store 20/40/60 (ascending even multiples

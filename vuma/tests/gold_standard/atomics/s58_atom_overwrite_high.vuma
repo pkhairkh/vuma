@@ -1,6 +1,5 @@
 // s58_atom_overwrite_high.vuma — overwrite to 210, atomic_load = 210
-// Expected exit code: 0 (current buggy backend)
-// Expected exit code (correct, post-bridge-fix): 210
+// Expected exit code: 210
 // 
 // Single 8-byte cell. atomic_store 40, then atomic_store 210.
 // atomic_load should return 210. On the current backend the load

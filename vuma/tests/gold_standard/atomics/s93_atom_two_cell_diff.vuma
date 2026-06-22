@@ -1,6 +1,5 @@
 // s93_atom_two_cell_diff.vuma — two cells, atomic diff = 20 (200 - 180)
-// Expected exit code: 0 (current buggy backend)
-// Expected exit code (correct, post-bridge-fix): 20
+// Expected exit code: 20
 //
 // Two 8-byte cells. atomic_store 200/180, atomic_load each, a - b
 // -> 20. On the current backend the loads return 0 -> 0 - 0 = 0 ->
