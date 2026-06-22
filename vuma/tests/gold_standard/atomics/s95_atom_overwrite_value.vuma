@@ -1,6 +1,5 @@
 // s95_atom_overwrite_value.vuma — overwrite c1 to 7, atomic load = 7
-// Expected exit code: 0 (current buggy backend)
-// Expected exit code (correct, post-bridge-fix): 7
+// Expected exit code: 7
 //
 // Single 8-byte cell. atomic_store 5, then atomic_store 7
 // (overwrite), then atomic_load -> 7. On the current backend the

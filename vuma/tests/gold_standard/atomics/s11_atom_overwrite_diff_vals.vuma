@@ -1,6 +1,5 @@
 // s11_atom_overwrite_diff_vals.vuma — atomic_store 100 then 50, load sees 50
-// Expected exit code: 0 (current buggy backend)
-// Expected exit code (correct, post-bridge-fix): 50
+// Expected exit code: 50
 //
 // Single 8-byte cell. atomic_store 100, then overwrite with 50. Load
 // should observe 50 (last write wins; overwrite goes high-to-low).

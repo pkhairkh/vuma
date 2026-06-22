@@ -1,6 +1,5 @@
 // s5_atom_overwrite_load.vuma — atomic_store twice, load final = 55
-// Expected exit code: 0 (current buggy backend)
-// Expected exit code (correct, post-bridge-fix): 55
+// Expected exit code: 55
 //
 // Single 8-byte cell. atomic_store 11, then atomic_store 55
 // (overwrite). atomic_load should yield 55. Current backend

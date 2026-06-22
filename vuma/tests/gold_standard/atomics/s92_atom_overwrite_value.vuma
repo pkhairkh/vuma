@@ -1,5 +1,4 @@
 // s92_atom_overwrite_value.vuma — overwrite c1 to 41, atomic load = 41
-// Expected exit code (correct, post-bridge-fix): 41
 // Observed on current x86_64 backend: 0 (FAIL — known bug)
 //
 // Single 8-byte cell. atomic_store 5, then atomic_store 41

@@ -1,5 +1,5 @@
 // s17_atom_two_cell_xor.vuma — two cells, atomic_store 0x55/0x33, xor = 0x66 = 102
-// Expected exit code: 0 (current buggy backend)
+// Expected exit code: 102
 // Expected exit code (correct, post-bridge-fix): 102  (0x55 ^ 0x33)
 //
 // Two 8-byte cells. atomic_store 0x55 (85) in c1, 0x33 (51) in c2,
