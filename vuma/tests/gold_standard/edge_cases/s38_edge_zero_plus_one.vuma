@@ -1,0 +1,13 @@
+// s38_edge_zero_plus_one.vuma — 0 + 1 = 1
+// Expected exit code: 1
+//
+// Add one to zero. 0 + 1 = 1. All operands loaded into u32
+// variables first. Distinct from s34_edge_max_minus_one (254) and
+// s30_edge_zero_xor_max (255).
+
+fn main() -> i32 {
+    a: u32 = 0;
+    b: u32 = 1;
+    r: u32 = a + b;        // 1
+    return r;
+}

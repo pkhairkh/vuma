@@ -1,0 +1,11 @@
+// mem_alloc_free.vuma — allocate and free a buffer
+// Expected exit code: 0
+//
+// Verifies the most basic memory lifecycle: allocate a buffer, then free it.
+// No loads or stores — just allocation and deallocation.
+
+fn main() -> i32 {
+    buf = allocate(64);
+    free(buf);
+    return 0;
+}

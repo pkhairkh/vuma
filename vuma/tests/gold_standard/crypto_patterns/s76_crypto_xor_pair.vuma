@@ -1,0 +1,14 @@
+// s76_crypto_xor_pair.vuma — 0x9E ^ 0x44 = 0xDA = 218
+// Expected exit code: 218
+//
+// Two-byte XOR. 158 ^ 68 = 218 (0xDA). Mid-bit pair (0x9E / 0x44)
+// produces the byte 0xDA. All operands loaded into u64 variables
+// first (immediate-RHS bitwise drop bug workaround). Distinct from
+// s74_crypto_xor_pair (156), s73_crypto_xor_pair (107) and
+// s72_crypto_or_mask (122).
+fn main() -> i32 {
+    a: u64 = 158;          // 0x9E
+    b: u64 = 68;           // 0x44
+    r: u64 = a ^ b;        // 0xDA = 218
+    return r;
+}

@@ -1,0 +1,20 @@
+// s88_cf_if_else_const.vuma — if true { x = 16 } else { x = 8 }; return x
+// Observed on current x86_64 backend: 8 (FAIL — known bug)
+//
+// If-true branch should set x = 16, else branch sets x = 8.
+// With a literal `true` condition the true branch should
+// win -> 16. On the current backend the if-true body's
+// single assignment is dropped, so the else body's
+// assignment (8) survives instead. Will exit 16 once the
+// if-body drop bug is fixed. Distinct from s86_cf_if_else_
+// const (14), s82_cf_if_else_const (12) and s78_cf_if_
+// else_const (10).
+fn main() -> i32 {
+    x: u32 = 0;
+    if true {
+        x = 16;
+    } else {
+        x = 8;
+    }
+    return x;
+}

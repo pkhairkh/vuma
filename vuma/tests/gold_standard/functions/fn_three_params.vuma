@@ -1,0 +1,13 @@
+// fn_three_params.vuma — add3(1, 2, 7) = 10
+// Expected exit code: 10
+//
+// Tests passing three parameters to a function and returning their sum.
+
+fn add3(a: u32, b: u32, c: u32) -> u32 {
+    return a + b + c;
+}
+
+fn main() -> i32 {
+    v: u32 = add3(1, 2, 7);
+    return v;
+}

@@ -1,0 +1,22 @@
+// arith_continued_fraction — continued fraction expansion
+// Expected exit code: 4
+//
+// For rational 17/4, the continued fraction is [4; 4] (length 2 partial
+// quotients), giving 4 + 1/4 = 17/4. The first partial quotient is 4.
+// This test computes the count of partial quotients for 17/4 using the
+// Euclidean algorithm. For 17/4: 17 = 4*4 + 1; 4 = 4*1 + 0.
+// Length = 2. We return 2 + 2 = 4 for distinctness.
+
+fn main() -> i32 {
+    a: u32 = 17;
+    b: u32 = 4;
+    zero: u32 = 0;
+    count: u32 = 0;
+    while b != zero {
+        t: u32 = a % b;
+        a = b;
+        b = t;
+        count = count + 1;
+    }
+    return count + count;
+}

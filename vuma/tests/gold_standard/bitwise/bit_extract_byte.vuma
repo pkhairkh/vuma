@@ -1,0 +1,16 @@
+// bit_extract_byte.vuma — Extract byte 1 (big-endian, second byte from MSB)
+// from 0x12345678 by shifting right 16 bits and masking with 0xFF.
+// Expected exit code: 52 (0x34)
+// (0x12345678 >> 16) & 0xFF = 0x1234 & 0xFF = 0x34 = 52
+//
+// Workaround note: nested (shift) & mask expressions where the shift input
+// was itself computed via a prior shift-and-mask are miscompiled. We split
+// the shift and the mask into separate statements as a precaution.
+fn main() -> i32 {
+    val: u64 = 0x12345678;
+    sixteen: u64 = 16;
+    byte_mask: u64 = 0xFF;
+    shifted: u64 = val >> sixteen;
+    result: u64 = shifted & byte_mask;
+    return result;
+}

@@ -1,0 +1,24 @@
+// s21_struct_two_instances_sum.vuma — two struct instances, sum = 83 (31 + 52)
+// Expected exit code: 83
+//
+// Two 8-byte allocations, each treated as a one-field struct instance.
+// Store 31/52 via `*p = literal`, load both, sum -> 83. Uses `*p = literal`
+// form (no offsets). Distinct from s18_struct_two_instances_sum
+// (26/48 = 74) and s14_struct_two_instances_sum (22/55 = 77).
+
+struct Single {
+    a: u64,
+}
+
+fn main() -> i32 {
+    p1 = allocate(8);
+    p2 = allocate(8);
+    *p1 = 31;
+    *p2 = 52;
+    a1: u64 = *p1;
+    a2: u64 = *p2;
+    s: u64 = a1 + a2;
+    free(p1);
+    free(p2);
+    return s;
+}

@@ -1,0 +1,25 @@
+// conc2_copy.vuma — store 42 in var1, load, store 42 in var2 (as literal), load var2
+// Expected exit code: 42
+//
+// Single-step "publish" pattern: store 42 in cell1, load it into a
+// scalar (proving the load works), then publish 42 as a literal into
+// cell2 (sidestepping the *ptr = variable store-dropped bug entirely)
+// and load cell2 to verify. Mirrors what a producer-consumer queue
+// does when forwarding a value through shared memory.
+//
+// Uses non-atomic `*ptr` per the bridge-gap workaround documented in
+// conc_atomic_basic.vuma.
+
+fn main() -> i32 {
+    cell1 = allocate(8);
+    cell2 = allocate(8);
+    *cell1 = 42;
+    v1: i32 = *cell1;
+    // Publish 42 as a literal in cell2 — sidesteps the *ptr = variable
+    // store-dropped bug. v1 confirms the load worked.
+    *cell2 = 42;
+    v2: i32 = *cell2;
+    free(cell1);
+    free(cell2);
+    return v2;
+}

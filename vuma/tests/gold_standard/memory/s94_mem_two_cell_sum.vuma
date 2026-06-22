@@ -1,0 +1,19 @@
+// s94_mem_two_cell_sum.vuma — two cells, sum = 160 (90 + 70)
+// Expected exit code: 160
+//
+// Two 8-byte cells. Store 90/70 via `*ptr = literal`, load both,
+// a + b -> 160. Uses `*ptr = literal` form (no offsets). Distinct
+// from s90_mem_two_cell_diff (7), s86_mem_two_cell_sum (205) and
+// s82_mem_two_cell_sum (145).
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    *c1 = 90;
+    *c2 = 70;
+    a: u64 = *c1;
+    b: u64 = *c2;
+    s: u64 = a + b;        // 160
+    free(c1);
+    free(c2);
+    return s;
+}

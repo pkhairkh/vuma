@@ -1,0 +1,23 @@
+// s52_mf_two_helpers_mul.vuma — h1(5)=8, h2(8)=40
+// Expected exit code: 40
+//
+// Two single-arg helpers: h1(x)=x+3, h2(x)=x*5. main calls h1(5) -> 8,
+// then h2(8) -> 40. Distinct from s50_mf_two_helpers_mul (110) and
+// s46_mf_two_helpers_mul (90).
+
+fn h1(x: u32) -> u32 {
+    n: u32 = 3;
+    r: u32 = x + n;
+    return r;
+}
+fn h2(x: u32) -> u32 {
+    n: u32 = 5;
+    r: u32 = x * n;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = h1(5);            // 8
+    r: u32 = h2(a);            // 40
+    return r;
+}

@@ -1,0 +1,20 @@
+// s7_ptr_two_buf_sum.vuma — 2 bufs each 8 bytes, sum = 40 + 60 = 100
+// Expected exit code: 100
+//
+// Two independent 8-byte buffers. Store 40 in buf1 and 60 in buf2
+// via `*p = literal`, load both, sum -> 100. Distinct from
+// s5_ptr_two_cell_publish (two cells with publishing semantics) and
+// s6_ptr_store_load_basic (single cell).
+
+fn main() -> i32 {
+    p1 = allocate(8);
+    p2 = allocate(8);
+    *p1 = 40;
+    *p2 = 60;
+    v1: i32 = *p1;
+    v2: i32 = *p2;
+    s: i32 = v1 + v2;
+    free(p1);
+    free(p2);
+    return s;
+}

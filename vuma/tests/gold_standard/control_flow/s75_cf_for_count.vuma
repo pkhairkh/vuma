@@ -1,0 +1,15 @@
+// s75_cf_for_count.vuma — for loop runs 107 iterations, count = 107
+// Observed on current x86_64 backend: 0 (FAIL — known bug)
+//
+// Counter starts at 0 and increments by 1 each iteration of a for
+// loop with range 0..107. Known "for-body assignments don't
+// propagate" bug keeps count at 0 -> exit 0. Will exit 107 once
+// fixed. Distinct from s74_cf_for_count (93), s70_cf_for_count_12
+// (12) and s66_cf_for_count_9 (9).
+fn main() -> i32 {
+    count: u32 = 0;
+    for i in 0..107 {
+        count = count + 1;
+    }
+    return count;
+}

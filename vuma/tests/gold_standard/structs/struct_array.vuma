@@ -1,0 +1,31 @@
+// struct_array.vuma — struct simulating an array of 5 u64 elements
+// Expected exit code: 5
+//
+// Treats a 40-byte allocation as an Array struct {e0, e1, e2, e3, e4: u64}
+// with each element at a stride of 8 bytes. Stores 1 in each element,
+// loads them all back, sums them: 1+1+1+1+1 = 5.
+
+struct Array {
+    e0: u64,
+    e1: u64,
+    e2: u64,
+    e3: u64,
+    e4: u64,
+}
+
+fn main() -> i32 {
+    a = allocate(40);
+    *(a + 0) = 1;
+    *(a + 8) = 1;
+    *(a + 16) = 1;
+    *(a + 24) = 1;
+    *(a + 32) = 1;
+    v0: u64 = *(a + 0);
+    v1: u64 = *(a + 8);
+    v2: u64 = *(a + 16);
+    v3: u64 = *(a + 24);
+    v4: u64 = *(a + 32);
+    sum: u64 = v0 + v1 + v2 + v3 + v4;
+    free(a);
+    return sum;
+}

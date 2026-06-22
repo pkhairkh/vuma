@@ -1,0 +1,27 @@
+// s19_atom_three_cells_even.vuma — atomic_store 20/40/60, sum = 120
+// Expected exit code: 0 (current buggy backend)
+// Expected exit code (correct, post-bridge-fix): 120  (20 + 40 + 60)
+//
+// Three 8-byte cells. atomic_store 20/40/60 (ascending even multiples
+// of 20) into each, then atomic_load all three and sum. On the current
+// backend all loads return 0 (atomic_store/load not bridged) -> exit 0.
+// Will exit 120 once atomic ops are wired. Distinct from
+// s18_atom_three_cells_odd (11/33/55 = 99) and s14_atom_store_three_load
+// (33/44/55 = 132).
+
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    c3 = allocate(8);
+    atomic_store(c1, 20);
+    atomic_store(c2, 40);
+    atomic_store(c3, 60);
+    a = atomic_load(c1);
+    b = atomic_load(c2);
+    c = atomic_load(c3);
+    s = a + b + c;
+    free(c1);
+    free(c2);
+    free(c3);
+    return s;
+}

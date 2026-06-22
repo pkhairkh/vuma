@@ -1,0 +1,19 @@
+// s6_nl_3x3_with_j.vuma — 3x3 nested loop, sum j*j = (0+1+4)*3 = 15
+// Observed on current x86_64 backend: 0 (FAIL — known bug)
+//
+// Outer loop 3 iterations, inner loop 3 iterations. Each inner
+// iteration adds j*j to acc. j takes 0,1,2 in each outer iteration,
+// so sum per outer = 0 + 1 + 4 = 5; total = 5 * 3 = 15. Known
+// "for-body assignments don't propagate" bug keeps acc at 0. Distinct
+// from s4_nl_3x3_sum (sums j, not j*j).
+
+fn main() -> i32 {
+    acc: u32 = 0;
+    for i in 0..3 {
+        for j in 0..3 {
+            sq: u32 = j * j;
+            acc = acc + sq;
+        }
+    }
+    return acc;
+}

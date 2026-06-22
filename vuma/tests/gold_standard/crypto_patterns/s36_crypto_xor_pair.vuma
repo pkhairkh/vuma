@@ -1,0 +1,15 @@
+// s36_crypto_xor_pair.vuma — 0xA5 ^ 0x5A = 0xFF = 255
+// Expected exit code: 255
+//
+// Two-byte XOR. 165 ^ 90 = 255 (0xFF). Complementary-bit
+// bytes XOR to all ones. All operands loaded into u64
+// variables first (immediate-RHS bitwise drop bug
+// workaround).
+// Distinct from s30_crypto_xor_pair (0xC3 ^ 0x3C = 0xFF) and s27_crypto_xor_pair (different values).
+
+fn main() -> i32 {
+    a: u64 = 165;          // 0xA5
+    b: u64 = 90;           // 0x5A
+    r: u64 = a ^ b;        // 0xFF = 255
+    return r;
+}

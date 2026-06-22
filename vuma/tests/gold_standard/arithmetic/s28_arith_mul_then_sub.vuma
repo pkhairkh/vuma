@@ -1,0 +1,16 @@
+// s28_arith_mul_then_sub.vuma — 12 * 8 - 20 = 96 - 20 = 76
+// Expected exit code: 76
+//
+// Two-stage u32 computation: mul then sub. 12 * 8 = 96; 96 - 20 = 76.
+// All operands loaded into u32 variables first. Distinct from
+// s26_arith_sub_then_div (sub-then-div, 30) and s22_arith_mul_then_sub
+// (mul-then-sub, different values).
+
+fn main() -> i32 {
+    a: u32 = 12;
+    b: u32 = 8;
+    c: u32 = 20;
+    m: u32 = a * b;       // 96
+    r: u32 = m - c;       // 76
+    return r;
+}

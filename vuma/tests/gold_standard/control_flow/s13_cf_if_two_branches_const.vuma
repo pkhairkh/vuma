@@ -1,0 +1,18 @@
+// s13_cf_if_two_branches_const.vuma — if true { x = 60 } else { x = 240 }; return x
+// Observed on current x86_64 backend: 240 (FAIL — known bug)
+//
+// Constant-true guard selects the if-body assignment (x = 60). On the
+// current backend the if-body assignment is silently dropped, so x
+// keeps the else-branch value 240 (exit 240). Will exit 60 once the
+// if-body drop bug is fixed. Distinct from s9_cf_if_else_one_branch
+// (values 50/200) and s4_cf_if_assign_simple (values 10/20).
+
+fn main() -> i32 {
+    x: u32 = 0;
+    if true {
+        x = 60;
+    } else {
+        x = 240;
+    }
+    return x;
+}

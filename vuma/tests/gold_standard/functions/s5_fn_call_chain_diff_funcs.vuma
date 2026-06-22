@@ -1,0 +1,23 @@
+// s5_fn_call_chain_diff_funcs.vuma — add5(mul3(4)) = 12 + 5 = 17
+// Expected exit code: 17
+//
+// mul3(x) = x * 3, add5(x) = x + 5. main calls mul3(4) -> 12, then
+// add5(12) -> 17. Distinct from fn_chained_calls (homogeneous adds).
+
+fn mul3(x: u32) -> u32 {
+    three: u32 = 3;
+    r: u32 = x * three;
+    return r;
+}
+
+fn add5(x: u32) -> u32 {
+    five: u32 = 5;
+    r: u32 = x + five;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = mul3(4);
+    b: u32 = add5(a);
+    return b;
+}

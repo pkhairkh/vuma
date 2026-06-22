@@ -1,0 +1,19 @@
+// s8_conc_two_cells_xor.vuma — two cells, xor loads = 172 (100 ^ 200)
+// Expected exit code: 172
+//
+// Two independent 8-byte cells. Each gets a different literal at
+// offset 0. Both loaded back and XORed. 100 (0x64) ^ 200 (0xC8) =
+// 172 (0xAC). Distinct from s6_conc_two_cell (sum, not xor).
+
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    *c1 = 100;
+    *c2 = 200;
+    v1: i32 = *c1;
+    v2: i32 = *c2;
+    s: i32 = v1 ^ v2;
+    free(c1);
+    free(c2);
+    return s;
+}

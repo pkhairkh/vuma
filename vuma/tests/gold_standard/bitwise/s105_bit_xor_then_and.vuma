@@ -1,0 +1,13 @@
+// s105_bit_xor_then_and.vuma — (0x80 ^ 0x21) & 0xE1 = 0xA1 & 0xE1 = 0xA1 = 161
+// Expected exit code: 161
+// 
+// Two-stage bitwise: XOR then AND. (128 ^ 33) = 161 (0xA1); 161 & 225 = 161 (0xA1). All operands loaded into u32 variables first (immediate-RHS bitwise drop bug workaround). Operands nonzero & distinct.
+// Distinct from s102_bit_xor_then_shr (46), s101_bit_xor_then_shl (204), s100_bit_xor_then_and (35).
+fn main() -> i32 {
+    a: u32 = 128;          // 0x80
+    b: u32 = 33;           // 0x21
+    c: u32 = 225;          // 0xE1
+    x: u32 = a ^ b;        // 0xA1 = 161
+    r: u32 = x & c;        // 0xA1 = 161
+    return r;
+}

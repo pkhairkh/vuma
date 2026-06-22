@@ -1,0 +1,16 @@
+// s53_arith_add_then_mod.vuma — (200 + 40) % 9 = 240 % 9 = 6
+// Expected exit code: 6
+//
+// Two-stage u32 computation: add then modulo. 200 + 40 = 240;
+// 240 % 9 = 6 (240 = 26*9 + 6). All operands loaded into u32
+// variables first. Straight-line arithmetic. Distinct from
+// s49_arith_add_then_mod (20) and s50_arith_add_then_div (50).
+
+fn main() -> i32 {
+    a: u32 = 200;
+    b: u32 = 40;
+    c: u32 = 9;
+    s: u32 = a + b;        // 240
+    r: u32 = s % c;        // 6
+    return r;
+}

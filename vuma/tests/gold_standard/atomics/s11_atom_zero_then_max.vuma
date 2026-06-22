@@ -1,0 +1,17 @@
+// s11_atom_zero_then_max.vuma — atomic_store 0 then 250, load sees 250
+// Expected exit code: 0 (current buggy backend)
+// Expected exit code (correct, post-bridge-fix): 250
+//
+// Single 8-byte cell. atomic_store 0 (zero), then atomic_store 250
+// (max u8). Load should observe 250 (last write wins). On the current
+// backend the load returns 0. Distinct from s10_atom_zero_one_pair
+// (zero then 50) and s6_atom_store_zero_load (single zero store).
+
+fn main() -> i32 {
+    c = allocate(8);
+    atomic_store(c, 0);
+    atomic_store(c, 250);
+    v = atomic_load(c);
+    free(c);
+    return v;
+}

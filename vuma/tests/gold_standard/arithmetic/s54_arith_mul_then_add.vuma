@@ -1,0 +1,16 @@
+// s54_arith_mul_then_add.vuma — 12 * 9 + 17 = 108 + 17 = 125
+// Expected exit code: 125
+//
+// Two-stage u32 computation: multiply then add. 12 * 9 = 108;
+// 108 + 17 = 125. All operands loaded into u32 variables first.
+// Straight-line arithmetic. Distinct from s50_arith_add_then_div
+// (25) and s49_arith_mul_then_sub (110).
+
+fn main() -> i32 {
+    a: u32 = 12;
+    b: u32 = 9;
+    c: u32 = 17;
+    p: u32 = a * b;        // 108
+    r: u32 = p + c;        // 125
+    return r;
+}

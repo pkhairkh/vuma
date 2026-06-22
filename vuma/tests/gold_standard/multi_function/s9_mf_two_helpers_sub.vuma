@@ -1,0 +1,24 @@
+// s9_mf_two_helpers_sub.vuma — sub3(sub5(20)) = (20-5)-3 = 12
+// Expected exit code: 12
+//
+// Two single-arg helpers chained: sub5(x) = x - 5, sub3(x) = x - 3.
+// main calls sub5(20) -> 15, then sub3(15) -> 12. Each call uses an
+// intermediate local. Distinct from s5_mf_three_chain (three add
+// helpers) and s4_mf_chain_3 (addends).
+
+fn sub5(x: u32) -> u32 {
+    n: u32 = 5;
+    r: u32 = x - n;
+    return r;
+}
+fn sub3(x: u32) -> u32 {
+    n: u32 = 3;
+    r: u32 = x - n;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = sub5(20);   // 15
+    b: u32 = sub3(a);    // 12
+    return b;
+}

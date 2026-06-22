@@ -1,0 +1,20 @@
+// s23_conc_two_cell_sum.vuma — two cells, sum = 150 (65 + 85)
+// Expected exit code: 150
+//
+// Two independent 8-byte cells. Each gets a distinct literal at offset 0
+// (65/85). Both loaded back and summed. Distinct from s22_conc_two_cell_xor
+// (xor, 41 ^ 98 = 75) and s20_conc_two_cell_diff (sub, 100 - 60 = 40).
+
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    *c1 = 65;
+    *c2 = 85;
+    v1: i32 = *c1;
+    v2: i32 = *c2;
+    s: i32 = v1 + v2;     // 150
+    free(c1);
+    free(c2);
+    return s;
+}
+

@@ -1,0 +1,27 @@
+// s32_ls_three_node_sum.vuma - three nodes, sum = 230 (50 + 80 + 100)
+// Expected exit code: 230
+//
+// three nodes, sum = 230 (50 + 80 + 100). All operands loaded into typed
+// variables before any bitwise op (immediate-RHS drop workaround where
+// applicable); stores use the `*ptr = literal` (or `*ptr = variable + 0`)
+// form with no `*(ptr + offset)` indexing. Distinct from
+// s30_ls_three_node_diff (diff) and s26_ls_three_node_sum (different
+// values).
+
+fn main() -> i32 {
+    n1 = allocate(8);
+    n2 = allocate(8);
+    n3 = allocate(8);
+    *n1 = 50;
+    *n2 = 80;
+    *n3 = 100;
+    a: u64 = *n1;
+    b: u64 = *n2;
+    c: u64 = *n3;
+    t: u64 = a + b;
+    s: u64 = t + c;        // 230
+    free(n1);
+    free(n2);
+    free(n3);
+    return s;
+}

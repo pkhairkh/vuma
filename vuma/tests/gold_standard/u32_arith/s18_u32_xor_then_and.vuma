@@ -1,0 +1,16 @@
+// s18_u32_xor_then_and.vuma — (0x66 ^ 0x0F) & 0xF0 = 0x69 & 0xF0 = 0x60 = 96
+// Expected exit code: 96
+//
+// XOR-then-AND. (102 ^ 15) = 105 (0x69); 105 & 240 = 96 (0x60). All
+// operands loaded into u32 variables first (immediate-RHS bitwise
+// drop bug workaround). Distinct from s14_u32_xor_then_shl
+// (xor-then-shl) and s12_u32_and_chain_3 (AND chain, no XOR).
+
+fn main() -> i32 {
+    a: u32 = 102;         // 0x66
+    b: u32 = 15;          // 0x0F
+    m: u32 = 240;         // 0xF0
+    x: u32 = a ^ b;       // 0x69 = 105
+    r: u32 = x & m;       // 0x60 = 96
+    return r;
+}

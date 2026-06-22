@@ -1,0 +1,16 @@
+// s51_u32_or_then_shr.vuma — (0xC0 | 0x30) >> 1 = 0xF0 >> 1 = 0x78 = 120
+// Expected exit code: 120
+//
+// Two-stage bitwise: OR then shift right. (192 | 48) = 240 (0xF0);
+// 240 >> 1 = 120 (0x78). All operands loaded into u32 variables first
+// (immediate-RHS bitwise drop bug workaround). Distinct from
+// s50_u32_shl_then_or (31) and s47_u32_xor_then_or (255).
+
+fn main() -> i32 {
+    a: u32 = 192;          // 0xC0
+    b: u32 = 48;           // 0x30
+    c: u32 = 1;
+    x: u32 = a | b;        // 0xF0 = 240
+    r: u32 = x >> c;       // 0x78 = 120
+    return r;
+}

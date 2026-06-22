@@ -1,0 +1,20 @@
+// s28_ptr_two_cell_or.vuma — two cells, or = 51 (0x11 | 0x22 = 0x33)
+// Expected exit code: 51
+//
+// Two 8-byte cells. Store 0x11/0x22 via `*ptr = literal`, load both,
+// OR -> 51. Uses `*ptr = literal` form (no offsets). All operands
+// loaded into typed locals before the OR. Distinct from
+// s26_ptr_two_cell_xor (xor, 38) and s22_ptr_two_cell_diff (sub, 24).
+
+fn main() -> i32 {
+    p1 = allocate(8);
+    p2 = allocate(8);
+    *p1 = 17;            // 0x11
+    *p2 = 34;            // 0x22
+    a: i32 = *p1;
+    b: i32 = *p2;
+    d: i32 = a | b;       // 0x33 = 51
+    free(p1);
+    free(p2);
+    return d;
+}

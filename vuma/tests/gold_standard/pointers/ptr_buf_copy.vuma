@@ -1,0 +1,19 @@
+// ptr_buf_copy.vuma — copy single value between buffers
+// Expected exit code: 42
+//
+// Stores 42 in src (at offset 0 via *buf), loads it into a temp
+// variable, stores the temp into dst, then loads dst and returns it.
+// Verifies that a value can be copied from one buffer to another
+// through a scalar intermediate.
+
+fn main() -> i32 {
+    src = allocate(8);
+    dst = allocate(8);
+    *src = 42;
+    tmp: i32 = *src;
+    *dst = tmp;
+    val: i32 = *dst;
+    free(src);
+    free(dst);
+    return val;
+}

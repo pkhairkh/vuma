@@ -1,0 +1,22 @@
+// s15_atom_two_cell_diff.vuma — two cells, atomic_store 50/100, sum = 150
+// Expected exit code: 0 (current buggy backend)
+// Expected exit code (correct, post-bridge-fix): 150  (50 + 100)
+//
+// Two 8-byte cells. atomic_store 50 in c1, 100 in c2, then atomic_load
+// both and sum. On the current backend both loads return 0 -> exit 0.
+// Will exit 150 once atomics are bridged. Distinct from
+// s14_atom_two_cell_sum (values 18/81 = 99) and s10_atom_three_cells
+// (three cells).
+
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    atomic_store(c1, 50);
+    atomic_store(c2, 100);
+    a = atomic_load(c1);
+    b = atomic_load(c2);
+    s = a + b;
+    free(c1);
+    free(c2);
+    return s;
+}

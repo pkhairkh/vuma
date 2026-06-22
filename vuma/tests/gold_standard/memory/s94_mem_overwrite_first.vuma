@@ -1,0 +1,22 @@
+// s94_mem_overwrite_first.vuma — overwrite c1 to 67, load = 67
+// Expected exit code: 67
+//
+// Three 8-byte cells. Store 100 at c1, store 200 at c2, store 50 at
+// c3, then overwrite c1 to 67. Load c1 -> 67 (the overwritten
+// value). Uses `*ptr = literal` form. Distinct from
+// s90_mem_overwrite_middle (31), s86_mem_overwrite_middle (235) and
+// s82_mem_overwrite_last (245).
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    c3 = allocate(8);
+    *c1 = 100;
+    *c2 = 200;
+    *c3 = 50;
+    *c1 = 67;
+    v: u64 = *c1;          // 67
+    free(c1);
+    free(c2);
+    free(c3);
+    return v;
+}

@@ -1,0 +1,11 @@
+// s29_edge_max_xor_zero.vuma — 255 ^ 0 = 255
+// Expected exit code: 255
+//
+// XOR identity: 255 ^ 0 = 255 (XOR with zero preserves the other operand). All operands loaded into u32 variables first. Distinct from s26_edge_max_minus_one (255 - 1 = 254) and s22_edge_zero_xor_zero (0 ^ 0 = 0).
+
+fn main() -> i32 {
+    a: u32 = 255;
+    b: u32 = 0;
+    r: u32 = a ^ b;       // 255
+    return r;
+}

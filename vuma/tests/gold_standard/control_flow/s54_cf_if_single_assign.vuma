@@ -1,0 +1,16 @@
+// s54_cf_if_single_assign.vuma — single if-true sets x = 85
+// Observed on current x86_64 backend: 0 (FAIL — known bug)
+//
+// One if-true block that overwrites x = 0 to x = 85. With a literal
+// `true` condition x should end at 85. On the current backend the
+// if-true body's assignment is dropped, so x stays 0 -> exit 0.
+// Will exit 85 once the if-body drop bug is fixed. Distinct from
+// s50_cf_if_single_assign (65) and s49_cf_if_single_assign (75).
+
+fn main() -> i32 {
+    x: u32 = 0;
+    if true {
+        x = 85;
+    }
+    return x;
+}

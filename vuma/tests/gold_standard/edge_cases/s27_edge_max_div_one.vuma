@@ -1,0 +1,13 @@
+// s27_edge_max_div_one.vuma — 255 / 1 = 255
+// Expected exit code: 255
+//
+// Division of max u8 by one. 255 / 1 = 255. All operands loaded into u32
+// variables first. Distinct from s26_edge_one_shl_four (1<<4=16) and
+// s22_edge_max_or_zero (255|0=255, different op).
+
+fn main() -> i32 {
+    a: u32 = 255;
+    b: u32 = 1;
+    r: u32 = a / b;       // 255
+    return r;
+}

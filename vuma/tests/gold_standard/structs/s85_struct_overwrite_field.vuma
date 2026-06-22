@@ -1,0 +1,21 @@
+// s85_struct_overwrite_field.vuma — overwrite single field, final = 167
+// Expected exit code: 167
+//
+// 8-byte allocation treated as a one-field struct. Store 14
+// via `*p = 14`, then overwrite with 167 via `*p = 167`
+// (literal overwrite, last write wins). Load and return 167.
+// Uses `*p = literal` form (no offsets). Distinct from
+// s82_struct_overwrite_field (215), s78_struct_overwrite_field
+// (3) and s74_struct_overwrite_field (85).
+struct Single {
+    a: u64,
+}
+
+fn main() -> i32 {
+    p = allocate(8);
+    *p = 14;
+    *p = 167;
+    a: u64 = *p;
+    free(p);
+    return a;
+}

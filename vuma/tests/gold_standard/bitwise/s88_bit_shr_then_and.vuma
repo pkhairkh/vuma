@@ -1,0 +1,16 @@
+// s88_bit_shr_then_and.vuma — (0xFF >> 3) & 0x1F = 0x1F & 0x1F = 0x1F = 31
+// Expected exit code: 31
+//
+// Two-stage bitwise: shift right then AND. (255 >> 3) = 31
+// (0x1F); 31 & 31 = 31 (0x1F). All operands loaded into u64
+// variables first (immediate-RHS bitwise drop bug
+// workaround). Distinct from s86_bit_or_then_shl (92),
+// s82_bit_shr_then_and (60) and s78_bit_or_then_shl (1).
+fn main() -> i32 {
+    a: u64 = 255;          // 0xFF
+    b: u64 = 3;            // shift amount
+    c: u64 = 31;           // 0x1F
+    x: u64 = a >> b;       // 0x1F = 31
+    r: u64 = x & c;        // 0x1F = 31
+    return r;
+}

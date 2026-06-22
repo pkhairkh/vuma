@@ -1,0 +1,16 @@
+// s9_bit_xor_then_and.vuma — (0xF0 ^ 0x0F) & 0xCC = 0xFF & 0xCC = 0xCC = 204
+// Expected exit code: 204
+//
+// XOR of 0xF0 (240) and 0x0F (15) = 0xFF (255). Then AND with 0xCC
+// (204) = 0xCC (204). All operands loaded into variables first to
+// dodge the immediate-RHS bitwise drop bug. Distinct from
+// s4_bit_or_then_and (op order swapped, OR-then-AND).
+
+fn main() -> i32 {
+    a: u64 = 240;     // 0xF0
+    b: u64 = 15;      // 0x0F
+    c: u64 = 204;     // 0xCC
+    x: u64 = a ^ b;   // 0xFF = 255
+    y: u64 = x & c;   // 0xCC = 204
+    return y;
+}

@@ -1,0 +1,15 @@
+// s99_arith_div_then_mul.vuma — (99 / 3) * 2 = 33 * 2 = 66
+// Expected exit code: 66
+//
+// Two-stage arithmetic: divide then multiply. 99 / 3 = 33;
+// 33 * 2 = 66. All operands kept as i32 locals. Straight-line
+// arithmetic. Distinct from s95_arith_sub_then_mul (38),
+// s91_arith_sub_then_mod (40) and s87_arith_sub_then_mod (35).
+fn main() -> i32 {
+    a: i32 = 99;
+    b: i32 = 3;
+    c: i32 = 2;
+    x: i32 = a / b;        // 33
+    r: i32 = x * c;        // 66
+    return r;
+}

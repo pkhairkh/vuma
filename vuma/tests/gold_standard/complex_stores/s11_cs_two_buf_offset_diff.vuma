@@ -1,0 +1,28 @@
+// s11_cs_two_buf_offset_diff.vuma — two 16-byte bufs, sum = 100
+// Expected exit code (correct): 100  (10 + 20 + 30 + 40)
+// Observed on current x86_64 backend: non-deterministic (FAIL — known
+//   U8-truncation bug on `*(p+offset)` stores/loads with u64 type)
+//
+// Two 16-byte buffers A and B. Store 10/20 at A+0/A+8, store 30/40 at
+// B+0/B+8. Load all four, sum -> 10 + 20 + 30 + 40 = 100. Distinct
+// from s10_cs_two_buf_offset_sum (different vals 25/35/15/45) and
+// s8_cs_interleaved_bufs (interleaved access pattern).
+
+fn main() -> i32 {
+    a = allocate(16);
+    b = allocate(16);
+    *(a + 0) = 10;
+    *(a + 8) = 20;
+    *(b + 0) = 30;
+    *(b + 8) = 40;
+    a0: u64 = *(a + 0);
+    a1: u64 = *(a + 8);
+    b0: u64 = *(b + 0);
+    b1: u64 = *(b + 8);
+    t1: u64 = a0 + a1;
+    t2: u64 = t1 + b0;
+    s: u64 = t2 + b1;
+    free(a);
+    free(b);
+    return s;
+}

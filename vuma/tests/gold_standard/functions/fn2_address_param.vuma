@@ -1,0 +1,21 @@
+// fn2_address_param.vuma — function stores 42 via Address param, main loads
+// Expected exit code: 42
+//
+// Tests passing an Address (allocated buffer) as a function parameter.
+// main allocates an 8-byte buffer, passes its Address to a helper that
+// stores the literal 42 at offset 0 via *p. main then loads the value
+// back. Verifies that a literal store through a passed-in Address is
+// visible to the caller.
+
+fn store_42(p: Address) -> i32 {
+    *p = 42;
+    return 0;
+}
+
+fn main() -> i32 {
+    buf = allocate(8);
+    store_42(buf);
+    v: u32 = *buf;
+    free(buf);
+    return v;
+}

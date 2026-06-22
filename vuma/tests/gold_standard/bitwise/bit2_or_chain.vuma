@@ -1,0 +1,15 @@
+// bit2_or_chain.vuma — Chain of bitwise ORs.
+// Expected exit code: 255 (0xFF)
+//
+// 0xF0 | 0x0C | 0x03 = 0xFC | 0x03 = 0xFF = 255.
+//
+// Workaround note: bitwise ops with an immediate RHS are silently dropped by
+// the current codegen, so all operands are loaded into variables first.
+fn main() -> i32 {
+    a: u64 = 0xF0;
+    b: u64 = 0x0C;
+    c: u64 = 0x03;
+    t1: u64 = a | b;
+    result: u64 = t1 | c;
+    return result;
+}

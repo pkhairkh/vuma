@@ -1,0 +1,18 @@
+// s8_nl_3x2_sum_i.vuma — 3x2 nested loop, sum of i = (0+1+2)*2 = 6
+// Observed on current x86_64 backend: 0 (FAIL — known bug)
+//
+// Outer loop 3 iterations, inner loop 2 iterations. Each inner
+// iteration adds i (outer counter) to acc. i takes 0,1,2 in each
+// outer iteration, so sum per outer = 0+1+2 = 3; total = 3*2 = 6.
+// Known bug keeps acc at 0. Distinct from s5_nl_2x3_acc (different
+// shape and value).
+
+fn main() -> i32 {
+    acc: u32 = 0;
+    for i in 0..3 {
+        for j in 0..2 {
+            acc = acc + i;
+        }
+    }
+    return acc;
+}

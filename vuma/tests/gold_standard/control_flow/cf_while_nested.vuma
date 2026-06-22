@@ -1,0 +1,18 @@
+// cf_while_nested — nested while loops count to 100
+// Expected exit code: 100
+//
+// Exposes: nested-loop non-counter variable (r) may not propagate.
+
+fn main() -> i32 {
+    i: u32 = 0;
+    r: u32 = 0;
+    while (i < 10) {
+        j: u32 = 0;
+        while (j < 10) {
+            r = r + 1;
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    return r;
+}

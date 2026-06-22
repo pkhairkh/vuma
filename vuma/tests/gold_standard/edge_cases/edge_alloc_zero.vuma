@@ -1,0 +1,11 @@
+// edge_alloc_zero — allocate(0), free, return 0
+// Expected exit code: 0
+//
+// Edge case: a zero-sized allocation must succeed (or no-op), then be
+// freed cleanly. main returns 0.
+
+fn main() -> i32 {
+    buf = allocate(0);
+    free(buf);
+    return 0;
+}

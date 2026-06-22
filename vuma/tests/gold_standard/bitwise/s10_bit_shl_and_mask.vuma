@@ -1,0 +1,16 @@
+// s10_bit_shl_and_mask.vuma — (1 << 5) & 0x20 = 32 & 32 = 32
+// Expected exit code: 32
+//
+// Shift left then mask. (1 << 5) = 32; 32 & 32 = 32. Tests that the
+// shift result is masked against the same bit position. All operands
+// loaded into variables first. Distinct from s6_bit_shl_then_shr
+// (shift left then right) and s4_bit_shl_xor (shift left then XOR).
+
+fn main() -> i32 {
+    v: u64 = 1;
+    sh: u64 = 5;
+    mask: u64 = 32;       // 0x20
+    shifted: u64 = v << sh;   // 32
+    r: u64 = shifted & mask;  // 32
+    return r;
+}

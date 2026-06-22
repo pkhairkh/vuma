@@ -1,0 +1,11 @@
+// u32_overflow_mul — u32 mul overflow: 65537 * 65537 mod 256 = 1
+// Expected exit code: 1
+//
+// 65537 * 65537 = 4295098369. Masked to u32 = 131073 = 0x20001.
+// Low byte = 0x01 = 1.
+
+fn main() -> i32 {
+    a: u32 = 65537;
+    product: u32 = (a * a) & 4294967295;
+    return product & 255;
+}

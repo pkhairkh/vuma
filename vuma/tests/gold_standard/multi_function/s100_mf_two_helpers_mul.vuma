@@ -1,0 +1,24 @@
+// s100_mf_two_helpers_mul.vuma — f1(9) * f2(7) = 12 * 12 = 144
+// Expected exit code: 144
+//
+// Two single-arg helpers. f1(x) = x + 3; f2(y) = y + 5.
+// main calls both and multiplies: f1(9) * f2(7) = 12 *
+// 12 = 144.
+// Distinct from s97_mf_three_chain (94), s94_mf_two_helpers_mul (96), s90_mf_three_chain (34).
+fn f1(x: u32) -> u32 {
+    k: u32 = 3;
+    r: u32 = x + k;
+    return r;
+}
+fn f2(y: u32) -> u32 {
+    k: u32 = 5;
+    r: u32 = y + k;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = f1(9);          // 12
+    b: u32 = f2(7);          // 12
+    m: u32 = a * b;          // 144
+    return m;
+}

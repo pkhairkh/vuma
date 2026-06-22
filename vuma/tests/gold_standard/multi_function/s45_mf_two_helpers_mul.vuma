@@ -1,0 +1,26 @@
+// s45_mf_two_helpers_mul.vuma — mul_three(20) + mul_five(10) = 60 + 50 = 110
+// Expected exit code: 110
+//
+// Two single-arg helpers, each called once from main, results added.
+// mul_three(x) = x * 3; mul_five(x) = x * 5. main calls
+// mul_three(20) -> 60 and mul_five(10) -> 50; sum = 110. Distinct
+// from s42_mf_two_helpers_sub (sub+sub, 82) and s34_mf_two_helpers_
+// sum (105).
+
+fn mul_three(x: u32) -> u32 {
+    n: u32 = 3;
+    r: u32 = x * n;
+    return r;
+}
+fn mul_five(x: u32) -> u32 {
+    n: u32 = 5;
+    r: u32 = x * n;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = mul_three(20);   // 60
+    b: u32 = mul_five(10);    // 50
+    r: u32 = a + b;           // 110
+    return r;
+}

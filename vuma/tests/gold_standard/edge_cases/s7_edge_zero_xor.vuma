@@ -1,0 +1,14 @@
+// s7_edge_zero_xor.vuma — 0 ^ 99 = 99
+// Expected exit code: 99
+//
+// XOR with zero is identity: 0 ^ 99 = 99. Tests the codegen's
+// handling of a zero left operand in XOR. Distinct from
+// s5_edge_zero_sum (sum of zeros, not xor) and s6_edge_zero_mul
+// (0 * anything = 0).
+
+fn main() -> i32 {
+    a: u64 = 0;
+    b: u64 = 99;
+    r: u64 = a ^ b;   // 99
+    return r;
+}

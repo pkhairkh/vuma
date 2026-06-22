@@ -1,0 +1,13 @@
+// s20_edge_zero_xor_max.vuma — 0 ^ 255 = 255
+// Expected exit code: 255
+//
+// XOR with zero is identity: 0 ^ 255 = 255. All operands loaded into u32
+// variables first. Distinct from s18_edge_max_xor_zero (255 ^ 0 = 255,
+// same value, swapped operand order) and s14_edge_xor_self (x ^ x = 0).
+
+fn main() -> i32 {
+    a: u32 = 0;
+    b: u32 = 255;
+    r: u32 = a ^ b;       // 255
+    return r;
+}

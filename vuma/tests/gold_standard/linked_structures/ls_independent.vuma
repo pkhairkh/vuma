@@ -1,0 +1,20 @@
+// ls_independent.vuma — two separate nodes, modify one, return other
+// Expected exit code: 42
+//
+// Creates two independent 8-byte nodes. Stores 42 in node1 and 99 in
+// node2. Then overwrites node2's value with 50 (modifying only node2).
+// Returns node1's value (42), confirming that modifying node2 does
+// not affect node1.
+
+fn main() -> i32 {
+    n1 = allocate(8);
+    n2 = allocate(8);
+    *(n1 + 0) = 42;
+    *(n2 + 0) = 99;
+    // Modify node2 — node1 should be unaffected
+    *(n2 + 0) = 50;
+    val: u64 = *(n1 + 0);
+    free(n1);
+    free(n2);
+    return val;
+}

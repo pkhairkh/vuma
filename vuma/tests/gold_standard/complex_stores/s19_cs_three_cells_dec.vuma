@@ -1,0 +1,24 @@
+// s19_cs_three_cells_dec.vuma — three cells, descending values, sum = 120 (60 + 40 + 20)
+// Expected exit code: 120
+//
+// Three 8-byte cells. Store 60/40/20 (descending by 20) in c1/c2/c3.
+// Load all three, sum -> 120. Uses `*ptr = literal` form (no offsets).
+// Distinct from s18_cs_three_cells_inc (ascending 11/22/33 = 66) and
+// s14_cs_three_cells_desc (different descending values 30/20/10 = 60).
+
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    c3 = allocate(8);
+    *c1 = 60;
+    *c2 = 40;
+    *c3 = 20;
+    a: u64 = *c1;
+    b: u64 = *c2;
+    c: u64 = *c3;
+    s: u64 = a + b + c;
+    free(c1);
+    free(c2);
+    free(c3);
+    return s;
+}

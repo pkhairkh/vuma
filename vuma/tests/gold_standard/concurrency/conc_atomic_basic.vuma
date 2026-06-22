@@ -1,0 +1,20 @@
+// conc_atomic_basic.vuma — basic store-then-load through a shared address
+// Expected exit code: 42
+//
+// Gold-standard concurrency test. VUMA's `atomic_store` / `atomic_load`
+// builtins are currently broken (the SCG-to-codegen bridge drops them
+// to `Add(0, 0)` no-ops — see Task 6-d). As a regression baseline, we
+// use the equivalent non-atomic `*ptr = val; val = *ptr;` form, which
+// exercises the same address-computation + Store + Load codegen path
+// that atomic_store/load will use once the bridge is fixed.
+//
+// Pattern: single 8-byte allocation, store decimal 42, load, return.
+// Single-threaded: tests the codegen, not concurrency safety.
+
+fn main() -> i32 {
+    cell = allocate(8);
+    *cell = 42;
+    val: i32 = *cell;
+    free(cell);
+    return val;
+}

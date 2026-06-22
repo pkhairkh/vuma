@@ -1,0 +1,21 @@
+// s104_conc_three_cell_sum.vuma — store 30+31+32 in 3 cells, load and sum = 93
+// Expected exit code: 93
+//
+// Three independent 8-byte cells. Store 30, 31, 32; load each and return the sum (93). Uses `*ptr = literal` form. Straight-line code only.
+// Distinct from s102_conc_overwrite_middle (1), s102_conc_three_cell_diff (198), s102_conc_two_cell_sum (22).
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    c3 = allocate(8);
+    *c1 = 30;
+    *c2 = 31;
+    *c3 = 32;
+    a: i32 = *c1;          // 30
+    b: i32 = *c2;          // 31
+    c: i32 = *c3;          // 32
+    s: i32 = a + b + c;    // 93
+    free(c1);
+    free(c2);
+    free(c3);
+    return s;
+}

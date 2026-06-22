@@ -1,0 +1,28 @@
+// s24_atom_three_cell_or.vuma — atomic_store 16/32/64, or = 112 (0x10|0x20|0x40)
+// Expected exit code: 0 (current buggy backend)
+// Expected exit code (correct, post-bridge-fix): 112  (16 | 32 | 64)
+//
+// Three 8-byte cells. atomic_store 16/32/64 (ascending powers of two)
+// into each, then atomic_load all three and OR. On the current backend
+// all loads return 0 (atomic_store/load not bridged) -> exit 0. Will exit
+// 112 once atomic ops are wired. Distinct from
+// s22_atom_three_cell_inc (sum, 10+20+30=60) and s18_atom_three_cells_odd
+// (11/33/55 = 99).
+
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    c3 = allocate(8);
+    atomic_store(c1, 16);
+    atomic_store(c2, 32);
+    atomic_store(c3, 64);
+    a = atomic_load(c1);
+    b = atomic_load(c2);
+    c = atomic_load(c3);
+    t = a | b;
+    s = t | c;
+    free(c1);
+    free(c2);
+    free(c3);
+    return s;
+}

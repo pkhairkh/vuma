@@ -1,0 +1,25 @@
+// s44_mf_two_helpers_mul.vuma — mul_two(7) + mul_three(8) = 14 + 24 = 38
+// Expected exit code: 38
+//
+// Two single-arg helpers, each called once from main, results added.
+// mul_two(x) = x * 2; mul_three(x) = x * 3. main calls mul_two(7) ->
+// 14 and mul_three(8) -> 24; sum = 38. Distinct from s42_mf_two_
+// helpers_sub (82) and s38_mf_two_helpers_sum (116).
+
+fn mul_two(x: u32) -> u32 {
+    n: u32 = 2;
+    r: u32 = x * n;
+    return r;
+}
+fn mul_three(x: u32) -> u32 {
+    n: u32 = 3;
+    r: u32 = x * n;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = mul_two(7);       // 14
+    b: u32 = mul_three(8);     // 24
+    r: u32 = a + b;            // 38
+    return r;
+}

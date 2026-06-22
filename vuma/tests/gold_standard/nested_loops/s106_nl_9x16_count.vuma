@@ -1,0 +1,14 @@
+// s106_nl_9x16_count.vuma — 9x16 nested loop, count = 9*16 = 144
+// Observed on current x86_64 backend: 0 (FAIL — known bug)
+//
+// Outer loop runs 9 iterations, inner loop runs 16 iterations each -> 9*16 = 144 total. Counter is a scalar accumulator updated inside the inner loop. Known "for-body assignments don't propagate" bug keeps count at 0 -> exit 0. Will exit 144 once fixed.
+// Distinct from s102_nl_2x61_count (122), s101_nl_4x15_count (60), s100_nl_2x59_count (118).
+fn main() -> i32 {
+    count: u32 = 0;
+    for i in 0..9 {
+        for j in 0..16 {
+            count = count + 1;
+        }
+    }
+    return count;
+}

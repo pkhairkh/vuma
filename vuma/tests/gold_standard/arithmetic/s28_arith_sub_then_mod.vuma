@@ -1,0 +1,16 @@
+// s28_arith_sub_then_mod.vuma — (250 - 25) % 7 = 225 % 7 = 1
+// Expected exit code: 1
+//
+// Two-stage u32 computation: sub then mod. 250 - 25 = 225;
+// 225 % 7 = 1 (7 * 32 = 224, remainder 1). All operands loaded into
+// u32 variables first. Distinct from s26_arith_div_mod_chain
+// (div-mod chain, 32) and s22_arith_mod_then_add (mod-then-add).
+
+fn main() -> i32 {
+    a: u32 = 250;
+    b: u32 = 25;
+    c: u32 = 7;
+    d: u32 = a - b;       // 225
+    r: u32 = d % c;       // 1
+    return r;
+}

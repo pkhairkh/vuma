@@ -1,0 +1,22 @@
+// s8_cf_if_chain_three.vuma — three if-true branches, last wins = 77
+// Observed on current x86_64 backend: 0 (FAIL — known bug, if-true bodies dropped)
+//
+// Sequential if-true branches each reassign x: 11, 22, 77. With all
+// literal-true conditions, every body should execute; the last write
+// (77) wins. On the current backend the if-true body assignments are
+// dropped, so x remains 0. Distinct from s5_cf_if_then_else_3way
+// (if-else chain).
+
+fn main() -> i32 {
+    x: u32 = 0;
+    if true {
+        x = 11;
+    }
+    if true {
+        x = 22;
+    }
+    if true {
+        x = 77;
+    }
+    return x;
+}

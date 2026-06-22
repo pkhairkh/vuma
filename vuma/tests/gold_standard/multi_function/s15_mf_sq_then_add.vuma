@@ -1,0 +1,23 @@
+// s15_mf_sq_then_add.vuma — sq(4) = 16; add10(16) = 26
+// Expected exit code: 26
+//
+// Two single-arg helpers chained: sq(x) = x * x; add10(x) = x + 10. main
+// calls sq(4) -> 16, then add10(16) -> 26. Each call uses an intermediate
+// local. Distinct from s14_mf_two_helpers_chain (inner(5)+outer) and
+// s13_mf_inc_then_double (inc then dbl).
+
+fn sq(x: u32) -> u32 {
+    r: u32 = x * x;
+    return r;
+}
+fn add10(x: u32) -> u32 {
+    n: u32 = 10;
+    r: u32 = x + n;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = sq(4);       // 16
+    b: u32 = add10(a);    // 26
+    return b;
+}

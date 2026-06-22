@@ -1,0 +1,13 @@
+// s21_edge_max_and_max.vuma — 255 & 255 = 255
+// Expected exit code: 255
+//
+// Bitwise AND of max-u8 with itself -> identity (255). All operands
+// loaded into u32 variables first. Distinct from s18_edge_max_xor_zero
+// (255 ^ 0 = 255) and s15_edge_max_xor_max (255 ^ 255 = 0).
+
+fn main() -> i32 {
+    a: u32 = 255;
+    b: u32 = 255;
+    r: u32 = a & b;       // 255
+    return r;
+}

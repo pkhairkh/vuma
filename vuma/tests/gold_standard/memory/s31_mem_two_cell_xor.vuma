@@ -1,0 +1,20 @@
+// s31_mem_two_cell_xor.vuma — two cells, xor = 255 (0xAA ^ 0x55)
+// Expected exit code: 255
+//
+// Two 8-byte cells. Store 0xAA/0x55 via `*ptr = literal`, load both,
+// XOR -> 0xFF = 255. Uses `*ptr = literal` form (no offsets). All
+// operands loaded into typed locals before the XOR. Distinct from
+// s30_mem_two_cell_and (and, 15) and s26_mem_two_cell_xor (xor, 102).
+
+fn main() -> i32 {
+    p1 = allocate(8);
+    p2 = allocate(8);
+    *p1 = 170;            // 0xAA
+    *p2 = 85;             // 0x55
+    a: u64 = *p1;
+    b: u64 = *p2;
+    s: u64 = a ^ b;       // 0xFF = 255
+    free(p1);
+    free(p2);
+    return s;
+}

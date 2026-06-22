@@ -1,0 +1,15 @@
+// mem2_store_literal — store a decimal literal, load, return
+// Expected exit code: 42
+//
+// Most basic memory pattern: allocate a buffer, store a decimal literal
+// (42) via `*(buf + 0) = 42`, load it back, return it.  Decimal literals
+// are used (not hex) to avoid the known hex-literal-store codegen bug.
+// Straight-line code only.
+
+fn main() -> i32 {
+    buf = allocate(8);
+    *(buf + 0) = 42;
+    val: u32 = *(buf + 0);
+    free(buf);
+    return val;
+}

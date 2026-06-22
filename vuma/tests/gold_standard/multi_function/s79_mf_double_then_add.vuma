@@ -1,0 +1,18 @@
+// s79_mf_double_then_add.vuma — double(11) + 5 = 22 + 5 = 27
+// Expected exit code: 27
+//
+// Helper double(x) = x + x. main doubles 11 then adds 5:
+// double(11) + 5 = 22 + 5 = 27. Distinct from
+// s78_mf_double_then_add (3), s77_mf_double_then_add (2) and
+// s76_mf_double_then_add (3).
+fn double(x: u32) -> u32 {
+    r: u32 = x + x;
+    return r;
+}
+
+fn main() -> i32 {
+    d: u32 = double(11);     // 22
+    k: u32 = 5;
+    s: u32 = d + k;            // 27
+    return s;
+}

@@ -1,0 +1,22 @@
+// ls_three_nodes.vuma — 3 nodes with values 1, 1, 1, return sum
+// Expected exit code: 3
+//
+// Creates three independent 8-byte nodes, stores 1 in each, sums
+// their loaded values: 1 + 1 + 1 = 3. All stored values are ≤ 255.
+
+fn main() -> i32 {
+    n1 = allocate(8);
+    n2 = allocate(8);
+    n3 = allocate(8);
+    *(n1 + 0) = 1;
+    *(n2 + 0) = 1;
+    *(n3 + 0) = 1;
+    v1: u64 = *(n1 + 0);
+    v2: u64 = *(n2 + 0);
+    v3: u64 = *(n3 + 0);
+    sum: u64 = v1 + v2 + v3;
+    free(n1);
+    free(n2);
+    free(n3);
+    return sum;
+}

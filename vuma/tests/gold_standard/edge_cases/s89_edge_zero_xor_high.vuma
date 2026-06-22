@@ -1,0 +1,14 @@
+// s89_edge_zero_xor_high.vuma — 0 ^ 26 = 26
+// Expected exit code: 26
+//
+// XOR the zero value 0 (0x00) with 26 (0x1A). 0 ^ 26 = 26
+// (0x1A). All operands loaded into u32 variables first
+// (immediate-RHS bitwise drop bug workaround). Distinct from
+// s86_edge_zero_xor_high (250), s82_edge_zero_xor_high (128) and
+// s78_edge_high_bit_or (129).
+fn main() -> i32 {
+    a: u32 = 0;            // 0x00
+    b: u32 = 26;          // 0x1A
+    r: u32 = a ^ b;        // 0x1A = 26
+    return r;
+}

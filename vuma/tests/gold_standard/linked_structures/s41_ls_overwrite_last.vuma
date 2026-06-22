@@ -1,0 +1,21 @@
+// s41_ls_overwrite_last.vuma - overwrite last node to 130, sum = 215 (85 + 130)
+// Expected exit code: 215
+//
+// Two 8-byte allocations treated as two nodes. Store 85 in n1;
+// store 40 then overwrite to 130 in n2. Load both, sum -> 215.
+// Uses `*ptr = literal` form (no offsets). Distinct from s38_ls_
+// overwrite_first (165) and s34_ls_overwrite_first.
+
+fn main() -> i32 {
+    n1 = allocate(8);
+    n2 = allocate(8);
+    *n1 = 85;
+    *n2 = 40;
+    *n2 = 130;
+    a: u64 = *n1;
+    b: u64 = *n2;
+    s: u64 = a + b;
+    free(n1);
+    free(n2);
+    return s;
+}

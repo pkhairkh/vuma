@@ -1,0 +1,17 @@
+// s62_arith_sub_then_add.vuma — (200 - 70) + 50 = 130 + 50 = 180
+// Expected exit code: 180
+// 
+// Two-stage u32 computation: subtract then add. 200 - 70 = 130;
+// 130 + 50 = 180. All operands loaded into u32 variables first.
+// Straight-line arithmetic. Distinct from s51_arith_sub_then_mul
+// (240), s58_arith_add_then_sub (150) and s55_arith_mul_then_sub
+// (155).
+
+fn main() -> i32 {
+    a: u32 = 200;
+    b: u32 = 70;
+    c: u32 = 50;
+    d: u32 = a - b;        // 130
+    r: u32 = d + c;        // 180
+    return r;
+}

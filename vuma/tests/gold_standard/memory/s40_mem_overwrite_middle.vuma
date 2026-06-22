@@ -1,0 +1,26 @@
+// s40_mem_overwrite_middle.vuma — overwrite middle to 120, sum = 245 (30 + 120 + 95)
+// Expected exit code: 245
+//
+// Three 8-byte cells. Store 30/70/95 via `*ptr = literal`, then
+// overwrite the middle cell with 120. Load all three, sum -> 245.
+// Uses `*ptr = literal` form (no offsets). Distinct from s38_mem_
+// overwrite_first (195) and s34_mem_overwrite_first (220).
+
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    c3 = allocate(8);
+    *c1 = 30;
+    *c2 = 70;
+    *c3 = 95;
+    *c2 = 120;
+    a: u64 = *c1;
+    b: u64 = *c2;
+    c: u64 = *c3;
+    t: u64 = a + b;
+    s: u64 = t + c;        // 245
+    free(c1);
+    free(c2);
+    free(c3);
+    return s;
+}

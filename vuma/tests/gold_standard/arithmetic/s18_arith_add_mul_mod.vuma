@@ -1,0 +1,18 @@
+// s18_arith_add_mul_mod.vuma — ((15 + 25) * 3) % 50 = 120 % 50 = 20
+// Expected exit code: 20
+//
+// Three-stage u32 computation: add then mul then mod. 15 + 25 = 40;
+// 40 * 3 = 120; 120 % 50 = 20. All operands loaded into u32 variables
+// first. Distinct from s12_arith_div_then_add (div-then-add) and
+// s11_arith_add_mul_div (add-mul-div, different ops).
+
+fn main() -> i32 {
+    a: u32 = 15;
+    b: u32 = 25;
+    c: u32 = 3;
+    m: u32 = 50;
+    p: u32 = a + b;       // 40
+    q: u32 = p * c;       // 120
+    r: u32 = q % m;       // 20
+    return r;
+}

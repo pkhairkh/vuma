@@ -1,0 +1,27 @@
+// s23_mf_two_helpers_diff.vuma — dbl(40) - half(100) = 80 - 50 = 30
+// Expected exit code: 30
+//
+// Two single-arg helpers, each called once from main, results
+// subtracted. dbl(x) = x * 2; half(x) = x / 2. main calls dbl(40) -> 80
+// and half(100) -> 50; diff = 30. Distinct from s22_mf_two_helpers_diff
+// (dbl(15) - half(40) = 10) and s14_mf_two_helpers_sub (two-helper sub,
+// different values).
+
+fn dbl(x: u32) -> u32 {
+    n: u32 = 2;
+    r: u32 = x * n;
+    return r;
+}
+fn half(x: u32) -> u32 {
+    n: u32 = 2;
+    r: u32 = x / n;
+    return r;
+}
+
+fn main() -> i32 {
+    a: u32 = dbl(40);     // 80
+    b: u32 = half(100);   // 50
+    r: u32 = a - b;       // 30
+    return r;
+}
+

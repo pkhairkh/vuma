@@ -1,0 +1,15 @@
+// s77_edge_max_xor_twenty.vuma — 255 ^ 20 = 235
+// Expected exit code: 235
+//
+// XOR the max u8 value 255 (0xFF) with 20 (0x14). 255 ^ 20 =
+// 235 (0xEB). All operands loaded into u32 variables first
+// (immediate-RHS bitwise drop bug workaround). Distinct from
+// s70_edge_one_shl_two (4), s66_edge_zero_xor_max (255) and
+// s74_edge_max_xor_eight (247).
+
+fn main() -> i32 {
+    a: u32 = 255;
+    b: u32 = 20;
+    r: u32 = a ^ b;        // 235
+    return r;
+}

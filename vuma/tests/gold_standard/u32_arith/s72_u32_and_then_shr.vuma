@@ -1,0 +1,16 @@
+// s72_u32_and_then_shr.vuma — (0xFC & 0x7C) >> 1 = 0x7C >> 1 = 0x3E = 62
+// Expected exit code: 62
+//
+// Two-stage bitwise: AND then shift right. (252 & 124) = 124
+// (0x7C); 124 >> 1 = 62 (0x3E). All operands loaded into u32
+// variables first (immediate-RHS bitwise drop bug workaround).
+// Distinct from s70_u32_shr_then_xor (180), s69_u32_and_then_
+// shr (126) and s66_u32_xor_then_and (51).
+fn main() -> i32 {
+    a: u32 = 252;          // 0xFC
+    b: u32 = 124;          // 0x7C
+    c: u32 = 1;
+    x: u32 = a & b;        // 0x7C = 124
+    r: u32 = x >> c;       // 0x3E = 62
+    return r;
+}

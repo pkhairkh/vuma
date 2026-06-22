@@ -1,0 +1,19 @@
+// s87_cf_if_else_const.vuma — if true { x = 22 } else { x = 9 }; return x
+// Observed on current x86_64 backend: 9 (FAIL — known bug)
+//
+// If-true branch should set x = 22, else branch sets x = 9.
+// With a literal `true` condition the true branch should win
+// -> 22. On the current backend the if-true body's single
+// assignment is dropped, so the else body's assignment (9)
+// survives instead. Will exit 22 once the if-body drop bug is
+// fixed. Distinct from s86_cf_if_else_const (14), s82_cf_if_
+// else_const (12) and s78_cf_if_else_const (10).
+fn main() -> i32 {
+    x: u32 = 0;
+    if true {
+        x = 22;
+    } else {
+        x = 9;
+    }
+    return x;
+}

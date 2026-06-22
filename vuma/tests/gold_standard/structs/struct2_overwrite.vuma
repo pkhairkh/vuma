@@ -1,0 +1,21 @@
+// struct2_overwrite.vuma — store 42, overwrite with 99, load
+// Expected exit code: 99
+//
+// Allocates a 16-byte struct, stores 42 at offset 0 via *(p + 0), then
+// overwrites the same field with 99, loads it back, frees, returns.
+// Verifies that a literal overwrite supersedes the prior stored value
+// in struct field access.
+
+struct Point {
+    x: u64,
+    y: u64,
+}
+
+fn main() -> i32 {
+    p = allocate(16);
+    *(p + 0) = 42;
+    *(p + 0) = 99;
+    val: u64 = *(p + 0);
+    free(p);
+    return val;
+}

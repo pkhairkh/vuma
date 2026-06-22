@@ -1,0 +1,16 @@
+// s11_cf_if_chain_2.vuma — if-true sets x=15, return = 15
+// Observed on current x86_64 backend: 0 (FAIL — known bug)
+//
+// Standalone if-true body sets x = 15. With a literal `true` condition
+// x should become 15. On the current backend the if-true body
+// assignment is dropped, so x keeps its init value 0. Distinct from
+// s4_cf_if_assign_simple (if-true x=10, else x=20) and s8_cf_if_chain_three
+// (three chained ifs, all dropped).
+
+fn main() -> i32 {
+    x: u32 = 0;
+    if true {
+        x = 15;
+    }
+    return x;
+}

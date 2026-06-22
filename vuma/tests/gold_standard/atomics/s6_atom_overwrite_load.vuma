@@ -1,0 +1,17 @@
+// s6_atom_overwrite_load.vuma — atomic store twice, load sees last = 60
+// Expected exit code: 0 (current buggy backend)
+// Expected exit code (correct, post-bridge-fix): 60
+//
+// Single 8-byte cell. atomic_store 10, then atomic_store 60. Load
+// should observe 60 (last write wins). On the current backend the
+// load returns 0. Distinct from s5_atom_overwrite_load (different
+// values).
+
+fn main() -> i32 {
+    c = allocate(8);
+    atomic_store(c, 10);
+    atomic_store(c, 60);
+    v = atomic_load(c);
+    free(c);
+    return v;
+}

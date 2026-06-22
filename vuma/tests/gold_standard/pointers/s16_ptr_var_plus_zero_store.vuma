@@ -1,0 +1,19 @@
+// s16_ptr_var_plus_zero_store.vuma — store via *p = v + 0 = 180
+// Expected exit code: 180
+//
+// Single 8-byte cell. Store literal 18 via `*p = 18`. Load 180 into a
+// local, then overwrite the cell via `*p = variable + 0` (the documented
+// workaround for the silent-drop bug on `*p = variable`). Load and
+// return 180 (the overwritten value). Distinct from
+// s5_ptr_var_plus_zero_store (different value) and
+// s13_ptr_var_plus_zero_roundtrip (roundtrip pattern).
+
+fn main() -> i32 {
+    p = allocate(8);
+    *p = 18;
+    v: i32 = 180;
+    *p = v + 0;
+    r: i32 = *p;
+    free(p);
+    return r;
+}

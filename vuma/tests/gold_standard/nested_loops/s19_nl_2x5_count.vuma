@@ -1,0 +1,18 @@
+// s19_nl_2x5_count.vuma — 2x5 nested loop, count = 10
+// Observed on current x86_64 backend: 0 (FAIL — known bug)
+//
+// Outer loop 2 iterations, inner loop 5 iterations each -> 2*5 = 10
+// total iterations. Counter increments by 1 each inner iteration.
+// Known "for-body assignments don't propagate" bug keeps count at 0.
+// Distinct from s18_nl_2x3_count (2x3 = 6) and s11_nl_2x5_count
+// (same 2x5 dims, different operand framing).
+
+fn main() -> i32 {
+    count: u32 = 0;
+    for i in 0..2 {
+        for j in 0..5 {
+            count = count + 1;
+        }
+    }
+    return count;
+}

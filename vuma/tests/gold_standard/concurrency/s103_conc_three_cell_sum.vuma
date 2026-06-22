@@ -1,0 +1,21 @@
+// s103_conc_three_cell_sum.vuma — store 1, 1, 51 in 3 cells, load and sum = 1+1+51 = 53
+// Expected exit code: 53
+//
+// Three independent 8-byte cells. Store 1, 1, 51; load each and return the sum (53). Uses `*ptr = literal` form. Straight-line code only.
+// Distinct from s100_conc_three_cell_sum (52), s94_conc_three_cell_sum (77).
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    c3 = allocate(8);
+    *c1 = 1;
+    *c2 = 1;
+    *c3 = 51;
+    a: i32 = *c1;          // 1
+    b: i32 = *c2;          // 1
+    c: i32 = *c3;          // 51
+    s: i32 = a + b + c;    // 53
+    free(c1);
+    free(c2);
+    free(c3);
+    return s;
+}

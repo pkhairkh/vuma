@@ -1,0 +1,14 @@
+// s86_ptr_single_store_load.vuma — store 180, load = 180
+// Expected exit code: 180
+//
+// Single 8-byte cell. Store 180 via `*p = literal`, load and
+// return 180. Uses `*p = literal` form (no offsets). Distinct
+// from s82_ptr_single_store_load (35), s78_ptr_single_store_load
+// (1) and s74_ptr_single_store_load (161).
+fn main() -> i32 {
+    p = allocate(8);
+    *p = 180;
+    v: i32 = *p;
+    free(p);
+    return v;
+}

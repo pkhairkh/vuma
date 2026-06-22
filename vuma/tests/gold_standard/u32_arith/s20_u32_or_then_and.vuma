@@ -1,0 +1,16 @@
+// s20_u32_or_then_and.vuma — (0xF0 | 0x0C) & 0xAA = 0xFC & 0xAA = 0xA8 = 168
+// Expected exit code: 168
+//
+// OR-then-AND. (240 | 12) = 252 (0xFC); 252 & 170 = 168 (0xA8). All
+// operands loaded into u32 variables first (immediate-RHS bitwise drop
+// bug workaround). Distinct from s18_u32_shl_then_or (shl-then-or) and
+// s14_u32_or_then_xor (OR-then-XOR).
+
+fn main() -> i32 {
+    a: u32 = 240;         // 0xF0
+    b: u32 = 12;          // 0x0C
+    m: u32 = 170;         // 0xAA
+    x: u32 = a | b;       // 0xFC = 252
+    r: u32 = x & m;       // 0xA8 = 168
+    return r;
+}

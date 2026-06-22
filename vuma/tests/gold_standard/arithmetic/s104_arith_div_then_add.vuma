@@ -1,0 +1,13 @@
+// s104_arith_div_then_add.vuma — (200 / 2) + 42 = 100 + 42 = 142
+// Expected exit code: 142
+//
+// Two-stage arithmetic: integer-divide then add. 200 / 2 = 100; 100 + 42 = 142. All operands kept as i32 locals. Straight-line arithmetic.
+// Distinct from s102_arith_add_then_div (74), s102_arith_mod_then_mul (88), s102_arith_mul_then_sub (79).
+fn main() -> i32 {
+    a: i32 = 200;
+    b: i32 = 2;
+    c: i32 = 42;
+    q: i32 = a / b;        // 100
+    r: i32 = q + c;        // 142
+    return r;
+}

@@ -1,0 +1,4 @@
+// Simple test: return exit code 42
+fn main() -> u64 {
+    42
+}

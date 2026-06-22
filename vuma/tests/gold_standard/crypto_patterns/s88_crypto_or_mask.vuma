@@ -1,0 +1,14 @@
+// s88_crypto_or_mask.vuma — 0xA5 | 0x0F = 0xAF = 175
+// Expected exit code: 175
+//
+// OR 0xA5 with 0x0F -> 0xAF = 175. All operands loaded
+// into u32 variables first (immediate-RHS bitwise drop bug
+// workaround). Distinct from s86_crypto_and_then_xor (63),
+// s82_crypto_and_then_or (37) and s78_crypto_or_then_xor
+// (9).
+fn main() -> i32 {
+    a: u32 = 165;          // 0xA5
+    b: u32 = 15;           // 0x0F
+    r: u32 = a | b;        // 0xAF = 175
+    return r;
+}

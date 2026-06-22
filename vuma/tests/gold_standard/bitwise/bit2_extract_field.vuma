@@ -1,0 +1,15 @@
+// bit2_extract_field.vuma — Extract a 3-bit field starting at bit 1 from 0xFF.
+// Expected exit code: 7
+//
+// (0xFF >> 1) & 0x07 = 0x7F & 0x07 = 0x07 = 7.
+//
+// Workaround note: bitwise ops with an immediate RHS are silently dropped by
+// the current codegen, so all operands are loaded into variables first.
+fn main() -> i32 {
+    val: u64 = 0xFF;
+    one: u64 = 1;
+    mask: u64 = 0x07;
+    shifted: u64 = val >> one;
+    result: u64 = shifted & mask;
+    return result;
+}

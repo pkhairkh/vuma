@@ -1,0 +1,13 @@
+// s38_edge_max_div_two.vuma — 255 / 2 = 127
+// Expected exit code: 127
+//
+// Integer division of the max u8 value by 2. 255 / 2 = 127. All
+// operands loaded into u32 variables first. Distinct from s34_edge_
+// max_minus_one (254) and s30_edge_zero_xor_max (255).
+
+fn main() -> i32 {
+    a: u32 = 255;
+    b: u32 = 2;
+    r: u32 = a / b;        // 127
+    return r;
+}

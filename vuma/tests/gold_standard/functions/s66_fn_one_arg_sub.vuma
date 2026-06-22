@@ -1,0 +1,17 @@
+// s66_fn_one_arg_sub.vuma — sub_twenty(100) = 80
+// Expected exit code: 80
+//
+// Helper sub_twenty(x) = x - 20. main calls sub_twenty(100) ->
+// 80. Single-arg function that subtracts a literal. Distinct
+// from s62_fn_one_arg_add (115), s58_fn_one_arg_sub (92) and
+// s55_fn_one_arg_add (95).
+fn sub_twenty(x: u32) -> u32 {
+    n: u32 = 20;
+    r: u32 = x - n;
+    return r;
+}
+
+fn main() -> i32 {
+    v: u32 = sub_twenty(100);
+    return v;
+}

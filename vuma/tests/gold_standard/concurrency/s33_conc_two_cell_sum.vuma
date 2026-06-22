@@ -1,0 +1,19 @@
+// s33_conc_two_cell_sum.vuma — two cells, sum = 85 + 95 = 180
+// Expected exit code: 180
+//
+// Deterministic test in the concurrency category. All operands loaded into typed
+// variables before any bitwise op; all stores use `*ptr = literal` (or the
+// `*ptr = variable + 0` workaround). Result lands in 0-255.
+// Distinct from s30_conc_two_cell_product (product, 156) and s26_conc_two_cell_or (or, 255).
+fn main() -> i32 {
+    c1 = allocate(8);
+    c2 = allocate(8);
+    *c1 = 85;
+    *c2 = 95;
+    v1: i32 = *c1;
+    v2: i32 = *c2;
+    s: i32 = v1 + v2;       // 180
+    free(c1);
+    free(c2);
+    return s;
+}
