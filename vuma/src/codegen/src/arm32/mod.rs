@@ -3635,12 +3635,56 @@ impl Backend for Arm32Backend {
                                 }
                                 code.extend(ss_store_to_slot(Gpr::R0, dst_offset));
                             }
-                            BinOpKind::SDiv | BinOpKind::UDiv
-                            | BinOpKind::SRem | BinOpKind::URem => {
-                                // Use SVC for division (ARM32 baseline has no hardware divide)
+                            BinOpKind::SDiv | BinOpKind::UDiv => {
+                                // Software division: R0 = R0 / R1
                                 code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R0));
                                 code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::R1));
-                                code.extend_from_slice(&encode_svc(Condition::Al, 0));
+                                // MOV R2, #0 (quotient)
+                                code.extend_from_slice(&0xE3A02000u32.to_le_bytes());
+                                // MOV R3, R0 (remainder)
+                                code.extend_from_slice(&0xE1A03000u32.to_le_bytes());
+                                // CMP R1, #0
+                                code.extend_from_slice(&0xE3510000u32.to_le_bytes());
+                                // BEQ +3 (to done)
+                                code.extend_from_slice(&0x0A000003u32.to_le_bytes());
+                                // loop: CMP R3, R1
+                                code.extend_from_slice(&0xE1530001u32.to_le_bytes());
+                                // BLO +2 (to done)
+                                code.extend_from_slice(&0x3A000002u32.to_le_bytes());
+                                // SUB R3, R3, R1
+                                code.extend_from_slice(&0xE0433001u32.to_le_bytes());
+                                // ADD R2, R2, #1
+                                code.extend_from_slice(&0xE2822001u32.to_le_bytes());
+                                // B loop (-6)
+                                code.extend_from_slice(&0xEAFFFFFAu32.to_le_bytes());
+                                // done: MOV R0, R2 (quotient)
+                                code.extend_from_slice(&0xE1A00002u32.to_le_bytes());
+                                code.extend(ss_store_to_slot(Gpr::R0, dst_offset));
+                            }
+                            BinOpKind::SRem | BinOpKind::URem => {
+                                // Software modulo: R0 = R0 % R1 (remainder)
+                                code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R0));
+                                code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::R1));
+                                // MOV R2, #0 (quotient)
+                                code.extend_from_slice(&0xE3A02000u32.to_le_bytes());
+                                // MOV R3, R0 (remainder)
+                                code.extend_from_slice(&0xE1A03000u32.to_le_bytes());
+                                // CMP R1, #0
+                                code.extend_from_slice(&0xE3510000u32.to_le_bytes());
+                                // BEQ +3 (to done)
+                                code.extend_from_slice(&0x0A000003u32.to_le_bytes());
+                                // loop: CMP R3, R1
+                                code.extend_from_slice(&0xE1530001u32.to_le_bytes());
+                                // BLO +2 (to done)
+                                code.extend_from_slice(&0x3A000002u32.to_le_bytes());
+                                // SUB R3, R3, R1
+                                code.extend_from_slice(&0xE0433001u32.to_le_bytes());
+                                // ADD R2, R2, #1
+                                code.extend_from_slice(&0xE2822001u32.to_le_bytes());
+                                // B loop (-6)
+                                code.extend_from_slice(&0xEAFFFFFAu32.to_le_bytes());
+                                // done: MOV R0, R3 (remainder)
+                                code.extend_from_slice(&0xE1A00003u32.to_le_bytes());
                                 code.extend(ss_store_to_slot(Gpr::R0, dst_offset));
                             }
                             // Comparison BinOps: produce 0 or 1
@@ -3725,7 +3769,32 @@ impl Backend for Arm32Backend {
                         let mut code = Vec::new();
                         code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R0));
                         code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::R1));
-                        code.extend_from_slice(&encode_svc(Condition::Al, 0));
+                        // Software division: R0 = R0 / R1
+                        // R2 = 0 (quotient), R3 = R0 (remainder)
+                        // CMP R1, #0; BEQ done
+                        // loop: CMP R3, R1; BLO done
+                        //   SUB R3, R3, R1; ADD R2, R2, #1; B loop
+                        // done: MOV R0, R2
+                        // MOV R2, #0
+                        code.extend_from_slice(&0xE3A02000u32.to_le_bytes()); // MOV R2, #0
+                        // MOV R3, R0
+                        code.extend_from_slice(&0xE1A03000u32.to_le_bytes()); // MOV R3, R0
+                        // CMP R1, #0
+                        code.extend_from_slice(&0xE3510000u32.to_le_bytes()); // CMP R1, #0
+                        // BEQ +3 (to done: MOV R0,R2)
+                        code.extend_from_slice(&0x0A000003u32.to_le_bytes()); // BEQ +3
+                        // loop: CMP R3, R1
+                        code.extend_from_slice(&0xE1530001u32.to_le_bytes()); // CMP R3, R1
+                        // BLO +2 (to done)
+                        code.extend_from_slice(&0x3A000002u32.to_le_bytes()); // BLO +2
+                        // SUB R3, R3, R1
+                        code.extend_from_slice(&0xE0433001u32.to_le_bytes()); // SUB R3, R3, R1
+                        // ADD R2, R2, #1
+                        code.extend_from_slice(&0xE2822001u32.to_le_bytes()); // ADD R2, R2, #1
+                        // B loop (offset = -6)
+                        code.extend_from_slice(&0xEAFFFFFAu32.to_le_bytes()); // B -6
+                        // done: MOV R0, R2
+                        code.extend_from_slice(&0xE1A00002u32.to_le_bytes()); // MOV R0, R2
                         code.extend(ss_store_to_slot(Gpr::R0, dst_offset));
                         code
                     }
