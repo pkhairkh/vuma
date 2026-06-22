@@ -1,6 +1,5 @@
 // s19_atom_overwrite_first.vuma — atomic_store 70 then overwrite to 25, load = 25
-// Expected exit code: 0 (current buggy backend)
-// Expected exit code (correct, post-bridge-fix): 25
+// Expected exit code: 25
 //
 // One 8-byte cell. atomic_store 70, then atomic_store 25 (overwriting
 // the first value), then atomic_load. Final stored value should be 25.

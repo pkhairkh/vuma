@@ -1706,10 +1706,12 @@ fn parse_expr_split(expr: &str) -> Option<(IrBinOpKind, String, String)> {
     ];
     
     // Check for single-character operators in precedence order (lowest first)
-    let single_ops: [(&str, IrBinOpKind); 8] = [
+    let single_ops: [(&str, IrBinOpKind); 10] = [
         ("|", IrBinOpKind::Or),
         ("^", IrBinOpKind::Xor),
         ("&", IrBinOpKind::And),
+        ("<", IrBinOpKind::SLt),
+        (">", IrBinOpKind::SGt),
         ("+", IrBinOpKind::Add),
         ("-", IrBinOpKind::Sub),
         ("*", IrBinOpKind::Mul),
@@ -1719,7 +1721,9 @@ fn parse_expr_split(expr: &str) -> Option<(IrBinOpKind, String, String)> {
     
     // Search for top-level operators (outside parentheses)
     // Process in precedence order (lowest first)
-    for &(op_str, op_kind) in &single_ops {
+    // Check two-char operators FIRST (before single-char)
+    // This ensures << >> are matched before < >
+    for &(op_str, op_kind) in &two_char_ops {
         if let Some(pos) = find_top_level_op(expr, op_str) {
             let lhs = expr[..pos].trim().to_string();
             let rhs = expr[pos + op_str.len()..].trim().to_string();
@@ -1729,8 +1733,7 @@ fn parse_expr_split(expr: &str) -> Option<(IrBinOpKind, String, String)> {
         }
     }
     
-    // Check two-char operators
-    for &(op_str, op_kind) in &two_char_ops {
+    for &(op_str, op_kind) in &single_ops {
         if let Some(pos) = find_top_level_op(expr, op_str) {
             let lhs = expr[..pos].trim().to_string();
             let rhs = expr[pos + op_str.len()..].trim().to_string();

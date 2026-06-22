@@ -1,5 +1,5 @@
 // s21_atom_two_cell_product.vuma — atomic_store 8/9, product = 72
-// Expected exit code: 0 (current buggy backend)
+// Expected exit code: 72
 // Expected exit code (correct, post-bridge-fix): 72  (8 * 9)
 //
 // Two 8-byte cells. atomic_store 8/9 into each, then atomic_load both

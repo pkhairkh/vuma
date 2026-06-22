@@ -1,6 +1,5 @@
 // s4_atom_chain.vuma — chain value across three atomic cells via literals
-// Expected exit code: 0 (current buggy backend)
-// Expected exit code (correct, post-bridge-fix): 66
+// Expected exit code: 66
 //
 // Three cells. atomic_store 11, 22, 33 into cell1/2/3 respectively
 // (literal values, independent of the loads). Load all three, sum:

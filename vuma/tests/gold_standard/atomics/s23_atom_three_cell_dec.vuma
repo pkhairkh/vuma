@@ -1,6 +1,5 @@
 // s23_atom_three_cell_dec.vuma — three cells descending, sum = 180 (100 + 60 + 20)
-// Expected exit code: 0 (current buggy backend)
-// Expected exit code (correct, post-bridge-fix): 180
+// Expected exit code: 180
 //
 // Three 8-byte cells. atomic_store 100/60/20 (descending) in c1/c2/c3.
 // atomic_load all three, sum -> 180. On the current backend atomic_load

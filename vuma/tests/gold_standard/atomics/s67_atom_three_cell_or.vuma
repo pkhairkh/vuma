@@ -1,6 +1,5 @@
 // s67_atom_three_cell_or.vuma — three cells, atomic or = 119 (17 | 34 | 68)
-// Expected exit code: 0 (current buggy backend)
-// Expected exit code (correct, post-bridge-fix): 119
+// Expected exit code: 119
 //
 // Three 8-byte cells. atomic_store 17/34/68, atomic_load each,
 // or -> 17 | 34 | 68 = 119 (0x77). On the current backend the

@@ -1,6 +1,5 @@
 // s99_atom_three_cell_diff.vuma — three cells, atomic diff = 17 (100 - 60 - 23)
-// Expected exit code: 0 (current buggy backend)
-// Expected exit code (correct, post-bridge-fix): 17
+// Expected exit code: 17
 //
 // Three 8-byte cells. atomic_store 100/60/23, atomic_load each,
 // a - b - c -> 17. On the current backend the loads return 0 ->

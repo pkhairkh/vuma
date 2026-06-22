@@ -1,6 +1,5 @@
 // s48_atom_three_cell_xor.vuma — three cells, atomic xor = 192 (0xF0 ^ 0x3C ^ 0x0C)
-// Expected exit code: 0 (current buggy backend)
-// Expected exit code (correct, post-bridge-fix): 192
+// Expected exit code: 192
 //
 // Three 8-byte cells. atomic_store 240/60/12 (0xF0/0x3C/0x0C),
 // atomic_load each, xor -> 0xC0 = 192. On the current backend the

@@ -1,5 +1,5 @@
 // s6_atom_two_cells_sum.vuma — two atomic stores + loads, sum = 90 (40 + 50)
-// Expected exit code: 0 (current buggy backend)
+// Expected exit code: 90
 // Expected exit code (correct, post-bridge-fix): 90  (40 + 50)
 //
 // Two 8-byte cells. atomic_store 40/50 into each, then atomic_load

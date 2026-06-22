@@ -1,6 +1,5 @@
 // s71_atom_overwrite_high.vuma — overwrite to 199, atomic_load = 199
-// Expected exit code: 0 (current buggy backend)
-// Expected exit code (correct, post-bridge-fix): 199
+// Expected exit code: 199
 //
 // Single 8-byte cell. atomic_store 50, then atomic_store 199.
 // atomic_load should return 199. On the current backend the load

@@ -1,6 +1,5 @@
 // s30_atom_overwrite_first.vuma — overwrite first store with 100, load = 100
-// Expected exit code: 0 (current buggy backend)
-// Expected exit code (correct, post-bridge-fix): 100
+// Expected exit code: 100
 //
 // Single 8-byte cell. atomic_store 30, then atomic_store 100 (overwrite).
 // atomic_load should return 100. On the current backend the load returns

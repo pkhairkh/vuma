@@ -1,6 +1,5 @@
 // s47_atom_two_cell_or.vuma — two cells, atomic or = 204 (0x88 | 0x44)
-// Expected exit code: 0 (current buggy backend)
-// Expected exit code (correct, post-bridge-fix): 204
+// Expected exit code: 204
 //
 // Two 8-byte cells. atomic_store 136/68 (0x88/0x44), atomic_load each,
 // or -> 204 (0xCC). On the current backend the loads return 0 ->

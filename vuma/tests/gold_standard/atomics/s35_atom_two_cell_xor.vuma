@@ -1,6 +1,5 @@
 // s35_atom_two_cell_xor.vuma — two cells, atomic xor = 255 (0xF0 ^ 0x0F)
-// Expected exit code: 0 (current buggy backend)
-// Expected exit code (correct, post-bridge-fix): 255
+// Expected exit code: 255
 //
 // Two 8-byte cells. atomic_store 240/15, atomic_load each, XOR -> 255
 // (0xF0 ^ 0x0F = 0xFF). On the current backend the loads return 0

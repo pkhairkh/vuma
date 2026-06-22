@@ -1,4 +1,5 @@
 // s10_cs_pattern_4_offsets.vuma — 4 offsets in 32-byte buf, sum = 100
+// Expected exit code: 100
 // Expected exit code (correct): 100  (10 + 20 + 30 + 40)
 // Observed on current x86_64 backend: non-deterministic (FAIL — known
 //   U8-truncation bug on `*(p+offset)` stores/loads with u64 type)

@@ -1,5 +1,5 @@
 // s19_atom_two_cell_diff.vuma — atomic_store 41/89, diff = 48 (89 - 41)
-// Expected exit code: 0 (current buggy backend)
+// Expected exit code: 48
 // Expected exit code (correct, post-bridge-fix): 48  (89 - 41)
 //
 // Two 8-byte cells. atomic_store 41/89 into each, then atomic_load

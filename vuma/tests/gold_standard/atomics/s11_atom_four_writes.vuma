@@ -1,6 +1,5 @@
 // s11_atom_four_writes.vuma — atomic_store 10, 20, 30, 40, load sees 40
-// Expected exit code: 0 (current buggy backend)
-// Expected exit code (correct, post-bridge-fix): 40
+// Expected exit code: 40
 //
 // Single 8-byte cell. atomic_store 10, then 20, then 30, then 40.
 // Load should observe 40 (last write wins, four writes total). On the

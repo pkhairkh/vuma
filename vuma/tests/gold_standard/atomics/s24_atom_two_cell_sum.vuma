@@ -1,5 +1,5 @@
 // s24_atom_two_cell_sum.vuma — atomic_store 38/57, sum = 95 (38 + 57)
-// Expected exit code: 0 (current buggy backend)
+// Expected exit code: 95
 // Expected exit code (correct, post-bridge-fix): 95  (38 + 57)
 //
 // Two 8-byte cells. atomic_store 38/57 into each, then atomic_load both

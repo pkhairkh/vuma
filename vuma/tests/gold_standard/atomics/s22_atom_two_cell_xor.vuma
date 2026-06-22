@@ -1,5 +1,5 @@
 // s22_atom_two_cell_xor.vuma — atomic_store 41/98, xor = 75 (41 ^ 98)
-// Expected exit code: 0 (current buggy backend)
+// Expected exit code: 75
 // Expected exit code (correct, post-bridge-fix): 75  (41 ^ 98)
 //
 // Two 8-byte cells. atomic_store 41/98 into each, then atomic_load both

@@ -1,6 +1,5 @@
 // s39_atom_overwrite_max.vuma — overwrite to 255, atomic_load = 255
-// Expected exit code: 0 (current buggy backend)
-// Expected exit code (correct, post-bridge-fix): 255
+// Expected exit code: 255
 //
 // Single 8-byte cell. atomic_store 95, then atomic_store 255 (max
 // u8). atomic_load should return 255. On the current backend the

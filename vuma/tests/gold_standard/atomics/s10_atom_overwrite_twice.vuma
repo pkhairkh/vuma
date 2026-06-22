@@ -1,6 +1,5 @@
 // s10_atom_overwrite_twice.vuma — atomic_store 10, 80, 90, load sees 90
-// Expected exit code: 0 (current buggy backend)
-// Expected exit code (correct, post-bridge-fix): 90
+// Expected exit code: 90
 //
 // Single 8-byte cell. atomic_store 10, then 80, then 90. Load should
 // observe 90 (last write wins, three writes total). On the current
