@@ -2173,8 +2173,19 @@ fn convert_node_to_statement_with_externs(
                         // It's a Load. The expression after "= *" can be:
                         //   - A simple variable: "buf"
                         //   - Pointer arithmetic: "(buf + 0)" or "(buf + offset)"
-                        // Use resolve_df_input to get the pointer from DataFlow.
-                        let ptr = resolve_df_input(node_id, 0, edge_idx, scg);
+                        let ptr_expr = strip_outer_parens(after);
+                        let df_sources: Vec<NodeId> = edge_idx.incoming_df(node_id).iter().map(|e| e.source).collect();
+                        let ptr = if let Some((op, l, r)) = parse_expr_split(ptr_expr) {
+                            let lhs_val = resolve_subexpr(&l, &df_sources, edge_idx, scg);
+                            let rhs_val = resolve_subexpr(&r, &df_sources, edge_idx, scg);
+                            ScgExpr::BinOp {
+                                op: map_binop_kind(op),
+                                lhs: Box::new(lhs_val),
+                                rhs: Box::new(rhs_val),
+                            }
+                        } else {
+                            resolve_subexpr(ptr_expr, &df_sources, edge_idx, scg)
+                        };
                         return Some(ScgStatement::Access(AccessNode::Load {
                             dst: node_var(node_id, "val"),
                             ptr,
