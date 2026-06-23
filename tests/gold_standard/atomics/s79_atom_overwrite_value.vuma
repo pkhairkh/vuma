@@ -6,6 +6,7 @@
 // returns 0 -> exit 0. Will exit 17 once atomics are wired
 // through. Distinct from s78_atom_overwrite_value (3),
 // s77_atom_overwrite_value (2) and s76_atom_overwrite_value (3).
+// Expected exit code: 17
 fn main() -> i32 {
     c1 = allocate(8);
     atomic_store(c1, 1);

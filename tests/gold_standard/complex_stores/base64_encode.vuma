@@ -11,6 +11,7 @@
 //   - Pointer arithmetic for both input and output buffers
 //   - allocate/free with proper cleanup
 //   - Pure computation returning meaningful checksum
+// Expected exit code: 0
 
 // ===========================================================================
 // Base64 alphabet lookup (6-bit index → ASCII character)

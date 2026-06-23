@@ -6,6 +6,7 @@
 // not bridged through to x86_64) -> exit 0. Will exit 255 once atomic
 // ops are wired through. Distinct from s26_atom_two_cell_or (or,
 // 240|15=255) and s22_atom_two_cell_xor (xor, 41^98=75).
+// Expected exit code: 255
 
 fn main() -> i32 {
     c1 = allocate(8);

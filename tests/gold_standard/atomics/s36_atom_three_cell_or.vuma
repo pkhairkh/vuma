@@ -6,6 +6,7 @@
 // backend all atomic_loads return 0 -> exit 0. Will exit
 // 110 once atomics are wired through.
 // Distinct from s30_atom_three_cell_xor (xor, 0) and s27_atom_three_cell_or (different values).
+// Expected exit code: 126
 
 fn main() -> i32 {
     c1 = allocate(8);

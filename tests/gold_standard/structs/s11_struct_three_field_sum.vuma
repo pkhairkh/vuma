@@ -6,6 +6,7 @@
 // Load all three, sum -> 10 + 20 + 30 = 60. Distinct from
 // s10_struct_overwrite_three_fields (overwrites all 3 to 50) and
 // s8_struct_four_fields_sum (4 fields).
+// Expected exit code: 60
 
 struct Triple {
     a: u64,

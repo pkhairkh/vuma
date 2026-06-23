@@ -9,6 +9,7 @@
 // offset 0 -> 20. The offset-based stores/loads trigger the U8-
 // truncation bug, making the observed exit non-deterministic. Distinct
 // from s6_struct_two_fields_sum (no swap) and s4_struct_overwrite_field.
+// Expected exit code: 20
 
 struct Pair {
     a: u64,

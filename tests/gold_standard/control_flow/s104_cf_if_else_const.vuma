@@ -3,6 +3,7 @@
 //
 // If-true branch should set x = 135, else branch sets x = 1. With a literal `true` condition the true branch should win -> 135. On the current backend the if-true body's single assignment is dropped, so the else body's assignment (1) survives instead. Will exit 135 once the if-body drop bug is fixed.
 // Distinct from s102_cf_if_single_assign (124), s102_cf_if_else_const (126), s102_cf_for_count (127), s102_cf_while_acc (130).
+// Expected exit code: 135
 fn main() -> i32 {
     x: u32 = 0;
     if true {

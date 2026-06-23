@@ -7,6 +7,7 @@
 // wired through. Distinct from s78_atom_three_cell_diff (148),
 // s77_atom_three_cell_diff (172) and s76_atom_three_cell_diff
 // (140).
+// Expected exit code: 11
 fn main() -> i32 {
     c1 = allocate(8);
     c2 = allocate(8);

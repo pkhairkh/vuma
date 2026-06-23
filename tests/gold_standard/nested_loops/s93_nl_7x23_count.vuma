@@ -5,6 +5,7 @@
 // 7*23 = 161 total. Counter increments by 1 each inner iteration.
 // Known "for-body assignments don't propagate" bug keeps count at
 // 0. Distinct from s90_nl_6x16_count (96), s82_nl_3x16_count (48) and s78_nl_3x19_count (57).
+// Expected exit code: 161
 fn main() -> i32 {
     count: u32 = 0;
     for i in 0..7 {

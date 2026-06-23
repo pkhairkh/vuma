@@ -5,6 +5,7 @@
 // documented correct value (175) is not observed. Will exit
 // 175 once the atomics bridge is wired through.
 // Distinct from s33_atom_overwrite_first (overwrite-first, 100) and s30_atom_overwrite_first (different values).
+// Expected exit code: 175
 fn main() -> i32 {
     c1 = allocate(8);
     atomic_store(c1, 200);

@@ -6,6 +6,7 @@
 // current backend the if-true body assignments are dropped, so x
 // stays 0. Distinct from s35_cf_if_chain_3 (88) and s34_cf_if_chain_2
 // (66).
+// Expected exit code: 200
 
 fn main() -> i32 {
     x: u32 = 0;

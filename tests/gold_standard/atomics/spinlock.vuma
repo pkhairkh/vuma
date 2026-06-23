@@ -11,6 +11,7 @@
 //   - No data races on the lock state
 //   - Atomic operations target correct addresses
 //   - Values come from valid writes (Origin invariant)
+// Expected exit code: 3
 
 // Spinlock struct — uses a single u64 as the lock state
 // 0 = unlocked, 1 = locked

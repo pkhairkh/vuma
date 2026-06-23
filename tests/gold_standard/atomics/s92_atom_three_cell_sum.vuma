@@ -6,6 +6,7 @@
 // -> exit 0. Will exit 35 once atomics are wired through. Distinct
 // from s90_atom_three_cell_sum (12), s86_atom_three_cell_diff (60)
 // and s82_atom_three_cell_diff (110).
+// Expected exit code: 35
 fn main() -> i32 {
     c1 = allocate(8);
     c2 = allocate(8);

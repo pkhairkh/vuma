@@ -6,6 +6,7 @@
 // -> exit 0. Will exit 4 once atomics are wired through.
 // Distinct from s78_atom_two_cell_sum (2), s77_atom_two_cell_sum
 // (3) and s76_atom_two_cell_sum (2).
+// Expected exit code: 4
 fn main() -> i32 {
     c1 = allocate(8);
     c2 = allocate(8);

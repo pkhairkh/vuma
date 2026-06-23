@@ -6,6 +6,7 @@
 // exit 200 once atomic ops are wired through. Distinct from
 // s26_atom_overwrite_max (overwrite with 255) and s22_atom_overwrite_load
 // (different values).
+// Expected exit code: 200
 
 fn main() -> i32 {
     c1 = allocate(8);

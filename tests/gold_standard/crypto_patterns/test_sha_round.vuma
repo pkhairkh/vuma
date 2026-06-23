@@ -1,6 +1,7 @@
 // Test: SHA-256 compression round simulation (simplified)
 // Tests u32 arithmetic with memory loads/stores and function calls
 // Expected: exit 79
+// Expected exit code: 164
 
 fn ch(x: u32, y: u32, z: u32) -> u32 {
     return (x & y) ^ ((!x) & z);

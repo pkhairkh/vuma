@@ -5,6 +5,7 @@
 // 13*17 = 221 total. Counter increments by 1 each inner iteration.
 // Known "for-body assignments don't propagate" bug keeps count at
 // 0. Distinct from s90_nl_4x21_count (84), s82_nl_6x9_count (54) and s78_nl_5x19_count (95).
+// Expected exit code: 221
 fn main() -> i32 {
     count: u32 = 0;
     for i in 0..13 {

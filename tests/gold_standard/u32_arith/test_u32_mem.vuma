@@ -1,5 +1,6 @@
 // Test: u32 store/load through pointers (like SHA256d)
 // Expected: exit 79
+// Expected exit code: 79
 
 fn write_u32(buf: Address, offset: u64, val: u32) {
     *(buf + offset) = (val >> 24) & 255;
