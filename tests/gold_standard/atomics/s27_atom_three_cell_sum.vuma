@@ -6,6 +6,7 @@
 // 60 once atomic ops are wired through. Distinct from
 // s26_atom_three_cell_sum (different values) and s22_atom_three_cell_inc
 // (incrementing values).
+// Expected exit code: 60
 
 fn main() -> i32 {
     c1 = allocate(8);

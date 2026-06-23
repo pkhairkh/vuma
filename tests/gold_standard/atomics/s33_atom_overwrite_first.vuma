@@ -5,6 +5,7 @@
 // documented correct value (100) is not observed. Will exit
 // 100 once the atomics bridge is wired through.
 // Distinct from s30_atom_overwrite_first (different values) and s26_atom_overwrite_load (overwrite-then-load).
+// Expected exit code: 100
 fn main() -> i32 {
     c1 = allocate(8);
     atomic_store(c1, 200);

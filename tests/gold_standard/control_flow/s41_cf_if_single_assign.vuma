@@ -6,6 +6,7 @@
 // if-true body's assignment is dropped, so x stays 0 -> exit 0.
 // Will exit 200 once the if-body drop bug is fixed. Distinct from
 // s38_cf_if_single_assign (88) and s34_cf_if_single_assign (70).
+// Expected exit code: 200
 
 fn main() -> i32 {
     x: u32 = 0;
