@@ -1724,7 +1724,7 @@ fn parse_expr_split(expr: &str) -> Option<(IrBinOpKind, String, String)> {
     let two_char_ops: [(&str, IrBinOpKind); 6] = [
         ("<=", IrBinOpKind::SLe), (">=", IrBinOpKind::SGe),
         ("==", IrBinOpKind::Eq), ("!=", IrBinOpKind::Ne),
-        ("<<", IrBinOpKind::Shl), (">>", IrBinOpKind::ShrL),
+        ("<<", IrBinOpKind::Shl), (">>", IrBinOpKind::ShrA),
     ];
     
     // Check for single-character operators in precedence order (lowest first)
@@ -2503,7 +2503,18 @@ fn convert_node_to_statement_with_externs(
             
             // Parse the expression to find the top-level operator
             // and split into lhs/rhs sub-expressions.
-            if let Some((op, lhs_str, rhs_str)) = parse_expr_split(&expr_str) {
+            if let Some((mut op, lhs_str, rhs_str)) = parse_expr_split(&expr_str) {
+                // For >> (ShrA after our fix), check the result type:
+                // unsigned types need ShrL (logical), signed need ShrA (arithmetic).
+                if op == IrBinOpKind::ShrA {
+                    let is_unsigned = comp.result_type
+                        .as_deref()
+                        .map(|t| t.starts_with('u'))
+                        .unwrap_or(false);
+                    if is_unsigned {
+                        op = IrBinOpKind::ShrL;
+                    }
+                }
                 // Map lhs and rhs to ScgExpr by matching variable names
                 // to DataFlow sources.
                 let lhs = resolve_subexpr(&lhs_str, &sources, edge_idx, scg);
@@ -3218,7 +3229,7 @@ fn parse_binop(op: &str) -> Option<IrBinOpKind> {
         "or" | "|" => return Some(IrBinOpKind::Or),
         "xor" | "^" => return Some(IrBinOpKind::Xor),
         "shl" | "<<" => return Some(IrBinOpKind::Shl),
-        "shr.l" | ">>" => return Some(IrBinOpKind::ShrL),
+        "shr.a" | "shr.l" | ">>" => return Some(IrBinOpKind::ShrA),
         "shr.a" => return Some(IrBinOpKind::ShrA),
         "slt" | "<" => return Some(IrBinOpKind::SLt),
         "sle" | "<=" => return Some(IrBinOpKind::SLe),
@@ -3236,7 +3247,7 @@ fn parse_binop(op: &str) -> Option<IrBinOpKind> {
     for (pat, kind) in [
         ("<=", IrBinOpKind::SLe), (">=", IrBinOpKind::SGe),
         ("==", IrBinOpKind::Eq), ("!=", IrBinOpKind::Ne),
-        ("<<", IrBinOpKind::Shl), (">>", IrBinOpKind::ShrL),
+        ("<<", IrBinOpKind::Shl), (">>", IrBinOpKind::ShrA),
     ] {
         if op_str.contains(&format!(" {} ", pat)) { return Some(kind); }
     }
