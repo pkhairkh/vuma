@@ -2999,12 +2999,12 @@ impl Backend for Wasm32Backend {
         let mut module = WasmModuleBuilder::new();
 
         // Add memory (2 pages minimum = 128KB, so the heap has room).
-        // Mark as shared so that Wasm atomic instructions (0xFE prefix)
-        // are valid at runtime.  Shared memories must specify a maximum.
+        // shared=false: we use single-threaded execution; atomic ops are
+        // lowered to plain loads/stores so we don't need shared memory.
         module.add_memory(WasmLimits {
             min: 2,
             max: Some(256),
-            shared: true,
+            shared: false,
         });
 
         // Export memory so the host runtime can read/write linear memory
