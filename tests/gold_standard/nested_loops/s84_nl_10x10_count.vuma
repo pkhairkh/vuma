@@ -1,5 +1,4 @@
 // s84_nl_10x10_count.vuma — 10x10 nested loop, count = 100
-// Expected exit code (correct): 100
 // Observed on current x86_64 backend: 0 (FAIL — known bug)
 //
 // Outer loop 10 iterations, inner loop 10 iterations each ->

@@ -1,4 +1,5 @@
 // CRC32 — CRC32 checksum implementation (IEEE 802.3 / ITU-T V.42)
+// Expected exit code: 0
 //
 // Implements the standard CRC32 algorithm used in ZIP, PNG, Ethernet, and
 // countless other protocols. Uses the polynomial 0xEDB88320 (bit-reversed

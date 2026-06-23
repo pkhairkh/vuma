@@ -1,8 +1,0 @@
-// bit_shr_basic.vuma — Right shift.
-// Expected exit code: 16
-// 256 >> 4 = 16
-fn main() -> i32 {
-    val: u64 = 256;
-    result: u64 = val >> 4;
-    return result;
-}

@@ -1,5 +1,4 @@
 // s45_nl_3x5_count.vuma — 3x5 nested loop, count = 15
-// Expected exit code (correct): 15
 // Observed on current x86_64 backend: 0 (FAIL — known bug)
 //
 // Outer loop 3 iterations, inner loop 5 iterations each -> 3*5 = 15

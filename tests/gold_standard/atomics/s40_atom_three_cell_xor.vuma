@@ -1,6 +1,5 @@
 // s40_atom_three_cell_xor.vuma — three cells, atomic xor = 54 (110 ^ 70 ^ 30)
-// Expected exit code: 0 (current buggy backend)
-// Expected exit code (correct, post-bridge-fix): 54
+// Expected exit code: 54
 //
 // Three 8-byte cells. atomic_store 110/70/30, atomic_load each, XOR
 // -> 54. 110 ^ 70 = 40 (0x28); 40 ^ 30 = 54 (0x36). On the current

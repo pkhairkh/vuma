@@ -1,5 +1,5 @@
 // nl_matrix_mul.vuma — 2x2 matrix multiply, return XOR checksum
-// Expected exit code (correct): 0
+// Expected exit code: 0
 // Expected exit code (current buggy backend): 0 (degenerate)
 //
 // Computes C = A * B for 2x2 matrices where A = B = [[1,1],[1,1]].

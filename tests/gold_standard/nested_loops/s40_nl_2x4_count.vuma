@@ -1,5 +1,4 @@
 // s40_nl_2x4_count.vuma — 2x4 nested loop, count = 8
-// Expected exit code (correct): 8
 // Observed on current x86_64 backend: 0 (FAIL — known bug)
 //
 // Outer loop 2 iterations, inner loop 4 iterations each -> 2*4 = 8

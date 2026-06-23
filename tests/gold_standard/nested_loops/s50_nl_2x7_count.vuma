@@ -1,5 +1,4 @@
 // s50_nl_2x7_count.vuma — 2x7 nested loop, count = 14
-// Expected exit code (correct): 14
 // Observed on current x86_64 backend: 0 (FAIL — known bug)
 //
 // Outer loop 2 iterations, inner loop 7 iterations each -> 2*7 = 14

@@ -1,5 +1,5 @@
 // s7_atom_three_cells_prod.vuma — three atomic cells, product = 4*5*6 = 120
-// Expected exit code: 0 (current buggy backend)
+// Expected exit code: 120
 // Expected exit code (correct, post-bridge-fix): 120  (4 * 5 * 6)
 //
 // Three 8-byte cells. atomic_store 4/5/6 into each, then atomic_load

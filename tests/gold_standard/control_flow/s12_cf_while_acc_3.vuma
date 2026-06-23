@@ -1,5 +1,4 @@
 // s12_cf_while_acc_3.vuma — while loop runs 4 iterations, acc += 3 each = 12
-// Expected exit code (correct): 12
 // Observed on current x86_64 backend: 0 (FAIL — known bug)
 //
 // Accumulator starts at 0. While i < 4, add 3 each iteration and

@@ -1,6 +1,5 @@
 // s87_atom_overwrite_value.vuma — overwrite to 235, atomic_load = 235
-// Expected exit code: 0 (current buggy backend)
-// Expected exit code (correct, post-bridge-fix): 235
+// Expected exit code: 235
 //
 // Single 8-byte cell. atomic_store 9, then atomic_store 235.
 // atomic_load should return 235. On the current backend the load

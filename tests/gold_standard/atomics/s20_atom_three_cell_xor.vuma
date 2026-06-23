@@ -1,5 +1,5 @@
 // s20_atom_three_cell_xor.vuma — three cells, atomic_store 170/85/15, xor = 240
-// Expected exit code: 0 (current buggy backend)
+// Expected exit code: 240
 // Expected exit code (correct, post-bridge-fix): 240  (170 ^ 85 ^ 15)
 //
 // Three 8-byte cells. atomic_store 170/85/15 into each, then atomic_load

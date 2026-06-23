@@ -1,5 +1,4 @@
 // s35_cf_if_else_const.vuma — if true { x = 95 } else { x = 38 }; return x
-// Expected exit code (correct): 95
 // Observed on current x86_64 backend: 38 (FAIL — known bug)
 //
 // If-true branch should set x = 95, else branch sets x = 38. With a

@@ -1,9 +1,0 @@
-// bit_mask_apply.vuma — Apply a 4-bit mask to a value.
-// Expected exit code: 10 (0x0A)
-// 0x1A & 0x0F = 0x0A = 10
-fn main() -> i32 {
-    value: u64 = 0x1A;
-    mask: u64 = 0x0F;
-    result: u64 = value & mask;
-    return result;
-}

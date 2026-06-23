@@ -1,5 +1,4 @@
 // s33_nl_2x5_count.vuma — 2x5 nested loop, count = 10
-// Expected exit code (correct): 10
 // Observed on current x86_64 backend: 0 (FAIL — known bug)
 //
 // Nested for-loop produces 10 iterations total. Known

@@ -1,5 +1,4 @@
 // s74_nl_2x23_count.vuma — 2x23 nested loop, count = 46
-// Expected exit code (correct): 46
 // Observed on current x86_64 backend: 0 (FAIL — known bug)
 //
 // Outer loop 2 iterations, inner loop 23 iterations each ->

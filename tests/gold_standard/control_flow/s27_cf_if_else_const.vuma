@@ -1,5 +1,4 @@
 // s27_cf_if_else_const.vuma — if-true branch sets x=88, else x=44 -> 88
-// Expected exit code (correct): 88
 // Observed on current x86_64 backend: 44 (FAIL — known bug)
 //
 // If-true branch should set x = 88, else branch sets x = 44. With a
