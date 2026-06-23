@@ -1573,11 +1573,29 @@ fn walk_control_flow_with_externs(
                                 if let Some(src_data) = scg.get_node(source) {
                                     if let NodePayload::Computation(comp) = &src_data.payload {
                                         if let ComputationKind::Other(ref lbl) = comp.kind {
+                                            // Handle "param <name>" nodes: resolve to Var("<name>")
+                                            if let Some(param_name) = lbl.strip_prefix("param ") {
+                                                let pn = param_name.trim();
+                                                if !pn.is_empty()
+                                                    && pn.chars().next().map_or(false, |c| c.is_alphabetic() || c == '_')
+                                                    && pn.chars().all(|c| c.is_alphanumeric() || c == '_')
+                                                {
+                                                    args.push(ScgExpr::Var(pn.to_string()));
+                                                    continue;
+                                                }
+                                            }
                                             if let Some(num_str) = lbl.strip_prefix("lit_") {
                                                 if let Ok(num) = num_str.parse::<i64>() {
                                                     args.push(ScgExpr::Int(num));
                                                     continue;
                                                 }
+                                            }
+                                            // Handle bare true/false/None
+                                            match lbl.as_str() {
+                                                "true" => { args.push(ScgExpr::Int(1)); continue; }
+                                                "false" => { args.push(ScgExpr::Int(0)); continue; }
+                                                "None" | "null" | "nullptr" => { args.push(ScgExpr::Int(0)); continue; }
+                                                _ => {}
                                             }
                                             if let Ok(num) = lbl.parse::<i64>() {
                                                 args.push(ScgExpr::Int(num));
