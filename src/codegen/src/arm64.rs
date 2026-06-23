@@ -1798,8 +1798,9 @@ impl Instruction {
             }
 
             // ---- MSUB: Rd = Ra - Rn * Rm ----
-            // MSUB: 1 0 0 1 1 0 1 1 0 0 0 Rm 0 Ra Rn Rd
-            Instruction::MSUB { rd, rn, rm, ra } => Ok(0x1B000000u32
+            // MSUB: sf 0 0 1 1 0 1 1 0 0 0 Rm 1 Ra Rn Rd
+            // bit[15] = 1 distinguishes MSUB from MADD (bit[15] = 0)
+            Instruction::MSUB { rd, rn, rm, ra } => Ok(0x1B008000u32
                 | (rm.encoding() << 16)
                 | (ra.encoding() << 10)
                 | (rn.encoding() << 5)
@@ -2366,8 +2367,9 @@ impl Instruction {
                 | rd.encoding()),
 
             // ---- MSUB: Rd = Ra - Rn * Rm ----
+            // bit[15] = 1 for MSUB (0 for MADD)
             Instruction::MSUB { rd, rn, rm, ra } => Ok((sf << 31)
-                | 0x1B000000u32
+                | 0x1B008000u32
                 | (rm.encoding() << 16)
                 | (ra.encoding() << 10)
                 | (rn.encoding() << 5)
