@@ -1405,26 +1405,25 @@ impl Emitter {
 
             // ── Atomic operations ──────────────────────────────────────────
             IRInstr::AtomicLoad { dst, addr, ty: _ } => {
-                // AArch64: LDAXR Xt, [Xn] — load-acquire exclusive
+                // AArch64: LDAR Xt, [Xn] — load-acquire (non-exclusive).
+                // LDAXR (exclusive) can behave unexpectedly when not
+                // paired with a matching STXR in a tight loop; LDAR
+                // provides acquire semantics without exclusivity.
                 let rt = self.resolve_reg(dst)?;
                 let rn = self.resolve_reg(addr)?;
-                self.emit_instruction(Instruction::LDAXR { rt, rn })?;
+                self.emit_instruction(Instruction::LDAR { rt, rn })?;
             }
 
             IRInstr::AtomicStore { value, addr, ty: _ } => {
-                // AArch64: STLXR Ws, Xt, [Xn] — store-release exclusive
-                // Loop until success.
+                // AArch64: STLR Xt, [Xn] — store-release (non-exclusive).
+                // The previous STLXR+CBNZ retry loop could infinite-loop
+                // because the exclusive monitor isn't always in a state
+                // where STLXR succeeds (it requires a preceding LDAXR to
+                // arm the monitor).  STLR provides release semantics
+                // without exclusivity and never fails.
                 let rt = self.resolve_reg(value)?;
                 let rn = self.resolve_reg(addr)?;
-                let rs = Register::X9; // scratch for status
-                let retry_label = format!("__atomic_store_retry_{}", self.code.len());
-                // Record label position
-                self.label_offsets.insert(retry_label.clone(), self.code.len());
-                self.emit_instruction(Instruction::STLXR { rs, rt, rn })?;
-                // CBNZ rs, retry — if store failed, retry
-                let fixup = self.code.len();
-                self.fixups.push((fixup, retry_label, BranchFormat::Cond19));
-                self.emit_instruction(Instruction::CBNZ { rt: rs, offset: 0 })?;
+                self.emit_instruction(Instruction::STLR { rt, rn })?;
             }
 
             IRInstr::AtomicCas { dst, addr, expected, desired, ty: _ } => {
@@ -3130,8 +3129,9 @@ impl Emitter {
                 let dst_offset = slots.get(&dst_id).copied().unwrap_or(0);
                 // Load address into X9
                 self.ss_load_value(addr, Register::X9, slots)?;
-                // LDAXR X10, [X9] — load-acquire exclusive
-                self.emit_instruction(Instruction::LDAXR {
+                // LDAR X10, [X9] — load-acquire (non-exclusive).
+                // LDAXR can hang without a paired STXR; LDAR never fails.
+                self.emit_instruction(Instruction::LDAR {
                     rt: Register::X10,
                     rn: Register::X9,
                 })?;
@@ -3140,27 +3140,15 @@ impl Emitter {
             }
 
             // ── Atomic store (stack-slot path) ──
-            // STLXR loop: store-release exclusive until success.
+            // STLR — store-release (non-exclusive). Never fails, no retry loop.
             IRInstr::AtomicStore { value, addr, ty: _ } => {
                 // Load address into X9, value into X10
                 self.ss_load_value(addr, Register::X9, slots)?;
                 self.ss_load_value(value, Register::X10, slots)?;
-                let retry_label = format!("__atomic_store_retry_{}", self.code.len());
-                self.label_offsets
-                    .insert(retry_label.clone(), self.code.len());
-                // STLXR X11, X10, [X9] — store-release exclusive
-                self.emit_instruction(Instruction::STLXR {
-                    rs: Register::X11,
+                // STLR X10, [X9] — store-release
+                self.emit_instruction(Instruction::STLR {
                     rt: Register::X10,
                     rn: Register::X9,
-                })?;
-                // CBNZ X11, retry — if store failed, retry
-                let fixup = self.code.len();
-                self.fixups
-                    .push((fixup, retry_label, BranchFormat::Cond19));
-                self.emit_instruction(Instruction::CBNZ {
-                    rt: Register::X11,
-                    offset: 0,
                 })?;
             }
 
