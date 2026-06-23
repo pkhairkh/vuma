@@ -1,5 +1,4 @@
 // s79_atom_overwrite_value.vuma — overwrite to 17, atomic_load = 17
-// Expected exit code (correct): 17
 // Observed on current x86_64 backend: 0 (FAIL — known bug: atomic_load returns 0)
 //
 // Single 8-byte cell. atomic_store 1, then atomic_store 17.

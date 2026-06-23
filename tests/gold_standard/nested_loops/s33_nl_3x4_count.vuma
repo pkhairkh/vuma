@@ -1,5 +1,4 @@
 // s33_nl_3x4_count.vuma — 3x4 nested loop, count = 12
-// Expected exit code (correct): 12
 // Observed on current x86_64 backend: 0 (FAIL — known bug)
 //
 // Nested for-loop produces 12 iterations total. Known

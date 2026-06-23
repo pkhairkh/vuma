@@ -1,9 +1,0 @@
-// bit_xor_basic.vuma — Bitwise XOR of two values.
-// Expected exit code: 240 (0xF0)
-// 0xFF ^ 0x0F = 0xF0 = 240
-fn main() -> i32 {
-    val: u64 = 0xFF;
-    mask: u64 = 0x0F;
-    result: u64 = val ^ mask;
-    return result;
-}

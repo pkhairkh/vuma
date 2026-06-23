@@ -1,5 +1,4 @@
 // s79_cf_if_single_assign.vuma — x=0; if true { x = 49 }; return x
-// Expected exit code (correct): 49
 // Observed on current x86_64 backend: 0 (FAIL — known bug: for/while/if-body assignments don't propagate)
 //
 // Single-assignment in an if-true body. With a literal `true`

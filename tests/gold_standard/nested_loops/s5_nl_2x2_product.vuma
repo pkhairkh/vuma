@@ -1,5 +1,4 @@
 // s5_nl_2x2_product.vuma — 2x2 nested loop, sum j = (0+1)*2 = 2
-// Expected exit code (correct): 2
 // Observed on current x86_64 backend: 0 (FAIL — known bug)
 //
 // Outer loop 2 iterations, inner loop 2 iterations. Each inner

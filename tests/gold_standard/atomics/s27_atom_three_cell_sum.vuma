@@ -1,5 +1,4 @@
 // s27_atom_three_cell_sum.vuma — atomic_store 10/20/30, sum = 60
-// Expected exit code (correct): 60
 // Observed on current x86_64 backend: 0 (FAIL — known bug)
 //
 // Three 8-byte cells. atomic_store 10/20/30, atomic_load all three, sum

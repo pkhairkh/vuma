@@ -1,5 +1,5 @@
 // s14_atom_two_cell_sum.vuma — two cells, atomic_store 18/81, sum = 99
-// Expected exit code: 0 (current buggy backend)
+// Expected exit code: 99
 // Expected exit code (correct, post-bridge-fix): 99  (18 + 81)
 //
 // Two 8-byte cells. atomic_store 18 in c1, 81 in c2, then

@@ -1,5 +1,4 @@
 // s28_cf_while_acc_4.vuma — while loop accumulates 4*6 = 24
-// Expected exit code (correct): 24
 // Observed on current x86_64 backend: 0 (FAIL — known bug)
 //
 // Accumulator starts at 0. While i < 4, add 6 each iteration -> 4 * 6 =

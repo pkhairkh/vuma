@@ -1,5 +1,4 @@
 // s56_cf_if_single_assign.vuma — single if-true sets x = 120
-// Expected exit code (correct): 120
 // Observed on current x86_64 backend: 0 (FAIL — known bug)
 //
 // One if-true block that overwrites x = 0 to x = 120. With a literal

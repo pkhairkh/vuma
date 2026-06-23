@@ -1,6 +1,5 @@
 // s21_atom_overwrite_chain.vuma — atomic_store 20->40->80, load = 80
-// Expected exit code: 0 (current buggy backend)
-// Expected exit code (correct, post-bridge-fix): 80
+// Expected exit code: 80
 //
 // Single 8-byte cell. atomic_store 20, overwrite with 40, overwrite with
 // 80 (last write wins). atomic_load returns 80 on a correct backend. On

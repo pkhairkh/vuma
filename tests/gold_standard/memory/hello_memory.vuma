@@ -1,4 +1,5 @@
 // Hello Memory - the simplest VUMA program
+// Expected exit code: 42
 // Demonstrates: allocate, write, read, free with VUMA verification
 //
 // This is the "Hello World" of VUMA. It shows the four fundamental

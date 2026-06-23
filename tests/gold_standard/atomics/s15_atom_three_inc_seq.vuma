@@ -1,5 +1,5 @@
 // s15_atom_three_inc_seq.vuma — three cells, atomic_store 10/20/30, sum = 60
-// Expected exit code: 0 (current buggy backend)
+// Expected exit code: 60
 // Expected exit code (correct, post-bridge-fix): 60  (10 + 20 + 30)
 //
 // Three 8-byte cells. atomic_store 10/20/30 in ascending order, then

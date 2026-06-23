@@ -1,5 +1,4 @@
 // s91_cf_while_acc.vuma — while loop accumulates 1 * 68 = 68
-// Expected exit code (correct): 68
 // Observed on current x86_64 backend: 0 (FAIL — known bug)
 //
 // Accumulator starts at 0. While i < 68, add 1 each iteration

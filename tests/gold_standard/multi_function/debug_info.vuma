@@ -1,4 +1,5 @@
 // Debug Info — Simple program that compiles with --debug flag
+// Expected exit code: 84
 //
 // This program demonstrates VUMA's DWARF debug info generation.
 // When compiled with `--debug`, the compiler emits DWARF v4 sections

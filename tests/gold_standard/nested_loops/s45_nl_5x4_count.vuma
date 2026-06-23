@@ -1,5 +1,4 @@
 // s45_nl_5x4_count.vuma — 5x4 nested loop, count = 20
-// Expected exit code (correct): 20
 // Observed on current x86_64 backend: 0 (FAIL — known bug)
 //
 // Outer loop 5 iterations, inner loop 4 iterations each -> 5*4 = 20

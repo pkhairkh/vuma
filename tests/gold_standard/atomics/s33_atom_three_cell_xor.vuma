@@ -1,5 +1,4 @@
 // s33_atom_three_cell_xor.vuma — three cells, atomic xor = 0xAA ^ 0x55 ^ 0xF0 = 0x0F = 15
-// Expected exit code (correct): 15
 // Observed on current x86_64 backend: 0 (FAIL — known bug)
 //
 // Atomics test. On the current x86_64 backend atomic_load returns 0, so the

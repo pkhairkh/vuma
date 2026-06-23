@@ -1,5 +1,4 @@
 // s32_atom_three_cell_sum.vuma - three cells, atomic sum = 210 (60 + 70 + 80)
-// Expected exit code (correct): 210
 // Observed on current x86_64 backend: 0 (FAIL - known bug)
 //
 // Uses atomic_store/atomic_load on the cell(s). On the current backend

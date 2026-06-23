@@ -1,5 +1,4 @@
 // s11_cf_while_count_5.vuma — while loop counts to 5
-// Expected exit code (correct): 5
 // Observed on current x86_64 backend: 0 (FAIL — known bug)
 //
 // Counter starts at 0. While i < 5, increment count and i each

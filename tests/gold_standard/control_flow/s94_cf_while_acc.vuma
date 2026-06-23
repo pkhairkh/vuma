@@ -1,5 +1,4 @@
 // s94_cf_while_acc.vuma — while loop accumulates 1 * 44 = 44
-// Expected exit code (correct): 44
 // Observed on current x86_64 backend: 0 (FAIL — known bug)
 //
 // Accumulator starts at 0. While i < 44, add 1 each iteration

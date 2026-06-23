@@ -1,5 +1,4 @@
 // s32_cf_for_count_4.vuma - for loop runs 4 iterations, count = 4
-// Expected exit code (correct): 4
 // Observed on current x86_64 backend: 0 (FAIL - known bug)
 //
 // Body assignment(s) should propagate to the return value. On the current

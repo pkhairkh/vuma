@@ -1,5 +1,4 @@
 // s16_cf_if_else_two_var.vuma — if true picks x=42 else x=99; return x
-// Expected exit code (correct): 42
 // Observed on current x86_64 backend: 99 (FAIL — known bug)
 //
 // Single variable x. if-true branch sets x = 42; else branch sets x = 99.

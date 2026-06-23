@@ -1,5 +1,4 @@
 // s11_cf_if_else_branches.vuma — if-true picks x=30, return = 30
-// Expected exit code (correct): 30
 // Observed on current x86_64 backend: 90 (FAIL — known bug)
 //
 // Outer if-true branch sets x = 30; else branch sets x = 90. With a

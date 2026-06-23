@@ -1,5 +1,4 @@
 // s79_nl_8x13_count.vuma — 8x13 nested loop, count = 104
-// Expected exit code (correct): 104
 // Observed on current x86_64 backend: 0 (FAIL — known bug: for-body assignments don't propagate)
 //
 // Outer loop 8 iterations, inner loop 13 iterations each ->

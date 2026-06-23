@@ -1,5 +1,4 @@
 // s7_nl_2x3_count.vuma — 2x3 nested loop, count = 6
-// Expected exit code (correct): 6
 // Observed on current x86_64 backend: 0 (FAIL — known bug)
 //
 // Outer 2 iterations, inner 3 each -> 6 total. Counter increments

@@ -1,6 +1,5 @@
 // s12_atom_store_load_value.vuma — atomic_store 88, atomic_load -> 88
-// Expected exit code: 0 (current buggy backend)
-// Expected exit code (correct, post-bridge-fix): 88
+// Expected exit code: 88
 //
 // Single 8-byte cell. atomic_store 88 then atomic_load. Per the
 // documented KNOWN CODEGEN GAP, atomic_store/load aren't lowered

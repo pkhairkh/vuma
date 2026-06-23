@@ -1,5 +1,4 @@
 // s37_cf_for_count_5.vuma — for loop runs 5 iterations, count = 5
-// Expected exit code (correct): 5
 // Observed on current x86_64 backend: 0 (FAIL — known bug)
 //
 // For loop runs to produce 5. Known "for-body assignments

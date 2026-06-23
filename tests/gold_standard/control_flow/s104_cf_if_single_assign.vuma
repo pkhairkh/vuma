@@ -1,5 +1,4 @@
 // s104_cf_if_single_assign.vuma — x=0; if true { x = 133 }; return x
-// Expected exit code (correct): 133
 // Observed on current x86_64 backend: 0 (FAIL — known bug)
 //
 // Single-assignment in an if-true body. With a literal `true` condition x should become 133. Known "if-body assignments don't propagate" bug keeps x at 0 -> exit 0. Will exit 133 once the bug is fixed.

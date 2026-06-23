@@ -1,7 +1,0 @@
-// Simpler test: just print_int to verify runtime works
-fn main() -> i32 {
-    print_int(42);
-    print_int(255);
-    print_int(0);
-    return 0;
-}

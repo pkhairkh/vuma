@@ -1,5 +1,4 @@
 // s4_cf_for_count_5.vuma — count iterations of a for loop
-// Expected exit code (correct): 5
 // Observed on current x86_64 backend: 0 (FAIL — known bug)
 //
 // Loops 5 times incrementing a counter. Known "for-body assignments

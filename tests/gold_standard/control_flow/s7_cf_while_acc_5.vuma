@@ -1,5 +1,4 @@
 // s7_cf_while_acc_5.vuma — while loop runs 5 iterations, acc = 5
-// Expected exit code (correct): 5
 // Observed on current x86_64 backend: 0 (FAIL — known bug)
 //
 // Counter `i` increments each iteration; `acc` also increments by

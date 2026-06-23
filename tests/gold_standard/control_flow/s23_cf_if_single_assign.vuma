@@ -1,5 +1,4 @@
 // s23_cf_if_single_assign.vuma — standalone if true sets x=85, return x
-// Expected exit code (correct): 85
 // Observed on current x86_64 backend: 0 (FAIL — known bug)
 //
 // Standalone if-true body sets x = 85. With a literal `true` condition

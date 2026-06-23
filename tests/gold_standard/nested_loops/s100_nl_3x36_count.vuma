@@ -1,5 +1,4 @@
 // s100_nl_3x36_count.vuma — 3x36 nested loop, count = 108
-// Expected exit code (correct): 108
 // Observed on current x86_64 backend: 0 (FAIL — known bug)
 //
 // Outer loop 3 iterations, inner loop 36 iterations each

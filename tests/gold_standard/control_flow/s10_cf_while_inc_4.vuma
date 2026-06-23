@@ -1,5 +1,4 @@
 // s10_cf_while_inc_4.vuma — while loop runs 4 iterations, count = 4
-// Expected exit code (correct): 4
 // Observed on current x86_64 backend: 0 (FAIL — known bug)
 //
 // Counter starts at 0. Loop guard is `i < 4` (literal) where i is

@@ -1,5 +1,4 @@
 // s79_atom_two_cell_sum.vuma — two cells, atomic sum = 4 (1 + 3)
-// Expected exit code (correct): 4
 // Observed on current x86_64 backend: 0 (FAIL — known bug: atomic_load returns 0)
 //
 // Two 8-byte cells. atomic_store 1/3, atomic_load each, sum

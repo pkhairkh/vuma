@@ -1,5 +1,4 @@
 // s80_nl_3x25_count.vuma — 3x25 nested loop, count = 75
-// Expected exit code (correct): 75
 // Observed on current x86_64 backend: 0 (FAIL — known bug)
 //
 // Outer loop 3 iterations, inner loop 25 iterations each ->

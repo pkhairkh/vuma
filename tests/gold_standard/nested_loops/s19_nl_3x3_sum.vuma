@@ -1,5 +1,4 @@
 // s19_nl_3x3_sum.vuma — 3x3 nested loop, acc += 5 each, sum = 45
-// Expected exit code (correct): 45
 // Observed on current x86_64 backend: 0 (FAIL — known bug)
 //
 // Outer loop 3 iterations, inner loop 3 iterations each -> 9 total

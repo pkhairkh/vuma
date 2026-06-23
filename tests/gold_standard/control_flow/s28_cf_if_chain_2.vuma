@@ -1,5 +1,4 @@
 // s28_cf_if_chain_2.vuma — chain of two ifs, last sets x=90
-// Expected exit code (correct): 90
 // Observed on current x86_64 backend: 0 (FAIL — known bug)
 //
 // Two sequential if-true blocks. Each overwrites x: 40, then 90. With

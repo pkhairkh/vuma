@@ -1,5 +1,5 @@
 // s7_atom_overwrite_first.vuma — overwrite cell1 then sum = 90 + 30 = 120
-// Expected exit code: 0 (current buggy backend)
+// Expected exit code: 120
 // Expected exit code (correct, post-bridge-fix): 120  (90 + 30)
 //
 // Two 8-byte cells. atomic_store 50 then 90 into cell1 (overwrite),

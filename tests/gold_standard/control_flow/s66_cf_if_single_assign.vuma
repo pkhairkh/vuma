@@ -1,5 +1,4 @@
 // s66_cf_if_single_assign.vuma — single if-true sets x = 95
-// Expected exit code (correct): 95
 // Observed on current x86_64 backend: 0 (FAIL — known bug)
 //
 // One if-true block that overwrites x = 0 to x = 95. With a

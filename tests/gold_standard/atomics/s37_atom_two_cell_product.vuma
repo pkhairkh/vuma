@@ -1,5 +1,4 @@
 // s37_atom_two_cell_product.vuma — two cells, atomic product = 15 * 10 = 150
-// Expected exit code (correct): 150
 // Observed on current x86_64 backend: 0 (FAIL — known bug)
 //
 // Atomics test. On the current x86_64 backend atomic_load returns 0, so the

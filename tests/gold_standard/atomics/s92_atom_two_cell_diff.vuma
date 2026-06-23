@@ -1,5 +1,4 @@
 // s92_atom_two_cell_diff.vuma — two cells, atomic diff = 30 (200 - 170)
-// Expected exit code (correct, post-bridge-fix): 30
 // Observed on current x86_64 backend: 0 (FAIL — known bug)
 //
 // Two 8-byte cells. atomic_store 200/170, atomic_load each, a - b

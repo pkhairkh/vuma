@@ -1,5 +1,4 @@
 // s104_nl_5x26_count.vuma — 5x26 nested loop, count = 5*26 = 130
-// Expected exit code (correct): 130
 // Observed on current x86_64 backend: 0 (FAIL — known bug)
 //
 // Outer loop runs 5 iterations, inner loop runs 26 iterations each -> 5*26 = 130 total. Counter is a scalar accumulator updated inside the inner loop. Known "for-body assignments don't propagate" bug keeps count at 0 -> exit 0. Will exit 130 once fixed.

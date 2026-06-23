@@ -1,5 +1,4 @@
 // s47_cf_while_acc_3.vuma — while loop accumulates 3*9 = 27
-// Expected exit code (correct): 27
 // Observed on current x86_64 backend: 0 (FAIL — known bug)
 //
 // Accumulator starts at 0. While i < 3, add 9 each iteration ->

@@ -1,4 +1,5 @@
 // s11_struct_two_instances_sum.vuma — two 16-byte structs, sum = 50
+// Expected exit code: 50
 // Expected exit code (correct): 50  (5 + 10 + 15 + 20)
 // Observed on current x86_64 backend: non-deterministic (FAIL — known
 //   U8-truncation bug on `*(p+offset)` stores/loads with u64 type)

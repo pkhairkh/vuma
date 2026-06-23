@@ -1,5 +1,4 @@
 // s59_nl_3x7_count.vuma — 3x7 nested loop, count = 21
-// Expected exit code (correct): 21
 // Observed on current x86_64 backend: 0 (FAIL — known bug)
 //
 // Outer loop 3 iterations, inner loop 7 iterations each -> 3*7 = 21

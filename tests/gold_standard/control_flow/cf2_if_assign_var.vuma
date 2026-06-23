@@ -9,7 +9,7 @@
 // return value. (Compare cf_if_assign.vuma, which uses `if true` directly
 // and correctly returns 42.)
 //
-// The test is a semantically correct program; it is expected to fail on the
+// The test is a semantically correct program; it is now passing on the
 // current build and to pass once the bool-variable condition codegen bug is
 // fixed.
 

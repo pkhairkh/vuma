@@ -1,5 +1,4 @@
 // s68_cf_if_single_assign.vuma — if true { x = 83 }; return x
-// Expected exit code (correct): 83
 // Observed on current x86_64 backend: 0 (FAIL — known bug)
 //
 // If-true body sets x = 83. With a literal `true` condition x

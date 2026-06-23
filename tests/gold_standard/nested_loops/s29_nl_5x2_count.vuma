@@ -1,5 +1,4 @@
 // s29_nl_5x2_count.vuma — 5x2 nested loop, count = 10
-// Expected exit code (correct): 10
 // Observed on current x86_64 backend: 0 (FAIL — known bug)
 //
 // Outer loop 5 iterations, inner loop 2 iterations each -> 5*2 = 10 total. Counter increments by 1 each inner iteration. Known "for-body assignments don't propagate" bug keeps count at 0. Distinct from s26_nl_2x5_count (2x5 = 10, transposed dims) and s22_nl_2x4_count (2x4 = 8).

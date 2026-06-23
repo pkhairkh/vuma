@@ -1,5 +1,4 @@
 // s46_cf_if_single_assign.vuma — single if-true sets x = 88
-// Expected exit code (correct): 88
 // Observed on current x86_64 backend: 0 (FAIL — known bug)
 //
 // One if-true block that overwrites x = 0 to x = 88. With a literal

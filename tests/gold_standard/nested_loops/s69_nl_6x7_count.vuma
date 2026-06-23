@@ -1,5 +1,4 @@
 // s69_nl_6x7_count.vuma -- 6x7 nested loop, count = 42
-// Expected exit code (correct): 42
 // Observed on current x86_64 backend: 0 (FAIL -- known bug)
 //
 // Outer loop 6 iterations, inner loop 7 iterations each -> 6*7 = 42

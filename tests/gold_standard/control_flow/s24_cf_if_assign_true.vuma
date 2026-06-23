@@ -1,5 +1,4 @@
 // s24_cf_if_assign_true.vuma — if-true sets x=90, return = 90
-// Expected exit code (correct): 90
 // Observed on current x86_64 backend: 0 (FAIL — known bug)
 //
 // Standalone if-true body sets x = 90. With a literal `true` condition

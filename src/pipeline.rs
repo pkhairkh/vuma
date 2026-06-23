@@ -777,6 +777,13 @@ fn resolve_df_input_for_node(
                         if let Ok(num) = num_str.parse::<i64>() {
                             return ScgExpr::Int(num);
                         }
+                        // Boolean literals: lit_true -> 1, lit_false -> 0
+                        if num_str == "true" {
+                            return ScgExpr::Int(1);
+                        }
+                        if num_str == "false" {
+                            return ScgExpr::Int(0);
+                        }
                     }
                     if let Ok(num) = label.parse::<i64>() {
                         return ScgExpr::Int(num);
@@ -839,6 +846,13 @@ fn resolve_df_input(
                             if let Ok(num) = num_str.parse::<i64>() {
                                 return ScgExpr::Int(num);
                             }
+                            // Boolean literals: lit_true -> 1, lit_false -> 0
+                            if num_str == "true" {
+                                return ScgExpr::Int(1);
+                            }
+                            if num_str == "false" {
+                                return ScgExpr::Int(0);
+                            }
                         }
                         // Check for bare number format (tail expression literals)
                         if let Ok(num) = label.parse::<i64>() {
@@ -872,6 +886,52 @@ fn resolve_df_input(
 /// Resolve the condition expression for a Branch node by looking at its
 /// incoming DataFlow edges.
 fn resolve_branch_cond(branch_id: NodeId, edge_idx: &EdgeIndex, scg: &SCG) -> ScgExpr {
+    // First, try to parse the branch label (e.g., "if (a > b)")
+    // to extract the condition expression.
+    if let Some(node_data) = scg.get_node(branch_id) {
+        if let NodePayload::Control(ctrl) = &node_data.payload {
+            if let Some(label) = &ctrl.label {
+                // Strip "if " prefix and outer parentheses
+                let cond_str = label.trim();
+                let cond_str = cond_str.strip_prefix("if").unwrap_or(cond_str).trim();
+                let cond_str = cond_str.strip_prefix('(').unwrap_or(cond_str);
+                let cond_str = cond_str.strip_suffix(')').unwrap_or(cond_str);
+                let cond_str = cond_str.trim();
+
+                // Try to parse as a comparison expression
+                if let Some((op, lhs_str, rhs_str)) = parse_expr_split(cond_str) {
+                    let df_inputs = edge_idx.incoming_df(branch_id);
+                    let sources: Vec<NodeId> = df_inputs.iter().map(|e| e.source).collect();
+                    let lhs = resolve_subexpr(&lhs_str, &sources, edge_idx, scg);
+                    let rhs = resolve_subexpr(&rhs_str, &sources, edge_idx, scg);
+                    return ScgExpr::BinOp {
+                        op: map_binop_kind(op),
+                        lhs: Box::new(lhs),
+                        rhs: Box::new(rhs),
+                    };
+                }
+
+                // For "if true" or "if false", return Int(1) or Int(0)
+                if cond_str == "true" {
+                    return ScgExpr::Int(1);
+                }
+                if cond_str == "false" {
+                    return ScgExpr::Int(0);
+                }
+
+                // For simple variable conditions, resolve via DataFlow
+                let df_inputs = edge_idx.incoming_df(branch_id);
+                let sources: Vec<NodeId> = df_inputs.iter().map(|e| e.source).collect();
+                let is_valid_var = cond_str.chars().next().map_or(false, |c| c.is_alphabetic() || c == '_')
+                    && cond_str.chars().all(|c| c.is_alphanumeric() || c == '_');
+                if is_valid_var {
+                    return resolve_subexpr(cond_str, &sources, edge_idx, scg);
+                }
+            }
+        }
+    }
+
+    // Fallback: use the first DataFlow input
     resolve_df_input(branch_id, 0, edge_idx, scg)
 }
 
@@ -1294,6 +1354,23 @@ fn walk_control_flow_with_externs(
                     if let Some(join) = join_node {
                         consumed.insert(join);
                         current = edge_idx.outgoing_cf(join).first().map(|e| e.target);
+                        // If the Join has no outgoing CF edges (a known SCG
+                        // pattern where the "after-if" code is chained directly
+                        // from the Branch node rather than from the Join),
+                        // fall back to the Branch's other CF edges to find the
+                        // continuation. We skip the then/else targets, the
+                        // Join itself, and any already-consumed nodes.
+                        if current.is_none() {
+                            current = edge_idx.outgoing_cf(node_id)
+                                .iter()
+                                .map(|e| e.target)
+                                .find(|&t| {
+                                    t != join
+                                        && t != then_tgt
+                                        && else_tgt != Some(t)
+                                        && !consumed.contains(&t)
+                                });
+                        }
                     } else {
                         current = None;
                     }
@@ -1362,9 +1439,34 @@ fn walk_control_flow_with_externs(
 
                     stmts.push(ScgStatement::Control(ControlNode::Loop { body, for_range, while_cond: None }));
 
-                    // Continue from the LoopExit
+                    // Continue from the statement AFTER the loop.
+                    //
+                    // The SCG construction (see `to_scg::convert_block_ids` +
+                    // `Stmt::For`/`Stmt::While`) adds a ControlFlow edge from
+                    // the LoopHeader to the *next sibling statement* in the
+                    // enclosing block (this is `after_loop_tgt` returned by
+                    // `resolve_loop`).  The LoopExit node itself has NO
+                    // outgoing CF edges, so following `outgoing_cf(exit)` —
+                    // as the previous code did — always yields `None` and
+                    // silently drops every statement that comes after the
+                    // loop (e.g. `i = i - 1` at the end of a while body, or
+                    // `ten: u32 = 10; return n - ten;` after the outer loop).
+                    //
+                    // This was the root cause of the nested-loop timeouts:
+                    // the inner loop's back-edge variable (e.g. `i`) was
+                    // never decremented because `i = i - 1` lived after the
+                    // inner loop and was discarded, turning the outer loop
+                    // into an infinite loop.
+                    //
+                    // Fix: prefer `after_loop_tgt`.  Fall back to the
+                    // LoopExit's outgoing edge for SCG variants that wire it
+                    // up (defensive — current codegen never does).
                     if let Some(exit) = exit_tgt {
                         consumed.insert(exit);
+                    }
+                    if let Some(after) = after_loop_tgt {
+                        current = Some(after);
+                    } else if let Some(exit) = exit_tgt {
                         current = edge_idx.outgoing_cf(exit).first().map(|e| e.target);
                     } else {
                         current = None;
@@ -1604,10 +1706,12 @@ fn parse_expr_split(expr: &str) -> Option<(IrBinOpKind, String, String)> {
     ];
     
     // Check for single-character operators in precedence order (lowest first)
-    let single_ops: [(&str, IrBinOpKind); 8] = [
+    let single_ops: [(&str, IrBinOpKind); 10] = [
         ("|", IrBinOpKind::Or),
         ("^", IrBinOpKind::Xor),
         ("&", IrBinOpKind::And),
+        ("<", IrBinOpKind::SLt),
+        (">", IrBinOpKind::SGt),
         ("+", IrBinOpKind::Add),
         ("-", IrBinOpKind::Sub),
         ("*", IrBinOpKind::Mul),
@@ -1617,7 +1721,9 @@ fn parse_expr_split(expr: &str) -> Option<(IrBinOpKind, String, String)> {
     
     // Search for top-level operators (outside parentheses)
     // Process in precedence order (lowest first)
-    for &(op_str, op_kind) in &single_ops {
+    // Check two-char operators FIRST (before single-char)
+    // This ensures << >> are matched before < >
+    for &(op_str, op_kind) in &two_char_ops {
         if let Some(pos) = find_top_level_op(expr, op_str) {
             let lhs = expr[..pos].trim().to_string();
             let rhs = expr[pos + op_str.len()..].trim().to_string();
@@ -1627,8 +1733,7 @@ fn parse_expr_split(expr: &str) -> Option<(IrBinOpKind, String, String)> {
         }
     }
     
-    // Check two-char operators
-    for &(op_str, op_kind) in &two_char_ops {
+    for &(op_str, op_kind) in &single_ops {
         if let Some(pos) = find_top_level_op(expr, op_str) {
             let lhs = expr[..pos].trim().to_string();
             let rhs = expr[pos + op_str.len()..].trim().to_string();
@@ -1748,6 +1853,13 @@ fn resolve_subexpr(
         if let Ok(num) = num_str.parse::<i64>() {
             return ScgExpr::Int(num);
         }
+        // Boolean literals: lit_true -> 1, lit_false -> 0
+        if num_str == "true" {
+            return ScgExpr::Int(1);
+        }
+        if num_str == "false" {
+            return ScgExpr::Int(0);
+        }
     }
     
     // Check if it's a simple variable name
@@ -1780,7 +1892,17 @@ fn resolve_subexpr(
                 }
             }
         }
-        // If still no match, use the first source as fallback
+        // If still no match, return the variable name as a Var expression
+        // for valid variable names. The IR builder will resolve it from its
+        // names map (e.g., for-loop iterators registered by lower_loop).
+        // Invalid identifiers (hex literals, numbers, etc.) fall back to
+        // the first source.
+        let is_valid_var = subexpr.chars().next().map_or(false, |c| c.is_alphabetic() || c == '_')
+            && subexpr.chars().all(|c| c.is_alphanumeric() || c == '_');
+        if is_valid_var {
+            return ScgExpr::Var(subexpr.to_string());
+        }
+        // Fallback: use the first source
         if let Some(&src) = sources.first() {
             return resolve_df_input_for_node(src, edge_idx, scg);
         }
@@ -1827,6 +1949,109 @@ fn is_simple_var(s: &str) -> bool {
     !s.is_empty() && s.chars().all(|c| c.is_alphanumeric() || c == '_') && !s.parse::<i64>().is_ok()
 }
 
+/// Try to extract the size expression from a dynamic-size `allocate(<expr>)`
+/// call, given the parent Computation node's label and DataFlow sources.
+///
+/// The label typically looks like one of:
+///   - `let buf = allocate(n)`
+///   - `buf = allocate(n + 8)`
+///   - `buf = allocate(capacity * msg_size)`
+///
+/// Returns `Some(ScgExpr)` if a non-trivial size expression is found, or
+/// `None` if the size is a literal 0 (or the label doesn't match the
+/// `allocate(...)` pattern).  The caller should fall back to a stack
+/// allocation in the `None` case.
+fn extract_dynamic_alloc_size(
+    comp_label: &str,
+    sources: &[NodeId],
+    edge_idx: &EdgeIndex,
+    scg: &SCG,
+) -> Option<ScgExpr> {
+    // Locate "allocate(" in the label.
+    let alloc_pos = comp_label.find("allocate(")?;
+    let after = &comp_label[alloc_pos + "allocate(".len()..];
+    // Find the matching closing paren (handle nested parens, e.g. for
+    // `allocate(f(x))` — though that's rare in practice).
+    let mut depth: i32 = 1;
+    let mut end: usize = 0;
+    for (i, c) in after.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = i;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    if depth != 0 {
+        return None;
+    }
+    let size_str = after[..end].trim();
+    if size_str.is_empty() {
+        return None;
+    }
+    // If the size is a literal integer, leave it to the stack-allocation
+    // path (the SCG AllocationNode.size should already hold the value).
+    if size_str.parse::<i64>().is_ok() {
+        return None;
+    }
+    // Resolve the size expression to a ScgExpr using the parent
+    // Computation node's DataFlow sources.
+    let size_expr = if let Some((op, lhs_str, rhs_str)) = parse_expr_split(size_str) {
+        let lhs = resolve_subexpr(&lhs_str, sources, edge_idx, scg);
+        let rhs = resolve_subexpr(&rhs_str, sources, edge_idx, scg);
+        ScgExpr::BinOp {
+            op: map_binop_kind(op),
+            lhs: Box::new(lhs),
+            rhs: Box::new(rhs),
+        }
+    } else {
+        resolve_subexpr(size_str, sources, edge_idx, scg)
+    };
+    // If the resolved expression fell back to Int(0) (e.g., the variable
+    // wasn't found), don't emit a heap allocation — it would call
+    // __vuma_alloc(0) which is wasteful and may return NULL.
+    if matches!(size_expr, ScgExpr::Int(0)) {
+        return None;
+    }
+    Some(size_expr)
+}
+
+/// Find the earliest Computation node that defines `var_name` via a
+/// "let <var_name> = ..." label.  This is the original variable definition;
+/// reassignments ("x = ...") should reuse this node's id as their dst so that
+/// SSA phi nodes are created at control-flow merge points (if/else, loops).
+fn find_original_let_def(var_name: &str, scg: &SCG) -> Option<NodeId> {
+    let let_prefix = format!("let {} = ", var_name);
+    let mut earliest: Option<NodeId> = None;
+    for n in scg.nodes() {
+        if let NodePayload::Computation(comp) = &n.payload {
+            if let ComputationKind::Other(ref label) = comp.kind {
+                if label.starts_with(&let_prefix) {
+                    if earliest.is_none() || n.id.as_u64() < earliest.unwrap().as_u64() {
+                        earliest = Some(n.id);
+                    }
+                }
+            }
+        }
+    }
+    earliest
+}
+
+/// Determine the destination variable name for a Computation node.
+/// For reassignments ("x = ...", not "let x = ..."), reuse the original
+/// definition's node id so that SSA phi nodes are created at merge points.
+/// For all other cases (including "let x = ..." definitions), use the node's
+/// own id.
+fn computation_dst(node_id: NodeId, _op_label: &str, _scg: &SCG) -> String {
+    // TEMPORARILY REVERTED for testing
+    node_var(node_id, "comp")
+}
+
 fn convert_node_to_statement_with_externs(
     node_id: NodeId,
     node_data: &NodeData,
@@ -1841,6 +2066,21 @@ fn convert_node_to_statement_with_externs(
                 .as_deref()
                 .and_then(parse_scg_type)
                 .unwrap_or(ScgType::U8);
+            // Dynamic-size allocate() (bare `allocate(expr);` statement).
+            // The Allocation node receives DataFlow edges directly from the
+            // size expression's variables; if there is a non-literal
+            // DataFlow input and the static size is 0, emit a Heap
+            // allocation that calls `__vuma_alloc`.
+            if alloc.size == 0 {
+                let size_expr = resolve_df_input(node_id, 0, edge_idx, scg);
+                if !matches!(size_expr, ScgExpr::Int(0)) {
+                    return Some(ScgStatement::Allocation(AllocationNode::Heap {
+                        name: node_var(node_id, "alloc"),
+                        size_expr,
+                        ty,
+                    }));
+                }
+            }
             Some(ScgStatement::Allocation(AllocationNode::Stack {
                 name: node_var(node_id, "alloc"),
                 size: alloc.size as u32,
@@ -1929,13 +2169,26 @@ fn convert_node_to_statement_with_externs(
             // IMPORTANT: "*region = 42" is a Store, NOT a Load. We only
             // treat it as a Load if the label matches "= *<var>" at the END
             // of the string (i.e., the dereference is the value being assigned).
-            if op_label.contains("= *") && !op_label.contains("= *") == false {
-                // Check if the part after "= *" is a simple variable (not an assignment)
+            if op_label.contains("= *") && !op_label.starts_with("*") {
                 if let Some(pos) = op_label.find("= *") {
                     let after = op_label[pos + 3..].trim();
-                    // If "after" is a simple variable name (no spaces, no =), it's a Load
-                    if !after.contains(' ') && !after.contains('=') && !after.is_empty() {
-                        let ptr = resolve_df_input(node_id, 0, edge_idx, scg);
+                    if !after.is_empty() && !after.contains('=') {
+                        // It's a Load. The expression after "= *" can be:
+                        //   - A simple variable: "buf"
+                        //   - Pointer arithmetic: "(buf + 0)" or "(buf + offset)"
+                        let ptr_expr = strip_outer_parens(after);
+                        let df_sources: Vec<NodeId> = edge_idx.incoming_df(node_id).iter().map(|e| e.source).collect();
+                        let ptr = if let Some((op, l, r)) = parse_expr_split(ptr_expr) {
+                            let lhs_val = resolve_subexpr(&l, &df_sources, edge_idx, scg);
+                            let rhs_val = resolve_subexpr(&r, &df_sources, edge_idx, scg);
+                            ScgExpr::BinOp {
+                                op: map_binop_kind(op),
+                                lhs: Box::new(lhs_val),
+                                rhs: Box::new(rhs_val),
+                            }
+                        } else {
+                            resolve_subexpr(ptr_expr, &df_sources, edge_idx, scg)
+                        };
                         return Some(ScgStatement::Access(AccessNode::Load {
                             dst: node_var(node_id, "val"),
                             ptr,
@@ -1951,10 +2204,38 @@ fn convert_node_to_statement_with_externs(
                     if let Some(target_data) = scg.get_node(deriv_edge.target) {
                         match &target_data.payload {
                             NodePayload::Allocation(alloc) => {
-                                // Convert to Allocation statement
+                                // Convert to Allocation statement.
+                                //
+                                // If `alloc.size == 0` the size argument was a
+                                // dynamic expression (variable, binop, etc.)
+                                // that `eval_const_int` couldn't fold at AST→SCG
+                                // time.  In that case we parse the size
+                                // expression out of the parent Computation
+                                // node's label (e.g. `buf = allocate(n + 8)`)
+                                // and emit a Heap allocation that lowers to a
+                                // call to the `__vuma_alloc` runtime stub.
                                 let ty = alloc.type_name.as_deref()
                                     .and_then(parse_scg_type)
                                     .unwrap_or(ScgType::U8);
+                                if alloc.size == 0 {
+                                    // Collect DataFlow sources for the parent
+                                    // Computation node so we can resolve the
+                                    // size expression's variable references.
+                                    let df_inputs = edge_idx.incoming_df(node_id);
+                                    let sources: Vec<NodeId> = df_inputs
+                                        .iter().map(|e| e.source).collect();
+                                    if let Some(size_expr) = extract_dynamic_alloc_size(
+                                        &op_label, &sources, edge_idx, scg,
+                                    ) {
+                                        return Some(ScgStatement::Allocation(
+                                            AllocationNode::Heap {
+                                                name: node_var(node_id, "comp"),
+                                                size_expr,
+                                                ty,
+                                            },
+                                        ));
+                                    }
+                                }
                                 return Some(ScgStatement::Allocation(AllocationNode::Stack {
                                     name: node_var(node_id, "comp"),  // Use Computation node var so Call refs find it
                                     size: alloc.size as u32,
@@ -2104,15 +2385,47 @@ fn convert_node_to_statement_with_externs(
             // Collect the source nodes from DataFlow edges
             let sources: Vec<NodeId> = df_inputs.iter().map(|e| e.source).collect();
             
-            // Strip "let <var> = " prefix from the label to get the expression
-            let expr_str: String = if op_label.starts_with("let ") {
-                if let Some(eq_pos) = op_label.find("= ") {
-                    op_label[eq_pos + 2..].to_string()
+            // Strip "<var> = " or "let <var> = " prefix from the label
+            // to get the expression. This handles both let bindings
+            // ("let sum = 0") and reassignments ("sum = sum + i").
+            //
+            // We also extract the user-visible variable name being
+            // assigned (`user_var`), so the codegen `lower_computation`
+            // can update the variable's entry in the `names` map (in
+            // addition to the SCG-node-id entry `dst`).  This is what
+            // lets `lower_if` detect reassignments inside branches and
+            // create proper phi nodes at if/else merge points.
+            let (expr_str, user_var): (String, Option<String>) = if let Some(eq_pos) = op_label.find("= ") {
+                // Check that the "=" is not part of "==" or "<=" or ">=" or "!="
+                let before_eq = &op_label[..eq_pos];
+                let after_eq = &op_label[eq_pos+1..]; // starts with "= "
+                let is_assignment_eq = !before_eq.ends_with('<')
+                    && !before_eq.ends_with('>')
+                    && !before_eq.ends_with('!')
+                    && !before_eq.ends_with('=')
+                    && !after_eq.starts_with("= ");
+                if is_assignment_eq {
+                    // Extract the user-visible variable name being assigned.
+                    // For "let x = ..." the var name is "x" (after stripping "let ").
+                    // For "x = ..." the var name is "x".
+                    // For complex lvalues ("obj.field = ...", "*p = ...", etc.)
+                    // we leave `user_var = None` so we don't pollute the names
+                    // map with non-variable keys.
+                    let var_part = before_eq.strip_prefix("let ").unwrap_or(before_eq).trim();
+                    let is_simple_ident = !var_part.is_empty()
+                        && var_part.chars().all(|c| c.is_alphanumeric() || c == '_')
+                        && !var_part.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false);
+                    let uv = if is_simple_ident {
+                        Some(var_part.to_string())
+                    } else {
+                        None
+                    };
+                    (op_label[eq_pos + 2..].to_string(), uv)
                 } else {
-                    op_label.to_string()
+                    (op_label.to_string(), None)
                 }
             } else {
-                op_label.to_string()
+                (op_label.to_string(), None)
             };
             
             // Parse the expression to find the top-level operator
@@ -2123,21 +2436,23 @@ fn convert_node_to_statement_with_externs(
                 let lhs = resolve_subexpr(&lhs_str, &sources, edge_idx, scg);
                 let rhs = resolve_subexpr(&rhs_str, &sources, edge_idx, scg);
                 Some(ScgStatement::Computation(ComputationNode {
-                    dst: node_var(node_id, "comp"),
+                    dst: computation_dst(node_id, &op_label, scg),
                     op,
                     lhs,
                     rhs,
                     tail_call: false,
+                    reassigns: user_var.clone(),
                 }))
             } else {
                 // Fallback: use the first two DataFlow inputs
                 let op = parse_binop(&op_label).unwrap_or(IrBinOpKind::Add);
                 Some(ScgStatement::Computation(ComputationNode {
-                    dst: node_var(node_id, "comp"),
+                    dst: computation_dst(node_id, &op_label, scg),
                     op,
                     lhs: resolve_df_input(node_id, 0, edge_idx, scg),
                     rhs: resolve_df_input(node_id, 1, edge_idx, scg),
                     tail_call: false,
+                    reassigns: user_var.clone(),
                 }))
             }
         }
@@ -2654,7 +2969,60 @@ pub fn bridge_scg_to_codegen_with_externs(scg: &SCG, extern_functions: &HashSet<
                 consumed.insert(ret);
             }
             if !body.iter().any(|s| matches!(s, ScgStatement::Return(_))) {
-                body.push(ScgStatement::Return(vec![]));
+                // The walk didn't reach the FunctionReturn (e.g., loop
+                // exit with no outgoing CF). Try to process the
+                // FunctionReturn directly to resolve the return value.
+                // Only use the reassignment search for functions with loops
+                // (where the walk is known to stop at LoopExit).
+                let has_loop = body.iter().any(|s| {
+                    matches!(s, ScgStatement::Control(ControlNode::Loop { .. }))
+                });
+                if let Some(ret) = return_node {
+                    let df_inputs = edge_idx.incoming_df(ret);
+                    let ret_vals: Vec<ScgExpr> = if df_inputs.is_empty() || !has_loop {
+                        // No DataFlow inputs or no loops — use simple resolution
+                        df_inputs.iter()
+                            .enumerate()
+                            .map(|(i, _)| resolve_df_input(ret, i, &edge_idx, scg))
+                            .collect()
+                    } else {
+                        df_inputs.iter()
+                            .enumerate()
+                            .map(|(i, _)| {
+                                let source = df_inputs[i].source;
+                                if let Some(source_data) = scg.get_node(source) {
+                                    if let NodePayload::Computation(comp) = &source_data.payload {
+                                        if let ComputationKind::Other(ref label) = comp.kind {
+                                            let var_name = label.trim();
+                                            let reassign_prefix = format!("{} =", var_name);
+                                            let let_prefix = format!("let {}", var_name);
+                                            let mut latest_reassign: Option<NodeId> = None;
+                                            for node in scg.nodes() {
+                                                if !consumed.contains(&node.id) {
+                                                    continue;
+                                                }
+                                                if let NodePayload::Computation(c) = &node.payload {
+                                                    if let ComputationKind::Other(ref l) = c.kind {
+                                                        if l.starts_with(&reassign_prefix) && !l.starts_with(&let_prefix) {
+                                                            latest_reassign = Some(node.id);
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            if let Some(reassign_id) = latest_reassign {
+                                                return ScgExpr::Var(format!("v_{}", reassign_id.as_u64()));
+                                            }
+                                        }
+                                    }
+                                }
+                                resolve_df_input(ret, i, &edge_idx, scg)
+                            })
+                            .collect()
+                    };
+                    body.push(ScgStatement::Return(ret_vals));
+                } else {
+                    body.push(ScgStatement::Return(vec![]));
+                }
             }
 
             scg_nodes.push(ScgNode::Function(ScgFunction {

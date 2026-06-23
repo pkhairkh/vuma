@@ -1,5 +1,4 @@
 // s10_cf_if_else_compound.vuma — if-true picks x=20, return = 20
-// Expected exit code (correct): 20
 // Observed on current x86_64 backend: 80 (FAIL — known bug)
 //
 // Outer if-true branch sets x = 20; else branch sets x = 80. With a

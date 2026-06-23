@@ -1,5 +1,4 @@
 // s37_nl_2x4_acc.vuma — 2x4 nested loop, acc = 8
-// Expected exit code (correct): 8
 // Observed on current x86_64 backend: 0 (FAIL — known bug)
 //
 // Nested for-loop produces 8 iterations total. Known

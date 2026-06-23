@@ -1,5 +1,4 @@
 // s21_cf_if_assign_true.vuma — if-true sets x=99, return = 99
-// Expected exit code (correct): 99
 // Observed on current x86_64 backend: 0 (FAIL — known bug)
 //
 // Standalone if-true body sets x = 99. With a literal `true` condition

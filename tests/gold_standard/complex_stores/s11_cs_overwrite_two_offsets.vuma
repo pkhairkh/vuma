@@ -1,4 +1,5 @@
 // s11_cs_overwrite_two_offsets.vuma — overwrite offsets 0 and 16, sum = 110
+// Expected exit code: 110
 // Expected exit code (correct): 110  (40 + 20 + 50)
 // Observed on current x86_64 backend: non-deterministic (FAIL — known
 //   U8-truncation bug on `*(p+offset)` stores/loads with u64 type)

@@ -1,5 +1,4 @@
 // s79_atom_three_cell_diff.vuma — three cells, atomic diff = 11 (15 - 2 - 2)
-// Expected exit code (correct): 11
 // Observed on current x86_64 backend: 0 (FAIL — known bug: atomic_load returns 0)
 //
 // Three 8-byte cells. atomic_store 15/2/2, atomic_load each,

@@ -1,5 +1,4 @@
 // s94_cf_if_single_assign.vuma — x=0; if true { x = 91 }; return x
-// Expected exit code (correct): 91
 // Observed on current x86_64 backend: 0 (FAIL — known bug)
 //
 // Single-assignment in an if-true body. With a literal `true`

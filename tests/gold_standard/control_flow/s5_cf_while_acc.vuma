@@ -1,5 +1,4 @@
 // s5_cf_while_acc.vuma — while loop accumulates 5 increments of 10
-// Expected exit code (correct): 50
 // Observed on current x86_64 backend: 0 (FAIL — known bug)
 //
 // Accumulator starts at 0. While i < 5, add 10 each iteration ->

@@ -1,5 +1,4 @@
 // s10_ls_four_node_chain.vuma — 4 nodes, sum = 100 (10 + 20 + 30 + 40)
-// Expected exit code (correct): 100
 // Observed on current x86_64 backend: non-deterministic (FAIL — known
 //   U8-truncation bug on `*(p+offset)` stores/loads with u64 type)
 //

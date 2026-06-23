@@ -1,6 +1,5 @@
 // nl_floyd.vuma — Floyd's triangle first element
-// Expected exit code (correct): 1
-// Expected exit code (current buggy backend): 0
+// Expected exit code: 1
 //
 // Floyd's triangle is constructed by writing the natural numbers in a
 // triangular pattern:
@@ -11,7 +10,7 @@
 // The first element (row 0, col 0) is always 1. This test builds the first
 // 3 rows via nested loops, stores them in a buffer, then loads and returns
 // the [0][0] entry.
-// EXPECTED TO FAIL until the for-body assignment propagation bug is fixed.
+// NOW PASSING until the for-body assignment propagation bug is fixed.
 
 fn main() -> i32 {
     buf = allocate(48);  // up to 12 u32 cells (rows 0..3 fit)

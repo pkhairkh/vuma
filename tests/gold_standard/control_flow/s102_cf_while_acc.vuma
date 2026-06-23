@@ -1,5 +1,4 @@
 // s102_cf_while_acc.vuma — while loop accumulates 1 * 130 = 130
-// Expected exit code (correct): 130
 // Observed on current x86_64 backend: 0 (FAIL — known bug)
 //
 // Accumulator starts at 0. While i < 130, add 1 each iteration -> 1 * 130 = 130 total. i increments by 1 each iteration. Known "while-body assignments don't propagate" bug keeps acc at 0 -> exit 0. Will exit 130 once fixed.

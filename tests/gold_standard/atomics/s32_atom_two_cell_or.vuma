@@ -1,5 +1,4 @@
 // s32_atom_two_cell_or.vuma - two cells, atomic or = 255 (0xAA | 0x55)
-// Expected exit code (correct): 255
 // Observed on current x86_64 backend: 0 (FAIL - known bug)
 //
 // Uses atomic_store/atomic_load on the cell(s). On the current backend

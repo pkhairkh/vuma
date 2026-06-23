@@ -1,6 +1,5 @@
 // s69_atom_three_cell_diff.vuma -- three cells, atomic diff = 105 (220 - 70 - 45)
-// Expected exit code: 0 (current buggy backend)
-// Expected exit code (correct, post-bridge-fix): 105
+// Expected exit code: 105
 //
 // Three 8-byte cells. atomic_store 220/70/45, atomic_load each, diff
 // -> 220 - 70 - 45 = 105. On the current backend the loads return 0

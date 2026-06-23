@@ -1,5 +1,4 @@
 // s8_cf_if_else_const.vuma — if-true picks x=42, return = 42
-// Expected exit code (correct): 42
 // Observed on current x86_64 backend: 88 (FAIL — known bug, else branch wins)
 //
 // Literal-true condition selects the if-true branch (x = 42); the else

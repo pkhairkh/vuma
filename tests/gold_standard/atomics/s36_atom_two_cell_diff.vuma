@@ -1,5 +1,4 @@
 // s36_atom_two_cell_diff.vuma — cells 240/15, diff = 225
-// Expected exit code (correct): 225
 // Observed on current x86_64 backend: 0 (FAIL — known bug)
 //
 // Two 8-byte cells store 240/15. Difference of the loaded

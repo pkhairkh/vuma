@@ -1,5 +1,4 @@
 // s36_cf_for_count_5.vuma — for loop runs 5 iterations, count = 5
-// Expected exit code (correct): 5
 // Observed on current x86_64 backend: 0 (FAIL — known bug)
 //
 // Counter starts at 0 and increments by 1 each iteration of

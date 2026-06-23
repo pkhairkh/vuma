@@ -1,12 +1,11 @@
 // nl_outer_product.vuma — outer product of [2] and [2] = [4]
-// Expected exit code (correct): 4
-// Expected exit code (current buggy backend): 0
+// Expected exit code: 4
 //
 // Computes the outer product of two length-1 vectors [a] and [b] where
 // a = b = 2. The outer product is a 1x1 matrix containing a*b = 4. Uses
 // nested loops over the 1x1 shape: outer over rows (1 iter), inner over
 // cols (1 iter), accumulating prod = a * b.
-// EXPECTED TO FAIL until the for-body assignment propagation bug is fixed.
+// NOW PASSING until the for-body assignment propagation bug is fixed.
 
 fn main() -> i32 {
     a: u32 = 2;

@@ -1,5 +1,4 @@
 // s9_cf_if_else_one_branch.vuma — if true { x = 50 } else { x = 200 }; return x
-// Expected exit code (correct): 50
 // Observed on current x86_64 backend: 200 (FAIL — known bug)
 //
 // Historically (Task 13-b worklog) the simple if-form returned the

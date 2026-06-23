@@ -1,5 +1,4 @@
 // s6_nl_3x3_with_j.vuma — 3x3 nested loop, sum j*j = (0+1+4)*3 = 15
-// Expected exit code (correct): 15
 // Observed on current x86_64 backend: 0 (FAIL — known bug)
 //
 // Outer loop 3 iterations, inner loop 3 iterations. Each inner

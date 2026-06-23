@@ -1,9 +1,0 @@
-// arith_sub_zero — identity law for subtraction: x - 0 = x
-// Expected exit code: 42
-
-fn main() -> i32 {
-    x: u32 = 42;
-    zero: u32 = 0;
-    result: u32 = x - zero;
-    return result;
-}

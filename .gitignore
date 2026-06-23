@@ -1,54 +1,38 @@
-# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
-
-# dependencies
-node_modules
-/.pnp
-.pnp.*
-.yarn/*
-!.yarn/patches
-!.yarn/plugins
-!.yarn/releases
-!.yarn/versions
-
-# testing
-/coverage
-
-# next.js
-/.next/
-/out/
-
-# production
-/build
-
-# misc
+/target
+**/target/
+**/*.rs.bk
+Cargo.lock
+*.o
+*.wasm
+*.elf
+*.bin
+*.img
 .DS_Store
-*.pem
+tool-results/
+.env
 
-# debug
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-.pnpm-debug.log*
+# Development debris
+agent-ctx/
+*.bak
+*.orig
+*.swp
+*.swo
+*~
+WORKLOG.md
+worklog.md
+WAVE_PLAN.md
+MANIFEST.md
 
-# env files (can opt-in for committing if needed)
-.env*
+# Fuzz / Proptest artifacts
+**/fuzz/target/
+**/fuzz/corpus/
+**/proptest-regressions/
 
-# vercel
-.vercel
+# Profiling artifacts
+perf.data*
+flamegraph.svg
 
-
-# typescript
-*.tsbuildinfo
-next-env.d.ts
-local-*
-.claude
-.z-ai-config
-*.log
-dev.log
-dev.out.log
-test
-prompt
-
-server.log
-# Skills directory
-/skills/
+# IDE / editor
+.idea/
+.vscode/
+*.iml

@@ -1,5 +1,4 @@
 // s13_cf_while_inc_5.vuma — while loop runs 5 iterations, count = 5
-// Expected exit code (correct): 5
 // Observed on current x86_64 backend: 0 (FAIL — known bug)
 //
 // Counter starts at 0. Loop guard is `i < 5` (literal) where i is

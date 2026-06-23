@@ -1,5 +1,5 @@
 // s28_atom_two_cell_and.vuma — atomic_store 0xF0/0x3C, and = 48
-// Expected exit code: 0 (current buggy backend)
+// Expected exit code: 48
 // Expected exit code (correct, post-bridge-fix): 48  (240 & 60)
 //
 // Two 8-byte cells. atomic_store 240/60 into each, then atomic_load both

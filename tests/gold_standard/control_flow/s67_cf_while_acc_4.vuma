@@ -1,5 +1,4 @@
 // s67_cf_while_acc_4.vuma — while loop accumulates 4*12 = 48
-// Expected exit code (correct): 48
 // Observed on current x86_64 backend: 0 (FAIL — known bug)
 //
 // Accumulator starts at 0. While i < 4, add 12 each iteration

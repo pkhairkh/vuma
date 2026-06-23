@@ -1,6 +1,5 @@
 // s102_atom_three_cell_diff.vuma — atomic_store 3 cells (200, 1, 2), 200-1-2 = 197
-// Expected exit code: 0 (current buggy backend)
-// Expected exit code (correct, post-bridge-fix): 197
+// Expected exit code: 197
 //
 // Three 8-byte cells. atomic_store 200, 1, 2; atomic_load each, return 200 - 1 - 2 = 197. On the current backend atomic_load returns 0 -> exit 0. Will exit 197 once atomics are wired through.
 // Distinct from s101_atom_overwrite_value (56), s101_atom_three_cell_diff (110), s101_atom_two_cell_sum (230).

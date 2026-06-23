@@ -1,4 +1,5 @@
 // Binary Search — Search a sorted array for a target value
+// Expected exit code: 0
 //
 // Implements classic binary search on a sorted array of u64 values stored
 // in allocated memory. Returns the index of the target if found, or -1

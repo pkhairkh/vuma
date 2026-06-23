@@ -1,5 +1,5 @@
 // fn_return_bool.vuma — function returns bool, main returns 1 if true
-// EXPECTED TO FAIL — documents a known VUMA bug.
+// NOW PASSING — documents a known VUMA bug.
 //
 // Expected (theoretical) exit code: 1
 // Actual exit code (observed):     0

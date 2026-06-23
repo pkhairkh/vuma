@@ -1,6 +1,5 @@
 // s55_atom_overwrite_value.vuma — store 80, overwrite to 220, load = 220
-// Expected exit code: 0 (current buggy backend)
-// Expected exit code (correct, post-bridge-fix): 220
+// Expected exit code: 220
 //
 // Single 8-byte cell. atomic_store 80, then overwrite with 220,
 // atomic_load -> 220. On the current backend the load returns 0 ->

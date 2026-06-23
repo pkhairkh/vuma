@@ -1,9 +1,0 @@
-// arith_div_basic — simple division: 12 / 4 = 3
-// Expected exit code: 3
-
-fn main() -> i32 {
-    x: u32 = 12;
-    y: u32 = 4;
-    result: u32 = x / y;
-    return result;
-}

@@ -1,5 +1,4 @@
 // s19_cf_if_else_two_val.vuma — if true { x = 42 } else { x = 84 }; return x
-// Expected exit code (correct): 42
 // Observed on current x86_64 backend: 84 (FAIL — known bug)
 //
 // If-true branch should set x = 42, else branch sets x = 84. With a

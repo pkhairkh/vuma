@@ -1,5 +1,4 @@
 // s22_cf_if_else_const.vuma — if true { x = 70 } else { x = 140 }; return x
-// Expected exit code (correct): 70
 // Observed on current x86_64 backend: 140 (FAIL — known bug)
 //
 // If-true branch should set x = 70, else branch sets x = 140. With a

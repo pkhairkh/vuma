@@ -1,5 +1,4 @@
 // s4_nl_outer_product.vuma — outer product sum: sum of i*j for i,j in 0..2
-// Expected exit code (correct): 1
 // Observed on current x86_64 backend: 0 (FAIL — known bug)
 //
 // 2x2 outer product: for each (i,j) pair, multiply i*j and add to

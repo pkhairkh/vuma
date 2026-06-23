@@ -1,9 +1,0 @@
-// edge2_return_42 — return 42
-// Expected exit code: 42
-//
-// Edge case: smallest possible main that returns a non-zero literal.
-// Pairs with edge2_return_zero to bracket the literal-return code path.
-
-fn main() -> i32 {
-    return 42;
-}
