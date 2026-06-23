@@ -1874,6 +1874,14 @@ fn resolve_subexpr(
         return ScgExpr::Int(num);
     }
 
+    // Boolean and unit literals
+    match subexpr {
+        "true" => return ScgExpr::Int(1),
+        "false" => return ScgExpr::Int(0),
+        "None" | "null" | "nullptr" => return ScgExpr::Int(0),
+        _ => {}
+    }
+
     // Check if it's a hex literal (e.g. "0x12", "0xFF", "-0x1A")
     let hex_str = subexpr.strip_prefix("-").unwrap_or(subexpr);
     let is_neg = subexpr.starts_with('-');
