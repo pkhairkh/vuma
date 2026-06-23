@@ -2723,9 +2723,12 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
         }
 
         IRInstr::Ret { values } => {
-            for (i, val) in values.iter().enumerate() {
-                let ty = ctx.result_types.get(i).copied().unwrap_or(WasmType::I32);
-                ctx.push_value(val, Some(&ty));
+            // Store return value at memory address 0 for _start to read.
+            // wasm i32.store expects stack: [addr, value]
+            if let Some(val) = values.first() {
+                ctx.emit(WasmInstr::I32Const(0));
+                ctx.push_value(val, Some(&WasmType::I32));
+                ctx.emit(WasmInstr::I32Store { align: 2, offset: 0 });
             }
             ctx.emit(WasmInstr::Return);
         }
@@ -2824,14 +2827,16 @@ fn lower_terminator(
 ) -> Result<(), BackendError> {
     match term {
         IRTerminator::Return(values) => {
-            // Only push return values if the function has result types.
-            // If result_types is empty, the function returns void — don't
-            // push anything (WASM requires 0 stack elements for void return).
-            if !ctx.result_types.is_empty() {
-                for (i, val) in values.iter().enumerate() {
-                    let ty = ctx.result_types.get(i).copied().unwrap_or(WasmType::I32);
-                    ctx.push_value(val, Some(&ty));
-                }
+            // Store the return value (if any) at memory address 0 so the
+            // _start wrapper can read it and pass to proc_exit.
+            // wasm i32.store expects stack: [addr, value] (addr deeper)
+            if let Some(val) = values.first() {
+                // Push address first
+                ctx.emit(WasmInstr::I32Const(0));
+                // Push value
+                ctx.push_value(val, Some(&WasmType::I32));
+                // i32.store: pops [addr, value], stores value at addr
+                ctx.emit(WasmInstr::I32Store { align: 2, offset: 0 });
             }
             ctx.emit(WasmInstr::Return);
         }
@@ -3180,28 +3185,16 @@ impl Backend for Wasm32Backend {
         let mut start_body = Vec::new();
 
         if let Some(main_idx) = main_func_idx {
-            // Call main()
+            // Call main() — stores return value at memory address 0
             WasmInstr::Call(main_idx).encode(&mut start_body);
 
-            let main_type = main_func_type.unwrap_or(WasmFuncType {
-                params: vec![],
-                results: vec![],
-            });
-
-            if main_type.results == vec![WasmType::I32] {
-                // main() returned i32 — pass it directly to proc_exit
-                // (imported function index WASI_PROC_EXIT_IDX = 1).
-                WasmInstr::Call(WASI_PROC_EXIT_IDX).encode(&mut start_body);
-            } else if main_type.results.is_empty() {
-                // main() returned void — exit with code 0.
-                WasmInstr::I32Const(0).encode(&mut start_body);
-                WasmInstr::Call(WASI_PROC_EXIT_IDX).encode(&mut start_body);
-            } else {
-                // main() returned some other type — drop it and exit 0.
-                WasmInstr::Drop.encode(&mut start_body);
-                WasmInstr::I32Const(0).encode(&mut start_body);
-                WasmInstr::Call(WASI_PROC_EXIT_IDX).encode(&mut start_body);
-            }
+            // Load return value from memory address 0
+            // i32.const 0 (address)
+            WasmInstr::I32Const(0).encode(&mut start_body);
+            // i32.load (addr -> value)
+            WasmInstr::I32Load { align: 2, offset: 0 }.encode(&mut start_body); // align=4, offset=0
+            // Call proc_exit(return_value)
+            WasmInstr::Call(WASI_PROC_EXIT_IDX).encode(&mut start_body);
         } else {
             // No main function found — exit with code 1 (error).
             WasmInstr::I32Const(1).encode(&mut start_body);
