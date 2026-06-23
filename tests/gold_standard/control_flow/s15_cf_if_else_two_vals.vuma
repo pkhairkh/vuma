@@ -6,6 +6,7 @@
 // assignment (66) survives instead -> exit 66. Will exit 33 once the
 // if-body drop bug is fixed. Distinct from s14_cf_if_else_const
 // (values 42/99) and s11_cf_if_else_branches (values 30/90).
+// Expected exit code: 33
 
 fn main() -> i32 {
     x: u32 = 0;

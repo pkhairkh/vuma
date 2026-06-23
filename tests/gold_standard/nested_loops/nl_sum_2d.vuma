@@ -3,6 +3,7 @@
 // Iterates a 2x5 grid (10 cells), each cell contributing value 1 to the
 // running sum.
 // NOW PASSING until the for-body assignment propagation bug is fixed.
+// Expected exit code: 10
 
 fn main() -> i32 {
     sum: u32 = 0;

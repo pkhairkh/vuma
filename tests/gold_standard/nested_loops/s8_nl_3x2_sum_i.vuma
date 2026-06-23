@@ -6,6 +6,7 @@
 // outer iteration, so sum per outer = 0+1+2 = 3; total = 3*2 = 6.
 // Known bug keeps acc at 0. Distinct from s5_nl_2x3_acc (different
 // shape and value).
+// Expected exit code: 6
 
 fn main() -> i32 {
     acc: u32 = 0;

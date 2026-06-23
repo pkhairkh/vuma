@@ -7,6 +7,7 @@
 // so the else body's assignment (200) survives instead. Will exit 64
 // once the if-body drop bug is fixed. Distinct from s62_cf_for_count_
 // 5 (5), s62_cf_if_else_const (56) and s62_cf_while_acc_4 (36).
+// Expected exit code: 64
 
 fn main() -> i32 {
     x: u32 = 0;

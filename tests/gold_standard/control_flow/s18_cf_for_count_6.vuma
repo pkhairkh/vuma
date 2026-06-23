@@ -7,6 +7,7 @@
 // from s14_cf_for_count_8 (8 iterations) and s9_cf_for_count_6
 // (same count, different operand framing — this entry keeps the
 // canonical count-the-iterations form).
+// Expected exit code: 6
 
 fn main() -> i32 {
     count: u32 = 0;

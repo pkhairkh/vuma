@@ -211,7 +211,7 @@ pub enum ControlNode {
     /// `loop { body }`
     Loop {
         body: Vec<ScgStatement>,
-        for_range: Option<(String, i64, i64)>,
+        for_range: Option<(String, i64, ScgExpr)>,
         while_cond: Option<String>,
     },
     /// `break` (from inside a loop).
@@ -1281,7 +1281,7 @@ impl IRBuilder {
     fn lower_loop(
         &mut self,
         body: &[ScgStatement],
-        for_range: &Option<(String, i64, i64)>,
+        for_range: &Option<(String, i64, ScgExpr)>,
         while_cond: &Option<String>,
         ir_func: &mut IRFunction,
         names: &mut HashMap<String, u32>,
@@ -1395,13 +1395,19 @@ impl IRBuilder {
             ir_func.current_block().instructions.push(phi);
         }
 
-        if let Some((var, _start, end)) = for_range {
+        if let Some((var, _start, end_expr)) = for_range {
             let counter_vreg = names.get(var).copied().unwrap_or(0);
+            // Resolve the end bound expression.  For constant ends
+            // (ScgExpr::Int(n)) this produces `end_vreg = n + 0`.  For
+            // variable ends (ScgExpr::Var("i")) this produces
+            // `end_vreg = i_vreg + 0`, correctly capturing the current
+            // value of the loop-variable-bound end.
+            let end_val = self.resolve_expr(end_expr, names, ir_func)?;
             let end_vreg = self.alloc_vreg();
             ir_func.register_vreg(VirtualRegister::named(end_vreg, "loop_end"));
             ir_func.current_block().instructions.push(IRInstruction::Add {
                 dst: IRValue::Register(end_vreg),
-                lhs: IRValue::Immediate(*end),
+                lhs: end_val,
                 rhs: IRValue::Immediate(0),
                 ty: None,
             });

@@ -6,6 +6,7 @@
 // Known "for-body assignments don't propagate" bug keeps count at 0.
 // Distinct from s22_nl_2x2_count (same dims, different sibling framing)
 // and s13_nl_2x2_count (same dims, s13 framing).
+// Expected exit code: 4
 
 fn main() -> i32 {
     count: u32 = 0;

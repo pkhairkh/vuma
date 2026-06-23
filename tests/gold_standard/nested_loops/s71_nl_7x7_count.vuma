@@ -6,6 +6,7 @@
 // Known "for-body assignments don't propagate" bug keeps count
 // at 0. Distinct from s69_nl_3x9_count (27), s70_nl_5x8_count
 // (40) and s66_nl_5x6_count (30).
+// Expected exit code: 49
 fn main() -> i32 {
     count: u32 = 0;
     for i in 0..7 {

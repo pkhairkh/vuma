@@ -3,6 +3,7 @@
 //
 // Single-assignment in an if-true body. With a literal `true` condition x should become 99. Known "if-body assignments don't propagate" bug keeps x at 0 -> exit 0. Will exit 99 once the bug is fixed.
 // Distinct from s102_cf_if_single_assign (124), s101_cf_if_single_assign (56), s100_cf_if_single_assign (112).
+// Expected exit code: 99
 fn main() -> i32 {
     x: u32 = 0;
     if true {

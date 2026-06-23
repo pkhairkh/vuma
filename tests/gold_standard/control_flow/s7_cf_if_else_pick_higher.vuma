@@ -10,6 +10,7 @@
 // were previously documented as PASS but now also fail on the
 // current backend). Kept as a regression guard: any future fix to
 // the if-true body drop will turn this exit into 88.
+// Expected exit code: 88
 
 fn main() -> i32 {
     x: u32 = 0;

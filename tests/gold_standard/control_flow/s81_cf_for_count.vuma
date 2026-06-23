@@ -6,6 +6,7 @@
 // propagate" bug keeps count at 0 -> exit 0. Will exit 14 once
 // fixed. Distinct from s78_cf_for_count (1), s77_cf_for_count_29
 // (29) and s76_cf_for_count (97).
+// Expected exit code: 14
 fn main() -> i32 {
     count: u32 = 0;
     for i in 0..14 {

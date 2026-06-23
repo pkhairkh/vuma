@@ -7,6 +7,7 @@
 // assignment is dropped, so the else body's assignment (150) survives.
 // Will exit 75 once the if-body drop bug is fixed.
 // Distinct from s33_cf_if_else_const (values 60/120, observed 120) and s30_cf_if_else_const (values 90/180, observed 180).
+// Expected exit code: 75
 fn main() -> i32 {
     x: u32 = 0;
     if true {

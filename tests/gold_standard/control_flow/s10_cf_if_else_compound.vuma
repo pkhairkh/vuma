@@ -10,6 +10,7 @@
 // Distinct from s5_cf_if_then_else_3way (TWO assignments in if-true
 // body, which works correctly) and s6_cf_if_two_branches_const
 // (different branch values 42/99).
+// Expected exit code: 20
 
 fn main() -> i32 {
     x: u32 = 0;

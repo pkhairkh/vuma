@@ -5,6 +5,7 @@
 // loop with range 0..6. Known "for-body assignments don't propagate"
 // bug keeps count at 0 -> exit 0. Will exit 6 once fixed. Distinct
 // from s6_cf_for_count_4 (4 iterations) and s5_cf_for_count_7.
+// Expected exit code: 6
 
 fn main() -> i32 {
     count: u32 = 0;
