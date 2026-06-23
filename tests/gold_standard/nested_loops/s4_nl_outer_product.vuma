@@ -4,6 +4,7 @@
 // 2x2 outer product: for each (i,j) pair, multiply i*j and add to
 // accumulator. Pairs: (0,0)=0, (0,1)=0, (1,0)=0, (1,1)=1. Sum = 1.
 // Known "for-body assignments don't propagate" bug → acc stays 0.
+// Expected exit code: 1
 
 fn main() -> i32 {
     acc: u32 = 0;

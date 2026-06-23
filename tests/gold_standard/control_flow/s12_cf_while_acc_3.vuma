@@ -6,6 +6,7 @@
 // "while-body assignments don't propagate" bug keeps acc at 0 ->
 // exit 0. Will exit 12 once fixed. Distinct from s9_cf_while_mul2
 // (mul-by-2 accumulator) and s7_cf_while_acc_5 (acc += 5).
+// Expected exit code: 12
 
 fn main() -> i32 {
     acc: u32 = 0;

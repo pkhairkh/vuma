@@ -7,6 +7,7 @@
 // once the bug is fixed. Distinct from s86_cf_if_single_assign
 // (25), s82_cf_if_single_assign (18) and s78_cf_if_single_
 // assign (22).
+// Expected exit code: 33
 fn main() -> i32 {
     x: u32 = 0;
     if true {

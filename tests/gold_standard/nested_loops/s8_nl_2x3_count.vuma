@@ -5,6 +5,7 @@
 // iteration adds 1 to count. Total iterations = 2 * 3 = 6. Known
 // "for-body assignments don't propagate" bug keeps count at 0.
 // Distinct from s6_nl_2x2_count_diff (2x2).
+// Expected exit code: 6
 
 fn main() -> i32 {
     count: u32 = 0;

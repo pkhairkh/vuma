@@ -6,6 +6,7 @@
 // "while-body assignments don't propagate" bug keeps acc at 0 ->
 // exit 0. Will exit 20 once fixed. Distinct from s34_cf_while_acc_6
 // (6*3 = 18) and s30_cf_while_acc_5 (5*5 = 25).
+// Expected exit code: 20
 
 fn main() -> i32 {
     acc: u32 = 0;

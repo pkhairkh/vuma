@@ -6,6 +6,7 @@
 // body assignment is dropped, so x keeps its init value 0. Distinct
 // from s11_cf_if_chain_2 (if-true x=15) and s4_cf_if_assign_simple
 // (if-true x=10, else x=20).
+// Expected exit code: 64
 
 fn main() -> i32 {
     x: u32 = 0;

@@ -6,6 +6,7 @@
 // "for-body assignments don't propagate" bug keeps count at 0.
 // Distinct from s46_nl_4x3_count (12) and s42_nl_4x5_count (20,
 // same total but added here for cross-set verification).
+// Expected exit code: 20
 
 fn main() -> i32 {
     count: u32 = 0;

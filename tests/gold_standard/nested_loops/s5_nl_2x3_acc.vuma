@@ -5,6 +5,7 @@
 // Pairs (i,j): (0,0),(0,1),(0,2),(1,0),(1,1),(1,2). Sum of i+j
 // across all = 0+1+2+1+2+3 = 9. Known bug keeps acc at 0.
 // Distinct from s4_nl_2x3_count (counts iters, doesn't sum i+j).
+// Expected exit code: 9
 
 fn main() -> i32 {
     acc: u32 = 0;

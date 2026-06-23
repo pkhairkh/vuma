@@ -6,6 +6,7 @@
 // assignments don't propagate" bug keeps count at 0. Distinct from
 // s10_nl_2x4_count (2x4 = 8) and s9_nl_2x4_count (same dimensions
 // but this test records a new total).
+// Expected exit code: 10
 
 fn main() -> i32 {
     count: u32 = 0;

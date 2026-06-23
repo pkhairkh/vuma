@@ -6,6 +6,7 @@
 // After 6 iterations, i == 6 and the loop exits; count should be 6.
 // Known "while-body assignments don't propagate" bug keeps count at
 // 0. Distinct from s5_cf_while_acc (acc accumulates 10s, count to 5).
+// Expected exit code: 6
 
 fn main() -> i32 {
     i: u32 = 0;

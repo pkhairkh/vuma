@@ -7,6 +7,7 @@
 // Known "while-body assignments don't propagate" bug keeps count at 0.
 // Distinct from s10_cf_while_inc_4 (4 iterations) and
 // s6_cf_while_dec_count (6 iterations, decrementing).
+// Expected exit code: 5
 
 fn main() -> i32 {
     i: u32 = 0;

@@ -9,6 +9,7 @@
 // if-body drop bug is fixed. Distinct from s86_cf_if_else_
 // const (14), s82_cf_if_else_const (12) and s78_cf_if_
 // else_const (10).
+// Expected exit code: 16
 fn main() -> i32 {
     x: u32 = 0;
     if true {

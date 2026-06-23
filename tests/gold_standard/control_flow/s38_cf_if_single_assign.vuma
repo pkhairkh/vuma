@@ -6,6 +6,7 @@
 // if-true body's assignment is dropped, so x stays 0 -> exit 0.
 // Will exit 88 once the if-body drop bug is fixed. Distinct from
 // s34_cf_if_single_assign (70) and s30_cf_if_chain_2.
+// Expected exit code: 88
 
 fn main() -> i32 {
     x: u32 = 0;

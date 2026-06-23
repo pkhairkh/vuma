@@ -5,6 +5,7 @@
 // "while-body assignments don't propagate" bug keeps the accumulator at 0.
 // Will exit 16 once fixed.
 // Distinct from s33_cf_while_acc_3 (3*3=9) and s30_cf_while_acc_5 (5*5=25).
+// Expected exit code: 16
 fn main() -> i32 {
     acc: u32 = 0;
     i: u32 = 0;

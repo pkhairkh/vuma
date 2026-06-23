@@ -8,6 +8,7 @@
 // bug does not manifest here. Kept as a regression guard: any
 // future change that reintroduces the drop will turn this exit
 // into 0. Mirrors the s4_cf_if_assign_simple convention.
+// Expected exit code: 30
 
 fn main() -> i32 {
     x: u32 = 0;

@@ -14,6 +14,7 @@
 //   ld -o ffi_demo ffi_demo.o -lc
 //
 // ──────────────────────────────────────────────────────────────
+// Expected exit code: 0
 
 // Declare C library functions we want to call.
 // The `extern "C"` block tells the compiler to use the C calling

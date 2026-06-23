@@ -1,4 +1,5 @@
 // Test: nested function calls
+// Expected exit code: 0
 fn rotr(x: u32, n: u32) -> u32 {
     return (x >> n) | (x << (32 - n));
 }
