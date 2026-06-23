@@ -3112,19 +3112,14 @@ pub fn bridge_scg_to_codegen_with_externs(scg: &SCG, extern_functions: &HashSet<
                 }
             }
 
-            // Determine if this function returns a value (has a Return with vals).
-            // If so, set results to [I32] so the wasm32 _start wrapper can pass
-            // the return value to proc_exit.  Other backends use the return
-            // register regardless of this metadata, so this is safe.
-            let has_return_val = body.iter().any(|s| {
-                matches!(s, ScgStatement::Return(ref vals) if !vals.is_empty())
-            });
-            let results = if has_return_val { vec![ScgType::I32] } else { vec![] };
-
+            // Keep results=[] for all functions. The wasm32 backend uses
+            // memory to pass the return value (not the wasm return type)
+            // because multi-block functions have stack imbalance issues
+            // with structured wasm control flow.
             scg_nodes.push(ScgNode::Function(ScgFunction {
                 name: func_name.clone(),
                 params,
-                results,
+                results: vec![],
                 body,
             }));
         }
@@ -3157,15 +3152,10 @@ pub fn bridge_scg_to_codegen_with_externs(scg: &SCG, extern_functions: &HashSet<
             body.push(ScgStatement::Return(vec![]));
         }
 
-        let has_return_val = body.iter().any(|s| {
-            matches!(s, ScgStatement::Return(ref vals) if !vals.is_empty())
-        });
-        let results = if has_return_val { vec![ScgType::I32] } else { vec![] };
-
         scg_nodes.push(ScgNode::Function(ScgFunction {
             name: "main".to_string(),
             params: vec![],
-            results,
+            results: vec![],
             body,
         }));
     }
