@@ -1892,6 +1892,16 @@ fn resolve_subexpr(
         return ScgExpr::Int(num);
     }
 
+    // Bitwise NOT: ~expr = expr ^ -1 (XOR with all-ones)
+    if let Some(inner) = subexpr.strip_prefix('~') {
+        let inner_expr = resolve_subexpr(inner.trim(), sources, edge_idx, scg);
+        return ScgExpr::BinOp {
+            op: vuma_codegen::ir::BinOpKind::Xor,
+            lhs: Box::new(inner_expr),
+            rhs: Box::new(ScgExpr::Int(-1)),
+        };
+    }
+
     // Boolean and unit literals
     match subexpr {
         "true" => return ScgExpr::Int(1),
