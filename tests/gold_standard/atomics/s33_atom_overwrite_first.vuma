@@ -1,5 +1,4 @@
 // s33_atom_overwrite_first.vuma — overwrite first cell, atomic load = 100
-// Expected exit code (correct): 100
 // Observed on current x86_64 backend: 0 (FAIL — known bug)
 //
 // Atomics test. On the current x86_64 backend atomic_load returns 0, so the

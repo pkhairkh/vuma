@@ -1,6 +1,5 @@
 // s17_atom_overwrite_chain.vuma — atomic_store 5 then 50 then 200, load sees 200
-// Expected exit code: 0 (current buggy backend)
-// Expected exit code (correct, post-bridge-fix): 200
+// Expected exit code: 200
 //
 // Single 8-byte cell. atomic_store 5, overwrite with 50, overwrite
 // with 200 (last write wins). atomic_load should observe 200. On the

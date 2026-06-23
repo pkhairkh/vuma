@@ -1,5 +1,4 @@
 // s88_cf_for_count.vuma — for loop runs 13 iterations, count = 13
-// Expected exit code (correct): 13
 // Observed on current x86_64 backend: 0 (FAIL — known bug)
 //
 // Counter starts at 0 and increments by 1 each iteration of

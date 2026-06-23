@@ -1,6 +1,5 @@
 // s24_atom_overwrite_load.vuma — atomic_store 19 then 84, load = 84
-// Expected exit code: 0 (current buggy backend)
-// Expected exit code (correct, post-bridge-fix): 84
+// Expected exit code: 84
 //
 // Single 8-byte cell. atomic_store 19, then overwrite with 84.
 // atomic_load should observe 84 (last write wins). On the current

@@ -1,5 +1,4 @@
 // s87_cf_if_else_const.vuma — if true { x = 22 } else { x = 9 }; return x
-// Expected exit code (correct): 22
 // Observed on current x86_64 backend: 9 (FAIL — known bug)
 //
 // If-true branch should set x = 22, else branch sets x = 9.

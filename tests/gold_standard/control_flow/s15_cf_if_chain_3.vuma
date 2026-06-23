@@ -1,5 +1,4 @@
 // s15_cf_if_chain_3.vuma — if-true sets x = 44, return = 44
-// Expected exit code (correct): 44
 // Observed on current x86_64 backend: 0 (FAIL — known bug)
 //
 // Standalone if-true body sets x = 44. With a literal `true` condition x

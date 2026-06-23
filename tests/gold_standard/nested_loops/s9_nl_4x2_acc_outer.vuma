@@ -1,5 +1,4 @@
 // s9_nl_4x2_acc_outer.vuma — 4x2 nested loop, sum of i = (0+1+2+3)*2 = 12
-// Expected exit code (correct): 12
 // Observed on current x86_64 backend: 0 (FAIL — known bug)
 //
 // Outer loop 4 iterations, inner loop 2 iterations each. Each

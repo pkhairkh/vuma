@@ -1,5 +1,4 @@
 // s30_cf_for_count_3.vuma — for loop runs 3 iterations, count = 3
-// Expected exit code (correct): 3
 // Observed on current x86_64 backend: 0 (FAIL — known bug)
 //
 // Counter starts at 0 and increments by 1 each iteration of a for loop

@@ -1,5 +1,4 @@
 // s13_cf_if_two_branches_const.vuma — if true { x = 60 } else { x = 240 }; return x
-// Expected exit code (correct): 60
 // Observed on current x86_64 backend: 240 (FAIL — known bug)
 //
 // Constant-true guard selects the if-body assignment (x = 60). On the

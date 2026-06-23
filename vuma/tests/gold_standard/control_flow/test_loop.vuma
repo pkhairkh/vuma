@@ -1,9 +1,0 @@
-// Test: for loop
-fn main() -> i32 {
-    sum: u32 = 0;
-    for i in 0..10 {
-        sum = sum + i;
-    }
-    // sum = 0+1+2+...+9 = 45
-    return 0;
-}

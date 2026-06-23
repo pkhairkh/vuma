@@ -1,5 +1,4 @@
 // s5_cf_if_then_else_3way.vuma — if-true branch with two assignments
-// Expected exit code (correct): 30
 // Observed on current x86_64 backend: 30 (PASS)
 //
 // Outer if-else: the "true" branch performs two assignments (x=10,

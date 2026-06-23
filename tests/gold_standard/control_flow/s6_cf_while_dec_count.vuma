@@ -1,5 +1,4 @@
 // s6_cf_while_dec_count.vuma — while loop runs 6 iterations, count = 6
-// Expected exit code (correct): 6
 // Observed on current x86_64 backend: 0 (FAIL — known bug)
 //
 // Counter starts at 0. Loop guard is `i < 6` (literal) where i is

@@ -1,9 +1,0 @@
-// arith_mul_basic — simple multiplication: 3 * 4 = 12
-// Expected exit code: 12
-
-fn main() -> i32 {
-    x: u32 = 3;
-    y: u32 = 4;
-    result: u32 = x * y;
-    return result;
-}

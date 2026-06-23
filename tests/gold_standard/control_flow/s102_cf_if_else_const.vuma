@@ -1,5 +1,4 @@
 // s102_cf_if_else_const.vuma — if true { x = 126 } else { x = 1 }; return x
-// Expected exit code (correct): 126
 // Observed on current x86_64 backend: 1 (FAIL — known bug)
 //
 // If-true branch should set x = 126, else branch sets x = 1. With a literal `true` condition the true branch should win -> 126. On the current backend the if-true body's single assignment is dropped, so the else body's assignment (1) survives instead. Will exit 126 once the if-body drop bug is fixed.

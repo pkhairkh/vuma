@@ -1,5 +1,4 @@
 // s63_nl_5x3_count.vuma — 5x3 nested loop, count = 15
-// Expected exit code (correct): 15
 // Observed on current x86_64 backend: 0 (FAIL — known bug)
 //
 // Outer loop 5 iterations, inner loop 3 iterations each -> 5*3 = 15

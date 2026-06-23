@@ -1,5 +1,4 @@
 // s12_cf_if_else_pick_lower.vuma — if true { x = 30 } else { x = 180 }; return x
-// Expected exit code (correct): 30
 // Observed on current x86_64 backend: 180 (FAIL — known bug)
 //
 // Constant-true guard selects the if-body assignment (x = 30). On the

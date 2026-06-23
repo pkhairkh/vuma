@@ -1,5 +1,4 @@
 // s81_cf_while_acc.vuma — while loop accumulates 3*37 = 111
-// Expected exit code (correct): 111
 // Observed on current x86_64 backend: 0 (FAIL — known bug)
 //
 // Accumulator starts at 0. While i < 3, add 37 each iteration

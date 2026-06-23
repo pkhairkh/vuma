@@ -1,6 +1,5 @@
 // s12_atom_overwrite_seq.vuma — atomic store 15/95/220, load sees 220
-// Expected exit code: 0 (current buggy backend)
-// Expected exit code (correct, post-bridge-fix): 220
+// Expected exit code: 220
 //
 // Single 8-byte cell. atomic_store 15, then 95, then 220 (three
 // sequential writes). atomic_load should yield 220 (last write wins).

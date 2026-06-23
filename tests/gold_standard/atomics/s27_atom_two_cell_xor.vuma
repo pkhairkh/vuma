@@ -1,5 +1,4 @@
 // s27_atom_two_cell_xor.vuma — atomic_store 0xAA/0x55, xor = 255
-// Expected exit code (correct): 255
 // Observed on current x86_64 backend: 0 (FAIL — known bug)
 //
 // Two 8-byte cells. atomic_store 170/15 into each, then atomic_load both

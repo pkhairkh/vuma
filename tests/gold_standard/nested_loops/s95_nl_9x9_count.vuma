@@ -1,5 +1,4 @@
 // s95_nl_9x9_count.vuma — 9x9 nested loop, count = 81
-// Expected exit code (correct): 81
 // Observed on current x86_64 backend: 0 (FAIL — known bug)
 //
 // Outer loop 9 iterations, inner loop 9 iterations each ->

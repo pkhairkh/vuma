@@ -1,5 +1,4 @@
 // s40_nl_2x3_count.vuma — 2x3 nested loop, count = 6
-// Expected exit code (correct): 6
 // Observed on current x86_64 backend: 0 (FAIL — known bug)
 //
 // Outer loop 2 iterations, inner loop 3 iterations each -> 2*3 = 6

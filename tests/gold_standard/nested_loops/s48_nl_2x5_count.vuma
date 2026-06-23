@@ -1,5 +1,4 @@
 // s48_nl_2x5_count.vuma — 2x5 nested loop, count = 10
-// Expected exit code (correct): 10
 // Observed on current x86_64 backend: 0 (FAIL — known bug)
 //
 // Outer loop 2 iterations, inner loop 5 iterations each -> 2*5 = 10

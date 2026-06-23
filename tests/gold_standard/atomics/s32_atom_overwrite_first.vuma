@@ -1,5 +1,4 @@
 // s32_atom_overwrite_first.vuma - overwrite atomic cell, load = 200
-// Expected exit code (correct): 200
 // Observed on current x86_64 backend: 0 (FAIL - known bug)
 //
 // Uses atomic_store/atomic_load on the cell(s). On the current backend

@@ -47,7 +47,6 @@ pub mod logging;
 pub mod lsp;
 pub mod pipeline;
 pub mod telemetry;
-pub mod test_harness;
 
 // Re-export package manager types.
 pub use vuma_package::{

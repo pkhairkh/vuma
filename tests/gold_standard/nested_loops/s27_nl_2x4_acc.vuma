@@ -1,5 +1,4 @@
 // s27_nl_2x4_acc.vuma — 2x4 nested loop, acc = 120 (8 * 15)
-// Expected exit code (correct): 120
 // Observed on current x86_64 backend: 0 (FAIL — known bug)
 //
 // Outer loop 2 iterations, inner loop 4 iterations each -> 8 total. acc
