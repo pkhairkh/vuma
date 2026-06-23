@@ -773,6 +773,18 @@ fn resolve_df_input_for_node(
         match &src_data.payload {
             NodePayload::Computation(comp) => {
                 if let ComputationKind::Other(ref label) = comp.kind {
+                    // For "param <name>" nodes, return Var("<name>") so the
+                    // IR builder can resolve it via its names map (which
+                    // registers params by their real name).
+                    if let Some(param_name) = label.strip_prefix("param ") {
+                        let param_name = param_name.trim();
+                        if !param_name.is_empty()
+                            && param_name.chars().next().map_or(false, |c| c.is_alphabetic() || c == '_')
+                            && param_name.chars().all(|c| c.is_alphanumeric() || c == '_')
+                        {
+                            return ScgExpr::Var(param_name.to_string());
+                        }
+                    }
                     if let Some(num_str) = label.strip_prefix("lit_") {
                         if let Ok(num) = num_str.parse::<i64>() {
                             return ScgExpr::Int(num);
@@ -842,6 +854,16 @@ fn resolve_df_input(
                 NodePayload::Computation(comp) => {
                     // Check if this is a literal computation node (label "lit_<n>")
                     if let ComputationKind::Other(ref label) = comp.kind {
+                        // For "param <name>" nodes, return Var("<name>")
+                        if let Some(param_name) = label.strip_prefix("param ") {
+                            let param_name = param_name.trim();
+                            if !param_name.is_empty()
+                                && param_name.chars().next().map_or(false, |c| c.is_alphabetic() || c == '_')
+                                && param_name.chars().all(|c| c.is_alphanumeric() || c == '_')
+                            {
+                                return ScgExpr::Var(param_name.to_string());
+                            }
+                        }
                         if let Some(num_str) = label.strip_prefix("lit_") {
                             if let Ok(num) = num_str.parse::<i64>() {
                                 return ScgExpr::Int(num);
