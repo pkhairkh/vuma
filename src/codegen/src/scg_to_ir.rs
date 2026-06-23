@@ -513,10 +513,15 @@ pub struct ScgData {
 /// Information about an enclosing loop, pushed onto the IRBuilder's loop stack.
 #[derive(Debug, Clone)]
 struct LoopContext {
-    /// Label of the loop header block (target for `continue`).
+    /// Label of the loop header block (target for `continue` in while-loops).
     header_label: String,
     /// Label of the loop exit block (target for `break`).
     exit_label: String,
+    /// Label of the continue target (back-edge block with increment).
+    /// For for-loops, this is the block containing the increment.
+    /// For while-loops, this is the same as header_label.
+    /// None if not yet set (continue will use header_label as fallback).
+    continue_target: Option<String>,
     /// Variable snapshots from each break path: (break_block_label, names_at_break).
     /// Used to create phi nodes at the loop exit that merge values from
     /// all break paths with the normal (fall-through) exit path.
@@ -1291,9 +1296,18 @@ impl IRBuilder {
         let loop_exit = self.alloc_label("loop_exit");
 
         // Push loop context for break/continue resolution.
+        // For for-loops, continue should jump to the increment block
+        // (which we'll create as loop_body_label + "_continue").
+        // We set continue_target after lowering the body.
+        let continue_label = if for_range.is_some() {
+            Some(self.alloc_label("loop_continue"))
+        } else {
+            None
+        };
         self.loop_stack.push(LoopContext {
             header_label: loop_header.clone(),
             exit_label: loop_exit.clone(),
+            continue_target: continue_label.clone(),
             break_snapshots: Vec::new(),
         });
 
@@ -1440,6 +1454,24 @@ impl IRBuilder {
         // ── Step 4: Lower the loop body ──
         ir_func.append_block(&loop_body_label);
         self.lower_statements(body, ir_func, names)?;
+
+        // ── Step 4b: Emit the continue target block (for for-loops) ──
+        // This block contains the loop increment and back-edge to header.
+        // `continue` jumps here, ensuring the increment is always executed.
+        if let Some(ref cont_label) = continue_label {
+            // If the current block (end of loop body) doesn't have a terminator,
+            // it falls through to the continue block.
+            if matches!(
+                ir_func.current_block().terminator,
+                IRTerminator::Unreachable
+            ) {
+                ir_func.current_block().push(IRInstruction::Branch {
+                    target: cont_label.clone(),
+                });
+                ir_func.current_block().terminator = IRTerminator::Jump(cont_label.clone());
+            }
+            ir_func.append_block(cont_label);
+        }
 
         if let Some((var, _start, _end)) = for_range {
             if let Some(&counter_vreg) = names.get(var) {
@@ -1754,18 +1786,35 @@ impl IRBuilder {
 
     /// Lower a `continue` to a jump to the enclosing loop's header label.
     fn lower_continue(&mut self, ir_func: &mut IRFunction) -> Result<()> {
-        let header_label = self
+        // Continue should jump to the loop back-edge (increment) block,
+        // NOT the loop header. Jumping to the header skips the increment,
+        // causing an infinite loop when continue is hit.
+        //
+        // For for-loops, the back-edge block is the last block in the loop
+        // body that contains the increment and then jumps to the header.
+        // We don't track the back-edge label directly, so we jump to the
+        // end of the loop body — the code after lower_statements(body)
+        // adds the increment and back-edge to header.
+        //
+        // The simplest correct fix: create a continue target that is the
+        // loop body's back-edge. Since we can't know the back-edge label
+        // at continue-lowering time, we use a synthetic label and patch
+        // it after the loop body is lowered.
+        let ctx = self
             .loop_stack
-            .last()
-            .map(|ctx| ctx.header_label.clone())
+            .last_mut()
             .ok_or_else(|| {
                 crate::CodegenError::TranslationError("continue outside of loop".to_string())
             })?;
 
+        // If we have a continue_target, jump there. Otherwise jump to header
+        // (for while-loops where there's no increment, this is correct).
+        let target = ctx.continue_target.clone().unwrap_or_else(|| ctx.header_label.clone());
+
         ir_func.current_block().push(IRInstruction::Branch {
-            target: header_label.clone(),
+            target: target.clone(),
         });
-        ir_func.current_block().terminator = IRTerminator::Jump(header_label);
+        ir_func.current_block().terminator = IRTerminator::Jump(target);
         Ok(())
     }
 
