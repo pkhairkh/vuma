@@ -1,6 +1,5 @@
 // s53_atom_three_cell_xor.vuma — three cells, atomic xor = 221 (0x44 ^ 0x88 ^ 0x11)
-// Expected exit code: 0 (current buggy backend)
-// Expected exit code (correct, post-bridge-fix): 221
+// Expected exit code: 221
 //
 // Three 8-byte cells. atomic_store 68/136/17 (0x44/0x88/0x11),
 // atomic_load each, xor -> 221 (0xDD). On the current backend the

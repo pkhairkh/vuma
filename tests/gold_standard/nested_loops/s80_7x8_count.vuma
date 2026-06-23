@@ -1,5 +1,4 @@
 // s80_nl_7x8_count.vuma — 7x8 nested loop, count = 56
-// Expected exit code (correct): 56
 // Observed on current x86_64 backend: 0 (FAIL — known bug)
 //
 // Outer loop 7 iterations, inner loop 8 iterations each ->

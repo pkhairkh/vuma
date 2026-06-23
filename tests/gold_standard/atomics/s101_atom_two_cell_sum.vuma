@@ -1,6 +1,5 @@
 // s101_atom_two_cell_sum.vuma — two cells, atomic sum = 230 (100 + 130)
-// Expected exit code: 0 (current buggy backend)
-// Expected exit code (correct, post-bridge-fix): 230
+// Expected exit code: 230
 //
 // Two 8-byte cells. atomic_store 100/130, atomic_load each, a + b
 // -> 230. On the current backend the loads return 0 -> 0 + 0 = 0

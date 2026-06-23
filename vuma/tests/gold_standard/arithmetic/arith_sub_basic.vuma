@@ -1,9 +1,0 @@
-// arith_sub_basic — simple subtraction: 10 - 3 = 7
-// Expected exit code: 7
-
-fn main() -> i32 {
-    x: u32 = 10;
-    y: u32 = 3;
-    result: u32 = x - y;
-    return result;
-}

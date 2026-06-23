@@ -1,6 +1,5 @@
 // s20_atom_overwrite_three.vuma — atomic_store 8 then 80 then 180, load sees 180
-// Expected exit code: 0 (current buggy backend)
-// Expected exit code (correct, post-bridge-fix): 180
+// Expected exit code: 180
 //
 // Single 8-byte cell. atomic_store 8, overwrite with 80, overwrite with
 // 180 (last write wins). atomic_load should observe 180. On the current

@@ -1,4 +1,5 @@
 // s11_ls_overwrite_first_node.vuma — overwrite first node, sum = 149
+// Expected exit code: 149
 // Expected exit code (correct): 149  (99 + 20 + 30)
 // Observed on current x86_64 backend: non-deterministic (FAIL — known
 //   U8-truncation bug on `*(p+offset)` stores/loads with u64 type)

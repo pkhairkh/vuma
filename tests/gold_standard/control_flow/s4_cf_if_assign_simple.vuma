@@ -1,5 +1,4 @@
 // s4_cf_if_assign_simple.vuma — if true { x = 10 } else { x = 20 }; return x
-// Expected exit code (correct): 10
 // Observed on current x86_64 backend: 10 (PASS)
 //
 // Historically documented as "if-body assignments are silently

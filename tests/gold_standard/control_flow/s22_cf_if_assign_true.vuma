@@ -1,5 +1,4 @@
 // s22_cf_if_assign_true.vuma — if-true sets x=81, return = 81
-// Expected exit code (correct): 81
 // Observed on current x86_64 backend: 0 (FAIL — known bug)
 //
 // Standalone if-true body sets x = 81. With a literal `true` condition

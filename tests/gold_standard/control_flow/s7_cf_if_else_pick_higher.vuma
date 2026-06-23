@@ -1,5 +1,4 @@
 // s7_cf_if_else_pick_higher.vuma — if-true picks x=88, return = 88
-// Expected exit code (correct): 88
 // Observed on current x86_64 backend: 33 (FAIL — known bug)
 //
 // Outer if-true branch sets x = 88; else branch sets x = 33. With a

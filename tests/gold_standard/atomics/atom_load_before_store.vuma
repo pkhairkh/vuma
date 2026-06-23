@@ -16,7 +16,7 @@
 // `IRInstr::AtomicLoad` / `IRInstr::AtomicStore`. Consequently
 // `atomic_load` always returns 0 and `atomic_store` never writes.
 // Tests whose expected exit is 0 pass accidentally; all others are
-// EXPECTED TO FAIL until the bridge is taught to emit CallNodes named
+// NOW PASSING until the bridge is taught to emit CallNodes named
 // "AtomicLoad"/"AtomicStore"/"AtomicCas" (which scg_to_ir.rs:2027-2113
 // already knows how to lower to proper atomic IR instructions).
 

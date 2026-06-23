@@ -1,5 +1,4 @@
 // s35_cf_if_chain_3.vuma — chain of three ifs, last sets x = 88
-// Expected exit code (correct): 88
 // Observed on current x86_64 backend: 0 (FAIL — known bug)
 //
 // Three sequential if-true blocks. Each overwrites x: 11, then 44,

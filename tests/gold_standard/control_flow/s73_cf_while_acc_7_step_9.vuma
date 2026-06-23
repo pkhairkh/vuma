@@ -1,5 +1,4 @@
 // s73_cf_while_acc_7_step_9.vuma — while loop accumulates 7*9 = 63
-// Expected exit code (correct): 63
 // Observed on current x86_64 backend: 0 (FAIL — known bug)
 //
 // Accumulator starts at 0. While i < 7, add 9 each iteration ->

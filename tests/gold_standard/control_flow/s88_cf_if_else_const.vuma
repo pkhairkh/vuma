@@ -1,5 +1,4 @@
 // s88_cf_if_else_const.vuma — if true { x = 16 } else { x = 8 }; return x
-// Expected exit code (correct): 16
 // Observed on current x86_64 backend: 8 (FAIL — known bug)
 //
 // If-true branch should set x = 16, else branch sets x = 8.

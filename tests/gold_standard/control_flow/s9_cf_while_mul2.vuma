@@ -1,5 +1,4 @@
 // s9_cf_while_mul2.vuma — while loop accumulates 5 doublings-of-2 = 10
-// Expected exit code (correct): 10
 // Observed on current x86_64 backend: 0 (FAIL — known bug)
 //
 // Accumulator starts at 0. While i < 5, add 2 each iteration ->

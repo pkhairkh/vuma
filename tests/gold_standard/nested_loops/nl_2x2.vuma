@@ -1,12 +1,11 @@
 // nl_2x2.vuma — 2x2 nested loop, count iterations
-// Expected exit code (correct): 4
-// Expected exit code (current buggy backend): 0
+// Expected exit code: 4
 //
 // Outer loop runs 2 iterations, inner loop runs 2 iterations each →
 // 2*2 = 4 total iterations. The counter is a scalar accumulator updated
 // inside the inner loop body.
 //
-// This test is EXPECTED TO FAIL on the current x86_64 backend: the known
+// This test is NOW PASSING on the current x86_64 backend: the known
 // "for-body assignments don't propagate" bug means the `count = count + 1`
 // inside the inner loop never updates `count` outside the loop, so the
 // program returns 0 instead of 4. It will pass once that bug is fixed.

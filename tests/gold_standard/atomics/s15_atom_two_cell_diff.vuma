@@ -1,5 +1,5 @@
 // s15_atom_two_cell_diff.vuma — two cells, atomic_store 50/100, sum = 150
-// Expected exit code: 0 (current buggy backend)
+// Expected exit code: 150
 // Expected exit code (correct, post-bridge-fix): 150  (50 + 100)
 //
 // Two 8-byte cells. atomic_store 50 in c1, 100 in c2, then atomic_load

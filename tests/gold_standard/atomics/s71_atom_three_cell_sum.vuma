@@ -1,6 +1,5 @@
 // s71_atom_three_cell_sum.vuma — three cells, atomic sum = 190 (90+65+35)
-// Expected exit code: 0 (current buggy backend)
-// Expected exit code (correct, post-bridge-fix): 190
+// Expected exit code: 190
 //
 // Three 8-byte cells. atomic_store 90/65/35, atomic_load each,
 // sum -> 190. On the current backend the loads return 0 -> 0+0+0

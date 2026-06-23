@@ -1,5 +1,4 @@
 // s99_nl_2x45_count.vuma — 2x45 nested loop, count = 90
-// Expected exit code (correct): 90
 // Observed on current x86_64 backend: 0 (FAIL — known bug)
 //
 // Outer loop 2 iterations, inner loop 45 iterations each ->

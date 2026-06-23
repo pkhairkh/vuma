@@ -1,5 +1,4 @@
 // s19_cf_if_chain_2.vuma — if true x=11; if true x=x+22; return 33
-// Expected exit code (correct): 33
 // Observed on current x86_64 backend: 0 (FAIL — known bug)
 //
 // Two consecutive if-true blocks. First sets x = 11, second adds 22

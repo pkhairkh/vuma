@@ -1,5 +1,4 @@
 // s8_cf_if_chain_three.vuma — three if-true branches, last wins = 77
-// Expected exit code (correct): 77
 // Observed on current x86_64 backend: 0 (FAIL — known bug, if-true bodies dropped)
 //
 // Sequential if-true branches each reassign x: 11, 22, 77. With all

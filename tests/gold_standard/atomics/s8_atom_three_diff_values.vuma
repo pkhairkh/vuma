@@ -1,5 +1,5 @@
 // s8_atom_three_diff_values.vuma — three atomic stores + loads, sum = 30 (5 + 10 + 15)
-// Expected exit code: 0 (current buggy backend)
+// Expected exit code: 30
 // Expected exit code (correct, post-bridge-fix): 30  (5 + 10 + 15)
 //
 // Three 8-byte cells. atomic_store 5/10/15 into each, then atomic_load

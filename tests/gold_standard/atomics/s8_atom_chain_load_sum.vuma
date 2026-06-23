@@ -1,5 +1,5 @@
 // s8_atom_chain_load_sum.vuma — four atomic cells, sum loads = 100 (20 + 30 + 10 + 40)
-// Expected exit code: 0 (current buggy backend)
+// Expected exit code: 100
 // Expected exit code (correct, post-bridge-fix): 100  (20 + 30 + 10 + 40)
 //
 // Four 8-byte cells. atomic_store 20/30/10/40 into each, then atomic_load

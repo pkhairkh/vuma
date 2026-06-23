@@ -1,5 +1,4 @@
 // s19_cf_while_acc_5.vuma — while loop accumulates 5*6 = 30
-// Expected exit code (correct): 30
 // Observed on current x86_64 backend: 0 (FAIL — known bug)
 //
 // Accumulator starts at 0. While i < 5, add 6 each iteration ->

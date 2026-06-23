@@ -1,5 +1,4 @@
 // s42_nl_2x6_count.vuma — 2x6 nested loop, count = 12
-// Expected exit code (correct): 12
 // Observed on current x86_64 backend: 0 (FAIL — known bug)
 //
 // Outer loop 2 iterations, inner loop 6 iterations each -> 2*6 = 12

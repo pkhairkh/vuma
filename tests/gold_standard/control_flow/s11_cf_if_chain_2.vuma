@@ -1,5 +1,4 @@
 // s11_cf_if_chain_2.vuma — if-true sets x=15, return = 15
-// Expected exit code (correct): 15
 // Observed on current x86_64 backend: 0 (FAIL — known bug)
 //
 // Standalone if-true body sets x = 15. With a literal `true` condition

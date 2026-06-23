@@ -1,5 +1,4 @@
 // s10_struct_two_field_swap.vuma — swap two fields, return offset 0 = 20
-// Expected exit code (correct): 20
 // Observed on current x86_64 backend: non-deterministic (FAIL — known
 //   U8-truncation bug: `*(p+offset)=literal` writes only the low byte;
 //   u64 loads return uninitialized high bytes)

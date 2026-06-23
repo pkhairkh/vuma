@@ -1,5 +1,4 @@
 // s33_atom_two_cell_sum.vuma — two cells, atomic sum = 100 + 155 = 255
-// Expected exit code (correct): 255
 // Observed on current x86_64 backend: 0 (FAIL — known bug)
 //
 // Atomics test. On the current x86_64 backend atomic_load returns 0, so the

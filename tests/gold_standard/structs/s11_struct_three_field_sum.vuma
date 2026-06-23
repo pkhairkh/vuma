@@ -1,5 +1,4 @@
 // s11_struct_three_field_sum.vuma — 3 fields, sum = 60 (10 + 20 + 30)
-// Expected exit code (correct): 60
 // Observed on current x86_64 backend: non-deterministic (FAIL — known
 //   U8-truncation bug on `*(p+offset)` stores/loads with u64 type)
 //

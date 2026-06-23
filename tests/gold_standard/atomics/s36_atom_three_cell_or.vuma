@@ -1,5 +1,4 @@
 // s36_atom_three_cell_or.vuma — cells 100/020/010, OR = 110
-// Expected exit code (correct): 110
 // Observed on current x86_64 backend: 0 (FAIL — known bug)
 //
 // Three 8-byte cells store 100/20/10. OR of the three

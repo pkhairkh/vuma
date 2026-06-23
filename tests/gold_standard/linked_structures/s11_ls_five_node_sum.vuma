@@ -1,4 +1,5 @@
 // s11_ls_five_node_sum.vuma — 5 nodes, sum = 150
+// Expected exit code: 150
 // Expected exit code (correct): 150  (10 + 20 + 30 + 40 + 50)
 // Observed on current x86_64 backend: non-deterministic (FAIL — known
 //   U8-truncation bug on `*(p+offset)` stores/loads with u64 type)

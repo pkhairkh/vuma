@@ -1,5 +1,4 @@
 // s105_nl_4x37_count.vuma — 4x37 nested loop, count = 4*37 = 148
-// Expected exit code (correct): 148
 // Observed on current x86_64 backend: 0 (FAIL — known bug)
 // 
 // Outer loop runs 4 iterations, inner loop runs 37 iterations each -> 4*37 = 148 total. Counter is a scalar accumulator updated inside the inner loop. Known "for-body assignments don't propagate" bug keeps count at 0 -> exit 0. Will exit 148 once fixed.
