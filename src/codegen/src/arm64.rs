@@ -1653,16 +1653,17 @@ impl Instruction {
                 Ok(0x1800FC00u32 | (rs.encoding() << 16) | (rn.encoding() << 5) | rt.encoding())
             }
 
-            // ---- LDAR (load-acquire) ----
-            // LDAR: 1 0 0 0 1 0 0 1 1 1 0 1 1 1 1 1 0 0 0 0 0 Rn Rt
+            // ---- LDAR (load-acquire, 64-bit) ----
+            // LDAR Xt, [Xn]: 0xC8DFFC00 | (Rn<<5) | Rt
+            // size=11, 11000101, L=1, 011111, 1111, 00, Rn, Rt
             Instruction::LDAR { rt, rn } => {
-                Ok(0x08DFF800u32 | (rn.encoding() << 5) | rt.encoding())
+                Ok(0xC8DFFC00u32 | (rn.encoding() << 5) | rt.encoding())
             }
 
-            // ---- STLR (store-release) ----
-            // STLR: 1 0 0 0 1 0 0 0 1 1 0 1 1 1 1 1 0 0 0 0 0 Rn Rt
+            // ---- STLR (store-release, 64-bit) ----
+            // STLR Xt, [Xn]: 0xC89FFC00 | (Rn<<5) | Rt
             Instruction::STLR { rt, rn } => {
-                Ok(0x089FF800u32 | (rn.encoding() << 5) | rt.encoding())
+                Ok(0xC89FFC00u32 | (rn.encoding() << 5) | rt.encoding())
             }
 
             // ---- B ----

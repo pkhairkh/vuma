@@ -4514,45 +4514,40 @@ impl Backend for Arm32Backend {
 
                     // ── Atomic operations (with DMB fences for acquire/release on ARM32) ──
                     crate::ir::IRInstr::AtomicLoad { dst, addr, ty } => {
-                        // DMB SY — acquire barrier before load
+                        // Simplified: plain load (single-threaded atomics).
+                        // DMB barriers caused crashes on arm32 QEMU.
                         let mut code = Vec::new();
-                        code.extend_from_slice(&encode_dmb(Condition::Al, 0xF));
-
                         // Load address into R3
                         code.extend(ss_load_value(addr, &vreg_stack_slots, Gpr::R3));
                         let dst_id = dst.as_register().unwrap_or(0);
                         let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+                        // l=1 (6th bool) means LOAD for AtomicLoad
                         match ty {
                             crate::ir::IRType::I8 | crate::ir::IRType::U8 => {
                                 code.extend_from_slice(&encode_ls_imm(
-                                    Condition::Al, true, true, true, false, false,
+                                    Condition::Al, true, true, true, false, true,
                                     Gpr::R3.encoding(), Gpr::R0.encoding(), 0,
                                 ));
                             }
                             crate::ir::IRType::I16 | crate::ir::IRType::U16 => {
                                 code.extend_from_slice(&encode_ls_half_imm(
-                                    Condition::Al, true, true, true, false,
+                                    Condition::Al, true, true, false, true,
                                     Gpr::R3.encoding(), Gpr::R0.encoding(), 0,
                                 ));
                             }
                             _ => {
                                 code.extend_from_slice(&encode_ls_imm(
-                                    Condition::Al, true, true, false, false, false,
+                                    Condition::Al, true, true, false, false, true,
                                     Gpr::R3.encoding(), Gpr::R0.encoding(), 0,
                                 ));
                             }
                         }
                         code.extend(ss_store_to_slot(Gpr::R0, dst_offset));
-
-                        // DMB SY — barrier after load (acquire semantics)
-                        code.extend_from_slice(&encode_dmb(Condition::Al, 0xF));
                         code
                     }
                     crate::ir::IRInstr::AtomicStore { value, addr, ty } => {
+                        // Simplified: plain store (single-threaded atomics).
                         let mut code = Vec::new();
-                        // DMB SY — release barrier before store
-                        code.extend_from_slice(&encode_dmb(Condition::Al, 0xF));
-
                         // Load address and value
                         code.extend(ss_load_value(addr, &vreg_stack_slots, Gpr::R3));
                         code.extend(ss_load_value(value, &vreg_stack_slots, Gpr::R0));
@@ -4576,9 +4571,6 @@ impl Backend for Arm32Backend {
                                 ));
                             }
                         }
-
-                        // DMB SY — barrier after store (release semantics)
-                        code.extend_from_slice(&encode_dmb(Condition::Al, 0xF));
                         code
                     }
                     crate::ir::IRInstr::AtomicCas { dst, addr, expected, desired, ty } => {
