@@ -1842,8 +1842,12 @@ fn resolve_subexpr(
     scg: &SCG,
 ) -> ScgExpr {
     let subexpr = subexpr.trim();
-    
-    // Check if it's a literal number
+
+    // Strip outer parentheses (e.g. "(-42)" → "-42") so negative literals
+    // and parenthesized sub-expressions are handled correctly.
+    let subexpr = strip_outer_parens(subexpr);
+
+    // Check if it's a literal number (handles negative literals like "-42")
     if let Ok(num) = subexpr.parse::<i64>() {
         return ScgExpr::Int(num);
     }
