@@ -1408,6 +1408,11 @@ fn walk_control_flow_with_externs(
                     if let Some(exit) = exit_tgt {
                         loop_stop.insert(exit);
                     }
+                    // Also stop at the after-loop target so the body walk
+                    // doesn't consume it (it belongs to the enclosing scope).
+                    if let Some(after) = after_loop_tgt {
+                        loop_stop.insert(after);
+                    }
 
                     let body = walk_control_flow_with_externs(body_tgt, scg, edge_idx, consumed, &loop_stop, extern_functions);
 
