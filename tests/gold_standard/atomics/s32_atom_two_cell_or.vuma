@@ -6,6 +6,7 @@
 // exit 255 once the atomics bridge is wired through. Distinct from
 // s30_atom_two_cell_xor (xor, 255) and s26_atom_two_cell_or (different
 // values).
+// Expected exit code: 255
 
 fn main() -> i32 {
     c1 = allocate(8);

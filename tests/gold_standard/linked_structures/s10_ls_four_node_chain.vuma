@@ -6,6 +6,7 @@
 // 0/8/16/24. Stores 10/20/30/40, loads all four, sums, returns 100.
 // Distinct from s5_ls_four_node_chain (different values 5/15/25/35)
 // and s6_ls_three_node_chain (3 nodes).
+// Expected exit code: 100
 
 fn main() -> i32 {
     block = allocate(32);

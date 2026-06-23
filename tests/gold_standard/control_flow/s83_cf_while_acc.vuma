@@ -7,6 +7,7 @@
 // at 0 -> exit 0. Will exit 142 once fixed. Distinct from
 // s78_cf_while_acc (2), s74_cf_while_acc (73) and s72_cf_while_
 // acc (29).
+// Expected exit code: 142
 fn main() -> i32 {
     acc: u32 = 0;
     i: u32 = 0;
