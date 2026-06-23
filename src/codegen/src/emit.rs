@@ -4056,7 +4056,7 @@ pub fn emit_elf(
         // ET_EXEC: patch in-function BL relocations; unresolved (external)
         // calls are left as-is (offset 0) and the symbol name is recorded
         // in the symtab/strtab for downstream tooling / debuggers.
-        resolve_call_relocs(&mut text_section, &all_call_relocs, &function_offsets)?;
+        resolve_call_relocs(&mut text_section, &all_call_relocs, &function_offsets, config.backend)?;
     }
 
     // ---- Step 3: Collect data sections (with proper alignment) ----
@@ -4481,7 +4481,7 @@ pub fn emit_raw(functions: &[IRFunction], data_sections: &[DataSection], config:
         }
     }
 
-    resolve_call_relocs(&mut text_section, &all_call_relocs, &function_offsets)?;
+    resolve_call_relocs(&mut text_section, &all_call_relocs, &function_offsets, config.backend)?;
 
     // Append data sections after the text section for bare-metal targets.
     // Each section is aligned to its stated alignment requirement.
@@ -4632,15 +4632,13 @@ fn resolve_call_relocs(
     text_section: &mut [u8],
     relocs: &[CallRelocation],
     function_offsets: &HashMap<String, u64>,
+    backend: BackendKind,
 ) -> Result<()> {
     for reloc in relocs {
         let target_offset = match function_offsets.get(&reloc.target_func) {
             Some(&off) => off,
             None => {
                 // External symbol — the linker will resolve this.
-                // For ET_EXEC builds this means the call will go to
-                // offset 0 (a trap), but the proper path is to compile
-                // as ET_REL and link with the system linker.
                 log::debug!(
                     "call relocation target '{}' is an external symbol — deferring to linker",
                     reloc.target_func
@@ -4664,7 +4662,20 @@ fn resolve_call_relocs(
         ]);
         let offset_bytes = (target_offset as i64) - (reloc.text_byte_offset as i64);
         let offset_words = (offset_bytes >> 2) as i32;
-        let patched = (bl_word & !0x03FFFFFF) | ((offset_words as u32) & 0x03FFFFFF);
+
+        let patched = if backend == BackendKind::LoongArch64 {
+            // LoongArch BL uses a split I26 format:
+            //   bits[31:26] = opcode (0x15 = BL)
+            //   bits[25:10] = offs26[15:0]  (lower 16 bits)
+            //   bits[9:0]   = offs26[25:16] (upper 10 bits)
+            let off26 = (offset_words as u32) & 0x03FFFFFF;
+            let lower16 = off26 & 0xFFFF;
+            let upper10 = (off26 >> 16) & 0x3FF;
+            (bl_word & 0xFC000000) | (lower16 << 10) | upper10
+        } else {
+            // Standard contiguous 26-bit field (AArch64, RISC-V, etc.)
+            (bl_word & !0x03FFFFFF) | ((offset_words as u32) & 0x03FFFFFF)
+        };
         text_section[bl_byte_idx..bl_byte_idx + 4].copy_from_slice(&patched.to_le_bytes());
     }
     Ok(())
