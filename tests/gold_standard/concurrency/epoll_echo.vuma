@@ -46,6 +46,7 @@
 //   cli_addr:   16 bytes  — sockaddr_in for accept (unused but required)
 //   cli_len:     8 bytes  — socklen_t for accept (unused but required)
 //   read_buf:  256 bytes  — buffer for reading client data
+// Expected exit code: 0
 
 // ===========================================================================
 // Linux Syscall Constants

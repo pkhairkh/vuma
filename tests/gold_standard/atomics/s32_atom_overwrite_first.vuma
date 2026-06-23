@@ -6,6 +6,7 @@
 // exit 200 once the atomics bridge is wired through. Distinct from
 // s30_atom_overwrite_first (different value) and s26_atom_overwrite_load
 // (different value).
+// Expected exit code: 200
 
 fn main() -> i32 {
     c1 = allocate(8);

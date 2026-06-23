@@ -6,6 +6,7 @@
 // exit 210 once the atomics bridge is wired through. Distinct from
 // s30_atom_three_cell_sum (different values) and s26_atom_three_cell_sum
 // (different values).
+// Expected exit code: 210
 
 fn main() -> i32 {
     c1 = allocate(8);

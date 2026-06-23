@@ -3,6 +3,7 @@
 //
 // Outer loop runs 5 iterations, inner loop runs 26 iterations each -> 5*26 = 130 total. Counter is a scalar accumulator updated inside the inner loop. Known "for-body assignments don't propagate" bug keeps count at 0 -> exit 0. Will exit 130 once fixed.
 // Distinct from s102_nl_2x53_count (106), s102_nl_2x61_count (122), s102_nl_2x62_count (124), s102_nl_5x25_count (125).
+// Expected exit code: 130
 fn main() -> i32 {
     count: u32 = 0;
     for i in 0..5 {

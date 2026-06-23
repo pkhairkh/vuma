@@ -3,6 +3,7 @@
 //
 // Counter starts at 0 and increments by 1 each iteration of a for loop with range 0..138. Known "for-body assignments don't propagate" bug keeps count at 0 -> exit 0. Will exit 138 once fixed.
 // Distinct from s102_cf_if_single_assign (124), s102_cf_if_else_const (126), s102_cf_for_count (127), s102_cf_while_acc (130).
+// Expected exit code: 138
 fn main() -> i32 {
     count: u32 = 0;
     for i in 0..138 {

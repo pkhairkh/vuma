@@ -1,4 +1,5 @@
 // Minimal test: just allocate and return 0
+// Expected exit code: 0
 fn main() -> i32 {
     return 0;
 }
