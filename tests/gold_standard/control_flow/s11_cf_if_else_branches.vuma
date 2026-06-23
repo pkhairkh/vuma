@@ -9,6 +9,7 @@
 // s10_cf_if_else_compound (returns 80) and s9_cf_if_else_one_branch
 // (returns 200). Distinct from s10_cf_if_else_compound (values 20/80)
 // and s6_cf_if_two_branches_const (values 42/99).
+// Expected exit code: 30
 
 fn main() -> i32 {
     x: u32 = 0;

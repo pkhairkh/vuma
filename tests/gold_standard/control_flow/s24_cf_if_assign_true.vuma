@@ -6,6 +6,7 @@
 // is dropped, so x keeps its init value 0. Distinct from
 // s22_cf_if_assign_true (if-true x=81) and s18_cf_if_assign_true
 // (if-true x=64).
+// Expected exit code: 90
 
 fn main() -> i32 {
     x: u32 = 0;

@@ -7,6 +7,7 @@
 // -> exit 0. Will exit 110 once the if-body drop bug is fixed.
 // Distinct from s58_cf_if_single_assign (99) and s57_cf_if_single_
 // assign (95).
+// Expected exit code: 110
 
 fn main() -> i32 {
     x: u32 = 0;

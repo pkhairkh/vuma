@@ -1,4 +1,5 @@
 // Test: for loop
+// Expected exit code: 0
 fn main() -> i32 {
     sum: u32 = 0;
     for i in 0..10 {

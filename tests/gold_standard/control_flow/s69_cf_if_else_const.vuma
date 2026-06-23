@@ -7,6 +7,7 @@
 // the else body's assignment (220) survives instead. Will exit 80
 // once the if-body drop bug is fixed. Distinct from s66_cf_if_else_
 // const (84), s65_cf_if_else_const (44) and s64_cf_if_else_const (64).
+// Expected exit code: 80
 fn main() -> i32 {
     x: u32 = 0;
     if true {

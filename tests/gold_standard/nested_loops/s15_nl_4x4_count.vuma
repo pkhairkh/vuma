@@ -5,6 +5,7 @@
 // iterations. Counter is a scalar accumulator updated inside the inner loop
 // body. Known "for-body assignments don't propagate" bug keeps count at 0.
 // Distinct from s14_nl_3x3_count (3x3 = 9) and s12_nl_4x3_count (4x3 = 12).
+// Expected exit code: 16
 
 fn main() -> i32 {
     count: u32 = 0;

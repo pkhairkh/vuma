@@ -8,6 +8,7 @@
 // Will exit 88 once the if-body drop bug is fixed. Distinct from
 // s58_cf_while_acc_5 (40), s58_cf_for_count_8 (8) and s58_cf_if_
 // else_const (64).
+// Expected exit code: 88
 
 fn main() -> i32 {
     x: u32 = 0;

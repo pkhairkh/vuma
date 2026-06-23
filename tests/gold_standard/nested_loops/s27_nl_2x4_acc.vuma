@@ -5,6 +5,7 @@
 // increments by 15 each inner iteration -> 120. Known "for-body
 // assignments don't propagate" bug keeps acc at 0. Distinct from
 // s26_nl_2x5_count (2x5=10) and s22_nl_2x4_count (2x4=8).
+// Expected exit code: 120
 
 fn main() -> i32 {
     acc: u32 = 0;

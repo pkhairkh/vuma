@@ -6,6 +6,7 @@
 // the inner loop body. The known "for-body assignments don't
 // propagate" bug means count stays 0 → exit 0. Will pass (exit 6)
 // once that bug is fixed.
+// Expected exit code: 6
 
 fn main() -> i32 {
     count: u32 = 0;

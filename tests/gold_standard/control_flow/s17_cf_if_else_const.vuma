@@ -7,6 +7,7 @@
 // Will exit 33 once the if-body drop bug is fixed. Distinct from
 // s14_cf_if_else_const (values 42/99) and s9_cf_if_else_one_branch
 // (values 50/200).
+// Expected exit code: 33
 
 fn main() -> i32 {
     x: u32 = 0;

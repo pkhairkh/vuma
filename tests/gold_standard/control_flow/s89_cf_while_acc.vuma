@@ -6,6 +6,7 @@
 // Known "while-body assignments don't propagate" bug keeps acc
 // at 0 -> exit 0. Will exit 86 once fixed. Distinct from
 // s86_cf_while_acc (28), s82_cf_while_acc (9) and s78_cf_while_acc (2).
+// Expected exit code: 86
 fn main() -> i32 {
     acc: u32 = 0;
     i: u32 = 0;

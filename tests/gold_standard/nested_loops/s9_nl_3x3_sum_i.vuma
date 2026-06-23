@@ -6,6 +6,7 @@
 // values 0, 1, 2 — each repeated 3 times by the inner loop — so
 // the sum is (0+1+2) * 3 = 9. Known bug keeps acc at 0. Distinct
 // from s4_nl_3x3_sum (sums inner index j, not outer index i).
+// Expected exit code: 9
 
 fn main() -> i32 {
     acc: u32 = 0;

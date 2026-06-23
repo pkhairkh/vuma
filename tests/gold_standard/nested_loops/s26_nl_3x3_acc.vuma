@@ -6,6 +6,7 @@
 // assignments don't propagate" bug keeps count at 0. Distinct from
 // s22_nl_3x3_count (3x3 = 9, same dims, different name) and
 // s16_nl_3x4_sum (3x4 = 12).
+// Expected exit code: 9
 
 fn main() -> i32 {
     count: u32 = 0;

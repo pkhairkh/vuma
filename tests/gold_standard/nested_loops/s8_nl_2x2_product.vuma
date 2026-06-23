@@ -6,6 +6,7 @@
 // giving 0+0+0+1 = 1. Known bug keeps acc at 0. Distinct from
 // s5_nl_2x2_product (different operand pair, same shape but this
 // test verifies the (1,1) corner).
+// Expected exit code: 1
 
 fn main() -> i32 {
     acc: u32 = 0;

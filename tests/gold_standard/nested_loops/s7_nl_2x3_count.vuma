@@ -7,6 +7,7 @@
 // (2x3, acc accumulates 5s) and s4_nl_2x3_count (already exists
 // with same shape; this one is the s7 regression-guard variant
 // documented to track the bug).
+// Expected exit code: 6
 
 fn main() -> i32 {
     count: u32 = 0;
