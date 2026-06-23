@@ -2605,7 +2605,14 @@ fn extract_function_params(entry_id: NodeId, scg: &SCG, edge_idx: &EdgeIndex) ->
                     (name, ty)
                 }
                 NodePayload::Computation(comp) => {
-                    let name = format!("v_{}", edge.target.as_u64());
+                    // Extract the parameter name from the label.
+                    // Labels look like "param n" or "param count" etc.
+                    let label = comp.kind.label();
+                    let name = if let Some(rest) = label.strip_prefix("param ") {
+                        rest.trim().to_string()
+                    } else {
+                        format!("v_{}", edge.target.as_u64())
+                    };
                     let ty = comp
                         .result_type
                         .as_deref()
