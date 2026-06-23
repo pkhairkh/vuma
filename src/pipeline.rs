@@ -1851,6 +1851,15 @@ fn resolve_subexpr(
     if let Ok(num) = subexpr.parse::<i64>() {
         return ScgExpr::Int(num);
     }
+
+    // Check if it's a hex literal (e.g. "0x12", "0xFF", "-0x1A")
+    let hex_str = subexpr.strip_prefix("-").unwrap_or(subexpr);
+    let is_neg = subexpr.starts_with('-');
+    if let Some(hex_digits) = hex_str.strip_prefix("0x").or_else(|| hex_str.strip_prefix("0X")) {
+        if let Ok(num) = i64::from_str_radix(hex_digits, 16) {
+            return ScgExpr::Int(if is_neg { -num } else { num });
+        }
+    }
     
     // Check if it's a known literal (lit_<n>)
     if let Some(num_str) = subexpr.strip_prefix("lit_") {

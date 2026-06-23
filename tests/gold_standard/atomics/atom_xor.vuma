@@ -1,5 +1,5 @@
 // atom_xor.vuma — store 0xFF, load, XOR with 0xFF in a variable, store, load
-// Expected exit code: 255
+// Expected exit code: 0
 //
 // Gold-standard atomic-operation test. Uses VUMA's builtin
 // `atomic_store(addr, val)` / `atomic_load(addr)` / `atomic_cas(addr, exp, des)`
