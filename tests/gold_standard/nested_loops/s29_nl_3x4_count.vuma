@@ -2,6 +2,7 @@
 // Observed on current x86_64 backend: 0 (FAIL — known bug)
 //
 // Outer loop 3 iterations, inner loop 4 iterations each -> 3*4 = 12 total. Counter increments by 1 each inner iteration. Known "for-body assignments don't propagate" bug keeps count at 0. Distinct from s26_nl_3x3_acc (3x3 = 9) and s22_nl_3x3_count (3x3 = 9).
+// Expected exit code: 12
 
 fn main() -> i32 {
     count: u32 = 0;

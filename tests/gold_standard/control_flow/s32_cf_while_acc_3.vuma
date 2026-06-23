@@ -5,6 +5,7 @@
 // backend if-true-body and loop-body assignments are dropped, so the result
 // stays 0. Will exit 21 once the SCG/bridge bug is fixed. Distinct from
 // s27_cf_while_acc_4 (4*5=20) and s26_cf_while_acc_6 (6*3=18).
+// Expected exit code: 21
 
 fn main() -> i32 {
     acc: u32 = 0;

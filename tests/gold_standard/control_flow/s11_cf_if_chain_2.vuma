@@ -6,6 +6,7 @@
 // assignment is dropped, so x keeps its init value 0. Distinct from
 // s4_cf_if_assign_simple (if-true x=10, else x=20) and s8_cf_if_chain_three
 // (three chained ifs, all dropped).
+// Expected exit code: 15
 
 fn main() -> i32 {
     x: u32 = 0;

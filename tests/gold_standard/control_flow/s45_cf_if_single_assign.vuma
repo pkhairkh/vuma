@@ -7,6 +7,7 @@
 // Will exit 88 once the if-body drop bug is fixed. Distinct from
 // s42_cf_if_single_assign (77) and s38_cf_if_single_assign (88, same
 // total but different operand 88 vs 77).
+// Expected exit code: 88
 
 fn main() -> i32 {
     x: u32 = 0;

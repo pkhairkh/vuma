@@ -6,6 +6,7 @@
 // assignments don't propagate" bug keeps count at 0. Distinct from
 // s4_nl_2x3_count (2x3 = 6, same dims, different name) and
 // s5_nl_2x3_acc (sums i+j, doesn't count).
+// Expected exit code: 6
 
 fn main() -> i32 {
     count: u32 = 0;

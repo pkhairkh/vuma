@@ -6,6 +6,7 @@
 // stays 0. Will exit 65 once the SCG/bridge bug is fixed. Distinct from
 // s30_cf_if_single_assign (value 70) and s26_cf_if_single_assign (different
 // value).
+// Expected exit code: 65
 
 fn main() -> i32 {
     x: u32 = 0;

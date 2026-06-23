@@ -6,6 +6,7 @@
 // "for-body assignments don't propagate" bug keeps count at 0.
 // Distinct from s38_nl_4x2_count (8, same dims, swapped order) and
 // s34_nl_2x4_count (8, same dims).
+// Expected exit code: 8
 
 fn main() -> i32 {
     count: u32 = 0;

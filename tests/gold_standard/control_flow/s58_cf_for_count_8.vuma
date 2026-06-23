@@ -6,6 +6,7 @@
 // bug keeps count at 0 -> exit 0. Will exit 8 once fixed. Distinct
 // from s51_cf_while_acc_4 (24), s51_cf_for_count_7 (7) and s51_cf_if_
 // else_const (70).
+// Expected exit code: 8
 
 fn main() -> i32 {
     count: u32 = 0;

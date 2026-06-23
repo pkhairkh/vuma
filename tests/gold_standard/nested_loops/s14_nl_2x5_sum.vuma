@@ -6,6 +6,7 @@
 // the inner loop body. Known "for-body assignments don't propagate"
 // bug keeps count at 0. Distinct from s9_nl_2x4_count (2x4 = 8) and
 // s10_nl_5x1_count (5x1 = 5).
+// Expected exit code: 10
 
 fn main() -> i32 {
     count: u32 = 0;

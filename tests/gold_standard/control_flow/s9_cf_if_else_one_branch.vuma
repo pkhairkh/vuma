@@ -8,6 +8,7 @@
 // from s4_cf_if_assign_simple (values 10/20, currently also
 // regressed to exit 20) and s5_cf_if_then_else_3way (two
 // assignments in true branch).
+// Expected exit code: 50
 
 fn main() -> i32 {
     x: u32 = 0;

@@ -7,6 +7,7 @@
 // propagate" bug keeps acc at 0 -> exit 0. Will exit 125
 // once fixed.
 // Distinct from s97_cf_while_acc (116), s94_cf_while_acc (44), s90_cf_while_acc (71).
+// Expected exit code: 125
 fn main() -> i32 {
     acc: u32 = 0;
     i: u32 = 0;

@@ -9,6 +9,7 @@
 // fixed. Distinct from s66_cf_if_else_const (correct 84 /
 // observed 210), s62_cf_if_else_const (56) and s58_cf_if_
 // else_const (64).
+// Expected exit code: 72
 fn main() -> i32 {
     x: u32 = 0;
     if true {

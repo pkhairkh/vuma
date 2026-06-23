@@ -6,6 +6,7 @@
 // the if-true body assignment is dropped and the else assignment wins,
 // so the observed exit is 88. Distinct from s6_cf_if_two_branches_const
 // (different else value 99, same bug class).
+// Expected exit code: 42
 
 fn main() -> i32 {
     x: u32 = 0;

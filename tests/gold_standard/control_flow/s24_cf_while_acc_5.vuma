@@ -6,6 +6,7 @@
 // assignments don't propagate" bug keeps acc at 0 -> exit 0. Will exit
 // 20 once fixed. Distinct from s22_cf_while_acc_3 (3*5 = 15) and
 // s18_cf_while_acc_4 (4*5 = 20, different addend).
+// Expected exit code: 20
 
 fn main() -> i32 {
     acc: u32 = 0;

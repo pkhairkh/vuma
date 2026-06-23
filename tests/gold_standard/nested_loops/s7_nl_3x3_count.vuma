@@ -5,6 +5,7 @@
 // by 1 each inner iteration. Known "for-body assignments don't
 // propagate" bug keeps count at 0. Distinct from s5_nl_3x2_count
 // (3x2 = 6) and s6_nl_3x3_with_j (sums j*j, not counts).
+// Expected exit code: 9
 
 fn main() -> i32 {
     count: u32 = 0;

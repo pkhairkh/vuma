@@ -7,6 +7,7 @@
 // at 0 -> exit 0. Will exit 26 once fixed. Distinct from
 // s78_cf_while_acc (2), s77_cf_while_acc (3) and s76_cf_while_
 // acc (2).
+// Expected exit code: 26
 fn main() -> i32 {
     acc: u32 = 0;
     i: u32 = 0;

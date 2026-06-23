@@ -6,6 +6,7 @@
 // assignments don't propagate" bug keeps acc at 0 -> exit 0. Will
 // exit 21 once fixed. Distinct from s58_cf_for_count_8 (8), s58_cf_
 // while_acc_5 (40) and s58_cf_if_else_const (64).
+// Expected exit code: 21
 
 fn main() -> i32 {
     acc: u32 = 0;

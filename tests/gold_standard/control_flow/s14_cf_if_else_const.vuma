@@ -8,6 +8,7 @@
 // 99 (exit 99). Will exit 42 once the if-body drop bug is fixed.
 // Distinct from s9_cf_if_else_one_branch (values 50/200) and
 // s10_cf_if_else_compound (values 20/80).
+// Expected exit code: 42
 
 fn main() -> i32 {
     x: u32 = 0;

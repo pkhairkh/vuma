@@ -6,6 +6,7 @@
 // assignments don't propagate" bug keeps acc at 0 -> exit 0.
 // Will exit 31 once fixed. Distinct from s70_cf_while_acc_6 (66),
 // s66_cf_while_acc_3 (33) and s74_cf_while_acc (73).
+// Expected exit code: 31
 
 fn main() -> i32 {
     acc: u32 = 0;

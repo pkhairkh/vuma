@@ -6,6 +6,7 @@
 // "for-body assignments don't propagate" bug keeps count at 0.
 // Distinct from s30_nl_2x2_count (2x2 = 4) and s27_nl_3x2_sum
 // (3x2, sum-variant).
+// Expected exit code: 6
 
 fn main() -> i32 {
     count: u32 = 0;

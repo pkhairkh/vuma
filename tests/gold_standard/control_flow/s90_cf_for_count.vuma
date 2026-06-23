@@ -6,6 +6,7 @@
 // propagate" bug keeps count at 0 -> exit 0. Will exit 69 once
 // fixed. Distinct from s86_cf_for_count (9), s82_cf_for_count (6)
 // and s78_cf_for_count (1).
+// Expected exit code: 69
 fn main() -> i32 {
     count: u32 = 0;
     for i in 0..69 {

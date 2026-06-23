@@ -8,6 +8,7 @@
 // survives instead. Will exit 74 once the if-body drop bug is
 // fixed. Distinct from s69_cf_if_else_const (80/220), s70_cf_if_
 // else_const (76/160) and s66_cf_if_else_const (84/210).
+// Expected exit code: 74
 fn main() -> i32 {
     x: u32 = 0;
     if true {

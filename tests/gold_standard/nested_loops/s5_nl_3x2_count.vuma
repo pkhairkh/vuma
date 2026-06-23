@@ -4,6 +4,7 @@
 // Outer 3 iterations, inner 2 each -> 6 total iterations. Counter
 // increments by 1 each iteration. Known bug keeps count at 0.
 // Distinct from s4_nl_3x3_sum (3x3, sums j).
+// Expected exit code: 6
 
 fn main() -> i32 {
     count: u32 = 0;

@@ -8,6 +8,7 @@
 // once the if-body drop bug is fixed. Distinct from
 // s18_cf_if_else_const (values 55/110) and s14_cf_if_else_const
 // (values 42/99).
+// Expected exit code: 42
 
 fn main() -> i32 {
     x: u32 = 0;

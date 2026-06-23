@@ -8,6 +8,7 @@
 // Will exit 75 once the if-body drop bug is fixed. Distinct from
 // s58_cf_if_else_const (true=64/else=200, observed 200) and s57_cf_
 // if_else_const (true=85/else=170, observed 170).
+// Expected exit code: 75
 
 fn main() -> i32 {
     x: u32 = 0;

@@ -10,6 +10,7 @@
 // if/bool-return bug is fixed. It necessarily uses `if` (the only way
 // to inspect a bool), so it is not strictly "straight-line" — included
 // here because the task spec calls for it as a documented-failure case.
+// Expected exit code: 1
 
 fn get_true() -> bool {
     return true;

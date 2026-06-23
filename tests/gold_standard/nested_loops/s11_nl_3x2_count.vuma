@@ -5,6 +5,7 @@
 // Counter increments by 1 each inner iteration. Known "for-body
 // assignments don't propagate" bug keeps count at 0. Distinct from
 // s10_nl_2x4_count (2x4) and s8_nl_3x2_sum_i (3x2 with i-sum).
+// Expected exit code: 6
 
 fn main() -> i32 {
     count: u32 = 0;

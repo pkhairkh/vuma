@@ -5,6 +5,7 @@
 // 50 total. Known "while-body assignments don't propagate" bug
 // keeps acc at 0 -> exit 0. Will exit 50 once fixed. Distinct from
 // cf_while_sum (sum-of-counter pattern).
+// Expected exit code: 50
 
 fn main() -> i32 {
     acc: u32 = 0;

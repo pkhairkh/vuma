@@ -7,6 +7,7 @@
 // Will exit 99 once the if-body drop bug is fixed. Distinct from
 // s62_cf_for_count_5 (5), s62_cf_if_single_assign (88) and s62_cf_
 // while_acc_4 (36).
+// Expected exit code: 99
 
 fn main() -> i32 {
     x: u32 = 0;

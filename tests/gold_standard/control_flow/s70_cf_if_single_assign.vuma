@@ -7,6 +7,7 @@
 // -> exit 0. Will exit 100 once the if-body drop bug is fixed.
 // Distinct from s66_cf_if_single_assign (95), s65_cf_if_single_
 // assign (98) and s62_cf_if_single_assign (88).
+// Expected exit code: 100
 fn main() -> i32 {
     x: u32 = 0;
     if true {

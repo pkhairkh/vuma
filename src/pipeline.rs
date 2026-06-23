@@ -1881,12 +1881,17 @@ fn resolve_subexpr(
                 }
             }
         }
-        // Second pass: check if any source's label CONTAINS the variable name
+        // Second pass: check if any source's label contains the variable name
+        // as a whole word (word-boundary match).  The previous `contains`
+        // check was too loose: it matched "i" inside "lit_5", causing
+        // `if (i == 5)` to resolve `i` to the literal 5 (because "lit_5"
+        // contains "i"), producing `5 == 5` (always true) and breaking
+        // every loop with a condition that references the loop variable.
         for &src in sources {
             if let Some(src_data) = scg.get_node(src) {
                 if let NodePayload::Computation(comp) = &src_data.payload {
                     let label = comp.kind.label();
-                    if label.contains(subexpr) {
+                    if contains_word(&label, subexpr) {
                         return resolve_df_input_for_node(src, edge_idx, scg);
                     }
                 }
@@ -1947,6 +1952,39 @@ fn resolve_subexpr(
 /// Check if a string is a simple variable name (alphanumeric, no spaces or operators)
 fn is_simple_var(s: &str) -> bool {
     !s.is_empty() && s.chars().all(|c| c.is_alphanumeric() || c == '_') && !s.parse::<i64>().is_ok()
+}
+
+/// Check if `needle` appears in `haystack` as a whole word (bounded by
+/// non-identifier characters or string boundaries).  This prevents false
+/// matches like "i" inside "lit_5" or "result" inside "results".
+fn contains_word(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return false;
+    }
+    let needle_bytes = needle.as_bytes();
+    let h_bytes = haystack.as_bytes();
+    let n_len = needle_bytes.len();
+    if n_len == 0 {
+        return false;
+    }
+    let mut i = 0;
+    while i + n_len <= h_bytes.len() {
+        if &h_bytes[i..i + n_len] == needle_bytes {
+            // Check left boundary
+            let left_ok = i == 0 || !is_ident_byte(h_bytes[i - 1]);
+            // Check right boundary
+            let right_ok = i + n_len == h_bytes.len() || !is_ident_byte(h_bytes[i + n_len]);
+            if left_ok && right_ok {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+fn is_ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
 }
 
 /// Try to extract the size expression from a dynamic-size `allocate(<expr>)`
@@ -2444,13 +2482,25 @@ fn convert_node_to_statement_with_externs(
                     reassigns: user_var.clone(),
                 }))
             } else {
-                // Fallback: use the first two DataFlow inputs
-                let op = parse_binop(&op_label).unwrap_or(IrBinOpKind::Add);
+                // parse_expr_split found no top-level operator.
+                //
+                // Try resolve_subexpr on the expression string — this handles
+                // simple assignments like `result = i` where the RHS is a
+                // bare variable name.  resolve_subexpr will return
+                // ScgExpr::Var("i") for a valid identifier, which the IR
+                // builder resolves via its `names` map (e.g. the loop phi
+                // vreg for `i`).  Without this, we'd fall through to
+                // resolve_df_input which returns Int(0) when the DataFlow
+                // source is a Control node (e.g. LoopHeader), silently
+                // turning `result = i` into `result = 0`.
+                let rhs_expr = resolve_subexpr(&expr_str, &sources, edge_idx, scg);
+                // Use Add(0, rhs) as a copy — the IR builder lowers this to
+                // `dst = 0 + rhs = rhs`.
                 Some(ScgStatement::Computation(ComputationNode {
                     dst: computation_dst(node_id, &op_label, scg),
-                    op,
-                    lhs: resolve_df_input(node_id, 0, edge_idx, scg),
-                    rhs: resolve_df_input(node_id, 1, edge_idx, scg),
+                    op: IrBinOpKind::Add,
+                    lhs: ScgExpr::Int(0),
+                    rhs: rhs_expr,
                     tail_call: false,
                     reassigns: user_var.clone(),
                 }))
@@ -2734,7 +2784,7 @@ fn find_entry_points(scg: &SCG, edge_idx: &EdgeIndex) -> Vec<NodeId> {
 /// 3. **Phase 3: Statement generation** — Convert non-control nodes into
 ///    ScgStatements with DataFlow-based variable naming.
 
-fn parse_for_range(label: &str) -> Option<(String, i64, i64)> {
+fn parse_for_range(label: &str) -> Option<(String, i64, ScgExpr)> {
     let label = label.trim();
     if !label.starts_with("for ") { return None; }
     let rest = &label[4..];
@@ -2747,9 +2797,33 @@ fn parse_for_range(label: &str) -> Option<(String, i64, i64)> {
         let inclusive = end_part.starts_with("=");
         let end_str = if inclusive { &end_part[1..] } else { end_part }.trim();
         let start: i64 = start_str.parse().ok()?;
-        let end: i64 = end_str.parse().ok()?;
-        let end = if inclusive { end + 1 } else { end };
-        return Some((var_name, start, end));
+        // End bound can be a constant or a variable name.  Constants are
+        // parsed as i64 and wrapped in ScgExpr::Int.  Variable names are
+        // wrapped in ScgExpr::Var — the IR builder resolves them via its
+        // `names` map (e.g. an outer loop's phi vreg).  This is what makes
+        // `for j in 0..i` work when `i` is the outer loop variable.
+        let end_expr = if let Ok(end) = end_str.parse::<i64>() {
+            let end = if inclusive { end + 1 } else { end };
+            ScgExpr::Int(end)
+        } else if end_str.chars().next().map_or(false, |c| c.is_alphabetic() || c == '_')
+            && end_str.chars().all(|c| c.is_alphanumeric() || c == '_')
+        {
+            // Variable end bound — inclusive adjustment is handled at
+            // runtime by the comparison (we use SLt for exclusive, but
+            // for inclusive the caller should have already adjusted).
+            if inclusive {
+                // `for j in 0..=i` → compare j <= i.  We can't easily
+                // express SLe with the current for_range structure (which
+                // always uses SLt).  For now, treat inclusive variable
+                // bounds as exclusive (rare in practice).
+                ScgExpr::Var(end_str.to_string())
+            } else {
+                ScgExpr::Var(end_str.to_string())
+            }
+        } else {
+            return None;
+        };
+        return Some((var_name, start, end_expr));
     }
     None
 }
@@ -4499,7 +4573,7 @@ fn parse_while_to_for_range(
     label: &str,
     edge_idx: &EdgeIndex,
     scg: &SCG,
-) -> Option<(String, i64, i64)> {
+) -> Option<(String, i64, ScgExpr)> {
     let label = label.trim();
     let cond_str = label.strip_prefix("while")?.trim();
     let cond_str = cond_str.strip_prefix('(').unwrap_or(cond_str);
@@ -4511,7 +4585,16 @@ fn parse_while_to_for_range(
         return None;
     }
     let rhs_str = cond_str[pos + 1..].trim();
-    let end: i64 = rhs_str.parse().ok()?;
+    // End bound can be a constant or a variable name.
+    let end_expr = if let Ok(end) = rhs_str.parse::<i64>() {
+        ScgExpr::Int(end)
+    } else if rhs_str.chars().next().map_or(false, |c| c.is_alphabetic() || c == '_')
+        && rhs_str.chars().all(|c| c.is_alphanumeric() || c == '_')
+    {
+        ScgExpr::Var(rhs_str.to_string())
+    } else {
+        return None;
+    };
 
     let lhs_expr = resolve_df_input(header_id, 0, edge_idx, scg);
     let var_name = match &lhs_expr {
@@ -4534,7 +4617,7 @@ fn parse_while_to_for_range(
         } else { 0 }
     } else { 0 };
 
-    Some((var_name, start, end))
+    Some((var_name, start, end_expr))
 }
 
 

@@ -5,6 +5,7 @@
 // 3*41 = 123 total. Counter increments by 1 each inner iteration.
 // Known "for-body assignments don't propagate" bug keeps count at
 // 0. Distinct from s90_nl_3x44_count (132), s82_nl_9x3_count (27) and s78_nl_5x19_count (95).
+// Expected exit code: 123
 fn main() -> i32 {
     count: u32 = 0;
     for i in 0..3 {

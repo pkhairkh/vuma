@@ -6,6 +6,7 @@
 // keeps the else-branch value 180 (exit 180). Will exit 30 once the
 // if-body drop bug is fixed. Distinct from s7_cf_if_else_pick_higher
 // (picks higher value) and s13_cf_if_two_branches_const (values 60/240).
+// Expected exit code: 30
 
 fn main() -> i32 {
     x: u32 = 0;

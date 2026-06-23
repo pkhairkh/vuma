@@ -6,6 +6,7 @@
 // backend the if-true body assignments are dropped, so x stays 0.
 // Distinct from s30_cf_if_single_assign (single-if, 70) and
 // s27_cf_if_chain_2 (different values, 77).
+// Expected exit code: 66
 
 fn main() -> i32 {
     x: u32 = 0;

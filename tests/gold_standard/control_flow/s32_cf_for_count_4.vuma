@@ -6,6 +6,7 @@
 // stays 0. Will exit 4 once the SCG/bridge bug is fixed. Distinct from
 // s30_cf_for_count_3 (3 iterations) and s26_cf_for_count_4 (4 iterations,
 // observed 0).
+// Expected exit code: 4
 
 fn main() -> i32 {
     count: u32 = 0;

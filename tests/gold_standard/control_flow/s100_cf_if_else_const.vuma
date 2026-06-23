@@ -8,6 +8,7 @@
 // assignment (11) survives instead. Will exit 118 once the
 // if-body drop bug is fixed.
 // Distinct from s97_cf_if_else_const (122), s94_cf_if_else_const (64), s90_cf_if_else_const (79).
+// Expected exit code: 118
 fn main() -> i32 {
     x: u32 = 0;
     if true {

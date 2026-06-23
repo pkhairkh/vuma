@@ -1,5 +1,6 @@
 // Test: u32 arithmetic that exercises 32-bit overflow and function calls
 // Expected: exit 79 (0x4F)
+// Expected exit code: 79
 
 fn add_u32(a: u32, b: u32) -> u32 {
     return a + b;

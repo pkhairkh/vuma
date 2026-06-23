@@ -6,6 +6,7 @@
 // (77) wins. On the current backend the if-true body assignments are
 // dropped, so x remains 0. Distinct from s5_cf_if_then_else_3way
 // (if-else chain).
+// Expected exit code: 77
 
 fn main() -> i32 {
     x: u32 = 0;

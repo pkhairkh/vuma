@@ -6,6 +6,7 @@
 // keeps the else-branch value 240 (exit 240). Will exit 60 once the
 // if-body drop bug is fixed. Distinct from s9_cf_if_else_one_branch
 // (values 50/200) and s4_cf_if_assign_simple (values 10/20).
+// Expected exit code: 60
 
 fn main() -> i32 {
     x: u32 = 0;

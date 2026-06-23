@@ -8,6 +8,7 @@
 // the if-body drop bug is fixed. Distinct from s26_cf_if_else_const
 // (values 200/100, observed 100) and s22_cf_if_else_const
 // (values 70/140, observed 140).
+// Expected exit code: 90
 
 fn main() -> i32 {
     x: u32 = 0;

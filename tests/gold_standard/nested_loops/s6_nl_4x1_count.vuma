@@ -5,6 +5,7 @@
 // increments by 1 each inner iteration. Even with a single-iteration
 // inner loop, the body-assignment bug keeps count at 0. Distinct from
 // s5_nl_3x2_count (3x2).
+// Expected exit code: 4
 
 fn main() -> i32 {
     count: u32 = 0;

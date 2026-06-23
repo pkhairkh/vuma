@@ -6,6 +6,7 @@
 // if-true body assignments are dropped, so x stays 0. Distinct from
 // s26_cf_if_chain_3 (three-if chain, 180) and s22_cf_if_assign_true
 // (single if-true).
+// Expected exit code: 90
 
 fn main() -> i32 {
     x: u32 = 0;

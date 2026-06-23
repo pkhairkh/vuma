@@ -5,6 +5,7 @@
 // for-body assignments don't propagate, so count stays 0. Will exit 6 once
 // the loop-body drop bug is fixed. Distinct from s30_nl_2x3_count (2x3 = 6)
 // and s26_nl_2x3_count (different set).
+// Expected exit code: 6
 
 fn main() -> i32 {
     count: u32 = 0;

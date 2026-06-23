@@ -6,6 +6,7 @@
 // 0, 1, 2, 3 — each repeated twice — so the sum is
 // (0+1+2+3) * 2 = 12. Known bug keeps acc at 0. Distinct from
 // s6_nl_4x1_count (counts iterations, doesn't sum i).
+// Expected exit code: 12
 
 fn main() -> i32 {
     acc: u32 = 0;

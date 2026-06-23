@@ -1,4 +1,5 @@
 // Test program: print integers and hex output to stdout
+// Expected exit code: 0
 fn main() -> i32 {
     // Test print_int: print the number 42
     print_int(42);

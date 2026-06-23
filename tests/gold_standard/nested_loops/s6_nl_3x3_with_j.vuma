@@ -6,6 +6,7 @@
 // so sum per outer = 0 + 1 + 4 = 5; total = 5 * 3 = 15. Known
 // "for-body assignments don't propagate" bug keeps acc at 0. Distinct
 // from s4_nl_3x3_sum (sums j, not j*j).
+// Expected exit code: 15
 
 fn main() -> i32 {
     acc: u32 = 0;
