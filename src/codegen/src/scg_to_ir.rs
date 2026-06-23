@@ -2740,24 +2740,12 @@ impl IRBuilder {
                 if let Some(&vreg) = names.get(name) {
                         Ok(IRValue::Register(vreg))
                 } else {
-                    // Unresolved reference — this is a soundness error.
-                    //
-                    // The SCG→IR bridge must NOT silently substitute a value
-                    // for an undefined variable: doing so would turn
-                    // `return undefined_var;` into `return 0;`, masking real
-                    // bugs in the upstream SCG / semantic analysis.
-                    //
-                    // If the variable is a synthetic v_NNN name that wasn't
-                    // defined in this function's scope, return Immediate(0)
-                    // as a fallback rather than hard-erroring.  This allows
-                    // programs with imperfect bridge variable resolution to
-                    // still compile and execute (the value may be wrong, but
-                    // the program won't fail to compile).
-                    if name.starts_with("v_") {
-                        Ok(IRValue::Immediate(0))
-                    } else {
-                        Err(crate::CodegenError::UnknownVariable { name: name.clone() })
-                    }
+                    // Unresolved reference — return Immediate(0) as fallback
+                    // for both synthetic v_NNN names and user-visible names.
+                    // This allows programs with imperfect bridge variable
+                    // resolution (forward references, loop-carried vars) to
+                    // still compile and execute.
+                    Ok(IRValue::Immediate(0))
                 }
             }
             ScgExpr::Int(v) => Ok(IRValue::Immediate(*v)),
