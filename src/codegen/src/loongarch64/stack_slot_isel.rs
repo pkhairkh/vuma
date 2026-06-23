@@ -1002,7 +1002,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     // Store return value ($a0) to dst's stack slot
                     if let Some(d) = dst {
                         let dst_id = d.as_register().unwrap_or(0);
-                        code.extend(encode_store_to_vreg(S0, dst_id, fp, &vreg_slots));
+                        code.extend(encode_store_to_vreg(Gpr::A0, dst_id, fp, &vreg_slots));
                     }
                     code
                 }
@@ -1450,9 +1450,9 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
             }
             crate::ir::IRTerminator::Return(vals) => {
                 let mut code = Vec::new();
-                // Load return value into $a0 (S0)
+                // Load return value into $a0 (A0 = $r4) per LP64 ABI
                 if let Some(val) = vals.first() {
-                    code.extend(encode_load_value(val, S0, fp, &vreg_slots));
+                    code.extend(encode_load_value(val, Gpr::A0, fp, &vreg_slots));
                 }
                 // Epilogue
                 code.extend_from_slice(&Instruction::LdD { rd: Gpr::Ra, rj: fp, imm12: -8 }.encode());
