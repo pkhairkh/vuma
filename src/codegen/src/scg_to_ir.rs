@@ -275,6 +275,10 @@ pub enum AccessNode {
         ptr: ScgExpr,
         /// Optional byte offset from the pointer.
         offset: Option<ScgExpr>,
+        /// Optional load type override. When None, the IR builder
+        /// determines the type (U8 for byte loads, U64 for pointer
+        /// loads). When Some, the specified type is used directly.
+        ty: Option<crate::ir::IRType>,
     },
     /// Write: `*ptr = val` or `ptr.field = val`
     Store {
@@ -2074,7 +2078,7 @@ impl IRBuilder {
         names: &mut HashMap<String, u32>,
     ) -> Result<()> {
         match access {
-            AccessNode::Load { dst, ptr, offset } => {
+            AccessNode::Load { dst, ptr, offset, ty } => {
                 let ptr_val = self.resolve_expr(ptr, names, ir_func)?;
                 let (addr_val, byte_offset) = match offset {
                     Some(off) => {
@@ -2097,22 +2101,8 @@ impl IRBuilder {
                 let dst_vreg = self.alloc_vreg();
                 ir_func.register_vreg(VirtualRegister::named(dst_vreg, dst));
                 names.insert(dst.clone(), dst_vreg);
-                // Determine load width: if loading from a pointer vreg
-                // (e.g. **buf1 first deref), use U64 to load the stored
-                // pointer. Otherwise default to U8 for byte loads.
-                let load_ty = if let IRValue::Register(vid) = addr_val {
-                    if self.pointer_vregs.contains(&vid) {
-                        // Loading from a pointer vreg — the result is also
-                        // a pointer (for multi-level dereference). Mark it
-                        // so subsequent loads from it also use U64.
-                        self.pointer_vregs.insert(dst_vreg);
-                        IRType::U64
-                    } else {
-                        IRType::U8
-                    }
-                } else {
-                    IRType::U8
-                };
+                // Use the explicit type if provided, otherwise default to U8
+                let load_ty = ty.clone().unwrap_or(IRType::U8);
                 ir_func.current_block().push(IRInstruction::Load {
                     dst: IRValue::Register(dst_vreg),
                     addr: addr_val,
@@ -3052,7 +3042,7 @@ impl IRBuilder {
                 defs.insert(name.clone());
                 Self::expr_uses(size_expr, &mut uses);
             }
-            ScgStatement::Access(AccessNode::Load { dst, ptr, offset }) => {
+            ScgStatement::Access(AccessNode::Load { dst, ptr, offset, .. }) => {
                 defs.insert(dst.clone());
                 Self::expr_uses(ptr, &mut uses);
                 if let Some(off) = offset {

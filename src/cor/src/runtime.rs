@@ -749,6 +749,7 @@ impl CORuntime {
                         dst: format!("loaded_{}", node.id),
                         ptr: ScgExpr::Var(format!("mem_{}", node.id)),
                         offset: None,
+                        ty: None,
                     }),
                 ];
                 if node.has_prefetch {
