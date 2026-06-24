@@ -1567,56 +1567,42 @@ fn walk_control_flow_with_externs(
                     if let Some(label) = &ctrl.label {
                         if let Some(func_name) = label.strip_prefix("call_") {
                             let is_extern = extern_functions.contains(func_name);
-                            // Collect arguments from DataFlow edges.
-                            // Each DataFlow edge source is either a variable's
-                            // defining node (-> Var) or a literal Computation
-                            // node with label "lit_<n>" (-> Int).
-                            let mut args = Vec::new();
-                            let df_inputs = edge_idx.incoming_df(node_id);
-                            for df_edge in &df_inputs {
-                                let source = df_edge.source;
-                                if let Some(src_data) = scg.get_node(source) {
-                                    if let NodePayload::Computation(comp) = &src_data.payload {
-                                        if let ComputationKind::Other(ref lbl) = comp.kind {
-                                            // Handle "param <name>" nodes: resolve to Var("<name>")
-                                            if let Some(param_name) = lbl.strip_prefix("param ") {
-                                                let pn = param_name.trim();
-                                                if !pn.is_empty()
-                                                    && pn.chars().next().map_or(false, |c| c.is_alphabetic() || c == '_')
-                                                    && pn.chars().all(|c| c.is_alphanumeric() || c == '_')
-                                                {
-                                                    args.push(ScgExpr::Var(pn.to_string()));
-                                                    continue;
-                                                }
-                                            }
-                                            if let Some(num_str) = lbl.strip_prefix("lit_") {
-                                                if let Ok(num) = num_str.parse::<i64>() {
-                                                    args.push(ScgExpr::Int(num));
-                                                    continue;
-                                                }
-                                            }
-                                            // Handle bare true/false/None
-                                            match lbl.as_str() {
-                                                "true" => { args.push(ScgExpr::Int(1)); continue; }
-                                                "false" => { args.push(ScgExpr::Int(0)); continue; }
-                                                "None" | "null" | "nullptr" => { args.push(ScgExpr::Int(0)); continue; }
-                                                _ => {}
-                                            }
-                                            if let Ok(num) = lbl.parse::<i64>() {
-                                                args.push(ScgExpr::Int(num));
-                                                continue;
-                                            }
-                                        }
-                                    }
-                                }
-                                args.push(ScgExpr::Var(format!("v_{}", source.as_u64())));
-                            }
-                            // Set the call's destination to the caller
-                            // Computation node's variable.
+
+                            // Find the caller Computation node
                             let caller_node = edge_idx.incoming
                                 .get(&node_id)
                                 .and_then(|edges| edges.iter().find(|e| e.kind == EdgeKind::ControlFlow))
                                 .map(|e| e.source);
+
+                            let df_inputs = edge_idx.incoming_df(node_id);
+                            let sources: Vec<NodeId> = df_inputs.iter().map(|e| e.source).collect();
+
+                            // Parse arguments from the caller's label.
+                            // The AST→SCG converter stores the call expression as
+                            // a string label, and DataFlow edges connect individual
+                            // variables rather than computed sub-expressions.
+                            let args: Vec<ScgExpr> = if let Some(caller) = caller_node {
+                                if let Some(caller_data) = scg.get_node(caller) {
+                                    if let NodePayload::Computation(comp) = &caller_data.payload {
+                                        let caller_label = comp.kind.label();
+                                        if let Some(expr) = extract_call_expr_from_label(&caller_label, func_name) {
+                                            let arg_strs = parse_call_args(&expr);
+                                            arg_strs.iter()
+                                                .map(|a| resolve_subexpr(a, &sources, edge_idx, scg))
+                                                .collect()
+                                        } else {
+                                            collect_args_from_df(&df_inputs, scg, edge_idx)
+                                        }
+                                    } else {
+                                        collect_args_from_df(&df_inputs, scg, edge_idx)
+                                    }
+                                } else {
+                                    collect_args_from_df(&df_inputs, scg, edge_idx)
+                                }
+                            } else {
+                                collect_args_from_df(&df_inputs, scg, edge_idx)
+                            };
+
                             let call_dst = if let Some(caller) = caller_node {
                                 Some(format!("v_{}", caller.as_u64()))
                             } else {
@@ -1883,6 +1869,70 @@ fn extract_calls_from_label(
     }
 
     (result, calls)
+}
+
+/// Extract the argument-expression string from a caller label.
+/// Given `ackermann((m - one), one)` and func_name `ackermann`,
+/// returns `(m - one), one`.
+fn extract_call_expr_from_label(label: &str, func_name: &str) -> Option<String> {
+    let search = format!("{}(", func_name);
+    let pos = label.find(&search)?;
+    let args_start = pos + search.len();
+    let bytes = label.as_bytes();
+    let mut depth: i32 = 1;
+    let mut i = args_start;
+    while i < bytes.len() && depth > 0 {
+        if bytes[i] == b'(' { depth += 1; }
+        else if bytes[i] == b')' { depth -= 1; }
+        if depth > 0 { i += 1; }
+    }
+    if depth == 0 { Some(label[args_start..i].to_string()) } else { None }
+}
+
+/// Collect call arguments from DataFlow edges (fallback).
+fn collect_args_from_df(
+    df_inputs: &[&vuma_scg::EdgeData],
+    scg: &SCG,
+    _edge_idx: &EdgeIndex,
+) -> Vec<ScgExpr> {
+    let mut args = Vec::new();
+    for df_edge in df_inputs {
+        let source = df_edge.source;
+        if let Some(src_data) = scg.get_node(source) {
+            if let NodePayload::Computation(comp) = &src_data.payload {
+                if let ComputationKind::Other(ref lbl) = comp.kind {
+                    if let Some(param_name) = lbl.strip_prefix("param ") {
+                        let pn = param_name.trim();
+                        if !pn.is_empty()
+                            && pn.chars().next().map_or(false, |c| c.is_alphabetic() || c == '_')
+                            && pn.chars().all(|c| c.is_alphanumeric() || c == '_')
+                        {
+                            args.push(ScgExpr::Var(pn.to_string()));
+                            continue;
+                        }
+                    }
+                    if let Some(num_str) = lbl.strip_prefix("lit_") {
+                        if let Ok(num) = num_str.parse::<i64>() {
+                            args.push(ScgExpr::Int(num));
+                            continue;
+                        }
+                    }
+                    match lbl.as_str() {
+                        "true" => { args.push(ScgExpr::Int(1)); continue; }
+                        "false" => { args.push(ScgExpr::Int(0)); continue; }
+                        "None" | "null" | "nullptr" => { args.push(ScgExpr::Int(0)); continue; }
+                        _ => {}
+                    }
+                    if let Ok(num) = lbl.parse::<i64>() {
+                        args.push(ScgExpr::Int(num));
+                        continue;
+                    }
+                }
+            }
+        }
+        args.push(ScgExpr::Var(format!("v_{}", source.as_u64())));
+    }
+    args
 }
 
 /// Parse function-call arguments: comma-separated, respecting nested parens.
