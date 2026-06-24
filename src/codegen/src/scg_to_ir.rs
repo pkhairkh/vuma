@@ -2078,9 +2078,6 @@ impl IRBuilder {
                 let ptr_val = self.resolve_expr(ptr, names, ir_func)?;
                 let (addr_val, byte_offset) = match offset {
                     Some(off) => {
-                        // If the offset is a constant, we can embed it directly
-                        // in the Load instruction. Otherwise, compute the address
-                        // with an Offset instruction and use offset 0.
                         if let ScgExpr::Int(off_val) = off {
                             (ptr_val, *off_val as i32)
                         } else {
@@ -2100,14 +2097,27 @@ impl IRBuilder {
                 let dst_vreg = self.alloc_vreg();
                 ir_func.register_vreg(VirtualRegister::named(dst_vreg, dst));
                 names.insert(dst.clone(), dst_vreg);
-                // Default to U8 for pointer dereference loads — VUMA's *ptr loads
-                // a single byte and zero-extends. The caller is responsible for
-                // any widening (e.g., assigning to a u32 variable).
+                // Determine load width: if loading from a pointer vreg
+                // (e.g. **buf1 first deref), use U64 to load the stored
+                // pointer. Otherwise default to U8 for byte loads.
+                let load_ty = if let IRValue::Register(vid) = addr_val {
+                    if self.pointer_vregs.contains(&vid) {
+                        // Loading from a pointer vreg — the result is also
+                        // a pointer (for multi-level dereference). Mark it
+                        // so subsequent loads from it also use U64.
+                        self.pointer_vregs.insert(dst_vreg);
+                        IRType::U64
+                    } else {
+                        IRType::U8
+                    }
+                } else {
+                    IRType::U8
+                };
                 ir_func.current_block().push(IRInstruction::Load {
                     dst: IRValue::Register(dst_vreg),
                     addr: addr_val,
                     offset: byte_offset,
-                    ty: IRType::U8,
+                    ty: load_ty,
                 });
             }
             AccessNode::Store { ptr, offset, value } => {
