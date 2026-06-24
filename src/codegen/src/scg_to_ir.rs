@@ -752,10 +752,15 @@ impl IRBuilder {
             }
         }
 
-        // Check if any statement is an atomic or memory operation. If so,
-        // use SOURCE ORDER instead of topological sort — the topological
-        // sort doesn't understand control-flow dependencies and can
-        // reorder loads before stores, breaking memory chains.
+        // Check if any statement is a control-flow statement (Loop, If, Break,
+        // Continue). If so, use SOURCE ORDER — the topological sort doesn't
+        // understand control-flow dependencies and can reorder an If before
+        // a Loop that defines the variable the If references.
+        // Also use source order for functions with memory ops (atomics, loads,
+        // stores) since the topological sort can reorder loads before stores.
+        let has_control_flow = non_return_indices.iter().any(|&i| {
+            matches!(&stmts[i], ScgStatement::Control(_))
+        });
         let has_memory_ops = non_return_indices.iter().any(|&i| {
             match &stmts[i] {
                 ScgStatement::Call(call) => {
@@ -766,19 +771,18 @@ impl IRBuilder {
             }
         });
 
-        if has_memory_ops {
-            // Use source order for functions with atomics
+        if has_control_flow || has_memory_ops {
+            // Use source order for functions with control flow or memory ops
             for &idx in &non_return_indices {
                 self.lower_statement(&stmts[idx], ir_func, names)?;
             }
         } else {
-            // Use source order for ALL functions.
-            // The topological sort doesn't understand control-flow dependencies
-            // and can reorder statements (e.g., putting an If before a Loop
-            // that defines the variable the If references). Source order
-            // preserves the bridge's walk order which follows the SCG's
-            // control-flow edges.
-            for &idx in &non_return_indices {
+            // Use topological sort for simple straight-line functions
+            // (no loops, no ifs, no memory ops). This helps with data-flow
+            // ordering for programs where the SCG bridge returns statements
+            // in a non-optimal order.
+            let order = Self::topological_sort_statements_subset(stmts, &non_return_indices);
+            for &idx in &order {
                 self.lower_statement(&stmts[idx], ir_func, names)?;
             }
         }
