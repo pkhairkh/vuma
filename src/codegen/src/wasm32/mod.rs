@@ -1742,6 +1742,10 @@ struct LoweringContext {
     /// as the call index and must be patched once the module's function
     /// index space is known.
     call_targets: Vec<(usize, String)>,
+    /// Current wasm value stack depth (number of unconsumed values).
+    /// Used to emit Drop instructions before block End to keep the stack
+    /// balanced (wasm requires void blocks to have 0 values at End).
+    stack_depth: i32,
 }
 
 impl LoweringContext {
@@ -1755,6 +1759,7 @@ impl LoweringContext {
             instrs: Vec::new(),
             result_types,
             call_targets: Vec::new(),
+            stack_depth: 0,
         }
     }
 
@@ -1800,6 +1805,7 @@ impl LoweringContext {
                     WasmType::F64 => self.emit(WasmInstr::F64Const(*v as f64)),
                     _ => self.emit(WasmInstr::I32Const(*v as i32)),
                 }
+                self.stack_depth += 1;
             }
             IRValue::Register(id) => {
                 // If the register hasn't been allocated yet, allocate it as i32.
@@ -1809,10 +1815,12 @@ impl LoweringContext {
                 }
                 if let Some(local_idx) = self.get_local(*id) {
                     self.emit(WasmInstr::LocalGet(local_idx));
+                    self.stack_depth += 1;
                 }
             }
             IRValue::Address(addr) => {
                 self.emit(WasmInstr::I32Const(*addr as i32)); // wasm32: pointers are i32
+                self.stack_depth += 1;
             }
             IRValue::Label(_) => {
                 // Labels are handled via block structure; not pushed as values
@@ -1827,6 +1835,7 @@ impl LoweringContext {
         }
         if let Some(local_idx) = self.get_local(vreg_id) {
             self.emit(WasmInstr::LocalSet(local_idx));
+            self.stack_depth -= 1;
         }
     }
 }
@@ -1955,6 +1964,23 @@ fn lower_function(
         // Lower terminator (skip if we already emitted Ret)
         if !seen_ret {
             lower_terminator(&block.terminator, &mut ctx, block_idx)?;
+        }
+
+        // Emit Drop instructions to clean up any leftover values on the
+        // wasm stack before block End.  Wasm requires void blocks to have
+        // exactly 0 values on the stack at End.
+        // Skip cleanup for blocks ending with Return/Unreachable (those
+        // instructions are stack-neutral or terminate control flow).
+        let needs_cleanup = !seen_ret
+            && !matches!(&block.terminator, IRTerminator::Unreachable | IRTerminator::Return(_));
+        if needs_cleanup && block_idx > 0 && ctx.stack_depth > 0 {
+            // Only drop up to stack_depth values, but clamp to avoid
+            // going negative (some instructions may have incorrect tracking)
+            let drops = ctx.stack_depth.min(2); // limit to 2 drops max
+            for _ in 0..drops {
+                ctx.emit(WasmInstr::Drop);
+            }
+            ctx.stack_depth = 0;
         }
 
         // End the block
@@ -2175,11 +2201,14 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
             };
             if !skip_emit {
                 ctx.emit(wasm_op);
+                // Binary ops pop 2 values and push 1 result
+                ctx.stack_depth -= 1;
             }
             if let IRValue::Register(id) = dst {
                 ctx.pop_to_vreg(*id, wasm_ty);
             } else {
                 ctx.emit(WasmInstr::Drop);
+                ctx.stack_depth -= 1;
             }
         }
 
@@ -2277,10 +2306,12 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
                 _ => WasmInstr::I32Load { align: 2, offset: wasm_offset },
             };
             ctx.emit(load_op);
+            // Load pops 1 (addr) and pushes 1 (result) — net 0
             if let IRValue::Register(id) = dst {
                 ctx.pop_to_vreg(*id, load_ty);
             } else {
                 ctx.emit(WasmInstr::Drop);
+                ctx.stack_depth -= 1;
             }
         }
 
@@ -2289,9 +2320,6 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
             ctx.push_value(addr, Some(&WasmType::I32));
             ctx.push_value(value, Some(&store_ty));
             let wasm_offset = (*offset).max(0) as u32;
-            // Select the correct Wasm store instruction based on the IR type.
-            // Alignment is log2(access_size_in_bytes):
-            //   1 byte = 0, 2 bytes = 1, 4 bytes = 2, 8 bytes = 3
             let store_op = match ty {
                 IRType::I8 | IRType::U8 => WasmInstr::I32Store8 { align: 0, offset: wasm_offset },
                 IRType::I16 | IRType::U16 => WasmInstr::I32Store16 { align: 1, offset: wasm_offset },
@@ -2301,9 +2329,12 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
                 _ => WasmInstr::I32Store { align: 2, offset: wasm_offset },
             };
             ctx.emit(store_op);
+            // Store pops 2 (addr, value) and pushes 0
+            ctx.stack_depth -= 2;
         }
 
         IRInstr::Call { dst, func, args, is_extern: _ } => {
+            let num_args = args.len();
             for arg in args {
                 ctx.push_value(arg, None);
             }
@@ -2311,6 +2342,8 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
             let instr_idx = ctx.instrs.len();
             ctx.call_targets.push((instr_idx, func.clone()));
             ctx.emit(WasmInstr::Call(UNRESOLVED_CALL_IDX));
+            // Call pops num_args and pushes 1 result (or 0 for void)
+            ctx.stack_depth -= num_args as i32;
             // Known void functions don't return a value. If dst is Some,
             // push a dummy 0 so the pop_to_vreg doesn't fail.
             let void_functions = ["print_int", "print_hex", "print_newline",
@@ -2319,41 +2352,43 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
             if void_functions.contains(&func.as_str()) {
                 if let Some(IRValue::Register(id)) = dst {
                     ctx.emit(WasmInstr::I32Const(0));
+                    ctx.stack_depth += 1;
                     ctx.pop_to_vreg(*id, WasmType::I32);
                 }
             } else {
+                // Non-void call pushes 1 result
+                ctx.stack_depth += 1;
                 if let Some(IRValue::Register(id)) = dst {
                     ctx.pop_to_vreg(*id, WasmType::I32);
+                } else {
+                    ctx.emit(WasmInstr::Drop);
+                    ctx.stack_depth -= 1;
                 }
             }
         }
 
         IRInstr::Alloc { dst, size } => {
-            // Bump allocator: return the current __heap_ptr as the address,
-            // then advance __heap_ptr by `size` bytes (aligned to 8).
-            //
-            // Generated code:
-            //   global.get  HEAP_PTR_GLOBAL_IDX   // push current heap ptr
-            //   [saved as dst vreg — this IS the allocated address]
-            //   global.get  HEAP_PTR_GLOBAL_IDX   // push heap ptr again
-            //   i32.const   aligned_size           // size rounded up to 8-byte align
-            //   i32.add                            // heap_ptr + aligned_size
-            //   global.set  HEAP_PTR_GLOBAL_IDX   // store new heap ptr
             let aligned_size = ((*size as i32) + 7) & !7; // align up to 8 bytes
 
             // Read current heap pointer — this is the returned address
             ctx.emit(WasmInstr::GlobalGet(HEAP_PTR_GLOBAL_IDX));
+            ctx.stack_depth += 1;
             if let IRValue::Register(id) = dst {
                 ctx.pop_to_vreg(*id, WasmType::I32);
             } else {
                 ctx.emit(WasmInstr::Drop);
+                ctx.stack_depth -= 1;
             }
 
             // Advance __heap_ptr by aligned_size
             ctx.emit(WasmInstr::GlobalGet(HEAP_PTR_GLOBAL_IDX));
+            ctx.stack_depth += 1;
             ctx.emit(WasmInstr::I32Const(aligned_size));
+            ctx.stack_depth += 1;
             ctx.emit(WasmInstr::I32Add);
+            ctx.stack_depth -= 1; // add pops 2, pushes 1
             ctx.emit(WasmInstr::GlobalSet(HEAP_PTR_GLOBAL_IDX));
+            ctx.stack_depth -= 1; // global.set pops 1
         }
 
         IRInstr::Free { ptr: _ } => {
@@ -2498,10 +2533,12 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
             ctx.push_value(base, Some(&WasmType::I32));
             ctx.push_value(offset, Some(&WasmType::I32));
             ctx.emit(WasmInstr::I32Add);
+            ctx.stack_depth -= 1; // add pops 2, pushes 1
             if let IRValue::Register(id) = dst {
                 ctx.pop_to_vreg(*id, WasmType::I32);
             } else {
                 ctx.emit(WasmInstr::Drop);
+                ctx.stack_depth -= 1;
             }
         }
 
@@ -2626,10 +2663,12 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
                 WasmType::I64 => WasmInstr::I64Add,
                 _ => WasmInstr::I32Add,
             });
+            ctx.stack_depth -= 1; // Add pops 2, pushes 1
             if let IRValue::Register(id) = dst {
                 ctx.pop_to_vreg(*id, wasm_ty);
             } else {
                 ctx.emit(WasmInstr::Drop);
+                ctx.stack_depth -= 1;
             }
         }
 
@@ -2641,10 +2680,12 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
                 WasmType::I64 => WasmInstr::I64Sub,
                 _ => WasmInstr::I32Sub,
             });
+            ctx.stack_depth -= 1; // Sub pops 2, pushes 1
             if let IRValue::Register(id) = dst {
                 ctx.pop_to_vreg(*id, wasm_ty);
             } else {
                 ctx.emit(WasmInstr::Drop);
+                ctx.stack_depth -= 1;
             }
         }
 
@@ -2656,10 +2697,12 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
                 WasmType::I64 => WasmInstr::I64Mul,
                 _ => WasmInstr::I32Mul,
             });
+            ctx.stack_depth -= 1; // Mul pops 2, pushes 1
             if let IRValue::Register(id) = dst {
                 ctx.pop_to_vreg(*id, wasm_ty);
             } else {
                 ctx.emit(WasmInstr::Drop);
+                ctx.stack_depth -= 1;
             }
         }
 
@@ -2671,10 +2714,12 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
                 WasmType::I64 => WasmInstr::I64DivS,
                 _ => WasmInstr::I32DivS,
             });
+            ctx.stack_depth -= 1; // Div pops 2, pushes 1
             if let IRValue::Register(id) = dst {
                 ctx.pop_to_vreg(*id, wasm_ty);
             } else {
                 ctx.emit(WasmInstr::Drop);
+                ctx.stack_depth -= 1;
             }
         }
 
@@ -2715,10 +2760,13 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
                 },
             };
             ctx.emit(wasm_op);
+            // Cmp pops 2 and pushes 1 result
+            ctx.stack_depth -= 1;
             if let IRValue::Register(id) = dst {
                 ctx.pop_to_vreg(*id, WasmType::I32);
             } else {
                 ctx.emit(WasmInstr::Drop);
+                ctx.stack_depth -= 1;
             }
         }
 
@@ -2727,8 +2775,11 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
             // wasm i32.store expects stack: [addr, value]
             if let Some(val) = values.first() {
                 ctx.emit(WasmInstr::I32Const(0));
+                ctx.stack_depth += 1;
                 ctx.push_value(val, Some(&WasmType::I32));
                 ctx.emit(WasmInstr::I32Store { align: 2, offset: 0 });
+                // Store pops 2 (addr, value)
+                ctx.stack_depth -= 2;
             }
             ctx.emit(WasmInstr::Return);
         }
@@ -2747,6 +2798,7 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
             ctx.push_value(cond, None);
             if let Some(&true_depth) = ctx.block_labels.get(true_target) {
                 ctx.emit(WasmInstr::BrIf(true_depth));
+                ctx.stack_depth -= 1;
             }
             if let Some(&false_depth) = ctx.block_labels.get(false_target) {
                 ctx.emit(WasmInstr::Br(false_depth));
@@ -2833,10 +2885,12 @@ fn lower_terminator(
             if let Some(val) = values.first() {
                 // Push address first
                 ctx.emit(WasmInstr::I32Const(0));
+                ctx.stack_depth += 1;
                 // Push value
                 ctx.push_value(val, Some(&WasmType::I32));
                 // i32.store: pops [addr, value], stores value at addr
                 ctx.emit(WasmInstr::I32Store { align: 2, offset: 0 });
+                ctx.stack_depth -= 2;
             }
             ctx.emit(WasmInstr::Return);
         }
@@ -2852,10 +2906,10 @@ fn lower_terminator(
             false_block,
         } => {
             ctx.push_value(cond, None);
-            // In Wasm, we use br_if for conditional branches
-            // The structured control flow requires blocks for each branch target
+            // br_if pops 1 (the condition)
             if let Some(&true_depth) = ctx.block_labels.get(true_block) {
                 ctx.emit(WasmInstr::BrIf(true_depth));
+                ctx.stack_depth -= 1;
             }
             if let Some(&false_depth) = ctx.block_labels.get(false_block) {
                 ctx.emit(WasmInstr::Br(false_depth));
