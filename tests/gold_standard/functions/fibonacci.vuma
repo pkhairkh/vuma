@@ -1,5 +1,5 @@
 // Fibonacci — Recursive and iterative implementations
-// Expected exit code: 55
+// Expected exit code: 40
 //
 // Computes Fibonacci numbers using both recursive and iterative approaches,
 // then verifies they agree. Returns fib(30) = 832040.
