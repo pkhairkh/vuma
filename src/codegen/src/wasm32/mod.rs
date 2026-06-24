@@ -2006,7 +2006,11 @@ fn lower_function(
             && !matches!(&block.terminator, IRTerminator::Unreachable | IRTerminator::Return(_))
             && ctx.stack_depth > 0
         {
-            let drops = ctx.stack_depth.min(2);
+            // Drop ALL leftover values to keep the wasm stack clean for
+            // the void block End.  The br to trampoline already exited
+            // the block, so these Drops are unreachable but needed for
+            // wasm validation.
+            let drops = ctx.stack_depth;
             for _ in 0..drops { ctx.emit(WasmInstr::Drop); }
             ctx.stack_depth = 0;
         }
@@ -2368,27 +2372,28 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
             let instr_idx = ctx.instrs.len();
             ctx.call_targets.push((instr_idx, func.clone()));
             ctx.emit(WasmInstr::Call(UNRESOLVED_CALL_IDX));
-            // Call pops num_args and pushes 1 result (or 0 for void)
+            // Call pops num_args. Wasm functions are void (no wasm result)
+            // because return values are communicated via memory[0].
             ctx.stack_depth -= num_args as i32;
-            // Known void functions don't return a value. If dst is Some,
-            // push a dummy 0 so the pop_to_vreg doesn't fail.
+            // Known void functions don't return a value.
             let void_functions = ["print_int", "print_hex", "print_newline",
                 "__vuma_print_int", "__vuma_print_hex", "__vuma_print_newline",
                 "write", "exit", "free", "__vuma_dealloc", "__vuma_free"];
-            if void_functions.contains(&func.as_str()) {
+            if !void_functions.contains(&func.as_str()) {
+                // Non-void call: load return value from memory address 0
+                // (the callee stores its return value there before returning)
                 if let Some(IRValue::Register(id)) = dst {
                     ctx.emit(WasmInstr::I32Const(0));
+                    ctx.emit(WasmInstr::I32Load { align: 2, offset: 0 });
                     ctx.stack_depth += 1;
                     ctx.pop_to_vreg(*id, WasmType::I32);
                 }
             } else {
-                // Non-void call pushes 1 result
-                ctx.stack_depth += 1;
+                // Void function with dst — push dummy 0
                 if let Some(IRValue::Register(id)) = dst {
+                    ctx.emit(WasmInstr::I32Const(0));
+                    ctx.stack_depth += 1;
                     ctx.pop_to_vreg(*id, WasmType::I32);
-                } else {
-                    ctx.emit(WasmInstr::Drop);
-                    ctx.stack_depth -= 1;
                 }
             }
         }
@@ -3302,6 +3307,18 @@ impl Backend for Wasm32Backend {
 
             // Record this function in the name → index map.
             func_name_to_idx.insert(func.name.clone(), func_idx);
+
+            // Also add short-name aliases. IR Call instructions use the
+            // short function name (e.g., "gcd"), but the IR function name
+            // is "fn_gcd_entry(u32)". Extract the short name and add it.
+            if let Some(rest) = func.name.strip_prefix("fn_") {
+                // rest = "gcd_entry(u32)" → split on "_entry" → "gcd"
+                let short = rest.split("_entry").next().unwrap_or(rest);
+                func_name_to_idx.entry(short.to_string()).or_insert(func_idx);
+                // Also add "fn_gcd_entry" (without param types)
+                let full_no_params = format!("fn_{}_entry", short);
+                func_name_to_idx.entry(full_no_params).or_insert(func_idx);
+            }
 
             // Recover local declarations from the typed metadata field.
             let local_decls: Vec<(u32, WasmType)> = func
