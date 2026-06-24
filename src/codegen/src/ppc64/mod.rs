@@ -4474,9 +4474,10 @@ impl Backend for PPC64Backend {
                             if i >= 8 { break; }
                             code.extend(ss_load_value(arg, &vreg_stack_slots, arg_regs[i]));
                         }
-                        // Save TOC (R2) per ELFv2 ABI convention before BL
-                        // STD R2, 24(R1) — TOC save area at caller's SP+24
-                        code.extend_from_slice(&Instruction::Std { rs: Gpr::R2, ra: Gpr::R1, ds: 24 }.encode());
+                        // Note: TOC (R2) save/restore is skipped because we
+                        // run under QEMU user mode without a TOC base. The
+                        // standard ELFv2 TOC save at SP+24 overlaps with the
+                        // first vreg stack slot, causing silent data corruption.
                         let bl_byte_offset = current_byte_offset + code.len() as u64;
                         code.extend_from_slice(&Instruction::Bl { li: 0 }.encode());
                         relocations.push(crate::backend::RelocationEntry {
@@ -4484,9 +4485,6 @@ impl Backend for PPC64Backend {
                             symbol: target_func.clone(),
                             reloc_type: "R_PPC64_REL24".to_string(),
                         });
-                        // Restore TOC (R2) per ELFv2 ABI convention after BL
-                        // LD R2, 24(R1)
-                        code.extend_from_slice(&Instruction::Ld { rt: Gpr::R2, ra: Gpr::R1, ds: 24 }.encode());
                         if let Some(d) = dst {
                             let dst_id = d.as_register().unwrap_or(0);
                             let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
