@@ -2379,23 +2379,33 @@ fn convert_computation_no_calls(
             let deref_count = lhs.chars().take_while(|&c| c == '*').count();
             if deref_count >= 2 {
                 let base_expr = strip_outer_parens(lhs[deref_count..].trim());
-                let df_sources: Vec<NodeId> = edge_idx
-                    .incoming_df(node_id)
-                    .iter()
-                    .map(|e| e.source)
-                    .collect();
+                // Collect ALL sources: DataFlow + Derivation edges
+                let df_inputs = edge_idx.incoming_df(node_id);
+                let mut all_sources: Vec<NodeId> = df_inputs.iter().map(|e| e.source).collect();
+                // Also check Derivation edges to Access nodes
+                for out_edge in edge_idx.outgoing.get(&node_id).map(|v| v.as_slice()).unwrap_or(&[]) {
+                    if out_edge.kind == EdgeKind::Derivation {
+                        if let Some(access_incoming) = edge_idx.incoming.get(&out_edge.target) {
+                            for e in access_incoming {
+                                if e.kind == EdgeKind::Derivation {
+                                    all_sources.push(e.source);
+                                }
+                            }
+                        }
+                    }
+                }
                 let base_ptr = if let Some((op, l, r)) = parse_expr_split(base_expr) {
-                    let lhs_val = resolve_subexpr(&l, &df_sources, edge_idx, scg);
-                    let rhs_val = resolve_subexpr(&r, &df_sources, edge_idx, scg);
+                    let lhs_val = resolve_subexpr(&l, &all_sources, edge_idx, scg);
+                    let rhs_val = resolve_subexpr(&r, &all_sources, edge_idx, scg);
                     ScgExpr::BinOp {
                         op: map_binop_kind(op),
                         lhs: Box::new(lhs_val),
                         rhs: Box::new(rhs_val),
                     }
                 } else {
-                    resolve_subexpr(base_expr, &df_sources, edge_idx, scg)
+                    resolve_subexpr(base_expr, &all_sources, edge_idx, scg)
                 };
-                let value = resolve_subexpr(rhs, &df_sources, edge_idx, scg);
+                let value = resolve_subexpr(rhs, &all_sources, edge_idx, scg);
                 let mut stmts = Vec::new();
                 let mut current_ptr = base_ptr;
                 for level in 0..deref_count - 1 {
