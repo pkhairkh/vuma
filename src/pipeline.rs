@@ -2271,6 +2271,20 @@ fn computation_dst_from_label(node_id: NodeId, label: &str, _scg: &SCG) -> Strin
     node_var(node_id, "comp")
 }
 
+/// Convert a Computation node's result_type to a load type.
+/// Only returns Some for specific integer types (u8/u16/u32/u64/i8/i16/i32/i64).
+/// Returns None for Address, void, or unknown types (defaults to U8).
+fn result_type_to_load_ty(result_type: &Option<String>) -> Option<vuma_codegen::ir::IRType> {
+    match result_type.as_deref() {
+        Some("u8") | Some("U8") | Some("i8") | Some("I8") => Some(vuma_codegen::ir::IRType::U8),
+        Some("u16") | Some("U16") | Some("i16") | Some("I16") => Some(vuma_codegen::ir::IRType::U16),
+        Some("u32") | Some("U32") | Some("i32") | Some("I32") => Some(vuma_codegen::ir::IRType::U32),
+        Some("u64") | Some("U64") | Some("i64") | Some("I64") => Some(vuma_codegen::ir::IRType::U64),
+        // Don't override for Address/void/unknown — let IR builder default to U8
+        _ => None,
+    }
+}
+
 /// Original (no-call-extraction) Computation node handling — used when
 /// `extract_calls_from_label` finds no calls in the label.
 fn convert_computation_no_calls(
@@ -2360,10 +2374,10 @@ fn convert_computation_no_calls(
                     resolve_subexpr(ptr_expr, &df_sources, edge_idx, scg)
                 };
                 return vec![ScgStatement::Access(AccessNode::Load {
-                    ty: None,
                     dst: node_var(node_id, "val"),
                     ptr,
                     offset: None,
+                    ty: None,
                 })];
             }
         }
@@ -2455,10 +2469,10 @@ fn convert_computation_no_calls(
             resolve_subexpr(ptr_expr, &df_sources, edge_idx, scg)
         };
         return vec![ScgStatement::Access(AccessNode::Load {
-            ty: None,
             dst: node_var(node_id, "val"),
             ptr,
             offset: None,
+            ty: None,
         })];
     }
 
