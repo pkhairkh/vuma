@@ -2521,7 +2521,7 @@ fn parse_expr_split(expr: &str) -> Option<(IrBinOpKind, String, String)> {
     let two_char_ops: [(&str, IrBinOpKind); 8] = [
         ("<=", IrBinOpKind::SLe), (">=", IrBinOpKind::SGe),
         ("==", IrBinOpKind::Eq), ("!=", IrBinOpKind::Ne),
-        ("<<", IrBinOpKind::Shl), (">>", IrBinOpKind::ShrL),
+        ("<<", IrBinOpKind::Shl), (">>", IrBinOpKind::ShrA),
         // Logical AND/OR: lowered to bitwise And/Or on integer operands
         // (VUMA booleans are i1/i64, so bitwise ops on 0/1 values are
         // equivalent to logical ops).
