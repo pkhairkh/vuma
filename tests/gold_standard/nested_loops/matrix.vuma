@@ -11,7 +11,7 @@
 //   - Pointer arithmetic with 4-byte (u32) stride
 //   - allocate/free for three matrix buffers (A, B, C)
 //   - IVE verifies all element accesses are within allocation bounds
-// Expected exit code: 0
+// Expected exit code: 16
 
 // ===========================================================================
 // Matrix element access (row-major, 4×4, u32 stride)
