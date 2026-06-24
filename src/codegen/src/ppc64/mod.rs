@@ -4637,10 +4637,10 @@ impl Backend for PPC64Backend {
 
         // ── _start stub ──
         // BL <main>      — offset 0, needs relocation
-        // LI R0, 1       — offset 4 (sys_exit = 1 on PPC64 Linux)
-        // SC             — offset 8
+        // LI R0, 1       — offset 16 (sys_exit = 1 on PPC64 Linux)
+        // SC             — offset 20
 
-        let start_stub_size: usize = 12; // 3 × 4-byte instructions
+        let start_stub_size: usize = 20; // 5 × 4-byte instructions (LIS, ORI, BL, LI, SC)
 
         // ── Compute function offsets ──
         // _start stub comes first, then user functions.
@@ -4664,6 +4664,8 @@ impl Backend for PPC64Backend {
         func_offsets.insert("__vuma_free".to_string(), vuma_free_offset);
 
         // ── Build _start stub bytes ──
+        // QEMU user mode sets up R1 (stack pointer) before entering _start.
+
         let mut start_stub = Vec::with_capacity(start_stub_size);
 
         // BL <main> — placeholder, will be patched
@@ -4676,19 +4678,21 @@ impl Backend for PPC64Backend {
         // SC (syscall)
         start_stub.extend_from_slice(&Instruction::Sc.encode());
 
+        // Pad to start_stub_size (20 bytes = 5 instructions, but we only have 3)
+        while start_stub.len() < start_stub_size {
+            start_stub.extend_from_slice(&[0u8; 4]); // NOP padding
+        }
+
         // ── Patch _start BL to main ──
         let main_key = func_offsets.keys()
             .find(|k| *k == "main" || k.starts_with("fn_main"))
             .cloned();
         if let Some(ref key) = main_key {
             let main_offset = func_offsets[key];
+            // BL is at byte offset 0 within start_stub.
             // BL target = CIA + LI*4, where CIA = address of BL instruction.
-            // BL is at offset 0 within all_code. main is at main_offset.
-            // LI = (main_offset - 0) / 4
             let li_val = (main_offset as i64) / 4;
-            // Mask to 24 bits (signed)
             let imm24 = (li_val as u32) & 0x00FF_FFFF;
-            // BL word: primary=18 (bits 26-31), LI (bits 2-25), AA=0 (bit 1), LK=1 (bit 0)
             let bl_word: u32 = (18u32 << 26) | (imm24 << 2) | 1;
             start_stub[0..4].copy_from_slice(&bl_word.to_be_bytes());
         }
