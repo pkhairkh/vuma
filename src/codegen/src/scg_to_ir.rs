@@ -600,6 +600,10 @@ pub struct IRBuilder {
     next_label: u32,
     /// Stack of enclosing loops, for break/continue resolution.
     loop_stack: Vec<LoopContext>,
+    /// Map from synthetic "v_N" names to user-visible variable names.
+    /// Populated by lower_computation when reassigns is set.
+    /// Used by resolve_expr as a fallback when Var("v_N") is not in names.
+    vreg_aliases: std::collections::HashMap<String, String>,
 }
 
 /// Backward-compatible alias.
@@ -612,6 +616,7 @@ impl IRBuilder {
             next_vreg: 0,
             next_label: 0,
             loop_stack: Vec::new(),
+            vreg_aliases: std::collections::HashMap::new(),
         }
     }
 
@@ -767,9 +772,13 @@ impl IRBuilder {
                 self.lower_statement(&stmts[idx], ir_func, names)?;
             }
         } else {
-            // Use topological sort for other functions
-            let order = Self::topological_sort_statements_subset(stmts, &non_return_indices);
-            for &idx in &order {
+            // Use source order for ALL functions.
+            // The topological sort doesn't understand control-flow dependencies
+            // and can reorder statements (e.g., putting an If before a Loop
+            // that defines the variable the If references). Source order
+            // preserves the bridge's walk order which follows the SCG's
+            // control-flow edges.
+            for &idx in &non_return_indices {
                 self.lower_statement(&stmts[idx], ir_func, names)?;
             }
         }
@@ -2217,6 +2226,9 @@ impl IRBuilder {
         }
         if let Some(name) = &comp.reassigns {
             names.insert(name.clone(), dst_vreg);
+            // Record the alias: "v_N" -> "user_name" so resolve_expr
+            // can fall back to the user name when "v_N" isn't in names.
+            self.vreg_aliases.insert(comp.dst.clone(), name.clone());
         }
 
         let dst = IRValue::Register(dst_vreg);
@@ -2792,14 +2804,19 @@ impl IRBuilder {
     fn resolve_expr(&mut self, expr: &ScgExpr, names: &HashMap<String, u32>, ir_func: &mut IRFunction) -> Result<IRValue> {
         match expr {
             ScgExpr::Var(name) => {
+                // Try user-visible name first (via alias map) because
+                // user names are always updated to the latest vreg by
+                // lower_computation's reassigns handling. The synthetic
+                // "v_N" name may point to a stale vreg after a loop or
+                // if-body reassignment.
+                if let Some(user_name) = self.vreg_aliases.get(name) {
+                    if let Some(&vreg) = names.get(user_name) {
+                        return Ok(IRValue::Register(vreg));
+                    }
+                }
                 if let Some(&vreg) = names.get(name) {
-                        Ok(IRValue::Register(vreg))
+                    Ok(IRValue::Register(vreg))
                 } else {
-                    // Unresolved reference — return Immediate(0) as fallback
-                    // for both synthetic v_NNN names and user-visible names.
-                    // This allows programs with imperfect bridge variable
-                    // resolution (forward references, loop-carried vars) to
-                    // still compile and execute.
                     Ok(IRValue::Immediate(0))
                 }
             }
