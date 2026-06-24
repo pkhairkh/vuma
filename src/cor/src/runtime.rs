@@ -857,6 +857,7 @@ impl CORuntime {
                             func: format!("__vuma_call_{}", node.id),
                             args: vec![],
                             is_extern: true,
+                            reassigns: None,
                         }),
                         ScgStatement::Return(vec![ScgExpr::Var("result".to_string())]),
                     ]
