@@ -1,6 +1,7 @@
 // s83_cf_if_else_const.vuma — if true { x = 136 } else { x = 250 }; return x
 // Observed on current x86_64 backend: 250 (FAIL — known bug)
 //
+// Expected exit code: 136
 // If-true branch should set x = 136, else branch sets x = 250.
 // With a literal `true` condition the true branch should win
 // -> 136. On the current backend the if-true body's single
