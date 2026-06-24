@@ -1,5 +1,5 @@
 // arith_collatz — Collatz sequence length
-// Expected exit code: 20
+// Expected exit code: 16
 //
 // Counts the number of steps to reach 1 from n=7 under Collatz iteration:
 //   n -> n/2     (n even)
