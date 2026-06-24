@@ -2016,6 +2016,7 @@ fn convert_node_to_statement_with_externs(
 
         NodePayload::Access(access) => match access.mode {
             AccessMode::Read => single(Some(ScgStatement::Access(AccessNode::Load {
+                ty: None,
                 dst: node_var(node_id, "val"),
                 ptr: resolve_df_input(node_id, 0, edge_idx, scg),
                 offset: access.offset.map(|o| ScgExpr::Int(o as i64)),
@@ -2312,16 +2313,21 @@ fn convert_computation_no_calls(
                     let mut stmts = Vec::new();
                     let mut current_ptr = base_ptr;
                     for level in 0..deref_count {
-                        let dst = if level == deref_count - 1 {
+                        let is_last = level == deref_count - 1;
+                        let dst = if is_last {
                             // Last level: use the user-visible variable name
                             computation_dst_from_label(node_id, op_label, scg)
                         } else {
                             format!("v_{}_deref_{}", node_id.as_u64(), level)
                         };
+                        // Intermediate loads use U64 (loading a pointer);
+                        // final load uses U8 (loading the value).
+                        let load_ty = if is_last { None } else { Some(vuma_codegen::ir::IRType::U64) };
                         stmts.push(ScgStatement::Access(AccessNode::Load {
                             dst: dst.clone(),
                             ptr: current_ptr.clone(),
                             offset: None,
+                            ty: load_ty,
                         }));
                         current_ptr = ScgExpr::Var(dst);
                     }
@@ -2354,6 +2360,7 @@ fn convert_computation_no_calls(
                     resolve_subexpr(ptr_expr, &df_sources, edge_idx, scg)
                 };
                 return vec![ScgStatement::Access(AccessNode::Load {
+                    ty: None,
                     dst: node_var(node_id, "val"),
                     ptr,
                     offset: None,
@@ -2393,10 +2400,13 @@ fn convert_computation_no_calls(
                 let mut current_ptr = base_ptr;
                 for level in 0..deref_count - 1 {
                     let dst = format!("v_{}_store_deref_{}", node_id.as_u64(), level);
+                    // All intermediate loads in a multi-level store use U64
+                    // (loading pointers to dereference through).
                     stmts.push(ScgStatement::Access(AccessNode::Load {
                         dst: dst.clone(),
                         ptr: current_ptr.clone(),
                         offset: None,
+                        ty: Some(vuma_codegen::ir::IRType::U64),
                     }));
                     current_ptr = ScgExpr::Var(dst);
                 }
@@ -2435,6 +2445,7 @@ fn convert_computation_no_calls(
             resolve_subexpr(ptr_expr, &df_sources, edge_idx, scg)
         };
         return vec![ScgStatement::Access(AccessNode::Load {
+            ty: None,
             dst: node_var(node_id, "val"),
             ptr,
             offset: None,
@@ -2488,6 +2499,7 @@ fn convert_computation_no_calls(
                         match access.mode {
                             AccessMode::Read if is_load_label => {
                                 return vec![ScgStatement::Access(AccessNode::Load {
+                                    ty: None,
                                     dst: node_var(node_id, "val"),
                                     ptr: resolve_df_input(node_id, 0, edge_idx, scg),
                                     offset: access.offset.map(|o| ScgExpr::Int(o as i64)),
