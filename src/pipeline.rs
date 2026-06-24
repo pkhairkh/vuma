@@ -2280,6 +2280,57 @@ fn convert_computation_no_calls(
     edge_idx: &EdgeIndex,
     scg: &SCG,
 ) -> Vec<ScgStatement> {
+    // Detect N-level dereference: "let val = **buf1" or "let val = ***buf1"
+    // This generates N loads: each loads a pointer (U64) except the last
+    // which loads the value (U8).
+    if op_label.contains("= *") && !op_label.starts_with("*") {
+        if let Some(pos) = op_label.find("= *") {
+            // Count ALL '*' characters after "= " (not just after "= *")
+            let after_eq = op_label[pos + 2..].trim(); // skip "= " (2 chars)
+            if !after_eq.is_empty() && !after_eq.contains('=') {
+                let deref_count = after_eq.chars().take_while(|&c| c == '*').count();
+                if deref_count >= 2 {
+                    // Multi-level dereference (**buf1, ***buf1, etc.)
+                    let base_expr = strip_outer_parens(after_eq[deref_count..].trim());
+                    let df_sources: Vec<NodeId> = edge_idx
+                        .incoming_df(node_id)
+                        .iter()
+                        .map(|e| e.source)
+                        .collect();
+                    let base_ptr = if let Some((op, l, r)) = parse_expr_split(base_expr) {
+                        let lhs_val = resolve_subexpr(&l, &df_sources, edge_idx, scg);
+                        let rhs_val = resolve_subexpr(&r, &df_sources, edge_idx, scg);
+                        ScgExpr::BinOp {
+                            op: map_binop_kind(op),
+                            lhs: Box::new(lhs_val),
+                            rhs: Box::new(rhs_val),
+                        }
+                    } else {
+                        resolve_subexpr(base_expr, &df_sources, edge_idx, scg)
+                    };
+                    
+                    let mut stmts = Vec::new();
+                    let mut current_ptr = base_ptr;
+                    for level in 0..deref_count {
+                        let dst = if level == deref_count - 1 {
+                            // Last level: use the user-visible variable name
+                            computation_dst_from_label(node_id, op_label, scg)
+                        } else {
+                            format!("v_{}_deref_{}", node_id.as_u64(), level)
+                        };
+                        stmts.push(ScgStatement::Access(AccessNode::Load {
+                            dst: dst.clone(),
+                            ptr: current_ptr.clone(),
+                            offset: None,
+                        }));
+                        current_ptr = ScgExpr::Var(dst);
+                    }
+                    return stmts;
+                }
+            }
+        }
+    }
+
     // Detect Load patterns: "let value = *region" or "X = *Y"
     if op_label.contains("= *") && !op_label.starts_with("*") {
         if let Some(pos) = op_label.find("= *") {
@@ -2307,6 +2358,55 @@ fn convert_computation_no_calls(
                     ptr,
                     offset: None,
                 })];
+            }
+        }
+    }
+
+    // Detect multi-level store: "**buf1 = 42" or "***buf1 = val"
+    // This generates N-1 loads to get the final pointer, then a store.
+    if op_label.starts_with("**") && op_label.contains("= ") {
+        if let Some(eq_pos) = op_label.rfind("= ") {
+            let lhs = op_label[..eq_pos].trim();
+            let rhs = op_label[eq_pos + 2..].trim();
+            // Count leading '*' characters
+            let deref_count = lhs.chars().take_while(|&c| c == '*').count();
+            if deref_count >= 2 {
+                let base_expr = strip_outer_parens(lhs[deref_count..].trim());
+                let df_sources: Vec<NodeId> = edge_idx
+                    .incoming_df(node_id)
+                    .iter()
+                    .map(|e| e.source)
+                    .collect();
+                let base_ptr = if let Some((op, l, r)) = parse_expr_split(base_expr) {
+                    let lhs_val = resolve_subexpr(&l, &df_sources, edge_idx, scg);
+                    let rhs_val = resolve_subexpr(&r, &df_sources, edge_idx, scg);
+                    ScgExpr::BinOp {
+                        op: map_binop_kind(op),
+                        lhs: Box::new(lhs_val),
+                        rhs: Box::new(rhs_val),
+                    }
+                } else {
+                    resolve_subexpr(base_expr, &df_sources, edge_idx, scg)
+                };
+                let value = resolve_subexpr(rhs, &df_sources, edge_idx, scg);
+                let mut stmts = Vec::new();
+                let mut current_ptr = base_ptr;
+                for level in 0..deref_count - 1 {
+                    let dst = format!("v_{}_store_deref_{}", node_id.as_u64(), level);
+                    stmts.push(ScgStatement::Access(AccessNode::Load {
+                        dst: dst.clone(),
+                        ptr: current_ptr.clone(),
+                        offset: None,
+                    }));
+                    current_ptr = ScgExpr::Var(dst);
+                }
+                // Final store to the dereferenced pointer
+                stmts.push(ScgStatement::Access(AccessNode::Store {
+                    ptr: current_ptr,
+                    offset: None,
+                    value,
+                }));
+                return stmts;
             }
         }
     }
@@ -2805,6 +2905,13 @@ fn resolve_subexpr(
                        || label.starts_with(&format!("{} ", subexpr))
                        || label.starts_with(&format!("{} =", subexpr))
                        || label.starts_with(&format!("let {} =", subexpr)) {
+                        // For multi-level dereference loads (let val = **buf1,
+                        // let val = ***buf1), the DataFlow input is the base
+                        // pointer, not the loaded value. Return Var(name) so
+                        // the IR builder resolves it via the names map.
+                        if label.contains("**") {
+                            return ScgExpr::Var(subexpr.to_string());
+                        }
                         return resolve_df_input_for_node(src, edge_idx, scg);
                     }
                 }
