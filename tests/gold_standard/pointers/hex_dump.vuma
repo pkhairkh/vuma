@@ -1,4 +1,5 @@
 // Hex Dump — Read bytes from memory, output hex representation
+// Expected exit code: 0
 //
 // Reads a block of bytes from memory and converts each byte to its
 // two-digit hexadecimal representation. The hex output is written into

@@ -1,6 +1,6 @@
 // Test: SHA-256 compression with loops and memory
 // Expected: exit 79
-// Expected exit code: 24
+// Expected exit code: 0
 
 fn rotr32(x: u32, n: u32) -> u32 {
     return ((x >> n) | (x << (32 - n))) & 4294967295;

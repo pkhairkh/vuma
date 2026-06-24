@@ -1,4 +1,5 @@
 // Quicksort — In-place quicksort on an array of integers
+// Expected exit code: 90
 //
 // Implements the classic quicksort algorithm using Lomuto partition scheme
 // with in-place swapping. The array is stored in allocated memory with

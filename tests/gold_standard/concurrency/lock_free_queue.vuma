@@ -1,4 +1,5 @@
 // Lock-Free SPSC Queue - demonstrates VUMA concurrency verification
+// Expected exit code: 0
 // Single-producer single-consumer ring buffer
 //
 // Lock-free data structures are among the hardest code to get right.
