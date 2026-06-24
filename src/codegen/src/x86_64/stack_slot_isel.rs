@@ -815,14 +815,32 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                 }
 
                 // ── Alloc ──
-                IRInstr::Alloc { dst, .. } => {
+                IRInstr::Alloc { dst, size } => {
                     let mut code = Vec::new();
                     let dst_id = dst.as_register().unwrap_or(0);
                     let alloc_off = alloc_offsets.get(&dst_id).copied().unwrap_or(-(frame_size as i32));
+                    let alloc_size = *size as i32;
                     // lea rax, [rbp + alloc_off]  (alloc_off is negative)
                     code.extend(encode_lea_reg_mem(Gpr::Rax, Gpr::Rbp, alloc_off));
                     // Store the pointer into dst's stack slot
                     code.extend(store_vreg(dst_id, Gpr::Rax));
+                    // Zero-initialize the allocated region to prevent
+                    // non-deterministic behavior from uninitialized memory.
+                    // Use a simple loop: for i in 0..size: [rax+i] = 0
+                    if alloc_size > 0 && alloc_size <= 4096 {
+                        // mov rcx, size
+                        code.extend(encode_mov_reg_imm32(Gpr::Rcx, alloc_size));
+                        // lea rdi, [rbp + alloc_off]  (reload addr, rax may be clobbered)
+                        code.extend(encode_lea_reg_mem(Gpr::Rdi, Gpr::Rbp, alloc_off));
+                        // xor eax, eax  (zero value)
+                        code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax));
+                        // rep stosb  (fill [rdi] with al, rcx times)
+                        code.extend_from_slice(&[0xF3, 0xAA]);
+                        // Reload the pointer into rax for any subsequent use
+                        code.extend(encode_lea_reg_mem(Gpr::Rax, Gpr::Rbp, alloc_off));
+                        // Store the pointer into dst's stack slot again (in case rax was used)
+                        code.extend(store_vreg(dst_id, Gpr::Rax));
+                    }
                     code
                 }
 
