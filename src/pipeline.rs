@@ -1637,6 +1637,7 @@ fn walk_control_flow_with_externs(
                                 func: func_name.to_string(),
                                 args,
                                 is_extern,
+                                reassigns: None,
                             }));
                             // Consume the call-site's FunctionEntry and
                             // FunctionReturn nodes.
@@ -1878,6 +1879,23 @@ fn map_binop_kind(op: IrBinOpKind) -> vuma_codegen::ir::BinOpKind {
         IrBinOpKind::Ne => vuma_codegen::ir::BinOpKind::Ne,
         _ => vuma_codegen::ir::BinOpKind::Add,
     }
+}
+
+
+/// Extract the user-visible variable name from a label like "out = atomic_load(...)".
+/// Returns None if the label doesn't match the "<var> = ..." pattern.
+fn extract_user_var_from_label(label: &str) -> Option<String> {
+    if let Some(eq_pos) = label.find("= ") {
+        let var_part = label[..eq_pos].trim();
+        let var_part = var_part.strip_prefix("let ").unwrap_or(var_part).trim();
+        if !var_part.is_empty()
+            && var_part.chars().next().map_or(false, |c| c.is_alphabetic() || c == '_')
+            && var_part.chars().all(|c| c.is_alphanumeric() || c == '_')
+        {
+            return Some(var_part.to_string());
+        }
+    }
+    None
 }
 
 fn resolve_subexpr(
@@ -2250,15 +2268,18 @@ fn convert_node_to_statement_with_externs(
                     func: "AtomicStore".to_string(),
                     args: vec![value, addr],
                     is_extern: false,
+                    reassigns: None,
                 }));
             }
             if op_label.contains("atomic_load") {
                 let addr = resolve_df_input(node_id, 0, edge_idx, scg);
+                let user_var = extract_user_var_from_label(&op_label);
                 return Some(ScgStatement::Call(CallNode {
                     dst: Some(node_var(node_id, "val")),
                     func: "AtomicLoad".to_string(),
                     args: vec![addr],
                     is_extern: false,
+                    reassigns: user_var,
                 }));
             }
 
@@ -2627,6 +2648,7 @@ fn convert_node_to_statement_with_externs(
                 func: eff.effect_kind.clone(),
                 args: vec![],
                 is_extern,
+                reassigns: None,
             }))
         }
 

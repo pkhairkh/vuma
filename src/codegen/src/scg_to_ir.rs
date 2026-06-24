@@ -349,6 +349,10 @@ pub struct CallNode {
     /// Whether this is a call to an extern (foreign) function.
     /// When true, the backend should emit a relocation instead of a local branch.
     pub is_extern: bool,
+    /// Optional user-visible variable name being assigned (e.g., "out" in
+    /// `out = atomic_load(...)`). When set, lower_call also registers this
+    /// name in the names map so resolve_expr can find it.
+    pub reassigns: Option<String>,
 }
 
 /// A simple expression in the SCG.
@@ -2411,6 +2415,7 @@ impl IRBuilder {
                         let vreg = self.alloc_vreg();
                         ir_func.register_vreg(VirtualRegister::named(vreg, name));
                         names.insert(name.clone(), vreg);
+                        if let Some(ref r) = call.reassigns { names.insert(r.clone(), vreg); }
                         IRValue::Register(vreg)
                     }
                     None => {
@@ -2467,6 +2472,7 @@ impl IRBuilder {
                         let vreg = self.alloc_vreg();
                         ir_func.register_vreg(VirtualRegister::named(vreg, name));
                         names.insert(name.clone(), vreg);
+                        if let Some(ref r) = call.reassigns { names.insert(r.clone(), vreg); }
                         IRValue::Register(vreg)
                     }
                     None => {
@@ -3496,6 +3502,7 @@ mod tests {
                     func: "compute".into(),
                     args: vec![ScgExpr::Int(42), ScgExpr::Int(7)],
                     is_extern: false,
+                reassigns: None,
                 }),
                 ScgStatement::Return(vec![ScgExpr::Var("result".into())]),
             ],
@@ -4219,6 +4226,7 @@ mod tests {
                     func: "print_int".into(),
                     args: vec![ScgExpr::Int(123)],
                     is_extern: false,
+                reassigns: None,
                 }),
                 ScgStatement::Return(vec![]),
             ],
