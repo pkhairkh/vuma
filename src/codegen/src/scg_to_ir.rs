@@ -604,6 +604,10 @@ pub struct IRBuilder {
     /// Populated by lower_computation when reassigns is set.
     /// Used by resolve_expr as a fallback when Var("v_N") is not in names.
     vreg_aliases: std::collections::HashMap<String, String>,
+    /// Set of vreg IDs that hold pointers (from allocate() or
+    /// function parameters of type Address). Used to determine Store/Load
+    /// width: pointer stores need U64 (64-bit), byte stores use U8.
+    pointer_vregs: std::collections::HashSet<u32>,
 }
 
 /// Backward-compatible alias.
@@ -617,6 +621,7 @@ impl IRBuilder {
             next_label: 0,
             loop_stack: Vec::new(),
             vreg_aliases: std::collections::HashMap::new(),
+            pointer_vregs: std::collections::HashSet::new(),
         }
     }
 
@@ -673,6 +678,10 @@ impl IRBuilder {
             ir_func.param_types.push(param.ty.to_ir_type());
             ir_func.register_vreg(vreg);
             name_to_vreg.insert(param.name.clone(), vreg_id);
+            // Mark pointer parameters for Store/Load width
+            if param.ty == ScgType::Ptr {
+                self.pointer_vregs.insert(vreg_id);
+            }
         }
 
         // Map result registers with proper types.
@@ -2020,14 +2029,13 @@ impl IRBuilder {
                 let vreg = self.alloc_vreg();
                 ir_func.register_vreg(VirtualRegister::named(vreg, name));
                 names.insert(name.clone(), vreg);
+                // Mark this vreg as a pointer for Store/Load width
+                self.pointer_vregs.insert(vreg);
                 ir_func.current_block().push(IRInstruction::Alloc {
                     dst: IRValue::Register(vreg),
                     size: *size,
                 });
-                // Record the type annotation on the virtual register.
-                // The stack layout pass will use the Alloc instruction to
-                // compute the actual stack slot offset.
-                let _ = ty; // Type info is preserved for future stack-slot annotation.
+                let _ = ty;
             }
             AllocationNode::Heap {
                 name,
@@ -2038,7 +2046,8 @@ impl IRBuilder {
                 let vreg = self.alloc_vreg();
                 ir_func.register_vreg(VirtualRegister::named(vreg, name));
                 names.insert(name.clone(), vreg);
-                // Lower to a call to `__vuma_alloc`.
+                // Mark this vreg as a pointer for Store/Load width
+                self.pointer_vregs.insert(vreg);
                 ir_func.current_block().push(IRInstruction::Call {
                     dst: Some(IRValue::Register(vreg)),
                     func: "__vuma_alloc".to_string(),
@@ -2122,12 +2131,22 @@ impl IRBuilder {
                     }
                     None => (ptr_val, 0),
                 };
-                // Use I64 for pointer dereference stores (64-bit values)
+                // Determine store width: if the value is a pointer vreg,
+                // use U64 (64-bit) to store the full address. Otherwise U8.
+                let store_ty = if let IRValue::Register(vid) = val {
+                    if self.pointer_vregs.contains(&vid) {
+                        IRType::U64
+                    } else {
+                        IRType::U8
+                    }
+                } else {
+                    IRType::U8
+                };
                 ir_func.current_block().push(IRInstruction::Store {
                     value: val,
                     addr: addr_val,
                     offset: byte_offset,
-                    ty: IRType::U8,
+                    ty: store_ty,
                 });
             }
         }
