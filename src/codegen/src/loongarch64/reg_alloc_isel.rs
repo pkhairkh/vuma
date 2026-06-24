@@ -557,7 +557,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     instrs.push(emit_ai(code, mnemonic));
                 }
             } else {
-                let code = lower_instr(instr, &mut cache, fp, &vreg_slots, &alloc_offsets, &mut relocations);
+                let code = lower_instr(instr, &mut cache, fp, &vreg_slots, &alloc_offsets, &mut relocations, byte_offset);
                 // Always emit an AllocatedInstruction (even when `code` is empty)
                 // so that IR instructions that produce no machine code on this
                 // backend — e.g. `CondBranch`, which is lowered as a terminator —
@@ -988,6 +988,7 @@ fn lower_instr(
     instr: &IRInstr, cache: &mut RegCache, fp: Gpr,
     vreg_slots: &HashMap<u32, i32>, alloc_offsets: &HashMap<u32, i32>,
     relocations: &mut Vec<RelocationEntry>,
+    byte_offset: usize,
 ) -> Vec<u8> {
     match instr {
         IRInstr::BinOp { op, dst, lhs, rhs, .. } => {
@@ -1095,7 +1096,7 @@ fn lower_instr(
                     else if let IRValue::Address(addr) = arg { code.extend(encode_load_imm(call_arg_regs[i], *addr as i64)); }
                 }
             }
-            let bl_off = code.len(); // offset within this instruction's code
+            let bl_off = byte_offset + code.len(); // global offset within function
             code.extend_from_slice(&Instruction::Bl { offs26: 0 }.encode());
             relocations.push(RelocationEntry { offset: bl_off as u64, symbol: target.clone(), reloc_type: "R_LARCH_B26".to_string() });
             cache.invalidate_caller_saved();
@@ -1253,8 +1254,9 @@ fn lower_instr(
             let mut code = Vec::new();
             let dst_id = dst.as_register().unwrap_or(0);
             let (d, ac) = cache.alloc_vreg(dst_id, None, fp); code.extend(ac);
+            let load_off = byte_offset + code.len();
             code.extend(encode_load_imm(d, 0));
-            relocations.push(RelocationEntry { offset: 0, symbol: name.clone(), reloc_type: "R_LARCH_64".to_string() });
+            relocations.push(RelocationEntry { offset: load_off as u64, symbol: name.clone(), reloc_type: "R_LARCH_64".to_string() });
             cache.mark_dirty(dst_id); code
         }
         IRInstr::Free { .. } => Vec::new(),
