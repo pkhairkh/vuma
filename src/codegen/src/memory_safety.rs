@@ -537,7 +537,7 @@ impl MemorySafetyAnalyzer {
                 }
                 ScgStatement::Access(access) => {
                     match access {
-                        AccessNode::Load { dst, ptr, offset } => {
+                        AccessNode::Load { dst, ptr, offset, .. } => {
                             let ptr_name = expr_to_name(ptr);
                             if let Some(info) = allocations.get_mut(&ptr_name) {
                                 info.accesses.push(AccessInfo {
