@@ -3556,37 +3556,39 @@ fn ss_load_imm(rd: Gpr, val: i64) -> Vec<u8> {
     code
 }
 
-/// Load from stack slot [R1 + offset_from_r1] into dst_reg.
-fn ss_load_from_slot(dst_reg: Gpr, offset_from_r1: i32) -> Vec<u8> {
-    if offset_from_r1 >= -32764 && offset_from_r1 <= 32764 && (offset_from_r1 & 3) == 0 {
-        Instruction::Ld { rt: dst_reg, ra: Gpr::R1, ds: offset_from_r1 }.encode().to_vec()
-    } else if offset_from_r1 >= -32768 && offset_from_r1 <= 32767 {
+/// Load from stack slot [R31 - offset_from_r31] into dst_reg.
+fn ss_load_from_slot(dst_reg: Gpr, offset_from_r31: i32) -> Vec<u8> {
+    let neg_off = -offset_from_r31;
+    if neg_off >= -32764 && neg_off <= 32764 && (neg_off & 3) == 0 {
+        Instruction::Ld { rt: dst_reg, ra: Gpr::R31, ds: neg_off }.encode().to_vec()
+    } else if neg_off >= -32768 && neg_off <= 32767 {
         let mut code = Vec::new();
-        code.extend_from_slice(&Instruction::Addi { rt: Gpr::R12, ra: Gpr::R1, simm: offset_from_r1 }.encode());
+        code.extend_from_slice(&Instruction::Addi { rt: Gpr::R12, ra: Gpr::R31, simm: neg_off }.encode());
         code.extend_from_slice(&Instruction::Ld { rt: dst_reg, ra: Gpr::R12, ds: 0 }.encode());
         code
     } else {
         let mut code = Vec::new();
-        code.extend(ss_load_imm(Gpr::R12, offset_from_r1 as i64));
-        code.extend_from_slice(&Instruction::Add { rt: Gpr::R12, ra: Gpr::R1, rb: Gpr::R12 }.encode());
+        code.extend(ss_load_imm(Gpr::R12, offset_from_r31 as i64));
+        code.extend_from_slice(&Instruction::Subf { rt: Gpr::R12, ra: Gpr::R12, rb: Gpr::R31 }.encode());
         code.extend_from_slice(&Instruction::Ld { rt: dst_reg, ra: Gpr::R12, ds: 0 }.encode());
         code
     }
 }
 
-/// Store src_reg into stack slot [R1 + offset_from_r1].
-fn ss_store_to_slot(src_reg: Gpr, offset_from_r1: i32) -> Vec<u8> {
-    if offset_from_r1 >= -32764 && offset_from_r1 <= 32764 && (offset_from_r1 & 3) == 0 {
-        Instruction::Std { rs: src_reg, ra: Gpr::R1, ds: offset_from_r1 }.encode().to_vec()
-    } else if offset_from_r1 >= -32768 && offset_from_r1 <= 32767 {
+/// Store src_reg into stack slot [R31 - offset_from_r31].
+fn ss_store_to_slot(src_reg: Gpr, offset_from_r31: i32) -> Vec<u8> {
+    let neg_off = -offset_from_r31;
+    if neg_off >= -32764 && neg_off <= 32764 && (neg_off & 3) == 0 {
+        Instruction::Std { rs: src_reg, ra: Gpr::R31, ds: neg_off }.encode().to_vec()
+    } else if neg_off >= -32768 && neg_off <= 32767 {
         let mut code = Vec::new();
-        code.extend_from_slice(&Instruction::Addi { rt: Gpr::R12, ra: Gpr::R1, simm: offset_from_r1 }.encode());
+        code.extend_from_slice(&Instruction::Addi { rt: Gpr::R12, ra: Gpr::R31, simm: neg_off }.encode());
         code.extend_from_slice(&Instruction::Std { rs: src_reg, ra: Gpr::R12, ds: 0 }.encode());
         code
     } else {
         let mut code = Vec::new();
-        code.extend(ss_load_imm(Gpr::R12, offset_from_r1 as i64));
-        code.extend_from_slice(&Instruction::Add { rt: Gpr::R12, ra: Gpr::R1, rb: Gpr::R12 }.encode());
+        code.extend(ss_load_imm(Gpr::R12, offset_from_r31 as i64));
+        code.extend_from_slice(&Instruction::Subf { rt: Gpr::R12, ra: Gpr::R12, rb: Gpr::R31 }.encode());
         code.extend_from_slice(&Instruction::Std { rs: src_reg, ra: Gpr::R12, ds: 0 }.encode());
         code
     }
@@ -3767,12 +3769,7 @@ impl Backend for PPC64Backend {
         // Then alloc regions, then vreg slots at [R31 - offset]
 
         let mut alloc_offsets: std::collections::HashMap<u32, i32> = std::collections::HashMap::new();
-        //   R1+0: back chain (saved by STDU, must not be overwritten)
-        //   R1+8: R31 save area (8 bytes)
-        //   R1+16: vreg slots start
-        //   R1+fs: old SP (saved by STDU)
-        //   R1+fs+16: LR save area (caller's)
-        let mut current_offset: i32 = 16; // after R31 save at R1+8
+        let mut current_offset: i32 = 24; // after saved R31 at -16
 
         let mut alloc_vreg_ids: Vec<u32> = stack_alloc_vregs.iter().copied().collect();
         alloc_vreg_ids.sort();
@@ -3817,12 +3814,12 @@ impl Backend for PPC64Backend {
             writes: vec![],
             encoded: Instruction::Std { rs: Gpr::R0, ra: Gpr::R1, ds: fs + 16 }.encode().to_vec(),
         });
-        // STD R31, 8(R1) - save R31 (don't clobber back chain at R1+0)
+        // STD R31, fs-16(R1) - save R31
         instructions.push(AllocatedInstruction {
             opcode: "std".into(),
             reads: vec![PhysicalReg::new(RegClass::Gpr, 31), PhysicalReg::new(RegClass::Gpr, 1)],
             writes: vec![],
-            encoded: Instruction::Std { rs: Gpr::R31, ra: Gpr::R1, ds: 8 }.encode().to_vec(),
+            encoded: Instruction::Std { rs: Gpr::R31, ra: Gpr::R1, ds: fs - 16 }.encode().to_vec(),
         });
         // ADDI R31, R1, frame_size
         instructions.push(AllocatedInstruction {
@@ -4504,7 +4501,7 @@ impl Backend for PPC64Backend {
                         code.extend_from_slice(&Instruction::Ld { rt: Gpr::R0, ra: Gpr::R1, ds: fs + 16 }.encode());
                         let mtlr_word: u32 = (31u32 << 26) | (0u32 << 21) | (8u32 << 16) | (467 << 1);
                         code.extend_from_slice(&encode_word(mtlr_word));
-                        code.extend_from_slice(&Instruction::Ld { rt: Gpr::R31, ra: Gpr::R1, ds: 8 }.encode());
+                        code.extend_from_slice(&Instruction::Ld { rt: Gpr::R31, ra: Gpr::R1, ds: fs - 16 }.encode());
                         code.extend_from_slice(&Instruction::Addi { rt: Gpr::R1, ra: Gpr::R1, simm: fs }.encode());
                         code.extend_from_slice(&Instruction::Bclr { bo: 20, bi: 0, bh: 0 }.encode());
                         code
