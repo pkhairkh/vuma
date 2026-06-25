@@ -2015,18 +2015,28 @@ fn convert_node_to_statement_with_externs(
         }
 
         NodePayload::Access(access) => match access.mode {
-            AccessMode::Read => single(Some(ScgStatement::Access(AccessNode::Load {
-                ty: None,
-                dst: node_var(node_id, "val"),
-                ptr: resolve_df_input(node_id, 0, edge_idx, scg),
-                offset: access.offset.map(|o| ScgExpr::Int(o as i64)),
-            }))),
-            AccessMode::Write | AccessMode::ReadWrite => {
-                single(Some(ScgStatement::Access(AccessNode::Store {
+            AccessMode::Read => {
+                // Don't use access_size — it reflects the pointer size, not the
+                // value size. Let the IR builder infer from result types.
+                single(Some(ScgStatement::Access(AccessNode::Load {
+                    ty: None,
+                    dst: node_var(node_id, "val"),
                     ptr: resolve_df_input(node_id, 0, edge_idx, scg),
                     offset: access.offset.map(|o| ScgExpr::Int(o as i64)),
-                    value: resolve_df_input(node_id, 1, edge_idx, scg),
                 })))
+            }
+            AccessMode::Write | AccessMode::ReadWrite => {
+                {
+                    // Don't use access_size for stores — it reflects the pointer
+                    // size, not the value size. Let the IR builder infer from
+                    // param types.
+                    single(Some(ScgStatement::Access(AccessNode::Store {
+                        ptr: resolve_df_input(node_id, 0, edge_idx, scg),
+                        offset: access.offset.map(|o| ScgExpr::Int(o as i64)),
+                        value: resolve_df_input(node_id, 1, edge_idx, scg),
+                        ty: None,
+                    })))
+                }
             }
         },
 
@@ -2285,6 +2295,37 @@ fn result_type_to_load_ty(result_type: &Option<String>) -> Option<vuma_codegen::
     }
 }
 
+
+/// Get the store type from the value's source node.
+/// Returns None if the type can't be determined.
+fn get_store_type_from_value(
+    node_id: NodeId,
+    position: usize,
+    edge_idx: &EdgeIndex,
+    scg: &SCG,
+) -> Option<vuma_codegen::ir::IRType> {
+    let df_inputs = edge_idx.incoming_df(node_id);
+    let df_inputs: Vec<vuma_scg::EdgeData> = if df_inputs.is_empty() {
+        edge_idx.incoming
+            .get(&node_id)
+            .map(|edges| edges.iter().filter(|e| e.kind == EdgeKind::Derivation).cloned().collect())
+            .unwrap_or_default()
+    } else {
+        df_inputs.iter().map(|e| (*e).clone()).collect()
+    };
+    if position < df_inputs.len() {
+        let source = df_inputs[position].source;
+        if let Some(src_data) = scg.get_node(source) {
+            if let NodePayload::Computation(comp) = &src_data.payload {
+                if let Some(rt) = &comp.result_type {
+                    return result_type_to_load_ty(&Some(rt.clone()));
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Original (no-call-extraction) Computation node handling — used when
 /// `extract_calls_from_label` finds no calls in the label.
 fn convert_computation_no_calls(
@@ -2439,6 +2480,7 @@ fn convert_computation_no_calls(
                     ptr: current_ptr,
                     offset: None,
                     value,
+                    ty: None,
                 }));
                 return stmts;
             }
@@ -2614,6 +2656,7 @@ fn convert_computation_no_calls(
                                     ptr,
                                     offset: access.offset.map(|o| ScgExpr::Int(o as i64)),
                                     value,
+                                    ty: None,
                                 })];
                             }
                             _ => {}
