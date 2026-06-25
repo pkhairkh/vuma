@@ -329,6 +329,9 @@ const DP_EOR: u32 = 0b0001;
 const DP_SUB: u32 = 0b0010;
 const DP_RSB: u32 = 0b0011;
 const DP_ADD: u32 = 0b0100;
+const DP_ADC: u32 = 0b0101; // Add with Carry
+const DP_SBC: u32 = 0b0110; // Subtract with Borrow
+const DP_RSC: u32 = 0b0111; // Reverse Subtract with Carry
 const DP_TST: u32 = 0b1000;
 const DP_TEQ: u32 = 0b1001;
 const DP_CMP: u32 = 0b1010;
@@ -3260,7 +3263,7 @@ impl Backend for Arm32Backend {
         let mut all_vreg_ids_sorted: Vec<u32> = all_vreg_ids.iter().copied().collect();
         all_vreg_ids_sorted.sort();
         for &id in &all_vreg_ids_sorted {
-            current_offset += 4; // 4 bytes per slot (ARM32 is 32-bit)
+            current_offset += 8; // 8 bytes per slot: low word at offset, high word at offset+4
             vreg_stack_slots.insert(id, current_offset);
         }
 
@@ -3418,6 +3421,60 @@ impl Backend for Arm32Backend {
             }
         }
 
+        /// Load a 64-bit IRValue into TWO registers (lo_reg, hi_reg).
+        fn ss_load_value_64(
+            lo_reg: Gpr,
+            hi_reg: Gpr,
+            val: &crate::ir::IRValue,
+            slots: &HashMap<u32, i32>,
+        ) -> Vec<u8> {
+            let mut code = Vec::new();
+            match val {
+                crate::ir::IRValue::Register(id) => {
+                    let offset = slots.get(id).copied().unwrap_or(0);
+                    code.extend(ss_load_from_slot(lo_reg, offset));
+                    code.extend(ss_load_from_slot(hi_reg, offset + 4));
+                }
+                crate::ir::IRValue::Immediate(v) => {
+                    code.extend(load_immediate_arm32(lo_reg, *v as u32));
+                    if *v < 0 {
+                        // MVN hi_reg, #0 → 0xFFFFFFFF
+                        code.extend_from_slice(&encode_dp_imm(
+                            Condition::Al, DP_MVN, false, 0, hi_reg.encoding(), 0, 0,
+                        ));
+                    } else {
+                        // MOV hi_reg, #0
+                        code.extend_from_slice(&encode_dp_imm(
+                            Condition::Al, DP_MOV, false, 0, hi_reg.encoding(), 0, 0,
+                        ));
+                    }
+                }
+                crate::ir::IRValue::Address(a) => {
+                    code.extend(load_immediate_arm32(lo_reg, *a as u32));
+                    code.extend_from_slice(&encode_dp_imm(
+                        Condition::Al, DP_MOV, false, 0, hi_reg.encoding(), 0, 0,
+                    ));
+                }
+                crate::ir::IRValue::Label(_) => {
+                    code.extend_from_slice(&encode_dp_imm(
+                        Condition::Al, DP_MOV, false, 0, lo_reg.encoding(), 0, 0,
+                    ));
+                    code.extend_from_slice(&encode_dp_imm(
+                        Condition::Al, DP_MOV, false, 0, hi_reg.encoding(), 0, 0,
+                    ));
+                }
+            }
+            code
+        }
+
+        /// Store TWO registers (lo, hi) into a vreg slot.
+        fn ss_store_64(lo_reg: Gpr, hi_reg: Gpr, offset_from_r11: i32) -> Vec<u8> {
+            let mut code = Vec::new();
+            code.extend(ss_store_to_slot(lo_reg, offset_from_r11));
+            code.extend(ss_store_to_slot(hi_reg, offset_from_r11 + 4));
+            code
+        }
+
         const R12_TEMP: u32 = 12; // R12 encoding for temp use
 
         // ── Phase 2: Emit prologue ──
@@ -3566,19 +3623,39 @@ impl Backend for Arm32Backend {
 
                         match op {
                             BinOpKind::Add | BinOpKind::Sub => {
-                                // Load lhs into R0, rhs into R1, compute, store R0 to dst slot
-                                code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R0));
-                                code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::R1));
-                                let arm_op = match op {
-                                    BinOpKind::Add => DP_ADD,
-                                    BinOpKind::Sub => DP_SUB,
-                                    _ => DP_ADD,
-                                };
-                                code.extend_from_slice(&encode_dp_reg(
-                                    Condition::Al, arm_op, false,
-                                    Gpr::R0.encoding(), Gpr::R0.encoding(), Gpr::R1.encoding(),
-                                ));
-                                code.extend(ss_store_to_slot(Gpr::R0, dst_offset));
+                                // 64-bit add/sub: load 64-bit lhs (R0:R2) and rhs (R1:R3),
+                                // operate on low word with carry/borrow flag, then high word
+                                // with carry (ADC) or borrow (SBC).
+                                code.extend(ss_load_value_64(Gpr::R0, Gpr::R2, lhs, &vreg_stack_slots));
+                                code.extend(ss_load_value_64(Gpr::R1, Gpr::R3, rhs, &vreg_stack_slots));
+                                match op {
+                                    BinOpKind::Add => {
+                                        // ADDS R0, R0, R1 (low word, set carry)
+                                        code.extend_from_slice(&encode_dp_reg(
+                                            Condition::Al, DP_ADD, true,
+                                            Gpr::R0.encoding(), Gpr::R0.encoding(), Gpr::R1.encoding(),
+                                        ));
+                                        // ADC R2, R2, R3 (high word, with carry)
+                                        code.extend_from_slice(&encode_dp_reg(
+                                            Condition::Al, DP_ADC, true,
+                                            Gpr::R2.encoding(), Gpr::R2.encoding(), Gpr::R3.encoding(),
+                                        ));
+                                    }
+                                    BinOpKind::Sub => {
+                                        // SUBS R0, R0, R1 (low word, set borrow)
+                                        code.extend_from_slice(&encode_dp_reg(
+                                            Condition::Al, DP_SUB, true,
+                                            Gpr::R0.encoding(), Gpr::R0.encoding(), Gpr::R1.encoding(),
+                                        ));
+                                        // SBC R2, R2, R3 (high word, with borrow)
+                                        code.extend_from_slice(&encode_dp_reg(
+                                            Condition::Al, DP_SBC, true,
+                                            Gpr::R2.encoding(), Gpr::R2.encoding(), Gpr::R3.encoding(),
+                                        ));
+                                    }
+                                    _ => {}
+                                }
+                                code.extend(ss_store_64(Gpr::R0, Gpr::R2, dst_offset));
                             }
                             BinOpKind::Mul => {
                                 code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R0));
@@ -3591,21 +3668,93 @@ impl Backend for Arm32Backend {
                                 code.extend(ss_store_to_slot(Gpr::R0, dst_offset));
                             }
                             BinOpKind::And | BinOpKind::Or | BinOpKind::Xor => {
-                                code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R0));
-                                code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::R1));
+                                // 64-bit bitwise op: load both words of lhs and rhs,
+                                // operate on low and high words independently, store both.
+                                code.extend(ss_load_value_64(Gpr::R0, Gpr::R2, lhs, &vreg_stack_slots));
+                                code.extend(ss_load_value_64(Gpr::R1, Gpr::R3, rhs, &vreg_stack_slots));
                                 let arm_op = match op {
                                     BinOpKind::And => DP_AND,
                                     BinOpKind::Or => DP_ORR,
                                     BinOpKind::Xor => DP_EOR,
                                     _ => DP_AND,
                                 };
+                                // Low word: R0 = R0 <op> R1
                                 code.extend_from_slice(&encode_dp_reg(
                                     Condition::Al, arm_op, false,
                                     Gpr::R0.encoding(), Gpr::R0.encoding(), Gpr::R1.encoding(),
                                 ));
-                                code.extend(ss_store_to_slot(Gpr::R0, dst_offset));
+                                // High word: R2 = R2 <op> R3
+                                code.extend_from_slice(&encode_dp_reg(
+                                    Condition::Al, arm_op, false,
+                                    Gpr::R2.encoding(), Gpr::R2.encoding(), Gpr::R3.encoding(),
+                                ));
+                                code.extend(ss_store_64(Gpr::R0, Gpr::R2, dst_offset));
                             }
-                            BinOpKind::Shl | BinOpKind::ShrL | BinOpKind::ShrA
+                            BinOpKind::ShrL => {
+                                // 64-bit logical right shift by variable amount.
+                                // R0=low, R2=high, R1=shift_amount (R3 = high word of
+                                // shift amount — ignored, used as scratch below).
+                                code.extend(ss_load_value_64(Gpr::R0, Gpr::R2, lhs, &vreg_stack_slots));
+                                code.extend(ss_load_value_64(Gpr::R1, Gpr::R3, rhs, &vreg_stack_slots));
+
+                                // CMP R1, #32 — set carry (CS) iff shift >= 32
+                                code.extend_from_slice(&encode_dp_imm(
+                                    Condition::Al, DP_CMP, true,
+                                    Gpr::R1.encoding(), 0, 0, 32,
+                                ));
+
+                                // If shift >= 32 (CS):
+                                //   SUB R12, R1, #32         (shift - 32)
+                                //   MOV R0, R2, LSR R12      (result_low = high >> (shift-32))
+                                //   MOV R2, #0               (result_high = 0)
+                                code.extend_from_slice(&encode_dp_imm(
+                                    Condition::Cs, DP_SUB, false,
+                                    Gpr::R1.encoding(), Gpr::R12.encoding(), 0, 32,
+                                ));
+                                code.extend_from_slice(&encode_dp_shift_reg(
+                                    Condition::Cs, DP_MOV, false, 0,
+                                    Gpr::R0.encoding(), 1, Gpr::R12.encoding(), Gpr::R2.encoding(),
+                                ));
+                                code.extend_from_slice(&encode_dp_imm(
+                                    Condition::Cs, DP_MOV, false, 0,
+                                    Gpr::R2.encoding(), 0, 0,
+                                ));
+
+                                // If shift < 32 (CC):
+                                //   MOV R12, R0              (save low)
+                                //   MOV R0, R12, LSR R1      (low >> shift)
+                                //   RSB R3, R1, #32          (32 - shift)
+                                //   MOV R12, R2, LSL R3      (high << (32-shift))
+                                //   ORR R0, R0, R12          (combine)
+                                //   MOV R2, R2, LSR R1       (high >> shift)
+                                code.extend_from_slice(&encode_dp_reg(
+                                    Condition::Cc, DP_MOV, false, 0,
+                                    Gpr::R12.encoding(), Gpr::R0.encoding(),
+                                ));
+                                code.extend_from_slice(&encode_dp_shift_reg(
+                                    Condition::Cc, DP_MOV, false, 0,
+                                    Gpr::R0.encoding(), 1, Gpr::R1.encoding(), Gpr::R12.encoding(),
+                                ));
+                                code.extend_from_slice(&encode_dp_imm(
+                                    Condition::Cc, DP_RSB, false,
+                                    Gpr::R1.encoding(), Gpr::R3.encoding(), 0, 32,
+                                ));
+                                code.extend_from_slice(&encode_dp_shift_reg(
+                                    Condition::Cc, DP_MOV, false, 0,
+                                    Gpr::R12.encoding(), 0, Gpr::R3.encoding(), Gpr::R2.encoding(),
+                                ));
+                                code.extend_from_slice(&encode_dp_reg(
+                                    Condition::Cc, DP_ORR, false,
+                                    Gpr::R0.encoding(), Gpr::R0.encoding(), Gpr::R12.encoding(),
+                                ));
+                                code.extend_from_slice(&encode_dp_shift_reg(
+                                    Condition::Cc, DP_MOV, false, 0,
+                                    Gpr::R2.encoding(), 1, Gpr::R1.encoding(), Gpr::R2.encoding(),
+                                ));
+
+                                code.extend(ss_store_64(Gpr::R0, Gpr::R2, dst_offset));
+                            }
+                            BinOpKind::Shl | BinOpKind::ShrA
                             | BinOpKind::Ror | BinOpKind::Rol => {
                                 code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R0));
                                 code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::R1));
@@ -3623,7 +3772,6 @@ impl Backend for Arm32Backend {
                                 } else {
                                     let shift_type: u32 = match op {
                                         BinOpKind::Shl => 0,
-                                        BinOpKind::ShrL => 1,
                                         BinOpKind::ShrA => 2,
                                         BinOpKind::Ror => 3,
                                         _ => 0,
@@ -3728,26 +3876,38 @@ impl Backend for Arm32Backend {
                         let dst_id = dst.as_register().unwrap_or(0);
                         let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
                         let mut code = Vec::new();
-                        code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R0));
-                        code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::R1));
+                        code.extend(ss_load_value_64(Gpr::R0, Gpr::R2, lhs, &vreg_stack_slots));
+                        code.extend(ss_load_value_64(Gpr::R1, Gpr::R3, rhs, &vreg_stack_slots));
+                        // ADDS R0, R0, R1 (low word, set carry)
                         code.extend_from_slice(&encode_dp_reg(
-                            Condition::Al, DP_ADD, false,
+                            Condition::Al, DP_ADD, true,
                             Gpr::R0.encoding(), Gpr::R0.encoding(), Gpr::R1.encoding(),
                         ));
-                        code.extend(ss_store_to_slot(Gpr::R0, dst_offset));
+                        // ADC R2, R2, R3 (high word, with carry)
+                        code.extend_from_slice(&encode_dp_reg(
+                            Condition::Al, DP_ADC, true,
+                            Gpr::R2.encoding(), Gpr::R2.encoding(), Gpr::R3.encoding(),
+                        ));
+                        code.extend(ss_store_64(Gpr::R0, Gpr::R2, dst_offset));
                         code
                     }
                     crate::ir::IRInstr::Sub { dst, lhs, rhs, .. } => {
                         let dst_id = dst.as_register().unwrap_or(0);
                         let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
                         let mut code = Vec::new();
-                        code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R0));
-                        code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::R1));
+                        code.extend(ss_load_value_64(Gpr::R0, Gpr::R2, lhs, &vreg_stack_slots));
+                        code.extend(ss_load_value_64(Gpr::R1, Gpr::R3, rhs, &vreg_stack_slots));
+                        // SUBS R0, R0, R1 (low word, set borrow)
                         code.extend_from_slice(&encode_dp_reg(
-                            Condition::Al, DP_SUB, false,
+                            Condition::Al, DP_SUB, true,
                             Gpr::R0.encoding(), Gpr::R0.encoding(), Gpr::R1.encoding(),
                         ));
-                        code.extend(ss_store_to_slot(Gpr::R0, dst_offset));
+                        // SBC R2, R2, R3 (high word, with borrow)
+                        code.extend_from_slice(&encode_dp_reg(
+                            Condition::Al, DP_SBC, true,
+                            Gpr::R2.encoding(), Gpr::R2.encoding(), Gpr::R3.encoding(),
+                        ));
+                        code.extend(ss_store_64(Gpr::R0, Gpr::R2, dst_offset));
                         code
                     }
                     crate::ir::IRInstr::Mul { dst, lhs, rhs, .. } => {
