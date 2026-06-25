@@ -3769,7 +3769,12 @@ impl Backend for PPC64Backend {
         // Then alloc regions, then vreg slots at [R31 - offset]
 
         let mut alloc_offsets: std::collections::HashMap<u32, i32> = std::collections::HashMap::new();
-        let mut current_offset: i32 = 24; // after saved R31 at -16
+        // Start at 32 to avoid overlapping with:
+        //   [R31 - 0]  = back chain (old R1)
+        //   [R31 - 8]  = unused
+        //   [R31 - 16] = saved R31
+        //   [R31 - 24] = unused
+        let mut current_offset: i32 = 32;
 
         let mut alloc_vreg_ids: Vec<u32> = stack_alloc_vregs.iter().copied().collect();
         alloc_vreg_ids.sort();
