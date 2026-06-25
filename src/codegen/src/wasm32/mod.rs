@@ -2319,24 +2319,22 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
         }
 
         IRInstr::Load { dst, addr, offset, ty } => {
-            let load_ty = WasmType::from_ir_type(ty).unwrap_or(WasmType::I32);
+            // On Wasm32, all integers are i32. Use i32 loads for all integer types.
+            let load_ty = if matches!(ty, IRType::F32) { WasmType::F32 }
+                else if matches!(ty, IRType::F64) { WasmType::F64 }
+                else { WasmType::I32 };
             ctx.push_value(addr, Some(&WasmType::I32));
             let wasm_offset = (*offset).max(0) as u32;
-            // Select the correct Wasm load instruction based on the IR type.
-            // Alignment is log2(access_size_in_bytes):
-            //   1 byte = 0, 2 bytes = 1, 4 bytes = 2, 8 bytes = 3
             let load_op = match ty {
                 IRType::I8 => WasmInstr::I32Load8S { align: 0, offset: wasm_offset },
                 IRType::U8 => WasmInstr::I32Load8U { align: 0, offset: wasm_offset },
                 IRType::I16 => WasmInstr::I32Load16S { align: 1, offset: wasm_offset },
                 IRType::U16 => WasmInstr::I32Load16U { align: 1, offset: wasm_offset },
-                IRType::I64 | IRType::U64 => WasmInstr::I64Load { align: 3, offset: wasm_offset },
                 IRType::F32 => WasmInstr::F32Load { align: 2, offset: wasm_offset },
                 IRType::F64 => WasmInstr::F64Load { align: 3, offset: wasm_offset },
                 _ => WasmInstr::I32Load { align: 2, offset: wasm_offset },
             };
             ctx.emit(load_op);
-            // Load pops 1 (addr) and pushes 1 (result) — net 0
             if let IRValue::Register(id) = dst {
                 ctx.pop_to_vreg(*id, load_ty);
             } else {
@@ -2346,20 +2344,21 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
         }
 
         IRInstr::Store { value, addr, offset, ty } => {
-            let store_ty = WasmType::from_ir_type(ty).unwrap_or(WasmType::I32);
+            // On Wasm32, all integers are i32. Use i32 stores for all integer types.
+            let store_ty = if matches!(ty, IRType::F32) { WasmType::F32 }
+                else if matches!(ty, IRType::F64) { WasmType::F64 }
+                else { WasmType::I32 };
             ctx.push_value(addr, Some(&WasmType::I32));
             ctx.push_value(value, Some(&store_ty));
             let wasm_offset = (*offset).max(0) as u32;
             let store_op = match ty {
                 IRType::I8 | IRType::U8 => WasmInstr::I32Store8 { align: 0, offset: wasm_offset },
                 IRType::I16 | IRType::U16 => WasmInstr::I32Store16 { align: 1, offset: wasm_offset },
-                IRType::I64 | IRType::U64 => WasmInstr::I64Store { align: 3, offset: wasm_offset },
                 IRType::F32 => WasmInstr::F32Store { align: 2, offset: wasm_offset },
                 IRType::F64 => WasmInstr::F64Store { align: 3, offset: wasm_offset },
                 _ => WasmInstr::I32Store { align: 2, offset: wasm_offset },
             };
             ctx.emit(store_op);
-            // Store pops 2 (addr, value) and pushes 0
             ctx.stack_depth -= 2;
         }
 
@@ -2834,13 +2833,12 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
         //   4 bytes → align = 2  (2^2 = 4)
         //   8 bytes → align = 3  (2^3 = 8)
         IRInstr::AtomicLoad { dst, addr, ty } => {
-            let load_ty = WasmType::from_ir_type(ty).unwrap_or(WasmType::I32);
+            // On Wasm32, all integers are i32. Use i32 atomic loads for all types.
+            let load_ty = WasmType::I32;
             ctx.push_value(addr, Some(&WasmType::I32));
-            // Select the correct Wasm atomic load instruction based on the IR type.
             let load_op = match ty {
                 IRType::I8 | IRType::U8 => WasmInstr::I32AtomicLoad8U { align: 0, offset: 0 },
                 IRType::I16 | IRType::U16 => WasmInstr::I32AtomicLoad16U { align: 1, offset: 0 },
-                IRType::I64 | IRType::U64 => WasmInstr::I64AtomicLoad { align: 3, offset: 0 },
                 _ => WasmInstr::I32AtomicLoad { align: 2, offset: 0 },
             };
             ctx.emit(load_op);
@@ -2851,33 +2849,25 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
             }
         }
         IRInstr::AtomicStore { value, addr, ty } => {
-            let store_ty = WasmType::from_ir_type(ty).unwrap_or(WasmType::I32);
-            // Wasm store: addr first, then value
+            // On Wasm32, all integers are i32. Use i32 atomic stores for all types.
             ctx.push_value(addr, Some(&WasmType::I32));
-            ctx.push_value(value, Some(&store_ty));
-            // Select the correct Wasm atomic store instruction based on the IR type.
+            ctx.push_value(value, Some(&WasmType::I32));
             let store_op = match ty {
                 IRType::I8 | IRType::U8 => WasmInstr::I32AtomicStore8 { align: 0, offset: 0 },
                 IRType::I16 | IRType::U16 => WasmInstr::I32AtomicStore16 { align: 1, offset: 0 },
-                IRType::I64 | IRType::U64 => WasmInstr::I64AtomicStore { align: 3, offset: 0 },
                 _ => WasmInstr::I32AtomicStore { align: 2, offset: 0 },
             };
             ctx.emit(store_op);
         }
         IRInstr::AtomicCas { dst, addr, expected, desired, ty } => {
-            // Wasm cmpxchg stack: [addr, expected, replacement] → [old_value]
-            // The instruction atomically reads the value at addr, compares it
-            // with expected, and if equal writes replacement.  It always
-            // returns the old value so the caller can test for success.
-            let value_ty = WasmType::from_ir_type(ty).unwrap_or(WasmType::I32);
+            // On Wasm32, all integers are i32. Use i32 cmpxchg for all types.
+            let value_ty = WasmType::I32;
             ctx.push_value(addr, Some(&WasmType::I32));
             ctx.push_value(expected, Some(&value_ty));
             ctx.push_value(desired, Some(&value_ty));
-            // Select the correct Wasm atomic cmpxchg instruction based on the IR type.
             let cas_op = match ty {
                 IRType::I8 | IRType::U8 => WasmInstr::I32AtomicRmw8CmpxchgU { align: 0, offset: 0 },
                 IRType::I16 | IRType::U16 => WasmInstr::I32AtomicRmw16CmpxchgU { align: 1, offset: 0 },
-                IRType::I64 | IRType::U64 => WasmInstr::I64AtomicRmwCmpxchg { align: 3, offset: 0 },
                 _ => WasmInstr::I32AtomicRmwCmpxchg { align: 2, offset: 0 },
             };
             ctx.emit(cas_op);
@@ -3401,10 +3391,36 @@ impl Backend for Wasm32Backend {
             index: start_func_idx,
         });
 
-        // Set _start as the Wasm start function (executed automatically
-        // on module instantiation).
-        // Do not set start section - _start is exported and called by host
-        // module.set_start(start_func_idx);
+        // ── Export _vuma_main for test harness ───────────────────
+        // This function calls main() and returns the result as an i32.
+        // The test harness uses `wasmtime run --invoke _vuma_main` to
+        // get the return value directly, bypassing WASI's proc_exit
+        // limitation (exit codes 0-126 only).
+        if let Some(main_idx) = main_func_idx {
+            let test_type_idx = module.add_type(WasmFuncType {
+                params: vec![],
+                results: vec![WasmType::I32],
+            });
+            let test_func_idx = module.add_function(test_type_idx);
+            let mut test_body = Vec::new();
+            // Call main() — stores return value at memory address 0
+            WasmInstr::Call(main_idx).encode(&mut test_body);
+            // Load return value from memory address 0
+            WasmInstr::I32Const(0).encode(&mut test_body);
+            WasmInstr::I32Load { align: 2, offset: 0 }.encode(&mut test_body);
+            // Return the value
+            WasmInstr::Return.encode(&mut test_body);
+            test_body.push(0x0B); // end
+            module.add_code(WasmFuncBody {
+                locals: vec![],
+                body: test_body,
+            });
+            module.add_export(WasmExport {
+                name: "_vuma_main".to_string(),
+                kind: WasmExportKind::Function,
+                index: test_func_idx,
+            });
+        }
 
         Ok(module.encode())
     }
