@@ -586,7 +586,15 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
             }
             crate::ir::IRTerminator::Branch { cond, true_block, false_block } => {
                 let mut code = cache.flush_all(fp);
-                let (c, pre) = if let Some(vid) = cond.as_register() { cache.read_vreg(vid, fp) } else { (Gpr::T0, encode_load_imm(Gpr::T0, 1)) };
+                // Load the condition value: if it's a register, read from cache;
+                // if it's an immediate, load the actual value (not hardcoded 1).
+                let (c, pre) = if let Some(vid) = cond.as_register() {
+                    cache.read_vreg(vid, fp)
+                } else if let IRValue::Immediate(imm) = cond {
+                    (Gpr::T0, encode_load_imm(Gpr::T0, *imm))
+                } else {
+                    (Gpr::T0, encode_load_imm(Gpr::T0, 1))
+                };
                 code.extend(pre);
                 let bnez_off = byte_offset + code.len();
                 code.extend_from_slice(&Instruction::Bnez { rj: c, offs21: 0 }.encode());
