@@ -243,8 +243,8 @@ impl RegCache {
         let mut code = Vec::new();
         for &reg in ALLOC_REGS {
             let idx = reg.encoding() as usize;
-            if let Some(vid) = self.reg_state[idx].vreg {
-                if self.reg_state[idx].dirty {
+            if self.reg_state[idx].dirty {
+                if let Some(vid) = self.reg_state[idx].vreg {
                     let offset = self.slot_offset(vid);
                     if fits_si12(offset as i64) {
                         code.extend_from_slice(&Instruction::StD { rd: reg, rj: fp, imm12: offset }.encode());
@@ -253,10 +253,9 @@ impl RegCache {
                         code.extend_from_slice(&Instruction::AddD { rd: Gpr::T0, rj: fp, rk: Gpr::T0 }.encode());
                         code.extend_from_slice(&Instruction::StD { rd: reg, rj: Gpr::T0, imm12: 0 }.encode());
                     }
+                    self.reg_state[idx].dirty = false;
+                    self.vreg_loc.insert(vid, VregLoc::Reg(reg, false));
                 }
-                // Mark vreg as on stack so read_vreg reloads it
-                self.vreg_loc.insert(vid, VregLoc::Stack(self.slot_offset(vid)));
-                self.reg_state[idx] = RegState { vreg: None, dirty: false, last_used: 0 };
             }
         }
         code
@@ -1503,41 +1502,36 @@ fn lower_binop(op: &BinOpKind, dst: &IRValue, lhs: &IRValue, rhs: &IRValue, cach
         BinOpKind::Mul => {
             let (l, pre) = resolve_val(lhs, cache, fp); code.extend(pre);
             let (r, pre2) = resolve_val(rhs, cache, fp); code.extend(pre2);
-            let (d, ac) = cache.alloc_vreg(dst_id, Some(l), fp); code.extend(ac);
-            if d != l { code.extend_from_slice(&Instruction::AddD { rd: d, rj: l, rk: Gpr::R0 }.encode()); }
-            code.extend_from_slice(&Instruction::MulD { rd: d, rj: d, rk: r }.encode());
+            let (d, ac) = cache.alloc_vreg(dst_id, None, fp); code.extend(ac);
+            code.extend_from_slice(&Instruction::MulD { rd: d, rj: l, rk: r }.encode());
             cache.mark_dirty(dst_id);
         }
         BinOpKind::SDiv => {
             let (l, pre) = resolve_val(lhs, cache, fp); code.extend(pre);
             let (r, pre2) = resolve_val(rhs, cache, fp); code.extend(pre2);
-            let (d, ac) = cache.alloc_vreg(dst_id, Some(l), fp); code.extend(ac);
-            if d != l { code.extend_from_slice(&Instruction::AddD { rd: d, rj: l, rk: Gpr::R0 }.encode()); }
-            code.extend_from_slice(&Instruction::DivD { rd: d, rj: d, rk: r }.encode());
+            let (d, ac) = cache.alloc_vreg(dst_id, None, fp); code.extend(ac);
+            code.extend_from_slice(&Instruction::DivD { rd: d, rj: l, rk: r }.encode());
             cache.mark_dirty(dst_id);
         }
         BinOpKind::UDiv => {
             let (l, pre) = resolve_val(lhs, cache, fp); code.extend(pre);
             let (r, pre2) = resolve_val(rhs, cache, fp); code.extend(pre2);
-            let (d, ac) = cache.alloc_vreg(dst_id, Some(l), fp); code.extend(ac);
-            if d != l { code.extend_from_slice(&Instruction::AddD { rd: d, rj: l, rk: Gpr::R0 }.encode()); }
-            code.extend_from_slice(&Instruction::DivDu { rd: d, rj: d, rk: r }.encode());
+            let (d, ac) = cache.alloc_vreg(dst_id, None, fp); code.extend(ac);
+            code.extend_from_slice(&Instruction::DivDu { rd: d, rj: l, rk: r }.encode());
             cache.mark_dirty(dst_id);
         }
         BinOpKind::SRem => {
             let (l, pre) = resolve_val(lhs, cache, fp); code.extend(pre);
             let (r, pre2) = resolve_val(rhs, cache, fp); code.extend(pre2);
-            let (d, ac) = cache.alloc_vreg(dst_id, Some(l), fp); code.extend(ac);
-            if d != l { code.extend_from_slice(&Instruction::AddD { rd: d, rj: l, rk: Gpr::R0 }.encode()); }
-            code.extend_from_slice(&Instruction::ModD { rd: d, rj: d, rk: r }.encode());
+            let (d, ac) = cache.alloc_vreg(dst_id, None, fp); code.extend(ac);
+            code.extend_from_slice(&Instruction::ModD { rd: d, rj: l, rk: r }.encode());
             cache.mark_dirty(dst_id);
         }
         BinOpKind::URem => {
             let (l, pre) = resolve_val(lhs, cache, fp); code.extend(pre);
             let (r, pre2) = resolve_val(rhs, cache, fp); code.extend(pre2);
-            let (d, ac) = cache.alloc_vreg(dst_id, Some(l), fp); code.extend(ac);
-            if d != l { code.extend_from_slice(&Instruction::AddD { rd: d, rj: l, rk: Gpr::R0 }.encode()); }
-            code.extend_from_slice(&Instruction::ModDu { rd: d, rj: d, rk: r }.encode());
+            let (d, ac) = cache.alloc_vreg(dst_id, None, fp); code.extend(ac);
+            code.extend_from_slice(&Instruction::ModDu { rd: d, rj: l, rk: r }.encode());
             cache.mark_dirty(dst_id);
         }
         BinOpKind::SLt | BinOpKind::SLe | BinOpKind::SGt | BinOpKind::SGe
