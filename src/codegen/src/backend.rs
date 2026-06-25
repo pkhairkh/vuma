@@ -491,6 +491,8 @@ pub enum BackendKind {
     Mips64,
     /// PowerPC 64-bit.
     PowerPC64,
+    /// RISC-V 32-bit.
+    RiscV32,
 }
 
 impl BackendKind {
@@ -505,6 +507,7 @@ impl BackendKind {
             BackendKind::Arm32 => "arm32",
             BackendKind::Mips64 => "mips64",
             BackendKind::PowerPC64 => "ppc64",
+            BackendKind::RiscV32 => "riscv32",
         }
     }
 }
@@ -676,6 +679,85 @@ impl TargetInfo for RiscV64TargetInfo {
     } // RVC + 32-bit
     fn output_format(&self) -> OutputFormat {
         OutputFormat::Elf64
+    }
+}
+
+// ---------------------------------------------------------------------------
+// RiscV32 TargetInfo
+// ---------------------------------------------------------------------------
+
+/// RISC-V 32-bit target information (RV32IMA + F/D).
+pub struct RiscV32TargetInfo;
+
+impl TargetInfo for RiscV32TargetInfo {
+    fn isa_name(&self) -> &'static str {
+        "riscv32"
+    }
+    fn target_triple(&self) -> &'static str {
+        "riscv32-unknown-linux-gnu"
+    }
+    fn elf_machine_type(&self) -> u16 {
+        243
+    } // EM_RISCV
+    fn default_base_address(&self) -> u64 {
+        0x10000
+    }
+    fn pointer_width(&self) -> usize {
+        4
+    }
+    fn size_of(&self, ty: &IRType) -> usize {
+        size_of_with_ptr_width(ty, 4)
+    }
+    fn alignment_of(&self, ty: &IRType) -> usize {
+        alignment_of_with_ptr_width(ty, 4)
+    }
+    fn endianness(&self) -> Endianness {
+        Endianness::Little
+    }
+    fn has_registers(&self) -> bool {
+        true
+    }
+    fn num_gp_regs(&self) -> usize {
+        32
+    } // x0-x31
+    fn num_simd_fp_regs(&self) -> usize {
+        32
+    } // f0-f31
+    fn has_hardwired_zero(&self) -> bool {
+        true
+    } // x0
+    fn has_link_register(&self) -> bool {
+        true
+    } // x1 (ra)
+    fn has_branch_delay_slots(&self) -> bool {
+        false
+    }
+    fn has_toc_pointer(&self) -> bool {
+        false
+    }
+    fn has_condition_registers(&self) -> bool {
+        false
+    }
+    fn calling_convention_name(&self) -> &'static str {
+        "ilp32d"
+    }
+    fn num_int_arg_regs(&self) -> usize {
+        8
+    } // a0-a7
+    fn num_fp_arg_regs(&self) -> usize {
+        8
+    } // fa0-fa7
+    fn stack_alignment(&self) -> usize {
+        16
+    }
+    fn instruction_alignment(&self) -> usize {
+        2
+    } // RVC allows 16-bit alignment
+    fn instruction_width_range(&self) -> (usize, usize) {
+        (2, 4)
+    } // RVC + 32-bit
+    fn output_format(&self) -> OutputFormat {
+        OutputFormat::Elf32
     }
 }
 
@@ -2633,6 +2715,7 @@ pub fn create_backend(kind: BackendKind) -> Result<Box<dyn Backend>, BackendErro
         BackendKind::Arm32 => Ok(Box::new(Arm32Backend::new())),
         BackendKind::Mips64 => Ok(Box::new(Mips64Backend::new())),
         BackendKind::PowerPC64 => Ok(Box::new(PPC64Backend::new())),
+        BackendKind::RiscV32 => Ok(Box::new(crate::riscv32::RiscV32Backend::new())),
     }
 }
 
