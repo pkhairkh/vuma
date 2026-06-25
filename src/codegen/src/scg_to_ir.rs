@@ -2122,12 +2122,9 @@ impl IRBuilder {
                         if !matches!(ret_ty, IRType::Ptr) {
                             return ret_ty.clone();
                         }
-                        IRType::U32
+                        IRType::U8
                     } else {
-                        // Default to U32 for untyped loads. Most VUMA programs
-                        // use u32 for values. Byte-level loads should use
-                        // explicit casts or masking.
-                        IRType::U32
+                        IRType::U8
                     }
                 });
                 ir_func.current_block().push(IRInstruction::Load {
