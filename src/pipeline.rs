@@ -2016,8 +2016,6 @@ fn convert_node_to_statement_with_externs(
 
         NodePayload::Access(access) => match access.mode {
             AccessMode::Read => {
-                // Don't use access_size — it reflects the pointer size, not the
-                // value size. Let the IR builder infer from result types.
                 single(Some(ScgStatement::Access(AccessNode::Load {
                     ty: None,
                     dst: node_var(node_id, "val"),
@@ -2414,11 +2412,13 @@ fn convert_computation_no_calls(
                 } else {
                     resolve_subexpr(ptr_expr, &df_sources, edge_idx, scg)
                 };
+                let load_ty = comp.result_type.as_deref()
+                    .and_then(|rt| result_type_to_load_ty(&Some(rt.to_string())));
                 return vec![ScgStatement::Access(AccessNode::Load {
                     dst: node_var(node_id, "val"),
                     ptr,
                     offset: None,
-                    ty: None,
+                    ty: load_ty,
                 })];
             }
         }
@@ -2564,8 +2564,11 @@ fn convert_computation_no_calls(
                             op_label.contains("= *") && !op_label.starts_with("*");
                         match access.mode {
                             AccessMode::Read if is_load_label => {
+                                // node_id IS the Computation node. Use its result_type.
+                                let load_ty = comp.result_type.as_deref()
+                                    .and_then(|rt| result_type_to_load_ty(&Some(rt.to_string())));
                                 return vec![ScgStatement::Access(AccessNode::Load {
-                                    ty: None,
+                                    ty: load_ty,
                                     dst: node_var(node_id, "val"),
                                     ptr: resolve_df_input(node_id, 0, edge_idx, scg),
                                     offset: access.offset.map(|o| ScgExpr::Int(o as i64)),
