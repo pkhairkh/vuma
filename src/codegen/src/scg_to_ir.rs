@@ -288,6 +288,9 @@ pub enum AccessNode {
         offset: Option<ScgExpr>,
         /// Value expression to store.
         value: ScgExpr,
+        /// Optional store type override. When None, defaults to U8 for
+        /// non-pointer values and U64 for pointer values.
+        ty: Option<crate::ir::IRType>,
     },
 }
 
@@ -612,6 +615,9 @@ pub struct IRBuilder {
     /// function parameters of type Address). Used to determine Store/Load
     /// width: pointer stores need U64 (64-bit), byte stores use U8.
     pointer_vregs: std::collections::HashSet<u32>,
+    /// Map from parameter name to IR type. Populated in lower_function,
+    /// used in lower_access to determine Store/Load width.
+    param_types: std::collections::HashMap<String, crate::ir::IRType>,
 }
 
 /// Backward-compatible alias.
@@ -626,6 +632,7 @@ impl IRBuilder {
             loop_stack: Vec::new(),
             vreg_aliases: std::collections::HashMap::new(),
             pointer_vregs: std::collections::HashSet::new(),
+            param_types: std::collections::HashMap::new(),
         }
     }
 
@@ -671,6 +678,7 @@ impl IRBuilder {
     /// (with proper IR types), allocates result registers, lowers the body
     /// statements, and rebuilds the CFG predecessor/successor sets.
     fn lower_function(&mut self, func: &ScgFunction) -> Result<IRFunction> {
+        self.param_types.clear();
         let mut ir_func = IRFunction::new(&func.name);
 
         // Map parameters to virtual registers with proper types.
@@ -686,6 +694,8 @@ impl IRBuilder {
             if param.ty == ScgType::Ptr {
                 self.pointer_vregs.insert(vreg_id);
             }
+            // Record param type for Store/Load width inference
+            self.param_types.insert(param.name.clone(), param.ty.to_ir_type());
         }
 
         // Map result registers with proper types.
@@ -2101,8 +2111,25 @@ impl IRBuilder {
                 let dst_vreg = self.alloc_vreg();
                 ir_func.register_vreg(VirtualRegister::named(dst_vreg, dst));
                 names.insert(dst.clone(), dst_vreg);
-                // Use the explicit type if provided, otherwise default to U8
-                let load_ty = ty.clone().unwrap_or(IRType::U8);
+                // Use the explicit type if provided, otherwise check if the
+                // destination variable matches a param name (for type inference),
+                // otherwise default to U8.
+                let load_ty = ty.clone().unwrap_or_else(|| {
+                    if let Some(pt) = self.param_types.get(dst) {
+                        pt.clone()
+                    } else if !ir_func.result_types.is_empty() {
+                        let ret_ty = &ir_func.result_types[0];
+                        if !matches!(ret_ty, IRType::Ptr) {
+                            return ret_ty.clone();
+                        }
+                        IRType::U32
+                    } else {
+                        // Default to U32 for untyped loads. Most VUMA programs
+                        // use u32 for values. Byte-level loads should use
+                        // explicit casts or masking.
+                        IRType::U32
+                    }
+                });
                 ir_func.current_block().push(IRInstruction::Load {
                     dst: IRValue::Register(dst_vreg),
                     addr: addr_val,
@@ -2110,7 +2137,7 @@ impl IRBuilder {
                     ty: load_ty,
                 });
             }
-            AccessNode::Store { ptr, offset, value } => {
+            AccessNode::Store { ptr, offset, value, ty } => {
                 let ptr_val = self.resolve_expr(ptr, names, ir_func)?;
                 let val = self.resolve_expr(value, names, ir_func)?;
                 let (addr_val, byte_offset) = match offset {
@@ -2131,17 +2158,28 @@ impl IRBuilder {
                     }
                     None => (ptr_val, 0),
                 };
-                // Determine store width: if the value is a pointer vreg,
-                // use U64 (64-bit) to store the full address. Otherwise U8.
-                let store_ty = if let IRValue::Register(vid) = val {
-                    if self.pointer_vregs.contains(&vid) {
-                        IRType::U64
+                // Determine store width: use explicit type if provided,
+                // else U64 for pointer vregs, else check param type, else U8.
+                let store_ty = ty.clone().unwrap_or_else(|| {
+                    if let IRValue::Register(vid) = val {
+                        if self.pointer_vregs.contains(&vid) {
+                            IRType::U64
+                        } else {
+                            // Check if this vreg corresponds to a known parameter
+                            // and use its type. Fall back to U8.
+                            let vreg_name = ir_func.vregs.get(&vid)
+                                .and_then(|v| v.name.as_deref());
+                            if let Some(name) = vreg_name {
+                                if let Some(pt) = self.param_types.get(name) {
+                                    return pt.clone();
+                                }
+                            }
+                            IRType::U8
+                        }
                     } else {
                         IRType::U8
                     }
-                } else {
-                    IRType::U8
-                };
+                });
                 ir_func.current_block().push(IRInstruction::Store {
                     value: val,
                     addr: addr_val,
@@ -3049,7 +3087,7 @@ impl IRBuilder {
                     Self::expr_uses(off, &mut uses);
                 }
             }
-            ScgStatement::Access(AccessNode::Store { ptr, offset, value }) => {
+            ScgStatement::Access(AccessNode::Store { ptr, offset, value, ty }) => {
                 Self::expr_uses(ptr, &mut uses);
                 if let Some(off) = offset {
                     Self::expr_uses(off, &mut uses);
@@ -3449,6 +3487,7 @@ mod tests {
                     ptr: ScgExpr::Var("ptr".into()),
                     offset: Some(ScgExpr::Int(16)),
                     value: ScgExpr::Var("val".into()),
+                    ty: None,
                 }),
                 ScgStatement::Return(vec![]),
             ],
@@ -4235,6 +4274,7 @@ mod tests {
                     ptr: ScgExpr::Var("ptr".into()),
                     offset: None,
                     value: ScgExpr::Int(42),
+                    ty: None,
                 }),
                 ScgStatement::Return(vec![]),
             ],
@@ -4475,6 +4515,7 @@ mod tests {
                     ptr: ScgExpr::Var("buf".into()),
                     offset: None,
                     value: ScgExpr::Int(99),
+                    ty: None,
                 }),
                 ScgStatement::Access(AccessNode::Load {
                     dst: "loaded".into(),
