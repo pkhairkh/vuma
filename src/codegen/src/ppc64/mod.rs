@@ -3517,7 +3517,10 @@ fn ss_load_imm(rd: Gpr, val: i64) -> Vec<u8> {
     if (-32768..=32767).contains(&val) {
         code.extend_from_slice(&Instruction::Li { rt: rd, simm: val as i32 }.encode());
     } else if uval <= 0xFFFF {
-        code.extend_from_slice(&Instruction::Ori { ra: rd, rs: Gpr::R0, uimm: uval as u32 & 0xFFFF }.encode());
+        // Use LI to clear rd first, then ORI. Don't use R0 as source because
+        // R0 may contain LR (saved by MFLR in prologue) or other stale values.
+        code.extend_from_slice(&Instruction::Li { rt: rd, simm: 0 }.encode());
+        code.extend_from_slice(&Instruction::Ori { ra: rd, rs: rd, uimm: uval as u32 & 0xFFFF }.encode());
     } else if uval & 0xFFFF == 0 && (uval >> 32) == 0 {
         code.extend_from_slice(&Instruction::Lis { rt: rd, simm: ((uval >> 16) & 0xFFFF) as i16 as i32 }.encode());
         // If the high 16 bits have bit 15 set, LIS sign-extends to 64-bit all-1s.
