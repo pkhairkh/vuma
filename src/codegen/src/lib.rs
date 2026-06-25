@@ -40,6 +40,7 @@ pub mod opt;
 pub mod ppc64;
 pub mod regalloc;
 pub mod riscv64;
+pub mod riscv32;
 pub mod scg_to_ir;
 pub mod target_desc;
 pub mod wasm32;
