@@ -3612,6 +3612,67 @@ pub fn bridge_scg_to_codegen(scg: &SCG) -> Scg {
 /// Bridge the `vuma-scg` SCG to the codegen SCG, with knowledge of which
 /// functions are declared as extern (foreign) in the source program.
 ///
+
+/// Extract the result types from a function's return node by tracing
+/// DataFlow edges back to the source Computation nodes.
+/// Also checks the function name for return type info:
+/// "fn_<name>_entry(<ret_type>)" format.
+fn extract_function_result_types(
+    return_node: Option<NodeId>,
+    scg: &SCG,
+    edge_idx: &EdgeIndex,
+    func_name: &str,
+) -> Vec<ScgType> {
+    // First, try to extract from the function name: "fn_<name>_entry(<ret_type>)"
+    if let Some(start) = func_name.rfind('(') {
+        if let Some(end) = func_name.rfind(')') {
+            if start < end {
+                let ret_type_str = &func_name[start + 1..end];
+                if ret_type_str != "void" && !ret_type_str.is_empty() {
+                    if let Some(ty) = parse_scg_type(ret_type_str) {
+                        return vec![ty];
+                    }
+                }
+            }
+        }
+    }
+
+    // Fallback: trace DataFlow edges from the return node
+    let mut results = Vec::new();
+    if let Some(ret) = return_node {
+        let df_inputs = edge_idx.incoming_df(ret);
+        for edge in &df_inputs {
+            let source = edge.source;
+            if let Some(src_data) = scg.get_node(source) {
+                match &src_data.payload {
+                    NodePayload::Computation(comp) => {
+                        let ty = comp
+                            .result_type
+                            .as_deref()
+                            .and_then(parse_scg_type)
+                            .unwrap_or(ScgType::I64);
+                        results.push(ty);
+                    }
+                    NodePayload::Allocation(alloc) => {
+                        let ty = alloc
+                            .type_name
+                            .as_deref()
+                            .and_then(parse_scg_type)
+                            .unwrap_or(ScgType::I64);
+                        results.push(ty);
+                    }
+                    _ => {
+                        results.push(ScgType::I64);
+                    }
+                }
+            } else {
+                results.push(ScgType::I64);
+            }
+        }
+    }
+    results
+}
+
 /// When a function call targets a name in `extern_functions`, the resulting
 /// `CallNode` gets `is_extern: true`, which causes the backend to emit
 /// a relocation entry instead of a local `BL` instruction.
@@ -3752,10 +3813,11 @@ pub fn bridge_scg_to_codegen_with_externs(scg: &SCG, extern_functions: &HashSet<
             // memory to pass the return value (not the wasm return type)
             // because multi-block functions have stack imbalance issues
             // with structured wasm control flow.
+            let result_types = extract_function_result_types(return_node, scg, &edge_idx, func_name);
             scg_nodes.push(ScgNode::Function(ScgFunction {
                 name: func_name.clone(),
                 params,
-                results: vec![],
+                results: result_types,
                 body,
             }));
         }
