@@ -1094,6 +1094,10 @@ fn lower_instr(
         }
         IRInstr::Call { dst, func: target, args, is_extern: _ } => {
             let mut code = cache.flush_caller_saved(fp);
+            // Invalidate caller-saved regs BEFORE loading args. This ensures
+            // read_vreg reloads vregs from stack instead of returning stale
+            // caller-saved regs that might be overwritten by previous args.
+            cache.invalidate_caller_saved();
             let call_arg_regs = [Gpr::A0, Gpr::A1, Gpr::A2, Gpr::A3, Gpr::A4, Gpr::A5, Gpr::A6, Gpr::A7];
             for (i, arg) in args.iter().enumerate() {
                 if i < call_arg_regs.len() {
@@ -1107,7 +1111,7 @@ fn lower_instr(
             let bl_off = byte_offset + code.len(); // global offset within function
             code.extend_from_slice(&Instruction::Bl { offs26: 0 }.encode());
             relocations.push(RelocationEntry { offset: bl_off as u64, symbol: target.clone(), reloc_type: "R_LARCH_B26".to_string() });
-            cache.invalidate_caller_saved();
+            // No need to invalidate again — already done above
             if let Some(d) = dst { cache.assign_vreg(d.as_register().unwrap_or(0), Gpr::A0, true); }
             code
         }
