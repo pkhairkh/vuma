@@ -1495,6 +1495,7 @@ fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) -> Vec
                     ptr,
                     offset: None,
                     value,
+                    ty: None,
                 }));
                 return stmts;
             }
@@ -1516,6 +1517,7 @@ fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) -> Vec
                     ptr: ScgExpr::Var(addr),
                     offset: None,
                     value,
+                    ty: None,
                 }));
                 return stmts;
             }
