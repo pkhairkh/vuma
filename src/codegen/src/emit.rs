@@ -121,6 +121,7 @@ const EM_AARCH64: u16 = 183;
 
 /// Machine type: x86-64.
 const EM_X86_64: u16 = 62;
+const EM_386: u16 = 3;
 
 /// Machine type: RISC-V.
 const EM_RISCV: u16 = 243;
@@ -214,6 +215,7 @@ const R_X86_64_64: u32 = 1;
 /// R_X86_64_PC32 — 32-bit PC-relative relocation.
 #[allow(dead_code)]
 const R_X86_64_PC32: u32 = 2;
+const R_386_PC32: u32 = 2;
 /// R_X86_64_PLT32 — 32-bit PLT-relative relocation (call).
 const R_X86_64_PLT32: u32 = 4;
 /// R_X86_64_32 — 32-bit absolute relocation (zero-extended).
@@ -3938,6 +3940,7 @@ fn em_machine_for_backend(backend: BackendKind) -> Result<u16> {
         BackendKind::Mips64 => Ok(EM_MIPS),
         BackendKind::PowerPC64 => Ok(EM_PPC64),
         BackendKind::RiscV32 => Ok(EM_RISCV),
+        BackendKind::X86_32 => Ok(EM_386),
         BackendKind::LoongArch64 => Ok(EM_LOONGARCH),
         BackendKind::Arm32 => Ok(EM_ARM),
         BackendKind::Wasm32 => Err(CodegenError::ElfError(
@@ -3959,6 +3962,7 @@ fn call_reloc_type_for_backend(backend: BackendKind) -> Result<u32> {
         BackendKind::Mips64 => Ok(R_MIPS_26),
         BackendKind::PowerPC64 => Ok(R_PPC64_REL24),
         BackendKind::RiscV32 => Ok(R_RISCV_CALL),
+        BackendKind::X86_32 => Ok(R_386_PC32),
         BackendKind::LoongArch64 => Ok(R_LARCH_B26),
         BackendKind::Arm32 => Ok(R_ARM_CALL),
         BackendKind::Wasm32 => {
@@ -4706,6 +4710,7 @@ pub fn section_alignment_for_backend(backend: BackendKind) -> u64 {
         BackendKind::Mips64 => 8,
         BackendKind::PowerPC64 => 16,
         BackendKind::RiscV32 => 4,
+        BackendKind::X86_32 => 4,
         BackendKind::LoongArch64 => 8,
         BackendKind::Wasm32 => 4, // Wasm doesn't use ELF, but provide a default
     }
