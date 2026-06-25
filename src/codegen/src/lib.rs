@@ -45,6 +45,7 @@ pub mod scg_to_ir;
 pub mod target_desc;
 pub mod wasm32;
 pub mod x86_64;
+pub mod x86_32;
 
 /// Re-export the primary pipeline entry point for convenience.
 pub use scg_to_ir::ScgToIr;

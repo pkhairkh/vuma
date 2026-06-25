@@ -493,6 +493,8 @@ pub enum BackendKind {
     PowerPC64,
     /// RISC-V 32-bit.
     RiscV32,
+    /// x86-32 (i386).
+    X86_32,
 }
 
 impl BackendKind {
@@ -508,6 +510,7 @@ impl BackendKind {
             BackendKind::Mips64 => "mips64",
             BackendKind::PowerPC64 => "ppc64",
             BackendKind::RiscV32 => "riscv32",
+            BackendKind::X86_32 => "x86_32",
         }
     }
 }
@@ -996,6 +999,39 @@ impl TargetInfo for X86_64TargetInfo {
     fn output_format(&self) -> OutputFormat {
         OutputFormat::Elf64
     }
+}
+
+// ---------------------------------------------------------------------------
+// X86_32 TargetInfo
+// ---------------------------------------------------------------------------
+
+/// x86-32 (i386) target information.
+pub struct X86_32TargetInfo;
+
+impl TargetInfo for X86_32TargetInfo {
+    fn isa_name(&self) -> &'static str { "x86_32" }
+    fn target_triple(&self) -> &'static str { "i386-unknown-linux-gnu" }
+    fn elf_machine_type(&self) -> u16 { 3 } // EM_386
+    fn default_base_address(&self) -> u64 { 0x08048000 }
+    fn pointer_width(&self) -> usize { 4 }
+    fn size_of(&self, ty: &IRType) -> usize { size_of_with_ptr_width(ty, 4) }
+    fn alignment_of(&self, ty: &IRType) -> usize { alignment_of_with_ptr_width(ty, 4) }
+    fn endianness(&self) -> Endianness { Endianness::Little }
+    fn has_registers(&self) -> bool { true }
+    fn num_gp_regs(&self) -> usize { 8 }
+    fn num_simd_fp_regs(&self) -> usize { 8 }
+    fn has_hardwired_zero(&self) -> bool { false }
+    fn has_link_register(&self) -> bool { false }
+    fn has_branch_delay_slots(&self) -> bool { false }
+    fn has_toc_pointer(&self) -> bool { false }
+    fn has_condition_registers(&self) -> bool { false }
+    fn calling_convention_name(&self) -> &'static str { "cdecl" }
+    fn num_int_arg_regs(&self) -> usize { 0 }
+    fn num_fp_arg_regs(&self) -> usize { 0 }
+    fn stack_alignment(&self) -> usize { 16 }
+    fn instruction_alignment(&self) -> usize { 1 }
+    fn instruction_width_range(&self) -> (usize, usize) { (1, 15) }
+    fn output_format(&self) -> OutputFormat { OutputFormat::Elf32 }
 }
 
 // ---------------------------------------------------------------------------
@@ -2716,6 +2752,7 @@ pub fn create_backend(kind: BackendKind) -> Result<Box<dyn Backend>, BackendErro
         BackendKind::Mips64 => Ok(Box::new(Mips64Backend::new())),
         BackendKind::PowerPC64 => Ok(Box::new(PPC64Backend::new())),
         BackendKind::RiscV32 => Ok(Box::new(crate::riscv32::RiscV32Backend::new())),
+        BackendKind::X86_32 => Ok(Box::new(crate::x86_32::X86_32Backend::new())),
     }
 }
 
