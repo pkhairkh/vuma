@@ -12,6 +12,7 @@ fn backend_from_name(name: &str) -> Result<BackendKind, String> {
         "aarch64" | "arm64" => Ok(BackendKind::AArch64),
         "riscv64" | "riscv" => Ok(BackendKind::RiscV64),
         "riscv32" => Ok(BackendKind::RiscV32),
+        "x86_32" | "i386" | "x86" => Ok(BackendKind::X86_32),
         "arm32" | "arm" => Ok(BackendKind::Arm32),
         "mips64" | "mips" => Ok(BackendKind::Mips64),
         "ppc64" | "powerpc64" | "ppc" => Ok(BackendKind::PowerPC64),
