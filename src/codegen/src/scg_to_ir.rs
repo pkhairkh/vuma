@@ -618,9 +618,6 @@ pub struct IRBuilder {
     /// Map from parameter name to IR type. Populated in lower_function,
     /// used in lower_access to determine Store/Load width.
     param_types: std::collections::HashMap<String, crate::ir::IRType>,
-    /// The current function's return type (for Load type inference).
-    /// Extracted from the function name format "fn_<name>_entry(<ret_type>)".
-    current_return_type: Option<crate::ir::IRType>,
 }
 
 /// Backward-compatible alias.
@@ -636,7 +633,6 @@ impl IRBuilder {
             vreg_aliases: std::collections::HashMap::new(),
             pointer_vregs: std::collections::HashSet::new(),
             param_types: std::collections::HashMap::new(),
-            current_return_type: None,
         }
     }
 
@@ -683,26 +679,6 @@ impl IRBuilder {
     /// statements, and rebuilds the CFG predecessor/successor sets.
     fn lower_function(&mut self, func: &ScgFunction) -> Result<IRFunction> {
         self.param_types.clear();
-        // Extract return type from function name: "fn_<name>_entry(<ret_type>)"
-        self.current_return_type = func.name.rfind('(')
-            .and_then(|start| func.name.rfind(')').map(|end| (start, end)))
-            .and_then(|(start, end)| {
-                if start < end {
-                    let ret_str = &func.name[start + 1..end];
-                    if ret_str != "void" && !ret_str.is_empty() {
-                        return match ret_str {
-                            "u8" | "i8" | "bool" => Some(crate::ir::IRType::U8),
-                            "u16" | "i16" => Some(crate::ir::IRType::U16),
-                            "u32" | "i32" => Some(crate::ir::IRType::U32),
-                            "u64" | "i64" => Some(crate::ir::IRType::U64),
-                            "f32" => Some(crate::ir::IRType::F32),
-                            "f64" => Some(crate::ir::IRType::F64),
-                            _ => None,
-                        };
-                    }
-                }
-                None
-            });
         let mut ir_func = IRFunction::new(&func.name);
 
         // Map parameters to virtual registers with proper types.
@@ -2141,9 +2117,10 @@ impl IRBuilder {
                 let load_ty = ty.clone().unwrap_or_else(|| {
                     if let Some(pt) = self.param_types.get(dst) {
                         pt.clone()
-                    } else if let Some(rt) = &self.current_return_type {
-                        if !matches!(rt, IRType::Ptr) {
-                            return rt.clone();
+                    } else if !ir_func.result_types.is_empty() {
+                        let ret_ty = &ir_func.result_types[0];
+                        if !matches!(ret_ty, IRType::Ptr) {
+                            return ret_ty.clone();
                         }
                         IRType::U8
                     } else {
