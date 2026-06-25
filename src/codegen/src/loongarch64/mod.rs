@@ -3702,7 +3702,7 @@ impl Backend for LoongArch64Backend {
     }
 
     fn allocate_registers(&self, func: &IRFunction) -> Result<AllocatedFunction, BackendError> {
-        reg_alloc_isel::allocate_registers(func)
+        stack_slot_isel::allocate_registers(func)
     }
 
     fn encode_function(&self, func: &AllocatedFunction) -> Result<Vec<u8>, BackendError> {
