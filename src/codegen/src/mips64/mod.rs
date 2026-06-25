@@ -2770,9 +2770,7 @@ fn mips64_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, 
                             code.extend_from_slice(&encode_nop());
                         }
                         BinOpKind::ShrL => {
-                            // Zero-extend to 64 bits, then shift right
-                            code.extend_from_slice(&Instruction::Dsll { rd: Gpr::T0, rt: Gpr::T0, sa: 32 }.encode());
-                            code.extend_from_slice(&Instruction::Dsrl { rd: Gpr::T0, rt: Gpr::T0, sa: 32 }.encode());
+                            // 64-bit logical shift right (no zero-extend needed)
                             code.extend_from_slice(&Instruction::Dsrlv { rd: Gpr::T0, rt: Gpr::T0, rs: Gpr::T1 }.encode());
                             code.extend_from_slice(&encode_nop());
                         }
