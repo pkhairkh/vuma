@@ -3813,11 +3813,10 @@ pub fn bridge_scg_to_codegen_with_externs(scg: &SCG, extern_functions: &HashSet<
             // memory to pass the return value (not the wasm return type)
             // because multi-block functions have stack imbalance issues
             // with structured wasm control flow.
-            let result_types = extract_function_result_types(return_node, scg, &edge_idx, func_name);
             scg_nodes.push(ScgNode::Function(ScgFunction {
                 name: func_name.clone(),
                 params,
-                results: result_types,
+                results: vec![],
                 body,
             }));
         }
