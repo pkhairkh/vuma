@@ -1387,6 +1387,18 @@ fn lower_binop(op: &BinOpKind, dst: &IRValue, lhs: &IRValue, rhs: &IRValue, cach
     let mut code = Vec::new();
     let dst_id = dst.as_register().unwrap_or(0);
 
+    // For commutative ops (Add, And, Or, Xor), swap operands so Register is lhs
+    // and Immediate is rhs. This avoids a reg cache eviction bug: when lhs is
+    // Immediate, resolve_val allocates a scratch reg, then alloc_vreg(dst, scratch)
+    // assigns dst to that scratch. If rhs is a Register, resolve_val(rhs) may evict
+    // the scratch (now holding dst) and reload rhs into the same reg.
+    let commutative = matches!(op, BinOpKind::Add | BinOpKind::And | BinOpKind::Or | BinOpKind::Xor);
+    let (lhs, rhs) = if commutative && matches!(lhs, IRValue::Immediate(_)) && !matches!(rhs, IRValue::Immediate(_)) {
+        (rhs, lhs)
+    } else {
+        (lhs, rhs)
+    };
+
     match op {
         BinOpKind::Add => {
             let (l, pre) = resolve_val(lhs, cache, fp); code.extend(pre);
