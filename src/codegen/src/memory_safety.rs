@@ -548,7 +548,7 @@ impl MemorySafetyAnalyzer {
                                 });
                             }
                         }
-                        AccessNode::Store { ptr, offset, value } => {
+                        AccessNode::Store { ptr, offset, value, .. } => {
                             let ptr_name = expr_to_name(ptr);
                             if let Some(info) = allocations.get_mut(&ptr_name) {
                                 info.accesses.push(AccessInfo {
