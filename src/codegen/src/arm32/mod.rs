@@ -3754,13 +3754,49 @@ impl Backend for Arm32Backend {
 
                                 code.extend(ss_store_64(Gpr::R0, Gpr::R2, dst_offset));
                             }
-                            BinOpKind::Shl | BinOpKind::ShrA
-                            | BinOpKind::Ror | BinOpKind::Rol => {
+                            BinOpKind::Shl => {
+                                // 64-bit Shl: R0=low, R2=high, R1=shift
+                                code.extend(ss_load_value_64(Gpr::R0, Gpr::R2, lhs, &vreg_stack_slots));
+                                code.extend(ss_load_value_64(Gpr::R1, Gpr::R3, rhs, &vreg_stack_slots));
+                                // CMP R1, #32
+                                code.extend_from_slice(&encode_dp_imm(Condition::Al, DP_CMP, true, Gpr::R1.encoding(), 0, 0, 32));
+                                // shift >= 32 (Cs): R12 = R1 - 32; R2 = R0 << R12; R0 = 0
+                                code.extend_from_slice(&encode_dp_imm(Condition::Cs, DP_SUB, false, Gpr::R1.encoding(), Gpr::R12.encoding(), 0, 32));
+                                code.extend_from_slice(&encode_dp_shift_reg(Condition::Cs, DP_MOV, false, 0, Gpr::R2.encoding(), 0, Gpr::R12.encoding(), Gpr::R0.encoding()));
+                                code.extend_from_slice(&encode_dp_imm(Condition::Cs, DP_MOV, false, 0, Gpr::R0.encoding(), 0, 0));
+                                // shift < 32 (Cc): R12 = R0; R0 = R0 << R1; R3 = 32-R1; R12 = R12 >> R3; R2 = (R2<<R1)|R12
+                                code.extend_from_slice(&encode_dp_reg(Condition::Cc, DP_MOV, false, 0, Gpr::R12.encoding(), Gpr::R0.encoding()));
+                                code.extend_from_slice(&encode_dp_shift_reg(Condition::Cc, DP_MOV, false, 0, Gpr::R0.encoding(), 0, Gpr::R1.encoding(), Gpr::R0.encoding()));
+                                code.extend_from_slice(&encode_dp_imm(Condition::Cc, DP_RSB, false, Gpr::R1.encoding(), Gpr::R3.encoding(), 0, 32));
+                                code.extend_from_slice(&encode_dp_shift_reg(Condition::Cc, DP_MOV, false, 0, Gpr::R12.encoding(), 1, Gpr::R3.encoding(), Gpr::R12.encoding()));
+                                code.extend_from_slice(&encode_dp_shift_reg(Condition::Cc, DP_MOV, false, 0, Gpr::R3.encoding(), 0, Gpr::R1.encoding(), Gpr::R2.encoding()));
+                                code.extend_from_slice(&encode_dp_reg(Condition::Cc, DP_ORR, false, Gpr::R2.encoding(), Gpr::R3.encoding(), Gpr::R12.encoding()));
+                                code.extend(ss_store_64(Gpr::R0, Gpr::R2, dst_offset));
+                            }
+                            BinOpKind::ShrA => {
+                                // 64-bit ShrA: R0=low, R2=high, R1=shift
+                                code.extend(ss_load_value_64(Gpr::R0, Gpr::R2, lhs, &vreg_stack_slots));
+                                code.extend(ss_load_value_64(Gpr::R1, Gpr::R3, rhs, &vreg_stack_slots));
+                                // CMP R1, #32
+                                code.extend_from_slice(&encode_dp_imm(Condition::Al, DP_CMP, true, Gpr::R1.encoding(), 0, 0, 32));
+                                // shift >= 32 (Cs): R12 = R1 - 32; R0 = R2 ASR R12; R2 = R2 ASR #31 (sign ext)
+                                code.extend_from_slice(&encode_dp_imm(Condition::Cs, DP_SUB, false, Gpr::R1.encoding(), Gpr::R12.encoding(), 0, 32));
+                                code.extend_from_slice(&encode_dp_shift_reg(Condition::Cs, DP_MOV, false, 0, Gpr::R0.encoding(), 2, Gpr::R12.encoding(), Gpr::R2.encoding()));
+                                code.extend_from_slice(&encode_dp_shift_reg(Condition::Cs, DP_MOV, false, 0, Gpr::R2.encoding(), 2, Gpr::R1.encoding(), Gpr::R2.encoding()));
+                                // shift < 32 (Cc): R12 = R2; R0 = (R2<<(32-R1))|(R0>>R1); R2 = R2 ASR R1
+                                code.extend_from_slice(&encode_dp_reg(Condition::Cc, DP_MOV, false, 0, Gpr::R12.encoding(), Gpr::R2.encoding()));
+                                code.extend_from_slice(&encode_dp_shift_reg(Condition::Cc, DP_MOV, false, 0, Gpr::R0.encoding(), 2, Gpr::R1.encoding(), Gpr::R0.encoding()));
+                                code.extend_from_slice(&encode_dp_imm(Condition::Cc, DP_RSB, false, Gpr::R1.encoding(), Gpr::R3.encoding(), 0, 32));
+                                code.extend_from_slice(&encode_dp_shift_reg(Condition::Cc, DP_MOV, false, 0, Gpr::R12.encoding(), 0, Gpr::R3.encoding(), Gpr::R12.encoding()));
+                                code.extend_from_slice(&encode_dp_reg(Condition::Cc, DP_ORR, false, Gpr::R0.encoding(), Gpr::R0.encoding(), Gpr::R12.encoding()));
+                                code.extend_from_slice(&encode_dp_shift_reg(Condition::Cc, DP_MOV, false, 0, Gpr::R2.encoding(), 2, Gpr::R1.encoding(), Gpr::R2.encoding()));
+                                code.extend(ss_store_64(Gpr::R0, Gpr::R2, dst_offset));
+                            }
+                            BinOpKind::Ror | BinOpKind::Rol => {
+                                // 32-bit rotate (keep as-is)
                                 code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R0));
                                 code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::R1));
                                 if matches!(op, BinOpKind::Rol) {
-                                    // ROL x, n = ROR x, (32-n)
-                                    // R2 = RSB R1, #32 = 32 - R1; R0 = R0 ROR R2
                                     code.extend_from_slice(&encode_dp_imm(
                                         Condition::Al, 0b0011, false,
                                         Gpr::R1.encoding(), Gpr::R2.encoding(), 0, 32,
@@ -3770,15 +3806,9 @@ impl Backend for Arm32Backend {
                                         Gpr::R0.encoding(), 3, Gpr::R2.encoding(), Gpr::R0.encoding(),
                                     ));
                                 } else {
-                                    let shift_type: u32 = match op {
-                                        BinOpKind::Shl => 0,
-                                        BinOpKind::ShrA => 2,
-                                        BinOpKind::Ror => 3,
-                                        _ => 0,
-                                    };
                                     code.extend_from_slice(&encode_dp_shift_reg(
                                         Condition::Al, DP_MOV, false, 0,
-                                        Gpr::R0.encoding(), shift_type, Gpr::R1.encoding(), Gpr::R0.encoding(),
+                                        Gpr::R0.encoding(), 3, Gpr::R1.encoding(), Gpr::R0.encoding(),
                                     ));
                                 }
                                 code.extend(ss_store_to_slot(Gpr::R0, dst_offset));
