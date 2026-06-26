@@ -1,50 +1,50 @@
 {
-  "timestamp": "2026-06-26 22:17:55 UTC",
+  "timestamp": "2026-06-26 22:48:28 UTC",
   "host": "pi-pkhairkh-dev",
   "arch": "aarch64",
   "total_runs": 57380,
-  "matches": 57278,
-  "pass_rate": "99.82%",
+  "matches": 55025,
+  "pass_rate": "95.90%",
   "per_backend": {
-    "aarch64": {
-      "total": 5738,
-      "match": 5733
-    },
     "x86_64": {
       "total": 5738,
-      "match": 5734
+      "match": 5716
     },
     "riscv64": {
       "total": 5738,
-      "match": 5733
+      "match": 5715
+    },
+    "aarch64": {
+      "total": 5738,
+      "match": 5715
     },
     "arm32": {
       "total": 5738,
-      "match": 5730
+      "match": 5711
     },
     "mips64": {
       "total": 5738,
-      "match": 5734
+      "match": 5680
     },
     "ppc64": {
       "total": 5738,
-      "match": 5726
+      "match": 3640
     },
     "loongarch64": {
       "total": 5738,
-      "match": 5733
+      "match": 5715
     },
     "x86_32": {
       "total": 5738,
-      "match": 5730
+      "match": 5712
     },
     "riscv32": {
       "total": 5738,
-      "match": 5698
+      "match": 5714
     },
     "wasm32": {
       "total": 5738,
-      "match": 5727
+      "match": 5707
     }
   }
 }
