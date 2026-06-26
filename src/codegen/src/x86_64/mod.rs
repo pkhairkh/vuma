@@ -1990,16 +1990,28 @@ fn decode_modrm_reg_rm(bytes: &[u8], pos: usize, rex_r: bool, rex_b: bool) -> (u
 /// zero-fills it at load time. This provides writable memory for global
 /// variables (e.g., those created by `allocate()` in VUMA source).
 fn build_minimal_x86_64_elf(code: &[u8], base_addr: u64, bss_size: u64) -> Vec<u8> {
-    const PAGE_SIZE: u64 = 0x1000; // 4 KB
+    // Use 4K for file offset alignment (keeps the file small) but 64K for
+    // virtual address alignment.  QEMU 10.x on hosts with 16K or 64K page
+    // sizes requires MAP_FIXED_NOREPLACE addresses to be host-page-aligned.
+    // Since x86_64's TARGET_PAGE_SIZE is fixed at 4K in QEMU, the issue
+    // manifests as mmap returning EINVAL for non-host-page-aligned addresses,
+    // causing "Unable to find a guest_base" errors.  Aligning vaddrs to 64K
+    // (the largest common aarch64 page size) ensures compatibility.
+    const FILE_PAGE_SIZE: u64 = 0x1000; // 4 KB — file offset alignment
+    const VADDR_ALIGN: u64 = 0x10000;   // 64 KB — virtual address alignment
 
     let elf_header_size: u64 = 64;
     let phdr_size: u64 = 56;
     let num_phdrs: u64 = if bss_size > 0 { 2 } else { 1 };
     let phdr_end = elf_header_size + phdr_size * num_phdrs;
     // Page-align the text segment start for mmap compatibility (required by QEMU).
-    let text_offset = ((phdr_end + PAGE_SIZE - 1) / PAGE_SIZE) * PAGE_SIZE;
+    let text_offset = ((phdr_end + FILE_PAGE_SIZE - 1) / FILE_PAGE_SIZE) * FILE_PAGE_SIZE;
     let text_size = code.len() as u64;
-    let entry_point = base_addr + text_offset;
+    // Align the text virtual address to 64K for host page size compatibility.
+    // p_offset (text_offset, 4K-aligned) and p_vaddr (64K-aligned) are both
+    // 0 mod 4K, satisfying the p_align congruence requirement.
+    let text_vaddr = ((base_addr + text_offset + VADDR_ALIGN - 1) / VADDR_ALIGN) * VADDR_ALIGN;
+    let entry_point = text_vaddr;
 
     let mut elf = Vec::with_capacity(text_offset as usize + code.len());
 
@@ -2031,18 +2043,19 @@ fn build_minimal_x86_64_elf(code: &[u8], base_addr: u64, bss_size: u64) -> Vec<u
     elf.extend_from_slice(&1u32.to_le_bytes()); // p_type = PT_LOAD
     elf.extend_from_slice(&5u32.to_le_bytes()); // p_flags = PF_R | PF_X
     elf.extend_from_slice(&text_offset.to_le_bytes()); // p_offset
-    elf.extend_from_slice(&(base_addr + text_offset).to_le_bytes()); // p_vaddr
-    elf.extend_from_slice(&(base_addr + text_offset).to_le_bytes()); // p_paddr
+    elf.extend_from_slice(&text_vaddr.to_le_bytes()); // p_vaddr
+    elf.extend_from_slice(&text_vaddr.to_le_bytes()); // p_paddr
     elf.extend_from_slice(&text_size.to_le_bytes()); // p_filesz
     elf.extend_from_slice(&text_size.to_le_bytes()); // p_memsz
-    elf.extend_from_slice(&PAGE_SIZE.to_le_bytes()); // p_align
+    elf.extend_from_slice(&FILE_PAGE_SIZE.to_le_bytes()); // p_align
 
     // --- Program Header 2: LOAD segment for .bss (PF_R | PF_W) ---
     // Only emitted when there is BSS data. The BSS segment starts at the
-    // next page boundary after the text segment. p_filesz = 0 because BSS
+    // next 64K boundary after the text segment to ensure it doesn't share
+    // a host page with the RX text segment. p_filesz = 0 because BSS
     // has no file content; the kernel zero-fills p_memsz bytes at load time.
     if bss_size > 0 {
-        let bss_vaddr = ((base_addr + text_offset + text_size + PAGE_SIZE - 1) / PAGE_SIZE) * PAGE_SIZE;
+        let bss_vaddr = ((text_vaddr + text_size + VADDR_ALIGN - 1) / VADDR_ALIGN) * VADDR_ALIGN;
         elf.extend_from_slice(&1u32.to_le_bytes()); // p_type = PT_LOAD
         elf.extend_from_slice(&6u32.to_le_bytes()); // p_flags = PF_R | PF_W
         elf.extend_from_slice(&0u64.to_le_bytes()); // p_offset (no file content)
@@ -2050,7 +2063,7 @@ fn build_minimal_x86_64_elf(code: &[u8], base_addr: u64, bss_size: u64) -> Vec<u
         elf.extend_from_slice(&bss_vaddr.to_le_bytes()); // p_paddr
         elf.extend_from_slice(&0u64.to_le_bytes()); // p_filesz (BSS is zero-filled)
         elf.extend_from_slice(&bss_size.to_le_bytes()); // p_memsz
-        elf.extend_from_slice(&PAGE_SIZE.to_le_bytes()); // p_align
+        elf.extend_from_slice(&FILE_PAGE_SIZE.to_le_bytes()); // p_align
     }
 
     // --- Padding + Code section ---
@@ -2816,19 +2829,23 @@ impl Backend for X86_64Backend {
         let bss_size: u64 = data_symbols.len() as u64 * BSS_SLOT_SIZE;
 
         // ── Compute BSS virtual address ──────────────────────────────
-        // The BSS segment starts at the next page boundary after the text
+        // The BSS segment starts at the next 64K boundary after the text
         // segment.  The text segment layout is computed inside
         // build_minimal_x86_64_elf, so we mirror the same calculation here.
+        // We use 64K alignment for virtual addresses to ensure compatibility
+        // with QEMU 10.x on hosts with 16K or 64K page sizes.
         const ELF_HEADER_SIZE: u64 = 64;
         const PHDR_SIZE: u64 = 56;
-        const PAGE_SIZE: u64 = 0x1000;
+        const FILE_PAGE_SIZE: u64 = 0x1000;
+        const VADDR_ALIGN: u64 = 0x10000;
         const BASE_ADDR: u64 = 0x400000;
         let num_phdrs: u64 = if bss_size > 0 { 2 } else { 1 };
         let phdr_end = ELF_HEADER_SIZE + PHDR_SIZE * num_phdrs;
-        let text_offset = ((phdr_end + PAGE_SIZE - 1) / PAGE_SIZE) * PAGE_SIZE;
+        let text_offset = ((phdr_end + FILE_PAGE_SIZE - 1) / FILE_PAGE_SIZE) * FILE_PAGE_SIZE;
         let text_size = all_code.len() as u64;
+        let text_vaddr: u64 = ((BASE_ADDR + text_offset + VADDR_ALIGN - 1) / VADDR_ALIGN) * VADDR_ALIGN;
         let bss_vaddr: u64 = if bss_size > 0 {
-            ((BASE_ADDR + text_offset + text_size + PAGE_SIZE - 1) / PAGE_SIZE) * PAGE_SIZE
+            ((text_vaddr + text_size + VADDR_ALIGN - 1) / VADDR_ALIGN) * VADDR_ALIGN
         } else {
             0
         };
@@ -2901,8 +2918,8 @@ impl Backend for X86_64Backend {
                             .copy_from_slice(&addr.to_le_bytes());
                     } else if func_offsets.contains_key(&reloc.symbol) {
                         // Function symbol with absolute relocation — patch with
-                        // the function's virtual address (text_offset + offset).
-                        let func_addr = BASE_ADDR + text_offset + func_offsets[&reloc.symbol] as u64;
+                        // the function's virtual address (text_vaddr + offset).
+                        let func_addr = text_vaddr + func_offsets[&reloc.symbol] as u64;
                         all_code[abs_offset..abs_offset + 8]
                             .copy_from_slice(&func_addr.to_le_bytes());
                     } else {
@@ -3429,11 +3446,12 @@ mod tests {
         assert_eq!(u16::from_le_bytes([elf[18], elf[19]]), 62);
         // With 1 phdr (no BSS), e_phnum = 1
         assert_eq!(u16::from_le_bytes([elf[56], elf[57]]), 1);
-        // entry = base + page_align(64 + 56) = 0x400000 + 0x1000 = 0x401000
+        // entry = vaddr_align(0x400000 + page_align(64 + 56)) = vaddr_align(0x401000) = 0x410000
+        // (64K-aligned for host page size compatibility with QEMU 10.x)
         let entry = u64::from_le_bytes([
             elf[24], elf[25], elf[26], elf[27], elf[28], elf[29], elf[30], elf[31],
         ]);
-        assert_eq!(entry, 0x401000);
+        assert_eq!(entry, 0x410000);
     }
 
     #[test]
@@ -3454,8 +3472,9 @@ mod tests {
             elf[24], elf[25], elf[26], elf[27], elf[28], elf[29], elf[30], elf[31],
         ]);
         // With 2 phdrs, text_offset = page_align(64 + 2*56) = page_align(176) = 0x1000
-        // entry = 0x400000 + 0x1000 = 0x401000
-        assert_eq!(entry, 0x401000);
+        // entry = vaddr_align(0x400000 + 0x1000) = vaddr_align(0x401000) = 0x410000
+        // (64K-aligned for host page size compatibility with QEMU 10.x)
+        assert_eq!(entry, 0x410000);
 
         // Second program header (BSS) starts at offset 64 + 56 = 120
         // Elf64_Phdr layout: p_type(4) p_flags(4) p_offset(8) p_vaddr(8) p_paddr(8) p_filesz(8) p_memsz(8) p_align(8)
@@ -3478,9 +3497,9 @@ mod tests {
             elf[ph2+16], elf[ph2+17], elf[ph2+18], elf[ph2+19],
             elf[ph2+20], elf[ph2+21], elf[ph2+22], elf[ph2+23],
         ]);
-        // BSS vaddr should be page-aligned and after the text segment
-        assert_eq!(bss_vaddr % 0x1000, 0, "BSS vaddr should be page-aligned");
-        assert!(bss_vaddr > 0x401000, "BSS should be after text segment");
+        // BSS vaddr should be 64K-aligned and after the text segment
+        assert_eq!(bss_vaddr % 0x10000, 0, "BSS vaddr should be 64K-aligned");
+        assert!(bss_vaddr > 0x410000, "BSS should be after text segment");
     }
 
     // ── Backend Trait Dispatch Test ─────────────────────────────────────
