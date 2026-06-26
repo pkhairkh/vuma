@@ -895,9 +895,9 @@ impl Instruction {
                 OP_IMM,
             ),
             Instruction::Slli { rd, rs1, shamt } => {
-                // funct7 = 0b0000000, funct3 = 0b001
-                // For RV32I, shamt is 6 bits (bits [25:20])
-                let funct7_and_shamt = (*shamt & 0x3F) << 20;
+                // RV32I: shamt is 5 bits (0-31). Bit 25 must be 0.
+                // Shifts by 32+ are illegal on RV32.
+                let funct7_and_shamt = (*shamt & 0x1F) << 20;
                 let word = funct7_and_shamt
                     | (rs1.encoding() << 15)
                     | (0b001 << 12)
@@ -906,8 +906,8 @@ impl Instruction {
                 word.to_le_bytes()
             }
             Instruction::Srli { rd, rs1, shamt } => {
-                // funct7 = 0b0000000, funct3 = 0b101
-                let funct7_and_shamt = (*shamt & 0x3F) << 20;
+                // RV32I: shamt is 5 bits (0-31). Bit 25 must be 0.
+                let funct7_and_shamt = (*shamt & 0x1F) << 20;
                 let word = funct7_and_shamt
                     | (rs1.encoding() << 15)
                     | (0b101 << 12)
@@ -916,8 +916,8 @@ impl Instruction {
                 word.to_le_bytes()
             }
             Instruction::Srai { rd, rs1, shamt } => {
-                // funct7 = 0b0100000, funct3 = 0b101
-                let funct7_and_shamt = (0b0100000u32 << 25) | ((*shamt & 0x3F) << 20);
+                // RV32I: shamt is 5 bits (0-31). funct7 = 0b0100000.
+                let funct7_and_shamt = (0b0100000u32 << 25) | ((*shamt & 0x1F) << 20);
                 let word = funct7_and_shamt
                     | (rs1.encoding() << 15)
                     | (0b101 << 12)
@@ -4088,65 +4088,21 @@ fn ss_load_imm(dst: Gpr, val: i64) -> Vec<u8> {
         if lo != 0 {
             code.extend(Instruction::Addi { rd: dst, rs1: dst, imm: lo }.encode());
         }
-        // If the value is non-negative but hi has bit 31 set, LUI sign-extends
-        // bit 31 and produces a negative 64-bit result.  Zero-extend with
-        // SLLI 32 + SRLI 32 to clear the upper 32 bits.
-        // This happens for positive i32 values near 0x8000_0000 (e.g. 0x7FFF_FF00)
-        // where the +0x800 rounding pushes hi into the negative-i32 range.
-        if val >= 0 && hi >= 0x8000_0000 {
-            code.extend(Instruction::Slli { rd: dst, rs1: dst, shamt: 32 }.encode());
-            code.extend(Instruction::Srli { rd: dst, rs1: dst, shamt: 32 }.encode());
-        }
+        // On RV32, LUI+ADDI naturally produces a 32-bit result.
+        // No SLLI/SRLI 32 needed (shift by 32 is illegal on RV32).
         return code;
     }
 
-    // Case 3: full 64-bit value
-    let upper_32 = (val >> 32) as u32;
+    // Case 3: full 64-bit value — on RV32, we can only load the lower 32 bits.
+    // The upper 32 bits are truncated (RV32 registers are 32-bit).
     let lower_32 = val as u32;
-
-    if upper_32 == 0 {
-        // Load lower_32 with zero-extension
-        let hi = ((lower_32.wrapping_add(0x800)) >> 12) << 12;
-        let lo = (lower_32 as i32).wrapping_sub(hi as i32);
-        code.extend(Instruction::Lui { rd: dst, imm: hi }.encode());
-        if lo != 0 {
-            code.extend(Instruction::Addi { rd: dst, rs1: dst, imm: lo }.encode());
-        }
-        // Zero-extend: SLLI 32 then SRLI 32
-        code.extend(Instruction::Slli { rd: dst, rs1: dst, shamt: 32 }.encode());
-        code.extend(Instruction::Srli { rd: dst, rs1: dst, shamt: 32 }.encode());
-    } else if lower_32 == 0 {
-        // Load upper_32 and shift left by 32
-        let hi = ((upper_32.wrapping_add(0x800)) >> 12) << 12;
-        let lo = (upper_32 as i32).wrapping_sub(hi as i32);
-        code.extend(Instruction::Lui { rd: dst, imm: hi }.encode());
-        if lo != 0 {
-            code.extend(Instruction::Addi { rd: dst, rs1: dst, imm: lo }.encode());
-        }
-        code.extend(Instruction::Slli { rd: dst, rs1: dst, shamt: 32 }.encode());
-    } else {
-        // Load upper_32, SLLI 32, load lower_32 (zero-extended) into T3, OR
-        let hi = ((upper_32.wrapping_add(0x800)) >> 12) << 12;
-        let lo = (upper_32 as i32).wrapping_sub(hi as i32);
-        code.extend(Instruction::Lui { rd: dst, imm: hi }.encode());
-        if lo != 0 {
-            code.extend(Instruction::Addi { rd: dst, rs1: dst, imm: lo }.encode());
-        }
-        code.extend(Instruction::Slli { rd: dst, rs1: dst, shamt: 32 }.encode());
-
-        // Load lower_32 into T3 with zero-extension
-        let hi = ((lower_32.wrapping_add(0x800)) >> 12) << 12;
-        let lo = (lower_32 as i32).wrapping_sub(hi as i32);
-        code.extend(Instruction::Lui { rd: Gpr::T3, imm: hi }.encode());
-        if lo != 0 {
-            code.extend(Instruction::Addi { rd: Gpr::T3, rs1: Gpr::T3, imm: lo }.encode());
-        }
-        code.extend(Instruction::Slli { rd: Gpr::T3, rs1: Gpr::T3, shamt: 32 }.encode());
-        code.extend(Instruction::Srli { rd: Gpr::T3, rs1: Gpr::T3, shamt: 32 }.encode());
-
-        code.extend(Instruction::Or { rd: dst, rs1: dst, rs2: Gpr::T3 }.encode());
+    let hi = ((lower_32.wrapping_add(0x800)) >> 12) << 12;
+    let lo = (lower_32 as i32).wrapping_sub(hi as i32);
+    code.extend(Instruction::Lui { rd: dst, imm: hi }.encode());
+    if lo != 0 {
+        code.extend(Instruction::Addi { rd: dst, rs1: dst, imm: lo }.encode());
     }
-
+    // On RV32, the register is already 32-bit — no zero-extension needed.
     code
 }
 
