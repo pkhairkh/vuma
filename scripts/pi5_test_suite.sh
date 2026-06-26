@@ -2,39 +2,8 @@
 # ═══════════════════════════════════════════════════════════════════════════
 # VUMA Full Test Suite Runner for Raspberry Pi 5 (aarch64 native)
 # ═══════════════════════════════════════════════════════════════════════════
-#
-# WHAT THIS DOES:
-#   1. Builds the VUMA compiler (if needed)
-#   2. Runs all 5,738 test programs across 8 backends (45,904 total runs)
-#   3. Generates a summary report
-#   4. Commits results to the repo and pushes to GitHub
-#
-# PREREQUISITES ON PI5:
-#   - Rust nightly toolchain (curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh)
-#   - QEMU user-mode for cross-arch testing:
-#       sudo apt install qemu-user qemu-user-static
-#   - Python 3
-#   - Git
-#   - wasmtime (for wasm32 backend):
-#       curl -sSL https://github.com/bytecodealliance/wasmtime/releases/download/v29.0.1/wasmtime-v29.0.1-aarch64-linux.tar.xz | tar xJ
-#       sudo cp wasmtime-v29.0.1-aarch64-linux/wasmtime /usr/local/bin/
-#
-# USAGE:
-#   chmod +x scripts/pi5_test_suite.sh
-#   ./scripts/pi5_test_suite.sh
-#
-# OR with options:
-#   ./scripts/pi5_test_suite.sh --workers 4        # Use 4 parallel workers
-#   ./scripts/pi5_test_suite.sh --skip-build        # Skip cargo build
-#   ./scripts/pi5_test_suite.sh --no-push           # Don't commit/push results
-#   ./scripts/pi5_test_suite.sh --backends aarch64,x86_64  # Test specific backends only
-#
-# ON PI5, aarch64 runs NATIVELY (no QEMU needed). Other backends use QEMU.
-# ═══════════════════════════════════════════════════════════════════════════
-
 set -euo pipefail
 
-# ── Parse arguments ──
 WORKERS=4
 SKIP_BUILD=0
 NO_PUSH=0
@@ -53,6 +22,9 @@ done
 
 cd "$REPO_DIR"
 
+# ── Setup PATH (cargo might be in ~/.cargo/bin) ──
+export PATH="$HOME/.cargo/bin:$PATH"
+
 echo "╔══════════════════════════════════════════════════════════════╗"
 echo "║  VUMA Full Test Suite — $(date -u '+%Y-%m-%d %H:%M UTC')            ║"
 echo "╠══════════════════════════════════════════════════════════════╣"
@@ -62,37 +34,47 @@ echo "║  Host:    $(uname -m) ($(hostname))"
 echo "╚══════════════════════════════════════════════════════════════╝"
 echo ""
 
-# ── Step 1: Check prerequisites ──
+# ── Step 1: Install prerequisites ──
 echo "▸ Checking prerequisites..."
 
-missing=()
-command -v cargo >/dev/null 2>&1 || missing+=("rust/cargo")
-command -v python3 >/dev/null 2>&1 || missing+=("python3")
-command -v git >/dev/null 2>&1 || missing+=("git")
-
-# Check QEMU for each backend
-HOST_ARCH=$(uname -m)
-QEMU_NEEDED=""
-for q in qemu-aarch64 qemu-x86_64 qemu-riscv64 qemu-arm qemu-mips64el qemu-ppc64 qemu-loongarch64; do
-    if [ "$HOST_ARCH" = "aarch64" ] && [ "$q" = "qemu-aarch64" ]; then
-        continue  # Native, no QEMU needed
-    fi
-    command -v $q >/dev/null 2>&1 || missing+=("$q (apt install qemu-user)")
-done
-
-# Check wasmtime
-command -v wasmtime >/dev/null 2>&1 || missing+=("wasmtime")
-
-if [ ${#missing[@]} -gt 0 ]; then
-    echo "✗ Missing: ${missing[*]}"
-    echo ""
-    echo "Install with:"
-    echo "  sudo apt install qemu-user qemu-user-static"
-    echo "  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
-    echo "  # For wasmtime, download from https://github.com/bytecodealliance/wasmtime/releases"
-    exit 1
+# Check/install Rust
+if ! command -v cargo &>/dev/null; then
+    echo "  Installing Rust..."
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain nightly-2026-03-01 2>/dev/null || {
+        echo "  curl failed, trying wget..."
+        wget -qO- https://sh.rustup.rs | sh -s -- -y --default-toolchain nightly-2026-03-01
+    }
+    source "$HOME/.cargo/env"
+    rustup component add rustfmt clippy rust-src 2>/dev/null || true
 fi
-echo "✓ All prerequisites found"
+echo "  ✓ Rust: $(rustc --version 2>/dev/null || echo 'NOT FOUND')"
+
+# Check/install QEMU
+if ! command -v qemu-aarch64 &>/dev/null; then
+    echo "  Installing QEMU..."
+    sudo apt update -qq && sudo apt install -y qemu-user qemu-user-static 2>/dev/null || {
+        echo "  ✗ Failed to install qemu-user. Run: sudo apt install qemu-user qemu-user-static"
+        exit 1
+    }
+fi
+echo "  ✓ QEMU: $(qemu-aarch64 --version 2>/dev/null | head -1 || echo 'NOT FOUND')"
+
+# Check/install wasmtime
+WASMTIME_BIN=""
+for p in /usr/local/bin/wasmtime "$HOME/.local/bin/wasmtime" "$(pwd)/wasmtime"; do
+    if [ -x "$p" ]; then WASMTIME_BIN="$p"; break; fi
+done
+if [ -z "$WASMTIME_BIN" ]; then
+    echo "  Installing wasmtime..."
+    ARCH=$(uname -m)
+    WASMTIME_URL="https://github.com/bytecodealliance/wasmtime/releases/download/v29.0.1/wasmtime-v29.0.1-${ARCH}-linux.tar.xz"
+    curl -sSL "$WASMTIME_URL" -o /tmp/wasmtime.tar.xz 2>/dev/null && {
+        tar xf /tmp/wasmtime.tar.xz -C /tmp/ 2>/dev/null
+        WASMTIME_BIN=$(find /tmp/wasmtime-v29.0.1-${ARCH}-linux -name wasmtime -type f 2>/dev/null | head -1)
+        [ -n "$WASMTIME_BIN" ] && cp "$WASMTIME_BIN" "$REPO_DIR/wasmtime" && WASMTIME_BIN="$REPO_DIR/wasmtime"
+    } || echo "  ⚠ wasmtime install failed (wasm32 backend will be skipped)"
+fi
+echo "  ✓ Wasmtime: ${WASMTIME_BIN:-NOT FOUND}"
 echo ""
 
 # ── Step 2: Build compiler ──
@@ -121,7 +103,7 @@ COMPILE = REPO / "target" / "release" / "compile_dump"
 RESULTS = REPO / "test_results"
 HOST_ARCH = platform.machine()
 
-# QEMU binary mapping (skip QEMU for native arch)
+# QEMU binary mapping
 BACKENDS = {}
 if HOST_ARCH == "aarch64":
     BACKENDS["aarch64"] = None  # Native!
@@ -133,7 +115,20 @@ BACKENDS["arm32"] = "qemu-arm"
 BACKENDS["mips64"] = "qemu-mips64el"
 BACKENDS["ppc64"] = "qemu-ppc64"
 BACKENDS["loongarch64"] = "qemu-loongarch64"
-BACKENDS["wasm32"] = "WASMTIME"
+
+# Check wasmtime
+WASMTIME = os.environ.get("WASMTIME_BIN", "")
+if WASMTIME and os.path.isfile(WASMTIME):
+    BACKENDS["wasm32"] = "WASMTIME"
+elif os.path.isfile(str(REPO / "wasmtime")):
+    WASMTIME = str(REPO / "wasmtime")
+    BACKENDS["wasm32"] = "WASMTIME"
+else:
+    # Try PATH
+    import shutil
+    if shutil.which("wasmtime"):
+        WASMTIME = "wasmtime"
+        BACKENDS["wasm32"] = "WASMTIME"
 
 EXEC_TIMEOUT = 5
 EXPECTED_RE = re.compile(rb"//\s*Expected exit code:\s*(-?\d+)")
@@ -167,9 +162,8 @@ def run_one(args):
 
         if backend == "wasm32":
             os.chmod(out, 0o644)
-            cmd = ["wasmtime", "run", "--invoke", "_vuma_main", out]
+            cmd = [WASMTIME, "run", "--invoke", "_vuma_main", out]
         elif BACKENDS[backend] is None:
-            # Native execution (no QEMU needed)
             os.chmod(out, 0o755)
             cmd = ["timeout", str(EXEC_TIMEOUT), out]
         else:
@@ -233,6 +227,8 @@ def main():
     remaining = [t for t in tasks if (t[0], t[4]) not in done]
     print(f"Tests: {len(tests)} × Backends: {len(bl)} = {total} runs")
     print(f"Already done: {len(done)}, Remaining: {len(remaining)}")
+    print(f"Backends: {bl}")
+    print()
 
     ckpt = open(args.checkpoint, "a", buffering=1)
     matches = 0
@@ -251,7 +247,6 @@ def main():
                 elapsed = time.monotonic() - t0
                 rate = i / elapsed if elapsed > 0 else 0
                 eta = (len(remaining) - i) / rate / 60 if rate > 0 else 0
-                total_matches = matches + sum(1 for _ in [])
                 print(f"  [{i}/{len(remaining)}] {rate:.0f}/s ETA {eta:.1f}min | matches={matches} ({100*matches/i:.1f}%)", flush=True)
 
     ckpt.close()
@@ -318,6 +313,7 @@ if __name__ == "__main__":
 PYEOF
 
 export REPO_DIR="$REPO_DIR"
+export WASMTIME_BIN="$WASMTIME_BIN"
 python3 "$RESULTS_DIR/run_tests.py" --workers "$WORKERS" ${BACKENDS:+--backends "$BACKENDS"}
 TEST_EXIT=$?
 
@@ -332,7 +328,7 @@ if [ $NO_PUSH -eq 0 ]; then
     git add scripts/pi5_test_suite.sh 2>/dev/null || true
 
     TIMESTAMP=$(date -u '+%Y-%m-%d_%H%M-UTC')
-    git commit -m "test: Full suite results ($TIMESTAMP)
+    git commit -m "test: Full suite results ($TIMESTAMP) on $(hostname)
 
 $(cat test_results/summary.json 2>/dev/null || echo 'See test_results/ for details')" 2>/dev/null || echo "(nothing to commit)"
 
