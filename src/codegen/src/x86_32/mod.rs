@@ -858,13 +858,7 @@ fn encode_mem_operand(code: &mut Vec<u8>, reg: u8, base: Gpr, offset: i32) {
 /// Encode MOVZX r64, byte [r64 + offset] (REX.W + 0F B6 /r with memory operand)
 pub fn encode_movzx_reg8_mem(dst: Gpr, base: Gpr, offset: i32) -> Vec<u8> {
     let mut code = Vec::new();
-    let r = dst.needs_rex();
-    let b = base.needs_rex();
-    // Always need REX.W for 64-bit dest
-    if let Some(rex) = rex_prefix(true, r, false, b) {
-        code.push(rex);
-    } else {
-    }
+    // x86_32: No REX prefix (no R8-R15, no 64-bit operands)
     code.push(0x0F);
     code.push(0xB6);
     encode_mem_operand(&mut code, dst.encoding() & 7, base, offset);
@@ -874,14 +868,7 @@ pub fn encode_movzx_reg8_mem(dst: Gpr, base: Gpr, offset: i32) -> Vec<u8> {
 /// Encode MOV byte [r64 + offset], r8 (low byte of GPR) (88 /r with memory operand, no REX.W)
 pub fn encode_mov_mem8_reg8(base: Gpr, offset: i32, src: Gpr) -> Vec<u8> {
     let mut code = Vec::new();
-    let r = src.needs_rex();
-    let b = base.needs_rex();
-    // We need REX prefix if r or b is extended register, but NOT REX.W
-    if r || b {
-        if let Some(rex) = rex_prefix(false, r, false, b) {
-            code.push(rex);
-        }
-    }
+    // x86_32: No REX prefix
     code.push(0x88);
     encode_mem_operand(&mut code, src.encoding() & 7, base, offset);
     code
@@ -890,14 +877,7 @@ pub fn encode_mov_mem8_reg8(base: Gpr, offset: i32, src: Gpr) -> Vec<u8> {
 /// Encode MOV dword [r64 + offset], r32 (89 /r with no REX.W, 32-bit store that zero-extends)
 pub fn encode_mov_mem32_reg32(base: Gpr, offset: i32, src: Gpr) -> Vec<u8> {
     let mut code = Vec::new();
-    let r = src.needs_rex();
-    let b = base.needs_rex();
-    // No REX.W for 32-bit operand size
-    if r || b {
-        if let Some(rex) = rex_prefix(false, r, false, b) {
-            code.push(rex);
-        }
-    }
+    // x86_32: No REX prefix
     code.push(0x89);
     encode_mem_operand(&mut code, src.encoding() & 7, base, offset);
     code
@@ -906,14 +886,7 @@ pub fn encode_mov_mem32_reg32(base: Gpr, offset: i32, src: Gpr) -> Vec<u8> {
 /// Encode MOV r32, dword [r64 + offset] (8B /r with no REX.W, 32-bit load that zero-extends to 64)
 pub fn encode_mov_reg32_mem(dst: Gpr, base: Gpr, offset: i32) -> Vec<u8> {
     let mut code = Vec::new();
-    let r = dst.needs_rex();
-    let b = base.needs_rex();
-    // No REX.W for 32-bit operand size
-    if r || b {
-        if let Some(rex) = rex_prefix(false, r, false, b) {
-            code.push(rex);
-        }
-    }
+    // x86_32: No REX prefix
     code.push(0x8B);
     encode_mem_operand(&mut code, dst.encoding() & 7, base, offset);
     code
@@ -922,13 +895,7 @@ pub fn encode_mov_reg32_mem(dst: Gpr, base: Gpr, offset: i32) -> Vec<u8> {
 /// Encode MOVSX r64, byte [r64 + offset] (REX.W + 0F BE /r with memory operand)
 pub fn encode_movsx_reg8_mem(dst: Gpr, base: Gpr, offset: i32) -> Vec<u8> {
     let mut code = Vec::new();
-    let r = dst.needs_rex();
-    let b = base.needs_rex();
-    if let Some(rex) = rex_prefix(true, r, false, b) {
-        code.push(rex);
-    } else {
-    }
-    code.push(0x0F);
+                code.push(0x0F);
     code.push(0xBE);
     encode_mem_operand(&mut code, dst.encoding() & 7, base, offset);
     code
@@ -937,13 +904,7 @@ pub fn encode_movsx_reg8_mem(dst: Gpr, base: Gpr, offset: i32) -> Vec<u8> {
 /// Encode MOVSX r64, word [r64 + offset] (REX.W + 0F BF /r with memory operand)
 pub fn encode_movsx_reg16_mem(dst: Gpr, base: Gpr, offset: i32) -> Vec<u8> {
     let mut code = Vec::new();
-    let r = dst.needs_rex();
-    let b = base.needs_rex();
-    if let Some(rex) = rex_prefix(true, r, false, b) {
-        code.push(rex);
-    } else {
-    }
-    code.push(0x0F);
+                code.push(0x0F);
     code.push(0xBF);
     encode_mem_operand(&mut code, dst.encoding() & 7, base, offset);
     code
@@ -952,16 +913,9 @@ pub fn encode_movsx_reg16_mem(dst: Gpr, base: Gpr, offset: i32) -> Vec<u8> {
 /// Encode MOV word [r64 + offset], r16 (66 89 /r with memory operand)
 pub fn encode_mov_mem16_reg16(base: Gpr, offset: i32, src: Gpr) -> Vec<u8> {
     let mut code = Vec::new();
-    let r = src.needs_rex();
-    let b = base.needs_rex();
-    // 16-bit operand size prefix
+            // 16-bit operand size prefix
     code.push(0x66);
-    if r || b {
-        if let Some(rex) = rex_prefix(false, r, false, b) {
-            code.push(rex);
-        }
-    }
-    code.push(0x89);
+        code.push(0x89);
     encode_mem_operand(&mut code, src.encoding() & 7, base, offset);
     code
 }
@@ -969,13 +923,7 @@ pub fn encode_mov_mem16_reg16(base: Gpr, offset: i32, src: Gpr) -> Vec<u8> {
 /// Encode MOVZX r64, word [r64 + offset] (REX.W + 0F B7 /r with memory operand)
 pub fn encode_movzx_reg16_mem(dst: Gpr, base: Gpr, offset: i32) -> Vec<u8> {
     let mut code = Vec::new();
-    let r = dst.needs_rex();
-    let b = base.needs_rex();
-    if let Some(rex) = rex_prefix(true, r, false, b) {
-        code.push(rex);
-    } else {
-    }
-    code.push(0x0F);
+                code.push(0x0F);
     code.push(0xB7);
     encode_mem_operand(&mut code, dst.encoding() & 7, base, offset);
     code
@@ -988,14 +936,7 @@ pub fn encode_movzx_reg16_mem(dst: Gpr, base: Gpr, offset: i32) -> Vec<u8> {
 /// Encode MOVD xmm, r32 (66 0F 6E /r) — move 32-bit GPR low dword into XMM.
 pub fn encode_movd_xmm_gpr(dst: Xmm, src: Gpr) -> Vec<u8> {
     let mut code = Vec::with_capacity(4);
-    let r = dst.needs_rex();
-    let b = src.needs_rex();
-    if r || b {
-        if let Some(rex) = rex_prefix(false, r, false, b) {
-            code.push(rex);
-        }
-    }
-    code.push(0x66);
+                code.push(0x66);
     code.push(0x0F);
     code.push(0x6E);
     code.push(modrm(3, dst.encoding() & 7, src.encoding() & 7));
@@ -1005,14 +946,7 @@ pub fn encode_movd_xmm_gpr(dst: Xmm, src: Gpr) -> Vec<u8> {
 /// Encode MOVD r32, xmm (66 0F 7E /r) — move low dword from XMM to GPR.
 pub fn encode_movd_gpr_xmm(dst: Gpr, src: Xmm) -> Vec<u8> {
     let mut code = Vec::with_capacity(4);
-    let r = src.needs_rex();
-    let b = dst.needs_rex();
-    if r || b {
-        if let Some(rex) = rex_prefix(false, r, false, b) {
-            code.push(rex);
-        }
-    }
-    code.push(0x66);
+                code.push(0x66);
     code.push(0x0F);
     code.push(0x7E);
     code.push(modrm(3, src.encoding() & 7, dst.encoding() & 7));
@@ -1022,13 +956,7 @@ pub fn encode_movd_gpr_xmm(dst: Gpr, src: Xmm) -> Vec<u8> {
 /// Encode MOVQ xmm, r64 (66 REX.W 0F 6E /r) — move 64-bit GPR into XMM.
 pub fn encode_movq_xmm_gpr(dst: Xmm, src: Gpr) -> Vec<u8> {
     let mut code = Vec::with_capacity(5);
-    let r = dst.needs_rex();
-    let b = src.needs_rex();
-    if let Some(rex) = rex_prefix(true, r, false, b) {
-        code.push(rex);
-    } else {
-    }
-    code.push(0x66);
+                code.push(0x66);
     code.push(0x0F);
     code.push(0x6E);
     code.push(modrm(3, dst.encoding() & 7, src.encoding() & 7));
@@ -1038,13 +966,7 @@ pub fn encode_movq_xmm_gpr(dst: Xmm, src: Gpr) -> Vec<u8> {
 /// Encode MOVQ r64, xmm (66 REX.W 0F 7E /r) — move 64-bit from XMM to GPR.
 pub fn encode_movq_gpr_xmm(dst: Gpr, src: Xmm) -> Vec<u8> {
     let mut code = Vec::with_capacity(5);
-    let r = src.needs_rex();
-    let b = dst.needs_rex();
-    if let Some(rex) = rex_prefix(true, r, false, b) {
-        code.push(rex);
-    } else {
-    }
-    code.push(0x66);
+                code.push(0x66);
     code.push(0x0F);
     code.push(0x7E);
     code.push(modrm(3, src.encoding() & 7, dst.encoding() & 7));
@@ -1054,14 +976,7 @@ pub fn encode_movq_gpr_xmm(dst: Gpr, src: Xmm) -> Vec<u8> {
 /// Encode CVTSI2SD xmm, r32 (F2 0F 2A /r) — convert signed 32-bit int to f64.
 pub fn encode_cvtsi2sd_xmm_r32(dst: Xmm, src: Gpr) -> Vec<u8> {
     let mut code = Vec::with_capacity(4);
-    let r = dst.needs_rex();
-    let b = src.needs_rex();
-    if r || b {
-        if let Some(rex) = rex_prefix(false, r, false, b) {
-            code.push(rex);
-        }
-    }
-    code.push(0xF2);
+                code.push(0xF2);
     code.push(0x0F);
     code.push(0x2A);
     code.push(modrm(3, dst.encoding() & 7, src.encoding() & 7));
@@ -1071,13 +986,7 @@ pub fn encode_cvtsi2sd_xmm_r32(dst: Xmm, src: Gpr) -> Vec<u8> {
 /// Encode CVTSI2SD xmm, r64 (F2 REX.W 0F 2A /r) — convert signed 64-bit int to f64.
 pub fn encode_cvtsi2sd_xmm_r64(dst: Xmm, src: Gpr) -> Vec<u8> {
     let mut code = Vec::with_capacity(5);
-    let r = dst.needs_rex();
-    let b = src.needs_rex();
-    if let Some(rex) = rex_prefix(true, r, false, b) {
-        code.push(rex);
-    } else {
-    }
-    code.push(0xF2);
+                code.push(0xF2);
     code.push(0x0F);
     code.push(0x2A);
     code.push(modrm(3, dst.encoding() & 7, src.encoding() & 7));
@@ -1087,14 +996,7 @@ pub fn encode_cvtsi2sd_xmm_r64(dst: Xmm, src: Gpr) -> Vec<u8> {
 /// Encode CVTSI2SS xmm, r32 (F3 0F 2A /r) — convert signed 32-bit int to f32.
 pub fn encode_cvtsi2ss_xmm_r32(dst: Xmm, src: Gpr) -> Vec<u8> {
     let mut code = Vec::with_capacity(4);
-    let r = dst.needs_rex();
-    let b = src.needs_rex();
-    if r || b {
-        if let Some(rex) = rex_prefix(false, r, false, b) {
-            code.push(rex);
-        }
-    }
-    code.push(0xF3);
+                code.push(0xF3);
     code.push(0x0F);
     code.push(0x2A);
     code.push(modrm(3, dst.encoding() & 7, src.encoding() & 7));
@@ -1104,13 +1006,7 @@ pub fn encode_cvtsi2ss_xmm_r32(dst: Xmm, src: Gpr) -> Vec<u8> {
 /// Encode CVTSI2SS xmm, r64 (F3 REX.W 0F 2A /r) — convert signed 64-bit int to f32.
 pub fn encode_cvtsi2ss_xmm_r64(dst: Xmm, src: Gpr) -> Vec<u8> {
     let mut code = Vec::with_capacity(5);
-    let r = dst.needs_rex();
-    let b = src.needs_rex();
-    if let Some(rex) = rex_prefix(true, r, false, b) {
-        code.push(rex);
-    } else {
-    }
-    code.push(0xF3);
+                code.push(0xF3);
     code.push(0x0F);
     code.push(0x2A);
     code.push(modrm(3, dst.encoding() & 7, src.encoding() & 7));
@@ -1120,14 +1016,7 @@ pub fn encode_cvtsi2ss_xmm_r64(dst: Xmm, src: Gpr) -> Vec<u8> {
 /// Encode CVTSD2SI r32, xmm (F2 0F 2D /r) — convert f64 to signed 32-bit int.
 pub fn encode_cvtsd2si_r32_xmm(dst: Gpr, src: Xmm) -> Vec<u8> {
     let mut code = Vec::with_capacity(4);
-    let r = src.needs_rex();
-    let b = dst.needs_rex();
-    if r || b {
-        if let Some(rex) = rex_prefix(false, r, false, b) {
-            code.push(rex);
-        }
-    }
-    code.push(0xF2);
+                code.push(0xF2);
     code.push(0x0F);
     code.push(0x2D);
     code.push(modrm(3, src.encoding() & 7, dst.encoding() & 7));
@@ -1137,13 +1026,7 @@ pub fn encode_cvtsd2si_r32_xmm(dst: Gpr, src: Xmm) -> Vec<u8> {
 /// Encode CVTSD2SI r64, xmm (F2 REX.W 0F 2D /r) — convert f64 to signed 64-bit int.
 pub fn encode_cvtsd2si_r64_xmm(dst: Gpr, src: Xmm) -> Vec<u8> {
     let mut code = Vec::with_capacity(5);
-    let r = src.needs_rex();
-    let b = dst.needs_rex();
-    if let Some(rex) = rex_prefix(true, r, false, b) {
-        code.push(rex);
-    } else {
-    }
-    code.push(0xF2);
+                code.push(0xF2);
     code.push(0x0F);
     code.push(0x2D);
     code.push(modrm(3, src.encoding() & 7, dst.encoding() & 7));
@@ -1153,14 +1036,7 @@ pub fn encode_cvtsd2si_r64_xmm(dst: Gpr, src: Xmm) -> Vec<u8> {
 /// Encode CVTSS2SI r32, xmm (F3 0F 2D /r) — convert f32 to signed 32-bit int.
 pub fn encode_cvtss2si_r32_xmm(dst: Gpr, src: Xmm) -> Vec<u8> {
     let mut code = Vec::with_capacity(4);
-    let r = src.needs_rex();
-    let b = dst.needs_rex();
-    if r || b {
-        if let Some(rex) = rex_prefix(false, r, false, b) {
-            code.push(rex);
-        }
-    }
-    code.push(0xF3);
+                code.push(0xF3);
     code.push(0x0F);
     code.push(0x2D);
     code.push(modrm(3, src.encoding() & 7, dst.encoding() & 7));
@@ -1170,13 +1046,7 @@ pub fn encode_cvtss2si_r32_xmm(dst: Gpr, src: Xmm) -> Vec<u8> {
 /// Encode CVTSS2SI r64, xmm (F3 REX.W 0F 2D /r) — convert f32 to signed 64-bit int.
 pub fn encode_cvtss2si_r64_xmm(dst: Gpr, src: Xmm) -> Vec<u8> {
     let mut code = Vec::with_capacity(5);
-    let r = src.needs_rex();
-    let b = dst.needs_rex();
-    if let Some(rex) = rex_prefix(true, r, false, b) {
-        code.push(rex);
-    } else {
-    }
-    code.push(0xF3);
+                code.push(0xF3);
     code.push(0x0F);
     code.push(0x2D);
     code.push(modrm(3, src.encoding() & 7, dst.encoding() & 7));
@@ -1189,14 +1059,7 @@ pub fn encode_cvtss2si_r64_xmm(dst: Gpr, src: Xmm) -> Vec<u8> {
 /// semantics represented by the IR's `FloatToInt` / `FloatToUInt`.
 pub fn encode_cvttsd2si_r32_xmm(dst: Gpr, src: Xmm) -> Vec<u8> {
     let mut code = Vec::with_capacity(4);
-    let r = src.needs_rex();
-    let b = dst.needs_rex();
-    if r || b {
-        if let Some(rex) = rex_prefix(false, r, false, b) {
-            code.push(rex);
-        }
-    }
-    code.push(0xF2);
+                code.push(0xF2);
     code.push(0x0F);
     code.push(0x2C);
     code.push(modrm(3, src.encoding() & 7, dst.encoding() & 7));
@@ -1207,13 +1070,7 @@ pub fn encode_cvttsd2si_r32_xmm(dst: Gpr, src: Xmm) -> Vec<u8> {
 /// 64-bit int with truncation (toward zero).
 pub fn encode_cvttsd2si_r64_xmm(dst: Gpr, src: Xmm) -> Vec<u8> {
     let mut code = Vec::with_capacity(5);
-    let r = src.needs_rex();
-    let b = dst.needs_rex();
-    if let Some(rex) = rex_prefix(true, r, false, b) {
-        code.push(rex);
-    } else {
-    }
-    code.push(0xF2);
+                code.push(0xF2);
     code.push(0x0F);
     code.push(0x2C);
     code.push(modrm(3, src.encoding() & 7, dst.encoding() & 7));
@@ -1224,14 +1081,7 @@ pub fn encode_cvttsd2si_r64_xmm(dst: Gpr, src: Xmm) -> Vec<u8> {
 /// with truncation (toward zero).
 pub fn encode_cvttss2si_r32_xmm(dst: Gpr, src: Xmm) -> Vec<u8> {
     let mut code = Vec::with_capacity(4);
-    let r = src.needs_rex();
-    let b = dst.needs_rex();
-    if r || b {
-        if let Some(rex) = rex_prefix(false, r, false, b) {
-            code.push(rex);
-        }
-    }
-    code.push(0xF3);
+                code.push(0xF3);
     code.push(0x0F);
     code.push(0x2C);
     code.push(modrm(3, src.encoding() & 7, dst.encoding() & 7));
@@ -1242,13 +1092,7 @@ pub fn encode_cvttss2si_r32_xmm(dst: Gpr, src: Xmm) -> Vec<u8> {
 /// 64-bit int with truncation (toward zero).
 pub fn encode_cvttss2si_r64_xmm(dst: Gpr, src: Xmm) -> Vec<u8> {
     let mut code = Vec::with_capacity(5);
-    let r = src.needs_rex();
-    let b = dst.needs_rex();
-    if let Some(rex) = rex_prefix(true, r, false, b) {
-        code.push(rex);
-    } else {
-    }
-    code.push(0xF3);
+                code.push(0xF3);
     code.push(0x0F);
     code.push(0x2C);
     code.push(modrm(3, src.encoding() & 7, dst.encoding() & 7));
@@ -1258,14 +1102,7 @@ pub fn encode_cvttss2si_r64_xmm(dst: Gpr, src: Xmm) -> Vec<u8> {
 /// Encode CVTSS2SD xmm, xmm (F3 0F 5A /r) — convert f32 to f64 (widen).
 pub fn encode_cvtss2sd_xmm_xmm(dst: Xmm, src: Xmm) -> Vec<u8> {
     let mut code = Vec::with_capacity(4);
-    let r = src.needs_rex();
-    let b = dst.needs_rex();
-    if r || b {
-        if let Some(rex) = rex_prefix(false, r, false, b) {
-            code.push(rex);
-        }
-    }
-    code.push(0xF3);
+                code.push(0xF3);
     code.push(0x0F);
     code.push(0x5A);
     code.push(modrm(3, src.encoding() & 7, dst.encoding() & 7));
@@ -1275,14 +1112,7 @@ pub fn encode_cvtss2sd_xmm_xmm(dst: Xmm, src: Xmm) -> Vec<u8> {
 /// Encode CVTSD2SS xmm, xmm (F2 0F 5A /r) — convert f64 to f32 (narrow).
 pub fn encode_cvtsd2ss_xmm_xmm(dst: Xmm, src: Xmm) -> Vec<u8> {
     let mut code = Vec::with_capacity(4);
-    let r = src.needs_rex();
-    let b = dst.needs_rex();
-    if r || b {
-        if let Some(rex) = rex_prefix(false, r, false, b) {
-            code.push(rex);
-        }
-    }
-    code.push(0xF2);
+                code.push(0xF2);
     code.push(0x0F);
     code.push(0x5A);
     code.push(modrm(3, src.encoding() & 7, dst.encoding() & 7));
@@ -1292,14 +1122,7 @@ pub fn encode_cvtsd2ss_xmm_xmm(dst: Xmm, src: Xmm) -> Vec<u8> {
 /// Encode ADDSD xmm, xmm (F2 0F 58 /r) — add scalar double-precision floats.
 pub fn encode_addsd_xmm_xmm(dst: Xmm, src: Xmm) -> Vec<u8> {
     let mut code = Vec::with_capacity(4);
-    let r = src.needs_rex();
-    let b = dst.needs_rex();
-    if r || b {
-        if let Some(rex) = rex_prefix(false, r, false, b) {
-            code.push(rex);
-        }
-    }
-    code.push(0xF2);
+                code.push(0xF2);
     code.push(0x0F);
     code.push(0x58);
     code.push(modrm(3, src.encoding() & 7, dst.encoding() & 7));
@@ -1309,14 +1132,7 @@ pub fn encode_addsd_xmm_xmm(dst: Xmm, src: Xmm) -> Vec<u8> {
 /// Encode ADDSS xmm, xmm (F3 0F 58 /r) — add scalar single-precision floats.
 pub fn encode_addss_xmm_xmm(dst: Xmm, src: Xmm) -> Vec<u8> {
     let mut code = Vec::with_capacity(4);
-    let r = src.needs_rex();
-    let b = dst.needs_rex();
-    if r || b {
-        if let Some(rex) = rex_prefix(false, r, false, b) {
-            code.push(rex);
-        }
-    }
-    code.push(0xF3);
+                code.push(0xF3);
     code.push(0x0F);
     code.push(0x58);
     code.push(modrm(3, src.encoding() & 7, dst.encoding() & 7));
