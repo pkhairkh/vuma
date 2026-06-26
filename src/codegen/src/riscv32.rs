@@ -2250,8 +2250,11 @@ impl std::fmt::Display for Instruction {
 /// The two segments are page-aligned to ensure the kernel maps them
 /// with different permissions.
 fn build_minimal_riscv32_elf_2seg(code: &[u8], base_addr: u64) -> Vec<u8> {
-    // ELF32 for RV32 — 2 LOAD segments, same layout as RV64
-    const PAGE_SIZE: u32 = 0x1000;
+    // ELF32 for RV32 — 2 LOAD segments
+    // Use 64K alignment for virtual addresses to ensure compatibility with
+    // QEMU 10.x on hosts with 16K or 64K page sizes (same fix as aarch64/x86_64).
+    const FILE_PAGE_SIZE: u32 = 0x1000;
+    const VADDR_ALIGN: u32 = 0x10000; // 64 KB
     let elf_header_size: u32 = 52;
     let phdr_size: u32 = 32;
     let num_phdrs: u32 = 2;
@@ -2259,8 +2262,9 @@ fn build_minimal_riscv32_elf_2seg(code: &[u8], base_addr: u64) -> Vec<u8> {
     let text_offset = phdr_end;
     let text_size = code.len() as u32;
     let text_file_end = text_offset + text_size;
-    let data_vaddr = ((base_addr as u32 + text_file_end + PAGE_SIZE - 1) / PAGE_SIZE) * PAGE_SIZE;
-    let data_size: u32 = PAGE_SIZE;
+    // Align BSS vaddr to 64K to avoid sharing a host page with the text segment
+    let data_vaddr = ((base_addr as u32 + text_file_end + VADDR_ALIGN - 1) / VADDR_ALIGN) * VADDR_ALIGN;
+    let data_size: u32 = FILE_PAGE_SIZE;
     let entry_point = base_addr as u32 + text_offset;
     let mut elf = Vec::with_capacity((text_offset + text_size) as usize);
     // e_ident (16 bytes)
@@ -2279,24 +2283,25 @@ fn build_minimal_riscv32_elf_2seg(code: &[u8], base_addr: u64) -> Vec<u8> {
     elf.extend_from_slice(&40u16.to_le_bytes()); // e_shentsize
     elf.extend_from_slice(&0u16.to_le_bytes()); // e_shnum
     elf.extend_from_slice(&0u16.to_le_bytes()); // e_shstrndx
-    // PHDR 1: text (R+X)
-    elf.extend_from_slice(&1u32.to_le_bytes()); // p_type
-    elf.extend_from_slice(&5u32.to_le_bytes()); // p_flags
+    // PHDR 1: text (R+X) — ELF32 Phdr field order:
+    //   p_type, p_offset, p_vaddr, p_paddr, p_filesz, p_memsz, p_flags, p_align
+    elf.extend_from_slice(&1u32.to_le_bytes()); // p_type = PT_LOAD
     elf.extend_from_slice(&0u32.to_le_bytes()); // p_offset
     elf.extend_from_slice(&(base_addr as u32).to_le_bytes()); // p_vaddr
     elf.extend_from_slice(&(base_addr as u32).to_le_bytes()); // p_paddr
     elf.extend_from_slice(&((text_offset + text_size) as u32).to_le_bytes()); // p_filesz
     elf.extend_from_slice(&((text_offset + text_size) as u32).to_le_bytes()); // p_memsz
-    elf.extend_from_slice(&PAGE_SIZE.to_le_bytes()); // p_align
-    // PHDR 2: data (R+W)
-    elf.extend_from_slice(&1u32.to_le_bytes()); // p_type
-    elf.extend_from_slice(&6u32.to_le_bytes()); // p_flags
+    elf.extend_from_slice(&5u32.to_le_bytes()); // p_flags = PF_R | PF_X
+    elf.extend_from_slice(&FILE_PAGE_SIZE.to_le_bytes()); // p_align
+    // PHDR 2: data (R+W) — ELF32 field order
+    elf.extend_from_slice(&1u32.to_le_bytes()); // p_type = PT_LOAD
     elf.extend_from_slice(&0u32.to_le_bytes()); // p_offset
     elf.extend_from_slice(&data_vaddr.to_le_bytes()); // p_vaddr
     elf.extend_from_slice(&data_vaddr.to_le_bytes()); // p_paddr
     elf.extend_from_slice(&0u32.to_le_bytes()); // p_filesz
     elf.extend_from_slice(&data_size.to_le_bytes()); // p_memsz
-    elf.extend_from_slice(&PAGE_SIZE.to_le_bytes()); // p_align
+    elf.extend_from_slice(&6u32.to_le_bytes()); // p_flags = PF_R | PF_W
+    elf.extend_from_slice(&FILE_PAGE_SIZE.to_le_bytes()); // p_align
     // text
     while (elf.len() as u32) < text_offset { elf.push(0); }
     elf.extend_from_slice(code);
