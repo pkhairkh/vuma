@@ -1990,72 +1990,80 @@ fn decode_modrm_reg_rm(bytes: &[u8], pos: usize, rex_r: bool, rex_b: bool) -> (u
 /// zero-fills it at load time. This provides writable memory for global
 /// variables (e.g., those created by `allocate()` in VUMA source).
 fn build_minimal_x86_32_elf(code: &[u8], base_addr: u64, bss_size: u64) -> Vec<u8> {
-    const PAGE_SIZE: u64 = 0x1000; // 4 KB
+    // ELF32 for i386 — proper ELF32 format with 52-byte header and 32-byte phdrs.
+    // Use 64K alignment for virtual addresses to ensure compatibility with
+    // QEMU 10.x on hosts with 16K or 64K page sizes (same fix as other backends).
+    const FILE_PAGE_SIZE: u32 = 0x1000; // 4 KB — file offset alignment
+    const VADDR_ALIGN: u32 = 0x10000;   // 64 KB — virtual address alignment
 
-    let elf_header_size: u64 = 64;
-    let phdr_size: u64 = 56;
-    let num_phdrs: u64 = if bss_size > 0 { 2 } else { 1 };
+    let base_addr: u32 = base_addr as u32;
+    let bss_size: u32 = bss_size as u32;
+    let elf_header_size: u32 = 52;  // ELF32 header is 52 bytes (not 64!)
+    let phdr_size: u32 = 32;        // ELF32 Phdr is 32 bytes (not 56!)
+    let num_phdrs: u32 = if bss_size > 0 { 2 } else { 1 };
     let phdr_end = elf_header_size + phdr_size * num_phdrs;
-    // Page-align the text segment start for mmap compatibility (required by QEMU).
-    let text_offset = ((phdr_end + PAGE_SIZE - 1) / PAGE_SIZE) * PAGE_SIZE;
-    let text_size = code.len() as u64;
-    let entry_point = base_addr + text_offset;
+    // Page-align the text segment start for mmap compatibility.
+    let text_offset: u32 = ((phdr_end + FILE_PAGE_SIZE - 1) / FILE_PAGE_SIZE) * FILE_PAGE_SIZE;
+    let text_size: u32 = code.len() as u32;
+    // Align text vaddr to 64K for host page size compatibility.
+    let text_vaddr: u32 = ((base_addr + text_offset + VADDR_ALIGN - 1) / VADDR_ALIGN) * VADDR_ALIGN;
+    let entry_point: u32 = text_vaddr;
 
     let mut elf = Vec::with_capacity(text_offset as usize + code.len());
 
-    // --- e_ident ---
-    elf.extend_from_slice(&[0x7f, b'E', b'L', b'F']); // magic
-    elf.push(2); // ELFCLASS32
+    // --- e_ident (16 bytes) ---
+    elf.extend_from_slice(&[0x7f, b'E', b'L', b'F']);
+    elf.push(1); // ELFCLASS32 (not 2!)
     elf.push(1); // ELFDATA2LSB
     elf.push(1); // EV_CURRENT
     elf.push(3); // ELFOSABI_LINUX
-    elf.push(0); // padding
-    elf.extend_from_slice(&[0u8; 7]); // padding
+    elf.push(0);
+    elf.extend_from_slice(&[0u8; 7]);
 
-    // --- ELF header fields ---
-    elf.extend_from_slice(&2u16.to_le_bytes()); // e_type = ET_EXEC
-    elf.extend_from_slice(&62u16.to_le_bytes()); // e_machine = EM_X86_64
-    elf.extend_from_slice(&1u32.to_le_bytes()); // e_version
-    elf.extend_from_slice(&entry_point.to_le_bytes()); // e_entry
-    elf.extend_from_slice(&elf_header_size.to_le_bytes()); // e_phoff
-    elf.extend_from_slice(&0u64.to_le_bytes()); // e_shoff (no section headers)
-    elf.extend_from_slice(&0u32.to_le_bytes()); // e_flags
-    elf.extend_from_slice(&64u16.to_le_bytes()); // e_ehsize
-    elf.extend_from_slice(&56u16.to_le_bytes()); // e_phentsize
+    // --- ELF32 header fields (36 bytes, all u32/u16 — no u64!) ---
+    elf.extend_from_slice(&2u16.to_le_bytes());       // e_type = ET_EXEC
+    elf.extend_from_slice(&3u16.to_le_bytes());        // e_machine = EM_386 (not 62!)
+    elf.extend_from_slice(&1u32.to_le_bytes());        // e_version
+    elf.extend_from_slice(&entry_point.to_le_bytes()); // e_entry (u32)
+    elf.extend_from_slice(&elf_header_size.to_le_bytes()); // e_phoff (u32)
+    elf.extend_from_slice(&0u32.to_le_bytes());        // e_shoff (u32, no section headers)
+    elf.extend_from_slice(&0u32.to_le_bytes());        // e_flags
+    elf.extend_from_slice(&52u16.to_le_bytes());       // e_ehsize (52 for ELF32)
+    elf.extend_from_slice(&32u16.to_le_bytes());       // e_phentsize (32 for ELF32 Phdr)
     elf.extend_from_slice(&(num_phdrs as u16).to_le_bytes()); // e_phnum
-    elf.extend_from_slice(&64u16.to_le_bytes()); // e_shentsize
-    elf.extend_from_slice(&0u16.to_le_bytes()); // e_shnum
-    elf.extend_from_slice(&0u16.to_le_bytes()); // e_shstrndx
+    elf.extend_from_slice(&40u16.to_le_bytes());       // e_shentsize (40 for ELF32 Shdr)
+    elf.extend_from_slice(&0u16.to_le_bytes());        // e_shnum
+    elf.extend_from_slice(&0u16.to_le_bytes());        // e_shstrndx
 
-    // --- Program Header 1: LOAD segment for .text (PF_R | PF_X) ---
-    elf.extend_from_slice(&1u32.to_le_bytes()); // p_type = PT_LOAD
-    elf.extend_from_slice(&5u32.to_le_bytes()); // p_flags = PF_R | PF_X
-    elf.extend_from_slice(&text_offset.to_le_bytes()); // p_offset
-    elf.extend_from_slice(&(base_addr + text_offset).to_le_bytes()); // p_vaddr
-    elf.extend_from_slice(&(base_addr + text_offset).to_le_bytes()); // p_paddr
-    elf.extend_from_slice(&text_size.to_le_bytes()); // p_filesz
-    elf.extend_from_slice(&text_size.to_le_bytes()); // p_memsz
-    elf.extend_from_slice(&PAGE_SIZE.to_le_bytes()); // p_align
+    // --- Program Header 1: LOAD .text (PF_R | PF_X) ---
+    // ELF32 Phdr field order: p_type, p_offset, p_vaddr, p_paddr,
+    //                         p_filesz, p_memsz, p_flags, p_align
+    elf.extend_from_slice(&1u32.to_le_bytes());        // p_type = PT_LOAD
+    elf.extend_from_slice(&text_offset.to_le_bytes()); // p_offset (u32)
+    elf.extend_from_slice(&text_vaddr.to_le_bytes());  // p_vaddr (u32)
+    elf.extend_from_slice(&text_vaddr.to_le_bytes());  // p_paddr (u32)
+    elf.extend_from_slice(&text_size.to_le_bytes());   // p_filesz (u32)
+    elf.extend_from_slice(&text_size.to_le_bytes());   // p_memsz (u32)
+    elf.extend_from_slice(&5u32.to_le_bytes());        // p_flags = PF_R | PF_X
+    elf.extend_from_slice(&FILE_PAGE_SIZE.to_le_bytes()); // p_align (u32)
 
-    // --- Program Header 2: LOAD segment for .bss (PF_R | PF_W) ---
-    // Only emitted when there is BSS data. The BSS segment starts at the
-    // next page boundary after the text segment. p_filesz = 0 because BSS
-    // has no file content; the kernel zero-fills p_memsz bytes at load time.
+    // --- Program Header 2: LOAD .bss (PF_R | PF_W) ---
+    // Only emitted when there is BSS data. BSS starts at the next 64K boundary
+    // after the text segment to avoid sharing a host page with text.
     if bss_size > 0 {
-        let bss_vaddr = ((base_addr + text_offset + text_size + PAGE_SIZE - 1) / PAGE_SIZE) * PAGE_SIZE;
-        elf.extend_from_slice(&1u32.to_le_bytes()); // p_type = PT_LOAD
-        elf.extend_from_slice(&6u32.to_le_bytes()); // p_flags = PF_R | PF_W
-        elf.extend_from_slice(&0u64.to_le_bytes()); // p_offset (no file content)
-        elf.extend_from_slice(&bss_vaddr.to_le_bytes()); // p_vaddr
-        elf.extend_from_slice(&bss_vaddr.to_le_bytes()); // p_paddr
-        elf.extend_from_slice(&0u64.to_le_bytes()); // p_filesz (BSS is zero-filled)
-        elf.extend_from_slice(&bss_size.to_le_bytes()); // p_memsz
-        elf.extend_from_slice(&PAGE_SIZE.to_le_bytes()); // p_align
+        let bss_vaddr: u32 = ((text_vaddr + text_size + VADDR_ALIGN - 1) / VADDR_ALIGN) * VADDR_ALIGN;
+        elf.extend_from_slice(&1u32.to_le_bytes());        // p_type = PT_LOAD
+        elf.extend_from_slice(&0u32.to_le_bytes());        // p_offset (no file content)
+        elf.extend_from_slice(&bss_vaddr.to_le_bytes());   // p_vaddr (u32)
+        elf.extend_from_slice(&bss_vaddr.to_le_bytes());   // p_paddr (u32)
+        elf.extend_from_slice(&0u32.to_le_bytes());        // p_filesz (BSS is zero-filled)
+        elf.extend_from_slice(&bss_size.to_le_bytes());    // p_memsz (u32)
+        elf.extend_from_slice(&6u32.to_le_bytes());        // p_flags = PF_R | PF_W
+        elf.extend_from_slice(&FILE_PAGE_SIZE.to_le_bytes()); // p_align (u32)
     }
 
     // --- Padding + Code section ---
-    // Pad to page-aligned text_offset
-    while (elf.len() as u64) < text_offset {
+    while (elf.len() as u32) < text_offset {
         elf.push(0);
     }
     elf.extend_from_slice(code);
@@ -2816,19 +2824,22 @@ impl Backend for X86_32Backend {
         let bss_size: u64 = data_symbols.len() as u64 * BSS_SLOT_SIZE;
 
         // ── Compute BSS virtual address ──────────────────────────────
-        // The BSS segment starts at the next page boundary after the text
-        // segment.  The text segment layout is computed inside
-        // build_minimal_x86_32_elf, so we mirror the same calculation here.
-        const ELF_HEADER_SIZE: u64 = 64;
-        const PHDR_SIZE: u64 = 56;
-        const PAGE_SIZE: u64 = 0x1000;
+        // The BSS segment starts at the next 64K boundary after the text
+        // segment.  We mirror the calculation from build_minimal_x86_32_elf
+        // here, using ELF32 sizes (52-byte header, 32-byte phdrs) and 64K
+        // virtual address alignment for QEMU 10.x host page size compatibility.
+        const ELF_HEADER_SIZE: u64 = 52;  // ELF32 header
+        const PHDR_SIZE: u64 = 32;        // ELF32 Phdr
+        const FILE_PAGE_SIZE: u64 = 0x1000;
+        const VADDR_ALIGN: u64 = 0x10000;
         const BASE_ADDR: u64 = 0x400000;
         let num_phdrs: u64 = if bss_size > 0 { 2 } else { 1 };
         let phdr_end = ELF_HEADER_SIZE + PHDR_SIZE * num_phdrs;
-        let text_offset = ((phdr_end + PAGE_SIZE - 1) / PAGE_SIZE) * PAGE_SIZE;
+        let text_offset = ((phdr_end + FILE_PAGE_SIZE - 1) / FILE_PAGE_SIZE) * FILE_PAGE_SIZE;
         let text_size = all_code.len() as u64;
+        let text_vaddr: u64 = ((BASE_ADDR + text_offset + VADDR_ALIGN - 1) / VADDR_ALIGN) * VADDR_ALIGN;
         let bss_vaddr: u64 = if bss_size > 0 {
-            ((BASE_ADDR + text_offset + text_size + PAGE_SIZE - 1) / PAGE_SIZE) * PAGE_SIZE
+            ((text_vaddr + text_size + VADDR_ALIGN - 1) / VADDR_ALIGN) * VADDR_ALIGN
         } else {
             0
         };
@@ -2902,7 +2913,7 @@ impl Backend for X86_32Backend {
                     } else if func_offsets.contains_key(&reloc.symbol) {
                         // Function symbol with absolute relocation — patch with
                         // the function's virtual address (text_offset + offset).
-                        let func_addr = BASE_ADDR + text_offset + func_offsets[&reloc.symbol] as u64;
+                        let func_addr = text_vaddr + func_offsets[&reloc.symbol] as u64;
                         all_code[abs_offset..abs_offset + 8]
                             .copy_from_slice(&func_addr.to_le_bytes());
                     } else {
@@ -3419,21 +3430,19 @@ mod tests {
 
         // Check ELF magic
         assert_eq!(&elf[0..4], &[0x7f, b'E', b'L', b'F']);
-        // ELFCLASS32
-        assert_eq!(elf[4], 2);
+        // ELFCLASS32 (1, not 2!)
+        assert_eq!(elf[4], 1);
         // ELFDATA2LSB
         assert_eq!(elf[5], 1);
         // e_type = ET_EXEC (2)
         assert_eq!(u16::from_le_bytes([elf[16], elf[17]]), 2);
-        // e_machine = EM_X86_64 (62)
-        assert_eq!(u16::from_le_bytes([elf[18], elf[19]]), 62);
-        // With 1 phdr (no BSS), e_phnum = 1
-        assert_eq!(u16::from_le_bytes([elf[56], elf[57]]), 1);
-        // entry = base + page_align(64 + 56) = 0x400000 + 0x1000 = 0x401000
-        let entry = u64::from_le_bytes([
-            elf[24], elf[25], elf[26], elf[27], elf[28], elf[29], elf[30], elf[31],
-        ]);
-        assert_eq!(entry, 0x401000);
+        // e_machine = EM_386 (3, not 62!)
+        assert_eq!(u16::from_le_bytes([elf[18], elf[19]]), 3);
+        // ELF32 header is 52 bytes; e_phnum is at offset 44 (not 56!)
+        assert_eq!(u16::from_le_bytes([elf[44], elf[45]]), 1);
+        // entry = vaddr_align(0x400000 + page_align(52 + 32)) = 0x410000
+        let entry = u32::from_le_bytes([elf[24], elf[25], elf[26], elf[27]]);
+        assert_eq!(entry, 0x410000);
     }
 
     #[test]
@@ -3445,42 +3454,32 @@ mod tests {
         assert_eq!(&elf[0..4], &[0x7f, b'E', b'L', b'F']);
         // e_type = ET_EXEC
         assert_eq!(u16::from_le_bytes([elf[16], elf[17]]), 2);
-        // e_machine = EM_X86_64
-        assert_eq!(u16::from_le_bytes([elf[18], elf[19]]), 62);
-        // With BSS, e_phnum = 2
-        assert_eq!(u16::from_le_bytes([elf[56], elf[57]]), 2);
-        // Entry point is still in text segment
-        let entry = u64::from_le_bytes([
-            elf[24], elf[25], elf[26], elf[27], elf[28], elf[29], elf[30], elf[31],
-        ]);
-        // With 2 phdrs, text_offset = page_align(64 + 2*56) = page_align(176) = 0x1000
-        // entry = 0x400000 + 0x1000 = 0x401000
-        assert_eq!(entry, 0x401000);
+        // e_machine = EM_386 (3)
+        assert_eq!(u16::from_le_bytes([elf[18], elf[19]]), 3);
+        // With BSS, e_phnum = 2 (at offset 44 for ELF32)
+        assert_eq!(u16::from_le_bytes([elf[44], elf[45]]), 2);
+        // Entry point (u32 at offset 24)
+        let entry = u32::from_le_bytes([elf[24], elf[25], elf[26], elf[27]]);
+        // With 2 phdrs, text_offset = page_align(52 + 2*32) = page_align(116) = 0x1000
+        // entry = vaddr_align(0x400000 + 0x1000) = 0x410000
+        assert_eq!(entry, 0x410000);
 
-        // Second program header (BSS) starts at offset 64 + 56 = 120
-        // Elf64_Phdr layout: p_type(4) p_flags(4) p_offset(8) p_vaddr(8) p_paddr(8) p_filesz(8) p_memsz(8) p_align(8)
-        let ph2 = 64 + 56;
+        // Second program header (BSS) starts at offset 52 + 32 = 84
+        // ELF32 Phdr layout: p_type(4) p_offset(4) p_vaddr(4) p_paddr(4) p_filesz(4) p_memsz(4) p_flags(4) p_align(4)
+        let ph2 = 52 + 32; // = 84
         let p_type = u32::from_le_bytes([elf[ph2], elf[ph2+1], elf[ph2+2], elf[ph2+3]]);
         assert_eq!(p_type, 1); // PT_LOAD
-        let p_flags = u32::from_le_bytes([elf[ph2+4], elf[ph2+5], elf[ph2+6], elf[ph2+7]]);
+        // p_flags is at offset 24 within the phdr
+        let p_flags = u32::from_le_bytes([elf[ph2+24], elf[ph2+25], elf[ph2+26], elf[ph2+27]]);
         assert_eq!(p_flags, 6); // PF_R | PF_W
-        let p_filesz = u64::from_le_bytes([
-            elf[ph2+32], elf[ph2+33], elf[ph2+34], elf[ph2+35],
-            elf[ph2+36], elf[ph2+37], elf[ph2+38], elf[ph2+39],
-        ]);
+        let p_filesz = u32::from_le_bytes([elf[ph2+16], elf[ph2+17], elf[ph2+18], elf[ph2+19]]);
         assert_eq!(p_filesz, 0); // BSS has no file content
-        let p_memsz = u64::from_le_bytes([
-            elf[ph2+40], elf[ph2+41], elf[ph2+42], elf[ph2+43],
-            elf[ph2+44], elf[ph2+45], elf[ph2+46], elf[ph2+47],
-        ]);
+        let p_memsz = u32::from_le_bytes([elf[ph2+20], elf[ph2+21], elf[ph2+22], elf[ph2+23]]);
         assert_eq!(p_memsz, 16);
-        let bss_vaddr = u64::from_le_bytes([
-            elf[ph2+16], elf[ph2+17], elf[ph2+18], elf[ph2+19],
-            elf[ph2+20], elf[ph2+21], elf[ph2+22], elf[ph2+23],
-        ]);
-        // BSS vaddr should be page-aligned and after the text segment
-        assert_eq!(bss_vaddr % 0x1000, 0, "BSS vaddr should be page-aligned");
-        assert!(bss_vaddr > 0x401000, "BSS should be after text segment");
+        let bss_vaddr = u32::from_le_bytes([elf[ph2+8], elf[ph2+9], elf[ph2+10], elf[ph2+11]]);
+        // BSS vaddr should be 64K-aligned and after the text segment
+        assert_eq!(bss_vaddr % 0x10000, 0, "BSS vaddr should be 64K-aligned");
+        assert!(bss_vaddr > 0x410000, "BSS should be after text segment");
     }
 
     // ── Backend Trait Dispatch Test ─────────────────────────────────────
