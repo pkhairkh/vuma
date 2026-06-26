@@ -2080,7 +2080,11 @@ fn convert_node_to_statement_with_externs(
         NodePayload::VTable(_) | NodePayload::ClosureEnv(_) => Vec::new(),
 
         NodePayload::StructDef(_) | NodePayload::EnumDef(_) | NodePayload::Match(_)
-        | NodePayload::ConstantTime(_) => Vec::new(),
+        | NodePayload::ConstantTime(_)
+        | NodePayload::ConceptDecl(_) | NodePayload::ConceptField(_) | NodePayload::ConceptAccess(_)
+        | NodePayload::GestaltDecl(_) | NodePayload::GestaltInterpret(_) | NodePayload::ContextAssert(_)
+        | NodePayload::ManifoldDecl(_) | NodePayload::ManifoldQuery(_) | NodePayload::ManifoldSlice(_)
+        | NodePayload::AuraAttach(_) | NodePayload::AuraQuery(_) | NodePayload::AuraUpdate(_) => Vec::new(),
     }
 }
 
