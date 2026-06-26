@@ -3061,6 +3061,15 @@ impl IRBuilder {
         match stmt {
             ScgStatement::Computation(c) => {
                 defs.insert(c.dst.clone());
+                // Also add the user-visible variable name (from reassigns)
+                // so the topological sort sees the dependency between a
+                // Computation that defines a user variable and a later
+                // Computation that references it by that user name.
+                // Without this, the sort may reorder the Mul after the Add
+                // that uses its result, causing the product to be lost.
+                if let Some(ref name) = c.reassigns {
+                    defs.insert(name.clone());
+                }
                 Self::expr_uses(&c.lhs, &mut uses);
                 Self::expr_uses(&c.rhs, &mut uses);
             }
@@ -3200,8 +3209,15 @@ impl IRBuilder {
 
     /// Collect variable uses from an expression.
     fn expr_uses(expr: &ScgExpr, uses: &mut HashSet<String>) {
-        if let ScgExpr::Var(name) = expr {
-            uses.insert(name.clone());
+        match expr {
+            ScgExpr::Var(name) => {
+                uses.insert(name.clone());
+            }
+            ScgExpr::BinOp { lhs, rhs, .. } => {
+                Self::expr_uses(lhs, uses);
+                Self::expr_uses(rhs, uses);
+            }
+            _ => {}
         }
     }
 }
