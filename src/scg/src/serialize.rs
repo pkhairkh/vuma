@@ -27,11 +27,14 @@
 use crate::edge::{EdgeData, EdgeId, EdgeKind};
 use crate::graph::SCG;
 use crate::node::{
-    AccessMode, AccessNode, AllocationNode, BDReference, CastNode, ClosureEnvNode, ComputationKind,
-    ComputationNode,
-    ConstantTimeNode, ConstantTimeOp, ControlKind, ControlNode, DeallocationNode, EffectNode,
-    EnumDefNode, EnumVariantInfo, MatchArmInfo, MatchNode, MatchPatternInfo, NodeData, NodeId,
-    NodePayload, NodeType, PhantomNode, ProgramPoint, StructDefNode, StructFieldInfo, VTableNode,
+    AccessMode, AccessNode, AllocationNode, AuraAttachNode, AuraField, AuraQueryNode,
+    AuraUpdateNode, BDReference, CastNode, ClosureEnvNode, ComputationKind, ComputationNode,
+    ConceptAccessNode, ConceptDeclNode, ConceptFieldNode, ConceptLayoutHint,
+    ConstantTimeNode, ConstantTimeOp, ContextAssertNode, ControlKind, ControlNode,
+    DeallocationNode, EffectNode, EnumDefNode, EnumVariantInfo, GestaltDeclNode,
+    GestaltInterpretNode, ManifoldDeclNode, ManifoldQueryNode, ManifoldSliceNode, MatchArmInfo,
+    MatchNode, MatchPatternInfo, NodeData, NodeId, NodePayload, NodeType, PhantomNode,
+    ProgramPoint, SpaceFillingCurve, StructDefNode, StructFieldInfo, VTableNode,
 };
 use crate::region::{DeploymentTarget, RegionId, SCGRegion};
 
@@ -62,6 +65,19 @@ const NODE_TYPE_STRUCT_DEF: u32 = 10;
 const NODE_TYPE_ENUM_DEF: u32 = 11;
 const NODE_TYPE_MATCH: u32 = 12;
 const NODE_TYPE_CONSTANT_TIME: u32 = 13;
+// Womb data models
+const NODE_TYPE_CONCEPT_DECL: u32 = 14;
+const NODE_TYPE_CONCEPT_FIELD: u32 = 15;
+const NODE_TYPE_CONCEPT_ACCESS: u32 = 16;
+const NODE_TYPE_GESTALT_DECL: u32 = 17;
+const NODE_TYPE_GESTALT_INTERPRET: u32 = 18;
+const NODE_TYPE_CONTEXT_ASSERT: u32 = 19;
+const NODE_TYPE_MANIFOLD_DECL: u32 = 20;
+const NODE_TYPE_MANIFOLD_QUERY: u32 = 21;
+const NODE_TYPE_MANIFOLD_SLICE: u32 = 22;
+const NODE_TYPE_AURA_ATTACH: u32 = 23;
+const NODE_TYPE_AURA_QUERY: u32 = 24;
+const NODE_TYPE_AURA_UPDATE: u32 = 25;
 
 const EDGE_KIND_DATA_FLOW: u32 = 0;
 const EDGE_KIND_CONTROL_FLOW: u32 = 1;
@@ -359,6 +375,18 @@ fn node_type_to_tag(nt: &NodeType) -> u32 {
         NodeType::EnumDef => NODE_TYPE_ENUM_DEF,
         NodeType::Match => NODE_TYPE_MATCH,
         NodeType::ConstantTime => NODE_TYPE_CONSTANT_TIME,
+        NodeType::ConceptDecl => NODE_TYPE_CONCEPT_DECL,
+        NodeType::ConceptField => NODE_TYPE_CONCEPT_FIELD,
+        NodeType::ConceptAccess => NODE_TYPE_CONCEPT_ACCESS,
+        NodeType::GestaltDecl => NODE_TYPE_GESTALT_DECL,
+        NodeType::GestaltInterpret => NODE_TYPE_GESTALT_INTERPRET,
+        NodeType::ContextAssert => NODE_TYPE_CONTEXT_ASSERT,
+        NodeType::ManifoldDecl => NODE_TYPE_MANIFOLD_DECL,
+        NodeType::ManifoldQuery => NODE_TYPE_MANIFOLD_QUERY,
+        NodeType::ManifoldSlice => NODE_TYPE_MANIFOLD_SLICE,
+        NodeType::AuraAttach => NODE_TYPE_AURA_ATTACH,
+        NodeType::AuraQuery => NODE_TYPE_AURA_QUERY,
+        NodeType::AuraUpdate => NODE_TYPE_AURA_UPDATE,
     }
 }
 
@@ -942,6 +970,120 @@ fn write_payload(w: &mut BinaryWriter, payload: &NodePayload) {
                 w.write_string(op);
             }
         }
+        // Womb data models — serialize as name + basic fields
+        NodePayload::ConceptDecl(c) => {
+            w.write_u32_le(NODE_TYPE_CONCEPT_DECL);
+            w.write_string(&c.name);
+            w.write_u64_le(c.field_names.len() as u64);
+            for f in &c.field_names { w.write_string(f); }
+            w.write_u64_le(c.region_id.as_u64());
+            w.write_u64_le(c.resolved_size);
+            w.write_u64_le(c.resolved_align);
+            w.write_u8(if c.layout_resolved { 1 } else { 0 });
+        }
+        NodePayload::ConceptField(c) => {
+            w.write_u32_le(NODE_TYPE_CONCEPT_FIELD);
+            w.write_string(&c.name);
+            w.write_string(&c.concept_name);
+            w.write_optional_string(&c.repd);
+            w.write_u64_le(c.access_count);
+        }
+        NodePayload::ConceptAccess(c) => {
+            w.write_u32_le(NODE_TYPE_CONCEPT_ACCESS);
+            w.write_string(&c.base_ptr);
+            w.write_string(&c.concept_name);
+            w.write_string(&c.field_name);
+            w.write_string(&c.result_var);
+            w.write_u8(if c.is_write { 1 } else { 0 });
+        }
+        NodePayload::GestaltDecl(g) => {
+            w.write_u32_le(NODE_TYPE_GESTALT_DECL);
+            w.write_string(&g.name);
+            w.write_u64_le(g.variants.len() as u64);
+            for v in &g.variants { w.write_string(v); }
+            w.write_u64_le(g.max_size);
+            w.write_u64_le(g.max_align);
+            w.write_u8(if g.degraded { 1 } else { 0 });
+        }
+        NodePayload::GestaltInterpret(g) => {
+            w.write_u32_le(NODE_TYPE_GESTALT_INTERPRET);
+            w.write_string(&g.base_ptr);
+            w.write_string(&g.gestalt_name);
+            w.write_string(&g.variant_name);
+            w.write_string(&g.result_var);
+            w.write_u8(if g.proven_safe { 1 } else { 0 });
+            w.write_u8(if g.requires_tag_check { 1 } else { 0 });
+        }
+        NodePayload::ContextAssert(c) => {
+            w.write_u32_le(NODE_TYPE_CONTEXT_ASSERT);
+            w.write_string(&c.gestalt_name);
+            w.write_string(&c.variant_name);
+            w.write_string(&c.base_ptr);
+            w.write_string(&c.proof_condition);
+        }
+        NodePayload::ManifoldDecl(m) => {
+            w.write_u32_le(NODE_TYPE_MANIFOLD_DECL);
+            w.write_string(&m.name);
+            w.write_u32_le(m.dimensions);
+            w.write_u64_le(m.dim_sizes.len() as u64);
+            for d in &m.dim_sizes { w.write_u64_le(*d); }
+            w.write_u64_le(m.element_size);
+            w.write_u64_le(m.total_bytes);
+            w.write_u32_le(match m.curve {
+                SpaceFillingCurve::ZOrder => 0,
+                SpaceFillingCurve::Hilbert => 1,
+                SpaceFillingCurve::RowMajor => 2,
+            });
+        }
+        NodePayload::ManifoldQuery(m) => {
+            w.write_u32_le(NODE_TYPE_MANIFOLD_QUERY);
+            w.write_string(&m.base_ptr);
+            w.write_string(&m.manifold_name);
+            w.write_u64_le(m.coordinates.len() as u64);
+            for c in &m.coordinates { w.write_string(c); }
+            w.write_string(&m.result_var);
+            w.write_u8(if m.is_write { 1 } else { 0 });
+        }
+        NodePayload::ManifoldSlice(m) => {
+            w.write_u32_le(NODE_TYPE_MANIFOLD_SLICE);
+            w.write_string(&m.src_ptr);
+            w.write_string(&m.manifold_name);
+            w.write_u64_le(m.start_coords.len() as u64);
+            for c in &m.start_coords { w.write_string(c); }
+            for c in &m.end_coords { w.write_string(c); }
+            w.write_string(&m.result_ptr);
+        }
+        NodePayload::AuraAttach(a) => {
+            w.write_u32_le(NODE_TYPE_AURA_ATTACH);
+            w.write_string(&a.base_ptr);
+            w.write_u64_le(a.schema_hash);
+            w.write_u32_le(a.version);
+            w.write_u64_le(a.bounds_size);
+            w.write_string(&a.schema_name);
+            w.write_string(&a.result_ptr);
+        }
+        NodePayload::AuraQuery(a) => {
+            w.write_u32_le(NODE_TYPE_AURA_QUERY);
+            w.write_string(&a.ptr);
+            w.write_u32_le(match a.field {
+                AuraField::SchemaHash => 0,
+                AuraField::Version => 1,
+                AuraField::BoundsSize => 2,
+                AuraField::SchemaName => 3,
+            });
+            w.write_string(&a.result_var);
+        }
+        NodePayload::AuraUpdate(a) => {
+            w.write_u32_le(NODE_TYPE_AURA_UPDATE);
+            w.write_string(&a.ptr);
+            w.write_u32_le(match a.field {
+                AuraField::SchemaHash => 0,
+                AuraField::Version => 1,
+                AuraField::BoundsSize => 2,
+                AuraField::SchemaName => 3,
+            });
+            w.write_string(&a.value);
+        }
     }
 }
 
@@ -1208,6 +1350,151 @@ fn read_payload(
                 dst,
                 operands,
             }))
+        }
+        // Womb data models — deserialize
+        NodeType::ConceptDecl => {
+            let name = reader.read_string(&format!("{}.name", context))?;
+            let field_count = reader.read_u64_le(&format!("{}.field_count", context))?;
+            let mut field_names = Vec::with_capacity(field_count as usize);
+            for i in 0..field_count as usize {
+                field_names.push(reader.read_string(&format!("{}.field[{}]", context, i))?);
+            }
+            let region_id = RegionId::new(reader.read_u64_le(&format!("{}.region_id", context))?);
+            let resolved_size = reader.read_u64_le(&format!("{}.resolved_size", context))?;
+            let resolved_align = reader.read_u64_le(&format!("{}.resolved_align", context))?;
+            let layout_resolved = reader.read_u8(&format!("{}.layout_resolved", context))? != 0;
+            Ok(NodePayload::ConceptDecl(ConceptDeclNode {
+                name, field_names, region_id, layout_hint: ConceptLayoutHint::Auto,
+                layout_resolved, resolved_offsets: Vec::new(), resolved_size, resolved_align,
+            }))
+        }
+        NodeType::ConceptField => {
+            let name = reader.read_string(&format!("{}.name", context))?;
+            let concept_name = reader.read_string(&format!("{}.concept_name", context))?;
+            let repd = reader.read_optional_string(&format!("{}.repd", context))?;
+            let access_count = reader.read_u64_le(&format!("{}.access_count", context))?;
+            Ok(NodePayload::ConceptField(ConceptFieldNode {
+                name, concept_name, repd, access_count, independent_access: false, co_accessed: false,
+            }))
+        }
+        NodeType::ConceptAccess => {
+            let base_ptr = reader.read_string(&format!("{}.base_ptr", context))?;
+            let concept_name = reader.read_string(&format!("{}.concept_name", context))?;
+            let field_name = reader.read_string(&format!("{}.field_name", context))?;
+            let result_var = reader.read_string(&format!("{}.result_var", context))?;
+            let is_write = reader.read_u8(&format!("{}.is_write", context))? != 0;
+            Ok(NodePayload::ConceptAccess(ConceptAccessNode {
+                base_ptr, concept_name, field_name, result_var, is_write,
+                resolved_offset: None, access_size: None,
+            }))
+        }
+        NodeType::GestaltDecl => {
+            let name = reader.read_string(&format!("{}.name", context))?;
+            let variant_count = reader.read_u64_le(&format!("{}.variant_count", context))?;
+            let mut variants = Vec::with_capacity(variant_count as usize);
+            for i in 0..variant_count as usize {
+                variants.push(reader.read_string(&format!("{}.variant[{}]", context, i))?);
+            }
+            let max_size = reader.read_u64_le(&format!("{}.max_size", context))?;
+            let max_align = reader.read_u64_le(&format!("{}.max_align", context))?;
+            let degraded = reader.read_u8(&format!("{}.degraded", context))? != 0;
+            Ok(NodePayload::GestaltDecl(GestaltDeclNode {
+                name, variants, max_size, max_align, degraded, tag_offset: None,
+            }))
+        }
+        NodeType::GestaltInterpret => {
+            let base_ptr = reader.read_string(&format!("{}.base_ptr", context))?;
+            let gestalt_name = reader.read_string(&format!("{}.gestalt_name", context))?;
+            let variant_name = reader.read_string(&format!("{}.variant_name", context))?;
+            let result_var = reader.read_string(&format!("{}.result_var", context))?;
+            let proven_safe = reader.read_u8(&format!("{}.proven_safe", context))? != 0;
+            let requires_tag_check = reader.read_u8(&format!("{}.requires_tag_check", context))? != 0;
+            Ok(NodePayload::GestaltInterpret(GestaltInterpretNode {
+                base_ptr, gestalt_name, variant_name, result_var, proven_safe, requires_tag_check,
+            }))
+        }
+        NodeType::ContextAssert => {
+            let gestalt_name = reader.read_string(&format!("{}.gestalt_name", context))?;
+            let variant_name = reader.read_string(&format!("{}.variant_name", context))?;
+            let base_ptr = reader.read_string(&format!("{}.base_ptr", context))?;
+            let proof_condition = reader.read_string(&format!("{}.proof_condition", context))?;
+            Ok(NodePayload::ContextAssert(ContextAssertNode {
+                gestalt_name, variant_name, base_ptr, proof_condition,
+            }))
+        }
+        NodeType::ManifoldDecl => {
+            let name = reader.read_string(&format!("{}.name", context))?;
+            let dimensions = reader.read_u32_le(&format!("{}.dimensions", context))?;
+            let dim_count = reader.read_u64_le(&format!("{}.dim_count", context))?;
+            let mut dim_sizes = Vec::with_capacity(dim_count as usize);
+            for i in 0..dim_count as usize {
+                dim_sizes.push(reader.read_u64_le(&format!("{}.dim[{}]", context, i))?);
+            }
+            let element_size = reader.read_u64_le(&format!("{}.element_size", context))?;
+            let total_bytes = reader.read_u64_le(&format!("{}.total_bytes", context))?;
+            let curve_tag = reader.read_u32_le(&format!("{}.curve", context))?;
+            let curve = match curve_tag { 0 => SpaceFillingCurve::ZOrder, 1 => SpaceFillingCurve::Hilbert, _ => SpaceFillingCurve::RowMajor };
+            let total_elements = dim_sizes.iter().product();
+            Ok(NodePayload::ManifoldDecl(ManifoldDeclNode {
+                name, dimensions, dim_sizes, element_size, total_elements, total_bytes, curve, locality_hints: Vec::new(),
+            }))
+        }
+        NodeType::ManifoldQuery => {
+            let base_ptr = reader.read_string(&format!("{}.base_ptr", context))?;
+            let manifold_name = reader.read_string(&format!("{}.manifold_name", context))?;
+            let coord_count = reader.read_u64_le(&format!("{}.coord_count", context))?;
+            let mut coordinates = Vec::with_capacity(coord_count as usize);
+            for i in 0..coord_count as usize {
+                coordinates.push(reader.read_string(&format!("{}.coord[{}]", context, i))?);
+            }
+            let result_var = reader.read_string(&format!("{}.result_var", context))?;
+            let is_write = reader.read_u8(&format!("{}.is_write", context))? != 0;
+            let value = if is_write { Some(reader.read_string(&format!("{}.value", context))?) } else { None };
+            Ok(NodePayload::ManifoldQuery(ManifoldQueryNode {
+                base_ptr, manifold_name, coordinates, result_var, is_write, value,
+            }))
+        }
+        NodeType::ManifoldSlice => {
+            let src_ptr = reader.read_string(&format!("{}.src_ptr", context))?;
+            let manifold_name = reader.read_string(&format!("{}.manifold_name", context))?;
+            let coord_count = reader.read_u64_le(&format!("{}.coord_count", context))?;
+            let mut start_coords = Vec::with_capacity(coord_count as usize);
+            let mut end_coords = Vec::with_capacity(coord_count as usize);
+            for i in 0..coord_count as usize {
+                start_coords.push(reader.read_string(&format!("{}.start[{}]", context, i))?);
+            }
+            for i in 0..coord_count as usize {
+                end_coords.push(reader.read_string(&format!("{}.end[{}]", context, i))?);
+            }
+            let result_ptr = reader.read_string(&format!("{}.result_ptr", context))?;
+            Ok(NodePayload::ManifoldSlice(ManifoldSliceNode {
+                src_ptr, manifold_name, start_coords, end_coords, result_ptr,
+            }))
+        }
+        NodeType::AuraAttach => {
+            let base_ptr = reader.read_string(&format!("{}.base_ptr", context))?;
+            let schema_hash = reader.read_u64_le(&format!("{}.schema_hash", context))?;
+            let version = reader.read_u32_le(&format!("{}.version", context))?;
+            let bounds_size = reader.read_u64_le(&format!("{}.bounds_size", context))?;
+            let schema_name = reader.read_string(&format!("{}.schema_name", context))?;
+            let result_ptr = reader.read_string(&format!("{}.result_ptr", context))?;
+            Ok(NodePayload::AuraAttach(AuraAttachNode {
+                base_ptr, schema_hash, version, bounds_size, schema_name, result_ptr,
+            }))
+        }
+        NodeType::AuraQuery => {
+            let ptr = reader.read_string(&format!("{}.ptr", context))?;
+            let field_tag = reader.read_u32_le(&format!("{}.field", context))?;
+            let field = match field_tag { 0 => AuraField::SchemaHash, 1 => AuraField::Version, 2 => AuraField::BoundsSize, _ => AuraField::SchemaName };
+            let result_var = reader.read_string(&format!("{}.result_var", context))?;
+            Ok(NodePayload::AuraQuery(AuraQueryNode { ptr, field, result_var }))
+        }
+        NodeType::AuraUpdate => {
+            let ptr = reader.read_string(&format!("{}.ptr", context))?;
+            let field_tag = reader.read_u32_le(&format!("{}.field", context))?;
+            let field = match field_tag { 0 => AuraField::SchemaHash, 1 => AuraField::Version, 2 => AuraField::BoundsSize, _ => AuraField::SchemaName };
+            let value = reader.read_string(&format!("{}.value", context))?;
+            Ok(NodePayload::AuraUpdate(AuraUpdateNode { ptr, field, value }))
         }
     }
 }
@@ -1532,6 +1819,18 @@ fn format_node_label(node: &NodeData) -> String {
         NodePayload::EnumDef(e) => format!("enum_def({})", e.name),
         NodePayload::Match(m) => format!("match({})", m.subject),
         NodePayload::ConstantTime(ct) => format!("ct_{:?}", ct.op),
+        NodePayload::ConceptDecl(c) => format!("concept_decl({})", c.name),
+        NodePayload::ConceptField(c) => format!("concept_field({}.{})", c.concept_name, c.name),
+        NodePayload::ConceptAccess(c) => format!("concept_access({}.{})", c.concept_name, c.field_name),
+        NodePayload::GestaltDecl(g) => format!("gestalt_decl({})", g.name),
+        NodePayload::GestaltInterpret(g) => format!("gestalt_interp({}.{})", g.gestalt_name, g.variant_name),
+        NodePayload::ContextAssert(c) => format!("context_assert({}.{})", c.gestalt_name, c.variant_name),
+        NodePayload::ManifoldDecl(m) => format!("manifold_decl({})", m.name),
+        NodePayload::ManifoldQuery(m) => format!("manifold_query({})", m.manifold_name),
+        NodePayload::ManifoldSlice(m) => format!("manifold_slice({})", m.manifold_name),
+        NodePayload::AuraAttach(a) => format!("aura_attach({})", a.schema_name),
+        NodePayload::AuraQuery(a) => format!("aura_query({:?})", a.field),
+        NodePayload::AuraUpdate(a) => format!("aura_update({:?})", a.field),
     };
 
     let ann = node
