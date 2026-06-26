@@ -2196,7 +2196,7 @@ fn convert_computation_node(
             let lhs = resolve_subexpr(&lhs_str, &sources, edge_idx, scg);
             let rhs = resolve_subexpr(&rhs_str, &sources, edge_idx, scg);
             call_stmts.push(ScgStatement::Computation(ComputationNode {
-                dst: computation_dst_from_label(node_id, &label_no_calls, scg),
+                dst: computation_dst(node_id, &label_no_calls, scg),
                 op,
                 lhs,
                 rhs,
@@ -2209,7 +2209,7 @@ fn convert_computation_node(
         // No top-level operator: emit a copy (Add(0, rhs))
         let rhs_expr = resolve_subexpr(&expr_str, &sources, edge_idx, scg);
         call_stmts.push(ScgStatement::Computation(ComputationNode {
-            dst: computation_dst_from_label(node_id, &label_no_calls, scg),
+            dst: computation_dst(node_id, &label_no_calls, scg),
             op: IrBinOpKind::Add,
             lhs: ScgExpr::Int(0),
             rhs: rhs_expr,
