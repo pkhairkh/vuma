@@ -64,9 +64,13 @@ pub mod transform;
 
 // -- Node types --
 pub use node::{
-    AccessMode, AccessNode, AllocationNode, BDReference, CastNode, ClosureEnvNode, ComputationKind,
-    ComputationNode, ControlKind, ControlNode, DeallocationNode, EffectNode, NodeData, NodeId,
-    NodePayload, NodeType, PhantomNode, ProgramPoint, VTableNode,
+    AccessMode, AccessNode, AllocationNode, AuraAttachNode, AuraField, AuraQueryNode,
+    AuraUpdateNode, BDReference, CastNode, ClosureEnvNode, ComputationKind, ComputationNode,
+    ConceptAccessNode, ConceptDeclNode, ConceptFieldNode, ConceptLayoutHint,
+    ConstantTimeNode, ConstantTimeOp, ContextAssertNode, ControlKind, ControlNode,
+    DeallocationNode, EffectNode, GestaltDeclNode, GestaltInterpretNode, ManifoldDeclNode,
+    ManifoldQueryNode, ManifoldSliceNode, NodeData, NodeId, NodePayload, NodeType, PhantomNode,
+    ProgramPoint, SpaceFillingCurve, VTableNode,
 };
 
 // -- Edge types --

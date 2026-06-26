@@ -397,6 +397,13 @@ impl BDInferenceEngine {
                 // VTable and ClosureEnv nodes inherit BD from their inputs
                 self.compute_phantom_bd(scg, node_id, bd_map)
             }
+            // Womb data models — inherit BD from inputs (phantom-like)
+            NodeType::ConceptDecl | NodeType::ConceptField | NodeType::ConceptAccess
+            | NodeType::GestaltDecl | NodeType::GestaltInterpret | NodeType::ContextAssert
+            | NodeType::ManifoldDecl | NodeType::ManifoldQuery | NodeType::ManifoldSlice
+            | NodeType::AuraAttach | NodeType::AuraQuery | NodeType::AuraUpdate => {
+                self.compute_phantom_bd(scg, node_id, bd_map)
+            }
         }
     }
 
@@ -864,6 +871,11 @@ impl BDInferenceEngine {
             NodeType::Control => Some(UsageContext::Argument),
             NodeType::Phantom => None,
             NodeType::VTable | NodeType::ClosureEnv | NodeType::StructDef | NodeType::EnumDef | NodeType::Match | NodeType::ConstantTime => None,
+            // Womb data models
+            NodeType::ConceptDecl | NodeType::ConceptField | NodeType::ConceptAccess
+            | NodeType::GestaltDecl | NodeType::GestaltInterpret | NodeType::ContextAssert
+            | NodeType::ManifoldDecl | NodeType::ManifoldQuery | NodeType::ManifoldSlice
+            | NodeType::AuraAttach | NodeType::AuraQuery | NodeType::AuraUpdate => None,
         }
     }
 

@@ -164,6 +164,18 @@ fn node_label(node: &vuma_scg::NodeData) -> String {
         NodePayload::EnumDef(e) => format!("enum {}", e.name),
         NodePayload::Match(m) => format!("match({})", m.subject),
         NodePayload::ConstantTime(ct) => format!("ct_{:?}", ct.op),
+        NodePayload::ConceptDecl(c) => format!("concept {}", c.name),
+        NodePayload::ConceptField(c) => format!("field {}.{}", c.concept_name, c.name),
+        NodePayload::ConceptAccess(c) => format!("access {}.{}", c.concept_name, c.field_name),
+        NodePayload::GestaltDecl(g) => format!("gestalt {}", g.name),
+        NodePayload::GestaltInterpret(g) => format!("interp {}.{}", g.gestalt_name, g.variant_name),
+        NodePayload::ContextAssert(c) => format!("assert {}.{}", c.gestalt_name, c.variant_name),
+        NodePayload::ManifoldDecl(m) => format!("manifold {}", m.name),
+        NodePayload::ManifoldQuery(m) => format!("query {}", m.manifold_name),
+        NodePayload::ManifoldSlice(m) => format!("slice {}", m.manifold_name),
+        NodePayload::AuraAttach(a) => format!("aura+{}", a.schema_name),
+        NodePayload::AuraQuery(a) => format!("aura?{:?}", a.field),
+        NodePayload::AuraUpdate(a) => format!("aura={:?}", a.field),
     }
 }
 

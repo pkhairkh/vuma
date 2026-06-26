@@ -67,6 +67,37 @@ pub enum NodeType {
     Match,
     /// A constant-time security operation node (ct_select, ct_eq).
     ConstantTime,
+    // ═══════════════════════════════════════════════════════════════════
+    // WOMB DATA MODELS — LLM-native replacements for structs/unions/arrays
+    // ═══════════════════════════════════════════════════════════════════
+    /// A Concept declaration (replaces struct). Fields are relational edges,
+    /// not fixed offsets. Layout is lazily inferred by the IVE.
+    ConceptDecl,
+    /// A field within a Concept. Connected to its ConceptDecl via RelD edges.
+    ConceptField,
+    /// An access to a Concept field. Triggers layout resolution.
+    ConceptAccess,
+    /// A Gestalt declaration (replaces union/enum). Tagless superposition
+    /// with proof-based interpretation.
+    GestaltDecl,
+    /// An interpretation of a Gestalt as a specific variant.
+    /// The IVE must prove the context guarantees this variant.
+    GestaltInterpret,
+    /// A context assertion used by the IVE to prove Gestalt safety.
+    ContextAssert,
+    /// A Manifold declaration (replaces arrays/tensors). Multi-dimensional
+    /// spatial data with space-filling curve memory layout.
+    ManifoldDecl,
+    /// A query into a Manifold (N-dimensional coordinate → value).
+    ManifoldQuery,
+    /// A slice of a Manifold (sub-region extraction).
+    ManifoldSlice,
+    /// Attaches Aura metadata to a Concept or Manifold.
+    AuraAttach,
+    /// Queries Aura metadata at runtime.
+    AuraQuery,
+    /// Updates Aura metadata.
+    AuraUpdate,
 }
 
 impl std::fmt::Display for NodeType {
@@ -86,6 +117,18 @@ impl std::fmt::Display for NodeType {
             NodeType::EnumDef => write!(f, "EnumDef"),
             NodeType::Match => write!(f, "Match"),
             NodeType::ConstantTime => write!(f, "ConstantTime"),
+            NodeType::ConceptDecl => write!(f, "ConceptDecl"),
+            NodeType::ConceptField => write!(f, "ConceptField"),
+            NodeType::ConceptAccess => write!(f, "ConceptAccess"),
+            NodeType::GestaltDecl => write!(f, "GestaltDecl"),
+            NodeType::GestaltInterpret => write!(f, "GestaltInterpret"),
+            NodeType::ContextAssert => write!(f, "ContextAssert"),
+            NodeType::ManifoldDecl => write!(f, "ManifoldDecl"),
+            NodeType::ManifoldQuery => write!(f, "ManifoldQuery"),
+            NodeType::ManifoldSlice => write!(f, "ManifoldSlice"),
+            NodeType::AuraAttach => write!(f, "AuraAttach"),
+            NodeType::AuraQuery => write!(f, "AuraQuery"),
+            NodeType::AuraUpdate => write!(f, "AuraUpdate"),
         }
     }
 }
@@ -170,6 +213,33 @@ pub enum NodePayload {
     Match(MatchNode),
     /// Payload for `NodeType::ConstantTime`.
     ConstantTime(ConstantTimeNode),
+    // ═══════════════════════════════════════════════════════════════════
+    // WOMB DATA MODELS
+    // ═══════════════════════════════════════════════════════════════════
+    /// Payload for `NodeType::ConceptDecl`.
+    ConceptDecl(ConceptDeclNode),
+    /// Payload for `NodeType::ConceptField`.
+    ConceptField(ConceptFieldNode),
+    /// Payload for `NodeType::ConceptAccess`.
+    ConceptAccess(ConceptAccessNode),
+    /// Payload for `NodeType::GestaltDecl`.
+    GestaltDecl(GestaltDeclNode),
+    /// Payload for `NodeType::GestaltInterpret`.
+    GestaltInterpret(GestaltInterpretNode),
+    /// Payload for `NodeType::ContextAssert`.
+    ContextAssert(ContextAssertNode),
+    /// Payload for `NodeType::ManifoldDecl`.
+    ManifoldDecl(ManifoldDeclNode),
+    /// Payload for `NodeType::ManifoldQuery`.
+    ManifoldQuery(ManifoldQueryNode),
+    /// Payload for `NodeType::ManifoldSlice`.
+    ManifoldSlice(ManifoldSliceNode),
+    /// Payload for `NodeType::AuraAttach`.
+    AuraAttach(AuraAttachNode),
+    /// Payload for `NodeType::AuraQuery`.
+    AuraQuery(AuraQueryNode),
+    /// Payload for `NodeType::AuraUpdate`.
+    AuraUpdate(AuraUpdateNode),
 }
 
 /// The kind of computation performed by a [`ComputationNode`].
@@ -600,13 +670,272 @@ pub struct ConstantTimeNode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ConstantTimeOp {
     /// Constant-time conditional select: `ct_select(cond, a, b)`.
-    /// Returns `a` if `cond != 0`, else `b`, without branching.
-    /// Lowered to: `(a & mask) | (b & ~mask)` where `mask = -(cond != 0)`.
     CtSelect,
     /// Constant-time equality check: `ct_eq(a, b)`.
-    /// Returns 1 if `a == b`, else 0, without branching.
-    /// Lowered to: constant-time comparison using XOR.
     CtEq,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MODEL 1: Concept — Relational data with lazy layout inference
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// A Concept declaration. Fields are NOT laid out in memory until the IVE
+/// resolves the access patterns. The Concept is a set of relational edges,
+/// not a rigid memory block.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConceptDeclNode {
+    /// User-visible name of the Concept (e.g., "Point", "Entity").
+    pub name: String,
+    /// Names of the fields, in declaration order. The actual byte offsets
+    /// are resolved lazily by the LayoutResolutionPass.
+    pub field_names: Vec<String>,
+    /// The region ID where instances of this Concept will be allocated.
+    pub region_id: crate::region::RegionId,
+    /// Layout strategy hint. The IVE may override this based on access patterns.
+    pub layout_hint: ConceptLayoutHint,
+    /// Set to true once the IVE has resolved the physical layout.
+    pub layout_resolved: bool,
+    /// Resolved byte offsets for each field (populated by LayoutResolutionPass).
+    pub resolved_offsets: Vec<(String, u64)>,
+    /// Total resolved size in bytes (0 until layout_resolved).
+    pub resolved_size: u64,
+    /// Resolved alignment requirement (0 until layout_resolved).
+    pub resolved_align: u64,
+}
+
+/// Layout strategy for a Concept.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ConceptLayoutHint {
+    /// Array of Structs (AoS) — fields packed together. Best when fields
+    /// are accessed together.
+    AoS,
+    /// Struct of Arrays (SoA) — each field in a separate array. Best when
+    /// fields are accessed independently in loops.
+    SoA,
+    /// Let the IVE decide based on access pattern analysis.
+    Auto,
+}
+
+/// A field within a Concept. Connected to its ConceptDecl via a RelD edge.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConceptFieldNode {
+    /// Name of the field.
+    pub name: String,
+    /// Name of the Concept this field belongs to.
+    pub concept_name: String,
+    /// Behavioral descriptor for the field's value type.
+    /// Initially abstract; resolved during BD inference.
+    pub repd: Option<String>,
+    /// Access frequency counter, used by LayoutResolutionPass to decide
+    /// AoS vs SoA. Incremented on each ConceptAccess.
+    pub access_count: u64,
+    /// True if this field is frequently accessed independently (SoA hint).
+    pub independent_access: bool,
+    /// True if this field is frequently accessed with other fields (AoS hint).
+    pub co_accessed: bool,
+}
+
+/// An access to a Concept field. Triggers layout resolution if not yet done.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConceptAccessNode {
+    /// The variable holding the Concept instance pointer.
+    pub base_ptr: String,
+    /// Name of the Concept type.
+    pub concept_name: String,
+    /// Name of the field being accessed.
+    pub field_name: String,
+    /// Result variable (where the loaded value goes, or value to store).
+    pub result_var: String,
+    /// True for write, false for read.
+    pub is_write: bool,
+    /// Resolved byte offset (populated after layout resolution).
+    pub resolved_offset: Option<u64>,
+    /// Access size in bytes (from the field's RepD).
+    pub access_size: Option<u64>,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MODEL 2: Gestalt — Tagless, context-dependent memory superposition
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// A Gestalt declaration. Memory is superimposed — the same bytes can be
+/// interpreted as different variants depending on context. The IVE proves
+/// which variant is active, eliminating runtime tags when possible.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GestaltDeclNode {
+    /// User-visible name of the Gestalt (e.g., "Message", "Event").
+    pub name: String,
+    /// All possible interpretations (variant names).
+    pub variants: Vec<String>,
+    /// The maximum byte size across all variants (for allocation).
+    pub max_size: u64,
+    /// The strictest alignment across all variants.
+    pub max_align: u64,
+    /// If true, the IVE could not prove all interpretations and has
+    /// injected a hidden 1-byte runtime tag.
+    pub degraded: bool,
+    /// The byte offset of the injected tag (if degraded). Typically 0.
+    pub tag_offset: Option<u64>,
+}
+
+/// An interpretation of a Gestalt as a specific variant.
+/// The IVE must prove the context guarantees this variant is active.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GestaltInterpretNode {
+    /// The variable holding the Gestalt instance pointer.
+    pub base_ptr: String,
+    /// Name of the Gestalt type.
+    pub gestalt_name: String,
+    /// The variant being interpreted as.
+    pub variant_name: String,
+    /// Result variable for the interpreted value.
+    pub result_var: String,
+    /// True if the IVE proved this interpretation is safe (no runtime check).
+    pub proven_safe: bool,
+    /// If degraded and not proven, a runtime tag check is emitted.
+    pub requires_tag_check: bool,
+}
+
+/// A context assertion used by the IVE to prove Gestalt safety.
+/// These are inserted by the compiler at branch points where the active
+/// variant becomes known (e.g., after a match or if-else).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ContextAssertNode {
+    /// Name of the Gestalt being asserted.
+    pub gestalt_name: String,
+    /// The variant asserted to be active.
+    pub variant_name: String,
+    /// The variable holding the Gestalt instance.
+    pub base_ptr: String,
+    /// A string representation of the proof condition.
+    pub proof_condition: String,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MODEL 3: Manifold — Multi-dimensional spatial data with space-filling curves
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// A Manifold declaration. Multi-dimensional data where memory layout
+/// uses space-filling curves (Z-order or Hilbert) for cache locality.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ManifoldDeclNode {
+    /// User-visible name of the Manifold (e.g., "Grid", "Tensor").
+    pub name: String,
+    /// Number of dimensions (e.g., 2 for a matrix, 3 for a volume).
+    pub dimensions: u32,
+    /// Size of each dimension (e.g., [4, 4] for a 4×4 grid).
+    pub dim_sizes: Vec<u64>,
+    /// Element size in bytes (e.g., 4 for u32).
+    pub element_size: u64,
+    /// Total number of elements (product of dim_sizes).
+    pub total_elements: u64,
+    /// Total buffer size in bytes.
+    pub total_bytes: u64,
+    /// The space-filling curve used for memory layout.
+    pub curve: SpaceFillingCurve,
+    /// Locality hints: which dimensions are frequently queried together.
+    /// E.g., [(0, 1)] means dim 0 and dim 1 are co-queried.
+    pub locality_hints: Vec<(u32, u32)>,
+}
+
+/// Space-filling curve type for Manifold memory layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SpaceFillingCurve {
+    /// Z-order (Morton) curve — simplest, good cache locality for 2D.
+    ZOrder,
+    /// Hilbert curve — better locality than Z-order, more complex to compute.
+    Hilbert,
+    /// Row-major (standard) — for backward compatibility with plain arrays.
+    RowMajor,
+}
+
+/// A query into a Manifold: given N-dimensional coordinates, load a value.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ManifoldQueryNode {
+    /// The variable holding the Manifold base pointer.
+    pub base_ptr: String,
+    /// Name of the Manifold type.
+    pub manifold_name: String,
+    /// Coordinate values (one per dimension).
+    pub coordinates: Vec<String>,
+    /// Result variable for the loaded value.
+    pub result_var: String,
+    /// True for write, false for read.
+    pub is_write: bool,
+    /// The value to store (if write).
+    pub value: Option<String>,
+}
+
+/// A slice of a Manifold: extract a sub-region.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ManifoldSliceNode {
+    /// The variable holding the source Manifold base pointer.
+    pub src_ptr: String,
+    /// Name of the Manifold type.
+    pub manifold_name: String,
+    /// Start coordinate for each dimension.
+    pub start_coords: Vec<String>,
+    /// End coordinate for each dimension.
+    pub end_coords: Vec<String>,
+    /// Result variable for the new Manifold (sub-region).
+    pub result_ptr: String,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MODEL 4: Aura — Self-describing metadata for runtime introspection
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Attaches Aura metadata to a Concept or Manifold. The metadata is stored
+/// in a hidden header before the base pointer.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AuraAttachNode {
+    /// The variable holding the base pointer (Concept or Manifold).
+    pub base_ptr: String,
+    /// Schema hash — identifies the structure of the metadata.
+    pub schema_hash: u64,
+    /// Schema version — for forward/backward compatibility.
+    pub version: u32,
+    /// Total size of the base allocation (for bounds checking).
+    pub bounds_size: u64,
+    /// Name of the metadata schema (for debugging/introspection).
+    pub schema_name: String,
+    /// Result variable for the new pointer (with Aura header).
+    pub result_ptr: String,
+}
+
+/// Queries Aura metadata at runtime. Returns a value from the AuraHeader.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AuraQueryNode {
+    /// The variable holding the pointer (with Aura header).
+    pub ptr: String,
+    /// What metadata field to query.
+    pub field: AuraField,
+    /// Result variable for the queried value.
+    pub result_var: String,
+}
+
+/// Fields available in the AuraHeader for runtime introspection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum AuraField {
+    /// The schema hash identifying the metadata structure.
+    SchemaHash,
+    /// The schema version number.
+    Version,
+    /// The bounds size of the base allocation.
+    BoundsSize,
+    /// The schema name string (returned as a pointer).
+    SchemaName,
+}
+
+/// Updates Aura metadata at runtime.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AuraUpdateNode {
+    /// The variable holding the pointer (with Aura header).
+    pub ptr: String,
+    /// What metadata field to update.
+    pub field: AuraField,
+    /// The new value.
+    pub value: String,
 }
 
 #[cfg(test)]

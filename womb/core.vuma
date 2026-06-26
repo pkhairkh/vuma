@@ -1,0 +1,191 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/core.vuma — The Womb Standard Library
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// This file demonstrates VUMA's four LLM-native data models:
+//   1. Concept  — Relational data with lazy layout inference (replaces struct)
+//   2. Gestalt  — Tagless, context-dependent superposition (replaces union)
+//   3. Manifold — Multi-dimensional spatial data with space-filling curves
+//   4. Aura     — Self-describing metadata for runtime introspection
+//
+// These models form the foundation of the Womb — VUMA's self-hosted core
+// library. They are designed to be LLM-reasonable: no rigid memory layouts,
+// no runtime tag overhead, no hidden state. The compiler (IVE) proves
+// safety at compile time, enabling zero-overhead abstractions.
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MODEL 1: CONCEPT — Relational Data (replaces struct)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// A Concept is NOT a struct. It does not have fixed byte offsets. Instead,
+// it is a set of relational edges. The compiler analyzes access patterns
+// and lazily decides whether to use Array-of-Structs (AoS) or
+// Struct-of-Arrays (SoA) layout.
+
+concept Entity {
+    id: u64,
+    x: f64,
+    y: f64,
+    health: u32,
+    active: u8,
+}
+
+// Layout hints can be specified explicitly:
+concept Particle @layout(soa) {
+    px: f64,
+    py: f64,
+    pz: f64,
+    velocity: f64,
+    mass: f64,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MODEL 2: GESTALT — Tagless Memory Superposition (replaces union/enum)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// A Gestalt does NOT have a runtime tag. The same memory can be interpreted
+// as different variants depending on context. The IVE proves which variant
+// is active, eliminating runtime checks when possible.
+
+gestalt Message {
+    text: Address,
+    binary: Address,
+    number: u64,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MODEL 3: MANIFOLD — Multi-Dimensional Spatial Data (replaces array)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// A Manifold uses space-filling curves (Z-order or Hilbert) to ensure
+// that semantic neighborhoods are physically contiguous in cache.
+
+manifold Grid {
+    dimensions: [8, 8],
+    element: u32,
+    curve: zorder,
+}
+
+manifold Volume {
+    dimensions: [4, 4, 4],
+    element: f64,
+    curve: hilbert,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MODEL 4: AURA — Self-Describing Metadata
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Opt-in metadata for runtime introspection. Stored in a hidden header
+// BEFORE the base pointer.
+
+aura EntityMeta {
+    schema: "Entity",
+    version: 1,
+    bounds: true,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// COMPLETE EXAMPLE: All Four Models Together
+// ═══════════════════════════════════════════════════════════════════════════
+
+concept Cell {
+    entity_id: u64,
+    energy: u32,
+    neighbor_count: u8,
+}
+
+gestalt CellEvent {
+    spawn: u64,
+    death: u64,
+    transfer: u64,
+}
+
+manifold SimulationGrid {
+    dimensions: [16, 16],
+    element: Address,
+    curve: zorder,
+}
+
+aura SimulationMeta {
+    schema: "Simulation",
+    version: 1,
+    bounds: true,
+}
+
+fn main() -> i32 {
+    // Allocate the simulation grid as a Manifold
+    grid: Address = manifold_alloc(SimulationGrid);
+
+    // Attach Aura metadata for runtime introspection
+    grid = aura_attach(grid, SimulationMeta);
+
+    // Query the Aura to verify attachment
+    hash: u64 = aura_query(grid, SimulationMeta, schema_hash);
+    ver: u32 = aura_query(grid, SimulationMeta, version);
+
+    // Initialize the grid with Cells
+    i: u32 = 0;
+    while i < 16 {
+        j: u32 = 0;
+        while j < 16 {
+            cell: Address = allocate(sizeof(Cell));
+
+            // Write to Concept fields (layout is lazily inferred)
+            concept_set(cell, Cell, entity_id, (i * 16 + j));
+            concept_set(cell, Cell, energy, 100);
+            concept_set(cell, Cell, neighbor_count, 0);
+
+            // Store the cell in the Manifold grid
+            manifold_set(grid, SimulationGrid, [i, j], cell);
+
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+
+    // Create an event message using a Gestalt
+    event_msg: Address = allocate(sizeof(CellEvent));
+
+    // The IVE can prove this interpretation is safe because we just
+    // allocated and haven't interpreted it as anything else yet
+    assert_variant(event_msg, CellEvent, spawn);
+    spawn_id: u64 = interpret(event_msg, CellEvent, spawn);
+    spawn_id = 42;
+
+    // Query a cell from the grid using spatial coordinates
+    center_cell: Address = manifold_query(grid, SimulationGrid, [8, 8]);
+
+    // Read a Concept field
+    cell_energy: u32 = concept_get(center_cell, Cell, energy);
+
+    // Clean up (IVE verifies Aura is properly freed)
+    aura_detach(grid, SimulationMeta);
+    free(grid);
+
+    return cell_energy & 255;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// BUILTIN FUNCTIONS (provided by the Womb runtime, lowered by codegen)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Concept operations:
+//   concept_get(ptr, ConceptName, field_name) -> value
+//   concept_set(ptr, ConceptName, field_name, value) -> void
+//
+// Gestalt operations:
+//   assert_variant(ptr, GestaltName, variant_name) -> void
+//   interpret(ptr, GestaltName, variant_name) -> value
+//
+// Manifold operations:
+//   manifold_alloc(ManifoldName) -> Address
+//   manifold_query(ptr, ManifoldName, [coords]) -> value
+//   manifold_set(ptr, ManifoldName, [coords], value) -> void
+//   manifold_slice(ptr, ManifoldName, [start], [end]) -> Address
+//
+// Aura operations:
+//   aura_attach(ptr, AuraName) -> Address
+//   aura_detach(ptr, AuraName) -> Address
+//   aura_query(ptr, AuraName, field) -> value
+//   aura_update(ptr, AuraName, field, value) -> void
