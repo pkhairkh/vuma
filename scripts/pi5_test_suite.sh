@@ -115,6 +115,8 @@ BACKENDS["arm32"] = "qemu-arm"
 BACKENDS["mips64"] = "qemu-mips64el"
 BACKENDS["ppc64"] = "qemu-ppc64"
 BACKENDS["loongarch64"] = "qemu-loongarch64"
+BACKENDS["riscv32"] = "qemu-riscv32"
+BACKENDS["x86_32"] = "qemu-i386"
 
 # Check wasmtime
 WASMTIME = os.environ.get("WASMTIME_BIN", "")
