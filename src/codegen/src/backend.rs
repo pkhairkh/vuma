@@ -1748,7 +1748,16 @@ fn aarch64_compute_frame_size(func: &IRFunction) -> usize {
 /// a single PF_R|PF_W|PF_X segment is insecure and may cause
 /// QEMU/Linux to reject the executable.
 fn build_aarch64_elf_2seg(code: &[u8], base_addr: u64, extern_symbols: &[String]) -> Vec<u8> {
-    const PAGE_SIZE: u64 = 0x1000; // 4 KB
+    // Use 64K alignment for virtual addresses to ensure compatibility with
+    // QEMU 10.x on hosts with 16K or 64K page sizes.  QEMU's aarch64
+    // user-mode uses TARGET_PAGE_BITS_VARY, which matches the host page
+    // size.  If the host has >4K pages, a 4K-aligned BSS segment can share
+    // a host page with the RX text segment, triggering QEMU's
+    // "PT_LOAD with bss overlapping non-writable page" error in zero_bss().
+    // 64K is the largest common aarch64 page size, so aligning to 64K
+    // guarantees no page overlap regardless of host page size.
+    const HOST_PAGE_ALIGN: u64 = 0x10000; // 64 KB — max common aarch64 page size
+    const PAGE_SIZE: u64 = 0x1000; // 4 KB — for p_align and BSS size
 
     let elf_header_size: u64 = 64;
     let phdr_size: u64 = 56;
@@ -1762,14 +1771,16 @@ fn build_aarch64_elf_2seg(code: &[u8], base_addr: u64, extern_symbols: &[String]
     let text_offset = phdr_end; // No page alignment — code right after headers
     let text_size = code.len() as u64;
 
-    // The data segment starts on the next page after the text.
+    // The data segment starts on the next 64K-aligned boundary after the
+    // text.  This ensures the BSS does not share a host page (which may be
+    // 4K, 16K, or 64K) with the RX text segment.
     let text_file_end = text_offset + text_size;
-    let data_vaddr = ((base_addr + text_file_end + PAGE_SIZE - 1) / PAGE_SIZE) * PAGE_SIZE;
+    let data_vaddr = ((base_addr + text_file_end + HOST_PAGE_ALIGN - 1) / HOST_PAGE_ALIGN) * HOST_PAGE_ALIGN;
     let data_offset = data_vaddr - base_addr; // file offset for data segment
     let data_size: u64 = PAGE_SIZE; // 1 page of writable memory for stack/data
     let entry_point = base_addr + text_offset;
 
-    let mut elf = Vec::with_capacity((data_offset + data_size) as usize);
+    let mut elf = Vec::with_capacity((text_offset + text_size + 256) as usize);
 
     // --- e_ident ---
     elf.extend_from_slice(&[0x7f, b'E', b'L', b'F']); // magic
@@ -1822,10 +1833,11 @@ fn build_aarch64_elf_2seg(code: &[u8], base_addr: u64, extern_symbols: &[String]
     }
     elf.extend_from_slice(code);
 
-    // --- Pad to data segment offset (if needed) ---
-    while (elf.len() as u64) < data_offset {
-        elf.push(0);
-    }
+    // NOTE: We do NOT pad the file to `data_offset`.  The data segment has
+    // p_filesz=0 (BSS-only), so the kernel never reads file content for it.
+    // The data segment's virtual address (data_vaddr) is 64K-aligned in the
+    // guest address space, but the file ends right after the text segment.
+    // This keeps the file small (~4KB) regardless of the 64K virtual alignment.
 
     // No file data for the .data segment (it's BSS-like, zero-initialized)
 
