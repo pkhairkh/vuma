@@ -105,10 +105,9 @@ HOST_ARCH = platform.machine()
 
 # QEMU binary mapping
 BACKENDS = {}
-if HOST_ARCH == "aarch64":
-    BACKENDS["aarch64"] = None  # Native!
-else:
-    BACKENDS["aarch64"] = "qemu-aarch64"
+# Always use QEMU for all backends (even native aarch64)
+# This ensures consistent ELF loading behavior
+BACKENDS["aarch64"] = "qemu-aarch64"
 BACKENDS["x86_64"] = "qemu-x86_64"
 BACKENDS["riscv64"] = "qemu-riscv64"
 BACKENDS["arm32"] = "qemu-arm"
