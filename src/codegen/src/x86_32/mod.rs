@@ -2064,6 +2064,7 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
     }
 
     // ── print_hex: Print EAX as 8 hex digits to stdout ──
+    // Argument: EDI = value to print (x86_32 calling convention)
     // Uses sys_write (4) with fd=1 (stdout).
     // Converts each nibble to hex char, writes to stack buffer, then sys_write.
     {
@@ -2073,6 +2074,8 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         code.extend(encode_mov_reg_reg(Gpr::Rbp, Gpr::Rsp));
         // sub esp, 16 (space for 8 hex digits + padding)
         code.extend_from_slice(&[0x83, 0xEC, 0x10]); // sub esp, 16
+        // mov eax, edi — load argument from EDI into EAX
+        code.extend(encode_mov_reg_reg(Gpr::Rax, Gpr::Rdi));
         // mov ecx, esp (buffer pointer)
         code.extend(encode_mov_reg_reg(Gpr::Rcx, Gpr::Rsp));
         // mov edx, 8 (digit count)
@@ -2128,6 +2131,7 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
     }
 
     // ── print_int: Print EAX as decimal integer to stdout ──
+    // Argument: EDI = value to print (x86_32 calling convention)
     // Converts digit-by-digit into a stack buffer, then sys_write.
     {
         let mut code = Vec::new();
@@ -2136,6 +2140,8 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         code.extend(encode_mov_reg_reg(Gpr::Rbp, Gpr::Rsp));
         // sub esp, 32 (space for digits)
         code.extend_from_slice(&[0x83, 0xEC, 0x20]); // sub esp, 32
+        // mov eax, edi — load argument from EDI into EAX
+        code.extend(encode_mov_reg_reg(Gpr::Rax, Gpr::Rdi));
         // lea ecx, [esp+31] (point to end of buffer, write backwards)
         code.extend(encode_lea_reg_mem(Gpr::Rcx, Gpr::Rsp, 31));
         // mov byte [ecx], 10 (newline)
