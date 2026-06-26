@@ -2510,11 +2510,13 @@ fn convert_computation_no_calls(
         } else {
             resolve_subexpr(ptr_expr, &df_sources, edge_idx, scg)
         };
+        let load_ty = comp.result_type.as_deref()
+            .and_then(|rt| result_type_to_load_ty(&Some(rt.to_string())));
         return vec![ScgStatement::Access(AccessNode::Load {
             dst: node_var(node_id, "val"),
             ptr,
             offset: None,
-            ty: None,
+            ty: load_ty,
         })];
     }
 

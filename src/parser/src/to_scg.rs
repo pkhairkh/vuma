@@ -95,6 +95,8 @@ pub struct AstToScg {
     next_region_id: u64,
     /// The default (top-level) region ID.
     default_region: RegionId,
+    /// Current function's return type (for propagating to return expr Computation nodes).
+    current_return_type: Option<String>,
 }
 
 impl AstToScg {
@@ -105,6 +107,7 @@ impl AstToScg {
             scopes: vec![HashMap::new()],
             alloc_defs: vec![HashMap::new()],
             next_region_id: 1,
+            current_return_type: None,
             default_region,
         }
     }
@@ -339,6 +342,7 @@ impl AstToScg {
             .as_ref()
             .map(|t| t.to_string())
             .unwrap_or_else(|| "void".to_string());
+        self.current_return_type = if ret_type_str != "void" { Some(ret_type_str.clone()) } else { None };
         let entry_label = format!("fn_{}_entry({})", f.name, ret_type_str);
 
         // FunctionEntry node.
@@ -1423,7 +1427,7 @@ impl AstToScg {
                             NodeType::Computation,
                             NodePayload::Computation(ComputationNode {
                                 kind: ComputationKind::Other(self.expr_to_string(v)),
-                                result_type: None,
+                                result_type: self.current_return_type.clone(),
                                 tail_call: false,
                             }),
                             self.span_to_pp(&r.span),
