@@ -1,4 +1,4 @@
-VUMA Test Failures — 2026-06-26 19:04:43 UTC
+VUMA Test Failures — 2026-06-26 20:43:34 UTC
 Total: 22447 failures across 5738 tests
 
   arithmetic           arith2_abundant_number.vuma                   exp=   1 [('aarch64', 255, 'MM'), ('x86_32', 255, 'MM'), ('riscv32', 255, 'MM')]
