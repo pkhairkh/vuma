@@ -7,6 +7,7 @@ set -euo pipefail
 WORKERS=4
 SKIP_BUILD=0
 NO_PUSH=0
+FRESH=0
 BACKENDS=""
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
@@ -15,6 +16,7 @@ while [[ $# -gt 0 ]]; do
         --workers) WORKERS="$2"; shift 2 ;;
         --skip-build) SKIP_BUILD=1; shift ;;
         --no-push) NO_PUSH=1; shift ;;
+        --fresh) FRESH=1; shift ;;
         --backends) BACKENDS="$2"; shift 2 ;;
         *) echo "Unknown option: $1"; exit 1 ;;
     esac
@@ -85,8 +87,27 @@ if [ $SKIP_BUILD -eq 0 ]; then
     echo ""
 fi
 
-# ── Step 3: Create Python test runner ──
+# ── Step 2.5: Clear checkpoint if --fresh or if compiler was rebuilt ──
 RESULTS_DIR="$REPO_DIR/test_results"
+CHECKPOINT="$RESULTS_DIR/checkpoint.jsonl"
+COMPILE_BIN="$REPO_DIR/target/release/compile_dump"
+if [ $FRESH -eq 1 ]; then
+    echo "▸ --fresh: clearing previous checkpoint..."
+    rm -f "$CHECKPOINT"
+    echo "✓ Checkpoint cleared"
+    echo ""
+elif [ -f "$CHECKPOINT" ] && [ -f "$COMPILE_BIN" ]; then
+    # Auto-detect: if the compiler binary is newer than the checkpoint,
+    # the results are stale and should be regenerated.
+    if [ "$COMPILE_BIN" -nt "$CHECKPOINT" ]; then
+        echo "▸ Compiler binary newer than checkpoint — clearing stale results..."
+        rm -f "$CHECKPOINT"
+        echo "✓ Checkpoint cleared"
+        echo ""
+    fi
+fi
+
+# ── Step 3: Create Python test runner ──
 mkdir -p "$RESULTS_DIR"
 
 cat > "$RESULTS_DIR/run_tests.py" << 'PYEOF'
