@@ -2063,6 +2063,147 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         stubs.push(("wait4".to_string(), code));
     }
 
+    // mmap(addr, length, prot, flags, fd, offset) → void*  [i386 syscall 192 = mmap2]
+    // i386 has no plain mmap syscall; mmap2 takes offset in 4KB pages instead
+    // of bytes.  We convert the caller's byte offset to pages (>> 12).
+    //
+    // VUMA calling convention (i386): args 0-3 in registers, args 4-5 on stack.
+    //   EDI=addr, ESI=length, EDX=prot, ECX=flags,
+    //   [ESP+4]=fd, [ESP+8]=offset (bytes)
+    //
+    // i386 syscall convention: EBX=arg1, ECX=arg2, EDX=arg3, ESI=arg4,
+    //                          EDI=arg5, EBP=arg6, EAX=syscall#, INT 0x80.
+    // For mmap2 we need:
+    //   EBX=addr, ECX=length, EDX=prot, ESI=flags, EDI=fd, EBP=offset_pages
+    {
+        let mut code = Vec::new();
+        // Save addr in EBX (target register) before we lose it.
+        code.extend(encode_mov_reg_reg(Gpr::Rbx, Gpr::Rdi)); // EBX = addr
+        // Push ECX (flags) so we can later pop it into ESI.
+        code.extend(encode_push(Gpr::Rcx));                  // push flags
+        // Push ESI (length) so we can later pop it into ECX.
+        code.extend(encode_push(Gpr::Rsi));                  // push length
+        // Stack now: [ESP]=length, [ESP+4]=flags, [ESP+8]=retaddr,
+        //            [ESP+12]=fd, [ESP+16]=offset
+        // Compute EBP = offset_pages = offset_bytes >> 12
+        code.extend(encode_mov_reg_mem(Gpr::Rax, Gpr::Rsp, 16)); // EAX = offset_bytes
+        // shr EAX, 12
+        code.extend_from_slice(&[0xC1, 0xE8, 0x0C]);         // shr eax, 12
+        code.extend(encode_mov_reg_reg(Gpr::Rbp, Gpr::Rax)); // EBP = offset_pages
+        // Set EDI = fd (was at [ESP+12] before our two pushes)
+        code.extend(encode_mov_reg_mem(Gpr::Rax, Gpr::Rsp, 12)); // EAX = fd
+        code.extend(encode_mov_reg_reg(Gpr::Rdi, Gpr::Rax)); // EDI = fd
+        // Restore length → ECX and flags → ESI from the stack.
+        code.extend(encode_pop(Gpr::Rcx));                   // ECX = length
+        code.extend(encode_pop(Gpr::Rsi));                   // ESI = flags
+        // Syscall number for mmap2 on i386.
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 192));    // EAX = sys_mmap2
+        code.extend(encode_syscall());                       // int 0x80
+        code.extend(encode_ret());
+        stubs.push(("mmap".to_string(), code));
+    }
+
+    // munmap(addr, length) → int  [i386 syscall 91]
+    // VUMA args: EDI=addr, ESI=length → EBX=addr, ECX=length
+    {
+        let mut code = Vec::new();
+        code.extend(encode_push(Gpr::Rsi));                  // push length
+        code.extend(encode_mov_reg_reg(Gpr::Rbx, Gpr::Rdi)); // EBX = addr
+        code.extend(encode_pop(Gpr::Rcx));                   // ECX = length
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 91));     // EAX = sys_munmap
+        code.extend(encode_syscall());
+        code.extend(encode_ret());
+        stubs.push(("munmap".to_string(), code));
+    }
+
+    // socket(domain, type, protocol) → int  [i386 syscall 359]
+    // VUMA args: EDI=domain, ESI=type, EDX=protocol
+    //   → EBX=domain, ECX=type, EDX=protocol
+    {
+        let mut code = Vec::new();
+        code.extend(encode_push(Gpr::Rsi));                  // push type
+        code.extend(encode_mov_reg_reg(Gpr::Rbx, Gpr::Rdi)); // EBX = domain
+        code.extend(encode_pop(Gpr::Rcx));                   // ECX = type
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 359));    // EAX = sys_socket (i386)
+        code.extend(encode_syscall());
+        code.extend(encode_ret());
+        stubs.push(("socket".to_string(), code));
+    }
+
+    // epoll_create1(flags) → int  [i386 syscall 329]
+    // VUMA args: EDI=flags → EBX=flags
+    {
+        let mut code = Vec::new();
+        code.extend(encode_mov_reg_reg(Gpr::Rbx, Gpr::Rdi)); // EBX = flags
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 329));    // EAX = sys_epoll_create1 (i386)
+        code.extend(encode_syscall());
+        code.extend(encode_ret());
+        stubs.push(("epoll_create1".to_string(), code));
+    }
+
+    // futex(uaddr, futex_op, val, timeout, uaddr2, val3) → int  [i386 syscall 240]
+    // VUMA calling convention (i386): args 0-3 in registers, args 4-5 on stack.
+    //   EDI=uaddr, ESI=futex_op, EDX=val, ECX=timeout,
+    //   [ESP+4]=uaddr2, [ESP+8]=val3
+    // i386 syscall convention: EBX=uaddr, ECX=futex_op, EDX=val,
+    //                          ESI=timeout, EDI=uaddr2, EBP=val3
+    {
+        let mut code = Vec::new();
+        // Save uaddr in EBX (target register) before losing it.
+        code.extend(encode_mov_reg_reg(Gpr::Rbx, Gpr::Rdi)); // EBX = uaddr
+        // Push ECX (timeout) and ESI (futex_op) so we can pop them into
+        // the correct registers later.
+        code.extend(encode_push(Gpr::Rcx));                  // push timeout
+        code.extend(encode_push(Gpr::Rsi));                  // push futex_op
+        // Stack: [ESP]=futex_op, [ESP+4]=timeout, [ESP+8]=retaddr,
+        //        [ESP+12]=uaddr2, [ESP+16]=val3
+        // Set EBP = val3 (was at [ESP+16])
+        code.extend(encode_mov_reg_mem(Gpr::Rax, Gpr::Rsp, 16)); // EAX = val3
+        code.extend(encode_mov_reg_reg(Gpr::Rbp, Gpr::Rax)); // EBP = val3
+        // Set EDI = uaddr2 (was at [ESP+12])
+        code.extend(encode_mov_reg_mem(Gpr::Rax, Gpr::Rsp, 12)); // EAX = uaddr2
+        code.extend(encode_mov_reg_reg(Gpr::Rdi, Gpr::Rax)); // EDI = uaddr2
+        // Restore futex_op → ECX and timeout → ESI from the stack.
+        code.extend(encode_pop(Gpr::Rcx));                   // ECX = futex_op
+        code.extend(encode_pop(Gpr::Rsi));                   // ESI = timeout
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 240));    // EAX = sys_futex (i386)
+        code.extend(encode_syscall());
+        code.extend(encode_ret());
+        stubs.push(("futex".to_string(), code));
+    }
+
+    // epoll_ctl(epfd, op, fd, event) → int  [i386 syscall 253]
+    // VUMA args: EDI=epfd, ESI=op, EDX=fd, ECX=event
+    //   → EBX=epfd, ECX=op, EDX=fd, ESI=event
+    {
+        let mut code = Vec::new();
+        code.extend(encode_push(Gpr::Rcx));                  // push event
+        code.extend(encode_push(Gpr::Rsi));                  // push op
+        code.extend(encode_mov_reg_reg(Gpr::Rbx, Gpr::Rdi)); // EBX = epfd
+        code.extend(encode_pop(Gpr::Rcx));                   // ECX = op
+        code.extend(encode_pop(Gpr::Rsi));                   // ESI = event
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 253));    // EAX = sys_epoll_ctl (i386)
+        code.extend(encode_syscall());
+        code.extend(encode_ret());
+        stubs.push(("epoll_ctl".to_string(), code));
+    }
+
+    // epoll_wait(epfd, events, maxevents, timeout) → int  [i386 syscall 256]
+    // VUMA args: EDI=epfd, ESI=events, EDX=maxevents, ECX=timeout
+    //   → EBX=epfd, ECX=events, EDX=maxevents, ESI=timeout
+    {
+        let mut code = Vec::new();
+        code.extend(encode_push(Gpr::Rcx));                  // push timeout
+        code.extend(encode_push(Gpr::Rsi));                  // push events
+        code.extend(encode_mov_reg_reg(Gpr::Rbx, Gpr::Rdi)); // EBX = epfd
+        code.extend(encode_pop(Gpr::Rcx));                   // ECX = events
+        code.extend(encode_pop(Gpr::Rsi));                   // ESI = timeout
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 256));    // EAX = sys_epoll_wait (i386)
+        code.extend(encode_syscall());
+        code.extend(encode_ret());
+        stubs.push(("epoll_wait".to_string(), code));
+    }
+
     // ── print_hex: Print EAX as 8 hex digits to stdout ──
     // Argument: EDI = value to print (x86_32 calling convention)
     // Uses sys_write (4) with fd=1 (stdout).
