@@ -184,7 +184,7 @@ def run_one(args):
 
         if backend == "wasm32":
             os.chmod(out, 0o644)
-            cmd = [WASMTIME, "run", "--invoke", "_vuma_main", out]
+            cmd = [WASMTIME, "run", out]
         elif BACKENDS[backend] is None:
             os.chmod(out, 0o755)
             cmd = ["timeout", str(EXEC_TIMEOUT), out]
@@ -196,12 +196,10 @@ def run_one(args):
             ep = subprocess.run(cmd, capture_output=True, timeout=EXEC_TIMEOUT + 3)
             rc = ep.returncode
             if backend == "wasm32":
-                stdout = ep.stdout.decode(errors="replace").strip()
-                if rc == 0 and stdout:
-                    try: result["actual"] = int(stdout)
-                    except: result["actual"] = rc; result["crashed"] = True
-                elif rc == 0: result["actual"] = 0
-                else: result["actual"] = rc; result["crashed"] = True
+                # Use proc_exit exit code (same as other backends)
+                # This fixes test_print where --invoke mixed stdout with return value
+                crashed = rc < 0 or rc > 128
+                result["actual"] = rc; result["crashed"] = crashed
             elif rc == 124:
                 result["timed_out"] = True; result["actual"] = 124
             else:
