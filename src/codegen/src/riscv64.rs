@@ -5397,6 +5397,186 @@ impl Backend for RiscV64Backend {
         // ── Build runtime I/O code ──
         let runtime_code = build_riscv64_runtime();
 
+        // ── Build __vuma_alloc / __vuma_free syscall stubs (mmap/munmap) ──
+        // __vuma_alloc(size in a0) -> a0 = mmap(NULL, size, PROT_READ|PROT_WRITE,
+        //                                         MAP_PRIVATE|MAP_ANONYMOUS, -1, 0)
+        //   RISC-V Linux: mmap = syscall 222, args a0-a5, syscall # in a7, ECALL.
+        // __vuma_free(addr in a0) -> munmap(addr, 0)
+        //   RISC-V Linux: munmap = syscall 215, args a0/a1, syscall # in a7, ECALL.
+        //
+        // RISC-V immediates used here all fit in the 12-bit signed field of
+        // ADDI, so each can be loaded with a single ADDI rd, zero, imm.
+        let vuma_alloc_stub: Vec<u8> = {
+            let mut code = Vec::new();
+            // MV a1, a0       (size -> length)
+            code.extend(Instruction::Addi { rd: Gpr::A1, rs1: Gpr::A0, imm: 0 }.encode());
+            // MV a0, zero     (addr = NULL)
+            code.extend(Instruction::Addi { rd: Gpr::A0, rs1: Gpr::Zero, imm: 0 }.encode());
+            // ADDI a2, zero, 3       (PROT_READ | PROT_WRITE = 3)
+            code.extend(Instruction::Addi { rd: Gpr::A2, rs1: Gpr::Zero, imm: 3 }.encode());
+            // ADDI a3, zero, 0x22    (MAP_PRIVATE | MAP_ANONYMOUS = 0x22 = 34)
+            code.extend(Instruction::Addi { rd: Gpr::A3, rs1: Gpr::Zero, imm: 0x22 }.encode());
+            // ADDI a4, zero, -1      (fd = -1)
+            code.extend(Instruction::Addi { rd: Gpr::A4, rs1: Gpr::Zero, imm: -1 }.encode());
+            // MV a5, zero     (offset = 0)
+            code.extend(Instruction::Addi { rd: Gpr::A5, rs1: Gpr::Zero, imm: 0 }.encode());
+            // ADDI a7, zero, 222     (sys_mmap)
+            code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 222 }.encode());
+            // ECALL
+            code.extend(Instruction::Ecall.encode());
+            // RET (JALR zero, ra, 0)
+            code.extend(Instruction::Jalr { rd: Gpr::Zero, rs1: Gpr::Ra, imm: 0 }.encode());
+            code
+        };
+        let vuma_free_stub: Vec<u8> = {
+            let mut code = Vec::new();
+            // MV a1, zero     (size = 0)
+            code.extend(Instruction::Addi { rd: Gpr::A1, rs1: Gpr::Zero, imm: 0 }.encode());
+            // ADDI a7, zero, 215     (sys_munmap)
+            code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 215 }.encode());
+            // ECALL
+            code.extend(Instruction::Ecall.encode());
+            // RET
+            code.extend(Instruction::Jalr { rd: Gpr::Zero, rs1: Gpr::Ra, imm: 0 }.encode());
+            code
+        };
+
+        // ── POSIX syscall stubs ──────────────────────────────────────
+        // These provide the syscalls needed by mmap_sha256d, signal_hash,
+        // lock_free_queue, epoll_echo, and ffi_demo tests.
+        //
+        // RISC-V calling convention: args in a0-a5, return in a0.
+        // RISC-V syscall convention: args in a0-a5, syscall # in a7, ECALL,
+        // return in a0. The calling convention matches the syscall convention
+        // for most syscalls, so simple stubs are just:
+        //     ADDI a7, zero, #num ; ECALL ; RET.
+        //
+        // For syscalls that need arg shuffling (open→openat, unlink→unlinkat,
+        // pipe→pipe2, dup2→dup3, fork→clone, sigaction→rt_sigaction),
+        // extra instructions are added before the syscall.
+        //
+        // RISC-V does NOT have legacy open/unlink/pipe/dup2/fork syscalls —
+        // it only has the *at / 2 / 3 variants. We emulate the legacy names
+        // by inserting AT_FDCWD=-100, default flags, etc.
+        //
+        // Linux RISC-V syscall numbers used here:
+        //   write=64, read=63, close=57, mmap=222, munmap=215, exit=93
+        //   alarm=36, getpid=172, socket=198, epoll_create1=20, futex=98
+        //   openat=56, unlinkat=35
+        //   rt_sigaction=134, pipe2=59, dup3=24, clone=220
+        //   execve=221, wait4=260, epoll_ctl=21, epoll_wait=22
+
+        // Helper: encode a simple "ADDI a7, zero, num ; ECALL ; RET" stub.
+        let simple_stub = |num: i32| -> Vec<u8> {
+            let mut code = Vec::new();
+            code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: num }.encode());
+            code.extend(Instruction::Ecall.encode());
+            code.extend(Instruction::Jalr { rd: Gpr::Zero, rs1: Gpr::Ra, imm: 0 }.encode());
+            code
+        };
+        // Helper: encode MV rd, rs (i.e. ADDI rd, rs, 0)
+        let mv = |rd: Gpr, rs: Gpr| -> [u8; 4] {
+            Instruction::Addi { rd, rs1: rs, imm: 0 }.encode()
+        };
+
+        let syscall_stubs: Vec<(String, Vec<u8>)> = {
+            let mut stubs: Vec<(String, Vec<u8>)> = Vec::new();
+
+            // Simple stubs (args already in correct registers a0-a5):
+            for (name, num) in [
+                ("write", 64), ("read", 63), ("close", 57), ("mmap", 222),
+                ("munmap", 215), ("exit", 93), ("alarm", 36), ("getpid", 172),
+                ("socket", 198), ("epoll_create1", 20), ("futex", 98),
+                ("execve", 221), ("wait4", 260), ("epoll_ctl", 21), ("epoll_wait", 22),
+            ] {
+                stubs.push((name.to_string(), simple_stub(num)));
+            }
+
+            // open → openat(AT_FDCWD=-100, pathname, flags, mode)
+            // Caller args: a0=pathname, a1=flags, a2=mode
+            // Need:        a0=-100,   a1=pathname, a2=flags, a3=mode
+            // Shuffle high→low to avoid clobbering.
+            {
+                let mut code = Vec::new();
+                code.extend(mv(Gpr::A3, Gpr::A2));           // a3 <- mode
+                code.extend(mv(Gpr::A2, Gpr::A1));           // a2 <- flags
+                code.extend(mv(Gpr::A1, Gpr::A0));           // a1 <- pathname
+                code.extend(Instruction::Addi { rd: Gpr::A0, rs1: Gpr::Zero, imm: -100 }.encode()); // a0 = AT_FDCWD
+                code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 56 }.encode());  // sys_openat
+                code.extend(Instruction::Ecall.encode());
+                code.extend(Instruction::Jalr { rd: Gpr::Zero, rs1: Gpr::Ra, imm: 0 }.encode());
+                stubs.push(("open".to_string(), code));
+            }
+
+            // unlink → unlinkat(AT_FDCWD=-100, pathname, 0)
+            // Caller args: a0=pathname
+            // Need:        a0=-100,   a1=pathname, a2=0
+            {
+                let mut code = Vec::new();
+                code.extend(Instruction::Addi { rd: Gpr::A2, rs1: Gpr::Zero, imm: 0 }.encode());   // a2 = 0 (flags)
+                code.extend(mv(Gpr::A1, Gpr::A0));                                                    // a1 <- pathname
+                code.extend(Instruction::Addi { rd: Gpr::A0, rs1: Gpr::Zero, imm: -100 }.encode()); // a0 = AT_FDCWD
+                code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 35 }.encode());  // sys_unlinkat
+                code.extend(Instruction::Ecall.encode());
+                code.extend(Instruction::Jalr { rd: Gpr::Zero, rs1: Gpr::Ra, imm: 0 }.encode());
+                stubs.push(("unlink".to_string(), code));
+            }
+
+            // sigaction → rt_sigaction(signum, act, oldact, sigsetsize=8)
+            // Caller args: a0=signum, a1=act, a2=oldact
+            // Need:        a0=signum, a1=act, a2=oldact, a3=8
+            {
+                let mut code = Vec::new();
+                code.extend(Instruction::Addi { rd: Gpr::A3, rs1: Gpr::Zero, imm: 8 }.encode());   // a3 = sigsetsize
+                code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 134 }.encode()); // sys_rt_sigaction
+                code.extend(Instruction::Ecall.encode());
+                code.extend(Instruction::Jalr { rd: Gpr::Zero, rs1: Gpr::Ra, imm: 0 }.encode());
+                stubs.push(("sigaction".to_string(), code));
+            }
+
+            // pipe → pipe2(pipefd, 0)
+            // Caller args: a0=pipefd
+            // Need:        a0=pipefd, a1=0
+            {
+                let mut code = Vec::new();
+                code.extend(Instruction::Addi { rd: Gpr::A1, rs1: Gpr::Zero, imm: 0 }.encode());   // a1 = 0 (flags)
+                code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 59 }.encode());  // sys_pipe2
+                code.extend(Instruction::Ecall.encode());
+                code.extend(Instruction::Jalr { rd: Gpr::Zero, rs1: Gpr::Ra, imm: 0 }.encode());
+                stubs.push(("pipe".to_string(), code));
+            }
+
+            // dup2 → dup3(oldfd, newfd, 0)
+            // Caller args: a0=oldfd, a1=newfd
+            // Need:        a0=oldfd, a1=newfd, a2=0
+            {
+                let mut code = Vec::new();
+                code.extend(Instruction::Addi { rd: Gpr::A2, rs1: Gpr::Zero, imm: 0 }.encode());   // a2 = 0 (flags)
+                code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 24 }.encode());  // sys_dup3
+                code.extend(Instruction::Ecall.encode());
+                code.extend(Instruction::Jalr { rd: Gpr::Zero, rs1: Gpr::Ra, imm: 0 }.encode());
+                stubs.push(("dup2".to_string(), code));
+            }
+
+            // fork → clone(SIGCHLD=17, 0, 0, 0, 0)
+            // Caller args: none
+            // Need:        a0=17, a1=0, a2=0, a3=0, a4=0
+            {
+                let mut code = Vec::new();
+                code.extend(Instruction::Addi { rd: Gpr::A0, rs1: Gpr::Zero, imm: 17 }.encode());  // a0 = SIGCHLD
+                code.extend(Instruction::Addi { rd: Gpr::A1, rs1: Gpr::Zero, imm: 0 }.encode());   // a1 = 0
+                code.extend(Instruction::Addi { rd: Gpr::A2, rs1: Gpr::Zero, imm: 0 }.encode());   // a2 = 0
+                code.extend(Instruction::Addi { rd: Gpr::A3, rs1: Gpr::Zero, imm: 0 }.encode());   // a3 = 0
+                code.extend(Instruction::Addi { rd: Gpr::A4, rs1: Gpr::Zero, imm: 0 }.encode());   // a4 = 0
+                code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 220 }.encode()); // sys_clone
+                code.extend(Instruction::Ecall.encode());
+                code.extend(Instruction::Jalr { rd: Gpr::Zero, rs1: Gpr::Ra, imm: 0 }.encode());
+                stubs.push(("fork".to_string(), code));
+            }
+
+            stubs
+        };
+
         // ── Compute function offsets ──
         let mut func_offsets: HashMap<String, usize> = HashMap::new();
         let mut current_offset: usize = header_size;
@@ -5408,6 +5588,30 @@ impl Backend for RiscV64Backend {
                 .map(|i| i.encoded.len())
                 .sum();
             current_offset += func_size;
+        }
+
+        // Runtime functions: __vuma_print_hex, __vuma_print_int, __vuma_print_newline
+        // The runtime blob is a single contiguous block; the three entry
+        // symbols all share the start of the blob (the dispatcher selects
+        // based on a0/a7 conventions).
+        let runtime_offsets_start = current_offset;
+        func_offsets.insert("__vuma_print_hex".to_string(), runtime_offsets_start);
+        func_offsets.insert("__vuma_print_int".to_string(), runtime_offsets_start);
+        func_offsets.insert("__vuma_print_newline".to_string(), runtime_offsets_start);
+        current_offset += runtime_code.len();
+
+        // __vuma_alloc / __vuma_free stubs go after the runtime blob.
+        let vuma_alloc_offset = current_offset;
+        let vuma_free_offset = vuma_alloc_offset + vuma_alloc_stub.len();
+        func_offsets.insert("__vuma_alloc".to_string(), vuma_alloc_offset);
+        func_offsets.insert("__vuma_free".to_string(), vuma_free_offset);
+        current_offset = vuma_free_offset + vuma_free_stub.len();
+
+        // POSIX syscall stubs go after __vuma_free.
+        let mut stub_offset = current_offset;
+        for (name, code) in &syscall_stubs {
+            func_offsets.insert(name.clone(), stub_offset);
+            stub_offset += code.len();
         }
 
         // ── Build _start stub ──
@@ -5483,6 +5687,13 @@ impl Backend for RiscV64Backend {
 
         // Append runtime I/O code
         all_code.extend_from_slice(&runtime_code);
+        // Append __vuma_alloc / __vuma_free syscall stubs.
+        all_code.extend_from_slice(&vuma_alloc_stub);
+        all_code.extend_from_slice(&vuma_free_stub);
+        // Append POSIX syscall stubs (write, read, open, close, mmap, etc.)
+        for (_, code) in &syscall_stubs {
+            all_code.extend_from_slice(code);
+        }
 
         // ── Patch JAL relocations for inter-function calls ──
         // RISC-V uses JAL for direct calls within ±1MB
