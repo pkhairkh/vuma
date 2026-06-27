@@ -2423,17 +2423,8 @@ impl IRBuilder {
                                     return pt.clone();
                                 }
                             }
-                            // Infer from pointer expression (same logic as loads)
-                            // Check for constant offset: base + N
-                            // Only infer for offset >= 8 (skip offset 4 — ambiguous)
-                            if let ScgExpr::BinOp { op: crate::ir::BinOpKind::Add, lhs: _, rhs } = ptr {
-                                if let ScgExpr::Int(n) = rhs.as_ref() {
-                                    if *n >= 8 && *n % 8 == 0 {
-                                        return IRType::U64;
-                                    }
-                                }
-                            }
-                            // Check for array stride: base + (idx * stride)
+                            // Only use array stride for store type inference.
+                            // Constant-offset inference is too unreliable.
                             if let ScgExpr::BinOp { op: crate::ir::BinOpKind::Add, lhs: _, rhs } = ptr {
                                 if let ScgExpr::BinOp { op: crate::ir::BinOpKind::Mul, lhs: _, rhs } = rhs.as_ref() {
                                     if let ScgExpr::Int(stride) = rhs.as_ref() {
@@ -2449,30 +2440,14 @@ impl IRBuilder {
                         }
                     } else {
                         // For immediate values, only infer U32/U64 when the
-                        // value is too large to fit in a byte (> 255) OR when
-                        // the offset is >= 4 (struct field stores).
-                        // This prevents `*(buf + 4) = 4` from being stored as U32
-                        // (which would overwrite bytes 4-7) while still allowing
-                        // `*(p + 8) = 20` to be stored as U64.
+                        // value is too large to fit in a byte (> 255) and
+                        // the pointer has an array stride.
                         let imm_too_large_for_byte = match &val {
                             IRValue::Immediate(v) => *v > 255 || *v < 0,
                             IRValue::Address(a) => *a > 255,
                             _ => false,
                         };
-                        let offset_is_struct_field = if let ScgExpr::BinOp { op: crate::ir::BinOpKind::Add, lhs: _, rhs } = ptr {
-                            if let ScgExpr::Int(n) = rhs.as_ref() {
-                                *n >= 8 && *n % 8 == 0
-                            } else { false }
-                        } else { false };
-
-                        if imm_too_large_for_byte || offset_is_struct_field {
-                            if let ScgExpr::BinOp { op: crate::ir::BinOpKind::Add, lhs: _, rhs } = ptr {
-                                if let ScgExpr::Int(n) = rhs.as_ref() {
-                                    if *n >= 8 && *n % 8 == 0 {
-                                        return IRType::U64;
-                                    }
-                                }
-                            }
+                        if imm_too_large_for_byte {
                             if let ScgExpr::BinOp { op: crate::ir::BinOpKind::Add, lhs: _, rhs } = ptr {
                                 if let ScgExpr::BinOp { op: crate::ir::BinOpKind::Mul, lhs: _, rhs } = rhs.as_ref() {
                                     if let ScgExpr::Int(stride) = rhs.as_ref() {

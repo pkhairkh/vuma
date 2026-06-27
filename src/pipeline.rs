@@ -2489,35 +2489,21 @@ fn convert_computation_no_calls(
                 // For offset 0 (tag bytes) or non-aligned offsets (byte access
                 // in read_u32_be), keep ty=None (defaults to U8).
                 let load_ty = {
-                    let rt = comp.result_type.as_deref();
                     let mut inferred_ty: Option<vuma_codegen::ir::IRType> = None;
 
-                    // Check for constant offset: base + N
-                    // Infer U64 for offset >= 8 (struct field at 8-byte boundary).
-                    // Skip offset 4 — it's ambiguous (could be a U32 struct field
-                    // or byte 4 of a byte array). The IR builder's store type
-                    // inference handles offset 4 for register stores.
+                    // Only use array stride for load type inference.
+                    // Constant-offset inference is too unreliable — it can't
+                    // distinguish struct field access from byte-array access.
+                    // The IR builder's current_return_type heuristic (load_count==1,
+                    // store_count==0) handles read-only functions like mat_read.
                     if let ScgExpr::BinOp { op: vuma_codegen::ir::BinOpKind::Add, lhs: _, rhs } = &ptr {
-                        if let ScgExpr::Int(n) = rhs.as_ref() {
-                            if *n >= 8 && *n % 8 == 0 {
-                                // Offset 8, 16, 24, ... → U64 (struct field at 8-byte boundary)
-                                inferred_ty = Some(vuma_codegen::ir::IRType::U64);
-                            }
-                        }
-                    }
-
-                    // Check for array stride: base + (idx * stride)
-                    // If stride is 8, it's a U64 array. If stride is 4, it's U32.
-                    if inferred_ty.is_none() {
-                        if let ScgExpr::BinOp { op: vuma_codegen::ir::BinOpKind::Add, lhs: _, rhs } = &ptr {
-                            if let ScgExpr::BinOp { op: vuma_codegen::ir::BinOpKind::Mul, lhs: _, rhs } = rhs.as_ref() {
-                                if let ScgExpr::Int(stride) = rhs.as_ref() {
-                                    inferred_ty = match *stride {
-                                        8 => Some(vuma_codegen::ir::IRType::U64),
-                                        4 => Some(vuma_codegen::ir::IRType::U32),
-                                        _ => None,
-                                    };
-                                }
+                        if let ScgExpr::BinOp { op: vuma_codegen::ir::BinOpKind::Mul, lhs: _, rhs } = rhs.as_ref() {
+                            if let ScgExpr::Int(stride) = rhs.as_ref() {
+                                inferred_ty = match *stride {
+                                    8 => Some(vuma_codegen::ir::IRType::U64),
+                                    4 => Some(vuma_codegen::ir::IRType::U32),
+                                    _ => None,
+                                };
                             }
                         }
                     }
