@@ -1,12 +1,12 @@
-VUMA Test Failures — 2026-06-27 00:55:04 UTC
+VUMA Test Failures — 2026-06-27 08:59:32 UTC
 Total: 46 failures across 14 tests
 
   complex_stores       base64_encode.vuma                            exp=  20 [('arm32', 0, 'MM')]
   concurrency          epoll_echo.vuma                               exp=   0 [('x86_32', -11, 'CR'), ('wasm32', 1, 'CR'), ('ppc64', 124, 'TO')]
-  concurrency          lock_free_queue.vuma                          exp=   0 [('riscv64', 124, 'TO'), ('aarch64', 124, 'TO'), ('ppc64', 124, 'TO'), ('wasm32', 1, 'CR'), ('loongarch64', 124, 'TO'), ('riscv32', 124, 'TO')]
-  concurrency          signal_hash.vuma                              exp=   0 [('riscv64', -11, 'CR'), ('aarch64', -11, 'CR'), ('x86_64', 124, 'TO'), ('mips64', 124, 'TO'), ('arm32', 124, 'TO'), ('ppc64', 124, 'TO'), ('riscv32', -11, 'CR'), ('x86_32', -11, 'CR'), ('wasm32', 1, 'CR'), ('loongarch64', 124, 'TO')]
+  concurrency          lock_free_queue.vuma                          exp=   0 [('aarch64', 124, 'TO'), ('riscv64', 124, 'TO'), ('wasm32', 1, 'CR'), ('ppc64', 124, 'TO'), ('loongarch64', 124, 'TO'), ('riscv32', 124, 'TO')]
+  concurrency          signal_hash.vuma                              exp=   0 [('aarch64', -11, 'CR'), ('riscv64', -11, 'CR'), ('x86_64', 124, 'TO'), ('arm32', 124, 'TO'), ('mips64', 124, 'TO'), ('ppc64', 124, 'TO'), ('riscv32', -11, 'CR'), ('x86_32', -11, 'CR'), ('wasm32', 1, 'CR'), ('loongarch64', 124, 'TO')]
   control_flow         bsearch.vuma                                  exp=   7 [('ppc64', -11, 'CR'), ('wasm32', 1, 'CR'), ('arm32', 124, 'TO')]
-  crypto_patterns      mmap_sha256d.vuma                             exp= 229 [('aarch64', 2, 'MM'), ('riscv64', 2, 'MM'), ('mips64', 2, 'MM'), ('arm32', 2, 'MM'), ('loongarch64', 3, 'MM'), ('riscv32', 2, 'MM'), ('wasm32', 1, 'CR'), ('x86_64', 124, 'TO'), ('ppc64', 124, 'TO'), ('x86_32', 124, 'TO')]
+  crypto_patterns      mmap_sha256d.vuma                             exp= 229 [('aarch64', 2, 'MM'), ('riscv64', 2, 'MM'), ('arm32', 2, 'MM'), ('mips64', 2, 'MM'), ('loongarch64', 3, 'MM'), ('riscv32', 2, 'MM'), ('wasm32', 1, 'CR'), ('x86_64', 124, 'TO'), ('ppc64', 124, 'TO'), ('x86_32', 124, 'TO')]
   edge_cases           ffi_demo.vuma                                 exp=   0 [('wasm32', 1, 'CR'), ('ppc64', 124, 'TO')]
   functions            quicksort.vuma                                exp=  90 [('ppc64', 196, 'MM')]
   functions            test_print.vuma                               exp=   0 [('x86_32', -11, 'CR'), ('wasm32', 420123450, 'MM'), ('ppc64', 124, 'TO')]
