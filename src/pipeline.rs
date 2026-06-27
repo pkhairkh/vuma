@@ -1575,7 +1575,17 @@ fn walk_control_flow_with_externs(
                                 .map(|e| e.source);
 
                             let df_inputs = edge_idx.incoming_df(node_id);
-                            let sources: Vec<NodeId> = df_inputs.iter().map(|e| e.source).collect();
+                            let mut sources: Vec<NodeId> = df_inputs.iter().map(|e| e.source).collect();
+
+                            // CRITICAL: Exclude the caller node from sources.
+                            // The caller's label (e.g. "let val = read_u32_be(block, i * 4)")
+                            // contains variable names like "i". Without this filter,
+                            // resolve_subexpr would match the caller node when resolving
+                            // "i" in a subsequent call like "w_store(w, i, val)", causing
+                            // the loop variable to be replaced with the caller's result.
+                            if let Some(caller) = caller_node {
+                                sources.retain(|&s| s != caller);
+                            }
 
                             // Parse arguments from the caller's label.
                             // The AST→SCG converter stores the call expression as
@@ -2616,6 +2626,15 @@ fn convert_computation_no_calls(
                                         }
                                     }
                                 }
+                                // CRITICAL: Exclude the current node (node_id) from
+                                // the sources. The store's own Computation node has
+                                // a label like "*(block + i) = *(msg + i)" which
+                                // contains the variable name "i". Without this
+                                // filter, resolve_subexpr would match the store
+                                // node itself when resolving "i", creating a
+                                // circular reference (v_611 = ... v_611 ...) that
+                                // corrupts the loop variable and causes SIGSEGV.
+                                all_sources.retain(|&s| s != node_id);
                                 let (ptr, value) = if op_label.starts_with("*") {
                                     if let Some(eq_pos) = op_label.rfind("= ") {
                                         let lhs = op_label[..eq_pos].trim();
@@ -3134,16 +3153,28 @@ fn resolve_subexpr(
             }
         }
         // Second pass: check if any source's label contains the variable name
-        // as a whole word (word-boundary match).  The previous `contains`
-        // check was too loose: it matched "i" inside "lit_5", causing
-        // `if (i == 5)` to resolve `i` to the literal 5 (because "lit_5"
-        // contains "i"), producing `5 == 5` (always true) and breaking
-        // every loop with a condition that references the loop variable.
+        // as a whole word (word-boundary match) AND the source DEFINES the
+        // variable (label starts with "let <var> =" or "<var> =" or "param <var>").
+        //
+        // The previous `contains_word`-only check was too loose: it matched
+        // "i" inside "let val = read_u32_be(block, i * 4)", causing the loop
+        // variable "i" to be resolved to the read_u32_be result instead of
+        // the actual loop variable. This silently corrupted call arguments
+        // like w_store(w, i, val) → w_store(w, read_u32_be_result, val).
         for &src in sources {
             if let Some(src_data) = scg.get_node(src) {
                 if let NodePayload::Computation(comp) = &src_data.payload {
                     let label = comp.kind.label();
-                    if contains_word(&label, subexpr) {
+                    // Only match if the source DEFINES the variable, not just
+                    // uses it. Definitions have the form:
+                    //   "let <var> = ..."
+                    //   "<var> = ..."
+                    //   "param <var>"
+                    //   "<var>" (exact match, already handled in first pass)
+                    let defines_var = label.starts_with(&format!("let {} =", subexpr))
+                        || label.starts_with(&format!("{} =", subexpr))
+                        || label == format!("param {}", subexpr);
+                    if defines_var && contains_word(&label, subexpr) {
                         return resolve_df_input_for_node(src, edge_idx, scg);
                     }
                 }
@@ -3580,7 +3611,7 @@ fn find_entry_points(scg: &SCG, edge_idx: &EdgeIndex) -> Vec<NodeId> {
 /// 3. **Phase 3: Statement generation** — Convert non-control nodes into
 ///    ScgStatements with DataFlow-based variable naming.
 
-fn parse_for_range(label: &str) -> Option<(String, i64, ScgExpr)> {
+fn parse_for_range(label: &str) -> Option<(String, ScgExpr, ScgExpr)> {
     let label = label.trim();
     if !label.starts_with("for ") { return None; }
     let rest = &label[4..];
@@ -3592,7 +3623,49 @@ fn parse_for_range(label: &str) -> Option<(String, i64, ScgExpr)> {
         let end_part = &range_str[dot_pos + 2..];
         let inclusive = end_part.starts_with("=");
         let end_str = if inclusive { &end_part[1..] } else { end_part }.trim();
-        let start: i64 = start_str.parse().ok()?;
+        // Start bound: can be a constant (i64) or a variable name or
+        // a parenthesized expression like "(msg_len + 1)".
+        let start_expr = if let Ok(start) = start_str.parse::<i64>() {
+            ScgExpr::Int(start)
+        } else if start_str.starts_with('(') && start_str.ends_with(')') {
+            // Parenthesized expression — strip parens and try to parse
+            // as a variable or simple binop.
+            let inner = start_str[1..start_str.len()-1].trim();
+            if let Ok(start) = inner.parse::<i64>() {
+                ScgExpr::Int(start)
+            } else if inner.chars().next().map_or(false, |c| c.is_alphabetic() || c == '_')
+                && inner.chars().all(|c| c.is_alphanumeric() || c == '_')
+            {
+                ScgExpr::Var(inner.to_string())
+            } else {
+                // Try to parse as a binop (e.g. "msg_len + 1")
+                if let Some((op, l, r)) = parse_expr_split(inner) {
+                    let lhs = if let Ok(v) = l.parse::<i64>() {
+                        ScgExpr::Int(v)
+                    } else {
+                        ScgExpr::Var(l.to_string())
+                    };
+                    let rhs = if let Ok(v) = r.parse::<i64>() {
+                        ScgExpr::Int(v)
+                    } else {
+                        ScgExpr::Var(r.to_string())
+                    };
+                    ScgExpr::BinOp {
+                        op: map_binop_kind(op),
+                        lhs: Box::new(lhs),
+                        rhs: Box::new(rhs),
+                    }
+                } else {
+                    return None;
+                }
+            }
+        } else if start_str.chars().next().map_or(false, |c| c.is_alphabetic() || c == '_')
+            && start_str.chars().all(|c| c.is_alphanumeric() || c == '_')
+        {
+            ScgExpr::Var(start_str.to_string())
+        } else {
+            return None;
+        };
         // End bound can be a constant or a variable name.  Constants are
         // parsed as i64 and wrapped in ScgExpr::Int.  Variable names are
         // wrapped in ScgExpr::Var — the IR builder resolves them via its
@@ -3619,7 +3692,7 @@ fn parse_for_range(label: &str) -> Option<(String, i64, ScgExpr)> {
         } else {
             return None;
         };
-        return Some((var_name, start, end_expr));
+        return Some((var_name, start_expr, end_expr));
     }
     None
 }
@@ -5401,7 +5474,7 @@ fn parse_while_to_for_range(
     label: &str,
     edge_idx: &EdgeIndex,
     scg: &SCG,
-) -> Option<(String, i64, ScgExpr)> {
+) -> Option<(String, ScgExpr, ScgExpr)> {
     let label = label.trim();
     let cond_str = label.strip_prefix("while")?.trim();
     let cond_str = cond_str.strip_prefix('(').unwrap_or(cond_str);
@@ -5439,11 +5512,16 @@ fn parse_while_to_for_range(
         if let NodePayload::Computation(comp) = &src_data.payload {
             if let ComputationKind::Other(lbl) = &comp.kind {
                 if let Some(eq_pos) = lbl.find("= ") {
-                    lbl[eq_pos + 2..].trim().parse::<i64>().unwrap_or(0)
-                } else { 0 }
-            } else { 0 }
-        } else { 0 }
-    } else { 0 };
+                    let start_str = lbl[eq_pos + 2..].trim();
+                    if let Ok(v) = start_str.parse::<i64>() {
+                        ScgExpr::Int(v)
+                    } else {
+                        ScgExpr::Var(start_str.to_string())
+                    }
+                } else { ScgExpr::Int(0) }
+            } else { ScgExpr::Int(0) }
+        } else { ScgExpr::Int(0) }
+    } else { ScgExpr::Int(0) };
 
     Some((var_name, start, end_expr))
 }
