@@ -2423,9 +2423,10 @@ fn convert_computation_no_calls(
                     resolve_subexpr(ptr_expr, &df_sources, edge_idx, scg)
                 };
                 // NOTE: We do NOT infer the load type from result_type here.
-                // Previous attempt to use comp.result_type caused regressions
-                // on big-endian backends (ppc64, mips64) where storing a U8
-                // and loading a U32 reads the byte in the wrong position.
+                // Previous attempts caused regressions on big-endian backends
+                // (ppc64) where storing a U8 and loading a U32 reads the byte
+                // in the wrong position. Many tests store U8 (default) and load
+                // with result_type set (e.g., "i32"), which would break.
                 // Keep ty: None (defaults to U8, zero-extended) for safety.
                 return vec![ScgStatement::Access(AccessNode::Load {
                     dst: node_var(node_id, "val"),
