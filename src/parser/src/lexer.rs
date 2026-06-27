@@ -384,6 +384,14 @@ pub enum TokenKind {
     CtSelect,
     /// `ct_eq` — constant-time equality check intrinsic
     CtEq,
+    /// `concept` — Womb data model keyword (replaces struct)
+    Concept,
+    /// `gestalt` — Womb data model keyword (replaces union/enum)
+    Gestalt,
+    /// `manifold` — Womb data model keyword (replaces array/tensor)
+    Manifold,
+    /// `aura` — Womb data model keyword (self-describing metadata)
+    Aura,
     /// Format string literal: `f"..."`
     FormatStr,
     /// Rust-style macro invocation identifier ending with `!`
@@ -549,6 +557,10 @@ impl std::fmt::Display for TokenKind {
             TokenKind::ErrKw => write!(f, "'Err'"),
             TokenKind::CtSelect => write!(f, "'ct_select'"),
             TokenKind::CtEq => write!(f, "'ct_eq'"),
+            TokenKind::Concept => write!(f, "'concept'"),
+            TokenKind::Gestalt => write!(f, "'gestalt'"),
+            TokenKind::Manifold => write!(f, "'manifold'"),
+            TokenKind::Aura => write!(f, "'aura'"),
             TokenKind::FormatStr => write!(f, "format string"),
             TokenKind::MacroIdent => write!(f, "macro identifier"),
 
@@ -666,6 +678,12 @@ fn keyword_kind(ident: &str) -> Option<TokenKind> {
         // Constant-time security intrinsics
         "ct_select" => Some(TokenKind::CtSelect),
         "ct_eq" => Some(TokenKind::CtEq),
+
+        // Womb data model keywords
+        "concept" => Some(TokenKind::Concept),
+        "gestalt" => Some(TokenKind::Gestalt),
+        "manifold" => Some(TokenKind::Manifold),
+        "aura" => Some(TokenKind::Aura),
 
         _ => None,
     }

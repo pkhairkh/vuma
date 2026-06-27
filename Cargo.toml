@@ -17,7 +17,6 @@ members = [
     "src/vuma",
     "src/bd",
     "src/cor",
-    "src/projection",
     "src/parser",
     "src/codegen",
     "src/std",
@@ -48,7 +47,6 @@ vuma-parser = { path = "src/parser" }
 vuma-cor = { path = "src/cor" }
 vuma-proof = { path = "src/proof" }
 vuma-std = { path = "src/std" }
-vuma-projection = { path = "src/projection" }
 vuma-package = { path = "src/package" }
 # External crates — pinned
 serde = { version = "1", features = ["derive"] }
