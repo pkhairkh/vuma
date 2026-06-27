@@ -2424,7 +2424,6 @@ impl IRBuilder {
                                 }
                             }
                             // Only use array stride for store type inference.
-                            // Constant-offset inference is too unreliable.
                             if let ScgExpr::BinOp { op: crate::ir::BinOpKind::Add, lhs: _, rhs } = ptr {
                                 if let ScgExpr::BinOp { op: crate::ir::BinOpKind::Mul, lhs: _, rhs } = rhs.as_ref() {
                                     if let ScgExpr::Int(stride) = rhs.as_ref() {
