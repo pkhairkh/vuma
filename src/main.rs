@@ -598,6 +598,13 @@ fn cmd_emit(
     file: &PathBuf,
     output: &Option<PathBuf>,
 ) -> Result<(), String> {
+    // NOTE: This command uses the direct AST→codegen SCG bridge
+    // (bridge_ast_to_codegen_scg) which bypasses the canonical
+    // semantic SCG pipeline. For full verification support, use
+    // `vuma build` or `vuma compile` which route through the
+    // canonical pipeline (src/pipeline.rs).
+    // TODO: Unify this path with the canonical pipeline.
+    eprintln!("[emit] Note: using direct AST→codegen path (not canonical pipeline)");
     let source = read_source(file)?;
     let backend_kind = BackendKind::from(*isa);
 
