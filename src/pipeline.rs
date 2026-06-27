@@ -2204,6 +2204,19 @@ fn convert_computation_node(
                 if op == IrBinOpKind::SRem {
                     op = IrBinOpKind::URem;
                 }
+                // Convert signed comparisons to unsigned for unsigned types
+                if op == IrBinOpKind::SLt {
+                    op = IrBinOpKind::ULt;
+                }
+                if op == IrBinOpKind::SLe {
+                    op = IrBinOpKind::ULe;
+                }
+                if op == IrBinOpKind::SGt {
+                    op = IrBinOpKind::UGt;
+                }
+                if op == IrBinOpKind::SGe {
+                    op = IrBinOpKind::UGe;
+                }
             }
             let lhs = resolve_subexpr(&lhs_str, &sources, edge_idx, scg);
             let rhs = resolve_subexpr(&rhs_str, &sources, edge_idx, scg);
@@ -2734,6 +2747,19 @@ fn convert_computation_no_calls(
             }
             if op == IrBinOpKind::SRem {
                 op = IrBinOpKind::URem;
+            }
+            // Convert signed comparisons to unsigned for unsigned types
+            if op == IrBinOpKind::SLt {
+                op = IrBinOpKind::ULt;
+            }
+            if op == IrBinOpKind::SLe {
+                op = IrBinOpKind::ULe;
+            }
+            if op == IrBinOpKind::SGt {
+                op = IrBinOpKind::UGt;
+            }
+            if op == IrBinOpKind::SGe {
+                op = IrBinOpKind::UGe;
             }
         }
         let lhs = resolve_subexpr(&lhs_str, sources, edge_idx, scg);
