@@ -2475,17 +2475,49 @@ fn convert_computation_no_calls(
                 } else {
                     resolve_subexpr(ptr_expr, &df_sources, edge_idx, scg)
                 };
-                // NOTE: We do NOT infer the load type from result_type here.
-                // Previous attempts caused regressions on big-endian backends
-                // (ppc64) where storing a U8 and loading a U32 reads the byte
-                // in the wrong position. Many tests store U8 (default) and load
-                // with result_type set (e.g., "i32"), which would break.
-                // Keep ty: None (defaults to U8, zero-extended) for safety.
+                // Infer load type from the pointer expression and result_type.
+                // If the pointer is `base + N` where N > 0 and N % 4 == 0,
+                // and the result_type is u32/i32, use U32 for the load.
+                // This handles struct field access like `*(opt + 4)` where
+                // a U32 value was stored at offset 4. On big-endian (ppc64),
+                // a U8 load at offset 4 reads the wrong byte (MSB instead of LSB).
+                //
+                // For offset 0 (tag bytes) or non-aligned offsets (byte access
+                // in read_u32_be), keep ty=None (defaults to U8).
+                let load_ty = {
+                    let mut offset_val: Option<i64> = None;
+                    if let ScgExpr::BinOp { op: vuma_codegen::ir::BinOpKind::Add, lhs: _, rhs } = &ptr {
+                        if let ScgExpr::Int(n) = rhs.as_ref() {
+                            offset_val = Some(*n);
+                        }
+                    }
+                    let rt = comp.result_type.as_deref();
+                    if let Some(off) = offset_val {
+                        if off > 0 && off % 4 == 0 {
+                            // Aligned non-zero offset — likely a U32 field
+                            if let Some("u32") = rt {
+                                Some(vuma_codegen::ir::IRType::U32)
+                            } else if let Some("i32") = rt {
+                                Some(vuma_codegen::ir::IRType::I32)
+                            } else if let Some("u64") = rt {
+                                Some(vuma_codegen::ir::IRType::U64)
+                            } else if let Some("i64") = rt {
+                                Some(vuma_codegen::ir::IRType::I64)
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                };
                 return vec![ScgStatement::Access(AccessNode::Load {
                     dst: node_var(node_id, "val"),
                     ptr,
                     offset: None,
-                    ty: None,
+                    ty: load_ty,
                 })];
             }
         }
