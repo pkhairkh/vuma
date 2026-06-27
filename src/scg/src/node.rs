@@ -370,6 +370,60 @@ impl ComputationNode {
     pub fn operation(&self) -> String {
         self.kind.label()
     }
+
+    // ── Typed classification accessors ────────────────────────────
+    //
+    // These methods classify the `ComputationKind::Other(label)` string
+    // into typed categories, replacing ad-hoc `strip_prefix` parsing
+    // scattered throughout `src/pipeline.rs`.
+    //
+    // Each method returns `Option<T>` — `None` means the label doesn't
+    // match that category.
+
+    /// Returns `Some(name)` if this node is a parameter declaration
+    /// (label format: `"param <name>"`).
+    pub fn as_param(&self) -> Option<&str> {
+        if let ComputationKind::Other(label) = &self.kind {
+            label.strip_prefix("param ").map(|s| s.trim())
+        } else {
+            None
+        }
+    }
+
+    /// Returns `Some(value)` if this node is a literal constant
+    /// (label format: `"lit_<number>"` or `"lit_true"` / `"lit_false"`).
+    pub fn as_literal(&self) -> Option<i64> {
+        if let ComputationKind::Other(label) = &self.kind {
+            if let Some(num_str) = label.strip_prefix("lit_") {
+                if let Ok(num) = num_str.parse::<i64>() {
+                    return Some(num);
+                }
+                if num_str == "true" {
+                    return Some(1);
+                }
+                if num_str == "false" {
+                    return Some(0);
+                }
+            }
+            // Also try parsing the label directly as a number
+            if let Ok(num) = label.parse::<i64>() {
+                return Some(num);
+            }
+        }
+        None
+    }
+
+    /// Returns `Some(())` if this node is a parameter or literal
+    /// (i.e., should be skipped during statement generation).
+    pub fn is_param_or_literal(&self) -> bool {
+        self.as_param().is_some() || self.as_literal().is_some()
+    }
+
+    /// Returns `Some(name)` if this node is a parameter declaration,
+    /// returning the trimmed parameter name.
+    pub fn param_name(&self) -> Option<String> {
+        self.as_param().map(|s| s.to_string())
+    }
 }
 
 /// Data specific to an allocation node.
