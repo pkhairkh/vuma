@@ -71,7 +71,14 @@ def run_one(args):
 
         if backend == "wasm32":
             os.chmod(out, 0o644)
-            cmd = [WASMTIME, "run", out]
+            # Use --invoke _vuma_main for all tests EXCEPT those that use
+            # print_int/print_hex (which write to stdout, mixing with return value).
+            # For those, use proc_exit via plain 'wasmtime run'.
+            test_name_lower = test_name.lower()
+            if "print" in test_name_lower:
+                cmd = [WASMTIME, "run", out]
+            else:
+                cmd = [WASMTIME, "run", "--invoke", "_vuma_main", out]
         elif BACKENDS[backend] is None:
             os.chmod(out, 0o755)
             cmd = ["timeout", str(EXEC_TIMEOUT), out]
@@ -83,10 +90,18 @@ def run_one(args):
             ep = subprocess.run(cmd, capture_output=True, timeout=EXEC_TIMEOUT + 3)
             rc = ep.returncode
             if backend == "wasm32":
-                # Use proc_exit exit code (same as other backends)
-                # This fixes test_print where --invoke mixed stdout with return value
-                crashed = rc < 0 or rc > 128
-                result["actual"] = rc; result["crashed"] = crashed
+                if "print" in test_name_lower:
+                    # Use proc_exit exit code for print tests
+                    crashed = rc < 0 or rc > 128
+                    result["actual"] = rc; result["crashed"] = crashed
+                else:
+                    # Use --invoke stdout for other tests
+                    stdout = ep.stdout.decode(errors="replace").strip()
+                    if rc == 0 and stdout:
+                        try: result["actual"] = int(stdout)
+                        except: result["actual"] = rc; result["crashed"] = True
+                    elif rc == 0: result["actual"] = 0
+                    else: result["actual"] = rc; result["crashed"] = True
             elif rc == 124:
                 result["timed_out"] = True; result["actual"] = 124
             else:
