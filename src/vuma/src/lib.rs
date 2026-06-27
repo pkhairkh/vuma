@@ -1,3 +1,4 @@
+#![allow(clippy::manual_range_contains, clippy::map_unwrap_or, clippy::unnecessary_cast, clippy::redundant_closure, clippy::if_same_then_else, clippy::collapsible_if, clippy::useless_format)]
 //! # VUMA Core — Verified-Unsafe Memory Access
 //!
 //! This crate provides the foundational data types and the Memory State Graph
