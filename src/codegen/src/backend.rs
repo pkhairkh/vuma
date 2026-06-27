@@ -2552,6 +2552,136 @@ impl Backend for AArch64Backend {
         func_offsets.insert("__vuma_alloc".to_string(), vuma_alloc_offset);
         func_offsets.insert("__vuma_free".to_string(), vuma_free_offset);
 
+        // ── POSIX syscall stubs ──────────────────────────────────────
+        // These provide the syscalls needed by mmap_sha256d, signal_hash,
+        // lock_free_queue, epoll_echo, and ffi_demo tests.
+        //
+        // AArch64 calling convention: args in X0-X5, return in X0.
+        // AArch64 syscall convention: args in X0-X5, syscall# in X8, SVC #0.
+        // The calling convention matches the syscall convention for most
+        // syscalls, so stubs are just: MOV X8, #num; SVC #0; RET.
+        //
+        // For syscalls that need arg shuffling (open→openat, unlink→unlinkat),
+        // extra MOV instructions are added before the syscall.
+
+        // Helper: encode MOVZ X8, #imm16
+        let movz_x8 = |imm: u32| -> [u8; 4] {
+            (0xD2800008u32 | ((imm & 0xFFFF) << 5)).to_le_bytes()
+        };
+        // Helper: encode MOV Xn, Xm (register move)
+        let mov_reg = |rd: u32, rs: u32| -> [u8; 4] {
+            (0xAA0003E0u32 | ((rs & 0x1F) << 16) | (rd & 0x1F)).to_le_bytes()
+        };
+        // Helper: encode MOVZ Xn, #imm16 (for any register)
+        let movz_reg = |rd: u32, imm: u32| -> [u8; 4] {
+            (0xD2800000u32 | ((imm & 0xFFFF) << 5) | (rd & 0x1F)).to_le_bytes()
+        };
+        // Helper: encode MOVN Xn, #imm16 (for negative values like -1)
+        let movn_reg = |rd: u32, imm: u32| -> [u8; 4] {
+            (0x92800000u32 | ((imm & 0xFFFF) << 5) | (rd & 0x1F)).to_le_bytes()
+        };
+
+        let svc: [u8; 4] = 0xD4000001u32.to_le_bytes(); // SVC #0
+        let ret: [u8; 4] = 0xD65F03C0u32.to_le_bytes(); // RET
+
+        // Build syscall stubs: (name, code)
+        let syscall_stubs: Vec<(String, Vec<u8>)> = {
+            let mut stubs: Vec<(String, Vec<u8>)> = Vec::new();
+
+            // Simple stubs (args already in correct registers X0-X5):
+            for (name, num) in [
+                ("write", 64), ("read", 63), ("close", 57), ("mmap", 222),
+                ("munmap", 215), ("exit", 94), ("alarm", 36), ("getpid", 172),
+                ("socket", 198), ("epoll_create1", 20), ("futex", 98),
+                ("execve", 221), ("wait4", 260), ("epoll_ctl", 21), ("epoll_wait", 22),
+            ] {
+                let mut code = Vec::new();
+                code.extend_from_slice(&movz_x8(num));
+                code.extend_from_slice(&svc);
+                code.extend_from_slice(&ret);
+                stubs.push((name.to_string(), code));
+            }
+
+            // open → openat(AT_FDCWD=-100, pathname, flags, mode)
+            {
+                let mut code = Vec::new();
+                code.extend_from_slice(&mov_reg(3, 2));
+                code.extend_from_slice(&mov_reg(2, 1));
+                code.extend_from_slice(&mov_reg(1, 0));
+                code.extend_from_slice(&movn_reg(0, 99));
+                code.extend_from_slice(&movz_x8(56));
+                code.extend_from_slice(&svc);
+                code.extend_from_slice(&ret);
+                stubs.push(("open".to_string(), code));
+            }
+
+            // unlink → unlinkat(AT_FDCWD=-100, pathname, 0)
+            {
+                let mut code = Vec::new();
+                code.extend_from_slice(&movz_reg(2, 0));
+                code.extend_from_slice(&mov_reg(1, 0));
+                code.extend_from_slice(&movn_reg(0, 99));
+                code.extend_from_slice(&movz_x8(35));
+                code.extend_from_slice(&svc);
+                code.extend_from_slice(&ret);
+                stubs.push(("unlink".to_string(), code));
+            }
+
+            // sigaction → rt_sigaction(signum, act, oldact, sigsetsize=8)
+            {
+                let mut code = Vec::new();
+                code.extend_from_slice(&movz_reg(3, 8));
+                code.extend_from_slice(&movz_x8(134));
+                code.extend_from_slice(&svc);
+                code.extend_from_slice(&ret);
+                stubs.push(("sigaction".to_string(), code));
+            }
+
+            // pipe → pipe2(pipefd, 0)
+            {
+                let mut code = Vec::new();
+                code.extend_from_slice(&movz_reg(1, 0));
+                code.extend_from_slice(&movz_x8(59));
+                code.extend_from_slice(&svc);
+                code.extend_from_slice(&ret);
+                stubs.push(("pipe".to_string(), code));
+            }
+
+            // dup2 → dup3(oldfd, newfd, 0)
+            {
+                let mut code = Vec::new();
+                code.extend_from_slice(&movz_reg(2, 0));
+                code.extend_from_slice(&movz_x8(24));
+                code.extend_from_slice(&svc);
+                code.extend_from_slice(&ret);
+                stubs.push(("dup2".to_string(), code));
+            }
+
+            // fork → clone(SIGCHLD, 0, 0, 0, 0)
+            {
+                let mut code = Vec::new();
+                code.extend_from_slice(&movz_reg(0, 17));
+                code.extend_from_slice(&movz_reg(1, 0));
+                code.extend_from_slice(&movz_reg(2, 0));
+                code.extend_from_slice(&movz_reg(3, 0));
+                code.extend_from_slice(&movz_reg(4, 0));
+                code.extend_from_slice(&movz_x8(220));
+                code.extend_from_slice(&svc);
+                code.extend_from_slice(&ret);
+                stubs.push(("fork".to_string(), code));
+            }
+
+            stubs
+        };
+
+        // Compute offsets for syscall stubs and register them
+        let syscall_stubs_start = vuma_free_offset + vuma_free_stub.len();
+        let mut stub_offset = syscall_stubs_start;
+        for (name, code) in &syscall_stubs {
+            func_offsets.insert(name.clone(), stub_offset);
+            stub_offset += code.len();
+        }
+
         // ── Build _start stub bytes ──
         let mut start_stub = Vec::with_capacity(start_stub_size);
 
@@ -2609,6 +2739,10 @@ impl Backend for AArch64Backend {
         // Append __vuma_alloc / __vuma_free syscall stubs.
         all_code.extend_from_slice(&vuma_alloc_stub);
         all_code.extend_from_slice(&vuma_free_stub);
+        // Append POSIX syscall stubs (write, read, open, close, mmap, etc.)
+        for (_, code) in &syscall_stubs {
+            all_code.extend_from_slice(code);
+        }
 
         // ── Patch BL relocations ──
         // Each function's relocations are relative to the start of that function's code.
