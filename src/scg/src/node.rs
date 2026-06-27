@@ -1077,3 +1077,96 @@ mod tests {
         assert_eq!(node.operation(), "match_dispatch(2_arms)");
     }
 }
+
+// ---------------------------------------------------------------------------
+// NodeVisitor trait — central dispatch to eliminate DRY violations
+// ---------------------------------------------------------------------------
+
+/// A visitor trait for dispatching on `NodePayload` without requiring
+/// every consumer to match all 25+ variants.
+///
+/// This eliminates the "11 duplicated match statements" problem identified
+/// in the codebase audit. New `NodeType` variants only need to be added
+/// here; consumers implement `visit_default()` for fallback behavior.
+///
+/// ## Usage
+///
+/// ```ignore
+/// struct MyVisitor;
+/// impl NodeVisitor for MyVisitor {
+///     type Output = String;
+///     fn visit_default(&mut self, _payload: &NodePayload) -> Self::Output {
+///         "unknown".to_string()
+///     }
+///     fn visit_computation(&mut self, c: &ComputationNode) -> Self::Output {
+///         c.kind.label()
+///     }
+///     // ... override only the variants you care about
+/// }
+///
+/// let label = MyVisitor.dispatch(&node.payload);
+/// ```
+pub trait NodeVisitor {
+    /// The output type of the visitor.
+    type Output;
+
+    /// Default fallback for any payload variant not explicitly handled.
+    fn visit_default(&mut self, payload: &NodePayload) -> Self::Output;
+
+    // ── Existing node types (override as needed) ──
+    fn visit_computation(&mut self, c: &ComputationNode, payload: &NodePayload) -> Self::Output { let _ = c; self.visit_default(payload) }
+    fn visit_allocation(&mut self, a: &AllocationNode, payload: &NodePayload) -> Self::Output { let _ = a; self.visit_default(payload) }
+    fn visit_deallocation(&mut self, d: &DeallocationNode, payload: &NodePayload) -> Self::Output { let _ = d; self.visit_default(payload) }
+    fn visit_access(&mut self, a: &AccessNode, payload: &NodePayload) -> Self::Output { let _ = a; self.visit_default(payload) }
+    fn visit_cast(&mut self, c: &CastNode, payload: &NodePayload) -> Self::Output { let _ = c; self.visit_default(payload) }
+    fn visit_effect(&mut self, e: &EffectNode, payload: &NodePayload) -> Self::Output { let _ = e; self.visit_default(payload) }
+    fn visit_control(&mut self, c: &ControlNode, payload: &NodePayload) -> Self::Output { let _ = c; self.visit_default(payload) }
+    fn visit_phantom(&mut self, p: &PhantomNode, payload: &NodePayload) -> Self::Output { let _ = p; self.visit_default(payload) }
+    fn visit_vtable(&mut self, v: &VTableNode, payload: &NodePayload) -> Self::Output { let _ = v; self.visit_default(payload) }
+    fn visit_closure_env(&mut self, c: &ClosureEnvNode, payload: &NodePayload) -> Self::Output { let _ = c; self.visit_default(payload) }
+
+    // ── Womb data model node types ──
+    fn visit_concept_decl(&mut self, c: &ConceptDeclNode, payload: &NodePayload) -> Self::Output { let _ = c; self.visit_default(payload) }
+    fn visit_concept_field(&mut self, c: &ConceptFieldNode, payload: &NodePayload) -> Self::Output { let _ = c; self.visit_default(payload) }
+    fn visit_concept_access(&mut self, c: &ConceptAccessNode, payload: &NodePayload) -> Self::Output { let _ = c; self.visit_default(payload) }
+    fn visit_gestalt_decl(&mut self, g: &GestaltDeclNode, payload: &NodePayload) -> Self::Output { let _ = g; self.visit_default(payload) }
+    fn visit_gestalt_interpret(&mut self, g: &GestaltInterpretNode, payload: &NodePayload) -> Self::Output { let _ = g; self.visit_default(payload) }
+    fn visit_context_assert(&mut self, c: &ContextAssertNode, payload: &NodePayload) -> Self::Output { let _ = c; self.visit_default(payload) }
+    fn visit_manifold_decl(&mut self, m: &ManifoldDeclNode, payload: &NodePayload) -> Self::Output { let _ = m; self.visit_default(payload) }
+    fn visit_manifold_query(&mut self, m: &ManifoldQueryNode, payload: &NodePayload) -> Self::Output { let _ = m; self.visit_default(payload) }
+    fn visit_manifold_slice(&mut self, m: &ManifoldSliceNode, payload: &NodePayload) -> Self::Output { let _ = m; self.visit_default(payload) }
+    fn visit_aura_attach(&mut self, a: &AuraAttachNode, payload: &NodePayload) -> Self::Output { let _ = a; self.visit_default(payload) }
+    fn visit_aura_query(&mut self, a: &AuraQueryNode, payload: &NodePayload) -> Self::Output { let _ = a; self.visit_default(payload) }
+    fn visit_aura_update(&mut self, a: &AuraUpdateNode, payload: &NodePayload) -> Self::Output { let _ = a; self.visit_default(payload) }
+
+    /// Central dispatch — calls the appropriate visit_* method.
+    /// This is the ONLY match statement that needs updating when a new
+    /// NodePayload variant is added.
+    fn dispatch(&mut self, payload: &NodePayload) -> Self::Output {
+        match payload {
+            NodePayload::Computation(c) => self.visit_computation(c, payload),
+            NodePayload::Allocation(a) => self.visit_allocation(a, payload),
+            NodePayload::Deallocation(d) => self.visit_deallocation(d, payload),
+            NodePayload::Access(a) => self.visit_access(a, payload),
+            NodePayload::Cast(c) => self.visit_cast(c, payload),
+            NodePayload::Effect(e) => self.visit_effect(e, payload),
+            NodePayload::Control(c) => self.visit_control(c, payload),
+            NodePayload::Phantom(p) => self.visit_phantom(p, payload),
+            NodePayload::VTable(v) => self.visit_vtable(v, payload),
+            NodePayload::ClosureEnv(c) => self.visit_closure_env(c, payload),
+            NodePayload::ConceptDecl(c) => self.visit_concept_decl(c, payload),
+            NodePayload::ConceptField(c) => self.visit_concept_field(c, payload),
+            NodePayload::ConceptAccess(c) => self.visit_concept_access(c, payload),
+            NodePayload::GestaltDecl(g) => self.visit_gestalt_decl(g, payload),
+            NodePayload::GestaltInterpret(g) => self.visit_gestalt_interpret(g, payload),
+            NodePayload::ContextAssert(c) => self.visit_context_assert(c, payload),
+            NodePayload::ManifoldDecl(m) => self.visit_manifold_decl(m, payload),
+            NodePayload::ManifoldQuery(m) => self.visit_manifold_query(m, payload),
+            NodePayload::ManifoldSlice(m) => self.visit_manifold_slice(m, payload),
+            NodePayload::AuraAttach(a) => self.visit_aura_attach(a, payload),
+            NodePayload::AuraQuery(a) => self.visit_aura_query(a, payload),
+            NodePayload::AuraUpdate(a) => self.visit_aura_update(a, payload),
+            _ => self.visit_default(payload),
+        }
+    }
+}

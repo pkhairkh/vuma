@@ -1264,6 +1264,9 @@ fn repd_kind_name(repd: &RepD) -> String {
         RepD::Union(_) => "Union".to_string(),
         RepD::Func(_) => "Func".to_string(),
         RepD::Generic { .. } => "Generic".to_string(),
+        RepD::ManifoldSpatial(_) => "ManifoldSpatial".to_string(),
+        RepD::GestaltSuperposition(_) => "GestaltSuperposition".to_string(),
+        RepD::ConceptRelational(_) => "ConceptRelational".to_string(),
     }
 }
 

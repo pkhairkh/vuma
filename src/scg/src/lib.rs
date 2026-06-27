@@ -73,6 +73,10 @@ pub use node::{
     ProgramPoint, SpaceFillingCurve, VTableNode,
 };
 
+/// Central visitor trait for dispatching on NodePayload.
+/// Eliminates the "11 duplicated match statements" DRY violation.
+pub use node::NodeVisitor;
+
 // -- Edge types --
 pub use edge::{EdgeData, EdgeId, EdgeKind};
 
