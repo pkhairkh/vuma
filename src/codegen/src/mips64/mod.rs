@@ -2895,8 +2895,75 @@ fn mips64_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, 
                     match op {
                         UnaryOpKind::Neg => { code.extend_from_slice(&Instruction::Dsubu { rd: Gpr::T0, rs: Gpr::Zero, rt: Gpr::T0 }.encode()); code.extend_from_slice(&encode_nop()); }
                         UnaryOpKind::Not => { code.extend_from_slice(&Instruction::Nor { rd: Gpr::T0, rs: Gpr::T0, rt: Gpr::Zero }.encode()); code.extend_from_slice(&encode_nop()); }
-                        UnaryOpKind::Clz | UnaryOpKind::Ctz | UnaryOpKind::Popcnt => {
-                            // Simplified: just return the value for now
+                        UnaryOpKind::Clz => {
+                            // MIPS32 CLZ: count leading zeros using a loop
+                            // T0 = input, T1 = count, T2 = mask
+                            // CLZ: shift left until MSB is 1, count shifts
+                            // Use MIPSR2 CLZ instruction if available (opcode COP1)
+                            // For now, implement via loop:
+                            // T1 = 0; T2 = 1 << 63; while (T0 & T2) == 0 { T1++; T2 >>= 1; }
+                            // Simplified: use SNEZ+CLZ emulation
+                            // Actually MIPS has CLZ in MIPSR2 (special3 opcode)
+                            // For simplicity, return 64 - popcount(~x & (x-1)) approximation
+                            // Or better: just return 64 for 0, else use a loop
+                            // Simplest correct: T1 = 64; while T0 != 0 { T0 <<= 1; T1--; }
+                            code.extend_from_slice(&Instruction::Lui { rt: Gpr::T1, imm: 0 }.encode()); // T1 = 0 (high)
+                            code.extend_from_slice(&Instruction::Ori { rt: Gpr::T1, rs: Gpr::T1, imm: 64 }.encode()); // T1 = 64
+                            code.extend_from_slice(&encode_nop());
+                            // Loop: while T0 != 0 { T0 <<= 1; T1-- }
+                            let loop_start = code.len();
+                            code.extend_from_slice(&Instruction::Beq { rs: Gpr::T0, rt: Gpr::Zero, offset: 5 }.encode()); // if T0 == 0, exit (skip 5 instrs)
+                            code.extend_from_slice(&encode_nop()); // delay slot
+                            code.extend_from_slice(&Instruction::Dsll { rd: Gpr::T0, rt: Gpr::T0, sa: 1 }.encode()); // T0 <<= 1
+                            code.extend_from_slice(&encode_nop());
+                            code.extend_from_slice(&Instruction::Daddiu { rt: Gpr::T1, rs: Gpr::T1, imm: -1 }.encode()); // T1--
+                            code.extend_from_slice(&encode_nop());
+                            code.extend_from_slice(&Instruction::Beq { rs: Gpr::Zero, rt: Gpr::Zero, offset: -7 }.encode()); // unconditional back
+                            code.extend_from_slice(&encode_nop()); // delay slot
+                            // Move T1 to T0 (result)
+                            code.extend_from_slice(&Instruction::Or { rd: Gpr::T0, rs: Gpr::T1, rt: Gpr::Zero }.encode());
+                            code.extend_from_slice(&encode_nop());
+                        }
+                        UnaryOpKind::Ctz => {
+                            // CTZ: count trailing zeros
+                            // T1 = 0; while (T0 & 1) == 0 { T1++; T0 >>= 1; }
+                            code.extend_from_slice(&Instruction::Lui { rt: Gpr::T1, imm: 0 }.encode());
+                            code.extend_from_slice(&Instruction::Ori { rt: Gpr::T1, rs: Gpr::T1, imm: 0 }.encode()); // T1 = 0
+                            code.extend_from_slice(&encode_nop());
+                            let loop_start = code.len();
+                            code.extend_from_slice(&Instruction::Andi { rt: Gpr::T2, rs: Gpr::T0, imm: 1 }.encode()); // T2 = T0 & 1
+                            code.extend_from_slice(&encode_nop());
+                            code.extend_from_slice(&Instruction::Bne { rs: Gpr::T2, rt: Gpr::Zero, offset: 5 }.encode()); // if T2 != 0, exit
+                            code.extend_from_slice(&encode_nop()); // delay slot
+                            code.extend_from_slice(&Instruction::Dsrl { rd: Gpr::T0, rt: Gpr::T0, sa: 1 }.encode()); // T0 >>= 1
+                            code.extend_from_slice(&encode_nop());
+                            code.extend_from_slice(&Instruction::Daddiu { rt: Gpr::T1, rs: Gpr::T1, imm: 1 }.encode()); // T1++
+                            code.extend_from_slice(&encode_nop());
+                            code.extend_from_slice(&Instruction::Beq { rs: Gpr::Zero, rt: Gpr::Zero, offset: -7 }.encode()); // unconditional back
+                            code.extend_from_slice(&encode_nop()); // delay slot
+                            code.extend_from_slice(&Instruction::Or { rd: Gpr::T0, rs: Gpr::T1, rt: Gpr::Zero }.encode());
+                            code.extend_from_slice(&encode_nop());
+                        }
+                        UnaryOpKind::Popcnt => {
+                            // POPCNT: count set bits using Hamming weight
+                            // Standard algorithm: x = (x & 0x55...) + ((x >> 1) & 0x55...)
+                            // For simplicity, use a loop: T1 = 0; while T0 != 0 { T1 += T0 & 1; T0 >>= 1; }
+                            code.extend_from_slice(&Instruction::Lui { rt: Gpr::T1, imm: 0 }.encode());
+                            code.extend_from_slice(&Instruction::Ori { rt: Gpr::T1, rs: Gpr::T1, imm: 0 }.encode()); // T1 = 0
+                            code.extend_from_slice(&encode_nop());
+                            let loop_start = code.len();
+                            code.extend_from_slice(&Instruction::Beq { rs: Gpr::T0, rt: Gpr::Zero, offset: 5 }.encode()); // if T0 == 0, exit
+                            code.extend_from_slice(&encode_nop()); // delay slot
+                            code.extend_from_slice(&Instruction::Andi { rt: Gpr::T2, rs: Gpr::T0, imm: 1 }.encode()); // T2 = T0 & 1
+                            code.extend_from_slice(&encode_nop());
+                            code.extend_from_slice(&Instruction::Daddu { rd: Gpr::T1, rs: Gpr::T1, rt: Gpr::T2 }.encode()); // T1 += T2
+                            code.extend_from_slice(&encode_nop());
+                            code.extend_from_slice(&Instruction::Dsrl { rd: Gpr::T0, rt: Gpr::T0, sa: 1 }.encode()); // T0 >>= 1
+                            code.extend_from_slice(&encode_nop());
+                            code.extend_from_slice(&Instruction::Beq { rs: Gpr::Zero, rt: Gpr::Zero, offset: -8 }.encode()); // unconditional back
+                            code.extend_from_slice(&encode_nop()); // delay slot
+                            code.extend_from_slice(&Instruction::Or { rd: Gpr::T0, rs: Gpr::T1, rt: Gpr::Zero }.encode());
+                            code.extend_from_slice(&encode_nop());
                         }
                     }
                     code.extend(ss_sd(Gpr::T0, dst_off));
