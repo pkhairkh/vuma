@@ -1739,7 +1739,7 @@ impl IRBuilder {
     /// Removing the phi nodes here would break both the analysis passes and
     /// the `scg_to_ir` tests that assert phi presence in merge / loop-header
     /// blocks.
-    fn resolve_phis(&self, ir_func: &mut IRFunction) -> Result<()> {
+    fn resolve_phis(&mut self, ir_func: &mut IRFunction) -> Result<()> {
         // Build a label → block-index map
         let label_to_idx: HashMap<String, usize> = ir_func.blocks
             .iter()
@@ -1759,37 +1759,73 @@ impl IRBuilder {
             }
         }
 
-        // For each phi, insert copies at the end of predecessor blocks,
-        // BEFORE any Branch instruction (so the copies execute before the jump).
+        // ── Group phi copies by predecessor block ──
+        //
+        // For each predecessor, we collect a list of (dst, src) pairs that
+        // must execute "in parallel" at the end of that block (before the
+        // branch to the phi's block).
+        //
+        // We then emit them using a parallel-copy algorithm that handles
+        // cycles correctly. Without this, two phis that swap values
+        //   a = phi(b),  b = phi(a)
+        // would be lowered to:
+        //   a = b + 0   (a's slot now has b's old value)
+        //   b = a + 0   (b's slot now has b's old value — WRONG, should be a's old)
+        // causing the second phi to read the wrong value.
+        //
+        // The algorithm:
+        //   1. Build a worklist of pending (dst, src) copies.
+        //   2. Repeatedly scan the worklist for a copy whose `src` is not
+        //      the `dst` of any other pending copy. Emit it.
+        //   3. If no such copy exists, we have a cycle. Pick any copy,
+        //      save its `src` to a fresh temp vreg, replace all pending
+        //      uses of that `src` with the temp, then emit the copy.
+        //   4. Repeat until the worklist is empty.
+        //
+        // The temp vreg is allocated via `self.alloc_vreg()` and gets its
+        // own stack slot in the emitter, so it cannot alias with any
+        // existing vreg.
+
+        // Map: pred_label → Vec<(dst, src)>
+        let mut copies_by_pred: HashMap<String, Vec<(IRValue, IRValue)>> = HashMap::new();
         for (_phi_block_idx, dst, incoming) in &all_phis {
             for (value, pred_label) in incoming {
                 // Skip self-referencing entries (where the value == dst)
                 if value == dst {
                     continue;
                 }
-
-                if let Some(&pred_idx) = label_to_idx.get(pred_label) {
-                    // Insert a copy instruction before the terminator
-                    // The copy is: dst = value, which is BinOp::Add(value, 0)
-                    // (We use Add with 0 as a move, matching the existing pattern)
-                    let copy_instr = IRInstruction::Add {
-                        dst: dst.clone(),
-                        lhs: value.clone(),
-                        rhs: IRValue::Immediate(0),
-                        ty: None,
-                    };
-
-                    // Insert BEFORE the last instruction if it's a Branch.
-                    // This ensures the copy executes before the jump.
-                    let block = &mut ir_func.blocks[pred_idx];
-                    if let Some(IRInstruction::Branch { .. }) = block.instructions.last() {
-                        // Insert before the Branch
-                        block.instructions.insert(block.instructions.len() - 1, copy_instr);
-                    } else {
-                        // No Branch at end — just append
-                        block.instructions.push(copy_instr);
-                    }
+                // Skip pure immediate sources that match dst (no-op)
+                if let IRValue::Immediate(_) = value {
+                    // Immediate sources have no slot to clobber, so they're always safe.
+                    // We still emit them (the dst gets the immediate value).
                 }
+                copies_by_pred
+                    .entry(pred_label.clone())
+                    .or_default()
+                    .push((dst.clone(), value.clone()));
+            }
+        }
+
+        // For each predecessor block, emit the parallel copies.
+        for (pred_label, copies) in &copies_by_pred {
+            let Some(&pred_idx) = label_to_idx.get(pred_label) else {
+                continue;
+            };
+
+            // Run the parallel-copy algorithm.
+            let emitted = self.emit_parallel_copies(copies.clone(), ir_func)?;
+
+            // Insert all emitted instructions before the terminator (Branch).
+            let block = &mut ir_func.blocks[pred_idx];
+            if let Some(IRInstruction::Branch { .. }) = block.instructions.last() {
+                // Insert before the Branch
+                let insert_at = block.instructions.len() - 1;
+                for (i, instr) in emitted.into_iter().enumerate() {
+                    block.instructions.insert(insert_at + i, instr);
+                }
+            } else {
+                // No Branch at end — just append
+                block.instructions.extend(emitted);
             }
         }
 
@@ -1799,6 +1835,113 @@ impl IRBuilder {
         }
 
         Ok(())
+    }
+
+    /// Emit a list of (dst, src) copies using a parallel-copy algorithm.
+    ///
+    /// Handles cyclic dependencies (e.g. swaps) by introducing temporary
+    /// vregs. Returns the ordered list of IR instructions to emit.
+    ///
+    /// The copies are emitted as `Add { dst, lhs: src, rhs: Imm(0), ty: None }`
+    /// which the stack-slot emitter lowers to a register-level load+store
+    /// (with no actual arithmetic, since adding zero is a no-op).
+    fn emit_parallel_copies(
+        &mut self,
+        mut copies: Vec<(IRValue, IRValue)>,
+        ir_func: &mut IRFunction,
+    ) -> Result<Vec<IRInstruction>> {
+        let mut emitted: Vec<IRInstruction> = Vec::new();
+
+        // Helper: make a copy instruction for (dst, src).
+        let make_copy = |dst: &IRValue, src: &IRValue| IRInstruction::Add {
+            dst: dst.clone(),
+            lhs: src.clone(),
+            rhs: IRValue::Immediate(0),
+            ty: None,
+        };
+
+        // Helper: extract register id from an IRValue (if any).
+        let reg_id = |v: &IRValue| match v {
+            IRValue::Register(id) => Some(*id),
+            _ => None,
+        };
+
+        // Repeat until all copies are emitted.
+        while !copies.is_empty() {
+            // Find a copy whose src register is not the dst of any other pending copy.
+            // (Immediate sources are always safe to emit since they don't read slots.)
+            let mut ready_idx: Option<usize> = None;
+            for (i, (_dst, src)) in copies.iter().enumerate() {
+                let src_reg = reg_id(src);
+                if src_reg.is_none() {
+                    // Immediate / address source — always safe.
+                    ready_idx = Some(i);
+                    break;
+                }
+                let src_reg = src_reg.unwrap();
+                let conflicts = copies.iter().any(|(d, _s)| {
+                    if let IRValue::Register(d_id) = d {
+                        *d_id == src_reg
+                    } else {
+                        false
+                    }
+                });
+                if !conflicts {
+                    ready_idx = Some(i);
+                    break;
+                }
+            }
+
+            if let Some(i) = ready_idx {
+                // Emit this copy.
+                let (dst, src) = copies.remove(i);
+                emitted.push(make_copy(&dst, &src));
+            } else {
+                // All remaining copies form cycles. Pick the first one
+                // and break the cycle by saving its src to a temp vreg.
+                let (dst, src) = copies[0].clone();
+                let src_reg = match reg_id(&src) {
+                    Some(r) => r,
+                    None => {
+                        // Shouldn't happen — immediates are always ready.
+                        copies.remove(0);
+                        emitted.push(make_copy(&dst, &src));
+                        continue;
+                    }
+                };
+
+                // Allocate a fresh temp vreg.
+                let temp_id = self.alloc_vreg();
+                ir_func.register_vreg(VirtualRegister::anonymous(temp_id));
+
+                // Emit: temp = src  (saves src's value before any overwrite)
+                emitted.push(IRInstruction::Add {
+                    dst: IRValue::Register(temp_id),
+                    lhs: IRValue::Register(src_reg),
+                    rhs: IRValue::Immediate(0),
+                    ty: None,
+                });
+
+                // Replace all pending uses of `src_reg` with `temp_id`.
+                for (d, s) in copies.iter_mut() {
+                    if let IRValue::Register(s_id) = s {
+                        if *s_id == src_reg {
+                            *s = IRValue::Register(temp_id);
+                            // Avoid double-replacement: change s_id to a sentinel.
+                            // (We do this by leaving it as temp_id — fine because
+                            // we won't match src_reg again on this vreg.)
+                        }
+                    }
+                    // Also: if `d` is the dst of this very copy (dst == dst), skip.
+                    // (Self-copies are filtered out earlier, so this shouldn't happen.)
+                }
+
+                // Now this copy's src is `temp_id`, which is not the dst of any
+                // pending copy → it will be picked up in the next iteration.
+            }
+        }
+
+        Ok(emitted)
     }
 
     /// Lower a `break` to a jump to the enclosing loop's exit label.
