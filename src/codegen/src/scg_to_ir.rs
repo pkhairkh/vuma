@@ -2404,6 +2404,11 @@ impl IRBuilder {
                 // load type inference. This is critical for big-endian (ppc64):
                 // if a U64 value is stored as U8, only 1 byte is written. When
                 // a U64 load reads all 8 bytes, 7 bytes are garbage on ppc64.
+                //
+                // IMPORTANT: For immediate values, only infer U32/U64 when the
+                // value is too large to fit in a byte (> 255). This prevents
+                // `*(buf + 4) = 4` from being stored as U32 (which would
+                // overwrite bytes 4-7) when the intent is a byte store.
                 let store_ty = ty.clone().unwrap_or_else(|| {
                     if let IRValue::Register(vid) = val {
                         if self.pointer_vregs.contains(&vid) {
@@ -2419,13 +2424,13 @@ impl IRBuilder {
                                 }
                             }
                             // Infer from pointer expression (same logic as loads)
-                            // Check for constant offset: base + N where N > 0 and N % 4 == 0
+                            // Check for constant offset: base + N
                             if let ScgExpr::BinOp { op: crate::ir::BinOpKind::Add, lhs: _, rhs } = ptr {
                                 if let ScgExpr::Int(n) = rhs.as_ref() {
-                                    if *n > 0 && *n % 8 == 0 {
+                                    if *n >= 8 && *n % 8 == 0 {
                                         return IRType::U64;
                                     }
-                                    if *n > 0 && *n % 4 == 0 {
+                                    if *n == 4 {
                                         return IRType::U32;
                                     }
                                 }
@@ -2445,26 +2450,43 @@ impl IRBuilder {
                             IRType::U8
                         }
                     } else {
-                        // For immediate values, also infer from pointer expression
-                        // This handles `*(p + 8) = 20` where 20 fits in U64.
-                        if let ScgExpr::BinOp { op: crate::ir::BinOpKind::Add, lhs: _, rhs } = ptr {
+                        // For immediate values, only infer U32/U64 when the
+                        // value is too large to fit in a byte (> 255) OR when
+                        // the offset is >= 4 (struct field stores).
+                        // This prevents `*(buf + 4) = 4` from being stored as U32
+                        // (which would overwrite bytes 4-7) while still allowing
+                        // `*(p + 8) = 20` to be stored as U64.
+                        let imm_too_large_for_byte = match &val {
+                            IRValue::Immediate(v) => *v > 255 || *v < 0,
+                            IRValue::Address(a) => *a > 255,
+                            _ => false,
+                        };
+                        let offset_is_struct_field = if let ScgExpr::BinOp { op: crate::ir::BinOpKind::Add, lhs: _, rhs } = ptr {
                             if let ScgExpr::Int(n) = rhs.as_ref() {
-                                if *n > 0 && *n % 8 == 0 {
-                                    return IRType::U64;
-                                }
-                                if *n > 0 && *n % 4 == 0 {
-                                    return IRType::U32;
+                                *n >= 8 && *n % 8 == 0
+                            } else { false }
+                        } else { false };
+
+                        if imm_too_large_for_byte || offset_is_struct_field {
+                            if let ScgExpr::BinOp { op: crate::ir::BinOpKind::Add, lhs: _, rhs } = ptr {
+                                if let ScgExpr::Int(n) = rhs.as_ref() {
+                                    if *n >= 8 && *n % 8 == 0 {
+                                        return IRType::U64;
+                                    }
+                                    if *n == 4 && imm_too_large_for_byte {
+                                        return IRType::U32;
+                                    }
                                 }
                             }
-                        }
-                        if let ScgExpr::BinOp { op: crate::ir::BinOpKind::Add, lhs: _, rhs } = ptr {
-                            if let ScgExpr::BinOp { op: crate::ir::BinOpKind::Mul, lhs: _, rhs } = rhs.as_ref() {
-                                if let ScgExpr::Int(stride) = rhs.as_ref() {
-                                    return match *stride {
-                                        8 => IRType::U64,
-                                        4 => IRType::U32,
-                                        _ => IRType::U8,
-                                    };
+                            if let ScgExpr::BinOp { op: crate::ir::BinOpKind::Add, lhs: _, rhs } = ptr {
+                                if let ScgExpr::BinOp { op: crate::ir::BinOpKind::Mul, lhs: _, rhs } = rhs.as_ref() {
+                                    if let ScgExpr::Int(stride) = rhs.as_ref() {
+                                        return match *stride {
+                                            8 => IRType::U64,
+                                            4 => IRType::U32,
+                                            _ => IRType::U8,
+                                        };
+                                    }
                                 }
                             }
                         }
