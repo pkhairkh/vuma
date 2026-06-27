@@ -2362,7 +2362,18 @@ impl IRBuilder {
                         // store at the call site may use U8 (byte store) while
                         // the return type is U32, causing a type mismatch on
                         // big-endian (ppc64).
-                        let ptr_has_offset = matches!(ptr, ScgExpr::BinOp { .. });
+                        let ptr_has_offset = match ptr {
+                            ScgExpr::BinOp { op: crate::ir::BinOpKind::Add, lhs: _, rhs } => {
+                                // Only count as "has offset" if the offset is
+                                // non-zero. *(p + 0) is equivalent to *p.
+                                match rhs.as_ref() {
+                                    ScgExpr::Int(n) => *n != 0,
+                                    ScgExpr::BinOp { .. } => true, // idx * stride
+                                    _ => true, // variable offset
+                                }
+                            }
+                            _ => false,
+                        };
                         if ptr_has_offset {
                             if let Some(ret_ty) = &self.current_return_type {
                                 if !matches!(ret_ty, IRType::Ptr) {
