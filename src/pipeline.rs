@@ -2188,12 +2188,16 @@ fn convert_computation_node(
         if let Some((mut op, lhs_str, rhs_str)) = parse_expr_split(&expr_str) {
             // Type-aware >> shift
             if op == IrBinOpKind::ShrA {
-                let is_unsigned = comp
+                // In VUMA, >> defaults to logical (unsigned) shift unless the
+                // result_type is explicitly signed (i8/i16/i32/i64).
+                // This is because VUMA uses u32 as the default integer type
+                // and masks with & 4294967295 for unsigned semantics.
+                let is_signed = comp
                     .result_type
                     .as_deref()
-                    .map(|t| t.starts_with('u'))
+                    .map(|t| t.starts_with('i'))
                     .unwrap_or(false);
-                if is_unsigned {
+                if !is_signed {
                     op = IrBinOpKind::ShrL;
                 }
             }
@@ -2711,12 +2715,14 @@ fn convert_computation_no_calls(
 
     if let Some((mut op, lhs_str, rhs_str)) = parse_expr_split(&expr_str) {
         if op == IrBinOpKind::ShrA {
-            let is_unsigned = comp
+            // In VUMA, >> defaults to logical (unsigned) shift unless the
+            // result_type is explicitly signed (i8/i16/i32/i64).
+            let is_signed = comp
                 .result_type
                 .as_deref()
-                .map(|t| t.starts_with('u'))
+                .map(|t| t.starts_with('i'))
                 .unwrap_or(false);
-            if is_unsigned {
+            if !is_signed {
                 op = IrBinOpKind::ShrL;
             }
         }
@@ -2875,6 +2881,31 @@ fn strip_outer_parens(expr: &str) -> &str {
         return &expr[1..expr.len() - 1];
     }
     expr
+}
+
+/// Check if an expression is likely unsigned by looking up the source node's
+/// type information. Used to decide ShrL vs ShrA for `>>` operators.
+fn is_expr_unsigned(expr: &str, scg: &SCG, sources: &[NodeId]) -> bool {
+    let expr = expr.trim();
+    // If the expression is a simple variable name, check the source nodes
+    for &src_id in sources {
+        if let Some(node) = scg.get_node(src_id) {
+            if let vuma_scg::node::NodePayload::Computation(c) = &node.payload {
+                // Check if this node defines the expression variable
+                let label = c.kind.label();
+                if label.contains(expr) {
+                    // Check if the node's result_type is unsigned
+                    if let Some(ref rt) = c.result_type {
+                        if rt.starts_with('u') {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Default: assume signed (safer for arithmetic shifts)
+    false
 }
 
 /// Resolve a sub-expression string to an ScgExpr.
@@ -3041,6 +3072,13 @@ fn resolve_subexpr(
     
     // For complex sub-expressions, recursively parse and return BinOp
     if let Some((op, lhs_str, rhs_str)) = parse_expr_split(subexpr) {
+        // In VUMA, >> defaults to logical (unsigned) shift.
+        // Only use arithmetic shift if explicitly dealing with signed types.
+        let op = if op == IrBinOpKind::ShrA {
+            IrBinOpKind::ShrL
+        } else {
+            op
+        };
         let lhs = resolve_subexpr(&lhs_str, sources, edge_idx, scg);
         let rhs = resolve_subexpr(&rhs_str, sources, edge_idx, scg);
         // Map IrBinOpKind to the codegen BinOpKind
