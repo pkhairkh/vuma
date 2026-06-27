@@ -1389,6 +1389,7 @@ impl IRBuilder {
 
         // ── Step 1: Snapshot names BEFORE the loop ──
         let names_before = names.clone();
+        eprintln!("[lower_loop] names_before has {} keys, 'a'={:?}", names_before.len(), names_before.get("a"));
 
         // ── Step 2: Jump from current block to loop header ──
         ir_func.current_block().push(IRInstruction::Branch {
@@ -1516,7 +1517,9 @@ impl IRBuilder {
 
         // ── Step 4: Lower the loop body ──
         ir_func.append_block(&loop_body_label);
+        eprintln!("[lower_loop] body has {} statements", body.len());
         self.lower_statements(body, ir_func, names)?;
+        eprintln!("[lower_loop] after body, names['a']={:?}", names.get("a"));
 
         // ── Step 4b: Emit the continue target block (for for-loops) ──
         // This block contains the loop increment and back-edge to header.
@@ -1596,6 +1599,7 @@ impl IRBuilder {
                                 // Get the latest vreg for this name
                                 let latest_vreg = name_to_latest.get(name).copied()
                                     .or_else(|| names.get(name).copied());
+                                eprintln!("[phi_patch] phi={:?} name={:?} latest={:?} names[name]={:?}", phi_vreg_id, name, latest_vreg, names.get(name));
                                 if let Some(current_vreg) = latest_vreg {
                                     for entry in incoming.iter_mut() {
                                         if entry.1 == loop_body_label || entry.1 == back_edge_label {
@@ -1812,6 +1816,7 @@ impl IRBuilder {
         // Map: pred_label → Vec<(dst, src)>
         let mut copies_by_pred: HashMap<String, Vec<(IRValue, IRValue)>> = HashMap::new();
         for (_phi_block_idx, dst, incoming) in &all_phis {
+            eprintln!("[resolve_phis] Phi dst={:?} incoming={:?}", dst, incoming);
             for (value, pred_label) in incoming {
                 // Skip self-referencing entries (where the value == dst)
                 if value == dst {
@@ -2753,6 +2758,14 @@ impl IRBuilder {
                 let vreg = self.alloc_vreg();
                 ir_func.register_vreg(VirtualRegister::named(vreg, name));
                 names.insert(name.clone(), vreg);
+                // Also set the user-visible variable name (from reassigns)
+                // so that subsequent references and phi resolution can find it.
+                // Without this, a let-binding like `a = read_u32_be(...)`
+                // would only set names["v_N"], not names["a"], and the
+                // compression loop's phi for "a" would not see the
+                // reassignment's new value, causing the back-edge to be
+                // self-referential.
+                if let Some(ref r) = call.reassigns { names.insert(r.clone(), vreg); }
                 Some(IRValue::Register(vreg))
             }
             None => None,
