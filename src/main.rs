@@ -41,7 +41,9 @@ struct Cli {
     #[arg(long, global = true, value_enum, default_value = "O2")]
     opt_level: OptLevelArg,
 
-    /// Verification level (overrides subcommand default)
+    /// Verification level (overrides subcommand default).
+    /// Use `--verification none` to bypass verification (equivalent to
+    /// `--allow-unverified`). Default is `normal` (strict).
     #[arg(long, global = true, value_enum, default_value = "normal")]
     verification: VerificationArg,
 
