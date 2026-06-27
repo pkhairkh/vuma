@@ -1,5 +1,4 @@
 use vuma_parser::{Parser, AstToScg};
-use vuma_scg::{EdgeKind, NodePayload};
 use vuma::pipeline::{CompileConfig, run_scg_transforms, OptLevel};
 fn main() {
     let args: Vec<String> = std::env::args().collect();

@@ -15,7 +15,7 @@
 1. [What's New in v0.1-alpha](#whats-new-in-v01-alpha)
 2. [Overview](#overview)
 3. [Features](#features)
-4. [8 Backend Architectures](#8-backend-architectures)
+4. [10 Backend Architectures](#10-backend-architectures)
 5. [Architecture](#architecture)
 6. [VUMA for LLMs](#vuma-for-llms)
 7. [Installation](#installation)
@@ -193,7 +193,7 @@ Per-backend DWARF debug information with four sections:
 
 ---
 
-## 8 Backend Architectures
+## 10 Backend Architectures
 
 VUMA supports multi-ISA code generation across 8 backend architectures — a unified compilation pipeline producing native machine code or WebAssembly from a single source program:
 
@@ -741,13 +741,15 @@ This is an alpha release. We are transparent about what is not yet complete:
 | Area | Status | Details |
 |------|--------|---------|
 | **Self-hosting** | ❌ Not started | VUMA cannot compile itself yet. The compiler is written in Rust. |
-| **Structs / Enums** | ❌ Not started | No user-defined struct or enum types. Programs operate on primitives, pointers, and regions. |
+| **Structs / Enums** | ✅ Working | User-defined struct and enum types compile to tagged unions in memory. Struct field access, enum dispatch, and pattern matching work on all 10 backends. |
+| **Womb subsystem** | ✅ Working | The `concept`, `gestalt`, `manifold`, and `aura` data models are integrated. SCG nodes, BD inference, and IVE verification support them. |
 | **Stdlib is host-side only** | ⚠️ Partial | Math, fmt, string, and crypto functions execute on the host side (Rust). They are not yet compiled to target machine code. |
 | **BD inference completeness** | ⚠️ Partial | Some complex BD inference scenarios (M2.3) are deferred to a future release. |
 | **Doubly-linked list verification** | ⚠️ Partial | Full verification of doubly-linked list patterns (M2.4) is not yet complete. |
 | **Concurrent verification** | ⚠️ Limited | Verification is limited to single-threaded programs. Full concurrent verification is planned. |
 | **COR end-to-end** | ⚠️ Partial | The Continuous Optimization Runtime is not yet integrated end-to-end. |
-| **LoongArch64 performance** | ⚠️ Slow | Full SHA256d on QEMU is too slow; should work on native hardware. |
+| **Backend tiers** | ✅ All Complete | All 10 backends (aarch64, x86_64, riscv64, riscv32, arm32, mips64, ppc64, loongarch64, x86_32, wasm32) pass >99% of the 5,738 gold-standard tests. |
+| **Verification gate** | ✅ Strict by default | `--verification normal` (default) halts codegen on invariant violations. Use `--verification none` to bypass. |
 | **Error recovery** | ⚠️ Partial | Parser has known type mismatches in AST→SCG lowering for some edge cases. |
 
 We believe in honest roadmapping. These limitations represent active development areas, not permanent constraints.

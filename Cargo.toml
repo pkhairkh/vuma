@@ -32,7 +32,7 @@ repository = "https://github.com/vuma-lang/vuma"
 license = "MIT"
 keywords = ["compiler", "verification", "memory-safety", "codegen", "ai-native"]
 categories = ["compilers", "development-tools", "memory-management"]
-authors = ["Super Z (GLM-5.1)"]
+authors = ["Parham Khairkhah"]
 edition = "2021"
 rust-version = "1.75"
 

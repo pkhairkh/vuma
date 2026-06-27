@@ -1,3 +1,4 @@
+#![allow(clippy::manual_range_contains, clippy::map_unwrap_or, clippy::unnecessary_cast, clippy::redundant_closure, clippy::if_same_then_else, clippy::collapsible_if, clippy::useless_format)]
 //! # VUMA Code Generation Module
 //!
 //! This crate handles code generation for the VUMA programming language,

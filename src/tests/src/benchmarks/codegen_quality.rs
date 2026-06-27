@@ -7,7 +7,7 @@
 
 use super::{BenchmarkResult, measure};
 use vuma_codegen::scg_to_ir::{
-    Scg, ScgNode, ScgFunction, ScgParam, ScgStatement, ScgType, ScgExpr,
+    Scg, ScgNode, ScgFunction, ScgStatement, ScgType, ScgExpr,
     ComputationNode, AllocationNode, AccessNode,
 };
 use vuma_codegen::ir::{BinOpKind, IRInstr, IRProgram};

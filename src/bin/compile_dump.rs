@@ -100,7 +100,7 @@ fn run_diag(backend_name: &str, examples_dir: &str, qemu: Option<&str>) {
     let mut crash = Vec::new();
     let mut pass = Vec::new();
     let mut timeout = Vec::new();
-    let mut exec_fail: Vec<(String, i32)> = Vec::new();
+    let exec_fail: Vec<(String, i32)> = Vec::new();
     for ex in &examples {
         let path = format!("{}/{}", examples_dir, ex);
         let source = fs::read_to_string(&path).unwrap();
