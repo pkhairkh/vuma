@@ -4195,8 +4195,124 @@ impl Backend for Mips64Backend {
         let ffi_stub_size: usize = 12; // ADDIU V0, ZERO, 0; JR RA; NOP (3 × 4 bytes)
         let ffi_stub_offset: usize = start_stub_size;
 
+        // ── Build __vuma_alloc / __vuma_free syscall stubs (mmap / munmap) ──
+        //
+        // MIPS64 N64 ABI calling convention: args in $a0-$a3, then $a4-$a7
+        // ($8-$11, which our `Gpr` enum names T0-T3).  Syscall convention:
+        // args in the same registers, syscall # in $v0, SYSCALL, return in $v0.
+        //
+        // __vuma_alloc(size in $a0) -> $v0 = mmap(NULL, size, PROT_READ|PROT_WRITE,
+        //                                           MAP_PRIVATE|MAP_ANONYMOUS, -1, 0)
+        //   __NR_mmap (N64) = 5009
+        // __vuma_free(addr in $a0) -> munmap(addr, 0)
+        //   __NR_munmap (N64) = 5011
+        //
+        // MIPS N64 Linux syscall numbers (from <asm/unistd.h>):
+        //   read=5000, write=5001, open=5002, close=5003, mmap=5009, munmap=5011,
+        //   rt_sigaction=5013, pipe=5021, dup2=5032, alarm=5037, getpid=5038,
+        //   socket=5040, clone=5055, fork=5056, execve=5057, exit=5058, wait4=5059,
+        //   unlink=5085, futex=5194, exit_group=5205, epoll_ctl=5208, epoll_wait=5209,
+        //   openat=5247, unlinkat=5253, epoll_create1=5285, dup3=5286, pipe2=5287
+        //
+        // All numbers fit in the 16-bit signed immediate field of ADDIU
+        // (max +32767), so each is a single ADDIU $v0, $zero, imm.
+        //
+        // Every stub ends with: SYSCALL; JR $ra; NOP (delay slot after JR).
+        let vuma_alloc_stub: Vec<u8> = {
+            let mut code = Vec::new();
+            // daddu $a1, $a0, $zero  (size -> length)
+            code.extend_from_slice(&Instruction::Daddu { rd: Gpr::A1, rs: Gpr::A0, rt: Gpr::Zero }.encode());
+            // daddu $a0, $zero, $zero  (addr = NULL)
+            code.extend_from_slice(&Instruction::Daddu { rd: Gpr::A0, rs: Gpr::Zero, rt: Gpr::Zero }.encode());
+            // addiu $a2, $zero, 3     (PROT_READ | PROT_WRITE)
+            code.extend_from_slice(&Instruction::Addiu { rt: Gpr::A2, rs: Gpr::Zero, imm: 3 }.encode());
+            // addiu $a3, $zero, 0x22  (MAP_PRIVATE | MAP_ANONYMOUS = 34)
+            code.extend_from_slice(&Instruction::Addiu { rt: Gpr::A3, rs: Gpr::Zero, imm: 0x22 }.encode());
+            // daddiu $a4, $zero, -1   (fd = -1; $a4 = $8 = T0 in our enum)
+            code.extend_from_slice(&Instruction::Daddiu { rt: Gpr::T0, rs: Gpr::Zero, imm: -1 }.encode());
+            // daddu $a5, $zero, $zero (offset = 0; $a5 = $9 = T1 in our enum)
+            code.extend_from_slice(&Instruction::Daddu { rd: Gpr::T1, rs: Gpr::Zero, rt: Gpr::Zero }.encode());
+            // addiu $v0, $zero, 5009  (sys_mmap)
+            code.extend_from_slice(&Instruction::Addiu { rt: Gpr::V0, rs: Gpr::Zero, imm: 5009 }.encode());
+            // syscall
+            code.extend_from_slice(&Instruction::Syscall { code: 0 }.encode());
+            // jr $ra
+            code.extend_from_slice(&Instruction::Jr { rs: Gpr::Ra }.encode());
+            // nop (delay slot)
+            code.extend_from_slice(&encode_nop());
+            code
+        };
+        let vuma_free_stub: Vec<u8> = {
+            let mut code = Vec::new();
+            // daddu $a1, $zero, $zero  (size = 0)
+            code.extend_from_slice(&Instruction::Daddu { rd: Gpr::A1, rs: Gpr::Zero, rt: Gpr::Zero }.encode());
+            // addiu $v0, $zero, 5011  (sys_munmap)
+            code.extend_from_slice(&Instruction::Addiu { rt: Gpr::V0, rs: Gpr::Zero, imm: 5011 }.encode());
+            // syscall
+            code.extend_from_slice(&Instruction::Syscall { code: 0 }.encode());
+            // jr $ra
+            code.extend_from_slice(&Instruction::Jr { rs: Gpr::Ra }.encode());
+            // nop (delay slot)
+            code.extend_from_slice(&encode_nop());
+            code
+        };
+
+        // ── POSIX syscall stubs ──────────────────────────────────────
+        //
+        // MIPS64 N64 calling convention matches the syscall convention for most
+        // syscalls (args in $a0-$a7), so simple stubs are just:
+        //     ADDIU $v0, $zero, #num ; SYSCALL ; JR $ra ; NOP.
+        //
+        // MIPS N64 has the *legacy* syscall numbers directly (open=5002,
+        // unlink=5085, pipe=5021, dup2=5032, fork=5056), so no `*at` / `2` / `3`
+        // arg-shuffling stubs are needed — only `sigaction` needs the
+        // `rt_sigaction` shim (sets $a3 = 8 sigsetsize).
+
+        // Helper: encode a simple "addiu $v0, $zero, num ; syscall ; jr $ra ; nop" stub.
+        let simple_stub = |num: i32| -> Vec<u8> {
+            let mut code = Vec::new();
+            code.extend_from_slice(&Instruction::Addiu { rt: Gpr::V0, rs: Gpr::Zero, imm: num }.encode());
+            code.extend_from_slice(&Instruction::Syscall { code: 0 }.encode());
+            code.extend_from_slice(&Instruction::Jr { rs: Gpr::Ra }.encode());
+            code.extend_from_slice(&encode_nop());
+            code
+        };
+
+        let syscall_stubs: Vec<(String, Vec<u8>)> = {
+            let mut stubs: Vec<(String, Vec<u8>)> = Vec::new();
+
+            // Simple stubs (args already in correct registers $a0-$a7):
+            for (name, num) in [
+                ("write", 5001), ("read", 5000), ("open", 5002), ("close", 5003),
+                ("mmap", 5009), ("munmap", 5011), ("exit", 5058), ("alarm", 5037),
+                ("getpid", 5038), ("socket", 5040), ("epoll_create1", 5285),
+                ("futex", 5194), ("execve", 5057), ("wait4", 5059),
+                ("epoll_ctl", 5208), ("epoll_wait", 5209),
+                ("pipe", 5021), ("dup2", 5032), ("fork", 5056), ("unlink", 5085),
+            ] {
+                stubs.push((name.to_string(), simple_stub(num)));
+            }
+
+            // sigaction → rt_sigaction(signum, act, oldact, sigsetsize=8)
+            // Caller args: $a0=signum, $a1=act, $a2=oldact
+            // Need:        $a0=signum, $a1=act, $a2=oldact, $a3=8
+            {
+                let mut code = Vec::new();
+                // addiu $a3, $zero, 8     (sigsetsize)
+                code.extend_from_slice(&Instruction::Addiu { rt: Gpr::A3, rs: Gpr::Zero, imm: 8 }.encode());
+                // addiu $v0, $zero, 5013  (sys_rt_sigaction)
+                code.extend_from_slice(&Instruction::Addiu { rt: Gpr::V0, rs: Gpr::Zero, imm: 5013 }.encode());
+                code.extend_from_slice(&Instruction::Syscall { code: 0 }.encode());
+                code.extend_from_slice(&Instruction::Jr { rs: Gpr::Ra }.encode());
+                code.extend_from_slice(&encode_nop());
+                stubs.push(("sigaction".to_string(), code));
+            }
+
+            stubs
+        };
+
         // ── Compute function offsets ──
-        // _start stub comes first, then user functions.
+        // _start stub comes first, then user functions, then runtime stubs.
         let mut func_offsets: HashMap<String, usize> = HashMap::new();
         let mut current_offset: usize = start_stub_size + ffi_stub_size;
 
@@ -4207,6 +4323,19 @@ impl Backend for Mips64Backend {
                 .map(|i| i.encoded.len())
                 .sum();
             current_offset += func_size;
+        }
+
+        // __vuma_alloc / __vuma_free stubs go after all user functions.
+        let vuma_alloc_offset = current_offset;
+        let vuma_free_offset = vuma_alloc_offset + vuma_alloc_stub.len();
+        func_offsets.insert("__vuma_alloc".to_string(), vuma_alloc_offset);
+        func_offsets.insert("__vuma_free".to_string(), vuma_free_offset);
+
+        // POSIX syscall stubs go after __vuma_free.
+        let mut stub_offset = vuma_free_offset + vuma_free_stub.len();
+        for (name, code) in &syscall_stubs {
+            func_offsets.insert(name.clone(), stub_offset);
+            stub_offset += code.len();
         }
 
         // ── Build _start stub bytes ──
@@ -4274,6 +4403,13 @@ impl Backend for Mips64Backend {
                     all_code.extend_from_slice(&instr.encoded);
                 }
             }
+        }
+        // Append __vuma_alloc / __vuma_free syscall stubs.
+        all_code.extend_from_slice(&vuma_alloc_stub);
+        all_code.extend_from_slice(&vuma_free_stub);
+        // Append POSIX syscall stubs (write, read, open, close, mmap, etc.)
+        for (_, code) in &syscall_stubs {
+            all_code.extend_from_slice(code);
         }
 
         // ── Patch J/JAL relocations for inter-function calls ──
