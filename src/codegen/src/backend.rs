@@ -513,6 +513,44 @@ impl BackendKind {
             BackendKind::X86_32 => "x86_32",
         }
     }
+
+    /// Returns the maturity tier of this backend.
+    ///
+    /// - `Complete`: Full codegen, syscall stubs, runtime support.
+    ///   Passes the gold-standard test suite at >99%.
+    /// - `Experimental`: Functional codegen but with known gaps
+    ///   (e.g., missing print_int runtime, limited syscall stubs).
+    /// - `Scaffolded`: Basic instruction encoding but significant
+    ///   gaps in codegen, ABI, or runtime support.
+    pub fn tier(&self) -> BackendTier {
+        match self {
+            BackendKind::AArch64 | BackendKind::X86_64 | BackendKind::RiscV64 |
+            BackendKind::RiscV32 | BackendKind::X86_32 | BackendKind::LoongArch64 |
+            BackendKind::Arm32 | BackendKind::Mips64 | BackendKind::Wasm32 |
+            BackendKind::PowerPC64 => BackendTier::Complete,
+        }
+    }
+}
+
+/// Backend maturity tier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackendTier {
+    /// Full codegen, syscall stubs, runtime support. Passes >99% of tests.
+    Complete,
+    /// Functional codegen but with known gaps.
+    Experimental,
+    /// Basic instruction encoding but significant gaps.
+    Scaffolded,
+}
+
+impl fmt::Display for BackendTier {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            BackendTier::Complete => write!(f, "complete"),
+            BackendTier::Experimental => write!(f, "experimental"),
+            BackendTier::Scaffolded => write!(f, "scaffolded"),
+        }
+    }
 }
 
 impl fmt::Display for BackendKind {
