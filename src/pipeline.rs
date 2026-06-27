@@ -2186,19 +2186,23 @@ fn convert_computation_node(
 
         // Try to parse the (now call-free) expression
         if let Some((mut op, lhs_str, rhs_str)) = parse_expr_split(&expr_str) {
-            // Type-aware >> shift
-            if op == IrBinOpKind::ShrA {
-                // In VUMA, >> defaults to logical (unsigned) shift unless the
-                // result_type is explicitly signed (i8/i16/i32/i64).
-                // This is because VUMA uses u32 as the default integer type
-                // and masks with & 4294967295 for unsigned semantics.
-                let is_signed = comp
-                    .result_type
-                    .as_deref()
-                    .map(|t| t.starts_with('i'))
-                    .unwrap_or(false);
-                if !is_signed {
+            // Type-aware >> shift and / % division
+            // In VUMA, >> and / default to unsigned operations unless the
+            // result_type is explicitly signed (i8/i16/i32/i64).
+            let is_signed = comp
+                .result_type
+                .as_deref()
+                .map(|t| t.starts_with('i'))
+                .unwrap_or(false);
+            if !is_signed {
+                if op == IrBinOpKind::ShrA {
                     op = IrBinOpKind::ShrL;
+                }
+                if op == IrBinOpKind::SDiv {
+                    op = IrBinOpKind::UDiv;
+                }
+                if op == IrBinOpKind::SRem {
+                    op = IrBinOpKind::URem;
                 }
             }
             let lhs = resolve_subexpr(&lhs_str, &sources, edge_idx, scg);
@@ -2715,16 +2719,21 @@ fn convert_computation_no_calls(
     let (expr_str, user_var) = strip_assignment_prefix(op_label);
 
     if let Some((mut op, lhs_str, rhs_str)) = parse_expr_split(&expr_str) {
-        if op == IrBinOpKind::ShrA {
-            // In VUMA, >> defaults to logical (unsigned) shift unless the
-            // result_type is explicitly signed (i8/i16/i32/i64).
-            let is_signed = comp
-                .result_type
-                .as_deref()
-                .map(|t| t.starts_with('i'))
-                .unwrap_or(false);
-            if !is_signed {
+        // Type-aware >> shift and / % division
+        let is_signed = comp
+            .result_type
+            .as_deref()
+            .map(|t| t.starts_with('i'))
+            .unwrap_or(false);
+        if !is_signed {
+            if op == IrBinOpKind::ShrA {
                 op = IrBinOpKind::ShrL;
+            }
+            if op == IrBinOpKind::SDiv {
+                op = IrBinOpKind::UDiv;
+            }
+            if op == IrBinOpKind::SRem {
+                op = IrBinOpKind::URem;
             }
         }
         let lhs = resolve_subexpr(&lhs_str, sources, edge_idx, scg);
@@ -2785,8 +2794,8 @@ fn parse_expr_split(expr: &str) -> Option<(IrBinOpKind, String, String)> {
         ("+", IrBinOpKind::Add),
         ("-", IrBinOpKind::Sub),
         ("*", IrBinOpKind::Mul),
-        ("/", IrBinOpKind::UDiv),
-        ("%", IrBinOpKind::URem),
+        ("/", IrBinOpKind::SDiv),
+        ("%", IrBinOpKind::SRem),
     ];
     
     // Search for top-level operators (outside parentheses)
@@ -3903,8 +3912,8 @@ fn parse_binop(op: &str) -> Option<IrBinOpKind> {
     }
     for (pat, kind) in [
         ("+", IrBinOpKind::Add), ("-", IrBinOpKind::Sub),
-        ("*", IrBinOpKind::Mul), ("/", IrBinOpKind::UDiv),
-        ("%", IrBinOpKind::URem), ("&", IrBinOpKind::And),
+        ("*", IrBinOpKind::Mul), ("/", IrBinOpKind::SDiv),
+        ("%", IrBinOpKind::SRem), ("&", IrBinOpKind::And),
         ("|", IrBinOpKind::Or), ("^", IrBinOpKind::Xor),
         ("<", IrBinOpKind::SLt), (">", IrBinOpKind::SGt),
     ] {
