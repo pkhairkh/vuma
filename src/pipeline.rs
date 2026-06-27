@@ -2494,8 +2494,8 @@ fn convert_computation_no_calls(
 
                     // Check for constant offset: base + N
                     // Infer U64 for offset >= 8 (struct field at 8-byte boundary).
-                    // Skip offset 4 — it's ambiguous (could be a U32 field or
-                    // byte 4 of a byte array). The IR builder's store type
+                    // Skip offset 4 — it's ambiguous (could be a U32 struct field
+                    // or byte 4 of a byte array). The IR builder's store type
                     // inference handles offset 4 for register stores.
                     if let ScgExpr::BinOp { op: vuma_codegen::ir::BinOpKind::Add, lhs: _, rhs } = &ptr {
                         if let ScgExpr::Int(n) = rhs.as_ref() {
