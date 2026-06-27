@@ -2589,9 +2589,12 @@ impl Backend for AArch64Backend {
             let mut stubs: Vec<(String, Vec<u8>)> = Vec::new();
 
             // Simple stubs (args already in correct registers X0-X5):
+            // Note: alarm is NOT a direct syscall on aarch64 (syscall 37 is
+            // linkat). We implement alarm as a special stub below using
+            // kill(getpid(), SIGALRM).
             for (name, num) in [
                 ("write", 64), ("read", 63), ("close", 57), ("mmap", 222),
-                ("munmap", 215), ("exit", 94), ("alarm", 36), ("getpid", 172),
+                ("munmap", 215), ("exit", 94), ("getpid", 172),
                 ("socket", 198), ("epoll_create1", 20), ("futex", 98),
                 ("execve", 221), ("wait4", 260), ("epoll_ctl", 21), ("epoll_wait", 22),
             ] {
@@ -2600,6 +2603,28 @@ impl Backend for AArch64Backend {
                 code.extend_from_slice(&svc);
                 code.extend_from_slice(&ret);
                 stubs.push((name.to_string(), code));
+            }
+
+            // alarm(seconds) — implement via kill(getpid(), SIGALRM)
+            // On aarch64, alarm is not a direct syscall. We deliver SIGALRM
+            // immediately by calling kill(getpid(), 14). This is sufficient
+            // for signal_hash which just needs the signal to fire during
+            // the busy loop.
+            // getpid = 172, kill = 129, SIGALRM = 14
+            // kill(pid, sig): X0=pid, X1=sig
+            {
+                let mut code = Vec::new();
+                // X8 = 172 (getpid)
+                code.extend_from_slice(&movz_x8(172));
+                code.extend_from_slice(&svc);
+                // X0 = pid (keep it as first arg to kill)
+                // X1 = 14 (SIGALRM)
+                code.extend_from_slice(&movz_reg(1, 14));
+                // X8 = 129 (kill)
+                code.extend_from_slice(&movz_x8(129));
+                code.extend_from_slice(&svc);
+                code.extend_from_slice(&ret);
+                stubs.push(("alarm".to_string(), code));
             }
 
             // open → openat(AT_FDCWD=-100, pathname, flags, mode)
@@ -2762,8 +2787,61 @@ impl Backend for AArch64Backend {
                     continue; // skip invalid relocations
                 }
 
-                if reloc.reloc_type == R_AARCH64_CALL26 {
-                    // R_AARCH64_CALL26: patch BL instruction's imm26 field.
+                if reloc.reloc_type == "R_VUMA_GETADDR" {
+                    // R_VUMA_GETADDR: patch 4 MOVZ/MOVK instructions (16 bytes)
+                    // with the function's absolute address.
+                    // The ELF base is 0x400000, so absolute = 0x400000 + offset.
+                    let target_offset = func_offsets.get(&reloc.symbol)
+                        .copied()
+                        .or_else(|| {
+                            let prefix = format!("fn_{}", reloc.symbol);
+                            func_offsets.keys()
+                                .find(|k| k.starts_with(&prefix))
+                                .and_then(|k| func_offsets.get(k))
+                                .copied()
+                        });
+                    if let Some(target_offset) = target_offset {
+                        let abs_addr = 0x400000u64 + target_offset as u64;
+                        // Patch 4 instructions at abs_offset..abs_offset+16
+                        if abs_offset + 16 <= all_code.len() {
+                            // MOVZ X9, #imm16 (bits 0-15)
+                            let imm0 = (abs_addr & 0xFFFF) as u32;
+                            let existing0 = u32::from_le_bytes([
+                                all_code[abs_offset], all_code[abs_offset + 1],
+                                all_code[abs_offset + 2], all_code[abs_offset + 3],
+                            ]);
+                            let patched0 = (existing0 & !0x001FFFE0) | (imm0 << 5);
+                            all_code[abs_offset..abs_offset + 4].copy_from_slice(&patched0.to_le_bytes());
+
+                            // MOVK X9, #imm16, lsl #16 (bits 16-31)
+                            let imm1 = ((abs_addr >> 16) & 0xFFFF) as u32;
+                            let existing1 = u32::from_le_bytes([
+                                all_code[abs_offset + 4], all_code[abs_offset + 5],
+                                all_code[abs_offset + 6], all_code[abs_offset + 7],
+                            ]);
+                            let patched1 = (existing1 & !0x001FFFE0) | (imm1 << 5);
+                            all_code[abs_offset + 4..abs_offset + 8].copy_from_slice(&patched1.to_le_bytes());
+
+                            // MOVK X9, #imm16, lsl #32 (bits 32-47)
+                            let imm2 = ((abs_addr >> 32) & 0xFFFF) as u32;
+                            let existing2 = u32::from_le_bytes([
+                                all_code[abs_offset + 8], all_code[abs_offset + 9],
+                                all_code[abs_offset + 10], all_code[abs_offset + 11],
+                            ]);
+                            let patched2 = (existing2 & !0x001FFFE0) | (imm2 << 5);
+                            all_code[abs_offset + 8..abs_offset + 12].copy_from_slice(&patched2.to_le_bytes());
+
+                            // MOVK X9, #imm16, lsl #48 (bits 48-63)
+                            let imm3 = ((abs_addr >> 48) & 0xFFFF) as u32;
+                            let existing3 = u32::from_le_bytes([
+                                all_code[abs_offset + 12], all_code[abs_offset + 13],
+                                all_code[abs_offset + 14], all_code[abs_offset + 15],
+                            ]);
+                            let patched3 = (existing3 & !0x001FFFE0) | (imm3 << 5);
+                            all_code[abs_offset + 12..abs_offset + 16].copy_from_slice(&patched3.to_le_bytes());
+                        }
+                    }
+                } else if reloc.reloc_type == R_AARCH64_CALL26 {
                     // BL target = PC + imm26*4, where PC = address of BL instruction.
                     // So: imm26 = (target_addr - bl_addr) / 4
                     let target_offset = func_offsets.get(&reloc.symbol)

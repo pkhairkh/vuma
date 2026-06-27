@@ -2883,26 +2883,49 @@ impl Emitter {
             }
 
             // ── GetAddress ──
+            // Emit 4 MOVZ/MOVK instructions (16 bytes) as placeholders for
+            // the function's absolute address. A custom relocation
+            // "R_VUMA_GETADDR" is created so encode_program can patch
+            // these with the actual function address.
             IRInstr::GetAddress { dst, name } => {
                 let dst_id = dst.as_register().unwrap_or(0);
                 let dst_offset = slots.get(&dst_id).copied().unwrap_or(0);
-                let name_hash = name
-                    .chars()
-                    .fold(0u64, |acc, c| acc.wrapping_mul(31).wrapping_add(c as u64));
-                self.emit_load_immediate(Register::X0, name_hash as i64)?;
-                let bl_word_idx = self.code.len();
-                let bl_byte_offset = self.func_text_offset + (bl_word_idx as u64) * 4;
-                self.call_relocs.push(CallRelocation {
-                    text_byte_offset: bl_byte_offset,
-                    target_func: "__vuma_getaddr".to_string(),
-                });
+                // Emit 4 placeholder instructions (MOVZ + 3 MOVK = 16 bytes)
+                // These will be patched by encode_program with the function's
+                // absolute address (ELF base + function offset).
+                let reloc_offset = self.func_text_offset + (self.code.len() as u64) * 4;
+                // MOVZ X9, #0 (placeholder)
+                self.emit_instruction(Instruction::MOVZ {
+                    rd: Register::X9,
+                    imm16: 0,
+                    shift: 0,
+                })?;
+                // MOVK X9, #0, lsl #16 (placeholder)
+                self.emit_instruction(Instruction::MOVK {
+                    rd: Register::X9,
+                    imm16: 0,
+                    shift: 1,
+                })?;
+                // MOVK X9, #0, lsl #32 (placeholder)
+                self.emit_instruction(Instruction::MOVK {
+                    rd: Register::X9,
+                    imm16: 0,
+                    shift: 2,
+                })?;
+                // MOVK X9, #0, lsl #48 (placeholder)
+                self.emit_instruction(Instruction::MOVK {
+                    rd: Register::X9,
+                    imm16: 0,
+                    shift: 3,
+                })?;
+                // Register a relocation so encode_program can patch this
                 self.relocations.push(RelocationEntry {
-                    offset: bl_byte_offset,
-                    symbol: "__vuma_getaddr".to_string(),
-                    reloc_type: "R_AARCH64_CALL26".to_string(),
+                    offset: reloc_offset,
+                    symbol: name.clone(),
+                    reloc_type: "R_VUMA_GETADDR".to_string(),
                 });
-                self.emit_instruction(Instruction::BL { offset: 0 })?;
-                self.ss_store_to_slot(Register::X0, dst_offset)?;
+                // Store X9 (function address) to dst's stack slot
+                self.ss_store_to_slot(Register::X9, dst_offset)?;
             }
 
             // ── Offset ──
