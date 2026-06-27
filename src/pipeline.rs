@@ -2492,10 +2492,10 @@ fn convert_computation_no_calls(
                     let mut inferred_ty: Option<vuma_codegen::ir::IRType> = None;
 
                     // Only use array stride for load type inference.
-                    // Constant-offset inference is too unreliable — it can't
-                    // distinguish struct field access from byte-array access.
-                    // The IR builder's current_return_type heuristic (load_count==1,
-                    // store_count==0) handles read-only functions like mat_read.
+                    // Constant-offset inference is unreliable because stores
+                    // and loads may use different offset expressions
+                    // (e.g. mem_arena_alloc stores via variable offset but
+                    // loads via constant offset).
                     if let ScgExpr::BinOp { op: vuma_codegen::ir::BinOpKind::Add, lhs: _, rhs } = &ptr {
                         if let ScgExpr::BinOp { op: vuma_codegen::ir::BinOpKind::Mul, lhs: _, rhs } = rhs.as_ref() {
                             if let ScgExpr::Int(stride) = rhs.as_ref() {
