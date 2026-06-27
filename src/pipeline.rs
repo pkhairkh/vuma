@@ -3316,6 +3316,7 @@ fn repd_to_scg_type(repd: &RepD) -> ScgType {
         },
         RepD::Struct(_) | RepD::Array(_) | RepD::Enum(_) | RepD::Union(_) => ScgType::Ptr,
         RepD::Generic { .. } => ScgType::I64,
+        RepD::ManifoldSpatial(_) | RepD::GestaltSuperposition(_) | RepD::ConceptRelational(_) => ScgType::Ptr,
     }
 }
 

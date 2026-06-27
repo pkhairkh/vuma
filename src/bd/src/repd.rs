@@ -95,6 +95,67 @@ pub struct FuncRep {
 }
 
 // ---------------------------------------------------------------------------
+// Womb Data Model Representations
+// ---------------------------------------------------------------------------
+
+/// Representation of a Manifold — multi-dimensional spatial data laid out
+/// using a space-filling curve (Z-order or Hilbert) for cache locality.
+///
+/// The physical memory is a 1D buffer; N-dimensional semantic coordinates
+/// are translated to physical offsets via bit-interleaving.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ManifoldSpatialRep {
+    /// Number of dimensions (e.g., 2 for a matrix, 3 for a volume).
+    pub dimensions: u32,
+    /// Size of each dimension.
+    pub dim_sizes: Vec<u64>,
+    /// Element size in bytes.
+    pub element_size: u64,
+    /// The space-filling curve used for memory layout.
+    pub curve: crate::manifold::SpaceFillingCurve,
+    /// The curve order (for Hilbert; log2 of max dim size).
+    pub order: u32,
+    /// Total buffer size in bytes.
+    pub total_bytes: u64,
+}
+
+/// Representation of a Gestalt — tagless, context-dependent memory superposition.
+///
+/// When `degraded` is true, a hidden 1-byte runtime tag is present at
+/// `tag_offset`. When false, the IVE proved that no tag is needed.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct GestaltSuperpositionRep {
+    /// All possible variant names.
+    pub variants: Vec<String>,
+    /// Maximum byte size across all variants.
+    pub max_size: u64,
+    /// Strictest alignment across all variants.
+    pub max_align: u64,
+    /// If true, a hidden 1-byte runtime tag was injected by the IVE.
+    pub degraded: bool,
+    /// Byte offset of the injected tag (if degraded).
+    pub tag_offset: Option<u64>,
+}
+
+/// Representation of a Concept — relational data with lazily-inferred layout.
+///
+/// The physical layout (AoS vs SoA) is resolved by the LayoutResolutionPass
+/// based on access pattern analysis.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ConceptRelationalRep {
+    /// Field names in declaration order.
+    pub field_names: Vec<String>,
+    /// Resolved byte offsets for each field (empty until layout resolved).
+    pub field_offsets: Vec<(String, u64)>,
+    /// Total size in bytes (0 until layout resolved).
+    pub total_size: u64,
+    /// Alignment requirement.
+    pub align: u64,
+    /// Layout strategy: true = SoA, false = AoS.
+    pub use_soa: bool,
+}
+
+// ---------------------------------------------------------------------------
 // RepD enum
 // ---------------------------------------------------------------------------
 
@@ -142,6 +203,12 @@ pub enum RepD {
     Union(UnionRep),
     /// Function signature.
     Func(FuncRep),
+    /// Manifold — multi-dimensional spatial data with space-filling curve layout.
+    ManifoldSpatial(ManifoldSpatialRep),
+    /// Gestalt — tagless, context-dependent memory superposition.
+    GestaltSuperposition(GestaltSuperpositionRep),
+    /// Concept — relational data with lazily-inferred layout.
+    ConceptRelational(ConceptRelationalRep),
     /// A generic type parameter with a name and optional BD constraints.
     Generic {
         /// Name of the type parameter (e.g., "T").
@@ -202,6 +269,30 @@ impl std::hash::Hash for RepD {
                 // Hash only the name; constraints contain non-Hash types.
                 name.hash(state);
             }
+            RepD::ManifoldSpatial(m) => {
+                m.dimensions.hash(state);
+                for d in &m.dim_sizes {
+                    d.hash(state);
+                }
+                m.element_size.hash(state);
+                m.total_bytes.hash(state);
+            }
+            RepD::GestaltSuperposition(g) => {
+                for v in &g.variants {
+                    v.hash(state);
+                }
+                g.max_size.hash(state);
+                g.max_align.hash(state);
+                g.degraded.hash(state);
+            }
+            RepD::ConceptRelational(c) => {
+                for f in &c.field_names {
+                    f.hash(state);
+                }
+                c.total_size.hash(state);
+                c.align.hash(state);
+                c.use_soa.hash(state);
+            }
         }
     }
 }
@@ -231,6 +322,9 @@ impl RepD {
             RepD::Union(u) => u.max_size,
             RepD::Func(_) => POINTER_SIZE, // function pointer
             RepD::Generic { .. } => 0,     // unknown until substituted
+            RepD::ManifoldSpatial(m) => m.total_bytes,
+            RepD::GestaltSuperposition(g) => g.max_size,
+            RepD::ConceptRelational(c) => c.total_size,
         }
     }
 
@@ -245,6 +339,9 @@ impl RepD {
             RepD::Union(u) => u.max_align,
             RepD::Func(_) => POINTER_SIZE,
             RepD::Generic { .. } => 1, // minimum alignment
+            RepD::ManifoldSpatial(m) => m.element_size.max(8),
+            RepD::GestaltSuperposition(g) => g.max_align,
+            RepD::ConceptRelational(c) => c.align.max(1),
         }
     }
 
@@ -484,6 +581,15 @@ impl fmt::Display for RepD {
                     write!(f, ": {c}")?;
                 }
                 write!(f, ")")
+            }
+            RepD::ManifoldSpatial(m) => {
+                write!(f, "manifold(dims={}, {:?}, curve={:?})", m.dimensions, m.dim_sizes, m.curve)
+            }
+            RepD::GestaltSuperposition(g) => {
+                write!(f, "gestalt({:?}, size={}, degraded={})", g.variants, g.max_size, g.degraded)
+            }
+            RepD::ConceptRelational(c) => {
+                write!(f, "concept({:?}, size={}, soa={})", c.field_names, c.total_size, c.use_soa)
             }
         }
     }

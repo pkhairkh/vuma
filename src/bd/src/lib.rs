@@ -35,6 +35,7 @@ pub mod context_solver;
 pub mod descriptor;
 pub mod error_reporting;
 pub mod inference;
+pub mod manifold;
 pub mod reld;
 pub mod reld_refine;
 pub mod repd;
