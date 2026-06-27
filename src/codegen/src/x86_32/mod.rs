@@ -2089,13 +2089,13 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         code.extend_from_slice(&[0x83, 0xE3, 0x0F]); // and ebx, 0x0F
         // cmp ebx, 10
         code.extend_from_slice(&[0x83, 0xFB, 0x0A]); // cmp ebx, 10
-        // jb .digit
-        code.extend_from_slice(&[0x72, 0x07]); // jb +7
+        // jb .digit (skip letter branch: 6+2+2 = 10 bytes)
+        code.extend_from_slice(&[0x72, 0x0A]); // jb +10
         // add ebx, 'A' - 10
         code.extend(encode_mov_reg_imm32(Gpr::Rsi, 55)); // 'A' - 10 = 55
         code.extend(encode_add_reg_reg(Gpr::Rbx, Gpr::Rsi));
-        // jmp .store
-        code.extend_from_slice(&[0xEB, 0x05]); // jmp +5
+        // jmp .store (skip digit branch: 3 bytes)
+        code.extend_from_slice(&[0xEB, 0x03]); // jmp +3
         // .digit: add ebx, '0'
         code.extend_from_slice(&[0x83, 0xC3, 0x30]); // add ebx, 0x30
         // .store: mov [ecx], bl
@@ -2152,12 +2152,13 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         // Check if EAX is 0
         // test eax, eax
         code.extend_from_slice(&[0x85, 0xC0]); // test eax, eax
-        // jnz .loop
-        code.extend_from_slice(&[0x75, 0x0A]); // jnz +10
+        // jnz .loop (skip zero-handling: 3+1+2 = 6 bytes)
+        code.extend_from_slice(&[0x75, 0x06]); // jnz +6
         // Handle zero: mov byte [ecx], '0'; dec ecx; jmp .done
         code.extend_from_slice(&[0xC6, 0x01, 0x30]); // mov byte [ecx], '0'
         code.extend_from_slice(&[0x49]); // dec ecx
-        code.extend_from_slice(&[0xEB, 0x10]); // jmp +16 (.done)
+        // jmp .done (skip loop body: 2+6+2+3+2+1+2+2 = 20 bytes)
+        code.extend_from_slice(&[0xEB, 0x14]); // jmp +20
 
         // .loop:
         let loop_offset = code.len();
@@ -2190,12 +2191,12 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         // mov ebx, 1 (stdout)
         code.extend(encode_mov_reg_imm32(Gpr::Rbx, 1));
         // ecx already points to the string
-        // mov edx, [ebp-4] — actually we need to compute length
-        // length = (esp+32) - ecx = ebp - 4 - ecx... let's compute differently
-        // mov edx, ebp; sub edx, ecx; sub edx, 4
+        // Compute length: (ESP + 32) - ECX = (EBP - 32 + 32) - ECX = EBP - ECX
+        // The buffer starts at ESP (= EBP - 32) and the last char (newline)
+        // is at ESP+31 (= EBP - 1). After inc ecx, ECX points to the first
+        // digit. Length = (EBP - 1 + 1) - ECX = EBP - ECX.
         code.extend(encode_mov_reg_reg(Gpr::Rdx, Gpr::Rbp));
         code.extend(encode_sub_reg_reg(Gpr::Rdx, Gpr::Rcx));
-        code.extend_from_slice(&[0x83, 0xEA, 0x04]); // sub edx, 4
         // int 0x80
         code.extend(encode_syscall());
 
