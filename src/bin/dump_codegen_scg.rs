@@ -1,5 +1,5 @@
 //! Dump codegen SCG statements for a .vuma file.
-use vuma_codegen::scg_to_ir::{ScgStatement, ScgExpr};
+use vuma_codegen::scg_to_ir::ScgStatement;
 use vuma_parser::{Parser, AstToScg};
 use vuma::pipeline::{CompileConfig, run_scg_transforms, bridge_scg_to_codegen};
 
