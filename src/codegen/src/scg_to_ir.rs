@@ -211,7 +211,7 @@ pub enum ControlNode {
     /// `loop { body }`
     Loop {
         body: Vec<ScgStatement>,
-        for_range: Option<(String, i64, ScgExpr)>,
+        for_range: Option<(String, ScgExpr, ScgExpr)>,
         while_cond: Option<String>,
     },
     /// `break` (from inside a loop).
@@ -1344,7 +1344,7 @@ impl IRBuilder {
     fn lower_loop(
         &mut self,
         body: &[ScgStatement],
-        for_range: &Option<(String, i64, ScgExpr)>,
+        for_range: &Option<(String, ScgExpr, ScgExpr)>,
         while_cond: &Option<String>,
         ir_func: &mut IRFunction,
         names: &mut HashMap<String, u32>,
@@ -1373,9 +1373,14 @@ impl IRBuilder {
         if let Some((var, start, _end)) = for_range {
             let counter_init = self.alloc_vreg();
             ir_func.register_vreg(VirtualRegister::named(counter_init, var.as_str()));
+            // Resolve the start expression. For constants, this produces
+            // Immediate(n). For variables, it produces a Register reference
+            // that the names map resolves. For binops (e.g. msg_len + 1),
+            // it produces a BinOp that the IR builder evaluates.
+            let start_val = self.resolve_expr(start, names, ir_func)?;
             ir_func.current_block().instructions.push(IRInstruction::Add {
                 dst: IRValue::Register(counter_init),
-                lhs: IRValue::Immediate(*start),
+                lhs: start_val,
                 rhs: IRValue::Immediate(0),
                 ty: None,
             });
