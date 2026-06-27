@@ -779,16 +779,17 @@ impl IRBuilder {
         // Continue). If so, use SOURCE ORDER — the topological sort doesn't
         // understand control-flow dependencies and can reorder an If before
         // a Loop that defines the variable the If references.
-        // Also use source order for functions with memory ops (atomics, loads,
-        // stores) since the topological sort can reorder loads before stores.
+        // Also use source order for functions with memory ops (any Call,
+        // atomics, loads, stores) since the topological sort can reorder
+        // loads before stores, or calls in the wrong order. Any function
+        // call may have memory side effects (writes to memory via pointers),
+        // so reordering calls is unsafe.
         let has_control_flow = non_return_indices.iter().any(|&i| {
             matches!(&stmts[i], ScgStatement::Control(_))
         });
         let has_memory_ops = non_return_indices.iter().any(|&i| {
             match &stmts[i] {
-                ScgStatement::Call(call) => {
-                    call.func == "AtomicStore" || call.func == "AtomicLoad"
-                }
+                ScgStatement::Call(_) => true,  // ANY call may have memory side effects
                 ScgStatement::Access(_) => true,
                 _ => false,
             }
