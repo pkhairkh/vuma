@@ -2425,13 +2425,11 @@ impl IRBuilder {
                             }
                             // Infer from pointer expression (same logic as loads)
                             // Check for constant offset: base + N
+                            // Only infer for offset >= 8 (skip offset 4 — ambiguous)
                             if let ScgExpr::BinOp { op: crate::ir::BinOpKind::Add, lhs: _, rhs } = ptr {
                                 if let ScgExpr::Int(n) = rhs.as_ref() {
                                     if *n >= 8 && *n % 8 == 0 {
                                         return IRType::U64;
-                                    }
-                                    if *n == 4 {
-                                        return IRType::U32;
                                     }
                                 }
                             }
@@ -2472,9 +2470,6 @@ impl IRBuilder {
                                 if let ScgExpr::Int(n) = rhs.as_ref() {
                                     if *n >= 8 && *n % 8 == 0 {
                                         return IRType::U64;
-                                    }
-                                    if *n == 4 && imm_too_large_for_byte {
-                                        return IRType::U32;
                                     }
                                 }
                             }
