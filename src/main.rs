@@ -1,3 +1,4 @@
+#![allow(clippy::manual_range_contains, clippy::map_unwrap_or, clippy::unnecessary_cast, clippy::redundant_closure, clippy::if_same_then_else, clippy::collapsible_if, clippy::useless_format)]
 //! VUMA CLI — Command-line interface for the VUMA compiler.
 //!
 //! Subcommands:
@@ -595,7 +596,7 @@ fn cmd_check(cli: &Cli, file: &PathBuf) -> Result<(), String> {
 /// than the main pipeline (which goes through the semantic SCG and loses
 /// most program semantics in the SCG→IR bridge).
 fn cmd_emit(
-    cli: &Cli,
+    _cli: &Cli,
     isa: &IsaArg,
     file: &PathBuf,
     output: &Option<PathBuf>,
@@ -1721,7 +1722,7 @@ fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) -> Vec
                     let e = flatten_expr(end, &mut pre_stmts, ctx);
                     (s, e)
                 }
-                other => {
+                _other => {
                     (ScgExpr::Int(0), ScgExpr::Int(0))
                 }
             };
@@ -1984,7 +1985,7 @@ fn cmd_bench(_cli: &Cli) {
             let mut parser = vuma_parser::Parser::new(&sha256d_source);
             let parse_result = parser.parse_program();
 
-            let parse_time = start.elapsed();
+            let _parse_time = start.elapsed();
 
             if parse_result.is_err() {
                 println!("  {:15} {:>12} {:>12} {:>12}", name, "PARSE_ERR", "-", "-");
@@ -2000,7 +2001,7 @@ fn cmd_bench(_cli: &Cli) {
             let mut ir_builder = ScgToIr::new();
             let ir_result = ir_builder.convert(&codegen_scg);
 
-            let ir_time = start.elapsed();
+            let _ir_time = start.elapsed();
 
             if let Ok(ir_program) = ir_result {
                 let ir_instr_count: usize = ir_program.functions.iter()
@@ -2101,10 +2102,10 @@ fn cmd_bench(_cli: &Cli) {
                 let mut total_loads = 0usize;
                 let mut total_stores = 0usize;
                 let mut redundant_loads = 0usize;
-                let mut redundant_stores = 0usize;
+                let redundant_stores = 0usize;
 
                 for func in &ir_program.functions {
-                    let mut last_store_target: Option<String> = None;
+                    let last_store_target: Option<String> = None;
                     for block in &func.blocks {
                         for instr in &block.instructions {
                             match instr {
@@ -2228,7 +2229,7 @@ fn main() {
     }
 
     let command = match cli.command {
-        Some(ref cmd) => cmd.clone(),
+        Some(ref cmd) => cmd,
         None => {
             // No subcommand and no --repl: print help.
             eprintln!("No subcommand specified. Use `vuma --help` or `vuma --repl`.");

@@ -988,7 +988,7 @@ fn run_backend_codegen(
     backend_kind: vuma_codegen::backend::BackendKind,
 ) -> Result<TargetOutput, Vec<VumaDiagnostic>> {
     use vuma_codegen::backend::{create_backend, AllocatedProgram};
-    use vuma_codegen::regalloc::RegAllocator;
+    
     use vuma_codegen::scg_to_ir::IRBuilder;
 
     // Bridge SCG to codegen SCG
