@@ -41,7 +41,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::diagnostics::{code_description, VumaDiagnostic};
-use crate::pipeline::{self, CompileConfig, CompileTarget};
+use crate::pipeline::{self, CompileConfig};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // VumaForLLM — Stateless LLM API

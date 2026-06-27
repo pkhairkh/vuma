@@ -8,7 +8,7 @@ use super::{BenchmarkResult, measure};
 use vuma_codegen::backend::{create_backend, BackendKind, AllocatedProgram};
 use vuma_codegen::scg_to_ir::{
     Scg, ScgNode, ScgFunction, ScgParam, ScgStatement, ScgType, ScgExpr,
-    ComputationNode, AllocationNode, AccessNode, ControlNode,
+    ComputationNode,
 };
 use vuma_codegen::ir::BinOpKind;
 use vuma_codegen::ScgToIr;

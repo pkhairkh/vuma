@@ -1544,7 +1544,7 @@ fn walk_control_flow_with_externs(
                             .unwrap_or_default();
                         deriv_inputs.iter()
                             .enumerate()
-                            .map(|(i, e)| resolve_df_input(node_id, i, edge_idx, scg))
+                            .map(|(i, _e)| resolve_df_input(node_id, i, edge_idx, scg))
                             .collect()
                     } else {
                         ret_vals
@@ -3205,7 +3205,7 @@ fn resolve_subexpr(
     // Match against the DataFlow sources
     if is_simple_var(subexpr) {
         // First, try exact match: the source node IS the variable definition
-        for (i, &src) in sources.iter().enumerate() {
+        for (_i, &src) in sources.iter().enumerate() {
             if let Some(src_data) = scg.get_node(src) {
                 if let NodePayload::Computation(comp) = &src_data.payload {
                     let label = comp.kind.label();
