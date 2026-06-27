@@ -1628,12 +1628,38 @@ fn walk_control_flow_with_externs(
                                     Some(format!("v_{}_ret", node_id.as_u64()))
                                 }
                             };
+                            // Extract user-visible variable name from the
+                            // caller's label (e.g. "let a = read_u32_be(...)"
+                            // → reassigns = Some("a")). This is critical for
+                            // phi resolution: without it, the let-binding's
+                            // dst would be a synthetic name (v_N) and the
+                            // user name ("a") would not be in the names map.
+                            // When a subsequent reassignment (e.g. "a = t1+t2")
+                            // updates names["a"], the phi for "v_N" would not
+                            // see the update, causing the back-edge value to
+                            // be self-referential and the loop to not propagate
+                            // the new value.
+                            let reassigns = if let Some(caller) = caller_node {
+                                if let Some(caller_data) = scg.get_node(caller) {
+                                    if let NodePayload::Computation(comp) = &caller_data.payload {
+                                        let label = comp.kind.label();
+                                        let (_expr, user_var) = strip_assignment_prefix(&label);
+                                        user_var
+                                    } else {
+                                        None
+                                    }
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            };
                             stmts.push(ScgStatement::Call(CallNode {
                                 dst: call_dst,
                                 func: func_name.to_string(),
                                 args,
                                 is_extern,
-                                reassigns: None,
+                                reassigns,
                             }));
                             // Consume the call-site's FunctionEntry and
                             // FunctionReturn nodes.
