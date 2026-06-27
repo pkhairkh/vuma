@@ -618,6 +618,17 @@ pub struct IRBuilder {
     /// Map from parameter name to IR type. Populated in lower_function,
     /// used in lower_access to determine Store/Load width.
     param_types: std::collections::HashMap<String, crate::ir::IRType>,
+    /// Number of Load statements in the current function. Used by
+    /// lower_access to decide whether to use the function's return type
+    /// for load width inference. When a function has exactly ONE load
+    /// that flows directly to the return value (e.g. `fn read() -> u32 {
+    /// return *ptr; }`), using the return type is safe and correct.
+    /// When a function has MULTIPLE loads (e.g. byte-level access that
+    /// combines several bytes), using the return type is wrong because
+    /// each load should be U8 (byte) not U32/U64 (word).
+    /// This is especially important on big-endian backends (ppc64) where
+    /// a U32 load of a U8-stored value reads the wrong byte position.
+    load_count: usize,
 }
 
 /// Backward-compatible alias.
@@ -633,6 +644,7 @@ impl IRBuilder {
             vreg_aliases: std::collections::HashMap::new(),
             pointer_vregs: std::collections::HashSet::new(),
             param_types: std::collections::HashMap::new(),
+            load_count: 0,
         }
     }
 
@@ -679,6 +691,11 @@ impl IRBuilder {
     /// statements, and rebuilds the CFG predecessor/successor sets.
     fn lower_function(&mut self, func: &ScgFunction) -> Result<IRFunction> {
         self.param_types.clear();
+        // Count the number of Load statements in this function's body.
+        // Used by lower_access to decide whether to infer load width from
+        // the function's return type (safe only for single-load functions
+        // where the load flows directly to the return).
+        self.load_count = Self::count_loads(&func.body);
         let mut ir_func = IRFunction::new(&func.name);
 
         // Map parameters to virtual registers with proper types.
@@ -2258,10 +2275,23 @@ impl IRBuilder {
                 // Use the explicit type if provided, otherwise check if the
                 // destination variable matches a param name (for type inference),
                 // otherwise default to U8.
+                //
+                // SPECIAL CASE: If the function has exactly ONE load statement
+                // and a non-pointer return type, use the return type for the
+                // load width. This handles the common pattern:
+                //   fn read_u32() -> u32 { return *ptr; }
+                // where the load should be U32 (not the default U8).
+                //
+                // This is critical for big-endian backends (ppc64) where a
+                // U8 load of a U32-stored value reads the wrong byte position.
+                //
+                // We do NOT use the return type when there are MULTIPLE loads
+                // (e.g. byte-level access: `b0 = *p; b1 = *(p+1); ...`) because
+                // each load should be U8 (byte), not U32/U64 (word).
                 let load_ty = ty.clone().unwrap_or_else(|| {
                     if let Some(pt) = self.param_types.get(dst) {
                         pt.clone()
-                    } else if !ir_func.result_types.is_empty() {
+                    } else if self.load_count == 1 && !ir_func.result_types.is_empty() {
                         let ret_ty = &ir_func.result_types[0];
                         if !matches!(ret_ty, IRType::Ptr) {
                             return ret_ty.clone();
@@ -3087,6 +3117,48 @@ impl IRBuilder {
         } else {
             false
         }
+    }
+
+    /// Recursively count the number of `AccessNode::Load` statements in a
+    /// function body, descending into nested control-flow bodies (`If`,
+    /// `Loop`, `Switch`). Used by `lower_access` to decide whether to
+    /// infer load width from the function's return type.
+    fn count_loads(stmts: &[ScgStatement]) -> usize {
+        let mut count = 0;
+        for stmt in stmts {
+            match stmt {
+                ScgStatement::Access(AccessNode::Load { .. }) => count += 1,
+                ScgStatement::Control(ctrl) => {
+                    count += Self::count_loads_in_control(ctrl);
+                }
+                _ => {}
+            }
+        }
+        count
+    }
+
+    /// Helper for `count_loads`: descend into control-flow nodes.
+    fn count_loads_in_control(ctrl: &ControlNode) -> usize {
+        let mut count = 0;
+        match ctrl {
+            ControlNode::If { then_body, else_body, .. } => {
+                count += Self::count_loads(then_body);
+                if let Some(eb) = else_body {
+                    count += Self::count_loads(eb);
+                }
+            }
+            ControlNode::Loop { body, .. } => {
+                count += Self::count_loads(body);
+            }
+            ControlNode::Switch { arms, default_body, .. } => {
+                for arm in arms {
+                    count += Self::count_loads(&arm.body);
+                }
+                count += Self::count_loads(default_body);
+            }
+            _ => {}
+        }
+        count
     }
 
     /// Recursively collect all variable names defined and used by a list of
