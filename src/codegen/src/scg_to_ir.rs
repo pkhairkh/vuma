@@ -1389,7 +1389,6 @@ impl IRBuilder {
 
         // ── Step 1: Snapshot names BEFORE the loop ──
         let names_before = names.clone();
-        eprintln!("[lower_loop] names_before has {} keys, 'a'={:?}", names_before.len(), names_before.get("a"));
 
         // ── Step 2: Jump from current block to loop header ──
         ir_func.current_block().push(IRInstruction::Branch {
@@ -1517,9 +1516,7 @@ impl IRBuilder {
 
         // ── Step 4: Lower the loop body ──
         ir_func.append_block(&loop_body_label);
-        eprintln!("[lower_loop] body has {} statements", body.len());
         self.lower_statements(body, ir_func, names)?;
-        eprintln!("[lower_loop] after body, names['a']={:?}", names.get("a"));
 
         // ── Step 4b: Emit the continue target block (for for-loops) ──
         // This block contains the loop increment and back-edge to header.
@@ -1599,7 +1596,6 @@ impl IRBuilder {
                                 // Get the latest vreg for this name
                                 let latest_vreg = name_to_latest.get(name).copied()
                                     .or_else(|| names.get(name).copied());
-                                eprintln!("[phi_patch] phi={:?} name={:?} latest={:?} names[name]={:?}", phi_vreg_id, name, latest_vreg, names.get(name));
                                 if let Some(current_vreg) = latest_vreg {
                                     for entry in incoming.iter_mut() {
                                         if entry.1 == loop_body_label || entry.1 == back_edge_label {
@@ -1816,7 +1812,6 @@ impl IRBuilder {
         // Map: pred_label → Vec<(dst, src)>
         let mut copies_by_pred: HashMap<String, Vec<(IRValue, IRValue)>> = HashMap::new();
         for (_phi_block_idx, dst, incoming) in &all_phis {
-            eprintln!("[resolve_phis] Phi dst={:?} incoming={:?}", dst, incoming);
             for (value, pred_label) in incoming {
                 // Skip self-referencing entries (where the value == dst)
                 if value == dst {
