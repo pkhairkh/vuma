@@ -1161,6 +1161,7 @@ fn flatten_expr(
                 lhs: lhs_expr,
                 rhs: rhs_expr,
                 tail_call: false,
+                reassigns: None,
             }));
             ScgExpr::Var(dst)
         }
@@ -1177,6 +1178,7 @@ fn flatten_expr(
                         lhs: operand_expr,
                         rhs: ScgExpr::Int(-1),
                         tail_call: false,
+                        reassigns: None,
                     }));
                 }
                 UnOp::Neg => {
@@ -1186,6 +1188,7 @@ fn flatten_expr(
                         lhs: ScgExpr::Int(0),
                         rhs: operand_expr,
                         tail_call: false,
+                        reassigns: None,
                     }));
                 }
                 UnOp::Not => {
@@ -1195,6 +1198,7 @@ fn flatten_expr(
                         lhs: operand_expr,
                         rhs: ScgExpr::Int(0),
                         tail_call: false,
+                        reassigns: None,
                     }));
                 }
                 UnOp::Deref => {
@@ -1202,6 +1206,7 @@ fn flatten_expr(
                         dst: dst.clone(),
                         ptr: operand_expr,
                         offset: None,
+                        ty: None,
                     }));
                 }
             }
@@ -1230,6 +1235,7 @@ fn flatten_expr(
                 func: func_name,
                 args: flat_args,
                 is_extern,
+                reassigns: None,
             }));
             ScgExpr::Var(dst)
         }
@@ -1246,6 +1252,7 @@ fn flatten_expr(
                 func: "AtomicLoad".to_string(),
                 args: vec![addr_expr],
                 is_extern: true,
+                reassigns: None,
             }));
             ScgExpr::Var(dst)
         }
@@ -1258,6 +1265,7 @@ fn flatten_expr(
                 func: "AtomicStore".to_string(),
                 args: vec![value_expr, addr_expr],
                 is_extern: true,
+                reassigns: None,
             }));
             ScgExpr::Var(dst)
         }
@@ -1271,6 +1279,7 @@ fn flatten_expr(
                 func: "AtomicCas".to_string(),
                 args: vec![addr_expr, expected_expr, desired_expr],
                 is_extern: true,
+                reassigns: None,
             }));
             ScgExpr::Var(dst)
         }
@@ -1283,6 +1292,7 @@ fn flatten_expr(
                 dst: dst.clone(),
                 ptr: addr,
                 offset: None,
+                ty: None,
             }));
             ScgExpr::Var(dst)
         }
@@ -1298,6 +1308,7 @@ fn flatten_expr(
                 lhs: base_expr,
                 rhs: off_expr,
                 tail_call: false,
+                reassigns: None,
             }));
             ScgExpr::Var(dst)
         }
@@ -1319,12 +1330,14 @@ fn flatten_expr(
                 lhs: base_expr,
                 rhs: idx_expr,
                 tail_call: false,
+                reassigns: None,
             }));
             let dst = ctx.alloc_temp();
             stmts.push(ScgStatement::Access(AccessNode::Load {
                 dst: dst.clone(),
                 ptr: ScgExpr::Var(addr),
                 offset: None,
+                ty: None,
             }));
             ScgExpr::Var(dst)
         }
@@ -1341,6 +1354,7 @@ fn flatten_expr(
                 func: "__vuma_alloc".to_string(),
                 args: vec![size_expr],
                 is_extern: true,
+                reassigns: None,
             }));
             ScgExpr::Var(dst)
         }
@@ -1442,6 +1456,7 @@ fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) -> Vec
                         func: name.clone(),
                         args: flat_args,
                         is_extern,
+                        reassigns: None,
                     }));
                     return stmts;
                 }
@@ -1477,6 +1492,7 @@ fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) -> Vec
                         lhs: result,
                         rhs: ScgExpr::Int(0),
                         tail_call: false,
+                        reassigns: None,
                     }));
                 }
             }
@@ -1511,6 +1527,7 @@ fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) -> Vec
                     lhs: base,
                     rhs: idx,
                     tail_call: false,
+                    reassigns: None,
                 }));
                 let value = flatten_expr(&assign_stmt.value, &mut stmts, ctx);
                 stmts.push(ScgStatement::Access(AccessNode::Store {
@@ -1562,6 +1579,7 @@ fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) -> Vec
                         func: name.clone(),
                         args: flat_args,
                         is_extern,
+                        reassigns: None,
                     }));
                     return stmts;
                 }
@@ -1578,6 +1596,7 @@ fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) -> Vec
                         lhs: result,
                         rhs: ScgExpr::Int(0),
                         tail_call: false,
+                        reassigns: None,
                     }));
                 }
             }
@@ -1611,6 +1630,7 @@ fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) -> Vec
                 lhs: ScgExpr::Var(dst),
                 rhs,
                 tail_call: false,
+                reassigns: None,
             }));
             stmts
         }
@@ -1695,6 +1715,7 @@ fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) -> Vec
                 lhs: start_expr,
                 rhs: ScgExpr::Int(0),
                 tail_call: false,
+                reassigns: None,
             });
 
             let mut loop_body = Vec::new();
@@ -1705,6 +1726,7 @@ fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) -> Vec
                 lhs: ScgExpr::Var(for_stmt.name.clone()),
                 rhs: end_expr.clone(),
                 tail_call: false,
+                reassigns: None,
             }));
 
             let inner_body = bridge_block_to_scg_stmts(&for_stmt.body, ctx);
@@ -1715,6 +1737,7 @@ fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) -> Vec
                 lhs: ScgExpr::Var(for_stmt.name.clone()),
                 rhs: ScgExpr::Int(1),
                 tail_call: false,
+                reassigns: None,
             }));
 
             loop_body.push(ScgStatement::Control(ControlNode::If {
