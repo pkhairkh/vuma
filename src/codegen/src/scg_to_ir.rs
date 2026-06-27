@@ -634,6 +634,11 @@ pub struct IRBuilder {
     /// width inference. Only applies when load_count == 1 AND store_count == 0
     /// (read-only functions where the single load flows to the return).
     store_count: usize,
+    /// Number of Cmp statements in the current function. Used to distinguish
+    /// read-only functions that directly return a load (mat_read: no Cmp)
+    /// from those that use the load in a comparison (verify_buf: has Cmp).
+    /// Only the former should use the return type for load width.
+    cmp_count: usize,
     /// The return type of the current function, parsed from the function
     /// name (e.g. "fn_main_entry(u64)" → U64). Used by lower_access for
     /// load type inference (see load_count). Stored separately from
@@ -657,6 +662,7 @@ impl IRBuilder {
             param_types: std::collections::HashMap::new(),
             load_count: 0,
             store_count: 0,
+            cmp_count: 0,
             current_return_type: None,
         }
     }
@@ -710,6 +716,7 @@ impl IRBuilder {
         // where the load flows directly to the return).
         self.load_count = Self::count_loads(&func.body);
         self.store_count = Self::count_stores(&func.body);
+        self.cmp_count = Self::count_cmps(&func.body);
         let mut ir_func = IRFunction::new(&func.name);
 
         // Map parameters to virtual registers with proper types.
@@ -2343,20 +2350,18 @@ impl IRBuilder {
                 let load_ty = ty.clone().unwrap_or_else(|| {
                     if let Some(pt) = self.param_types.get(dst) {
                         pt.clone()
-                    } else if self.load_count == 1 && self.store_count == 0 {
-                        // For read-only functions with exactly ONE load that
-                        // flows directly to the return (e.g. `fn mat_read()
-                        // -> u32 { return *(mat + offset); }`), use the
-                        // function's return type for the load width.
+                    } else if self.load_count == 1 && self.store_count == 0 && self.cmp_count == 0 {
+                        // For read-only functions with exactly ONE load, no
+                        // stores, and no comparisons, the load result flows
+                        // directly to the return value. Use the function's
+                        // return type for the load width.
                         //
-                        // This is safe because there are no stores to conflict
-                        // with. On big-endian (ppc64), using U32 for the load
-                        // ensures all 4 bytes are read in the right order.
-                        //
-                        // We require store_count == 0 because functions that
-                        // both store and load (e.g. byte-level access that
-                        // stores U8 and loads U8) would break if we used the
-                        // return type (U32/U64) for U8 loads.
+                        // The cmp_count == 0 check excludes functions like
+                        // verify_buf that use the load in a comparison
+                        // (if v != expected), which indicates byte-level access.
+                        // Functions like mat_read (no comparisons) directly
+                        // return the loaded value, so the return type is
+                        // the correct load width.
                         if let Some(ret_ty) = &self.current_return_type {
                             if !matches!(ret_ty, IRType::Ptr) {
                                 return ret_ty.clone();
@@ -3252,6 +3257,66 @@ impl IRBuilder {
                 }
                 _ => {}
             }
+        }
+        count
+    }
+
+    /// Recursively count Cmp-like statements (Cmp, CondBranch with a Cmp).
+    fn count_cmps(stmts: &[ScgStatement]) -> usize {
+        let mut count = 0;
+        for stmt in stmts {
+            match stmt {
+                ScgStatement::Computation(c) => {
+                    // Check if this is a comparison operation
+                    if matches!(c.op, crate::ir::BinOpKind::SLt | crate::ir::BinOpKind::SLe
+                        | crate::ir::BinOpKind::SGt | crate::ir::BinOpKind::SGe
+                        | crate::ir::BinOpKind::ULt | crate::ir::BinOpKind::ULe
+                        | crate::ir::BinOpKind::UGt | crate::ir::BinOpKind::UGe
+                        | crate::ir::BinOpKind::Eq | crate::ir::BinOpKind::Ne)
+                    {
+                        count += 1;
+                    }
+                }
+                ScgStatement::Control(ctrl) => {
+                    count += Self::count_cmps_in_control(ctrl);
+                }
+                _ => {}
+            }
+        }
+        count
+    }
+
+    /// Helper for `count_cmps`: descend into control-flow nodes.
+    fn count_cmps_in_control(ctrl: &ControlNode) -> usize {
+        let mut count = 0;
+        match ctrl {
+            ControlNode::If { cond, then_body, else_body, .. } => {
+                // Check if the condition is a comparison
+                if let ScgExpr::BinOp { op, .. } = cond {
+                    if matches!(op, crate::ir::BinOpKind::SLt | crate::ir::BinOpKind::SLe
+                        | crate::ir::BinOpKind::SGt | crate::ir::BinOpKind::SGe
+                        | crate::ir::BinOpKind::ULt | crate::ir::BinOpKind::ULe
+                        | crate::ir::BinOpKind::UGt | crate::ir::BinOpKind::UGe
+                        | crate::ir::BinOpKind::Eq | crate::ir::BinOpKind::Ne)
+                    {
+                        count += 1;
+                    }
+                }
+                count += Self::count_cmps(then_body);
+                if let Some(eb) = else_body {
+                    count += Self::count_cmps(eb);
+                }
+            }
+            ControlNode::Loop { body, .. } => {
+                count += Self::count_cmps(body);
+            }
+            ControlNode::Switch { arms, default_body, .. } => {
+                for arm in arms {
+                    count += Self::count_cmps(&arm.body);
+                }
+                count += Self::count_cmps(default_body);
+            }
+            _ => {}
         }
         count
     }
