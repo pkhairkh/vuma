@@ -3838,6 +3838,35 @@ pub fn bridge_scg_to_codegen_with_externs(scg: &SCG, extern_functions: &HashSet<
                 }
             }
 
+            // Extract the return type from the function name.
+            // Function names have the format "fn_<name>_entry(<return_type>)"
+            // e.g. "fn_main_entry(u64)" → return type u64.
+            // This is used by the IR builder to infer load types (e.g.
+            // loading a u32 value instead of defaulting to U8), which is
+            // critical for big-endian backends (ppc64) where U8 store +
+            // U32 load reads the wrong byte position.
+            let results: Vec<ScgType> = if let Some(open) = func_name.rfind('(') {
+                if let Some(close) = func_name.rfind(')') {
+                    if close > open {
+                        let ret_ty_str = &func_name[open + 1..close];
+                        // "void" means no return value
+                        if ret_ty_str.is_empty() || ret_ty_str == "void" {
+                            vec![]
+                        } else if let Some(ty) = parse_scg_type(ret_ty_str) {
+                            vec![ty]
+                        } else {
+                            vec![]
+                        }
+                    } else {
+                        vec![]
+                    }
+                } else {
+                    vec![]
+                }
+            } else {
+                vec![]
+            };
+
             // Keep results=[] for all functions. The wasm32 backend uses
             // memory to pass the return value (not the wasm return type)
             // because multi-block functions have stack imbalance issues
@@ -3845,7 +3874,7 @@ pub fn bridge_scg_to_codegen_with_externs(scg: &SCG, extern_functions: &HashSet<
             scg_nodes.push(ScgNode::Function(ScgFunction {
                 name: func_name.clone(),
                 params,
-                results: vec![],
+                results,
                 body,
             }));
         }
