@@ -2650,7 +2650,64 @@ fn convert_computation_no_calls(
                                                 scg,
                                             )
                                         };
-                                        let value = if let Some((op, l, r)) =
+                                        let value = if rhs.starts_with('*') {
+                                            // RHS is a dereference: `*(msg + i)`.
+                                            // Generate a Load statement first, then
+                                            // use the loaded value as the store value.
+                                            // Without this, resolve_subexpr would
+                                            // misparse `*` as the Mul operator and
+                                            // return Int(0), silently dropping the
+                                            // load and storing 0 instead of the
+                                            // actual byte.
+                                            //
+                                            // We return a synthetic statement list
+                                            // (Load + Store) instead of a single
+                                            // Store. The caller (convert_computation_no_calls)
+                                            // returns this Vec directly.
+                                            let load_ptr_expr = strip_outer_parens(&rhs[1..].trim());
+                                            let load_ptr = if let Some((op2, l2, r2)) =
+                                                parse_expr_split(load_ptr_expr)
+                                            {
+                                                let lv = resolve_subexpr(
+                                                    &l2,
+                                                    &all_sources,
+                                                    edge_idx,
+                                                    scg,
+                                                );
+                                                let rv = resolve_subexpr(
+                                                    &r2,
+                                                    &all_sources,
+                                                    edge_idx,
+                                                    scg,
+                                                );
+                                                ScgExpr::BinOp {
+                                                    op: map_binop_kind(op2),
+                                                    lhs: Box::new(lv),
+                                                    rhs: Box::new(rv),
+                                                }
+                                            } else {
+                                                resolve_subexpr(
+                                                    load_ptr_expr,
+                                                    &all_sources,
+                                                    edge_idx,
+                                                    scg,
+                                                )
+                                            };
+                                            let load_dst = format!("v_{}_load_rhs", node_id.as_u64());
+                                            let load_stmt = ScgStatement::Access(AccessNode::Load {
+                                                dst: load_dst.clone(),
+                                                ptr: load_ptr,
+                                                offset: None,
+                                                ty: None,
+                                            });
+                                            let store_stmt = ScgStatement::Access(AccessNode::Store {
+                                                ptr,
+                                                offset: access.offset.map(|o| ScgExpr::Int(o as i64)),
+                                                value: ScgExpr::Var(load_dst),
+                                                ty: None,
+                                            });
+                                            return vec![load_stmt, store_stmt];
+                                        } else if let Some((op, l, r)) =
                                             parse_expr_split(rhs)
                                         {
                                             let lhs_val = resolve_subexpr(
