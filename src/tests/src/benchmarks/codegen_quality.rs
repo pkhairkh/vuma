@@ -146,6 +146,7 @@ fn build_program_with_memory(size: usize) -> Scg {
             ptr: ScgExpr::Var("buf".to_string()),
             offset: Some(ScgExpr::Int((i * 4) as i64)),
             value: ScgExpr::Int(i as i64),
+            ty: None,
         }));
         if i % 3 == 0 {
             // Load immediately after store — potentially redundant
@@ -153,6 +154,7 @@ fn build_program_with_memory(size: usize) -> Scg {
                 dst: format!("val{}", i),
                 ptr: ScgExpr::Var("buf".to_string()),
                 offset: Some(ScgExpr::Int((i * 4) as i64)),
+                ty: None,
             }));
         }
     }
@@ -165,6 +167,7 @@ fn build_program_with_memory(size: usize) -> Scg {
             lhs: ScgExpr::Int(i as i64),
             rhs: ScgExpr::Int((i + 1) as i64),
             tail_call: false,
+            reassigns: None,
         }));
     }
 

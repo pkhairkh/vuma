@@ -68,6 +68,7 @@ fn build_program(stmt_count: usize) -> Scg {
             lhs: if i == 0 { ScgExpr::Int(i as i64) } else { ScgExpr::Var(format!("x{}", i - 1)) },
             rhs: ScgExpr::Int((i + 1) as i64),
             tail_call: false,
+            reassigns: None,
         }));
     }
     body.push(ScgStatement::Return(vec![ScgExpr::Var(format!("x{}", stmt_count - 1))]));
