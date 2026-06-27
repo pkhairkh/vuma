@@ -3311,8 +3311,11 @@ fn resolve_subexpr(
             rhs: Box::new(rhs),
         };
     }
-    
-    // Fallback
+
+    // Fallback: log warning for unsupported sub-expressions instead of
+    // silently returning 0. This makes debugging easier when constructs
+    // are not handled by the SCG→IR bridge.
+    eprintln!("[vuma] WARNING: resolve_subexpr fallback for '{}'; using 0", subexpr);
     ScgExpr::Int(0)
 }
 
