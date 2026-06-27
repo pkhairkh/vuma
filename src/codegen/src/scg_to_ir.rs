@@ -629,6 +629,17 @@ pub struct IRBuilder {
     /// This is especially important on big-endian backends (ppc64) where
     /// a U32 load of a U8-stored value reads the wrong byte position.
     load_count: usize,
+    /// Number of Store statements in the current function. Used together
+    /// with load_count to decide whether to use the return type for load
+    /// width inference. Only applies when load_count == 1 AND store_count == 0
+    /// (read-only functions where the single load flows to the return).
+    store_count: usize,
+    /// The return type of the current function, parsed from the function
+    /// name (e.g. "fn_main_entry(u64)" → U64). Used by lower_access for
+    /// load type inference (see load_count). Stored separately from
+    /// ir_func.result_types to avoid breaking wasm32 (which uses
+    /// result_types for the wasm function signature).
+    current_return_type: Option<crate::ir::IRType>,
 }
 
 /// Backward-compatible alias.
@@ -645,6 +656,8 @@ impl IRBuilder {
             pointer_vregs: std::collections::HashSet::new(),
             param_types: std::collections::HashMap::new(),
             load_count: 0,
+            store_count: 0,
+            current_return_type: None,
         }
     }
 
@@ -696,6 +709,7 @@ impl IRBuilder {
         // the function's return type (safe only for single-load functions
         // where the load flows directly to the return).
         self.load_count = Self::count_loads(&func.body);
+        self.store_count = Self::count_stores(&func.body);
         let mut ir_func = IRFunction::new(&func.name);
 
         // Map parameters to virtual registers with proper types.
@@ -722,6 +736,39 @@ impl IRBuilder {
             ir_func.results.push(IRValue::Register(vreg_id));
             ir_func.result_types.push(ty.to_ir_type());
             ir_func.register_vreg(vreg);
+        }
+
+        // Parse the return type from the function name (e.g.
+        // "fn_main_entry(u64)" → U64) and store it in self.current_return_type.
+        // This is used by lower_access to infer load width for single-load
+        // functions (load_count == 1), which is critical for big-endian
+        // backends (ppc64) where U8 store + U32 load reads the wrong byte.
+        //
+        // We DON'T populate ir_func.result_types here because the wasm32
+        // backend uses result_types to build the wasm function signature,
+        // and wasm32 stores return values in memory (not on the wasm stack).
+        // Adding result_types would cause "type mismatch: expected i32 but
+        // nothing on stack" errors.
+        self.current_return_type = None;
+        if let Some(open) = func.name.rfind('(') {
+            if let Some(close) = func.name.rfind(')') {
+                if close > open {
+                    let ret_ty_str = &func.name[open + 1..close];
+                    if !ret_ty_str.is_empty() && ret_ty_str != "void" {
+                        self.current_return_type = match ret_ty_str {
+                            "u8" | "U8" => Some(crate::ir::IRType::U8),
+                            "u16" | "U16" => Some(crate::ir::IRType::U16),
+                            "u32" | "U32" => Some(crate::ir::IRType::U32),
+                            "u64" | "U64" => Some(crate::ir::IRType::U64),
+                            "i8" | "I8" => Some(crate::ir::IRType::I8),
+                            "i16" | "I16" => Some(crate::ir::IRType::I16),
+                            "i32" | "I32" => Some(crate::ir::IRType::I32),
+                            "i64" | "I64" => Some(crate::ir::IRType::I64),
+                            _ => None,
+                        };
+                    }
+                }
+            }
         }
 
         // Pre-pass: register variable names that are *used* in the body but
@@ -2296,10 +2343,24 @@ impl IRBuilder {
                 let load_ty = ty.clone().unwrap_or_else(|| {
                     if let Some(pt) = self.param_types.get(dst) {
                         pt.clone()
-                    } else if self.load_count == 1 && !ir_func.result_types.is_empty() {
-                        let ret_ty = &ir_func.result_types[0];
-                        if !matches!(ret_ty, IRType::Ptr) {
-                            return ret_ty.clone();
+                    } else if self.load_count == 1 && self.store_count == 0 {
+                        // For read-only functions with exactly ONE load that
+                        // flows directly to the return (e.g. `fn mat_read()
+                        // -> u32 { return *(mat + offset); }`), use the
+                        // function's return type for the load width.
+                        //
+                        // This is safe because there are no stores to conflict
+                        // with. On big-endian (ppc64), using U32 for the load
+                        // ensures all 4 bytes are read in the right order.
+                        //
+                        // We require store_count == 0 because functions that
+                        // both store and load (e.g. byte-level access that
+                        // stores U8 and loads U8) would break if we used the
+                        // return type (U32/U64) for U8 loads.
+                        if let Some(ret_ty) = &self.current_return_type {
+                            if !matches!(ret_ty, IRType::Ptr) {
+                                return ret_ty.clone();
+                            }
                         }
                         IRType::U8
                     } else {
@@ -3146,6 +3207,45 @@ impl IRBuilder {
                 }
                 _ => {}
             }
+        }
+        count
+    }
+
+    /// Recursively count the number of `AccessNode::Store` statements.
+    fn count_stores(stmts: &[ScgStatement]) -> usize {
+        let mut count = 0;
+        for stmt in stmts {
+            match stmt {
+                ScgStatement::Access(AccessNode::Store { .. }) => count += 1,
+                ScgStatement::Control(ctrl) => {
+                    count += Self::count_stores_in_control(ctrl);
+                }
+                _ => {}
+            }
+        }
+        count
+    }
+
+    /// Helper for `count_stores`: descend into control-flow nodes.
+    fn count_stores_in_control(ctrl: &ControlNode) -> usize {
+        let mut count = 0;
+        match ctrl {
+            ControlNode::If { then_body, else_body, .. } => {
+                count += Self::count_stores(then_body);
+                if let Some(eb) = else_body {
+                    count += Self::count_stores(eb);
+                }
+            }
+            ControlNode::Loop { body, .. } => {
+                count += Self::count_stores(body);
+            }
+            ControlNode::Switch { arms, default_body, .. } => {
+                for arm in arms {
+                    count += Self::count_stores(&arm.body);
+                }
+                count += Self::count_stores(default_body);
+            }
+            _ => {}
         }
         count
     }
