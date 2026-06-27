@@ -1591,6 +1591,14 @@ fn walk_control_flow_with_externs(
                             // The AST→SCG converter stores the call expression as
                             // a string label, and DataFlow edges connect individual
                             // variables rather than computed sub-expressions.
+                            //
+                            // CRITICAL: Arguments may contain nested function calls
+                            // (e.g. write_u32_be(state, 0, (read_u32_be(state, 0) + a) & mask)).
+                            // We must extract these nested calls into separate Call
+                            // statements BEFORE resolving the argument expression,
+                            // otherwise resolve_subexpr would silently replace the
+                            // call with Int(0), producing wrong results.
+                            let mut nested_call_stmts: Vec<ScgStatement> = Vec::new();
                             let args: Vec<ScgExpr> = if let Some(caller) = caller_node {
                                 if let Some(caller_data) = scg.get_node(caller) {
                                     if let NodePayload::Computation(comp) = &caller_data.payload {
@@ -1598,7 +1606,14 @@ fn walk_control_flow_with_externs(
                                         if let Some(expr) = extract_call_expr_from_label(&caller_label, func_name) {
                                             let arg_strs = parse_call_args(&expr);
                                             arg_strs.iter()
-                                                .map(|a| resolve_subexpr(a, &sources, edge_idx, scg))
+                                                .map(|a| {
+                                                    // Extract nested function calls from this argument
+                                                    let (modified_a, mut calls) = extract_calls_from_label(
+                                                        a, node_id, &sources, edge_idx, scg, extern_functions,
+                                                    );
+                                                    nested_call_stmts.append(&mut calls);
+                                                    resolve_subexpr(&modified_a, &sources, edge_idx, scg)
+                                                })
                                                 .collect()
                                         } else {
                                             collect_args_from_df(&df_inputs, scg, edge_idx)
@@ -1612,6 +1627,11 @@ fn walk_control_flow_with_externs(
                             } else {
                                 collect_args_from_df(&df_inputs, scg, edge_idx)
                             };
+                            // Emit any extracted nested Call statements BEFORE
+                            // the outer call. This ensures the nested calls
+                            // execute first and their results are available
+                            // as vreg references in the outer call's arguments.
+                            stmts.append(&mut nested_call_stmts);
 
                             let call_dst = if let Some(caller) = caller_node {
                                 Some(format!("v_{}", caller.as_u64()))
