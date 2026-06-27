@@ -2785,8 +2785,8 @@ fn parse_expr_split(expr: &str) -> Option<(IrBinOpKind, String, String)> {
         ("+", IrBinOpKind::Add),
         ("-", IrBinOpKind::Sub),
         ("*", IrBinOpKind::Mul),
-        ("/", IrBinOpKind::SDiv),
-        ("%", IrBinOpKind::SRem),
+        ("/", IrBinOpKind::UDiv),
+        ("%", IrBinOpKind::URem),
     ];
     
     // Search for top-level operators (outside parentheses)
@@ -2922,6 +2922,8 @@ fn map_binop_kind(op: IrBinOpKind) -> vuma_codegen::ir::BinOpKind {
         IrBinOpKind::Mul => vuma_codegen::ir::BinOpKind::Mul,
         IrBinOpKind::SDiv => vuma_codegen::ir::BinOpKind::SDiv,
         IrBinOpKind::SRem => vuma_codegen::ir::BinOpKind::SRem,
+        IrBinOpKind::UDiv => vuma_codegen::ir::BinOpKind::UDiv,
+        IrBinOpKind::URem => vuma_codegen::ir::BinOpKind::URem,
         IrBinOpKind::And => vuma_codegen::ir::BinOpKind::And,
         IrBinOpKind::Or => vuma_codegen::ir::BinOpKind::Or,
         IrBinOpKind::Xor => vuma_codegen::ir::BinOpKind::Xor,
@@ -3089,6 +3091,8 @@ fn resolve_subexpr(
             IrBinOpKind::Mul => vuma_codegen::ir::BinOpKind::Mul,
             IrBinOpKind::SDiv => vuma_codegen::ir::BinOpKind::SDiv,
             IrBinOpKind::SRem => vuma_codegen::ir::BinOpKind::SRem,
+            IrBinOpKind::UDiv => vuma_codegen::ir::BinOpKind::UDiv,
+            IrBinOpKind::URem => vuma_codegen::ir::BinOpKind::URem,
             IrBinOpKind::And => vuma_codegen::ir::BinOpKind::And,
             IrBinOpKind::Or => vuma_codegen::ir::BinOpKind::Or,
             IrBinOpKind::Xor => vuma_codegen::ir::BinOpKind::Xor,
@@ -3899,8 +3903,8 @@ fn parse_binop(op: &str) -> Option<IrBinOpKind> {
     }
     for (pat, kind) in [
         ("+", IrBinOpKind::Add), ("-", IrBinOpKind::Sub),
-        ("*", IrBinOpKind::Mul), ("/", IrBinOpKind::SDiv),
-        ("%", IrBinOpKind::SRem), ("&", IrBinOpKind::And),
+        ("*", IrBinOpKind::Mul), ("/", IrBinOpKind::UDiv),
+        ("%", IrBinOpKind::URem), ("&", IrBinOpKind::And),
         ("|", IrBinOpKind::Or), ("^", IrBinOpKind::Xor),
         ("<", IrBinOpKind::SLt), (">", IrBinOpKind::SGt),
     ] {
