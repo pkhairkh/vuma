@@ -2476,42 +2476,54 @@ fn convert_computation_no_calls(
                     resolve_subexpr(ptr_expr, &df_sources, edge_idx, scg)
                 };
                 // Infer load type from the pointer expression and result_type.
-                // If the pointer is `base + N` where N > 0 and N % 4 == 0,
-                // and the result_type is u32/i32, use U32 for the load.
-                // This handles struct field access like `*(opt + 4)` where
-                // a U32 value was stored at offset 4. On big-endian (ppc64),
-                // a U8 load at offset 4 reads the wrong byte (MSB instead of LSB).
+                // Case 1: `base + N` where N > 0 and N % 4 == 0 → struct field
+                //   e.g. *(opt + 4) loads a U32 field
+                // Case 2: `base + (idx * stride)` where stride is 4 or 8 → array
+                //   e.g. *(arr + idx * 8) loads a U64 array element
+                //   e.g. *(mat + (row * 4 + col) * 4) loads a U32 matrix element
+                //
+                // On big-endian (ppc64), a U8 load of a multi-byte value reads
+                // the wrong byte (MSB instead of LSB). Using the correct load
+                // type ensures all bytes are read in the right order.
                 //
                 // For offset 0 (tag bytes) or non-aligned offsets (byte access
                 // in read_u32_be), keep ty=None (defaults to U8).
                 let load_ty = {
-                    let mut offset_val: Option<i64> = None;
+                    let rt = comp.result_type.as_deref();
+                    let mut inferred_ty: Option<vuma_codegen::ir::IRType> = None;
+
+                    // Check for constant offset: base + N
                     if let ScgExpr::BinOp { op: vuma_codegen::ir::BinOpKind::Add, lhs: _, rhs } = &ptr {
                         if let ScgExpr::Int(n) = rhs.as_ref() {
-                            offset_val = Some(*n);
-                        }
-                    }
-                    let rt = comp.result_type.as_deref();
-                    if let Some(off) = offset_val {
-                        if off > 0 && off % 4 == 0 {
-                            // Aligned non-zero offset — likely a U32 field
-                            if let Some("u32") = rt {
-                                Some(vuma_codegen::ir::IRType::U32)
-                            } else if let Some("i32") = rt {
-                                Some(vuma_codegen::ir::IRType::I32)
-                            } else if let Some("u64") = rt {
-                                Some(vuma_codegen::ir::IRType::U64)
-                            } else if let Some("i64") = rt {
-                                Some(vuma_codegen::ir::IRType::I64)
-                            } else {
-                                None
+                            if *n > 0 && *n % 4 == 0 {
+                                inferred_ty = match rt {
+                                    Some("u32") => Some(vuma_codegen::ir::IRType::U32),
+                                    Some("i32") => Some(vuma_codegen::ir::IRType::I32),
+                                    Some("u64") => Some(vuma_codegen::ir::IRType::U64),
+                                    Some("i64") => Some(vuma_codegen::ir::IRType::I64),
+                                    _ => None,
+                                };
                             }
-                        } else {
-                            None
                         }
-                    } else {
-                        None
                     }
+
+                    // Check for array stride: base + (idx * stride)
+                    // If stride is 8, it's a U64 array. If stride is 4, it's U32.
+                    if inferred_ty.is_none() {
+                        if let ScgExpr::BinOp { op: vuma_codegen::ir::BinOpKind::Add, lhs: _, rhs } = &ptr {
+                            if let ScgExpr::BinOp { op: vuma_codegen::ir::BinOpKind::Mul, lhs: _, rhs } = rhs.as_ref() {
+                                if let ScgExpr::Int(stride) = rhs.as_ref() {
+                                    inferred_ty = match *stride {
+                                        8 => Some(vuma_codegen::ir::IRType::U64),
+                                        4 => Some(vuma_codegen::ir::IRType::U32),
+                                        _ => None,
+                                    };
+                                }
+                            }
+                        }
+                    }
+
+                    inferred_ty
                 };
                 return vec![ScgStatement::Access(AccessNode::Load {
                     dst: node_var(node_id, "val"),
