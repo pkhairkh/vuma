@@ -1,6 +1,5 @@
 // Test: Loop with memory operations (simplified SHA256d W schedule)
-// Expected: exit 79
-// Expected exit code: 0
+// Expected exit code: 128 (result & 0xFF where result = 0x61626380)
 
 fn write_u32(buf: Address, offset: u64, val: u32) {
     *(buf + offset) = (val >> 24) & 255;
