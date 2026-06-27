@@ -13,7 +13,7 @@
 //   - optional payload types on variants
 //   - match expressions for pattern matching
 //   - tagged union memory layout (discriminant + payload)
-// Expected exit code: 0
+// Expected exit code: 141
 
 // ===========================================================================
 // Define an Option-like enum
