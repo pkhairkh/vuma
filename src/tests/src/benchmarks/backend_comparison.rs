@@ -95,6 +95,7 @@ fn build_reference_program() -> Scg {
         lhs: ScgExpr::Int(1),
         rhs: ScgExpr::Int(2),
         tail_call: false,
+        reassigns: None,
     }));
     body.push(ScgStatement::Computation(ComputationNode {
         dst: "b".to_string(),
@@ -102,6 +103,7 @@ fn build_reference_program() -> Scg {
         lhs: ScgExpr::Var("a".to_string()),
         rhs: ScgExpr::Int(3),
         tail_call: false,
+        reassigns: None,
     }));
     body.push(ScgStatement::Computation(ComputationNode {
         dst: "c".to_string(),
@@ -109,6 +111,7 @@ fn build_reference_program() -> Scg {
         lhs: ScgExpr::Var("b".to_string()),
         rhs: ScgExpr::Var("a".to_string()),
         tail_call: false,
+        reassigns: None,
     }));
 
     // Memory operations
@@ -121,11 +124,13 @@ fn build_reference_program() -> Scg {
         ptr: ScgExpr::Var("buf".to_string()),
         offset: None,
         value: ScgExpr::Var("c".to_string()),
+        ty: None,
     }));
     body.push(ScgStatement::Access(AccessNode::Load {
         dst: "val".to_string(),
         ptr: ScgExpr::Var("buf".to_string()),
         offset: None,
+        ty: None,
     }));
 
     // Control flow
@@ -137,6 +142,7 @@ fn build_reference_program() -> Scg {
             lhs: ScgExpr::Var("val".to_string()),
             rhs: ScgExpr::Int(1),
             tail_call: false,
+            reassigns: None,
         })],
         else_body: Some(vec![ScgStatement::Computation(ComputationNode {
             dst: "d".to_string(),
@@ -144,6 +150,7 @@ fn build_reference_program() -> Scg {
             lhs: ScgExpr::Var("val".to_string()),
             rhs: ScgExpr::Int(1),
             tail_call: false,
+            reassigns: None,
         })]),
     }));
 
