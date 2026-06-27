@@ -1146,7 +1146,10 @@ fn flatten_expr(
             Lit::Float(f) => ScgExpr::Float(*f),
             Lit::Bool(b) => ScgExpr::Int(if *b { 1 } else { 0 }),
             Lit::Address(a) => ScgExpr::Int(*a as i64),
-            Lit::String(_) => ScgExpr::Int(0),
+            Lit::String(_) => {
+                eprintln!("[vuma] WARNING: string literals are not supported in codegen; using 0");
+                ScgExpr::Int(0)
+            }
         },
 
         // ── Binary operations: flatten lhs and rhs, then emit one Computation ──
@@ -1385,7 +1388,12 @@ fn flatten_expr(
         }
 
         // ── Fallback for unsupported expression types ──
-        _ => ScgExpr::Int(0),
+        // Log a warning instead of silently returning 0. This makes
+        // unsupported constructs visible during compilation.
+        _ => {
+            eprintln!("[vuma] WARNING: unsupported expression type in flatten_expr; using 0");
+            ScgExpr::Int(0)
+        }
     }
 }
 
