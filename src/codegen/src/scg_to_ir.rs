@@ -2396,14 +2396,21 @@ impl IRBuilder {
                     None => (ptr_val, 0),
                 };
                 // Determine store width: use explicit type if provided,
-                // else U64 for pointer vregs, else check param type, else U8.
+                // else U64 for pointer vregs, else check param type,
+                // else infer from pointer expression (aligned offset / array stride),
+                // else U8.
+                //
+                // The offset-based and array-stride-based inference mirrors the
+                // load type inference. This is critical for big-endian (ppc64):
+                // if a U64 value is stored as U8, only 1 byte is written. When
+                // a U64 load reads all 8 bytes, 7 bytes are garbage on ppc64.
                 let store_ty = ty.clone().unwrap_or_else(|| {
                     if let IRValue::Register(vid) = val {
                         if self.pointer_vregs.contains(&vid) {
                             IRType::U64
                         } else {
                             // Check if this vreg corresponds to a known parameter
-                            // and use its type. Fall back to U8.
+                            // and use its type.
                             let vreg_name = ir_func.vregs.get(&vid)
                                 .and_then(|v| v.name.as_deref());
                             if let Some(name) = vreg_name {
@@ -2411,9 +2418,56 @@ impl IRBuilder {
                                     return pt.clone();
                                 }
                             }
+                            // Infer from pointer expression (same logic as loads)
+                            // Check for constant offset: base + N where N > 0 and N % 4 == 0
+                            if let ScgExpr::BinOp { op: crate::ir::BinOpKind::Add, lhs: _, rhs } = ptr {
+                                if let ScgExpr::Int(n) = rhs.as_ref() {
+                                    if *n > 0 && *n % 8 == 0 {
+                                        return IRType::U64;
+                                    }
+                                    if *n > 0 && *n % 4 == 0 {
+                                        return IRType::U32;
+                                    }
+                                }
+                            }
+                            // Check for array stride: base + (idx * stride)
+                            if let ScgExpr::BinOp { op: crate::ir::BinOpKind::Add, lhs: _, rhs } = ptr {
+                                if let ScgExpr::BinOp { op: crate::ir::BinOpKind::Mul, lhs: _, rhs } = rhs.as_ref() {
+                                    if let ScgExpr::Int(stride) = rhs.as_ref() {
+                                        return match *stride {
+                                            8 => IRType::U64,
+                                            4 => IRType::U32,
+                                            _ => IRType::U8,
+                                        };
+                                    }
+                                }
+                            }
                             IRType::U8
                         }
                     } else {
+                        // For immediate values, also infer from pointer expression
+                        // This handles `*(p + 8) = 20` where 20 fits in U64.
+                        if let ScgExpr::BinOp { op: crate::ir::BinOpKind::Add, lhs: _, rhs } = ptr {
+                            if let ScgExpr::Int(n) = rhs.as_ref() {
+                                if *n > 0 && *n % 8 == 0 {
+                                    return IRType::U64;
+                                }
+                                if *n > 0 && *n % 4 == 0 {
+                                    return IRType::U32;
+                                }
+                            }
+                        }
+                        if let ScgExpr::BinOp { op: crate::ir::BinOpKind::Add, lhs: _, rhs } = ptr {
+                            if let ScgExpr::BinOp { op: crate::ir::BinOpKind::Mul, lhs: _, rhs } = rhs.as_ref() {
+                                if let ScgExpr::Int(stride) = rhs.as_ref() {
+                                    return match *stride {
+                                        8 => IRType::U64,
+                                        4 => IRType::U32,
+                                        _ => IRType::U8,
+                                    };
+                                }
+                            }
+                        }
                         IRType::U8
                     }
                 });
