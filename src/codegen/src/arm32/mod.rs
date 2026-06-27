@@ -5083,6 +5083,305 @@ impl Backend for Arm32Backend {
         // ── Build runtime I/O code ──
         let runtime_code = build_arm32_runtime();
 
+        // ── Build __vuma_alloc / __vuma_free syscall stubs (old_mmap / munmap) ──
+        // __vuma_alloc(size in R0) -> R0 = mmap(NULL, size, PROT_READ|PROT_WRITE,
+        //                                        MAP_PRIVATE|MAP_ANONYMOUS, -1, 0)
+        //   ARM EABI Linux: sys_old_mmap = 90, takes a single arg in R0 pointing
+        //   to a struct mmap_arg_struct { addr, len, prot, flags, fd, offset }
+        //   laid out in memory. We build the struct on the stack.
+        // __vuma_free(addr in R0) -> munmap(addr, 0)
+        //   ARM EABI Linux: sys_munmap = 91, args R0/R1, syscall # in R7, SVC #0.
+        //
+        // Note: ARM AAPCS marks R4-R11 as callee-saved. We clobber R4 and R5 in
+        // the alloc stub, so we save/restore them via PUSH/POP. The free stub
+        // and simple syscall stubs clobber only R7 (which is also callee-saved
+        // in AAPCS) — this matches the existing _start stub and the runtime
+        // print_hex/print_int functions, which also clobber R7 without saving
+        // (treated as leaf syscall wrappers, not full C functions).
+        let vuma_alloc_stub: Vec<u8> = {
+            let mut code = Vec::new();
+            // PUSH {R4, R5}  — save callee-saved registers we'll clobber.
+            //   STMDB SP!, {R4, R5}  → register_list = 0b0011_0000 = 0x0030
+            code.extend_from_slice(&encode_stm(
+                Condition::Al, true, false, false, true, Gpr::R13.encoding(), 0x0030,
+            ));
+            // MOV R4, R0  (save size, since R0 will be reused as struct ptr)
+            code.extend_from_slice(&encode_dp_reg(
+                Condition::Al, DP_MOV, false, 0, Gpr::R4.encoding(), Gpr::R0.encoding(),
+            ));
+            // SUB SP, SP, #24  (allocate mmap_arg_struct: 6 × 4 bytes)
+            code.extend_from_slice(&encode_dp_imm(
+                Condition::Al, DP_SUB, false, Gpr::R13.encoding(), Gpr::R13.encoding(), 0, 24,
+            ));
+            // MOV R5, #0; STR R5, [SP, #0]  — addr = NULL
+            code.extend_from_slice(&encode_dp_imm(
+                Condition::Al, DP_MOV, false, 0, Gpr::R5.encoding(), 0, 0,
+            ));
+            code.extend_from_slice(&encode_ls_imm(
+                Condition::Al, true, true, false, false, false,
+                Gpr::R13.encoding(), Gpr::R5.encoding(), 0,
+            ));
+            // STR R4, [SP, #4]  — len = size
+            code.extend_from_slice(&encode_ls_imm(
+                Condition::Al, true, true, false, false, false,
+                Gpr::R13.encoding(), Gpr::R4.encoding(), 4,
+            ));
+            // MOV R5, #3; STR R5, [SP, #8]  — prot = PROT_READ|PROT_WRITE
+            code.extend_from_slice(&encode_dp_imm(
+                Condition::Al, DP_MOV, false, 0, Gpr::R5.encoding(), 0, 3,
+            ));
+            code.extend_from_slice(&encode_ls_imm(
+                Condition::Al, true, true, false, false, false,
+                Gpr::R13.encoding(), Gpr::R5.encoding(), 8,
+            ));
+            // MOV R5, #0x22; STR R5, [SP, #12]  — flags = MAP_PRIVATE|MAP_ANONYMOUS
+            code.extend_from_slice(&encode_dp_imm(
+                Condition::Al, DP_MOV, false, 0, Gpr::R5.encoding(), 0, 0x22,
+            ));
+            code.extend_from_slice(&encode_ls_imm(
+                Condition::Al, true, true, false, false, false,
+                Gpr::R13.encoding(), Gpr::R5.encoding(), 12,
+            ));
+            // MVN R5, #0; STR R5, [SP, #16]  — fd = -1 (MVN Rd, #0 → Rd = ~0 = -1)
+            code.extend_from_slice(&encode_dp_imm(
+                Condition::Al, DP_MVN, false, 0, Gpr::R5.encoding(), 0, 0,
+            ));
+            code.extend_from_slice(&encode_ls_imm(
+                Condition::Al, true, true, false, false, false,
+                Gpr::R13.encoding(), Gpr::R5.encoding(), 16,
+            ));
+            // MOV R5, #0; STR R5, [SP, #20]  — offset = 0
+            code.extend_from_slice(&encode_dp_imm(
+                Condition::Al, DP_MOV, false, 0, Gpr::R5.encoding(), 0, 0,
+            ));
+            code.extend_from_slice(&encode_ls_imm(
+                Condition::Al, true, true, false, false, false,
+                Gpr::R13.encoding(), Gpr::R5.encoding(), 20,
+            ));
+            // MOV R0, SP  (R0 = pointer to struct)
+            code.extend_from_slice(&encode_dp_reg(
+                Condition::Al, DP_MOV, false, 0, Gpr::R0.encoding(), Gpr::R13.encoding(),
+            ));
+            // MOV R7, #90  (sys_old_mmap)
+            code.extend_from_slice(&encode_dp_imm(
+                Condition::Al, DP_MOV, false, 0, Gpr::R7.encoding(), 0, 90,
+            ));
+            // SVC #0
+            code.extend_from_slice(&encode_svc(Condition::Al, 0));
+            // ADD SP, SP, #24  (free the struct)
+            code.extend_from_slice(&encode_dp_imm(
+                Condition::Al, DP_ADD, false, Gpr::R13.encoding(), Gpr::R13.encoding(), 0, 24,
+            ));
+            // POP {R4, R5}
+            code.extend_from_slice(&encode_ldm(
+                Condition::Al, false, true, false, true, Gpr::R13.encoding(), 0x0030,
+            ));
+            // BX LR
+            code.extend_from_slice(&encode_bx(Condition::Al, Gpr::R14.encoding()));
+            code
+        };
+        let vuma_free_stub: Vec<u8> = {
+            let mut code = Vec::new();
+            // MOV R1, #0  (size = 0)
+            code.extend_from_slice(&encode_dp_imm(
+                Condition::Al, DP_MOV, false, 0, Gpr::R1.encoding(), 0, 0,
+            ));
+            // MOV R7, #91  (sys_munmap)
+            code.extend_from_slice(&encode_dp_imm(
+                Condition::Al, DP_MOV, false, 0, Gpr::R7.encoding(), 0, 91,
+            ));
+            // SVC #0
+            code.extend_from_slice(&encode_svc(Condition::Al, 0));
+            // BX LR
+            code.extend_from_slice(&encode_bx(Condition::Al, Gpr::R14.encoding()));
+            code
+        };
+
+        // ── POSIX syscall stubs ──────────────────────────────────────
+        // These provide the syscalls needed by mmap_sha256d, signal_hash,
+        // lock_free_queue, epoll_echo, and ffi_demo tests.
+        //
+        // ARM EABI calling convention: args in R0-R3 (+ args 5-6 on stack),
+        // return in R0.  ARM EABI syscall convention: args in R0-R5, syscall
+        // # in R7, SVC #0, return in R0.
+        //
+        // For 1-4 arg syscalls (where the args fit in R0-R3), the calling
+        // convention matches the syscall convention, so simple stubs are just:
+        //     MOV R7, #num ; SVC #0 ; BX LR.
+        //
+        // For 6-arg syscalls (mmap, futex), we need to load args 5-6 from the
+        // caller's stack frame into R4-R5 (saving R4-R5 first via PUSH/POP).
+        //
+        // For syscalls that need arg shuffling (open→open on ARM, but uses
+        // legacy open=5; unlink=10; sigaction=67; pipe=42; dup2=63; fork=2),
+        // ARM32 has the *legacy* syscall numbers directly — no *at / 2 / 3
+        // variants needed. So most stubs are simple.
+        //
+        // For `mmap`, ARM EABI uses sys_old_mmap=90 which takes a struct
+        // pointer in R0. We build the struct on the stack.
+        //
+        // Linux ARM EABI syscall numbers used here:
+        //   write=4, read=3, open=5, close=6, mmap=90 (old_mmap),
+        //   munmap=91, unlink=10, exit=1, exit_group=248, alarm=27,
+        //   getpid=20, socket=281 (arm32), epoll_create1=356 (arm32),
+        //   futex=240, sigaction=67, pipe=42, dup2=63, fork=2,
+        //   execve=11, wait4=114, epoll_ctl=251 (arm32), epoll_wait=252 (arm32)
+        //
+        // Note: socket=281 (0x119) and epoll_create1=356 (0x164) do NOT fit
+        // in a single ARM rotated-immediate MOV (which encodes an 8-bit value
+        // rotated right by an even amount). We use load_immediate_arm32 to
+        // emit MOV+ORR sequences for these.
+
+        // Helper: encode a simple "MOV R7, #num ; SVC #0 ; BX LR" stub.
+        // For numbers that don't fit in a single ARM rotated immediate,
+        // load_immediate_arm32 emits a MOV+ORR sequence.
+        let simple_stub = |num: u32| -> Vec<u8> {
+            let mut code = Vec::new();
+            code.extend(load_immediate_arm32(Gpr::R7, num));
+            code.extend_from_slice(&encode_svc(Condition::Al, 0));
+            code.extend_from_slice(&encode_bx(Condition::Al, Gpr::R14.encoding()));
+            code
+        };
+        // Helper: encode a 6-arg stub that loads args 5-6 from the caller's
+        // stack into R4-R5 before calling the syscall. Used for mmap and futex.
+        let six_arg_stub = |num: u32| -> Vec<u8> {
+            let mut code = Vec::new();
+            // PUSH {R4, R5}  — save callee-saved registers.
+            //   register_list = 0b0011_0000 = 0x0030
+            code.extend_from_slice(&encode_stm(
+                Condition::Al, true, false, false, true, Gpr::R13.encoding(), 0x0030,
+            ));
+            // After PUSH, caller's [SP+0] is now at [SP+8], [SP+4] at [SP+12].
+            // LDR R4, [SP, #8]   (arg 5)
+            code.extend_from_slice(&encode_ls_imm(
+                Condition::Al, true, true, false, false, false,
+                Gpr::R13.encoding(), Gpr::R4.encoding(), 8,
+            ));
+            // LDR R5, [SP, #12]  (arg 6)
+            code.extend_from_slice(&encode_ls_imm(
+                Condition::Al, true, true, false, false, false,
+                Gpr::R13.encoding(), Gpr::R5.encoding(), 12,
+            ));
+            // MOV R7, #num  (or MOV+ORR if num doesn't fit in 8 bits)
+            code.extend(load_immediate_arm32(Gpr::R7, num));
+            // SVC #0
+            code.extend_from_slice(&encode_svc(Condition::Al, 0));
+            // POP {R4, R5}
+            code.extend_from_slice(&encode_ldm(
+                Condition::Al, false, true, false, true, Gpr::R13.encoding(), 0x0030,
+            ));
+            // BX LR
+            code.extend_from_slice(&encode_bx(Condition::Al, Gpr::R14.encoding()));
+            code
+        };
+
+        let syscall_stubs: Vec<(String, Vec<u8>)> = {
+            let mut stubs: Vec<(String, Vec<u8>)> = Vec::new();
+
+            // Simple stubs (args 1-4 already in correct registers R0-R3):
+            // ARM32 has the legacy syscall numbers (open=5, unlink=10, etc.),
+            // so no arg shuffling is needed — just set R7 and SVC.
+            // NOTE: futex is NOT here because it takes 6 args; it's below
+            // using six_arg_stub to load args 5-6 from the caller's stack.
+            for (name, num) in [
+                ("write", 4u32), ("read", 3), ("open", 5), ("close", 6),
+                ("munmap", 91), ("exit", 1), ("exit_group", 248),
+                ("alarm", 27), ("getpid", 20), ("unlink", 10),
+                ("sigaction", 67), ("pipe", 42), ("dup2", 63),
+                ("fork", 2), ("execve", 11), ("wait4", 114),
+                ("socket", 281), ("epoll_create1", 356),
+                ("epoll_ctl", 251), ("epoll_wait", 252),
+            ] {
+                stubs.push((name.to_string(), simple_stub(num)));
+            }
+
+            // futex — 6-arg syscall. Args 1-4 in R0-R3, args 5-6 on the
+            // caller's stack at [SP+0] and [SP+4] (per AAPCS). We load them
+            // into R4-R5 before SVC. ARM EABI: sys_futex = 240.
+            stubs.push(("futex".to_string(), six_arg_stub(240)));
+
+            // mmap → old_mmap(struct *) — ARM EABI sys_old_mmap = 90.
+            // Caller args: R0=addr, R1=len, R2=prot, R3=flags,
+            //              [SP+0]=fd, [SP+4]=offset (per AAPCS).
+            // Need to build a struct {addr, len, prot, flags, fd, offset} on
+            // the stack, then set R0 = SP, R7 = 90, SVC #0.
+            {
+                let mut code = Vec::new();
+                // PUSH {R4, R5}  — save callee-saved registers.
+                code.extend_from_slice(&encode_stm(
+                    Condition::Al, true, false, false, true, Gpr::R13.encoding(), 0x0030,
+                ));
+                // After PUSH (SP -= 8): caller's [SP+0] → [SP+8], [SP+4] → [SP+12].
+                // LDR R4, [SP, #8]   (fd)
+                code.extend_from_slice(&encode_ls_imm(
+                    Condition::Al, true, true, false, false, false,
+                    Gpr::R13.encoding(), Gpr::R4.encoding(), 8,
+                ));
+                // LDR R5, [SP, #12]  (offset)
+                code.extend_from_slice(&encode_ls_imm(
+                    Condition::Al, true, true, false, false, false,
+                    Gpr::R13.encoding(), Gpr::R5.encoding(), 12,
+                ));
+                // SUB SP, SP, #24  (allocate mmap_arg_struct: 6 × 4 bytes)
+                code.extend_from_slice(&encode_dp_imm(
+                    Condition::Al, DP_SUB, false, Gpr::R13.encoding(), Gpr::R13.encoding(), 0, 24,
+                ));
+                // STR R0, [SP, #0]  (addr)
+                code.extend_from_slice(&encode_ls_imm(
+                    Condition::Al, true, true, false, false, false,
+                    Gpr::R13.encoding(), Gpr::R0.encoding(), 0,
+                ));
+                // STR R1, [SP, #4]  (len)
+                code.extend_from_slice(&encode_ls_imm(
+                    Condition::Al, true, true, false, false, false,
+                    Gpr::R13.encoding(), Gpr::R1.encoding(), 4,
+                ));
+                // STR R2, [SP, #8]  (prot)
+                code.extend_from_slice(&encode_ls_imm(
+                    Condition::Al, true, true, false, false, false,
+                    Gpr::R13.encoding(), Gpr::R2.encoding(), 8,
+                ));
+                // STR R3, [SP, #12]  (flags)
+                code.extend_from_slice(&encode_ls_imm(
+                    Condition::Al, true, true, false, false, false,
+                    Gpr::R13.encoding(), Gpr::R3.encoding(), 12,
+                ));
+                // STR R4, [SP, #16]  (fd)
+                code.extend_from_slice(&encode_ls_imm(
+                    Condition::Al, true, true, false, false, false,
+                    Gpr::R13.encoding(), Gpr::R4.encoding(), 16,
+                ));
+                // STR R5, [SP, #20]  (offset)
+                code.extend_from_slice(&encode_ls_imm(
+                    Condition::Al, true, true, false, false, false,
+                    Gpr::R13.encoding(), Gpr::R5.encoding(), 20,
+                ));
+                // MOV R0, SP  (R0 = pointer to struct)
+                code.extend_from_slice(&encode_dp_reg(
+                    Condition::Al, DP_MOV, false, 0, Gpr::R0.encoding(), Gpr::R13.encoding(),
+                ));
+                // MOV R7, #90  (sys_old_mmap)
+                code.extend_from_slice(&encode_dp_imm(
+                    Condition::Al, DP_MOV, false, 0, Gpr::R7.encoding(), 0, 90,
+                ));
+                // SVC #0
+                code.extend_from_slice(&encode_svc(Condition::Al, 0));
+                // ADD SP, SP, #24  (free the struct)
+                code.extend_from_slice(&encode_dp_imm(
+                    Condition::Al, DP_ADD, false, Gpr::R13.encoding(), Gpr::R13.encoding(), 0, 24,
+                ));
+                // POP {R4, R5}
+                code.extend_from_slice(&encode_ldm(
+                    Condition::Al, false, true, false, true, Gpr::R13.encoding(), 0x0030,
+                ));
+                // BX LR
+                code.extend_from_slice(&encode_bx(Condition::Al, Gpr::R14.encoding()));
+                stubs.push(("mmap".to_string(), code));
+            }
+
+            stubs
+        };
+
         // ── Compute function offsets ──
         let mut func_offsets: HashMap<String, usize> = HashMap::new();
         let mut current_offset: usize = start_stub_size + ffi_stub_size;
@@ -5096,6 +5395,29 @@ impl Backend for Arm32Backend {
                 .map(|i| i.encoded.len())
                 .sum();
             current_offset += func_size;
+        }
+
+        // Runtime functions: __vuma_print_hex, __vuma_print_int, __vuma_print_newline
+        // The runtime blob is a single contiguous block; the three entry
+        // symbols all share the start of the blob.
+        let runtime_offsets_start = current_offset;
+        func_offsets.insert("__vuma_print_hex".to_string(), runtime_offsets_start);
+        func_offsets.insert("__vuma_print_int".to_string(), runtime_offsets_start);
+        func_offsets.insert("__vuma_print_newline".to_string(), runtime_offsets_start);
+        current_offset += runtime_code.len();
+
+        // __vuma_alloc / __vuma_free stubs go after the runtime blob.
+        let vuma_alloc_offset = current_offset;
+        let vuma_free_offset = vuma_alloc_offset + vuma_alloc_stub.len();
+        func_offsets.insert("__vuma_alloc".to_string(), vuma_alloc_offset);
+        func_offsets.insert("__vuma_free".to_string(), vuma_free_offset);
+        current_offset = vuma_free_offset + vuma_free_stub.len();
+
+        // POSIX syscall stubs go after __vuma_free.
+        let mut stub_offset = current_offset;
+        for (name, code) in &syscall_stubs {
+            func_offsets.insert(name.clone(), stub_offset);
+            stub_offset += code.len();
         }
 
         // ── Build _start stub ──
@@ -5156,6 +5478,13 @@ impl Backend for Arm32Backend {
 
         // Append runtime I/O code
         all_code.extend_from_slice(&runtime_code);
+        // Append __vuma_alloc / __vuma_free syscall stubs.
+        all_code.extend_from_slice(&vuma_alloc_stub);
+        all_code.extend_from_slice(&vuma_free_stub);
+        // Append POSIX syscall stubs (write, read, open, close, mmap, etc.)
+        for (_, code) in &syscall_stubs {
+            all_code.extend_from_slice(code);
+        }
 
         // ── Patch BL relocations for inter-function calls and intra-function branches ──
         // Build a map of "func_name::block_label" -> absolute code offset

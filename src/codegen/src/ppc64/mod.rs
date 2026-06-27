@@ -4669,6 +4669,78 @@ impl Backend for PPC64Backend {
         func_offsets.insert("__vuma_alloc".to_string(), vuma_alloc_offset);
         func_offsets.insert("__vuma_free".to_string(), vuma_free_offset);
 
+        // ── POSIX syscall stubs ──────────────────────────────────────
+        //
+        // PPC64 calling convention: args in R3-R10, return in R3.
+        // PPC64 syscall convention: args in R3-R8, syscall # in R0, SC,
+        // return in R3.  The calling convention matches the syscall convention
+        // for most syscalls (args already in R3-R8), so simple stubs are just:
+        //     LI R0, #num ; SC ; BLR.
+        //
+        // PPC64 Linux has the *legacy* syscall numbers directly (open=5,
+        // unlink=10, pipe=42, dup2=63, fork=2), so no `*at` / `2` / `3`
+        // arg-shuffling stubs are needed — only `sigaction` needs the
+        // `rt_sigaction` shim (sets R6 = 8 sigsetsize).
+        //
+        // PPC64 Linux syscall numbers (from arch/powerpc/include/uapi/asm/unistd.h):
+        //   exit=1, fork=2, read=3, write=4, open=5, close=6, unlink=10,
+        //   execve=11, getpid=20, alarm=27, pipe=42, dup2=63, sigaction=67,
+        //   mmap=90, munmap=91, wait4=114, clone=120, rt_sigaction=173,
+        //   futex=221, exit_group=234, epoll_ctl=237, epoll_wait=238,
+        //   openat=286, unlinkat=292, epoll_create1=315, dup3=316, pipe2=317,
+        //   socket=326
+        //
+        // All numbers fit in the 16-bit signed immediate field of LI
+        // (max +32767), so each is a single LI R0, imm.
+
+        // Helper: encode a simple "LI R0, num ; SC ; BLR" stub.
+        let simple_stub = |num: i32| -> Vec<u8> {
+            let mut code = Vec::new();
+            code.extend_from_slice(&Instruction::Li { rt: Gpr::R0, simm: num }.encode());
+            code.extend_from_slice(&Instruction::Sc.encode());
+            code.extend_from_slice(&Instruction::Bclr { bo: 20, bi: 0, bh: 0 }.encode()); // BLR
+            code
+        };
+
+        let syscall_stubs: Vec<(String, Vec<u8>)> = {
+            let mut stubs: Vec<(String, Vec<u8>)> = Vec::new();
+
+            // Simple stubs (args already in correct registers R3-R8):
+            for (name, num) in [
+                ("write", 4), ("read", 3), ("open", 5), ("close", 6),
+                ("mmap", 90), ("munmap", 91), ("exit", 1), ("alarm", 27),
+                ("getpid", 20), ("socket", 326), ("epoll_create1", 315),
+                ("futex", 221), ("execve", 11), ("wait4", 114),
+                ("epoll_ctl", 237), ("epoll_wait", 238),
+                ("pipe", 42), ("dup2", 63), ("fork", 2), ("unlink", 10),
+            ] {
+                stubs.push((name.to_string(), simple_stub(num)));
+            }
+
+            // sigaction → rt_sigaction(signum, act, oldact, sigsetsize=8)
+            // Caller args: R3=signum, R4=act, R5=oldact
+            // Need:        R3=signum, R4=act, R5=oldact, R6=8
+            {
+                let mut code = Vec::new();
+                // LI R6, 8     (sigsetsize)
+                code.extend_from_slice(&Instruction::Li { rt: Gpr::R6, simm: 8 }.encode());
+                // LI R0, 173   (sys_rt_sigaction)
+                code.extend_from_slice(&Instruction::Li { rt: Gpr::R0, simm: 173 }.encode());
+                code.extend_from_slice(&Instruction::Sc.encode());
+                code.extend_from_slice(&Instruction::Bclr { bo: 20, bi: 0, bh: 0 }.encode()); // BLR
+                stubs.push(("sigaction".to_string(), code));
+            }
+
+            stubs
+        };
+
+        // POSIX syscall stubs go after __vuma_free stub (which is 4 instrs × 4 = 16 B).
+        let mut stub_offset = vuma_free_offset + 16;
+        for (name, code) in &syscall_stubs {
+            func_offsets.insert(name.clone(), stub_offset);
+            stub_offset += code.len();
+        }
+
         // ── Build _start stub bytes ──
         // QEMU user mode sets up R1 (stack pointer) before entering _start.
 
@@ -4737,6 +4809,10 @@ impl Backend for PPC64Backend {
         // Append __vuma_alloc / __vuma_free syscall stubs.
         all_code.extend_from_slice(&vuma_alloc_stub);
         all_code.extend_from_slice(&vuma_free_stub);
+        // Append POSIX syscall stubs (write, read, open, close, mmap, etc.)
+        for (_, code) in &syscall_stubs {
+            all_code.extend_from_slice(code);
+        }
 
         // ── Patch BL relocations ──
         // Each function's relocations are relative to the start of that function's code.

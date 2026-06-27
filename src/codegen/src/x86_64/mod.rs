@@ -2306,7 +2306,7 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         stubs.push(("execve".to_string(), code));
     }
 
-    // wait4(pid_t pid, int *wstatus, int options, struct rusage *rusage) → pid_t  [syscall 61]
+    // waitpid(pid, wstatus, options) → pid_t  [syscall 61 = sys_wait4]
     // VUMA declares: fn waitpid(pid: i64, status: Address, options: i64) -> i64;
     // args: RDI=pid, RSI=wstatus, RDX=options → same as syscall for first 3
     // R10 must be 0 (NULL rusage) before the syscall.
@@ -2317,6 +2317,37 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         code.extend(encode_syscall());                     // syscall
         code.extend(encode_ret());                         // ret
         stubs.push(("waitpid".to_string(), code));
+    }
+
+    // wait4(pid, wstatus, options, rusage) → pid_t  [syscall 61]
+    // Full wait4 syscall with all 4 args. VUMA declares:
+    //   fn wait4(pid: i64, wstatus: Address, options: i64, rusage: Address) -> i64;
+    // args: RDI=pid, RSI=wstatus, RDX=options, RCX=rusage
+    // syscall: RDI=pid, RSI=wstatus, RDX=options, R10=rusage
+    // Need to move 4th arg from RCX → R10 before syscall
+    {
+        let mut code = Vec::new();
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 61));  // sys_wait4
+        code.extend(encode_mov_reg_reg(Gpr::R10, Gpr::Rcx)); // RCX → R10 (rusage)
+        code.extend(encode_syscall());                     // syscall
+        code.extend(encode_ret());                         // ret
+        stubs.push(("wait4".to_string(), code));
+    }
+
+    // futex(uaddr, futex_op, val, timeout, uaddr2, val3) → int  [syscall 202]
+    // Kernel signature: futex(u32 *uaddr, int futex_op, u32 val,
+    //                          const struct timespec *timeout,
+    //                          u32 *uaddr2, u32 val3)
+    // args: RDI=uaddr, RSI=futex_op, RDX=val, RCX=timeout, R8=uaddr2, R9=val3
+    // syscall: RDI=uaddr, RSI=futex_op, RDX=val, R10=timeout, R8=uaddr2, R9=val3
+    // Need to move 4th arg from RCX → R10 before syscall
+    {
+        let mut code = Vec::new();
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 202)); // sys_futex
+        code.extend(encode_mov_reg_reg(Gpr::R10, Gpr::Rcx)); // RCX → R10 (timeout)
+        code.extend(encode_syscall());                     // syscall
+        code.extend(encode_ret());                         // ret
+        stubs.push(("futex".to_string(), code));
     }
 
     // strcmp(const char *s1, const char *s2) → int

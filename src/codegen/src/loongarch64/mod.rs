@@ -3815,6 +3815,137 @@ impl Backend for LoongArch64Backend {
         vuma_free_stub.extend_from_slice(&Instruction::Syscall.encode());
         vuma_free_stub.extend_from_slice(&Instruction::Jirl { rd: Gpr::R0, rj: Gpr::Ra, offs16: 0 }.encode());      // return
 
+        // ── POSIX syscall stubs ──────────────────────────────────────
+        // These provide the syscalls needed by mmap_sha256d, signal_hash,
+        // lock_free_queue, epoll_echo, and ffi_demo tests.
+        //
+        // LoongArch64 calling convention: args in $a0-$a5 (r4-r9),
+        //   return in $a0.
+        // LoongArch64 syscall convention: args in $a0-$a5, syscall# in
+        //   $a7 (r11), SYSCALL instruction (0x0000000b), return in $a0.
+        // The calling convention matches the syscall convention for most
+        // syscalls, so stubs are just:
+        //     addi.d $a7, $r0, #num ; syscall ; jirl $r0, $ra, 0
+        //
+        // For syscalls that need arg shuffling (open→openat,
+        // unlink→unlinkat, sigaction→rt_sigaction, pipe→pipe2, dup2→dup3,
+        // fork→clone), extra instructions are added before the syscall.
+        //
+        // LoongArch uses openat/unlinkat/pipe2/dup3/clone (like RISC-V),
+        // per the generic Linux syscall ABI. All syscall numbers (max 260)
+        // and AT_FDCWD (-100) fit in the 12-bit signed ADDI.D immediate
+        // field, so no LU12I.W is needed.
+        let syscall_stubs: Vec<(String, Vec<u8>)> = {
+            let mut stubs: Vec<(String, Vec<u8>)> = Vec::new();
+
+            // Simple stubs (args already in correct registers $a0-$a5):
+            for (name, num) in [
+                ("write", 64), ("read", 63), ("close", 57), ("mmap", 222),
+                ("munmap", 215), ("exit", 93), ("alarm", 36), ("getpid", 172),
+                ("socket", 198), ("epoll_create1", 20), ("futex", 98),
+                ("execve", 221), ("wait4", 260), ("epoll_ctl", 21), ("epoll_wait", 22),
+            ] {
+                let mut code = Vec::new();
+                code.extend_from_slice(&Instruction::AddiD { rd: Gpr::A7, rj: Gpr::R0, imm12: num }.encode());
+                code.extend_from_slice(&Instruction::Syscall.encode());
+                code.extend_from_slice(&Instruction::Jirl { rd: Gpr::R0, rj: Gpr::Ra, offs16: 0 }.encode());
+                stubs.push((name.to_string(), code));
+            }
+
+            // open → openat(AT_FDCWD=-100, pathname, flags, mode)
+            // Caller args: a0=pathname, a1=flags, a2=mode
+            // Need:        a0=-100,   a1=pathname, a2=flags, a3=mode
+            // Shuffle high→low to avoid clobbering.
+            {
+                let mut code = Vec::new();
+                code.extend_from_slice(&Instruction::Or { rd: Gpr::A3, rj: Gpr::A2, rk: Gpr::R0 }.encode());  // a3 <- mode
+                code.extend_from_slice(&Instruction::Or { rd: Gpr::A2, rj: Gpr::A1, rk: Gpr::R0 }.encode());  // a2 <- flags
+                code.extend_from_slice(&Instruction::Or { rd: Gpr::A1, rj: Gpr::A0, rk: Gpr::R0 }.encode());  // a1 <- pathname
+                code.extend_from_slice(&Instruction::AddiD { rd: Gpr::A0, rj: Gpr::R0, imm12: -100 }.encode()); // a0 = AT_FDCWD
+                code.extend_from_slice(&Instruction::AddiD { rd: Gpr::A7, rj: Gpr::R0, imm12: 56 }.encode());   // sys_openat
+                code.extend_from_slice(&Instruction::Syscall.encode());
+                code.extend_from_slice(&Instruction::Jirl { rd: Gpr::R0, rj: Gpr::Ra, offs16: 0 }.encode());
+                stubs.push(("open".to_string(), code));
+            }
+
+            // unlink → unlinkat(AT_FDCWD=-100, pathname, 0)
+            // Caller args: a0=pathname
+            // Need:        a0=-100,   a1=pathname, a2=0
+            {
+                let mut code = Vec::new();
+                code.extend_from_slice(&Instruction::Or { rd: Gpr::A2, rj: Gpr::R0, rk: Gpr::R0 }.encode());    // a2 = 0 (flags)
+                code.extend_from_slice(&Instruction::Or { rd: Gpr::A1, rj: Gpr::A0, rk: Gpr::R0 }.encode());    // a1 <- pathname
+                code.extend_from_slice(&Instruction::AddiD { rd: Gpr::A0, rj: Gpr::R0, imm12: -100 }.encode()); // a0 = AT_FDCWD
+                code.extend_from_slice(&Instruction::AddiD { rd: Gpr::A7, rj: Gpr::R0, imm12: 35 }.encode());   // sys_unlinkat
+                code.extend_from_slice(&Instruction::Syscall.encode());
+                code.extend_from_slice(&Instruction::Jirl { rd: Gpr::R0, rj: Gpr::Ra, offs16: 0 }.encode());
+                stubs.push(("unlink".to_string(), code));
+            }
+
+            // sigaction → rt_sigaction(signum, act, oldact, sigsetsize=8)
+            // Caller args: a0=signum, a1=act, a2=oldact
+            // Need:        a0=signum, a1=act, a2=oldact, a3=8
+            {
+                let mut code = Vec::new();
+                code.extend_from_slice(&Instruction::AddiD { rd: Gpr::A3, rj: Gpr::R0, imm12: 8 }.encode());    // a3 = sigsetsize
+                code.extend_from_slice(&Instruction::AddiD { rd: Gpr::A7, rj: Gpr::R0, imm12: 134 }.encode());  // sys_rt_sigaction
+                code.extend_from_slice(&Instruction::Syscall.encode());
+                code.extend_from_slice(&Instruction::Jirl { rd: Gpr::R0, rj: Gpr::Ra, offs16: 0 }.encode());
+                stubs.push(("sigaction".to_string(), code));
+            }
+
+            // pipe → pipe2(pipefd, 0)
+            // Caller args: a0=pipefd
+            // Need:        a0=pipefd, a1=0
+            {
+                let mut code = Vec::new();
+                code.extend_from_slice(&Instruction::Or { rd: Gpr::A1, rj: Gpr::R0, rk: Gpr::R0 }.encode());    // a1 = 0 (flags)
+                code.extend_from_slice(&Instruction::AddiD { rd: Gpr::A7, rj: Gpr::R0, imm12: 59 }.encode());    // sys_pipe2
+                code.extend_from_slice(&Instruction::Syscall.encode());
+                code.extend_from_slice(&Instruction::Jirl { rd: Gpr::R0, rj: Gpr::Ra, offs16: 0 }.encode());
+                stubs.push(("pipe".to_string(), code));
+            }
+
+            // dup2 → dup3(oldfd, newfd, 0)
+            // Caller args: a0=oldfd, a1=newfd
+            // Need:        a0=oldfd, a1=newfd, a2=0
+            {
+                let mut code = Vec::new();
+                code.extend_from_slice(&Instruction::Or { rd: Gpr::A2, rj: Gpr::R0, rk: Gpr::R0 }.encode());    // a2 = 0 (flags)
+                code.extend_from_slice(&Instruction::AddiD { rd: Gpr::A7, rj: Gpr::R0, imm12: 24 }.encode());    // sys_dup3
+                code.extend_from_slice(&Instruction::Syscall.encode());
+                code.extend_from_slice(&Instruction::Jirl { rd: Gpr::R0, rj: Gpr::Ra, offs16: 0 }.encode());
+                stubs.push(("dup2".to_string(), code));
+            }
+
+            // fork → clone(SIGCHLD=17, 0, 0, 0, 0)
+            // Caller args: none
+            // Need:        a0=17, a1=0, a2=0, a3=0, a4=0
+            {
+                let mut code = Vec::new();
+                code.extend_from_slice(&Instruction::AddiD { rd: Gpr::A0, rj: Gpr::R0, imm12: 17 }.encode());   // a0 = SIGCHLD
+                code.extend_from_slice(&Instruction::Or { rd: Gpr::A1, rj: Gpr::R0, rk: Gpr::R0 }.encode());    // a1 = 0
+                code.extend_from_slice(&Instruction::Or { rd: Gpr::A2, rj: Gpr::R0, rk: Gpr::R0 }.encode());    // a2 = 0
+                code.extend_from_slice(&Instruction::Or { rd: Gpr::A3, rj: Gpr::R0, rk: Gpr::R0 }.encode());    // a3 = 0
+                code.extend_from_slice(&Instruction::Or { rd: Gpr::A4, rj: Gpr::R0, rk: Gpr::R0 }.encode());    // a4 = 0
+                code.extend_from_slice(&Instruction::AddiD { rd: Gpr::A7, rj: Gpr::R0, imm12: 220 }.encode());  // sys_clone
+                code.extend_from_slice(&Instruction::Syscall.encode());
+                code.extend_from_slice(&Instruction::Jirl { rd: Gpr::R0, rj: Gpr::Ra, offs16: 0 }.encode());
+                stubs.push(("fork".to_string(), code));
+            }
+
+            stubs
+        };
+
+        // Compute offsets for syscall stubs and register them.
+        // __vuma_alloc stub = 9 instrs (36 B), __vuma_free stub = 4 instrs (16 B).
+        let syscall_stubs_start = vuma_free_offset + vuma_free_stub.len();
+        let mut stub_offset = syscall_stubs_start;
+        for (name, code) in &syscall_stubs {
+            func_offsets.insert(name.clone(), stub_offset);
+            stub_offset += code.len();
+        }
+
         // ── Concatenate all code ──
         let mut all_code = start_stub;
         all_code.extend_from_slice(&ffi_stub); // 8 bytes at offset 12
@@ -3828,6 +3959,10 @@ impl Backend for LoongArch64Backend {
         // Append __vuma_alloc / __vuma_free syscall stubs.
         all_code.extend_from_slice(&vuma_alloc_stub);
         all_code.extend_from_slice(&vuma_free_stub);
+        // Append POSIX syscall stubs (write, read, open, close, mmap, etc.)
+        for (_, code) in &syscall_stubs {
+            all_code.extend_from_slice(code);
+        }
 
         // ── Compute code virtual-address base ──
         // Must match the layout in build_loongarch64_elf_2seg.
