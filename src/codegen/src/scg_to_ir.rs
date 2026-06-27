@@ -2356,15 +2356,18 @@ impl IRBuilder {
                         // directly to the return value. Use the function's
                         // return type for the load width.
                         //
-                        // The cmp_count == 0 check excludes functions like
-                        // verify_buf that use the load in a comparison
-                        // (if v != expected), which indicates byte-level access.
-                        // Functions like mat_read (no comparisons) directly
-                        // return the loaded value, so the return type is
-                        // the correct load width.
-                        if let Some(ret_ty) = &self.current_return_type {
-                            if !matches!(ret_ty, IRType::Ptr) {
-                                return ret_ty.clone();
+                        // BUT: only do this when the pointer expression has an
+                        // offset (base + N or base + idx * stride). Skip simple
+                        // dereferences like *p (just Var("p")), because the
+                        // store at the call site may use U8 (byte store) while
+                        // the return type is U32, causing a type mismatch on
+                        // big-endian (ppc64).
+                        let ptr_has_offset = matches!(ptr, ScgExpr::BinOp { .. });
+                        if ptr_has_offset {
+                            if let Some(ret_ty) = &self.current_return_type {
+                                if !matches!(ret_ty, IRType::Ptr) {
+                                    return ret_ty.clone();
+                                }
                             }
                         }
                         IRType::U8
