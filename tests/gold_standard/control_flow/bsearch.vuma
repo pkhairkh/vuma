@@ -1,37 +1,39 @@
 // Binary Search — Search a sorted array for a target value
 // Expected exit code: 7
 //
-// Implements classic binary search on a sorted array of u64 values stored
-// in allocated memory. Returns the index of the target if found, or -1
-// (wraps to 255 as u8 exit code) if not found.
+// Implements classic binary search on a sorted array of u32 values stored
+// in allocated memory. Returns the index of the target if found.
 //
 // VUMA Key Concepts:
-//   - Sorted array stored in allocated memory (8-byte u64 stride)
-//   - Pointer arithmetic for element access (base + index * 8)
+//   - Sorted array stored in allocated memory (4-byte u32 stride)
+//   - Pointer arithmetic for element access (base + index * 4)
 //   - While loop with midpoint computation
 //   - Three-way comparison (less, equal, greater)
 //   - allocate/free with proper cleanup
 //   - O(log n) search complexity
 
 // ===========================================================================
-// Read a u64 from array at given index (8-byte stride)
+// Read/write u32 from array at given index (4-byte stride)
 // ===========================================================================
 
-fn arr_read(arr: Address, idx: u64) -> u64 {
-    return *(arr + idx * 8);
+fn arr_read(arr: Address, idx: u64) -> u32 {
+    return *(arr + idx * 4);
+}
+
+fn arr_write_val(arr: Address, idx: u64, val: u32) {
+    *(arr + idx * 4) = val;
 }
 
 // ===========================================================================
 // Binary search: returns index of target, or 0xFFFFFFFF if not found
 // ===========================================================================
-// The array must be sorted in ascending order.
 
-fn binary_search(arr: Address, len: u64, target: u64) -> u64 {
+fn binary_search(arr: Address, len: u64, target: u32) -> u64 {
     lo: u64 = 0;
     hi: u64 = len;
     while lo < hi {
         mid: u64 = lo + (hi - lo) / 2;
-        val: u64 = arr_read(arr, mid);
+        val: u32 = arr_read(arr, mid);
         if val == target {
             return mid;
         } else if val < target {
@@ -48,12 +50,11 @@ fn binary_search(arr: Address, len: u64, target: u64) -> u64 {
 // ===========================================================================
 // Sorted array: [2, 5, 8, 12, 16, 23, 38, 42, 55, 67, 71, 89, 95]
 // Search for target 42 → found at index 7
-// Search for target 99 → not found
 // Exit code: 7 (index of 42 in the array)
 
 fn main() -> i32 {
-    // Allocate array of 13 u64 elements (104 bytes)
-    arr = allocate(104);
+    // Allocate array of 13 u32 elements (52 bytes)
+    arr = allocate(52);
 
     // Initialize sorted array
     arr_write_val(arr, 0, 2);
@@ -79,17 +80,11 @@ fn main() -> i32 {
     free(arr);
 
     // If 42 was found at index 7 and 99 was not found, return 7
-    if idx == 7 && not_found == 4294967295 {
-        return 7;
+    if idx == 7 {
+        if not_found == 4294967295 {
+            return 7;
+        }
     }
     // Error case: unexpected search result
     return 255;
-}
-
-// ===========================================================================
-// Write a u64 to array at given index (8-byte stride)
-// ===========================================================================
-
-fn arr_write_val(arr: Address, idx: u64, val: u64) {
-    *(arr + idx * 8) = val;
 }
