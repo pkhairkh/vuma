@@ -3606,6 +3606,7 @@ impl Backend for Arm32Backend {
             target_label: String,
             is_unconditional: bool, // true for B, false for Bcc (BNE etc.)
             condition: Condition,   // condition code (AL for unconditional)
+            branch_offset_in_enc: usize, // byte offset of this branch within the instruction's encoded output
         }
         let mut branch_fixups: Vec<BranchFixup> = Vec::new();
 
@@ -4260,6 +4261,7 @@ impl Backend for Arm32Backend {
                     // ── Branch ──
                     crate::ir::IRInstr::Branch { target } => {
                         let mut code = Vec::new();
+                        let branch_offset_in_enc = code.len();
                         let branch_offset_in_func = current_byte_offset + code.len() as u64;
                         code.extend_from_slice(&encode_branch(Condition::Al, false, 0));
                         branch_fixups.push(BranchFixup {
@@ -4268,6 +4270,7 @@ impl Backend for Arm32Backend {
                             target_label: target.clone(),
                             is_unconditional: true,
                             condition: Condition::Al,
+                            branch_offset_in_enc,
                         });
                         code
                     }
@@ -4283,6 +4286,7 @@ impl Backend for Arm32Backend {
                             Gpr::R0.encoding(), 0, 0, 0,
                         ));
                         // BNE true_target (placeholder)
+                        let bne_offset_in_enc = code.len();
                         let bne_offset_in_func = current_byte_offset + code.len() as u64;
                         code.extend_from_slice(&encode_branch(Condition::Ne, false, 0));
                         branch_fixups.push(BranchFixup {
@@ -4291,8 +4295,10 @@ impl Backend for Arm32Backend {
                             target_label: true_target.clone(),
                             is_unconditional: false,
                             condition: Condition::Ne,
+                            branch_offset_in_enc: bne_offset_in_enc,
                         });
                         // B false_target (placeholder)
+                        let b_offset_in_enc = code.len();
                         let b_offset_in_func = current_byte_offset + code.len() as u64;
                         code.extend_from_slice(&encode_branch(Condition::Al, false, 0));
                         branch_fixups.push(BranchFixup {
@@ -4301,6 +4307,7 @@ impl Backend for Arm32Backend {
                             target_label: false_target.clone(),
                             is_unconditional: true,
                             condition: Condition::Al,
+                            branch_offset_in_enc: b_offset_in_enc,
                         });
                         code
                     }
@@ -4952,17 +4959,18 @@ impl Backend for Arm32Backend {
 
             let instr = &mut instructions[fixup.instr_idx];
             let enc = &mut instr.encoded;
-            // The branch instruction is the last 4 bytes in this instruction's encoded output
-            // (could be preceded by load-value code for CondBranch)
-            // Find the branch: scan from the end for the B/Bcc instruction
-            if enc.len() >= 4 {
-                let branch_pos = enc.len() - 4;
+            // Use the recorded branch_offset_in_enc to find the exact
+            // position of this branch within the instruction's encoded output.
+            // This fixes the bug where CondBranch's BNE (at offset N) and
+            // B (at offset N+4) shared the same instr_idx, but only the
+            // last branch (B) was being patched.
+            let pos = fixup.branch_offset_in_enc;
+            if pos + 4 <= enc.len() {
                 let existing = u32::from_le_bytes([
-                    enc[branch_pos], enc[branch_pos + 1], enc[branch_pos + 2], enc[branch_pos + 3],
+                    enc[pos], enc[pos + 1], enc[pos + 2], enc[pos + 3],
                 ]);
-                // Preserve condition code and L bit, patch offset24
                 let patched = (existing & 0xFF000000) | ((offset_words as u32) & 0x00FF_FFFF);
-                enc[branch_pos..branch_pos + 4].copy_from_slice(&patched.to_le_bytes());
+                enc[pos..pos + 4].copy_from_slice(&patched.to_le_bytes());
             }
         }
 
