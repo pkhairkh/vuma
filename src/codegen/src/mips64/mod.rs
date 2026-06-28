@@ -3007,12 +3007,89 @@ fn mips64_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, 
                             else { code.extend(ss_load_imm(Gpr::T4, off as i64)); code.extend_from_slice(&Instruction::Daddu { rd: Gpr::T4, rs: Gpr::T3, rt: Gpr::T4 }.encode()); code.extend_from_slice(&encode_nop()); code.extend_from_slice(&Instruction::Lbu { rt: Gpr::T0, base: Gpr::T4, offset: 0 }.encode()); code.extend_from_slice(&encode_nop()); }
                         }
                         IRType::I32 | IRType::U32 => {
-                            if (-32768..=32767).contains(&off) { code.extend_from_slice(&Instruction::Lwu { rt: Gpr::T0, base: Gpr::T3, offset: off }.encode()); code.extend_from_slice(&encode_nop()); }
-                            else { code.extend(ss_load_imm(Gpr::T4, off as i64)); code.extend_from_slice(&Instruction::Daddu { rd: Gpr::T4, rs: Gpr::T3, rt: Gpr::T4 }.encode()); code.extend_from_slice(&encode_nop()); code.extend_from_slice(&Instruction::Lwu { rt: Gpr::T0, base: Gpr::T4, offset: 0 }.encode()); code.extend_from_slice(&encode_nop()); }
+                            // MIPS requires 4-byte alignment for LWU.
+                            // Use LBU+shift+OR for unaligned 32-bit loads.
+                            if (-32768..=32767).contains(&off) {
+                                code.extend_from_slice(&Instruction::Lbu { rt: Gpr::T0, base: Gpr::T3, offset: off }.encode()); code.extend_from_slice(&encode_nop());
+                                code.extend_from_slice(&Instruction::Lbu { rt: Gpr::T1, base: Gpr::T3, offset: off + 1 }.encode()); code.extend_from_slice(&encode_nop());
+                                code.extend_from_slice(&Instruction::Lbu { rt: Gpr::T2, base: Gpr::T3, offset: off + 2 }.encode()); code.extend_from_slice(&encode_nop());
+                                code.extend_from_slice(&Instruction::Lbu { rt: Gpr::T4, base: Gpr::T3, offset: off + 3 }.encode()); code.extend_from_slice(&encode_nop());
+                                code.extend_from_slice(&Instruction::Dsll { rd: Gpr::T1, rt: Gpr::T1, sa: 8 }.encode()); code.extend_from_slice(&encode_nop());
+                                code.extend_from_slice(&Instruction::Or { rd: Gpr::T0, rs: Gpr::T0, rt: Gpr::T1 }.encode()); code.extend_from_slice(&encode_nop());
+                                code.extend_from_slice(&Instruction::Dsll { rd: Gpr::T2, rt: Gpr::T2, sa: 16 }.encode()); code.extend_from_slice(&encode_nop());
+                                code.extend_from_slice(&Instruction::Or { rd: Gpr::T0, rs: Gpr::T0, rt: Gpr::T2 }.encode()); code.extend_from_slice(&encode_nop());
+                                code.extend_from_slice(&Instruction::Dsll { rd: Gpr::T4, rt: Gpr::T4, sa: 24 }.encode()); code.extend_from_slice(&encode_nop());
+                                code.extend_from_slice(&Instruction::Or { rd: Gpr::T0, rs: Gpr::T0, rt: Gpr::T4 }.encode()); code.extend_from_slice(&encode_nop());
+                            }
+                            else {
+                                code.extend(ss_load_imm(Gpr::T4, off as i64));
+                                code.extend_from_slice(&Instruction::Daddu { rd: Gpr::T4, rs: Gpr::T3, rt: Gpr::T4 }.encode()); code.extend_from_slice(&encode_nop());
+                                code.extend_from_slice(&Instruction::Lbu { rt: Gpr::T0, base: Gpr::T4, offset: 0 }.encode()); code.extend_from_slice(&encode_nop());
+                                code.extend_from_slice(&Instruction::Lbu { rt: Gpr::T1, base: Gpr::T4, offset: 1 }.encode()); code.extend_from_slice(&encode_nop());
+                                code.extend_from_slice(&Instruction::Lbu { rt: Gpr::T2, base: Gpr::T4, offset: 2 }.encode()); code.extend_from_slice(&encode_nop());
+                                code.extend_from_slice(&Instruction::Lbu { rt: Gpr::T5, base: Gpr::T4, offset: 3 }.encode()); code.extend_from_slice(&encode_nop());
+                                code.extend_from_slice(&Instruction::Dsll { rd: Gpr::T1, rt: Gpr::T1, sa: 8 }.encode()); code.extend_from_slice(&encode_nop());
+                                code.extend_from_slice(&Instruction::Or { rd: Gpr::T0, rs: Gpr::T0, rt: Gpr::T1 }.encode()); code.extend_from_slice(&encode_nop());
+                                code.extend_from_slice(&Instruction::Dsll { rd: Gpr::T2, rt: Gpr::T2, sa: 16 }.encode()); code.extend_from_slice(&encode_nop());
+                                code.extend_from_slice(&Instruction::Or { rd: Gpr::T0, rs: Gpr::T0, rt: Gpr::T2 }.encode()); code.extend_from_slice(&encode_nop());
+                                code.extend_from_slice(&Instruction::Dsll { rd: Gpr::T5, rt: Gpr::T5, sa: 24 }.encode()); code.extend_from_slice(&encode_nop());
+                                code.extend_from_slice(&Instruction::Or { rd: Gpr::T0, rs: Gpr::T0, rt: Gpr::T5 }.encode()); code.extend_from_slice(&encode_nop());
+                            }
                         }
                         _ => {
-                            if (-32768..=32767).contains(&off) { code.extend_from_slice(&Instruction::Ld { rt: Gpr::T0, base: Gpr::T3, offset: off }.encode()); code.extend_from_slice(&encode_nop()); }
-                            else { code.extend(ss_load_imm(Gpr::T4, off as i64)); code.extend_from_slice(&Instruction::Daddu { rd: Gpr::T4, rs: Gpr::T3, rt: Gpr::T4 }.encode()); code.extend_from_slice(&encode_nop()); code.extend_from_slice(&Instruction::Ld { rt: Gpr::T0, base: Gpr::T4, offset: 0 }.encode()); code.extend_from_slice(&encode_nop()); }
+                            // U64/Ptr load: MIPS requires 8-byte alignment for LD.
+                            // Use LBU (byte loads) for fully unaligned 64-bit access.
+                            if (-32768..=32767).contains(&off) {
+                                code.extend_from_slice(&Instruction::Lbu { rt: Gpr::T0, base: Gpr::T3, offset: off }.encode()); code.extend_from_slice(&encode_nop());
+                                code.extend_from_slice(&Instruction::Lbu { rt: Gpr::T1, base: Gpr::T3, offset: off + 1 }.encode()); code.extend_from_slice(&encode_nop());
+                                code.extend_from_slice(&Instruction::Lbu { rt: Gpr::T2, base: Gpr::T3, offset: off + 2 }.encode()); code.extend_from_slice(&encode_nop());
+                                code.extend_from_slice(&Instruction::Lbu { rt: Gpr::T4, base: Gpr::T3, offset: off + 3 }.encode()); code.extend_from_slice(&encode_nop());
+                                code.extend_from_slice(&Instruction::Lbu { rt: Gpr::T5, base: Gpr::T3, offset: off + 4 }.encode()); code.extend_from_slice(&encode_nop());
+                                code.extend_from_slice(&Instruction::Lbu { rt: Gpr::T6, base: Gpr::T3, offset: off + 5 }.encode()); code.extend_from_slice(&encode_nop());
+                                code.extend_from_slice(&Instruction::Lbu { rt: Gpr::T7, base: Gpr::T3, offset: off + 6 }.encode()); code.extend_from_slice(&encode_nop());
+                                code.extend_from_slice(&Instruction::Lbu { rt: Gpr::T8, base: Gpr::T3, offset: off + 7 }.encode()); code.extend_from_slice(&encode_nop());
+                                // Assemble: T0 = b0 | (b1<<8) | (b2<<16) | (b3<<24) | (b4<<32) | (b5<<40) | (b6<<48) | (b7<<56)
+                                code.extend_from_slice(&Instruction::Dsll { rd: Gpr::T1, rt: Gpr::T1, sa: 8 }.encode()); code.extend_from_slice(&encode_nop());
+                                code.extend_from_slice(&Instruction::Or { rd: Gpr::T0, rs: Gpr::T0, rt: Gpr::T1 }.encode()); code.extend_from_slice(&encode_nop());
+                                code.extend_from_slice(&Instruction::Dsll { rd: Gpr::T2, rt: Gpr::T2, sa: 16 }.encode()); code.extend_from_slice(&encode_nop());
+                                code.extend_from_slice(&Instruction::Or { rd: Gpr::T0, rs: Gpr::T0, rt: Gpr::T2 }.encode()); code.extend_from_slice(&encode_nop());
+                                code.extend_from_slice(&Instruction::Dsll { rd: Gpr::T4, rt: Gpr::T4, sa: 24 }.encode()); code.extend_from_slice(&encode_nop());
+                                code.extend_from_slice(&Instruction::Or { rd: Gpr::T0, rs: Gpr::T0, rt: Gpr::T4 }.encode()); code.extend_from_slice(&encode_nop());
+                                code.extend_from_slice(&Instruction::Dsll { rd: Gpr::T5, rt: Gpr::T5, sa: 32 }.encode()); code.extend_from_slice(&encode_nop());
+                                code.extend_from_slice(&Instruction::Or { rd: Gpr::T0, rs: Gpr::T0, rt: Gpr::T5 }.encode()); code.extend_from_slice(&encode_nop());
+                                code.extend_from_slice(&Instruction::Dsll { rd: Gpr::T6, rt: Gpr::T6, sa: 40 }.encode()); code.extend_from_slice(&encode_nop());
+                                code.extend_from_slice(&Instruction::Or { rd: Gpr::T0, rs: Gpr::T0, rt: Gpr::T6 }.encode()); code.extend_from_slice(&encode_nop());
+                                code.extend_from_slice(&Instruction::Dsll { rd: Gpr::T7, rt: Gpr::T7, sa: 48 }.encode()); code.extend_from_slice(&encode_nop());
+                                code.extend_from_slice(&Instruction::Or { rd: Gpr::T0, rs: Gpr::T0, rt: Gpr::T7 }.encode()); code.extend_from_slice(&encode_nop());
+                                code.extend_from_slice(&Instruction::Dsll { rd: Gpr::T8, rt: Gpr::T8, sa: 56 }.encode()); code.extend_from_slice(&encode_nop());
+                                code.extend_from_slice(&Instruction::Or { rd: Gpr::T0, rs: Gpr::T0, rt: Gpr::T8 }.encode()); code.extend_from_slice(&encode_nop());
+                            }
+                            else {
+                                code.extend(ss_load_imm(Gpr::T4, off as i64));
+                                code.extend_from_slice(&Instruction::Daddu { rd: Gpr::T4, rs: Gpr::T3, rt: Gpr::T4 }.encode()); code.extend_from_slice(&encode_nop());
+                                code.extend_from_slice(&Instruction::Lbu { rt: Gpr::T0, base: Gpr::T4, offset: 0 }.encode()); code.extend_from_slice(&encode_nop());
+                                code.extend_from_slice(&Instruction::Lbu { rt: Gpr::T1, base: Gpr::T4, offset: 1 }.encode()); code.extend_from_slice(&encode_nop());
+                                code.extend_from_slice(&Instruction::Lbu { rt: Gpr::T2, base: Gpr::T4, offset: 2 }.encode()); code.extend_from_slice(&encode_nop());
+                                code.extend_from_slice(&Instruction::Lbu { rt: Gpr::T5, base: Gpr::T4, offset: 3 }.encode()); code.extend_from_slice(&encode_nop());
+                                code.extend_from_slice(&Instruction::Lbu { rt: Gpr::T6, base: Gpr::T4, offset: 4 }.encode()); code.extend_from_slice(&encode_nop());
+                                code.extend_from_slice(&Instruction::Lbu { rt: Gpr::T7, base: Gpr::T4, offset: 5 }.encode()); code.extend_from_slice(&encode_nop());
+                                code.extend_from_slice(&Instruction::Lbu { rt: Gpr::T8, base: Gpr::T4, offset: 6 }.encode()); code.extend_from_slice(&encode_nop());
+                                code.extend_from_slice(&Instruction::Lbu { rt: Gpr::T9, base: Gpr::T4, offset: 7 }.encode()); code.extend_from_slice(&encode_nop());
+                                code.extend_from_slice(&Instruction::Dsll { rd: Gpr::T1, rt: Gpr::T1, sa: 8 }.encode()); code.extend_from_slice(&encode_nop());
+                                code.extend_from_slice(&Instruction::Or { rd: Gpr::T0, rs: Gpr::T0, rt: Gpr::T1 }.encode()); code.extend_from_slice(&encode_nop());
+                                code.extend_from_slice(&Instruction::Dsll { rd: Gpr::T2, rt: Gpr::T2, sa: 16 }.encode()); code.extend_from_slice(&encode_nop());
+                                code.extend_from_slice(&Instruction::Or { rd: Gpr::T0, rs: Gpr::T0, rt: Gpr::T2 }.encode()); code.extend_from_slice(&encode_nop());
+                                code.extend_from_slice(&Instruction::Dsll { rd: Gpr::T5, rt: Gpr::T5, sa: 24 }.encode()); code.extend_from_slice(&encode_nop());
+                                code.extend_from_slice(&Instruction::Or { rd: Gpr::T0, rs: Gpr::T0, rt: Gpr::T5 }.encode()); code.extend_from_slice(&encode_nop());
+                                code.extend_from_slice(&Instruction::Dsll { rd: Gpr::T6, rt: Gpr::T6, sa: 32 }.encode()); code.extend_from_slice(&encode_nop());
+                                code.extend_from_slice(&Instruction::Or { rd: Gpr::T0, rs: Gpr::T0, rt: Gpr::T6 }.encode()); code.extend_from_slice(&encode_nop());
+                                code.extend_from_slice(&Instruction::Dsll { rd: Gpr::T7, rt: Gpr::T7, sa: 40 }.encode()); code.extend_from_slice(&encode_nop());
+                                code.extend_from_slice(&Instruction::Or { rd: Gpr::T0, rs: Gpr::T0, rt: Gpr::T7 }.encode()); code.extend_from_slice(&encode_nop());
+                                code.extend_from_slice(&Instruction::Dsll { rd: Gpr::T8, rt: Gpr::T8, sa: 48 }.encode()); code.extend_from_slice(&encode_nop());
+                                code.extend_from_slice(&Instruction::Or { rd: Gpr::T0, rs: Gpr::T0, rt: Gpr::T8 }.encode()); code.extend_from_slice(&encode_nop());
+                                code.extend_from_slice(&Instruction::Dsll { rd: Gpr::T9, rt: Gpr::T9, sa: 56 }.encode()); code.extend_from_slice(&encode_nop());
+                                code.extend_from_slice(&Instruction::Or { rd: Gpr::T0, rs: Gpr::T0, rt: Gpr::T9 }.encode()); code.extend_from_slice(&encode_nop());
+                            }
                         }
                     }
                     code.extend(ss_sd(Gpr::T0, dst_off));
@@ -3033,8 +3110,23 @@ fn mips64_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, 
                             else { code.extend(ss_load_imm(Gpr::T4, off as i64)); code.extend_from_slice(&Instruction::Daddu { rd: Gpr::T4, rs: Gpr::T3, rt: Gpr::T4 }.encode()); code.extend_from_slice(&encode_nop()); code.extend_from_slice(&Instruction::Sw { rt: Gpr::T0, base: Gpr::T4, offset: 0 }.encode()); code.extend_from_slice(&encode_nop()); }
                         }
                         _ => {
-                            if (-32768..=32767).contains(&off) { code.extend_from_slice(&Instruction::Sd { rt: Gpr::T0, base: Gpr::T3, offset: off }.encode()); code.extend_from_slice(&encode_nop()); }
-                            else { code.extend(ss_load_imm(Gpr::T4, off as i64)); code.extend_from_slice(&Instruction::Daddu { rd: Gpr::T4, rs: Gpr::T3, rt: Gpr::T4 }.encode()); code.extend_from_slice(&encode_nop()); code.extend_from_slice(&Instruction::Sd { rt: Gpr::T0, base: Gpr::T4, offset: 0 }.encode()); code.extend_from_slice(&encode_nop()); }
+                            // U64/Ptr store: MIPS requires 8-byte alignment for SD.
+                            // Use SW + shift to store unaligned 64-bit values.
+                            if (-32768..=32767).contains(&off) {
+                                // Store low 32 bits
+                                code.extend_from_slice(&Instruction::Sw { rt: Gpr::T0, base: Gpr::T3, offset: off }.encode()); code.extend_from_slice(&encode_nop());
+                                // Shift right 32 to get high bits
+                                code.extend_from_slice(&Instruction::Dsrl { rd: Gpr::T1, rt: Gpr::T0, sa: 32 }.encode()); code.extend_from_slice(&encode_nop());
+                                // Store high 32 bits
+                                code.extend_from_slice(&Instruction::Sw { rt: Gpr::T1, base: Gpr::T3, offset: off + 4 }.encode()); code.extend_from_slice(&encode_nop());
+                            }
+                            else {
+                                code.extend(ss_load_imm(Gpr::T4, off as i64));
+                                code.extend_from_slice(&Instruction::Daddu { rd: Gpr::T4, rs: Gpr::T3, rt: Gpr::T4 }.encode()); code.extend_from_slice(&encode_nop());
+                                code.extend_from_slice(&Instruction::Sw { rt: Gpr::T0, base: Gpr::T4, offset: 0 }.encode()); code.extend_from_slice(&encode_nop());
+                                code.extend_from_slice(&Instruction::Dsrl { rd: Gpr::T1, rt: Gpr::T0, sa: 32 }.encode()); code.extend_from_slice(&encode_nop());
+                                code.extend_from_slice(&Instruction::Sw { rt: Gpr::T1, base: Gpr::T4, offset: 4 }.encode()); code.extend_from_slice(&encode_nop());
+                            }
                         }
                     }
                 }
