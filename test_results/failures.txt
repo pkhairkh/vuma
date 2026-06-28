@@ -1,4 +1,4 @@
-VUMA Test Failures — 2026-06-28 22:09:41 UTC
+VUMA Test Failures — 2026-06-28 22:34:23 UTC
 Total: 2 failures across 1 tests
 
   concurrency          lock_free_queue.vuma                          exp=   0 [('mips64', -11, 'CR'), ('wasm32', 1, 'MM')]
