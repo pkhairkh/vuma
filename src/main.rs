@@ -1609,12 +1609,12 @@ fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) -> Vec
                 ScgExpr::Var(name) if name == &dst => {}
                 _ => {
                     stmts.push(ScgStatement::Computation(ComputationNode {
-                        dst,
+                        dst: dst.clone(),
                         op: BinOpKind::Add,
                         lhs: result,
                         rhs: ScgExpr::Int(0),
                         tail_call: false,
-                        reassigns: None,
+                        reassigns: Some(dst),
                     }));
                 }
             }
@@ -1645,10 +1645,10 @@ fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) -> Vec
             stmts.push(ScgStatement::Computation(ComputationNode {
                 dst: dst.clone(),
                 op: binop,
-                lhs: ScgExpr::Var(dst),
+                lhs: ScgExpr::Var(dst.clone()),
                 rhs,
                 tail_call: false,
-                reassigns: None,
+                reassigns: Some(dst),
             }));
             stmts
         }

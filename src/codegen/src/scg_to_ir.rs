@@ -2584,10 +2584,18 @@ impl IRBuilder {
         // instead of a proper phi).  The earlier regression on bitwise/crypto
         // tests has been independently addressed by using source order for
         // memory operations, so it is now safe to always apply this update.
+        //
+        // IMPORTANT: Only apply prev_vreg remapping when `comp.reassigns` is
+        // set (i.e., an actual reassignment like `x = x + 1`).  Do NOT remap
+        // based on `lhs_val` alone — that would incorrectly treat let-bindings
+        // like `next_head: u32 = head + 1` as reassignments of `head`,
+        // causing `head` to be remapped to `next_head`'s vreg.  This was the
+        // root cause of lock_free_queue failures on wasm32 and mips64: after
+        // `next_head = head + 1`, `head` resolved to the wrong vreg, so
+        // `slot = buf + (head % capacity) * 4` used the comparison result
+        // instead of the actual head value.
         let prev_vreg: Option<u32> = if let Some(name) = &comp.reassigns {
             names.get(name).copied()
-        } else if let IRValue::Register(lhs_vreg) = &lhs_val {
-            Some(*lhs_vreg)
         } else {
             None
         };
