@@ -4222,6 +4222,56 @@ fn ss_load_value(val: &IRValue, slots: &HashMap<u32, i32>, scratch: Gpr) -> Vec<
     }
 }
 
+/// Load a 64-bit IRValue into TWO registers (lo_reg, hi_reg).
+///
+/// On riscv32, stack slots are 8 bytes but `ss_load_from_slot` only loads
+/// the low 32 bits (via Lw). This helper loads both the low and high words
+/// so that 64-bit return values are correctly passed in a0:a1 (RV32 ABI).
+fn ss_load_value_64(lo_reg: Gpr, hi_reg: Gpr, val: &IRValue, slots: &HashMap<u32, i32>) -> Vec<u8> {
+    let mut code = Vec::new();
+    match val {
+        IRValue::Register(id) => {
+            let offset = slots.get(id).copied().unwrap_or(0);
+            // Load low word from [S0 - offset]
+            code.extend(ss_load_from_slot(lo_reg, offset));
+            // Load high word from [S0 - offset + 4] (next 4 bytes)
+            // riscv32 Lw imm is 12-bit signed; offset+4 should still fit
+            // since slot offsets are typically small.
+            let hi_offset = offset - 4; // S0 - (offset - 4) = S0 - offset + 4
+            code.extend(ss_load_from_slot(hi_reg, hi_offset));
+        }
+        IRValue::Immediate(v) => {
+            code.extend(ss_load_imm(lo_reg, *v));
+            // High word: sign-extend from bit 63
+            if *v < 0 {
+                // MV hi_reg, -1 (all ones)
+                code.extend(Instruction::Addi { rd: hi_reg, rs1: Gpr::Zero, imm: -1 }.encode());
+            } else {
+                code.extend(Instruction::Addi { rd: hi_reg, rs1: Gpr::Zero, imm: 0 }.encode());
+            }
+        }
+        IRValue::Address(a) => {
+            code.extend(ss_load_imm(lo_reg, *a as i64));
+            code.extend(Instruction::Addi { rd: hi_reg, rs1: Gpr::Zero, imm: 0 }.encode());
+        }
+        IRValue::Label(_) => {
+            code.extend(Instruction::Addi { rd: lo_reg, rs1: Gpr::Zero, imm: 0 }.encode());
+            code.extend(Instruction::Addi { rd: hi_reg, rs1: Gpr::Zero, imm: 0 }.encode());
+        }
+    }
+    code
+}
+
+/// Store TWO registers (lo, hi) into a vreg's 8-byte stack slot.
+fn ss_store_64(lo_reg: Gpr, hi_reg: Gpr, offset_from_s0: i32) -> Vec<u8> {
+    let mut code = Vec::new();
+    // Store low word at [S0 - offset]
+    code.extend(ss_store_to_slot(lo_reg, offset_from_s0));
+    // Store high word at [S0 - offset + 4] = [S0 - (offset - 4)]
+    code.extend(ss_store_to_slot(hi_reg, offset_from_s0 - 4));
+    code
+}
+
 impl Backend for RiscV32Backend {
     fn target_info(&self) -> &dyn crate::backend::TargetInfo {
         &self.target_info
@@ -4921,7 +4971,7 @@ impl Backend for RiscV32Backend {
                         code
                     }
 
-                    IRInstr::Call { dst, func: target_func, args, is_extern: _ } => {
+                    IRInstr::Call { dst, func: target_func, args, is_extern } => {
                         let mut code = Vec::new();
                         let arg_reg_list = [Gpr::A0, Gpr::A1, Gpr::A2, Gpr::A3,
                                             Gpr::A4, Gpr::A5, Gpr::A6, Gpr::A7];
@@ -4936,18 +4986,55 @@ impl Backend for RiscV32Backend {
                             symbol: target_func.clone(),
                             reloc_type: "R_RISCV_JAL".to_string(),
                         });
+                        // Store return value to dst stack slot.
+                        // For VUMA functions (non-extern), the return value is 64-bit
+                        // in a0:a1 (RV32 ABI). For extern functions (syscalls), the
+                        // return is 32-bit in a0 only — sign-extend to 64-bit so that
+                        // negative values (e.g., -1 error returns) are correctly
+                        // represented in 64-bit operations.
                         if let Some(d) = dst {
                             let dst_id = d.as_register().unwrap_or(0);
                             let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
-                            code.extend(ss_store_to_slot(Gpr::A0, dst_offset));
+                            if !is_extern {
+                                // VUMA function: store both a0 (low) and a1 (high)
+                                code.extend(ss_store_64(Gpr::A0, Gpr::A1, dst_offset));
+                            } else {
+                                // Extern/syscall: sign-extend 32-bit a0 to 64-bit.
+                                // SRAI a1, a0, 31 — fills a1 with 0xFFFFFFFF if a0 is
+                                // negative (bit 31 set), or 0x00000000 if non-negative.
+                                code.extend(Instruction::Srai { rd: Gpr::A1, rs1: Gpr::A0, shamt: 31 }.encode());
+                                code.extend(ss_store_64(Gpr::A0, Gpr::A1, dst_offset));
+                            }
                         }
                         code
                     }
 
                     IRInstr::Ret { values } => {
                         let mut code = Vec::new();
+                        // Load return value into a0 (and a1 for 64-bit returns).
+                        // RV32 ABI: 64-bit return values are passed in a0:a1.
+                        // Check result_types first; fall back to parsing the
+                        // function name (e.g. "fn_foo_entry(u64)" → 64-bit).
+                        let is_64bit_ret = func.result_types.first()
+                            .map(|t| matches!(t, crate::ir::IRType::I64 | crate::ir::IRType::U64))
+                            .unwrap_or_else(|| {
+                                if let Some(open) = func.name.rfind('(') {
+                                    if let Some(close) = func.name.rfind(')') {
+                                        if close > open {
+                                            let ret_ty = &func.name[open + 1..close];
+                                            return ret_ty == "u64" || ret_ty == "i64"
+                                                || ret_ty == "U64" || ret_ty == "I64";
+                                        }
+                                    }
+                                }
+                                false
+                            });
                         if let Some(val) = values.first() {
-                            code.extend(ss_load_value(val, &vreg_stack_slots, Gpr::A0));
+                            if is_64bit_ret {
+                                code.extend(ss_load_value_64(Gpr::A0, Gpr::A1, val, &vreg_stack_slots));
+                            } else {
+                                code.extend(ss_load_value(val, &vreg_stack_slots, Gpr::A0));
+                            }
                         }
                         // Epilogue
                         if fs - 16 >= -2048 {
