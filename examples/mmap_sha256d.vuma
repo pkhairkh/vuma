@@ -161,7 +161,7 @@ fn sha256_init_k(k: Address) {
 // ===========================================================================
 
 fn sha256_transform(state: Address, k: Address, w: Address, block: Address) {
-    i: u64 = 0;
+    i: u32 = 0;
     for i in 0..16 {
         val: u32 = read_u32_be(block, i * 4);
         w_store(w, i, val);
@@ -214,7 +214,7 @@ fn sha256_transform(state: Address, k: Address, w: Address, block: Address) {
 // ===========================================================================
 
 fn sha256_pad_block(block: Address, msg: Address, msg_len: u64) {
-    i: u64 = 0;
+    i: u32 = 0;
     for i in 0..msg_len {
         *(block + i) = *(msg + i);
     }
@@ -237,7 +237,7 @@ fn sha256_pad_block(block: Address, msg: Address, msg_len: u64) {
 }
 
 fn copy32(dst: Address, src: Address) {
-    i: u64 = 0;
+    i: u32 = 0;
     for i in 0..32 {
         *(dst + i) = *(src + i);
     }
