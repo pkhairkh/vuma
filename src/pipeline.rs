@@ -2544,39 +2544,6 @@ fn convert_computation_no_calls(
                         }
                     }
 
-                    // If array stride inference didn't apply, try using the
-                    // SCG node's result_type for struct field access.
-                    // This handles the pattern: `val: u32 = *(opt + 4)`
-                    // where the declared type u32 should determine the load
-                    // width. This is critical for big-endian (ppc64) where a
-                    // U8 load of a U32-stored value reads the wrong byte.
-                    //
-                    // We ONLY do this when ALL of the following are true:
-                    // 1. The pointer has a CONSTANT offset (e.g. ptr + 4),
-                    //    not a variable offset (e.g. ptr + i) — variable
-                    //    offsets are used in byte-level access patterns.
-                    // 2. The constant offset is NON-ZERO — offset 0 is
-                    //    ambiguous: it could be a tag byte (U8 store) or a
-                    //    U32 field. We skip it to avoid breaking tag loads.
-                    // 3. The offset is aligned to 4 bytes (offset % 4 == 0),
-                    //    which is the natural alignment for U32 fields.
-                    if inferred_ty.is_none() {
-                        if let ScgExpr::BinOp { op: vuma_codegen::ir::BinOpKind::Add, lhs: _, rhs } = &ptr {
-                            if let ScgExpr::Int(off_val) = rhs.as_ref() {
-                                if *off_val > 0 && *off_val % 4 == 0 {
-                                    if let Some(ref rt) = comp.result_type {
-                                        inferred_ty = match rt.as_str() {
-                                            "u32" | "U32" | "i32" | "I32" => Some(vuma_codegen::ir::IRType::U32),
-                                            "u64" | "U64" | "i64" | "I64" => Some(vuma_codegen::ir::IRType::U64),
-                                            "u16" | "U16" | "i16" | "I16" => Some(vuma_codegen::ir::IRType::U16),
-                                            _ => None,
-                                        };
-                                    }
-                                }
-                            }
-                        }
-                    }
-
                     inferred_ty
                 };
                 return vec![ScgStatement::Access(AccessNode::Load {
