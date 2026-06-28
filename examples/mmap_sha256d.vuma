@@ -38,6 +38,7 @@ extern "C" {
     fn close(fd: i64) -> i64;
     fn unlink(pathname: Address) -> i64;
     fn exit(code: i64);
+    fn getpid() -> i64;
 }
 
 // ===========================================================================
@@ -334,6 +335,37 @@ fn copy32(dst: Address, src: Address) {
 //   block:   64 bytes  — current message block
 //   inner:   32 bytes  — inner hash output
 
+
+// ===========================================================================
+// Helper: write a non-negative integer as decimal to a buffer
+// ===========================================================================
+// Used to construct a unique temp file path incorporating the PID,
+// so parallel test runs (across backends) do not collide on the
+// same /tmp/vuma_mmap_test filename.
+
+fn write_decimal(buf: Address, offset: u64, val: i64) -> u64 {
+    if val == 0 {
+        *(buf + offset) = 48;  // '0'
+        return offset + 1;
+    }
+    // Count digits
+    n: u64 = 0;
+    tmp: i64 = val;
+    while tmp > 0 {
+        n = n + 1;
+        tmp = tmp / 10;
+    }
+    // Write digits backwards from the end
+    pos: u64 = offset + n;
+    tmp = val;
+    while tmp > 0 {
+        pos = pos - 1;
+        *(buf + pos) = (tmp % 10) + 48;  // '0' + digit
+        tmp = tmp / 10;
+    }
+    return offset + n;
+}
+
 fn sha256d(msg: Address, msg_len: u64, out: Address) {
     // Allocate working memory
     state = allocate(32);
@@ -385,8 +417,10 @@ fn sha256d(msg: Address, msg_len: u64, out: Address) {
 
 fn main() -> i32 {
     // ---- Step 1: Build the temp file path string ----
-    // "/tmp/vuma_mmap_test" = 19 chars + null terminator = 20 bytes
-    path = allocate(20);
+    // "/tmp/vuma_mmap_test_<pid>" — includes PID so parallel runs across
+    // backends do not collide on the same filename.
+    // Max length: 19 (prefix) + 20 (max u64 digits) + 1 (null) = 40 bytes.
+    path = allocate(40);
     *(path + 0) = 47;   // '/'
     *(path + 1) = 116;  // 't'
     *(path + 2) = 109;  // 'm'
@@ -406,7 +440,11 @@ fn main() -> i32 {
     *(path + 16) = 101; // 'e'
     *(path + 17) = 115; // 's'
     *(path + 18) = 116; // 't'
-    *(path + 19) = 0;   // null terminator
+    *(path + 19) = 95;  // '_'
+    pid: i64 = getpid();
+    end: u64 = write_decimal(path, 20, pid);
+    *(path + end) = 0;  // null terminator
+
 
     // ---- Step 2: Build the message string ----
     // "Hello, VUMA mmap!" = 17 bytes
