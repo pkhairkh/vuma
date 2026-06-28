@@ -2858,15 +2858,32 @@ fn convert_computation_no_calls(
             let symbol = addr_name[at_pos + 3..].trim();
             if !symbol.is_empty() && !symbol.contains(' ') && !symbol.contains('(') {
                 let var_part = addr_name[..at_pos].trim();
-                let dst = if var_part.is_empty() {
-                    node_var(node_id, "addr")
+                let user_name = if var_part.is_empty() {
+                    None
                 } else {
-                    var_part.to_string()
+                    Some(var_part.to_string())
                 };
-                return vec![ScgStatement::GetAddress(GetAddressNode {
-                    dst,
+                // Use node_var (v_{node_id}) as GetAddress dst so that
+                // resolve_subexpr (which returns Var("v_{source_node_id}"))
+                // can find it in the IR builder's names map.
+                let node_dst = node_var(node_id, "addr");
+                // Also create a Computation copy with the user-visible name
+                // so that references to the user name also resolve.
+                let mut stmts = vec![ScgStatement::GetAddress(GetAddressNode {
+                    dst: node_dst.clone(),
                     name: symbol.to_string(),
                 })];
+                if let Some(uname) = user_name {
+                    stmts.push(ScgStatement::Computation(ComputationNode {
+                        dst: uname.clone(),
+                        op: IrBinOpKind::Add,
+                        lhs: ScgExpr::Var(node_dst),
+                        rhs: ScgExpr::Int(0),
+                        tail_call: false,
+                        reassigns: Some(uname),
+                    }));
+                }
+                return stmts;
             }
         }
     } else if let Some(symbol) = op_label.strip_prefix("@") {
