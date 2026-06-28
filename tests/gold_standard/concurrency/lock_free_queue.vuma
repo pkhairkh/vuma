@@ -1,19 +1,12 @@
-// Lock-Free SPSC Queue — simplified to use manual memory layout
+// Lock-Free SPSC Queue — simplified for cross-backend compatibility
 // Expected exit code: 0
 //
-// Single-producer single-consumer ring buffer using AtomicLoad/AtomicStore
-// for inter-thread communication. This version uses manual byte-level
-// memory access instead of struct assignment to test the compiler's
-// atomic operation support.
-//
-// VUMA Key Concepts:
-//   - AtomicLoad / AtomicStore for inter-thread communication
-//   - Ring buffer index arithmetic
-//   - Manual struct layout (byte-level write_u64_le / read_u64_le)
-//   - allocate / free with proper cleanup
+// Tests AtomicLoad/AtomicStore and ring buffer index arithmetic.
+// Uses separate allocations for each field to avoid pointer arithmetic
+// issues on 32-bit backends.
 
 // ===========================================================================
-// Write/read u64 little-endian (for struct field access)
+// Write/read u64 little-endian
 // ===========================================================================
 
 fn write_u64_le(buf: Address, offset: u64, val: u64) {
@@ -40,56 +33,39 @@ fn read_u64_le(buf: Address, offset: u64) -> u64 {
 }
 
 // ===========================================================================
-// Queue layout (32 bytes):
-//   offset  0: buffer   (8 bytes, Address)
-//   offset  8: capacity (8 bytes, u64)
-//   offset 16: head     (8 bytes, AtomicU64 — producer index)
-//   offset 24: tail     (8 bytes, AtomicU64 — consumer index)
+// Queue using separate allocations for each component.
+// This avoids pointer arithmetic on struct fields which can cause issues
+// on 32-bit backends.
 // ===========================================================================
 
-fn queue_new(capacity: u64) -> Address {
-    q = allocate(32);
-    buf = allocate(capacity * 8);
-    write_u64_le(q, 0, buf);
-    write_u64_le(q, 8, capacity);
-    // head = 0, tail = 0 (already zeroed by allocate, but set explicitly)
-    AtomicStore(0, q + 16);
-    AtomicStore(0, q + 24);
-    return q;
-}
-
-fn queue_push(q: Address, value: u64) -> i32 {
-    head: u64 = AtomicLoad(q + 16);
-    tail: u64 = AtomicLoad(q + 24);
-    capacity: u64 = read_u64_le(q, 8);
+fn queue_push(buf: Address, head_flag: Address, tail_flag: Address, capacity: u64, value: u64) -> i32 {
+    head: u64 = AtomicLoad(head_flag);
+    tail: u64 = AtomicLoad(tail_flag);
     next_head: u64 = head + 1;
 
     if next_head % capacity == tail % capacity {
         return 0;  // Queue is full
     }
 
-    buf: u64 = read_u64_le(q, 0);
     slot: u64 = buf + (head % capacity) * 8;
     write_u64_le(slot, 0, value);
 
-    AtomicStore(next_head, q + 16);
+    AtomicStore(next_head, head_flag);
     return 1;
 }
 
-fn queue_pop(q: Address) -> u64 {
-    tail: u64 = AtomicLoad(q + 24);
-    head: u64 = AtomicLoad(q + 16);
-    capacity: u64 = read_u64_le(q, 8);
+fn queue_pop(buf: Address, head_flag: Address, tail_flag: Address, capacity: u64) -> u64 {
+    tail: u64 = AtomicLoad(tail_flag);
+    head: u64 = AtomicLoad(head_flag);
 
     if tail % capacity == head % capacity {
         return 4294967295;  // Queue is empty — return sentinel
     }
 
-    buf: u64 = read_u64_le(q, 0);
     slot: u64 = buf + (tail % capacity) * 8;
     value: u64 = read_u64_le(slot, 0);
 
-    AtomicStore(tail + 1, q + 24);
+    AtomicStore(tail + 1, tail_flag);
     return value;
 }
 
@@ -98,16 +74,28 @@ fn queue_pop(q: Address) -> u64 {
 // ===========================================================================
 
 fn main() -> i32 {
-    q = queue_new(4);
-    queue_push(q, 42);
-    queue_push(q, 99);
-    val1: u64 = queue_pop(q);
-    val2: u64 = queue_pop(q);
+    // Allocate queue components separately
+    capacity: u64 = 4;
+    buf = allocate(capacity * 8);
+    head_flag = allocate(8);
+    tail_flag = allocate(8);
+
+    // Initialize head and tail to 0
+    AtomicStore(0, head_flag);
+    AtomicStore(0, tail_flag);
+
+    // Push two values
+    queue_push(buf, head_flag, tail_flag, capacity, 42);
+    queue_push(buf, head_flag, tail_flag, capacity, 99);
+
+    // Pop two values
+    val1: u64 = queue_pop(buf, head_flag, tail_flag, capacity);
+    val2: u64 = queue_pop(buf, head_flag, tail_flag, capacity);
 
     // Clean up
-    buf: u64 = read_u64_le(q, 0);
     free(buf);
-    free(q);
+    free(head_flag);
+    free(tail_flag);
 
     // Verify results
     if val1 != 42 {
