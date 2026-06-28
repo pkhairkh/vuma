@@ -98,3 +98,12 @@ fn queue_pop(q: Address) -> Option<u64> {
 
     return Some(value);
 }
+
+fn main() -> i32 {
+    q = queue_new(4);
+    queue_push(q, 42);
+    queue_push(q, 99);
+    result = queue_pop(q);
+    free(q);
+    return 0;
+}
