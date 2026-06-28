@@ -51,7 +51,7 @@ fn small_sigma1(x: u32) -> u32 {
 // Read/write u32 from a byte buffer (big-endian, per FIPS 180-4)
 // ===========================================================================
 
-fn read_u32_be(buf: Address, offset: u64) -> u32 {
+fn read_u32_be(buf: Address, offset: u32) -> u32 {
     b0: u32 = *(buf + offset);
     b1: u32 = *(buf + offset + 1);
     b2: u32 = *(buf + offset + 2);
@@ -59,18 +59,18 @@ fn read_u32_be(buf: Address, offset: u64) -> u32 {
     return ((b0 << 24) | (b1 << 16) | (b2 << 8) | b3) & 4294967295;
 }
 
-fn write_u32_be(buf: Address, offset: u64, val: u32) {
+fn write_u32_be(buf: Address, offset: u32, val: u32) {
     *(buf + offset) = (val >> 24) & 255;
     *(buf + offset + 1) = (val >> 16) & 255;
     *(buf + offset + 2) = (val >> 8) & 255;
     *(buf + offset + 3) = val & 255;
 }
 
-fn w_store(w_base: Address, idx: u64, val: u32) {
+fn w_store(w_base: Address, idx: u32, val: u32) {
     write_u32_be(w_base, idx * 4, val);
 }
 
-fn w_load(w_base: Address, idx: u64) -> u32 {
+fn w_load(w_base: Address, idx: u32) -> u32 {
     return read_u32_be(w_base, idx * 4);
 }
 
@@ -213,7 +213,7 @@ fn sha256_transform(state: Address, k: Address, w: Address, block: Address) {
 // Pad a message into a 64-byte block
 // ===========================================================================
 
-fn sha256_pad_block(block: Address, msg: Address, msg_len: u64) {
+fn sha256_pad_block(block: Address, msg: Address, msg_len: u32) {
     i: u32 = 0;
     for i in 0..msg_len {
         *(block + i) = *(msg + i);
@@ -247,7 +247,7 @@ fn copy32(dst: Address, src: Address) {
 // SHA256d: SHA-256(SHA-256(message))
 // ===========================================================================
 
-fn sha256d(msg: Address, msg_len: u64, out: Address) {
+fn sha256d(msg: Address, msg_len: u32, out: Address) {
     state = allocate(32);
     k = allocate(256);
     w = allocate(256);

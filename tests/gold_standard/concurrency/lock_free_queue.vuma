@@ -5,13 +5,12 @@
 // Uses 32-bit values throughout to avoid 64-bit arithmetic issues.
 
 // ===========================================================================
-// Queue push/pop using regular load/store (no atomics needed for
-// single-threaded test). Uses separate allocations for each component.
+// Queue push/pop using regular byte-level load/store.
+// Uses separate allocations for each component.
 // ===========================================================================
 
 fn queue_push(buf: Address, head_ptr: Address, tail_ptr: Address, capacity: u32, value: u32) -> i32 {
-    // Read head and tail indices (stored as 8 bytes each, little-endian)
-    // We only read the low 4 bytes since values are small
+    // Read head and tail indices (stored as single byte, values 0-255)
     head: u32 = *(head_ptr + 0);
     tail: u32 = *(tail_ptr + 0);
     next_head: u32 = head + 1;
@@ -21,13 +20,14 @@ fn queue_push(buf: Address, head_ptr: Address, tail_ptr: Address, capacity: u32,
     }
 
     // Write 32-bit value at slot = buf + (head % capacity) * 4
-    slot: u32 = buf + (head % capacity) * 4;
+    // slot must be Address type for pointer arithmetic to work
+    slot: Address = buf + (head % capacity) * 4;
     *(slot + 0) = value & 255;
     *(slot + 1) = (value >> 8) & 255;
     *(slot + 2) = (value >> 16) & 255;
     *(slot + 3) = (value >> 24) & 255;
 
-    // Update head index
+    // Update head index (single byte store, value 0-255)
     *(head_ptr + 0) = next_head;
     return 1;
 }
@@ -41,14 +41,14 @@ fn queue_pop(buf: Address, head_ptr: Address, tail_ptr: Address, capacity: u32) 
     }
 
     // Read 32-bit value from slot
-    slot: u32 = buf + (tail % capacity) * 4;
+    slot: Address = buf + (tail % capacity) * 4;
     b0: u32 = *(slot + 0);
     b1: u32 = *(slot + 1);
     b2: u32 = *(slot + 2);
     b3: u32 = *(slot + 3);
     value: u32 = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
 
-    // Update tail index
+    // Update tail index (single byte store, value 0-255)
     *(tail_ptr + 0) = tail + 1;
     return value;
 }
