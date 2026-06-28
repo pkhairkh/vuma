@@ -312,11 +312,22 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
     // x86_32 only has 8 GPRs; we use EDI, ESI, EDX, ECX for the first 4 args.
     // Use store_vreg (which zeros the high word) so that 64-bit operations
     // on parameters don't read garbage from the high 4 bytes.
+    // Args 4+ are passed on the stack at [EBP + 8 + (i-4)*4].
     let arg_regs = [Gpr::Rdi, Gpr::Rsi, Gpr::Rdx, Gpr::Rcx];
     for (i, param) in func.params.iter().enumerate() {
         if let Some(id) = param.as_register() {
             if i < arg_regs.len() {
                 emit(store_vreg(id, arg_regs[i]), "store_param");
+            } else {
+                // Stack-passed argument: load from [EBP + 8 + (i-4)*4]
+                // and store to the vreg's stack slot.
+                let stack_off = 8 + (i - arg_regs.len()) * 4;
+                let mut param_code = Vec::new();
+                // MOV EAX, [EBP + stack_off]
+                param_code.extend(encode_mov_reg_mem(Gpr::Rax, Gpr::Rbp, stack_off as i32));
+                // Store EAX to vreg slot (with high word zeroing)
+                param_code.extend(store_vreg(id, Gpr::Rax));
+                emit(param_code, "store_stack_param");
             }
         }
     }
