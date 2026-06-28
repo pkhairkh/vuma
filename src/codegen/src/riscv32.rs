@@ -4135,28 +4135,19 @@ fn ss_load_from_slot(dst_reg: Gpr, offset_from_s0: i32) -> Vec<u8> {
 /// IMPORTANT: src_reg must NOT be T3 when the offset is large.
 fn ss_store_to_slot(src_reg: Gpr, offset_from_s0: i32) -> Vec<u8> {
     let neg_off = -offset_from_s0;
-    let mut code = Vec::new();
     if neg_off >= -2048 {
-        // Store low word: SW src, neg_off(S0)
-        code.extend_from_slice(&Instruction::Sw { rs1: Gpr::S0, rs2: src_reg, imm: neg_off }.encode());
+        // Offset fits in 12-bit signed: SW src, neg_off(S0)
+        Instruction::Sw { rs1: Gpr::S0, rs2: src_reg, imm: neg_off }
+            .encode()
+            .to_vec()
     } else {
         // Large offset: compute address into T3, then SW from T3
+        let mut code = Vec::new();
         code.extend(ss_load_imm(Gpr::T3, offset_from_s0 as i64));
         code.extend(Instruction::Sub { rd: Gpr::T3, rs1: Gpr::S0, rs2: Gpr::T3 }.encode());
-        code.extend_from_slice(&Instruction::Sw { rs1: Gpr::T3, rs2: src_reg, imm: 0 }.encode());
+        code.extend(Instruction::Sw { rs1: Gpr::T3, rs2: src_reg, imm: 0 }.encode());
+        code
     }
-    // Zero the high word to prevent garbage in 64-bit stack slots.
-    // SW zero, neg_off-4(S0) — stores 0 at [S0 - offset + 4]
-    let hi_neg_off = neg_off + 4; // = -(offset_from_s0 - 4) = -offset_from_s0 + 4
-    if hi_neg_off >= -2048 {
-        code.extend_from_slice(&Instruction::Sw { rs1: Gpr::S0, rs2: Gpr::Zero, imm: hi_neg_off }.encode());
-    } else {
-        // Large offset: reuse T3 + 4
-        code.extend(ss_load_imm(Gpr::T3, (offset_from_s0 - 4) as i64));
-        code.extend(Instruction::Sub { rd: Gpr::T3, rs1: Gpr::S0, rs2: Gpr::T3 }.encode());
-        code.extend_from_slice(&Instruction::Sw { rs1: Gpr::T3, rs2: Gpr::Zero, imm: 0 }.encode());
-    }
-    code
 }
 
 /// Store a double-precision FP value from an FPR to a stack slot at [S0 - offset_from_s0].
