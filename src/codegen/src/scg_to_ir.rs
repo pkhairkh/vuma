@@ -1411,11 +1411,12 @@ impl IRBuilder {
         // For for-loops, continue should jump to the increment block
         // (which we'll create as loop_body_label + "_continue").
         // We set continue_target after lowering the body.
-        let continue_label = if for_range.is_some() {
-            Some(self.alloc_label("loop_continue"))
-        } else {
-            None
-        };
+        // Always create a continue label so that `continue` statements
+        // jump to the back-edge block (which has phi copies) instead of
+        // the loop header (which would skip phi resolution). This is
+        // critical for while-loops with guards, where `continue` would
+        // otherwise skip the phi copy that updates the loop variable.
+        let continue_label = Some(self.alloc_label("loop_continue"));
         self.loop_stack.push(LoopContext {
             header_label: loop_header.clone(),
             exit_label: loop_exit.clone(),
