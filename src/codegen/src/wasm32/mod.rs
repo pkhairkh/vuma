@@ -3268,6 +3268,29 @@ impl Backend for Wasm32Backend {
         func_name_to_idx.insert("write".to_string(), 0); // fd_write import = index 0
         func_name_to_idx.insert("exit".to_string(), 1);  // proc_exit import = index 1
 
+        // ── Stub function for unknown externs ──────────────────────
+        // When the wasm32 backend encounters a call to an unknown extern
+        // function (e.g. epoll_create1, close, socket), it resolves the
+        // call to this stub function index instead of crashing.
+        // The stub returns -1 (error), allowing tests to detect unsupported
+        // functionality gracefully.
+        let stub_type_idx = module.add_type(WasmFuncType {
+            params: vec![],
+            results: vec![WasmType::I32],
+        });
+        let stub_func_idx = module.add_function(stub_type_idx);
+        // Stub body: i32.const -1; end
+        let stub_body = {
+            let mut b = Vec::new();
+            WasmInstr::I32Const(-1).encode(&mut b);
+            b.push(0x0B); // end
+            b
+        };
+        module.add_code(WasmFuncBody {
+            locals: vec![],
+            body: stub_body,
+        });
+
         // ── Program functions ──────────────────────────────────────
         // Track the main function so the _start wrapper can call it.
         let mut main_func_idx: Option<u32> = None;
@@ -3335,7 +3358,7 @@ impl Backend for Wasm32Backend {
 
             // ── Resolve call relocations ────────────────────────────
             // Patch unresolved Call targets in the body bytecode.
-            resolve_call_relocations(&mut body_bytes, &func.relocations, &func_name_to_idx)?;
+            resolve_call_relocations(&mut body_bytes, &func.relocations, &func_name_to_idx, stub_func_idx)?;
 
             module.add_code(WasmFuncBody {
                 locals: local_decls,
@@ -3492,6 +3515,7 @@ fn resolve_call_relocations(
     body_bytes: &mut Vec<u8>,
     relocations: &[RelocationEntry],
     func_name_to_idx: &HashMap<String, u32>,
+    stub_func_idx: u32,
 ) -> Result<(), BackendError> {
     // Process relocations in reverse order (highest offset first) so that
     // splicing earlier relocations doesn't invalidate later offsets.
@@ -3505,16 +3529,14 @@ fn resolve_call_relocations(
         let resolved_idx = match func_name_to_idx.get(&reloc.symbol) {
             Some(&idx) => idx,
             None => {
-                // External symbol — add it as a WASI import.
-                // The function will be resolved at runtime by the WASI runtime.
+                // External symbol — resolve to the stub function that returns -1.
+                // This allows tests to detect unsupported functionality gracefully
+                // (e.g. epoll_create1 returns -1 on wasm32/WASI).
                 log::debug!(
-                    "unresolved call target '{}' in wasm32 module — treating as WASI import",
+                    "unresolved call target '{}' in wasm32 module — using stub (returns -1)",
                     reloc.symbol
                 );
-                // Use a placeholder index 0 (the canonical _start function).
-                // When used with a proper WASI runtime, the import will be resolved.
-                // For now, this allows compilation to succeed.
-                0
+                stub_func_idx
             }
         };
 
@@ -5947,7 +5969,7 @@ mod wasm_target_tests {
         let mut name_map = HashMap::new();
         name_map.insert("main".to_string(), 5u32);
 
-        resolve_call_relocations(&mut body, &relocs, &name_map).expect("resolution should succeed");
+        resolve_call_relocations(&mut body, &relocs, &name_map, 99).expect("resolution should succeed");
 
         // Verify the Call target was patched
         let (_, leb_len) = decode_unsigned_leb128(&body[1..]);
