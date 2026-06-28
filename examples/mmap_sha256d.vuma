@@ -225,7 +225,7 @@ fn sha256_pad_block(block: Address, msg: Address, msg_len: u64) {
     // 64-bit big-endian message length in bits.
     // msg_len is at most 55, so bit_len = msg_len * 8 fits in 32 bits.
     // The high 32 bits are always 0.
-    bit_len: u64 = msg_len * 8;
+    bit_len: u32 = msg_len * 8;
     *(block + 56) = 0;
     *(block + 57) = 0;
     *(block + 58) = 0;
