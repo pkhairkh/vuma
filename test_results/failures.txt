@@ -1,4 +1,4 @@
-VUMA Test Failures — 2026-06-28 14:43:17 UTC
+VUMA Test Failures — 2026-06-28 14:56:11 UTC
 Total: 6 failures across 4 tests
 
   concurrency          epoll_echo.vuma                               exp=   0 [('wasm32', 1, 'CR')]
