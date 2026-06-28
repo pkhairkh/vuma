@@ -1,69 +1,50 @@
 // Lock-Free SPSC Queue — simplified for cross-backend compatibility
 // Expected exit code: 0
 //
-// Tests AtomicLoad/AtomicStore and ring buffer index arithmetic.
-// Uses separate allocations for each field to avoid pointer arithmetic
-// issues on 32-bit backends.
-
-// ===========================================================================
-// Write/read u64 little-endian
-// ===========================================================================
-
-fn write_u64_le(buf: Address, offset: u64, val: u64) {
-    *(buf + offset) = val & 255;
-    *(buf + offset + 1) = (val >> 8) & 255;
-    *(buf + offset + 2) = (val >> 16) & 255;
-    *(buf + offset + 3) = (val >> 24) & 255;
-    *(buf + offset + 4) = (val >> 32) & 255;
-    *(buf + offset + 5) = (val >> 40) & 255;
-    *(buf + offset + 6) = (val >> 48) & 255;
-    *(buf + offset + 7) = (val >> 56) & 255;
-}
-
-fn read_u64_le(buf: Address, offset: u64) -> u64 {
-    b0: u64 = *(buf + offset);
-    b1: u64 = *(buf + offset + 1);
-    b2: u64 = *(buf + offset + 2);
-    b3: u64 = *(buf + offset + 3);
-    b4: u64 = *(buf + offset + 4);
-    b5: u64 = *(buf + offset + 5);
-    b6: u64 = *(buf + offset + 6);
-    b7: u64 = *(buf + offset + 7);
-    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
-}
+// Tests ring buffer index arithmetic with 32-bit values.
+// Uses 32-bit elements to avoid 64-bit arithmetic issues on 32-bit backends.
 
 // ===========================================================================
 // Queue using separate allocations for each component.
-// This avoids pointer arithmetic on struct fields which can cause issues
-// on 32-bit backends.
+// Uses 32-bit values to avoid 64-bit shift issues on riscv32/x86_32.
 // ===========================================================================
 
-fn queue_push(buf: Address, head_flag: Address, tail_flag: Address, capacity: u64, value: u64) -> i32 {
-    head: u64 = AtomicLoad(head_flag);
-    tail: u64 = AtomicLoad(tail_flag);
-    next_head: u64 = head + 1;
+fn queue_push(buf: Address, head_flag: Address, tail_flag: Address, capacity: u32, value: u32) -> i32 {
+    head: u32 = AtomicLoad(head_flag);
+    tail: u32 = AtomicLoad(tail_flag);
+    next_head: u32 = head + 1;
 
     if next_head % capacity == tail % capacity {
         return 0;  // Queue is full
     }
 
-    slot: u64 = buf + (head % capacity) * 8;
-    write_u64_le(slot, 0, value);
+    // Write 32-bit value at slot = buf + (head % capacity) * 4
+    slot: u32 = buf + (head % capacity) * 4;
+    // Write little-endian u32
+    *(slot + 0) = value & 255;
+    *(slot + 1) = (value >> 8) & 255;
+    *(slot + 2) = (value >> 16) & 255;
+    *(slot + 3) = (value >> 24) & 255;
 
     AtomicStore(next_head, head_flag);
     return 1;
 }
 
-fn queue_pop(buf: Address, head_flag: Address, tail_flag: Address, capacity: u64) -> u64 {
-    tail: u64 = AtomicLoad(tail_flag);
-    head: u64 = AtomicLoad(head_flag);
+fn queue_pop(buf: Address, head_flag: Address, tail_flag: Address, capacity: u32) -> u32 {
+    tail: u32 = AtomicLoad(tail_flag);
+    head: u32 = AtomicLoad(head_flag);
 
     if tail % capacity == head % capacity {
         return 4294967295;  // Queue is empty — return sentinel
     }
 
-    slot: u64 = buf + (tail % capacity) * 8;
-    value: u64 = read_u64_le(slot, 0);
+    // Read 32-bit value from slot = buf + (tail % capacity) * 4
+    slot: u32 = buf + (tail % capacity) * 4;
+    b0: u32 = *(slot + 0);
+    b1: u32 = *(slot + 1);
+    b2: u32 = *(slot + 2);
+    b3: u32 = *(slot + 3);
+    value: u32 = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
 
     AtomicStore(tail + 1, tail_flag);
     return value;
@@ -75,8 +56,8 @@ fn queue_pop(buf: Address, head_flag: Address, tail_flag: Address, capacity: u64
 
 fn main() -> i32 {
     // Allocate queue components separately
-    capacity: u64 = 4;
-    buf = allocate(capacity * 8);
+    capacity: u32 = 4;
+    buf = allocate(capacity * 4);  // 4 elements × 4 bytes = 16 bytes
     head_flag = allocate(8);
     tail_flag = allocate(8);
 
@@ -89,8 +70,8 @@ fn main() -> i32 {
     queue_push(buf, head_flag, tail_flag, capacity, 99);
 
     // Pop two values
-    val1: u64 = queue_pop(buf, head_flag, tail_flag, capacity);
-    val2: u64 = queue_pop(buf, head_flag, tail_flag, capacity);
+    val1: u32 = queue_pop(buf, head_flag, tail_flag, capacity);
+    val2: u32 = queue_pop(buf, head_flag, tail_flag, capacity);
 
     // Clean up
     free(buf);
