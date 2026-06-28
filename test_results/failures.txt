@@ -1,12 +1,6 @@
-VUMA Test Failures — 2026-06-28 18:39:37 UTC
-Total: 11 failures across 9 tests
+VUMA Test Failures — 2026-06-28 18:50:37 UTC
+Total: 5 failures across 3 tests
 
-  bitwise              bit2_priority_encode.vuma                     exp=   7 [('arm32', 6, 'MM')]
-  bitwise              bit_abs.vuma                                  exp=  42 [('arm32', 214, 'MM')]
-  bitwise              bit_is_pow2.vuma                              exp=   1 [('arm32', 0, 'MM')]
-  bitwise              bit_log2.vuma                                 exp=   3 [('arm32', 2, 'MM')]
-  bitwise              bit_priority_encoder.vuma                     exp=   7 [('arm32', 6, 'MM')]
-  complex_stores       base64_encode.vuma                            exp=  20 [('arm32', 0, 'MM')]
   concurrency          lock_free_queue.vuma                          exp=   0 [('mips64', -11, 'CR'), ('x86_32', 1, 'MM'), ('wasm32', 1, 'MM')]
-  crypto_patterns      mmap_sha256d.vuma                             exp= 229 [('arm32', 89, 'MM')]
+  crypto_patterns      mmap_sha256d.vuma                             exp= 229 [('arm32', 29, 'MM')]
   structs              enum_demo.vuma                                exp= 141 [('ppc64', 99, 'MM')]
