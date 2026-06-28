@@ -1433,18 +1433,34 @@ fn walk_control_flow_with_externs(
                     let mut needs_guard = false;
                     if for_range.is_none() {
                         // Try to parse a while-loop condition into a for-range.
+                        // CAUTION: The for-range conversion creates a separate
+                        // loop counter that is NOT updated when the body
+                        // modifies the loop variable (e.g. `while i < 8 { ...
+                        // i = 8; }`). This causes the loop to not exit early,
+                        // leading to out-of-bounds access and memory corruption
+                        // on 32-bit backends (arm32, x86_32) where stack
+                        // allocations are adjacent.
+                        //
+                        // We check if the body has ANY reassignment. If so,
+                        // we skip the for-range conversion and use the
+                        // while-condition guard (Break) instead, which
+                        // correctly handles variable reassignment.
                         if let Some(label) = &ctrl.label {
                             if let Some(fr) = parse_while_to_for_range(node_id, label, edge_idx, scg) {
-                                for_range = Some(fr);
-                            } else if let Some(neg_cond) = parse_while_condition(node_id, label, edge_idx, scg) {
-                                // Fallback: inject a Break guard.
-                                let guard = ScgStatement::Control(ControlNode::If {
-                                    cond: neg_cond,
-                                    then_body: vec![ScgStatement::Control(ControlNode::Break)],
-                                    else_body: None,
-                                });
-                                needs_guard = true;
-                                let _ = guard; // suppress unused
+                                // Check if the body reassigns any variable.
+                                // If so, it might reassign the loop variable,
+                                // so use the guard to be safe.
+                                let body_has_reassigns = body_has_any_reassigns(&body);
+                                if body_has_reassigns {
+                                    needs_guard = true;
+                                } else {
+                                    for_range = Some(fr);
+                                }
+                            }
+                            if for_range.is_none() && !needs_guard {
+                                if let Some(_neg_cond) = parse_while_condition(node_id, label, edge_idx, scg) {
+                                    needs_guard = true;
+                                }
                             }
                         }
                     }
@@ -5594,6 +5610,53 @@ fn parse_while_to_for_range(
     } else { ScgExpr::Int(0) };
 
     Some((var_name, start, end_expr))
+}
+
+/// Check if a loop body has any variable reassignment.
+///
+/// This is used to decide whether the while-to-for-range conversion is safe.
+/// If the body reassigns any variable, it might reassign the loop variable,
+/// which would cause the for-range counter to diverge. In that case, we
+/// use the while-condition guard (Break) instead.
+///
+/// Recursively scans if/else and nested loop bodies.
+fn body_has_any_reassigns(body: &[ScgStatement]) -> bool {
+    for stmt in body {
+        match stmt {
+            ScgStatement::Computation(comp) => {
+                if comp.reassigns.is_some() {
+                    return true;
+                }
+            }
+            ScgStatement::Control(ControlNode::If { then_body, else_body, .. }) => {
+                if body_has_any_reassigns(then_body) {
+                    return true;
+                }
+                if let Some(else_b) = else_body {
+                    if body_has_any_reassigns(else_b) {
+                        return true;
+                    }
+                }
+            }
+            ScgStatement::Control(ControlNode::Loop { body, .. }) => {
+                if body_has_any_reassigns(body) {
+                    return true;
+                }
+            }
+            ScgStatement::Control(ControlNode::Switch { arms, default_body, .. }) => {
+                for arm in arms {
+                    if body_has_any_reassigns(&arm.body) {
+                        return true;
+                    }
+                }
+                if body_has_any_reassigns(default_body) {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 
