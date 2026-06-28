@@ -1,6 +1,6 @@
-VUMA Test Failures — 2026-06-28 18:50:37 UTC
+VUMA Test Failures — 2026-06-28 19:14:34 UTC
 Total: 5 failures across 3 tests
 
+  complex_stores       base64_encode.vuma                            exp=  20 [('arm32', 0, 'MM')]
   concurrency          lock_free_queue.vuma                          exp=   0 [('mips64', -11, 'CR'), ('x86_32', 1, 'MM'), ('wasm32', 1, 'MM')]
-  crypto_patterns      mmap_sha256d.vuma                             exp= 229 [('arm32', 29, 'MM')]
   structs              enum_demo.vuma                                exp= 141 [('ppc64', 99, 'MM')]
