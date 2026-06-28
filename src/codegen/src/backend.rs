@@ -2664,11 +2664,14 @@ impl Backend for AArch64Backend {
                 // STR XZR, [SP, #8] = 0xF9000000 | (1 << 10) | (31 << 5) | 31 = 0xF90007FF
                 code.extend_from_slice(&0xF90007FFu32.to_le_bytes());
                 // STR X0, [SP, #16]  (it_value.tv_sec = X0 = seconds)
-                // STR X0, [SP, #16] = 0xF9000000 | (2 << 10) | (31 << 5) | 0 = 0xF9000800
-                code.extend_from_slice(&0xF9000800u32.to_le_bytes());
+                // STR Xt, [Xn, #imm] = 0xF9000000 | (imm/8 << 10) | (Rn << 5) | Rt
+                // SP = Rn=31, X0 = Rt=0, imm=16 → imm12=2
+                // 0xF9000000 | (2 << 10) | (31 << 5) | 0 = 0xF9000BE0
+                code.extend_from_slice(&0xF9000BE0u32.to_le_bytes());
                 // STR XZR, [SP, #24] (it_value.tv_usec = 0)
-                // STR XZR, [SP, #24] = 0xF9000000 | (3 << 10) | (31 << 5) | 31 = 0xF9000CFF
-                code.extend_from_slice(&0xF9000CFFu32.to_le_bytes());
+                // SP = Rn=31, XZR = Rt=31, imm=24 → imm12=3
+                // 0xF9000000 | (3 << 10) | (31 << 5) | 31 = 0xF9000FFF
+                code.extend_from_slice(&0xF9000FFFu32.to_le_bytes());
                 // MOV X0, #0 (ITIMER_REAL)
                 code.extend_from_slice(&movz_reg(0, 0));
                 // ADD X1, SP, #0 (pointer to itimerval)
