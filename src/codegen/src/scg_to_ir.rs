@@ -3133,16 +3133,6 @@ impl IRBuilder {
         let dst_vreg = self.alloc_vreg();
         ir_func.register_vreg(VirtualRegister::named(dst_vreg, &ga.dst));
         names.insert(ga.dst.clone(), dst_vreg);
-        // Also register the SCG node-id-based name (e.g. "v_863") so that
-        // resolve_subexpr can find it when it resolves a variable reference
-        // via DataFlow source node IDs. Without this, the GetAddress result
-        // would be invisible to calls that reference the variable by its
-        // SCG node ID (e.g. write_u64_le(act, 0, handler_addr) where
-        // handler_addr was resolved to v_863 by the SCG bridge).
-        let node_var = format!("v_{}", ga.dst.trim_start_matches("v_"));
-        if node_var != ga.dst {
-            names.insert(node_var, dst_vreg);
-        }
 
         ir_func.current_block().push(IRInstruction::GetAddress {
             dst: IRValue::Register(dst_vreg),
