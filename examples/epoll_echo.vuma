@@ -2,6 +2,7 @@
 // Expected exit code: 0
 //
 // Tests that epoll_create1 and close syscalls work correctly.
+// On wasm32, epoll is not supported, so the test just returns 0.
 
 extern "C" {
     fn epoll_create1(flags: i64) -> i64;
@@ -13,8 +14,7 @@ fn main() -> i32 {
     // Create an epoll instance
     epfd: i64 = epoll_create1(0);
     if epfd < 0 {
-        // epoll_create1 not supported (e.g. wasm32/WASI) — return 0
-        // to indicate the test passed (we can't test epoll on this backend)
+        // epoll_create1 not supported — return 0 (test passes)
         return 0;
     }
 
