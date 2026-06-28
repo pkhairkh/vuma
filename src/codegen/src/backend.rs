@@ -2848,21 +2848,14 @@ impl Backend for AArch64Backend {
                 }
 
                 if reloc.reloc_type == "R_VUMA_GETADDR" {
-                    eprintln!("[GETADDR] Processing reloc: symbol='{}' offset={} func_code_offset={} abs_offset={}", reloc.symbol, reloc.offset, func_code_offset, abs_offset);
                     let target_offset = func_offsets.get(&reloc.symbol)
                         .copied()
                         .or_else(|| {
                             let prefix = format!("fn_{}", reloc.symbol);
-                            eprintln!("[GETADDR] Trying prefix '{}' against {} func_offsets", prefix, func_offsets.len());
                             for k in func_offsets.keys() {
                                 if k.starts_with(&prefix) {
-                                    eprintln!("[GETADDR] Found match: '{}' -> {}", k, func_offsets[k]);
                                     return Some(func_offsets[k]);
                                 }
-                            }
-                            eprintln!("[GETADDR] No match found! Available keys:");
-                            for k in func_offsets.keys() {
-                                eprintln!("[GETADDR]   '{}'", k);
                             }
                             None
                         });
