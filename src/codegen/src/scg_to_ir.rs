@@ -2429,78 +2429,72 @@ impl IRBuilder {
                 // value is too large to fit in a byte (> 255). This prevents
                 // `*(buf + 4) = 4` from being stored as U32 (which would
                 // overwrite bytes 4-7) when the intent is a byte store.
-                let store_ty = ty.clone().unwrap_or_else(|| {
-                    if let IRValue::Register(vid) = val {
-                        if self.pointer_vregs.contains(&vid) {
-                            IRType::U64
-                        } else {
-                            // Check if this vreg corresponds to a known parameter
-                            // and use its type. Check both the vreg name and any
-                            // user-visible alias (via vreg_aliases).
-                            let vreg_name = ir_func.vregs.get(&vid)
-                                .and_then(|v| v.name.as_deref());
-                            if let Some(name) = vreg_name {
-                                if let Some(pt) = self.param_types.get(name) {
-                                    return pt.clone();
-                                }
-                                // Also check via alias map: "v_N" → "user_name"
+                let store_ty = if let Some(t) = ty {
+                    t.clone()
+                } else if let IRValue::Register(vid) = val {
+                    if self.pointer_vregs.contains(&vid) {
+                        IRType::U64
+                    } else {
+                        let vreg_name = ir_func.vregs.get(&vid)
+                            .and_then(|v| v.name.as_deref());
+                        let mut found_ty: Option<IRType> = None;
+                        if let Some(name) = vreg_name {
+                            if let Some(pt) = self.param_types.get(name) {
+                                found_ty = Some(pt.clone());
+                            }
+                            if found_ty.is_none() {
                                 if let Some(user_name) = self.vreg_aliases.get(name) {
                                     if let Some(pt) = self.param_types.get(user_name) {
-                                        return pt.clone();
+                                        found_ty = Some(pt.clone());
                                     }
                                 }
                             }
-                            // Also check: does the value resolve to a name that
-                            // directly matches a param? The resolve_expr might have
-                            // returned the vid of a param, but the vreg name might
-                            // be set to the param name during registration.
-                            // Try all param_types entries to see if any match vid.
+                        }
+                        if found_ty.is_none() {
                             for (pname, pty) in &self.param_types {
                                 if let Some(&pvreg) = names.get(pname) {
-                                    if pvreg == *vid {
-                                        return pty.clone();
-                                    }
-                                }
-                            }
-                            // Only use array stride for store type inference.
-                            if let ScgExpr::BinOp { op: crate::ir::BinOpKind::Add, lhs: _, rhs } = ptr {
-                                if let ScgExpr::BinOp { op: crate::ir::BinOpKind::Mul, lhs: _, rhs } = rhs.as_ref() {
-                                    if let ScgExpr::Int(stride) = rhs.as_ref() {
-                                        return match *stride {
-                                            8 => IRType::U64,
-                                            4 => IRType::U32,
-                                            _ => IRType::U8,
-                                        };
-                                    }
-                                }
-                            }
-                            IRType::U8
-                        }
-                    } else {
-                        // For immediate values, only infer U32/U64 when the
-                        // value is too large to fit in a byte (> 255) and
-                        // the pointer has an array stride.
-                        let imm_too_large_for_byte = match &val {
-                            IRValue::Immediate(v) => *v > 255 || *v < 0,
-                            IRValue::Address(a) => *a > 255,
-                            _ => false,
-                        };
-                        if imm_too_large_for_byte {
-                            if let ScgExpr::BinOp { op: crate::ir::BinOpKind::Add, lhs: _, rhs } = ptr {
-                                if let ScgExpr::BinOp { op: crate::ir::BinOpKind::Mul, lhs: _, rhs } = rhs.as_ref() {
-                                    if let ScgExpr::Int(stride) = rhs.as_ref() {
-                                        return match *stride {
-                                            8 => IRType::U64,
-                                            4 => IRType::U32,
-                                            _ => IRType::U8,
-                                        };
+                                    if pvreg == vid {
+                                        found_ty = Some(pty.clone());
+                                        break;
                                     }
                                 }
                             }
                         }
-                        IRType::U8
+                        if found_ty.is_none() {
+                            if let ScgExpr::BinOp { op: crate::ir::BinOpKind::Add, lhs: _, rhs } = ptr {
+                                if let ScgExpr::BinOp { op: crate::ir::BinOpKind::Mul, lhs: _, rhs } = rhs.as_ref() {
+                                    if let ScgExpr::Int(stride) = rhs.as_ref() {
+                                        found_ty = Some(match *stride {
+                                            8 => IRType::U64,
+                                            4 => IRType::U32,
+                                            _ => IRType::U8,
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                        found_ty.unwrap_or(IRType::U8)
                     }
-                });
+                } else {
+                    let imm_too_large_for_byte = match &val {
+                        IRValue::Immediate(v) => *v > 255 || *v < 0,
+                        IRValue::Address(a) => *a > 255,
+                        _ => false,
+                    };
+                    if imm_too_large_for_byte {
+                        if let ScgExpr::BinOp { op: crate::ir::BinOpKind::Add, lhs: _, rhs } = ptr {
+                            if let ScgExpr::BinOp { op: crate::ir::BinOpKind::Mul, lhs: _, rhs } = rhs.as_ref() {
+                                if let ScgExpr::Int(stride) = rhs.as_ref() {
+                                    match *stride {
+                                        8 => IRType::U64,
+                                        4 => IRType::U32,
+                                        _ => IRType::U8,
+                                    }
+                                } else { IRType::U8 }
+                            } else { IRType::U8 }
+                        } else { IRType::U8 }
+                    } else { IRType::U8 }
+                };
                 ir_func.current_block().push(IRInstruction::Store {
                     value: val,
                     addr: addr_val,
