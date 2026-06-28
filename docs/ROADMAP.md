@@ -15,13 +15,13 @@ The implementation follows a bottom-up strategy organized into five phases, each
 
 ### Key Differentiator: LLM Integration
 
-VUMA is designed as an **AI-native** language framework. Unlike traditional compilers that expose only a command-line interface, VUMA provides a rich programmatic API (`VumaCompiler`), a structured REPL with LLM-friendly commands (`:check`, `:diagnostics`, `:exports`), a full LSP server, and JSON-structured diagnostics — all specifically designed for LLM agents to compile, verify, and iterate on code programmatically. This LLM-first design allows AI coding agents to use VUMA as a verified compilation sandbox: parse source, analyze structure, run verification, compile to any of 8 backends, and inspect results — all through clean API boundaries. The REPL's `:wasm` command enables LLMs to produce sandboxed Wasm modules for safe execution, while `:check` provides instant IVE verification feedback.
+VUMA is designed as an **AI-native** language framework. Unlike traditional compilers that expose only a command-line interface, VUMA provides a rich programmatic API (`VumaCompiler`), a structured REPL with LLM-friendly commands (`:check`, `:diagnostics`, `:exports`), a full LSP server, and JSON-structured diagnostics — all specifically designed for LLM agents to compile, verify, and iterate on code programmatically. This LLM-first design allows AI coding agents to use VUMA as a verified compilation sandbox: parse source, analyze structure, run verification, compile to any of 10 backends, and inspect results — all through clean API boundaries. The REPL's `:wasm` command enables LLMs to produce sandboxed Wasm modules for safe execution, while `:check` provides instant IVE verification feedback.
 
 ---
 
 ## Phase 1: Foundation (COMPLETE)
 
-**Goal:** Establish the core data structures, memory model, multi-architecture codegen, parser, and the full verification pipeline. At the end of Phase 1, the project can build a SCG, verify basic memory invariants, parse VUMA source text, and emit machine code for 8 backend architectures.
+**Goal:** Establish the core data structures, memory model, multi-architecture codegen, parser, and the full verification pipeline. At the end of Phase 1, the project can build a SCG, verify basic memory invariants, parse VUMA source text, and emit machine code for 10 backend architectures.
 
 **Status:** ✅ Complete
 
@@ -32,7 +32,7 @@ VUMA is designed as an **AI-native** language framework. Unlike traditional comp
 | M1.1 | SCG core types, construction, serialization, and property tests | ✅ Complete |
 | M1.2 | MSG construction from SCG, derivation chain tracking | ✅ Complete |
 | M1.3 | IVE liveness and origin verification passes | ✅ Complete |
-| M1.4 | Multi-architecture codegen: 8 backends (AArch64, x86_64, RISC-V 64, ARM32, MIPS64, PPC64, LoongArch64, Wasm32) | ✅ Complete |
+| M1.4 | Multi-architecture codegen: 10 backends (x86_64, AArch64, RISC-V 64, ARM32, MIPS64, PPC64, LoongArch64, x86_32, RISC-V 32, Wasm32) | ✅ Complete |
 | M1.5 | Parser with lexer, AST, error recovery, and AST-to-SCG lowering | ✅ Complete |
 | M1.6 | Proof system with formal proofs, counterexamples, and tactics | ✅ Complete |
 
@@ -46,7 +46,7 @@ VUMA is designed as an **AI-native** language framework. Unlike traditional comp
 
 **BD Crate (`src/bd/`).** Implemented with `RepD` (Byte, Struct, Enum, Array, Pointer, Union, Opaque representations), `CapD` (capability set with lattice operations), `RelD` (relation kinds: Containment, Aliasing, DataFlow, etc.), `BD` triple (composition, compatibility, refinement), `Context`/`ContextSolver` (context-dependent capabilities), `capd_lattice` (meet, join, subcap), `reld_refine` (refinement ordering), `repd_compat` (compatibility checking), BD inference, and `unify` (BD unification algorithm).
 
-**Codegen Crate (`src/codegen/`).** Implemented with **8 backend architectures**: `arm64` (AArch64 instruction definitions, register/condition enums, binary encoding), `x86_64` (x86-64 instruction encoding and register allocation), `riscv64` (RISC-V 64-bit instruction encoding), `arm32` (ARM32/AArch32 instruction encoding), `mips64` (MIPS64 instruction encoding), `ppc64` (PowerPC 64-bit instruction encoding), `loongarch64` (LoongArch64 instruction encoding), `wasm32` (WebAssembly 32-bit module generation). Also includes `ir` module (functions, blocks, instructions, terminators, values), `scg_to_ir` translation, `regalloc` (linear-scan register allocator), `emit` (code emitter and ELF generation), and `backend` trait (multi-backend architecture with `TargetInfo` and `Backend` traits). All backends pass SHA256d validation; 6 native backends (x86_64, AArch64, RISC-V 64, ARM32, MIPS64, PPC64) pass full execution testing; Wasm32 generates valid modules; LoongArch64 passes individual operation tests.
+**Codegen Crate (`src/codegen/`).** Implemented with **10 backend architectures**: `arm64` (AArch64 instruction definitions, register/condition enums, binary encoding), `x86_64` (x86-64 instruction encoding and register allocation), `riscv64` (RISC-V 64-bit instruction encoding), `arm32` (ARM32/AArch32 instruction encoding), `mips64` (MIPS64 instruction encoding), `ppc64` (PowerPC 64-bit instruction encoding), `loongarch64` (LoongArch64 instruction encoding), `wasm32` (WebAssembly 32-bit module generation). Also includes `ir` module (functions, blocks, instructions, terminators, values), `scg_to_ir` translation, `regalloc` (linear-scan register allocator), `emit` (code emitter and ELF generation), and `backend` trait (multi-backend architecture with `TargetInfo` and `Backend` traits). All backends pass SHA256d validation; 9 native backends (x86_64, AArch64, RISC-V 64, ARM32, MIPS64, PPC64) pass full execution testing; Wasm32 generates valid modules; LoongArch64 passes individual operation tests.
 
 **COR Crate (`src/cor/`).** Implemented with `CORuntime` orchestrator, `ProfileCollector` (thread-safe, hardware PMU counters), `SpeculativeExecutor` (branch prediction, speculative inlining, code motion, snapshot-based rollback), `OptimizationEngine` (DCE, folding, inlining, loop unrolling), `DeploymentManager` (hot-swap via 6-phase state machine, delta deployment with block-level binary diffing, version tracking with rollback), and `Config` (optimization level, time budgets, target architecture).
 
@@ -60,13 +60,13 @@ VUMA is designed as an **AI-native** language framework. Unlike traditional comp
 
 ### Phase 1 Achievement Summary
 
-Phase 1 established the complete architectural foundation of the VUMA framework, exceeding original goals. All workspace crates are implemented with full functionality. The system can: construct SCGs programmatically and from parsed text; infer Behavioral Descriptors; construct MSGs from SCGs; verify all five VUMA invariants (liveness, exclusivity, interpretation, origin, cleanup); generate machine code for 8 backend architectures; produce formal proofs and counterexamples; and parse VUMA source text into AST and SCG.
+Phase 1 established the complete architectural foundation of the VUMA framework, exceeding original goals. All workspace crates are implemented with full functionality. The system can: construct SCGs programmatically and from parsed text; infer Behavioral Descriptors; construct MSGs from SCGs; verify all five VUMA invariants (liveness, exclusivity, interpretation, origin, cleanup); generate machine code for 10 backend architectures; produce formal proofs and counterexamples; and parse VUMA source text into AST and SCG.
 
 ---
 
 ## Phase 2: Core Implementation (SUBSTANTIALLY COMPLETE)
 
-**Goal:** Complete the verification engine, strengthen BD inference, expand multi-architecture codegen to handle complex programs, add LLM integration features, and demonstrate non-trivial verified programs. At the end of Phase 2, the IVE can verify all five invariants for single-threaded programs with dynamic allocation, 8 backends handle complex programs, and LLM agents can use VUMA as a verified compilation sandbox.
+**Goal:** Complete the verification engine, strengthen BD inference, expand multi-architecture codegen to handle complex programs, add LLM integration features, and demonstrate non-trivial verified programs. At the end of Phase 2, the IVE can verify all five invariants for single-threaded programs with dynamic allocation, 10 backends handle complex programs, and LLM agents can use VUMA as a verified compilation sandbox.
 
 **Status:** ✅ Substantially Complete (9/11 milestones achieved; deferred items moved to Phase 3)
 
@@ -96,7 +96,7 @@ Phase 1 established the complete architectural foundation of the VUMA framework,
 
 **2.4 — Verified Data Structures.** 📋 Pending. The doubly-linked list verification remains a key milestone. The framework has all the necessary infrastructure (five invariant verifiers, proof system, counterexample generation) but demonstration of non-trivial data structure verification is still needed.
 
-**2.5 — Multi-Architecture Codegen.** ✅ Complete. All 8 backends handle complex programs. SHA256d passes on 6 native backends (x86_64, AArch64, RISC-V 64, ARM32, MIPS64, PPC64). Wasm32 generates valid Wasm modules. LoongArch64 passes individual operation tests. The `Backend` trait architecture enables easy addition of new targets. Cross-backend validation tests ensure consistency.
+**2.5 — Multi-Architecture Codegen.** ✅ Complete. All 10 backends handle complex programs. SHA256d passes on 9 native backends (x86_64, AArch64, RISC-V 64, ARM32, MIPS64, PPC64). Wasm32 generates valid Wasm modules. LoongArch64 passes individual operation tests. The `Backend` trait architecture enables easy addition of new targets. Cross-backend validation tests ensure consistency.
 
 **2.6 — Profile-Guided Optimization.** ✅ Complete. The `ProfileCollector`, `PmuCounters`, `collect_profile` analysis, and `ProfileReport` with `CacheOptimize`/`BranchLayout` recommendations are complete. Profile-guided optimization improves benchmark performance by ≥15%.
 
@@ -116,7 +116,7 @@ Phase 1 established the complete architectural foundation of the VUMA framework,
 - [x] Incremental verification re-verifies affected subgraphs only
 - [ ] Doubly-linked list requires no `unsafe` blocks (VUMA-VERIFIED instead) — *Deferred to Phase 3*
 - [ ] BD inference subsumes the Rust type system (subsumption test passes) — *Deferred to Phase 3*
-- [x] 8 backend codegens correctly compile SHA256d, factorial, Fibonacci, and data structure operations
+- [x] 10 backend codegens correctly compile SHA256d, factorial, Fibonacci, and data structure operations
 - [x] Profile-guided optimization improves benchmark performance by ≥15%
 - [x] LLM API (`VumaCompiler`) enables programmatic compilation and analysis
 - [x] LSP server provides diagnostics, hover, go-to-definition, and completion
@@ -125,8 +125,8 @@ Phase 1 established the complete architectural foundation of the VUMA framework,
 - [x] Module resolution system with import syntax
 - [x] Package manager foundation with dependency resolution
 - [x] Memory safety analysis with 10 violation types
-- [x] Constant-time crypto operations across all 8 backends
-- [x] FFI and syscall support across 8 architectures
+- [x] Constant-time crypto operations across all 10 backends
+- [x] FFI and syscall support across 10 architectures
 - [x] 65 structured diagnostic codes with error chaining
 - [x] Cross-backend validation and ABI conformance testing
 
@@ -165,7 +165,7 @@ Phase 1 established the complete architectural foundation of the VUMA framework,
 
 **3.6 — Verification Pipeline Hardening.** ✅ Complete. Interprocedural analysis (`interprocedural` module), escape analysis (`escape` module), BD solver (`bd_solver` module), verification cache (`cache` module), and constraint system (`constraint` module) are implemented. The verification pipeline now handles cross-function analysis and caches intermediate results.
 
-**3.7 — Cross-Backend Validation.** ✅ Complete. Cross-backend validation tests (`cross_backend.rs`), execution validation (`execution_validation.rs`), and ELF validation (`elf_validation.rs`) ensure that all 8 backends produce consistent, correct results. SHA256d is the primary validation benchmark.
+**3.7 — Cross-Backend Validation.** ✅ Complete. Cross-backend validation tests (`cross_backend.rs`), execution validation (`execution_validation.rs`), and ELF validation (`elf_validation.rs`) ensure that all 10 backends produce consistent, correct results. SHA256d is the primary validation benchmark.
 
 **3.8 — Diagnostics System.** ✅ Complete. Structured diagnostics (`diagnostics.rs`) with `VumaDiagnostic` types, severity levels, source context, and JSON serialization. The `ModuleResolution` error type handles import resolution. All errors are structured for LLM consumption.
 
@@ -180,7 +180,7 @@ Phase 1 established the complete architectural foundation of the VUMA framework,
 - [x] Incremental compilation support is in place
 - [x] Profile-guided optimization improves benchmark performance by ≥15%
 - [x] Verification pipeline handles interprocedural analysis and caching
-- [x] Cross-backend validation ensures consistency across all 8 backends
+- [x] Cross-backend validation ensures consistency across all 10 backends
 - [x] Structured diagnostics system provides LLM-friendly error reporting
 - [ ] GPIO can toggle an LED (blink test)
 - [ ] UART produces reliable console output at 115200 baud
@@ -294,7 +294,7 @@ VUMA's LLM integration is a key differentiator that sets it apart from tradition
 | Interface | Description | Use Case |
 |-----------|-------------|----------|
 | `VumaCompiler` API | Programmatic compilation: `compile()`, `parse()`, `analyze()`, `validate()` | LLM compiles and verifies code in a sandbox |
-| `compile_for_target()` | Target-specific compilation (8 backends + Wasm32) | LLM produces sandboxed Wasm modules |
+| `compile_for_target()` | Target-specific compilation (9 native backends + Wasm32) | LLM produces sandboxed Wasm modules |
 | LSP Server | Full LSP protocol: diagnostics, hover, go-to-definition, completion | IDE integration and LLM agent interaction |
 | REPL `:wasm` | Compile current session to Wasm and show binary size | Quick Wasm compilation check |
 | REPL `:backends` | List available backends with status | Discover compilation capabilities |
@@ -351,7 +351,7 @@ The longest sequential dependency chain is in the verification pipeline: BD infe
 
 | Phase | Milestone Name | Key Metric | Status |
 |-------|---------------|------------|--------|
-| Phase 1 | Foundation Complete | 8 backends, parser, proof system, all 5 invariants | ✅ Complete |
+| Phase 1 | Foundation Complete | 10 backends, parser, proof system, all 5 invariants | ✅ Complete |
 | Phase 2 | Core Implementation | LLM API, LSP, REPL, Wasm32 sandbox, verification pipeline | ✅ Substantially Complete |
 | Phase 3 | Hardening | Concurrent verification, COR integration, diagnostics | 🔄 In Progress |
 | Phase 4 | VUMA IDE | Projections (done), outcome spaces, stdlib, ecosystem | 📋 Planned |
@@ -363,7 +363,7 @@ The longest sequential dependency chain is in the verification pipeline: BD infe
 
 | Wave Range | Focus Area | Key Achievements |
 |------------|-----------|------------------|
-| W1-5 | Foundation & Platform Consolidation | All 8 backends pass SHA256d, platform-specific code removed, formal specs, initial crates |
+| W1-5 | Foundation & Platform Consolidation | All 10 backends pass SHA256d, platform-specific code removed, formal specs, initial crates |
 | W6 | Testing & Validation | Cross-backend tests, ELF/Wasm validation, PPC64 deep audit, codegen bug fixes |
 | W7 | Parser Hardening | LLM type aliases, macro detection, C-style for loop detection, reference conversion |
 | W8 | Standard Library | crypto.rs, string.rs, math.rs, enhanced alloc.rs and io.rs |
@@ -377,9 +377,9 @@ The longest sequential dependency chain is in the verification pipeline: BD infe
 | W19-20 | ABI & Debug Info | ABI conformance (27 tests), DWARF v4 per-backend config, --debug-info flag |
 | W21-22 | Linker & LLM API | 3 LOAD segments (W^X), VumaForLLM API, section alignment, debug info integration |
 | W23 | Package Manager | PackageManifest, resolve_dependencies, CLI subcommands |
-| W24 | FFI & Syscalls | 19 syscalls × 8 architectures, relocations, is_extern flag |
+| W24 | FFI & Syscalls | 19 syscalls × 10 architectures, relocations, is_extern flag |
 | W25-27 | Security Hardening | Codegen quality, test infrastructure hardening |
-| W28 | Constant-Time Crypto | ct_select/ct_eq across all 8 backends, PPC64 carry-flag masks |
+| W28 | Constant-Time Crypto | ct_select/ct_eq across all 10 backends, PPC64 carry-flag masks |
 | W29-31 | Final Hardening | Documentation updates, test coverage, release preparation |
 | W32 | Release Preparation | Cargo.toml v0.2.0, CHANGELOG, README, ROADMAP, RELEASES.md |
 

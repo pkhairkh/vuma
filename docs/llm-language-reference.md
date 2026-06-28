@@ -1061,7 +1061,7 @@ gte: u32 = crypto::ct_gte_u32(a: u32, b: u32);       // 1 if a >= b
 // crypto::SHA256_H — 8 u32 initial hash values
 ```
 
-**Critical:** Constant-time functions execute in the same number of cycles regardless of input values. Use them whenever comparing secret data to prevent timing side-channels. All 8 backends implement these with branchless codegen.
+**Critical:** Constant-time functions execute in the same number of cycles regardless of input values. Use them whenever comparing secret data to prevent timing side-channels. All 10 backends implement these with branchless codegen.
 
 ### 13.4 The `string` Module (String and Memory Operations)
 
@@ -1743,7 +1743,7 @@ VUMA produces structured diagnostics with error codes. These codes are organized
 
 ## 20. Target Platforms
 
-VUMA compiles to native machine code for 8 architectures plus Wasm. Each target has its own backend that translates the IR to machine code.
+VUMA compiles to native machine code for 10 architectures plus Wasm. Each target has its own backend that translates the IR to machine code.
 
 ### Supported Targets
 
@@ -1808,7 +1808,7 @@ qemu-loongarch64 ./sha256d_loongarch64; echo $?
 
 ### Portability Rules
 
-When writing VUMA code, follow these rules to ensure it works on all 8 targets:
+When writing VUMA code, follow these rules to ensure it works on all 10 targets:
 
 1. **Always mask u32 results** with `& 4294967295` after addition, subtraction, multiplication, and left shift.
 2. **Use `x ^ 4294967295`** for bitwise NOT, never `~x`.
