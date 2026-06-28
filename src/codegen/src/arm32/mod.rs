@@ -3734,11 +3734,14 @@ impl Backend for Arm32Backend {
                 if i < 4 {
                     let offset = vreg_stack_slots.get(&id).copied().unwrap_or(0);
                     let mut store_code = ss_store_word_only(arg_regs[i], offset);
-                    // Zero the high word: MOV R12, #0; STR R12, [R11, #(-offset+4)]
+                    // Zero the high word using arg_regs[i] itself (it's free
+                    // after the store above). MUST NOT use R12 because
+                    // ss_store_word_only clobbers R12 for large offsets,
+                    // which would destroy the zero value.
                     store_code.extend_from_slice(&encode_dp_imm(
-                        Condition::Al, DP_MOV, false, 0, Gpr::R12.encoding(), 0, 0,
+                        Condition::Al, DP_MOV, false, 0, arg_regs[i].encoding(), 0, 0,
                     ));
-                    store_code.extend(ss_store_word_only(Gpr::R12, offset - 4));
+                    store_code.extend(ss_store_word_only(arg_regs[i], offset - 4));
                     instructions.push(AllocatedInstruction {
                         opcode: "str+str".to_string(),
                         reads: vec![PhysicalReg::new(RegClass::Gpr, arg_regs[i].encoding())],
@@ -3752,11 +3755,12 @@ impl Backend for Arm32Backend {
                     let mut param_code = Vec::new();
                     param_code.extend(ss_load_from_r11_plus(Gpr::R0, arg_offset_from_r11));
                     param_code.extend(ss_store_word_only(Gpr::R0, slot_offset));
-                    // Zero the high word
+                    // Zero the high word using R0 (free after store).
+                    // MUST NOT use R12 — ss_store_word_only clobbers it.
                     param_code.extend_from_slice(&encode_dp_imm(
-                        Condition::Al, DP_MOV, false, 0, Gpr::R12.encoding(), 0, 0,
+                        Condition::Al, DP_MOV, false, 0, Gpr::R0.encoding(), 0, 0,
                     ));
-                    param_code.extend(ss_store_word_only(Gpr::R12, slot_offset - 4));
+                    param_code.extend(ss_store_word_only(Gpr::R0, slot_offset - 4));
                     instructions.push(AllocatedInstruction {
                         opcode: "ldr+str".to_string(),
                         reads: vec![PhysicalReg::new(RegClass::Gpr, Gpr::R11.encoding())],
