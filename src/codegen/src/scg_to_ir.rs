@@ -2450,6 +2450,18 @@ impl IRBuilder {
                                     }
                                 }
                             }
+                            // Also check: does the value resolve to a name that
+                            // directly matches a param? The resolve_expr might have
+                            // returned the vid of a param, but the vreg name might
+                            // be set to the param name during registration.
+                            // Try all param_types entries to see if any match vid.
+                            for (pname, pty) in &self.param_types {
+                                if let Some(&pvreg) = names.get(pname) {
+                                    if pvreg == *vid {
+                                        return pty.clone();
+                                    }
+                                }
+                            }
                             // Only use array stride for store type inference.
                             if let ScgExpr::BinOp { op: crate::ir::BinOpKind::Add, lhs: _, rhs } = ptr {
                                 if let ScgExpr::BinOp { op: crate::ir::BinOpKind::Mul, lhs: _, rhs } = rhs.as_ref() {
