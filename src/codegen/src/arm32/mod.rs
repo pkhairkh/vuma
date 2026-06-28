@@ -4126,6 +4126,16 @@ impl Backend for Arm32Backend {
                             }
                         }
                         code.extend(ss_store_to_slot(Gpr::R0, dst_offset));
+                        // Zero the high word — loads produce 32-bit results,
+                        // but stack slots are 8 bytes. Without zeroing, the
+                        // high word contains garbage from a previous value.
+                        // When a 64-bit operation (e.g. Shl) later loads
+                        // both words via ss_load_value_64, the garbage high
+                        // word corrupts the result.
+                        code.extend_from_slice(&encode_dp_imm(
+                            Condition::Al, DP_MOV, false, 0, Gpr::R1.encoding(), 0, 0,
+                        )); // MOV R1, #0
+                        code.extend(ss_store_to_slot(Gpr::R1, dst_offset + 4));
                         code
                     }
 
@@ -4196,6 +4206,11 @@ impl Backend for Arm32Backend {
                             ));
                         }
                         code.extend(ss_store_to_slot(Gpr::R0, dst_offset));
+                        // Zero high word (32-bit pointer result in 64-bit slot)
+                        code.extend_from_slice(&encode_dp_imm(
+                            Condition::Al, DP_MOV, false, 0, Gpr::R1.encoding(), 0, 0,
+                        )); // MOV R1, #0
+                        code.extend(ss_store_to_slot(Gpr::R1, dst_offset + 4));
                         code
                     }
 
@@ -4729,6 +4744,11 @@ impl Backend for Arm32Backend {
                             }
                         }
                         code.extend(ss_store_to_slot(Gpr::R0, dst_offset));
+                        // Zero high word (32-bit pointer result in 64-bit slot)
+                        code.extend_from_slice(&encode_dp_imm(
+                            Condition::Al, DP_MOV, false, 0, Gpr::R1.encoding(), 0, 0,
+                        )); // MOV R1, #0
+                        code.extend(ss_store_to_slot(Gpr::R1, dst_offset + 4));
                         code
                     }
 
