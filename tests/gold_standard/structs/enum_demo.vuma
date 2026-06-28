@@ -46,8 +46,14 @@ enum Result {
 fn make_some(val: u32, out: Address) {
     // Write tag = 1 (Some variant)
     *(out + 0) = 1;
-    // Write payload
-    *(out + 4) = val;
+    // Write payload as 4 individual bytes (little-endian).
+    // This avoids store/load width mismatches on big-endian backends
+    // (ppc64) where the compiler cannot distinguish struct field
+    // access from byte-level scatter access.
+    *(out + 4) = val & 255;
+    *(out + 5) = (val >> 8) & 255;
+    *(out + 6) = (val >> 16) & 255;
+    *(out + 7) = (val >> 24) & 255;
 }
 
 // ===========================================================================
@@ -68,7 +74,12 @@ fn make_none(out: Address) {
 fn option_unwrap_or(opt: Address, default: u32) -> u32 {
     tag: u32 = *(opt + 0);
     if tag == 1 {
-        val: u32 = *(opt + 4);
+        // Read payload as 4 individual bytes and reassemble (little-endian).
+        b0: u32 = *(opt + 4);
+        b1: u32 = *(opt + 5);
+        b2: u32 = *(opt + 6);
+        b3: u32 = *(opt + 7);
+        val: u32 = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
         return val;
     } else {
         return default;
