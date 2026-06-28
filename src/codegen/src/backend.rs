@@ -2653,24 +2653,22 @@ impl Backend for AArch64Backend {
             {
                 let mut code = Vec::new();
                 // SUB SP, SP, #32
+                // Encoding: 0xD1000000 | (imm12 << 10) | (Rn << 5) | Rd
+                // SUB SP, SP, #32 = 0xD1000000 | (32 << 10) | (31 << 5) | 31
                 code.extend_from_slice(&0xD10083FFu32.to_le_bytes());
                 // STR XZR, [SP, #0]  (it_interval.tv_sec = 0)
                 // STR Xt, [Xn, #imm] = 0xF9000000 | (imm/8 << 10) | (Rn << 5) | Rt
-                // SP = Rn=31, XZR = Rt=31
+                // STR XZR, [SP, #0] = 0xF9000000 | 0 | (31 << 5) | 31 = 0xF90003FF
                 code.extend_from_slice(&0xF90003FFu32.to_le_bytes());
                 // STR XZR, [SP, #8]  (it_interval.tv_usec = 0)
-                // imm/8 = 8/8 = 1, so (1 << 10) = 0x400
-                // 0xF9000000 | 0x400 | (31 << 5) | 31 = 0xF90007FF
+                // STR XZR, [SP, #8] = 0xF9000000 | (1 << 10) | (31 << 5) | 31 = 0xF90007FF
                 code.extend_from_slice(&0xF90007FFu32.to_le_bytes());
                 // STR X0, [SP, #16]  (it_value.tv_sec = X0 = seconds)
-                // imm/8 = 16/8 = 2, so (2 << 10) = 0x800
-                // Rn=31 (SP), Rt=0 (X0)
-                // 0xF9000000 | 0x800 | (31 << 5) | 0 = 0xF9000000 | 0x800 | 0x3E0 | 0 = 0xF9000BE0
-                code.extend_from_slice(&0xF9000BE0u32.to_le_bytes());
+                // STR X0, [SP, #16] = 0xF9000000 | (2 << 10) | (31 << 5) | 0 = 0xF9000800
+                code.extend_from_slice(&0xF9000800u32.to_le_bytes());
                 // STR XZR, [SP, #24] (it_value.tv_usec = 0)
-                // imm/8 = 24/8 = 3, so (3 << 10) = 0xC00
-                // 0xF9000000 | 0xC00 | (31 << 5) | 31 = 0xF9000FFF
-                code.extend_from_slice(&0xF9000FFFu32.to_le_bytes());
+                // STR XZR, [SP, #24] = 0xF9000000 | (3 << 10) | (31 << 5) | 31 = 0xF9000CFF
+                code.extend_from_slice(&0xF9000CFFu32.to_le_bytes());
                 // MOV X0, #0 (ITIMER_REAL)
                 code.extend_from_slice(&movz_reg(0, 0));
                 // ADD X1, SP, #0 (pointer to itimerval)
