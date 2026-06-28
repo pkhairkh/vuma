@@ -3667,6 +3667,14 @@ impl Backend for Arm32Backend {
                                     Gpr::R0.encoding(), 0, Gpr::R1.encoding(), Gpr::R0.encoding(),
                                 ));
                                 code.extend(ss_store_to_slot(Gpr::R0, dst_offset));
+                                // Zero the high word — 32-bit MUL only produces a 32-bit
+                                // result, but stack slots are 8 bytes. Without clearing
+                                // the high word, subsequent 64-bit operations (e.g. pointer
+                                // arithmetic) read garbage from the high word.
+                                code.extend_from_slice(&encode_dp_imm(
+                                    Condition::Al, DP_MOV, false, 0, Gpr::R1.encoding(), 0, 0,
+                                )); // MOV R1, #0
+                                code.extend(ss_store_to_slot(Gpr::R1, dst_offset + 4));
                             }
                             BinOpKind::And | BinOpKind::Or | BinOpKind::Xor => {
                                 // 64-bit bitwise op: load both words of lhs and rhs,
@@ -3839,6 +3847,11 @@ impl Backend for Arm32Backend {
                                 // done: MOV R0, R2 (quotient)
                                 code.extend_from_slice(&0xE1A00002u32.to_le_bytes());
                                 code.extend(ss_store_to_slot(Gpr::R0, dst_offset));
+                                // Zero high word (32-bit result in 64-bit slot)
+                                code.extend_from_slice(&encode_dp_imm(
+                                    Condition::Al, DP_MOV, false, 0, Gpr::R1.encoding(), 0, 0,
+                                )); // MOV R1, #0
+                                code.extend(ss_store_to_slot(Gpr::R1, dst_offset + 4));
                             }
                             BinOpKind::SRem | BinOpKind::URem => {
                                 // Software modulo: R0 = R0 % R1 (remainder)
@@ -3865,6 +3878,11 @@ impl Backend for Arm32Backend {
                                 // done: MOV R0, R3 (remainder)
                                 code.extend_from_slice(&0xE1A00003u32.to_le_bytes());
                                 code.extend(ss_store_to_slot(Gpr::R0, dst_offset));
+                                // Zero high word (32-bit result in 64-bit slot)
+                                code.extend_from_slice(&encode_dp_imm(
+                                    Condition::Al, DP_MOV, false, 0, Gpr::R1.encoding(), 0, 0,
+                                )); // MOV R1, #0
+                                code.extend(ss_store_to_slot(Gpr::R1, dst_offset + 4));
                             }
                             // Comparison BinOps: produce 0 or 1
                             BinOpKind::SLt | BinOpKind::SLe | BinOpKind::SGt | BinOpKind::SGe
@@ -3897,6 +3915,11 @@ impl Backend for Arm32Backend {
                                     cmp_cond, DP_MOV, false, 0, Gpr::R0.encoding(), 0, 1,
                                 ));
                                 code.extend(ss_store_to_slot(Gpr::R0, dst_offset));
+                                // Zero high word (32-bit result 0 or 1 in 64-bit slot)
+                                code.extend_from_slice(&encode_dp_imm(
+                                    Condition::Al, DP_MOV, false, 0, Gpr::R1.encoding(), 0, 0,
+                                )); // MOV R1, #0
+                                code.extend(ss_store_to_slot(Gpr::R1, dst_offset + 4));
                             }
                         }
                         code
