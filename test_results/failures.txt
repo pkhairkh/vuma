@@ -1,12 +1,12 @@
-VUMA Test Failures — 2026-06-28 01:40:28 UTC
-Total: 34 failures across 9 tests
+VUMA Test Failures — 2026-06-28 02:05:57 UTC
+Total: 32 failures across 9 tests
 
   complex_stores       base64_encode.vuma                            exp=  20 [('arm32', 0, 'MM')]
-  concurrency          epoll_echo.vuma                               exp=   0 [('x86_32', -11, 'CR'), ('wasm32', 1, 'CR'), ('mips64', 124, 'TO'), ('ppc64', 124, 'TO')]
+  concurrency          epoll_echo.vuma                               exp=   0 [('x86_32', -11, 'CR'), ('wasm32', 1, 'CR'), ('ppc64', 124, 'TO'), ('mips64', 124, 'TO')]
   concurrency          lock_free_queue.vuma                          exp=   0 [('x86_64', -11, 'CR'), ('x86_32', -11, 'CR'), ('wasm32', 1, 'CR'), ('ppc64', 124, 'TO')]
-  concurrency          signal_hash.vuma                              exp=   0 [('x86_64', -11, 'CR'), ('aarch64', -11, 'CR'), ('mips64', 1, 'MM'), ('ppc64', 1, 'MM'), ('arm32', -14, 'CR'), ('x86_32', -11, 'CR'), ('wasm32', 1, 'CR'), ('riscv64', 124, 'TO'), ('riscv32', 124, 'TO'), ('loongarch64', 124, 'TO')]
+  concurrency          signal_hash.vuma                              exp=   0 [('x86_64', -11, 'CR'), ('aarch64', -11, 'CR'), ('mips64', 1, 'MM'), ('ppc64', 1, 'MM'), ('arm32', -14, 'CR'), ('x86_32', -11, 'CR'), ('wasm32', 1, 'CR'), ('riscv64', 124, 'TO'), ('loongarch64', 124, 'TO'), ('riscv32', 124, 'TO')]
   control_flow         bsearch.vuma                                  exp=   7 [('ppc64', -11, 'CR'), ('wasm32', 1, 'CR'), ('arm32', 124, 'TO')]
-  crypto_patterns      mmap_sha256d.vuma                             exp= 229 [('aarch64', 6, 'MM'), ('x86_64', 6, 'MM'), ('arm32', -11, 'CR'), ('ppc64', 2, 'MM'), ('mips64', -11, 'CR'), ('x86_32', -11, 'CR'), ('riscv32', 35, 'MM'), ('wasm32', 1, 'CR')]
+  crypto_patterns      mmap_sha256d.vuma                             exp= 229 [('riscv64', 6, 'MM'), ('ppc64', 2, 'MM'), ('arm32', -11, 'CR'), ('riscv32', 35, 'MM'), ('x86_32', -11, 'CR'), ('wasm32', 1, 'CR')]
   edge_cases           ffi_demo.vuma                                 exp=   0 [('ppc64', 1, 'MM'), ('wasm32', 1, 'CR')]
   memory               mem_string_copy.vuma                          exp=   0 [('arm32', 1, 'MM')]
   structs              enum_demo.vuma                                exp= 141 [('ppc64', 99, 'MM')]
