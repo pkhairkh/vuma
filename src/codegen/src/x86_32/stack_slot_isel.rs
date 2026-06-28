@@ -310,12 +310,13 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
 
     // Copy function parameters from arg registers to their stack slots.
     // x86_32 only has 8 GPRs; we use EDI, ESI, EDX, ECX for the first 4 args.
+    // Use store_vreg (which zeros the high word) so that 64-bit operations
+    // on parameters don't read garbage from the high 4 bytes.
     let arg_regs = [Gpr::Rdi, Gpr::Rsi, Gpr::Rdx, Gpr::Rcx];
     for (i, param) in func.params.iter().enumerate() {
         if let Some(id) = param.as_register() {
             if i < arg_regs.len() {
-                let off = slot_offset(id);
-                emit(encode_mov_mem_reg(Gpr::Rbp, off, arg_regs[i]), "store_param");
+                emit(store_vreg(id, arg_regs[i]), "store_param");
             }
         }
     }
