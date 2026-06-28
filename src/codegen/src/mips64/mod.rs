@@ -4385,8 +4385,12 @@ impl Backend for Mips64Backend {
             code.extend_from_slice(&Instruction::Daddu { rd: Gpr::A0, rs: Gpr::Zero, rt: Gpr::Zero }.encode());
             // addiu $a2, $zero, 3     (PROT_READ | PROT_WRITE)
             code.extend_from_slice(&Instruction::Addiu { rt: Gpr::A2, rs: Gpr::Zero, imm: 3 }.encode());
-            // addiu $a3, $zero, 0x22  (MAP_PRIVATE | MAP_ANONYMOUS = 34)
-            code.extend_from_slice(&Instruction::Addiu { rt: Gpr::A3, rs: Gpr::Zero, imm: 0x22 }.encode());
+            // addiu $a3, $zero, 0x802  (MAP_PRIVATE | MAP_ANONYMOUS)
+            // NOTE: On MIPS Linux, MAP_ANONYMOUS = 0x800 (not 0x20 like x86/aarch64).
+            // MAP_PRIVATE = 0x02, so MAP_PRIVATE | MAP_ANONYMOUS = 0x802.
+            // Using 0x22 (the x86 value) would set MAP_FIXED (0x10) + MAP_PRIVATE,
+            // causing mmap to fail or map to address 0.
+            code.extend_from_slice(&Instruction::Addiu { rt: Gpr::A3, rs: Gpr::Zero, imm: 0x802 }.encode());
             // daddiu $a4, $zero, -1   (fd = -1; $a4 = $8 = T0 in our enum)
             code.extend_from_slice(&Instruction::Daddiu { rt: Gpr::T0, rs: Gpr::Zero, imm: -1 }.encode());
             // daddu $a5, $zero, $zero (offset = 0; $a5 = $9 = T1 in our enum)
