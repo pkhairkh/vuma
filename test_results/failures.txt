@@ -1,5 +1,5 @@
-VUMA Test Failures — 2026-06-28 21:14:00 UTC
-Total: 4 failures across 2 tests
+VUMA Test Failures — 2026-06-28 21:30:40 UTC
+Total: 3 failures across 2 tests
 
-  concurrency          lock_free_queue.vuma                          exp=   0 [('mips64', -11, 'CR'), ('x86_32', 1, 'MM'), ('wasm32', 1, 'MM')]
+  concurrency          lock_free_queue.vuma                          exp=   0 [('mips64', -11, 'CR'), ('wasm32', 1, 'MM')]
   structs              enum_demo.vuma                                exp= 141 [('ppc64', 99, 'MM')]
