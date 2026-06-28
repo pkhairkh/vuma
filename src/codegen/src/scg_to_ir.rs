@@ -2435,12 +2435,19 @@ impl IRBuilder {
                             IRType::U64
                         } else {
                             // Check if this vreg corresponds to a known parameter
-                            // and use its type.
+                            // and use its type. Check both the vreg name and any
+                            // user-visible alias (via vreg_aliases).
                             let vreg_name = ir_func.vregs.get(&vid)
                                 .and_then(|v| v.name.as_deref());
                             if let Some(name) = vreg_name {
                                 if let Some(pt) = self.param_types.get(name) {
                                     return pt.clone();
+                                }
+                                // Also check via alias map: "v_N" → "user_name"
+                                if let Some(user_name) = self.vreg_aliases.get(name) {
+                                    if let Some(pt) = self.param_types.get(user_name) {
+                                        return pt.clone();
+                                    }
                                 }
                             }
                             // Only use array stride for store type inference.
