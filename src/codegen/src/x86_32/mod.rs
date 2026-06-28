@@ -1923,16 +1923,15 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
     // VUMA args: EDI=addr, ESI=length, EDX=prot, ECX=flags
     //   (args 5-6 (fd, offset) are on the stack for i386)
     // For __vuma_alloc, we call mmap2(NULL, size, PROT_RW, MAP_PRIVATE|MAP_ANON, -1, 0)
+    //
+    // IMPORTANT: EBP is the frame pointer (callee-saved in cdecl). We MUST
+    // save/restore it, even though this stub is currently only called for
+    // heap allocation (not stack allocation via Alloc instruction).
     {
         let mut code = Vec::new();
-        // The VUMA calling convention for x86_32 puts args 0-3 in EDI, ESI, EDX, ECX
-        // and args 4-5 on the stack at [ESP+4] and [ESP+8] (after return address).
-        // But __vuma_alloc only has 1 arg (size), so we construct the mmap2 args here.
-        // For the general mmap case, assume args are: EDI=addr, ESI=length, EDX=prot
-        // For __vuma_alloc, EDI=size, we set up all 6 args.
-        // This stub handles __vuma_alloc specifically:
+        // Save EBP (frame pointer)
+        code.extend(encode_push(Gpr::Rbp));
         // mmap2(NULL, size, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0)
-        code.extend(encode_mov_reg_reg(Gpr::Rbx, Gpr::Rdi));    // addr = 0 (NULL) — will be overwritten below
         code.extend(encode_xor_reg_reg(Gpr::Rbx, Gpr::Rbx));    // EBX = 0 (addr = NULL)
         code.extend(encode_mov_reg_reg(Gpr::Rcx, Gpr::Rdi));    // ECX = length = size
         code.extend(encode_mov_reg_imm32(Gpr::Rdx, 3));         // EDX = PROT_READ|PROT_WRITE
@@ -1941,6 +1940,8 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         code.extend(encode_xor_reg_reg(Gpr::Rbp, Gpr::Rbp));    // EBP = offset = 0
         code.extend(encode_mov_reg_imm32(Gpr::Rax, 192));       // EAX = sys_mmap2
         code.extend(encode_syscall());
+        // Restore EBP (frame pointer)
+        code.extend(encode_pop(Gpr::Rbp));
         code.extend(encode_ret());
         stubs.push(("__vuma_alloc".to_string(), code));
     }
@@ -2075,23 +2076,29 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
     //                          EDI=arg5, EBP=arg6, EAX=syscall#, INT 0x80.
     // For mmap2 we need:
     //   EBX=addr, ECX=length, EDX=prot, ESI=flags, EDI=fd, EBP=offset_pages
+    //
+    // IMPORTANT: EBP is the frame pointer (callee-saved in cdecl). We MUST
+    // save/restore it, otherwise the caller's stack frame is corrupted and
+    // all subsequent local variable access reads garbage → SIGSEGV.
     {
         let mut code = Vec::new();
+        // Save EBP (frame pointer) — will be restored after the syscall.
+        code.extend(encode_push(Gpr::Rbp));                  // push EBP
         // Save addr in EBX (target register) before we lose it.
         code.extend(encode_mov_reg_reg(Gpr::Rbx, Gpr::Rdi)); // EBX = addr
         // Push ECX (flags) so we can later pop it into ESI.
         code.extend(encode_push(Gpr::Rcx));                  // push flags
         // Push ESI (length) so we can later pop it into ECX.
         code.extend(encode_push(Gpr::Rsi));                  // push length
-        // Stack now: [ESP]=length, [ESP+4]=flags, [ESP+8]=retaddr,
-        //            [ESP+12]=fd, [ESP+16]=offset
+        // Stack now: [ESP]=length, [ESP+4]=flags, [ESP+8]=saved_EBP,
+        //            [ESP+12]=retaddr, [ESP+16]=fd, [ESP+20]=offset
         // Compute EBP = offset_pages = offset_bytes >> 12
-        code.extend(encode_mov_reg_mem(Gpr::Rax, Gpr::Rsp, 16)); // EAX = offset_bytes
+        code.extend(encode_mov_reg_mem(Gpr::Rax, Gpr::Rsp, 20)); // EAX = offset_bytes
         // shr EAX, 12
         code.extend_from_slice(&[0xC1, 0xE8, 0x0C]);         // shr eax, 12
         code.extend(encode_mov_reg_reg(Gpr::Rbp, Gpr::Rax)); // EBP = offset_pages
-        // Set EDI = fd (was at [ESP+12] before our two pushes)
-        code.extend(encode_mov_reg_mem(Gpr::Rax, Gpr::Rsp, 12)); // EAX = fd
+        // Set EDI = fd (was at [ESP+16] after our three pushes)
+        code.extend(encode_mov_reg_mem(Gpr::Rax, Gpr::Rsp, 16)); // EAX = fd
         code.extend(encode_mov_reg_reg(Gpr::Rdi, Gpr::Rax)); // EDI = fd
         // Restore length → ECX and flags → ESI from the stack.
         code.extend(encode_pop(Gpr::Rcx));                   // ECX = length
@@ -2099,6 +2106,8 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         // Syscall number for mmap2 on i386.
         code.extend(encode_mov_reg_imm32(Gpr::Rax, 192));    // EAX = sys_mmap2
         code.extend(encode_syscall());                       // int 0x80
+        // Restore EBP (frame pointer) before returning.
+        code.extend(encode_pop(Gpr::Rbp));                   // pop EBP
         code.extend(encode_ret());
         stubs.push(("mmap".to_string(), code));
     }
@@ -2147,27 +2156,34 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
     //   [ESP+4]=uaddr2, [ESP+8]=val3
     // i386 syscall convention: EBX=uaddr, ECX=futex_op, EDX=val,
     //                          ESI=timeout, EDI=uaddr2, EBP=val3
+    //
+    // IMPORTANT: EBP is the frame pointer (callee-saved in cdecl). We MUST
+    // save/restore it, otherwise the caller's stack frame is corrupted.
     {
         let mut code = Vec::new();
+        // Save EBP (frame pointer) — will be restored after the syscall.
+        code.extend(encode_push(Gpr::Rbp));                  // push EBP
         // Save uaddr in EBX (target register) before losing it.
         code.extend(encode_mov_reg_reg(Gpr::Rbx, Gpr::Rdi)); // EBX = uaddr
         // Push ECX (timeout) and ESI (futex_op) so we can pop them into
         // the correct registers later.
         code.extend(encode_push(Gpr::Rcx));                  // push timeout
         code.extend(encode_push(Gpr::Rsi));                  // push futex_op
-        // Stack: [ESP]=futex_op, [ESP+4]=timeout, [ESP+8]=retaddr,
-        //        [ESP+12]=uaddr2, [ESP+16]=val3
-        // Set EBP = val3 (was at [ESP+16])
-        code.extend(encode_mov_reg_mem(Gpr::Rax, Gpr::Rsp, 16)); // EAX = val3
+        // Stack: [ESP]=futex_op, [ESP+4]=timeout, [ESP+8]=saved_EBP,
+        //        [ESP+12]=retaddr, [ESP+16]=uaddr2, [ESP+20]=val3
+        // Set EBP = val3 (was at [ESP+20] after three pushes)
+        code.extend(encode_mov_reg_mem(Gpr::Rax, Gpr::Rsp, 20)); // EAX = val3
         code.extend(encode_mov_reg_reg(Gpr::Rbp, Gpr::Rax)); // EBP = val3
-        // Set EDI = uaddr2 (was at [ESP+12])
-        code.extend(encode_mov_reg_mem(Gpr::Rax, Gpr::Rsp, 12)); // EAX = uaddr2
+        // Set EDI = uaddr2 (was at [ESP+16] after three pushes)
+        code.extend(encode_mov_reg_mem(Gpr::Rax, Gpr::Rsp, 16)); // EAX = uaddr2
         code.extend(encode_mov_reg_reg(Gpr::Rdi, Gpr::Rax)); // EDI = uaddr2
         // Restore futex_op → ECX and timeout → ESI from the stack.
         code.extend(encode_pop(Gpr::Rcx));                   // ECX = futex_op
         code.extend(encode_pop(Gpr::Rsi));                   // ESI = timeout
         code.extend(encode_mov_reg_imm32(Gpr::Rax, 240));    // EAX = sys_futex (i386)
         code.extend(encode_syscall());
+        // Restore EBP (frame pointer) before returning.
+        code.extend(encode_pop(Gpr::Rbp));                   // pop EBP
         code.extend(encode_ret());
         stubs.push(("futex".to_string(), code));
     }
