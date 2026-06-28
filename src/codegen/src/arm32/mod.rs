@@ -4177,7 +4177,7 @@ impl Backend for Arm32Backend {
                     }
 
                     // ── Call ──
-                    crate::ir::IRInstr::Call { dst, func: target_func, args, is_extern: _ } => {
+                    crate::ir::IRInstr::Call { dst, func: target_func, args, is_extern } => {
                         let mut code = Vec::new();
                         let num_args = args.len();
                         let num_stack_args = if num_args > 4 { num_args - 4 } else { 0 };
@@ -4248,11 +4248,32 @@ impl Backend for Arm32Backend {
                             code.extend_from_slice(&emit_add_sp(stack_args_bytes as i32));
                         }
 
-                        // Store return value to dst stack slot
+                        // Store return value to dst stack slot.
+                        // For VUMA functions (non-extern), the return value is 64-bit
+                        // in R0:R1 (AAPCS). For extern functions (syscalls), the return
+                        // is 32-bit in R0 only — sign-extend to 64-bit so that negative
+                        // values (e.g., -1 error returns from open/read) are correctly
+                        // represented in 64-bit operations.
                         if let Some(d) = dst {
                             let dst_id = d.as_register().unwrap_or(0);
                             let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+                            // Store low word (R0)
                             code.extend(ss_store_to_slot(Gpr::R0, dst_offset));
+                            if !is_extern {
+                                // VUMA function: store high word (R1) from 64-bit return
+                                code.extend(ss_store_to_slot(Gpr::R1, dst_offset + 4));
+                            } else {
+                                // Extern/syscall: sign-extend 32-bit R0 to 64-bit R0:R1.
+                                // MOV R1, R0, ASR #31 — fills R1 with 0xFFFFFFFF if R0 is
+                                // negative (bit 31 set), or 0x00000000 if non-negative.
+                                // This is correct for both signed returns (i64) and for
+                                // user-space pointers (which have bit 31 = 0 on 32-bit Linux).
+                                code.extend_from_slice(&encode_dp_shift_imm(
+                                    Condition::Al, DP_MOV, false, 0,
+                                    Gpr::R1.encoding(), Gpr::R0.encoding(), 2, 31,
+                                ));
+                                code.extend(ss_store_to_slot(Gpr::R1, dst_offset + 4));
+                            }
                         }
 
                         code
@@ -4861,9 +4882,32 @@ impl Backend for Arm32Backend {
                     // ── Ret ──
                     crate::ir::IRInstr::Ret { values } => {
                         let mut code = Vec::new();
-                        // Load return value into R0
+                        // Load return value into R0 (and R1 for 64-bit returns).
+                        // AAPCS: 64-bit return values are passed in R0:R1.
+                        // Check result_types first; fall back to parsing the
+                        // function name (e.g. "fn_foo_entry(u64)" → 64-bit).
+                        let is_64bit_ret = func.result_types.first()
+                            .map(|t| matches!(t, crate::ir::IRType::I64 | crate::ir::IRType::U64))
+                            .unwrap_or_else(|| {
+                                // Fallback: parse return type from function name
+                                if let Some(open) = func.name.rfind('(') {
+                                    if let Some(close) = func.name.rfind(')') {
+                                        if close > open {
+                                            let ret_ty = &func.name[open + 1..close];
+                                            return ret_ty == "u64" || ret_ty == "i64"
+                                                || ret_ty == "U64" || ret_ty == "I64";
+                                        }
+                                    }
+                                }
+                                false
+                            });
                         if let Some(val) = values.first() {
-                            code.extend(ss_load_value(val, &vreg_stack_slots, Gpr::R0));
+                            if is_64bit_ret {
+                                // Load both low (R0) and high (R1) words.
+                                code.extend(ss_load_value_64(Gpr::R0, Gpr::R1, val, &vreg_stack_slots));
+                            } else {
+                                code.extend(ss_load_value(val, &vreg_stack_slots, Gpr::R0));
+                            }
                         } else {
                             code.extend_from_slice(&encode_dp_imm(
                                 Condition::Al, DP_MOV, false, 0, Gpr::R0.encoding(), 0, 0,
