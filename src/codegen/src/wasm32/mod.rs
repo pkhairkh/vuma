@@ -2363,6 +2363,58 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
         }
 
         IRInstr::Call { dst, func, args, is_extern: _ } => {
+            // Special-case: __vuma_alloc(size) — bump allocator (dynamic size)
+            // On wasm32, we don't have mmap. Treat __vuma_alloc like Alloc
+            // but with the size from the argument (which is already on the
+            // stack after push_value above).
+            if func == "__vuma_alloc" {
+                // The size argument was pushed by the loop below in a prior
+                // iteration, but we haven't pushed it yet at this point.
+                // Push it now, use it to advance __heap_ptr, and return the
+                // old __heap_ptr as the allocation result.
+                let size_arg = args.iter().next()
+                    .ok_or_else(|| BackendError::UnsupportedFeature {
+                        isa: "wasm32",
+                        feature: "__vuma_alloc requires 1 argument (size)".into(),
+                    })?;
+                ctx.push_value(size_arg, Some(&WasmType::I32));
+                // Align size up to 8 bytes
+                ctx.emit(WasmInstr::I32Const(7));
+                ctx.emit(WasmInstr::I32Add);
+                ctx.emit(WasmInstr::I32Const(-8)); // AND with !7 = AND with 0xFFFFFFF8
+                ctx.emit(WasmInstr::I32And);
+                // Stack now: [aligned_size]
+                // Read current heap pointer — this is the returned address
+                ctx.emit(WasmInstr::GlobalGet(HEAP_PTR_GLOBAL_IDX));
+                ctx.stack_depth += 1;
+                // Stack: [aligned_size, old_heap_ptr]
+                // Save old_heap_ptr to dst
+                if let Some(IRValue::Register(id)) = dst {
+                    ctx.pop_to_vreg(*id, WasmType::I32);
+                } else {
+                    ctx.emit(WasmInstr::Drop);
+                    ctx.stack_depth -= 1;
+                }
+                // Stack: [aligned_size]
+                // Compute new heap ptr = old_heap_ptr + aligned_size
+                // But we already popped old_heap_ptr. Reload it from dst? No,
+                // we need to re-fetch. Actually, let's do it differently:
+                // 1. Read old_heap_ptr → save to dst
+                // 2. Compute old_heap_ptr + aligned_size → store to global
+                // We already have aligned_size on stack. Let's duplicate
+                // the old_heap_ptr from dst... but that requires reloading.
+                // Simpler approach: re-read global, add size, store global.
+                ctx.emit(WasmInstr::GlobalGet(HEAP_PTR_GLOBAL_IDX));
+                ctx.stack_depth += 1;
+                // Stack: [aligned_size, old_heap_ptr]
+                ctx.emit(WasmInstr::I32Add);
+                ctx.stack_depth -= 1;
+                // Stack: [new_heap_ptr]
+                ctx.emit(WasmInstr::GlobalSet(HEAP_PTR_GLOBAL_IDX));
+                ctx.stack_depth -= 1;
+                return Ok(());
+            }
+
             let num_args = args.len();
             for arg in args {
                 ctx.push_value(arg, None);
