@@ -1302,27 +1302,16 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                         let stack_bytes = (args.len() - num_reg_args) * 4;
                         code.extend(encode_add_reg_imm32(Gpr::Rsp, stack_bytes as i32));
                     }
-                    
+
                     // Store return value to dst's stack slot.
-                    // For VUMA functions (non-extern), the return value is 64-bit
-                    // in EDX:EAX (cdecl). For extern functions (syscalls), the return
-                    // is 32-bit in EAX only — sign-extend to 64-bit so that negative
-                    // values (e.g., -1 error returns from open/read) are correctly
-                    // represented in 64-bit operations.
+                    // On x86_32, ALL return values (both VUMA and extern) are 32-bit
+                    // in EAX. The store_vreg call already stores EAX and zeros the
+                    // high 4 bytes. Do NOT store EDX — it contains garbage after
+                    // a function call on x86_32 (x86_32 doesn't use EDX:EAX for
+                    // 64-bit returns like x86_64 does).
                     if let Some(d) = dst {
                         let dst_id = d.as_register().unwrap_or(0);
-                        let dst_off = slot_offset(dst_id);
-                        // Store low word (EAX)
                         code.extend(store_vreg(dst_id, Gpr::Rax));
-                        if !is_extern {
-                            // VUMA function: store high word (EDX) from 64-bit return
-                            code.extend(encode_mov_mem_reg(Gpr::Rbp, dst_off + 4, Gpr::Rdx));
-                        } else {
-                            // Extern/syscall: sign-extend 32-bit EAX to 64-bit.
-                            // CDQ (0x99) sign-extends EAX into EDX:EAX.
-                            code.extend_from_slice(&[0x99u8]);
-                            code.extend(encode_mov_mem_reg(Gpr::Rbp, dst_off + 4, Gpr::Rdx));
-                        }
                     }
                     code
                 }
