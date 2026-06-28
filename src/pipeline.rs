@@ -2858,11 +2858,16 @@ fn convert_computation_no_calls(
             let symbol = addr_name[at_pos + 3..].trim();
             if !symbol.is_empty() && !symbol.contains(' ') && !symbol.contains('(') {
                 let var_part = addr_name[..at_pos].trim();
-                let dst = if var_part.is_empty() {
-                    node_var(node_id, "addr")
+                let user_var = if var_part.is_empty() {
+                    None
                 } else {
-                    var_part.to_string()
+                    Some(var_part.to_string())
                 };
+                // Use node_var (v_{node_id}) as dst so that resolve_subexpr
+                // (which returns Var("v_{source_node_id}")) can find it.
+                // Also set reassigns to the user-visible variable name so
+                // lower_get_address can register both names.
+                let dst = node_var(node_id, "addr");
                 return vec![ScgStatement::GetAddress(GetAddressNode {
                     dst,
                     name: symbol.to_string(),
