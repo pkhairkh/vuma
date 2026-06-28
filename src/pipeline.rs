@@ -2527,21 +2527,11 @@ fn convert_computation_no_calls(
                 let load_ty = {
                     let mut inferred_ty: Option<vuma_codegen::ir::IRType> = None;
 
-                    // Use result_type from the SCG node for load type inference.
-                    // This handles struct field access like `val: u32 = *(opt + 4)`
-                    // where the declared type u32 should determine the load width.
-                    // This is critical for big-endian (ppc64) where a U8 load of
-                    // a U32-stored value reads the wrong byte (MSB instead of LSB).
-                    if inferred_ty.is_none() {
-                        inferred_ty = result_type_to_load_ty(&comp.result_type);
-                    }
-
                     // Only use array stride for load type inference.
                     // Constant-offset inference is unreliable because stores
                     // and loads may use different offset expressions
                     // (e.g. mem_arena_alloc stores via variable offset but
                     // loads via constant offset).
-                    if inferred_ty.is_none() {
                     if let ScgExpr::BinOp { op: vuma_codegen::ir::BinOpKind::Add, lhs: _, rhs } = &ptr {
                         if let ScgExpr::BinOp { op: vuma_codegen::ir::BinOpKind::Mul, lhs: _, rhs } = rhs.as_ref() {
                             if let ScgExpr::Int(stride) = rhs.as_ref() {
@@ -2553,7 +2543,6 @@ fn convert_computation_no_calls(
                             }
                         }
                     }
-                    } // close if inferred_ty.is_none()
 
                     inferred_ty
                 };
