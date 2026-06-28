@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.1.0-alpha.1] — 2026-03-06
 
-Pre-release alpha build incorporating Waves 1–5 of critical bug fixes, atomics/ABI support, FP conversion casts, infrastructure/stdlib expansion, and test hardening across all 8 backends.
+Pre-release alpha build incorporating Waves 1–5 of critical bug fixes, atomics/ABI support, FP conversion casts, infrastructure/stdlib expansion, and test hardening across all 10 backends.
 
 ---
 
@@ -64,7 +64,7 @@ Pre-release alpha build incorporating Waves 1–5 of critical bug fixes, atomics
 #### FP Conversion Casts (Wave 3)
 
 - **`IRInstr::Cast`**: Extended with `from_ty`/`to_ty` enabling type-aware conversions across `i32`↔`f32`, `i32`↔`f64`, `i64`↔`f32`, `i64`↔`f64`, `f32`↔`f64` in both signed and unsigned variants. *(W3)*
-- All 8 backends now emit architecturally correct FP conversion instructions instead of generic or wrong encodings. *(W3)*
+- All 10 backends now emit architecturally correct FP conversion instructions instead of generic or wrong encodings. *(W3)*
 
 #### Standard Library (Wave 4)
 
@@ -73,7 +73,7 @@ Pre-release alpha build incorporating Waves 1–5 of critical bug fixes, atomics
 
 #### Debug Info (Wave 4)
 
-- **DWARF debug info generation**: Full `.debug_info`, `.debug_abbrev`, `.debug_line`, `.debug_frame` sections with per-backend address sizes, alignment factors, and CIE presets for all 8 architectures. *(W4)*
+- **DWARF debug info generation**: Full `.debug_info`, `.debug_abbrev`, `.debug_line`, `.debug_frame` sections with per-backend address sizes, alignment factors, and CIE presets for all 10 architectures. *(W4)*
 
 #### FFI (Wave 4)
 
@@ -95,11 +95,11 @@ Pre-release alpha build incorporating Waves 1–5 of critical bug fixes, atomics
 
 #### Wave 5 — Test Infrastructure
 
-- **25 SHA256d backend validation tests** — End-to-end SHA256d execution correctness across all 8 backends. *(W5)*
+- **25 SHA256d backend validation tests** — End-to-end SHA256d execution correctness across all 10 backends. *(W5)*
 - **13 dedicated regression tests** — Targeted tests for each fix from Waves 1–4 (ARM64 rotation, atomics per-arch, FP conversions per-arch, ABI compliance, stack-slot NOP). *(W5)*
 - **74 diagnostics integration tests** — Full coverage of diagnostic emission, error chaining, suggestion applicability, and all 4 output formats. *(W5)*
 - **29 DWARF/FFI integration tests** — CIE presets per-architecture, debug section validation, ELF relocation verification, extern block parsing, FFI pipeline tests. *(W5)*
-- **21 expanded ABI conformance tests** — Calling convention compliance for argument passing, return values, and callee-saved register preservation across all 8 backends. *(W5)*
+- **21 expanded ABI conformance tests** — Calling convention compliance for argument passing, return values, and callee-saved register preservation across all 10 backends. *(W5)*
 - **19 property-based tests** — Proptest-driven fuzzing for parser roundtrip, SCG invariants, codegen correctness, and cross-backend consistency. *(W5)*
 - **55 math test functions** — Comprehensive coverage of the expanded `math.rs` module (92 public items). *(W5)*
 - **30 fmt test functions** — Full coverage of the new `fmt.rs` module (13 functions). *(W5)*
@@ -118,14 +118,14 @@ Pre-release alpha build incorporating Waves 1–5 of critical bug fixes, atomics
 
 - **W1**: Removed Pi5 bare-metal platform crate (`src/pi5/`) and all Pi5-specific code from workspace, pipeline, tests, COR, security, IO, and documentation. `CompileTarget::Pi5Bare`/`Pi5Linux` replaced with `CompileTarget::Linux`. `TestCategory::Pi5` removed from test framework. *(W1)*
 - **W6**: ELF emission restructured to 3 LOAD segments (R / RX / RW) for W^X compliance. `.rodata` placed before `.text` in memory. *(W6-f, W21)*
-- **W24**: `IRInstr::Call` now carries `is_extern: bool` field — all `IRInstr::Call` construction sites updated across all 8 backends and test code. *(W24)*
+- **W24**: `IRInstr::Call` now carries `is_extern: bool` field — all `IRInstr::Call` construction sites updated across all 10 backends and test code. *(W24)*
 - **W24**: `CallNode` in `scg_to_ir.rs` now carries `is_extern: bool` field propagated through `lower_call`. *(W24)*
 
 ### Features
 
 #### Multi-Architecture Codegen (W1, W2, W3, W4, W5, W6)
 
-- **W1**: All 6 native backends pass SHA256d execution test: x86_64, AArch64, RISC-V 64, ARM32, MIPS64, PPC64. LoongArch64 passes individual operations; Wasm32 generates valid modules. *(W1)*
+- **W1**: All 9 native backends pass SHA256d execution test: x86_64, AArch64, RISC-V 64, ARM32, MIPS64, PPC64. LoongArch64 passes individual operations; Wasm32 generates valid modules. *(W1)*
 - **W1**: Fixed PPC64 RLDICL encoding, 32-bit masking, and ss_load_imm zero-extension. *(W1)*
 - **W1**: Fixed LoongArch64 3R opcodes (24 of 26 were wrong), shift immediate formats, LU12I_W/LU32I_D, BEQZ/BNEZ, and FP opcodes. *(W1)*
 - **W1**: Wasm32: Added ROR/ROL via shift+or sequence, fixed push_value type hints. *(W1)*
@@ -134,11 +134,11 @@ Pre-release alpha build incorporating Waves 1–5 of critical bug fixes, atomics
 - **W2**: RISC-V 64 fixes: immediate encoding, branch offset calculations. *(W2)*
 - **W2**: ARM32 fixes: condition code encoding, LDR/STR offset calculations. *(W2)*
 - **W2**: MIPS64 fixes: delay slot handling, big-endian ELF generation. *(W2)*
-- **W3**: Cross-backend ABI consistency improvements across all 8 backends. *(W3)*
+- **W3**: Cross-backend ABI consistency improvements across all 10 backends. *(W3)*
 - **W3**: Backend trait architecture with `TargetInfo` and `Backend` traits for multi-backend support. *(W3)*
 - **W4**: Per-backend instruction encoding verification and disassembler fixes. *(W4)*
 - **W5**: Structured SCG output for LLMs: `SCG::to_json()` and `SCG::to_text()` methods with LLM-friendly JSON types (`LlmNode`, `LlmEdge`, `LlmFunction`, `LlmRegion`, `LlmSummary`). *(W5-d)*
-- **W6**: Cross-backend consistency test suite (9 tests across 4 IR programs × 8 backends). *(W6-b)*
+- **W6**: Cross-backend consistency test suite (9 tests across 4 IR programs × 10 backends). *(W6-b)*
 - **W6**: ELF validation tests for all 7 native backends (ELF32/64, endianness, machine types). *(W6-c)*
 - **W6**: Wasm32 binary validation tests (12 tests: magic, sections, globals, exports, code bodies). *(W6-d)*
 - **W6**: Parser roundtrip tests (10 tests: minimal program, memory ops, SHA256d parse, error recovery). *(W6-g)*
@@ -170,7 +170,7 @@ Pre-release alpha build incorporating Waves 1–5 of critical bug fixes, atomics
 - **W15**: Four output formats: JSON, ANSI rich text, plain text, LSP. `DiagnosticSummary` for statistical analysis. *(W15)*
 - **W17**: Memory safety analyzer with 10 violation types (E041–E050): UseAfterFree, DoubleFree, MemoryLeak, BoundsCheckFailure, NullDereference, DanglingPointer, UninitializedRead, BufferOverflow, UseAfterScope, InvalidFree. *(W17)*
 - **W17**: Runtime bounds checking behind `--safe` CLI flag. *(W17)*
-- **W28**: Constant-time crypto operations: `ct_select`, `ct_eq`, `ct_ne`, `ct_lt`, `ct_gte` — branchless implementations across all 8 backends. *(W28)*
+- **W28**: Constant-time crypto operations: `ct_select`, `ct_eq`, `ct_ne`, `ct_lt`, `ct_gte` — branchless implementations across all 10 backends. *(W28)*
 - **W28**: PPC64 carry-flag-based constant-time mask (addic+subfe). LoongArch64 maskeqz/masknez branchless select. *(W28)*
 
 #### Module System & Package Manager (W10, W23)
@@ -183,7 +183,7 @@ Pre-release alpha build incorporating Waves 1–5 of critical bug fixes, atomics
 
 #### FFI & Syscalls (W24)
 
-- **W24**: SyscallTable with 19 syscalls across 8 architectures (verified against Linux kernel headers). *(W24)*
+- **W24**: SyscallTable with 19 syscalls across 10 architectures (verified against Linux kernel headers). *(W24)*
 - **W24**: Architecture-specific relocation kinds: Arm32Call, Mips26, Ppc64Rel24, LoongArchB26, etc. *(W24)*
 - **W24**: `is_extern` flag on `IRInstr::Call` and `CallNode` for FFI vs local call distinction. *(W24)*
 
@@ -195,8 +195,8 @@ Pre-release alpha build incorporating Waves 1–5 of critical bug fixes, atomics
 
 #### Tooling & Infrastructure (W16, W19, W20, W21)
 
-- **W16**: GitHub Actions CI: test + release workflow, cross-compile matrix for all 8 ISA targets, Dependabot. *(W16)*
-- **W19**: ABI conformance testing: 27 tests covering calling conventions for all 8 backends. *(W19)*
+- **W16**: GitHub Actions CI: test + release workflow, cross-compile matrix for all 10 ISA targets, Dependabot. *(W16)*
+- **W19**: ABI conformance testing: 27 tests covering calling conventions for all 10 backends. *(W19)*
 - **W20**: DWARF debug info: per-backend address size and min_inst_length, `DwarfBuilder::for_backend()`, `--debug-info` CLI alias. *(W20)*
 - **W21**: ELF linker hardening: 3 LOAD segments (W^X), per-arch section alignment, `--sections` CLI flag. *(W21)*
 - **W21**: Performance benchmarking suite: SHA256d per-backend, compilation speed, backend comparison, codegen quality. *(W21)*
@@ -229,7 +229,7 @@ Pre-release alpha build incorporating Waves 1–5 of critical bug fixes, atomics
 ### Documentation
 
 - **W5**: LLM language reference with 15 sections covering types, functions, memory, pitfalls, and target platforms. *(W5)*
-- **W13**: ROADMAP.md updated to reflect 8 backends, LLM API, LSP, REPL, Phase 2 progress. *(W13)*
+- **W13**: ROADMAP.md updated to reflect 10 backends, LLM API, LSP, REPL, Phase 2 progress. *(W13)*
 - **W13**: architecture.md Section 9: LLM Integration Architecture with Wasm32 sandbox description. *(W13)*
 
 ---
@@ -331,10 +331,10 @@ This release represents Phase 2 (substantially complete) of the VUMA framework. 
 - **Wasm32 sandbox**: LLM agents can compile to safe, sandboxed WebAssembly modules
 - **Verification hardening**: Interprocedural analysis, escape analysis, verification cache, property-based testing
 - **Memory safety**: 10 violation types, compile-time checks, runtime bounds checking
-- **Constant-time crypto**: Branchless ct_select/ct_eq across all 8 backends
+- **Constant-time crypto**: Branchless ct_select/ct_eq across all 10 backends
 - **Module system**: Multi-file compilation with import resolution
 - **Package manager**: Foundation with manifest, resolver, registry
-- **FFI & syscalls**: 19 syscalls across 8 architectures, is_extern flag, architecture-specific relocations
+- **FFI & syscalls**: 19 syscalls across 10 architectures, is_extern flag, architecture-specific relocations
 - **Register allocator**: Loop-aware spill weights, GreedyRegCache, dead-vreg reuse
 - **Diagnostics**: 65 diagnostic codes, error chaining, structured suggestions, 4 output formats
 
@@ -366,13 +366,13 @@ This is the initial public release of the VUMA framework. It contains the comple
 - **2026-03-05 — Wave 11-12:** Verification pipeline hardened with VumaCompiler.verify(), property-based testing.
 - **2026-03-05 — Wave 13-14:** Documentation overhaul, REPL enhancements (`:wasm`, `:backends`, `:check`, `:diagnostics`, `:exports`).
 - **2026-03-05 — Wave 15:** Comprehensive structured error reporting (65 diagnostic codes, error chaining, suggestions).
-- **2026-03-05 — Wave 16:** CI build matrix for all 8 ISA targets.
+- **2026-03-05 — Wave 16:** CI build matrix for all 10 ISA targets.
 - **2026-03-05 — Wave 17-18:** Memory safety analyzer, performance benchmarking suite.
 - **2026-03-05 — Wave 19-20:** ABI conformance testing (27 tests), DWARF debug info enhancements.
 - **2026-03-05 — Wave 21-22:** Linker hardening (3 LOAD segments, W^X), VumaForLLM API layer.
 - **2026-03-05 — Wave 23:** Package manager foundation.
-- **2026-03-05 — Wave 24:** FFI and syscalls (19 syscalls × 8 architectures, relocations).
+- **2026-03-05 — Wave 24:** FFI and syscalls (19 syscalls × 10 architectures, relocations).
 - **2026-03-05 — Wave 25-27:** Security hardening, codegen quality improvements, test infrastructure.
-- **2026-03-05 — Wave 28:** Constant-time crypto operations across all 8 backends.
+- **2026-03-05 — Wave 28:** Constant-time crypto operations across all 10 backends.
 - **2026-03-05 — Wave 29-31:** Final hardening, documentation updates, release preparation.
 - **2026-03-05 — Wave 32:** Release preparation: Cargo.toml v0.1.0-alpha.1, CHANGELOG, README, ROADMAP, RELEASES.md.

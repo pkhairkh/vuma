@@ -75,7 +75,7 @@ The workspace consists of the following crates:
 | `vuma-cor` | `src/cor/` | Continuous Optimization Runtime |
 | `vuma-projection` | `src/projection/` | Projection system (textual, visual, conversational) |
 | `vuma-parser` | `src/parser/` | SCG parser and projection parser |
-| `vuma-codegen` | `src/codegen/` | Multi-architecture code generation (8 backends) |
+| `vuma-codegen` | `src/codegen/` | Multi-architecture code generation (10 backends) |
 | `vuma-std` | `src/std/` | VUMA standard library |
 | `vuma-proof` | `src/proof/` | Proof infrastructure and formal methods |
 | `vuma-tests` | `src/tests/` | Integration tests |
@@ -287,7 +287,7 @@ The VUMA project has a comprehensive test infrastructure spanning multiple categ
 
 | Category | Crate | What It Tests |
 |----------|-------|---------------|
-| Cross-backend consistency | `vuma-tests::cross_backend` | All 8 backends produce consistent results |
+| Cross-backend consistency | `vuma-tests::cross_backend` | All 10 backends produce consistent results |
 | ABI conformance | `vuma-tests::abi_conformance` | 27 ABI compliance tests across backends |
 | ELF validation | `vuma-tests::elf_validation` | 7 native backends produce valid ELF binaries |
 | Wasm validation | `vuma-tests::wasm_validation` | 12 Wasm32 module validation tests |
@@ -302,7 +302,7 @@ The VUMA project has a comprehensive test infrastructure spanning multiple categ
 ### 3.2 Running Specific Test Categories
 
 ```bash
-# Cross-backend consistency (8 backends)
+# Cross-backend consistency (10 backends)
 cargo test -p vuma-tests -- cross_backend
 
 # ABI conformance (27 tests)
@@ -326,7 +326,7 @@ cargo test -p vuma-tests -- diagnostics
 
 ### 3.3 Benchmarks
 
-The benchmark suite covers SHA256d across all 8 backends, compilation speed, binary size comparison, and codegen quality (redundant load/store analysis):
+The benchmark suite covers SHA256d across all 10 backends, compilation speed, binary size comparison, and codegen quality (redundant load/store analysis):
 
 ```bash
 make bench
@@ -339,7 +339,7 @@ The GitHub Actions CI runs on every push and PR:
 - Format check (`cargo fmt --check`)
 - Lint check (`cargo clippy -- -D warnings`)
 - Full test suite across all crates
-- Cross-compile matrix for all 8 targets
+- Cross-compile matrix for all 10 targets
 - Dependabot for dependency updates
 
 ---
@@ -645,7 +645,7 @@ regions), add it to `src/vuma/src/region.rs` or the relevant module.
 
 ## 6. How to Add New Backend Instructions
 
-The codegen crate (`src/codegen/`) defines instructions for all 8 backends (AArch64, x86_64, RISC-V 64, ARM32, MIPS64, PPC64, LoongArch64, Wasm32), register allocation, and the SCG → IR → machine code lowering pipeline. Adding a new instruction requires changes across several modules.
+The codegen crate (`src/codegen/`) defines instructions for all 10 backends (AArch64, x86_64, RISC-V 64, ARM32, MIPS64, PPC64, LoongArch64, Wasm32), register allocation, and the SCG → IR → machine code lowering pipeline. Adding a new instruction requires changes across several modules.
 
 ### 6.1 Step 1: Define the Instruction Variant
 
@@ -833,7 +833,7 @@ Reviewers will evaluate PRs against the following criteria:
   the architecture reference manual (ARM, x86, RISC-V, etc.)
 - **Changes to `unsafe` annotations**: Any change to `// VUMA-VERIFIED` or
   `// IVE-TODO` annotations requires explicit reviewer acknowledgment
-- **FFI/syscall changes**: Must test across all 8 backends with ABI conformance tests
+- **FFI/syscall changes**: Must test across all 10 backends with ABI conformance tests
 
 ---
 

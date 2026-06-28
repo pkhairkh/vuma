@@ -2,7 +2,7 @@
 
 > Version 0.2.0 — Last updated 2026-03-06
 
-This document is the definitive reference for the VUMA programming language, a memory-oriented, verification-first systems language targeting 8 backend architectures (AArch64, x86_64, RISC-V 64, ARM32, MIPS64, PPC64, LoongArch64, Wasm32). VUMA eliminates the need for `unsafe` blocks by making the Invariant Verification Engine (IVE) an integral part of compilation. Every pointer dereference, allocation, and free is automatically checked against five core invariants: **Liveness**, **Exclusivity**, **Interpretation**, **Origin**, and **Cleanup** (collectively "LIVE").
+This document is the definitive reference for the VUMA programming language, a memory-oriented, verification-first systems language targeting 10 backend architectures (AArch64, x86_64, RISC-V 64, ARM32, MIPS64, PPC64, LoongArch64, Wasm32). VUMA eliminates the need for `unsafe` blocks by making the Invariant Verification Engine (IVE) an integral part of compilation. Every pointer dereference, allocation, and free is automatically checked against five core invariants: **Liveness**, **Exclusivity**, **Interpretation**, **Origin**, and **Cleanup** (collectively "LIVE").
 
 ---
 
@@ -971,7 +971,7 @@ The `crypto` module provides SHA-256 constants and logical functions, plus const
 
 - **SHA-256 helpers**: `sha256_ch`, `sha256_maj`, `sha256_big_sigma0`, `sha256_big_sigma1`, `sha256_small_sigma0`, `sha256_small_sigma1`
 - **Byte access**: `sha256_read_u32_be`, `sha256_write_u32_be`
-- **Constant-time operations**: `ct_select_u32`, `ct_eq_u32`, `ct_ne_u32`, `ct_lt_u32`, `ct_gte_u32` — branchless implementations across all 8 backends
+- **Constant-time operations**: `ct_select_u32`, `ct_eq_u32`, `ct_ne_u32`, `ct_lt_u32`, `ct_gte_u32` — branchless implementations across all 10 backends
 - **SHA-256 constants**: `SHA256_K` (64 round constants), `SHA256_H` (8 initial hash values)
 
 ```vuma
@@ -1028,7 +1028,7 @@ The standard library also includes:
 
 ## 10. FFI and External Functions
 
-VUMA supports calling external C functions and Linux syscalls through `extern "C"` blocks. This enables interoperability with existing C libraries and direct system call access across all 8 backend architectures.
+VUMA supports calling external C functions and Linux syscalls through `extern "C"` blocks. This enables interoperability with existing C libraries and direct system call access across all 10 backend architectures.
 
 ### Extern Block Syntax
 
@@ -1051,7 +1051,7 @@ Functions declared in `extern` blocks have the `is_extern` flag set in the SCG. 
 
 ### Supported Syscalls
 
-VUMA provides FFI bindings for 19 Linux syscalls across all 8 architectures:
+VUMA provides FFI bindings for 19 Linux syscalls across all 10 architectures:
 
 `read`, `write`, `open`, `close`, `exit`, `mmap`, `munmap`, `brk`, `ioctl`, `fcntl`, `getpid`, `clone`, `futex`, `pipe`, `dup`, `dup2`, `wait4`, `rt_sigaction`, `rt_sigprocmask`
 
@@ -1059,7 +1059,7 @@ Each syscall has architecture-specific relocations for all backends.
 
 ### DWARF Debug Information
 
-When compiled with `--debug-info`, VUMA generates DWARF v4 debug information sections for all 8 backends. The emitted sections include:
+When compiled with `--debug-info`, VUMA generates DWARF v4 debug information sections for all 10 backends. The emitted sections include:
 
 | Section | Contents |
 |---------|----------|
@@ -1068,13 +1068,13 @@ When compiled with `--debug-info`, VUMA generates DWARF v4 debug information sec
 | `.debug_line` | Line-number program (DWARF standard opcodes) |
 | `.debug_frame` | Call frame information (CIE + FDE entries) |
 
-The DWARF builder is parameterized by address size to support all 8 backends (8-byte addresses for 64-bit targets, 4-byte for ARM32 and Wasm32).
+The DWARF builder is parameterized by address size to support all 10 backends (8-byte addresses for 64-bit targets, 4-byte for ARM32 and Wasm32).
 
 ---
 
 ## 11. Platform-Specific Features
 
-VUMA targets 8 backend architectures with AArch64 as the primary platform. This section describes platform-specific features, with detailed AArch64 bare-metal support.
+VUMA targets 10 backend architectures with AArch64 as the primary platform. This section describes platform-specific features, with detailed AArch64 bare-metal support.
 
 ### Device Memory Mapping
 
@@ -1178,7 +1178,7 @@ VUMA supports 8 compilation targets with a unified `Backend` trait:
 | LoongArch64 | Little | 64-bit | ELF64 |
 | Wasm32 | Little | 32-bit | Wasm |
 
-All 6 native backends (x86_64, AArch64, RISC-V 64, ARM32, MIPS64, PPC64) pass the full SHA256d execution test. LoongArch64 passes individual operation tests. Wasm32 generates valid modules.
+All 9 native backends (x86_64, AArch64, RISC-V 64, ARM32, MIPS64, PPC64) pass the full SHA256d execution test. LoongArch64 passes individual operation tests. Wasm32 generates valid modules.
 
 ---
 

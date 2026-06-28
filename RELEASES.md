@@ -8,13 +8,13 @@ This document summarizes each VUMA release with key changes and known limitation
 
 **Alpha Pre-Release: Critical Bug Fixes, Atomics, FP Conversions, Test Hardening**
 
-Pre-release alpha incorporating Waves 1–5 of critical bug fixes, atomics/ABI support, FP conversion casts, infrastructure/stdlib expansion, and test hardening across all 8 backends.
+Pre-release alpha incorporating Waves 1–5 of critical bug fixes, atomics/ABI support, FP conversion casts, infrastructure/stdlib expansion, and test hardening across all 10 backends.
 
 ### Highlights
 
 - **ARM64 ROR/ROL fix**: Rotation instructions now correctly emit `EXTR`/`RORV`
-- **6-arch atomics**: LoongArch64 (LL.D/SC.D), PPC64 (LDARX/STDCX), RISC-V 64, Wasm32 (24 new atomic ops), ARM32 (LDREX/STREX), MIPS64 (LLD/SCD)
-- **FP conversion casts**: Type-aware `IRInstr::Cast` with `from_ty`/`to_ty` across all 8 backends
+- **10-arch atomics**: LoongArch64 (LL.D/SC.D), PPC64 (LDARX/STDCX), RISC-V 64, Wasm32 (24 new atomic ops), ARM32 (LDREX/STREX), MIPS64 (LLD/SCD)
+- **FP conversion casts**: Type-aware `IRInstr::Cast` with `from_ty`/`to_ty` across all 10 backends
 - **LoongArch64 terminators**: Fixed Switch/Invoke/TailCall/Resume lowering
 - **ARM32 AAPCS**: Proper >4 argument passing via the stack
 - **Standard library expansion**: `math.rs` (92 items), `fmt.rs` (13 functions)
@@ -39,7 +39,7 @@ Pre-release alpha incorporating Waves 1–5 of critical bug fixes, atomics/ABI s
 
 > **Note**: This is a pre-release (alpha) version. The API is not yet stabilized and may change before v0.1.0.
 
-This release represents the substantial completion of Phase 2 of the VUMA framework. The project now supports 8 backend architectures, provides comprehensive LLM integration, and includes a Wasm32 sandbox for safe LLM-generated code execution.
+This release represents the substantial completion of Phase 2 of the VUMA framework. The project now supports 10 backend architectures, provides comprehensive LLM integration, and includes a Wasm32 sandbox for safe LLM-generated code execution.
 
 ### Highlights
 
@@ -47,22 +47,22 @@ This release represents the substantial completion of Phase 2 of the VUMA framew
 - **LLM Integration**: VumaForLLM API, VumaCompiler API, LSP server, enhanced REPL (`:wasm`, `:backends`, `:check`, `:diagnostics`, `:exports`), parser hardened for LLM-generated code
 - **Wasm32 Sandbox**: LLM agents compile to safe, sandboxed WebAssembly modules
 - **Memory Safety**: 10 violation types (E041–E050), compile-time checks, runtime bounds checking (`--safe`)
-- **Constant-Time Crypto**: Branchless `ct_select`, `ct_eq`, `ct_ne`, `ct_lt`, `ct_gte` across all 8 backends
+- **Constant-Time Crypto**: Branchless `ct_select`, `ct_eq`, `ct_ne`, `ct_lt`, `ct_gte` across all 10 backends
 - **Module System**: Multi-file compilation with `import "path"::{names};` and circular import detection
 - **Package Manager**: Foundation with `vuma pkg init/build/add` and dependency resolution
-- **FFI & Syscalls**: 19 Linux syscalls across 8 architectures, architecture-specific relocations
+- **FFI & Syscalls**: 19 Linux syscalls across 10 architectures, architecture-specific relocations
 - **Register Allocator**: Loop-aware spill weights, GreedyRegCache, dead-vreg reuse
 - **Diagnostics**: 65 diagnostic codes (E001–E050, W001–W010, I001–I005), error chaining, structured suggestions, 4 output formats (JSON, ANSI, plain text, LSP)
-- **CI**: GitHub Actions with cross-compile matrix for all 8 ISA targets
+- **CI**: GitHub Actions with cross-compile matrix for all 10 ISA targets
 
 ### New Features (since initial alpha)
 
 #### Multi-Architecture Codegen
-- All 6 native backends pass SHA256d: x86_64, AArch64, RISC-V 64, ARM32, MIPS64, PPC64
+- All 9 native backends pass SHA256d: x86_64, AArch64, RISC-V 64, ARM32, MIPS64, PPC64
 - LoongArch64 deep audit: fixed 7 encoding/ABI bugs, added maskeqz/masknez instructions
 - PPC64 deep audit: fixed LR save offset, CMP l-field, RLDCL/RLDCR opcode, mb5/me5
 - Wasm32 generates valid modules with 12-section validation
-- Cross-backend consistency tests (9 tests × 8 backends)
+- Cross-backend consistency tests (9 tests × 10 backends)
 - ELF validation for all 7 native backends (ELF32/64, endianness, machine types)
 - ABI conformance testing (27 tests covering calling conventions)
 - ELF emission: 3 LOAD segments (W^X), per-arch section alignment
