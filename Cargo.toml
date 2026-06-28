@@ -27,8 +27,8 @@ members = [
 
 [workspace.package]
 version = "0.1.0-alpha.1"
-description = "Verified-Unsafe Memory Access — an AI-native programming language framework with behavioral verification, 8-architecture codegen, and LLM integration"
-repository = "https://github.com/vuma-lang/vuma"
+description = "Verified-Unsafe Memory Access — a programming language framework with behavioral verification, 10-architecture codegen, and LLM integration"
+repository = "https://github.com/pkhairkh/vuma"
 license = "MIT"
 keywords = ["compiler", "verification", "memory-safety", "codegen", "ai-native"]
 categories = ["compilers", "development-tools", "memory-management"]
@@ -72,10 +72,10 @@ release = "alpha"
 release-channel = "pre-release"
 min-rust-version = "1.75"
 msrv-policy = "latest-stable"
-homepage = "https://vuma-lang.github.io"
-documentation = "https://docs.vuma-lang.org"
-bug-tracker = "https://github.com/vuma-lang/vuma/issues"
-changelog = "https://github.com/vuma-lang/vuma/blob/main/CHANGELOG.md"
+homepage = "https://github.com/pkhairkh/vuma"
+documentation = "https://github.com/pkhairkh/vuma/tree/main/docs"
+bug-tracker = "https://github.com/pkhairkh/vuma/issues"
+changelog = "https://github.com/pkhairkh/vuma/blob/main/CHANGELOG.md"
 license-file = "LICENSE"
 
 [dependencies]
