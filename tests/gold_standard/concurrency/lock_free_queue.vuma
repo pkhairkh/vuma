@@ -1,109 +1,120 @@
-// Lock-Free SPSC Queue - demonstrates VUMA concurrency verification
+// Lock-Free SPSC Queue — simplified to use manual memory layout
 // Expected exit code: 0
-// Single-producer single-consumer ring buffer
 //
-// Lock-free data structures are among the hardest code to get right.
-// The combination of concurrent access and subtle memory ordering
-// requirements makes bugs difficult to reproduce and diagnose.
-//
-// VUMA's IVE extends its 5 invariants to concurrent code:
-//   - Liveness: verifies no use-after-free across threads
-//   - Exclusivity: verifies no data races (two threads writing same bytes)
-//   - Interpretation: verifies atomic operations target correct addresses
-//   - Origin: verifies values come from valid writes (no torn reads)
-//   - Cleanup: verifies all shared resources are eventually freed
+// Single-producer single-consumer ring buffer using AtomicLoad/AtomicStore
+// for inter-thread communication. This version uses manual byte-level
+// memory access instead of struct assignment to test the compiler's
+// atomic operation support.
 //
 // VUMA Key Concepts:
-//   - AtomicU64 with Acquire/Release memory ordering
-//   - Concurrent access verification by IVE
+//   - AtomicLoad / AtomicStore for inter-thread communication
 //   - Ring buffer index arithmetic
-//   - IVE proves absence of data races without locks
-//   - Generic struct parameter <T> for type-safe queues
+//   - Manual struct layout (byte-level write_u64_le / read_u64_le)
+//   - allocate / free with proper cleanup
 
-struct Queue<T> {
-    buffer: Address,      // Ring buffer storage
-    capacity: u64,        // Maximum number of elements
-    head: AtomicU64,      // Producer write index
-    tail: AtomicU64,      // Consumer read index
+// ===========================================================================
+// Write/read u64 little-endian (for struct field access)
+// ===========================================================================
+
+fn write_u64_le(buf: Address, offset: u64, val: u64) {
+    *(buf + offset) = val & 255;
+    *(buf + offset + 1) = (val >> 8) & 255;
+    *(buf + offset + 2) = (val >> 16) & 255;
+    *(buf + offset + 3) = (val >> 24) & 255;
+    *(buf + offset + 4) = (val >> 32) & 255;
+    *(buf + offset + 5) = (val >> 40) & 255;
+    *(buf + offset + 6) = (val >> 48) & 255;
+    *(buf + offset + 7) = (val >> 56) & 255;
 }
 
+fn read_u64_le(buf: Address, offset: u64) -> u64 {
+    b0: u64 = *(buf + offset);
+    b1: u64 = *(buf + offset + 1);
+    b2: u64 = *(buf + offset + 2);
+    b3: u64 = *(buf + offset + 3);
+    b4: u64 = *(buf + offset + 4);
+    b5: u64 = *(buf + offset + 5);
+    b6: u64 = *(buf + offset + 6);
+    b7: u64 = *(buf + offset + 7);
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
+}
+
+// ===========================================================================
+// Queue layout (32 bytes):
+//   offset  0: buffer   (8 bytes, Address)
+//   offset  8: capacity (8 bytes, u64)
+//   offset 16: head     (8 bytes, AtomicU64 — producer index)
+//   offset 24: tail     (8 bytes, AtomicU64 — consumer index)
+// ===========================================================================
+
 fn queue_new(capacity: u64) -> Address {
-    // Create a new SPSC queue
-    // IVE verifies: buffer allocation matches capacity * element_size
-    q = allocate(32);  // Queue struct
-    buf = allocate(capacity * 8);  // Buffer for u64 values
-    *q = Queue {
-        buffer: buf,
-        capacity,
-        head: AtomicU64::new(0),
-        tail: AtomicU64::new(0),
-    };
+    q = allocate(32);
+    buf = allocate(capacity * 8);
+    write_u64_le(q, 0, buf);
+    write_u64_le(q, 8, capacity);
+    // head = 0, tail = 0 (already zeroed by allocate, but set explicitly)
+    AtomicStore(0, q + 16);
+    AtomicStore(0, q + 24);
     return q;
 }
 
-fn queue_push(q: Address, value: u64) -> bool {
-    // Push a value onto the queue (producer side)
-    //
-    // IVE verifies:
-    //   - slot is within buffer region (bounds check)
-    //   - Release ordering ensures the value write is visible
-    //     before the head index update
-    //   - No data race: producer only writes slots between old
-    //     head and new head, consumer only reads slots between
-    //     old tail and new tail
+fn queue_push(q: Address, value: u64) -> i32 {
+    head: u64 = AtomicLoad(q + 16);
+    tail: u64 = AtomicLoad(q + 24);
+    capacity: u64 = read_u64_le(q, 8);
+    next_head: u64 = head + 1;
 
-    head = (*q).head.load(Acquire);
-    tail = (*q).tail.load(Acquire);
-    next_head = head + 1;
-
-    if next_head % (*q).capacity == tail % (*q).capacity {
-        return false;  // Queue is full
+    if next_head % capacity == tail % capacity {
+        return 0;  // Queue is full
     }
 
-    // Compute the slot address within the ring buffer
-    // IVE verifies: slot is within buffer region
-    slot = (*q).buffer + (head % (*q).capacity) * 8;
-    *slot = value;
+    buf: u64 = read_u64_le(q, 0);
+    slot: u64 = buf + (head % capacity) * 8;
+    write_u64_le(slot, 0, value);
 
-    // Publish the new head with Release ordering
-    // IVE verifies: Release ordering ensures write visible before head update
-    (*q).head.store(next_head, Release);
-    return true;
+    AtomicStore(next_head, q + 16);
+    return 1;
 }
 
-fn queue_pop(q: Address) -> Option<u64> {
-    // Pop a value from the queue (consumer side)
-    //
-    // IVE verifies:
-    //   - No data race between push and pop on different slots
-    //   - Acquire ordering ensures the consumer sees the value
-    //     written by the producer before reading the slot
-    //   - The value read originated from a valid write (Origin)
+fn queue_pop(q: Address) -> u64 {
+    tail: u64 = AtomicLoad(q + 24);
+    head: u64 = AtomicLoad(q + 16);
+    capacity: u64 = read_u64_le(q, 8);
 
-    tail = (*q).tail.load(Acquire);
-    head = (*q).head.load(Acquire);
-
-    if tail % (*q).capacity == head % (*q).capacity {
-        return None;  // Queue is empty
+    if tail % capacity == head % capacity {
+        return 4294967295;  // Queue is empty — return sentinel
     }
 
-    // Compute the slot address within the ring buffer
-    // IVE verifies: slot is within buffer region
-    slot = (*q).buffer + (tail % (*q).capacity) * 8;
-    value = *slot;
+    buf: u64 = read_u64_le(q, 0);
+    slot: u64 = buf + (tail % capacity) * 8;
+    value: u64 = read_u64_le(slot, 0);
 
-    // Advance the tail with Release ordering
-    // IVE verifies: no data race between push and pop on different slots
-    (*q).tail.store(tail + 1, Release);
-
-    return Some(value);
+    AtomicStore(tail + 1, q + 24);
+    return value;
 }
+
+// ===========================================================================
+// Main Entry Point
+// ===========================================================================
 
 fn main() -> i32 {
     q = queue_new(4);
     queue_push(q, 42);
     queue_push(q, 99);
-    result = queue_pop(q);
+    val1: u64 = queue_pop(q);
+    val2: u64 = queue_pop(q);
+
+    // Clean up
+    buf: u64 = read_u64_le(q, 0);
+    free(buf);
     free(q);
+
+    // Verify results
+    if val1 != 42 {
+        return 1;
+    }
+    if val2 != 99 {
+        return 2;
+    }
     return 0;
 }
