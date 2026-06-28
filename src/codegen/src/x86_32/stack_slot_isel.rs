@@ -1167,9 +1167,41 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                 // ── Control: Ret ──
                 IRInstr::Ret { values } => {
                     let mut code = Vec::new();
-                    // Load return value into RAX
+                    // Load return value into RAX (and EDX for 64-bit returns).
+                    // i386 cdecl: 64-bit return values are in EDX:EAX.
+                    // Check result_types first; fall back to parsing the
+                    // function name (e.g. "fn_foo_entry(u64)" → 64-bit).
+                    let is_64bit_ret = func.result_types.first()
+                        .map(|t| matches!(t, IRType::I64 | IRType::U64))
+                        .unwrap_or_else(|| {
+                            if let Some(open) = func.name.rfind('(') {
+                                if let Some(close) = func.name.rfind(')') {
+                                    if close > open {
+                                        let ret_ty = &func.name[open + 1..close];
+                                        return ret_ty == "u64" || ret_ty == "i64"
+                                            || ret_ty == "U64" || ret_ty == "I64";
+                                    }
+                                }
+                            }
+                            false
+                        });
                     if let Some(val) = values.first() {
-                        code.extend(load_value(val, Gpr::Rax));
+                        if is_64bit_ret {
+                            // Load low word (EAX) from slot
+                            code.extend(load_value(val, Gpr::Rax));
+                            // Load high word (EDX) from slot+4
+                            if let IRValue::Register(id) = val {
+                                let high_off = slot_offset(*id) + 4;
+                                code.extend(encode_mov_reg_mem(Gpr::Rdx, Gpr::Rbp, high_off));
+                            } else {
+                                // For immediates, the high word is 0 or 0xFFFFFFFF
+                                // (sign extension is handled by load_value for the low word).
+                                // CDQ (0x99) sign-extends EAX into EDX:EAX.
+                                code.extend_from_slice(&[0x99u8]);
+                            }
+                        } else {
+                            code.extend(load_value(val, Gpr::Rax));
+                        }
                     }
                     // Epilogue: pop callee-saved in reverse order
                     for &reg in callee_save_regs.iter().rev() {
@@ -1211,7 +1243,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                 }
 
                 // ── Call ──
-                IRInstr::Call { dst, func: call_target, args, is_extern: _ } => {
+                IRInstr::Call { dst, func: call_target, args, is_extern } => {
                     let mut code = Vec::new();
                     // Load arguments from stack into arg registers.
                     // x86_32 only has 8 GPRs (EAX, ECX, EDX, EBX, ESP, EBP, ESI, EDI).
@@ -1249,10 +1281,26 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                         code.extend(encode_add_reg_imm32(Gpr::Rsp, stack_bytes as i32));
                     }
                     
-                    // Store return value (EAX) to dst's stack slot
+                    // Store return value to dst's stack slot.
+                    // For VUMA functions (non-extern), the return value is 64-bit
+                    // in EDX:EAX (cdecl). For extern functions (syscalls), the return
+                    // is 32-bit in EAX only — sign-extend to 64-bit so that negative
+                    // values (e.g., -1 error returns from open/read) are correctly
+                    // represented in 64-bit operations.
                     if let Some(d) = dst {
                         let dst_id = d.as_register().unwrap_or(0);
+                        let dst_off = slot_offset(dst_id);
+                        // Store low word (EAX)
                         code.extend(store_vreg(dst_id, Gpr::Rax));
+                        if !is_extern {
+                            // VUMA function: store high word (EDX) from 64-bit return
+                            code.extend(encode_mov_mem_reg(Gpr::Rbp, dst_off + 4, Gpr::Rdx));
+                        } else {
+                            // Extern/syscall: sign-extend 32-bit EAX to 64-bit.
+                            // CDQ (0x99) sign-extends EAX into EDX:EAX.
+                            code.extend_from_slice(&[0x99u8]);
+                            code.extend(encode_mov_mem_reg(Gpr::Rbp, dst_off + 4, Gpr::Rdx));
+                        }
                     }
                     code
                 }
