@@ -359,6 +359,8 @@ pub enum RelocationKind {
     LoongArchB26,
     /// LoongArch64: R_LARCH_CALL36 — 36-bit call sequence.
     LoongArchCall36,
+    /// x86_32: R_386_PLT32 — 32-bit PC-relative PLT call.
+    X86_32Plt32,
     /// Generic: 32-bit PC-relative call (fallback).
     GenericCall32,
     /// Generic: 64-bit absolute address (fallback).
@@ -381,6 +383,7 @@ impl fmt::Display for RelocationKind {
             RelocationKind::Ppc64Rel64 => write!(f, "R_PPC64_REL64"),
             RelocationKind::LoongArchB26 => write!(f, "R_LARCH_B26"),
             RelocationKind::LoongArchCall36 => write!(f, "R_LARCH_CALL36"),
+            RelocationKind::X86_32Plt32 => write!(f, "R_386_PLT32"),
             RelocationKind::GenericCall32 => write!(f, "GENERIC_CALL32"),
             RelocationKind::GenericAbs64 => write!(f, "GENERIC_ABS64"),
         }
@@ -394,11 +397,12 @@ impl RelocationKind {
         match arch {
             "aarch64" => RelocationKind::AArch64Call26,
             "x86_64" => RelocationKind::X86_64Plt32,
-            "riscv64" => RelocationKind::RiscvCall,
+            "riscv64" | "riscv32" => RelocationKind::RiscvCall,
             "arm32" => RelocationKind::Arm32Call,
             "mips64" => RelocationKind::Mips26,
             "ppc64" => RelocationKind::Ppc64Rel24,
             "loongarch64" => RelocationKind::LoongArchB26,
+            "x86_32" | "i386" => RelocationKind::X86_32Plt32,
             _ => RelocationKind::GenericCall32,
         }
     }
@@ -425,6 +429,10 @@ pub enum Arch {
     PPC64,
     /// LoongArch64
     LoongArch64,
+    /// x86 32-bit (i386)
+    X86_32,
+    /// RISC-V 32-bit
+    RiscV32,
     /// Wasm32 (no native syscalls; uses wasi or external bindings)
     Wasm32,
 }
@@ -439,6 +447,8 @@ impl fmt::Display for Arch {
             Arch::Mips64 => write!(f, "mips64"),
             Arch::PPC64 => write!(f, "ppc64"),
             Arch::LoongArch64 => write!(f, "loongarch64"),
+            Arch::X86_32 => write!(f, "x86_32"),
+            Arch::RiscV32 => write!(f, "riscv32"),
             Arch::Wasm32 => write!(f, "wasm32"),
         }
     }
@@ -455,6 +465,8 @@ impl Arch {
             "mips64" | "mips64el" => Some(Arch::Mips64),
             "ppc64" | "ppc64le" | "powerpc64" => Some(Arch::PPC64),
             "loongarch64" | "la64" => Some(Arch::LoongArch64),
+            "x86_32" | "i386" | "x86" => Some(Arch::X86_32),
+            "riscv32" | "rv32" => Some(Arch::RiscV32),
             "wasm32" => Some(Arch::Wasm32),
             _ => None,
         }
@@ -555,6 +567,8 @@ impl SyscallTable {
             Arch::Mips64 => mips64_syscalls(),
             Arch::PPC64 => ppc64_syscalls(),
             Arch::LoongArch64 => loongarch64_syscalls(),
+            Arch::X86_32 => x86_32_syscalls(),
+            Arch::RiscV32 => riscv32_syscalls(),
             Arch::Wasm32 => HashMap::new(), // no native syscalls
         };
         Self { arch, numbers }
@@ -774,6 +788,71 @@ fn loongarch64_syscalls() -> HashMap<SyscallName, u64> {
     .collect()
 }
 
+/// x86_32 (i386) Linux syscall numbers.
+///
+/// i386 uses `int 0x80` with the syscall number in EAX and args in
+/// EBX, ECX, EDX, ESI, EDI, EBP (max 6). Note that `mmap` on i386 uses
+/// `mmap2` (syscall 192) which takes the offset in pages (4096-byte units),
+/// not bytes. For zero-offset anonymous mappings this is equivalent.
+fn x86_32_syscalls() -> HashMap<SyscallName, u64> {
+    use SyscallName::*;
+    [
+        (Read, 3),
+        (Write, 4),
+        (Open, 5),
+        (Close, 6),
+        (Exit, 1),
+        (ExitGroup, 252),
+        (Mmap, 192),   // mmap2 on i386 (offset in pages, not bytes)
+        (Munmap, 91),
+        (Brk, 45),
+        (Ioctl, 54),
+        (Fcntl, 55),
+        (Getpid, 20),
+        (Kill, 37),
+        (Mprotect, 125),
+        (ClockGettime, 265),
+        (SchedYield, 158),
+        (Clone, 120),
+        (Futex, 240),
+        (SetTidAddress, 258),
+    ]
+    .into_iter()
+    .collect()
+}
+
+/// RISC-V 32-bit Linux syscall numbers.
+///
+/// RV32 uses `ecall` with the syscall number in a7 and args in
+/// a0-a5 (max 6). The generic RISC-V syscall table (newer arch-generic
+/// numbers) is shared between RV32 and RV64 — the numbers are identical.
+fn riscv32_syscalls() -> HashMap<SyscallName, u64> {
+    use SyscallName::*;
+    [
+        (Read, 63),
+        (Write, 64),
+        (Open, 35),    // openat
+        (Close, 57),
+        (Exit, 93),
+        (ExitGroup, 94),
+        (Mmap, 222),
+        (Munmap, 215),
+        (Brk, 214),
+        (Ioctl, 29),
+        (Fcntl, 25),
+        (Getpid, 172),
+        (Kill, 129),
+        (Mprotect, 226),
+        (ClockGettime, 115),
+        (SchedYield, 124),
+        (Clone, 220),
+        (Futex, 98),
+        (SetTidAddress, 96),
+    ]
+    .into_iter()
+    .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -885,6 +964,33 @@ mod tests {
     }
 
     #[test]
+    fn test_syscall_table_x86_32() {
+        let table = SyscallTable::for_arch(Arch::X86_32);
+        assert_eq!(table.get(SyscallName::Read), Some(3));
+        assert_eq!(table.get(SyscallName::Write), Some(4));
+        assert_eq!(table.get(SyscallName::Exit), Some(1));
+        assert_eq!(table.get(SyscallName::ExitGroup), Some(252));
+        assert_eq!(table.get(SyscallName::Mmap), Some(192)); // mmap2
+        assert_eq!(table.get(SyscallName::Munmap), Some(91));
+        assert_eq!(table.get(SyscallName::Futex), Some(240));
+        assert_eq!(table.get(SyscallName::SetTidAddress), Some(258));
+    }
+
+    #[test]
+    fn test_syscall_table_riscv32() {
+        let table = SyscallTable::for_arch(Arch::RiscV32);
+        assert_eq!(table.get(SyscallName::Read), Some(63));
+        assert_eq!(table.get(SyscallName::Write), Some(64));
+        assert_eq!(table.get(SyscallName::Exit), Some(93));
+        assert_eq!(table.get(SyscallName::Mmap), Some(222));
+        assert_eq!(table.get(SyscallName::Futex), Some(98));
+        // RV32 shares the generic RISC-V syscall table with RV64
+        let rv64 = SyscallTable::for_arch(Arch::RiscV64);
+        assert_eq!(table.get(SyscallName::Write), rv64.get(SyscallName::Write));
+        assert_eq!(table.get(SyscallName::Exit), rv64.get(SyscallName::Exit));
+    }
+
+    #[test]
     fn test_syscall_table_wasm32_empty() {
         let table = SyscallTable::for_arch(Arch::Wasm32);
         assert!(table.is_empty());
@@ -902,6 +1008,10 @@ mod tests {
         assert_eq!(Arch::from_name("mips64"), Some(Arch::Mips64));
         assert_eq!(Arch::from_name("ppc64"), Some(Arch::PPC64));
         assert_eq!(Arch::from_name("loongarch64"), Some(Arch::LoongArch64));
+        assert_eq!(Arch::from_name("x86_32"), Some(Arch::X86_32));
+        assert_eq!(Arch::from_name("i386"), Some(Arch::X86_32));
+        assert_eq!(Arch::from_name("riscv32"), Some(Arch::RiscV32));
+        assert_eq!(Arch::from_name("rv32"), Some(Arch::RiscV32));
         assert_eq!(Arch::from_name("unknown"), None);
     }
 
@@ -910,10 +1020,13 @@ mod tests {
         assert_eq!(RelocationKind::for_arch("aarch64"), RelocationKind::AArch64Call26);
         assert_eq!(RelocationKind::for_arch("x86_64"), RelocationKind::X86_64Plt32);
         assert_eq!(RelocationKind::for_arch("riscv64"), RelocationKind::RiscvCall);
+        assert_eq!(RelocationKind::for_arch("riscv32"), RelocationKind::RiscvCall);
         assert_eq!(RelocationKind::for_arch("arm32"), RelocationKind::Arm32Call);
         assert_eq!(RelocationKind::for_arch("mips64"), RelocationKind::Mips26);
         assert_eq!(RelocationKind::for_arch("ppc64"), RelocationKind::Ppc64Rel24);
         assert_eq!(RelocationKind::for_arch("loongarch64"), RelocationKind::LoongArchB26);
+        assert_eq!(RelocationKind::for_arch("x86_32"), RelocationKind::X86_32Plt32);
+        assert_eq!(RelocationKind::for_arch("i386"), RelocationKind::X86_32Plt32);
         assert_eq!(RelocationKind::for_arch("unknown"), RelocationKind::GenericCall32);
     }
 }

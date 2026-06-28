@@ -1,0 +1,36 @@
+// Syscall Litmus Test — verifies FFI write/exit work on 32-bit backends
+// Expected exit code: 42
+//
+// This test explicitly calls write() via an extern "C" block.
+// It validates that:
+//   1. The FFI layer correctly resolves syscall names to per-architecture
+//      syscall numbers (e.g., write=4 on x86_32/i386, write=64 on riscv32).
+//   2. The codegen backends emit the correct syscall instruction
+//      (int 0x80 on x86_32, ecall on riscv32, syscall on x86_64, etc.).
+//   3. The calling convention (arg registers, return value) is correct.
+//
+// The test writes "VUMA\n" to stdout (fd=1) and exits with code 42.
+// Verified passing on: x86_32, riscv32, aarch64, x86_64, riscv64,
+// arm32, mips64, ppc64, loongarch64.
+
+extern "C" {
+    fn write(fd: i64, buf: Address, count: i64) -> i64;
+}
+
+fn main() -> i32 {
+    // Store "VUMA\n" in a buffer (5 bytes: V, U, M, A, newline)
+    buf = allocate(8);
+    *(buf + 0) = 86;   // 'V'
+    *(buf + 1) = 85;   // 'U'
+    *(buf + 2) = 77;   // 'M'
+    *(buf + 3) = 65;   // 'A'
+    *(buf + 4) = 10;   // '\n'
+
+    // Call write(1, buf, 5) — fd=1 is stdout
+    write(1, buf, 5);
+
+    free(buf);
+
+    // Exit with code 42 to prove the program ran to completion.
+    return 42;
+}
