@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-06-28 23:04:46 UTC",
+  "timestamp": "2026-06-28 23:40:26 UTC",
   "host": "pi-pkhairkh-dev",
   "arch": "aarch64",
   "total_runs": 57380,
@@ -26,10 +26,6 @@
       "total": 5738,
       "match": 5738
     },
-    "loongarch64": {
-      "total": 5738,
-      "match": 5738
-    },
     "ppc64": {
       "total": 5738,
       "match": 5738
@@ -39,6 +35,10 @@
       "match": 5738
     },
     "x86_32": {
+      "total": 5738,
+      "match": 5738
+    },
+    "loongarch64": {
       "total": 5738,
       "match": 5738
     },
