@@ -3438,17 +3438,30 @@ impl Backend for Arm32Backend {
                     Condition::Al, true, false, false, false, false,
                     Gpr::R11.encoding(), src_reg.encoding(), (-neg_off) as u32,
                 ));
-                // Zero a scratch register (NOT src_reg, NOT R11)
-                let zero_reg = if src_reg == Gpr::R1 { Gpr::R0 } else { Gpr::R1 };
-                code.extend_from_slice(&encode_dp_reg(
-                    Condition::Al, DP_EOR, false,
-                    zero_reg.encoding(), zero_reg.encoding(), zero_reg.encoding(),
-                )); // EOR zero_reg, zero_reg, zero_reg → zero_reg = 0
-                // STR zero_reg, [R11, #(-hi_neg_off)]  (high word = 0)
+                // Use R14 (LR) as temporary zero register. LR is callee-saved
+                // and already saved in the prologue at [R11 + fs + 4].
+                // MOV R14, #0
+                code.extend_from_slice(&encode_dp_imm(
+                    Condition::Al, DP_MOV, false, 0, Gpr::R14.encoding(), 0, 0,
+                ));
+                // STR R14, [R11, #(-hi_neg_off)]  (high word = 0)
                 code.extend_from_slice(&encode_ls_imm(
                     Condition::Al, true, false, false, false, false,
-                    Gpr::R11.encoding(), zero_reg.encoding(), (-hi_neg_off) as u32,
+                    Gpr::R11.encoding(), Gpr::R14.encoding(), (-hi_neg_off) as u32,
                 ));
+                // Restore LR: LDR R14, [R11, #(fs + 4)]
+                if (fs + 4) <= 4095 {
+                    code.extend_from_slice(&encode_ls_imm(
+                        Condition::Al, true, true, false, false, true,
+                        Gpr::R11.encoding(), Gpr::R14.encoding(), (fs + 4) as u32,
+                    ));
+                } else {
+                    code.extend_from_slice(&emit_add_imm(Gpr::R14, Gpr::R11, fs + 4));
+                    code.extend_from_slice(&encode_ls_imm(
+                        Condition::Al, true, true, false, false, true,
+                        Gpr::R14.encoding(), Gpr::R14.encoding(), 0,
+                    ));
+                }
                 code
             } else {
                 // Large offset — fall back to plain store (no high-word zeroing).
