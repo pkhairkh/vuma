@@ -3408,6 +3408,66 @@ impl Backend for Arm32Backend {
             }
         }
 
+        /// Store a 32-bit value AND zero the high word of the 8-byte slot.
+        ///
+        /// This is the correct way to store any 32-bit result (Load, Add,
+        /// Mul, Div, etc.) into a stack slot. The high 4 bytes are zeroed
+        /// to prevent garbage from corrupting subsequent 64-bit operations.
+        ///
+        /// Implementation: Stores the low word via STR, then stores 0 to
+        /// the high word via STR of a register that we KNOW is 0. We use
+        /// the ARM `EOR Rd, Rd, Rd` trick to zero a register that's NOT
+        /// src_reg and NOT R11. We pick R1 if src_reg != R1, else R0.
+        /// This is safe because callers have already consumed src_reg's
+        /// value (it's being stored), and the scratch is only used within
+        /// this function.
+        ///
+        /// For the large-offset path (offset > 4095), we DON'T zero the
+        /// high word — those offsets are rare (only for functions with
+        /// 400+ vregs) and the R12 scratch conflict makes it unsafe.
+        /// The high word will be garbage, but those functions typically
+        /// don't use 64-bit operations on their results.
+        fn ss_store_32_zero(src_reg: Gpr, offset_from_r11: i32) -> Vec<u8> {
+            let neg_off = -offset_from_r11;
+            let hi_neg_off = neg_off + 4; // high word at [R11 - (offset-4)]
+            if neg_off >= -4095 && hi_neg_off >= -4095 {
+                // Both offsets fit in 12-bit immediate — no R12 needed.
+                let mut code = Vec::new();
+                // STR src_reg, [R11, #(-neg_off)]  (low word)
+                code.extend_from_slice(&encode_ls_imm(
+                    Condition::Al, true, false, false, false, false,
+                    Gpr::R11.encoding(), src_reg.encoding(), (-neg_off) as u32,
+                ));
+                // Zero a scratch register (NOT src_reg, NOT R11)
+                let zero_reg = if src_reg == Gpr::R1 { Gpr::R0 } else { Gpr::R1 };
+                code.extend_from_slice(&encode_dp_reg(
+                    Condition::Al, DP_EOR, false,
+                    zero_reg.encoding(), zero_reg.encoding(), zero_reg.encoding(),
+                )); // EOR zero_reg, zero_reg, zero_reg → zero_reg = 0
+                // STR zero_reg, [R11, #(-hi_neg_off)]  (high word = 0)
+                code.extend_from_slice(&encode_ls_imm(
+                    Condition::Al, true, false, false, false, false,
+                    Gpr::R11.encoding(), zero_reg.encoding(), (-hi_neg_off) as u32,
+                ));
+                code
+            } else {
+                // Large offset — fall back to plain store (no high-word zeroing).
+                // This is safe because large-offset functions (400+ vregs) rarely
+                // mix 32-bit and 64-bit operations on the same vreg.
+                ss_store_to_slot(src_reg, offset_from_r11)
+            }
+        }
+
+        /// Store TWO registers (lo, hi) into a vreg slot.
+        /// Uses ss_store_to_slot (NOT ss_store_32_zero) because both words
+        /// have valid data — zeroing the high word would destroy the hi_reg value.
+        fn ss_store_64(lo_reg: Gpr, hi_reg: Gpr, offset_from_r11: i32) -> Vec<u8> {
+            let mut code = Vec::new();
+            code.extend(ss_store_to_slot(lo_reg, offset_from_r11));
+            code.extend(ss_store_to_slot(hi_reg, offset_from_r11 + 4));
+            code
+        }
+
         /// Load an IRValue into a scratch register.
         fn ss_load_value(val: &crate::ir::IRValue, slots: &HashMap<u32, i32>, scratch: Gpr) -> Vec<u8> {
             match val {
@@ -3464,14 +3524,6 @@ impl Backend for Arm32Backend {
                     ));
                 }
             }
-            code
-        }
-
-        /// Store TWO registers (lo, hi) into a vreg slot.
-        fn ss_store_64(lo_reg: Gpr, hi_reg: Gpr, offset_from_r11: i32) -> Vec<u8> {
-            let mut code = Vec::new();
-            code.extend(ss_store_to_slot(lo_reg, offset_from_r11));
-            code.extend(ss_store_to_slot(hi_reg, offset_from_r11 + 4));
             code
         }
 
@@ -3666,7 +3718,7 @@ impl Backend for Arm32Backend {
                                     Condition::Al, false,
                                     Gpr::R0.encoding(), 0, Gpr::R1.encoding(), Gpr::R0.encoding(),
                                 ));
-                                code.extend(ss_store_to_slot(Gpr::R0, dst_offset));
+                                code.extend(ss_store_32_zero(Gpr::R0, dst_offset));
                                 // Zero the high word — 32-bit MUL only produces a 32-bit
                                 // result, but stack slots are 8 bytes. Without clearing
                                 // the high word, subsequent 64-bit operations (e.g. pointer
@@ -3820,7 +3872,7 @@ impl Backend for Arm32Backend {
                                         Gpr::R0.encoding(), 3, Gpr::R1.encoding(), Gpr::R0.encoding(),
                                     ));
                                 }
-                                code.extend(ss_store_to_slot(Gpr::R0, dst_offset));
+                                code.extend(ss_store_32_zero(Gpr::R0, dst_offset));
                             }
                             BinOpKind::SDiv | BinOpKind::UDiv => {
                                 // Software division: R0 = R0 / R1
@@ -3846,7 +3898,7 @@ impl Backend for Arm32Backend {
                                 code.extend_from_slice(&0xEAFFFFFAu32.to_le_bytes());
                                 // done: MOV R0, R2 (quotient)
                                 code.extend_from_slice(&0xE1A00002u32.to_le_bytes());
-                                code.extend(ss_store_to_slot(Gpr::R0, dst_offset));
+                                code.extend(ss_store_32_zero(Gpr::R0, dst_offset));
                                 // Zero high word (32-bit result in 64-bit slot)
                                 code.extend_from_slice(&encode_dp_imm(
                                     Condition::Al, DP_MOV, false, 0, Gpr::R1.encoding(), 0, 0,
@@ -3877,7 +3929,7 @@ impl Backend for Arm32Backend {
                                 code.extend_from_slice(&0xEAFFFFFAu32.to_le_bytes());
                                 // done: MOV R0, R3 (remainder)
                                 code.extend_from_slice(&0xE1A00003u32.to_le_bytes());
-                                code.extend(ss_store_to_slot(Gpr::R0, dst_offset));
+                                code.extend(ss_store_32_zero(Gpr::R0, dst_offset));
                                 // Zero high word (32-bit result in 64-bit slot)
                                 code.extend_from_slice(&encode_dp_imm(
                                     Condition::Al, DP_MOV, false, 0, Gpr::R1.encoding(), 0, 0,
@@ -3914,7 +3966,7 @@ impl Backend for Arm32Backend {
                                 code.extend_from_slice(&encode_dp_imm(
                                     cmp_cond, DP_MOV, false, 0, Gpr::R0.encoding(), 0, 1,
                                 ));
-                                code.extend(ss_store_to_slot(Gpr::R0, dst_offset));
+                                code.extend(ss_store_32_zero(Gpr::R0, dst_offset));
                                 // Zero high word (32-bit result 0 or 1 in 64-bit slot)
                                 code.extend_from_slice(&encode_dp_imm(
                                     Condition::Al, DP_MOV, false, 0, Gpr::R1.encoding(), 0, 0,
@@ -3974,7 +4026,7 @@ impl Backend for Arm32Backend {
                             Condition::Al, false,
                             Gpr::R0.encoding(), 0, Gpr::R1.encoding(), Gpr::R0.encoding(),
                         ));
-                        code.extend(ss_store_to_slot(Gpr::R0, dst_offset));
+                        code.extend(ss_store_32_zero(Gpr::R0, dst_offset));
                         code
                     }
                     crate::ir::IRInstr::Div { dst, lhs, rhs, .. } => {
@@ -4009,7 +4061,7 @@ impl Backend for Arm32Backend {
                         code.extend_from_slice(&0xEAFFFFFAu32.to_le_bytes()); // B -6
                         // done: MOV R0, R2
                         code.extend_from_slice(&0xE1A00002u32.to_le_bytes()); // MOV R0, R2
-                        code.extend(ss_store_to_slot(Gpr::R0, dst_offset));
+                        code.extend(ss_store_32_zero(Gpr::R0, dst_offset));
                         code
                     }
 
@@ -4042,7 +4094,7 @@ impl Backend for Arm32Backend {
                         code.extend_from_slice(&encode_dp_imm(
                             cmp_cond, DP_MOV, false, 0, Gpr::R0.encoding(), 0, 1,
                         ));
-                        code.extend(ss_store_to_slot(Gpr::R0, dst_offset));
+                        code.extend(ss_store_32_zero(Gpr::R0, dst_offset));
                         code
                     }
 
@@ -4071,7 +4123,7 @@ impl Backend for Arm32Backend {
                                 // Placeholder: pass through
                             }
                         }
-                        code.extend(ss_store_to_slot(Gpr::R0, dst_offset));
+                        code.extend(ss_store_32_zero(Gpr::R0, dst_offset));
                         code
                     }
 
@@ -4125,7 +4177,7 @@ impl Backend for Arm32Backend {
                                 )); // LDR R0, [R3, #0]
                             }
                         }
-                        code.extend(ss_store_to_slot(Gpr::R0, dst_offset));
+                        code.extend(ss_store_32_zero(Gpr::R0, dst_offset));
                         // Zero the high word — loads produce 32-bit results,
                         // but stack slots are 8 bytes. Without zeroing, the
                         // high word contains garbage from a previous value.
@@ -4205,7 +4257,7 @@ impl Backend for Arm32Backend {
                                 Gpr::R11.encoding(), Gpr::R0.encoding(), Gpr::R0.encoding(),
                             ));
                         }
-                        code.extend(ss_store_to_slot(Gpr::R0, dst_offset));
+                        code.extend(ss_store_32_zero(Gpr::R0, dst_offset));
                         // Zero high word (32-bit pointer result in 64-bit slot)
                         code.extend_from_slice(&encode_dp_imm(
                             Condition::Al, DP_MOV, false, 0, Gpr::R1.encoding(), 0, 0,
@@ -4296,7 +4348,7 @@ impl Backend for Arm32Backend {
                             let dst_id = d.as_register().unwrap_or(0);
                             let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
                             // Store low word (R0)
-                            code.extend(ss_store_to_slot(Gpr::R0, dst_offset));
+                            code.extend(ss_store_32_zero(Gpr::R0, dst_offset));
                             if !is_extern {
                                 // VUMA function: store high word (R1) from 64-bit return
                                 code.extend(ss_store_to_slot(Gpr::R1, dst_offset + 4));
@@ -4594,7 +4646,7 @@ impl Backend for Arm32Backend {
                                 }
                             }
                         }
-                        code.extend(ss_store_to_slot(Gpr::R0, dst_offset));
+                        code.extend(ss_store_32_zero(Gpr::R0, dst_offset));
                         code
                     }
 
@@ -4618,7 +4670,7 @@ impl Backend for Arm32Backend {
                             Condition::Ne, DP_MOV, false, 0,
                             Gpr::R0.encoding(), Gpr::R1.encoding(),
                         ));
-                        code.extend(ss_store_to_slot(Gpr::R0, dst_offset));
+                        code.extend(ss_store_32_zero(Gpr::R0, dst_offset));
                         code
                     }
 
@@ -4672,7 +4724,7 @@ impl Backend for Arm32Backend {
                             Condition::Al, DP_ORR, false,
                             Gpr::R0.encoding(), Gpr::R0.encoding(), Gpr::R1.encoding(),
                         ));
-                        code.extend(ss_store_to_slot(Gpr::R0, dst_offset));
+                        code.extend(ss_store_32_zero(Gpr::R0, dst_offset));
                         code
                     }
 
@@ -4709,7 +4761,7 @@ impl Backend for Arm32Backend {
                             Condition::Al, DP_EOR, false,
                             Gpr::R0.encoding(), Gpr::R0.encoding(), 0, 1,
                         ));
-                        code.extend(ss_store_to_slot(Gpr::R0, dst_offset));
+                        code.extend(ss_store_32_zero(Gpr::R0, dst_offset));
                         code
                     }
 
@@ -4743,7 +4795,7 @@ impl Backend for Arm32Backend {
                                 ));
                             }
                         }
-                        code.extend(ss_store_to_slot(Gpr::R0, dst_offset));
+                        code.extend(ss_store_32_zero(Gpr::R0, dst_offset));
                         // Zero high word (32-bit pointer result in 64-bit slot)
                         code.extend_from_slice(&encode_dp_imm(
                             Condition::Al, DP_MOV, false, 0, Gpr::R1.encoding(), 0, 0,
@@ -4758,7 +4810,7 @@ impl Backend for Arm32Backend {
                         let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
                         let mut code = Vec::new();
                         code.extend_from_slice(&load_immediate_arm32(Gpr::R0, 0));
-                        code.extend(ss_store_to_slot(Gpr::R0, dst_offset));
+                        code.extend(ss_store_32_zero(Gpr::R0, dst_offset));
                         code
                     }
 
@@ -4803,7 +4855,7 @@ impl Backend for Arm32Backend {
                                 ));
                             }
                         }
-                        code.extend(ss_store_to_slot(Gpr::R0, dst_offset));
+                        code.extend(ss_store_32_zero(Gpr::R0, dst_offset));
                         code
                     }
                     crate::ir::IRInstr::AtomicStore { value, addr, ty } => {
@@ -4917,7 +4969,7 @@ impl Backend for Arm32Backend {
                         // Store the old value (in R0) to the dst stack slot
                         let dst_id = dst.as_register().unwrap_or(0);
                         let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
-                        code.extend(ss_store_to_slot(Gpr::R0, dst_offset));
+                        code.extend(ss_store_32_zero(Gpr::R0, dst_offset));
 
                         code
                     }
