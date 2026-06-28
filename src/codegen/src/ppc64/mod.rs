@@ -4675,7 +4675,7 @@ impl Backend for PPC64Backend {
         // normally instead of jumping to an unresolved address (which caused
         // infinite loops / timeouts on ppc64).
         // print_int stub: 1 instruction (BLR = return)
-        let print_int_offset = vuma_free_offset + 12; // after vuma_free stub (3 instrs × 4 = 12 B)
+        let print_int_offset = vuma_free_offset + 16; // after vuma_free stub (4 instrs × 4 = 16 B)
         let print_hex_offset = print_int_offset + 4;  // 1 instruction
         // Register under BOTH names: the user-facing "print_int" (which is
         // what the IR Call instruction uses as func name) and the internal
@@ -4752,8 +4752,8 @@ impl Backend for PPC64Backend {
             stubs
         };
 
-        // POSIX syscall stubs go after __vuma_free stub (which is 4 instrs × 4 = 16 B).
-        let mut stub_offset = vuma_free_offset + 16;
+        // POSIX syscall stubs go after print stubs (2 × 4 = 8 bytes).
+        let mut stub_offset = print_hex_offset + 4;
         for (name, code) in &syscall_stubs {
             func_offsets.insert(name.clone(), stub_offset);
             stub_offset += code.len();
