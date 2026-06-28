@@ -2643,24 +2643,43 @@ impl Backend for AArch64Backend {
                 stubs.push((name.to_string(), code));
             }
 
-            // alarm(seconds) — implement via kill(getpid(), SIGALRM)
-            // On aarch64, alarm is not a direct syscall. We deliver SIGALRM
-            // immediately by calling kill(getpid(), 14). This is sufficient
-            // for signal_hash which just needs the signal to fire during
-            // the busy loop.
-            // getpid = 172, kill = 129, SIGALRM = 14
-            // kill(pid, sig): X0=pid, X1=sig
+            // alarm(seconds) — implement via setitimer(ITIMER_REAL, ...)
+            // On aarch64, alarm is not a direct syscall. We use setitimer
+            // (syscall 103) to schedule SIGALRM after the specified delay.
+            // setitimer(ITIMER_REAL=0, &itimerval, NULL)
+            // struct itimerval { struct timeval it_interval; struct timeval it_value; }
+            // struct timeval { long tv_sec; long tv_usec; }
+            // Total: 32 bytes on stack
             {
                 let mut code = Vec::new();
-                // X8 = 172 (getpid)
-                code.extend_from_slice(&movz_x8(172));
+                // SUB SP, SP, #32
+                // Encoding: 0xD1000000 | (imm12 << 10) | (Rn << 5) | Rd
+                // SUB SP, SP, #32 = 0xD1000000 | (32 << 10) | (31 << 5) | 31
+                code.extend_from_slice(&0xD10083FFu32.to_le_bytes());
+                // STR XZR, [SP, #0]  (it_interval.tv_sec = 0)
+                // STR Xt, [Xn, #imm] = 0xF9000000 | (imm/8 << 10) | (Rn << 5) | Rt
+                // STR XZR, [SP, #0] = 0xF9000000 | 0 | (31 << 5) | 31 = 0xF90003FF
+                code.extend_from_slice(&0xF90003FFu32.to_le_bytes());
+                // STR XZR, [SP, #8]  (it_interval.tv_usec = 0)
+                // STR XZR, [SP, #8] = 0xF9000000 | (1 << 10) | (31 << 5) | 31 = 0xF90007FF
+                code.extend_from_slice(&0xF90007FFu32.to_le_bytes());
+                // STR X0, [SP, #16]  (it_value.tv_sec = X0 = seconds)
+                // STR X0, [SP, #16] = 0xF9000000 | (2 << 10) | (31 << 5) | 0 = 0xF9000800
+                code.extend_from_slice(&0xF9000800u32.to_le_bytes());
+                // STR XZR, [SP, #24] (it_value.tv_usec = 0)
+                // STR XZR, [SP, #24] = 0xF9000000 | (3 << 10) | (31 << 5) | 31 = 0xF9000CFF
+                code.extend_from_slice(&0xF9000CFFu32.to_le_bytes());
+                // MOV X0, #0 (ITIMER_REAL)
+                code.extend_from_slice(&movz_reg(0, 0));
+                // ADD X1, SP, #0 (pointer to itimerval)
+                code.extend_from_slice(&0x910003E1u32.to_le_bytes());
+                // MOV X2, #0 (NULL)
+                code.extend_from_slice(&movz_reg(2, 0));
+                // MOV X8, #103 (setitimer)
+                code.extend_from_slice(&movz_x8(103));
                 code.extend_from_slice(&svc);
-                // X0 = pid (keep it as first arg to kill)
-                // X1 = 14 (SIGALRM)
-                code.extend_from_slice(&movz_reg(1, 14));
-                // X8 = 129 (kill)
-                code.extend_from_slice(&movz_x8(129));
-                code.extend_from_slice(&svc);
+                // ADD SP, SP, #32
+                code.extend_from_slice(&0x910083FFu32.to_le_bytes());
                 code.extend_from_slice(&ret);
                 stubs.push(("alarm".to_string(), code));
             }
@@ -2826,17 +2845,23 @@ impl Backend for AArch64Backend {
                 }
 
                 if reloc.reloc_type == "R_VUMA_GETADDR" {
-                    // R_VUMA_GETADDR: patch 4 MOVZ/MOVK instructions (16 bytes)
-                    // with the function's absolute address.
-                    // The ELF base is 0x400000, so absolute = 0x400000 + offset.
+                    eprintln!("[GETADDR] Processing reloc: symbol='{}' offset={} func_code_offset={} abs_offset={}", reloc.symbol, reloc.offset, func_code_offset, abs_offset);
                     let target_offset = func_offsets.get(&reloc.symbol)
                         .copied()
                         .or_else(|| {
                             let prefix = format!("fn_{}", reloc.symbol);
-                            func_offsets.keys()
-                                .find(|k| k.starts_with(&prefix))
-                                .and_then(|k| func_offsets.get(k))
-                                .copied()
+                            eprintln!("[GETADDR] Trying prefix '{}' against {} func_offsets", prefix, func_offsets.len());
+                            for k in func_offsets.keys() {
+                                if k.starts_with(&prefix) {
+                                    eprintln!("[GETADDR] Found match: '{}' -> {}", k, func_offsets[k]);
+                                    return Some(func_offsets[k]);
+                                }
+                            }
+                            eprintln!("[GETADDR] No match found! Available keys:");
+                            for k in func_offsets.keys() {
+                                eprintln!("[GETADDR]   '{}'", k);
+                            }
+                            None
                         });
                     if let Some(target_offset) = target_offset {
                         let abs_addr = 0x400000u64 + target_offset as u64;

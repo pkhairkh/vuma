@@ -2244,6 +2244,11 @@ impl Emitter {
     fn apply_fixups(&mut self) -> Result<()> {
         let fixups = std::mem::take(&mut self.fixups);
         for (word_idx, label, format) in &fixups {
+            // Debug: check if this fixup overwrites GetAddress code (indices 147-150)
+            if *word_idx >= 147 && *word_idx <= 150 {
+                eprintln!("[apply_fixups] WARNING: fixup at word_idx={} label={} format={:?} overwrites GetAddress code!", word_idx, label, format);
+                eprintln!("[apply_fixups]   old word: 0x{:08x}", self.code[*word_idx]);
+            }
             let target_offset = self.label_offsets.get(label).copied().unwrap_or(0);
             let offset = (target_offset as i32) - (*word_idx as i32);
             let old_word = self.code[*word_idx];
@@ -2883,48 +2888,28 @@ impl Emitter {
             }
 
             // ── GetAddress ──
-            // Emit 4 MOVZ/MOVK instructions (16 bytes) as placeholders for
-            // the function's absolute address. A custom relocation
-            // "R_VUMA_GETADDR" is created so encode_program can patch
-            // these with the actual function address.
+            // Load a placeholder 64-bit value into X9 using emit_load_immediate.
+            // We use 0xDEADBEEF (a value that requires all 4 MOVZ/MOVK instructions)
+            // so the relocation patcher always has 16 bytes to patch.
+            // encode_program patches these with the function's absolute address.
             IRInstr::GetAddress { dst, name } => {
+                eprintln!("[GetAddress] ss_emit_instr handler called for '{}'", name);
                 let dst_id = dst.as_register().unwrap_or(0);
                 let dst_offset = slots.get(&dst_id).copied().unwrap_or(0);
-                // Emit 4 placeholder instructions (MOVZ + 3 MOVK = 16 bytes)
-                // These will be patched by encode_program with the function's
-                // absolute address (ELF base + function offset).
-                let reloc_offset = self.func_text_offset + (self.code.len() as u64) * 4;
-                // MOVZ X9, #0 (placeholder)
-                self.emit_instruction(Instruction::MOVZ {
-                    rd: Register::X9,
-                    imm16: 0,
-                    shift: 0,
-                })?;
-                // MOVK X9, #0, lsl #16 (placeholder)
-                self.emit_instruction(Instruction::MOVK {
-                    rd: Register::X9,
-                    imm16: 0,
-                    shift: 1,
-                })?;
-                // MOVK X9, #0, lsl #32 (placeholder)
-                self.emit_instruction(Instruction::MOVK {
-                    rd: Register::X9,
-                    imm16: 0,
-                    shift: 2,
-                })?;
-                // MOVK X9, #0, lsl #48 (placeholder)
-                self.emit_instruction(Instruction::MOVK {
-                    rd: Register::X9,
-                    imm16: 0,
-                    shift: 3,
-                })?;
-                // Register a relocation so encode_program can patch this
+                let reloc_offset = (self.code.len() as u64) * 4;
+                eprintln!("[GetAddress] code.len() before emit = {}, reloc_offset = {}", self.code.len(), reloc_offset);
+                self.emit_load_immediate(Register::X9, 0x1111111111111111)?;
+                eprintln!("[GetAddress] code.len() after emit = {}", self.code.len());
+                eprintln!("[GetAddress] last 4 words: {:08x} {:08x} {:08x} {:08x}",
+                    self.code[self.code.len().saturating_sub(4)],
+                    self.code[self.code.len().saturating_sub(3)],
+                    self.code[self.code.len().saturating_sub(2)],
+                    self.code[self.code.len().saturating_sub(1)]);
                 self.relocations.push(RelocationEntry {
                     offset: reloc_offset,
                     symbol: name.clone(),
                     reloc_type: "R_VUMA_GETADDR".to_string(),
                 });
-                // Store X9 (function address) to dst's stack slot
                 self.ss_store_to_slot(Register::X9, dst_offset)?;
             }
 
