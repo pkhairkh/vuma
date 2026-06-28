@@ -3936,6 +3936,12 @@ fn improve_expr(expr: &ScgExpr, str_repr: &str) -> ScgExpr {
     }
 }
 
+/// Bridge the `vuma-scg` SCG to the codegen SCG (no extern functions).
+///
+/// This is a convenience wrapper around [`bridge_scg_to_codegen_with_externs`]
+/// that passes an empty set of extern function names. Use this when the
+/// program does not declare any `extern "C"` blocks, or when all function
+/// calls are to locally-defined VUMA functions.
 pub fn bridge_scg_to_codegen(scg: &SCG) -> Scg {
     bridge_scg_to_codegen_with_externs(scg, &HashSet::new())
 }
