@@ -215,10 +215,31 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
         encode_mov_reg_mem(scratch, Gpr::Rbp, off)
     };
 
-    // Store a scratch register into a vreg's stack slot
+    // Store a scratch register into a vreg's stack slot.
+    // IMPORTANT: Stack slots are 8 bytes (64-bit), but x86_32 operations
+    // only produce 32-bit results. We MUST zero the high 4 bytes after
+    // storing the low word, otherwise garbage from a previous value
+    // remains in the high word. When the result is later used in 64-bit
+    // pointer arithmetic (e.g. buf + (i * 4)), the garbage high word
+    // produces a wrong address → crash or wrong result.
     let store_vreg = |id: u32, scratch: Gpr| -> Vec<u8> {
         let off = slot_offset(id);
-        encode_mov_mem_reg(Gpr::Rbp, off, scratch)
+        let mut code = encode_mov_mem_reg(Gpr::Rbp, off, scratch);
+        // Zero the high 4 bytes: MOV DWORD PTR [EBP + off + 4], 0
+        // Encoding: C7 /0 (MOV r/m32, imm32) with mod=01 (disp8), reg=0
+        let hi_off = off + 4;
+        if hi_off >= -128 && hi_off <= 127 {
+            // MOV DWORD PTR [EBP + disp8], 0
+            // C7 45 disp8 00 00 00 00
+            code.extend_from_slice(&[0xC7, 0x45, hi_off as u8, 0, 0, 0, 0]);
+        } else {
+            // MOV DWORD PTR [EBP + disp32], 0
+            // C7 85 disp32 00 00 00 00
+            code.extend_from_slice(&[0xC7, 0x85]);
+            code.extend_from_slice(&(hi_off as i32).to_le_bytes());
+            code.extend_from_slice(&[0, 0, 0, 0]);
+        }
+        code
     };
 
     // Load an IRValue into a scratch register
