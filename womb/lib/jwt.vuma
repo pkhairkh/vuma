@@ -1,0 +1,205 @@
+// womb/lib/jwt.vuma — JWT/JWS (RFC 7519 + RFC 7515)
+// JSON Web Token encoding and verification.
+// No main() — importable library module.
+// Requires: base64.vuma, hmac.vuma, sha256.vuma, sha512.vuma.
+
+// ===========================================================================
+// JWT structure: header.payload.signature
+// All three parts are base64url-encoded (no padding).
+// header:    {"alg":"HS256","typ":"JWT"}
+// payload:   {"sub":"123","name":"John","iat":1516239022}
+// signature: HMAC-SHA256(base64url(header) + "." + base64url(payload), secret)
+// ===========================================================================
+
+// Base64URL encode (no padding)
+fn base64url_encode(input: Address, len: u32, output: Address) -> u32 {
+    // First do standard base64
+    enclen: u32 = base64_encode(input, len, output);
+
+    // Replace '+' with '-', '/' with '_', remove '=' padding
+    i: u32 = 0;
+    while i < enclen {
+        c: u32 = *(output + i);
+        if c == 43 { *(output + i) = 45; }  // '+' → '-'
+        if c == 47 { *(output + i) = 95; }  // '/' → '_'
+        i = i + 1;
+    }
+
+    // Remove trailing '='
+    while enclen > 0 {
+        if *(output + enclen - 1) == 61 {
+            enclen = enclen - 1;
+        } else {
+            break;
+        }
+    }
+
+    return enclen;
+}
+
+// ===========================================================================
+// JWT Sign with HMAC-SHA256
+// header_json:  JSON header string (e.g. {"alg":"HS256","typ":"JWT"})
+// payload_json: JSON payload string
+// secret:       HMAC secret key
+// secret_len:   secret length
+// token_out:    output buffer for compact JWT (header.payload.signature)
+// Returns: token length
+// ===========================================================================
+
+fn jwt_sign_hs256(header_json: Address, header_len: u32, payload_json: Address, payload_len: u32, secret: Address, secret_len: u32, token_out: Address) -> u32 {
+    // Base64URL encode header
+    enc_header = allocate(header_len * 2);
+    enc_header_len: u32 = base64url_encode(header_json, header_len, enc_header);
+
+    // Base64URL encode payload
+    enc_payload = allocate(payload_len * 2);
+    enc_payload_len: u32 = base64url_encode(payload_json, payload_len, enc_payload);
+
+    // Build signing input: enc_header "." enc_payload
+    signing_input_len: u32 = enc_header_len + 1 + enc_payload_len;
+    signing_input = allocate(signing_input_len);
+
+    i: u32 = 0;
+    while i < enc_header_len { *(signing_input + i) = *(enc_header + i); i = i + 1; }
+    *(signing_input + enc_header_len) = 46;  // '.'
+    i = 0;
+    while i < enc_payload_len { *(signing_input + enc_header_len + 1 + i) = *(enc_payload + i); i = i + 1; }
+
+    // Sign: HMAC-SHA256(signing_input, secret)
+    sig = allocate(32);
+    hmac_sha256(secret, secret_len, signing_input, signing_input_len, sig);
+
+    // Base64URL encode signature
+    enc_sig = allocate(64);
+    enc_sig_len: u32 = base64url_encode(sig, 32, enc_sig);
+
+    // Build token: signing_input "." enc_sig
+    pos: u32 = 0;
+    i = 0;
+    while i < signing_input_len { *(token_out + pos) = *(signing_input + i); pos = pos + 1; i = i + 1; }
+    *(token_out + pos) = 46;  // '.'
+    pos = pos + 1;
+    i = 0;
+    while i < enc_sig_len { *(token_out + pos) = *(enc_sig + i); pos = pos + 1; i = i + 1; }
+
+    free(enc_header); free(enc_payload); free(signing_input);
+    free(sig); free(enc_sig);
+
+    return pos;
+}
+
+// ===========================================================================
+// JWT Verify with HMAC-SHA256
+// token:     compact JWT string
+// token_len: token length
+// secret:    HMAC secret key
+// secret_len: secret length
+// Returns: 1 if valid, 0 if invalid
+// ===========================================================================
+
+fn jwt_verify_hs256(token: Address, token_len: u32, secret: Address, secret_len: u32) -> u32 {
+    // Find last '.' (separates payload from signature)
+    last_dot: u32 = 0;
+    i: u32 = 0;
+    while i < token_len {
+        if *(token + i) == 46 { last_dot = i; }
+        i = i + 1;
+    }
+    if last_dot == 0 { return 0; }
+
+    // Signing input = token[0..last_dot]
+    signing_input_len: u32 = last_dot;
+
+    // Expected signature = HMAC-SHA256(signing_input, secret)
+    expected_sig = allocate(32);
+    hmac_sha256(secret, secret_len, token, signing_input_len, expected_sig);
+
+    // Base64URL encode expected signature
+    enc_expected = allocate(64);
+    enc_expected_len: u32 = base64url_encode(expected_sig, 32, enc_expected);
+
+    // Compare with token's signature (after last '.')
+    token_sig_len: u32 = token_len - last_dot - 1;
+
+    if token_sig_len != enc_expected_len {
+        free(expected_sig); free(enc_expected);
+        return 0;
+    }
+
+    // Constant-time comparison
+    result: u32 = 1;
+    i = 0;
+    while i < enc_expected_len {
+        if *(token + last_dot + 1 + i) != *(enc_expected + i) { result = 0; }
+        i = i + 1;
+    }
+
+    free(expected_sig); free(enc_expected);
+    return result;
+}
+
+// ===========================================================================
+// JWT Sign with HMAC-SHA512
+// ===========================================================================
+
+fn jwt_sign_hs512(header_json: Address, header_len: u32, payload_json: Address, payload_len: u32, secret: Address, secret_len: u32, token_out: Address) -> u32 {
+    enc_header = allocate(header_len * 2);
+    enc_header_len: u32 = base64url_encode(header_json, header_len, enc_header);
+
+    enc_payload = allocate(payload_len * 2);
+    enc_payload_len: u32 = base64url_encode(payload_json, payload_len, enc_payload);
+
+    signing_input_len: u32 = enc_header_len + 1 + enc_payload_len;
+    signing_input = allocate(signing_input_len);
+
+    i: u32 = 0;
+    while i < enc_header_len { *(signing_input + i) = *(enc_header + i); i = i + 1; }
+    *(signing_input + enc_header_len) = 46;
+    i = 0;
+    while i < enc_payload_len { *(signing_input + enc_header_len + 1 + i) = *(enc_payload + i); i = i + 1; }
+
+    sig = allocate(64);
+    hmac_sha512(secret, secret_len, signing_input, signing_input_len, sig);
+
+    enc_sig = allocate(128);
+    enc_sig_len: u32 = base64url_encode(sig, 64, enc_sig);
+
+    pos: u32 = 0;
+    i = 0;
+    while i < signing_input_len { *(token_out + pos) = *(signing_input + i); pos = pos + 1; i = i + 1; }
+    *(token_out + pos) = 46;
+    pos = pos + 1;
+    i = 0;
+    while i < enc_sig_len { *(token_out + pos) = *(enc_sig + i); pos = pos + 1; i = i + 1; }
+
+    free(enc_header); free(enc_payload); free(signing_input);
+    free(sig); free(enc_sig);
+
+    return pos;
+}
+
+// ===========================================================================
+// JWT Sign with none (no signature — for debugging only!)
+// ===========================================================================
+
+fn jwt_sign_none(header_json: Address, header_len: u32, payload_json: Address, payload_len: u32, token_out: Address) -> u32 {
+    enc_header = allocate(header_len * 2);
+    enc_header_len: u32 = base64url_encode(header_json, header_len, enc_header);
+
+    enc_payload = allocate(payload_len * 2);
+    enc_payload_len: u32 = base64url_encode(payload_json, payload_len, enc_payload);
+
+    pos: u32 = 0;
+    i: u32 = 0;
+    while i < enc_header_len { *(token_out + pos) = *(enc_header + i); pos = pos + 1; i = i + 1; }
+    *(token_out + pos) = 46;
+    pos = pos + 1;
+    i = 0;
+    while i < enc_payload_len { *(token_out + pos) = *(enc_payload + i); pos = pos + 1; i = i + 1; }
+    *(token_out + pos) = 46;
+    pos = pos + 1;
+
+    free(enc_header); free(enc_payload);
+    return pos;
+}
