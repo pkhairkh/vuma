@@ -1,0 +1,233 @@
+// womb/lib/asn1.vuma — ASN.1 DER Encoder/Decoder
+// No main() — importable library module.
+// Used by X.509 certificates, PKCS structures, JWT (JWS/JWE).
+//
+// DER (Distinguished Encoding Rules) — single canonical encoding.
+// TLV format: Tag || Length || Value
+
+const TAG_BOOLEAN: u32 = 1;
+const TAG_INTEGER: u32 = 2;
+const TAG_BIT_STRING: u32 = 3;
+const TAG_OCTET_STRING: u32 = 4;
+const TAG_NULL: u32 = 5;
+const TAG_OID: u32 = 6;
+const TAG_UTF8_STRING: u32 = 12;
+const TAG_PRINTABLE_STRING: u32 = 19;
+const TAG_IA5_STRING: u32 = 22;
+const TAG_UTC_TIME: u32 = 23;
+const TAG_GENERALIZED_TIME: u32 = 24;
+const TAG_SEQUENCE: u32 = 48;       // 0x30
+const TAG_SET: u32 = 49;            // 0x31
+const TAG_CONTEXT_0: u32 = 160;     // 0xA0
+const TAG_CONTEXT_1: u32 = 161;     // 0xA1
+const TAG_CONTEXT_3: u32 = 163;     // 0xA3
+
+// ===========================================================================
+// DER Length encoding/decoding
+// ===========================================================================
+
+// Write DER length. Returns bytes written.
+fn der_write_length(buf: Address, offset: u32, len: u32) -> u32 {
+    if len < 128 {
+        *(buf + offset) = len & 255;
+        return 1;
+    }
+    if len < 256 {
+        *(buf + offset) = 129;  // 0x81
+        *(buf + offset + 1) = len & 255;
+        return 2;
+    }
+    // 2-byte length
+    *(buf + offset) = 130;  // 0x82
+    *(buf + offset + 1) = (len >> 8) & 255;
+    *(buf + offset + 2) = len & 255;
+    return 3;
+}
+
+// Read DER length. Returns (length, bytes_consumed)
+// If bytes_consumed is 0, error.
+fn der_read_length(buf: Address, offset: u32) -> u32 {
+    b: u32 = *(buf + offset);
+    if b < 128 {
+        return b;  // short form (length = b, consumed = 1)
+    }
+    n: u32 = b & 127;
+    if n == 0 { return 0; }  // indefinite length not allowed in DER
+    if n > 2 { return 0; }   // error: too long
+    len: u32 = 0;
+    i: u32 = 0;
+    while i < n {
+        len = (len << 8) | *(buf + offset + 1 + i);
+        i = i + 1;
+    }
+    // Encode: high bit = consumed flag, rest = length
+    // We return length; caller computes consumed = 1 + n
+    return len;
+}
+
+fn der_read_length_consumed(buf: Address, offset: u32) -> u32 {
+    b: u32 = *(buf + offset);
+    if b < 128 { return 1; }
+    return 1 + (b & 127);
+}
+
+// ===========================================================================
+// DER encoding primitives
+// ===========================================================================
+
+// Write SEQUENCE header. Returns bytes written.
+fn der_write_sequence_header(buf: Address, offset: u32, content_len: u32) -> u32 {
+    *(buf + offset) = TAG_SEQUENCE;
+    return 1 + der_write_length(buf, offset + 1, content_len);
+}
+
+// Write INTEGER (unsigned, big-endian)
+fn der_write_integer(buf: Address, offset: u32, val: Address, val_len: u32) -> u32 {
+    // Skip leading zeros
+    start: u32 = 0;
+    while start < val_len - 1 {
+        if *(val + start) != 0 { break; }
+        start = start + 1;
+    }
+
+    // If high bit is set, prepend 0x00
+    needs_pad: u32 = 0;
+    effective_len: u32 = val_len - start;
+    if (*(val + start) & 128) != 0 {
+        needs_pad = 1;
+        effective_len = effective_len + 1;
+    }
+
+    *(buf + offset) = TAG_INTEGER;
+    pos: u32 = offset + 1 + der_write_length(buf, offset + 1, effective_len);
+
+    if needs_pad == 1 {
+        *(buf + pos) = 0;
+        pos = pos + 1;
+    }
+
+    i: u32 = start;
+    while i < val_len {
+        *(buf + pos) = *(val + i);
+        pos = pos + 1;
+        i = i + 1;
+    }
+
+    return pos - offset;
+}
+
+// Write OCTET STRING
+fn der_write_octet_string(buf: Address, offset: u32, data: Address, data_len: u32) -> u32 {
+    *(buf + offset) = TAG_OCTET_STRING;
+    pos: u32 = offset + 1 + der_write_length(buf, offset + 1, data_len);
+    i: u32 = 0;
+    while i < data_len {
+        *(buf + pos + i) = *(data + i);
+        i = i + 1;
+    }
+    return pos + data_len - offset;
+}
+
+// Write NULL
+fn der_write_null(buf: Address, offset: u32) -> u32 {
+    *(buf + offset) = TAG_NULL;
+    *(buf + offset + 1) = 0;
+    return 2;
+}
+
+// Write BIT STRING
+fn der_write_bit_string(buf: Address, offset: u32, data: Address, data_len: u32) -> u32 {
+    content_len: u32 = data_len + 1;  // +1 for unused bits count
+    *(buf + offset) = TAG_BIT_STRING;
+    pos: u32 = offset + 1 + der_write_length(buf, offset + 1, content_len);
+    *(buf + pos) = 0;  // 0 unused bits
+    pos = pos + 1;
+    i: u32 = 0;
+    while i < data_len {
+        *(buf + pos + i) = *(data + i);
+        i = i + 1;
+    }
+    return pos + data_len - offset;
+}
+
+// Write OID (simplified: write pre-encoded OID bytes)
+fn der_write_oid(buf: Address, offset: u32, oid_bytes: Address, oid_len: u32) -> u32 {
+    *(buf + offset) = TAG_OID;
+    pos: u32 = offset + 1 + der_write_length(buf, offset + 1, oid_len);
+    i: u32 = 0;
+    while i < oid_len {
+        *(buf + pos + i) = *(oid_bytes + i);
+        i = i + 1;
+    }
+    return pos + oid_len - offset;
+}
+
+// ===========================================================================
+// DER decoding primitives
+// ===========================================================================
+
+// Read tag at offset. Returns tag value.
+fn der_read_tag(buf: Address, offset: u32) -> u32 {
+    return *(buf + offset);
+}
+
+// Read TLV: returns (value_offset, value_length). If tag doesn't match, returns 0.
+fn der_read_tlv(buf: Address, offset: u32, expected_tag: u32, val_offset_out: Address, val_len_out: Address) -> u32 {
+    tag: u32 = *(buf + offset);
+    if tag != expected_tag { return 0; }
+
+    len_consumed: u32 = der_read_length_consumed(buf, offset + 1);
+    len: u32 = der_read_length(buf, offset + 1);
+
+    v_off: u32 = offset + 1 + len_consumed;
+    *(val_offset_out + 0) = v_off & 255;
+    *(val_offset_out + 1) = (v_off >> 8) & 255;
+    *(val_offset_out + 2) = (v_off >> 16) & 255;
+    *(val_offset_out + 3) = (v_off >> 24) & 255;
+    *(val_len_out + 0) = len & 255;
+    *(val_len_out + 1) = (len >> 8) & 255;
+    *(val_len_out + 2) = (len >> 16) & 255;
+    *(val_len_out + 3) = (len >> 24) & 255;
+
+    return 1;  // success
+}
+
+fn load_u32_le(ptr: Address, off: u32) -> u32 {
+    b0: u32 = *(ptr + off); b1: u32 = *(ptr + off + 1);
+    b2: u32 = *(ptr + off + 2); b3: u32 = *(ptr + off + 3);
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+}
+
+// ===========================================================================
+// Common OID encodings (pre-computed)
+// ===========================================================================
+
+// SHA-256 OID: 2.16.840.1.101.3.4.2.1
+// DER: 06 09 60 86 48 01 65 03 04 02 01
+fn oid_sha256() -> Address {
+    buf = allocate(9);
+    *(buf + 0) = 96; *(buf + 1) = 134; *(buf + 2) = 72;
+    *(buf + 3) = 1; *(buf + 4) = 101; *(buf + 5) = 3;
+    *(buf + 6) = 4; *(buf + 7) = 2; *(buf + 8) = 1;
+    return buf;
+}
+
+// RSA encryption OID: 1.2.840.113549.1.1.1
+// DER: 06 09 2A 86 48 86 F7 0D 01 01 01
+fn oid_rsa() -> Address {
+    buf = allocate(9);
+    *(buf + 0) = 42; *(buf + 1) = 134; *(buf + 2) = 72;
+    *(buf + 3) = 134; *(buf + 4) = 247; *(buf + 5) = 13;
+    *(buf + 6) = 1; *(buf + 7) = 1; *(buf + 8) = 1;
+    return buf;
+}
+
+// ECDSA with SHA-256 OID: 1.2.840.10045.4.3.2
+// DER: 06 08 2A 86 48 CE 3D 04 03 02
+fn oid_ecdsa_sha256() -> Address {
+    buf = allocate(8);
+    *(buf + 0) = 42; *(buf + 1) = 134; *(buf + 2) = 72;
+    *(buf + 3) = 206; *(buf + 4) = 61; *(buf + 5) = 4;
+    *(buf + 6) = 3; *(buf + 7) = 2;
+    return buf;
+}

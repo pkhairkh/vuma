@@ -1,0 +1,115 @@
+// womb/crypto/rsa.vuma — RSA PKCS#1 v1.5 (RFC 8017)
+// 2048-bit RSA encrypt/decrypt/sign/verify.
+// No main() — importable library module.
+// Requires: bignum2048.vuma, sha256.vuma.
+
+const KEY_SIZE: u32 = 256;  // 2048 bits = 256 bytes
+
+fn rsa_public_op(c: Address, m: Address, e: Address, n: Address) {
+    bn2048_mod_exp(c, m, e, n);
+}
+
+fn rsa_private_op(m: Address, c: Address, d: Address, n: Address) {
+    bn2048_mod_exp(m, c, d, n);
+}
+
+fn rsa_pkcs1_v15_pad_encrypt(msg: Address, msg_len: u32, key_size: u32, random: Address, padded: Address) -> u32 {
+    if msg_len > key_size - 11 { return 0; }
+    ps_len: u32 = key_size - msg_len - 3;
+    *(padded + 0) = 0;
+    *(padded + 1) = 2;
+    i: u32 = 0;
+    while i < ps_len {
+        r: u32 = *(random + i);
+        if r == 0 { r = 1; }
+        *(padded + 2 + i) = r;
+        i = i + 1;
+    }
+    *(padded + 2 + ps_len) = 0;
+    i = 0;
+    while i < msg_len { *(padded + 3 + ps_len + i) = *(msg + i); i = i + 1; }
+    return key_size;
+}
+
+fn rsa_pkcs1_v15_pad_sign(hash: Address, hash_len: u32, key_size: u32, padded: Address) -> u32 {
+    di_len: u32 = 19;
+    t_len: u32 = di_len + hash_len;
+    if t_len > key_size - 11 { return 0; }
+    ps_len: u32 = key_size - t_len - 3;
+    *(padded + 0) = 0;
+    *(padded + 1) = 1;
+    i: u32 = 0;
+    while i < ps_len { *(padded + 2 + i) = 255; i = i + 1; }
+    *(padded + 2 + ps_len) = 0;
+    // SHA-256 DigestInfo
+    *(padded + 3 + ps_len) = 0x30; *(padded + 3 + ps_len + 1) = 0x31;
+    *(padded + 3 + ps_len + 2) = 0x30; *(padded + 3 + ps_len + 3) = 0x0D;
+    *(padded + 3 + ps_len + 4) = 0x06; *(padded + 3 + ps_len + 5) = 0x09;
+    *(padded + 3 + ps_len + 6) = 0x60; *(padded + 3 + ps_len + 7) = 0x86;
+    *(padded + 3 + ps_len + 8) = 0x48; *(padded + 3 + ps_len + 9) = 0x01;
+    *(padded + 3 + ps_len + 10) = 0x65; *(padded + 3 + ps_len + 11) = 0x03;
+    *(padded + 3 + ps_len + 12) = 0x04; *(padded + 3 + ps_len + 13) = 0x02;
+    *(padded + 3 + ps_len + 14) = 0x01; *(padded + 3 + ps_len + 15) = 0x05;
+    *(padded + 3 + ps_len + 16) = 0x00; *(padded + 3 + ps_len + 17) = 0x04;
+    *(padded + 3 + ps_len + 18) = 0x20;
+    i = 0;
+    while i < hash_len { *(padded + 3 + ps_len + di_len + i) = *(hash + i); i = i + 1; }
+    return key_size;
+}
+
+fn rsa_pkcs1_v15_encrypt(msg: Address, msg_len: u32, e: Address, n: Address, key_size: u32, random: Address, ciphertext: Address) -> u32 {
+    padded = allocate(key_size);
+    pad_len: u32 = rsa_pkcs1_v15_pad_encrypt(msg, msg_len, key_size, random, padded);
+    if pad_len == 0 { free(padded); return 0; }
+    rsa_public_op(ciphertext, padded, e, n);
+    free(padded);
+    return key_size;
+}
+
+fn rsa_pkcs1_v15_decrypt(ciphertext: Address, d: Address, n: Address, key_size: u32, msg: Address) -> u32 {
+    padded = allocate(key_size);
+    rsa_private_op(padded, ciphertext, d, n);
+    if *(padded + 0) != 0 { free(padded); return 0; }
+    if *(padded + 1) != 2 { free(padded); return 0; }
+    i: u32 = 2;
+    while i < key_size {
+        if *(padded + i) == 0 { break; }
+        i = i + 1;
+    }
+    if i == key_size { free(padded); return 0; }
+    if i < 10 { free(padded); return 0; }
+    msg_len: u32 = key_size - i - 1;
+    j: u32 = 0;
+    while j < msg_len { *(msg + j) = *(padded + i + 1 + j); j = j + 1; }
+    free(padded);
+    return msg_len;
+}
+
+fn rsa_pkcs1_v15_sign(msg: Address, msg_len: u32, d: Address, n: Address, key_size: u32, signature: Address) -> u32 {
+    hash = allocate(32);
+    sha256_oneshot(msg, msg_len, hash);
+    padded = allocate(key_size);
+    pad_len: u32 = rsa_pkcs1_v15_pad_sign(hash, 32, key_size, padded);
+    if pad_len == 0 { free(hash); free(padded); return 0; }
+    rsa_private_op(signature, padded, d, n);
+    free(hash); free(padded);
+    return key_size;
+}
+
+fn rsa_pkcs1_v15_verify(msg: Address, msg_len: u32, e: Address, n: Address, key_size: u32, signature: Address) -> u32 {
+    hash = allocate(32);
+    sha256_oneshot(msg, msg_len, hash);
+    decrypted = allocate(key_size);
+    rsa_public_op(decrypted, signature, e, n);
+    expected = allocate(key_size);
+    pad_len: u32 = rsa_pkcs1_v15_pad_sign(hash, 32, key_size, expected);
+    if pad_len == 0 { free(hash); free(decrypted); free(expected); return 0; }
+    result: u32 = 1;
+    i: u32 = 0;
+    while i < key_size {
+        if *(decrypted + i) != *(expected + i) { result = 0; break; }
+        i = i + 1;
+    }
+    free(hash); free(decrypted); free(expected);
+    return result;
+}

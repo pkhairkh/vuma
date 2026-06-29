@@ -1,0 +1,257 @@
+// womb/lib/dns.vuma — DNS Resolver (RFC 1035)
+// No main() — importable library module.
+// Builds and parses DNS query/response packets.
+
+extern "C" {
+    fn socket(domain: i64, sock_type: i64, protocol: i64) -> i64;
+    fn sendto(sockfd: i64, buf: Address, len: i64, flags: i64, dest_addr: Address, addrlen: i64) -> i64;
+    fn recvfrom(sockfd: i64, buf: Address, len: i64, flags: i64, src_addr: Address, addrlen: Address) -> i64;
+    fn close(fd: i64) -> i64;
+}
+
+const AF_INET: i64 = 2;
+const SOCK_DGRAM: i64 = 2;
+const IPPROTO_UDP: i64 = 17;
+const DNS_PORT: u32 = 53;
+const DNS_MAX_DOMAIN: u32 = 253;
+const DNS_RESPONSE_MAX: u32 = 512;
+
+// DNS record types
+const DNS_TYPE_A: u32 = 1;
+const DNS_TYPE_AAAA: u32 = 28;
+const DNS_TYPE_CNAME: u32 = 5;
+const DNS_TYPE_MX: u32 = 15;
+const DNS_TYPE_TXT: u32 = 16;
+const DNS_TYPE_NS: u32 = 2;
+const DNS_TYPE_PTR: u32 = 12;
+const DNS_TYPE_SRV: u32 = 33;
+
+// DNS classes
+const DNS_CLASS_IN: u32 = 1;
+
+// ===========================================================================
+// DNS Query Packet Builder
+// Header (12 bytes):
+//   [0..1]   Transaction ID (u16, big-endian)
+//   [2..3]   Flags (u16: QR|Opcode|AA|TC|RD|RA|Z|RCODE)
+//   [4..5]   QDCOUNT (number of questions)
+//   [6..7]   ANCOUNT (number of answers)
+//   [8..9]   NSCOUNT (number of authority records)
+//   [10..11] ARCOUNT (number of additional records)
+// ===========================================================================
+
+fn dns_build_query(query: Address, domain: Address, qtype: u32, txn_id: u32) -> u32 {
+    pos: u32 = 0;
+
+    // Transaction ID (big-endian)
+    *(query + 0) = (txn_id >> 8) & 255;
+    *(query + 1) = txn_id & 255;
+    pos = 2;
+
+    // Flags: RD=1 (recursion desired), standard query
+    *(query + 2) = 1;   // 0x0100 (RD=1)
+    *(query + 3) = 0;
+    pos = 4;
+
+    // QDCOUNT = 1
+    *(query + 4) = 0;
+    *(query + 5) = 1;
+    pos = 6;
+
+    // ANCOUNT = 0
+    *(query + 6) = 0; *(query + 7) = 0;
+    pos = 8;
+
+    // NSCOUNT = 0
+    *(query + 8) = 0; *(query + 9) = 0;
+    pos = 10;
+
+    // ARCOUNT = 0
+    *(query + 10) = 0; *(query + 11) = 0;
+    pos = 12;
+
+    // Question section: encode domain name
+    // "www.example.com" → [3]www[7]example[3]com[0]
+    label_start: u32 = 0;
+    i: u32 = 0;
+    while *(domain + i) != 0 {
+        if *(domain + i) == 46 {  // '.'
+            // Write label length
+            label_len: u32 = i - label_start;
+            *(query + pos) = label_len & 255;
+            pos = pos + 1;
+            // Write label bytes
+            j: u32 = label_start;
+            while j < i {
+                *(query + pos) = *(domain + j);
+                pos = pos + 1;
+                j = j + 1;
+            }
+            label_start = i + 1;
+        }
+        i = i + 1;
+    }
+
+    // Last label
+    label_len: u32 = i - label_start;
+    if label_len > 0 {
+        *(query + pos) = label_len & 255;
+        pos = pos + 1;
+        j: u32 = label_start;
+        while j < i {
+            *(query + pos) = *(domain + j);
+            pos = pos + 1;
+            j = j + 1;
+        }
+    }
+
+    // Terminator
+    *(query + pos) = 0;
+    pos = pos + 1;
+
+    // QTYPE (big-endian)
+    *(query + pos) = (qtype >> 8) & 255;
+    *(query + pos + 1) = qtype & 255;
+    pos = pos + 2;
+
+    // QCLASS = IN (1)
+    *(query + pos) = 0;
+    *(query + pos + 1) = 1;
+    pos = pos + 2;
+
+    return pos;
+}
+
+// ===========================================================================
+// DNS Response Parser
+// Extracts the first A record (IPv4 address, 4 bytes)
+// Returns 1 on success, 0 on failure
+// ===========================================================================
+
+fn dns_parse_response_a(response: Address, resp_len: u32, ip_out: Address) -> u32 {
+    // Check minimum length
+    if resp_len < 12 { return 0; }
+
+    // Read header
+    qdcount: u32 = (*(response + 4) << 8) | *(response + 5);
+    ancount: u32 = (*(response + 6) << 8) | *(response + 7);
+
+    if ancount == 0 { return 0; }
+
+    // Skip question section
+    pos: u32 = 12;
+    q: u32 = 0;
+    while q < qdcount {
+        // Skip name (label sequence ending with 0)
+        while pos < resp_len {
+            len: u32 = *(response + pos);
+            if len == 0 { pos = pos + 1; break; }
+            if (len & 192) == 192 { pos = pos + 2; break; }  // compression pointer
+            pos = pos + 1 + len;
+        }
+        // Skip QTYPE (2) + QCLASS (2)
+        pos = pos + 4;
+        q = q + 1;
+    }
+
+    // Parse answer section
+    a: u32 = 0;
+    while a < ancount {
+        // Skip name
+        while pos < resp_len {
+            len: u32 = *(response + pos);
+            if len == 0 { pos = pos + 1; break; }
+            if (len & 192) == 192 { pos = pos + 2; break; }
+            pos = pos + 1 + len;
+        }
+
+        if pos + 10 > resp_len { return 0; }
+
+        // Read TYPE, CLASS, TTL, RDLENGTH
+        rtype: u32 = (*(response + pos) << 8) | *(response + pos + 1);
+        pos = pos + 2;
+        // Skip CLASS (2) + TTL (4)
+        pos = pos + 6;
+        rdlength: u32 = (*(response + pos) << 8) | *(response + pos + 1);
+        pos = pos + 2;
+
+        if rtype == DNS_TYPE_A {
+            if rdlength == 4 {
+                // Found A record — copy IP address
+                *(ip_out + 0) = *(response + pos);
+                *(ip_out + 1) = *(response + pos + 1);
+                *(ip_out + 2) = *(response + pos + 2);
+                *(ip_out + 3) = *(response + pos + 3);
+                return 1;
+            }
+        }
+
+        // Skip RDATA
+        pos = pos + rdlength;
+        a = a + 1;
+    }
+
+    return 0;  // no A record found
+}
+
+// ===========================================================================
+// DNS Resolve — high-level function
+// Resolves a domain name to an IPv4 address (4 bytes, network byte order)
+// Returns 1 on success, 0 on failure
+// ===========================================================================
+
+fn dns_resolve(domain: Address, dns_server_ip: u32, ip_out: Address) -> u32 {
+    // Create UDP socket
+    sockfd: i64 = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if sockfd < 0 { return 0; }
+
+    // Build query
+    query = allocate(512);
+    txn_id: u32 = 0x1234;  // In production, use random
+    query_len: u32 = dns_build_query(query, domain, DNS_TYPE_A, txn_id);
+
+    // Build destination address
+    dest_addr = allocate(16);
+    *(dest_addr + 0) = AF_INET & 255;
+    *(dest_addr + 1) = (AF_INET >> 8) & 255;
+    *(dest_addr + 2) = (DNS_PORT >> 8) & 255;
+    *(dest_addr + 3) = DNS_PORT & 255;
+    *(dest_addr + 4) = (dns_server_ip >> 24) & 255;
+    *(dest_addr + 5) = (dns_server_ip >> 16) & 255;
+    *(dest_addr + 6) = (dns_server_ip >> 8) & 255;
+    *(dest_addr + 7) = dns_server_ip & 255;
+    i: u32 = 0;
+    while i < 8 { *(dest_addr + 8 + i) = 0; i = i + 1; }
+
+    // Send query
+    sent: i64 = sendto(sockfd, query, query_len, 0, dest_addr, 16);
+    free(query);
+    free(dest_addr);
+
+    if sent < 0 {
+        close(sockfd);
+        return 0;
+    }
+
+    // Receive response
+    response = allocate(DNS_RESPONSE_MAX);
+    src_addr = allocate(16);
+    addrlen = allocate(4);
+    *(addrlen + 0) = 16;
+
+    recv_len: i64 = recvfrom(sockfd, response, DNS_RESPONSE_MAX, 0, src_addr, addrlen);
+
+    close(sockfd);
+    free(src_addr);
+    free(addrlen);
+
+    if recv_len <= 0 {
+        free(response);
+        return 0;
+    }
+
+    // Parse response
+    result: u32 = dns_parse_response_a(response, recv_len, ip_out);
+    free(response);
+    return result;
+}
