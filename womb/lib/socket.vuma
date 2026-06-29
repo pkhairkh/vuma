@@ -1,0 +1,377 @@
+// womb/lib/socket.vuma — BSD Socket API (POSIX sys/socket.h equivalent)
+// No main() — importable library module.
+// Provides: full TCP/UDP socket API + inet_pton/ntop + htons/ntohs
+// Requires: import "../lib/string.vuma"::{htons, ntohs, htonl, ntohl};
+
+extern "C" {
+    fn socket(domain: i64, sock_type: i64, protocol: i64) -> i64;
+    fn connect(sockfd: i64, addr: Address, addrlen: i64) -> i64;
+    fn bind(sockfd: i64, addr: Address, addrlen: i64) -> i64;
+    fn listen(sockfd: i64, backlog: i64) -> i64;
+    fn accept(sockfd: i64, addr: Address, addrlen: Address) -> i64;
+    fn send(sockfd: i64, buf: Address, len: i64, flags: i64) -> i64;
+    fn recv(sockfd: i64, buf: Address, len: i64, flags: i64) -> i64;
+    fn sendto(sockfd: i64, buf: Address, len: i64, flags: i64, dest_addr: Address, addrlen: i64) -> i64;
+    fn recvfrom(sockfd: i64, buf: Address, len: i64, flags: i64, src_addr: Address, addrlen: Address) -> i64;
+    fn shutdown(sockfd: i64, how: i64) -> i64;
+    fn setsockopt(sockfd: i64, level: i64, optname: i64, optval: Address, optlen: i64) -> i64;
+    fn close(fd: i64) -> i64;
+}
+
+// Constants
+const AF_INET: i64 = 2;
+const AF_INET6: i64 = 10;
+const SOCK_STREAM: i64 = 1;
+const SOCK_DGRAM: i64 = 2;
+const SOCK_RAW: i64 = 3;
+const SOL_SOCKET: i64 = 1;
+const SO_REUSEADDR: i64 = 2;
+const SO_KEEPALIVE: i64 = 9;
+const SO_RCVBUF: i64 = 8;
+const SO_SNDBUF: i64 = 7;
+const SO_RCVTIMEO: i64 = 20;
+const SO_SNDTIMEO: i64 = 21;
+const IPPROTO_TCP: i64 = 6;
+const IPPROTO_UDP: i64 = 17;
+const MSG_NOSIGNAL: i64 = 16384;
+const SHUT_RD: i64 = 0;
+const SHUT_WR: i64 = 1;
+const SHUT_RDWR: i64 = 2;
+
+// ===========================================================================
+// sockaddr_in structure (16 bytes)
+//   [0..1]   sin_family (u16)
+//   [2..3]   sin_port (u16, network byte order)
+//   [4..7]   sin_addr (u32, network byte order)
+//   [8..15]  sin_zero (8 bytes padding)
+// ===========================================================================
+
+fn make_sockaddr_in(addr: Address, port: u32, ip: u32) {
+    *(addr + 0) = AF_INET & 255;
+    *(addr + 1) = (AF_INET >> 8) & 255;
+    // port in network byte order (big-endian)
+    *(addr + 2) = (port >> 8) & 255;
+    *(addr + 3) = port & 255;
+    // IP in network byte order
+    *(addr + 4) = (ip >> 24) & 255;
+    *(addr + 5) = (ip >> 16) & 255;
+    *(addr + 6) = (ip >> 8) & 255;
+    *(addr + 7) = ip & 255;
+    i: u32 = 0;
+    while i < 8 { *(addr + 8 + i) = 0; i = i + 1; }
+}
+
+// ===========================================================================
+// TCP Client API
+// ===========================================================================
+
+fn tcp_socket() -> i64 {
+    return socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+}
+
+fn tcp_connect(ip: u32, port: u32) -> i64 {
+    sockfd: i64 = tcp_socket();
+    if sockfd < 0 { return -1; }
+    addr = allocate(16);
+    make_sockaddr_in(addr, port, ip);
+    ret: i64 = connect(sockfd, addr, 16);
+    free(addr);
+    if ret < 0 {
+        close(sockfd);
+        return -1;
+    }
+    return sockfd;
+}
+
+fn tcp_connect_timeout(ip: u32, port: u32, timeout_ms: u32) -> i64 {
+    // Simplified: no non-blocking connect yet
+    return tcp_connect(ip, port);
+}
+
+// ===========================================================================
+// TCP Server API
+// ===========================================================================
+
+fn tcp_listen(port: u32) -> i64 {
+    sockfd: i64 = tcp_socket();
+    if sockfd < 0 { return -1; }
+
+    // SO_REUSEADDR
+    optval = allocate(4);
+    *(optval + 0) = 1;
+    setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, optval, 4);
+    free(optval);
+
+    addr = allocate(16);
+    make_sockaddr_in(addr, port, 0);
+    ret: i64 = bind(sockfd, addr, 16);
+    free(addr);
+    if ret < 0 {
+        close(sockfd);
+        return -1;
+    }
+
+    ret = listen(sockfd, 128);
+    if ret < 0 {
+        close(sockfd);
+        return -1;
+    }
+    return sockfd;
+}
+
+fn tcp_accept(listen_fd: i64) -> i64 {
+    client_addr = allocate(16);
+    addrlen = allocate(4);
+    *(addrlen + 0) = 16;
+    client_fd: i64 = accept(listen_fd, client_addr, addrlen);
+    free(client_addr);
+    free(addrlen);
+    return client_fd;
+}
+
+fn tcp_accept_addr(listen_fd: i64, client_ip: Address) -> i64 {
+    client_addr = allocate(16);
+    addrlen = allocate(4);
+    *(addrlen + 0) = 16;
+    client_fd: i64 = accept(listen_fd, client_addr, addrlen);
+    if client_fd >= 0 {
+        // Extract IP (bytes 4-7, network byte order)
+        b0: u32 = *(client_addr + 4);
+        b1: u32 = *(client_addr + 5);
+        b2: u32 = *(client_addr + 6);
+        b3: u32 = *(client_addr + 7);
+        ip: u32 = (b0 << 24) | (b1 << 16) | (b2 << 8) | b3;
+        // Store as u32 at client_ip
+        *(client_ip + 0) = ip & 255;
+        *(client_ip + 1) = (ip >> 8) & 255;
+        *(client_ip + 2) = (ip >> 16) & 255;
+        *(client_ip + 3) = (ip >> 24) & 255;
+    }
+    free(client_addr);
+    free(addrlen);
+    return client_fd;
+}
+
+// ===========================================================================
+// Data transfer
+// ===========================================================================
+
+fn tcp_send(sockfd: i64, data: Address, len: u32) -> i64 {
+    return send(sockfd, data, len, MSG_NOSIGNAL);
+}
+
+fn tcp_recv(sockfd: i64, buf: Address, len: u32) -> i64 {
+    return recv(sockfd, buf, len, 0);
+}
+
+fn tcp_send_all(sockfd: i64, data: Address, len: u32) -> i64 {
+    sent: u32 = 0;
+    while sent < len {
+        n: i64 = send(sockfd, data + sent, len - sent, MSG_NOSIGNAL);
+        if n <= 0 { return -1; }
+        sent = sent + n;
+    }
+    return len;
+}
+
+fn tcp_recv_all(sockfd: i64, buf: Address, len: u32) -> i64 {
+    received: u32 = 0;
+    while received < len {
+        n: i64 = recv(sockfd, buf + received, len - received, 0);
+        if n <= 0 { return received; }
+        received = received + n;
+    }
+    return len;
+}
+
+fn tcp_send_str(sockfd: i64, s: Address) -> i64 {
+    n: u32 = 0;
+    while *(s + n) != 0 { n = n + 1; }
+    return tcp_send_all(sockfd, s, n);
+}
+
+fn tcp_close(sockfd: i64) {
+    shutdown(sockfd, SHUT_RDWR);
+    close(sockfd);
+}
+
+// ===========================================================================
+// Socket options
+// ===========================================================================
+
+fn set_reuseaddr(sockfd: i64) -> i64 {
+    optval = allocate(4);
+    *(optval + 0) = 1;
+    ret: i64 = setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, optval, 4);
+    free(optval);
+    return ret;
+}
+
+fn set_keepalive(sockfd: i64) -> i64 {
+    optval = allocate(4);
+    *(optval + 0) = 1;
+    ret: i64 = setsockopt(sockfd, SOL_SOCKET, SO_KEEPALIVE, optval, 4);
+    free(optval);
+    return ret;
+}
+
+fn set_recv_bufsize(sockfd: i64, size: u32) -> i64 {
+    optval = allocate(4);
+    *(optval + 0) = size & 255;
+    *(optval + 1) = (size >> 8) & 255;
+    *(optval + 2) = (size >> 16) & 255;
+    *(optval + 3) = (size >> 24) & 255;
+    ret: i64 = setsockopt(sockfd, SOL_SOCKET, SO_RCVBUF, optval, 4);
+    free(optval);
+    return ret;
+}
+
+fn set_send_bufsize(sockfd: i64, size: u32) -> i64 {
+    optval = allocate(4);
+    *(optval + 0) = size & 255;
+    *(optval + 1) = (size >> 8) & 255;
+    *(optval + 2) = (size >> 16) & 255;
+    *(optval + 3) = (size >> 24) & 255;
+    ret: i64 = setsockopt(sockfd, SOL_SOCKET, SO_SNDBUF, optval, 4);
+    free(optval);
+    return ret;
+}
+
+// ===========================================================================
+// UDP API
+// ===========================================================================
+
+fn udp_socket() -> i64 {
+    return socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+}
+
+fn udp_bind(port: u32) -> i64 {
+    sockfd: i64 = udp_socket();
+    if sockfd < 0 { return -1; }
+    set_reuseaddr(sockfd);
+    addr = allocate(16);
+    make_sockaddr_in(addr, port, 0);
+    ret: i64 = bind(sockfd, addr, 16);
+    free(addr);
+    if ret < 0 {
+        close(sockfd);
+        return -1;
+    }
+    return sockfd;
+}
+
+fn udp_sendto(sockfd: i64, data: Address, len: u32, ip: u32, port: u32) -> i64 {
+    dest = allocate(16);
+    make_sockaddr_in(dest, port, ip);
+    ret: i64 = sendto(sockfd, data, len, 0, dest, 16);
+    free(dest);
+    return ret;
+}
+
+fn udp_recvfrom(sockfd: i64, buf: Address, len: u32, src_ip: Address, src_port: Address) -> i64 {
+    src_addr = allocate(16);
+    addrlen = allocate(4);
+    *(addrlen + 0) = 16;
+    n: i64 = recvfrom(sockfd, buf, len, 0, src_addr, addrlen);
+
+    if n >= 0 {
+        // Extract IP
+        b0: u32 = *(src_addr + 4);
+        b1: u32 = *(src_addr + 5);
+        b2: u32 = *(src_addr + 6);
+        b3: u32 = *(src_addr + 7);
+        ip: u32 = (b0 << 24) | (b1 << 16) | (b2 << 8) | b3;
+        *(src_ip + 0) = ip & 255;
+        *(src_ip + 1) = (ip >> 8) & 255;
+        *(src_ip + 2) = (ip >> 16) & 255;
+        *(src_ip + 3) = (ip >> 24) & 255;
+
+        // Extract port (network byte order)
+        p0: u32 = *(src_addr + 2);
+        p1: u32 = *(src_addr + 3);
+        port: u32 = (p0 << 8) | p1;
+        *(src_port + 0) = port & 255;
+        *(src_port + 1) = (port >> 8) & 255;
+        *(src_port + 2) = (port >> 16) & 255;
+        *(src_port + 3) = (port >> 24) & 255;
+    }
+
+    free(src_addr);
+    free(addrlen);
+    return n;
+}
+
+// ===========================================================================
+// IP address parsing (inet_pton for IPv4)
+// Parse "192.168.1.1" → u32 (host byte order)
+// ===========================================================================
+
+fn inet_pton_ipv4(str: Address) -> u32 {
+    result: u32 = 0;
+    i: u32 = 0;
+    octet: u32 = 0;
+    dots: u32 = 0;
+
+    while dots < 4 {
+        c: u32 = *(str + i);
+        if c == 0 {
+            if dots == 3 {
+                result = result | (octet << (dots * 8));
+                return result;
+            }
+            return 0;  // error
+        }
+        if c == 46 {  // '.'
+            if octet > 255 { return 0; }
+            result = result | (octet << (dots * 8));
+            dots = dots + 1;
+            octet = 0;
+            i = i + 1;
+        } else {
+            if c >= 48 {
+                if c <= 57 {
+                    octet = octet * 10 + (c - 48);
+                    i = i + 1;
+                } else {
+                    return 0;
+                }
+            } else {
+                return 0;
+            }
+        }
+    }
+    return 0;
+}
+
+// Format u32 → "a.b.c.d" (inet_ntop for IPv4)
+fn inet_ntop_ipv4(ip: u32, buf: Address) -> Address {
+    pos: u32 = 0;
+    octet: u32 = 0;
+    i: u32 = 0;
+    while i < 4 {
+        octet = (ip >> (i * 8)) & 255;
+        if octet >= 100 {
+            *(buf + pos) = 48 + (octet / 100);
+            pos = pos + 1;
+            *(buf + pos) = 48 + ((octet / 10) % 10);
+            pos = pos + 1;
+            *(buf + pos) = 48 + (octet % 10);
+            pos = pos + 1;
+        } else if octet >= 10 {
+            *(buf + pos) = 48 + (octet / 10);
+            pos = pos + 1;
+            *(buf + pos) = 48 + (octet % 10);
+            pos = pos + 1;
+        } else {
+            *(buf + pos) = 48 + octet;
+            pos = pos + 1;
+        }
+        if i < 3 {
+            *(buf + pos) = 46;  // '.'
+            pos = pos + 1;
+        }
+        i = i + 1;
+    }
+    *(buf + pos) = 0;
+    return buf;
+}

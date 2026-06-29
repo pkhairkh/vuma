@@ -1,0 +1,70 @@
+// womb/encoding/url.vuma — URL/Percent Encoding (RFC 3986)
+// No main() — importable library module.
+
+fn url_encode_char(c: u32) -> u32 {
+    // Unreserved characters: A-Z a-z 0-9 - _ . ~
+    if c >= 65 { if c <= 90 { return 0; } }
+    if c >= 97 { if c <= 122 { return 0; } }
+    if c >= 48 { if c <= 57 { return 0; } }
+    if c == 45 { return 0; }  // -
+    if c == 95 { return 0; }  // _
+    if c == 46 { return 0; }  // .
+    if c == 126 { return 0; } // ~
+    return 1;  // needs encoding
+}
+
+fn url_encode(input: Address, len: u32, output: Address) -> u32 {
+    out_idx: u32 = 0;
+    i: u32 = 0;
+    while i < len {
+        c: u32 = *(input + i);
+        if url_encode_char(c) == 0 {
+            *(output + out_idx) = c;
+            out_idx = out_idx + 1;
+        } else {
+            *(output + out_idx) = 37;  // %
+            out_idx = out_idx + 1;
+            hi: u32 = c >> 4;
+            lo: u32 = c & 15;
+            if hi < 10 { *(output + out_idx) = 48 + hi; }
+            else { *(output + out_idx) = 65 + hi - 10; }
+            out_idx = out_idx + 1;
+            if lo < 10 { *(output + out_idx) = 48 + lo; }
+            else { *(output + out_idx) = 65 + lo - 10; }
+            out_idx = out_idx + 1;
+        }
+        i = i + 1;
+    }
+    return out_idx;
+}
+
+fn url_decode(input: Address, len: u32, output: Address) -> u32 {
+    out_idx: u32 = 0;
+    i: u32 = 0;
+    while i < len {
+        c: u32 = *(input + i);
+        if c == 37 {
+            // %XX
+            if i + 2 >= len { return 4294967295; }
+            hi: u32 = hex_val(*(input + i + 1));
+            lo: u32 = hex_val(*(input + i + 2));
+            if hi == 255 { return 4294967295; }
+            if lo == 255 { return 4294967295; }
+            *(output + out_idx) = (hi << 4) | lo;
+            out_idx = out_idx + 1;
+            i = i + 3;
+        } else {
+            *(output + out_idx) = c;
+            out_idx = out_idx + 1;
+            i = i + 1;
+        }
+    }
+    return out_idx;
+}
+
+fn hex_val(c: u32) -> u32 {
+    if c >= 48 { if c <= 57 { return c - 48; } }
+    if c >= 97 { if c <= 102 { return c - 87; } }
+    if c >= 65 { if c <= 70 { return c - 55; } }
+    return 255;
+}
