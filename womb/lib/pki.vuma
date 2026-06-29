@@ -1,0 +1,1531 @@
+// pki.vuma
+// VUMA standard library module: PKI primitives — PKCS#8, PKCS#10,
+// PKCS#7/CMS, OCSP, and CRL. No main() — importable library module.
+//
+// Task ID: womb-pki
+//
+// Implements:
+//   1. PKCS#8  — Private Key Info (RFC 5208)
+//   2. PKCS#10 — Certificate Signing Request (RFC 2986)
+//   3. PKCS#7 / CMS — SignedData (RFC 5652)
+//   4. OCSP    — Request/Response (RFC 6960)
+//   5. CRL     — Certificate Revocation List (RFC 5280)
+//
+// Required peer modules (assumed to exist in the import scope):
+//   asn1.vuma  — der_write_length, der_write_sequence_header,
+//                der_write_integer, der_write_octet_string,
+//                der_write_bit_string, der_write_null, der_write_oid,
+//                der_read_length, der_read_length_consumed,
+//                der_read_tag, der_read_tlv
+//   sha256.vuma — sha256_oneshot
+//   rsa.vuma   — rsa_pkcs1_v15_sign, rsa_pkcs1_v15_verify
+//   x509.vuma  — x509_parse
+//
+// DER/ASN.1 conventions:
+//   TLV: Tag (1 byte) || Length (1-3 bytes) || Value.
+//   Length encoding: < 128 = short form (1 byte), otherwise 0x81/0x82 long
+//   form. All lengths in this module stay below 65535 bytes, matching the
+//   capacity of the asn1.vuma der_write_length helper.
+//
+// Memory management:
+//   Functions that build DER structures write into caller-provided `out`
+//   buffers and return the number of bytes written (or 0 on error).
+//   Intermediate work buffers are allocated with allocate() and freed
+//   before return. OID byte buffers are short-lived (allocated per call,
+//   freed before the function returns).
+//
+// Output-buffer conventions for parse functions:
+//   * Offsets are absolute into the input buffer (`buf`).
+//   * Each (offset, length) pair is stored as two little-endian u32 values,
+//     8 bytes total: offset first, then length.
+//   * Status values (OCSP response status, OCSP cert status) are stored as
+//     a single little-endian u32 (4 bytes).
+//   * The CRL `revoked_serials` output is an array of 8-byte entries
+//     (offset+length per revoked serial); crl_parse returns the count.
+
+// ===========================================================================
+// DER tag constants (subset relevant to PKI)
+// ===========================================================================
+
+const PKI_TAG_INTEGER: u32          = 2;
+const PKI_TAG_BIT_STRING: u32       = 3;
+const PKI_TAG_OCTET_STRING: u32     = 4;
+const PKI_TAG_NULL: u32             = 5;
+const PKI_TAG_OID: u32              = 6;
+const PKI_TAG_ENUMERATED: u32       = 10;
+const PKI_TAG_UTC_TIME: u32         = 23;   // 0x17
+const PKI_TAG_GENERALIZED_TIME: u32 = 24;   // 0x18
+const PKI_TAG_SEQUENCE: u32         = 48;   // 0x30
+const PKI_TAG_SET: u32              = 49;   // 0x31
+
+// Context-specific tag bytes
+// EXPLICIT (constructed) — used for CHOICE wrappers and OPTIONAL wrappers
+const PKI_TAG_CTX_0_EXPLICIT: u32   = 160;  // 0xA0
+const PKI_TAG_CTX_1_EXPLICIT: u32   = 161;  // 0xA1
+const PKI_TAG_CTX_2_EXPLICIT: u32   = 162;  // 0xA2
+const PKI_TAG_CTX_3_EXPLICIT: u32   = 163;  // 0xA3
+// IMPLICIT (primitive) — replaces the underlying primitive tag
+const PKI_TAG_CTX_0_IMPLICIT: u32   = 128;  // 0x80
+const PKI_TAG_CTX_1_IMPLICIT: u32   = 129;  // 0x81
+const PKI_TAG_CTX_2_IMPLICIT: u32   = 130;  // 0x82
+
+// OCSP response status (RFC 6960 Section 4.2.1)
+const PKI_OCSP_RESP_SUCCESSFUL: u32         = 0;
+const PKI_OCSP_RESP_MALFORMED_REQUEST: u32  = 1;
+const PKI_OCSP_RESP_INTERNAL_ERROR: u32     = 2;
+const PKI_OCSP_RESP_TRY_LATER: u32          = 3;
+const PKI_OCSP_RESP_SIG_REQUIRED: u32       = 5;
+const PKI_OCSP_RESP_UNAUTHORIZED: u32       = 6;
+
+// OCSP cert status (RFC 6960 Section 2.2.3 — CHOICE tag numbers)
+const PKI_OCSP_CERT_GOOD: u32       = 0;
+const PKI_OCSP_CERT_REVOKED: u32    = 1;
+const PKI_OCSP_CERT_UNKNOWN: u32    = 2;
+
+// OCSP hash algorithm selector
+const PKI_HASH_SHA1: u32   = 0;     // issuerNameHash/issuerKeyHash = 20 bytes
+const PKI_HASH_SHA256: u32 = 1;     // issuerNameHash/issuerKeyHash = 32 bytes
+
+// ===========================================================================
+// Little-endian u32 load/store helpers
+// ===========================================================================
+
+fn pki_store_u32(buf: Address, off: u32, val: u32) {
+    *(buf + off)     = val & 255;
+    *(buf + off + 1) = (val >> 8) & 255;
+    *(buf + off + 2) = (val >> 16) & 255;
+    *(buf + off + 3) = (val >> 24) & 255;
+}
+
+fn pki_load_u32(buf: Address, off: u32) -> u32 {
+    return *(buf + off) | (*(buf + off + 1) << 8)
+         | (*(buf + off + 2) << 16) | (*(buf + off + 3) << 24);
+}
+
+// ===========================================================================
+// DER length-byte count and INTEGER TLV size helpers
+// ===========================================================================
+
+// Returns the number of bytes that der_write_length will emit for `len`.
+// Mirrors asn1.vuma's der_write_length (max 3 bytes / 0x82 form).
+fn pki_len_bytes_for(len: u32) -> u32 {
+    if len < 128 { return 1; }
+    if len < 256 { return 2; }
+    return 3;
+}
+
+// Effective DER INTEGER content length for the given raw big-endian bytes.
+// Strips leading zeros (keeping at least one byte) and accounts for the
+// 0x00 pad byte that DER requires when the MSB of the remaining value is 1.
+fn pki_integer_content_len(val: Address, val_len: u32) -> u32 {
+    if val_len == 0 { return 1; }
+    start: u32 = 0;
+    while start < val_len - 1 {
+        if *(val + start) != 0 { break; }
+        start = start + 1;
+    }
+    effective: u32 = val_len - start;
+    if (*(val + start) & 128) != 0 {
+        effective = effective + 1;
+    }
+    return effective;
+}
+
+// Full TLV size for a DER INTEGER with the given raw bytes.
+fn pki_integer_tlv_len(val: Address, val_len: u32) -> u32 {
+    c: u32 = pki_integer_content_len(val, val_len);
+    return 1 + pki_len_bytes_for(c) + c;
+}
+
+// ===========================================================================
+// TLV header writers (tag + length, no content)
+// ===========================================================================
+
+// Write a generic TLV header. Returns bytes written.
+fn pki_write_tlv_header(buf: Address, offset: u32, tag: u32, content_len: u32) -> u32 {
+    *(buf + offset) = tag & 255;
+    return 1 + der_write_length(buf, offset + 1, content_len);
+}
+
+fn pki_write_seq_header(buf: Address, offset: u32, content_len: u32) -> u32 {
+    return pki_write_tlv_header(buf, offset, PKI_TAG_SEQUENCE, content_len);
+}
+
+fn pki_write_set_header(buf: Address, offset: u32, content_len: u32) -> u32 {
+    return pki_write_tlv_header(buf, offset, PKI_TAG_SET, content_len);
+}
+
+// Write a small non-negative integer (0..127) as a DER INTEGER.
+fn pki_write_small_int(buf: Address, offset: u32, val: u32) -> u32 {
+    *(buf + offset)     = PKI_TAG_INTEGER;
+    *(buf + offset + 1) = 1;
+    *(buf + offset + 2) = val & 127;
+    return 3;
+}
+
+// ===========================================================================
+// OID byte buffers — freshly allocated, caller frees
+// ===========================================================================
+
+// RSA encryption OID: 1.2.840.113549.1.1.1
+// DER bytes: 2A 86 48 86 F7 0D 01 01 01 (9 bytes)
+fn pki_oid_rsa_enc() -> Address {
+    buf = allocate(9);
+    *(buf + 0) = 42;  *(buf + 1) = 134; *(buf + 2) = 72;
+    *(buf + 3) = 134; *(buf + 4) = 247; *(buf + 5) = 13;
+    *(buf + 6) = 1;   *(buf + 7) = 1;   *(buf + 8) = 1;
+    return buf;
+}
+
+// sha256WithRSAEncryption OID: 1.2.840.113549.1.1.11
+// DER bytes: 2A 86 48 86 F7 0D 01 01 0B (9 bytes)
+fn pki_oid_sha256_rsa() -> Address {
+    buf = allocate(9);
+    *(buf + 0) = 42;  *(buf + 1) = 134; *(buf + 2) = 72;
+    *(buf + 3) = 134; *(buf + 4) = 247; *(buf + 5) = 13;
+    *(buf + 6) = 1;   *(buf + 7) = 1;   *(buf + 8) = 11;
+    return buf;
+}
+
+// SHA-256 OID: 2.16.840.1.101.3.4.2.1
+// DER bytes: 60 86 48 01 65 03 04 02 01 (9 bytes)
+fn pki_oid_sha256() -> Address {
+    buf = allocate(9);
+    *(buf + 0) = 96;  *(buf + 1) = 134; *(buf + 2) = 72;
+    *(buf + 3) = 1;   *(buf + 4) = 101; *(buf + 5) = 3;
+    *(buf + 6) = 4;   *(buf + 7) = 2;   *(buf + 8) = 1;
+    return buf;
+}
+
+// SHA-1 OID: 1.3.14.3.2.26
+// DER bytes: 2B 0E 03 02 1A (5 bytes)
+fn pki_oid_sha1() -> Address {
+    buf = allocate(5);
+    *(buf + 0) = 43;  *(buf + 1) = 14; *(buf + 2) = 3;
+    *(buf + 3) = 2;   *(buf + 4) = 26;
+    return buf;
+}
+
+// id-data OID: 1.2.840.113549.1.7.1
+// DER bytes: 2A 86 48 86 F7 0D 01 07 01 (9 bytes)
+fn pki_oid_data() -> Address {
+    buf = allocate(9);
+    *(buf + 0) = 42;  *(buf + 1) = 134; *(buf + 2) = 72;
+    *(buf + 3) = 134; *(buf + 4) = 247; *(buf + 5) = 13;
+    *(buf + 6) = 1;   *(buf + 7) = 7;   *(buf + 8) = 1;
+    return buf;
+}
+
+// id-signedData OID: 1.2.840.113549.1.7.2
+// DER bytes: 2A 86 48 86 F7 0D 01 07 02 (9 bytes)
+fn pki_oid_signed_data() -> Address {
+    buf = allocate(9);
+    *(buf + 0) = 42;  *(buf + 1) = 134; *(buf + 2) = 72;
+    *(buf + 3) = 134; *(buf + 4) = 247; *(buf + 5) = 13;
+    *(buf + 6) = 1;   *(buf + 7) = 7;   *(buf + 8) = 2;
+    return buf;
+}
+
+// id-pkix-ocsp-basic OID: 1.3.6.1.5.5.7.48.1.1
+// DER bytes: 2B 06 01 05 05 07 30 01 01 (9 bytes)
+fn pki_oid_ocsp_basic() -> Address {
+    buf = allocate(9);
+    *(buf + 0) = 43;  *(buf + 1) = 6;   *(buf + 2) = 1;
+    *(buf + 3) = 5;   *(buf + 4) = 5;   *(buf + 5) = 7;
+    *(buf + 6) = 48;  *(buf + 7) = 1;   *(buf + 8) = 1;
+    return buf;
+}
+
+// ===========================================================================
+// AlgorithmIdentifier writer — SEQUENCE { OID, NULL }
+// ===========================================================================
+
+// Write SEQUENCE { OID, NULL } into `buf` at `offset`. Returns bytes written.
+fn pki_write_alg_id(buf: Address, offset: u32, oid_bytes: Address, oid_len: u32) -> u32 {
+    oid_tlv_len: u32 = 1 + pki_len_bytes_for(oid_len) + oid_len;
+    content_len: u32 = oid_tlv_len + 2;  // NULL = 05 00 (2 bytes)
+    pos: u32 = offset;
+    pos = pos + pki_write_seq_header(buf, pos, content_len);
+    pos = pos + der_write_oid(buf, pos, oid_bytes, oid_len);
+    pos = pos + der_write_null(buf, pos);
+    return pos - offset;
+}
+
+// Total size of an AlgorithmIdentifier TLV with a given raw OID length.
+fn pki_alg_id_len(oid_len: u32) -> u32 {
+    oid_tlv_len: u32 = 1 + pki_len_bytes_for(oid_len) + oid_len;
+    content_len: u32 = oid_tlv_len + 2;
+    return 1 + pki_len_bytes_for(content_len) + content_len;
+}
+
+// ===========================================================================
+// SECTION 1: PKCS#8 — Private Key Info (RFC 5208)
+// ===========================================================================
+//
+// PrivateKeyInfo ::= SEQUENCE {
+//   version             INTEGER (0),
+//   privateKeyAlgorithm AlgorithmIdentifier,
+//   privateKey          OCTET STRING,    -- contains DER RSAPrivateKey
+//   attributes          [0] OPTIONAL     -- omitted here
+// }
+//
+// RSAPrivateKey ::= SEQUENCE {
+//   version           INTEGER (0),
+//   modulus           INTEGER,    -- n
+//   publicExponent    INTEGER,    -- e
+//   privateExponent   INTEGER,    -- d
+//   prime1            INTEGER,    -- p
+//   prime2            INTEGER,    -- q
+//   exponent1         INTEGER,    -- d mod (p-1) = dp
+//   exponent2         INTEGER,    -- d mod (q-1) = dq
+//   coefficient       INTEGER     -- q^-1 mod p = qinv
+// }
+//
+// pkcs8_encode_rsa_private_key:
+//   All RSA integer inputs are big-endian byte strings. `out` must be large
+//   enough for the full PrivateKeyInfo (8 KiB suffices for any 4096-bit RSA
+//   key). `version` is the outer PrivateKeyInfo version (typically 0); the
+//   inner RSAPrivateKey version is always 0 per PKCS#1.
+//   Returns total bytes written.
+
+fn pkcs8_encode_rsa_private_key(version: u32, n: Address, n_len: u32,
+                                e: Address, e_len: u32,
+                                d: Address, d_len: u32,
+                                p: Address, p_len: u32,
+                                q: Address, q_len: u32,
+                                dp: Address, dp_len: u32,
+                                dq: Address, dq_len: u32,
+                                qinv: Address, qinv_len: u32,
+                                out: Address) -> u32 {
+    // ---- Pass 1: compute the RSAPrivateKey content length ----
+    rsa_content_len: u32 = 3;  // inner version INTEGER (02 01 00)
+    rsa_content_len = rsa_content_len + pki_integer_tlv_len(n, n_len);
+    rsa_content_len = rsa_content_len + pki_integer_tlv_len(e, e_len);
+    rsa_content_len = rsa_content_len + pki_integer_tlv_len(d, d_len);
+    rsa_content_len = rsa_content_len + pki_integer_tlv_len(p, p_len);
+    rsa_content_len = rsa_content_len + pki_integer_tlv_len(q, q_len);
+    rsa_content_len = rsa_content_len + pki_integer_tlv_len(dp, dp_len);
+    rsa_content_len = rsa_content_len + pki_integer_tlv_len(dq, dq_len);
+    rsa_content_len = rsa_content_len + pki_integer_tlv_len(qinv, qinv_len);
+
+    // RSAPrivateKey TLV total = 1 + length_bytes + content
+    rsa_tlv_len: u32 = 1 + pki_len_bytes_for(rsa_content_len) + rsa_content_len;
+
+    // ---- Compute the PrivateKeyInfo content length ----
+    rsa_oid = pki_oid_rsa_enc();
+    alg_id_len: u32 = pki_alg_id_len(9);   // SEQUENCE{OID rsaEncryption, NULL} = 15
+    octet_tlv_len: u32 = 1 + pki_len_bytes_for(rsa_tlv_len) + rsa_tlv_len;
+    // version (3) + alg_id + OCTET STRING
+    pki_content_len: u32 = 3 + alg_id_len + octet_tlv_len;
+
+    // ---- Pass 2: write into `out` ----
+    pos: u32 = 0;
+    pos = pos + pki_write_seq_header(out, pos, pki_content_len);
+    pos = pos + pki_write_small_int(out, pos, version);
+    pos = pos + pki_write_alg_id(out, pos, rsa_oid, 9);
+    free(rsa_oid);
+
+    // privateKey OCTET STRING containing RSAPrivateKey
+    pos = pos + pki_write_tlv_header(out, pos, PKI_TAG_OCTET_STRING, rsa_tlv_len);
+    pos = pos + pki_write_seq_header(out, pos, rsa_content_len);
+    pos = pos + pki_write_small_int(out, pos, 0);  // RSAPrivateKey inner version
+    pos = pos + der_write_integer(out, pos, n, n_len);
+    pos = pos + der_write_integer(out, pos, e, e_len);
+    pos = pos + der_write_integer(out, pos, d, d_len);
+    pos = pos + der_write_integer(out, pos, p, p_len);
+    pos = pos + der_write_integer(out, pos, q, q_len);
+    pos = pos + der_write_integer(out, pos, dp, dp_len);
+    pos = pos + der_write_integer(out, pos, dq, dq_len);
+    pos = pos + der_write_integer(out, pos, qinv, qinv_len);
+
+    return pos;
+}
+
+// Parse a DER PrivateKeyInfo and write field offsets into `key_data`.
+//
+// key_data layout (68 bytes, all little-endian u32):
+//   [ 0.. 3]  outer version (u32)
+//   [ 4.. 7]  n_offset       [ 8..11]  n_len
+//   [12..15]  e_offset       [16..19]  e_len
+//   [20..23]  d_offset       [24..27]  d_len
+//   [28..31]  p_offset       [32..35]  p_len
+//   [36..39]  q_offset       [40..43]  q_len
+//   [44..47]  dp_offset      [48..51]  dp_len
+//   [52..55]  dq_offset      [56..59]  dq_len
+//   [60..63]  qinv_offset    [64..67]  qinv_len
+//
+// Offsets are absolute into `buf`. Leading 0x00 pad bytes are stripped from
+// each integer's effective range.
+// Returns 1 on success, 0 on error.
+
+fn pkcs8_decode(buf: Address, buf_len: u32, key_data: Address) -> u32 {
+    pos: u32 = 0;
+
+    // Outer SEQUENCE
+    if *(buf + pos) != PKI_TAG_SEQUENCE { return 0; }
+    pos = pos + 1;
+    pos = pos + der_read_length_consumed(buf, pos);
+
+    // version INTEGER
+    if *(buf + pos) != PKI_TAG_INTEGER { return 0; }
+    pos = pos + 1;
+    v_len: u32 = der_read_length(buf, pos);
+    v_len_consumed: u32 = der_read_length_consumed(buf, pos);
+    v_off: u32 = pos + v_len_consumed;
+    pki_store_u32(key_data, 0, *(buf + v_off));
+    pos = v_off + v_len;
+
+    // privateKeyAlgorithm AlgorithmIdentifier (SEQUENCE) — skip
+    if *(buf + pos) != PKI_TAG_SEQUENCE { return 0; }
+    pos = pos + 1;
+    ai_len: u32 = der_read_length(buf, pos);
+    ai_len_consumed: u32 = der_read_length_consumed(buf, pos);
+    pos = pos + ai_len_consumed + ai_len;
+
+    // privateKey OCTET STRING containing RSAPrivateKey
+    if *(buf + pos) != PKI_TAG_OCTET_STRING { return 0; }
+    pos = pos + 1;
+    octet_len: u32 = der_read_length(buf, pos);
+    octet_len_consumed: u32 = der_read_length_consumed(buf, pos);
+    pos = pos + octet_len_consumed;
+
+    // RSAPrivateKey SEQUENCE
+    if *(buf + pos) != PKI_TAG_SEQUENCE { return 0; }
+    pos = pos + 1;
+    rk_len: u32 = der_read_length(buf, pos);
+    rk_len_consumed: u32 = der_read_length_consumed(buf, pos);
+    pos = pos + rk_len_consumed;
+
+    // Inner version (skip)
+    if *(buf + pos) != PKI_TAG_INTEGER { return 0; }
+    pos = pos + 1;
+    iv_len: u32 = der_read_length(buf, pos);
+    iv_len_consumed: u32 = der_read_length_consumed(buf, pos);
+    pos = pos + iv_len_consumed + iv_len;
+
+    // Read the 8 integer fields: n, e, d, p, q, dp, dq, qinv
+    field_off_base: u32 = 4;
+    i: u32 = 0;
+    while i < 8 {
+        if *(buf + pos) != PKI_TAG_INTEGER { return 0; }
+        pos = pos + 1;
+        f_len: u32 = der_read_length(buf, pos);
+        f_len_consumed: u32 = der_read_length_consumed(buf, pos);
+        f_off: u32 = pos + f_len_consumed;
+
+        // Strip leading 0x00 pad byte if present (DER adds it when MSB is 1)
+        eff_off: u32 = f_off;
+        eff_len: u32 = f_len;
+        if f_len > 1 {
+            if *(buf + f_off) == 0 {
+                eff_off = f_off + 1;
+                eff_len = f_len - 1;
+            }
+        }
+        pki_store_u32(key_data, field_off_base + i * 8,     eff_off);
+        pki_store_u32(key_data, field_off_base + i * 8 + 4, eff_len);
+        pos = f_off + f_len;
+        i = i + 1;
+    }
+
+    return 1;
+}
+
+// ===========================================================================
+// SECTION 2: PKCS#10 — Certificate Signing Request (RFC 2986)
+// ===========================================================================
+//
+// CertificationRequest ::= SEQUENCE {
+//   certificationRequestInfo CertificationRequestInfo,
+//   signatureAlgorithm       AlgorithmIdentifier,
+//   signature                BIT STRING
+// }
+//
+// CertificationRequestInfo ::= SEQUENCE {
+//   version       INTEGER (0),
+//   subject       Name,
+//   subjectPKInfo SubjectPublicKeyInfo,
+//   attributes    [0] IMPLICIT Attributes  -- empty SET here: A0 00
+// }
+//
+// csr_build:
+//   `subject`    — DER-encoded Name SEQUENCE bytes (copied verbatim)
+//   `pubkey`     — DER-encoded SubjectPublicKeyInfo SEQUENCE bytes
+//   `privkey_d`  — RSA private exponent (LE bignum form, key_size bytes)
+//   `n`          — RSA modulus (LE bignum form, key_size bytes)
+//   `key_size`   — RSA key size in bytes (256 for 2048-bit)
+//   `out`        — output buffer; must be at least subject_len + pubkey_len
+//                  + key_size + 64 bytes
+//   Returns total bytes written.
+
+fn csr_build(subject: Address, subject_len: u32,
+             pubkey: Address, pubkey_len: u32,
+             privkey_d: Address, n: Address, key_size: u32,
+             out: Address) -> u32 {
+    // CertificationRequestInfo content:
+    //   version (3) + subject + subjectPKInfo + attributes [0] empty (2)
+    cri_content_len: u32 = 3 + subject_len + pubkey_len + 2;
+    cri_tlv_len: u32 = 1 + pki_len_bytes_for(cri_content_len) + cri_content_len;
+
+    // Build CRI in a temporary buffer (we must hash it for signing)
+    cri_buf = allocate(cri_tlv_len);
+    cpos: u32 = 0;
+    cpos = cpos + pki_write_seq_header(cri_buf, cpos, cri_content_len);
+    cpos = cpos + pki_write_small_int(cri_buf, cpos, 0);  // version 0
+
+    // subject (already a DER SEQUENCE, copy verbatim)
+    i: u32 = 0;
+    while i < subject_len {
+        *(cri_buf + cpos + i) = *(subject + i);
+        i = i + 1;
+    }
+    cpos = cpos + subject_len;
+
+    // subjectPKInfo (already a DER SEQUENCE, copy verbatim)
+    i = 0;
+    while i < pubkey_len {
+        *(cri_buf + cpos + i) = *(pubkey + i);
+        i = i + 1;
+    }
+    cpos = cpos + pubkey_len;
+
+    // attributes [0] IMPLICIT empty SET: A0 00
+    *(cri_buf + cpos)     = PKI_TAG_CTX_0_EXPLICIT;  // 0xA0 (constructed + ctx 0)
+    *(cri_buf + cpos + 1) = 0;
+    cpos = cpos + 2;
+
+    // Hash CRI and sign with RSA-PKCS1v15-SHA256
+    sig = allocate(key_size);
+    sig_len: u32 = rsa_pkcs1_v15_sign(cri_buf, cri_tlv_len, privkey_d, n, key_size, sig);
+    if sig_len == 0 {
+        free(cri_buf); free(sig);
+        return 0;
+    }
+
+    // Build final CertificationRequest
+    sha256_rsa_oid = pki_oid_sha256_rsa();
+    sig_alg_len: u32 = pki_alg_id_len(9);                    // sha256WithRSA = 15
+    sig_bit_content: u32 = sig_len + 1;                       // +1 unused-bits byte
+    sig_bit_tlv_len: u32 = 1 + pki_len_bytes_for(sig_bit_content) + sig_bit_content;
+    cr_content_len: u32 = cri_tlv_len + sig_alg_len + sig_bit_tlv_len;
+
+    pos: u32 = 0;
+    pos = pos + pki_write_seq_header(out, pos, cr_content_len);
+
+    // certificationRequestInfo
+    i = 0;
+    while i < cri_tlv_len {
+        *(out + pos + i) = *(cri_buf + i);
+        i = i + 1;
+    }
+    pos = pos + cri_tlv_len;
+
+    // signatureAlgorithm
+    pos = pos + pki_write_alg_id(out, pos, sha256_rsa_oid, 9);
+    free(sha256_rsa_oid);
+
+    // signature BIT STRING
+    pos = pos + pki_write_tlv_header(out, pos, PKI_TAG_BIT_STRING, sig_bit_content);
+    *(out + pos) = 0;  // 0 unused bits
+    pos = pos + 1;
+    i = 0;
+    while i < sig_len {
+        *(out + pos + i) = *(sig + i);
+        i = i + 1;
+    }
+    pos = pos + sig_len;
+
+    free(cri_buf); free(sig);
+    return pos;
+}
+
+// Parse a DER CertificationRequest.
+//
+// Outputs (each is 8 bytes: u32 offset, u32 length, into `buf`):
+//   subject — entire Name SEQUENCE (tag + length + content)
+//   pubkey  — entire SubjectPublicKeyInfo SEQUENCE
+//   sig     — signature value bytes (excludes BIT STRING header and the
+//             unused-bits byte)
+//
+// Returns 1 on success, 0 on error.
+
+fn csr_parse(buf: Address, buf_len: u32,
+             subject: Address, pubkey: Address, sig: Address) -> u32 {
+    pos: u32 = 0;
+
+    // CertificationRequest SEQUENCE
+    if *(buf + pos) != PKI_TAG_SEQUENCE { return 0; }
+    pos = pos + 1;
+    pos = pos + der_read_length_consumed(buf, pos);
+
+    // CertificationRequestInfo SEQUENCE
+    if *(buf + pos) != PKI_TAG_SEQUENCE { return 0; }
+    cri_start: u32 = pos;
+    pos = pos + 1;
+    cri_len: u32 = der_read_length(buf, pos);
+    cri_len_consumed: u32 = der_read_length_consumed(buf, pos);
+    cri_content_off: u32 = pos + cri_len_consumed;
+    pos = cri_content_off;
+
+    // version INTEGER
+    if *(buf + pos) != PKI_TAG_INTEGER { return 0; }
+    pos = pos + 1;
+    v_len: u32 = der_read_length(buf, pos);
+    v_len_consumed: u32 = der_read_length_consumed(buf, pos);
+    pos = pos + v_len_consumed + v_len;
+
+    // subject Name SEQUENCE — capture entire TLV
+    if *(buf + pos) != PKI_TAG_SEQUENCE { return 0; }
+    subj_start: u32 = pos;
+    pos = pos + 1;
+    subj_len: u32 = der_read_length(buf, pos);
+    subj_len_consumed: u32 = der_read_length_consumed(buf, pos);
+    subj_content_off: u32 = pos + subj_len_consumed;
+    subj_total: u32 = subj_content_off + subj_len - subj_start;
+    pki_store_u32(subject, 0, subj_start);
+    pki_store_u32(subject, 4, subj_total);
+    pos = subj_content_off + subj_len;
+
+    // subjectPKInfo SEQUENCE — capture entire TLV
+    if *(buf + pos) != PKI_TAG_SEQUENCE { return 0; }
+    pk_start: u32 = pos;
+    pos = pos + 1;
+    pk_len: u32 = der_read_length(buf, pos);
+    pk_len_consumed: u32 = der_read_length_consumed(buf, pos);
+    pk_content_off: u32 = pos + pk_len_consumed;
+    pk_total: u32 = pk_content_off + pk_len - pk_start;
+    pki_store_u32(pubkey, 0, pk_start);
+    pki_store_u32(pubkey, 4, pk_total);
+    pos = pk_content_off + pk_len;
+
+    // Skip the rest of CRI (attributes [0] ...) and advance to its end
+    cri_end: u32 = cri_start + 1 + cri_len_consumed + cri_len;
+    pos = cri_end;
+
+    // signatureAlgorithm SEQUENCE — skip
+    if *(buf + pos) != PKI_TAG_SEQUENCE { return 0; }
+    pos = pos + 1;
+    sa_len: u32 = der_read_length(buf, pos);
+    sa_len_consumed: u32 = der_read_length_consumed(buf, pos);
+    pos = pos + sa_len_consumed + sa_len;
+
+    // signature BIT STRING
+    if *(buf + pos) != PKI_TAG_BIT_STRING { return 0; }
+    pos = pos + 1;
+    sig_len: u32 = der_read_length(buf, pos);
+    sig_len_consumed: u32 = der_read_length_consumed(buf, pos);
+    sig_content_off: u32 = pos + sig_len_consumed;
+    // Skip the unused-bits byte (1 byte) -> signature value starts at +1
+    sig_off: u32 = sig_content_off + 1;
+    sig_actual: u32 = sig_len - 1;
+    pki_store_u32(sig, 0, sig_off);
+    pki_store_u32(sig, 4, sig_actual);
+
+    return 1;
+}
+
+// ===========================================================================
+// SECTION 3: PKCS#7 / CMS — SignedData (RFC 5652)
+// ===========================================================================
+//
+// ContentInfo ::= SEQUENCE {
+//   contentType OID,                  -- id-signedData
+//   content [0] EXPLICIT ANY          -- SignedData DER
+// }
+//
+// SignedData ::= SEQUENCE {
+//   version          CMSVersion,      -- 1 here
+//   digestAlgorithms SET OF AlgId,    -- { sha256 }
+//   encapContentInfo EncapsulatedContentInfo,
+//   certificates     [0] IMPLICIT CertificateSet OPTIONAL,  -- the cert
+//   signerInfos      SET OF SignerInfo
+// }
+//
+// EncapsulatedContentInfo ::= SEQUENCE {
+//   eContentType OID,                 -- id-data
+//   eContent   [0] EXPLICIT OCTET STRING
+// }
+//
+// SignerInfo ::= SEQUENCE {
+//   version            CMSVersion,    -- 1 here (IssuerAndSerialNumber sid)
+//   sid                SignerIdentifier,  -- IssuerAndSerialNumber (parsed
+//                                         -- from cert)
+//   digestAlgorithm    AlgId,         -- sha256
+//   signatureAlgorithm AlgId,         -- sha256WithRSA
+//   signature          OCTET STRING
+// }
+//
+// cms_build_signed_data:
+//   `content`    — payload bytes to be signed and wrapped
+//   `cert`       — DER certificate of the signer (embedded in certificates
+//                  and used to extract IssuerAndSerialNumber for sid)
+//   `privkey_d`  — RSA private exponent (LE bignum, key_size bytes)
+//   `n`          — RSA modulus (LE bignum, key_size bytes)
+//   `key_size`   — RSA key size in bytes
+//   `out`        — output buffer; must be at least content_len + cert_len
+//                  + key_size + 256 bytes
+//   Returns total bytes written; 0 on error.
+
+fn cms_build_signed_data(content: Address, content_len: u32,
+                         cert: Address, cert_len: u32,
+                         privkey_d: Address, n: Address, key_size: u32,
+                         out: Address) -> u32 {
+    // Parse the cert to obtain issuer Name + serial for IssuerAndSerialNumber.
+    // x509.vuma field layout: [4..7] serial_offset, [8..11] serial_len,
+    // [12..15] issuer_offset, [16..19] issuer_len.
+    cert_fields = allocate(80);
+    if x509_parse(cert, cert_len, cert_fields) == 0 {
+        free(cert_fields);
+        return 0;
+    }
+    issuer_off: u32   = pki_load_u32(cert_fields, 12);
+    issuer_len: u32   = pki_load_u32(cert_fields, 16);
+    serial_off: u32   = pki_load_u32(cert_fields, 4);
+    serial_len: u32   = pki_load_u32(cert_fields, 8);
+
+    // Sign the content with RSA-PKCS1v15-SHA256
+    sig = allocate(key_size);
+    sig_len: u32 = rsa_pkcs1_v15_sign(content, content_len, privkey_d, n, key_size, sig);
+    if sig_len == 0 {
+        free(cert_fields); free(sig);
+        return 0;
+    }
+
+    sha256_oid     = pki_oid_sha256();
+    sha256_rsa_oid = pki_oid_sha256_rsa();
+    data_oid       = pki_oid_data();
+    signed_data_oid = pki_oid_signed_data();
+
+    // ---- Compute lengths bottom-up ----
+
+    // IssuerAndSerialNumber ::= SEQUENCE { issuer Name, serialNumber INTEGER }
+    // The issuer bytes are an entire Name SEQUENCE (TLV included).
+    serial_tlv_len: u32   = pki_integer_tlv_len(cert + serial_off, serial_len);
+    iasn_content_len: u32 = issuer_len + serial_tlv_len;
+    iasn_tlv_len: u32     = 1 + pki_len_bytes_for(iasn_content_len) + iasn_content_len;
+    sid_tlv_len: u32      = iasn_tlv_len;  // sid = IssuerAndSerialNumber (a SEQUENCE)
+
+    // digestAlgorithms SET { SEQUENCE{OID sha256, NULL} }
+    sha256_alg_len: u32          = pki_alg_id_len(9);   // = 15
+    digest_algs_content_len: u32 = sha256_alg_len;
+    digest_algs_tlv_len: u32     = 1 + pki_len_bytes_for(digest_algs_content_len)
+                                 + digest_algs_content_len;
+
+    // EncapsulatedContentInfo: SEQUENCE { OID id-data, [0] EXPLICIT OCTET STRING }
+    oid_data_tlv_len: u32         = 1 + pki_len_bytes_for(9) + 9;  // = 11
+    octet_tlv_len: u32            = 1 + pki_len_bytes_for(content_len) + content_len;
+    explicit_octet_tlv_len: u32   = 1 + pki_len_bytes_for(octet_tlv_len) + octet_tlv_len;
+    eci_content_len: u32          = oid_data_tlv_len + explicit_octet_tlv_len;
+    eci_tlv_len: u32              = 1 + pki_len_bytes_for(eci_content_len) + eci_content_len;
+
+    // certificates [0] IMPLICIT — contains the cert SEQUENCE as-is
+    certs_tlv_len: u32 = 1 + pki_len_bytes_for(cert_len) + cert_len;
+
+    // signature OCTET STRING
+    sig_octet_tlv_len: u32 = 1 + pki_len_bytes_for(sig_len) + sig_len;
+
+    // SignerInfo content:
+    //   version(3) + sid + digestAlg + signatureAlg + signature OCTET STRING
+    signer_info_content_len: u32 = 3 + sid_tlv_len + sha256_alg_len + sha256_alg_len
+                                 + sig_octet_tlv_len;
+    signer_info_tlv_len: u32     = 1 + pki_len_bytes_for(signer_info_content_len)
+                                 + signer_info_content_len;
+
+    // signerInfos SET (1 signer)
+    signer_infos_tlv_len: u32 = 1 + pki_len_bytes_for(signer_info_tlv_len)
+                              + signer_info_tlv_len;
+
+    // SignedData content:
+    //   version(3) + digestAlgorithms + encapContentInfo + certificates + signerInfos
+    signed_data_content_len: u32 = 3 + digest_algs_tlv_len + eci_tlv_len
+                                 + certs_tlv_len + signer_infos_tlv_len;
+    signed_data_tlv_len: u32     = 1 + pki_len_bytes_for(signed_data_content_len)
+                                 + signed_data_content_len;
+
+    // [0] EXPLICIT SignedData
+    explicit_signed_data_len: u32 = 1 + pki_len_bytes_for(signed_data_tlv_len)
+                                  + signed_data_tlv_len;
+
+    // ContentInfo: OID id-signedData + [0] EXPLICIT SignedData
+    oid_signed_data_tlv_len: u32 = 1 + pki_len_bytes_for(9) + 9;  // = 11
+    ci_content_len: u32          = oid_signed_data_tlv_len + explicit_signed_data_len;
+
+    // ---- Write top-down ----
+    pos: u32 = 0;
+    pos = pos + pki_write_seq_header(out, pos, ci_content_len);
+    pos = pos + der_write_oid(out, pos, signed_data_oid, 9);
+
+    // [0] EXPLICIT SignedData
+    pos = pos + pki_write_tlv_header(out, pos, PKI_TAG_CTX_0_EXPLICIT, signed_data_tlv_len);
+
+    // SignedData SEQUENCE
+    pos = pos + pki_write_seq_header(out, pos, signed_data_content_len);
+    pos = pos + pki_write_small_int(out, pos, 1);  // version = 1
+
+    // digestAlgorithms SET
+    pos = pos + pki_write_set_header(out, pos, digest_algs_content_len);
+    pos = pos + pki_write_alg_id(out, pos, sha256_oid, 9);
+
+    // encapContentInfo SEQUENCE
+    pos = pos + pki_write_seq_header(out, pos, eci_content_len);
+    pos = pos + der_write_oid(out, pos, data_oid, 9);
+    // [0] EXPLICIT OCTET STRING wrapping the content
+    pos = pos + pki_write_tlv_header(out, pos, PKI_TAG_CTX_0_EXPLICIT, octet_tlv_len);
+    pos = pos + pki_write_tlv_header(out, pos, PKI_TAG_OCTET_STRING, content_len);
+    i: u32 = 0;
+    while i < content_len {
+        *(out + pos + i) = *(content + i);
+        i = i + 1;
+    }
+    pos = pos + content_len;
+
+    // certificates [0] IMPLICIT (constructed ctx tag 0xA0) — embed cert
+    pos = pos + pki_write_tlv_header(out, pos, PKI_TAG_CTX_0_EXPLICIT, cert_len);
+    i = 0;
+    while i < cert_len {
+        *(out + pos + i) = *(cert + i);
+        i = i + 1;
+    }
+    pos = pos + cert_len;
+
+    // signerInfos SET
+    pos = pos + pki_write_set_header(out, pos, signer_info_tlv_len);
+
+    // SignerInfo SEQUENCE
+    pos = pos + pki_write_seq_header(out, pos, signer_info_content_len);
+    pos = pos + pki_write_small_int(out, pos, 1);  // version = 1
+
+    // sid = IssuerAndSerialNumber SEQUENCE (already a SEQUENCE, chosen branch)
+    pos = pos + pki_write_seq_header(out, pos, iasn_content_len);
+    // issuer (entire Name SEQUENCE, copy verbatim)
+    i = 0;
+    while i < issuer_len {
+        *(out + pos + i) = *(cert + issuer_off + i);
+        i = i + 1;
+    }
+    pos = pos + issuer_len;
+    // serialNumber INTEGER
+    pos = pos + der_write_integer(out, pos, cert + serial_off, serial_len);
+
+    // digestAlgorithm (sha256)
+    pos = pos + pki_write_alg_id(out, pos, sha256_oid, 9);
+    // signatureAlgorithm (sha256WithRSA)
+    pos = pos + pki_write_alg_id(out, pos, sha256_rsa_oid, 9);
+
+    // signature OCTET STRING
+    pos = pos + pki_write_tlv_header(out, pos, PKI_TAG_OCTET_STRING, sig_len);
+    i = 0;
+    while i < sig_len {
+        *(out + pos + i) = *(sig + i);
+        i = i + 1;
+    }
+    pos = pos + sig_len;
+
+    free(cert_fields); free(sig);
+    free(sha256_oid); free(sha256_rsa_oid);
+    free(data_oid); free(signed_data_oid);
+    return pos;
+}
+
+// Parse a DER ContentInfo/SignedData.
+//
+// Outputs (each 8 bytes: u32 offset, u32 length into `buf`):
+//   content — the eContent OCTET STRING value bytes (the wrapped payload)
+//   cert    — the first certificate inside certificates [0] (entire cert TLV)
+//   sig     — the first signerInfo's signature value bytes (inside the
+//             OCTET STRING, excluding tag/length)
+//
+// Returns 1 on success, 0 on error.
+
+fn cms_parse_signed_data(buf: Address, buf_len: u32,
+                         content: Address, cert: Address, sig: Address) -> u32 {
+    pos: u32 = 0;
+
+    // ContentInfo SEQUENCE
+    if *(buf + pos) != PKI_TAG_SEQUENCE { return 0; }
+    pos = pos + 1;
+    pos = pos + der_read_length_consumed(buf, pos);
+
+    // contentType OID (expect id-signedData) — skip
+    if *(buf + pos) != PKI_TAG_OID { return 0; }
+    pos = pos + 1;
+    oid_len: u32 = der_read_length(buf, pos);
+    oid_len_consumed: u32 = der_read_length_consumed(buf, pos);
+    pos = pos + oid_len_consumed + oid_len;
+
+    // [0] EXPLICIT SignedData
+    if *(buf + pos) != PKI_TAG_CTX_0_EXPLICIT { return 0; }
+    pos = pos + 1;
+    pos = pos + der_read_length_consumed(buf, pos);
+
+    // SignedData SEQUENCE
+    if *(buf + pos) != PKI_TAG_SEQUENCE { return 0; }
+    pos = pos + 1;
+    sd_len_consumed: u32 = der_read_length_consumed(buf, pos);
+    pos = pos + sd_len_consumed;
+
+    // version INTEGER — skip
+    if *(buf + pos) != PKI_TAG_INTEGER { return 0; }
+    pos = pos + 1;
+    v_len: u32 = der_read_length(buf, pos);
+    v_len_consumed: u32 = der_read_length_consumed(buf, pos);
+    pos = pos + v_len_consumed + v_len;
+
+    // digestAlgorithms SET — skip
+    if *(buf + pos) != PKI_TAG_SET { return 0; }
+    pos = pos + 1;
+    da_len: u32 = der_read_length(buf, pos);
+    da_len_consumed: u32 = der_read_length_consumed(buf, pos);
+    pos = pos + da_len_consumed + da_len;
+
+    // encapContentInfo SEQUENCE
+    if *(buf + pos) != PKI_TAG_SEQUENCE { return 0; }
+    pos = pos + 1;
+    eci_len: u32 = der_read_length(buf, pos);
+    eci_len_consumed: u32 = der_read_length_consumed(buf, pos);
+    eci_content_off: u32 = pos + eci_len_consumed;
+    eci_end: u32 = eci_content_off + eci_len;
+
+    // Parse encapContentInfo: eContentType OID + [0] EXPLICIT OCTET STRING
+    eci_pos: u32 = eci_content_off;
+    if *(buf + eci_pos) != PKI_TAG_OID { return 0; }
+    eci_pos = eci_pos + 1;
+    eco_len: u32 = der_read_length(buf, eci_pos);
+    eco_len_consumed: u32 = der_read_length_consumed(buf, eci_pos);
+    eci_pos = eci_pos + eco_len_consumed + eco_len;
+
+    // [0] EXPLICIT OCTET STRING
+    pki_store_u32(content, 0, 0);
+    pki_store_u32(content, 4, 0);
+    if *(buf + eci_pos) == PKI_TAG_CTX_0_EXPLICIT {
+        eci_pos = eci_pos + 1;
+        eo_len: u32 = der_read_length(buf, eci_pos);
+        eo_len_consumed: u32 = der_read_length_consumed(buf, eci_pos);
+        eci_pos = eci_pos + eo_len_consumed;
+        // OCTET STRING
+        if *(buf + eci_pos) == PKI_TAG_OCTET_STRING {
+            eci_pos = eci_pos + 1;
+            os_len: u32 = der_read_length(buf, eci_pos);
+            os_len_consumed: u32 = der_read_length_consumed(buf, eci_pos);
+            os_off: u32 = eci_pos + os_len_consumed;
+            pki_store_u32(content, 0, os_off);
+            pki_store_u32(content, 4, os_len);
+        }
+    }
+    pos = eci_end;
+
+    // certificates [0] IMPLICIT (optional)
+    pki_store_u32(cert, 0, 0);
+    pki_store_u32(cert, 4, 0);
+    if *(buf + pos) == PKI_TAG_CTX_0_EXPLICIT {
+        certs_outer_start: u32 = pos;
+        pos = pos + 1;
+        certs_len: u32 = der_read_length(buf, pos);
+        certs_len_consumed: u32 = der_read_length_consumed(buf, pos);
+        certs_content_off: u32 = pos + certs_len_consumed;
+        certs_end: u32 = certs_content_off + certs_len;
+
+        // First certificate (a SEQUENCE)
+        if *(buf + certs_content_off) == PKI_TAG_SEQUENCE {
+            c_start: u32 = certs_content_off;
+            cp: u32 = certs_content_off + 1;
+            c_len: u32 = der_read_length(buf, cp);
+            c_len_consumed: u32 = der_read_length_consumed(buf, cp);
+            c_content_off: u32 = cp + c_len_consumed;
+            c_total: u32 = c_content_off + c_len - c_start;
+            pki_store_u32(cert, 0, c_start);
+            pki_store_u32(cert, 4, c_total);
+        }
+        pos = certs_end;
+    }
+
+    // signerInfos SET
+    if *(buf + pos) != PKI_TAG_SET { return 0; }
+    pos = pos + 1;
+    si_len: u32 = der_read_length(buf, pos);
+    si_len_consumed: u32 = der_read_length_consumed(buf, pos);
+    pos = pos + si_len_consumed;
+
+    // First SignerInfo SEQUENCE
+    if *(buf + pos) != PKI_TAG_SEQUENCE { return 0; }
+    pos = pos + 1;
+    sinfo_len: u32 = der_read_length(buf, pos);
+    sinfo_len_consumed: u32 = der_read_length_consumed(buf, pos);
+    pos = pos + sinfo_len_consumed;
+
+    // version INTEGER — skip
+    if *(buf + pos) != PKI_TAG_INTEGER { return 0; }
+    pos = pos + 1;
+    sv_len: u32 = der_read_length(buf, pos);
+    sv_len_consumed: u32 = der_read_length_consumed(buf, pos);
+    pos = pos + sv_len_consumed + sv_len;
+
+    // sid — IssuerAndSerialNumber SEQUENCE (or [0] SubjectKeyIdentifier)
+    sid_tag: u32 = *(buf + pos);
+    pos = pos + 1;
+    sid_len: u32 = der_read_length(buf, pos);
+    sid_len_consumed: u32 = der_read_length_consumed(buf, pos);
+    pos = pos + sid_len_consumed + sid_len;
+    if sid_tag != PKI_TAG_SEQUENCE {
+        if sid_tag != PKI_TAG_CTX_0_IMPLICIT { return 0; }
+    }
+
+    // digestAlgorithm AlgId (SEQUENCE) — skip
+    if *(buf + pos) != PKI_TAG_SEQUENCE { return 0; }
+    pos = pos + 1;
+    da2_len: u32 = der_read_length(buf, pos);
+    da2_len_consumed: u32 = der_read_length_consumed(buf, pos);
+    pos = pos + da2_len_consumed + da2_len;
+
+    // signedAttrs [0] IMPLICIT (optional) — skip if present
+    if *(buf + pos) == PKI_TAG_CTX_0_IMPLICIT {
+        pos = pos + 1;
+        sa2_len: u32 = der_read_length(buf, pos);
+        sa2_len_consumed: u32 = der_read_length_consumed(buf, pos);
+        pos = pos + sa2_len_consumed + sa2_len;
+    }
+
+    // signatureAlgorithm AlgId (SEQUENCE) — skip
+    if *(buf + pos) != PKI_TAG_SEQUENCE { return 0; }
+    pos = pos + 1;
+    sa3_len: u32 = der_read_length(buf, pos);
+    sa3_len_consumed: u32 = der_read_length_consumed(buf, pos);
+    pos = pos + sa3_len_consumed + sa3_len;
+
+    // signature OCTET STRING
+    if *(buf + pos) != PKI_TAG_OCTET_STRING { return 0; }
+    pos = pos + 1;
+    sos_len: u32 = der_read_length(buf, pos);
+    sos_len_consumed: u32 = der_read_length_consumed(buf, pos);
+    sos_off: u32 = pos + sos_len_consumed;
+    pki_store_u32(sig, 0, sos_off);
+    pki_store_u32(sig, 4, sos_len);
+
+    return 1;
+}
+
+// ===========================================================================
+// SECTION 4: OCSP — Request/Response (RFC 6960)
+// ===========================================================================
+//
+// OCSPRequest ::= SEQUENCE {
+//   tbsRequest      TBSRequest,
+//   optionalSignature [0] EXPLICIT Signature OPTIONAL
+// }
+// TBSRequest ::= SEQUENCE {
+//   version      [0] EXPLICIT INTEGER DEFAULT v1,    -- omitted (default)
+//   requestorName [1] EXPLICIT GeneralName OPTIONAL, -- omitted
+//   requestList  SEQUENCE OF Request,
+//   requestExtensions [2] EXPLICIT Extensions OPTIONAL -- omitted
+// }
+// Request ::= SEQUENCE { reqCert CertID, singleRequestExtensions [0] OPTIONAL }
+// CertID ::= SEQUENCE {
+//   hashAlgorithm AlgorithmIdentifier,
+//   issuerNameHash OCTET STRING,
+//   issuerKeyHash  OCTET STRING,
+//   serialNumber   INTEGER
+// }
+//
+// ocsp_build_request:
+//   `cert_serial`       — raw serial bytes (big-endian)
+//   `issuer_name_hash`  — hash of issuer DN (hash_len bytes)
+//   `issuer_key_hash`   — hash of issuer public key BIT STRING contents
+//   `hash_algorithm`    — PKI_HASH_SHA1 (0) or PKI_HASH_SHA256 (1)
+//   `out`               — output buffer (256 bytes is ample)
+//   Returns total bytes written.
+
+fn ocsp_build_request(cert_serial: Address, serial_len: u32,
+                      issuer_name_hash: Address, issuer_key_hash: Address,
+                      hash_algorithm: u32, out: Address) -> u32 {
+    // Determine hash length and OID
+    hash_len: u32 = 20;
+    hash_oid_len: u32 = 5;
+    if hash_algorithm == PKI_HASH_SHA256 {
+        hash_len = 32;
+        hash_oid_len = 9;
+    }
+    hash_oid = allocate(9);  // max OID size we use here
+    if hash_algorithm == PKI_HASH_SHA256 {
+        src = pki_oid_sha256();
+        i: u32 = 0;
+        while i < 9 { *(hash_oid + i) = *(src + i); i = i + 1; }
+        free(src);
+    } else {
+        src = pki_oid_sha1();
+        i = 0;
+        while i < 5 { *(hash_oid + i) = *(src + i); i = i + 1; }
+        free(src);
+    }
+
+    // ---- Compute lengths bottom-up ----
+    hash_alg_len: u32   = pki_alg_id_len(hash_oid_len);
+    name_hash_tlv: u32  = 1 + pki_len_bytes_for(hash_len) + hash_len;
+    key_hash_tlv: u32   = 1 + pki_len_bytes_for(hash_len) + hash_len;
+    serial_tlv: u32     = pki_integer_tlv_len(cert_serial, serial_len);
+
+    certid_content_len: u32 = hash_alg_len + name_hash_tlv + key_hash_tlv + serial_tlv;
+    certid_tlv_len: u32     = 1 + pki_len_bytes_for(certid_content_len) + certid_content_len;
+
+    request_content_len: u32 = certid_tlv_len;
+    request_tlv_len: u32     = 1 + pki_len_bytes_for(request_content_len) + request_content_len;
+
+    request_list_content_len: u32 = request_tlv_len;
+    request_list_tlv_len: u32     = 1 + pki_len_bytes_for(request_list_content_len)
+                                  + request_list_content_len;
+
+    tbs_content_len: u32 = request_list_tlv_len;
+    ocsp_req_content_len: u32 = tbs_content_len;
+
+    // ---- Write ----
+    pos: u32 = 0;
+    pos = pos + pki_write_seq_header(out, pos, ocsp_req_content_len);   // OCSPRequest
+    pos = pos + pki_write_seq_header(out, pos, tbs_content_len);        // TBSRequest
+    pos = pos + pki_write_seq_header(out, pos, request_list_content_len); // requestList
+    pos = pos + pki_write_seq_header(out, pos, request_content_len);    // Request
+    pos = pos + pki_write_seq_header(out, pos, certid_content_len);     // CertID
+
+    // hashAlgorithm AlgId
+    pos = pos + pki_write_alg_id(out, pos, hash_oid, hash_oid_len);
+    free(hash_oid);
+
+    // issuerNameHash OCTET STRING
+    pos = pos + pki_write_tlv_header(out, pos, PKI_TAG_OCTET_STRING, hash_len);
+    i: u32 = 0;
+    while i < hash_len {
+        *(out + pos + i) = *(issuer_name_hash + i);
+        i = i + 1;
+    }
+    pos = pos + hash_len;
+
+    // issuerKeyHash OCTET STRING
+    pos = pos + pki_write_tlv_header(out, pos, PKI_TAG_OCTET_STRING, hash_len);
+    i = 0;
+    while i < hash_len {
+        *(out + pos + i) = *(issuer_key_hash + i);
+        i = i + 1;
+    }
+    pos = pos + hash_len;
+
+    // serialNumber INTEGER
+    pos = pos + der_write_integer(out, pos, cert_serial, serial_len);
+
+    return pos;
+}
+
+// Parse a DER OCSPResponse.
+//
+// OCSPResponse ::= SEQUENCE {
+//   responseStatus ENUMERATED,
+//   responseBytes  [0] EXPLICIT ResponseBytes OPTIONAL  -- only if successful
+// }
+// ResponseBytes ::= SEQUENCE { responseType OID, response OCTET STRING }
+//   response contains DER BasicOCSPResponse
+// BasicOCSPResponse ::= SEQUENCE { tbsResponseData, signatureAlgorithm,
+//                                  signature BIT STRING, certs OPTIONAL }
+// ResponseData ::= SEQUENCE {
+//   version [0] EXPLICIT INTEGER DEFAULT v1,   -- optional
+//   responderID (CHOICE: [1] EXPLICIT Name | [2] EXPLICIT OCTET STRING),
+//   producedAt GeneralizedTime,
+//   responses SEQUENCE OF SingleResponse,
+//   responseExtensions [1] EXPLICIT OPTIONAL
+// }
+// SingleResponse ::= SEQUENCE {
+//   certID CertID,
+//   certStatus CHOICE { good [0] IMPLICIT NULL, revoked [1] IMPLICIT,
+//                       unknown [2] IMPLICIT },
+//   thisUpdate GeneralizedTime,
+//   nextUpdate [0] EXPLICIT GeneralizedTime OPTIONAL,
+//   singleExtensions [1] EXPLICIT OPTIONAL
+// }
+//
+// Outputs:
+//   status       — u32: responseStatus (0 = successful)
+//   cert_status  — u32: 0=good, 1=revoked, 2=unknown (from first SingleResponse)
+//   this_update  — 8 bytes: offset+length of the thisUpdate Time TLV in `buf`
+//   next_update  — 8 bytes: offset+length of the nextUpdate Time TLV (or 0,0
+//                  if absent)
+//
+// Returns 1 on success (even if responseStatus != successful — outputs other
+// than status are zeroed in that case), 0 on parse error.
+
+fn ocsp_parse_response(buf: Address, buf_len: u32,
+                       status: Address, cert_status: Address,
+                       this_update: Address, next_update: Address) -> u32 {
+    // Zero all outputs up front; we fill them as we go.
+    pki_store_u32(status, 0, 0);
+    pki_store_u32(cert_status, 0, 0);
+    pki_store_u32(this_update, 0, 0);
+    pki_store_u32(this_update, 4, 0);
+    pki_store_u32(next_update, 0, 0);
+    pki_store_u32(next_update, 4, 0);
+
+    pos: u32 = 0;
+
+    // OCSPResponse SEQUENCE
+    if *(buf + pos) != PKI_TAG_SEQUENCE { return 0; }
+    pos = pos + 1;
+    pos = pos + der_read_length_consumed(buf, pos);
+
+    // responseStatus ENUMERATED
+    if *(buf + pos) != PKI_TAG_ENUMERATED { return 0; }
+    pos = pos + 1;
+    rs_len: u32 = der_read_length(buf, pos);
+    rs_len_consumed: u32 = der_read_length_consumed(buf, pos);
+    rs_off: u32 = pos + rs_len_consumed;
+    pki_store_u32(status, 0, *(buf + rs_off));
+    pos = rs_off + rs_len;
+
+    // If not successful, responseBytes is absent — return success (status only).
+    if *(buf + rs_off) != PKI_OCSP_RESP_SUCCESSFUL { return 1; }
+
+    // responseBytes [0] EXPLICIT
+    if *(buf + pos) != PKI_TAG_CTX_0_EXPLICIT { return 0; }
+    pos = pos + 1;
+    pos = pos + der_read_length_consumed(buf, pos);
+
+    // ResponseBytes SEQUENCE
+    if *(buf + pos) != PKI_TAG_SEQUENCE { return 0; }
+    pos = pos + 1;
+    rbs_len: u32 = der_read_length(buf, pos);
+    rbs_len_consumed: u32 = der_read_length_consumed(buf, pos);
+    pos = pos + rbs_len_consumed;
+
+    // responseType OID — skip
+    if *(buf + pos) != PKI_TAG_OID { return 0; }
+    pos = pos + 1;
+    roid_len: u32 = der_read_length(buf, pos);
+    roid_len_consumed: u32 = der_read_length_consumed(buf, pos);
+    pos = pos + roid_len_consumed + roid_len;
+
+    // response OCTET STRING — contains DER BasicOCSPResponse
+    if *(buf + pos) != PKI_TAG_OCTET_STRING { return 0; }
+    pos = pos + 1;
+    resp_len: u32 = der_read_length(buf, pos);
+    resp_len_consumed: u32 = der_read_length_consumed(buf, pos);
+    resp_off: u32 = pos + resp_len_consumed;
+
+    // Parse BasicOCSPResponse SEQUENCE
+    bor_pos: u32 = resp_off;
+    if *(buf + bor_pos) != PKI_TAG_SEQUENCE { return 0; }
+    bor_pos = bor_pos + 1;
+    bor_pos = bor_pos + der_read_length_consumed(buf, bor_pos);
+
+    // tbsResponseData SEQUENCE
+    if *(buf + bor_pos) != PKI_TAG_SEQUENCE { return 0; }
+    bor_pos = bor_pos + 1;
+    rd_len: u32 = der_read_length(buf, bor_pos);
+    rd_len_consumed: u32 = der_read_length_consumed(buf, bor_pos);
+    rd_content_off: u32 = bor_pos + rd_len_consumed;
+
+    rp: u32 = rd_content_off;
+
+    // version [0] EXPLICIT (optional) — skip if present
+    if *(buf + rp) == PKI_TAG_CTX_0_EXPLICIT {
+        rp = rp + 1;
+        rv_len: u32 = der_read_length(buf, rp);
+        rv_len_consumed: u32 = der_read_length_consumed(buf, rp);
+        rp = rp + rv_len_consumed + rv_len;
+    }
+
+    // responderID: [1] EXPLICIT Name OR [2] EXPLICIT OCTET STRING
+    rid_tag: u32 = *(buf + rp);
+    if rid_tag == PKI_TAG_CTX_1_EXPLICIT {
+        // byName [1] EXPLICIT Name
+    } else {
+        if rid_tag == PKI_TAG_CTX_2_EXPLICIT {
+            // byKey [2] EXPLICIT OCTET STRING
+        } else {
+            // Some encoders omit the explicit tag and use a bare Name SEQUENCE
+            if rid_tag != PKI_TAG_SEQUENCE { return 0; }
+        }
+    }
+    rp = rp + 1;
+    rid_len: u32 = der_read_length(buf, rp);
+    rid_len_consumed: u32 = der_read_length_consumed(buf, rp);
+    rp = rp + rid_len_consumed + rid_len;
+
+    // producedAt GeneralizedTime — skip
+    pa_tag: u32 = *(buf + rp);
+    if pa_tag != PKI_TAG_GENERALIZED_TIME {
+        if pa_tag != PKI_TAG_UTC_TIME { return 0; }
+    }
+    rp = rp + 1;
+    pa_len: u32 = der_read_length(buf, rp);
+    pa_len_consumed: u32 = der_read_length_consumed(buf, rp);
+    rp = rp + pa_len_consumed + pa_len;
+
+    // responses SEQUENCE OF SingleResponse
+    if *(buf + rp) != PKI_TAG_SEQUENCE { return 0; }
+    rp = rp + 1;
+    resps_len: u32 = der_read_length(buf, rp);
+    resps_len_consumed: u32 = der_read_length_consumed(buf, rp);
+    rp = rp + resps_len_consumed;
+
+    // First SingleResponse SEQUENCE
+    if *(buf + rp) != PKI_TAG_SEQUENCE { return 0; }
+    rp = rp + 1;
+    sr_len: u32 = der_read_length(buf, rp);
+    sr_len_consumed: u32 = der_read_length_consumed(buf, rp);
+    rp = rp + sr_len_consumed;
+
+    // certID CertID SEQUENCE — skip
+    if *(buf + rp) != PKI_TAG_SEQUENCE { return 0; }
+    rp = rp + 1;
+    cid_len: u32 = der_read_length(buf, rp);
+    cid_len_consumed: u32 = der_read_length_consumed(buf, rp);
+    rp = rp + cid_len_consumed + cid_len;
+
+    // certStatus — CHOICE tagged [0]/[1]/[2] IMPLICIT
+    // The cert_status value is the context tag number: tag & 0x1F.
+    cs_tag: u32 = *(buf + rp);
+    pki_store_u32(cert_status, 0, cs_tag & 31);
+    rp = rp + 1;
+    cs_len: u32 = der_read_length(buf, rp);
+    cs_len_consumed: u32 = der_read_length_consumed(buf, rp);
+    rp = rp + cs_len_consumed + cs_len;
+
+    // thisUpdate Time (GeneralizedTime or UTCTime) — capture entire TLV
+    tu_tag: u32 = *(buf + rp);
+    if tu_tag != PKI_TAG_GENERALIZED_TIME {
+        if tu_tag != PKI_TAG_UTC_TIME { return 0; }
+    }
+    tu_start: u32 = rp;
+    rp = rp + 1;
+    tu_len: u32 = der_read_length(buf, rp);
+    tu_len_consumed: u32 = der_read_length_consumed(buf, rp);
+    tu_content_off: u32 = rp + tu_len_consumed;
+    tu_total: u32 = tu_content_off + tu_len - tu_start;
+    pki_store_u32(this_update, 0, tu_start);
+    pki_store_u32(this_update, 4, tu_total);
+    rp = tu_content_off + tu_len;
+
+    // nextUpdate [0] EXPLICIT Time (optional)
+    if *(buf + rp) == PKI_TAG_CTX_0_EXPLICIT {
+        nu_outer_start: u32 = rp;
+        rp = rp + 1;
+        nu_len: u32 = der_read_length(buf, rp);
+        nu_len_consumed: u32 = der_read_length_consumed(buf, rp);
+        rp = rp + nu_len_consumed;
+        // Inner Time TLV
+        nu_start: u32 = rp;
+        rp = rp + 1;
+        nui_len: u32 = der_read_length(buf, rp);
+        nui_len_consumed: u32 = der_read_length_consumed(buf, rp);
+        nui_content_off: u32 = rp + nui_len_consumed;
+        nu_total: u32 = nui_content_off + nui_len - nu_outer_start;
+        pki_store_u32(next_update, 0, nu_outer_start);
+        pki_store_u32(next_update, 4, nu_total);
+    }
+
+    return 1;
+}
+
+// ===========================================================================
+// SECTION 5: CRL — Certificate Revocation List (RFC 5280)
+// ===========================================================================
+//
+// CertificateList ::= SEQUENCE {
+//   tbsCertList          TBSCertList,
+//   signatureAlgorithm   AlgorithmIdentifier,
+//   signatureValue       BIT STRING
+// }
+// TBSCertList ::= SEQUENCE {
+//   version                 Version OPTIONAL,   -- INTEGER, skip if present
+//   signature               AlgorithmIdentifier,
+//   issuer                  Name,
+//   thisUpdate              Time,
+//   nextUpdate              Time OPTIONAL,
+//   revokedCertificates     SEQUENCE OF SEQUENCE {
+//     userCertificate       CertificateSerialNumber,  -- INTEGER
+//     revocationDate        Time,
+//     crlEntryExtensions    [0] EXPLICIT OPTIONAL
+//   } OPTIONAL,
+//   crlExtensions           [0] EXPLICIT OPTIONAL
+// }
+//
+// crl_parse:
+//   `revoked_serials` — output array of 8-byte entries (u32 offset, u32 len)
+//                        into `buf` for each revoked serial. Each serial's
+//                        leading 0x00 pad byte (if any) is stripped.
+//   `max_entries`     — capacity of `revoked_serials` in entries (each 8 bytes)
+//   `next_update`     — 8-byte output (offset+len) for nextUpdate Time TLV
+//                        (or 0,0 if absent)
+//   Returns the count of revoked serial entries written.
+
+fn crl_parse(buf: Address, buf_len: u32,
+             revoked_serials: Address, max_entries: u32,
+             next_update: Address) -> u32 {
+    pki_store_u32(next_update, 0, 0);
+    pki_store_u32(next_update, 4, 0);
+
+    pos: u32 = 0;
+
+    // CertificateList SEQUENCE
+    if *(buf + pos) != PKI_TAG_SEQUENCE { return 0; }
+    pos = pos + 1;
+    pos = pos + der_read_length_consumed(buf, pos);
+
+    // TBSCertList SEQUENCE
+    if *(buf + pos) != PKI_TAG_SEQUENCE { return 0; }
+    pos = pos + 1;
+    pos = pos + der_read_length_consumed(buf, pos);
+
+    // version (optional, INTEGER) — skip if present
+    if *(buf + pos) == PKI_TAG_INTEGER {
+        pos = pos + 1;
+        v_len: u32 = der_read_length(buf, pos);
+        v_len_consumed: u32 = der_read_length_consumed(buf, pos);
+        pos = pos + v_len_consumed + v_len;
+    }
+
+    // signature AlgorithmIdentifier (SEQUENCE) — skip
+    if *(buf + pos) != PKI_TAG_SEQUENCE { return 0; }
+    pos = pos + 1;
+    sig_alg_len: u32 = der_read_length(buf, pos);
+    sig_alg_len_consumed: u32 = der_read_length_consumed(buf, pos);
+    pos = pos + sig_alg_len_consumed + sig_alg_len;
+
+    // issuer Name (SEQUENCE) — skip
+    if *(buf + pos) != PKI_TAG_SEQUENCE { return 0; }
+    pos = pos + 1;
+    iss_len: u32 = der_read_length(buf, pos);
+    iss_len_consumed: u32 = der_read_length_consumed(buf, pos);
+    pos = pos + iss_len_consumed + iss_len;
+
+    // thisUpdate Time — skip
+    tu_tag: u32 = *(buf + pos);
+    if tu_tag != PKI_TAG_UTC_TIME {
+        if tu_tag != PKI_TAG_GENERALIZED_TIME { return 0; }
+    }
+    pos = pos + 1;
+    tu_len: u32 = der_read_length(buf, pos);
+    tu_len_consumed: u32 = der_read_length_consumed(buf, pos);
+    pos = pos + tu_len_consumed + tu_len;
+
+    // nextUpdate Time (optional) — capture
+    nu_tag: u32 = *(buf + pos);
+    if nu_tag == PKI_TAG_UTC_TIME {
+        // bare UTCTime nextUpdate
+        nu_start: u32 = pos;
+        pos = pos + 1;
+        nu_len: u32 = der_read_length(buf, pos);
+        nu_len_consumed: u32 = der_read_length_consumed(buf, pos);
+        nu_content_off: u32 = pos + nu_len_consumed;
+        nu_total: u32 = nu_content_off + nu_len - nu_start;
+        pki_store_u32(next_update, 0, nu_start);
+        pki_store_u32(next_update, 4, nu_total);
+        pos = nu_content_off + nu_len;
+    } else {
+        if nu_tag == PKI_TAG_GENERALIZED_TIME {
+            nu_start2: u32 = pos;
+            pos = pos + 1;
+            nu_len2: u32 = der_read_length(buf, pos);
+            nu_len_consumed2: u32 = der_read_length_consumed(buf, pos);
+            nu_content_off2: u32 = pos + nu_len_consumed2;
+            nu_total2: u32 = nu_content_off2 + nu_len2 - nu_start2;
+            pki_store_u32(next_update, 0, nu_start2);
+            pki_store_u32(next_update, 4, nu_total2);
+            pos = nu_content_off2 + nu_len2;
+        }
+    }
+
+    // revokedCertificates SEQUENCE OF (optional)
+    count: u32 = 0;
+    if *(buf + pos) == PKI_TAG_SEQUENCE {
+        pos = pos + 1;
+        rc_len: u32 = der_read_length(buf, pos);
+        rc_len_consumed: u32 = der_read_length_consumed(buf, pos);
+        rc_end: u32 = pos + rc_len_consumed + rc_len;
+        pos = pos + rc_len_consumed;
+
+        // Iterate revoked certificate entries
+        while pos < rc_end {
+            if count >= max_entries { break; }
+            if *(buf + pos) != PKI_TAG_SEQUENCE { break; }
+            pos = pos + 1;
+            entry_len: u32 = der_read_length(buf, pos);
+            entry_len_consumed: u32 = der_read_length_consumed(buf, pos);
+            entry_content_off: u32 = pos + entry_len_consumed;
+            entry_end: u32 = entry_content_off + entry_len;
+            pos = entry_content_off;
+
+            // userCertificate INTEGER (serial number)
+            if *(buf + pos) != PKI_TAG_INTEGER { break; }
+            serial_start: u32 = pos;
+            pos = pos + 1;
+            ser_len: u32 = der_read_length(buf, pos);
+            ser_len_consumed: u32 = der_read_length_consumed(buf, pos);
+            ser_content_off: u32 = pos + ser_len_consumed;
+
+            // Strip leading 0x00 pad byte if present (but keep at least 1 byte)
+            eff_off: u32 = ser_content_off;
+            eff_len: u32 = ser_len;
+            if ser_len > 1 {
+                if *(buf + ser_content_off) == 0 {
+                    eff_off = ser_content_off + 1;
+                    eff_len = ser_len - 1;
+                }
+            }
+            pki_store_u32(revoked_serials, count * 8,     eff_off);
+            pki_store_u32(revoked_serials, count * 8 + 4, eff_len);
+            count = count + 1;
+
+            // Move to the next entry (skip revocationDate + any extensions)
+            pos = entry_end;
+        }
+    }
+
+    return count;
+}
+
+// Check whether `serial` (raw big-endian bytes) is on the revoked list of
+// the supplied CRL.
+//
+// Returns 1 if the serial is revoked, 0 otherwise (including parse errors).
+
+fn crl_check_revoked(crl: Address, crl_len: u32,
+                     serial: Address, serial_len: u32) -> u32 {
+    if serial_len == 0 { return 0; }
+
+    // Normalize the input serial: strip leading zero bytes (canonical form)
+    s_start: u32 = 0;
+    while s_start < serial_len - 1 {
+        if *(serial + s_start) != 0 { break; }
+        s_start = s_start + 1;
+    }
+    s_eff_len: u32 = serial_len - s_start;
+
+    // Allocate space for up to 256 revoked entries (2 KiB)
+    max_entries: u32 = 256;
+    revoked_serials = allocate(max_entries * 8);
+    next_update = allocate(8);
+
+    count: u32 = crl_parse(crl, crl_len, revoked_serials, max_entries, next_update);
+
+    result: u32 = 0;
+    i: u32 = 0;
+    while i < count {
+        e_off: u32 = pki_load_u32(revoked_serials, i * 8);
+        e_len: u32 = pki_load_u32(revoked_serials, i * 8 + 4);
+        if e_len == s_eff_len {
+            matched: u32 = 1;
+            j: u32 = 0;
+            while j < s_eff_len {
+                if *(crl + e_off + j) != *(serial + s_start + j) {
+                    matched = 0;
+                    break;
+                }
+                j = j + 1;
+            }
+            if matched == 1 {
+                result = 1;
+                break;
+            }
+        }
+        i = i + 1;
+    }
+
+    free(revoked_serials);
+    free(next_update);
+    return result;
+}

@@ -1,0 +1,694 @@
+// womb/crypto/key_agreement.vuma — Key Agreement Protocols
+// ===========================================================================
+// Provides three key-agreement mechanisms:
+//
+//   1. ECDH over NIST P-384        (elliptic curve, 384-bit)
+//   2. Classic Finite-Field DH     (RFC 7919 FFDHE2048, 2048-bit)
+//   3. X448                        (RFC 7748 Curve448, 448-bit Montgomery)
+//
+// No main() — importable library module.
+//
+// External dependencies (assumed to exist at link time):
+//   ecdsa_p384.vuma  — P-384 curve parameters and 384-bit point operations:
+//                        p384_p_be()   -> Address  (48-byte big-endian prime p)
+//                        p384_gx_be()  -> Address  (48-byte big-endian Gx)
+//                        p384_gy_be()  -> Address  (48-byte big-endian Gy)
+//                        swap_endian_48(dst, src)
+//                        p384_scalar_mul(rx, ry, k_le, px_le, py_le, p_le)
+//                          (384-bit scalar multiplication, 48-byte little-endian
+//                           elements — the P-384 analogue of p256_scalar_mul)
+//   bignum2048.vuma  — 2048-bit bignum (256-byte little-endian limbs):
+//                        bn2048_mod_exp(r, a, exp, m)   r = a^exp mod m
+//                        bn2048_zero, bn2048_copy, bn2048_cmp, bn2048_is_zero,
+//                        bn2048_add, bn2048_sub, bn2048_mod_mul, ...
+//   bignum.vuma      — 256-bit bignum (bn256_*) and ecdsa_p256.vuma (p256_*)
+//                      — referenced for completeness; not called directly here.
+//   sha256_oneshot, sha512_oneshot — available if a caller wants to derive a
+//                      digest from the raw shared secret.
+//
+// Memory model: every function allocates its own working buffers via
+// allocate() and releases them with free() before returning. All public
+// entry points write their outputs into caller-supplied buffers.
+//
+// Endianness conventions:
+//   - P-384 inputs/outputs: 48-byte big-endian (network order), matching the
+//     rest of the ECDSA/ECDH P-256 family. Converted to little-endian for the
+//     384-bit point operations.
+//   - DH inputs/outputs: prime_len-byte big-endian. Converted to 256-byte
+//     little-endian internally for bn2048_* calls.
+//   - X448 inputs/outputs: 56-byte little-endian field elements (RFC 7748
+//     wire format is little-endian). All field arithmetic is mod
+//     p = 2^448 - 2^224 - 1.
+// ===========================================================================
+
+
+// ===========================================================================
+// Part 1: ECDH over NIST P-384
+// ===========================================================================
+// Curve: y^2 = x^3 - 3x + b (mod p),  p = 2^384 - 2^128 - 2^96 + 2^32 - 1
+// Public key Q = d * G; shared secret S = d * Q_peer (x-coordinate of result).
+// All scalars and coordinates are 48-byte (384-bit) big-endian arrays.
+//
+// The point arithmetic (point add/double, scalar multiplication) is provided
+// by ecdsa_p384.vuma as 384-bit ("p384_*") operations, structurally identical
+// to the P-256 ("p256_*") operations but operating on 48-byte elements.
+// These ECDH wrappers are thin: they byte-swap between the big-endian external
+// representation and the little-endian limb representation used by the bignum
+// layer, then call p384_scalar_mul.
+
+// Generate public key: Q = d * G
+//   privkey_be   : 48-byte big-endian private scalar d
+//   pubkey_x_be  : 48-byte big-endian Qx (output)
+//   pubkey_y_be  : 48-byte big-endian Qy (output)
+fn ecdh_p384_keygen(privkey_be: Address, pubkey_x_be: Address, pubkey_y_be: Address) {
+    // Private scalar to little-endian limb form
+    d_le = allocate(48);
+    swap_endian_48(d_le, privkey_be);
+
+    // Generator G to little-endian
+    gx_be = p384_gx_be();
+    gy_be = p384_gy_be();
+    gx_le = allocate(48);
+    gy_le = allocate(48);
+    swap_endian_48(gx_le, gx_be);
+    swap_endian_48(gy_le, gy_be);
+    free(gx_be); free(gy_be);
+
+    // Field prime p to little-endian
+    p_be = p384_p_be();
+    p_le = allocate(48);
+    swap_endian_48(p_le, p_be);
+    free(p_be);
+
+    // Q = d * G
+    qx_le = allocate(48);
+    qy_le = allocate(48);
+    p384_scalar_mul(qx_le, qy_le, d_le, gx_le, gy_le, p_le);
+
+    // Publish Q in big-endian
+    swap_endian_48(pubkey_x_be, qx_le);
+    swap_endian_48(pubkey_y_be, qy_le);
+
+    free(d_le); free(gx_le); free(gy_le); free(p_le); free(qx_le); free(qy_le);
+}
+
+// Compute shared secret: S = d * Q_peer
+//   privkey_be   : 48-byte big-endian our private scalar d
+//   peer_x_be    : 48-byte big-endian peer public key x
+//   peer_y_be    : 48-byte big-endian peer public key y
+//   shared       : 48-byte big-endian x-coordinate of S = d*Q_peer (output)
+fn ecdh_p384_shared_secret(privkey_be: Address, peer_x_be: Address, peer_y_be: Address, shared: Address) {
+    // Convert inputs to little-endian
+    d_le = allocate(48);
+    swap_endian_48(d_le, privkey_be);
+    qx_le = allocate(48);
+    qy_le = allocate(48);
+    swap_endian_48(qx_le, peer_x_be);
+    swap_endian_48(qy_le, peer_y_be);
+
+    // Field prime p to little-endian
+    p_be = p384_p_be();
+    p_le = allocate(48);
+    swap_endian_48(p_le, p_be);
+    free(p_be);
+
+    // S = d * Q_peer
+    sx_le = allocate(48);
+    sy_le = allocate(48);
+    p384_scalar_mul(sx_le, sy_le, d_le, qx_le, qy_le, p_le);
+
+    // Shared secret is the x-coordinate (big-endian)
+    swap_endian_48(shared, sx_le);
+
+    free(d_le); free(qx_le); free(qy_le); free(p_le); free(sx_le); free(sy_le);
+}
+
+
+// ===========================================================================
+// Part 2: Classic Finite-Field Diffie-Hellman (RFC 7919 FFDHE)
+// ===========================================================================
+// public = generator ^ private  mod prime
+// shared = peer_pub ^ private   mod prime
+//
+// All DH values are big-endian byte arrays of length `prime_len`
+// (1 <= prime_len <= 256). The 2048-bit bignum layer (bignum2048.vuma) works
+// on fixed 256-byte little-endian limb buffers, so we widen/swap at the
+// boundary: a prime_len-byte big-endian input is right-justified and reversed
+// into a 256-byte little-endian buffer (zero-padded in the high limbs), the
+// modular exponentiation is performed, and the low prime_len bytes of the
+// result are reversed back to big-endian for output.
+//
+// Return codes (dh_generate / dh_shared_secret):
+//   0  success
+//   1  prime_len == 0
+//   2  prime_len > 256
+
+// Widen a prime_len-byte big-endian integer into a 256-byte little-endian
+// limb buffer (high bytes zero-filled). Used to feed bn2048_* routines.
+fn ka_be_to_le256(le_buf: Address, be_in: Address, len: u32) {
+    // Zero the whole 256-byte buffer first
+    i: u32 = 0;
+    while i < 256 { *(le_buf + i) = 0; i = i + 1; }
+    if len == 0 { return; }
+    // be_in[0]   = most-significant byte  -> le_buf[len-1]
+    // be_in[len-1] = least-significant byte -> le_buf[0]
+    i = 0;
+    while i < len {
+        *(le_buf + i) = *(be_in + (len - 1 - i));
+        i = i + 1;
+    }
+}
+
+// Narrow the low `len` bytes of a 256-byte little-endian limb buffer back into
+// a `len`-byte big-endian output.
+fn ka_le256_to_be(be_out: Address, le_buf: Address, len: u32) {
+    if len == 0 { return; }
+    i: u32 = 0;
+    while i < len {
+        *(be_out + i) = *(le_buf + (len - 1 - i));
+        i = i + 1;
+    }
+}
+
+// Copy `len` bytes verbatim (used to echo the private value into keypair[]).
+fn ka_copy_bytes(dst: Address, src: Address, len: u32) {
+    i: u32 = 0;
+    while i < len {
+        *(dst + i) = *(src + i);
+        i = i + 1;
+    }
+}
+
+// Generate a DH keypair.
+//   keypair      : output buffer, 2*prime_len bytes
+//                  [0 .. prime_len-1]            = public value (big-endian)
+//                  [prime_len .. 2*prime_len-1]  = private value (big-endian)
+//   generator    : prime_len-byte big-endian generator g
+//   prime        : prime_len-byte big-endian prime p
+//   prime_len    : byte length of g, p, and the values (1..256)
+//   private_val  : prime_len-byte big-endian private exponent x
+// Returns 0 on success, nonzero on invalid prime_len.
+fn dh_generate(keypair: Address, generator: Address, prime: Address, prime_len: u32, private_val: Address) -> u32 {
+    if prime_len == 0 { return 1; }
+    if prime_len > 256 { return 2; }
+
+    gen_le   = allocate(256);
+    priv_le  = allocate(256);
+    prime_le = allocate(256);
+    pub_le   = allocate(256);
+
+    ka_be_to_le256(gen_le,   generator,   prime_len);
+    ka_be_to_le256(priv_le,  private_val, prime_len);
+    ka_be_to_le256(prime_le, prime,       prime_len);
+
+    // public = generator ^ private  mod prime
+    bn2048_mod_exp(pub_le, gen_le, priv_le, prime_le);
+
+    // Lay out the keypair: public then private, both big-endian.
+    ka_le256_to_be(keypair,             pub_le,      prime_len);
+    ka_copy_bytes(keypair + prime_len,  private_val, prime_len);
+
+    free(gen_le); free(priv_le); free(prime_le); free(pub_le);
+    return 0;
+}
+
+// Compute a DH shared secret.
+//   priv      : prime_len-byte big-endian our private exponent x
+//   peer_pub  : prime_len-byte big-endian peer public value
+//   prime     : prime_len-byte big-endian prime p
+//   prime_len : byte length (1..256)
+//   shared    : prime_len-byte big-endian shared secret = peer_pub^x mod p (out)
+// Returns 0 on success, nonzero on invalid prime_len.
+fn dh_shared_secret(priv: Address, peer_pub: Address, prime: Address, prime_len: u32, shared: Address) -> u32 {
+    if prime_len == 0 { return 1; }
+    if prime_len > 256 { return 2; }
+
+    priv_le  = allocate(256);
+    peer_le  = allocate(256);
+    prime_le = allocate(256);
+    shared_le = allocate(256);
+
+    ka_be_to_le256(priv_le,  priv,     prime_len);
+    ka_be_to_le256(peer_le,  peer_pub, prime_len);
+    ka_be_to_le256(prime_le, prime,    prime_len);
+
+    // shared = peer_pub ^ priv  mod prime
+    bn2048_mod_exp(shared_le, peer_le, priv_le, prime_le);
+
+    ka_le256_to_be(shared, shared_le, prime_len);
+
+    free(priv_le); free(peer_le); free(prime_le); free(shared_le);
+    return 0;
+}
+
+// RFC 7919 ffdhe2048 prime (256 bytes, big-endian).
+//   p = 2^2048 - 2^1984 + {[2^1918 * e] + 560316} * 2^64 - 1
+// Returns a freshly allocated 256-byte buffer holding p in big-endian order.
+// The caller owns the buffer and must free() it.
+fn ffdhe2048_prime() -> Address {
+    buf = allocate(256);
+    *(buf + 0) = 255; *(buf + 1) = 255; *(buf + 2) = 255; *(buf + 3) = 255; *(buf + 4) = 255; *(buf + 5) = 255; *(buf + 6) = 255; *(buf + 7) = 255;
+    *(buf + 8) = 173; *(buf + 9) = 248; *(buf + 10) = 84; *(buf + 11) = 88; *(buf + 12) = 162; *(buf + 13) = 187; *(buf + 14) = 74; *(buf + 15) = 154;
+    *(buf + 16) = 175; *(buf + 17) = 220; *(buf + 18) = 86; *(buf + 19) = 32; *(buf + 20) = 39; *(buf + 21) = 61; *(buf + 22) = 60; *(buf + 23) = 241;
+    *(buf + 24) = 216; *(buf + 25) = 185; *(buf + 26) = 197; *(buf + 27) = 131; *(buf + 28) = 206; *(buf + 29) = 45; *(buf + 30) = 54; *(buf + 31) = 149;
+    *(buf + 32) = 169; *(buf + 33) = 225; *(buf + 34) = 54; *(buf + 35) = 65; *(buf + 36) = 20; *(buf + 37) = 100; *(buf + 38) = 51; *(buf + 39) = 251;
+    *(buf + 40) = 204; *(buf + 41) = 147; *(buf + 42) = 157; *(buf + 43) = 206; *(buf + 44) = 36; *(buf + 45) = 155; *(buf + 46) = 62; *(buf + 47) = 249;
+    *(buf + 48) = 125; *(buf + 49) = 47; *(buf + 50) = 227; *(buf + 51) = 99; *(buf + 52) = 99; *(buf + 53) = 12; *(buf + 54) = 117; *(buf + 55) = 216;
+    *(buf + 56) = 246; *(buf + 57) = 129; *(buf + 58) = 178; *(buf + 59) = 2; *(buf + 60) = 174; *(buf + 61) = 196; *(buf + 62) = 97; *(buf + 63) = 122;
+    *(buf + 64) = 211; *(buf + 65) = 223; *(buf + 66) = 30; *(buf + 67) = 213; *(buf + 68) = 213; *(buf + 69) = 253; *(buf + 70) = 101; *(buf + 71) = 97;
+    *(buf + 72) = 36; *(buf + 73) = 51; *(buf + 74) = 245; *(buf + 75) = 31; *(buf + 76) = 95; *(buf + 77) = 6; *(buf + 78) = 110; *(buf + 79) = 208;
+    *(buf + 80) = 133; *(buf + 81) = 99; *(buf + 82) = 101; *(buf + 83) = 85; *(buf + 84) = 61; *(buf + 85) = 237; *(buf + 86) = 26; *(buf + 87) = 243;
+    *(buf + 88) = 181; *(buf + 89) = 87; *(buf + 90) = 19; *(buf + 91) = 94; *(buf + 92) = 127; *(buf + 93) = 87; *(buf + 94) = 201; *(buf + 95) = 53;
+    *(buf + 96) = 152; *(buf + 97) = 79; *(buf + 98) = 12; *(buf + 99) = 112; *(buf + 100) = 224; *(buf + 101) = 230; *(buf + 102) = 139; *(buf + 103) = 119;
+    *(buf + 104) = 226; *(buf + 105) = 166; *(buf + 106) = 137; *(buf + 107) = 218; *(buf + 108) = 243; *(buf + 109) = 239; *(buf + 110) = 232; *(buf + 111) = 114;
+    *(buf + 112) = 29; *(buf + 113) = 241; *(buf + 114) = 88; *(buf + 115) = 161; *(buf + 116) = 54; *(buf + 117) = 173; *(buf + 118) = 231; *(buf + 119) = 53;
+    *(buf + 120) = 48; *(buf + 121) = 172; *(buf + 122) = 202; *(buf + 123) = 79; *(buf + 124) = 72; *(buf + 125) = 58; *(buf + 126) = 121; *(buf + 127) = 122;
+    *(buf + 128) = 188; *(buf + 129) = 10; *(buf + 130) = 177; *(buf + 131) = 130; *(buf + 132) = 179; *(buf + 133) = 36; *(buf + 134) = 251; *(buf + 135) = 97;
+    *(buf + 136) = 209; *(buf + 137) = 8; *(buf + 138) = 169; *(buf + 139) = 75; *(buf + 140) = 178; *(buf + 141) = 200; *(buf + 142) = 227; *(buf + 143) = 251;
+    *(buf + 144) = 185; *(buf + 145) = 106; *(buf + 146) = 218; *(buf + 147) = 183; *(buf + 148) = 96; *(buf + 149) = 215; *(buf + 150) = 244; *(buf + 151) = 104;
+    *(buf + 152) = 29; *(buf + 153) = 79; *(buf + 154) = 66; *(buf + 155) = 163; *(buf + 156) = 222; *(buf + 157) = 57; *(buf + 158) = 77; *(buf + 159) = 244;
+    *(buf + 160) = 174; *(buf + 161) = 86; *(buf + 162) = 237; *(buf + 163) = 231; *(buf + 164) = 99; *(buf + 165) = 114; *(buf + 166) = 187; *(buf + 167) = 25;
+    *(buf + 168) = 11; *(buf + 169) = 7; *(buf + 170) = 167; *(buf + 171) = 200; *(buf + 172) = 238; *(buf + 173) = 10; *(buf + 174) = 109; *(buf + 175) = 112;
+    *(buf + 176) = 158; *(buf + 177) = 2; *(buf + 178) = 252; *(buf + 179) = 225; *(buf + 180) = 205; *(buf + 181) = 247; *(buf + 182) = 226; *(buf + 183) = 236;
+    *(buf + 184) = 192; *(buf + 185) = 52; *(buf + 186) = 4; *(buf + 187) = 205; *(buf + 188) = 40; *(buf + 189) = 52; *(buf + 190) = 47; *(buf + 191) = 97;
+    *(buf + 192) = 145; *(buf + 193) = 114; *(buf + 194) = 254; *(buf + 195) = 156; *(buf + 196) = 233; *(buf + 197) = 133; *(buf + 198) = 131; *(buf + 199) = 255;
+    *(buf + 200) = 142; *(buf + 201) = 79; *(buf + 202) = 18; *(buf + 203) = 50; *(buf + 204) = 238; *(buf + 205) = 242; *(buf + 206) = 129; *(buf + 207) = 131;
+    *(buf + 208) = 195; *(buf + 209) = 254; *(buf + 210) = 59; *(buf + 211) = 27; *(buf + 212) = 76; *(buf + 213) = 111; *(buf + 214) = 173; *(buf + 215) = 115;
+    *(buf + 216) = 59; *(buf + 217) = 181; *(buf + 218) = 252; *(buf + 219) = 188; *(buf + 220) = 46; *(buf + 221) = 194; *(buf + 222) = 32; *(buf + 223) = 5;
+    *(buf + 224) = 197; *(buf + 225) = 142; *(buf + 226) = 241; *(buf + 227) = 131; *(buf + 228) = 125; *(buf + 229) = 22; *(buf + 230) = 131; *(buf + 231) = 178;
+    *(buf + 232) = 198; *(buf + 233) = 243; *(buf + 234) = 74; *(buf + 235) = 38; *(buf + 236) = 193; *(buf + 237) = 178; *(buf + 238) = 239; *(buf + 239) = 250;
+    *(buf + 240) = 136; *(buf + 241) = 107; *(buf + 242) = 66; *(buf + 243) = 56; *(buf + 244) = 97; *(buf + 245) = 40; *(buf + 246) = 92; *(buf + 247) = 151;
+    *(buf + 248) = 255; *(buf + 249) = 255; *(buf + 250) = 255; *(buf + 251) = 255; *(buf + 252) = 255; *(buf + 253) = 255; *(buf + 254) = 255; *(buf + 255) = 255;
+    return buf;
+}
+
+// RFC 7919 ffdhe2048 generator. g = 2.
+fn ffdhe2048_generator() -> u32 {
+    return 2;
+}
+
+
+// ===========================================================================
+// Part 3: X448 (RFC 7748 — Curve448)
+// ===========================================================================
+// Montgomery-form curve over GF(p), p = 2^448 - 2^224 - 1:
+//     v^2 = u^3 + u*(u^2 + 156326*x^2 + ...)   (the Montgomery ladder below
+//     uses only the u-coordinate, parameterised by a24 = 39081).
+//
+// Field element representation: 56 bytes (448 bits = 7 x u64 limbs), stored
+// little-endian (byte 0 = least significant). The scalar and the u-coordinate
+// are taken directly in RFC 7748 wire (little-endian) format.
+//
+// The Montgomery ladder is identical in structure to the X25519 ladder but
+// operates over the 448-bit field:
+//   * p     = 2^448 - 2^224 - 1
+//   * a24   = 39081
+//   * 448 ladder steps (bits 447..0)
+//   * scalar clamping: clear bits 0,1 and bit 447; set bit 446
+//
+// Field arithmetic is implemented from scratch here as a self-contained
+// 7-limb (56-byte) bignum mod p, using generic shift-and-add multiplication
+// and Fermat (a^(p-2)) inversion. Correctness relies on 64-bit wraparound
+// for the modular add/sub carry/borrow handling, exactly as in bignum.vuma's
+// 256-bit variants.
+
+// ---- 56-byte little-endian load/store of a u64 limb ----------------------
+
+fn fe448_load_u64(ptr: Address, off: u32) -> u64 {
+    b0: u64 = *(ptr + off);     b1: u64 = *(ptr + off + 1);
+    b2: u64 = *(ptr + off + 2); b3: u64 = *(ptr + off + 3);
+    b4: u64 = *(ptr + off + 4); b5: u64 = *(ptr + off + 5);
+    b6: u64 = *(ptr + off + 6); b7: u64 = *(ptr + off + 7);
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
+}
+
+fn fe448_store_u64(ptr: Address, off: u32, val: u64) {
+    *(ptr + off)     = val & 255;
+    *(ptr + off + 1) = (val >> 8) & 255;
+    *(ptr + off + 2) = (val >> 16) & 255;
+    *(ptr + off + 3) = (val >> 24) & 255;
+    *(ptr + off + 4) = (val >> 32) & 255;
+    *(ptr + off + 5) = (val >> 40) & 255;
+    *(ptr + off + 6) = (val >> 48) & 255;
+    *(ptr + off + 7) = (val >> 56) & 255;
+}
+
+// ---- Basic field-element operations (7 x u64 limbs = 56 bytes) ------------
+
+fn fe448_zero(r: Address) {
+    i: u32 = 0;
+    while i < 56 { *(r + i) = 0; i = i + 1; }
+}
+
+fn fe448_one(r: Address) {
+    fe448_zero(r);
+    *(r + 0) = 1;
+}
+
+fn fe448_copy(r: Address, a: Address) {
+    i: u32 = 0;
+    while i < 56 { *(r + i) = *(a + i); i = i + 1; }
+}
+
+fn fe448_is_zero(a: Address) -> u32 {
+    i: u32 = 0;
+    while i < 7 {
+        if fe448_load_u64(a, i * 8) != 0 { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+// Compare a and b: 1 if a>b, -1 if a<b, 0 if equal (most-significant limb first).
+fn fe448_cmp(a: Address, b: Address) -> i32 {
+    i: u32 = 6;
+    while 1 == 1 {
+        av: u64 = fe448_load_u64(a, i * 8);
+        bv: u64 = fe448_load_u64(b, i * 8);
+        if av > bv { return 1; }
+        if av < bv { return -1; }
+        if i == 0 { break; }
+        i = i - 1;
+    }
+    return 0;
+}
+
+// r = a + b  (mod 2^448); returns the carry out of bit 448.
+fn fe448_add(r: Address, a: Address, b: Address) -> u32 {
+    carry: u64 = 0;
+    i: u32 = 0;
+    while i < 7 {
+        av: u64 = fe448_load_u64(a, i * 8);
+        bv: u64 = fe448_load_u64(b, i * 8);
+        sum: u64 = av + bv + carry;
+        fe448_store_u64(r, i * 8, sum);
+        if sum < av { carry = 1; }
+        else {
+            if sum == av {
+                if carry == 1 { carry = 1; }
+                else { carry = 0; }
+            } else {
+                carry = 0;
+            }
+        }
+        i = i + 1;
+    }
+    return carry;
+}
+
+// r = a - b  (mod 2^448); returns the borrow out of bit 448.
+fn fe448_sub(r: Address, a: Address, b: Address) -> u32 {
+    borrow: u64 = 0;
+    i: u32 = 0;
+    while i < 7 {
+        av: u64 = fe448_load_u64(a, i * 8);
+        bv: u64 = fe448_load_u64(b, i * 8);
+        diff: u64 = av - bv - borrow;
+        fe448_store_u64(r, i * 8, diff);
+        if av < bv { borrow = 1; }
+        else {
+            if av == bv {
+                if borrow == 1 { borrow = 1; }
+                else { borrow = 0; }
+            } else {
+                borrow = 0;
+            }
+        }
+        i = i + 1;
+    }
+    return borrow;
+}
+
+// r = a - val  (mod 2^448), val a small u64. Used to build p-2 for inversion.
+fn fe448_sub_small(r: Address, a: Address, val: u64) {
+    borrow: u64 = val;
+    i: u32 = 0;
+    while i < 7 {
+        av: u64 = fe448_load_u64(a, i * 8);
+        diff: u64 = av - borrow;
+        fe448_store_u64(r, i * 8, diff);
+        if av < borrow { borrow = 1; }
+        else { borrow = 0; }
+        i = i + 1;
+    }
+}
+
+// r = (a + b) mod m   (assumes a, b < m). One conditional subtraction suffices
+// because a + b < 2m. When the raw add carries out of 448 bits, r holds
+// (a+b) - 2^448 which is < m, so r - m wraps (mod 2^448) to a + b - m.
+fn fe448_mod_add(r: Address, a: Address, b: Address, m: Address) {
+    carry: u32 = fe448_add(r, a, b);
+    if carry == 1 {
+        fe448_sub(r, r, m);
+    } else {
+        if fe448_cmp(r, m) >= 0 {
+            fe448_sub(r, r, m);
+        }
+    }
+}
+
+// r = (a - b) mod m   (assumes a, b < m). If a < b, the raw sub borrows and
+// r holds (a - b) + 2^448; adding m (mod 2^448) yields a - b + m, in range.
+fn fe448_mod_sub(r: Address, a: Address, b: Address, m: Address) {
+    borrow: u32 = fe448_sub(r, a, b);
+    if borrow == 1 {
+        fe448_add(r, r, m);
+    }
+}
+
+// Bit extraction / bit-length (for square-and-multiply).
+
+fn fe448_get_bit(a: Address, bit: u32) -> u32 {
+    limb: u32 = bit / 64;
+    pos: u32 = bit % 64;
+    if limb >= 7 { return 0; }
+    v: u64 = fe448_load_u64(a, limb * 8);
+    return (v >> pos) & 1;
+}
+
+fn fe448_bitlen(a: Address) -> u32 {
+    i: u32 = 6;
+    while 1 == 1 {
+        v: u64 = fe448_load_u64(a, i * 8);
+        if v != 0 {
+            bits: u32 = 64;
+            while bits > 0 {
+                if ((v >> (bits - 1)) & 1) == 1 { return i * 64 + bits; }
+                bits = bits - 1;
+            }
+            return i * 64 + 1;
+        }
+        if i == 0 { break; }
+        i = i - 1;
+    }
+    return 0;
+}
+
+// r = (a * b) mod m  via shift-and-add. The doubling step uses mod_add(temp,
+// temp, m) so the result stays correctly reduced even when 2*temp crosses the
+// 2^448 boundary (the generic lshift1+subtract shortcut is unsafe for that).
+fn fe448_mod_mul(r: Address, a: Address, b: Address, m: Address) {
+    fe448_zero(r);
+    temp = allocate(56);
+    fe448_copy(temp, a);
+
+    bits: u32 = fe448_bitlen(b);
+    i: u32 = 0;
+    while i < bits {
+        if fe448_get_bit(b, i) == 1 {
+            fe448_mod_add(r, r, temp, m);
+        }
+        // temp = 2 * temp mod m  (correct doubling)
+        fe448_mod_add(temp, temp, temp, m);
+        i = i + 1;
+    }
+    free(temp);
+}
+
+// r = a^exp mod m  via square-and-multiply (MSB-first bit traversal).
+fn fe448_mod_exp(r: Address, a: Address, exp: Address, m: Address) {
+    fe448_zero(r);
+    *(r + 0) = 1;  // r = 1
+
+    base = allocate(56);
+    fe448_copy(base, a);
+
+    bits: u32 = fe448_bitlen(exp);
+    i: u32 = 0;
+    while i < bits {
+        if fe448_get_bit(exp, i) == 1 {
+            tmp = allocate(56);
+            fe448_mod_mul(tmp, r, base, m);
+            fe448_copy(r, tmp);
+            free(tmp);
+        }
+        tmp2 = allocate(56);
+        fe448_mod_mul(tmp2, base, base, m);
+        fe448_copy(base, tmp2);
+        free(tmp2);
+        i = i + 1;
+    }
+    free(base);
+}
+
+// r = a^(-1) mod m  via Fermat's little theorem: a^(m-2) mod m.
+// Requires m to be prime (true for p = 2^448 - 2^224 - 1).
+fn fe448_mod_inv(r: Address, a: Address, m: Address) {
+    exp = allocate(56);
+    fe448_copy(exp, m);
+    fe448_sub_small(exp, exp, 2);  // exp = m - 2
+    fe448_mod_exp(r, a, exp, m);
+    free(exp);
+}
+
+// Constant-time conditional swap of two 56-byte field elements.
+// swap == 1 -> exchange a and b; swap == 0 -> no-op. Branch-free.
+fn fe448_cswap(swap: u32, a: Address, b: Address) {
+    mask: u32 = 0;
+    if swap == 1 { mask = 4294967295; }  // 0xFFFFFFFF
+    i: u32 = 0;
+    while i < 56 {
+        av: u32 = *(a + i);
+        bv: u32 = *(b + i);
+        dummy: u32 = (av ^ bv) & mask;
+        *(a + i) = av ^ dummy;
+        *(b + i) = bv ^ dummy;
+        i = i + 1;
+    }
+}
+
+// r = a * 39081 mod m   (a24 for Curve448). 39081 = 0x9891.
+fn fe448_mul_a24(r: Address, a: Address, m: Address) {
+    b = allocate(56);
+    fe448_zero(b);
+    *(b + 0) = 145;  // 0x91
+    *(b + 1) = 152;  // 0x98
+    fe448_mod_mul(r, a, b, m);
+    free(b);
+}
+
+// Fill r with the X448 field prime p = 2^448 - 2^224 - 1 in little-endian:
+// all bytes 0xFF except byte 28 = 0xFE (bit 224 is the only clear bit).
+fn fe448_p448(r: Address) {
+    i: u32 = 0;
+    while i < 56 { *(r + i) = 255; i = i + 1; }
+    *(r + 28) = 254;  // 0xFE: clear bit 224
+}
+
+// --------------------------------------------------------------------------
+// X448 scalar multiplication (RFC 7748 Section 5, Montgomery ladder).
+//   out    : 56-byte little-endian result  = scalar * point  (u-coordinate)
+//   scalar : 56-byte little-endian scalar  (clamped internally)
+//   point  : 56-byte little-endian u-coordinate of the input point
+// --------------------------------------------------------------------------
+fn x448_scalarmult(out: Address, scalar: Address, point: Address) {
+    // Field prime
+    p = allocate(56);
+    fe448_p448(p);
+
+    // Clamp the scalar: clear bits 0,1 and bit 447; set bit 446.
+    k = allocate(56);
+    i: u32 = 0;
+    while i < 56 { *(k + i) = *(scalar + i); i = i + 1; }
+    *(k + 0)  = *(k + 0)  & 252;   // clear bits 0,1  (0xFC)
+    *(k + 55) = *(k + 55) & 127;   // clear bit 447   (0x7F)
+    *(k + 55) = *(k + 55) | 64;    // set   bit 446   (0x40)
+
+    // u-coordinate (X448 uses the full 448 bits — no high-bit masking).
+    u = allocate(56);
+    i = 0;
+    while i < 56 { *(u + i) = *(point + i); i = i + 1; }
+
+    // Ladder state
+    x1 = allocate(56); fe448_copy(x1, u);   // x1 = u
+    x2 = allocate(56); fe448_one(x2);        // x2 = 1
+    z2 = allocate(56); fe448_zero(z2);       // z2 = 0
+    x3 = allocate(56); fe448_copy(x3, u);    // x3 = u
+    z3 = allocate(56); fe448_one(z3);        // z3 = 1
+
+    swap: u32 = 0;
+    pos: i32 = 447;
+    while pos >= 0 {
+        byte_idx: u32 = pos / 8;
+        bit_idx: u32 = pos % 8;
+        bit: u32 = (*(k + byte_idx) >> bit_idx) & 1;
+
+        swap = swap ^ bit;
+        fe448_cswap(swap, x2, x3);
+        fe448_cswap(swap, z2, z3);
+        swap = bit;
+
+        // A = x2 + z2 ; AA = A^2
+        a = allocate(56); fe448_mod_add(a, x2, z2, p);
+        aa = allocate(56); fe448_mod_mul(aa, a, a, p);
+
+        // B = x2 - z2 ; BB = B^2
+        b = allocate(56); fe448_mod_sub(b, x2, z2, p);
+        bb = allocate(56); fe448_mod_mul(bb, b, b, p);
+
+        // E = AA - BB
+        e_val = allocate(56); fe448_mod_sub(e_val, aa, bb, p);
+
+        // C = x3 + z3 ; D = x3 - z3
+        c = allocate(56); fe448_mod_add(c, x3, z3, p);
+        d = allocate(56); fe448_mod_sub(d, x3, z3, p);
+
+        // DA = D * A ; CB = C * B
+        da = allocate(56); fe448_mod_mul(da, d, a, p);
+        cb = allocate(56); fe448_mod_mul(cb, c, b, p);
+
+        // x3 = (DA + CB)^2
+        da_cb = allocate(56); fe448_mod_add(da_cb, da, cb, p);
+        fe448_mod_mul(x3, da_cb, da_cb, p);
+
+        // z3 = x1 * (DA - CB)^2
+        da_cb_sub = allocate(56); fe448_mod_sub(da_cb_sub, da, cb, p);
+        sq = allocate(56); fe448_mod_mul(sq, da_cb_sub, da_cb_sub, p);
+        fe448_mod_mul(z3, x1, sq, p);
+
+        // x2 = AA * BB
+        fe448_mod_mul(x2, aa, bb, p);
+
+        // z2 = E * (AA + a24 * E)
+        a24_e = allocate(56); fe448_mul_a24(a24_e, e_val, p);
+        aa_a24e = allocate(56); fe448_mod_add(aa_a24e, aa, a24_e, p);
+        fe448_mod_mul(z2, e_val, aa_a24e, p);
+
+        free(a); free(aa); free(b); free(bb); free(e_val);
+        free(c); free(d); free(da); free(cb); free(da_cb);
+        free(da_cb_sub); free(sq); free(a24_e); free(aa_a24e);
+
+        pos = pos - 1;
+    }
+
+    // Final conditional swap undoes the last pending swap.
+    fe448_cswap(swap, x2, x3);
+    fe448_cswap(swap, z2, z3);
+
+    // out = x2 * z2^(-1) mod p
+    z_inv = allocate(56); fe448_mod_inv(z_inv, z2, p);
+    fe448_mod_mul(out, x2, z_inv, p);
+
+    free(p); free(k); free(u);
+    free(x1); free(x2); free(z2); free(x3); free(z3); free(z_inv);
+}
+
+// X448 key-pair generation.
+//   privkey : 56-byte little-endian private scalar (clamped internally)
+//   pubkey  : 56-byte little-endian public u-coordinate = X448(privkey, 5)
+// The base point is u = 5 (RFC 7748).
+fn x448_keygen(privkey: Address, pubkey: Address) {
+    base = allocate(56);
+    fe448_zero(base);
+    *(base + 0) = 5;  // u = 5
+    x448_scalarmult(pubkey, privkey, base);
+    free(base);
+}
+
+// X448 shared secret.
+//   privkey     : 56-byte little-endian our private scalar
+//   peer_pubkey : 56-byte little-endian peer public u-coordinate
+//   shared      : 56-byte little-endian shared secret = X448(privkey, peer_pubkey)
+fn x448_shared_secret(privkey: Address, peer_pubkey: Address, shared: Address) {
+    x448_scalarmult(shared, privkey, peer_pubkey);
+}

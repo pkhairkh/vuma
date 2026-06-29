@@ -1,0 +1,1048 @@
+// compression_extra.vuma — gzip / LZ4 / zstd / Brotli wrappers (simplified)
+//
+// Task ID: womb-compression-extra
+//
+// No main() — importable library module. Compiles to bare-metal machine code
+// on all VUMA backends. Memory access is byte-level via *(ptr + offset); all
+// multi-byte values are little-endian unless noted.
+//
+// This module is SELF-CONTAINED: it provides its own crc32/adler32 and its own
+// DEFLATE stored-block codec so the four wrappers below round-trip without
+// any external dependency.
+//
+// Simplifications (documented per format):
+//   * gzip  — DEFLATE payload uses BTYPE=00 (stored) blocks only. The internal
+//             inflate_stored decodes stored blocks; compressed block types
+//             (fixed/dynamic Huffman) return -1.
+//   * lz4   — Frame descriptor is 2 bytes (FLG + BD); the Header Checksum
+//             (HC) byte and content checksum are omitted. Each data block is a
+//             single literals-only LZ4 sequence (no match finding).
+//   * zstd  — Only Raw (block_type=0) and RLE (block_type=1) blocks are
+//             produced/decoded. Compressed blocks (FSE/Huffman) return -1.
+//   * brotli — Only raw (uncompressed) meta-blocks are produced/decoded.
+//             Compressed meta-blocks (Huffman/context modeling) return -1.
+//             MNIBBLES is repurposed as a size class: the MLEN field width is
+//             (MNIBBLES + 1) bytes (1..4 bytes), covering 0 .. 2^32-1.
+//
+// Public API (all compress/decompress return bytes written/read, or -1):
+//   crc32(data, len) -> u32
+//   adler32(data, len) -> u32
+//   deflate_stored(input, input_len, output, output_max) -> i64
+//   inflate_stored(input, input_len, output, output_max) -> i64
+//   gzip_compress(input, input_len, output, output_max) -> i64
+//   gzip_decompress(input, input_len, output, output_max) -> i64
+//   lz4_compress(input, input_len, output, output_max) -> i64
+//   lz4_decompress(input, input_len, output, output_max) -> i64
+//   zstd_compress(input, input_len, output, output_max) -> i64
+//   zstd_decompress(input, input_len, output, output_max) -> i64
+//   brotli_compress(input, input_len, output, output_max) -> i64
+//   brotli_decompress(input, input_len, output, output_max) -> i64
+
+// ===========================================================================
+// Constants
+// ===========================================================================
+
+const MASK32: u32     = 4294967295;     // 0xFFFFFFFF
+const MOD_ADLER: u32  = 65521;          // largest prime < 2^16
+const CRC32_POLY: u32 = 3988292384;     // 0xEDB88320 (reversed, standard zlib/gzip CRC-32)
+const INV32: u32      = 4294967295;     // 0xFFFFFFFF (CRC init / final XOR)
+
+// ===========================================================================
+// Byte-level memory helpers (little-endian)
+// ===========================================================================
+
+fn store_u32_le(ptr: Address, offset: u32, val: u32) {
+    *(ptr + offset + 0) = val & 255;
+    *(ptr + offset + 1) = (val >> 8) & 255;
+    *(ptr + offset + 2) = (val >> 16) & 255;
+    *(ptr + offset + 3) = (val >> 24) & 255;
+}
+
+fn load_u32_le(ptr: Address, offset: u32) -> u32 {
+    b0: u32 = *(ptr + offset + 0);
+    b1: u32 = *(ptr + offset + 1);
+    b2: u32 = *(ptr + offset + 2);
+    b3: u32 = *(ptr + offset + 3);
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+}
+
+// Store an Address as 8 little-endian bytes (Address is treated as u64).
+fn store_addr_le(ptr: Address, offset: u32, val: Address) {
+    v: u64 = val as u64;
+    *(ptr + offset + 0) = v & 255;
+    *(ptr + offset + 1) = (v >> 8) & 255;
+    *(ptr + offset + 2) = (v >> 16) & 255;
+    *(ptr + offset + 3) = (v >> 24) & 255;
+    *(ptr + offset + 4) = (v >> 32) & 255;
+    *(ptr + offset + 5) = (v >> 40) & 255;
+    *(ptr + offset + 6) = (v >> 48) & 255;
+    *(ptr + offset + 7) = (v >> 56) & 255;
+}
+
+// Load an Address from 8 little-endian bytes.
+fn load_addr_le(ptr: Address, offset: u32) -> Address {
+    b0: u64 = *(ptr + offset + 0);
+    b1: u64 = *(ptr + offset + 1);
+    b2: u64 = *(ptr + offset + 2);
+    b3: u64 = *(ptr + offset + 3);
+    b4: u64 = *(ptr + offset + 4);
+    b5: u64 = *(ptr + offset + 5);
+    b6: u64 = *(ptr + offset + 6);
+    b7: u64 = *(ptr + offset + 7);
+    v: u64 = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+               | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
+    return v as Address;
+}
+
+// ===========================================================================
+// CRC-32 (IEEE 802.3, polynomial 0xEDB88320)
+// Bitwise, allocation-free. Used by gzip.
+// ===========================================================================
+
+fn crc32(data: Address, len: u32) -> u32 {
+    crc: u32 = INV32;                 // init = 0xFFFFFFFF
+    i: u32 = 0;
+    while i < len {
+        b: u32 = *(data + i);
+        crc = crc ^ b;
+        j: u32 = 0;
+        while j < 8 {
+            if (crc & 1) == 1 {
+                crc = (crc >> 1) ^ CRC32_POLY;
+            } else {
+                crc = crc >> 1;
+            }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    return crc ^ INV32;               // final XOR
+}
+
+// ===========================================================================
+// Adler-32 (RFC 1950) — used by zlib; included for completeness.
+// ===========================================================================
+
+fn adler32(data: Address, len: u32) -> u32 {
+    s1: u32 = 1;
+    s2: u32 = 0;
+    i: u32 = 0;
+    while i < len {
+        b: u32 = *(data + i);
+        s1 = (s1 + b) % MOD_ADLER;
+        s2 = (s2 + s1) % MOD_ADLER;
+        i = i + 1;
+    }
+    return (s2 << 16) | s1;
+}
+
+// ===========================================================================
+// Bit writer / bit reader (LSB-first) — used by the Brotli wrapper.
+// ===========================================================================
+
+// Bit writer state (32 bytes):
+//   [0..3]   accumulator (u32)     pending bits, LSB first
+//   [4..7]   bit_count  (u32)      valid bits in accumulator (0..7)
+//   [8..15]  output     (Address)  output buffer base
+//   [16..19] pos        (u32)      current byte write position
+//   [20..23] max        (u32)      output buffer capacity
+//   [24..27] error      (u32)      0 = OK, 1 = overflow
+
+// Initialize a bit writer state that the CALLER has already allocated (at
+// least 32 bytes). The state must live in the caller's frame so it stays
+// valid across calls to bit_writer_put / bit_writer_align. (VUMA's
+// allocate() returns a stack-local pointer; returning one from a helper
+// would dangle, so we allocate in the long-lived caller and init here.)
+fn bit_writer_init(w: Address, output: Address, max: u32) {
+    store_u32_le(w, 0, 0);            // accumulator
+    store_u32_le(w, 4, 0);            // bit_count
+    store_addr_le(w, 8, output);      // output
+    store_u32_le(w, 16, 0);           // pos
+    store_u32_le(w, 20, max);         // max
+    store_u32_le(w, 24, 0);           // error
+}
+
+// Write nbits of value (LSB first). nbits must be <= 24.
+fn bit_writer_put(w: Address, value: u32, nbits: u32) {
+    acc: u32 = load_u32_le(w, 0);
+    bits: u32 = load_u32_le(w, 4);
+    mask: u32 = (1 << nbits) - 1;
+    acc = acc | ((value & mask) << bits);
+    bits = bits + nbits;
+    out: Address = load_addr_le(w, 8);
+    pos: u32 = load_u32_le(w, 16);
+    max: u32 = load_u32_le(w, 20);
+    while bits >= 8 {
+        byte: u32 = acc & 255;
+        if pos < max {
+            *(out + pos) = byte;
+        } else {
+            store_u32_le(w, 24, 1);   // overflow flag
+        }
+        pos = pos + 1;
+        acc = acc >> 8;
+        bits = bits - 8;
+    }
+    store_u32_le(w, 0, acc);
+    store_u32_le(w, 4, bits);
+    store_u32_le(w, 16, pos);
+}
+
+// Pad with zero bits up to the next byte boundary.
+fn bit_writer_align(w: Address) {
+    bits: u32 = load_u32_le(w, 4);
+    if bits > 0 {
+        bit_writer_put(w, 0, 8 - bits);
+    }
+}
+
+fn bit_writer_pos(w: Address) -> u32 {
+    return load_u32_le(w, 16);
+}
+
+// Advance the byte write position by n (after writing raw bytes directly).
+fn bit_writer_advance(w: Address, n: u32) {
+    pos: u32 = load_u32_le(w, 16);
+    store_u32_le(w, 16, pos + n);
+}
+
+fn bit_writer_error(w: Address) -> u32 {
+    return load_u32_le(w, 24);
+}
+
+fn bit_writer_free(w: Address) {
+    free(w);
+}
+
+// Bit reader state (32 bytes):
+//   [0..7]   data     (Address)  input buffer base
+//   [8..11]  byte_pos (u32)      current byte index
+//   [12..15] bit_pos  (u32)      current bit within byte (0..7)
+//   [16..19] len      (u32)      total input length
+//   [20..23] error    (u32)      0 = OK, 1 = past end
+
+// Initialize a bit reader state that the CALLER has already allocated (at
+// least 32 bytes). See bit_writer_init for why the caller owns the storage.
+fn bit_reader_init(r: Address, data: Address, len: u32) {
+    store_addr_le(r, 0, data);
+    store_u32_le(r, 8, 0);            // byte_pos
+    store_u32_le(r, 12, 0);           // bit_pos
+    store_u32_le(r, 16, len);
+    store_u32_le(r, 20, 0);           // error
+}
+
+fn bit_reader_bit(r: Address) -> u32 {
+    byte_pos: u32 = load_u32_le(r, 8);
+    bit_pos: u32 = load_u32_le(r, 12);
+    len: u32 = load_u32_le(r, 16);
+    if byte_pos >= len {
+        store_u32_le(r, 20, 1);
+        return 0;
+    }
+    data: Address = load_addr_le(r, 0);
+    b: u32 = *(data + byte_pos);
+    bit: u32 = (b >> bit_pos) & 1;
+    bit_pos = bit_pos + 1;
+    if bit_pos == 8 {
+        bit_pos = 0;
+        byte_pos = byte_pos + 1;
+    }
+    store_u32_le(r, 8, byte_pos);
+    store_u32_le(r, 12, bit_pos);
+    return bit;
+}
+
+// Read n bits (LSB first). The first bit read becomes the LSB of the result.
+fn bit_reader_bits(r: Address, n: u32) -> u32 {
+    result: u32 = 0;
+    i: u32 = 0;
+    while i < n {
+        bit: u32 = bit_reader_bit(r);
+        result = result | (bit << i);
+        i = i + 1;
+    }
+    return result;
+}
+
+// Advance to the next byte boundary.
+fn bit_reader_align(r: Address) {
+    bit_pos: u32 = load_u32_le(r, 12);
+    if bit_pos != 0 {
+        store_u32_le(r, 12, 0);
+        byte_pos: u32 = load_u32_le(r, 8);
+        store_u32_le(r, 8, byte_pos + 1);
+    }
+}
+
+fn bit_reader_byte_pos(r: Address) -> u32 {
+    return load_u32_le(r, 8);
+}
+
+// Advance the byte read position by n (after consuming raw bytes directly).
+fn bit_reader_advance(r: Address, n: u32) {
+    pos: u32 = load_u32_le(r, 8);
+    store_u32_le(r, 8, pos + n);
+}
+
+fn bit_reader_error(r: Address) -> u32 {
+    return load_u32_le(r, 20);
+}
+
+fn bit_reader_free(r: Address) {
+    free(r);
+}
+
+// ===========================================================================
+// DEFLATE stored-block codec (RFC 1951 subset, BTYPE=00 only)
+//
+// Used as the payload of the gzip wrapper. The encoder writes the 3-bit block
+// header (BFINAL + BTYPE=00) as a single byte (bits 3..7 = 0), so the stream
+// stays byte-aligned and no bit writer is needed. The decoder reads that byte
+// and rejects compressed block types (BTYPE 01/10).
+//
+// Per stored block:
+//   [0]     1 byte: bit 0 = BFINAL, bits 1-2 = BTYPE (00 = stored)
+//   [1..2]  2 bytes LE: LEN  (0..65535)
+//   [3..4]  2 bytes LE: NLEN = ~LEN & 0xFFFF
+//   [5..]   LEN bytes of literal data
+// ===========================================================================
+
+fn deflate_stored(input: Address, input_len: u32, output: Address, output_max: u32) -> i64 {
+    out_pos: u32 = 0;
+
+    if input_len == 0 {
+        if out_pos + 5 > output_max { return -1; }
+        *(output + out_pos)     = 1;      // BFINAL=1, BTYPE=00
+        *(output + out_pos + 1) = 0;      // LEN low
+        *(output + out_pos + 2) = 0;      // LEN high
+        *(output + out_pos + 3) = 255;    // NLEN low
+        *(output + out_pos + 4) = 255;    // NLEN high
+        out_pos = out_pos + 5;
+        return out_pos as i64;
+    }
+
+    in_pos: u32 = 0;
+    while in_pos < input_len {
+        chunk: u32 = input_len - in_pos;
+        if chunk > 65535 { chunk = 65535; }
+
+        bfinal: u32 = 0;
+        if in_pos + chunk == input_len { bfinal = 1; }
+
+        if out_pos + 5 + chunk > output_max { return -1; }
+
+        *(output + out_pos) = bfinal;
+        out_pos = out_pos + 1;
+
+        *(output + out_pos)     = chunk & 255;
+        *(output + out_pos + 1) = (chunk >> 8) & 255;
+        out_pos = out_pos + 2;
+
+        nlen: u32 = chunk ^ 65535;
+        *(output + out_pos)     = nlen & 255;
+        *(output + out_pos + 1) = (nlen >> 8) & 255;
+        out_pos = out_pos + 2;
+
+        i: u32 = 0;
+        while i < chunk {
+            *(output + out_pos + i) = *(input + in_pos + i);
+            i = i + 1;
+        }
+        out_pos = out_pos + chunk;
+        in_pos = in_pos + chunk;
+    }
+
+    return out_pos as i64;
+}
+
+fn inflate_stored(input: Address, input_len: u32, output: Address, output_max: u32) -> i64 {
+    in_pos: u32 = 0;
+    out_pos: u32 = 0;
+    done: u32 = 0;
+    while done == 0 {
+        // 1-byte block header (BFINAL in bit 0, BTYPE in bits 1-2).
+        if in_pos + 1 > input_len { return -1; }
+        hdr: u32 = *(input + in_pos);
+        in_pos = in_pos + 1;
+        bfinal: u32 = hdr & 1;
+        btype: u32 = (hdr >> 1) & 3;
+        if btype != 0 {
+            // Compressed blocks (fixed/dynamic Huffman) are not supported.
+            return -1;
+        }
+        // Stored block: LEN (2 LE) + NLEN (2 LE) + LEN data bytes.
+        if in_pos + 4 > input_len { return -1; }
+        len_lo: u32 = *(input + in_pos);
+        len_hi: u32 = *(input + in_pos + 1);
+        block_len: u32 = len_lo | (len_hi << 8);
+        nlen_lo: u32 = *(input + in_pos + 2);
+        nlen_hi: u32 = *(input + in_pos + 3);
+        nlen: u32 = nlen_lo | (nlen_hi << 8);
+        in_pos = in_pos + 4;
+        if nlen != (block_len ^ 65535) { return -1; }
+
+        if in_pos + block_len > input_len { return -1; }
+        if out_pos + block_len > output_max { return -1; }
+        i: u32 = 0;
+        while i < block_len {
+            *(output + out_pos + i) = *(input + in_pos + i);
+            i = i + 1;
+        }
+        in_pos = in_pos + block_len;
+        out_pos = out_pos + block_len;
+
+        if bfinal == 1 { done = 1; }
+    }
+    return out_pos as i64;
+}
+
+// ===========================================================================
+// gzip wrapper (RFC 1952)
+//
+// Stream layout:
+//   [0..9]    header (10 bytes): 1F 8B 08 00 00 00 00 00 00 FF
+//   [10..N-9] DEFLATE stream (stored blocks)
+//   [N-8..N-1] CRC-32 (4 bytes LE) || ISIZE (4 bytes LE)
+//
+// gzip_compress returns total output length, or -1 on error.
+// gzip_decompress returns decompressed length, or -1 on error (bad magic,
+// inflate failure, CRC-32 mismatch, or length mismatch).
+// ===========================================================================
+
+// Returns the gzip header size in bytes (>= 10), or 0 on error. Parses the
+// optional FEXTRA / FNAME / FCOMMENT / FHCRC fields described by FLG.
+fn gzip_header_size(input: Address, input_len: u32) -> u32 {
+    if input_len < 10 { return 0; }
+    flg: u32 = *(input + 3);
+    if (flg & 240) != 0 { return 0; }     // reserved bits 4..7 must be zero
+
+    pos: u32 = 10;
+    xlen: u32 = 0;
+    found: u32 = 0;
+    b: u32 = 0;
+
+    // FEXTRA (bit 6): 2-byte XLEN + XLEN bytes.
+    if (flg & 64) != 0 {
+        if pos + 2 > input_len { return 0; }
+        xlen = *(input + pos) | (*(input + pos + 1) << 8);
+        pos = pos + 2 + xlen;
+        if pos > input_len { return 0; }
+    }
+    // FNAME (bit 3): null-terminated string.
+    if (flg & 8) != 0 {
+        found = 0;
+        while pos < input_len {
+            b = *(input + pos);
+            pos = pos + 1;
+            if b == 0 { found = 1; }
+            if b == 0 { break; }
+        }
+        if found == 0 { return 0; }
+    }
+    // FCOMMENT (bit 4): null-terminated string.
+    if (flg & 16) != 0 {
+        found = 0;
+        while pos < input_len {
+            b = *(input + pos);
+            pos = pos + 1;
+            if b == 0 { found = 1; }
+            if b == 0 { break; }
+        }
+        if found == 0 { return 0; }
+    }
+    // FHCRC (bit 1): 2 bytes.
+    if (flg & 2) != 0 {
+        if pos + 2 > input_len { return 0; }
+        pos = pos + 2;
+    }
+    return pos;
+}
+
+fn gzip_compress(input: Address, input_len: u32, output: Address, output_max: u32) -> i64 {
+    // Need at least 10-byte header + 8-byte trailer around the deflate stream.
+    if output_max < 18 { return -1; }
+
+    // 10-byte gzip header: ID1 ID2 CM FLG MTIME(4) XFL OS.
+    *(output + 0) = 31;     // 0x1F ID1
+    *(output + 1) = 139;    // 0x8B ID2
+    *(output + 2) = 8;      // 0x08 CM = deflate
+    *(output + 3) = 0;      // 0x00 FLG = no optional fields
+    *(output + 4) = 0;      // MTIME byte 0
+    *(output + 5) = 0;      // MTIME byte 1
+    *(output + 6) = 0;      // MTIME byte 2
+    *(output + 7) = 0;      // MTIME byte 3
+    *(output + 8) = 0;      // XFL
+    *(output + 9) = 255;    // OS = unknown
+
+    // DEFLATE stream into output[10..], leaving 8 bytes for the trailer.
+    deflate_len: i64 = deflate_stored(input, input_len, output + 10, output_max - 18);
+    if deflate_len < 0 { return -1; }
+    deflate_len_u32: u32 = deflate_len as u32;
+
+    // CRC-32 of the uncompressed input and ISIZE = input_len mod 2^32.
+    crc: u32 = crc32(input, input_len);
+    isize_val: u32 = input_len & MASK32;
+
+    trailer_off: u32 = 10 + deflate_len_u32;
+    store_u32_le(output, trailer_off, crc);
+    store_u32_le(output, trailer_off + 4, isize_val);
+
+    return 10 + deflate_len + 8;
+}
+
+fn gzip_decompress(input: Address, input_len: u32, output: Address, output_max: u32) -> i64 {
+    if input_len < 18 { return -1; }
+
+    // Verify magic and CM.
+    if *(input + 0) != 31 { return -1; }
+    if *(input + 1) != 139 { return -1; }
+    if *(input + 2) != 8 { return -1; }      // CM = deflate
+
+    hdr_size: u32 = gzip_header_size(input, input_len);
+    if hdr_size == 0 { return -1; }
+
+    // The DEFLATE stream sits between the header and the 8-byte trailer.
+    if hdr_size + 8 > input_len { return -1; }
+    deflate_len: u32 = input_len - hdr_size - 8;
+
+    inflated: i64 = inflate_stored(input + hdr_size, deflate_len, output, output_max);
+    if inflated < 0 { return -1; }
+    inflated_u32: u32 = inflated as u32;
+
+    // Trailer: CRC-32 (4 LE) || ISIZE (4 LE).
+    trailer_off: u32 = input_len - 8;
+    exp_crc: u32 = load_u32_le(input, trailer_off);
+    exp_isize: u32 = load_u32_le(input, trailer_off + 4);
+
+    if crc32(output, inflated_u32) != exp_crc { return -1; }
+    if inflated_u32 != exp_isize { return -1; }
+
+    return inflated;
+}
+
+// ===========================================================================
+// LZ4 frame format (simplified)
+//
+// Frame layout:
+//   magic(4) 0x184D2204 LE || FLG(1) || BD(1) || blocks || end_mark(4) 0
+// (HC byte and content checksum omitted — simplified frame.)
+//
+// Each block: block_size(4 LE) || data. Bit 31 of block_size is the
+// uncompressed flag; bits 0..30 are the size.
+//   - Uncompressed block (bit 31 = 1): data is raw bytes.
+//   - Compressed block  (bit 31 = 0): data is a sequence of LZ4 sequences.
+//
+// LZ4 block sequence:
+//   token(1): lit_len_high(4) || match_len_high(4)
+//   if lit_len_high == 15: extension bytes (sum 255s, then final < 255)
+//   literal bytes (lit_len)
+//   if more data in block:
+//       match_offset(2 LE)
+//       if match_len_high == 15: extension bytes
+//       match_len = match_len_high + ext + 4   (min match = 4)
+//       copy match_len bytes from (out_pos - offset)   (overlap allowed)
+// The last sequence in a block is literals-only (no offset/match); it is
+// detected by the block data being fully consumed after the literals.
+//
+// The encoder emits one literals-only sequence per block (no matches).
+// ===========================================================================
+
+// Number of literal-length extension bytes for a given literal count.
+fn lz4_lit_ext_count(lit_len: u32) -> u32 {
+    if lit_len < 15 { return 0; }
+    rem: u32 = lit_len - 15;
+    return (rem / 255) + 1;
+}
+
+fn lz4_compress(input: Address, input_len: u32, output: Address, output_max: u32) -> i64 {
+    // Need at least 6-byte frame header + 4-byte end mark.
+    if output_max < 10 { return -1; }
+
+    out_pos: u32 = 0;
+
+    // Magic number 0x184D2204 (little-endian).
+    *(output + 0) = 4;
+    *(output + 1) = 34;
+    *(output + 2) = 77;
+    *(output + 3) = 24;
+    out_pos = 4;
+
+    // FLG = 0x60 (version=01, B.Indep=1, rest 0). BD = 0x40 (Block_Max_Size=4).
+    *(output + out_pos) = 96; out_pos = out_pos + 1;
+    *(output + out_pos) = 64; out_pos = out_pos + 1;
+
+    in_pos: u32 = 0;
+    while in_pos < input_len {
+        chunk: u32 = input_len - in_pos;
+        if chunk > 65535 { chunk = 65535; }
+
+        // Token high nibble + extension encode the literal length.
+        ext: u32 = lz4_lit_ext_count(chunk);
+        block_data_len: u32 = 1 + ext + chunk;
+
+        if out_pos + 4 + block_data_len > output_max { return -1; }
+
+        // Block size field (bit 31 = 0 -> compressed block).
+        store_u32_le(output, out_pos, block_data_len);
+        out_pos = out_pos + 4;
+
+        // Token: high nibble = min(chunk, 15), low nibble = 0.
+        high: u32 = chunk;
+        if high > 15 { high = 15; }
+        *(output + out_pos) = (high << 4) & 240;
+        out_pos = out_pos + 1;
+
+        // Literal-length extension bytes (only when chunk >= 15).
+        if chunk >= 15 {
+            rem: u32 = chunk - 15;
+            while rem >= 255 {
+                *(output + out_pos) = 255;
+                out_pos = out_pos + 1;
+                rem = rem - 255;
+            }
+            *(output + out_pos) = rem & 255;
+            out_pos = out_pos + 1;
+        }
+
+        // Literal bytes.
+        i: u32 = 0;
+        while i < chunk {
+            *(output + out_pos + i) = *(input + in_pos + i);
+            i = i + 1;
+        }
+        out_pos = out_pos + chunk;
+        in_pos = in_pos + chunk;
+    }
+
+    // End mark (4 zero bytes).
+    if out_pos + 4 > output_max { return -1; }
+    *(output + out_pos)     = 0;
+    *(output + out_pos + 1) = 0;
+    *(output + out_pos + 2) = 0;
+    *(output + out_pos + 3) = 0;
+    out_pos = out_pos + 4;
+
+    return out_pos as i64;
+}
+
+fn lz4_decompress(input: Address, input_len: u32, output: Address, output_max: u32) -> i64 {
+    if input_len < 10 { return -1; }
+
+    // Verify magic 0x184D2204 (little-endian).
+    if *(input + 0) != 4 { return -1; }
+    if *(input + 1) != 34 { return -1; }
+    if *(input + 2) != 77 { return -1; }
+    if *(input + 3) != 24 { return -1; }
+
+    // FLG (offset 4) and BD (offset 5) are present but not strictly validated.
+    in_pos: u32 = 6;
+    out_pos: u32 = 0;
+    done: u32 = 0;
+
+    while done == 0 {
+        if in_pos + 4 > input_len { return -1; }
+        block_size_field: u32 = load_u32_le(input, in_pos);
+        in_pos = in_pos + 4;
+
+        if block_size_field == 0 {
+            done = 1;
+        } else {
+            uncomp_flag: u32 = (block_size_field >> 31) & 1;
+            block_size: u32 = block_size_field & 2147483647;   // 0x7FFFFFFF
+            if in_pos + block_size > input_len { return -1; }
+
+            if uncomp_flag == 1 {
+                // Uncompressed block: copy block_size raw bytes.
+                if out_pos + block_size > output_max { return -1; }
+                ui: u32 = 0;
+                while ui < block_size {
+                    *(output + out_pos + ui) = *(input + in_pos + ui);
+                    ui = ui + 1;
+                }
+                in_pos = in_pos + block_size;
+                out_pos = out_pos + block_size;
+            } else {
+                // Compressed block: decode sequences until block consumed.
+                block_end: u32 = in_pos + block_size;
+                while in_pos < block_end {
+                    token: u32 = *(input + in_pos);
+                    in_pos = in_pos + 1;
+                    lit_high: u32 = (token >> 4) & 15;
+                    match_high: u32 = token & 15;
+
+                    // Literal length (with extension).
+                    lit_len: u32 = lit_high;
+                    if lit_high == 15 {
+                        lm: u32 = 1;
+                        while lm == 1 {
+                            if in_pos >= block_end { return -1; }
+                            leb: u32 = *(input + in_pos);
+                            in_pos = in_pos + 1;
+                            lit_len = lit_len + leb;
+                            if leb < 255 { lm = 0; }
+                        }
+                    }
+
+                    // Read literals.
+                    if in_pos + lit_len > block_end { return -1; }
+                    if out_pos + lit_len > output_max { return -1; }
+                    li: u32 = 0;
+                    while li < lit_len {
+                        *(output + out_pos + li) = *(input + in_pos + li);
+                        li = li + 1;
+                    }
+                    in_pos = in_pos + lit_len;
+                    out_pos = out_pos + lit_len;
+
+                    // Last sequence (block fully consumed) has no match.
+                    if in_pos < block_end {
+                        // Match offset (2 bytes LE).
+                        if in_pos + 2 > block_end { return -1; }
+                        off_lo: u32 = *(input + in_pos);
+                        off_hi: u32 = *(input + in_pos + 1);
+                        in_pos = in_pos + 2;
+                        offset: u32 = off_lo | (off_hi << 8);
+                        if offset == 0 { return -1; }
+                        if offset > out_pos { return -1; }
+
+                        // Match length (with extension), plus minimum 4.
+                        match_len: u32 = match_high;
+                        if match_high == 15 {
+                            mm: u32 = 1;
+                            while mm == 1 {
+                                if in_pos >= block_end { return -1; }
+                                meb: u32 = *(input + in_pos);
+                                in_pos = in_pos + 1;
+                                match_len = match_len + meb;
+                                if meb < 255 { mm = 0; }
+                            }
+                        }
+                        match_len = match_len + 4;
+
+                        if out_pos + match_len > output_max { return -1; }
+                        // Byte-by-byte copy (handles overlap).
+                        src_pos: u32 = out_pos - offset;
+                        mi: u32 = 0;
+                        while mi < match_len {
+                            *(output + out_pos + mi) = *(output + src_pos + mi);
+                            mi = mi + 1;
+                        }
+                        out_pos = out_pos + match_len;
+                    }
+                }
+            }
+        }
+    }
+
+    return out_pos as i64;
+}
+
+// ===========================================================================
+// zstd frame format (RFC 8478, simplified — raw/RLE blocks only)
+//
+// Frame layout:
+//   magic(4) 0xFD2FB528 LE || frame_header || blocks
+//
+// Frame header (this encoder):
+//   descriptor(1) = 0xA0  (FCSFlag=2 -> 4-byte FCS, Single_Segment=1,
+//                          no content checksum, no dictionary)
+//   frame_content_size(4 LE) = uncompressed length
+// (No window descriptor because Single_Segment=1.)
+//
+// Block header (3 bytes LE):
+//   bit 0       last_block
+//   bits 1..2   block_type (0=Raw, 1=RLE, 2=Compressed, 3=Reserved)
+//   bits 3..23  block_size (21 bits)
+//
+// Raw block: block_size bytes copied verbatim.
+// RLE block: 1 byte repeated block_size times.
+// Compressed block: requires FSE/Huffman — NOT supported (returns -1).
+// ===========================================================================
+
+fn zstd_compress(input: Address, input_len: u32, output: Address, output_max: u32) -> i64 {
+    // Need at least magic(4) + descriptor(1) + FCS(4) + one block header(3).
+    if output_max < 12 { return -1; }
+
+    out_pos: u32 = 0;
+
+    // Magic 0xFD2FB528 (little-endian).
+    *(output + 0) = 40;     // 0x28
+    *(output + 1) = 181;    // 0xB5
+    *(output + 2) = 47;     // 0x2F
+    *(output + 3) = 253;    // 0xFD
+    out_pos = 4;
+
+    // Frame header descriptor 0xA0 = FCSFlag(2)<<6 | Single_Segment(1)<<5.
+    *(output + out_pos) = 160;
+    out_pos = out_pos + 1;
+
+    // Frame Content Size (4 bytes LE) = input_len.
+    store_u32_le(output, out_pos, input_len);
+    out_pos = out_pos + 4;
+
+    if input_len == 0 {
+        // One empty final raw block: last=1, type=0, size=0 -> header = 1.
+        if out_pos + 3 > output_max { return -1; }
+        *(output + out_pos)     = 1;
+        *(output + out_pos + 1) = 0;
+        *(output + out_pos + 2) = 0;
+        out_pos = out_pos + 3;
+    } else {
+        in_pos: u32 = 0;
+        while in_pos < input_len {
+            chunk: u32 = input_len - in_pos;
+            if chunk > 1048576 { chunk = 1048576; }   // 1 MiB chunks
+
+            last_block: u32 = 0;
+            if in_pos + chunk == input_len { last_block = 1; }
+
+            if out_pos + 3 + chunk > output_max { return -1; }
+
+            // Block header: last(1) | type(0)<<1 | size<<3.
+            hdr: u32 = (last_block & 1) | ((chunk & 2097151) << 3);
+            *(output + out_pos)     = hdr & 255;
+            *(output + out_pos + 1) = (hdr >> 8) & 255;
+            *(output + out_pos + 2) = (hdr >> 16) & 255;
+            out_pos = out_pos + 3;
+
+            // Raw block content.
+            i: u32 = 0;
+            while i < chunk {
+                *(output + out_pos + i) = *(input + in_pos + i);
+                i = i + 1;
+            }
+            out_pos = out_pos + chunk;
+            in_pos = in_pos + chunk;
+        }
+    }
+
+    return out_pos as i64;
+}
+
+fn zstd_decompress(input: Address, input_len: u32, output: Address, output_max: u32) -> i64 {
+    if input_len < 8 { return -1; }
+
+    // Verify magic 0xFD2FB528 (little-endian).
+    if *(input + 0) != 40 { return -1; }
+    if *(input + 1) != 181 { return -1; }
+    if *(input + 2) != 47 { return -1; }
+    if *(input + 3) != 253 { return -1; }
+
+    pos: u32 = 4;
+    descriptor: u32 = *(input + pos);
+    pos = pos + 1;
+
+    fcs_flag: u32 = (descriptor >> 6) & 3;
+    single_segment: u32 = (descriptor >> 5) & 1;
+    dict_id_flag: u32 = descriptor & 3;
+
+    // Window descriptor (absent when Single_Segment=1).
+    if single_segment == 0 {
+        if pos + 1 > input_len { return -1; }
+        pos = pos + 1;
+    }
+
+    // Dictionary ID (0, 1, 2, or 4 bytes).
+    dict_id_size: u32 = 0;
+    if dict_id_flag == 1 { dict_id_size = 1; }
+    if dict_id_flag == 2 { dict_id_size = 2; }
+    if dict_id_flag == 3 { dict_id_size = 4; }
+    if pos + dict_id_size > input_len { return -1; }
+    pos = pos + dict_id_size;
+
+    // Frame Content Size field (informational; skipped, not strictly needed).
+    fcs_size: u32 = 0;
+    if fcs_flag == 0 {
+        if single_segment == 1 { fcs_size = 1; } else { fcs_size = 0; }
+    }
+    if fcs_flag == 1 { fcs_size = 2; }
+    if fcs_flag == 2 { fcs_size = 4; }
+    if fcs_flag == 3 { fcs_size = 8; }
+    if pos + fcs_size > input_len { return -1; }
+    pos = pos + fcs_size;
+
+    out_pos: u32 = 0;
+    done: u32 = 0;
+    while done == 0 {
+        if pos + 3 > input_len { return -1; }
+        b0: u32 = *(input + pos);
+        b1: u32 = *(input + pos + 1);
+        b2: u32 = *(input + pos + 2);
+        pos = pos + 3;
+        hdr: u32 = b0 | (b1 << 8) | (b2 << 16);
+
+        last_block: u32 = hdr & 1;
+        block_type: u32 = (hdr >> 1) & 3;
+        block_size: u32 = (hdr >> 3) & 2097151;
+
+        if block_type == 0 {
+            // Raw block: copy block_size bytes.
+            if pos + block_size > input_len { return -1; }
+            if out_pos + block_size > output_max { return -1; }
+            ri: u32 = 0;
+            while ri < block_size {
+                *(output + out_pos + ri) = *(input + pos + ri);
+                ri = ri + 1;
+            }
+            pos = pos + block_size;
+            out_pos = out_pos + block_size;
+        } else if block_type == 1 {
+            // RLE block: 1 byte repeated block_size times.
+            if pos + 1 > input_len { return -1; }
+            if out_pos + block_size > output_max { return -1; }
+            val: u32 = *(input + pos);
+            pos = pos + 1;
+            rli: u32 = 0;
+            while rli < block_size {
+                *(output + out_pos + rli) = val;
+                rli = rli + 1;
+            }
+            out_pos = out_pos + block_size;
+        } else if block_type == 2 {
+            // Compressed block: FSE/Huffman not supported.
+            return -1;
+        } else {
+            // Reserved block type.
+            return -1;
+        }
+
+        if last_block == 1 { done = 1; }
+    }
+
+    // Content checksum (if present) is ignored by this simplified decoder.
+    return out_pos as i64;
+}
+
+// ===========================================================================
+// Brotli (simplified — raw meta-blocks only, RFC 7932 subset)
+//
+// Bit stream is LSB-first within each byte. Each meta-block:
+//   ISLAST(1)
+//   if ISLAST == 1: ISLASTEMPTY(1)   -> if 1, stream ends (empty last block)
+//   MNIBBLES(2)                       size class; MLEN width = (MNIBBLES+1) bytes
+//   MLEN((MNIBBLES+1)*8 bits)         uncompressed length of this meta-block
+//   <align to byte boundary>
+//   MLEN raw bytes                    (all meta-blocks are raw/uncompressed)
+//
+// One non-empty meta-block holds the whole input (MLEN width 1..4 bytes
+// covers 0 .. 2^32-1). Empty input produces a single empty last meta-block
+// (ISLAST=1, ISLASTEMPTY=1). Compressed meta-blocks (Huffman/context
+// modeling) are NOT supported and return -1 on decode.
+// ===========================================================================
+
+fn brotli_compress(input: Address, input_len: u32, output: Address, output_max: u32) -> i64 {
+    // State lives in this frame so it stays valid across bit_writer_* calls.
+    w = allocate(32);
+    bit_writer_init(w, output, output_max);
+
+    if input_len == 0 {
+        // Empty last meta-block: ISLAST=1, ISLASTEMPTY=1.
+        bit_writer_put(w, 1, 1);       // ISLAST
+        bit_writer_put(w, 1, 1);       // ISLASTEMPTY
+        bit_writer_align(w);
+    } else {
+        // Choose MNIBBLES: MLEN width = (MNIBBLES+1) bytes.
+        mnibbles: u32 = 0;
+        mlen_bytes: u32 = 1;
+        if input_len <= 255 {
+            mnibbles = 0; mlen_bytes = 1;
+        } else if input_len <= 65535 {
+            mnibbles = 1; mlen_bytes = 2;
+        } else if input_len <= 16777215 {
+            mnibbles = 2; mlen_bytes = 3;
+        } else {
+            mnibbles = 3; mlen_bytes = 4;
+        }
+
+        // Meta-block header bits.
+        bit_writer_put(w, 1, 1);            // ISLAST
+        bit_writer_put(w, 0, 1);            // ISLASTEMPTY = 0
+        bit_writer_put(w, mnibbles, 2);     // MNIBBLES
+        mb: u32 = 0;
+        while mb < mlen_bytes {
+            byte_val: u32 = (input_len >> (mb * 8)) & 255;
+            bit_writer_put(w, byte_val, 8);
+            mb = mb + 1;
+        }
+        bit_writer_align(w);
+
+        // Write raw bytes directly (stream is now byte-aligned).
+        byte_pos: u32 = bit_writer_pos(w);
+        if byte_pos + input_len > output_max {
+            bit_writer_free(w);
+            return -1;
+        }
+        i: u32 = 0;
+        while i < input_len {
+            *(output + byte_pos + i) = *(input + i);
+            i = i + 1;
+        }
+        bit_writer_advance(w, input_len);
+    }
+
+    err: u32 = bit_writer_error(w);
+    total: u32 = bit_writer_pos(w);
+    bit_writer_free(w);
+    if err != 0 { return -1; }
+    return total as i64;
+}
+
+fn brotli_decompress(input: Address, input_len: u32, output: Address, output_max: u32) -> i64 {
+    // State lives in this frame so it stays valid across bit_reader_* calls.
+    r = allocate(32);
+    bit_reader_init(r, input, input_len);
+    out_pos: u32 = 0;
+    done: u32 = 0;
+
+    while done == 0 {
+        islast: u32 = bit_reader_bit(r);
+        islastempty: u32 = 0;
+        if islast == 1 {
+            islastempty = bit_reader_bit(r);
+            if islastempty == 1 {
+                bit_reader_align(r);
+                done = 1;
+            }
+        }
+
+        if done == 0 {
+            mnibbles: u32 = bit_reader_bits(r, 2);
+            mlen_bytes: u32 = mnibbles + 1;
+
+            // Read MLEN (mlen_bytes bytes, 8 bits each, LSB first).
+            mlen: u32 = 0;
+            mb: u32 = 0;
+            while mb < mlen_bytes {
+                byte_val: u32 = bit_reader_bits(r, 8);
+                mlen = mlen | (byte_val << (mb * 8));
+                mb = mb + 1;
+            }
+
+            // Align to byte boundary, then copy raw bytes.
+            bit_reader_align(r);
+            data_pos: u32 = bit_reader_byte_pos(r);
+            if data_pos + mlen > input_len {
+                bit_reader_free(r);
+                return -1;
+            }
+            if out_pos + mlen > output_max {
+                bit_reader_free(r);
+                return -1;
+            }
+            i: u32 = 0;
+            while i < mlen {
+                *(output + out_pos + i) = *(input + data_pos + i);
+                i = i + 1;
+            }
+            bit_reader_advance(r, mlen);
+            out_pos = out_pos + mlen;
+
+            if islast == 1 { done = 1; }
+        }
+    }
+
+    err: u32 = bit_reader_error(r);
+    bit_reader_free(r);
+    if err != 0 { return -1; }
+    return out_pos as i64;
+}

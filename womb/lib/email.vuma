@@ -1,0 +1,1440 @@
+// email.vuma
+// VUMA standard library module: SMTP / IMAP / POP3 clients + MIME helpers.
+// Target: all 10 VUMA backends. Importable library module (no main()).
+//
+// Task ID: womb-email
+//
+// Implements four families of text-line email protocols plus MIME encoding
+// helpers, all on top of a tiny TCP I/O surface declared extern "C" below.
+//
+//   1. SMTP client (RFC 5321)
+//        smtp_connect / smtp_ehlo / smtp_starttls / smtp_auth_plain /
+//        smtp_auth_login / smtp_mail_from / smtp_rcpt_to / smtp_data /
+//        smtp_quit / smtp_send (one-shot)
+//
+//   2. IMAP client (RFC 9051, tagged commands A001..A005)
+//        imap_connect / imap_login / imap_select / imap_fetch /
+//        imap_list / imap_logout
+//
+//   3. POP3 client (RFC 1939)
+//        pop3_connect / pop3_user / pop3_pass / pop3_stat /
+//        pop3_retr / pop3_dele / pop3_quit
+//
+//   4. MIME helpers (RFC 2045 / RFC 5322)
+//        mime_encode_base64_body / mime_build_headers
+//
+// External dependencies (declared extern "C" below, assumed provided by the
+// linking unit — e.g. womb/net/tcp.vuma and womb/encoding/base64.vuma):
+//
+//     tcp_connect(ip: u32, port: u32) -> i64
+//         Open a TCP connection to ip:port. Returns fd >= 0 or -1 on error.
+//     tcp_send_str(fd: i64, s: Address) -> i64
+//         Send a NUL-terminated C string over the connection.
+//     tcp_recv(fd: i64, buf: Address, max_len: u32) -> i64
+//         Receive up to max_len bytes into buf. Returns byte count, 0 on EOF,
+//         or -1 on error.
+//     tcp_close(fd: i64)
+//         Close the connection.
+//     base64_encode(in: Address, in_len: u32, out: Address) -> u32
+//         RFC 4648 base64 encode of in_len bytes; returns output length.
+//     sha256_oneshot(in: Address, in_len: u32, out: Address) -> u32
+//         SHA-256 of in_len bytes into a 32-byte out buffer; returns 32.
+//
+// Memory is managed with allocate()/free(); byte-level loads/stores use the
+// *(ptr + offset) primitive. All multi-byte values are little-endian.
+//
+// DESIGN NOTES:
+//   * Scanning helpers (email_find_crlf, email_find_dot_term, etc.) use
+//     early `return` rather than `break` to keep nesting shallow and stay
+//     friendly to all VUMA codegen paths.
+//   * tcp_send_str is NUL-terminated, so this module assumes text payloads
+//     without embedded NUL bytes — the common case for RFC 5321/5322/1939/
+//     9051 messages. Binary-capable sending would require a length-based
+//     tcp_send primitive, intentionally out of scope here.
+//   * smtp_starttls sends the STARTTLS command and checks for 220; it does
+//     NOT perform the TLS handshake (that requires a TLS library such as
+//     tls13.vuma). Callers must layer TLS themselves after a 220 reply.
+//   * smtp_data performs RFC 5321 dot-stuffing on outbound bodies.
+//   * pop3_retr undoes dot-stuffing on inbound message bodies.
+
+extern "C" {
+    fn tcp_connect(server_ip: u32, port: u32) -> i64;
+    fn tcp_send_str(fd: i64, s: Address) -> i64;
+    fn tcp_recv(fd: i64, buf: Address, max_len: u32) -> i64;
+    fn tcp_close(fd: i64);
+    fn base64_encode(input: Address, in_len: u32, output: Address) -> u32;
+    fn sha256_oneshot(input: Address, in_len: u32, output: Address) -> u32;
+}
+
+// ===========================================================================
+// Constants
+// ===========================================================================
+
+const EMAIL_BUF_SIZE: u32 = 4096;          // general-purpose line buffer
+const EMAIL_B64_BUF_SIZE: u32 = 4096;      // base64 scratch buffer
+const EMAIL_FETCH_BUF_SIZE: u32 = 16384;   // IMAP FETCH / POP3 RETR bodies
+
+const SMTP_DEFAULT_PORT: u32 = 25;
+const SMTP_SUBMISSION_PORT: u32 = 587;
+const IMAP_DEFAULT_PORT: u32 = 143;
+const POP3_DEFAULT_PORT: u32 = 110;
+
+// Return values
+const EMAIL_OK: u32 = 1;
+const EMAIL_FAIL: u32 = 0;
+
+// IMAP command tags A001..A005 are encoded by their trailing digit.
+const IMAP_TAG_LOGIN: u32  = 1;
+const IMAP_TAG_SELECT: u32 = 2;
+const IMAP_TAG_FETCH: u32  = 3;
+const IMAP_TAG_LIST: u32   = 4;
+const IMAP_TAG_LOGOUT: u32 = 5;
+
+// ===========================================================================
+// Internal byte / string helpers
+// ===========================================================================
+
+// Length of a NUL-terminated string.
+fn email_strlen(s: Address) -> u32 {
+    let n: u32 = 0;
+    while *(s + n) != 0 {
+        n = n + 1;
+    }
+    return n;
+}
+
+// Append one byte to dst at offset off; returns new offset.
+fn email_append_byte(dst: Address, off: u32, b: u32) -> u32 {
+    *(dst + off) = b & 255;
+    return off + 1;
+}
+
+// Append the two-byte CRLF sequence; returns new offset.
+fn email_append_crlf(dst: Address, off: u32) -> u32 {
+    *(dst + off) = 13;       // CR
+    *(dst + off + 1) = 10;   // LF
+    return off + 2;
+}
+
+// Append a NUL-terminated string s to dst at offset off (without copying the
+// NUL terminator). Returns new offset.
+fn email_append_str(dst: Address, off: u32, s: Address) -> u32 {
+    let i: u32 = 0;
+    while *(s + i) != 0 {
+        *(dst + off + i) = *(s + i);
+        i = i + 1;
+    }
+    return off + i;
+}
+
+// Append n bytes from src to dst at offset off. Returns new offset.
+fn email_append_bytes(dst: Address, off: u32, src: Address, n: u32) -> u32 {
+    let i: u32 = 0;
+    while i < n {
+        *(dst + off + i) = *(src + i);
+        i = i + 1;
+    }
+    return off + n;
+}
+
+// Append a u32 as decimal ASCII to dst at offset off. Returns new offset.
+fn email_append_u32(dst: Address, off: u32, val: u32) -> u32 {
+    if val == 0 {
+        *(dst + off) = 48;   // '0'
+        return off + 1;
+    }
+    // Count digits.
+    let ndigits: u32 = 0;
+    let v: u32 = val;
+    while v > 0 {
+        ndigits = ndigits + 1;
+        v = v / 10;
+    }
+    // Write digits most-significant-first.
+    v = val;
+    let i: u32 = ndigits;
+    while i > 0 {
+        i = i - 1;
+        *(dst + off + i) = 48 + (v % 10);
+        v = v / 10;
+    }
+    return off + ndigits;
+}
+
+// Store a little-endian u32 at ptr.
+fn email_store_u32_at(ptr: Address, val: u32) {
+    *(ptr + 0) = val & 255;
+    *(ptr + 1) = (val >> 8) & 255;
+    *(ptr + 2) = (val >> 16) & 255;
+    *(ptr + 3) = (val >> 24) & 255;
+}
+
+// Load a little-endian u32 from ptr.
+fn email_load_u32_at(ptr: Address) -> u32 {
+    let b0: u32 = *(ptr + 0);
+    let b1: u32 = *(ptr + 1);
+    let b2: u32 = *(ptr + 2);
+    let b3: u32 = *(ptr + 3);
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+}
+
+// Find the first "\r\n" in buf[start..total). Returns its index, or `total`
+// if not found.
+fn email_find_crlf(buf: Address, start: u32, total: u32) -> u32 {
+    let i: u32 = start;
+    while i + 1 < total {
+        if *(buf + i) == 13 {
+            if *(buf + i + 1) == 10 {
+                return i;
+            }
+        }
+        i = i + 1;
+    }
+    return total;
+}
+
+// Find the first "\r\n.\r\n" sentinel in buf[start..total). Returns its index,
+// or `total` if not found.
+fn email_find_dot_term(buf: Address, start: u32, total: u32) -> u32 {
+    let i: u32 = start;
+    while i + 4 < total {
+        if *(buf + i) == 13 {
+            if *(buf + i + 1) == 10 {
+                if *(buf + i + 2) == 46 {
+                    if *(buf + i + 3) == 13 {
+                        if *(buf + i + 4) == 10 {
+                            return i;
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return total;
+}
+
+// Find the first occurrence of byte `ch` in buf[start..total). Returns its
+// index, or `total` if not found.
+fn email_find_char(buf: Address, start: u32, total: u32, ch: u32) -> u32 {
+    let i: u32 = start;
+    while i < total {
+        if *(buf + i) == ch {
+            return i;
+        }
+        i = i + 1;
+    }
+    return total;
+}
+
+// Return the index of the first non-space byte at or after `start` in
+// buf[start..total), or `total` if only spaces remain.
+fn email_skip_spaces(buf: Address, start: u32, total: u32) -> u32 {
+    let i: u32 = start;
+    while i < total {
+        if *(buf + i) != 32 {
+            return i;
+        }
+        i = i + 1;
+    }
+    return total;
+}
+
+// ===========================================================================
+// 1. SMTP CLIENT (RFC 5321)
+// ===========================================================================
+//
+// SMTP replies are one or more text lines, each beginning with a 3-digit
+// code. Continuation lines use "nnn-" (hyphen after the code); the final
+// line uses "nnn " (space). Success is 2xx (positive completion) or 3xx
+// (positive intermediate, e.g. 354 "start mail input").
+//
+// smtp_read_response reads until the final line and returns the numeric
+// 3-digit code (0 on error/EOF). The full text is left NUL-terminated in
+// buf for callers that want to inspect extensions.
+
+// Returns 1 if the SMTP line at buf[line_start..line_end) is a final line
+// (3-digit code followed by a space at column 3).
+fn smtp_is_final_line(buf: Address, line_start: u32, line_end: u32) -> u32 {
+    if line_end < line_start + 4 {
+        return 0;
+    }
+    if *(buf + line_start + 3) == 32 {   // space
+        return 1;
+    }
+    return 0;
+}
+
+// Read a complete (possibly multiline) SMTP reply into buf.
+// Returns the 3-digit reply code, or 0 on error.
+fn smtp_read_response(fd: i64, buf: Address, max_len: u32) -> u32 {
+    let total: u32 = 0;
+    let done: u32 = 0;
+    while done == 0 {
+        if total + 1 >= max_len {
+            done = 1;
+        } else {
+            let n: i64 = tcp_recv(fd, buf + total, max_len - total - 1);
+            if n <= 0 {
+                done = 1;
+            } else {
+                total = total + (n as u32);
+                // Walk every complete CRLF-delimited line looking for a
+                // final line (space at column 3).
+                let line_start: u32 = 0;
+                let i: u32 = 0;
+                while i < total {
+                    let crlf: u32 = email_find_crlf(buf, i, total);
+                    if crlf >= total {
+                        i = total;
+                    } else {
+                        if smtp_is_final_line(buf, line_start, crlf) == 1 {
+                            done = 1;
+                            i = total;
+                        } else {
+                            line_start = crlf + 2;
+                            i = crlf + 2;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    *(buf + total) = 0;
+    if total < 3 {
+        return 0;
+    }
+    let c0: u32 = *(buf + 0);
+    let c1: u32 = *(buf + 1);
+    let c2: u32 = *(buf + 2);
+    if c0 < 48 { return 0; }
+    if c0 > 57 { return 0; }
+    if c1 < 48 { return 0; }
+    if c1 > 57 { return 0; }
+    if c2 < 48 { return 0; }
+    if c2 > 57 { return 0; }
+    return (c0 - 48) * 100 + (c1 - 48) * 10 + (c2 - 48);
+}
+
+// True if code is 2xx (positive completion).
+fn smtp_is_2xx(code: u32) -> u32 {
+    if code >= 200 {
+        if code < 300 {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+// True if code is 3xx (positive intermediate).
+fn smtp_is_3xx(code: u32) -> u32 {
+    if code >= 300 {
+        if code < 400 {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+// Connect to an SMTP server and read the 220 greeting.
+// Returns fd >= 0 on success, -1 on error.
+fn smtp_connect(server_ip: u32, port: u32) -> i64 {
+    let fd: i64 = tcp_connect(server_ip, port);
+    if fd < 0 {
+        return -1;
+    }
+    let buf: Address = allocate(EMAIL_BUF_SIZE);
+    let code: u32 = smtp_read_response(fd, buf, EMAIL_BUF_SIZE);
+    free(buf);
+    if code != 220 {
+        tcp_close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+// Send EHLO <hostname> and parse the 250 multiline reply.
+// Returns EMAIL_OK on 2xx, EMAIL_FAIL otherwise.
+fn smtp_ehlo(fd: i64, hostname: Address) -> u32 {
+    let buf: Address = allocate(EMAIL_BUF_SIZE);
+    // "EHLO "
+    *(buf + 0) = 69;     // E
+    *(buf + 1) = 72;     // H
+    *(buf + 2) = 76;     // L
+    *(buf + 3) = 79;     // O
+    *(buf + 4) = 32;     // space
+    let o: u32 = email_append_str(buf, 5, hostname);
+    o = email_append_crlf(buf, o);
+    *(buf + o) = 0;
+    tcp_send_str(fd, buf);
+    let code: u32 = smtp_read_response(fd, buf, EMAIL_BUF_SIZE);
+    free(buf);
+    if smtp_is_2xx(code) == 1 {
+        return EMAIL_OK;
+    }
+    return EMAIL_FAIL;
+}
+
+// Send STARTTLS. Returns EMAIL_OK if the server replies 220 (ready for TLS).
+// NOTE: the TLS handshake itself is not performed here — callers must layer
+// a TLS implementation (e.g. tls13.vuma) over the fd after a 220 reply.
+fn smtp_starttls(fd: i64) -> u32 {
+    let buf: Address = allocate(EMAIL_BUF_SIZE);
+    // "STARTTLS\r\n"
+    *(buf + 0) = 83;    // S
+    *(buf + 1) = 84;    // T
+    *(buf + 2) = 65;    // A
+    *(buf + 3) = 82;    // R
+    *(buf + 4) = 84;    // T
+    *(buf + 5) = 84;    // T
+    *(buf + 6) = 76;    // L
+    *(buf + 7) = 83;    // S
+    *(buf + 8) = 13;    // CR
+    *(buf + 9) = 10;    // LF
+    *(buf + 10) = 0;
+    tcp_send_str(fd, buf);
+    let code: u32 = smtp_read_response(fd, buf, EMAIL_BUF_SIZE);
+    free(buf);
+    if code == 220 {
+        return EMAIL_OK;
+    }
+    return EMAIL_FAIL;
+}
+
+// AUTH PLAIN: base64("\0user\0pass") sent inline.
+// Returns EMAIL_OK on 235, EMAIL_FAIL otherwise.
+fn smtp_auth_plain(fd: i64, username: Address, password: Address) -> u32 {
+    let buf: Address = allocate(EMAIL_BUF_SIZE);
+    let plain: Address = allocate(EMAIL_B64_BUF_SIZE);
+    let b64: Address = allocate(EMAIL_B64_BUF_SIZE);
+
+    // Build "\0username\0password"
+    *(plain + 0) = 0;     // authzid separator (empty)
+    let q: u32 = email_append_str(plain, 1, username);
+    *(plain + q) = 0;     // separator
+    let r: u32 = email_append_str(plain, q + 1, password);
+    let plain_len: u32 = r;
+
+    let b64_len: u32 = base64_encode(plain, plain_len, b64);
+    *(b64 + b64_len) = 0;
+
+    // "AUTH PLAIN <b64>\r\n"
+    *(buf + 0) = 65;     // A
+    *(buf + 1) = 85;     // U
+    *(buf + 2) = 84;     // T
+    *(buf + 3) = 72;     // H
+    *(buf + 4) = 32;     // space
+    *(buf + 5) = 80;     // P
+    *(buf + 6) = 76;     // L
+    *(buf + 7) = 65;     // A
+    *(buf + 8) = 73;     // I
+    *(buf + 9) = 78;     // N
+    *(buf + 10) = 32;    // space
+    let o: u32 = email_append_bytes(buf, 11, b64, b64_len);
+    let p: u32 = email_append_crlf(buf, o);
+    *(buf + p) = 0;
+    tcp_send_str(fd, buf);
+
+    let code: u32 = smtp_read_response(fd, buf, EMAIL_BUF_SIZE);
+    free(buf);
+    free(plain);
+    free(b64);
+    if code == 235 {
+        return EMAIL_OK;
+    }
+    return EMAIL_FAIL;
+}
+
+// AUTH LOGIN: challenge-response with base64-encoded user then password.
+// Returns EMAIL_OK on 235, EMAIL_FAIL otherwise.
+fn smtp_auth_login(fd: i64, username: Address, password: Address) -> u32 {
+    let buf: Address = allocate(EMAIL_BUF_SIZE);
+    let ubuf: Address = allocate(EMAIL_B64_BUF_SIZE);
+    let pbuf: Address = allocate(EMAIL_B64_BUF_SIZE);
+
+    // Base64-encode username and password up front.
+    let ulen: u32 = email_strlen(username);
+    let plen: u32 = email_strlen(password);
+    let ub64: u32 = base64_encode(username, ulen, ubuf);
+    let pb64: u32 = base64_encode(password, plen, pbuf);
+    *(ubuf + ub64) = 0;
+    *(pbuf + pb64) = 0;
+
+    // 1. "AUTH LOGIN\r\n"
+    *(buf + 0) = 65;    // A
+    *(buf + 1) = 85;    // U
+    *(buf + 2) = 84;    // T
+    *(buf + 3) = 72;    // H
+    *(buf + 4) = 32;    // space
+    *(buf + 5) = 76;    // L
+    *(buf + 6) = 79;    // O
+    *(buf + 7) = 71;    // G
+    *(buf + 8) = 73;    // I
+    *(buf + 9) = 78;    // N
+    *(buf + 10) = 13;
+    *(buf + 11) = 10;
+    *(buf + 12) = 0;
+    tcp_send_str(fd, buf);
+    let code: u32 = smtp_read_response(fd, buf, EMAIL_BUF_SIZE);
+    if code != 334 {
+        free(buf);
+        free(ubuf);
+        free(pbuf);
+        return EMAIL_FAIL;
+    }
+
+    // 2. Send base64(username)
+    let o: u32 = email_append_bytes(buf, 0, ubuf, ub64);
+    let p: u32 = email_append_crlf(buf, o);
+    *(buf + p) = 0;
+    tcp_send_str(fd, buf);
+    let code2: u32 = smtp_read_response(fd, buf, EMAIL_BUF_SIZE);
+    if code2 != 334 {
+        free(buf);
+        free(ubuf);
+        free(pbuf);
+        return EMAIL_FAIL;
+    }
+
+    // 3. Send base64(password)
+    let o2: u32 = email_append_bytes(buf, 0, pbuf, pb64);
+    let p2: u32 = email_append_crlf(buf, o2);
+    *(buf + p2) = 0;
+    tcp_send_str(fd, buf);
+    let code3: u32 = smtp_read_response(fd, buf, EMAIL_BUF_SIZE);
+
+    free(buf);
+    free(ubuf);
+    free(pbuf);
+    if code3 == 235 {
+        return EMAIL_OK;
+    }
+    return EMAIL_FAIL;
+}
+
+// MAIL FROM:<from>. Returns EMAIL_OK on 2xx.
+fn smtp_mail_from(fd: i64, from: Address) -> u32 {
+    let buf: Address = allocate(EMAIL_BUF_SIZE);
+    // "MAIL FROM:<"
+    *(buf + 0) = 77;    // M
+    *(buf + 1) = 65;    // A
+    *(buf + 2) = 73;    // I
+    *(buf + 3) = 76;    // L
+    *(buf + 4) = 32;    // space
+    *(buf + 5) = 70;    // F
+    *(buf + 6) = 82;    // R
+    *(buf + 7) = 79;    // O
+    *(buf + 8) = 77;    // M
+    *(buf + 9) = 58;    // :
+    *(buf + 10) = 60;   // <
+    let o: u32 = email_append_str(buf, 11, from);
+    *(buf + o) = 62;    // >
+    let p: u32 = email_append_crlf(buf, o + 1);
+    *(buf + p) = 0;
+    tcp_send_str(fd, buf);
+    let code: u32 = smtp_read_response(fd, buf, EMAIL_BUF_SIZE);
+    free(buf);
+    if smtp_is_2xx(code) == 1 {
+        return EMAIL_OK;
+    }
+    return EMAIL_FAIL;
+}
+
+// RCPT TO:<to>. Returns EMAIL_OK on 2xx.
+fn smtp_rcpt_to(fd: i64, to: Address) -> u32 {
+    let buf: Address = allocate(EMAIL_BUF_SIZE);
+    // "RCPT TO:<"
+    *(buf + 0) = 82;    // R
+    *(buf + 1) = 67;    // C
+    *(buf + 2) = 80;    // P
+    *(buf + 3) = 84;    // T
+    *(buf + 4) = 32;    // space
+    *(buf + 5) = 84;    // T
+    *(buf + 6) = 79;    // O
+    *(buf + 7) = 58;    // :
+    *(buf + 8) = 60;    // <
+    let o: u32 = email_append_str(buf, 9, to);
+    *(buf + o) = 62;    // >
+    let p: u32 = email_append_crlf(buf, o + 1);
+    *(buf + p) = 0;
+    tcp_send_str(fd, buf);
+    let code: u32 = smtp_read_response(fd, buf, EMAIL_BUF_SIZE);
+    free(buf);
+    if smtp_is_2xx(code) == 1 {
+        return EMAIL_OK;
+    }
+    return EMAIL_FAIL;
+}
+
+// DATA: send "DATA", expect 354, send body (with dot-stuffing) + "\r\n.\r\n",
+// expect 250. Returns EMAIL_OK on success.
+fn smtp_data(fd: i64, body: Address, body_len: u32) -> u32 {
+    let buf: Address = allocate(EMAIL_BUF_SIZE);
+
+    // "DATA\r\n"
+    *(buf + 0) = 68;    // D
+    *(buf + 1) = 65;    // A
+    *(buf + 2) = 84;    // T
+    *(buf + 3) = 65;    // A
+    *(buf + 4) = 13;
+    *(buf + 5) = 10;
+    *(buf + 6) = 0;
+    tcp_send_str(fd, buf);
+    let code: u32 = smtp_read_response(fd, buf, EMAIL_BUF_SIZE);
+    if code != 354 {
+        free(buf);
+        return EMAIL_FAIL;
+    }
+
+    // Build body with RFC 5321 dot-stuffing + terminator "\r\n.\r\n".
+    // Worst case every line begins with '.', so output <= 2*body_len + 5.
+    let sendbuf: Address = allocate(body_len * 2 + 16);
+    let out_off: u32 = 0;
+    let at_line_start: u32 = 1;
+    let i: u32 = 0;
+    while i < body_len {
+        let b: u32 = *(body + i);
+        if at_line_start == 1 {
+            if b == 46 {            // '.' — stuff an extra dot
+                *(sendbuf + out_off) = 46;
+                out_off = out_off + 1;
+            }
+        }
+        *(sendbuf + out_off) = b;
+        out_off = out_off + 1;
+        if b == 10 {                // LF
+            at_line_start = 1;
+        } else {
+            at_line_start = 0;
+        }
+        i = i + 1;
+    }
+    // Append the end-of-data sentinel "\r\n.\r\n".
+    *(sendbuf + out_off + 0) = 13;
+    *(sendbuf + out_off + 1) = 10;
+    *(sendbuf + out_off + 2) = 46;   // .
+    *(sendbuf + out_off + 3) = 13;
+    *(sendbuf + out_off + 4) = 10;
+    *(sendbuf + out_off + 5) = 0;
+    tcp_send_str(fd, sendbuf);
+    free(sendbuf);
+
+    let code2: u32 = smtp_read_response(fd, buf, EMAIL_BUF_SIZE);
+    free(buf);
+    if smtp_is_2xx(code2) == 1 {
+        return EMAIL_OK;
+    }
+    return EMAIL_FAIL;
+}
+
+// Send QUIT and close the connection.
+fn smtp_quit(fd: i64) {
+    let buf: Address = allocate(EMAIL_BUF_SIZE);
+    // "QUIT\r\n"
+    *(buf + 0) = 81;    // Q
+    *(buf + 1) = 85;    // U
+    *(buf + 2) = 73;    // I
+    *(buf + 3) = 84;    // T
+    *(buf + 4) = 13;
+    *(buf + 5) = 10;
+    *(buf + 6) = 0;
+    tcp_send_str(fd, buf);
+    // Best-effort: read the 221 farewell, ignore errors.
+    smtp_read_response(fd, buf, EMAIL_BUF_SIZE);
+    free(buf);
+    tcp_close(fd);
+}
+
+// All-in-one: connect, EHLO, MAIL FROM, RCPT TO, DATA, QUIT.
+// Uses "localhost" as the EHLO hostname and skips STARTTLS/AUTH.
+// Returns EMAIL_OK on success, EMAIL_FAIL otherwise.
+fn smtp_send(server_ip: u32, port: u32, from: Address, to: Address,
+             body: Address, body_len: u32) -> u32 {
+    let fd: i64 = smtp_connect(server_ip, port);
+    if fd < 0 {
+        return EMAIL_FAIL;
+    }
+    // EHLO "localhost"
+    let hostname: Address = allocate(16);
+    *(hostname + 0) = 108;    // l
+    *(hostname + 1) = 111;    // o
+    *(hostname + 2) = 99;     // c
+    *(hostname + 3) = 97;     // a
+    *(hostname + 4) = 108;    // l
+    *(hostname + 5) = 104;    // h
+    *(hostname + 6) = 111;    // o
+    *(hostname + 7) = 115;    // s
+    *(hostname + 8) = 116;    // t
+    *(hostname + 9) = 0;
+    let r: u32 = smtp_ehlo(fd, hostname);
+    free(hostname);
+    if r == EMAIL_FAIL {
+        smtp_quit(fd);
+        return EMAIL_FAIL;
+    }
+    if smtp_mail_from(fd, from) == EMAIL_FAIL {
+        smtp_quit(fd);
+        return EMAIL_FAIL;
+    }
+    if smtp_rcpt_to(fd, to) == EMAIL_FAIL {
+        smtp_quit(fd);
+        return EMAIL_FAIL;
+    }
+    let dr: u32 = smtp_data(fd, body, body_len);
+    smtp_quit(fd);
+    return dr;
+}
+
+// ===========================================================================
+// 2. IMAP CLIENT (RFC 9051)
+// ===========================================================================
+//
+// IMAP uses tagged commands: the client sends "A00N command args" and the
+// server replies with one or more untagged lines ("* ...") followed by a
+// final tagged line "A00N OK/NO/BAD ...". We read until the tagged
+// completion line appears and report success/failure.
+
+// Append the 5-byte tag "A00<digit> " (digit 1..5) at off. Returns new off.
+fn imap_append_tag(buf: Address, off: u32, tag_digit: u32) -> u32 {
+    *(buf + off + 0) = 65;            // A
+    *(buf + off + 1) = 48;            // 0
+    *(buf + off + 2) = 48;            // 0
+    *(buf + off + 3) = 48 + tag_digit;
+    *(buf + off + 4) = 32;            // space
+    return off + 5;
+}
+
+// Scan buf[0..len) for the tagged completion "A00<digit> <status>" where
+// status is OK / NO / BAD.
+// Returns 1 if OK found, 2 if NO/BAD found, 0 if not found.
+fn imap_find_tag_status(buf: Address, len: u32, tag_digit: u32) -> u32 {
+    let i: u32 = 0;
+    while i + 5 < len {
+        if *(buf + i) == 65 {                 // 'A'
+            if *(buf + i + 1) == 48 {         // '0'
+                if *(buf + i + 2) == 48 {     // '0'
+                    if *(buf + i + 3) == 48 + tag_digit {
+                        if *(buf + i + 4) == 32 {    // space
+                            let s0: u32 = *(buf + i + 5);
+                            // "OK"
+                            if s0 == 79 {             // 'O'
+                                if i + 6 < len {
+                                    if *(buf + i + 6) == 75 {   // 'K'
+                                        return 1;
+                                    }
+                                }
+                            }
+                            // "NO"
+                            if s0 == 78 {             // 'N'
+                                if i + 6 < len {
+                                    if *(buf + i + 6) == 79 {   // 'O'
+                                        return 2;
+                                    }
+                                }
+                            }
+                            // "BAD"
+                            if s0 == 66 {             // 'B'
+                                if i + 7 < len {
+                                    if *(buf + i + 6) == 65 {   // 'A'
+                                        if *(buf + i + 7) == 68 {   // 'D'
+                                            return 2;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+// Read from fd into buf until the tagged completion line for `tag_digit`
+// appears (OK/NO/BAD) or the buffer fills / connection closes.
+// Returns EMAIL_OK if the tag completed with OK, EMAIL_FAIL otherwise.
+fn imap_read_tagged(fd: i64, buf: Address, max_len: u32, tag_digit: u32) -> u32 {
+    let total: u32 = 0;
+    let done: u32 = 0;
+    while done == 0 {
+        if total + 1 >= max_len {
+            done = 1;
+        } else {
+            let n: i64 = tcp_recv(fd, buf + total, max_len - total - 1);
+            if n <= 0 {
+                done = 1;
+            } else {
+                total = total + (n as u32);
+                let st: u32 = imap_find_tag_status(buf, total, tag_digit);
+                if st != 0 {
+                    done = 1;
+                }
+            }
+        }
+    }
+    *(buf + total) = 0;
+    let st2: u32 = imap_find_tag_status(buf, total, tag_digit);
+    if st2 == 1 {
+        return EMAIL_OK;
+    }
+    return EMAIL_FAIL;
+}
+
+// Connect to an IMAP server and read the "* OK" greeting.
+// Returns fd >= 0 on success, -1 on error.
+fn imap_connect(server_ip: u32, port: u32) -> i64 {
+    let fd: i64 = tcp_connect(server_ip, port);
+    if fd < 0 {
+        return -1;
+    }
+    let buf: Address = allocate(EMAIL_BUF_SIZE);
+    let total: u32 = 0;
+    let got_crlf: u32 = 0;
+    while got_crlf == 0 {
+        if total + 1 >= EMAIL_BUF_SIZE {
+            got_crlf = 1;
+        } else {
+            let n: i64 = tcp_recv(fd, buf + total, EMAIL_BUF_SIZE - total - 1);
+            if n <= 0 {
+                got_crlf = 1;
+            } else {
+                total = total + (n as u32);
+                if email_find_crlf(buf, 0, total) < total {
+                    got_crlf = 1;
+                }
+            }
+        }
+    }
+    *(buf + total) = 0;
+    // Greeting must start with "* OK".
+    let ok: u32 = 0;
+    if total >= 4 {
+        if *(buf + 0) == 42 {        // '*'
+            if *(buf + 1) == 32 {    // space
+                if *(buf + 2) == 79 {   // 'O'
+                    if *(buf + 3) == 75 {  // 'K'
+                        ok = 1;
+                    }
+                }
+            }
+        }
+    }
+    free(buf);
+    if ok == 0 {
+        tcp_close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+// A001 LOGIN <user> <pass>. Returns EMAIL_OK / EMAIL_FAIL.
+fn imap_login(fd: i64, username: Address, password: Address) -> u32 {
+    let buf: Address = allocate(EMAIL_BUF_SIZE);
+    let o: u32 = imap_append_tag(buf, 0, IMAP_TAG_LOGIN);
+    // "LOGIN "
+    *(buf + o + 0) = 76;    // L
+    *(buf + o + 1) = 79;    // O
+    *(buf + o + 2) = 71;    // G
+    *(buf + o + 3) = 73;    // I
+    *(buf + o + 4) = 78;    // N
+    *(buf + o + 5) = 32;    // space
+    let p: u32 = email_append_str(buf, o + 6, username);
+    *(buf + p) = 32;        // space
+    let q: u32 = email_append_str(buf, p + 1, password);
+    let r: u32 = email_append_crlf(buf, q);
+    *(buf + r) = 0;
+    tcp_send_str(fd, buf);
+    let res: u32 = imap_read_tagged(fd, buf, EMAIL_BUF_SIZE, IMAP_TAG_LOGIN);
+    free(buf);
+    return res;
+}
+
+// A002 SELECT <mailbox>. Returns EMAIL_OK / EMAIL_FAIL.
+fn imap_select(fd: i64, mailbox: Address) -> u32 {
+    let buf: Address = allocate(EMAIL_BUF_SIZE);
+    let o: u32 = imap_append_tag(buf, 0, IMAP_TAG_SELECT);
+    // "SELECT "
+    *(buf + o + 0) = 83;    // S
+    *(buf + o + 1) = 69;    // E
+    *(buf + o + 2) = 76;    // L
+    *(buf + o + 3) = 69;    // E
+    *(buf + o + 4) = 67;    // C
+    *(buf + o + 5) = 84;    // T
+    *(buf + o + 6) = 32;    // space
+    let p: u32 = email_append_str(buf, o + 7, mailbox);
+    let q: u32 = email_append_crlf(buf, p);
+    *(buf + q) = 0;
+    tcp_send_str(fd, buf);
+    let res: u32 = imap_read_tagged(fd, buf, EMAIL_BUF_SIZE, IMAP_TAG_SELECT);
+    free(buf);
+    return res;
+}
+
+// Find the first "{NNN}\r\n" literal marker in buf[0..total).
+// On success: returns 1, stores the literal byte count at *out_len and the
+// start offset of the literal data at *out_start.
+// On failure: returns 0.
+fn imap_find_literal(buf: Address, total: u32, out_len: Address,
+                     out_start: Address) -> u32 {
+    let i: u32 = 0;
+    while i < total {
+        if *(buf + i) == 123 {           // '{'
+            let j: u32 = i + 1;
+            let n: u32 = 0;
+            while j < total {
+                let c: u32 = *(buf + j);
+                if c == 125 {            // '}'
+                    email_store_u32_at(out_len, n);
+                    let start: u32 = j + 1;
+                    if j + 2 < total {
+                        if *(buf + j + 1) == 13 {
+                            if *(buf + j + 2) == 10 {
+                                let s: u32 = j + 3;
+                                email_store_u32_at(out_start, s);
+                                return 1;
+                            }
+                        }
+                    }
+                    email_store_u32_at(out_start, start);
+                    return 1;
+                }
+                if c < 48 { return 0; }
+                if c > 57 { return 0; }
+                n = n * 10 + (c - 48);
+                j = j + 1;
+            }
+            return 0;   // ran off the end without '}'
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+// A003 FETCH <seq> BODY[] — extract the literal body into out (up to max_len).
+// Returns the number of bytes copied to out (0 on failure).
+//
+// The server reply looks like:
+//   * N FETCH (BODY[] {bytecount}\r\n<literal bytes>\r\n)\r\n
+//   A003 OK Fetch completed\r\n
+// We locate the first "{bytecount}\r\n" literal marker and copy the
+// following bytecount bytes (capped at max_len) into out.
+fn imap_fetch(fd: i64, seq: u32, out: Address, max_len: u32) -> u32 {
+    let line: Address = allocate(EMAIL_BUF_SIZE);
+    let buf: Address = allocate(EMAIL_FETCH_BUF_SIZE);
+    let lit_len_buf: Address = allocate(8);   // u32 literal_len + u32 literal_start
+    let lit_start_buf: Address = lit_len_buf + 4;
+
+    // Build "A003 FETCH <seq> BODY[]\r\n"
+    let o: u32 = imap_append_tag(line, 0, IMAP_TAG_FETCH);
+    // "FETCH "
+    *(line + o + 0) = 70;   // F
+    *(line + o + 1) = 69;   // E
+    *(line + o + 2) = 84;   // T
+    *(line + o + 3) = 67;   // C
+    *(line + o + 4) = 72;   // H
+    *(line + o + 5) = 32;   // space
+    let p: u32 = email_append_u32(line, o + 6, seq);
+    // " BODY[]"
+    *(line + p + 0) = 32;   // space
+    *(line + p + 1) = 66;   // B
+    *(line + p + 2) = 79;   // O
+    *(line + p + 3) = 68;   // D
+    *(line + p + 4) = 89;   // Y
+    *(line + p + 5) = 91;   // [
+    *(line + p + 6) = 93;   // ]
+    let q: u32 = email_append_crlf(line, p + 7);
+    *(line + q) = 0;
+    tcp_send_str(fd, line);
+
+    // Read until the tagged completion appears or buffer fills.
+    let total: u32 = 0;
+    let done: u32 = 0;
+    while done == 0 {
+        if total + 1 >= EMAIL_FETCH_BUF_SIZE {
+            done = 1;
+        } else {
+            let n: i64 = tcp_recv(fd, buf + total, EMAIL_FETCH_BUF_SIZE - total - 1);
+            if n <= 0 {
+                done = 1;
+            } else {
+                total = total + (n as u32);
+                let st: u32 = imap_find_tag_status(buf, total, IMAP_TAG_FETCH);
+                if st != 0 {
+                    done = 1;
+                }
+            }
+        }
+    }
+    *(buf + total) = 0;
+
+    // Locate the "{NNN}\r\n" literal marker.
+    let copied: u32 = 0;
+    let found: u32 = imap_find_literal(buf, total, lit_len_buf, lit_start_buf);
+    if found == 1 {
+        let literal_len: u32 = email_load_u32_at(lit_len_buf);
+        let literal_start: u32 = email_load_u32_at(lit_start_buf);
+        copied = literal_len;
+        if copied > max_len {
+            copied = max_len;
+        }
+        // Guard against buffer underrun: if fewer bytes arrived than the
+        // literal promises, copy only what we have.
+        if literal_start + copied > total {
+            if total > literal_start {
+                copied = total - literal_start;
+            } else {
+                copied = 0;
+            }
+            if copied > max_len {
+                copied = max_len;
+            }
+        }
+        let k: u32 = 0;
+        while k < copied {
+            *(out + k) = *(buf + literal_start + k);
+            k = k + 1;
+        }
+    }
+
+    free(line);
+    free(buf);
+    free(lit_len_buf);
+    return copied;
+}
+
+// A004 LIST <ref> <mailbox>. Returns EMAIL_OK / EMAIL_FAIL.
+fn imap_list(fd: i64, ref: Address, mailbox: Address) -> u32 {
+    let buf: Address = allocate(EMAIL_BUF_SIZE);
+    let o: u32 = imap_append_tag(buf, 0, IMAP_TAG_LIST);
+    // "LIST "
+    *(buf + o + 0) = 76;    // L
+    *(buf + o + 1) = 73;    // I
+    *(buf + o + 2) = 83;    // S
+    *(buf + o + 3) = 84;    // T
+    *(buf + o + 4) = 32;    // space
+    let p: u32 = email_append_str(buf, o + 5, ref);
+    *(buf + p) = 32;        // space
+    let q: u32 = email_append_str(buf, p + 1, mailbox);
+    let r: u32 = email_append_crlf(buf, q);
+    *(buf + r) = 0;
+    tcp_send_str(fd, buf);
+    let res: u32 = imap_read_tagged(fd, buf, EMAIL_BUF_SIZE, IMAP_TAG_LIST);
+    free(buf);
+    return res;
+}
+
+// A005 LOGOUT, then close.
+fn imap_logout(fd: i64) {
+    let buf: Address = allocate(EMAIL_BUF_SIZE);
+    let o: u32 = imap_append_tag(buf, 0, IMAP_TAG_LOGOUT);
+    // "LOGOUT"
+    *(buf + o + 0) = 76;    // L
+    *(buf + o + 1) = 79;    // O
+    *(buf + o + 2) = 71;    // G
+    *(buf + o + 3) = 79;    // O
+    *(buf + o + 4) = 85;    // U
+    *(buf + o + 5) = 84;    // T
+    let p: u32 = email_append_crlf(buf, o + 6);
+    *(buf + p) = 0;
+    tcp_send_str(fd, buf);
+    // Best-effort: read the tagged bye response, ignore errors.
+    imap_read_tagged(fd, buf, EMAIL_BUF_SIZE, IMAP_TAG_LOGOUT);
+    free(buf);
+    tcp_close(fd);
+}
+
+// ===========================================================================
+// 3. POP3 CLIENT (RFC 1939)
+// ===========================================================================
+//
+// POP3 is lock-step: each client command gets a single-line "+OK ..." or
+// "-ERR ..." reply, except RETR which is followed by the message body
+// terminated by a line containing only ".".
+
+// Read a single POP3 reply line (until CRLF) into buf. The buffer is left
+// NUL-terminated. Returns EMAIL_OK if the line begins with "+OK",
+// EMAIL_FAIL otherwise (including "-ERR" or read error).
+fn pop3_read_line(fd: i64, buf: Address, max_len: u32) -> u32 {
+    let total: u32 = 0;
+    let got_crlf: u32 = 0;
+    while got_crlf == 0 {
+        if total + 1 >= max_len {
+            got_crlf = 1;
+        } else {
+            let n: i64 = tcp_recv(fd, buf + total, max_len - total - 1);
+            if n <= 0 {
+                got_crlf = 1;
+            } else {
+                total = total + (n as u32);
+                if email_find_crlf(buf, 0, total) < total {
+                    got_crlf = 1;
+                }
+            }
+        }
+    }
+    *(buf + total) = 0;
+    if total >= 3 {
+        if *(buf + 0) == 43 {        // '+'
+            if *(buf + 1) == 79 {    // 'O'
+                if *(buf + 2) == 75 {   // 'K'
+                    return EMAIL_OK;
+                }
+            }
+        }
+    }
+    return EMAIL_FAIL;
+}
+
+// Connect to a POP3 server and read the "+OK" greeting.
+// Returns fd >= 0 on success, -1 on error.
+fn pop3_connect(server_ip: u32, port: u32) -> i64 {
+    let fd: i64 = tcp_connect(server_ip, port);
+    if fd < 0 {
+        return -1;
+    }
+    let buf: Address = allocate(EMAIL_BUF_SIZE);
+    let r: u32 = pop3_read_line(fd, buf, EMAIL_BUF_SIZE);
+    free(buf);
+    if r == EMAIL_FAIL {
+        tcp_close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+// USER <username>. Returns EMAIL_OK on +OK.
+fn pop3_user(fd: i64, username: Address) -> u32 {
+    let buf: Address = allocate(EMAIL_BUF_SIZE);
+    // "USER "
+    *(buf + 0) = 85;    // U
+    *(buf + 1) = 83;    // S
+    *(buf + 2) = 69;    // E
+    *(buf + 3) = 82;    // R
+    *(buf + 4) = 32;    // space
+    let o: u32 = email_append_str(buf, 5, username);
+    let p: u32 = email_append_crlf(buf, o);
+    *(buf + p) = 0;
+    tcp_send_str(fd, buf);
+    let r: u32 = pop3_read_line(fd, buf, EMAIL_BUF_SIZE);
+    free(buf);
+    return r;
+}
+
+// PASS <password>. Returns EMAIL_OK on +OK.
+fn pop3_pass(fd: i64, password: Address) -> u32 {
+    let buf: Address = allocate(EMAIL_BUF_SIZE);
+    // "PASS "
+    *(buf + 0) = 80;    // P
+    *(buf + 1) = 65;    // A
+    *(buf + 2) = 83;    // S
+    *(buf + 3) = 83;    // S
+    *(buf + 4) = 32;    // space
+    let o: u32 = email_append_str(buf, 5, password);
+    let p: u32 = email_append_crlf(buf, o);
+    *(buf + p) = 0;
+    tcp_send_str(fd, buf);
+    let r: u32 = pop3_read_line(fd, buf, EMAIL_BUF_SIZE);
+    free(buf);
+    return r;
+}
+
+// STAT — returns the message count, or 0 on error.
+// Server replies "+OK <count> <size>".
+fn pop3_stat(fd: i64) -> u32 {
+    let buf: Address = allocate(EMAIL_BUF_SIZE);
+    // "STAT\r\n"
+    *(buf + 0) = 83;    // S
+    *(buf + 1) = 84;    // T
+    *(buf + 2) = 65;    // A
+    *(buf + 3) = 84;    // T
+    *(buf + 4) = 13;
+    *(buf + 5) = 10;
+    *(buf + 6) = 0;
+    tcp_send_str(fd, buf);
+    let r: u32 = pop3_read_line(fd, buf, EMAIL_BUF_SIZE);
+    if r == EMAIL_FAIL {
+        free(buf);
+        return 0;
+    }
+    let len: u32 = email_strlen(buf);
+    if len < 4 {
+        free(buf);
+        return 0;
+    }
+    // Find the first space after "+OK".
+    let sp: u32 = email_find_char(buf, 0, len, 32);
+    if sp >= len {
+        free(buf);
+        return 0;
+    }
+    // Skip spaces to reach the start of the count field.
+    let count_start: u32 = email_skip_spaces(buf, sp, len);
+    if count_start >= len {
+        free(buf);
+        return 0;
+    }
+    // Parse the decimal count until the next non-digit.
+    let count: u32 = 0;
+    let i: u32 = count_start;
+    let parsing: u32 = 1;
+    while parsing == 1 {
+        if i >= len {
+            parsing = 0;
+        } else {
+            let c: u32 = *(buf + i);
+            if c < 48 {
+                parsing = 0;
+            } else {
+                if c > 57 {
+                    parsing = 0;
+                } else {
+                    count = count * 10 + (c - 48);
+                    i = i + 1;
+                }
+            }
+        }
+    }
+    free(buf);
+    return count;
+}
+
+// RETR <msg_num> — fetch a message body into out (up to max_len bytes).
+// Undoes RFC 1939 dot-stuffing. Returns bytes copied (0 on failure).
+fn pop3_retr(fd: i64, msg_num: u32, out: Address, max_len: u32) -> u32 {
+    let line: Address = allocate(EMAIL_BUF_SIZE);
+    let buf: Address = allocate(EMAIL_FETCH_BUF_SIZE);
+
+    // "RETR <n>\r\n"
+    *(line + 0) = 82;    // R
+    *(line + 1) = 69;    // E
+    *(line + 2) = 84;    // T
+    *(line + 3) = 82;    // R
+    *(line + 4) = 32;    // space
+    let o: u32 = email_append_u32(line, 5, msg_num);
+    let p: u32 = email_append_crlf(line, o);
+    *(line + p) = 0;
+    tcp_send_str(fd, line);
+
+    // Read until the end-of-message sentinel "\r\n.\r\n" appears.
+    let total: u32 = 0;
+    let done: u32 = 0;
+    while done == 0 {
+        if total + 1 >= EMAIL_FETCH_BUF_SIZE {
+            done = 1;
+        } else {
+            let n: i64 = tcp_recv(fd, buf + total, EMAIL_FETCH_BUF_SIZE - total - 1);
+            if n <= 0 {
+                done = 1;
+            } else {
+                total = total + (n as u32);
+                if email_find_dot_term(buf, 0, total) < total {
+                    done = 1;
+                }
+            }
+        }
+    }
+    *(buf + total) = 0;
+
+    // The body starts right after the "+OK...\r\n" status line.
+    let crlf_pos: u32 = email_find_crlf(buf, 0, total);
+    let body_start: u32;
+    if crlf_pos >= total {
+        body_start = 0;
+    } else {
+        body_start = crlf_pos + 2;
+    }
+    // body_end = index of the "\r\n.\r\n" sentinel.
+    let body_end: u32 = email_find_dot_term(buf, body_start, total);
+
+    // Copy body into out, undoing dot-stuffing: a line beginning with ".."
+    // in the wire form decodes to a line beginning with ".".
+    let out_off: u32 = 0;
+    let at_line_start: u32 = 1;
+    let k: u32 = body_start;
+    while k < body_end {
+        if out_off >= max_len {
+            k = body_end;
+        } else {
+            let b: u32 = *(buf + k);
+            if at_line_start == 1 {
+                if b == 46 {                // '.'
+                    // If the next byte is also '.', this is stuffed — drop one.
+                    if k + 1 < body_end {
+                        if *(buf + k + 1) == 46 {
+                            k = k + 1;
+                            b = 46;
+                        }
+                    }
+                }
+            }
+            *(out + out_off) = b;
+            out_off = out_off + 1;
+            if b == 10 {                    // LF
+                at_line_start = 1;
+            } else {
+                at_line_start = 0;
+            }
+            k = k + 1;
+        }
+    }
+
+    free(line);
+    free(buf);
+    return out_off;
+}
+
+// DELE <msg_num>. Returns EMAIL_OK on +OK.
+fn pop3_dele(fd: i64, msg_num: u32) -> u32 {
+    let buf: Address = allocate(EMAIL_BUF_SIZE);
+    // "DELE "
+    *(buf + 0) = 68;    // D
+    *(buf + 1) = 69;    // E
+    *(buf + 2) = 76;    // L
+    *(buf + 3) = 69;    // E
+    *(buf + 4) = 32;    // space
+    let o: u32 = email_append_u32(buf, 5, msg_num);
+    let p: u32 = email_append_crlf(buf, o);
+    *(buf + p) = 0;
+    tcp_send_str(fd, buf);
+    let r: u32 = pop3_read_line(fd, buf, EMAIL_BUF_SIZE);
+    free(buf);
+    return r;
+}
+
+// QUIT, then close.
+fn pop3_quit(fd: i64) {
+    let buf: Address = allocate(EMAIL_BUF_SIZE);
+    // "QUIT\r\n"
+    *(buf + 0) = 81;    // Q
+    *(buf + 1) = 85;    // U
+    *(buf + 2) = 73;    // I
+    *(buf + 3) = 84;    // T
+    *(buf + 4) = 13;
+    *(buf + 5) = 10;
+    *(buf + 6) = 0;
+    tcp_send_str(fd, buf);
+    // Best-effort: read the +OK sign-off, ignore errors.
+    pop3_read_line(fd, buf, EMAIL_BUF_SIZE);
+    free(buf);
+    tcp_close(fd);
+}
+
+// ===========================================================================
+// 4. MIME HELPERS (RFC 2045 / RFC 5322)
+// ===========================================================================
+
+// Base64-encode `in_len` bytes from `input` into `output`, wrapping lines at
+// `line_len` characters with CRLF. A final CRLF is appended per RFC 2045.
+// If line_len is 0, a default of 76 is used.
+// Returns the total number of bytes written to output.
+fn mime_encode_base64_body(input: Address, in_len: u32, output: Address,
+                           line_len: u32) -> u32 {
+    let wrap: u32 = line_len;
+    if wrap == 0 {
+        wrap = 76;
+    }
+    // base64 output is 4 * ceil(in_len / 3) bytes; +4 for safety.
+    let b64_max: u32 = 4 * ((in_len + 2) / 3) + 4;
+    let tmp: Address = allocate(b64_max);
+    let b64_len: u32 = base64_encode(input, in_len, tmp);
+
+    let out_off: u32 = 0;
+    let col: u32 = 0;
+    let i: u32 = 0;
+    while i < b64_len {
+        *(output + out_off) = *(tmp + i);
+        out_off = out_off + 1;
+        col = col + 1;
+        if col >= wrap {
+            // Insert CRLF unless this is the very last character.
+            if i + 1 < b64_len {
+                *(output + out_off) = 13;
+                *(output + out_off + 1) = 10;
+                out_off = out_off + 2;
+                col = 0;
+            }
+        }
+        i = i + 1;
+    }
+    // Final CRLF terminates the encoded body.
+    *(output + out_off) = 13;
+    *(output + out_off + 1) = 10;
+    out_off = out_off + 2;
+
+    free(tmp);
+    return out_off;
+}
+
+// Build a minimal RFC 5322 header block:
+//   From: <from>\r\n
+//   To: <to>\r\n
+//   Subject: <subject>\r\n
+//   Content-Type: <content_type>\r\n
+//   \r\n
+// The result is NUL-terminated in `out`. Returns the header length
+// (excluding the NUL terminator), or 0 if it would exceed max_len.
+fn mime_build_headers(from: Address, to: Address, subject: Address,
+                      content_type: Address, out: Address,
+                      max_len: u32) -> u32 {
+    let off: u32 = 0;
+
+    // "From: "
+    off = email_append_byte(out, off, 70);     // F
+    off = email_append_byte(out, off, 114);    // r
+    off = email_append_byte(out, off, 111);    // o
+    off = email_append_byte(out, off, 109);    // m
+    off = email_append_byte(out, off, 58);     // :
+    off = email_append_byte(out, off, 32);     // space
+    off = email_append_str(out, off, from);
+    off = email_append_crlf(out, off);
+
+    // "To: "
+    off = email_append_byte(out, off, 84);     // T
+    off = email_append_byte(out, off, 111);    // o
+    off = email_append_byte(out, off, 58);     // :
+    off = email_append_byte(out, off, 32);     // space
+    off = email_append_str(out, off, to);
+    off = email_append_crlf(out, off);
+
+    // "Subject: "
+    off = email_append_byte(out, off, 83);     // S
+    off = email_append_byte(out, off, 117);    // u
+    off = email_append_byte(out, off, 98);     // b
+    off = email_append_byte(out, off, 106);    // j
+    off = email_append_byte(out, off, 101);    // e
+    off = email_append_byte(out, off, 99);     // c
+    off = email_append_byte(out, off, 116);    // t
+    off = email_append_byte(out, off, 58);     // :
+    off = email_append_byte(out, off, 32);     // space
+    off = email_append_str(out, off, subject);
+    off = email_append_crlf(out, off);
+
+    // "Content-Type: "
+    off = email_append_byte(out, off, 67);     // C
+    off = email_append_byte(out, off, 111);    // o
+    off = email_append_byte(out, off, 110);    // n
+    off = email_append_byte(out, off, 116);    // t
+    off = email_append_byte(out, off, 101);    // e
+    off = email_append_byte(out, off, 110);    // n
+    off = email_append_byte(out, off, 116);    // t
+    off = email_append_byte(out, off, 45);     // -
+    off = email_append_byte(out, off, 84);     // T
+    off = email_append_byte(out, off, 121);    // y
+    off = email_append_byte(out, off, 112);    // p
+    off = email_append_byte(out, off, 101);    // e
+    off = email_append_byte(out, off, 58);     // :
+    off = email_append_byte(out, off, 32);     // space
+    off = email_append_str(out, off, content_type);
+    off = email_append_crlf(out, off);
+
+    // Blank line separating headers from body.
+    off = email_append_crlf(out, off);
+
+    if off + 1 >= max_len {
+        return 0;
+    }
+    *(out + off) = 0;
+    return off;
+}

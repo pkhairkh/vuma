@@ -1,0 +1,1075 @@
+// womb/lib/app_protocols.vuma — HTTP/3, QPACK, MQTT 3.1.1, CoAP
+// No main() — importable library module.
+//
+// Implements four application-layer protocols over byte buffers:
+//   1. HTTP/3 (RFC 9114) frame build/parse using QUIC variable-length
+//      integers (RFC 9000 Section 16).
+//   2. QPACK (RFC 9204) header compression — integer codec, single-header
+//      literal-without-name-reference encoder, and a decoder that handles
+//      indexed, literal-with-name-ref, and literal-without-name-ref
+//      representations.
+//   3. MQTT 3.1.1 (ISO/IEC 20922) control packet builders + parser.
+//   4. CoAP (RFC 7252) request builder, response parser, option encoder.
+//
+// Memory is managed with allocate()/free(); byte-level loads/stores go
+// through the ap_store_u32 / ap_load_u32 / ap_store_u64 / ap_load_u64 /
+// ap_store_addr / ap_load_addr helpers (little-endian). Every public
+// function takes an `out: Address` (caller-allocated) and returns the
+// number of bytes written. Out-parameters that return pointers/lengths
+// are `Address` cells that the caller allocates to 4 or 8 bytes.
+//
+// Task ID: womb-app-protocols
+
+// ===========================================================================
+// Constants
+// ===========================================================================
+
+// HTTP/3 frame types (RFC 9114 Section 7.1)
+const HTTP3_FRAME_DATA: u32 = 0;
+const HTTP3_FRAME_HEADERS: u32 = 1;
+const HTTP3_FRAME_CANCEL_PUSH: u32 = 3;
+const HTTP3_FRAME_SETTINGS: u32 = 4;
+const HTTP3_FRAME_PUSH_PROMISE: u32 = 5;
+const HTTP3_FRAME_GOAWAY: u32 = 7;
+const HTTP3_FRAME_MAX_PUSH_ID: u32 = 13;
+
+// HTTP/3 settings (RFC 9114 Section 7.2.4.1)
+const HTTP3_SETTINGS_QPACK_MAX_TABLE_CAPACITY: u32 = 1;
+const HTTP3_SETTINGS_MAX_FIELD_SECTION_SIZE: u32 = 6;
+const HTTP3_SETTINGS_QPACK_BLOCKED_STREAMS: u32 = 7;
+
+// Default settings values emitted by http3_build_settings
+const HTTP3_DEFAULT_TABLE_CAPACITY: u32 = 4096;
+const HTTP3_DEFAULT_MAX_FIELD_SECTION_SIZE: u32 = 16384;
+
+// QPACK representation masks (RFC 9204 Section 4.5)
+const QPACK_INDEXED_MASK: u32 = 128;           // 1xxxxxxx
+const QPACK_LITERAL_NAME_REF_MASK: u32 = 64;   // 01xxxxxx
+const QPACK_LITERAL_NO_REF_MASK: u32 = 32;     // 001xxxxx
+const QPACK_INDEXED_PREFIX_BITS: u32 = 6;
+const QPACK_LITERAL_NAME_REF_PREFIX_BITS: u32 = 4;
+const QPACK_LITERAL_NO_REF_PREFIX_BITS: u32 = 5;
+const QPACK_VALUE_LENGTH_PREFIX_BITS: u32 = 7;
+
+// MQTT control packet types (ISO/IEC 20922 Table 3.1)
+const MQTT_TYPE_CONNECT: u32 = 1;
+const MQTT_TYPE_CONNACK: u32 = 2;
+const MQTT_TYPE_PUBLISH: u32 = 3;
+const MQTT_TYPE_PUBACK: u32 = 4;
+const MQTT_TYPE_SUBSCRIBE: u32 = 8;
+const MQTT_TYPE_SUBACK: u32 = 9;
+const MQTT_TYPE_PINGREQ: u32 = 12;
+const MQTT_TYPE_PINGRESP: u32 = 13;
+const MQTT_TYPE_DISCONNECT: u32 = 14;
+
+const MQTT_CONNECT_FLAGS_CLEAN: u32 = 2;
+const MQTT_PROTOCOL_LEVEL: u32 = 4;
+const MQTT_MAX_REMAINING_LENGTH_BYTES: u32 = 4;
+
+// CoAP constants (RFC 7252)
+const COAP_VERSION: u32 = 1;
+const COAP_TYPE_CON: u32 = 0;
+const COAP_TYPE_NON: u32 = 1;
+const COAP_TYPE_ACK: u32 = 2;
+const COAP_TYPE_RST: u32 = 3;
+const COAP_METHOD_GET: u32 = 1;
+const COAP_METHOD_POST: u32 = 2;
+const COAP_METHOD_PUT: u32 = 3;
+const COAP_METHOD_DELETE: u32 = 4;
+const COAP_OPTION_URI_PATH: u32 = 11;
+const COAP_PAYLOAD_MARKER: u32 = 255;
+const COAP_HEADER_SIZE: u32 = 4;
+const COAP_MAX_TOKEN_LEN: u32 = 8;
+
+const AP_U32_MAX: u32 = 4294967295;
+
+// ===========================================================================
+// Byte-level load/store helpers (little-endian)
+// ===========================================================================
+// *(ptr + offset) returns/stores a single byte as u32. These helpers
+// assemble/disassemble multi-byte values in little-endian order. Offsets
+// are u32 to compose cleanly with the u32 index arithmetic used
+// throughout the module.
+
+fn ap_store_u32(ptr: Address, off: u32, val: u32) {
+    *(ptr + off)     = val & 255;
+    *(ptr + off + 1) = (val >> 8) & 255;
+    *(ptr + off + 2) = (val >> 16) & 255;
+    *(ptr + off + 3) = (val >> 24) & 255;
+}
+
+fn ap_load_u32(ptr: Address, off: u32) -> u32 {
+    let b0: u32 = *(ptr + off);
+    let b1: u32 = *(ptr + off + 1);
+    let b2: u32 = *(ptr + off + 2);
+    let b3: u32 = *(ptr + off + 3);
+    return (b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)) & AP_U32_MAX;
+}
+
+fn ap_store_u64(ptr: Address, off: u32, val: u64) {
+    *(ptr + off)     = val & 255;
+    *(ptr + off + 1) = (val >> 8) & 255;
+    *(ptr + off + 2) = (val >> 16) & 255;
+    *(ptr + off + 3) = (val >> 24) & 255;
+    *(ptr + off + 4) = (val >> 32) & 255;
+    *(ptr + off + 5) = (val >> 40) & 255;
+    *(ptr + off + 6) = (val >> 48) & 255;
+    *(ptr + off + 7) = (val >> 56) & 255;
+}
+
+fn ap_load_u64(ptr: Address, off: u32) -> u64 {
+    let b0: u64 = *(ptr + off)     as u64;
+    let b1: u64 = *(ptr + off + 1) as u64;
+    let b2: u64 = *(ptr + off + 2) as u64;
+    let b3: u64 = *(ptr + off + 3) as u64;
+    let b4: u64 = *(ptr + off + 4) as u64;
+    let b5: u64 = *(ptr + off + 5) as u64;
+    let b6: u64 = *(ptr + off + 6) as u64;
+    let b7: u64 = *(ptr + off + 7) as u64;
+    let v: u64 = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+              | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
+    return v;
+}
+
+fn ap_store_addr(ptr: Address, off: u32, val: Address) {
+    let v: u64 = val as u64;
+    ap_store_u64(ptr, off, v);
+}
+
+fn ap_load_addr(ptr: Address, off: u32) -> Address {
+    let v: u64 = ap_load_u64(ptr, off);
+    return v as Address;
+}
+
+// Compute the length of a null-terminated string.
+
+fn ap_strlen(s: Address) -> u32 {
+    let n: u32 = 0;
+    while *(s + n) != 0 {
+        n = n + 1;
+    }
+    return n;
+}
+
+// ===========================================================================
+// 1. HTTP/3 (RFC 9114)
+// ===========================================================================
+// HTTP/3 frame format (RFC 9114 Section 7.1):
+//   Frame {
+//     Type (i),       // QUIC variable-length integer
+//     Length (i),     // QUIC variable-length integer
+//     Frame Payload (..)
+//   }
+//
+// QUIC variable-length integer (RFC 9000 Section 16):
+//   2-bit length prefix on the first byte:
+//     00 → 1 byte total,  6-bit  value (0 .. 63)
+//     01 → 2 bytes total, 14-bit value (0 .. 16383)
+//     10 → 4 bytes total, 30-bit value (0 .. 1073741823)
+//     11 → 8 bytes total, 62-bit value
+//   The 2-bit prefix is the high two bits of the first byte. The remaining
+//   bits of the first byte plus any continuation bytes hold the value in
+//   big-endian order.
+
+// Encode a QUIC variable-length integer into buf starting at pos. Returns
+// the new position. Supports values up to 30 bits (4-byte form); larger
+// values fall back to the 8-byte form using the low 30 bits.
+
+fn http3_encode_varint(buf: Address, pos: u32, value: u32) -> u32 {
+    if value < 64 {
+        *(buf + pos) = value & 255;
+        return pos + 1;
+    }
+    if value < 16384 {
+        *(buf + pos)     = 64 | ((value >> 8) & 63);
+        *(buf + pos + 1) = value & 255;
+        return pos + 2;
+    }
+    // 4-byte form (30-bit value).
+    *(buf + pos)     = 128 | ((value >> 24) & 63);
+    *(buf + pos + 1) = (value >> 16) & 255;
+    *(buf + pos + 2) = (value >> 8) & 255;
+    *(buf + pos + 3) = value & 255;
+    return pos + 4;
+}
+
+// Decode a QUIC variable-length integer from buf starting at *pos (the
+// u32 cell at Address pos). *pos is advanced past the integer. Returns
+// the decoded value.
+
+fn http3_decode_varint(buf: Address, pos: Address) -> u32 {
+    let p: u32 = ap_load_u32(pos, 0);
+    let first: u32 = *(buf + p) & 255;
+    let prefix: u32 = (first >> 6) & 3;
+    if prefix == 0 {
+        ap_store_u32(pos, 0, p + 1);
+        return first & 63;
+    }
+    if prefix == 1 {
+        let v: u32 = ((first & 63) << 8) | (*(buf + p + 1) & 255);
+        ap_store_u32(pos, 0, p + 2);
+        return v;
+    }
+    if prefix == 2 {
+        let v: u32 = ((first & 63) << 24)
+                   | ((*(buf + p + 1) & 255) << 16)
+                   | ((*(buf + p + 2) & 255) << 8)
+                   | (*(buf + p + 3) & 255);
+        ap_store_u32(pos, 0, p + 4);
+        return v;
+    }
+    // prefix == 3: 8-byte form. Only the low 30 bits are used (u32 range).
+    let v: u32 = ((*(buf + p + 4) & 255) << 24)
+               | ((*(buf + p + 5) & 255) << 16)
+               | ((*(buf + p + 6) & 255) << 8)
+               | (*(buf + p + 7) & 255);
+    ap_store_u32(pos, 0, p + 8);
+    return v;
+}
+
+// Build a complete HTTP/3 frame at out: type varint || length varint || payload.
+// `payload` may be 0 / payload_len 0 to emit a frame with an empty payload.
+// Returns the total number of bytes written to `out`.
+
+fn http3_build_frame(out: Address, frame_type: u32, payload: Address, payload_len: u32) -> u32 {
+    let after_type: u32 = http3_encode_varint(out, 0, frame_type);
+    let after_len: u32 = http3_encode_varint(out, after_type, payload_len);
+    let i: u32 = 0;
+    while i < payload_len {
+        *(out + after_len + i) = *(payload + i) & 255;
+        i = i + 1;
+    }
+    return after_len + payload_len;
+}
+
+// HEADERS frame (type 0x01). Payload is the QPACK-encoded header block
+// passed in as `headers` (headers_len bytes). Returns total frame size.
+
+fn http3_build_headers_frame(headers: Address, headers_len: u32, out: Address) -> u32 {
+    return http3_build_frame(out, HTTP3_FRAME_HEADERS, headers, headers_len);
+}
+
+// DATA frame (type 0x00). Payload is the raw body bytes.
+
+fn http3_build_data_frame(data: Address, data_len: u32, out: Address) -> u32 {
+    return http3_build_frame(out, HTTP3_FRAME_DATA, data, data_len);
+}
+
+// Parse a single HTTP/3 frame at the start of `buf`.
+//   *type        ← u32 frame type
+//   *payload     ← Address of (buf + frame_header_size), i.e. the payload
+//   *payload_len ← u32 payload length
+// Returns the total frame size (header + payload), or 0 on error.
+
+fn http3_parse_frame(buf: Address, buf_len: u32, type: Address, payload: Address, payload_len: Address) -> u32 {
+    if buf_len < 2 { return 0; }
+    let pos_cell: Address = allocate(4);
+    ap_store_u32(pos_cell, 0, 0);
+    let frame_type: u32 = http3_decode_varint(buf, pos_cell);
+    let cur1: u32 = ap_load_u32(pos_cell, 0);
+    if cur1 >= buf_len { free(pos_cell); return 0; }
+    let frame_len: u32 = http3_decode_varint(buf, pos_cell);
+    let header_size: u32 = ap_load_u32(pos_cell, 0);
+    free(pos_cell);
+
+    if header_size + frame_len > buf_len { return 0; }
+    ap_store_u32(type, 0, frame_type);
+    ap_store_addr(payload, 0, buf + header_size);
+    ap_store_u32(payload_len, 0, frame_len);
+    return header_size + frame_len;
+}
+
+// GOAWAY frame (type 0x07). Payload is a single varint: the largest stream
+// ID that was processed. Returns total frame size.
+
+fn http3_build_goaway(stream_id: u64, out: Address) -> u32 {
+    // Encode stream_id as a QUIC varint into a temporary buffer. We only
+    // use the low 30 bits since the rest of the module uses u32 lengths.
+    let payload: Address = allocate(8);
+    let lo: u32 = (stream_id & 4294967295) as u32;
+    let p: u32 = http3_encode_varint(payload, 0, lo);
+    let total: u32 = http3_build_frame(out, HTTP3_FRAME_GOAWAY, payload, p);
+    free(payload);
+    return total;
+}
+
+// SETTINGS frame (type 0x04). Payload is a sequence of settings, each:
+//   identifier (varint) || value (varint)
+// Emits QPACK_MAX_TABLE_CAPACITY and MAX_FIELD_SECTION_SIZE with the
+// default values. Returns total frame size.
+
+fn http3_build_settings(out: Address) -> u32 {
+    let payload: Address = allocate(32);
+    let p1: u32 = http3_encode_varint(payload, 0, HTTP3_SETTINGS_QPACK_MAX_TABLE_CAPACITY);
+    let p2: u32 = http3_encode_varint(payload, p1, HTTP3_DEFAULT_TABLE_CAPACITY);
+    let p3: u32 = http3_encode_varint(payload, p2, HTTP3_SETTINGS_MAX_FIELD_SECTION_SIZE);
+    let p4: u32 = http3_encode_varint(payload, p3, HTTP3_DEFAULT_MAX_FIELD_SECTION_SIZE);
+    let total: u32 = http3_build_frame(out, HTTP3_FRAME_SETTINGS, payload, p4);
+    free(payload);
+    return total;
+}
+
+// ===========================================================================
+// 2. QPACK (RFC 9204)
+// ===========================================================================
+// QPACK integer encoding (RFC 9204 Section 4.1.1) is structurally identical
+// to HPACK integer encoding (RFC 7541 Section 5.1): the low `prefix_bits`
+// bits of the first byte hold an initial value, and if that value equals
+// the max (2^prefix_bits - 1), continuation bytes follow with 7 bits each
+// and the high bit as a continuation flag.
+
+// Encode `value` with the given prefix length, writing the encoding into
+// buf starting at pos. The high (8 - prefix_bits) bits of the first byte
+// are written as 0; the caller is responsible for OR-ing in any prefix
+// bits (e.g. the 001 pattern for a literal-without-name-ref) afterwards.
+// Returns the new position.
+
+fn qpack_encode_integer(buf: Address, pos: u32, value: u32, prefix_bits: u32) -> u32 {
+    let one: u32 = 1;
+    let M: u32 = ((one << prefix_bits) - 1) & AP_U32_MAX;
+    if value < M {
+        *(buf + pos) = value & 255;
+        return pos + 1;
+    }
+    // value >= M: first byte = M (prefix bits remain 0), then continuation.
+    *(buf + pos) = M & 255;
+    let mut_p: u32 = pos + 1;
+    let mut_v: u32 = value - M;
+    while mut_v >= 128 {
+        *(buf + mut_p) = ((mut_v & 127) | 128) & 255;
+        mut_p = mut_p + 1;
+        mut_v = mut_v >> 7;
+    }
+    *(buf + mut_p) = mut_v & 255;
+    return mut_p + 1;
+}
+
+// Decode a QPACK integer from buf starting at *pos (the u32 cell at
+// Address pos). *pos is advanced past the integer. The first byte's high
+// (8 - prefix_bits) bits are ignored. Returns the decoded value.
+
+fn qpack_decode_integer(buf: Address, pos: Address, prefix_bits: u32) -> u32 {
+    let one: u32 = 1;
+    let M: u32 = ((one << prefix_bits) - 1) & AP_U32_MAX;
+    let p: u32 = ap_load_u32(pos, 0);
+    let first_byte: u32 = *(buf + p) & 255;
+    let mut_value: u32 = first_byte & M;
+    let mut_p: u32 = p + 1;
+    if mut_value < M {
+        ap_store_u32(pos, 0, mut_p);
+        return mut_value;
+    }
+    // mut_value == M: continuation bytes.
+    let mut_m: u32 = 0;
+    while 1 == 1 {
+        let b: u32 = *(buf + mut_p) & 255;
+        mut_p = mut_p + 1;
+        mut_value = (mut_value + ((b & 127) << mut_m)) & AP_U32_MAX;
+        mut_m = (mut_m + 7) & AP_U32_MAX;
+        if (b & 128) == 0 { break; }
+    }
+    ap_store_u32(pos, 0, mut_p);
+    return mut_value;
+}
+
+// Encode a single header as a literal field line without name reference
+// (RFC 9204 Section 4.5.4). Pattern: 001Nxxxx where N=0 (we never set the
+// never-index bit) and xxxx is the 5-bit name length prefix.
+// Layout written at buf[pos..]:
+//   name length  (varint, 5-bit prefix, top 3 bits = 001)
+//   name bytes   (name_len bytes)
+//   value length (varint, 7-bit prefix; high bit = H = 0, no Huffman)
+//   value bytes  (value_len bytes)
+// Returns the new position.
+
+fn qpack_encode_header(buf: Address, pos: u32, name: Address, name_len: u32, value: Address, value_len: u32) -> u32 {
+    // Reserve the first byte for the 001 prefix + name length integer.
+    let name_first: u32 = pos;
+    let after_name_len: u32 = qpack_encode_integer(buf, pos, name_len, QPACK_LITERAL_NO_REF_PREFIX_BITS);
+    // OR the 001 pattern (0x20) into the first byte.
+    *(buf + name_first) = (*(buf + name_first) | QPACK_LITERAL_NO_REF_MASK) & 255;
+    // Write name bytes.
+    let i: u32 = 0;
+    while i < name_len {
+        *(buf + after_name_len + i) = *(name + i) & 255;
+        i = i + 1;
+    }
+    let after_name: u32 = after_name_len + name_len;
+    // Value length with 7-bit prefix; high bit (H) stays 0 (no Huffman).
+    let after_val_len: u32 = qpack_encode_integer(buf, after_name, value_len, QPACK_VALUE_LENGTH_PREFIX_BITS);
+    // Write value bytes.
+    let j: u32 = 0;
+    while j < value_len {
+        *(buf + after_val_len + j) = *(value + j) & 255;
+        j = j + 1;
+    }
+    return after_val_len + value_len;
+}
+
+// Minimal QPACK static-table lookup. Returns 1 if the (1-based) index
+// names one of the entries we know about; writes the name bytes to
+// name_out (no null terminator) and stores the name length at *name_len.
+// Returns 0 for unknown indices. Only a tiny subset is provided so that
+// qpack_decode_header can recover name bytes for indexed / literal-with-
+// name-ref representations of the most common pseudo-headers.
+
+fn qpack_static_name(idx: u32, name_out: Address, name_len: Address) -> u32 {
+    if idx == 1 {
+        // :authority
+        *(name_out + 0) = 58; *(name_out + 1) = 97; *(name_out + 2) = 117;
+        *(name_out + 3) = 116; *(name_out + 4) = 104; *(name_out + 5) = 111;
+        *(name_out + 6) = 114; *(name_out + 7) = 105; *(name_out + 8) = 116;
+        *(name_out + 9) = 121;
+        ap_store_u32(name_len, 0, 10);
+        return 1;
+    }
+    if idx == 3 {
+        // :method
+        *(name_out + 0) = 58; *(name_out + 1) = 109; *(name_out + 2) = 101;
+        *(name_out + 3) = 116; *(name_out + 4) = 104; *(name_out + 5) = 111;
+        *(name_out + 6) = 100;
+        ap_store_u32(name_len, 0, 7);
+        return 1;
+    }
+    if idx == 4 {
+        // :method (POST in the static table, name is the same)
+        *(name_out + 0) = 58; *(name_out + 1) = 109; *(name_out + 2) = 101;
+        *(name_out + 3) = 116; *(name_out + 4) = 104; *(name_out + 5) = 111;
+        *(name_out + 6) = 100;
+        ap_store_u32(name_len, 0, 7);
+        return 1;
+    }
+    if idx == 5 {
+        // :path
+        *(name_out + 0) = 58; *(name_out + 1) = 112; *(name_out + 2) = 97;
+        *(name_out + 3) = 116; *(name_out + 4) = 104;
+        ap_store_u32(name_len, 0, 5);
+        return 1;
+    }
+    if idx == 7 {
+        // :scheme
+        *(name_out + 0) = 58; *(name_out + 1) = 115; *(name_out + 2) = 99;
+        *(name_out + 3) = 104; *(name_out + 4) = 101; *(name_out + 5) = 109;
+        *(name_out + 6) = 101;
+        ap_store_u32(name_len, 0, 7);
+        return 1;
+    }
+    return 0;
+}
+
+// Decode a QPACK encoded field section into `headers`.
+//
+// Output buffer layout:
+//   [0 .. max_headers*16)              — array of 16-byte entries
+//   [max_headers*16 ..)                — string pool for name/value bytes
+// Each 16-byte entry:
+//   [0..3]   name_offset  (u32, byte offset within `headers`)
+//   [4..7]   name_len     (u32)
+//   [8..11]  value_offset (u32)
+//   [12..15] value_len    (u32)
+//
+// Returns the number of decoded headers. Decoding stops on the first
+// malformed entry, when buf is exhausted, or when max_headers is reached.
+// Indexed entries whose static-table index we don't recognize are still
+// counted but written with empty name/value.
+
+fn qpack_decode_header(buf: Address, buf_len: u32, headers: Address, max_headers: u32) -> u32 {
+    let pos_cell: Address = allocate(4);
+    ap_store_u32(pos_cell, 0, 0);
+
+    let count: u32 = 0;
+    let pool: u32 = max_headers * 16;
+    // Scratch buffer used for static-table name lookups.
+    let name_buf: Address = allocate(64);
+    let name_len_cell: Address = allocate(4);
+
+    while count < max_headers {
+        let p: u32 = ap_load_u32(pos_cell, 0);
+        if p >= buf_len { break; }
+
+        let first: u32 = *(buf + p) & 255;
+
+        // Indexed field line — With Name Reference: 1Txxxxxx
+        if (first & 128) != 0 {
+            let idx: u32 = qpack_decode_integer(buf, pos_cell, QPACK_INDEXED_PREFIX_BITS);
+            let found: u32 = qpack_static_name(idx, name_buf, name_len_cell);
+            let nl: u32 = ap_load_u32(name_len_cell, 0);
+            let entry_off: u32 = count * 16;
+            if found == 1 {
+                ap_store_u32(headers, entry_off + 0, pool);
+                ap_store_u32(headers, entry_off + 4, nl);
+                ap_store_u32(headers, entry_off + 8, pool + nl);
+                ap_store_u32(headers, entry_off + 12, 0);
+                let k: u32 = 0;
+                while k < nl {
+                    *(headers + pool + k) = *(name_buf + k) & 255;
+                    k = k + 1;
+                }
+                pool = pool + nl;
+            } else {
+                ap_store_u32(headers, entry_off + 0, pool);
+                ap_store_u32(headers, entry_off + 4, 0);
+                ap_store_u32(headers, entry_off + 8, pool);
+                ap_store_u32(headers, entry_off + 12, 0);
+            }
+            count = count + 1;
+            continue;
+        }
+
+        // Literal field line — With Name Reference: 01NTxxxx
+        if (first & 192) == 64 {
+            // 4-bit prefix name index.
+            let idx: u32 = qpack_decode_integer(buf, pos_cell, QPACK_LITERAL_NAME_REF_PREFIX_BITS);
+            let found: u32 = qpack_static_name(idx, name_buf, name_len_cell);
+            let nl: u32 = ap_load_u32(name_len_cell, 0);
+            // Value length (7-bit prefix, ignore H bit).
+            let val_len: u32 = qpack_decode_integer(buf, pos_cell, QPACK_VALUE_LENGTH_PREFIX_BITS);
+            let vp: u32 = ap_load_u32(pos_cell, 0);
+            if vp + val_len > buf_len { break; }
+            let entry_off: u32 = count * 16;
+            ap_store_u32(headers, entry_off + 0, pool);
+            ap_store_u32(headers, entry_off + 4, nl);
+            ap_store_u32(headers, entry_off + 8, pool + nl);
+            ap_store_u32(headers, entry_off + 12, val_len);
+            if found == 1 {
+                let k: u32 = 0;
+                while k < nl {
+                    *(headers + pool + k) = *(name_buf + k) & 255;
+                    k = k + 1;
+                }
+            }
+            let m: u32 = 0;
+            while m < val_len {
+                *(headers + pool + nl + m) = *(buf + vp + m) & 255;
+                m = m + 1;
+            }
+            pool = pool + nl + val_len;
+            ap_store_u32(pos_cell, 0, vp + val_len);
+            count = count + 1;
+            continue;
+        }
+
+        // Literal field line — Without Name Reference: 001Nxxxx
+        if (first & 224) == 32 {
+            // 5-bit prefix name length.
+            let name_len: u32 = qpack_decode_integer(buf, pos_cell, QPACK_LITERAL_NO_REF_PREFIX_BITS);
+            let np: u32 = ap_load_u32(pos_cell, 0);
+            if np + name_len > buf_len { break; }
+            // Value length (7-bit prefix).
+            let val_len: u32 = qpack_decode_integer(buf, pos_cell, QPACK_VALUE_LENGTH_PREFIX_BITS);
+            let vp: u32 = ap_load_u32(pos_cell, 0);
+            if vp + val_len > buf_len { break; }
+            let entry_off: u32 = count * 16;
+            ap_store_u32(headers, entry_off + 0, pool);
+            ap_store_u32(headers, entry_off + 4, name_len);
+            ap_store_u32(headers, entry_off + 8, pool + name_len);
+            ap_store_u32(headers, entry_off + 12, val_len);
+            let k: u32 = 0;
+            while k < name_len {
+                *(headers + pool + k) = *(buf + np + k) & 255;
+                k = k + 1;
+            }
+            let m: u32 = 0;
+            while m < val_len {
+                *(headers + pool + name_len + m) = *(buf + vp + m) & 255;
+                m = m + 1;
+            }
+            pool = pool + name_len + val_len;
+            ap_store_u32(pos_cell, 0, vp + val_len);
+            count = count + 1;
+            continue;
+        }
+
+        // Unrecognized representation — stop decoding.
+        break;
+    }
+
+    free(name_buf);
+    free(name_len_cell);
+    free(pos_cell);
+    return count;
+}
+
+// ===========================================================================
+// 3. MQTT 3.1.1 (ISO/IEC 20922)
+// ===========================================================================
+// MQTT Remaining Length encoding (Section 2.2.3.5): a variable-length
+// 7-bit-per-byte scheme with the high bit as a continuation flag. Maximum
+// 4 bytes (up to 268435455).
+
+// Encode `value` as an MQTT remaining length into buf at pos. Returns the
+// new position. Caller must ensure buf has at least 4 bytes free.
+
+fn mqtt_encode_remaining_length(buf: Address, pos: u32, value: u32) -> u32 {
+    let mut_p: u32 = pos;
+    let mut_v: u32 = value;
+    while 1 == 1 {
+        let b: u32 = mut_v % 128;
+        mut_v = mut_v / 128;
+        if mut_v > 0 {
+            *(buf + mut_p) = (b | 128) & 255;
+        } else {
+            *(buf + mut_p) = b & 255;
+        }
+        mut_p = mut_p + 1;
+        if mut_v == 0 { break; }
+    }
+    return mut_p;
+}
+
+// Decode an MQTT remaining length from buf starting at *pos. *pos is
+// advanced past the length. Returns the decoded value, or AP_U32_MAX on
+// error (malformed encoding or more than 4 bytes).
+
+fn mqtt_decode_remaining_length(buf: Address, pos: Address) -> u32 {
+    let mut_p: u32 = ap_load_u32(pos, 0);
+    let multiplier: u32 = 1;
+    let value: u32 = 0;
+    let bytes_seen: u32 = 0;
+    while 1 == 1 {
+        let b: u32 = *(buf + mut_p) & 255;
+        mut_p = mut_p + 1;
+        value = (value + ((b & 127) * multiplier)) & AP_U32_MAX;
+        bytes_seen = bytes_seen + 1;
+        if bytes_seen > MQTT_MAX_REMAINING_LENGTH_BYTES {
+            ap_store_u32(pos, 0, mut_p);
+            return AP_U32_MAX;
+        }
+        if (b & 128) == 0 {
+            ap_store_u32(pos, 0, mut_p);
+            return value;
+        }
+        multiplier = multiplier * 128;
+    }
+    // Unreachable.
+    ap_store_u32(pos, 0, mut_p);
+    return value;
+}
+
+// Build a CONNECT control packet.
+// Variable header: protocol name "MQTT" (length-prefixed), protocol level
+// 4, connect flags 0x02 (clean session only), keep-alive (2 bytes BE).
+// Payload: client_id (length-prefixed, null-terminated input).
+
+fn mqtt_build_connect(client_id: Address, keepalive: u16, out: Address) -> u32 {
+    let client_id_len: u32 = ap_strlen(client_id);
+    let ka: u32 = keepalive as u32;
+
+    // Build the variable header + payload first into a scratch buffer so we
+    // know the remaining length before we write the fixed header.
+    let scratch: Address = allocate(256 + client_id_len);
+    // Protocol Name: length(2 BE) + "MQTT"
+    *(scratch + 0) = 0; *(scratch + 1) = 4;
+    *(scratch + 2) = 77;  // M
+    *(scratch + 3) = 81;  // Q
+    *(scratch + 4) = 84;  // T
+    *(scratch + 5) = 84;  // T
+    // Protocol Level
+    *(scratch + 6) = MQTT_PROTOCOL_LEVEL & 255;
+    // Connect Flags (clean session)
+    *(scratch + 7) = MQTT_CONNECT_FLAGS_CLEAN & 255;
+    // Keep Alive (2 bytes BE)
+    *(scratch + 8) = (ka >> 8) & 255;
+    *(scratch + 9) = ka & 255;
+    // Payload: Client ID length (2 BE) + bytes
+    *(scratch + 10) = (client_id_len >> 8) & 255;
+    *(scratch + 11) = client_id_len & 255;
+    let i: u32 = 0;
+    while i < client_id_len {
+        *(scratch + 12 + i) = *(client_id + i) & 255;
+        i = i + 1;
+    }
+    let remaining: u32 = 12 + client_id_len;
+
+    // Fixed header: type=1 (0x10), remaining length, then body.
+    *(out + 0) = (MQTT_TYPE_CONNECT << 4) & 255;
+    let after_rl: u32 = mqtt_encode_remaining_length(out, 1, remaining);
+    let j: u32 = 0;
+    while j < remaining {
+        *(out + after_rl + j) = *(scratch + j) & 255;
+        j = j + 1;
+    }
+    free(scratch);
+    return after_rl + remaining;
+}
+
+// Build a PUBLISH control packet.
+// Fixed header byte 0 = 0x30 | (qos << 1) (retain = 0). If qos > 0, a
+// 2-byte packet ID is inserted after the topic (defaults to 0x0001).
+
+fn mqtt_build_publish(topic: Address, payload: Address, payload_len: u32, qos: u8, out: Address) -> u32 {
+    let topic_len: u32 = ap_strlen(topic);
+    let q: u32 = qos as u32;
+
+    // Compute remaining length.
+    let with_pid: u32 = 0;
+    if q > 0 { with_pid = 2; }
+    let remaining: u32 = 2 + topic_len + with_pid + payload_len;
+
+    // Fixed header byte 0: type=3 (0x30), QoS in bits 1-2, retain=0.
+    *(out + 0) = ((MQTT_TYPE_PUBLISH << 4) | ((q & 3) << 1)) & 255;
+    let after_rl: u32 = mqtt_encode_remaining_length(out, 1, remaining);
+
+    // Variable header: topic length (2 BE) + topic bytes.
+    *(out + after_rl) = (topic_len >> 8) & 255;
+    *(out + after_rl + 1) = topic_len & 255;
+    let p1: u32 = after_rl + 2;
+    let i: u32 = 0;
+    while i < topic_len {
+        *(out + p1 + i) = *(topic + i) & 255;
+        i = i + 1;
+    }
+    let p2: u32 = p1 + topic_len;
+
+    // Packet ID if QoS > 0 (default 0x0001).
+    let p3: u32 = p2;
+    if q > 0 {
+        *(out + p2) = 0;
+        *(out + p2 + 1) = 1;
+        p3 = p2 + 2;
+    }
+
+    // Payload bytes.
+    let j: u32 = 0;
+    while j < payload_len {
+        *(out + p3 + j) = *(payload + j) & 255;
+        j = j + 1;
+    }
+    return p3 + payload_len;
+}
+
+// Build a SUBSCRIBE control packet.
+// Fixed header byte 0 = 0x82 (type=8, flags=0010 — required by spec).
+// Variable header: packet ID (2 BE). Payload: topic filter length (2 BE) +
+// topic filter bytes + requested QoS (1 byte).
+
+fn mqtt_build_subscribe(packet_id: u16, topic: Address, qos: u8, out: Address) -> u32 {
+    let topic_len: u32 = ap_strlen(topic);
+    let q: u32 = qos as u32;
+    let pid: u32 = packet_id as u32;
+
+    let remaining: u32 = 2 + 2 + topic_len + 1;
+
+    // Fixed header.
+    *(out + 0) = ((MQTT_TYPE_SUBSCRIBE << 4) | 2) & 255;
+    let after_rl: u32 = mqtt_encode_remaining_length(out, 1, remaining);
+
+    // Packet ID (2 BE).
+    *(out + after_rl) = (pid >> 8) & 255;
+    *(out + after_rl + 1) = pid & 255;
+    let p: u32 = after_rl + 2;
+
+    // Topic filter length (2 BE) + topic bytes.
+    *(out + p) = (topic_len >> 8) & 255;
+    *(out + p + 1) = topic_len & 255;
+    let p1: u32 = p + 2;
+    let i: u32 = 0;
+    while i < topic_len {
+        *(out + p1 + i) = *(topic + i) & 255;
+        i = i + 1;
+    }
+    let p2: u32 = p1 + topic_len;
+
+    // Requested QoS.
+    *(out + p2) = q & 255;
+    return p2 + 1;
+}
+
+// PINGREQ: type=12, remaining length=0. Two bytes total.
+
+fn mqtt_build_pingreq(out: Address) -> u32 {
+    *(out + 0) = (MQTT_TYPE_PINGREQ << 4) & 255;
+    *(out + 1) = 0;
+    return 2;
+}
+
+// DISCONNECT: type=14, remaining length=0. Two bytes total.
+
+fn mqtt_build_disconnect(out: Address) -> u32 {
+    *(out + 0) = (MQTT_TYPE_DISCONNECT << 4) & 255;
+    *(out + 1) = 0;
+    return 2;
+}
+
+// Parse an MQTT control packet header.
+//   *type        ← u32 packet type (top 4 bits of byte 0)
+//   *payload     ← Address of (buf + fixed_header_size)
+//   *payload_len ← u32 remaining length
+// Returns the total packet size (fixed header + remaining length), or 0
+// on error.
+
+fn mqtt_parse_packet(buf: Address, buf_len: u32, type: Address, payload: Address, payload_len: Address) -> u32 {
+    if buf_len < 2 { return 0; }
+    let first: u32 = *(buf + 0) & 255;
+    let ptype: u32 = (first >> 4) & 15;
+    let pos_cell: Address = allocate(4);
+    ap_store_u32(pos_cell, 0, 1);
+    let remaining: u32 = mqtt_decode_remaining_length(buf, pos_cell);
+    let header_size: u32 = ap_load_u32(pos_cell, 0);
+    free(pos_cell);
+    if remaining == AP_U32_MAX { return 0; }
+    if header_size + remaining > buf_len { return 0; }
+    ap_store_u32(type, 0, ptype);
+    ap_store_addr(payload, 0, buf + header_size);
+    ap_store_u32(payload_len, 0, remaining);
+    return header_size + remaining;
+}
+
+// ===========================================================================
+// 4. CoAP (RFC 7252)
+// ===========================================================================
+// CoAP message format (Section 3):
+//    0                   1                   2                   3
+//    0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+//   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+//   |Ver| T |  TKL  |      Code     |          Message ID           |
+//   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+//   |   Token (if any, TKL bytes) ...
+//   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+//   |   Options (if any) ...
+//   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+//   |1 1 1 1 1 1 1 1|    Payload (if any) ...
+//   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+//
+// Option format (Section 3.1): each option is delta+length+value.
+//   4-bit delta, 4-bit length:
+//     0-12: direct
+//     13:   1 extended byte (value = extended + 13)
+//     14:   2 extended bytes BE (value = extended + 269)
+//     15:   reserved (payload marker for delta/length == 15)
+
+// Build a single CoAP option at buf[pos..]. `delta` is the difference
+// between this option's number and the previous option's number (or the
+// option number itself for the first option). `value` is value_len bytes.
+// Returns the new position.
+
+fn coap_build_option(buf: Address, pos: u32, delta: u32, value: Address, value_len: u32) -> u32 {
+    // Compute delta encoding.
+    let delta_nibble: u32 = 15;
+    let delta_ext_bytes: u32 = 0;
+    let delta_ext_val: u32 = 0;
+    if delta < 13 {
+        delta_nibble = delta;
+    } else if delta < 269 {
+        delta_nibble = 13;
+        delta_ext_bytes = 1;
+        delta_ext_val = delta - 13;
+    } else {
+        delta_nibble = 14;
+        delta_ext_bytes = 2;
+        delta_ext_val = delta - 269;
+    }
+
+    // Compute length encoding.
+    let len_nibble: u32 = 15;
+    let len_ext_bytes: u32 = 0;
+    let len_ext_val: u32 = 0;
+    if value_len < 13 {
+        len_nibble = value_len;
+    } else if value_len < 269 {
+        len_nibble = 13;
+        len_ext_bytes = 1;
+        len_ext_val = value_len - 13;
+    } else {
+        len_nibble = 14;
+        len_ext_bytes = 2;
+        len_ext_val = value_len - 269;
+    }
+
+    // First byte: (delta_nibble << 4) | len_nibble.
+    *(buf + pos) = ((delta_nibble << 4) | len_nibble) & 255;
+    let p1: u32 = pos + 1;
+
+    // Delta extension bytes (big-endian).
+    let p2: u32 = p1;
+    if delta_ext_bytes == 1 {
+        *(buf + p1) = delta_ext_val & 255;
+        p2 = p1 + 1;
+    } else if delta_ext_bytes == 2 {
+        *(buf + p1) = (delta_ext_val >> 8) & 255;
+        *(buf + p1 + 1) = delta_ext_val & 255;
+        p2 = p1 + 2;
+    }
+
+    // Length extension bytes (big-endian).
+    let p3: u32 = p2;
+    if len_ext_bytes == 1 {
+        *(buf + p2) = len_ext_val & 255;
+        p3 = p2 + 1;
+    } else if len_ext_bytes == 2 {
+        *(buf + p2) = (len_ext_val >> 8) & 255;
+        *(buf + p2 + 1) = len_ext_val & 255;
+        p3 = p2 + 2;
+    }
+
+    // Value bytes.
+    let i: u32 = 0;
+    while i < value_len {
+        *(buf + p3 + i) = *(value + i) & 255;
+        i = i + 1;
+    }
+    return p3 + value_len;
+}
+
+// Build a CoAP request message.
+//   method     — GET=1, POST=2, PUT=3, DELETE=4
+//   uri_path   — null-terminated string, e.g. "foo/bar/baz"; each path
+//                 segment becomes a Uri-Path option (option number 11).
+//   payload    — payload bytes (may be 0 if payload_len == 0)
+//   payload_len
+//   message_id — 16-bit message ID
+//   token      — token bytes (may be 0 if token_len == 0)
+//   token_len  — 0..8
+//   out        — caller-allocated output buffer
+// Returns total message size.
+
+fn coap_build_request(method: u32, uri_path: Address, payload: Address, payload_len: u32, message_id: u16, token: Address, token_len: u8, out: Address) -> u32 {
+    let tkl: u32 = token_len as u32;
+    let mid: u32 = message_id as u32;
+
+    // Header byte 0: Version(2) | Type(2) | Token Length(4)
+    // Version = 1, Type = CON (0) for requests.
+    *(out + 0) = ((COAP_VERSION << 6) | ((COAP_TYPE_CON & 3) << 4) | (tkl & 15)) & 255;
+    // Header byte 1: Code = method (8 bits).
+    *(out + 1) = method & 255;
+    // Header bytes 2-3: Message ID (16-bit BE).
+    *(out + 2) = (mid >> 8) & 255;
+    *(out + 3) = mid & 255;
+
+    let p: u32 = COAP_HEADER_SIZE;
+
+    // Token bytes (0..8).
+    let i: u32 = 0;
+    while i < tkl {
+        *(out + p + i) = *(token + i) & 255;
+        i = i + 1;
+    }
+    let p_after_token: u32 = p + tkl;
+
+    // Uri-Path options. The first segment has delta = 11 (option number
+    // 11). Subsequent segments have delta = 0 (same option number).
+    let prev_option: u32 = 0;
+    let seg_start: u32 = 0;
+    let idx: u32 = 0;
+    let p_after_opts: u32 = p_after_token;
+    let done: u32 = 0;
+    while done == 0 {
+        let c: u32 = *(uri_path + idx) & 255;
+        if c == 47 || c == 0 {
+            // End of segment at offset idx (exclusive).
+            let seg_len: u32 = idx - seg_start;
+            let delta: u32 = COAP_OPTION_URI_PATH - prev_option;
+            let written: u32 = coap_build_option(out, p_after_opts, delta, uri_path + seg_start, seg_len);
+            p_after_opts = written;
+            prev_option = COAP_OPTION_URI_PATH;
+            seg_start = idx + 1;
+            if c == 0 { done = 1; }
+        }
+        idx = idx + 1;
+    }
+
+    // Payload marker + payload (only if there is a payload).
+    if payload_len > 0 {
+        *(out + p_after_opts) = COAP_PAYLOAD_MARKER & 255;
+        let p_after_marker: u32 = p_after_opts + 1;
+        let j: u32 = 0;
+        while j < payload_len {
+            *(out + p_after_marker + j) = *(payload + j) & 255;
+            j = j + 1;
+        }
+        return p_after_marker + payload_len;
+    }
+    return p_after_opts;
+}
+
+// Parse a CoAP response.
+//   *code        ← u32 response code (byte 1 of header)
+//   *payload     ← Address of first payload byte (after 0xFF marker),
+//                   or buf + buf_len if no payload
+//   *payload_len ← u32 payload length in bytes
+// Returns 1 on success, 0 on error (buffer too small, wrong version, or
+// malformed option).
+
+fn coap_parse_response(buf: Address, buf_len: u32, code: Address, payload: Address, payload_len: Address) -> u32 {
+    if buf_len < COAP_HEADER_SIZE { return 0; }
+    let b0: u32 = *(buf + 0) & 255;
+    let ver: u32 = (b0 >> 6) & 3;
+    if ver != COAP_VERSION { return 0; }
+    let tkl: u32 = b0 & 15;
+    if tkl > COAP_MAX_TOKEN_LEN { return 0; }
+    let resp_code: u32 = *(buf + 1) & 255;
+
+    // Position after header + token.
+    if COAP_HEADER_SIZE + tkl > buf_len { return 0; }
+    let p: u32 = COAP_HEADER_SIZE + tkl;
+
+    // Walk options. Each option: 4-bit delta, 4-bit length, optional
+    // extension bytes, then value bytes. Stop at 0xFF marker or end.
+    let prev_option_number: u32 = 0;
+    let p_after_opts: u32 = p;
+    let hit_marker: u32 = 0;
+    while p_after_opts < buf_len {
+        let ob: u32 = *(buf + p_after_opts) & 255;
+        if ob == COAP_PAYLOAD_MARKER {
+            hit_marker = 1;
+            p_after_opts = p_after_opts + 1;
+            break;
+        }
+        let delta_nibble: u32 = (ob >> 4) & 15;
+        let len_nibble: u32 = ob & 15;
+        // 15 is reserved for both delta and length.
+        if delta_nibble == 15 || len_nibble == 15 { return 0; }
+        let q: u32 = p_after_opts + 1;
+
+        // Decode delta.
+        let delta: u32 = 0;
+        if delta_nibble < 13 {
+            delta = delta_nibble;
+        } else if delta_nibble == 13 {
+            if q >= buf_len { return 0; }
+            delta = (*(buf + q) & 255) + 13;
+            q = q + 1;
+        } else {
+            // delta_nibble == 14
+            if q + 1 >= buf_len { return 0; }
+            delta = (((*(buf + q) & 255) << 8) | (*(buf + q + 1) & 255)) + 269;
+            q = q + 2;
+        }
+
+        // Decode length.
+        let vlen: u32 = 0;
+        if len_nibble < 13 {
+            vlen = len_nibble;
+        } else if len_nibble == 13 {
+            if q >= buf_len { return 0; }
+            vlen = (*(buf + q) & 255) + 13;
+            q = q + 1;
+        } else {
+            if q + 1 >= buf_len { return 0; }
+            vlen = (((*(buf + q) & 255) << 8) | (*(buf + q + 1) & 255)) + 269;
+            q = q + 2;
+        }
+
+        // Skip value bytes.
+        if q + vlen > buf_len { return 0; }
+        prev_option_number = prev_option_number + delta;
+        p_after_opts = q + vlen;
+    }
+
+    // Compute payload bounds.
+    let payload_start: u32 = p_after_opts;
+    let plen: u32 = 0;
+    if hit_marker == 1 {
+        if payload_start > buf_len { return 0; }
+        plen = buf_len - payload_start;
+    } else {
+        // No payload marker — payload is empty.
+        payload_start = buf_len;
+        plen = 0;
+    }
+
+    ap_store_u32(code, 0, resp_code);
+    ap_store_addr(payload, 0, buf + payload_start);
+    ap_store_u32(payload_len, 0, plen);
+    return 1;
+}

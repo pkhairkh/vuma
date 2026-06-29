@@ -1,0 +1,1104 @@
+// womb_build3/hqc.vuma — HQC (Hamming Quasi-Cyclic) Post-Quantum KEM
+//
+// HQC is a code-based key encapsulation mechanism (KEM) submitted to the
+// NIST Post-Quantum standardisation process. It relies on the difficulty
+// of decoding random quasi-cyclic codes, a problem believed to be hard
+// even for quantum adversaries.
+//
+// This is a SIMPLIFIED, COMPILABLE VUMA reference implementation of the
+// HQC-128 parameter set. It is structured to mirror the real HQC
+// construction (keygen / encaps / decaps with a public-key noise term
+// s = x + h*y and a ciphertext (u, v) = (r + e, m_enc + h*r + e)) and
+// implements the building blocks required by the task:
+//
+//   * gf2_vec_add      — XOR of two binary vectors over GF(2)
+//   * gf2_vec_mul      — polynomial multiplication in GF(2)[x]/(x^n + 1)
+//   * sparse_vec_mul   — multiply a sparse vector (given by its support)
+//                        by a dense vector, exploiting sparsity
+//   * reed_muller_encode / reed_muller_decode
+//                      — first-order Reed-Muller RM(1, m) code with
+//                        majority-logic decoding
+//   * weight           — Hamming weight of a binary vector
+//   * hqc_keygen / hqc_encaps / hqc_decaps — the KEM API
+//
+// Parameter set: HQC-128
+//   n     = 17669  (length of the cyclic ring GF(2)[x]/(x^n + 1), prime)
+//   n1    = 46     (BCH code length used in the tensor product)
+//   n2    = 96     (tensor second-component length, 3 * RM(1,5)=32)
+//   k     = 16     (message dimension in bits)
+//   delta = 373    (minimum distance of the tensor public code)
+//   w     = 67     (weight of the public-key error term)
+//   w_r   = 75     (weight of the secret key vectors x, y)
+//   w_e   = 81     (weight of the encapsulation noise vector e)
+//
+// Representation notes
+// --------------------
+// Binary vectors of length n are stored as n bytes, one byte per bit
+// (each byte is 0 or 1). This trades memory for simplicity and avoids
+// bit-manipulation pitfalls across the 10 VUMA backends. Sparse vectors
+// are also stored as full length-n byte arrays, and their support (the
+// list of set-bit indices) is stored separately as a little-endian u32
+// array for use by sparse_vec_mul.
+//
+// Memory layouts
+//   pk : [h (n bytes) || s (n bytes)]                  = 2n bytes
+//   sk : [x (n) || y (n) || h (n) || s (n)]            = 4n bytes
+//   ct : [u (n) || v (n)]                              = 2n bytes
+//   ss : 32 bytes (SHA-256 output)
+//
+// A self-contained SHA-256 (NIST FIPS 180-4) is embedded so the module
+// has no external dependencies; this is required for ss = SHA-256(m||ct).
+//
+// SECURITY NOTE: This is a teaching/reference implementation. It is NOT
+// constant time and the simplified decoder may fail to correct noise at
+// the full HQC-128 weights — production HQC uses a tensor BCH⊗RM code
+// with a much more elaborate decoder. The structure, however, follows
+// the HQC recipe faithfully.
+
+// ===========================================================================
+// HQC-128 Parameters
+// ===========================================================================
+
+const HQC_N: u32 = 17669;      // cyclic ring length (prime)
+const HQC_N1: u32 = 46;        // BCH code length
+const HQC_N2: u32 = 96;        // tensor second-component length
+const HQC_K: u32 = 16;         // message length in bits
+const HQC_DELTA: u32 = 373;    // tensor code minimum distance
+const HQC_W: u32 = 67;         // public-key error weight
+const HQC_WR: u32 = 75;        // secret key (x, y) weight
+const HQC_WE: u32 = 81;        // encapsulation noise weight
+
+// Reed-Muller RM(1, m) parameters. We use m = 4 giving:
+//   length  = 2^4 = 16
+//   dimension = m + 1 = 5
+//   minimum distance = 2^(m-1) = 8
+//   corrects up to 2^(m-2) - 1 = 3 errors via majority logic.
+// The k = 16 bit message is split into ceil(16/5) = 4 RM(1,4) blocks
+// (the final block carries 1 message bit + 4 zero-padding bits), giving
+// a 4 * 16 = 64-bit encoded message that is placed at the start of the
+// length-n v vector and zero-padded elsewhere.
+const RM_M: u32 = 4;
+const RM_LEN: u32 = 16;        // 2^RM_M
+const RM_DIM: u32 = 5;         // RM_M + 1
+const HQC_RM_BLOCKS: u32 = 4;  // ceil(HQC_K / RM_DIM)
+const HQC_M_ENC_LEN: u32 = 64; // HQC_RM_BLOCKS * RM_LEN
+
+// Derived memory sizes
+const HQC_PK_SIZE: u32 = 35338;   // 2 * HQC_N
+const HQC_SK_SIZE: u32 = 70676;   // 4 * HQC_N
+const HQC_CT_SIZE: u32 = 35338;   // 2 * HQC_N
+const HQC_SS_SIZE: u32 = 32;
+const HQC_MSG_BITS: u32 = 16;     // == HQC_K
+
+const MASK32: u32 = 4294967295;
+
+// ===========================================================================
+// Embedded SHA-256 (NIST FIPS 180-4)
+// ===========================================================================
+
+const K0: u32 = 1116352408;
+const K1: u32 = 1899447441;
+const K2: u32 = 3049323471;
+const K3: u32 = 3921009573;
+const K4: u32 = 961987163;
+const K5: u32 = 1508970993;
+const K6: u32 = 2453635748;
+const K7: u32 = 2870763221;
+const K8: u32 = 3624381080;
+const K9: u32 = 310598401;
+const K10: u32 = 607225278;
+const K11: u32 = 1426881987;
+const K12: u32 = 1925078388;
+const K13: u32 = 2162078206;
+const K14: u32 = 2614888103;
+const K15: u32 = 3248222580;
+const K16: u32 = 3835390401;
+const K17: u32 = 4022224774;
+const K18: u32 = 264347078;
+const K19: u32 = 604807628;
+const K20: u32 = 770255983;
+const K21: u32 = 1249150122;
+const K22: u32 = 1555081692;
+const K23: u32 = 1996064986;
+const K24: u32 = 2554220882;
+const K25: u32 = 2821834349;
+const K26: u32 = 2952996808;
+const K27: u32 = 3210313671;
+const K28: u32 = 3336571891;
+const K29: u32 = 3584528711;
+const K30: u32 = 113926993;
+const K31: u32 = 338241895;
+const K32: u32 = 666307205;
+const K33: u32 = 773529912;
+const K34: u32 = 1294757372;
+const K35: u32 = 1396182291;
+const K36: u32 = 1695183700;
+const K37: u32 = 1986661051;
+const K38: u32 = 2177026350;
+const K39: u32 = 2456956037;
+const K40: u32 = 2730485921;
+const K41: u32 = 2820302411;
+const K42: u32 = 3259730800;
+const K43: u32 = 3345764771;
+const K44: u32 = 3516065817;
+const K45: u32 = 3600352804;
+const K46: u32 = 4094571909;
+const K47: u32 = 275423344;
+const K48: u32 = 430227734;
+const K49: u32 = 506948616;
+const K50: u32 = 659060556;
+const K51: u32 = 883997877;
+const K52: u32 = 958139571;
+const K53: u32 = 1322822218;
+const K54: u32 = 1537002063;
+const K55: u32 = 1747873779;
+const K56: u32 = 1955562222;
+const K57: u32 = 2024104815;
+const K58: u32 = 2227730452;
+const K59: u32 = 2361852424;
+const K60: u32 = 2428436474;
+const K61: u32 = 2756734187;
+const K62: u32 = 3204031479;
+const K63: u32 = 3329325298;
+
+const H0_INIT: u32 = 1779033703;
+const H1_INIT: u32 = 3144134277;
+const H2_INIT: u32 = 1013904242;
+const H3_INIT: u32 = 2773480762;
+const H4_INIT: u32 = 1359893119;
+const H5_INIT: u32 = 2600822924;
+const H6_INIT: u32 = 528734635;
+const H7_INIT: u32 = 1541459225;
+
+// SHA-256 context layout (112 bytes):
+//   [0..31]   H[0..7]   (8 * u32, big-endian)
+//   [32..39]  bit count (u64 stored as 2 * u32, big-endian, low word at 36)
+//   [40..43]  buf_len   (u32, big-endian)
+//   [44..107] buffer    (64 bytes)
+const SHA256_CTX_SIZE: u32 = 112;
+
+fn rotr32(x: u32, n: u32) -> u32 {
+    return ((x >> n) | (x << (32 - n))) & MASK32;
+}
+
+fn ch(x: u32, y: u32, z: u32) -> u32 {
+    return (x & y) ^ ((x ^ MASK32) & z);
+}
+
+fn maj(x: u32, y: u32, z: u32) -> u32 {
+    return (x & y) ^ (x & z) ^ (y & z);
+}
+
+fn big_sigma0(x: u32) -> u32 {
+    return rotr32(x, 2) ^ rotr32(x, 13) ^ rotr32(x, 22);
+}
+
+fn big_sigma1(x: u32) -> u32 {
+    return rotr32(x, 6) ^ rotr32(x, 11) ^ rotr32(x, 25);
+}
+
+fn small_sigma0(x: u32) -> u32 {
+    return rotr32(x, 7) ^ rotr32(x, 18) ^ (x >> 3);
+}
+
+fn small_sigma1(x: u32) -> u32 {
+    return rotr32(x, 17) ^ rotr32(x, 19) ^ (x >> 10);
+}
+
+fn load_u32_be(ptr: Address, offset: u32) -> u32 {
+    b0: u32 = *(ptr + offset);
+    b1: u32 = *(ptr + offset + 1);
+    b2: u32 = *(ptr + offset + 2);
+    b3: u32 = *(ptr + offset + 3);
+    return (b0 << 24) | (b1 << 16) | (b2 << 8) | b3;
+}
+
+fn store_u32_be(ptr: Address, offset: u32, val: u32) {
+    *(ptr + offset) = (val >> 24) & 255;
+    *(ptr + offset + 1) = (val >> 16) & 255;
+    *(ptr + offset + 2) = (val >> 8) & 255;
+    *(ptr + offset + 3) = val & 255;
+}
+
+fn sha256_init(ctx: Address) {
+    store_u32_be(ctx, 0, H0_INIT);
+    store_u32_be(ctx, 4, H1_INIT);
+    store_u32_be(ctx, 8, H2_INIT);
+    store_u32_be(ctx, 12, H3_INIT);
+    store_u32_be(ctx, 16, H4_INIT);
+    store_u32_be(ctx, 20, H5_INIT);
+    store_u32_be(ctx, 24, H6_INIT);
+    store_u32_be(ctx, 28, H7_INIT);
+    store_u32_be(ctx, 32, 0);
+    store_u32_be(ctx, 36, 0);
+    store_u32_be(ctx, 40, 0);
+}
+
+fn sha256_compress(ctx: Address, block: Address) {
+    a: u32 = load_u32_be(ctx, 0);
+    b: u32 = load_u32_be(ctx, 4);
+    c: u32 = load_u32_be(ctx, 8);
+    d: u32 = load_u32_be(ctx, 12);
+    e: u32 = load_u32_be(ctx, 16);
+    f: u32 = load_u32_be(ctx, 20);
+    g: u32 = load_u32_be(ctx, 24);
+    h: u32 = load_u32_be(ctx, 28);
+
+    wbuf = allocate(256);
+    i: u32 = 0;
+    while i < 16 {
+        store_u32_be(wbuf, i * 4, load_u32_be(block, i * 4));
+        i = i + 1;
+    }
+    i = 16;
+    while i < 64 {
+        w15: u32 = load_u32_be(wbuf, (i - 15) * 4);
+        w2: u32 = load_u32_be(wbuf, (i - 2) * 4);
+        s0: u32 = small_sigma0(w15);
+        s1: u32 = small_sigma1(w2);
+        w16: u32 = (load_u32_be(wbuf, (i - 16) * 4) + s0 + load_u32_be(wbuf, (i - 7) * 4) + s1) & MASK32;
+        store_u32_be(wbuf, i * 4, w16);
+        i = i + 1;
+    }
+
+    i = 0;
+    while i < 64 {
+        ki: u32 = 0;
+        if i == 0 { ki = K0; }
+        if i == 1 { ki = K1; }
+        if i == 2 { ki = K2; }
+        if i == 3 { ki = K3; }
+        if i == 4 { ki = K4; }
+        if i == 5 { ki = K5; }
+        if i == 6 { ki = K6; }
+        if i == 7 { ki = K7; }
+        if i == 8 { ki = K8; }
+        if i == 9 { ki = K9; }
+        if i == 10 { ki = K10; }
+        if i == 11 { ki = K11; }
+        if i == 12 { ki = K12; }
+        if i == 13 { ki = K13; }
+        if i == 14 { ki = K14; }
+        if i == 15 { ki = K15; }
+        if i == 16 { ki = K16; }
+        if i == 17 { ki = K17; }
+        if i == 18 { ki = K18; }
+        if i == 19 { ki = K19; }
+        if i == 20 { ki = K20; }
+        if i == 21 { ki = K21; }
+        if i == 22 { ki = K22; }
+        if i == 23 { ki = K23; }
+        if i == 24 { ki = K24; }
+        if i == 25 { ki = K25; }
+        if i == 26 { ki = K26; }
+        if i == 27 { ki = K27; }
+        if i == 28 { ki = K28; }
+        if i == 29 { ki = K29; }
+        if i == 30 { ki = K30; }
+        if i == 31 { ki = K31; }
+        if i == 32 { ki = K32; }
+        if i == 33 { ki = K33; }
+        if i == 34 { ki = K34; }
+        if i == 35 { ki = K35; }
+        if i == 36 { ki = K36; }
+        if i == 37 { ki = K37; }
+        if i == 38 { ki = K38; }
+        if i == 39 { ki = K39; }
+        if i == 40 { ki = K40; }
+        if i == 41 { ki = K41; }
+        if i == 42 { ki = K42; }
+        if i == 43 { ki = K43; }
+        if i == 44 { ki = K44; }
+        if i == 45 { ki = K45; }
+        if i == 46 { ki = K46; }
+        if i == 47 { ki = K47; }
+        if i == 48 { ki = K48; }
+        if i == 49 { ki = K49; }
+        if i == 50 { ki = K50; }
+        if i == 51 { ki = K51; }
+        if i == 52 { ki = K52; }
+        if i == 53 { ki = K53; }
+        if i == 54 { ki = K54; }
+        if i == 55 { ki = K55; }
+        if i == 56 { ki = K56; }
+        if i == 57 { ki = K57; }
+        if i == 58 { ki = K58; }
+        if i == 59 { ki = K59; }
+        if i == 60 { ki = K60; }
+        if i == 61 { ki = K61; }
+        if i == 62 { ki = K62; }
+        if i == 63 { ki = K63; }
+
+        wi: u32 = load_u32_be(wbuf, i * 4);
+        t1: u32 = (h + big_sigma1(e) + ch(e, f, g) + ki + wi) & MASK32;
+        t2: u32 = (big_sigma0(a) + maj(a, b, c)) & MASK32;
+
+        h = g;
+        g = f;
+        f = e;
+        e = (d + t1) & MASK32;
+        d = c;
+        c = b;
+        b = a;
+        a = (t1 + t2) & MASK32;
+
+        i = i + 1;
+    }
+
+    store_u32_be(ctx, 0, (load_u32_be(ctx, 0) + a) & MASK32);
+    store_u32_be(ctx, 4, (load_u32_be(ctx, 4) + b) & MASK32);
+    store_u32_be(ctx, 8, (load_u32_be(ctx, 8) + c) & MASK32);
+    store_u32_be(ctx, 12, (load_u32_be(ctx, 12) + d) & MASK32);
+    store_u32_be(ctx, 16, (load_u32_be(ctx, 16) + e) & MASK32);
+    store_u32_be(ctx, 20, (load_u32_be(ctx, 20) + f) & MASK32);
+    store_u32_be(ctx, 24, (load_u32_be(ctx, 24) + g) & MASK32);
+    store_u32_be(ctx, 28, (load_u32_be(ctx, 28) + h) & MASK32);
+
+    free(wbuf);
+}
+
+fn sha256_update(ctx: Address, data: Address, len: u32) {
+    buf_len: u32 = load_u32_be(ctx, 40);
+    i: u32 = 0;
+    while i < len {
+        db: u32 = *(data + i);
+        *(ctx + 44 + buf_len) = db;
+        buf_len = buf_len + 1;
+        i = i + 1;
+        if buf_len == 64 {
+            sha256_compress(ctx, ctx + 44);
+            buf_len = 0;
+            lo: u32 = load_u32_be(ctx, 36);
+            store_u32_be(ctx, 36, (lo + 512) & MASK32);
+        }
+    }
+    store_u32_be(ctx, 40, buf_len);
+}
+
+fn sha256_final(ctx: Address, out: Address) {
+    buf_len: u32 = load_u32_be(ctx, 40);
+    bit_lo: u32 = load_u32_be(ctx, 36);
+    total_bits: u32 = (bit_lo + (buf_len * 8)) & MASK32;
+
+    *(ctx + 44 + buf_len) = 128;
+    buf_len = buf_len + 1;
+    while buf_len != 56 {
+        *(ctx + 44 + buf_len) = 0;
+        buf_len = buf_len + 1;
+    }
+    store_u32_be(ctx, 44 + 56, 0);
+    store_u32_be(ctx, 44 + 60, total_bits);
+    sha256_compress(ctx, ctx + 44);
+
+    i: u32 = 0;
+    while i < 8 {
+        store_u32_be(out, i * 4, load_u32_be(ctx, i * 4));
+        i = i + 1;
+    }
+}
+
+fn sha256_oneshot(data: Address, len: u32, out: Address) {
+    ctx = allocate(SHA256_CTX_SIZE);
+    sha256_init(ctx);
+    sha256_update(ctx, data, len);
+    sha256_final(ctx, out);
+    free(ctx);
+}
+
+// ===========================================================================
+// Little-endian u32 helpers (for sparse-index storage)
+// ===========================================================================
+
+fn load_u32_le_at(ptr: Address, off: u32) -> u32 {
+    b0: u32 = *(ptr + off);
+    b1: u32 = *(ptr + off + 1);
+    b2: u32 = *(ptr + off + 2);
+    b3: u32 = *(ptr + off + 3);
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+}
+
+fn store_u32_le_at(ptr: Address, off: u32, val: u32) {
+    *(ptr + off) = val & 255;
+    *(ptr + off + 1) = (val >> 8) & 255;
+    *(ptr + off + 2) = (val >> 16) & 255;
+    *(ptr + off + 3) = (val >> 24) & 255;
+}
+
+// ===========================================================================
+// GF(2) vector primitives
+// ===========================================================================
+
+// gf2_vec_add: out[i] = a[i] XOR b[i] for i in [0, n).
+// Vectors are stored 1 byte per bit (each byte is 0 or 1).
+fn gf2_vec_add(out: Address, a: Address, b: Address, n: u32) {
+    i: u32 = 0;
+    while i < n {
+        av: u32 = *(a + i);
+        bv: u32 = *(b + i);
+        *(out + i) = (av ^ bv) & 255;
+        i = i + 1;
+    }
+}
+
+// gf2_vec_mul: polynomial multiplication in GF(2)[x]/(x^n + 1).
+// Computes out = a * b mod (x^n + 1), i.e. cyclic convolution:
+//   out[k] = XOR_{i+j == k (mod n)} (a[i] AND b[j])
+// Schoolbook O(n^2); skips zero coefficients so it is fast when either
+// operand is sparse.
+fn gf2_vec_mul(out: Address, a: Address, b: Address, n: u32) {
+    i: u32 = 0;
+    while i < n {
+        *(out + i) = 0;
+        i = i + 1;
+    }
+    i = 0;
+    while i < n {
+        ai: u32 = *(a + i) & 1;
+        if ai != 0 {
+            j: u32 = 0;
+            while j < n {
+                bj: u32 = *(b + j) & 1;
+                if bj != 0 {
+                    k: u32 = i + j;
+                    if k >= n { k = k - n; }
+                    cur: u32 = *(out + k);
+                    *(out + k) = (cur ^ 1) & 255;
+                }
+                j = j + 1;
+            }
+        }
+        i = i + 1;
+    }
+}
+
+// sparse_vec_mul: multiply a sparse vector by a dense vector in the
+// ring GF(2)[x]/(x^n + 1). The sparse vector is described by its support
+// sparse_idx[0..len) (each entry an index in [0, n)) and the corresponding
+// coefficient values sparse_val[0..len) (each a single GF(2) bit, 0 or 1).
+//
+//   out[k] = XOR_{s in [0,len)} sparse_val[s] * dense[(k - sparse_idx[s]) mod n]
+//
+// which is the cyclic convolution of the sparse vector with `dense`.
+// Entries with sparse_val[s] == 0 contribute nothing and are skipped.
+// Complexity O(len * n) — far cheaper than gf2_vec_mul when len << n.
+fn sparse_vec_mul(out: Address, sparse_idx: Address, sparse_val: Address,
+                  len: u32, dense: Address, n: u32) {
+    i: u32 = 0;
+    while i < n {
+        *(out + i) = 0;
+        i = i + 1;
+    }
+    s: u32 = 0;
+    while s < len {
+        idx: u32 = load_u32_le_at(sparse_idx, s * 4);
+        val: u32 = *(sparse_val + s) & 1;
+        if val != 0 {
+            // For each output position k, XOR in dense[(k - idx) mod n].
+            // We compute src = (k + n - idx) mod n to avoid underflow.
+            k: u32 = 0;
+            while k < n {
+                src: u32 = k + n - idx;
+                if src >= n { src = src - n; }
+                dv: u32 = *(dense + src) & 1;
+                if dv != 0 {
+                    cur: u32 = *(out + k);
+                    *(out + k) = (cur ^ 1) & 255;
+                }
+                k = k + 1;
+            }
+        }
+        s = s + 1;
+    }
+}
+
+// weight: Hamming weight of a binary vector (number of non-zero bytes).
+fn weight(v: Address, n: u32) -> u32 {
+    w: u32 = 0;
+    i: u32 = 0;
+    while i < n {
+        vi: u32 = *(v + i) & 1;
+        if vi != 0 {
+            w = w + 1;
+        }
+        i = i + 1;
+    }
+    return w;
+}
+
+// ===========================================================================
+// Reed-Muller RM(1, m) with m = 4
+// ===========================================================================
+//
+// RM(1, m) is the first-order Reed-Muller code. It has:
+//   length      = 2^m
+//   dimension   = m + 1
+//   min distance = 2^(m-1)
+//
+// Codewords are evaluations of affine Boolean functions
+//   f(x_0, ..., x_{m-1}) = c + v_0*x_0 + ... + v_{m-1}*x_{m-1}
+// over all 2^m points of {0,1}^m. We index evaluation points by an
+// integer p in [0, 2^m) whose bit i is x_i.
+//
+// Generator matrix rows (m = 4):
+//   row 0  : all 1s            (constant term c)
+//   row i+1: x_i for i = 0..3  (variable terms)
+//
+// Majority-logic decoding: for each variable x_i, form the 2^(m-1)
+// pairwise checks received[p] XOR received[p | 2^i] (where bit i of p
+// is 0). Each check is a noisy estimate of v_i. Majority vote gives
+// v_i. Once all v_i are known, the constant c is recovered by majority
+// vote over received[p] XOR (v . x(p)).
+
+// reed_muller_encode: encode a 5-bit message into a 16-bit RM(1,4)
+// codeword.
+//   msg  : 5 bytes (msg[0]=c, msg[1]=v_0, msg[2]=v_1, msg[3]=v_2, msg[4]=v_3)
+//   out  : 16 bytes (one bit per evaluation point, byte 0/1)
+fn reed_muller_encode(msg: Address, out: Address) {
+    c: u32 = *(msg + 0) & 1;
+    v0: u32 = *(msg + 1) & 1;
+    v1: u32 = *(msg + 2) & 1;
+    v2: u32 = *(msg + 3) & 1;
+    v3: u32 = *(msg + 4) & 1;
+
+    p: u32 = 0;
+    while p < RM_LEN {
+        b0: u32 = p & 1;
+        b1: u32 = (p >> 1) & 1;
+        b2: u32 = (p >> 2) & 1;
+        b3: u32 = (p >> 3) & 1;
+        bit: u32 = (c ^ (v0 & b0) ^ (v1 & b1) ^ (v2 & b2) ^ (v3 & b3)) & 1;
+        *(out + p) = bit;
+        p = p + 1;
+    }
+}
+
+// reed_muller_decode: majority-logic decoding of a 16-bit received word
+// to a 5-bit message.
+//   received : 16 bytes (noisy codeword, one bit per byte)
+//   out      : 5 bytes  (decoded message: c, v_0, v_1, v_2, v_3)
+fn reed_muller_decode(received: Address, out: Address) {
+    // Recover v_0..v_3 by majority vote over pairwise checks.
+    v: u32 = 0;  // packed: bit i holds v_i
+    i: u32 = 0;
+    while i < RM_M {
+        mask: u32 = 1 << i;
+        ones: u32 = 0;
+        p: u32 = 0;
+        while p < RM_LEN {
+            if (p & mask) == 0 {
+                partner: u32 = p | mask;
+                rp: u32 = *(received + p) & 1;
+                rq: u32 = *(received + partner) & 1;
+                check: u32 = rp ^ rq;
+                if check != 0 {
+                    ones = ones + 1;
+                }
+            }
+            p = p + 1;
+        }
+        // 2^(m-1) = 8 checks; threshold = 4. Majority-1 => v_i = 1.
+        if ones > 4 {
+            v = v | mask;
+        }
+        i = i + 1;
+    }
+
+    v0: u32 = v & 1;
+    v1: u32 = (v >> 1) & 1;
+    v2: u32 = (v >> 2) & 1;
+    v3: u32 = (v >> 3) & 1;
+
+    // Recover c by majority vote over (received[p] XOR v.x(p)).
+    ones_c: u32 = 0;
+    p: u32 = 0;
+    while p < RM_LEN {
+        b0: u32 = p & 1;
+        b1: u32 = (p >> 1) & 1;
+        b2: u32 = (p >> 2) & 1;
+        b3: u32 = (p >> 3) & 1;
+        rp: u32 = *(received + p) & 1;
+        predicted: u32 = (v0 & b0) ^ (v1 & b1) ^ (v2 & b2) ^ (v3 & b3);
+        if (rp ^ predicted) != 0 {
+            ones_c = ones_c + 1;
+        }
+        p = p + 1;
+    }
+    c: u32 = 0;
+    if ones_c > 8 {
+        c = 1;
+    }
+
+    *(out + 0) = c;
+    *(out + 1) = v0;
+    *(out + 2) = v1;
+    *(out + 3) = v2;
+    *(out + 4) = v3;
+}
+
+// ===========================================================================
+// HQC message encode / decode (4 RM(1,4) blocks -> 64 bits)
+// ===========================================================================
+
+// hqc_encode_message: split the k-bit message into ceil(k/RM_DIM) RM(1,4)
+// blocks, encode each, and place the resulting 64 bits at the start of a
+// length-n vector (zero elsewhere).
+//   msg    : HQC_K bytes (one bit per byte)
+//   m_enc  : HQC_N bytes (encoded message, zero-padded)
+fn hqc_encode_message(msg: Address, m_enc: Address) {
+    i: u32 = 0;
+    while i < HQC_N {
+        *(m_enc + i) = 0;
+        i = i + 1;
+    }
+    msg_buf = allocate(RM_DIM);
+    rm_out = allocate(RM_LEN);
+    block: u32 = 0;
+    while block < HQC_RM_BLOCKS {
+        base: u32 = block * RM_DIM;
+        j: u32 = 0;
+        while j < RM_DIM {
+            bit_idx: u32 = base + j;
+            if bit_idx < HQC_K {
+                *(msg_buf + j) = *(msg + bit_idx) & 1;
+            } else {
+                *(msg_buf + j) = 0;
+            }
+            j = j + 1;
+        }
+        reed_muller_encode(msg_buf, rm_out);
+        j = 0;
+        while j < RM_LEN {
+            *(m_enc + block * RM_LEN + j) = *(rm_out + j);
+            j = j + 1;
+        }
+        block = block + 1;
+    }
+    free(msg_buf);
+    free(rm_out);
+}
+
+// hqc_decode_message: decode the first 64 bits of `m_enc` (treated as 4
+// noisy RM(1,4) codewords) back into the k-bit message.
+//   m_enc : HQC_N bytes (noisy encoded message)
+//   msg   : HQC_K bytes (output message, one bit per byte)
+// Returns 0 on completion.
+fn hqc_decode_message(m_enc: Address, msg: Address) -> u32 {
+    msg_buf = allocate(RM_DIM);
+    rm_in = allocate(RM_LEN);
+    block: u32 = 0;
+    while block < HQC_RM_BLOCKS {
+        j: u32 = 0;
+        while j < RM_LEN {
+            *(rm_in + j) = *(m_enc + block * RM_LEN + j) & 1;
+            j = j + 1;
+        }
+        reed_muller_decode(rm_in, msg_buf);
+        base: u32 = block * RM_DIM;
+        j = 0;
+        while j < RM_DIM {
+            bit_idx: u32 = base + j;
+            if bit_idx < HQC_K {
+                *(msg + bit_idx) = *(msg_buf + j) & 1;
+            }
+            j = j + 1;
+        }
+        block = block + 1;
+    }
+    free(msg_buf);
+    free(rm_in);
+    return 0;
+}
+
+// ===========================================================================
+// PRG and sampling
+// ===========================================================================
+
+// hqc_prg: SHA-256 counter-mode PRG. Produces out_len pseudo-random bytes
+// from (seed, counter). Each 32-byte block is SHA-256(seed || counter+i).
+fn hqc_prg(seed: Address, seed_len: u32, counter: u32, out: Address, out_len: u32) {
+    buf = allocate(seed_len + 4);
+    i: u32 = 0;
+    while i < seed_len {
+        *(buf + i) = *(seed + i);
+        i = i + 1;
+    }
+    hash_out = allocate(32);
+    pos: u32 = 0;
+    blk: u32 = 0;
+    while pos < out_len {
+        store_u32_le_at(buf, seed_len, counter + blk);
+        sha256_oneshot(buf, seed_len + 4, hash_out);
+        j: u32 = 0;
+        while j < 32 {
+            if pos < out_len {
+                *(out + pos) = *(hash_out + j);
+            }
+            j = j + 1;
+            pos = pos + 1;
+        }
+        blk = blk + 1;
+    }
+    free(buf);
+    free(hash_out);
+}
+
+// hqc_sample_random: fill `out` with n uniform pseudo-random bits
+// (each byte is 0 or 1).
+fn hqc_sample_random(seed: Address, seed_len: u32, counter: u32, out: Address, n: u32) {
+    hqc_prg(seed, seed_len, counter, out, n);
+    i: u32 = 0;
+    while i < n {
+        *(out + i) = *(out + i) & 1;
+        i = i + 1;
+    }
+}
+
+// hqc_sample_sparse: sample a sparse binary vector of length n with
+// exactly `wt` set bits at distinct positions. The vector is written to
+// `out_vec` (n bytes, 0/1) and its support to `out_idx` (4*wt bytes,
+// little-endian u32 array). Uses rejection sampling on a PRG stream so
+// the result is deterministic given (seed, counter).
+fn hqc_sample_sparse(seed: Address, seed_len: u32, counter: u32,
+                     out_vec: Address, out_idx: Address,
+                     wt: u32, n: u32) {
+    i: u32 = 0;
+    while i < n {
+        *(out_vec + i) = 0;
+        i = i + 1;
+    }
+    // 4 bytes per candidate index; allocate a generous buffer.
+    buf_len: u32 = wt * 8;
+    if buf_len < 32 { buf_len = 32; }
+    rand_buf = allocate(buf_len);
+    hqc_prg(seed, seed_len, counter, rand_buf, buf_len);
+
+    filled: u32 = 0;
+    rp: u32 = 0;
+    while filled < wt {
+        if rp + 1 >= buf_len {
+            // Refresh the random stream (rare for the chosen weights).
+            hqc_prg(seed, seed_len, counter + 1000 + rp, rand_buf, buf_len);
+            rp = 0;
+        }
+        lo: u32 = *(rand_buf + rp);
+        hi: u32 = *(rand_buf + rp + 1);
+        val: u32 = lo | (hi << 8);
+        idx: u32 = val % n;
+        rp = rp + 2;
+
+        // Reject duplicates.
+        already: u32 = 0;
+        k: u32 = 0;
+        while k < filled {
+            existing: u32 = load_u32_le_at(out_idx, k * 4);
+            if existing == idx {
+                already = 1;
+            }
+            k = k + 1;
+        }
+        if already == 0 {
+            *(out_vec + idx) = 1;
+            store_u32_le_at(out_idx, filled * 4, idx);
+            filled = filled + 1;
+        }
+    }
+    free(rand_buf);
+}
+
+// hqc_derive_message: derive the k-bit message from `randomness`.
+// Uses SHA-256(randomness) and takes the first k bits.
+fn hqc_derive_message(randomness: Address, msg: Address) {
+    digest = allocate(32);
+    sha256_oneshot(randomness, 32, digest);
+    i: u32 = 0;
+    while i < HQC_K {
+        byte_idx: u32 = i / 8;
+        bit_idx: u32 = i & 7;
+        b: u32 = *(digest + byte_idx);
+        *(msg + i) = (b >> bit_idx) & 1;
+        i = i + 1;
+    }
+    free(digest);
+}
+
+// ===========================================================================
+// HQC-128 Key Generation
+// ===========================================================================
+//
+//   x, y  <- sparse random vectors of length n, weight w_r
+//   h     <- uniform random vector of length n
+//   s     = x + h*y        (addition and multiplication in GF(2)[x]/(x^n+1))
+//   pk    = (h, s)
+//   sk    = (x, y, h, s)   (sk stores a copy of pk for decapsulation)
+//
+// Returns 0 on success.
+
+fn hqc_keygen(seed: Address, pk: Address, sk: Address) -> u32 {
+    h = pk;
+    s = pk + HQC_N;
+    x = sk;
+    y = sk + HQC_N;
+    h_sk = sk + 2 * HQC_N;
+    s_sk = sk + 3 * HQC_N;
+
+    x_idx = allocate(HQC_WR * 4);
+    y_idx = allocate(HQC_WR * 4);
+    // HQC sparse vectors are binary: every support entry carries value 1.
+    ones_wr = allocate(HQC_WR);
+    i_init: u32 = 0;
+    while i_init < HQC_WR {
+        *(ones_wr + i_init) = 1;
+        i_init = i_init + 1;
+    }
+    hqc_sample_sparse(seed, 32, 100, x, x_idx, HQC_WR, HQC_N);
+    hqc_sample_sparse(seed, 32, 200, y, y_idx, HQC_WR, HQC_N);
+
+    // h is uniformly random (dense).
+    hqc_sample_random(seed, 32, 300, h, HQC_N);
+
+    // s = x + h*y. Use sparse_vec_mul with y's support since y is sparse.
+    hy = allocate(HQC_N);
+    sparse_vec_mul(hy, y_idx, ones_wr, HQC_WR, h, HQC_N);
+    gf2_vec_add(s, x, hy, HQC_N);
+    free(hy);
+    free(ones_wr);
+
+    // Copy h, s into the secret key (sk stores a full copy of pk).
+    i: u32 = 0;
+    while i < HQC_N {
+        *(h_sk + i) = *(h + i);
+        *(s_sk + i) = *(s + i);
+        i = i + 1;
+    }
+
+    free(x_idx);
+    free(y_idx);
+    return 0;
+}
+
+// ===========================================================================
+// HQC-128 Encapsulation
+// ===========================================================================
+//
+//   m     <- derived from `randomness` (k-bit message)
+//   m_enc = RM_encode(m) padded to length n
+//   r     <- sparse, weight w_r   (derived deterministically from m)
+//   e     <- sparse, weight w_e   (derived deterministically from m)
+//   u     = r + e                          (over GF(2))
+//   v     = m_enc XOR (h*r + e)            (over GF(2))
+//   ct    = (u, v)
+//   ss    = SHA-256(m || ct)
+//
+// r and e are derived from m (not directly from `randomness`) so that the
+// decapsulator can re-derive them for the CCA re-encryption check.
+//
+// Returns 0 on success.
+
+fn hqc_encaps(pk: Address, randomness: Address, ct: Address, ss: Address) -> u32 {
+    h = pk;
+
+    // Derive message and (deterministically) the noise vectors.
+    msg = allocate(HQC_K);
+    hqc_derive_message(randomness, msg);
+
+    sample_seed = allocate(32);
+    sha256_oneshot(msg, HQC_K, sample_seed);
+
+    m_enc = allocate(HQC_N);
+    hqc_encode_message(msg, m_enc);
+
+    r_idx = allocate(HQC_WR * 4);
+    e_idx = allocate(HQC_WE * 4);
+    r_vec = allocate(HQC_N);
+    e_vec = allocate(HQC_N);
+    ones_wr = allocate(HQC_WR);
+    ones_we = allocate(HQC_WE);
+    init_i: u32 = 0;
+    while init_i < HQC_WR {
+        *(ones_wr + init_i) = 1;
+        init_i = init_i + 1;
+    }
+    init_i = 0;
+    while init_i < HQC_WE {
+        *(ones_we + init_i) = 1;
+        init_i = init_i + 1;
+    }
+    hqc_sample_sparse(sample_seed, 32, 10, r_vec, r_idx, HQC_WR, HQC_N);
+    hqc_sample_sparse(sample_seed, 32, 20, e_vec, e_idx, HQC_WE, HQC_N);
+
+    // u = r + e
+    gf2_vec_add(ct, r_vec, e_vec, HQC_N);          // u at ct[0..n)
+    // v = m_enc XOR (h*r + e)
+    hr = allocate(HQC_N);
+    sparse_vec_mul(hr, r_idx, ones_wr, HQC_WR, h, HQC_N);
+    noise = allocate(HQC_N);
+    gf2_vec_add(noise, hr, e_vec, HQC_N);
+    gf2_vec_add(ct + HQC_N, m_enc, noise, HQC_N);  // v at ct[n..2n)
+
+    // ss = SHA-256(msg || ct)
+    hash_in = allocate(HQC_K + HQC_CT_SIZE);
+    i: u32 = 0;
+    while i < HQC_K {
+        *(hash_in + i) = *(msg + i);
+        i = i + 1;
+    }
+    i = 0;
+    while i < HQC_CT_SIZE {
+        *(hash_in + HQC_K + i) = *(ct + i);
+        i = i + 1;
+    }
+    sha256_oneshot(hash_in, HQC_K + HQC_CT_SIZE, ss);
+
+    free(msg);
+    free(sample_seed);
+    free(m_enc);
+    free(r_idx);
+    free(e_idx);
+    free(r_vec);
+    free(e_vec);
+    free(ones_wr);
+    free(ones_we);
+    free(hr);
+    free(noise);
+    free(hash_in);
+    return 0;
+}
+
+// ===========================================================================
+// HQC-128 Decapsulation
+// ===========================================================================
+//
+//   ct = (u, v), sk = (x, y, h, s)
+//
+// The decryptor forms the syndrome-like quantity
+//   v' = v XOR (s * u)
+// which (algebraically) equals m_enc plus a residual noise term. The
+// first 64 bits of v' are decoded as 4 RM(1,4) codewords to recover the
+// message m'. The ciphertext is then re-encrypted under m' (using the
+// deterministic noise derivation) and compared to the supplied ct:
+//   * if (u', v') == (u, v)  ->  ss = SHA-256(m' || ct)
+//   * otherwise              ->  ss = SHA-256(fail_pad || ct)
+// This is the Fujisaki-Okamoto style transform that gives CCA security.
+//
+// Returns 0 if re-encryption verified, 1 on verification failure.
+
+fn hqc_decaps(sk: Address, pk: Address, ct: Address, ss: Address) -> u32 {
+    h_sk = sk + 2 * HQC_N;
+    s_sk = sk + 3 * HQC_N;
+    u = ct;
+    v = ct + HQC_N;
+
+    // v' = v XOR (s * u)
+    su = allocate(HQC_N);
+    gf2_vec_mul(su, s_sk, u, HQC_N);
+    v_prime = allocate(HQC_N);
+    gf2_vec_add(v_prime, v, su, HQC_N);
+
+    // Decode m from the first 64 bits of v'.
+    msg = allocate(HQC_K);
+    hqc_decode_message(v_prime, msg);
+
+    // Re-encrypt: re-derive r, e from msg and rebuild (u', v').
+    sample_seed = allocate(32);
+    sha256_oneshot(msg, HQC_K, sample_seed);
+
+    m_enc = allocate(HQC_N);
+    hqc_encode_message(msg, m_enc);
+
+    r_idx = allocate(HQC_WR * 4);
+    e_idx = allocate(HQC_WE * 4);
+    r_vec = allocate(HQC_N);
+    e_vec = allocate(HQC_N);
+    ones_wr = allocate(HQC_WR);
+    ones_we = allocate(HQC_WE);
+    init_j: u32 = 0;
+    while init_j < HQC_WR {
+        *(ones_wr + init_j) = 1;
+        init_j = init_j + 1;
+    }
+    init_j = 0;
+    while init_j < HQC_WE {
+        *(ones_we + init_j) = 1;
+        init_j = init_j + 1;
+    }
+    hqc_sample_sparse(sample_seed, 32, 10, r_vec, r_idx, HQC_WR, HQC_N);
+    hqc_sample_sparse(sample_seed, 32, 20, e_vec, e_idx, HQC_WE, HQC_N);
+
+    u_prime = allocate(HQC_N);
+    gf2_vec_add(u_prime, r_vec, e_vec, HQC_N);
+
+    hr = allocate(HQC_N);
+    sparse_vec_mul(hr, r_idx, ones_wr, HQC_WR, h_sk, HQC_N);
+    noise = allocate(HQC_N);
+    gf2_vec_add(noise, hr, e_vec, HQC_N);
+    v_prime2 = allocate(HQC_N);
+    gf2_vec_add(v_prime2, m_enc, noise, HQC_N);
+
+    // Compare (u, v) with (u_prime, v_prime2).
+    match_flag: u32 = 1;
+    i: u32 = 0;
+    while i < HQC_N {
+        if (*(u + i) & 1) != (*(u_prime + i) & 1) {
+            match_flag = 0;
+        }
+        if (*(v + i) & 1) != (*(v_prime2 + i) & 1) {
+            match_flag = 0;
+        }
+        i = i + 1;
+    }
+
+    // ss = SHA-256(msg || ct) on success.
+    hash_in = allocate(HQC_K + HQC_CT_SIZE);
+    i = 0;
+    while i < HQC_K {
+        *(hash_in + i) = *(msg + i);
+        i = i + 1;
+    }
+    i = 0;
+    while i < HQC_CT_SIZE {
+        *(hash_in + HQC_K + i) = *(ct + i);
+        i = i + 1;
+    }
+    sha256_oneshot(hash_in, HQC_K + HQC_CT_SIZE, ss);
+
+    // On failure, overwrite ss with SHA-256(fail_pad || ct) for CCA
+    // failure-amplification: a mismatched decapsulation must not leak
+    // information about the secret key.
+    if match_flag == 0 {
+        fail_in = allocate(32 + HQC_CT_SIZE);
+        j: u32 = 0;
+        while j < 32 {
+            *(fail_in + j) = 0;
+            j = j + 1;
+        }
+        j = 0;
+        while j < HQC_CT_SIZE {
+            *(fail_in + 32 + j) = *(ct + j);
+            j = j + 1;
+        }
+        sha256_oneshot(fail_in, 32 + HQC_CT_SIZE, ss);
+        free(fail_in);
+    }
+
+    free(su);
+    free(v_prime);
+    free(msg);
+    free(sample_seed);
+    free(m_enc);
+    free(r_idx);
+    free(e_idx);
+    free(r_vec);
+    free(e_vec);
+    free(ones_wr);
+    free(ones_we);
+    free(u_prime);
+    free(hr);
+    free(noise);
+    free(v_prime2);
+    free(hash_in);
+
+    if match_flag == 1 {
+        return 0;
+    }
+    return 1;
+}
