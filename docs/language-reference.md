@@ -1,8 +1,8 @@
 # VUMA Language Reference
 
-> Version 0.2.0 — Last updated 2026-03-06
+> Version 0.1.0-alpha.1 — Last updated 2026-06-28
 
-This document is the definitive reference for the VUMA programming language, a memory-oriented, verification-first systems language targeting 10 backend architectures (AArch64, x86_64, RISC-V 64, ARM32, MIPS64, PPC64, LoongArch64, Wasm32). VUMA eliminates the need for `unsafe` blocks by making the Invariant Verification Engine (IVE) an integral part of compilation. Every pointer dereference, allocation, and free is automatically checked against five core invariants: **Liveness**, **Exclusivity**, **Interpretation**, **Origin**, and **Cleanup** (collectively "LIVE").
+This document is the definitive reference for the VUMA programming language, a memory-oriented, verification-first systems language targeting 10 backend architectures (x86_64, AArch64, RISC-V 64, ARM32, MIPS64, PPC64, LoongArch64, x86_32, RISC-V 32, Wasm32). VUMA eliminates the need for `unsafe` blocks by making the Invariant Verification Engine (IVE) an integral part of compilation. Every pointer dereference, allocation, and free is automatically checked against five core invariants: **Liveness**, **Exclusivity**, **Interpretation**, **Origin**, and **Cleanup** (collectively "LIVE").
 
 ---
 

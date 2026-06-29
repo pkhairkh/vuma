@@ -149,8 +149,8 @@ that are used as map keys or in equality comparisons, also derive `PartialEq`,
 ### 2.1 Library Crates — Use `thiserror`
 
 All error types in library crates (`vuma-scg`, `vuma-ive`, `vuma-bd`,
-`vuma-codegen`, `vuma-vuma`, `vuma-proof`, `vuma-cor`, `vuma-parser`,
-`vuma-projection`, `vuma-std`) must use **`thiserror`** for error
+`vuma-codegen`, `vuma-core`, `vuma-proof`, `vuma-cor`, `vuma-parser`,
+`vuma-std`) must use **`thiserror`** for error
 definitions. This ensures that error types are concrete, implement
 `std::error::Error`, and have useful `Display` implementations.
 
@@ -737,12 +737,12 @@ Use the crate name as the scope. The valid scopes are:
 | `vuma` | `vuma` (core) |
 | `bd` | `vuma-bd` |
 | `cor` | `vuma-cor` |
-| `projection` | `vuma-projection` |
 | `parser` | `vuma-parser` |
 | `codegen` | `vuma-codegen` |
 | `std` | `vuma-std` |
 | `proof` | `vuma-proof` |
 | `tests` | `vuma-tests` |
+| `package` | `vuma-package` |
 | `docs` | Documentation (cross-cutting) |
 | `ci` | CI/CD configuration |
 | *(none)* | Changes affecting the entire workspace |
