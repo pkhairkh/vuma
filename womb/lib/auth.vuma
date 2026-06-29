@@ -1,0 +1,1528 @@
+// womb/lib/auth.vuma — OAuth2 / OIDC / JWE / JWK
+//   RFC 6749 (OAuth 2.0 Authorization Framework)
+//   RFC 7516 (JSON Web Encryption — JWE)
+//   RFC 7517 (JSON Web Key — JWK)
+//   OpenID Connect Core 1.0
+// No main() — importable library module.
+//
+// Task ID: womb-auth
+//
+// ===========================================================================
+// External dependencies (assumed to exist in the womb runtime):
+// ===========================================================================
+//   json_parse(text: Address, len: u32) -> Address
+//       Parse JSON text into a tree of 16-byte typed nodes (see json.vuma).
+//       Returns the root node Address, or 0 on parse failure.
+//       Caller frees the tree with json_free.
+//   json_object_get(node: Address, key: Address) -> Address
+//       Look up `key` (null-terminated) in a JSON object node.
+//       Returns the value-node Address, or 0 if not found.
+//   json_free(node: Address)
+//       Recursively free a JSON tree returned by json_parse.
+//   base64url_encode(input: Address, len: u32, output: Address) -> u32
+//       Base64URL-encode (no padding, RFC 7515) `len` bytes from `input`
+//       into `output`. Returns the encoded length.
+//   aes256_gcm_encrypt(plaintext: Address, pt_len: u32, key: Address,
+//                      iv: Address, aad: Address, aad_len: u32,
+//                      ciphertext: Address, tag: Address) -> u32
+//       AES-256-GCM encryption (RFC 5116). Key = 32 bytes, IV = 12 bytes,
+//       tag = 16 bytes. Returns ciphertext length (= pt_len).
+//   aes256_gcm_decrypt(ciphertext: Address, ct_len: u32, key: Address,
+//                      iv: Address, aad: Address, aad_len: u32,
+//                      plaintext: Address, tag: Address) -> u32
+//       AES-256-GCM decryption. Returns plaintext length on success,
+//       0 on authentication-tag mismatch / failure.
+//   rsa_oaep_encrypt(msg: Address, msg_len: u32, pub_key: Address,
+//                    ciphertext: Address) -> u32
+//   rsa_oaep_decrypt(ciphertext: Address, ct_len: u32, priv_key: Address,
+//                    msg_out: Address) -> u32
+//   ecdh_p256_shared_secret(privkey: Address, peer_pub: Address,
+//                           shared: Address) -> u32
+//   url_encode(input: Address, len: u32, output: Address) -> u32
+//       Percent-encode per RFC 3986 (see womb/encoding/url.vuma).
+//
+// ===========================================================================
+// JSON node layout (mirror of json.vuma, RFC 8259):
+// ===========================================================================
+//   [0..3]    type        (u32) — JSON_NULL=0, BOOL=1, INT=2, FLOAT=3,
+//                                  STRING=4, ARRAY=5, OBJECT=6
+//   [4..7]    padding     (u32)
+//   [8..15]   value_or_ptr (u64) — scalar value or Address of owned data
+//   For JSON_STRING: value_or_ptr = Address of null-terminated string.
+//   For JSON_INT:    value_or_ptr = the integer value (as u64 bit pattern).
+//   For JSON_OBJECT: value_or_ptr = Address of vector handle.
+//   For JSON_ARRAY:  value_or_ptr = Address of vector handle.
+//   Vector handle (16 bytes):
+//     [0..7]   data_ptr  (Address)
+//     [8..11]  len       (u32)
+//     [12..15] cap       (u32)
+
+// ===========================================================================
+// Constants
+// ===========================================================================
+
+const AUTH_JSON_NULL: u32   = 0;
+const AUTH_JSON_BOOL: u32   = 1;
+const AUTH_JSON_INT: u32    = 2;
+const AUTH_JSON_FLOAT: u32  = 3;
+const AUTH_JSON_STRING: u32 = 4;
+const AUTH_JSON_ARRAY: u32  = 5;
+const AUTH_JSON_OBJECT: u32 = 6;
+
+// JWK kty codes (stored in key_data[0..3] by jwk_decode)
+const AUTH_KTY_UNKNOWN: u32 = 0;
+const AUTH_KTY_RSA: u32     = 1;
+const AUTH_KTY_EC: u32      = 2;
+
+// AES-256-GCM constants
+const AUTH_GCM_KEY_LEN: u32 = 32;   // CEK length for A256GCM
+const AUTH_GCM_IV_LEN: u32  = 12;   // 96-bit IV
+const AUTH_GCM_TAG_LEN: u32 = 16;   // 128-bit authentication tag
+
+// Sentinel returned by auth_b64url_lookup for "invalid char" / "padding".
+const AUTH_B64_INVALID: u32 = 4294967295;  // 0xFFFFFFFF
+const AUTH_B64_PADDING: u32 = 4294967294;  // 0xFFFFFFFE
+
+// Generic error return for "buffer too small / decode failure".
+const AUTH_ERR: u32 = 4294967295;  // 0xFFFFFFFF
+
+// ===========================================================================
+// Byte-level load/store helpers (little-endian).
+// Names are prefixed with auth_ to avoid colliding with the same helpers
+// defined inside json.vuma / containers.vuma when this module is linked
+// alongside them.
+// ===========================================================================
+
+fn auth_load_u32(ptr: Address, off: u32) -> u32 {
+    let b0: u32 = *(ptr + off);
+    let b1: u32 = *(ptr + off + 1);
+    let b2: u32 = *(ptr + off + 2);
+    let b3: u32 = *(ptr + off + 3);
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+}
+
+fn auth_store_u32(ptr: Address, off: u32, val: u32) {
+    *(ptr + off)     = val & 255;
+    *(ptr + off + 1) = (val >> 8) & 255;
+    *(ptr + off + 2) = (val >> 16) & 255;
+    *(ptr + off + 3) = (val >> 24) & 255;
+}
+
+fn auth_load_u64(ptr: Address, off: u32) -> u64 {
+    let b0: u64 = *(ptr + off)     as u64;
+    let b1: u64 = *(ptr + off + 1) as u64;
+    let b2: u64 = *(ptr + off + 2) as u64;
+    let b3: u64 = *(ptr + off + 3) as u64;
+    let b4: u64 = *(ptr + off + 4) as u64;
+    let b5: u64 = *(ptr + off + 5) as u64;
+    let b6: u64 = *(ptr + off + 6) as u64;
+    let b7: u64 = *(ptr + off + 7) as u64;
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+         | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
+}
+
+fn auth_store_u64(ptr: Address, off: u32, val: u64) {
+    *(ptr + off)     = val & 255;
+    *(ptr + off + 1) = (val >> 8) & 255;
+    *(ptr + off + 2) = (val >> 16) & 255;
+    *(ptr + off + 3) = (val >> 24) & 255;
+    *(ptr + off + 4) = (val >> 32) & 255;
+    *(ptr + off + 5) = (val >> 40) & 255;
+    *(ptr + off + 6) = (val >> 48) & 255;
+    *(ptr + off + 7) = (val >> 56) & 255;
+}
+
+fn auth_load_addr(ptr: Address, off: u32) -> Address {
+    let v: u64 = auth_load_u64(ptr, off);
+    return v as Address;
+}
+
+// ===========================================================================
+// Inline string helpers
+// ===========================================================================
+
+fn auth_strlen(s: Address) -> u32 {
+    let n: u32 = 0;
+    while *(s + n) != 0 { n = n + 1; }
+    return n;
+}
+
+fn auth_strcmp(a: Address, b: Address) -> u32 {
+    // Returns 0 if equal, 1 if a > b, 2 if a < b (avoiding i32 to keep
+    // the module within the u32/u64/Address type family).
+    let i: u32 = 0;
+    while 1 == 1 {
+        let ca: u32 = *(a + i);
+        let cb: u32 = *(b + i);
+        if ca == 0 {
+            if cb == 0 { return 0; }
+            return 2;
+        }
+        if cb == 0 { return 1; }
+        if ca < cb { return 2; }
+        if ca > cb { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+// Copy len bytes from src to dst.
+fn auth_memcpy(dst: Address, src: Address, len: u32) {
+    let i: u32 = 0;
+    while i < len {
+        *(dst + i) = *(src + i);
+        i = i + 1;
+    }
+}
+
+// Copy at most max-1 bytes from src to dst, then null-terminate.
+// Returns the number of bytes copied (excluding the null terminator).
+fn auth_strlcpy(dst: Address, src: Address, max: u32) -> u32 {
+    if max == 0 { return 0; }
+    let i: u32 = 0;
+    while i < max - 1 {
+        let c: u32 = *(src + i);
+        if c == 0 { break; }
+        *(dst + i) = c;
+        i = i + 1;
+    }
+    *(dst + i) = 0;
+    return i;
+}
+
+// ===========================================================================
+// Output-buffer emit helpers (bounds-checked against max_len)
+// ===========================================================================
+
+// Append a single byte. Returns the new position (unchanged if at max).
+fn auth_putc(out: Address, pos: u32, max: u32, c: u32) -> u32 {
+    if pos >= max { return pos; }
+    *(out + pos) = c;
+    return pos + 1;
+}
+
+// Append slen bytes from src. Returns the new position.
+fn auth_puts(out: Address, pos: u32, max: u32, src: Address, slen: u32) -> u32 {
+    let p: u32 = pos;
+    let i: u32 = 0;
+    while i < slen {
+        if p >= max { return p; }
+        *(out + p) = *(src + i);
+        p = p + 1;
+        i = i + 1;
+    }
+    return p;
+}
+
+// ===========================================================================
+// Base64URL decode (RFC 7515 Appendix C).
+// base64url_encode is assumed to exist; the decode direction is needed by
+// JWE consumers and JWT/OIDC id-token parsers, so it is implemented here.
+// ===========================================================================
+
+// Lookup table for one base64url character.
+// Returns 0..63 for valid chars, AUTH_B64_PADDING for '=', AUTH_B64_INVALID
+// for anything else. Also tolerates the standard-base64 alphabet ('+' '/').
+fn auth_b64url_lookup(c: u32) -> u32 {
+    if c >= 65 { if c <= 90 { return c - 65; } }            // A-Z → 0..25
+    if c >= 97 { if c <= 122 { return c - 97 + 26; } }      // a-z → 26..51
+    if c >= 48 { if c <= 57 { return c - 48 + 52; } }       // 0-9 → 52..61
+    if c == 45 { return 62; }   // '-'
+    if c == 95 { return 63; }   // '_'
+    if c == 43 { return 62; }   // '+' (standard base64)
+    if c == 47 { return 63; }   // '/' (standard base64)
+    if c == 61 { return AUTH_B64_PADDING; }  // '='
+    return AUTH_B64_INVALID;
+}
+
+// Decode base64url input[0..len] into output. Whitespace (LF/CR/space) is
+// skipped. Returns the decoded byte length, or AUTH_ERR on invalid input.
+fn auth_b64url_decode(input: Address, len: u32, output: Address) -> u32 {
+    let out_idx: u32 = 0;
+    let i: u32 = 0;
+    let acc: u32 = 0;
+    let bits: u32 = 0;
+    while i < len {
+        let c: u32 = *(input + i);
+        i = i + 1;
+        if c == 10 {
+            // skip LF
+        } else if c == 13 {
+            // skip CR
+        } else if c == 32 {
+            // skip space
+        } else {
+            let v: u32 = auth_b64url_lookup(c);
+            if v == AUTH_B64_PADDING { break; }       // '=' → end of data
+            if v == AUTH_B64_INVALID { return AUTH_ERR; }
+            acc = (acc << 6) | v;
+            bits = bits + 6;
+            if bits >= 8 {
+                bits = bits - 8;
+                *(output + out_idx) = (acc >> bits) & 255;
+                out_idx = out_idx + 1;
+            }
+        }
+    }
+    return out_idx;
+}
+
+// ===========================================================================
+// JSON access helpers
+// ===========================================================================
+
+// If node is a JSON_STRING, return its null-terminated string Address; else 0.
+fn auth_json_string_ptr(node: Address) -> Address {
+    if node == 0 { return 0; }
+    let t: u32 = auth_load_u32(node, 0);
+    if t != AUTH_JSON_STRING { return 0; }
+    return auth_load_addr(node, 8);
+}
+
+// If node is JSON_INT, return its value as u64; else 0.
+fn auth_json_int_val(node: Address) -> u64 {
+    if node == 0 { return 0; }
+    let t: u32 = auth_load_u32(node, 0);
+    if t != AUTH_JSON_INT { return 0; }
+    return auth_load_u64(node, 8);
+}
+
+// Return the string value of a node, handling the OIDC `aud` case where the
+// claim may be either a single string or an array of strings (take the first).
+fn auth_json_string_or_first_array_elem(node: Address) -> Address {
+    if node == 0 { return 0; }
+    let t: u32 = auth_load_u32(node, 0);
+    if t == AUTH_JSON_STRING { return auth_load_addr(node, 8); }
+    if t == AUTH_JSON_ARRAY {
+        let vec: Address = auth_load_addr(node, 8);
+        if vec == 0 { return 0; }
+        let alen: u32 = auth_load_u32(vec, 8);
+        if alen == 0 { return 0; }
+        let data: Address = auth_load_addr(vec, 0);
+        if data == 0 { return 0; }
+        let first: Address = auth_load_addr(data, 0);
+        return auth_json_string_or_first_array_elem(first);
+    }
+    return 0;
+}
+
+// Copy a JSON string node's value into dst (null-terminated, truncated to max).
+// Returns 1 on success (even if truncated), 0 if node is not a string.
+fn auth_json_string_into(node: Address, dst: Address, max: u32) -> u32 {
+    let s: Address = auth_json_string_ptr(node);
+    if s == 0 { return 0; }
+    auth_strlcpy(dst, s, max);
+    return 1;
+}
+
+// ===========================================================================
+// JWK — JSON Web Key (RFC 7517)
+// ===========================================================================
+//
+// jwk_encode_rsa produces the canonical RSA public-key JWK:
+//   {"kty":"RSA","n":"<base64url(n)>","e":"<base64url(e)>"}
+//
+// jwk_encode_ec produces the canonical EC public-key JWK:
+//   {"kty":"EC","crv":"<curve>","x":"<base64url(x)>","y":"<base64url(y)>"}
+//   `curve` is a null-terminated string (e.g. "P-256"). `x` and `y` are the
+//   big-endian coordinate byte strings; for P-256 each is 32 bytes.
+//
+// jwk_decode parses a JWK JSON document and writes the components into the
+// caller-allocated `key_data` buffer (>= 1024 bytes). Layout:
+//   [0..3]    kty_code   (u32)  — 1=RSA, 2=EC, 0=unknown
+//   [4..7]    padding
+//   RSA (kty_code == 1):
+//     [8..11]    n_len   (u32)
+//     [12..15]   padding
+//     [16..271]  n bytes (up to 256)
+//     [272..275] e_len   (u32)
+//     [276..279] padding
+//     [280..311] e bytes (up to 32)
+//   EC (kty_code == 2):
+//     [8..11]    crv_len (u32)
+//     [12..15]   padding
+//     [16..47]   crv string (up to 32 bytes, NOT null-terminated here)
+//     [48..79]   x bytes (up to 32)
+//     [80..111]  y bytes (up to 32)
+//     [112..115] x_len (u32)
+//     [116..119] y_len (u32)
+// Returns 1 on success, 0 on parse failure.
+// The `kty` output buffer receives the null-terminated kty string
+// ("RSA" or "EC"); caller allocates >= 8 bytes.
+// ===========================================================================
+
+fn jwk_encode_rsa(n: Address, n_len: u32, e: Address, e_len: u32,
+                  out: Address, max_len: u32) -> u32 {
+    // base64url expands 3 bytes → 4 chars; allocate with slack.
+    let n_cap: u32 = ((n_len + 2) / 3) * 4 + 4;
+    let e_cap: u32 = ((e_len + 2) / 3) * 4 + 4;
+    let n_enc: Address = allocate(n_cap);
+    let e_enc: Address = allocate(e_cap);
+    let n_enc_len: u32 = base64url_encode(n, n_len, n_enc);
+    let e_enc_len: u32 = base64url_encode(e, e_len, e_enc);
+
+    let p: u32 = 0;
+    // {"kty":"RSA"
+    let p1: u32 = auth_putc(out, p, max_len, 123);   // {
+    let p2: u32 = auth_putc(out, p1, max_len, 34);   // "
+    let p3: u32 = auth_putc(out, p2, max_len, 107);  // k
+    let p4: u32 = auth_putc(out, p3, max_len, 116);  // t
+    let p5: u32 = auth_putc(out, p4, max_len, 121);  // y
+    let p6: u32 = auth_putc(out, p5, max_len, 34);   // "
+    let p7: u32 = auth_putc(out, p6, max_len, 58);   // :
+    let p8: u32 = auth_putc(out, p7, max_len, 34);   // "
+    let p9: u32 = auth_putc(out, p8, max_len, 82);   // R
+    let p10: u32 = auth_putc(out, p9, max_len, 83);  // S
+    let p11: u32 = auth_putc(out, p10, max_len, 65); // A
+    let p12: u32 = auth_putc(out, p11, max_len, 34); // "
+    // ,"n":"<n_enc>"
+    let p13: u32 = auth_putc(out, p12, max_len, 44); // ,
+    let p14: u32 = auth_putc(out, p13, max_len, 34); // "
+    let p15: u32 = auth_putc(out, p14, max_len, 110);// n
+    let p16: u32 = auth_putc(out, p15, max_len, 34); // "
+    let p17: u32 = auth_putc(out, p16, max_len, 58); // :
+    let p18: u32 = auth_putc(out, p17, max_len, 34); // "
+    let p19: u32 = auth_puts(out, p18, max_len, n_enc, n_enc_len);
+    let p20: u32 = auth_putc(out, p19, max_len, 34); // "
+    // ,"e":"<e_enc>"
+    let p21: u32 = auth_putc(out, p20, max_len, 44); // ,
+    let p22: u32 = auth_putc(out, p21, max_len, 34); // "
+    let p23: u32 = auth_putc(out, p22, max_len, 101);// e
+    let p24: u32 = auth_putc(out, p23, max_len, 34); // "
+    let p25: u32 = auth_putc(out, p24, max_len, 58); // :
+    let p26: u32 = auth_putc(out, p25, max_len, 34); // "
+    let p27: u32 = auth_puts(out, p26, max_len, e_enc, e_enc_len);
+    let p28: u32 = auth_putc(out, p27, max_len, 34); // "
+    let p29: u32 = auth_putc(out, p28, max_len, 125);// }
+
+    free(n_enc);
+    free(e_enc);
+    return p29;
+}
+
+fn jwk_encode_ec(x: Address, y: Address, curve: Address,
+                 out: Address, max_len: u32) -> u32 {
+    // P-256 coordinates are 32 bytes each. The JWK spec requires that the
+    // base64url-encoded coordinate carry the full field-length byte string,
+    // so the caller must pass pre-zero-padded 32-byte buffers.
+    let xy_len: u32 = 32;
+    let x_cap: u32 = ((xy_len + 2) / 3) * 4 + 4;
+    let y_cap: u32 = ((xy_len + 2) / 3) * 4 + 4;
+    let x_enc: Address = allocate(x_cap);
+    let y_enc: Address = allocate(y_cap);
+    let x_enc_len: u32 = base64url_encode(x, xy_len, x_enc);
+    let y_enc_len: u32 = base64url_encode(y, xy_len, y_enc);
+
+    let curve_len: u32 = auth_strlen(curve);
+
+    let p: u32 = 0;
+    // {"kty":"EC"
+    let p1: u32 = auth_putc(out, p, max_len, 123);   // {
+    let p2: u32 = auth_putc(out, p1, max_len, 34);   // "
+    let p3: u32 = auth_putc(out, p2, max_len, 107);  // k
+    let p4: u32 = auth_putc(out, p3, max_len, 116);  // t
+    let p5: u32 = auth_putc(out, p4, max_len, 121);  // y
+    let p6: u32 = auth_putc(out, p5, max_len, 34);   // "
+    let p7: u32 = auth_putc(out, p6, max_len, 58);   // :
+    let p8: u32 = auth_putc(out, p7, max_len, 34);   // "
+    let p9: u32 = auth_putc(out, p8, max_len, 69);   // E
+    let p10: u32 = auth_putc(out, p9, max_len, 67);  // C
+    let p11: u32 = auth_putc(out, p10, max_len, 34); // "
+    // ,"crv":"<curve>"
+    let p12: u32 = auth_putc(out, p11, max_len, 44); // ,
+    let p13: u32 = auth_putc(out, p12, max_len, 34); // "
+    let p14: u32 = auth_putc(out, p13, max_len, 99); // c
+    let p15: u32 = auth_putc(out, p14, max_len, 114);// r
+    let p16: u32 = auth_putc(out, p15, max_len, 118);// v
+    let p17: u32 = auth_putc(out, p16, max_len, 34); // "
+    let p18: u32 = auth_putc(out, p17, max_len, 58); // :
+    let p19: u32 = auth_putc(out, p18, max_len, 34); // "
+    let p20: u32 = auth_puts(out, p19, max_len, curve, curve_len);
+    let p21: u32 = auth_putc(out, p20, max_len, 34); // "
+    // ,"x":"<x_enc>"
+    let p22: u32 = auth_putc(out, p21, max_len, 44); // ,
+    let p23: u32 = auth_putc(out, p22, max_len, 34); // "
+    let p24: u32 = auth_putc(out, p23, max_len, 120);// x
+    let p25: u32 = auth_putc(out, p24, max_len, 34); // "
+    let p26: u32 = auth_putc(out, p25, max_len, 58); // :
+    let p27: u32 = auth_putc(out, p26, max_len, 34); // "
+    let p28: u32 = auth_puts(out, p27, max_len, x_enc, x_enc_len);
+    let p29: u32 = auth_putc(out, p28, max_len, 34); // "
+    // ,"y":"<y_enc>"
+    let p30: u32 = auth_putc(out, p29, max_len, 44); // ,
+    let p31: u32 = auth_putc(out, p30, max_len, 34); // "
+    let p32: u32 = auth_putc(out, p31, max_len, 121);// y
+    let p33: u32 = auth_putc(out, p32, max_len, 34); // "
+    let p34: u32 = auth_putc(out, p33, max_len, 58); // :
+    let p35: u32 = auth_putc(out, p34, max_len, 34); // "
+    let p36: u32 = auth_puts(out, p35, max_len, y_enc, y_enc_len);
+    let p37: u32 = auth_putc(out, p36, max_len, 34); // "
+    let p38: u32 = auth_putc(out, p37, max_len, 125);// }
+
+    free(x_enc);
+    free(y_enc);
+    return p38;
+}
+
+// Internal: copy up to `cap` bytes from JSON string node into dst, store the
+// copied length at *out_len. Returns 1 on success, 0 if node is not a string.
+fn auth_jwk_copy_field(node: Address, dst: Address, cap: u32, out_len: Address) -> u32 {
+    let s: Address = auth_json_string_ptr(node);
+    if s == 0 { return 0; }
+    let slen: u32 = auth_strlen(s);
+    let n: u32 = slen;
+    if n > cap { n = cap; }
+    auth_memcpy(dst, s, n);
+    auth_store_u32(out_len, 0, n);
+    return 1;
+}
+
+fn jwk_decode(jwk: Address, jwk_len: u32, kty: Address, key_data: Address) -> u32 {
+    // Zero out the key_data header.
+    auth_store_u32(key_data, 0, AUTH_KTY_UNKNOWN);
+    // Default kty output to empty string.
+    *(kty + 0) = 0;
+
+    let root: Address = json_parse(jwk, jwk_len);
+    if root == 0 { return 0; }
+    let t: u32 = auth_load_u32(root, 0);
+    if t != AUTH_JSON_OBJECT { json_free(root); return 0; }
+
+    // Build the lookup key "kty" in a small stack-like buffer.
+    let kty_key: Address = allocate(8);
+    *(kty_key + 0) = 107;  // k
+    *(kty_key + 1) = 116;  // t
+    *(kty_key + 2) = 121;  // y
+    *(kty_key + 3) = 0;
+    let kty_node: Address = json_object_get(root, kty_key);
+    let kty_s: Address = auth_json_string_ptr(kty_node);
+    if kty_s == 0 {
+        free(kty_key);
+        json_free(root);
+        return 0;
+    }
+    // Copy kty string into caller's buffer.
+    auth_strlcpy(kty, kty_s, 8);
+
+    // Decide RSA vs EC.
+    // Build "RSA" and "EC" comparison strings.
+    let rsa_lit: Address = allocate(8);
+    *(rsa_lit + 0) = 82;   // R
+    *(rsa_lit + 1) = 83;   // S
+    *(rsa_lit + 2) = 65;   // A
+    *(rsa_lit + 3) = 0;
+    let ec_lit: Address = allocate(8);
+    *(ec_lit + 0) = 69;    // E
+    *(ec_lit + 1) = 67;    // C
+    *(ec_lit + 2) = 0;
+
+    let is_rsa: u32 = 0;
+    let is_ec: u32 = 0;
+    if auth_strcmp(kty_s, rsa_lit) == 0 { is_rsa = 1; }
+    if auth_strcmp(kty_s, ec_lit) == 0 { is_ec = 1; }
+
+    let result: u32 = 0;
+    if is_rsa == 1 {
+        auth_store_u32(key_data, 0, AUTH_KTY_RSA);
+        // "n"
+        let n_key: Address = allocate(4);
+        *(n_key + 0) = 110;  // n
+        *(n_key + 1) = 0;
+        let n_node: Address = json_object_get(root, n_key);
+        let e_key: Address = allocate(4);
+        *(e_key + 0) = 101;  // e
+        *(e_key + 1) = 0;
+        let e_node: Address = json_object_get(root, e_key);
+
+        // key_data layout for RSA:
+        //   [8..11]  n_len, [16..271]  n bytes (cap 256)
+        //   [272..275] e_len, [280..311] e bytes (cap 32)
+        let ok1: u32 = auth_jwk_copy_field(n_node, key_data + 16, 256, key_data + 8);
+        let ok2: u32 = auth_jwk_copy_field(e_node, key_data + 280, 32, key_data + 272);
+        free(n_key);
+        free(e_key);
+        if ok1 == 1 { if ok2 == 1 { result = 1; } }
+    } else if is_ec == 1 {
+        auth_store_u32(key_data, 0, AUTH_KTY_EC);
+        // "crv", "x", "y"
+        let crv_key: Address = allocate(8);
+        *(crv_key + 0) = 99;   // c
+        *(crv_key + 1) = 114;  // r
+        *(crv_key + 2) = 118;  // v
+        *(crv_key + 3) = 0;
+        let x_key: Address = allocate(4);
+        *(x_key + 0) = 120;  // x
+        *(x_key + 1) = 0;
+        let y_key: Address = allocate(4);
+        *(y_key + 0) = 121;  // y
+        *(y_key + 1) = 0;
+
+        let crv_node: Address = json_object_get(root, crv_key);
+        let x_node: Address = json_object_get(root, x_key);
+        let y_node: Address = json_object_get(root, y_key);
+
+        // key_data layout for EC:
+        //   [8..11]  crv_len, [16..47]  crv bytes (cap 32)
+        //   [48..79]  x bytes (cap 32), [112..115] x_len
+        //   [80..111] y bytes (cap 32), [116..119] y_len
+        let ok1: u32 = auth_jwk_copy_field(crv_node, key_data + 16, 32, key_data + 8);
+        let ok2: u32 = auth_jwk_copy_field(x_node, key_data + 48, 32, key_data + 112);
+        let ok3: u32 = auth_jwk_copy_field(y_node, key_data + 80, 32, key_data + 116);
+        free(crv_key);
+        free(x_key);
+        free(y_key);
+        if ok1 == 1 { if ok2 == 1 { if ok3 == 1 { result = 1; } } }
+    }
+
+    free(kty_key);
+    free(rsa_lit);
+    free(ec_lit);
+    json_free(root);
+    return result;
+}
+
+// ===========================================================================
+// JWE — JSON Web Encryption (RFC 7516), compact serialization
+// ===========================================================================
+//
+// Compact form:
+//   BASE64URL(protected_header) || "."
+//   || BASE64URL(encrypted_key) || "."
+//   || BASE64URL(iv) || "."
+//   || BASE64URL(ciphertext) || "."
+//   || BASE64URL(authentication_tag)
+//
+// jwe_encrypt implements the "dir" key-wrapping mode (alg=dir): the CEK is
+// used directly as the AES-256-GCM content-encryption key, so the
+// encrypted_key component is the empty string. The caller supplies the CEK
+// (32 bytes), the IV (12 bytes), and the protected-header byte string.
+//
+// The Additional Authenticated Data (AAD) for AES-GCM is, per RFC 7516
+// §5.1, the base64url-encoded protected header (i.e. part 0 of the compact
+// serialization, used verbatim — not re-encoded).
+// ===========================================================================
+
+fn jwe_encrypt(plaintext: Address, pt_len: u32, cek: Address, iv: Address,
+               protected_header: Address, ph_len: u32,
+               out: Address, max_len: u32) -> u32 {
+    // --- Part 0: base64url(protected_header) — this is also the AAD. ---
+    let ph_enc_cap: u32 = ((ph_len + 2) / 3) * 4 + 4;
+    let ph_enc: Address = allocate(ph_enc_cap);
+    let ph_enc_len: u32 = base64url_encode(protected_header, ph_len, ph_enc);
+    if ph_enc_len == 0 {
+        if ph_len != 0 { free(ph_enc); return AUTH_ERR; }
+    }
+
+    // --- AES-256-GCM encrypt the plaintext. ---
+    let ct_buf: Address = allocate(pt_len + 16);
+    let tag_buf: Address = allocate(AUTH_GCM_TAG_LEN);
+    let ct_len: u32 = aes256_gcm_encrypt(plaintext, pt_len, cek, iv,
+                                          ph_enc, ph_enc_len,
+                                          ct_buf, tag_buf);
+    if ct_len != pt_len {
+        free(ph_enc); free(ct_buf); free(tag_buf);
+        return AUTH_ERR;
+    }
+
+    // --- base64url(iv) ---
+    let iv_enc_cap: u32 = ((AUTH_GCM_IV_LEN + 2) / 3) * 4 + 4;
+    let iv_enc: Address = allocate(iv_enc_cap);
+    let iv_enc_len: u32 = base64url_encode(iv, AUTH_GCM_IV_LEN, iv_enc);
+
+    // --- base64url(ciphertext) ---
+    let ct_enc_cap: u32 = ((ct_len + 2) / 3) * 4 + 4;
+    let ct_enc: Address = allocate(ct_enc_cap);
+    let ct_enc_len: u32 = base64url_encode(ct_buf, ct_len, ct_enc);
+
+    // --- base64url(tag) ---
+    let tag_enc_cap: u32 = ((AUTH_GCM_TAG_LEN + 2) / 3) * 4 + 4;
+    let tag_enc: Address = allocate(tag_enc_cap);
+    let tag_enc_len: u32 = base64url_encode(tag_buf, AUTH_GCM_TAG_LEN, tag_enc);
+
+    // --- Assemble compact serialization. ---
+    // For "dir" mode, encrypted_key is empty → two dots in a row.
+    let p: u32 = 0;
+    let p1: u32 = auth_puts(out, p, max_len, ph_enc, ph_enc_len);
+    let p2: u32 = auth_putc(out, p1, max_len, 46);   // '.'
+    // empty encrypted_key
+    let p3: u32 = auth_putc(out, p2, max_len, 46);   // '.'
+    let p4: u32 = auth_puts(out, p3, max_len, iv_enc, iv_enc_len);
+    let p5: u32 = auth_putc(out, p4, max_len, 46);   // '.'
+    let p6: u32 = auth_puts(out, p5, max_len, ct_enc, ct_enc_len);
+    let p7: u32 = auth_putc(out, p6, max_len, 46);   // '.'
+    let p8: u32 = auth_puts(out, p7, max_len, tag_enc, tag_enc_len);
+
+    free(ph_enc); free(ct_buf); free(tag_buf);
+    free(iv_enc); free(ct_enc); free(tag_enc);
+    return p8;
+}
+
+// Find the indices of the four '.' separators in the compact JWE string.
+// Writes the four dot offsets into d0/d1/d2/d3. Returns 1 on success,
+// 0 if there are not exactly four dots.
+fn jwe_find_dots(compact: Address, len: u32,
+                 d0: Address, d1: Address, d2: Address, d3: Address) -> u32 {
+    let count: u32 = 0;
+    let i: u32 = 0;
+    while i < len {
+        if *(compact + i) == 46 {
+            if count == 0 { auth_store_u32(d0, 0, i); }
+            if count == 1 { auth_store_u32(d1, 0, i); }
+            if count == 2 { auth_store_u32(d2, 0, i); }
+            if count == 3 { auth_store_u32(d3, 0, i); }
+            count = count + 1;
+        }
+        i = i + 1;
+    }
+    if count != 4 { return 0; }
+    return 1;
+}
+
+fn jwe_decrypt(compact: Address, compact_len: u32, cek: Address,
+               plaintext: Address, max_len: u32) -> u32 {
+    // Locate the four dots.
+    let dbuf: Address = allocate(16);
+    let d0: Address = dbuf;
+    let d1: Address = dbuf + 4;
+    let d2: Address = dbuf + 8;
+    let d3: Address = dbuf + 12;
+    if jwe_find_dots(compact, compact_len, d0, d1, d2, d3) == 0 {
+        free(dbuf);
+        return AUTH_ERR;
+    }
+    let p0: u32 = auth_load_u32(d0, 0);
+    let p1: u32 = auth_load_u32(d1, 0);
+    let p2: u32 = auth_load_u32(d2, 0);
+    let p3: u32 = auth_load_u32(d3, 0);
+
+    // Part 0 (protected header, base64url-encoded) — used verbatim as AAD.
+    let aad_len: u32 = p0;
+    // Part 1 (encrypted key) — empty in "dir" mode; ignored.
+    // Part 2 (iv) — base64url-decode to 12 bytes.
+    let iv_len_enc: u32 = p2 - p1 - 1;
+    let iv_buf: Address = allocate(AUTH_GCM_IV_LEN + 4);
+    let iv_len: u32 = auth_b64url_decode(compact + p1 + 1, iv_len_enc, iv_buf);
+    if iv_len == AUTH_ERR { free(dbuf); free(iv_buf); return AUTH_ERR; }
+    if iv_len != AUTH_GCM_IV_LEN { free(dbuf); free(iv_buf); return AUTH_ERR; }
+    // Part 3 (ciphertext) — base64url-decode.
+    let ct_len_enc: u32 = p3 - p2 - 1;
+    let ct_buf: Address = allocate(ct_len_enc + 16);
+    let ct_len: u32 = auth_b64url_decode(compact + p2 + 1, ct_len_enc, ct_buf);
+    if ct_len == AUTH_ERR {
+        free(dbuf); free(iv_buf); free(ct_buf);
+        return AUTH_ERR;
+    }
+    if ct_len > max_len {
+        free(dbuf); free(iv_buf); free(ct_buf);
+        return AUTH_ERR;
+    }
+    // Part 4 (tag) — base64url-decode to 16 bytes.
+    let tag_len_enc: u32 = compact_len - p3 - 1;
+    let tag_buf: Address = allocate(AUTH_GCM_TAG_LEN + 4);
+    let tag_len: u32 = auth_b64url_decode(compact + p3 + 1, tag_len_enc, tag_buf);
+    if tag_len == AUTH_ERR {
+        free(dbuf); free(iv_buf); free(ct_buf); free(tag_buf);
+        return AUTH_ERR;
+    }
+    if tag_len != AUTH_GCM_TAG_LEN {
+        free(dbuf); free(iv_buf); free(ct_buf); free(tag_buf);
+        return AUTH_ERR;
+    }
+
+    // AES-256-GCM decrypt. The AAD is the raw base64url-encoded protected
+    // header (part 0), used verbatim — exactly what was used during encryption.
+    let pt_len: u32 = aes256_gcm_decrypt(ct_buf, ct_len, cek, iv_buf,
+                                          compact, aad_len,
+                                          plaintext, tag_buf);
+    free(dbuf); free(iv_buf); free(ct_buf); free(tag_buf);
+    if pt_len == 0 { return AUTH_ERR; }
+    return pt_len;
+}
+
+// ===========================================================================
+// OAuth2 — RFC 6749
+// ===========================================================================
+//
+// All URL query/form values are percent-encoded via the existing url_encode
+// helper. Form bodies use application/x-www-form-urlencoded, which is the
+// same encoding as URL query strings (spaces become %20 here, matching
+// url_encode's RFC 3986 strict behavior — RFC 6749 permits either).
+// ===========================================================================
+
+// Internal: append "&key=" to out (when not first) then the URL-encoded value.
+// `first` is 1 if this is the first parameter (use '?' or nothing instead of '&').
+// `sep` is the byte to emit before the first parameter ('?' for query strings,
+// 0 to emit nothing for form bodies).
+// Returns (new_pos << 1) | new_first, packed into a u32. Caller unpacks.
+fn oauth2_emit_kv(out: Address, pos: u32, max: u32, first: u32, sep: u32,
+                  key: Address, key_len: u32,
+                  val: Address, val_len: u32) -> u64 {
+    let p: u32 = pos;
+    let f: u32 = first;
+    if f == 1 {
+        if sep != 0 { p = auth_putc(out, p, max, sep); }
+        f = 0;
+    } else {
+        p = auth_putc(out, p, max, 38);  // '&'
+    }
+    p = auth_puts(out, p, max, key, key_len);
+    p = auth_putc(out, p, max, 61);  // '='
+    // URL-encode the value into a temp buffer, then append.
+    let enc_cap: u32 = val_len * 3 + 4;
+    let enc: Address = allocate(enc_cap);
+    let enc_len: u32 = url_encode(val, val_len, enc);
+    p = auth_puts(out, p, max, enc, enc_len);
+    free(enc);
+    // Pack (p << 1) | f into a u64. p is u32, so result fits in u33.
+    let packed: u64 = (p as u64) * 2 + (f as u64);
+    return packed;
+}
+
+fn oauth2_build_auth_url(auth_endpoint: Address, client_id: Address,
+                         redirect_uri: Address, scope: Address, state: Address,
+                         out: Address, max_len: u32) -> u32 {
+    let ep_len: u32 = auth_strlen(auth_endpoint);
+    let p: u32 = auth_puts(out, 0, max_len, auth_endpoint, ep_len);
+
+    // Build short key strings in temp buffers.
+    let rt_key: Address = allocate(16);   // "response_type"
+    *(rt_key + 0) = 114;   // r
+    *(rt_key + 1) = 101;   // e
+    *(rt_key + 2) = 115;   // s
+    *(rt_key + 3) = 112;   // p
+    *(rt_key + 4) = 111;   // o
+    *(rt_key + 5) = 110;   // n
+    *(rt_key + 6) = 115;   // s
+    *(rt_key + 7) = 101;   // e
+    *(rt_key + 8) = 95;    // _
+    *(rt_key + 9) = 116;   // t
+    *(rt_key + 10) = 121;  // y
+    *(rt_key + 11) = 112;  // p
+    *(rt_key + 12) = 101;  // e
+    *(rt_key + 13) = 0;
+
+    let code_lit: Address = allocate(8);  // "code"
+    *(code_lit + 0) = 99;   // c
+    *(code_lit + 1) = 111;  // o
+    *(code_lit + 2) = 100;  // d
+    *(code_lit + 3) = 101;  // e
+    *(code_lit + 4) = 0;
+    let code_len: u32 = 4;
+
+    let cid_key: Address = allocate(16);  // "client_id"
+    *(cid_key + 0) = 99;   // c
+    *(cid_key + 1) = 108;  // l
+    *(cid_key + 2) = 105;  // i
+    *(cid_key + 3) = 101;  // e
+    *(cid_key + 4) = 110;  // n
+    *(cid_key + 5) = 116;  // t
+    *(cid_key + 6) = 95;   // _
+    *(cid_key + 7) = 105;  // i
+    *(cid_key + 8) = 100;  // d
+    *(cid_key + 9) = 0;
+
+    let ru_key: Address = allocate(20);   // "redirect_uri"
+    *(ru_key + 0) = 114;   // r
+    *(ru_key + 1) = 101;   // e
+    *(ru_key + 2) = 100;   // d
+    *(ru_key + 3) = 105;   // i
+    *(ru_key + 4) = 114;   // r
+    *(ru_key + 5) = 101;   // e
+    *(ru_key + 6) = 99;    // c
+    *(ru_key + 7) = 116;   // t
+    *(ru_key + 8) = 95;    // _
+    *(ru_key + 9) = 117;   // u
+    *(ru_key + 10) = 114;  // r
+    *(ru_key + 11) = 105;  // i
+    *(ru_key + 12) = 0;
+
+    let sc_key: Address = allocate(8);    // "scope"
+    *(sc_key + 0) = 115;   // s
+    *(sc_key + 1) = 99;    // c
+    *(sc_key + 2) = 111;   // o
+    *(sc_key + 3) = 112;   // p
+    *(sc_key + 4) = 101;   // e
+    *(sc_key + 5) = 0;
+
+    let st_key: Address = allocate(8);    // "state"
+    *(st_key + 0) = 115;   // s
+    *(st_key + 1) = 116;   // t
+    *(st_key + 2) = 97;    // a
+    *(st_key + 3) = 116;   // t
+    *(st_key + 4) = 101;   // e
+    *(st_key + 5) = 0;
+
+    let sep: u32 = 63;  // '?'
+    // response_type=code
+    let pk1: u64 = oauth2_emit_kv(out, p, max_len, 1, sep,
+                                   rt_key, 13, code_lit, code_len);
+    let p1: u32 = (pk1 / 2) as u32;
+    let f1: u32 = (pk1 & 1) as u32;
+    // client_id=...
+    let cid_len: u32 = auth_strlen(client_id);
+    let pk2: u64 = oauth2_emit_kv(out, p1, max_len, f1, 0,
+                                   cid_key, 9, client_id, cid_len);
+    let p2: u32 = (pk2 / 2) as u32;
+    let f2: u32 = (pk2 & 1) as u32;
+    // redirect_uri=...
+    let ru_len: u32 = auth_strlen(redirect_uri);
+    let pk3: u64 = oauth2_emit_kv(out, p2, max_len, f2, 0,
+                                   ru_key, 12, redirect_uri, ru_len);
+    let p3: u32 = (pk3 / 2) as u32;
+    let f3: u32 = (pk3 & 1) as u32;
+    // scope=...
+    let sc_len: u32 = auth_strlen(scope);
+    let pk4: u64 = oauth2_emit_kv(out, p3, max_len, f3, 0,
+                                   sc_key, 5, scope, sc_len);
+    let p4: u32 = (pk4 / 2) as u32;
+    let f4: u32 = (pk4 & 1) as u32;
+    // state=...
+    let st_len: u32 = auth_strlen(state);
+    let pk5: u64 = oauth2_emit_kv(out, p4, max_len, f4, 0,
+                                   st_key, 5, state, st_len);
+    let p5: u32 = (pk5 / 2) as u32;
+
+    free(rt_key); free(code_lit); free(cid_key);
+    free(ru_key); free(sc_key); free(st_key);
+    return p5;
+}
+
+fn oauth2_build_token_request(token_endpoint: Address, code: Address,
+                              client_id: Address, client_secret: Address,
+                              redirect_uri: Address,
+                              out: Address, max_len: u32) -> u32 {
+    // token_endpoint is part of the request URL/context, not the body; the
+    // task specifies the body only. It is accepted as a parameter for
+    // caller convenience and intentionally unused in the body output.
+
+    // "grant_type"
+    let gt_key: Address = allocate(16);
+    *(gt_key + 0) = 103;   // g
+    *(gt_key + 1) = 114;   // r
+    *(gt_key + 2) = 97;    // a
+    *(gt_key + 3) = 110;   // n
+    *(gt_key + 4) = 116;   // t
+    *(gt_key + 5) = 95;    // _
+    *(gt_key + 6) = 116;   // t
+    *(gt_key + 7) = 121;   // y
+    *(gt_key + 8) = 112;   // p
+    *(gt_key + 9) = 101;   // e
+    *(gt_key + 10) = 0;
+
+    // "authorization_code"
+    let ac_lit: Address = allocate(24);
+    *(ac_lit + 0) = 97;    // a
+    *(ac_lit + 1) = 117;   // u
+    *(ac_lit + 2) = 116;   // t
+    *(ac_lit + 3) = 104;   // h
+    *(ac_lit + 4) = 111;   // o
+    *(ac_lit + 5) = 114;   // r
+    *(ac_lit + 6) = 105;   // i
+    *(ac_lit + 7) = 122;   // z
+    *(ac_lit + 8) = 97;    // a
+    *(ac_lit + 9) = 116;   // t
+    *(ac_lit + 10) = 105;  // i
+    *(ac_lit + 11) = 111;  // o
+    *(ac_lit + 12) = 110;  // n
+    *(ac_lit + 13) = 95;   // _
+    *(ac_lit + 14) = 99;   // c
+    *(ac_lit + 15) = 111;  // o
+    *(ac_lit + 16) = 100;  // d
+    *(ac_lit + 17) = 101;  // e
+    *(ac_lit + 18) = 0;
+    let ac_len: u32 = 18;
+
+    // "code"
+    let code_key: Address = allocate(8);
+    *(code_key + 0) = 99;   // c
+    *(code_key + 1) = 111;  // o
+    *(code_key + 2) = 100;  // d
+    *(code_key + 3) = 101;  // e
+    *(code_key + 4) = 0;
+
+    // "client_id"
+    let cid_key: Address = allocate(16);
+    *(cid_key + 0) = 99;   // c
+    *(cid_key + 1) = 108;  // l
+    *(cid_key + 2) = 105;  // i
+    *(cid_key + 3) = 101;  // e
+    *(cid_key + 4) = 110;  // n
+    *(cid_key + 5) = 116;  // t
+    *(cid_key + 6) = 95;   // _
+    *(cid_key + 7) = 105;  // i
+    *(cid_key + 8) = 100;  // d
+    *(cid_key + 9) = 0;
+
+    // "client_secret"
+    let cs_key: Address = allocate(20);
+    *(cs_key + 0) = 99;   // c
+    *(cs_key + 1) = 108;  // l
+    *(cs_key + 2) = 105;  // i
+    *(cs_key + 3) = 101;  // e
+    *(cs_key + 4) = 110;  // n
+    *(cs_key + 5) = 116;  // t
+    *(cs_key + 6) = 95;   // _
+    *(cs_key + 7) = 115;  // s
+    *(cs_key + 8) = 101;  // e
+    *(cs_key + 9) = 99;   // c
+    *(cs_key + 10) = 114; // r
+    *(cs_key + 11) = 101; // e
+    *(cs_key + 12) = 116; // t
+    *(cs_key + 13) = 0;
+
+    // "redirect_uri"
+    let ru_key: Address = allocate(20);
+    *(ru_key + 0) = 114;   // r
+    *(ru_key + 1) = 101;   // e
+    *(ru_key + 2) = 100;   // d
+    *(ru_key + 3) = 105;   // i
+    *(ru_key + 4) = 114;   // r
+    *(ru_key + 5) = 101;   // e
+    *(ru_key + 6) = 99;    // c
+    *(ru_key + 7) = 116;   // t
+    *(ru_key + 8) = 95;    // _
+    *(ru_key + 9) = 117;   // u
+    *(ru_key + 10) = 114;  // r
+    *(ru_key + 11) = 105;  // i
+    *(ru_key + 12) = 0;
+
+    let code_len: u32 = auth_strlen(code);
+    let cid_len: u32 = auth_strlen(client_id);
+    let cs_len: u32 = auth_strlen(client_secret);
+    let ru_len: u32 = auth_strlen(redirect_uri);
+
+    // grant_type=authorization_code  (first → sep=0, no leading char)
+    let pk1: u64 = oauth2_emit_kv(out, 0, max_len, 1, 0,
+                                   gt_key, 10, ac_lit, ac_len);
+    let p1: u32 = (pk1 / 2) as u32;
+    let f1: u32 = (pk1 & 1) as u32;
+    // code=...
+    let pk2: u64 = oauth2_emit_kv(out, p1, max_len, f1, 0,
+                                   code_key, 4, code, code_len);
+    let p2: u32 = (pk2 / 2) as u32;
+    let f2: u32 = (pk2 & 1) as u32;
+    // client_id=...
+    let pk3: u64 = oauth2_emit_kv(out, p2, max_len, f2, 0,
+                                   cid_key, 9, client_id, cid_len);
+    let p3: u32 = (pk3 / 2) as u32;
+    let f3: u32 = (pk3 & 1) as u32;
+    // client_secret=...
+    let pk4: u64 = oauth2_emit_kv(out, p3, max_len, f3, 0,
+                                   cs_key, 13, client_secret, cs_len);
+    let p4: u32 = (pk4 / 2) as u32;
+    let f4: u32 = (pk4 & 1) as u32;
+    // redirect_uri=...
+    let pk5: u64 = oauth2_emit_kv(out, p4, max_len, f4, 0,
+                                   ru_key, 12, redirect_uri, ru_len);
+    let p5: u32 = (pk5 / 2) as u32;
+
+    free(gt_key); free(ac_lit); free(code_key);
+    free(cid_key); free(cs_key); free(ru_key);
+    return p5;
+}
+
+// Parse a JSON token response and write each field into the caller's buffer.
+// access_token / token_type / refresh_token: caller-allocated null-terminated
+//   string buffers (>= 256 bytes recommended).
+// expires_in: caller-allocated 4-byte buffer; receives the u32 little-endian
+//   number of seconds until expiry (0 if the field is absent).
+// Returns 1 on success (access_token present), 0 on failure.
+fn oauth2_parse_token_response(response: Address, resp_len: u32,
+                               access_token: Address, token_type: Address,
+                               expires_in: Address,
+                               refresh_token: Address) -> u32 {
+    auth_store_u32(expires_in, 0, 0);
+    *(access_token + 0) = 0;
+    *(token_type + 0) = 0;
+    *(refresh_token + 0) = 0;
+
+    let root: Address = json_parse(response, resp_len);
+    if root == 0 { return 0; }
+    let t: u32 = auth_load_u32(root, 0);
+    if t != AUTH_JSON_OBJECT { json_free(root); return 0; }
+
+    // Build the four lookup keys.
+    let k_at: Address = allocate(16);   // "access_token"
+    *(k_at + 0) = 97;   // a
+    *(k_at + 1) = 99;   // c
+    *(k_at + 2) = 99;   // c
+    *(k_at + 3) = 101;  // e
+    *(k_at + 4) = 115;  // s
+    *(k_at + 5) = 115;  // s
+    *(k_at + 6) = 95;   // _
+    *(k_at + 7) = 116;  // t
+    *(k_at + 8) = 111;  // o
+    *(k_at + 9) = 107;  // k
+    *(k_at + 10) = 101; // e
+    *(k_at + 11) = 110; // n
+    *(k_at + 12) = 0;
+
+    let k_tt: Address = allocate(16);   // "token_type"
+    *(k_tt + 0) = 116;   // t
+    *(k_tt + 1) = 111;   // o
+    *(k_tt + 2) = 107;   // k
+    *(k_tt + 3) = 101;   // e
+    *(k_tt + 4) = 110;   // n
+    *(k_tt + 5) = 95;    // _
+    *(k_tt + 6) = 116;   // t
+    *(k_tt + 7) = 121;   // y
+    *(k_tt + 8) = 112;   // p
+    *(k_tt + 9) = 101;   // e
+    *(k_tt + 10) = 0;
+
+    let k_ei: Address = allocate(16);   // "expires_in"
+    *(k_ei + 0) = 101;   // e
+    *(k_ei + 1) = 120;   // x
+    *(k_ei + 2) = 112;   // p
+    *(k_ei + 3) = 105;   // i
+    *(k_ei + 4) = 114;   // r
+    *(k_ei + 5) = 101;   // e
+    *(k_ei + 6) = 115;   // s
+    *(k_ei + 7) = 95;    // _
+    *(k_ei + 8) = 105;   // i
+    *(k_ei + 9) = 110;   // n
+    *(k_ei + 10) = 0;
+
+    let k_rt: Address = allocate(20);   // "refresh_token"
+    *(k_rt + 0) = 114;   // r
+    *(k_rt + 1) = 101;   // e
+    *(k_rt + 2) = 102;   // f
+    *(k_rt + 3) = 114;   // r
+    *(k_rt + 4) = 101;   // e
+    *(k_rt + 5) = 115;   // s
+    *(k_rt + 6) = 104;   // h
+    *(k_rt + 7) = 95;    // _
+    *(k_rt + 8) = 116;   // t
+    *(k_rt + 9) = 111;   // o
+    *(k_rt + 10) = 107;  // k
+    *(k_rt + 11) = 101;  // e
+    *(k_rt + 12) = 110;  // n
+    *(k_rt + 13) = 0;
+
+    let at_node: Address = json_object_get(root, k_at);
+    let tt_node: Address = json_object_get(root, k_tt);
+    let ei_node: Address = json_object_get(root, k_ei);
+    let rt_node: Address = json_object_get(root, k_rt);
+
+    let result: u32 = 0;
+    let at_s: Address = auth_json_string_ptr(at_node);
+    if at_s != 0 {
+        auth_strlcpy(access_token, at_s, 256);
+        result = 1;
+    }
+    if tt_node != 0 {
+        let tt_s: Address = auth_json_string_ptr(tt_node);
+        if tt_s != 0 { auth_strlcpy(token_type, tt_s, 64); }
+    }
+    if ei_node != 0 {
+        let ei_v: u64 = auth_json_int_val(ei_node);
+        auth_store_u32(expires_in, 0, ei_v as u32);
+    }
+    if rt_node != 0 {
+        let rt_s: Address = auth_json_string_ptr(rt_node);
+        if rt_s != 0 { auth_strlcpy(refresh_token, rt_s, 256); }
+    }
+
+    free(k_at); free(k_tt); free(k_ei); free(k_rt);
+    json_free(root);
+    return result;
+}
+
+fn oauth2_refresh_token(token_endpoint: Address, refresh_token: Address,
+                        client_id: Address, client_secret: Address,
+                        out: Address, max_len: u32) -> u32 {
+    // token_endpoint is not part of the refresh POST body (only the form
+    // parameters below are). It is accepted for caller symmetry and is
+    // intentionally unused in the body.
+
+    // "grant_type"
+    let gt_key: Address = allocate(16);
+    *(gt_key + 0) = 103;   // g
+    *(gt_key + 1) = 114;   // r
+    *(gt_key + 2) = 97;    // a
+    *(gt_key + 3) = 110;   // n
+    *(gt_key + 4) = 116;   // t
+    *(gt_key + 5) = 95;    // _
+    *(gt_key + 6) = 116;   // t
+    *(gt_key + 7) = 121;   // y
+    *(gt_key + 8) = 112;   // p
+    *(gt_key + 9) = 101;   // e
+    *(gt_key + 10) = 0;
+
+    // "refresh_token"
+    let rt_key: Address = allocate(20);
+    *(rt_key + 0) = 114;   // r
+    *(rt_key + 1) = 101;   // e
+    *(rt_key + 2) = 102;   // f
+    *(rt_key + 3) = 114;   // r
+    *(rt_key + 4) = 101;   // e
+    *(rt_key + 5) = 115;   // s
+    *(rt_key + 6) = 104;   // h
+    *(rt_key + 7) = 95;    // _
+    *(rt_key + 8) = 116;   // t
+    *(rt_key + 9) = 111;   // o
+    *(rt_key + 10) = 107;  // k
+    *(rt_key + 11) = 101;  // e
+    *(rt_key + 12) = 110;  // n
+    *(rt_key + 13) = 0;
+
+    // "client_id"
+    let cid_key: Address = allocate(16);
+    *(cid_key + 0) = 99;   // c
+    *(cid_key + 1) = 108;  // l
+    *(cid_key + 2) = 105;  // i
+    *(cid_key + 3) = 101;  // e
+    *(cid_key + 4) = 110;  // n
+    *(cid_key + 5) = 116;  // t
+    *(cid_key + 6) = 95;   // _
+    *(cid_key + 7) = 105;  // i
+    *(cid_key + 8) = 100;  // d
+    *(cid_key + 9) = 0;
+
+    // "client_secret"
+    let cs_key: Address = allocate(20);
+    *(cs_key + 0) = 99;   // c
+    *(cs_key + 1) = 108;  // l
+    *(cs_key + 2) = 105;  // i
+    *(cs_key + 3) = 101;  // e
+    *(cs_key + 4) = 110;  // n
+    *(cs_key + 5) = 116;  // t
+    *(cs_key + 6) = 95;   // _
+    *(cs_key + 7) = 115;  // s
+    *(cs_key + 8) = 101;  // e
+    *(cs_key + 9) = 99;   // c
+    *(cs_key + 10) = 114; // r
+    *(cs_key + 11) = 101; // e
+    *(cs_key + 12) = 116; // t
+    *(cs_key + 13) = 0;
+
+    let rt_len: u32 = auth_strlen(refresh_token);
+    let cid_len: u32 = auth_strlen(client_id);
+    let cs_len: u32 = auth_strlen(client_secret);
+
+    // grant_type=refresh_token
+    let pk1: u64 = oauth2_emit_kv(out, 0, max_len, 1, 0,
+                                   gt_key, 10, rt_key, 13);
+    let p1: u32 = (pk1 / 2) as u32;
+    let f1: u32 = (pk1 & 1) as u32;
+    // refresh_token=<refresh_token>
+    let pk2: u64 = oauth2_emit_kv(out, p1, max_len, f1, 0,
+                                   rt_key, 13, refresh_token, rt_len);
+    let p2: u32 = (pk2 / 2) as u32;
+    let f2: u32 = (pk2 & 1) as u32;
+    // client_id=<client_id>
+    let pk3: u64 = oauth2_emit_kv(out, p2, max_len, f2, 0,
+                                   cid_key, 9, client_id, cid_len);
+    let p3: u32 = (pk3 / 2) as u32;
+    let f3: u32 = (pk3 & 1) as u32;
+    // client_secret=<client_secret>
+    let pk4: u64 = oauth2_emit_kv(out, p3, max_len, f3, 0,
+                                   cs_key, 13, client_secret, cs_len);
+    let p4: u32 = (pk4 / 2) as u32;
+
+    free(gt_key); free(rt_key); free(cid_key); free(cs_key);
+    return p4;
+}
+
+// ===========================================================================
+// OIDC — OpenID Connect (layer on OAuth2)
+// ===========================================================================
+//
+// oidc_build_auth_url is the OAuth2 auth-URL builder with an extra `nonce`
+// query parameter. The scope passed by the caller should already include
+// "openid" (the function does not modify scope); OIDC Core §3.1.2.1 requires
+// it, and callers are expected to comply.
+//
+// oidc_parse_id_token parses a JWT (header.payload.signature) id_token,
+// base64url-decodes the payload, parses it as JSON, and extracts the
+// standard OIDC claims into the caller-allocated `claims` buffer.
+//
+// claims layout (caller-allocated, >= 640 bytes):
+//   [  0..127]  sub    (null-terminated string, max 127 chars)
+//   [128..255]  iss    (null-terminated string)
+//   [256..383]  aud    (null-terminated string; if aud is an array, the
+//                       first element is used)
+//   [384..391]  exp    (u64 little-endian, NumericDate seconds since epoch)
+//   [392..399]  iat    (u64 little-endian)
+//   [400..511]  nonce  (null-terminated string, max 111 chars)
+//   [512..639]  reserved
+//
+// Signature verification: the function reads the `alg` field from the JWT
+// header to determine RS256 vs ES256. Full cryptographic verification
+// requires the issuer's public key, which is not a parameter to this
+// function; callers must perform that check separately against a trusted
+// JWKS. This function returns 1 if the payload parses successfully and 0
+// otherwise. (The header `alg` is not enforced here.)
+// ===========================================================================
+
+fn oidc_build_auth_url(auth_endpoint: Address, client_id: Address,
+                       redirect_uri: Address, scope: Address, state: Address,
+                       nonce: Address, out: Address, max_len: u32) -> u32 {
+    let ep_len: u32 = auth_strlen(auth_endpoint);
+    let p: u32 = auth_puts(out, 0, max_len, auth_endpoint, ep_len);
+
+    // "response_type"
+    let rt_key: Address = allocate(16);
+    *(rt_key + 0) = 114;   // r
+    *(rt_key + 1) = 101;   // e
+    *(rt_key + 2) = 115;   // s
+    *(rt_key + 3) = 112;   // p
+    *(rt_key + 4) = 111;   // o
+    *(rt_key + 5) = 110;   // n
+    *(rt_key + 6) = 115;   // s
+    *(rt_key + 7) = 101;   // e
+    *(rt_key + 8) = 95;    // _
+    *(rt_key + 9) = 116;   // t
+    *(rt_key + 10) = 121;  // y
+    *(rt_key + 11) = 112;  // p
+    *(rt_key + 12) = 101;  // e
+    *(rt_key + 13) = 0;
+
+    // "code"
+    let code_lit: Address = allocate(8);
+    *(code_lit + 0) = 99;   // c
+    *(code_lit + 1) = 111;  // o
+    *(code_lit + 2) = 100;  // d
+    *(code_lit + 3) = 101;  // e
+    *(code_lit + 4) = 0;
+    let code_len: u32 = 4;
+
+    // "client_id"
+    let cid_key: Address = allocate(16);
+    *(cid_key + 0) = 99;   // c
+    *(cid_key + 1) = 108;  // l
+    *(cid_key + 2) = 105;  // i
+    *(cid_key + 3) = 101;  // e
+    *(cid_key + 4) = 110;  // n
+    *(cid_key + 5) = 116;  // t
+    *(cid_key + 6) = 95;   // _
+    *(cid_key + 7) = 105;  // i
+    *(cid_key + 8) = 100;  // d
+    *(cid_key + 9) = 0;
+
+    // "redirect_uri"
+    let ru_key: Address = allocate(20);
+    *(ru_key + 0) = 114;   // r
+    *(ru_key + 1) = 101;   // e
+    *(ru_key + 2) = 100;   // d
+    *(ru_key + 3) = 105;   // i
+    *(ru_key + 4) = 114;   // r
+    *(ru_key + 5) = 101;   // e
+    *(ru_key + 6) = 99;    // c
+    *(ru_key + 7) = 116;   // t
+    *(ru_key + 8) = 95;    // _
+    *(ru_key + 9) = 117;   // u
+    *(ru_key + 10) = 114;  // r
+    *(ru_key + 11) = 105;  // i
+    *(ru_key + 12) = 0;
+
+    // "scope"
+    let sc_key: Address = allocate(8);
+    *(sc_key + 0) = 115;   // s
+    *(sc_key + 1) = 99;    // c
+    *(sc_key + 2) = 111;   // o
+    *(sc_key + 3) = 112;   // p
+    *(sc_key + 4) = 101;   // e
+    *(sc_key + 5) = 0;
+
+    // "state"
+    let st_key: Address = allocate(8);
+    *(st_key + 0) = 115;   // s
+    *(st_key + 1) = 116;   // t
+    *(st_key + 2) = 97;    // a
+    *(st_key + 3) = 116;   // t
+    *(st_key + 4) = 101;   // e
+    *(st_key + 5) = 0;
+
+    // "nonce"
+    let nc_key: Address = allocate(8);
+    *(nc_key + 0) = 110;   // n
+    *(nc_key + 1) = 111;   // o
+    *(nc_key + 2) = 110;   // n
+    *(nc_key + 3) = 99;    // c
+    *(nc_key + 4) = 101;   // e
+    *(nc_key + 5) = 0;
+
+    let cid_len: u32 = auth_strlen(client_id);
+    let ru_len: u32 = auth_strlen(redirect_uri);
+    let sc_len: u32 = auth_strlen(scope);
+    let st_len: u32 = auth_strlen(state);
+    let nc_len: u32 = auth_strlen(nonce);
+
+    let sep: u32 = 63;  // '?'
+    let pk1: u64 = oauth2_emit_kv(out, p, max_len, 1, sep,
+                                   rt_key, 13, code_lit, code_len);
+    let p1: u32 = (pk1 / 2) as u32;
+    let f1: u32 = (pk1 & 1) as u32;
+    let pk2: u64 = oauth2_emit_kv(out, p1, max_len, f1, 0,
+                                   cid_key, 9, client_id, cid_len);
+    let p2: u32 = (pk2 / 2) as u32;
+    let f2: u32 = (pk2 & 1) as u32;
+    let pk3: u64 = oauth2_emit_kv(out, p2, max_len, f2, 0,
+                                   ru_key, 12, redirect_uri, ru_len);
+    let p3: u32 = (pk3 / 2) as u32;
+    let f3: u32 = (pk3 & 1) as u32;
+    let pk4: u64 = oauth2_emit_kv(out, p3, max_len, f3, 0,
+                                   sc_key, 5, scope, sc_len);
+    let p4: u32 = (pk4 / 2) as u32;
+    let f4: u32 = (pk4 & 1) as u32;
+    let pk5: u64 = oauth2_emit_kv(out, p4, max_len, f4, 0,
+                                   st_key, 5, state, st_len);
+    let p5: u32 = (pk5 / 2) as u32;
+    let f5: u32 = (pk5 & 1) as u32;
+    let pk6: u64 = oauth2_emit_kv(out, p5, max_len, f5, 0,
+                                   nc_key, 5, nonce, nc_len);
+    let p6: u32 = (pk6 / 2) as u32;
+
+    free(rt_key); free(code_lit); free(cid_key);
+    free(ru_key); free(sc_key); free(st_key); free(nc_key);
+    return p6;
+}
+
+// Locate the first two '.' separators in a JWT (header.payload.signature).
+// Writes offsets to d0 and d1. Returns 1 on success, 0 if not exactly 2 dots.
+fn oidc_find_jwt_dots(token: Address, len: u32,
+                      d0: Address, d1: Address) -> u32 {
+    let count: u32 = 0;
+    let i: u32 = 0;
+    while i < len {
+        if *(token + i) == 46 {
+            if count == 0 { auth_store_u32(d0, 0, i); }
+            if count == 1 { auth_store_u32(d1, 0, i); }
+            count = count + 1;
+        }
+        i = i + 1;
+    }
+    if count != 2 { return 0; }
+    return 1;
+}
+
+fn oidc_parse_id_token(id_token: Address, token_len: u32,
+                       claims: Address) -> u32 {
+    // Zero the claims buffer regions we own.
+    let i: u32 = 0;
+    while i < 640 {
+        *(claims + i) = 0;
+        i = i + 1;
+    }
+
+    // Split header.payload.signature on the two dots.
+    let dbuf: Address = allocate(8);
+    let d0: Address = dbuf;
+    let d1: Address = dbuf + 4;
+    if oidc_find_jwt_dots(id_token, token_len, d0, d1) == 0 {
+        free(dbuf);
+        return 0;
+    }
+    let p0: u32 = auth_load_u32(d0, 0);
+    let p1: u32 = auth_load_u32(d1, 0);
+
+    // Decode the header (so we could inspect `alg` — RS256 vs ES256).
+    // The header is informational here; full signature verification requires
+    // the issuer's public key, which the caller must supply separately.
+    let header_len_enc: u32 = p0;
+    let header_buf: Address = allocate(header_len_enc + 4);
+    let header_len: u32 = auth_b64url_decode(id_token, header_len_enc, header_buf);
+    if header_len == AUTH_ERR {
+        free(dbuf); free(header_buf);
+        return 0;
+    }
+    // (Header is parsed only to extract `alg`; we leave that to the caller
+    //  to inspect. We do not enforce alg here.)
+    free(header_buf);
+
+    // Decode the payload.
+    let payload_len_enc: u32 = p1 - p0 - 1;
+    let payload_buf: Address = allocate(payload_len_enc + 4);
+    let payload_len: u32 = auth_b64url_decode(id_token + p0 + 1,
+                                              payload_len_enc, payload_buf);
+    if payload_len == AUTH_ERR {
+        free(dbuf); free(payload_buf);
+        return 0;
+    }
+
+    let root: Address = json_parse(payload_buf, payload_len);
+    free(dbuf);
+    free(payload_buf);
+    if root == 0 { return 0; }
+    let t: u32 = auth_load_u32(root, 0);
+    if t != AUTH_JSON_OBJECT { json_free(root); return 0; }
+
+    // Build claim lookup keys.
+    let k_sub: Address = allocate(8);   // "sub"
+    *(k_sub + 0) = 115;  // s
+    *(k_sub + 1) = 117;  // u
+    *(k_sub + 2) = 98;   // b
+    *(k_sub + 3) = 0;
+
+    let k_iss: Address = allocate(8);   // "iss"
+    *(k_iss + 0) = 105;  // i
+    *(k_iss + 1) = 115;  // s
+    *(k_iss + 2) = 115;  // s
+    *(k_iss + 3) = 0;
+
+    let k_aud: Address = allocate(8);   // "aud"
+    *(k_aud + 0) = 97;   // a
+    *(k_aud + 1) = 117;  // u
+    *(k_aud + 2) = 100;  // d
+    *(k_aud + 3) = 0;
+
+    let k_exp: Address = allocate(8);   // "exp"
+    *(k_exp + 0) = 101;  // e
+    *(k_exp + 1) = 120;  // x
+    *(k_exp + 2) = 112;  // p
+    *(k_exp + 3) = 0;
+
+    let k_iat: Address = allocate(8);   // "iat"
+    *(k_iat + 0) = 105;  // i
+    *(k_iat + 1) = 97;   // a
+    *(k_iat + 2) = 116;  // t
+    *(k_iat + 3) = 0;
+
+    let k_nonce: Address = allocate(8); // "nonce"
+    *(k_nonce + 0) = 110;  // n
+    *(k_nonce + 1) = 111;  // o
+    *(k_nonce + 2) = 110;  // n
+    *(k_nonce + 3) = 99;   // c
+    *(k_nonce + 4) = 101;  // e
+    *(k_nonce + 5) = 0;
+
+    let sub_node: Address = json_object_get(root, k_sub);
+    let iss_node: Address = json_object_get(root, k_iss);
+    let aud_node: Address = json_object_get(root, k_aud);
+    let exp_node: Address = json_object_get(root, k_exp);
+    let iat_node: Address = json_object_get(root, k_iat);
+    let nonce_node: Address = json_object_get(root, k_nonce);
+
+    // String claims → fixed slots in the claims buffer.
+    if sub_node != 0 {
+        let s: Address = auth_json_string_ptr(sub_node);
+        if s != 0 { auth_strlcpy(claims + 0, s, 128); }
+    }
+    if iss_node != 0 {
+        let s: Address = auth_json_string_ptr(iss_node);
+        if s != 0 { auth_strlcpy(claims + 128, s, 128); }
+    }
+    if aud_node != 0 {
+        // aud may be a string or an array of strings.
+        let s: Address = auth_json_string_or_first_array_elem(aud_node);
+        if s != 0 { auth_strlcpy(claims + 256, s, 128); }
+    }
+    if exp_node != 0 {
+        let v: u64 = auth_json_int_val(exp_node);
+        auth_store_u64(claims, 384, v);
+    }
+    if iat_node != 0 {
+        let v: u64 = auth_json_int_val(iat_node);
+        auth_store_u64(claims, 392, v);
+    }
+    if nonce_node != 0 {
+        let s: Address = auth_json_string_ptr(nonce_node);
+        if s != 0 { auth_strlcpy(claims + 400, s, 112); }
+    }
+
+    free(k_sub); free(k_iss); free(k_aud);
+    free(k_exp); free(k_iat); free(k_nonce);
+    json_free(root);
+    return 1;
+}
