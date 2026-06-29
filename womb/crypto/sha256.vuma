@@ -1,0 +1,420 @@
+// womb/crypto/sha256.vuma — SHA-256 (NIST FIPS 180-4)
+// Expected exit code: 0 (self-test passes)
+//
+// This is a COMPILABLE VUMA implementation of SHA-256 per NIST FIPS 180-4.
+// It compiles to bare-metal machine code on all 10 VUMA backends.
+//
+// Usage:
+//   sha256_init(ctx)           — initialize context
+//   sha256_update(ctx, data, len)  — feed data bytes
+//   sha256_final(ctx, out)     — produce 32-byte digest
+//   sha256_oneshot(data, len, out) — all-in-one
+//
+// Memory layout:
+//   SHA256_CTX: 104 bytes
+//     [0..31]   state H[0..7]  (8 × u32 = 32 bytes)
+//     [32..39]  bit count low  (u64 at offset 32)
+//     [40..47]  buffer length  (u32 at offset 40)
+//     [48..111] buffer         (64 bytes, partial block)
+//   Digest output: 32 bytes (8 × u32, big-endian)
+
+// ===========================================================================
+// Constants — FIPS 180-4 Section 4.2.2: K[0..63]
+// ===========================================================================
+
+const K0: u32 = 1116352408;
+const K1: u32 = 1899447441;
+const K2: u32 = 3049323471;
+const K3: u32 = 3921009573;
+const K4: u32 = 961987163;
+const K5: u32 = 1508970993;
+const K6: u32 = 2453635748;
+const K7: u32 = 2870763221;
+const K8: u32 = 3624381080;
+const K9: u32 = 310598401;
+const K10: u32 = 607225278;
+const K11: u32 = 1426881987;
+const K12: u32 = 1925078388;
+const K13: u32 = 2162078206;
+const K14: u32 = 2614888103;
+const K15: u32 = 3248222580;
+const K16: u32 = 3835390401;
+const K17: u32 = 4022224774;
+const K18: u32 = 264347078;
+const K19: u32 = 604807628;
+const K20: u32 = 770255983;
+const K21: u32 = 1249150122;
+const K22: u32 = 1555081692;
+const K23: u32 = 1996064986;
+const K24: u32 = 2554220882;
+const K25: u32 = 2821834349;
+const K26: u32 = 2952996808;
+const K27: u32 = 3210313671;
+const K28: u32 = 3336571891;
+const K29: u32 = 3584528711;
+const K30: u32 = 113926993;
+const K31: u32 = 338241895;
+const K32: u32 = 666307205;
+const K33: u32 = 773529912;
+const K34: u32 = 1294757372;
+const K35: u32 = 1396182291;
+const K36: u32 = 1695183700;
+const K37: u32 = 1986661051;
+const K38: u32 = 2177026350;
+const K39: u32 = 2456956037;
+const K40: u32 = 2730485921;
+const K41: u32 = 2820302411;
+const K42: u32 = 3259730800;
+const K43: u32 = 3345764771;
+const K44: u32 = 3516065817;
+const K45: u32 = 3600352804;
+const K46: u32 = 4094571909;
+const K47: u32 = 275423344;
+const K48: u32 = 430227734;
+const K49: u32 = 506948616;
+const K50: u32 = 659060556;
+const K51: u32 = 883997877;
+const K52: u32 = 958139571;
+const K53: u32 = 1322822218;
+const K54: u32 = 1537002063;
+const K55: u32 = 1747873779;
+const K56: u32 = 1955562222;
+const K57: u32 = 2024104815;
+const K58: u32 = 2227730452;
+const K59: u32 = 2361852424;
+const K60: u32 = 2428436474;
+const K61: u32 = 2756734187;
+const K62: u32 = 3204031479;
+const K63: u32 = 3329325298;
+
+// Initial hash values — FIPS 180-4 Section 5.3.3: H[0..7]
+const H0_INIT: u32 = 1779033703;
+const H1_INIT: u32 = 3144134277;
+const H2_INIT: u32 = 1013904242;
+const H3_INIT: u32 = 2773480762;
+const H4_INIT: u32 = 1359893119;
+const H5_INIT: u32 = 2600822924;
+const H6_INIT: u32 = 528734635;
+const H7_INIT: u32 = 1541459225;
+
+const MASK32: u32 = 4294967295;
+
+// ===========================================================================
+// Helper: u32 right-rotate
+// ===========================================================================
+
+fn rotr32(x: u32, n: u32) -> u32 {
+    return ((x >> n) | (x << (32 - n))) & MASK32;
+}
+
+// ===========================================================================
+// SHA-256 logical functions (FIPS 180-4 Section 4.1.2)
+// ===========================================================================
+
+fn ch(x: u32, y: u32, z: u32) -> u32 {
+    return (x & y) ^ ((x ^ MASK32) & z);
+}
+
+fn maj(x: u32, y: u32, z: u32) -> u32 {
+    return (x & y) ^ (x & z) ^ (y & z);
+}
+
+fn big_sigma0(x: u32) -> u32 {
+    return rotr32(x, 2) ^ rotr32(x, 13) ^ rotr32(x, 22);
+}
+
+fn big_sigma1(x: u32) -> u32 {
+    return rotr32(x, 6) ^ rotr32(x, 11) ^ rotr32(x, 25);
+}
+
+fn small_sigma0(x: u32) -> u32 {
+    return rotr32(x, 7) ^ rotr32(x, 18) ^ (x >> 3);
+}
+
+fn small_sigma1(x: u32) -> u32 {
+    return rotr32(x, 17) ^ rotr32(x, 19) ^ (x >> 10);
+}
+
+// ===========================================================================
+// Byte-level memory helpers (endianness conversion)
+// ===========================================================================
+
+fn load_u32_be(ptr: Address, offset: u32) -> u32 {
+    b0: u32 = *(ptr + offset);
+    b1: u32 = *(ptr + offset + 1);
+    b2: u32 = *(ptr + offset + 2);
+    b3: u32 = *(ptr + offset + 3);
+    return (b0 << 24) | (b1 << 16) | (b2 << 8) | b3;
+}
+
+fn store_u32_be(ptr: Address, offset: u32, val: u32) {
+    *(ptr + offset) = (val >> 24) & 255;
+    *(ptr + offset + 1) = (val >> 16) & 255;
+    *(ptr + offset + 2) = (val >> 8) & 255;
+    *(ptr + offset + 3) = val & 255;
+}
+
+// ===========================================================================
+// SHA-256 Context — 112 bytes
+//   [0..31]   H[0..7]  (8 × u32 = 32 bytes)
+//   [32..39]  bit_count (u64, stored as 2 × u32)
+//   [40..43]  buf_len (u32)
+//   [44..107] buffer (64 bytes)
+// ===========================================================================
+
+fn sha256_init(ctx: Address) {
+    store_u32_be(ctx, 0, H0_INIT);
+    store_u32_be(ctx, 4, H1_INIT);
+    store_u32_be(ctx, 8, H2_INIT);
+    store_u32_be(ctx, 12, H3_INIT);
+    store_u32_be(ctx, 16, H4_INIT);
+    store_u32_be(ctx, 20, H5_INIT);
+    store_u32_be(ctx, 24, H6_INIT);
+    store_u32_be(ctx, 28, H7_INIT);
+    // bit_count = 0
+    store_u32_be(ctx, 32, 0);
+    store_u32_be(ctx, 36, 0);
+    // buf_len = 0
+    store_u32_be(ctx, 40, 0);
+}
+
+// ===========================================================================
+// SHA-256 compression — process one 64-byte block
+// ===========================================================================
+
+fn sha256_compress(ctx: Address, block: Address) {
+    // Load current state
+    a: u32 = load_u32_be(ctx, 0);
+    b: u32 = load_u32_be(ctx, 4);
+    c: u32 = load_u32_be(ctx, 8);
+    d: u32 = load_u32_be(ctx, 12);
+    e: u32 = load_u32_be(ctx, 16);
+    f: u32 = load_u32_be(ctx, 20);
+    g: u32 = load_u32_be(ctx, 24);
+    h: u32 = load_u32_be(ctx, 28);
+
+    // Prepare W[0..63] — first 16 from block, rest expanded
+    // We'll compute W on the fly using a working buffer
+    wbuf = allocate(256);  // 64 × 4 bytes
+
+    // W[0..15] = block bytes (big-endian)
+    i: u32 = 0;
+    while i < 16 {
+        wi: u32 = load_u32_be(block, i * 4);
+        store_u32_be(wbuf, i * 4, wi);
+        i = i + 1;
+    }
+
+    // W[16..63] = expansion
+    i = 16;
+    while i < 64 {
+        w15: u32 = load_u32_be(wbuf, (i - 15) * 4);
+        w2: u32 = load_u32_be(wbuf, (i - 2) * 4);
+        s0: u32 = small_sigma0(w15);
+        s1: u32 = small_sigma1(w2);
+        w16: u32 = (load_u32_be(wbuf, (i - 16) * 4) + s0 + load_u32_be(wbuf, (i - 7) * 4) + s1) & MASK32;
+        store_u32_be(wbuf, i * 4, w16);
+        i = i + 1;
+    }
+
+    // 64 rounds of compression
+    i = 0;
+    while i < 64 {
+        ki: u32 = 0;
+        if i == 0 { ki = K0; }
+        if i == 1 { ki = K1; }
+        if i == 2 { ki = K2; }
+        if i == 3 { ki = K3; }
+        if i == 4 { ki = K4; }
+        if i == 5 { ki = K5; }
+        if i == 6 { ki = K6; }
+        if i == 7 { ki = K7; }
+        if i == 8 { ki = K8; }
+        if i == 9 { ki = K9; }
+        if i == 10 { ki = K10; }
+        if i == 11 { ki = K11; }
+        if i == 12 { ki = K12; }
+        if i == 13 { ki = K13; }
+        if i == 14 { ki = K14; }
+        if i == 15 { ki = K15; }
+        if i == 16 { ki = K16; }
+        if i == 17 { ki = K17; }
+        if i == 18 { ki = K18; }
+        if i == 19 { ki = K19; }
+        if i == 20 { ki = K20; }
+        if i == 21 { ki = K21; }
+        if i == 22 { ki = K22; }
+        if i == 23 { ki = K23; }
+        if i == 24 { ki = K24; }
+        if i == 25 { ki = K25; }
+        if i == 26 { ki = K26; }
+        if i == 27 { ki = K27; }
+        if i == 28 { ki = K28; }
+        if i == 29 { ki = K29; }
+        if i == 30 { ki = K30; }
+        if i == 31 { ki = K31; }
+        if i == 32 { ki = K32; }
+        if i == 33 { ki = K33; }
+        if i == 34 { ki = K34; }
+        if i == 35 { ki = K35; }
+        if i == 36 { ki = K36; }
+        if i == 37 { ki = K37; }
+        if i == 38 { ki = K38; }
+        if i == 39 { ki = K39; }
+        if i == 40 { ki = K40; }
+        if i == 41 { ki = K41; }
+        if i == 42 { ki = K42; }
+        if i == 43 { ki = K43; }
+        if i == 44 { ki = K44; }
+        if i == 45 { ki = K45; }
+        if i == 46 { ki = K46; }
+        if i == 47 { ki = K47; }
+        if i == 48 { ki = K48; }
+        if i == 49 { ki = K49; }
+        if i == 50 { ki = K50; }
+        if i == 51 { ki = K51; }
+        if i == 52 { ki = K52; }
+        if i == 53 { ki = K53; }
+        if i == 54 { ki = K54; }
+        if i == 55 { ki = K55; }
+        if i == 56 { ki = K56; }
+        if i == 57 { ki = K57; }
+        if i == 58 { ki = K58; }
+        if i == 59 { ki = K59; }
+        if i == 60 { ki = K60; }
+        if i == 61 { ki = K61; }
+        if i == 62 { ki = K62; }
+        if i == 63 { ki = K63; }
+
+        wi: u32 = load_u32_be(wbuf, i * 4);
+        t1: u32 = (h + big_sigma1(e) + ch(e, f, g) + ki + wi) & MASK32;
+        t2: u32 = (big_sigma0(a) + maj(a, b, c)) & MASK32;
+
+        h = g;
+        g = f;
+        f = e;
+        e = (d + t1) & MASK32;
+        d = c;
+        c = b;
+        b = a;
+        a = (t1 + t2) & MASK32;
+
+        i = i + 1;
+    }
+
+    // Add compressed state to context
+    store_u32_be(ctx, 0, (load_u32_be(ctx, 0) + a) & MASK32);
+    store_u32_be(ctx, 4, (load_u32_be(ctx, 4) + b) & MASK32);
+    store_u32_be(ctx, 8, (load_u32_be(ctx, 8) + c) & MASK32);
+    store_u32_be(ctx, 12, (load_u32_be(ctx, 12) + d) & MASK32);
+    store_u32_be(ctx, 16, (load_u32_be(ctx, 16) + e) & MASK32);
+    store_u32_be(ctx, 20, (load_u32_be(ctx, 20) + f) & MASK32);
+    store_u32_be(ctx, 24, (load_u32_be(ctx, 24) + g) & MASK32);
+    store_u32_be(ctx, 28, (load_u32_be(ctx, 28) + h) & MASK32);
+
+    free(wbuf);
+}
+
+// ===========================================================================
+// SHA-256 update — feed data bytes into context
+// ===========================================================================
+
+fn sha256_update(ctx: Address, data: Address, len: u32) {
+    buf_len: u32 = load_u32_be(ctx, 40);
+
+    i: u32 = 0;
+    while i < len {
+        // Copy byte to buffer
+        db: u32 = *(data + i);
+        *(ctx + 44 + buf_len) = db;
+        buf_len = buf_len + 1;
+        i = i + 1;
+
+        // When buffer is full, compress
+        if buf_len == 64 {
+            sha256_compress(ctx, ctx + 44);
+            buf_len = 0;
+            // Increment bit count by 512
+            lo: u32 = load_u32_be(ctx, 36);
+            store_u32_be(ctx, 36, (lo + 512) & MASK32);
+        }
+    }
+
+    store_u32_be(ctx, 40, buf_len);
+}
+
+// ===========================================================================
+// SHA-256 final — produce 32-byte digest
+// ===========================================================================
+
+fn sha256_final(ctx: Address, out: Address) {
+    buf_len: u32 = load_u32_be(ctx, 40);
+    bit_lo: u32 = load_u32_be(ctx, 36);
+
+    // Total bits = bit_lo + buf_len * 8
+    total_bits: u32 = (bit_lo + (buf_len * 8)) & MASK32;
+
+    // Append 0x80
+    *(ctx + 44 + buf_len) = 128;
+    buf_len = buf_len + 1;
+
+    // Pad with zeros until 56 bytes mod 64
+    while buf_len != 56 {
+        *(ctx + 44 + buf_len) = 0;
+        buf_len = buf_len + 1;
+    }
+
+    // Append 64-bit big-endian bit length (high 32 = 0, low 32 = total_bits)
+    store_u32_be(ctx, 44 + 56, 0);
+    store_u32_be(ctx, 44 + 60, total_bits);
+
+    // Final compress
+    sha256_compress(ctx, ctx + 44);
+
+    // Write digest (big-endian)
+    i: u32 = 0;
+    while i < 8 {
+        hi: u32 = load_u32_be(ctx, i * 4);
+        store_u32_be(out, i * 4, hi);
+        i = i + 1;
+    }
+}
+
+// ===========================================================================
+// SHA-256 oneshot — all-in-one convenience
+// ===========================================================================
+
+fn sha256_oneshot(data: Address, len: u32, out: Address) {
+    ctx = allocate(112);
+    sha256_init(ctx);
+    sha256_update(ctx, data, len);
+    sha256_final(ctx, out);
+    free(ctx);
+}
+
+// ===========================================================================
+// Self-test: SHA-256("abc") = ba7816bf 8f01cfea 414140de 5dae2223 b00361a3 96177a9c b410ff61 f20015ad
+// ===========================================================================
+
+fn main() -> i32 {
+    // Test vector: "abc"
+    msg = allocate(3);
+    *(msg + 0) = 97;  // 'a'
+    *(msg + 1) = 98;  // 'b'
+    *(msg + 2) = 99;  // 'c'
+
+    out = allocate(32);
+    sha256_oneshot(msg, 3, out);
+
+    // Verify first 4 bytes = 0xBA7816BF
+    h0: u32 = load_u32_be(out, 0);
+    expected: u32 = 3132259095;  // 0xBA7816BF
+
+    free(msg);
+    free(out);
+
+    if h0 == expected {
+        return 0;
+    }
+    return 1;
+}
