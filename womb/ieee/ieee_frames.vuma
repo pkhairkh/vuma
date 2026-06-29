@@ -1,0 +1,901 @@
+// ieee_frames.vuma
+// VUMA standard library module: IEEE / IETF link- and network-layer frame
+// parsers and builders.
+//
+//   1. IEEE 802.3 Ethernet frame (RFC 894 / IEEE 802.3-2018)
+//   2. IEEE 802.1Q VLAN tag
+//   3. IEEE 802.11 WiFi management frame (simplified beacon / probe response)
+//   4. IEEE 802.15.4 (Zigbee / 6LoWPAN) frame
+//   5. ARP (RFC 826)
+//   6. IPv4 header (RFC 791)
+//   7. ICMP (RFC 792)
+//
+// Target: all 10 VUMA backends. Importable library module (no main()).
+//
+// Task ID: womb-ieee-frames
+//
+// ===========================================================================
+// External dependency
+// ===========================================================================
+// This module assumes an external CRC-32 function with the signature
+//
+//   fn crc32(data: Address, len: u32) -> u32;
+//
+// is available at link time. It must implement the IEEE 802.3 / ITU-T V.42
+// CRC-32 (polynomial 0xEDB88320, init 0xFFFFFFFF, reflected input/output,
+// final XOR 0xFFFFFFFF) — the same CRC used for the Ethernet Frame Check
+// Sequence. crc32() is invoked but not defined here.
+//
+// ===========================================================================
+// Output-parameter conventions
+// ===========================================================================
+// Many functions take `out: Address` or `<field>: Address` output parameters.
+// To keep the conventions uniform across every protocol in this module:
+//
+//   * Output u16 / u32 scalars (ethertype, payload_len, vlan_id, frame_type,
+//     channel, ip addresses, oper, type, code, id, seq, ...) are written as
+//     4 little-endian bytes at the given Address. The caller reads them back
+//     with ieee_load_u32_le(out, 0).
+//
+//   * Output Address values (a pointer into a frame buffer, e.g. the parsed
+//     payload pointer) are written as 8 little-endian bytes at the given
+//     Address. The caller reads them back with ieee_load_addr_le(out, 0).
+//
+//   * Output byte fields (MAC addresses, SSID text, 802.15.4 short/extended
+//     addresses) are copied verbatim into the caller's buffer.
+//
+// Return values: 0 on success, a small positive integer (1, 2, 3, ...) on
+// failure. Builder functions that produce a variable-length buffer return
+// the number of bytes written (or 0 on error).
+//
+// ===========================================================================
+// Constants
+// ===========================================================================
+
+// Ethertype constants (RFC 894 / IEEE 802.3)
+const ETH_TYPE_IPV4: u32 = 0x0800;
+const ETH_TYPE_ARP: u32  = 0x0806;
+const ETH_TYPE_IPV6: u32 = 0x86DD;
+const ETH_TYPE_VLAN: u32 = 0x8100;
+
+// Ethernet geometry
+const ETH_HEADER_LEN: u32   = 14;
+const ETH_FCS_LEN: u32      = 4;
+const ETH_MIN_PAYLOAD: u32  = 46;
+const ETH_MAX_PAYLOAD: u32  = 1500;
+const ETH_ADDR_LEN: u32     = 6;
+
+// IEEE 802.1Q
+const ETH_TPID_VLAN: u32    = 0x8100;
+
+// IEEE 802.15.4 frame types
+const ZIGBEE_FRAME_BEACON: u32     = 0;
+const ZIGBEE_FRAME_DATA: u32       = 1;
+const ZIGBEE_FRAME_ACK: u32        = 2;
+const ZIGBEE_FRAME_MAC_COMMAND: u32 = 3;
+
+// IEEE 802.11 management-body fixed-field length for beacon / probe response
+// (timestamp(8) + beacon_interval(2) + capability(2) = 12) following the
+// 24-byte MAC header (fc(2)+dur(2)+da(6)+sa(6)+bssid(6)+seq(2)).
+const WIFI_MGMT_BODY_FIXED: u32 = 12;
+const WIFI_MAC_HEADER_LEN: u32  = 24;
+
+// ARP / ICMP / IPv4 geometry
+const ARP_PKT_LEN: u32  = 28;
+const ICMP_HEADER_LEN: u32 = 8;
+const IPV4_MIN_HEADER_LEN: u32 = 20;
+
+// ===========================================================================
+// Byte-level load/store helpers
+// ===========================================================================
+// *(ptr + off) reads/writes a single byte. These helpers assemble/disassemble
+// multi-byte values in either big-endian (network order, used by Ethernet /
+// ARP / IPv4 / ICMP) or little-endian (used by 802.15.4 and for output
+// scalar storage) order. Offsets are u32 so they compose cleanly with the
+// u32 index arithmetic used throughout the module.
+
+fn ieee_store_u16_be(buf: Address, off: u32, val: u32) {
+    *(buf + off)     = (val >> 8) & 255;
+    *(buf + off + 1) = val & 255;
+}
+
+fn ieee_load_u16_be(buf: Address, off: u32) -> u32 {
+    b0: u32 = *(buf + off);
+    b1: u32 = *(buf + off + 1);
+    return ((b0 << 8) | b1) & 65535;
+}
+
+fn ieee_store_u16_le(buf: Address, off: u32, val: u32) {
+    *(buf + off)     = val & 255;
+    *(buf + off + 1) = (val >> 8) & 255;
+}
+
+fn ieee_load_u16_le(buf: Address, off: u32) -> u32 {
+    b0: u32 = *(buf + off);
+    b1: u32 = *(buf + off + 1);
+    return (b0 | (b1 << 8)) & 65535;
+}
+
+fn ieee_store_u32_be(buf: Address, off: u32, val: u32) {
+    *(buf + off)     = (val >> 24) & 255;
+    *(buf + off + 1) = (val >> 16) & 255;
+    *(buf + off + 2) = (val >> 8) & 255;
+    *(buf + off + 3) = val & 255;
+}
+
+fn ieee_load_u32_be(buf: Address, off: u32) -> u32 {
+    b0: u32 = *(buf + off);
+    b1: u32 = *(buf + off + 1);
+    b2: u32 = *(buf + off + 2);
+    b3: u32 = *(buf + off + 3);
+    return ((b0 << 24) | (b1 << 16) | (b2 << 8) | b3) & 4294967295;
+}
+
+fn ieee_store_u32_le(buf: Address, off: u32, val: u32) {
+    *(buf + off)     = val & 255;
+    *(buf + off + 1) = (val >> 8) & 255;
+    *(buf + off + 2) = (val >> 16) & 255;
+    *(buf + off + 3) = (val >> 24) & 255;
+}
+
+fn ieee_load_u32_le(buf: Address, off: u32) -> u32 {
+    b0: u32 = *(buf + off);
+    b1: u32 = *(buf + off + 1);
+    b2: u32 = *(buf + off + 2);
+    b3: u32 = *(buf + off + 3);
+    return (b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)) & 4294967295;
+}
+
+// Store / load an Address (pointer-sized, 8 bytes on 64-bit targets) in
+// little-endian order. Used for "store a pointer into a frame" outputs.
+fn ieee_store_addr_le(buf: Address, off: u32, val: Address) {
+    v: u64 = val as u64;
+    *(buf + off)     = v & 255;
+    *(buf + off + 1) = (v >> 8) & 255;
+    *(buf + off + 2) = (v >> 16) & 255;
+    *(buf + off + 3) = (v >> 24) & 255;
+    *(buf + off + 4) = (v >> 32) & 255;
+    *(buf + off + 5) = (v >> 40) & 255;
+    *(buf + off + 6) = (v >> 48) & 255;
+    *(buf + off + 7) = (v >> 56) & 255;
+}
+
+fn ieee_load_addr_le(buf: Address, off: u32) -> Address {
+    b0: u64 = *(buf + off)     as u64;
+    b1: u64 = *(buf + off + 1) as u64;
+    b2: u64 = *(buf + off + 2) as u64;
+    b3: u64 = *(buf + off + 3) as u64;
+    b4: u64 = *(buf + off + 4) as u64;
+    b5: u64 = *(buf + off + 5) as u64;
+    b6: u64 = *(buf + off + 6) as u64;
+    b7: u64 = *(buf + off + 7) as u64;
+    v: u64 = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+              | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
+    return v as Address;
+}
+
+fn ieee_memcpy(dst: Address, src: Address, len: u32) {
+    i: u32 = 0;
+    while i < len {
+        *(dst + i) = *(src + i);
+        i = i + 1;
+    }
+}
+
+fn ieee_memset(buf: Address, val: u32, len: u32) {
+    i: u32 = 0;
+    v: u32 = val & 255;
+    while i < len {
+        *(buf + i) = v;
+        i = i + 1;
+    }
+}
+
+// 4-bit nybble → uppercase hex ASCII ('0'..'9','A'..'F')
+fn ieee_nibble_hex(n: u32) -> u32 {
+    if n < 10 {
+        return n + 48;
+    }
+    return n + 55;
+}
+
+// hex ASCII → nybble value, or 0xFFFFFFFF on invalid digit.
+fn ieee_hex_val(c: u32) -> u32 {
+    if c >= 48 {
+        if c <= 57 {
+            return c - 48;
+        }
+    }
+    if c >= 65 {
+        if c <= 70 {
+            return c - 55;
+        }
+    }
+    if c >= 97 {
+        if c <= 102 {
+            return c - 87;
+        }
+    }
+    return 4294967295;
+}
+
+// ===========================================================================
+// 1. IEEE 802.3 Ethernet Frame (RFC 894 / IEEE 802.3-2018)
+// ===========================================================================
+// Frame format:
+//   dst_mac(6) || src_mac(6) || ethertype(2) || payload(46..1500) || FCS(4)
+//
+// eth_build_frame writes a complete frame (header + padded payload + FCS)
+// into the caller-provided `out` buffer, which must be at least
+//   14 + max(payload_len, 46) + 4
+// bytes. Returns the total frame length written, or 0 on error.
+
+fn eth_build_frame(dst_mac: Address, src_mac: Address, ethertype: u32,
+                   payload: Address, payload_len: u32, out: Address) -> u32 {
+    if payload_len > ETH_MAX_PAYLOAD {
+        return 0;
+    }
+
+    // dst || src
+    ieee_memcpy(out, dst_mac, ETH_ADDR_LEN);
+    ieee_memcpy(out + ETH_ADDR_LEN, src_mac, ETH_ADDR_LEN);
+
+    // ethertype (network order)
+    ieee_store_u16_be(out, 12, ethertype);
+
+    // payload, zero-padded to the 46-byte minimum
+    plen: u32 = payload_len;
+    if plen < ETH_MIN_PAYLOAD {
+        plen = ETH_MIN_PAYLOAD;
+    }
+    i: u32 = 0;
+    while i < plen {
+        if i < payload_len {
+            *(out + ETH_HEADER_LEN + i) = *(payload + i);
+        } else {
+            *(out + ETH_HEADER_LEN + i) = 0;
+        }
+        i = i + 1;
+    }
+
+    // FCS = CRC-32 over dst+src+ethertype+payload (everything except the FCS)
+    frame_len: u32 = ETH_HEADER_LEN + plen;
+    fcs: u32 = crc32(out, frame_len);
+    ieee_store_u32_be(out, frame_len, fcs);
+
+    return frame_len + ETH_FCS_LEN;
+}
+
+// eth_parse_frame extracts dst/src MAC, ethertype, payload pointer and
+// payload length, then verifies the FCS. The output buffers must be:
+//   dst_mac, src_mac : 6 bytes each
+//   ethertype        : 4 bytes (u32 LE)
+//   payload          : 8 bytes (Address LE — pointer into `frame`)
+//   payload_len      : 4 bytes (u32 LE)
+// Returns 0 on success, 1 if the frame is too short, 2 on FCS mismatch.
+
+fn eth_parse_frame(frame: Address, frame_len: u32,
+                   dst_mac: Address, src_mac: Address,
+                   ethertype: Address, payload: Address,
+                   payload_len: Address) -> u32 {
+    if frame_len < ETH_HEADER_LEN + ETH_FCS_LEN {
+        return 1;
+    }
+
+    ieee_memcpy(dst_mac, frame, ETH_ADDR_LEN);
+    ieee_memcpy(src_mac, frame + ETH_ADDR_LEN, ETH_ADDR_LEN);
+
+    et: u32 = ieee_load_u16_be(frame, 12);
+    ieee_store_u32_le(ethertype, 0, et);
+
+    // Payload starts right after the 14-byte header
+    ieee_store_addr_le(payload, 0, frame + ETH_HEADER_LEN);
+
+    // Payload length = frame minus header minus FCS (padded length; the
+    // original unpadded length cannot be recovered from the wire).
+    plen: u32 = frame_len - ETH_HEADER_LEN - ETH_FCS_LEN;
+    ieee_store_u32_le(payload_len, 0, plen);
+
+    // Verify FCS: crc32 over everything except the trailing 4 FCS bytes,
+    // compared big-endian against the stored FCS.
+    data_len: u32 = frame_len - ETH_FCS_LEN;
+    computed: u32 = crc32(frame, data_len);
+    stored: u32 = ieee_load_u32_be(frame, data_len);
+    if computed != stored {
+        return 2;
+    }
+    return 0;
+}
+
+// eth_mac_to_string formats a 6-byte MAC as "AA:BB:CC:DD:EE:FF" (17 chars)
+// plus a NUL terminator into `out` (18 bytes). Returns 0.
+
+fn eth_mac_to_string(mac: Address, out: Address) -> u32 {
+    i: u32 = 0;
+    pos: u32 = 0;
+    while i < ETH_ADDR_LEN {
+        b: u32 = *(mac + i);
+        hi: u32 = b >> 4;
+        lo: u32 = b & 15;
+        *(out + pos)     = ieee_nibble_hex(hi);
+        *(out + pos + 1) = ieee_nibble_hex(lo);
+        pos = pos + 2;
+        if i < 5 {
+            *(out + pos) = 58;  // ':'
+            pos = pos + 1;
+        }
+        i = i + 1;
+    }
+    *(out + pos) = 0;  // NUL terminator
+    return 0;
+}
+
+// eth_string_to_mac parses "AA:BB:CC:DD:EE:FF" (uppercase or lowercase hex,
+// ':' separators) into 6 bytes at `mac`. Returns 0 on success, 1 on a bad
+// hex digit, 2 on a missing separator.
+
+fn eth_string_to_mac(str: Address, mac: Address) -> u32 {
+    i: u32 = 0;
+    while i < ETH_ADDR_LEN {
+        hi: u32 = ieee_hex_val(*(str + i * 3));
+        if hi == 4294967295 {
+            return 1;
+        }
+        lo: u32 = ieee_hex_val(*(str + i * 3 + 1));
+        if lo == 4294967295 {
+            return 1;
+        }
+        *(mac + i) = ((hi << 4) | lo) & 255;
+        if i < 5 {
+            sep: u32 = *(str + i * 3 + 2);
+            if sep != 58 {
+                return 2;
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+// ===========================================================================
+// 2. IEEE 802.1Q VLAN Tag
+// ===========================================================================
+// Tagged frame format:
+//   dst(6) || src(6) || TPID(2)=0x8100 || TCI(2) || ethertype(2) || payload || FCS(4)
+// TCI layout: [priority(3) | DEI(1) | VLAN ID(12)].
+//
+// vlan_strip_tag operates in place on `frame`. If the frame is tagged it
+// removes the 4-byte tag, recomputes the FCS, writes vlan_id, priority and
+// the new (untagged) frame length to the outputs, and returns the inner
+// ethertype. If the frame is not tagged the frame is left untouched, the
+// outputs are set to defaults (vlan_id=0, priority=0, untagged=frame_len)
+// and the function returns 0.
+
+fn vlan_strip_tag(frame: Address, frame_len: u32,
+                  vlan_id: Address, priority: Address,
+                  untagged: Address) -> u32 {
+    ieee_store_u32_le(untagged, 0, frame_len);
+    ieee_store_u32_le(vlan_id, 0, 0);
+    ieee_store_u32_le(priority, 0, 0);
+
+    // Need at least header(14) + tag(4) + FCS(4) = 22 bytes to be tagged.
+    if frame_len < 22 {
+        return 0;
+    }
+    tpid: u32 = ieee_load_u16_be(frame, 12);
+    if tpid != ETH_TPID_VLAN {
+        return 0;
+    }
+
+    tci: u32 = ieee_load_u16_be(frame, 14);
+    vid: u32 = tci & 4095;
+    pri: u32 = (tci >> 13) & 7;
+    ieee_store_u32_le(vlan_id, 0, vid);
+    ieee_store_u32_le(priority, 0, pri);
+
+    inner_et: u32 = ieee_load_u16_be(frame, 16);
+
+    // Shift the bytes after the tag (ethertype + payload + FCS) left by 4
+    // so they overwrite TPID+TCI. Source offset (16) is always ahead of the
+    // destination offset (12), so the in-place left shift is safe.
+    i: u32 = 0;
+    count: u32 = frame_len - 16;
+    while i < count {
+        *(frame + 12 + i) = *(frame + 16 + i);
+        i = i + 1;
+    }
+
+    new_len: u32 = frame_len - 4;
+    data_len: u32 = new_len - ETH_FCS_LEN;
+    fcs: u32 = crc32(frame, data_len);
+    ieee_store_u32_be(frame, data_len, fcs);
+
+    ieee_store_u32_le(untagged, 0, new_len);
+    return inner_et;
+}
+
+// vlan_add_tag reads an untagged frame from `frame` and writes a tagged
+// copy into `out`, which must be at least frame_len + 4 bytes. The FCS is
+// recomputed over the new tagged frame. Returns the new frame length, or 0
+// if the input is too short to be a valid Ethernet frame.
+
+fn vlan_add_tag(frame: Address, frame_len: u32,
+                vlan_id: u32, priority: u32, out: Address) -> u32 {
+    if frame_len < ETH_HEADER_LEN + ETH_FCS_LEN {
+        return 0;
+    }
+
+    // dst || src (12 bytes unchanged)
+    ieee_memcpy(out, frame, 12);
+
+    // TPID || TCI
+    ieee_store_u16_be(out, 12, ETH_TPID_VLAN);
+    tci: u32 = (((priority & 7) << 13) | (vlan_id & 4095)) & 65535;
+    ieee_store_u16_be(out, 14, tci);
+
+    // Copy the remainder of the input frame (ethertype + payload + old FCS)
+    // to out + 16.
+    rest: u32 = frame_len - 12;
+    i: u32 = 0;
+    while i < rest {
+        *(out + 16 + i) = *(frame + 12 + i);
+        i = i + 1;
+    }
+
+    new_len: u32 = frame_len + 4;
+    data_len: u32 = new_len - ETH_FCS_LEN;
+    fcs: u32 = crc32(out, data_len);
+    ieee_store_u32_be(out, data_len, fcs);
+
+    return new_len;
+}
+
+// ===========================================================================
+// 3. IEEE 802.11 WiFi Management Frame (simplified)
+// ===========================================================================
+// Management frame layout:
+//   frame_control(2) || duration(2) || da(6) || sa(6) || bssid(6) ||
+//   seq_ctrl(2) || management_body || tagged_params
+//
+// For beacon and probe-response frames the management body is fixed at 12
+// bytes (timestamp(8) + interval(2) + capability(2)), so tagged parameters
+// begin at offset 36. Each tag is tag_number(1) || tag_length(1) ||
+// tag_data(tag_length). SSID is tag 0; DS Parameter Set (channel) is tag 3.
+//
+// Note: RSSI is a radio-layer measurement that is NOT encoded inside the
+// 802.11 frame body (it comes from the radiotap header, which this
+// simplified parser does not consume); wifi_parse_beacon therefore writes
+// 0 to the rssi output.
+
+fn wifi_parse_beacon(frame: Address, frame_len: u32,
+                     ssid: Address, ssid_len: Address,
+                     channel: Address, rssi: Address) -> u32 {
+    ieee_store_u32_le(ssid_len, 0, 0);
+    ieee_store_u32_le(channel, 0, 0);
+    ieee_store_u32_le(rssi, 0, 0);
+
+    if frame_len < WIFI_MAC_HEADER_LEN + WIFI_MGMT_BODY_FIXED {
+        return 1;
+    }
+
+    pos: u32 = WIFI_MAC_HEADER_LEN + WIFI_MGMT_BODY_FIXED;
+    while pos + 2 <= frame_len {
+        tag: u32 = *(frame + pos);
+        tlen: u32 = *(frame + pos + 1);
+        if pos + 2 + tlen > frame_len {
+            break;
+        }
+        if tag == 0 {
+            // SSID (tag 0)
+            i: u32 = 0;
+            while i < tlen {
+                *(ssid + i) = *(frame + pos + 2 + i);
+                i = i + 1;
+            }
+            ieee_store_u32_le(ssid_len, 0, tlen);
+        }
+        if tag == 3 {
+            // DS Parameter Set (tag 3): 1-byte channel number.
+            if tlen >= 1 {
+                ch: u32 = *(frame + pos + 2);
+                ieee_store_u32_le(channel, 0, ch);
+            }
+        }
+        pos = pos + 2 + tlen;
+    }
+    return 0;
+}
+
+fn wifi_parse_probe_response(frame: Address, frame_len: u32,
+                             ssid: Address, ssid_len: Address) -> u32 {
+    ieee_store_u32_le(ssid_len, 0, 0);
+    if frame_len < WIFI_MAC_HEADER_LEN + WIFI_MGMT_BODY_FIXED {
+        return 1;
+    }
+
+    pos: u32 = WIFI_MAC_HEADER_LEN + WIFI_MGMT_BODY_FIXED;
+    while pos + 2 <= frame_len {
+        tag: u32 = *(frame + pos);
+        tlen: u32 = *(frame + pos + 1);
+        if pos + 2 + tlen > frame_len {
+            break;
+        }
+        if tag == 0 {
+            i: u32 = 0;
+            while i < tlen {
+                *(ssid + i) = *(frame + pos + 2 + i);
+                i = i + 1;
+            }
+            ieee_store_u32_le(ssid_len, 0, tlen);
+            return 0;
+        }
+        pos = pos + 2 + tlen;
+    }
+    return 0;
+}
+
+// ===========================================================================
+// 4. IEEE 802.15.4 (Zigbee / 6LoWPAN) Frame
+// ===========================================================================
+// Frame layout (IEEE 802.15.4):
+//   Frame Control(2, LE) || Seq Number(1) || Addressing || [Security] || Payload
+//
+// Frame Control bits used here:
+//   [0..2]   Frame Type      (Beacon=0, Data=1, Ack=2, MAC Command=3)
+//   [3]      Security Enabled
+//   [6]      PAN ID Compression
+//   [10..11] Dest Addressing Mode (0=none, 2=short, 3=extended)
+//   [14..15] Src Addressing Mode  (0=none, 2=short, 3=extended)
+//
+// Addressing fields (all little-endian):
+//   dst: [dst_pan(2)] + dst_addr(2 if short, 8 if extended)
+//   src: [src_pan(2)] + src_addr(2 if short, 8 if extended)
+// src_pan is omitted when PAN ID Compression is set AND a destination is
+// present (src_pan == dst_pan in that case).
+//
+// Security handling is not implemented in this simplified parser; the
+// payload pointer is set to the first byte after the addressing fields.
+//
+// Outputs:
+//   frame_type  : 4 bytes (u32 LE)
+//   dst_pan     : 4 bytes (u32 LE)
+//   dst_addr    : 8 bytes (short addr in bytes 0..1, zero-padded; or 8-byte ext)
+//   src_addr    : 8 bytes (same)
+//   payload     : 8 bytes (Address LE — pointer into `frame`)
+//   payload_len : 4 bytes (u32 LE)
+// Returns 0 on success, 1 if too short, 2 on a truncated destination, 3 on
+// a truncated source.
+
+fn zigbee_parse_frame(frame: Address, frame_len: u32,
+                      frame_type: Address, dst_pan: Address,
+                      dst_addr: Address, src_addr: Address,
+                      payload: Address, payload_len: Address) -> u32 {
+    if frame_len < 3 {
+        return 1;
+    }
+
+    fc: u32 = ieee_load_u16_le(frame, 0);
+    ftype: u32 = fc & 7;
+    pan_comp: u32 = (fc >> 6) & 1;
+    dst_mode: u32 = (fc >> 10) & 3;
+    src_mode: u32 = (fc >> 14) & 3;
+
+    ieee_store_u32_le(frame_type, 0, ftype);
+    ieee_store_u32_le(dst_pan, 0, 0);
+    ieee_memset(dst_addr, 0, 8);
+    ieee_memset(src_addr, 0, 8);
+
+    off: u32 = 3;  // after Frame Control + Seq Number
+
+    // --- Destination addressing ---
+    dst_present: u32 = 0;
+    if dst_mode == 2 {
+        dst_present = 1;
+    }
+    if dst_mode == 3 {
+        dst_present = 1;
+    }
+    if dst_present == 1 {
+        if off + 2 > frame_len {
+            return 2;
+        }
+        dpan: u32 = ieee_load_u16_le(frame, off);
+        ieee_store_u32_le(dst_pan, 0, dpan);
+        off = off + 2;
+        if dst_mode == 2 {
+            if off + 2 > frame_len {
+                return 2;
+            }
+            d0: u32 = *(frame + off);
+            d1: u32 = *(frame + off + 1);
+            *(dst_addr + 0) = d0;
+            *(dst_addr + 1) = d1;
+            off = off + 2;
+        } else {
+            if off + 8 > frame_len {
+                return 2;
+            }
+            k1: u32 = 0;
+            while k1 < 8 {
+                *(dst_addr + k1) = *(frame + off + k1);
+                k1 = k1 + 1;
+            }
+            off = off + 8;
+        }
+    }
+
+    // --- Source addressing ---
+    src_present: u32 = 0;
+    if src_mode == 2 {
+        src_present = 1;
+    }
+    if src_mode == 3 {
+        src_present = 1;
+    }
+    if src_present == 1 {
+        // src PAN is present unless PAN ID compression is set AND a dst is present
+        src_pan_present: u32 = 1;
+        if pan_comp == 1 {
+            if dst_present == 1 {
+                src_pan_present = 0;
+            }
+        }
+        if src_pan_present == 1 {
+            if off + 2 > frame_len {
+                return 3;
+            }
+            off = off + 2;
+        }
+        if src_mode == 2 {
+            if off + 2 > frame_len {
+                return 3;
+            }
+            s0: u32 = *(frame + off);
+            s1: u32 = *(frame + off + 1);
+            *(src_addr + 0) = s0;
+            *(src_addr + 1) = s1;
+            off = off + 2;
+        } else {
+            if off + 8 > frame_len {
+                return 3;
+            }
+            k2: u32 = 0;
+            while k2 < 8 {
+                *(src_addr + k2) = *(frame + off + k2);
+                k2 = k2 + 1;
+            }
+            off = off + 8;
+        }
+    }
+
+    ieee_store_addr_le(payload, 0, frame + off);
+    plen: u32 = frame_len - off;
+    ieee_store_u32_le(payload_len, 0, plen);
+    return 0;
+}
+
+// ===========================================================================
+// 5. ARP (RFC 826)
+// ===========================================================================
+// ARP packet (28 bytes, all multi-byte fields network order):
+//   htype(2)=1 || ptype(2)=0x0800 || hlen(1)=6 || plen(1)=4 || oper(2) ||
+//   sha(6) || spa(4) || tha(6) || tpa(4)
+//
+// IPv4 addresses are passed as u32 values in "network order as a number"
+// form: 192.168.1.1 is represented as 0xC0A80101 (most-significant byte =
+// first octet). They are serialized big-endian into the packet.
+
+fn arp_build_request(sender_ip: u32, target_ip: u32,
+                     sender_mac: Address, out: Address) -> u32 {
+    ieee_store_u16_be(out, 0, 1);           // htype = Ethernet
+    ieee_store_u16_be(out, 2, ETH_TYPE_IPV4); // ptype = IPv4
+    *(out + 4) = ETH_ADDR_LEN;             // hlen = 6
+    *(out + 5) = 4;                         // plen = 4
+    ieee_store_u16_be(out, 6, 1);           // oper = request
+    ieee_memcpy(out + 8, sender_mac, ETH_ADDR_LEN);  // sha
+    ieee_store_u32_be(out, 14, sender_ip);  // spa
+    ieee_memset(out + 18, 0, ETH_ADDR_LEN); // tha = 0
+    ieee_store_u32_be(out, 24, target_ip);  // tpa
+    return ARP_PKT_LEN;
+}
+
+fn arp_build_reply(sender_ip: u32, target_ip: u32,
+                   sender_mac: Address, target_mac: Address,
+                   out: Address) -> u32 {
+    ieee_store_u16_be(out, 0, 1);
+    ieee_store_u16_be(out, 2, ETH_TYPE_IPV4);
+    *(out + 4) = ETH_ADDR_LEN;
+    *(out + 5) = 4;
+    ieee_store_u16_be(out, 6, 2);           // oper = reply
+    ieee_memcpy(out + 8, sender_mac, ETH_ADDR_LEN);  // sha
+    ieee_store_u32_be(out, 14, sender_ip);  // spa
+    ieee_memcpy(out + 18, target_mac, ETH_ADDR_LEN); // tha
+    ieee_store_u32_be(out, 24, target_ip);  // tpa
+    return ARP_PKT_LEN;
+}
+
+// arp_parse extracts oper, sender/target MAC+IP. Outputs:
+//   oper        : 4 bytes (u32 LE)
+//   sender_mac  : 6 bytes
+//   sender_ip   : 4 bytes (u32 LE — network-order-as-number value)
+//   target_mac  : 6 bytes
+//   target_ip   : 4 bytes (u32 LE)
+// Returns 0 on success, 1 if the packet is too short.
+
+fn arp_parse(packet: Address, pkt_len: u32,
+             oper: Address, sender_mac: Address, sender_ip: Address,
+             target_mac: Address, target_ip: Address) -> u32 {
+    if pkt_len < ARP_PKT_LEN {
+        return 1;
+    }
+    o: u32 = ieee_load_u16_be(packet, 6);
+    ieee_store_u32_le(oper, 0, o);
+    ieee_memcpy(sender_mac, packet + 8, ETH_ADDR_LEN);
+    sip: u32 = ieee_load_u32_be(packet, 14);
+    ieee_store_u32_le(sender_ip, 0, sip);
+    ieee_memcpy(target_mac, packet + 18, ETH_ADDR_LEN);
+    tip: u32 = ieee_load_u32_be(packet, 24);
+    ieee_store_u32_le(target_ip, 0, tip);
+    return 0;
+}
+
+// ===========================================================================
+// 6. IPv4 Header (RFC 791)
+// ===========================================================================
+// Header layout (all multi-byte fields network order):
+//   ver/ihl(1) || tos(1) || total_len(2) || id(2) || flags/frag(2) ||
+//   ttl(1) || protocol(1) || checksum(2) || src_ip(4) || dst_ip(4) || [options]
+// ihl is the header length in 32-bit words (min 5 = 20 bytes).
+
+fn ipv4_parse_header(buf: Address, buf_len: u32,
+                     version: Address, ihl: Address,
+                     total_len: Address, protocol: Address,
+                     src_ip: Address, dst_ip: Address,
+                     payload: Address, payload_len: Address) -> u32 {
+    if buf_len < IPV4_MIN_HEADER_LEN {
+        return 1;
+    }
+    b0: u32 = *(buf + 0);
+    ver: u32 = (b0 >> 4) & 15;
+    h: u32 = b0 & 15;
+    ieee_store_u32_le(version, 0, ver);
+    ieee_store_u32_le(ihl, 0, h);
+
+    tlen: u32 = ieee_load_u16_be(buf, 2);
+    ieee_store_u32_le(total_len, 0, tlen);
+
+    proto: u32 = *(buf + 9);
+    ieee_store_u32_le(protocol, 0, proto);
+
+    sip: u32 = ieee_load_u32_be(buf, 12);
+    ieee_store_u32_le(src_ip, 0, sip);
+    dip: u32 = ieee_load_u32_be(buf, 16);
+    ieee_store_u32_le(dst_ip, 0, dip);
+
+    hdr_len: u32 = h * 4;
+    if hdr_len < IPV4_MIN_HEADER_LEN {
+        return 2;
+    }
+    if hdr_len > buf_len {
+        return 2;
+    }
+    ieee_store_addr_le(payload, 0, buf + hdr_len);
+
+    if tlen < hdr_len {
+        return 3;
+    }
+    plen: u32 = tlen - hdr_len;
+    ieee_store_u32_le(payload_len, 0, plen);
+    return 0;
+}
+
+// ipv4_build_header writes a minimal 20-byte IPv4 header (no options) into
+// `out` (at least 20 bytes). total_len = 20 + payload_len. The header
+// checksum is computed and stored. Returns 20, or 0 if payload_len is so
+// large that total_len would overflow 16 bits.
+
+fn ipv4_build_header(src_ip: u32, dst_ip: u32, protocol: u32,
+                     payload_len: u32, ttl: u32, out: Address) -> u32 {
+    tlen: u32 = IPV4_MIN_HEADER_LEN + payload_len;
+    if tlen > 65535 {
+        return 0;
+    }
+
+    *(out + 0) = ((4 << 4) | 5) & 255;     // version=4, ihl=5
+    *(out + 1) = 0;                         // tos
+    ieee_store_u16_be(out, 2, tlen);        // total length
+    ieee_store_u16_be(out, 4, 0);           // identification
+    ieee_store_u16_be(out, 6, 0);           // flags + fragment offset
+    *(out + 8) = ttl & 255;                 // ttl
+    *(out + 9) = protocol & 255;            // protocol
+    ieee_store_u16_be(out, 10, 0);          // checksum = 0 during computation
+    ieee_store_u32_be(out, 12, src_ip);     // source IP
+    ieee_store_u32_be(out, 16, dst_ip);     // destination IP
+
+    cksum: u16 = ipv4_checksum(out, IPV4_MIN_HEADER_LEN);
+    ieee_store_u16_be(out, 10, cksum as u32);
+    return IPV4_MIN_HEADER_LEN;
+}
+
+// ipv4_checksum computes the Internet checksum (RFC 1071) — the one's
+// complement of the one's complement sum of all 16-bit words — over
+// `header_len` bytes. header_len is assumed even (IPv4 headers always are
+// since ihl counts 32-bit words); an odd trailing byte is padded with zero.
+// When computing the checksum for a header, the checksum field itself must
+// be zero in the input. The same routine is reused for ICMP checksums.
+
+fn ipv4_checksum(header: Address, header_len: u32) -> u16 {
+    sum: u32 = 0;
+    i: u32 = 0;
+    while i + 1 < header_len {
+        w: u32 = ieee_load_u16_be(header, i);
+        sum = (sum + w) & 4294967295;
+        i = i + 2;
+    }
+    if i < header_len {
+        b: u32 = *(header + i);
+        sum = (sum + (b << 8)) & 4294967295;
+    }
+    // Fold 16-bit carries until none remain.
+    while (sum >> 16) != 0 {
+        hi: u32 = sum >> 16;
+        lo: u32 = sum & 65535;
+        sum = (hi + lo) & 4294967295;
+    }
+    result: u32 = (sum ^ 4294967295) & 65535;
+    return result as u16;
+}
+
+// ===========================================================================
+// 7. ICMP (RFC 792)
+// ===========================================================================
+// ICMP Echo Request/Reply layout:
+//   type(1) || code(1) || checksum(2) || id(2) || seq(2) || data(data_len)
+// For an Echo Request type=8/code=0; for an Echo Reply type=0/code=0.
+// The checksum covers the whole ICMP message (with the checksum field zero
+// during computation). Multi-byte fields are network order.
+
+fn icmp_build_echo(id: u16, seq: u16, data: Address, data_len: u32,
+                   out: Address) -> u32 {
+    *(out + 0) = 8;                          // type = Echo Request
+    *(out + 1) = 0;                          // code
+    ieee_store_u16_be(out, 2, 0);            // checksum = 0 during computation
+    ieee_store_u16_be(out, 4, id as u32);    // identifier
+    ieee_store_u16_be(out, 6, seq as u32);   // sequence number
+
+    i: u32 = 0;
+    while i < data_len {
+        *(out + ICMP_HEADER_LEN + i) = *(data + i);
+        i = i + 1;
+    }
+
+    total: u32 = ICMP_HEADER_LEN + data_len;
+    cksum: u16 = ipv4_checksum(out, total);
+    ieee_store_u16_be(out, 2, cksum as u32);
+    return total;
+}
+
+// icmp_parse extracts type, code, id and seq from an ICMP message. Outputs:
+//   type : 4 bytes (u32 LE)
+//   code : 4 bytes (u32 LE)
+//   id   : 4 bytes (u32 LE)
+//   seq  : 4 bytes (u32 LE)
+// Returns 0 on success, 1 if the buffer is too short to hold the 8-byte
+// ICMP header.
+
+fn icmp_parse(buf: Address, buf_len: u32,
+              type: Address, code: Address,
+              id: Address, seq: Address) -> u32 {
+    if buf_len < ICMP_HEADER_LEN {
+        return 1;
+    }
+    t: u32 = *(buf + 0);
+    c: u32 = *(buf + 1);
+    i: u32 = ieee_load_u16_be(buf, 4);
+    s: u32 = ieee_load_u16_be(buf, 6);
+    ieee_store_u32_le(type, 0, t);
+    ieee_store_u32_le(code, 0, c);
+    ieee_store_u32_le(id, 0, i);
+    ieee_store_u32_le(seq, 0, s);
+    return 0;
+}

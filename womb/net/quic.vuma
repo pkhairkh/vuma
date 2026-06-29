@@ -1,0 +1,1027 @@
+// womb/net/quic.vuma — QUIC Protocol (RFC 9000, RFC 9001, RFC 9002)
+// No main() — importable library module.
+//
+// Implements a simplified QUIC v1 stack:
+//   1. Long-header Initial packet build/parse (RFC 9000 §17)
+//   2. Variable-length integer encoding (RFC 9000 §16)
+//   3. Transport parameters encode/decode (RFC 9000 §18)
+//   4. Initial key derivation via HKDF-Expand-Label (RFC 9001 §5.2)
+//   5. Packet protection (AEAD + header protection) (RFC 9001 §5.4)
+//   6. Connection state (create/free/send/recv over UDP)
+//   7. Flow control (max-data / consumed-data accounting)
+//
+// ===========================================================================
+// Assumed crypto primitives (provided by sibling library modules, called
+// directly — same convention as tls13.vuma):
+//
+//   sha256_oneshot(msg: Address, msg_len: u32, out: Address)
+//       Compute SHA-256 over msg[0..msg_len], write 32-byte digest to `out`.
+//
+//   hkdf_expand_sha256(prk: Address, info: Address, info_len: u32,
+//                      okm: Address, okm_len: u32)
+//       HKDF-Expand (RFC 5869 §2.3) using HMAC-SHA256.
+//
+//   aes256_gcm_encrypt(plaintext: Address, pt_len: u32, key: Address,
+//                      iv: Address, aad: Address, aad_len: u32,
+//                      ciphertext: Address, tag: Address) -> u32
+//       AES-256-GCM AEAD encryption; returns ct_len (== pt_len); 16-byte tag.
+//
+//   ecdh_p256_shared_secret(privkey: Address, peerpub: Address, out: Address)
+//       P-256 ECDH shared secret (used by the 1-RTT handshake path; available
+//       but not exercised by the Initial-only simplified send/recv path).
+//
+// Companion AES primitives (part of the same AES library that provides
+// aes256_gcm_encrypt; required by RFC 9001 §5.4):
+//
+//   aes256_gcm_decrypt(ciphertext: Address, ct_len: u32, key: Address,
+//                      iv: Address, aad: Address, aad_len: u32,
+//                      plaintext: Address, tag: Address) -> u32
+//       AES-256-GCM AEAD decryption with tag verification; returns pt_len on
+//       success, 0 on authentication failure. (Natural companion to the
+//       assumed aes256_gcm_encrypt — every GCM library provides both.)
+//
+//   aes256_encrypt_block(in: Address, key: Address, out: Address)
+//       Raw AES-256 single-block (ECB) encryption of one 16-byte block. Used
+//       for QUIC header protection mask derivation (RFC 9001 §5.4.3), which
+//       fundamentally requires AES-ECB of the 16-byte sample — this cannot be
+//       reproduced through the GCM interface.
+//
+// ===========================================================================
+// Syscalls (UDP datagram I/O) are declared via extern "C".
+
+extern "C" {
+    fn socket(domain: i64, sock_type: i64, protocol: i64) -> i64;
+    fn sendto(sockfd: i64, buf: Address, len: i64, flags: i64, dest_addr: Address, addrlen: i64) -> i64;
+    fn recvfrom(sockfd: i64, buf: Address, len: i64, flags: i64, src_addr: Address, addrlen: Address) -> i64;
+    fn close(fd: i64) -> i64;
+}
+
+// ===========================================================================
+// Constants
+// ===========================================================================
+
+const QUIC_V1: u32 = 1;                 // QUIC version 1 (0x00000001)
+const QUIC_GCM_TAG_LEN: u32 = 16;       // AES-256-GCM tag length
+const QUIC_IV_LEN: u32 = 12;            // QUIC packet-protection IV length
+const QUIC_KEY_LEN: u32 = 32;           // AES-256 key length
+const QUIC_HP_LEN: u32 = 32;            // header-protection key length
+const QUIC_SALT_LEN: u32 = 20;          // initial-salt length
+
+const AF_INET: i64 = 2;
+const SOCK_DGRAM: i64 = 2;
+const IPPROTO_UDP: i64 = 17;
+
+// Long-header packet types (encoded in bits 4-5 of the first byte)
+const QUIC_PKT_INITIAL: u32 = 0;
+const QUIC_PKT_0RTT: u32 = 1;
+const QUIC_PKT_HANDSHAKE: u32 = 2;
+const QUIC_PKT_RETRY: u32 = 3;
+
+// Transport-parameter identifiers (RFC 9000 §18.2)
+const TP_MAX_IDLE_TIMEOUT: u64 = 1;
+const TP_MAX_UDP_PAYLOAD: u64 = 3;
+const TP_INITIAL_MAX_DATA: u64 = 4;
+const TP_INITIAL_MAX_STREAMS_BIDI: u64 = 8;
+const TP_INITIAL_MAX_STREAMS_UNI: u64 = 9;
+
+// Connection states
+const CONN_STATE_INIT: u32 = 0;
+const CONN_STATE_HANDSHAKE: u32 = 1;
+const CONN_STATE_ESTABLISHED: u32 = 2;
+const CONN_STATE_CLOSED: u32 = 3;
+
+// ===========================================================================
+// Connection state layout (offsets, in bytes).
+// All multi-byte fields are stored big-endian via the byte-level helpers
+// below, so alignment is irrelevant.
+//   [  0.. 31] DCID (up to 32 bytes)
+//   [ 32]      DCID length
+//   [ 33.. 64] SCID (up to 32 bytes)
+//   [ 65]      SCID length
+//   [ 66.. 97] client_initial_key (32)
+//   [ 98..109] client_initial_iv  (12)
+//   [110..141] client_initial_hp  (32)
+//   [142..173] server_initial_key (32)
+//   [174..185] server_initial_iv  (12)
+//   [186..217] server_initial_hp  (32)
+//   [218..249] client_1rtt_key    (32)
+//   [250..261] client_1rtt_iv     (12)
+//   [262..293] client_1rtt_hp     (32)
+//   [294..325] server_1rtt_key    (32)
+//   [326..337] server_1rtt_iv     (12)
+//   [338..369] server_1rtt_hp     (32)
+//   [370..401] initial_secret     (32)
+//   [402..409] next_send_pn       (u64)
+//   [410..417] next_recv_pn       (u64)
+//   [418..425] max_data           (u64)  flow-control window
+//   [426..433] consumed_data      (u64)  bytes sent/received against window
+//   [434..441] max_idle_timeout   (u64, ms)
+//   [442..449] max_udp_payload    (u64)
+//   [450..453] socket_fd          (u32)
+//   [454..457] state              (u32)
+//   [458..461] is_client          (u32)
+//   [462..477] peer sockaddr_in   (16)
+//   [478..493] local sockaddr_in  (16)
+const OFF_CONN_DCID: u32 = 0;
+const OFF_CONN_DCID_LEN: u32 = 32;
+const OFF_CONN_SCID: u32 = 33;
+const OFF_CONN_SCID_LEN: u32 = 65;
+const OFF_CONN_CI_KEY: u32 = 66;
+const OFF_CONN_CI_IV: u32 = 98;
+const OFF_CONN_CI_HP: u32 = 110;
+const OFF_CONN_SI_KEY: u32 = 142;
+const OFF_CONN_SI_IV: u32 = 174;
+const OFF_CONN_SI_HP: u32 = 186;
+const OFF_CONN_CA_KEY: u32 = 218;
+const OFF_CONN_CA_IV: u32 = 250;
+const OFF_CONN_CA_HP: u32 = 262;
+const OFF_CONN_SA_KEY: u32 = 294;
+const OFF_CONN_SA_IV: u32 = 326;
+const OFF_CONN_SA_HP: u32 = 338;
+const OFF_CONN_INIT_SECRET: u32 = 370;
+const OFF_CONN_NEXT_PN: u32 = 402;
+const OFF_CONN_NEXT_RECV_PN: u32 = 410;
+const OFF_CONN_MAX_DATA: u32 = 418;
+const OFF_CONN_CONSUMED: u32 = 426;
+const OFF_CONN_MAX_IDLE: u32 = 434;
+const OFF_CONN_MAX_UDP: u32 = 442;
+const OFF_CONN_FD: u32 = 450;
+const OFF_CONN_STATE: u32 = 454;
+const OFF_CONN_IS_CLIENT: u32 = 458;
+const OFF_CONN_PEER_ADDR: u32 = 462;
+const OFF_CONN_LOCAL_ADDR: u32 = 478;
+const CONN_SIZE: u32 = 512;
+
+// ===========================================================================
+// Byte-level big-endian store/load helpers.
+// ===========================================================================
+
+fn quic_store_u16(addr: Address, val: u32) {
+    *(addr + 0) = (val >> 8) & 255;
+    *(addr + 1) = val & 255;
+}
+
+fn quic_load_u16(addr: Address) -> u32 {
+    b0: u32 = *(addr + 0);
+    b1: u32 = *(addr + 1);
+    return (((b0 << 8) | b1) & 65535);
+}
+
+fn quic_store_u32(addr: Address, val: u32) {
+    *(addr + 0) = (val >> 24) & 255;
+    *(addr + 1) = (val >> 16) & 255;
+    *(addr + 2) = (val >> 8) & 255;
+    *(addr + 3) = val & 255;
+}
+
+fn quic_load_u32(addr: Address) -> u32 {
+    b0: u32 = *(addr + 0);
+    b1: u32 = *(addr + 1);
+    b2: u32 = *(addr + 2);
+    b3: u32 = *(addr + 3);
+    return (((b0 << 24) | (b1 << 16) | (b2 << 8) | b3) & 4294967295);
+}
+
+fn quic_store_u64(addr: Address, val: u64) {
+    *(addr + 0) = (val >> 56) & 255;
+    *(addr + 1) = (val >> 48) & 255;
+    *(addr + 2) = (val >> 40) & 255;
+    *(addr + 3) = (val >> 32) & 255;
+    *(addr + 4) = (val >> 24) & 255;
+    *(addr + 5) = (val >> 16) & 255;
+    *(addr + 6) = (val >> 8) & 255;
+    *(addr + 7) = val & 255;
+}
+
+fn quic_load_u64(addr: Address) -> u64 {
+    t0: u32 = *(addr + 0);
+    t1: u32 = *(addr + 1);
+    t2: u32 = *(addr + 2);
+    t3: u32 = *(addr + 3);
+    t4: u32 = *(addr + 4);
+    t5: u32 = *(addr + 5);
+    t6: u32 = *(addr + 6);
+    t7: u32 = *(addr + 7);
+    b0: u64 = t0;
+    b1: u64 = t1;
+    b2: u64 = t2;
+    b3: u64 = t3;
+    b4: u64 = t4;
+    b5: u64 = t5;
+    b6: u64 = t6;
+    b7: u64 = t7;
+    return (b0 << 56) | (b1 << 48) | (b2 << 40) | (b3 << 32) | (b4 << 24) | (b5 << 16) | (b6 << 8) | b7;
+}
+
+// ===========================================================================
+// HMAC-SHA256 and HKDF-Extract (RFC 5869 §2.2).
+// HKDF-Extract(salt, IKM) = HMAC-Hash(salt, IKM). HMAC is built from
+// sha256_oneshot so the module only depends on the assumed primitives.
+// ===========================================================================
+
+fn quic_hmac_sha256(key: Address, key_len: u32, msg: Address, msg_len: u32, out: Address) {
+    // K' = key padded with zeros to the SHA-256 block size (64 bytes).
+    // (Salt and CID are both < 64 bytes, so no key hashing is required.)
+    kpad = allocate(64);
+    i: u32 = 0;
+    while i < 64 { *(kpad + i) = 0; i = i + 1; }
+    i = 0;
+    while i < key_len { *(kpad + i) = *(key + i); i = i + 1; }
+
+    // inner = SHA256( (K' XOR 0x36) || msg )
+    inner_in = allocate(64 + msg_len);
+    i = 0;
+    while i < 64 { *(inner_in + i) = (*(kpad + i) ^ 0x36) & 255; i = i + 1; }
+    i = 0;
+    while i < msg_len { *(inner_in + 64 + i) = *(msg + i); i = i + 1; }
+    inner_hash = allocate(32);
+    sha256_oneshot(inner_in, 64 + msg_len, inner_hash);
+
+    // HMAC = SHA256( (K' XOR 0x5c) || inner )
+    outer_in = allocate(96);
+    i = 0;
+    while i < 64 { *(outer_in + i) = (*(kpad + i) ^ 0x5c) & 255; i = i + 1; }
+    i = 0;
+    while i < 32 { *(outer_in + 64 + i) = *(inner_hash + i); i = i + 1; }
+    sha256_oneshot(outer_in, 96, out);
+
+    free(kpad); free(inner_in); free(inner_hash); free(outer_in);
+}
+
+fn quic_hkdf_extract(salt: Address, salt_len: u32, ikm: Address, ikm_len: u32, prk: Address) {
+    quic_hmac_sha256(salt, salt_len, ikm, ikm_len, prk);
+}
+
+// HKDF-Expand-Label (RFC 8446 §7.1, reused by QUIC RFC 9001 §5.1):
+//   HkdfLabel = struct { uint16 length; opaque label<7..255>; opaque context<0..255>; }
+//   label = "tls13 " + Label
+//   HKDF-Expand-Label(Secret, Label, Context, Length) = HKDF-Expand(Secret, HkdfLabel, Length)
+fn quic_hkdf_expand_label(secret: Address, label: Address, label_len: u32, context: Address, context_len: u32, out: Address, out_len: u32) {
+    full_label_len: u32 = 6 + label_len;                  // "tls13 " + label
+    hkdf_label_len: u32 = 2 + 1 + full_label_len + 1 + context_len;
+    hkdf_label = allocate(hkdf_label_len);
+
+    // uint16 length (big-endian)
+    *(hkdf_label + 0) = (out_len >> 8) & 255;
+    *(hkdf_label + 1) = out_len & 255;
+    // label length (one byte)
+    *(hkdf_label + 2) = full_label_len & 255;
+    // "tls13 " (6 bytes: 0x74 0x6c 0x73 0x31 0x33 0x20)
+    *(hkdf_label + 3) = 0x74; *(hkdf_label + 4) = 0x6c; *(hkdf_label + 5) = 0x73;
+    *(hkdf_label + 6) = 0x31; *(hkdf_label + 7) = 0x33; *(hkdf_label + 8) = 0x20;
+    // label bytes
+    i: u32 = 0;
+    while i < label_len { *(hkdf_label + 9 + i) = *(label + i); i = i + 1; }
+    // context length (one byte)
+    *(hkdf_label + 9 + label_len) = context_len & 255;
+    // context bytes
+    i = 0;
+    while i < context_len { *(hkdf_label + 10 + label_len + i) = *(context + i); i = i + 1; }
+
+    hkdf_expand_sha256(secret, hkdf_label, hkdf_label_len, out, out_len);
+    free(hkdf_label);
+}
+
+// ===========================================================================
+// Variable-Length Integer Encoding (RFC 9000 §16)
+//
+//   2-bit tag in the first byte's MSBs selects the encoding width:
+//     00 -> 1 byte  ( 6 bits, max 63)
+//     01 -> 2 bytes (14 bits, max 16383)
+//     10 -> 4 bytes (30 bits, max 1073741823)
+//     11 -> 8 bytes (62 bits, max 2^62 - 1)
+// ===========================================================================
+
+// Returns 1/2/4/8 — the number of bytes the value would occupy.
+fn quic_varint_byte_len_for_value(val: u64) -> u32 {
+    if val <= 63 { return 1; }
+    if val <= 16383 { return 2; }
+    if val <= 1073741823 { return 4; }
+    return 8;
+}
+
+// Number of bytes occupied by the varint currently stored at buf[offset],
+// determined from the first byte's two MSBs.
+fn quic_varint_len(buf: Address, offset: u32) -> u32 {
+    first: u32 = *(buf + offset);
+    return 1 << ((first >> 6) & 3);
+}
+
+// Encode val at buf[offset]. Returns the number of bytes written (1/2/4/8).
+fn quic_encode_varint(buf: Address, offset: u32, val: u64) -> u32 {
+    if val <= 63 {
+        *(buf + offset) = val & 255;
+        return 1;
+    }
+    if val <= 16383 {
+        *(buf + offset)     = (0x40 | ((val >> 8) & 0x3f)) & 255;
+        *(buf + offset + 1) = val & 255;
+        return 2;
+    }
+    if val <= 1073741823 {
+        *(buf + offset)     = (0x80 | ((val >> 24) & 0x3f)) & 255;
+        *(buf + offset + 1) = (val >> 16) & 255;
+        *(buf + offset + 2) = (val >> 8) & 255;
+        *(buf + offset + 3) = val & 255;
+        return 4;
+    }
+    // 8-byte encoding (62-bit value)
+    *(buf + offset)     = (0xC0 | ((val >> 56) & 0x3f)) & 255;
+    *(buf + offset + 1) = (val >> 48) & 255;
+    *(buf + offset + 2) = (val >> 40) & 255;
+    *(buf + offset + 3) = (val >> 32) & 255;
+    *(buf + offset + 4) = (val >> 24) & 255;
+    *(buf + offset + 5) = (val >> 16) & 255;
+    *(buf + offset + 6) = (val >> 8) & 255;
+    *(buf + offset + 7) = val & 255;
+    return 8;
+}
+
+// Decode the varint at buf[offset] and return its value.
+// (The signature returns only the value; callers advance the offset by
+// quic_varint_len(buf, offset) bytes.)
+fn quic_decode_varint(buf: Address, offset: u32) -> u64 {
+    first: u32 = *(buf + offset);
+    tag: u32 = (first >> 6) & 3;
+    if tag == 0 {
+        v: u64 = first & 63;
+        return v;
+    }
+    if tag == 1 {
+        b0: u64 = first & 63;
+        b1: u64 = *(buf + offset + 1);
+        return (b0 << 8) | b1;
+    }
+    if tag == 2 {
+        b0: u64 = first & 63;
+        b1: u64 = *(buf + offset + 1);
+        b2: u64 = *(buf + offset + 2);
+        b3: u64 = *(buf + offset + 3);
+        return (b0 << 24) | (b1 << 16) | (b2 << 8) | b3;
+    }
+    // tag == 3 : 8-byte (62-bit) encoding
+    b0: u64 = first & 63;
+    b1: u64 = *(buf + offset + 1);
+    b2: u64 = *(buf + offset + 2);
+    b3: u64 = *(buf + offset + 3);
+    b4: u64 = *(buf + offset + 4);
+    b5: u64 = *(buf + offset + 5);
+    b6: u64 = *(buf + offset + 6);
+    b7: u64 = *(buf + offset + 7);
+    return (b0 << 56) | (b1 << 48) | (b2 << 40) | (b3 << 32) | (b4 << 24) | (b5 << 16) | (b6 << 8) | b7;
+}
+
+// ===========================================================================
+// Packet Format — Long Header (Initial) (RFC 9000 §17.2)
+//
+//   first byte: 1(form) | 1(fixed) | 2(type) | 2(reserved) | 2(pn_length-1)
+//   version (4 bytes, big-endian)
+//   DCID length (1 byte) || DCID
+//   SCID length (1 byte) || SCID
+//   token length (varint) || token
+//   length (varint) = pn_length + payload_length
+//   packet number (pn_length bytes, big-endian)
+//   payload ...
+// ===========================================================================
+
+// Choose the minimum packet-number field width (1..4 bytes) for a given PN.
+fn quic_pn_length(pn: u64) -> u32 {
+    pn_length: u32 = 4;
+    if pn < 16777216 { pn_length = 3; }   // < 2^24
+    if pn < 65536 { pn_length = 2; }       // < 2^16
+    if pn < 256 { pn_length = 1; }         // < 2^8
+    return pn_length;
+}
+
+// Build an Initial long-header at buf[0..]. payload_len is the number of bytes
+// that will follow the packet-number field on the wire (plaintext payload;
+// for encrypted packets the caller passes plaintext_len + 16 to account for
+// the AEAD tag, so the Length field matches the on-wire remainder).
+// Returns the header length (= offset where the payload begins).
+fn quic_build_initial_header(buf: Address, dcid: Address, dcid_len: u32, scid: Address, scid_len: u32, token: Address, token_len: u32, packet_num: u64, payload_len: u32) -> u32 {
+    pn_length: u32 = quic_pn_length(packet_num);
+
+    // First byte: form=1, fixed=1, type=0 (Initial), reserved=0, pn_length-1
+    *(buf + 0) = (0xC0 | ((pn_length - 1) & 3)) & 255;
+
+    // Version (QUIC v1 = 1, big-endian)
+    *(buf + 1) = 0; *(buf + 2) = 0; *(buf + 3) = 0; *(buf + 4) = 1;
+
+    // DCID
+    pos: u32 = 5;
+    *(buf + pos) = dcid_len & 255; pos = pos + 1;
+    i: u32 = 0;
+    while i < dcid_len { *(buf + pos + i) = *(dcid + i); i = i + 1; }
+    pos = pos + dcid_len;
+
+    // SCID
+    *(buf + pos) = scid_len & 255; pos = pos + 1;
+    i = 0;
+    while i < scid_len { *(buf + pos + i) = *(scid + i); i = i + 1; }
+    pos = pos + scid_len;
+
+    // Token length (varint) + token bytes
+    pos = pos + quic_encode_varint(buf, pos, token_len);
+    i = 0;
+    while i < token_len { *(buf + pos + i) = *(token + i); i = i + 1; }
+    pos = pos + token_len;
+
+    // Length (varint) = pn_length + payload_len
+    length_val: u64 = (pn_length + payload_len) & 4294967295;
+    pos = pos + quic_encode_varint(buf, pos, length_val);
+
+    // Packet number (pn_length bytes, big-endian)
+    pn_pos: u32 = pos;
+    i = 0;
+    while i < pn_length {
+        shift: u32 = (pn_length - 1 - i) * 8;
+        *(buf + pn_pos + i) = ((packet_num >> shift) & 255) & 255;
+        i = i + 1;
+    }
+    pos = pos + pn_length;
+
+    return pos;
+}
+
+// Parse a long header from buf[0..buf_len].
+// Outputs (each written to the caller-provided Address):
+//   *type        : 1 byte — packet type (bits 4-5 of the first byte)
+//   *version     : 4 bytes big-endian
+//   *dcid_len    : 1 byte ; *dcid : dcid_len bytes copied
+//   *scid_len    : 1 byte ; *scid : scid_len bytes copied
+// Returns the packet-number offset (pn_offset) on success, or 0 on error
+// (short header, truncated, or Retry which carries no packet number).
+fn quic_parse_header(buf: Address, buf_len: u32, type: Address, version: Address, dcid: Address, dcid_len: Address, scid: Address, scid_len: Address) -> u32 {
+    if buf_len < 7 { return 0; }
+    first: u32 = *(buf);
+    // Only long headers are handled here.
+    if (first & 128) == 0 { return 0; }
+
+    // Packet type (bits 4-5 — not protected)
+    ptype: u32 = (first >> 4) & 3;
+    *type = ptype & 255;
+
+    // Version (4 bytes big-endian)
+    *(version + 0) = *(buf + 1);
+    *(version + 1) = *(buf + 2);
+    *(version + 2) = *(buf + 3);
+    *(version + 3) = *(buf + 4);
+
+    // DCID
+    dlen: u32 = *(buf + 5);
+    *dcid_len = dlen & 255;
+    i: u32 = 0;
+    while i < dlen { *(dcid + i) = *(buf + 6 + i); i = i + 1; }
+    pos: u32 = 6 + dlen;
+    if pos + 1 > buf_len { return 0; }
+
+    // SCID
+    slen: u32 = *(buf + pos);
+    *scid_len = slen & 255;
+    pos = pos + 1;
+    i = 0;
+    while i < slen { *(scid + i) = *(buf + pos + i); i = i + 1; }
+    pos = pos + slen;
+
+    // Initial (type 0) and 0-RTT (type 1) carry a token field; Handshake (2)
+    // does not. Retry (3) has no Length/PN — bail out.
+    if ptype == 3 { return 0; }
+    if ptype == 0 {
+        // token length (varint) + token bytes
+        tok_val: u64 = quic_decode_varint(buf, pos);
+        pos = pos + quic_varint_len(buf, pos);
+        ti: u64 = 0;
+        while ti < tok_val { pos = pos + 1; ti = ti + 1; }
+    }
+
+    if pos >= buf_len { return 0; }
+    // Length (varint) — skip it (the remainder length is not needed to locate
+    // the packet number, which starts immediately after the Length field).
+    pos = pos + quic_varint_len(buf, pos);
+
+    return pos;
+}
+
+// ===========================================================================
+// Transport Parameters (RFC 9000 §18)
+//
+// Each parameter: ID (varint) | length (varint) | value (length bytes).
+// The values handled here are themselves varint-encoded u64s.
+//
+// Decoded parameter block (written to `params`):
+//   [ 0.. 7] max_idle_timeout
+//   [ 8..15] max_udp_payload
+//   [16..23] initial_max_data
+//   [24..31] initial_max_streams_bidi
+//   [32..39] initial_max_streams_uni
+// ===========================================================================
+
+fn quic_encode_tp(buf: Address, max_idle_timeout: u64, max_udp_payload: u64, initial_max_data: u64, initial_max_streams_bidi: u64, initial_max_streams_uni: u64) -> u32 {
+    pos: u32 = 0;
+    vlen: u32 = 0;
+
+    // max_idle_timeout (id = 1)
+    vlen = quic_varint_byte_len_for_value(max_idle_timeout);
+    pos = pos + quic_encode_varint(buf, pos, TP_MAX_IDLE_TIMEOUT);
+    pos = pos + quic_encode_varint(buf, pos, vlen);
+    pos = pos + quic_encode_varint(buf, pos, max_idle_timeout);
+
+    // max_udp_payload (id = 3)
+    vlen = quic_varint_byte_len_for_value(max_udp_payload);
+    pos = pos + quic_encode_varint(buf, pos, TP_MAX_UDP_PAYLOAD);
+    pos = pos + quic_encode_varint(buf, pos, vlen);
+    pos = pos + quic_encode_varint(buf, pos, max_udp_payload);
+
+    // initial_max_data (id = 4)
+    vlen = quic_varint_byte_len_for_value(initial_max_data);
+    pos = pos + quic_encode_varint(buf, pos, TP_INITIAL_MAX_DATA);
+    pos = pos + quic_encode_varint(buf, pos, vlen);
+    pos = pos + quic_encode_varint(buf, pos, initial_max_data);
+
+    // initial_max_streams_bidi (id = 8)
+    vlen = quic_varint_byte_len_for_value(initial_max_streams_bidi);
+    pos = pos + quic_encode_varint(buf, pos, TP_INITIAL_MAX_STREAMS_BIDI);
+    pos = pos + quic_encode_varint(buf, pos, vlen);
+    pos = pos + quic_encode_varint(buf, pos, initial_max_streams_bidi);
+
+    // initial_max_streams_uni (id = 9)
+    vlen = quic_varint_byte_len_for_value(initial_max_streams_uni);
+    pos = pos + quic_encode_varint(buf, pos, TP_INITIAL_MAX_STREAMS_UNI);
+    pos = pos + quic_encode_varint(buf, pos, vlen);
+    pos = pos + quic_encode_varint(buf, pos, initial_max_streams_uni);
+
+    return pos;
+}
+
+// Decode a transport-parameter block. Returns 1 on success, 0 on error.
+// Recognised parameters are written into the `params` block described above;
+// unrecognised parameters are skipped.
+fn quic_decode_tp(buf: Address, buf_len: u32, params: Address) -> u32 {
+    // Zero the recognised-parameter block first.
+    i: u32 = 0;
+    while i < 40 { *(params + i) = 0; i = i + 1; }
+
+    pos: u32 = 0;
+    while pos < buf_len {
+        if pos >= buf_len { break; }
+        id: u64 = quic_decode_varint(buf, pos);
+        pos = pos + quic_varint_len(buf, pos);
+        if pos >= buf_len { return 0; }
+        plen_val: u64 = quic_decode_varint(buf, pos);
+        plen: u32 = quic_varint_len(buf, pos);
+        pos = pos + plen;
+        // plen_val fits in a u32 for any real parameter.
+        plen_u32: u32 = 0;
+        // Skip token-style conversion: walk plen_val bytes via a u64 counter.
+        if pos + plen_val > buf_len { return 0; }
+
+        // Value is itself a varint for the parameters we recognise.
+        if id == TP_MAX_IDLE_TIMEOUT {
+            quic_store_u64(params + 0, quic_decode_varint(buf, pos));
+        } else {
+            if id == TP_MAX_UDP_PAYLOAD {
+                quic_store_u64(params + 8, quic_decode_varint(buf, pos));
+            } else {
+                if id == TP_INITIAL_MAX_DATA {
+                    quic_store_u64(params + 16, quic_decode_varint(buf, pos));
+                } else {
+                    if id == TP_INITIAL_MAX_STREAMS_BIDI {
+                        quic_store_u64(params + 24, quic_decode_varint(buf, pos));
+                    } else {
+                        if id == TP_INITIAL_MAX_STREAMS_UNI {
+                            quic_store_u64(params + 32, quic_decode_varint(buf, pos));
+                        }
+                    }
+                }
+            }
+        }
+        // Advance past the value.
+        vskip: u64 = 0;
+        while vskip < plen_val { pos = pos + 1; vskip = vskip + 1; }
+    }
+    return 1;
+}
+
+// ===========================================================================
+// Initial Key Derivation (RFC 9001 §5.2)
+//
+//   salt              = 0x38762cf7f55934b34d179ae6a4c80cadccbb7f0a
+//   initial_secret    = HKDF-Extract(salt, connection_id)
+//   client_init_secret= HKDF-Expand-Label(initial_secret, "client in", "", 32)
+//   key               = HKDF-Expand-Label(client_init_secret, "quic key", "", 32)
+//   iv                = HKDF-Expand-Label(client_init_secret, "quic iv",  "", 12)
+//   hp                = HKDF-Expand-Label(client_init_secret, "quic hp",  "", 32)
+// ===========================================================================
+
+fn quic_initial_keys(connection_id: Address, cid_len: u32, client_initial_key: Address, client_initial_iv: Address, client_initial_hp: Address) {
+    // Initial salt (20 bytes): 0x38762cf7f55934b34d179ae6a4c80cadccbb7f0a
+    salt = allocate(QUIC_SALT_LEN);
+    *(salt + 0)  = 0x38; *(salt + 1)  = 0x76; *(salt + 2)  = 0x2c; *(salt + 3)  = 0xf7;
+    *(salt + 4)  = 0xf5; *(salt + 5)  = 0x59; *(salt + 6)  = 0x34; *(salt + 7)  = 0xb3;
+    *(salt + 8)  = 0x4d; *(salt + 9)  = 0x17; *(salt + 10) = 0x9a; *(salt + 11) = 0xe6;
+    *(salt + 12) = 0xa4; *(salt + 13) = 0xc8; *(salt + 14) = 0x0c; *(salt + 15) = 0xad;
+    *(salt + 16) = 0xcc; *(salt + 17) = 0xbb; *(salt + 18) = 0x7f; *(salt + 19) = 0x0a;
+
+    // initial_secret = HKDF-Extract(salt, connection_id)
+    initial_secret = allocate(QUIC_KEY_LEN);
+    quic_hkdf_extract(salt, QUIC_SALT_LEN, connection_id, cid_len, initial_secret);
+
+    // Label buffers: "client in" (9), "quic key" (8), "quic iv" (7), "quic hp" (7)
+    lbl_client_in = allocate(9);
+    *(lbl_client_in + 0) = 0x63; *(lbl_client_in + 1) = 0x6c; *(lbl_client_in + 2) = 0x69;
+    *(lbl_client_in + 3) = 0x65; *(lbl_client_in + 4) = 0x6e; *(lbl_client_in + 5) = 0x74;
+    *(lbl_client_in + 6) = 0x20; *(lbl_client_in + 7) = 0x69; *(lbl_client_in + 8) = 0x6e;
+
+    lbl_quic_key = allocate(8);
+    *(lbl_quic_key + 0) = 0x71; *(lbl_quic_key + 1) = 0x75; *(lbl_quic_key + 2) = 0x69;
+    *(lbl_quic_key + 3) = 0x63; *(lbl_quic_key + 4) = 0x20; *(lbl_quic_key + 5) = 0x6b;
+    *(lbl_quic_key + 6) = 0x65; *(lbl_quic_key + 7) = 0x79;
+
+    lbl_quic_iv = allocate(7);
+    *(lbl_quic_iv + 0) = 0x71; *(lbl_quic_iv + 1) = 0x75; *(lbl_quic_iv + 2) = 0x69;
+    *(lbl_quic_iv + 3) = 0x63; *(lbl_quic_iv + 4) = 0x20; *(lbl_quic_iv + 5) = 0x69;
+    *(lbl_quic_iv + 6) = 0x76;
+
+    lbl_quic_hp = allocate(7);
+    *(lbl_quic_hp + 0) = 0x71; *(lbl_quic_hp + 1) = 0x75; *(lbl_quic_hp + 2) = 0x69;
+    *(lbl_quic_hp + 3) = 0x63; *(lbl_quic_hp + 4) = 0x20; *(lbl_quic_hp + 5) = 0x68;
+    *(lbl_quic_hp + 6) = 0x70;
+
+    // Empty context (length 0); any valid address works since context_len = 0.
+    empty_ctx = allocate(1);
+
+    // client_initial_secret = HKDF-Expand-Label(initial_secret, "client in", "", 32)
+    client_secret = allocate(QUIC_KEY_LEN);
+    quic_hkdf_expand_label(initial_secret, lbl_client_in, 9, empty_ctx, 0, client_secret, QUIC_KEY_LEN);
+
+    // key = HKDF-Expand-Label(client_secret, "quic key", "", 32)
+    quic_hkdf_expand_label(client_secret, lbl_quic_key, 8, empty_ctx, 0, client_initial_key, QUIC_KEY_LEN);
+    // iv  = HKDF-Expand-Label(client_secret, "quic iv",  "", 12)
+    quic_hkdf_expand_label(client_secret, lbl_quic_iv, 7, empty_ctx, 0, client_initial_iv, QUIC_IV_LEN);
+    // hp  = HKDF-Expand-Label(client_secret, "quic hp",  "", 32)
+    quic_hkdf_expand_label(client_secret, lbl_quic_hp, 7, empty_ctx, 0, client_initial_hp, QUIC_HP_LEN);
+
+    free(salt); free(initial_secret);
+    free(lbl_client_in); free(lbl_quic_key); free(lbl_quic_iv); free(lbl_quic_hp);
+    free(empty_ctx); free(client_secret);
+}
+
+// ===========================================================================
+// Packet Protection (RFC 9001 §5.4)
+//
+// AEAD: AES-256-GCM with nonce = IV XOR packet_number (PN encoded big-endian
+//   and padded to 96 bits; XORed into the low 8 bytes of the 12-byte IV).
+//   AAD = the packet header up to and including the packet-number field.
+//
+// Header protection (RFC 9001 §5.4.3):
+//   sample = packet[pn_offset + 4 .. pn_offset + 4 + 16]
+//   mask   = AES-ECB(hp_key, sample)            (16 bytes)
+//   first_byte ^= mask[0] & mask_bits
+//       long header:  mask_bits = 0x0f (reserved 2 + pn_length 2 bits)
+//       short header: mask_bits = 0x1f
+//   pn_bytes[i] ^= mask[1 + i]   for i in 0..pn_length
+// ===========================================================================
+
+// nonce = iv XOR pn (pn padded to 12 bytes big-endian, XORed into bytes 4..11)
+fn quic_build_nonce(nonce: Address, iv: Address, pn: u64) {
+    i: u32 = 0;
+    while i < QUIC_IV_LEN { *(nonce + i) = *(iv + i); i = i + 1; }
+    // XOR pn (big-endian, 8 bytes) into nonce[4..12]
+    n4: u64 = *(nonce + 4);
+    n5: u64 = *(nonce + 5);
+    n6: u64 = *(nonce + 6);
+    n7: u64 = *(nonce + 7);
+    n8: u64 = *(nonce + 8);
+    n9: u64 = *(nonce + 9);
+    n10: u64 = *(nonce + 10);
+    n11: u64 = *(nonce + 11);
+    *(nonce + 4)  = (n4  ^ ((pn >> 56) & 255)) & 255;
+    *(nonce + 5)  = (n5  ^ ((pn >> 48) & 255)) & 255;
+    *(nonce + 6)  = (n6  ^ ((pn >> 40) & 255)) & 255;
+    *(nonce + 7)  = (n7  ^ ((pn >> 32) & 255)) & 255;
+    *(nonce + 8)  = (n8  ^ ((pn >> 24) & 255)) & 255;
+    *(nonce + 9)  = (n9  ^ ((pn >> 16) & 255)) & 255;
+    *(nonce + 10) = (n10 ^ ((pn >> 8)  & 255)) & 255;
+    *(nonce + 11) = (n11 ^ (pn         & 255)) & 255;
+}
+
+// Encrypt one packet. The plaintext packet is at packet[0..packet_len] with
+// the header occupying [0..header_len] and the PN field at
+// [pn_offset .. pn_offset + pn_length] where pn_length = header_len - pn_offset.
+// Writes the protected packet to `encrypted`: header || ciphertext || tag.
+// Returns the total length of the protected packet, or 0 on error.
+fn quic_encrypt_packet(key: Address, iv: Address, hp_key: Address, packet: Address, packet_len: u32, header_len: u32, pn_offset: u32, encrypted: Address) -> u32 {
+    if header_len > packet_len { return 0; }
+    pn_length: u32 = header_len - pn_offset;
+    if pn_length == 0 { return 0; }
+    if pn_length > 4 { return 0; }
+
+    // Reconstruct the full packet number (big-endian).
+    pn: u64 = 0;
+    i: u32 = 0;
+    while i < pn_length {
+        pb: u64 = *(packet + pn_offset + i);
+        pn = (pn << 8) | pb;
+        i = i + 1;
+    }
+
+    // nonce = IV XOR pn
+    nonce = allocate(QUIC_IV_LEN);
+    quic_build_nonce(nonce, iv, pn);
+
+    // AEAD: plaintext = packet[header_len..packet_len], AAD = packet[0..header_len]
+    pt_len: u32 = packet_len - header_len;
+    tag = allocate(QUIC_GCM_TAG_LEN);
+    // Ciphertext goes to encrypted[header_len .. header_len + pt_len].
+    aes256_gcm_encrypt(packet + header_len, pt_len, key, nonce, packet, header_len, encrypted + header_len, tag);
+
+    // Build the output: header (real) || ciphertext || tag.
+    i = 0;
+    while i < header_len { *(encrypted + i) = *(packet + i); i = i + 1; }
+    i = 0;
+    while i < QUIC_GCM_TAG_LEN { *(encrypted + header_len + pt_len + i) = *(tag + i); i = i + 1; }
+    total: u32 = header_len + pt_len + QUIC_GCM_TAG_LEN;
+
+    // Header protection. The sample is 16 bytes starting at pn_offset + 4 in
+    // the (partially built) protected packet.
+    if total < pn_offset + 4 + 16 {
+        free(nonce); free(tag);
+        return 0;
+    }
+    sample: Address = encrypted + pn_offset + 4;
+    mask = allocate(16);
+    aes256_encrypt_block(sample, hp_key, mask);
+
+    // Determine mask_bits from the form bit (not protected).
+    first: u32 = *(encrypted);
+    mask_bits: u32 = 0x0f;
+    if (first & 128) == 0 { mask_bits = 0x1f; }
+    m0: u32 = *(mask);
+    *(encrypted) = (first ^ (m0 & mask_bits)) & 255;
+
+    i = 0;
+    while i < pn_length {
+        mi: u32 = *(mask + 1 + i);
+        cur: u32 = *(encrypted + pn_offset + i);
+        *(encrypted + pn_offset + i) = (cur ^ mi) & 255;
+        i = i + 1;
+    }
+
+    free(nonce); free(tag); free(mask);
+    return total;
+}
+
+// Decrypt one protected packet. The protected packet is at
+// encrypted[0..enc_len]; the recovered plaintext packet is written to
+// `packet[0..]`. Returns the total plaintext packet length (header + payload)
+// on success, or 0 on error / authentication failure.
+fn quic_decrypt_packet(key: Address, iv: Address, hp_key: Address, encrypted: Address, enc_len: u32, packet: Address) -> u32 {
+    if enc_len < 20 { return 0; }
+
+    // Locate the packet-number offset by parsing the (still-protected) long
+    // header. The form/type/version/Length fields are not header-protected,
+    // so quic_parse_header works on the protected packet.
+    out_type = allocate(1);
+    out_ver = allocate(4);
+    out_dcid = allocate(32);
+    out_dcid_len = allocate(1);
+    out_scid = allocate(32);
+    out_scid_len = allocate(1);
+    pn_offset: u32 = quic_parse_header(encrypted, enc_len, out_type, out_ver, out_dcid, out_dcid_len, out_scid, out_scid_len);
+    free(out_type); free(out_ver); free(out_dcid); free(out_dcid_len); free(out_scid); free(out_scid_len);
+    if pn_offset == 0 { return 0; }
+
+    // Header-protection mask.
+    if enc_len < pn_offset + 4 + 16 { return 0; }
+    sample: Address = encrypted + pn_offset + 4;
+    mask = allocate(16);
+    aes256_encrypt_block(sample, hp_key, mask);
+
+    // Recover the real first byte and pn_length.
+    first_enc: u32 = *(encrypted);
+    mask_bits: u32 = 0x0f;
+    if (first_enc & 128) == 0 { mask_bits = 0x1f; }
+    m0: u32 = *(mask);
+    real_first: u32 = (first_enc ^ (m0 & mask_bits)) & 255;
+    *(packet) = real_first & 255;
+    pn_length: u32 = (real_first & 3) + 1;
+
+    // Copy the unchanged header bytes (1 .. pn_offset) and recover the PN.
+    i: u32 = 1;
+    while i < pn_offset { *(packet + i) = *(encrypted + i); i = i + 1; }
+    i = 0;
+    while i < pn_length {
+        mi: u32 = *(mask + 1 + i);
+        c: u32 = *(encrypted + pn_offset + i);
+        *(packet + pn_offset + i) = (c ^ mi) & 255;
+        i = i + 1;
+    }
+    free(mask);
+
+    header_len: u32 = pn_offset + pn_length;
+    if enc_len < header_len + QUIC_GCM_TAG_LEN { return 0; }
+
+    // Reconstruct the full packet number.
+    pn: u64 = 0;
+    i = 0;
+    while i < pn_length {
+        pb: u64 = *(packet + pn_offset + i);
+        pn = (pn << 8) | pb;
+        i = i + 1;
+    }
+
+    // nonce = IV XOR pn
+    nonce = allocate(QUIC_IV_LEN);
+    quic_build_nonce(nonce, iv, pn);
+
+    // AEAD decrypt: ciphertext = encrypted[header_len .. enc_len-16],
+    //               tag        = encrypted[enc_len-16 .. enc_len],
+    //               AAD        = packet[0..header_len] (recovered header).
+    ct_len: u32 = enc_len - header_len - QUIC_GCM_TAG_LEN;
+    pt_len: u32 = aes256_gcm_decrypt(encrypted + header_len, ct_len, key, nonce, packet, header_len, packet + header_len, encrypted + enc_len - QUIC_GCM_TAG_LEN);
+    free(nonce);
+    if pt_len == 0 { return 0; }   // authentication failure
+    return header_len + pt_len;
+}
+
+// ===========================================================================
+// Connection State
+// ===========================================================================
+
+// Allocate and initialise a connection-state block. Returns its address.
+fn quic_conn_create() -> Address {
+    conn = allocate(CONN_SIZE);
+    i: u32 = 0;
+    while i < CONN_SIZE { *(conn + i) = 0; i = i + 1; }
+    quic_store_u64(conn + OFF_CONN_NEXT_PN, 0);
+    quic_store_u64(conn + OFF_CONN_NEXT_RECV_PN, 0);
+    quic_store_u64(conn + OFF_CONN_MAX_DATA, 1048576);     // 1 MiB default window
+    quic_store_u64(conn + OFF_CONN_CONSUMED, 0);
+    quic_store_u64(conn + OFF_CONN_MAX_IDLE, 30000);       // 30 s default
+    quic_store_u64(conn + OFF_CONN_MAX_UDP, 1452);         // typical MTU-safe payload
+    quic_store_u32(conn + OFF_CONN_FD, 0);
+    quic_store_u32(conn + OFF_CONN_STATE, CONN_STATE_INIT);
+    quic_store_u32(conn + OFF_CONN_IS_CLIENT, 1);
+    return conn;
+}
+
+fn quic_conn_free(conn: Address) {
+    free(conn);
+}
+
+// --- Optional setup helpers (not part of the required API, but make a     ---
+// --- connection usable end-to-end on the Initial-key path).                ---
+
+// Derive client Initial keys from the DCID and store them + the CIDs in conn.
+fn quic_conn_setup_initial(conn: Address, dcid: Address, dcid_len: u32) {
+    i: u32 = 0;
+    while i < dcid_len { *(conn + OFF_CONN_DCID + i) = *(dcid + i); i = i + 1; }
+    *(conn + OFF_CONN_DCID_LEN) = dcid_len & 255;
+    // Simplified 8-byte all-zero SCID (a real client would use random bytes).
+    i = 0;
+    while i < 8 { *(conn + OFF_CONN_SCID + i) = 0; i = i + 1; }
+    *(conn + OFF_CONN_SCID_LEN) = 8;
+    quic_initial_keys(dcid, dcid_len, conn + OFF_CONN_CI_KEY, conn + OFF_CONN_CI_IV, conn + OFF_CONN_CI_HP);
+    quic_store_u32(conn + OFF_CONN_STATE, CONN_STATE_HANDSHAKE);
+}
+
+// Create a UDP socket and store its fd in conn. Returns the fd, or -1.
+fn quic_conn_open_socket(conn: Address) -> i64 {
+    fd: i64 = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if fd < 0 { return -1; }
+    fdu: u32 = fd & 4294967295;
+    quic_store_u32(conn + OFF_CONN_FD, fdu);
+    return fd;
+}
+
+fn quic_conn_set_fd(conn: Address, fd: i64) {
+    fdu: u32 = fd & 4294967295;
+    quic_store_u32(conn + OFF_CONN_FD, fdu);
+}
+
+// Set the peer IPv4 endpoint. ip is in host byte order (e.g. 0x7F000001).
+fn quic_conn_set_peer(conn: Address, ip: u32, port: u32) {
+    a: Address = conn + OFF_CONN_PEER_ADDR;
+    *(a + 0) = 2; *(a + 1) = 0;                                   // sin_family = AF_INET
+    *(a + 2) = (port >> 8) & 255; *(a + 3) = port & 255;          // sin_port (network order)
+    *(a + 4) = (ip >> 24) & 255;                                  // sin_addr (network order)
+    *(a + 5) = (ip >> 16) & 255;
+    *(a + 6) = (ip >> 8) & 255;
+    *(a + 7) = ip & 255;
+    i: u32 = 0;
+    while i < 8 { *(a + 8 + i) = 0; i = i + 1; }                  // sin_zero
+}
+
+// Send application data: build an Initial packet around `data`, protect it,
+// and transmit it via sendto(2). Returns bytes transmitted, or -1 on error.
+fn quic_conn_send(conn: Address, data: Address, len: u32) -> i64 {
+    if len > 1500 { return -1; }
+
+    pkt = allocate(2048);
+    pn: u64 = quic_load_u64(conn + OFF_CONN_NEXT_PN);
+
+    // payload_len on the wire = plaintext + AEAD tag, so the Length field
+    // covers PN + ciphertext + tag.
+    wire_payload_len: u32 = len + QUIC_GCM_TAG_LEN;
+    header_len: u32 = quic_build_initial_header(
+        pkt,
+        conn + OFF_CONN_DCID, *(conn + OFF_CONN_DCID_LEN),
+        conn + OFF_CONN_SCID, *(conn + OFF_CONN_SCID_LEN),
+        conn, 0,                          // empty token
+        pn, wire_payload_len);
+
+    // Copy plaintext payload into the packet.
+    i: u32 = 0;
+    while i < len { *(pkt + header_len + i) = *(data + i); i = i + 1; }
+    packet_len: u32 = header_len + len;
+
+    // PN field offset = header_len - pn_length (pn_length from first byte).
+    first: u32 = *(pkt);
+    pn_length: u32 = (first & 3) + 1;
+    pn_offset: u32 = header_len - pn_length;
+
+    enc = allocate(2048);
+    enc_len: u32 = quic_encrypt_packet(
+        conn + OFF_CONN_CI_KEY, conn + OFF_CONN_CI_IV, conn + OFF_CONN_CI_HP,
+        pkt, packet_len, header_len, pn_offset, enc);
+    free(pkt);
+    if enc_len == 0 { free(enc); return -1; }
+
+    fd_i: i64 = quic_load_u32(conn + OFF_CONN_FD);
+    len_i: i64 = enc_len;
+    sent: i64 = sendto(fd_i, enc, len_i, 0, conn + OFF_CONN_PEER_ADDR, 16);
+    free(enc);
+    if sent < 0 { return -1; }
+
+    // Advance the packet number and account the data against flow control.
+    quic_store_u64(conn + OFF_CONN_NEXT_PN, pn + 1);
+    quic_consume_data(conn, len);
+    return sent;
+}
+
+// Receive one datagram, decrypt it, and copy the decrypted payload into buf
+// (up to max_len bytes). Returns the number of payload bytes copied, or -1.
+fn quic_conn_recv(conn: Address, buf: Address, max_len: u32) -> i64 {
+    enc = allocate(2048);
+    src_addr = allocate(16);
+    addrlen_ptr = allocate(4);
+    *(addrlen_ptr + 0) = 16; *(addrlen_ptr + 1) = 0;
+    *(addrlen_ptr + 2) = 0; *(addrlen_ptr + 3) = 0;
+
+    fd_i: i64 = quic_load_u32(conn + OFF_CONN_FD);
+    n: i64 = recvfrom(fd_i, enc, 2048, 0, src_addr, addrlen_ptr);
+    free(src_addr); free(addrlen_ptr);
+    if n < 0 { free(enc); return -1; }
+    n_u32: u32 = n & 4294967295;
+
+    plain = allocate(2048);
+    plain_len: u32 = quic_decrypt_packet(
+        conn + OFF_CONN_CI_KEY, conn + OFF_CONN_CI_IV, conn + OFF_CONN_CI_HP,
+        enc, n_u32, plain);
+    free(enc);
+    if plain_len == 0 { free(plain); return -1; }
+
+    // Recover the header length so we can return just the payload.
+    out_type = allocate(1);
+    out_ver = allocate(4);
+    out_dcid = allocate(32);
+    out_dcid_len = allocate(1);
+    out_scid = allocate(32);
+    out_scid_len = allocate(1);
+    pn_offset: u32 = quic_parse_header(plain, plain_len, out_type, out_ver, out_dcid, out_dcid_len, out_scid, out_scid_len);
+    free(out_type); free(out_ver); free(out_dcid); free(out_dcid_len); free(out_scid); free(out_scid_len);
+    if pn_offset == 0 { free(plain); return -1; }
+    pfirst: u32 = *(plain);
+    pn_length: u32 = (pfirst & 3) + 1;
+    header_len: u32 = pn_offset + pn_length;
+    if header_len > plain_len { free(plain); return -1; }
+    payload_len: u32 = plain_len - header_len;
+
+    to_copy: u32 = payload_len;
+    if to_copy > max_len { to_copy = max_len; }
+    i: u32 = 0;
+    while i < to_copy { *(buf + i) = *(plain + header_len + i); i = i + 1; }
+    free(plain);
+
+    // Advance the receive packet number and account the data.
+    rpn: u64 = quic_load_u64(conn + OFF_CONN_NEXT_RECV_PN);
+    quic_store_u64(conn + OFF_CONN_NEXT_RECV_PN, rpn + 1);
+    quic_consume_data(conn, payload_len);
+    ret: i64 = to_copy;
+    return ret;
+}
+
+// ===========================================================================
+// Flow Control (simplified, RFC 9000 §4 / RFC 9002)
+// ===========================================================================
+
+// Set the connection-level max-data window.
+fn quic_update_max_data(conn: Address, max_data: u64) {
+    quic_store_u64(conn + OFF_CONN_MAX_DATA, max_data);
+}
+
+// Account `len` bytes against the connection-level data window.
+fn quic_consume_data(conn: Address, len: u64) {
+    consumed: u64 = quic_load_u64(conn + OFF_CONN_CONSUMED);
+    quic_store_u64(conn + OFF_CONN_CONSUMED, consumed + len);
+}
