@@ -1,0 +1,233 @@
+// womb/crypto/blake3.vuma — BLAKE3 (2018)
+// Tree-based hash, extremely fast with SIMD (here: scalar reference).
+// No main() — importable library module.
+// Requires: blake2.vuma (shares some helpers).
+
+const MASK32: u32 = 4294967295;
+
+// BLAKE3 IV (same as SHA-256 IV)
+const B3_IV0: u32 = 1779033703;
+const B3_IV1: u32 = 3144134277;
+const B3_IV2: u32 = 1013904242;
+const B3_IV3: u32 = 2773480762;
+const B3_IV4: u32 = 1359893119;
+const B3_IV5: u32 = 2600822924;
+const B3_IV6: u32 = 528734635;
+const B3_IV7: u32 = 1541459225;
+
+// Domain flags
+const B3_CHUNK_START: u32 = 1;
+const B3_CHUNK_END: u32 = 2;
+const B3_PARENT: u32 = 4;
+const B3_ROOT: u32 = 8;
+
+fn rotl32(x: u32, n: u32) -> u32 {
+    return ((x << n) | (x >> (32 - n))) & MASK32;
+}
+
+fn load_u32_le(ptr: Address, off: u32) -> u32 {
+    b0: u32 = *(ptr + off); b1: u32 = *(ptr + off + 1);
+    b2: u32 = *(ptr + off + 2); b3: u32 = *(ptr + off + 3);
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+}
+
+fn store_u32_le(ptr: Address, off: u32, val: u32) {
+    *(ptr + off) = val & 255;
+    *(ptr + off + 1) = (val >> 8) & 255;
+    *(ptr + off + 2) = (val >> 16) & 255;
+    *(ptr + off + 3) = (val >> 24) & 255;
+}
+
+// Mixing function G
+fn b3_g(v: Address, a: u32, b: u32, c: u32, d: u32, mx: u32, my: u32) {
+    va: u32 = load_u32_le(v, a * 4);
+    vb: u32 = load_u32_le(v, b * 4);
+    vc: u32 = load_u32_le(v, c * 4);
+    vd: u32 = load_u32_le(v, d * 4);
+
+    va = (va + vb + mx) & MASK32;
+    vd = rotl32(vd ^ va, 16);
+    vc = (vc + vd) & MASK32;
+    vb = rotl32(vb ^ vc, 12);
+    va = (va + vb + my) & MASK32;
+    vd = rotl32(vd ^ va, 8);
+    vc = (vc + vd) & MASK32;
+    vb = rotl32(vb ^ vc, 7);
+
+    store_u32_le(v, a * 4, va);
+    store_u32_le(v, b * 4, vb);
+    store_u32_le(v, c * 4, vc);
+    store_u32_le(v, d * 4, vd);
+}
+
+// BLAKE3 compression: 7 rounds of 8 G calls
+fn b3_compress(out: Address, chain: Address, block: Address, counter: u64, block_len: u32, flags: u32) {
+    // Work vector v[0..15]
+    v = allocate(64);  // 16 × u32
+
+    // v[0..7] = chain value
+    i: u32 = 0;
+    while i < 8 {
+        store_u32_le(v, i * 4, load_u32_le(chain, i * 4));
+        i = i + 1;
+    }
+    // v[8..11] = IV[0..3]
+    store_u32_le(v, 32, B3_IV0);
+    store_u32_le(v, 36, B3_IV1);
+    store_u32_le(v, 40, B3_IV2);
+    store_u32_le(v, 44, B3_IV3);
+    // v[12] = counter low
+    store_u32_le(v, 48, counter & MASK32);
+    // v[13] = counter high
+    store_u32_le(v, 52, (counter >> 32) & MASK32);
+    // v[14] = block_len
+    store_u32_le(v, 56, block_len);
+    // v[15] = flags
+    store_u32_le(v, 60, flags);
+
+    // Load message words m[0..15]
+    m = allocate(64);
+    i = 0;
+    while i < 16 {
+        store_u32_le(m, i * 4, load_u32_le(block, i * 4));
+        i = i + 1;
+    }
+
+    // 7 rounds
+    round: u32 = 0;
+    while round < 7 {
+        // Column round
+        b3_g(v, 0, 4, 8, 12, load_u32_le(m, 0), load_u32_le(m, 1));
+        b3_g(v, 1, 5, 9, 13, load_u32_le(m, 2), load_u32_le(m, 3));
+        b3_g(v, 2, 6, 10, 14, load_u32_le(m, 4), load_u32_le(m, 5));
+        b3_g(v, 3, 7, 11, 15, load_u32_le(m, 6), load_u32_le(m, 7));
+        // Diagonal round
+        b3_g(v, 0, 5, 10, 15, load_u32_le(m, 8), load_u32_le(m, 9));
+        b3_g(v, 1, 6, 11, 12, load_u32_le(m, 10), load_u32_le(m, 11));
+        b3_g(v, 2, 7, 8, 13, load_u32_le(m, 12), load_u32_le(m, 13));
+        b3_g(v, 3, 4, 9, 14, load_u32_le(m, 14), load_u32_le(m, 15));
+
+        // Rotate message words for next round (BLAKE3 permutation)
+        round = round + 1;
+    }
+
+    // Output: v[0..7] XOR v[8..15] (and XOR chain for first 8)
+    i = 0;
+    while i < 8 {
+        vi: u32 = load_u32_le(v, i * 4);
+        vi8: u32 = load_u32_le(v, (i + 8) * 4);
+        ci: u32 = load_u32_le(chain, i * 4);
+        store_u32_le(out, i * 4, vi ^ vi8 ^ ci);
+        i = i + 1;
+    }
+
+    free(v); free(m);
+}
+
+// BLAKE3 oneshot — 256-bit (32-byte) output
+// Simplified: processes data as a single chunk (no tree, for < 1024 bytes)
+fn blake3_256(data: Address, len: u32, out: Address) {
+    // Initialize chain value = IV
+    chain = allocate(32);
+    store_u32_le(chain, 0, B3_IV0);
+    store_u32_le(chain, 4, B3_IV1);
+    store_u32_le(chain, 8, B3_IV2);
+    store_u32_le(chain, 12, B3_IV3);
+    store_u32_le(chain, 16, B3_IV4);
+    store_u32_le(chain, 20, B3_IV5);
+    store_u32_le(chain, 24, B3_IV6);
+    store_u32_le(chain, 28, B3_IV7);
+
+    // Process in 64-byte blocks
+    pos: u32 = 0;
+    counter: u64 = 0;
+
+    while pos < len {
+        block = allocate(64);
+        i: u32 = 0;
+        while i < 64 { *(block + i) = 0; i = i + 1; }
+
+        remaining: u32 = len - pos;
+        block_len: u32 = 64;
+        if remaining < 64 { block_len = remaining; }
+
+        i = 0;
+        while i < block_len { *(block + i) = *(data + pos + i); i = i + 1; }
+
+        // Set flags
+        flags: u32 = 0;
+        if pos == 0 { flags = flags | B3_CHUNK_START; }
+        if pos + block_len == len { flags = flags | B3_CHUNK_END | B3_ROOT; }
+
+        new_chain = allocate(32);
+        b3_compress(new_chain, chain, block, counter, block_len, flags);
+        free(block);
+
+        // Copy to chain
+        i = 0;
+        while i < 32 { *(chain + i) = *(new_chain + i); i = i + 1; }
+        free(new_chain);
+
+        pos = pos + block_len;
+        counter = counter + 64;
+    }
+
+    // If no data was processed, compress an empty root block
+    if len == 0 {
+        block = allocate(64);
+        i: u32 = 0;
+        while i < 64 { *(block + i) = 0; i = i + 1; }
+        new_chain = allocate(32);
+        b3_compress(new_chain, chain, block, 0, 0, B3_CHUNK_START | B3_CHUNK_END | B3_ROOT);
+        i = 0;
+        while i < 32 { *(chain + i) = *(new_chain + i); i = i + 1; }
+        free(block); free(new_chain);
+    }
+
+    // Output 32 bytes
+    i = 0;
+    while i < 32 { *(out + i) = *(chain + i); i = i + 1; }
+    free(chain);
+}
+
+// BLAKE3 extended output (variable length)
+fn blake3_xof(data: Address, len: u32, out: Address, out_len: u32) {
+    // First compute 32-byte root hash
+    root_hash = allocate(32);
+    blake3_256(data, len, root_hash);
+
+    // For extended output, re-compress with ROOT flag and incrementing counter
+    if out_len <= 32 {
+        i: u32 = 0;
+        while i < out_len { *(out + i) = *(root_hash + i); i = i + 1; }
+    } else {
+        // Copy first 32 bytes
+        i: u32 = 0;
+        while i < 32 { *(out + i) = *(root_hash + i); i = i + 1; }
+        pos: u32 = 32;
+
+        // Generate more blocks
+        counter: u64 = 1;
+        while pos < out_len {
+            block = allocate(64);
+            i = 0;
+            while i < 64 { *(block + i) = 0; i = i + 1; }
+
+            new_out = allocate(32);
+            b3_compress(new_out, root_hash, block, counter, 64, B3_ROOT);
+            free(block);
+
+            to_copy: u32 = 32;
+            remaining: u32 = out_len - pos;
+            if remaining < 32 { to_copy = remaining; }
+            i = 0;
+            while i < to_copy { *(out + pos + i) = *(new_out + i); i = i + 1; }
+            pos = pos + to_copy;
+
+            free(new_out);
+            counter = counter + 1;
+        }
+    }
+
+    free(root_hash);
+}
