@@ -1,0 +1,141 @@
+// womb/crypto/chacha20.vuma — ChaCha20 Stream Cipher (RFC 8439)
+// No main() — importable library module.
+// 256-bit key, 96-bit nonce, 32-bit counter.
+// All operations are u32 with 20 rounds (10 double rounds).
+
+const MASK32: u32 = 4294967295;
+
+fn rotl32(x: u32, n: u32) -> u32 {
+    return ((x << n) | (x >> (32 - n))) & MASK32;
+}
+
+fn load_u32_le(ptr: Address, off: u32) -> u32 {
+    b0: u32 = *(ptr + off); b1: u32 = *(ptr + off + 1);
+    b2: u32 = *(ptr + off + 2); b3: u32 = *(ptr + off + 3);
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+}
+
+fn store_u32_le(ptr: Address, off: u32, val: u32) {
+    *(ptr + off) = val & 255;
+    *(ptr + off + 1) = (val >> 8) & 255;
+    *(ptr + off + 2) = (val >> 16) & 255;
+    *(ptr + off + 3) = (val >> 24) & 255;
+}
+
+// ChaCha20 quarter round
+fn qr(state: Address, a: u32, b: u32, c: u32, d: u32) {
+    // a += b; d ^= a; d <<<= 16;
+    va: u32 = load_u32_le(state, a * 4);
+    vb: u32 = load_u32_le(state, b * 4);
+    vc: u32 = load_u32_le(state, c * 4);
+    vd: u32 = load_u32_le(state, d * 4);
+
+    va = (va + vb) & MASK32;
+    vd = rotl32(vd ^ va, 16);
+    vc = (vc + vd) & MASK32;
+    vb = rotl32(vb ^ vc, 12);
+    va = (va + vb) & MASK32;
+    vd = rotl32(vd ^ va, 8);
+    vc = (vc + vd) & MASK32;
+    vb = rotl32(vb ^ vc, 7);
+
+    store_u32_le(state, a * 4, va);
+    store_u32_le(state, b * 4, vb);
+    store_u32_le(state, c * 4, vc);
+    store_u32_le(state, d * 4, vd);
+}
+
+// ChaCha20 block function — generates 64 bytes of keystream
+fn chacha20_block(key: Address, counter: u32, nonce: Address, out: Address) {
+    state = allocate(64);  // 16 × u32
+
+    // Constants: "expand 32-byte k"
+    store_u32_le(state, 0, 1634760805);   // "expa"
+    store_u32_le(state, 4, 857760878);    // "nd 3"
+    store_u32_le(state, 8, 2036477234);   // "2-by"
+    store_u32_le(state, 12, 1797285236);  // "te k"
+
+    // Key (256 bits = 8 × u32)
+    i: u32 = 0;
+    while i < 8 {
+        store_u32_le(state, 16 + i * 4, load_u32_le(key, i * 4));
+        i = i + 1;
+    }
+
+    // Counter
+    store_u32_le(state, 48, counter);
+
+    // Nonce (96 bits = 3 × u32)
+    i = 0;
+    while i < 3 {
+        store_u32_le(state, 52 + i * 4, load_u32_le(nonce, i * 4));
+        i = i + 1;
+    }
+
+    // Save initial state
+    initial = allocate(64);
+    i = 0;
+    while i < 64 {
+        *(initial + i) = *(state + i);
+        i = i + 1;
+    }
+
+    // 20 rounds = 10 double rounds
+    round: u32 = 0;
+    while round < 10 {
+        // Column rounds
+        qr(state, 0, 4, 8, 12);
+        qr(state, 1, 5, 9, 13);
+        qr(state, 2, 6, 10, 14);
+        qr(state, 3, 7, 11, 15);
+        // Diagonal rounds
+        qr(state, 0, 5, 10, 15);
+        qr(state, 1, 6, 11, 12);
+        qr(state, 2, 7, 8, 13);
+        qr(state, 3, 4, 9, 14);
+        round = round + 1;
+    }
+
+    // Add initial state
+    i = 0;
+    while i < 16 {
+        s: u32 = load_u32_le(state, i * 4);
+        init_val: u32 = load_u32_le(initial, i * 4);
+        store_u32_le(out, i * 4, (s + init_val) & MASK32);
+        i = i + 1;
+    }
+
+    free(state);
+    free(initial);
+}
+
+// ChaCha20 encrypt/decrypt (same operation — XOR with keystream)
+fn chacha20_encrypt(data: Address, data_len: u32, key: Address, nonce: Address, counter: u32, output: Address) -> u32 {
+    pos: u32 = 0;
+    ctr: u32 = counter;
+
+    while pos < data_len {
+        // Generate 64-byte keystream block
+        keystream = allocate(64);
+        chacha20_block(key, ctr, nonce, keystream);
+
+        // XOR with data
+        remaining: u32 = data_len - pos;
+        to_xor: u32 = 64;
+        if remaining < 64 { to_xor = remaining; }
+
+        i: u32 = 0;
+        while i < to_xor {
+            db: u32 = *(data + pos + i);
+            ks: u32 = *(keystream + i);
+            *(output + pos + i) = (db ^ ks) & 255;
+            i = i + 1;
+        }
+
+        free(keystream);
+        pos = pos + to_xor;
+        ctr = ctr + 1;
+    }
+
+    return data_len;
+}

@@ -1,0 +1,171 @@
+// womb/crypto/pbkdf2.vuma — PBKDF2 (RFC 2898 / SP 800-132)
+// Password-Based Key Derivation Function 2.
+// No main() — importable library module.
+// Requires: hmac.vuma (which requires sha256.vuma).
+
+const MASK32: u32 = 4294967295;
+
+// ===========================================================================
+// PBKDF2-HMAC-SHA256
+// password:    pointer to password bytes
+// pass_len:    password length
+// salt:        pointer to salt bytes
+// salt_len:    salt length
+// iterations:  number of iterations
+// out:         pointer to output buffer
+// out_len:     desired output length (dkLen)
+// ===========================================================================
+
+fn pbkdf2_hmac_sha256(password: Address, pass_len: u32, salt: Address, salt_len: u32, iterations: u32, out: Address, out_len: u32) {
+    hlen: u32 = 32;  // SHA-256 output size
+
+    block_index: u32 = 1;
+    pos: u32 = 0;
+
+    while pos < out_len {
+        // Build U1 = HMAC(password, salt || INT(block_index))
+        // INT is a 4-byte big-endian integer
+        u_buf = allocate(salt_len + 4);
+
+        // Copy salt
+        i: u32 = 0;
+        while i < salt_len {
+            *(u_buf + i) = *(salt + i);
+            i = i + 1;
+        }
+
+        // Append block index (4 bytes, big-endian)
+        *(u_buf + salt_len) = (block_index >> 24) & 255;
+        *(u_buf + salt_len + 1) = (block_index >> 16) & 255;
+        *(u_buf + salt_len + 2) = (block_index >> 8) & 255;
+        *(u_buf + salt_len + 3) = block_index & 255;
+
+        // U1 = HMAC(password, salt || INT(block_index))
+        u_prev = allocate(hlen);
+        hmac_sha256(password, pass_len, u_buf, salt_len + 4, u_prev);
+        free(u_buf);
+
+        // T = U1
+        t_buf = allocate(hlen);
+        i = 0;
+        while i < hlen {
+            *(t_buf + i) = *(u_prev + i);
+            i = i + 1;
+        }
+
+        // U2, U3, ... Uc
+        iter: u32 = 1;
+        while iter < iterations {
+            // U_i = HMAC(password, U_{i-1})
+            u_next = allocate(hlen);
+            hmac_sha256(password, pass_len, u_prev, hlen, u_next);
+
+            // T = T XOR U_i
+            i = 0;
+            while i < hlen {
+                t_val: u32 = *(t_buf + i);
+                u_val: u32 = *(u_next + i);
+                *(t_buf + i) = (t_val ^ u_val) & 255;
+                i = i + 1;
+            }
+
+            // Copy u_next to u_prev for next iteration
+            i = 0;
+            while i < hlen {
+                *(u_prev + i) = *(u_next + i);
+                i = i + 1;
+            }
+            free(u_next);
+            iter = iter + 1;
+        }
+
+        // Copy T to output
+        to_copy: u32 = hlen;
+        remaining: u32 = out_len - pos;
+        if remaining < hlen { to_copy = remaining; }
+
+        i = 0;
+        while i < to_copy {
+            *(out + pos + i) = *(t_buf + i);
+            i = i + 1;
+        }
+        pos = pos + to_copy;
+
+        free(u_prev);
+        free(t_buf);
+        block_index = block_index + 1;
+    }
+}
+
+// ===========================================================================
+// PBKDF2-HMAC-SHA512
+// ===========================================================================
+
+fn pbkdf2_hmac_sha512(password: Address, pass_len: u32, salt: Address, salt_len: u32, iterations: u32, out: Address, out_len: u32) {
+    hlen: u32 = 64;  // SHA-512 output size
+
+    block_index: u32 = 1;
+    pos: u32 = 0;
+
+    while pos < out_len {
+        u_buf = allocate(salt_len + 4);
+
+        i: u32 = 0;
+        while i < salt_len {
+            *(u_buf + i) = *(salt + i);
+            i = i + 1;
+        }
+        *(u_buf + salt_len) = (block_index >> 24) & 255;
+        *(u_buf + salt_len + 1) = (block_index >> 16) & 255;
+        *(u_buf + salt_len + 2) = (block_index >> 8) & 255;
+        *(u_buf + salt_len + 3) = block_index & 255;
+
+        u_prev = allocate(hlen);
+        hmac_sha512(password, pass_len, u_buf, salt_len + 4, u_prev);
+        free(u_buf);
+
+        t_buf = allocate(hlen);
+        i = 0;
+        while i < hlen {
+            *(t_buf + i) = *(u_prev + i);
+            i = i + 1;
+        }
+
+        iter: u32 = 1;
+        while iter < iterations {
+            u_next = allocate(hlen);
+            hmac_sha512(password, pass_len, u_prev, hlen, u_next);
+
+            i = 0;
+            while i < hlen {
+                t_val: u32 = *(t_buf + i);
+                u_val: u32 = *(u_next + i);
+                *(t_buf + i) = (t_val ^ u_val) & 255;
+                i = i + 1;
+            }
+
+            i = 0;
+            while i < hlen {
+                *(u_prev + i) = *(u_next + i);
+                i = i + 1;
+            }
+            free(u_next);
+            iter = iter + 1;
+        }
+
+        to_copy: u32 = hlen;
+        remaining: u32 = out_len - pos;
+        if remaining < hlen { to_copy = remaining; }
+
+        i = 0;
+        while i < to_copy {
+            *(out + pos + i) = *(t_buf + i);
+            i = i + 1;
+        }
+        pos = pos + to_copy;
+
+        free(u_prev);
+        free(t_buf);
+        block_index = block_index + 1;
+    }
+}

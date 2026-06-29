@@ -1,0 +1,328 @@
+// womb/crypto/sha512.vuma — SHA-512 (NIST FIPS 180-4)
+// 64-round, 1024-bit blocks, 512-bit output. All u64 arithmetic.
+
+const MASK64: u64 = 18446744073709551615;
+
+const K00: u64 = 7640891576956012808;
+const K01: u64 = 13503953896175878187;
+const K02: u64 = 15435957540538237452;
+const K03: u64 = 18215351976745547372;
+const K04: u64 = 10639575167991255556;
+const K05: u64 = 18994474441642845557;
+const K06: u64 = 15523509239682538077;
+const K07: u64 = 18359876152369483481;
+const K08: u64 = 16407567163726766569;
+const K09: u64 = 1220079220720777858;
+const K10: u64 = 1373409287735127788;
+const K11: u64 = 17530989347130375474;
+const K12: u64 = 10901372894326919108;
+const K13: u64 = 16467161083222162069;
+const K14: u64 = 17570068309420756997;
+const K15: u64 = 16366416153167313899;
+const K16: u64 = 16514813475974556944;
+const K17: u64 = 17930956827214002847;
+const K18: u64 = 954934321949552099;
+const K19: u64 = 16918360538362487164;
+const K20: u64 = 10699425298191717162;
+const K21: u64 = 17025578497607453732;
+const K22: u64 = 17205792890865285843;
+const K23: u64 = 17122529001552529491;
+const K24: u64 = 17207285979492499214;
+const K25: u64 = 18223442432682556751;
+const K26: u64 = 17463973205273470906;
+const K27: u64 = 17957536543199558831;
+const K28: u64 = 18270902336289731205;
+const K29: u64 = 17928629181441589383;
+const K30: u64 = 16364392964325287455;
+const K31: u64 = 14758090931460787154;
+const K32: u64 = 16945474657718681076;
+const K33: u64 = 18015637187688049127;
+const K34: u64 = 17574224966099457887;
+const K35: u64 = 17466075930109307208;
+const K36: u64 = 16866600617130845779;
+const K37: u64 = 17816495172633545870;
+const K38: u64 = 16939531609509284485;
+const K39: u64 = 16846106328846697966;
+const K40: u64 = 17955691885283885148;
+const K41: u64 = 16583403709709811594;
+const K42: u64 = 17887326246749686567;
+const K43: u64 = 17356158057894055330;
+const K44: u64 = 17671290567161299586;
+const K45: u64 = 17721057979287806511;
+const K46: u64 = 18327988006797326443;
+const K47: u64 = 18001121869820444338;
+const K48: u64 = 17731663736729207874;
+const K49: u64 = 17638125991677801896;
+const K50: u64 = 17535422172899500129;
+const K51: u64 = 17871517494062363293;
+const K52: u64 = 17881083152257410195;
+const K53: u64 = 17161081177638038283;
+const K54: u64 = 17929046668155564189;
+const K55: u64 = 18048233221898826086;
+const K56: u64 = 18090846886838579486;
+const K57: u64 = 17441895862944507986;
+const K58: u64 = 17455767905156400859;
+const K59: u64 = 17611368568308158005;
+const K60: u64 = 17863485614262009907;
+const K61: u64 = 18327220370186244354;
+const K62: u64 = 18246328242539699959;
+const K63: u64 = 17925708410278739866;
+const K64: u64 = 18434928838138339468;
+const K65: u64 = 18366372079253293829;
+const K66: u64 = 18061910102335228346;
+const K67: u64 = 18061925176993679188;
+const K68: u64 = 18309576728340026980;
+const K69: u64 = 5455897142182748870;
+const K70: u64 = 17778958605995739538;
+const K71: u64 = 18168262475039228665;
+const K72: u64 = 17562595232049816756;
+const K73: u64 = 18228289176600333512;
+const K74: u64 = 18346282071627561187;
+const K75: u64 = 17901896515900825352;
+const K76: u64 = 18115970502102990430;
+const K77: u64 = 16572715940448600818;
+const K78: u64 = 18036914472500181478;
+const K79: u64 = 17756305133259270429;
+
+const H0I: u64 = 10619821402735081789;
+const H1I: u64 = 16942662018386419942;
+const H2I: u64 = 18232450244195540281;
+const H3I: u64 = 13628641668891657829;
+const H4I: u64 = 10360585386009616437;
+const H5I: u64 = 17051783394714231267;
+const H6I: u64 = 12111855159460855334;
+const H7I: u64 = 16931113426636396240;
+
+fn rotr64(x: u64, n: u64) -> u64 {
+    return (x >> n) | (x << (64 - n));
+}
+
+fn load_u64_be(ptr: Address, off: u32) -> u64 {
+    b0: u64 = *(ptr + off); b1: u64 = *(ptr + off + 1);
+    b2: u64 = *(ptr + off + 2); b3: u64 = *(ptr + off + 3);
+    b4: u64 = *(ptr + off + 4); b5: u64 = *(ptr + off + 5);
+    b6: u64 = *(ptr + off + 6); b7: u64 = *(ptr + off + 7);
+    return (b0 << 56) | (b1 << 48) | (b2 << 40) | (b3 << 32) | (b4 << 24) | (b5 << 16) | (b6 << 8) | b7;
+}
+
+fn store_u64_be(ptr: Address, off: u32, val: u64) {
+    *(ptr + off) = (val >> 56) & 255;
+    *(ptr + off + 1) = (val >> 48) & 255;
+    *(ptr + off + 2) = (val >> 40) & 255;
+    *(ptr + off + 3) = (val >> 32) & 255;
+    *(ptr + off + 4) = (val >> 24) & 255;
+    *(ptr + off + 5) = (val >> 16) & 255;
+    *(ptr + off + 6) = (val >> 8) & 255;
+    *(ptr + off + 7) = val & 255;
+}
+
+fn ch64(x: u64, y: u64, z: u64) -> u64 {
+    return (x & y) ^ ((x ^ MASK64) & z);
+}
+
+fn maj64(x: u64, y: u64, z: u64) -> u64 {
+    return (x & y) ^ (x & z) ^ (y & z);
+}
+
+fn big_sigma0_64(x: u64) -> u64 {
+    return rotr64(x, 28) ^ rotr64(x, 34) ^ rotr64(x, 39);
+}
+
+fn big_sigma1_64(x: u64) -> u64 {
+    return rotr64(x, 14) ^ rotr64(x, 18) ^ rotr64(x, 41);
+}
+
+fn small_sigma0_64(x: u64) -> u64 {
+    return rotr64(x, 1) ^ rotr64(x, 8) ^ (x >> 7);
+}
+
+fn small_sigma1_64(x: u64) -> u64 {
+    return rotr64(x, 19) ^ rotr64(x, 61) ^ (x >> 6);
+}
+
+fn sha512_init(ctx: Address) {
+    store_u64_be(ctx, 0, H0I);
+    store_u64_be(ctx, 8, H1I);
+    store_u64_be(ctx, 16, H2I);
+    store_u64_be(ctx, 24, H3I);
+    store_u64_be(ctx, 32, H4I);
+    store_u64_be(ctx, 40, H5I);
+    store_u64_be(ctx, 48, H6I);
+    store_u64_be(ctx, 56, H7I);
+    store_u64_be(ctx, 64, 0);
+    store_u64_be(ctx, 72, 0);
+    store_u64_be(ctx, 80, 0);
+}
+
+fn sha512_compress(ctx: Address, block: Address) {
+    a: u64 = load_u64_be(ctx, 0);
+    b: u64 = load_u64_be(ctx, 8);
+    c: u64 = load_u64_be(ctx, 16);
+    d: u64 = load_u64_be(ctx, 24);
+    e: u64 = load_u64_be(ctx, 32);
+    f: u64 = load_u64_be(ctx, 40);
+    g: u64 = load_u64_be(ctx, 48);
+    h: u64 = load_u64_be(ctx, 56);
+
+    wbuf = allocate(640);
+    i: u32 = 0;
+    while i < 16 {
+        store_u64_be(wbuf, i * 8, load_u64_be(block, i * 8));
+        i = i + 1;
+    }
+    i = 16;
+    while i < 80 {
+        w15: u64 = load_u64_be(wbuf, (i - 15) * 8);
+        w2: u64 = load_u64_be(wbuf, (i - 2) * 8);
+        w16: u64 = load_u64_be(wbuf, (i - 16) * 8) + small_sigma0_64(w15) + load_u64_be(wbuf, (i - 7) * 8) + small_sigma1_64(w2);
+        store_u64_be(wbuf, i * 8, w16);
+        i = i + 1;
+    }
+
+    i = 0;
+    while i < 80 {
+        ki: u64 = 0;
+        if i == 0 { ki = K00; }
+        if i == 1 { ki = K01; }
+        if i == 2 { ki = K02; }
+        if i == 3 { ki = K03; }
+        if i == 4 { ki = K04; }
+        if i == 5 { ki = K05; }
+        if i == 6 { ki = K06; }
+        if i == 7 { ki = K07; }
+        if i == 8 { ki = K08; }
+        if i == 9 { ki = K09; }
+        if i == 10 { ki = K10; }
+        if i == 11 { ki = K11; }
+        if i == 12 { ki = K12; }
+        if i == 13 { ki = K13; }
+        if i == 14 { ki = K14; }
+        if i == 15 { ki = K15; }
+        if i == 16 { ki = K16; }
+        if i == 17 { ki = K17; }
+        if i == 18 { ki = K18; }
+        if i == 19 { ki = K19; }
+        if i == 20 { ki = K20; }
+        if i == 21 { ki = K21; }
+        if i == 22 { ki = K22; }
+        if i == 23 { ki = K23; }
+        if i == 24 { ki = K24; }
+        if i == 25 { ki = K25; }
+        if i == 26 { ki = K26; }
+        if i == 27 { ki = K27; }
+        if i == 28 { ki = K28; }
+        if i == 29 { ki = K29; }
+        if i == 30 { ki = K30; }
+        if i == 31 { ki = K31; }
+        if i == 32 { ki = K32; }
+        if i == 33 { ki = K33; }
+        if i == 34 { ki = K34; }
+        if i == 35 { ki = K35; }
+        if i == 36 { ki = K36; }
+        if i == 37 { ki = K37; }
+        if i == 38 { ki = K38; }
+        if i == 39 { ki = K39; }
+        if i == 40 { ki = K40; }
+        if i == 41 { ki = K41; }
+        if i == 42 { ki = K42; }
+        if i == 43 { ki = K43; }
+        if i == 44 { ki = K44; }
+        if i == 45 { ki = K45; }
+        if i == 46 { ki = K46; }
+        if i == 47 { ki = K47; }
+        if i == 48 { ki = K48; }
+        if i == 49 { ki = K49; }
+        if i == 50 { ki = K50; }
+        if i == 51 { ki = K51; }
+        if i == 52 { ki = K52; }
+        if i == 53 { ki = K53; }
+        if i == 54 { ki = K54; }
+        if i == 55 { ki = K55; }
+        if i == 56 { ki = K56; }
+        if i == 57 { ki = K57; }
+        if i == 58 { ki = K58; }
+        if i == 59 { ki = K59; }
+        if i == 60 { ki = K60; }
+        if i == 61 { ki = K61; }
+        if i == 62 { ki = K62; }
+        if i == 63 { ki = K63; }
+        if i == 64 { ki = K64; }
+        if i == 65 { ki = K65; }
+        if i == 66 { ki = K66; }
+        if i == 67 { ki = K67; }
+        if i == 68 { ki = K68; }
+        if i == 69 { ki = K69; }
+        if i == 70 { ki = K70; }
+        if i == 71 { ki = K71; }
+        if i == 72 { ki = K72; }
+        if i == 73 { ki = K73; }
+        if i == 74 { ki = K74; }
+        if i == 75 { ki = K75; }
+        if i == 76 { ki = K76; }
+        if i == 77 { ki = K77; }
+        if i == 78 { ki = K78; }
+        if i == 79 { ki = K79; }
+
+        wi: u64 = load_u64_be(wbuf, i * 8);
+        t1: u64 = h + big_sigma1_64(e) + ch64(e, f, g) + ki + wi;
+        t2: u64 = big_sigma0_64(a) + maj64(a, b, c);
+        h = g; g = f; f = e; e = d + t1;
+        d = c; c = b; b = a; a = t1 + t2;
+        i = i + 1;
+    }
+
+    store_u64_be(ctx, 0, load_u64_be(ctx, 0) + a);
+    store_u64_be(ctx, 8, load_u64_be(ctx, 8) + b);
+    store_u64_be(ctx, 16, load_u64_be(ctx, 16) + c);
+    store_u64_be(ctx, 24, load_u64_be(ctx, 24) + d);
+    store_u64_be(ctx, 32, load_u64_be(ctx, 32) + e);
+    store_u64_be(ctx, 40, load_u64_be(ctx, 40) + f);
+    store_u64_be(ctx, 48, load_u64_be(ctx, 48) + g);
+    store_u64_be(ctx, 56, load_u64_be(ctx, 56) + h);
+    free(wbuf);
+}
+
+fn sha512_update(ctx: Address, data: Address, len: u32) {
+    buf_len: u32 = load_u64_be(ctx, 80);
+    i: u32 = 0;
+    while i < len {
+        *(ctx + 88 + buf_len) = *(data + i);
+        buf_len = buf_len + 1;
+        i = i + 1;
+        if buf_len == 128 {
+            sha512_compress(ctx, ctx + 88);
+            lo: u64 = load_u64_be(ctx, 64);
+            store_u64_be(ctx, 64, lo + 1024);
+            buf_len = 0;
+        }
+    }
+    store_u64_be(ctx, 80, buf_len);
+}
+
+fn sha512_final(ctx: Address, out: Address) {
+    buf_len: u32 = load_u64_be(ctx, 80);
+    total_lo: u64 = load_u64_be(ctx, 64);
+    total_hi: u64 = load_u64_be(ctx, 72);
+    new_lo: u64 = total_lo + (buf_len * 8);
+    if new_lo < total_lo { total_hi = total_hi + 1; }
+    total_lo = new_lo;
+    *(ctx + 88 + buf_len) = 128;
+    buf_len = buf_len + 1;
+    while buf_len != 112 { *(ctx + 88 + buf_len) = 0; buf_len = buf_len + 1; }
+    store_u64_be(ctx, 88 + 112, total_hi);
+    store_u64_be(ctx, 88 + 120, total_lo);
+    sha512_compress(ctx, ctx + 88);
+    i: u32 = 0;
+    while i < 8 {
+        store_u64_be(out, i * 8, load_u64_be(ctx, i * 8));
+        i = i + 1;
+    }
+}
+
+fn sha512_oneshot(data: Address, len: u32, out: Address) {
+    ctx = allocate(216);
+    sha512_init(ctx);
+    sha512_update(ctx, data, len);
+    sha512_final(ctx, out);
+    free(ctx);
+}
