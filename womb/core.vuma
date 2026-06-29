@@ -1,17 +1,23 @@
 // ═══════════════════════════════════════════════════════════════════════════
-// womb/core.vuma — The Womb Standard Library
+// womb/core.vuma — The Womb Standard Library (DESIGN SPEC, NOT COMPILABLE)
 // ═══════════════════════════════════════════════════════════════════════════
 //
-// This file demonstrates VUMA's four LLM-native data models:
+// STATUS: This file is aspirational design pseudocode. The VUMA compiler
+// CANNOT compile this file. The `concept`, `gestalt`, `manifold`, `aura`
+// keywords are lexed and parsed into AST/SCG nodes, but the compiler
+// pipeline does not lower them to IR or generate code for them. The
+// builtin functions (concept_get, manifold_alloc, aura_attach, etc.)
+// are not implemented in any backend.
+//
+// This file exists to document the intended design of the Womb — VUMA's
+// planned self-hosted standard library — so that future implementation
+// work has a clear target. Do not attempt to compile or run this file.
+//
+// The four planned LLM-native data models:
 //   1. Concept  — Relational data with lazy layout inference (replaces struct)
 //   2. Gestalt  — Tagless, context-dependent superposition (replaces union)
 //   3. Manifold — Multi-dimensional spatial data with space-filling curves
 //   4. Aura     — Self-describing metadata for runtime introspection
-//
-// These models form the foundation of the Womb — VUMA's self-hosted core
-// library. They are designed to be LLM-reasonable: no rigid memory layouts,
-// no runtime tag overhead, no hidden state. The compiler (IVE) proves
-// safety at compile time, enabling zero-overhead abstractions.
 
 // ═══════════════════════════════════════════════════════════════════════════
 // MODEL 1: CONCEPT — Relational Data (replaces struct)
