@@ -1,0 +1,369 @@
+// womb/crypto/x25519.vuma — X25519 (RFC 7748)
+// Curve25519 Diffie-Hellman key exchange using Montgomery ladder.
+// No main() — importable library module.
+//
+// p = 2^255 - 19
+// Curve: y^2 = x^3 + 486662*x^2 + x (mod p)
+// Base point u = 9 (x-coordinate only)
+//
+// All arithmetic is field arithmetic mod p = 2^255 - 19.
+
+// ===========================================================================
+// Field reduction mod p = 2^255 - 19
+// After multiplication, we have a 512-bit result that needs reduction.
+// The reduction uses the identity: 2^255 ≡ 19 (mod p)
+// ===========================================================================
+
+// Load 32 bytes little-endian as 4 × u64 limbs
+fn load_u64_le(ptr: Address, off: u32) -> u64 {
+    b0: u64 = *(ptr + off); b1: u64 = *(ptr + off + 1);
+    b2: u64 = *(ptr + off + 2); b3: u64 = *(ptr + off + 3);
+    b4: u64 = *(ptr + off + 4); b5: u64 = *(ptr + off + 5);
+    b6: u64 = *(ptr + off + 6); b7: u64 = *(ptr + off + 7);
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
+}
+
+fn store_u64_le(ptr: Address, off: u32, val: u64) {
+    *(ptr + off) = val & 255;
+    *(ptr + off + 1) = (val >> 8) & 255;
+    *(ptr + off + 2) = (val >> 16) & 255;
+    *(ptr + off + 3) = (val >> 24) & 255;
+    *(ptr + off + 4) = (val >> 32) & 255;
+    *(ptr + off + 5) = (val >> 40) & 255;
+    *(ptr + off + 6) = (val >> 48) & 255;
+    *(ptr + off + 7) = (val >> 56) & 255;
+}
+
+// Field element: 4 × u64 limbs (little-endian), representing 256-bit number mod p
+// p = 2^255 - 19
+
+fn fe_zero(r: Address) {
+    i: u32 = 0;
+    while i < 32 { *(r + i) = 0; i = i + 1; }
+}
+
+fn fe_one(r: Address) {
+    fe_zero(r);
+    *(r + 0) = 1;
+}
+
+fn fe_copy(r: Address, a: Address) {
+    i: u32 = 0;
+    while i < 32 { *(r + i) = *(a + i); i = i + 1; }
+}
+
+fn fe_add(r: Address, a: Address, b: Address) {
+    // Add then reduce mod p
+    carry: u64 = 0;
+    i: u32 = 0;
+    while i < 4 {
+        av: u64 = load_u64_le(a, i * 8);
+        bv: u64 = load_u64_le(b, i * 8);
+        sum: u64 = av + bv + carry;
+        store_u64_le(r, i * 8, sum);
+        if sum < av { carry = 1; }
+        else { carry = 0; }
+        i = i + 1;
+    }
+
+    // If there's a carry or result >= p, subtract p
+    // p = 2^255 - 19, so p in LE = [0xED, 0xFF, 0xFF, ..., 0x7F]
+    // Check if bit 255 is set or carry occurred
+    hi: u64 = load_u64_le(r, 24);
+    if carry == 1 || (hi >> 63) == 1 {
+        // Subtract p = 2^255 - 19
+        // Equivalent to: subtract 2^255 and add 19
+        // Clear bit 255
+        store_u64_le(r, 24, load_u64_le(r, 24) & 9223372036854775807);
+        // Add 19
+        lo: u64 = load_u64_le(r, 0);
+        store_u64_le(r, 0, lo + 19);
+        // Handle carry from adding 19
+        if lo + 19 < lo {
+            i = 1;
+            while i < 4 {
+                v: u64 = load_u64_le(r, i * 8);
+                store_u64_le(r, i * 8, v + 1);
+                if v + 1 > v { break; }
+                i = i + 1;
+            }
+        }
+    }
+
+    // Final check: if still >= p, subtract p again
+    hi = load_u64_le(r, 24);
+    if (hi >> 63) == 1 {
+        store_u64_le(r, 24, hi & 9223372036854775807);
+        lo: u64 = load_u64_le(r, 0);
+        store_u64_le(r, 0, lo + 19);
+    }
+}
+
+fn fe_sub(r: Address, a: Address, b: Address) {
+    // a - b mod p
+    // If a < b, add p = 2^255 - 19
+    borrow: u64 = 0;
+    i: u32 = 0;
+    while i < 4 {
+        av: u64 = load_u64_le(a, i * 8);
+        bv: u64 = load_u64_le(b, i * 8);
+        diff: u64 = av - bv - borrow;
+        store_u64_le(r, i * 8, diff);
+        if av < bv { borrow = 1; }
+        else {
+            if av == bv && borrow == 1 { borrow = 1; }
+            else { borrow = 0; }
+        }
+        i = i + 1;
+    }
+
+    // If borrow, add p
+    if borrow == 1 {
+        // Add 2^255 - 19 = set bit 255 and subtract 19
+        // Actually: add p = 2^255 - 19
+        // = add 2^255 (set bit 255) and subtract 19
+        lo: u64 = load_u64_le(r, 0);
+        if lo >= 19 {
+            store_u64_le(r, 0, lo - 19);
+        } else {
+            store_u64_le(r, 0, lo + 18446744073709551597);  // 0 - 19 + 2^64
+            // Propagate borrow
+            i = 1;
+            while i < 4 {
+                v: u64 = load_u64_le(r, i * 8);
+                if v >= 1 {
+                    store_u64_le(r, i * 8, v - 1);
+                    break;
+                } else {
+                    store_u64_le(r, i * 8, 18446744073709551615);
+                }
+                i = i + 1;
+            }
+        }
+        // Set bit 255
+        hi: u64 = load_u64_le(r, 24);
+        store_u64_le(r, 24, hi | 9223372036854775808);
+    }
+}
+
+fn fe_mul(r: Address, a: Address, b: Address) {
+    // Schoolbook 256×256 → 512 bit multiply, then reduce mod p
+    // This is simplified — uses the bignum mod_mul
+    p_le = allocate(32);
+    *(p_le + 0) = 237;
+    i: u32 = 1;
+    while i < 31 { *(p_le + i) = 255; i = i + 1; }
+    *(p_le + 31) = 127;
+
+    bn256_mod_mul(r, a, b, p_le);
+    free(p_le);
+}
+
+fn fe_square(r: Address, a: Address) {
+    fe_mul(r, a, a);
+}
+
+fn fe_mul121666(r: Address, a: Address) {
+    // r = a * 121666 mod p
+    b = allocate(32);
+    fe_zero(b);
+    // 121666 = 0x1DB42
+    *(b + 0) = 66;   // 0x42
+    *(b + 1) = 219;  // 0xDB
+    *(b + 2) = 1;    // 0x01
+    fe_mul(r, a, b);
+    free(b);
+}
+
+fn fe_invert(r: Address, a: Address) {
+    // Compute a^(-1) mod p using Fermat's little theorem
+    // a^(-1) = a^(p-2) mod p = a^(2^255 - 21) mod p
+    p_le = allocate(32);
+    *(p_le + 0) = 237;
+    i: u32 = 1;
+    while i < 31 { *(p_le + i) = 255; i = i + 1; }
+    *(p_le + 31) = 127;
+
+    // exp = p - 2 = 2^255 - 21
+    exp = allocate(32);
+    fe_copy(exp, p_le);
+    // Subtract 2
+    lo: u64 = load_u64_le(exp, 0);
+    store_u64_le(exp, 0, lo - 2);
+
+    bn256_mod_exp(r, a, exp, p_le);
+    free(p_le); free(exp);
+}
+
+fn fe_cswap(swap: u32, a: Address, b: Address) {
+    // Constant-time conditional swap
+    // If swap=1, exchange a and b; if swap=0, do nothing
+    mask: u32 = 0;
+    if swap == 1 { mask = MASK32; }
+
+    i: u32 = 0;
+    while i < 32 {
+        av: u32 = *(a + i);
+        bv: u32 = *(b + i);
+        dummy: u32 = (av ^ bv) & mask;
+        *(a + i) = av ^ dummy;
+        *(b + i) = bv ^ dummy;
+        i = i + 1;
+    }
+}
+
+const MASK32: u32 = 4294967295;
+
+// ===========================================================================
+// Montgomery Ladder — scalar multiplication on Curve25519
+// RFC 7748 Section 5: x25519(k, u) computes k*(u:x-coordinate)
+// ===========================================================================
+
+fn x25519_scalarmult(out: Address, scalar: Address, point: Address) {
+    // Clamp scalar
+    k = allocate(32);
+    i: u32 = 0;
+    while i < 32 { *(k + i) = *(scalar + i); i = i + 1; }
+    *(k + 0) = *(k + 0) & 248;    // clear bits 0-2
+    *(k + 31) = *(k + 31) & 127;  // clear bit 255
+    *(k + 31) = *(k + 31) | 64;   // set bit 254
+
+    // Decode u-coordinate (mask high bit)
+    u = allocate(32);
+    i = 0;
+    while i < 32 { *(u + i) = *(point + i); i = i + 1; }
+    *(u + 31) = *(u + 31) & 127;
+
+    // Montgomery ladder
+    x1 = allocate(32);
+    fe_copy(x1, u);
+
+    x2 = allocate(32);
+    fe_one(x2);  // x2 = 1
+
+    z2 = allocate(32);
+    fe_zero(z2);  // z2 = 0
+
+    x3 = allocate(32);
+    fe_copy(x3, u);  // x3 = u
+
+    z3 = allocate(32);
+    fe_one(z3);  // z3 = 1
+
+    swap: u32 = 0;
+
+    t = i;
+    pos: i32 = 254;
+    while pos >= 0 {
+        // Get bit pos of scalar
+        byte_idx: u32 = pos / 8;
+        bit_idx: u32 = pos % 8;
+        bit: u32 = (*(k + byte_idx) >> bit_idx) & 1;
+
+        swap = swap ^ bit;
+        fe_cswap(swap, x2, x3);
+        fe_cswap(swap, z2, z3);
+        swap = bit;
+
+        // A = x2 + z2
+        a = allocate(32);
+        fe_add(a, x2, z2);
+
+        // AA = A^2
+        aa = allocate(32);
+        fe_square(aa, a);
+
+        // B = x2 - z2
+        b = allocate(32);
+        fe_sub(b, x2, z2);
+
+        // BB = B^2
+        bb = allocate(32);
+        fe_square(bb, b);
+
+        // E = AA - BB
+        e_val = allocate(32);
+        fe_sub(e_val, aa, bb);
+
+        // C = x3 + z3
+        c = allocate(32);
+        fe_add(c, x3, z3);
+
+        // D = x3 - z3
+        d = allocate(32);
+        fe_sub(d, x3, z3);
+
+        // DA = D * A
+        da = allocate(32);
+        fe_mul(da, d, a);
+
+        // CB = C * B
+        cb = allocate(32);
+        fe_mul(cb, c, b);
+
+        // x3 = (DA + CB)^2
+        da_cb = allocate(32);
+        fe_add(da_cb, da, cb);
+        fe_square(x3, da_cb);
+
+        // z3 = x1 * (DA - CB)^2
+        da_cb_sub = allocate(32);
+        fe_sub(da_cb_sub, da, cb);
+        sq = allocate(32);
+        fe_square(sq, da_cb_sub);
+        fe_mul(z3, x1, sq);
+
+        // x2 = AA * BB
+        fe_mul(x2, aa, bb);
+
+        // z2 = E * (AA + a24 * E)
+        // a24 = 121665
+        a24_e = allocate(32);
+        fe_mul121666(a24_e, e_val);
+        aa_a24e = allocate(32);
+        fe_add(aa_a24e, aa, a24_e);
+        fe_mul(z2, e_val, aa_a24e);
+
+        free(a); free(aa); free(b); free(bb); free(e_val);
+        free(c); free(d); free(da); free(cb); free(da_cb);
+        free(da_cb_sub); free(sq); free(a24_e); free(aa_a24e);
+
+        pos = pos - 1;
+    }
+
+    // Final swap
+    fe_cswap(swap, x2, x3);
+    fe_cswap(swap, z2, z3);
+
+    // Compute result = x2 * z2^(-1)
+    z_inv = allocate(32);
+    fe_invert(z_inv, z2);
+    fe_mul(out, x2, z_inv);
+
+    free(k); free(u); free(x1); free(x2); free(z2); free(x3); free(z3); free(z_inv);
+}
+
+// ===========================================================================
+// X25519 key pair generation
+// private key: 32 random bytes (clamped internally)
+// public key: x25519(private, base_point=9)
+// ===========================================================================
+
+fn x25519_keygen(privkey: Address, pubkey: Address) {
+    // Base point u = 9 (32 bytes, little-endian)
+    base = allocate(32);
+    fe_zero(base);
+    *(base + 0) = 9;
+
+    x25519_scalarmult(pubkey, privkey, base);
+    free(base);
+}
+
+// ===========================================================================
+// X25519 shared secret
+// shared = x25519(my_private, their_public)
+// ===========================================================================
+
+fn x25519_shared_secret(my_privkey: Address, their_pubkey: Address, shared: Address) {
+    x25519_scalarmult(shared, my_privkey, their_pubkey);
+}
