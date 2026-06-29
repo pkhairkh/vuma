@@ -1,0 +1,74 @@
+// womb/crypto/ecdh_p256.vuma — ECDH Key Exchange over NIST P-256
+// No main() — importable library module.
+// Requires: ecdsa_p256.vuma (shares curve parameters and point operations).
+
+// ===========================================================================
+// Generate public key from private key
+// Q = d * G
+// privkey: 32-byte big-endian scalar
+// pubkey_x, pubkey_y: 32-byte big-endian point coordinates (output)
+// ===========================================================================
+
+fn ecdh_p256_keygen(privkey_be: Address, pubkey_x_be: Address, pubkey_y_be: Address) {
+    // Convert private key to little-endian
+    d_le = allocate(32);
+    swap_endian_32(d_le, privkey_be);
+
+    // Get generator point in little-endian
+    gx_be = p256_gx();
+    gy_be = p256_gy();
+    gx_le = allocate(32);
+    gy_le = allocate(32);
+    swap_endian_32(gx_le, gx_be);
+    swap_endian_32(gy_le, gy_be);
+    free(gx_be); free(gy_be);
+
+    // Get prime p in little-endian
+    p_be = p256_p();
+    p_le = allocate(32);
+    swap_endian_32(p_le, p_be);
+    free(p_be);
+
+    // Q = d * G
+    qx_le = allocate(32);
+    qy_le = allocate(32);
+    p256_scalar_mul(qx_le, qy_le, d_le, gx_le, gy_le, p_le);
+
+    // Convert to big-endian output
+    swap_endian_32(pubkey_x_be, qx_le);
+    swap_endian_32(pubkey_y_be, qy_le);
+
+    free(d_le); free(gx_le); free(gy_le); free(p_le); free(qx_le); free(qy_le);
+}
+
+// ===========================================================================
+// Compute shared secret
+// S = d * Q (where d is our private key, Q is their public key)
+// Returns the x-coordinate of the shared point (32 bytes, big-endian)
+// ===========================================================================
+
+fn ecdh_p256_shared_secret(privkey_be: Address, peer_pubkey_x_be: Address, peer_pubkey_y_be: Address, shared_secret: Address) {
+    // Convert to little-endian
+    d_le = allocate(32);
+    swap_endian_32(d_le, privkey_be);
+    qx_le = allocate(32);
+    qy_le = allocate(32);
+    swap_endian_32(qx_le, peer_pubkey_x_be);
+    swap_endian_32(qy_le, peer_pubkey_y_be);
+
+    // Get prime p
+    p_be = p256_p();
+    p_le = allocate(32);
+    swap_endian_32(p_le, p_be);
+    free(p_be);
+
+    // S = d * Q
+    sx_le = allocate(32);
+    sy_le = allocate(32);
+    p256_scalar_mul(sx_le, sy_le, d_le, qx_le, qy_le, p_le);
+
+    // Output x-coordinate as shared secret (big-endian)
+    swap_endian_32(shared_secret, sx_le);
+
+    free(d_le); free(qx_le); free(qy_le); free(p_le); free(sx_le); free(sy_le);
+}
