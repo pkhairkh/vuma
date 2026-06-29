@@ -1,0 +1,378 @@
+// threading.vuma
+// VUMA standard library module: threading primitives.
+// Target: Linux (x86_64, aarch64, riscv64, arm32, mips64, ppc64, loongarch64, x86_32).
+// Importable library module — no main().
+//
+// Task ID: womb-threading
+//
+// This module provides five futex-based synchronization primitives:
+//   1. Mutex              — exclusive lock                      (4 bytes)
+//   2. Condition Variable — wait/signal paired with a mutex     (8 bytes)
+//   3. RWLock             — shared/exclusive (reader/writer)    (8 bytes)
+//   4. Semaphore          — counting semaphore                  (4 bytes)
+//   5. Spinlock           — busy-wait lock                      (4 bytes)
+//
+// All memory is managed with allocate()/free(); byte-level loads and
+// stores use the *(ptr + offset) primitive. Multi-byte integers are
+// stored in little-endian layout (native on every VUMA backend), which
+// matches what the Linux kernel expects when reading futex words.
+//
+// NOTE ON ATOMICITY: This surface does not expose hardware atomic
+// instructions. The test-and-set used by Mutex and Spinlock is a
+// non-atomic load-then-store pair, which the task spec explicitly
+// permits under VUMA's memory model. Correctness of the blocking
+// primitives (Mutex contended path, Condvar, RWLock, Semaphore)
+// ultimately relies on the kernel-side atomicity of futex: the kernel
+// re-reads the word under its own lock before parking a waiter, which
+// closes the lost-wakeup window.
+
+// ===========================================================================
+// Linux syscalls
+// ===========================================================================
+
+extern "C" {
+    fn futex(uaddr: Address, futex_op: i64, val: i64, timeout: Address, uaddr2: Address, val3: i64) -> i64;
+    fn clone(flags: i64, stack: Address, ptid: Address, ctid: Address, newtls: i64) -> i64;
+    fn mmap(addr: Address, length: i64, prot: i64, flags: i64, fd: i64, offset: i64) -> Address;
+    fn munmap(addr: Address, length: i64) -> i64;
+    fn sched_yield() -> i64;
+}
+
+// ===========================================================================
+// Constants
+// ===========================================================================
+
+const FUTEX_WAIT: i64 = 0;
+const FUTEX_WAKE: i64 = 1;
+const FUTEX_PRIVATE_FLAG: i64 = 128;
+
+const PROT_READ: i64 = 1;
+const PROT_WRITE: i64 = 2;
+const MAP_PRIVATE: i64 = 2;
+const MAP_ANONYMOUS: i64 = 32;
+
+const CLONE_THREAD: i64 = 65536;
+const CLONE_SIGHAND: i64 = 2048;
+const CLONE_VM: i64 = 256;
+
+// Largest signed 32-bit value. Used as the `val` argument to FUTEX_WAKE
+// in cond_broadcast / rwlock_write_unlock to wake every waiter.
+const INT_MAX: i64 = 2147483647;
+
+// ===========================================================================
+// Internal byte-level helpers
+//
+// VUMA's *(ptr + offset) reads or writes a single byte. To present a
+// 4-byte word to the Linux kernel for futex (which treats uaddr as a
+// native int*), we decompose u32 values into 4 little-endian bytes.
+// Every primitive below goes through these helpers.
+// ===========================================================================
+
+// Load a 4-byte little-endian u32 starting at `addr`.
+fn load_u32(addr: Address) -> u32 {
+    let b0: u32 = *(addr + 0) as u32;
+    let b1: u32 = *(addr + 1) as u32;
+    let b2: u32 = *(addr + 2) as u32;
+    let b3: u32 = *(addr + 3) as u32;
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+}
+
+// Store a 4-byte little-endian u32 starting at `addr`.
+fn store_u32(addr: Address, value: u32) {
+    *(addr + 0) = value & 255;
+    *(addr + 1) = (value >> 8) & 255;
+    *(addr + 2) = (value >> 16) & 255;
+    *(addr + 3) = (value >> 24) & 255;
+    return;
+}
+
+// Non-atomic test-and-set: load the word, if it is 0 store 1 and return
+// 1 (success); otherwise return 0 (failure). Not truly atomic on archs
+// without hardware support, but acceptable for VUMA's memory model per
+// the task spec. Used by Mutex and Spinlock.
+fn test_and_set(addr: Address) -> u32 {
+    let v: u32 = load_u32(addr);
+    if v == 0 {
+        store_u32(addr, 1);
+        return 1;
+    }
+    return 0;
+}
+
+// ===========================================================================
+// 1. Mutex
+//
+// 4 bytes: 0 = unlocked, 1 = locked.
+// The kernel reads this address as a 4-byte int when futex is invoked.
+//
+// Lock path: try test-and-set; on failure, FUTEX_WAIT with val=1 so the
+// kernel only parks us while the lock is still observed-locked, which
+// closes the lost-wakeup window against a concurrent unlocker.
+// Unlock path: store 0, FUTEX_WAKE one waiter.
+// ===========================================================================
+
+fn mutex_create() -> Address {
+    let m: Address = allocate(4);
+    store_u32(m, 0);
+    return m;
+}
+
+fn mutex_lock(m: Address) {
+    while true {
+        if test_and_set(m) == 1 {
+            return;
+        }
+        // Contended. Sleep until the kernel observes *m == 1; if the
+        // value has already changed (someone unlocked), return at once.
+        futex(m, FUTEX_WAIT | FUTEX_PRIVATE_FLAG, 1, 0, 0, 0);
+    }
+}
+
+fn mutex_trylock(m: Address) -> u32 {
+    return test_and_set(m);
+}
+
+fn mutex_unlock(m: Address) {
+    store_u32(m, 0);
+    // Release exactly one waiter; the rest will continue to block.
+    futex(m, FUTEX_WAKE | FUTEX_PRIVATE_FLAG, 1, 0, 0, 0);
+    return;
+}
+
+fn mutex_free(m: Address) {
+    free(m);
+    return;
+}
+
+// ===========================================================================
+// 2. Condition Variable
+//
+// 8 bytes:
+//   [0..3] sequence counter (u32) — the futex word
+//   [4..7] reserved (kept zero for future use)
+//
+// Waiters capture the current seq, release the mutex, then FUTEX_WAIT on
+// the seq word with that captured value. Signalers bump the seq (which
+// invalidates any waiter's expected value) and wake.
+//
+// This sequence-counter pattern is the standard futex condvar recipe;
+// it tolerates spurious wakeups because the waiter's caller is expected
+// to re-check the predicate in a loop, as with POSIX condvars.
+// ===========================================================================
+
+fn cond_create() -> Address {
+    let c: Address = allocate(8);
+    store_u32(c + 0, 0);     // seq
+    store_u32(c + 4, 0);     // reserved
+    return c;
+}
+
+fn cond_wait(cond: Address, m: Address) {
+    // Capture the seq BEFORE releasing the mutex, so a signal that
+    // arrives between unlock and wait is detectable: the kernel will
+    // see *cond != seq and return EAGAIN instead of parking us.
+    let seq: u32 = load_u32(cond + 0);
+
+    // Release the caller's mutex so other threads can make progress.
+    mutex_unlock(m);
+
+    // Sleep only while *cond == seq. On wake (or spurious return),
+    // fall through to re-locking.
+    futex(cond + 0, FUTEX_WAIT | FUTEX_PRIVATE_FLAG, seq as i64, 0, 0, 0);
+
+    // Re-acquire the mutex before returning, matching the condvar
+    // contract: the caller holds the mutex on entry and on exit.
+    mutex_lock(m);
+    return;
+}
+
+fn cond_signal(cond: Address) {
+    // Bump seq so any waiter's FUTEX_WAIT sees *cond != expected and
+    // either returns immediately or gets woken.
+    let seq: u32 = load_u32(cond + 0);
+    store_u32(cond + 0, seq + 1);
+    futex(cond + 0, FUTEX_WAKE | FUTEX_PRIVATE_FLAG, 1, 0, 0, 0);
+    return;
+}
+
+fn cond_broadcast(cond: Address) {
+    let seq: u32 = load_u32(cond + 0);
+    store_u32(cond + 0, seq + 1);
+    // INT_MAX wakes every waiter currently parked on this word.
+    futex(cond + 0, FUTEX_WAKE | FUTEX_PRIVATE_FLAG, INT_MAX, 0, 0, 0);
+    return;
+}
+
+fn cond_free(cond: Address) {
+    free(cond);
+    return;
+}
+
+// ===========================================================================
+// 3. RWLock
+//
+// 8 bytes:
+//   [0..3] reader count (u32) — number of active read holders
+//   [4..7] writer flag   (u32) — 0 = no writer, 1 = writer holds lock
+//
+// Readers: bump reader count only when writer flag is 0.
+// Writers: set writer flag only when reader count is 0 and writer flag is 0.
+//
+// Wakeups are aimed at the appropriate word:
+//   - read_unlock wakes one writer (on the writer flag) when the last
+//     reader leaves.
+//   - write_unlock wakes one writer (writer flag) and all readers
+//     (reader count).
+// ===========================================================================
+
+fn rwlock_create() -> Address {
+    let rw: Address = allocate(8);
+    store_u32(rw + 0, 0);    // reader count
+    store_u32(rw + 4, 0);    // writer flag
+    return rw;
+}
+
+fn rwlock_read_lock(rw: Address) {
+    while true {
+        let writer: u32 = load_u32(rw + 4);
+        if writer == 0 {
+            // No active writer — take a read slot.
+            let readers: u32 = load_u32(rw + 0);
+            store_u32(rw + 0, readers + 1);
+            return;
+        }
+        // A writer holds the lock — wait for it to clear the flag.
+        futex(rw + 4, FUTEX_WAIT | FUTEX_PRIVATE_FLAG, 1, 0, 0, 0);
+    }
+}
+
+fn rwlock_read_unlock(rw: Address) {
+    let readers: u32 = load_u32(rw + 0);
+    store_u32(rw + 0, readers - 1);
+    // Last reader out wakes one pending writer.
+    if readers == 1 {
+        futex(rw + 4, FUTEX_WAKE | FUTEX_PRIVATE_FLAG, 1, 0, 0, 0);
+    }
+    return;
+}
+
+fn rwlock_write_lock(rw: Address) {
+    while true {
+        let readers: u32 = load_u32(rw + 0);
+        let writer: u32 = load_u32(rw + 4);
+        if readers == 0 {
+            if writer == 0 {
+                store_u32(rw + 4, 1);
+                return;
+            }
+        }
+        // Block on the writer flag if a writer is active; otherwise
+        // wait on the reader count for its current value, which will
+        // change as readers exit.
+        if writer != 0 {
+            futex(rw + 4, FUTEX_WAIT | FUTEX_PRIVATE_FLAG, 1, 0, 0, 0);
+        } else {
+            futex(rw + 0, FUTEX_WAIT | FUTEX_PRIVATE_FLAG, readers as i64, 0, 0, 0);
+        }
+    }
+}
+
+fn rwlock_write_unlock(rw: Address) {
+    // Drop the writer flag first so waiters can re-evaluate.
+    store_u32(rw + 4, 0);
+    // Wake one pending writer (if any)…
+    futex(rw + 4, FUTEX_WAKE | FUTEX_PRIVATE_FLAG, 1, 0, 0, 0);
+    // …and all pending readers.
+    futex(rw + 0, FUTEX_WAKE | FUTEX_PRIVATE_FLAG, INT_MAX, 0, 0, 0);
+    return;
+}
+
+fn rwlock_free(rw: Address) {
+    free(rw);
+    return;
+}
+
+// ===========================================================================
+// 4. Semaphore
+//
+// 4 bytes: unsigned count. sem_wait decrements when count > 0, else
+// blocks on FUTEX_WAIT with val=0 (only block while count is still 0).
+// sem_post increments and wakes one waiter.
+// ===========================================================================
+
+fn sem_create(initial: u32) -> Address {
+    let s: Address = allocate(4);
+    store_u32(s, initial);
+    return s;
+}
+
+fn sem_wait(s: Address) {
+    while true {
+        let c: u32 = load_u32(s);
+        if c > 0 {
+            store_u32(s, c - 1);
+            return;
+        }
+        // c == 0 — decrementing would go negative. Sleep while the
+        // kernel still observes *s == 0; a sem_post will change it
+        // and either return EAGAIN or wake us.
+        futex(s, FUTEX_WAIT | FUTEX_PRIVATE_FLAG, 0, 0, 0, 0);
+    }
+}
+
+fn sem_post(s: Address) {
+    let c: u32 = load_u32(s);
+    store_u32(s, c + 1);
+    // Wake at most one waiter.
+    futex(s, FUTEX_WAKE | FUTEX_PRIVATE_FLAG, 1, 0, 0, 0);
+    return;
+}
+
+fn sem_trywait(s: Address) -> u32 {
+    let c: u32 = load_u32(s);
+    if c > 0 {
+        store_u32(s, c - 1);
+        return 1;
+    }
+    return 0;
+}
+
+fn sem_free(s: Address) {
+    free(s);
+    return;
+}
+
+// ===========================================================================
+// 5. Spinlock
+//
+// 4 bytes: 0 = unlocked, 1 = locked. Pure userspace busy-wait that
+// calls sched_yield() between attempts so the scheduler can run other
+// threads instead of burning a full quantum. No futex used — this is
+// the right choice for very short critical sections only.
+// ===========================================================================
+
+fn spin_create() -> Address {
+    let s: Address = allocate(4);
+    store_u32(s, 0);
+    return s;
+}
+
+fn spin_lock(s: Address) {
+    while true {
+        if test_and_set(s) == 1 {
+            return;
+        }
+        // Contended — let the scheduler run something else, then retry.
+        sched_yield();
+    }
+}
+
+fn spin_unlock(s: Address) {
+    store_u32(s, 0);
+    return;
+}
+
+fn spin_free(s: Address) {
+    free(s);
+    return;
+}

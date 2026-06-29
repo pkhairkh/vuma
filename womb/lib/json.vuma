@@ -1,0 +1,1253 @@
+// json.vuma
+// VUMA standard library module: JSON parser, builder, and serializer (RFC 8259).
+// Target: all 10 VUMA backends. Importable library module (no main()).
+//
+// Task ID: womb-json
+//
+// JSON values are represented as 16-byte typed nodes in heap memory:
+//
+//   Node layout (16 bytes, little-endian):
+//     [0..3]    type        (u32)  — JSON_NULL / BOOL / INT / FLOAT / STRING / ARRAY / OBJECT
+//     [4..7]    padding     (u32)  — unused, keeps value_or_ptr 8-byte aligned
+//     [8..15]   value_or_ptr (u64) — scalar value or Address of owned data
+//
+//   For JSON_NULL:   value_or_ptr is 0 (unused).
+//   For JSON_BOOL:   value_or_ptr is 0 (false) or 1 (true), stored as u64.
+//   For JSON_INT:    value_or_ptr is the i64 bit pattern, stored as u64.
+//   For JSON_FLOAT:  value_or_ptr is the f64 bit pattern, stored as 8 bytes.
+//   For JSON_STRING: value_or_ptr is the Address of a null-terminated owned string.
+//   For JSON_ARRAY:  value_or_ptr is the Address of a vector handle (see below).
+//   For JSON_OBJECT: value_or_ptr is the Address of a vector handle (see below).
+//
+//   Vector handle (16 bytes):
+//     [0..7]    data_ptr  (Address) — heap buffer of cap * slot_size bytes
+//     [8..11]   len       (u32)     — number of stored slots
+//     [12..15]  cap       (u32)     — allocated slot count
+//
+//   Array slot  (8 bytes):  [0..7]  node_ptr (Address)
+//   Object slot (16 bytes): [0..7]  key_ptr  (Address, owned null-terminated string)
+//                            [8..15] val_ptr  (Address, owned node)
+//
+// Ownership: every node owns its subtree. json_new_string and json_parse_string
+// copy/allocate their own string buffers. json_object_set copies its key argument.
+// json_free recursively frees a node tree and all owned memory.
+//
+// The `pos` parameter in parser functions is an Address pointing to a 4-byte
+// little-endian u32 holding the current scan offset into `text`. Functions
+// advance that offset in place (in-out convention).
+
+// ===========================================================================
+// Type constants
+// ===========================================================================
+
+const JSON_NULL: u32   = 0;
+const JSON_BOOL: u32   = 1;
+const JSON_INT: u32    = 2;
+const JSON_FLOAT: u32  = 3;
+const JSON_STRING: u32 = 4;
+const JSON_ARRAY: u32  = 5;
+const JSON_OBJECT: u32 = 6;
+
+const JSON_VEC_INIT_CAP: u32 = 4;
+
+// ===========================================================================
+// Byte-level load/store helpers
+// ===========================================================================
+// *(ptr + offset) returns/stores a single byte as u32. These helpers
+// assemble/disassemble multi-byte values in little-endian order.
+
+fn json_load_u32(ptr: Address, off: u32) -> u32 {
+    let b0: u32 = *(ptr + off);
+    let b1: u32 = *(ptr + off + 1);
+    let b2: u32 = *(ptr + off + 2);
+    let b3: u32 = *(ptr + off + 3);
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+}
+
+fn json_store_u32(ptr: Address, off: u32, val: u32) {
+    *(ptr + off)     = val & 255;
+    *(ptr + off + 1) = (val >> 8) & 255;
+    *(ptr + off + 2) = (val >> 16) & 255;
+    *(ptr + off + 3) = (val >> 24) & 255;
+}
+
+fn json_load_u64(ptr: Address, off: u32) -> u64 {
+    let b0: u64 = *(ptr + off)     as u64;
+    let b1: u64 = *(ptr + off + 1) as u64;
+    let b2: u64 = *(ptr + off + 2) as u64;
+    let b3: u64 = *(ptr + off + 3) as u64;
+    let b4: u64 = *(ptr + off + 4) as u64;
+    let b5: u64 = *(ptr + off + 5) as u64;
+    let b6: u64 = *(ptr + off + 6) as u64;
+    let b7: u64 = *(ptr + off + 7) as u64;
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+         | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
+}
+
+fn json_store_u64(ptr: Address, off: u32, val: u64) {
+    *(ptr + off)     = val & 255;
+    *(ptr + off + 1) = (val >> 8) & 255;
+    *(ptr + off + 2) = (val >> 16) & 255;
+    *(ptr + off + 3) = (val >> 24) & 255;
+    *(ptr + off + 4) = (val >> 32) & 255;
+    *(ptr + off + 5) = (val >> 40) & 255;
+    *(ptr + off + 6) = (val >> 48) & 255;
+    *(ptr + off + 7) = (val >> 56) & 255;
+}
+
+fn json_load_addr(ptr: Address, off: u32) -> Address {
+    let v: u64 = json_load_u64(ptr, off);
+    return v as Address;
+}
+
+fn json_store_addr(ptr: Address, off: u32, val: Address) {
+    json_store_u64(ptr, off, val as u64);
+}
+
+// ===========================================================================
+// Position helpers — load/store the 4-byte little-endian u32 pointed to by
+// `pos`. (Same convention as unicode.vuma's utf8_load_pos / utf8_store_pos.)
+// ===========================================================================
+
+fn json_load_pos(pos: Address) -> u32 {
+    return *(pos + 0) | (*(pos + 1) << 8) | (*(pos + 2) << 16) | (*(pos + 3) << 24);
+}
+
+fn json_store_pos(pos: Address, val: u32) {
+    *(pos + 0) = val & 255;
+    *(pos + 1) = (val >> 8) & 255;
+    *(pos + 2) = (val >> 16) & 255;
+    *(pos + 3) = (val >> 24) & 255;
+}
+
+// ===========================================================================
+// f64 storage helpers
+// ===========================================================================
+// The node's value_or_ptr field (bytes 8..15) holds an f64 bit pattern for
+// JSON_FLOAT nodes. VUMA supports typed f64 stores through an Address via
+// `*ptr = f64_val` (see vuma_fix/examples/float_math.vuma, demo_fp_memory).
+// We use an 8-byte temp buffer to move between f64 and its byte representation.
+
+fn json_store_f64(node: Address, val: f64) {
+    let tmp: Address = allocate(8);
+    *tmp = val;
+    let i: u32 = 0;
+    while i < 8 {
+        let b: u32 = *(tmp + i);
+        *(node + 8 + i) = b;
+        i = i + 1;
+    }
+    free(tmp);
+}
+
+fn json_load_f64(node: Address) -> f64 {
+    let tmp: Address = allocate(8);
+    let i: u32 = 0;
+    while i < 8 {
+        let b: u32 = *(node + 8 + i);
+        *(tmp + i) = b;
+        i = i + 1;
+    }
+    let val: f64 = *tmp;
+    free(tmp);
+    return val;
+}
+
+// ===========================================================================
+// Inline string helpers (strlen, strcmp, strncmp)
+// ===========================================================================
+
+fn json_strlen(s: Address) -> u32 {
+    let n: u32 = 0;
+    while *(s + n) != 0 { n = n + 1; }
+    return n;
+}
+
+fn json_strcmp(a: Address, b: Address) -> i32 {
+    let i: u32 = 0;
+    while 1 == 1 {
+        let ca: u32 = *(a + i);
+        let cb: u32 = *(b + i);
+        if ca == 0 { if cb == 0 { return 0; } return -1; }
+        if cb == 0 { return 1; }
+        if ca < cb { return -1; }
+        if ca > cb { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn json_strncmp(a: Address, b: Address, n: u32) -> i32 {
+    let i: u32 = 0;
+    while i < n {
+        let ca: u32 = *(a + i);
+        let cb: u32 = *(b + i);
+        if ca == 0 { if cb == 0 { return 0; } return -1; }
+        if cb == 0 { return 1; }
+        if ca < cb { return -1; }
+        if ca > cb { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+// ===========================================================================
+// Character classification helpers
+// ===========================================================================
+
+fn json_hex_val(c: u32) -> u32 {
+    if c >= 48 { if c <= 57 { return c - 48; } }     // '0'-'9'
+    if c >= 97 { if c <= 102 { return c - 87; } }    // 'a'-'f'
+    if c >= 65 { if c <= 70 { return c - 55; } }     // 'A'-'F'
+    return 0;
+}
+
+fn json_hex_digit(v: u32) -> u32 {
+    if v < 10 { return 48 + v; }       // '0'-'9'
+    return 97 + v - 10;                // 'a'-'f' (lowercase)
+}
+
+fn json_is_digit(c: u32) -> u32 {
+    if c >= 48 { if c <= 57 { return 1; } }
+    return 0;
+}
+
+// ===========================================================================
+// Node creation helper
+// ===========================================================================
+
+fn json_make_node(t: u32, value: u64) -> Address {
+    let node: Address = allocate(16);
+    json_store_u32(node, 0, t);
+    json_store_u32(node, 4, 0);
+    json_store_u64(node, 8, value);
+    return node;
+}
+
+// ===========================================================================
+// Vector grow helper
+// ===========================================================================
+// Doubles the capacity of the vector owned by `node`. The vector handle
+// itself is reallocated (header + data in one block), so the node's
+// value_or_ptr is updated to point at the new handle.
+
+fn json_vec_grow(node: Address, slot_size: u32) {
+    let old_vec: Address = json_load_addr(node, 8);
+    let old_cap: u32 = json_load_u32(old_vec, 12);
+    let new_cap: u32 = old_cap * 2;
+    let work_cap: u32 = new_cap;
+    if new_cap == 0 { work_cap = JSON_VEC_INIT_CAP; }
+    let new_data_size: u32 = work_cap * slot_size;
+    let new_data: Address = allocate(new_data_size);
+    let old_data: Address = json_load_addr(old_vec, 0);
+    // Copy existing data bytes.
+    let data_bytes: u32 = old_cap * slot_size;
+    let i: u32 = 0;
+    while i < data_bytes {
+        let b: u32 = *(old_data + i);
+        *(new_data + i) = b;
+        i = i + 1;
+    }
+    // Update the handle in place (handle layout is unchanged).
+    json_store_addr(old_vec, 0, new_data);
+    json_store_u32(old_vec, 12, work_cap);
+    free(old_data);
+}
+
+// ===========================================================================
+// Builder functions
+// ===========================================================================
+
+fn json_new_null() -> Address {
+    return json_make_node(JSON_NULL, 0);
+}
+
+fn json_new_bool(val: u32) -> Address {
+    let v: u64 = val as u64;
+    return json_make_node(JSON_BOOL, v);
+}
+
+fn json_new_int(val: i64) -> Address {
+    return json_make_node(JSON_INT, val as u64);
+}
+
+fn json_new_float(val: f64) -> Address {
+    let node: Address = allocate(16);
+    json_store_u32(node, 0, JSON_FLOAT);
+    json_store_u32(node, 4, 0);
+    json_store_f64(node, val);
+    return node;
+}
+
+fn json_new_string(str: Address) -> Address {
+    let len: u32 = json_strlen(str);
+    let buf: Address = allocate(len + 1);
+    let i: u32 = 0;
+    while i < len {
+        *(buf + i) = *(str + i);
+        i = i + 1;
+    }
+    *(buf + len) = 0;
+    return json_make_node(JSON_STRING, buf as u64);
+}
+
+fn json_new_array() -> Address {
+    let vec: Address = allocate(16);
+    let data: Address = allocate(JSON_VEC_INIT_CAP * 8);
+    json_store_addr(vec, 0, data);
+    json_store_u32(vec, 8, 0);                  // len = 0
+    json_store_u32(vec, 12, JSON_VEC_INIT_CAP); // cap = 4
+    return json_make_node(JSON_ARRAY, vec as u64);
+}
+
+fn json_new_object() -> Address {
+    let vec: Address = allocate(16);
+    let data: Address = allocate(JSON_VEC_INIT_CAP * 16);
+    json_store_addr(vec, 0, data);
+    json_store_u32(vec, 8, 0);                  // len = 0
+    json_store_u32(vec, 12, JSON_VEC_INIT_CAP); // cap = 4
+    return json_make_node(JSON_OBJECT, vec as u64);
+}
+
+fn json_array_push(arr: Address, node: Address) {
+    let vec: Address = json_load_addr(arr, 8);
+    let len: u32 = json_load_u32(vec, 8);
+    let cap: u32 = json_load_u32(vec, 12);
+    if len >= cap {
+        json_vec_grow(arr, 8);
+    }
+    let data: Address = json_load_addr(vec, 0);
+    json_store_addr(data, len * 8, node);
+    json_store_u32(vec, 8, len + 1);
+}
+
+// Public object setter: copies the key string (caller retains ownership of
+// the key argument) and stores the value node pointer (ownership transfers
+// to the object tree).
+fn json_object_set(obj: Address, key: Address, node: Address) {
+    // Copy the key so the object owns its own key string.
+    let key_len: u32 = json_strlen(key);
+    let new_key: Address = allocate(key_len + 1);
+    let i: u32 = 0;
+    while i < key_len {
+        *(new_key + i) = *(key + i);
+        i = i + 1;
+    }
+    *(new_key + key_len) = 0;
+    json_object_set_raw(obj, new_key, node);
+}
+
+// Internal object setter: takes ownership of `key` (either stores it in the
+// vector or frees it if the key already exists). Used by the parser, which
+// produces transient key buffers that should not be copied a second time.
+fn json_object_set_raw(obj: Address, key: Address, val_node: Address) {
+    let vec: Address = json_load_addr(obj, 8);
+    let len: u32 = json_load_u32(vec, 8);
+    let data: Address = json_load_addr(vec, 0);
+
+    // If the key already exists, replace the value and free the duplicate key.
+    let i: u32 = 0;
+    while i < len {
+        let slot_off: u32 = i * 16;
+        let k: Address = json_load_addr(data, slot_off);
+        if json_strcmp(k, key) == 0 {
+            json_store_addr(data, slot_off + 8, val_node);
+            free(key);
+            return;
+        }
+        i = i + 1;
+    }
+
+    // Key not found — append a new slot. Grow if necessary.
+    let cap: u32 = json_load_u32(vec, 12);
+    if len >= cap {
+        json_vec_grow(obj, 16);
+        data = json_load_addr(vec, 0);  // reload data ptr after grow
+    }
+    let slot_off: u32 = len * 16;
+    json_store_addr(data, slot_off, key);
+    json_store_addr(data, slot_off + 8, val_node);
+    json_store_u32(vec, 8, len + 1);
+}
+
+// ===========================================================================
+// Parser helpers
+// ===========================================================================
+
+fn json_pow10_u32(n: u32) -> f64 {
+    let result: f64 = 1.0;
+    let i: u32 = 0;
+    while i < n {
+        result = result * 10.0;
+        i = i + 1;
+    }
+    return result;
+}
+
+fn json_pow10(n: i64) -> f64 {
+    if n == 0 { return 1.0; }
+    if n > 0 {
+        let result: f64 = 1.0;
+        let i: i64 = 0;
+        while i < n {
+            result = result * 10.0;
+            i = i + 1;
+        }
+        return result;
+    }
+    // n < 0
+    let pos_n: i64 = 0 - n;
+    let result: f64 = 1.0;
+    let i: i64 = 0;
+    while i < pos_n {
+        result = result * 10.0;
+        i = i + 1;
+    }
+    return 1.0 / result;
+}
+
+fn json_parse_int_value(text: Address, start: u32, end: u32, negative: u32) -> i64 {
+    let p: u32 = start;
+    if negative == 1 { p = p + 1; }
+    let val: i64 = 0;
+    while p < end {
+        let c: u32 = *(text + p);
+        if json_is_digit(c) == 1 {
+            let digit: i64 = (c - 48) as i64;
+            val = val * 10 + digit;
+        }
+        p = p + 1;
+    }
+    if negative == 1 { return 0 - val; }
+    return val;
+}
+
+fn json_parse_float_value(text: Address, start: u32, end: u32) -> f64 {
+    let p: u32 = start;
+
+    // Integer part.
+    let int_val: f64 = 0.0;
+    while p < end {
+        let c: u32 = *(text + p);
+        if json_is_digit(c) == 1 {
+            let d: f64 = inttofloat(c - 48);
+            int_val = int_val * 10.0 + d;
+            p = p + 1;
+        } else {
+            break;
+        }
+    }
+
+    let val: f64 = int_val;
+
+    // Fractional part.
+    if p < end {
+        if *(text + p) == 46 {  // '.'
+            p = p + 1;
+            let frac_val: f64 = 0.0;
+            let frac_count: u32 = 0;
+            while p < end {
+                let c: u32 = *(text + p);
+                if json_is_digit(c) == 1 {
+                    let d: f64 = inttofloat(c - 48);
+                    frac_val = frac_val * 10.0 + d;
+                    frac_count = frac_count + 1;
+                    p = p + 1;
+                } else {
+                    break;
+                }
+            }
+            let divisor: f64 = json_pow10_u32(frac_count);
+            val = val + frac_val / divisor;
+        }
+    }
+
+    // Exponent part.
+    if p < end {
+        let c: u32 = *(text + p);
+        let is_e: u32 = 0;
+        if c == 101 { is_e = 1; }  // 'e'
+        if c == 69 { is_e = 1; }   // 'E'
+        if is_e == 1 {
+            p = p + 1;
+            let exp_neg: u32 = 0;
+            if p < end {
+                let ec: u32 = *(text + p);
+                if ec == 43 { p = p + 1; }       // '+'
+                else if ec == 45 { exp_neg = 1; p = p + 1; }  // '-'
+            }
+            let exp_val: i64 = 0;
+            while p < end {
+                let c2: u32 = *(text + p);
+                if json_is_digit(c2) == 1 {
+                    let d: i64 = (c2 - 48) as i64;
+                    exp_val = exp_val * 10 + d;
+                    p = p + 1;
+                } else {
+                    break;
+                }
+            }
+            if exp_neg == 1 { exp_val = 0 - exp_val; }
+            let pow: f64 = json_pow10(exp_val);
+            val = val * pow;
+        }
+    }
+
+    return val;
+}
+
+// ===========================================================================
+// Parser
+// ===========================================================================
+
+fn json_skip_whitespace(text: Address, pos: Address) {
+    let p: u32 = json_load_pos(pos);
+    while 1 == 1 {
+        let c: u32 = *(text + p);
+        if c == 32 { p = p + 1; }        // space
+        else if c == 9 { p = p + 1; }    // tab
+        else if c == 10 { p = p + 1; }   // LF
+        else if c == 13 { p = p + 1; }   // CR
+        else { break; }
+    }
+    json_store_pos(pos, p);
+}
+
+// json_parse: parse a JSON document. Returns the root node Address, or 0 on
+// error. The input need not be null-terminated; a null-terminated copy is
+// made internally so the recursive parser can scan safely.
+fn json_parse(text: Address, len: u32) -> Address {
+    // Make a null-terminated copy.
+    let buf: Address = allocate(len + 1);
+    let i: u32 = 0;
+    while i < len {
+        *(buf + i) = *(text + i);
+        i = i + 1;
+    }
+    *(buf + len) = 0;
+
+    let pos_buf: Address = allocate(4);
+    json_store_pos(pos_buf, 0);
+    json_skip_whitespace(buf, pos_buf);
+    let root: Address = json_parse_value(buf, pos_buf);
+
+    free(pos_buf);
+    // Safe to free buf: json_parse_string allocates its own owned copies.
+    free(buf);
+    return root;
+}
+
+fn json_parse_value(text: Address, pos: Address) -> Address {
+    json_skip_whitespace(text, pos);
+    let p: u32 = json_load_pos(pos);
+    let c: u32 = *(text + p);
+
+    if c == 0 { return 0; }                       // end of input
+    if c == 34 { return json_parse_string(text, pos); }   // '"'
+    if c == 123 { return json_parse_object(text, pos); }  // '{'
+    if c == 91 { return json_parse_array(text, pos); }    // '['
+    if c == 45 { return json_parse_number(text, pos); }   // '-'
+    if c >= 48 { if c <= 57 { return json_parse_number(text, pos); } }  // '0'-'9'
+
+    // Keywords: true (116), false (102), null (110).
+    if c == 116 {  // 't' → true
+        if *(text + p + 1) == 114 {
+            if *(text + p + 2) == 117 {
+                if *(text + p + 3) == 101 {
+                    json_store_pos(pos, p + 4);
+                    return json_new_bool(1);
+                }
+            }
+        }
+        return 0;
+    }
+    if c == 102 {  // 'f' → false
+        if *(text + p + 1) == 97 {
+            if *(text + p + 2) == 108 {
+                if *(text + p + 3) == 115 {
+                    if *(text + p + 4) == 101 {
+                        json_store_pos(pos, p + 5);
+                        return json_new_bool(0);
+                    }
+                }
+            }
+        }
+        return 0;
+    }
+    if c == 110 {  // 'n' → null
+        if *(text + p + 1) == 117 {
+            if *(text + p + 2) == 108 {
+                if *(text + p + 3) == 108 {
+                    json_store_pos(pos, p + 4);
+                    return json_new_null();
+                }
+            }
+        }
+        return 0;
+    }
+
+    return 0;  // unexpected character
+}
+
+fn json_parse_string(text: Address, pos: Address) -> Address {
+    let p: u32 = json_load_pos(pos);
+    if *(text + p) != 34 { return 0; }  // must start with '"'
+    p = p + 1;
+    let start: u32 = p;
+
+    // First pass: compute the unescaped length (accounting for \uXXXX → 1-3 UTF-8 bytes).
+    let unescaped_len: u32 = 0;
+    let scan: u32 = p;
+    while 1 == 1 {
+        let c: u32 = *(text + scan);
+        if c == 0 { return 0; }          // unterminated string
+        if c == 34 { break; }            // closing quote
+        if c == 92 {                     // backslash — escape sequence
+            let nc: u32 = *(text + scan + 1);
+            if nc == 117 {               // \uXXXX
+                let h1: u32 = json_hex_val(*(text + scan + 2));
+                let h2: u32 = json_hex_val(*(text + scan + 3));
+                let h3: u32 = json_hex_val(*(text + scan + 4));
+                let h4: u32 = json_hex_val(*(text + scan + 5));
+                let code: u32 = (h1 << 12) | (h2 << 8) | (h3 << 4) | h4;
+                if code < 128 { unescaped_len = unescaped_len + 1; }
+                else if code < 2048 { unescaped_len = unescaped_len + 2; }
+                else { unescaped_len = unescaped_len + 3; }
+                scan = scan + 6;
+            } else {
+                unescaped_len = unescaped_len + 1;
+                scan = scan + 2;
+            }
+        } else {
+            unescaped_len = unescaped_len + 1;
+            scan = scan + 1;
+        }
+    }
+
+    // Allocate the output buffer and perform the second pass.
+    let out: Address = allocate(unescaped_len + 1);
+    let out_i: u32 = 0;
+    p = start;
+    while 1 == 1 {
+        let c: u32 = *(text + p);
+        if c == 34 { break; }  // closing quote
+        if c == 92 {           // escape
+            let nc: u32 = *(text + p + 1);
+            if nc == 34 { *(out + out_i) = 34; out_i = out_i + 1; p = p + 2; }
+            else if nc == 92 { *(out + out_i) = 92; out_i = out_i + 1; p = p + 2; }
+            else if nc == 47 { *(out + out_i) = 47; out_i = out_i + 1; p = p + 2; }
+            else if nc == 98 { *(out + out_i) = 8; out_i = out_i + 1; p = p + 2; }    // \b
+            else if nc == 102 { *(out + out_i) = 12; out_i = out_i + 1; p = p + 2; }  // \f
+            else if nc == 110 { *(out + out_i) = 10; out_i = out_i + 1; p = p + 2; }  // \n
+            else if nc == 114 { *(out + out_i) = 13; out_i = out_i + 1; p = p + 2; }  // \r
+            else if nc == 116 { *(out + out_i) = 9; out_i = out_i + 1; p = p + 2; }   // \t
+            else if nc == 117 {  // \uXXXX → UTF-8
+                let h1: u32 = json_hex_val(*(text + p + 2));
+                let h2: u32 = json_hex_val(*(text + p + 3));
+                let h3: u32 = json_hex_val(*(text + p + 4));
+                let h4: u32 = json_hex_val(*(text + p + 5));
+                let code: u32 = (h1 << 12) | (h2 << 8) | (h3 << 4) | h4;
+                if code < 128 {
+                    *(out + out_i) = code;
+                    out_i = out_i + 1;
+                } else if code < 2048 {
+                    *(out + out_i) = 192 | (code >> 6);
+                    *(out + out_i + 1) = 128 | (code & 63);
+                    out_i = out_i + 2;
+                } else {
+                    *(out + out_i) = 224 | (code >> 12);
+                    *(out + out_i + 1) = 128 | ((code >> 6) & 63);
+                    *(out + out_i + 2) = 128 | (code & 63);
+                    out_i = out_i + 3;
+                }
+                p = p + 6;
+            } else {
+                // Unknown escape — emit the character after backslash verbatim.
+                *(out + out_i) = nc;
+                out_i = out_i + 1;
+                p = p + 2;
+            }
+        } else {
+            *(out + out_i) = c;
+            out_i = out_i + 1;
+            p = p + 1;
+        }
+    }
+    *(out + out_i) = 0;
+    p = p + 1;  // skip closing quote
+    json_store_pos(pos, p);
+
+    return json_make_node(JSON_STRING, out as u64);
+}
+
+fn json_parse_number(text: Address, pos: Address) -> Address {
+    let p: u32 = json_load_pos(pos);
+    let start: u32 = p;
+
+    let negative: u32 = 0;
+    if *(text + p) == 45 { negative = 1; p = p + 1; }  // '-'
+
+    // Integer part: '0' or [1-9][0-9]*
+    if *(text + p) == 48 {
+        p = p + 1;
+    } else {
+        if *(text + p) < 49 { return 0; }
+        if *(text + p) > 57 { return 0; }
+        while json_is_digit(*(text + p)) == 1 { p = p + 1; }
+    }
+
+    let is_float: u32 = 0;
+
+    // Fractional part.
+    if *(text + p) == 46 {  // '.'
+        is_float = 1;
+        p = p + 1;
+        if json_is_digit(*(text + p)) == 0 { return 0; }
+        while json_is_digit(*(text + p)) == 1 { p = p + 1; }
+    }
+
+    // Exponent part.
+    let c: u32 = *(text + p);
+    let is_e: u32 = 0;
+    if c == 101 { is_e = 1; }
+    if c == 69 { is_e = 1; }
+    if is_e == 1 {
+        is_float = 1;
+        p = p + 1;
+        let c2: u32 = *(text + p);
+        if c2 == 43 { p = p + 1; }       // '+'
+        else if c2 == 45 { p = p + 1; }  // '-'
+        if json_is_digit(*(text + p)) == 0 { return 0; }
+        while json_is_digit(*(text + p)) == 1 { p = p + 1; }
+    }
+
+    json_store_pos(pos, p);
+
+    if is_float == 1 {
+        let val: f64 = json_parse_float_value(text, start, p);
+        if negative == 1 { val = 0.0 - val; }
+        return json_new_float(val);
+    } else {
+        let val: i64 = json_parse_int_value(text, start, p, negative);
+        return json_new_int(val);
+    }
+}
+
+fn json_parse_array(text: Address, pos: Address) -> Address {
+    let p: u32 = json_load_pos(pos);
+    if *(text + p) != 91 { return 0; }  // '['
+    p = p + 1;
+    json_store_pos(pos, p);
+
+    let node: Address = json_new_array();
+
+    json_skip_whitespace(text, pos);
+    let p2: u32 = json_load_pos(pos);
+    if *(text + p2) == 93 {  // ']' — empty array
+        json_store_pos(pos, p2 + 1);
+        return node;
+    }
+
+    while 1 == 1 {
+        json_skip_whitespace(text, pos);
+        let elem: Address = json_parse_value(text, pos);
+        if elem == 0 {
+            json_free(node);
+            return 0;
+        }
+        json_array_push(node, elem);
+
+        json_skip_whitespace(text, pos);
+        let p3: u32 = json_load_pos(pos);
+        let c: u32 = *(text + p3);
+        if c == 93 {  // ']'
+            json_store_pos(pos, p3 + 1);
+            return node;
+        }
+        if c != 44 {  // not ','
+            json_free(node);
+            return 0;
+        }
+        json_store_pos(pos, p3 + 1);  // skip ','
+    }
+    return node;
+}
+
+fn json_parse_object(text: Address, pos: Address) -> Address {
+    let p: u32 = json_load_pos(pos);
+    if *(text + p) != 123 { return 0; }  // '{'
+    p = p + 1;
+    json_store_pos(pos, p);
+
+    let node: Address = json_new_object();
+
+    json_skip_whitespace(text, pos);
+    let p2: u32 = json_load_pos(pos);
+    if *(text + p2) == 125 {  // '}' — empty object
+        json_store_pos(pos, p2 + 1);
+        return node;
+    }
+
+    while 1 == 1 {
+        json_skip_whitespace(text, pos);
+        let p3: u32 = json_load_pos(pos);
+        if *(text + p3) != 34 {  // key must be a string
+            json_free(node);
+            return 0;
+        }
+
+        let key_node: Address = json_parse_string(text, pos);
+        if key_node == 0 {
+            json_free(node);
+            return 0;
+        }
+        // Steal the owned string from the wrapper node, then free the wrapper.
+        let key: Address = json_load_addr(key_node, 8);
+        free(key_node);
+
+        json_skip_whitespace(text, pos);
+        let p4: u32 = json_load_pos(pos);
+        if *(text + p4) != 58 {  // ':'
+            free(key);
+            json_free(node);
+            return 0;
+        }
+        json_store_pos(pos, p4 + 1);  // skip ':'
+
+        json_skip_whitespace(text, pos);
+        let val: Address = json_parse_value(text, pos);
+        if val == 0 {
+            free(key);
+            json_free(node);
+            return 0;
+        }
+
+        // json_object_set_raw takes ownership of `key`.
+        json_object_set_raw(node, key, val);
+
+        json_skip_whitespace(text, pos);
+        let p5: u32 = json_load_pos(pos);
+        let c: u32 = *(text + p5);
+        if c == 125 {  // '}'
+            json_store_pos(pos, p5 + 1);
+            return node;
+        }
+        if c != 44 {  // not ','
+            json_free(node);
+            return 0;
+        }
+        json_store_pos(pos, p5 + 1);  // skip ','
+    }
+    return node;
+}
+
+// ===========================================================================
+// Accessors
+// ===========================================================================
+
+fn json_type(node: Address) -> u32 {
+    return json_load_u32(node, 0);
+}
+
+fn json_get_int(node: Address) -> i64 {
+    let v: u64 = json_load_u64(node, 8);
+    return v as i64;
+}
+
+fn json_get_float(node: Address) -> f64 {
+    return json_load_f64(node);
+}
+
+fn json_get_bool(node: Address) -> u32 {
+    let v: u64 = json_load_u64(node, 8);
+    if v != 0 { return 1; }
+    return 0;
+}
+
+fn json_get_string(node: Address) -> Address {
+    return json_load_addr(node, 8);
+}
+
+fn json_array_len(node: Address) -> u32 {
+    let vec: Address = json_load_addr(node, 8);
+    return json_load_u32(vec, 8);
+}
+
+fn json_array_get(node: Address, idx: u32) -> Address {
+    let vec: Address = json_load_addr(node, 8);
+    let len: u32 = json_load_u32(vec, 8);
+    if idx >= len { return 0; }
+    let data: Address = json_load_addr(vec, 0);
+    return json_load_addr(data, idx * 8);
+}
+
+fn json_object_get(node: Address, key: Address) -> Address {
+    let vec: Address = json_load_addr(node, 8);
+    let len: u32 = json_load_u32(vec, 8);
+    let data: Address = json_load_addr(vec, 0);
+    let i: u32 = 0;
+    while i < len {
+        let k: Address = json_load_addr(data, i * 16);
+        if json_strcmp(k, key) == 0 {
+            return json_load_addr(data, i * 16 + 8);
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn json_object_has(node: Address, key: Address) -> u32 {
+    let vec: Address = json_load_addr(node, 8);
+    let len: u32 = json_load_u32(vec, 8);
+    let data: Address = json_load_addr(vec, 0);
+    let i: u32 = 0;
+    while i < len {
+        let k: Address = json_load_addr(data, i * 16);
+        if json_strcmp(k, key) == 0 {
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+// ===========================================================================
+// Serializer helpers
+// ===========================================================================
+
+fn json_emit_char(buf: Address, pos: u32, max_len: u32, c: u32) -> u32 {
+    if pos >= max_len { return pos; }
+    *(buf + pos) = c;
+    return pos + 1;
+}
+
+// Emit a single character with JSON string escaping. Returns the new position.
+fn json_emit_escaped_char(buf: Address, pos: u32, max_len: u32, c: u32) -> u32 {
+    let p: u32 = pos;
+    if c == 34 {            // " → \"
+        if p + 2 > max_len { return p; }
+        *(buf + p) = 92;
+        *(buf + p + 1) = 34;
+        return p + 2;
+    }
+    if c == 92 {            // \ → \\
+        if p + 2 > max_len { return p; }
+        *(buf + p) = 92;
+        *(buf + p + 1) = 92;
+        return p + 2;
+    }
+    if c == 10 {            // newline → \n
+        if p + 2 > max_len { return p; }
+        *(buf + p) = 92;
+        *(buf + p + 1) = 110;
+        return p + 2;
+    }
+    if c == 13 {            // carriage return → \r
+        if p + 2 > max_len { return p; }
+        *(buf + p) = 92;
+        *(buf + p + 1) = 114;
+        return p + 2;
+    }
+    if c == 9 {             // tab → \t
+        if p + 2 > max_len { return p; }
+        *(buf + p) = 92;
+        *(buf + p + 1) = 116;
+        return p + 2;
+    }
+    if c == 8 {             // backspace → \b
+        if p + 2 > max_len { return p; }
+        *(buf + p) = 92;
+        *(buf + p + 1) = 98;
+        return p + 2;
+    }
+    if c == 12 {            // form feed → \f
+        if p + 2 > max_len { return p; }
+        *(buf + p) = 92;
+        *(buf + p + 1) = 102;
+        return p + 2;
+    }
+    if c < 32 {             // other control char → \uXXXX
+        if p + 6 > max_len { return p; }
+        *(buf + p) = 92;
+        *(buf + p + 1) = 117;
+        *(buf + p + 2) = json_hex_digit((c >> 12) & 15);
+        *(buf + p + 3) = json_hex_digit((c >> 8) & 15);
+        *(buf + p + 4) = json_hex_digit((c >> 4) & 15);
+        *(buf + p + 5) = json_hex_digit(c & 15);
+        return p + 6;
+    }
+    // Normal printable character.
+    if p >= max_len { return p; }
+    *(buf + p) = c;
+    return p + 1;
+}
+
+// Emit a quoted, escaped JSON string. Bounds-checked against max_len.
+fn json_emit_string_escaped(buf: Address, pos: u32, max_len: u32, s: Address) -> u32 {
+    let p: u32 = json_emit_char(buf, pos, max_len, 34);  // opening '"'
+    if p == pos { return p; }  // no room for opening quote
+    let slen: u32 = json_strlen(s);
+    let i: u32 = 0;
+    while i < slen {
+        let c: u32 = *(s + i);
+        let new_p: u32 = json_emit_escaped_char(buf, p, max_len, c);
+        if new_p == p { return p; }  // out of room
+        p = new_p;
+        i = i + 1;
+    }
+    return json_emit_char(buf, p, max_len, 34);  // closing '"'
+}
+
+// Serialize a non-negative i64 as decimal text. (Caller handles the sign.)
+fn json_serialize_int_unsigned(val: i64, buf: Address, pos: u32, max_len: u32) -> u32 {
+    let temp: Address = allocate(20);
+    let n: u32 = 0;
+    let v: i64 = val;
+    if v == 0 {
+        *(temp + 0) = 48;
+        n = 1;
+    } else {
+        while v > 0 {
+            let d: i64 = v % 10;
+            *(temp + n) = 48 + d;
+            n = n + 1;
+            v = v / 10;
+        }
+    }
+    // Copy digits in reverse order.
+    let p: u32 = pos;
+    let i: u32 = 0;
+    while i < n {
+        if p >= max_len { free(temp); return p; }
+        *(buf + p) = *(temp + n - 1 - i);
+        p = p + 1;
+        i = i + 1;
+    }
+    free(temp);
+    return p;
+}
+
+// Serialize a signed i64 as decimal text.
+fn json_serialize_int(val: i64, buf: Address, pos: u32, max_len: u32) -> u32 {
+    let p: u32 = pos;
+    let v: i64 = val;
+    if v < 0 {
+        let np: u32 = json_emit_char(buf, p, max_len, 45);  // '-'
+        if np == p { return p; }
+        return json_serialize_int_unsigned(0 - v, buf, np, max_len);
+    }
+    return json_serialize_int_unsigned(v, buf, p, max_len);
+}
+
+// Serialize an f64 as JSON number text. Produces sign, integer part, '.',
+// and up to 6 fractional digits with trailing zeros trimmed (but always at
+// least one digit after the decimal point).
+fn json_serialize_float(val: f64, buf: Address, pos: u32, max_len: u32) -> u32 {
+    let p: u32 = pos;
+    let v: f64 = val;
+
+    // Sign.
+    if v < 0.0 {
+        let np: u32 = json_emit_char(buf, p, max_len, 45);  // '-'
+        if np == p { return p; }
+        v = 0.0 - v;
+        p = np;
+    }
+
+    // Special case: zero.
+    if v == 0.0 {
+        let p1: u32 = json_emit_char(buf, p, max_len, 48);     // '0'
+        let p2: u32 = json_emit_char(buf, p1, max_len, 46);    // '.'
+        return json_emit_char(buf, p2, max_len, 48);           // '0'
+    }
+
+    // Extract integer and fractional parts.
+    let int_part: i64 = floattoint(v);
+    let int_f: f64 = inttofloat(int_part);
+    let frac: f64 = v - int_f;
+
+    // Write integer part.
+    let after_int: u32 = json_serialize_int_unsigned(int_part, buf, p, max_len);
+
+    // Write '.'.
+    let after_dot: u32 = json_emit_char(buf, after_int, max_len, 46);
+    if after_dot == after_int { return after_int; }  // out of room
+    let dot_pos: u32 = after_int;  // position of the '.'
+
+    // Write up to 6 fractional digits.
+    let work_frac: f64 = frac;
+    let p2: u32 = after_dot;
+    let i: u32 = 0;
+    while i < 6 {
+        work_frac = work_frac * 10.0;
+        let d: i64 = floattoint(work_frac);
+        let clamped: i64 = d;
+        if d < 0 { clamped = 0; }
+        if d > 9 { clamped = 9; }
+        let np: u32 = json_emit_char(buf, p2, max_len, 48 + clamped);
+        if np == p2 { return p2; }  // out of room
+        p2 = np;
+        work_frac = work_frac - inttofloat(clamped);
+        i = i + 1;
+    }
+
+    // Trim trailing zeros, but keep at least one digit after '.'.
+    while p2 > dot_pos + 2 {
+        if *(buf + p2 - 1) == 48 {
+            p2 = p2 - 1;
+        } else {
+            break;
+        }
+    }
+
+    return p2;
+}
+
+// ===========================================================================
+// Serializer
+// ===========================================================================
+
+fn json_serialize(node: Address, buf: Address, max_len: u32) -> u32 {
+    return json_serialize_value(node, buf, 0, max_len);
+}
+
+fn json_serialize_value(node: Address, buf: Address, pos: u32, max_len: u32) -> u32 {
+    if node == 0 { return pos; }
+    let t: u32 = json_load_u32(node, 0);
+    let p: u32 = pos;
+
+    if t == JSON_NULL {
+        p = json_emit_char(buf, p, max_len, 110);  // n
+        p = json_emit_char(buf, p, max_len, 117);  // u
+        p = json_emit_char(buf, p, max_len, 108);  // l
+        p = json_emit_char(buf, p, max_len, 108);  // l
+        return p;
+    }
+
+    if t == JSON_BOOL {
+        let v: u32 = json_get_bool(node);
+        if v != 0 {
+            p = json_emit_char(buf, p, max_len, 116);  // t
+            p = json_emit_char(buf, p, max_len, 114);  // r
+            p = json_emit_char(buf, p, max_len, 117);  // u
+            p = json_emit_char(buf, p, max_len, 101);  // e
+        } else {
+            p = json_emit_char(buf, p, max_len, 102);  // f
+            p = json_emit_char(buf, p, max_len, 97);   // a
+            p = json_emit_char(buf, p, max_len, 108);  // l
+            p = json_emit_char(buf, p, max_len, 115);  // s
+            p = json_emit_char(buf, p, max_len, 101);  // e
+        }
+        return p;
+    }
+
+    if t == JSON_INT {
+        let v: i64 = json_get_int(node);
+        return json_serialize_int(v, buf, p, max_len);
+    }
+
+    if t == JSON_FLOAT {
+        let v: f64 = json_get_float(node);
+        return json_serialize_float(v, buf, p, max_len);
+    }
+
+    if t == JSON_STRING {
+        let s: Address = json_get_string(node);
+        return json_emit_string_escaped(buf, p, max_len, s);
+    }
+
+    if t == JSON_ARRAY {
+        p = json_emit_char(buf, p, max_len, 91);  // '['
+        let len: u32 = json_array_len(node);
+        let i: u32 = 0;
+        while i < len {
+            if i > 0 {
+                p = json_emit_char(buf, p, max_len, 44);  // ','
+            }
+            let elem: Address = json_array_get(node, i);
+            p = json_serialize_value(elem, buf, p, max_len);
+            i = i + 1;
+        }
+        p = json_emit_char(buf, p, max_len, 93);  // ']'
+        return p;
+    }
+
+    if t == JSON_OBJECT {
+        p = json_emit_char(buf, p, max_len, 123);  // '{'
+        let vec: Address = json_load_addr(node, 8);
+        let len: u32 = json_load_u32(vec, 8);
+        let data: Address = json_load_addr(vec, 0);
+        let i: u32 = 0;
+        while i < len {
+            if i > 0 {
+                p = json_emit_char(buf, p, max_len, 44);  // ','
+            }
+            let k: Address = json_load_addr(data, i * 16);
+            let v: Address = json_load_addr(data, i * 16 + 8);
+            p = json_emit_string_escaped(buf, p, max_len, k);
+            p = json_emit_char(buf, p, max_len, 58);  // ':'
+            p = json_serialize_value(v, buf, p, max_len);
+            i = i + 1;
+        }
+        p = json_emit_char(buf, p, max_len, 125);  // '}'
+        return p;
+    }
+
+    // Unknown type — emit null as a safe fallback.
+    p = json_emit_char(buf, p, max_len, 110);  // n
+    p = json_emit_char(buf, p, max_len, 117);  // u
+    p = json_emit_char(buf, p, max_len, 108);  // l
+    p = json_emit_char(buf, p, max_len, 108);  // l
+    return p;
+}
+
+// json_serialize_string: serialize a raw string as a quoted, escaped JSON
+// string. Does not take max_len — the caller must ensure the buffer is
+// large enough (worst case: 2 + 6 * strlen bytes for all-\uXXXX input).
+fn json_serialize_string(str: Address, buf: Address, pos: u32) -> u32 {
+    // Use a very large max_len to effectively disable bounds checking.
+    return json_emit_string_escaped(buf, pos, 2147483647, str);
+}
+
+// ===========================================================================
+// json_free — recursively free a node tree and all owned memory
+// ===========================================================================
+
+fn json_free(node: Address) {
+    if node == 0 { return; }
+    let t: u32 = json_load_u32(node, 0);
+
+    if t == JSON_STRING {
+        let s: Address = json_load_addr(node, 8);
+        free(s);
+    } else if t == JSON_ARRAY {
+        let vec: Address = json_load_addr(node, 8);
+        let len: u32 = json_load_u32(vec, 8);
+        let data: Address = json_load_addr(vec, 0);
+        let i: u32 = 0;
+        while i < len {
+            let child: Address = json_load_addr(data, i * 8);
+            json_free(child);
+            i = i + 1;
+        }
+        free(data);
+        free(vec);
+    } else if t == JSON_OBJECT {
+        let vec: Address = json_load_addr(node, 8);
+        let len: u32 = json_load_u32(vec, 8);
+        let data: Address = json_load_addr(vec, 0);
+        let i: u32 = 0;
+        while i < len {
+            let k: Address = json_load_addr(data, i * 16);
+            let v: Address = json_load_addr(data, i * 16 + 8);
+            free(k);
+            json_free(v);
+            i = i + 1;
+        }
+        free(data);
+        free(vec);
+    }
+    // JSON_NULL, JSON_BOOL, JSON_INT, JSON_FLOAT carry no extra allocations.
+
+    free(node);
+}
