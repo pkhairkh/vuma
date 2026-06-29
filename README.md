@@ -106,9 +106,11 @@ Per-backend DWARF debug information: `.debug_abbrev`, `.debug_info`, `.debug_lin
 - **Architecture-specific relocations**: `Arm32Call`, `Mips26`, `Ppc64Rel24`, `LoongArchB26`, `X86_32Plt32`, etc.
 - **`extern "C" { fn ...; }`** FFI blocks
 
-### Standard Library (host-side, not yet compiled to target)
+### Standard Library (not yet linked to VUMA programs)
 
-| Module | Key Functions |
+The `vuma-std` Rust crate contains 24K lines wrapping Rust's standard library, but is **not currently linked** to compiled VUMA programs. These functions are not callable from VUMA source code yet. The intended path is to replace this with the Womb — a self-hosted library written in VUMA — but the Womb data models are not yet implemented (see Known Limitations).
+
+| Module | Key Functions (Rust-side, not linked) |
 |--------|--------------|
 | **math** | `sin`, `cos`, `tan`, `sqrt`, `exp`, `ln`, `pow`, `floor`, `ceil`, `is_nan`, `copysign` + f32 variants |
 | **fmt** | `format_int`, `format_uint`, `format_float`, `format_hex`, `format_binary`, `pad_left`, `join`, `write_str` |
@@ -494,7 +496,7 @@ vuma/
 │   │   ├── x86_32/          # x86_32 backend (cdecl)
 │   │   └── wasm32/          # WebAssembly backend
 │   ├── proof/               # Formal Proof System
-│   ├── std/                 # Standard Library (18 modules, host-side)
+│   ├── std/                 # Standard Library (Rust crate, not yet linked to VUMA programs)
 │   ├── package/             # Package Manager (manifest, resolver, registry)
 │   └── tests/               # Integration Tests & Benchmarks
 ├── examples/                # 48 VUMA example programs (*.vuma)
@@ -645,8 +647,8 @@ This is an alpha release.
 |------|--------|---------|
 | **Self-hosting** | ❌ Not started | VUMA cannot compile itself yet. The compiler is written in Rust. |
 | **Structs / Enums** | ✅ Working | User-defined struct and enum types compile to tagged unions in memory. Struct field access, enum dispatch, and pattern matching work on all 10 backends. |
-| **Womb subsystem** | ✅ Working | The `concept`, `gestalt`, `manifold`, and `aura` data models are integrated. SCG nodes, BD inference, and IVE verification support them. |
-| **Stdlib is host-side only** | ⚠️ Partial | Math, fmt, string, and crypto functions execute on the host side (Rust). They are not yet compiled to target machine code. |
+| **Womb data models** | ❌ Not implemented | The `concept`, `gestalt`, `manifold`, `aura` keywords are lexed and parsed into AST/SCG nodes, but the pipeline skips them (no IR or codegen). The `womb/core.vuma` file is aspirational pseudocode that the compiler cannot compile. |
+| **Standard library** | ❌ Not linked | The `vuma-std` crate (24K lines of Rust) wraps Rust's `std` but is never imported by the compiler or linked to VUMA programs. Math/fmt/crypto functions are not callable from VUMA code. |
 | **BD inference completeness** | ⚠️ Partial | Some complex BD inference scenarios (M2.3) are deferred to a future release. |
 | **Doubly-linked list verification** | ⚠️ Partial | Full verification of doubly-linked list patterns (M2.4) is not yet complete. |
 | **Concurrent verification** | ⚠️ Limited | Verification is limited to single-threaded programs. Full concurrent verification is planned. |

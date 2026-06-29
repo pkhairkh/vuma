@@ -29,7 +29,8 @@
 ### What Doesn't Work Yet
 
 - **Self-hosting** — VUMA cannot compile itself; the compiler is written in Rust
-- **Stdlib is host-side** — math, fmt, string, crypto execute on the host (Rust), not compiled to target machine code
+- **Womb data models** — `concept`/`gestalt`/`manifold`/`aura` keywords parse but produce no code; `womb/core.vuma` is unimplemented design pseudocode
+- **Standard library** — `vuma-std` Rust crate exists (24K lines) but is not linked to VUMA programs; functions are not callable from VUMA source
 - **BD inference completeness** — some complex scenarios deferred
 - **Doubly-linked list verification** — full verification not yet complete
 - **Concurrent verification** — limited to single-threaded programs
