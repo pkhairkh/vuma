@@ -1,0 +1,187 @@
+// womb/crypto/salsa20.vuma — Salsa20 / XSalsa20 Stream Cipher (eSTREAM)
+// No main() — importable library module.
+// 256-bit key, 64-bit nonce (Salsa20), 192-bit nonce (XSalsa20).
+// 20 rounds (10 double rounds). Based on add-rotate-XOR ARX design.
+
+const MASK32: u32 = 4294967295;
+
+fn rotl32(x: u32, n: u32) -> u32 {
+    return ((x << n) | (x >> (32 - n))) & MASK32;
+}
+
+fn load_u32_le(ptr: Address, off: u32) -> u32 {
+    b0: u32 = *(ptr + off); b1: u32 = *(ptr + off + 1);
+    b2: u32 = *(ptr + off + 2); b3: u32 = *(ptr + off + 3);
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+}
+
+fn store_u32_le(ptr: Address, off: u32, val: u32) {
+    *(ptr + off) = val & 255;
+    *(ptr + off + 1) = (val >> 8) & 255;
+    *(ptr + off + 2) = (val >> 16) & 255;
+    *(ptr + off + 3) = (val >> 24) & 255;
+}
+
+// Salsa20 quarterround: b ^= rotl(a+d, 7); c ^= rotl(b+a, 9); d ^= rotl(c+b, 13); a ^= rotl(d+c, 18)
+fn salsa20_qr(state: Address, a: u32, b: u32, c: u32, d: u32) {
+    va: u32 = load_u32_le(state, a * 4);
+    vb: u32 = load_u32_le(state, b * 4);
+    vc: u32 = load_u32_le(state, c * 4);
+    vd: u32 = load_u32_le(state, d * 4);
+
+    vb = vb ^ rotl32((va + vd) & MASK32, 7);
+    vc = vc ^ rotl32((vb + va) & MASK32, 9);
+    vd = vd ^ rotl32((vc + vb) & MASK32, 13);
+    va = va ^ rotl32((vd + vc) & MASK32, 18);
+
+    store_u32_le(state, a * 4, va);
+    store_u32_le(state, b * 4, vb);
+    store_u32_le(state, c * 4, vc);
+    store_u32_le(state, d * 4, vd);
+}
+
+// Salsa20 block function: generates 64 bytes of keystream
+fn salsa20_block(key: Address, nonce: Address, counter: u32, out: Address) {
+    state = allocate(64);
+
+    // Constants: "expand 32-byte k"
+    store_u32_le(state, 0, 1634760805);   // "expa"
+    store_u32_le(state, 20, 857760878);   // "nd 3"
+    store_u32_le(state, 40, 2036477234);  // "2-by"
+    store_u32_le(state, 60, 1797285236);  // "te k"
+
+    // Key (8 × u32)
+    i: u32 = 0;
+    while i < 4 {
+        store_u32_le(state, 4 + i * 4, load_u32_le(key, i * 4));
+        store_u32_le(state, 44 + i * 4, load_u32_le(key, 16 + i * 4));
+        i = i + 1;
+    }
+
+    // Nonce (2 × u32)
+    store_u32_le(state, 24, load_u32_le(nonce, 0));
+    store_u32_le(state, 28, load_u32_le(nonce, 4));
+
+    // Counter (2 × u32)
+    store_u32_le(state, 12, counter);
+    store_u32_le(state, 16, 0);
+
+    // Save initial state
+    initial = allocate(64);
+    i = 0;
+    while i < 64 { *(initial + i) = *(state + i); i = i + 1; }
+
+    // 20 rounds = 10 double rounds
+    round: u32 = 0;
+    while round < 10 {
+        // Column round
+        salsa20_qr(state, 0, 4, 8, 12);
+        salsa20_qr(state, 5, 9, 13, 1);
+        salsa20_qr(state, 10, 14, 2, 6);
+        salsa20_qr(state, 15, 3, 7, 11);
+        // Row round
+        salsa20_qr(state, 0, 1, 2, 3);
+        salsa20_qr(state, 5, 6, 7, 4);
+        salsa20_qr(state, 10, 11, 8, 9);
+        salsa20_qr(state, 15, 12, 13, 14);
+        round = round + 1;
+    }
+
+    // Add initial state
+    i = 0;
+    while i < 16 {
+        s: u32 = load_u32_le(state, i * 4);
+        init_val: u32 = load_u32_le(initial, i * 4);
+        store_u32_le(out, i * 4, (s + init_val) & MASK32);
+        i = i + 1;
+    }
+
+    free(state); free(initial);
+}
+
+// Salsa20 encrypt/decrypt (same operation — XOR with keystream)
+fn salsa20_encrypt(data: Address, data_len: u32, key: Address, nonce: Address, output: Address) -> u32 {
+    pos: u32 = 0;
+    ctr: u32 = 0;
+    while pos < data_len {
+        keystream = allocate(64);
+        salsa20_block(key, nonce, ctr, keystream);
+        remaining: u32 = data_len - pos;
+        to_xor: u32 = 64;
+        if remaining < 64 { to_xor = remaining; }
+        i: u32 = 0;
+        while i < to_xor {
+            *(output + pos + i) = (*(data + pos + i) ^ *(keystream + i)) & 255;
+            i = i + 1;
+        }
+        free(keystream);
+        pos = pos + to_xor;
+        ctr = ctr + 1;
+    }
+    return data_len;
+}
+
+// HSalsa20 — used for XSalsa20 key derivation
+// Takes key + nonce[0..16] → derived subkey
+fn hsalsa20(key: Address, nonce_first16: Address, out: Address) {
+    state = allocate(64);
+    store_u32_le(state, 0, 1634760805);
+    store_u32_le(state, 20, 857760878);
+    store_u32_le(state, 40, 2036477234);
+    store_u32_le(state, 60, 1797285236);
+
+    i: u32 = 0;
+    while i < 4 {
+        store_u32_le(state, 4 + i * 4, load_u32_le(key, i * 4));
+        store_u32_le(state, 44 + i * 4, load_u32_le(key, 16 + i * 4));
+        i = i + 1;
+    }
+    // First 16 bytes of nonce → 4 words at positions 8,12,16,24
+    store_u32_le(state, 8, load_u32_le(nonce_first16, 0));
+    store_u32_le(state, 12, load_u32_le(nonce_first16, 4));
+    store_u32_le(state, 16, load_u32_le(nonce_first16, 8));
+    store_u32_le(state, 24, load_u32_le(nonce_first16, 12));
+
+    // 20 rounds
+    round: u32 = 0;
+    while round < 10 {
+        salsa20_qr(state, 0, 4, 8, 12);
+        salsa20_qr(state, 5, 9, 13, 1);
+        salsa20_qr(state, 10, 14, 2, 6);
+        salsa20_qr(state, 15, 3, 7, 11);
+        salsa20_qr(state, 0, 1, 2, 3);
+        salsa20_qr(state, 5, 6, 7, 4);
+        salsa20_qr(state, 10, 11, 8, 9);
+        salsa20_qr(state, 15, 12, 13, 14);
+        round = round + 1;
+    }
+
+    // Output: words 0,5,10,15,6,7,8,9 (the non-diagonal words)
+    store_u32_le(out, 0, load_u32_le(state, 0));
+    store_u32_le(out, 4, load_u32_le(state, 20));
+    store_u32_le(out, 8, load_u32_le(state, 40));
+    store_u32_le(out, 12, load_u32_le(state, 60));
+    store_u32_le(out, 16, load_u32_le(state, 24));
+    store_u32_le(out, 20, load_u32_le(state, 28));
+    store_u32_le(out, 24, load_u32_le(state, 32));
+    store_u32_le(out, 28, load_u32_le(state, 36));
+
+    free(state);
+}
+
+// XSalsa20 encrypt/decrypt — 192-bit nonce
+// Uses HSalsa20 to derive a subkey from key + nonce[0..16],
+// then uses Salsa20 with subkey + nonce[16..24]
+fn xsalsa20_encrypt(data: Address, data_len: u32, key: Address, nonce: Address, output: Address) -> u32 {
+    // Derive subkey
+    subkey = allocate(32);
+    hsalsa20(key, nonce, subkey);
+
+    // Use nonce[16..24] as the 8-byte Salsa20 nonce
+    sub_nonce = nonce + 16;
+
+    salsa20_encrypt(data, data_len, subkey, sub_nonce, output);
+
+    free(subkey);
+    return data_len;
+}

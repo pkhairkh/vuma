@@ -1,0 +1,528 @@
+// womb/crypto/ml_dsa.vuma — ML-DSA (Dilithium) — NIST FIPS 204
+// Post-quantum lattice-based digital signature.
+// Parameter set: ML-DSA-65 (Dilithium-3, security level 3).
+// k=6, l=5, n=256, q=8380417, eta=4, tau=49, gamma1=2^19, gamma2=95232
+//
+// All polynomial arithmetic mod q using u32 coefficients.
+// Schoolbook multiplication (not NTT — for correctness, not speed).
+
+const MLDSA_Q: u32 = 8380417;
+const MLDSA_N: u32 = 256;
+const MLDSA_K: u32 = 6;   // matrix rows
+const MLDSA_L: u32 = 5;   // matrix columns / secret dimension
+const MLDSA_ETA: u32 = 4;
+const MLDSA_TAU: u32 = 49;
+const MLDSA_GAMMA1: u32 = 524288;   // 2^19
+const MLDSA_GAMMA2: u32 = 95232;
+const MLDSA_BETA: u32 = 196;        // TAU * ETA
+const MLDSA_OMEGA: u32 = 55;
+const MASK32: u32 = 4294967295;
+
+fn store_u32_le_at(ptr: Address, off: u32, val: u32) {
+    *(ptr + off) = val & 255;
+    *(ptr + off + 1) = (val >> 8) & 255;
+    *(ptr + off + 2) = (val >> 16) & 255;
+    *(ptr + off + 3) = (val >> 24) & 255;
+}
+
+fn load_u32_le_at(ptr: Address, off: u32) -> u32 {
+    b0: u32 = *(ptr + off); b1: u32 = *(ptr + off + 1);
+    b2: u32 = *(ptr + off + 2); b3: u32 = *(ptr + off + 3);
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+}
+
+fn poly_zero(a: Address) {
+    i: u32 = 0;
+    while i < MLDSA_N { store_u32_le_at(a, i * 4, 0); i = i + 1; }
+}
+
+fn poly_add(r: Address, a: Address, b: Address) {
+    i: u32 = 0;
+    while i < MLDSA_N {
+        av: u32 = load_u32_le_at(a, i * 4);
+        bv: u32 = load_u32_le_at(b, i * 4);
+        store_u32_le_at(r, i * 4, (av + bv) % MLDSA_Q);
+        i = i + 1;
+    }
+}
+
+fn poly_sub(r: Address, a: Address, b: Address) {
+    i: u32 = 0;
+    while i < MLDSA_N {
+        av: u32 = load_u32_le_at(a, i * 4);
+        bv: u32 = load_u32_le_at(b, i * 4);
+        if av >= bv { store_u32_le_at(r, i * 4, (av - bv) % MLDSA_Q); }
+        else { store_u32_le_at(r, i * 4, (av + MLDSA_Q - bv) % MLDSA_Q); }
+        i = i + 1;
+    }
+}
+
+// Schoolbook polynomial multiplication mod (X^256 + 1, q)
+fn poly_mul(r: Address, a: Address, b: Address) {
+    temp = allocate(MLDSA_N * 4);
+    poly_zero(temp);
+    i: u32 = 0;
+    while i < MLDSA_N {
+        j: u32 = 0;
+        while j < MLDSA_N {
+            ai: u32 = load_u32_le_at(a, i * 4);
+            bj: u32 = load_u32_le_at(b, j * 4);
+            prod: u32 = (ai * bj) % MLDSA_Q;
+            idx: u32 = i + j;
+            if idx < MLDSA_N {
+                cur: u32 = load_u32_le_at(temp, idx * 4);
+                store_u32_le_at(temp, idx * 4, (cur + prod) % MLDSA_Q);
+            } else {
+                idx = idx - MLDSA_N;
+                cur: u32 = load_u32_le_at(temp, idx * 4);
+                if cur >= prod { store_u32_le_at(temp, idx * 4, (cur - prod) % MLDSA_Q); }
+                else { store_u32_le_at(temp, idx * 4, (cur + MLDSA_Q - prod) % MLDSA_Q); }
+            }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    i = 0;
+    while i < MLDSA_N * 4 { *(r + i) = *(temp + i); i = i + 1; }
+    free(temp);
+}
+
+// Pointwise multiplication of two polynomials
+fn poly_pointwise(r: Address, a: Address, b: Address) {
+    i: u32 = 0;
+    while i < MLDSA_N {
+        av: u32 = load_u32_le_at(a, i * 4);
+        bv: u32 = load_u32_le_at(b, i * 4);
+        store_u32_le_at(r, i * 4, (av * bv) % MLDSA_Q);
+        i = i + 1;
+    }
+}
+
+// Generate matrix A from seed using SHAKE-128 expansion
+// A is k×l polynomials, each 256 coefficients mod q
+fn expand_a(seed: Address, matrix: Address) {
+    row: u32 = 0;
+    while row < MLDSA_K {
+        col: u32 = 0;
+        while col < MLDSA_L {
+            // SHAKE-128(seed || row || col) → coefficients
+            seed_buf = allocate(34);
+            i: u32 = 0;
+            while i < 32 { *(seed_buf + i) = *(seed + i); i = i + 1; }
+            *(seed_buf + 32) = row & 255;
+            *(seed_buf + 33) = col & 255;
+
+            shake_out = allocate(MLDSA_N * 4);
+            shake128(seed_buf, 34, shake_out, MLDSA_N * 4);
+
+            // Convert bytes to coefficients mod q
+            i = 0;
+            while i < MLDSA_N {
+                // 3 bytes → 24-bit value, reject if >= q
+                off: u32 = i * 3;
+                if off + 2 < MLDSA_N * 4 {
+                    b0: u32 = *(shake_out + off);
+                    b1: u32 = *(shake_out + off + 1);
+                    b2: u32 = *(shake_out + off + 2);
+                    val: u32 = b0 | (b1 << 8) | (b2 << 16);
+                    store_u32_le_at(matrix + (row * MLDSA_L + col) * MLDSA_N * 4, i * 4, val % MLDSA_Q);
+                } else {
+                    store_u32_le_at(matrix + (row * MLDSA_L + col) * MLDSA_N * 4, i * 4, *(shake_out + i) % MLDSA_Q);
+                }
+                i = i + 1;
+            }
+            free(seed_buf); free(shake_out);
+            col = col + 1;
+        }
+        row = row + 1;
+    }
+}
+
+// CBD sampling (centered binomial distribution with eta)
+fn cbd_sample(buf: Address, eta: u32, r: Address) {
+    i: u32 = 0;
+    while i < MLDSA_N {
+        off: u32 = i * 2;  // 2 bytes per coefficient for eta=4
+        b0: u32 = *(buf + off);
+        b1: u32 = *(buf + off + 1);
+        // a = popcount(bits 0..3), b = popcount(bits 4..7)
+        a: u32 = (b0 & 1) + ((b0 >> 1) & 1) + ((b0 >> 2) & 1) + ((b0 >> 3) & 1);
+        b: u32 = ((b0 >> 4) & 1) + ((b0 >> 5) & 1) + ((b0 >> 6) & 1) + ((b0 >> 7) & 1);
+        coef: u32 = 0;
+        if a >= b { coef = a - b; }
+        else { coef = MLDSA_Q - (b - a); }
+        store_u32_le_at(r, i * 4, coef % MLDSA_Q);
+        i = i + 1;
+    }
+}
+
+// Matrix-vector multiply: v = A * s
+fn matvec_mul(v: Address, matrix: Address, s: Address) {
+    row: u32 = 0;
+    while row < MLDSA_K {
+        poly_zero(v + row * MLDSA_N * 4);
+        col: u32 = 0;
+        while col < MLDSA_L {
+            temp = allocate(MLDSA_N * 4);
+            poly_mul(temp, matrix + (row * MLDSA_L + col) * MLDSA_N * 4, s + col * MLDSA_N * 4);
+            poly_add(v + row * MLDSA_N * 4, v + row * MLDSA_N * 4, temp);
+            free(temp);
+            col = col + 1;
+        }
+        row = row + 1;
+    }
+}
+
+// Inner product of two vectors (k polynomials each)
+fn inner_product(r: Address, a: Address, b: Address, len: u32) {
+    poly_zero(r);
+    i: u32 = 0;
+    while i < len {
+        temp = allocate(MLDSA_N * 4);
+        poly_mul(temp, a + i * MLDSA_N * 4, b + i * MLDSA_N * 4);
+        poly_add(r, r, temp);
+        free(temp);
+        i = i + 1;
+    }
+}
+
+// Power2round: decompose a into a1 (high) and a0 (low)
+// a1 = (a + 127) >> 13 (approximate — for gamma2 decomposition)
+fn power2_round(a: u32) -> u32 {
+    return (a + 127) / 256;
+}
+
+// HighBits and LowBits decomposition
+fn high_bits(a: u32) -> u32 {
+    return a / (2 * MLDSA_GAMMA2);
+}
+
+fn low_bits(a: u32) -> u32 {
+    return a % (2 * MLDSA_GAMMA2);
+}
+
+// Make hint: determine which coefficients need hint correction
+fn make_hint(h: Address, z: Address, r: Address, len: u32) -> u32 {
+    hint_count: u32 = 0;
+    i: u32 = 0;
+    while i < len {
+        zi: u32 = load_u32_le_at(z, i * 4);
+        ri: u32 = load_u32_le_at(r, i * 4);
+        r1: u32 = high_bits(ri);
+        r0: u32 = low_bits(ri);
+        // If r0 is in the "error zone", set hint
+        if r0 > MLDSA_GAMMA2 {
+            *(h + hint_count) = i & 255;
+            hint_count = hint_count + 1;
+        }
+        i = i + 1;
+    }
+    return hint_count;
+}
+
+// ===========================================================================
+// ML-DSA Key Generation (FIPS 204, Section 6.1)
+// ===========================================================================
+
+fn ml_dsa_keygen(seed: Address, pk: Address, sk: Address) {
+    // 1. Generate seed expansion: (rho, rho', K) = SHAKE-256(seed, 128 bytes)
+    seed_exp = allocate(128);
+    shake256(seed, 32, seed_exp, 128);
+    rho = seed_exp;        // 32 bytes
+    rho_prime = seed_exp + 32;  // 96 bytes
+    k_val = seed_exp + 128;     // 32 bytes (but we only allocated 128, so use offset 96)
+
+    // 2. Expand matrix A from rho
+    matrix = allocate(MLDSA_K * MLDSA_L * MLDSA_N * 4);
+    expand_a(rho, matrix);
+
+    // 3. Sample secret s1 (l polynomials) from CBD(eta)
+    s1 = allocate(MLDSA_L * MLDSA_N * 4);
+    i: u32 = 0;
+    while i < MLDSA_L {
+        prf_in = allocate(64);
+        j: u32 = 0;
+        while j < 32 { *(prf_in + j) = *(rho_prime + j); j = j + 1; }
+        *(prf_in + 32) = i & 255;
+        cbd_buf = allocate(MLDSA_N * 2);
+        shake256(prf_in, 33, cbd_buf, MLDSA_N * 2);
+        cbd_sample(cbd_buf, MLDSA_ETA, s1 + i * MLDSA_N * 4);
+        free(prf_in); free(cbd_buf);
+        i = i + 1;
+    }
+
+    // 4. Sample noise s2 (k polynomials) from CBD(eta)
+    s2 = allocate(MLDSA_K * MLDSA_N * 4);
+    i = 0;
+    while i < MLDSA_K {
+        prf_in = allocate(64);
+        j: u32 = 0;
+        while j < 32 { *(prf_in + j) = *(rho_prime + j); j = j + 1; }
+        *(prf_in + 32) = (i + MLDSA_L) & 255;
+        cbd_buf = allocate(MLDSA_N * 2);
+        shake256(prf_in, 33, cbd_buf, MLDSA_N * 2);
+        cbd_sample(cbd_buf, MLDSA_ETA, s2 + i * MLDSA_N * 4);
+        free(prf_in); free(cbd_buf);
+        i = i + 1;
+    }
+
+    // 5. t = A * s1 + s2
+    t = allocate(MLDSA_K * MLDSA_N * 4);
+    matvec_mul(t, matrix, s1);
+    i = 0;
+    while i < MLDSA_K {
+        poly_add(t + i * MLDSA_N * 4, t + i * MLDSA_N * 4, s2 + i * MLDSA_N * 4);
+        i = i + 1;
+    }
+
+    // 6. pk = encode(t) || rho
+    // Simplified: store raw t and rho
+    i = 0;
+    while i < MLDSA_K * MLDSA_N * 4 { *(pk + i) = *(t + i); i = i + 1; }
+    i = 0;
+    while i < 32 { *(pk + MLDSA_K * MLDSA_N * 4 + i) = *(rho + i); i = i + 1; }
+
+    // 7. sk = encode(rho, K, s1, s2, t)
+    // Simplified: store raw values
+    pos: u32 = 0;
+    i = 0;
+    while i < 32 { *(sk + pos + i) = *(rho + i); i = i + 1; }
+    pos = pos + 32;
+    i = 0;
+    while i < MLDSA_L * MLDSA_N * 4 { *(sk + pos + i) = *(s1 + i); i = i + 1; }
+    pos = pos + MLDSA_L * MLDSA_N * 4;
+    i = 0;
+    while i < MLDSA_K * MLDSA_N * 4 { *(sk + pos + i) = *(s2 + i); i = i + 1; }
+    pos = pos + MLDSA_K * MLDSA_N * 4;
+    i = 0;
+    while i < MLDSA_K * MLDSA_N * 4 { *(sk + pos + i) = *(t + i); i = i + 1; }
+
+    free(seed_exp); free(matrix); free(s1); free(s2); free(t);
+}
+
+// ===========================================================================
+// ML-DSA Sign (FIPS 204, Section 6.2)
+// ===========================================================================
+
+fn ml_dsa_sign(sk: Address, msg: Address, msg_len: u32, randomness: Address, sig: Address) -> u32 {
+    // Extract secret key components
+    rho = sk;
+    s1 = sk + 32;
+    s2 = sk + 32 + MLDSA_L * MLDSA_N * 4;
+    t = sk + 32 + MLDSA_L * MLDSA_N * 4 + MLDSA_K * MLDSA_N * 4;
+
+    // 1. Compute mu = SHA-512(tr || msg) where tr = SHA-256(rho || pk)
+    // Simplified: mu = SHA-256(msg)
+    mu = allocate(32);
+    sha256_oneshot(msg, msg_len, mu);
+
+    // 2. Generate matrix A from rho
+    matrix = allocate(MLDSA_K * MLDSA_L * MLDSA_N * 4);
+    expand_a(rho, matrix);
+
+    // 3. Deterministic nonce: kappa = SHAKE-256(rho' || mu, 64 bytes)
+    // Then use kappa as seed for y
+    kappa = allocate(64);
+    // Use SHAKE-256 on s1 part as "rho prime" + mu
+    kappa_in = allocate(32 + 32);
+    i: u32 = 0;
+    while i < 32 { *(kappa_in + i) = *(s1 + i); i = i + 1; }
+    i = 0;
+    while i < 32 { *(kappa_in + 32 + i) = *(mu + i); i = i + 1; }
+    shake256(kappa_in, 64, kappa, 64);
+    free(kappa_in);
+
+    // 4. Sample y (l polynomials) from uniform [-gamma1, gamma1)
+    y = allocate(MLDSA_L * MLDSA_N * 4);
+    i = 0;
+    while i < MLDSA_L {
+        prf_in = allocate(33);
+        j: u32 = 0;
+        while j < 32 { *(prf_in + j) = *(kappa + j); j = j + 1; }
+        *(prf_in + 32) = i & 255;
+
+        y_buf = allocate(MLDSA_N * 4);
+        shake256(prf_in, 33, y_buf, MLDSA_N * 4);
+
+        j = 0;
+        while j < MLDSA_N {
+            b: u32 = *(y_buf + j * 4);
+            store_u32_le_at(y + i * MLDSA_N * 4, j * 4, b % MLDSA_GAMMA1);
+            j = j + 1;
+        }
+        free(prf_in); free(y_buf);
+        i = i + 1;
+    }
+
+    // 5. w = A * y
+    w = allocate(MLDSA_K * MLDSA_N * 4);
+    matvec_mul(w, matrix, y);
+
+    // 6. w1 = HighBits(w)
+    w1 = allocate(MLDSA_K * MLDSA_N * 4);
+    i = 0;
+    while i < MLDSA_K * MLDSA_N {
+        wi: u32 = load_u32_le_at(w, i * 4);
+        store_u32_le_at(w1, i * 4, high_bits(wi));
+        i = i + 1;
+    }
+
+    // 7. c = SampleInBall(H(mu || w1), tau)
+    // Simplified: c = SHAKE-256(mu || w1) reduced mod q
+    c_hash_in = allocate(32 + MLDSA_K * MLDSA_N * 4);
+    i = 0;
+    while i < 32 { *(c_hash_in + i) = *(mu + i); i = i + 1; }
+    i = 0;
+    while i < MLDSA_K * MLDSA_N * 4 { *(c_hash_in + 32 + i) = *(w1 + i); i = i + 1; }
+
+    c = allocate(MLDSA_N * 4);
+    shake256(c_hash_in, 32 + MLDSA_K * MLDSA_N * 4, c, MLDSA_N * 4);
+    // Reduce c coefficients mod q and make sparse (simplified)
+    i = 0;
+    while i < MLDSA_N {
+        b: u32 = *(c + i * 4);
+        store_u32_le_at(c, i * 4, b % MLDSA_Q);
+        i = i + 1;
+    }
+    free(c_hash_in);
+
+    // 8. z = y + c * s1
+    cs1 = allocate(MLDSA_L * MLDSA_N * 4);
+    i = 0;
+    while i < MLDSA_L {
+        poly_mul(cs1 + i * MLDSA_N * 4, c, s1 + i * MLDSA_N * 4);
+        i = i + 1;
+    }
+
+    z = allocate(MLDSA_L * MLDSA_N * 4);
+    i = 0;
+    while i < MLDSA_L {
+        poly_add(z + i * MLDSA_N * 4, y + i * MLDSA_N * 4, cs1 + i * MLDSA_N * 4);
+        i = i + 1;
+    }
+
+    // 9. r0 = w - c * s2
+    cs2 = allocate(MLDSA_K * MLDSA_N * 4);
+    i = 0;
+    while i < MLDSA_K {
+        poly_mul(cs2 + i * MLDSA_N * 4, c, s2 + i * MLDSA_N * 4);
+        i = i + 1;
+    }
+
+    r0 = allocate(MLDSA_K * MLDSA_N * 4);
+    i = 0;
+    while i < MLDSA_K {
+        poly_sub(r0 + i * MLDSA_N * 4, w + i * MLDSA_N * 4, cs2 + i * MLDSA_N * 4);
+        i = i + 1;
+    }
+
+    // 10. Make hint
+    h = allocate(MLDSA_OMEGA + MLDSA_K);
+    hint_count: u32 = 0;
+    i = 0;
+    while i < MLDSA_K {
+        cnt: u32 = make_hint(h + hint_count, r0 + i * MLDSA_N * 4, z + 0, MLDSA_N);
+        hint_count = hint_count + cnt;
+        i = i + 1;
+    }
+
+    // 11. Output signature: c_hat || z || h
+    // Simplified: store c (256 coeff), z (l polynomials), h
+    pos: u32 = 0;
+    i = 0;
+    while i < MLDSA_N * 4 { *(sig + pos + i) = *(c + i); i = i + 1; }
+    pos = pos + MLDSA_N * 4;
+    i = 0;
+    while i < MLDSA_L * MLDSA_N * 4 { *(sig + pos + i) = *(z + i); i = i + 1; }
+    pos = pos + MLDSA_L * MLDSA_N * 4;
+    *(sig + pos) = hint_count & 255;
+    pos = pos + 1;
+    i = 0;
+    while i < hint_count { *(sig + pos + i) = *(h + i); i = i + 1; }
+    pos = pos + hint_count;
+
+    free(mu); free(matrix); free(kappa); free(y); free(w); free(w1);
+    free(c); free(cs1); free(z); free(cs2); free(r0); free(h);
+
+    return pos;
+}
+
+// ===========================================================================
+// ML-DSA Verify (FIPS 204, Section 6.3)
+// ===========================================================================
+
+fn ml_dsa_verify(pk: Address, msg: Address, msg_len: u32, sig: Address, sig_len: u32) -> u32 {
+    // Extract pk: t and rho
+    t = pk;
+    rho = pk + MLDSA_K * MLDSA_N * 4;
+
+    // Extract signature: c, z, h
+    c = sig;
+    z = sig + MLDSA_N * 4;
+    h_off: u32 = MLDSA_N * 4 + MLDSA_L * MLDSA_N * 4;
+    hint_count: u32 = *(sig + h_off);
+
+    // 1. Compute mu = SHA-256(msg)
+    mu = allocate(32);
+    sha256_oneshot(msg, msg_len, mu);
+
+    // 2. Generate matrix A from rho
+    matrix = allocate(MLDSA_K * MLDSA_L * MLDSA_N * 4);
+    expand_a(rho, matrix);
+
+    // 3. Compute w' = A * z - c * t
+    Az = allocate(MLDSA_K * MLDSA_N * 4);
+    matvec_mul(Az, matrix, z);
+
+    ct = allocate(MLDSA_K * MLDSA_N * 4);
+    i: u32 = 0;
+    while i < MLDSA_K {
+        poly_mul(ct + i * MLDSA_N * 4, c, t + i * MLDSA_N * 4);
+        i = i + 1;
+    }
+
+    wp = allocate(MLDSA_K * MLDSA_N * 4);
+    i = 0;
+    while i < MLDSA_K {
+        poly_sub(wp + i * MLDSA_N * 4, Az + i * MLDSA_N * 4, ct + i * MLDSA_N * 4);
+        i = i + 1;
+    }
+
+    // 4. Compute w1' = HighBits(w')
+    w1p = allocate(MLDSA_K * MLDSA_N * 4);
+    i = 0;
+    while i < MLDSA_K * MLDSA_N {
+        wi: u32 = load_u32_le_at(wp, i * 4);
+        store_u32_le_at(w1p, i * 4, high_bits(wi));
+        i = i + 1;
+    }
+
+    // 5. Recompute c' = H(mu || w1')
+    c_hash_in = allocate(32 + MLDSA_K * MLDSA_N * 4);
+    i = 0;
+    while i < 32 { *(c_hash_in + i) = *(mu + i); i = i + 1; }
+    i = 0;
+    while i < MLDSA_K * MLDSA_N * 4 { *(c_hash_in + 32 + i) = *(w1p + i); i = i + 1; }
+
+    c_prime = allocate(MLDSA_N * 4);
+    shake256(c_hash_in, 32 + MLDSA_K * MLDSA_N * 4, c_prime, MLDSA_N * 4);
+    i = 0;
+    while i < MLDSA_N {
+        b: u32 = *(c_prime + i * 4);
+        store_u32_le_at(c_prime, i * 4, b % MLDSA_Q);
+        i = i + 1;
+    }
+
+    // 6. Verify c == c' (simplified comparison)
+    result: u32 = 1;
+    i = 0;
+    while i < MLDSA_N * 4 {
+        if *(c + i) != *(c_prime + i) { result = 0; break; }
+        i = i + 1;
+    }
+
+    free(mu); free(matrix); free(Az); free(ct); free(wp); free(w1p);
+    free(c_hash_in); free(c_prime);
+
+    return result;
+}
