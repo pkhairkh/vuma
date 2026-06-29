@@ -1,0 +1,1773 @@
+// womb/lib/printf.vuma — Formatted String Output (printf / sprintf / snprintf)
+// Task ID: womb-printf
+// No main() — importable library module.
+//
+// VUMA has no C-style varargs, so this module exposes specialized
+// sprintf_*, snprintf_*, and printf_* variants. Each variant accepts a
+// fixed number of typed arguments and walks the format string,
+// dispatching every %spec to the next available argument of the
+// matching type (string / int / uint / float).
+//
+// Supported format specifiers:
+//   %d / %i  signed integer
+//   %u       unsigned integer
+//   %x / %X  hexadecimal (lowercase / uppercase)
+//   %o       octal
+//   %b       binary
+//   %c       character
+//   %s       null-terminated string
+//   %p       pointer (0x-prefixed hex)
+//   %f       floating point (default precision 6)
+//   %e / %E  scientific notation
+//   %g / %G  shorter of %f or %e
+//   %%       literal percent
+//
+// Supported modifiers:
+//   width       %5d    (right-aligned)
+//   left-align  %-5d
+//   zero-pad    %05d
+//   precision   %.3f   /  %.10s
+//   length      %ld %lld %lu %llx
+//
+// Memory is managed with allocate() / free(); byte-level loads/stores
+// use the *(ptr + offset) primitive.
+
+extern "C" {
+    fn write(fd: i64, buf: Address, count: i64) -> i64;
+}
+
+// ===========================================================================
+// Constants
+// ===========================================================================
+
+const STDOUT_FD: i64 = 1;
+
+// Spec types — stored at offset 0 of the parsed-spec buffer.
+const SPEC_INVALID:  u32 = 0;
+const SPEC_DEC:      u32 = 1;   // %d, %i
+const SPEC_UINT:     u32 = 2;   // %u
+const SPEC_HEX_LO:   u32 = 3;   // %x
+const SPEC_HEX_UP:   u32 = 4;   // %X
+const SPEC_OCT:      u32 = 5;   // %o
+const SPEC_BIN:      u32 = 6;   // %b
+const SPEC_CHAR:     u32 = 7;   // %c
+const SPEC_STR:      u32 = 8;   // %s
+const SPEC_PTR:      u32 = 9;   // %p
+const SPEC_FLOAT:    u32 = 10;  // %f
+const SPEC_EXP_LO:   u32 = 11;  // %e
+const SPEC_EXP_UP:   u32 = 12;  // %E
+const SPEC_GEXP_LO:  u32 = 13;  // %g
+const SPEC_GEXP_UP:  u32 = 14;  // %G
+const SPEC_PERCENT:  u32 = 15;  // %%
+
+const PREC_UNSPEC: u32 = 4294967295;  // 0xFFFFFFFF — precision not given
+
+// Flag bits — stored at offset 12 of the parsed-spec buffer.
+const FLAG_ZERO_PAD:   u32 = 1;
+const FLAG_LEFT_ALIGN: u32 = 2;
+
+// Length modifiers — stored at offset 16 of the parsed-spec buffer.
+const LEN_DEFAULT: u32 = 0;
+const LEN_HH:      u32 = 1;
+const LEN_H:       u32 = 2;
+const LEN_L:       u32 = 3;
+const LEN_LL:      u32 = 4;
+
+// Float format modes (internal dispatch).
+const MODE_F:    u32 = 0;
+const MODE_E_LO: u32 = 1;
+const MODE_E_UP: u32 = 2;
+const MODE_G_LO: u32 = 3;
+const MODE_G_UP: u32 = 4;
+
+// ===========================================================================
+// Byte / word helpers
+// ===========================================================================
+
+// Store a u32 as 4 little-endian bytes into buf at byte offset `off`.
+fn store_u32(buf: Address, off: u32, val: u32) {
+    *(buf + off)     = val & 255;
+    *(buf + off + 1) = (val >> 8) & 255;
+    *(buf + off + 2) = (val >> 16) & 255;
+    *(buf + off + 3) = (val >> 24) & 255;
+    return;
+}
+
+// Load a little-endian u32 from buf at byte offset `off`.
+fn load_u32(buf: Address, off: u32) -> u32 {
+    let b0: u32 = *(buf + off);
+    let b1: u32 = *(buf + off + 1);
+    let b2: u32 = *(buf + off + 2);
+    let b3: u32 = *(buf + off + 3);
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+}
+
+// Null-terminated string length.
+fn strlen(s: Address) -> u32 {
+    let n: u32 = 0;
+    while *(s + n) != 0 { n = n + 1; }
+    return n;
+}
+
+// Reinterpret an Address as a u64 by writing it byte-by-byte to a
+// scratch buffer and reading it back. This avoids relying on implicit
+// Address→u64 conversion semantics.
+fn addr_to_u64(a: Address) -> u64 {
+    let buf: Address = allocate(8);
+    *(buf + 0) = a & 255;
+    *(buf + 1) = (a >> 8) & 255;
+    *(buf + 2) = (a >> 16) & 255;
+    *(buf + 3) = (a >> 24) & 255;
+    *(buf + 4) = (a >> 32) & 255;
+    *(buf + 5) = (a >> 40) & 255;
+    *(buf + 6) = (a >> 48) & 255;
+    *(buf + 7) = (a >> 56) & 255;
+    let v: u64 = 0;
+    let i: u32 = 0;
+    while i < 8 {
+        let b: u64 = *(buf + i);
+        let shift: u32 = i * 8;
+        v = v | (b << shift);
+        i = i + 1;
+    }
+    free(buf);
+    return v;
+}
+
+// ===========================================================================
+// Float helpers
+// ===========================================================================
+
+fn fabs_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x; }
+    return x;
+}
+
+// Floor of a non-negative f64 (used after abs).
+fn floor_f64_pos(x: f64) -> f64 {
+    let i: u64 = x;        // truncate toward zero (x >= 0)
+    let fi: f64 = i;
+    return fi;
+}
+
+fn pow10_f64(p: u32) -> f64 {
+    let r: f64 = 1.0;
+    let i: u32 = 0;
+    while i < p { r = r * 10.0; i = i + 1; }
+    return r;
+}
+
+fn pow10_u64(p: u32) -> u64 {
+    let r: u64 = 1;
+    let i: u32 = 0;
+    while i < p { r = r * 10; i = i + 1; }
+    return r;
+}
+
+fn isnan_f64(x: f64) -> u32 {
+    if x != x { return 1; }
+    return 0;
+}
+
+fn isinf_f64(x: f64) -> u32 {
+    if x > 1.0e308 * 10.0 { return 1; }
+    if x < 0.0 - 1.0e308 * 10.0 { return 1; }
+    return 0;
+}
+
+// ===========================================================================
+// Format spec parser
+// ===========================================================================
+//
+// Layout of the 20-byte parsed-spec buffer:
+//   +0   spec_type  (u32, one of SPEC_*)
+//   +4   width      (u32)
+//   +8   precision  (u32, PREC_UNSPEC if not given)
+//   +12  flags      (u32, bitmask of FLAG_*)
+//   +16  length     (u32, one of LEN_*)
+//
+// `pos_in` points just past the '%'. Returns the position past the
+// conversion character. If the conversion is unknown, leaves spec_type
+// as SPEC_INVALID and returns the position past the unknown char so
+// the caller can recover.
+
+fn parse_spec(fmt: Address, pos_in: u32, spec_buf: Address) -> u32 {
+    let p: u32 = pos_in;
+
+    // Reset fields.
+    store_u32(spec_buf, 0, SPEC_INVALID);
+    store_u32(spec_buf, 4, 0);
+    store_u32(spec_buf, 8, PREC_UNSPEC);
+    store_u32(spec_buf, 12, 0);
+    store_u32(spec_buf, 16, LEN_DEFAULT);
+
+    // --- Flags: '-' and '0' (also accept '+' and ' ' but ignore them) ---
+    let flags: u32 = 0;
+    let parsing_flags: u32 = 1;
+    while parsing_flags == 1 {
+        let c: u32 = *(fmt + p);
+        if c == 45 {              // '-'
+            flags = flags | FLAG_LEFT_ALIGN;
+            p = p + 1;
+        } else if c == 48 {       // '0'
+            flags = flags | FLAG_ZERO_PAD;
+            p = p + 1;
+        } else if c == 43 {       // '+' — ignored
+            p = p + 1;
+        } else if c == 32 {       // ' ' — ignored
+            p = p + 1;
+        } else if c == 35 {       // '#' — ignored (alt form)
+            p = p + 1;
+        } else {
+            parsing_flags = 0;
+        }
+    }
+    // Left-align disables zero-pad.
+    if (flags & FLAG_LEFT_ALIGN) != 0 {
+        flags = flags & (4294967295 ^ FLAG_ZERO_PAD);
+    }
+
+    // --- Width (decimal digits, no '*' support) ---
+    let width: u32 = 0;
+    while *(fmt + p) >= 48 && *(fmt + p) <= 57 {
+        width = width * 10 + (*(fmt + p) - 48);
+        p = p + 1;
+    }
+
+    // --- Precision (.digits) ---
+    let precision: u32 = PREC_UNSPEC;
+    if *(fmt + p) == 46 {  // '.'
+        p = p + 1;
+        precision = 0;
+        while *(fmt + p) >= 48 && *(fmt + p) <= 57 {
+            precision = precision * 10 + (*(fmt + p) - 48);
+            p = p + 1;
+        }
+    }
+
+    // --- Length modifier ---
+    let length: u32 = LEN_DEFAULT;
+    let lc: u32 = *(fmt + p);
+    if lc == 108 {       // 'l'
+        p = p + 1;
+        if *(fmt + p) == 108 {  // 'll'
+            p = p + 1;
+            length = LEN_LL;
+        } else {
+            length = LEN_L;
+        }
+    } else if lc == 104 {  // 'h'
+        p = p + 1;
+        if *(fmt + p) == 104 {  // 'hh'
+            p = p + 1;
+            length = LEN_HH;
+        } else {
+            length = LEN_H;
+        }
+    } else if lc == 122 {  // 'z' (size_t)
+        p = p + 1;
+        length = LEN_LL;
+    } else if lc == 106 {  // 'j' (intmax_t)
+        p = p + 1;
+        length = LEN_LL;
+    } else if lc == 116 {  // 't' (ptrdiff_t)
+        p = p + 1;
+        length = LEN_LL;
+    } else if lc == 76 {   // 'L' (long double — treat as f64)
+        p = p + 1;
+        length = LEN_LL;
+    }
+
+    // --- Conversion character ---
+    let conv: u32 = *(fmt + p);
+    let spec_type: u32 = SPEC_INVALID;
+    if conv == 100 || conv == 105 {       // 'd' 'i'
+        spec_type = SPEC_DEC;       p = p + 1;
+    } else if conv == 117 {              // 'u'
+        spec_type = SPEC_UINT;      p = p + 1;
+    } else if conv == 120 {              // 'x'
+        spec_type = SPEC_HEX_LO;    p = p + 1;
+    } else if conv == 88 {               // 'X'
+        spec_type = SPEC_HEX_UP;    p = p + 1;
+    } else if conv == 111 {              // 'o'
+        spec_type = SPEC_OCT;       p = p + 1;
+    } else if conv == 98 {               // 'b'
+        spec_type = SPEC_BIN;       p = p + 1;
+    } else if conv == 99 {               // 'c'
+        spec_type = SPEC_CHAR;      p = p + 1;
+    } else if conv == 115 {              // 's'
+        spec_type = SPEC_STR;       p = p + 1;
+    } else if conv == 112 {              // 'p'
+        spec_type = SPEC_PTR;       p = p + 1;
+    } else if conv == 102 {              // 'f'
+        spec_type = SPEC_FLOAT;     p = p + 1;
+    } else if conv == 101 {              // 'e'
+        spec_type = SPEC_EXP_LO;    p = p + 1;
+    } else if conv == 69 {               // 'E'
+        spec_type = SPEC_EXP_UP;    p = p + 1;
+    } else if conv == 103 {              // 'g'
+        spec_type = SPEC_GEXP_LO;   p = p + 1;
+    } else if conv == 71 {               // 'G'
+        spec_type = SPEC_GEXP_UP;   p = p + 1;
+    } else if conv == 37 {               // '%'
+        spec_type = SPEC_PERCENT;   p = p + 1;
+    } else {
+        // Unknown conversion — leave spec_type as SPEC_INVALID and
+        // advance past the unknown char so the caller can recover.
+        p = p + 1;
+    }
+
+    store_u32(spec_buf, 0, spec_type);
+    store_u32(spec_buf, 4, width);
+    store_u32(spec_buf, 8, precision);
+    store_u32(spec_buf, 12, flags);
+    store_u32(spec_buf, 16, length);
+    return p;
+}
+
+// ===========================================================================
+// Integer formatters
+// ====================================================================================
+
+// Format signed integer with the given base, width, and padding options.
+// Writes to buf starting at pos and returns the new pos.
+fn fmt_int(buf: Address, pos: u32, val: i64, base: u32, width: u32,
+           zero_pad: u32, left_align: u32) -> u32 {
+    let digits: Address = allocate(80);
+    let n_digits: u32 = 0;
+    let neg: u32 = 0;
+    let v: i64 = val;
+
+    if val < 0 {
+        neg = 1;
+        v = 0 - val;
+    }
+
+    // |v| → digits, least-significant first.
+    let uv: u64 = v;
+    if uv == 0 {
+        *(digits + 0) = 48;
+        n_digits = 1;
+    } else {
+        while uv > 0 {
+            let d: u32 = uv % base;
+            let c: u32;
+            if d < 10 { c = 48 + d; } else { c = 97 + d - 10; }
+            *(digits + n_digits) = c;
+            n_digits = n_digits + 1;
+            uv = uv / base;
+        }
+    }
+
+    let sign_len: u32 = 0;
+    if neg != 0 { sign_len = 1; }
+    let content_len: u32 = sign_len + n_digits;
+    let out_pos: u32 = pos;
+
+    if left_align == 0 {
+        if zero_pad != 0 {
+            // [sign][zeros][digits]
+            if neg != 0 {
+                *(buf + out_pos) = 45;
+                out_pos = out_pos + 1;
+            }
+            while content_len < width {
+                *(buf + out_pos) = 48;
+                out_pos = out_pos + 1;
+                content_len = content_len + 1;
+            }
+        } else {
+            // [spaces][sign][digits]
+            while content_len < width {
+                *(buf + out_pos) = 32;
+                out_pos = out_pos + 1;
+                content_len = content_len + 1;
+            }
+            if neg != 0 {
+                *(buf + out_pos) = 45;
+                out_pos = out_pos + 1;
+            }
+        }
+    } else {
+        // Left-aligned: [sign][digits][trailing spaces]
+        if neg != 0 {
+            *(buf + out_pos) = 45;
+            out_pos = out_pos + 1;
+        }
+    }
+
+    // Digits (reversed into buf).
+    let i: u32 = 0;
+    while i < n_digits {
+        *(buf + out_pos) = *(digits + n_digits - 1 - i);
+        out_pos = out_pos + 1;
+        i = i + 1;
+    }
+
+    if left_align != 0 {
+        let total: u32 = out_pos - pos;
+        while total < width {
+            *(buf + out_pos) = 32;
+            out_pos = out_pos + 1;
+            total = total + 1;
+        }
+    }
+
+    free(digits);
+    return out_pos;
+}
+
+// Format unsigned integer with the given base, case, width, and padding.
+fn fmt_uint(buf: Address, pos: u32, val: u64, base: u32, upper: u32,
+            width: u32, zero_pad: u32, left_align: u32) -> u32 {
+    let digits: Address = allocate(80);
+    let n_digits: u32 = 0;
+    let v: u64 = val;
+
+    if v == 0 {
+        *(digits + 0) = 48;
+        n_digits = 1;
+    } else {
+        while v > 0 {
+            let d: u32 = v % base;
+            let c: u32;
+            if d < 10 {
+                c = 48 + d;
+            } else {
+                if upper != 0 { c = 65 + d - 10; } else { c = 97 + d - 10; }
+            }
+            *(digits + n_digits) = c;
+            n_digits = n_digits + 1;
+            v = v / base;
+        }
+    }
+
+    let content_len: u32 = n_digits;
+    let out_pos: u32 = pos;
+
+    if left_align == 0 {
+        let pad_char: u32 = 32;
+        if zero_pad != 0 { pad_char = 48; }
+        while content_len < width {
+            *(buf + out_pos) = pad_char;
+            out_pos = out_pos + 1;
+            content_len = content_len + 1;
+        }
+    }
+
+    let i: u32 = 0;
+    while i < n_digits {
+        *(buf + out_pos) = *(digits + n_digits - 1 - i);
+        out_pos = out_pos + 1;
+        i = i + 1;
+    }
+
+    if left_align != 0 {
+        let total: u32 = out_pos - pos;
+        while total < width {
+            *(buf + out_pos) = 32;
+            out_pos = out_pos + 1;
+            total = total + 1;
+        }
+    }
+
+    free(digits);
+    return out_pos;
+}
+
+// ===========================================================================
+// Character, string, pointer formatters
+// ===========================================================================
+
+fn fmt_char(buf: Address, pos: u32, c: u32, width: u32, left_align: u32) -> u32 {
+    let out_pos: u32 = pos;
+    let n_lead: u32 = 0;
+    let n_trail: u32 = 0;
+    if left_align == 0 {
+        if 1 < width { n_lead = width - 1; }
+    } else {
+        if 1 < width { n_trail = width - 1; }
+    }
+
+    let i: u32 = 0;
+    while i < n_lead {
+        *(buf + out_pos) = 32;
+        out_pos = out_pos + 1;
+        i = i + 1;
+    }
+    *(buf + out_pos) = c & 255;
+    out_pos = out_pos + 1;
+    let j: u32 = 0;
+    while j < n_trail {
+        *(buf + out_pos) = 32;
+        out_pos = out_pos + 1;
+        j = j + 1;
+    }
+    return out_pos;
+}
+
+// Format a null-terminated string with optional precision cap (max chars)
+// and width padding.
+fn fmt_string(buf: Address, pos: u32, str: Address, width: u32,
+              precision: u32, left_align: u32) -> u32 {
+    let len: u32 = 0;
+    if precision == PREC_UNSPEC {
+        while *(str + len) != 0 { len = len + 1; }
+    } else {
+        while len < precision {
+            if *(str + len) == 0 { break; }
+            len = len + 1;
+        }
+    }
+
+    let n_lead: u32 = 0;
+    let n_trail: u32 = 0;
+    if left_align == 0 {
+        if len < width { n_lead = width - len; }
+    } else {
+        if len < width { n_trail = width - len; }
+    }
+
+    let out_pos: u32 = pos;
+    let i: u32 = 0;
+    while i < n_lead {
+        *(buf + out_pos) = 32;
+        out_pos = out_pos + 1;
+        i = i + 1;
+    }
+    let j: u32 = 0;
+    while j < len {
+        *(buf + out_pos) = *(str + j);
+        out_pos = out_pos + 1;
+        j = j + 1;
+    }
+    let k: u32 = 0;
+    while k < n_trail {
+        *(buf + out_pos) = 32;
+        out_pos = out_pos + 1;
+        k = k + 1;
+    }
+    return out_pos;
+}
+
+// Format a pointer (u64) as 0x-prefixed lowercase hex, right-aligned
+// with spaces.
+fn fmt_ptr(buf: Address, pos: u32, val: u64, width: u32) -> u32 {
+    let digits: Address = allocate(20);
+    let n_digits: u32 = 0;
+    let v: u64 = val;
+
+    if v == 0 {
+        *(digits + 0) = 48;
+        n_digits = 1;
+    } else {
+        while v > 0 {
+            let d: u32 = v % 16;
+            let c: u32;
+            if d < 10 { c = 48 + d; } else { c = 97 + d - 10; }
+            *(digits + n_digits) = c;
+            n_digits = n_digits + 1;
+            v = v / 16;
+        }
+    }
+
+    let content_len: u32 = 2 + n_digits;  // "0x" + digits
+    let out_pos: u32 = pos;
+
+    while content_len < width {
+        *(buf + out_pos) = 32;
+        out_pos = out_pos + 1;
+        content_len = content_len + 1;
+    }
+
+    *(buf + out_pos) = 48;     // '0'
+    *(buf + out_pos + 1) = 120; // 'x'
+    out_pos = out_pos + 2;
+
+    let i: u32 = 0;
+    while i < n_digits {
+        *(buf + out_pos) = *(digits + n_digits - 1 - i);
+        out_pos = out_pos + 1;
+        i = i + 1;
+    }
+
+    free(digits);
+    return out_pos;
+}
+
+// ===========================================================================
+// Float formatters
+// ===========================================================================
+
+// Strip trailing '0' chars (and a trailing '.') from temp[start..end).
+// Returns the new end position.
+fn strip_trailing_zeros(temp: Address, start: u32, end_in: u32) -> u32 {
+    let p: u32 = end_in;
+    while p > start {
+        let c: u32 = *(temp + p - 1);
+        if c == 48 {        // '0'
+            p = p - 1;
+        } else {
+            break;
+        }
+    }
+    if p > start {
+        if *(temp + p - 1) == 46 {  // '.'
+            p = p - 1;
+        }
+    }
+    return p;
+}
+
+// Copy temp[0..tlen) to buf[pos..), with optional width padding.
+// left_align == 0 → leading spaces; else trailing spaces.
+fn emit_with_width(buf: Address, pos: u32, temp: Address, tlen: u32,
+                   width: u32, left_align: u32) -> u32 {
+    let n_lead: u32 = 0;
+    let n_trail: u32 = 0;
+    if left_align == 0 {
+        if tlen < width { n_lead = width - tlen; }
+    } else {
+        if tlen < width { n_trail = width - tlen; }
+    }
+
+    let out_pos: u32 = pos;
+    let i: u32 = 0;
+    while i < n_lead {
+        *(buf + out_pos) = 32;
+        out_pos = out_pos + 1;
+        i = i + 1;
+    }
+    let j: u32 = 0;
+    while j < tlen {
+        *(buf + out_pos) = *(temp + j);
+        out_pos = out_pos + 1;
+        j = j + 1;
+    }
+    let k: u32 = 0;
+    while k < n_trail {
+        *(buf + out_pos) = 32;
+        out_pos = out_pos + 1;
+        k = k + 1;
+    }
+    return out_pos;
+}
+
+// Body for %f: writes sign + integer part + '.' + frac digits to temp
+// starting at tpos_in. Returns new tpos. `x` must be non-negative.
+// `neg` controls whether a leading '-' is written.
+fn fmt_f_body(temp: Address, tpos_in: u32, x: f64, precision: u32, neg: u32) -> u32 {
+    let tpos: u32 = tpos_in;
+
+    if neg != 0 {
+        *(temp + tpos) = 45;
+        tpos = tpos + 1;
+    }
+
+    // Truncate toward zero and split into integer + fractional parts.
+    // Convert through explicit declarations so VUMA's coercion rules
+    // apply at the let-binding rather than in mixed arithmetic.
+    let int_part: u64 = x;             // f64 -> u64 (truncate)
+    let int_as_f: f64 = int_part;      // u64 -> f64
+    let mut_frac: f64 = x - int_as_f;  // f64 - f64
+    if mut_frac < 0.0 { mut_frac = 0.0; }  // guard tiny negative
+
+    // Round: scaled = round(frac * 10^precision).
+    let p10f: f64 = pow10_f64(precision);
+    let scaled_f: f64 = mut_frac * p10f;
+    let scaled: u64 = scaled_f + 0.5;
+    let p10u: u64 = pow10_u64(precision);
+    let mut_int: u64 = int_part;
+    let mut_scaled: u64 = scaled;
+    if mut_scaled >= p10u {
+        mut_int = mut_int + 1;
+        mut_scaled = mut_scaled - p10u;
+    }
+
+    // Integer digits (LSB first into a scratch buffer, then reversed).
+    let int_digits: Address = allocate(40);
+    let n_int: u32 = 0;
+    if mut_int == 0 {
+        *(int_digits + 0) = 48;
+        n_int = 1;
+    } else {
+        let iv: u64 = mut_int;
+        let pos_d: u32 = 0;
+        while iv > 0 {
+            let d: u32 = iv % 10;
+            *(int_digits + pos_d) = 48 + d;
+            pos_d = pos_d + 1;
+            iv = iv / 10;
+        }
+        n_int = pos_d;
+    }
+    // Copy int_digits (reversed) into temp.
+    let i: u32 = 0;
+    while i < n_int {
+        *(temp + tpos) = *(int_digits + n_int - 1 - i);
+        tpos = tpos + 1;
+        i = i + 1;
+    }
+    free(int_digits);
+
+    // Fractional digits.
+    if precision > 0 {
+        *(temp + tpos) = 46;  // '.'
+        tpos = tpos + 1;
+
+        let frac_digits: Address = allocate(40);
+        let sv: u64 = mut_scaled;
+        let k: u32 = 0;
+        while k < precision {
+            *(frac_digits + k) = 48 + (sv % 10);
+            sv = sv / 10;
+            k = k + 1;
+        }
+        // frac_digits[0] = LSB; write most-significant first.
+        let m: u32 = 0;
+        while m < precision {
+            *(temp + tpos) = *(frac_digits + precision - 1 - m);
+            tpos = tpos + 1;
+            m = m + 1;
+        }
+        free(frac_digits);
+    }
+
+    return tpos;
+}
+
+// Body for %e / %E: writes sign + 1-digit mantissa + '.' + frac + 'e' + exp.
+// `x` must be non-negative. `mode` is MODE_E_LO or MODE_E_UP.
+fn fmt_e_body(temp: Address, tpos_in: u32, x: f64, precision: u32,
+              neg: u32, mode: u32) -> u32 {
+    let tpos: u32 = tpos_in;
+
+    if neg != 0 {
+        *(temp + tpos) = 45;
+        tpos = tpos + 1;
+    }
+
+    // Normalize: 1.0 <= m < 10.0, exp such that x = m * 10^exp.
+    let exp: i64 = 0;
+    let m: f64 = x;
+    if x > 0.0 {
+        while m >= 10.0 { m = m / 10.0; exp = exp + 1; }
+        while m < 1.0 { m = m * 10.0; exp = exp - 1; }
+    }
+
+    // Round m to `precision` fractional digits.
+    let p10f: f64 = pow10_f64(precision);
+    let scaled_f: f64 = m * p10f;
+    let scaled: u64 = scaled_f + 0.5;
+    let p10u: u64 = pow10_u64(precision);
+    let mut_scaled: u64 = scaled;
+    let mut_exp: i64 = exp;
+    // 10 * p10u — if precision is 0, this is just 10.
+    let ten_p10: u64 = 10 * p10u;
+    if mut_scaled >= ten_p10 {
+        mut_scaled = mut_scaled / 10;
+        mut_exp = mut_exp + 1;
+    }
+
+    // mantissa integer digit + fractional digits.
+    let mant_int: u64 = mut_scaled / p10u;
+    let mant_frac: u64 = mut_scaled % p10u;
+
+    *(temp + tpos) = 48 + mant_int;
+    tpos = tpos + 1;
+
+    if precision > 0 {
+        *(temp + tpos) = 46;
+        tpos = tpos + 1;
+
+        let frac_digits: Address = allocate(40);
+        let sv: u64 = mant_frac;
+        let k: u32 = 0;
+        while k < precision {
+            *(frac_digits + k) = 48 + (sv % 10);
+            sv = sv / 10;
+            k = k + 1;
+        }
+        let mm: u32 = 0;
+        while mm < precision {
+            *(temp + tpos) = *(frac_digits + precision - 1 - mm);
+            tpos = tpos + 1;
+            mm = mm + 1;
+        }
+        free(frac_digits);
+    }
+
+    // 'e' or 'E'.
+    let e_char: u32 = 101;
+    if mode == MODE_E_UP { e_char = 69; }
+    *(temp + tpos) = e_char;
+    tpos = tpos + 1;
+
+    // Exponent sign + at least 2 digits.
+    let exp_neg: u32 = 0;
+    let exp_val: u64 = mut_exp;
+    if mut_exp < 0 {
+        exp_neg = 1;
+        exp_val = 0 - mut_exp;
+    }
+    if exp_neg != 0 {
+        *(temp + tpos) = 45;
+    } else {
+        *(temp + tpos) = 43;
+    }
+    tpos = tpos + 1;
+
+    if exp_val < 100 {
+        *(temp + tpos)     = 48 + (exp_val / 10);
+        *(temp + tpos + 1) = 48 + (exp_val % 10);
+        tpos = tpos + 2;
+    } else {
+        // 3+ digit exponent (rare). Emit in reverse then re-reverse.
+        let ed: Address = allocate(8);
+        let ev: u64 = exp_val;
+        let n: u32 = 0;
+        while ev > 0 {
+            *(ed + n) = 48 + (ev % 10);
+            ev = ev / 10;
+            n = n + 1;
+        }
+        let i: u32 = 0;
+        while i < n {
+            *(temp + tpos) = *(ed + n - 1 - i);
+            tpos = tpos + 1;
+            i = i + 1;
+        }
+        free(ed);
+    }
+
+    return tpos;
+}
+
+// Body for %g / %G: chooses %e or %f based on the exponent, then strips
+// trailing zeros from the mantissa.
+fn fmt_g_body(temp: Address, tpos_in: u32, x: f64, precision_in: u32,
+              neg: u32, mode: u32) -> u32 {
+    let prec: u32 = precision_in;
+    let p: u32 = prec;
+    if p == 0 { p = 1; }
+
+    let tpos: u32 = tpos_in;
+
+    if neg != 0 {
+        *(temp + tpos) = 45;
+        tpos = tpos + 1;
+    }
+
+    // Compute exponent (base-10).
+    let exp: i64 = 0;
+    let m: f64 = x;
+    if x > 0.0 {
+        while m >= 10.0 { m = m / 10.0; exp = exp + 1; }
+        while m < 1.0 { m = m * 10.0; exp = exp - 1; }
+    }
+
+    // Decide %e vs %f.
+    let use_e: u32 = 0;
+    if exp < 0 {
+        if exp < -4 { use_e = 1; }
+    } else {
+        let exp_u: u64 = exp;
+        let prec_u: u64 = p;
+        if exp_u >= prec_u { use_e = 1; }
+    }
+
+    if use_e != 0 {
+        // %e with precision = p - 1, then strip mantissa zeros.
+        let sub_prec: u32 = p - 1;
+        let mantissa_start: u32 = tpos;
+        let e_end: u32 = fmt_e_body(temp, tpos, x, sub_prec, 0, mode);
+
+        // Find 'e' or 'E'.
+        let e_pos: u32 = mantissa_start;
+        while e_pos < e_end {
+            let c: u32 = *(temp + e_pos);
+            if c == 101 || c == 69 { break; }
+            e_pos = e_pos + 1;
+        }
+
+        // Strip trailing zeros from mantissa.
+        let new_e_pos: u32 = strip_trailing_zeros(temp, mantissa_start, e_pos);
+        let shift: u32 = e_pos - new_e_pos;
+        if shift > 0 {
+            let i: u32 = new_e_pos;
+            while i < e_end - shift {
+                *(temp + i) = *(temp + i + shift);
+                i = i + 1;
+            }
+            return e_end - shift;
+        }
+        return e_end;
+    } else {
+        // %f with precision = p - 1 - exp, then strip zeros.
+        let sub_prec: u32;
+        if exp >= 0 {
+            let exp_u: u32 = exp;
+            sub_prec = p - 1 - exp_u;
+        } else {
+            let abs_exp: u32 = 0 - exp;
+            sub_prec = p - 1 + abs_exp;
+        }
+        let f_end: u32 = fmt_f_body(temp, tpos, x, sub_prec, 0);
+        return strip_trailing_zeros(temp, tpos, f_end);
+    }
+}
+
+// Top-level float formatter: handles NaN / Inf sign and special-case
+// rendering, then dispatches to fmt_f_body / fmt_e_body / fmt_g_body.
+// Applies width padding (right-align with spaces by default; left-align
+// when the spec had '-').
+fn fmt_float_full(buf: Address, pos: u32, val: f64, precision: u32,
+                  width: u32, mode: u32, left_align: u32) -> u32 {
+    let temp: Address = allocate(80);
+    let tpos: u32 = 0;
+    let neg: u32 = 0;
+    let x: f64 = val;
+
+    if val < 0.0 {
+        neg = 1;
+        x = 0.0 - val;
+    } else if val == 0.0 {
+        // Detect negative zero via reciprocal sign.
+        let recip: f64 = 1.0 / val;
+        if recip < 0.0 { neg = 1; }
+    }
+
+    // NaN
+    if isnan_f64(val) == 1 {
+        *(temp + 0) = 110;  // 'n'
+        *(temp + 1) = 97;   // 'a'
+        *(temp + 2) = 110;  // 'n'
+        tpos = 3;
+        if neg != 0 {
+            *(temp + 0) = 45;   // '-'
+            *(temp + 1) = 110;
+            *(temp + 2) = 97;
+            *(temp + 3) = 110;
+            tpos = 4;
+        }
+        // Uppercase for %E / %G modes.
+        if mode == MODE_E_UP || mode == MODE_G_UP {
+            let start: u32 = 0;
+            if neg != 0 { start = 1; }
+            let i: u32 = start;
+            while i < tpos {
+                let c: u32 = *(temp + i);
+                if c >= 97 && c <= 122 {
+                    *(temp + i) = c - 32;
+                }
+                i = i + 1;
+            }
+        }
+        let r: u32 = emit_with_width(buf, pos, temp, tpos, width, left_align);
+        free(temp);
+        return r;
+    }
+
+    // Inf
+    if isinf_f64(val) == 1 {
+        *(temp + 0) = 105;  // 'i'
+        *(temp + 1) = 110;  // 'n'
+        *(temp + 2) = 102;  // 'f'
+        tpos = 3;
+        if neg != 0 {
+            *(temp + 0) = 45;
+            *(temp + 1) = 105;
+            *(temp + 2) = 110;
+            *(temp + 3) = 102;
+            tpos = 4;
+        }
+        if mode == MODE_E_UP || mode == MODE_G_UP {
+            let start: u32 = 0;
+            if neg != 0 { start = 1; }
+            let i: u32 = start;
+            while i < tpos {
+                let c: u32 = *(temp + i);
+                if c >= 97 && c <= 122 {
+                    *(temp + i) = c - 32;
+                }
+                i = i + 1;
+            }
+        }
+        let r: u32 = emit_with_width(buf, pos, temp, tpos, width, left_align);
+        free(temp);
+        return r;
+    }
+
+    // Dispatch by mode.
+    let end: u32;
+    if mode == MODE_F {
+        end = fmt_f_body(temp, 0, x, precision, neg);
+    } else if mode == MODE_E_LO || mode == MODE_E_UP {
+        end = fmt_e_body(temp, 0, x, precision, neg, mode);
+    } else {
+        // %g / %G — fmt_g_body handles sign itself.
+        end = fmt_g_body(temp, 0, x, precision, neg, mode);
+    }
+
+    let r: u32 = emit_with_width(buf, pos, temp, end, width, left_align);
+    free(temp);
+    return r;
+}
+
+// Public %f helper (right-aligned, no left-align flag).
+fn fmt_float(buf: Address, pos: u32, val: f64, precision: u32, width: u32) -> u32 {
+    return fmt_float_full(buf, pos, val, precision, width, MODE_F, 0);
+}
+
+// Map a SPEC_* float type to an internal MODE_*.
+fn mode_from_spec(st: u32) -> u32 {
+    if st == SPEC_FLOAT    { return MODE_F; }
+    if st == SPEC_EXP_LO   { return MODE_E_LO; }
+    if st == SPEC_EXP_UP   { return MODE_E_UP; }
+    if st == SPEC_GEXP_LO  { return MODE_G_LO; }
+    return MODE_G_UP;
+}
+
+// ===========================================================================
+// Per-arg-type dispatchers
+// ===========================================================================
+//
+// Each emit_* function inspects the parsed spec buffer and writes the
+// formatted value to buf. Cross-type coercion (int→float, float→int)
+// is handled inside emit_int and emit_float.
+
+// Dispatch a string-typed argument.
+fn emit_str(buf: Address, pos: u32, spec_buf: Address, s: Address) -> u32 {
+    let st: u32 = load_u32(spec_buf, 0);
+    let w: u32 = load_u32(spec_buf, 4);
+    let pr: u32 = load_u32(spec_buf, 8);
+    let fl: u32 = load_u32(spec_buf, 12);
+    let left: u32 = 0;
+    if (fl & FLAG_LEFT_ALIGN) != 0 { left = 1; }
+
+    if st == SPEC_STR {
+        return fmt_string(buf, pos, s, w, pr, left);
+    }
+    if st == SPEC_CHAR {
+        let c: u32 = *(s + 0);
+        return fmt_char(buf, pos, c, w, left);
+    }
+    if st == SPEC_PTR {
+        let v: u64 = addr_to_u64(s);
+        return fmt_ptr(buf, pos, v, w);
+    }
+    if st == SPEC_PERCENT {
+        *(buf + pos) = 37;
+        return pos + 1;
+    }
+    // Mismatched spec for a string arg — print the string as a fallback.
+    return fmt_string(buf, pos, s, w, pr, left);
+}
+
+// Dispatch an i64 argument.
+fn emit_int(buf: Address, pos: u32, spec_buf: Address, v: i64) -> u32 {
+    let st: u32 = load_u32(spec_buf, 0);
+    let w: u32 = load_u32(spec_buf, 4);
+    let pr: u32 = load_u32(spec_buf, 8);
+    let fl: u32 = load_u32(spec_buf, 12);
+    let zp: u32 = 0;
+    if (fl & FLAG_ZERO_PAD) != 0 { zp = 1; }
+    let left: u32 = 0;
+    if (fl & FLAG_LEFT_ALIGN) != 0 { left = 1; }
+
+    if st == SPEC_DEC {
+        return fmt_int(buf, pos, v, 10, w, zp, left);
+    }
+    if st == SPEC_UINT {
+        let uv: u64 = v;
+        return fmt_uint(buf, pos, uv, 10, 0, w, zp, left);
+    }
+    if st == SPEC_HEX_LO {
+        let uv: u64 = v;
+        return fmt_uint(buf, pos, uv, 16, 0, w, zp, left);
+    }
+    if st == SPEC_HEX_UP {
+        let uv: u64 = v;
+        return fmt_uint(buf, pos, uv, 16, 1, w, zp, left);
+    }
+    if st == SPEC_OCT {
+        let uv: u64 = v;
+        return fmt_uint(buf, pos, uv, 8, 0, w, zp, left);
+    }
+    if st == SPEC_BIN {
+        let uv: u64 = v;
+        return fmt_uint(buf, pos, uv, 2, 0, w, zp, left);
+    }
+    if st == SPEC_CHAR {
+        let c: u32 = v & 255;
+        return fmt_char(buf, pos, c, w, left);
+    }
+    if st == SPEC_PTR {
+        let uv: u64 = v;
+        return fmt_ptr(buf, pos, uv, w);
+    }
+    if st == SPEC_PERCENT {
+        *(buf + pos) = 37;
+        return pos + 1;
+    }
+    if st == SPEC_FLOAT || st == SPEC_EXP_LO || st == SPEC_EXP_UP ||
+       st == SPEC_GEXP_LO || st == SPEC_GEXP_UP {
+        let fv: f64 = v;
+        let use_pr: u32 = pr;
+        if pr == PREC_UNSPEC { use_pr = 6; }
+        let mode: u32 = mode_from_spec(st);
+        return fmt_float_full(buf, pos, fv, use_pr, w, mode, left);
+    }
+    // Unknown spec — emit nothing.
+    return pos;
+}
+
+// Dispatch a u64 argument.
+fn emit_uint(buf: Address, pos: u32, spec_buf: Address, v: u64) -> u32 {
+    let st: u32 = load_u32(spec_buf, 0);
+    let w: u32 = load_u32(spec_buf, 4);
+    let pr: u32 = load_u32(spec_buf, 8);
+    let fl: u32 = load_u32(spec_buf, 12);
+    let zp: u32 = 0;
+    if (fl & FLAG_ZERO_PAD) != 0 { zp = 1; }
+    let left: u32 = 0;
+    if (fl & FLAG_LEFT_ALIGN) != 0 { left = 1; }
+
+    if st == SPEC_DEC {
+        let iv: i64 = v;
+        return fmt_int(buf, pos, iv, 10, w, zp, left);
+    }
+    if st == SPEC_UINT {
+        return fmt_uint(buf, pos, v, 10, 0, w, zp, left);
+    }
+    if st == SPEC_HEX_LO {
+        return fmt_uint(buf, pos, v, 16, 0, w, zp, left);
+    }
+    if st == SPEC_HEX_UP {
+        return fmt_uint(buf, pos, v, 16, 1, w, zp, left);
+    }
+    if st == SPEC_OCT {
+        return fmt_uint(buf, pos, v, 8, 0, w, zp, left);
+    }
+    if st == SPEC_BIN {
+        return fmt_uint(buf, pos, v, 2, 0, w, zp, left);
+    }
+    if st == SPEC_CHAR {
+        let c: u32 = v & 255;
+        return fmt_char(buf, pos, c, w, left);
+    }
+    if st == SPEC_PTR {
+        return fmt_ptr(buf, pos, v, w);
+    }
+    if st == SPEC_PERCENT {
+        *(buf + pos) = 37;
+        return pos + 1;
+    }
+    if st == SPEC_FLOAT || st == SPEC_EXP_LO || st == SPEC_EXP_UP ||
+       st == SPEC_GEXP_LO || st == SPEC_GEXP_UP {
+        let fv: f64 = v;
+        let use_pr: u32 = pr;
+        if pr == PREC_UNSPEC { use_pr = 6; }
+        let mode: u32 = mode_from_spec(st);
+        return fmt_float_full(buf, pos, fv, use_pr, w, mode, left);
+    }
+    return pos;
+}
+
+// Dispatch an f64 argument.
+fn emit_float(buf: Address, pos: u32, spec_buf: Address, v: f64) -> u32 {
+    let st: u32 = load_u32(spec_buf, 0);
+    let w: u32 = load_u32(spec_buf, 4);
+    let pr: u32 = load_u32(spec_buf, 8);
+    let fl: u32 = load_u32(spec_buf, 12);
+    let zp: u32 = 0;
+    if (fl & FLAG_ZERO_PAD) != 0 { zp = 1; }
+    let left: u32 = 0;
+    if (fl & FLAG_LEFT_ALIGN) != 0 { left = 1; }
+
+    if st == SPEC_FLOAT || st == SPEC_EXP_LO || st == SPEC_EXP_UP ||
+       st == SPEC_GEXP_LO || st == SPEC_GEXP_UP {
+        let use_pr: u32 = pr;
+        if pr == PREC_UNSPEC { use_pr = 6; }
+        let mode: u32 = mode_from_spec(st);
+        return fmt_float_full(buf, pos, v, use_pr, w, mode, left);
+    }
+    if st == SPEC_DEC {
+        let iv: i64 = v;
+        return fmt_int(buf, pos, iv, 10, w, zp, left);
+    }
+    if st == SPEC_UINT || st == SPEC_HEX_LO || st == SPEC_HEX_UP ||
+       st == SPEC_OCT || st == SPEC_BIN {
+        let uv: u64 = v;
+        if st == SPEC_UINT   { return fmt_uint(buf, pos, uv, 10, 0, w, zp, left); }
+        if st == SPEC_HEX_LO { return fmt_uint(buf, pos, uv, 16, 0, w, zp, left); }
+        if st == SPEC_HEX_UP { return fmt_uint(buf, pos, uv, 16, 1, w, zp, left); }
+        if st == SPEC_OCT    { return fmt_uint(buf, pos, uv, 8,  0, w, zp, left); }
+        return fmt_uint(buf, pos, uv, 2, 0, w, zp, left);  // SPEC_BIN
+    }
+    if st == SPEC_CHAR {
+        let c: u32 = v & 255;
+        return fmt_char(buf, pos, c, w, left);
+    }
+    if st == SPEC_PTR {
+        let uv: u64 = v;
+        return fmt_ptr(buf, pos, uv, w);
+    }
+    if st == SPEC_PERCENT {
+        *(buf + pos) = 37;
+        return pos + 1;
+    }
+    return pos;
+}
+
+// ===========================================================================
+// sprintf_* — format to buffer (unbounded)
+// ===========================================================================
+//
+// Each variant walks `fmt`, parsing %spec directives and dispatching to
+// the appropriate argument. Behavior for missing arguments: an empty
+// string is substituted for missing string args, and 0 for missing
+// integer / float args. The output is null-terminated; the returned
+// count excludes the null terminator.
+
+fn sprintf_str(buf: Address, fmt: Address, s1: Address) -> u32 {
+    let spec_buf: Address = allocate(20);
+    let empty: Address = allocate(1);
+    *(empty + 0) = 0;
+
+    let p: u32 = 0;
+    let out_pos: u32 = 0;
+    let str_used: u32 = 0;
+
+    while *(fmt + p) != 0 {
+        let c: u32 = *(fmt + p);
+        if c == 37 {  // '%'
+            let saved_p: u32 = p;
+            let p2: u32 = p + 1;
+            let new_p: u32 = parse_spec(fmt, p2, spec_buf);
+            let st: u32 = load_u32(spec_buf, 0);
+            if st == SPEC_INVALID {
+                // Output '%' literally and reparse from saved_p + 1.
+                *(buf + out_pos) = 37;
+                out_pos = out_pos + 1;
+                p = saved_p + 1;
+            } else {
+                p = new_p;
+                if st == SPEC_PERCENT {
+                    *(buf + out_pos) = 37;
+                    out_pos = out_pos + 1;
+                } else if st == SPEC_STR || st == SPEC_CHAR || st == SPEC_PTR {
+                    let arg: Address = empty;
+                    if str_used == 0 { arg = s1; str_used = 1; }
+                    out_pos = emit_str(buf, out_pos, spec_buf, arg);
+                } else if st == SPEC_FLOAT || st == SPEC_EXP_LO || st == SPEC_EXP_UP ||
+                          st == SPEC_GEXP_LO || st == SPEC_GEXP_UP {
+                    // No float arg — emit "0.000000"-style with default prec.
+                    let zero: f64 = 0.0;
+                    let pr: u32 = load_u32(spec_buf, 8);
+                    let w: u32 = load_u32(spec_buf, 4);
+                    let use_pr: u32 = pr;
+                    if pr == PREC_UNSPEC { use_pr = 6; }
+                    let mode: u32 = mode_from_spec(st);
+                    out_pos = fmt_float_full(buf, out_pos, zero, use_pr, w, mode, 0);
+                } else {
+                    // Integer-like spec with no int arg — emit 0.
+                    let zero: i64 = 0;
+                    out_pos = emit_int(buf, out_pos, spec_buf, zero);
+                }
+            }
+        } else {
+            *(buf + out_pos) = c;
+            out_pos = out_pos + 1;
+            p = p + 1;
+        }
+    }
+
+    *(buf + out_pos) = 0;
+    free(spec_buf);
+    free(empty);
+    return out_pos;
+}
+
+fn sprintf_int(buf: Address, fmt: Address, v1: i64) -> u32 {
+    let spec_buf: Address = allocate(20);
+
+    let p: u32 = 0;
+    let out_pos: u32 = 0;
+    let int_used: u32 = 0;
+
+    while *(fmt + p) != 0 {
+        let c: u32 = *(fmt + p);
+        if c == 37 {
+            let saved_p: u32 = p;
+            let p2: u32 = p + 1;
+            let new_p: u32 = parse_spec(fmt, p2, spec_buf);
+            let st: u32 = load_u32(spec_buf, 0);
+            if st == SPEC_INVALID {
+                *(buf + out_pos) = 37;
+                out_pos = out_pos + 1;
+                p = saved_p + 1;
+            } else {
+                p = new_p;
+                if st == SPEC_PERCENT {
+                    *(buf + out_pos) = 37;
+                    out_pos = out_pos + 1;
+                } else if st == SPEC_STR {
+                    // No string arg — emit empty.
+                } else {
+                    // Integer-like, char, pointer, or float spec — all
+                    // consume the i64 argument (emit_int coerces to
+                    // float for %f/%e/%E/%g/%G).
+                    let arg: i64 = 0;
+                    if int_used == 0 { arg = v1; int_used = 1; }
+                    out_pos = emit_int(buf, out_pos, spec_buf, arg);
+                }
+            }
+        } else {
+            *(buf + out_pos) = c;
+            out_pos = out_pos + 1;
+            p = p + 1;
+        }
+    }
+
+    *(buf + out_pos) = 0;
+    free(spec_buf);
+    return out_pos;
+}
+
+fn sprintf_uint(buf: Address, fmt: Address, v1: u64) -> u32 {
+    let spec_buf: Address = allocate(20);
+
+    let p: u32 = 0;
+    let out_pos: u32 = 0;
+    let uint_used: u32 = 0;
+
+    while *(fmt + p) != 0 {
+        let c: u32 = *(fmt + p);
+        if c == 37 {
+            let saved_p: u32 = p;
+            let p2: u32 = p + 1;
+            let new_p: u32 = parse_spec(fmt, p2, spec_buf);
+            let st: u32 = load_u32(spec_buf, 0);
+            if st == SPEC_INVALID {
+                *(buf + out_pos) = 37;
+                out_pos = out_pos + 1;
+                p = saved_p + 1;
+            } else {
+                p = new_p;
+                if st == SPEC_PERCENT {
+                    *(buf + out_pos) = 37;
+                    out_pos = out_pos + 1;
+                } else if st == SPEC_STR {
+                    // No string arg — emit empty.
+                } else {
+                    let arg: u64 = 0;
+                    if uint_used == 0 { arg = v1; uint_used = 1; }
+                    out_pos = emit_uint(buf, out_pos, spec_buf, arg);
+                }
+            }
+        } else {
+            *(buf + out_pos) = c;
+            out_pos = out_pos + 1;
+            p = p + 1;
+        }
+    }
+
+    *(buf + out_pos) = 0;
+    free(spec_buf);
+    return out_pos;
+}
+
+// sprintf_hex is identical to sprintf_uint in dispatch — both consume a
+// u64 argument. Kept as a distinct entry point for API clarity.
+fn sprintf_hex(buf: Address, fmt: Address, v1: u64) -> u32 {
+    return sprintf_uint(buf, fmt, v1);
+}
+
+fn sprintf_float(buf: Address, fmt: Address, v1: f64) -> u32 {
+    let spec_buf: Address = allocate(20);
+
+    let p: u32 = 0;
+    let out_pos: u32 = 0;
+    let float_used: u32 = 0;
+
+    while *(fmt + p) != 0 {
+        let c: u32 = *(fmt + p);
+        if c == 37 {
+            let saved_p: u32 = p;
+            let p2: u32 = p + 1;
+            let new_p: u32 = parse_spec(fmt, p2, spec_buf);
+            let st: u32 = load_u32(spec_buf, 0);
+            if st == SPEC_INVALID {
+                *(buf + out_pos) = 37;
+                out_pos = out_pos + 1;
+                p = saved_p + 1;
+            } else {
+                p = new_p;
+                if st == SPEC_PERCENT {
+                    *(buf + out_pos) = 37;
+                    out_pos = out_pos + 1;
+                } else if st == SPEC_STR {
+                    // No string arg — emit empty.
+                } else {
+                    let arg: f64 = 0.0;
+                    if float_used == 0 { arg = v1; float_used = 1; }
+                    out_pos = emit_float(buf, out_pos, spec_buf, arg);
+                }
+            }
+        } else {
+            *(buf + out_pos) = c;
+            out_pos = out_pos + 1;
+            p = p + 1;
+        }
+    }
+
+    *(buf + out_pos) = 0;
+    free(spec_buf);
+    return out_pos;
+}
+
+// ---- multi-argument variants ---------------------------------------------
+
+fn sprintf_str_int(buf: Address, fmt: Address, s1: Address, v1: i64) -> u32 {
+    let spec_buf: Address = allocate(20);
+    let empty: Address = allocate(1);
+    *(empty + 0) = 0;
+
+    let p: u32 = 0;
+    let out_pos: u32 = 0;
+    let str_used: u32 = 0;
+    let int_used: u32 = 0;
+
+    while *(fmt + p) != 0 {
+        let c: u32 = *(fmt + p);
+        if c == 37 {
+            let saved_p: u32 = p;
+            let p2: u32 = p + 1;
+            let new_p: u32 = parse_spec(fmt, p2, spec_buf);
+            let st: u32 = load_u32(spec_buf, 0);
+            if st == SPEC_INVALID {
+                *(buf + out_pos) = 37;
+                out_pos = out_pos + 1;
+                p = saved_p + 1;
+            } else {
+                p = new_p;
+                if st == SPEC_PERCENT {
+                    *(buf + out_pos) = 37;
+                    out_pos = out_pos + 1;
+                } else if st == SPEC_STR || st == SPEC_CHAR || st == SPEC_PTR {
+                    let arg: Address = empty;
+                    if str_used == 0 { arg = s1; str_used = 1; }
+                    out_pos = emit_str(buf, out_pos, spec_buf, arg);
+                } else if st == SPEC_FLOAT || st == SPEC_EXP_LO || st == SPEC_EXP_UP ||
+                          st == SPEC_GEXP_LO || st == SPEC_GEXP_UP {
+                    let iv: i64 = 0;
+                    if int_used == 0 { iv = v1; int_used = 1; }
+                    let arg: f64 = iv;  // i64 -> f64 via declaration
+                    let pr: u32 = load_u32(spec_buf, 8);
+                    let w: u32 = load_u32(spec_buf, 4);
+                    let fl: u32 = load_u32(spec_buf, 12);
+                    let left: u32 = 0;
+                    if (fl & FLAG_LEFT_ALIGN) != 0 { left = 1; }
+                    let use_pr: u32 = pr;
+                    if pr == PREC_UNSPEC { use_pr = 6; }
+                    let mode: u32 = mode_from_spec(st);
+                    out_pos = fmt_float_full(buf, out_pos, arg, use_pr, w, mode, left);
+                } else {
+                    let arg: i64 = 0;
+                    if int_used == 0 { arg = v1; int_used = 1; }
+                    out_pos = emit_int(buf, out_pos, spec_buf, arg);
+                }
+            }
+        } else {
+            *(buf + out_pos) = c;
+            out_pos = out_pos + 1;
+            p = p + 1;
+        }
+    }
+
+    *(buf + out_pos) = 0;
+    free(spec_buf);
+    free(empty);
+    return out_pos;
+}
+
+fn sprintf_str_str(buf: Address, fmt: Address, s1: Address, s2: Address) -> u32 {
+    let spec_buf: Address = allocate(20);
+    let empty: Address = allocate(1);
+    *(empty + 0) = 0;
+
+    let p: u32 = 0;
+    let out_pos: u32 = 0;
+    let str_used: u32 = 0;
+
+    while *(fmt + p) != 0 {
+        let c: u32 = *(fmt + p);
+        if c == 37 {
+            let saved_p: u32 = p;
+            let p2: u32 = p + 1;
+            let new_p: u32 = parse_spec(fmt, p2, spec_buf);
+            let st: u32 = load_u32(spec_buf, 0);
+            if st == SPEC_INVALID {
+                *(buf + out_pos) = 37;
+                out_pos = out_pos + 1;
+                p = saved_p + 1;
+            } else {
+                p = new_p;
+                if st == SPEC_PERCENT {
+                    *(buf + out_pos) = 37;
+                    out_pos = out_pos + 1;
+                } else if st == SPEC_STR || st == SPEC_CHAR || st == SPEC_PTR {
+                    let arg: Address = empty;
+                    if str_used == 0 { arg = s1; str_used = 1; }
+                    else if str_used == 1 { arg = s2; str_used = 2; }
+                    out_pos = emit_str(buf, out_pos, spec_buf, arg);
+                } else if st == SPEC_FLOAT || st == SPEC_EXP_LO || st == SPEC_EXP_UP ||
+                          st == SPEC_GEXP_LO || st == SPEC_GEXP_UP {
+                    let zero: f64 = 0.0;
+                    let pr: u32 = load_u32(spec_buf, 8);
+                    let w: u32 = load_u32(spec_buf, 4);
+                    let fl: u32 = load_u32(spec_buf, 12);
+                    let left: u32 = 0;
+                    if (fl & FLAG_LEFT_ALIGN) != 0 { left = 1; }
+                    let use_pr: u32 = pr;
+                    if pr == PREC_UNSPEC { use_pr = 6; }
+                    let mode: u32 = mode_from_spec(st);
+                    out_pos = fmt_float_full(buf, out_pos, zero, use_pr, w, mode, left);
+                } else {
+                    let zero: i64 = 0;
+                    out_pos = emit_int(buf, out_pos, spec_buf, zero);
+                }
+            }
+        } else {
+            *(buf + out_pos) = c;
+            out_pos = out_pos + 1;
+            p = p + 1;
+        }
+    }
+
+    *(buf + out_pos) = 0;
+    free(spec_buf);
+    free(empty);
+    return out_pos;
+}
+
+fn sprintf_int_str(buf: Address, fmt: Address, v1: i64, s1: Address) -> u32 {
+    let spec_buf: Address = allocate(20);
+    let empty: Address = allocate(1);
+    *(empty + 0) = 0;
+
+    let p: u32 = 0;
+    let out_pos: u32 = 0;
+    let int_used: u32 = 0;
+    let str_used: u32 = 0;
+
+    while *(fmt + p) != 0 {
+        let c: u32 = *(fmt + p);
+        if c == 37 {
+            let saved_p: u32 = p;
+            let p2: u32 = p + 1;
+            let new_p: u32 = parse_spec(fmt, p2, spec_buf);
+            let st: u32 = load_u32(spec_buf, 0);
+            if st == SPEC_INVALID {
+                *(buf + out_pos) = 37;
+                out_pos = out_pos + 1;
+                p = saved_p + 1;
+            } else {
+                p = new_p;
+                if st == SPEC_PERCENT {
+                    *(buf + out_pos) = 37;
+                    out_pos = out_pos + 1;
+                } else if st == SPEC_STR || st == SPEC_CHAR || st == SPEC_PTR {
+                    let arg: Address = empty;
+                    if str_used == 0 { arg = s1; str_used = 1; }
+                    out_pos = emit_str(buf, out_pos, spec_buf, arg);
+                } else if st == SPEC_FLOAT || st == SPEC_EXP_LO || st == SPEC_EXP_UP ||
+                          st == SPEC_GEXP_LO || st == SPEC_GEXP_UP {
+                    let iv: i64 = 0;
+                    if int_used == 0 { iv = v1; int_used = 1; }
+                    let arg: f64 = iv;  // i64 -> f64 via declaration
+                    let pr: u32 = load_u32(spec_buf, 8);
+                    let w: u32 = load_u32(spec_buf, 4);
+                    let fl: u32 = load_u32(spec_buf, 12);
+                    let left: u32 = 0;
+                    if (fl & FLAG_LEFT_ALIGN) != 0 { left = 1; }
+                    let use_pr: u32 = pr;
+                    if pr == PREC_UNSPEC { use_pr = 6; }
+                    let mode: u32 = mode_from_spec(st);
+                    out_pos = fmt_float_full(buf, out_pos, arg, use_pr, w, mode, left);
+                } else {
+                    let arg: i64 = 0;
+                    if int_used == 0 { arg = v1; int_used = 1; }
+                    out_pos = emit_int(buf, out_pos, spec_buf, arg);
+                }
+            }
+        } else {
+            *(buf + out_pos) = c;
+            out_pos = out_pos + 1;
+            p = p + 1;
+        }
+    }
+
+    *(buf + out_pos) = 0;
+    free(spec_buf);
+    free(empty);
+    return out_pos;
+}
+
+fn sprintf_str_int_str(buf: Address, fmt: Address, s1: Address, v1: i64, s2: Address) -> u32 {
+    let spec_buf: Address = allocate(20);
+    let empty: Address = allocate(1);
+    *(empty + 0) = 0;
+
+    let p: u32 = 0;
+    let out_pos: u32 = 0;
+    let str_used: u32 = 0;
+    let int_used: u32 = 0;
+
+    while *(fmt + p) != 0 {
+        let c: u32 = *(fmt + p);
+        if c == 37 {
+            let saved_p: u32 = p;
+            let p2: u32 = p + 1;
+            let new_p: u32 = parse_spec(fmt, p2, spec_buf);
+            let st: u32 = load_u32(spec_buf, 0);
+            if st == SPEC_INVALID {
+                *(buf + out_pos) = 37;
+                out_pos = out_pos + 1;
+                p = saved_p + 1;
+            } else {
+                p = new_p;
+                if st == SPEC_PERCENT {
+                    *(buf + out_pos) = 37;
+                    out_pos = out_pos + 1;
+                } else if st == SPEC_STR || st == SPEC_CHAR || st == SPEC_PTR {
+                    let arg: Address = empty;
+                    if str_used == 0 { arg = s1; str_used = 1; }
+                    else if str_used == 1 { arg = s2; str_used = 2; }
+                    out_pos = emit_str(buf, out_pos, spec_buf, arg);
+                } else if st == SPEC_FLOAT || st == SPEC_EXP_LO || st == SPEC_EXP_UP ||
+                          st == SPEC_GEXP_LO || st == SPEC_GEXP_UP {
+                    let iv: i64 = 0;
+                    if int_used == 0 { iv = v1; int_used = 1; }
+                    let arg: f64 = iv;  // i64 -> f64 via declaration
+                    let pr: u32 = load_u32(spec_buf, 8);
+                    let w: u32 = load_u32(spec_buf, 4);
+                    let fl: u32 = load_u32(spec_buf, 12);
+                    let left: u32 = 0;
+                    if (fl & FLAG_LEFT_ALIGN) != 0 { left = 1; }
+                    let use_pr: u32 = pr;
+                    if pr == PREC_UNSPEC { use_pr = 6; }
+                    let mode: u32 = mode_from_spec(st);
+                    out_pos = fmt_float_full(buf, out_pos, arg, use_pr, w, mode, left);
+                } else {
+                    let arg: i64 = 0;
+                    if int_used == 0 { arg = v1; int_used = 1; }
+                    out_pos = emit_int(buf, out_pos, spec_buf, arg);
+                }
+            }
+        } else {
+            *(buf + out_pos) = c;
+            out_pos = out_pos + 1;
+            p = p + 1;
+        }
+    }
+
+    *(buf + out_pos) = 0;
+    free(spec_buf);
+    free(empty);
+    return out_pos;
+}
+
+// ===========================================================================
+// snprintf_* — bounded sprintf
+// ===========================================================================
+//
+// snprintf returns the number of characters that *would* have been
+// written (excluding the null terminator) — matching C99 semantics.
+// At most max_len-1 chars are written, plus a null terminator.
+// If max_len is 0, nothing is written and the would-be length is returned.
+
+fn snprintf_str(buf: Address, max_len: u32, fmt: Address, s1: Address) -> u32 {
+    // Format into a temporary buffer, then copy with the size limit.
+    let temp: Address = allocate(65536);
+    let n: u32 = sprintf_str(temp, fmt, s1);
+
+    if max_len > 0 {
+        let to_copy: u32 = n;
+        if to_copy >= max_len { to_copy = max_len - 1; }
+        let i: u32 = 0;
+        while i < to_copy {
+            *(buf + i) = *(temp + i);
+            i = i + 1;
+        }
+        *(buf + to_copy) = 0;
+    }
+
+    free(temp);
+    return n;
+}
+
+// ===========================================================================
+// printf_* — format to stdout via write(2)
+// ===========================================================================
+//
+// Each printf_* variant formats into a temporary buffer and then issues
+// a single write() syscall on fd=1. The return value is the result of
+// write() (bytes written, or -1 on error).
+
+fn printf_str(fmt: Address, s1: Address) -> i64 {
+    let temp: Address = allocate(65536);
+    let n: u32 = sprintf_str(temp, fmt, s1);
+    let wr: i64 = write(STDOUT_FD, temp, n);
+    free(temp);
+    return wr;
+}
+
+fn printf_int(fmt: Address, v1: i64) -> i64 {
+    let temp: Address = allocate(65536);
+    let n: u32 = sprintf_int(temp, fmt, v1);
+    let wr: i64 = write(STDOUT_FD, temp, n);
+    free(temp);
+    return wr;
+}
+
+fn printf_uint(fmt: Address, v1: u64) -> i64 {
+    let temp: Address = allocate(65536);
+    let n: u32 = sprintf_uint(temp, fmt, v1);
+    let wr: i64 = write(STDOUT_FD, temp, n);
+    free(temp);
+    return wr;
+}
+
+fn printf_hex(fmt: Address, v1: u64) -> i64 {
+    let temp: Address = allocate(65536);
+    let n: u32 = sprintf_hex(temp, fmt, v1);
+    let wr: i64 = write(STDOUT_FD, temp, n);
+    free(temp);
+    return wr;
+}
+
+fn printf_float(fmt: Address, v1: f64) -> i64 {
+    let temp: Address = allocate(65536);
+    let n: u32 = sprintf_float(temp, fmt, v1);
+    let wr: i64 = write(STDOUT_FD, temp, n);
+    free(temp);
+    return wr;
+}
+
+fn printf_str_int(fmt: Address, s1: Address, v1: i64) -> i64 {
+    let temp: Address = allocate(65536);
+    let n: u32 = sprintf_str_int(temp, fmt, s1, v1);
+    let wr: i64 = write(STDOUT_FD, temp, n);
+    free(temp);
+    return wr;
+}
+
+fn printf_str_str(fmt: Address, s1: Address, s2: Address) -> i64 {
+    let temp: Address = allocate(65536);
+    let n: u32 = sprintf_str_str(temp, fmt, s1, s2);
+    let wr: i64 = write(STDOUT_FD, temp, n);
+    free(temp);
+    return wr;
+}

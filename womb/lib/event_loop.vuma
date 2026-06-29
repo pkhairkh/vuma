@@ -1,0 +1,515 @@
+// event_loop.vuma
+// VUMA standard library module: epoll-based event loop / reactor.
+// Target: Linux x86_64. Importable library module (no main()).
+//
+// Task ID: womb-event-loop
+//
+// This module wraps the Linux epoll API behind a small reactor. Callers
+// register file descriptors together with a callback and a user_data
+// pointer; evloop_run() blocks in epoll_wait and dispatches each ready
+// fd to its callback. If a callback returns 1, the fd is automatically
+// removed from the loop.
+//
+// Memory is managed with allocate()/free(); byte-level loads/stores use
+// the *(ptr + offset) primitive. All multi-byte fields are stored in
+// little-endian byte order (native for x86_64).
+//
+// ===========================================================================
+// Memory layout
+// ===========================================================================
+//
+// Event loop structure (header is 16 bytes, followed by the handler table):
+//
+//   [0..7]    epoll_fd     (i64, 8 bytes)  — kernel epoll fd
+//   [8..11]   num_handlers (u32, 4 bytes)  — live handler count;
+//                                            also overloaded as the
+//                                            stop sentinel (0xFFFFFFFF)
+//   [12..15]  max_handlers (u32, 4 bytes)  — capacity of handler table
+//   [16..]    handler table                — array of HANDLER_SIZE entries
+//
+// Handler entry (32 bytes, naturally aligned):
+//
+//   [0..7]    fd         (i64, 8 bytes)
+//   [8..11]   events     (u32, 4 bytes)
+//   [12..15]  padding    (4 bytes, keeps callback 8-byte aligned)
+//   [16..23]  callback   (Address, 8 bytes) — function pointer
+//   [24..31]  user_data  (Address, 8 bytes) — opaque caller data
+//
+// epoll_event structure (12 bytes, packed, as defined by <sys/epoll.h>):
+//
+//   [0..3]    events (u32)
+//   [4..11]   data   (u64) — we store the fd here
+//
+// Total allocation for a loop: 16 + (max_handlers * 32) bytes.
+
+// ===========================================================================
+// Constants
+// ===========================================================================
+
+// epoll_ctl operations
+const EPOLL_CTL_ADD: i64 = 1;
+const EPOLL_CTL_DEL: i64 = 2;
+const EPOLL_CTL_MOD: i64 = 3;
+
+// epoll event flags
+const EPOLLIN: u32 = 1;
+const EPOLLOUT: u32 = 4;
+const EPOLLERR: u32 = 8;
+const EPOLLHUP: u32 = 16;
+const EPOLLET: u32 = 2147483648;    // 0x80000000
+
+// fcntl
+const F_SETFL: i64 = 4;
+const O_NONBLOCK: i64 = 2048;       // x86_64 value
+
+// Event loop header offsets
+const EVLOOP_EPOLL_FD_OFF: u32 = 0;
+const EVLOOP_NUM_HANDLERS_OFF: u32 = 8;
+const EVLOOP_MAX_HANDLERS_OFF: u32 = 12;
+const EVLOOP_TABLE_OFF: u32 = 16;
+
+// Handler entry offsets (within a 32-byte slot)
+const HANDLER_SIZE: u32 = 32;
+const HANDLER_FD_OFF: u32 = 0;
+const HANDLER_EVENTS_OFF: u32 = 8;
+const HANDLER_CALLBACK_OFF: u32 = 16;
+const HANDLER_USERDATA_OFF: u32 = 24;
+
+// Stop sentinel: evloop_stop() writes this to num_handlers.
+const STOP_SENTINEL: u32 = 4294967295;    // 0xFFFFFFFF
+
+// epoll_event offsets (12-byte packed struct)
+const EPOLL_EVENT_SIZE: u32 = 12;
+const EPOLL_EVENT_EVENTS_OFF: u32 = 0;
+const EPOLL_EVENT_DATA_OFF: u32 = 4;
+
+// Maximum number of events returned per epoll_wait call.
+const EPOLL_MAX_EVENTS: i64 = 64;
+
+// ===========================================================================
+// Linux x86_64 syscalls
+// ===========================================================================
+
+extern "C" {
+    fn epoll_create1(flags: i64) -> i64;
+    fn epoll_ctl(epfd: i64, op: i64, fd: i64, event: Address) -> i64;
+    fn epoll_wait(epfd: i64, events: Address, maxevents: i64, timeout: i64) -> i64;
+    fn close(fd: i64) -> i64;
+    fn read(fd: i64, buf: Address, count: i64) -> i64;
+    fn write(fd: i64, buf: Address, count: i64) -> i64;
+    fn fcntl(fd: i64, cmd: i64, arg: i64) -> i64;
+}
+
+// ===========================================================================
+// Internal byte-level load/store helpers (little-endian)
+// ===========================================================================
+
+// Store the low 4 bytes of `val` at ptr+offset (little-endian).
+fn store_u32_le(ptr: Address, offset: u32, val: u32) {
+    *(ptr + offset) = val & 255;
+    *(ptr + offset + 1) = (val >> 8) & 255;
+    *(ptr + offset + 2) = (val >> 16) & 255;
+    *(ptr + offset + 3) = (val >> 24) & 255;
+    return;
+}
+
+// Load 4 bytes at ptr+offset as a little-endian u32.
+fn load_u32_le(ptr: Address, offset: u32) -> u32 {
+    let b0: u32 = *(ptr + offset);
+    let b1: u32 = *(ptr + offset + 1);
+    let b2: u32 = *(ptr + offset + 2);
+    let b3: u32 = *(ptr + offset + 3);
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+}
+
+// Store 8 bytes of `val` at ptr+offset (little-endian).
+fn store_i64_le(ptr: Address, offset: u32, val: i64) {
+    *(ptr + offset) = val & 255;
+    *(ptr + offset + 1) = (val >> 8) & 255;
+    *(ptr + offset + 2) = (val >> 16) & 255;
+    *(ptr + offset + 3) = (val >> 24) & 255;
+    *(ptr + offset + 4) = (val >> 32) & 255;
+    *(ptr + offset + 5) = (val >> 40) & 255;
+    *(ptr + offset + 6) = (val >> 48) & 255;
+    *(ptr + offset + 7) = (val >> 56) & 255;
+    return;
+}
+
+// Load 8 bytes at ptr+offset as a little-endian i64.
+fn load_i64_le(ptr: Address, offset: u32) -> i64 {
+    let b0: i64 = *(ptr + offset) as i64;
+    let b1: i64 = *(ptr + offset + 1) as i64;
+    let b2: i64 = *(ptr + offset + 2) as i64;
+    let b3: i64 = *(ptr + offset + 3) as i64;
+    let b4: i64 = *(ptr + offset + 4) as i64;
+    let b5: i64 = *(ptr + offset + 5) as i64;
+    let b6: i64 = *(ptr + offset + 6) as i64;
+    let b7: i64 = *(ptr + offset + 7) as i64;
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+         | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
+}
+
+// Store an Address (8 bytes, little-endian) at ptr+offset.
+fn store_address(ptr: Address, offset: u32, val: Address) {
+    let v: i64 = val as i64;
+    store_i64_le(ptr, offset, v);
+    return;
+}
+
+// Load an Address (8 bytes, little-endian) from ptr+offset.
+fn load_address(ptr: Address, offset: u32) -> Address {
+    let v: i64 = load_i64_le(ptr, offset);
+    return v as Address;
+}
+
+// ===========================================================================
+// epoll_event helpers (12-byte packed struct)
+// ===========================================================================
+
+// Initialise an epoll_event at `ev` with the given events mask and fd.
+// The fd is stored in the 8-byte `data` union (we use the u64 fd variant).
+fn epoll_event_set(ev: Address, events: u32, fd: i64) {
+    store_u32_le(ev, EPOLL_EVENT_EVENTS_OFF, events);
+    store_i64_le(ev, EPOLL_EVENT_DATA_OFF, fd);
+    return;
+}
+
+// ===========================================================================
+// Handler table lookup
+// ===========================================================================
+
+// Return a pointer to the handler entry for `fd`, or null (0) if not found.
+// Entries with fd == 0 are unused slots and are skipped.
+fn handler_find(lp: Address, fd: i64) -> Address {
+    let num: u32 = load_u32_le(lp, EVLOOP_NUM_HANDLERS_OFF);
+    // If the stop sentinel has been written, the count is no longer valid.
+    if num == STOP_SENTINEL {
+        return 0;
+    }
+    let base: Address = lp + EVLOOP_TABLE_OFF;
+    let i: u32 = 0;
+    while i < num {
+        let entry: Address = base + (i * HANDLER_SIZE);
+        let efd: i64 = load_i64_le(entry, HANDLER_FD_OFF);
+        if efd == fd {
+            return entry;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+// Return a pointer to the first free handler slot (fd == 0), or null if
+// the table is full.
+fn handler_find_free(lp: Address) -> Address {
+    let max: u32 = load_u32_le(lp, EVLOOP_MAX_HANDLERS_OFF);
+    let base: Address = lp + EVLOOP_TABLE_OFF;
+    let i: u32 = 0;
+    while i < max {
+        let entry: Address = base + (i * HANDLER_SIZE);
+        let efd: i64 = load_i64_le(entry, HANDLER_FD_OFF);
+        if efd == 0 {
+            return entry;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+// Zero out a 32-byte handler entry, marking it free.
+fn handler_clear(entry: Address) {
+    let i: u32 = 0;
+    while i < HANDLER_SIZE {
+        *(entry + i) = 0;
+        i = i + 1;
+    }
+    return;
+}
+
+// ===========================================================================
+// 1. Event loop lifecycle
+// ===========================================================================
+
+// Create a new event loop supporting up to `max_handlers` simultaneous fds.
+// Returns a pointer to the loop structure, or null (0) on failure
+// (e.g. epoll_create1 failed or allocation failed).
+//
+// Total allocation: 16 + (max_handlers * 32) bytes, zero-initialised.
+fn evloop_create(max_handlers: u32) -> Address {
+    let epfd: i64 = epoll_create1(0);
+    if epfd < 0 {
+        return 0;
+    }
+    let table_bytes: u32 = max_handlers * HANDLER_SIZE;
+    let total: u32 = EVLOOP_TABLE_OFF + table_bytes;
+    let lp: Address = allocate(total);
+    if lp == 0 {
+        close(epfd);
+        return 0;
+    }
+    // Zero-initialise the whole structure so all handler slots start free.
+    let i: u32 = 0;
+    while i < total {
+        *(lp + i) = 0;
+        i = i + 1;
+    }
+    store_i64_le(lp, EVLOOP_EPOLL_FD_OFF, epfd);
+    store_u32_le(lp, EVLOOP_NUM_HANDLERS_OFF, 0);
+    store_u32_le(lp, EVLOOP_MAX_HANDLERS_OFF, max_handlers);
+    return lp;
+}
+
+// Tear down an event loop. Closes the epoll fd and frees memory.
+// Does NOT close registered fds — the caller is responsible for that.
+fn evloop_free(lp: Address) {
+    let epfd: i64 = load_i64_le(lp, EVLOOP_EPOLL_FD_OFF);
+    if epfd > 0 {
+        close(epfd);
+    }
+    free(lp);
+    return;
+}
+
+// ===========================================================================
+// 2. Handler registration
+// ===========================================================================
+
+// Register a new fd in the loop.
+//   events    — bitmask of EPOLLIN / EPOLLOUT / EPOLLERR / EPOLLHUP / EPOLLET
+//   callback  — function pointer invoked when the fd becomes ready
+//   user_data — opaque pointer passed back to the callback
+// Returns 1 on success, 0 on failure (fd already registered, table full,
+// or epoll_ctl error).
+fn evloop_add(lp: Address, fd: i64, events: u32, callback: Address,
+              user_data: Address) -> u32 {
+    if fd <= 0 {
+        return 0;
+    }
+    // Refuse if the fd is already registered.
+    let existing: Address = handler_find(lp, fd);
+    if existing != 0 {
+        return 0;
+    }
+    let entry: Address = handler_find_free(lp);
+    if entry == 0 {
+        return 0;
+    }
+    // Build the epoll_event in a small scratch buffer.
+    let ev: Address = allocate(EPOLL_EVENT_SIZE);
+    if ev == 0 {
+        return 0;
+    }
+    epoll_event_set(ev, events, fd);
+    let epfd: i64 = load_i64_le(lp, EVLOOP_EPOLL_FD_OFF);
+    let rc: i64 = epoll_ctl(epfd, EPOLL_CTL_ADD, fd, ev);
+    free(ev);
+    if rc < 0 {
+        return 0;
+    }
+    // Record the handler entry.
+    store_i64_le(entry, HANDLER_FD_OFF, fd);
+    store_u32_le(entry, HANDLER_EVENTS_OFF, events);
+    store_address(entry, HANDLER_CALLBACK_OFF, callback);
+    store_address(entry, HANDLER_USERDATA_OFF, user_data);
+    // Bump the live-handler count (unless evloop_stop has been signalled).
+    let num: u32 = load_u32_le(lp, EVLOOP_NUM_HANDLERS_OFF);
+    if num != STOP_SENTINEL {
+        store_u32_le(lp, EVLOOP_NUM_HANDLERS_OFF, num + 1);
+    }
+    return 1;
+}
+
+// Remove `fd` from the loop.
+// Returns 1 on success, 0 if the fd was not registered or epoll_ctl failed.
+// The local handler slot is always cleared, even on kernel-side failure,
+// so that the loop's bookkeeping stays consistent.
+fn evloop_remove(lp: Address, fd: i64) -> u32 {
+    let entry: Address = handler_find(lp, fd);
+    if entry == 0 {
+        return 0;
+    }
+    let epfd: i64 = load_i64_le(lp, EVLOOP_EPOLL_FD_OFF);
+    // The kernel ignores the event pointer for EPOLL_CTL_DEL, but a
+    // valid pointer is still required by the syscall signature.
+    let ev: Address = allocate(EPOLL_EVENT_SIZE);
+    if ev != 0 {
+        epoll_event_set(ev, 0, fd);
+    }
+    let rc: i64 = epoll_ctl(epfd, EPOLL_CTL_DEL, fd, ev);
+    if ev != 0 {
+        free(ev);
+    }
+    handler_clear(entry);
+    let num: u32 = load_u32_le(lp, EVLOOP_NUM_HANDLERS_OFF);
+    if num != STOP_SENTINEL {
+        if num > 0 {
+            store_u32_le(lp, EVLOOP_NUM_HANDLERS_OFF, num - 1);
+        }
+    }
+    if rc < 0 {
+        return 0;
+    }
+    return 1;
+}
+
+// Modify the events mask for an existing fd.
+// Returns 1 on success, 0 if not registered or on epoll_ctl failure.
+fn evloop_modify(lp: Address, fd: i64, events: u32) -> u32 {
+    let entry: Address = handler_find(lp, fd);
+    if entry == 0 {
+        return 0;
+    }
+    let ev: Address = allocate(EPOLL_EVENT_SIZE);
+    if ev == 0 {
+        return 0;
+    }
+    epoll_event_set(ev, events, fd);
+    let epfd: i64 = load_i64_le(lp, EVLOOP_EPOLL_FD_OFF);
+    let rc: i64 = epoll_ctl(epfd, EPOLL_CTL_MOD, fd, ev);
+    free(ev);
+    if rc < 0 {
+        return 0;
+    }
+    store_u32_le(entry, HANDLER_EVENTS_OFF, events);
+    return 1;
+}
+
+// ===========================================================================
+// 3. Non-blocking I/O helpers
+// ===========================================================================
+
+// Set `fd` to non-blocking mode via fcntl(F_SETFL, O_NONBLOCK).
+// Returns the fcntl return value (0 on success, -1 on error).
+fn evloop_set_nonblock(fd: i64) -> i64 {
+    return fcntl(fd, F_SETFL, O_NONBLOCK);
+}
+
+// ===========================================================================
+// 4. Main event loop
+// ===========================================================================
+
+// Dispatch a single ready epoll_event: look up the handler by fd, invoke
+// its callback, and remove the fd if the callback returns 1.
+// Returns the callback's return value, or 0 if no handler was found.
+fn evloop_dispatch(lp: Address, ev: Address) -> u32 {
+    let events: u32 = load_u32_le(ev, EPOLL_EVENT_EVENTS_OFF);
+    let fd: i64 = load_i64_le(ev, EPOLL_EVENT_DATA_OFF);
+    if fd == 0 {
+        // fd == 0 means the data field was unset — skip silently.
+        return 0;
+    }
+    let entry: Address = handler_find(lp, fd);
+    if entry == 0 {
+        // Not registered (maybe removed inside another callback). Skip.
+        return 0;
+    }
+    let cb: Address = load_address(entry, HANDLER_CALLBACK_OFF);
+    let ud: Address = load_address(entry, HANDLER_USERDATA_OFF);
+    if cb == 0 {
+        return 0;
+    }
+    // -----------------------------------------------------------------
+    // Indirect function-pointer call. `cb` is an Address-typed variable
+    // holding the callback pointer stored in the handler table. The
+    // callback contract is:
+    //   fn(fd: i64, events: u32, user_data: Address) -> u32
+    // A return value of 1 means "remove this fd from the loop".
+    // -----------------------------------------------------------------
+    let result: u32 = cb(fd, events, ud);
+    if result == 1 {
+        evloop_remove(lp, fd);
+    }
+    return result;
+}
+
+// Run the event loop.
+//   timeout_ms < 0: loop forever (until evloop_stop is called).
+//   timeout_ms == 0: return after one epoll_wait iteration.
+//   timeout_ms  > 0: poll for up to timeout_ms per iteration; the loop
+//                    continues until evloop_stop is called.
+// Returns 0 on normal exit, 1 on error (invalid loop or epoll_wait error).
+fn evloop_run(lp: Address, timeout_ms: i64) -> u32 {
+    let epfd: i64 = load_i64_le(lp, EVLOOP_EPOLL_FD_OFF);
+    if epfd <= 0 {
+        return 1;
+    }
+    // Allocate the ready-events buffer once, reused across iterations.
+    let buf_size: u32 = (EPOLL_MAX_EVENTS as u32) * EPOLL_EVENT_SIZE;
+    let events_buf: Address = allocate(buf_size);
+    if events_buf == 0 {
+        return 1;
+    }
+    let once: u32 = 0;
+    if timeout_ms == 0 {
+        once = 1;
+    }
+    let rc: u32 = 0;
+    while 1 == 1 {
+        // Check the stop sentinel at the top of every iteration.
+        let flag: u32 = load_u32_le(lp, EVLOOP_NUM_HANDLERS_OFF);
+        if flag == STOP_SENTINEL {
+            break;
+        }
+        // Block in epoll_wait for ready events.
+        let n: i64 = epoll_wait(epfd, events_buf, EPOLL_MAX_EVENTS, timeout_ms);
+        if n < 0 {
+            rc = 1;
+            break;
+        }
+        // Dispatch each ready event in order.
+        let i: i64 = 0;
+        while i < n {
+            let off: i64 = i * (EPOLL_EVENT_SIZE as i64);
+            let ev: Address = events_buf + off;
+            evloop_dispatch(lp, ev);
+            i = i + 1;
+        }
+        // A callback may have called evloop_stop — re-check the sentinel.
+        let flag2: u32 = load_u32_le(lp, EVLOOP_NUM_HANDLERS_OFF);
+        if flag2 == STOP_SENTINEL {
+            break;
+        }
+        if once == 1 {
+            break;
+        }
+    }
+    free(events_buf);
+    return rc;
+}
+
+// Signal the loop to stop. Safe to call from within a callback.
+// Writes the STOP_SENTINEL to the num_handlers slot. The actual count
+// is destroyed, but the loop is shutting down anyway. The next
+// evloop_run iteration (or the current one, after dispatch finishes)
+// observes the sentinel and exits.
+fn evloop_stop(lp: Address) {
+    store_u32_le(lp, EVLOOP_NUM_HANDLERS_OFF, STOP_SENTINEL);
+    return;
+}
+
+// ===========================================================================
+// 5. Convenience registration helpers
+// ===========================================================================
+
+// Register `fd` for read readiness (EPOLLIN). The fd should typically be
+// set to non-blocking mode first via evloop_set_nonblock.
+fn evloop_add_read(lp: Address, fd: i64, callback: Address,
+                   user_data: Address) -> u32 {
+    return evloop_add(lp, fd, EPOLLIN, callback, user_data);
+}
+
+// Register `fd` for write readiness (EPOLLOUT).
+fn evloop_add_write(lp: Address, fd: i64, callback: Address,
+                    user_data: Address) -> u32 {
+    return evloop_add(lp, fd, EPOLLOUT, callback, user_data);
+}
+
+// Register `fd` with an arbitrary event mask plus EPOLLET (edge-triggered).
+// The caller supplies the base events (e.g. EPOLLIN | EPOLLOUT); EPOLLET
+// is OR'd in automatically. With edge-triggered semantics the caller
+// MUST drain the fd to EAGAIN or risk lost wakeups.
+fn evloop_add_edge(lp: Address, fd: i64, events: u32, callback: Address,
+                   user_data: Address) -> u32 {
+    let edge_events: u32 = events | EPOLLET;
+    return evloop_add(lp, fd, edge_events, callback, user_data);
+}
