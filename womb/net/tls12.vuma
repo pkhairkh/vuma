@@ -1,0 +1,630 @@
+// womb/tls12.vuma — TLS 1.2 (RFC 5246) library module
+// No main() — importable library module.
+//
+// Task ID: womb-tls12
+//
+// Implements the TLS 1.2 cryptographic core:
+//   1. PRF            (RFC 5246 Section 5)           — tls12_prf
+//   2. Key Schedule   (RFC 5246 Section 6.3 / 8.1)   — tls12_compute_master_secret,
+//                                                       tls12_compute_keys,
+//                                                       tls12_extract_key_material
+//   3. Record Layer   (RFC 5246 Section 6.2.3)       — tls12_encrypt_record,
+//                                                       tls12_decrypt_record
+//   4. Handshake      (RFC 5246 Section 7.4)         — tls12_build_client_hello,
+//                                                       tls12_parse_server_hello,
+//                                                       tls12_build_finished
+//
+// The PRF uses HMAC-SHA-256 (P_hash with SHA-256), which is the mandatory
+// PRF for TLS 1.2 cipher suites that specify SHA-256 (RFC 5246 Section 5).
+//
+// Record-layer cipher suite targeted: TLS_RSA_WITH_AES_256_CBC_SHA256
+// (0x003D): MAC = HMAC-SHA-256, bulk cipher = AES-256-CBC with explicit IV,
+// MAC-then-encrypt. AES-CBC is used in raw block mode (input pre-padded to
+// the AES block boundary with TLS padding); the explicit per-record IV is
+// managed by the caller (passed into encrypt/decrypt, prepended to the
+// ciphertext by the caller when framing the TLS record).
+//
+// Assumed-existing primitives (declared `extern "C"` below):
+//   sha256_oneshot, sha1_oneshot, md5_oneshot, hmac_sha256,
+//   aes256_cbc_encrypt, aes256_cbc_decrypt,
+//   rsa_pkcs1_v15_encrypt, rsa_pkcs1_v15_decrypt.
+//
+// Memory is managed with allocate()/free(); byte-level loads/stores use the
+// *(ptr + offset) primitive. Multi-byte integers are assembled byte-by-byte
+// in big-endian (network) order via the store_u*_be / load_u*_be helpers.
+
+// ===========================================================================
+// Constants (RFC 5246 / RFC 5246 ciphersuite registry)
+// ===========================================================================
+
+// Protocol / record-layer constants
+const TLS_12_VERSION: u32 = 0x0303;                       // TLS 1.2 (major.minor = 3.3)
+const TLS_HANDSHAKE: u32 = 22;                            // record content type: Handshake
+const TLS_CLIENT_HELLO: u32 = 1;                          // handshake msg type
+const TLS_SERVER_HELLO: u32 = 2;                          // handshake msg type
+const TLS_FINISHED: u32 = 20;                             // handshake msg type
+
+// Cipher suite: RSA key exchange, AES-256-CBC, HMAC-SHA-256
+const TLS_RSA_WITH_AES_256_CBC_SHA256: u32 = 0x003D;
+
+// Size constants for the targeted cipher suite
+const SHA256_LEN: u32 = 32;                               // HMAC-SHA-256 digest / mac_key length
+const AES_BLOCK_SIZE: u32 = 16;                           // AES block (and explicit IV) length
+const MASTER_SECRET_LEN: u32 = 48;                        // RFC 5246: master_secret is 48 bytes
+const FINISHED_VERIFY_LEN: u32 = 12;                      // RFC 5246: verify_data is 12 bytes
+const KEY_BLOCK_LEN: u32 = 160;                           // 2 * (mac_key(32) + enc_key(32) + iv(16))
+
+// ===========================================================================
+// Assumed-existing crypto primitives.
+// hmac_sha256 matches womb/crypto/hmac_sha256.vuma:
+//     hmac_sha256(key, key_len, msg, msg_len, out) -> void, out = 32 bytes.
+// aes256_cbc_{encrypt,decrypt} operate in raw CBC mode on block-aligned
+// input (no internal PKCS#7 padding); TLS applies its own padding. They
+// return the number of bytes written (== input length on a block-aligned
+// input), or 0 on error.
+// ===========================================================================
+
+extern "C" {
+    fn sha256_oneshot(data: Address, len: u32, out: Address);
+    fn sha1_oneshot(data: Address, len: u32, out: Address);
+    fn md5_oneshot(data: Address, len: u32, out: Address);
+    fn hmac_sha256(key: Address, key_len: u32, msg: Address, msg_len: u32, out: Address);
+    fn aes256_cbc_encrypt(key: Address, iv: Address, plaintext: Address, pt_len: u32, ciphertext: Address) -> u32;
+    fn aes256_cbc_decrypt(key: Address, iv: Address, ciphertext: Address, ct_len: u32, plaintext: Address) -> u32;
+    fn rsa_pkcs1_v15_encrypt(msg: Address, msg_len: u32, e: Address, n: Address, key_size: u32, ciphertext: Address) -> u32;
+    fn rsa_pkcs1_v15_decrypt(ciphertext: Address, d: Address, n: Address, key_size: u32, msg_out: Address) -> u32;
+}
+
+// ===========================================================================
+// Big-endian (network byte order) store / load helpers.
+// VUMA exposes only byte-granular *(ptr + off); multi-byte integers are
+// assembled/disassembled one byte at a time.
+// ===========================================================================
+
+fn store_u16_be(addr: Address, val: u32) {
+    *(addr + 0) = (val >> 8) & 255;
+    *(addr + 1) = val & 255;
+}
+
+fn store_u24_be(addr: Address, val: u32) {
+    *(addr + 0) = (val >> 16) & 255;
+    *(addr + 1) = (val >> 8) & 255;
+    *(addr + 2) = val & 255;
+}
+
+fn store_u32_be(addr: Address, val: u32) {
+    *(addr + 0) = (val >> 24) & 255;
+    *(addr + 1) = (val >> 16) & 255;
+    *(addr + 2) = (val >> 8) & 255;
+    *(addr + 3) = val & 255;
+}
+
+fn store_u64_be(addr: Address, val: u64) {
+    // Keep the whole expression in u64 to avoid any u32/u64 mixing in `&`.
+    let m: u64 = 255;
+    *(addr + 0) = ((val >> 56) & m) as u32;
+    *(addr + 1) = ((val >> 48) & m) as u32;
+    *(addr + 2) = ((val >> 40) & m) as u32;
+    *(addr + 3) = ((val >> 32) & m) as u32;
+    *(addr + 4) = ((val >> 24) & m) as u32;
+    *(addr + 5) = ((val >> 16) & m) as u32;
+    *(addr + 6) = ((val >> 8) & m) as u32;
+    *(addr + 7) = (val & m) as u32;
+}
+
+fn load_u16_be(addr: Address) -> u32 {
+    let hi: u32 = *(addr + 0);
+    let lo: u32 = *(addr + 1);
+    return (hi << 8) | lo;
+}
+
+fn load_u24_be(addr: Address) -> u32 {
+    let b0: u32 = *(addr + 0);
+    let b1: u32 = *(addr + 1);
+    let b2: u32 = *(addr + 2);
+    return (b0 << 16) | (b1 << 8) | b2;
+}
+
+fn load_u32_be(addr: Address) -> u32 {
+    let b0: u32 = *(addr + 0);
+    let b1: u32 = *(addr + 1);
+    let b2: u32 = *(addr + 2);
+    let b3: u32 = *(addr + 3);
+    return (b0 << 24) | (b1 << 16) | (b2 << 8) | b3;
+}
+
+// ===========================================================================
+// Memory helpers
+// ===========================================================================
+
+// Copy `n` bytes from src to dst (no overlap assumed).
+fn tls12_memcpy(dst: Address, src: Address, n: u32) {
+    let i: u32 = 0;
+    while i < n {
+        *(dst + i) = *(src + i);
+        i = i + 1;
+    }
+}
+
+// ===========================================================================
+// 1. PRF (RFC 5246 Section 5)
+//
+//   P_hash(secret, seed) = HMAC_hash(secret, A(1) + seed) ||
+//                          HMAC_hash(secret, A(2) + seed) || ...
+//   A(0) = seed
+//   A(i) = HMAC_hash(secret, A(i-1))
+//
+//   PRF(secret, label, seed) = P_hash(secret, label || seed)
+//
+// For TLS 1.2 with SHA-256, HMAC_hash = HMAC-SHA-256 (32-byte output).
+// ===========================================================================
+
+// P_hash with HMAC-SHA-256. Writes out_len bytes to `out`.
+fn tls12_p_hash(secret: Address, secret_len: u32, seed: Address, seed_len: u32, out: Address, out_len: u32) {
+    let a: Address = allocate(SHA256_LEN);              // A(i) for i >= 1 (always 32 bytes)
+    let a_next: Address = allocate(SHA256_LEN);         // temp for A(i+1) (avoid in-place aliasing)
+    let buf: Address = allocate(SHA256_LEN + seed_len); // A(i) || seed
+    let block: Address = allocate(SHA256_LEN);          // HMAC(secret, A(i) || seed)
+
+    // A(1) = HMAC(secret, A(0)) = HMAC(secret, seed)
+    hmac_sha256(secret, secret_len, seed, seed_len, a);
+
+    let offset: u32 = 0;
+    let remaining: u32 = 0;
+    let to_copy: u32 = 0;
+    while offset < out_len {
+        // buf = A(i) || seed
+        tls12_memcpy(buf + 0, a, SHA256_LEN);
+        tls12_memcpy(buf + SHA256_LEN, seed, seed_len);
+        // block = HMAC(secret, A(i) || seed)
+        hmac_sha256(secret, secret_len, buf, SHA256_LEN + seed_len, block);
+        // Copy block (or its prefix) into out[offset..].
+        remaining = out_len - offset;
+        to_copy = SHA256_LEN;
+        if remaining < SHA256_LEN { to_copy = remaining; }
+        tls12_memcpy(out + offset, block, to_copy);
+        offset = offset + to_copy;
+        // A(i+1) = HMAC(secret, A(i))
+        hmac_sha256(secret, secret_len, a, SHA256_LEN, a_next);
+        tls12_memcpy(a, a_next, SHA256_LEN);
+    }
+
+    free(a);
+    free(a_next);
+    free(buf);
+    free(block);
+}
+
+// TLS 1.2 PRF: P_hash(secret, label || seed).
+//   secret     : PRF secret
+//   secret_len : length of secret
+//   label      : ASCII label (e.g. "master secret")
+//   label_len  : length of label
+//   seed       : seed bytes
+//   seed_len   : length of seed
+//   out        : output buffer (out_len bytes written)
+//   out_len    : desired output length
+fn tls12_prf(secret: Address, secret_len: u32, label: Address, label_len: u32, seed: Address, seed_len: u32, out: Address, out_len: u32) {
+    // PRF input seed = label || seed
+    let seed_full: Address = allocate(label_len + seed_len);
+    tls12_memcpy(seed_full + 0, label, label_len);
+    tls12_memcpy(seed_full + label_len, seed, seed_len);
+    tls12_p_hash(secret, secret_len, seed_full, label_len + seed_len, out, out_len);
+    free(seed_full);
+}
+
+// ===========================================================================
+// 2. Key Schedule (RFC 5246 Section 6.3 / 8.1)
+// ===========================================================================
+
+// Compute the 48-byte master_secret.
+//   master_secret = PRF(pre_master, "master secret",
+//                       client_random || server_random, 48)
+// NOTE the seed order: client_random first, then server_random.
+// master_out must point to a 48-byte buffer.
+fn tls12_compute_master_secret(pre_master: Address, pm_len: u32, client_random: Address, server_random: Address, master_out: Address) {
+    // seed = client_random(32) || server_random(32)
+    let seed: Address = allocate(64);
+    tls12_memcpy(seed + 0, client_random, 32);
+    tls12_memcpy(seed + 32, server_random, 32);
+
+    // label = "master secret" (13 bytes)
+    let label: Address = allocate(13);
+    *(label + 0) = 109;   // 'm'
+    *(label + 1) = 97;    // 'a'
+    *(label + 2) = 115;   // 's'
+    *(label + 3) = 116;   // 't'
+    *(label + 4) = 101;   // 'e'
+    *(label + 5) = 114;   // 'r'
+    *(label + 6) = 32;    // ' '
+    *(label + 7) = 115;   // 's'
+    *(label + 8) = 101;   // 'e'
+    *(label + 9) = 99;    // 'c'
+    *(label + 10) = 114;  // 'r'
+    *(label + 11) = 101;  // 'e'
+    *(label + 12) = 116;  // 't'
+
+    tls12_prf(pre_master, pm_len, label, 13, seed, 64, master_out, MASTER_SECRET_LEN);
+
+    free(seed);
+    free(label);
+}
+
+// Compute the key_block.
+//   key_block = PRF(master, "key expansion",
+//                   server_random || client_random, key_block_len)
+// NOTE the seed order is REVERSED vs. the master-secret computation:
+// server_random first, then client_random (RFC 5246 Section 6.3).
+// key_block must point to a key_block_len-byte buffer.
+fn tls12_compute_keys(master: Address, client_random: Address, server_random: Address, key_block: Address, key_block_len: u32) {
+    // seed = server_random(32) || client_random(32)
+    let seed: Address = allocate(64);
+    tls12_memcpy(seed + 0, server_random, 32);
+    tls12_memcpy(seed + 32, client_random, 32);
+
+    // label = "key expansion" (13 bytes)
+    let label: Address = allocate(13);
+    *(label + 0) = 107;   // 'k'
+    *(label + 1) = 101;   // 'e'
+    *(label + 2) = 121;   // 'y'
+    *(label + 3) = 32;    // ' '
+    *(label + 4) = 101;   // 'e'
+    *(label + 5) = 120;   // 'x'
+    *(label + 6) = 112;   // 'p'
+    *(label + 7) = 97;    // 'a'
+    *(label + 8) = 110;   // 'n'
+    *(label + 9) = 115;   // 's'
+    *(label + 10) = 105;  // 'i'
+    *(label + 11) = 111;  // 'o'
+    *(label + 12) = 110;  // 'n'
+
+    tls12_prf(master, MASTER_SECRET_LEN, label, 13, seed, 64, key_block, key_block_len);
+
+    free(seed);
+    free(label);
+}
+
+// Split a key_block into the six material pieces for
+// TLS_RSA_WITH_AES_256_CBC_SHA256 (RFC 5246 Section 6.3).
+//
+//   key_block layout (160 bytes total for this suite):
+//     [  0.. 32) client_write_MAC_key   (HMAC-SHA-256 key, 32 bytes)
+//     [ 32.. 64) server_write_MAC_key
+//     [ 64.. 96) client_write_key       (AES-256 key, 32 bytes)
+//     [ 96..128) server_write_key
+//     [128..144) client_write_IV        (AES-CBC IV, 16 bytes)
+//     [144..160) server_write_IV
+//
+// Each output Address must point to a buffer of the indicated size.
+fn tls12_extract_key_material(key_block: Address, client_mac: Address, server_mac: Address, client_key: Address, server_key: Address, client_iv: Address, server_iv: Address) {
+    tls12_memcpy(client_mac, key_block + 0, 32);
+    tls12_memcpy(server_mac, key_block + 32, 32);
+    tls12_memcpy(client_key, key_block + 64, 32);
+    tls12_memcpy(server_key, key_block + 96, 32);
+    tls12_memcpy(client_iv, key_block + 128, 16);
+    tls12_memcpy(server_iv, key_block + 144, 16);
+}
+
+// ===========================================================================
+// 3. Record Layer (RFC 5246 Section 6.2.3)
+//
+// Cipher: AES-256-CBC with explicit IV, MAC = HMAC-SHA-256 (MAC-then-encrypt).
+//
+// MAC = HMAC-SHA-256(mac_key,
+//                    seq_num(8) || type(1) || version(2) || length(2) ||
+//                    plaintext)
+//
+// For encryption the MAC is appended to the plaintext, the combined buffer
+// is padded to the AES block boundary with TLS padding, and the whole is
+// CBC-encrypted with the (caller-supplied, per-record) IV. The MAC is
+// therefore included inside the encrypted payload. The explicit IV is NOT
+// prepended to the ciphertext buffer by these functions — the caller owns
+// IV framing in the TLS record (record = header(5) || IV(16) || ciphertext).
+//
+// aes256_cbc_{encrypt,decrypt} are assumed to be raw CBC (block-aligned I/O,
+// no internal padding); TLS handles padding explicitly here.
+// ===========================================================================
+
+// Encrypt one TLS record fragment.
+//   key       : AES-256 encryption key (32 bytes)
+//   iv        : explicit per-record IV (16 bytes)
+//   mac_key   : HMAC-SHA-256 MAC key (32 bytes)
+//   seq_num   : 64-bit record sequence number
+//   type      : record content type (e.g. TLS_HANDSHAKE=22, 23=app data)
+//   plaintext : record fragment (pt_len bytes)
+//   pt_len    : plaintext length
+//   ciphertext: output buffer; receives the encrypted bytes
+// Returns the number of ciphertext bytes written (= padded length), or 0 on
+// error from aes256_cbc_encrypt. The caller must size the output buffer to
+// at least pt_len + 32 (MAC) + up to 16 (padding) bytes.
+fn tls12_encrypt_record(key: Address, iv: Address, mac_key: Address, seq_num: u64, type: u32, plaintext: Address, pt_len: u32, ciphertext: Address) -> u32 {
+    // 1. Build MAC input: seq_num(8) || type(1) || version(2) || length(2) || plaintext
+    let mac_input_len: u32 = 13 + pt_len;
+    let mac_input: Address = allocate(mac_input_len);
+    store_u64_be(mac_input + 0, seq_num);
+    *(mac_input + 8) = type & 255;
+    store_u16_be(mac_input + 9, TLS_12_VERSION);
+    store_u16_be(mac_input + 11, pt_len);
+    tls12_memcpy(mac_input + 13, plaintext, pt_len);
+
+    // 2. MAC = HMAC-SHA-256(mac_key, mac_input)
+    let mac: Address = allocate(SHA256_LEN);
+    hmac_sha256(mac_key, SHA256_LEN, mac_input, mac_input_len, mac);
+
+    // 3. payload = plaintext || MAC, then TLS-CBC pad to AES block boundary.
+    //    TLS padding: append (padding_length + 1) bytes each equal to
+    //    padding_length, where padding_length makes the total a multiple of
+    //    the block size. bytes_to_add is in [1, AES_BLOCK_SIZE].
+    let payload_len: u32 = pt_len + SHA256_LEN;
+    let bytes_to_add: u32 = AES_BLOCK_SIZE - (payload_len % AES_BLOCK_SIZE);
+    let padding_length: u32 = bytes_to_add - 1;
+    let padded_len: u32 = payload_len + bytes_to_add;
+    let padded: Address = allocate(padded_len);
+    tls12_memcpy(padded + 0, plaintext, pt_len);
+    tls12_memcpy(padded + pt_len, mac, SHA256_LEN);
+    let i: u32 = 0;
+    while i < bytes_to_add {
+        *(padded + payload_len + i) = padding_length & 255;
+        i = i + 1;
+    }
+
+    // 4. AES-256-CBC encrypt (raw CBC; input already block-aligned).
+    let enc_len: u32 = aes256_cbc_encrypt(key, iv, padded, padded_len, ciphertext);
+
+    free(mac_input);
+    free(mac);
+    free(padded);
+    return enc_len;
+}
+
+// Decrypt one TLS record fragment and verify its MAC.
+//   key       : AES-256 decryption key (32 bytes)
+//   iv        : explicit per-record IV (16 bytes)
+//   mac_key   : HMAC-SHA-256 MAC key (32 bytes)
+//   seq_num   : 64-bit record sequence number
+//   type      : record content type
+//   ciphertext: encrypted fragment (ct_len bytes, must be a nonzero multiple
+//               of AES_BLOCK_SIZE; IV NOT included)
+//   ct_len    : ciphertext length
+//   plaintext : output buffer; receives the recovered plaintext
+// Returns the recovered plaintext length on success, or 0 on any error
+// (bad length, bad padding, MAC mismatch). The caller must size the output
+// buffer to at least ct_len bytes.
+fn tls12_decrypt_record(key: Address, iv: Address, mac_key: Address, seq_num: u64, type: u32, ciphertext: Address, ct_len: u32, plaintext: Address) -> u32 {
+    // ct_len must be a nonzero multiple of the AES block size.
+    if ct_len == 0 { return 0; }
+    if (ct_len % AES_BLOCK_SIZE) != 0 { return 0; }
+
+    // 1. AES-256-CBC decrypt.
+    let decrypted: Address = allocate(ct_len);
+    let dec_len: u32 = aes256_cbc_decrypt(key, iv, ciphertext, ct_len, decrypted);
+    if dec_len != ct_len {
+        free(decrypted);
+        return 0;
+    }
+
+    // 2. Remove and verify TLS padding. The last byte is padding_length; the
+    //    last (padding_length + 1) bytes must all equal padding_length.
+    //    Checked without early exit (no short-circuit on first bad byte).
+    let padding_length: u32 = *(decrypted + ct_len - 1);
+    if padding_length >= ct_len {
+        free(decrypted);
+        return 0;
+    }
+    let bytes_to_add: u32 = padding_length + 1;
+    let i: u32 = 0;
+    let pad_ok: u32 = 1;
+    while i < bytes_to_add {
+        if *(decrypted + ct_len - 1 - i) != (padding_length & 255) { pad_ok = 0; }
+        i = i + 1;
+    }
+    if pad_ok == 0 {
+        free(decrypted);
+        return 0;
+    }
+    let unpadded_len: u32 = ct_len - bytes_to_add;
+
+    // 3. Split: plaintext || MAC(32). Need at least the 32-byte MAC.
+    if unpadded_len < SHA256_LEN {
+        free(decrypted);
+        return 0;
+    }
+    let pt_len: u32 = unpadded_len - SHA256_LEN;
+
+    // 4. Recompute MAC over the recovered plaintext and compare (constant
+    //    time: no early exit on first mismatch).
+    let mac_input_len: u32 = 13 + pt_len;
+    let mac_input: Address = allocate(mac_input_len);
+    store_u64_be(mac_input + 0, seq_num);
+    *(mac_input + 8) = type & 255;
+    store_u16_be(mac_input + 9, TLS_12_VERSION);
+    store_u16_be(mac_input + 11, pt_len);
+    tls12_memcpy(mac_input + 13, decrypted, pt_len);
+
+    let mac_computed: Address = allocate(SHA256_LEN);
+    hmac_sha256(mac_key, SHA256_LEN, mac_input, mac_input_len, mac_computed);
+
+    let mac_ok: u32 = 1;
+    i = 0;
+    while i < SHA256_LEN {
+        if *(decrypted + pt_len + i) != *(mac_computed + i) { mac_ok = 0; }
+        i = i + 1;
+    }
+    if mac_ok == 0 {
+        free(decrypted);
+        free(mac_input);
+        free(mac_computed);
+        return 0;
+    }
+
+    // 5. Emit recovered plaintext.
+    tls12_memcpy(plaintext, decrypted, pt_len);
+
+    free(decrypted);
+    free(mac_input);
+    free(mac_computed);
+    return pt_len;
+}
+
+// ===========================================================================
+// 4. Handshake Messages (RFC 5246 Section 7.4)
+//
+// These build/parse handshake-layer messages (4-byte handshake header +
+// body). They do NOT include the 5-byte TLS record header; the caller is
+// responsible for wrapping a handshake message in a Handshake record
+// (content type TLS_HANDSHAKE=22, version 0x0303, length).
+// ===========================================================================
+
+// Build a ClientHello handshake message (RFC 5246 Section 7.4.1.2).
+//   client_random   : 32-byte client random
+//   session_id      : session id bytes (may be empty if session_id_len==0)
+//   session_id_len  : session id length (0..32)
+//   cipher_suites   : cipher suite list (cs_len bytes, big-endian pairs)
+//   cs_len          : cipher suite list length (must be even)
+//   out             : output buffer
+// Returns total message length (4-byte header + body). The caller must size
+// `out` to at least 4 + 2 + 32 + 1 + session_id_len + 2 + cs_len + 2 bytes.
+fn tls12_build_client_hello(client_random: Address, session_id: Address, session_id_len: u32, cipher_suites: Address, cs_len: u32, out: Address) -> u32 {
+    // body = client_version(2) || random(32) || sid_len(1) || sid ||
+    //        cipher_suites_len(2) || cipher_suites || comp_len(1) || null(1)
+    let body_len: u32 = 2 + 32 + 1 + session_id_len + 2 + cs_len + 1 + 1;
+    let total: u32 = 4 + body_len;
+
+    // Handshake header: msg_type(1) = CLIENT_HELLO, length(3) = body_len
+    *(out + 0) = TLS_CLIENT_HELLO & 255;
+    store_u24_be(out + 1, body_len);
+
+    // client_version = 0x0303
+    store_u16_be(out + 4, TLS_12_VERSION);
+
+    // random (32 bytes)
+    tls12_memcpy(out + 6, client_random, 32);
+
+    // session_id_length(1) + session_id
+    *(out + 38) = session_id_len & 255;
+    tls12_memcpy(out + 39, session_id, session_id_len);
+
+    // cipher_suites_length(2) + cipher_suites
+    let cs_off: u32 = 39 + session_id_len;
+    store_u16_be(out + cs_off, cs_len);
+    tls12_memcpy(out + cs_off + 2, cipher_suites, cs_len);
+
+    // compression_methods_length(1) + null compression(1)
+    let comp_off: u32 = cs_off + 2 + cs_len;
+    *(out + comp_off) = 1;
+    *(out + comp_off + 1) = 0;
+
+    return total;
+}
+
+// Parse a ServerHello handshake message (RFC 5246 Section 7.4.1.3).
+//   buf          : buffer holding the full handshake message (header + body)
+//   buf_len      : bytes available in buf
+//   server_random: output, receives 32-byte server random
+//   session_id   : output, receives session id as LENGTH-PREFIXED bytes:
+//                  session_id[0] = sid_len, session_id[1..1+sid_len] = id
+//   cipher_suite : output, receives the 2-byte big-endian wire cipher suite
+//                  value at cipher_suite[0..2] (read with load_u16_be()).
+// Returns the total number of bytes consumed (4 + body_len) on success, or
+// 0 on error (short buffer, wrong message type, truncated fields). Any
+// trailing extensions are ignored.
+fn tls12_parse_server_hello(buf: Address, buf_len: u32, server_random: Address, session_id: Address, cipher_suite: Address) -> u32 {
+    // 4-byte handshake header.
+    if buf_len < 4 { return 0; }
+    let msg_type: u32 = *(buf + 0);
+    if msg_type != TLS_SERVER_HELLO { return 0; }
+    let body_len: u32 = load_u24_be(buf + 1);
+    if buf_len < 4 + body_len { return 0; }
+    // Minimum ServerHello body: version(2)+random(32)+sid_len(1)+cipher(2)+comp(1) = 38
+    if body_len < 38 { return 0; }
+
+    let p: u32 = 4;   // cursor into buf (starts after the handshake header)
+
+    // server_version (2) — present and parsed; not strictly enforced here.
+    p = p + 2;
+
+    // random (32) -> server_random
+    tls12_memcpy(server_random, buf + p, 32);
+    p = p + 32;
+
+    // session_id_length (1)
+    let sid_len: u32 = *(buf + p);
+    p = p + 1;
+    // Ensure room remains for session_id + cipher_suite(2) + compression(1).
+    if 4 + body_len < p + sid_len + 2 + 1 { return 0; }
+
+    // session_id output: length-prefixed (caller reads session_id[0] for len).
+    *(session_id + 0) = sid_len & 255;
+    tls12_memcpy(session_id + 1, buf + p, sid_len);
+    p = p + sid_len;
+
+    // cipher_suite (2 bytes, big-endian wire value) -> cipher_suite[0..2]
+    let cs_hi: u32 = *(buf + p);
+    let cs_lo: u32 = *(buf + p + 1);
+    *(cipher_suite + 0) = cs_hi & 255;
+    *(cipher_suite + 1) = cs_lo & 255;
+    p = p + 2;
+
+    // compression_method (1) — present; not returned. (Extensions, if any,
+    // follow and are ignored.)
+    return 4 + body_len;
+}
+
+// Build a Finished handshake message (RFC 5246 Section 7.4.9).
+//   verify_data = PRF(master, "client finished" | "server finished",
+//                     handshake_hash, 12)
+//   master         : 48-byte master secret
+//   handshake_hash : 32-byte SHA-256 hash of all prior handshake messages
+//   is_client      : nonzero -> "client finished", zero -> "server finished"
+//   out            : output buffer (must hold at least 16 bytes)
+// Returns 16 (4-byte handshake header + 12-byte verify_data).
+fn tls12_build_finished(master: Address, handshake_hash: Address, is_client: u32, out: Address) -> u32 {
+    // label = "client finished" (15) or "server finished" (15)
+    let label: Address = allocate(15);
+    if is_client != 0 {
+        *(label + 0) = 99;    // 'c'
+        *(label + 1) = 108;   // 'l'
+        *(label + 2) = 105;   // 'i'
+        *(label + 3) = 101;   // 'e'
+        *(label + 4) = 110;   // 'n'
+        *(label + 5) = 116;   // 't'
+        *(label + 6) = 32;    // ' '
+        *(label + 7) = 102;   // 'f'
+        *(label + 8) = 105;   // 'i'
+        *(label + 9) = 110;   // 'n'
+        *(label + 10) = 105;  // 'i'
+        *(label + 11) = 115;  // 's'
+        *(label + 12) = 104;  // 'h'
+        *(label + 13) = 101;  // 'e'
+        *(label + 14) = 100;  // 'd'
+    } else {
+        *(label + 0) = 115;   // 's'
+        *(label + 1) = 101;   // 'e'
+        *(label + 2) = 114;   // 'r'
+        *(label + 3) = 118;   // 'v'
+        *(label + 4) = 101;   // 'e'
+        *(label + 5) = 114;   // 'r'
+        *(label + 6) = 32;    // ' '
+        *(label + 7) = 102;   // 'f'
+        *(label + 8) = 105;   // 'i'
+        *(label + 9) = 110;   // 'n'
+        *(label + 10) = 105;  // 'i'
+        *(label + 11) = 115;  // 's'
+        *(label + 12) = 104;  // 'h'
+        *(label + 13) = 101;  // 'e'
+        *(label + 14) = 100;  // 'd'
+    }
+
+    // verify_data = PRF(master, label, handshake_hash, 12)
+    let verify_data: Address = allocate(FINISHED_VERIFY_LEN);
+    tls12_prf(master, MASTER_SECRET_LEN, label, 15, handshake_hash, SHA256_LEN, verify_data, FINISHED_VERIFY_LEN);
+
+    // Finished message: header(type=FINISHED, length=12) || verify_data(12)
+    *(out + 0) = TLS_FINISHED & 255;
+    store_u24_be(out + 1, FINISHED_VERIFY_LEN);
+    tls12_memcpy(out + 4, verify_data, FINISHED_VERIFY_LEN);
+
+    free(label);
+    free(verify_data);
+    return 4 + FINISHED_VERIFY_LEN;
+}
