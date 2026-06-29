@@ -1,0 +1,627 @@
+// containers.vuma
+// VUMA standard library module: data structure containers.
+// Target: all 10 VUMA backends. Importable library module (no main()).
+//
+// Task ID: womb-containers
+//
+// Provides six container families, all storing elements as u64 (8 bytes):
+//   1. Vector      — dynamic array with doubling growth
+//   2. HashMap     — open addressing, linear probing, FNV-1a hashing
+//   3. LinkedList  — doubly linked list with circular sentinel
+//   4. RingBuffer  — SPSC ring with unbounded head/tail counters
+//   5. Stack       — LIFO, built on Vector
+//   6. Queue       — FIFO, built on RingBuffer
+//
+// Memory is managed with allocate()/free(); byte-level loads/stores go
+// through the load_u32/store_u32/load_u64/store_u64/load_addr/store_addr
+// helpers defined at the top of this file. No structs, no generics, no
+// arrays — every container handle is an Address pointing to a fixed-layout
+// byte block documented below.
+//
+// ===========================================================================
+// Memory layouts (all offsets in bytes, little-endian)
+// ===========================================================================
+//
+//   Vector handle (24 bytes):
+//     [0..7]    data_ptr  (Address) — heap buffer of cap*8 bytes
+//     [8..15]   len       (u64)     — number of stored elements
+//     [16..23]  capacity  (u64)     — allocated slot count
+//
+//   HashMap handle (24 bytes):
+//     [0..7]    slots_ptr (Address) — heap buffer of cap*32 bytes
+//     [8..15]   capacity  (u64)     — slot count (never 0)
+//     [16..23]  count     (u64)     — live entry count
+//   HashMap slot (32 bytes):
+//     [0..3]    occupied  (u32)     — 0=empty, 1=occupied, 2=tombstone
+//     [4..7]    hash      (u32)     — cached FNV-1a hash of key
+//     [8..15]   key_ptr   (Address) — owned copy of key bytes
+//     [16..23]  key_len   (u64)     — length of key in bytes
+//     [24..31]  value     (u64)     — stored value
+//
+//   LinkedList sentinel / node (24 bytes):
+//     [0..7]    prev      (Address) — previous node (sentinel.prev = tail)
+//     [8..15]   next      (Address) — next node     (sentinel.next = head)
+//     [16..23]  val       (u64)     — element (sentinel.val = live count)
+//
+//   RingBuffer handle (32 bytes):
+//     [0..7]    buf_ptr   (Address) — heap buffer of cap*8 bytes
+//     [8..15]   capacity  (u64)     — slot count (never 0)
+//     [16..23]  head      (u64)     — total pushed count (unbounded)
+//     [24..31]  tail      (u64)     — total popped count (unbounded)
+//     empty iff head == tail; full iff (head - tail) >= capacity
+//
+//   Stack handle: identical layout to Vector (24 bytes).
+//   Queue handle: identical layout to RingBuffer (32 bytes).
+
+const EMPTY_SENTINEL: u64 = 57005;   // 0xDEAD — returned by pop on empty
+const SLOT_SIZE: u64    = 32;        // bytes per HashMap slot
+const FNV_OFFSET: u64   = 2166136261;
+const FNV_PRIME: u64    = 16777619;
+const MASK32: u64       = 4294967295;
+const FULL_RET: u32     = 4294967295; // (u32)-1, returned by ring_push when full
+
+// ===========================================================================
+// Byte-level load/store helpers
+// ===========================================================================
+// *(ptr + offset) returns/stores a single byte as u32. These helpers
+// assemble/disassemble multi-byte values in little-endian order. Offsets
+// are u64 so they compose cleanly with u64 index arithmetic at call sites.
+
+fn store_u32(ptr: Address, off: u64, val: u32) {
+    *(ptr + off)     = val & 255;
+    *(ptr + off + 1) = (val >> 8) & 255;
+    *(ptr + off + 2) = (val >> 16) & 255;
+    *(ptr + off + 3) = (val >> 24) & 255;
+}
+
+fn load_u32(ptr: Address, off: u64) -> u32 {
+    let b0: u32 = *(ptr + off);
+    let b1: u32 = *(ptr + off + 1);
+    let b2: u32 = *(ptr + off + 2);
+    let b3: u32 = *(ptr + off + 3);
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+}
+
+fn store_u64(ptr: Address, off: u64, val: u64) {
+    *(ptr + off)     = val & 255;
+    *(ptr + off + 1) = (val >> 8) & 255;
+    *(ptr + off + 2) = (val >> 16) & 255;
+    *(ptr + off + 3) = (val >> 24) & 255;
+    *(ptr + off + 4) = (val >> 32) & 255;
+    *(ptr + off + 5) = (val >> 40) & 255;
+    *(ptr + off + 6) = (val >> 48) & 255;
+    *(ptr + off + 7) = (val >> 56) & 255;
+}
+
+fn load_u64(ptr: Address, off: u64) -> u64 {
+    let b0: u64 = *(ptr + off);
+    let b1: u64 = *(ptr + off + 1);
+    let b2: u64 = *(ptr + off + 2);
+    let b3: u64 = *(ptr + off + 3);
+    let b4: u64 = *(ptr + off + 4);
+    let b5: u64 = *(ptr + off + 5);
+    let b6: u64 = *(ptr + off + 6);
+    let b7: u64 = *(ptr + off + 7);
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+         | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
+}
+
+fn store_addr(ptr: Address, off: u64, val: Address) {
+    let v: u64 = val as u64;
+    *(ptr + off)     = v & 255;
+    *(ptr + off + 1) = (v >> 8) & 255;
+    *(ptr + off + 2) = (v >> 16) & 255;
+    *(ptr + off + 3) = (v >> 24) & 255;
+    *(ptr + off + 4) = (v >> 32) & 255;
+    *(ptr + off + 5) = (v >> 40) & 255;
+    *(ptr + off + 6) = (v >> 48) & 255;
+    *(ptr + off + 7) = (v >> 56) & 255;
+}
+
+fn load_addr(ptr: Address, off: u64) -> Address {
+    let b0: u64 = *(ptr + off);
+    let b1: u64 = *(ptr + off + 1);
+    let b2: u64 = *(ptr + off + 2);
+    let b3: u64 = *(ptr + off + 3);
+    let b4: u64 = *(ptr + off + 4);
+    let b5: u64 = *(ptr + off + 5);
+    let b6: u64 = *(ptr + off + 6);
+    let b7: u64 = *(ptr + off + 7);
+    let v: u64 = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+               | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
+    return v as Address;
+}
+
+// ===========================================================================
+// 1. Vector — dynamic array of u64
+// ===========================================================================
+
+fn vec_create(capacity: u32) -> Address {
+    let vec: Address = allocate(24);
+    let cap: u64 = capacity as u64;
+    let real_cap: u64 = cap;
+    if cap == 0 { real_cap = 8; }
+    let data: Address = allocate(real_cap * 8);
+    store_addr(vec, 0, data);
+    store_u64(vec, 8, 0);            // len = 0
+    store_u64(vec, 16, real_cap);    // capacity
+    return vec;
+}
+
+fn vec_push(vec: Address, val: u64) {
+    let len: u64 = load_u64(vec, 8);
+    let cap: u64 = load_u64(vec, 16);
+    let data: Address = load_addr(vec, 0);
+    if len >= cap {
+        // Grow: double capacity, fallback to 8 if currently 0.
+        let new_cap: u64 = cap * 2;
+        if new_cap == 0 { new_cap = 8; }
+        let new_data: Address = allocate(new_cap * 8);
+        let i: u64 = 0;
+        while i < len {
+            let v: u64 = load_u64(data, i * 8);
+            store_u64(new_data, i * 8, v);
+            i = i + 1;
+        }
+        free(data);
+        store_addr(vec, 0, new_data);
+        store_u64(vec, 16, new_cap);
+        data = new_data;
+    }
+    store_u64(data, len * 8, val);
+    store_u64(vec, 8, len + 1);
+}
+
+fn vec_get(vec: Address, idx: u32) -> u64 {
+    let len: u64 = load_u64(vec, 8);
+    if (idx as u64) >= len { return 0; }
+    let data: Address = load_addr(vec, 0);
+    return load_u64(data, (idx as u64) * 8);
+}
+
+fn vec_set(vec: Address, idx: u32, val: u64) {
+    let len: u64 = load_u64(vec, 8);
+    if (idx as u64) >= len { return; }
+    let data: Address = load_addr(vec, 0);
+    store_u64(data, (idx as u64) * 8, val);
+}
+
+fn vec_len(vec: Address) -> u32 {
+    let len: u64 = load_u64(vec, 8);
+    return len as u32;
+}
+
+fn vec_pop(vec: Address) -> u64 {
+    let len: u64 = load_u64(vec, 8);
+    if len == 0 { return EMPTY_SENTINEL; }
+    let new_len: u64 = len - 1;
+    let data: Address = load_addr(vec, 0);
+    let v: u64 = load_u64(data, new_len * 8);
+    store_u64(vec, 8, new_len);
+    return v;
+}
+
+fn vec_free(vec: Address) {
+    let data: Address = load_addr(vec, 0);
+    free(data);
+    free(vec);
+}
+
+fn vec_resize(vec: Address, new_capacity: u32) {
+    let cur_cap: u64 = load_u64(vec, 16);
+    let requested: u64 = new_capacity as u64;
+    let new_cap: u64 = requested;
+    if requested == 0 { new_cap = 8; }
+    if new_cap == cur_cap { return; }
+    let old_data: Address = load_addr(vec, 0);
+    let new_data: Address = allocate(new_cap * 8);
+    let len: u64 = load_u64(vec, 8);
+    let copy_len: u64 = len;
+    if len > new_cap { copy_len = new_cap; }
+    let i: u64 = 0;
+    while i < copy_len {
+        let v: u64 = load_u64(old_data, i * 8);
+        store_u64(new_data, i * 8, v);
+        i = i + 1;
+    }
+    if len > new_cap {
+        store_u64(vec, 8, new_cap);   // truncate length to fit
+    }
+    free(old_data);
+    store_addr(vec, 0, new_data);
+    store_u64(vec, 16, new_cap);
+}
+
+fn vec_clear(vec: Address) {
+    store_u64(vec, 8, 0);             // len = 0; data buffer kept
+}
+
+// ===========================================================================
+// 2. HashMap — open addressing, linear probing, FNV-1a
+// ===========================================================================
+
+// FNV-1a 32-bit hash of key_len bytes at key.
+fn fnv1a_hash(key: Address, key_len: u32) -> u32 {
+    let hash: u64 = FNV_OFFSET;
+    let i: u32 = 0;
+    while i < key_len {
+        let b: u64 = *(key + i);
+        hash = (hash ^ b) & MASK32;
+        hash = (hash * FNV_PRIME) & MASK32;
+        i = i + 1;
+    }
+    return hash as u32;
+}
+
+fn map_create(capacity: u32) -> Address {
+    let map: Address = allocate(24);
+    let requested: u64 = capacity as u64;
+    let cap: u64 = requested;
+    if requested == 0 { cap = 8; }
+    let slots: Address = allocate(cap * SLOT_SIZE);
+    // Zero-initialize all slots so occupied flags read 0 (empty).
+    let i: u64 = 0;
+    let total: u64 = cap * SLOT_SIZE;
+    while i < total {
+        *(slots + i) = 0;
+        i = i + 1;
+    }
+    store_addr(map, 0, slots);
+    store_u64(map, 8, cap);
+    store_u64(map, 16, 0);            // count = 0
+    return map;
+}
+
+// Compare the key stored in `slot` against the (key, key_len, hash) probe.
+// Returns 1 on full match (hash + length + byte equality), 0 otherwise.
+fn map_slot_matches(slot: Address, key: Address, key_len: u32, hash: u32) -> u32 {
+    let slot_hash: u32 = load_u32(slot, 4);
+    if slot_hash != hash { return 0; }
+    let slot_key_len: u64 = load_u64(slot, 16);
+    if slot_key_len != (key_len as u64) { return 0; }
+    let slot_key: Address = load_addr(slot, 8);
+    let i: u32 = 0;
+    while i < key_len {
+        if *(slot_key + i) != *(key + i) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+// Write a fresh entry into the slot at `slots + idx*SLOT_SIZE`. Allocates
+// an owned copy of the key. Caller increments the live count afterwards.
+fn map_write_slot(slots: Address, idx: u64, hash: u32, key: Address, key_len: u32, val: u64) {
+    let slot: Address = slots + idx * SLOT_SIZE;
+    let key_copy: Address = allocate(key_len);
+    let i: u32 = 0;
+    while i < key_len {
+        *(key_copy + i) = *(key + i);
+        i = i + 1;
+    }
+    store_u32(slot, 0, 1);                  // occupied
+    store_u32(slot, 4, hash);
+    store_addr(slot, 8, key_copy);
+    store_u64(slot, 16, key_len as u64);
+    store_u64(slot, 24, val);
+}
+
+fn map_put(map: Address, key: Address, key_len: u32, val: u64) {
+    let slots: Address = load_addr(map, 0);
+    let cap: u64 = load_u64(map, 8);
+    let hash: u32 = fnv1a_hash(key, key_len);
+    let start: u64 = (hash as u64) % cap;
+
+    let ts_found: u32 = 0;
+    let ts_idx: u64 = 0;
+
+    let probe: u64 = 0;
+    let cur: u64 = start;
+    while probe < cap {
+        let slot: Address = slots + cur * SLOT_SIZE;
+        let occ: u32 = load_u32(slot, 0);
+        if occ == 0 {
+            // Empty slot. Insert here, or at the first tombstone if any.
+            let target: u64 = cur;
+            if ts_found == 1 { target = ts_idx; }
+            map_write_slot(slots, target, hash, key, key_len, val);
+            let count: u64 = load_u64(map, 16);
+            store_u64(map, 16, count + 1);
+            return;
+        }
+        if occ == 1 {
+            if map_slot_matches(slot, key, key_len, hash) == 1 {
+                // Existing key — update value in place.
+                store_u64(slot, 24, val);
+                return;
+            }
+        }
+        if occ == 2 {
+            if ts_found == 0 {
+                ts_found = 1;
+                ts_idx = cur;
+            }
+        }
+        cur = (cur + 1) % cap;
+        probe = probe + 1;
+    }
+
+    // Probe sequence exhausted without finding an empty slot or matching key.
+    // If we saw a tombstone, reuse it.
+    if ts_found == 1 {
+        map_write_slot(slots, ts_idx, hash, key, key_len, val);
+        let count: u64 = load_u64(map, 16);
+        store_u64(map, 16, count + 1);
+    }
+    // Otherwise the map is genuinely full; silently drop the insertion.
+}
+
+// Internal: linear-probe for `key`. Returns slot index on hit, or cap on miss.
+fn map_find_slot(map: Address, key: Address, key_len: u32, hash: u32) -> u64 {
+    let slots: Address = load_addr(map, 0);
+    let cap: u64 = load_u64(map, 8);
+    let start: u64 = (hash as u64) % cap;
+    let probe: u64 = 0;
+    let cur: u64 = start;
+    while probe < cap {
+        let slot: Address = slots + cur * SLOT_SIZE;
+        let occ: u32 = load_u32(slot, 0);
+        if occ == 0 {
+            return cap;                  // empty — key not present
+        }
+        if occ == 1 {
+            if map_slot_matches(slot, key, key_len, hash) == 1 {
+                return cur;              // hit
+            }
+        }
+        // occ == 2 (tombstone) — keep probing
+        cur = (cur + 1) % cap;
+        probe = probe + 1;
+    }
+    return cap;                          // probed every slot, no hit
+}
+
+fn map_get(map: Address, key: Address, key_len: u32) -> u64 {
+    let hash: u32 = fnv1a_hash(key, key_len);
+    let idx: u64 = map_find_slot(map, key, key_len, hash);
+    let cap: u64 = load_u64(map, 8);
+    if idx == cap { return EMPTY_SENTINEL; }
+    let slots: Address = load_addr(map, 0);
+    let slot: Address = slots + idx * SLOT_SIZE;
+    return load_u64(slot, 24);
+}
+
+fn map_remove(map: Address, key: Address, key_len: u32) -> u32 {
+    let hash: u32 = fnv1a_hash(key, key_len);
+    let idx: u64 = map_find_slot(map, key, key_len, hash);
+    let cap: u64 = load_u64(map, 8);
+    if idx == cap { return 0; }
+    let slots: Address = load_addr(map, 0);
+    let slot: Address = slots + idx * SLOT_SIZE;
+    // Free the owned key copy, then mark slot as tombstone.
+    let key_copy: Address = load_addr(slot, 8);
+    free(key_copy);
+    store_addr(slot, 8, 0 as Address);
+    store_u64(slot, 16, 0);
+    store_u64(slot, 24, 0);
+    store_u32(slot, 0, 2);               // tombstone
+    let count: u64 = load_u64(map, 16);
+    if count > 0 {
+        store_u64(map, 16, count - 1);
+    }
+    return 1;
+}
+
+fn map_contains(map: Address, key: Address, key_len: u32) -> u32 {
+    let hash: u32 = fnv1a_hash(key, key_len);
+    let idx: u64 = map_find_slot(map, key, key_len, hash);
+    let cap: u64 = load_u64(map, 8);
+    if idx == cap { return 0; }
+    return 1;
+}
+
+fn map_free(map: Address) {
+    let slots: Address = load_addr(map, 0);
+    let cap: u64 = load_u64(map, 8);
+    let i: u64 = 0;
+    while i < cap {
+        let slot: Address = slots + i * SLOT_SIZE;
+        let occ: u32 = load_u32(slot, 0);
+        if occ == 1 {
+            let key_copy: Address = load_addr(slot, 8);
+            free(key_copy);
+        }
+        i = i + 1;
+    }
+    free(slots);
+    free(map);
+}
+
+// ===========================================================================
+// 3. LinkedList — doubly linked, circular sentinel
+// ===========================================================================
+
+fn list_create() -> Address {
+    let sentinel: Address = allocate(24);
+    store_addr(sentinel, 0, sentinel);   // prev = self
+    store_addr(sentinel, 8, sentinel);   // next = self
+    store_u64(sentinel, 16, 0);          // val = count
+    return sentinel;
+}
+
+fn list_push_front(list: Address, val: u64) {
+    let old_head: Address = load_addr(list, 8);   // sentinel.next
+    let node: Address = allocate(24);
+    store_addr(node, 0, list);                    // node.prev = sentinel
+    store_addr(node, 8, old_head);                // node.next = old_head
+    store_u64(node, 16, val);
+    store_addr(old_head, 0, node);                // old_head.prev = node
+    store_addr(list, 8, node);                    // sentinel.next = node
+    let count: u64 = load_u64(list, 16);
+    store_u64(list, 16, count + 1);
+}
+
+fn list_push_back(list: Address, val: u64) {
+    let old_tail: Address = load_addr(list, 0);   // sentinel.prev
+    let node: Address = allocate(24);
+    store_addr(node, 0, old_tail);                // node.prev = old_tail
+    store_addr(node, 8, list);                    // node.next = sentinel
+    store_u64(node, 16, val);
+    store_addr(old_tail, 8, node);                // old_tail.next = node
+    store_addr(list, 0, node);                    // sentinel.prev = node
+    let count: u64 = load_u64(list, 16);
+    store_u64(list, 16, count + 1);
+}
+
+fn list_pop_front(list: Address) -> u64 {
+    let head: Address = load_addr(list, 8);       // sentinel.next
+    if head == list { return EMPTY_SENTINEL; }    // empty
+    let val: u64 = load_u64(head, 16);
+    let new_head: Address = load_addr(head, 8);   // head.next
+    store_addr(new_head, 0, list);                // new_head.prev = sentinel
+    store_addr(list, 8, new_head);                // sentinel.next = new_head
+    free(head);
+    let count: u64 = load_u64(list, 16);
+    store_u64(list, 16, count - 1);
+    return val;
+}
+
+fn list_pop_back(list: Address) -> u64 {
+    let tail: Address = load_addr(list, 0);       // sentinel.prev
+    if tail == list { return EMPTY_SENTINEL; }    // empty
+    let val: u64 = load_u64(tail, 16);
+    let new_tail: Address = load_addr(tail, 0);   // tail.prev
+    store_addr(new_tail, 8, list);                // new_tail.next = sentinel
+    store_addr(list, 0, new_tail);                // sentinel.prev = new_tail
+    free(tail);
+    let count: u64 = load_u64(list, 16);
+    store_u64(list, 16, count - 1);
+    return val;
+}
+
+fn list_len(list: Address) -> u32 {
+    let count: u64 = load_u64(list, 16);
+    return count as u32;
+}
+
+fn list_free(list: Address) {
+    let current: Address = load_addr(list, 8);    // sentinel.next
+    while current != list {
+        let next: Address = load_addr(current, 8);
+        free(current);
+        current = next;
+    }
+    free(list);                                   // free sentinel last
+}
+
+// ===========================================================================
+// 4. RingBuffer — SPSC, unbounded head/tail counters
+// ===========================================================================
+
+fn ring_create(capacity: u32) -> Address {
+    let ring: Address = allocate(32);
+    let requested: u64 = capacity as u64;
+    let cap: u64 = requested;
+    if requested == 0 { cap = 8; }
+    let buf: Address = allocate(cap * 8);
+    store_addr(ring, 0, buf);
+    store_u64(ring, 8, cap);
+    store_u64(ring, 16, 0);           // head = 0
+    store_u64(ring, 24, 0);           // tail = 0
+    return ring;
+}
+
+fn ring_push(ring: Address, val: u64) -> u32 {
+    let buf: Address = load_addr(ring, 0);
+    let cap: u64 = load_u64(ring, 8);
+    let head: u64 = load_u64(ring, 16);
+    let tail: u64 = load_u64(ring, 24);
+    if (head - tail) >= cap {
+        return FULL_RET;              // buffer full
+    }
+    let slot: u64 = head % cap;
+    store_u64(buf, slot * 8, val);
+    store_u64(ring, 16, head + 1);
+    return 0;
+}
+
+fn ring_pop(ring: Address) -> u64 {
+    let buf: Address = load_addr(ring, 0);
+    let cap: u64 = load_u64(ring, 8);
+    let head: u64 = load_u64(ring, 16);
+    let tail: u64 = load_u64(ring, 24);
+    if head == tail { return EMPTY_SENTINEL; }   // empty
+    let slot: u64 = tail % cap;
+    let val: u64 = load_u64(buf, slot * 8);
+    store_u64(ring, 24, tail + 1);
+    return val;
+}
+
+fn ring_len(ring: Address) -> u32 {
+    let head: u64 = load_u64(ring, 16);
+    let tail: u64 = load_u64(ring, 24);
+    return (head - tail) as u32;
+}
+
+fn ring_free(ring: Address) {
+    let buf: Address = load_addr(ring, 0);
+    free(buf);
+    free(ring);
+}
+
+// ===========================================================================
+// 5. Stack — LIFO, built on Vector
+// ===========================================================================
+// Stack handle is a Vector handle: push appends, pop removes from the tail.
+
+fn stack_create(capacity: u32) -> Address {
+    return vec_create(capacity);
+}
+
+fn stack_push(stack: Address, val: u64) {
+    vec_push(stack, val);
+}
+
+fn stack_pop(stack: Address) -> u64 {
+    return vec_pop(stack);
+}
+
+fn stack_peek(stack: Address) -> u64 {
+    let len: u64 = load_u64(stack, 8);
+    if len == 0 { return EMPTY_SENTINEL; }
+    let data: Address = load_addr(stack, 0);
+    return load_u64(data, (len - 1) * 8);
+}
+
+fn stack_len(stack: Address) -> u32 {
+    return vec_len(stack);
+}
+
+fn stack_free(stack: Address) {
+    vec_free(stack);
+}
+
+// ===========================================================================
+// 6. Queue — FIFO, built on RingBuffer
+// ===========================================================================
+// Queue handle is a RingBuffer handle: push enqueues at head, pop dequeues
+// at tail. Capacity is the number of elements the queue can hold.
+
+fn queue_create(capacity: u32) -> Address {
+    return ring_create(capacity);
+}
+
+fn queue_push(queue: Address, val: u64) -> u32 {
+    return ring_push(queue, val);
+}
+
+fn queue_pop(queue: Address) -> u64 {
+    return ring_pop(queue);
+}
+
+fn queue_len(queue: Address) -> u32 {
+    return ring_len(queue);
+}
+
+fn queue_free(queue: Address) {
+    ring_free(queue);
+}
