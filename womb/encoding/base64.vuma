@@ -1,0 +1,190 @@
+// womb/encoding/base64.vuma — Base64 Encoding (RFC 4648)
+// Expected exit code: 0 (self-test passes)
+//
+// Compilable VUMA implementation of Base64 encode/decode.
+// Used by HTTP Basic Auth, MIME, JWT, and many crypto protocols.
+
+// ===========================================================================
+// Base64 alphabet (RFC 4648 Section 4)
+// ===========================================================================
+
+fn b64_encode_byte(idx: u32) -> u32 {
+    if idx < 26 { return idx + 65; }      // A-Z
+    if idx < 52 { return (idx - 26) + 97; } // a-z
+    if idx < 62 { return (idx - 52) + 48; } // 0-9
+    if idx == 62 { return 43; }             // +
+    return 47;                              // /
+}
+
+fn b64_decode_byte(c: u32) -> u32 {
+    if c >= 65 {
+        if c <= 90 { return c - 65; }     // A-Z → 0-25
+    }
+    if c >= 97 {
+        if c <= 122 { return c - 97 + 26; } // a-z → 26-51
+    }
+    if c >= 48 {
+        if c <= 57 { return c - 48 + 52; }  // 0-9 → 52-61
+    }
+    if c == 43 { return 62; }  // +
+    if c == 47 { return 63; }  // /
+    return 255;  // invalid
+}
+
+// ===========================================================================
+// Base64 Encode
+// input:  pointer to input bytes
+// len:    number of input bytes
+// output: pointer to output buffer (must be at least 4*ceil(len/3) bytes)
+// Returns: length of encoded output
+// ===========================================================================
+
+fn base64_encode(input: Address, len: u32, output: Address) -> u32 {
+    out_idx: u32 = 0;
+    in_idx: u32 = 0;
+
+    // Process 3-byte groups
+    while in_idx + 3 <= len {
+        b0: u32 = *(input + in_idx);
+        b1: u32 = *(input + in_idx + 1);
+        b2: u32 = *(input + in_idx + 2);
+
+        // Encode 4 Base64 chars
+        *(output + out_idx) = b64_encode_byte(b0 >> 2);
+        *(output + out_idx + 1) = b64_encode_byte(((b0 & 3) << 4) | (b1 >> 4));
+        *(output + out_idx + 2) = b64_encode_byte(((b1 & 15) << 2) | (b2 >> 6));
+        *(output + out_idx + 3) = b64_encode_byte(b2 & 63);
+
+        out_idx = out_idx + 4;
+        in_idx = in_idx + 3;
+    }
+
+    // Handle remaining 1 or 2 bytes
+    remaining: u32 = len - in_idx;
+    if remaining == 1 {
+        b0: u32 = *(input + in_idx);
+        *(output + out_idx) = b64_encode_byte(b0 >> 2);
+        *(output + out_idx + 1) = b64_encode_byte((b0 & 3) << 4);
+        *(output + out_idx + 2) = 61;  // '='
+        *(output + out_idx + 3) = 61;  // '='
+        out_idx = out_idx + 4;
+    } else if remaining == 2 {
+        b0: u32 = *(input + in_idx);
+        b1: u32 = *(input + in_idx + 1);
+        *(output + out_idx) = b64_encode_byte(b0 >> 2);
+        *(output + out_idx + 1) = b64_encode_byte(((b0 & 3) << 4) | (b1 >> 4));
+        *(output + out_idx + 2) = b64_encode_byte((b1 & 15) << 2);
+        *(output + out_idx + 3) = 61;  // '='
+        out_idx = out_idx + 4;
+    }
+
+    return out_idx;
+}
+
+// ===========================================================================
+// Base64 Decode
+// input:  pointer to Base64 string
+// len:    length of input (must be multiple of 4)
+// output: pointer to output buffer
+// Returns: length of decoded output, or -1 on error
+// ===========================================================================
+
+fn base64_decode(input: Address, len: u32, output: Address) -> u32 {
+    if len % 4 != 0 {
+        return 4294967295;  // -1 as u32
+    }
+
+    out_idx: u32 = 0;
+    in_idx: u32 = 0;
+
+    while in_idx < len {
+        c0: u32 = *(input + in_idx);
+        c1: u32 = *(input + in_idx + 1);
+        c2: u32 = *(input + in_idx + 2);
+        c3: u32 = *(input + in_idx + 3);
+
+        v0: u32 = b64_decode_byte(c0);
+        v1: u32 = b64_decode_byte(c1);
+
+        *(output + out_idx) = (v0 << 2) | (v1 >> 4);
+        out_idx = out_idx + 1;
+
+        if c2 != 61 {
+            v2: u32 = b64_decode_byte(c2);
+            *(output + out_idx) = ((v1 & 15) << 4) | (v2 >> 2);
+            out_idx = out_idx + 1;
+
+            if c3 != 61 {
+                v3: u32 = b64_decode_byte(c3);
+                *(output + out_idx) = ((v2 & 3) << 6) | v3;
+                out_idx = out_idx + 1;
+            }
+        }
+
+        in_idx = in_idx + 4;
+    }
+
+    return out_idx;
+}
+
+// ===========================================================================
+// Self-test: encode "Hello" → "SGVsbG8=" and check
+// ===========================================================================
+
+fn main() -> i32 {
+    // Input: "Hello" (5 bytes)
+    input = allocate(5);
+    *(input + 0) = 72;   // 'H'
+    *(input + 1) = 101;  // 'e'
+    *(input + 2) = 108;  // 'l'
+    *(input + 3) = 108;  // 'l'
+    *(input + 4) = 111;  // 'o'
+
+    // Encode
+    encoded = allocate(8);
+    enclen: u32 = base64_encode(input, 5, encoded);
+
+    // Expected: "SGVsbG8=" = [83, 71, 86, 115, 98, 71, 56, 61]
+    if enclen != 8 {
+        free(input);
+        free(encoded);
+        return 1;
+    }
+    if *(encoded + 0) != 83 { free(input); free(encoded); return 2; }   // 'S'
+    if *(encoded + 1) != 71 { free(input); free(encoded); return 3; }   // 'G'
+    if *(encoded + 2) != 86 { free(input); free(encoded); return 4; }   // 'V'
+    if *(encoded + 3) != 115 { free(input); free(encoded); return 5; }  // 's'
+    if *(encoded + 4) != 98 { free(input); free(encoded); return 6; }   // 'b'
+    if *(encoded + 5) != 71 { free(input); free(encoded); return 7; }   // 'G'
+    if *(encoded + 6) != 56 { free(input); free(encoded); return 8; }   // '8'
+    if *(encoded + 7) != 61 { free(input); free(encoded); return 9; }   // '='
+
+    // Decode back
+    decoded = allocate(5);
+    declen: u32 = base64_decode(encoded, 8, decoded);
+
+    if declen != 5 {
+        free(input);
+        free(encoded);
+        free(decoded);
+        return 10;
+    }
+
+    // Verify round-trip
+    i: u32 = 0;
+    while i < 5 {
+        if *(decoded + i) != *(input + i) {
+            free(input);
+            free(encoded);
+            free(decoded);
+            return 11;
+        }
+        i = i + 1;
+    }
+
+    free(input);
+    free(encoded);
+    free(decoded);
+
+    return 0;
+}
