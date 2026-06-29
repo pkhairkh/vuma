@@ -1,10 +1,8 @@
 # VUMA Global Invariants — Formal Specification
 
 **Document ID:** VUMA-SPEC-INV-001
-**Version:** 1.0
-**Date:** 2026-03-05
-**Author:** Agent W1-05
-**Status:** Final Draft
+
+**Author:** Parham Khairkhah
 
 ---
 

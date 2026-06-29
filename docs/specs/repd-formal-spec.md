@@ -2,8 +2,6 @@
 
 **Document:** VUMA-W1-02
 **Component:** Behavioral Descriptors → Representation Descriptors
-**Status:** Draft
-**Date:** 2026-03-05
 
 ---
 

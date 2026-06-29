@@ -4,7 +4,7 @@
 //!
 //! | # | Category                          | What it validates                                      |
 //! |---|-----------------------------------|--------------------------------------------------------|
-//! | 1 | Full pipeline per backend         | Parse → SCG → IR → RegAlloc → Encode for all 8 backends|
+//! | 1 | Full pipeline per backend         | Parse → SCG → IR → RegAlloc → Encode for all 10 backends|
 //! | 2 | LLM API                           | VumaForLLM: compile, check, analyze, to_wasm, explain  |
 //! | 3 | Module system                     | Import resolution across two .vuma files                |
 //! | 4 | Error recovery                    | Multiple errors, LLM mistake detection, suggestions    |
@@ -34,7 +34,7 @@ use vuma_parser::{AstToScg, Parser};
 // Constants
 // ===========================================================================
 
-/// All 8 backend kinds in a stable order.
+/// All 10 backend kinds in a stable order.
 const ALL_BACKENDS: &[BackendKind] = &[
     BackendKind::AArch64,
     BackendKind::X86_64,
@@ -44,6 +44,8 @@ const ALL_BACKENDS: &[BackendKind] = &[
     BackendKind::Arm32,
     BackendKind::Mips64,
     BackendKind::PowerPC64,
+    BackendKind::X86_32,
+    BackendKind::RiscV32,
 ];
 
 /// Human-readable name for a BackendKind.
@@ -57,6 +59,8 @@ fn backend_name(kind: BackendKind) -> &'static str {
         BackendKind::Arm32 => "arm32",
         BackendKind::Mips64 => "mips64",
         BackendKind::PowerPC64 => "ppc64",
+        BackendKind::X86_32 => "x86_32",
+        BackendKind::RiscV32 => "riscv32",
     }
 }
 
@@ -71,13 +75,15 @@ fn elf_machine(kind: BackendKind) -> u16 {
         BackendKind::Arm32 => 40,
         BackendKind::Mips64 => 8,
         BackendKind::PowerPC64 => 21,
+        BackendKind::X86_32 => 3,
+        BackendKind::RiscV32 => 243,
     }
 }
 
 /// Expected output format for a BackendKind.
 fn expected_output_format(kind: BackendKind) -> OutputFormat {
     match kind {
-        BackendKind::Arm32 => OutputFormat::Elf32,
+        BackendKind::Arm32 | BackendKind::X86_32 | BackendKind::RiscV32 => OutputFormat::Elf32,
         BackendKind::Wasm32 => OutputFormat::WasmBinary,
         _ => OutputFormat::Elf64,
     }
@@ -290,7 +296,7 @@ fn test_full_pipeline_all_backends_simple() {
     }
 }
 
-/// Test: Full pipeline with an arithmetic program across all 8 backends.
+/// Test: Full pipeline with an arithmetic program across all 10 backends.
 #[test]
 fn test_full_pipeline_all_backends_arithmetic() {
     let scg = make_arithmetic_codegen_scg();
@@ -419,7 +425,7 @@ fn test_full_pipeline_sha256d_aarch64() {
     validate_elf_header(&binary, BackendKind::AArch64);
 }
 
-/// Test: sha256d compiled for all 8 backends — each must produce valid output.
+/// Test: sha256d compiled for all 10 backends — each must produce valid output.
 #[test]
 fn test_full_pipeline_sha256d_all_backends() {
     let sha256d_source = include_str!("../../../examples/sha256d.vuma");

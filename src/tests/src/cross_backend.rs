@@ -1,6 +1,6 @@
 //! # Cross-Backend Consistency Test Suite
 //!
-//! Compiles the same VUMA programs for all 8 backends and verifies they produce
+//! Compiles the same VUMA programs for all 10 backends and verifies they produce
 //! equivalent, structurally valid results.
 //!
 //! # Architecture
@@ -34,7 +34,7 @@
 //!
 //! | # | Test                                                | Scope                     |
 //! |---|-----------------------------------------------------|---------------------------|
-//! |10 | Full-pipeline example compilation (all backends)    | 39 examples × 8 backends  |
+//! |10 | Full-pipeline example compilation (all backends)    | 39 examples × 10 backends  |
 //! |11 | ELF section validation for example programs         | .text/.data/.symtab/.strtab |
 //! |12 | Wasm32 format validation for example programs       | Wasm binary structure     |
 //! |13 | Cross-backend code size consistency for examples    | Size sanity per backend   |
@@ -55,7 +55,7 @@ use std::path::Path;
 // Backend helpers
 // ---------------------------------------------------------------------------
 
-/// All 8 backend kinds, in a stable order for iteration.
+/// All 10 backend kinds, in a stable order for iteration.
 const ALL_BACKENDS: &[BackendKind] = &[
     BackendKind::AArch64,
     BackendKind::RiscV64,
@@ -65,6 +65,8 @@ const ALL_BACKENDS: &[BackendKind] = &[
     BackendKind::Arm32,
     BackendKind::Mips64,
     BackendKind::PowerPC64,
+    BackendKind::X86_32,
+    BackendKind::RiscV32,
 ];
 
 /// Human-readable name for a BackendKind (for assertion messages).
@@ -78,6 +80,8 @@ fn backend_name(kind: BackendKind) -> &'static str {
         BackendKind::Arm32 => "arm32",
         BackendKind::Mips64 => "mips64",
         BackendKind::PowerPC64 => "ppc64",
+        BackendKind::X86_32 => "x86_32",
+        BackendKind::RiscV32 => "riscv32",
     }
 }
 
@@ -92,13 +96,15 @@ fn elf_machine(kind: BackendKind) -> u16 {
         BackendKind::Arm32 => 40,      // EM_ARM
         BackendKind::Mips64 => 8,      // EM_MIPS
         BackendKind::PowerPC64 => 21,  // EM_PPC64
+        BackendKind::X86_32 => 3,      // EM_386
+        BackendKind::RiscV32 => 243,   // EM_RISCV (same as RV64)
     }
 }
 
 /// Expected output format for a BackendKind.
 fn expected_output_format(kind: BackendKind) -> OutputFormat {
     match kind {
-        BackendKind::Arm32 => OutputFormat::Elf32,
+        BackendKind::Arm32 | BackendKind::X86_32 | BackendKind::RiscV32 => OutputFormat::Elf32,
         BackendKind::Wasm32 => OutputFormat::WasmBinary,
         _ => OutputFormat::Elf64,
     }
@@ -466,7 +472,7 @@ fn make_function_call_program() -> Vec<IRFunction> {
 
 /// Test 1: Simple program — `fn main() -> i64 { return 42; }`
 ///
-/// Validates that all 8 backends can compile a trivial return-constant
+/// Validates that all 10 backends can compile a trivial return-constant
 /// function and produce structurally valid output.
 #[test]
 fn test_cross_backend_simple_return() {
@@ -521,7 +527,7 @@ fn test_cross_backend_simple_return() {
 
 /// Test 2: Arithmetic program — `(10 + 20) * 3 - 5 = 85`
 ///
-/// Validates that all 8 backends can compile a sequence of arithmetic
+/// Validates that all 10 backends can compile a sequence of arithmetic
 /// operations and produce structurally valid output.
 #[test]
 fn test_cross_backend_arithmetic() {
@@ -568,7 +574,7 @@ fn test_cross_backend_arithmetic() {
 
 /// Test 3: Memory program — alloc, store, load, mask, return
 ///
-/// Validates that all 8 backends can compile memory operations
+/// Validates that all 10 backends can compile memory operations
 /// (stack allocation, store, load) and produce structurally valid output.
 #[test]
 fn test_cross_backend_memory() {
@@ -624,7 +630,7 @@ fn test_cross_backend_memory() {
 
 /// Test 4: Function call — helper returns 7, main returns helper()
 ///
-/// Validates that all 8 backends can compile a multi-function program
+/// Validates that all 10 backends can compile a multi-function program
 /// with an inter-function call and produce structurally valid output.
 #[test]
 fn test_cross_backend_function_call() {
@@ -789,7 +795,7 @@ fn test_cross_backend_output_format_consistency() {
 
 /// Test 6: Cross-backend code size sanity
 ///
-/// Compiles all 4 programs on all 8 backends and verifies that the
+/// Compiles all 4 programs on all 10 backends and verifies that the
 /// code sizes are within sane bounds relative to each other.
 /// While the absolute sizes differ per ISA, they should all be > 0 and
 /// not absurdly large for these tiny programs.
@@ -1274,7 +1280,7 @@ fn compile_all_examples() -> Vec<ExampleCompileResult> {
 fn print_test_matrix(results: &[ExampleCompileResult]) {
     eprintln!();
     eprintln!("╔════════════════════════════════════════════════════════════════════════════════════════════════════╗");
-    eprintln!("║                       Cross-Backend Compilation Test Matrix (39 examples × 8 backends)          ║");
+    eprintln!("║                       Cross-Backend Compilation Test Matrix (39 examples × 10 backends)          ║");
     eprintln!("╠════════════════════════════════════════════════════════════════════════════════════════════════════╣");
     eprintln!("║ {:<24} │ {:^8} │ {:^8} │ {:^8} │ {:^12} │ {:^8} │ {:^8} │ {:^8} │ {:^8} ║",
         "Example", "aarch64", "riscv64", "wasm32", "loongarch64", "x86_64", "arm32", "mips64", "ppc64");
@@ -1336,7 +1342,7 @@ fn print_test_matrix(results: &[ExampleCompileResult]) {
 /// Test 10: Full-pipeline example compilation for all backends
 ///
 /// Compiles every `.vuma` example in the `examples/` directory through the
-/// full parse → SCG → IR → backend pipeline for all 8 backends.  For each
+/// full parse → SCG → IR → backend pipeline for all 10 backends.  For each
 /// successful compilation, validates the binary output.  This test does NOT
 /// fail if some examples don't compile — that is expected for complex programs
 /// that use features not yet supported by every backend.  It DOES fail if a

@@ -6356,7 +6356,7 @@ mod tests {
 // - Updated lib.rs to re-export EmitConfig, OutputFormat, Target, emit_elf,
 //   emit_raw.
 //
-// 2026-03-05: Linker Integration Hardening (Task 21-22)
+// Linker Integration Hardening
 //
 // Changes:
 // - Restructured ELF layout: .rodata is now placed before .text in memory,

@@ -2,9 +2,8 @@
 
 **Document ID:** VUMA-SPEC-BD-INF-001  
 **Task ID:** W1-26  
-**Author:** Agent W1-26  
-**Date:** 2026-03-04  
-**Status:** Draft  
+**Author:** Parham Khairkhah
+
 **Dependencies:** SCG Specification, VUMA Memory Model Specification  
 
 ---

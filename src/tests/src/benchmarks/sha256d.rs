@@ -1,6 +1,6 @@
 //! SHA256d benchmark: compile time, binary size, estimated instruction count per backend.
 //!
-//! Compiles a reference program through all 8 backends and measures
+//! Compiles a reference program through all 10 backends and measures
 //! parse time, SCG-to-IR time, register allocation time, encoding time,
 //! final binary size, and estimated instruction count.
 
@@ -74,7 +74,7 @@ pub fn run_benchmarks() -> Vec<BenchmarkResult> {
     let mut results = Vec::new();
     let scg = build_sha256d_like_scg();
 
-    let backends: [(BackendKind, &str); 8] = [
+    let backends: [(BackendKind, &str); 10] = [
         (BackendKind::AArch64, "aarch64"),
         (BackendKind::X86_64, "x86_64"),
         (BackendKind::RiscV64, "riscv64"),
@@ -83,6 +83,8 @@ pub fn run_benchmarks() -> Vec<BenchmarkResult> {
         (BackendKind::PowerPC64, "ppc64"),
         (BackendKind::LoongArch64, "loongarch64"),
         (BackendKind::Wasm32, "wasm32"),
+        (BackendKind::X86_32, "x86_32"),
+        (BackendKind::RiscV32, "riscv32"),
     ];
 
     for (kind, name) in &backends {

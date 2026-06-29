@@ -370,6 +370,9 @@ fn test_all_backends_zero_args() {
         BackendKind::Mips64,
         BackendKind::PowerPC64,
         BackendKind::LoongArch64,
+        BackendKind::X86_32,
+        BackendKind::RiscV32,
+        BackendKind::Wasm32,
     ] {
         let backend = create_backend(kind).unwrap();
         let func = make_func_with_n_args("zero_arg_func", 0);
@@ -395,6 +398,9 @@ fn test_all_backends_stack_args() {
         BackendKind::Mips64,
         BackendKind::PowerPC64,
         BackendKind::LoongArch64,
+        BackendKind::X86_32,
+        BackendKind::RiscV32,
+        BackendKind::Wasm32,
     ] {
         let backend = create_backend(kind).unwrap();
         let info = backend.target_info();
@@ -652,7 +658,7 @@ fn test_ppc64_toc_register() {
 // Comprehensive calling convention data validation
 // ===========================================================================
 
-/// Verify that all 8 backends report consistent ABI data.
+/// Verify that all 10 backends report consistent ABI data.
 #[test]
 fn test_all_backends_abi_data() {
     let cases = vec![
@@ -880,7 +886,7 @@ fn test_arm32_eight_args_allocation() {
 }
 
 // ===========================================================================
-// Atomic operation tests for all 8 backends
+// Atomic operation tests for all 10 backends
 // ===========================================================================
 
 /// Build an IR function containing an AtomicCas instruction.
@@ -922,8 +928,8 @@ fn make_cas_func(name: &str, ty: IRType) -> IRFunction {
 fn expected_cas_patterns(kind: BackendKind) -> Vec<&'static str> {
     match kind {
         BackendKind::AArch64 => vec!["ldaxr", "stlxr"],
-        BackendKind::X86_64 => vec!["lock", "cmpxchg"],
-        BackendKind::RiscV64 => vec!["lr.d", "sc.d"],
+        BackendKind::X86_64 | BackendKind::X86_32 => vec!["lock", "cmpxchg"],
+        BackendKind::RiscV64 | BackendKind::RiscV32 => vec!["lr.d", "sc.d"],
         BackendKind::Arm32 => vec!["ldrex", "strex"],
         BackendKind::Mips64 => vec!["lld", "scd"],
         BackendKind::PowerPC64 => vec!["ldarx", "stdcx"],
@@ -1160,8 +1166,8 @@ fn make_fp_conv_func(name: &str) -> IRFunction {
 fn expected_fp_conv_patterns(kind: BackendKind) -> Vec<&'static str> {
     match kind {
         BackendKind::AArch64 => vec!["scvtf", "fcvtzs"],
-        BackendKind::X86_64 => vec!["cvtsi2sd", "cvttsd2si"],
-        BackendKind::RiscV64 => vec!["fcvt.d.l", "fcvt.l.d"],
+        BackendKind::X86_64 | BackendKind::X86_32 => vec!["cvtsi2sd", "cvttsd2si"],
+        BackendKind::RiscV64 | BackendKind::RiscV32 => vec!["fcvt.d.l", "fcvt.l.d"],
         BackendKind::Arm32 => vec!["vcvt", "fsito"],
         BackendKind::Mips64 => vec!["dmtc1", "cvt.l.d", "cvt.d.l", "dmfc1"],
         BackendKind::PowerPC64 => vec!["fcfid", "fctidz"],

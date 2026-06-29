@@ -1,8 +1,7 @@
 # VUMA Gold-Standard Test Suite
 
 A categorized collection of `.vuma` programs that serve as the gold standard
-for testing the VUMA compiler across all 8 supported backends (x86_64, AArch64,
-RISC-V 64, ARM32, MIPS64, PPC64, LoongArch64, Wasm32).
+for testing the VUMA compiler across all 10 supported backends (x86_64, AArch64, RISC-V 64, ARM32, MIPS64, PPC64, LoongArch64, x86_32, RISC-V 32, Wasm32).
 
 The suite is the primary regression-prevention gate for the VUMA compiler. It
 covers every language feature, every codegen path, and every backend. Each

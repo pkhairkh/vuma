@@ -5,7 +5,7 @@ Tests that exercise unusual corners of the language: hardware register access vi
 ## What belongs here
 
 - Hardware register access via `map_device()` (embedded)
-- f32 / f64 conversion intrinsics on all 8 backends
+- f32 / f64 conversion intrinsics on all 10 backends
 - `extern "C" { fn write(...); }` FFI block + relocations
 - FP arithmetic and FP store/load
 

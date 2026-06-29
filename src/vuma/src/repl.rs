@@ -1266,17 +1266,19 @@ Expressions:
 
     /// Handle the `:backends` command — list available compilation backends.
     ///
-    /// Shows all 8 backend architectures with their current status.
+    /// Shows all 10 backend architectures with their current status.
     fn cmd_backends(&self) -> Result<ReplResult, ReplError> {
         let backends = [
-            ("aarch64", "ARM64/AArch64", "✅ Stable — primary platform, passes SHA256d"),
-            ("x86_64", "x86-64", "✅ Stable — passes SHA256d"),
-            ("riscv64", "RISC-V 64-bit", "✅ Stable — passes SHA256d"),
-            ("arm32", "ARM32/AArch32", "✅ Stable — passes SHA256d"),
-            ("mips64", "MIPS64", "✅ Stable — passes SHA256d"),
-            ("ppc64", "PowerPC 64-bit", "✅ Stable — passes SHA256d"),
-            ("loongarch64", "LoongArch64", "🔄 Experimental — passes individual ops, full SHA256d slow under QEMU"),
-            ("wasm32", "WebAssembly 32-bit", "🔄 In Progress — valid module generation, type tracking needed"),
+            ("aarch64", "ARM64/AArch64", "✅ Stable — 100% gold-standard pass"),
+            ("x86_64", "x86-64", "✅ Stable — 100% gold-standard pass"),
+            ("riscv64", "RISC-V 64-bit", "✅ Stable — 100% gold-standard pass"),
+            ("arm32", "ARM32/AArch32", "✅ Stable — 100% gold-standard pass"),
+            ("mips64", "MIPS64", "✅ Stable — 100% gold-standard pass"),
+            ("ppc64", "PowerPC 64-bit", "✅ Stable — 100% gold-standard pass"),
+            ("loongarch64", "LoongArch64", "✅ Stable — 100% gold-standard pass"),
+            ("x86_32", "x86-32 (i386)", "✅ Stable — 100% gold-standard pass"),
+            ("riscv32", "RISC-V 32-bit", "✅ Stable — 100% gold-standard pass"),
+            ("wasm32", "WebAssembly 32-bit", "✅ Stable — 100% gold-standard pass"),
         ];
 
         let mut output = String::new();

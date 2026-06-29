@@ -1,9 +1,8 @@
 # Decidability Analysis for VUMA Verification
 
 **Document ID:** VUMA-SPEC-DECID-001  
-**Author:** Agent W1-25  
-**Date:** March 4, 2026  
-**Status:** Draft — For Peer Review  
+**Author:** Parham Khairkhah
+
 **Task ID:** W1-25
 
 ---

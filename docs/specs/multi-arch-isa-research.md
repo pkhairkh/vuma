@@ -2,7 +2,7 @@
 
 **VUMA Project — Specification Document**
 **Purpose: Research all target ISAs for the multi-architecture compiler backend**
-**Date: March 2026**
+**Date:** June 2026
 
 ---
 

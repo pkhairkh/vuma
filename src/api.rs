@@ -350,6 +350,8 @@ impl VumaCompiler {
             BackendKind::Arm32,
             BackendKind::Mips64,
             BackendKind::PowerPC64,
+            BackendKind::X86_32,
+            BackendKind::RiscV32,
         ];
 
         all_kinds

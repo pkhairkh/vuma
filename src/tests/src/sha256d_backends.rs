@@ -1,6 +1,6 @@
 //! # SHA256d Backend Validation Tests
 //!
-//! Comprehensive validation of the SHA256d test program across all 8 VUMA
+//! Comprehensive validation of the SHA256d test program across all 10 VUMA
 //! backends.  The SHA256d program is the canonical test for VUMA because it
 //! exercises:
 //!
@@ -196,6 +196,7 @@ const EM_ARM: u16 = 40;
 const EM_MIPS: u16 = 8;
 const EM_PPC64: u16 = 21;
 const EM_LOONGARCH: u16 = 258;
+const EM_386: u16 = 3;
 
 // ===========================================================================
 // Helper: Backend metadata
@@ -210,7 +211,7 @@ struct BackendMeta {
     elf_data: u8,
 }
 
-/// All 8 backends with their ELF metadata.
+/// All 10 backends with their ELF metadata.
 fn all_backends() -> Vec<BackendMeta> {
     vec![
         BackendMeta {
@@ -268,6 +269,20 @@ fn all_backends() -> Vec<BackendMeta> {
             elf_machine: 0, // Not ELF
             elf_class: 0,
             elf_data: 0,
+        },
+        BackendMeta {
+            kind: BackendKind::X86_32,
+            name: "x86_32",
+            elf_machine: EM_386,
+            elf_class: ELFCLASS32,
+            elf_data: ELFDATA2LSB,
+        },
+        BackendMeta {
+            kind: BackendKind::RiscV32,
+            name: "riscv32",
+            elf_machine: EM_RISCV,
+            elf_class: ELFCLASS32,
+            elf_data: ELFDATA2LSB,
         },
     ]
 }
@@ -551,7 +566,7 @@ fn test_sha256d_compiles_via_framework_arm64() {
 }
 
 // ===========================================================================
-// Test 3: SHA256d backend validation — all 8 backends compile add SCG
+// Test 3: SHA256d backend validation — all 10 backends compile add SCG
 // ===========================================================================
 // This test verifies that each backend can produce a valid binary from a
 // simple program, establishing that the backend infrastructure works before
@@ -590,7 +605,7 @@ fn test_sha256d_backends_all_compile_simple_program() {
 }
 
 // ===========================================================================
-// Test 4: SHA256d IR compilation — all 8 backends
+// Test 4: SHA256d IR compilation — all 10 backends
 // ===========================================================================
 // Constructs IR that models the SHA256d program's return value (79 = 0x4F)
 // and compiles it through each backend. This validates that each backend
@@ -657,7 +672,7 @@ fn test_sha256d_ir_compilation_all_backends() {
 }
 
 // ===========================================================================
-// Test 5: SHA256d bitwise operation IR — all 8 backends
+// Test 5: SHA256d bitwise operation IR — all 10 backends
 // ===========================================================================
 // Tests the bitwise operations used in SHA256d (AND, OR, XOR, shifts)
 // through each backend's compilation pipeline.
@@ -799,7 +814,7 @@ fn test_sha256d_bitwise_ops_all_backends() {
 }
 
 // ===========================================================================
-// Test 6: SHA256d shift operations IR — all 8 backends
+// Test 6: SHA256d shift operations IR — all 10 backends
 // ===========================================================================
 // Tests the shift/rotate operations used in SHA256d's sigma functions.
 
@@ -1207,7 +1222,7 @@ fn make_fp_conversion_ir() -> IRFunction {
 #[test]
 fn test_fp_conversion_pipeline_all_backends() {
     // Verify that a program simulating FP conversion operations
-    // compiles through all 8 backends.
+    // compiles through all 10 backends.
     let func = make_fp_conversion_ir();
 
     for meta in all_backends() {
@@ -1336,7 +1351,7 @@ fn make_atomic_ops_ir() -> IRFunction {
 #[test]
 fn test_atomic_ops_pipeline_all_backends() {
     // Verify that a program simulating atomic operations
-    // compiles through all 8 backends.
+    // compiles through all 10 backends.
     let func = make_atomic_ops_ir();
 
     for meta in all_backends() {
@@ -1537,7 +1552,7 @@ fn test_sha256d_wasm32_module_structure() {
 }
 
 // ===========================================================================
-// Test 14: SHA256d memory operations — all 8 backends
+// Test 14: SHA256d memory operations — all 10 backends
 // ===========================================================================
 // Tests the memory access pattern used in SHA256d (allocate, store, load,
 // free) through each backend's compilation pipeline.
@@ -1645,7 +1660,7 @@ fn test_sha256d_memory_ops_all_backends() {
 }
 
 // ===========================================================================
-// Test 15: SHA256d function call pipeline — all 8 backends
+// Test 15: SHA256d function call pipeline — all 10 backends
 // ===========================================================================
 // Tests the function call pattern used in SHA256d (helper functions like
 // rotr32, ch, maj called from the main compression function).
@@ -1715,7 +1730,7 @@ fn test_sha256d_function_call_all_backends() {
 }
 
 // ===========================================================================
-// Test 16: SHA256d wrapping addition — all 8 backends
+// Test 16: SHA256d wrapping addition — all 10 backends
 // ===========================================================================
 // Tests u32 wrapping addition as used in SHA256d compression rounds.
 

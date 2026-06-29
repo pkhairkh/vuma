@@ -32,7 +32,7 @@
 //! | `region r = alloc(…)`  | Region + Allocation node + Derivation edge       |
 //! | `sizeof(T)` / `alignof(T)` | Computation nodes                            |
 //!
-//! # Enhancement notes (Task 4-3)
+//! # Enhancement notes
 //!
 //! Each mapping is enhanced with deeper semantic fidelity:
 //!
@@ -3650,7 +3650,7 @@ mod tests {
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // ENHANCED TESTS (Task 4-3): 11 new tests covering deeper SCG semantics
+    // ENHANCED TESTS: 11 new tests covering deeper SCG semantics
     // ═══════════════════════════════════════════════════════════════════════
 
     // ── Test 21: Fn entry label includes return type ──────────────────────

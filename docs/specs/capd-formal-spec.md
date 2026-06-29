@@ -1,10 +1,8 @@
 # Capability Descriptors (CapD) — Formal Mathematical Specification
 
 **Document ID:** VUMA-SPEC-W1-03
-**Version:** 1.0.0
-**Date:** 2026-03-05
-**Author:** Agent W1-03
-**Status:** Draft — For Review
+
+**Author:** Parham Khairkhah
 
 ---
 

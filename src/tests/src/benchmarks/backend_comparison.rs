@@ -1,5 +1,5 @@
 //! Backend comparison benchmark: compile the same program and measure
-//! binary sizes across all 8 backends.
+//! binary sizes across all 10 backends.
 
 use super::{BenchmarkResult, measure};
 use vuma_codegen::backend::{create_backend, BackendKind, AllocatedProgram};
@@ -12,13 +12,13 @@ use vuma_codegen::ScgToIr;
 
 /// Run backend comparison benchmarks.
 ///
-/// Compiles a representative reference program through all 8 backends
+/// Compiles a representative reference program through all 10 backends
 /// and reports binary size, IR instruction count, and compilation time.
 pub fn run_benchmarks() -> Vec<BenchmarkResult> {
     let mut results = Vec::new();
     let scg = build_reference_program();
 
-    let backends: [(BackendKind, &str); 8] = [
+    let backends: [(BackendKind, &str); 10] = [
         (BackendKind::AArch64, "aarch64"),
         (BackendKind::X86_64, "x86_64"),
         (BackendKind::RiscV64, "riscv64"),
@@ -27,6 +27,8 @@ pub fn run_benchmarks() -> Vec<BenchmarkResult> {
         (BackendKind::PowerPC64, "ppc64"),
         (BackendKind::LoongArch64, "loongarch64"),
         (BackendKind::Wasm32, "wasm32"),
+        (BackendKind::X86_32, "x86_32"),
+        (BackendKind::RiscV32, "riscv32"),
     ];
 
     for (kind, name) in &backends {
