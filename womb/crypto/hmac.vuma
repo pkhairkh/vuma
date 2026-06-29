@@ -1,0 +1,178 @@
+// womb/crypto/hmac.vuma — HMAC (NIST FIPS 198-1)
+// Generic HMAC supporting SHA-1, SHA-256, SHA-512.
+// No main() — importable library module.
+// Requires: sha1.vuma, sha256.vuma, sha512.vuma to be imported alongside.
+
+// ipad = 0x36, opad = 0x5c
+
+// ===========================================================================
+// HMAC-SHA1 (20-byte digest, 64-byte block)
+// ===========================================================================
+
+fn hmac_sha1(key: Address, keylen: u32, msg: Address, msglen: u32, out: Address) {
+    kprime = allocate(64);
+    if keylen <= 64 {
+        i: u32 = 0;
+        while i < 64 {
+            if i < keylen { *(kprime + i) = *(key + i); }
+            else { *(kprime + i) = 0; }
+            i = i + 1;
+        }
+    } else {
+        sha1_oneshot(key, keylen, kprime);
+        i: u32 = 20;
+        while i < 64 { *(kprime + i) = 0; i = i + 1; }
+    }
+
+    kipad = allocate(64);
+    kopad = allocate(64);
+    i: u32 = 0;
+    while i < 64 {
+        kb: u32 = *(kprime + i);
+        *(kipad + i) = (kb ^ 54) & 255;
+        *(kopad + i) = (kb ^ 92) & 255;
+        i = i + 1;
+    }
+
+    inner = allocate(64 + msglen);
+    i = 0;
+    while i < 64 { *(inner + i) = *(kipad + i); i = i + 1; }
+    i = 0;
+    while i < msglen { *(inner + 64 + i) = *(msg + i); i = i + 1; }
+
+    inner_hash = allocate(20);
+    sha1_oneshot(inner, 64 + msglen, inner_hash);
+
+    outer = allocate(64 + 20);
+    i = 0;
+    while i < 64 { *(outer + i) = *(kopad + i); i = i + 1; }
+    i = 0;
+    while i < 20 { *(outer + 64 + i) = *(inner_hash + i); i = i + 1; }
+
+    sha1_oneshot(outer, 84, out);
+
+    free(kprime); free(kipad); free(kopad);
+    free(inner); free(inner_hash); free(outer);
+}
+
+// ===========================================================================
+// HMAC-SHA256 (32-byte digest, 64-byte block)
+// ===========================================================================
+
+fn hmac_sha256(key: Address, keylen: u32, msg: Address, msglen: u32, out: Address) {
+    kprime = allocate(64);
+    if keylen <= 64 {
+        i: u32 = 0;
+        while i < 64 {
+            if i < keylen { *(kprime + i) = *(key + i); }
+            else { *(kprime + i) = 0; }
+            i = i + 1;
+        }
+    } else {
+        sha256_oneshot(key, keylen, kprime);
+        i: u32 = 32;
+        while i < 64 { *(kprime + i) = 0; i = i + 1; }
+    }
+
+    kipad = allocate(64);
+    kopad = allocate(64);
+    i: u32 = 0;
+    while i < 64 {
+        kb: u32 = *(kprime + i);
+        *(kipad + i) = (kb ^ 54) & 255;
+        *(kopad + i) = (kb ^ 92) & 255;
+        i = i + 1;
+    }
+
+    inner = allocate(64 + msglen);
+    i = 0;
+    while i < 64 { *(inner + i) = *(kipad + i); i = i + 1; }
+    i = 0;
+    while i < msglen { *(inner + 64 + i) = *(msg + i); i = i + 1; }
+
+    inner_hash = allocate(32);
+    sha256_oneshot(inner, 64 + msglen, inner_hash);
+
+    outer = allocate(64 + 32);
+    i = 0;
+    while i < 64 { *(outer + i) = *(kopad + i); i = i + 1; }
+    i = 0;
+    while i < 32 { *(outer + 64 + i) = *(inner_hash + i); i = i + 1; }
+
+    sha256_oneshot(outer, 96, out);
+
+    free(kprime); free(kipad); free(kopad);
+    free(inner); free(inner_hash); free(outer);
+}
+
+// ===========================================================================
+// HMAC-SHA512 (64-byte digest, 128-byte block)
+// ===========================================================================
+
+fn hmac_sha512(key: Address, keylen: u32, msg: Address, msglen: u32, out: Address) {
+    kprime = allocate(128);
+    if keylen <= 128 {
+        i: u32 = 0;
+        while i < 128 {
+            if i < keylen { *(kprime + i) = *(key + i); }
+            else { *(kprime + i) = 0; }
+            i = i + 1;
+        }
+    } else {
+        sha512_oneshot(key, keylen, kprime);
+        i: u32 = 64;
+        while i < 128 { *(kprime + i) = 0; i = i + 1; }
+    }
+
+    kipad = allocate(128);
+    kopad = allocate(128);
+    i: u32 = 0;
+    while i < 128 {
+        kb: u32 = *(kprime + i);
+        *(kipad + i) = (kb ^ 54) & 255;
+        *(kopad + i) = (kb ^ 92) & 255;
+        i = i + 1;
+    }
+
+    inner = allocate(128 + msglen);
+    i = 0;
+    while i < 128 { *(inner + i) = *(kipad + i); i = i + 1; }
+    i = 0;
+    while i < msglen { *(inner + 128 + i) = *(msg + i); i = i + 1; }
+
+    inner_hash = allocate(64);
+    sha512_oneshot(inner, 128 + msglen, inner_hash);
+
+    outer = allocate(128 + 64);
+    i = 0;
+    while i < 128 { *(outer + i) = *(kopad + i); i = i + 1; }
+    i = 0;
+    while i < 64 { *(outer + 128 + i) = *(inner_hash + i); i = i + 1; }
+
+    sha512_oneshot(outer, 192, out);
+
+    free(kprime); free(kipad); free(kopad);
+    free(inner); free(inner_hash); free(outer);
+}
+
+// ===========================================================================
+// Constant-time comparison (crypto-safe)
+// ===========================================================================
+
+fn ct_memcmp(a: Address, b: Address, n: u32) -> u32 {
+    diff: u32 = 0;
+    i: u32 = 0;
+    while i < n {
+        diff = diff | (*(a + i) ^ *(b + i));
+        i = i + 1;
+    }
+    // diff is 0 if equal, non-zero if different
+    // Return 1 if equal, 0 if different (inverted from memcmp)
+    if diff == 0 { return 1; }
+    return 0;
+}
+
+fn ct_select(mask: u32, a: u32, b: u32) -> u32 {
+    // If mask=0xFFFFFFFF, return a; if mask=0, return b
+    return (a & mask) | (b & (~mask & MASK32));
+}
