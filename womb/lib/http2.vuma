@@ -1,0 +1,258 @@
+// womb/lib/http2.vuma — HTTP/2 Frame Parser (RFC 9113)
+// No main() — importable library module.
+// Parses HTTP/2 frames: DATA, HEADERS, PRIORITY, RST_STREAM, SETTINGS,
+// PUSH_PROMISE, PING, GOAWAY, WINDOW_UPDATE, CONTINUATION.
+
+const HTTP2_FRAME_HEADER_SIZE: u32 = 9;
+
+// Frame types
+const HTTP2_DATA: u32 = 0;
+const HTTP2_HEADERS: u32 = 1;
+const HTTP2_PRIORITY: u32 = 2;
+const HTTP2_RST_STREAM: u32 = 3;
+const HTTP2_SETTINGS: u32 = 4;
+const HTTP2_PUSH_PROMISE: u32 = 5;
+const HTTP2_PING: u32 = 6;
+const HTTP2_GOAWAY: u32 = 7;
+const HTTP2_WINDOW_UPDATE: u32 = 8;
+const HTTP2_CONTINUATION: u32 = 9;
+
+// Frame flags
+const HTTP2_FLAG_END_STREAM: u32 = 1;
+const HTTP2_FLAG_ACK: u32 = 1;
+const HTTP2_FLAG_END_HEADERS: u32 = 4;
+const HTTP2_FLAG_PADDED: u32 = 8;
+const HTTP2_FLAG_PRIORITY: u32 = 32;
+
+// ===========================================================================
+// HTTP/2 Frame Header (9 bytes):
+//   [0..2]   Length (24-bit, big-endian) — payload length
+//   [3]      Type (8 bits)
+//   [4]      Flags (8 bits)
+//   [5..8]   Stream ID (31-bit, MSB reserved)
+// ===========================================================================
+
+fn http2_parse_frame_header(buf: Address, length_out: Address, type_out: Address, flags_out: Address, stream_id_out: Address) -> u32 {
+    if buf == 0 { return 0; }
+
+    // Length (24-bit big-endian)
+    len: u32 = (*(buf + 0) << 16) | (*(buf + 1) << 8) | *(buf + 2);
+    *length_out = len & 255;
+    *(length_out + 1) = (len >> 8) & 255;
+    *(length_out + 2) = (len >> 16) & 255;
+    *(length_out + 3) = (len >> 24) & 255;
+
+    // Type
+    *type_out = *(buf + 3);
+
+    // Flags
+    *flags_out = *(buf + 4);
+
+    // Stream ID (31-bit, clear MSB)
+    sid: u32 = (*(buf + 5) << 24) | (*(buf + 6) << 16) | (*(buf + 7) << 8) | *(buf + 8);
+    sid = sid & 2147483647;  // clear reserved bit
+    *stream_id_out = sid & 255;
+    *(stream_id_out + 1) = (sid >> 8) & 255;
+    *(stream_id_out + 2) = (sid >> 16) & 255;
+    *(stream_id_out + 3) = (sid >> 24) & 255;
+
+    return 1;
+}
+
+fn http2_build_frame_header(buf: Address, length: u32, frame_type: u32, flags: u32, stream_id: u32) {
+    // Length (24-bit big-endian)
+    *(buf + 0) = (length >> 16) & 255;
+    *(buf + 1) = (length >> 8) & 255;
+    *(buf + 2) = length & 255;
+    // Type
+    *(buf + 3) = frame_type & 255;
+    // Flags
+    *(buf + 4) = flags & 255;
+    // Stream ID (31-bit, MSB=0)
+    *(buf + 5) = (stream_id >> 24) & 127;
+    *(buf + 6) = (stream_id >> 16) & 255;
+    *(buf + 7) = (stream_id >> 8) & 255;
+    *(buf + 8) = stream_id & 255;
+}
+
+// ===========================================================================
+// SETTINGS frame (type 0x4)
+// Payload: sequence of 6-byte pairs: identifier(2) + value(4)
+// ===========================================================================
+
+const SETTINGS_HEADER_TABLE_SIZE: u32 = 1;
+const SETTINGS_ENABLE_PUSH: u32 = 2;
+const SETTINGS_MAX_CONCURRENT_STREAMS: u32 = 3;
+const SETTINGS_INITIAL_WINDOW_SIZE: u32 = 4;
+const SETTINGS_MAX_FRAME_SIZE: u32 = 5;
+const SETTINGS_MAX_HEADER_LIST_SIZE: u32 = 6;
+
+fn http2_build_settings(buf: Address, max_concurrent_streams: u32, initial_window_size: u32) -> u32 {
+    pos: u32 = HTTP2_FRAME_HEADER_SIZE;
+
+    // SETTINGS_MAX_CONCURRENT_STREAMS
+    *(buf + pos) = 0; *(buf + pos + 1) = SETTINGS_MAX_CONCURRENT_STREAMS & 255;
+    pos = pos + 2;
+    *(buf + pos) = (max_concurrent_streams >> 24) & 255;
+    *(buf + pos + 1) = (max_concurrent_streams >> 16) & 255;
+    *(buf + pos + 2) = (max_concurrent_streams >> 8) & 255;
+    *(buf + pos + 3) = max_concurrent_streams & 255;
+    pos = pos + 4;
+
+    // SETTINGS_INITIAL_WINDOW_SIZE
+    *(buf + pos) = 0; *(buf + pos + 1) = SETTINGS_INITIAL_WINDOW_SIZE & 255;
+    pos = pos + 2;
+    *(buf + pos) = (initial_window_size >> 24) & 255;
+    *(buf + pos + 1) = (initial_window_size >> 16) & 255;
+    *(buf + pos + 2) = (initial_window_size >> 8) & 255;
+    *(buf + pos + 3) = initial_window_size & 255;
+    pos = pos + 4;
+
+    // Frame header
+    payload_len: u32 = pos - HTTP2_FRAME_HEADER_SIZE;
+    http2_build_frame_header(buf, payload_len, HTTP2_SETTINGS, 0, 0);
+
+    return pos;
+}
+
+// SETTINGS ACK frame
+fn http2_build_settings_ack(buf: Address) -> u32 {
+    http2_build_frame_header(buf, 0, HTTP2_SETTINGS, HTTP2_FLAG_ACK, 0);
+    return HTTP2_FRAME_HEADER_SIZE;
+}
+
+// ===========================================================================
+// DATA frame (type 0x0)
+// ===========================================================================
+
+fn http2_build_data_frame(buf: Address, stream_id: u32, data: Address, data_len: u32, end_stream: u32) -> u32 {
+    // Copy data after frame header
+    pos: u32 = HTTP2_FRAME_HEADER_SIZE;
+    i: u32 = 0;
+    while i < data_len { *(buf + pos + i) = *(data + i); i = i + 1; }
+    pos = pos + data_len;
+
+    // Flags
+    flags: u32 = 0;
+    if end_stream == 1 { flags = HTTP2_FLAG_END_STREAM; }
+
+    http2_build_frame_header(buf, data_len, HTTP2_DATA, flags, stream_id);
+    return pos;
+}
+
+// ===========================================================================
+// HEADERS frame (type 0x1)
+// Simplified HPACK: just stores raw header bytes (no compression)
+// ===========================================================================
+
+fn http2_build_headers_frame(buf: Address, stream_id: u32, headers: Address, headers_len: u32, end_stream: u32, end_headers: u32) -> u32 {
+    pos: u32 = HTTP2_FRAME_HEADER_SIZE;
+    i: u32 = 0;
+    while i < headers_len { *(buf + pos + i) = *(headers + i); i = i + 1; }
+    pos = pos + headers_len;
+
+    flags: u32 = HTTP2_FLAG_END_HEADERS;
+    if end_stream == 1 { flags = flags | HTTP2_FLAG_END_STREAM; }
+
+    http2_build_frame_header(buf, headers_len, HTTP2_HEADERS, flags, stream_id);
+    return pos;
+}
+
+// ===========================================================================
+// PING frame (type 0x6) — 8-byte payload
+// ===========================================================================
+
+fn http2_build_ping(buf: Address, payload: Address) -> u32 {
+    pos: u32 = HTTP2_FRAME_HEADER_SIZE;
+    i: u32 = 0;
+    while i < 8 { *(buf + pos + i) = *(payload + i); i = i + 1; }
+    http2_build_frame_header(buf, 8, HTTP2_PING, 0, 0);
+    return pos + 8;
+}
+
+fn http2_build_ping_ack(buf: Address, payload: Address) -> u32 {
+    pos: u32 = HTTP2_FRAME_HEADER_SIZE;
+    i: u32 = 0;
+    while i < 8 { *(buf + pos + i) = *(payload + i); i = i + 1; }
+    http2_build_frame_header(buf, 8, HTTP2_PING, HTTP2_FLAG_ACK, 0);
+    return pos + 8;
+}
+
+// ===========================================================================
+// GOAWAY frame (type 0x7)
+// Payload: last_stream_id(4) + error_code(4) + debug_data(variable)
+// ===========================================================================
+
+const GOAWAY_NO_ERROR: u32 = 0;
+const GOAWAY_PROTOCOL_ERROR: u32 = 1;
+const GOAWAY_INTERNAL_ERROR: u32 = 2;
+const GOAWAY_FLOW_CONTROL_ERROR: u32 = 3;
+
+fn http2_build_goaway(buf: Address, last_stream_id: u32, error_code: u32) -> u32 {
+    pos: u32 = HTTP2_FRAME_HEADER_SIZE;
+    // last_stream_id (31-bit)
+    *(buf + pos) = (last_stream_id >> 24) & 127;
+    *(buf + pos + 1) = (last_stream_id >> 16) & 255;
+    *(buf + pos + 2) = (last_stream_id >> 8) & 255;
+    *(buf + pos + 3) = last_stream_id & 255;
+    pos = pos + 4;
+    // error_code
+    *(buf + pos) = (error_code >> 24) & 255;
+    *(buf + pos + 1) = (error_code >> 16) & 255;
+    *(buf + pos + 2) = (error_code >> 8) & 255;
+    *(buf + pos + 3) = error_code & 255;
+    pos = pos + 4;
+
+    http2_build_frame_header(buf, 8, HTTP2_GOAWAY, 0, 0);
+    return pos;
+}
+
+// ===========================================================================
+// WINDOW_UPDATE frame (type 0x8)
+// 4-byte payload: window size increment (31-bit)
+// ===========================================================================
+
+fn http2_build_window_update(buf: Address, stream_id: u32, increment: u32) -> u32 {
+    pos: u32 = HTTP2_FRAME_HEADER_SIZE;
+    *(buf + pos) = (increment >> 24) & 127;
+    *(buf + pos + 1) = (increment >> 16) & 255;
+    *(buf + pos + 2) = (increment >> 8) & 255;
+    *(buf + pos + 3) = increment & 255;
+    pos = pos + 4;
+
+    http2_build_frame_header(buf, 4, HTTP2_WINDOW_UPDATE, 0, stream_id);
+    return pos;
+}
+
+// ===========================================================================
+// RST_STREAM frame (type 0x3)
+// 4-byte payload: error code
+// ===========================================================================
+
+fn http2_build_rst_stream(buf: Address, stream_id: u32, error_code: u32) -> u32 {
+    pos: u32 = HTTP2_FRAME_HEADER_SIZE;
+    *(buf + pos) = (error_code >> 24) & 255;
+    *(buf + pos + 1) = (error_code >> 16) & 255;
+    *(buf + pos + 2) = (error_code >> 8) & 255;
+    *(buf + pos + 3) = error_code & 255;
+    pos = pos + 4;
+
+    http2_build_frame_header(buf, 4, HTTP2_RST_STREAM, 0, stream_id);
+    return pos;
+}
+
+// ===========================================================================
+// HTTP/2 Connection Preface
+// Client sends: "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n" followed by SETTINGS frame
+// ===========================================================================
+
+fn http2_write_preface(buf: Address) -> u32 {
+    // Magic preface string (24 bytes)
+    *(buf + 0) = 80; *(buf + 1) = 82; *(buf + 2) = 73; *(buf + 3) = 32;
+    *(buf + 4) = 42; *(buf + 5) = 32; *(buf + 6) = 72; *(buf + 7) = 84;
+    *(buf + 8) = 84; *(buf + 9) = 80; *(buf + 10) = 47; *(buf + 11) = 50;
+    *(buf + 12) = 46; *(buf + 13) = 48; *(buf + 14) = 13; *(buf + 15) = 10;
+    *(buf + 16) = 13; *(buf + 17) = 10; *(buf + 18) = 83; *(buf + 19) = 77;
+    *(buf + 20) = 13; *(buf + 21) = 10; *(buf + 22) = 13; *(buf + 23) = 10;
+    return 24;
+}

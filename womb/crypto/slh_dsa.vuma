@@ -1,0 +1,302 @@
+// womb/crypto/slh_dsa.vuma — SLH-DSA (SPHINCS+) — NIST FIPS 205
+// Post-quantum hash-based digital signature.
+// Parameter set: SLH-DSA-SHA2-128s (SPHINCS+-Sha2-128s-small).
+// n=16, h=63, d=7, a=6, k=14, w=4
+// Based on WOTS+ and FORS few-time signatures in a hypertree.
+//
+// This is a simplified reference implementation showing the structure.
+// A full SPHINCS+ implementation requires careful Merkle tree management.
+
+const SLH_N: u32 = 16;        // hash output size (128 bits)
+const SLH_H: u32 = 63;        // total tree height
+const SLH_D: u32 = 7;         // number of subtrees
+const SLH_A: u32 = 6;         // FORS trees
+const SLH_K: u32 = 14;        // FORS trees count
+const SLH_W: u32 = 4;         // Winternitz parameter (WOTS+)
+
+// ===========================================================================
+// Hash functions for SLH-DSA-SHA2-128s
+// H = SHA-256, H_msg = SHAKE-256, PRF = SHA-256
+// ===========================================================================
+
+fn slh_hash(pk_seed: Address, adrs: Address, msg: Address, msg_len: u32, out: Address) {
+    // H(pk_seed || adrs || msg) — SHA-256
+    input = allocate(32 + 32 + msg_len);
+    i: u32 = 0;
+    while i < 32 { *(input + i) = *(pk_seed + i); i = i + 1; }
+    i = 0;
+    while i < 32 { *(input + 32 + i) = *(adrs + i); i = i + 1; }
+    i = 0;
+    while i < msg_len { *(input + 64 + i) = *(msg + i); i = i + 1; }
+    sha256_oneshot(input, 64 + msg_len, out);
+    // Truncate to n=16 bytes
+    free(input);
+}
+
+fn slh_prg(seed: Address, adrs: Address, out: Address, out_len: u32) {
+    // PRG(seed || adrs) — SHAKE-256
+    input = allocate(32 + 32);
+    i: u32 = 0;
+    while i < 32 { *(input + i) = *(seed + i); i = i + 1; }
+    i = 0;
+    while i < 32 { *(input + 32 + i) = *(adrs + i); i = i + 1; }
+    shake256(input, 64, out, out_len);
+    free(input);
+}
+
+fn slh_hash_msg(r: Address, pk_seed: Address, pk_root: Address, msg: Address, msg_len: u32, out: Address, out_len: u32) {
+    // H_msg(r || pk_seed || pk_root || msg) — SHAKE-256
+    input = allocate(32 + 32 + 32 + msg_len);
+    i: u32 = 0;
+    while i < 32 { *(input + i) = *(r + i); i = i + 1; }
+    i = 0;
+    while i < 32 { *(input + 32 + i) = *(pk_seed + i); i = i + 1; }
+    i = 0;
+    while i < 32 { *(input + 64 + i) = *(pk_root + i); i = i + 1; }
+    i = 0;
+    while i < msg_len { *(input + 96 + i) = *(msg + i); i = i + 1; }
+    shake256(input, 96 + msg_len, out, out_len);
+    free(input);
+}
+
+// ===========================================================================
+// WOTS+ (Winternitz One-Time Signature)
+// ===========================================================================
+
+// Chain function: iteratively hash a value n times
+fn wots_chain(pk_seed: Address, adrs: Address, x: Address, start: u32, steps: u32, out: Address) {
+    // Copy x to out
+    i: u32 = 0;
+    while i < SLH_N { *(out + i) = *(x + i); i = i + 1; }
+
+    s: u32 = start;
+    while s < start + steps {
+        // Set chain address to s
+        *(adrs + 28) = s & 255;  // simplified ADRS manipulation
+        slh_hash(pk_seed, adrs, out, SLH_N, out);
+        s = s + 1;
+    }
+}
+
+// WOTS+ key generation
+fn wots_pkgen(pk_seed: Address, sk_seed: Address, adrs: Address, pk: Address) {
+    // Generate w private key elements, chain each to get public key
+    w: u32 = 16;  // 2^W for W=4
+    i: u32 = 0;
+    while i < w {
+        // Generate secret key element from PRG
+        sk_elem = allocate(SLH_N);
+        slh_prg(sk_seed, adrs, sk_elem, SLH_N);
+        // Chain to get public key element
+        wots_chain(pk_seed, adrs, sk_elem, 0, w - 1, pk + i * SLH_N);
+        free(sk_elem);
+        i = i + 1;
+    }
+}
+
+// WOTS+ sign
+fn wots_sign(pk_seed: Address, sk_seed: Address, msg: Address, adrs: Address, sig: Address) {
+    w: u32 = 16;
+    i: u32 = 0;
+    while i < w {
+        // Generate secret key element
+        sk_elem = allocate(SLH_N);
+        slh_prg(sk_seed, adrs, sk_elem, SLH_N);
+
+        // Compute message base-16 digits
+        m_digit: u32 = *(msg + (i / 2));
+        if i % 2 == 0 { m_digit = m_digit & 15; }
+        else { m_digit = (m_digit >> 4) & 15; }
+
+        // Chain for m_digit steps
+        wots_chain(pk_seed, adrs, sk_elem, 0, m_digit, sig + i * SLH_N);
+        free(sk_elem);
+        i = i + 1;
+    }
+}
+
+// WOTS+ verify
+fn wots_verify(pk_seed: Address, msg: Address, sig: Address, adrs: Address, pk: Address) {
+    w: u32 = 16;
+    i: u32 = 0;
+    while i < w {
+        m_digit: u32 = *(msg + (i / 2));
+        if i % 2 == 0 { m_digit = m_digit & 15; }
+        else { m_digit = (m_digit >> 4) & 15; }
+
+        // Chain from m_digit to w-1
+        wots_chain(pk_seed, adrs, sig + i * SLH_N, m_digit, w - 1 - m_digit, pk + i * SLH_N);
+        i = i + 1;
+    }
+}
+
+// ===========================================================================
+// FORS (Forest of Random Subsets) — few-time signature
+// ===========================================================================
+
+fn fors_skgen(pk_seed: Address, sk_seed: Address, adrs: Address, idx: u32, sk: Address) {
+    // Set FORS tree index in ADRS
+    *(adrs + 24) = idx & 255;
+    slh_prg(sk_seed, adrs, sk, SLH_N);
+}
+
+fn fors_pkgen(pk_seed: Address, sk_seed: Address, adrs: Address, pk: Address) {
+    // Generate leaves and compute Merkle tree root
+    // Simplified: just hash all leaves together
+    temp = allocate(SLH_K * SLH_N);
+    i: u32 = 0;
+    while i < SLH_K {
+        fors_skgen(pk_seed, sk_seed, adrs, i, temp + i * SLH_N);
+        i = i + 1;
+    }
+    sha256_oneshot(temp, SLH_K * SLH_N, pk);
+    free(temp);
+}
+
+// ===========================================================================
+// SLH-DSA Key Generation (FIPS 205, Section 9.1)
+// ===========================================================================
+
+fn slh_dsa_keygen(seed: Address, pk: Address, sk: Address) {
+    // sk.seed = seed[0..31]
+    // pk.seed = seed[32..63]
+    // sk.prsf = seed[64..95]
+    sk_seed = seed;
+    pk_seed = seed + 32;
+    prf_key = seed + 64;
+
+    // Compute pk.root = top-level Merkle tree root
+    // Simplified: pk.root = H(pk_seed || sk_seed)
+    pk_input = allocate(64);
+    i: u32 = 0;
+    while i < 32 { *(pk_input + i) = *(pk_seed + i); i = i + 1; }
+    i = 0;
+    while i < 32 { *(pk_input + 32 + i) = *(sk_seed + i); i = i + 1; }
+
+    pk_root = allocate(32);
+    sha256_oneshot(pk_input, 64, pk_root);
+    free(pk_input);
+
+    // pk = pk_seed || pk_root
+    i = 0;
+    while i < 32 { *(pk + i) = *(pk_seed + i); i = i + 1; }
+    i = 0;
+    while i < 32 { *(pk + 32 + i) = *(pk_root + i); i = i + 1; }
+
+    // sk = sk_seed || prf_key || pk
+    i = 0;
+    while i < 32 { *(sk + i) = *(sk_seed + i); i = i + 1; }
+    i = 0;
+    while i < 32 { *(sk + 32 + i) = *(prf_key + i); i = i + 1; }
+    i = 0;
+    while i < 64 { *(sk + 64 + i) = *(pk + i); i = i + 1; }
+
+    free(pk_root);
+}
+
+// ===========================================================================
+// SLH-DSA Sign (FIPS 205, Section 9.2)
+// ===========================================================================
+
+fn slh_dsa_sign(sk: Address, msg: Address, msg_len: u32, randomness: Address, sig: Address) -> u32 {
+    sk_seed = sk;
+    prf_key = sk + 32;
+    pk_seed = sk + 64;
+    pk_root = sk + 96;
+
+    // 1. Generate randomizer r = PRF(prf_key || randomness || msg)
+    r = allocate(32);
+    prf_in = allocate(32 + 32 + msg_len);
+    i: u32 = 0;
+    while i < 32 { *(prf_in + i) = *(prf_key + i); i = i + 1; }
+    i = 0;
+    while i < 32 { *(prf_in + 32 + i) = *(randomness + i); i = i + 1; }
+    i = 0;
+    while i < msg_len { *(prf_in + 64 + i) = *(msg + i); i = i + 1; }
+    shake256(prf_in, 64 + msg_len, r, 32);
+    free(prf_in);
+
+    // 2. Compute digest: (m_hash, tree_idx, leaf_idx) = H_msg(r || pk_seed || pk_root || msg)
+    digest = allocate(64);
+    slh_hash_msg(r, pk_seed, pk_root, msg, msg_len, digest, 64);
+    m_hash = digest;
+    tree_idx = digest + 32;
+
+    // 3. FORS signature
+    fors_sig = allocate(SLH_K * SLH_N * 2);
+    adrs = allocate(32);
+    i = 0;
+    while i < 32 { *(adrs + i) = 0; i = i + 1; }
+
+    // Simplified: sign m_hash with FORS
+    i = 0;
+    while i < SLH_K {
+        // Generate FORS secret key
+        fors_skgen(pk_seed, sk_seed, adrs, i, fors_sig + i * SLH_N * 2);
+        i = i + 1;
+    }
+
+    // 4. Hypertree signature (d layers of Merkle trees)
+    ht_sig = allocate(SLH_D * SLH_N * 20);
+    i = 0;
+    while i < SLH_D {
+        // WOTS+ signature at each layer
+        wots_sign(pk_seed, sk_seed, m_hash, adrs, ht_sig + i * SLH_N * 20);
+        i = i + 1;
+    }
+
+    // 5. Signature = r || fors_sig || ht_sig
+    pos: u32 = 0;
+    i = 0;
+    while i < 32 { *(sig + pos + i) = *(r + i); i = i + 1; }
+    pos = pos + 32;
+    i = 0;
+    while i < SLH_K * SLH_N * 2 { *(sig + pos + i) = *(fors_sig + i); i = i + 1; }
+    pos = pos + SLH_K * SLH_N * 2;
+    i = 0;
+    while i < SLH_D * SLH_N * 20 { *(sig + pos + i) = *(ht_sig + i); i = i + 1; }
+    pos = pos + SLH_D * SLH_N * 20;
+
+    free(r); free(digest); free(fors_sig); free(adrs); free(ht_sig);
+    return pos;
+}
+
+// ===========================================================================
+// SLH-DSA Verify (FIPS 205, Section 9.3)
+// ===========================================================================
+
+fn slh_dsa_verify(pk: Address, msg: Address, msg_len: u32, sig: Address, sig_len: u32) -> u32 {
+    pk_seed = pk;
+    pk_root = pk + 32;
+
+    // Extract r, fors_sig, ht_sig from signature
+    r = sig;
+    fors_sig = sig + 32;
+    ht_sig_off: u32 = 32 + SLH_K * SLH_N * 2;
+
+    // 1. Compute digest
+    digest = allocate(64);
+    slh_hash_msg(r, pk_seed, pk_root, msg, msg_len, digest, 64);
+    m_hash = digest;
+
+    // 2. Reconstruct FORS public key from FORS signature
+    adrs = allocate(32);
+    i: u32 = 0;
+    while i < 32 { *(adrs + i) = 0; i = i + 1; }
+
+    fors_pk = allocate(32);
+    // Simplified: hash the FORS signature to get reconstructed pk
+    sha256_oneshot(fors_sig, SLH_K * SLH_N * 2, fors_pk);
+
+    // 3. Verify hypertree signatures
+    // Simplified: check that the reconstructed root matches pk_root
+    result: u32 = 1;
+    i = 0;
+    while i < 32 {
+        if *(fors_pk + i) != *(pk_root + i) { result = 0; break; }
+        i = i + 1;
+    }
+
+    free(digest); free(adrs); free(fors_pk);
+    return result;
+}

@@ -1,0 +1,426 @@
+// womb/net/tls13.vuma — TLS 1.3 Protocol (RFC 8446)
+// Handshake state machine, key schedule, and record layer.
+// No main() — importable library module.
+// Requires: sha256.vuma, sha384.vuma, hkdf.vuma, ecdh_p256.vuma, aes256 (GCM),
+// chacha20_poly1305.vuma, hmac.vuma.
+//
+// This implements the TLS 1.3 handshake protocol:
+// ClientHello → ServerHello → {EncryptedExtensions, Certificate, CertificateVerify, Finished}
+// → {Finished} → Application Data
+//
+// Key Schedule (RFC 8446 Section 7.1):
+// Early Secret = HKDF-Extract(0, PSK)
+// Handshake Secret = HKDF-Extract(Derive-Secret(Early, "derived", ""), ECDHE)
+// Master Secret = HKDF-Extract(Derive-Secret(Handshake, "derived", ""), 0)
+// Client/Server Handshake Traffic Secret = Derive-Secret(Handshake, "c hs traffic" / "s hs traffic", Transcript)
+// Client/Server Application Traffic Secret = Derive-Secret(Master, "c ap traffic" / "s ap traffic", Transcript)
+
+// TLS 1.3 constants
+const TLS_VERSION: u32 = 0x0304;  // TLS 1.3
+const TLS_HANDSHAKE: u32 = 22;
+const TLS_APPLICATION_DATA: u32 = 23;
+const TLS_CLIENT_HELLO: u32 = 1;
+const TLS_SERVER_HELLO: u32 = 2;
+const TLS_ENCRYPTED_EXTENSIONS: u32 = 8;
+const TLS_CERTIFICATE: u32 = 11;
+const TLS_CERTIFICATE_VERIFY: u32 = 15;
+const TLS_FINISHED: u32 = 20;
+
+// Named groups
+const TLS_SECP256R1: u32 = 0x0017;
+const TLS_SECP384R1: u32 = 0x0018;
+const TLS_X25519: u32 = 0x001D;
+
+// Cipher suites
+const TLS_AES_128_GCM_SHA256: u32 = 0x1301;
+const TLS_AES_256_GCM_SHA384: u32 = 0x1302;
+const TLS_CHACHA20_POLY1305_SHA256: u32 = 0x1303;
+
+// ===========================================================================
+// TLS 1.3 Transcript Hash
+// Accumulates handshake messages and computes SHA-256 hash
+// ===========================================================================
+
+// TLS Context structure (stored in memory):
+//   [0..31]    client_random (32 bytes)
+//   [32..63]   server_random (32 bytes)
+//   [64..95]   early_secret (32 bytes)
+//   [96..127]  handshake_secret (32 bytes)
+//   [128..159] master_secret (32 bytes)
+//   [160..191] client_hs_traffic_secret (32 bytes)
+//   [192..223] server_hs_traffic_secret (32 bytes)
+//   [224..255] client_ap_traffic_secret (32 bytes)
+//   [256..287] server_ap_traffic_secret (32 bytes)
+//   [288..319] transcript_hash (32 bytes)
+//   [320..321] cipher_suite (u16)
+//   [322..323] handshake_state (u16)
+//   [324..355] client_write_key (32 bytes)
+//   [356..387] server_write_key (32 bytes)
+//   [388..419] client_write_iv (32 bytes)
+//   [420..451] server_write_iv (32 bytes)
+
+const OFF_CLIENT_RANDOM: u32 = 0;
+const OFF_SERVER_RANDOM: u32 = 32;
+const OFF_EARLY_SECRET: u32 = 64;
+const OFF_HANDSHAKE_SECRET: u32 = 96;
+const OFF_MASTER_SECRET: u32 = 128;
+const OFF_CLIENT_HS_SECRET: u32 = 160;
+const OFF_SERVER_HS_SECRET: u32 = 192;
+const OFF_CLIENT_AP_SECRET: u32 = 224;
+const OFF_SERVER_AP_SECRET: u32 = 256;
+const OFF_TRANSCRIPT: u32 = 288;
+const OFF_CIPHER_SUITE: u32 = 320;
+const OFF_HS_STATE: u32 = 322;
+const OFF_CLIENT_WRITE_KEY: u32 = 324;
+const OFF_SERVER_WRITE_KEY: u32 = 356;
+const OFF_CLIENT_WRITE_IV: u32 = 388;
+const OFF_SERVER_WRITE_IV: u32 = 420;
+
+// Handshake states
+const STATE_START: u32 = 0;
+const STATE_CLIENT_HELLO_SENT: u32 = 1;
+const STATE_SERVER_HELLO_RECV: u32 = 2;
+const STATE_ENCRYPTED_EXTENSIONS_RECV: u32 = 3;
+const STATE_CERTIFICATE_RECV: u32 = 4;
+const STATE_CERTIFICATE_VERIFY_RECV: u32 = 5;
+const STATE_SERVER_FINISHED_RECV: u32 = 6;
+const STATE_CLIENT_FINISHED_SENT: u32 = 7;
+const STATE_ESTABLISHED: u32 = 8;
+
+fn tls_init(ctx: Address, client_random: Address) {
+    i: u32 = 0;
+    while i < 32 { *(ctx + OFF_CLIENT_RANDOM + i) = *(client_random + i); i = i + 1; }
+    *(ctx + OFF_HS_STATE) = STATE_START & 255;
+    *(ctx + OFF_HS_STATE + 1) = (STATE_START >> 8) & 255;
+}
+
+// Update transcript hash with new handshake message
+fn tls_update_transcript(ctx: Address, msg: Address, msg_len: u32) {
+    // Append to transcript buffer, then re-hash
+    // For simplicity, we hash the current transcript + new message
+    old_hash = ctx + OFF_TRANSCRIPT;
+    input = allocate(32 + msg_len);
+    i: u32 = 0;
+    while i < 32 { *(input + i) = *(old_hash + i); i = i + 1; }
+    i = 0;
+    while i < msg_len { *(input + 32 + i) = *(msg + i); i = i + 1; }
+    sha256_oneshot(input, 32 + msg_len, old_hash);
+    free(input);
+}
+
+// ===========================================================================
+// TLS 1.3 Key Schedule (RFC 8446 Section 7.1)
+// ===========================================================================
+
+// Derive-Secret(Secret, Label, Messages) = HKDF-Expand-Label(Secret, Label, Hash(Messages), Hash.length)
+// HKDF-Expand-Label(Secret, Label, Context, Length) =
+//   HKDF-Expand(Secret, HkdfLabel, Length)
+// where HkdfLabel = struct { uint16 length; opaque label<7..255>; opaque context<0..255>; }
+// label = "tls13 " + Label
+
+fn tls_hkdf_expand_label(secret: Address, label: Address, label_len: u32, context: Address, context_len: u32, out: Address, out_len: u32) {
+    // Build HkdfLabel: length(2) || label_len(1) || "tls13 " || label || context_len(1) || context
+    full_label_len: u32 = 6 + label_len;  // "tls13 " + label
+    hkdf_label_len: u32 = 2 + 1 + full_label_len + 1 + context_len;
+    hkdf_label = allocate(hkdf_label_len);
+
+    // length (big-endian u16)
+    *(hkdf_label + 0) = (out_len >> 8) & 255;
+    *(hkdf_label + 1) = out_len & 255;
+
+    // label length
+    *(hkdf_label + 2) = full_label_len & 255;
+
+    // "tls13 "
+    *(hkdf_label + 3) = 116; *(hkdf_label + 4) = 108; *(hkdf_label + 5) = 115;
+    *(hkdf_label + 6) = 49; *(hkdf_label + 7) = 51; *(hkdf_label + 8) = 32;
+
+    // label bytes
+    i: u32 = 0;
+    while i < label_len { *(hkdf_label + 9 + i) = *(label + i); i = i + 1; }
+
+    // context length
+    *(hkdf_label + 9 + label_len) = context_len & 255;
+
+    // context bytes
+    i = 0;
+    while i < context_len { *(hkdf_label + 10 + label_len + i) = *(context + i); i = i + 1; }
+
+    // HKDF-Expand(Secret, HkdfLabel, out_len)
+    hkdf_expand_sha256(secret, hkdf_label, hkdf_label_len, out, out_len);
+
+    free(hkdf_label);
+}
+
+// Compute the early secret: HKDF-Extract(0, PSK)
+// For no PSK: Early Secret = HKDF-Extract(0, 0)
+fn tls_compute_early_secret(ctx: Address) {
+    zeros = allocate(32);
+    i: u32 = 0;
+    while i < 32 { *(zeros + i) = 0; i = i + 1; }
+    empty = allocate(1);
+    hkdf_extract_sha256(zeros, 32, empty, 0, ctx + OFF_EARLY_SECRET);
+    free(zeros); free(empty);
+}
+
+// Compute the handshake secret: HKDF-Extract(Derive-Secret(Early, "derived", ""), ECDHE)
+fn tls_compute_handshake_secret(ctx: Address, ecdhe_shared: Address, ecdhe_len: u32) {
+    // derived = Derive-Secret(Early Secret, "derived", "")
+    derived_label = "d";  // placeholder — real label is "derived"
+    derived = allocate(32);
+    empty_transcript = allocate(32);
+    i: u32 = 0;
+    while i < 32 { *(empty_transcript + i) = 0; i = i + 1; }
+
+    // Use "derived" label
+    lbl = allocate(7);
+    *(lbl + 0) = 100; *(lbl + 1) = 101; *(lbl + 2) = 114; *(lbl + 3) = 105;
+    *(lbl + 4) = 118; *(lbl + 5) = 101; *(lbl + 6) = 100;
+    tls_hkdf_expand_label(ctx + OFF_EARLY_SECRET, lbl, 7, empty_transcript, 32, derived, 32);
+    free(lbl); free(empty_transcript);
+
+    // Handshake Secret = HKDF-Extract(derived, ECDHE shared secret)
+    hkdf_extract_sha256(derived, 32, ecdhe_shared, ecdhe_len, ctx + OFF_HANDSHAKE_SECRET);
+    free(derived);
+}
+
+// Compute traffic secrets from handshake secret
+fn tls_compute_handshake_traffic_secrets(ctx: Address) {
+    transcript = ctx + OFF_TRANSCRIPT;
+
+    // Client Handshake Traffic Secret
+    c_lbl = allocate(1); *c_lbl = 99;  // "c"
+    c_hs_lbl = allocate(12);
+    *(c_hs_lbl + 0) = 99; *(c_hs_lbl + 1) = 32; *(c_hs_lbl + 2) = 104; *(c_hs_lbl + 3) = 115;
+    *(c_hs_lbl + 4) = 32; *(c_hs_lbl + 5) = 116; *(c_hs_lbl + 6) = 114; *(c_hs_lbl + 7) = 97;
+    *(c_hs_lbl + 8) = 102; *(c_hs_lbl + 9) = 102; *(c_hs_lbl + 10) = 105; *(c_hs_lbl + 11) = 99;
+    tls_hkdf_expand_label(ctx + OFF_HANDSHAKE_SECRET, c_hs_lbl, 12, transcript, 32, ctx + OFF_CLIENT_HS_SECRET, 32);
+    free(c_lbl); free(c_hs_lbl);
+
+    // Server Handshake Traffic Secret
+    s_hs_lbl = allocate(12);
+    *(s_hs_lbl + 0) = 115; *(s_hs_lbl + 1) = 32; *(s_hs_lbl + 2) = 104; *(s_hs_lbl + 3) = 115;
+    *(s_hs_lbl + 4) = 32; *(s_hs_lbl + 5) = 116; *(s_hs_lbl + 6) = 114; *(s_hs_lbl + 7) = 97;
+    *(s_hs_lbl + 8) = 102; *(s_hs_lbl + 9) = 102; *(s_hs_lbl + 10) = 105; *(s_hs_lbl + 11) = 99;
+    tls_hkdf_expand_label(ctx + OFF_HANDSHAKE_SECRET, s_hs_lbl, 12, transcript, 32, ctx + OFF_SERVER_HS_SECRET, 32);
+    free(s_hs_lbl);
+
+    // Derive write keys from traffic secrets
+    // client_write_key = HKDF-Expand-Label(ClientHS, "key", "", 32)
+    key_lbl = allocate(3);
+    *(key_lbl + 0) = 107; *(key_lbl + 1) = 101; *(key_lbl + 2) = 121;
+    empty = allocate(1);
+    tls_hkdf_expand_label(ctx + OFF_CLIENT_HS_SECRET, key_lbl, 3, empty, 0, ctx + OFF_CLIENT_WRITE_KEY, 32);
+    tls_hkdf_expand_label(ctx + OFF_SERVER_HS_SECRET, key_lbl, 3, empty, 0, ctx + OFF_SERVER_WRITE_KEY, 32);
+    free(key_lbl); free(empty);
+
+    // client_write_iv = HKDF-Expand-Label(ClientHS, "iv", "", 12)
+    iv_lbl = allocate(2);
+    *(iv_lbl + 0) = 105; *(iv_lbl + 1) = 118;
+    tls_hkdf_expand_label(ctx + OFF_CLIENT_HS_SECRET, iv_lbl, 2, empty, 0, ctx + OFF_CLIENT_WRITE_IV, 12);
+    tls_hkdf_expand_label(ctx + OFF_SERVER_HS_SECRET, iv_lbl, 2, empty, 0, ctx + OFF_SERVER_WRITE_IV, 12);
+    free(iv_lbl);
+}
+
+// Compute the master secret
+fn tls_compute_master_secret(ctx: Address) {
+    derived = allocate(32);
+    empty_transcript = allocate(32);
+    i: u32 = 0;
+    while i < 32 { *(empty_transcript + i) = 0; i = i + 1; }
+
+    lbl = allocate(7);
+    *(lbl + 0) = 100; *(lbl + 1) = 101; *(lbl + 2) = 114; *(lbl + 3) = 105;
+    *(lbl + 4) = 118; *(lbl + 5) = 101; *(lbl + 6) = 100;
+    tls_hkdf_expand_label(ctx + OFF_HANDSHAKE_SECRET, lbl, 7, empty_transcript, 32, derived, 32);
+    free(lbl); free(empty_transcript);
+
+    zeros = allocate(32);
+    i = 0;
+    while i < 32 { *(zeros + i) = 0; i = i + 1; }
+    hkdf_extract_sha256(derived, 32, zeros, 32, ctx + OFF_MASTER_SECRET);
+    free(derived); free(zeros);
+}
+
+// Compute application traffic secrets
+fn tls_compute_application_traffic_secrets(ctx: Address) {
+    transcript = ctx + OFF_TRANSCRIPT;
+
+    c_ap_lbl = allocate(12);
+    *(c_ap_lbl + 0) = 99; *(c_ap_lbl + 1) = 32; *(c_ap_lbl + 2) = 97; *(c_ap_lbl + 3) = 112;
+    *(c_ap_lbl + 4) = 32; *(c_ap_lbl + 5) = 116; *(c_ap_lbl + 6) = 114; *(c_ap_lbl + 7) = 97;
+    *(c_ap_lbl + 8) = 102; *(c_ap_lbl + 9) = 102; *(c_ap_lbl + 10) = 105; *(c_ap_lbl + 11) = 99;
+    tls_hkdf_expand_label(ctx + OFF_MASTER_SECRET, c_ap_lbl, 12, transcript, 32, ctx + OFF_CLIENT_AP_SECRET, 32);
+    free(c_ap_lbl);
+
+    s_ap_lbl = allocate(12);
+    *(s_ap_lbl + 0) = 115; *(s_ap_lbl + 1) = 32; *(s_ap_lbl + 2) = 97; *(s_ap_lbl + 3) = 112;
+    *(s_ap_lbl + 4) = 32; *(s_ap_lbl + 5) = 116; *(s_ap_lbl + 6) = 114; *(s_ap_lbl + 7) = 97;
+    *(s_ap_lbl + 8) = 102; *(s_ap_lbl + 9) = 102; *(s_ap_lbl + 10) = 105; *(s_ap_lbl + 11) = 99;
+    tls_hkdf_expand_label(ctx + OFF_MASTER_SECRET, s_ap_lbl, 12, transcript, 32, ctx + OFF_SERVER_AP_SECRET, 32);
+    free(s_ap_lbl);
+
+    // Derive application write keys
+    key_lbl = allocate(3);
+    *(key_lbl + 0) = 107; *(key_lbl + 1) = 101; *(key_lbl + 2) = 121;
+    empty = allocate(1);
+    tls_hkdf_expand_label(ctx + OFF_CLIENT_AP_SECRET, key_lbl, 3, empty, 0, ctx + OFF_CLIENT_WRITE_KEY, 32);
+    tls_hkdf_expand_label(ctx + OFF_SERVER_AP_SECRET, key_lbl, 3, empty, 0, ctx + OFF_SERVER_WRITE_KEY, 32);
+
+    iv_lbl = allocate(2);
+    *(iv_lbl + 0) = 105; *(iv_lbl + 1) = 118;
+    tls_hkdf_expand_label(ctx + OFF_CLIENT_AP_SECRET, iv_lbl, 2, empty, 0, ctx + OFF_CLIENT_WRITE_IV, 12);
+    tls_hkdf_expand_label(ctx + OFF_SERVER_AP_SECRET, iv_lbl, 2, empty, 0, ctx + OFF_SERVER_WRITE_IV, 12);
+    free(key_lbl); free(iv_lbl); free(empty);
+}
+
+// ===========================================================================
+// TLS 1.3 Record Layer — encrypt/decrypt records with AEAD
+// ===========================================================================
+
+// Encrypt a TLS 1.3 record using AES-256-GCM
+// The nonce is the 12-byte write IV XORed with the 64-bit sequence number
+fn tls_encrypt_record(ctx: Address, is_client: u32, plaintext: Address, pt_len: u32, ciphertext: Address, seq_num: u64) -> u32 {
+    // Select key and IV
+    key: Address = ctx + OFF_SERVER_WRITE_KEY;
+    iv: Address = ctx + OFF_SERVER_WRITE_IV;
+    if is_client == 1 {
+        key = ctx + OFF_CLIENT_WRITE_KEY;
+        iv = ctx + OFF_CLIENT_WRITE_IV;
+    }
+
+    // Compute nonce = IV XOR seq_num (padded to 12 bytes)
+    nonce = allocate(12);
+    i: u32 = 0;
+    while i < 12 { *(nonce + i) = *(iv + i); i = i + 1; }
+    // XOR last 8 bytes with seq_num (big-endian)
+    *(nonce + 4) = *(nonce + 4) ^ ((seq_num >> 56) & 255);
+    *(nonce + 5) = *(nonce + 5) ^ ((seq_num >> 48) & 255);
+    *(nonce + 6) = *(nonce + 6) ^ ((seq_num >> 40) & 255);
+    *(nonce + 7) = *(nonce + 7) ^ ((seq_num >> 32) & 255);
+    *(nonce + 8) = *(nonce + 8) ^ ((seq_num >> 24) & 255);
+    *(nonce + 9) = *(nonce + 9) ^ ((seq_num >> 16) & 255);
+    *(nonce + 10) = *(nonce + 10) ^ ((seq_num >> 8) & 255);
+    *(nonce + 11) = *(nonce + 11) ^ (seq_num & 255);
+
+    // AAD = record header (5 bytes: type=23, version=0x0303, length)
+    aad = allocate(5);
+    *(aad + 0) = TLS_APPLICATION_DATA & 255;
+    *(aad + 1) = 3; *(aad + 2) = 3;  // legacy version
+    // Length will be set by caller — use placeholder
+    *(aad + 3) = 0; *(aad + 4) = 0;
+
+    tag = allocate(16);
+    ct_len: u32 = aes256_gcm_encrypt(plaintext, pt_len, key, nonce, aad, 5, ciphertext, tag);
+
+    // Append tag to ciphertext
+    i = 0;
+    while i < 16 { *(ciphertext + ct_len + i) = *(tag + i); i = i + 1; }
+
+    free(nonce); free(aad); free(tag);
+    return ct_len + 16;
+}
+
+// ===========================================================================
+// TLS 1.3 ClientHello builder
+// Builds a minimal ClientHello with supported cipher suites and key share
+// ===========================================================================
+
+fn tls_build_client_hello(ctx: Address, ecdhe_pubkey: Address, ecdhe_pubkey_len: u32, out: Address) -> u32 {
+    pos: u32 = 0;
+
+    // Handshake type: ClientHello (1)
+    *(out + pos) = 1; pos = pos + 1;
+    // Length placeholder (3 bytes)
+    *(out + pos) = 0; *(out + pos + 1) = 0; *(out + pos + 2) = 0; pos = pos + 3;
+
+    // Client version: 0x0303 (legacy)
+    *(out + pos) = 3; *(out + pos + 1) = 3; pos = pos + 2;
+
+    // Client random (32 bytes)
+    i: u32 = 0;
+    while i < 32 { *(out + pos + i) = *(ctx + OFF_CLIENT_RANDOM + i); i = i + 1; }
+    pos = pos + 32;
+
+    // Session ID length: 0
+    *(out + pos) = 0; pos = pos + 1;
+
+    // Cipher suites: 2 suites × 2 bytes = 4 bytes
+    *(out + pos) = 0; *(out + pos + 1) = 4; pos = pos + 2;  // length
+    *(out + pos) = 0x13; *(out + pos + 1) = 0x02; pos = pos + 2;  // AES_256_GCM_SHA384
+    *(out + pos) = 0x13; *(out + pos + 1) = 0x03; pos = pos + 2;  // CHACHA20_POLY1305_SHA256
+
+    // Compression methods: 1 method (null)
+    *(out + pos) = 1; *(out + pos + 1) = 0; pos = pos + 2;
+
+    // Extensions length (placeholder)
+    ext_len_pos: u32 = pos;
+    *(out + pos) = 0; *(out + pos + 1) = 0; pos = pos + 2;
+
+    // Supported versions extension
+    *(out + pos) = 0; *(out + pos + 1) = 0x2B; pos = pos + 2;  // extension type 43
+    *(out + pos) = 0; *(out + pos + 1) = 3; pos = pos + 2;  // length
+    *(out + pos) = 2; pos = pos + 1;  // list length
+    *(out + pos) = 3; *(out + pos + 1) = 4; pos = pos + 2;  // TLS 1.3
+
+    // Key share extension (ECDHE public key)
+    *(out + pos) = 0; *(out + pos + 1) = 0x33; pos = pos + 2;  // extension type 51
+    // Extension length
+    ks_len: u32 = 4 + ecdhe_pubkey_len;
+    *(out + pos) = (ks_len >> 8) & 255; *(out + pos + 1) = ks_len & 255; pos = pos + 2;
+    // Client key share list length
+    cl_len: u32 = 2 + ecdhe_pubkey_len;
+    *(out + pos) = (cl_len >> 8) & 255; *(out + pos + 1) = cl_len & 255; pos = pos + 2;
+    // Named group: secp256r1
+    *(out + pos) = 0; *(out + pos + 1) = 0x17; pos = pos + 2;
+    // Key length
+    *(out + pos) = (ecdhe_pubkey_len >> 8) & 255; *(out + pos + 1) = ecdhe_pubkey_len & 255; pos = pos + 2;
+    // Key bytes
+    i = 0;
+    while i < ecdhe_pubkey_len { *(out + pos + i) = *(ecdhe_pubkey + i); i = i + 1; }
+    pos = pos + ecdhe_pubkey_len;
+
+    // Fill in extension length
+    ext_total: u32 = pos - ext_len_pos - 2;
+    *(out + ext_len_pos) = (ext_total >> 8) & 255;
+    *(out + ext_len_pos + 1) = ext_total & 255;
+
+    // Fill in handshake length
+    hs_len: u32 = pos - 4;
+    *(out + 1) = (hs_len >> 16) & 255;
+    *(out + 2) = (hs_len >> 8) & 255;
+    *(out + 3) = hs_len & 255;
+
+    // Update transcript
+    tls_update_transcript(ctx, out, pos);
+
+    // Update state
+    *(ctx + OFF_HS_STATE) = STATE_CLIENT_HELLO_SENT & 255;
+
+    return pos;
+}
+
+// ===========================================================================
+// TLS 1.3 Finished message
+// verify_data = HMAC(finished_key, Transcript-Hash(Handshake))
+// finished_key = HKDF-Expand-Label(BaseKey, "finished", "", Hash.length)
+// ===========================================================================
+
+fn tls_compute_verify_data(ctx: Address, is_client: u32, verify_data: Address) {
+    // Select base key
+    base_key: Address = ctx + OFF_SERVER_HS_SECRET;
+    if is_client == 1 { base_key = ctx + OFF_CLIENT_HS_SECRET; }
+
+    // finished_key = HKDF-Expand-Label(BaseKey, "finished", "", 32)
+    finished_key = allocate(32);
+    fin_lbl = allocate(8);
+    *(fin_lbl + 0) = 102; *(fin_lbl + 1) = 105; *(fin_lbl + 2) = 110; *(fin_lbl + 3) = 105;
+    *(fin_lbl + 4) = 115; *(fin_lbl + 5) = 104; *(fin_lbl + 6) = 101; *(fin_lbl + 7) = 100;
+    empty = allocate(1);
+    tls_hkdf_expand_label(base_key, fin_lbl, 8, empty, 0, finished_key, 32);
+    free(fin_lbl); free(empty);
+
+    // verify_data = HMAC-SHA256(finished_key, transcript_hash)
+    hmac_sha256(finished_key, 32, ctx + OFF_TRANSCRIPT, 32, verify_data);
+    free(finished_key);
+}
