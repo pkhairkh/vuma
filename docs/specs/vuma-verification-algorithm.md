@@ -1,9 +1,8 @@
 # VUMA Verification Algorithm Specification
 
 **Document ID:** VUMA-SPEC-VA-001
-**Author:** Agent W1-27
-**Date:** 2026-03-04
-**Status:** Draft — For Review
+**Author:** Parham Khairkhah
+
 **Parent Specification:** Proposal "Beyond Human Syntax" Section 3.6 (VUMA Layer 6)
 
 ---
@@ -74,12 +73,10 @@ function VERIFY_LIVENESS(msg: MSG) -> Map<Access, LivenessResult>:
 
     return results
 
-
 function IS_REACHABLE_ON_ANY_PATH_THROUGH(cfg, waypoint, target):
     // Returns true if there exists any path from entry to target
     // that passes through waypoint
     return IS_REACHABLE(cfg, waypoint, target)
-
 
 function RESOLVE_BASE_REGION(target, derivations):
     // Walk derivation chain until we reach a region allocation
@@ -173,7 +170,6 @@ function VERIFY_EXCLUSIVITY(msg: MSG) -> Map<(Access, Access), ExclusivityResult
 
     return results
 
-
 function BUILD_CONFLICT_PAIRS(accesses):
     pairs = []
     // Optimization: group accesses by region class
@@ -192,7 +188,6 @@ function BUILD_CONFLICT_PAIRS(accesses):
                 if RANGES_OVERLAP(a1.target, a1.size, a2.target, a2.size):
                     pairs.append((a1, a2))
     return pairs
-
 
 function COMPUTE_HAPPENS_BEFORE(sync_edges, cfg):
     // Build transitive closure of synchronization ordering
@@ -214,7 +209,6 @@ function COMPUTE_HAPPENS_BEFORE(sync_edges, cfg):
     // Compute transitive closure
     hb.compute_transitive_closure()
     return hb
-
 
 function CAN_EXECUTE_CONCURRENTLY(a1, a2, cfg):
     // Two accesses can execute concurrently if they are in different threads
@@ -323,7 +317,6 @@ function VERIFY_INTERPRETATION(msg: MSG) -> Map<Access, InterpretationResult>:
 
     return results
 
-
 function GET_REPD_AT_POINT(region, offset, size, point, msg):
     // Walk the region's RepD history backward from `point`
     // to find the most recent RepD-affecting operation
@@ -342,7 +335,6 @@ function GET_REPD_AT_POINT(region, offset, size, point, msg):
     // (multiple writes may cover different sub-ranges)
     return MERGE_REPDS(relevant, offset, size)
 
-
 function CHECK_REPD_COMPATIBILITY(actual, expected):
     if actual == expected:
         return Compatible
@@ -352,7 +344,6 @@ function CHECK_REPD_COMPATIBILITY(actual, expected):
        STRUCTURE_COMPATIBLE(actual, expected):
         return Reinterpretation
     return Incompatible
-
 
 function IS_VALID_REINTERPRETATION(actual, expected, offset):
     // A reinterpretation is valid if:
@@ -496,7 +487,6 @@ function VERIFY_ORIGIN(msg: MSG) -> Map<Access, OriginResult>:
 
     return results
 
-
 function TRACE_DERIVATION_CHAIN(d, derivations):
     // Walk the derivation graph backward from d to the root
     chain = [d]
@@ -511,7 +501,6 @@ function TRACE_DERIVATION_CHAIN(d, derivations):
         current = parent.source
 
     return chain
-
 
 function CLASSIFY_ARITHMETIC(step):
     // Classify the arithmetic expression into categories:
@@ -618,7 +607,6 @@ function VERIFY_CLEANUP(msg: MSG) -> Map<Region, CleanupResult>:
 
     return results
 
-
 function VERIFY_NO_DOUBLE_FREE(msg: MSG) -> Map<Region, CleanupResult>:
     results = {}
 
@@ -658,7 +646,6 @@ function VERIFY_NO_DOUBLE_FREE(msg: MSG) -> Map<Region, CleanupResult>:
                     counterexample=DESCRIBE_LOOP_STRUCTURE(msg.cfg, r.free_point))
 
     return results
-
 
 function FIND_ALL_FREE_POINTS(region, msg):
     // Collect all program points that deallocate this region

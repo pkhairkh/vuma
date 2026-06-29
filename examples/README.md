@@ -164,7 +164,7 @@ Demonstrates VUMA's full suite of atomic memory operations: `atomic_load`/`atomi
 
 ### 19. [float_math.vuma](float_math.vuma) — FP conversion and math operations
 
-Showcases VUMA's floating-point capabilities across six demos: integer-to-float conversion (`inttofloat`, `uinttofloat`), float-to-integer conversion (`floattoint`, `floattouint`), float-to-float widening/narrowing (`floattofloat`), arithmetic on `f32`/`f64`, mixed integer/float computation with explicit conversion, and storing/loading floats from allocated memory. The codegen emits proper ISA-specific FP instructions on all 8 backends — not no-op bit reinterpretation.
+Showcases VUMA's floating-point capabilities across six demos: integer-to-float conversion (`inttofloat`, `uinttofloat`), float-to-integer conversion (`floattoint`, `floattouint`), float-to-float widening/narrowing (`floattofloat`), arithmetic on `f32`/`f64`, mixed integer/float computation with explicit conversion, and storing/loading floats from allocated memory. The codegen emits proper ISA-specific FP instructions on all 10 backends — not no-op bit reinterpretation.
 
 **Features demonstrated:** `f32`, `f64`, `inttofloat`, `uinttofloat`, `floattoint`, `floattouint`, `floattofloat`, FP arithmetic (+, -, *, /), FP memory store/load, IVE Interpretation invariant for FP types
 

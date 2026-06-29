@@ -4725,7 +4725,7 @@ mod tests {
 // Worklog
 // ═══════════════════════════════════════════════════════════════════════════
 //
-// 2026-03-04 — Enhanced linear-scan register allocator (Task 4-8)
+// Enhanced linear-scan register allocator
 //
 // Changes:
 //   1. Added `coalesced_vregs` field to `LiveInterval` — tracks all vreg IDs

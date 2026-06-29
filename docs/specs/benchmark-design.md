@@ -1,10 +1,8 @@
 # VUMA Benchmark Suite Design: Comparative Performance vs C and Rust
 
 **Document ID:** VUMA-SPEC-BENCH-001
-**Version:** 1.1
-**Date:** 2026-03-06
-**Author:** Agent W1-29
-**Status:** Draft
+
+**Author:** Parham Khairkhah
 
 ---
 

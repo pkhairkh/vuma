@@ -1,7 +1,7 @@
 //! # DWARF Debug Info & C FFI Integration Tests
 //!
 //! Validates the newly implemented DWARF debug info emission and C FFI
-//! (Foreign Function Interface) features end-to-end across all 8 VUMA
+//! (Foreign Function Interface) features end-to-end across all 10 VUMA
 //! backends.
 //!
 //! # DWARF Tests
@@ -11,7 +11,7 @@
 //! | 1  | Debug ELF sections present                          | .debug_info, .debug_abbrev, .debug_line, .debug_frame |
 //! | 2  | .debug_line contains valid line number entries      | DW_LNS_COPY, DW_LNE_END_SEQUENCE present    |
 //! | 3  | .debug_frame has valid CIE/FDE entries              | CIE_id = 0xFFFFFFFF, FDE after CIE          |
-//! | 4–11| Per-backend CIE presets (8 backends)               | Correct cfa_reg, return_address_reg, alignment |
+//! | 4–11| Per-backend CIE presets (10 backends)               | Correct cfa_reg, return_address_reg, alignment |
 //! | 12 | DwarfBuilder for_backend config consistency         | address_size + min_inst_length per backend   |
 //! | 13 | Debug sections are non-empty for all backends       | All 4 sections present after emit            |
 //!
@@ -89,7 +89,7 @@ fn debug_elf_config(backend: BackendKind) -> EmitConfig {
     config
 }
 
-/// All 8 backend kinds for iteration.
+/// All 10 backend kinds for iteration.
 const ALL_BACKENDS: &[BackendKind] = &[
     BackendKind::AArch64,
     BackendKind::X86_64,
@@ -99,9 +99,11 @@ const ALL_BACKENDS: &[BackendKind] = &[
     BackendKind::PowerPC64,
     BackendKind::LoongArch64,
     BackendKind::Wasm32,
+    BackendKind::X86_32,
+    BackendKind::RiscV32,
 ];
 
-/// All 7 native (ELF-capable) backend kinds.
+/// All 9 native (ELF-capable) backend kinds.
 const NATIVE_BACKENDS: &[BackendKind] = &[
     BackendKind::AArch64,
     BackendKind::X86_64,
@@ -110,6 +112,8 @@ const NATIVE_BACKENDS: &[BackendKind] = &[
     BackendKind::Mips64,
     BackendKind::PowerPC64,
     BackendKind::LoongArch64,
+    BackendKind::X86_32,
+    BackendKind::RiscV32,
 ];
 
 // ===========================================================================
@@ -410,7 +414,7 @@ fn test_cie_preset_wasm32() {
 // -- Test 12: DwarfBuilder for_backend config consistency --
 
 /// Test: Verify that `DwarfBuilder::for_backend` sets the correct
-/// `address_size` and `min_inst_length` for all 8 backends.
+/// `address_size` and `min_inst_length` for all 10 backends.
 #[test]
 fn test_for_backend_config_consistency() {
     let expected: Vec<(BackendKind, u8, u8)> = vec![

@@ -1,9 +1,8 @@
 # VUMA Trivial Program Invariant Proofs
 
 **Document:** VUMA-SPEC-TRIVIAL-001
-**Author:** Agent W1-23
-**Date:** 2026-03-04
-**Status:** Verified
+**Author:** Parham Khairkhah
+
 **References:** Proposal §2.9 (Safety Through Restriction Fallacy), §3.6 (Verified-Unsafe Memory Access)
 
 ---

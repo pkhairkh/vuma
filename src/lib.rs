@@ -1,4 +1,4 @@
-//! VUMA — Verified-Unsafe Memory Access: AI-Native Programming Language Framework
+//! VUMA — Verified-Unsafe Memory Access
 //!
 //! This is the root crate that aggregates all workspace members and provides
 //! the full compilation pipeline.
@@ -14,11 +14,12 @@
 //! | `vuma-ive`      | Inference & Verification Engine (5 invariants)   |
 //! | `vuma-bd`       | Behavioral Descriptors (RepD, CapD, RelD)        |
 //! | `vuma-core`     | Memory State Graph (MSG) and SCG → MSG           |
-//! | `vuma-codegen`  | IR lowering, register allocation, ARM64 codegen   |
-//! | `vuma-projection` | Textual/visual/conversational projections       |
+//! | `vuma-codegen`  | IR lowering, register allocation, 10 backends    |
 //! | `vuma-proof`    | Proof generation and checking                    |
-//! | `vuma-cor`      | Coordination runtime                             |
-//! | `vuma-std`      | Standard library                                 |
+//! | `vuma-cor`      | Continuous Optimization Runtime                  |
+//! | `vuma-std`      | Standard library (host-side)                     |
+//! | `vuma-tests`    | Integration tests and benchmarks                 |
+//! | `vuma-package`  | Package manager                                  |
 //!
 //! # Quick Start
 //!
