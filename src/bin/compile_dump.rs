@@ -1,8 +1,9 @@
 //! Standalone tool to compile a .vuma file and dump the resulting ELF bytes.
 use vuma_codegen::backend::{create_backend, BackendKind, AllocatedProgram};
 use vuma_codegen::scg_to_ir::IRBuilder;
-use vuma_parser::{Parser, AstToScg};
+use vuma_parser::{Parser, AstToScg, ModuleResolver};
 use vuma::pipeline::{CompileConfig, run_scg_transforms, CompileTarget, OptLevel, VerificationLevel, bridge_scg_to_codegen};
+use std::path::Path;
 use std::process::Command;
 use std::fs;
 
@@ -23,10 +24,23 @@ fn backend_from_name(name: &str) -> Result<BackendKind, String> {
 }
 
 fn compile_for_backend(source: &str, kind: BackendKind) -> Result<Vec<u8>, String> {
-    let mut parser = Parser::new(source);
-    let result = parser.parse_program();
-    if result.has_errors() { return Err(format!("parse: {} errors", result.errors.len())); }
-    let ast = result.unwrap();
+    compile_for_backend_with_path(source, kind, None)
+}
+
+fn compile_for_backend_with_path(source: &str, kind: BackendKind, file_path: Option<&Path>) -> Result<Vec<u8>, String> {
+    // Resolve imports if a file path is provided
+    let ast = if let Some(path) = file_path {
+        let mut resolver = ModuleResolver::new();
+        match resolver.resolve_source(source, Some(path)) {
+            Ok(program) => program,
+            Err(errors) => return Err(format!("import resolution: {} errors: {:?}", errors.len(), errors.first())),
+        }
+    } else {
+        let mut parser = Parser::new(source);
+        let result = parser.parse_program();
+        if result.has_errors() { return Err(format!("parse: {} errors", result.errors.len())); }
+        result.unwrap()
+    };
     let mut scg = { let mut c = AstToScg::new(); c.convert(&ast).map_err(|e| format!("scg: {}", e))? };
     let config = CompileConfig {
         target: if kind == BackendKind::Wasm32 { CompileTarget::Wasm32 } else { CompileTarget::Linux },
@@ -152,7 +166,8 @@ fn main() {
     let backend_name = if args.len() > 3 { args[3].as_str() } else { "aarch64" };
     let kind = backend_from_name(backend_name).unwrap_or(BackendKind::AArch64);
     let source = std::fs::read_to_string(path).unwrap();
-    let binary = compile_for_backend(&source, kind).unwrap();
+    let file_path = std::path::Path::new(path);
+    let binary = compile_for_backend_with_path(&source, kind, Some(file_path)).unwrap();
     std::fs::write(out_path, &binary).unwrap();
     eprintln!("Wrote {} bytes to {}", binary.len(), out_path);
 }
