@@ -1,0 +1,88 @@
+// womb/crypto/aes192.vuma — AES-192 (NIST FIPS 197)
+// 192-bit key, 12 rounds, 208-byte round key schedule.
+// Includes encrypt AND decrypt.
+// No main() — importable library module.
+
+fn aes192_key_expansion(key: Address, roundkeys: Address) {
+    // Nk=6, Nr=12, 13×16=208 bytes
+    i: u32 = 0;
+    while i < 24 { *(roundkeys + i) = *(key + i); i = i + 1; }
+
+    i = 6;
+    while i < 52 {
+        t0: u32 = *(roundkeys + (i - 1) * 4);
+        t1: u32 = *(roundkeys + (i - 1) * 4 + 1);
+        t2: u32 = *(roundkeys + (i - 1) * 4 + 2);
+        t3: u32 = *(roundkeys + (i - 1) * 4 + 3);
+
+        if i % 6 == 0 {
+            tmp: u32 = t0;
+            t0 = t1; t1 = t2; t2 = t3; t3 = tmp;
+            t0 = sbox(t0); t1 = sbox(t1); t2 = sbox(t2); t3 = sbox(t3);
+            rc: u32 = rcon(i / 6);
+            t0 = t0 ^ rc;
+        }
+
+        w0: u32 = *(roundkeys + (i - 6) * 4);
+        w1: u32 = *(roundkeys + (i - 6) * 4 + 1);
+        w2: u32 = *(roundkeys + (i - 6) * 4 + 2);
+        w3: u32 = *(roundkeys + (i - 6) * 4 + 3);
+
+        *(roundkeys + i * 4) = w0 ^ t0;
+        *(roundkeys + i * 4 + 1) = w1 ^ t1;
+        *(roundkeys + i * 4 + 2) = w2 ^ t2;
+        *(roundkeys + i * 4 + 3) = w3 ^ t3;
+        i = i + 1;
+    }
+}
+
+fn aes192_encrypt_block(plaintext: Address, key: Address, ciphertext: Address) {
+    roundkeys = allocate(208);
+    aes192_key_expansion(key, roundkeys);
+
+    state = allocate(16);
+    i: u32 = 0;
+    while i < 16 { *(state + i) = *(plaintext + i); i = i + 1; }
+
+    add_round_key(state, roundkeys, 0);
+
+    round: u32 = 1;
+    while round < 12 {
+        sub_bytes(state); shift_rows(state); mix_columns(state);
+        add_round_key(state, roundkeys, round);
+        round = round + 1;
+    }
+
+    sub_bytes(state); shift_rows(state);
+    add_round_key(state, roundkeys, 12);
+
+    i = 0;
+    while i < 16 { *(ciphertext + i) = *(state + i); i = i + 1; }
+    free(roundkeys); free(state);
+}
+
+fn aes192_decrypt_block(ciphertext: Address, key: Address, plaintext: Address) {
+    roundkeys = allocate(208);
+    aes192_key_expansion(key, roundkeys);
+
+    state = allocate(16);
+    i: u32 = 0;
+    while i < 16 { *(state + i) = *(ciphertext + i); i = i + 1; }
+
+    add_round_key(state, roundkeys, 12);
+
+    round: u32 = 11;
+    while round >= 1 {
+        inv_shift_rows(state); inv_sub_bytes(state);
+        add_round_key(state, roundkeys, round);
+        inv_mix_columns(state);
+        round = round - 1;
+    }
+
+    inv_shift_rows(state); inv_sub_bytes(state);
+    add_round_key(state, roundkeys, 0);
+
+    i = 0;
+    while i < 16 { *(plaintext + i) = *(state + i); i = i + 1; }
+    free(roundkeys); free(state);
+}
