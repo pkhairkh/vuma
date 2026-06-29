@@ -29,7 +29,7 @@
 //!
 //! | # | Test                                        | Bug                                              |
 //! |---|---------------------------------------------|--------------------------------------------------|
-//! | 11| `test_fp_conversion_not_noop_all_backends`   | FP conversion casts as no-ops on all 8 backends  |
+//! | 11| `test_fp_conversion_not_noop_all_backends`   | FP conversion casts as no-ops on all 10 backends  |
 //!
 //! ## Wave 4
 //!
@@ -51,7 +51,7 @@ use std::collections::HashMap;
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// All 8 backend kinds.
+/// All 10 backend kinds.
 const ALL_BACKENDS: &[BackendKind] = &[
     BackendKind::AArch64,
     BackendKind::RiscV64,
@@ -61,6 +61,8 @@ const ALL_BACKENDS: &[BackendKind] = &[
     BackendKind::Arm32,
     BackendKind::Mips64,
     BackendKind::PowerPC64,
+    BackendKind::X86_32,
+    BackendKind::RiscV32,
 ];
 
 /// Create a minimal IR function with the given name and a single entry block.
@@ -886,14 +888,14 @@ fn test_loongarch64_no_break_on_control_flow() {
 }
 
 // ===========================================================================
-// Wave 3, Bug 11: FP conversion casts as no-ops on all 8 backends
+// Wave 3, Bug 11: FP conversion casts as no-ops on all 10 backends
 // ===========================================================================
 
 /// Regression test: FP conversion casts (IntToFloat, UIntToFloat, FloatToInt,
 /// FloatToUInt, FloatToFloat) must produce actual conversion instructions on
 /// all backends, not be treated as no-ops (MOV).
 ///
-/// **Original bug**: All 8 backends were treating FP conversion casts as
+/// **Original bug**: All 10 backends were treating FP conversion casts as
 /// no-ops — the Cast instruction for these kinds was either mapped to a
 /// plain MOV (integer move) or produced zero instructions, resulting in
 /// bit-reinterpretation instead of value conversion. For example,
