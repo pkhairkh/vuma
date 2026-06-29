@@ -1,0 +1,522 @@
+// womb/lib/aes256.vuma — AES-256 library (no main, importable)
+// womb/crypto/aes256.vuma — AES-256 (NIST FIPS 197)
+// Expected exit code: 0 (self-test passes)
+//
+// AES-256 encrypt/decrypt with 256-bit key and 128-bit blocks.
+// 14 rounds, 240-byte round key schedule.
+//
+// This is a COMPILABLE VUMA implementation. All operations use byte-level
+// memory access and u32 arithmetic that works on all 10 VUMA backends.
+
+const MASK32: u32 = 4294967295;
+
+// ===========================================================================
+// AES S-Box (FIPS 197 Figure 7)
+// ===========================================================================
+
+fn sbox(idx: u32) -> u32 {
+    // Full 256-entry S-Box
+    if idx == 0 { return 0x63; }
+    if idx == 1 { return 0x7C; }
+    if idx == 2 { return 0x77; }
+    if idx == 3 { return 0x7B; }
+    if idx == 4 { return 0xF2; }
+    if idx == 5 { return 0x6B; }
+    if idx == 6 { return 0x6F; }
+    if idx == 7 { return 0xC5; }
+    if idx == 8 { return 0x30; }
+    if idx == 9 { return 0x01; }
+    if idx == 10 { return 0x67; }
+    if idx == 11 { return 0x2B; }
+    if idx == 12 { return 0xFE; }
+    if idx == 13 { return 0xD7; }
+    if idx == 14 { return 0xAB; }
+    if idx == 15 { return 0x76; }
+    if idx == 16 { return 0xCA; }
+    if idx == 17 { return 0x82; }
+    if idx == 18 { return 0xC9; }
+    if idx == 19 { return 0x7D; }
+    if idx == 20 { return 0xFA; }
+    if idx == 21 { return 0x59; }
+    if idx == 22 { return 0x47; }
+    if idx == 23 { return 0xF0; }
+    if idx == 24 { return 0xAD; }
+    if idx == 25 { return 0xD4; }
+    if idx == 26 { return 0xA2; }
+    if idx == 27 { return 0xAF; }
+    if idx == 28 { return 0x9C; }
+    if idx == 29 { return 0xA4; }
+    if idx == 30 { return 0x72; }
+    if idx == 31 { return 0xC0; }
+    if idx == 32 { return 0xB7; }
+    if idx == 33 { return 0xFD; }
+    if idx == 34 { return 0x93; }
+    if idx == 35 { return 0x26; }
+    if idx == 36 { return 0x36; }
+    if idx == 37 { return 0x3F; }
+    if idx == 38 { return 0xF7; }
+    if idx == 39 { return 0xCC; }
+    if idx == 40 { return 0x34; }
+    if idx == 41 { return 0xA5; }
+    if idx == 42 { return 0xE5; }
+    if idx == 43 { return 0xF1; }
+    if idx == 44 { return 0x71; }
+    if idx == 45 { return 0xD8; }
+    if idx == 46 { return 0x31; }
+    if idx == 47 { return 0x15; }
+    if idx == 48 { return 0x04; }
+    if idx == 49 { return 0xC7; }
+    if idx == 50 { return 0x23; }
+    if idx == 51 { return 0xC3; }
+    if idx == 52 { return 0x18; }
+    if idx == 53 { return 0x96; }
+    if idx == 54 { return 0x05; }
+    if idx == 55 { return 0x9A; }
+    if idx == 56 { return 0x07; }
+    if idx == 57 { return 0x12; }
+    if idx == 58 { return 0x80; }
+    if idx == 59 { return 0xE2; }
+    if idx == 60 { return 0xEB; }
+    if idx == 61 { return 0x27; }
+    if idx == 62 { return 0xB2; }
+    if idx == 63 { return 0x75; }
+    if idx == 64 { return 0x09; }
+    if idx == 65 { return 0x83; }
+    if idx == 66 { return 0x2C; }
+    if idx == 67 { return 0x1A; }
+    if idx == 68 { return 0x1B; }
+    if idx == 69 { return 0x6E; }
+    if idx == 70 { return 0x5A; }
+    if idx == 71 { return 0xA0; }
+    if idx == 72 { return 0x52; }
+    if idx == 73 { return 0x3B; }
+    if idx == 74 { return 0xD6; }
+    if idx == 75 { return 0xB3; }
+    if idx == 76 { return 0x29; }
+    if idx == 77 { return 0xE3; }
+    if idx == 78 { return 0x2F; }
+    if idx == 79 { return 0x84; }
+    if idx == 80 { return 0x53; }
+    if idx == 81 { return 0xD1; }
+    if idx == 82 { return 0x00; }
+    if idx == 83 { return 0xED; }
+    if idx == 84 { return 0x20; }
+    if idx == 85 { return 0xFC; }
+    if idx == 86 { return 0xB1; }
+    if idx == 87 { return 0x5B; }
+    if idx == 88 { return 0x6A; }
+    if idx == 89 { return 0xCB; }
+    if idx == 90 { return 0xBE; }
+    if idx == 91 { return 0x39; }
+    if idx == 92 { return 0x4A; }
+    if idx == 93 { return 0x4C; }
+    if idx == 94 { return 0x58; }
+    if idx == 95 { return 0xCF; }
+    if idx == 96 { return 0xD0; }
+    if idx == 97 { return 0xEF; }
+    if idx == 98 { return 0xAA; }
+    if idx == 99 { return 0xFB; }
+    if idx == 100 { return 0x43; }
+    if idx == 101 { return 0x4D; }
+    if idx == 102 { return 0x33; }
+    if idx == 103 { return 0x85; }
+    if idx == 104 { return 0x45; }
+    if idx == 105 { return 0xF9; }
+    if idx == 106 { return 0x02; }
+    if idx == 107 { return 0x7F; }
+    if idx == 108 { return 0x50; }
+    if idx == 109 { return 0x3C; }
+    if idx == 110 { return 0x9F; }
+    if idx == 111 { return 0xA8; }
+    if idx == 112 { return 0x51; }
+    if idx == 113 { return 0xA3; }
+    if idx == 114 { return 0x40; }
+    if idx == 115 { return 0x8F; }
+    if idx == 116 { return 0x92; }
+    if idx == 117 { return 0x9D; }
+    if idx == 118 { return 0x38; }
+    if idx == 119 { return 0xF5; }
+    if idx == 120 { return 0xBC; }
+    if idx == 121 { return 0xB6; }
+    if idx == 122 { return 0xDA; }
+    if idx == 123 { return 0x21; }
+    if idx == 124 { return 0x10; }
+    if idx == 125 { return 0xFF; }
+    if idx == 126 { return 0xF3; }
+    if idx == 127 { return 0xD2; }
+    if idx == 128 { return 0xCD; }
+    if idx == 129 { return 0x0C; }
+    if idx == 130 { return 0x13; }
+    if idx == 131 { return 0xEC; }
+    if idx == 132 { return 0x5F; }
+    if idx == 133 { return 0x97; }
+    if idx == 134 { return 0x44; }
+    if idx == 135 { return 0x17; }
+    if idx == 136 { return 0xC4; }
+    if idx == 137 { return 0xA7; }
+    if idx == 138 { return 0x7E; }
+    if idx == 139 { return 0x3D; }
+    if idx == 140 { return 0x64; }
+    if idx == 141 { return 0x5D; }
+    if idx == 142 { return 0x19; }
+    if idx == 143 { return 0x73; }
+    if idx == 144 { return 0x60; }
+    if idx == 145 { return 0x81; }
+    if idx == 146 { return 0x4F; }
+    if idx == 147 { return 0xDC; }
+    if idx == 148 { return 0x22; }
+    if idx == 149 { return 0x2A; }
+    if idx == 150 { return 0x90; }
+    if idx == 151 { return 0x88; }
+    if idx == 152 { return 0x46; }
+    if idx == 153 { return 0xEE; }
+    if idx == 154 { return 0xB8; }
+    if idx == 155 { return 0x14; }
+    if idx == 156 { return 0xDE; }
+    if idx == 157 { return 0x5E; }
+    if idx == 158 { return 0x0B; }
+    if idx == 159 { return 0xDB; }
+    if idx == 160 { return 0xE0; }
+    if idx == 161 { return 0x32; }
+    if idx == 162 { return 0x3A; }
+    if idx == 163 { return 0x0A; }
+    if idx == 164 { return 0x49; }
+    if idx == 165 { return 0x06; }
+    if idx == 166 { return 0x24; }
+    if idx == 167 { return 0x5C; }
+    if idx == 168 { return 0xC2; }
+    if idx == 169 { return 0xD3; }
+    if idx == 170 { return 0xAC; }
+    if idx == 171 { return 0x62; }
+    if idx == 172 { return 0x91; }
+    if idx == 173 { return 0x95; }
+    if idx == 174 { return 0xE4; }
+    if idx == 175 { return 0x79; }
+    if idx == 176 { return 0xE7; }
+    if idx == 177 { return 0xC8; }
+    if idx == 178 { return 0x37; }
+    if idx == 179 { return 0x6D; }
+    if idx == 180 { return 0x8D; }
+    if idx == 181 { return 0xD5; }
+    if idx == 182 { return 0x4E; }
+    if idx == 183 { return 0xA9; }
+    if idx == 184 { return 0x6C; }
+    if idx == 185 { return 0x56; }
+    if idx == 186 { return 0xF4; }
+    if idx == 187 { return 0xEA; }
+    if idx == 188 { return 0x65; }
+    if idx == 189 { return 0x7A; }
+    if idx == 190 { return 0xAE; }
+    if idx == 191 { return 0x08; }
+    if idx == 192 { return 0xBA; }
+    if idx == 193 { return 0x78; }
+    if idx == 194 { return 0x25; }
+    if idx == 195 { return 0x2E; }
+    if idx == 196 { return 0x1C; }
+    if idx == 197 { return 0xA6; }
+    if idx == 198 { return 0xB4; }
+    if idx == 199 { return 0xC6; }
+    if idx == 200 { return 0xE8; }
+    if idx == 201 { return 0xDD; }
+    if idx == 202 { return 0x74; }
+    if idx == 203 { return 0x1F; }
+    if idx == 204 { return 0x4B; }
+    if idx == 205 { return 0xBD; }
+    if idx == 206 { return 0x8B; }
+    if idx == 207 { return 0x8A; }
+    if idx == 208 { return 0x70; }
+    if idx == 209 { return 0x3E; }
+    if idx == 210 { return 0xB5; }
+    if idx == 211 { return 0x66; }
+    if idx == 212 { return 0x48; }
+    if idx == 213 { return 0x03; }
+    if idx == 214 { return 0xF6; }
+    if idx == 215 { return 0x0E; }
+    if idx == 216 { return 0x61; }
+    if idx == 217 { return 0x35; }
+    if idx == 218 { return 0x57; }
+    if idx == 219 { return 0xB9; }
+    if idx == 220 { return 0x86; }
+    if idx == 221 { return 0xC1; }
+    if idx == 222 { return 0x1D; }
+    if idx == 223 { return 0x9E; }
+    if idx == 224 { return 0xE1; }
+    if idx == 225 { return 0xF8; }
+    if idx == 226 { return 0x98; }
+    if idx == 227 { return 0x11; }
+    if idx == 228 { return 0x69; }
+    if idx == 229 { return 0xD9; }
+    if idx == 230 { return 0x8E; }
+    if idx == 231 { return 0x94; }
+    if idx == 232 { return 0x9B; }
+    if idx == 233 { return 0x1E; }
+    if idx == 234 { return 0x87; }
+    if idx == 235 { return 0xE9; }
+    if idx == 236 { return 0xCE; }
+    if idx == 237 { return 0x55; }
+    if idx == 238 { return 0x28; }
+    if idx == 239 { return 0xDF; }
+    if idx == 240 { return 0x8C; }
+    if idx == 241 { return 0xA1; }
+    if idx == 242 { return 0x89; }
+    if idx == 243 { return 0x0D; }
+    if idx == 244 { return 0xBF; }
+    if idx == 245 { return 0xE6; }
+    if idx == 246 { return 0x42; }
+    if idx == 247 { return 0x68; }
+    if idx == 248 { return 0x41; }
+    if idx == 249 { return 0x99; }
+    if idx == 250 { return 0x2D; }
+    if idx == 251 { return 0x0F; }
+    if idx == 252 { return 0xB0; }
+    if idx == 253 { return 0x54; }
+    if idx == 254 { return 0xBB; }
+    return 0x16;
+}
+
+// ===========================================================================
+// AES round constants Rcon[i] (FIPS 197 Section 5.2)
+// ===========================================================================
+
+fn rcon(idx: u32) -> u32 {
+    if idx == 1 { return 1; }
+    if idx == 2 { return 2; }
+    if idx == 3 { return 4; }
+    if idx == 4 { return 8; }
+    if idx == 5 { return 16; }
+    if idx == 6 { return 32; }
+    if idx == 7 { return 64; }
+    return 128;
+}
+
+// ===========================================================================
+// GF(2^8) multiplication (used in MixColumns)
+// ===========================================================================
+
+fn xtime(a: u32) -> u32 {
+    hi: u32 = (a >> 7) & 1;
+    result: u32 = (a << 1) & 255;
+    if hi == 1 {
+        result = result ^ 27;  // 0x1B = irred poly
+    }
+    return result;
+}
+
+fn gmul(a: u32, b: u32) -> u32 {
+    result: u32 = 0;
+    x: u32 = a;
+    y: u32 = b;
+    i: u32 = 0;
+    while i < 8 {
+        if (y & 1) == 1 {
+            result = result ^ x;
+        }
+        x = xtime(x);
+        y = y >> 1;
+        i = i + 1;
+    }
+    return result & 255;
+}
+
+// ===========================================================================
+// Key Expansion — AES-256: 240 bytes from 32-byte key
+// ===========================================================================
+
+fn aes256_key_expansion(key: Address, roundkeys: Address) {
+    // First 32 bytes = key
+    i: u32 = 0;
+    while i < 32 {
+        *(roundkeys + i) = *(key + i);
+        i = i + 1;
+    }
+
+    // Nk=8 (32-byte key), Nb=4, Nr=14
+    // Total 240 bytes = 60 words (4 bytes each)
+    // i goes from 8 (word 8) to 59 (word 59)
+    i = 8;
+    while i < 60 {
+        // Read word i-1 (4 bytes)
+        t0: u32 = *(roundkeys + (i - 1) * 4);
+        t1: u32 = *(roundkeys + (i - 1) * 4 + 1);
+        t2: u32 = *(roundkeys + (i - 1) * 4 + 2);
+        t3: u32 = *(roundkeys + (i - 1) * 4 + 3);
+
+        // temp = word[i-1]
+        if i % 8 == 0 {
+            // RotWord
+            tmp: u32 = t0;
+            t0 = t1;
+            t1 = t2;
+            t2 = t3;
+            t3 = tmp;
+
+            // SubWord
+            t0 = sbox(t0);
+            t1 = sbox(t1);
+            t2 = sbox(t2);
+            t3 = sbox(t3);
+
+            // XOR Rcon
+            rc: u32 = rcon(i / 8);
+            t0 = t0 ^ rc;
+        } else if i % 8 == 4 {
+            // SubWord only (for AES-256)
+            t0 = sbox(t0);
+            t1 = sbox(t1);
+            t2 = sbox(t2);
+            t3 = sbox(t3);
+        }
+
+        // word[i] = word[i-8] XOR temp
+        w0: u32 = *(roundkeys + (i - 8) * 4);
+        w1: u32 = *(roundkeys + (i - 8) * 4 + 1);
+        w2: u32 = *(roundkeys + (i - 8) * 4 + 2);
+        w3: u32 = *(roundkeys + (i - 8) * 4 + 3);
+
+        *(roundkeys + i * 4) = w0 ^ t0;
+        *(roundkeys + i * 4 + 1) = w1 ^ t1;
+        *(roundkeys + i * 4 + 2) = w2 ^ t2;
+        *(roundkeys + i * 4 + 3) = w3 ^ t3;
+
+        i = i + 1;
+    }
+}
+
+// ===========================================================================
+// AddRoundKey — XOR state with round key
+// ===========================================================================
+
+fn add_round_key(state: Address, roundkeys: Address, round: u32) {
+    offset: u32 = round * 16;
+    i: u32 = 0;
+    while i < 16 {
+        b: u32 = *(state + i);
+        k: u32 = *(roundkeys + offset + i);
+        *(state + i) = (b ^ k) & 255;
+        i = i + 1;
+    }
+}
+
+// ===========================================================================
+// SubBytes
+// ===========================================================================
+
+fn sub_bytes(state: Address) {
+    i: u32 = 0;
+    while i < 16 {
+        b: u32 = *(state + i);
+        *(state + i) = sbox(b);
+        i = i + 1;
+    }
+}
+
+// ===========================================================================
+// ShiftRows
+// State is column-major: state[r + 4*c]
+// Row r is shifted left by r positions
+// ===========================================================================
+
+fn shift_rows(state: Address) {
+    // Row 0: no shift
+    // Row 1: shift left by 1
+    t: u32 = *(state + 1);
+    *(state + 1) = *(state + 5);
+    *(state + 5) = *(state + 9);
+    *(state + 9) = *(state + 13);
+    *(state + 13) = t;
+
+    // Row 2: shift left by 2
+    t = *(state + 2);
+    *(state + 2) = *(state + 10);
+    *(state + 10) = t;
+    t = *(state + 6);
+    *(state + 6) = *(state + 14);
+    *(state + 14) = t;
+
+    // Row 3: shift left by 3 (= shift right by 1)
+    t = *(state + 15);
+    *(state + 15) = *(state + 11);
+    *(state + 11) = *(state + 7);
+    *(state + 7) = *(state + 3);
+    *(state + 3) = t;
+}
+
+// ===========================================================================
+// MixColumns
+// ===========================================================================
+
+fn mix_columns(state: Address) {
+    c: u32 = 0;
+    while c < 4 {
+        s0: u32 = *(state + 4 * c);
+        s1: u32 = *(state + 4 * c + 1);
+        s2: u32 = *(state + 4 * c + 2);
+        s3: u32 = *(state + 4 * c + 3);
+
+        // MixColumns matrix multiply
+        // [2 3 1 1]   [s0]
+        // [1 2 3 1] × [s1]
+        // [1 1 2 3]   [s2]
+        // [3 1 1 2]   [s3]
+
+        r0: u32 = gmul(s0, 2) ^ gmul(s1, 3) ^ gmul(s2, 1) ^ gmul(s3, 1);
+        r1: u32 = gmul(s0, 1) ^ gmul(s1, 2) ^ gmul(s2, 3) ^ gmul(s3, 1);
+        r2: u32 = gmul(s0, 1) ^ gmul(s1, 1) ^ gmul(s2, 2) ^ gmul(s3, 3);
+        r3: u32 = gmul(s0, 3) ^ gmul(s1, 1) ^ gmul(s2, 1) ^ gmul(s3, 2);
+
+        *(state + 4 * c) = r0;
+        *(state + 4 * c + 1) = r1;
+        *(state + 4 * c + 2) = r2;
+        *(state + 4 * c + 3) = r3;
+
+        c = c + 1;
+    }
+}
+
+// ===========================================================================
+// AES-256 Encrypt — single 16-byte block
+// ===========================================================================
+
+fn aes256_encrypt_block(plaintext: Address, key: Address, ciphertext: Address) {
+    // Expand key (240 bytes)
+    roundkeys = allocate(240);
+    aes256_key_expansion(key, roundkeys);
+
+    // Copy plaintext to state
+    state = allocate(16);
+    i: u32 = 0;
+    while i < 16 {
+        *(state + i) = *(plaintext + i);
+        i = i + 1;
+    }
+
+    // Initial round key addition
+    add_round_key(state, roundkeys, 0);
+
+    // Rounds 1..13
+    round: u32 = 1;
+    while round < 14 {
+        sub_bytes(state);
+        shift_rows(state);
+        mix_columns(state);
+        add_round_key(state, roundkeys, round);
+        round = round + 1;
+    }
+
+    // Final round (no MixColumns)
+    sub_bytes(state);
+    shift_rows(state);
+    add_round_key(state, roundkeys, 14);
+
+    // Copy state to ciphertext
+    i = 0;
+    while i < 16 {
+        *(ciphertext + i) = *(state + i);
+        i = i + 1;
+    }
+
+    free(roundkeys);
+    free(state);
+}
+
+// ===========================================================================
