@@ -1,0 +1,130 @@
+// womb/crypto/chacha20_poly1305.vuma — ChaCha20-Poly1305 AEAD (RFC 8439)
+// No main() — importable library module.
+// Requires: chacha20.vuma, poly1305.vuma.
+//
+// Construction (RFC 8439 Section 2.6):
+// 1. Generate one-time Poly1305 key: first 32 bytes of ChaCha20(key, 0, nonce)
+// 2. Encrypt plaintext with ChaCha20(key, 1, nonce) — counter starts at 1
+// 3. Compute Poly1305 MAC over: AAD || pad16 || ciphertext || pad16 || len(AAD) || len(CT)
+// 4. Tag is the MAC output
+
+fn pad_to_16(buf: Address, len: u32) -> u32 {
+    rem: u32 = len % 16;
+    if rem == 0 { return len; }
+    padded: u32 = len + (16 - rem);
+    i: u32 = len;
+    while i < padded {
+        *(buf + i) = 0;
+        i = i + 1;
+    }
+    return padded;
+}
+
+fn store_u64_le(ptr: Address, off: u32, val: u64) {
+    *(ptr + off) = val & 255;
+    *(ptr + off + 1) = (val >> 8) & 255;
+    *(ptr + off + 2) = (val >> 16) & 255;
+    *(ptr + off + 3) = (val >> 24) & 255;
+    *(ptr + off + 4) = (val >> 32) & 255;
+    *(ptr + off + 5) = (val >> 40) & 255;
+    *(ptr + off + 6) = (val >> 48) & 255;
+    *(ptr + off + 7) = (val >> 56) & 255;
+}
+
+fn chacha20_poly1305_encrypt(key: Address, nonce: Address, aad: Address, aad_len: u32, plaintext: Address, pt_len: u32, ciphertext: Address, tag: Address) -> u32 {
+    // 1. Generate one-time Poly1305 key: ChaCha20(key, counter=0, nonce)
+    poly_key = allocate(32);
+    // Use chacha20_encrypt with counter=0 on a zero block
+    zero_input = allocate(32);
+    i: u32 = 0;
+    while i < 32 { *(zero_input + i) = 0; i = i + 1; }
+    chacha20_encrypt(zero_input, 32, key, nonce, 0, poly_key);
+    free(zero_input);
+
+    // 2. Encrypt plaintext: ChaCha20(key, counter=1, nonce)
+    chacha20_encrypt(plaintext, pt_len, key, nonce, 1, ciphertext);
+
+    // 3. Build MAC input: AAD || pad16(AAD) || CT || pad16(CT) || len(AAD) || len(CT)
+    aad_padded_len: u32 = aad_len;
+    if aad_len % 16 != 0 { aad_padded_len = aad_len + (16 - aad_len % 16); }
+    ct_padded_len: u32 = pt_len;
+    if pt_len % 16 != 0 { ct_padded_len = pt_len + (16 - pt_len % 16); }
+
+    mac_input_len: u32 = aad_padded_len + ct_padded_len + 16;
+    mac_input = allocate(mac_input_len);
+
+    // Copy AAD
+    pos: u32 = 0;
+    i = 0;
+    while i < aad_len { *(mac_input + pos) = *(aad + i); pos = pos + 1; i = i + 1; }
+    // Pad AAD to 16
+    while pos < aad_padded_len { *(mac_input + pos) = 0; pos = pos + 1; }
+
+    // Copy ciphertext
+    i = 0;
+    while i < pt_len { *(mac_input + pos) = *(ciphertext + i); pos = pos + 1; i = i + 1; }
+    // Pad CT to 16
+    while pos < aad_padded_len + ct_padded_len { *(mac_input + pos) = 0; pos = pos + 1; }
+
+    // Append lengths (8 bytes each, little-endian u64)
+    store_u64_le(mac_input, pos, aad_len);
+    pos = pos + 8;
+    store_u64_le(mac_input, pos, pt_len);
+
+    // 4. Compute Poly1305 tag
+    poly1305_mac(poly_key, mac_input, mac_input_len, tag);
+
+    free(poly_key);
+    free(mac_input);
+    return pt_len;
+}
+
+fn chacha20_poly1305_decrypt(key: Address, nonce: Address, aad: Address, aad_len: u32, ciphertext: Address, ct_len: u32, plaintext: Address, tag: Address) -> u32 {
+    // 1. Generate one-time Poly1305 key
+    poly_key = allocate(32);
+    zero_input = allocate(32);
+    i: u32 = 0;
+    while i < 32 { *(zero_input + i) = 0; i = i + 1; }
+    chacha20_encrypt(zero_input, 32, key, nonce, 0, poly_key);
+    free(zero_input);
+
+    // 2. Verify tag first
+    aad_padded_len: u32 = aad_len;
+    if aad_len % 16 != 0 { aad_padded_len = aad_len + (16 - aad_len % 16); }
+    ct_padded_len: u32 = ct_len;
+    if ct_len % 16 != 0 { ct_padded_len = ct_len + (16 - ct_len % 16); }
+
+    mac_input_len: u32 = aad_padded_len + ct_padded_len + 16;
+    mac_input = allocate(mac_input_len);
+
+    pos: u32 = 0;
+    i = 0;
+    while i < aad_len { *(mac_input + pos) = *(aad + i); pos = pos + 1; i = i + 1; }
+    while pos < aad_padded_len { *(mac_input + pos) = 0; pos = pos + 1; }
+
+    i = 0;
+    while i < ct_len { *(mac_input + pos) = *(ciphertext + i); pos = pos + 1; i = i + 1; }
+    while pos < aad_padded_len + ct_padded_len { *(mac_input + pos) = 0; pos = pos + 1; }
+
+    store_u64_le(mac_input, pos, aad_len);
+    pos = pos + 8;
+    store_u64_le(mac_input, pos, ct_len);
+
+    computed_tag = allocate(16);
+    poly1305_mac(poly_key, mac_input, mac_input_len, computed_tag);
+
+    // Constant-time tag comparison
+    ok: u32 = ct_memcmp(tag, computed_tag, 16);
+
+    free(poly_key);
+    free(mac_input);
+    free(computed_tag);
+
+    if ok == 0 {
+        return 4294967295;  // -1: tag mismatch
+    }
+
+    // 3. Decrypt: ChaCha20(key, counter=1, nonce)
+    chacha20_encrypt(ciphertext, ct_len, key, nonce, 1, plaintext);
+    return ct_len;
+}
