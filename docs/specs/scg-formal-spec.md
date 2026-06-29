@@ -1,10 +1,6 @@
 # Formal Mathematical Specification: Semantic Computation Graph (SCG)
 
-**Project:** VUMA — Verified-Unsafe Memory Access  
-**Document:** W1-01 — SCG Formal Model  
-**Author:** Agent W1-01  
-**Date:** 2026-03-04  
-**Status:** Specification — Draft 1  
+**Author:** Parham Khairkhah
 
 ---
 

@@ -2,8 +2,6 @@
 
 **VUMA Project — Behavioral Descriptors Component**
 **Task ID:** W1-04
-**Date:** 2026-03-04
-**Status:** Specification Draft v1.0
 
 ---
 
