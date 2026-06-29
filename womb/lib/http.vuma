@@ -1,0 +1,351 @@
+// womb/lib/http.vuma — HTTP/1.1 Parser (RFC 7230)
+// No main() — importable library module.
+// Parses HTTP request/response lines and headers.
+// Requires: string.vuma (for strlen, strcmp, etc.)
+
+extern "C" {
+    fn write(fd: i64, buf: Address, count: i64) -> i64;
+    fn read(fd: i64, buf: Address, count: i64) -> i64;
+    fn close(fd: i64) -> i64;
+}
+
+const HTTP_MAX_HEADERS: u32 = 50;
+const HTTP_MAX_LINE: u32 = 8192;
+
+// HTTP Method enumeration
+const HTTP_GET: u32 = 0;
+const HTTP_POST: u32 = 1;
+const HTTP_PUT: u32 = 2;
+const HTTP_DELETE: u32 = 3;
+const HTTP_HEAD: u32 = 4;
+const HTTP_OPTIONS: u32 = 5;
+const HTTP_PATCH: u32 = 6;
+
+// Parse HTTP method from string
+fn http_parse_method(s: Address) -> u32 {
+    // GET
+    if *(s + 0) == 71 {
+        if *(s + 1) == 69 {
+            if *(s + 2) == 84 { return HTTP_GET; }
+        }
+    }
+    // POST
+    if *(s + 0) == 80 {
+        if *(s + 1) == 79 {
+            if *(s + 2) == 83 {
+                if *(s + 3) == 84 { return HTTP_POST; }
+            }
+        }
+        if *(s + 1) == 85 {
+            if *(s + 2) == 84 { return HTTP_PUT; }
+            if *(s + 2) == 82 { if *(s + 3) == 67 { if *(s + 4) == 72 { return HTTP_PATCH; } } }
+        }
+        if *(s + 1) == 65 { if *(s + 2) == 84 { if *(s + 3) == 67 { if *(s + 4) == 72 { return HTTP_PATCH; } } } }
+    }
+    // DELETE
+    if *(s + 0) == 68 {
+        if *(s + 1) == 69 {
+            if *(s + 2) == 76 {
+                if *(s + 3) == 69 {
+                    if *(s + 4) == 84 {
+                        if *(s + 5) == 69 { return HTTP_DELETE; }
+                    }
+                }
+            }
+        }
+    }
+    // HEAD
+    if *(s + 0) == 72 {
+        if *(s + 1) == 69 {
+            if *(s + 2) == 65 {
+                if *(s + 3) == 68 { return HTTP_HEAD; }
+            }
+        }
+    }
+    // OPTIONS
+    if *(s + 0) == 79 {
+        if *(s + 1) == 80 {
+            if *(s + 2) == 84 {
+                if *(s + 3) == 73 {
+                    if *(s + 4) == 79 {
+                        if *(s + 5) == 78 {
+                            if *(s + 6) == 83 { return HTTP_OPTIONS; }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return 255;  // unknown
+}
+
+// ===========================================================================
+// HTTP Request structure (stored in memory):
+//   [0..3]     method (u32)
+//   [4..7]     path_offset (u32, relative to this struct)
+//   [8..11]    path_len (u32)
+//   [12..15]   version_major (u32)
+//   [16..19]   version_minor (u32)
+//   [20..23]   header_count (u32)
+//   [24..1039] header entries (50 × 20 bytes: name_offset, name_len, val_offset, val_len, pad)
+//   [1040..]   raw request data (path, headers, body)
+// ===========================================================================
+
+// Parse request line: "GET /path HTTP/1.1\r\n"
+fn http_parse_request_line(buf: Address, buf_len: u32, req: Address) -> u32 {
+    // Find end of first line
+    line_end: u32 = 0;
+    i: u32 = 0;
+    while i < buf_len - 1 {
+        if *(buf + i) == 13 {
+            if *(buf + i + 1) == 10 { line_end = i; break; }
+        }
+        i = i + 1;
+    }
+    if line_end == 0 { return 0; }  // no CRLF found
+
+    // Parse method
+    method_end: u32 = 0;
+    i = 0;
+    while i < line_end {
+        if *(buf + i) == 32 { method_end = i; break; }  // space
+        i = i + 1;
+    }
+    if method_end == 0 { return 0; }
+
+    // Store method
+    method: u32 = http_parse_method(buf);
+    *(req + 0) = method & 255;
+    *(req + 1) = (method >> 8) & 255;
+    *(req + 2) = (method >> 16) & 255;
+    *(req + 3) = (method >> 24) & 255;
+
+    // Parse path
+    path_start: u32 = method_end + 1;
+    path_end: u32 = 0;
+    i = path_start;
+    while i < line_end {
+        if *(buf + i) == 32 { path_end = i; break; }
+        i = i + 1;
+    }
+    if path_end == 0 { return 0; }
+
+    path_len: u32 = path_end - path_start;
+    *(req + 4) = path_start & 255;
+    *(req + 5) = (path_start >> 8) & 255;
+    *(req + 6) = (path_start >> 16) & 255;
+    *(req + 7) = (path_start >> 24) & 255;
+    *(req + 8) = path_len & 255;
+    *(req + 9) = (path_len >> 8) & 255;
+    *(req + 10) = (path_len >> 16) & 255;
+    *(req + 11) = (path_len >> 24) & 255;
+
+    // Parse version: "HTTP/1.1"
+    ver_start: u32 = path_end + 1;
+    // Expect "HTTP/"
+    if *(buf + ver_start) != 72 { return 0; }  // 'H'
+    if *(buf + ver_start + 1) != 84 { return 0; }  // 'T'
+    if *(buf + ver_start + 2) != 84 { return 0; }  // 'T'
+    if *(buf + ver_start + 3) != 80 { return 0; }  // 'P'
+    if *(buf + ver_start + 4) != 47 { return 0; }  // '/'
+
+    major: u32 = *(buf + ver_start + 5) - 48;
+    minor: u32 = *(buf + ver_start + 7) - 48;
+    *(req + 12) = major & 255;
+    *(req + 16) = minor & 255;
+
+    // Return offset past the request line (after CRLF)
+    return line_end + 2;
+}
+
+// Parse headers starting at offset
+fn http_parse_headers(buf: Address, offset: u32, buf_len: u32, req: Address) -> u32 {
+    header_count: u32 = 0;
+    pos: u32 = offset;
+
+    while pos < buf_len - 1 && header_count < HTTP_MAX_HEADERS {
+        // Check for end of headers (double CRLF)
+        if *(buf + pos) == 13 {
+            if *(buf + pos + 1) == 10 {
+                break;  // end of headers
+            }
+        }
+
+        // Find colon (header name separator)
+        name_end: u32 = pos;
+        i: u32 = pos;
+        while i < buf_len {
+            if *(buf + i) == 58 { name_end = i; break; }  // ':'
+            i = i + 1;
+        }
+
+        // Skip space after colon
+        val_start: u32 = name_end + 1;
+        if *(buf + val_start) == 32 { val_start = val_start + 1; }  // skip space
+
+        // Find end of value (CRLF)
+        val_end: u32 = val_start;
+        i = val_start;
+        while i < buf_len - 1 {
+            if *(buf + i) == 13 {
+                if *(buf + i + 1) == 10 { val_end = i; break; }
+            }
+            i = i + 1;
+        }
+
+        // Store header entry
+        entry_off: u32 = 24 + header_count * 20;
+        name_len: u32 = name_end - pos;
+        val_len: u32 = val_end - val_start;
+
+        // name_offset
+        *(req + entry_off + 0) = pos & 255;
+        *(req + entry_off + 1) = (pos >> 8) & 255;
+        // name_len
+        *(req + entry_off + 4) = name_len & 255;
+        *(req + entry_off + 5) = (name_len >> 8) & 255;
+        // val_offset
+        *(req + entry_off + 8) = val_start & 255;
+        *(req + entry_off + 9) = (val_start >> 8) & 255;
+        // val_len
+        *(req + entry_off + 12) = val_len & 255;
+        *(req + entry_off + 13) = (val_len >> 8) & 255;
+
+        header_count = header_count + 1;
+        pos = val_end + 2;  // skip CRLF
+    }
+
+    // Store header count
+    *(req + 20) = header_count & 255;
+    *(req + 21) = (header_count >> 8) & 255;
+
+    return pos + 2;  // skip final CRLF
+}
+
+// ===========================================================================
+// HTTP Response builder
+// ===========================================================================
+
+fn http_build_response(status_code: u32, status_text: Address, content_type: Address, body: Address, body_len: u32, out: Address) -> u32 {
+    pos: u32 = 0;
+
+    // Status line: "HTTP/1.1 200 OK\r\n"
+    *(out + pos) = 72; *(out + pos + 1) = 84; *(out + pos + 2) = 84; *(out + pos + 3) = 80;
+    *(out + pos + 4) = 47; *(out + pos + 5) = 49; *(out + pos + 6) = 46; *(out + pos + 7) = 49;
+    pos = pos + 8;
+    *(out + pos) = 32; pos = pos + 1;  // space
+
+    // Status code (3 digits)
+    *(out + pos) = 48 + (status_code / 100);
+    *(out + pos + 1) = 48 + ((status_code / 10) % 10);
+    *(out + pos + 2) = 48 + (status_code % 10);
+    pos = pos + 3;
+    *(out + pos) = 32; pos = pos + 1;  // space
+
+    // Status text
+    sl: u32 = 0;
+    while *(status_text + sl) != 0 { *(out + pos + sl) = *(status_text + sl); sl = sl + 1; }
+    pos = pos + sl;
+
+    // CRLF
+    *(out + pos) = 13; *(out + pos + 1) = 10; pos = pos + 2;
+
+    // Content-Type header
+    *(out + pos) = 67; *(out + pos + 1) = 111; *(out + pos + 2) = 110;
+    *(out + pos + 3) = 116; *(out + pos + 4) = 101; *(out + pos + 5) = 110;
+    *(out + pos + 6) = 116; *(out + pos + 7) = 45; *(out + pos + 8) = 84;
+    *(out + pos + 9) = 121; *(out + pos + 10) = 112; *(out + pos + 11) = 101;
+    *(out + pos + 12) = 58; *(out + pos + 13) = 32;
+    pos = pos + 14;
+    ctl: u32 = 0;
+    while *(content_type + ctl) != 0 { *(out + pos + ctl) = *(content_type + ctl); ctl = ctl + 1; }
+    pos = pos + ctl;
+    *(out + pos) = 13; *(out + pos + 1) = 10; pos = pos + 2;
+
+    // Content-Length header
+    *(out + pos) = 67; *(out + pos + 1) = 111; *(out + pos + 2) = 110;
+    *(out + pos + 3) = 116; *(out + pos + 4) = 101; *(out + pos + 5) = 110;
+    *(out + pos + 6) = 116; *(out + pos + 7) = 45; *(out + pos + 8) = 76;
+    *(out + pos + 9) = 101; *(out + pos + 10) = 110; *(out + pos + 11) = 103;
+    *(out + pos + 12) = 116; *(out + pos + 13) = 104; *(out + pos + 14) = 58;
+    *(out + pos + 15) = 32;
+    pos = pos + 16;
+
+    // Convert body_len to string
+    if body_len == 0 {
+        *(out + pos) = 48; pos = pos + 1;
+    } else {
+        temp = allocate(12);
+        tp: u32 = 0;
+        v: u32 = body_len;
+        while v > 0 {
+            *(temp + tp) = 48 + (v % 10);
+            tp = tp + 1;
+            v = v / 10;
+        }
+        while tp > 0 {
+            tp = tp - 1;
+            *(out + pos) = *(temp + tp);
+            pos = pos + 1;
+        }
+        free(temp);
+    }
+    *(out + pos) = 13; *(out + pos + 1) = 10; pos = pos + 2;
+
+    // End of headers
+    *(out + pos) = 13; *(out + pos + 1) = 10; pos = pos + 2;
+
+    // Body
+    i: u32 = 0;
+    while i < body_len {
+        *(out + pos + i) = *(body + i);
+        i = i + 1;
+    }
+    pos = pos + body_len;
+
+    return pos;
+}
+
+// Common status texts
+fn http_status_text_200() -> Address {
+    buf = allocate(3);
+    *(buf + 0) = 79; *(buf + 1) = 75; *(buf + 2) = 0;  // "OK"
+    return buf;
+}
+
+fn http_status_text_404() -> Address {
+    buf = allocate(10);
+    *(buf + 0) = 78; *(buf + 1) = 111; *(buf + 2) = 116; *(buf + 3) = 32;
+    *(buf + 4) = 70; *(buf + 5) = 111; *(buf + 6) = 117; *(buf + 7) = 110;
+    *(buf + 8) = 100; *(buf + 9) = 0;  // "Not Found"
+    return buf;
+}
+
+fn http_content_type_json() -> Address {
+    buf = allocate(31);
+    *(buf + 0) = 97; *(buf + 1) = 112; *(buf + 2) = 112;
+    *(buf + 3) = 108; *(buf + 4) = 105; *(buf + 5) = 99;
+    *(buf + 6) = 97; *(buf + 7) = 116; *(buf + 8) = 105;
+    *(buf + 9) = 111; *(buf + 10) = 110; *(buf + 11) = 47;
+    *(buf + 12) = 106; *(buf + 13) = 115; *(buf + 14) = 111;
+    *(buf + 15) = 110; *(buf + 16) = 0;  // "application/json"
+    return buf;
+}
+
+fn http_content_type_html() -> Address {
+    buf = allocate(10);
+    *(buf + 0) = 116; *(buf + 1) = 101; *(buf + 2) = 120;
+    *(buf + 3) = 116; *(buf + 4) = 47; *(buf + 5) = 104;
+    *(buf + 6) = 116; *(buf + 7) = 109; *(buf + 8) = 108;
+    *(buf + 9) = 0;  // "text/html"
+    return buf;
+}
+
+fn http_content_type_plain() -> Address {
+    buf = allocate(11);
+    *(buf + 0) = 116; *(buf + 1) = 101; *(buf + 2) = 120;
+    *(buf + 3) = 116; *(buf + 4) = 47; *(buf + 5) = 112;
+    *(buf + 6) = 108; *(buf + 7) = 97; *(buf + 8) = 105;
+    *(buf + 9) = 110; *(buf + 10) = 0;  // "text/plain"
+    return buf;
+}

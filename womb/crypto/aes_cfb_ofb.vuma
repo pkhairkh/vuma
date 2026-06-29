@@ -1,0 +1,241 @@
+// womb/crypto/aes_cfb_ofb.vuma — AES-CFB and AES-OFB modes (NIST SP 800-38A)
+// Requires: aes256.vuma (for block cipher), or aes128.vuma.
+// Uses AES-256 block cipher by default; can be adapted for AES-128.
+
+// ===========================================================================
+// AES-256-CFB (Cipher Feedback) — NIST SP 800-38A Section 6.3
+// Encrypt: C_i = P_i XOR AES_enc(C_{i-1}), C_0 = IV
+// Decrypt: P_i = C_i XOR AES_enc(C_{i-1}), C_0 = IV
+// Same operation for encrypt/decrypt (just swap P and C).
+// ===========================================================================
+
+fn aes256_cfb_encrypt(plaintext: Address, pt_len: u32, key: Address, iv: Address, ciphertext: Address) -> u32 {
+    prev = allocate(16);
+    i: u32 = 0;
+    while i < 16 { *(prev + i) = *(iv + i); i = i + 1; }
+
+    pos: u32 = 0;
+    while pos < pt_len {
+        keystream = allocate(16);
+        aes256_encrypt_block(prev, key, keystream);
+
+        block_remaining: u32 = pt_len - pos;
+        to_xor: u32 = 16;
+        if block_remaining < 16 { to_xor = block_remaining; }
+
+        i = 0;
+        while i < to_xor {
+            ct_val: u32 = (*(plaintext + pos + i) ^ *(keystream + i)) & 255;
+            *(ciphertext + pos + i) = ct_val;
+            *(prev + i) = ct_val;  // C_i feeds back
+            i = i + 1;
+        }
+
+        free(keystream);
+        pos = pos + to_xor;
+    }
+
+    free(prev);
+    return pt_len;
+}
+
+fn aes256_cfb_decrypt(ciphertext: Address, ct_len: u32, key: Address, iv: Address, plaintext: Address) -> u32 {
+    prev = allocate(16);
+    i: u32 = 0;
+    while i < 16 { *(prev + i) = *(iv + i); i = i + 1; }
+
+    pos: u32 = 0;
+    while pos < ct_len {
+        keystream = allocate(16);
+        aes256_encrypt_block(prev, key, keystream);
+
+        block_remaining: u32 = ct_len - pos;
+        to_xor: u32 = 16;
+        if block_remaining < 16 { to_xor = block_remaining; }
+
+        i = 0;
+        while i < to_xor {
+            ct_val: u32 = *(ciphertext + pos + i);
+            *(plaintext + pos + i) = (ct_val ^ *(keystream + i)) & 255;
+            *(prev + i) = ct_val;  // C_i feeds back
+            i = i + 1;
+        }
+
+        free(keystream);
+        pos = pos + to_xor;
+    }
+
+    free(prev);
+    return ct_len;
+}
+
+// ===========================================================================
+// AES-256-OFB (Output Feedback) — NIST SP 800-38A Section 6.4
+// Encrypt/Decrypt: O_i = AES_enc(O_{i-1}), O_0 = IV
+// C_i = P_i XOR O_i
+// Same operation for encrypt and decrypt.
+// ===========================================================================
+
+fn aes256_ofb_crypt(data: Address, data_len: u32, key: Address, iv: Address, output: Address) -> u32 {
+    prev = allocate(16);
+    i: u32 = 0;
+    while i < 16 { *(prev + i) = *(iv + i); i = i + 1; }
+
+    pos: u32 = 0;
+    while pos < data_len {
+        keystream = allocate(16);
+        aes256_encrypt_block(prev, key, keystream);
+
+        // Update prev = keystream (output feedback)
+        i = 0;
+        while i < 16 { *(prev + i) = *(keystream + i); i = i + 1; }
+
+        block_remaining: u32 = data_len - pos;
+        to_xor: u32 = 16;
+        if block_remaining < 16 { to_xor = block_remaining; }
+
+        i = 0;
+        while i < to_xor {
+            *(output + pos + i) = (*(data + pos + i) ^ *(keystream + i)) & 255;
+            i = i + 1;
+        }
+
+        free(keystream);
+        pos = pos + to_xor;
+    }
+
+    free(prev);
+    return data_len;
+}
+
+// ===========================================================================
+// AES-256-CCM (Counter with CBC-MAC) — NIST SP 800-38B
+// AEAD mode: authenticated encryption with associated data.
+//
+// Simplified: CBC-MAC for authentication + CTR for encryption.
+// ===========================================================================
+
+fn aes256_ccm_encrypt(plaintext: Address, pt_len: u32, key: Address, nonce: Address, nonce_len: u32, aad: Address, aad_len: u32, ciphertext: Address, tag: Address, tag_len: u32) -> u32 {
+    // 1. Compute CBC-MAC over: B0 || AAD || plaintext
+    // B0 = flags || nonce || length
+
+    // Build B0
+    b0 = allocate(16);
+    i: u32 = 0;
+    while i < 16 { *(b0 + i) = 0; i = i + 1; }
+    // Flags: L-1 = 2 (length field = 3 bytes), M = tag_len
+    flags: u32 = (tag_len - 2) / 2;  // encoded tag length
+    flags = flags << 3;
+    if aad_len > 0 { flags = flags | 64; }  // AAD flag
+    *(b0 + 0) = flags;
+    // Nonce
+    i = 0;
+    while i < nonce_len { *(b0 + 1 + i) = *(nonce + i); i = i + 1; }
+    // Length (3 bytes, big-endian)
+    *(b0 + 13) = (pt_len >> 16) & 255;
+    *(b0 + 14) = (pt_len >> 8) & 255;
+    *(b0 + 15) = pt_len & 255;
+
+    // CBC-MAC
+    mac_state = allocate(16);
+    i = 0;
+    while i < 16 { *(mac_state + i) = *(b0 + i); i = i + 1; }
+    // Encrypt B0
+    aes256_encrypt_block(mac_state, key, mac_state);
+
+    // Process AAD (simplified: just hash blocks)
+    aad_pos: u32 = 0;
+    while aad_pos < aad_len {
+        aad_block = allocate(16);
+        i = 0;
+        while i < 16 {
+            if aad_pos + i < aad_len {
+                *(aad_block + i) = *(aad + aad_pos + i);
+            } else {
+                *(aad_block + i) = 0;
+            }
+            i = i + 1;
+        }
+        // XOR with mac_state
+        i = 0;
+        while i < 16 { *(mac_state + i) = (*(mac_state + i) ^ *(aad_block + i)) & 255; i = i + 1; }
+        aes256_encrypt_block(mac_state, key, mac_state);
+        free(aad_block);
+        aad_pos = aad_pos + 16;
+    }
+
+    // Process plaintext
+    pt_pos: u32 = 0;
+    while pt_pos < pt_len {
+        pt_block = allocate(16);
+        i = 0;
+        while i < 16 {
+            if pt_pos + i < pt_len {
+                *(pt_block + i) = *(plaintext + pt_pos + i);
+            } else {
+                *(pt_block + i) = 0;
+            }
+            i = i + 1;
+        }
+        i = 0;
+        while i < 16 { *(mac_state + i) = (*(mac_state + i) ^ *(pt_block + i)) & 255; i = i + 1; }
+        aes256_encrypt_block(mac_state, key, mac_state);
+        free(pt_block);
+        pt_pos = pt_pos + 16;
+    }
+
+    // Tag = first tag_len bytes of CBC-MAC, XORed with S0
+    // S0 = AES_enc(flags || nonce || 0)
+    s0 = allocate(16);
+    i = 0;
+    while i < 16 { *(s0 + i) = 0; i = i + 1; }
+    *(s0 + 0) = flags & 7;  // L-1 = 2
+    i = 0;
+    while i < nonce_len { *(s0 + 1 + i) = *(nonce + i); i = i + 1; }
+    aes256_encrypt_block(s0, key, s0);
+
+    // Tag = mac_state XOR s0 (truncated to tag_len)
+    i = 0;
+    while i < tag_len {
+        *(tag + i) = (*(mac_state + i) ^ *(s0 + i)) & 255;
+        i = i + 1;
+    }
+    free(s0); free(b0); free(mac_state);
+
+    // 2. CTR encrypt
+    // A0 = flags || nonce || counter
+    ctr_block = allocate(16);
+    i = 0;
+    while i < 16 { *(ctr_block + i) = 0; i = i + 1; }
+    *(ctr_block + 0) = flags & 7;
+    i = 0;
+    while i < nonce_len { *(ctr_block + 1 + i) = *(nonce + i); i = i + 1; }
+    *(ctr_block + 15) = 1;  // counter starts at 1 (S0 was counter 0)
+
+    pos: u32 = 0;
+    while pos < pt_len {
+        keystream = allocate(16);
+        aes256_encrypt_block(ctr_block, key, keystream);
+
+        block_remaining: u32 = pt_len - pos;
+        to_xor: u32 = 16;
+        if block_remaining < 16 { to_xor = block_remaining; }
+
+        i = 0;
+        while i < to_xor {
+            *(ciphertext + pos + i) = (*(plaintext + pos + i) ^ *(keystream + i)) & 255;
+            i = i + 1;
+        }
+        free(keystream);
+
+        // Increment counter
+        *(ctr_block + 15) = (*(ctr_block + 15) + 1) & 255;
+        if *(ctr_block + 15) == 0 {
+            *(ctr_block + 14) = (*(ctr_block + 14) + 1) & 255;
+        }
+        pos = pos + to_xor;
+    }
+
+    free(ctr_block);
+    return pt_len;
+}
