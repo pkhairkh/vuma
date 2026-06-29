@@ -1,0 +1,380 @@
+// womb/crypto/bignum.vuma — Multi-Precision Integer Arithmetic
+// No main() — importable library module.
+// Supports 256-bit, 384-bit, 512-bit, 2048-bit, 4096-bit integers.
+// Numbers are stored as arrays of u64 limbs (little-endian: limb[0] = least significant).
+//
+// This is the foundation for RSA, ECDSA, and ECDH.
+
+const MASK32: u32 = 4294967295;
+const MASK64: u64 = 18446744073709551615;
+
+// ===========================================================================
+// 256-bit arithmetic (4 × u64 limbs) — for ECDSA P-256
+// ===========================================================================
+
+// Load 4 u64 limbs from 32-byte buffer (little-endian)
+fn bn256_load(buf: Address, a: Address) {
+    i: u32 = 0;
+    while i < 4 {
+        off: u32 = i * 8;
+        b0: u64 = *(buf + off); b1: u64 = *(buf + off + 1);
+        b2: u64 = *(buf + off + 2); b3: u64 = *(buf + off + 3);
+        b4: u64 = *(buf + off + 4); b5: u64 = *(buf + off + 5);
+        b6: u64 = *(buf + off + 6); b7: u64 = *(buf + off + 7);
+        val: u64 = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
+        // Store u64 at a + i*8 (we'll use byte-level storage)
+        *(a + off) = val & 255;
+        *(a + off + 1) = (val >> 8) & 255;
+        *(a + off + 2) = (val >> 16) & 255;
+        *(a + off + 3) = (val >> 24) & 255;
+        *(a + off + 4) = (val >> 32) & 255;
+        *(a + off + 5) = (val >> 40) & 255;
+        *(a + off + 6) = (val >> 48) & 255;
+        *(a + off + 7) = (val >> 56) & 255;
+        i = i + 1;
+    }
+}
+
+// Store 4 u64 limbs to 32-byte buffer
+fn bn256_store(a: Address, buf: Address) {
+    i: u32 = 0;
+    while i < 32 {
+        *(buf + i) = *(a + i);
+        i = i + 1;
+    }
+}
+
+// Load a u64 from memory (little-endian)
+fn load_u64(ptr: Address, off: u32) -> u64 {
+    b0: u64 = *(ptr + off); b1: u64 = *(ptr + off + 1);
+    b2: u64 = *(ptr + off + 2); b3: u64 = *(ptr + off + 3);
+    b4: u64 = *(ptr + off + 4); b5: u64 = *(ptr + off + 5);
+    b6: u64 = *(ptr + off + 6); b7: u64 = *(ptr + off + 7);
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
+}
+
+// Store a u64 to memory (little-endian)
+fn store_u64(ptr: Address, off: u32, val: u64) {
+    *(ptr + off) = val & 255;
+    *(ptr + off + 1) = (val >> 8) & 255;
+    *(ptr + off + 2) = (val >> 16) & 255;
+    *(ptr + off + 3) = (val >> 24) & 255;
+    *(ptr + off + 4) = (val >> 32) & 255;
+    *(ptr + off + 5) = (val >> 40) & 255;
+    *(ptr + off + 6) = (val >> 48) & 255;
+    *(ptr + off + 7) = (val >> 56) & 255;
+}
+
+// a = 0
+fn bn256_zero(a: Address) {
+    i: u32 = 0;
+    while i < 32 { *(a + i) = 0; i = i + 1; }
+}
+
+// Copy a to r
+fn bn256_copy(r: Address, a: Address) {
+    i: u32 = 0;
+    while i < 32 { *(r + i) = *(a + i); i = i + 1; }
+}
+
+// Compare a and b: return 0 if equal, 1 if a>b, -1 if a<b
+fn bn256_cmp(a: Address, b: Address) -> i32 {
+    i: u32 = 3;
+    while 1 == 1 {
+        av: u64 = load_u64(a, i * 8);
+        bv: u64 = load_u64(b, i * 8);
+        if av > bv { return 1; }
+        if av < bv { return -1; }
+        if i == 0 { break; }
+        i = i - 1;
+    }
+    return 0;
+}
+
+// Is zero?
+fn bn256_is_zero(a: Address) -> u32 {
+    i: u32 = 0;
+    while i < 4 {
+        if load_u64(a, i * 8) != 0 { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+// r = a + b, returns carry
+fn bn256_add(r: Address, a: Address, b: Address) -> u32 {
+    carry: u64 = 0;
+    i: u32 = 0;
+    while i < 4 {
+        av: u64 = load_u64(a, i * 8);
+        bv: u64 = load_u64(b, i * 8);
+        sum: u64 = av + bv + carry;
+        store_u64(r, i * 8, sum);
+        // Carry if sum < av (unsigned overflow)
+        if sum < av { carry = 1; }
+        else {
+            if sum == av {
+                if carry == 1 { carry = 1; }
+                else { carry = 0; }
+            } else {
+                carry = 0;
+            }
+        }
+        i = i + 1;
+    }
+    return carry;
+}
+
+// r = a - b, returns borrow
+fn bn256_sub(r: Address, a: Address, b: Address) -> u32 {
+    borrow: u64 = 0;
+    i: u32 = 0;
+    while i < 4 {
+        av: u64 = load_u64(a, i * 8);
+        bv: u64 = load_u64(b, i * 8);
+        diff: u64 = av - bv - borrow;
+        store_u64(r, i * 8, diff);
+        // Borrow if av < bv + borrow
+        if av < bv { borrow = 1; }
+        else {
+            if av == bv {
+                // diff = 0 - borrow, borrow if borrow was 1
+                if borrow == 1 { borrow = 1; }
+                else { borrow = 0; }
+            } else {
+                // av > bv, but if borrow was 1, diff = av-bv-1
+                // No borrow unless av == bv and borrow was 1 (handled above)
+                borrow = 0;
+            }
+        }
+        i = i + 1;
+    }
+    return borrow;
+}
+
+// r = a + scalar (mod 2^256)
+fn bn256_add_u32(r: Address, a: Address, scalar: u32) {
+    carry: u64 = scalar;
+    i: u32 = 0;
+    while i < 4 {
+        av: u64 = load_u64(a, i * 8);
+        sum: u64 = av + carry;
+        store_u64(r, i * 8, sum);
+        if sum < av { carry = 1; }
+        else { carry = 0; }
+        i = i + 1;
+    }
+}
+
+// r = a >> 1 (right shift by 1 bit)
+fn bn256_rshift1(r: Address, a: Address) {
+    i: u32 = 3;
+    while i > 0 {
+        hi: u64 = load_u64(a, i * 8);
+        lo: u64 = load_u64(a, (i - 1) * 8);
+        store_u64(r, i * 8, (hi >> 1) | (lo << 63));
+        i = i - 1;
+    }
+    v0: u64 = load_u64(a, 0);
+    store_u64(r, 0, v0 >> 1);
+}
+
+// r = a << 1 (left shift by 1 bit)
+fn bn256_lshift1(r: Address, a: Address) {
+    carry: u64 = 0;
+    i: u32 = 0;
+    while i < 4 {
+        v: u64 = load_u64(a, i * 8);
+        store_u64(r, i * 8, (v << 1) | carry);
+        carry = v >> 63;
+        i = i + 1;
+    }
+}
+
+// r = a & b
+fn bn256_and(r: Address, a: Address, b: Address) {
+    i: u32 = 0;
+    while i < 4 {
+        store_u64(r, i * 8, load_u64(a, i * 8) & load_u64(b, i * 8));
+        i = i + 1;
+    }
+}
+
+// r = a | b
+fn bn256_or(r: Address, a: Address, b: Address) {
+    i: u32 = 0;
+    while i < 4 {
+        store_u64(r, i * 8, load_u64(a, i * 8) | load_u64(b, i * 8));
+        i = i + 1;
+    }
+}
+
+// r = a ^ b
+fn bn256_xor(r: Address, a: Address, b: Address) {
+    i: u32 = 0;
+    while i < 4 {
+        store_u64(r, i * 8, load_u64(a, i * 8) ^ load_u64(b, i * 8));
+        i = i + 1;
+    }
+}
+
+// Get bit i of a (0 = LSB)
+fn bn256_get_bit(a: Address, bit: u32) -> u32 {
+    limb: u32 = bit / 64;
+    pos: u32 = bit % 64;
+    if limb >= 4 { return 0; }
+    v: u64 = load_u64(a, limb * 8);
+    return (v >> pos) & 1;
+}
+
+// Number of bits in a
+fn bn256_bitlen(a: Address) -> u32 {
+    i: u32 = 3;
+    while 1 == 1 {
+        v: u64 = load_u64(a, i * 8);
+        if v != 0 {
+            // Count leading zeros in u64
+            bits: u32 = 64;
+            while bits > 0 {
+                if (v >> (bits - 1)) & 1 == 1 { return i * 64 + bits; }
+                bits = bits - 1;
+            }
+            return i * 64 + 1;
+        }
+        if i == 0 { break; }
+        i = i - 1;
+    }
+    return 0;
+}
+
+// ===========================================================================
+// Modular arithmetic (mod p) for 256-bit numbers
+// ===========================================================================
+
+// r = a + b mod m (assuming a, b < m)
+fn bn256_mod_add(r: Address, a: Address, b: Address, m: Address) {
+    carry: u32 = bn256_add(r, a, b);
+    // If carry or r >= m, subtract m
+    if carry == 1 {
+        bn256_sub(r, r, m);
+    } else {
+        if bn256_cmp(r, m) >= 0 {
+            bn256_sub(r, r, m);
+        }
+    }
+}
+
+// r = a - b mod m (assuming a, b < m)
+fn bn256_mod_sub(r: Address, a: Address, b: Address, m: Address) {
+    borrow: u32 = bn256_sub(r, a, b);
+    if borrow == 1 {
+        bn256_add(r, r, m);
+    }
+}
+
+// r = a * b mod m (using schoolbook multiplication + Barrett or repeated subtraction)
+// This is simplified — uses shift-and-add with modular reduction.
+fn bn256_mod_mul(r: Address, a: Address, b: Address, m: Address) {
+    // r = 0
+    bn256_zero(r);
+    temp = allocate(32);
+    bn256_copy(temp, a);
+
+    bits: u32 = bn256_bitlen(b);
+    i: u32 = 0;
+    while i < bits {
+        if bn256_get_bit(b, i) == 1 {
+            bn256_mod_add(r, r, temp, m);
+        }
+        // temp = temp * 2 mod m
+        bn256_lshift1(temp, temp);
+        if bn256_cmp(temp, m) >= 0 {
+            bn256_sub(temp, temp, m);
+        }
+        i = i + 1;
+    }
+    free(temp);
+}
+
+// r = a^exp mod m (using square-and-multiply)
+fn bn256_mod_exp(r: Address, a: Address, exp: Address, m: Address) {
+    bn256_zero(r);
+    // r = 1
+    *(r + 0) = 1;
+
+    base = allocate(32);
+    bn256_copy(base, a);
+
+    bits: u32 = bn256_bitlen(exp);
+    i: u32 = 0;
+    while i < bits {
+        if bn256_get_bit(exp, i) == 1 {
+            // r = r * base mod m
+            temp = allocate(32);
+            bn256_mod_mul(temp, r, base, m);
+            bn256_copy(r, temp);
+            free(temp);
+        }
+        // base = base^2 mod m
+        temp2 = allocate(32);
+        bn256_mod_mul(temp2, base, base, m);
+        bn256_copy(base, temp2);
+        free(temp2);
+        i = i + 1;
+    }
+    free(base);
+}
+
+// Extended GCD: compute a^-1 mod m using the extended Euclidean algorithm
+// r = a^(-1) mod m
+fn bn256_mod_inv(r: Address, a: Address, m: Address) {
+    // Extended Euclidean: find x such that a*x ≡ 1 (mod m)
+    // Using the binary extended GCD algorithm
+
+    u = allocate(32);
+    v = allocate(32);
+    x1 = allocate(32);
+    x2 = allocate(32);
+
+    bn256_copy(u, a);
+    bn256_copy(v, m);
+    bn256_zero(x2);
+    *(x1 + 0) = 1;  // x1 = 1
+
+    while bn256_is_zero(u) == 0 {
+        // While u is even:
+        while bn256_get_bit(u, 0) == 0 {
+            bn256_rshift1(u, u);
+            if bn256_get_bit(x1, 0) == 0 {
+                bn256_rshift1(x1, x1);
+            } else {
+                // x1 = (x1 + m) / 2
+                bn256_add(x1, x1, m);
+                bn256_rshift1(x1, x1);
+            }
+        }
+        // While v is even:
+        while bn256_get_bit(v, 0) == 0 {
+            bn256_rshift1(v, v);
+            if bn256_get_bit(x2, 0) == 0 {
+                bn256_rshift1(x2, x2);
+            } else {
+                bn256_add(x2, x2, m);
+                bn256_rshift1(x2, x2);
+            }
+        }
+        // If u >= v:
+        if bn256_cmp(u, v) >= 0 {
+            bn256_sub(u, u, v);
+            bn256_mod_sub(x1, x1, x2, m);
+        } else {
+            bn256_sub(v, v, u);
+            bn256_mod_sub(x2, x2, x1, m);
+        }
+    }
+
+    // Result is x1 (mod m), and v should be 1 (GCD)
+    bn256_copy(r, x1);
+
+    free(u); free(v); free(x1); free(x2);
+}

@@ -1,0 +1,36 @@
+// womb/crypto/sha384.vuma — SHA-384 (NIST FIPS 180-4)
+// Truncated SHA-512 with different initial hash values.
+// 80-round, 1024-bit blocks, 384-bit (48-byte) output.
+// Requires: sha512.vuma (shares compression function).
+
+// FIPS 180-4 Section 5.3.4: SHA-384 initial hash values
+const H0I_384: u64 = 13478193318084588547;
+const H1I_384: u64 = 2550396343389265400;
+const H2I_384: u64 = 1010948346851328306;
+const H3I_384: u64 = 16117252739641894804;
+const H4I_384: u64 = 12696512699617033960;
+const H5I_384: u64 = 15728981531209326632;
+const H6I_384: u64 = 15478198936575664745;
+const H7I_384: u64 = 13697051427777647928;
+
+fn sha384_init(ctx: Address) {
+    store_u64_be(ctx, 0, H0I_384);
+    store_u64_be(ctx, 8, H1I_384);
+    store_u64_be(ctx, 16, H2I_384);
+    store_u64_be(ctx, 24, H3I_384);
+    store_u64_be(ctx, 32, H4I_384);
+    store_u64_be(ctx, 40, H5I_384);
+    store_u64_be(ctx, 48, H6I_384);
+    store_u64_be(ctx, 56, H7I_384);
+    store_u64_be(ctx, 64, 0);
+    store_u64_be(ctx, 72, 0);
+    store_u64_be(ctx, 80, 0);
+}
+
+fn sha384_oneshot(data: Address, len: u32, out: Address) {
+    ctx = allocate(216);
+    sha384_init(ctx);
+    sha512_update(ctx, data, len);
+    sha512_final(ctx, out);
+    free(ctx);
+}
