@@ -1,0 +1,122 @@
+// womb/crypto/crc.vuma — CRC-16, CRC-32, CRC-64
+// IEEE 802.3 CRC-32, CCITT CRC-16, CRC-64 (ECMA-182)
+// No main() — importable library module.
+
+// ===========================================================================
+// CRC-32 (IEEE 802.3) — used in Ethernet, PNG, zip, gzip
+// Polynomial: 0xEDB88320 (reversed), init=0xFFFFFFFF, final XOR=0xFFFFFFFF
+// ===========================================================================
+
+fn crc32_table_entry(idx: u32) -> u32 {
+    crc: u32 = idx;
+    i: u32 = 0;
+    while i < 8 {
+        if (crc & 1) == 1 {
+            crc = (crc >> 1) ^ 4022334336;  // 0xEDB88320
+        } else {
+            crc = crc >> 1;
+        }
+        i = i + 1;
+    }
+    return crc;
+}
+
+fn crc32(data: Address, len: u32) -> u32 {
+    crc: u32 = 4294967295;  // 0xFFFFFFFF
+    i: u32 = 0;
+    while i < len {
+        b: u32 = *(data + i);
+        idx: u32 = (crc ^ b) & 255;
+        crc = (crc >> 8) ^ crc32_table_entry(idx);
+        i = i + 1;
+    }
+    return crc ^ 4294967295;  // final XOR
+}
+
+fn crc32_update(crc: u32, data: Address, len: u32) -> u32 {
+    r: u32 = crc;
+    i: u32 = 0;
+    while i < len {
+        b: u32 = *(data + i);
+        idx: u32 = (r ^ b) & 255;
+        r = (r >> 8) ^ crc32_table_entry(idx);
+        i = i + 1;
+    }
+    return r;
+}
+
+fn crc32_final(crc: u32) -> u32 {
+    return crc ^ 4294967295;
+}
+
+// ===========================================================================
+// CRC-16 (CCITT) — used in X.25, HDLC, Bluetooth, modbus
+// Polynomial: 0x1021, init=0xFFFF, no final XOR
+// ===========================================================================
+
+fn crc16_ccitt(data: Address, len: u32) -> u32 {
+    crc: u32 = 65535;  // 0xFFFF
+    i: u32 = 0;
+    while i < len {
+        b: u32 = *(data + i);
+        crc = crc ^ (b << 8);
+        j: u32 = 0;
+        while j < 8 {
+            if (crc & 32768) == 32768 {  // 0x8000
+                crc = ((crc << 1) ^ 4129) & 65535;  // 0x1021
+            } else {
+                crc = (crc << 1) & 65535;
+            }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    return crc;
+}
+
+// CRC-16 (modbus) — init=0xFFFF, polynomial 0x8005 (reversed 0xA001)
+fn crc16_modbus(data: Address, len: u32) -> u32 {
+    crc: u32 = 65535;
+    i: u32 = 0;
+    while i < len {
+        b: u32 = *(data + i);
+        crc = crc ^ b;
+        j: u32 = 0;
+        while j < 8 {
+            if (crc & 1) == 1 {
+                crc = (crc >> 1) ^ 40961;  // 0xA001
+            } else {
+                crc = crc >> 1;
+            }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    return crc;
+}
+
+// ===========================================================================
+// CRC-64 (ECMA-182) — used in XZ, ext4 checksums
+// Polynomial: 0x42F0E1EBA9EA3693, init=0, final XOR=0
+// ===========================================================================
+
+fn crc64(data: Address, len: u32) -> u64 {
+    crc: u64 = 0;
+    i: u32 = 0;
+    while i < len {
+        b: u64 = *(data + i);
+        crc = crc ^ (b << 56);
+        j: u32 = 0;
+        while j < 8 {
+            if (crc >> 63) == 1 {
+                // Polynomial: 0x42F0E1EBA9EA3693
+                crc = (crc << 1) ^ 4822662123227859539;
+            } else {
+                crc = crc << 1;
+            }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    return crc;
+}
