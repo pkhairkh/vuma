@@ -25,13 +25,12 @@ up your development environment, make changes, and get them merged.
 
 | Tool | Minimum Version | Purpose |
 |------|----------------|---------|
-| Rust toolchain (stable) | Per `rust-toolchain.toml` | Core language; VUMA uses the stable channel |
+| Rust toolchain (nightly) | Per `rust-toolchain.toml` | Core language; VUMA requires nightly |
 | `rustup` | Latest | Rust toolchain management |
 | `cargo` | Included with Rust | Build system |
 | Git | 2.30+ | Version control |
-| QEMU (aarch64) | 7.0+ | ARM64 emulation for testing |
-| `aarch64-none-elf-` toolchain | Latest | Bare-metal cross-compilation (objcopy, ld) |
-| ARM64 hardware | Any | Physical target (optional but recommended) |
+| QEMU | 7.0+ | Emulation for testing cross-architecture backends |
+| Wasmtime | 29+ | For running Wasm32 backend tests |
 
 ### 1.2 Install the Rust Toolchain
 
@@ -43,7 +42,7 @@ repository, `rustup` will automatically select the correct channel and component
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
 # The targets are listed in rust-toolchain.toml and will be auto-installed:
-#   stable, components: rustfmt, clippy
+#   nightly-2026-03-01, components: rustfmt, clippy, rust-src
 #   targets: aarch64-unknown-linux-gnu, aarch64-unknown-none
 
 # Verify the toolchain
@@ -54,10 +53,10 @@ cargo --version
 ### 1.3 Clone and Build
 
 ```bash
-git clone https://github.com/vuma-project/vuma.git
+git clone https://github.com/pkhairkh/vuma.git
 cd vuma
 
-# Build all workspace members (12 crates)
+# Build all workspace members (11 crates)
 cargo build --workspace
 
 # Quick check without generating binaries (faster iteration)
@@ -73,12 +72,12 @@ The workspace consists of the following crates:
 | `vuma` (core) | `src/vuma/` | VUMA memory model: Address, Region, Access, MSG |
 | `vuma-bd` | `src/bd/` | Behavioral Descriptors (RepD, CapD, RelD) |
 | `vuma-cor` | `src/cor/` | Continuous Optimization Runtime |
-| `vuma-projection` | `src/projection/` | Projection system (textual, visual, conversational) |
-| `vuma-parser` | `src/parser/` | SCG parser and projection parser |
+| `vuma-parser` | `src/parser/` | Lexer, parser, AST, AST-to-SCG lowering |
 | `vuma-codegen` | `src/codegen/` | Multi-architecture code generation (10 backends) |
-| `vuma-std` | `src/std/` | VUMA standard library |
+| `vuma-std` | `src/std/` | VUMA standard library (host-side) |
 | `vuma-proof` | `src/proof/` | Proof infrastructure and formal methods |
 | `vuma-tests` | `src/tests/` | Integration tests |
+| `vuma-package` | `src/package/` | Package manager |
 
 ### 1.4 Build with Make or Just
 
