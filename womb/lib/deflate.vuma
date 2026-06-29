@@ -1,0 +1,1062 @@
+// deflate.vuma — DEFLATE compression/decompression (RFC 1951)
+//                + zlib wrapper (RFC 1950)
+//                + CRC-32 (used by gzip wrapper)
+//
+// Task ID: womb-compression
+//
+// No main() — importable library module. Compiles to bare-metal machine
+// code on all 10 VUMA backends. Memory access is byte-level via
+// *(ptr + offset); all multi-byte values are little-endian unless noted.
+//
+// Public API:
+//   bit_reader_create(data, len) -> Address
+//   bit_read_bits(reader, n) -> u32
+//   bit_read_bit(reader) -> u32
+//   huffman_build(lengths, num_codes, tree)
+//   huffman_decode(reader, tree) -> u32
+//   inflate(input, input_len, output, output_max) -> i64
+//   inflate_block_stored(reader, output, out_pos, out_max) -> u32
+//   inflate_block_fixed(reader, output, out_pos, out_max) -> u32
+//   inflate_block_dynamic(reader, output, out_pos, out_max) -> u32
+//   deflate(input, input_len, output, output_max) -> i64
+//   crc32(data, len) -> u32
+//   zlib_compress(input, input_len, output, output_max) -> i64
+//   zlib_decompress(input, input_len, output, output_max) -> i64
+
+// ===========================================================================
+// Constants
+// ===========================================================================
+
+const MASK32: u32     = 4294967295;     // 0xFFFFFFFF
+const MOD_ADLER: u32  = 65521;          // largest prime < 2^16
+const CRC32_POLY: u32 = 4022334336;     // 0xEDB88320 (reversed)
+const INV32: u32      = 4294967295;     // 0xFFFFFFFF (CRC init / final XOR)
+
+// ===========================================================================
+// Byte-level memory helpers (little-endian)
+//
+// *(ptr + offset) returns/stores a single byte as u32. These helpers
+// assemble/disassemble multi-byte values in little-endian byte order.
+// ===========================================================================
+
+fn store_u32_le(ptr: Address, offset: u32, val: u32) {
+    *(ptr + offset + 0) = val & 255;
+    *(ptr + offset + 1) = (val >> 8) & 255;
+    *(ptr + offset + 2) = (val >> 16) & 255;
+    *(ptr + offset + 3) = (val >> 24) & 255;
+}
+
+fn load_u32_le(ptr: Address, offset: u32) -> u32 {
+    b0: u32 = *(ptr + offset + 0);
+    b1: u32 = *(ptr + offset + 1);
+    b2: u32 = *(ptr + offset + 2);
+    b3: u32 = *(ptr + offset + 3);
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+}
+
+// Store an Address as 8 little-endian bytes. Address is treated as u64
+// for byte extraction.
+fn store_addr_le(ptr: Address, offset: u32, val: Address) {
+    v: u64 = val as u64;
+    *(ptr + offset + 0) = v & 255;
+    *(ptr + offset + 1) = (v >> 8) & 255;
+    *(ptr + offset + 2) = (v >> 16) & 255;
+    *(ptr + offset + 3) = (v >> 24) & 255;
+    *(ptr + offset + 4) = (v >> 32) & 255;
+    *(ptr + offset + 5) = (v >> 40) & 255;
+    *(ptr + offset + 6) = (v >> 48) & 255;
+    *(ptr + offset + 7) = (v >> 56) & 255;
+}
+
+// Load an Address from 8 little-endian bytes.
+fn load_addr_le(ptr: Address, offset: u32) -> Address {
+    b0: u64 = *(ptr + offset + 0);
+    b1: u64 = *(ptr + offset + 1);
+    b2: u64 = *(ptr + offset + 2);
+    b3: u64 = *(ptr + offset + 3);
+    b4: u64 = *(ptr + offset + 4);
+    b5: u64 = *(ptr + offset + 5);
+    b6: u64 = *(ptr + offset + 6);
+    b7: u64 = *(ptr + offset + 7);
+    v: u64 = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+               | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
+    return v as Address;
+}
+
+// ===========================================================================
+// CRC-32 (IEEE 802.3, polynomial 0xEDB88320)
+// Used by gzip/zlib CRC, PNG, Ethernet, zip.
+// init = 0xFFFFFFFF, final XOR = 0xFFFFFFFF.
+// ===========================================================================
+
+fn crc32_table_entry(idx: u32) -> u32 {
+    crc: u32 = idx;
+    i: u32 = 0;
+    while i < 8 {
+        if (crc & 1) == 1 {
+            crc = (crc >> 1) ^ CRC32_POLY;
+        } else {
+            crc = crc >> 1;
+        }
+        i = i + 1;
+    }
+    return crc;
+}
+
+fn crc32(data: Address, len: u32) -> u32 {
+    // Build the 256-entry table once per call for speed.
+    table = allocate(1024);           // 256 * 4 bytes
+    i: u32 = 0;
+    while i < 256 {
+        store_u32_le(table, i * 4, crc32_table_entry(i));
+        i = i + 1;
+    }
+
+    crc: u32 = INV32;                 // init = 0xFFFFFFFF
+    i = 0;
+    while i < len {
+        b: u32 = *(data + i);
+        idx: u32 = (crc ^ b) & 255;
+        crc = (crc >> 8) ^ load_u32_le(table, idx * 4);
+        i = i + 1;
+    }
+
+    free(table);
+    return crc ^ INV32;               // final XOR
+}
+
+// ===========================================================================
+// Adler-32 (RFC 1950)
+// s1 = 1, s2 = 0; for each byte: s1 = (s1 + byte) % 65521,
+//                              s2 = (s2 + s1) % 65521.
+// Result = (s2 << 16) | s1.
+// ===========================================================================
+
+fn adler32(data: Address, len: u32) -> u32 {
+    s1: u32 = 1;
+    s2: u32 = 0;
+    i: u32 = 0;
+    while i < len {
+        b: u32 = *(data + i);
+        s1 = (s1 + b) % MOD_ADLER;
+        s2 = (s2 + s1) % MOD_ADLER;
+        i = i + 1;
+    }
+    return (s2 << 16) | s1;
+}
+
+// ===========================================================================
+// Bit reader (LSB-first, for inflate)
+//
+// State layout (32 bytes):
+//   [0..7]   data_ptr  (Address) — start of the input byte stream
+//   [8..11]  byte_pos  (u32)     — current byte index
+//   [12..15] bit_pos   (u32)     — current bit within byte (0..7)
+//   [16..19] len       (u32)     — total input length in bytes
+//   [20..23] error     (u32)     — 0 = OK, 1 = past end of input
+// ===========================================================================
+
+fn bit_reader_create(data: Address, len: u32) -> Address {
+    state = allocate(32);
+    store_addr_le(state, 0, data);
+    store_u32_le(state, 8, 0);         // byte_pos
+    store_u32_le(state, 12, 0);        // bit_pos
+    store_u32_le(state, 16, len);
+    store_u32_le(state, 20, 0);        // error
+    return state;
+}
+
+// Read a single bit (LSB first). Returns the bit (0 or 1). If the reader
+// is past the end of input, sets the error flag and returns 0.
+fn bit_read_bit(reader: Address) -> u32 {
+    byte_pos: u32 = load_u32_le(reader, 8);
+    bit_pos: u32 = load_u32_le(reader, 12);
+    len: u32 = load_u32_le(reader, 16);
+
+    if byte_pos >= len {
+        store_u32_le(reader, 20, 1);   // set error
+        return 0;
+    }
+
+    data: Address = load_addr_le(reader, 0);
+    b: u32 = *(data + byte_pos);
+    bit: u32 = (b >> bit_pos) & 1;
+
+    bit_pos = bit_pos + 1;
+    if bit_pos == 8 {
+        bit_pos = 0;
+        byte_pos = byte_pos + 1;
+    }
+
+    store_u32_le(reader, 8, byte_pos);
+    store_u32_le(reader, 12, bit_pos);
+    return bit;
+}
+
+// Read n bits (LSB first). The first bit read becomes the LSB of the result.
+fn bit_read_bits(reader: Address, n: u32) -> u32 {
+    result: u32 = 0;
+    i: u32 = 0;
+    while i < n {
+        bit: u32 = bit_read_bit(reader);
+        result = result | (bit << i);
+        i = i + 1;
+    }
+    return result;
+}
+
+// ===========================================================================
+// Huffman decoder (canonical codes, RFC 1951 Section 3.2.2)
+//
+// Tree layout:
+//   [0..63]   counts[16]   (16 * u32) — counts[i] = # of codes of length i
+//   [64..]    symbols[]    (num_codes * u32) — symbols in canonical order
+//
+// Build assigns canonical codes: codes of equal length are sequential and
+// numerically increasing; shorter codes are assigned before longer codes.
+//
+// Decode follows the puff.c (zlib reference) algorithm: walk down the
+// canonical code space one bit at a time.
+// ===========================================================================
+
+// Build a decode tree from code lengths. Returns 1 on success, 0 on error
+// (code length > 15). The caller must allocate at least
+//   64 + num_codes * 4
+// bytes for the tree.
+fn huffman_build(lengths: Address, num_codes: u32, tree: Address) -> u32 {
+    // Zero the counts[0..15]
+    i: u32 = 0;
+    while i < 16 {
+        store_u32_le(tree, i * 4, 0);
+        i = i + 1;
+    }
+
+    // Count codes of each length
+    i = 0;
+    while i < num_codes {
+        len: u32 = *(lengths + i);
+        if len > 15 {
+            return 0;                  // invalid code length
+        }
+        cur: u32 = load_u32_le(tree, len * 4);
+        store_u32_le(tree, len * 4, cur + 1);
+        i = i + 1;
+    }
+
+    // Compute starting symbol index for each length, then place symbols.
+    offsets = allocate(64);            // 16 * u32
+    offset: u32 = 0;
+    i = 1;
+    while i < 16 {
+        store_u32_le(offsets, i * 4, offset);
+        count: u32 = load_u32_le(tree, i * 4);
+        offset = offset + count;
+        i = i + 1;
+    }
+
+    // Place each symbol at its canonical position
+    i = 0;
+    while i < num_codes {
+        len = *(lengths + i);
+        if len > 0 {
+            idx: u32 = load_u32_le(offsets, len * 4);
+            store_u32_le(tree, 64 + idx * 4, i);
+            store_u32_le(offsets, len * 4, idx + 1);
+        }
+        i = i + 1;
+    }
+
+    free(offsets);
+    return 1;
+}
+
+// Decode one symbol from the reader using the tree. Returns the symbol.
+// On error (invalid code or past-end-of-input), sets the reader error flag
+// and returns 0.
+fn huffman_decode(reader: Address, tree: Address) -> u32 {
+    code: u32 = 0;
+    first: u32 = 0;
+    index: u32 = 0;
+    len: u32 = 1;
+    while len <= 15 {
+        bit: u32 = bit_read_bit(reader);
+        code = code | bit;
+        count: u32 = load_u32_le(tree, len * 4);
+        if code - first < count {
+            sym_idx: u32 = index + (code - first);
+            return load_u32_le(tree, 64 + sym_idx * 4);
+        }
+        index = index + count;
+        first = first + count;
+        first = first << 1;
+        code = code << 1;
+        len = len + 1;
+    }
+    // No matching code found in 15 bits → invalid stream
+    store_u32_le(reader, 20, 1);
+    return 0;
+}
+
+// ===========================================================================
+// Length and distance tables (RFC 1951 Section 3.2.5)
+//
+// Length codes 257..285: each has a base length and a number of extra bits
+//   that are read and added to the base.
+// Distance codes 0..29: each has a base distance and extra bits.
+// ===========================================================================
+
+fn length_base(sym: u32) -> u32 {
+    if sym == 257 { return 3; }
+    if sym == 258 { return 4; }
+    if sym == 259 { return 5; }
+    if sym == 260 { return 6; }
+    if sym == 261 { return 7; }
+    if sym == 262 { return 8; }
+    if sym == 263 { return 9; }
+    if sym == 264 { return 10; }
+    if sym == 265 { return 11; }
+    if sym == 266 { return 13; }
+    if sym == 267 { return 15; }
+    if sym == 268 { return 17; }
+    if sym == 269 { return 19; }
+    if sym == 270 { return 23; }
+    if sym == 271 { return 27; }
+    if sym == 272 { return 31; }
+    if sym == 273 { return 35; }
+    if sym == 274 { return 43; }
+    if sym == 275 { return 51; }
+    if sym == 276 { return 59; }
+    if sym == 277 { return 67; }
+    if sym == 278 { return 83; }
+    if sym == 279 { return 99; }
+    if sym == 280 { return 115; }
+    if sym == 281 { return 131; }
+    if sym == 282 { return 163; }
+    if sym == 283 { return 195; }
+    if sym == 284 { return 227; }
+    if sym == 285 { return 258; }
+    return 0;
+}
+
+fn length_extra_bits(sym: u32) -> u32 {
+    if sym == 257 { return 0; }
+    if sym == 258 { return 0; }
+    if sym == 259 { return 0; }
+    if sym == 260 { return 0; }
+    if sym == 261 { return 0; }
+    if sym == 262 { return 0; }
+    if sym == 263 { return 0; }
+    if sym == 264 { return 0; }
+    if sym == 265 { return 1; }
+    if sym == 266 { return 1; }
+    if sym == 267 { return 1; }
+    if sym == 268 { return 1; }
+    if sym == 269 { return 2; }
+    if sym == 270 { return 2; }
+    if sym == 271 { return 2; }
+    if sym == 272 { return 2; }
+    if sym == 273 { return 3; }
+    if sym == 274 { return 3; }
+    if sym == 275 { return 3; }
+    if sym == 276 { return 3; }
+    if sym == 277 { return 4; }
+    if sym == 278 { return 4; }
+    if sym == 279 { return 4; }
+    if sym == 280 { return 4; }
+    if sym == 281 { return 5; }
+    if sym == 282 { return 5; }
+    if sym == 283 { return 5; }
+    if sym == 284 { return 5; }
+    if sym == 285 { return 0; }
+    return 0;
+}
+
+fn dist_base(sym: u32) -> u32 {
+    if sym == 0 { return 1; }
+    if sym == 1 { return 2; }
+    if sym == 2 { return 3; }
+    if sym == 3 { return 4; }
+    if sym == 4 { return 5; }
+    if sym == 5 { return 7; }
+    if sym == 6 { return 9; }
+    if sym == 7 { return 13; }
+    if sym == 8 { return 17; }
+    if sym == 9 { return 25; }
+    if sym == 10 { return 33; }
+    if sym == 11 { return 49; }
+    if sym == 12 { return 65; }
+    if sym == 13 { return 97; }
+    if sym == 14 { return 129; }
+    if sym == 15 { return 193; }
+    if sym == 16 { return 257; }
+    if sym == 17 { return 385; }
+    if sym == 18 { return 513; }
+    if sym == 19 { return 769; }
+    if sym == 20 { return 1025; }
+    if sym == 21 { return 1537; }
+    if sym == 22 { return 2049; }
+    if sym == 23 { return 3073; }
+    if sym == 24 { return 4097; }
+    if sym == 25 { return 6145; }
+    if sym == 26 { return 8193; }
+    if sym == 27 { return 12289; }
+    if sym == 28 { return 16385; }
+    if sym == 29 { return 24577; }
+    return 0;
+}
+
+fn dist_extra_bits(sym: u32) -> u32 {
+    if sym == 0 { return 0; }
+    if sym == 1 { return 0; }
+    if sym == 2 { return 0; }
+    if sym == 3 { return 0; }
+    if sym == 4 { return 1; }
+    if sym == 5 { return 1; }
+    if sym == 6 { return 2; }
+    if sym == 7 { return 2; }
+    if sym == 8 { return 3; }
+    if sym == 9 { return 3; }
+    if sym == 10 { return 4; }
+    if sym == 11 { return 4; }
+    if sym == 12 { return 5; }
+    if sym == 13 { return 5; }
+    if sym == 14 { return 6; }
+    if sym == 15 { return 6; }
+    if sym == 16 { return 7; }
+    if sym == 17 { return 7; }
+    if sym == 18 { return 8; }
+    if sym == 19 { return 8; }
+    if sym == 20 { return 9; }
+    if sym == 21 { return 9; }
+    if sym == 22 { return 10; }
+    if sym == 23 { return 10; }
+    if sym == 24 { return 11; }
+    if sym == 25 { return 11; }
+    if sym == 26 { return 12; }
+    if sym == 27 { return 12; }
+    if sym == 28 { return 13; }
+    if sym == 29 { return 13; }
+    return 0;
+}
+
+// ===========================================================================
+// Inflate: shared decode body (used by fixed and dynamic block handlers)
+//
+// Reads literal/length/distance symbols from the reader using the lit/len
+// and distance Huffman trees, writing decompressed bytes to output, until
+// the end-of-block symbol (256) is seen. Returns 1 on success, 0 on error.
+// ===========================================================================
+
+fn inflate_decode_body(reader: Address, output: Address, out_pos_ptr: Address, out_max: u32, lit_tree: Address, dist_tree: Address) -> u32 {
+    out_pos: u32 = load_u32_le(out_pos_ptr, 0);
+
+    done: u32 = 0;
+    while done == 0 {
+        // Bail out if a prior read hit end-of-input.
+        if load_u32_le(reader, 20) != 0 {
+            return 0;
+        }
+
+        sym: u32 = huffman_decode(reader, lit_tree);
+
+        if sym == 256 {
+            // End of block
+            done = 1;
+        } else {
+            if sym < 256 {
+                // Literal byte
+                if out_pos >= out_max {
+                    return 0;          // output overflow
+                }
+                *(output + out_pos) = sym;
+                out_pos = out_pos + 1;
+            } else {
+                // Length / distance pair
+                if sym > 285 {
+                    return 0;          // invalid length code
+                }
+
+                extra: u32 = length_extra_bits(sym);
+                base: u32 = length_base(sym);
+                length: u32 = base;
+                if extra > 0 {
+                    length = length + bit_read_bits(reader, extra);
+                }
+
+                dsym: u32 = huffman_decode(reader, dist_tree);
+                if dsym > 29 {
+                    return 0;          // invalid distance code
+                }
+                dextra: u32 = dist_extra_bits(dsym);
+                dbase: u32 = dist_base(dsym);
+                dist: u32 = dbase;
+                if dextra > 0 {
+                    dist = dist + bit_read_bits(reader, dextra);
+                }
+
+                // Check for read errors accumulated while reading extra bits.
+                if load_u32_le(reader, 20) != 0 {
+                    return 0;
+                }
+
+                // Validate distance against output history.
+                if dist > out_pos {
+                    return 0;          // distance points before output start
+                }
+                // Validate output bounds (length can be up to 258).
+                if out_pos + length > out_max {
+                    return 0;          // output overflow
+                }
+
+                // Byte-by-byte copy. This correctly handles overlapping
+                // back-references (e.g. dist=1, length=N replicates one byte
+                // N times) because source and destination advance together.
+                src: u32 = out_pos - dist;
+                j: u32 = 0;
+                while j < length {
+                    b: u32 = *(output + src + j);
+                    *(output + out_pos + j) = b;
+                    j = j + 1;
+                }
+                out_pos = out_pos + length;
+            }
+        }
+    }
+
+    store_u32_le(out_pos_ptr, 0, out_pos);
+    return 1;
+}
+
+// ===========================================================================
+// Inflate: stored (uncompressed) block
+//   Layout after block header: align to byte, then LEN (2 bytes LE),
+//   NLEN (2 bytes LE = ~LEN & 0xFFFF), then LEN literal data bytes.
+// Returns 1 on success, 0 on error.
+// ===========================================================================
+
+fn inflate_block_stored(reader: Address, output: Address, out_pos: Address, out_max: u32) -> u32 {
+    // Stored blocks start on a byte boundary: discard remaining bits.
+    bit_pos: u32 = load_u32_le(reader, 12);
+    if bit_pos > 0 {
+        store_u32_le(reader, 12, 0);
+        bp: u32 = load_u32_le(reader, 8);
+        store_u32_le(reader, 8, bp + 1);
+    }
+
+    data: Address = load_addr_le(reader, 0);
+    input_len: u32 = load_u32_le(reader, 16);
+    byte_pos: u32 = load_u32_le(reader, 8);
+
+    // Need at least 4 bytes for LEN + NLEN.
+    if byte_pos + 4 > input_len {
+        return 0;
+    }
+
+    // Read LEN (2 bytes LE)
+    lo: u32 = *(data + byte_pos);
+    hi: u32 = *(data + byte_pos + 1);
+    len: u32 = lo | (hi << 8);
+
+    // Read NLEN (2 bytes LE)
+    nlo: u32 = *(data + byte_pos + 2);
+    nhi: u32 = *(data + byte_pos + 3);
+    nlen: u32 = nlo | (nhi << 8);
+
+    byte_pos = byte_pos + 4;
+
+    // Verify NLEN == ~LEN & 0xFFFF
+    if (len ^ 65535) != nlen {
+        return 0;
+    }
+
+    // Need len more bytes of input.
+    if byte_pos + len > input_len {
+        return 0;
+    }
+
+    // Output bounds check.
+    pos: u32 = load_u32_le(out_pos, 0);
+    if pos + len > out_max {
+        return 0;
+    }
+
+    // Copy len bytes verbatim.
+    i: u32 = 0;
+    while i < len {
+        b: u32 = *(data + byte_pos + i);
+        *(output + pos + i) = b;
+        i = i + 1;
+    }
+
+    store_u32_le(out_pos, 0, pos + len);
+    store_u32_le(reader, 8, byte_pos + len);
+    return 1;
+}
+
+// ===========================================================================
+// Inflate: fixed Huffman block (RFC 1951 Section 3.2.6)
+//   Literal/length code lengths:
+//     0..143   -> 8 bits
+//     144..255 -> 9 bits
+//     256..279 -> 7 bits
+//     280..287 -> 8 bits
+//   Distance codes 0..31 -> 5 bits each.
+// Returns 1 on success, 0 on error.
+// ===========================================================================
+
+fn inflate_block_fixed(reader: Address, output: Address, out_pos: Address, out_max: u32) -> u32 {
+    // Build fixed literal/length code lengths (288 entries).
+    lit_lengths = allocate(288);
+    i: u32 = 0;
+    while i < 144 {
+        *(lit_lengths + i) = 8;
+        i = i + 1;
+    }
+    while i < 256 {
+        *(lit_lengths + i) = 9;
+        i = i + 1;
+    }
+    while i < 280 {
+        *(lit_lengths + i) = 7;
+        i = i + 1;
+    }
+    while i < 288 {
+        *(lit_lengths + i) = 8;
+        i = i + 1;
+    }
+
+    // Build fixed distance code lengths (32 entries, all 5 bits).
+    dist_lengths = allocate(32);
+    i = 0;
+    while i < 32 {
+        *(dist_lengths + i) = 5;
+        i = i + 1;
+    }
+
+    lit_tree = allocate(1216);         // 64 + 288 * 4
+    dist_tree = allocate(192);         // 64 + 32 * 4
+
+    huffman_build(lit_lengths, 288, lit_tree);
+    huffman_build(dist_lengths, 32, dist_tree);
+
+    result: u32 = inflate_decode_body(reader, output, out_pos, out_max, lit_tree, dist_tree);
+
+    free(lit_lengths);
+    free(dist_lengths);
+    free(lit_tree);
+    free(dist_tree);
+    return result;
+}
+
+// ===========================================================================
+// Inflate: dynamic Huffman block (RFC 1951 Section 3.2.7)
+//
+//   1. Read HLIT (5 bits) + 257, HDIST (5 bits) + 1, HCLEN (4 bits) + 4.
+//   2. Read HCLEN code-length-code lengths (3 bits each) in the order
+//      16,17,18,0,8,7,9,6,10,5,11,4,12,3,13,2,14,1,15.
+//   3. Build the code-length Huffman tree.
+//   4. Decode HLIT + HDIST code lengths using that tree, applying the
+//      repeat codes 16 (prev, 3-6x), 17 (zero, 3-10x), 18 (zero, 11-138x).
+//   5. Split into lit/len lengths (first HLIT) and dist lengths (next HDIST).
+//   6. Build the lit/len and dist trees and decode the block body.
+//
+// Returns 1 on success, 0 on error. All temporary allocations are freed
+// on every path.
+// ===========================================================================
+
+fn inflate_block_dynamic(reader: Address, output: Address, out_pos: Address, out_max: u32) -> u32 {
+    hlit: u32 = bit_read_bits(reader, 5) + 257;
+    hdist: u32 = bit_read_bits(reader, 5) + 1;
+    hclen: u32 = bit_read_bits(reader, 4) + 4;
+
+    // Code-length code order (RFC 1951 Section 3.2.7).
+    cl_order = allocate(19);
+    *(cl_order + 0)  = 16;
+    *(cl_order + 1)  = 17;
+    *(cl_order + 2)  = 18;
+    *(cl_order + 3)  = 0;
+    *(cl_order + 4)  = 8;
+    *(cl_order + 5)  = 7;
+    *(cl_order + 6)  = 9;
+    *(cl_order + 7)  = 6;
+    *(cl_order + 8)  = 10;
+    *(cl_order + 9)  = 5;
+    *(cl_order + 10) = 11;
+    *(cl_order + 11) = 4;
+    *(cl_order + 12) = 12;
+    *(cl_order + 13) = 3;
+    *(cl_order + 14) = 13;
+    *(cl_order + 15) = 2;
+    *(cl_order + 16) = 14;
+    *(cl_order + 17) = 1;
+    *(cl_order + 18) = 15;
+
+    // cl_lengths[0..18] — only the first HCLEN are read; the rest stay 0.
+    cl_lengths = allocate(19);
+    i: u32 = 0;
+    while i < 19 {
+        *(cl_lengths + i) = 0;
+        i = i + 1;
+    }
+    i = 0;
+    while i < hclen {
+        val: u32 = bit_read_bits(reader, 3);
+        order_val: u32 = *(cl_order + i);
+        *(cl_lengths + order_val) = val;
+        i = i + 1;
+    }
+
+    cl_tree = allocate(140);           // 64 + 19 * 4
+    huffman_build(cl_lengths, 19, cl_tree);
+
+    total: u32 = hlit + hdist;
+    combined_lengths = allocate(total + 4);
+
+    lit_tree = allocate(1216);         // 64 + 288 * 4
+    dist_tree = allocate(192);         // 64 + 32 * 4
+
+    status: u32 = 1;
+
+    // Decode the combined lit/len + dist code lengths.
+    i = 0;
+    sym: u32 = 0;
+    repeat: u32 = 0;
+    prev: u32 = 0;
+    j: u32 = 0;
+    while i < total {
+        if status == 0 {
+            i = total;               // force outer-loop exit
+        }
+        if status == 1 {
+            sym = huffman_decode(reader, cl_tree);
+
+        if sym < 16 {
+            *(combined_lengths + i) = sym;
+            i = i + 1;
+        } else {
+            if sym == 16 {
+                // Repeat previous code length 3..6 times (2 extra bits).
+                repeat = bit_read_bits(reader, 2) + 3;
+                if i == 0 {
+                    status = 0;        // no previous code to repeat
+                } else {
+                    prev = *(combined_lengths + i - 1);
+                    j = 0;
+                    while j < repeat {
+                        if i >= total {
+                            status = 0;
+                            j = repeat;   // force inner-loop exit
+                        } else {
+                            *(combined_lengths + i) = prev;
+                            i = i + 1;
+                            j = j + 1;
+                        }
+                    }
+                }
+            } else {
+                if sym == 17 {
+                    // Repeat zero 3..10 times (3 extra bits).
+                    repeat = bit_read_bits(reader, 3) + 3;
+                    j = 0;
+                    while j < repeat {
+                        if i >= total {
+                            status = 0;
+                            j = repeat;   // force inner-loop exit
+                        } else {
+                            *(combined_lengths + i) = 0;
+                            i = i + 1;
+                            j = j + 1;
+                        }
+                    }
+                } else {
+                    if sym == 18 {
+                        // Repeat zero 11..138 times (7 extra bits).
+                        repeat = bit_read_bits(reader, 7) + 11;
+                        j = 0;
+                        while j < repeat {
+                            if i >= total {
+                                status = 0;
+                                j = repeat;   // force inner-loop exit
+                            } else {
+                                *(combined_lengths + i) = 0;
+                                i = i + 1;
+                                j = j + 1;
+                            }
+                        }
+                    } else {
+                        status = 0;    // invalid code-length symbol
+                    }
+                }
+            }
+        }
+        }                          // closes if status == 1
+    }
+
+    // Build the lit/len and distance trees from the decoded lengths.
+    if status == 1 {
+        huffman_build(combined_lengths, hlit, lit_tree);
+        huffman_build(combined_lengths + hlit, hdist, dist_tree);
+    }
+
+    // Decode the block body (literals + back-references until symbol 256).
+    if status == 1 {
+        status = inflate_decode_body(reader, output, out_pos, out_max, lit_tree, dist_tree);
+    }
+
+    free(cl_order);
+    free(cl_lengths);
+    free(cl_tree);
+    free(combined_lengths);
+    free(lit_tree);
+    free(dist_tree);
+    return status;
+}
+
+// ===========================================================================
+// Inflate (decompression, RFC 1951)
+//
+// Reads a DEFLATE stream from input[0..input_len) and writes the
+// decompressed bytes to output[0..output_max). Returns the decompressed
+// length, or -1 on any error (truncated input, invalid code, output
+// overflow, bad checksum is not checked here — that's the zlib layer).
+// ===========================================================================
+
+fn inflate(input: Address, input_len: u32, output: Address, output_max: u32) -> i64 {
+    reader = bit_reader_create(input, input_len);
+    out_pos_holder = allocate(8);
+    store_u32_le(out_pos_holder, 0, 0);
+
+    done: u32 = 0;
+    while done == 0 {
+        bfinal: u32 = bit_read_bit(reader);
+        btype: u32 = bit_read_bits(reader, 2);
+
+        // Detect end-of-input while reading the block header.
+        if load_u32_le(reader, 20) != 0 {
+            free(reader);
+            free(out_pos_holder);
+            return -1;
+        }
+
+        status: u32 = 0;
+        if btype == 0 {
+            status = inflate_block_stored(reader, output, out_pos_holder, output_max);
+        } else {
+            if btype == 1 {
+                status = inflate_block_fixed(reader, output, out_pos_holder, output_max);
+            } else {
+                if btype == 2 {
+                    status = inflate_block_dynamic(reader, output, out_pos_holder, output_max);
+                } else {
+                    // BTYPE = 11 is reserved and invalid.
+                    free(reader);
+                    free(out_pos_holder);
+                    return -1;
+                }
+            }
+        }
+
+        if status == 0 {
+            free(reader);
+            free(out_pos_holder);
+            return -1;
+        }
+
+        if bfinal == 1 {
+            done = 1;
+        }
+    }
+
+    result: i64 = load_u32_le(out_pos_holder, 0) as i64;
+    free(reader);
+    free(out_pos_holder);
+    return result;
+}
+
+// ===========================================================================
+// Deflate (compression — stored blocks only)
+//
+// Produces a valid DEFLATE stream using BTYPE=00 (stored) blocks. No actual
+// compression is performed; the output is the input plus a 5-byte header
+// per 65535-byte chunk. This is maximally compliant (any RFC 1951 inflate
+// implementation must accept it) but minimum effort.
+//
+// Per-block layout:
+//   [0]     1 byte: bit 0 = BFINAL, bits 1-2 = BTYPE (00 = stored)
+//   [1..2]  2 bytes LE: LEN (number of data bytes, 0..65535)
+//   [3..4]  2 bytes LE: NLEN = ~LEN & 0xFFFF
+//   [5..]   LEN bytes of literal data
+//
+// Empty input still produces one final empty block (LEN=0).
+// Returns the compressed length, or -1 on output overflow.
+// ===========================================================================
+
+fn deflate(input: Address, input_len: u32, output: Address, output_max: u32) -> i64 {
+    out_pos: u32 = 0;
+    in_pos: u32 = 0;
+
+    while in_pos < input_len {
+        // Determine chunk size for this block (max 65535).
+        chunk: u32 = input_len - in_pos;
+        if chunk > 65535 {
+            chunk = 65535;
+        }
+
+        // Final block? (This is the last chunk of the input.)
+        bfinal: u32 = 0;
+        if in_pos + chunk == input_len {
+            bfinal = 1;
+        }
+
+        // Bounds check: 5 header bytes + chunk data bytes.
+        if out_pos + 5 + chunk > output_max {
+            return -1;
+        }
+
+        // Block header byte: BFINAL in bit 0, BTYPE=00 in bits 1-2.
+        *(output + out_pos) = bfinal;
+        out_pos = out_pos + 1;
+
+        // LEN (2 bytes LE).
+        *(output + out_pos)     = chunk & 255;
+        *(output + out_pos + 1) = (chunk >> 8) & 255;
+        out_pos = out_pos + 2;
+
+        // NLEN = ~LEN & 0xFFFF (2 bytes LE).
+        nlen: u32 = chunk ^ 65535;
+        *(output + out_pos)     = nlen & 255;
+        *(output + out_pos + 1) = (nlen >> 8) & 255;
+        out_pos = out_pos + 2;
+
+        // Literal data bytes.
+        i: u32 = 0;
+        while i < chunk {
+            b: u32 = *(input + in_pos + i);
+            *(output + out_pos + i) = b;
+            i = i + 1;
+        }
+        out_pos = out_pos + chunk;
+        in_pos = in_pos + chunk;
+    }
+
+    // Empty input: emit a single final empty stored block so the stream
+    // is well-formed (a DEFLATE stream must contain at least one block).
+    if input_len == 0 {
+        if out_pos + 5 > output_max {
+            return -1;
+        }
+        *(output + out_pos)     = 1;     // BFINAL=1, BTYPE=00
+        *(output + out_pos + 1) = 0;     // LEN low  = 0
+        *(output + out_pos + 2) = 0;     // LEN high = 0
+        *(output + out_pos + 3) = 255;   // NLEN low  = 0xFF
+        *(output + out_pos + 4) = 255;   // NLEN high = 0xFF
+        out_pos = out_pos + 5;
+    }
+
+    return out_pos as i64;
+}
+
+// ===========================================================================
+// zlib wrapper (RFC 1950)
+//
+// Stream layout:
+//   [0]      CMF = (CINFO << 4) | CM.  CM=8 (deflate), CINFO=7 (32K window)
+//            -> CMF = 0x78 = 120.
+//   [1]      FLG = (FLEVEL << 6) | (FDICT << 5) | FCHECK, where
+//            (CMF*256 + FLG) % 31 == 0.  We use FLEVEL=2, FDICT=0,
+//            FCHECK=28 -> FLG = 0x9C = 156.
+//   [2..]    DEFLATE compressed data.
+//   [N-4..N-1]  Adler-32 of the original (uncompressed) data, big-endian.
+//
+// zlib_compress returns the total output length, or -1 on error.
+// zlib_decompress returns the decompressed length, or -1 on error
+// (bad header, inflate failure, or Adler-32 mismatch).
+// ===========================================================================
+
+fn zlib_compress(input: Address, input_len: u32, output: Address, output_max: u32) -> i64 {
+    cmf: u32 = 120;                    // 0x78: CM=8, CINFO=7
+    flg: u32 = 156;                    // 0x9C: FLEVEL=2, FDICT=0, FCHECK=28
+
+    // Need at least 2 (header) + 5 (min deflate block) + 4 (adler) = 11.
+    if output_max < 11 {
+        return -1;
+    }
+
+    // Write the 2-byte zlib header.
+    *(output + 0) = cmf;
+    *(output + 1) = flg;
+
+    // Deflate the payload into output[2..].
+    deflate_len: i64 = deflate(input, input_len, output + 2, output_max - 6);
+    if deflate_len < 0 {
+        return -1;
+    }
+
+    deflate_len_u32: u32 = deflate_len as u32;
+
+    // Adler-32 of the original (uncompressed) data.
+    adler: u32 = adler32(input, input_len);
+
+    // Write Adler-32 big-endian immediately after the deflate stream.
+    adler_off: u32 = 2 + deflate_len_u32;
+    *(output + adler_off + 0) = (adler >> 24) & 255;
+    *(output + adler_off + 1) = (adler >> 16) & 255;
+    *(output + adler_off + 2) = (adler >> 8) & 255;
+    *(output + adler_off + 3) = adler & 255;
+
+    return 2 + deflate_len + 4;
+}
+
+fn zlib_decompress(input: Address, input_len: u32, output: Address, output_max: u32) -> i64 {
+    // Need at least 2 (header) + 1 (min deflate) + 4 (adler) = 7 bytes,
+    // but require 6 to avoid underflow on input_len - 6 below; inflate will
+    // reject a zero-length deflate stream.
+    if input_len < 6 {
+        return -1;
+    }
+
+    // Read and validate the 2-byte zlib header.
+    cmf: u32 = *(input + 0);
+    flg: u32 = *(input + 1);
+
+    // CM must be 8 (deflate).
+    if (cmf & 15) != 8 {
+        return -1;
+    }
+
+    // FCHECK: (CMF*256 + FLG) must be a multiple of 31.
+    check: u32 = (cmf * 256 + flg) % 31;
+    if check != 0 {
+        return -1;
+    }
+
+    // FDICT (bit 5) must be 0 — preset dictionaries are not supported here.
+    if (flg & 32) != 0 {
+        return -1;
+    }
+
+    // Inflate the DEFLATE stream that sits between the header and the
+    // trailing 4-byte Adler-32.
+    inflated_len: i64 = inflate(input + 2, input_len - 6, output, output_max);
+    if inflated_len < 0 {
+        return -1;
+    }
+
+    // Read the expected Adler-32 from the last 4 input bytes (big-endian).
+    adler_off: u32 = input_len - 4;
+    b0: u32 = *(input + adler_off + 0);
+    b1: u32 = *(input + adler_off + 1);
+    b2: u32 = *(input + adler_off + 2);
+    b3: u32 = *(input + adler_off + 3);
+    expected_adler: u32 = (b0 << 24) | (b1 << 16) | (b2 << 8) | b3;
+
+    // Compute the actual Adler-32 of the decompressed data and compare.
+    inflated_len_u32: u32 = inflated_len as u32;
+    actual_adler: u32 = adler32(output, inflated_len_u32);
+
+    if actual_adler != expected_adler {
+        return -1;
+    }
+
+    return inflated_len;
+}
