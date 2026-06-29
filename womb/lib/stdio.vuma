@@ -1,0 +1,342 @@
+// womb/lib/stdio.vuma — Standard I/O (POSIX stdio.h equivalent)
+// No main() — importable library module.
+// Provides: write_str, write_int, write_hex, write_u64, read_line, file ops
+// Uses extern "C" FFI for write/read syscalls.
+
+extern "C" {
+    fn write(fd: i64, buf: Address, count: i64) -> i64;
+    fn read(fd: i64, buf: Address, count: i64) -> i64;
+}
+
+const STDOUT: i64 = 1;
+const STDERR: i64 = 2;
+const STDIN: i64 = 0;
+
+// ===========================================================================
+// Output functions
+// ===========================================================================
+
+fn write_str(s: Address) -> i64 {
+    n: u32 = 0;
+    while *(s + n) != 0 { n = n + 1; }
+    return write(STDOUT, s, n);
+}
+
+fn write_str_fd(fd: i64, s: Address) -> i64 {
+    n: u32 = 0;
+    while *(s + n) != 0 { n = n + 1; }
+    return write(fd, s, n);
+}
+
+fn write_bytes(fd: i64, buf: Address, len: u32) -> i64 {
+    return write(fd, buf, len);
+}
+
+fn write_char(c: u32) -> i64 {
+    buf = allocate(1);
+    *(buf + 0) = c & 255;
+    ret: i64 = write(STDOUT, buf, 1);
+    free(buf);
+    return ret;
+}
+
+fn write_newline() -> i64 {
+    buf = allocate(1);
+    *(buf + 0) = 10;
+    ret: i64 = write(STDOUT, buf, 1);
+    free(buf);
+    return ret;
+}
+
+fn write_int(val: i64) -> i64 {
+    buf = allocate(24);
+    if val == 0 {
+        *(buf + 0) = 48;
+        *(buf + 1) = 0;
+        write_str(buf);
+        free(buf);
+        return 1;
+    }
+    v: i64 = val;
+    pos: u32 = 0;
+    if val < 0 { v = 0 - val; }
+
+    temp = allocate(24);
+    tp: u32 = 0;
+    while v > 0 {
+        d: u32 = v % 10;
+        *(temp + tp) = 48 + d;
+        tp = tp + 1;
+        v = v / 10;
+    }
+
+    if val < 0 { *(buf + pos) = 45; pos = pos + 1; }
+    while tp > 0 {
+        tp = tp - 1;
+        *(buf + pos) = *(temp + tp);
+        pos = pos + 1;
+    }
+    *(buf + pos) = 0;
+    ret: i64 = write_str(buf);
+    free(temp);
+    free(buf);
+    return ret;
+}
+
+fn write_uint(val: u64) -> i64 {
+    buf = allocate(24);
+    if val == 0 {
+        *(buf + 0) = 48;
+        *(buf + 1) = 0;
+        write_str(buf);
+        free(buf);
+        return 1;
+    }
+    v: u64 = val;
+    pos: u32 = 0;
+    temp = allocate(24);
+    tp: u32 = 0;
+    while v > 0 {
+        d: u64 = v % 10;
+        *(temp + tp) = 48 + d;
+        tp = tp + 1;
+        v = v / 10;
+    }
+    while tp > 0 {
+        tp = tp - 1;
+        *(buf + pos) = *(temp + tp);
+        pos = pos + 1;
+    }
+    *(buf + pos) = 0;
+    ret: i64 = write_str(buf);
+    free(temp);
+    free(buf);
+    return ret;
+}
+
+fn write_hex(val: u64) -> i64 {
+    buf = allocate(20);
+    *(buf + 0) = 48;  // '0'
+    *(buf + 1) = 120; // 'x'
+    pos: u32 = 2;
+
+    temp = allocate(16);
+    tp: u32 = 0;
+    v: u64 = val;
+    i: u32 = 0;
+    while i < 16 {
+        nibble: u64 = (v >> 60) & 15;
+        c: u32;
+        if nibble < 10 { c = 48 + nibble; } else { c = 97 + nibble - 10; }
+        *(temp + tp) = c;
+        tp = tp + 1;
+        v = v << 4;
+        i = i + 1;
+    }
+
+    // Skip leading zeros
+    start: u32 = 0;
+    while start < tp - 1 {
+        if *(temp + start) != 48 { break; }
+        start = start + 1;
+    }
+
+    i = start;
+    while i < tp {
+        *(buf + pos) = *(temp + i);
+        pos = pos + 1;
+        i = i + 1;
+    }
+    *(buf + pos) = 0;
+
+    ret: i64 = write_str(buf);
+    free(temp);
+    free(buf);
+    return ret;
+}
+
+fn write_hex_u32(val: u32) -> i64 {
+    buf = allocate(12);
+    *(buf + 0) = 48;
+    *(buf + 1) = 120;
+    pos: u32 = 2;
+    i: u32 = 0;
+    while i < 8 {
+        nibble: u32 = (val >> 28) & 15;
+        c: u32;
+        if nibble < 10 { c = 48 + nibble; } else { c = 97 + nibble - 10; }
+        *(buf + pos) = c;
+        pos = pos + 1;
+        val = val << 4;
+        i = i + 1;
+    }
+    *(buf + pos) = 0;
+    ret: i64 = write_str(buf);
+    free(buf);
+    return ret;
+}
+
+fn write_bin(val: u64) -> i64 {
+    buf = allocate(68);
+    *(buf + 0) = 48;
+    *(buf + 1) = 98;
+    pos: u32 = 2;
+    i: u32 = 0;
+    while i < 64 {
+        bit: u32 = (val >> 63) & 1;
+        *(buf + pos) = 48 + bit;
+        pos = pos + 1;
+        val = val << 1;
+        i = i + 1;
+    }
+    *(buf + pos) = 0;
+    ret: i64 = write_str(buf);
+    free(buf);
+    return ret;
+}
+
+// ===========================================================================
+// printf-style formatted output (simplified)
+// ===========================================================================
+
+fn printf_str(s: Address) -> i64 {
+    return write_str(s);
+}
+
+fn printf_int(val: i64) -> i64 {
+    return write_int(val);
+}
+
+fn printf_uint(val: u64) -> i64 {
+    return write_uint(val);
+}
+
+fn printf_hex(val: u64) -> i64 {
+    return write_hex(val);
+}
+
+fn printf_newline() -> i64 {
+    return write_newline();
+}
+
+fn printf_str_int(str_part: Address, int_val: i64) -> i64 {
+    write_str(str_part);
+    return write_int(int_val);
+}
+
+fn printf_int_str(int_val: i64, str_part: Address) -> i64 {
+    write_int(int_val);
+    return write_str(str_part);
+}
+
+fn printf_str_int_str(part1: Address, val: i64, part2: Address) -> i64 {
+    write_str(part1);
+    write_int(val);
+    return write_str(part2);
+}
+
+fn printf_str_uint_str(part1: Address, val: u64, part2: Address) -> i64 {
+    write_str(part1);
+    write_uint(val);
+    return write_str(part2);
+}
+
+fn printf_str_hex_str(part1: Address, val: u64, part2: Address) -> i64 {
+    write_str(part1);
+    write_hex(val);
+    return write_str(part2);
+}
+
+// ===========================================================================
+// Input functions
+// ===========================================================================
+
+fn read_line(buf: Address, max_len: u32) -> u32 {
+    pos: u32 = 0;
+    while pos < max_len - 1 {
+        char_buf = allocate(1);
+        n: i64 = read(STDIN, char_buf, 1);
+        if n <= 0 {
+            free(char_buf);
+            break;
+        }
+        c: u32 = *(char_buf + 0);
+        if c == 10 {  // newline
+            free(char_buf);
+            break;
+        }
+        *(buf + pos) = c;
+        pos = pos + 1;
+        free(char_buf);
+    }
+    *(buf + pos) = 0;
+    return pos;
+}
+
+fn read_bytes(buf: Address, max_len: u32) -> i64 {
+    return read(STDIN, buf, max_len);
+}
+
+fn read_byte() -> u32 {
+    char_buf = allocate(1);
+    n: i64 = read(STDIN, char_buf, 1);
+    if n <= 0 {
+        free(char_buf);
+        return 4294967295;  // EOF
+    }
+    c: u32 = *(char_buf + 0);
+    free(char_buf);
+    return c;
+}
+
+// ===========================================================================
+// Error output (stderr)
+// ===========================================================================
+
+fn eprint_str(s: Address) -> i64 {
+    n: u32 = 0;
+    while *(s + n) != 0 { n = n + 1; }
+    return write(STDERR, s, n);
+}
+
+fn eprint_int(val: i64) -> i64 {
+    buf = allocate(24);
+    if val == 0 {
+        *(buf + 0) = 48;
+        *(buf + 1) = 0;
+        eprint_str(buf);
+        free(buf);
+        return 1;
+    }
+    v: i64 = val;
+    pos: u32 = 0;
+    if val < 0 { v = 0 - val; }
+    temp = allocate(24);
+    tp: u32 = 0;
+    while v > 0 {
+        d: u32 = v % 10;
+        *(temp + tp) = 48 + d;
+        tp = tp + 1;
+        v = v / 10;
+    }
+    if val < 0 { *(buf + pos) = 45; pos = pos + 1; }
+    while tp > 0 {
+        tp = tp - 1;
+        *(buf + pos) = *(temp + tp);
+        pos = pos + 1;
+    }
+    *(buf + pos) = 0;
+    ret: i64 = eprint_str(buf);
+    free(temp);
+    free(buf);
+    return ret;
+}
+
+fn eprintln_str(s: Address) -> i64 {
+    eprint_str(s);
+    nl = allocate(1);
+    *(nl + 0) = 10;
+    ret: i64 = write(STDERR, nl, 1);
+    free(nl);
+    return ret;
+}

@@ -1,0 +1,53 @@
+// womb/encoding/hex.vuma — Hexadecimal Encoding (RFC 4648)
+// No main() — importable library module.
+
+fn hex_encode(input: Address, len: u32, output: Address) -> u32 {
+    i: u32 = 0;
+    while i < len {
+        b: u32 = *(input + i);
+        hi: u32 = b >> 4;
+        lo: u32 = b & 15;
+        if hi < 10 { *(output + i * 2) = 48 + hi; }
+        else { *(output + i * 2) = 97 + hi - 10; }
+        if lo < 10 { *(output + i * 2 + 1) = 48 + lo; }
+        else { *(output + i * 2 + 1) = 97 + lo - 10; }
+        i = i + 1;
+    }
+    return len * 2;
+}
+
+fn hex_decode(input: Address, len: u32, output: Address) -> u32 {
+    if len % 2 != 0 { return 4294967295; }
+    i: u32 = 0;
+    while i < len {
+        hi: u32 = hex_char_to_val(*(input + i));
+        lo: u32 = hex_char_to_val(*(input + i + 1));
+        if hi == 255 { return 4294967295; }
+        if lo == 255 { return 4294967295; }
+        *(output + i / 2) = (hi << 4) | lo;
+        i = i + 2;
+    }
+    return len / 2;
+}
+
+fn hex_char_to_val(c: u32) -> u32 {
+    if c >= 48 { if c <= 57 { return c - 48; } }
+    if c >= 97 { if c <= 102 { return c - 87; } }
+    if c >= 65 { if c <= 70 { return c - 55; } }
+    return 255;
+}
+
+fn hex_encode_upper(input: Address, len: u32, output: Address) -> u32 {
+    i: u32 = 0;
+    while i < len {
+        b: u32 = *(input + i);
+        hi: u32 = b >> 4;
+        lo: u32 = b & 15;
+        if hi < 10 { *(output + i * 2) = 48 + hi; }
+        else { *(output + i * 2) = 65 + hi - 10; }
+        if lo < 10 { *(output + i * 2 + 1) = 48 + lo; }
+        else { *(output + i * 2 + 1) = 65 + lo - 10; }
+        i = i + 1;
+    }
+    return len * 2;
+}

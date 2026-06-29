@@ -1,0 +1,156 @@
+// womb/lib/time.vuma — Time and Sleep Functions (POSIX time.h equivalent)
+// No main() — importable library module.
+
+extern "C" {
+    fn clock_gettime(clk_id: i64, ts: Address) -> i64;
+    fn nanosleep(req: Address, rem: Address) -> i64;
+}
+
+const CLOCK_REALTIME: i64 = 0;
+const CLOCK_MONOTONIC: i64 = 1;
+const CLOCK_PROCESS_CPUTIME_ID: i64 = 2;
+const CLOCK_THREAD_CPUTIME_ID: i64 = 3;
+
+// timespec: 16 bytes
+//   [0..7]  tv_sec (i64)
+//   [8..15] tv_nsec (i64)
+
+fn time_now() -> u64 {
+    ts = allocate(16);
+    clock_gettime(CLOCK_REALTIME, ts);
+    // Read tv_sec (8 bytes, little-endian)
+    s: u64 = 0;
+    i: u32 = 0;
+    while i < 8 {
+        b: u64 = *(ts + i);
+        s = s | (b << (i * 8));
+        i = i + 1;
+    }
+    free(ts);
+    return s;
+}
+
+fn time_monotonic() -> u64 {
+    ts = allocate(16);
+    clock_gettime(CLOCK_MONOTONIC, ts);
+    s: u64 = 0;
+    i: u32 = 0;
+    while i < 8 {
+        b: u64 = *(ts + i);
+        s = s | (b << (i * 8));
+        i = i + 1;
+    }
+    free(ts);
+    return s;
+}
+
+fn time_monotonic_ns() -> u64 {
+    ts = allocate(16);
+    clock_gettime(CLOCK_MONOTONIC, ts);
+    s: u64 = 0;
+    ns: u64 = 0;
+    i: u32 = 0;
+    while i < 8 {
+        b: u64 = *(ts + i);
+        s = s | (b << (i * 8));
+        i = i + 1;
+    }
+    i = 0;
+    while i < 8 {
+        b: u64 = *(ts + 8 + i);
+        ns = ns | (b << (i * 8));
+        i = i + 1;
+    }
+    free(ts);
+    return s * 1000000000 + ns;
+}
+
+fn time_monotonic_us() -> u64 {
+    return time_monotonic_ns() / 1000;
+}
+
+fn time_monotonic_ms() -> u64 {
+    return time_monotonic_ns() / 1000000;
+}
+
+// ===========================================================================
+// Sleep functions
+// ===========================================================================
+
+fn sleep_ms(ms: u32) -> i64 {
+    req = allocate(16);
+    sec: u64 = ms / 1000;
+    nsec: u64 = (ms % 1000) * 1000000;
+
+    // Write tv_sec
+    i: u32 = 0;
+    while i < 8 {
+        *(req + i) = (sec >> (i * 8)) & 255;
+        i = i + 1;
+    }
+    // Write tv_nsec
+    i = 0;
+    while i < 8 {
+        *(req + 8 + i) = (nsec >> (i * 8)) & 255;
+        i = i + 1;
+    }
+
+    rem = allocate(16);
+    ret: i64 = nanosleep(req, rem);
+    free(req);
+    free(rem);
+    return ret;
+}
+
+fn sleep_us(us: u32) -> i64 {
+    return sleep_ms(us / 1000);
+}
+
+fn sleep_s(secs: u32) -> i64 {
+    return sleep_ms(secs * 1000);
+}
+
+// ===========================================================================
+// Timestamp helpers
+// ===========================================================================
+
+fn time_diff_ms(start: u64, end: u64) -> u64 {
+    return (end - start) / 1000000;
+}
+
+fn time_diff_us(start: u64, end: u64) -> u64 {
+    return (end - start) / 1000;
+}
+
+fn time_diff_ns(start: u64, end: u64) -> u64 {
+    return end - start;
+}
+
+// ===========================================================================
+// Epoch conversion helpers (simplified Unix epoch)
+// ===========================================================================
+
+fn epoch_seconds() -> u64 {
+    return time_now();
+}
+
+fn epoch_millis() -> u64 {
+    ts = allocate(16);
+    clock_gettime(CLOCK_REALTIME, ts);
+    s: u64 = 0;
+    ns: u64 = 0;
+    i: u32 = 0;
+    while i < 8 {
+        b: u64 = *(ts + i);
+        s = s | (b << (i * 8));
+        i = i + 1;
+    }
+    i = 0;
+    while i < 8 {
+        b: u64 = *(ts + 8 + i);
+        ns = ns | (b << (i * 8));
+        i = i + 1;
+    }
+    free(ts);
+    return s * 1000 + ns / 1000000;
+}
