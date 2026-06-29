@@ -1,0 +1,211 @@
+// womb/crypto/md5.vuma — MD5 (RFC 1321)
+// Legacy hash function — 128-bit output, 64 rounds.
+// Still widely used in HTTP Digest Auth, NTLM, file checksums.
+// NOT for cryptographic security — only for legacy compatibility.
+
+const MASK32: u32 = 4294967295;
+
+// Per-round shift amounts
+const S0: u32 = 7; const S1: u32 = 12; const S2: u32 = 17; const S3: u32 = 22;
+const S4: u32 = 5; const S5: u32 = 9; const S6: u32 = 14; const S7: u32 = 20;
+const S8: u32 = 4; const S9: u32 = 11; const S10: u32 = 16; const S11: u32 = 23;
+const S12: u32 = 6; const S13: u32 = 10; const S14: u32 = 15; const S15: u32 = 21;
+
+fn rotl32(x: u32, n: u32) -> u32 {
+    return ((x << n) | (x >> (32 - n))) & MASK32;
+}
+
+fn load_u32_le(ptr: Address, off: u32) -> u32 {
+    b0: u32 = *(ptr + off); b1: u32 = *(ptr + off + 1);
+    b2: u32 = *(ptr + off + 2); b3: u32 = *(ptr + off + 3);
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+}
+
+fn store_u32_le(ptr: Address, off: u32, val: u32) {
+    *(ptr + off) = val & 255;
+    *(ptr + off + 1) = (val >> 8) & 255;
+    *(ptr + off + 2) = (val >> 16) & 255;
+    *(ptr + off + 3) = (val >> 24) & 255;
+}
+
+// K table: K[i] = floor(2^32 * |sin(i+1)|) for i=0..63
+fn md5_k(idx: u32) -> u32 {
+    if idx == 0 { return 3614090360; }
+    if idx == 1 { return 3905402710; }
+    if idx == 2 { return 606105819; }
+    if idx == 3 { return 3250441966; }
+    if idx == 4 { return 4118548399; }
+    if idx == 5 { return 1200080426; }
+    if idx == 6 { return 2821735955; }
+    if idx == 7 { return 4249261313; }
+    if idx == 8 { return 1770035416; }
+    if idx == 9 { return 2336552879; }
+    if idx == 10 { return 4294925233; }
+    if idx == 11 { return 2304563134; }
+    if idx == 12 { return 1804603682; }
+    if idx == 13 { return 4254626195; }
+    if idx == 14 { return 2792965006; }
+    if idx == 15 { return 1236535329; }
+    if idx == 16 { return 4122456904; }
+    if idx == 17 { return 3115982417; }
+    if idx == 18 { return 2585797764; }
+    if idx == 19 { return 3942874059; }
+    if idx == 20 { return 3712866113; }
+    if idx == 21 { return 2650097792; }
+    if idx == 22 { return 1866375312; }
+    if idx == 23 { return 3940257326; }
+    if idx == 24 { return 2417469325; }
+    if idx == 25 { return 2304563494; }
+    if idx == 26 { return 4110918685; }
+    if idx == 27 { return 2709127959; }
+    if idx == 28 { return 2010040352; }
+    if idx == 29 { return 3904418173; }
+    if idx == 30 { return 3783441917; }
+    if idx == 31 { return 2026838592; }
+    if idx == 32 { return 2627496497; }
+    if idx == 33 { return 1866375312; }
+    if idx == 34 { return 741168079; }
+    if idx == 35 { return 4049829007; }
+    if idx == 36 { return 3053147920; }
+    if idx == 37 { return 3949870264; }
+    if idx == 38 { return 587729985; }
+    if idx == 39 { return 4030777747; }
+    if idx == 40 { return 3495752482; }
+    if idx == 41 { return 1707807981; }
+    if idx == 42 { return 3253427019; }
+    if idx == 43 { return 1272821128; }
+    if idx == 44 { return 3662495513; }
+    if idx == 45 { return 2686256376; }
+    if idx == 46 { return 1694094439; }
+    if idx == 47 { return 3245019308; }
+    if idx == 48 { return 4223185659; }
+    if idx == 49 { return 2751308665; }
+    if idx == 50 { return 1875249140; }
+    if idx == 51 { return 3537138525; }
+    if idx == 52 { return 3373307053; }
+    if idx == 53 { return 3533710109; }
+    if idx == 54 { return 1302680948; }
+    if idx == 55 { return 4254489423; }
+    if idx == 56 { return 3532940241; }
+    if idx == 57 { return 1804603682; }
+    if idx == 58 { return 1446553360; }
+    if idx == 59 { return 3864093344; }
+    if idx == 60 { return 2108259060; }
+    if idx == 61 { return 4122456904; }
+    if idx == 62 { return 2650097792; }
+    if idx == 63 { return 2442655389; }
+    return 0;
+}
+
+fn md5_oneshot(data: Address, len: u32, out: Address) {
+    // Initialize state
+    a0: u32 = 1732584193;
+    b0: u32 = 4023233417;
+    c0: u32 = 2562383102;
+    d0: u32 = 271733878;
+
+    // Padding: append 0x80, then zeros, then 64-bit length
+    padded_len: u32 = len + 1;
+    while padded_len % 64 != 56 { padded_len = padded_len + 1; }
+    padded_len = padded_len + 8;
+
+    padded = allocate(padded_len);
+    i: u32 = 0;
+    while i < len { *(padded + i) = *(data + i); i = i + 1; }
+    *(padded + len) = 128;
+    i = len + 1;
+    while i < padded_len - 8 { *(padded + i) = 0; i = i + 1; }
+    // Length in bits, little-endian 64-bit
+    bit_len: u32 = (len * 8) & MASK32;
+    store_u32_le(padded, padded_len - 8, bit_len);
+    store_u32_le(padded, padded_len - 4, 0);
+
+    // Process each 64-byte block
+    block_idx: u32 = 0;
+    while block_idx < padded_len {
+        // Load 16 words
+        m = allocate(64);
+        j: u32 = 0;
+        while j < 16 {
+            store_u32_le(m, j * 4, load_u32_le(padded, block_idx + j * 4));
+            j = j + 1;
+        }
+
+        a: u32 = a0;
+        b: u32 = b0;
+        c: u32 = c0;
+        d: u32 = d0;
+
+        // 64 rounds
+        round: u32 = 0;
+        while round < 64 {
+            f: u32 = 0;
+            g: u32 = 0;
+            s: u32 = 0;
+
+            if round < 16 {
+                f = (b & c) | ((b ^ MASK32) & d);
+                g = round;
+                if round % 4 == 0 { s = S0; }
+                if round % 4 == 1 { s = S1; }
+                if round % 4 == 2 { s = S2; }
+                if round % 4 == 3 { s = S3; }
+            }
+            if round >= 16 {
+                if round < 32 {
+                    f = (d & b) | ((d ^ MASK32) & c);
+                    g = (5 * round + 1) % 16;
+                    if round % 4 == 0 { s = S4; }
+                    if round % 4 == 1 { s = S5; }
+                    if round % 4 == 2 { s = S6; }
+                    if round % 4 == 3 { s = S7; }
+                }
+            }
+            if round >= 32 {
+                if round < 48 {
+                    f = b ^ c ^ d;
+                    g = (3 * round + 5) % 16;
+                    if round % 4 == 0 { s = S8; }
+                    if round % 4 == 1 { s = S9; }
+                    if round % 4 == 2 { s = S10; }
+                    if round % 4 == 3 { s = S11; }
+                }
+            }
+            if round >= 48 {
+                f = c ^ (b | (d ^ MASK32));
+                g = (7 * round) % 16;
+                if round % 4 == 0 { s = S12; }
+                if round % 4 == 1 { s = S13; }
+                if round % 4 == 2 { s = S14; }
+                if round % 4 == 3 { s = S15; }
+            }
+
+            temp: u32 = d;
+            d = c;
+            c = b;
+            mg: u32 = load_u32_le(m, g * 4);
+            ki: u32 = md5_k(round);
+            new_b: u32 = (b + rotl32((a + f + ki + mg) & MASK32, s)) & MASK32;
+            b = new_b;
+            a = temp;
+
+            round = round + 1;
+        }
+
+        a0 = (a0 + a) & MASK32;
+        b0 = (b0 + b) & MASK32;
+        c0 = (c0 + c) & MASK32;
+        d0 = (d0 + d) & MASK32;
+
+        free(m);
+        block_idx = block_idx + 64;
+    }
+
+    // Output digest (16 bytes, little-endian)
+    store_u32_le(out, 0, a0);
+    store_u32_le(out, 4, b0);
+    store_u32_le(out, 8, c0);
+    store_u32_le(out, 12, d0);
+
+    free(padded);
+}
