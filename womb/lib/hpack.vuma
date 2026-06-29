@@ -1,0 +1,1259 @@
+// hpack.vuma
+// VUMA standard library module: HPACK header compression for HTTP/2 (RFC 7541).
+// Target: all 10 VUMA backends. Importable library module (no main()).
+//
+// Task ID: womb-hpack
+//
+// Implements:
+//   1. Static table (RFC 7541 Appendix A, entries 1-30 hardcoded)
+//   2. Dynamic table (FIFO with size limit and eviction)
+//   3. Integer encode/decode (RFC 7541 Section 5.1)
+//   4. String encode/decode (RFC 7541 Section 5.2) — raw bytes only,
+//      Huffman-encoded input is rejected (flagged via sentinel return)
+//   5. Header block decode (RFC 7541 Section 6) — all four representations
+//      plus Dynamic Table Size Update
+//   6. Single-header encode (simplified: indexed or literal-without-indexing)
+//
+// Memory is managed with allocate()/free(); byte-level loads/stores go
+// through the hpack_store_u32 / hpack_load_u32 / hpack_store_addr /
+// hpack_load_addr helpers. No structs, no generics, no arrays — every
+// handle is an Address pointing to a fixed-layout byte block documented
+// below.
+//
+// ===========================================================================
+// Memory layouts (all offsets in bytes, little-endian)
+// ===========================================================================
+//
+//   Dynamic table handle (32 bytes header + 64 entries * 24 bytes = 1568):
+//     [0..3]    max_size      (u32) — current maximum table size in bytes
+//     [4..7]    current_size  (u32) — sum of (name_len + value_len + 32)
+//     [8..11]   count         (u32) — number of live entries
+//     [12..15]  capacity      (u32) — max entry slots (always 64)
+//     [16..31]  reserved      — padding to align entries on 32-byte boundary
+//     [32..]    entries[64]   — each entry is 24 bytes (see below)
+//
+//   Dynamic table entry (24 bytes):
+//     [0..7]    name_addr   (Address) — heap allocation owned by the table
+//     [8..11]   name_len    (u32)
+//     [12..19]  value_addr  (Address) — heap allocation owned by the table
+//     [20..23]  value_len   (u32)
+//
+//   Decoded header output buffer:
+//     [0..max_headers*16]               — array of 16-byte entries
+//     [max_headers*16..]                — string pool for name/value bytes
+//   Each 16-byte entry:
+//     [0..3]    name_offset   (u32) — byte offset within output buffer
+//     [4..7]    name_len      (u32)
+//     [8..11]   value_offset  (u32)
+//     [12..15]  value_len     (u32)
+//
+//   Indexing convention (RFC 7541 Section 2.3.3):
+//     1..61   — static table (only 1..30 implemented here; 31..61 errors)
+//     62..    — dynamic table, 62 = most recently added entry
+//
+// ===========================================================================
+// Constants
+// ===========================================================================
+
+const HPACK_STATIC_TABLE_MAX: u32    = 30;
+const HPACK_DYNAMIC_INDEX_BASE: u32  = 62;
+const HPACK_DYNAMIC_TABLE_MAX_ENTRIES: u32 = 64;
+const HPACK_TABLE_HEADER_SIZE: u32   = 32;
+const HPACK_ENTRY_SIZE: u32          = 24;
+const HPACK_OUTPUT_ENTRY_SIZE: u32   = 16;
+const HPACK_U32_MAX: u32             = 4294967295;
+const HPACK_ENTRY_OVERHEAD: u32      = 32;   // RFC 7541 Section 4.1
+const HPACK_HUFFMAN_NOT_IMPL: u32    = 4294967295;  // sentinel for hpack_decode_string
+const HPACK_HUFFMAN_FLAG_MASK: u32   = 128;
+const HPACK_CONTINUATION_FLAG_MASK: u32 = 128;
+const HPACK_CONTINUATION_PAYLOAD_MASK: u32 = 127;
+
+// ===========================================================================
+// Byte-level load/store helpers
+// ===========================================================================
+// *(ptr + offset) returns/stores a single byte as u32. These helpers
+// assemble/disassemble multi-byte values in little-endian order. Offsets
+// are u32 to compose cleanly with the u32 index arithmetic used throughout.
+
+fn hpack_store_u32(ptr: Address, off: u32, val: u32) {
+    *(ptr + off)     = val & 255;
+    *(ptr + off + 1) = (val >> 8) & 255;
+    *(ptr + off + 2) = (val >> 16) & 255;
+    *(ptr + off + 3) = (val >> 24) & 255;
+}
+
+fn hpack_load_u32(ptr: Address, off: u32) -> u32 {
+    let b0: u32 = *(ptr + off);
+    let b1: u32 = *(ptr + off + 1);
+    let b2: u32 = *(ptr + off + 2);
+    let b3: u32 = *(ptr + off + 3);
+    return (b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)) & 4294967295;
+}
+
+fn hpack_store_addr(ptr: Address, off: u32, val: Address) {
+    let v: u64 = val as u64;
+    *(ptr + off)     = v & 255;
+    *(ptr + off + 1) = (v >> 8) & 255;
+    *(ptr + off + 2) = (v >> 16) & 255;
+    *(ptr + off + 3) = (v >> 24) & 255;
+    *(ptr + off + 4) = (v >> 32) & 255;
+    *(ptr + off + 5) = (v >> 40) & 255;
+    *(ptr + off + 6) = (v >> 48) & 255;
+    *(ptr + off + 7) = (v >> 56) & 255;
+}
+
+fn hpack_load_addr(ptr: Address, off: u32) -> Address {
+    let b0: u64 = *(ptr + off)     as u64;
+    let b1: u64 = *(ptr + off + 1) as u64;
+    let b2: u64 = *(ptr + off + 2) as u64;
+    let b3: u64 = *(ptr + off + 3) as u64;
+    let b4: u64 = *(ptr + off + 4) as u64;
+    let b5: u64 = *(ptr + off + 5) as u64;
+    let b6: u64 = *(ptr + off + 6) as u64;
+    let b7: u64 = *(ptr + off + 7) as u64;
+    let v: u64 = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+              | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
+    return v as Address;
+}
+
+// ===========================================================================
+// 1. Static Table (RFC 7541 Appendix A, entries 1-30)
+// ===========================================================================
+// Returns the length of the name/value string at the given 1-based index.
+// Index 0 and indices > 30 return 0.
+
+fn hpack_static_name_len(idx: u32) -> u32 {
+    if idx == 1  { return 10; }   // :authority
+    if idx == 2  { return 7;  }   // :method
+    if idx == 3  { return 7;  }   // :method
+    if idx == 4  { return 5;  }   // :path
+    if idx == 5  { return 5;  }   // :path
+    if idx == 6  { return 7;  }   // :scheme
+    if idx == 7  { return 7;  }   // :scheme
+    if idx == 8  { return 7;  }   // :status
+    if idx == 9  { return 7;  }   // :status
+    if idx == 10 { return 7;  }   // :status
+    if idx == 11 { return 7;  }   // :status
+    if idx == 12 { return 7;  }   // :status
+    if idx == 13 { return 7;  }   // :status
+    if idx == 14 { return 7;  }   // :status
+    if idx == 15 { return 15; }   // accept-encoding
+    if idx == 16 { return 15; }   // accept-language
+    if idx == 17 { return 13; }   // accept-ranges
+    if idx == 18 { return 6;  }   // accept
+    if idx == 19 { return 27; }   // access-control-allow-origin
+    if idx == 20 { return 3;  }   // age
+    if idx == 21 { return 5;  }   // allow
+    if idx == 22 { return 13; }   // authorization
+    if idx == 23 { return 13; }   // cache-control
+    if idx == 24 { return 19; }   // content-disposition
+    if idx == 25 { return 16; }   // content-encoding
+    if idx == 26 { return 16; }   // content-language
+    if idx == 27 { return 14; }   // content-length
+    if idx == 28 { return 16; }   // content-location
+    if idx == 29 { return 13; }   // content-range
+    if idx == 30 { return 12; }   // content-type
+    return 0;
+}
+
+fn hpack_static_value_len(idx: u32) -> u32 {
+    if idx == 1  { return 0;  }   // (empty)
+    if idx == 2  { return 3;  }   // GET
+    if idx == 3  { return 4;  }   // POST
+    if idx == 4  { return 1;  }   // /
+    if idx == 5  { return 11; }   // /index.html
+    if idx == 6  { return 4;  }   // http
+    if idx == 7  { return 5;  }   // https
+    if idx == 8  { return 3;  }   // 200
+    if idx == 9  { return 3;  }   // 204
+    if idx == 10 { return 3;  }   // 206
+    if idx == 11 { return 3;  }   // 304
+    if idx == 12 { return 3;  }   // 400
+    if idx == 13 { return 3;  }   // 404
+    if idx == 14 { return 3;  }   // 500
+    if idx == 15 { return 13; }   // gzip, deflate
+    // 16..30: empty value
+    return 0;
+}
+
+// Helper: write ":method" (7 bytes)
+fn hpack_write_method(buf: Address) {
+    *(buf + 0) = 58;   // :
+    *(buf + 1) = 109;  // m
+    *(buf + 2) = 101;  // e
+    *(buf + 3) = 116;  // t
+    *(buf + 4) = 104;  // h
+    *(buf + 5) = 111;  // o
+    *(buf + 6) = 100;  // d
+}
+
+// Helper: write ":path" (5 bytes)
+fn hpack_write_path(buf: Address) {
+    *(buf + 0) = 58;   // :
+    *(buf + 1) = 112;  // p
+    *(buf + 2) = 97;   // a
+    *(buf + 3) = 116;  // t
+    *(buf + 4) = 104;  // h
+}
+
+// Helper: write ":scheme" (7 bytes)
+fn hpack_write_scheme(buf: Address) {
+    *(buf + 0) = 58;   // :
+    *(buf + 1) = 115;  // s
+    *(buf + 2) = 99;   // c
+    *(buf + 3) = 104;  // h
+    *(buf + 4) = 101;  // e
+    *(buf + 5) = 109;  // m
+    *(buf + 6) = 101;  // e
+}
+
+// Helper: write ":status" (7 bytes)
+fn hpack_write_status(buf: Address) {
+    *(buf + 0) = 58;   // :
+    *(buf + 1) = 115;  // s
+    *(buf + 2) = 116;  // t
+    *(buf + 3) = 97;   // a
+    *(buf + 4) = 116;  // t
+    *(buf + 5) = 117;  // u
+    *(buf + 6) = 115;  // s
+}
+
+// Helper: write a 3-digit status code (d0 d1 d2)
+fn hpack_write_status_value(buf: Address, d0: u32, d1: u32, d2: u32) {
+    *(buf + 0) = d0;
+    *(buf + 1) = d1;
+    *(buf + 2) = d2;
+}
+
+// Write the name bytes for the given 1-based static-table index into buf.
+// No-op for invalid indices. Caller must size buf to at least
+// hpack_static_name_len(idx) bytes.
+
+fn hpack_static_name_write(idx: u32, buf: Address) {
+    if idx == 1 {
+        // :authority
+        *(buf + 0) = 58;   // :
+        *(buf + 1) = 97;   // a
+        *(buf + 2) = 117;  // u
+        *(buf + 3) = 116;  // t
+        *(buf + 4) = 104;  // h
+        *(buf + 5) = 111;  // o
+        *(buf + 6) = 114;  // r
+        *(buf + 7) = 105;  // i
+        *(buf + 8) = 116;  // t
+        *(buf + 9) = 121;  // y
+        return;
+    }
+    if idx == 2 { hpack_write_method(buf); return; }
+    if idx == 3 { hpack_write_method(buf); return; }
+    if idx == 4 { hpack_write_path(buf); return; }
+    if idx == 5 { hpack_write_path(buf); return; }
+    if idx == 6 { hpack_write_scheme(buf); return; }
+    if idx == 7 { hpack_write_scheme(buf); return; }
+    if idx == 8  { hpack_write_status(buf); return; }
+    if idx == 9  { hpack_write_status(buf); return; }
+    if idx == 10 { hpack_write_status(buf); return; }
+    if idx == 11 { hpack_write_status(buf); return; }
+    if idx == 12 { hpack_write_status(buf); return; }
+    if idx == 13 { hpack_write_status(buf); return; }
+    if idx == 14 { hpack_write_status(buf); return; }
+    if idx == 15 {
+        // accept-encoding
+        *(buf + 0)  = 97;   // a
+        *(buf + 1)  = 99;   // c
+        *(buf + 2)  = 99;   // c
+        *(buf + 3)  = 101;  // e
+        *(buf + 4)  = 112;  // p
+        *(buf + 5)  = 116;  // t
+        *(buf + 6)  = 45;   // -
+        *(buf + 7)  = 101;  // e
+        *(buf + 8)  = 110;  // n
+        *(buf + 9)  = 99;   // c
+        *(buf + 10) = 111;  // o
+        *(buf + 11) = 100;  // d
+        *(buf + 12) = 105;  // i
+        *(buf + 13) = 110;  // n
+        *(buf + 14) = 103;  // g
+        return;
+    }
+    if idx == 16 {
+        // accept-language
+        *(buf + 0)  = 97;   // a
+        *(buf + 1)  = 99;   // c
+        *(buf + 2)  = 99;   // c
+        *(buf + 3)  = 101;  // e
+        *(buf + 4)  = 112;  // p
+        *(buf + 5)  = 116;  // t
+        *(buf + 6)  = 45;   // -
+        *(buf + 7)  = 108;  // l
+        *(buf + 8)  = 97;   // a
+        *(buf + 9)  = 110;  // n
+        *(buf + 10) = 103;  // g
+        *(buf + 11) = 117;  // u
+        *(buf + 12) = 97;   // a
+        *(buf + 13) = 103;  // g
+        *(buf + 14) = 101;  // e
+        return;
+    }
+    if idx == 17 {
+        // accept-ranges
+        *(buf + 0)  = 97;   // a
+        *(buf + 1)  = 99;   // c
+        *(buf + 2)  = 99;   // c
+        *(buf + 3)  = 101;  // e
+        *(buf + 4)  = 112;  // p
+        *(buf + 5)  = 116;  // t
+        *(buf + 6)  = 45;   // -
+        *(buf + 7)  = 114;  // r
+        *(buf + 8)  = 97;   // a
+        *(buf + 9)  = 110;  // n
+        *(buf + 10) = 103;  // g
+        *(buf + 11) = 101;  // e
+        *(buf + 12) = 115;  // s
+        return;
+    }
+    if idx == 18 {
+        // accept
+        *(buf + 0) = 97;   // a
+        *(buf + 1) = 99;   // c
+        *(buf + 2) = 99;   // c
+        *(buf + 3) = 101;  // e
+        *(buf + 4) = 112;  // p
+        *(buf + 5) = 116;  // t
+        return;
+    }
+    if idx == 19 {
+        // access-control-allow-origin
+        *(buf + 0)  = 97;   // a
+        *(buf + 1)  = 99;   // c
+        *(buf + 2)  = 99;   // c
+        *(buf + 3)  = 101;  // e
+        *(buf + 4)  = 115;  // s
+        *(buf + 5)  = 115;  // s
+        *(buf + 6)  = 45;   // -
+        *(buf + 7)  = 99;   // c
+        *(buf + 8)  = 111;  // o
+        *(buf + 9)  = 110;  // n
+        *(buf + 10) = 116;  // t
+        *(buf + 11) = 114;  // r
+        *(buf + 12) = 111;  // o
+        *(buf + 13) = 108;  // l
+        *(buf + 14) = 45;   // -
+        *(buf + 15) = 97;   // a
+        *(buf + 16) = 108;  // l
+        *(buf + 17) = 108;  // l
+        *(buf + 18) = 111;  // o
+        *(buf + 19) = 119;  // w
+        *(buf + 20) = 45;   // -
+        *(buf + 21) = 111;  // o
+        *(buf + 22) = 114;  // r
+        *(buf + 23) = 105;  // i
+        *(buf + 24) = 103;  // g
+        *(buf + 25) = 105;  // i
+        *(buf + 26) = 110;  // n
+        return;
+    }
+    if idx == 20 {
+        // age
+        *(buf + 0) = 97;   // a
+        *(buf + 1) = 103;  // g
+        *(buf + 2) = 101;  // e
+        return;
+    }
+    if idx == 21 {
+        // allow
+        *(buf + 0) = 97;   // a
+        *(buf + 1) = 108;  // l
+        *(buf + 2) = 108;  // l
+        *(buf + 3) = 111;  // o
+        *(buf + 4) = 119;  // w
+        return;
+    }
+    if idx == 22 {
+        // authorization
+        *(buf + 0)  = 97;   // a
+        *(buf + 1)  = 117;  // u
+        *(buf + 2)  = 116;  // t
+        *(buf + 3)  = 104;  // h
+        *(buf + 4)  = 111;  // o
+        *(buf + 5)  = 114;  // r
+        *(buf + 6)  = 105;  // i
+        *(buf + 7)  = 122;  // z
+        *(buf + 8)  = 97;   // a
+        *(buf + 9)  = 116;  // t
+        *(buf + 10) = 105;  // i
+        *(buf + 11) = 111;  // o
+        *(buf + 12) = 110;  // n
+        return;
+    }
+    if idx == 23 {
+        // cache-control
+        *(buf + 0)  = 99;   // c
+        *(buf + 1)  = 97;   // a
+        *(buf + 2)  = 99;   // c
+        *(buf + 3)  = 104;  // h
+        *(buf + 4)  = 101;  // e
+        *(buf + 5)  = 45;   // -
+        *(buf + 6)  = 99;   // c
+        *(buf + 7)  = 111;  // o
+        *(buf + 8)  = 110;  // n
+        *(buf + 9)  = 116;  // t
+        *(buf + 10) = 114;  // r
+        *(buf + 11) = 111;  // o
+        *(buf + 12) = 108;  // l
+        return;
+    }
+    if idx == 24 {
+        // content-disposition
+        *(buf + 0)  = 99;   // c
+        *(buf + 1)  = 111;  // o
+        *(buf + 2)  = 110;  // n
+        *(buf + 3)  = 116;  // t
+        *(buf + 4)  = 101;  // e
+        *(buf + 5)  = 110;  // n
+        *(buf + 6)  = 116;  // t
+        *(buf + 7)  = 45;   // -
+        *(buf + 8)  = 100;  // d
+        *(buf + 9)  = 105;  // i
+        *(buf + 10) = 115;  // s
+        *(buf + 11) = 112;  // p
+        *(buf + 12) = 111;  // o
+        *(buf + 13) = 115;  // s
+        *(buf + 14) = 105;  // i
+        *(buf + 15) = 116;  // t
+        *(buf + 16) = 105;  // i
+        *(buf + 17) = 111;  // o
+        *(buf + 18) = 110;  // n
+        return;
+    }
+    if idx == 25 {
+        // content-encoding
+        *(buf + 0)  = 99;   // c
+        *(buf + 1)  = 111;  // o
+        *(buf + 2)  = 110;  // n
+        *(buf + 3)  = 116;  // t
+        *(buf + 4)  = 101;  // e
+        *(buf + 5)  = 110;  // n
+        *(buf + 6)  = 116;  // t
+        *(buf + 7)  = 45;   // -
+        *(buf + 8)  = 101;  // e
+        *(buf + 9)  = 110;  // n
+        *(buf + 10) = 99;   // c
+        *(buf + 11) = 111;  // o
+        *(buf + 12) = 100;  // d
+        *(buf + 13) = 105;  // i
+        *(buf + 14) = 110;  // n
+        *(buf + 15) = 103;  // g
+        return;
+    }
+    if idx == 26 {
+        // content-language
+        *(buf + 0)  = 99;   // c
+        *(buf + 1)  = 111;  // o
+        *(buf + 2)  = 110;  // n
+        *(buf + 3)  = 116;  // t
+        *(buf + 4)  = 101;  // e
+        *(buf + 5)  = 110;  // n
+        *(buf + 6)  = 116;  // t
+        *(buf + 7)  = 45;   // -
+        *(buf + 8)  = 108;  // l
+        *(buf + 9)  = 97;   // a
+        *(buf + 10) = 110;  // n
+        *(buf + 11) = 103;  // g
+        *(buf + 12) = 117;  // u
+        *(buf + 13) = 97;   // a
+        *(buf + 14) = 103;  // g
+        *(buf + 15) = 101;  // e
+        return;
+    }
+    if idx == 27 {
+        // content-length
+        *(buf + 0)  = 99;   // c
+        *(buf + 1)  = 111;  // o
+        *(buf + 2)  = 110;  // n
+        *(buf + 3)  = 116;  // t
+        *(buf + 4)  = 101;  // e
+        *(buf + 5)  = 110;  // n
+        *(buf + 6)  = 116;  // t
+        *(buf + 7)  = 45;   // -
+        *(buf + 8)  = 108;  // l
+        *(buf + 9)  = 101;  // e
+        *(buf + 10) = 110;  // n
+        *(buf + 11) = 103;  // g
+        *(buf + 12) = 116;  // t
+        *(buf + 13) = 104;  // h
+        return;
+    }
+    if idx == 28 {
+        // content-location
+        *(buf + 0)  = 99;   // c
+        *(buf + 1)  = 111;  // o
+        *(buf + 2)  = 110;  // n
+        *(buf + 3)  = 116;  // t
+        *(buf + 4)  = 101;  // e
+        *(buf + 5)  = 110;  // n
+        *(buf + 6)  = 116;  // t
+        *(buf + 7)  = 45;   // -
+        *(buf + 8)  = 108;  // l
+        *(buf + 9)  = 111;  // o
+        *(buf + 10) = 99;   // c
+        *(buf + 11) = 97;   // a
+        *(buf + 12) = 116;  // t
+        *(buf + 13) = 105;  // i
+        *(buf + 14) = 111;  // o
+        *(buf + 15) = 110;  // n
+        return;
+    }
+    if idx == 29 {
+        // content-range
+        *(buf + 0)  = 99;   // c
+        *(buf + 1)  = 111;  // o
+        *(buf + 2)  = 110;  // n
+        *(buf + 3)  = 116;  // t
+        *(buf + 4)  = 101;  // e
+        *(buf + 5)  = 110;  // n
+        *(buf + 6)  = 116;  // t
+        *(buf + 7)  = 45;   // -
+        *(buf + 8)  = 114;  // r
+        *(buf + 9)  = 97;   // a
+        *(buf + 10) = 110;  // n
+        *(buf + 11) = 103;  // g
+        *(buf + 12) = 101;  // e
+        return;
+    }
+    if idx == 30 {
+        // content-type
+        *(buf + 0)  = 99;   // c
+        *(buf + 1)  = 111;  // o
+        *(buf + 2)  = 110;  // n
+        *(buf + 3)  = 116;  // t
+        *(buf + 4)  = 101;  // e
+        *(buf + 5)  = 110;  // n
+        *(buf + 6)  = 116;  // t
+        *(buf + 7)  = 45;   // -
+        *(buf + 8)  = 116;  // t
+        *(buf + 9)  = 121;  // y
+        *(buf + 10) = 112;  // p
+        *(buf + 11) = 101;  // e
+        return;
+    }
+}
+
+// Write the value bytes for the given 1-based static-table index into buf.
+fn hpack_static_value_write(idx: u32, buf: Address) {
+    if idx == 1  { return; }   // empty
+    if idx == 2  {
+        // GET
+        *(buf + 0) = 71;   // G
+        *(buf + 1) = 69;   // E
+        *(buf + 2) = 84;   // T
+        return;
+    }
+    if idx == 3  {
+        // POST
+        *(buf + 0) = 80;   // P
+        *(buf + 1) = 79;   // O
+        *(buf + 2) = 83;   // S
+        *(buf + 3) = 84;   // T
+        return;
+    }
+    if idx == 4  {
+        // /
+        *(buf + 0) = 47;
+        return;
+    }
+    if idx == 5  {
+        // /index.html
+        *(buf + 0)  = 47;   // /
+        *(buf + 1)  = 105;  // i
+        *(buf + 2)  = 110;  // n
+        *(buf + 3)  = 100;  // d
+        *(buf + 4)  = 101;  // e
+        *(buf + 5)  = 120;  // x
+        *(buf + 6)  = 46;   // .
+        *(buf + 7)  = 104;  // h
+        *(buf + 8)  = 116;  // t
+        *(buf + 9)  = 109;  // m
+        *(buf + 10) = 108;  // l
+        return;
+    }
+    if idx == 6  {
+        // http
+        *(buf + 0) = 104;  // h
+        *(buf + 1) = 116;  // t
+        *(buf + 2) = 116;  // t
+        *(buf + 3) = 112;  // p
+        return;
+    }
+    if idx == 7  {
+        // https
+        *(buf + 0) = 104;  // h
+        *(buf + 1) = 116;  // t
+        *(buf + 2) = 116;  // t
+        *(buf + 3) = 112;  // p
+        *(buf + 4) = 115;  // s
+        return;
+    }
+    if idx == 8  { hpack_write_status_value(buf, 50, 48, 48); return; }  // 200
+    if idx == 9  { hpack_write_status_value(buf, 50, 48, 52); return; }  // 204
+    if idx == 10 { hpack_write_status_value(buf, 50, 48, 54); return; }  // 206
+    if idx == 11 { hpack_write_status_value(buf, 51, 48, 52); return; }  // 304
+    if idx == 12 { hpack_write_status_value(buf, 52, 48, 48); return; }  // 400
+    if idx == 13 { hpack_write_status_value(buf, 52, 48, 52); return; }  // 404
+    if idx == 14 { hpack_write_status_value(buf, 53, 48, 48); return; }  // 500
+    if idx == 15 {
+        // gzip, deflate
+        *(buf + 0)  = 103;  // g
+        *(buf + 1)  = 122;  // z
+        *(buf + 2)  = 105;  // i
+        *(buf + 3)  = 112;  // p
+        *(buf + 4)  = 44;   // ,
+        *(buf + 5)  = 32;   // (space)
+        *(buf + 6)  = 100;  // d
+        *(buf + 7)  = 101;  // e
+        *(buf + 8)  = 102;  // f
+        *(buf + 9)  = 108;  // l
+        *(buf + 10) = 97;   // a
+        *(buf + 11) = 116;  // t
+        *(buf + 12) = 101;  // e
+        return;
+    }
+    // 16..30: empty
+    return;
+}
+
+// Allocate a fresh NUL-terminated buffer containing the static name string
+// for the given index. Caller is responsible for freeing the returned buffer.
+// Returns 0 for idx == 0 or idx > 30.
+
+fn hpack_static_name(idx: u32) -> Address {
+    if idx == 0 { return 0 as Address; }
+    if idx > HPACK_STATIC_TABLE_MAX { return 0 as Address; }
+    let len: u32 = hpack_static_name_len(idx);
+    let buf: Address = allocate(len + 1);
+    hpack_static_name_write(idx, buf);
+    *(buf + len) = 0;
+    return buf;
+}
+
+// Allocate a fresh NUL-terminated buffer containing the static value string
+// for the given index. Caller is responsible for freeing the returned buffer.
+// Returns 0 for idx == 0 or idx > 30.
+
+fn hpack_static_value(idx: u32) -> Address {
+    if idx == 0 { return 0 as Address; }
+    if idx > HPACK_STATIC_TABLE_MAX { return 0 as Address; }
+    let len: u32 = hpack_static_value_len(idx);
+    let buf: Address = allocate(len + 1);
+    hpack_static_value_write(idx, buf);
+    *(buf + len) = 0;
+    return buf;
+}
+
+// ===========================================================================
+// 2. Dynamic Table
+// ===========================================================================
+// Layout: see file header. The table owns the name/value buffers of all
+// live entries. Eviction frees those buffers.
+
+// Create a new dynamic table with the given maximum size in bytes.
+// Returns an Address pointing to a 1568-byte allocation.
+
+fn hpack_table_create(max_size: u32) -> Address {
+    let total: u32 = HPACK_TABLE_HEADER_SIZE + HPACK_DYNAMIC_TABLE_MAX_ENTRIES * HPACK_ENTRY_SIZE;
+    let table: Address = allocate(total);
+    hpack_store_u32(table, 0,  max_size);
+    hpack_store_u32(table, 4,  0);   // current_size
+    hpack_store_u32(table, 8,  0);   // count
+    hpack_store_u32(table, 12, HPACK_DYNAMIC_TABLE_MAX_ENTRIES);
+    return table;
+}
+
+// Free the table and all owned name/value buffers. The table handle is
+// invalid after this call.
+
+fn hpack_table_destroy(table: Address) {
+    if table == 0 as Address { return; }
+    let count: u32 = hpack_load_u32(table, 8);
+    let mut_i: u32 = 0;
+    while mut_i < count {
+        let entry: Address = table + HPACK_TABLE_HEADER_SIZE + mut_i * HPACK_ENTRY_SIZE;
+        let n_addr: Address = hpack_load_addr(entry, 0);
+        let v_addr: Address = hpack_load_addr(entry, 12);
+        if n_addr != 0 as Address { free(n_addr); }
+        if v_addr != 0 as Address { free(v_addr); }
+        mut_i = mut_i + 1;
+    }
+    free(table);
+}
+
+// Internal: address of entry at 0-based internal index i (0 = most recent).
+fn hpack_table_entry_addr(table: Address, i: u32) -> Address {
+    return table + HPACK_TABLE_HEADER_SIZE + i * HPACK_ENTRY_SIZE;
+}
+
+// Internal: evict the oldest entry (at internal index count-1).
+fn hpack_table_evict_oldest(table: Address) {
+    let count: u32 = hpack_load_u32(table, 8);
+    if count == 0 { return; }
+    let entry: Address = hpack_table_entry_addr(table, count - 1);
+    let n_addr: Address = hpack_load_addr(entry, 0);
+    let n_len: u32 = hpack_load_u32(entry, 8);
+    let v_addr: Address = hpack_load_addr(entry, 12);
+    let v_len: u32 = hpack_load_u32(entry, 20);
+    let evicted_size: u32 = n_len + v_len + HPACK_ENTRY_OVERHEAD;
+    if n_addr != 0 as Address { free(n_addr); }
+    if v_addr != 0 as Address { free(v_addr); }
+    // Clear entry
+    hpack_store_addr(entry, 0,  0 as Address);
+    hpack_store_u32(entry, 8,  0);
+    hpack_store_addr(entry, 12, 0 as Address);
+    hpack_store_u32(entry, 20, 0);
+    // Update table state
+    let cur: u32 = hpack_load_u32(table, 4);
+    if cur >= evicted_size {
+        hpack_store_u32(table, 4, cur - evicted_size);
+    } else {
+        hpack_store_u32(table, 4, 0);
+    }
+    hpack_store_u32(table, 8, count - 1);
+}
+
+// Update the maximum table size. If the new maximum is smaller than the
+// current size, evict entries from the oldest end until it fits.
+// Implements RFC 7541 Section 4.2 / 4.3.
+
+fn hpack_table_set_max_size(table: Address, new_max: u32) {
+    hpack_store_u32(table, 0, new_max);
+    let mut_cur: u32 = hpack_load_u32(table, 4);
+    let mut_count: u32 = hpack_load_u32(table, 8);
+    while mut_count > 0 {
+        if mut_cur <= new_max { break; }
+        hpack_table_evict_oldest(table);
+        mut_cur = hpack_load_u32(table, 4);
+        mut_count = hpack_load_u32(table, 8);
+    }
+}
+
+// Add a new entry to the front of the dynamic table. The table makes its
+// own copies of the name and value bytes; the caller retains ownership of
+// the input buffers. If the new entry's size alone exceeds max_size, the
+// table is emptied and the entry is not inserted (RFC 7541 Section 4.4).
+// Implements RFC 7541 Section 4.4.
+
+fn hpack_table_add(table: Address, name: Address, name_len: u32, value: Address, value_len: u32) {
+    let max_size: u32 = hpack_load_u32(table, 0);
+    let entry_size: u32 = name_len + value_len + HPACK_ENTRY_OVERHEAD;
+    let mut_count: u32 = hpack_load_u32(table, 8);
+    let mut_cur: u32 = hpack_load_u32(table, 4);
+
+    // Evict oldest entries until there is room for the new entry, or the
+    // table is empty. If entry_size > max_size, we evict everything and
+    // then bail out without inserting.
+    while mut_count > 0 {
+        if (mut_cur + entry_size) <= max_size { break; }
+        hpack_table_evict_oldest(table);
+        mut_count = hpack_load_u32(table, 8);
+        mut_cur = hpack_load_u32(table, 4);
+    }
+
+    // Special case: new entry alone is larger than max_size — table MUST
+    // be emptied and the entry is not inserted.
+    if entry_size > max_size { return; }
+
+    // Bounded by HPACK_DYNAMIC_TABLE_MAX_ENTRIES. If at capacity, evict
+    // the oldest to make room for the shift.
+    if mut_count >= HPACK_DYNAMIC_TABLE_MAX_ENTRIES {
+        hpack_table_evict_oldest(table);
+        mut_count = hpack_load_u32(table, 8);
+        mut_cur = hpack_load_u32(table, 4);
+    }
+
+    // Shift existing entries one slot toward the tail (oldest end), so
+    // that index 0 becomes free for the new entry. We iterate from the
+    // oldest (count-1) down to 0, copying slot i to slot i+1.
+    let mut_i: u32 = mut_count;
+    while mut_i > 0 {
+        let src: Address = hpack_table_entry_addr(table, mut_i - 1);
+        let dst: Address = hpack_table_entry_addr(table, mut_i);
+        hpack_store_addr(dst, 0,  hpack_load_addr(src, 0));
+        hpack_store_u32(dst, 8,  hpack_load_u32(src, 8));
+        hpack_store_addr(dst, 12, hpack_load_addr(src, 12));
+        hpack_store_u32(dst, 20, hpack_load_u32(src, 20));
+        mut_i = mut_i - 1;
+    }
+
+    // Allocate owned copies of name and value.
+    let n_buf: Address = allocate(name_len + 1);
+    let v_buf: Address = allocate(value_len + 1);
+    let ni: u32 = 0;
+    while ni < name_len {
+        *(n_buf + ni) = *(name + ni) & 255;
+        ni = ni + 1;
+    }
+    *(n_buf + name_len) = 0;
+    let vi: u32 = 0;
+    while vi < value_len {
+        *(v_buf + vi) = *(value + vi) & 255;
+        vi = vi + 1;
+    }
+    *(v_buf + value_len) = 0;
+
+    // Store new entry at index 0.
+    let entry0: Address = hpack_table_entry_addr(table, 0);
+    hpack_store_addr(entry0, 0,  n_buf);
+    hpack_store_u32(entry0, 8,  name_len);
+    hpack_store_addr(entry0, 12, v_buf);
+    hpack_store_u32(entry0, 20, value_len);
+
+    // Update table state.
+    hpack_store_u32(table, 8, mut_count + 1);
+    hpack_store_u32(table, 4, mut_cur + entry_size);
+}
+
+// Look up a name in the dynamic table. Returns the 1-based HPACK index
+// (62 = most recent entry) if found, or 0 if not found. Only name bytes
+// are compared; value bytes are not examined.
+
+fn hpack_table_lookup(table: Address, name: Address, name_len: u32) -> u32 {
+    let count: u32 = hpack_load_u32(table, 8);
+    let i: u32 = 0;
+    while i < count {
+        let entry: Address = hpack_table_entry_addr(table, i);
+        let e_name_len: u32 = hpack_load_u32(entry, 8);
+        if e_name_len == name_len {
+            // Compare bytes
+            let e_name: Address = hpack_load_addr(entry, 0);
+            let mut_j: u32 = 0;
+            let mut_match: u32 = 1;
+            while mut_j < name_len {
+                if (*(e_name + mut_j) & 255) != (*(name + mut_j) & 255) {
+                    mut_match = 0;
+                }
+                mut_j = mut_j + 1;
+            }
+            if mut_match == 1 {
+                return HPACK_DYNAMIC_INDEX_BASE + i;
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+// Internal: retrieve the Address of the entry at the given HPACK index
+// (62 = most recent). Returns 0 if the index is out of range.
+
+fn hpack_table_get_entry(table: Address, hpack_idx: u32) -> Address {
+    if hpack_idx < HPACK_DYNAMIC_INDEX_BASE { return 0 as Address; }
+    let internal_idx: u32 = hpack_idx - HPACK_DYNAMIC_INDEX_BASE;
+    let count: u32 = hpack_load_u32(table, 8);
+    if internal_idx >= count { return 0 as Address; }
+    return hpack_table_entry_addr(table, internal_idx);
+}
+
+// ===========================================================================
+// 3. Integer Encode/Decode (RFC 7541 Section 5.1)
+// ===========================================================================
+// Decodes an HPACK integer starting at the byte pointed to by *pos, using
+// the given prefix length (1..=8). The prefix bits already present in the
+// first byte contribute to the value. On return, *pos has been advanced
+// past the encoded integer. Caller must ensure the buffer contains enough
+// bytes for the encoding (this implementation does no bounds checking).
+
+fn hpack_decode_int(buf: Address, pos: Address, prefix_bits: u32) -> u32 {
+    let p: u32 = hpack_load_u32(pos, 0);
+    let one: u32 = 1;
+    let M: u32 = ((one << prefix_bits) - 1) & 4294967295;
+    let first_byte: u32 = *(buf + p) & 255;
+    let mut_value: u32 = first_byte & M;
+    let mut_p: u32 = p + 1;
+    if mut_value < M {
+        hpack_store_u32(pos, 0, mut_p);
+        return mut_value;
+    }
+    // mut_value == M: read continuation bytes
+    let mut_m: u32 = 0;
+    while 1 == 1 {
+        let b: u32 = *(buf + mut_p) & 255;
+        mut_p = mut_p + 1;
+        mut_value = (mut_value + ((b & 127) << mut_m)) & 4294967295;
+        mut_m = (mut_m + 7) & 4294967295;
+        if (b & 128) == 0 { break; }
+    }
+    hpack_store_u32(pos, 0, mut_p);
+    return mut_value;
+}
+
+// Encodes value as an HPACK integer with the given prefix length, OR-ing
+// the prefix bits into the first byte along with prefix_byte. Returns the
+// new position (offset into buf) after the encoded integer. The caller
+// must ensure buf has at least 5 bytes of headroom at pos (worst case for
+// a u32 value with prefix_bits = 1 is 5 bytes: 1 + 4 continuation).
+
+fn hpack_encode_int(buf: Address, pos: u32, value: u32, prefix_bits: u32, prefix_byte: u32) -> u32 {
+    let one: u32 = 1;
+    let M: u32 = ((one << prefix_bits) - 1) & 4294967295;
+    let mut_p: u32 = pos;
+    if value < M {
+        *(buf + mut_p) = (prefix_byte | value) & 255;
+        return mut_p + 1;
+    }
+    *(buf + mut_p) = (prefix_byte | M) & 255;
+    mut_p = mut_p + 1;
+    let mut_v: u32 = value - M;
+    while mut_v >= 128 {
+        *(buf + mut_p) = ((mut_v & 127) | 128) & 255;
+        mut_p = mut_p + 1;
+        mut_v = mut_v >> 7;
+    }
+    *(buf + mut_p) = mut_v & 255;
+    return mut_p + 1;
+}
+
+// ===========================================================================
+// 4. String Encode/Decode (RFC 7541 Section 5.2)
+// ===========================================================================
+// Decodes an HPACK string literal starting at *pos. The first byte's high
+// bit is the Huffman flag; the low 7 bits (plus continuation, if any) form
+// the length. The string bytes are copied into out[0..length]. On return,
+// *pos has been advanced past the string. Returns the length on success.
+//
+// This implementation does NOT support Huffman-encoded strings. If the
+// Huffman flag is set, the function returns the sentinel
+// HPACK_HUFFMAN_NOT_IMPL without advancing *pos past the string body, so
+// callers can detect the error. The caller is responsible for checking
+// the return value against the sentinel.
+
+fn hpack_decode_string(buf: Address, pos: Address, out: Address, out_max: u32) -> u32 {
+    let p_before: u32 = hpack_load_u32(pos, 0);
+    let first_byte: u32 = *(buf + p_before) & 255;
+    let huffman_flag: u32 = first_byte & 128;
+    // Decode length with 7-bit prefix; this also advances *pos past the
+    // length encoding (but not past the string body).
+    let length: u32 = hpack_decode_int(buf, pos, 7);
+    if huffman_flag != 0 {
+        // Huffman decoding is not implemented. We have already advanced
+        // pos past the length encoding; rewind it so the caller can
+        // detect the error and abort cleanly.
+        hpack_store_u32(pos, 0, p_before);
+        return HPACK_HUFFMAN_NOT_IMPL;
+    }
+    if length > out_max {
+        // Output buffer too small — rewind and report error.
+        hpack_store_u32(pos, 0, p_before);
+        return HPACK_HUFFMAN_NOT_IMPL;
+    }
+    let p_after: u32 = hpack_load_u32(pos, 0);
+    let i: u32 = 0;
+    while i < length {
+        *(out + i) = *(buf + p_after + i) & 255;
+        i = i + 1;
+    }
+    hpack_store_u32(pos, 0, p_after + length);
+    return length;
+}
+
+// Encodes a string literal. If use_huffman is non-zero, the Huffman flag
+// bit is set (but no actual Huffman encoding is performed — the raw bytes
+// are emitted with the flag set, which is incorrect for wire interop but
+// useful for testing decoders that handle the flag). For correct wire
+// output, pass use_huffman = 0. Returns the new position.
+
+fn hpack_encode_string(buf: Address, pos: u32, str: Address, str_len: u32, use_huffman: u32) -> u32 {
+    let mut_prefix: u32 = 0;
+    if use_huffman != 0 { mut_prefix = 128; }
+    let mut_p: u32 = hpack_encode_int(buf, pos, str_len, 7, mut_prefix);
+    let i: u32 = 0;
+    while i < str_len {
+        *(buf + mut_p) = *(str + i) & 255;
+        mut_p = mut_p + 1;
+        i = i + 1;
+    }
+    return mut_p;
+}
+
+// ===========================================================================
+// 5. Header Block Decode (RFC 7541 Section 6)
+// ===========================================================================
+// Decodes a complete HPACK block at buf[0..buf_len] into output.
+// output is laid out as:
+//   [0 .. max_headers*16)               — array of 16-byte decoded-header entries
+//   [max_headers*16 ..)                 — string pool for name/value bytes
+// Each 16-byte entry is (name_offset, name_len, value_offset, value_len)
+// as u32 little-endian, where the offsets are byte offsets within output.
+// Returns the number of decoded headers (which may be less than the number
+// of headers in the block if max_headers was reached). Dynamic Table Size
+// Update control messages do not count toward the header count.
+//
+// On Huffman-encoded input or output-buffer overflow, decoding stops and
+// the count so far is returned.
+
+fn hpack_decode(buf: Address, buf_len: u32, output: Address, max_headers: u32, table: Address) -> u32 {
+    // Position is tracked through a 4-byte allocation so we can pass its
+    // address to hpack_decode_int / hpack_decode_string.
+    let pos_buf: Address = allocate(4);
+    hpack_store_u32(pos_buf, 0, 0);
+
+    let mut_count: u32 = 0;
+    let mut_pool: u32 = max_headers * 16;
+
+    while hpack_load_u32(pos_buf, 0) < buf_len {
+        if mut_count >= max_headers { break; }
+
+        let cur_pos: u32 = hpack_load_u32(pos_buf, 0);
+        let first_byte: u32 = *(buf + cur_pos) & 255;
+
+        // Per-iteration state. Each branch below sets these and then we
+        // emit the entry once at the bottom of the loop body.
+        let mut_name_off: u32 = 0;
+        let mut_name_len: u32 = 0;
+        let mut_value_off: u32 = 0;
+        let mut_value_len: u32 = 0;
+        let mut_skip: u32 = 0;
+        let mut_is_control: u32 = 0;     // Dynamic Table Size Update — not a header
+        let mut_add_to_table: u32 = 0;   // set for Literal with Incremental Indexing
+
+        // ----- Indexed Header Field (1xxxxxxx) -----
+        if (first_byte & 128) != 0 {
+            let index: u32 = hpack_decode_int(buf, pos_buf, 7);
+
+            // Source pointers for name/value (may be static or dynamic).
+            let mut_src_name: Address = 0 as Address;
+            let mut_src_value: Address = 0 as Address;
+            let mut_owned_name: u32 = 0;
+            let mut_owned_value: u32 = 0;
+
+            if index == 0 {
+                // 0 is invalid for indexed representation.
+                mut_skip = 1;
+            } else if index <= HPACK_STATIC_TABLE_MAX {
+                mut_src_name = hpack_static_name(index);
+                mut_name_len = hpack_static_name_len(index);
+                mut_src_value = hpack_static_value(index);
+                mut_value_len = hpack_static_value_len(index);
+                mut_owned_name = 1;
+                mut_owned_value = 1;
+            } else if index <= 61 {
+                // Static table entries 31..61 are not implemented.
+                mut_skip = 1;
+            } else {
+                let entry: Address = hpack_table_get_entry(table, index);
+                if entry == 0 as Address {
+                    mut_skip = 1;
+                } else {
+                    mut_src_name = hpack_load_addr(entry, 0);
+                    mut_name_len = hpack_load_u32(entry, 8);
+                    mut_src_value = hpack_load_addr(entry, 12);
+                    mut_value_len = hpack_load_u32(entry, 20);
+                }
+            }
+
+            if mut_skip == 0 {
+                // Copy name into pool.
+                mut_name_off = mut_pool;
+                let ci: u32 = 0;
+                while ci < mut_name_len {
+                    *(output + mut_pool) = *(mut_src_name + ci) & 255;
+                    mut_pool = mut_pool + 1;
+                    ci = ci + 1;
+                }
+                // Copy value into pool.
+                mut_value_off = mut_pool;
+                let cj: u32 = 0;
+                while cj < mut_value_len {
+                    *(output + mut_pool) = *(mut_src_value + cj) & 255;
+                    mut_pool = mut_pool + 1;
+                    cj = cj + 1;
+                }
+            }
+
+            if mut_owned_name != 0  { free(mut_src_name); }
+            if mut_owned_value != 0 { free(mut_src_value); }
+
+        // ----- Literal with Incremental Indexing (01xxxxxx) -----
+        } else if (first_byte & 192) == 64 {
+            let name_index: u32 = hpack_decode_int(buf, pos_buf, 6);
+            mut_add_to_table = 1;
+            // --- begin inline name resolution ---
+            if name_index == 0 {
+                // Literal name follows. Decode directly into the pool.
+                mut_name_off = mut_pool;
+                let out_addr: Address = output + mut_pool;
+                let n_len: u32 = hpack_decode_string(buf, pos_buf, out_addr, buf_len);
+                if n_len == HPACK_HUFFMAN_NOT_IMPL {
+                    mut_skip = 1;
+                } else {
+                    mut_name_len = n_len;
+                    mut_pool = mut_pool + n_len;
+                }
+            } else if name_index <= HPACK_STATIC_TABLE_MAX {
+                let sname: Address = hpack_static_name(name_index);
+                mut_name_len = hpack_static_name_len(name_index);
+                mut_name_off = mut_pool;
+                let ci: u32 = 0;
+                while ci < mut_name_len {
+                    *(output + mut_pool) = *(sname + ci) & 255;
+                    mut_pool = mut_pool + 1;
+                    ci = ci + 1;
+                }
+                free(sname);
+            } else if name_index <= 61 {
+                mut_skip = 1;
+            } else {
+                let entry: Address = hpack_table_get_entry(table, name_index);
+                if entry == 0 as Address {
+                    mut_skip = 1;
+                } else {
+                    let src: Address = hpack_load_addr(entry, 0);
+                    mut_name_len = hpack_load_u32(entry, 8);
+                    mut_name_off = mut_pool;
+                    let ci: u32 = 0;
+                    while ci < mut_name_len {
+                        *(output + mut_pool) = *(src + ci) & 255;
+                        mut_pool = mut_pool + 1;
+                        ci = ci + 1;
+                    }
+                }
+            }
+            // --- end inline name resolution ---
+
+            // Decode value directly into the pool.
+            if mut_skip == 0 {
+                mut_value_off = mut_pool;
+                let out_addr: Address = output + mut_pool;
+                let v_len: u32 = hpack_decode_string(buf, pos_buf, out_addr, buf_len);
+                if v_len == HPACK_HUFFMAN_NOT_IMPL {
+                    mut_skip = 1;
+                } else {
+                    mut_value_len = v_len;
+                    mut_pool = mut_pool + v_len;
+                }
+            }
+
+        // ----- Dynamic Table Size Update (001xxxxx) -----
+        } else if (first_byte & 224) == 32 {
+            let new_max: u32 = hpack_decode_int(buf, pos_buf, 5);
+            hpack_table_set_max_size(table, new_max);
+            mut_is_control = 1;
+
+        // ----- Literal Never Indexed (0001xxxx) or without Indexing (0000xxxx) -----
+        } else if (first_byte & 240) == 16 || (first_byte & 240) == 0 {
+            // 4-bit prefix; we don't distinguish "never indexed" from
+            // "without indexing" at decode time — both yield a header that
+            // is not added to the dynamic table.
+            let name_index: u32 = hpack_decode_int(buf, pos_buf, 4);
+
+            // --- begin inline name resolution ---
+            if name_index == 0 {
+                mut_name_off = mut_pool;
+                let out_addr: Address = output + mut_pool;
+                let n_len: u32 = hpack_decode_string(buf, pos_buf, out_addr, buf_len);
+                if n_len == HPACK_HUFFMAN_NOT_IMPL {
+                    mut_skip = 1;
+                } else {
+                    mut_name_len = n_len;
+                    mut_pool = mut_pool + n_len;
+                }
+            } else if name_index <= HPACK_STATIC_TABLE_MAX {
+                let sname: Address = hpack_static_name(name_index);
+                mut_name_len = hpack_static_name_len(name_index);
+                mut_name_off = mut_pool;
+                let ci: u32 = 0;
+                while ci < mut_name_len {
+                    *(output + mut_pool) = *(sname + ci) & 255;
+                    mut_pool = mut_pool + 1;
+                    ci = ci + 1;
+                }
+                free(sname);
+            } else if name_index <= 61 {
+                mut_skip = 1;
+            } else {
+                let entry: Address = hpack_table_get_entry(table, name_index);
+                if entry == 0 as Address {
+                    mut_skip = 1;
+                } else {
+                    let src: Address = hpack_load_addr(entry, 0);
+                    mut_name_len = hpack_load_u32(entry, 8);
+                    mut_name_off = mut_pool;
+                    let ci: u32 = 0;
+                    while ci < mut_name_len {
+                        *(output + mut_pool) = *(src + ci) & 255;
+                        mut_pool = mut_pool + 1;
+                        ci = ci + 1;
+                    }
+                }
+            }
+            // --- end inline name resolution ---
+
+            // Decode value directly into the pool.
+            if mut_skip == 0 {
+                mut_value_off = mut_pool;
+                let out_addr: Address = output + mut_pool;
+                let v_len: u32 = hpack_decode_string(buf, pos_buf, out_addr, buf_len);
+                if v_len == HPACK_HUFFMAN_NOT_IMPL {
+                    mut_skip = 1;
+                } else {
+                    mut_value_len = v_len;
+                    mut_pool = mut_pool + v_len;
+                }
+            }
+        } else {
+            // Unrecognized first-byte pattern: skip one byte to make
+            // forward progress.
+            hpack_store_u32(pos_buf, 0, cur_pos + 1);
+            mut_is_control = 1;
+        }
+
+        // Emit the entry (unless this was a control message or a skip).
+        if mut_is_control == 0 {
+            if mut_skip == 0 {
+                let out_entry: Address = output + mut_count * 16;
+                hpack_store_u32(out_entry, 0,  mut_name_off);
+                hpack_store_u32(out_entry, 4,  mut_name_len);
+                hpack_store_u32(out_entry, 8,  mut_value_off);
+                hpack_store_u32(out_entry, 12, mut_value_len);
+                mut_count = mut_count + 1;
+
+                // Add to dynamic table if this was a Literal with
+                // Incremental Indexing.
+                if mut_add_to_table != 0 {
+                    hpack_table_add(
+                        table,
+                        output + mut_name_off, mut_name_len,
+                        output + mut_value_off, mut_value_len
+                    );
+                }
+            }
+        }
+    }
+
+    free(pos_buf);
+    return mut_count;
+}
+
+// ===========================================================================
+// 6. Single-Header Encode (simplified)
+// ===========================================================================
+// Encodes a single header field into buf starting at offset pos.
+// If index > 0, emits an Indexed Header Field representation (1xxxxxxx)
+// using the given index — note that this representation carries only the
+// index, not a separate name/value, so the name/value arguments are
+// ignored in that case.
+// If index == 0, emits a Literal Header Field without Indexing (0000xxxx)
+// with a literal name and literal value (no Huffman encoding).
+// Returns the new position.
+
+fn hpack_encode_header(buf: Address, pos: u32, name: Address, name_len: u32, value: Address, value_len: u32, index: u32) -> u32 {
+    if index > 0 {
+        // Indexed Header Field: prefix 0x80, 7-bit prefix.
+        return hpack_encode_int(buf, pos, index, 7, 128);
+    }
+    // Literal without Indexing: prefix 0x00, 4-bit prefix, name index = 0.
+    let mut_p: u32 = hpack_encode_int(buf, pos, 0, 4, 0);
+    // Literal name (no Huffman)
+    mut_p = hpack_encode_string(buf, mut_p, name, name_len, 0);
+    // Literal value (no Huffman)
+    mut_p = hpack_encode_string(buf, mut_p, value, value_len, 0);
+    return mut_p;
+}

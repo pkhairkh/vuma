@@ -1,0 +1,273 @@
+// fileio.vuma
+// VUMA standard library module: file I/O, directories, processes, pipes.
+// Target: Linux x86_64. Importable library module (no main()).
+//
+// Task ID: womb-fileio
+//
+// This module wraps Linux x86_64 syscalls behind high-level VUMA functions.
+// Memory is managed with allocate()/free(); byte-level loads/stores use
+// the *(ptr + offset) primitive.
+
+// ===========================================================================
+// Constants
+// ===========================================================================
+
+const O_RDONLY: i64 = 0;
+const O_WRONLY: i64 = 1;
+const O_RDWR:   i64 = 2;
+const O_CREAT:  i64 = 64;
+const O_TRUNC:  i64 = 512;
+const O_APPEND: i64 = 1024;
+
+const SEEK_SET: i64 = 0;
+const SEEK_CUR: i64 = 1;
+const SEEK_END: i64 = 2;
+
+const S_IRWXU:  i64 = 448;
+
+// Size of struct stat on x86_64 Linux.
+const STAT_SIZE: i64 = 144;
+// Offset of st_size (off_t, 8 bytes) within struct stat on x86_64 Linux.
+const STAT_ST_SIZE_OFF: i64 = 48;
+
+// ===========================================================================
+// Linux x86_64 syscalls
+// ===========================================================================
+
+extern "C" {
+    fn open(pathname: Address, flags: i64, mode: i64) -> i64;
+    fn close(fd: i64) -> i64;
+    fn read(fd: i64, buf: Address, count: i64) -> i64;
+    fn write(fd: i64, buf: Address, count: i64) -> i64;
+    fn lseek(fd: i64, offset: i64, whence: i64) -> i64;
+    fn unlink(pathname: Address) -> i64;
+    fn mkdir(pathname: Address, mode: i64) -> i64;
+    fn rmdir(pathname: Address) -> i64;
+    fn rename(oldpath: Address, newpath: Address) -> i64;
+    fn stat(pathname: Address, statbuf: Address) -> i64;
+    fn fstat(fd: i64, statbuf: Address) -> i64;
+    fn getcwd(buf: Address, size: i64) -> Address;
+    fn chdir(path: Address) -> i64;
+    fn dup2(oldfd: i64, newfd: i64) -> i64;
+    fn pipe(pipefd: Address) -> i64;
+    fn fork() -> i64;
+    fn execve(path: Address, argv: Address, envp: Address) -> i64;
+    fn waitpid(pid: i64, status: Address, options: i64) -> i64;
+    fn kill(pid: i64, sig: i64) -> i64;
+    // exit() is required to implement proc_exit(). Linux x86_64 syscall #60.
+    fn exit(code: i64) -> i64;
+}
+
+// ===========================================================================
+// Internal helpers
+// ===========================================================================
+
+// Load a little-endian i64 from 8 bytes starting at `ptr`.
+// Used to pull st_size out of struct stat.
+fn mem_load_i64(ptr: Address) -> i64 {
+    let b0: i64 = *(ptr + 0) as i64;
+    let b1: i64 = *(ptr + 1) as i64;
+    let b2: i64 = *(ptr + 2) as i64;
+    let b3: i64 = *(ptr + 3) as i64;
+    let b4: i64 = *(ptr + 4) as i64;
+    let b5: i64 = *(ptr + 5) as i64;
+    let b6: i64 = *(ptr + 6) as i64;
+    let b7: i64 = *(ptr + 7) as i64;
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+         | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
+}
+
+// ===========================================================================
+// 1. File operations
+// ===========================================================================
+
+// Open `path` with `flags`. Returns fd on success, -1 on error.
+fn file_open(path: Address, flags: i64) -> i64 {
+    let fd: i64 = open(path, flags, 0);
+    return fd;
+}
+
+// Close a file descriptor. Errors are ignored.
+fn file_close(fd: i64) {
+    close(fd);
+    return;
+}
+
+// Read up to `len` bytes into `buf`. Returns bytes read, or -1 on error.
+fn file_read(fd: i64, buf: Address, len: u32) -> i64 {
+    let n: i64 = read(fd, buf, len as i64);
+    return n;
+}
+
+// Write `len` bytes from `buf`. Returns bytes written, or -1 on error.
+fn file_write(fd: i64, buf: Address, len: u32) -> i64 {
+    let n: i64 = write(fd, buf, len as i64);
+    return n;
+}
+
+// Open `path` read-only, read up to `max_len` bytes into `buf`, close.
+// Returns total bytes read, or -1 on error.
+fn file_read_all(path: Address, buf: Address, max_len: u32) -> i64 {
+    let fd: i64 = file_open(path, O_RDONLY);
+    if fd < 0 {
+        return -1;
+    }
+    let total: i64 = 0;
+    let remaining: i64 = max_len as i64;
+    let cursor: Address = buf;
+    while remaining > 0 {
+        let n: i64 = read(fd, cursor, remaining);
+        if n < 0 {
+            file_close(fd);
+            return -1;
+        }
+        if n == 0 {
+            break;
+        }
+        total = total + n;
+        remaining = remaining - n;
+        cursor = cursor + n;
+    }
+    file_close(fd);
+    return total;
+}
+
+// Open `path` for writing (create + truncate), write all `len` bytes, close.
+// Returns total bytes written, or -1 on error.
+fn file_write_all(path: Address, buf: Address, len: u32) -> i64 {
+    let fd: i64 = file_open(path, O_WRONLY | O_CREAT | O_TRUNC);
+    if fd < 0 {
+        return -1;
+    }
+    let total: i64 = 0;
+    let remaining: i64 = len as i64;
+    let cursor: Address = buf;
+    while remaining > 0 {
+        let n: i64 = write(fd, cursor, remaining);
+        if n < 0 {
+            file_close(fd);
+            return -1;
+        }
+        if n == 0 {
+            break;
+        }
+        total = total + n;
+        remaining = remaining - n;
+        cursor = cursor + n;
+    }
+    file_close(fd);
+    return total;
+}
+
+// Reposition the file offset. Returns the new offset, or -1 on error.
+fn file_lseek(fd: i64, offset: i64, whence: i64) -> i64 {
+    return lseek(fd, offset, whence);
+}
+
+// Return the size of `path` in bytes (via stat), or -1 on error.
+// On x86_64 Linux, struct stat.st_size is at offset 48, 8 bytes, little-endian.
+fn file_size(path: Address) -> i64 {
+    let sb: Address = allocate(STAT_SIZE);
+    let rc: i64 = stat(path, sb);
+    if rc < 0 {
+        free(sb);
+        return -1;
+    }
+    let size: i64 = mem_load_i64(sb + STAT_ST_SIZE_OFF);
+    free(sb);
+    return size;
+}
+
+// Return 1 if `path` exists (stat succeeds), 0 otherwise.
+fn file_exists(path: Address) -> u32 {
+    let sb: Address = allocate(STAT_SIZE);
+    let rc: i64 = stat(path, sb);
+    free(sb);
+    if rc == 0 {
+        return 1u32;
+    }
+    return 0u32;
+}
+
+// Delete a file via unlink(). Returns 0 on success, -1 on error.
+fn file_delete(path: Address) -> i64 {
+    return unlink(path);
+}
+
+// Rename `old_path` to `new_path`. Returns 0 on success, -1 on error.
+fn file_rename(old_path: Address, new_path: Address) -> i64 {
+    return rename(old_path, new_path);
+}
+
+// ===========================================================================
+// 2. Directory operations
+// ===========================================================================
+
+// Create a directory at `path` with `mode`. Returns 0 on success, -1 on error.
+fn dir_create(path: Address, mode: i64) -> i64 {
+    return mkdir(path, mode);
+}
+
+// Remove an empty directory at `path`. Returns 0 on success, -1 on error.
+fn dir_delete(path: Address) -> i64 {
+    return rmdir(path);
+}
+
+// Get the current working directory into `buf` (up to `size` bytes).
+// Returns `buf` on success, or a null Address on error.
+fn dir_getcwd(buf: Address, size: u32) -> Address {
+    return getcwd(buf, size as i64);
+}
+
+// Change the current working directory to `path`.
+// Returns 0 on success, -1 on error.
+fn dir_chdir(path: Address) -> i64 {
+    return chdir(path);
+}
+
+// ===========================================================================
+// 3. Process management
+// ===========================================================================
+
+// Fork the current process.
+// Returns child pid in parent, 0 in child, -1 on error.
+fn proc_fork() -> i64 {
+    return fork();
+}
+
+// Execute `path` with argv and envp.
+// Does not return on success; returns -1 on error.
+fn proc_exec(path: Address, argv: Address, envp: Address) -> i64 {
+    return execve(path, argv, envp);
+}
+
+// Wait for child `pid` (blocking, no options). Returns the reaped pid,
+// or -1 on error. The child's exit status is discarded internally.
+fn proc_wait(pid: i64) -> i64 {
+    let status: Address = allocate(4);
+    let rc: i64 = waitpid(pid, status, 0);
+    free(status);
+    return rc;
+}
+
+// Send signal `sig` to process `pid`. Returns 0 on success, -1 on error.
+fn proc_kill(pid: i64, sig: i64) -> i64 {
+    return kill(pid, sig);
+}
+
+// Terminate this process with exit `code`. Does not return.
+fn proc_exit(code: i64) {
+    exit(code);
+    return;
+}
+
+// ===========================================================================
+// 4. Pipe
+// ===========================================================================
+
+// Create an anonymous pipe. On success, writes two i32 file descriptors to
+// the 8-byte buffer at `pipefd`: pipefd[0] is the read end, pipefd[1] the
+// write end. Returns 0 on success, -1 on error.
+fn pipe_create(pipefd: Address) -> i64 {
+    return pipe(pipefd);
+}
