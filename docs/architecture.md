@@ -63,7 +63,7 @@ The workspace has 11 member crates:
 | `vuma-parser` | `src/parser/` | Lexer, parser, AST, AST-to-SCG lowering, module resolution |
 | `vuma-cor` | `src/cor/` | Continuous Optimization Runtime — PGO, speculative optimization, deployment |
 | `vuma-proof` | `src/proof/` | Formal proof system — proofs, checker, tactics, counterexamples |
-| `vuma-std` | `src/std/` | Standard library (host-side) — math, fmt, crypto, string, alloc, io, sync |
+| `vuma-std` | `src/std/` | Standard library (Rust crate, not yet linked to VUMA programs) |
 | `vuma-tests` | `src/tests/` | Integration tests and benchmarks |
 | `vuma-package` | `src/package/` | Package manager — manifest, resolver, registry |
 
