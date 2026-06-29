@@ -1,7 +1,7 @@
 //! # VUMA Performance Benchmark Suite
 //!
 //! Structured benchmarks measuring compilation-pipeline performance and
-//! codegen quality across all 8 VUMA backends.
+//! codegen quality across all 10 VUMA backends.
 //!
 //! # Benchmark Categories
 //!
@@ -9,7 +9,7 @@
 //! |---|---------------------------|-----------------------------------------------------|
 //! | 1 | SHA256d                   | Compile time, binary size, estimated instruction count per backend |
 //! | 2 | Compilation Speed         | Parse→SCG→IR→codegen time for programs of varying size |
-//! | 3 | Backend Comparison        | Same program, binary sizes across all 8 backends    |
+//! | 3 | Backend Comparison        | Same program, binary sizes across all 10 backends    |
 //! | 4 | Codegen Quality           | Count redundant loads/stores in stack-slot output   |
 //!
 //! # Methodology

@@ -1,9 +1,8 @@
 # Memory State Graph (MSG) Construction Algorithm: Formal Specification
 
 **Document ID:** VUMA-SPEC-MSG-001  
-**Author:** Agent W1-06  
-**Date:** 2026-03-05  
-**Status:** Draft  
+**Author:** Parham Khairkhah
+
 **Parent Specification:** VUMA Layer 6 — Verified-Unsafe Memory Access (Proposal §3.6)
 
 ---

@@ -1,10 +1,9 @@
 # VUMA Security Model Specification
 
 **Document ID:** VUMA-SPEC-SEC-001
-**Version:** 1.1.0
-**Status:** Formal Specification
-**Authors:** Agent W1-30, VUMA Core Team
-**Last Updated:** 2026-03-06
+
+**Author:** Parham Khairkhah
+**Last Updated:** 2026-06-28
 
 ---
 

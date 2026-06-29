@@ -1691,7 +1691,7 @@ mod tests {
 // Worklog
 // ===========================================================================
 //
-// ## 2026-03-05 — Task 3-28: Enhanced Sync Primitives
+// ## Enhanced Sync Primitives
 //
 // ### Summary
 // Replaced and enhanced the VUMA sync primitives module with 7 full-featured
