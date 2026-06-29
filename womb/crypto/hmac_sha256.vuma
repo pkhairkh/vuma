@@ -1,0 +1,148 @@
+// womb/crypto/hmac_sha256.vuma — HMAC-SHA256 (NIST FIPS 198-1)
+// Expected exit code: 0 (self-test passes)
+//
+// HMAC-SHA256 = H((K' ⊕ opad) || H((K' ⊕ ipad) || message))
+//
+// Where K' is the key padded to block_size (64 bytes):
+//   - If key < 64 bytes, zero-pad
+//   - If key > 64 bytes, K' = SHA256(key)
+//
+// ipad = 0x36 repeated 64 times
+// opad = 0x5C repeated 64 times
+
+// Import SHA-256 functions (assuming sha256.vuma is compiled together)
+// For standalone testing, we duplicate the interface here.
+
+const MASK32: u32 = 4294967295;
+const BLOCK_SIZE: u32 = 64;
+const DIGEST_SIZE: u32 = 32;
+
+// ===========================================================================
+// HMAC-SHA256
+// key:    pointer to key bytes
+// keylen: length of key in bytes
+// msg:    pointer to message bytes
+// msglen: length of message in bytes
+// out:    pointer to 32-byte output buffer
+// ===========================================================================
+
+fn hmac_sha256(key: Address, keylen: u32, msg: Address, msglen: u32, out: Address) {
+    // Step 1: Derive K' (block-sized key)
+    kprime = allocate(64);
+
+    if keylen <= 64 {
+        // Zero-pad key to 64 bytes
+        i: u32 = 0;
+        while i < 64 {
+            if i < keylen {
+                *(kprime + i) = *(key + i);
+            } else {
+                *(kprime + i) = 0;
+            }
+            i = i + 1;
+        }
+    } else {
+        // K' = SHA256(key)
+        sha256_oneshot(key, keylen, kprime);
+        // Zero-pad the 32-byte hash to 64 bytes
+        i: u32 = 32;
+        while i < 64 {
+            *(kprime + i) = 0;
+            i = i + 1;
+        }
+    }
+
+    // Step 2: Compute K' ⊕ ipad and K' ⊕ opad
+    kipad = allocate(64);
+    kopad = allocate(64);
+
+    i: u32 = 0;
+    while i < 64 {
+        kb: u32 = *(kprime + i);
+        *(kipad + i) = (kb ^ 54) & 255;    // 0x36 = 54
+        *(kopad + i) = (kb ^ 92) & 255;    // 0x5C = 92
+        i = i + 1;
+    }
+
+    // Step 3: Inner hash = SHA256(kipad || msg)
+    inner = allocate(64 + msglen);
+
+    // Copy kipad
+    i = 0;
+    while i < 64 {
+        *(inner + i) = *(kipad + i);
+        i = i + 1;
+    }
+
+    // Copy msg
+    i = 0;
+    while i < msglen {
+        *(inner + 64 + i) = *(msg + i);
+        i = i + 1;
+    }
+
+    inner_hash = allocate(32);
+    sha256_oneshot(inner, 64 + msglen, inner_hash);
+
+    // Step 4: Outer hash = SHA256(kopad || inner_hash)
+    outer = allocate(64 + 32);
+
+    // Copy kopad
+    i = 0;
+    while i < 64 {
+        *(outer + i) = *(kopad + i);
+        i = i + 1;
+    }
+
+    // Copy inner_hash
+    i = 0;
+    while i < 32 {
+        *(outer + 64 + i) = *(inner_hash + i);
+        i = i + 1;
+    }
+
+    sha256_oneshot(outer, 96, out);
+
+    // Cleanup
+    free(kprime);
+    free(kipad);
+    free(kopad);
+    free(inner);
+    free(inner_hash);
+    free(outer);
+}
+
+// ===========================================================================
+// Self-test: HMAC-SHA256(key="", msg="") per RFC 4231 Test Case 1
+// Expected: 0xb613679a0814d9ec772f95d778c35fc5ff1697c493715653c6c712144292c5ad
+// We check first 4 bytes = 0xB613679A = 3052843162
+// ===========================================================================
+
+fn main() -> i32 {
+    // Empty key and message
+    key = allocate(1);
+    msg = allocate(1);
+    *(key + 0) = 0;
+    *(msg + 0) = 0;
+
+    out = allocate(32);
+    hmac_sha256(key, 0, msg, 0, out);
+
+    // Check first 4 bytes
+    b0: u32 = *(out + 0);
+    b1: u32 = *(out + 1);
+    b2: u32 = *(out + 2);
+    b3: u32 = *(out + 3);
+    h0: u32 = (b0 << 24) | (b1 << 16) | (b2 << 8) | b3;
+
+    expected: u32 = 3052843162;  // 0xB613679A
+
+    free(key);
+    free(msg);
+    free(out);
+
+    if h0 == expected {
+        return 0;
+    }
+    return 1;
+}
