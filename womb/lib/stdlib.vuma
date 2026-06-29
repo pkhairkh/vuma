@@ -1,0 +1,342 @@
+// womb/lib/stdlib.vuma — Standard Library Utility Functions (POSIX stdlib.h)
+// No main() — importable library module.
+// Provides: atoi, atol, itoa, utoa, abs, min, max, clamp, min_u32, max_u32, etc.
+
+const MASK32: u32 = 4294967295;
+
+// ===========================================================================
+// String to integer conversion
+// ===========================================================================
+
+fn atoi(s: Address) -> i32 {
+    result: i32 = 0;
+    sign: i32 = 1;
+    i: u32 = 0;
+    // Skip whitespace
+    while *(s + i) == 32 { i = i + 1; }
+    // Sign
+    if *(s + i) == 45 { sign = 0 - 1; i = i + 1; }
+    if *(s + i) == 43 { i = i + 1; }
+    // Digits
+    while *(s + i) >= 48 {
+        if *(s + i) <= 57 {
+            d: i32 = *(s + i) - 48;
+            result = result * 10 + d;
+            i = i + 1;
+        } else {
+            break;
+        }
+    }
+    return result * sign;
+}
+
+fn strtol(s: Address, endptr: Address, base: u32) -> i64 {
+    result: i64 = 0;
+    sign: i64 = 1;
+    i: u32 = 0;
+    while *(s + i) == 32 { i = i + 1; }
+    if *(s + i) == 45 { sign = 0 - 1; i = i + 1; }
+    if *(s + i) == 43 { i = i + 1; }
+    while *(s + i) != 0 {
+        c: u32 = *(s + i);
+        digit: u32 = 255;
+        if c >= 48 { if c <= 57 { digit = c - 48; } }
+        if c >= 97 { if c <= 122 { digit = c - 87; } }
+        if c >= 65 { if c <= 90 { digit = c - 55; } }
+        if digit >= base { break; }
+        result = result * base + digit;
+        i = i + 1;
+    }
+    if endptr != 0 {
+        // Store end position
+        *(endptr + 0) = (s + i) & 255;
+        *(endptr + 1) = ((s + i) >> 8) & 255;
+        *(endptr + 2) = ((s + i) >> 16) & 255;
+        *(endptr + 3) = ((s + i) >> 24) & 255;
+    }
+    return result * sign;
+}
+
+// ===========================================================================
+// Integer to string conversion
+// ===========================================================================
+
+fn itoa(val: i32, buf: Address, base: u32) -> Address {
+    if val == 0 {
+        *(buf + 0) = 48;
+        *(buf + 1) = 0;
+        return buf;
+    }
+    v: i32 = val;
+    pos: u32 = 0;
+    if val < 0 { v = 0 - val; }
+
+    temp = allocate(32);
+    tp: u32 = 0;
+    while v > 0 {
+        d: u32 = v % base;
+        c: u32 = 48;
+        if d >= 10 { c = 65 + d - 10; } else { c = 48 + d; }
+        *(temp + tp) = c;
+        tp = tp + 1;
+        v = v / base;
+    }
+
+    if val < 0 { *(buf + pos) = 45; pos = pos + 1; }
+    while tp > 0 {
+        tp = tp - 1;
+        *(buf + pos) = *(temp + tp);
+        pos = pos + 1;
+    }
+    *(buf + pos) = 0;
+    free(temp);
+    return buf;
+}
+
+fn utoa(val: u32, buf: Address, base: u32) -> Address {
+    if val == 0 {
+        *(buf + 0) = 48;
+        *(buf + 1) = 0;
+        return buf;
+    }
+    v: u32 = val;
+    temp = allocate(32);
+    tp: u32 = 0;
+    pos: u32 = 0;
+    while v > 0 {
+        d: u32 = v % base;
+        c: u32;
+        if d >= 10 { c = 65 + d - 10; } else { c = 48 + d; }
+        *(temp + tp) = c;
+        tp = tp + 1;
+        v = v / base;
+    }
+    while tp > 0 {
+        tp = tp - 1;
+        *(buf + pos) = *(temp + tp);
+        pos = pos + 1;
+    }
+    *(buf + pos) = 0;
+    free(temp);
+    return buf;
+}
+
+fn u64toa(val: u64, buf: Address, base: u32) -> Address {
+    if val == 0 {
+        *(buf + 0) = 48;
+        *(buf + 1) = 0;
+        return buf;
+    }
+    v: u64 = val;
+    temp = allocate(64);
+    tp: u32 = 0;
+    pos: u32 = 0;
+    while v > 0 {
+        d: u64 = v % base;
+        c: u64;
+        if d >= 10 { c = 65 + d - 10; } else { c = 48 + d; }
+        *(temp + tp) = c;
+        tp = tp + 1;
+        v = v / base;
+    }
+    while tp > 0 {
+        tp = tp - 1;
+        *(buf + pos) = *(temp + tp);
+        pos = pos + 1;
+    }
+    *(buf + pos) = 0;
+    free(temp);
+    return buf;
+}
+
+// ===========================================================================
+// Integer math helpers
+// ===========================================================================
+
+fn abs(x: i32) -> i32 {
+    if x < 0 { return 0 - x; }
+    return x;
+}
+
+fn abs64(x: i64) -> i64 {
+    if x < 0 { return 0 - x; }
+    return x;
+}
+
+fn min(a: i32, b: i32) -> i32 {
+    if a < b { return a; }
+    return b;
+}
+
+fn max(a: i32, b: i32) -> i32 {
+    if a > b { return a; }
+    return b;
+}
+
+fn min_u32(a: u32, b: u32) -> u32 {
+    if a < b { return a; }
+    return b;
+}
+
+fn max_u32(a: u32, b: u32) -> u32 {
+    if a > b { return a; }
+    return b;
+}
+
+fn min_u64(a: u64, b: u64) -> u64 {
+    if a < b { return a; }
+    return b;
+}
+
+fn max_u64(a: u64, b: u64) -> u64 {
+    if a > b { return a; }
+    return b;
+}
+
+fn clamp(x: i32, lo: i32, hi: i32) -> i32 {
+    if x < lo { return lo; }
+    if x > hi { return hi; }
+    return x;
+}
+
+fn clamp_u32(x: u32, lo: u32, hi: u32) -> u32 {
+    if x < lo { return lo; }
+    if x > hi { return hi; }
+    return x;
+}
+
+// ===========================================================================
+// GCD and LCM
+// ===========================================================================
+
+fn gcd_u32(a: u32, b: u32) -> u32 {
+    x: u32 = a; y: u32 = b;
+    while y != 0 {
+        t: u32 = x % y;
+        x = y;
+        y = t;
+    }
+    return x;
+}
+
+fn lcm_u32(a: u32, b: u32) -> u32 {
+    g: u32 = gcd_u32(a, b);
+    if g == 0 { return 0; }
+    return (a / g) * b;
+}
+
+fn gcd_u64(a: u64, b: u64) -> u64 {
+    x: u64 = a; y: u64 = b;
+    while y != 0 {
+        t: u64 = x % y;
+        x = y;
+        y = t;
+    }
+    return x;
+}
+
+// ===========================================================================
+// Bit manipulation
+// ===========================================================================
+
+fn is_power_of_two(x: u32) -> u32 {
+    if x == 0 { return 0; }
+    if (x & (x - 1)) == 0 { return 1; }
+    return 0;
+}
+
+fn next_power_of_two(x: u32) -> u32 {
+    if x == 0 { return 1; }
+    v: u32 = x - 1;
+    v = v | (v >> 1);
+    v = v | (v >> 2);
+    v = v | (v >> 4);
+    v = v | (v >> 8);
+    v = v | (v >> 16);
+    return v + 1;
+}
+
+fn count_ones_u32(x: u32) -> u32 {
+    v: u32 = x;
+    count: u32 = 0;
+    while v != 0 {
+        v = v & (v - 1);
+        count = count + 1;
+    }
+    return count;
+}
+
+fn leading_zeros_u32(x: u32) -> u32 {
+    if x == 0 { return 32; }
+    v: u32 = x;
+    count: u32 = 0;
+    if (v & 4294901760) == 0 { count = count + 16; v = v << 16; }
+    if (v & 4278190080) == 0 { count = count + 8; v = v << 8; }
+    if (v & 4026531840) == 0 { count = count + 4; v = v << 4; }
+    if (v & 3221225472) == 0 { count = count + 2; v = v << 2; }
+    if (v & 2147483648) == 0 { count = count + 1; }
+    return count;
+}
+
+fn trailing_zeros_u32(x: u32) -> u32 {
+    if x == 0 { return 32; }
+    v: u32 = x;
+    count: u32 = 0;
+    while (v & 1) == 0 {
+        count = count + 1;
+        v = v >> 1;
+    }
+    return count;
+}
+
+fn log2_u32(x: u32) -> u32 {
+    if x == 0 { return 0; }
+    return 31 - leading_zeros_u32(x);
+}
+
+fn reverse_bits_u32(x: u32) -> u32 {
+    v: u32 = x;
+    v = ((v >> 1) & 1431655765) | ((v & 1431655765) << 1);
+    v = ((v >> 2) & 858993459) | ((v & 858993459) << 2);
+    v = ((v >> 4) & 252645135) | ((v & 252645135) << 4);
+    v = ((v >> 8) & 16711935) | ((v & 16711935) << 8);
+    v = (v >> 16) | (v << 16);
+    return v;
+}
+
+fn swap_bytes_u32(x: u32) -> u32 {
+    return ((x & 255) << 24) | (((x >> 8) & 255) << 16) | (((x >> 16) & 255) << 8) | ((x >> 24) & 255);
+}
+
+// ===========================================================================
+// Pseudo-random number generator (xorshift64)
+// ===========================================================================
+
+// Global RNG state — stored at a fixed memory address
+// In a real implementation this would be thread-local
+fn xorshift32(state: u32) -> u32 {
+    x: u32 = state;
+    x = x ^ (x << 13);
+    x = x ^ (x >> 17);
+    x = x ^ (x << 5);
+    return x;
+}
+
+fn xorshift64(state: u64) -> u64 {
+    x: u64 = state;
+    x = x ^ (x << 13);
+    x = x ^ (x >> 7);
+    x = x ^ (x << 17);
+    return x;
+}
+
+fn rand_u32(seed: u32) -> u32 {
+    return xorshift32(seed);
+}
+
+fn rand_range(seed: u32, lo: u32, hi: u32) -> u32 {
+    if hi <= lo { return lo; }
+    range: u32 = hi - lo;
+    r: u32 = xorshift32(seed);
+    return lo + (r % range);
+}
