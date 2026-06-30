@@ -1,62 +1,81 @@
-// womb/crypto/secp256k1.vuma — ECDSA over secp256k1 (Bitcoin/Ethereum)
+// womb/crypto/secp256k1.vuma — ECDSA + ECDH over secp256k1 (Bitcoin/Ethereum)
 // No main() — importable library module.
-// Requires: bignum.vuma, sha256.vuma, hmac.vuma.
-// Curve: y^2 = x^3 + 7 (mod p) — no cofactor term (a=0, b=7)
-// p = 2^256 - 2^32 - 977
-// n = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
+// Requires: bignum.vuma (bn256_*), sha256.vuma, hmac.vuma (hmac_sha256).
+//
+// Curve: y^2 = x^3 + 7 (mod p) — Koblitz curve with a=0, b=7
+//   p = 2^256 - 2^32 - 977
+//        = 0xFFFFFFFF FFFFFFFF FFFFFFFF FFFFFFFF FFFFFFFF FFFFFFFF FFFFFFFE FFFFFC2F
+//   n = 0xFFFFFFFF FFFFFFFF FFFFFFFF FFFFFFFE BAAEDCE6 AF48A03B BFD25E8C D0364141
+//   Gx= 0x79BE667E F9DCBBAC 55A06295 CE870B07 029BFCDB 2DCE28D9 59F2815B 16F81798
+//   Gy= 0x483ADA77 26A3C465 5DA4FBFC 0E1108A8 FD17B448 A6855419 9C47D08F FB10D4B8
+//
+// Signing uses RFC 6979 deterministic nonce derivation (HMAC-SHA-256 over
+// (private key, message hash)) so signatures are reproducible and immune to
+// weak-RNG k disclosure attacks. ECDH follows the same Q = d*G / S = d*Q_peer
+// pattern as the NIST curves.
 
-// secp256k1 prime p (big-endian, 32 bytes)
+// ===========================================================================
+// secp256k1 constants (32-byte big-endian buffers)
+// ===========================================================================
+
 fn secp256k1_p() -> Address {
     buf = allocate(32);
-    *(buf + 0) = 255; *(buf + 1) = 255; *(buf + 2) = 255; *(buf + 3) = 255;
-    *(buf + 4) = 255; *(buf + 5) = 255; *(buf + 6) = 255; *(buf + 7) = 255;
-    *(buf + 8) = 255; *(buf + 9) = 255; *(buf + 10) = 255; *(buf + 11) = 255;
+    *(buf +  0) = 255; *(buf +  1) = 255; *(buf +  2) = 255; *(buf +  3) = 255;
+    *(buf +  4) = 255; *(buf +  5) = 255; *(buf +  6) = 255; *(buf +  7) = 255;
+    *(buf +  8) = 255; *(buf +  9) = 255; *(buf + 10) = 255; *(buf + 11) = 255;
     *(buf + 12) = 255; *(buf + 13) = 255; *(buf + 14) = 255; *(buf + 15) = 255;
     *(buf + 16) = 255; *(buf + 17) = 255; *(buf + 18) = 255; *(buf + 19) = 255;
     *(buf + 20) = 255; *(buf + 21) = 255; *(buf + 22) = 255; *(buf + 23) = 255;
     *(buf + 24) = 255; *(buf + 25) = 255; *(buf + 26) = 255; *(buf + 27) = 254;
-    *(buf + 28) = 255; *(buf + 29) = 255; *(buf + 30) = 252; *(buf + 31) = 47;
+    *(buf + 28) = 255; *(buf + 29) = 255; *(buf + 30) = 252; *(buf + 31) =  47;
     return buf;
 }
 
-// secp256k1 order n (big-endian, 32 bytes)
 fn secp256k1_n() -> Address {
     buf = allocate(32);
-    *(buf + 0) = 255; *(buf + 1) = 255; *(buf + 2) = 255; *(buf + 3) = 255;
-    *(buf + 4) = 255; *(buf + 5) = 255; *(buf + 6) = 255; *(buf + 7) = 255;
-    *(buf + 8) = 255; *(buf + 9) = 255; *(buf + 10) = 255; *(buf + 11) = 255;
+    *(buf +  0) = 255; *(buf +  1) = 255; *(buf +  2) = 255; *(buf +  3) = 255;
+    *(buf +  4) = 255; *(buf +  5) = 255; *(buf +  6) = 255; *(buf +  7) = 255;
+    *(buf +  8) = 255; *(buf +  9) = 255; *(buf + 10) = 255; *(buf + 11) = 255;
     *(buf + 12) = 255; *(buf + 13) = 255; *(buf + 14) = 255; *(buf + 15) = 254;
     *(buf + 16) = 186; *(buf + 17) = 174; *(buf + 18) = 220; *(buf + 19) = 230;
-    *(buf + 20) = 175; *(buf + 21) = 72; *(buf + 22) = 160; *(buf + 23) = 59;
-    *(buf + 24) = 191; *(buf + 25) = 37; *(buf + 26) = 232; *(buf + 27) = 205;
-    *(buf + 28) = 3; *(buf + 29) = 100; *(buf + 30) = 20; *(buf + 31) = 65;
+    *(buf + 20) = 175; *(buf + 21) =  72; *(buf + 22) = 160; *(buf + 23) =  59;
+    *(buf + 24) = 191; *(buf + 25) =  37; *(buf + 26) = 232; *(buf + 27) = 205;
+    *(buf + 28) =   3; *(buf + 29) = 100; *(buf + 30) =  20; *(buf + 31) =  65;
     return buf;
 }
 
-// Generator point G
+// b = 7 (curve coefficient)
+fn secp256k1_b() -> Address {
+    buf = allocate(32);
+    i: u32 = 0;
+    while i < 32 { *(buf + i) = 0; i = i + 1; }
+    *(buf + 31) = 7;
+    return buf;
+}
+
 fn secp256k1_gx() -> Address {
     buf = allocate(32);
-    *(buf + 0) = 121; *(buf + 1) = 190; *(buf + 2) = 181; *(buf + 3) = 83;
-    *(buf + 4) = 59; *(buf + 5) = 76; *(buf + 6) = 165; *(buf + 7) = 207;
-    *(buf + 8) = 111; *(buf + 9) = 76; *(buf + 10) = 173; *(buf + 11) = 166;
+    *(buf +  0) = 121; *(buf +  1) = 190; *(buf +  2) = 181; *(buf +  3) =  83;
+    *(buf +  4) =  59; *(buf +  5) =  76; *(buf +  6) = 165; *(buf +  7) = 207;
+    *(buf +  8) = 111; *(buf +  9) =  76; *(buf + 10) = 173; *(buf + 11) = 166;
     *(buf + 12) = 109; *(buf + 13) = 119; *(buf + 14) = 145; *(buf + 15) = 151;
-    *(buf + 16) = 150; *(buf + 17) = 107; *(buf + 18) = 21; *(buf + 19) = 193;
-    *(buf + 20) = 236; *(buf + 21) = 85; *(buf + 22) = 75; *(buf + 23) = 210;
+    *(buf + 16) = 150; *(buf + 17) = 107; *(buf + 18) =  21; *(buf + 19) = 193;
+    *(buf + 20) = 236; *(buf + 21) =  85; *(buf + 22) =  75; *(buf + 23) = 210;
     *(buf + 24) = 224; *(buf + 25) = 215; *(buf + 26) = 159; *(buf + 27) = 218;
-    *(buf + 28) = 119; *(buf + 29) = 38; *(buf + 30) = 234; *(buf + 31) = 87;
+    *(buf + 28) = 119; *(buf + 29) =  38; *(buf + 30) = 234; *(buf + 31) =  87;
     return buf;
 }
 
 fn secp256k1_gy() -> Address {
     buf = allocate(32);
-    *(buf + 0) = 19; *(buf + 1) = 173; *(buf + 2) = 207; *(buf + 3) = 80;
-    *(buf + 4) = 177; *(buf + 5) = 241; *(buf + 6) = 237; *(buf + 7) = 177;
-    *(buf + 8) = 79; *(buf + 9) = 194; *(buf + 10) = 103; *(buf + 11) = 232;
-    *(buf + 12) = 177; *(buf + 13) = 219; *(buf + 14) = 183; *(buf + 15) = 95;
-    *(buf + 16) = 238; *(buf + 17) = 30; *(buf + 18) = 31; *(buf + 19) = 150;
-    *(buf + 20) = 158; *(buf + 21) = 44; *(buf + 22) = 2; *(buf + 23) = 48;
-    *(buf + 24) = 66; *(buf + 25) = 84; *(buf + 26) = 121; *(buf + 27) = 9;
-    *(buf + 28) = 57; *(buf + 29) = 247; *(buf + 30) = 96; *(buf + 31) = 14;
+    *(buf +  0) =  19; *(buf +  1) = 173; *(buf +  2) = 207; *(buf +  3) =  80;
+    *(buf +  4) = 177; *(buf +  5) = 241; *(buf +  6) = 237; *(buf +  7) = 177;
+    *(buf +  8) =  79; *(buf +  9) = 194; *(buf + 10) = 103; *(buf + 11) = 232;
+    *(buf + 12) = 177; *(buf + 13) = 219; *(buf + 14) = 183; *(buf + 15) =  95;
+    *(buf + 16) = 238; *(buf + 17) =  30; *(buf + 18) =  31; *(buf + 19) = 150;
+    *(buf + 20) = 158; *(buf + 21) =  44; *(buf + 22) =   2; *(buf + 23) =  48;
+    *(buf + 24) =  66; *(buf + 25) =  84; *(buf + 26) = 121; *(buf + 27) =   9;
+    *(buf + 28) =  57; *(buf + 29) = 247; *(buf + 30) =  96; *(buf + 31) =  14;
     return buf;
 }
 
@@ -65,9 +84,30 @@ fn swap_endian_32(dst: Address, src: Address) {
     while i < 32 { *(dst + i) = *(src + 31 - i); i = i + 1; }
 }
 
-// Point operations — secp256k1 uses a=0, so formulas are simpler than P-256
-// slope = (3*x^2) / (2*y) for doubling (since a=0)
-// slope = (y2-y1) / (x2-x1) for addition
+// ===========================================================================
+// Point-on-curve check: y^2 == x^3 + 7 (mod p)
+// ===========================================================================
+
+fn secp256k1_is_on_curve(px: Address, py: Address, p_le: Address, b_le: Address) -> u32 {
+    y_sq = allocate(32);
+    bn256_mod_mul(y_sq, py, py, p_le);
+    x_sq = allocate(32);
+    bn256_mod_mul(x_sq, px, px, p_le);
+    x_cubed = allocate(32);
+    bn256_mod_mul(x_cubed, x_sq, px, p_le);
+    rhs = allocate(32);
+    bn256_mod_add(rhs, x_cubed, b_le, p_le);
+
+    result: u32 = 0;
+    if bn256_cmp(y_sq, rhs) == 0 { result = 1; }
+
+    free(y_sq); free(x_sq); free(x_cubed); free(rhs);
+    return result;
+}
+
+// ===========================================================================
+// Point operations — secp256k1 uses a=0, so doubling slope = (3*x^2)/(2*y).
+// ===========================================================================
 
 fn secp256k1_point_double(rx: Address, ry: Address, px: Address, py: Address, p_le: Address) {
     if bn256_is_zero(px) == 1 {
@@ -106,8 +146,12 @@ fn secp256k1_point_double(rx: Address, ry: Address, px: Address, py: Address, p_
 }
 
 fn secp256k1_point_add(rx: Address, ry: Address, px: Address, py: Address, qx: Address, qy: Address, p_le: Address) {
-    if bn256_is_zero(px) == 1 { if bn256_is_zero(py) == 1 { bn256_copy(rx, qx); bn256_copy(ry, qy); return; } }
-    if bn256_is_zero(qx) == 1 { if bn256_is_zero(qy) == 1 { bn256_copy(rx, px); bn256_copy(ry, py); return; } }
+    if bn256_is_zero(px) == 1 {
+        if bn256_is_zero(py) == 1 { bn256_copy(rx, qx); bn256_copy(ry, qy); return; }
+    }
+    if bn256_is_zero(qx) == 1 {
+        if bn256_is_zero(qy) == 1 { bn256_copy(rx, px); bn256_copy(ry, py); return; }
+    }
     if bn256_cmp(px, qx) == 0 {
         if bn256_cmp(py, qy) == 0 { secp256k1_point_double(rx, ry, px, py, p_le); return; }
         else { bn256_zero(rx); bn256_zero(ry); return; }
@@ -134,6 +178,7 @@ fn secp256k1_scalar_mul(rx: Address, ry: Address, k: Address, px: Address, py: A
     bn256_zero(rx); bn256_zero(ry);
     tx = allocate(32); ty = allocate(32);
     bits: u32 = bn256_bitlen(k);
+    if bits == 0 { free(tx); free(ty); return; }
     i: u32 = bits;
     while i > 0 {
         i = i - 1;
@@ -147,7 +192,86 @@ fn secp256k1_scalar_mul(rx: Address, ry: Address, k: Address, px: Address, py: A
     free(tx); free(ty);
 }
 
-// ECDSA secp256k1 Sign (RFC 6979 deterministic nonce)
+// ===========================================================================
+// RFC 6979 deterministic nonce generation for secp256k1 ECDSA (HMAC-SHA-256).
+// Same algorithm as rfc6979_p256_k but with secp256k1's n.
+// ===========================================================================
+
+fn rfc6979_secp256k1_k(x_be: Address, h_be: Address, n_le: Address, k_le: Address) {
+    hlen: u32 = 32;
+
+    V = allocate(hlen);
+    K = allocate(hlen);
+    i: u32 = 0;
+    while i < hlen { *(V + i) = 1; *(K + i) = 0; i = i + 1; }
+
+    h_le = allocate(32);
+    swap_endian_32(h_le, h_be);
+    if bn256_cmp(h_le, n_le) >= 0 { bn256_sub(h_le, h_le, n_le); }
+    h_be_canon = allocate(32);
+    swap_endian_32(h_be_canon, h_le);
+    free(h_le);
+
+    x_le = allocate(32);
+    swap_endian_32(x_le, x_be);
+    x_be_canon = allocate(32);
+    swap_endian_32(x_be_canon, x_le);
+    free(x_le);
+
+    buf1 = allocate(hlen + 1 + 32 + 32);
+    i = 0;
+    while i < hlen { *(buf1 + i) = *(V + i); i = i + 1; }
+    *(buf1 + hlen) = 0;
+    i = 0;
+    while i < 32 { *(buf1 + hlen + 1 + i) = *(x_be_canon + i); i = i + 1; }
+    i = 0;
+    while i < 32 { *(buf1 + hlen + 1 + 32 + i) = *(h_be_canon + i); i = i + 1; }
+    hmac_sha256(K, hlen, buf1, hlen + 1 + 64, V);
+    i = 0;
+    while i < hlen { *(K + i) = *(V + i); i = i + 1; }
+    hmac_sha256(K, hlen, buf1, hlen + 1 + 64, K);
+    hmac_sha256(K, hlen, V, hlen, V);
+    free(buf1);
+
+    buf2 = allocate(hlen + 1 + 32 + 32);
+    i = 0;
+    while i < hlen { *(buf2 + i) = *(V + i); i = i + 1; }
+    *(buf2 + hlen) = 1;
+    i = 0;
+    while i < 32 { *(buf2 + hlen + 1 + i) = *(x_be_canon + i); i = i + 1; }
+    i = 0;
+    while i < 32 { *(buf2 + hlen + 1 + 32 + i) = *(h_be_canon + i); i = i + 1; }
+    hmac_sha256(K, hlen, buf2, hlen + 1 + 64, K);
+    hmac_sha256(K, hlen, V, hlen, V);
+    free(buf2);
+
+    accepted: u32 = 0;
+    attempts: u32 = 0;
+    while accepted == 0 && attempts < 32 {
+        hmac_sha256(K, hlen, V, hlen, V);
+        swap_endian_32(k_le, V);
+        if bn256_cmp(k_le, n_le) >= 0 { bn256_sub(k_le, k_le, n_le); }
+        if bn256_is_zero(k_le) == 0 {
+            accepted = 1;
+        } else {
+            buf3 = allocate(hlen + 1);
+            i = 0;
+            while i < hlen { *(buf3 + i) = *(V + i); i = i + 1; }
+            *(buf3 + hlen) = 0;
+            hmac_sha256(K, hlen, buf3, hlen + 1, K);
+            hmac_sha256(K, hlen, V, hlen, V);
+            free(buf3);
+        }
+        attempts = attempts + 1;
+    }
+
+    free(V); free(K); free(h_be_canon); free(x_be_canon);
+}
+
+// ===========================================================================
+// ECDSA secp256k1 Sign (RFC 6979 deterministic nonce, SHA-256 message hash)
+// ===========================================================================
+
 fn secp256k1_sign(msg: Address, msg_len: u32, privkey_be: Address, r_out: Address, s_out: Address) {
     h = allocate(32); sha256_oneshot(msg, msg_len, h);
     h_le = allocate(32); swap_endian_32(h_le, h);
@@ -155,16 +279,17 @@ fn secp256k1_sign(msg: Address, msg_len: u32, privkey_be: Address, r_out: Addres
 
     p_be = secp256k1_p(); n_be = secp256k1_n();
     gx_be = secp256k1_gx(); gy_be = secp256k1_gy();
-    p_le = allocate(32); n_le = allocate(32); gx_le = allocate(32); gy_le = allocate(32);
+    p_le = allocate(32); n_le = allocate(32);
+    gx_le = allocate(32); gy_le = allocate(32);
     swap_endian_32(p_le, p_be); swap_endian_32(n_le, n_be);
     swap_endian_32(gx_le, gx_be); swap_endian_32(gy_le, gy_be);
     free(p_be); free(n_be); free(gx_be); free(gy_be);
 
-    // Deterministic nonce
-    k = allocate(32); hmac_sha256(privkey_be, 32, h, 32, k);
-    k_le = allocate(32); swap_endian_32(k_le, k);
-    free(k);
-    if bn256_cmp(k_le, n_le) >= 0 { bn256_sub(k_le, k_le, n_le); }
+    if bn256_cmp(d_le, n_le) >= 0 { bn256_sub(d_le, d_le, n_le); }
+    if bn256_cmp(h_le, n_le) >= 0 { bn256_sub(h_le, h_le, n_le); }
+
+    k_le = allocate(32);
+    rfc6979_secp256k1_k(privkey_be, h, n_le, k_le);
 
     rx = allocate(32); ry = allocate(32);
     secp256k1_scalar_mul(rx, ry, k_le, gx_le, gy_le, p_le);
@@ -177,6 +302,15 @@ fn secp256k1_sign(msg: Address, msg_len: u32, privkey_be: Address, r_out: Addres
     h_rd = allocate(32); bn256_mod_add(h_rd, h_le, rd, n_le);
     s_le = allocate(32); bn256_mod_mul(s_le, k_inv, h_rd, n_le);
 
+    // Low-S normalization (BIP-62): if s > n/2, replace s with n - s.
+    // This makes signatures canonical and prevents malleability.
+    half_n = allocate(32);
+    bn256_rshift1(half_n, n_le);
+    if bn256_cmp(s_le, half_n) > 0 {
+        bn256_sub(s_le, n_le, s_le);
+    }
+    free(half_n);
+
     swap_endian_32(r_out, r_le); swap_endian_32(s_out, s_le);
 
     free(h); free(h_le); free(d_le); free(p_le); free(n_le);
@@ -184,7 +318,10 @@ fn secp256k1_sign(msg: Address, msg_len: u32, privkey_be: Address, r_out: Addres
     free(r_le); free(k_inv); free(rd); free(h_rd); free(s_le);
 }
 
+// ===========================================================================
 // ECDSA secp256k1 Verify
+// ===========================================================================
+
 fn secp256k1_verify(msg: Address, msg_len: u32, pubx_be: Address, puby_be: Address, r_be: Address, s_be: Address) -> u32 {
     n_be = secp256k1_n(); n_le = allocate(32); swap_endian_32(n_le, n_be); free(n_be);
     r_le = allocate(32); s_le = allocate(32);
@@ -197,14 +334,26 @@ fn secp256k1_verify(msg: Address, msg_len: u32, pubx_be: Address, puby_be: Addre
 
     h = allocate(32); sha256_oneshot(msg, msg_len, h);
     h_le = allocate(32); swap_endian_32(h_le, h); free(h);
+    if bn256_cmp(h_le, n_le) >= 0 { bn256_sub(h_le, h_le, n_le); }
 
-    p_be = secp256k1_p(); gx_be = secp256k1_gx(); gy_be = secp256k1_gy();
-    p_le = allocate(32); gx_le = allocate(32); gy_le = allocate(32);
-    swap_endian_32(p_le, p_be); swap_endian_32(gx_le, gx_be); swap_endian_32(gy_le, gy_be);
-    free(p_be); free(gx_be); free(gy_be);
+    p_be = secp256k1_p(); b_be = secp256k1_b();
+    gx_be = secp256k1_gx(); gy_be = secp256k1_gy();
+    p_le = allocate(32); b_le = allocate(32);
+    gx_le = allocate(32); gy_le = allocate(32);
+    swap_endian_32(p_le, p_be); swap_endian_32(b_le, b_be);
+    swap_endian_32(gx_le, gx_be); swap_endian_32(gy_le, gy_be);
+    free(p_be); free(b_be); free(gx_be); free(gy_be);
 
     qx_le = allocate(32); qy_le = allocate(32);
     swap_endian_32(qx_le, pubx_be); swap_endian_32(qy_le, puby_be);
+
+    // Validate public key is on the curve
+    if secp256k1_is_on_curve(qx_le, qy_le, p_le, b_le) == 0 {
+        free(n_le); free(r_le); free(s_le); free(h_le);
+        free(p_le); free(b_le); free(gx_le); free(gy_le);
+        free(qx_le); free(qy_le);
+        return 0;
+    }
 
     w = allocate(32); bn256_mod_inv(w, s_le, n_le);
     u1 = allocate(32); bn256_mod_mul(u1, h_le, w, n_le);
@@ -217,27 +366,38 @@ fn secp256k1_verify(msg: Address, msg_len: u32, pubx_be: Address, puby_be: Addre
     ptx = allocate(32); pty = allocate(32);
     secp256k1_point_add(ptx, pty, r1x, r1y, r2x, r2y, p_le);
 
-    if bn256_is_zero(ptx) == 1 { if bn256_is_zero(pty) == 1 {
-        free(n_le); free(r_le); free(s_le); free(h_le); free(p_le); free(gx_le); free(gy_le);
-        free(qx_le); free(qy_le); free(w); free(u1); free(u2);
-        free(r1x); free(r1y); free(r2x); free(r2y); free(ptx); free(pty);
-        return 0;
-    }}
-
-    v = allocate(32); bn256_copy(v, ptx);
-    if bn256_cmp(v, n_le) >= 0 { bn256_sub(v, v, n_le); }
     result: u32 = 0;
-    if bn256_cmp(v, r_le) == 0 { result = 1; }
+    if bn256_is_zero(ptx) == 0 || bn256_is_zero(pty) == 0 {
+        v = allocate(32); bn256_copy(v, ptx);
+        if bn256_cmp(v, n_le) >= 0 { bn256_sub(v, v, n_le); }
+        if bn256_cmp(v, r_le) == 0 { result = 1; }
+        free(v);
+    }
 
-    free(n_le); free(r_le); free(s_le); free(h_le); free(p_le); free(gx_le); free(gy_le);
-    free(qx_le); free(qy_le); free(w); free(u1); free(u2);
-    free(r1x); free(r1y); free(r2x); free(r2y); free(ptx); free(pty); free(v);
+    free(n_le); free(r_le); free(s_le); free(h_le); free(p_le); free(b_le);
+    free(gx_le); free(gy_le); free(qx_le); free(qy_le); free(w); free(u1); free(u2);
+    free(r1x); free(r1y); free(r2x); free(r2y); free(ptx); free(pty);
+
     return result;
 }
 
-// secp256k1 public key derivation: Q = d * G
+// ===========================================================================
+// Public key derivation: Q = d * G
+// ===========================================================================
+
 fn secp256k1_pubkeygen(privkey_be: Address, pubx_be: Address, puby_be: Address) {
+    n_be = secp256k1_n();
+    n_le = allocate(32);
+    swap_endian_32(n_le, n_be);
+    free(n_be);
+
     d_le = allocate(32); swap_endian_32(d_le, privkey_be);
+    if bn256_cmp(d_le, n_le) >= 0 { bn256_sub(d_le, d_le, n_le); }
+    if bn256_is_zero(d_le) == 1 {
+        bn256_zero(d_le);
+        *(d_le + 0) = 1;
+    }
+
     gx_be = secp256k1_gx(); gy_be = secp256k1_gy();
     gx_le = allocate(32); gy_le = allocate(32);
     swap_endian_32(gx_le, gx_be); swap_endian_32(gy_le, gy_be);
@@ -247,6 +407,67 @@ fn secp256k1_pubkeygen(privkey_be: Address, pubx_be: Address, puby_be: Address) 
     qx_le = allocate(32); qy_le = allocate(32);
     secp256k1_scalar_mul(qx_le, qy_le, d_le, gx_le, gy_le, p_le);
     swap_endian_32(pubx_be, qx_le); swap_endian_32(puby_be, qy_le);
+    swap_endian_32(privkey_be, d_le);
 
-    free(d_le); free(gx_le); free(gy_le); free(p_le); free(qx_le); free(qy_le);
+    free(n_le); free(d_le); free(gx_le); free(gy_le); free(p_le); free(qx_le); free(qy_le);
+}
+
+// ===========================================================================
+// ECDH over secp256k1: shared secret = (d * Q_peer).x
+//   privkey_be   : 32-byte big-endian our private scalar
+//   peer_pubx_be : 32-byte big-endian peer public key x
+//   peer_puby_be : 32-byte big-endian peer public key y
+//   shared (out) : 32-byte big-endian shared secret (x-coordinate)
+// Returns 1 on success, 0 if peer public key is invalid or shared point is
+// the point at infinity.
+// ===========================================================================
+
+fn secp256k1_ecdh_shared_secret(privkey_be: Address, peer_pubx_be: Address, peer_puby_be: Address, shared: Address) -> u32 {
+    // Validate peer public key
+    p_be = secp256k1_p(); b_be = secp256k1_b();
+    p_le = allocate(32); b_le = allocate(32);
+    swap_endian_32(p_le, p_be); swap_endian_32(b_le, b_be);
+    free(p_be); free(b_be);
+
+    qx_le = allocate(32); qy_le = allocate(32);
+    swap_endian_32(qx_le, peer_pubx_be); swap_endian_32(qy_le, peer_puby_be);
+
+    // Reject point at infinity
+    if bn256_is_zero(qx_le) == 1 && bn256_is_zero(qy_le) == 1 {
+        free(p_le); free(b_le); free(qx_le); free(qy_le);
+        return 0;
+    }
+    if bn256_cmp(qx_le, p_le) >= 0 || bn256_cmp(qy_le, p_le) >= 0 {
+        free(p_le); free(b_le); free(qx_le); free(qy_le);
+        return 0;
+    }
+    if secp256k1_is_on_curve(qx_le, qy_le, p_le, b_le) == 0 {
+        free(p_le); free(b_le); free(qx_le); free(qy_le);
+        return 0;
+    }
+
+    n_be = secp256k1_n();
+    n_le = allocate(32);
+    swap_endian_32(n_le, n_be);
+    free(n_be);
+
+    d_le = allocate(32); swap_endian_32(d_le, privkey_be);
+    if bn256_cmp(d_le, n_le) >= 0 { bn256_sub(d_le, d_le, n_le); }
+    if bn256_is_zero(d_le) == 1 {
+        free(p_le); free(b_le); free(n_le); free(qx_le); free(qy_le); free(d_le);
+        return 0;
+    }
+
+    sx_le = allocate(32); sy_le = allocate(32);
+    secp256k1_scalar_mul(sx_le, sy_le, d_le, qx_le, qy_le, p_le);
+
+    ok: u32 = 1;
+    if bn256_is_zero(sx_le) == 1 && bn256_is_zero(sy_le) == 1 { ok = 0; }
+    if ok == 1 {
+        swap_endian_32(shared, sx_le);
+    }
+
+    free(p_le); free(b_le); free(n_le); free(qx_le); free(qy_le);
+    free(d_le); free(sx_le); free(sy_le);
+    return ok;
 }

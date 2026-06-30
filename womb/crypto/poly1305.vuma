@@ -1,163 +1,196 @@
-// womb/crypto/poly1305.vuma — Poly1305 MAC (RFC 8439)
-// No main() — importable library module.
-// One-time authentication code based on polynomial evaluation mod 2^130-5.
+// womb/crypto/poly1305.vuma — Poly1305 One-Time MAC (RFC 8439)
+// Computes Poly1305(key, msg) over GF(2^130 - 5) using a 5 x 26-bit limb
+// representation. Provides keygen, mac, and verify. No main().
 
-const MASK32: u32 = 4294967295;
+const POLY1305_MASK32: u32 = 4294967295;
+const POLY1305_BLOCK_SIZE: u32 = 16;
+const POLY1305_KEY_SIZE: u32 = 32;
+const POLY1305_TAG_SIZE: u32 = 16;
 
-// Load 4 bytes little-endian
-fn load_u32_le(ptr: Address, off: u32) -> u32 {
-    b0: u32 = *(ptr + off); b1: u32 = *(ptr + off + 1);
-    b2: u32 = *(ptr + off + 2); b3: u32 = *(ptr + off + 3);
+// ===========================================================================
+// Little-endian byte helpers.
+// ===========================================================================
+
+fn poly1305_load_u32(ptr: Address, off: u32) -> u32 {
+    b0: u32 = *(ptr + off);
+    b1: u32 = *(ptr + off + 1);
+    b2: u32 = *(ptr + off + 2);
+    b3: u32 = *(ptr + off + 3);
     return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
 }
 
-// Poly1305 uses 130-bit integers. We represent these as 5 × u26 limbs.
-// But for simplicity, we use a byte-by-byte schoolbook approach.
+fn poly1305_store_u32(ptr: Address, off: u32, val: u32) {
+    *(ptr + off) = val & 255;
+    *(ptr + off + 1) = (val >> 8) & 255;
+    *(ptr + off + 2) = (val >> 16) & 255;
+    *(ptr + off + 3) = (val >> 24) & 255;
+}
 
-// We need: r (clamped key), s (one-time pad), message, output (16 bytes)
-//
-// Algorithm:
-//   r = key[0..15] with clamping
-//   s = key[16..31]
+fn poly1305_store_u64_le(ptr: Address, off: u32, val: u64) {
+    *(ptr + off) = val & 255;
+    *(ptr + off + 1) = (val >> 8) & 255;
+    *(ptr + off + 2) = (val >> 16) & 255;
+    *(ptr + off + 3) = (val >> 24) & 255;
+    *(ptr + off + 4) = (val >> 32) & 255;
+    *(ptr + off + 5) = (val >> 40) & 255;
+    *(ptr + off + 6) = (val >> 48) & 255;
+    *(ptr + off + 7) = (val >> 56) & 255;
+}
+
+// ===========================================================================
+// Key generation.
+// RFC 8439 Section 2.5.1: the 32-byte Poly1305 key is r || s where r is the
+// 16-byte clamped evaluation point and s is a 16-byte one-time pad. The
+// caller supplies 32 bytes of cryptographic randomness (e.g. from
+// drbg_generate); this routine writes the clamped key to key_out.
+// Clamping: r[3], r[7], r[11], r[15] &= 0x0f; r[4], r[8], r[12] &= 0xfc.
+// ===========================================================================
+
+fn poly1305_keygen(seed: Address, key_out: Address) {
+    i: u32 = 0;
+    while i < POLY1305_KEY_SIZE {
+        *(key_out + i) = *(seed + i);
+        i = i + 1;
+    }
+    // Clamp r (first 16 bytes).
+    *(key_out + 3) = *(key_out + 3) & 15;
+    *(key_out + 7) = *(key_out + 7) & 15;
+    *(key_out + 11) = *(key_out + 11) & 15;
+    *(key_out + 15) = *(key_out + 15) & 15;
+    *(key_out + 4) = *(key_out + 4) & 252;
+    *(key_out + 8) = *(key_out + 8) & 252;
+    *(key_out + 12) = *(key_out + 12) & 252;
+}
+
+// ===========================================================================
+// Decode a 17-byte little-endian block (16 message bytes + 0x01 high byte,
+// or a partial block padded with 0x01 then zeros) into 5 x 26-bit limbs.
+// ===========================================================================
+
+fn poly1305_decode_block(block: Address, n0: Address, n1: Address,
+                         n2: Address, n3: Address, n4: Address) {
+    b3: u64 = *(block + 3);
+    b6: u64 = *(block + 6);
+    b9: u64 = *(block + 9);
+
+    v0: u64 = *(block + 0)
+            | (*(block + 1) << 8)
+            | (*(block + 2) << 16)
+            | ((b3 & 3) << 24);
+    *n0 = v0;
+
+    v1: u64 = (b3 >> 2)
+            | (*(block + 4) << 6)
+            | (*(block + 5) << 14)
+            | ((b6 & 15) << 22);
+    *n1 = v1;
+
+    v2: u64 = (b6 >> 4)
+            | (*(block + 7) << 4)
+            | (*(block + 8) << 12)
+            | ((b9 & 63) << 20);
+    *n2 = v2;
+
+    v3: u64 = (b9 >> 6)
+            | (*(block + 10) << 2)
+            | (*(block + 11) << 10)
+            | (*(block + 12) << 18);
+    *n3 = v3;
+
+    v4: u64 = *(block + 13)
+            | (*(block + 14) << 8)
+            | (*(block + 15) << 16)
+            | (*(block + 16) << 24);
+    *n4 = v4;
+}
+
+// ===========================================================================
+// Poly1305 MAC.
+// RFC 8439 Section 2.5.1:
+//   r = key[0..15] (clamped), s = key[16..31]
 //   acc = 0
 //   for each 16-byte (or partial) block:
-//     n = block || 0x01 (pad to 17 bytes) — interpreted as little-endian integer
+//     n = block || 0x01 (high byte) -- little-endian integer
 //     acc = (acc + n) * r mod (2^130 - 5)
 //   tag = (acc + s) mod 2^128
-
-// For 130-bit arithmetic, we use 5 limbs of 26 bits each.
-// p = 2^130 - 5
-// limb0 = bits 0-25, limb1 = bits 26-51, etc.
+// ===========================================================================
 
 fn poly1305_mac(key: Address, msg: Address, msg_len: u32, tag: Address) {
-    // Clamp r: r &= 0x0ffffffc0ffffffc0ffffffc0fffffff
-    r = allocate(16);
+    // The key is assumed to already be clamped (caller may use
+    // poly1305_keygen or supply a pre-clamped key). We re-apply the clamp
+    // defensively so callers cannot misuse an unclamped key.
+    r_buf = allocate(POLY1305_BLOCK_SIZE);
     i: u32 = 0;
-    while i < 16 { *(r + i) = *(key + i); i = i + 1; }
-    *(r + 3) = *(r + 3) & 15;
-    *(r + 7) = *(r + 7) & 15;
-    *(r + 11) = *(r + 11) & 15;
-    *(r + 15) = *(r + 15) & 15;
-    *(r + 4) = *(r + 4) & 252;
-    *(r + 8) = *(r + 8) & 252;
-    *(r + 12) = *(r + 12) & 252;
+    while i < POLY1305_BLOCK_SIZE { *(r_buf + i) = *(key + i); i = i + 1; }
+    *(r_buf + 3) = *(r_buf + 3) & 15;
+    *(r_buf + 7) = *(r_buf + 7) & 15;
+    *(r_buf + 11) = *(r_buf + 11) & 15;
+    *(r_buf + 15) = *(r_buf + 15) & 15;
+    *(r_buf + 4) = *(r_buf + 4) & 252;
+    *(r_buf + 8) = *(r_buf + 8) & 252;
+    *(r_buf + 12) = *(r_buf + 12) & 252;
 
-    // Load s (one-time pad) — last 16 bytes of key
-    s = allocate(16);
+    // Decode r into 5 x 26-bit limbs.
+    r0_ptr = allocate(8); r1_ptr = allocate(8);
+    r2_ptr = allocate(8); r3_ptr = allocate(8); r4_ptr = allocate(8);
+    poly1305_decode_block(r_buf, r0_ptr, r1_ptr, r2_ptr, r3_ptr, r4_ptr);
+    // Mask off the high byte of r4 since r is only 128 bits (no 0x01 pad).
+    r4_val: u64 = *r4_ptr & 3;
+    *r4_ptr = r4_val;
+    r0: u64 = *r0_ptr;
+    r1: u64 = *r1_ptr;
+    r2: u64 = *r2_ptr;
+    r3: u64 = *r3_ptr;
+    r4: u64 = *r4_ptr;
+
+    // Accumulator (5 x 26-bit limbs), zero-initialized.
+    acc = allocate(40);  // 5 x u64
     i = 0;
-    while i < 16 { *(s + i) = *(key + 16 + i); i = i + 1; }
+    while i < 5 { *(acc + i * 8) = 0; i = i + 1; }
 
-    // Accumulator (5 × 26 bits = 130 bits), stored as u64 array
-    acc = allocate(40);  // 5 × u64
-    i = 0;
-    while i < 5 { *(acc + i) = 0; i = i + 1; }
-
-    // Process message in 16-byte blocks
+    // Scratch buffer for the current block (17 bytes, padded).
+    block = allocate(17);
     pos: u32 = 0;
     while pos < msg_len {
-        // Read block as little-endian integer (with 0x01 appended)
         block_len: u32 = msg_len - pos;
-        if block_len > 16 { block_len = 16; }
+        if block_len > POLY1305_BLOCK_SIZE { block_len = POLY1305_BLOCK_SIZE; }
 
-        // n = block || 0x01 (17 bytes max)
-        // Load into 5 limbs (130 bits + overflow)
-        n0: u64 = 0;
-        n1: u64 = 0;
-        n2: u64 = 0;
-        n3: u64 = 0;
-        n4: u64 = 0;
-
-        // Simple approach: load as bytes and process
-        // n = message_block | (1 << (8 * block_len))
-        // We process byte by byte
-
-        // Load block into a temporary (17 bytes, padded with 0x01)
-        block = allocate(17);
         i = 0;
         while i < 17 { *(block + i) = 0; i = i + 1; }
         i = 0;
-        while i < block_len {
-            *(block + i) = *(msg + pos + i);
-            i = i + 1;
-        }
-        *(block + block_len) = 1;  // append 0x01
+        while i < block_len { *(block + i) = *(msg + pos + i); i = i + 1; }
+        *(block + block_len) = 1;  // 0x01 high byte
 
-        // Convert block to 5 × 26-bit limbs (little-endian)
-        // Limb 0: bits 0-25 (bytes 0-3, partial)
-        n0 = 0;
-        n0 = n0 | (*(block + 0));
-        n0 = n0 | (*(block + 1) << 8);
-        n0 = n0 | (*(block + 2) << 16);
-        n0 = n0 | ((*(block + 3) & 3) << 24);  // 26 bits
+        n0_ptr = allocate(8); n1_ptr = allocate(8);
+        n2_ptr = allocate(8); n3_ptr = allocate(8); n4_ptr = allocate(8);
+        poly1305_decode_block(block, n0_ptr, n1_ptr, n2_ptr, n3_ptr, n4_ptr);
+        n0: u64 = *n0_ptr; n1: u64 = *n1_ptr;
+        n2: u64 = *n2_ptr; n3: u64 = *n3_ptr; n4: u64 = *n4_ptr;
+        free(n0_ptr); free(n1_ptr); free(n2_ptr); free(n3_ptr); free(n4_ptr);
 
-        n1 = 0;
-        n1 = n1 | (*(block + 3) >> 2);
-        n1 = n1 | (*(block + 4) << 6);
-        n1 = n1 | (*(block + 5) << 14);
-        n1 = n1 | ((*(block + 6) & 15) << 22);  // 26 bits
-
-        n2 = 0;
-        n2 = n2 | (*(block + 6) >> 4);
-        n2 = n2 | (*(block + 7) << 4);
-        n2 = n2 | (*(block + 8) << 12);
-        n2 = n2 | ((*(block + 9) & 63) << 20);  // 26 bits
-
-        n3 = 0;
-        n3 = n3 | (*(block + 9) >> 6);
-        n3 = n3 | (*(block + 10) << 2);
-        n3 = n3 | (*(block + 11) << 10);
-        n3 = n3 | (*(block + 12) << 18);  // 26 bits
-
-        n4 = 0;
-        n4 = n4 | (*(block + 13));
-        n4 = n4 | (*(block + 14) << 8);
-        n4 = n4 | (*(block + 15) << 16);
-        n4 = n4 | (*(block + 16) << 24);  // up to 25 bits
-
-        free(block);
-
-        // acc = (acc + n)
+        // acc = acc + n
         *(acc + 0) = *(acc + 0) + n0;
         *(acc + 1) = *(acc + 1) + n1;
         *(acc + 2) = *(acc + 2) + n2;
         *(acc + 3) = *(acc + 3) + n3;
         *(acc + 4) = *(acc + 4) + n4;
 
-        // acc = acc * r mod p
-        // This is simplified — a full implementation would do proper
-        // 130-bit multiplication with modular reduction.
-        // For now, we use a byte-level approach.
-
-        // Load r as 5 limbs
-        r0: u64 = *(r + 0) | (*(r + 1) << 8) | (*(r + 2) << 16) | ((*(r + 3) & 3) << 24);
-        r1: u64 = (*(r + 3) >> 2) | (*(r + 4) << 6) | (*(r + 5) << 14) | ((*(r + 6) & 15) << 22);
-        r2: u64 = (*(r + 6) >> 4) | (*(r + 7) << 4) | (*(r + 8) << 12) | ((*(r + 9) & 63) << 20);
-        r3: u64 = (*(r + 9) >> 6) | (*(r + 10) << 2) | (*(r + 11) << 10) | (*(r + 12) << 18);
-        r4: u64 = *(r + 13) | (*(r + 14) << 8) | (*(r + 15) << 16);
-
-        // Schoolbook multiplication (simplified — products may overflow u64)
-        // This is a known limitation; a production implementation would use
-        // careful limb scheduling to avoid overflow.
         a0: u64 = *(acc + 0);
         a1: u64 = *(acc + 1);
         a2: u64 = *(acc + 2);
         a3: u64 = *(acc + 3);
         a4: u64 = *(acc + 4);
 
-        // Multiply and reduce mod 2^130-5
-        // (acc * r) mod p where p = 2^130 - 5
-        // Since 2^130 ≡ 5 (mod p), we can reduce by multiplying
-        // high bits by 5 and adding to low bits.
-
-        // Full multiplication produces 10 limbs; we simplify here.
-        // This is correct for small messages but may overflow for large inputs.
-        d0: u64 = a0 * r0 + a1 * r4 * 5 + a2 * r3 * 5 + a3 * r2 * 5 + a4 * r1 * 5;
-        d1: u64 = a0 * r1 + a1 * r0 + a2 * r4 * 5 + a3 * r3 * 5 + a4 * r2 * 5;
-        d2: u64 = a0 * r2 + a1 * r1 + a2 * r0 + a3 * r4 * 5 + a4 * r3 * 5;
-        d3: u64 = a0 * r3 + a1 * r2 + a2 * r1 + a3 * r0 + a4 * r4 * 5;
+        // Schoolbook multiplication with reduction by 5 (since 2^130 = 5 mod p).
+        // d_i = sum_j a_j * r_{i-j mod 5}, with high-index r terms multiplied
+        // by 5 to fold the 2^130 wrap-around back into the low limbs.
+        d0: u64 = a0 * r0 + 5 * (a1 * r4 + a2 * r3 + a3 * r2 + a4 * r1);
+        d1: u64 = a0 * r1 + a1 * r0 + 5 * (a2 * r4 + a3 * r3 + a4 * r2);
+        d2: u64 = a0 * r2 + a1 * r1 + a2 * r0 + 5 * (a3 * r4 + a4 * r3);
+        d3: u64 = a0 * r3 + a1 * r2 + a2 * r1 + a3 * r0 + 5 * (a4 * r4);
         d4: u64 = a0 * r4 + a1 * r3 + a2 * r2 + a3 * r1 + a4 * r0;
 
-        // Carry propagation
+        // Carry propagation across the 5 limbs (each limb holds 26 bits).
         c: u64 = d0 >> 26;
         d0 = d0 & 67108863;  // 2^26 - 1
         d1 = d1 + c;
@@ -173,7 +206,7 @@ fn poly1305_mac(key: Address, msg: Address, msg_len: u32, tag: Address) {
         c = d4 >> 26;
         d4 = d4 & 67108863;
 
-        // Reduce: high bit * 5
+        // Final reduction: high carry * 5 wraps back to limb 0.
         d0 = d0 + c * 5;
         c = d0 >> 26;
         d0 = d0 & 67108863;
@@ -188,41 +221,58 @@ fn poly1305_mac(key: Address, msg: Address, msg_len: u32, tag: Address) {
         pos = pos + block_len;
     }
 
-    // Final: tag = (acc + s) mod 2^128
-    // Add s to accumulator
-    s0: u64 = *(s + 0) | (*(s + 1) << 8) | (*(s + 2) << 16) | (*(s + 3) << 24);
-    s1: u64 = *(s + 4) | (*(s + 5) << 8) | (*(s + 6) << 16) | (*(s + 7) << 24);
-    s2: u64 = *(s + 8) | (*(s + 9) << 8) | (*(s + 10) << 16) | (*(s + 11) << 24);
-    s3: u64 = *(s + 12) | (*(s + 13) << 8) | (*(s + 14) << 16) | (*(s + 15) << 24);
-
-    // Convert acc to 4 × 32-bit (mod 2^128)
+    // Final: tag = (acc + s) mod 2^128.
+    // Pack the 5 x 26-bit accumulator into 4 x 32-bit words.
     f0: u64 = *(acc + 0) | (*(acc + 1) << 26);
     f1: u64 = (*(acc + 1) >> 6) | (*(acc + 2) << 20);
     f2: u64 = (*(acc + 2) >> 12) | (*(acc + 3) << 14);
     f3: u64 = (*(acc + 3) >> 18) | (*(acc + 4) << 8);
 
-    f0 = (f0 + s0) & MASK32;
-    f1 = (f1 + s1 + (f0 >> 32)) & MASK32;
-    f2 = (f2 + s2 + (f1 >> 32)) & MASK32;
-    f3 = (f3 + s3 + (f2 >> 32)) & MASK32;
+    s0: u64 = poly1305_load_u32(key + 16, 0);
+    s1: u64 = poly1305_load_u32(key + 20, 0);
+    s2: u64 = poly1305_load_u32(key + 24, 0);
+    s3: u64 = poly1305_load_u32(key + 28, 0);
 
-    // Write tag (16 bytes, little-endian)
-    *(tag + 0) = f0 & 255;
-    *(tag + 1) = (f0 >> 8) & 255;
-    *(tag + 2) = (f0 >> 16) & 255;
-    *(tag + 3) = (f0 >> 24) & 255;
-    *(tag + 4) = f1 & 255;
-    *(tag + 5) = (f1 >> 8) & 255;
-    *(tag + 6) = (f1 >> 16) & 255;
-    *(tag + 7) = (f1 >> 24) & 255;
-    *(tag + 8) = f2 & 255;
-    *(tag + 9) = (f2 >> 8) & 255;
-    *(tag + 10) = (f2 >> 16) & 255;
-    *(tag + 11) = (f2 >> 24) & 255;
-    *(tag + 12) = f3 & 255;
-    *(tag + 13) = (f3 >> 8) & 255;
-    *(tag + 14) = (f3 >> 16) & 255;
-    *(tag + 15) = (f3 >> 24) & 255;
+    // Add s with carry propagation, mod 2^128.
+    f0 = f0 + s0;
+    f1 = f1 + s1 + (f0 >> 32);
+    f2 = f2 + s2 + (f1 >> 32);
+    f3 = f3 + s3 + (f2 >> 32);
+    f0 = f0 & 4294967295;
+    f1 = f1 & 4294967295;
+    f2 = f2 & 4294967295;
+    f3 = f3 & 4294967295;
 
-    free(r); free(s); free(acc);
+    poly1305_store_u32(tag, 0, f0 & POLY1305_MASK32);
+    poly1305_store_u32(tag, 4, f1 & POLY1305_MASK32);
+    poly1305_store_u32(tag, 8, f2 & POLY1305_MASK32);
+    poly1305_store_u32(tag, 12, f3 & POLY1305_MASK32);
+
+    free(r_buf);
+    free(r0_ptr); free(r1_ptr); free(r2_ptr); free(r3_ptr); free(r4_ptr);
+    free(acc);
+    free(block);
+}
+
+// ===========================================================================
+// Poly1305 verify.
+// Computes the MAC over msg and constant-time compares with the supplied
+// tag. Returns 1 on match, 0 otherwise. The comparison reads all 16 tag
+// bytes regardless of where the first mismatch occurs.
+// ===========================================================================
+
+fn poly1305_verify(key: Address, msg: Address, msg_len: u32, tag: Address) -> u32 {
+    computed = allocate(POLY1305_TAG_SIZE);
+    poly1305_mac(key, msg, msg_len, computed);
+
+    diff: u32 = 0;
+    i: u32 = 0;
+    while i < POLY1305_TAG_SIZE {
+        diff = diff | (*(computed + i) ^ *(tag + i));
+        i = i + 1;
+    }
+    free(computed);
+    // diff == 0 iff equal; fold to single bit (no branch on secret data).
+    folded: u32 = (diff | ((0 - diff) & POLY1305_MASK32)) >> 31;
+    return 1 - folded;
 }

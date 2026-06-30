@@ -1,6 +1,6 @@
 // womb/crypto/ecdsa_p256.vuma — ECDSA over NIST P-256 (FIPS 186-4)
 // No main() — importable library module.
-// Requires: bignum.vuma, sha256.vuma, hmac.vuma.
+// Requires: bignum.vuma (bn256_*), sha256.vuma, hmac.vuma.
 //
 // Curve: y^2 = x^3 + a*x + b (mod p)
 // P-256 parameters (FIPS 186-4 Section D.1.2.3):
@@ -10,29 +10,27 @@
 //   Gx = 0x6B17D1F2E12C4247F8BCE6E563A440F277037D812DEB33A0F4A13945D898C296
 //   Gy = 0x4FE342E2FE1A7F9B8EE7EB4A7C0F9E162BCE33576B315ECECBB6406837BF51F5
 //   n = 0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551
-
-// All point coordinates and scalars are 32-byte (256-bit) big-endian arrays
-// stored in memory. The bignum module uses little-endian internally, so we
-// reverse byte order when loading/storing.
-
-// P-256 prime p (big-endian, 32 bytes)
-// p = FFFFFFFF 00000001 00000000 00000000 00000000 FFFFFFFF FFFFFFFF FFFFFFFF
-// Stored as 32-byte big-endian at a fixed address
-
-// We store curve parameters as byte arrays and convert to limb format at runtime.
+//
+// Point coordinates and scalars are 32-byte big-endian on the wire. The bignum
+// module uses little-endian internally, so we byte-swap at every entry/exit.
+//
+// Signing uses RFC 6979 deterministic nonce derivation (HMAC-SHA-256 over
+// (private key, message hash)) so signatures are reproducible and immune to
+// weak-RNG k disclosure attacks. Verification follows FIPS 186-4 Section 7.
 
 // ===========================================================================
-// P-256 constants (stored as 32-byte big-endian in memory)
+// P-256 constants (returned as freshly-allocated 32-byte big-endian buffers;
+// caller frees).
 // ===========================================================================
 
 fn p256_p() -> Address {
     // p = 0xFFFFFFFF00000001000000000000000000000000FFFFFFFFFFFFFFFFFFFFFFFF
     buf = allocate(32);
-    *(buf + 0) = 255; *(buf + 1) = 255; *(buf + 2) = 255; *(buf + 3) = 255;
-    *(buf + 4) = 0; *(buf + 5) = 0; *(buf + 6) = 0; *(buf + 7) = 1;
-    *(buf + 8) = 0; *(buf + 9) = 0; *(buf + 10) = 0; *(buf + 11) = 0;
-    *(buf + 12) = 0; *(buf + 13) = 0; *(buf + 14) = 0; *(buf + 15) = 0;
-    *(buf + 16) = 0; *(buf + 17) = 0; *(buf + 18) = 0; *(buf + 19) = 0;
+    *(buf +  0) = 255; *(buf +  1) = 255; *(buf +  2) = 255; *(buf +  3) = 255;
+    *(buf +  4) =   0; *(buf +  5) =   0; *(buf +  6) =   0; *(buf +  7) =   1;
+    *(buf +  8) =   0; *(buf +  9) =   0; *(buf + 10) =   0; *(buf + 11) =   0;
+    *(buf + 12) =   0; *(buf + 13) =   0; *(buf + 14) =   0; *(buf + 15) =   0;
+    *(buf + 16) =   0; *(buf + 17) =   0; *(buf + 18) =   0; *(buf + 19) =   0;
     *(buf + 20) = 255; *(buf + 21) = 255; *(buf + 22) = 255; *(buf + 23) = 255;
     *(buf + 24) = 255; *(buf + 25) = 255; *(buf + 26) = 255; *(buf + 27) = 255;
     *(buf + 28) = 255; *(buf + 29) = 255; *(buf + 30) = 255; *(buf + 31) = 255;
@@ -42,48 +40,59 @@ fn p256_p() -> Address {
 fn p256_n() -> Address {
     // n = 0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551
     buf = allocate(32);
-    *(buf + 0) = 255; *(buf + 1) = 255; *(buf + 2) = 255; *(buf + 3) = 255;
-    *(buf + 4) = 0; *(buf + 5) = 0; *(buf + 6) = 0; *(buf + 7) = 0;
-    *(buf + 8) = 255; *(buf + 9) = 255; *(buf + 10) = 255; *(buf + 11) = 255;
+    *(buf +  0) = 255; *(buf +  1) = 255; *(buf +  2) = 255; *(buf +  3) = 255;
+    *(buf +  4) =   0; *(buf +  5) =   0; *(buf +  6) =   0; *(buf +  7) =   0;
+    *(buf +  8) = 255; *(buf +  9) = 255; *(buf + 10) = 255; *(buf + 11) = 255;
     *(buf + 12) = 255; *(buf + 13) = 255; *(buf + 14) = 255; *(buf + 15) = 255;
     *(buf + 16) = 188; *(buf + 17) = 230; *(buf + 18) = 250; *(buf + 19) = 173;
-    *(buf + 20) = 167; *(buf + 21) = 23; *(buf + 22) = 158; *(buf + 23) = 132;
+    *(buf + 20) = 167; *(buf + 21) =  23; *(buf + 22) = 158; *(buf + 23) = 132;
     *(buf + 24) = 243; *(buf + 25) = 185; *(buf + 26) = 202; *(buf + 27) = 194;
-    *(buf + 28) = 252; *(buf + 29) = 99; *(buf + 30) = 37; *(buf + 31) = 81;
+    *(buf + 28) = 252; *(buf + 29) =  99; *(buf + 30) =  37; *(buf + 31) =  81;
+    return buf;
+}
+
+fn p256_b() -> Address {
+    // b = 0x5AC635D8AA3A93E7B3EBBD55769886BC651D06B0CC53B0F63BCE3C3E27D2604B
+    buf = allocate(32);
+    *(buf +  0) =  90; *(buf +  1) = 198; *(buf +  2) =  53; *(buf +  3) = 216;
+    *(buf +  4) = 170; *(buf +  5) =  58; *(buf +  6) = 147; *(buf +  7) = 231;
+    *(buf +  8) = 179; *(buf +  9) = 235; *(buf + 10) = 189; *(buf + 11) =  85;
+    *(buf + 12) = 118; *(buf + 13) = 152; *(buf + 14) = 134; *(buf + 15) = 188;
+    *(buf + 16) = 101; *(buf + 17) =  29; *(buf + 18) =   6; *(buf + 19) = 176;
+    *(buf + 20) = 204; *(buf + 21) =  83; *(buf + 22) = 176; *(buf + 23) = 246;
+    *(buf + 24) =  59; *(buf + 25) = 206; *(buf + 26) =  60; *(buf + 27) =  62;
+    *(buf + 28) =  39; *(buf + 29) = 210; *(buf + 30) =  96; *(buf + 31) =  75;
     return buf;
 }
 
 fn p256_gx() -> Address {
-    // Gx = 0x6B17D1F2E12C4247F8BCE6E563A440F277037D812DEB33A0F4A13945D898C296
     buf = allocate(32);
-    *(buf + 0) = 107; *(buf + 1) = 23; *(buf + 2) = 209; *(buf + 3) = 242;
-    *(buf + 4) = 225; *(buf + 5) = 44; *(buf + 6) = 66; *(buf + 7) = 71;
-    *(buf + 8) = 248; *(buf + 9) = 188; *(buf + 10) = 230; *(buf + 11) = 229;
-    *(buf + 12) = 99; *(buf + 13) = 164; *(buf + 14) = 64; *(buf + 15) = 242;
-    *(buf + 16) = 119; *(buf + 17) = 3; *(buf + 18) = 125; *(buf + 19) = 129;
-    *(buf + 20) = 45; *(buf + 21) = 235; *(buf + 22) = 51; *(buf + 23) = 160;
-    *(buf + 24) = 244; *(buf + 25) = 161; *(buf + 26) = 57; *(buf + 27) = 69;
+    *(buf +  0) = 107; *(buf +  1) =  23; *(buf +  2) = 209; *(buf +  3) = 242;
+    *(buf +  4) = 225; *(buf +  5) =  44; *(buf +  6) =  66; *(buf +  7) =  71;
+    *(buf +  8) = 248; *(buf +  9) = 188; *(buf + 10) = 230; *(buf + 11) = 229;
+    *(buf + 12) =  99; *(buf + 13) = 164; *(buf + 14) =  64; *(buf + 15) = 242;
+    *(buf + 16) = 119; *(buf + 17) =   3; *(buf + 18) = 125; *(buf + 19) = 129;
+    *(buf + 20) =  45; *(buf + 21) = 235; *(buf + 22) =  51; *(buf + 23) = 160;
+    *(buf + 24) = 244; *(buf + 25) = 161; *(buf + 26) =  57; *(buf + 27) =  69;
     *(buf + 28) = 216; *(buf + 29) = 152; *(buf + 30) = 194; *(buf + 31) = 150;
     return buf;
 }
 
 fn p256_gy() -> Address {
-    // Gy = 0x4FE342E2FE1A7F9B8EE7EB4A7C0F9E162BCE33576B315ECECBB6406837BF51F5
     buf = allocate(32);
-    *(buf + 0) = 79; *(buf + 1) = 227; *(buf + 2) = 66; *(buf + 3) = 226;
-    *(buf + 4) = 254; *(buf + 5) = 26; *(buf + 6) = 127; *(buf + 7) = 155;
-    *(buf + 8) = 142; *(buf + 9) = 231; *(buf + 10) = 235; *(buf + 11) = 74;
-    *(buf + 12) = 124; *(buf + 13) = 15; *(buf + 14) = 158; *(buf + 15) = 22;
-    *(buf + 16) = 43; *(buf + 17) = 206; *(buf + 18) = 51; *(buf + 19) = 87;
-    *(buf + 20) = 107; *(buf + 21) = 49; *(buf + 22) = 94; *(buf + 23) = 206;
-    *(buf + 24) = 203; *(buf + 25) = 182; *(buf + 26) = 64; *(buf + 27) = 104;
-    *(buf + 28) = 55; *(buf + 29) = 191; *(buf + 30) = 81; *(buf + 31) = 245;
+    *(buf +  0) =  79; *(buf +  1) = 227; *(buf +  2) =  66; *(buf +  3) = 226;
+    *(buf +  4) = 254; *(buf +  5) =  26; *(buf +  6) = 127; *(buf +  7) = 155;
+    *(buf +  8) = 142; *(buf +  9) = 231; *(buf + 10) = 235; *(buf + 11) =  74;
+    *(buf + 12) = 124; *(buf + 13) =  15; *(buf + 14) = 158; *(buf + 15) =  22;
+    *(buf + 16) =  43; *(buf + 17) = 206; *(buf + 18) =  51; *(buf + 19) =  87;
+    *(buf + 20) = 107; *(buf + 21) =  49; *(buf + 22) =  94; *(buf + 23) = 206;
+    *(buf + 24) = 203; *(buf + 25) = 182; *(buf + 26) =  64; *(buf + 27) = 104;
+    *(buf + 28) =  55; *(buf + 29) = 191; *(buf + 30) =  81; *(buf + 31) = 245;
     return buf;
 }
 
 // ===========================================================================
-// Big-endian to little-endian byte swap for 32 bytes
-// (bignum module uses little-endian, curve params are big-endian)
+// Big-endian <-> little-endian byte swap for 32-byte field elements.
 // ===========================================================================
 
 fn swap_endian_32(dst: Address, src: Address) {
@@ -92,6 +101,39 @@ fn swap_endian_32(dst: Address, src: Address) {
         *(dst + i) = *(src + 31 - i);
         i = i + 1;
     }
+}
+
+// ===========================================================================
+// Point-on-curve check: y^2 == x^3 - 3*x + b (mod p).
+// Used by verify to reject bogus public keys.
+// ===========================================================================
+
+fn p256_is_on_curve(px: Address, py: Address, p_le: Address, b_le: Address) -> u32 {
+    // y^2
+    y_sq = allocate(32);
+    bn256_mod_mul(y_sq, py, py, p_le);
+    // x^3 = x * x * x
+    x_sq = allocate(32);
+    bn256_mod_mul(x_sq, px, px, p_le);
+    x_cubed = allocate(32);
+    bn256_mod_mul(x_cubed, x_sq, px, p_le);
+    // 3*x  (= x + x + x) — a = -3, so a*x = -3*x
+    three_x = allocate(32);
+    bn256_mod_add(three_x, px, px, p_le);
+    bn256_mod_add(three_x, three_x, px, p_le);
+    // rhs = x^3 - 3*x + b = x^3 + (p - 3*x) + b
+    neg_3x = allocate(32);
+    bn256_mod_sub(neg_3x, p_le, three_x, p_le);  // p - 3x
+    rhs = allocate(32);
+    bn256_mod_add(rhs, x_cubed, neg_3x, p_le);
+    bn256_mod_add(rhs, rhs, b_le, p_le);
+
+    result: u32 = 0;
+    if bn256_cmp(y_sq, rhs) == 0 { result = 1; }
+
+    free(y_sq); free(x_sq); free(x_cubed); free(three_x);
+    free(neg_3x); free(rhs);
+    return result;
 }
 
 // ===========================================================================
@@ -105,7 +147,7 @@ fn swap_endian_32(dst: Address, src: Address) {
 // Rx = slope^2 - 2*x mod p
 // Ry = slope*(x - Rx) - y mod p
 fn p256_point_double(rx: Address, ry: Address, px: Address, py: Address, p_le: Address) {
-    // If P is point at infinity, return infinity
+    // If P is the point at infinity, return infinity
     if bn256_is_zero(px) == 1 {
         if bn256_is_zero(py) == 1 {
             bn256_zero(rx);
@@ -117,27 +159,20 @@ fn p256_point_double(rx: Address, ry: Address, px: Address, py: Address, p_le: A
     // a = -3 mod p = p - 3
     a_val = allocate(32);
     bn256_copy(a_val, p_le);
-    // a = p - 3
     a_lo: u64 = load_u64(a_val, 0);
     store_u64(a_val, 0, a_lo - 3);
 
-    // t1 = x^2 mod p
+    // t1 = x^2 mod p ; t2 = 3*t1 + a
     t1 = allocate(32);
     bn256_mod_mul(t1, px, px, p_le);
-
-    // t2 = 3 * t1 mod p = (t1 + t1 + t1)
     t2 = allocate(32);
     bn256_mod_add(t2, t1, t1, p_le);
     bn256_mod_add(t2, t2, t1, p_le);
-
-    // t2 = t2 + a mod p = 3*x^2 + a
     bn256_mod_add(t2, t2, a_val, p_le);
 
-    // t3 = 2*y mod p
+    // t3 = 2*y ; slope = t2 * t3^(-1) mod p
     t3 = allocate(32);
     bn256_mod_add(t3, py, py, p_le);
-
-    // slope = t2 * t3^(-1) mod p
     t3_inv = allocate(32);
     bn256_mod_inv(t3_inv, t3, p_le);
     slope = allocate(32);
@@ -161,15 +196,9 @@ fn p256_point_double(rx: Address, ry: Address, px: Address, py: Address, p_le: A
     free(slope); free(slope_sq); free(two_x); free(x_minus_rx); free(slope_x);
 }
 
-// Point add: R = P + Q
-// If P == Q, use point double
-// If P is infinity, R = Q
-// If Q is infinity, R = P
-// slope = (Qy - Py) / (Qx - Px) mod p
-// Rx = slope^2 - Px - Qx mod p
-// Ry = slope*(Px - Rx) - Py mod p
+// Point add: R = P + Q. Handles infinity inputs, equal points (doubles),
+// and additive inverses (returns infinity).
 fn p256_point_add(rx: Address, ry: Address, px: Address, py: Address, qx: Address, qy: Address, p_le: Address) {
-    // If P is infinity
     if bn256_is_zero(px) == 1 {
         if bn256_is_zero(py) == 1 {
             bn256_copy(rx, qx);
@@ -177,7 +206,6 @@ fn p256_point_add(rx: Address, ry: Address, px: Address, py: Address, qx: Addres
             return;
         }
     }
-    // If Q is infinity
     if bn256_is_zero(qx) == 1 {
         if bn256_is_zero(qy) == 1 {
             bn256_copy(rx, px);
@@ -185,14 +213,12 @@ fn p256_point_add(rx: Address, ry: Address, px: Address, py: Address, qx: Addres
             return;
         }
     }
-    // If Px == Qx
     if bn256_cmp(px, qx) == 0 {
         if bn256_cmp(py, qy) == 0 {
-            // P == Q, double
             p256_point_double(rx, ry, px, py, p_le);
             return;
         } else {
-            // P = -Q, result is infinity
+            // P = -Q, result is point at infinity
             bn256_zero(rx);
             bn256_zero(ry);
             return;
@@ -227,63 +253,209 @@ fn p256_point_add(rx: Address, ry: Address, px: Address, py: Address, qx: Addres
     free(slope_sq); free(temp); free(x_diff); free(slope_x);
 }
 
-// Scalar multiplication: R = k * P
-// Uses double-and-add algorithm
+// Scalar multiplication: R = k * P using double-and-add (MSB-first).
 fn p256_scalar_mul(rx: Address, ry: Address, k: Address, px: Address, py: Address, p_le: Address) {
-    // R = point at infinity
     bn256_zero(rx);
     bn256_zero(ry);
 
-    // Temporary point
     tx = allocate(32);
     ty = allocate(32);
 
-    // Process bits from MSB to LSB
     bits: u32 = bn256_bitlen(k);
     if bits == 0 { free(tx); free(ty); return; }
 
     i: u32 = bits;
     while i > 0 {
         i = i - 1;
-        // R = 2*R (double)
+        // R = 2*R
         p256_point_double(tx, ty, rx, ry, p_le);
         bn256_copy(rx, tx);
         bn256_copy(ry, ty);
-
-        // If bit i is set, R = R + P
+        // R = R + P if bit i is set
         if bn256_get_bit(k, i) == 1 {
             p256_point_add(tx, ty, rx, ry, px, py, p_le);
             bn256_copy(rx, tx);
             bn256_copy(ry, ty);
         }
     }
-
     free(tx); free(ty);
 }
 
 // ===========================================================================
+// Key generation: produce a fresh (private scalar d, public point Q) pair.
+//   privkey_be (in/out) : 32-byte big-endian private scalar (caller seeds)
+//   pubkey_x_be (out)   : 32-byte big-endian Q.x
+//   pubkey_y_be (out)   : 32-byte big-endian Q.y
+// Computes Q = d * G. The caller is expected to fill `privkey_be` with 32
+// bytes from a CSPRNG; this function reduces d mod n to keep it in range,
+// then derives the public key.
+// ===========================================================================
+
+fn ecdsa_p256_keygen(privkey_be: Address, pubkey_x_be: Address, pubkey_y_be: Address) {
+    n_be = p256_n();
+    n_le = allocate(32);
+    swap_endian_32(n_le, n_be);
+    free(n_be);
+
+    d_le = allocate(32);
+    swap_endian_32(d_le, privkey_be);
+    // Reduce d mod n so 1 <= d < n (single conditional subtraction suffices
+    // because d < 2^256 < 2n)
+    if bn256_cmp(d_le, n_le) >= 0 {
+        bn256_sub(d_le, d_le, n_le);
+    }
+    if bn256_is_zero(d_le) == 1 {
+        // Degenerate private key — clamp to 1
+        bn256_zero(d_le);
+        *(d_le + 0) = 1;
+    }
+
+    gx_be = p256_gx();
+    gy_be = p256_gy();
+    gx_le = allocate(32);
+    gy_le = allocate(32);
+    swap_endian_32(gx_le, gx_be);
+    swap_endian_32(gy_le, gy_be);
+    free(gx_be); free(gy_be);
+
+    p_be = p256_p();
+    p_le = allocate(32);
+    swap_endian_32(p_le, p_be);
+    free(p_be);
+
+    qx_le = allocate(32);
+    qy_le = allocate(32);
+    p256_scalar_mul(qx_le, qy_le, d_le, gx_le, gy_le, p_le);
+
+    swap_endian_32(pubkey_x_be, qx_le);
+    swap_endian_32(pubkey_y_be, qy_le);
+
+    // Reflect the (possibly reduced) d back into privkey_be
+    swap_endian_32(privkey_be, d_le);
+
+    free(n_le); free(d_le); free(gx_le); free(gy_le); free(p_le);
+    free(qx_le); free(qy_le);
+}
+
+// ===========================================================================
+// RFC 6979 deterministic nonce generation for ECDSA P-256.
+//   k = bits2int(T) where T = HMAC_DRBG output of length hlen, derived from
+//   the private key x and the message hash h, reduced mod n with rejection
+//   of k == 0 and k >= n.
+// Inputs:
+//   x_be (32 bytes, big-endian) : private scalar
+//   h_be (32 bytes, big-endian) : message hash
+//   n_le (32 bytes, little-endian) : group order
+// Output:
+//   k_le (32 bytes, little-endian) : nonce satisfying 1 <= k < n
+// ===========================================================================
+
+fn rfc6979_p256_k(x_be: Address, h_be: Address, n_le: Address, k_le: Address) {
+    hlen: u32 = 32;
+
+    // V = 0x01 * 32 ; K = 0x00 * 32
+    V = allocate(hlen);
+    K = allocate(hlen);
+    i: u32 = 0;
+    while i < hlen { *(V + i) = 1; *(K + i) = 0; i = i + 1; }
+
+    // bits2octets(h) = h mod n essentially — but RFC 6979 specifies a
+    // particular reduction. We compute h_be interpreted as a big-endian
+    // integer and reduce mod n (single subtraction suffices because
+    // h < 2^256 < 2n).
+    h_le = allocate(32);
+    swap_endian_32(h_le, h_be);
+    if bn256_cmp(h_le, n_le) >= 0 {
+        bn256_sub(h_le, h_le, n_le);
+    }
+    h_be_reduced = allocate(32);
+    swap_endian_32(h_be_reduced, h_le);
+    free(h_le);
+
+    x_le = allocate(32);
+    swap_endian_32(x_le, x_be);
+    x_be_canon = allocate(32);
+    swap_endian_32(x_be_canon, x_le);
+    free(x_le);
+
+    // K = HMAC_K(V || 0x00 || int2octets(x) || bits2octets(h))
+    buf1 = allocate(hlen + 1 + 32 + 32);
+    i = 0;
+    while i < hlen { *(buf1 + i) = *(V + i); i = i + 1; }
+    *(buf1 + hlen) = 0;
+    i = 0;
+    while i < 32 { *(buf1 + hlen + 1 + i) = *(x_be_canon + i); i = i + 1; }
+    i = 0;
+    while i < 32 { *(buf1 + hlen + 1 + 32 + i) = *(h_be_reduced + i); i = i + 1; }
+    hmac_sha256(K, hlen, buf1, hlen + 1 + 64, V);   // V <- HMAC_K(buf1)
+    i = 0;
+    while i < hlen { *(K + i) = *(V + i); i = i + 1; }
+    hmac_sha256(K, hlen, buf1, hlen + 1 + 64, K);   // K <- HMAC_K(buf1) → real K
+    // V = HMAC_K(V)
+    hmac_sha256(K, hlen, V, hlen, V);
+    free(buf1);
+
+    // K = HMAC_K(V || 0x01 || int2octets(x) || bits2octets(h))
+    buf2 = allocate(hlen + 1 + 32 + 32);
+    i = 0;
+    while i < hlen { *(buf2 + i) = *(V + i); i = i + 1; }
+    *(buf2 + hlen) = 1;
+    i = 0;
+    while i < 32 { *(buf2 + hlen + 1 + i) = *(x_be_canon + i); i = i + 1; }
+    i = 0;
+    while i < 32 { *(buf2 + hlen + 1 + 32 + i) = *(h_be_reduced + i); i = i + 1; }
+    hmac_sha256(K, hlen, buf2, hlen + 1 + 64, K);   // K <- HMAC_K(buf2)
+    hmac_sha256(K, hlen, V, hlen, V);               // V <- HMAC_K(V)
+    free(buf2);
+
+    // Generate candidate T = V (one block = 32 bytes = qlen_bytes for P-256)
+    accepted: u32 = 0;
+    attempts: u32 = 0;
+    while accepted == 0 && attempts < 32 {
+        hmac_sha256(K, hlen, V, hlen, V);
+        // k = bits2int(V) = V interpreted big-endian then reduced mod n
+        swap_endian_32(k_le, V);
+        if bn256_cmp(k_le, n_le) >= 0 {
+            bn256_sub(k_le, k_le, n_le);
+        }
+        if bn256_is_zero(k_le) == 0 {
+            accepted = 1;
+        } else {
+            // K = HMAC_K(V || 0x00) ; V = HMAC_K(V)
+            buf3 = allocate(hlen + 1);
+            i = 0;
+            while i < hlen { *(buf3 + i) = *(V + i); i = i + 1; }
+            *(buf3 + hlen) = 0;
+            hmac_sha256(K, hlen, buf3, hlen + 1, K);
+            hmac_sha256(K, hlen, V, hlen, V);
+            free(buf3);
+        }
+        attempts = attempts + 1;
+    }
+
+    free(V); free(K); free(h_be_reduced); free(x_be_canon);
+}
+
+// ===========================================================================
 // ECDSA P-256 Sign
-// Hash the message with SHA-256, then sign with private key d.
+// Hash the message with SHA-256, derive k via RFC 6979, then compute
+// r = (k*G).x mod n and s = k^-1 * (h + r*d) mod n.
 // Output: r, s (each 32 bytes, big-endian)
 // ===========================================================================
 
 fn ecdsa_p256_sign(msg: Address, msg_len: u32, privkey_be: Address, r_out: Address, s_out: Address) {
-    // Hash message
     h = allocate(32);
     sha256_oneshot(msg, msg_len, h);
 
-    // Convert hash and key to little-endian
     h_le = allocate(32);
     swap_endian_32(h_le, h);
     d_le = allocate(32);
     swap_endian_32(d_le, privkey_be);
 
-    // Get curve params in little-endian
     p_be = p256_p();
     n_be = p256_n();
     gx_be = p256_gx();
     gy_be = p256_gy();
-
     p_le = allocate(32);
     n_le = allocate(32);
     gx_le = allocate(32);
@@ -292,27 +464,26 @@ fn ecdsa_p256_sign(msg: Address, msg_len: u32, privkey_be: Address, r_out: Addre
     swap_endian_32(n_le, n_be);
     swap_endian_32(gx_le, gx_be);
     swap_endian_32(gy_le, gy_be);
-
     free(p_be); free(n_be); free(gx_be); free(gy_be);
 
-    // k = deterministic nonce (use HMAC-SHA256(d, h) truncated to 32 bytes)
-    k = allocate(32);
-    hmac_sha256(privkey_be, 32, h, 32, k);
-    k_le = allocate(32);
-    swap_endian_32(k_le, k);
-    free(k);
-
-    // Ensure k < n (reduce if needed — simplified, just check)
-    if bn256_cmp(k_le, n_le) >= 0 {
-        bn256_sub(k_le, k_le, n_le);
+    // Reduce d mod n
+    if bn256_cmp(d_le, n_le) >= 0 {
+        bn256_sub(d_le, d_le, n_le);
+    }
+    // Reduce h mod n (h < 2^256 < 2n, so at most one subtraction)
+    if bn256_cmp(h_le, n_le) >= 0 {
+        bn256_sub(h_le, h_le, n_le);
     }
 
-    // R = k * G
+    // RFC 6979 deterministic k
+    k_le = allocate(32);
+    rfc6979_p256_k(privkey_be, h, n_le, k_le);
+
+    // R = k * G ; r = Rx mod n
     rx = allocate(32);
     ry = allocate(32);
     p256_scalar_mul(rx, ry, k_le, gx_le, gy_le, p_le);
 
-    // r = Rx mod n
     r_le = allocate(32);
     bn256_copy(r_le, rx);
     if bn256_cmp(r_le, n_le) >= 0 {
@@ -322,13 +493,10 @@ fn ecdsa_p256_sign(msg: Address, msg_len: u32, privkey_be: Address, r_out: Addre
     // s = k^(-1) * (h + r*d) mod n
     k_inv = allocate(32);
     bn256_mod_inv(k_inv, k_le, n_le);
-
     rd = allocate(32);
     bn256_mod_mul(rd, r_le, d_le, n_le);
-
     h_rd = allocate(32);
     bn256_mod_add(h_rd, h_le, rd, n_le);
-
     s_le = allocate(32);
     bn256_mod_mul(s_le, k_inv, h_rd, n_le);
 
@@ -343,11 +511,14 @@ fn ecdsa_p256_sign(msg: Address, msg_len: u32, privkey_be: Address, r_out: Addre
 
 // ===========================================================================
 // ECDSA P-256 Verify
-// Returns 1 if valid, 0 if invalid
+//   msg          : message bytes
+//   pubkey_*_be  : 32-byte big-endian public key coordinates
+//   r_be, s_be   : 32-byte big-endian signature halves
+// Returns 1 if valid, 0 if invalid (including malformed signatures or
+// public keys that are not on the curve).
 // ===========================================================================
 
 fn ecdsa_p256_verify(msg: Address, msg_len: u32, pubkey_x_be: Address, pubkey_y_be: Address, r_be: Address, s_be: Address) -> u32 {
-    // Check 0 < r < n and 0 < s < n
     n_be = p256_n();
     n_le = allocate(32);
     swap_endian_32(n_le, n_be);
@@ -358,90 +529,79 @@ fn ecdsa_p256_verify(msg: Address, msg_len: u32, pubkey_x_be: Address, pubkey_y_
     swap_endian_32(r_le, r_be);
     swap_endian_32(s_le, s_be);
 
+    // Range checks: 1 <= r, s < n
     if bn256_is_zero(r_le) == 1 { free(n_le); free(r_le); free(s_le); return 0; }
     if bn256_is_zero(s_le) == 1 { free(n_le); free(r_le); free(s_le); return 0; }
     if bn256_cmp(r_le, n_le) >= 0 { free(n_le); free(r_le); free(s_le); return 0; }
     if bn256_cmp(s_le, n_le) >= 0 { free(n_le); free(r_le); free(s_le); return 0; }
 
-    // Hash message
     h = allocate(32);
     sha256_oneshot(msg, msg_len, h);
     h_le = allocate(32);
     swap_endian_32(h_le, h);
     free(h);
+    if bn256_cmp(h_le, n_le) >= 0 {
+        bn256_sub(h_le, h_le, n_le);
+    }
 
-    // Get curve params
     p_be = p256_p();
+    b_be = p256_b();
     gx_be = p256_gx();
     gy_be = p256_gy();
     p_le = allocate(32);
+    b_le = allocate(32);
     gx_le = allocate(32);
     gy_le = allocate(32);
     swap_endian_32(p_le, p_be);
+    swap_endian_32(b_le, b_be);
     swap_endian_32(gx_le, gx_be);
     swap_endian_32(gy_le, gy_be);
-    free(p_be); free(gx_be); free(gy_be);
+    free(p_be); free(b_be); free(gx_be); free(gy_be);
 
-    // Convert public key to little-endian
     qx_le = allocate(32);
     qy_le = allocate(32);
     swap_endian_32(qx_le, pubkey_x_be);
     swap_endian_32(qy_le, pubkey_y_be);
 
-    // w = s^(-1) mod n
+    // Reject public keys that are not on the curve
+    if p256_is_on_curve(qx_le, qy_le, p_le, b_le) == 0 {
+        free(n_le); free(r_le); free(s_le); free(h_le);
+        free(p_le); free(b_le); free(gx_le); free(gy_le);
+        free(qx_le); free(qy_le);
+        return 0;
+    }
+
+    // w = s^(-1) mod n ; u1 = h * w ; u2 = r * w
     w = allocate(32);
     bn256_mod_inv(w, s_le, n_le);
-
-    // u1 = h * w mod n
     u1 = allocate(32);
     bn256_mod_mul(u1, h_le, w, n_le);
-
-    // u2 = r * w mod n
     u2 = allocate(32);
     bn256_mod_mul(u2, r_le, w, n_le);
 
     // Pt = u1*G + u2*Q
-    // u1*G
-    r1x = allocate(32);
-    r1y = allocate(32);
+    r1x = allocate(32); r1y = allocate(32);
     p256_scalar_mul(r1x, r1y, u1, gx_le, gy_le, p_le);
-
-    // u2*Q
-    r2x = allocate(32);
-    r2y = allocate(32);
+    r2x = allocate(32); r2y = allocate(32);
     p256_scalar_mul(r2x, r2y, u2, qx_le, qy_le, p_le);
-
-    // Pt = r1 + r2
-    ptx = allocate(32);
-    pty = allocate(32);
+    ptx = allocate(32); pty = allocate(32);
     p256_point_add(ptx, pty, r1x, r1y, r2x, r2y, p_le);
 
-    // If Pt is infinity, signature is invalid
-    if bn256_is_zero(ptx) == 1 {
-        if bn256_is_zero(pty) == 1 {
-            free(n_le); free(r_le); free(s_le); free(h_le);
-            free(p_le); free(gx_le); free(gy_le);
-            free(qx_le); free(qy_le); free(w); free(u1); free(u2);
-            free(r1x); free(r1y); free(r2x); free(r2y); free(ptx); free(pty);
-            return 0;
-        }
-    }
-
-    // v = Ptx mod n
-    v = allocate(32);
-    bn256_copy(v, ptx);
-    if bn256_cmp(v, n_le) >= 0 {
-        bn256_sub(v, v, n_le);
-    }
-
-    // Valid if v == r
     result: u32 = 0;
-    if bn256_cmp(v, r_le) == 0 { result = 1; }
+    if bn256_is_zero(ptx) == 0 || bn256_is_zero(pty) == 0 {
+        v = allocate(32);
+        bn256_copy(v, ptx);
+        if bn256_cmp(v, n_le) >= 0 {
+            bn256_sub(v, v, n_le);
+        }
+        if bn256_cmp(v, r_le) == 0 { result = 1; }
+        free(v);
+    }
 
     free(n_le); free(r_le); free(s_le); free(h_le);
-    free(p_le); free(gx_le); free(gy_le);
+    free(p_le); free(b_le); free(gx_le); free(gy_le);
     free(qx_le); free(qy_le); free(w); free(u1); free(u2);
-    free(r1x); free(r1y); free(r2x); free(r2y); free(ptx); free(pty); free(v);
+    free(r1x); free(r1y); free(r2x); free(r2y); free(ptx); free(pty);
 
     return result;
 }

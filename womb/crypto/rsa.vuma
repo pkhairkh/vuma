@@ -1,10 +1,373 @@
-// womb/crypto/rsa.vuma — RSA PKCS#1 v1.5 (RFC 8017)
-// 2048-bit RSA encrypt/decrypt/sign/verify.
+// womb/crypto/rsa.vuma — RSA-2048 PKCS#1 v1.5 (RFC 8017)
+// 2048-bit RSA: key generation, encrypt/decrypt, sign/verify, CRT private op.
 // No main() — importable library module.
-// Requires: bignum2048.vuma, sha256.vuma.
+// Requires: bignum2048.vuma (mod_exp, mod_mul, mod_add, mod_sub, add, sub,
+//           cmp, is_zero, copy, zero, bitlen, get_bit, set_u32),
+//           sha256.vuma (sha256_oneshot),
+//           drbg.vuma (drbg_random for prime search seeding).
+//
+// Memory layout of an RSA private key (RSA_KEY_BYTES = 8 * 256 = 2048 bytes):
+//   off +    0 : n    (modulus,                256 bytes, little-endian)
+//   off +  256 : e    (public exponent,        256 bytes, little-endian)
+//   off +  512 : d    (private exponent,       256 bytes, little-endian)
+//   off +  768 : p    (first prime,            256 bytes, little-endian)
+//   off + 1024 : q    (second prime,           256 bytes, little-endian)
+//   off + 1280 : dp   (d mod (p-1),            256 bytes, little-endian)
+//   off + 1536 : dq   (d mod (q-1),            256 bytes, little-endian)
+//   off + 1792 : qinv (q^-1 mod p,             256 bytes, little-endian)
+// A public key occupies the first 512 bytes (n || e).
 
-const KEY_SIZE: u32 = 256;  // 2048 bits = 256 bytes
+const KEY_SIZE: u32 = 256;          // 2048 bits = 256 bytes
+const RSA_KEY_BYTES: u32 = 2048;    // full private key blob (8 * 256)
+const RSA_PUB_BYTES: u32 = 512;     // public key blob (n || e)
+const EXP_E: u32 = 65537;           // standard public exponent F4
 
+// ===========================================================================
+// Right-shift a 256-byte little-endian bignum by 1 bit (in place semantics
+// through r). Implemented byte-wise so it works on any 2048-bit value.
+// ===========================================================================
+fn rsa_bn_rshift1(r: Address, a: Address) {
+    i: u32 = 0;
+    while i < 256 {
+        cur: u32 = *(a + i);
+        nxt: u32 = 0;
+        if i + 1 < 256 { nxt = *(a + i + 1); }
+        *(r + i) = ((cur >> 1) | (nxt << 7)) & 255;
+        i = i + 1;
+    }
+}
+
+// Left-shift a 256-byte bignum by 1 bit, used by long division.
+fn bn2048_lshift1_256(r: Address, a: Address) {
+    carry: u32 = 0;
+    i: u32 = 0;
+    while i < 256 {
+        cur: u32 = *(a + i);
+        newv: u32 = (cur << 1) | carry;
+        *(r + i) = newv & 255;
+        carry = newv >> 8;
+        i = i + 1;
+    }
+}
+
+// Copy 256 bytes from src to dst.
+fn ka_copy_to(dst: Address, src: Address) {
+    i: u32 = 0;
+    while i < 256 { *(dst + i) = *(src + i); i = i + 1; }
+}
+
+// Copy 256 bytes from a blob offset into a standalone bignum buffer.
+fn ka_from_blob(dst: Address, src: Address) {
+    i: u32 = 0;
+    while i < 256 { *(dst + i) = *(src + i); i = i + 1; }
+}
+
+// ===========================================================================
+// Extended-GCD modular inverse for 2048-bit bignums.
+// Computes r = a^(-1) mod m via the binary extended Euclidean algorithm,
+// matching the bn256_mod_inv implementation in bignum.vuma. All intermediate
+// values stay in [0, m) using mod_add / mod_sub semantics on the 256-byte
+// buffers.
+// ===========================================================================
+fn rsa_bn_mod_inv(r: Address, a: Address, m: Address) {
+    u = allocate(256);
+    v = allocate(256);
+    x1 = allocate(256);
+    x2 = allocate(256);
+    bn2048_copy(u, a);
+    bn2048_copy(v, m);
+    bn2048_zero(x2);
+    bn2048_set_u32(x1, 1);
+
+    while bn2048_is_zero(u) == 0 {
+        // Strip factors of 2 from u, adjusting x1 = x1/2 mod m
+        while bn2048_get_bit(u, 0) == 0 {
+            rsa_bn_rshift1(u, u);
+            if bn2048_get_bit(x1, 0) == 0 {
+                rsa_bn_rshift1(x1, x1);
+            } else {
+                bn2048_add(x1, x1, m);
+                rsa_bn_rshift1(x1, x1);
+            }
+        }
+        // Strip factors of 2 from v, adjusting x2 = x2/2 mod m
+        while bn2048_get_bit(v, 0) == 0 {
+            rsa_bn_rshift1(v, v);
+            if bn2048_get_bit(x2, 0) == 0 {
+                rsa_bn_rshift1(x2, x2);
+            } else {
+                bn2048_add(x2, x2, m);
+                rsa_bn_rshift1(x2, x2);
+            }
+        }
+        // Reduce the larger of u, v; subtract the smaller; same for x1, x2
+        if bn2048_cmp(u, v) >= 0 {
+            bn2048_sub(u, u, v);
+            borrow: u32 = bn2048_sub(x1, x1, x2);
+            if borrow == 1 { bn2048_add(x1, x1, m); }
+        } else {
+            bn2048_sub(v, v, u);
+            borrow2: u32 = bn2048_sub(x2, x2, x1);
+            if borrow2 == 1 { bn2048_add(x2, x2, m); }
+        }
+    }
+    bn2048_copy(r, x2);
+    free(u); free(v); free(x1); free(x2);
+}
+
+// ===========================================================================
+// Compute r = a mod m using repeated shift-subtract long division.
+// Both inputs and output are 256-byte little-endian bignums. Works for any
+// 0 <= a, m < 2^2048 (m != 0).
+// ===========================================================================
+fn rsa_bn_mod(r: Address, a: Address, m: Address) {
+    rem = allocate(256);
+    bn2048_zero(rem);
+    bits: u32 = bn2048_bitlen(a);
+    i: u32 = bits;
+    while i > 0 {
+        i = i - 1;
+        // rem = rem << 1
+        bn2048_lshift1_256(rem, rem);
+        // rem.bit0 = a.bit(i)
+        if bn2048_get_bit(a, i) == 1 {
+            *(rem + 0) = *(rem + 0) | 1;
+        }
+        // if rem >= m: rem -= m
+        if bn2048_cmp(rem, m) >= 0 {
+            bn2048_sub(rem, rem, m);
+        }
+    }
+    bn2048_copy(r, rem);
+    free(rem);
+}
+
+// ===========================================================================
+// 2048-bit = 1024-bit * 1024-bit schoolbook multiply into a 256-byte result.
+// Operates on 256-byte buffers but only the low 128 bytes of each input are
+// significant (i.e. 1024-bit operands). Result occupies all 256 bytes.
+// ===========================================================================
+fn rsa_mul_2048(r: Address, a: Address, b: Address) {
+    // Zero result
+    i: u32 = 0;
+    while i < 256 { *(r + i) = 0; i = i + 1; }
+
+    ai: u32 = 0;
+    while ai < 128 {
+        a_val: u32 = *(a + ai);
+        if a_val == 0 { ai = ai + 1; continue; }
+        bi: u32 = 0;
+        while bi < 128 {
+            b_val: u32 = *(b + bi);
+            if b_val == 0 { bi = bi + 1; continue; }
+            // 16-bit product, add into r at offset ai+bi
+            prod: u32 = a_val * b_val;
+            off: u32 = ai + bi;
+            // Add low byte of prod with carry propagation
+            cur0: u32 = *(r + off + 0);
+            newv0: u32 = cur0 + (prod & 255);
+            *(r + off + 0) = newv0 & 255;
+            carry: u32 = newv0 >> 8;
+            // Add high byte of prod with carry propagation, plus any further
+            // carries that result from the addition itself.
+            k: u32 = 1;
+            remaining: u32 = (prod >> 8) + carry;
+            while k < 16 {
+                if off + k >= 256 { break; }
+                if remaining == 0 { break; }
+                cur: u32 = *(r + off + k);
+                newv: u32 = cur + (remaining & 255);
+                *(r + off + k) = newv & 255;
+                remaining = (remaining >> 8) + (newv >> 8);
+                k = k + 1;
+            }
+            bi = bi + 1;
+        }
+        ai = ai + 1;
+    }
+}
+
+// ===========================================================================
+// Miller-Rabin primality test on a 256-byte (2048-bit) candidate.
+// Returns 1 if probably prime, 0 if composite. Uses rounds = 5 small bases
+// (2, 3, 5, 7, 11) — sufficient for randomly generated 1024-bit candidates
+// in practical key generation.
+// ===========================================================================
+fn rsa_is_probably_prime(n: Address) -> u32 {
+    if bn2048_is_zero(n) == 1 { return 0; }
+    n_low: u32 = *(n + 0);
+    if n_low == 2 { return 1; }
+    if n_low == 3 { return 1; }
+    if (n_low & 1) == 0 { return 0; }
+
+    // Write n-1 = d * 2^r with d odd
+    nm1 = allocate(256);
+    bn2048_set_u32(nm1, 1);
+    bn2048_sub(nm1, n, nm1);
+    r: u32 = 0;
+    d = allocate(256);
+    bn2048_copy(d, nm1);
+    while bn2048_get_bit(d, 0) == 0 {
+        rsa_bn_rshift1(d, d);
+        r = r + 1;
+    }
+
+    bases = allocate(5);
+    *(bases + 0) = 2;
+    *(bases + 1) = 3;
+    *(bases + 2) = 5;
+    *(bases + 3) = 7;
+    *(bases + 4) = 11;
+
+    one = allocate(256);
+    bn2048_set_u32(one, 1);
+
+    result: u32 = 1;
+    bi: u32 = 0;
+    while bi < 5 {
+        if result == 0 { break; }
+        a = allocate(256);
+        bn2048_set_u32(a, *(bases + bi));
+        // If a >= n, skip (only matters for tiny n)
+        if bn2048_cmp(a, n) >= 0 { free(a); bi = bi + 1; continue; }
+
+        // x = a^d mod n
+        x = allocate(256);
+        bn2048_mod_exp(x, a, d, n);
+
+        cont: u32 = 0;
+        if bn2048_cmp(x, one) == 0 { cont = 1; }
+        if cont == 0 {
+            if bn2048_cmp(x, nm1) == 0 { cont = 1; }
+        }
+
+        ri: u32 = 0;
+        while cont == 0 && ri + 1 < r {
+            x2 = allocate(256);
+            bn2048_mod_mul(x2, x, x, n);
+            bn2048_copy(x, x2);
+            free(x2);
+            if bn2048_cmp(x, one) == 0 { result = 0; break; }
+            if bn2048_cmp(x, nm1) == 0 { cont = 1; break; }
+            ri = ri + 1;
+        }
+        if cont == 0 && result == 1 { result = 0; }
+
+        free(a); free(x);
+        bi = bi + 1;
+    }
+
+    free(nm1); free(d); free(bases); free(one);
+    return result;
+}
+
+// ===========================================================================
+// Random 256-byte bignum seeded from the DRBG. The two highest bits and the
+// lowest bit are forced to 1 so that p, q are exactly 1024 bits and odd.
+// ===========================================================================
+fn rsa_random_1024bit_odd(out: Address) {
+    drbg_random(out, 128);
+    *(out + 0) = *(out + 0) | 1;            // force odd
+    *(out + 127) = *(out + 127) | 192;      // set top two bits -> 1024-bit
+    // Zero out bytes 128..255 so bn2048_cmp sees a 1024-bit value
+    i: u32 = 128;
+    while i < 256 { *(out + i) = 0; i = i + 1; }
+}
+
+// ===========================================================================
+// Generate a 1024-bit prime p with p mod EXP_E != 1 (so gcd(p-1, e) = 1).
+// Search starts from a random odd 1024-bit integer and increments by 2 until
+// Miller-Rabin accepts the candidate.
+// ===========================================================================
+fn rsa_generate_prime(out: Address) {
+    rsa_random_1024bit_odd(out);
+    attempts: u32 = 0;
+    while attempts < 100000 {
+        // Reject p if (p mod EXP_E) == 1 (i.e. gcd(p-1, e) != 1)
+        acc: u32 = 0;
+        i: u32 = 128;
+        while i > 0 {
+            i = i - 1;
+            acc = ((acc << 8) | *(out + i)) % 65537;
+        }
+        if acc != 1 {
+            if rsa_is_probably_prime(out) == 1 { return; }
+        }
+        // Increment by 2 (preserve oddness); carry propagates upward
+        i = 0;
+        carry: u32 = 2;
+        while i < 128 && carry > 0 {
+            cur: u32 = *(out + i);
+            newv: u32 = cur + carry;
+            *(out + i) = newv & 255;
+            carry = newv >> 8;
+            i = i + 1;
+        }
+        attempts = attempts + 1;
+    }
+}
+
+// ===========================================================================
+// Generate an RSA-2048 keypair.
+//   key_out : RSA_KEY_BYTES-byte buffer to receive the full private key blob
+//             (n || e || d || p || q || dp || dq || qinv)
+// Returns 1 on success, 0 on failure.
+// ===========================================================================
+fn rsa_keygen(key_out: Address) -> u32 {
+    p  = allocate(256);
+    q  = allocate(256);
+    n  = allocate(256);
+    e  = allocate(256);
+    d  = allocate(256);
+    p1 = allocate(256);
+    q1 = allocate(256);
+    phi = allocate(256);
+    dp = allocate(256);
+    dq = allocate(256);
+    qinv = allocate(256);
+
+    rsa_generate_prime(p);
+    rsa_generate_prime(q);
+    if bn2048_cmp(p, q) == 0 {
+        rsa_generate_prime(q);
+    }
+
+    // n = p * q
+    rsa_mul_2048(n, p, q);
+
+    // e = 65537
+    bn2048_set_u32(e, EXP_E);
+
+    // phi = (p-1) * (q-1)
+    bn2048_set_u32(p1, 1); bn2048_sub(p1, p, p1);
+    bn2048_set_u32(q1, 1); bn2048_sub(q1, q, q1);
+    rsa_mul_2048(phi, p1, q1);
+
+    // d = e^-1 mod phi
+    rsa_bn_mod_inv(d, e, phi);
+
+    // dp = d mod (p-1), dq = d mod (q-1), qinv = q^-1 mod p
+    rsa_bn_mod(dp,  d, p1);
+    rsa_bn_mod(dq,  d, q1);
+    rsa_bn_mod_inv(qinv, q, p);
+
+    ka_copy_to(key_out + 0,    n);
+    ka_copy_to(key_out + 256,  e);
+    ka_copy_to(key_out + 512,  d);
+    ka_copy_to(key_out + 768,  p);
+    ka_copy_to(key_out + 1024, q);
+    ka_copy_to(key_out + 1280, dp);
+    ka_copy_to(key_out + 1536, dq);
+    ka_copy_to(key_out + 1792, qinv);
+
+    free(p); free(q); free(n); free(e); free(d);
+    free(p1); free(q1); free(phi); free(dp); free(dq); free(qinv);
+    return 1;
+}
+
+// ===========================================================================
+// Core RSA primitive: c = m^e mod n (public op) and m = c^d mod n (private op)
+// ===========================================================================
 fn rsa_public_op(c: Address, m: Address, e: Address, n: Address) {
     bn2048_mod_exp(c, m, e, n);
 }
@@ -13,6 +376,56 @@ fn rsa_private_op(m: Address, c: Address, d: Address, n: Address) {
     bn2048_mod_exp(m, c, d, n);
 }
 
+// CRT-accelerated private operation: m = c^d mod n = CRT(c^dp mod p, c^dq mod q).
+//   m1 = c^dp mod p
+//   m2 = c^dq mod q
+//   h = qinv * (m1 - m2) mod p
+//   m = m2 + h * q
+// Inputs: key blob (full private key, RSA_KEY_BYTES), ciphertext c (256 bytes),
+//         output m (256 bytes).
+fn rsa_private_op_crt(m: Address, c: Address, key: Address) {
+    p = allocate(256); q = allocate(256);
+    dp = allocate(256); dq = allocate(256); qinv = allocate(256);
+    n = allocate(256);
+    ka_from_blob(p,  key + 768);
+    ka_from_blob(q,  key + 1024);
+    ka_from_blob(dp, key + 1280);
+    ka_from_blob(dq, key + 1536);
+    ka_from_blob(qinv, key + 1792);
+    ka_from_blob(n,  key + 0);
+
+    // Reduce c modulo p and q so the exponentiation operands fit in p, q
+    cp = allocate(256); cq = allocate(256);
+    rsa_bn_mod(cp, c, p);
+    rsa_bn_mod(cq, c, q);
+
+    m1 = allocate(256); m2 = allocate(256);
+    bn2048_mod_exp(m1, cp, dp, p);
+    bn2048_mod_exp(m2, cq, dq, q);
+
+    // h = qinv * (m1 - m2) mod p
+    diff = allocate(256);
+    borrow: u32 = bn2048_sub(diff, m1, m2);
+    if borrow == 1 { bn2048_add(diff, diff, p); }
+    t = allocate(256);
+    bn2048_mod_mul(t, qinv, diff, p);
+
+    // m = m2 + t * q
+    tq = allocate(256);
+    rsa_mul_2048(tq, t, q);
+    bn2048_add(m, m2, tq);
+
+    // Reduce m mod n in case t*q produced a carry into the high half
+    rsa_bn_mod(m, m, n);
+
+    free(p); free(q); free(dp); free(dq); free(qinv); free(n);
+    free(cp); free(cq); free(m1); free(m2); free(diff); free(t); free(tq);
+}
+
+// ===========================================================================
+// PKCS#1 v1.5 padding for encryption: EM = 0x00 || 0x02 || PS || 0x00 || M
+// PS is random non-zero bytes, length = key_size - msg_len - 3.
+// ===========================================================================
 fn rsa_pkcs1_v15_pad_encrypt(msg: Address, msg_len: u32, key_size: u32, random: Address, padded: Address) -> u32 {
     if msg_len > key_size - 11 { return 0; }
     ps_len: u32 = key_size - msg_len - 3;
@@ -21,7 +434,7 @@ fn rsa_pkcs1_v15_pad_encrypt(msg: Address, msg_len: u32, key_size: u32, random: 
     i: u32 = 0;
     while i < ps_len {
         r: u32 = *(random + i);
-        if r == 0 { r = 1; }
+        if r == 0 { r = 1; }  // PS bytes must be non-zero
         *(padded + 2 + i) = r;
         i = i + 1;
     }
@@ -31,6 +444,8 @@ fn rsa_pkcs1_v15_pad_encrypt(msg: Address, msg_len: u32, key_size: u32, random: 
     return key_size;
 }
 
+// PKCS#1 v1.5 padding for signatures: EM = 0x00 || 0x01 || PS || 0x00 || T
+// PS is 0xFF bytes, T is the DigestInfo prefix || hash.
 fn rsa_pkcs1_v15_pad_sign(hash: Address, hash_len: u32, key_size: u32, padded: Address) -> u32 {
     di_len: u32 = 19;
     t_len: u32 = di_len + hash_len;
@@ -41,12 +456,12 @@ fn rsa_pkcs1_v15_pad_sign(hash: Address, hash_len: u32, key_size: u32, padded: A
     i: u32 = 0;
     while i < ps_len { *(padded + 2 + i) = 255; i = i + 1; }
     *(padded + 2 + ps_len) = 0;
-    // SHA-256 DigestInfo
-    *(padded + 3 + ps_len) = 0x30; *(padded + 3 + ps_len + 1) = 0x31;
-    *(padded + 3 + ps_len + 2) = 0x30; *(padded + 3 + ps_len + 3) = 0x0D;
-    *(padded + 3 + ps_len + 4) = 0x06; *(padded + 3 + ps_len + 5) = 0x09;
-    *(padded + 3 + ps_len + 6) = 0x60; *(padded + 3 + ps_len + 7) = 0x86;
-    *(padded + 3 + ps_len + 8) = 0x48; *(padded + 3 + ps_len + 9) = 0x01;
+    // DigestInfo prefix for SHA-256 (RFC 8017 Section 9.2)
+    *(padded + 3 + ps_len +  0) = 0x30; *(padded + 3 + ps_len +  1) = 0x31;
+    *(padded + 3 + ps_len +  2) = 0x30; *(padded + 3 + ps_len +  3) = 0x0D;
+    *(padded + 3 + ps_len +  4) = 0x06; *(padded + 3 + ps_len +  5) = 0x09;
+    *(padded + 3 + ps_len +  6) = 0x60; *(padded + 3 + ps_len +  7) = 0x86;
+    *(padded + 3 + ps_len +  8) = 0x48; *(padded + 3 + ps_len +  9) = 0x01;
     *(padded + 3 + ps_len + 10) = 0x65; *(padded + 3 + ps_len + 11) = 0x03;
     *(padded + 3 + ps_len + 12) = 0x04; *(padded + 3 + ps_len + 13) = 0x02;
     *(padded + 3 + ps_len + 14) = 0x01; *(padded + 3 + ps_len + 15) = 0x05;
@@ -57,6 +472,9 @@ fn rsa_pkcs1_v15_pad_sign(hash: Address, hash_len: u32, key_size: u32, padded: A
     return key_size;
 }
 
+// ===========================================================================
+// PKCS#1 v1.5 encrypt: pad, then c = m^e mod n
+// ===========================================================================
 fn rsa_pkcs1_v15_encrypt(msg: Address, msg_len: u32, e: Address, n: Address, key_size: u32, random: Address, ciphertext: Address) -> u32 {
     padded = allocate(key_size);
     pad_len: u32 = rsa_pkcs1_v15_pad_encrypt(msg, msg_len, key_size, random, padded);
@@ -66,6 +484,9 @@ fn rsa_pkcs1_v15_encrypt(msg: Address, msg_len: u32, e: Address, n: Address, key
     return key_size;
 }
 
+// ===========================================================================
+// PKCS#1 v1.5 decrypt: m = c^d mod n, then strip padding
+// ===========================================================================
 fn rsa_pkcs1_v15_decrypt(ciphertext: Address, d: Address, n: Address, key_size: u32, msg: Address) -> u32 {
     padded = allocate(key_size);
     rsa_private_op(padded, ciphertext, d, n);
@@ -77,7 +498,7 @@ fn rsa_pkcs1_v15_decrypt(ciphertext: Address, d: Address, n: Address, key_size: 
         i = i + 1;
     }
     if i == key_size { free(padded); return 0; }
-    if i < 10 { free(padded); return 0; }
+    if i < 10 { free(padded); return 0; }  // PS must be at least 8 bytes
     msg_len: u32 = key_size - i - 1;
     j: u32 = 0;
     while j < msg_len { *(msg + j) = *(padded + i + 1 + j); j = j + 1; }
@@ -85,6 +506,9 @@ fn rsa_pkcs1_v15_decrypt(ciphertext: Address, d: Address, n: Address, key_size: 
     return msg_len;
 }
 
+// ===========================================================================
+// PKCS#1 v1.5 sign: hash, pad with DigestInfo, then s = m^d mod n
+// ===========================================================================
 fn rsa_pkcs1_v15_sign(msg: Address, msg_len: u32, d: Address, n: Address, key_size: u32, signature: Address) -> u32 {
     hash = allocate(32);
     sha256_oneshot(msg, msg_len, hash);
@@ -96,6 +520,9 @@ fn rsa_pkcs1_v15_sign(msg: Address, msg_len: u32, d: Address, n: Address, key_si
     return key_size;
 }
 
+// ===========================================================================
+// PKCS#1 v1.5 verify: hash, re-pad, compare with s^e mod n in constant time
+// ===========================================================================
 fn rsa_pkcs1_v15_verify(msg: Address, msg_len: u32, e: Address, n: Address, key_size: u32, signature: Address) -> u32 {
     hash = allocate(32);
     sha256_oneshot(msg, msg_len, hash);
@@ -104,12 +531,29 @@ fn rsa_pkcs1_v15_verify(msg: Address, msg_len: u32, e: Address, n: Address, key_
     expected = allocate(key_size);
     pad_len: u32 = rsa_pkcs1_v15_pad_sign(hash, 32, key_size, expected);
     if pad_len == 0 { free(hash); free(decrypted); free(expected); return 0; }
-    result: u32 = 1;
+    // Constant-time compare
+    diff: u32 = 0;
     i: u32 = 0;
     while i < key_size {
-        if *(decrypted + i) != *(expected + i) { result = 0; break; }
+        diff = diff | (*(decrypted + i) ^ *(expected + i));
         i = i + 1;
     }
+    result: u32 = 0;
+    if diff == 0 { result = 1; }
     free(hash); free(decrypted); free(expected);
     return result;
+}
+
+// ===========================================================================
+// CRT-accelerated sign variant that takes the full private key blob.
+// ===========================================================================
+fn rsa_pkcs1_v15_sign_crt(msg: Address, msg_len: u32, key: Address, key_size: u32, signature: Address) -> u32 {
+    hash = allocate(32);
+    sha256_oneshot(msg, msg_len, hash);
+    padded = allocate(key_size);
+    pad_len: u32 = rsa_pkcs1_v15_pad_sign(hash, 32, key_size, padded);
+    if pad_len == 0 { free(hash); free(padded); return 0; }
+    rsa_private_op_crt(signature, padded, key);
+    free(hash); free(padded);
+    return key_size;
 }

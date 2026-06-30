@@ -1,67 +1,354 @@
 // womb/crypto/ecdsa_p384.vuma — ECDSA over NIST P-384 (FIPS 186-4)
 // No main() — importable library module.
-// Requires: bignum.vuma (needs 384-bit support — uses 6-limb extension).
+// Requires: sha384.vuma (sha384_oneshot), hmac.vuma (hmac_sha512).
 //
-// P-384: y^2 = x^3 - 3x + b (mod p)
-// p = 2^384 - 2^128 - 2^96 + 2^32 - 1
-// n = 39402006196394479212279040100143613805079739270465446667946905279627659399113263569398956308152294913554433653942643
-// Uses same bignum functions but with 6 u64 limbs (48 bytes) instead of 4.
+// P-384 parameters (FIPS 186-4 Section D.1.2.4):
+//   p = 2^384 - 2^128 - 2^96 + 2^32 - 1
+//   a = -3 mod p
+//   b = 0xB3312FA7E23EE7E4988E056BE3F82D19181D9C6EFE8141120314088F5013875A
+//       C656398D8A2ED19D2A85C8EDD3EC2AEF
+//   Gx = 0xAA87CA22BE8B05378EB1C71EF320AD746E1D3B628BA79B9859F741E082542A38
+//        5502F25DBF55296C3A545E3872760AB8
+//   Gy = 0x3617DE4A96262C6F5D9E98BF9292DC29F8F41DBD289A147CE9DA3113B5F0B8C0
+//        0A60B1CE1D7E819D7A431D7C90EA0E5F
+//   n  = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFC7634D81F4372DDF
+//        581A0DB248B0A77AECEC196ACCC52973
+//
+// All scalars and point coordinates are 48-byte (384-bit) big-endian on the
+// wire. Internally we operate on 48-byte little-endian limb buffers (6 × u64).
+//
+// Signing uses RFC 6979 deterministic nonce derivation via HMAC-SHA-512
+// (matching the curve strength), with the 384-bit digest truncated to 48 bytes
+// for the nonce block.
 
-// For brevity, this module follows the same pattern as ecdsa_p256.vuma
-// but with P-384 parameters and 384-bit arithmetic.
-// The point operations (double, add, scalar_mul) are structurally identical
-// to P-256, just with different field size and curve constants.
+const MASK64: u64 = 18446744073709551615;
 
-// P-384 prime p (big-endian, 48 bytes)
-// p = FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFE FFFFFFFF 0000000000000000 FFFFFFFF
-fn p384_p_be() -> Address {
-    buf = allocate(48);
-    i: u32 = 0;
-    while i < 48 { *(buf + i) = 255; i = i + 1; }
-    *(buf + 31) = 254;  // p = 2^384 - 2^128 - 2^96 + 2^32 - 1
-    *(buf + 32) = 255; *(buf + 33) = 255; *(buf + 34) = 255; *(buf + 35) = 255;
-    *(buf + 36) = 0; *(buf + 37) = 0; *(buf + 38) = 0; *(buf + 39) = 0;
-    *(buf + 40) = 0; *(buf + 41) = 0; *(buf + 42) = 0; *(buf + 43) = 0;
-    *(buf + 44) = 255; *(buf + 45) = 255; *(buf + 46) = 255; *(buf + 47) = 255;
-    return buf;
+// ===========================================================================
+// 384-bit bignum primitives (6 × u64 limbs, little-endian)
+// ===========================================================================
+
+fn bn384_load_u64(ptr: Address, off: u32) -> u64 {
+    b0: u64 = *(ptr + off);     b1: u64 = *(ptr + off + 1);
+    b2: u64 = *(ptr + off + 2); b3: u64 = *(ptr + off + 3);
+    b4: u64 = *(ptr + off + 4); b5: u64 = *(ptr + off + 5);
+    b6: u64 = *(ptr + off + 6); b7: u64 = *(ptr + off + 7);
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
 }
 
-// P-384 order n (big-endian, 48 bytes)
-fn p384_n_be() -> Address {
+fn bn384_store_u64(ptr: Address, off: u32, val: u64) {
+    *(ptr + off)     = val & 255;
+    *(ptr + off + 1) = (val >> 8) & 255;
+    *(ptr + off + 2) = (val >> 16) & 255;
+    *(ptr + off + 3) = (val >> 24) & 255;
+    *(ptr + off + 4) = (val >> 32) & 255;
+    *(ptr + off + 5) = (val >> 40) & 255;
+    *(ptr + off + 6) = (val >> 48) & 255;
+    *(ptr + off + 7) = (val >> 56) & 255;
+}
+
+fn bn384_zero(a: Address) {
+    i: u32 = 0;
+    while i < 48 { *(a + i) = 0; i = i + 1; }
+}
+
+fn bn384_copy(r: Address, a: Address) {
+    i: u32 = 0;
+    while i < 48 { *(r + i) = *(a + i); i = i + 1; }
+}
+
+fn bn384_is_zero(a: Address) -> u32 {
+    i: u32 = 0;
+    while i < 6 {
+        if bn384_load_u64(a, i * 8) != 0 { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn bn384_set_u32(r: Address, val: u32) {
+    bn384_zero(r);
+    *(r + 0) = val & 255;
+    *(r + 1) = (val >> 8) & 255;
+    *(r + 2) = (val >> 16) & 255;
+    *(r + 3) = (val >> 24) & 255;
+}
+
+fn bn384_cmp(a: Address, b: Address) -> i32 {
+    i: u32 = 5;
+    while 1 == 1 {
+        av: u64 = bn384_load_u64(a, i * 8);
+        bv: u64 = bn384_load_u64(b, i * 8);
+        if av > bv { return 1; }
+        if av < bv { return -1; }
+        if i == 0 { break; }
+        i = i - 1;
+    }
+    return 0;
+}
+
+fn bn384_add(r: Address, a: Address, b: Address) -> u32 {
+    carry: u64 = 0;
+    i: u32 = 0;
+    while i < 6 {
+        av: u64 = bn384_load_u64(a, i * 8);
+        bv: u64 = bn384_load_u64(b, i * 8);
+        sum: u64 = av + bv + carry;
+        bn384_store_u64(r, i * 8, sum);
+        if sum < av { carry = 1; }
+        else { carry = 0; }
+        i = i + 1;
+    }
+    return carry;
+}
+
+fn bn384_sub(r: Address, a: Address, b: Address) -> u32 {
+    borrow: u64 = 0;
+    i: u32 = 0;
+    while i < 6 {
+        av: u64 = bn384_load_u64(a, i * 8);
+        bv: u64 = bn384_load_u64(b, i * 8);
+        diff: u64 = av - bv - borrow;
+        bn384_store_u64(r, i * 8, diff);
+        if av < bv { borrow = 1; }
+        else { borrow = 0; }
+        i = i + 1;
+    }
+    return borrow;
+}
+
+fn bn384_lshift1(r: Address, a: Address) {
+    carry: u64 = 0;
+    i: u32 = 0;
+    while i < 6 {
+        v: u64 = bn384_load_u64(a, i * 8);
+        bn384_store_u64(r, i * 8, (v << 1) | carry);
+        carry = v >> 63;
+        i = i + 1;
+    }
+}
+
+fn bn384_rshift1(r: Address, a: Address) {
+    i: u32 = 5;
+    while i > 0 {
+        hi: u64 = bn384_load_u64(a, i * 8);
+        lo: u64 = bn384_load_u64(a, (i - 1) * 8);
+        bn384_store_u64(r, i * 8, (hi >> 1) | (lo << 63));
+        i = i - 1;
+    }
+    v0: u64 = bn384_load_u64(a, 0);
+    bn384_store_u64(r, 0, v0 >> 1);
+}
+
+fn bn384_get_bit(a: Address, bit: u32) -> u32 {
+    limb: u32 = bit / 64;
+    pos: u32 = bit % 64;
+    if limb >= 6 { return 0; }
+    v: u64 = bn384_load_u64(a, limb * 8);
+    return (v >> pos) & 1;
+}
+
+fn bn384_bitlen(a: Address) -> u32 {
+    i: u32 = 5;
+    while 1 == 1 {
+        v: u64 = bn384_load_u64(a, i * 8);
+        if v != 0 {
+            bits: u32 = 64;
+            while bits > 0 {
+                if ((v >> (bits - 1)) & 1) == 1 { return i * 64 + bits; }
+                bits = bits - 1;
+            }
+            return i * 64 + 1;
+        }
+        if i == 0 { break; }
+        i = i - 1;
+    }
+    return 0;
+}
+
+fn bn384_mod_add(r: Address, a: Address, b: Address, m: Address) {
+    carry: u32 = bn384_add(r, a, b);
+    if carry == 1 { bn384_sub(r, r, m); }
+    else {
+        if bn384_cmp(r, m) >= 0 { bn384_sub(r, r, m); }
+    }
+}
+
+fn bn384_mod_sub(r: Address, a: Address, b: Address, m: Address) {
+    borrow: u32 = bn384_sub(r, a, b);
+    if borrow == 1 { bn384_add(r, r, m); }
+}
+
+fn bn384_mod_mul(r: Address, a: Address, b: Address, m: Address) {
+    bn384_zero(r);
+    temp = allocate(48);
+    bn384_copy(temp, a);
+    bits: u32 = bn384_bitlen(b);
+    i: u32 = 0;
+    while i < bits {
+        if bn384_get_bit(b, i) == 1 {
+            bn384_mod_add(r, r, temp, m);
+        }
+        // temp = 2 * temp mod m
+        bn384_mod_add(temp, temp, temp, m);
+        i = i + 1;
+    }
+    free(temp);
+}
+
+fn bn384_mod_exp(r: Address, a: Address, exp: Address, m: Address) {
+    bn384_zero(r);
+    *(r + 0) = 1;
+    base = allocate(48);
+    bn384_copy(base, a);
+    bits: u32 = bn384_bitlen(exp);
+    i: u32 = 0;
+    while i < bits {
+        if bn384_get_bit(exp, i) == 1 {
+            tmp = allocate(48);
+            bn384_mod_mul(tmp, r, base, m);
+            bn384_copy(r, tmp);
+            free(tmp);
+        }
+        tmp2 = allocate(48);
+        bn384_mod_mul(tmp2, base, base, m);
+        bn384_copy(base, tmp2);
+        free(tmp2);
+        i = i + 1;
+    }
+    free(base);
+}
+
+// Binary extended GCD modular inverse: r = a^(-1) mod m.
+fn bn384_mod_inv(r: Address, a: Address, m: Address) {
+    u = allocate(48); v = allocate(48);
+    x1 = allocate(48); x2 = allocate(48);
+    bn384_copy(u, a);
+    bn384_copy(v, m);
+    bn384_zero(x2);
+    bn384_set_u32(x1, 1);
+    while bn384_is_zero(u) == 0 {
+        while bn384_get_bit(u, 0) == 0 {
+            bn384_rshift1(u, u);
+            if bn384_get_bit(x1, 0) == 0 {
+                bn384_rshift1(x1, x1);
+            } else {
+                bn384_add(x1, x1, m);
+                bn384_rshift1(x1, x1);
+            }
+        }
+        while bn384_get_bit(v, 0) == 0 {
+            bn384_rshift1(v, v);
+            if bn384_get_bit(x2, 0) == 0 {
+                bn384_rshift1(x2, x2);
+            } else {
+                bn384_add(x2, x2, m);
+                bn384_rshift1(x2, x2);
+            }
+        }
+        if bn384_cmp(u, v) >= 0 {
+            bn384_sub(u, u, v);
+            borrow: u32 = bn384_sub(x1, x1, x2);
+            if borrow == 1 { bn384_add(x1, x1, m); }
+        } else {
+            bn384_sub(v, v, u);
+            borrow2: u32 = bn384_sub(x2, x2, x1);
+            if borrow2 == 1 { bn384_add(x2, x2, m); }
+        }
+    }
+    bn384_copy(r, x2);
+    free(u); free(v); free(x1); free(x2);
+}
+
+// ===========================================================================
+// P-384 curve constants (big-endian, 48 bytes each)
+// ===========================================================================
+
+fn p384_p_be() -> Address {
+    // p = 2^384 - 2^128 - 2^96 + 2^32 - 1
     buf = allocate(48);
-    *(buf + 0) = 255; *(buf + 1) = 255; *(buf + 2) = 255; *(buf + 3) = 255;
-    *(buf + 4) = 255; *(buf + 5) = 255; *(buf + 6) = 255; *(buf + 7) = 255;
-    *(buf + 8) = 255; *(buf + 9) = 255; *(buf + 10) = 255; *(buf + 11) = 255;
+    *(buf +  0) = 255; *(buf +  1) = 255; *(buf +  2) = 255; *(buf +  3) = 255;
+    *(buf +  4) = 255; *(buf +  5) = 255; *(buf +  6) = 255; *(buf +  7) = 255;
+    *(buf +  8) = 255; *(buf +  9) = 255; *(buf + 10) = 255; *(buf + 11) = 255;
     *(buf + 12) = 255; *(buf + 13) = 255; *(buf + 14) = 255; *(buf + 15) = 255;
     *(buf + 16) = 255; *(buf + 17) = 255; *(buf + 18) = 255; *(buf + 19) = 255;
     *(buf + 20) = 255; *(buf + 21) = 255; *(buf + 22) = 255; *(buf + 23) = 255;
     *(buf + 24) = 255; *(buf + 25) = 255; *(buf + 26) = 255; *(buf + 27) = 255;
-    *(buf + 28) = 255; *(buf + 29) = 255; *(buf + 30) = 255; *(buf + 31) = 255;
+    *(buf + 28) = 255; *(buf + 29) = 255; *(buf + 30) = 255; *(buf + 31) = 254;
     *(buf + 32) = 255; *(buf + 33) = 255; *(buf + 34) = 255; *(buf + 35) = 255;
-    *(buf + 36) = 255; *(buf + 37) = 255; *(buf + 38) = 255; *(buf + 39) = 255;
-    *(buf + 40) = 255; *(buf + 41) = 255; *(buf + 42) = 255; *(buf + 43) = 255;
-    *(buf + 44) = 255; *(buf + 45) = 255; *(buf + 46) = 255; *(buf + 47) = 127;
+    *(buf + 36) =   0; *(buf + 37) =   0; *(buf + 38) =   0; *(buf + 39) =   0;
+    *(buf + 40) =   0; *(buf + 41) =   0; *(buf + 42) =   0; *(buf + 43) =   0;
+    *(buf + 44) = 255; *(buf + 45) = 255; *(buf + 46) = 255; *(buf + 47) = 255;
     return buf;
 }
 
-// Generator point G (big-endian, 48 bytes each)
+fn p384_n_be() -> Address {
+    buf = allocate(48);
+    *(buf +  0) = 255; *(buf +  1) = 255; *(buf +  2) = 255; *(buf +  3) = 255;
+    *(buf +  4) = 255; *(buf +  5) = 255; *(buf +  6) = 255; *(buf +  7) = 255;
+    *(buf +  8) = 255; *(buf +  9) = 255; *(buf + 10) = 255; *(buf + 11) = 255;
+    *(buf + 12) = 255; *(buf + 13) = 255; *(buf + 14) = 255; *(buf + 15) = 255;
+    *(buf + 16) = 255; *(buf + 17) = 255; *(buf + 18) = 255; *(buf + 19) = 255;
+    *(buf + 20) = 255; *(buf + 21) = 255; *(buf + 22) = 255; *(buf + 23) = 255;
+    *(buf + 24) = 255; *(buf + 25) = 255; *(buf + 26) = 255; *(buf + 27) = 255;
+    *(buf + 28) = 199; *(buf + 29) =  99; *(buf + 30) =  77; *(buf + 31) = 129;
+    *(buf + 32) = 244; *(buf + 33) =  55; *(buf + 34) =  45; *(buf + 35) = 223;
+    *(buf + 36) =  88; *(buf + 37) =  26; *(buf + 38) =  13; *(buf + 39) = 178;
+    *(buf + 40) =  72; *(buf + 41) = 176; *(buf + 42) = 167; *(buf + 43) = 122;
+    *(buf + 44) = 236; *(buf + 45) = 236; *(buf + 46) =  25; *(buf + 47) = 115;
+    return buf;
+}
+
+fn p384_b_be() -> Address {
+    buf = allocate(48);
+    *(buf +  0) = 179; *(buf +  1) =  49; *(buf +  2) =  47; *(buf +  3) = 167;
+    *(buf +  4) = 226; *(buf +  5) =  62; *(buf +  6) = 231; *(buf +  7) = 228;
+    *(buf +  8) = 152; *(buf +  9) = 142; *(buf + 10) =   5; *(buf + 11) = 107;
+    *(buf + 12) = 227; *(buf + 13) = 248; *(buf + 14) =  45; *(buf + 15) =  25;
+    *(buf + 16) =  24; *(buf + 17) =  29; *(buf + 18) = 156; *(buf + 19) = 110;
+    *(buf + 20) = 254; *(buf + 21) = 129; *(buf + 22) =  65; *(buf + 23) =  18;
+    *(buf + 24) =   3; *(buf + 25) =  20; *(buf + 26) =   8; *(buf + 27) = 143;
+    *(buf + 28) =  80; *(buf + 29) =  19; *(buf + 30) =  56; *(buf + 31) = 117;
+    *(buf + 32) =  90; *(buf + 33) = 198; *(buf + 34) =  86; *(buf + 35) =  57;
+    *(buf + 36) = 141; *(buf + 37) = 216; *(buf + 38) = 162; *(buf + 39) = 237;
+    *(buf + 40) =  25; *(buf + 41) = 209; *(buf + 42) =  42; *(buf + 43) = 133;
+    *(buf + 44) = 200; *(buf + 45) = 237; *(buf + 46) = 211; *(buf + 47) = 236;
+    *(buf + 44) =  62; *(buf + 45) = 194; *(buf + 46) = 174; *(buf + 47) = 239;
+    return buf;
+}
+
 fn p384_gx_be() -> Address {
     buf = allocate(48);
-    *(buf + 0) = 170; *(buf + 1) = 38; *(buf + 2) = 83; *(buf + 3) = 85;
-    *(buf + 4) = 244; *(buf + 5) = 15; *(buf + 6) = 3; *(buf + 7) = 205;
-    // ... (full Gx would be 48 bytes — abbreviated for space)
-    // In a real implementation, all 48 bytes would be hardcoded.
-    i: u32 = 8;
-    while i < 48 { *(buf + i) = 0; i = i + 1; }
+    *(buf +  0) = 170; *(buf +  1) = 135; *(buf +  2) = 202; *(buf +  3) =  34;
+    *(buf +  4) = 190; *(buf +  5) = 139; *(buf +  6) =   5; *(buf +  7) =  55;
+    *(buf +  8) = 142; *(buf +  9) = 177; *(buf + 10) = 199; *(buf + 11) =  30;
+    *(buf + 12) = 243; *(buf + 13) =  32; *(buf + 14) = 173; *(buf + 15) = 116;
+    *(buf + 16) = 110; *(buf + 17) =  29; *(buf + 18) =  59; *(buf + 19) =  98;
+    *(buf + 20) = 139; *(buf + 21) = 167; *(buf + 22) = 155; *(buf + 23) = 152;
+    *(buf + 24) =  89; *(buf + 25) = 247; *(buf + 26) =  65; *(buf + 27) = 224;
+    *(buf + 28) = 130; *(buf + 29) =  37; *(buf + 30) =  66; *(buf + 31) = 163;
+    *(buf + 32) = 130; *(buf + 33) =   2; *(buf + 34) = 242; *(buf + 35) =  93;
+    *(buf + 36) = 191; *(buf + 37) =  85; *(buf + 38) =  41; *(buf + 39) = 108;
+    *(buf + 40) =  59; *(buf + 41) = 165; *(buf + 42) =  69; *(buf + 43) = 227;
+    *(buf + 44) = 248; *(buf + 45) = 114; *(buf + 46) = 118; *(buf + 47) =  10;
+    *(buf + 44) = 184; *(buf + 45) =   0; *(buf + 46) = 171; *(buf + 47) = 184;
     return buf;
 }
 
 fn p384_gy_be() -> Address {
     buf = allocate(48);
-    *(buf + 0) = 99; *(buf + 1) = 228; *(buf + 2) = 173; *(buf + 3) = 230;
-    *(buf + 4) = 56; *(buf + 5) = 169; *(buf + 6) = 240; *(buf + 7) = 154;
-    i: u32 = 8;
-    while i < 48 { *(buf + i) = 0; i = i + 1; }
+    *(buf +  0) =  54; *(buf +  1) =  23; *(buf +  2) = 222; *(buf +  3) =  74;
+    *(buf +  4) = 150; *(buf +  5) =  38; *(buf +  6) =  44; *(buf +  7) = 111;
+    *(buf +  8) =  93; *(buf +  9) = 158; *(buf + 10) = 152; *(buf + 11) = 191;
+    *(buf + 12) = 146; *(buf + 13) = 146; *(buf + 14) = 220; *(buf + 15) =  41;
+    *(buf + 16) = 248; *(buf + 17) = 244; *(buf + 18) =  29; *(buf + 19) = 189;
+    *(buf + 20) =  40; *(buf + 21) = 154; *(buf + 22) =  20; *(buf + 23) = 124;
+    *(buf + 24) = 233; *(buf + 25) = 218; *(buf + 26) =  49; *(buf + 27) =  17;
+    *(buf + 28) =  59; *(buf + 29) =  95; *(buf + 30) = 240; *(buf + 31) = 184;
+    *(buf + 32) = 192; *(buf + 33) =  10; *(buf + 34) =  96; *(buf + 35) = 177;
+    *(buf + 36) = 206; *(buf + 37) =  29; *(buf + 38) = 126; *(buf + 39) = 129;
+    *(buf + 40) = 157; *(buf + 41) = 122; *(buf + 42) =  67; *(buf + 43) =  29;
+    *(buf + 44) = 124; *(buf + 45) = 144; *(buf + 46) = 234; *(buf + 47) =  14;
+    *(buf + 44) =  95; *(buf + 45) = 224; *(buf + 46) = 229; *(buf + 47) = 244;
     return buf;
 }
 
@@ -73,66 +360,423 @@ fn swap_endian_48(dst: Address, src: Address) {
     }
 }
 
-// NOTE: P-384 uses 384-bit bignum (6 × u64 limbs = 48 bytes).
-// The bignum.vuma module currently supports 256-bit (4 limbs).
-// To support P-384, extend the bignum functions to 6 limbs.
-// The algorithms (mod_add, mod_sub, mod_mul, mod_exp, mod_inv) are
-// identical — just change the limb count from 4 to 6.
-//
-// For now, P-384 sign/verify follow the same structure as P-256
-// but with 48-byte field elements.
+// ===========================================================================
+// Point operations (affine, mod p)
+// ===========================================================================
+
+fn p384_is_on_curve(px: Address, py: Address, p_le: Address, b_le: Address) -> u32 {
+    y_sq = allocate(48);
+    bn384_mod_mul(y_sq, py, py, p_le);
+    x_sq = allocate(48);
+    bn384_mod_mul(x_sq, px, px, p_le);
+    x_cubed = allocate(48);
+    bn384_mod_mul(x_cubed, x_sq, px, p_le);
+    three_x = allocate(48);
+    bn384_mod_add(three_x, px, px, p_le);
+    bn384_mod_add(three_x, three_x, px, p_le);
+    neg_3x = allocate(48);
+    bn384_mod_sub(neg_3x, p_le, three_x, p_le);
+    rhs = allocate(48);
+    bn384_mod_add(rhs, x_cubed, neg_3x, p_le);
+    bn384_mod_add(rhs, rhs, b_le, p_le);
+
+    result: u32 = 0;
+    if bn384_cmp(y_sq, rhs) == 0 { result = 1; }
+
+    free(y_sq); free(x_sq); free(x_cubed); free(three_x);
+    free(neg_3x); free(rhs);
+    return result;
+}
+
+fn p384_point_double(rx: Address, ry: Address, px: Address, py: Address, p_le: Address) {
+    if bn384_is_zero(px) == 1 {
+        if bn384_is_zero(py) == 1 {
+            bn384_zero(rx);
+            bn384_zero(ry);
+            return;
+        }
+    }
+    // a = p - 3
+    a_val = allocate(48);
+    bn384_copy(a_val, p_le);
+    a_lo: u64 = bn384_load_u64(a_val, 0);
+    bn384_store_u64(a_val, 0, a_lo - 3);
+
+    t1 = allocate(48);
+    bn384_mod_mul(t1, px, px, p_le);
+    t2 = allocate(48);
+    bn384_mod_add(t2, t1, t1, p_le);
+    bn384_mod_add(t2, t2, t1, p_le);
+    bn384_mod_add(t2, t2, a_val, p_le);
+
+    t3 = allocate(48);
+    bn384_mod_add(t3, py, py, p_le);
+    t3_inv = allocate(48);
+    bn384_mod_inv(t3_inv, t3, p_le);
+    slope = allocate(48);
+    bn384_mod_mul(slope, t2, t3_inv, p_le);
+
+    slope_sq = allocate(48);
+    bn384_mod_mul(slope_sq, slope, slope, p_le);
+    two_x = allocate(48);
+    bn384_mod_add(two_x, px, px, p_le);
+    bn384_mod_sub(rx, slope_sq, two_x, p_le);
+
+    x_minus_rx = allocate(48);
+    bn384_mod_sub(x_minus_rx, px, rx, p_le);
+    slope_x = allocate(48);
+    bn384_mod_mul(slope_x, slope, x_minus_rx, p_le);
+    bn384_mod_sub(ry, slope_x, py, p_le);
+
+    free(a_val); free(t1); free(t2); free(t3); free(t3_inv);
+    free(slope); free(slope_sq); free(two_x); free(x_minus_rx); free(slope_x);
+}
+
+fn p384_point_add(rx: Address, ry: Address, px: Address, py: Address, qx: Address, qy: Address, p_le: Address) {
+    if bn384_is_zero(px) == 1 {
+        if bn384_is_zero(py) == 1 {
+            bn384_copy(rx, qx);
+            bn384_copy(ry, qy);
+            return;
+        }
+    }
+    if bn384_is_zero(qx) == 1 {
+        if bn384_is_zero(qy) == 1 {
+            bn384_copy(rx, px);
+            bn384_copy(ry, py);
+            return;
+        }
+    }
+    if bn384_cmp(px, qx) == 0 {
+        if bn384_cmp(py, qy) == 0 {
+            p384_point_double(rx, ry, px, py, p_le);
+            return;
+        } else {
+            bn384_zero(rx);
+            bn384_zero(ry);
+            return;
+        }
+    }
+
+    dy = allocate(48); bn384_mod_sub(dy, qy, py, p_le);
+    dx = allocate(48); bn384_mod_sub(dx, qx, px, p_le);
+    dx_inv = allocate(48); bn384_mod_inv(dx_inv, dx, p_le);
+    slope = allocate(48); bn384_mod_mul(slope, dy, dx_inv, p_le);
+
+    slope_sq = allocate(48); bn384_mod_mul(slope_sq, slope, slope, p_le);
+    temp = allocate(48); bn384_mod_sub(temp, slope_sq, px, p_le);
+    bn384_mod_sub(rx, temp, qx, p_le);
+
+    x_diff = allocate(48); bn384_mod_sub(x_diff, px, rx, p_le);
+    slope_x = allocate(48); bn384_mod_mul(slope_x, slope, x_diff, p_le);
+    bn384_mod_sub(ry, slope_x, py, p_le);
+
+    free(dy); free(dx); free(dx_inv); free(slope);
+    free(slope_sq); free(temp); free(x_diff); free(slope_x);
+}
+
+fn p384_scalar_mul(rx: Address, ry: Address, k: Address, px: Address, py: Address, p_le: Address) {
+    bn384_zero(rx);
+    bn384_zero(ry);
+    tx = allocate(48); ty = allocate(48);
+    bits: u32 = bn384_bitlen(k);
+    if bits == 0 { free(tx); free(ty); return; }
+    i: u32 = bits;
+    while i > 0 {
+        i = i - 1;
+        p384_point_double(tx, ty, rx, ry, p_le);
+        bn384_copy(rx, tx);
+        bn384_copy(ry, ty);
+        if bn384_get_bit(k, i) == 1 {
+            p384_point_add(tx, ty, rx, ry, px, py, p_le);
+            bn384_copy(rx, tx);
+            bn384_copy(ry, ty);
+        }
+    }
+    free(tx); free(ty);
+}
+
+// ===========================================================================
+// RFC 6979 deterministic nonce for P-384 using HMAC-SHA-512 (hlen = 64).
+// The 64-byte HMAC output is reduced mod n with rejection.
+// ===========================================================================
+
+fn rfc6979_p384_k(x_be: Address, h_be: Address, n_le: Address, k_le: Address) {
+    hlen: u32 = 64;
+    qlen: u32 = 48;
+
+    V = allocate(hlen);
+    K = allocate(hlen);
+    i: u32 = 0;
+    while i < hlen { *(V + i) = 1; *(K + i) = 0; i = i + 1; }
+
+    // bits2octets(h): h is 48 bytes already; reduce mod n
+    h_le = allocate(48);
+    swap_endian_48(h_le, h_be);
+    if bn384_cmp(h_le, n_le) >= 0 {
+        bn384_sub(h_le, h_le, n_le);
+    }
+    h_be_canon = allocate(48);
+    swap_endian_48(h_be_canon, h_le);
+    free(h_le);
+
+    // x is 48 bytes already
+    x_be_canon = allocate(48);
+    bn384_copy(x_be_canon, x_be);
+
+    // K = HMAC_K(V || 0x00 || x || h)
+    buf1 = allocate(hlen + 1 + 48 + 48);
+    i = 0;
+    while i < hlen { *(buf1 + i) = *(V + i); i = i + 1; }
+    *(buf1 + hlen) = 0;
+    i = 0;
+    while i < 48 { *(buf1 + hlen + 1 + i) = *(x_be_canon + i); i = i + 1; }
+    i = 0;
+    while i < 48 { *(buf1 + hlen + 1 + 48 + i) = *(h_be_canon + i); i = i + 1; }
+    hmac_sha512(K, hlen, buf1, hlen + 1 + 96, V);
+    i = 0;
+    while i < hlen { *(K + i) = *(V + i); i = i + 1; }
+    hmac_sha512(K, hlen, buf1, hlen + 1 + 96, K);
+    hmac_sha512(K, hlen, V, hlen, V);
+    free(buf1);
+
+    // K = HMAC_K(V || 0x01 || x || h)
+    buf2 = allocate(hlen + 1 + 48 + 48);
+    i = 0;
+    while i < hlen { *(buf2 + i) = *(V + i); i = i + 1; }
+    *(buf2 + hlen) = 1;
+    i = 0;
+    while i < 48 { *(buf2 + hlen + 1 + i) = *(x_be_canon + i); i = i + 1; }
+    i = 0;
+    while i < 48 { *(buf2 + hlen + 1 + 48 + i) = *(h_be_canon + i); i = i + 1; }
+    hmac_sha512(K, hlen, buf2, hlen + 1 + 96, K);
+    hmac_sha512(K, hlen, V, hlen, V);
+    free(buf2);
+
+    // Generate k by concatenating V-blocks until we have qlen bytes
+    T = allocate(qlen);
+    have: u32 = 0;
+    while have < qlen {
+        hmac_sha512(K, hlen, V, hlen, V);
+        to_copy: u32 = hlen;
+        remaining: u32 = qlen - have;
+        if remaining < to_copy { to_copy = remaining; }
+        i = 0;
+        while i < to_copy { *(T + have + i) = *(V + i); i = i + 1; }
+        have = have + to_copy;
+    }
+
+    swap_endian_48(k_le, T);
+    // Reduce k mod n; reject if k == 0 or k >= n
+    accepted: u32 = 0;
+    attempts: u32 = 0;
+    while accepted == 0 && attempts < 32 {
+        if bn384_cmp(k_le, n_le) >= 0 {
+            bn384_sub(k_le, k_le, n_le);
+        }
+        if bn384_is_zero(k_le) == 0 {
+            accepted = 1;
+        } else {
+            buf3 = allocate(hlen + 1);
+            i = 0;
+            while i < hlen { *(buf3 + i) = *(V + i); i = i + 1; }
+            *(buf3 + hlen) = 0;
+            hmac_sha512(K, hlen, buf3, hlen + 1, K);
+            hmac_sha512(K, hlen, V, hlen, V);
+            free(buf3);
+            // Regenerate T
+            have = 0;
+            while have < qlen {
+                hmac_sha512(K, hlen, V, hlen, V);
+                to_copy: u32 = hlen;
+                remaining: u32 = qlen - have;
+                if remaining < to_copy { to_copy = remaining; }
+                i = 0;
+                while i < to_copy { *(T + have + i) = *(V + i); i = i + 1; }
+                have = have + to_copy;
+            }
+            swap_endian_48(k_le, T);
+        }
+        attempts = attempts + 1;
+    }
+
+    free(V); free(K); free(h_be_canon); free(x_be_canon); free(T);
+}
+
+// ===========================================================================
+// ECDSA P-384 Key Generation: Q = d * G
+//   privkey_be (in/out) : 48-byte big-endian private scalar (reduced mod n)
+//   pubkey_x_be (out)   : 48-byte big-endian Q.x
+//   pubkey_y_be (out)   : 48-byte big-endian Q.y
+// ===========================================================================
+
+fn ecdsa_p384_keygen(privkey_be: Address, pubkey_x_be: Address, pubkey_y_be: Address) {
+    n_be = p384_n_be();
+    n_le = allocate(48);
+    swap_endian_48(n_le, n_be);
+    free(n_be);
+
+    d_le = allocate(48);
+    swap_endian_48(d_le, privkey_be);
+    if bn384_cmp(d_le, n_le) >= 0 {
+        bn384_sub(d_le, d_le, n_le);
+    }
+    if bn384_is_zero(d_le) == 1 {
+        bn384_zero(d_le);
+        *(d_le + 0) = 1;
+    }
+
+    gx_be = p384_gx_be(); gy_be = p384_gy_be();
+    gx_le = allocate(48); gy_le = allocate(48);
+    swap_endian_48(gx_le, gx_be);
+    swap_endian_48(gy_le, gy_be);
+    free(gx_be); free(gy_be);
+
+    p_be = p384_p_be();
+    p_le = allocate(48);
+    swap_endian_48(p_le, p_be);
+    free(p_be);
+
+    qx_le = allocate(48); qy_le = allocate(48);
+    p384_scalar_mul(qx_le, qy_le, d_le, gx_le, gy_le, p_le);
+
+    swap_endian_48(pubkey_x_be, qx_le);
+    swap_endian_48(pubkey_y_be, qy_le);
+    swap_endian_48(privkey_be, d_le);
+
+    free(n_le); free(d_le); free(gx_le); free(gy_le); free(p_le);
+    free(qx_le); free(qy_le);
+}
+
+// ===========================================================================
+// ECDSA P-384 Sign (uses SHA-384 to match curve strength)
+// ===========================================================================
 
 fn ecdsa_p384_sign(msg: Address, msg_len: u32, privkey_be: Address, r_out: Address, s_out: Address) {
-    // Hash message with SHA-384 (matches curve strength)
     h = allocate(48);
     sha384_oneshot(msg, msg_len, h);
 
-    // Convert to LE
     h_le = allocate(48);
     swap_endian_48(h_le, h);
     d_le = allocate(48);
     swap_endian_48(d_le, privkey_be);
 
-    // Get curve params in LE
-    p_be = p384_p_be();
-    n_be = p384_n_be();
-    gx_be = p384_gx_be();
-    gy_be = p384_gy_be();
-    p_le = allocate(48);
-    n_le = allocate(48);
-    gx_le = allocate(48);
-    gy_le = allocate(48);
+    p_be = p384_p_be(); n_be = p384_n_be();
+    gx_be = p384_gx_be(); gy_be = p384_gy_be();
+    p_le = allocate(48); n_le = allocate(48);
+    gx_le = allocate(48); gy_le = allocate(48);
     swap_endian_48(p_le, p_be);
     swap_endian_48(n_le, n_be);
     swap_endian_48(gx_le, gx_be);
     swap_endian_48(gy_le, gy_be);
     free(p_be); free(n_be); free(gx_be); free(gy_be);
 
-    // Deterministic nonce
-    k = allocate(48);
-    hmac_sha512(privkey_be, 48, h, 48, k);
+    if bn384_cmp(d_le, n_le) >= 0 { bn384_sub(d_le, d_le, n_le); }
+    if bn384_cmp(h_le, n_le) >= 0 { bn384_sub(h_le, h_le, n_le); }
+
     k_le = allocate(48);
-    swap_endian_48(k_le, k);
-    free(k);
+    rfc6979_p384_k(privkey_be, h, n_le, k_le);
 
-    // R = k * G
-    // (Uses same scalar_mul as P-256, but with 48-byte elements)
-    // NOTE: Requires extending bignum to 384-bit.
-    // For now, this is a placeholder showing the structure.
-    rx = allocate(48);
-    ry = allocate(48);
-    // p384_scalar_mul(rx, ry, k_le, gx_le, gy_le, p_le);  // TODO: extend bignum
+    rx = allocate(48); ry = allocate(48);
+    p384_scalar_mul(rx, ry, k_le, gx_le, gy_le, p_le);
 
-    // r = Rx mod n
-    // s = k^-1 * (h + r*d) mod n
+    r_le = allocate(48);
+    bn384_copy(r_le, rx);
+    if bn384_cmp(r_le, n_le) >= 0 { bn384_sub(r_le, r_le, n_le); }
+
+    k_inv = allocate(48); bn384_mod_inv(k_inv, k_le, n_le);
+    rd = allocate(48); bn384_mod_mul(rd, r_le, d_le, n_le);
+    h_rd = allocate(48); bn384_mod_add(h_rd, h_le, rd, n_le);
+    s_le = allocate(48); bn384_mod_mul(s_le, k_inv, h_rd, n_le);
+
+    swap_endian_48(r_out, r_le);
+    swap_endian_48(s_out, s_le);
 
     free(h); free(h_le); free(d_le); free(p_le); free(n_le);
     free(gx_le); free(gy_le); free(k_le); free(rx); free(ry);
+    free(r_le); free(k_inv); free(rd); free(h_rd); free(s_le);
 }
 
+// ===========================================================================
+// ECDSA P-384 Verify
+// ===========================================================================
+
 fn ecdsa_p384_verify(msg: Address, msg_len: u32, pubkey_x_be: Address, pubkey_y_be: Address, r_be: Address, s_be: Address) -> u32 {
-    // Same structure as P-256 verify, with 384-bit elements and SHA-384
-    // Requires bignum extension to 384-bit.
-    // Returns 0 for now (placeholder).
-    return 0;
+    n_be = p384_n_be();
+    n_le = allocate(48);
+    swap_endian_48(n_le, n_be);
+    free(n_be);
+
+    r_le = allocate(48); s_le = allocate(48);
+    swap_endian_48(r_le, r_be);
+    swap_endian_48(s_le, s_be);
+
+    if bn384_is_zero(r_le) == 1 { free(n_le); free(r_le); free(s_le); return 0; }
+    if bn384_is_zero(s_le) == 1 { free(n_le); free(r_le); free(s_le); return 0; }
+    if bn384_cmp(r_le, n_le) >= 0 { free(n_le); free(r_le); free(s_le); return 0; }
+    if bn384_cmp(s_le, n_le) >= 0 { free(n_le); free(r_le); free(s_le); return 0; }
+
+    h = allocate(48);
+    sha384_oneshot(msg, msg_len, h);
+    h_le = allocate(48);
+    swap_endian_48(h_le, h);
+    free(h);
+    if bn384_cmp(h_le, n_le) >= 0 { bn384_sub(h_le, h_le, n_le); }
+
+    p_be = p384_p_be(); b_be = p384_b_be();
+    gx_be = p384_gx_be(); gy_be = p384_gy_be();
+    p_le = allocate(48); b_le = allocate(48);
+    gx_le = allocate(48); gy_le = allocate(48);
+    swap_endian_48(p_le, p_be);
+    swap_endian_48(b_le, b_be);
+    swap_endian_48(gx_le, gx_be);
+    swap_endian_48(gy_le, gy_be);
+    free(p_be); free(b_be); free(gx_be); free(gy_be);
+
+    qx_le = allocate(48); qy_le = allocate(48);
+    swap_endian_48(qx_le, pubkey_x_be);
+    swap_endian_48(qy_le, pubkey_y_be);
+
+    if p384_is_on_curve(qx_le, qy_le, p_le, b_le) == 0 {
+        free(n_le); free(r_le); free(s_le); free(h_le);
+        free(p_le); free(b_le); free(gx_le); free(gy_le);
+        free(qx_le); free(qy_le);
+        return 0;
+    }
+
+    w = allocate(48); bn384_mod_inv(w, s_le, n_le);
+    u1 = allocate(48); bn384_mod_mul(u1, h_le, w, n_le);
+    u2 = allocate(48); bn384_mod_mul(u2, r_le, w, n_le);
+
+    r1x = allocate(48); r1y = allocate(48);
+    p384_scalar_mul(r1x, r1y, u1, gx_le, gy_le, p_le);
+    r2x = allocate(48); r2y = allocate(48);
+    p384_scalar_mul(r2x, r2y, u2, qx_le, qy_le, p_le);
+    ptx = allocate(48); pty = allocate(48);
+    p384_point_add(ptx, pty, r1x, r1y, r2x, r2y, p_le);
+
+    result: u32 = 0;
+    if bn384_is_zero(ptx) == 0 || bn384_is_zero(pty) == 0 {
+        v = allocate(48);
+        bn384_copy(v, ptx);
+        if bn384_cmp(v, n_le) >= 0 { bn384_sub(v, v, n_le); }
+        if bn384_cmp(v, r_le) == 0 { result = 1; }
+        free(v);
+    }
+
+    free(n_le); free(r_le); free(s_le); free(h_le);
+    free(p_le); free(b_le); free(gx_le); free(gy_le);
+    free(qx_le); free(qy_le); free(w); free(u1); free(u2);
+    free(r1x); free(r1y); free(r2x); free(r2y); free(ptx); free(pty);
+
+    return result;
+}
+
+// Expose scalar_mul and byte-swap for callers like ecdh_p384 / key_agreement.
+fn p384_scalar_mul_wrap(rx: Address, ry: Address, k: Address, px: Address, py: Address, p: Address) {
+    p384_scalar_mul(rx, ry, k, px, py, p);
+}
+
+fn swap_endian_48_wrap(dst: Address, src: Address) {
+    swap_endian_48(dst, src);
 }

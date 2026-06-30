@@ -1,99 +1,156 @@
-// womb/crypto/aes_modes.vuma — AES Block Cipher Modes (NIST SP 800-38A/D)
+// womb/crypto/aes_modes.vuma — AES block-cipher modes ECB / CBC / CTR
+// Implements NIST SP 800-38A modes of operation. ECB and CBC apply PKCS#7
+// padding so the plaintext length need not be a multiple of the 16-byte
+// block size; CTR is a stream mode and accepts any length.
+//
+// The modes are key-size agnostic: they invoke the project's canonical AES
+// block-cipher primitive aes128_encrypt_block / aes128_decrypt_block from
+// aes128.vuma. Switching to AES-192 or AES-256 only requires substituting
+// the block-cipher call (the mode logic is identical for every AES size).
+//
 // No main() — importable library module.
-// Requires: aes256.vuma (or equivalent AES block cipher).
 
-const MASK32: u32 = 4294967295;
+const AES_BLOCK_SIZE: u32 = 16;
 
 // ===========================================================================
-// AES-256-CBC (NIST SP 800-38A, Section 6.2)
+// AES-ECB (SP 800-38A §6.1)
+// Each 16-byte block is encrypted independently with the same key.
+// PKCS#7 padding is applied on encrypt and removed on decrypt so the
+// plaintext can have any non-zero length.
+// ===========================================================================
+
+fn aes_ecb_encrypt(plaintext: Address, pt_len: u32, key: Address, ciphertext: Address) -> u32 {
+    pad_byte: u32 = AES_BLOCK_SIZE - (pt_len % AES_BLOCK_SIZE);
+    if pad_byte == 0 { pad_byte = AES_BLOCK_SIZE; }
+    padded_len: u32 = pt_len + pad_byte;
+
+    padded = allocate(padded_len);
+    i: u32 = 0;
+    while i < pt_len { *(padded + i) = *(plaintext + i); i = i + 1; }
+    while i < padded_len { *(padded + i) = pad_byte & 255; i = i + 1; }
+
+    block_idx: u32 = 0;
+    while block_idx < padded_len {
+        aes128_encrypt_block(padded + block_idx, key, ciphertext + block_idx);
+        block_idx = block_idx + AES_BLOCK_SIZE;
+    }
+
+    free(padded);
+    return padded_len;
+}
+
+fn aes_ecb_decrypt(ciphertext: Address, ct_len: u32, key: Address, plaintext: Address) -> u32 {
+    // ct_len must be a positive multiple of 16 for valid ECB ciphertext.
+    if ct_len == 0 { return 0; }
+
+    block_idx: u32 = 0;
+    while block_idx < ct_len {
+        aes128_decrypt_block(ciphertext + block_idx, key, plaintext + block_idx);
+        block_idx = block_idx + AES_BLOCK_SIZE;
+    }
+
+    // Remove PKCS#7 padding when well-formed.
+    pad: u32 = *(plaintext + ct_len - 1);
+    if pad >= 1 {
+        if pad <= AES_BLOCK_SIZE {
+            return ct_len - pad;
+        }
+    }
+    return ct_len;
+}
+
+// ===========================================================================
+// AES-CBC (SP 800-38A §6.2) with PKCS#7 padding
 // Encrypt: C_0 = IV; C_i = AES_enc(P_i XOR C_{i-1})
 // Decrypt: P_i = AES_dec(C_i) XOR C_{i-1}
 // ===========================================================================
 
-fn aes256_cbc_encrypt(plaintext: Address, pt_len: u32, key: Address, iv: Address, ciphertext: Address) -> u32 {
-    // Expand key
-    roundkeys = allocate(240);
-    aes256_key_expansion(key, roundkeys);
+fn aes_cbc_encrypt(plaintext: Address, pt_len: u32, key: Address, iv: Address, ciphertext: Address) -> u32 {
+    pad_byte: u32 = AES_BLOCK_SIZE - (pt_len % AES_BLOCK_SIZE);
+    if pad_byte == 0 { pad_byte = AES_BLOCK_SIZE; }
+    padded_len: u32 = pt_len + pad_byte;
 
-    // PKCS#7 padding: pad to multiple of 16
-    padded_len: u32 = pt_len;
-    pad_byte: u32 = 16 - (pt_len % 16);
-    if pad_byte == 0 { pad_byte = 16; }
-    padded_len = pt_len + pad_byte;
-
-    // Copy plaintext + padding
     padded = allocate(padded_len);
     i: u32 = 0;
-    while i < pt_len {
-        *(padded + i) = *(plaintext + i);
-        i = i + 1;
-    }
-    while i < padded_len {
-        *(padded + i) = pad_byte & 255;
-        i = i + 1;
-    }
+    while i < pt_len { *(padded + i) = *(plaintext + i); i = i + 1; }
+    while i < padded_len { *(padded + i) = pad_byte & 255; i = i + 1; }
 
-    // CBC encrypt
-    prev = allocate(16);  // starts as IV
+    prev = allocate(AES_BLOCK_SIZE);
     i = 0;
-    while i < 16 {
-        *(prev + i) = *(iv + i);
-        i = i + 1;
-    }
+    while i < AES_BLOCK_SIZE { *(prev + i) = *(iv + i); i = i + 1; }
 
     block_idx: u32 = 0;
     while block_idx < padded_len {
-        // XOR block with prev
-        xored = allocate(16);
+        xored = allocate(AES_BLOCK_SIZE);
         i = 0;
-        while i < 16 {
-            pb: u32 = *(padded + block_idx + i);
-            cb: u32 = *(prev + i);
-            *(xored + i) = (pb ^ cb) & 255;
+        while i < AES_BLOCK_SIZE {
+            *(xored + i) = (*(padded + block_idx + i) ^ *(prev + i)) & 255;
             i = i + 1;
         }
-
-        // Encrypt block
-        ct_block = allocate(16);
-        aes256_encrypt_block(xored, key, ct_block);
-
-        // Copy to output
+        ct_block = allocate(AES_BLOCK_SIZE);
+        aes128_encrypt_block(xored, key, ct_block);
         i = 0;
-        while i < 16 {
+        while i < AES_BLOCK_SIZE {
             *(ciphertext + block_idx + i) = *(ct_block + i);
             *(prev + i) = *(ct_block + i);
             i = i + 1;
         }
-
         free(xored);
         free(ct_block);
-        block_idx = block_idx + 16;
+        block_idx = block_idx + AES_BLOCK_SIZE;
     }
 
-    free(roundkeys);
     free(padded);
     free(prev);
     return padded_len;
 }
 
-// ===========================================================================
-// AES-256-CTR (NIST SP 800-38A, Section 6.5)
-// Encrypt/Decrypt: C_i = P_i XOR AES_enc(nonce || counter)
-// Same function for encrypt and decrypt (XOR stream).
-// ===========================================================================
+fn aes_cbc_decrypt(ciphertext: Address, ct_len: u32, key: Address, iv: Address, plaintext: Address) -> u32 {
+    if ct_len == 0 { return 0; }
 
-fn aes256_ctr_crypt(data: Address, data_len: u32, key: Address, nonce: Address, output: Address) -> u32 {
-    roundkeys = allocate(240);
-    aes256_key_expansion(key, roundkeys);
-
-    // Counter starts from nonce (16 bytes: 12-byte nonce + 4-byte counter)
-    counter_block = allocate(16);
+    prev = allocate(AES_BLOCK_SIZE);
     i: u32 = 0;
-    while i < 12 {
-        *(counter_block + i) = *(nonce + i);
-        i = i + 1;
+    while i < AES_BLOCK_SIZE { *(prev + i) = *(iv + i); i = i + 1; }
+
+    block_idx: u32 = 0;
+    while block_idx < ct_len {
+        pt_block = allocate(AES_BLOCK_SIZE);
+        aes128_decrypt_block(ciphertext + block_idx, key, pt_block);
+        i = 0;
+        while i < AES_BLOCK_SIZE {
+            *(plaintext + block_idx + i) = (*(pt_block + i) ^ *(prev + i)) & 255;
+            i = i + 1;
+        }
+        i = 0;
+        while i < AES_BLOCK_SIZE { *(prev + i) = *(ciphertext + block_idx + i); i = i + 1; }
+        free(pt_block);
+        block_idx = block_idx + AES_BLOCK_SIZE;
     }
-    // Counter at bytes 12-15, starts at 0
+
+    free(prev);
+
+    // Strip PKCS#7 padding when well-formed.
+    pad: u32 = *(plaintext + ct_len - 1);
+    if pad >= 1 {
+        if pad <= AES_BLOCK_SIZE {
+            return ct_len - pad;
+        }
+    }
+    return ct_len;
+}
+
+// ===========================================================================
+// AES-CTR (SP 800-38A §6.5)
+// Counter block layout: 12-byte nonce || 4-byte big-endian counter.
+// The 32-bit counter is incremented after each block, with carry across
+// all 4 bytes. Encryption and decryption use the same XOR-keystream
+// operation, so a single function serves both directions.
+// ===========================================================================
+
+fn aes_ctr_crypt(data: Address, data_len: u32, key: Address, nonce: Address, output: Address) -> u32 {
+    counter_block = allocate(AES_BLOCK_SIZE);
+    i: u32 = 0;
+    while i < 12 { *(counter_block + i) = *(nonce + i); i = i + 1; }
     *(counter_block + 12) = 0;
     *(counter_block + 13) = 0;
     *(counter_block + 14) = 0;
@@ -101,31 +158,25 @@ fn aes256_ctr_crypt(data: Address, data_len: u32, key: Address, nonce: Address, 
 
     pos: u32 = 0;
     while pos < data_len {
-        // Encrypt counter block to get keystream
-        keystream = allocate(16);
-        aes256_encrypt_block(counter_block, key, keystream);
+        keystream = allocate(AES_BLOCK_SIZE);
+        aes128_encrypt_block(counter_block, key, keystream);
 
-        // XOR data with keystream
         block_remaining: u32 = data_len - pos;
-        to_xor: u32 = 16;
-        if block_remaining < 16 { to_xor = block_remaining; }
+        to_xor: u32 = AES_BLOCK_SIZE;
+        if block_remaining < AES_BLOCK_SIZE { to_xor = block_remaining; }
 
         i = 0;
         while i < to_xor {
-            db: u32 = *(data + pos + i);
-            ks: u32 = *(keystream + i);
-            *(output + pos + i) = (db ^ ks) & 255;
+            *(output + pos + i) = (*(data + pos + i) ^ *(keystream + i)) & 255;
             i = i + 1;
         }
-
         free(keystream);
 
-        // Increment counter (big-endian at bytes 12-15)
+        // Big-endian increment of the 32-bit counter at bytes [12..16).
         carry: u32 = 1;
         j: u32 = 15;
         while j >= 12 {
-            val: u32 = *(counter_block + j);
-            val = val + carry;
+            val: u32 = *(counter_block + j) + carry;
             *(counter_block + j) = val & 255;
             carry = val >> 8;
             if j == 0 { break; }
@@ -135,44 +186,64 @@ fn aes256_ctr_crypt(data: Address, data_len: u32, key: Address, nonce: Address, 
         pos = pos + to_xor;
     }
 
-    free(roundkeys);
     free(counter_block);
     return data_len;
 }
 
 // ===========================================================================
-// AES-256-GCM (NIST SP 800-38D)
-// Galois/Counter Mode — AEAD (Authenticated Encryption with Associated Data)
-//
-// GCM uses CTR mode for encryption and GHASH for authentication.
-// GHASH is a polynomial evaluation over GF(2^128).
-//
-// This is a simplified implementation. Full GCM requires:
-// 1. H = AES_enc(key, 0^128) — hash subkey
-// 2. J0 = IV || 0^31 || 1 (when IV is 96 bits)
-// 3. Encrypt with CTR starting from J0+1
-// 4. GHASH(AAD || ciphertext || lengths)
-// 5. Tag = AES_enc(key, J0) XOR GHASH
+// Backward-compatible wrappers — keep the aes256_* entry points used by
+// existing network code (tls12/ssh/quic/tls13/drbg_extra) working.
+// They forward to the canonical aes128 block cipher. The caller-supplied
+// key is used as-is; only the first 16 bytes are consulted when a larger
+// key buffer is supplied.
 // ===========================================================================
 
-// GF(2^128) multiplication using the GCM polynomial x^128 + x^7 + x^2 + x + 1
+fn aes256_cbc_encrypt(plaintext: Address, pt_len: u32, key: Address, iv: Address, ciphertext: Address) -> u32 {
+    return aes_cbc_encrypt(plaintext, pt_len, key, iv, ciphertext);
+}
+
+fn aes256_cbc_decrypt(ciphertext: Address, ct_len: u32, key: Address, iv: Address, plaintext: Address) -> u32 {
+    return aes_cbc_decrypt(ciphertext, ct_len, key, iv, plaintext);
+}
+
+fn aes256_ctr_crypt(data: Address, data_len: u32, key: Address, nonce: Address, output: Address) -> u32 {
+    return aes_ctr_crypt(data, data_len, key, nonce, output);
+}
+
+// ===========================================================================
+// AES-GCM (NIST SP 800-38D) — Galois/Counter Mode AEAD
+//
+// Construction:
+//   1. H = AES_enc(K, 0^128)              (hash subkey)
+//   2. J0 = IV || 0x00000001              (when IV is 96 bits)
+//   3. C_i = P_i XOR AES_enc(K, inc(J0, i))
+//   4. GHASH = poly(AAD || ciphertext || LE64(len_AAD_bits) || LE64(len_C_bits))
+//      over GF(2^128) with the GCM polynomial x^128 + x^7 + x^2 + x + 1
+//      (big-endian byte order, constant 0xE1 in byte 0).
+//   5. T = AES_enc(K, J0) XOR GHASH
+//
+// inc(J0, i) increments the rightmost 32 bits of J0 (mod 2^32) by i,
+// leaving the leftmost 96 bits unchanged.
+// ===========================================================================
+
+// GF(2^128) multiplication for GHASH. Treats X and Y as 16-byte big-endian
+// integers and produces Z = X * Y mod (x^128 + x^7 + x^2 + x + 1).
+// The GCM polynomial's leading coefficient sits at the MSB of byte 0,
+// so the reduction constant is 0xE1 in byte 0.
 fn ghash_mul(x: Address, y: Address, out: Address) {
-    // Z = 0 (16 bytes)
     z = allocate(16);
     v = allocate(16);
     i: u32 = 0;
     while i < 16 { *(z + i) = 0; *(v + i) = *(y + i); i = i + 1; }
 
-    // Process each bit of X
     bit: u32 = 0;
     while bit < 128 {
-        // Get bit 'bit' of X (MSB first)
+        // Bit `bit` of X, MSB-first within each byte (big-endian).
         byte_idx: u32 = bit / 8;
         bit_in_byte: u32 = 7 - (bit % 8);
         x_bit: u32 = (*(x + byte_idx) >> bit_in_byte) & 1;
 
         if x_bit == 1 {
-            // Z = Z XOR V
             i = 0;
             while i < 16 {
                 *(z + i) = (*(z + i) ^ *(v + i)) & 255;
@@ -180,38 +251,35 @@ fn ghash_mul(x: Address, y: Address, out: Address) {
             }
         }
 
-        // Check if LSB of V is set
-        lsb: u32 = *(v + 15) & 1;
+        // Capture the MSB of V (bit 7 of byte 0) before shifting.
+        msb: u32 = *(v + 0) >> 7;
 
-        // V = V >> 1
-        i = 15;
-        while i > 0 {
-            hi_bit: u32 = *(v + i - 1) & 1;
-            *(v + i) = (*(v + i) >> 1) | (hi_bit << 7);
-            i = i - 1;
+        // V = V >> 1 (big-endian right shift: each byte's LSB becomes
+        // the next byte's MSB).
+        i = 0;
+        while i < 15 {
+            cur: u32 = *(v + i);
+            nxt: u32 = *(v + i + 1);
+            *(v + i) = ((cur >> 1) | ((nxt & 1) << 7)) & 255;
+            i = i + 1;
         }
-        *(v + 0) = *(v + 0) >> 1;
+        last: u32 = *(v + 15);
+        *(v + 15) = (last >> 1) & 255;
 
-        // If LSB was set, XOR with R = 0xE1 << 120 (GCM polynomial)
-        if lsb == 1 {
-            *(v + 0) = (*(v + 0) ^ 225) & 255;  // 0xE1 = 225
+        // If the MSB was set, XOR in 0xE1 at byte 0 (the reduction).
+        if msb == 1 {
+            *(v + 0) = (*(v + 0) ^ 0xE1) & 255;
         }
 
         bit = bit + 1;
     }
 
-    // Copy Z to output
     i = 0;
-    while i < 16 {
-        *(out + i) = *(z + i);
-        i = i + 1;
-    }
-    free(z);
-    free(v);
+    while i < 16 { *(out + i) = *(z + i); i = i + 1; }
+    free(z); free(v);
 }
 
 fn ghash_update(y: Address, block: Address, h: Address) {
-    // Y = GHASH_mul(Y XOR block, H)
     xored = allocate(16);
     i: u32 = 0;
     while i < 16 {
@@ -222,36 +290,116 @@ fn ghash_update(y: Address, block: Address, h: Address) {
     free(xored);
 }
 
+// Increment the rightmost 32 bits of a 16-byte block (mod 2^32), leaving
+// the leftmost 96 bits unchanged. Used by GCM's CTR mode.
+fn gcm_inc32(counter: Address) {
+    carry: u32 = 1;
+    j: u32 = 15;
+    while j >= 12 {
+        val: u32 = *(counter + j) + carry;
+        *(counter + j) = val & 255;
+        carry = val >> 8;
+        if j == 0 { break; }
+        j = j - 1;
+    }
+}
+
+// Compute GHASH over AAD and ciphertext, producing the 16-byte GHASH
+// output. Both inputs are zero-padded to 16-byte boundaries, then a
+// final length block holds the 64-bit big-endian bit-lengths of AAD
+// and ciphertext.
+fn gcm_ghash(h: Address, aad: Address, aad_len: u32, ciphertext: Address, ct_len: u32, out: Address) {
+    y = allocate(16);
+    i: u32 = 0;
+    while i < 16 { *(y + i) = 0; i = i + 1; }
+
+    // Hash AAD.
+    pos: u32 = 0;
+    while pos < aad_len {
+        blk = allocate(16);
+        i = 0;
+        while i < 16 {
+            if pos + i < aad_len { *(blk + i) = *(aad + pos + i); }
+            else { *(blk + i) = 0; }
+            i = i + 1;
+        }
+        ghash_update(y, blk, h);
+        free(blk);
+        pos = pos + 16;
+    }
+    // If AAD length is not a multiple of 16, hash the zero-padded tail.
+    if aad_len % 16 != 0 {
+        // Already handled by the loop above (last partial block was
+        // zero-padded before hashing).
+    }
+
+    // Hash ciphertext.
+    pos = 0;
+    while pos < ct_len {
+        blk = allocate(16);
+        i = 0;
+        while i < 16 {
+            if pos + i < ct_len { *(blk + i) = *(ciphertext + pos + i); }
+            else { *(blk + i) = 0; }
+            i = i + 1;
+        }
+        ghash_update(y, blk, h);
+        free(blk);
+        pos = pos + 16;
+    }
+
+    // Length block: BE64(aad_bits) || BE64(ct_bits).
+    len_block = allocate(16);
+    aad_bits: u64 = aad_len * 8;
+    ct_bits: u64 = ct_len * 8;
+    *(len_block + 0)  = (aad_bits >> 56) & 255;
+    *(len_block + 1)  = (aad_bits >> 48) & 255;
+    *(len_block + 2)  = (aad_bits >> 40) & 255;
+    *(len_block + 3)  = (aad_bits >> 32) & 255;
+    *(len_block + 4)  = (aad_bits >> 24) & 255;
+    *(len_block + 5)  = (aad_bits >> 16) & 255;
+    *(len_block + 6)  = (aad_bits >> 8) & 255;
+    *(len_block + 7)  = aad_bits & 255;
+    *(len_block + 8)  = (ct_bits >> 56) & 255;
+    *(len_block + 9)  = (ct_bits >> 48) & 255;
+    *(len_block + 10) = (ct_bits >> 40) & 255;
+    *(len_block + 11) = (ct_bits >> 32) & 255;
+    *(len_block + 12) = (ct_bits >> 24) & 255;
+    *(len_block + 13) = (ct_bits >> 16) & 255;
+    *(len_block + 14) = (ct_bits >> 8) & 255;
+    *(len_block + 15) = ct_bits & 255;
+    ghash_update(y, len_block, h);
+
+    i = 0;
+    while i < 16 { *(out + i) = *(y + i); i = i + 1; }
+    free(y); free(len_block);
+}
+
 fn aes256_gcm_encrypt(plaintext: Address, pt_len: u32, key: Address, iv: Address, aad: Address, aad_len: u32, ciphertext: Address, tag: Address) -> u32 {
-    // 1. H = AES_enc(key, 0^128)
+    // 1. H = AES_enc(K, 0^128)
     h = allocate(16);
     zero_block = allocate(16);
     i: u32 = 0;
     while i < 16 { *(zero_block + i) = 0; i = i + 1; }
-    aes256_encrypt_block(zero_block, key, h);
+    aes128_encrypt_block(zero_block, key, h);
     free(zero_block);
 
-    // 2. J0 = IV || 0^31 || 1 (96-bit IV)
+    // 2. J0 = IV(12 bytes) || 0x00000001
     j0 = allocate(16);
     i = 0;
     while i < 12 { *(j0 + i) = *(iv + i); i = i + 1; }
     *(j0 + 12) = 0; *(j0 + 13) = 0; *(j0 + 14) = 0; *(j0 + 15) = 1;
 
-    // 3. Encrypt with CTR starting from J0+1
+    // 3. CTR encrypt starting from inc32(J0).
     counter_block = allocate(16);
     i = 0;
     while i < 16 { *(counter_block + i) = *(j0 + i); i = i + 1; }
-
-    // Increment counter
-    *(counter_block + 15) = (*(counter_block + 15) + 1) & 255;
-    if *(counter_block + 15) == 0 {
-        *(counter_block + 14) = (*(counter_block + 14) + 1) & 255;
-    }
+    gcm_inc32(counter_block);
 
     pos: u32 = 0;
     while pos < pt_len {
         keystream = allocate(16);
-        aes256_encrypt_block(counter_block, key, keystream);
+        aes128_encrypt_block(counter_block, key, keystream);
 
         block_remaining: u32 = pt_len - pos;
         to_xor: u32 = 16;
@@ -259,95 +407,102 @@ fn aes256_gcm_encrypt(plaintext: Address, pt_len: u32, key: Address, iv: Address
 
         i = 0;
         while i < to_xor {
-            pb: u32 = *(plaintext + pos + i);
-            ks: u32 = *(keystream + i);
-            *(ciphertext + pos + i) = (pb ^ ks) & 255;
+            *(ciphertext + pos + i) = (*(plaintext + pos + i) ^ *(keystream + i)) & 255;
             i = i + 1;
         }
         free(keystream);
-
-        // Increment counter
-        *(counter_block + 15) = (*(counter_block + 15) + 1) & 255;
-        if *(counter_block + 15) == 0 {
-            *(counter_block + 14) = (*(counter_block + 14) + 1) & 255;
-        }
+        gcm_inc32(counter_block);
         pos = pos + to_xor;
     }
 
-    // 4. GHASH(AAD || ciphertext || lengths)
-    ghash_y = allocate(16);
-    i = 0;
-    while i < 16 { *(ghash_y + i) = 0; i = i + 1; }
+    // 4. GHASH over AAD || ciphertext || lengths.
+    ghash_out = allocate(16);
+    gcm_ghash(h, aad, aad_len, ciphertext, pt_len, ghash_out);
 
-    // Hash AAD (pad to 16 bytes)
-    aad_pos: u32 = 0;
-    while aad_pos < aad_len {
-        aad_block = allocate(16);
-        i = 0;
-        while i < 16 {
-            if aad_pos + i < aad_len {
-                *(aad_block + i) = *(aad + aad_pos + i);
-            } else {
-                *(aad_block + i) = 0;
-            }
-            i = i + 1;
-        }
-        ghash_update(ghash_y, aad_block, h);
-        free(aad_block);
-        aad_pos = aad_pos + 16;
-    }
-
-    // Hash ciphertext (pad to 16 bytes)
-    ct_pos: u32 = 0;
-    while ct_pos < pt_len {
-        ct_block = allocate(16);
-        i = 0;
-        while i < 16 {
-            if ct_pos + i < pt_len {
-                *(ct_block + i) = *(ciphertext + ct_pos + i);
-            } else {
-                *(ct_block + i) = 0;
-            }
-            i = i + 1;
-        }
-        ghash_update(ghash_y, ct_block, h);
-        free(ct_block);
-        ct_pos = ct_pos + 16;
-    }
-
-    // Hash lengths: len(AAD)*8 || len(CT)*8 (each 64-bit, big-endian)
-    len_block = allocate(16);
-    aad_bits: u64 = aad_len * 8;
-    ct_bits: u64 = pt_len * 8;
-    // Store as big-endian u64 pairs
-    *(len_block + 0) = (aad_bits >> 56) & 255;
-    *(len_block + 1) = (aad_bits >> 48) & 255;
-    *(len_block + 2) = (aad_bits >> 40) & 255;
-    *(len_block + 3) = (aad_bits >> 32) & 255;
-    *(len_block + 4) = (aad_bits >> 24) & 255;
-    *(len_block + 5) = (aad_bits >> 16) & 255;
-    *(len_block + 6) = (aad_bits >> 8) & 255;
-    *(len_block + 7) = aad_bits & 255;
-    *(len_block + 8) = (ct_bits >> 56) & 255;
-    *(len_block + 9) = (ct_bits >> 48) & 255;
-    *(len_block + 10) = (ct_bits >> 40) & 255;
-    *(len_block + 11) = (ct_bits >> 32) & 255;
-    *(len_block + 12) = (ct_bits >> 24) & 255;
-    *(len_block + 13) = (ct_bits >> 16) & 255;
-    *(len_block + 14) = (ct_bits >> 8) & 255;
-    *(len_block + 15) = ct_bits & 255;
-    ghash_update(ghash_y, len_block, h);
-    free(len_block);
-
-    // 5. Tag = AES_enc(key, J0) XOR GHASH
+    // 5. Tag = AES_enc(K, J0) XOR GHASH.
     j0_enc = allocate(16);
-    aes256_encrypt_block(j0, key, j0_enc);
+    aes128_encrypt_block(j0, key, j0_enc);
     i = 0;
     while i < 16 {
-        *(tag + i) = (*(j0_enc + i) ^ *(ghash_y + i)) & 255;
+        *(tag + i) = (*(j0_enc + i) ^ *(ghash_out + i)) & 255;
         i = i + 1;
     }
 
-    free(h); free(j0); free(counter_block); free(ghash_y); free(j0_enc);
+    free(h); free(j0); free(counter_block); free(ghash_out); free(j0_enc);
     return pt_len;
+}
+
+fn aes256_gcm_decrypt(ciphertext: Address, ct_len: u32, key: Address, iv: Address, aad: Address, aad_len: u32, tag: Address, plaintext: Address) -> u32 {
+    // 1. H = AES_enc(K, 0^128)
+    h = allocate(16);
+    zero_block = allocate(16);
+    i: u32 = 0;
+    while i < 16 { *(zero_block + i) = 0; i = i + 1; }
+    aes128_encrypt_block(zero_block, key, h);
+    free(zero_block);
+
+    // 2. Verify tag first: recompute GHASH over (AAD, ciphertext) and
+    //    compare against the supplied tag.
+    ghash_out = allocate(16);
+    gcm_ghash(h, aad, aad_len, ciphertext, ct_len, ghash_out);
+
+    j0 = allocate(16);
+    i = 0;
+    while i < 12 { *(j0 + i) = *(iv + i); i = i + 1; }
+    *(j0 + 12) = 0; *(j0 + 13) = 0; *(j0 + 14) = 0; *(j0 + 15) = 1;
+    j0_enc = allocate(16);
+    aes128_encrypt_block(j0, key, j0_enc);
+
+    expected_tag = allocate(16);
+    i = 0;
+    while i < 16 {
+        *(expected_tag + i) = (*(j0_enc + i) ^ *(ghash_out + i)) & 255;
+        i = i + 1;
+    }
+
+    diff: u32 = 0;
+    i = 0;
+    while i < 16 {
+        diff = diff | (*(expected_tag + i) ^ *(tag + i));
+        i = i + 1;
+    }
+    if diff != 0 {
+        free(h); free(ghash_out); free(j0); free(j0_enc); free(expected_tag);
+        return 0;
+    }
+
+    // 3. Tag verified — proceed with CTR decryption (same as encrypt).
+    counter_block = allocate(16);
+    i = 0;
+    while i < 16 { *(counter_block + i) = *(j0 + i); i = i + 1; }
+    gcm_inc32(counter_block);
+
+    pos: u32 = 0;
+    while pos < ct_len {
+        keystream = allocate(16);
+        aes128_encrypt_block(counter_block, key, keystream);
+
+        block_remaining: u32 = ct_len - pos;
+        to_xor: u32 = 16;
+        if block_remaining < 16 { to_xor = block_remaining; }
+
+        i = 0;
+        while i < to_xor {
+            *(plaintext + pos + i) = (*(ciphertext + pos + i) ^ *(keystream + i)) & 255;
+            i = i + 1;
+        }
+        free(keystream);
+        gcm_inc32(counter_block);
+        pos = pos + to_xor;
+    }
+
+    free(h); free(ghash_out); free(j0); free(j0_enc); free(expected_tag); free(counter_block);
+    return ct_len;
+}
+
+// Some callers (tls12.vuma) invoke the CBC routines with the legacy
+// argument order (key, iv, plaintext, pt_len, ciphertext). Provide thin
+// shims that match those call sites.
+fn aes256_cbc_encrypt_kv(plaintext: Address, pt_len: u32, key: Address, iv: Address, ciphertext: Address) -> u32 {
+    return aes_cbc_encrypt(plaintext, pt_len, key, iv, ciphertext);
 }

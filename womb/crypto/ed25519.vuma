@@ -1,134 +1,244 @@
 // womb/crypto/ed25519.vuma — Ed25519 (RFC 8032)
 // Edwards-curve Digital Signature Algorithm over Curve25519.
 // No main() — importable library module.
-// Requires: sha512.vuma, bignum.vuma.
+// Requires: sha512.vuma (sha512_oneshot), bignum.vuma (bn256_*).
 //
-// Curve: -x^2 + y^2 = 1 + d*x^2*y^2 (mod p)
-// p = 2^255 - 19
-// d = 37095705934669439343138083508754565189542113879843219016388785533085940283555
-// B (base point): x = 15112221349535400772501151409588531511454012693041857206046113283949847762202
-//                  y = 46316835694926478169428394003475163141307993866256225615783033603165251855960
-// L (order) = 2^252 + 27742317777372353535851937790883648493
+// Curve: -x^2 + y^2 = 1 + d*x^2*y^2 (mod p)  (twisted Edwards, a = -1)
+//   p = 2^255 - 19
+//   d = -121665/121666 mod p
+//   B (base point): x = 15112221349535400772501151409588531511454012693041857206046113283949847762202
+//                    y = 46316835694926478169428394003475163141307993866256225615783033603165251855960
+//   L (order) = 2^252 + 27742317777372353535851937790883648493
 //
-// All field arithmetic is mod p = 2^255 - 19, using 256-bit bignum.
+// Field arithmetic is mod p = 2^255 - 19, using bn256_* with a 32-byte
+// little-endian limb representation (the high bit of byte 31 is masked off
+// whenever a value is loaded from a wire-format point encoding).
 
 // ===========================================================================
-// Curve constants (stored as 32-byte little-endian)
+// Curve constants (32-byte little-endian)
 // ===========================================================================
 
 fn ed25519_p() -> Address {
-    // p = 2^255 - 19 = 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFED
-    // In little-endian: 7F FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF ED
+    // p = 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFED
+    // LE: ED FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF 7F
     buf = allocate(32);
     *(buf + 0) = 237;
     i: u32 = 1;
-    while i < 32 { *(buf + i) = 255; i = i + 1; }
-    *(buf + 31) = 127;  // 0x7F
+    while i < 31 { *(buf + i) = 255; i = i + 1; }
+    *(buf + 31) = 127;
     return buf;
 }
 
 fn ed25519_l() -> Address {
     // L = 2^252 + 27742317777372353535851937790883648493
-    // = 0x1000000000000000000000000000000014DEF9DEA2F79CD65812631A5CF5D3ED
+    //   = 0x1000000000000000000000000000000014DEF9DEA2F79CD65812631A5CF5D3ED
+    // LE: ED D3 F5 5C 1A 63 12 58 D6 9C F7 A2 DE F9 DE 14
+    //     00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 10
     buf = allocate(32);
-    *(buf + 0) = 237; *(buf + 1) = 61; *(buf + 2) = 93; *(buf + 3) = 197;
-    *(buf + 4) = 166; *(buf + 5) = 35; *(buf + 6) = 97; *(buf + 7) = 129;
-    *(buf + 8) = 165; *(buf + 9) = 137; *(buf + 10) = 122; *(buf + 11) = 247;
-    *(buf + 12) = 47; *(buf + 13) = 234; *(buf + 14) = 158; *(buf + 15) = 124;
-    *(buf + 16) = 0; *(buf + 17) = 0; *(buf + 18) = 0; *(buf + 19) = 0;
-    *(buf + 20) = 0; *(buf + 21) = 0; *(buf + 22) = 0; *(buf + 23) = 0;
-    *(buf + 24) = 0; *(buf + 25) = 0; *(buf + 26) = 0; *(buf + 27) = 0;
-    *(buf + 28) = 0; *(buf + 29) = 0; *(buf + 30) = 0; *(buf + 31) = 16;
+    *(buf +  0) = 237; *(buf +  1) =  61; *(buf +  2) =  93; *(buf +  3) = 197;
+    *(buf +  4) = 166; *(buf +  5) =  35; *(buf +  6) =  97; *(buf +  7) = 129;
+    *(buf +  8) = 165; *(buf +  9) = 137; *(buf + 10) = 122; *(buf + 11) = 247;
+    *(buf + 12) =  47; *(buf + 13) = 234; *(buf + 14) = 158; *(buf + 15) =  20;
+    *(buf + 16) =   0; *(buf + 17) =   0; *(buf + 18) =   0; *(buf + 19) =   0;
+    *(buf + 20) =   0; *(buf + 21) =   0; *(buf + 22) =   0; *(buf + 23) =   0;
+    *(buf + 24) =   0; *(buf + 25) =   0; *(buf + 26) =   0; *(buf + 27) =   0;
+    *(buf + 28) =   0; *(buf + 29) =   0; *(buf + 30) =   0; *(buf + 31) =  16;
+    return buf;
+}
+
+// d = -121665/121666 mod p (precomputed LE bytes).
+fn ed25519_d() -> Address {
+    buf = allocate(32);
+    *(buf +  0) = 163; *(buf +  1) = 120; *(buf +  2) =  89; *(buf +  3) =  19;
+    *(buf +  4) =  60; *(buf +  5) = 164; *(buf +  6) =  46; *(buf +  7) = 160;
+    *(buf +  8) = 134; *(buf +  9) = 105; *(buf + 10) = 194; *(buf + 11) = 140;
+    *(buf + 12) =   6; *(buf + 13) =  27; *(buf + 14) =  60; *(buf + 15) = 128;
+    *(buf + 16) =  92; *(buf + 17) =  20; *(buf + 18) =  58; *(buf + 19) = 107;
+    *(buf + 20) =  55; *(buf + 21) = 132; *(buf + 22) =  92; *(buf + 23) = 146;
+    *(buf + 24) =  71; *(buf + 25) = 212; *(buf + 26) =  77; *(buf + 27) = 156;
+    *(buf + 28) = 105; *(buf + 29) =  91; *(buf + 30) =  93; *(buf + 31) =  82;
+    return buf;
+}
+
+// sqrt(-1) mod p = 2^((p-1)/4) mod p (precomputed LE bytes for decompression).
+fn ed25519_sqrt_m1() -> Address {
+    // 19681161336723050825442985873232810906779009870791404531190718613984590602334
+    // LE bytes:
+    buf = allocate(32);
+    *(buf +  0) = 212; *(buf +  1) = 196; *(buf +  2) = 184; *(buf +  3) = 210;
+    *(buf +  4) = 195; *(buf +  5) = 227; *(buf +  6) =  71; *(buf +  7) = 167;
+    *(buf +  8) = 244; *(buf +  9) =  52; *(buf + 10) =  61; *(buf + 11) = 147;
+    *(buf + 12) =  36; *(buf + 13) =  16; *(buf + 14) = 131; *(buf + 15) =  47;
+    *(buf + 16) = 167; *(buf + 17) = 215; *(buf + 18) = 251; *(buf + 19) =  61;
+    *(buf + 20) = 153; *(buf + 21) =   0; *(buf + 22) =  77; *(buf + 23) =  43;
+    *(buf + 24) =  11; *(buf + 25) = 223; *(buf + 26) = 193; *(buf + 27) =  79;
+    *(buf + 28) = 128; *(buf + 29) =  36; *(buf + 30) = 131; *(buf + 31) =  43;
+    return buf;
+}
+
+// Base point B (LE 32-byte x and y).
+fn ed25519_bx() -> Address {
+    buf = allocate(32);
+    *(buf +  0) =  26; *(buf +  1) = 213; *(buf +  2) =  37; *(buf +  3) = 143;
+    *(buf +  4) =  96; *(buf +  5) =  45; *(buf +  6) =  86; *(buf +  7) = 201;
+    *(buf +  8) = 178; *(buf +  9) = 167; *(buf + 10) =  37; *(buf + 11) = 149;
+    *(buf + 12) =  96; *(buf + 13) = 199; *(buf + 14) =  44; *(buf + 15) = 105;
+    *(buf + 16) =  92; *(buf + 17) = 220; *(buf + 18) =   6; *(buf + 19) =  44;
+    *(buf + 20) = 211; *(buf + 21) = 139; *(buf + 22) = 133; *(buf + 23) = 138;
+    *(buf + 24) = 243; *(buf + 25) = 157; *(buf + 26) = 206; *(buf + 27) =  92;
+    *(buf + 28) = 225; *(buf + 29) =  73; *(buf + 30) = 166; *(buf + 31) =  33;
+    return buf;
+}
+
+fn ed25519_by() -> Address {
+    buf = allocate(32);
+    *(buf +  0) =  88; *(buf +  1) = 102; *(buf +  2) = 102; *(buf +  3) = 102;
+    *(buf +  4) = 102; *(buf +  5) = 102; *(buf +  6) = 102; *(buf +  7) = 102;
+    *(buf +  8) = 102; *(buf +  9) = 102; *(buf + 10) = 102; *(buf + 11) = 102;
+    *(buf + 12) = 102; *(buf + 13) = 102; *(buf + 14) = 102; *(buf + 15) = 102;
+    *(buf + 16) = 102; *(buf + 17) = 102; *(buf + 18) = 102; *(buf + 19) = 102;
+    *(buf + 20) = 102; *(buf + 21) = 102; *(buf + 22) = 102; *(buf + 23) = 102;
+    *(buf + 24) = 102; *(buf + 25) = 102; *(buf + 26) = 102; *(buf + 27) = 102;
+    *(buf + 28) = 102; *(buf + 29) = 102; *(buf + 30) = 102; *(buf + 31) = 102;
     return buf;
 }
 
 // ===========================================================================
-// Edwards curve point addition (twisted Edwards, a=-1)
-// (x1,y1) + (x2,y2) = ((x1*y2+x2*y1)/(1+d*x1*x2*y1*y2), (y1*y2+x1*x2)/(1-d*x1*x2*y1*y2))
+// 64-byte little-endian buffer -> 32-byte little-endian reduction mod L.
+// Implements long division: walk 512 bits from MSB to LSB, shift the
+// remainder left by 1, set the LSB to the current input bit, and subtract L
+// whenever the remainder is >= L. The remainder always fits in 32 bytes by
+// construction (each iteration keeps rem < L).
 // ===========================================================================
 
-fn ed25519_point_add(rx: Address, ry: Address, x1: Address, y1: Address, x2: Address, y2: Address, p_le: Address) {
-    // t1 = x1 * y2
+fn ed25519_mod_l(r: Address, hash_64: Address) {
+    L_le = ed25519_l();
+
+    rem = allocate(64);
+    i: u32 = 0;
+    while i < 64 { *(rem + i) = 0; i = i + 1; }
+
+    pos: i32 = 511;
+    while pos >= 0 {
+        byte_idx: u32 = pos / 8;
+        bit_idx: u32 = pos % 8;
+        bit: u32 = (*(hash_64 + byte_idx) >> bit_idx) & 1;
+
+        // rem = rem << 1 (64 bytes wide)
+        carry: u32 = 0;
+        i = 0;
+        while i < 64 {
+            cur: u32 = *(rem + i);
+            newv: u32 = (cur << 1) | carry;
+            *(rem + i) = newv & 255;
+            carry = newv >> 8;
+            i = i + 1;
+        }
+
+        // rem.bit0 = bit
+        *(rem + 0) = (*(rem + 0) & 254) | bit;
+
+        // Determine whether rem >= L (treating L as zero-extended to 64 bytes)
+        ge_l: u32 = 0;
+        high_nz: u32 = 0;
+        i = 32;
+        while i < 64 {
+            if *(rem + i) != 0 { high_nz = 1; }
+            i = i + 1;
+        }
+        if high_nz == 1 {
+            ge_l = 1;
+        } else {
+            if bn256_cmp(rem, L_le) >= 0 { ge_l = 1; }
+        }
+
+        if ge_l == 1 {
+            borrow: u32 = bn256_sub(rem, rem, L_le);
+            if borrow == 1 {
+                // Propagate borrow into high 32 bytes
+                i = 32;
+                while i < 64 {
+                    cur: u32 = *(rem + i);
+                    if cur > 0 {
+                        *(rem + i) = cur - 1;
+                        break;
+                    } else {
+                        *(rem + i) = 255;
+                    }
+                    i = i + 1;
+                }
+            }
+        }
+
+        pos = pos - 1;
+    }
+
+    i = 0;
+    while i < 32 { *(r + i) = *(rem + i); i = i + 1; }
+    free(rem); free(L_le);
+}
+
+// ===========================================================================
+// Edwards curve point addition (twisted Edwards, a=-1):
+//   (x1,y1) + (x2,y2) = ((x1*y2 + x2*y1) / (1 + d*x1*x2*y1*y2),
+//                         (y1*y2 + x1*x2) / (1 - d*x1*x2*y1*y2))
+// All operations mod p. The same formula is used for doubling (P + P).
+// ===========================================================================
+
+fn ed25519_point_add(rx: Address, ry: Address, x1: Address, y1: Address, x2: Address, y2: Address, p_le: Address, d_le: Address) {
+    // t1 = x1*y2 ; t2 = x2*y1 ; num_x = t1 + t2
     t1 = allocate(32);
     bn256_mod_mul(t1, x1, y2, p_le);
-
-    // t2 = x2 * y1
     t2 = allocate(32);
     bn256_mod_mul(t2, x2, y1, p_le);
-
-    // numerator_x = t1 + t2
     num_x = allocate(32);
     bn256_mod_add(num_x, t1, t2, p_le);
 
-    // t3 = x1 * x2
+    // t3 = x1*x2 ; t4 = y1*y2 ; num_y = t4 + t3  (a = -1, so + x1*x2)
     t3 = allocate(32);
     bn256_mod_mul(t3, x1, x2, p_le);
-
-    // t4 = y1 * y2
     t4 = allocate(32);
     bn256_mod_mul(t4, y1, y2, p_le);
-
-    // numerator_y = t4 + t3 (for a=-1: y1*y2 - (-1)*x1*x2 = y1*y2 + x1*x2)
     num_y = allocate(32);
     bn256_mod_add(num_y, t4, t3, p_le);
 
-    // t5 = t3 * t4 = x1*x2*y1*y2
+    // t5 = x1*x2*y1*y2 = t3 * t4 ; dt = d * t5
     t5 = allocate(32);
     bn256_mod_mul(t5, t3, t4, p_le);
-
-    // d mod p (d = -121665/121666 mod p)
-    // We precompute d mod p as a constant
-    // d = 37095705934669439343138083508754565189542113879843219016388785533085940283555
-    // In LE bytes: 0xA3 0x78 0x59 0x13 0x3C 0xA4 0x2E 0xA0 0x86 0x69 0xC2 0x8C 0x06 0x1B 0x3C 0x80
-    //              0x5C 0x14 0x3A 0x6B 0x37 0x84 0x5C 0x92 0x47 0xD4 0x4D 0x9C 0x69 0x5B 0x5D 0x52
-    d_val = allocate(32);
-    *(d_val + 0) = 163; *(d_val + 1) = 120; *(d_val + 2) = 89; *(d_val + 3) = 19;
-    *(d_val + 4) = 60; *(d_val + 5) = 164; *(d_val + 6) = 46; *(d_val + 7) = 160;
-    *(d_val + 8) = 134; *(d_val + 9) = 105; *(d_val + 10) = 194; *(d_val + 11) = 140;
-    *(d_val + 12) = 6; *(d_val + 13) = 27; *(d_val + 14) = 60; *(d_val + 15) = 128;
-    *(d_val + 16) = 92; *(d_val + 17) = 20; *(d_val + 18) = 58; *(d_val + 19) = 107;
-    *(d_val + 20) = 55; *(d_val + 21) = 132; *(d_val + 22) = 92; *(d_val + 23) = 146;
-    *(d_val + 24) = 71; *(d_val + 25) = 212; *(d_val + 26) = 77; *(d_val + 27) = 156;
-    *(d_val + 28) = 105; *(d_val + 29) = 91; *(d_val + 30) = 93; *(d_val + 31) = 82;
-
-    // dt = d * t5 mod p
     dt = allocate(32);
-    bn256_mod_mul(dt, d_val, t5, p_le);
+    bn256_mod_mul(dt, d_le, t5, p_le);
 
-    // denom_x = 1 + dt
+    // denom_x = 1 + dt ; denom_y = 1 - dt
     one = allocate(32);
     bn256_zero(one);
     *(one + 0) = 1;
     denom_x = allocate(32);
     bn256_mod_add(denom_x, one, dt, p_le);
-
-    // denom_y = 1 - dt
     denom_y = allocate(32);
     bn256_mod_sub(denom_y, one, dt, p_le);
 
-    // rx = num_x * denom_x^-1 mod p
+    // rx = num_x * denom_x^-1 ; ry = num_y * denom_y^-1
     dx_inv = allocate(32);
     bn256_mod_inv(dx_inv, denom_x, p_le);
     bn256_mod_mul(rx, num_x, dx_inv, p_le);
-
-    // ry = num_y * denom_y^-1 mod p
     dy_inv = allocate(32);
     bn256_mod_inv(dy_inv, denom_y, p_le);
     bn256_mod_mul(ry, num_y, dy_inv, p_le);
 
     free(t1); free(t2); free(num_x); free(t3); free(t4); free(num_y);
-    free(t5); free(d_val); free(dt); free(one); free(denom_x); free(denom_y);
+    free(t5);
+    free(dt); free(one); free(denom_x); free(denom_y);
     free(dx_inv); free(dy_inv);
 }
 
-// Scalar multiplication: R = k * P using double-and-add
-// For Edwards curves, doubling is the same formula as addition (P + P).
-fn ed25519_scalar_mul(rx: Address, ry: Address, k: Address, px: Address, py: Address, p_le: Address) {
-    // R = identity (0, 1)
+// Scalar multiplication: R = k * P using double-and-add (MSB-first).
+// Edwards doubling uses the same addition formula (P + P).
+fn ed25519_scalar_mul(rx: Address, ry: Address, k: Address, px: Address, py: Address, p_le: Address, d_le: Address) {
+    // Identity element of twisted Edwards curve is (0, 1)
     bn256_zero(rx);
-    *(rx + 0) = 0;  // x = 0
+    *(rx + 0) = 0;
     bn256_zero(ry);
-    *(ry + 0) = 1;  // y = 1
+    *(ry + 0) = 1;
 
     tx = allocate(32);
     ty = allocate(32);
@@ -138,30 +248,175 @@ fn ed25519_scalar_mul(rx: Address, ry: Address, k: Address, px: Address, py: Add
     while i > 0 {
         i = i - 1;
         // R = 2*R = R + R
-        ed25519_point_add(tx, ty, rx, ry, rx, ry, p_le);
+        ed25519_point_add(tx, ty, rx, ry, rx, ry, p_le, d_le);
         bn256_copy(rx, tx);
         bn256_copy(ry, ty);
-
         if bn256_get_bit(k, i) == 1 {
-            // R = R + P
-            ed25519_point_add(tx, ty, rx, ry, px, py, p_le);
+            ed25519_point_add(tx, ty, rx, ry, px, py, p_le, d_le);
             bn256_copy(rx, tx);
             bn256_copy(ry, ty);
         }
     }
-
     free(tx); free(ty);
 }
 
 // ===========================================================================
+// Point compression: encode (x, y) as 32-byte y with sign bit of x in MSB.
+// The "sign" is the LSB of x (parity), placed in bit 255 of the encoding.
+// ===========================================================================
+
+fn ed25519_point_compress(out: Address, x_le: Address, y_le: Address) {
+    i: u32 = 0;
+    while i < 32 { *(out + i) = *(y_le + i); i = i + 1; }
+    // Clear bit 255 then set it to the LSB of x
+    *(out + 31) = *(out + 31) & 127;
+    sign_bit: u32 = *(x_le + 0) & 1;
+    *(out + 31) = *(out + 31) | (sign_bit << 7);
+}
+
+// ===========================================================================
+// Recover x from y using the curve equation.
+//   x^2 = (y^2 - 1) / (d*y^2 + 1) mod p
+//   x = sqrt(rhs) ; choose sign of x based on `sign` (LSB of expected x).
+// Returns 1 on success (x written to x_le), 0 if y is not on the curve.
+// Uses Tonelli-Shanks variant for p ≡ 5 (mod 8):
+//   cand = rhs^((p+3)/8) mod p
+//   if cand^2 == rhs: x = cand
+//   else if cand^2 == -rhs: x = cand * sqrt(-1)
+//   else: not a quadratic residue, return 0
+// ===========================================================================
+
+fn ed25519_recover_x(x_le: Address, y_le: Address, sign: u32, p_le: Address, d_le: Address) -> u32 {
+    // y^2
+    y_sq = allocate(32);
+    bn256_mod_mul(y_sq, y_le, y_le, p_le);
+
+    // num = y^2 - 1
+    one = allocate(32);
+    bn256_zero(one);
+    *(one + 0) = 1;
+    num = allocate(32);
+    bn256_mod_sub(num, y_sq, one, p_le);
+
+    // den = d*y^2 + 1
+    d_ysq = allocate(32);
+    bn256_mod_mul(d_ysq, d_le, y_sq, p_le);
+    den = allocate(32);
+    bn256_mod_add(den, d_ysq, one, p_le);
+
+    // rhs = num * den^-1
+    den_inv = allocate(32);
+    bn256_mod_inv(den_inv, den, p_le);
+    rhs = allocate(32);
+    bn256_mod_mul(rhs, num, den_inv, p_le);
+
+    // cand = rhs^((p+3)/8) mod p
+    // (p+3)/8 = (2^255 - 16) / 8 = 2^252 - 2
+    exp = allocate(32);
+    // 2^252 - 2 in LE: 0xFE 0xFF ... 0xFF 0x0F (low byte = -2, byte 31 = 0x0F to clear top 4 bits)
+    *(exp + 0) = 254;   // 0xFE = -2 mod 256
+    i: u32 = 1;
+    while i < 31 { *(exp + i) = 255; i = i + 1; }
+    *(exp + 31) = 15;   // 0x0F: bit 252 set, bits 253..255 clear
+    cand = allocate(32);
+    bn256_mod_exp(cand, rhs, exp, p_le);
+
+    // Check cand^2 vs rhs
+    cand_sq = allocate(32);
+    bn256_mod_mul(cand_sq, cand, cand, p_le);
+
+    ok: u32 = 0;
+    if bn256_cmp(cand_sq, rhs) == 0 {
+        // x = cand
+        bn256_copy(x_le, cand);
+        ok = 1;
+    } else {
+        // Check cand^2 == -rhs (i.e., rhs negated mod p)
+        neg_rhs = allocate(32);
+        bn256_mod_sub(neg_rhs, p_le, rhs, p_le);
+        if bn256_cmp(cand_sq, neg_rhs) == 0 {
+            // x = cand * sqrt(-1)
+            sqrt_m1 = ed25519_sqrt_m1();
+            bn256_mod_mul(x_le, cand, sqrt_m1, p_le);
+            free(sqrt_m1);
+            ok = 1;
+        }
+        free(neg_rhs);
+    }
+
+    if ok == 1 {
+        // Adjust sign of x so LSB matches `sign`
+        cur_sign: u32 = *(x_le + 0) & 1;
+        if cur_sign != sign {
+            // x = p - x
+            neg_x = allocate(32);
+            bn256_mod_sub(neg_x, p_le, x_le, p_le);
+            bn256_copy(x_le, neg_x);
+            free(neg_x);
+        }
+    }
+
+    free(y_sq); free(one); free(num); free(d_ysq); free(den);
+    free(den_inv); free(rhs); free(exp); free(cand); free(cand_sq);
+
+    return ok;
+}
+
+// ===========================================================================
+// Point decompression: decode 32-byte encoding to (x, y).
+//   enc[0..31]  : y with sign bit of x in MSB of enc[31]
+// Returns 1 on success, 0 if the encoding is invalid.
+// ===========================================================================
+
+fn ed25519_point_decompress(x_le: Address, y_le: Address, enc: Address, p_le: Address, d_le: Address) -> u32 {
+    sign: u32 = (*(enc + 31) >> 7) & 1;
+    // y = enc with high bit cleared, then reduce mod p (y < 2^255 < 2p)
+    i: u32 = 0;
+    while i < 31 { *(y_le + i) = *(enc + i); i = i + 1; }
+    *(y_le + 31) = *(enc + 31) & 127;
+    if bn256_cmp(y_le, p_le) >= 0 {
+        bn256_sub(y_le, y_le, p_le);
+    }
+    return ed25519_recover_x(x_le, y_le, sign, p_le, d_le);
+}
+
+// ===========================================================================
+// Ed25519 Key Generation (RFC 8032 Section 5.1.5)
+//   privkey (in)  : 32-byte seed (random)
+//   pubkey (out)  : 32-byte compressed public key = A = a*B
+// Also computes the intermediate expanded secret (a, prefix) but does not
+// return it — callers sign with ed25519_sign which redoes the expansion.
+// ===========================================================================
+
+fn ed25519_keygen(privkey: Address, pubkey: Address) {
+    h = allocate(64);
+    sha512_oneshot(privkey, 32, h);
+
+    // a = h[0..31] with clamping
+    *(h + 0)  = *(h + 0)  & 248;     // clear bits 0-2
+    *(h + 31) = *(h + 31) & 127;     // clear bit 255
+    *(h + 31) = *(h + 31) | 64;      // set bit 254
+
+    p_le = ed25519_p();
+    d_le = ed25519_d();
+    bx = ed25519_bx();
+    by = ed25519_by();
+
+    ax = allocate(32);
+    ay = allocate(32);
+    ed25519_scalar_mul(ax, ay, h, bx, by, p_le, d_le);
+
+    ed25519_point_compress(pubkey, ax, ay);
+
+    free(h); free(p_le); free(d_le); free(bx); free(by); free(ax); free(ay);
+}
+
+// ===========================================================================
 // Ed25519 Sign (RFC 8032, Section 5.1.6)
-//
-// Inputs:
-//   privkey: 32-byte seed (little-endian)
-//   msg: message bytes
-//   msg_len: message length
-// Output:
-//   sig: 64-byte signature (R || S)
+//   privkey : 32-byte seed
+//   msg     : message bytes
+//   msg_len : message length
+//   sig     : 64-byte signature output (R || S)
 // ===========================================================================
 
 fn ed25519_sign(privkey: Address, msg: Address, msg_len: u32, sig: Address) {
@@ -169,140 +424,124 @@ fn ed25519_sign(privkey: Address, msg: Address, msg_len: u32, sig: Address) {
     h = allocate(64);
     sha512_oneshot(privkey, 32, h);
 
-    // 2. a = h[0..31] with clamping
-    a = h;  // first 32 bytes
-    *(a + 0) = *(a + 0) & 248;     // clear bits 0-2
-    *(a + 31) = *(a + 31) & 127;   // clear bit 255
-    *(a + 31) = *(a + 31) | 64;    // set bit 254
-
-    // prefix = h[32..63]
+    // 2. a = h[0..31] with clamping ; prefix = h[32..63]
+    *(h + 0)  = *(h + 0)  & 248;
+    *(h + 31) = *(h + 31) & 127;
+    *(h + 31) = *(h + 31) | 64;
+    a = h;          // first 32 bytes
     prefix = h + 32;
 
-    // 3. Compute A = a * B (public key point)
+    // 3. A = a * B (public key point)
     p_le = ed25519_p();
+    d_le = ed25519_d();
+    bx = ed25519_bx();
+    by = ed25519_by();
 
-    // Base point B
-    bx = allocate(32);
-    by = allocate(32);
-    // Bx = 15112221349535400772501151409588531511454012693041857206046113283949847762202
-    // In LE: 0x1A 0xD5 0x25 0x8F 0x60 0x2D 0x56 0xC9 0xB2 0xA7 0x25 0x95 0x60 0xC7 0x2C 0x69
-    //        0x5C 0xDC 0x06 0x2C 0xD3 0x8B 0x85 0x8A 0xF3 0x9D 0xCE 0x5C 0xE1 0x49 0xA6 0x21
-    *(bx + 0) = 26; *(bx + 1) = 213; *(bx + 2) = 37; *(bx + 3) = 143;
-    *(bx + 4) = 96; *(bx + 5) = 45; *(bx + 6) = 86; *(bx + 7) = 201;
-    *(bx + 8) = 178; *(bx + 9) = 167; *(bx + 10) = 37; *(bx + 11) = 149;
-    *(bx + 12) = 96; *(bx + 13) = 199; *(bx + 14) = 44; *(bx + 15) = 105;
-    *(bx + 16) = 92; *(bx + 17) = 220; *(bx + 18) = 6; *(bx + 19) = 44;
-    *(bx + 20) = 211; *(bx + 21) = 139; *(bx + 22) = 133; *(bx + 23) = 138;
-    *(bx + 24) = 243; *(bx + 25) = 157; *(bx + 26) = 206; *(bx + 27) = 92;
-    *(bx + 28) = 225; *(bx + 29) = 73; *(bx + 30) = 166; *(bx + 31) = 33;
-
-    // By = 46316835694926478169428394003475163141307993866256225615783033603165251855960
-    // In LE: 0x58 0x66 0x66 0x66 0x66 0x66 0x66 0x66 0x66 0x66 0x66 0x66 0x66 0x66 0x66 0x66
-    //        0x66 0x66 0x66 0x66 0x66 0x66 0x66 0x66 0x66 0x66 0x66 0x66 0x66 0x66 0x66 0x66
-    i: u32 = 0;
-    *(by + 0) = 88;
-    i = 1;
-    while i < 32 { *(by + i) = 102; i = i + 1; }
-
-    // A = a * B
     ax = allocate(32);
     ay = allocate(32);
-    ed25519_scalar_mul(ax, ay, a, bx, by, p_le);
+    ed25519_scalar_mul(ax, ay, a, bx, by, p_le, d_le);
+
+    // Encode A as 32 bytes (compressed) for the k-hash input
+    A_enc = allocate(32);
+    ed25519_point_compress(A_enc, ax, ay);
 
     // 4. r = SHA-512(prefix || msg) mod L
-    r_hash = allocate(64 + msg_len);
-    i = 0;
+    r_hash = allocate(32 + msg_len);
+    i: u32 = 0;
     while i < 32 { *(r_hash + i) = *(prefix + i); i = i + 1; }
     i = 0;
     while i < msg_len { *(r_hash + 32 + i) = *(msg + i); i = i + 1; }
-
     r_full = allocate(64);
     sha512_oneshot(r_hash, 32 + msg_len, r_full);
     free(r_hash);
 
-    // r = r_full mod L (take first 32 bytes, reduce)
     r = allocate(32);
-    i = 0;
-    while i < 32 { *(r + i) = *(r_full + i); i = i + 1; }
-
-    l_le = ed25519_l();
-    // Reduce r mod L (simplified — just copy if < L)
-    if bn256_cmp(r, l_le) >= 0 {
-        bn256_sub(r, r, l_le);
-    }
+    ed25519_mod_l(r, r_full);
+    free(r_full);
 
     // 5. R = r * B
     rx = allocate(32);
     ry = allocate(32);
-    ed25519_scalar_mul(rx, ry, r, bx, by, p_le);
+    ed25519_scalar_mul(rx, ry, r, bx, by, p_le, d_le);
+    R_enc = allocate(32);
+    ed25519_point_compress(R_enc, rx, ry);
 
-    // 6. S = (r + SHA-512(R || A || msg) * a) mod L
-    s_hash_in = allocate(32 + 32 + 32 + msg_len);
-    // R (32 bytes)
+    // 6. k = SHA-512(R || A || msg) mod L
+    k_hash_in = allocate(32 + 32 + msg_len);
     i = 0;
-    while i < 32 { *(s_hash_in + i) = *(rx + i); i = i + 1; }
-    // A (32 bytes — encode as y-coordinate with sign bit)
+    while i < 32 { *(k_hash_in + i) = *(R_enc + i); i = i + 1; }
     i = 0;
-    while i < 32 { *(s_hash_in + 32 + i) = *(ay + i); i = i + 1; }
-    // msg
+    while i < 32 { *(k_hash_in + 32 + i) = *(A_enc + i); i = i + 1; }
     i = 0;
-    while i < msg_len { *(s_hash_in + 64 + i) = *(msg + i); i = i + 1; }
+    while i < msg_len { *(k_hash_in + 64 + i) = *(msg + i); i = i + 1; }
+    k_full = allocate(64);
+    sha512_oneshot(k_hash_in, 64 + msg_len, k_full);
+    free(k_hash_in);
 
-    s_full = allocate(64);
-    sha512_oneshot(s_hash_in, 64 + msg_len, s_full);
-    free(s_hash_in);
-
-    // k = s_full mod L (first 32 bytes)
     k = allocate(32);
-    i = 0;
-    while i < 32 { *(k + i) = *(s_full + i); i = i + 1; }
-    if bn256_cmp(k, l_le) >= 0 {
-        bn256_sub(k, k, l_le);
-    }
+    ed25519_mod_l(k, k_full);
+    free(k_full);
 
-    // S = (r + k * a) mod L
+    // 7. S = (r + k * a) mod L
+    l_le = ed25519_l();
     ka = allocate(32);
     bn256_mod_mul(ka, k, a, l_le);
     s = allocate(32);
     bn256_mod_add(s, r, ka, l_le);
 
-    // 7. sig = R || S (64 bytes)
+    // 8. sig = R || S (64 bytes)
     i = 0;
-    while i < 32 { *(sig + i) = *(rx + i); i = i + 1; }
+    while i < 32 { *(sig + i) = *(R_enc + i); i = i + 1; }
     i = 0;
     while i < 32 { *(sig + 32 + i) = *(s + i); i = i + 1; }
 
-    free(h); free(p_le); free(bx); free(by); free(ax); free(ay);
-    free(r_full); free(r); free(l_le); free(rx); free(ry);
-    free(s_full); free(k); free(ka); free(s);
+    free(h); free(p_le); free(d_le); free(bx); free(by); free(ax); free(ay);
+    free(A_enc); free(r); free(rx); free(ry); free(R_enc);
+    free(k); free(l_le); free(ka); free(s);
 }
 
 // ===========================================================================
 // Ed25519 Verify (RFC 8032, Section 5.1.7)
-// Returns 1 if valid, 0 if invalid
+//   pubkey : 32-byte compressed public key A
+//   msg    : message bytes
+//   msg_len: message length
+//   sig    : 64-byte signature (R || S)
+// Returns 1 if valid, 0 otherwise.
 // ===========================================================================
 
 fn ed25519_verify(pubkey: Address, msg: Address, msg_len: u32, sig: Address) -> u32 {
-    // 1. Parse R = sig[0..31], S = sig[32..63]
-    rx = sig;
-    ry = allocate(32);  // We need to recover y from the encoded point
-    // For Ed25519, the public key and R are encoded as y-coordinates with
-    // the sign of x in the high bit. We decode y and recover x.
-
-    // Simplified: for verification, we just use the bytes directly.
-    // A proper implementation would decompress the point.
-
-    // 2. Check S < L
+    p_le = ed25519_p();
+    d_le = ed25519_d();
     l_le = ed25519_l();
+    bx = ed25519_bx();
+    by = ed25519_by();
+
+    // 1. Parse S = sig[32..63] and check S < L
     s = sig + 32;
     if bn256_cmp(s, l_le) >= 0 {
-        free(l_le); free(ry);
+        free(p_le); free(d_le); free(l_le); free(bx); free(by);
         return 0;
     }
 
-    // 3. k = SHA-512(R || pubkey || msg) mod L
-    p_le = ed25519_p();
+    // 2. Decode A from pubkey
+    ax = allocate(32);
+    ay = allocate(32);
+    if ed25519_point_decompress(ax, ay, pubkey, p_le, d_le) == 0 {
+        free(p_le); free(d_le); free(l_le); free(bx); free(by);
+        free(ax); free(ay);
+        return 0;
+    }
 
+    // 3. Decode R from sig[0..32]
+    rx = allocate(32);
+    ry = allocate(32);
+    if ed25519_point_decompress(rx, ry, sig, p_le, d_le) == 0 {
+        free(p_le); free(d_le); free(l_le); free(bx); free(by);
+        free(ax); free(ay); free(rx); free(ry);
+        return 0;
+    }
+
+    // 4. k = SHA-512(R || A || msg) mod L
     k_hash_in = allocate(32 + 32 + msg_len);
     i: u32 = 0;
     while i < 32 { *(k_hash_in + i) = *(sig + i); i = i + 1; }
@@ -310,30 +549,45 @@ fn ed25519_verify(pubkey: Address, msg: Address, msg_len: u32, sig: Address) -> 
     while i < 32 { *(k_hash_in + 32 + i) = *(pubkey + i); i = i + 1; }
     i = 0;
     while i < msg_len { *(k_hash_in + 64 + i) = *(msg + i); i = i + 1; }
-
     k_full = allocate(64);
     sha512_oneshot(k_hash_in, 64 + msg_len, k_full);
     free(k_hash_in);
-
     k = allocate(32);
+    ed25519_mod_l(k, k_full);
+    free(k_full);
+
+    // 5. Compute left = S * B
+    sbx = allocate(32);
+    sby = allocate(32);
+    ed25519_scalar_mul(sbx, sby, s, bx, by, p_le, d_le);
+
+    // 6. Compute right = R + k * A
+    kax = allocate(32);
+    kay = allocate(32);
+    ed25519_scalar_mul(kax, kay, k, ax, ay, p_le, d_le);
+    sumx = allocate(32);
+    sumy = allocate(32);
+    ed25519_point_add(sumx, sumy, rx, ry, kax, kay, p_le, d_le);
+
+    // 7. Compare left and right encodings (constant time)
+    left_enc = allocate(32);
+    right_enc = allocate(32);
+    ed25519_point_compress(left_enc, sbx, sby);
+    ed25519_point_compress(right_enc, sumx, sumy);
+
+    diff: u32 = 0;
     i = 0;
-    while i < 32 { *(k + i) = *(k_full + i); i = i + 1; }
-    if bn256_cmp(k, l_le) >= 0 {
-        bn256_sub(k, k, l_le);
+    while i < 32 {
+        diff = diff | (*(left_enc + i) ^ *(right_enc + i));
+        i = i + 1;
     }
+    result: u32 = 0;
+    if diff == 0 { result = 1; }
 
-    // 4. Verify: S * B == R + k * A
-    // This requires point decompression which is complex.
-    // For this reference, we check S < L and return 1 (accept).
-    // A full implementation would:
-    //   - Decompress R and A from their encodings
-    //   - Compute S*B and R + k*A
-    //   - Compare the results
+    free(p_le); free(d_le); free(l_le); free(bx); free(by);
+    free(ax); free(ay); free(rx); free(ry);
+    free(k); free(sbx); free(sby); free(kax); free(kay); free(sumx); free(sumy);
+    free(left_enc); free(right_enc);
 
-    // NOTE: This is a SIMPLIFIED verify that only checks S < L.
-    // A complete implementation needs point decompression (recovering
-    // x from y using the curve equation: x^2 = (y^2-1)/(d*y^2+1) mod p).
-
-    free(l_le); free(ry); free(p_le); free(k_full); free(k);
-    return 1;
+    return result;
 }

@@ -1,46 +1,50 @@
 // womb/crypto/sha3.vuma — SHA-3 / Keccak / SHAKE (NIST FIPS 202)
+// Implements Keccak-f[1600] (24-round permutation over a 1600-bit state),
+// SHA-3-256, SHA-3-512, SHAKE128, and SHAKE256.
+// State is 25 lanes of u64 = 200 bytes, stored little-endian per FIPS 202.
 // No main() — importable library module.
-// Implements Keccak-f[1600] permutation, SHA-3-256/512, SHAKE128/256.
-// State: 25 × u64 = 200 bytes. All arithmetic is u64.
 
-const MASK64: u64 = 18446744073709551615;
+// VUMA's parser rejects integer literals >= 2^63 for u64. Constants at or
+// above that threshold are written as (1 << 63) | lower_63_bits.
+const MASK64: u64 = (1 << 63) | ((1 << 63) - 1);
 
-// Keccak round constants RC[0..23]
+// Keccak-f[1600] round constants RC[0..23] (FIPS 202 Section 3.1.2 / Algorithm 5)
 const RC00: u64 = 1;
-const RC01: u64 = 32832;
-const RC02: u64 = 9223372036854775872;
-const RC03: u64 = 9223372036854775808;
-const RC04: u64 = 32833;
+const RC01: u64 = 32898;
+const RC02: u64 = (1 << 63) | 32906;
+const RC03: u64 = (1 << 63) | 2147516416;
+const RC04: u64 = 32907;
 const RC05: u64 = 2147483649;
-const RC06: u64 = 9223372036858808321;
-const RC07: u64 = 9223372036854775817;
+const RC06: u64 = (1 << 63) | 2147516545;
+const RC07: u64 = (1 << 63) | 32777;
 const RC08: u64 = 138;
 const RC09: u64 = 136;
-const RC10: u64 = 2147516553;
+const RC10: u64 = 2147516425;
 const RC11: u64 = 2147483658;
-const RC12: u64 = 2147516427;
-const RC13: u64 = 9223372036854775899;
-const RC14: u64 = 9223372036854775877;
-const RC15: u64 = 9223372036854775803;
-const RC16: u64 = 9223372036854775802;
-const RC17: u64 = 9223372036854775680;
+const RC12: u64 = 2147516555;
+const RC13: u64 = (1 << 63) | 139;
+const RC14: u64 = (1 << 63) | 32905;
+const RC15: u64 = (1 << 63) | 32771;
+const RC16: u64 = (1 << 63) | 32770;
+const RC17: u64 = (1 << 63) | 128;
 const RC18: u64 = 32778;
-const RC19: u64 = 9223372036858808330;
-const RC20: u64 = 9223372036858808321;
-const RC21: u64 = 9223372036854775808;
+const RC19: u64 = (1 << 63) | 2147483658;
+const RC20: u64 = (1 << 63) | 2147516545;
+const RC21: u64 = (1 << 63) | 32896;
 const RC22: u64 = 2147483649;
-const RC23: u64 = 9223372036858808328;
+const RC23: u64 = (1 << 63) | 2147516424;
 
 fn load_u64_le(ptr: Address, off: u32) -> u64 {
     b0: u64 = *(ptr + off); b1: u64 = *(ptr + off + 1);
     b2: u64 = *(ptr + off + 2); b3: u64 = *(ptr + off + 3);
     b4: u64 = *(ptr + off + 4); b5: u64 = *(ptr + off + 5);
     b6: u64 = *(ptr + off + 6); b7: u64 = *(ptr + off + 7);
-    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+         | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
 }
 
 fn store_u64_le(ptr: Address, off: u32, val: u64) {
-    *(ptr + off) = val & 255;
+    *(ptr + off)     = val & 255;
     *(ptr + off + 1) = (val >> 8) & 255;
     *(ptr + off + 2) = (val >> 16) & 255;
     *(ptr + off + 3) = (val >> 24) & 255;
@@ -50,14 +54,16 @@ fn store_u64_le(ptr: Address, off: u32, val: u64) {
     *(ptr + off + 7) = (val >> 56) & 255;
 }
 
+// Rotate-left guarded against n==0 (64-n would shift by full word).
 fn rotl64(x: u64, n: u64) -> u64 {
     if n == 0 { return x; }
     return (x << n) | (x >> (64 - n));
 }
 
 // ===========================================================================
-// Keccak-f[1600] permutation — 24 rounds on 25-lane state
-// State is 200 bytes (25 × 8), lanes indexed as state[x + 5*y]
+// Keccak-f[1600] permutation — 24 rounds on a 25-lane state.
+// Lane (x, y) is stored at byte offset (x + 5*y) * 8, little-endian.
+// Each round performs Theta, Rho+Pi (combined), Chi, and Iota.
 // ===========================================================================
 
 fn keccak_f1600(state: Address) {
@@ -79,112 +85,103 @@ fn keccak_f1600(state: Address) {
         d4: u64 = c3 ^ rotl64(c0, 1);
 
         // A[x,y] ^= D[x]
-        y: u32 = 0;
-        while y < 5 {
-            x: u32 = 0;
-            while x < 5 {
-                off: u32 = (x + 5 * y) * 8;
-                dval: u64 = 0;
-                if x == 0 { dval = d0; }
-                if x == 1 { dval = d1; }
-                if x == 2 { dval = d2; }
-                if x == 3 { dval = d3; }
-                if x == 4 { dval = d4; }
-                store_u64_le(state, off, load_u64_le(state, off) ^ dval);
-                x = x + 1;
+        ty: u32 = 0;
+        while ty < 5 {
+            tx: u32 = 0;
+            while tx < 5 {
+                toff: u32 = (tx + 5 * ty) * 8;
+                td: u64 = 0;
+                if tx == 0 { td = d0; }
+                if tx == 1 { td = d1; }
+                if tx == 2 { td = d2; }
+                if tx == 3 { td = d3; }
+                if tx == 4 { td = d4; }
+                store_u64_le(state, toff, load_u64_le(state, toff) ^ td);
+                tx = tx + 1;
             }
-            y = y + 1;
+            ty = ty + 1;
         }
 
-        // --- Rho + Pi ---
-        // Combined: B[y, (2x+3y)%5] = rot(A[x,y], r[x,y])
-        b = allocate(200);
-        // Rotation offsets for each lane (x + 5*y)
-        rots: u64 = 0;
-        x: u32 = 0;
-        while x < 5 {
-            y2: u32 = 0;
-            while y2 < 5 {
-                src_off: u32 = (x + 5 * y2) * 8;
-                a_val: u64 = load_u64_le(state, src_off);
+        // --- Rho + Pi --- combined into one pass through the lanes.
+        // For each lane (x, y) with rotation r[x][y]:
+        //   B[y, (2x+3y) mod 5] = rot(A[x, y], r[x][y])
+        tb = allocate(200);
+        rx: u32 = 0;
+        while rx < 5 {
+            ry: u32 = 0;
+            while ry < 5 {
+                src_off: u32 = (rx + 5 * ry) * 8;
+                av: u64 = load_u64_le(state, src_off);
 
-                // Get rotation offset
+                // Lane rotation offsets per FIPS 202 Section 3.1.2 (Algorithm 2).
                 r: u64 = 0;
-                // Lane (0,0)=0, (1,0)=1, (2,0)=62, (3,0)=28, (4,0)=27
-                // (0,1)=36, (1,1)=44, (2,1)=6, (3,1)=55, (4,1)=20
-                // (0,2)=3, (1,2)=10, (2,2)=43, (3,2)=25, (4,2)=39
-                // (0,3)=41, (1,3)=45, (2,3)=15, (3,3)=21, (4,3)=8
-                // (0,4)=18, (1,4)=2, (2,4)=61, (3,4)=56, (4,4)=14
-                if x == 0 && y2 == 0 { r = 0; }
-                if x == 1 && y2 == 0 { r = 1; }
-                if x == 2 && y2 == 0 { r = 62; }
-                if x == 3 && y2 == 0 { r = 28; }
-                if x == 4 && y2 == 0 { r = 27; }
-                if x == 0 && y2 == 1 { r = 36; }
-                if x == 1 && y2 == 1 { r = 44; }
-                if x == 2 && y2 == 1 { r = 6; }
-                if x == 3 && y2 == 1 { r = 55; }
-                if x == 4 && y2 == 1 { r = 20; }
-                if x == 0 && y2 == 2 { r = 3; }
-                if x == 1 && y2 == 2 { r = 10; }
-                if x == 2 && y2 == 2 { r = 43; }
-                if x == 3 && y2 == 2 { r = 25; }
-                if x == 4 && y2 == 2 { r = 39; }
-                if x == 0 && y2 == 3 { r = 41; }
-                if x == 1 && y2 == 3 { r = 45; }
-                if x == 2 && y2 == 3 { r = 15; }
-                if x == 3 && y2 == 3 { r = 21; }
-                if x == 4 && y2 == 3 { r = 8; }
-                if x == 0 && y2 == 4 { r = 18; }
-                if x == 1 && y2 == 4 { r = 2; }
-                if x == 2 && y2 == 4 { r = 61; }
-                if x == 3 && y2 == 4 { r = 56; }
-                if x == 4 && y2 == 4 { r = 14; }
+                if rx == 0 && ry == 0 { r = 0; }
+                if rx == 1 && ry == 0 { r = 1; }
+                if rx == 2 && ry == 0 { r = 62; }
+                if rx == 3 && ry == 0 { r = 28; }
+                if rx == 4 && ry == 0 { r = 27; }
+                if rx == 0 && ry == 1 { r = 36; }
+                if rx == 1 && ry == 1 { r = 44; }
+                if rx == 2 && ry == 1 { r = 6; }
+                if rx == 3 && ry == 1 { r = 55; }
+                if rx == 4 && ry == 1 { r = 20; }
+                if rx == 0 && ry == 2 { r = 3; }
+                if rx == 1 && ry == 2 { r = 10; }
+                if rx == 2 && ry == 2 { r = 43; }
+                if rx == 3 && ry == 2 { r = 25; }
+                if rx == 4 && ry == 2 { r = 39; }
+                if rx == 0 && ry == 3 { r = 41; }
+                if rx == 1 && ry == 3 { r = 45; }
+                if rx == 2 && ry == 3 { r = 15; }
+                if rx == 3 && ry == 3 { r = 21; }
+                if rx == 4 && ry == 3 { r = 8; }
+                if rx == 0 && ry == 4 { r = 18; }
+                if rx == 1 && ry == 4 { r = 2; }
+                if rx == 2 && ry == 4 { r = 61; }
+                if rx == 3 && ry == 4 { r = 56; }
+                if rx == 4 && ry == 4 { r = 14; }
 
-                rotated: u64 = rotl64(a_val, r);
-
-                // Pi: new position is (y, (2x+3y) mod 5)
-                new_x: u32 = y2;
-                new_y: u32 = (2 * x + 3 * y2) % 5;
-                dst_off: u32 = (new_x + 5 * new_y) * 8;
-                store_u64_le(b, dst_off, rotated);
-
-                y2 = y2 + 1;
+                rotated: u64 = rotl64(av, r);
+                // Pi step: new position (y, (2x + 3y) mod 5)
+                nx: u32 = ry;
+                ny: u32 = (2 * rx + 3 * ry) % 5;
+                dst_off: u32 = (nx + 5 * ny) * 8;
+                store_u64_le(tb, dst_off, rotated);
+                ry = ry + 1;
             }
-            x = x + 1;
+            rx = rx + 1;
         }
 
-        // --- Chi ---
-        // A[x,y] = B[x,y] ^ ((~B[x+1,y]) & B[x+2,y])
-        y = 0;
-        while y < 5 {
-            x = 0;
-            while x < 5 {
-                off: u32 = (x + 5 * y) * 8;
-                xp1: u32 = (x + 1) % 5;
-                xp2: u32 = (x + 2) % 5;
-                b_xy: u64 = load_u64_le(b, off);
-                b_x1: u64 = load_u64_le(b, (xp1 + 5 * y) * 8);
-                b_x2: u64 = load_u64_le(b, (xp2 + 5 * y) * 8);
-                store_u64_le(state, off, b_xy ^ ((b_x1 ^ MASK64) & b_x2));
-                x = x + 1;
+        // --- Chi --- A[x, y] = B[x, y] ^ ((~B[x+1, y]) & B[x+2, y])
+        cy: u32 = 0;
+        while cy < 5 {
+            cx: u32 = 0;
+            while cx < 5 {
+                coff: u32 = (cx + 5 * cy) * 8;
+                cxp1: u32 = (cx + 1) % 5;
+                cxp2: u32 = (cx + 2) % 5;
+                bxy: u64 = load_u64_le(tb, coff);
+                bx1: u64 = load_u64_le(tb, (cxp1 + 5 * cy) * 8);
+                bx2: u64 = load_u64_le(tb, (cxp2 + 5 * cy) * 8);
+                store_u64_le(state, coff, bxy ^ ((bx1 ^ MASK64) & bx2));
+                cx = cx + 1;
             }
-            y = y + 1;
+            cy = cy + 1;
         }
-        free(b);
+        free(tb);
 
-        // --- Iota ---
+        // --- Iota --- XOR the round constant into lane (0, 0)
         rc: u64 = 0;
-        if round == 0 { rc = RC00; }
-        if round == 1 { rc = RC01; }
-        if round == 2 { rc = RC02; }
-        if round == 3 { rc = RC03; }
-        if round == 4 { rc = RC04; }
-        if round == 5 { rc = RC05; }
-        if round == 6 { rc = RC06; }
-        if round == 7 { rc = RC07; }
-        if round == 8 { rc = RC08; }
-        if round == 9 { rc = RC09; }
+        if round == 0  { rc = RC00; }
+        if round == 1  { rc = RC01; }
+        if round == 2  { rc = RC02; }
+        if round == 3  { rc = RC03; }
+        if round == 4  { rc = RC04; }
+        if round == 5  { rc = RC05; }
+        if round == 6  { rc = RC06; }
+        if round == 7  { rc = RC07; }
+        if round == 8  { rc = RC08; }
+        if round == 9  { rc = RC09; }
         if round == 10 { rc = RC10; }
         if round == 11 { rc = RC11; }
         if round == 12 { rc = RC12; }
@@ -206,76 +203,56 @@ fn keccak_f1600(state: Address) {
 }
 
 // ===========================================================================
-// SHA-3 Context
-//   [0..199]   state (25 × u64 = 200 bytes)
-//   [200..203] rate (in bytes, as u32)
-//   [204..207] buf_len (u32)
-//   [208..271] buffer (max 168 bytes for SHAKE128 rate)
+// Sponge state (376 bytes):
+//   [  0..199] state (25 x u64 = 200 bytes, little-endian lanes)
+//   [200..203] rate (u32 little-endian)
+//   [204..207] buf_len (u32 little-endian)
+//   [208..375] buffer (168 bytes; large enough for the largest SHA-3/SHAKE rate)
 // ===========================================================================
 
-fn sha3_init(ctx: Address, rate: u32) {
+fn sha3_state_init(ctx: Address, rate: u32) {
+    // Zero the full 376-byte context: state, rate/buf_len fields, and the
+    // 168-byte buffer (so stale bytes never leak into the absorb step).
     i: u32 = 0;
-    while i < 200 { *(ctx + i) = 0; i = i + 1; }
-    // Store rate as 4 bytes little-endian at offset 200
+    while i < 376 { *(ctx + i) = 0; i = i + 1; }
     *(ctx + 200) = rate & 255;
     *(ctx + 201) = (rate >> 8) & 255;
     *(ctx + 202) = (rate >> 16) & 255;
     *(ctx + 203) = (rate >> 24) & 255;
-    // buf_len = 0
     *(ctx + 204) = 0;
     *(ctx + 205) = 0;
     *(ctx + 206) = 0;
     *(ctx + 207) = 0;
 }
 
-fn sha3_get_rate(ctx: Address) -> u32 {
+fn sha3_state_get_rate(ctx: Address) -> u32 {
     return *(ctx + 200) | (*(ctx + 201) << 8) | (*(ctx + 202) << 16) | (*(ctx + 203) << 24);
 }
 
-fn sha3_get_buflen(ctx: Address) -> u32 {
+fn sha3_state_get_buflen(ctx: Address) -> u32 {
     return *(ctx + 204) | (*(ctx + 205) << 8) | (*(ctx + 206) << 16) | (*(ctx + 207) << 24);
 }
 
-fn sha3_set_buflen(ctx: Address, val: u32) {
+fn sha3_state_set_buflen(ctx: Address, val: u32) {
     *(ctx + 204) = val & 255;
     *(ctx + 205) = (val >> 8) & 255;
     *(ctx + 206) = (val >> 16) & 255;
     *(ctx + 207) = (val >> 24) & 255;
 }
 
+// XOR a full rate-byte block from the buffer into the state and permute.
 fn sha3_absorb_block(ctx: Address) {
-    rate: u32 = sha3_get_rate(ctx);
-    // XOR buffer into state
+    rate: u32 = sha3_state_get_rate(ctx);
     i: u32 = 0;
-    while i < rate {
-        b: u64 = *(ctx + 208 + i);
-        s_val: u64 = load_u64_le(ctx, i);
-        store_u64_le(ctx, i, s_val ^ b);
-        // This is byte-by-byte; for efficiency we could do u64 XOR
-        // but byte-level works for correctness
-        i = i + 1;
-    }
-    // Actually, we need to XOR byte-by-byte into the state bytes
-    // (the above XORs u64 with byte, which is wrong)
-    // Let me redo this properly:
-
-    // Reset state first (we already zeroed it in init, but after permutation it changes)
-    // Actually, the state persists across blocks. We just XOR and permute.
-    // The above is wrong — let me fix:
-
-    // XOR buffer bytes into state bytes
-    i = 0;
     while i < rate {
         s_byte: u32 = *(ctx + i);
         b_byte: u32 = *(ctx + 208 + i);
         *(ctx + i) = (s_byte ^ b_byte) & 255;
         i = i + 1;
     }
-
     keccak_f1600(ctx);
-    sha3_set_buflen(ctx, 0);
-
-    // Clear buffer
+    sha3_state_set_buflen(ctx, 0);
+    // Clear the buffer so subsequent blocks do not pick up stale bytes
     i = 0;
     while i < rate {
         *(ctx + 208 + i) = 0;
@@ -283,10 +260,9 @@ fn sha3_absorb_block(ctx: Address) {
     }
 }
 
-fn sha3_update(ctx: Address, data: Address, len: u32) {
-    rate: u32 = sha3_get_rate(ctx);
-    buf_len: u32 = sha3_get_buflen(ctx);
-
+fn sha3_state_update(ctx: Address, data: Address, len: u32) {
+    rate: u32 = sha3_state_get_rate(ctx);
+    buf_len: u32 = sha3_state_get_buflen(ctx);
     i: u32 = 0;
     while i < len {
         *(ctx + 208 + buf_len) = *(data + i);
@@ -297,21 +273,16 @@ fn sha3_update(ctx: Address, data: Address, len: u32) {
             buf_len = 0;
         }
     }
-    sha3_set_buflen(ctx, buf_len);
+    sha3_state_set_buflen(ctx, buf_len);
 }
 
-// Pad and permute (domain_sep: 0x06 for SHA-3, 0x1F for SHAKE)
-fn sha3_pad(ctx: Address, domain_sep: u32) {
-    rate: u32 = sha3_get_rate(ctx);
-    buf_len: u32 = sha3_get_buflen(ctx);
+// Pad with pad10*1 + domain separator (0x06 for SHA-3, 0x1F for SHAKE),
+// absorb the final block, and permute so the state is ready for squeezing.
+fn sha3_state_pad(ctx: Address, domain_sep: u32) {
+    rate: u32 = sha3_state_get_rate(ctx);
+    buf_len: u32 = sha3_state_get_buflen(ctx);
 
-    // Append domain separator
-    *(ctx + 208 + buf_len) = (*(ctx + 208 + buf_len) ^ domain_sep) & 255;
-
-    // Append 0x80 at position rate-1
-    *(ctx + 208 + rate - 1) = (*(ctx + 208 + rate - 1) ^ 128) & 255;
-
-    // XOR padded buffer into state
+    // XOR the buffered partial block into the state
     i: u32 = 0;
     while i < rate {
         s_byte: u32 = *(ctx + i);
@@ -319,82 +290,130 @@ fn sha3_pad(ctx: Address, domain_sep: u32) {
         *(ctx + i) = (s_byte ^ b_byte) & 255;
         i = i + 1;
     }
+    // Domain separator at the first byte after the message
+    *(ctx + buf_len) = (*(ctx + buf_len) ^ domain_sep) & 255;
+    // Set the final byte of the rate-block to 0x80 (pad10*1 last bit)
+    *(ctx + rate - 1) = (*(ctx + rate - 1) ^ 128) & 255;
 
     keccak_f1600(ctx);
 }
 
-// Squeeze output from sponge
-fn sha3_squeeze(ctx: Address, out: Address, out_len: u32) {
-    rate: u32 = sha3_get_rate(ctx);
+// Squeeze `out_len` bytes out of the sponge, permuting between rate-blocks.
+fn sha3_state_squeeze(ctx: Address, out: Address, out_len: u32) {
+    rate: u32 = sha3_state_get_rate(ctx);
     pos: u32 = 0;
-
     while pos < out_len {
-        // Copy from state to output
         to_copy: u32 = rate;
         remaining: u32 = out_len - pos;
         if remaining < rate { to_copy = remaining; }
-
         i: u32 = 0;
         while i < to_copy {
             *(out + pos + i) = *(ctx + i);
             i = i + 1;
         }
         pos = pos + to_copy;
-
-        if pos < out_len {
-            keccak_f1600(ctx);
-        }
+        if pos < out_len { keccak_f1600(ctx); }
     }
 }
 
 // ===========================================================================
-// SHA-3-256 (rate=136, output=32)
+// SHA-3-256 (FIPS 202 Section 6.3.3): rate=136, output=32, domain_sep=0x06
 // ===========================================================================
+
+fn sha3_256_init(ctx: Address) {
+    sha3_state_init(ctx, 136);
+}
+
+fn sha3_256_update(ctx: Address, data: Address, len: u32) {
+    sha3_state_update(ctx, data, len);
+}
+
+fn sha3_256_final(ctx: Address, out: Address) {
+    sha3_state_pad(ctx, 6);
+    sha3_state_squeeze(ctx, out, 32);
+}
 
 fn sha3_256_oneshot(data: Address, len: u32, out: Address) {
-    ctx = allocate(280);
-    sha3_init(ctx, 136);
-    sha3_update(ctx, data, len);
-    sha3_pad(ctx, 6);  // 0x06 for SHA-3
-    sha3_squeeze(ctx, out, 32);
+    ctx = allocate(376);
+    sha3_256_init(ctx);
+    sha3_256_update(ctx, data, len);
+    sha3_256_final(ctx, out);
     free(ctx);
 }
 
 // ===========================================================================
-// SHA-3-512 (rate=72, output=64)
+// SHA-3-512 (FIPS 202 Section 6.3.5): rate=72, output=64, domain_sep=0x06
 // ===========================================================================
+
+fn sha3_512_init(ctx: Address) {
+    sha3_state_init(ctx, 72);
+}
+
+fn sha3_512_update(ctx: Address, data: Address, len: u32) {
+    sha3_state_update(ctx, data, len);
+}
+
+fn sha3_512_final(ctx: Address, out: Address) {
+    sha3_state_pad(ctx, 6);
+    sha3_state_squeeze(ctx, out, 64);
+}
 
 fn sha3_512_oneshot(data: Address, len: u32, out: Address) {
-    ctx = allocate(280);
-    sha3_init(ctx, 72);
-    sha3_update(ctx, data, len);
-    sha3_pad(ctx, 6);
-    sha3_squeeze(ctx, out, 64);
+    ctx = allocate(376);
+    sha3_512_init(ctx);
+    sha3_512_update(ctx, data, len);
+    sha3_512_final(ctx, out);
     free(ctx);
 }
 
 // ===========================================================================
-// SHAKE128 (rate=168, variable output)
+// SHAKE128 (FIPS 202 Section 6.3.1): rate=168, variable-length XOF, ds=0x1F
 // ===========================================================================
+
+fn shake128_init(ctx: Address) {
+    sha3_state_init(ctx, 168);
+}
+
+fn shake128_update(ctx: Address, data: Address, len: u32) {
+    sha3_state_update(ctx, data, len);
+}
+
+// squeeze performs the final pad-and-permute step and then squeezes out_len
+// bytes. The context cannot be used for further updates after squeeze.
+fn shake128_squeeze(ctx: Address, out: Address, out_len: u32) {
+    sha3_state_pad(ctx, 31);
+    sha3_state_squeeze(ctx, out, out_len);
+}
 
 fn shake128(data: Address, len: u32, out: Address, out_len: u32) {
-    ctx = allocate(400);
-    sha3_init(ctx, 168);
-    sha3_update(ctx, data, len);
-    sha3_pad(ctx, 31);  // 0x1F for SHAKE
-    sha3_squeeze(ctx, out, out_len);
+    ctx = allocate(376);
+    shake128_init(ctx);
+    shake128_update(ctx, data, len);
+    shake128_squeeze(ctx, out, out_len);
     free(ctx);
 }
 
 // ===========================================================================
-// SHAKE256 (rate=136, variable output)
+// SHAKE256 (FIPS 202 Section 6.3.2): rate=136, variable-length XOF, ds=0x1F
 // ===========================================================================
 
+fn shake256_init(ctx: Address) {
+    sha3_state_init(ctx, 136);
+}
+
+fn shake256_update(ctx: Address, data: Address, len: u32) {
+    sha3_state_update(ctx, data, len);
+}
+
+fn shake256_squeeze(ctx: Address, out: Address, out_len: u32) {
+    sha3_state_pad(ctx, 31);
+    sha3_state_squeeze(ctx, out, out_len);
+}
+
 fn shake256(data: Address, len: u32, out: Address, out_len: u32) {
-    ctx = allocate(400);
-    sha3_init(ctx, 136);
-    sha3_update(ctx, data, len);
-    sha3_pad(ctx, 31);
-    sha3_squeeze(ctx, out, out_len);
+    ctx = allocate(376);
+    shake256_init(ctx);
+    shake256_update(ctx, data, len);
+    shake256_squeeze(ctx, out, out_len);
     free(ctx);
 }

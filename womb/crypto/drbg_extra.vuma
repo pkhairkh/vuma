@@ -1,19 +1,14 @@
 // womb/crypto/drbg_extra.vuma — HASH_DRBG and CTR_DRBG (NIST SP 800-90A)
-// No main() — importable library module.
-// Requires: sha256_oneshot(data, len, out), aes256_encrypt_block(pt, key, ct).
-//
 // Implements two NIST-approved DRBG mechanisms:
 //   1. HASH_DRBG (Section 10.1.1) with SHA-256, seedlen = 32
 //   2. CTR_DRBG  (Section 10.2.1) with AES-256, seedlen = 48
+// No main().
+// Requires: sha256_oneshot(data, len, out), aes256_encrypt_block(pt, key, ct).
 //
 // Shared state layout (68 bytes total):
 //   [0..31]   V (HASH_DRBG) / K (CTR_DRBG AES-256 key)
 //   [32..63]  C (HASH_DRBG) / V at [32..47], [48..63] unused (CTR_DRBG)
 //   [64..67]  reseed_counter (u32, little-endian)
-//
-// For HASH_DRBG the seedlen is 32 (SHA-256 output size).
-// For CTR_DRBG with AES-256 the seedlen is 48 (keylen 32 + blocklen 16).
-// ===========================================================================
 
 const SEEDLEN_HASH: u32 = 32;
 const SEEDLEN_CTR: u32 = 48;
@@ -21,6 +16,7 @@ const STATE_VK_OFF: u32 = 0;
 const STATE_CV_OFF: u32 = 32;
 const STATE_RC_OFF: u32 = 64;
 const CTR_V_OFF: u32 = 32;
+const DRBG_RESEED_INTERVAL: u32 = 4294967295;
 
 // ===========================================================================
 // Common byte-level helpers
@@ -57,9 +53,8 @@ fn memset(dst: Address, val: u32, n: u32) {
     }
 }
 
-// Big-endian modular add: out = (a + b) mod 2^(8*n).
-// Works in-place when a == out or b == out. Carry never exceeds 1 so u32
-// arithmetic is safe (max intermediate = 255 + 255 + 1 = 511).
+// Big-endian modular add: out = (a + b) mod 2^(8*n). Works in-place when
+// a == out or b == out. Carry never exceeds 1.
 fn add_be(a: Address, b: Address, n: u32, out: Address) {
     carry: u32 = 0;
     i: u32 = n;
@@ -74,9 +69,7 @@ fn add_be(a: Address, b: Address, n: u32, out: Address) {
 }
 
 // Big-endian modular add of a small delta: out = (a + delta) mod 2^(8*n).
-// Works in-place when a == out. delta MUST be small enough that
-// (255 + delta) does not overflow u32 on the first (least significant) byte;
-// callers in this module always pass delta = 1.
+// Works in-place when a == out. Callers always pass delta = 1.
 fn add_be_small(a: Address, delta: u32, n: u32, out: Address) {
     carry: u32 = delta;
     i: u32 = n;
@@ -98,8 +91,8 @@ fn add_be_small(a: Address, delta: u32, n: u32, out: Address) {
 //   V = Hash(0x00 || seed_material)
 //   C = Hash(0x01 || V)
 //   reseed_counter = 1
-fn hash_drbg_init(state: Address, entropy: Address, entropy_len: u32, nonce: Address, nonce_len: u32) {
-    // seed_material = entropy || nonce
+fn hash_drbg_init(state: Address, entropy: Address, entropy_len: u32,
+                  nonce: Address, nonce_len: u32) {
     seed_len: u32 = entropy_len + nonce_len;
     seed = allocate(seed_len);
     memcpy(seed, entropy, entropy_len);
@@ -117,7 +110,6 @@ fn hash_drbg_init(state: Address, entropy: Address, entropy_len: u32, nonce: Add
     memcpy(buf2 + 1, state + STATE_VK_OFF, 32);
     sha256_oneshot(buf2, 33, state + STATE_CV_OFF);
 
-    // reseed_counter = 1
     store_u32_le(state, STATE_RC_OFF, 1);
 
     free(seed);
@@ -137,11 +129,9 @@ fn hash_drbg_hashgen(no_of_bytes: u32, v_in: Address, out: Address) {
     data = allocate(32);
     memcpy(data, v_in, 32);
 
-    // W buffer: enough for at least one extra full block beyond no_of_bytes
     w = allocate(no_of_bytes + 32);
     w_len: u32 = 0;
 
-    // input = 0x02 || data  (33 bytes)
     inbuf = allocate(33);
     *(inbuf + 0) = 2;
     blk = allocate(32);
@@ -151,11 +141,9 @@ fn hash_drbg_hashgen(no_of_bytes: u32, v_in: Address, out: Address) {
         sha256_oneshot(inbuf, 33, blk);
         memcpy(w + w_len, blk, 32);
         w_len = w_len + 32;
-        // data = (data + 1) mod 2^256
         add_be_small(data, 1, 32, data);
     }
 
-    // Return leftmost no_of_bytes of W
     memcpy(out, w, no_of_bytes);
 
     free(data);
@@ -165,13 +153,19 @@ fn hash_drbg_hashgen(no_of_bytes: u32, v_in: Address, out: Address) {
 }
 
 // hash_drbg_generate(state, out, out_len) -> u32:
-//   H = Hash(0x03 || V)
-//   V = (V + H + C + reseed_counter) mod 2^256
-//   output = leftmost out_len bytes of Hashgen(out_len, V)
-//   C = Hash(0x01 || V)
-//   reseed_counter = reseed_counter + 1
+//   Per SP 800-90A 10.1.1.5:
+//   1. If reseed_counter > RESEED_INTERVAL, return 0 (caller must reseed).
+//   2. H = Hash(0x03 || V)
+//   3. V = (V + H + C + reseed_counter) mod 2^256
+//   4. output = leftmost out_len bytes of Hashgen(out_len, V)
+//   5. C = Hash(0x01 || V)
+//   6. reseed_counter = reseed_counter + 1
+//   Returns out_len on success, 0 if a reseed is required.
 fn hash_drbg_generate(state: Address, out: Address, out_len: u32) -> u32 {
     rc: u32 = load_u32_le(state, STATE_RC_OFF);
+    if rc > DRBG_RESEED_INTERVAL {
+        return 0;
+    }
 
     // H = Hash(0x03 || V)
     inbuf = allocate(33);
@@ -180,9 +174,7 @@ fn hash_drbg_generate(state: Address, out: Address, out_len: u32) -> u32 {
     h = allocate(32);
     sha256_oneshot(inbuf, 33, h);
 
-    // reseed_counter as 32-byte big-endian (only last 4 bytes nonzero) so
-    // we can add it with add_be (carry-safe) instead of add_be_small with a
-    // potentially large delta.
+    // reseed_counter as 32-byte big-endian for carry-safe add_be.
     rc_bytes = allocate(32);
     memset(rc_bytes, 0, 32);
     *(rc_bytes + 28) = (rc >> 24) & 255;
@@ -245,7 +237,7 @@ fn hash_drbg_reseed(state: Address, entropy: Address, entropy_len: u32) {
 // CTR_DRBG (NIST SP 800-90A Section 10.2.1) — AES-256, seedlen = 48
 // ===========================================================================
 
-// Internal: CTR_DRBG_Update(provided_data, K, V) — NIST 10.2.1.2
+// CTR_DRBG_Update(provided_data, K, V) — NIST 10.2.1.2.
 //   temp = empty
 //   while len(temp) < seedlen:
 //     V = (V + 1) mod 2^128
@@ -254,20 +246,15 @@ fn hash_drbg_reseed(state: Address, entropy: Address, entropy_len: u32) {
 //   temp = (temp XOR provided_data) truncated to seedlen
 //   K = leftmost 32 bytes of temp
 //   V = next 16 bytes of temp
-//
 // K and V are modified in place through the supplied pointers.
 fn ctr_drbg_update(provided_data: Address, k: Address, v: Address) {
-    // 3 AES blocks (48 bytes) needed for seedlen = 48; allocate slack.
     temp = allocate(SEEDLEN_CTR + 16);
     temp_len: u32 = 0;
     blk = allocate(16);
 
     while temp_len < SEEDLEN_CTR {
-        // V = (V + 1) mod 2^128
         add_be_small(v, 1, 16, v);
-        // block = AES_Enc(K, V)
         aes256_encrypt_block(v, k, blk);
-        // temp = temp || block
         memcpy(temp + temp_len, blk, 16);
         temp_len = temp_len + 16;
     }
@@ -294,19 +281,16 @@ fn ctr_drbg_update(provided_data: Address, k: Address, v: Address) {
 //   seed_material = entropy || nonce (padded/truncated to seedlen = 48)
 //   CTR_DRBG_Update(seed_material, K, V)
 //   reseed_counter = 1
-fn ctr_drbg_init(state: Address, entropy: Address, entropy_len: u32, nonce: Address, nonce_len: u32) {
-    // K = 0 (state[0..31]), V = 0 (state[32..47])
+fn ctr_drbg_init(state: Address, entropy: Address, entropy_len: u32,
+                 nonce: Address, nonce_len: u32) {
     memset(state + STATE_VK_OFF, 0, 32);
     memset(state + CTR_V_OFF, 0, 16);
 
-    // seed_material = entropy || nonce
     sm_len: u32 = entropy_len + nonce_len;
     sm = allocate(sm_len);
     memcpy(sm, entropy, entropy_len);
     memcpy(sm + entropy_len, nonce, nonce_len);
 
-    // CTR_DRBG_Update expects exactly seedlen (48) bytes of provided_data.
-    // Copy seed_material into a zero-padded seedlen buffer (truncate if longer).
     pd = allocate(SEEDLEN_CTR);
     memset(pd, 0, SEEDLEN_CTR);
     copy_len: u32 = sm_len;
@@ -322,35 +306,37 @@ fn ctr_drbg_init(state: Address, entropy: Address, entropy_len: u32, nonce: Addr
 }
 
 // ctr_drbg_generate(state, out, out_len) -> u32:
-//   Generate blocks:
-//     while len(output) < out_len:
-//       V = (V + 1) mod 2^128
-//       output_block = AES_Enc(K, V)
-//       output = output || output_block
-//     output = leftmost out_len bytes of output
-//   CTR_DRBG_Update(0x00 * seedlen, K, V)
-//   reseed_counter = reseed_counter + 1
+//   Per SP 800-90A 10.2.1.5:
+//   1. If reseed_counter > RESEED_INTERVAL, return 0 (caller must reseed).
+//   2. while len(output) < out_len:
+//        V = (V + 1) mod 2^128
+//        output_block = AES_Enc(K, V)
+//        output = output || output_block
+//   3. output = leftmost out_len bytes of output
+//   4. CTR_DRBG_Update(0x00 * seedlen, K, V)
+//   5. reseed_counter = reseed_counter + 1
+//   Returns out_len on success, 0 if a reseed is required.
 fn ctr_drbg_generate(state: Address, out: Address, out_len: u32) -> u32 {
+    rc: u32 = load_u32_le(state, STATE_RC_OFF);
+    if rc > DRBG_RESEED_INTERVAL {
+        return 0;
+    }
+
     k: Address = state + STATE_VK_OFF;
     v: Address = state + CTR_V_OFF;
 
-    // Output buffer with room for one extra block (ceiling round-up)
     buf_len: u32 = out_len + 16;
     out_buf = allocate(buf_len);
     out_pos: u32 = 0;
     blk = allocate(16);
 
     while out_pos < out_len {
-        // V = (V + 1) mod 2^128
         add_be_small(v, 1, 16, v);
-        // output_block = AES_Enc(K, V)
         aes256_encrypt_block(v, k, blk);
-        // append block to output
         memcpy(out_buf + out_pos, blk, 16);
         out_pos = out_pos + 16;
     }
 
-    // Copy leftmost out_len bytes to caller's buffer
     memcpy(out, out_buf, out_len);
 
     // CTR_DRBG_Update(0x00 * seedlen, K, V)
@@ -358,8 +344,6 @@ fn ctr_drbg_generate(state: Address, out: Address, out_len: u32) -> u32 {
     memset(zero, 0, SEEDLEN_CTR);
     ctr_drbg_update(zero, k, v);
 
-    // reseed_counter = reseed_counter + 1
-    rc: u32 = load_u32_le(state, STATE_RC_OFF);
     store_u32_le(state, STATE_RC_OFF, rc + 1);
 
     free(out_buf);

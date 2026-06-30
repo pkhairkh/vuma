@@ -1,189 +1,196 @@
 // womb/crypto/scrypt.vuma — scrypt Password-Based KDF (RFC 7914)
-// Memory-hard function designed to be expensive for ASIC/GPU attackers.
-// No main() — importable library module.
-// Requires: sha256.vuma, hmac.vuma (for PBKDF2-HMAC-SHA256 used internally).
+// Memory-hard function combining PBKDF2-HMAC-SHA256, Salsa20/8 core,
+// BlockMix, and ROMix. No main().
+// Requires: pbkdf2.vuma (for PBKDF2-HMAC-SHA256).
+
+const SCRYPT_MASK32: u32 = 4294967295;
 
 // ===========================================================================
-// scrypt parameters:
-//   password:    user password
-//   salt:        random salt
-//   N:           CPU/memory cost parameter (must be power of 2)
-//   r:           block size parameter
-//   p:           parallelism parameter
-//   output:      derived key buffer
-//   out_len:     desired output length
-//
-// Memory required: 128 * r * N bytes
+// 32-bit rotate left.
 // ===========================================================================
 
-const MASK32: u32 = 4294967295;
-
-// Salsa20/8 core — used by scrypt's ROMix
-fn salsa20_8_core(block: Address) {
-    // Block is 64 bytes = 16 × u32
-    x = allocate(64);
-    i: u32 = 0;
-    while i < 64 { *(x + i) = *(block + i); i = i + 1; }
-
-    // Load 16 u32 words (little-endian)
-    // Do 8 rounds of Salsa20
-    round: u32 = 0;
-    while round < 4 {
-        // Column round
-        salsa20_8_quarterround(x, 0, 4, 8, 12);
-        salsa20_8_quarterround(x, 5, 9, 13, 1);
-        salsa20_8_quarterround(x, 10, 14, 2, 6);
-        salsa20_8_quarterround(x, 15, 3, 7, 11);
-
-        // Row round
-        salsa20_8_quarterround(x, 0, 1, 2, 3);
-        salsa20_8_quarterround(x, 5, 6, 7, 4);
-        salsa20_8_quarterround(x, 10, 11, 8, 9);
-        salsa20_8_quarterround(x, 15, 12, 13, 14);
-
-        round = round + 1;
-    }
-
-    // Add original block
-    i = 0;
-    while i < 64 {
-        xi: u32 = *(x + i);
-        bi: u32 = *(block + i);
-        *(block + i) = (xi + bi) & 255;  // Simplified byte-level
-        i = i + 1;
-    }
-    free(x);
+fn scrypt_rotl32(x: u32, n: u32) -> u32 {
+    return ((x << n) | (x >> (32 - n))) & SCRYPT_MASK32;
 }
 
-fn salsa20_8_quarterround(block: Address, a: u32, b: u32, c: u32, d: u32) {
-    // Operate on u32 words at byte offsets a*4, b*4, c*4, d*4
-    va: u32 = load_u32_le(block, a * 4);
-    vb: u32 = load_u32_le(block, b * 4);
-    vc: u32 = load_u32_le(block, c * 4);
-    vd: u32 = load_u32_le(block, d * 4);
+// ===========================================================================
+// Little-endian 32-bit load/store.
+// ===========================================================================
 
-    vb = vb ^ rotl32((va + vd) & MASK32, 7);
-    vc = vc ^ rotl32((vb + va) & MASK32, 9);
-    vd = vd ^ rotl32((vc + vb) & MASK32, 13);
-    va = va ^ rotl32((vd + vc) & MASK32, 18);
-
-    store_u32_le(block, a * 4, va);
-    store_u32_le(block, b * 4, vb);
-    store_u32_le(block, c * 4, vc);
-    store_u32_le(block, d * 4, vd);
-}
-
-fn rotl32(x: u32, n: u32) -> u32 {
-    return ((x << n) | (x >> (32 - n))) & MASK32;
-}
-
-fn load_u32_le(ptr: Address, off: u32) -> u32 {
-    b0: u32 = *(ptr + off); b1: u32 = *(ptr + off + 1);
-    b2: u32 = *(ptr + off + 2); b3: u32 = *(ptr + off + 3);
+fn scrypt_load_u32_le(ptr: Address, off: u32) -> u32 {
+    b0: u32 = *(ptr + off);
+    b1: u32 = *(ptr + off + 1);
+    b2: u32 = *(ptr + off + 2);
+    b3: u32 = *(ptr + off + 3);
     return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
 }
 
-fn store_u32_le(ptr: Address, off: u32, val: u32) {
+fn scrypt_store_u32_le(ptr: Address, off: u32, val: u32) {
     *(ptr + off) = val & 255;
     *(ptr + off + 1) = (val >> 8) & 255;
     *(ptr + off + 2) = (val >> 16) & 255;
     *(ptr + off + 3) = (val >> 24) & 255;
 }
 
-// BlockMix — scrypt's mixing function
-// Input: 2r blocks of 64 bytes each
-// Output: 2r blocks of 64 bytes each
-fn blockmix(input: Address, output: Address, r: u32) {
-    block_size: u32 = 64 * r;
+// ===========================================================================
+// Salsa20/8 quarter-round (operates on 4 u32 words via 16-byte block).
+// ===========================================================================
 
-    // X = B[2r-1] (last block)
+fn scrypt_salsa20_quarterround(block: Address, a: u32, b: u32, c: u32, d: u32) {
+    va: u32 = scrypt_load_u32_le(block, a * 4);
+    vb: u32 = scrypt_load_u32_le(block, b * 4);
+    vc: u32 = scrypt_load_u32_le(block, c * 4);
+    vd: u32 = scrypt_load_u32_le(block, d * 4);
+
+    vb = vb ^ scrypt_rotl32((va + vd) & SCRYPT_MASK32, 7);
+    vc = vc ^ scrypt_rotl32((vb + va) & SCRYPT_MASK32, 9);
+    vd = vd ^ scrypt_rotl32((vc + vb) & SCRYPT_MASK32, 13);
+    va = va ^ scrypt_rotl32((vd + vc) & SCRYPT_MASK32, 18);
+
+    scrypt_store_u32_le(block, a * 4, va);
+    scrypt_store_u32_le(block, b * 4, vb);
+    scrypt_store_u32_le(block, c * 4, vc);
+    scrypt_store_u32_le(block, d * 4, vd);
+}
+
+// ===========================================================================
+// Salsa20/8 core — 8 rounds (4 double-rounds) on a 64-byte block.
+// Per RFC 7914 Section 3, the input is treated as 16 little-endian u32
+// words, the round function is applied, and the original input is added
+// back at the end. The block is modified in place.
+// ===========================================================================
+
+fn scrypt_salsa20_8_core(block: Address) {
+    // Save the original input for the final addition.
+    saved = allocate(64);
+    i: u32 = 0;
+    while i < 64 { *(saved + i) = *(block + i); i = i + 1; }
+
+    round: u32 = 0;
+    while round < 4 {
+        // Column round
+        scrypt_salsa20_quarterround(block, 0, 4, 8, 12);
+        scrypt_salsa20_quarterround(block, 5, 9, 13, 1);
+        scrypt_salsa20_quarterround(block, 10, 14, 2, 6);
+        scrypt_salsa20_quarterround(block, 15, 3, 7, 11);
+        // Row round
+        scrypt_salsa20_quarterround(block, 0, 1, 2, 3);
+        scrypt_salsa20_quarterround(block, 5, 6, 7, 4);
+        scrypt_salsa20_quarterround(block, 10, 11, 8, 9);
+        scrypt_salsa20_quarterround(block, 15, 12, 13, 14);
+        round = round + 1;
+    }
+
+    // Add the original input back (mod 2^32, little-endian).
+    i = 0;
+    while i < 16 {
+        a: u32 = scrypt_load_u32_le(block, i * 4);
+        b: u32 = scrypt_load_u32_le(saved, i * 4);
+        scrypt_store_u32_le(block, i * 4, (a + b) & SCRYPT_MASK32);
+        i = i + 1;
+    }
+    free(saved);
+}
+
+// ===========================================================================
+// BlockMix — scrypt's mixing function (RFC 7914 Section 3).
+//   Input:  2r blocks of 64 bytes each (B[0..2r-1])
+//   Output: 2r blocks of 64 bytes each (Y[0..2r-1]), interleaved as
+//           Y'[0..r-1] = Y[0], Y[2], ..., Y[2r-2]
+//           Y'[r..2r-1] = Y[1], Y[3], ..., Y[2r-1]
+// ===========================================================================
+
+fn scrypt_blockmix(input: Address, output: Address, r: u32) {
+    block_size: u32 = 64 * r;
     x = allocate(64);
+    // X = B[2r-1] (last block)
     i: u32 = 0;
     while i < 64 { *(x + i) = *(input + block_size - 64 + i); i = i + 1; }
 
-    // For i = 0 to 2r-1:
+    // Y buffer: 2r blocks of 64 bytes each (we'll permute into `output`).
+    y = allocate(block_size * 2);
+
     j: u32 = 0;
     while j < 2 * r {
         // X = X XOR B[j]
         i = 0;
         while i < 64 {
-            xi: u32 = *(x + i);
+            xv: u32 = *(x + i);
             bj: u32 = *(input + j * 64 + i);
-            *(x + i) = (xi ^ bj) & 255;
+            *(x + i) = (xv ^ bj) & 255;
             i = i + 1;
         }
-        // X = Salsa20_8(X)
-        salsa20_8_core(x);
-
+        // X = Salsa20/8(X)
+        scrypt_salsa20_8_core(x);
         // Y[j] = X
         i = 0;
-        while i < 64 { *(output + j * 64 + i) = *(x + i); i = i + 1; }
-
+        while i < 64 { *(y + j * 64 + i) = *(x + i); i = i + 1; }
         j = j + 1;
     }
 
-    // Output: Y[0], Y[2], ..., Y[2r-2], Y[1], Y[3], ..., Y[2r-1]
-    // (even-indexed blocks first, then odd-indexed)
-    temp = allocate(block_size * 2);
-    // Even indices
+    // Permute into output: even blocks first, then odd blocks.
     j = 0;
     while j < r {
         i = 0;
-        while i < 64 { *(temp + j * 64 + i) = *(output + (2 * j) * 64 + i); i = i + 1; }
+        while i < 64 { *(output + j * 64 + i) = *(y + (2 * j) * 64 + i); i = i + 1; }
         j = j + 1;
     }
-    // Odd indices
     j = 0;
     while j < r {
         i = 0;
-        while i < 64 { *(temp + (r + j) * 64 + i) = *(output + (2 * j + 1) * 64 + i); i = i + 1; }
+        while i < 64 { *(output + (r + j) * 64 + i) = *(y + (2 * j + 1) * 64 + i); i = i + 1; }
         j = j + 1;
     }
-    // Copy to output
-    i = 0;
-    while i < block_size * 2 { *(output + i) = *(temp + i); i = i + 1; }
 
-    free(x); free(temp);
+    free(x); free(y);
 }
 
-// ROMix — scrypt's sequential memory-hard function
-fn romix(input: Address, output: Address, r: u32, n: u32) {
-    block_size: u32 = 128 * r;  // 2 * 64 * r
+// ===========================================================================
+// Integerify — extract a 64-bit little-endian integer from the first 8
+// bytes of the last 64-byte block of B (i.e. offset 64*(2r-1)). Used to
+// index into V mod N.
+// ===========================================================================
+
+fn scrypt_integerify(b: Address, r: u32) -> u32 {
+    off: u32 = 64 * (2 * r - 1);
+    lo: u32 = scrypt_load_u32_le(b, off);
+    // The high 32 bits are ignored because N <= 2^32 in practice.
+    return lo;
+}
+
+// ===========================================================================
+// ROMix — scrypt's sequential memory-hard function (RFC 7914 Section 4).
+//   input, output: 128*r byte buffers
+//   n:             CPU/memory cost (power of 2)
+// ===========================================================================
+
+fn scrypt_romix(input: Address, output: Address, r: u32, n: u32) {
+    block_size: u32 = 128 * r;
 
     // V = array of n blocks
     v = allocate(block_size * n);
-
-    // X = input
     x = allocate(block_size);
+
     i: u32 = 0;
     while i < block_size { *(x + i) = *(input + i); i = i + 1; }
 
     // First pass: V[i] = X; X = BlockMix(X)
     i = 0;
     while i < n {
-        // Copy X to V[i]
         j: u32 = 0;
         while j < block_size { *(v + i * block_size + j) = *(x + j); j = j + 1; }
-
-        // X = BlockMix(X)
         temp = allocate(block_size);
-        blockmix(x, temp, r);
+        scrypt_blockmix(x, temp, r);
         j = 0;
         while j < block_size { *(x + j) = *(temp + j); j = j + 1; }
         free(temp);
-
         i = i + 1;
     }
 
-    // Second pass: j = integerify(X) mod n; X = X XOR V[j]; X = BlockMix(X)
+    // Second pass: j = Integerify(X) mod N; X = X XOR V[j]; X = BlockMix(X)
     i = 0;
     while i < n {
-        // j = X[block_size - 64] interpreted as little-endian u64 mod n
-        j: u32 = 0;
-        // Simplified: use first 4 bytes mod n
-        j = (*(x) | (*(x + 1) << 8) | (*(x + 2) << 16) | (*(x + 3) << 24)) % n;
-
-        // X = X XOR V[j]
+        j: u32 = scrypt_integerify(x, r) % n;
         k: u32 = 0;
         while k < block_size {
             xv: u32 = *(x + k);
@@ -191,49 +198,44 @@ fn romix(input: Address, output: Address, r: u32, n: u32) {
             *(x + k) = (xv ^ vj) & 255;
             k = k + 1;
         }
-
-        // X = BlockMix(X)
         temp = allocate(block_size);
-        blockmix(x, temp, r);
+        scrypt_blockmix(x, temp, r);
         k = 0;
         while k < block_size { *(x + k) = *(temp + k); k = k + 1; }
         free(temp);
-
         i = i + 1;
     }
 
-    // Output = X
     i = 0;
     while i < block_size { *(output + i) = *(x + i); i = i + 1; }
-
     free(v); free(x);
 }
 
-// scrypt — full KDF
-fn scrypt(password: Address, pass_len: u32, salt: Address, salt_len: u32, n: u32, r: u32, p: u32, out: Address, out_len: u32) {
-    // 1. B = PBKDF2-HMAC-SHA256(password, salt, 1, p * 128 * r)
+// ===========================================================================
+// scrypt — full KDF (RFC 7914 Section 5).
+//   B = PBKDF2-HMAC-SHA256(password, salt, 1, p * 128 * r)
+//   for i in 0..p: B_i = ROMix(B_i, n, r)
+//   output = PBKDF2-HMAC-SHA256(password, B, 1, out_len)
+// ===========================================================================
+
+fn scrypt(password: Address, pass_len: u32, salt: Address, salt_len: u32,
+          n: u32, r: u32, p: u32, out: Address, out_len: u32) {
     b_len: u32 = p * 128 * r;
     b = allocate(b_len);
     pbkdf2_hmac_sha256(password, pass_len, salt, salt_len, 1, b, b_len);
 
-    // 2. For each block B[i]: B[i] = ROMix(B[i], N, r)
     block_size: u32 = 128 * r;
     i: u32 = 0;
     while i < p {
-        block_in = b + i * block_size;
+        block_in: Address = b + i * block_size;
         block_out = allocate(block_size);
-        romix(block_in, block_out, r, n);
-
-        // Copy back
+        scrypt_romix(block_in, block_out, r, n);
         j: u32 = 0;
         while j < block_size { *(b + i * block_size + j) = *(block_out + j); j = j + 1; }
         free(block_out);
-
         i = i + 1;
     }
 
-    // 3. Output = PBKDF2-HMAC-SHA256(password, B, 1, out_len)
     pbkdf2_hmac_sha256(password, pass_len, b, b_len, 1, out, out_len);
-
     free(b);
 }
