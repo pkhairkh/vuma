@@ -1,18 +1,26 @@
-// womb_build3/sha_variants.vuma — SHA truncated/derived variants (FIPS 180-4, FIPS 202, NIST SP 800-185)
+// womb/crypto/sha_variants.vuma — SHA truncated/derived variants (FIPS 180-4, FIPS 202, NIST SP 800-185)
 // No main() — importable library module.
 //
-// Implements:
-//   1. SHA-224        (FIPS 180-4 §5.3.2)  — 32-bit, 28-byte output
-//   2. SHA-512/224     (FIPS 180-4 §5.3.6.1) — 64-bit, 28-byte output
-//   3. SHA-512/256     (FIPS 180-4 §5.3.6.2) — 64-bit, 32-byte output
-//   4. SHA-3-224       (FIPS 202)            — Keccak, rate=144, 28-byte output
-//   5. SHA-3-384       (FIPS 202)            — Keccak, rate=104, 48-byte output
-//   6. cSHAKE-256      (NIST SP 800-185)     — Keccak, rate=136, variable output
-//   7. KMAC-256        (NIST SP 800-185)     — cSHAKE-based MAC, variable output
+// Implements seven NIST-standard hash/XOF/MAC primitives built from two
+// underlying compression cores (SHA-256 / SHA-512 Merkle-Damgard, and
+// Keccak-f[1600] sponge):
 //
-// NOTE: VUMA's parser rejects integer literals >= 2^63 for u64. Constants at or
-// above that threshold are expressed as (1 << 63) | lower_bits, which the parser
-// accepts and evaluates correctly.
+//   1. SHA-224        (FIPS 180-4 §5.3.2)   — 32-bit Merkle-Damgard, 64-byte blocks, 28-byte output
+//   2. SHA-512/224    (FIPS 180-4 §5.3.6.1) — 64-bit Merkle-Damgard, 128-byte blocks, 28-byte output
+//   3. SHA-512/256    (FIPS 180-4 §5.3.6.2) — 64-bit Merkle-Damgard, 128-byte blocks, 32-byte output
+//   4. SHA-3-224      (FIPS 202 §6.3.2)     — Keccak-f[1600], rate=144 bytes (1152 bits), 28-byte output
+//   5. SHA-3-384      (FIPS 202 §6.3.4)     — Keccak-f[1600], rate=104 bytes (832 bits),  48-byte output
+//   6. cSHAKE-256     (NIST SP 800-185)     — Keccak-f[1600], rate=136 bytes (1088 bits), variable output
+//   7. KMAC-256       (NIST SP 800-185)     — cSHAKE256 with N="KMAC", keyed MAC, variable output
+//
+// SHA-224 / SHA-512/224 / SHA-512/256 / SHA-3-224 / SHA-3-384 each expose
+// a streaming API (init/update/final) plus an oneshot wrapper. cSHAKE-256
+// and KMAC-256 take additional parameters and expose only their oneshot
+// forms, per NIST SP 800-185.
+//
+// VUMA's parser rejects integer literals >= 2^63 for u64. Constants at or
+// above that threshold are expressed as (1 << 63) | lower_63_bits, which
+// the parser accepts and evaluates to the correct unsigned u64 value.
 
 // ===========================================================================
 // Masks
@@ -22,7 +30,9 @@ const MASK32: u32 = 4294967295;
 const MASK64: u64 = (1 << 63) | ((1 << 63) - 1);
 
 // ===========================================================================
-// SHA-256 K constants (FIPS 180-4 §4.2.2) — used by SHA-224 compression
+// SHA-256 round constants K[0..63] (FIPS 180-4 §4.2.2).
+// Used by the SHA-224 compression function (SHA-224 reuses SHA-256's
+// compression with a different IV and a shorter output).
 // ===========================================================================
 
 const K0: u32 = 1116352408;
@@ -91,21 +101,25 @@ const K62: u32 = 3204031479;
 const K63: u32 = 3329325298;
 
 // ===========================================================================
-// SHA-224 initial hash values (task-provided)
+// SHA-224 initial hash values (FIPS 180-4 Section 5.3.2).
+//   H0=0xc1059ed8 H1=0x367cd507 H2=0x3070dd17 H3=0xf70e5939
+//   H4=0xffc00b31 H5=0x68581511 H6=0x64f98fa7 H7=0xbefa4fa4
 // ===========================================================================
 
-const IV224_0: u32 = 3237375559;
-const IV224_1: u32 = 2592920043;
-const IV224_2: u32 = 1742899540;
-const IV224_3: u32 = 2313607510;
-const IV224_4: u32 = 3325110494;
-const IV224_5: u32 = 2762176761;
-const IV224_6: u32 = 3133236634;
-const IV224_7: u32 = 2577592045;
+const IV224_0: u32 = 3238371032;   // 0xc1059ed8
+const IV224_1: u32 = 914150663;    // 0x367cd507
+const IV224_2: u32 = 812702999;    // 0x3070dd17
+const IV224_3: u32 = 4144912697;   // 0xf70e5939
+const IV224_4: u32 = 4290775857;   // 0xffc00b31
+const IV224_5: u32 = 1750603025;   // 0x68581511
+const IV224_6: u32 = 1694076839;   // 0x64f98fa7
+const IV224_7: u32 = 3204075428;   // 0xbefa4fa4
 
 // ===========================================================================
-// SHA-512 K constants (FIPS 180-4 §4.2.3) — used by SHA-512/224, SHA-512/256
-// Values >= 2^63 expressed as (1 << 63) | lower_bits (parser workaround).
+// SHA-512 round constants K[0..79] (FIPS 180-4 §4.2.3).
+// Used by SHA-512/224 and SHA-512/256 (both reuse SHA-512's compression
+// with their own IVs and shorter outputs).
+// Values >= 2^63 are expressed as (1 << 63) | lower_bits (parser workaround).
 // ===========================================================================
 
 const K00: u64 = 4794697086780616226;
@@ -190,33 +204,37 @@ const K78: u64 = 6902733635092675308;
 const K79: u64 = 7801388544844847127;
 
 // ===========================================================================
-// SHA-512/224 initial hash values (task-provided)
+// SHA-512/224 initial hash values (FIPS 180-4 Section 5.3.6.1).
+//   H0=0x8C3D37C819544DA2 H1=0x73E1996689DCD4D6 H2=0x1DFAB7AE32FF9C82 H3=0x679DD514582F9FCF
+//   H4=0x0F6D2B697BD44DA8 H5=0x77E36F7304C48942 H6=0x3F9D85A86A1D36C8 H7=0x1112E6AD91D692A1
 // ===========================================================================
 
-const IV512_224_0: u64 = (1 << 63) | 5275627739252013240;
-const IV512_224_1: u64 = 4322529037018558520;
-const IV512_224_2: u64 = (1 << 63) | 475294824033615290;
-const IV512_224_3: u64 = (1 << 63) | 6502377148148004063;
-const IV512_224_4: u64 = 8797911104386128377;
-const IV512_224_5: u64 = 1665965869684066266;
-const IV512_224_6: u64 = (1 << 63) | 8148186305731025927;
-const IV512_224_7: u64 = (1 << 63) | 1319125140351225954;
+const IV512_224_0: u64 = (1 << 63) | 881922434592427426;
+const IV512_224_1: u64 = 8350123849800275158;
+const IV512_224_2: u64 = 2160240930085379202;
+const IV512_224_3: u64 = 7466358040605728719;
+const IV512_224_4: u64 = 1111592415079452072;
+const IV512_224_5: u64 = 8638871050018654530;
+const IV512_224_6: u64 = 4583966954114332360;
+const IV512_224_7: u64 = 1230299281376055969;
 
 // ===========================================================================
-// SHA-512/256 initial hash values (task-provided)
+// SHA-512/256 initial hash values (FIPS 180-4 Section 5.3.6.2).
+//   H0=0x22312194FC2BF72C H1=0x9F555FA3C84C64C2 H2=0x2393B86B6F53B151 H3=0x963877195940EABD
+//   H4=0x96283EE2A88EFFE3 H5=0xBE5E1E2553863992 H6=0x2B0199FC2C85B8AA H7=0x0EB72DDC81C52CA2
 // ===========================================================================
 
-const IV512_256_0: u64 = 3598033650016961226;
-const IV512_256_1: u64 = (1 << 63) | 2778416651850732550;
-const IV512_256_2: u64 = (1 << 63) | 6389875636111784043;
-const IV512_256_3: u64 = 3272154012802604429;
-const IV512_256_4: u64 = 9078140347733703894;
-const IV512_256_5: u64 = 1829200856447498259;
-const IV512_256_6: u64 = 1694839273222294853;
-const IV512_256_7: u64 = (1 << 63) | 4751895960314416150;
+const IV512_256_0: u64 = 2463787394917988140;
+const IV512_256_1: u64 = (1 << 63) | 2257815945240929474;
+const IV512_256_2: u64 = 2563595384472711505;
+const IV512_256_3: u64 = (1 << 63) | 1601160618285525693;
+const IV512_256_4: u64 = (1 << 63) | 1596595211114315747;
+const IV512_256_5: u64 = (1 << 63) | 4494062623826262418;
+const IV512_256_6: u64 = 3098927326965381290;
+const IV512_256_7: u64 = 1060366662362279074;
 
 // ===========================================================================
-// Keccak-f[1600] round constants (FIPS 202)
+// Keccak-f[1600] round constants RC[0..23] (FIPS 202 Section 3.1.2 / Algorithm 5).
 // ===========================================================================
 
 const RC00: u64 = 1;
@@ -237,7 +255,7 @@ const RC14: u64 = (1 << 63) | 32905;
 const RC15: u64 = (1 << 63) | 32771;
 const RC16: u64 = (1 << 63) | 32770;
 const RC17: u64 = (1 << 63) | 128;
-const RC18: u64 = 32906;
+const RC18: u64 = 32778;
 const RC19: u64 = (1 << 63) | 2147483658;
 const RC20: u64 = (1 << 63) | 2147516545;
 const RC21: u64 = (1 << 63) | 32896;
@@ -250,34 +268,42 @@ const RC23: u64 = (1 << 63) | 2147516424;
 // ===========================================================================
 // ===========================================================================
 
+// Rotate-right on u32. Caller ensures 1 <= n <= 31.
 fn rotr32(x: u32, n: u32) -> u32 {
     return ((x >> n) | (x << (32 - n))) & MASK32;
 }
 
+// Ch(x, y, z) = (x AND y) XOR ((NOT x) AND z)
 fn ch32(x: u32, y: u32, z: u32) -> u32 {
     return (x & y) ^ ((x ^ MASK32) & z);
 }
 
+// Maj(x, y, z) = (x AND y) XOR (x AND z) XOR (y AND z)
 fn maj32(x: u32, y: u32, z: u32) -> u32 {
     return (x & y) ^ (x & z) ^ (y & z);
 }
 
+// Big Sigma0(x) = ROTR^2(x) XOR ROTR^13(x) XOR ROTR^22(x)
 fn bsig0_32(x: u32) -> u32 {
     return rotr32(x, 2) ^ rotr32(x, 13) ^ rotr32(x, 22);
 }
 
+// Big Sigma1(x) = ROTR^6(x) XOR ROTR^11(x) XOR ROTR^25(x)
 fn bsig1_32(x: u32) -> u32 {
     return rotr32(x, 6) ^ rotr32(x, 11) ^ rotr32(x, 25);
 }
 
+// Small sigma0(x) = ROTR^7(x) XOR ROTR^18(x) XOR SHR^3(x)
 fn ssig0_32(x: u32) -> u32 {
     return rotr32(x, 7) ^ rotr32(x, 18) ^ (x >> 3);
 }
 
+// Small sigma1(x) = ROTR^17(x) XOR ROTR^19(x) XOR SHR^10(x)
 fn ssig1_32(x: u32) -> u32 {
     return rotr32(x, 17) ^ rotr32(x, 19) ^ (x >> 10);
 }
 
+// Load 4 bytes big-endian into a u32.
 fn load_u32_be(ptr: Address, off: u32) -> u32 {
     b0: u32 = *(ptr + off);
     b1: u32 = *(ptr + off + 1);
@@ -286,6 +312,7 @@ fn load_u32_be(ptr: Address, off: u32) -> u32 {
     return (b0 << 24) | (b1 << 16) | (b2 << 8) | b3;
 }
 
+// Store a u32 big-endian into 4 bytes.
 fn store_u32_be(ptr: Address, off: u32, val: u32) {
     *(ptr + off) = (val >> 24) & 255;
     *(ptr + off + 1) = (val >> 16) & 255;
@@ -294,12 +321,11 @@ fn store_u32_be(ptr: Address, off: u32, val: u32) {
 }
 
 // SHA-224 context layout (112 bytes):
-//   [0..31]   H[0..7]  (8 x u32, big-endian)
-//   [32..35]  bit_count_high (u32, big-endian) — always 0 for practical sizes
-//   [36..39]  bit_count_low  (u32, big-endian)
-//   [40..43]  buf_len (u32, big-endian)
-//   [44..107] message buffer (64 bytes)
-
+//   [ 0..31]  H[0..7]    8 x u32 big-endian state words
+//   [32..35]  bit_hi     high 32 bits of total message length in bits
+//   [36..39]  bit_lo     low 32 bits of total message length in bits
+//   [40..43]  buf_len    bytes currently in the message buffer
+//   [44..107] buf[64]    partial block accumulator (512-bit block)
 fn sha224_init(ctx: Address) {
     store_u32_be(ctx, 0, IV224_0);
     store_u32_be(ctx, 4, IV224_1);
@@ -314,6 +340,10 @@ fn sha224_init(ctx: Address) {
     store_u32_be(ctx, 40, 0);
 }
 
+// SHA-224 compression: 64 rounds over a single 512-bit block (FIPS 180-4
+// Section 6.2.2 — identical to SHA-256's compression). Builds the 64-word
+// message schedule from the 16 input words, then mixes each round with
+// K[i] and the working-state registers a..h.
 fn sha224_compress(ctx: Address, block: Address) {
     a: u32 = load_u32_be(ctx, 0);
     b: u32 = load_u32_be(ctx, 4);
@@ -324,6 +354,7 @@ fn sha224_compress(ctx: Address, block: Address) {
     g: u32 = load_u32_be(ctx, 24);
     h: u32 = load_u32_be(ctx, 28);
 
+    // 64-word message schedule: 64 x 4 bytes = 256 bytes
     wbuf = allocate(256);
 
     i: u32 = 0;
@@ -331,6 +362,7 @@ fn sha224_compress(ctx: Address, block: Address) {
         store_u32_be(wbuf, i * 4, load_u32_be(block, i * 4));
         i = i + 1;
     }
+    // Rounds 16..63: W[i] = SSig1(W[i-2]) + W[i-7] + SSig0(W[i-15]) + W[i-16]
     i = 16;
     while i < 64 {
         w15: u32 = load_u32_be(wbuf, (i - 15) * 4);
@@ -343,16 +375,16 @@ fn sha224_compress(ctx: Address, block: Address) {
     i = 0;
     while i < 64 {
         ki: u32 = 0;
-        if i == 0 { ki = K0; }
-        if i == 1 { ki = K1; }
-        if i == 2 { ki = K2; }
-        if i == 3 { ki = K3; }
-        if i == 4 { ki = K4; }
-        if i == 5 { ki = K5; }
-        if i == 6 { ki = K6; }
-        if i == 7 { ki = K7; }
-        if i == 8 { ki = K8; }
-        if i == 9 { ki = K9; }
+        if i == 0  { ki = K0; }
+        if i == 1  { ki = K1; }
+        if i == 2  { ki = K2; }
+        if i == 3  { ki = K3; }
+        if i == 4  { ki = K4; }
+        if i == 5  { ki = K5; }
+        if i == 6  { ki = K6; }
+        if i == 7  { ki = K7; }
+        if i == 8  { ki = K8; }
+        if i == 9  { ki = K9; }
         if i == 10 { ki = K10; }
         if i == 11 { ki = K11; }
         if i == 12 { ki = K12; }
@@ -416,6 +448,7 @@ fn sha224_compress(ctx: Address, block: Address) {
         i = i + 1;
     }
 
+    // Add the compressed chunk back into the running state
     store_u32_be(ctx, 0, (load_u32_be(ctx, 0) + a) & MASK32);
     store_u32_be(ctx, 4, (load_u32_be(ctx, 4) + b) & MASK32);
     store_u32_be(ctx, 8, (load_u32_be(ctx, 8) + c) & MASK32);
@@ -428,6 +461,19 @@ fn sha224_compress(ctx: Address, block: Address) {
     free(wbuf);
 }
 
+// Increment the 64-bit bit counter (stored as bit_hi||bit_lo big-endian at
+// offsets 32 and 36) by `bits`, carrying into the high word on overflow.
+fn sha224_add_bits(ctx: Address, bits: u32) {
+    lo: u32 = load_u32_be(ctx, 36);
+    hi: u32 = load_u32_be(ctx, 32);
+    new_lo: u32 = (lo + bits) & MASK32;
+    if new_lo < lo { hi = (hi + 1) & MASK32; }
+    store_u32_be(ctx, 36, new_lo);
+    store_u32_be(ctx, 32, hi);
+}
+
+// Absorb `len` bytes of `data`, compressing a full 64-byte block each time
+// the buffer fills.
 fn sha224_update(ctx: Address, data: Address, len: u32) {
     buf_len: u32 = load_u32_be(ctx, 40);
     i: u32 = 0;
@@ -437,22 +483,28 @@ fn sha224_update(ctx: Address, data: Address, len: u32) {
         i = i + 1;
         if buf_len == 64 {
             sha224_compress(ctx, ctx + 44);
-            lo: u32 = load_u32_be(ctx, 36);
-            store_u32_be(ctx, 36, (lo + 512) & MASK32);
+            sha224_add_bits(ctx, 512);
             buf_len = 0;
         }
     }
     store_u32_be(ctx, 40, buf_len);
 }
 
+// Pad the buffered message per FIPS 180-4 Section 5.1.1, run the final
+// compression, and write the 28-byte digest to `out`. Padding is 0x80,
+// zeros, then the 64-bit big-endian bit length in the last 8 bytes.
 fn sha224_final(ctx: Address, out: Address) {
     buf_len: u32 = load_u32_be(ctx, 40);
-    bit_lo: u32 = load_u32_be(ctx, 36);
-    total_bits: u32 = (bit_lo + (buf_len * 8)) & MASK32;
 
+    // Account for the unprocessed buffered bytes in the bit counter
+    sha224_add_bits(ctx, buf_len * 8);
+
+    // Append the 0x80 bit after the message
     *(ctx + 44 + buf_len) = 128;
     buf_len = buf_len + 1;
 
+    // If not enough room for the 8-byte length suffix, pad this block,
+    // compress, and start a fresh block.
     if buf_len > 56 {
         while buf_len < 64 {
             *(ctx + 44 + buf_len) = 0;
@@ -462,16 +514,18 @@ fn sha224_final(ctx: Address, out: Address) {
         buf_len = 0;
     }
 
+    // Pad with zeros up to the length field at offset 56
     while buf_len < 56 {
         *(ctx + 44 + buf_len) = 0;
         buf_len = buf_len + 1;
     }
 
-    store_u32_be(ctx, 44 + 56, 0);
-    store_u32_be(ctx, 44 + 60, total_bits);
+    // Append 64-bit big-endian bit length (high word first, then low)
+    store_u32_be(ctx, 44 + 56, load_u32_be(ctx, 32));
+    store_u32_be(ctx, 44 + 60, load_u32_be(ctx, 36));
     sha224_compress(ctx, ctx + 44);
 
-    // Output first 7 words (28 bytes)
+    // Output first 7 words (28 bytes) — SHA-224 truncation
     i: u32 = 0;
     while i < 7 {
         store_u32_be(out, i * 4, load_u32_be(ctx, i * 4));
@@ -479,6 +533,8 @@ fn sha224_final(ctx: Address, out: Address) {
     }
 }
 
+// Convenience wrapper: initialise a fresh context, absorb `data`, finalise
+// into `out`, and free the context.
 fn sha224_oneshot(data: Address, len: u32, out: Address) {
     ctx = allocate(112);
     sha224_init(ctx);
@@ -493,34 +549,42 @@ fn sha224_oneshot(data: Address, len: u32, out: Address) {
 // ===========================================================================
 // ===========================================================================
 
+// Rotate-right on u64. Caller ensures 1 <= n <= 63.
 fn rotr64(x: u64, n: u64) -> u64 {
     return (x >> n) | (x << (64 - n));
 }
 
+// Ch(x, y, z) = (x AND y) XOR ((NOT x) AND z)
 fn ch64(x: u64, y: u64, z: u64) -> u64 {
     return (x & y) ^ ((x ^ MASK64) & z);
 }
 
+// Maj(x, y, z) = (x AND y) XOR (x AND z) XOR (y AND z)
 fn maj64(x: u64, y: u64, z: u64) -> u64 {
     return (x & y) ^ (x & z) ^ (y & z);
 }
 
+// Big Sigma0(x) = ROTR^28(x) XOR ROTR^34(x) XOR ROTR^39(x)
 fn bsig0_64(x: u64) -> u64 {
     return rotr64(x, 28) ^ rotr64(x, 34) ^ rotr64(x, 39);
 }
 
+// Big Sigma1(x) = ROTR^14(x) XOR ROTR^18(x) XOR ROTR^41(x)
 fn bsig1_64(x: u64) -> u64 {
     return rotr64(x, 14) ^ rotr64(x, 18) ^ rotr64(x, 41);
 }
 
+// Small sigma0(x) = ROTR^1(x) XOR ROTR^8(x) XOR SHR^7(x)
 fn ssig0_64(x: u64) -> u64 {
     return rotr64(x, 1) ^ rotr64(x, 8) ^ (x >> 7);
 }
 
+// Small sigma1(x) = ROTR^19(x) XOR ROTR^61(x) XOR SHR^6(x)
 fn ssig1_64(x: u64) -> u64 {
     return rotr64(x, 19) ^ rotr64(x, 61) ^ (x >> 6);
 }
 
+// Load 8 bytes big-endian into a u64.
 fn load_u64_be(ptr: Address, off: u32) -> u64 {
     b0: u64 = *(ptr + off);
     b1: u64 = *(ptr + off + 1);
@@ -533,6 +597,7 @@ fn load_u64_be(ptr: Address, off: u32) -> u64 {
     return (b0 << 56) | (b1 << 48) | (b2 << 40) | (b3 << 32) | (b4 << 24) | (b5 << 16) | (b6 << 8) | b7;
 }
 
+// Store a u64 big-endian into 8 bytes.
 fn store_u64_be(ptr: Address, off: u32, val: u64) {
     *(ptr + off) = (val >> 56) & 255;
     *(ptr + off + 1) = (val >> 48) & 255;
@@ -544,13 +609,12 @@ fn store_u64_be(ptr: Address, off: u32, val: u64) {
     *(ptr + off + 7) = val & 255;
 }
 
-// SHA-512 context layout (216 bytes):
-//   [0..63]   H[0..7]  (8 x u64, big-endian)
-//   [64..71]  bit_count_low  (u64)
-//   [72..79]  bit_count_high (u64)
-//   [80..87]  buf_len (u64, only low 32 bits used)
-//   [88..215] message buffer (128 bytes)
-
+// SHA-512 context layout (216 bytes), shared by SHA-512/224 and SHA-512/256:
+//   [  0.. 63] H[0..7]   8 x u64 big-endian state words
+//   [ 64.. 71] bit_lo    low 64 bits of total message length in bits
+//   [ 72.. 79] bit_hi    high 64 bits of total message length in bits
+//   [ 80.. 87] buf_len   bytes currently in the message buffer
+//   [ 88..215] buf[128]  partial block accumulator (1024-bit block)
 fn sha512_224_init(ctx: Address) {
     store_u64_be(ctx, 0, IV512_224_0);
     store_u64_be(ctx, 8, IV512_224_1);
@@ -579,6 +643,9 @@ fn sha512_256_init(ctx: Address) {
     store_u64_be(ctx, 80, 0);
 }
 
+// SHA-512 compression: 80 rounds over a single 1024-bit block (FIPS 180-4
+// Section 6.4.2). Used by both SHA-512/224 and SHA-512/256; the caller
+// supplies the appropriate IV via sha512_224_init / sha512_256_init.
 fn sha512_compress(ctx: Address, block: Address) {
     a: u64 = load_u64_be(ctx, 0);
     b: u64 = load_u64_be(ctx, 8);
@@ -589,6 +656,7 @@ fn sha512_compress(ctx: Address, block: Address) {
     g: u64 = load_u64_be(ctx, 48);
     h: u64 = load_u64_be(ctx, 56);
 
+    // 80-word message schedule: 80 x 8 bytes = 640 bytes
     wbuf = allocate(640);
 
     i: u32 = 0;
@@ -596,6 +664,7 @@ fn sha512_compress(ctx: Address, block: Address) {
         store_u64_be(wbuf, i * 8, load_u64_be(block, i * 8));
         i = i + 1;
     }
+    // Rounds 16..79: W[i] = SSig1(W[i-2]) + W[i-7] + SSig0(W[i-15]) + W[i-16]
     i = 16;
     while i < 80 {
         w15: u64 = load_u64_be(wbuf, (i - 15) * 8);
@@ -608,16 +677,16 @@ fn sha512_compress(ctx: Address, block: Address) {
     i = 0;
     while i < 80 {
         ki: u64 = 0;
-        if i == 0 { ki = K00; }
-        if i == 1 { ki = K01; }
-        if i == 2 { ki = K02; }
-        if i == 3 { ki = K03; }
-        if i == 4 { ki = K04; }
-        if i == 5 { ki = K05; }
-        if i == 6 { ki = K06; }
-        if i == 7 { ki = K07; }
-        if i == 8 { ki = K08; }
-        if i == 9 { ki = K09; }
+        if i == 0  { ki = K00; }
+        if i == 1  { ki = K01; }
+        if i == 2  { ki = K02; }
+        if i == 3  { ki = K03; }
+        if i == 4  { ki = K04; }
+        if i == 5  { ki = K05; }
+        if i == 6  { ki = K06; }
+        if i == 7  { ki = K07; }
+        if i == 8  { ki = K08; }
+        if i == 9  { ki = K09; }
         if i == 10 { ki = K10; }
         if i == 11 { ki = K11; }
         if i == 12 { ki = K12; }
@@ -697,6 +766,8 @@ fn sha512_compress(ctx: Address, block: Address) {
         i = i + 1;
     }
 
+    // Add the compressed chunk back into the running state. u64 arithmetic
+    // wraps mod 2^64 by definition in VUMA, so no explicit masking needed.
     store_u64_be(ctx, 0, load_u64_be(ctx, 0) + a);
     store_u64_be(ctx, 8, load_u64_be(ctx, 8) + b);
     store_u64_be(ctx, 16, load_u64_be(ctx, 16) + c);
@@ -709,6 +780,9 @@ fn sha512_compress(ctx: Address, block: Address) {
     free(wbuf);
 }
 
+// Absorb `len` bytes of `data` into the SHA-512 context, compressing a
+// full 128-byte block each time the buffer fills. Shared by SHA-512/224
+// and SHA-512/256.
 fn sha512_update(ctx: Address, data: Address, len: u32) {
     buf_len: u32 = load_u64_be(ctx, 80);
     i: u32 = 0;
@@ -718,25 +792,38 @@ fn sha512_update(ctx: Address, data: Address, len: u32) {
         i = i + 1;
         if buf_len == 128 {
             sha512_compress(ctx, ctx + 88);
+            // Account for 1024 bits of message processed in this block
             lo: u64 = load_u64_be(ctx, 64);
-            store_u64_be(ctx, 64, lo + 1024);
+            hi: u64 = load_u64_be(ctx, 72);
+            new_lo: u64 = lo + 1024;
+            if new_lo < lo { hi = hi + 1; }
+            store_u64_be(ctx, 64, new_lo);
+            store_u64_be(ctx, 72, hi);
             buf_len = 0;
         }
     }
     store_u64_be(ctx, 80, buf_len);
 }
 
+// Pad the buffered message per FIPS 180-4 Section 5.1.2 (1024-bit variant),
+// run the final compression, and write the first `out_len` bytes of the
+// 64-byte state to `out`. Used by SHA-512/224 (out_len=28) and
+// SHA-512/256 (out_len=32).
 fn sha512_final_trunc(ctx: Address, out: Address, out_len: u32) {
     buf_len: u32 = load_u64_be(ctx, 80);
     total_lo: u64 = load_u64_be(ctx, 64);
     total_hi: u64 = load_u64_be(ctx, 72);
+    // Add the unprocessed buffered bytes to the bit counter
     new_lo: u64 = total_lo + (buf_len * 8);
     if new_lo < total_lo { total_hi = total_hi + 1; }
     total_lo = new_lo;
 
+    // Append the 0x80 bit after the message
     *(ctx + 88 + buf_len) = 128;
     buf_len = buf_len + 1;
 
+    // If not enough room for the 16-byte length suffix, pad this block,
+    // compress, and start a fresh block.
     if buf_len > 112 {
         while buf_len < 128 {
             *(ctx + 88 + buf_len) = 0;
@@ -746,11 +833,13 @@ fn sha512_final_trunc(ctx: Address, out: Address, out_len: u32) {
         buf_len = 0;
     }
 
+    // Pad with zeros up to the length field at offset 112
     while buf_len < 112 {
         *(ctx + 88 + buf_len) = 0;
         buf_len = buf_len + 1;
     }
 
+    // Append 128-bit big-endian bit length (high 64 bits first, then low)
     store_u64_be(ctx, 88 + 112, total_hi);
     store_u64_be(ctx, 88 + 120, total_lo);
     sha512_compress(ctx, ctx + 88);
@@ -770,12 +859,32 @@ fn sha512_final_trunc(ctx: Address, out: Address, out_len: u32) {
     free(tmp);
 }
 
+// SHA-512/224 streaming API — SHA-512 algorithm with SHA-512/224 IV and
+// output truncated to 28 bytes (first 224 bits of the 512-bit digest).
+fn sha512_224_update(ctx: Address, data: Address, len: u32) {
+    sha512_update(ctx, data, len);
+}
+
+fn sha512_224_final(ctx: Address, out: Address) {
+    sha512_final_trunc(ctx, out, 28);
+}
+
 fn sha512_224_oneshot(data: Address, len: u32, out: Address) {
     ctx = allocate(216);
     sha512_224_init(ctx);
     sha512_update(ctx, data, len);
     sha512_final_trunc(ctx, out, 28);
     free(ctx);
+}
+
+// SHA-512/256 streaming API — SHA-512 algorithm with SHA-512/256 IV and
+// output truncated to 32 bytes (first 256 bits of the 512-bit digest).
+fn sha512_256_update(ctx: Address, data: Address, len: u32) {
+    sha512_update(ctx, data, len);
+}
+
+fn sha512_256_final(ctx: Address, out: Address) {
+    sha512_final_trunc(ctx, out, 32);
 }
 
 fn sha512_256_oneshot(data: Address, len: u32, out: Address) {
@@ -792,6 +901,8 @@ fn sha512_256_oneshot(data: Address, len: u32, out: Address) {
 // ===========================================================================
 // ===========================================================================
 
+// Load 8 bytes little-endian into a u64. Keccak stores each 64-bit lane
+// in little-endian byte order per FIPS 202 Section 3.1.2.
 fn load_u64_le(ptr: Address, off: u32) -> u64 {
     b0: u64 = *(ptr + off);
     b1: u64 = *(ptr + off + 1);
@@ -804,6 +915,7 @@ fn load_u64_le(ptr: Address, off: u32) -> u64 {
     return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
 }
 
+// Store a u64 little-endian into 8 bytes.
 fn store_u64_le(ptr: Address, off: u32, val: u64) {
     *(ptr + off) = val & 255;
     *(ptr + off + 1) = (val >> 8) & 255;
@@ -815,30 +927,34 @@ fn store_u64_le(ptr: Address, off: u32, val: u64) {
     *(ptr + off + 7) = (val >> 56) & 255;
 }
 
+// Rotate-left guarded against n==0 (64-n would shift by full word).
 fn rotl64(x: u64, n: u64) -> u64 {
     if n == 0 { return x; }
     return (x << n) | (x >> (64 - n));
 }
 
-// Keccak-f[1600]: 24 rounds on a 25-lane state (200 bytes).
-// Lane at (x, y) is stored at byte offset (x + 5*y) * 8, little-endian.
-
+// Keccak-f[1600]: 24 rounds on a 25-lane state (200 bytes total).
+// Lane (x, y) is stored at byte offset (x + 5*y) * 8, little-endian.
+// Each round performs Theta, Rho+Pi (combined), Chi, and Iota.
 fn keccak_f1600(state: Address) {
     round: u32 = 0;
     while round < 24 {
         // --- Theta ---
+        // C[x] = A[x,0] ^ A[x,1] ^ A[x,2] ^ A[x,3] ^ A[x,4]
         c0: u64 = load_u64_le(state, 0) ^ load_u64_le(state, 40) ^ load_u64_le(state, 80) ^ load_u64_le(state, 120) ^ load_u64_le(state, 160);
         c1: u64 = load_u64_le(state, 8) ^ load_u64_le(state, 48) ^ load_u64_le(state, 88) ^ load_u64_le(state, 128) ^ load_u64_le(state, 168);
         c2: u64 = load_u64_le(state, 16) ^ load_u64_le(state, 56) ^ load_u64_le(state, 96) ^ load_u64_le(state, 136) ^ load_u64_le(state, 176);
         c3: u64 = load_u64_le(state, 24) ^ load_u64_le(state, 64) ^ load_u64_le(state, 104) ^ load_u64_le(state, 144) ^ load_u64_le(state, 184);
         c4: u64 = load_u64_le(state, 32) ^ load_u64_le(state, 72) ^ load_u64_le(state, 112) ^ load_u64_le(state, 152) ^ load_u64_le(state, 192);
 
+        // D[x] = C[x-1] ^ rot(C[x+1], 1)
         d0: u64 = c4 ^ rotl64(c1, 1);
         d1: u64 = c0 ^ rotl64(c2, 1);
         d2: u64 = c1 ^ rotl64(c3, 1);
         d3: u64 = c2 ^ rotl64(c4, 1);
         d4: u64 = c3 ^ rotl64(c0, 1);
 
+        // A[x,y] ^= D[x]
         ty: u32 = 0;
         while ty < 5 {
             tx: u32 = 0;
@@ -857,6 +973,9 @@ fn keccak_f1600(state: Address) {
         }
 
         // --- Rho + Pi ---
+        // B[y, 2x+3y mod 5] = rot(A[x, y], r[x, y])
+        // r[x, y] is the per-lane rotation offset from the Keccak
+        // specification (FIPS 202 Table 2).
         tb = allocate(200);
         rx: u32 = 0;
         while rx < 5 {
@@ -902,6 +1021,7 @@ fn keccak_f1600(state: Address) {
         }
 
         // --- Chi ---
+        // A[x, y] = B[x, y] ^ ((NOT B[x+1, y]) AND B[x+2, y])
         cy: u32 = 0;
         while cy < 5 {
             cx: u32 = 0;
@@ -920,17 +1040,18 @@ fn keccak_f1600(state: Address) {
         free(tb);
 
         // --- Iota ---
+        // A[0, 0] ^= RC[round]
         rc: u64 = 0;
-        if round == 0 { rc = RC00; }
-        if round == 1 { rc = RC01; }
-        if round == 2 { rc = RC02; }
-        if round == 3 { rc = RC03; }
-        if round == 4 { rc = RC04; }
-        if round == 5 { rc = RC05; }
-        if round == 6 { rc = RC06; }
-        if round == 7 { rc = RC07; }
-        if round == 8 { rc = RC08; }
-        if round == 9 { rc = RC09; }
+        if round == 0  { rc = RC00; }
+        if round == 1  { rc = RC01; }
+        if round == 2  { rc = RC02; }
+        if round == 3  { rc = RC03; }
+        if round == 4  { rc = RC04; }
+        if round == 5  { rc = RC05; }
+        if round == 6  { rc = RC06; }
+        if round == 7  { rc = RC07; }
+        if round == 8  { rc = RC08; }
+        if round == 9  { rc = RC09; }
         if round == 10 { rc = RC10; }
         if round == 11 { rc = RC11; }
         if round == 12 { rc = RC12; }
@@ -951,7 +1072,8 @@ fn keccak_f1600(state: Address) {
     }
 }
 
-// XOR `rate` bytes from `block` into `state`, then permute.
+// XOR `rate` bytes from `block` into the first `rate` bytes of `state`,
+// then run the Keccak-f[1600] permutation.
 fn keccak_absorb_block(state: Address, block: Address, rate: u32) {
     i: u32 = 0;
     while i < rate {
@@ -963,8 +1085,12 @@ fn keccak_absorb_block(state: Address, block: Address, rate: u32) {
     keccak_f1600(state);
 }
 
-// Generic sponge: absorb `data` with domain-separation byte `domain_sep`,
-// squeeze `out_len` bytes into `out`.
+// Generic Keccak sponge: absorb `data` with domain-separation byte
+// `domain_sep` (0x06 for SHA-3 hashes, 0x1F for SHAKE, 0x04 for cSHAKE),
+// pad with pad10*1, and squeeze `out_len` bytes into `out`. The pad10*1
+// rule sets the bit immediately after the last absorbed message byte to 1
+// and the last bit of the final block to 1; combined with the domain
+// separator this gives the standard SHA-3 / SHAKE / cSHAKE suffix.
 fn keccak_sponge(rate: u32, domain_sep: u32, data: Address, data_len: u32, out: Address, out_len: u32) {
     state = allocate(200);
     i: u32 = 0;
@@ -984,7 +1110,11 @@ fn keccak_sponge(rate: u32, domain_sep: u32, data: Address, data_len: u32, out: 
         pos = pos + rate;
     }
 
-    // Final block: remaining message bytes + pad10*1 with domain separator
+    // Final block: remaining message bytes + pad10*1 with domain separator.
+    // The remaining message bytes are copied into a zero-initialised block,
+    // then the domain separator is XORed at the first padding byte position
+    // (i.e. immediately after the last message byte), and 0x80 is XORed at
+    // the last byte of the block to set the final pad bit.
     remaining: u32 = data_len - pos;
     i = 0;
     while i < rate { *(block + i) = 0; i = i + 1; }
@@ -997,7 +1127,9 @@ fn keccak_sponge(rate: u32, domain_sep: u32, data: Address, data_len: u32, out: 
     *(block + rate - 1) = (*(block + rate - 1) ^ 128) & 255;
     keccak_absorb_block(state, block, rate);
 
-    // Squeeze
+    // Squeeze `out_len` bytes from the state. Each squeeze iteration emits
+    // up to `rate` bytes from the state, then permutes the state if more
+    // output is needed (FIPS 202 Section 5.2).
     sp: u32 = 0;
     while sp < out_len {
         chunk: u32 = rate;
@@ -1016,19 +1148,159 @@ fn keccak_sponge(rate: u32, domain_sep: u32, data: Address, data_len: u32, out: 
 }
 
 // ===========================================================================
-// SHA-3-224: rate=144, output=28, domain_sep=0x06
+// Keccak streaming state — shared by SHA-3-224 and SHA-3-384.
+//   [  0..199] state (25 x u64 = 200 bytes)
+//   [200..203] rate (u32 little-endian)
+//   [204..207] buf_len (u32 little-endian)
+//   [208..375] buffer (168 bytes, large enough for the largest SHA-3 rate)
 // ===========================================================================
 
-fn sha3_224_oneshot(data: Address, len: u32, out: Address) {
-    keccak_sponge(144, 6, data, len, out, 28);
+fn keccak_stream_init(ctx: Address, rate: u32) {
+    // Zero the full 376-byte context so stale buffer bytes never leak into
+    // the absorb step.
+    i: u32 = 0;
+    while i < 376 { *(ctx + i) = 0; i = i + 1; }
+    *(ctx + 200) = rate & 255;
+    *(ctx + 201) = (rate >> 8) & 255;
+    *(ctx + 202) = (rate >> 16) & 255;
+    *(ctx + 203) = (rate >> 24) & 255;
+    *(ctx + 204) = 0;
+    *(ctx + 205) = 0;
+    *(ctx + 206) = 0;
+    *(ctx + 207) = 0;
+}
+
+fn keccak_stream_get_rate(ctx: Address) -> u32 {
+    return *(ctx + 200) | (*(ctx + 201) << 8) | (*(ctx + 202) << 16) | (*(ctx + 203) << 24);
+}
+
+fn keccak_stream_get_buflen(ctx: Address) -> u32 {
+    return *(ctx + 204) | (*(ctx + 205) << 8) | (*(ctx + 206) << 16) | (*(ctx + 207) << 24);
+}
+
+fn keccak_stream_set_buflen(ctx: Address, val: u32) {
+    *(ctx + 204) = val & 255;
+    *(ctx + 205) = (val >> 8) & 255;
+    *(ctx + 206) = (val >> 16) & 255;
+    *(ctx + 207) = (val >> 24) & 255;
+}
+
+// Absorb `len` bytes of `data` into the streaming Keccak state, permuting
+// each time a full rate-byte block fills the buffer.
+fn keccak_stream_update(ctx: Address, data: Address, len: u32) {
+    rate: u32 = keccak_stream_get_rate(ctx);
+    buf_len: u32 = keccak_stream_get_buflen(ctx);
+    i: u32 = 0;
+    while i < len {
+        *(ctx + 208 + buf_len) = *(data + i);
+        buf_len = buf_len + 1;
+        i = i + 1;
+        if buf_len == rate {
+            // XOR buffered block into state and permute
+            j: u32 = 0;
+            while j < rate {
+                sv: u32 = *(ctx + j);
+                bv: u32 = *(ctx + 208 + j);
+                *(ctx + j) = (sv ^ bv) & 255;
+                j = j + 1;
+            }
+            keccak_f1600(ctx);
+            buf_len = 0;
+            // Clear the buffer so the next partial block does not pick up
+            // stale bytes from this one.
+            j = 0;
+            while j < rate { *(ctx + 208 + j) = 0; j = j + 1; }
+        }
+    }
+    keccak_stream_set_buflen(ctx, buf_len);
+}
+
+// Pad the final block with pad10*1 + domain separator, absorb, and squeeze
+// `out_len` bytes from the sponge. The buffered partial block (already zero-
+// padded beyond `buf_len`) is XORed into the state, the domain separator is
+// applied at byte `buf_len`, and 0x80 is applied at the last byte of the
+// rate.
+fn keccak_stream_final(ctx: Address, domain_sep: u32, out: Address, out_len: u32) {
+    rate: u32 = keccak_stream_get_rate(ctx);
+    buf_len: u32 = keccak_stream_get_buflen(ctx);
+
+    // XOR the buffered partial block (plus pad10*1 padding) into the state
+    j: u32 = 0;
+    while j < rate {
+        sv: u32 = *(ctx + j);
+        bv: u32 = *(ctx + 208 + j);
+        *(ctx + j) = (sv ^ bv) & 255;
+        j = j + 1;
+    }
+    // Apply domain separator at buf_len position and 0x80 at last byte
+    *(ctx + buf_len) = (*(ctx + buf_len) ^ domain_sep) & 255;
+    *(ctx + rate - 1) = (*(ctx + rate - 1) ^ 128) & 255;
+
+    keccak_f1600(ctx);
+
+    // Squeeze out_len bytes
+    sp: u32 = 0;
+    while sp < out_len {
+        chunk: u32 = rate;
+        if out_len - sp < rate { chunk = out_len - sp; }
+        k: u32 = 0;
+        while k < chunk {
+            *(out + sp + k) = *(ctx + k);
+            k = k + 1;
+        }
+        sp = sp + chunk;
+        if sp < out_len { keccak_f1600(ctx); }
+    }
 }
 
 // ===========================================================================
-// SHA-3-384: rate=104, output=48, domain_sep=0x06
+// SHA-3-224: rate=144 bytes (1152 bits), output=28 bytes, domain_sep=0x06.
+// (FIPS 202 Section 6.3.2)
 // ===========================================================================
 
+fn sha3_224_init(ctx: Address) {
+    keccak_stream_init(ctx, 144);
+}
+
+fn sha3_224_update(ctx: Address, data: Address, len: u32) {
+    keccak_stream_update(ctx, data, len);
+}
+
+fn sha3_224_final(ctx: Address, out: Address) {
+    keccak_stream_final(ctx, 6, out, 28);
+}
+
+fn sha3_224_oneshot(data: Address, len: u32, out: Address) {
+    ctx = allocate(376);
+    sha3_224_init(ctx);
+    sha3_224_update(ctx, data, len);
+    sha3_224_final(ctx, out);
+    free(ctx);
+}
+
+// ===========================================================================
+// SHA-3-384: rate=104 bytes (832 bits), output=48 bytes, domain_sep=0x06.
+// (FIPS 202 Section 6.3.4)
+// ===========================================================================
+
+fn sha3_384_init(ctx: Address) {
+    keccak_stream_init(ctx, 104);
+}
+
+fn sha3_384_update(ctx: Address, data: Address, len: u32) {
+    keccak_stream_update(ctx, data, len);
+}
+
+fn sha3_384_final(ctx: Address, out: Address) {
+    keccak_stream_final(ctx, 6, out, 48);
+}
+
 fn sha3_384_oneshot(data: Address, len: u32, out: Address) {
-    keccak_sponge(104, 6, data, len, out, 48);
+    ctx = allocate(376);
+    sha3_384_init(ctx);
+    sha3_384_update(ctx, data, len);
+    sha3_384_final(ctx, out);
+    free(ctx);
 }
 
 // ===========================================================================
@@ -1038,7 +1310,9 @@ fn sha3_384_oneshot(data: Address, len: u32, out: Address) {
 // ===========================================================================
 
 // left_encode(x): minimal big-endian encoding of x with length byte first.
-// Returns total bytes written (length byte + value bytes).
+// Encodes the value as: [n, byte_n-1, byte_n-2, ..., byte_0] where n is the
+// number of value bytes (1..4 for a u32). Returns total bytes written
+// (length byte + value bytes).
 fn left_encode(out: Address, x: u32) -> u32 {
     n: u32 = 1;
     if x >= 256 { n = 2; }
@@ -1055,6 +1329,9 @@ fn left_encode(out: Address, x: u32) -> u32 {
 }
 
 // right_encode(x): minimal big-endian encoding of x with length byte last.
+// Encodes the value as: [byte_n-1, byte_n-2, ..., byte_0, n] where n is the
+// number of value bytes (1..4 for a u32). Returns total bytes written
+// (value bytes + length byte).
 fn right_encode(out: Address, x: u32) -> u32 {
     n: u32 = 1;
     if x >= 256 { n = 2; }
@@ -1070,7 +1347,8 @@ fn right_encode(out: Address, x: u32) -> u32 {
     return n + 1;
 }
 
-// encode_string(s): left_encode(len(s)*8) || s
+// encode_string(s): left_encode(len(s)*8) || s, where len(s)*8 is the bit
+// length of s. Returns total bytes written.
 fn encode_string(s: Address, s_len: u32, out: Address) -> u32 {
     bit_len: u32 = s_len * 8;
     len_size: u32 = left_encode(out, bit_len);
@@ -1082,7 +1360,8 @@ fn encode_string(s: Address, s_len: u32, out: Address) -> u32 {
     return len_size + s_len;
 }
 
-// bytepad(X, w): left_encode(w) || X || zeros, total = w bytes.
+// bytepad(X, w): left_encode(w) || X || zeros, total padded to exactly w
+// bytes. The result is written into `out` (which must be at least w bytes).
 fn bytepad(x: Address, x_len: u32, out: Address, w: u32) {
     len_size: u32 = left_encode(out, w);
     i: u32 = 0;
@@ -1097,24 +1376,28 @@ fn bytepad(x: Address, x_len: u32, out: Address, w: u32) {
     }
 }
 
-// cSHAKE-256: rate=136, domain_sep=0x04 (falls back to SHAKE256 = 0x1F
-// when customization is empty, per NIST SP 800-185).
+// cSHAKE-256 (NIST SP 800-185, rate=136 bytes = 1088 bits, capacity=512).
 //
-// cSHAKE256(X, L, N="", S) =
-//   if S is empty: SHAKE256(X, L)
-//   else: SHAKE-like sponge with prefix = bytepad(encode_string("") || encode_string(S), 136)
-//         and domain_sep = 0x04
-
+// cSHAKE256(X, L, N, S):
+//   if N = "" and S = "": return SHAKE256(X, L)
+//   else: return KECCAK[512](bytepad(encode_string(N) || encode_string(S), 136) || X || 04, L)
+//
+// This module's cshake256 takes the customization string S as `custom` and
+// uses N = "" (empty function-name string, the typical case for
+// standalone cSHAKE). When `custom_len` is 0 both N and S are empty and
+// cSHAKE-256 reduces to SHAKE-256 (domain_sep = 0x1F); otherwise the
+// cSHAKE prefix bytepad(encode_string("") || encode_string(S), 136) is
+// prepended and domain_sep = 0x04 is used.
 fn cshake256(data: Address, data_len: u32, custom: Address, custom_len: u32, out: Address, out_len: u32) {
     rate: u32 = 136;
 
-    // If customization is empty, cSHAKE reduces to SHAKE256
+    // If both N and S are empty, cSHAKE reduces to SHAKE256
     if custom_len == 0 {
         keccak_sponge(rate, 31, data, data_len, out, out_len);
         return;
     }
 
-    // Build prefix = bytepad(encode_string("") || encode_string(custom), 136)
+    // Build X = encode_string("") || encode_string(custom).
     // encode_string("") = left_encode(0) = [0x01, 0x00]  (always 2 bytes)
     xbuf = allocate(280);
     *(xbuf + 0) = 1;
@@ -1123,6 +1406,7 @@ fn cshake256(data: Address, data_len: u32, custom: Address, custom_len: u32, out
     enc_len: u32 = encode_string(custom, custom_len, xbuf + 2);
     xlen = xlen + enc_len;
 
+    // prefix = bytepad(X, 136)
     prefix = allocate(136);
     bytepad(xbuf, xlen, prefix, 136);
     free(xbuf);
@@ -1147,46 +1431,75 @@ fn cshake256(data: Address, data_len: u32, custom: Address, custom_len: u32, out
     free(full);
 }
 
-// KMAC-256: cSHAKE256 with N="" (reduces to SHAKE256) on input:
-//   key || bytepad(encode_string(""), 136) || msg || right_encode(out_len * 8)
-
+// KMAC-256 (NIST SP 800-185, rate=136 bytes = 1088 bits, capacity=512).
+//
+// KMAC256(K, X, L, S):
+//   1. newX = bytepad(encode_string(K), 136) || X || right_encode(L)
+//   2. return cSHAKE256(newX, L, "KMAC", S)
+//
+// Because the function-name string N = "KMAC" is non-empty, the inner
+// cSHAKE call always uses the cSHAKE prefix
+//   bytepad(encode_string("KMAC") || encode_string(S), 136)
+// and the cSHAKE domain separator 0x04 — it does NOT reduce to SHAKE256,
+// even when S is empty. This implementation passes S = "" (no
+// customization); callers needing a customization string can extend the
+// signature or prepend S themselves.
 fn kmac256(key: Address, key_len: u32, msg: Address, msg_len: u32, out: Address, out_len: u32) {
     rate: u32 = 136;
 
-    // right_encode(out_len * 8)
+    // --- Build the cSHAKE prefix: bytepad(encode_string("KMAC") || encode_string(""), 136) ---
+    // encode_string("KMAC") = left_encode(32) || "KMAC"
+    //   left_encode(32) = [0x01, 0x20]  (length 1 byte, value 0x20 = 32 = 4 chars * 8 bits)
+    // encode_string("") = left_encode(0) = [0x01, 0x00]
+    // X = encode_string("KMAC") || encode_string("")  (8 bytes total)
+    xbuf = allocate(280);
+    *(xbuf + 0) = 1;    // left_encode(32) length byte
+    *(xbuf + 1) = 32;   // left_encode(32) value: bit length of "KMAC"
+    *(xbuf + 2) = 75;   // 'K' = 0x4B
+    *(xbuf + 3) = 77;   // 'M' = 0x4D
+    *(xbuf + 4) = 65;   // 'A' = 0x41
+    *(xbuf + 5) = 67;   // 'C' = 0x43
+    *(xbuf + 6) = 1;    // left_encode(0) length byte
+    *(xbuf + 7) = 0;    // left_encode(0) value: bit length of ""
+    xlen: u32 = 8;
+
+    prefix = allocate(136);
+    bytepad(xbuf, xlen, prefix, 136);
+    free(xbuf);
+
+    // --- Build the encoded key: bytepad(encode_string(key), 136) ---
+    enc_key_buf = allocate(280);
+    enc_key_len: u32 = encode_string(key, key_len, enc_key_buf);
+    enc_key = allocate(136);
+    bytepad(enc_key_buf, enc_key_len, enc_key, 136);
+    free(enc_key_buf);
+
+    // --- Build right_encode(out_len * 8) — the requested output length in bits ---
     right_buf = allocate(8);
     right_len: u32 = right_encode(right_buf, out_len * 8);
 
-    // Build: key || bytepad(encode_string(""), 136) || msg || right_encode(out_len*8)
-    total_len: u32 = key_len + 136 + msg_len + right_len;
+    // --- Concatenate: prefix || enc_key || msg || right_encode(out_len * 8) ---
+    total_len: u32 = 136 + 136 + msg_len + right_len;
     input = allocate(total_len);
     pos: u32 = 0;
 
-    // key
+    // Copy prefix (136 bytes)
     i: u32 = 0;
-    while i < key_len {
-        *(input + pos + i) = *(key + i);
-        i = i + 1;
-    }
-    pos = pos + key_len;
-
-    // bytepad(encode_string(""), 136)
-    // encode_string("") = [0x01, 0x00]
-    es = allocate(8);
-    *(es + 0) = 1;
-    *(es + 1) = 0;
-    bp = allocate(136);
-    bytepad(es, 2, bp, 136);
-    free(es);
-    i = 0;
     while i < 136 {
-        *(input + pos + i) = *(bp + i);
+        *(input + pos + i) = *(prefix + i);
         i = i + 1;
     }
     pos = pos + 136;
-    free(bp);
 
-    // msg
+    // Copy encoded key (136 bytes)
+    i = 0;
+    while i < 136 {
+        *(input + pos + i) = *(enc_key + i);
+        i = i + 1;
+    }
+    pos = pos + 136;
+
+    // Copy message (msg_len bytes)
     i = 0;
     while i < msg_len {
         *(input + pos + i) = *(msg + i);
@@ -1194,17 +1507,19 @@ fn kmac256(key: Address, key_len: u32, msg: Address, msg_len: u32, out: Address,
     }
     pos = pos + msg_len;
 
-    // right_encode(out_len * 8)
+    // Copy right_encode(out_len * 8) (right_len bytes)
     i = 0;
     while i < right_len {
         *(input + pos + i) = *(right_buf + i);
         i = i + 1;
     }
     pos = pos + right_len;
+
+    // Absorb with cSHAKE domain separator (0x04) since N = "KMAC" is non-empty
+    keccak_sponge(rate, 4, input, total_len, out, out_len);
+
+    free(prefix);
+    free(enc_key);
     free(right_buf);
-
-    // N="" and S="" => cSHAKE reduces to SHAKE256 => domain_sep = 0x1F
-    keccak_sponge(rate, 31, input, total_len, out, out_len);
-
     free(input);
 }

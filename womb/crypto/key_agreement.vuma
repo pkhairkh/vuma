@@ -16,19 +16,23 @@
 //                        swap_endian_48(dst, src)
 //                        p384_scalar_mul(rx, ry, k_le, px_le, py_le, p_le)
 //                          (384-bit scalar multiplication, 48-byte little-endian
-//                           elements — the P-384 analogue of p256_scalar_mul)
+//                           elements — provided by ecdsa_p384.vuma)
 //   bignum2048.vuma  — 2048-bit bignum (256-byte little-endian limbs):
 //                        bn2048_mod_exp(r, a, exp, m)   r = a^exp mod m
 //                        bn2048_zero, bn2048_copy, bn2048_cmp, bn2048_is_zero,
 //                        bn2048_add, bn2048_sub, bn2048_mod_mul, ...
-//   bignum.vuma      — 256-bit bignum (bn256_*) and ecdsa_p256.vuma (p256_*)
-//                      — referenced for completeness; not called directly here.
 //   sha256_oneshot, sha512_oneshot — available if a caller wants to derive a
 //                      digest from the raw shared secret.
 //
 // Memory model: every function allocates its own working buffers via
 // allocate() and releases them with free() before returning. All public
 // entry points write their outputs into caller-supplied buffers.
+//
+// Error handling: dh_generate and dh_shared_secret use a single return path.
+// Each step is guarded by an `err == 0` check, and any failure sets `err` and
+// skips subsequent work, falling through to one common cleanup section that
+// frees every allocation exactly once. This eliminates early returns and
+// makes resource ownership explicit.
 //
 // Endianness conventions:
 //   - P-384 inputs/outputs: 48-byte big-endian (network order), matching the
@@ -97,7 +101,9 @@ fn ecdh_p384_keygen(privkey_be: Address, pubkey_x_be: Address, pubkey_y_be: Addr
 //   peer_x_be    : 48-byte big-endian peer public key x
 //   peer_y_be    : 48-byte big-endian peer public key y
 //   shared       : 48-byte big-endian x-coordinate of S = d*Q_peer (output)
-fn ecdh_p384_shared_secret(privkey_be: Address, peer_x_be: Address, peer_y_be: Address, shared: Address) {
+// Returns 1 on success, 0 if the resulting shared point is the point at
+// infinity (which signals an invalid peer key or active attack).
+fn ecdh_p384_shared_secret(privkey_be: Address, peer_x_be: Address, peer_y_be: Address, shared: Address) -> u32 {
     // Convert inputs to little-endian
     d_le = allocate(48);
     swap_endian_48(d_le, privkey_be);
@@ -117,10 +123,25 @@ fn ecdh_p384_shared_secret(privkey_be: Address, peer_x_be: Address, peer_y_be: A
     sy_le = allocate(48);
     p384_scalar_mul(sx_le, sy_le, d_le, qx_le, qy_le, p_le);
 
-    // Shared secret is the x-coordinate (big-endian)
-    swap_endian_48(shared, sx_le);
+    // Reject point-at-infinity shared secret (both coordinates zero)
+    ok: u32 = 1;
+    inf_x: u32 = 1;
+    inf_y: u32 = 1;
+    i: u32 = 0;
+    while i < 48 {
+        if *(sx_le + i) != 0 { inf_x = 0; }
+        if *(sy_le + i) != 0 { inf_y = 0; }
+        i = i + 1;
+    }
+    if inf_x == 1 && inf_y == 1 { ok = 0; }
+
+    if ok == 1 {
+        // Shared secret is the x-coordinate (big-endian)
+        swap_endian_48(shared, sx_le);
+    }
 
     free(d_le); free(qx_le); free(qy_le); free(p_le); free(sx_le); free(sy_le);
+    return ok;
 }
 
 
@@ -142,6 +163,8 @@ fn ecdh_p384_shared_secret(privkey_be: Address, peer_x_be: Address, peer_y_be: A
 //   0  success
 //   1  prime_len == 0
 //   2  prime_len > 256
+// All functions use a single return path: each step is guarded by an err
+// flag, and the cleanup section runs unconditionally before the final return.
 
 // Widen a prime_len-byte big-endian integer into a 256-byte little-endian
 // limb buffer (high bytes zero-filled). Used to feed bn2048_* routines.
@@ -189,27 +212,30 @@ fn ka_copy_bytes(dst: Address, src: Address, len: u32) {
 //   private_val  : prime_len-byte big-endian private exponent x
 // Returns 0 on success, nonzero on invalid prime_len.
 fn dh_generate(keypair: Address, generator: Address, prime: Address, prime_len: u32, private_val: Address) -> u32 {
-    if prime_len == 0 { return 1; }
-    if prime_len > 256 { return 2; }
+    err: u32 = 0;
+    if prime_len == 0 { err = 1; }
+    if prime_len > 256 { err = 2; }
 
     gen_le   = allocate(256);
     priv_le  = allocate(256);
     prime_le = allocate(256);
     pub_le   = allocate(256);
 
-    ka_be_to_le256(gen_le,   generator,   prime_len);
-    ka_be_to_le256(priv_le,  private_val, prime_len);
-    ka_be_to_le256(prime_le, prime,       prime_len);
+    if err == 0 {
+        ka_be_to_le256(gen_le,   generator,   prime_len);
+        ka_be_to_le256(priv_le,  private_val, prime_len);
+        ka_be_to_le256(prime_le, prime,       prime_len);
 
-    // public = generator ^ private  mod prime
-    bn2048_mod_exp(pub_le, gen_le, priv_le, prime_le);
+        // public = generator ^ private  mod prime
+        bn2048_mod_exp(pub_le, gen_le, priv_le, prime_le);
 
-    // Lay out the keypair: public then private, both big-endian.
-    ka_le256_to_be(keypair,             pub_le,      prime_len);
-    ka_copy_bytes(keypair + prime_len,  private_val, prime_len);
+        // Lay out the keypair: public then private, both big-endian.
+        ka_le256_to_be(keypair,             pub_le,      prime_len);
+        ka_copy_bytes(keypair + prime_len,  private_val, prime_len);
+    }
 
     free(gen_le); free(priv_le); free(prime_le); free(pub_le);
-    return 0;
+    return err;
 }
 
 // Compute a DH shared secret.
@@ -220,25 +246,28 @@ fn dh_generate(keypair: Address, generator: Address, prime: Address, prime_len: 
 //   shared    : prime_len-byte big-endian shared secret = peer_pub^x mod p (out)
 // Returns 0 on success, nonzero on invalid prime_len.
 fn dh_shared_secret(priv: Address, peer_pub: Address, prime: Address, prime_len: u32, shared: Address) -> u32 {
-    if prime_len == 0 { return 1; }
-    if prime_len > 256 { return 2; }
+    err: u32 = 0;
+    if prime_len == 0 { err = 1; }
+    if prime_len > 256 { err = 2; }
 
     priv_le  = allocate(256);
     peer_le  = allocate(256);
     prime_le = allocate(256);
     shared_le = allocate(256);
 
-    ka_be_to_le256(priv_le,  priv,     prime_len);
-    ka_be_to_le256(peer_le,  peer_pub, prime_len);
-    ka_be_to_le256(prime_le, prime,    prime_len);
+    if err == 0 {
+        ka_be_to_le256(priv_le,  priv,     prime_len);
+        ka_be_to_le256(peer_le,  peer_pub, prime_len);
+        ka_be_to_le256(prime_le, prime,    prime_len);
 
-    // shared = peer_pub ^ priv  mod prime
-    bn2048_mod_exp(shared_le, peer_le, priv_le, prime_le);
+        // shared = peer_pub ^ priv  mod prime
+        bn2048_mod_exp(shared_le, peer_le, priv_le, prime_le);
 
-    ka_le256_to_be(shared, shared_le, prime_len);
+        ka_le256_to_be(shared, shared_le, prime_len);
+    }
 
     free(priv_le); free(peer_le); free(prime_le); free(shared_le);
-    return 0;
+    return err;
 }
 
 // RFC 7919 ffdhe2048 prime (256 bytes, big-endian).
@@ -285,6 +314,34 @@ fn ffdhe2048_prime() -> Address {
 // RFC 7919 ffdhe2048 generator. g = 2.
 fn ffdhe2048_generator() -> u32 {
     return 2;
+}
+
+// Convenience: generate an FFDHE2048 keypair using the standard prime and g=2.
+//   keypair     : output buffer, 512 bytes (256 public + 256 private)
+//   private_val : 256-byte big-endian private exponent x (caller-supplied)
+// Returns 0 on success.
+fn ffdhe2048_keygen(keypair: Address, private_val: Address) -> u32 {
+    prime = ffdhe2048_prime();
+    // Build the 256-byte big-endian representation of g = 2.
+    g_buf = allocate(256);
+    i: u32 = 0;
+    while i < 256 { *(g_buf + i) = 0; i = i + 1; }
+    *(g_buf + 255) = 2;
+    rc: u32 = dh_generate(keypair, g_buf, prime, 256, private_val);
+    free(prime); free(g_buf);
+    return rc;
+}
+
+// Convenience: compute an FFDHE2048 shared secret.
+//   priv      : 256-byte big-endian our private exponent x
+//   peer_pub  : 256-byte big-endian peer public value
+//   shared    : 256-byte big-endian shared secret (output)
+// Returns 0 on success.
+fn ffdhe2048_shared_secret(priv: Address, peer_pub: Address, shared: Address) -> u32 {
+    prime = ffdhe2048_prime();
+    rc: u32 = dh_shared_secret(priv, peer_pub, prime, 256, shared);
+    free(prime);
+    return rc;
 }
 
 
@@ -550,9 +607,9 @@ fn fe448_cswap(swap: u32, a: Address, b: Address) {
     while i < 56 {
         av: u32 = *(a + i);
         bv: u32 = *(b + i);
-        dummy: u32 = (av ^ bv) & mask;
-        *(a + i) = av ^ dummy;
-        *(b + i) = bv ^ dummy;
+        diff: u32 = (av ^ bv) & mask;
+        *(a + i) = av ^ diff;
+        *(b + i) = bv ^ diff;
         i = i + 1;
     }
 }
@@ -689,6 +746,10 @@ fn x448_keygen(privkey: Address, pubkey: Address) {
 //   privkey     : 56-byte little-endian our private scalar
 //   peer_pubkey : 56-byte little-endian peer public u-coordinate
 //   shared      : 56-byte little-endian shared secret = X448(privkey, peer_pubkey)
-fn x448_shared_secret(privkey: Address, peer_pubkey: Address, shared: Address) {
+// Returns 1 on success, 0 if the resulting shared secret is all-zero (low-order
+// point per RFC 7748 Section 6.1).
+fn x448_shared_secret(privkey: Address, peer_pubkey: Address, shared: Address) -> u32 {
     x448_scalarmult(shared, privkey, peer_pubkey);
+    if fe448_is_zero(shared) == 1 { return 0; }
+    return 1;
 }
