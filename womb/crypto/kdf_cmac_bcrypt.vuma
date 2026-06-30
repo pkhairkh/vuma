@@ -1,11 +1,11 @@
-// kdf_cmac_bcrypt.vuma — KDF (SP 800-108), AES-CMAC (SP 800-38B), bcrypt
-// No main() — importable library module.
+// womb/crypto/kdf_cmac_bcrypt.vuma — KDF (SP 800-108), AES-CMAC (SP 800-38B),
+// bcrypt (RFC 6964 Provos-Mazières). No main().
 //
-// Assumed external functions (resolved at link time from sibling modules):
-//   sha256_oneshot(data: Address, len: u32, out: Address)
-//   hmac_sha256(key: Address, keylen: u32, msg: Address, msglen: u32, out: Address)
-//   hmac_sha512(key: Address, keylen: u32, msg: Address, msglen: u32, out: Address)
-//   aes256_encrypt_block(plaintext: Address, key: Address, ciphertext: Address)
+// Externally resolved symbols (linked from sibling modules):
+//   sha256_oneshot(data, len, out)
+//   hmac_sha256(key, keylen, msg, msglen, out)
+//   hmac_sha512(key, keylen, msg, msglen, out)
+//   aes256_encrypt_block(plaintext, key, ciphertext)
 //
 // Public API:
 //   kdf_counter(kin, kin_len, label, label_len, context, context_len,
@@ -14,12 +14,12 @@
 //                out, out_len)
 //   kdf_pipeline(kin, kin_len, label, label_len, context, context_len,
 //                out, out_len)
-//   aes_cmac(key, msg, msg_len, out)
+//   aes_cmac_kdf(key, msg, msg_len, out)             [renamed to avoid clash
+//                                                     with aes_extra_modes.vuma]
 //   bcrypt_hash(password, pass_len, salt, cost, hash_out) -> u32
 //
-// Internal helpers (prefixed kc_/bf_/cmac_) are kept locally to avoid symbol
-// clashes when this module is linked alongside sha256.vuma / aes256.vuma /
-// hmac_sha256.vuma (which define their own load_u32_be / MASK32 etc.).
+// Internal helpers are prefixed kc_/bf_/cmac_ to avoid symbol clashes when
+// this module is linked alongside sha256.vuma / aes256.vuma / hmac.vuma.
 
 const KC_MASK32: u32 = 4294967295;
 
@@ -59,7 +59,7 @@ fn kc_memzero(dst: Address, n: u32) {
 }
 
 // ===========================================================================
-// PRF dispatcher for the KDF constructions
+// PRF dispatcher for the KDF constructions.
 //   hash_func == 0 -> HMAC-SHA-256 (hLen = 32)
 //   hash_func == 1 -> HMAC-SHA-512 (hLen = 64)
 // ===========================================================================
@@ -79,9 +79,8 @@ fn kc_prf(hash_func: u32, key: Address, key_len: u32,
 }
 
 // ===========================================================================
-// 1. KDF in Counter Mode (SP 800-108 Section 5.1)
+// 1. KDF in Counter Mode (SP 800-108 Section 5.1).
 //    K(i) = PRF(Kin, [i]_2 || Label || 0x00 || Context || [L]_2)
-//    [i]_2 = i as 32-bit big-endian, [L]_2 = (out_len*8) as 32-bit big-endian.
 //    Output = K(1) || K(2) || ... truncated to out_len.
 // ===========================================================================
 
@@ -89,186 +88,171 @@ fn kdf_counter(kin: Address, kin_len: u32,
                label: Address, label_len: u32,
                context: Address, context_len: u32,
                out: Address, out_len: u32, hash_func: u32) {
-    if out_len == 0 { return; }
+    if out_len > 0 {
+        hLen: u32 = kc_hlen(hash_func);
+        L_bits: u32 = out_len * 8;
+        n: u32 = (out_len + hLen - 1) / hLen;   // ceil(out_len / hLen)
 
-    hLen: u32 = kc_hlen(hash_func);
-    L_bits: u32 = out_len * 8;
-    n: u32 = (out_len + hLen - 1) / hLen;   // ceil(out_len / hLen)
+        i: u32 = 1;
+        produced: u32 = 0;
+        done: u32 = 0;
+        while done == 0 {
+            in_len: u32 = 4 + label_len + 1 + context_len + 4;
+            buf = allocate(in_len);
+            kc_store_u32_be(buf, 0, i);
+            kc_memcpy(buf + 4, label, label_len);
+            *(buf + 4 + label_len) = 0;
+            kc_memcpy(buf + 4 + label_len + 1, context, context_len);
+            kc_store_u32_be(buf, 4 + label_len + 1 + context_len, L_bits);
 
-    i: u32 = 1;
-    produced: u32 = 0;
-    while i <= n {
-        in_len: u32 = 4 + label_len + 1 + context_len + 4;
-        buf = allocate(in_len);
-        // [i]_2
-        kc_store_u32_be(buf, 0, i);
-        // Label
-        kc_memcpy(buf + 4, label, label_len);
-        // 0x00 separator
-        *(buf + 4 + label_len) = 0;
-        // Context
-        kc_memcpy(buf + 4 + label_len + 1, context, context_len);
-        // [L]_2
-        kc_store_u32_be(buf, 4 + label_len + 1 + context_len, L_bits);
+            kblock = allocate(hLen);
+            kc_prf(hash_func, kin, kin_len, buf, in_len, kblock);
 
-        kblock = allocate(hLen);
-        kc_prf(hash_func, kin, kin_len, buf, in_len, kblock);
+            remain: u32 = out_len - produced;
+            take: u32 = hLen;
+            if remain < take { take = remain; }
+            kc_memcpy(out + produced, kblock, take);
+            produced = produced + take;
 
-        remain: u32 = out_len - produced;
-        take: u32 = hLen;
-        if remain < take { take = remain; }
-        kc_memcpy(out + produced, kblock, take);
-        produced = produced + take;
+            free(buf);
+            free(kblock);
 
-        free(buf);
-        free(kblock);
-
-        if produced >= out_len { break; }
-        i = i + 1;
+            if produced >= out_len { done = 1; }
+            else {
+                if i >= n { done = 1; }
+                else { i = i + 1; }
+            }
+        }
     }
 }
 
 // ===========================================================================
-// 2. KDF in Feedback Mode (SP 800-108 Section 5.2)
+// 2. KDF in Feedback Mode (SP 800-108 Section 5.2).
 //    K(0) = 0x00 * hLen.
 //    K(i) = PRF(Kin, K(i-1) || [i]_2 || Label || 0x00 || Context || [L]_2).
-//    PRF is HMAC-SHA-256 (hLen = 32). Output truncated to out_len.
 // ===========================================================================
 
 fn kdf_feedback(kin: Address, kin_len: u32,
                 label: Address, label_len: u32,
                 context: Address, context_len: u32,
                 out: Address, out_len: u32) {
-    if out_len == 0 { return; }
+    if out_len > 0 {
+        hash_func: u32 = 0;
+        hLen: u32 = 32;
+        L_bits: u32 = out_len * 8;
 
-    hash_func: u32 = 0;   // HMAC-SHA-256
-    hLen: u32 = 32;
-    L_bits: u32 = out_len * 8;
+        kprev = allocate(hLen);
+        kc_memzero(kprev, hLen);
 
-    kprev = allocate(hLen);
-    kc_memzero(kprev, hLen);   // K(0) = 0x00 * hLen
+        i: u32 = 1;
+        produced: u32 = 0;
+        while produced < out_len {
+            in_len: u32 = hLen + 4 + label_len + 1 + context_len + 4;
+            buf = allocate(in_len);
+            kc_memcpy(buf, kprev, hLen);
+            kc_store_u32_be(buf, hLen, i);
+            kc_memcpy(buf + hLen + 4, label, label_len);
+            *(buf + hLen + 4 + label_len) = 0;
+            kc_memcpy(buf + hLen + 4 + label_len + 1, context, context_len);
+            kc_store_u32_be(buf, hLen + 4 + label_len + 1 + context_len, L_bits);
 
-    i: u32 = 1;
-    produced: u32 = 0;
-    while produced < out_len {
-        in_len: u32 = hLen + 4 + label_len + 1 + context_len + 4;
-        buf = allocate(in_len);
-        // K(i-1)
-        kc_memcpy(buf, kprev, hLen);
-        // [i]_2
-        kc_store_u32_be(buf, hLen, i);
-        // Label
-        kc_memcpy(buf + hLen + 4, label, label_len);
-        // 0x00
-        *(buf + hLen + 4 + label_len) = 0;
-        // Context
-        kc_memcpy(buf + hLen + 4 + label_len + 1, context, context_len);
-        // [L]_2
-        kc_store_u32_be(buf, hLen + 4 + label_len + 1 + context_len, L_bits);
+            kblock = allocate(hLen);
+            kc_prf(hash_func, kin, kin_len, buf, in_len, kblock);
 
-        kblock = allocate(hLen);
-        kc_prf(hash_func, kin, kin_len, buf, in_len, kblock);
+            remain: u32 = out_len - produced;
+            take: u32 = hLen;
+            if remain < take { take = remain; }
+            kc_memcpy(out + produced, kblock, take);
+            produced = produced + take;
 
-        remain: u32 = out_len - produced;
-        take: u32 = hLen;
-        if remain < take { take = remain; }
-        kc_memcpy(out + produced, kblock, take);
-        produced = produced + take;
+            kc_memcpy(kprev, kblock, hLen);
 
-        // K(i) becomes K(i-1) for the next iteration
-        kc_memcpy(kprev, kblock, hLen);
-
-        free(buf);
-        free(kblock);
-        i = i + 1;
+            free(buf);
+            free(kblock);
+            i = i + 1;
+        }
+        free(kprev);
     }
-    free(kprev);
 }
 
 // ===========================================================================
-// 3. KDF in Double-Pipeline Mode (SP 800-108 Section 5.3)
+// 3. KDF in Double-Pipeline Mode (SP 800-108 Section 5.3).
 //    A(0) = PRF(Kin, [0x03] || Label || 0x00 || Context || [L]_2)
 //    A(i) = PRF(Kin, A(i-1))
 //    K(i) = PRF(Kin, A(i-1) || [i]_2 || Label || 0x00 || Context || [L]_2)
-//    PRF is HMAC-SHA-256 (hLen = 32). Output truncated to out_len.
 // ===========================================================================
 
 fn kdf_pipeline(kin: Address, kin_len: u32,
                 label: Address, label_len: u32,
                 context: Address, context_len: u32,
                 out: Address, out_len: u32) {
-    if out_len == 0 { return; }
+    if out_len > 0 {
+        hash_func: u32 = 0;
+        hLen: u32 = 32;
+        L_bits: u32 = out_len * 8;
 
-    hash_func: u32 = 0;   // HMAC-SHA-256
-    hLen: u32 = 32;
-    L_bits: u32 = out_len * 8;
+        // A(0) = PRF(Kin, [0x03] || Label || 0x00 || Context || [L]_2)
+        a = allocate(hLen);
+        a_in_len: u32 = 1 + label_len + 1 + context_len + 4;
+        abuf = allocate(a_in_len);
+        *(abuf + 0) = 3;
+        kc_memcpy(abuf + 1, label, label_len);
+        *(abuf + 1 + label_len) = 0;
+        kc_memcpy(abuf + 1 + label_len + 1, context, context_len);
+        kc_store_u32_be(abuf, 1 + label_len + 1 + context_len, L_bits);
+        kc_prf(hash_func, kin, kin_len, abuf, a_in_len, a);
+        free(abuf);
 
-    // A(0) = PRF(Kin, [0x03] || Label || 0x00 || Context || [L]_2)
-    a = allocate(hLen);
-    a_in_len: u32 = 1 + label_len + 1 + context_len + 4;
-    abuf = allocate(a_in_len);
-    *(abuf + 0) = 3;   // 0x03 indicator byte
-    kc_memcpy(abuf + 1, label, label_len);
-    *(abuf + 1 + label_len) = 0;
-    kc_memcpy(abuf + 1 + label_len + 1, context, context_len);
-    kc_store_u32_be(abuf, 1 + label_len + 1 + context_len, L_bits);
-    kc_prf(hash_func, kin, kin_len, abuf, a_in_len, a);
-    free(abuf);
+        i: u32 = 1;
+        produced: u32 = 0;
+        while produced < out_len {
+            in_len: u32 = hLen + 4 + label_len + 1 + context_len + 4;
+            buf = allocate(in_len);
+            kc_memcpy(buf, a, hLen);
+            kc_store_u32_be(buf, hLen, i);
+            kc_memcpy(buf + hLen + 4, label, label_len);
+            *(buf + hLen + 4 + label_len) = 0;
+            kc_memcpy(buf + hLen + 4 + label_len + 1, context, context_len);
+            kc_store_u32_be(buf, hLen + 4 + label_len + 1 + context_len, L_bits);
 
-    i: u32 = 1;
-    produced: u32 = 0;
-    while produced < out_len {
-        in_len: u32 = hLen + 4 + label_len + 1 + context_len + 4;
-        buf = allocate(in_len);
-        // A(i-1)
-        kc_memcpy(buf, a, hLen);
-        // [i]_2
-        kc_store_u32_be(buf, hLen, i);
-        // Label
-        kc_memcpy(buf + hLen + 4, label, label_len);
-        // 0x00
-        *(buf + hLen + 4 + label_len) = 0;
-        // Context
-        kc_memcpy(buf + hLen + 4 + label_len + 1, context, context_len);
-        // [L]_2
-        kc_store_u32_be(buf, hLen + 4 + label_len + 1 + context_len, L_bits);
+            kblock = allocate(hLen);
+            kc_prf(hash_func, kin, kin_len, buf, in_len, kblock);
 
-        kblock = allocate(hLen);
-        kc_prf(hash_func, kin, kin_len, buf, in_len, kblock);
+            remain: u32 = out_len - produced;
+            take: u32 = hLen;
+            if remain < take { take = remain; }
+            kc_memcpy(out + produced, kblock, take);
+            produced = produced + take;
 
-        remain: u32 = out_len - produced;
-        take: u32 = hLen;
-        if remain < take { take = remain; }
-        kc_memcpy(out + produced, kblock, take);
-        produced = produced + take;
+            // A(i) = PRF(Kin, A(i-1))
+            anext = allocate(hLen);
+            kc_prf(hash_func, kin, kin_len, a, hLen, anext);
+            kc_memcpy(a, anext, hLen);
+            free(anext);
 
-        // A(i) = PRF(Kin, A(i-1))
-        anext = allocate(hLen);
-        kc_prf(hash_func, kin, kin_len, a, hLen, anext);
-        kc_memcpy(a, anext, hLen);
-        free(anext);
-
-        free(buf);
-        free(kblock);
-        i = i + 1;
+            free(buf);
+            free(kblock);
+            i = i + 1;
+        }
+        free(a);
     }
-    free(a);
 }
 
 // ===========================================================================
-// 4. AES-CMAC (SP 800-38B)
+// 4. AES-CMAC (SP 800-38B) — renamed to aes_cmac_kdf to avoid symbol
+//    conflict with aes_extra_modes.vuma (Wave 1.1).
 //    Subkey gen: L = AES_key(0^128); K1 = L<<1 (XOR 0x87 if MSB(L)=1);
 //                K2 = K1<<1 (XOR 0x87 if MSB(K1)=1).
 //    Final block: XOR with K1 if complete, or (M_n || 10..0) XOR K2 if not.
 // ===========================================================================
 
-// Shift a 16-byte big-endian value left by 1 bit. Returns the bit shifted out
-// of the most-significant end (byte 0, bit 7) — i.e. the MSB of the input.
+// Shift a 16-byte big-endian value left by 1 bit. Returns the bit shifted
+// out of the most-significant end (byte 0, bit 7).
 fn cmac_shift_left(in_addr: Address, out_addr: Address) -> u32 {
     carry: u32 = 0;
     j: u32 = 0;
     while j < 16 {
-        idx: u32 = 15 - j;          // process from LSB (15) up to MSB (0)
+        idx: u32 = 15 - j;
         b: u32 = *(in_addr + idx);
         newcarry: u32 = (b >> 7) & 1;
         *(out_addr + idx) = ((b << 1) | carry) & 255;
@@ -278,8 +262,8 @@ fn cmac_shift_left(in_addr: Address, out_addr: Address) -> u32 {
     return carry;
 }
 
-fn aes_cmac(key: Address, msg: Address, msg_len: u32, out: Address) {
-    // --- Subkey generation ---
+fn aes_cmac_kdf(key: Address, msg: Address, msg_len: u32, out: Address) {
+    // Subkey generation
     zero = allocate(16);
     kc_memzero(zero, 16);
     L = allocate(16);
@@ -289,7 +273,7 @@ fn aes_cmac(key: Address, msg: Address, msg_len: u32, out: Address) {
     k1 = allocate(16);
     msb: u32 = cmac_shift_left(L, k1);
     if msb == 1 {
-        *(k1 + 15) = (*(k1 + 15) ^ 135) & 255;   // 0x87 = 135
+        *(k1 + 15) = (*(k1 + 15) ^ 135) & 255;   // 0x87
     }
     free(L);
 
@@ -299,7 +283,7 @@ fn aes_cmac(key: Address, msg: Address, msg_len: u32, out: Address) {
         *(k2 + 15) = (*(k2 + 15) ^ 135) & 255;
     }
 
-    // --- Block layout ---
+    // Block layout
     num_blocks: u32 = (msg_len + 15) / 16;
     if num_blocks == 0 { num_blocks = 1; }
     complete: u32 = 0;
@@ -307,34 +291,36 @@ fn aes_cmac(key: Address, msg: Address, msg_len: u32, out: Address) {
         if msg_len % 16 == 0 { complete = 1; }
     }
 
-    X = allocate(16);   // running CBC state, starts at 0^128
+    X = allocate(16);
     kc_memzero(X, 16);
-    Y = allocate(16);   // scratch (X XOR block)
+    Y = allocate(16);
     last = allocate(16);
 
-    // --- Process all blocks except the last ---
+    // Process all blocks except the last
     i: u32 = 0;
-    while i < num_blocks - 1 {
+    while i + 1 < num_blocks {
         k: u32 = 0;
         while k < 16 {
             *(Y + k) = (*(X + k) ^ *(msg + i * 16 + k)) & 255;
             k = k + 1;
         }
-        aes256_encrypt_block(Y, key, X);   // X = AES(Y)
+        aes256_encrypt_block(Y, key, X);
         i = i + 1;
     }
 
-    // --- Last block: pad if incomplete, XOR with K1 (complete) or K2 (padded) ---
+    // Last block: pad if incomplete, XOR with K1 (complete) or K2 (padded)
     k: u32 = 0;
     while k < 16 {
-        lastpos: u32 = (num_blocks - 1) * 16 + k;
+        lastpos: u32 = i * 16 + k;
         mb: u32 = 0;
         if lastpos < msg_len {
             mb = *(msg + lastpos);
-        } else if lastpos == msg_len {
-            mb = 128;        // 0x80 padding bit
         } else {
-            mb = 0;
+            if lastpos == msg_len {
+                mb = 128;       // 0x80 padding bit
+            } else {
+                mb = 0;
+            }
         }
         kk: u32 = 0;
         if complete == 1 { kk = *(k1 + k); } else { kk = *(k2 + k); }
@@ -350,32 +336,23 @@ fn aes_cmac(key: Address, msg: Address, msg_len: u32, out: Address) {
     }
     aes256_encrypt_block(Y, key, out);
 
-    free(k1);
-    free(k2);
-    free(X);
-    free(Y);
-    free(last);
+    free(k1); free(k2); free(X); free(Y); free(last);
 }
 
 // ===========================================================================
-// 5. bcrypt — password hashing via Eksblowfish
+// 5. bcrypt — password hashing via Eksblowfish (RFC 6964 Provos-Mazières).
 //
-// Minimal Blowfish (Feistel, 16 rounds, 18-entry P-array + 4x256 S-boxes).
-// The standard Blowfish P/S init constants (fractional hex digits of pi) are
-// replaced here by a deterministic LCG fill seeded with 0x243F6A88 (the first
-// standard Blowfish P-array word) so the cipher is self-contained and
-// reproducible while preserving the Eksblowfish *structure*. This is the
-// "simplified / minimal" Blowfish called for by the task.
-//
-// bcrypt flow:
-//   1. eks_blowfish_setup: blowfish_init (fill + key XOR + 1 salted expand),
-//      then (2^cost - 1) more salted expands for a total of 2^cost expansions.
-//   2. Encrypt the 24-byte magic "OrpheanBeholderScryDoubt" 64 times
-//      (3 blocks of 8 bytes per iteration) -> 24-byte hash output.
-//
-// The task's "64 rounds of modified Blowfish" is realized as the 64 magic-
-// string encryption iterations of real bcrypt; the Feistel uses the standard
-// 16-round depth (BF_ROUNDS).
+// Blowfish is a 16-round Feistel cipher with an 18-entry P-array and four
+// 256-entry S-boxes. The standard Blowfish init constants are the first
+// 1042 32-bit words of the fractional part of pi (in hex). To keep this
+// module self-contained (no embedded 4 KiB constant table) we generate the
+// initial P/S state from a 32-bit LCG seeded with 0x243F6A88 — the first
+// standard Blowfish P-array word. The Eksblowfish key schedule then mixes
+// the password and salt into this state over 2^cost rounds; the magic
+// string "OrpheanBeholderScryDoubt" is encrypted 64 times to derive the
+// 24-byte bcrypt hash. This preserves the bcrypt *structure* (memory-cost
+// parameter, Eksblowfish expansion, magic-string encryption) but does not
+// reproduce OpenBSD-compatible bcrypt strings.
 //
 // Context layout (BF_CTX_SIZE = 4168 bytes):
 //   [0..71]     P-array: 18 x u32 (big-endian)
@@ -383,9 +360,9 @@ fn aes_cmac(key: Address, msg: Address, msg_len: u32, out: Address) {
 // salt is assumed to point to 16 bytes (128 bits).
 // ===========================================================================
 
-const BF_P_OFFSET: u32 = 0;       // P-array base offset
-const BF_S_OFFSET: u32 = 72;      // S-box base offset
-const BF_CTX_SIZE: u32 = 4168;    // 72 + 4*256*4
+const BF_P_OFFSET: u32 = 0;
+const BF_S_OFFSET: u32 = 72;
+const BF_CTX_SIZE: u32 = 4168;
 const BF_ROUNDS: u32 = 16;
 
 fn bf_get_p(ctx: Address, i: u32) -> u32 {
@@ -404,7 +381,8 @@ fn bf_set_s(ctx: Address, box_idx: u32, j: u32, v: u32) {
     kc_store_u32_be(ctx, BF_S_OFFSET + (box_idx * 256 + j) * 4, v);
 }
 
-// 32-bit LCG (Numerical Recipes constants) for deterministic P/S init.
+// 32-bit LCG (Numerical Recipes constants). Seeded with 0x243F6A88, the
+// first standard Blowfish P-array word.
 fn bf_lcg_next(state_addr: Address) -> u32 {
     s: u32 = kc_load_u32_be(state_addr, 0);
     s = (s * 1664525 + 1013904223) & KC_MASK32;
@@ -412,8 +390,7 @@ fn bf_lcg_next(state_addr: Address) -> u32 {
     return s;
 }
 
-// Blowfish F function:
-//   F(x) = ((S0[a] + S1[b]) XOR S2[c]) + S3[d]   (mod 2^32)
+// Blowfish F function: F(x) = ((S0[a] + S1[b]) XOR S2[c]) + S3[d] mod 2^32
 fn bf_f(ctx: Address, x: u32) -> u32 {
     a: u32 = (x >> 24) & 255;
     b: u32 = (x >> 16) & 255;
@@ -429,8 +406,8 @@ fn bf_f(ctx: Address, x: u32) -> u32 {
     return t;
 }
 
-// Standard 16-round Blowfish encryption of a 64-bit block held as two u32
-// words (big-endian) at *left and *right. In-place.
+// Standard 16-round Blowfish encryption of a 64-bit block held as two
+// big-endian u32 words at *left and *right. In-place.
 fn blowfish_encrypt(ctx: Address, left: Address, right: Address) {
     L: u32 = kc_load_u32_be(left, 0);
     R: u32 = kc_load_u32_be(right, 0);
@@ -439,7 +416,7 @@ fn blowfish_encrypt(ctx: Address, left: Address, right: Address) {
     while i < BF_ROUNDS {
         L = L ^ bf_get_p(ctx, i);
         R = R ^ bf_f(ctx, L);
-        tmp = L; L = R; R = tmp;   // swap
+        tmp = L; L = R; R = tmp;
         i = i + 1;
     }
     tmp = L; L = R; R = tmp;       // undo final swap
@@ -449,9 +426,9 @@ fn blowfish_encrypt(ctx: Address, left: Address, right: Address) {
     kc_store_u32_be(right, 0, R);
 }
 
-// Eksblowfish state expansion with salt. Re-derives the P-array (9 pairs) and
-// all four S-boxes (4 x 128 pairs each) by repeatedly encrypting (L,R) where
-// the running L,R are XORed with successive 32-bit salt words (cycled).
+// Eksblowfish state expansion with salt. Re-derives the P-array (9 pairs)
+// and all four S-boxes (4 x 128 pairs each) by repeatedly encrypting
+// (L, R) XORed with successive 32-bit salt words (cycled).
 fn blowfish_expand_state(ctx: Address, salt: Address) {
     L: u32 = 0;
     R: u32 = 0;
@@ -506,7 +483,7 @@ fn blowfish_expand_state(ctx: Address, salt: Address) {
 }
 
 // Initialise the Blowfish context:
-//   1. Deterministic LCG fill of P and S (seed 0x243F6A88).
+//   1. Deterministic LCG fill of P and S (seed = 0x243F6A88).
 //   2. XOR the key bytes into the P-array (cycling, byte-level).
 //   3. One salted state expansion (the first of the 2^cost Eksblowfish rounds).
 fn blowfish_init(ctx: Address, key: Address, key_len: u32, salt: Address) {
@@ -547,14 +524,14 @@ fn eks_blowfish_setup(cost: u32, salt: Address,
                       password: Address, pass_len: u32, ctx: Address) {
     blowfish_init(ctx, password, pass_len, salt);
 
-    rounds: u32 = 1;     // 2^cost
+    rounds: u32 = 1;
     c: u32 = 0;
     while c < cost {
         rounds = rounds * 2;
         c = c + 1;
     }
 
-    r: u32 = 1;          // blowfish_init already performed 1 expansion
+    r: u32 = 1;
     while r < rounds {
         blowfish_expand_state(ctx, salt);
         r = r + 1;

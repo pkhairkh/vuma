@@ -1,310 +1,1489 @@
-// womb/lib/x509.vuma — X.509 Certificate Parsing (RFC 5280)
+// womb/lib/x509.vuma — X.509 v3 Certificate Parser and Builder (RFC 5280)
 // No main() — importable library module.
-// Requires: asn1.vuma (DER decoder), sha256.vuma, rsa.vuma, ecdsa_p256.vuma.
+// Requires: asn1.vuma (DER codec). Assumes the following crypto primitives
+// are available in the link scope (provided by womb/lib/sha256.vuma,
+// rsa.vuma, ecdsa_p256.vuma, ed25519.vuma — the same convention used by
+// pki.vuma):
 //
-// X.509 Certificate structure (RFC 5280 Section 4.1):
+//   sha256_oneshot(in: Address, in_len: u32, out: Address) -> u32
+//       Write the 32-byte SHA-256 digest of `in[0..in_len)` to `out`.
+//
+//   rsa_pkcs1_v15_verify(hash: Address, hash_len: u32,
+//                        sig: Address, sig_len: u32,
+//                        e: Address, e_len: u32,
+//                        n: Address, n_len: u32) -> u32
+//       Verify an RSA PKCS#1 v1.5 signature. Returns 1 on success, 0 on
+//       failure. `hash` is the pre-computed digest; `sig` is the raw RSA
+//       signature (big-endian integer); `e`/`n` are the public exponent
+//       and modulus in big-endian byte arrays.
+//
+//   ecdsa_p256_verify(hash: Address, hash_len: u32,
+//                     sig: Address, sig_len: u32,
+//                     pubkey: Address, pubkey_len: u32) -> u32
+//       Verify an ECDSA P-256 signature. `sig` is DER-encoded
+//       (SEQUENCE { r INTEGER, s INTEGER }). `pubkey` is the 65-byte
+//       uncompressed point (0x04 || X || Y). Returns 1 on success.
+//
+//   ed25519_verify(msg: Address, msg_len: u32,
+//                  sig: Address, sig_len: u32,
+//                  pubkey: Address, pubkey_len: u32) -> u32
+//       Verify a PureEdDSA Ed25519 signature. `sig` is 64 bytes; `pubkey`
+//       is 32 bytes. The signature is over the raw message (no pre-hash).
+//       Returns 1 on success.
+//
+// X.509 Certificate structure (RFC 5280 §4.1):
+//
 //   Certificate ::= SEQUENCE {
-//     tbsCertificate       TBSCertificate,
-//     signatureAlgorithm   AlgorithmIdentifier,
-//     signatureValue       BIT STRING
+//       tbsCertificate       TBSCertificate,
+//       signatureAlgorithm   AlgorithmIdentifier,
+//       signatureValue       BIT STRING
 //   }
+//
 //   TBSCertificate ::= SEQUENCE {
-//     version         [0] EXPLICIT Version DEFAULT v1,
-//     serialNumber         CertificateSerialNumber,
-//     signature            AlgorithmIdentifier,
-//     issuer               Name,
-//     validity             Validity,
-//     subject              Name,
-//     subjectPublicKeyInfo SubjectPublicKeyInfo,
-//     issuerUniqueID  [1] IMPLICIT UniqueIdentifier OPTIONAL,
-//     subjectUniqueID [2] IMPLICIT UniqueIdentifier OPTIONAL,
-//     extensions      [3] EXPLICIT Extensions OPTIONAL
+//       version         [0] EXPLICIT Version DEFAULT v1,
+//       serialNumber         CertificateSerialNumber,
+//       signature            AlgorithmIdentifier,
+//       issuer               Name,
+//       validity             Validity,
+//       subject              Name,
+//       subjectPublicKeyInfo SubjectPublicKeyInfo,
+//       issuerUniqueID  [1] IMPLICIT UniqueIdentifier OPTIONAL,
+//       subjectUniqueID [2] IMPLICIT UniqueIdentifier OPTIONAL,
+//       extensions      [3] EXPLICIT Extensions OPTIONAL
 //   }
+//
+//   Validity ::= SEQUENCE { notBefore Time, notAfter Time }
+//   Time ::= CHOICE { utcTime UTCTime, generalTime GeneralizedTime }
+//
+//   SubjectPublicKeyInfo ::= SEQUENCE {
+//       algorithm        AlgorithmIdentifier,
+//       subjectPublicKey BIT STRING
+//   }
+//
+//   AlgorithmIdentifier ::= SEQUENCE {
+//       algorithm   OBJECT IDENTIFIER,
+//       parameters  ANY DEFINED BY algorithm OPTIONAL
+//   }
+//
+//   Name ::= RDNSequence
+//   RDNSequence ::= SEQUENCE OF RelativeDistinguishedName
+//   RelativeDistinguishedName ::= SET OF AttributeTypeAndValue
+//   AttributeTypeAndValue ::= SEQUENCE { type OID, value ANY }
+//
+//   Extension ::= SEQUENCE {
+//       extnID      OBJECT IDENTIFIER,
+//       critical    BOOLEAN DEFAULT FALSE,
+//       extnValue   OCTET STRING
+//   }
+//
+// Field-layout conventions:
+//   All multi-byte integer fields are little-endian (VUMA standard).
+//   Offsets are relative to the start of the DER buffer (`cert_raw`).
+//   Addresses are stored as 8-byte u64 LE so the same layout works on
+//   both 32-bit and 64-bit VUMA backends (the high bytes are zero on
+//   32-bit targets — see auth.vuma's auth_store_addr for the precedent).
+//
+// X509_CERT_FIELDS struct (X509_CERT_FIELDS_SIZE = 104 bytes):
+//   [  0..  3]  version            (u32 LE; 0=v1, 1=v2, 2=v3)
+//   [  4..  7]  serial_offset      (u32 LE)
+//   [  8.. 11]  serial_len         (u32 LE)
+//   [ 12.. 15]  issuer_offset      (u32 LE)
+//   [ 16.. 19]  issuer_len         (u32 LE)
+//   [ 20.. 23]  subject_offset     (u32 LE)
+//   [ 24.. 27]  subject_len        (u32 LE)
+//   [ 32.. 35]  not_before_offset  (u32 LE)
+//   [ 36.. 39]  not_before_len     (u32 LE)
+//   [ 40.. 43]  not_after_offset   (u32 LE)
+//   [ 44.. 47]  not_after_len      (u32 LE)
+//   [ 48.. 51]  pubkey_algo_oid_offset (u32 LE)
+//   [ 52.. 55]  pubkey_algo_oid_len    (u32 LE)
+//   [ 56.. 59]  pubkey_offset      (u32 LE; SPKI BIT STRING content,
+//                                    excludes the unused-bits byte)
+//   [ 60.. 63]  pubkey_len         (u32 LE)
+//   [ 64.. 67]  sig_algo_oid_offset   (u32 LE)
+//   [ 68.. 71]  sig_algo_oid_len      (u32 LE)
+//   [ 72.. 75]  sig_offset         (u32 LE; BIT STRING content,
+//                                    excludes the unused-bits byte)
+//   [ 76.. 79]  sig_len            (u32 LE)
+//   [ 80.. 83]  tbs_offset         (u32 LE; start of TBSCertificate TLV,
+//                                    includes the SEQUENCE tag byte)
+//   [ 84.. 87]  tbs_len            (u32 LE; total TBS bytes:
+//                                    tag + length header + content)
+//   [ 88.. 91]  exts_offset        (u32 LE; start of Extensions [3] EXPLICIT
+//                                    wrapper, 0 if no extensions)
+//   [ 92.. 95]  exts_len           (u32 LE)
+//   [ 96..103]  cert_raw           (Address, u64 LE — pointer to the DER
+//                                    buffer; stored so that
+//                                    x509_is_self_signed / x509_verify_signature
+//                                    can operate with a single `cert` arg)
+//
+// X509_PUBKEY_HANDLE struct (X509_PUBKEY_HANDLE_SIZE = 16 bytes):
+//   [  0..  3]  key_type  (u32 LE: 1=RSA, 2=ECDSA-P256, 3=Ed25519)
+//   [  4.. 11]  key_data  (Address, u64 LE)
+//   [ 12.. 15]  key_len   (u32 LE)
+//
+//   For RSA (key_type=1): key_data points to a buffer laid out as
+//     [u32 LE e_len][e bytes][u32 LE n_len][n bytes]
+//   For ECDSA-P256 (key_type=2): key_data is the 65-byte uncompressed point
+//     (0x04 || X || Y). key_len = 65.
+//   For Ed25519 (key_type=3): key_data is the 32-byte public key.
+//     key_len = 32.
+//
+// No `break` / no early returns from inside if/while blocks; every function
+// with preconditions uses a `status` flag and a single trailing
+// `if status == 0 { return 0; }` before the final `return <value>;`.
 
 const X509_VERSION_V1: u32 = 0;
+const X509_VERSION_V2: u32 = 1;
 const X509_VERSION_V3: u32 = 2;
 
-// X.509 Certificate fields (stored in a flat structure in memory):
-//   [0..3]      version (u32)
-//   [4..7]      serial_offset (u32, offset into raw cert)
-//   [8..11]     serial_len (u32)
-//   [12..15]    issuer_offset (u32)
-//   [16..19]    issuer_len (u32)
-//   [20..23]    subject_offset (u32)
-//   [24..27]    subject_len (u32)
-//   [32..39]    not_before_offset (u32) + not_before_len (u32)
-//   [40..47]    not_after_offset (u32) + not_after_len (u32)
-//   [48..55]    pubkey_algo_oid_offset (u32) + len (u32)
-//   [56..63]    pubkey_offset (u32) + pubkey_len (u32)
-//   [64..71]    sig_algo_oid_offset (u32) + len (u32)
-//   [72..79]    sig_offset (u32) + sig_len (u32)
+const X509_KEY_TYPE_RSA: u32 = 1;
+const X509_KEY_TYPE_ECDSA_P256: u32 = 2;
+const X509_KEY_TYPE_ED25519: u32 = 3;
 
-fn store_u32_off(buf: Address, field: u32, val: u32) {
-    *(buf + field) = val & 255;
-    *(buf + field + 1) = (val >> 8) & 255;
-    *(buf + field + 2) = (val >> 16) & 255;
-    *(buf + field + 3) = (val >> 24) & 255;
+// Well-known extension identifiers (stored in the extn_id field of
+// X509_EXT_ENTRY). X509_EXT_UNKNOWN (0) is used for unrecognized OIDs.
+const X509_EXT_UNKNOWN: u32 = 0;
+const X509_EXT_BASIC_CONSTRAINTS: u32 = 1;
+const X509_EXT_KEY_USAGE: u32 = 2;
+const X509_EXT_SUBJECT_KEY_ID: u32 = 3;
+const X509_EXT_AUTHORITY_KEY_ID: u32 = 4;
+const X509_EXT_SUBJECT_ALT_NAME: u32 = 5;
+
+// Struct sizes
+const X509_CERT_FIELDS_SIZE: u32 = 104;
+const X509_PUBKEY_HANDLE_SIZE: u32 = 16;
+const X509_NAME_MAX_ENTRIES: u32 = 32;
+const X509_NAME_ENTRY_SIZE: u32 = 20;
+const X509_NAME_STRUCT_SIZE: u32 = 644;     // 4 + 32 * 20
+const X509_EXTS_MAX_ENTRIES: u32 = 32;
+const X509_EXT_ENTRY_SIZE: u32 = 24;
+const X509_EXTS_STRUCT_SIZE: u32 = 772;     // 4 + 32 * 24
+
+// Field offsets within X509_CERT_FIELDS
+const X509_F_VERSION: u32 = 0;
+const X509_F_SERIAL_OFF: u32 = 4;
+const X509_F_SERIAL_LEN: u32 = 8;
+const X509_F_ISSUER_OFF: u32 = 12;
+const X509_F_ISSUER_LEN: u32 = 16;
+const X509_F_SUBJECT_OFF: u32 = 20;
+const X509_F_SUBJECT_LEN: u32 = 24;
+const X509_F_NOT_BEFORE_OFF: u32 = 32;
+const X509_F_NOT_BEFORE_LEN: u32 = 36;
+const X509_F_NOT_AFTER_OFF: u32 = 40;
+const X509_F_NOT_AFTER_LEN: u32 = 44;
+const X509_F_PUBKEY_ALGO_OID_OFF: u32 = 48;
+const X509_F_PUBKEY_ALGO_OID_LEN: u32 = 52;
+const X509_F_PUBKEY_OFF: u32 = 56;
+const X509_F_PUBKEY_LEN: u32 = 60;
+const X509_F_SIG_ALGO_OID_OFF: u32 = 64;
+const X509_F_SIG_ALGO_OID_LEN: u32 = 68;
+const X509_F_SIG_OFF: u32 = 72;
+const X509_F_SIG_LEN: u32 = 76;
+const X509_F_TBS_OFF: u32 = 80;
+const X509_F_TBS_LEN: u32 = 84;
+const X509_F_EXTS_OFF: u32 = 88;
+const X509_F_EXTS_LEN: u32 = 92;
+const X509_F_CERT_RAW: u32 = 96;            // Address (u64 LE), 8 bytes
+
+// ===========================================================================
+// Little-endian u32 / Address store/load helpers
+// ===========================================================================
+
+fn x509_store_u32(buf: Address, off: u32, val: u32) {
+    *(buf + off)     = val & 255;
+    *(buf + off + 1) = (val >> 8) & 255;
+    *(buf + off + 2) = (val >> 16) & 255;
+    *(buf + off + 3) = (val >> 24) & 255;
 }
 
-fn load_u32_off(buf: Address, field: u32) -> u32 {
-    return *(buf + field) | (*(buf + field + 1) << 8) | (*(buf + field + 2) << 16) | (*(buf + field + 3) << 24);
+fn x509_load_u32(buf: Address, off: u32) -> u32 {
+    b0: u32 = *(buf + off);
+    b1: u32 = *(buf + off + 1);
+    b2: u32 = *(buf + off + 2);
+    b3: u32 = *(buf + off + 3);
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+}
+
+// Store an Address as a 8-byte u64 LE value. Works on both 32-bit and
+// 64-bit VUMA backends (high bytes are zero on 32-bit targets). Precedent:
+// auth.vuma's auth_store_addr.
+fn x509_store_addr(buf: Address, off: u32, val: Address) {
+    v: u64 = val as u64;
+    *(buf + off)     = v & 255;
+    *(buf + off + 1) = (v >> 8) & 255;
+    *(buf + off + 2) = (v >> 16) & 255;
+    *(buf + off + 3) = (v >> 24) & 255;
+    *(buf + off + 4) = (v >> 32) & 255;
+    *(buf + off + 5) = (v >> 40) & 255;
+    *(buf + off + 6) = (v >> 48) & 255;
+    *(buf + off + 7) = (v >> 56) & 255;
+}
+
+fn x509_load_addr(buf: Address, off: u32) -> Address {
+    b0: u64 = *(buf + off) as u64;
+    b1: u64 = *(buf + off + 1) as u64;
+    b2: u64 = *(buf + off + 2) as u64;
+    b3: u64 = *(buf + off + 3) as u64;
+    b4: u64 = *(buf + off + 4) as u64;
+    b5: u64 = *(buf + off + 5) as u64;
+    b6: u64 = *(buf + off + 6) as u64;
+    b7: u64 = *(buf + off + 7) as u64;
+    v: u64 = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+               | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
+    return v as Address;
 }
 
 // ===========================================================================
-// Parse X.509 Certificate
-// cert_raw:  DER-encoded certificate bytes
-// cert_len:  certificate length
-// fields:    output buffer (80+ bytes for parsed fields)
-// Returns 1 on success, 0 on failure
+// Time helpers — convert UTCTime / GeneralizedTime strings to Unix epoch
+// seconds (u32 LE). Uses Howard Hinnant's days_from_civil algorithm
+// (http://howardhinnant.github.io/date_algorithms.html), adapted for u32.
 // ===========================================================================
 
-fn x509_parse(cert_raw: Address, cert_len: u32, fields: Address) -> u32 {
-    pos: u32 = 0;
+// Compute days since 1970-01-01 from a civil (proleptic Gregorian) date.
+// Valid for dates >= 1970-01-01 (returns 0 for the epoch). For dates before
+// the epoch the u32 arithmetic underflows (wraps to a large value), which
+// causes x509_check_validity to reject the cert — the safe behavior.
+fn x509_days_from_civil(y: u32, m: u32, d: u32) -> u32 {
+    y_adj: u32 = y;
+    if m <= 2 { y_adj = y - 1; }
+    era: u32 = y_adj / 400;
+    yoe: u32 = y_adj - era * 400;
+    m_adj: u32 = m;
+    if m > 2 { m_adj = m - 3; } else { m_adj = m + 9; }
+    doy: u32 = (153 * m_adj + 2) / 5 + d - 1;
+    doe: u32 = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + doe - 719468;
+}
 
-    // Outer SEQUENCE: Certificate
-    if *(cert_raw + pos) != 48 { return 0; }  // SEQUENCE tag
-    pos = pos + 1;
-    // Read length (skip for simplicity — assume we have the full cert)
-    len_consumed: u32 = der_read_length_consumed(cert_raw, pos);
-    pos = pos + len_consumed;
+// Convert a 2-digit ASCII decimal to its numeric value.
+fn x509_dec2(s: Address) -> u32 {
+    hi: u32 = *(s + 0) - 48;
+    lo: u32 = *(s + 1) - 48;
+    return hi * 10 + lo;
+}
 
-    // tbsCertificate SEQUENCE
-    tbs_start: u32 = pos;
-    if *(cert_raw + pos) != 48 { return 0; }
-    pos = pos + 1;
-    tbs_len_consumed: u32 = der_read_length_consumed(cert_raw, pos);
-    pos = pos + tbs_len_consumed;
+// Convert a 4-digit ASCII decimal to its numeric value.
+fn x509_dec4(s: Address) -> u32 {
+    d0: u32 = *(s + 0) - 48;
+    d1: u32 = *(s + 1) - 48;
+    d2: u32 = *(s + 2) - 48;
+    d3: u32 = *(s + 3) - 48;
+    return d0 * 1000 + d1 * 100 + d2 * 10 + d3;
+}
 
-    // version [0] EXPLICIT (optional — check for context tag 0xA0)
-    if *(cert_raw + pos) == 160 {  // [0] EXPLICIT
-        pos = pos + 1;
-        v_len_consumed: u32 = der_read_length_consumed(cert_raw, pos);
-        pos = pos + v_len_consumed;
-        version: u32 = *(cert_raw + pos);
-        store_u32_off(fields, 0, version);
-        pos = pos + 1;
+// Parse a UTCTime (YYMMDDHHMMSSZ, 13 bytes) or GeneralizedTime
+// (YYYYMMDDHHMMSSZ, 15 bytes) string into a Unix epoch timestamp.
+// Writes u32 LE to `out`. Returns 1 on success, 0 on error.
+// RFC 5280 §4.1.2.5.1: UTCTime years YY < 50 → 20YY, YY >= 50 → 19YY.
+fn x509_parse_time(time_str: Address, time_len: u32, out: Address) -> u32 {
+    status: u32 = 1;
+    year: u32 = 0;
+    month: u32 = 0;
+    day: u32 = 0;
+    hour: u32 = 0;
+    minute: u32 = 0;
+    second: u32 = 0;
+    days: u32 = 0;
+    ts: u32 = 0;
+    p: Address = time_str;
+
+    if time_len == 13 {
+        // UTCTime: YYMMDDHHMMSSZ
+        yy: u32 = x509_dec2(p);
+        if yy < 50 { year = 2000 + yy; } else { year = 1900 + yy; }
+        month = x509_dec2(p + 2);
+        day = x509_dec2(p + 4);
+        hour = x509_dec2(p + 6);
+        minute = x509_dec2(p + 8);
+        second = x509_dec2(p + 10);
+        // p + 12 must be 'Z' (0x5A)
+        if *(p + 12) != 90 { status = 0; }
     } else {
-        store_u32_off(fields, 0, 0);  // default v1
+        if time_len == 15 {
+            // GeneralizedTime: YYYYMMDDHHMMSSZ
+            year = x509_dec4(p);
+            month = x509_dec2(p + 4);
+            day = x509_dec2(p + 6);
+            hour = x509_dec2(p + 8);
+            minute = x509_dec2(p + 10);
+            second = x509_dec2(p + 12);
+            if *(p + 14) != 90 { status = 0; }
+        } else {
+            status = 0;
+        }
     }
 
-    // serialNumber: INTEGER
-    if *(cert_raw + pos) != 2 { return 0; }  // INTEGER tag
-    pos = pos + 1;
-    serial_len: u32 = der_read_length(cert_raw, pos);
-    serial_len_consumed: u32 = der_read_length_consumed(cert_raw, pos);
-    serial_offset: u32 = pos + serial_len_consumed;
-    store_u32_off(fields, 4, serial_offset);
-    store_u32_off(fields, 8, serial_len);
-    pos = serial_offset + serial_len;
+    if status == 1 {
+        if month < 1 || month > 12 { status = 0; }
+        if day < 1 || day > 31 { status = 0; }
+        if hour > 23 { status = 0; }
+        if minute > 59 { status = 0; }
+        if second > 59 { status = 0; }
+    }
 
-    // signature AlgorithmIdentifier (SEQUENCE)
-    if *(cert_raw + pos) != 48 { return 0; }
-    pos = pos + 1;
-    sig_algo_len: u32 = der_read_length(cert_raw, pos);
-    sig_algo_len_consumed: u32 = der_read_length_consumed(cert_raw, pos);
-    sig_algo_offset: u32 = pos + sig_algo_len_consumed;
-    store_u32_off(fields, 64, sig_algo_offset);
-    store_u32_off(fields, 68, sig_algo_len);
-    pos = sig_algo_offset + sig_algo_len;
+    if status == 1 {
+        days = x509_days_from_civil(year, month, day);
+        ts = days * 86400 + hour * 3600 + minute * 60 + second;
+        x509_store_u32(out, 0, ts);
+    }
 
-    // issuer Name (SEQUENCE)
-    if *(cert_raw + pos) != 48 { return 0; }
-    pos = pos + 1;
-    issuer_len: u32 = der_read_length(cert_raw, pos);
-    issuer_len_consumed: u32 = der_read_length_consumed(cert_raw, pos);
-    issuer_offset: u32 = pos + issuer_len_consumed;
-    store_u32_off(fields, 12, issuer_offset);
-    store_u32_off(fields, 16, issuer_len);
-    pos = issuer_offset + issuer_len;
-
-    // validity Validity (SEQUENCE)
-    if *(cert_raw + pos) != 48 { return 0; }
-    pos = pos + 1;
-    validity_len: u32 = der_read_length(cert_raw, pos);
-    validity_len_consumed: u32 = der_read_length_consumed(cert_raw, pos);
-    pos = pos + validity_len_consumed;
-
-    // notBefore (UTCTime or GeneralizedTime)
-    not_before_tag: u32 = *(cert_raw + pos);
-    pos = pos + 1;
-    nb_len: u32 = der_read_length(cert_raw, pos);
-    nb_len_consumed: u32 = der_read_length_consumed(cert_raw, pos);
-    nb_offset: u32 = pos + nb_len_consumed;
-    store_u32_off(fields, 32, nb_offset);
-    store_u32_off(fields, 36, nb_len);
-    pos = nb_offset + nb_len;
-
-    // notAfter
-    not_after_tag: u32 = *(cert_raw + pos);
-    pos = pos + 1;
-    na_len: u32 = der_read_length(cert_raw, pos);
-    na_len_consumed: u32 = der_read_length_consumed(cert_raw, pos);
-    na_offset: u32 = pos + na_len_consumed;
-    store_u32_off(fields, 40, na_offset);
-    store_u32_off(fields, 44, na_len);
-    pos = na_offset + na_len;
-
-    // subject Name (SEQUENCE)
-    if *(cert_raw + pos) != 48 { return 0; }
-    pos = pos + 1;
-    subject_len: u32 = der_read_length(cert_raw, pos);
-    subject_len_consumed: u32 = der_read_length_consumed(cert_raw, pos);
-    subject_offset: u32 = pos + subject_len_consumed;
-    store_u32_off(fields, 20, subject_offset);
-    store_u32_off(fields, 24, subject_len);
-    pos = subject_offset + subject_len;
-
-    // subjectPublicKeyInfo (SEQUENCE)
-    if *(cert_raw + pos) != 48 { return 0; }
-    pos = pos + 1;
-    spki_len: u32 = der_read_length(cert_raw, pos);
-    spki_len_consumed: u32 = der_read_length_consumed(cert_raw, pos);
-    spki_offset: u32 = pos + spki_len_consumed;
-    store_u32_off(fields, 56, spki_offset);
-    store_u32_off(fields, 60, spki_len);
-
-    // Parse SPKI: SEQUENCE { AlgorithmIdentifier, BIT STRING }
-    spki_pos: u32 = spki_offset;
-    // AlgorithmIdentifier (SEQUENCE containing OID)
-    spki_pos = spki_pos + 1;  // skip SEQUENCE tag
-    // ... (simplified — skip to BIT STRING)
-    pos = spki_offset + spki_len;
-
-    // Skip optional extensions (find signature)
-    // After tbsCertificate, we have signatureAlgorithm and signatureValue
-
-    // Move past tbsCertificate
-    tbs_end: u32 = tbs_start + 1 + tbs_len_consumed + der_read_length(cert_raw, tbs_start + 1);
-    pos = tbs_end;
-
-    // signatureAlgorithm
-    if *(cert_raw + pos) != 48 { return 0; }
-    pos = pos + 1;
-    sa_len: u32 = der_read_length(cert_raw, pos);
-    sa_len_consumed: u32 = der_read_length_consumed(cert_raw, pos);
-    pos = pos + sa_len_consumed + sa_len;
-
-    // signatureValue (BIT STRING)
-    if *(cert_raw + pos) != 3 { return 0; }  // BIT STRING
-    pos = pos + 1;
-    sig_len: u32 = der_read_length(cert_raw, pos);
-    sig_len_consumed: u32 = der_read_length_consumed(cert_raw, pos);
-    sig_offset: u32 = pos + sig_len_consumed + 1;  // +1 for unused bits byte
-    sig_actual_len: u32 = sig_len - 1;
-    store_u32_off(fields, 72, sig_offset);
-    store_u32_off(fields, 76, sig_actual_len);
-
+    if status == 0 { return 0; }
     return 1;
 }
 
 // ===========================================================================
-// Verify X.509 Certificate Signature (simplified)
-// Verifies the certificate's signature using the issuer's public key.
-// Currently supports RSA PKCS#1 v1.5 with SHA-256.
+// x509_parse_certificate — parse a DER-encoded X.509 v3 certificate
+//
+//   der          : Address — DER-encoded certificate bytes
+//   der_len      : u32     — certificate length in bytes
+//   cert_fields  : Address — caller-allocated X509_CERT_FIELDS buffer
+//                            (at least X509_CERT_FIELDS_SIZE = 104 bytes)
+//
+// Returns 1 on success, 0 on parse error.
 // ===========================================================================
 
-fn x509_verify_rsa_sha256(cert_raw: Address, cert_len: u32, fields: Address, issuer_pubkey_e: Address, issuer_pubkey_n: Address, key_size: u32) -> u32 {
-    // Extract TBS certificate
+fn x509_parse_certificate(der: Address, der_len: u32, cert_fields: Address) -> u32 {
+    status: u32 = 1;
+    pos: u32 = 0;
     tbs_start: u32 = 0;
-    // Skip outer SEQUENCE
-    pos: u32 = 1;
-    pos = pos + der_read_length_consumed(cert_raw, pos);
-
-    tbs_offset: u32 = pos;
-    // TBS length
-    tbs_len_val: u32 = der_read_length(cert_raw, pos + 1);
-    tbs_total: u32 = 1 + der_read_length_consumed(cert_raw, pos + 1) + tbs_len_val;
-
-    // Extract signature
-    sig_offset: u32 = load_u32_off(fields, 72);
-    sig_len: u32 = load_u32_off(fields, 76);
-
-    // Hash TBS certificate
-    tbs_hash = allocate(32);
-    sha256_oneshot(cert_raw + tbs_offset, tbs_total, tbs_hash);
-
-    // RSA verify: decrypt signature with issuer's public key
-    decrypted = allocate(key_size);
-    rsa_public_op(decrypted, cert_raw + sig_offset, issuer_pubkey_e, issuer_pubkey_n);
-
-    // Build expected PKCS#1 v1.5 padded hash
-    expected = allocate(key_size);
-    pad_len: u32 = rsa_pkcs1_v15_pad_sign(tbs_hash, 32, key_size, expected);
-
-    // Compare
-    result: u32 = 1;
+    tbs_content_len: u32 = 0;
+    tbs_len_consumed: u32 = 0;
+    tbs_end: u32 = 0;
+    tag_byte: u32 = 0;
+    len_val: u32 = 0;
+    len_consumed: u32 = 0;
+    content_off: u32 = 0;
+    inner_pos: u32 = 0;
+    ai_content_len: u32 = 0;
+    ai_len_consumed: u32 = 0;
+    oid_len: u32 = 0;
+    oid_len_consumed: u32 = 0;
+    oid_off: u32 = 0;
+    bs_len: u32 = 0;
+    bs_len_consumed: u32 = 0;
+    v_len_consumed: u32 = 0;
+    v_content_len: u32 = 0;
+    exts_content_len: u32 = 0;
+    exts_len_consumed: u32 = 0;
     i: u32 = 0;
-    while i < key_size {
-        if *(decrypted + i) != *(expected + i) { result = 0; break; }
+
+    // Initialize cert_fields to zero
+    i = 0;
+    while i < X509_CERT_FIELDS_SIZE {
+        *(cert_fields + i) = 0;
         i = i + 1;
     }
 
-    free(tbs_hash); free(decrypted); free(expected);
+    // Store cert_raw pointer so x509_is_self_signed / x509_verify_signature
+    // can recover the DER buffer from cert_fields alone.
+    x509_store_addr(cert_fields, X509_F_CERT_RAW, der);
+
+    // --- Outer SEQUENCE: Certificate ---
+    if status == 1 {
+        if der_len < 2 { status = 0; }
+        if status == 1 {
+            if *(der + 0) != 0x30 { status = 0; }  // SEQUENCE tag
+            if status == 1 {
+                len_consumed = der_read_length_consumed(der, 1);
+                if len_consumed == 0 { status = 0; }
+                if status == 1 {
+                    pos = 1 + len_consumed;
+                }
+            }
+        }
+    }
+
+    // --- TBSCertificate SEQUENCE ---
+    if status == 1 {
+        if *(der + pos) != 0x30 { status = 0; }
+        if status == 1 {
+            tbs_start = pos;
+            tbs_content_len = der_read_length(der, pos + 1);
+            tbs_len_consumed = der_read_length_consumed(der, pos + 1);
+            if tbs_len_consumed == 0 { status = 0; }
+            if status == 1 {
+                x509_store_u32(cert_fields, X509_F_TBS_OFF, tbs_start);
+                x509_store_u32(cert_fields, X509_F_TBS_LEN,
+                               1 + tbs_len_consumed + tbs_content_len);
+                tbs_end = tbs_start + 1 + tbs_len_consumed + tbs_content_len;
+                pos = pos + 1 + tbs_len_consumed;
+            }
+        }
+    }
+
+    // --- version [0] EXPLICIT (optional; default v1) ---
+    if status == 1 {
+        if *(der + pos) == 0xA0 {  // [0] EXPLICIT
+            v_len_consumed = der_read_length_consumed(der, pos + 1);
+            v_content_len = der_read_length(der, pos + 1);
+            if v_len_consumed == 0 { status = 0; }
+            if status == 1 {
+                // Inside [0] is a single INTEGER TLV: 02 01 NN
+                inner_pos = pos + 1 + v_len_consumed;
+                if *(der + inner_pos) != 0x02 { status = 0; }
+                if status == 1 {
+                    // inner_pos + 2 = version value (length is 1)
+                    x509_store_u32(cert_fields, X509_F_VERSION, *(der + inner_pos + 2));
+                    pos = pos + 1 + v_len_consumed + v_content_len;
+                }
+            }
+        } else {
+            x509_store_u32(cert_fields, X509_F_VERSION, X509_VERSION_V1);
+        }
+    }
+
+    // --- serialNumber INTEGER ---
+    if status == 1 {
+        if *(der + pos) != 0x02 { status = 0; }
+        if status == 1 {
+            oid_len = der_read_length(der, pos + 1);
+            oid_len_consumed = der_read_length_consumed(der, pos + 1);
+            if oid_len_consumed == 0 { status = 0; }
+            if status == 1 {
+                oid_off = pos + 1 + oid_len_consumed;
+                x509_store_u32(cert_fields, X509_F_SERIAL_OFF, oid_off);
+                x509_store_u32(cert_fields, X509_F_SERIAL_LEN, oid_len);
+                pos = oid_off + oid_len;
+            }
+        }
+    }
+
+    // --- signature AlgorithmIdentifier SEQUENCE (inside TBS) ---
+    // Record the OID but skip over the AlgorithmIdentifier.
+    if status == 1 {
+        if *(der + pos) != 0x30 { status = 0; }
+        if status == 1 {
+            ai_content_len = der_read_length(der, pos + 1);
+            ai_len_consumed = der_read_length_consumed(der, pos + 1);
+            if ai_len_consumed == 0 { status = 0; }
+            if status == 1 {
+                // Inside AlgorithmIdentifier: SEQUENCE { OID, [params] }
+                inner_pos = pos + 1 + ai_len_consumed;
+                if *(der + inner_pos) == 0x06 {  // OID tag
+                    oid_len = der_read_length(der, inner_pos + 1);
+                    oid_len_consumed = der_read_length_consumed(der, inner_pos + 1);
+                    if oid_len_consumed > 0 {
+                        oid_off = inner_pos + 1 + oid_len_consumed;
+                        // TBS signature algo OID is the same as the outer
+                        // signatureAlgorithm; we record it as sig_algo_oid
+                        // (it is authoritative for selecting the verify path).
+                        x509_store_u32(cert_fields, X509_F_SIG_ALGO_OID_OFF, oid_off);
+                        x509_store_u32(cert_fields, X509_F_SIG_ALGO_OID_LEN, oid_len);
+                    }
+                }
+                pos = pos + 1 + ai_len_consumed + ai_content_len;
+            }
+        }
+    }
+
+    // --- issuer Name SEQUENCE ---
+    if status == 1 {
+        if *(der + pos) != 0x30 { status = 0; }
+        if status == 1 {
+            ai_content_len = der_read_length(der, pos + 1);
+            ai_len_consumed = der_read_length_consumed(der, pos + 1);
+            if ai_len_consumed == 0 { status = 0; }
+            if status == 1 {
+                oid_off = pos;  // include the SEQUENCE tag + length header
+                oid_len = 1 + ai_len_consumed + ai_content_len;
+                x509_store_u32(cert_fields, X509_F_ISSUER_OFF, oid_off);
+                x509_store_u32(cert_fields, X509_F_ISSUER_LEN, oid_len);
+                pos = pos + oid_len;
+            }
+        }
+    }
+
+    // --- validity Validity SEQUENCE ---
+    if status == 1 {
+        if *(der + pos) != 0x30 { status = 0; }
+        if status == 1 {
+            ai_content_len = der_read_length(der, pos + 1);
+            ai_len_consumed = der_read_length_consumed(der, pos + 1);
+            if ai_len_consumed == 0 { status = 0; }
+            if status == 1 {
+                pos = pos + 1 + ai_len_consumed;
+                // notBefore (UTCTime 0x17 or GeneralizedTime 0x18)
+                tag_byte = *(der + pos);
+                if tag_byte != 0x17 && tag_byte != 0x18 { status = 0; }
+                if status == 1 {
+                    len_val = der_read_length(der, pos + 1);
+                    len_consumed = der_read_length_consumed(der, pos + 1);
+                    if len_consumed == 0 { status = 0; }
+                    if status == 1 {
+                        oid_off = pos + 1 + len_consumed;
+                        x509_store_u32(cert_fields, X509_F_NOT_BEFORE_OFF, oid_off);
+                        x509_store_u32(cert_fields, X509_F_NOT_BEFORE_LEN, len_val);
+                        pos = oid_off + len_val;
+                    }
+                }
+                // notAfter
+                if status == 1 {
+                    tag_byte = *(der + pos);
+                    if tag_byte != 0x17 && tag_byte != 0x18 { status = 0; }
+                    if status == 1 {
+                        len_val = der_read_length(der, pos + 1);
+                        len_consumed = der_read_length_consumed(der, pos + 1);
+                        if len_consumed == 0 { status = 0; }
+                        if status == 1 {
+                            oid_off = pos + 1 + len_consumed;
+                            x509_store_u32(cert_fields, X509_F_NOT_AFTER_OFF, oid_off);
+                            x509_store_u32(cert_fields, X509_F_NOT_AFTER_LEN, len_val);
+                            pos = oid_off + len_val;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // --- subject Name SEQUENCE ---
+    if status == 1 {
+        if *(der + pos) != 0x30 { status = 0; }
+        if status == 1 {
+            ai_content_len = der_read_length(der, pos + 1);
+            ai_len_consumed = der_read_length_consumed(der, pos + 1);
+            if ai_len_consumed == 0 { status = 0; }
+            if status == 1 {
+                oid_off = pos;
+                oid_len = 1 + ai_len_consumed + ai_content_len;
+                x509_store_u32(cert_fields, X509_F_SUBJECT_OFF, oid_off);
+                x509_store_u32(cert_fields, X509_F_SUBJECT_LEN, oid_len);
+                pos = pos + oid_len;
+            }
+        }
+    }
+
+    // --- subjectPublicKeyInfo SEQUENCE ---
+    if status == 1 {
+        if *(der + pos) != 0x30 { status = 0; }
+        if status == 1 {
+            ai_content_len = der_read_length(der, pos + 1);
+            ai_len_consumed = der_read_length_consumed(der, pos + 1);
+            if ai_len_consumed == 0 { status = 0; }
+            if status == 1 {
+                spki_end: u32 = pos + 1 + ai_len_consumed + ai_content_len;
+                inner_pos = pos + 1 + ai_len_consumed;
+                // AlgorithmIdentifier SEQUENCE { OID, [params] }
+                if *(der + inner_pos) != 0x30 { status = 0; }
+                if status == 1 {
+                    ai_content_len = der_read_length(der, inner_pos + 1);
+                    ai_len_consumed = der_read_length_consumed(der, inner_pos + 1);
+                    if ai_len_consumed == 0 { status = 0; }
+                    if status == 1 {
+                        algo_seq_end: u32 = inner_pos + 1 + ai_len_consumed + ai_content_len;
+                        oid_pos: u32 = inner_pos + 1 + ai_len_consumed;
+                        if *(der + oid_pos) == 0x06 {  // OID
+                            oid_len = der_read_length(der, oid_pos + 1);
+                            oid_len_consumed = der_read_length_consumed(der, oid_pos + 1);
+                            if oid_len_consumed > 0 {
+                                oid_off = oid_pos + 1 + oid_len_consumed;
+                                x509_store_u32(cert_fields, X509_F_PUBKEY_ALGO_OID_OFF, oid_off);
+                                x509_store_u32(cert_fields, X509_F_PUBKEY_ALGO_OID_LEN, oid_len);
+                            }
+                        }
+                        // Move to BIT STRING (subjectPublicKey)
+                        inner_pos = algo_seq_end;
+                        if *(der + inner_pos) != 0x03 { status = 0; }  // BIT STRING
+                        if status == 1 {
+                            bs_len = der_read_length(der, inner_pos + 1);
+                            bs_len_consumed = der_read_length_consumed(der, inner_pos + 1);
+                            if bs_len_consumed == 0 { status = 0; }
+                            if status == 1 {
+                                // Skip the unused-bits byte (1 byte after length)
+                                content_off = inner_pos + 1 + bs_len_consumed + 1;
+                                x509_store_u32(cert_fields, X509_F_PUBKEY_OFF, content_off);
+                                x509_store_u32(cert_fields, X509_F_PUBKEY_LEN, bs_len - 1);
+                            }
+                        }
+                    }
+                }
+                pos = spki_end;
+            }
+        }
+    }
+
+    // --- Optional fields inside TBS: issuerUniqueID [1], subjectUniqueID [2],
+    //     extensions [3] EXPLICIT ---
+    if status == 1 {
+        // Loop: skip [1] and [2] tags, capture [3] extensions
+        done: u32 = 0;
+        while pos < tbs_end && done == 0 && status == 1 {
+            tag_byte = *(der + pos);
+            if tag_byte == 0xA1 {  // [1] IMPLICIT issuerUniqueID
+                ai_content_len = der_read_length(der, pos + 1);
+                ai_len_consumed = der_read_length_consumed(der, pos + 1);
+                if ai_len_consumed == 0 { status = 0; }
+                if status == 1 {
+                    pos = pos + 1 + ai_len_consumed + ai_content_len;
+                }
+            } else {
+                if tag_byte == 0xA2 {  // [2] IMPLICIT subjectUniqueID
+                    ai_content_len = der_read_length(der, pos + 1);
+                    ai_len_consumed = der_read_length_consumed(der, pos + 1);
+                    if ai_len_consumed == 0 { status = 0; }
+                    if status == 1 {
+                        pos = pos + 1 + ai_len_consumed + ai_content_len;
+                    }
+                } else {
+                    if tag_byte == 0xA3 {  // [3] EXPLICIT extensions
+                        exts_content_len = der_read_length(der, pos + 1);
+                        exts_len_consumed = der_read_length_consumed(der, pos + 1);
+                        if exts_len_consumed == 0 { status = 0; }
+                        if status == 1 {
+                            x509_store_u32(cert_fields, X509_F_EXTS_OFF, pos);
+                            x509_store_u32(cert_fields, X509_F_EXTS_LEN,
+                                           1 + exts_len_consumed + exts_content_len);
+                            pos = pos + 1 + exts_len_consumed + exts_content_len;
+                        }
+                    } else {
+                        done = 1;  // unrecognized tag — stop scanning
+                    }
+                }
+            }
+        }
+    }
+
+    // --- After TBS: signatureAlgorithm SEQUENCE ---
+    if status == 1 {
+        pos = tbs_end;
+        if *(der + pos) != 0x30 { status = 0; }
+        if status == 1 {
+            ai_content_len = der_read_length(der, pos + 1);
+            ai_len_consumed = der_read_length_consumed(der, pos + 1);
+            if ai_len_consumed == 0 { status = 0; }
+            if status == 1 {
+                // Parse the outer signatureAlgorithm OID (overrides the TBS
+                // one if present — they should match per RFC 5280 §4.1.1.2).
+                inner_pos = pos + 1 + ai_len_consumed;
+                if *(der + inner_pos) == 0x06 {
+                    oid_len = der_read_length(der, inner_pos + 1);
+                    oid_len_consumed = der_read_length_consumed(der, inner_pos + 1);
+                    if oid_len_consumed > 0 {
+                        oid_off = inner_pos + 1 + oid_len_consumed;
+                        x509_store_u32(cert_fields, X509_F_SIG_ALGO_OID_OFF, oid_off);
+                        x509_store_u32(cert_fields, X509_F_SIG_ALGO_OID_LEN, oid_len);
+                    }
+                }
+                pos = pos + 1 + ai_len_consumed + ai_content_len;
+            }
+        }
+    }
+
+    // --- signatureValue BIT STRING ---
+    if status == 1 {
+        if *(der + pos) != 0x03 { status = 0; }
+        if status == 1 {
+            bs_len = der_read_length(der, pos + 1);
+            bs_len_consumed = der_read_length_consumed(der, pos + 1);
+            if bs_len_consumed == 0 { status = 0; }
+            if status == 1 {
+                // Skip the unused-bits byte
+                content_off = pos + 1 + bs_len_consumed + 1;
+                x509_store_u32(cert_fields, X509_F_SIG_OFF, content_off);
+                x509_store_u32(cert_fields, X509_F_SIG_LEN, bs_len - 1);
+            }
+        }
+    }
+
+    if status == 0 { return 0; }
+    return 1;
+}
+
+// Legacy alias used by pki.vuma — identical to x509_parse_certificate.
+fn x509_parse(cert_raw: Address, cert_len: u32, fields: Address) -> u32 {
+    return x509_parse_certificate(cert_raw, cert_len, fields);
+}
+
+// ===========================================================================
+// x509_build_tbs — build a TBSCertificate DER structure (RFC 5280 §4.1.2)
+//
+//   subject        : Address — length-prefixed Name DER (u32 LE length + bytes)
+//   issuer         : Address — length-prefixed Name DER
+//   pubkey         : Address — length-prefixed SubjectPublicKeyInfo DER
+//   serial         : Address — u32 LE serial number value
+//   validity_start : Address — NUL-terminated UTCTime/GeneralizedTime string
+//   validity_end   : Address — NUL-terminated UTCTime/GeneralizedTime string
+//   out            : Address — caller-allocated output buffer (>= 4096 bytes)
+//
+// Returns bytes written, 0 on error. The TBS uses version v3 and
+// sha256WithRSAEncryption as the signature AlgorithmIdentifier (the most
+// common X.509 profile — callers needing a different algorithm can patch
+// the OID bytes in the output after building).
+// ===========================================================================
+
+fn x509_strlen(s: Address) -> u32 {
+    n: u32 = 0;
+    done: u32 = 0;
+    while done == 0 {
+        if *(s + n) == 0 { done = 1; }
+        if done == 0 { n = n + 1; }
+    }
+    return n;
+}
+
+fn x509_build_tbs(subject: Address, issuer: Address, pubkey: Address,
+                  serial: Address, validity_start: Address, validity_end: Address,
+                  out: Address) -> u32 {
+    status: u32 = 1;
+    pos: u32 = 0;
+    content_pos: u32 = 0;
+    subj_len: u32 = 0;
+    iss_len: u32 = 0;
+    pk_len: u32 = 0;
+    start_len: u32 = 0;
+    end_len: u32 = 0;
+    i: u32 = 0;
+    content = allocate(4096);
+    temp = allocate(16);
+
+    // Read length-prefixed buffers
+    subj_len = x509_load_u32(subject, 0);
+    iss_len = x509_load_u32(issuer, 0);
+    pk_len = x509_load_u32(pubkey, 0);
+    start_len = x509_strlen(validity_start);
+    end_len = x509_strlen(validity_end);
+
+    if subj_len == 0 { status = 0; }
+    if iss_len == 0 { status = 0; }
+    if pk_len == 0 { status = 0; }
+    if start_len == 0 { status = 0; }
+    if end_len == 0 { status = 0; }
+
+    // Build TBS content into `content` buffer
+    if status == 1 {
+        content_pos = 0;
+
+        // version [0] EXPLICIT { INTEGER v3 }
+        *(content + content_pos) = 0xA0;      // [0] EXPLICIT
+        *(content + content_pos + 1) = 3;     // length 3
+        *(content + content_pos + 2) = 0x02;  // INTEGER tag
+        *(content + content_pos + 3) = 1;     // length 1
+        *(content + content_pos + 4) = X509_VERSION_V3;  // v3 = 2
+        content_pos = content_pos + 5;
+
+        // serialNumber INTEGER (from u32 LE)
+        x509_store_u32(temp, 0, x509_load_u32(serial, 0));
+        content_pos = content_pos + asn1_encode_integer(temp, content + content_pos);
+
+        // signature AlgorithmIdentifier: sha256WithRSAEncryption + NULL
+        // 06 09 2A 86 48 86 F7 0D 01 01 0B  05 00
+        sha256_rsa_oid = allocate(9);
+        *(sha256_rsa_oid + 0) = 42;  *(sha256_rsa_oid + 1) = 134; *(sha256_rsa_oid + 2) = 72;
+        *(sha256_rsa_oid + 3) = 134; *(sha256_rsa_oid + 4) = 247; *(sha256_rsa_oid + 5) = 13;
+        *(sha256_rsa_oid + 6) = 1;   *(sha256_rsa_oid + 7) = 1;   *(sha256_rsa_oid + 8) = 11;
+        // AlgorithmIdentifier SEQUENCE
+        ai_content_len: u32 = 11 + 2;  // OID TLV (11 bytes) + NULL (2 bytes)
+        *(content + content_pos) = 0x30;  // SEQUENCE
+        content_pos = content_pos + 1 + der_write_length(content, content_pos, ai_content_len);
+        content_pos = content_pos + der_write_oid(content, content_pos, sha256_rsa_oid, 9);
+        content_pos = content_pos + der_write_null(content, content_pos);
+        free(sha256_rsa_oid);
+
+        // issuer Name (copy length-prefixed bytes)
+        i = 0;
+        while i < iss_len {
+            *(content + content_pos + i) = *(issuer + 4 + i);
+            i = i + 1;
+        }
+        content_pos = content_pos + iss_len;
+
+        // validity Validity SEQUENCE { UTCTime start, UTCTime end }
+        validity_content_len: u32 = (2 + start_len) + (2 + end_len);
+        *(content + content_pos) = 0x30;  // SEQUENCE
+        content_pos = content_pos + 1 + der_write_length(content, content_pos, validity_content_len);
+        // notBefore
+        *(content + content_pos) = 0x17;  // UTCTime tag
+        content_pos = content_pos + 1 + der_write_length(content, content_pos, start_len);
+        i = 0;
+        while i < start_len {
+            *(content + content_pos + i) = *(validity_start + i);
+            i = i + 1;
+        }
+        content_pos = content_pos + start_len;
+        // notAfter
+        *(content + content_pos) = 0x17;  // UTCTime tag
+        content_pos = content_pos + 1 + der_write_length(content, content_pos, end_len);
+        i = 0;
+        while i < end_len {
+            *(content + content_pos + i) = *(validity_end + i);
+            i = i + 1;
+        }
+        content_pos = content_pos + end_len;
+
+        // subject Name (copy length-prefixed bytes)
+        i = 0;
+        while i < subj_len {
+            *(content + content_pos + i) = *(subject + 4 + i);
+            i = i + 1;
+        }
+        content_pos = content_pos + subj_len;
+
+        // subjectPublicKeyInfo (copy length-prefixed bytes)
+        i = 0;
+        while i < pk_len {
+            *(content + content_pos + i) = *(pubkey + 4 + i);
+            i = i + 1;
+        }
+        content_pos = content_pos + pk_len;
+    }
+
+    // Wrap content in a SEQUENCE TLV
+    if status == 1 {
+        *(out + 0) = 0x30;  // SEQUENCE
+        pos = 1 + der_write_length(out, 1, content_pos);
+        i = 0;
+        while i < content_pos {
+            *(out + pos + i) = *(content + i);
+            i = i + 1;
+        }
+        pos = pos + content_pos;
+    }
+
+    free(content);
+    free(temp);
+    if status == 0 { return 0; }
+    return pos;
+}
+
+// ===========================================================================
+// x509_parse_name — parse a Name (RDNSequence) into a flat entry array
+//
+//   der       : Address — Name DER bytes (starts at the SEQUENCE tag)
+//   len       : u32     — bytes available
+//   name_out  : Address — caller-allocated X509_NAME_STRUCT_SIZE buffer
+//
+// Output layout (X509_NAME_STRUCT_SIZE = 644 bytes):
+//   [0..3]  rdn_count (u32 LE)
+//   [4..]   array of X509_NAME_MAX_ENTRIES entries, each X509_NAME_ENTRY_SIZE
+//           (20) bytes:
+//             [ 0.. 3] type_oid_offset  (u32 LE, into `der`)
+//             [ 4.. 7] type_oid_len     (u32 LE)
+//             [ 8..11] value_offset     (u32 LE, into `der`)
+//             [12..15] value_len        (u32 LE)
+//             [16..19] value_tag        (u32 LE — tag byte of the value)
+//
+// Returns 1 on success, 0 on error.
+// ===========================================================================
+
+fn x509_parse_name(der: Address, len: u32, name_out: Address) -> u32 {
+    status: u32 = 1;
+    pos: u32 = 0;
+    end: u32 = 0;
+    rdn_end: u32 = 0;
+    atv_end: u32 = 0;
+    count: u32 = 0;
+    seq_len: u32 = 0;
+    seq_consumed: u32 = 0;
+    set_len: u32 = 0;
+    set_consumed: u32 = 0;
+    atv_len: u32 = 0;
+    atv_consumed: u32 = 0;
+    oid_len: u32 = 0;
+    oid_consumed: u32 = 0;
+    val_len: u32 = 0;
+    val_consumed: u32 = 0;
+    val_tag: u32 = 0;
+    i: u32 = 0;
+
+    // Initialize name_out
+    i = 0;
+    while i < X509_NAME_STRUCT_SIZE {
+        *(name_out + i) = 0;
+        i = i + 1;
+    }
+
+    // Outer SEQUENCE (RDNSequence)
+    if len < 2 { status = 0; }
+    if status == 1 {
+        if *(der + 0) != 0x30 { status = 0; }
+        if status == 1 {
+            seq_len = der_read_length(der, 1);
+            seq_consumed = der_read_length_consumed(der, 1);
+            if seq_consumed == 0 { status = 0; }
+            if status == 1 {
+                pos = 1 + seq_consumed;
+                end = pos + seq_len;
+                if end > len { status = 0; }
+            }
+        }
+    }
+
+    // Iterate over RDNs (SETs)
+    if status == 1 {
+        done: u32 = 0;
+        while pos < end && done == 0 && status == 1 {
+            if *(der + pos) != 0x31 { status = 0; }  // SET tag
+            if status == 1 {
+                set_len = der_read_length(der, pos + 1);
+                set_consumed = der_read_length_consumed(der, pos + 1);
+                if set_consumed == 0 { status = 0; }
+                if status == 1 {
+                    rdn_end = pos + 1 + set_consumed + set_len;
+                    atv_pos: u32 = pos + 1 + set_consumed;
+                    // Iterate over AttributeTypeAndValue SEQUENCEs in this SET
+                    atv_done: u32 = 0;
+                    while atv_pos < rdn_end && atv_done == 0 && status == 1 {
+                        if *(der + atv_pos) != 0x30 { status = 0; }  // SEQUENCE
+                        if status == 1 {
+                            atv_len = der_read_length(der, atv_pos + 1);
+                            atv_consumed = der_read_length_consumed(der, atv_pos + 1);
+                            if atv_consumed == 0 { status = 0; }
+                            if status == 1 {
+                                atv_end = atv_pos + 1 + atv_consumed + atv_len;
+                                inner: u32 = atv_pos + 1 + atv_consumed;
+                                // type OID
+                                if *(der + inner) != 0x06 { status = 0; }
+                                if status == 1 {
+                                    oid_len = der_read_length(der, inner + 1);
+                                    oid_consumed = der_read_length_consumed(der, inner + 1);
+                                    if oid_consumed == 0 { status = 0; }
+                                    if status == 1 {
+                                        oid_off_local: u32 = inner + 1 + oid_consumed;
+                                        inner = oid_off_local + oid_len;
+                                        // value (any tag)
+                                        if inner < atv_end {
+                                            val_tag = *(der + inner);
+                                            val_len = der_read_length(der, inner + 1);
+                                            val_consumed = der_read_length_consumed(der, inner + 1);
+                                            if val_consumed > 0 && count < X509_NAME_MAX_ENTRIES {
+                                                val_off_local: u32 = inner + 1 + val_consumed;
+                                                base: u32 = 4 + count * X509_NAME_ENTRY_SIZE;
+                                                x509_store_u32(name_out + base, 0, oid_off_local);
+                                                x509_store_u32(name_out + base, 4, oid_len);
+                                                x509_store_u32(name_out + base, 8, val_off_local);
+                                                x509_store_u32(name_out + base, 12, val_len);
+                                                x509_store_u32(name_out + base, 16, val_tag);
+                                                count = count + 1;
+                                            }
+                                        }
+                                    }
+                                }
+                                atv_pos = atv_end;
+                            }
+                        }
+                    }
+                    pos = rdn_end;
+                }
+            }
+        }
+    }
+
+    if status == 1 {
+        x509_store_u32(name_out, 0, count);
+    }
+
+    if status == 0 { return 0; }
+    return 1;
+}
+
+// ===========================================================================
+// x509_check_validity — check if current_time falls within [not_before, not_after]
+//
+//   not_before  : Address — u32 LE Unix timestamp (parse with x509_parse_time)
+//   not_after   : Address — u32 LE Unix timestamp
+//   current_time: u32     — current Unix timestamp
+//
+// Returns 1 if not_before <= current_time <= not_after, 0 otherwise.
+// ===========================================================================
+
+fn x509_check_validity(not_before: Address, not_after: Address, current_time: u32) -> u32 {
+    nb: u32 = x509_load_u32(not_before, 0);
+    na: u32 = x509_load_u32(not_after, 0);
+    valid: u32 = 1;
+    if current_time < nb { valid = 0; }
+    if current_time > na { valid = 0; }
+    return valid;
+}
+
+// ===========================================================================
+// x509_parse_extensions — parse Extensions SEQUENCE into a flat array
+//
+//   der  : Address — Extensions DER (the SEQUENCE OF Extension, NOT the
+//                    [3] EXPLICIT wrapper — caller strips the wrapper)
+//   len  : u32     — bytes available
+//   exts : Address — caller-allocated X509_EXTS_STRUCT_SIZE buffer
+//
+// Output layout (X509_EXTS_STRUCT_SIZE = 772 bytes):
+//   [0..3]  ext_count (u32 LE)
+//   [4..]   array of X509_EXTS_MAX_ENTRIES entries, each X509_EXT_ENTRY_SIZE
+//           (24) bytes:
+//             [ 0.. 3] oid_offset   (u32 LE, into `der`)
+//             [ 4.. 7] oid_len      (u32 LE)
+//             [ 8..11] critical     (u32 LE: 0 or 1)
+//             [12..15] value_offset (u32 LE, into `der`)
+//             [16..19] value_len    (u32 LE)
+//             [20..23] extn_id      (u32 LE: X509_EXT_* constant)
+//
+// Recognized extensions (matched by OID):
+//   2.5.29.14  subjectKeyIdentifier      → X509_EXT_SUBJECT_KEY_ID (3)
+//   2.5.29.15  keyUsage                  → X509_EXT_KEY_USAGE (2)
+//   2.5.29.17  subjectAltName            → X509_EXT_SUBJECT_ALT_NAME (5)
+//   2.5.29.19  basicConstraints          → X509_EXT_BASIC_CONSTRAINTS (1)
+//   2.5.29.35  authorityKeyIdentifier    → X509_EXT_AUTHORITY_KEY_ID (4)
+//
+// Returns 1 on success, 0 on error.
+// ===========================================================================
+
+// Match an OID at (der + off, len bytes) against the well-known extension OIDs.
+// Returns the X509_EXT_* constant, or X509_EXT_UNKNOWN.
+fn x509_classify_ext_oid(der: Address, off: u32, oid_len: u32) -> u32 {
+    result: u32 = X509_EXT_UNKNOWN;
+    // 2.5.29.14 → 55 1D 0E  (subjectKeyIdentifier)
+    if oid_len == 3 {
+        if *(der + off) == 85 && *(der + off + 1) == 29 && *(der + off + 2) == 14 {
+            result = X509_EXT_SUBJECT_KEY_ID;
+        }
+        if *(der + off) == 85 && *(der + off + 1) == 29 && *(der + off + 2) == 15 {
+            result = X509_EXT_KEY_USAGE;
+        }
+        if *(der + off) == 85 && *(der + off + 1) == 29 && *(der + off + 2) == 17 {
+            result = X509_EXT_SUBJECT_ALT_NAME;
+        }
+        if *(der + off) == 85 && *(der + off + 1) == 29 && *(der + off + 2) == 19 {
+            result = X509_EXT_BASIC_CONSTRAINTS;
+        }
+        if *(der + off) == 85 && *(der + off + 1) == 29 && *(der + off + 2) == 35 {
+            result = X509_EXT_AUTHORITY_KEY_ID;
+        }
+    }
+    return result;
+}
+
+fn x509_parse_extensions(der: Address, len: u32, exts: Address) -> u32 {
+    status: u32 = 1;
+    pos: u32 = 0;
+    end: u32 = 0;
+    count: u32 = 0;
+    seq_len: u32 = 0;
+    seq_consumed: u32 = 0;
+    ext_len: u32 = 0;
+    ext_consumed: u32 = 0;
+    ext_end: u32 = 0;
+    oid_len: u32 = 0;
+    oid_consumed: u32 = 0;
+    val_len: u32 = 0;
+    val_consumed: u32 = 0;
+    critical: u32 = 0;
+    extn_id: u32 = 0;
+    i: u32 = 0;
+
+    // Initialize exts
+    i = 0;
+    while i < X509_EXTS_STRUCT_SIZE {
+        *(exts + i) = 0;
+        i = i + 1;
+    }
+
+    if len < 2 { status = 0; }
+    if status == 1 {
+        if *(der + 0) != 0x30 { status = 0; }  // SEQUENCE OF Extension
+        if status == 1 {
+            seq_len = der_read_length(der, 1);
+            seq_consumed = der_read_length_consumed(der, 1);
+            if seq_consumed == 0 { status = 0; }
+            if status == 1 {
+                pos = 1 + seq_consumed;
+                end = pos + seq_len;
+                if end > len { status = 0; }
+            }
+        }
+    }
+
+    if status == 1 {
+        done: u32 = 0;
+        while pos < end && done == 0 && status == 1 {
+            if *(der + pos) != 0x30 { status = 0; }  // Extension SEQUENCE
+            if status == 1 {
+                ext_len = der_read_length(der, pos + 1);
+                ext_consumed = der_read_length_consumed(der, pos + 1);
+                if ext_consumed == 0 { status = 0; }
+                if status == 1 {
+                    ext_end = pos + 1 + ext_consumed + ext_len;
+                    inner: u32 = pos + 1 + ext_consumed;
+                    // extnID OID
+                    if *(der + inner) != 0x06 { status = 0; }
+                    if status == 1 {
+                        oid_len = der_read_length(der, inner + 1);
+                        oid_consumed = der_read_length_consumed(der, inner + 1);
+                        if oid_consumed == 0 { status = 0; }
+                        if status == 1 {
+                            oid_off_local: u32 = inner + 1 + oid_consumed;
+                            inner = oid_off_local + oid_len;
+                            critical = 0;
+                            val_len = 0;
+                            val_consumed = 0;
+                            val_off_local: u32 = 0;
+                            // Optional critical BOOLEAN
+                            if inner < ext_end {
+                                if *(der + inner) == 0x01 {  // BOOLEAN
+                                    crit_len: u32 = der_read_length(der, inner + 1);
+                                    crit_consumed: u32 = der_read_length_consumed(der, inner + 1);
+                                    if crit_consumed > 0 {
+                                        if *(der + inner + 1 + crit_consumed) != 0 {
+                                            critical = 1;
+                                        }
+                                        inner = inner + 1 + crit_consumed + crit_len;
+                                    }
+                                }
+                            }
+                            // extnValue OCTET STRING
+                            if inner < ext_end {
+                                if *(der + inner) == 0x04 {  // OCTET STRING
+                                    val_len = der_read_length(der, inner + 1);
+                                    val_consumed = der_read_length_consumed(der, inner + 1);
+                                    if val_consumed > 0 {
+                                        val_off_local = inner + 1 + val_consumed;
+                                    }
+                                }
+                            }
+                            if count < X509_EXTS_MAX_ENTRIES {
+                                extn_id = x509_classify_ext_oid(der, oid_off_local, oid_len);
+                                base: u32 = 4 + count * X509_EXT_ENTRY_SIZE;
+                                x509_store_u32(exts + base, 0, oid_off_local);
+                                x509_store_u32(exts + base, 4, oid_len);
+                                x509_store_u32(exts + base, 8, critical);
+                                x509_store_u32(exts + base, 12, val_off_local);
+                                x509_store_u32(exts + base, 16, val_len);
+                                x509_store_u32(exts + base, 20, extn_id);
+                                count = count + 1;
+                            }
+                        }
+                    }
+                    pos = ext_end;
+                }
+            }
+        }
+    }
+
+    if status == 1 {
+        x509_store_u32(exts, 0, count);
+    }
+
+    if status == 0 { return 0; }
+    return 1;
+}
+
+// ===========================================================================
+// x509_is_self_signed — check if issuer == subject
+//
+//   cert : Address — X509_CERT_FIELDS struct (must have been filled by
+//                    x509_parse_certificate, which stores cert_raw at
+//                    offset X509_F_CERT_RAW)
+//
+// Returns 1 if issuer and subject Name DER bytes are identical, 0 otherwise.
+// ===========================================================================
+
+fn x509_is_self_signed(cert: Address) -> u32 {
+    cert_raw: Address = x509_load_addr(cert, X509_F_CERT_RAW);
+    iss_off: u32 = x509_load_u32(cert, X509_F_ISSUER_OFF);
+    iss_len: u32 = x509_load_u32(cert, X509_F_ISSUER_LEN);
+    sub_off: u32 = x509_load_u32(cert, X509_F_SUBJECT_OFF);
+    sub_len: u32 = x509_load_u32(cert, X509_F_SUBJECT_LEN);
+    result: u32 = 1;
+
+    if iss_len != sub_len { result = 0; }
+    if result == 1 {
+        i: u32 = 0;
+        while i < iss_len && result == 1 {
+            if *(cert_raw + iss_off + i) != *(cert_raw + sub_off + i) { result = 0; }
+            i = i + 1;
+        }
+    }
     return result;
 }
 
 // ===========================================================================
-// Extract RSA public key from SubjectPublicKeyInfo
-// Simplified: assumes RSA key, extracts n and e from BIT STRING
+// x509_verify_signature — verify a certificate's signature
+//
+//   cert         : Address — X509_CERT_FIELDS struct (filled by
+//                             x509_parse_certificate)
+//   issuer_pubkey: Address — X509_PUBKEY_HANDLE struct
+//
+// Supports RSA PKCS#1 v1.5 (with SHA-256), ECDSA-P256 (with SHA-256), and
+// Ed25519 (PureEdDSA). The algorithm is selected by matching the cert's
+// signatureAlgorithm OID.
+//
+// Returns 1 if the signature is valid, 0 otherwise (including unrecognized
+// algorithm or parse error).
 // ===========================================================================
 
-fn x509_extract_rsa_pubkey(cert_raw: Address, fields: Address, n_out: Address, e_out: Address) -> u32 {
-    spki_offset: u32 = load_u32_off(fields, 56);
-    spki_len: u32 = load_u32_off(fields, 60);
-
-    // Parse SPKI: SEQUENCE { AlgorithmIdentifier, BIT STRING }
-    pos: u32 = spki_offset;
-    pos = pos + 1;  // SEQUENCE tag
-    outer_len_consumed: u32 = der_read_length_consumed(cert_raw, pos);
-    pos = pos + outer_len_consumed;
-
-    // AlgorithmIdentifier (SEQUENCE)
-    pos = pos + 1;  // SEQUENCE tag
-    ai_len: u32 = der_read_length(cert_raw, pos);
-    ai_len_consumed: u32 = der_read_length_consumed(cert_raw, pos);
-    pos = pos + ai_len_consumed + ai_len;
-
-    // BIT STRING (contains DER-encoded RSAPublicKey)
-    if *(cert_raw + pos) != 3 { return 0; }
-    pos = pos + 1;
-    bs_len: u32 = der_read_length(cert_raw, pos);
-    bs_len_consumed: u32 = der_read_length_consumed(cert_raw, pos);
-    pos = pos + bs_len_consumed + 1;  // skip unused bits byte
-
-    // RSAPublicKey ::= SEQUENCE { modulus INTEGER, publicExponent INTEGER }
-    if *(cert_raw + pos) != 48 { return 0; }
-    pos = pos + 1;
-    rk_len: u32 = der_read_length(cert_raw, pos);
-    rk_len_consumed: u32 = der_read_length_consumed(cert_raw, pos);
-    pos = pos + rk_len_consumed;
-
-    // modulus INTEGER
-    if *(cert_raw + pos) != 2 { return 0; }
-    pos = pos + 1;
-    n_len: u32 = der_read_length(cert_raw, pos);
-    n_len_consumed: u32 = der_read_length_consumed(cert_raw, pos);
-    n_offset: u32 = pos + n_len_consumed;
-    // Skip leading 0x00 if present
-    if *(cert_raw + n_offset) == 0 {
-        n_offset = n_offset + 1;
-        n_len = n_len - 1;
-    }
+// Compare an OID at (der + off, oid_len) against a reference byte buffer.
+// Returns 1 if equal, 0 otherwise.
+fn x509_oid_eq(der: Address, off: u32, oid_len: u32, ref: Address, ref_len: u32) -> u32 {
+    eq: u32 = 1;
+    if oid_len != ref_len { eq = 0; }
     i: u32 = 0;
-    while i < n_len { *(n_out + i) = *(cert_raw + n_offset + i); i = i + 1; }
-    pos = n_offset + n_len;
-
-    // publicExponent INTEGER
-    if *(cert_raw + pos) != 2 { return 0; }
-    pos = pos + 1;
-    e_len: u32 = der_read_length(cert_raw, pos);
-    e_len_consumed: u32 = der_read_length_consumed(cert_raw, pos);
-    e_offset: u32 = pos + e_len_consumed;
-    if *(cert_raw + e_offset) == 0 {
-        e_offset = e_offset + 1;
-        e_len = e_len - 1;
+    while i < oid_len && eq == 1 {
+        if *(der + off + i) != *(ref + i) { eq = 0; }
+        i = i + 1;
     }
-    i = 0;
-    while i < e_len { *(e_out + i) = *(cert_raw + e_offset + i); i = i + 1; }
+    return eq;
+}
 
-    return n_len;  // return key size in bytes
+fn x509_verify_signature(cert: Address, issuer_pubkey: Address) -> u32 {
+    status: u32 = 1;
+    result: u32 = 0;
+    cert_raw: Address = x509_load_addr(cert, X509_F_CERT_RAW);
+    tbs_off: u32 = x509_load_u32(cert, X509_F_TBS_OFF);
+    tbs_len: u32 = x509_load_u32(cert, X509_F_TBS_LEN);
+    sig_off: u32 = x509_load_u32(cert, X509_F_SIG_OFF);
+    sig_len: u32 = x509_load_u32(cert, X509_F_SIG_LEN);
+    sig_oid_off: u32 = x509_load_u32(cert, X509_F_SIG_ALGO_OID_OFF);
+    sig_oid_len: u32 = x509_load_u32(cert, X509_F_SIG_ALGO_OID_LEN);
+    key_type: u32 = x509_load_u32(issuer_pubkey, 0);
+    key_data: Address = x509_load_addr(issuer_pubkey, 4);
+    key_len: u32 = x509_load_u32(issuer_pubkey, 12);
+    algo: u32 = 0;  // 1=sha256RSA, 2=ecdsaSHA256, 3=ed25519
+
+    if tbs_len == 0 { status = 0; }
+    if sig_len == 0 { status = 0; }
+    if sig_oid_len == 0 { status = 0; }
+
+    // Match signatureAlgorithm OID
+    if status == 1 {
+        rsa_oid = allocate(9);
+        *(rsa_oid + 0) = 42;  *(rsa_oid + 1) = 134; *(rsa_oid + 2) = 72;
+        *(rsa_oid + 3) = 134; *(rsa_oid + 4) = 247; *(rsa_oid + 5) = 13;
+        *(rsa_oid + 6) = 1;   *(rsa_oid + 7) = 1;   *(rsa_oid + 8) = 11;
+        ecdsa_oid = allocate(8);
+        *(ecdsa_oid + 0) = 42;  *(ecdsa_oid + 1) = 134; *(ecdsa_oid + 2) = 72;
+        *(ecdsa_oid + 3) = 206; *(ecdsa_oid + 4) = 61;  *(ecdsa_oid + 5) = 4;
+        *(ecdsa_oid + 6) = 3;   *(ecdsa_oid + 7) = 2;
+        ed25519_oid = allocate(3);
+        *(ed25519_oid + 0) = 43;  *(ed25519_oid + 1) = 101; *(ed25519_oid + 2) = 112;
+
+        if x509_oid_eq(cert_raw, sig_oid_off, sig_oid_len, rsa_oid, 9) == 1 {
+            algo = 1;
+        }
+        if algo == 0 {
+            if x509_oid_eq(cert_raw, sig_oid_off, sig_oid_len, ecdsa_oid, 8) == 1 {
+                algo = 2;
+            }
+        }
+        if algo == 0 {
+            if x509_oid_eq(cert_raw, sig_oid_off, sig_oid_len, ed25519_oid, 3) == 1 {
+                algo = 3;
+            }
+        }
+        free(rsa_oid);
+        free(ecdsa_oid);
+        free(ed25519_oid);
+    }
+
+    if status == 1 {
+        if algo == 0 { status = 0; }  // unrecognized algorithm
+    }
+
+    // Dispatch to the appropriate verify primitive
+    if status == 1 {
+        if algo == 1 {
+            // RSA PKCS#1 v1.5 with SHA-256
+            if key_type != X509_KEY_TYPE_RSA { status = 0; }
+            if status == 1 {
+                // Parse key_data: [u32 LE e_len][e][u32 LE n_len][n]
+                e_len: u32 = x509_load_u32(key_data, 0);
+                e_ptr: Address = key_data + 4;
+                n_ptr: Address = key_data + 4 + e_len;
+                n_len: u32 = x509_load_u32(key_data, 4 + e_len);
+                // Hash the TBS certificate
+                tbs_hash = allocate(32);
+                sha256_oneshot(cert_raw + tbs_off, tbs_len, tbs_hash);
+                result = rsa_pkcs1_v15_verify(tbs_hash, 32,
+                                              cert_raw + sig_off, sig_len,
+                                              e_ptr, e_len, n_ptr, n_len);
+                free(tbs_hash);
+            }
+        } else {
+            if algo == 2 {
+                // ECDSA-P256 with SHA-256
+                if key_type != X509_KEY_TYPE_ECDSA_P256 { status = 0; }
+                if status == 1 {
+                    tbs_hash = allocate(32);
+                    sha256_oneshot(cert_raw + tbs_off, tbs_len, tbs_hash);
+                    result = ecdsa_p256_verify(tbs_hash, 32,
+                                               cert_raw + sig_off, sig_len,
+                                               key_data, key_len);
+                    free(tbs_hash);
+                }
+            } else {
+                if algo == 3 {
+                    // Ed25519 (PureEdDSA — signs the raw message, no pre-hash)
+                    if key_type != X509_KEY_TYPE_ED25519 { status = 0; }
+                    if status == 1 {
+                        result = ed25519_verify(cert_raw + tbs_off, tbs_len,
+                                                cert_raw + sig_off, sig_len,
+                                                key_data, key_len);
+                    }
+                }
+            }
+        }
+    }
+
+    if status == 0 { return 0; }
+    return result;
+}
+
+// ===========================================================================
+// x509_fingerprint_sha256 — SHA-256 of the DER encoding
+//
+//   cert    : Address — raw DER certificate bytes
+//   der_len : u32     — certificate length
+//   out     : Address — caller-allocated 32-byte output buffer
+//
+// Returns 32 (the SHA-256 digest size) on success, 0 on error.
+// ===========================================================================
+
+fn x509_fingerprint_sha256(cert: Address, der_len: u32, out: Address) -> u32 {
+    status: u32 = 1;
+    if der_len == 0 { status = 0; }
+    if status == 1 {
+        sha256_oneshot(cert, der_len, out);
+    }
+    if status == 0 { return 0; }
+    return 32;
+}
+
+// ===========================================================================
+// Legacy compatibility — kept for pki.vuma and any other existing imports.
+// ===========================================================================
+
+// Verify an RSA-PKCS1-v1.5-SHA-256 signature on a certificate, using the
+// issuer's RSA public key (e, n as big-endian byte arrays, key_size in bytes).
+// Returns 1 on success, 0 on failure. This is the historical entry point
+// used before x509_verify_signature gained multi-algorithm support.
+fn x509_verify_rsa_sha256(cert_raw: Address, cert_len: u32, fields: Address,
+                          issuer_pubkey_e: Address, issuer_pubkey_n: Address,
+                          key_size: u32) -> u32 {
+    status: u32 = 1;
+    result: u32 = 0;
+    tbs_offset: u32 = x509_load_u32(fields, X509_F_TBS_OFF);
+    tbs_total: u32 = x509_load_u32(fields, X509_F_TBS_LEN);
+    sig_offset: u32 = x509_load_u32(fields, X509_F_SIG_OFF);
+    sig_len: u32 = x509_load_u32(fields, X509_F_SIG_LEN);
+
+    if cert_len == 0 { status = 0; }
+    if key_size == 0 { status = 0; }
+
+    if status == 1 {
+        // Hash TBS certificate
+        tbs_hash = allocate(32);
+        sha256_oneshot(cert_raw + tbs_offset, tbs_total, tbs_hash);
+        // RSA verify: RSA_public_op decrypts the signature with the issuer's
+        // public key, producing the PKCS#1 v1.5 padded hash. We then build
+        // the expected padded form and compare.
+        decrypted = allocate(key_size);
+        rsa_public_op(decrypted, cert_raw + sig_offset,
+                      issuer_pubkey_e, issuer_pubkey_n);
+        expected = allocate(key_size);
+        rsa_pkcs1_v15_pad_sign(tbs_hash, 32, key_size, expected);
+        // Constant-time compare
+        result = 1;
+        i: u32 = 0;
+        while i < key_size {
+            if *(decrypted + i) != *(expected + i) { result = 0; }
+            i = i + 1;
+        }
+        free(tbs_hash);
+        free(decrypted);
+        free(expected);
+    }
+
+    if status == 0 { return 0; }
+    return result;
+}
+
+// Extract an RSA public key (n, e) from the SubjectPublicKeyInfo of a
+// parsed certificate. Writes n bytes to n_out, e bytes to e_out. Returns
+// the key size in bytes (n_len), or 0 on error.
+fn x509_extract_rsa_pubkey(cert_raw: Address, fields: Address,
+                           n_out: Address, e_out: Address) -> u32 {
+    status: u32 = 1;
+    result: u32 = 0;
+    // SPKI is at cert_raw + (subjectPublicKeyInfo SEQUENCE start). We
+    // reconstruct the start from the pubkey content offset (which excludes
+    // the BIT STRING tag/length/unused-bits byte) by walking backwards
+    // through the AlgorithmIdentifier. For simplicity, we re-parse from
+    // the known field offsets.
+    pk_off: u32 = x509_load_u32(fields, X509_F_PUBKEY_OFF);  // BIT STRING content
+    pk_len: u32 = x509_load_u32(fields, X509_F_PUBKEY_LEN);
+    algo_oid_off: u32 = x509_load_u32(fields, X509_F_PUBKEY_ALGO_OID_OFF);
+    algo_oid_len: u32 = x509_load_u32(fields, X509_F_PUBKEY_ALGO_OID_LEN);
+
+    // Verify this is an RSA key (OID 1.2.840.113549.1.1.1)
+    rsa_oid = allocate(9);
+    *(rsa_oid + 0) = 42;  *(rsa_oid + 1) = 134; *(rsa_oid + 2) = 72;
+    *(rsa_oid + 3) = 134; *(rsa_oid + 4) = 247; *(rsa_oid + 5) = 13;
+    *(rsa_oid + 6) = 1;   *(rsa_oid + 7) = 1;   *(rsa_oid + 8) = 1;
+    if x509_oid_eq(cert_raw, algo_oid_off, algo_oid_len, rsa_oid, 9) == 0 {
+        status = 0;
+    }
+    free(rsa_oid);
+
+    if status == 1 {
+        // The BIT STRING content is a DER-encoded RSAPublicKey:
+        //   SEQUENCE { modulus INTEGER, publicExponent INTEGER }
+        pos: u32 = pk_off;
+        if *(cert_raw + pos) != 0x30 { status = 0; }
+        if status == 1 {
+            rk_len: u32 = der_read_length(cert_raw, pos + 1);
+            rk_consumed: u32 = der_read_length_consumed(cert_raw, pos + 1);
+            if rk_consumed == 0 { status = 0; }
+            if status == 1 {
+                pos = pos + 1 + rk_consumed;
+                // modulus INTEGER
+                if *(cert_raw + pos) != 0x02 { status = 0; }
+                if status == 1 {
+                    n_len: u32 = der_read_length(cert_raw, pos + 1);
+                    n_consumed: u32 = der_read_length_consumed(cert_raw, pos + 1);
+                    if n_consumed == 0 { status = 0; }
+                    if status == 1 {
+                        n_offset: u32 = pos + 1 + n_consumed;
+                        // Strip leading 0x00 sign-pad byte
+                        n_actual_off: u32 = n_offset;
+                        n_actual_len: u32 = n_len;
+                        if n_len > 1 {
+                            if *(cert_raw + n_offset) == 0 {
+                                n_actual_off = n_offset + 1;
+                                n_actual_len = n_len - 1;
+                            }
+                        }
+                        i: u32 = 0;
+                        while i < n_actual_len {
+                            *(n_out + i) = *(cert_raw + n_actual_off + i);
+                            i = i + 1;
+                        }
+                        pos = n_offset + n_len;
+                        // publicExponent INTEGER
+                        if *(cert_raw + pos) != 0x02 { status = 0; }
+                        if status == 1 {
+                            e_len: u32 = der_read_length(cert_raw, pos + 1);
+                            e_consumed: u32 = der_read_length_consumed(cert_raw, pos + 1);
+                            if e_consumed == 0 { status = 0; }
+                            if status == 1 {
+                                e_offset: u32 = pos + 1 + e_consumed;
+                                e_actual_off: u32 = e_offset;
+                                e_actual_len: u32 = e_len;
+                                if e_len > 1 {
+                                    if *(cert_raw + e_offset) == 0 {
+                                        e_actual_off = e_offset + 1;
+                                        e_actual_len = e_len - 1;
+                                    }
+                                }
+                                i = 0;
+                                while i < e_actual_len {
+                                    *(e_out + i) = *(cert_raw + e_actual_off + i);
+                                    i = i + 1;
+                                }
+                                result = n_actual_len;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if status == 0 { return 0; }
+    return result;
 }

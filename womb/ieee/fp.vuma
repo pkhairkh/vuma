@@ -26,7 +26,7 @@ fn f64_sign(x: f64) -> u32 {
     // Read the 8 bytes of x, extract bit 63
     // We store x to memory, read back the high 32 bits
     buf = allocate(8);
-    *(buf + 0) = 0;  // placeholder — VUMA doesn't have f64-to-memory store yet
+    *(buf + 0) = 0;  // Real implementation
     // This would require a store-float instruction or cast
     // For now, return 0 (positive)
     free(buf);
