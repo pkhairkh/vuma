@@ -1,6 +1,6 @@
 [package]
 name = "vuma"
-version = "0.1.0-alpha.1"
+version = "0.2.0-alpha.1"
 edition = "2021"
 description.workspace = true
 repository.workspace = true
@@ -26,7 +26,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0-alpha.1"
+version = "0.2.0-alpha.1"
 description = "Verified-Unsafe Memory Access — a programming language framework with behavioral verification, 10-architecture codegen, and LLM integration"
 repository = "https://github.com/pkhairkh/vuma"
 license = "MIT"
