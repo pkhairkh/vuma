@@ -400,7 +400,7 @@ fn cam_p(z_hi: u32, z_lo: u32) -> u64 {
     y7: u32 = b1 ^ b2 ^ b3 ^ b4 ^ b5 ^ b6;
     out_hi: u32 = (y0 << 24) | (y1 << 16) | (y2 << 8) | y3;
     out_lo: u32 = (y4 << 24) | (y5 << 16) | (y6 << 8) | y7;
-    return (((out_hi as u64) << 32) | (out_lo as u64)) & 18446744073709551615;
+    return (((out_hi as u64) << 32) | (out_lo as u64)) & ((1 << 63) | ((1 << 63) - 1));
 }
 
 // FL function: (x_L || x_R) -> (x_L & KL || x_R ^ ROTL(x_R & KR, 1))
@@ -414,7 +414,7 @@ fn cam_fl(inp: u64, k: u64) -> u64 {
     t: u32 = (x_lo & k_lo);
     rot: u32 = ((t << 1) | (t >> 31)) & MASK32;
     y_lo: u32 = x_lo ^ rot;
-    return (((y_hi as u64) << 32) | (y_lo as u64)) & 18446744073709551615;
+    return (((y_hi as u64) << 32) | (y_lo as u64)) & ((1 << 63) | ((1 << 63) - 1));
 }
 
 // FL^-1 function
@@ -427,7 +427,7 @@ fn cam_fl_inv(inp: u64, k: u64) -> u64 {
     t: u32 = ((y_lo << 1) | (y_lo >> 31)) & MASK32;
     x_lo: u32 = y_lo ^ (t & k_lo);
     x_hi: u32 = y_hi & k_hi;
-    return (((x_hi as u64) << 32) | (x_lo as u64)) & 18446744073709551615;
+    return (((x_hi as u64) << 32) | (x_lo as u64)) & ((1 << 63) | ((1 << 63) - 1));
 }
 
 // ROTL128(x_hi, x_lo, n)
@@ -457,7 +457,7 @@ fn cam_key_schedule_128(key: Address, subkeys: Address) {
     // For correctness, we need to follow RFC 3713 Section 2.2 exactly.
     // KA = (KL ^ KR) XOR (F(KL ^ KR) || F(...))
     // We'll compute KA properly:
-    kl: u64 = (((k1_hi as u64) << 32) | (k1_lo as u64)) & 18446744073709551615;
+    kl: u64 = (((k1_hi as u64) << 32) | (k1_lo as u64)) & ((1 << 63) | ((1 << 63) - 1));
     // D1 = KL_hi, D2 = KL_lo
     d1: u32 = k1_hi;
     d2: u32 = k1_lo;
@@ -465,11 +465,11 @@ fn cam_key_schedule_128(key: Address, subkeys: Address) {
     // Per RFC: D2 = D2 ^ F(D1, K2) where K2 is constants
     // Constants CON0..CON5 are specified; we use the standard values
     con: u64 = 0xa09e667f3bcc908b;  // CON0||CON1 (Hex)
-    d2_new: u32 = d2 ^ ((cam_f((((d1 as u64) << 32) | (d2 as u64)) & 18446744073709551615, con) >> 32) & MASK32);
-    d1_new: u32 = d1 ^ ((cam_f((((d1 as u64) << 32) | (d2 as u64)) & 18446744073709551615, con)) & MASK32);
+    d2_new: u32 = d2 ^ ((cam_f((((d1 as u64) << 32) | (d2 as u64)) & ((1 << 63) | ((1 << 63) - 1)), con) >> 32) & MASK32);
+    d1_new: u32 = d1 ^ ((cam_f((((d1 as u64) << 32) | (d2 as u64)) & ((1 << 63) | ((1 << 63) - 1)), con)) & MASK32);
     con2: u64 = 0xb67ae8584caa73b2;
-    d1 = d1_new ^ ((cam_f((((d1_new as u64) << 32) | (d2_new as u64)) & 18446744073709551615, con2)) & MASK32);
-    d2 = d2_new ^ ((cam_f((((d1_new as u64) << 32) | (d2_new as u64)) & 18446744073709551615, con2) >> 32) & MASK32);
+    d1 = d1_new ^ ((cam_f((((d1_new as u64) << 32) | (d2_new as u64)) & ((1 << 63) | ((1 << 63) - 1)), con2)) & MASK32);
+    d2 = d2_new ^ ((cam_f((((d1_new as u64) << 32) | (d2_new as u64)) & ((1 << 63) | ((1 << 63) - 1)), con2) >> 32) & MASK32);
     // After 2 rounds, KA = (d1, d2) (after one more XOR with KL)
     ka: u64 = (((d1 as u64) << 32) | (d2 as u64)) ^ kl;
     // For brevity, we provide a deterministic key schedule by deriving
@@ -506,7 +506,7 @@ fn cam_load_subkey(sk: Address, idx: u32) -> u64 {
     i: u32 = 0;
     while i < 4 { hi = (hi << 8) | *(sk + idx * 8 + i); i = i + 1; }
     while i < 8 { lo = (lo << 8) | *(sk + idx * 8 + i); i = i + 1; }
-    return (((hi as u64) << 32) | (lo as u64)) & 18446744073709551615;
+    return (((hi as u64) << 32) | (lo as u64)) & ((1 << 63) | ((1 << 63) - 1));
 }
 
 // Camellia 128-bit block encryption (18 rounds + 6 FL/FL^-1)

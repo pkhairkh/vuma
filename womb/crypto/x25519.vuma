@@ -14,7 +14,7 @@
 // uses Fermat's little theorem: a^(-1) = a^(p-2) mod p.
 
 const MASK32: u32 = 4294967295;
-const MASK64: u64 = 18446744073709551615;
+const MASK64: u64 = ((1 << 63) | ((1 << 63) - 1));
 
 // ===========================================================================
 // 4 × u64 limb load/store (little-endian byte order)
@@ -168,7 +168,7 @@ fn fe_sub(r: Address, a: Address, b: Address) {
             store_u64_le(r, 0, lo - 19);
         } else {
             // Underflow on subtraction; borrow from higher limbs.
-            store_u64_le(r, 0, lo + 18446744073709551597);  // 2^64 - 19
+            store_u64_le(r, 0, lo + ((1 << 63) | ((1 << 63) - 3)));  // 2^64 - 19
             i = 1;
             while i < 4 {
                 v: u64 = load_u64_le(r, i * 8);
@@ -176,14 +176,14 @@ fn fe_sub(r: Address, a: Address, b: Address) {
                     store_u64_le(r, i * 8, v - 1);
                     break;
                 } else {
-                    store_u64_le(r, i * 8, 18446744073709551615);
+                    store_u64_le(r, i * 8, ((1 << 63) | ((1 << 63) - 1)));
                 }
                 i = i + 1;
             }
         }
         // Set bit 255
         hi: u64 = load_u64_le(r, 24);
-        store_u64_le(r, 24, hi | 9223372036854775808);
+        store_u64_le(r, 24, hi | (1 << 63));
     }
 }
 
