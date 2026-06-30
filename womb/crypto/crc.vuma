@@ -13,7 +13,7 @@ fn crc32_table_entry(idx: u32) -> u32 {
     i: u32 = 0;
     while i < 8 {
         if (crc & 1) == 1 {
-            crc = (crc >> 1) ^ 4022334336;  // 0xEDB88320
+            crc = (crc >> 1) ^ 3988292384;  // 0xEDB88320
         } else {
             crc = crc >> 1;
         }
