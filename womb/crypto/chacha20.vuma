@@ -1,107 +1,151 @@
-// womb/crypto/chacha20.vuma — ChaCha20 Stream Cipher (RFC 8439)
+// womb/crypto/chacha20.vuma — ChaCha20 Stream Cipher (RFC 8439, §2.3–2.4)
 // No main() — importable library module.
-// 256-bit key, 96-bit nonce, 32-bit counter.
-// All operations are u32 with 20 rounds (10 double rounds).
+//
+// 256-bit key, 96-bit nonce, 32-bit block counter. 20 rounds
+// (10 double rounds of column + diagonal quarter-rounds). State is
+// 512 bits arranged as 16 little-endian 32-bit words:
+//
+//   word  0  1  2  3       "expa" "nd 3" "2-by" "te k"   (constants)
+//   word  4  5  6  7       key[0..3]
+//   word  8  9 10 11       key[4..7]
+//   word 12                counter
+//   word 13 14 15          nonce[0..2]
+//
+// Encryption and decryption are identical XOR-with-keystream operations.
 
-const MASK32: u32 = 4294967295;
+const CHACHA20_MASK32: u32 = 4294967295;
+const CHACHA20_KEY_SIZE: u32 = 32;
+const CHACHA20_NONCE_SIZE: u32 = 12;
+const CHACHA20_BLOCK_SIZE: u32 = 64;
 
-fn rotl32(x: u32, n: u32) -> u32 {
-    return ((x << n) | (x >> (32 - n))) & MASK32;
+// RFC 8439 §2.3.2: "expand 32-byte k" as four little-endian u32 words.
+const CHACHA20_SIGMA_0: u32 = 1634760805;  // "expa"
+const CHACHA20_SIGMA_1: u32 = 857760878;   // "nd 3"
+const CHACHA20_SIGMA_2: u32 = 2036477234;  // "2-by"
+const CHACHA20_SIGMA_3: u32 = 1797285236;  // "te k"
+
+// ===========================================================================
+// 32-bit primitives: rotate-left and little-endian byte helpers.
+// ===========================================================================
+
+fn chacha20_rotl32(x: u32, n: u32) -> u32 {
+    return ((x << n) | (x >> (32 - n))) & CHACHA20_MASK32;
 }
 
-fn load_u32_le(ptr: Address, off: u32) -> u32 {
-    b0: u32 = *(ptr + off); b1: u32 = *(ptr + off + 1);
-    b2: u32 = *(ptr + off + 2); b3: u32 = *(ptr + off + 3);
+fn chacha20_load_u32_le(ptr: Address, off: u32) -> u32 {
+    b0: u32 = *(ptr + off);
+    b1: u32 = *(ptr + off + 1);
+    b2: u32 = *(ptr + off + 2);
+    b3: u32 = *(ptr + off + 3);
     return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
 }
 
-fn store_u32_le(ptr: Address, off: u32, val: u32) {
+fn chacha20_store_u32_le(ptr: Address, off: u32, val: u32) {
     *(ptr + off) = val & 255;
     *(ptr + off + 1) = (val >> 8) & 255;
     *(ptr + off + 2) = (val >> 16) & 255;
     *(ptr + off + 3) = (val >> 24) & 255;
 }
 
-// ChaCha20 quarter round
-fn qr(state: Address, a: u32, b: u32, c: u32, d: u32) {
-    // a += b; d ^= a; d <<<= 16;
-    va: u32 = load_u32_le(state, a * 4);
-    vb: u32 = load_u32_le(state, b * 4);
-    vc: u32 = load_u32_le(state, c * 4);
-    vd: u32 = load_u32_le(state, d * 4);
+// ===========================================================================
+// RFC 8439 §2.1 — quarter round QR(a, b, c, d):
+//   a += b; d ^= a; d <<<= 16;
+//   c += d; b ^= c; b <<<= 12;
+//   a += b; d ^= a; d <<<= 8;
+//   c += d; b ^= c; b <<<= 7;
+// All additions are mod 2^32. Operates in place on the 16-word state.
+// ===========================================================================
 
-    va = (va + vb) & MASK32;
-    vd = rotl32(vd ^ va, 16);
-    vc = (vc + vd) & MASK32;
-    vb = rotl32(vb ^ vc, 12);
-    va = (va + vb) & MASK32;
-    vd = rotl32(vd ^ va, 8);
-    vc = (vc + vd) & MASK32;
-    vb = rotl32(vb ^ vc, 7);
+fn chacha20_qr(state: Address, a: u32, b: u32, c: u32, d: u32) {
+    va: u32 = chacha20_load_u32_le(state, a * 4);
+    vb: u32 = chacha20_load_u32_le(state, b * 4);
+    vc: u32 = chacha20_load_u32_le(state, c * 4);
+    vd: u32 = chacha20_load_u32_le(state, d * 4);
 
-    store_u32_le(state, a * 4, va);
-    store_u32_le(state, b * 4, vb);
-    store_u32_le(state, c * 4, vc);
-    store_u32_le(state, d * 4, vd);
+    va = (va + vb) & CHACHA20_MASK32;
+    vd = chacha20_rotl32(vd ^ va, 16);
+    vc = (vc + vd) & CHACHA20_MASK32;
+    vb = chacha20_rotl32(vb ^ vc, 12);
+    va = (va + vb) & CHACHA20_MASK32;
+    vd = chacha20_rotl32(vd ^ va, 8);
+    vc = (vc + vd) & CHACHA20_MASK32;
+    vb = chacha20_rotl32(vb ^ vc, 7);
+
+    chacha20_store_u32_le(state, a * 4, va);
+    chacha20_store_u32_le(state, b * 4, vb);
+    chacha20_store_u32_le(state, c * 4, vc);
+    chacha20_store_u32_le(state, d * 4, vd);
 }
 
-// ChaCha20 block function — generates 64 bytes of keystream
+// One ChaCha20 double-round: column round + diagonal round.
+fn chacha20_double_round(state: Address) {
+    // Column round — QR on each column of the 4x4 state matrix.
+    chacha20_qr(state, 0, 4, 8, 12);
+    chacha20_qr(state, 1, 5, 9, 13);
+    chacha20_qr(state, 2, 6, 10, 14);
+    chacha20_qr(state, 3, 7, 11, 15);
+    // Diagonal round — QR on each diagonal.
+    chacha20_qr(state, 0, 5, 10, 15);
+    chacha20_qr(state, 1, 6, 11, 12);
+    chacha20_qr(state, 2, 7, 8, 13);
+    chacha20_qr(state, 3, 4, 9, 14);
+}
+
+// ===========================================================================
+// RFC 8439 §2.3.1 — ChaCha20 block function.
+// Initializes the 512-bit state from the constants, key, counter and nonce,
+// applies 20 rounds (10 double-rounds), adds the initial state (mod 2^32)
+// and writes 64 bytes of keystream to `out`.
+// ===========================================================================
+
 fn chacha20_block(key: Address, counter: u32, nonce: Address, out: Address) {
-    state = allocate(64);  // 16 × u32
+    state = allocate(64);   // 16 x u32 working state.
+    initial = allocate(64); // snapshot of pre-round state for the final add.
 
-    // Constants: "expand 32-byte k"
-    store_u32_le(state, 0, 1634760805);   // "expa"
-    store_u32_le(state, 4, 857760878);    // "nd 3"
-    store_u32_le(state, 8, 2036477234);   // "2-by"
-    store_u32_le(state, 12, 1797285236);  // "te k"
+    // Constants.
+    chacha20_store_u32_le(state, 0, CHACHA20_SIGMA_0);
+    chacha20_store_u32_le(state, 4, CHACHA20_SIGMA_1);
+    chacha20_store_u32_le(state, 8, CHACHA20_SIGMA_2);
+    chacha20_store_u32_le(state, 12, CHACHA20_SIGMA_3);
 
-    // Key (256 bits = 8 × u32)
+    // Key: 256 bits = 8 x u32 little-endian words at positions 4..11.
     i: u32 = 0;
     while i < 8 {
-        store_u32_le(state, 16 + i * 4, load_u32_le(key, i * 4));
+        chacha20_store_u32_le(state, 16 + i * 4, chacha20_load_u32_le(key, i * 4));
         i = i + 1;
     }
 
-    // Counter
-    store_u32_le(state, 48, counter);
+    // Counter: 32-bit word at position 12.
+    chacha20_store_u32_le(state, 48, counter);
 
-    // Nonce (96 bits = 3 × u32)
+    // Nonce: 96 bits = 3 x u32 little-endian words at positions 13..15.
     i = 0;
     while i < 3 {
-        store_u32_le(state, 52 + i * 4, load_u32_le(nonce, i * 4));
+        chacha20_store_u32_le(state, 52 + i * 4, chacha20_load_u32_le(nonce, i * 4));
         i = i + 1;
     }
 
-    // Save initial state
-    initial = allocate(64);
+    // Snapshot for the final state-addition step (RFC 8439 §2.3.1).
     i = 0;
     while i < 64 {
         *(initial + i) = *(state + i);
         i = i + 1;
     }
 
-    // 20 rounds = 10 double rounds
+    // 20 rounds = 10 double rounds.
     round: u32 = 0;
     while round < 10 {
-        // Column rounds
-        qr(state, 0, 4, 8, 12);
-        qr(state, 1, 5, 9, 13);
-        qr(state, 2, 6, 10, 14);
-        qr(state, 3, 7, 11, 15);
-        // Diagonal rounds
-        qr(state, 0, 5, 10, 15);
-        qr(state, 1, 6, 11, 12);
-        qr(state, 2, 7, 8, 13);
-        qr(state, 3, 4, 9, 14);
+        chacha20_double_round(state);
         round = round + 1;
     }
 
-    // Add initial state
+    // Add the initial state back into the working state (mod 2^32) and
+    // emit 64 bytes of keystream.
     i = 0;
     while i < 16 {
-        s: u32 = load_u32_le(state, i * 4);
-        init_val: u32 = load_u32_le(initial, i * 4);
-        store_u32_le(out, i * 4, (s + init_val) & MASK32);
+        s: u32 = chacha20_load_u32_le(state, i * 4);
+        init_val: u32 = chacha20_load_u32_le(initial, i * 4);
+        chacha20_store_u32_le(out, i * 4, (s + init_val) & CHACHA20_MASK32);
         i = i + 1;
     }
 
@@ -109,20 +153,25 @@ fn chacha20_block(key: Address, counter: u32, nonce: Address, out: Address) {
     free(initial);
 }
 
-// ChaCha20 encrypt/decrypt (same operation — XOR with keystream)
-fn chacha20_encrypt(data: Address, data_len: u32, key: Address, nonce: Address, counter: u32, output: Address) -> u32 {
+// ===========================================================================
+// RFC 8439 §2.4 — ChaCha20 encrypt/decrypt.
+// Identical for both directions: XOR the data with the ChaCha20 keystream
+// generated from (key, counter, nonce). The block counter is incremented
+// once per 64-byte block and starts at the caller-supplied `counter`.
+// ===========================================================================
+
+fn chacha20_encrypt(data: Address, data_len: u32, key: Address,
+                    nonce: Address, counter: u32, output: Address) -> u32 {
     pos: u32 = 0;
     ctr: u32 = counter;
+    keystream = allocate(CHACHA20_BLOCK_SIZE);
 
     while pos < data_len {
-        // Generate 64-byte keystream block
-        keystream = allocate(64);
         chacha20_block(key, ctr, nonce, keystream);
 
-        // XOR with data
         remaining: u32 = data_len - pos;
-        to_xor: u32 = 64;
-        if remaining < 64 { to_xor = remaining; }
+        to_xor: u32 = CHACHA20_BLOCK_SIZE;
+        if remaining < CHACHA20_BLOCK_SIZE { to_xor = remaining; }
 
         i: u32 = 0;
         while i < to_xor {
@@ -132,10 +181,49 @@ fn chacha20_encrypt(data: Address, data_len: u32, key: Address, nonce: Address, 
             i = i + 1;
         }
 
-        free(keystream);
         pos = pos + to_xor;
         ctr = ctr + 1;
     }
 
+    free(keystream);
     return data_len;
+}
+
+// Decrypt is the same operation as encrypt for a stream cipher.
+fn chacha20_decrypt(data: Address, data_len: u32, key: Address,
+                    nonce: Address, counter: u32, output: Address) -> u32 {
+    return chacha20_encrypt(data, data_len, key, nonce, counter, output);
+}
+
+// ===========================================================================
+// RFC 8439 §2.4 — one-shot keystream API.
+// Generates `out_len` bytes of ChaCha20 keystream (no input plaintext).
+// Useful for deriving the Poly1305 one-time key in ChaCha20-Poly1305 and
+// for stream-based protocols that XOR externally.
+// ===========================================================================
+
+fn chacha20_keystream(key: Address, nonce: Address, counter: u32,
+                      out: Address, out_len: u32) {
+    zero = allocate(out_len);
+    i: u32 = 0;
+    while i < out_len { *(zero + i) = 0; i = i + 1; }
+    chacha20_encrypt(zero, out_len, key, nonce, counter, out);
+    free(zero);
+}
+
+// ===========================================================================
+// Key generation. RFC 8439 does not specify a key-derivation scheme for
+// ChaCha20 itself; callers must supply 32 bytes of cryptographic randomness
+// (e.g. from drbg_generate). This routine copies the supplied 32-byte seed
+// into key_out verbatim so callers have a uniform key-generation entry
+// point. The 12-byte nonce must also come from a CSPRNG and never repeat
+// under the same key.
+// ===========================================================================
+
+fn chacha20_keygen(seed: Address, key_out: Address) {
+    i: u32 = 0;
+    while i < CHACHA20_KEY_SIZE {
+        *(key_out + i) = *(seed + i);
+        i = i + 1;
+    }
 }
