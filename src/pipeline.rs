@@ -3377,6 +3377,32 @@ fn resolve_subexpr(
         };
     }
 
+    // Handle cast expressions: "expr as Type" or "(expr as Type)"
+    // The SCG represents casts as Computation nodes with label "(expr as Type)"
+    // when the cast is used directly in an expression (not a let-binding).
+    // We strip the cast and return the inner expression — the type is already
+    // tracked by the SCG node's result_type, and the backend will handle
+    // the actual value (casts between integer types are no-ops at the IR
+    // level since all registers are 64-bit).
+    if let Some(inner) = subexpr.strip_prefix("(").and_then(|s| s.strip_suffix(")")) {
+        if let Some(as_pos) = inner.find(" as ") {
+            let expr_part = inner[..as_pos].trim();
+            let type_part = inner[as_pos + 4..].trim();
+            // Validate type_part looks like a type name
+            if type_part.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                return resolve_subexpr(expr_part, sources, edge_idx, scg);
+            }
+        }
+    }
+    // Also handle without parens: "expr as Type"
+    if let Some(as_pos) = subexpr.find(" as ") {
+        let expr_part = subexpr[..as_pos].trim();
+        let type_part = subexpr[as_pos + 4..].trim();
+        if type_part.chars().all(|c| c.is_alphanumeric() || c == '_') {
+            return resolve_subexpr(expr_part, sources, edge_idx, scg);
+        }
+    }
+
     // Fallback: log warning for unsupported sub-expressions instead of
     // silently returning 0. This makes debugging easier when constructs
     // are not handled by the SCG→IR bridge.
