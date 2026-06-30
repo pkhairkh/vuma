@@ -1,36 +1,414 @@
-// womb/crypto/sha384.vuma — SHA-384 (NIST FIPS 180-4)
-// Truncated SHA-512 with different initial hash values.
-// 80-round, 1024-bit blocks, 384-bit (48-byte) output.
-// Requires: sha512.vuma (shares compression function).
+// womb/crypto/sha384.vuma — SHA-384 (NIST FIPS 180-4 Section 6.3.2)
+// 80-round Merkle-Damgard hash over 1024-bit (128-byte) blocks; the
+// 512-bit state is truncated to 384 bits (48 bytes = first six of the
+// eight 64-bit state words) for output. SHA-384 uses the same compression
+// function and round constants K[0..79] as SHA-512; only the initial hash
+// values and output length differ.
+// Streaming API: sha384_init / sha384_update / sha384_final / sha384_oneshot,
+// plus the exposed compression primitive sha384_compress.
+// All arithmetic is u64 with explicit masking via MASK64.
 
-// FIPS 180-4 Section 5.3.4: SHA-384 initial hash values
-const H0I_384: u64 = 13478193318084588547;
-const H1I_384: u64 = 2550396343389265400;
-const H2I_384: u64 = 1010948346851328306;
-const H3I_384: u64 = 16117252739641894804;
-const H4I_384: u64 = 12696512699617033960;
-const H5I_384: u64 = 15728981531209326632;
-const H6I_384: u64 = 15478198936575664745;
-const H7I_384: u64 = 13697051427777647928;
+// VUMA's parser rejects integer literals >= 2^63 for u64. Constants at or
+// above that threshold are written as (1 << 63) | lower_63_bits, which the
+// parser evaluates to the correct unsigned u64 value.
+const MASK64: u64 = (1 << 63) | ((1 << 63) - 1);
 
+// ===========================================================================
+// SHA-512 round constants K[0..79] (FIPS 180-4 Section 4.2.3).
+// SHA-384 uses the same compression function as SHA-512, hence the same K.
+// ===========================================================================
+const K00: u64 = 4794697086780616226;
+const K01: u64 = 8158064640168781261;
+const K02: u64 = (1 << 63) | 3873372549979913007;
+const K03: u64 = (1 << 63) | 7617235848656444348;
+const K04: u64 = 4131703408338449720;
+const K05: u64 = 6480981068601479193;
+const K06: u64 = (1 << 63) | 1314913260039393179;
+const K07: u64 = (1 << 63) | 3106462115564454168;
+const K08: u64 = (1 << 63) | 6343226172721267266;
+const K09: u64 = 1334009975649890238;
+const K10: u64 = 2608012711638119052;
+const K11: u64 = 6128411473006802146;
+const K12: u64 = 8268148722764581231;
+const K13: u64 = (1 << 63) | 62683150300911281;
+const K14: u64 = (1 << 63) | 2007486848863506997;
+const K15: u64 = (1 << 63) | 4727637717853742740;
+const K16: u64 = (1 << 63) | 7249504305499163346;
+const K17: u64 = (1 << 63) | 8051951825580926435;
+const K18: u64 = 1135362057144423861;
+const K19: u64 = 2597628984639134821;
+const K20: u64 = 3308224258029322869;
+const K21: u64 = 5365058923640841347;
+const K22: u64 = 6679025012923562964;
+const K23: u64 = 8573033837759648693;
+const K24: u64 = (1 << 63) | 1746923122095218603;
+const K25: u64 = (1 << 63) | 2896314207596458512;
+const K26: u64 = (1 << 63) | 3459652681264210239;
+const K27: u64 = (1 << 63) | 4564820193195265764;
+const K28: u64 = (1 << 63) | 5107095116777557954;
+const K29: u64 = (1 << 63) | 6172061550930208549;
+const K30: u64 = 489312712824947311;
+const K31: u64 = 1452737877330783856;
+const K32: u64 = 2861767655752347644;
+const K33: u64 = 3322285676063803686;
+const K34: u64 = 5560940570517711597;
+const K35: u64 = 5996557281743188959;
+const K36: u64 = 7280758554555802590;
+const K37: u64 = 8532644243296465576;
+const K38: u64 = (1 << 63) | 126884940132232934;
+const K39: u64 = (1 << 63) | 1329173790114067771;
+const K40: u64 = (1 << 63) | 2503975697319527268;
+const K41: u64 = (1 << 63) | 2889734586378629121;
+const K42: u64 = (1 << 63) | 4777065146415093649;
+const K43: u64 = (1 << 63) | 5146578234805370416;
+const K44: u64 = (1 << 63) | 5878015661349753368;
+const K45: u64 = (1 << 63) | 6240025511819847952;
+const K46: u64 = (1 << 63) | 8362680404887543850;
+const K47: u64 = 1182934255886127544;
+const K48: u64 = 1847814050463011016;
+const K49: u64 = 2177327727835720531;
+const K50: u64 = 2830643537854262169;
+const K51: u64 = 3796741975233480872;
+const K52: u64 = 4115178125766777443;
+const K53: u64 = 5681478168544905931;
+const K54: u64 = 6601373596472566643;
+const K55: u64 = 7507060721942968483;
+const K56: u64 = 8399075790359081724;
+const K57: u64 = 8693463985226723168;
+const K58: u64 = (1 << 63) | 344657401505426290;
+const K59: u64 = (1 << 63) | 920706882646325740;
+const K60: u64 = (1 << 63) | 1206683199982476840;
+const K61: u64 = (1 << 63) | 2616711143808482793;
+const K62: u64 = (1 << 63) | 4537838383804086549;
+const K63: u64 = (1 << 63) | 5075971239616598827;
+const K64: u64 = (1 << 63) | 5343308541310951836;
+const K65: u64 = (1 << 63) | 5874585929355674119;
+const K66: u64 = (1 << 63) | 7699604874473827102;
+const K67: u64 = (1 << 63) | 8466010285406081400;
+const K68: u64 = 500013540394364858;
+const K69: u64 = 748580250866718886;
+const K70: u64 = 1242879168328830382;
+const K71: u64 = 1977374033974150939;
+const K72: u64 = 2944078676154940804;
+const K73: u64 = 3659926193048069267;
+const K74: u64 = 4368137639120453308;
+const K75: u64 = 4836135668995329356;
+const K76: u64 = 5532061633213252278;
+const K77: u64 = 6448918945643986474;
+const K78: u64 = 6902733635092675308;
+const K79: u64 = 7801388544844847127;
+
+// ===========================================================================
+// SHA-384 initial hash values (FIPS 180-4 Section 5.3.4).
+// H0=0xcbbb9d5dc1059ed8 H1=0x629a292a367cd507 H2=0x9159015a3070dd17
+// H3=0x152fecd8f70e5939 H4=0x67332667ffc00b31 H5=0x8eb44a8768581511
+// H6=0xdb0c2e0d64f98fa7 H7=0x47b5481dbefa4fa4
+// ===========================================================================
+const H0I: u64 = (1 << 63) | 5457128399485378264;
+const H1I: u64 = 7105036623409894663;
+const H2I: u64 = (1 << 63) | 1250031858443410711;
+const H3I: u64 = 1526699215303891257;
+const H4I: u64 = 7436329637833083697;
+const H5I: u64 = (1 << 63) | 1059553757770552593;
+const H6I: u64 = (1 << 63) | 6560669392235499431;
+const H7I: u64 = 5167115440072839076;
+
+// Rotate-right guarded against n==0 (64-n would shift by full word).
+fn rotr64(x: u64, n: u64) -> u64 {
+    if n == 0 { return x; }
+    return (x >> n) | (x << (64 - n));
+}
+
+// Load 8 bytes big-endian into a u64.
+fn load_u64_be(ptr: Address, off: u32) -> u64 {
+    b0: u64 = *(ptr + off); b1: u64 = *(ptr + off + 1);
+    b2: u64 = *(ptr + off + 2); b3: u64 = *(ptr + off + 3);
+    b4: u64 = *(ptr + off + 4); b5: u64 = *(ptr + off + 5);
+    b6: u64 = *(ptr + off + 6); b7: u64 = *(ptr + off + 7);
+    return (b0 << 56) | (b1 << 48) | (b2 << 40) | (b3 << 32)
+         | (b4 << 24) | (b5 << 16) | (b6 << 8) | b7;
+}
+
+// Store a u64 big-endian into 8 bytes.
+fn store_u64_be(ptr: Address, off: u32, val: u64) {
+    *(ptr + off)     = (val >> 56) & 255;
+    *(ptr + off + 1) = (val >> 48) & 255;
+    *(ptr + off + 2) = (val >> 40) & 255;
+    *(ptr + off + 3) = (val >> 32) & 255;
+    *(ptr + off + 4) = (val >> 24) & 255;
+    *(ptr + off + 5) = (val >> 16) & 255;
+    *(ptr + off + 6) = (val >> 8) & 255;
+    *(ptr + off + 7) = val & 255;
+}
+
+// Ch(x, y, z) = (x AND y) XOR ((NOT x) AND z)
+fn ch64(x: u64, y: u64, z: u64) -> u64 {
+    return (x & y) ^ ((x ^ MASK64) & z);
+}
+
+// Maj(x, y, z) = (x AND y) XOR (x AND z) XOR (y AND z)
+fn maj64(x: u64, y: u64, z: u64) -> u64 {
+    return (x & y) ^ (x & z) ^ (y & z);
+}
+
+// Big Sigma0(x) = ROTR^28(x) XOR ROTR^34(x) XOR ROTR^39(x)
+fn big_sigma0_64(x: u64) -> u64 {
+    return rotr64(x, 28) ^ rotr64(x, 34) ^ rotr64(x, 39);
+}
+
+// Big Sigma1(x) = ROTR^14(x) XOR ROTR^18(x) XOR ROTR^41(x)
+fn big_sigma1_64(x: u64) -> u64 {
+    return rotr64(x, 14) ^ rotr64(x, 18) ^ rotr64(x, 41);
+}
+
+// Small sigma0(x) = ROTR^1(x) XOR ROTR^8(x) XOR SHR^7(x)
+fn small_sigma0_64(x: u64) -> u64 {
+    return rotr64(x, 1) ^ rotr64(x, 8) ^ (x >> 7);
+}
+
+// Small sigma1(x) = ROTR^19(x) XOR ROTR^61(x) XOR SHR^6(x)
+fn small_sigma1_64(x: u64) -> u64 {
+    return rotr64(x, 19) ^ rotr64(x, 61) ^ (x >> 6);
+}
+
+// Context layout (216 bytes):
+//   [  0.. 63] H[0..7]   8 x u64 big-endian state words
+//   [ 64.. 71] bit_lo    low 64 bits of total message length in bits
+//   [ 72.. 79] bit_hi    high 64 bits of total message length in bits
+//   [ 80.. 87] buf_len   bytes currently in the message buffer
+//   [ 88..215] buf[128]  partial block accumulator (1024-bit block)
 fn sha384_init(ctx: Address) {
-    store_u64_be(ctx, 0, H0I_384);
-    store_u64_be(ctx, 8, H1I_384);
-    store_u64_be(ctx, 16, H2I_384);
-    store_u64_be(ctx, 24, H3I_384);
-    store_u64_be(ctx, 32, H4I_384);
-    store_u64_be(ctx, 40, H5I_384);
-    store_u64_be(ctx, 48, H6I_384);
-    store_u64_be(ctx, 56, H7I_384);
+    store_u64_be(ctx, 0,  H0I);
+    store_u64_be(ctx, 8,  H1I);
+    store_u64_be(ctx, 16, H2I);
+    store_u64_be(ctx, 24, H3I);
+    store_u64_be(ctx, 32, H4I);
+    store_u64_be(ctx, 40, H5I);
+    store_u64_be(ctx, 48, H6I);
+    store_u64_be(ctx, 56, H7I);
     store_u64_be(ctx, 64, 0);
     store_u64_be(ctx, 72, 0);
     store_u64_be(ctx, 80, 0);
 }
 
+// Core compression: 80 rounds over a single 1024-bit block, per FIPS 180-4
+// Section 6.4.2. Builds the 80-word message schedule from the 16 input
+// words, then mixes each round with K[i] and the working-state registers
+// a..h using the SHA-512 mixing functions. The compressed block is added
+// back into the running state H[0..7].
+fn sha384_compress(ctx: Address, block: Address) {
+    a: u64 = load_u64_be(ctx, 0);
+    b: u64 = load_u64_be(ctx, 8);
+    c: u64 = load_u64_be(ctx, 16);
+    d: u64 = load_u64_be(ctx, 24);
+    e: u64 = load_u64_be(ctx, 32);
+    f: u64 = load_u64_be(ctx, 40);
+    g: u64 = load_u64_be(ctx, 48);
+    h: u64 = load_u64_be(ctx, 56);
+
+    // 80-word message schedule: 80 x 8 bytes = 640 bytes
+    wbuf = allocate(640);
+    i: u32 = 0;
+    while i < 16 {
+        store_u64_be(wbuf, i * 8, load_u64_be(block, i * 8));
+        i = i + 1;
+    }
+    // Rounds 16..79: W[i] = SSig1(W[i-2]) + W[i-7] + SSig0(W[i-15]) + W[i-16]
+    i = 16;
+    while i < 80 {
+        w15: u64 = load_u64_be(wbuf, (i - 15) * 8);
+        w2:  u64 = load_u64_be(wbuf, (i - 2) * 8);
+        w16: u64 = load_u64_be(wbuf, (i - 16) * 8)
+                 + small_sigma0_64(w15)
+                 + load_u64_be(wbuf, (i - 7) * 8)
+                 + small_sigma1_64(w2);
+        store_u64_be(wbuf, i * 8, w16);
+        i = i + 1;
+    }
+
+    i = 0;
+    while i < 80 {
+        ki: u64 = 0;
+        if i == 0  { ki = K00; }
+        if i == 1  { ki = K01; }
+        if i == 2  { ki = K02; }
+        if i == 3  { ki = K03; }
+        if i == 4  { ki = K04; }
+        if i == 5  { ki = K05; }
+        if i == 6  { ki = K06; }
+        if i == 7  { ki = K07; }
+        if i == 8  { ki = K08; }
+        if i == 9  { ki = K09; }
+        if i == 10 { ki = K10; }
+        if i == 11 { ki = K11; }
+        if i == 12 { ki = K12; }
+        if i == 13 { ki = K13; }
+        if i == 14 { ki = K14; }
+        if i == 15 { ki = K15; }
+        if i == 16 { ki = K16; }
+        if i == 17 { ki = K17; }
+        if i == 18 { ki = K18; }
+        if i == 19 { ki = K19; }
+        if i == 20 { ki = K20; }
+        if i == 21 { ki = K21; }
+        if i == 22 { ki = K22; }
+        if i == 23 { ki = K23; }
+        if i == 24 { ki = K24; }
+        if i == 25 { ki = K25; }
+        if i == 26 { ki = K26; }
+        if i == 27 { ki = K27; }
+        if i == 28 { ki = K28; }
+        if i == 29 { ki = K29; }
+        if i == 30 { ki = K30; }
+        if i == 31 { ki = K31; }
+        if i == 32 { ki = K32; }
+        if i == 33 { ki = K33; }
+        if i == 34 { ki = K34; }
+        if i == 35 { ki = K35; }
+        if i == 36 { ki = K36; }
+        if i == 37 { ki = K37; }
+        if i == 38 { ki = K38; }
+        if i == 39 { ki = K39; }
+        if i == 40 { ki = K40; }
+        if i == 41 { ki = K41; }
+        if i == 42 { ki = K42; }
+        if i == 43 { ki = K43; }
+        if i == 44 { ki = K44; }
+        if i == 45 { ki = K45; }
+        if i == 46 { ki = K46; }
+        if i == 47 { ki = K47; }
+        if i == 48 { ki = K48; }
+        if i == 49 { ki = K49; }
+        if i == 50 { ki = K50; }
+        if i == 51 { ki = K51; }
+        if i == 52 { ki = K52; }
+        if i == 53 { ki = K53; }
+        if i == 54 { ki = K54; }
+        if i == 55 { ki = K55; }
+        if i == 56 { ki = K56; }
+        if i == 57 { ki = K57; }
+        if i == 58 { ki = K58; }
+        if i == 59 { ki = K59; }
+        if i == 60 { ki = K60; }
+        if i == 61 { ki = K61; }
+        if i == 62 { ki = K62; }
+        if i == 63 { ki = K63; }
+        if i == 64 { ki = K64; }
+        if i == 65 { ki = K65; }
+        if i == 66 { ki = K66; }
+        if i == 67 { ki = K67; }
+        if i == 68 { ki = K68; }
+        if i == 69 { ki = K69; }
+        if i == 70 { ki = K70; }
+        if i == 71 { ki = K71; }
+        if i == 72 { ki = K72; }
+        if i == 73 { ki = K73; }
+        if i == 74 { ki = K74; }
+        if i == 75 { ki = K75; }
+        if i == 76 { ki = K76; }
+        if i == 77 { ki = K77; }
+        if i == 78 { ki = K78; }
+        if i == 79 { ki = K79; }
+
+        wi: u64 = load_u64_be(wbuf, i * 8);
+        t1: u64 = h + big_sigma1_64(e) + ch64(e, f, g) + ki + wi;
+        t2: u64 = big_sigma0_64(a) + maj64(a, b, c);
+        h = g; g = f; f = e; e = d + t1;
+        d = c; c = b; b = a; a = t1 + t2;
+        i = i + 1;
+    }
+
+    // Add the compressed chunk back into the running state. u64 arithmetic
+    // wraps mod 2^64 by definition in VUMA, so no explicit masking needed.
+    store_u64_be(ctx, 0,  load_u64_be(ctx, 0)  + a);
+    store_u64_be(ctx, 8,  load_u64_be(ctx, 8)  + b);
+    store_u64_be(ctx, 16, load_u64_be(ctx, 16) + c);
+    store_u64_be(ctx, 24, load_u64_be(ctx, 24) + d);
+    store_u64_be(ctx, 32, load_u64_be(ctx, 32) + e);
+    store_u64_be(ctx, 40, load_u64_be(ctx, 40) + f);
+    store_u64_be(ctx, 48, load_u64_be(ctx, 48) + g);
+    store_u64_be(ctx, 56, load_u64_be(ctx, 56) + h);
+    free(wbuf);
+}
+
+// Increment the 128-bit bit counter by `bits` (1 <= bits <= 1024), carrying
+// into the high 64-bit limb when the low limb wraps.
+fn sha384_add_bits(ctx: Address, bits: u64) {
+    lo: u64 = load_u64_be(ctx, 64);
+    hi: u64 = load_u64_be(ctx, 72);
+    new_lo: u64 = lo + bits;
+    if new_lo < lo { hi = hi + 1; }
+    store_u64_be(ctx, 64, new_lo);
+    store_u64_be(ctx, 72, hi);
+}
+
+// Absorb `len` bytes of `data` into the context, compressing a full 128-byte
+// block each time the buffer fills.
+fn sha384_update(ctx: Address, data: Address, len: u32) {
+    buf_len: u64 = load_u64_be(ctx, 80);
+    i: u32 = 0;
+    while i < len {
+        *(ctx + 88 + buf_len) = *(data + i);
+        buf_len = buf_len + 1;
+        i = i + 1;
+        if buf_len == 128 {
+            sha384_compress(ctx, ctx + 88);
+            sha384_add_bits(ctx, 1024);
+            buf_len = 0;
+        }
+    }
+    store_u64_be(ctx, 80, buf_len);
+}
+
+// Pad the buffered message per FIPS 180-4 Section 5.1.2 (1024-bit variant),
+// run the final compression, and write the 48-byte digest to `out`.
+// Padding is: 0x80 bit, then zeros, then the 128-bit big-endian bit length
+// of the original message at the last 16 bytes of the final block.
+fn sha384_final(ctx: Address, out: Address) {
+    buf_len: u64 = load_u64_be(ctx, 80);
+
+    // Account for the unprocessed buffered bytes in the bit counter
+    sha384_add_bits(ctx, buf_len * 8);
+
+    // Append the 0x80 bit after the message
+    *(ctx + 88 + buf_len) = 128;
+    buf_len = buf_len + 1;
+
+    // If not enough room for the 16-byte length suffix, pad this block with
+    // zeros, compress, and start a fresh block.
+    if buf_len > 112 {
+        while buf_len < 128 {
+            *(ctx + 88 + buf_len) = 0;
+            buf_len = buf_len + 1;
+        }
+        sha384_compress(ctx, ctx + 88);
+        buf_len = 0;
+    }
+    // Pad with zeros up to the length field at offset 112
+    while buf_len < 112 {
+        *(ctx + 88 + buf_len) = 0;
+        buf_len = buf_len + 1;
+    }
+    // Append 128-bit big-endian bit length (high 64 bits first, then low)
+    store_u64_be(ctx, 88 + 112, load_u64_be(ctx, 72));
+    store_u64_be(ctx, 88 + 120, load_u64_be(ctx, 64));
+
+    sha384_compress(ctx, ctx + 88);
+
+    // Emit first 6 state words (48 bytes) big-endian — SHA-384 truncation
+    i: u32 = 0;
+    while i < 6 {
+        store_u64_be(out, i * 8, load_u64_be(ctx, i * 8));
+        i = i + 1;
+    }
+}
+
+// Convenience wrapper: initialise a fresh context, absorb `data`, finalise
+// into `out`, and free the context.
 fn sha384_oneshot(data: Address, len: u32, out: Address) {
     ctx = allocate(216);
     sha384_init(ctx);
-    sha512_update(ctx, data, len);
-    sha512_final(ctx, out);
+    sha384_update(ctx, data, len);
+    sha384_final(ctx, out);
     free(ctx);
 }

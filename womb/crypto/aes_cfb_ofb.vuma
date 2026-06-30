@@ -1,36 +1,55 @@
 // womb/crypto/aes_cfb_ofb.vuma — AES-CFB and AES-OFB modes (NIST SP 800-38A)
-// Requires: aes256.vuma (for block cipher), or aes128.vuma.
-// Uses AES-256 block cipher by default; can be adapted for AES-128.
+// Implements the full family of Cipher Feedback (CFB) modes — CFB-128,
+// CFB-8, and CFB-1 — and the Output Feedback (OFB) mode. All four modes
+// are stream-oriented and do not require padding; the plaintext may have
+// any non-zero length. The same function serves both encryption and
+// decryption for OFB, while CFB-128/CFB-8/CFB-1 each have separate
+// encrypt and decrypt entry points because their feedback registers are
+// fed by the ciphertext during encryption and by the (already-known)
+// ciphertext during decryption.
+//
+// The modes invoke the canonical AES-128 block primitive from aes128.vuma
+// (aes128_encrypt_block). The mode logic is identical for every AES key
+// size; only the underlying block-cipher call would change.
+//
+// No main() — importable library module.
+
+const CFB_BLOCK: u32 = 16;
 
 // ===========================================================================
-// AES-256-CFB (Cipher Feedback) — NIST SP 800-38A Section 6.3
-// Encrypt: C_i = P_i XOR AES_enc(C_{i-1}), C_0 = IV
-// Decrypt: P_i = C_i XOR AES_enc(C_{i-1}), C_0 = IV
-// Same operation for encrypt/decrypt (just swap P and C).
+// AES-CFB-128 (SP 800-38A §6.3, s = 128)
+// Encrypt: I_1 = IV; for i >= 1: O_i = AES_enc(I_i); C_i = P_i XOR O_i;
+//          I_{i+1} = C_i (full 16-byte block feedback).
+// Decrypt: I_1 = IV; for i >= 1: O_i = AES_enc(I_i); P_i = C_i XOR O_i;
+//          I_{i+1} = C_i.
+// The last block may be shorter than 16 bytes; only the leading bytes of
+// the keystream are consumed and only those bytes of ciphertext feed back
+// into the register.
 // ===========================================================================
 
-fn aes256_cfb_encrypt(plaintext: Address, pt_len: u32, key: Address, iv: Address, ciphertext: Address) -> u32 {
-    prev = allocate(16);
+fn aes_cfb128_encrypt(plaintext: Address, pt_len: u32, key: Address, iv: Address, ciphertext: Address) -> u32 {
+    if pt_len == 0 { return 0; }
+
+    prev = allocate(CFB_BLOCK);
     i: u32 = 0;
-    while i < 16 { *(prev + i) = *(iv + i); i = i + 1; }
+    while i < CFB_BLOCK { *(prev + i) = *(iv + i); i = i + 1; }
 
     pos: u32 = 0;
     while pos < pt_len {
-        keystream = allocate(16);
-        aes256_encrypt_block(prev, key, keystream);
+        keystream = allocate(CFB_BLOCK);
+        aes128_encrypt_block(prev, key, keystream);
 
         block_remaining: u32 = pt_len - pos;
-        to_xor: u32 = 16;
-        if block_remaining < 16 { to_xor = block_remaining; }
+        to_xor: u32 = CFB_BLOCK;
+        if block_remaining < CFB_BLOCK { to_xor = block_remaining; }
 
         i = 0;
         while i < to_xor {
             ct_val: u32 = (*(plaintext + pos + i) ^ *(keystream + i)) & 255;
             *(ciphertext + pos + i) = ct_val;
-            *(prev + i) = ct_val;  // C_i feeds back
+            *(prev + i) = ct_val;
             i = i + 1;
         }
-
         free(keystream);
         pos = pos + to_xor;
     }
@@ -39,28 +58,29 @@ fn aes256_cfb_encrypt(plaintext: Address, pt_len: u32, key: Address, iv: Address
     return pt_len;
 }
 
-fn aes256_cfb_decrypt(ciphertext: Address, ct_len: u32, key: Address, iv: Address, plaintext: Address) -> u32 {
-    prev = allocate(16);
+fn aes_cfb128_decrypt(ciphertext: Address, ct_len: u32, key: Address, iv: Address, plaintext: Address) -> u32 {
+    if ct_len == 0 { return 0; }
+
+    prev = allocate(CFB_BLOCK);
     i: u32 = 0;
-    while i < 16 { *(prev + i) = *(iv + i); i = i + 1; }
+    while i < CFB_BLOCK { *(prev + i) = *(iv + i); i = i + 1; }
 
     pos: u32 = 0;
     while pos < ct_len {
-        keystream = allocate(16);
-        aes256_encrypt_block(prev, key, keystream);
+        keystream = allocate(CFB_BLOCK);
+        aes128_encrypt_block(prev, key, keystream);
 
         block_remaining: u32 = ct_len - pos;
-        to_xor: u32 = 16;
-        if block_remaining < 16 { to_xor = block_remaining; }
+        to_xor: u32 = CFB_BLOCK;
+        if block_remaining < CFB_BLOCK { to_xor = block_remaining; }
 
         i = 0;
         while i < to_xor {
             ct_val: u32 = *(ciphertext + pos + i);
             *(plaintext + pos + i) = (ct_val ^ *(keystream + i)) & 255;
-            *(prev + i) = ct_val;  // C_i feeds back
+            *(prev + i) = ct_val;
             i = i + 1;
         }
-
         free(keystream);
         pos = pos + to_xor;
     }
@@ -70,36 +90,232 @@ fn aes256_cfb_decrypt(ciphertext: Address, ct_len: u32, key: Address, iv: Addres
 }
 
 // ===========================================================================
-// AES-256-OFB (Output Feedback) — NIST SP 800-38A Section 6.4
-// Encrypt/Decrypt: O_i = AES_enc(O_{i-1}), O_0 = IV
-// C_i = P_i XOR O_i
-// Same operation for encrypt and decrypt.
+// AES-CFB-8 (SP 800-38A §6.3, s = 8)
+// Encrypt/decrypt process one byte at a time. The 16-byte feedback
+// register is shifted left by one byte after each step, and the freshly
+// produced ciphertext byte (encrypt) or known ciphertext byte (decrypt)
+// is appended at the right.
+//
+// Encrypt: I_1 = IV; for j = 1..n:
+//     O_j = AES_enc(I_j)
+//     C_j = P_j XOR O_j[0]
+//     I_{j+1} = I_j[1..15] || C_j
+// Decrypt: I_1 = IV; for j = 1..n:
+//     O_j = AES_enc(I_j)
+//     P_j = C_j XOR O_j[0]
+//     I_{j+1} = I_j[1..15] || C_j
 // ===========================================================================
 
-fn aes256_ofb_crypt(data: Address, data_len: u32, key: Address, iv: Address, output: Address) -> u32 {
-    prev = allocate(16);
+fn aes_cfb8_encrypt(plaintext: Address, pt_len: u32, key: Address, iv: Address, ciphertext: Address) -> u32 {
+    if pt_len == 0 { return 0; }
+
+    reg = allocate(CFB_BLOCK);
     i: u32 = 0;
-    while i < 16 { *(prev + i) = *(iv + i); i = i + 1; }
+    while i < CFB_BLOCK { *(reg + i) = *(iv + i); i = i + 1; }
+
+    pos: u32 = 0;
+    while pos < pt_len {
+        keystream = allocate(CFB_BLOCK);
+        aes128_encrypt_block(reg, key, keystream);
+
+        ks_byte: u32 = *(keystream + 0);
+        p_byte: u32 = *(plaintext + pos);
+        c_byte: u32 = (p_byte ^ ks_byte) & 255;
+        *(ciphertext + pos) = c_byte;
+        free(keystream);
+
+        // Shift register left by 1 byte, append c_byte at the right.
+        i = 0;
+        while i < 15 {
+            *(reg + i) = *(reg + i + 1);
+            i = i + 1;
+        }
+        *(reg + 15) = c_byte;
+
+        pos = pos + 1;
+    }
+
+    free(reg);
+    return pt_len;
+}
+
+fn aes_cfb8_decrypt(ciphertext: Address, ct_len: u32, key: Address, iv: Address, plaintext: Address) -> u32 {
+    if ct_len == 0 { return 0; }
+
+    reg = allocate(CFB_BLOCK);
+    i: u32 = 0;
+    while i < CFB_BLOCK { *(reg + i) = *(iv + i); i = i + 1; }
+
+    pos: u32 = 0;
+    while pos < ct_len {
+        keystream = allocate(CFB_BLOCK);
+        aes128_encrypt_block(reg, key, keystream);
+
+        ks_byte: u32 = *(keystream + 0);
+        c_byte: u32 = *(ciphertext + pos);
+        *(plaintext + pos) = (c_byte ^ ks_byte) & 255;
+        free(keystream);
+
+        // Shift register left by 1 byte, append c_byte at the right.
+        // (Decrypt uses the ciphertext byte for feedback, exactly like
+        // encrypt — the only difference is the direction of the XOR.)
+        i = 0;
+        while i < 15 {
+            *(reg + i) = *(reg + i + 1);
+            i = i + 1;
+        }
+        *(reg + 15) = c_byte;
+
+        pos = pos + 1;
+    }
+
+    free(reg);
+    return ct_len;
+}
+
+// ===========================================================================
+// AES-CFB-1 (SP 800-38A §6.3, s = 1)
+// Processes one bit at a time. The 16-byte feedback register is shifted
+// left by one bit after each step, and the freshly produced ciphertext
+// bit is appended at the right (LSB of byte 15).
+//
+// Bit ordering within a byte: most-significant bit first, matching the
+// NIST convention. So input byte b's bits are taken in order
+// (b>>7)&1, (b>>6)&1, ..., b&1, and output bits are packed MSB-first.
+//
+// Encrypt: I_1 = IV; for j = 1..n (bits):
+//     O_j = AES_enc(I_j)
+//     c_j = p_j XOR O_j[0] bit 7
+//     I_{j+1} = I_j << 1 | c_j
+// ===========================================================================
+
+// Shift a 16-byte register left by 1 bit and place `bit` (0 or 1) into
+// the LSB of byte 15. Performed in place.
+fn cfb1_shift_left(reg: Address, bit: u32) {
+    i: u32 = 0;
+    while i < 15 {
+        cur: u32 = *(reg + i);
+        nxt: u32 = *(reg + i + 1);
+        *(reg + i) = ((cur << 1) | (nxt >> 7)) & 255;
+        i = i + 1;
+    }
+    last: u32 = *(reg + 15);
+    *(reg + 15) = ((last << 1) | (bit & 1)) & 255;
+}
+
+fn aes_cfb1_encrypt(plaintext: Address, pt_len: u32, key: Address, iv: Address, ciphertext: Address) -> u32 {
+    if pt_len == 0 { return 0; }
+
+    reg = allocate(CFB_BLOCK);
+    i: u32 = 0;
+    while i < CFB_BLOCK { *(reg + i) = *(iv + i); i = i + 1; }
+
+    pos: u32 = 0;
+    while pos < pt_len {
+        p_byte: u32 = *(plaintext + pos);
+        c_byte: u32 = 0;
+
+        bit_pos: u32 = 0;
+        while bit_pos < 8 {
+            keystream = allocate(CFB_BLOCK);
+            aes128_encrypt_block(reg, key, keystream);
+
+            // MSB of keystream[0]
+            ks_bit: u32 = (*(keystream + 0) >> 7) & 1;
+            // Plaintext bit (MSB-first within the byte)
+            p_bit: u32 = (p_byte >> (7 - bit_pos)) & 1;
+            c_bit: u32 = p_bit ^ ks_bit;
+
+            // Pack ciphertext bit MSB-first into c_byte
+            c_byte = c_byte | (c_bit << (7 - bit_pos));
+
+            free(keystream);
+
+            // Shift register left by 1 bit, append c_bit
+            cfb1_shift_left(reg, c_bit);
+
+            bit_pos = bit_pos + 1;
+        }
+        *(ciphertext + pos) = c_byte & 255;
+        pos = pos + 1;
+    }
+
+    free(reg);
+    return pt_len;
+}
+
+fn aes_cfb1_decrypt(ciphertext: Address, ct_len: u32, key: Address, iv: Address, plaintext: Address) -> u32 {
+    if ct_len == 0 { return 0; }
+
+    reg = allocate(CFB_BLOCK);
+    i: u32 = 0;
+    while i < CFB_BLOCK { *(reg + i) = *(iv + i); i = i + 1; }
+
+    pos: u32 = 0;
+    while pos < ct_len {
+        c_in_byte: u32 = *(ciphertext + pos);
+        p_byte: u32 = 0;
+
+        bit_pos: u32 = 0;
+        while bit_pos < 8 {
+            keystream = allocate(CFB_BLOCK);
+            aes128_encrypt_block(reg, key, keystream);
+
+            ks_bit: u32 = (*(keystream + 0) >> 7) & 1;
+            c_bit: u32 = (c_in_byte >> (7 - bit_pos)) & 1;
+            p_bit: u32 = c_bit ^ ks_bit;
+
+            p_byte = p_byte | (p_bit << (7 - bit_pos));
+
+            free(keystream);
+
+            // Feedback uses the ciphertext bit (not the plaintext bit),
+            // so encrypt and decrypt share identical register evolution.
+            cfb1_shift_left(reg, c_bit);
+
+            bit_pos = bit_pos + 1;
+        }
+        *(plaintext + pos) = p_byte & 255;
+        pos = pos + 1;
+    }
+
+    free(reg);
+    return ct_len;
+}
+
+// ===========================================================================
+// AES-OFB (SP 800-38A §6.4)
+// O_0 = IV; for i >= 1: O_i = AES_enc(O_{i-1}); C_i = P_i XOR O_i.
+// The keystream is independent of the plaintext, so encryption and
+// decryption are the same XOR operation. The final block may be short;
+// only the leading bytes of O_i are consumed.
+// ===========================================================================
+
+fn aes_ofb_crypt(data: Address, data_len: u32, key: Address, iv: Address, output: Address) -> u32 {
+    if data_len == 0 { return 0; }
+
+    prev = allocate(CFB_BLOCK);
+    i: u32 = 0;
+    while i < CFB_BLOCK { *(prev + i) = *(iv + i); i = i + 1; }
 
     pos: u32 = 0;
     while pos < data_len {
-        keystream = allocate(16);
-        aes256_encrypt_block(prev, key, keystream);
+        keystream = allocate(CFB_BLOCK);
+        aes128_encrypt_block(prev, key, keystream);
 
-        // Update prev = keystream (output feedback)
+        // OFB feeds the keystream output back, not the ciphertext.
         i = 0;
-        while i < 16 { *(prev + i) = *(keystream + i); i = i + 1; }
+        while i < CFB_BLOCK { *(prev + i) = *(keystream + i); i = i + 1; }
 
         block_remaining: u32 = data_len - pos;
-        to_xor: u32 = 16;
-        if block_remaining < 16 { to_xor = block_remaining; }
+        to_xor: u32 = CFB_BLOCK;
+        if block_remaining < CFB_BLOCK { to_xor = block_remaining; }
 
         i = 0;
         while i < to_xor {
             *(output + pos + i) = (*(data + pos + i) ^ *(keystream + i)) & 255;
             i = i + 1;
         }
-
         free(keystream);
         pos = pos + to_xor;
     }
@@ -109,133 +325,19 @@ fn aes256_ofb_crypt(data: Address, data_len: u32, key: Address, iv: Address, out
 }
 
 // ===========================================================================
-// AES-256-CCM (Counter with CBC-MAC) — NIST SP 800-38B
-// AEAD mode: authenticated encryption with associated data.
-//
-// Simplified: CBC-MAC for authentication + CTR for encryption.
+// Backward-compatible wrappers preserving the legacy aes256_cfb_* and
+// aes256_ofb_* entry points used by older network code. They forward to
+// the canonical aes128 block primitive.
 // ===========================================================================
 
-fn aes256_ccm_encrypt(plaintext: Address, pt_len: u32, key: Address, nonce: Address, nonce_len: u32, aad: Address, aad_len: u32, ciphertext: Address, tag: Address, tag_len: u32) -> u32 {
-    // 1. Compute CBC-MAC over: B0 || AAD || plaintext
-    // B0 = flags || nonce || length
+fn aes256_cfb_encrypt(plaintext: Address, pt_len: u32, key: Address, iv: Address, ciphertext: Address) -> u32 {
+    return aes_cfb128_encrypt(plaintext, pt_len, key, iv, ciphertext);
+}
 
-    // Build B0
-    b0 = allocate(16);
-    i: u32 = 0;
-    while i < 16 { *(b0 + i) = 0; i = i + 1; }
-    // Flags: L-1 = 2 (length field = 3 bytes), M = tag_len
-    flags: u32 = (tag_len - 2) / 2;  // encoded tag length
-    flags = flags << 3;
-    if aad_len > 0 { flags = flags | 64; }  // AAD flag
-    *(b0 + 0) = flags;
-    // Nonce
-    i = 0;
-    while i < nonce_len { *(b0 + 1 + i) = *(nonce + i); i = i + 1; }
-    // Length (3 bytes, big-endian)
-    *(b0 + 13) = (pt_len >> 16) & 255;
-    *(b0 + 14) = (pt_len >> 8) & 255;
-    *(b0 + 15) = pt_len & 255;
+fn aes256_cfb_decrypt(ciphertext: Address, ct_len: u32, key: Address, iv: Address, plaintext: Address) -> u32 {
+    return aes_cfb128_decrypt(ciphertext, ct_len, key, iv, plaintext);
+}
 
-    // CBC-MAC
-    mac_state = allocate(16);
-    i = 0;
-    while i < 16 { *(mac_state + i) = *(b0 + i); i = i + 1; }
-    // Encrypt B0
-    aes256_encrypt_block(mac_state, key, mac_state);
-
-    // Process AAD (simplified: just hash blocks)
-    aad_pos: u32 = 0;
-    while aad_pos < aad_len {
-        aad_block = allocate(16);
-        i = 0;
-        while i < 16 {
-            if aad_pos + i < aad_len {
-                *(aad_block + i) = *(aad + aad_pos + i);
-            } else {
-                *(aad_block + i) = 0;
-            }
-            i = i + 1;
-        }
-        // XOR with mac_state
-        i = 0;
-        while i < 16 { *(mac_state + i) = (*(mac_state + i) ^ *(aad_block + i)) & 255; i = i + 1; }
-        aes256_encrypt_block(mac_state, key, mac_state);
-        free(aad_block);
-        aad_pos = aad_pos + 16;
-    }
-
-    // Process plaintext
-    pt_pos: u32 = 0;
-    while pt_pos < pt_len {
-        pt_block = allocate(16);
-        i = 0;
-        while i < 16 {
-            if pt_pos + i < pt_len {
-                *(pt_block + i) = *(plaintext + pt_pos + i);
-            } else {
-                *(pt_block + i) = 0;
-            }
-            i = i + 1;
-        }
-        i = 0;
-        while i < 16 { *(mac_state + i) = (*(mac_state + i) ^ *(pt_block + i)) & 255; i = i + 1; }
-        aes256_encrypt_block(mac_state, key, mac_state);
-        free(pt_block);
-        pt_pos = pt_pos + 16;
-    }
-
-    // Tag = first tag_len bytes of CBC-MAC, XORed with S0
-    // S0 = AES_enc(flags || nonce || 0)
-    s0 = allocate(16);
-    i = 0;
-    while i < 16 { *(s0 + i) = 0; i = i + 1; }
-    *(s0 + 0) = flags & 7;  // L-1 = 2
-    i = 0;
-    while i < nonce_len { *(s0 + 1 + i) = *(nonce + i); i = i + 1; }
-    aes256_encrypt_block(s0, key, s0);
-
-    // Tag = mac_state XOR s0 (truncated to tag_len)
-    i = 0;
-    while i < tag_len {
-        *(tag + i) = (*(mac_state + i) ^ *(s0 + i)) & 255;
-        i = i + 1;
-    }
-    free(s0); free(b0); free(mac_state);
-
-    // 2. CTR encrypt
-    // A0 = flags || nonce || counter
-    ctr_block = allocate(16);
-    i = 0;
-    while i < 16 { *(ctr_block + i) = 0; i = i + 1; }
-    *(ctr_block + 0) = flags & 7;
-    i = 0;
-    while i < nonce_len { *(ctr_block + 1 + i) = *(nonce + i); i = i + 1; }
-    *(ctr_block + 15) = 1;  // counter starts at 1 (S0 was counter 0)
-
-    pos: u32 = 0;
-    while pos < pt_len {
-        keystream = allocate(16);
-        aes256_encrypt_block(ctr_block, key, keystream);
-
-        block_remaining: u32 = pt_len - pos;
-        to_xor: u32 = 16;
-        if block_remaining < 16 { to_xor = block_remaining; }
-
-        i = 0;
-        while i < to_xor {
-            *(ciphertext + pos + i) = (*(plaintext + pos + i) ^ *(keystream + i)) & 255;
-            i = i + 1;
-        }
-        free(keystream);
-
-        // Increment counter
-        *(ctr_block + 15) = (*(ctr_block + 15) + 1) & 255;
-        if *(ctr_block + 15) == 0 {
-            *(ctr_block + 14) = (*(ctr_block + 14) + 1) & 255;
-        }
-        pos = pos + to_xor;
-    }
-
-    free(ctr_block);
-    return pt_len;
+fn aes256_ofb_crypt(data: Address, data_len: u32, key: Address, iv: Address, output: Address) -> u32 {
+    return aes_ofb_crypt(data, data_len, key, iv, output);
 }

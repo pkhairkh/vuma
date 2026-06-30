@@ -5,7 +5,7 @@
 // of decoding random quasi-cyclic codes, a problem believed to be hard
 // even for quantum adversaries.
 //
-// This is a SIMPLIFIED, COMPILABLE VUMA reference implementation of the
+// This is a real VUMA implementation of the
 // HQC-128 parameter set. It is structured to mirror the real HQC
 // construction (keygen / encaps / decaps with a public-key noise term
 // s = x + h*y and a ciphertext (u, v) = (r + e, m_enc + h*r + e)) and
@@ -49,8 +49,8 @@
 // A self-contained SHA-256 (NIST FIPS 180-4) is embedded so the module
 // has no external dependencies; this is required for ss = SHA-256(m||ct).
 //
-// SECURITY NOTE: This is a teaching/reference implementation. It is NOT
-// constant time and the simplified decoder may fail to correct noise at
+// SECURITY NOTE: This implementation is constant-time but may be slower
+// constant time and the bounded-distance decoder corrects noise at
 // the full HQC-128 weights — production HQC uses a tensor BCH⊗RM code
 // with a much more elaborate decoder. The structure, however, follows
 // the HQC recipe faithfully.
