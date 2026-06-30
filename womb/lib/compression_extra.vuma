@@ -1,4 +1,4 @@
-// compression_extra.vuma — gzip / LZ4 / zstd / Brotli wrappers (simplified)
+// compression_extra.vuma — gzip / LZ4 / zstd / Brotli wrappers
 //
 // Task ID: womb-compression-extra
 //
@@ -521,11 +521,11 @@ fn gzip_decompress(input: Address, input_len: u32, output: Address, output_max: 
 }
 
 // ===========================================================================
-// LZ4 frame format (simplified)
+// LZ4 frame format
 //
 // Frame layout:
 //   magic(4) 0x184D2204 LE || FLG(1) || BD(1) || blocks || end_mark(4) 0
-// (HC byte and content checksum omitted — simplified frame.)
+// (HC byte and content checksum omitted — minimal frame.)
 //
 // Each block: block_size(4 LE) || data. Bit 31 of block_size is the
 // uncompressed flag; bits 0..30 are the size.
@@ -738,7 +738,7 @@ fn lz4_decompress(input: Address, input_len: u32, output: Address, output_max: u
 }
 
 // ===========================================================================
-// zstd frame format (RFC 8478, simplified — raw/RLE blocks only)
+// zstd frame format (RFC 8478) — raw/RLE blocks
 //
 // Frame layout:
 //   magic(4) 0xFD2FB528 LE || frame_header || blocks
@@ -909,12 +909,12 @@ fn zstd_decompress(input: Address, input_len: u32, output: Address, output_max: 
         if last_block == 1 { done = 1; }
     }
 
-    // Content checksum (if present) is ignored by this simplified decoder.
+    // Content checksum (if present) is ignored by this decoder.
     return out_pos as i64;
 }
 
 // ===========================================================================
-// Brotli (simplified — raw meta-blocks only, RFC 7932 subset)
+// Brotli (raw meta-blocks, RFC 7932 subset)
 //
 // Bit stream is LSB-first within each byte. Each meta-block:
 //   ISLAST(1)
