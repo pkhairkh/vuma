@@ -1,26 +1,32 @@
-// womb/crypto/chacha20_poly1305.vuma — ChaCha20-Poly1305 AEAD (RFC 8439)
+// womb/crypto/chacha20_poly1305.vuma — ChaCha20-Poly1305 AEAD (RFC 8439 §2.8)
 // No main() — importable library module.
-// Requires: chacha20.vuma, poly1305.vuma.
+// Requires: chacha20.vuma, poly1305.vuma, hmac.vuma (ct_memcmp).
 //
-// Construction (RFC 8439 Section 2.6):
-// 1. Generate one-time Poly1305 key: first 32 bytes of ChaCha20(key, 0, nonce)
-// 2. Encrypt plaintext with ChaCha20(key, 1, nonce) — counter starts at 1
-// 3. Compute Poly1305 MAC over: AAD || pad16 || ciphertext || pad16 || len(AAD) || len(CT)
-// 4. Tag is the MAC output
+// AEAD construction (RFC 8439 §2.8):
+//   1. poly_key = ChaCha20(key, counter=0, nonce)[0..32]   (one-time key)
+//   2. ciphertext = ChaCha20(key, counter=1, nonce)(plaintext)
+//   3. mac_input = AAD || pad16(AAD) || ciphertext || pad16(ciphertext)
+//                  || u64_le(aad_len) || u64_le(ct_len)
+//   4. tag = Poly1305(poly_key, mac_input)
+//
+// Decryption re-derives poly_key, recomputes the tag over (AAD, ciphertext)
+// and verifies it in constant time before running ChaCha20 to recover the
+// plaintext. On tag mismatch the plaintext buffer is left untouched and the
+// function returns 0xFFFFFFFF (sentinel for -1).
 
-fn pad_to_16(buf: Address, len: u32) -> u32 {
-    rem: u32 = len % 16;
-    if rem == 0 { return len; }
-    padded: u32 = len + (16 - rem);
-    i: u32 = len;
-    while i < padded {
-        *(buf + i) = 0;
-        i = i + 1;
-    }
-    return padded;
-}
+const C20P1305_KEY_SIZE: u32 = 32;
+const C20P1305_NONCE_SIZE: u32 = 12;
+const C20P1305_TAG_SIZE: u32 = 16;
+const C20P1305_MAC_KEY_SIZE: u32 = 32;
+const C20P1305_MASK32: u32 = 4294967295;
+const C20P1305_FAIL: u32 = 4294967295;
 
-fn store_u64_le(ptr: Address, off: u32, val: u64) {
+// ===========================================================================
+// Little-endian u64 store helper. Used for the two 8-byte length suffixes
+// in the Poly1305 mac_input construction (RFC 8439 §2.8, "Construction").
+// ===========================================================================
+
+fn c20p1305_store_u64_le(ptr: Address, off: u32, val: u64) {
     *(ptr + off) = val & 255;
     *(ptr + off + 1) = (val >> 8) & 255;
     *(ptr + off + 2) = (val >> 16) & 255;
@@ -31,100 +37,163 @@ fn store_u64_le(ptr: Address, off: u32, val: u64) {
     *(ptr + off + 7) = (val >> 56) & 255;
 }
 
-fn chacha20_poly1305_encrypt(key: Address, nonce: Address, aad: Address, aad_len: u32, plaintext: Address, pt_len: u32, ciphertext: Address, tag: Address) -> u32 {
-    // 1. Generate one-time Poly1305 key: ChaCha20(key, counter=0, nonce)
-    poly_key = allocate(32);
-    // Use chacha20_encrypt with counter=0 on a zero block
-    zero_input = allocate(32);
-    i: u32 = 0;
-    while i < 32 { *(zero_input + i) = 0; i = i + 1; }
-    chacha20_encrypt(zero_input, 32, key, nonce, 0, poly_key);
-    free(zero_input);
+// Round `len` up to the next multiple of 16. Returns `len` unchanged when
+// it is already a multiple of 16.
+fn c20p1305_pad16(len: u32) -> u32 {
+    rem: u32 = len % 16;
+    if rem == 0 { return len; }
+    return len + (16 - rem);
+}
 
-    // 2. Encrypt plaintext: ChaCha20(key, counter=1, nonce)
+// ===========================================================================
+// Build the Poly1305 mac_input buffer:
+//   AAD || 0^pad16(AAD) || CT || 0^pad16(CT) || u64_le(aad_len) || u64_le(ct_len)
+// Writes the resulting bytes into `mac_input` and returns the total length.
+// RFC 8439 §2.8 specifies the trailing two 8-byte little-endian length
+// fields (not 16). `mac_input` must be at least
+//   pad16(aad_len) + pad16(ct_len) + 16
+// bytes long.
+// ===========================================================================
+
+fn c20p1305_build_mac_input(mac_input: Address, aad: Address, aad_len: u32,
+                            ct: Address, ct_len: u32) -> u32 {
+    aad_padded: u32 = c20p1305_pad16(aad_len);
+    ct_padded: u32 = c20p1305_pad16(ct_len);
+
+    pos: u32 = 0;
+
+    // AAD.
+    i: u32 = 0;
+    while i < aad_len { *(mac_input + pos) = *(aad + i); pos = pos + 1; i = i + 1; }
+    while pos < aad_padded { *(mac_input + pos) = 0; pos = pos + 1; }
+
+    // Ciphertext.
+    i = 0;
+    while i < ct_len { *(mac_input + pos) = *(ct + i); pos = pos + 1; i = i + 1; }
+    while pos < aad_padded + ct_padded { *(mac_input + pos) = 0; pos = pos + 1; }
+
+    // Lengths (each 8 bytes, little-endian u64).
+    c20p1305_store_u64_le(mac_input, pos, aad_len);
+    pos = pos + 8;
+    c20p1305_store_u64_le(mac_input, pos, ct_len);
+    pos = pos + 8;
+
+    return pos;
+}
+
+// ===========================================================================
+// Derive the one-time Poly1305 key. RFC 8439 §2.6: take the first 32 bytes
+// of the ChaCha20 keystream generated with counter = 0 and the AEAD nonce.
+// The remaining 32 bytes of that 64-byte block are discarded.
+// ===========================================================================
+
+fn c20p1305_derive_poly_key(key: Address, nonce: Address, poly_key: Address) {
+    zero = allocate(32);
+    i: u32 = 0;
+    while i < 32 { *(zero + i) = 0; i = i + 1; }
+    // ChaCha20 with counter=0 over a 32-byte zero input yields the first
+    // 32 bytes of keystream, which is exactly the one-time Poly1305 key.
+    chacha20_encrypt(zero, 32, key, nonce, 0, poly_key);
+    free(zero);
+}
+
+// ===========================================================================
+// RFC 8439 §2.8 — ChaCha20-Poly1305 encrypt (detached tag).
+// Inputs:  32-byte key, 12-byte nonce, AAD (aad_len bytes), plaintext
+//          (pt_len bytes).
+// Outputs: ciphertext (pt_len bytes), tag (16 bytes).
+// Returns pt_len on success.
+// ===========================================================================
+
+fn chacha20_poly1305_encrypt(key: Address, nonce: Address,
+                             aad: Address, aad_len: u32,
+                             plaintext: Address, pt_len: u32,
+                             ciphertext: Address, tag: Address) -> u32 {
+    // 1. One-time Poly1305 key.
+    poly_key = allocate(C20P1305_MAC_KEY_SIZE);
+    c20p1305_derive_poly_key(key, nonce, poly_key);
+
+    // 2. Encrypt plaintext with counter = 1.
     chacha20_encrypt(plaintext, pt_len, key, nonce, 1, ciphertext);
 
-    // 3. Build MAC input: AAD || pad16(AAD) || CT || pad16(CT) || len(AAD) || len(CT)
-    aad_padded_len: u32 = aad_len;
-    if aad_len % 16 != 0 { aad_padded_len = aad_len + (16 - aad_len % 16); }
-    ct_padded_len: u32 = pt_len;
-    if pt_len % 16 != 0 { ct_padded_len = pt_len + (16 - pt_len % 16); }
-
-    mac_input_len: u32 = aad_padded_len + ct_padded_len + 16;
+    // 3. Build the mac_input buffer.
+    mac_input_len: u32 = c20p1305_pad16(aad_len) + c20p1305_pad16(pt_len) + 16;
     mac_input = allocate(mac_input_len);
+    actual_len: u32 = c20p1305_build_mac_input(mac_input, aad, aad_len,
+                                                ciphertext, pt_len);
 
-    // Copy AAD
-    pos: u32 = 0;
-    i = 0;
-    while i < aad_len { *(mac_input + pos) = *(aad + i); pos = pos + 1; i = i + 1; }
-    // Pad AAD to 16
-    while pos < aad_padded_len { *(mac_input + pos) = 0; pos = pos + 1; }
-
-    // Copy ciphertext
-    i = 0;
-    while i < pt_len { *(mac_input + pos) = *(ciphertext + i); pos = pos + 1; i = i + 1; }
-    // Pad CT to 16
-    while pos < aad_padded_len + ct_padded_len { *(mac_input + pos) = 0; pos = pos + 1; }
-
-    // Append lengths (8 bytes each, little-endian u64)
-    store_u64_le(mac_input, pos, aad_len);
-    pos = pos + 8;
-    store_u64_le(mac_input, pos, pt_len);
-
-    // 4. Compute Poly1305 tag
-    poly1305_mac(poly_key, mac_input, mac_input_len, tag);
+    // 4. tag = Poly1305(poly_key, mac_input).
+    poly1305_mac(poly_key, mac_input, actual_len, tag);
 
     free(poly_key);
     free(mac_input);
     return pt_len;
 }
 
-fn chacha20_poly1305_decrypt(key: Address, nonce: Address, aad: Address, aad_len: u32, ciphertext: Address, ct_len: u32, plaintext: Address, tag: Address) -> u32 {
-    // 1. Generate one-time Poly1305 key
-    poly_key = allocate(32);
-    zero_input = allocate(32);
-    i: u32 = 0;
-    while i < 32 { *(zero_input + i) = 0; i = i + 1; }
-    chacha20_encrypt(zero_input, 32, key, nonce, 0, poly_key);
-    free(zero_input);
+// ===========================================================================
+// RFC 8439 §2.8 — ChaCha20-Poly1305 decrypt (detached tag).
+// Inputs:  32-byte key, 12-byte nonce, AAD (aad_len bytes), ciphertext
+//          (ct_len bytes), 16-byte tag.
+// Outputs: plaintext (ct_len bytes) on tag match.
+// Returns ct_len on success, or 0xFFFFFFFF on tag mismatch (plaintext
+// buffer is left untouched in the failure case).
+// ===========================================================================
 
-    // 2. Verify tag first
-    aad_padded_len: u32 = aad_len;
-    if aad_len % 16 != 0 { aad_padded_len = aad_len + (16 - aad_len % 16); }
-    ct_padded_len: u32 = ct_len;
-    if ct_len % 16 != 0 { ct_padded_len = ct_len + (16 - ct_len % 16); }
+fn chacha20_poly1305_decrypt(key: Address, nonce: Address,
+                             aad: Address, aad_len: u32,
+                             ciphertext: Address, ct_len: u32,
+                             plaintext: Address, tag: Address) -> u32 {
+    // 1. One-time Poly1305 key.
+    poly_key = allocate(C20P1305_MAC_KEY_SIZE);
+    c20p1305_derive_poly_key(key, nonce, poly_key);
 
-    mac_input_len: u32 = aad_padded_len + ct_padded_len + 16;
+    // 2. Re-compute the tag over (AAD, ciphertext).
+    mac_input_len: u32 = c20p1305_pad16(aad_len) + c20p1305_pad16(ct_len) + 16;
     mac_input = allocate(mac_input_len);
+    actual_len: u32 = c20p1305_build_mac_input(mac_input, aad, aad_len,
+                                                ciphertext, ct_len);
 
-    pos: u32 = 0;
-    i = 0;
-    while i < aad_len { *(mac_input + pos) = *(aad + i); pos = pos + 1; i = i + 1; }
-    while pos < aad_padded_len { *(mac_input + pos) = 0; pos = pos + 1; }
+    computed_tag = allocate(C20P1305_TAG_SIZE);
+    poly1305_mac(poly_key, mac_input, actual_len, computed_tag);
 
-    i = 0;
-    while i < ct_len { *(mac_input + pos) = *(ciphertext + i); pos = pos + 1; i = i + 1; }
-    while pos < aad_padded_len + ct_padded_len { *(mac_input + pos) = 0; pos = pos + 1; }
-
-    store_u64_le(mac_input, pos, aad_len);
-    pos = pos + 8;
-    store_u64_le(mac_input, pos, ct_len);
-
-    computed_tag = allocate(16);
-    poly1305_mac(poly_key, mac_input, mac_input_len, computed_tag);
-
-    // Constant-time tag comparison
-    ok: u32 = ct_memcmp(tag, computed_tag, 16);
+    // Constant-time tag comparison. ct_memcmp returns 1 iff all 16 bytes
+    // match, 0 otherwise.
+    ok: u32 = ct_memcmp(tag, computed_tag, C20P1305_TAG_SIZE);
 
     free(poly_key);
     free(mac_input);
     free(computed_tag);
 
     if ok == 0 {
-        return 4294967295;  // -1: tag mismatch
+        // Tag mismatch — refuse to release plaintext.
+        return C20P1305_FAIL;
     }
 
-    // 3. Decrypt: ChaCha20(key, counter=1, nonce)
+    // 3. Decrypt with counter = 1.
     chacha20_encrypt(ciphertext, ct_len, key, nonce, 1, plaintext);
     return ct_len;
+}
+
+// ===========================================================================
+// Convenience: encrypt with an explicit 96-bit nonce derived from a 32-bit
+// counter and an 8-byte fixed-nonce prefix (RFC 8439 §2.8 / RFC 7905-style
+// "nonce = fixed_prefix || u32_be(counter)"). Writes the 12-byte nonce to
+// `nonce_out` so the caller can transmit it. Useful for record-protocol
+// usage where the counter is implicit per-session.
+// ===========================================================================
+
+fn chacha20_poly1305_encrypt_iv(key: Address, fixed_nonce: Address,
+                                counter: u32, aad: Address, aad_len: u32,
+                                plaintext: Address, pt_len: u32,
+                                ciphertext: Address, tag: Address,
+                                nonce_out: Address) -> u32 {
+    // Build 12-byte nonce: 8-byte fixed prefix || 4-byte big-endian counter.
+    i: u32 = 0;
+    while i < 8 { *(nonce_out + i) = *(fixed_nonce + i); i = i + 1; }
+    *(nonce_out + 8) = (counter >> 24) & 255;
+    *(nonce_out + 9) = (counter >> 16) & 255;
+    *(nonce_out + 10) = (counter >> 8) & 255;
+    *(nonce_out + 11) = counter & 255;
+    return chacha20_poly1305_encrypt(key, nonce_out, aad, aad_len,
+                                     plaintext, pt_len, ciphertext, tag);
 }

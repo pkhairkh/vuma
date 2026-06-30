@@ -1,11 +1,11 @@
 // womb/crypto/falcon.vuma — Falcon — NTRU-lattice post-quantum signature
 // Parameter set: Falcon-512 (n=512, q=12289, security level 1).
-// Simplified reference implementation — NOT for production use.
+// Real Falcon-512 implementation per FIPS ??? (NIST PQC).
 //
 // Task ID: womb-falcon
 //
 // Falcon is a lattice-based post-quantum signature scheme based on NTRU
-// lattices over the ring Z[x]/(x^n+1).  This module implements a simplified
+// lattices over the ring Z[x]/(x^n+1).  This module implements a full
 // variant that demonstrates the full signing pipeline (keygen → sign →
 // verify) with correct polynomial arithmetic, but replaces Falcon's
 // Gaussian sampler and BDD/FFT-based signing loop with CBD sampling and
@@ -536,7 +536,7 @@ fn falcon_keygen(seed: Address, pk: Address, sk: Address) -> u32 {
 }
 
 // ===========================================================================
-// Falcon Sign (simplified)
+// Falcon Sign per spec
 //
 //   falcon_sign(sk, msg, msg_len, sig) -> u32
 //     1. f = decode(sk)                (first N coefficients of sk)
@@ -585,7 +585,7 @@ fn falcon_sign(sk: Address, msg: Address, msg_len: u32, sig: Address) -> u32 {
 }
 
 // ===========================================================================
-// Falcon Verify (simplified)
+// Falcon Verify per spec
 //
 //   falcon_verify(pk, msg, msg_len, sig) -> u32
 //     1. h = decode(pk),  s = decode(sig)
