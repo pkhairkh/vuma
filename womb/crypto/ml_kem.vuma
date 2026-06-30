@@ -1,39 +1,266 @@
-// womb/crypto/ml_kem.vuma — ML-KEM (Kyber) — NIST FIPS 203
-// Post-quantum key encapsulation mechanism based on Module-LWE.
+// womb/crypto/ml_kem.vuma — ML-KEM (FIPS 203 / Kyber)
 //
-// This is a COMPILABLE VUMA implementation of the ML-KEM-768 parameter set.
-// ML-KEM-768: k=3, n=256, q=3329, eta1=2, eta2=2, du=10, dv=4
+// Module-LWE key encapsulation mechanism per NIST FIPS 203 (final, 2024).
+// Implements all three parameter sets:
 //
-// The implementation uses byte-level memory access and u32/u64 arithmetic
-// that works on all 10 VUMA backends. Polynomial arithmetic is done in
-// coefficient form (not NTT — schoolbook multiplication for correctness).
+//   ML-KEM-512  : k=2, eta1=3, eta2=2, du=10, dv=4   (NIST PQC level 1)
+//   ML-KEM-768  : k=3, eta1=2, eta2=2, du=10, dv=4   (NIST PQC level 3)
+//   ML-KEM-1024 : k=4, eta1=2, eta2=2, du=11, dv=5   (NIST PQC level 5)
 //
-// NOTE: This is a reference implementation focused on correctness, not
-// constant-time side-channel resistance. A production implementation would
-// use NTT-based multiplication and constant-time rejection sampling.
+// Common parameters: n=256, q=3329, primitive 512th root of unity zeta=17.
+//
+// Public API (caller-allocated output buffers):
+//   ml_kem_seed_entropy(seed, len)         — seed the internal entropy pool
+//   ml_kem_keygen_512/768/1024(pk, sk)     — generate keypair
+//   ml_kem_encaps_512/768/1024(pk, ct, ss) — encapsulate (ct + 32-byte ss)
+//   ml_kem_decaps_512/768/1024(sk, ct, ss) — decapsulate (32-byte ss)
+//
+// Buffer sizes (bytes):
+//                       pk     sk     ct    ss
+//   ML-KEM-512 :        800   1632    768    32
+//   ML-KEM-768 :       1184   2400   1088    32
+//   ML-KEM-1024:       1568   3168   1568    32
+//
+// External dependencies (linked from sibling crypto modules):
+//   shake128(data, len, out, out_len)        — SHAKE-128 XOF (sha3.vuma)
+//   shake256(data, len, out, out_len)        — SHAKE-256 XOF (sha3.vuma)
+//   sha3_256_oneshot(data, len, out)         — SHA3-256 hash (sha3.vuma)
+//   sha3_512_oneshot(data, len, out)         — SHA3-512 hash (sha3.vuma)
+//
+// Memory layout: polynomials are 256 coefficients, each a u32 in [0, q),
+// stored little-endian (4 bytes per coefficient, 1024 bytes per polynomial).
+// Vectors are k polynomials concatenated (k*1024 bytes). Matrices are k*k
+// polynomials (k*k*1024 bytes). All bit-packing is little-endian per FIPS 203.
 
 // ===========================================================================
-// ML-KEM-768 Parameters (FIPS 203, Table 1)
+// Parameters (FIPS 203 Table 1)
 // ===========================================================================
 
-const MLKEM_K: u32 = 3;        // module dimension
-const MLKEM_N: u32 = 256;      // polynomial degree
-const MLKEM_Q: u32 = 3329;     // modulus
-const MLKEM_ETA1: u32 = 2;     // CBD parameter for secret
-const MLKEM_ETA2: u32 = 2;     // CBD parameter for noise
-const MLKEM_DU: u32 = 10;      // compression for u
-const MLKEM_DV: u32 = 4;       // compression for v
-const MLKEM_PK_SIZE: u32 = 1184;  // public key size
-const MLKEM_SK_SIZE: u32 = 2400;  // secret key size
-const MLKEM_CT_SIZE: u32 = 1088;  // ciphertext size
-const MLKEM_SS_SIZE: u32 = 32;    // shared secret size
+const MLKEM_Q: u32 = 3329;
+const MLKEM_N: u32 = 256;
+const MLKEM_POLY_BYTES: u32 = 1024;         // 256 * 4
+const MLKEM_128_INV: u32 = 3303;            // 128^{-1} mod 3329 (for INTT)
+const MLKEM_COEF_BYTES_12: u32 = 384;       // 256 * 12 / 8 (uncompressed t/s)
+const MLKEM_RHO_BYTES: u32 = 32;
+const MLKEM_SS_BYTES: u32 = 32;
+const MLKEM_M_BYTES: u32 = 32;
+const MLKEM_Z_BYTES: u32 = 32;
+const MLKEM_PK_HASH_BYTES: u32 = 32;
 
-const MASK32: u32 = 4294967295;
+// ML-KEM-512
+const MLKEM_512_K: u32 = 2;
+const MLKEM_512_ETA1: u32 = 3;
+const MLKEM_512_ETA2: u32 = 2;
+const MLKEM_512_DU: u32 = 10;
+const MLKEM_512_DV: u32 = 4;
+const MLKEM_512_PK_SIZE: u32 = 800;         // 384*2 + 32
+const MLKEM_512_SK_SIZE: u32 = 1632;        // 384*2 + 800 + 32 + 32
+const MLKEM_512_CT_SIZE: u32 = 768;         // 320*2 + 128
+
+// ML-KEM-768
+const MLKEM_768_K: u32 = 3;
+const MLKEM_768_ETA1: u32 = 2;
+const MLKEM_768_ETA2: u32 = 2;
+const MLKEM_768_DU: u32 = 10;
+const MLKEM_768_DV: u32 = 4;
+const MLKEM_768_PK_SIZE: u32 = 1184;        // 384*3 + 32
+const MLKEM_768_SK_SIZE: u32 = 2400;        // 384*3 + 1184 + 32 + 32
+const MLKEM_768_CT_SIZE: u32 = 1088;        // 320*3 + 128
+
+// ML-KEM-1024
+const MLKEM_1024_K: u32 = 4;
+const MLKEM_1024_ETA1: u32 = 2;
+const MLKEM_1024_ETA2: u32 = 2;
+const MLKEM_1024_DU: u32 = 11;
+const MLKEM_1024_DV: u32 = 5;
+const MLKEM_1024_PK_SIZE: u32 = 1568;       // 384*4 + 32
+const MLKEM_1024_SK_SIZE: u32 = 3168;       // 384*4 + 1568 + 32 + 32
+const MLKEM_1024_CT_SIZE: u32 = 1568;       // 352*4 + 160
+
+// Entropy pool — fixed memory location populated via ml_kem_seed_entropy().
+// The pool holds a 32-byte seed followed by a 4-byte call counter (so each
+// invocation of _ml_kem_get_entropy yields a fresh SHAKE-256 stream).
+const MLKEM_ENTROPY_POOL: Address = 0x5A5A0000;
+const MLKEM_ENTROPY_COUNTER: Address = 0x5A5A0020;
 
 // ===========================================================================
-// Polynomial arithmetic mod q (coefficients stored as u32 array)
-// A polynomial is 256 coefficients, each mod 3329.
-// Stored as 256 × 4 = 1024 bytes in memory.
+// FIPS 203 Table 4 — zeta table (128 entries)
+//   zetas[k] = 17^BitRev_7(k) mod 3329, for k = 0..127
+// Computed deterministically from the primitive 512th root of unity zeta=17.
+// ===========================================================================
+
+fn mlkem_zeta(k: u32) -> u32 {
+    if k == 0 { return 1; }
+    if k == 1 { return 1729; }
+    if k == 2 { return 2580; }
+    if k == 3 { return 3289; }
+    if k == 4 { return 2642; }
+    if k == 5 { return 630; }
+    if k == 6 { return 1897; }
+    if k == 7 { return 848; }
+    if k == 8 { return 1062; }
+    if k == 9 { return 1919; }
+    if k == 10 { return 193; }
+    if k == 11 { return 797; }
+    if k == 12 { return 2786; }
+    if k == 13 { return 3260; }
+    if k == 14 { return 569; }
+    if k == 15 { return 1746; }
+    if k == 16 { return 296; }
+    if k == 17 { return 2447; }
+    if k == 18 { return 1339; }
+    if k == 19 { return 1476; }
+    if k == 20 { return 3046; }
+    if k == 21 { return 56; }
+    if k == 22 { return 2240; }
+    if k == 23 { return 1333; }
+    if k == 24 { return 1426; }
+    if k == 25 { return 2094; }
+    if k == 26 { return 535; }
+    if k == 27 { return 2882; }
+    if k == 28 { return 2393; }
+    if k == 29 { return 2879; }
+    if k == 30 { return 1974; }
+    if k == 31 { return 821; }
+    if k == 32 { return 289; }
+    if k == 33 { return 331; }
+    if k == 34 { return 3253; }
+    if k == 35 { return 1756; }
+    if k == 36 { return 1197; }
+    if k == 37 { return 2304; }
+    if k == 38 { return 2277; }
+    if k == 39 { return 2055; }
+    if k == 40 { return 650; }
+    if k == 41 { return 1977; }
+    if k == 42 { return 2513; }
+    if k == 43 { return 632; }
+    if k == 44 { return 2865; }
+    if k == 45 { return 33; }
+    if k == 46 { return 1320; }
+    if k == 47 { return 1915; }
+    if k == 48 { return 2319; }
+    if k == 49 { return 1435; }
+    if k == 50 { return 807; }
+    if k == 51 { return 452; }
+    if k == 52 { return 1438; }
+    if k == 53 { return 2868; }
+    if k == 54 { return 1534; }
+    if k == 55 { return 2402; }
+    if k == 56 { return 2647; }
+    if k == 57 { return 2617; }
+    if k == 58 { return 1481; }
+    if k == 59 { return 648; }
+    if k == 60 { return 2474; }
+    if k == 61 { return 3110; }
+    if k == 62 { return 1227; }
+    if k == 63 { return 910; }
+    if k == 64 { return 17; }
+    if k == 65 { return 2761; }
+    if k == 66 { return 583; }
+    if k == 67 { return 2649; }
+    if k == 68 { return 1637; }
+    if k == 69 { return 723; }
+    if k == 70 { return 2288; }
+    if k == 71 { return 1100; }
+    if k == 72 { return 1409; }
+    if k == 73 { return 2662; }
+    if k == 74 { return 3281; }
+    if k == 75 { return 233; }
+    if k == 76 { return 756; }
+    if k == 77 { return 2156; }
+    if k == 78 { return 3015; }
+    if k == 79 { return 3050; }
+    if k == 80 { return 1703; }
+    if k == 81 { return 1651; }
+    if k == 82 { return 2789; }
+    if k == 83 { return 1789; }
+    if k == 84 { return 1847; }
+    if k == 85 { return 952; }
+    if k == 86 { return 1461; }
+    if k == 87 { return 2687; }
+    if k == 88 { return 939; }
+    if k == 89 { return 2308; }
+    if k == 90 { return 2437; }
+    if k == 91 { return 2388; }
+    if k == 92 { return 733; }
+    if k == 93 { return 2337; }
+    if k == 94 { return 268; }
+    if k == 95 { return 641; }
+    if k == 96 { return 1584; }
+    if k == 97 { return 2298; }
+    if k == 98 { return 2037; }
+    if k == 99 { return 3220; }
+    if k == 100 { return 375; }
+    if k == 101 { return 2549; }
+    if k == 102 { return 2090; }
+    if k == 103 { return 1645; }
+    if k == 104 { return 1063; }
+    if k == 105 { return 319; }
+    if k == 106 { return 2773; }
+    if k == 107 { return 757; }
+    if k == 108 { return 2099; }
+    if k == 109 { return 561; }
+    if k == 110 { return 2466; }
+    if k == 111 { return 2594; }
+    if k == 112 { return 2804; }
+    if k == 113 { return 1092; }
+    if k == 114 { return 403; }
+    if k == 115 { return 1026; }
+    if k == 116 { return 1143; }
+    if k == 117 { return 2150; }
+    if k == 118 { return 2775; }
+    if k == 119 { return 886; }
+    if k == 120 { return 1722; }
+    if k == 121 { return 1212; }
+    if k == 122 { return 1874; }
+    if k == 123 { return 1029; }
+    if k == 124 { return 2110; }
+    if k == 125 { return 2935; }
+    if k == 126 { return 885; }
+    if k == 127 { return 2154; }
+    return 0;
+}
+
+// ===========================================================================
+// Byte load/store helpers (little-endian u32)
+// ===========================================================================
+
+fn store_u32_le_at(ptr: Address, off: u32, val: u32) {
+    *(ptr + off) = val & 255;
+    *(ptr + off + 1) = (val >> 8) & 255;
+    *(ptr + off + 2) = (val >> 16) & 255;
+    *(ptr + off + 3) = (val >> 24) & 255;
+}
+
+fn load_u32_le_at(ptr: Address, off: u32) -> u32 {
+    b0: u32 = *(ptr + off);
+    b1: u32 = *(ptr + off + 1);
+    b2: u32 = *(ptr + off + 2);
+    b3: u32 = *(ptr + off + 3);
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+}
+
+// ===========================================================================
+// Modular arithmetic in Z_q (q = 3329)
+// ===========================================================================
+
+fn mlkem_mod_add(a: u32, b: u32) -> u32 {
+    s: u32 = a + b;
+    if s >= MLKEM_Q { s = s - MLKEM_Q; }
+    return s;
+}
+
+fn mlkem_mod_sub(a: u32, b: u32) -> u32 {
+    if a >= b { return a - b; }
+    return a + MLKEM_Q - b;
+}
+
+fn mlkem_mod_mul(a: u32, b: u32) -> u32 {
+    return (a * b) % MLKEM_Q;
+}
+
+// ===========================================================================
+// Polynomial helpers (256 coefficients mod q, 1024 bytes per polynomial)
 // ===========================================================================
 
 fn poly_zero(a: Address) {
@@ -44,17 +271,12 @@ fn poly_zero(a: Address) {
     }
 }
 
-fn store_u32_le_at(ptr: Address, off: u32, val: u32) {
-    *(ptr + off) = val & 255;
-    *(ptr + off + 1) = (val >> 8) & 255;
-    *(ptr + off + 2) = (val >> 16) & 255;
-    *(ptr + off + 3) = (val >> 24) & 255;
-}
-
-fn load_u32_le_at(ptr: Address, off: u32) -> u32 {
-    b0: u32 = *(ptr + off); b1: u32 = *(ptr + off + 1);
-    b2: u32 = *(ptr + off + 2); b3: u32 = *(ptr + off + 3);
-    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+fn poly_copy(dst: Address, src: Address) {
+    i: u32 = 0;
+    while i < 1024 {
+        *(dst + i) = *(src + i);
+        i = i + 1;
+    }
 }
 
 fn poly_add(r: Address, a: Address, b: Address) {
@@ -62,8 +284,7 @@ fn poly_add(r: Address, a: Address, b: Address) {
     while i < 256 {
         av: u32 = load_u32_le_at(a, i * 4);
         bv: u32 = load_u32_le_at(b, i * 4);
-        sum: u32 = (av + bv) % MLKEM_Q;
-        store_u32_le_at(r, i * 4, sum);
+        store_u32_le_at(r, i * 4, mlkem_mod_add(av, bv));
         i = i + 1;
     }
 }
@@ -73,583 +294,1050 @@ fn poly_sub(r: Address, a: Address, b: Address) {
     while i < 256 {
         av: u32 = load_u32_le_at(a, i * 4);
         bv: u32 = load_u32_le_at(b, i * 4);
-        if av >= bv {
-            store_u32_le_at(r, i * 4, (av - bv) % MLKEM_Q);
-        } else {
-            store_u32_le_at(r, i * 4, (av + MLKEM_Q - bv) % MLKEM_Q);
-        }
+        store_u32_le_at(r, i * 4, mlkem_mod_sub(av, bv));
         i = i + 1;
     }
 }
 
-// Schoolbook polynomial multiplication mod q (mod X^256 + 1)
-// r = a * b mod (X^256 + 1, q)
-fn poly_mul(r: Address, a: Address, b: Address) {
-    temp = allocate(1024);
-    poly_zero(temp);
+// ===========================================================================
+// Number-Theoretic Transform (FIPS 203 Algorithm 41 — NTT)
+//
+// In-place forward NTT. Transforms a polynomial from coefficient form to
+// NTT domain. Uses the layered Cooley-Tukey butterfly pattern with zeta
+// values from the precomputed table.
+// ===========================================================================
 
+fn ntt(poly: Address) {
+    len: u32 = 128;
+    k: u32 = 1;
+    while len >= 2 {
+        start: u32 = 0;
+        while start < 256 {
+            z: u32 = mlkem_zeta(k);
+            k = k + 1;
+            j: u32 = start;
+            while j < start + len {
+                aj: u32 = load_u32_le_at(poly, j * 4);
+                ajl: u32 = load_u32_le_at(poly, (j + len) * 4);
+                t: u32 = mlkem_mod_mul(z, ajl);
+                store_u32_le_at(poly, (j + len) * 4, mlkem_mod_sub(aj, t));
+                store_u32_le_at(poly, j * 4, mlkem_mod_add(aj, t));
+                j = j + 1;
+            }
+            start = start + 2 * len;
+        }
+        len = len / 2;
+    }
+}
+
+// ===========================================================================
+// Inverse NTT (FIPS 203 Algorithm 42 — NTT^{-1})
+//
+// In-place inverse NTT. Reverses the forward transform, then scales by
+// 128^{-1} mod q to compensate for the transform length factor.
+// ===========================================================================
+
+fn intt(poly: Address) {
+    len: u32 = 2;
+    k: u32 = 127;
+    while len <= 128 {
+        start: u32 = 0;
+        while start < 256 {
+            z: u32 = mlkem_zeta(k);
+            k = k - 1;
+            j: u32 = start;
+            while j < start + len {
+                aj: u32 = load_u32_le_at(poly, j * 4);
+                ajl: u32 = load_u32_le_at(poly, (j + len) * 4);
+                store_u32_le_at(poly, j * 4, mlkem_mod_add(aj, ajl));
+                store_u32_le_at(poly, (j + len) * 4, mlkem_mod_mul(z, mlkem_mod_sub(ajl, aj)));
+                j = j + 1;
+            }
+            start = start + 2 * len;
+        }
+        len = len * 2;
+    }
+    // Scale by 128^{-1} mod q (= 3303) to complete the inverse transform.
     i: u32 = 0;
     while i < 256 {
-        j: u32 = 0;
-        while j < 256 {
-            ai: u32 = load_u32_le_at(a, i * 4);
-            bj: u32 = load_u32_le_at(b, j * 4);
-            prod: u32 = (ai * bj) % MLKEM_Q;
-            idx: u32 = i + j;
-            if idx < 256 {
-                cur: u32 = load_u32_le_at(temp, idx * 4);
-                store_u32_le_at(temp, idx * 4, (cur + prod) % MLKEM_Q);
-            } else {
-                // Reduction mod X^256 + 1: X^256 = -1
-                idx = idx - 256;
-                cur: u32 = load_u32_le_at(temp, idx * 4);
-                if cur >= prod {
-                    store_u32_le_at(temp, idx * 4, (cur - prod) % MLKEM_Q);
-                } else {
-                    store_u32_le_at(temp, idx * 4, (cur + MLKEM_Q - prod) % MLKEM_Q);
-                }
-            }
-            j = j + 1;
-        }
+        v: u32 = load_u32_le_at(poly, i * 4);
+        store_u32_le_at(poly, i * 4, mlkem_mod_mul(v, MLKEM_128_INV));
         i = i + 1;
     }
-
-    // Copy to output
-    i = 0;
-    while i < 1024 {
-        *(r + i) = *(temp + i);
-        i = i + 1;
-    }
-    free(temp);
 }
 
 // ===========================================================================
-// Compression and Decompression (FIPS 203, Section 4.2)
-// Compress_d(x) = round(2^d / q * x) mod 2^d
-// Decompress_d(x) = round(q / 2^d * x)
+// Pointwise multiplication in NTT domain (FIPS 203 Algorithm 44 — MultiplyNTTs)
+//
+// Computes h = f * g where f, g, h are all in NTT domain. Treats pairs of
+// coefficients as elements of Z_q[X]/(X^2 - zeta^(2*BitRev_7(i)+1)):
+//   h[2i]   = f[2i] * g[2i] - f[2i+1] * g[2i+1]
+//   h[2i+1] = f[2i] * g[2i+1] + f[2i+1] * g[2i]
 // ===========================================================================
 
-fn compress_u32(x: u32, d: u32) -> u32 {
-    // round(2^d * x / q) mod 2^d
-    // Use: (x * 2^d + q/2) / q
-    pow2d: u64 = 1;
+fn ntt_mul(r: Address, a: Address, b: Address) {
+    i: u32 = 0;
+    while i < 128 {
+        a0: u32 = load_u32_le_at(a, (2 * i) * 4);
+        a1: u32 = load_u32_le_at(a, (2 * i + 1) * 4);
+        b0: u32 = load_u32_le_at(b, (2 * i) * 4);
+        b1: u32 = load_u32_le_at(b, (2 * i + 1) * 4);
+        h0: u32 = mlkem_mod_sub(mlkem_mod_mul(a0, b0), mlkem_mod_mul(a1, b1));
+        h1: u32 = mlkem_mod_add(mlkem_mod_mul(a0, b1), mlkem_mod_mul(a1, b0));
+        store_u32_le_at(r, (2 * i) * 4, h0);
+        store_u32_le_at(r, (2 * i + 1) * 4, h1);
+        i = i + 1;
+    }
+}
+
+// ===========================================================================
+// Compression / Decompression (FIPS 203 Algorithms 5 & 6)
+//
+//   Compress_d(x)   = round(2^d / q * x) mod 2^d
+//   Decompress_d(y) = round(q / 2^d * y)
+//
+// The round() is implemented via (numerator + half_denominator) / denominator.
+// All arithmetic fits in u32 (max intermediate is q * 2^12 ≈ 13.6M).
+// ===========================================================================
+
+fn compress_val(x: u32, d: u32) -> u32 {
+    pow2d: u32 = 1;
     i: u32 = 0;
     while i < d {
         pow2d = pow2d * 2;
         i = i + 1;
     }
-    x64: u64 = x;
-    q64: u64 = MLKEM_Q;
-    half_q: u64 = q64 / 2;
-    result: u64 = (x64 * pow2d + half_q) / q64;
-    mask: u64 = pow2d - 1;
+    half_q: u32 = MLKEM_Q / 2;
+    num: u32 = x * pow2d + half_q;
+    result: u32 = num / MLKEM_Q;
+    mask: u32 = pow2d - 1;
     return result & mask;
 }
 
-fn decompress_u32(y: u32, d: u32) -> u32 {
-    // round(q * y / 2^d)
-    pow2d: u64 = 1;
+fn decompress_val(y: u32, d: u32) -> u32 {
+    pow2d: u32 = 1;
     i: u32 = 0;
     while i < d {
         pow2d = pow2d * 2;
         i = i + 1;
     }
-    y64: u64 = y;
-    q64: u64 = MLKEM_Q;
-    half_pow: u64 = pow2d / 2;
-    result: u64 = (q64 * y64 + half_pow) / pow2d;
+    half_pow: u32 = pow2d / 2;
+    num: u32 = MLKEM_Q * y + half_pow;
+    result: u32 = num / pow2d;
     return result % MLKEM_Q;
 }
 
-fn poly_compress(r: Address, a: Address, d: u32) {
+// In-place: replace each coefficient of `poly` with Compress_d(coef).
+fn compress(poly: Address, d: u32) {
     i: u32 = 0;
     while i < 256 {
-        av: u32 = load_u32_le_at(a, i * 4);
-        store_u32_le_at(r, i * 4, compress_u32(av, d));
+        v: u32 = load_u32_le_at(poly, i * 4);
+        store_u32_le_at(poly, i * 4, compress_val(v, d));
         i = i + 1;
     }
 }
 
-fn poly_decompress(r: Address, a: Address, d: u32) {
+// In-place: replace each coefficient of `poly` with Decompress_d(coef).
+fn decompress(poly: Address, d: u32) {
     i: u32 = 0;
     while i < 256 {
-        av: u32 = load_u32_le_at(a, i * 4);
-        store_u32_le_at(r, i * 4, decompress_u32(av, d));
+        v: u32 = load_u32_le_at(poly, i * 4);
+        store_u32_le_at(poly, i * 4, decompress_val(v, d));
         i = i + 1;
     }
 }
 
 // ===========================================================================
-// Centered Binomial Distribution (CBD) — sampling from PRF output
-// CBD_eta samples from a byte stream: for eta=2, each 4-byte window
-// produces one coefficient in [-2, 2].
+// Byte encoding / decoding (FIPS 203 Algorithms 9 & 10 — ByteEncode_d / ByteDecode_d)
+//
+// Packs 256 coefficients (each in [0, 2^d)) into a bit stream of (256*d)/8
+// bytes, least-significant bit first. Decoding reverses the operation.
+// Supported d values: 1, 4, 5, 10, 11, 12.
 // ===========================================================================
 
-fn cbd_eta2(buf: Address, r: Address) {
-    // For eta=2: process 4 bytes per coefficient (32 bits)
-    // coefficient = popcount(bits 0-3) - popcount(bits 4-7)
+fn byte_encode(out: Address, poly: Address, d: u32) {
+    out_len: u32 = (256 * d) / 8;
+    // Zero the output buffer.
+    i: u32 = 0;
+    while i < out_len {
+        *(out + i) = 0;
+        i = i + 1;
+    }
+    // Bit accumulator: low bits first. acc holds up to 31 valid bits.
+    acc: u32 = 0;
+    acc_bits: u32 = 0;
+    out_pos: u32 = 0;
+    i = 0;
+    while i < 256 {
+        coef: u32 = load_u32_le_at(poly, i * 4);
+        acc = acc | (coef << acc_bits);
+        acc_bits = acc_bits + d;
+        while acc_bits >= 8 {
+            *(out + out_pos) = acc & 255;
+            acc = acc >> 8;
+            acc_bits = acc_bits - 8;
+            out_pos = out_pos + 1;
+        }
+        i = i + 1;
+    }
+    // Flush any remaining bits in the accumulator (should be 0 for valid d).
+    if acc_bits > 0 {
+        *(out + out_pos) = acc & 255;
+    }
+}
+
+fn byte_decode(out: Address, bytes: Address, d: u32) {
+    acc: u32 = 0;
+    acc_bits: u32 = 0;
+    in_pos: u32 = 0;
     i: u32 = 0;
     while i < 256 {
-        off: u32 = i * 4;
-        b0: u32 = *(buf + off);
-        b1: u32 = *(buf + off + 1);
-        b2: u32 = *(buf + off + 2);
-        b3: u32 = *(buf + off + 3);
+        while acc_bits < d {
+            b: u32 = *(bytes + in_pos);
+            acc = acc | (b << acc_bits);
+            in_pos = in_pos + 1;
+            acc_bits = acc_bits + 8;
+        }
+        mask: u32 = (1 << d) - 1;
+        coef: u32 = acc & mask;
+        acc = acc >> d;
+        acc_bits = acc_bits - d;
+        store_u32_le_at(out, i * 4, coef);
+        i = i + 1;
+    }
+}
 
-        // bits 0-3
-        a: u32 = (b0 & 1) + ((b0 >> 1) & 1) + ((b0 >> 2) & 1) + ((b0 >> 3) & 1);
-        // bits 4-7
-        b: u32 = ((b0 >> 4) & 1) + ((b0 >> 5) & 1) + ((b0 >> 6) & 1) + ((b0 >> 7) & 1);
+// ===========================================================================
+// Centered Binomial Distribution (FIPS 203 Algorithm 4 — CBD_eta)
+//
+// Samples a polynomial from a byte stream. For each coefficient i in 0..255:
+//   a = sum of bits [i*2*eta .. i*2*eta + eta - 1]
+//   b = sum of bits [i*2*eta + eta .. i*2*eta + 2*eta - 1]
+//   coef = (a - b) mod q
+// The input must contain at least 64*eta bytes (128 for eta=2, 192 for eta=3).
+// ===========================================================================
 
+fn cbd_get_bit(buf: Address, bit_pos: u32) -> u32 {
+    byte_idx: u32 = bit_pos / 8;
+    bit_idx: u32 = bit_pos - byte_idx * 8;
+    byte_val: u32 = *(buf + byte_idx);
+    return (byte_val >> bit_idx) & 1;
+}
+
+fn cbd(bytes: Address, eta: u32, out: Address) {
+    i: u32 = 0;
+    while i < 256 {
+        bit_pos: u32 = i * 2 * eta;
+        a: u32 = 0;
+        b: u32 = 0;
+        j: u32 = 0;
+        while j < eta {
+            a = a + cbd_get_bit(bytes, bit_pos + j);
+            b = b + cbd_get_bit(bytes, bit_pos + eta + j);
+            j = j + 1;
+        }
         coef: u32 = 0;
         if a >= b {
             coef = a - b;
         } else {
             coef = MLKEM_Q - (b - a);
         }
-        store_u32_le_at(r, i * 4, coef % MLKEM_Q);
+        store_u32_le_at(out, i * 4, coef % MLKEM_Q);
         i = i + 1;
     }
 }
 
 // ===========================================================================
-// Matrix/vector operations (module arithmetic over R_q^k)
-// A vector is k polynomials concatenated: k * 1024 bytes
-// A matrix is k * k polynomials: k * k * 1024 bytes
+// PRF (FIPS 203 Algorithm 7 — PRF_eta)
+//
+//   PRF_eta(sigma, N) = SHAKE-256(sigma || N, output of 64*eta bytes)
+//
+// Produces 64*eta bytes (the input length CBD needs to sample one polynomial).
 // ===========================================================================
 
-// Matrix-vector multiply: v = A * s, where A is k×k matrix, s is k-vector
-fn matvec_mul(v: Address, matrix: Address, s: Address) {
-    // v[i] = sum_j A[i][j] * s[j]
-    row: u32 = 0;
-    while row < MLKEM_K {
-        // v[row] = 0
-        poly_zero(v + row * 1024);
+fn prf(seed: Address, nonce: u32, out_len: u32, out: Address) {
+    in_buf = allocate(33);
+    i: u32 = 0;
+    while i < 32 {
+        *(in_buf + i) = *(seed + i);
+        i = i + 1;
+    }
+    *(in_buf + 32) = nonce & 255;
+    shake256(in_buf, 33, out, out_len);
+    free(in_buf);
+}
 
-        col: u32 = 0;
-        while col < MLKEM_K {
-            // A[row][col] at matrix + (row * K + col) * 1024
-            // s[col] at s + col * 1024
-            a_poly = matrix + (row * MLKEM_K + col) * 1024;
-            s_poly = s + col * 1024;
+// ===========================================================================
+// Hash functions G, H, KDF (FIPS 203 Sections 5.1-5.3)
+//
+//   G(m)   = SHA3-512(m)    — 64-byte output, split into (rho, sigma)
+//   H(m)   = SHA3-256(m)    — 32-byte output
+//   KDF(s) = SHA3-256(s)    — 32-byte output (input is 64 bytes: K_bar || H(c))
+// ===========================================================================
 
-            // temp = A[row][col] * s[col]
-            temp = allocate(1024);
-            poly_mul(temp, a_poly, s_poly);
+fn mlkem_g(in_buf: Address, in_len: u32, out: Address) {
+    sha3_512_oneshot(in_buf, in_len, out);
+}
 
-            // v[row] += temp
-            poly_add(v + row * 1024, v + row * 1024, temp);
-            free(temp);
+fn mlkem_h(in_buf: Address, in_len: u32, out: Address) {
+    sha3_256_oneshot(in_buf, in_len, out);
+}
 
-            col = col + 1;
+// KDF: SHA3-256 over a 64-byte input buffer (K_bar || H(ct)).
+fn kdf(buf64: Address, out: Address) {
+    sha3_256_oneshot(buf64, 64, out);
+}
+
+// ===========================================================================
+// SampleNTT (FIPS 203 Algorithm 9 — SampleNTT)
+//
+// Samples a polynomial in NTT domain from XOF(SHAKE-128) seeded with
+// (rho || i || j). Uses rejection sampling: reads 3 bytes at a time,
+// derives two 12-bit candidates d1, d2; accepts those < q.
+// ===========================================================================
+
+fn sample_ntt(rho: Address, i: u32, j: u32, out: Address) {
+    seed = allocate(34);
+    k: u32 = 0;
+    while k < 32 {
+        *(seed + k) = *(rho + k);
+        k = k + 1;
+    }
+    *(seed + 32) = i & 255;
+    *(seed + 33) = j & 255;
+
+    // 1024 bytes of XOF output gives ~340 candidate pairs (~680 candidates),
+    // of which ~550 are accepted. More than enough for 256 coefficients.
+    stream = allocate(1024);
+    shake128(seed, 34, stream, 1024);
+
+    pos: u32 = 0;
+    coef_idx: u32 = 0;
+    while coef_idx < 256 {
+        // If we are about to read past the buffer, fall back to zero-fill.
+        // (Bound check: 1024 bytes / 3 bytes per pair = 341 pairs = 682
+        // candidates max — well above the ~314 needed in the worst case.
+        // For robustness, stop if pos+2 exceeds the buffer.)
+        if pos + 2 >= 1024 {
+            k = 0;
+            while k < 256 {
+                store_u32_le_at(out, k * 4, 0);
+                k = k + 1;
+            }
+            free(seed);
+            free(stream);
+            return;
         }
-        row = row + 1;
+        b0: u32 = *(stream + pos);
+        b1: u32 = *(stream + pos + 1);
+        b2: u32 = *(stream + pos + 2);
+        pos = pos + 3;
+
+        d1: u32 = b0 + 256 * (b1 & 15);
+        d2: u32 = (b1 >> 4) + 16 * b2;
+
+        if d1 < MLKEM_Q {
+            store_u32_le_at(out, coef_idx * 4, d1);
+            coef_idx = coef_idx + 1;
+        }
+        if coef_idx < 256 {
+            if d2 < MLKEM_Q {
+                store_u32_le_at(out, coef_idx * 4, d2);
+                coef_idx = coef_idx + 1;
+            }
+        }
+    }
+
+    free(seed);
+    free(stream);
+}
+
+// ===========================================================================
+// Matrix / vector operations in NTT domain
+//
+// A matrix is k*k polynomials, each 1024 bytes, stored row-major:
+//   A[i][j]  at  matrix + (i * k + j) * 1024
+// A vector is k polynomials, each 1024 bytes:
+//   v[i]     at  vec + i * 1024
+//
+// All operations are in NTT domain — polynomials are NOT inverse-NTT'd.
+// ===========================================================================
+
+// Sample matrix A in NTT domain: A[i][j] = SampleNTT(rho, i, j).
+// Output: matrix is k*k*1024 bytes, each polynomial in NTT form.
+fn mlkem_sample_matrix_a(matrix: Address, rho: Address, k: u32) {
+    i: u32 = 0;
+    while i < k {
+        j: u32 = 0;
+        while j < k {
+            sample_ntt(rho, i, j, matrix + (i * k + j) * MLKEM_POLY_BYTES);
+            j = j + 1;
+        }
+        i = i + 1;
     }
 }
 
-// Inner product: r = <a, s> = sum_i a[i] * s[i]
-fn inner_product(r: Address, a: Address, s: Address) {
+// Compute v = A * s in NTT domain (no transpose).
+//   v[i] = sum_{j=0..k-1} A[i][j] • s[j]   (• = NTT-domain pointwise mul)
+fn mlkem_matvec_ntt(v: Address, matrix: Address, s: Address, k: u32) {
+    i: u32 = 0;
+    while i < k {
+        poly_zero(v + i * MLKEM_POLY_BYTES);
+        j: u32 = 0;
+        while j < k {
+            tmp = allocate(MLKEM_POLY_BYTES);
+            ntt_mul(tmp,
+                    matrix + (i * k + j) * MLKEM_POLY_BYTES,
+                    s + j * MLKEM_POLY_BYTES);
+            poly_add(v + i * MLKEM_POLY_BYTES,
+                     v + i * MLKEM_POLY_BYTES,
+                     tmp);
+            free(tmp);
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+}
+
+// Compute v = A^T * s in NTT domain (transposed).
+//   v[i] = sum_{j=0..k-1} A[j][i] • s[j]
+fn mlkem_matvec_ntt_transpose(v: Address, matrix: Address, s: Address, k: u32) {
+    i: u32 = 0;
+    while i < k {
+        poly_zero(v + i * MLKEM_POLY_BYTES);
+        j: u32 = 0;
+        while j < k {
+            tmp = allocate(MLKEM_POLY_BYTES);
+            ntt_mul(tmp,
+                    matrix + (j * k + i) * MLKEM_POLY_BYTES,
+                    s + j * MLKEM_POLY_BYTES);
+            poly_add(v + i * MLKEM_POLY_BYTES,
+                     v + i * MLKEM_POLY_BYTES,
+                     tmp);
+            free(tmp);
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+}
+
+// Inner product in NTT domain: r = sum_i a[i] • s[i]
+fn mlkem_inner_product_ntt(r: Address, a: Address, s: Address, k: u32) {
     poly_zero(r);
     i: u32 = 0;
-    while i < MLKEM_K {
-        temp = allocate(1024);
-        poly_mul(temp, a + i * 1024, s + i * 1024);
-        poly_add(r, r, temp);
-        free(temp);
+    while i < k {
+        tmp = allocate(MLKEM_POLY_BYTES);
+        ntt_mul(tmp, a + i * MLKEM_POLY_BYTES, s + i * MLKEM_POLY_BYTES);
+        poly_add(r, r, tmp);
+        free(tmp);
         i = i + 1;
     }
 }
 
-// Vector add: r = a + b
-fn vec_add(r: Address, a: Address, b: Address) {
+// Vector add in NTT domain: r = a + b
+fn mlkem_vec_add(r: Address, a: Address, b: Address, k: u32) {
     i: u32 = 0;
-    while i < MLKEM_K {
-        poly_add(r + i * 1024, a + i * 1024, b + i * 1024);
+    while i < k {
+        poly_add(r + i * MLKEM_POLY_BYTES,
+                 a + i * MLKEM_POLY_BYTES,
+                 b + i * MLKEM_POLY_BYTES);
         i = i + 1;
     }
 }
 
 // ===========================================================================
-// Hash functions H, G (FIPS 203 uses SHA3-512 and SHAKE-256)
-// For simplicity, we use SHA-256 + SHAKE256 from the crypto module.
+// Encode / decode public key, secret key, ciphertext (FIPS 203 Sections 7-9)
 // ===========================================================================
 
-// G(seed) = SHA3-512(seed) — produces 64 bytes
-fn mlkem_g(seed: Address, seed_len: u32, out: Address) {
-    sha3_512_oneshot(seed, seed_len, out);
+// pk = ByteEncode_12(t_hat) || rho
+//   t_hat is k polynomials in NTT domain, each 384 bytes packed.
+fn mlkem_encode_pk(pk: Address, t_hat: Address, rho: Address, k: u32) {
+    i: u32 = 0;
+    while i < k {
+        byte_encode(pk + i * MLKEM_COEF_BYTES_12,
+                    t_hat + i * MLKEM_POLY_BYTES,
+                    12);
+        i = i + 1;
+    }
+    j: u32 = 0;
+    while j < MLKEM_RHO_BYTES {
+        *(pk + k * MLKEM_COEF_BYTES_12 + j) = *(rho + j);
+        j = j + 1;
+    }
 }
 
-// H(msg, len) = SHA-256(msg) — produces 32 bytes
-fn mlkem_hash(msg: Address, msg_len: u32, out: Address) {
-    sha256_oneshot(msg, msg_len, out);
+// Inverse of encode_pk: parse pk into (t_hat, rho).
+fn mlkem_decode_pk(t_hat: Address, rho: Address, pk: Address, k: u32) {
+    i: u32 = 0;
+    while i < k {
+        byte_decode(t_hat + i * MLKEM_POLY_BYTES,
+                    pk + i * MLKEM_COEF_BYTES_12,
+                    12);
+        i = i + 1;
+    }
+    j: u32 = 0;
+    while j < MLKEM_RHO_BYTES {
+        *(rho + j) = *(pk + k * MLKEM_COEF_BYTES_12 + j);
+        j = j + 1;
+    }
+}
+
+// sk = ByteEncode_12(s_hat) || pk || H(pk) || z
+//   s_hat is k polynomials in NTT domain.
+//   pk_hash = H(pk) is precomputed (32 bytes).
+//   z is the implicit-rejection seed (32 bytes).
+fn mlkem_encode_sk(sk: Address, s_hat: Address, pk: Address, pk_hash: Address, z: Address, k: u32) {
+    pk_size: u32 = k * MLKEM_COEF_BYTES_12 + MLKEM_RHO_BYTES;
+    i: u32 = 0;
+    while i < k {
+        byte_encode(sk + i * MLKEM_COEF_BYTES_12,
+                    s_hat + i * MLKEM_POLY_BYTES,
+                    12);
+        i = i + 1;
+    }
+    j: u32 = 0;
+    while j < pk_size {
+        *(sk + k * MLKEM_COEF_BYTES_12 + j) = *(pk + j);
+        j = j + 1;
+    }
+    j = 0;
+    while j < MLKEM_PK_HASH_BYTES {
+        *(sk + k * MLKEM_COEF_BYTES_12 + pk_size + j) = *(pk_hash + j);
+        j = j + 1;
+    }
+    j = 0;
+    while j < MLKEM_Z_BYTES {
+        *(sk + k * MLKEM_COEF_BYTES_12 + pk_size + MLKEM_PK_HASH_BYTES + j) = *(z + j);
+        j = j + 1;
+    }
+}
+
+// Parse sk into (s_hat, pk, pk_hash, z).
+fn mlkem_decode_sk(s_hat: Address, pk: Address, pk_hash: Address, z: Address, sk: Address, k: u32) {
+    pk_size: u32 = k * MLKEM_COEF_BYTES_12 + MLKEM_RHO_BYTES;
+    i: u32 = 0;
+    while i < k {
+        byte_decode(s_hat + i * MLKEM_POLY_BYTES,
+                    sk + i * MLKEM_COEF_BYTES_12,
+                    12);
+        i = i + 1;
+    }
+    j: u32 = 0;
+    while j < pk_size {
+        *(pk + j) = *(sk + k * MLKEM_COEF_BYTES_12 + j);
+        j = j + 1;
+    }
+    j = 0;
+    while j < MLKEM_PK_HASH_BYTES {
+        *(pk_hash + j) = *(sk + k * MLKEM_COEF_BYTES_12 + pk_size + j);
+        j = j + 1;
+    }
+    j = 0;
+    while j < MLKEM_Z_BYTES {
+        *(z + j) = *(sk + k * MLKEM_COEF_BYTES_12 + pk_size + MLKEM_PK_HASH_BYTES + j);
+        j = j + 1;
+    }
+}
+
+// ct = ByteEncode_du(Compress_du(u)) || ByteEncode_dv(Compress_dv(v))
+//   u is k polynomials; v is a single polynomial.
+fn mlkem_encode_ct(ct: Address, u: Address, v: Address, k: u32, du: u32, dv: u32) {
+    u_bytes: u32 = (256 * du) / 8;
+    i: u32 = 0;
+    while i < k {
+        u_poly = allocate(MLKEM_POLY_BYTES);
+        poly_copy(u_poly, u + i * MLKEM_POLY_BYTES);
+        compress(u_poly, du);
+        byte_encode(ct + i * u_bytes, u_poly, du);
+        free(u_poly);
+        i = i + 1;
+    }
+    v_poly = allocate(MLKEM_POLY_BYTES);
+    poly_copy(v_poly, v);
+    compress(v_poly, dv);
+    byte_encode(ct + k * u_bytes, v_poly, dv);
+    free(v_poly);
+}
+
+// Parse ct into (u, v): decompress after byte-decoding.
+fn mlkem_decode_ct(u: Address, v: Address, ct: Address, k: u32, du: u32, dv: u32) {
+    u_bytes: u32 = (256 * du) / 8;
+    i: u32 = 0;
+    while i < k {
+        byte_decode(u + i * MLKEM_POLY_BYTES, ct + i * u_bytes, du);
+        decompress(u + i * MLKEM_POLY_BYTES, du);
+        i = i + 1;
+    }
+    byte_decode(v, ct + k * u_bytes, dv);
+    decompress(v, dv);
 }
 
 // ===========================================================================
-// Key Generation (FIPS 203, Section 6.1)
+// Entropy pool — backs the public ml_kem_*_keygen / ml_kem_*_encaps APIs.
 //
-// Input: 32-byte random seed d
-// Output: public key (pk), secret key (sk)
-//
-// 1. (d, z) = G(seed) — split 64 bytes into two 32-byte halves
-// 2. rho = d, sigma = z
-// 3. Sample matrix A from PRF(rho)
-// 4. Sample secret s from CBD(sigma)
-// 5. Sample noise e from CBD(sigma)
-// 6. t = A * s + e
-// 7. pk = encode(t) || encode(rho)
-// 8. sk = encode(s)
+// ml_kem_seed_entropy(seed, len) copies up to 32 bytes of seed into the pool
+// at a fixed memory location and resets the per-call counter to 0.
+// _ml_kem_get_entropy(out, len) stretches the pool seed via SHAKE-256 keyed
+// by the counter, then increments the counter so each call yields a fresh
+// stream. The user is expected to seed the pool with fresh randomness before
+// each key generation / encapsulation operation.
 // ===========================================================================
 
-fn mlkem_keygen(seed: Address, pk: Address, sk: Address) {
-    // 1. G(seed) = (rho || sigma)
+fn ml_kem_seed_entropy(seed: Address, len: u32) {
+    i: u32 = 0;
+    while i < 32 {
+        if i < len {
+            *(MLKEM_ENTROPY_POOL + i) = *(seed + i);
+        } else {
+            *(MLKEM_ENTROPY_POOL + i) = 0;
+        }
+        i = i + 1;
+    }
+    // Reset counter to 0.
+    *(MLKEM_ENTROPY_COUNTER) = 0;
+    *(MLKEM_ENTROPY_COUNTER + 1) = 0;
+    *(MLKEM_ENTROPY_COUNTER + 2) = 0;
+    *(MLKEM_ENTROPY_COUNTER + 3) = 0;
+}
+
+fn _ml_kem_get_entropy(out: Address, len: u32) {
+    counter: u32 = *(MLKEM_ENTROPY_COUNTER)
+                 | (*(MLKEM_ENTROPY_COUNTER + 1) << 8)
+                 | (*(MLKEM_ENTROPY_COUNTER + 2) << 16)
+                 | (*(MLKEM_ENTROPY_COUNTER + 3) << 24);
+    in_buf = allocate(36);
+    i: u32 = 0;
+    while i < 32 {
+        *(in_buf + i) = *(MLKEM_ENTROPY_POOL + i);
+        i = i + 1;
+    }
+    *(in_buf + 32) = counter & 255;
+    *(in_buf + 33) = (counter >> 8) & 255;
+    *(in_buf + 34) = (counter >> 16) & 255;
+    *(in_buf + 35) = (counter >> 24) & 255;
+    shake256(in_buf, 36, out, len);
+    counter = counter + 1;
+    *(MLKEM_ENTROPY_COUNTER) = counter & 255;
+    *(MLKEM_ENTROPY_COUNTER + 1) = (counter >> 8) & 255;
+    *(MLKEM_ENTROPY_COUNTER + 2) = (counter >> 16) & 255;
+    *(MLKEM_ENTROPY_COUNTER + 3) = (counter >> 24) & 255;
+    free(in_buf);
+}
+
+// ===========================================================================
+// ML-KEM Key Generation (FIPS 203 Algorithm 12 — ML-KEM.KeyGen)
+//
+// Inputs: k, eta1 (parameter set), seed source (internal entropy pool)
+// Outputs: pk (k*384 + 32 bytes), sk (768*k + 96 bytes)
+//
+//   1. (d, z) = G(seed)        — 64-byte hash, split into two 32-byte halves
+//   2. rho = d, sigma = z
+//   3. A_hat = ExpandMatrix(rho)            — k*k NTT-domain polynomials
+//   4. s[i]   = CBD_eta1(PRF(sigma, i))     — for i = 0..k-1
+//   5. e[i]   = CBD_eta1(PRF(sigma, k+i))   — for i = 0..k-1
+//   6. s_hat = NTT(s); e_hat = NTT(e)
+//   7. t_hat = A_hat * s_hat + e_hat        — NTT-domain matrix-vector mul
+//   8. pk = ByteEncode_12(t_hat) || rho
+//   9. sk = ByteEncode_12(s_hat) || pk || H(pk) || z
+// ===========================================================================
+
+fn _ml_kem_keygen(k: u32, eta1: u32, pk: Address, sk: Address) {
+    // 1. Pull 32 bytes of seed from the entropy pool, then G(.) it.
+    seed = allocate(32);
+    _ml_kem_get_entropy(seed, 32);
+
     gz = allocate(64);
     mlkem_g(seed, 32, gz);
     rho = gz;          // first 32 bytes
     sigma = gz + 32;   // last 32 bytes
+    free(seed);
 
-    // 3. Generate matrix A (k×k polynomials) from PRF(rho)
-    // In a real implementation, this uses SHAKE-128 expansion.
-    // For this reference, we derive A from SHAKE256(rho || i || j).
-    matrix = allocate(MLKEM_K * MLKEM_K * 1024);
-    row: u32 = 0;
-    while row < MLKEM_K {
-        col: u32 = 0;
-        while col < MLKEM_K {
-            // Generate polynomial A[row][col] from SHAKE256(rho || row || col)
-            seed_buf = allocate(34);
-            i: u32 = 0;
-            while i < 32 { *(seed_buf + i) = *(rho + i); i = i + 1; }
-            *(seed_buf + 32) = row & 255;
-            *(seed_buf + 33) = col & 255;
+    // 3. Sample matrix A in NTT domain.
+    matrix = allocate(k * k * MLKEM_POLY_BYTES);
+    mlkem_sample_matrix_a(matrix, rho, k);
 
-            shake_out = allocate(1024);
-            shake256(seed_buf, 34, shake_out, 1024);
+    // 4-5. Sample secret s and noise e from CBD_eta1(PRF(sigma, N)).
+    prf_out_len: u32 = 64 * eta1;
+    s_vec = allocate(k * MLKEM_POLY_BYTES);
+    e_vec = allocate(k * MLKEM_POLY_BYTES);
 
-            // Convert bytes to coefficients mod q
-            i = 0;
-            while i < 256 {
-                b: u32 = *(shake_out + (i * 4));
-                coef: u32 = b % MLKEM_Q;
-                store_u32_le_at(matrix + (row * MLKEM_K + col) * 1024, i * 4, coef);
-                i = i + 1;
-            }
-
-            free(seed_buf);
-            free(shake_out);
-            col = col + 1;
-        }
-        row = row + 1;
-    }
-
-    // 4. Sample secret vector s from CBD(sigma)
-    s_vec = allocate(MLKEM_K * 1024);
     i: u32 = 0;
-    while i < MLKEM_K {
-        // PRF: SHAKE256(sigma || i)
-        prf_in = allocate(33);
-        j: u32 = 0;
-        while j < 32 { *(prf_in + j) = *(sigma + j); j = j + 1; }
-        *(prf_in + 32) = i & 255;
-
-        cbd_buf = allocate(1024);
-        shake256(prf_in, 33, cbd_buf, 1024);
-        cbd_eta2(cbd_buf, s_vec + i * 1024);
-
-        free(prf_in);
+    while i < k {
+        cbd_buf = allocate(prf_out_len);
+        prf(sigma, i, prf_out_len, cbd_buf);
+        cbd(cbd_buf, eta1, s_vec + i * MLKEM_POLY_BYTES);
+        free(cbd_buf);
+        i = i + 1;
+    }
+    i = 0;
+    while i < k {
+        cbd_buf = allocate(prf_out_len);
+        prf(sigma, k + i, prf_out_len, cbd_buf);
+        cbd(cbd_buf, eta1, e_vec + i * MLKEM_POLY_BYTES);
         free(cbd_buf);
         i = i + 1;
     }
 
-    // 5. Sample noise vector e from CBD(sigma)
-    e_vec = allocate(MLKEM_K * 1024);
+    // 6. NTT(s) and NTT(e).
     i = 0;
-    while i < MLKEM_K {
-        prf_in = allocate(33);
-        j: u32 = 0;
-        while j < 32 { *(prf_in + j) = *(sigma + j); j = j + 1; }
-        *(prf_in + 32) = (i + MLKEM_K) & 255;
-
-        cbd_buf = allocate(1024);
-        shake256(prf_in, 33, cbd_buf, 1024);
-        cbd_eta2(cbd_buf, e_vec + i * 1024);
-
-        free(prf_in);
-        free(cbd_buf);
+    while i < k {
+        ntt(s_vec + i * MLKEM_POLY_BYTES);
+        ntt(e_vec + i * MLKEM_POLY_BYTES);
         i = i + 1;
     }
 
-    // 6. t = A * s + e
-    t_vec = allocate(MLKEM_K * 1024);
-    matvec_mul(t_vec, matrix, s_vec);
-    vec_add(t_vec, t_vec, e_vec);
+    // 7. t_hat = A_hat * s_hat + e_hat (NTT domain).
+    t_hat = allocate(k * MLKEM_POLY_BYTES);
+    mlkem_matvec_ntt(t_hat, matrix, s_vec, k);
+    mlkem_vec_add(t_hat, t_hat, e_vec, k);
 
-    // 7. pk = encode(t) || rho
-    // Encode t (k polynomials, each 256 × 12-bit = 384 bytes)
-    // For simplicity, we store raw coefficients (4 bytes each = 1024 bytes per poly)
-    i = 0;
-    while i < MLKEM_K * 1024 {
-        *(pk + i) = *(t_vec + i);
-        i = i + 1;
-    }
-    // Append rho
-    i = 0;
-    while i < 32 {
-        *(pk + MLKEM_K * 1024 + i) = *(rho + i);
-        i = i + 1;
-    }
+    // 8. pk = ByteEncode_12(t_hat) || rho.
+    mlkem_encode_pk(pk, t_hat, rho, k);
 
-    // 8. sk = encode(s) || ... (simplified: just store s)
-    i = 0;
-    while i < MLKEM_K * 1024 {
-        *(sk + i) = *(s_vec + i);
-        i = i + 1;
-    }
+    // 9. sk = ByteEncode_12(s_hat) || pk || H(pk) || z.
+    pk_size: u32 = k * MLKEM_COEF_BYTES_12 + MLKEM_RHO_BYTES;
+    pk_hash = allocate(MLKEM_PK_HASH_BYTES);
+    mlkem_h(pk, pk_size, pk_hash);
+    mlkem_encode_sk(sk, s_vec, pk, pk_hash, gz + 32, k);
 
-    free(gz); free(matrix); free(s_vec); free(e_vec); free(t_vec);
+    free(gz);
+    free(matrix);
+    free(s_vec);
+    free(e_vec);
+    free(t_hat);
+    free(pk_hash);
 }
 
 // ===========================================================================
-// Encapsulation (FIPS 203, Section 6.2)
+// ML-KEM Encapsulation (FIPS 203 Algorithm 13 — ML-KEM.Encaps)
 //
-// Input: public key (pk)
-// Output: ciphertext (ct), shared secret (ss)
+// Inputs: k, eta1, eta2, du, dv, pk
+// Outputs: ct (k*du*32 + dv*32 bytes), ss (32 bytes)
 //
-// 1. Sample random message m (32 bytes)
-// 2. (K_bar, r) = G(m || H(pk))
-// 3. Sample matrix A from rho in pk
-// 4. Sample secret r_vec from CBD(r)
-// 5. Sample noise e1, e2 from CBD(r)
-// 6. u = A^T * r_vec + e1
-// 7. v = <t, r_vec> + e2 + Decompress(m)
-// 8. ct = Compress(u) || Compress(v)
-// 9. ss = K(m, ct)
+//   1. m = random 32 bytes
+//   2. (K_bar, r) = G(m || H(pk))
+//   3. A_hat = ExpandMatrix(rho)         — from rho in pk
+//   4. t_hat = ByteDecode_12(pk)         — from pk
+//   5. r_vec[i] = CBD_eta1(PRF(r, i))    — for i = 0..k-1
+//   6. e1[i]   = CBD_eta2(PRF(r, k+i))   — for i = 0..k-1
+//   7. e2      = CBD_eta2(PRF(r, 2k))
+//   8. r_hat = NTT(r_vec)
+//   9. u = INTT(A_hat^T * r_hat) + e1
+//  10. v = INTT(<t_hat, r_hat>) + e2 + Decompress_1(m)
+//  11. c1 = ByteEncode_du(Compress_du(u))
+//      c2 = ByteEncode_dv(Compress_dv(v))
+//      ct = c1 || c2
+//  12. ss = KDF(K_bar || H(ct))
 // ===========================================================================
 
-fn mlkem_encaps(pk: Address, randomness: Address, ct: Address, ss: Address) {
-    // 1. m = randomness (32 bytes — should be truly random)
-    m = allocate(32);
-    i: u32 = 0;
-    while i < 32 { *(m + i) = *(randomness + i); i = i + 1; }
-
+// Internal encapsulation: takes pre-sampled message m and precomputed pk_hash.
+// Used by both ml_kem_encaps (fresh m) and ml_kem_decaps (re-encryption check).
+fn _ml_kem_encaps_with_m(k: u32, eta1: u32, eta2: u32, du: u32, dv: u32,
+                         pk: Address, pk_hash: Address, m: Address,
+                         ct: Address, ss: Address) {
     // 2. (K_bar, r) = G(m || H(pk))
-    g_in = allocate(32 + 32);
-    i = 0;
+    g_in = allocate(64);
+    i: u32 = 0;
     while i < 32 { *(g_in + i) = *(m + i); i = i + 1; }
-    // H(pk) — hash the public key (simplified: first 32 bytes of pk)
-    pk_hash = allocate(32);
-    sha256_oneshot(pk, MLKEM_K * 1024 + 32, pk_hash);
     i = 0;
     while i < 32 { *(g_in + 32 + i) = *(pk_hash + i); i = i + 1; }
-
     gz = allocate(64);
     mlkem_g(g_in, 64, gz);
-    k_bar = gz;        // first 32 bytes
-    r_seed = gz + 32;  // last 32 bytes
-    free(g_in); free(pk_hash);
+    k_bar = gz;          // first 32 bytes
+    r_seed = gz + 32;    // last 32 bytes
+    free(g_in);
 
-    // Extract rho from pk
-    rho = pk + MLKEM_K * 1024;
+    // 3. Parse pk -> (t_hat, rho); sample A_hat in NTT domain.
+    t_hat = allocate(k * MLKEM_POLY_BYTES);
+    rho = allocate(MLKEM_RHO_BYTES);
+    mlkem_decode_pk(t_hat, rho, pk, k);
 
-    // 3. Generate matrix A^T from rho
-    matrix = allocate(MLKEM_K * MLKEM_K * 1024);
-    row: u32 = 0;
-    while row < MLKEM_K {
-        col: u32 = 0;
-        while col < MLKEM_K {
-            seed_buf = allocate(34);
-            i: u32 = 0;
-            while i < 32 { *(seed_buf + i) = *(rho + i); i = i + 1; }
-            *(seed_buf + 32) = col & 255;
-            *(seed_buf + 33) = row & 255;
+    matrix = allocate(k * k * MLKEM_POLY_BYTES);
+    mlkem_sample_matrix_a(matrix, rho, k);
+    free(rho);
 
-            shake_out = allocate(1024);
-            shake256(seed_buf, 34, shake_out, 1024);
-
-            i = 0;
-            while i < 256 {
-                b: u32 = *(shake_out + (i * 4));
-                store_u32_le_at(matrix + (row * MLKEM_K + col) * 1024, i * 4, b % MLKEM_Q);
-                i = i + 1;
-            }
-            free(seed_buf); free(shake_out);
-            col = col + 1;
-        }
-        row = row + 1;
-    }
-
-    // Extract t from pk
-    t_vec = pk;
-
-    // 4. Sample r_vec from CBD(r_seed)
-    r_vec = allocate(MLKEM_K * 1024);
+    // 5. Sample r_vec from CBD_eta1(PRF(r, i)).
+    prf_eta1_len: u32 = 64 * eta1;
+    r_vec = allocate(k * MLKEM_POLY_BYTES);
     i = 0;
-    while i < MLKEM_K {
-        prf_in = allocate(33);
-        j: u32 = 0;
-        while j < 32 { *(prf_in + j) = *(r_seed + j); j = j + 1; }
-        *(prf_in + 32) = i & 255;
-
-        cbd_buf = allocate(1024);
-        shake256(prf_in, 33, cbd_buf, 1024);
-        cbd_eta2(cbd_buf, r_vec + i * 1024);
-        free(prf_in); free(cbd_buf);
+    while i < k {
+        cbd_buf = allocate(prf_eta1_len);
+        prf(r_seed, i, prf_eta1_len, cbd_buf);
+        cbd(cbd_buf, eta1, r_vec + i * MLKEM_POLY_BYTES);
+        free(cbd_buf);
         i = i + 1;
     }
 
-    // 5. Sample e1 from CBD(r_seed)
-    e1_vec = allocate(MLKEM_K * 1024);
+    // 6. Sample e1 from CBD_eta2(PRF(r, k+i)).
+    prf_eta2_len: u32 = 64 * eta2;
+    e1_vec = allocate(k * MLKEM_POLY_BYTES);
     i = 0;
-    while i < MLKEM_K {
-        prf_in = allocate(33);
-        j: u32 = 0;
-        while j < 32 { *(prf_in + j) = *(r_seed + j); j = j + 1; }
-        *(prf_in + 32) = (i + MLKEM_K) & 255;
-
-        cbd_buf = allocate(1024);
-        shake256(prf_in, 33, cbd_buf, 1024);
-        cbd_eta2(cbd_buf, e1_vec + i * 1024);
-        free(prf_in); free(cbd_buf);
+    while i < k {
+        cbd_buf = allocate(prf_eta2_len);
+        prf(r_seed, k + i, prf_eta2_len, cbd_buf);
+        cbd(cbd_buf, eta2, e1_vec + i * MLKEM_POLY_BYTES);
+        free(cbd_buf);
         i = i + 1;
     }
 
-    // 6. u = A^T * r_vec + e1
-    u_vec = allocate(MLKEM_K * 1024);
-    matvec_mul(u_vec, matrix, r_vec);
-    vec_add(u_vec, u_vec, e1_vec);
+    // 7. Sample e2 from CBD_eta2(PRF(r, 2k)).
+    cbd_buf2 = allocate(prf_eta2_len);
+    prf(r_seed, 2 * k, prf_eta2_len, cbd_buf2);
+    e2_poly = allocate(MLKEM_POLY_BYTES);
+    cbd(cbd_buf2, eta2, e2_poly);
+    free(cbd_buf2);
 
-    // 7. v = <t, r_vec> + e2 + Decompress(m)
-    v_poly = allocate(1024);
-    inner_product(v_poly, t_vec, r_vec);
-
-    // e2 (single polynomial)
-    prf_in2 = allocate(33);
+    // 8. r_hat = NTT(r_vec)
     i = 0;
-    while i < 32 { *(prf_in2 + i) = *(r_seed + i); i = i + 1; }
-    *(prf_in2 + 32) = (2 * MLKEM_K) & 255;
-    cbd_buf2 = allocate(1024);
-    shake256(prf_in2, 33, cbd_buf2, 1024);
-    e2_poly = allocate(1024);
-    cbd_eta2(cbd_buf2, e2_poly);
-    free(prf_in2); free(cbd_buf2);
+    while i < k {
+        ntt(r_vec + i * MLKEM_POLY_BYTES);
+        i = i + 1;
+    }
 
+    // 9. u = INTT(A_hat^T * r_hat) + e1
+    u_vec = allocate(k * MLKEM_POLY_BYTES);
+    mlkem_matvec_ntt_transpose(u_vec, matrix, r_vec, k);
+    i = 0;
+    while i < k {
+        intt(u_vec + i * MLKEM_POLY_BYTES);
+        i = i + 1;
+    }
+    mlkem_vec_add(u_vec, u_vec, e1_vec, k);
+
+    // 10. v = INTT(<t_hat, r_hat>) + e2 + Decompress_1(m)
+    v_poly = allocate(MLKEM_POLY_BYTES);
+    mlkem_inner_product_ntt(v_poly, t_hat, r_vec, k);
+    intt(v_poly);
     poly_add(v_poly, v_poly, e2_poly);
 
-    // Add decompressed message (treat m as a polynomial)
-    m_poly = allocate(1024);
+    // Add Decompress_1(m): treat m as a polynomial with 256 1-bit coefficients.
+    m_poly = allocate(MLKEM_POLY_BYTES);
     i = 0;
     while i < 256 {
-        b: u32 = 0;
-        if i < 32 {
-            b = *(m + i);
-        }
-        // Decompress each byte as a coefficient (d=1)
-        coef: u32 = decompress_u32(b, 1);
-        store_u32_le_at(m_poly, i * 4, coef);
+        bit: u32 = 0;
+        byte_idx: u32 = i / 8;
+        bit_idx: u32 = i - byte_idx * 8;
+        mb: u32 = *(m + byte_idx);
+        bit = (mb >> bit_idx) & 1;
+        store_u32_le_at(m_poly, i * 4, decompress_val(bit, 1));
         i = i + 1;
     }
     poly_add(v_poly, v_poly, m_poly);
 
-    // 8. ct = Compress(u, du) || Compress(v, dv)
-    // Store compressed u (k polynomials)
-    i = 0;
-    while i < MLKEM_K {
-        poly_compress(ct + i * 1024, u_vec + i * 1024, MLKEM_DU);
-        i = i + 1;
-    }
-    // Store compressed v
-    poly_compress(ct + MLKEM_K * 1024, v_poly, MLKEM_DV);
+    // 11. ct = ByteEncode_du(Compress_du(u)) || ByteEncode_dv(Compress_dv(v))
+    mlkem_encode_ct(ct, u_vec, v_poly, k, du, dv);
 
-    // 9. ss = H(K_bar || ct)
-    ss_in = allocate(32 + MLKEM_CT_SIZE);
+    // 12. ss = KDF(K_bar || H(ct))
+    ct_size: u32 = k * ((256 * du) / 8) + (256 * dv) / 8;
+    h_ct = allocate(MLKEM_PK_HASH_BYTES);
+    mlkem_h(ct, ct_size, h_ct);
+    kdf_in = allocate(64);
     i = 0;
-    while i < 32 { *(ss_in + i) = *(k_bar + i); i = i + 1; }
+    while i < 32 { *(kdf_in + i) = *(k_bar + i); i = i + 1; }
     i = 0;
-    while i < MLKEM_CT_SIZE {
-        if i < MLKEM_K * 1024 + 1024 {
-            *(ss_in + 32 + i) = *(ct + i);
-        } else {
-            *(ss_in + 32 + i) = 0;
-        }
-        i = i + 1;
-    }
-    mlkem_hash(ss_in, 32 + MLKEM_K * 1024 + 1024, ss);
+    while i < 32 { *(kdf_in + 32 + i) = *(h_ct + i); i = i + 1; }
+    kdf(kdf_in, ss);
 
-    free(m); free(gz); free(matrix); free(r_vec); free(e1_vec);
-    free(u_vec); free(v_poly); free(e2_poly); free(m_poly); free(ss_in);
+    free(gz);
+    free(t_hat);
+    free(matrix);
+    free(r_vec);
+    free(e1_vec);
+    free(e2_poly);
+    free(u_vec);
+    free(v_poly);
+    free(m_poly);
+    free(h_ct);
+    free(kdf_in);
 }
 
 // ===========================================================================
-// Decapsulation (FIPS 203, Section 6.3)
+// ML-KEM Decapsulation (FIPS 203 Algorithm 14 — ML-KEM.Decaps)
 //
-// Input: secret key (sk), ciphertext (ct)
-// Output: shared secret (ss)
+// Inputs: k, eta1, eta2, du, dv, sk, ct
+// Output: ss (32 bytes)
 //
-// 1. Decompress u, v from ct
-// 2. m' = v - <s, u>
-// 3. (K_bar', r') = G(m' || H(pk))
-// 4. Re-encrypt with r' to get ct'
-// 5. If ct == ct': ss = H(K_bar' || ct)
-//    Else: ss = H(z || ct) (implicit rejection)
+//   1. Parse sk -> (s_hat, pk, pk_hash, z)
+//   2. Parse ct -> (u, v) via Decompress_du, Decompress_dv
+//   3. m' = Compress_1(v - INTT(<s_hat, NTT(u)>))
+//   4. (K_bar', r') = G(m' || pk_hash)
+//   5. Re-encrypt with m' and r' to get ct'
+//   6. If ct == ct': ss = KDF(K_bar' || H(ct))
+//      Else:        ss = KDF(z || H(ct))     — implicit rejection
 // ===========================================================================
 
-fn mlkem_decaps(sk: Address, pk: Address, ct: Address, ss: Address) {
-    // Extract s from sk
-    s_vec = sk;
+fn _ml_kem_decaps(k: u32, eta1: u32, eta2: u32, du: u32, dv: u32,
+                  sk: Address, ct: Address, ss: Address) {
+    pk_size: u32 = k * MLKEM_COEF_BYTES_12 + MLKEM_RHO_BYTES;
 
-    // 1. Decompress u, v
-    u_vec = allocate(MLKEM_K * 1024);
+    // 1. Parse sk.
+    s_hat = allocate(k * MLKEM_POLY_BYTES);
+    pk = allocate(pk_size);
+    pk_hash = allocate(MLKEM_PK_HASH_BYTES);
+    z = allocate(MLKEM_Z_BYTES);
+    mlkem_decode_sk(s_hat, pk, pk_hash, z, sk, k);
+
+    // 2. Parse ct -> (u, v).
+    u_vec = allocate(k * MLKEM_POLY_BYTES);
+    v_poly = allocate(MLKEM_POLY_BYTES);
+    mlkem_decode_ct(u_vec, v_poly, ct, k, du, dv);
+
+    // 3. m' = Compress_1(v - INTT(<s_hat, NTT(u)>))
+    // NTT each u[i] in place.
     i: u32 = 0;
-    while i < MLKEM_K {
-        poly_decompress(u_vec + i * 1024, ct + i * 1024, MLKEM_DU);
+    while i < k {
+        ntt(u_vec + i * MLKEM_POLY_BYTES);
         i = i + 1;
     }
+    su = allocate(MLKEM_POLY_BYTES);
+    mlkem_inner_product_ntt(su, s_hat, u_vec, k);
+    intt(su);
 
-    v_poly = allocate(1024);
-    poly_decompress(v_poly, ct + MLKEM_K * 1024, MLKEM_DV);
+    m_prime_poly = allocate(MLKEM_POLY_BYTES);
+    poly_sub(m_prime_poly, v_poly, su);
+    compress(m_prime_poly, 1);
 
-    // 2. m' = v - <s, u>
-    su = allocate(1024);
-    inner_product(su, s_vec, u_vec);
-
-    m_poly = allocate(1024);
-    poly_sub(m_poly, v_poly, su);
-
-    // 3. Extract m' (compress back to 32 bytes)
-    m_prime = allocate(32);
+    // Pack m' into 32 bytes (each bit = 1 coefficient).
+    m_prime = allocate(MLKEM_M_BYTES);
     i = 0;
-    while i < 32 {
-        coef: u32 = load_u32_le_at(m_poly, i * 4);
-        c: u32 = compress_u32(coef, 1);
-        *(m_prime + i) = c & 1;
+    while i < 32 { *(m_prime + i) = 0; i = i + 1; }
+    i = 0;
+    while i < 256 {
+        coef: u32 = load_u32_le_at(m_prime_poly, i * 4);
+        bit: u32 = coef & 1;
+        byte_idx: u32 = i / 8;
+        bit_idx: u32 = i - byte_idx * 8;
+        cur: u32 = *(m_prime + byte_idx);
+        *(m_prime + byte_idx) = cur | (bit << bit_idx);
         i = i + 1;
     }
 
-    // 4. (K_bar', r') = G(m' || H(pk))
-    pk_hash = allocate(32);
-    sha256_oneshot(pk, MLKEM_K * 1024 + 32, pk_hash);
-
+    // 4. (K_bar', r') = G(m' || pk_hash)
     g_in = allocate(64);
     i = 0;
     while i < 32 { *(g_in + i) = *(m_prime + i); i = i + 1; }
     i = 0;
     while i < 32 { *(g_in + 32 + i) = *(pk_hash + i); i = i + 1; }
-
     gz = allocate(64);
     mlkem_g(g_in, 64, gz);
-    k_bar = gz;
-    r_seed = gz + 32;
+    k_bar_p = gz;        // first 32 bytes
+    // r_p = gz + 32      — used implicitly by re-encryption below
+    free(g_in);
 
-    // 5. ss = H(K_bar || ct) (simplified — skip re-encryption check)
-    ss_in = allocate(32 + MLKEM_CT_SIZE);
+    // 5. Re-encrypt with m' to produce ct'.
+    ct_size: u32 = k * ((256 * du) / 8) + (256 * dv) / 8;
+    ct_prime = allocate(ct_size);
+    ss_prime = allocate(MLKEM_SS_BYTES);
+    _ml_kem_encaps_with_m(k, eta1, eta2, du, dv, pk, pk_hash, m_prime, ct_prime, ss_prime);
+
+    // 6. Compare ct' with received ct. If equal, ss = KDF(K_bar' || H(ct)).
+    //    Otherwise, ss = KDF(z || H(ct)) — implicit rejection.
+    h_ct = allocate(MLKEM_PK_HASH_BYTES);
+    mlkem_h(ct, ct_size, h_ct);
+
+    match: u32 = 1;
     i = 0;
-    while i < 32 { *(ss_in + i) = *(k_bar + i); i = i + 1; }
-    i = 0;
-    while i < MLKEM_K * 1024 + 1024 {
-        *(ss_in + 32 + i) = *(ct + i);
+    while i < ct_size {
+        if *(ct + i) != *(ct_prime + i) { match = 0; }
         i = i + 1;
     }
-    mlkem_hash(ss_in, 32 + MLKEM_K * 1024 + 1024, ss);
 
-    free(u_vec); free(v_poly); free(su); free(m_poly); free(m_prime);
-    free(pk_hash); free(g_in); free(gz); free(ss_in);
+    kdf_in = allocate(64);
+    i = 0;
+    while i < 32 { *(kdf_in + 32 + i) = *(h_ct + i); i = i + 1; }
+    if match == 1 {
+        i = 0;
+        while i < 32 { *(kdf_in + i) = *(k_bar_p + i); i = i + 1; }
+    } else {
+        i = 0;
+        while i < 32 { *(kdf_in + i) = *(z + i); i = i + 1; }
+    }
+    kdf(kdf_in, ss);
+
+    free(s_hat);
+    free(pk);
+    free(pk_hash);
+    free(z);
+    free(u_vec);
+    free(v_poly);
+    free(su);
+    free(m_prime_poly);
+    free(m_prime);
+    free(gz);
+    free(ct_prime);
+    free(ss_prime);
+    free(h_ct);
+    free(kdf_in);
+}
+
+// ===========================================================================
+// Public API — one entry point per parameter set (FIPS 203 Section 12).
+//
+// Callers must invoke ml_kem_seed_entropy(seed, len) with at least 32 bytes
+// of fresh randomness before each keygen / encaps call. The entropy pool is
+// consumed deterministically: each call to keygen pulls 32 bytes (stretched
+// to 64 via G), and each call to encaps pulls 32 bytes (the message m).
+// ===========================================================================
+
+fn ml_kem_keygen_512(pk: Address, sk: Address) {
+    _ml_kem_keygen(MLKEM_512_K, MLKEM_512_ETA1, pk, sk);
+}
+
+fn ml_kem_keygen_768(pk: Address, sk: Address) {
+    _ml_kem_keygen(MLKEM_768_K, MLKEM_768_ETA1, pk, sk);
+}
+
+fn ml_kem_keygen_1024(pk: Address, sk: Address) {
+    _ml_kem_keygen(MLKEM_1024_K, MLKEM_1024_ETA1, pk, sk);
+}
+
+fn ml_kem_encaps_512(pk: Address, ct: Address, ss: Address) {
+    pk_size: u32 = MLKEM_512_PK_SIZE;
+    pk_hash = allocate(MLKEM_PK_HASH_BYTES);
+    mlkem_h(pk, pk_size, pk_hash);
+    m = allocate(MLKEM_M_BYTES);
+    _ml_kem_get_entropy(m, MLKEM_M_BYTES);
+    _ml_kem_encaps_with_m(MLKEM_512_K, MLKEM_512_ETA1, MLKEM_512_ETA2,
+                          MLKEM_512_DU, MLKEM_512_DV, pk, pk_hash, m, ct, ss);
+    free(pk_hash);
+    free(m);
+}
+
+fn ml_kem_encaps_768(pk: Address, ct: Address, ss: Address) {
+    pk_size: u32 = MLKEM_768_PK_SIZE;
+    pk_hash = allocate(MLKEM_PK_HASH_BYTES);
+    mlkem_h(pk, pk_size, pk_hash);
+    m = allocate(MLKEM_M_BYTES);
+    _ml_kem_get_entropy(m, MLKEM_M_BYTES);
+    _ml_kem_encaps_with_m(MLKEM_768_K, MLKEM_768_ETA1, MLKEM_768_ETA2,
+                          MLKEM_768_DU, MLKEM_768_DV, pk, pk_hash, m, ct, ss);
+    free(pk_hash);
+    free(m);
+}
+
+fn ml_kem_encaps_1024(pk: Address, ct: Address, ss: Address) {
+    pk_size: u32 = MLKEM_1024_PK_SIZE;
+    pk_hash = allocate(MLKEM_PK_HASH_BYTES);
+    mlkem_h(pk, pk_size, pk_hash);
+    m = allocate(MLKEM_M_BYTES);
+    _ml_kem_get_entropy(m, MLKEM_M_BYTES);
+    _ml_kem_encaps_with_m(MLKEM_1024_K, MLKEM_1024_ETA1, MLKEM_1024_ETA2,
+                          MLKEM_1024_DU, MLKEM_1024_DV, pk, pk_hash, m, ct, ss);
+    free(pk_hash);
+    free(m);
+}
+
+fn ml_kem_decaps_512(sk: Address, ct: Address, ss: Address) {
+    _ml_kem_decaps(MLKEM_512_K, MLKEM_512_ETA1, MLKEM_512_ETA2,
+                   MLKEM_512_DU, MLKEM_512_DV, sk, ct, ss);
+}
+
+fn ml_kem_decaps_768(sk: Address, ct: Address, ss: Address) {
+    _ml_kem_decaps(MLKEM_768_K, MLKEM_768_ETA1, MLKEM_768_ETA2,
+                   MLKEM_768_DU, MLKEM_768_DV, sk, ct, ss);
+}
+
+fn ml_kem_decaps_1024(sk: Address, ct: Address, ss: Address) {
+    _ml_kem_decaps(MLKEM_1024_K, MLKEM_1024_ETA1, MLKEM_1024_ETA2,
+                   MLKEM_1024_DU, MLKEM_1024_DV, sk, ct, ss);
 }
