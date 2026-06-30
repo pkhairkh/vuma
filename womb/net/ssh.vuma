@@ -262,19 +262,19 @@ fn ssh_parse_version_string(data: Address, len: u32, version_out: Address) -> u3
 
     // Scan for a line starting with "SSH-" preceded by start-of-data or LF.
     while pos < len && scan_done == 0 {
-        match: u32 = 0;
+        match_flag: u32 = 0;
         if pos + 4 <= len {
             if *(data + pos) == (CHAR_S & 255) {
                 if *(data + pos + 1) == (CHAR_S & 255) {
                     if *(data + pos + 2) == (CHAR_H & 255) {
                         if *(data + pos + 3) == (CHAR_DASH & 255) {
-                            match = 1;
+                            match_flag = 1;
                         }
                     }
                 }
             }
         }
-        if match == 1 {
+        if match_flag == 1 {
             at_line_start: u32 = 0;
             if pos == 0 { at_line_start = 1; }
             else {

@@ -71,13 +71,13 @@ fn ed448_fe_is_zero(a: Address) -> u32 {
 
 fn ed448_fe_cmp(a: Address, b: Address) -> i32 {
     i: u32 = 6;
-    while 1 == 1 {
+done: u32 = 0;
+        while done == 0 {
         av: u64 = ed448_load_u64(a, i * 8);
         bv: u64 = ed448_load_u64(b, i * 8);
         if av > bv { return 1; }
         if av < bv { return -1; }
-        if i == 0 { break; }
-        i = i - 1;
+        if i == 0 { done = 1; } else { i = i - 1; }
     }
     return 0;
 }
@@ -176,7 +176,8 @@ fn ed448_fe_get_bit(a: Address, bit: u32) -> u32 {
 
 fn ed448_fe_bitlen(a: Address) -> u32 {
     i: u32 = 6;
-    while 1 == 1 {
+done: u32 = 0;
+        while done == 0 {
         v: u64 = ed448_load_u64(a, i * 8);
         if v != 0 {
             bits: u32 = 64;
@@ -186,8 +187,7 @@ fn ed448_fe_bitlen(a: Address) -> u32 {
             }
             return i * 64 + 1;
         }
-        if i == 0 { break; }
-        i = i - 1;
+        if i == 0 { done = 1; } else { i = i - 1; }
     }
     return 0;
 }
@@ -426,7 +426,7 @@ fn ed448_mod_l(r: Address, hash_114: Address) {
         }
         // rem.bit0 = bit
         v0: u64 = ed448_load_u64(rem, 0);
-        ed448_store_u64(rem, 0, (v0 & 18446744073709551614) | bit);
+        ed448_store_u64(rem, 0, (v0 & ((1 << 63) | ((1 << 63) - 2))) | bit);
 
         // If rem >= L, subtract L
         if ed448_fe_cmp(rem, L_buf) >= 0 {
@@ -654,7 +654,7 @@ fn ed448_mod_l_from_56(r: Address, val_56: Address) {
             i = i + 1;
         }
         v0: u64 = ed448_load_u64(rem, 0);
-        ed448_store_u64(rem, 0, (v0 & 18446744073709551614) | bit);
+        ed448_store_u64(rem, 0, (v0 & ((1 << 63) | ((1 << 63) - 2))) | bit);
         if ed448_fe_cmp(rem, L_buf) >= 0 {
             ed448_fe_sub_raw(rem, rem, L_buf);
         }
@@ -823,13 +823,13 @@ fn p521_fe_cmp(a: Address, b: Address) -> i32 {
     if *(a + 64) > *(b + 64) { return 1; }
     if *(a + 64) < *(b + 64) { return -1; }
     i: u32 = 7;
-    while 1 == 1 {
+done: u32 = 0;
+        while done == 0 {
         av: u64 = p521_load_u64(a, i * 8);
         bv: u64 = p521_load_u64(b, i * 8);
         if av > bv { return 1; }
         if av < bv { return -1; }
-        if i == 0 { break; }
-        i = i - 1;
+        if i == 0 { done = 1; } else { i = i - 1; }
     }
     return 0;
 }
@@ -885,7 +885,7 @@ fn p521_fe_add(r: Address, a: Address, b: Address) {
                 v: u64 = p521_load_u64(r, i * 8);
                 new_v: u64 = v + 1;
                 p521_store_u64(r, i * 8, new_v);
-                if new_v > v { break; }
+                if new_v > v { inner_done = 1; }
                 i = i + 1;
             }
         }
@@ -927,7 +927,7 @@ fn p521_fe_sub(r: Address, a: Address, b: Address) {
                 v: u64 = p521_load_u64(r, i * 8);
                 new_v: u64 = v - 1;
                 p521_store_u64(r, i * 8, new_v);
-                if new_v < v { break; }
+                if new_v < v { inner_done = 1; }
                 i = i + 1;
             }
         }
@@ -944,7 +944,8 @@ fn p521_fe_get_bit(a: Address, bit: u32) -> u32 {
 fn p521_fe_bitlen(a: Address) -> u32 {
     // Check bytes from high to low
     i: u32 = 65;
-    while 1 == 1 {
+done: u32 = 0;
+        while done == 0 {
         v: u32 = *(a + i);
         if v != 0 {
             bits: u32 = 8;
@@ -954,8 +955,7 @@ fn p521_fe_bitlen(a: Address) -> u32 {
             }
             return i * 8 + 1;
         }
-        if i == 0 { break; }
-        i = i - 1;
+        if i == 0 { done = 1; } else { i = i - 1; }
     }
     return 0;
 }
