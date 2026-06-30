@@ -1,41 +1,60 @@
 // womb/crypto/sha1.vuma — SHA-1 (NIST FIPS 180-4)
-// 80-round, 512-bit blocks, 160-bit output. All u32 arithmetic.
+// 80-round Merkle-Damgard hash, 512-bit blocks, 160-bit (20-byte) output.
+// Streaming API: sha1_init / sha1_update / sha1_final / sha1_oneshot.
+// All arithmetic is u32 with explicit & MASK32 after every add.
 
 const MASK32: u32 = 4294967295;
 
+// FIPS 180-4 Section 5.3.1: SHA-1 initial hash values
 const H0I: u32 = 1732584193;   // 0x67452301
 const H1I: u32 = 4023233417;   // 0xEFCDAB89
 const H2I: u32 = 2562383102;   // 0x98BADCFE
 const H3I: u32 = 271733878;    // 0x10325476
 const H4I: u32 = 3285377520;   // 0xC3D2E1F0
 
+// Round constants per FIPS 180-4 Section 4.1.1
+const KC0: u32 = 1518500249;   // 0x5A827999 (rounds  0..19)
+const KC1: u32 = 1859775393;   // 0x6ED9EBA1 (rounds 20..39)
+const KC2: u32 = 2400959708;   // 0x8F1BBCDC (rounds 40..59)
+const KC3: u32 = 3395469782;   // 0xCA62C1D6 (rounds 60..79)
+
+// Rotate-left guarded against n==0 (32-n would shift by full word)
 fn rotl32(x: u32, n: u32) -> u32 {
+    if n == 0 { return x; }
     return ((x << n) | (x >> (32 - n))) & MASK32;
 }
 
 fn load_u32_be(ptr: Address, off: u32) -> u32 {
     b0: u32 = *(ptr + off); b1: u32 = *(ptr + off + 1);
     b2: u32 = *(ptr + off + 2); b3: u32 = *(ptr + off + 3);
-    return (b0 << 24) | (b1 << 16) | (b2 << 8) | b3;
+    return ((b0 << 24) | (b1 << 16) | (b2 << 8) | b3) & MASK32;
 }
 
 fn store_u32_be(ptr: Address, off: u32, val: u32) {
-    *(ptr + off) = (val >> 24) & 255;
+    *(ptr + off)     = (val >> 24) & 255;
     *(ptr + off + 1) = (val >> 16) & 255;
     *(ptr + off + 2) = (val >> 8) & 255;
     *(ptr + off + 3) = val & 255;
 }
 
+// Context layout (96 bytes):
+//   [ 0.. 19] H[0..4]   5 x u32 big-endian state words
+//   [20.. 23] bit_lo    low 32 bits of total message length in bits
+//   [24.. 27] bit_hi    high 32 bits of total message length in bits
+//   [28.. 31] buf_len   bytes currently in the message buffer
+//   [32.. 95] buf[64]   partial block accumulator
 fn sha1_init(ctx: Address) {
-    store_u32_be(ctx, 0, H0I);
-    store_u32_be(ctx, 4, H1I);
-    store_u32_be(ctx, 8, H2I);
+    store_u32_be(ctx, 0,  H0I);
+    store_u32_be(ctx, 4,  H1I);
+    store_u32_be(ctx, 8,  H2I);
     store_u32_be(ctx, 12, H3I);
     store_u32_be(ctx, 16, H4I);
-    store_u32_be(ctx, 20, 0);  // bit count
-    store_u32_be(ctx, 24, 0);  // buf_len
+    store_u32_be(ctx, 20, 0);
+    store_u32_be(ctx, 24, 0);
+    store_u32_be(ctx, 28, 0);
 }
 
+// Core compression: 80 rounds over a single 512-bit block.
 fn sha1_compress(ctx: Address, block: Address) {
     a: u32 = load_u32_be(ctx, 0);
     b: u32 = load_u32_be(ctx, 4);
@@ -43,16 +62,21 @@ fn sha1_compress(ctx: Address, block: Address) {
     d: u32 = load_u32_be(ctx, 12);
     e: u32 = load_u32_be(ctx, 16);
 
-    wbuf = allocate(256);  // 80 × 4 bytes
+    // 80-word message schedule, laid out as 80 x 4 bytes = 320 bytes
+    wbuf = allocate(320);
 
     i: u32 = 0;
     while i < 16 {
         store_u32_be(wbuf, i * 4, load_u32_be(block, i * 4));
         i = i + 1;
     }
+    // Rounds 16..79: w[i] = rotl(w[i-3] ^ w[i-8] ^ w[i-14] ^ w[i-16], 1)
     i = 16;
     while i < 80 {
-        w: u32 = load_u32_be(wbuf, (i - 3) * 4) ^ load_u32_be(wbuf, (i - 8) * 4) ^ load_u32_be(wbuf, (i - 14) * 4) ^ load_u32_be(wbuf, (i - 16) * 4);
+        w: u32 = load_u32_be(wbuf, (i - 3) * 4)
+               ^ load_u32_be(wbuf, (i - 8) * 4)
+               ^ load_u32_be(wbuf, (i - 14) * 4)
+               ^ load_u32_be(wbuf, (i - 16) * 4);
         w = rotl32(w, 1);
         store_u32_be(wbuf, i * 4, w);
         i = i + 1;
@@ -63,24 +87,27 @@ fn sha1_compress(ctx: Address, block: Address) {
         f: u32 = 0;
         k: u32 = 0;
         if i < 20 {
-            f = (b & c) | ((b ^ MASK32) & d);
-            k = 1518500249;  // 0x5A827999
+            // Ch(b,c,d) = (b AND c) XOR ((NOT b) AND d)
+            f = (b & c) ^ ((b ^ MASK32) & d);
+            k = KC0;
         }
         if i >= 20 {
             if i < 40 {
+                // Parity(b,c,d) = b XOR c XOR d
                 f = b ^ c ^ d;
-                k = 1859775393;  // 0x6ED9EBA1
+                k = KC1;
             }
         }
         if i >= 40 {
             if i < 60 {
-                f = (b & c) | (b & d) | (c & d);
-                k = 2400959708;  // 0x8F1BBCDC
+                // Maj(b,c,d) = (b AND c) XOR (b AND d) XOR (c AND d)
+                f = (b & c) ^ (b & d) ^ (c & d);
+                k = KC2;
             }
         }
         if i >= 60 {
             f = b ^ c ^ d;
-            k = 3395469782;  // 0xCA62C1D6
+            k = KC3;
         }
 
         wi: u32 = load_u32_be(wbuf, i * 4);
@@ -93,44 +120,76 @@ fn sha1_compress(ctx: Address, block: Address) {
         i = i + 1;
     }
 
-    store_u32_be(ctx, 0, (load_u32_be(ctx, 0) + a) & MASK32);
-    store_u32_be(ctx, 4, (load_u32_be(ctx, 4) + b) & MASK32);
-    store_u32_be(ctx, 8, (load_u32_be(ctx, 8) + c) & MASK32);
+    // Add the compressed chunk back into the running state
+    store_u32_be(ctx, 0,  (load_u32_be(ctx, 0)  + a) & MASK32);
+    store_u32_be(ctx, 4,  (load_u32_be(ctx, 4)  + b) & MASK32);
+    store_u32_be(ctx, 8,  (load_u32_be(ctx, 8)  + c) & MASK32);
     store_u32_be(ctx, 12, (load_u32_be(ctx, 12) + d) & MASK32);
     store_u32_be(ctx, 16, (load_u32_be(ctx, 16) + e) & MASK32);
     free(wbuf);
 }
 
+// Increment the 64-bit bit counter by `bits` (1 <= bits <= 512), carrying
+// into the high word when the low word wraps.
+fn sha1_add_bits(ctx: Address, bits: u32) {
+    lo: u32 = load_u32_be(ctx, 20);
+    hi: u32 = load_u32_be(ctx, 24);
+    new_lo: u32 = (lo + bits) & MASK32;
+    if new_lo < lo { hi = (hi + 1) & MASK32; }
+    store_u32_be(ctx, 20, new_lo);
+    store_u32_be(ctx, 24, hi);
+}
+
 fn sha1_update(ctx: Address, data: Address, len: u32) {
-    buf_len: u32 = load_u32_be(ctx, 24);
+    buf_len: u32 = load_u32_be(ctx, 28);
     i: u32 = 0;
     while i < len {
-        *(ctx + 28 + buf_len) = *(data + i);
+        *(ctx + 32 + buf_len) = *(data + i);
         buf_len = buf_len + 1;
         i = i + 1;
         if buf_len == 64 {
-            sha1_compress(ctx, ctx + 28);
-            lo: u32 = load_u32_be(ctx, 20);
-            store_u32_be(ctx, 20, (lo + 512) & MASK32);
+            sha1_compress(ctx, ctx + 32);
+            sha1_add_bits(ctx, 512);
             buf_len = 0;
         }
     }
-    store_u32_be(ctx, 24, buf_len);
+    store_u32_be(ctx, 28, buf_len);
 }
 
+// Pad the buffered message per FIPS 180-4 Section 5.1.1, run the final
+// compression, and write the 20-byte digest to `out`.
 fn sha1_final(ctx: Address, out: Address) {
-    buf_len: u32 = load_u32_be(ctx, 24);
-    bit_lo: u32 = load_u32_be(ctx, 20);
-    total_bits: u32 = (bit_lo + (buf_len * 8)) & MASK32;
-    *(ctx + 28 + buf_len) = 128;
+    buf_len: u32 = load_u32_be(ctx, 28);
+
+    // Account for the unprocessed buffered bytes in the bit counter
+    sha1_add_bits(ctx, buf_len * 8);
+
+    // Append the 0x80 bit after the message
+    *(ctx + 32 + buf_len) = 128;
     buf_len = buf_len + 1;
-    while buf_len != 56 {
-        *(ctx + 28 + buf_len) = 0;
+
+    // If not enough room for the 8-byte length suffix, pad this block with
+    // zeros, compress, and start a fresh block.
+    if buf_len > 56 {
+        while buf_len < 64 {
+            *(ctx + 32 + buf_len) = 0;
+            buf_len = buf_len + 1;
+        }
+        sha1_compress(ctx, ctx + 32);
+        buf_len = 0;
+    }
+    // Pad with zeros up to the length field at offset 56
+    while buf_len < 56 {
+        *(ctx + 32 + buf_len) = 0;
         buf_len = buf_len + 1;
     }
-    store_u32_be(ctx, 28 + 56, 0);
-    store_u32_be(ctx, 28 + 60, total_bits);
-    sha1_compress(ctx, ctx + 28);
+    // Append 64-bit big-endian bit length (high word first, then low)
+    store_u32_be(ctx, 32 + 56, load_u32_be(ctx, 24));
+    store_u32_be(ctx, 32 + 60, load_u32_be(ctx, 20));
+
+    sha1_compress(ctx, ctx + 32);
+
+    // Emit H[0..4] big-endian
     i: u32 = 0;
     while i < 5 {
         store_u32_be(out, i * 4, load_u32_be(ctx, i * 4));
@@ -139,7 +198,7 @@ fn sha1_final(ctx: Address, out: Address) {
 }
 
 fn sha1_oneshot(data: Address, len: u32, out: Address) {
-    ctx = allocate(92);  // 28 + 64
+    ctx = allocate(96);
     sha1_init(ctx);
     sha1_update(ctx, data, len);
     sha1_final(ctx, out);

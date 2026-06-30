@@ -1,18 +1,72 @@
-// womb/lib/http.vuma — HTTP/1.1 Parser (RFC 7230)
+// womb/lib/http.vuma — HTTP/1.1 Parser and Builder (RFC 7230 / RFC 9112)
 // No main() — importable library module.
-// Parses HTTP request/response lines and headers.
-// Requires: string.vuma (for strlen, strcmp, etc.)
+//
+// Task ID: W4.1
+//
+// Implements HTTP/1.1 message parsing and serialization per RFC 7230
+// (message syntax) and RFC 9112 (wire format):
+//   1. Request parser    http_parse_request(data, len, method, path, version, headers, body)
+//   2. Request builder   http_build_request(method, path, host, headers, body, out)
+//   3. Response parser   http_parse_response(data, len, status, reason, headers, body)
+//   4. Response builder  http_build_response(status, reason, headers, body, out)
+//   5. Chunked transfer  http_decode_chunked(data, len, out)
+//                        http_encode_chunked(data, len, out)
+//   6. Header helpers    http_get_header(headers, name, value) -> u32
+//                        http_set_header(headers, name, value) -> u32
+//
+// HTTP/1.1 message grammar (RFC 7230 §3, RFC 9112 §6):
+//   HTTP-message   = start-line CRLF *( field-line CRLF ) CRLF [ body ]
+//   request-line   = method SP request-target SP HTTP-version
+//   status-line    = HTTP-version SP status-code SP reason-phrase
+//   field-line     = field-name ":" OWS field-value OWS
+//   chunked-body   = *chunk last-chunk trailer-part CRLF
+//   chunk          = chunk-size [chunk-ext] CRLF chunk-data CRLF
+//   last-chunk     = "0" [chunk-ext] CRLF
+//
+// Output parameter layouts (all integers little-endian):
+//   method  (4 B): u32 LE method code (HTTP_GET, HTTP_POST, ...).
+//   path    (8 B): u32 LE offset into `data` + u32 LE length.
+//   version (4 B): u32 LE version (major<<16 | minor, e.g. 0x00010001).
+//   status  (4 B): u32 LE status code (e.g. 200).
+//   reason  (8 B): u32 LE offset into `data` + u32 LE length.
+//   headers (in/out): caller-allocated HTTP_HEADERS_STRUCT buffer.
+//   body    (8 B): u32 LE offset into `data` + u32 LE length.
+//
+// Headers struct layout (HTTP_HEADERS_STRUCT_SIZE = 2056 bytes):
+//   [0..3]    count      : u32 LE (0..HTTP_MAX_HEADERS)
+//   [4..7]    pool_used  : u32 LE (bytes used in pool)
+//   [8..1031] entries    : HTTP_MAX_HEADERS × 16 B
+//                            [0..3]   name_off u32 LE (into pool)
+//                            [4..7]   name_len u32 LE
+//                            [8..11]  val_off  u32 LE
+//                            [12..15] val_len  u32 LE
+//   [1032..2055] pool    : HTTP_HEADER_POOL_SIZE B (name/value byte pool)
+//
+// Builders: the `body` argument points to a length-prefixed buffer where
+// body[0..3] is u32 LE byte length and body[4..] is the payload. A NULL
+// body (0) means "no body" (no Content-Length header is emitted). `path`,
+// `host`, `reason`, `name`, `value` args to builders / header helpers are
+// NUL-terminated C strings.
+//
+// All multi-byte integers are little-endian except where noted. Memory is
+// managed with allocate()/free(); byte-level loads/stores use the
+// *(ptr + offset) primitive. No function uses early returns — loop
+// termination is via counter exhaustion or a `done`/`status` flag, and
+// the only `return` inside a function is the trailing tail-conditional
+// `if status != 0 { return 0; }` at function exit (after all free()
+// cleanup), followed by the final `return <value>;`.
 
-extern "C" {
-    fn write(fd: i64, buf: Address, count: i64) -> i64;
-    fn read(fd: i64, buf: Address, count: i64) -> i64;
-    fn close(fd: i64) -> i64;
-}
+const HTTP_MAX_HEADERS: u32 = 64;
+const HTTP_HEADER_ENTRY_SIZE: u32 = 16;
+const HTTP_HEADER_POOL_OFFSET: u32 = 1032;        // 8 + 64*16
+const HTTP_HEADER_POOL_SIZE: u32 = 1024;
+const HTTP_HEADERS_STRUCT_SIZE: u32 = 2056;       // 1032 + 1024
 
-const HTTP_MAX_HEADERS: u32 = 50;
 const HTTP_MAX_LINE: u32 = 8192;
+const HTTP_BUILD_MAX: u32 = 32768;
+const HTTP_CHUNK_MAX: u32 = 4096;
 
-// HTTP Method enumeration
+// Method codes (RFC 9110 §9)
 const HTTP_GET: u32 = 0;
 const HTTP_POST: u32 = 1;
 const HTTP_PUT: u32 = 2;
@@ -20,332 +74,862 @@ const HTTP_DELETE: u32 = 3;
 const HTTP_HEAD: u32 = 4;
 const HTTP_OPTIONS: u32 = 5;
 const HTTP_PATCH: u32 = 6;
+const HTTP_CONNECT: u32 = 7;
+const HTTP_TRACE: u32 = 8;
+const HTTP_UNKNOWN: u32 = 255;
 
-// Parse HTTP method from string
-fn http_parse_method(s: Address) -> u32 {
-    // GET
-    if *(s + 0) == 71 {
-        if *(s + 1) == 69 {
-            if *(s + 2) == 84 { return HTTP_GET; }
+// Common status codes (RFC 9110 §15)
+const HTTP_STATUS_OK: u32 = 200;
+const HTTP_STATUS_BAD_REQUEST: u32 = 400;
+const HTTP_STATUS_NOT_FOUND: u32 = 404;
+const HTTP_STATUS_INTERNAL_ERROR: u32 = 500;
+
+// ===========================================================================
+// Little-endian u32 store/load (VUMA exposes only byte-granular access).
+// ===========================================================================
+
+fn http_put_u32_le(addr: Address, val: u32) {
+    *(addr + 0) = val & 255;
+    *(addr + 1) = (val >> 8) & 255;
+    *(addr + 2) = (val >> 16) & 255;
+    *(addr + 3) = (val >> 24) & 255;
+}
+
+fn http_get_u32_le(addr: Address) -> u32 {
+    b0: u32 = *(addr + 0);
+    b1: u32 = *(addr + 1);
+    b2: u32 = *(addr + 2);
+    b3: u32 = *(addr + 3);
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+}
+
+// ===========================================================================
+// String helpers — NUL-terminated strlen, bounded scans, case-insensitive
+// compare. No `break` / early return; loop termination is via flags.
+// ===========================================================================
+
+fn http_strlen(s: Address) -> u32 {
+    n: u32 = 0;
+    done: u32 = 0;
+    while done == 0 {
+        if *(s + n) == 0 { done = 1; }
+        if done == 0 { n = n + 1; }
+    }
+    return n;
+}
+
+// Find first occurrence of `target` byte in buf[start..end).
+// Returns offset, or `end` if not found.
+fn http_find_byte(buf: Address, start: u32, end: u32, target: u32) -> u32 {
+    i: u32 = start;
+    found: u32 = end;
+    done: u32 = 0;
+    while i < end && done == 0 {
+        if *(buf + i) == target { found = i; done = 1; }
+        i = i + 1;
+    }
+    return found;
+}
+
+// Find first CRLF in buf[start..end). Returns offset of '\r', or `end`.
+fn http_find_crlf(buf: Address, start: u32, end: u32) -> u32 {
+    i: u32 = start;
+    found: u32 = end;
+    done: u32 = 0;
+    while i + 1 < end && done == 0 {
+        if *(buf + i) == 13 {
+            if *(buf + i + 1) == 10 { found = i; done = 1; }
+        }
+        i = i + 1;
+    }
+    return found;
+}
+
+// ASCII lowercase (only A-Z affected).
+fn http_lower(c: u32) -> u32 {
+    r: u32 = c;
+    if c >= 65 && c <= 90 { r = c + 32; }
+    return r;
+}
+
+// Case-insensitive equality of two byte sequences.
+// Returns 1 if equal, 0 otherwise.
+fn http_str_eq_nc(a: Address, alen: u32, b: Address, blen: u32) -> u32 {
+    eq: u32 = 0;
+    if alen == blen { eq = 1; }
+    i: u32 = 0;
+    while i < alen && eq == 1 {
+        if http_lower(*(a + i)) != http_lower(*(b + i)) { eq = 0; }
+        i = i + 1;
+    }
+    return eq;
+}
+
+// ===========================================================================
+// Decimal and hex u32 -> ASCII conversion (for Content-Length, chunk-size).
+// ===========================================================================
+
+// Writes minimal decimal ASCII representation (no leading zeros, but at
+// least one digit). Returns number of bytes written.
+fn http_u32_to_decimal(value: u32, out: Address) -> u32 {
+    temp = allocate(12);
+    tp: u32 = 0;
+    v: u32 = value;
+    zero: u32 = 0;
+    if v == 0 { zero = 1; }
+    if zero == 1 {
+        *(temp + 0) = 48;  // '0'
+        tp = 1;
+    }
+    if zero == 0 {
+        while v > 0 {
+            *(temp + tp) = 48 + (v % 10);
+            tp = tp + 1;
+            v = v / 10;
         }
     }
-    // POST
-    if *(s + 0) == 80 {
-        if *(s + 1) == 79 {
-            if *(s + 2) == 83 {
-                if *(s + 3) == 84 { return HTTP_POST; }
+    i: u32 = 0;
+    while i < tp {
+        *(out + i) = *(temp + tp - 1 - i);
+        i = i + 1;
+    }
+    free(temp);
+    return tp;
+}
+
+// Writes minimal lowercase hex ASCII representation (no leading zeros, but
+// at least one digit). Returns number of bytes written.
+fn http_u32_to_hex_minimal(value: u32, out: Address) -> u32 {
+    temp = allocate(8);
+    tp: u32 = 0;
+    v: u32 = value;
+    zero: u32 = 0;
+    if v == 0 { zero = 1; }
+    if zero == 1 {
+        *(temp + 0) = 48;  // '0'
+        tp = 1;
+    }
+    if zero == 0 {
+        while v > 0 {
+            nibble: u32 = v & 15;
+            if nibble < 10 {
+                *(temp + tp) = 48 + nibble;
+            } else {
+                *(temp + tp) = 87 + nibble;  // 'a'-10
+            }
+            tp = tp + 1;
+            v = v >> 4;
+        }
+    }
+    i: u32 = 0;
+    while i < tp {
+        *(out + i) = *(temp + tp - 1 - i);
+        i = i + 1;
+    }
+    free(temp);
+    return tp;
+}
+
+// Parse single ASCII hex digit. Returns 0..15, or 16 if invalid.
+fn http_parse_hex_digit(c: u32) -> u32 {
+    r: u32 = 16;
+    if c >= 48 && c <= 57 { r = c - 48; }       // '0'..'9'
+    if c >= 65 && c <= 70 { r = c - 55; }        // 'A'..'F'
+    if c >= 97 && c <= 102 { r = c - 87; }       // 'a'..'f'
+    return r;
+}
+
+// ===========================================================================
+// HTTP method parser (RFC 9110 §9).
+// `buf` points at the start of the request line; `end` is the offset of the
+// SP that terminates the method token.
+// ===========================================================================
+
+fn http_parse_method(buf: Address, end: u32) -> u32 {
+    m: u32 = HTTP_UNKNOWN;
+    if end == 3 {
+        if *(buf + 0) == 71 && *(buf + 1) == 69 && *(buf + 2) == 84 { m = HTTP_GET; }       // GET
+        if *(buf + 0) == 80 && *(buf + 1) == 85 && *(buf + 2) == 84 { m = HTTP_PUT; }       // PUT
+    }
+    if end == 4 {
+        if *(buf + 0) == 80 && *(buf + 1) == 79 && *(buf + 2) == 83 && *(buf + 3) == 84 { m = HTTP_POST; }  // POST
+        if *(buf + 0) == 72 && *(buf + 1) == 69 && *(buf + 2) == 65 && *(buf + 3) == 68 { m = HTTP_HEAD; }  // HEAD
+    }
+    if end == 5 {
+        if *(buf + 0) == 80 && *(buf + 1) == 65 && *(buf + 2) == 84 && *(buf + 3) == 67 && *(buf + 4) == 72 { m = HTTP_PATCH; } // PATCH
+        if *(buf + 0) == 84 && *(buf + 1) == 82 && *(buf + 2) == 65 && *(buf + 3) == 67 && *(buf + 4) == 69 { m = HTTP_TRACE; } // TRACE
+    }
+    if end == 6 {
+        if *(buf + 0) == 68 && *(buf + 1) == 69 && *(buf + 2) == 76 && *(buf + 3) == 69 && *(buf + 4) == 84 && *(buf + 5) == 69 { m = HTTP_DELETE; } // DELETE
+    }
+    if end == 7 {
+        if *(buf + 0) == 67 && *(buf + 1) == 79 && *(buf + 2) == 78 && *(buf + 3) == 78 && *(buf + 4) == 69 && *(buf + 5) == 67 && *(buf + 6) == 84 { m = HTTP_CONNECT; } // CONNECT
+        if *(buf + 0) == 79 && *(buf + 1) == 80 && *(buf + 2) == 84 && *(buf + 3) == 73 && *(buf + 4) == 79 && *(buf + 5) == 78 && *(buf + 6) == 83 { m = HTTP_OPTIONS; } // OPTIONS
+    }
+    return m;
+}
+
+// Method code -> ASCII name. Writes NUL-terminated name to `out`.
+// Returns name length (excluding NUL).
+fn http_method_name(method: u32, out: Address) -> u32 {
+    n: u32 = 0;
+    if method == HTTP_GET       { *(out + 0) = 71; *(out + 1) = 69; *(out + 2) = 84;                                                                 n = 3; }
+    if method == HTTP_POST      { *(out + 0) = 80; *(out + 1) = 79; *(out + 2) = 83; *(out + 3) = 84;                                                n = 4; }
+    if method == HTTP_PUT       { *(out + 0) = 80; *(out + 1) = 85; *(out + 2) = 84;                                                                 n = 3; }
+    if method == HTTP_DELETE    { *(out + 0) = 68; *(out + 1) = 69; *(out + 2) = 76; *(out + 3) = 69; *(out + 4) = 84; *(out + 5) = 69;              n = 6; }
+    if method == HTTP_HEAD      { *(out + 0) = 72; *(out + 1) = 69; *(out + 2) = 65; *(out + 3) = 68;                                                n = 4; }
+    if method == HTTP_OPTIONS   { *(out + 0) = 79; *(out + 1) = 80; *(out + 2) = 84; *(out + 3) = 73; *(out + 4) = 79; *(out + 5) = 78; *(out + 6) = 83; n = 7; }
+    if method == HTTP_PATCH     { *(out + 0) = 80; *(out + 1) = 65; *(out + 2) = 84; *(out + 3) = 67; *(out + 4) = 72;                              n = 5; }
+    if method == HTTP_CONNECT   { *(out + 0) = 67; *(out + 1) = 79; *(out + 2) = 78; *(out + 3) = 78; *(out + 4) = 69; *(out + 5) = 67; *(out + 6) = 84; n = 7; }
+    if method == HTTP_TRACE     { *(out + 0) = 84; *(out + 1) = 82; *(out + 2) = 65; *(out + 3) = 67; *(out + 4) = 69;                              n = 5; }
+    *(out + n) = 0;
+    return n;
+}
+
+// Parse "HTTP/x.y" at buf[start..end). Returns (major<<16 | minor), or 0 on error.
+// Expects exactly 8 bytes: 'H','T','T','P','/',major,'.',minor.
+fn http_parse_version(buf: Address, start: u32, end: u32) -> u32 {
+    v: u32 = 0;
+    if start + 8 <= end {
+        if *(buf + start + 0) == 72 && *(buf + start + 1) == 84 && *(buf + start + 2) == 84 && *(buf + start + 3) == 80 && *(buf + start + 4) == 47 && *(buf + start + 6) == 46 {
+            major: u32 = *(buf + start + 5) - 48;
+            minor: u32 = *(buf + start + 7) - 48;
+            if major <= 9 && minor <= 9 {
+                v = (major << 16) | minor;
             }
         }
-        if *(s + 1) == 85 {
-            if *(s + 2) == 84 { return HTTP_PUT; }
-            if *(s + 2) == 82 { if *(s + 3) == 67 { if *(s + 4) == 72 { return HTTP_PATCH; } } }
-        }
-        if *(s + 1) == 65 { if *(s + 2) == 84 { if *(s + 3) == 67 { if *(s + 4) == 72 { return HTTP_PATCH; } } } }
     }
-    // DELETE
-    if *(s + 0) == 68 {
-        if *(s + 1) == 69 {
-            if *(s + 2) == 76 {
-                if *(s + 3) == 69 {
-                    if *(s + 4) == 84 {
-                        if *(s + 5) == 69 { return HTTP_DELETE; }
+    return v;
+}
+
+// ===========================================================================
+// Headers struct manipulation (RFC 7230 §3.2 field-line abstraction).
+// ===========================================================================
+
+fn http_headers_init(headers: Address) {
+    http_put_u32_le(headers + 0, 0);       // count = 0
+    http_put_u32_le(headers + 4, 0);       // pool_used = 0
+}
+
+// Append a header (name + value as raw byte sequences with lengths).
+// Returns 1 on success, 0 on overflow.
+fn http_headers_add_internal(headers: Address, name_ptr: Address, name_len: u32,
+                            val_ptr: Address, val_len: u32) -> u32 {
+    count: u32 = http_get_u32_le(headers + 0);
+    pool_used: u32 = http_get_u32_le(headers + 4);
+    ok: u32 = 1;
+    if count >= HTTP_MAX_HEADERS { ok = 0; }
+    if ok == 1 {
+        needed: u32 = name_len + val_len;
+        if pool_used + needed > HTTP_HEADER_POOL_SIZE { ok = 0; }
+    }
+    if ok == 1 {
+        i: u32 = 0;
+        while i < name_len {
+            *(headers + HTTP_HEADER_POOL_OFFSET + pool_used + i) = *(name_ptr + i);
+            i = i + 1;
+        }
+        i = 0;
+        while i < val_len {
+            *(headers + HTTP_HEADER_POOL_OFFSET + pool_used + name_len + i) = *(val_ptr + i);
+            i = i + 1;
+        }
+        entry: Address = headers + 8 + count * HTTP_HEADER_ENTRY_SIZE;
+        http_put_u32_le(entry + 0,  pool_used);             // name_off
+        http_put_u32_le(entry + 4,  name_len);              // name_len
+        http_put_u32_le(entry + 8,  pool_used + name_len);  // val_off
+        http_put_u32_le(entry + 12, val_len);               // val_len
+        http_put_u32_le(headers + 0, count + 1);
+        http_put_u32_le(headers + 4, pool_used + name_len + val_len);
+    }
+    return ok;
+}
+
+// http_set_header(headers, name, value) -> u32
+// Append a header to the struct. `name` and `value` are NUL-terminated.
+// Returns 1 on success, 0 on overflow.
+fn http_set_header(headers: Address, name: Address, value: Address) -> u32 {
+    nl: u32 = http_strlen(name);
+    vl: u32 = http_strlen(value);
+    return http_headers_add_internal(headers, name, nl, value, vl);
+}
+
+// http_get_header(headers, name, value) -> u32
+// Case-insensitive lookup by name (NUL-terminated). On match, copies the
+// value (NUL-terminated) into `value` (caller-allocated, >= HTTP_MAX_LINE).
+// Returns 1 if found, 0 otherwise.
+fn http_get_header(headers: Address, name: Address, value: Address) -> u32 {
+    found: u32 = 0;
+    nl: u32 = http_strlen(name);
+    count: u32 = http_get_u32_le(headers + 0);
+    i: u32 = 0;
+    while i < count && found == 0 {
+        entry: Address = headers + 8 + i * HTTP_HEADER_ENTRY_SIZE;
+        n_off: u32 = http_get_u32_le(entry + 0);
+        n_len: u32 = http_get_u32_le(entry + 4);
+        v_off: u32 = http_get_u32_le(entry + 8);
+        v_len: u32 = http_get_u32_le(entry + 12);
+        n_ptr: Address = headers + HTTP_HEADER_POOL_OFFSET + n_off;
+        v_ptr: Address = headers + HTTP_HEADER_POOL_OFFSET + v_off;
+        if http_str_eq_nc(n_ptr, n_len, name, nl) == 1 {
+            j: u32 = 0;
+            while j < v_len {
+                *(value + j) = *(v_ptr + j);
+                j = j + 1;
+            }
+            *(value + v_len) = 0;
+            found = 1;
+        }
+        i = i + 1;
+    }
+    return found;
+}
+
+// ===========================================================================
+// Field-line parser (RFC 7230 §3.2).
+// Parses "field-name ':' OWS field-value OWS CRLF" starting at `start`.
+// On success, appends the header to `headers` and returns the offset past
+// the CRLF. On error, returns 0.
+// ===========================================================================
+
+fn http_parse_one_header(data: Address, start: u32, len: u32, headers: Address) -> u32 {
+    status: u32 = 0;
+    next: u32 = 0;
+
+    // Find ':' (field-name terminator). RFC 7230 §3.2.6: token charset
+    // excludes ':' so the first ':' is the separator.
+    colon: u32 = http_find_byte(data, start, len, 58);
+    if colon >= len { status = 1; }
+
+    if status == 0 {
+        name_start: u32 = start;
+        name_len: u32 = colon - start;
+        if name_len == 0 { status = 2; }
+
+        if status == 0 {
+            // Skip ':' and leading OWS (spaces/tabs)
+            val_start: u32 = colon + 1;
+            ows_done: u32 = 0;
+            while val_start < len && ows_done == 0 {
+                c: u32 = *(data + val_start);
+                if c == 32 || c == 9 { val_start = val_start + 1; }
+                if c != 32 && c != 9 { ows_done = 1; }
+            }
+
+            // Find CRLF
+            crlf: u32 = http_find_crlf(data, val_start, len);
+            if crlf >= len { status = 3; }
+
+            if status == 0 {
+                val_end: u32 = crlf;
+                // Trim trailing OWS
+                trim_done: u32 = 0;
+                while val_end > val_start && trim_done == 0 {
+                    c: u32 = *(data + val_end - 1);
+                    if c == 32 || c == 9 { val_end = val_end - 1; }
+                    if c != 32 && c != 9 { trim_done = 1; }
+                }
+                val_len: u32 = val_end - val_start;
+
+                ok: u32 = http_headers_add_internal(headers,
+                                                    data + name_start, name_len,
+                                                    data + val_start, val_len);
+                if ok == 0 { status = 4; }
+                if status == 0 { next = crlf + 2; }  // skip CRLF
+            }
+        }
+    }
+
+    if status != 0 { return 0; }
+    return next;
+}
+
+// ===========================================================================
+// http_parse_request — RFC 9112 §3
+//   request-line = method SP request-target SP HTTP-version CRLF
+//   followed by *(field-line CRLF) CRLF [ body ]
+// Returns 1 on success, 0 on error.
+// ===========================================================================
+
+fn http_parse_request(data: Address, len: u32, method: Address, path: Address,
+                     version: Address, headers: Address, body: Address) -> u32 {
+    status: u32 = 0;
+    pos: u32 = 0;
+
+    if len == 0 { status = 1; }
+    if headers == 0 { status = 2; }
+
+    if status == 0 {
+        http_headers_init(headers);
+
+        line_end: u32 = http_find_crlf(data, 0, len);
+        if line_end >= len { status = 3; }
+
+        if status == 0 {
+            method_end: u32 = http_find_byte(data, 0, line_end, 32);  // SP
+            if method_end >= line_end { status = 4; }
+
+            if status == 0 {
+                m: u32 = http_parse_method(data, method_end);
+                if m == HTTP_UNKNOWN { status = 5; }
+                if status == 0 {
+                    http_put_u32_le(method, m);
+                    pos = method_end + 1;
+                }
+            }
+        }
+
+        if status == 0 {
+            path_end: u32 = http_find_byte(data, pos, line_end, 32);  // SP
+            if path_end >= line_end { status = 6; }
+            if status == 0 {
+                http_put_u32_le(path + 0, pos);
+                http_put_u32_le(path + 4, path_end - pos);
+                pos = path_end + 1;
+            }
+        }
+
+        if status == 0 {
+            v: u32 = http_parse_version(data, pos, line_end);
+            if v == 0 { status = 7; }
+            if status == 0 {
+                http_put_u32_le(version, v);
+                pos = line_end + 2;  // skip CRLF
+            }
+        }
+
+        if status == 0 {
+            hdr_done: u32 = 0;
+            while pos < len && hdr_done == 0 && status == 0 {
+                if *(data + pos) == 13 {
+                    if pos + 1 < len {
+                        if *(data + pos + 1) == 10 { hdr_done = 1; }
                     }
+                }
+                if hdr_done == 0 && status == 0 {
+                    np: u32 = http_parse_one_header(data, pos, len, headers);
+                    if np == 0 { status = 8; }
+                    if status == 0 { pos = np; }
+                }
+            }
+
+            if status == 0 {
+                if hdr_done == 0 { status = 9; }
+                if status == 0 {
+                    pos = pos + 2;  // skip empty-line CRLF
+                    http_put_u32_le(body + 0, pos);
+                    http_put_u32_le(body + 4, len - pos);
                 }
             }
         }
     }
-    // HEAD
-    if *(s + 0) == 72 {
-        if *(s + 1) == 69 {
-            if *(s + 2) == 65 {
-                if *(s + 3) == 68 { return HTTP_HEAD; }
+
+    if status != 0 { return 0; }
+    return 1;
+}
+
+// ===========================================================================
+// http_parse_response — RFC 9112 §4
+//   status-line = HTTP-version SP status-code SP reason-phrase CRLF
+//   followed by *(field-line CRLF) CRLF [ body ]
+// Returns 1 on success, 0 on error.
+// ===========================================================================
+
+fn http_parse_response(data: Address, len: u32, status_out: Address, reason: Address,
+                      headers: Address, body: Address) -> u32 {
+    status: u32 = 0;
+    pos: u32 = 0;
+
+    if len == 0 { status = 1; }
+    if headers == 0 { status = 2; }
+
+    if status == 0 {
+        http_headers_init(headers);
+
+        line_end: u32 = http_find_crlf(data, 0, len);
+        if line_end >= len { status = 3; }
+
+        if status == 0 {
+            v: u32 = http_parse_version(data, 0, line_end);
+            if v == 0 { status = 4; }
+
+            if status == 0 {
+                sp1: u32 = http_find_byte(data, 0, line_end, 32);  // first SP
+                if sp1 >= line_end { status = 5; }
+
+                if status == 0 {
+                    if sp1 + 4 > line_end { status = 6; }
+                    if status == 0 {
+                        d0: u32 = *(data + sp1 + 1) - 48;
+                        d1: u32 = *(data + sp1 + 2) - 48;
+                        d2: u32 = *(data + sp1 + 3) - 48;
+                        if d0 > 9 || d1 > 9 || d2 > 9 { status = 7; }
+                        if status == 0 {
+                            code: u32 = d0 * 100 + d1 * 10 + d2;
+                            http_put_u32_le(status_out, code);
+
+                            sp2: u32 = http_find_byte(data, sp1 + 1, line_end, 32);  // second SP
+                            if sp2 >= line_end { status = 8; }
+                            if status == 0 {
+                                reason_start: u32 = sp2 + 1;
+                                reason_len: u32 = line_end - reason_start;
+                                http_put_u32_le(reason + 0, reason_start);
+                                http_put_u32_le(reason + 4, reason_len);
+                                pos = line_end + 2;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if status == 0 {
+            hdr_done: u32 = 0;
+            while pos < len && hdr_done == 0 && status == 0 {
+                if *(data + pos) == 13 {
+                    if pos + 1 < len {
+                        if *(data + pos + 1) == 10 { hdr_done = 1; }
+                    }
+                }
+                if hdr_done == 0 && status == 0 {
+                    np: u32 = http_parse_one_header(data, pos, len, headers);
+                    if np == 0 { status = 10; }
+                    if status == 0 { pos = np; }
+                }
+            }
+
+            if status == 0 {
+                if hdr_done == 0 { status = 11; }
+                if status == 0 {
+                    pos = pos + 2;
+                    http_put_u32_le(body + 0, pos);
+                    http_put_u32_le(body + 4, len - pos);
+                }
             }
         }
     }
-    // OPTIONS
-    if *(s + 0) == 79 {
-        if *(s + 1) == 80 {
-            if *(s + 2) == 84 {
-                if *(s + 3) == 73 {
-                    if *(s + 4) == 79 {
-                        if *(s + 5) == 78 {
-                            if *(s + 6) == 83 { return HTTP_OPTIONS; }
+
+    if status != 0 { return 0; }
+    return 1;
+}
+
+// ===========================================================================
+// http_build_request — RFC 9112 §3
+//   Emits: method SP path " HTTP/1.1" CRLF "Host: " host CRLF
+//          *(name ": " value CRLF) [Content-Length: N CRLF] CRLF [body]
+// `body` is length-prefixed (body[0..3] = u32 LE length, body[4..] = data).
+// `body == 0` means "no body".
+// Returns total bytes written to `out`.
+// ===========================================================================
+
+fn http_build_request(method: u32, path: Address, host: Address,
+                     headers: Address, body: Address, out: Address) -> u32 {
+    pos: u32 = 0;
+
+    // Method name
+    mtmp = allocate(16);
+    mlen: u32 = http_method_name(method, mtmp);
+    i: u32 = 0;
+    while i < mlen { *(out + pos + i) = *(mtmp + i); i = i + 1; }
+    pos = pos + mlen;
+    free(mtmp);
+
+    // " "
+    *(out + pos) = 32; pos = pos + 1;
+
+    // path (NUL-terminated)
+    pl: u32 = http_strlen(path);
+    i = 0;
+    while i < pl { *(out + pos + i) = *(path + i); i = i + 1; }
+    pos = pos + pl;
+
+    // " HTTP/1.1\r\n"
+    *(out + pos + 0) = 32; *(out + pos + 1) = 72; *(out + pos + 2) = 84;
+    *(out + pos + 3) = 84; *(out + pos + 4) = 80; *(out + pos + 5) = 47;
+    *(out + pos + 6) = 49; *(out + pos + 7) = 46; *(out + pos + 8) = 49;
+    *(out + pos + 9) = 13; *(out + pos + 10) = 10;
+    pos = pos + 11;
+
+    // "Host: " + host + "\r\n"
+    *(out + pos + 0) = 72; *(out + pos + 1) = 111; *(out + pos + 2) = 115;
+    *(out + pos + 3) = 116; *(out + pos + 4) = 58; *(out + pos + 5) = 32;
+    pos = pos + 6;
+    hl: u32 = http_strlen(host);
+    i = 0;
+    while i < hl { *(out + pos + i) = *(host + i); i = i + 1; }
+    pos = pos + hl;
+    *(out + pos) = 13; *(out + pos + 1) = 10; pos = pos + 2;
+
+    // Additional headers
+    if headers != 0 {
+        count: u32 = http_get_u32_le(headers + 0);
+        i = 0;
+        while i < count {
+            entry: Address = headers + 8 + i * HTTP_HEADER_ENTRY_SIZE;
+            n_off: u32 = http_get_u32_le(entry + 0);
+            n_len: u32 = http_get_u32_le(entry + 4);
+            v_off: u32 = http_get_u32_le(entry + 8);
+            v_len: u32 = http_get_u32_le(entry + 12);
+            n_ptr: Address = headers + HTTP_HEADER_POOL_OFFSET + n_off;
+            v_ptr: Address = headers + HTTP_HEADER_POOL_OFFSET + v_off;
+            j: u32 = 0;
+            while j < n_len { *(out + pos + j) = *(n_ptr + j); j = j + 1; }
+            pos = pos + n_len;
+            *(out + pos) = 58; *(out + pos + 1) = 32; pos = pos + 2;
+            j = 0;
+            while j < v_len { *(out + pos + j) = *(v_ptr + j); j = j + 1; }
+            pos = pos + v_len;
+            *(out + pos) = 13; *(out + pos + 1) = 10; pos = pos + 2;
+            i = i + 1;
+        }
+    }
+
+    // Body / Content-Length
+    body_len: u32 = 0;
+    if body != 0 { body_len = http_get_u32_le(body + 0); }
+    if body_len > 0 {
+        // "Content-Length: "
+        *(out + pos + 0) = 67; *(out + pos + 1) = 111; *(out + pos + 2) = 110;
+        *(out + pos + 3) = 116; *(out + pos + 4) = 101; *(out + pos + 5) = 110;
+        *(out + pos + 6) = 116; *(out + pos + 7) = 45; *(out + pos + 8) = 76;
+        *(out + pos + 9) = 101; *(out + pos + 10) = 110; *(out + pos + 11) = 103;
+        *(out + pos + 12) = 116; *(out + pos + 13) = 104; *(out + pos + 14) = 58;
+        *(out + pos + 15) = 32;
+        pos = pos + 16;
+        dlen: u32 = http_u32_to_decimal(body_len, out + pos);
+        pos = pos + dlen;
+        *(out + pos) = 13; *(out + pos + 1) = 10; pos = pos + 2;
+    }
+
+    // End of headers
+    *(out + pos) = 13; *(out + pos + 1) = 10; pos = pos + 2;
+
+    // Body bytes
+    if body_len > 0 {
+        i = 0;
+        while i < body_len { *(out + pos + i) = *(body + 4 + i); i = i + 1; }
+        pos = pos + body_len;
+    }
+
+    return pos;
+}
+
+// ===========================================================================
+// http_build_response — RFC 9112 §4
+//   Emits: "HTTP/1.1 " status " " reason CRLF
+//          *(name ": " value CRLF) [Content-Length: N CRLF] CRLF [body]
+// Returns total bytes written to `out`.
+// ===========================================================================
+
+fn http_build_response(status_code: u32, reason: Address, headers: Address,
+                      body: Address, out: Address) -> u32 {
+    pos: u32 = 0;
+
+    // "HTTP/1.1 "
+    *(out + pos + 0) = 72; *(out + pos + 1) = 84; *(out + pos + 2) = 84;
+    *(out + pos + 3) = 80; *(out + pos + 4) = 47; *(out + pos + 5) = 49;
+    *(out + pos + 6) = 46; *(out + pos + 7) = 49; *(out + pos + 8) = 32;
+    pos = pos + 9;
+
+    // Status code (3 digits)
+    *(out + pos + 0) = 48 + (status_code / 100);
+    *(out + pos + 1) = 48 + ((status_code / 10) % 10);
+    *(out + pos + 2) = 48 + (status_code % 10);
+    pos = pos + 3;
+
+    // " " + reason + CRLF
+    *(out + pos) = 32; pos = pos + 1;
+    rl: u32 = http_strlen(reason);
+    i: u32 = 0;
+    while i < rl { *(out + pos + i) = *(reason + i); i = i + 1; }
+    pos = pos + rl;
+    *(out + pos) = 13; *(out + pos + 1) = 10; pos = pos + 2;
+
+    // Additional headers
+    if headers != 0 {
+        count: u32 = http_get_u32_le(headers + 0);
+        i = 0;
+        while i < count {
+            entry: Address = headers + 8 + i * HTTP_HEADER_ENTRY_SIZE;
+            n_off: u32 = http_get_u32_le(entry + 0);
+            n_len: u32 = http_get_u32_le(entry + 4);
+            v_off: u32 = http_get_u32_le(entry + 8);
+            v_len: u32 = http_get_u32_le(entry + 12);
+            n_ptr: Address = headers + HTTP_HEADER_POOL_OFFSET + n_off;
+            v_ptr: Address = headers + HTTP_HEADER_POOL_OFFSET + v_off;
+            j: u32 = 0;
+            while j < n_len { *(out + pos + j) = *(n_ptr + j); j = j + 1; }
+            pos = pos + n_len;
+            *(out + pos) = 58; *(out + pos + 1) = 32; pos = pos + 2;
+            j = 0;
+            while j < v_len { *(out + pos + j) = *(v_ptr + j); j = j + 1; }
+            pos = pos + v_len;
+            *(out + pos) = 13; *(out + pos + 1) = 10; pos = pos + 2;
+            i = i + 1;
+        }
+    }
+
+    // Content-Length + body
+    body_len: u32 = 0;
+    if body != 0 { body_len = http_get_u32_le(body + 0); }
+    if body_len > 0 {
+        *(out + pos + 0) = 67; *(out + pos + 1) = 111; *(out + pos + 2) = 110;
+        *(out + pos + 3) = 116; *(out + pos + 4) = 101; *(out + pos + 5) = 110;
+        *(out + pos + 6) = 116; *(out + pos + 7) = 45; *(out + pos + 8) = 76;
+        *(out + pos + 9) = 101; *(out + pos + 10) = 110; *(out + pos + 11) = 103;
+        *(out + pos + 12) = 116; *(out + pos + 13) = 104; *(out + pos + 14) = 58;
+        *(out + pos + 15) = 32;
+        pos = pos + 16;
+        dlen: u32 = http_u32_to_decimal(body_len, out + pos);
+        pos = pos + dlen;
+        *(out + pos) = 13; *(out + pos + 1) = 10; pos = pos + 2;
+    }
+
+    // End of headers
+    *(out + pos) = 13; *(out + pos + 1) = 10; pos = pos + 2;
+
+    // Body bytes
+    if body_len > 0 {
+        i = 0;
+        while i < body_len { *(out + pos + i) = *(body + 4 + i); i = i + 1; }
+        pos = pos + body_len;
+    }
+
+    return pos;
+}
+
+// ===========================================================================
+// Chunked transfer encoding (RFC 7230 §4.1, RFC 9112 §7.1).
+//
+//   chunk          = chunk-size [chunk-ext] CRLF chunk-data CRLF
+//   chunk-size     = 1*HEXDIG
+//   chunk-ext      = *( ";" chunk-ext-name [ "=" chunk-ext-val ] )
+//   last-chunk     = "0" [chunk-ext] CRLF
+//
+// http_encode_chunked writes `data` as a sequence of HTTP_CHUNK_MAX-byte
+// chunks followed by a last-chunk and final CRLF.
+// http_decode_chunked parses chunk-size / chunk-data pairs and copies the
+// decoded payload to `out`. Returns total bytes written, 0 on error.
+// ===========================================================================
+
+fn http_encode_chunked(data: Address, len: u32, out: Address) -> u32 {
+    pos: u32 = 0;
+    sent: u32 = 0;
+
+    while sent < len {
+        remaining: u32 = len - sent;
+        chunk: u32 = HTTP_CHUNK_MAX;
+        if remaining < HTTP_CHUNK_MAX { chunk = remaining; }
+
+        // chunk-size in hex
+        n: u32 = http_u32_to_hex_minimal(chunk, out + pos);
+        pos = pos + n;
+
+        // CRLF
+        *(out + pos) = 13; *(out + pos + 1) = 10; pos = pos + 2;
+
+        // chunk-data
+        i: u32 = 0;
+        while i < chunk {
+            *(out + pos + i) = *(data + sent + i);
+            i = i + 1;
+        }
+        pos = pos + chunk;
+
+        // CRLF
+        *(out + pos) = 13; *(out + pos + 1) = 10; pos = pos + 2;
+
+        sent = sent + chunk;
+    }
+
+    // last-chunk: "0\r\n" (always emitted, even for len == 0)
+    *(out + pos) = 48;  // '0'
+    pos = pos + 1;
+    *(out + pos) = 13; *(out + pos + 1) = 10; pos = pos + 2;
+
+    // Final CRLF terminating the chunked body (RFC 7230 §4.1 chunked-body)
+    *(out + pos) = 13; *(out + pos + 1) = 10; pos = pos + 2;
+
+    return pos;
+}
+
+fn http_decode_chunked(data: Address, len: u32, out: Address) -> u32 {
+    status: u32 = 0;
+    pos: u32 = 0;
+    out_pos: u32 = 0;
+
+    if len == 0 { status = 1; }
+
+    if status == 0 {
+        done: u32 = 0;
+        while pos < len && done == 0 && status == 0 {
+            // Parse hex chunk-size until CRLF or ';' (chunk-ext marker)
+            chunk_size: u32 = 0;
+            hex_done: u32 = 0;
+            hex_count: u32 = 0;
+            while pos < len && hex_done == 0 && status == 0 {
+                c: u32 = *(data + pos);
+                if c == 13 || c == 59 { hex_done = 1; }   // '\r' or ';'
+                if c != 13 && c != 59 {
+                    h: u32 = http_parse_hex_digit(c);
+                    if h == 16 { hex_done = 1; status = 2; }
+                    if status == 0 {
+                        chunk_size = (chunk_size << 4) | h;
+                        pos = pos + 1;
+                        hex_count = hex_count + 1;
+                    }
+                }
+            }
+
+            if status == 0 {
+                if hex_count == 0 { status = 3; }  // no hex digits
+            }
+
+            // Skip chunk-ext (if any) up to CRLF
+            if status == 0 {
+                ext_done: u32 = 0;
+                while pos < len && ext_done == 0 && status == 0 {
+                    c: u32 = *(data + pos);
+                    if c == 13 { ext_done = 1; }
+                    if c != 13 { pos = pos + 1; }
+                }
+            }
+
+            // Skip CRLF after chunk-size line
+            if status == 0 {
+                if pos + 1 >= len { status = 4; }
+                if status == 0 {
+                    if *(data + pos) != 13 || *(data + pos + 1) != 10 { status = 5; }
+                    if status == 0 {
+                        pos = pos + 2;
+
+                        // chunk_size == 0 → last-chunk
+                        if chunk_size == 0 { done = 1; }
+
+                        if done == 0 {
+                            if pos + chunk_size > len { status = 6; }
+                            if status == 0 {
+                                i: u32 = 0;
+                                while i < chunk_size {
+                                    *(out + out_pos + i) = *(data + pos + i);
+                                    i = i + 1;
+                                }
+                                out_pos = out_pos + chunk_size;
+                                pos = pos + chunk_size;
+
+                                if pos + 1 >= len { status = 7; }
+                                if status == 0 {
+                                    if *(data + pos) != 13 || *(data + pos + 1) != 10 { status = 8; }
+                                    if status == 0 { pos = pos + 2; }
+                                }
+                            }
                         }
                     }
                 }
             }
         }
     }
-    return 255;  // unknown
-}
 
-// ===========================================================================
-// HTTP Request structure (stored in memory):
-//   [0..3]     method (u32)
-//   [4..7]     path_offset (u32, relative to this struct)
-//   [8..11]    path_len (u32)
-//   [12..15]   version_major (u32)
-//   [16..19]   version_minor (u32)
-//   [20..23]   header_count (u32)
-//   [24..1039] header entries (50 × 20 bytes: name_offset, name_len, val_offset, val_len, pad)
-//   [1040..]   raw request data (path, headers, body)
-// ===========================================================================
-
-// Parse request line: "GET /path HTTP/1.1\r\n"
-fn http_parse_request_line(buf: Address, buf_len: u32, req: Address) -> u32 {
-    // Find end of first line
-    line_end: u32 = 0;
-    i: u32 = 0;
-    while i < buf_len - 1 {
-        if *(buf + i) == 13 {
-            if *(buf + i + 1) == 10 { line_end = i; break; }
-        }
-        i = i + 1;
-    }
-    if line_end == 0 { return 0; }  // no CRLF found
-
-    // Parse method
-    method_end: u32 = 0;
-    i = 0;
-    while i < line_end {
-        if *(buf + i) == 32 { method_end = i; break; }  // space
-        i = i + 1;
-    }
-    if method_end == 0 { return 0; }
-
-    // Store method
-    method: u32 = http_parse_method(buf);
-    *(req + 0) = method & 255;
-    *(req + 1) = (method >> 8) & 255;
-    *(req + 2) = (method >> 16) & 255;
-    *(req + 3) = (method >> 24) & 255;
-
-    // Parse path
-    path_start: u32 = method_end + 1;
-    path_end: u32 = 0;
-    i = path_start;
-    while i < line_end {
-        if *(buf + i) == 32 { path_end = i; break; }
-        i = i + 1;
-    }
-    if path_end == 0 { return 0; }
-
-    path_len: u32 = path_end - path_start;
-    *(req + 4) = path_start & 255;
-    *(req + 5) = (path_start >> 8) & 255;
-    *(req + 6) = (path_start >> 16) & 255;
-    *(req + 7) = (path_start >> 24) & 255;
-    *(req + 8) = path_len & 255;
-    *(req + 9) = (path_len >> 8) & 255;
-    *(req + 10) = (path_len >> 16) & 255;
-    *(req + 11) = (path_len >> 24) & 255;
-
-    // Parse version: "HTTP/1.1"
-    ver_start: u32 = path_end + 1;
-    // Expect "HTTP/"
-    if *(buf + ver_start) != 72 { return 0; }  // 'H'
-    if *(buf + ver_start + 1) != 84 { return 0; }  // 'T'
-    if *(buf + ver_start + 2) != 84 { return 0; }  // 'T'
-    if *(buf + ver_start + 3) != 80 { return 0; }  // 'P'
-    if *(buf + ver_start + 4) != 47 { return 0; }  // '/'
-
-    major: u32 = *(buf + ver_start + 5) - 48;
-    minor: u32 = *(buf + ver_start + 7) - 48;
-    *(req + 12) = major & 255;
-    *(req + 16) = minor & 255;
-
-    // Return offset past the request line (after CRLF)
-    return line_end + 2;
-}
-
-// Parse headers starting at offset
-fn http_parse_headers(buf: Address, offset: u32, buf_len: u32, req: Address) -> u32 {
-    header_count: u32 = 0;
-    pos: u32 = offset;
-
-    while pos < buf_len - 1 && header_count < HTTP_MAX_HEADERS {
-        // Check for end of headers (double CRLF)
-        if *(buf + pos) == 13 {
-            if *(buf + pos + 1) == 10 {
-                break;  // end of headers
-            }
-        }
-
-        // Find colon (header name separator)
-        name_end: u32 = pos;
-        i: u32 = pos;
-        while i < buf_len {
-            if *(buf + i) == 58 { name_end = i; break; }  // ':'
-            i = i + 1;
-        }
-
-        // Skip space after colon
-        val_start: u32 = name_end + 1;
-        if *(buf + val_start) == 32 { val_start = val_start + 1; }  // skip space
-
-        // Find end of value (CRLF)
-        val_end: u32 = val_start;
-        i = val_start;
-        while i < buf_len - 1 {
-            if *(buf + i) == 13 {
-                if *(buf + i + 1) == 10 { val_end = i; break; }
-            }
-            i = i + 1;
-        }
-
-        // Store header entry
-        entry_off: u32 = 24 + header_count * 20;
-        name_len: u32 = name_end - pos;
-        val_len: u32 = val_end - val_start;
-
-        // name_offset
-        *(req + entry_off + 0) = pos & 255;
-        *(req + entry_off + 1) = (pos >> 8) & 255;
-        // name_len
-        *(req + entry_off + 4) = name_len & 255;
-        *(req + entry_off + 5) = (name_len >> 8) & 255;
-        // val_offset
-        *(req + entry_off + 8) = val_start & 255;
-        *(req + entry_off + 9) = (val_start >> 8) & 255;
-        // val_len
-        *(req + entry_off + 12) = val_len & 255;
-        *(req + entry_off + 13) = (val_len >> 8) & 255;
-
-        header_count = header_count + 1;
-        pos = val_end + 2;  // skip CRLF
-    }
-
-    // Store header count
-    *(req + 20) = header_count & 255;
-    *(req + 21) = (header_count >> 8) & 255;
-
-    return pos + 2;  // skip final CRLF
-}
-
-// ===========================================================================
-// HTTP Response builder
-// ===========================================================================
-
-fn http_build_response(status_code: u32, status_text: Address, content_type: Address, body: Address, body_len: u32, out: Address) -> u32 {
-    pos: u32 = 0;
-
-    // Status line: "HTTP/1.1 200 OK\r\n"
-    *(out + pos) = 72; *(out + pos + 1) = 84; *(out + pos + 2) = 84; *(out + pos + 3) = 80;
-    *(out + pos + 4) = 47; *(out + pos + 5) = 49; *(out + pos + 6) = 46; *(out + pos + 7) = 49;
-    pos = pos + 8;
-    *(out + pos) = 32; pos = pos + 1;  // space
-
-    // Status code (3 digits)
-    *(out + pos) = 48 + (status_code / 100);
-    *(out + pos + 1) = 48 + ((status_code / 10) % 10);
-    *(out + pos + 2) = 48 + (status_code % 10);
-    pos = pos + 3;
-    *(out + pos) = 32; pos = pos + 1;  // space
-
-    // Status text
-    sl: u32 = 0;
-    while *(status_text + sl) != 0 { *(out + pos + sl) = *(status_text + sl); sl = sl + 1; }
-    pos = pos + sl;
-
-    // CRLF
-    *(out + pos) = 13; *(out + pos + 1) = 10; pos = pos + 2;
-
-    // Content-Type header
-    *(out + pos) = 67; *(out + pos + 1) = 111; *(out + pos + 2) = 110;
-    *(out + pos + 3) = 116; *(out + pos + 4) = 101; *(out + pos + 5) = 110;
-    *(out + pos + 6) = 116; *(out + pos + 7) = 45; *(out + pos + 8) = 84;
-    *(out + pos + 9) = 121; *(out + pos + 10) = 112; *(out + pos + 11) = 101;
-    *(out + pos + 12) = 58; *(out + pos + 13) = 32;
-    pos = pos + 14;
-    ctl: u32 = 0;
-    while *(content_type + ctl) != 0 { *(out + pos + ctl) = *(content_type + ctl); ctl = ctl + 1; }
-    pos = pos + ctl;
-    *(out + pos) = 13; *(out + pos + 1) = 10; pos = pos + 2;
-
-    // Content-Length header
-    *(out + pos) = 67; *(out + pos + 1) = 111; *(out + pos + 2) = 110;
-    *(out + pos + 3) = 116; *(out + pos + 4) = 101; *(out + pos + 5) = 110;
-    *(out + pos + 6) = 116; *(out + pos + 7) = 45; *(out + pos + 8) = 76;
-    *(out + pos + 9) = 101; *(out + pos + 10) = 110; *(out + pos + 11) = 103;
-    *(out + pos + 12) = 116; *(out + pos + 13) = 104; *(out + pos + 14) = 58;
-    *(out + pos + 15) = 32;
-    pos = pos + 16;
-
-    // Convert body_len to string
-    if body_len == 0 {
-        *(out + pos) = 48; pos = pos + 1;
-    } else {
-        temp = allocate(12);
-        tp: u32 = 0;
-        v: u32 = body_len;
-        while v > 0 {
-            *(temp + tp) = 48 + (v % 10);
-            tp = tp + 1;
-            v = v / 10;
-        }
-        while tp > 0 {
-            tp = tp - 1;
-            *(out + pos) = *(temp + tp);
-            pos = pos + 1;
-        }
-        free(temp);
-    }
-    *(out + pos) = 13; *(out + pos + 1) = 10; pos = pos + 2;
-
-    // End of headers
-    *(out + pos) = 13; *(out + pos + 1) = 10; pos = pos + 2;
-
-    // Body
-    i: u32 = 0;
-    while i < body_len {
-        *(out + pos + i) = *(body + i);
-        i = i + 1;
-    }
-    pos = pos + body_len;
-
-    return pos;
-}
-
-// Common status texts
-fn http_status_text_200() -> Address {
-    buf = allocate(3);
-    *(buf + 0) = 79; *(buf + 1) = 75; *(buf + 2) = 0;  // "OK"
-    return buf;
-}
-
-fn http_status_text_404() -> Address {
-    buf = allocate(10);
-    *(buf + 0) = 78; *(buf + 1) = 111; *(buf + 2) = 116; *(buf + 3) = 32;
-    *(buf + 4) = 70; *(buf + 5) = 111; *(buf + 6) = 117; *(buf + 7) = 110;
-    *(buf + 8) = 100; *(buf + 9) = 0;  // "Not Found"
-    return buf;
-}
-
-fn http_content_type_json() -> Address {
-    buf = allocate(31);
-    *(buf + 0) = 97; *(buf + 1) = 112; *(buf + 2) = 112;
-    *(buf + 3) = 108; *(buf + 4) = 105; *(buf + 5) = 99;
-    *(buf + 6) = 97; *(buf + 7) = 116; *(buf + 8) = 105;
-    *(buf + 9) = 111; *(buf + 10) = 110; *(buf + 11) = 47;
-    *(buf + 12) = 106; *(buf + 13) = 115; *(buf + 14) = 111;
-    *(buf + 15) = 110; *(buf + 16) = 0;  // "application/json"
-    return buf;
-}
-
-fn http_content_type_html() -> Address {
-    buf = allocate(10);
-    *(buf + 0) = 116; *(buf + 1) = 101; *(buf + 2) = 120;
-    *(buf + 3) = 116; *(buf + 4) = 47; *(buf + 5) = 104;
-    *(buf + 6) = 116; *(buf + 7) = 109; *(buf + 8) = 108;
-    *(buf + 9) = 0;  // "text/html"
-    return buf;
-}
-
-fn http_content_type_plain() -> Address {
-    buf = allocate(11);
-    *(buf + 0) = 116; *(buf + 1) = 101; *(buf + 2) = 120;
-    *(buf + 3) = 116; *(buf + 4) = 47; *(buf + 5) = 112;
-    *(buf + 6) = 108; *(buf + 7) = 97; *(buf + 8) = 105;
-    *(buf + 9) = 110; *(buf + 10) = 0;  // "text/plain"
-    return buf;
+    if status != 0 { return 0; }
+    return out_pos;
 }

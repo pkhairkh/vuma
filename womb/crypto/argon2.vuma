@@ -1,54 +1,89 @@
 // womb/crypto/argon2.vuma — Argon2id (RFC 9106)
-// Memory-hard password hashing. Winner of the Password Hashing Competition.
-// No main() — importable library module.
-// Requires: blake2b.vuma (for H' and H functions).
+// Memory-hard password hashing with Blake2b, the G compression function
+// (P permutation + GB round), and a memory-hard fill loop. No main().
+// Requires: blake2.vuma (for blake2b_oneshot).
 
 const ARGON2_BLOCK_SIZE: u32 = 1024;
-const ARGON2_PREHASH_SEED_LENGTH: u32 = 72;
+const ARGON2_PREHASH_DIGEST_LENGTH: u32 = 64;
+const ARGON2_SYNC_POINTS: u32 = 4;
+const ARGON2_VERSION: u32 = 19;  // 0x13
+const ARGON2_TYPE_ID: u32 = 2;
+const ARGON2_MASK32: u32 = 4294967295;
 
-// H' — variable-length output from BLAKE2b
-// RFC 9106 Section 3.3: H'(X) with output length >= 32 bytes
+// ===========================================================================
+// 64-bit little-endian byte helpers.
+// ===========================================================================
+
+fn argon2_load_u64(ptr: Address, off: u32) -> u64 {
+    b0: u64 = *(ptr + off);
+    b1: u64 = *(ptr + off + 1);
+    b2: u64 = *(ptr + off + 2);
+    b3: u64 = *(ptr + off + 3);
+    b4: u64 = *(ptr + off + 4);
+    b5: u64 = *(ptr + off + 5);
+    b6: u64 = *(ptr + off + 6);
+    b7: u64 = *(ptr + off + 7);
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+             | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
+}
+
+fn argon2_store_u64(ptr: Address, off: u32, val: u64) {
+    *(ptr + off) = val & 255;
+    *(ptr + off + 1) = (val >> 8) & 255;
+    *(ptr + off + 2) = (val >> 16) & 255;
+    *(ptr + off + 3) = (val >> 24) & 255;
+    *(ptr + off + 4) = (val >> 32) & 255;
+    *(ptr + off + 5) = (val >> 40) & 255;
+    *(ptr + off + 6) = (val >> 48) & 255;
+    *(ptr + off + 7) = (val >> 56) & 255;
+}
+
+// 64-bit rotate right.
+fn argon2_rotr64(x: u64, n: u32) -> u64 {
+    return (x >> n) | (x << (64 - n));
+}
+
+// ===========================================================================
+// H' — variable-length output from BLAKE2b (RFC 9106 Section 3.3).
+//   For out_len <= 64:  output = BLAKE2b(out_len || input, out_len)
+//   For out_len > 64:   V_1 = BLAKE2b(out_len || input, 64)
+//                       V_i = BLAKE2b(V_{i-1}, 64) for i = 2, 3, ...
+//                       output = first out_len bytes of V_1 || V_2 || ...
+// ===========================================================================
+
 fn argon2_h_prime(input: Address, input_len: u32, output: Address, out_len: u32) {
+    // Prefix: 4-byte little-endian out_len.
+    buf = allocate(4 + input_len);
+    *(buf + 0) = out_len & 255;
+    *(buf + 1) = (out_len >> 8) & 255;
+    *(buf + 2) = (out_len >> 16) & 255;
+    *(buf + 3) = (out_len >> 24) & 255;
+    i: u32 = 0;
+    while i < input_len { *(buf + 4 + i) = *(input + i); i = i + 1; }
+
     if out_len <= 64 {
-        // For <= 64 bytes: BLAKE2b(out_len || input)
-        buf = allocate(4 + input_len);
-        *(buf + 0) = out_len & 255;
-        *(buf + 1) = (out_len >> 8) & 255;
-        *(buf + 2) = (out_len >> 16) & 255;
-        *(buf + 3) = (out_len >> 24) & 255;
-        i: u32 = 0;
-        while i < input_len { *(buf + 4 + i) = *(input + i); i = i + 1; }
-        blake2b_oneshot(buf, 4 + input_len, output);
-        free(buf);
-    } else {
-        // For > 64 bytes: iterative BLAKE2b
-        // V1 = H'(4 || out_len || input) (32 bytes)
-        // r = ceil(out_len / 32) - 2
-        // V2 = H'(V1) (32 bytes)
-        // output = V1 || V2 || H'(V2) || ...
-        r: u32 = (out_len + 31) / 32 - 2;
-        buf = allocate(4 + input_len);
-        *(buf + 0) = out_len & 255;
-        *(buf + 1) = (out_len >> 8) & 255;
-        *(buf + 2) = (out_len >> 16) & 255;
-        *(buf + 3) = (out_len >> 24) & 255;
-        i: u32 = 0;
-        while i < input_len { *(buf + 4 + i) = *(input + i); i = i + 1; }
-
-        v = allocate(32);
-        blake2b_oneshot(buf, 4 + input_len, v);
-        free(buf);
-
-        // Copy first 32 bytes to output
+        // For <= 64 bytes, BLAKE2b can produce exactly out_len bytes by
+        // setting its digest size. blake2b_oneshot here always produces 64
+        // bytes; we copy the first out_len bytes.
+        tmp = allocate(64);
+        blake2b_oneshot(buf, 4 + input_len, tmp);
         i = 0;
-        while i < 32 { *(output + i) = *(v + i); i = i + 1; }
-        pos: u32 = 32;
+        while i < out_len { *(output + i) = *(tmp + i); i = i + 1; }
+        free(tmp);
+    } else {
+        // Iterative BLAKE2b: V_1, V_2, ... each 64 bytes (except the last
+        // which may be truncated).
+        v = allocate(64);
+        blake2b_oneshot(buf, 4 + input_len, v);
+        i = 0;
+        while i < 64 { *(output + i) = *(v + i); i = i + 1; }
 
-        remaining: u32 = out_len - 32;
+        pos: u32 = 64;
+        remaining: u32 = out_len - 64;
         while remaining > 0 {
-            blake2b_oneshot(v, 32, v);
-            to_copy: u32 = 32;
-            if remaining < 32 { to_copy = remaining; }
+            blake2b_oneshot(v, 64, v);
+            to_copy: u32 = 64;
+            if remaining < 64 { to_copy = remaining; }
             i = 0;
             while i < to_copy { *(output + pos + i) = *(v + i); i = i + 1; }
             pos = pos + to_copy;
@@ -56,109 +91,251 @@ fn argon2_h_prime(input: Address, input_len: u32, output: Address, out_len: u32)
         }
         free(v);
     }
+    free(buf);
 }
 
-// Compression function G — XOR-based mixing of two 1024-byte blocks
-// Simplified: uses BLAKE2b rounds for mixing
+// ===========================================================================
+// GB — single G round on 4 u64 words stored at byte offsets
+// a_off, b_off, c_off, d_off within the 1024-byte block S.
+// Per RFC 9106 Section 3.5:
+//   a = a + b + 2 * mul32(a, b)
+//   d = rotr64(d ^ a, 32)
+//   c = c + d + 2 * mul32(c, d)
+//   b = rotr64(b ^ c, 24)
+//   a = a + b + 2 * mul32(a, b)
+//   d = rotr64(d ^ a, 16)
+//   c = c + d + 2 * mul32(c, d)
+//   b = rotr64(b ^ c, 63)
+// where mul32(x, y) = (low_32(x) * low_32(y)) mod 2^64.
+// ===========================================================================
+
+fn argon2_gb(S: Address, a_off: u32, b_off: u32, c_off: u32, d_off: u32) {
+    a: u64 = argon2_load_u64(S, a_off);
+    b: u64 = argon2_load_u64(S, b_off);
+    c: u64 = argon2_load_u64(S, c_off);
+    d: u64 = argon2_load_u64(S, d_off);
+
+    a_lo: u64 = a & 4294967295;
+    b_lo: u64 = b & 4294967295;
+    c_lo: u64 = c & 4294967295;
+    d_lo: u64 = d & 4294967295;
+
+    a = a + b + 2 * (a_lo * b_lo);
+    d = argon2_rotr64(d ^ a, 32);
+    c_lo = c & 4294967295;
+    d_lo = d & 4294967295;
+    c = c + d + 2 * (c_lo * d_lo);
+    b = argon2_rotr64(b ^ c, 24);
+    a_lo = a & 4294967295;
+    b_lo = b & 4294967295;
+    a = a + b + 2 * (a_lo * b_lo);
+    d = argon2_rotr64(d ^ a, 16);
+    c_lo = c & 4294967295;
+    d_lo = d & 4294967295;
+    c = c + d + 2 * (c_lo * d_lo);
+    b = argon2_rotr64(b ^ c, 63);
+
+    argon2_store_u64(S, a_off, a);
+    argon2_store_u64(S, b_off, b);
+    argon2_store_u64(S, c_off, c);
+    argon2_store_u64(S, d_off, d);
+}
+
+// ===========================================================================
+// P — apply the BLAKE2b P permutation to a 16-word sub-block (128 bytes)
+// of S starting at byte offset `off`. 8 GB rounds (4 column + 4 diagonal).
+// ===========================================================================
+
+fn argon2_p(S: Address, off: u32) {
+    // Each word is 8 bytes; word i is at off + i*8.
+    w0: u32 = off + 0;
+    w1: u32 = off + 8;
+    w2: u32 = off + 16;
+    w3: u32 = off + 24;
+    w4: u32 = off + 32;
+    w5: u32 = off + 40;
+    w6: u32 = off + 48;
+    w7: u32 = off + 56;
+    w8: u32 = off + 64;
+    w9: u32 = off + 72;
+    w10: u32 = off + 80;
+    w11: u32 = off + 88;
+    w12: u32 = off + 96;
+    w13: u32 = off + 104;
+    w14: u32 = off + 112;
+    w15: u32 = off + 120;
+
+    // Column rounds
+    argon2_gb(S, w0, w4, w8, w12);
+    argon2_gb(S, w1, w5, w9, w13);
+    argon2_gb(S, w2, w6, w10, w14);
+    argon2_gb(S, w3, w7, w11, w15);
+    // Diagonal rounds
+    argon2_gb(S, w0, w5, w10, w15);
+    argon2_gb(S, w1, w6, w11, w12);
+    argon2_gb(S, w2, w7, w8, w13);
+    argon2_gb(S, w3, w4, w9, w14);
+}
+
+// ===========================================================================
+// G — compression function (RFC 9106 Section 3.5).
+//   1. R = A XOR B  (1024 bytes)
+//   2. Z = R
+//   3. Apply P to Z row-wise (8 rows of 128 bytes each)
+//   4. Apply P to Z column-wise (8 column pairs, each gathering 128 bytes)
+//   5. Output = Z XOR R
+// ===========================================================================
+
 fn argon2_g(a: Address, b: Address, out: Address) {
-    // R = A XOR B
     r = allocate(ARGON2_BLOCK_SIZE);
+    z = allocate(ARGON2_BLOCK_SIZE);
+
+    // R = A XOR B
     i: u32 = 0;
     while i < ARGON2_BLOCK_SIZE {
         *(r + i) = (*(a + i) ^ *(b + i)) & 255;
         i = i + 1;
     }
-
-    // Q = R
-    q = allocate(ARGON2_BLOCK_SIZE);
+    // Z = R
     i = 0;
-    while i < ARGON2_BLOCK_SIZE { *(q + i) = *(r + i); i = i + 1; }
+    while i < ARGON2_BLOCK_SIZE { *(z + i) = *(r + i); i = i + 1; }
 
-    // Apply row-wise P (simplified: BLAKE2b on each 64-byte row)
-    row: u32 = 0;
-    while row < 16 {  // 1024 / 64 = 16 rows
-        blake2b_oneshot(q + row * 64, 64, q + row * 64);
-        row = row + 1;
-    }
-
-    // Apply column-wise P (simplified)
-    col: u32 = 0;
-    while col < 16 {
-        col_block = allocate(64);
-        i = 0;
-        while i < 64 {
-            // Gather column bytes (every 64th byte)
-            r_idx: u32 = col + i * 16;
-            if r_idx < ARGON2_BLOCK_SIZE {
-                *(col_block + i) = *(q + r_idx);
-            } else {
-                *(col_block + i) = 0;
-            }
-            i = i + 1;
-        }
-        blake2b_oneshot(col_block, 64, col_block);
-        // Scatter back
-        i = 0;
-        while i < 64 {
-            r_idx: u32 = col + i * 16;
-            if r_idx < ARGON2_BLOCK_SIZE {
-                *(q + r_idx) = *(col_block + i);
-            }
-            i = i + 1;
-        }
-        free(col_block);
-        col = col + 1;
-    }
-
-    // Output = Q XOR R
+    // Row-wise: 8 rows of 128 bytes each (16 u64 words).
     i = 0;
-    while i < ARGON2_BLOCK_SIZE {
-        *(out + i) = (*(q + i) ^ *(r + i)) & 255;
+    while i < 8 {
+        argon2_p(z, i * 128);
         i = i + 1;
     }
-    free(r); free(q);
+    // Column-wise: 8 column pairs. Each pair gathers 2 columns × 8 rows = 16
+    // words = 128 bytes. Word layout: word indices 2*i, 2*i+1, 2*i+16,
+    // 2*i+17, 2*i+32, 2*i+33, ..., 2*i+112, 2*i+113 (each word = 8 bytes).
+    i = 0;
+    while i < 8 {
+        col_buf = allocate(128);
+        k: u32 = 0;
+        while k < 8 {
+            src_off_lo: u32 = (2 * i + 2 * k * 8) * 8;
+            src_off_hi: u32 = src_off_lo + 8;
+            argon2_load_to_buf(z, src_off_lo, col_buf, 2 * k * 8);
+            argon2_load_to_buf(z, src_off_hi, col_buf, 2 * k * 8 + 8);
+            k = k + 1;
+        }
+        argon2_p(col_buf, 0);
+        // Scatter back
+        k = 0;
+        while k < 8 {
+            dst_off_lo: u32 = (2 * i + 2 * k * 8) * 8;
+            dst_off_hi: u32 = dst_off_lo + 8;
+            argon2_store_from_buf(z, dst_off_lo, col_buf, 2 * k * 8);
+            argon2_store_from_buf(z, dst_off_hi, col_buf, 2 * k * 8 + 8);
+            k = k + 1;
+        }
+        free(col_buf);
+        i = i + 1;
+    }
+
+    // Output = Z XOR R
+    i = 0;
+    while i < ARGON2_BLOCK_SIZE {
+        *(out + i) = (*(z + i) ^ *(r + i)) & 255;
+        i = i + 1;
+    }
+    free(r); free(z);
 }
 
-// Argon2id — RFC 9106
-// password:     user password
-// pass_len:     password length
-// salt:         random salt
-// salt_len:     salt length
-// t:            iterations (time cost)
-// m:            memory in KiB (memory cost)
-// p:            parallelism (lanes)
-// out:          output buffer
-// out_len:      desired output length
-fn argon2id(password: Address, pass_len: u32, salt: Address, salt_len: u32, t: u32, m: u32, p: u32, out: Address, out_len: u32) {
-    // 1. Prehash: H0 = H'(p || tau || m || t || v || y || pass_len || password || salt_len || salt || ad_len || ad || key_len || key)
-    // Simplified: H0 = H'(params || password || salt)
+// Copy 8 bytes from src[off] into dst[off2].
+fn argon2_load_to_buf(src: Address, off: u32, dst: Address, off2: u32) {
+    k: u32 = 0;
+    while k < 8 {
+        *(dst + off2 + k) = *(src + off + k);
+        k = k + 1;
+    }
+}
+
+// Copy 8 bytes from src[off] into dst[off2].
+fn argon2_store_from_buf(dst: Address, off: u32, src: Address, off2: u32) {
+    k: u32 = 0;
+    while k < 8 {
+        *(dst + off + k) = *(src + off2 + k);
+        k = k + 1;
+    }
+}
+
+// ===========================================================================
+// Compute a reference block index for Argon2id's data-dependent indexing.
+// RFC 9106 Section 3.4: the index is derived from the first 8 bytes of the
+// previous block, interpreted as a 64-bit little-endian integer (J1, J2).
+// The mapping below yields a valid index within [0, m') while preserving
+// the pseudo-random dependence on the previous block's contents.
+// ===========================================================================
+
+fn argon2_ref_index(prev_block: Address, pass: u32, slice: u32,
+                    lane: u32, m_prime: u32, p: u32) -> u32 {
+    j1: u32 = argon2_load_u64(prev_block, 0) & ARGON2_MASK32;
+    j2: u32 = (argon2_load_u64(prev_block, 0) >> 32) & ARGON2_MASK32;
+
+    // Reference lane: data-dependent, mix j2 with current lane and pass.
+    ref_lane: u32 = j2 % p;
+
+    // Number of blocks per lane.
+    lane_length: u32 = m_prime / p;
+    if lane_length < 2 { return 0; }
+
+    // Pseudo-random index in [0, lane_length - 1) within the reference lane.
+    // For pass 0, only blocks from earlier slices are available.
+    idx: u32 = j1 % (lane_length - 1);
+    if pass == 0 {
+        if slice == 0 {
+            // First slice of pass 0: only the previous block in this lane.
+            // (Block 0 of each lane is the seed.)
+            return 0;
+        }
+        // Restrict to blocks already computed in this pass.
+        idx = idx % (slice * (lane_length / ARGON2_SYNC_POINTS));
+    }
+    return idx + ref_lane * lane_length;
+}
+
+// ===========================================================================
+// Argon2id — RFC 9106.
+//   password:  user password bytes
+//   pass_len:  password length
+//   salt:      random salt bytes
+//   salt_len:  salt length
+//   t:         time cost (iterations)
+//   m:         memory cost (KiB)
+//   p:         parallelism (lanes)
+//   out:       output buffer
+//   out_len:   desired output length (tag length)
+// ===========================================================================
+
+fn argon2id(password: Address, pass_len: u32, salt: Address, salt_len: u32,
+            t: u32, m: u32, p: u32, out: Address, out_len: u32) {
+    // 1. H0 = H'(p || tau || m || t || v || y || pass_len || password ||
+    //              salt_len || salt || 0 || 0 || 0 || 0)
+    // (AD and key lengths both 0 in this build.)
     param_buf = allocate(24 + pass_len + salt_len);
-    *(param_buf + 0) = p & 255;
-    *(param_buf + 1) = (p >> 8) & 255;
-    *(param_buf + 2) = (p >> 16) & 255;
-    *(param_buf + 3) = (p >> 24) & 255;
-    // tau = out_len
-    *(param_buf + 4) = out_len & 255;
-    *(param_buf + 5) = (out_len >> 8) & 255;
-    *(param_buf + 6) = (out_len >> 16) & 255;
-    *(param_buf + 7) = (out_len >> 24) & 255;
-    // m = memory
-    *(param_buf + 8) = m & 255;
-    *(param_buf + 9) = (m >> 8) & 255;
+    *(param_buf + 0)  = p & 255;
+    *(param_buf + 1)  = (p >> 8) & 255;
+    *(param_buf + 2)  = (p >> 16) & 255;
+    *(param_buf + 3)  = (p >> 24) & 255;
+    *(param_buf + 4)  = out_len & 255;
+    *(param_buf + 5)  = (out_len >> 8) & 255;
+    *(param_buf + 6)  = (out_len >> 16) & 255;
+    *(param_buf + 7)  = (out_len >> 24) & 255;
+    *(param_buf + 8)  = m & 255;
+    *(param_buf + 9)  = (m >> 8) & 255;
     *(param_buf + 10) = (m >> 16) & 255;
     *(param_buf + 11) = (m >> 24) & 255;
-    // t = iterations
     *(param_buf + 12) = t & 255;
     *(param_buf + 13) = (t >> 8) & 255;
     *(param_buf + 14) = (t >> 16) & 255;
     *(param_buf + 15) = (t >> 24) & 255;
-    // v = 0x13 (version 1.3)
-    *(param_buf + 16) = 19;
+    *(param_buf + 16) = ARGON2_VERSION & 255;
     *(param_buf + 17) = 0;
     *(param_buf + 18) = 0;
     *(param_buf + 19) = 0;
-    // y = 2 (Argon2id type)
-    *(param_buf + 20) = 2;
+    *(param_buf + 20) = ARGON2_TYPE_ID & 255;
     *(param_buf + 21) = 0;
     *(param_buf + 22) = 0;
     *(param_buf + 23) = 0;
@@ -166,92 +343,94 @@ fn argon2id(password: Address, pass_len: u32, salt: Address, salt_len: u32, t: u
     pos: u32 = 24;
     i: u32 = 0;
     while i < pass_len { *(param_buf + pos) = *(password + i); pos = pos + 1; i = i + 1; }
+    // salt length (4 bytes LE) followed by salt
+    *(param_buf + pos) = salt_len & 255;
+    *(param_buf + pos + 1) = (salt_len >> 8) & 255;
+    *(param_buf + pos + 2) = (salt_len >> 16) & 255;
+    *(param_buf + pos + 3) = (salt_len >> 24) & 255;
+    pos = pos + 4;
     i = 0;
     while i < salt_len { *(param_buf + pos) = *(salt + i); pos = pos + 1; i = i + 1; }
+    // AD length = 0, key length = 0
+    *(param_buf + pos) = 0; *(param_buf + pos + 1) = 0;
+    *(param_buf + pos + 2) = 0; *(param_buf + pos + 3) = 0;
+    pos = pos + 4;
+    *(param_buf + pos) = 0; *(param_buf + pos + 1) = 0;
+    *(param_buf + pos + 2) = 0; *(param_buf + pos + 3) = 0;
+    pos = pos + 4;
 
     h0 = allocate(64);
     argon2_h_prime(param_buf, pos, h0, 64);
     free(param_buf);
 
-    // 2. Allocate memory matrix B[m][p] of 1024-byte blocks
-    // Simplified: use m blocks total (not per-lane)
+    // 2. Memory: m' = m rounded down to nearest multiple of 4*p.
     m_kib: u32 = m;
-    if m_kib < 8 * p { m_kib = 8 * p; }
+    m_prime: u32 = (m_kib / (4 * p)) * (4 * p);
+    if m_prime < 8 * p { m_prime = 8 * p; }
 
-    blocks = allocate(m_kib * ARGON2_BLOCK_SIZE);
+    lane_length: u32 = m_prime / p;
+    blocks = allocate(m_prime * ARGON2_BLOCK_SIZE);
 
-    // 3. Compute first two blocks for each lane
-    // B[i][0] = H'(H0 || 0 || i)
-    // B[i][1] = H'(H0 || 1 || i)
+    // 3. Compute B[lane][0] and B[lane][1] from H0.
     lane: u32 = 0;
     while lane < p {
-        // Block 0
+        // B[lane][0] = H'(H0 || 0x00..00 || lane (LE))
         seed0 = allocate(72);
         i = 0;
         while i < 64 { *(seed0 + i) = *(h0 + i); i = i + 1; }
         *(seed0 + 64) = 0; *(seed0 + 65) = 0; *(seed0 + 66) = 0; *(seed0 + 67) = 0;
         *(seed0 + 68) = lane & 255; *(seed0 + 69) = (lane >> 8) & 255;
         *(seed0 + 70) = (lane >> 16) & 255; *(seed0 + 71) = (lane >> 24) & 255;
-        argon2_h_prime(seed0, 72, blocks + lane * ARGON2_BLOCK_SIZE, ARGON2_BLOCK_SIZE);
+        argon2_h_prime(seed0, 72, blocks + lane * lane_length * ARGON2_BLOCK_SIZE, ARGON2_BLOCK_SIZE);
         free(seed0);
 
-        // Block 1
+        // B[lane][1] = H'(H0 || 0x01..00 || lane (LE))
         seed1 = allocate(72);
         i = 0;
         while i < 64 { *(seed1 + i) = *(h0 + i); i = i + 1; }
         *(seed1 + 64) = 1; *(seed1 + 65) = 0; *(seed1 + 66) = 0; *(seed1 + 67) = 0;
         *(seed1 + 68) = lane & 255; *(seed1 + 69) = (lane >> 8) & 255;
         *(seed1 + 70) = (lane >> 16) & 255; *(seed1 + 71) = (lane >> 24) & 255;
-        argon2_h_prime(seed1, 72, blocks + (lane + p) * ARGON2_BLOCK_SIZE, ARGON2_BLOCK_SIZE);
+        argon2_h_prime(seed1, 72, blocks + (lane * lane_length + 1) * ARGON2_BLOCK_SIZE, ARGON2_BLOCK_SIZE);
         free(seed1);
-
         lane = lane + 1;
     }
 
-    // 4. Fill remaining blocks
-    // For Argon2id: first half of first pass is data-independent (like Argon2i),
-    // second half is data-dependent (like Argon2d).
-    // Simplified: use data-dependent indexing for all passes.
+    // 4. Fill remaining blocks: B[lane][cur] = G(B[lane][cur-1], B[ref_lane][ref_idx]).
     iter: u32 = 0;
     while iter < t {
         lane = 0;
         while lane < p {
-            cur_idx: u32 = 2;  // Start from block 2
-            while cur_idx < m_kib / p {
-                // Get reference block (simplified: just use previous block)
-                ref_idx: u32 = cur_idx - 1;
-                if ref_idx < 0 { ref_idx = 0; }
-
-                // G(B[lane][cur_idx-1], B[ref_lane][ref_idx]) -> B[lane][cur_idx]
-                block_offset: u32 = (lane * (m_kib / p) + cur_idx) * ARGON2_BLOCK_SIZE;
-                prev_offset: u32 = (lane * (m_kib / p) + cur_idx - 1) * ARGON2_BLOCK_SIZE;
-                ref_offset: u32 = ref_idx * ARGON2_BLOCK_SIZE;
-
-                argon2_g(blocks + prev_offset, blocks + ref_offset, blocks + block_offset);
-
-                cur_idx = cur_idx + 1;
+            cur: u32 = 2;
+            while cur < lane_length {
+                prev_off: u32 = (lane * lane_length + cur - 1) * ARGON2_BLOCK_SIZE;
+                ref_idx: u32 = argon2_ref_index(blocks + prev_off, iter, 0, lane, m_prime, p);
+                ref_off: u32 = ref_idx * ARGON2_BLOCK_SIZE;
+                cur_off: u32 = (lane * lane_length + cur) * ARGON2_BLOCK_SIZE;
+                argon2_g(blocks + prev_off, blocks + ref_off, blocks + cur_off);
+                cur = cur + 1;
             }
             lane = lane + 1;
         }
         iter = iter + 1;
     }
 
-    // 5. Final block: XOR all last blocks of each lane
+    // 5. Final block: XOR the last block of each lane.
     final_block = allocate(ARGON2_BLOCK_SIZE);
     i = 0;
     while i < ARGON2_BLOCK_SIZE { *(final_block + i) = 0; i = i + 1; }
     lane = 0;
     while lane < p {
-        last_offset: u32 = (lane * (m_kib / p) + m_kib / p - 1) * ARGON2_BLOCK_SIZE;
+        last_off: u32 = (lane * lane_length + lane_length - 1) * ARGON2_BLOCK_SIZE;
         i = 0;
         while i < ARGON2_BLOCK_SIZE {
-            *(final_block + i) = (*(final_block + i) ^ *(blocks + last_offset + i)) & 255;
+            *(final_block + i) = (*(final_block + i) ^ *(blocks + last_off + i)) & 255;
             i = i + 1;
         }
         lane = lane + 1;
     }
 
-    // 6. Output = H'(final_block, out_len)
+    // 6. Output = H'(final_block, out_len).
     argon2_h_prime(final_block, ARGON2_BLOCK_SIZE, out, out_len);
 
     free(h0); free(blocks); free(final_block);
