@@ -126,7 +126,7 @@ fn write_hex(val: u64) -> i64 {
     i: u32 = 0;
     while i < 16 {
         nibble: u64 = (v >> 60) & 15;
-        c: u32;
+        c: u32 = 0;
         if nibble < 10 { c = 48 + nibble; } else { c = 97 + nibble - 10; }
         *(temp + tp) = c;
         tp = tp + 1;
@@ -163,7 +163,7 @@ fn write_hex_u32(val: u32) -> i64 {
     i: u32 = 0;
     while i < 8 {
         nibble: u32 = (val >> 28) & 15;
-        c: u32;
+        c: u32 = 0;
         if nibble < 10 { c = 48 + nibble; } else { c = 97 + nibble - 10; }
         *(buf + pos) = c;
         pos = pos + 1;

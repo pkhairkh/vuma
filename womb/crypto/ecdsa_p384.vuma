@@ -21,7 +21,7 @@
 // (matching the curve strength), with the 384-bit digest truncated to 48 bytes
 // for the nonce block.
 
-const MASK64: u64 = 18446744073709551615;
+const MASK64: u64 = ((1 << 63) | ((1 << 63) - 1));
 
 // ===========================================================================
 // 384-bit bignum primitives (6 × u64 limbs, little-endian)
