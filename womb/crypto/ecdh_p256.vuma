@@ -1,54 +1,91 @@
 // womb/crypto/ecdh_p256.vuma — ECDH Key Exchange over NIST P-256
 // No main() — importable library module.
-// Requires: ecdsa_p256.vuma (shares curve parameters and point operations).
+// Requires: ecdsa_p256.vuma (curve parameters, point operations, is_on_curve),
+//           sha256.vuma (KDF for shared-secret derivation).
+//
+// Standard ECDH flow:
+//   1. Alice picks random d_A in [1, n-1], computes Q_A = d_A * G, sends Q_A.
+//   2. Bob   picks random d_B in [1, n-1], computes Q_B = d_B * G, sends Q_B.
+//   3. Alice computes S = d_A * Q_B ; Bob computes S = d_B * Q_A.
+//   4. Both derive the symmetric key from S.x via a KDF (Concat-KDF / SHA-256).
+//
+// This module provides keygen, public-key validation, raw shared-secret
+// computation, and a SHA-256-based KDF that produces a 32-byte symmetric key.
+// All scalars/coordinates on the wire are 32-byte big-endian.
 
 // ===========================================================================
-// Generate public key from private key
-// Q = d * G
-// privkey: 32-byte big-endian scalar
-// pubkey_x, pubkey_y: 32-byte big-endian point coordinates (output)
+// Generate public key from private key: Q = d * G
+//   privkey_be (in/out) : 32-byte big-endian private scalar (reduced mod n)
+//   pubkey_x_be (out)   : 32-byte big-endian Q.x
+//   pubkey_y_be (out)   : 32-byte big-endian Q.y
 // ===========================================================================
 
 fn ecdh_p256_keygen(privkey_be: Address, pubkey_x_be: Address, pubkey_y_be: Address) {
-    // Convert private key to little-endian
-    d_le = allocate(32);
-    swap_endian_32(d_le, privkey_be);
-
-    // Get generator point in little-endian
-    gx_be = p256_gx();
-    gy_be = p256_gy();
-    gx_le = allocate(32);
-    gy_le = allocate(32);
-    swap_endian_32(gx_le, gx_be);
-    swap_endian_32(gy_le, gy_be);
-    free(gx_be); free(gy_be);
-
-    // Get prime p in little-endian
-    p_be = p256_p();
-    p_le = allocate(32);
-    swap_endian_32(p_le, p_be);
-    free(p_be);
-
-    // Q = d * G
-    qx_le = allocate(32);
-    qy_le = allocate(32);
-    p256_scalar_mul(qx_le, qy_le, d_le, gx_le, gy_le, p_le);
-
-    // Convert to big-endian output
-    swap_endian_32(pubkey_x_be, qx_le);
-    swap_endian_32(pubkey_y_be, qy_le);
-
-    free(d_le); free(gx_le); free(gy_le); free(p_le); free(qx_le); free(qy_le);
+    // Delegate to the ECDSA module's keygen — same mathematical operation
+    // (Q = d * G with d reduced mod n and d != 0 enforced).
+    ecdsa_p256_keygen(privkey_be, pubkey_x_be, pubkey_y_be);
 }
 
 // ===========================================================================
-// Compute shared secret
-// S = d * Q (where d is our private key, Q is their public key)
-// Returns the x-coordinate of the shared point (32 bytes, big-endian)
+// Validate a public key:
+//   - Not the point at infinity
+//   - Coordinates in [0, p-1]
+//   - Point lies on the curve y^2 = x^3 - 3x + b (mod p)
+// Returns 1 if valid, 0 otherwise.
 // ===========================================================================
 
-fn ecdh_p256_shared_secret(privkey_be: Address, peer_pubkey_x_be: Address, peer_pubkey_y_be: Address, shared_secret: Address) {
-    // Convert to little-endian
+fn ecdh_p256_validate_pubkey(pubkey_x_be: Address, pubkey_y_be: Address) -> u32 {
+    // Point at infinity check
+    is_inf_x: u32 = 1;
+    is_inf_y: u32 = 1;
+    i: u32 = 0;
+    while i < 32 {
+        if *(pubkey_x_be + i) != 0 { is_inf_x = 0; }
+        if *(pubkey_y_be + i) != 0 { is_inf_y = 0; }
+        i = i + 1;
+    }
+    if is_inf_x == 1 && is_inf_y == 1 { return 0; }
+
+    p_be = p256_p();
+    b_be = p256_b();
+    p_le = allocate(32);
+    b_le = allocate(32);
+    swap_endian_32(p_le, p_be);
+    swap_endian_32(b_le, b_be);
+    free(p_be); free(b_be);
+
+    qx_le = allocate(32);
+    qy_le = allocate(32);
+    swap_endian_32(qx_le, pubkey_x_be);
+    swap_endian_32(qy_le, pubkey_y_be);
+
+    // Reject coordinates >= p
+    if bn256_cmp(qx_le, p_le) >= 0 { free(p_le); free(b_le); free(qx_le); free(qy_le); return 0; }
+    if bn256_cmp(qy_le, p_le) >= 0 { free(p_le); free(b_le); free(qx_le); free(qy_le); return 0; }
+
+    result: u32 = p256_is_on_curve(qx_le, qy_le, p_le, b_le);
+
+    free(p_le); free(b_le); free(qx_le); free(qy_le);
+    return result;
+}
+
+// ===========================================================================
+// Compute raw shared secret: S = d * Q_peer (x-coordinate of result)
+//   privkey_be       : 32-byte big-endian our private scalar
+//   peer_pubkey_x_be : 32-byte big-endian peer public key x
+//   peer_pubkey_y_be : 32-byte big-endian peer public key y
+//   shared (out)     : 32-byte big-endian x-coordinate of S
+// Returns 1 on success, 0 if the peer public key is invalid or the resulting
+// shared point is the point at infinity (both indicate active attacks).
+// ===========================================================================
+
+fn ecdh_p256_shared_secret(privkey_be: Address, peer_pubkey_x_be: Address, peer_pubkey_y_be: Address, shared: Address) -> u32 {
+    // Validate peer public key before any math
+    if ecdh_p256_validate_pubkey(peer_pubkey_x_be, peer_pubkey_y_be) == 0 {
+        return 0;
+    }
+
+    // Convert inputs to little-endian
     d_le = allocate(32);
     swap_endian_32(d_le, privkey_be);
     qx_le = allocate(32);
@@ -56,19 +93,86 @@ fn ecdh_p256_shared_secret(privkey_be: Address, peer_pubkey_x_be: Address, peer_
     swap_endian_32(qx_le, peer_pubkey_x_be);
     swap_endian_32(qy_le, peer_pubkey_y_be);
 
-    // Get prime p
+    // Reduce d mod n
+    n_be = p256_n();
+    n_le = allocate(32);
+    swap_endian_32(n_le, n_be);
+    free(n_be);
+    if bn256_cmp(d_le, n_le) >= 0 {
+        bn256_sub(d_le, d_le, n_le);
+    }
+    if bn256_is_zero(d_le) == 1 {
+        free(d_le); free(qx_le); free(qy_le); free(n_le);
+        return 0;
+    }
+
+    // Field prime p in little-endian
     p_be = p256_p();
     p_le = allocate(32);
     swap_endian_32(p_le, p_be);
     free(p_be);
 
-    // S = d * Q
+    // S = d * Q_peer
     sx_le = allocate(32);
     sy_le = allocate(32);
     p256_scalar_mul(sx_le, sy_le, d_le, qx_le, qy_le, p_le);
 
-    // Output x-coordinate as shared secret (big-endian)
-    swap_endian_32(shared_secret, sx_le);
+    // Reject point-at-infinity shared secret
+    ok: u32 = 1;
+    if bn256_is_zero(sx_le) == 1 {
+        if bn256_is_zero(sy_le) == 1 { ok = 0; }
+    }
 
-    free(d_le); free(qx_le); free(qy_le); free(p_le); free(sx_le); free(sy_le);
+    if ok == 1 {
+        swap_endian_32(shared, sx_le);
+    }
+
+    free(d_le); free(qx_le); free(qy_le); free(p_le); free(n_le);
+    free(sx_le); free(sy_le);
+    return ok;
+}
+
+// ===========================================================================
+// Derive a symmetric key from the raw shared secret using a Concat-KDF
+// (NIST SP 800-56A Section 5.8.1) with SHA-256.
+//   shared (in)   : 32-byte raw shared secret (x-coordinate)
+//   info  (in)    : optional context/info string (may be empty: pass len=0)
+//   info_len      : length of info in bytes
+//   key_out (out) : 32-byte derived symmetric key
+// The KDF computes Z = shared, then for i = 1: K_i = SHA-256(i_be32 || Z || info),
+// concatenates K_i until enough bytes are produced (here, exactly 32 bytes).
+// ===========================================================================
+
+fn ecdh_p256_kdf(shared: Address, info: Address, info_len: u32, key_out: Address) {
+    // Buffer layout: [4-byte counter BE] || [32-byte Z] || [info]
+    buf = allocate(4 + 32 + info_len);
+    // Place Z at offset 4
+    i: u32 = 0;
+    while i < 32 { *(buf + 4 + i) = *(shared + i); i = i + 1; }
+    // Place info after Z
+    i = 0;
+    while i < info_len { *(buf + 4 + 32 + i) = *(info + i); i = i + 1; }
+
+    // counter = 1 (big-endian 32-bit)
+    *(buf + 0) = 0; *(buf + 1) = 0; *(buf + 2) = 0; *(buf + 3) = 1;
+
+    // First 32 bytes of KDF output = SHA-256(counter || Z || info)
+    sha256_oneshot(buf, 4 + 32 + info_len, key_out);
+
+    free(buf);
+}
+
+// ===========================================================================
+// Convenience: compute shared secret AND derive a 32-byte symmetric key from it
+// in one call. Returns 1 on success, 0 on validation failure.
+// ===========================================================================
+
+fn ecdh_p256_derive_key(privkey_be: Address, peer_pubkey_x_be: Address, peer_pubkey_y_be: Address, info: Address, info_len: u32, key_out: Address) -> u32 {
+    shared = allocate(32);
+    ok: u32 = ecdh_p256_shared_secret(privkey_be, peer_pubkey_x_be, peer_pubkey_y_be, shared);
+    if ok == 1 {
+        ecdh_p256_kdf(shared, info, info_len, key_out);
+    }
+    free(shared);
+    return ok;
 }

@@ -18,10 +18,11 @@
 // MGF1 accepts a hash_func parameter (0 = SHA-256, 1 = SHA-3-256) so the
 // same primitive can serve either hash.
 //
-// Output buffers: an output Address parameter is appended to each public
-// function that produces ciphertext / plaintext / signature bytes (these
-// do not fit in the u32 status return). This matches the convention used
-// by the existing rsa.vuma PKCS#1 v1.5 module.
+// Error handling: every function uses a single return path. Each step is
+// guarded by an `err == 0` check, and any failure sets `err` and skips all
+// subsequent work, falling through to one common cleanup section that frees
+// every allocation exactly once. This eliminates the early-return pattern
+// entirely and makes resource ownership explicit.
 
 const HLEN: u32 = 32;        // SHA-256 / SHA-3-256 output length (bytes)
 const BN_BYTES: u32 = 256;   // 2048-bit bignum byte length (bignum2048.vuma)
@@ -34,9 +35,6 @@ const BN_BYTES: u32 = 256;   // 2048-bit bignum byte length (bignum2048.vuma)
 // ===========================================================================
 
 fn em_to_bn(bn: Address, em: Address, key_size: u32) {
-    // bn[0]        = LSB = em[key_size - 1]
-    // bn[key_size-1] = MSB = em[0]
-    // bn[key_size .. BN_BYTES-1] = 0
     i: u32 = 0;
     while i < key_size {
         *(bn + i) = *(em + key_size - 1 - i);
@@ -49,8 +47,6 @@ fn em_to_bn(bn: Address, em: Address, key_size: u32) {
 }
 
 fn bn_to_em(em: Address, bn: Address, key_size: u32) {
-    // em[0]        = MSB = bn[key_size - 1]
-    // em[key_size-1] = LSB = bn[0]
     i: u32 = 0;
     while i < key_size {
         *(em + i) = *(bn + key_size - 1 - i);
@@ -84,6 +80,17 @@ fn xor_bytes(dst: Address, src: Address, n: u32) {
     }
 }
 
+// Constant-time byte comparison. Returns 0 on equal, nonzero otherwise.
+fn oaep_cteq(a: Address, b: Address, n: u32) -> u32 {
+    diff: u32 = 0;
+    i: u32 = 0;
+    while i < n {
+        diff = diff | (*(a + i) ^ *(b + i));
+        i = i + 1;
+    }
+    return diff;
+}
+
 // ===========================================================================
 // MGF1 — Mask Generation Function (RFC 8017 Section B.2.1)
 //   mgf1(seed, seed_len, mask, mask_len, hash_func)
@@ -94,7 +101,6 @@ fn xor_bytes(dst: Address, src: Address, n: u32) {
 // ===========================================================================
 
 fn mgf1(seed: Address, seed_len: u32, mask: Address, mask_len: u32, hash_func: u32) {
-    // buf holds seed || C where C is the 4-byte big-endian counter
     buf = allocate(seed_len + 4);
     hash_out = allocate(HLEN);
 
@@ -144,64 +150,74 @@ fn mgf1(seed: Address, seed_len: u32, mask: Address, mask_len: u32, hash_func: u
 // ===========================================================================
 
 fn rsa_oaep_encrypt(msg: Address, msg_len: u32, e: Address, n: Address, key_size: u32, label: Address, label_len: u32, random: Address, ciphertext: Address) -> u32 {
+    // Single-error-path layout: every allocation happens up front, every step
+    // is guarded by `err == 0`, and one cleanup section frees everything.
+    err: u32 = 0;
+
+    lHash   = allocate(HLEN);
+    DB      = allocate(BN_BYTES);
+    seed    = allocate(HLEN);
+    dbMask  = allocate(BN_BYTES);
+    seedMask = allocate(HLEN);
+    EM      = allocate(BN_BYTES);
+    em_bn   = allocate(BN_BYTES);
+    ct_bn   = allocate(BN_BYTES);
+
     // Length check: msg_len <= key_size - 2*hLen - 2
     max_len: u32 = key_size - 2 * HLEN - 2;
-    if msg_len > max_len { return 0; }
+    if msg_len > max_len { err = 1; }
 
-    db_len: u32 = key_size - HLEN - 1;
-    ps_len: u32 = key_size - msg_len - 2 * HLEN - 2;
+    db_len: u32 = 0;
+    ps_len: u32 = 0;
+    if err == 0 {
+        db_len = key_size - HLEN - 1;
+        ps_len = key_size - msg_len - 2 * HLEN - 2;
 
-    // a) lHash = Hash(label)  (32 bytes, SHA-256)
-    lHash = allocate(HLEN);
-    hash_oneshot(label, label_len, lHash, 0);
+        // a) lHash = Hash(label)  (32 bytes, SHA-256)
+        hash_oneshot(label, label_len, lHash, 0);
 
-    // b)+c) DB = lHash || PS(zeros) || 0x01 || M   (db_len bytes)
-    DB = allocate(db_len);
-    i: u32 = 0;
-    while i < HLEN { *(DB + i) = *(lHash + i); i = i + 1; }
-    i = 0;
-    while i < ps_len { *(DB + HLEN + i) = 0; i = i + 1; }
-    *(DB + HLEN + ps_len) = 1;
-    i = 0;
-    while i < msg_len { *(DB + HLEN + ps_len + 1 + i) = *(msg + i); i = i + 1; }
+        // b)+c) DB = lHash || PS(zeros) || 0x01 || M   (db_len bytes)
+        i: u32 = 0;
+        while i < HLEN { *(DB + i) = *(lHash + i); i = i + 1; }
+        i = 0;
+        while i < ps_len { *(DB + HLEN + i) = 0; i = i + 1; }
+        *(DB + HLEN + ps_len) = 1;
+        i = 0;
+        while i < msg_len { *(DB + HLEN + ps_len + 1 + i) = *(msg + i); i = i + 1; }
 
-    // d) seed = random hLen bytes
-    seed = allocate(HLEN);
-    i = 0;
-    while i < HLEN { *(seed + i) = *(random + i); i = i + 1; }
+        // d) seed = random hLen bytes
+        i = 0;
+        while i < HLEN { *(seed + i) = *(random + i); i = i + 1; }
 
-    // e) dbMask = MGF1(seed, db_len)
-    dbMask = allocate(db_len);
-    mgf1(seed, HLEN, dbMask, db_len, 0);
+        // e) dbMask = MGF1(seed, db_len)
+        mgf1(seed, HLEN, dbMask, db_len, 0);
 
-    // f) maskedDB = DB XOR dbMask   (in place on DB)
-    xor_bytes(DB, dbMask, db_len);
+        // f) maskedDB = DB XOR dbMask   (in place on DB)
+        xor_bytes(DB, dbMask, db_len);
 
-    // g) seedMask = MGF1(maskedDB, hLen)
-    seedMask = allocate(HLEN);
-    mgf1(DB, db_len, seedMask, HLEN, 0);
+        // g) seedMask = MGF1(maskedDB, hLen)
+        mgf1(DB, db_len, seedMask, HLEN, 0);
 
-    // h) maskedSeed = seed XOR seedMask   (in place on seed)
-    xor_bytes(seed, seedMask, HLEN);
+        // h) maskedSeed = seed XOR seedMask   (in place on seed)
+        xor_bytes(seed, seedMask, HLEN);
 
-    // i) EM = 0x00 || maskedSeed || maskedDB   (key_size bytes)
-    EM = allocate(key_size);
-    *(EM + 0) = 0;
-    i = 0;
-    while i < HLEN { *(EM + 1 + i) = *(seed + i); i = i + 1; }
-    i = 0;
-    while i < db_len { *(EM + 1 + HLEN + i) = *(DB + i); i = i + 1; }
+        // i) EM = 0x00 || maskedSeed || maskedDB   (key_size bytes)
+        *(EM + 0) = 0;
+        i = 0;
+        while i < HLEN { *(EM + 1 + i) = *(seed + i); i = i + 1; }
+        i = 0;
+        while i < db_len { *(EM + 1 + HLEN + i) = *(DB + i); i = i + 1; }
 
-    // j) c = EM^e mod n
-    em_bn = allocate(BN_BYTES);
-    ct_bn = allocate(BN_BYTES);
-    em_to_bn(em_bn, EM, key_size);
-    bn2048_mod_exp(ct_bn, em_bn, e, n);
-    bn_to_em(ciphertext, ct_bn, key_size);
+        // j) c = EM^e mod n
+        em_to_bn(em_bn, EM, key_size);
+        bn2048_mod_exp(ct_bn, em_bn, e, n);
+        bn_to_em(ciphertext, ct_bn, key_size);
+    }
 
-    // k) cleanup
     free(lHash); free(DB); free(seed); free(dbMask);
     free(seedMask); free(EM); free(em_bn); free(ct_bn);
+
+    if err != 0 { return 0; }
     return key_size;
 }
 
@@ -214,89 +230,92 @@ fn rsa_oaep_encrypt(msg: Address, msg_len: u32, e: Address, n: Address, key_size
 // ===========================================================================
 
 fn rsa_oaep_decrypt(ciphertext: Address, d: Address, n: Address, key_size: u32, label: Address, label_len: u32, msg_out: Address) -> u32 {
-    if key_size < 2 * HLEN + 2 { return 0; }
+    err: u32 = 0;
+    msg_len: u32 = 0;
 
-    db_len: u32 = key_size - HLEN - 1;
-
-    // a) m = c^d mod n
-    ct_bn = allocate(BN_BYTES);
-    m_bn = allocate(BN_BYTES);
-    em_to_bn(ct_bn, ciphertext, key_size);
-    bn2048_mod_exp(m_bn, ct_bn, d, n);
-
-    // b) EM = m padded to key_size bytes (big-endian)
-    EM = allocate(key_size);
-    bn_to_em(EM, m_bn, key_size);
-
-    // c) Verify EM[0] == 0x00
-    if *(EM + 0) != 0 {
-        free(ct_bn); free(m_bn); free(EM);
-        return 0;
-    }
-
-    // d) maskedSeed = EM[1 .. 1+hLen]
+    ct_bn      = allocate(BN_BYTES);
+    m_bn       = allocate(BN_BYTES);
+    EM         = allocate(BN_BYTES);
     maskedSeed = allocate(HLEN);
-    i: u32 = 0;
-    while i < HLEN { *(maskedSeed + i) = *(EM + 1 + i); i = i + 1; }
-
-    // e) maskedDB = EM[1+hLen .. key_size]
-    maskedDB = allocate(db_len);
-    i = 0;
-    while i < db_len { *(maskedDB + i) = *(EM + 1 + HLEN + i); i = i + 1; }
-
-    // f) seedMask = MGF1(maskedDB, hLen)
-    seedMask = allocate(HLEN);
-    mgf1(maskedDB, db_len, seedMask, HLEN, 0);
-
-    // g) seed = maskedSeed XOR seedMask
-    xor_bytes(maskedSeed, seedMask, HLEN);
-
-    // h) dbMask = MGF1(seed, db_len)
-    dbMask = allocate(db_len);
-    mgf1(maskedSeed, HLEN, dbMask, db_len, 0);
-
-    // i) DB = maskedDB XOR dbMask   (in place on maskedDB)
-    xor_bytes(maskedDB, dbMask, db_len);
-
-    // j) lHash' = DB[0..hLen]; verify lHash' == Hash(label)
+    maskedDB   = allocate(BN_BYTES);
+    seedMask   = allocate(HLEN);
+    dbMask     = allocate(BN_BYTES);
     lHash_expected = allocate(HLEN);
-    hash_oneshot(label, label_len, lHash_expected, 0);
-    if memcmp(maskedDB, lHash_expected, HLEN) != 0 {
-        free(ct_bn); free(m_bn); free(EM); free(maskedSeed);
-        free(maskedDB); free(seedMask); free(dbMask); free(lHash_expected);
-        return 0;
+
+    db_len: u32 = 0;
+    if key_size < 2 * HLEN + 2 { err = 1; }
+
+    if err == 0 {
+        db_len = key_size - HLEN - 1;
+
+        // a) m = c^d mod n
+        em_to_bn(ct_bn, ciphertext, key_size);
+        bn2048_mod_exp(m_bn, ct_bn, d, n);
+
+        // b) EM = m padded to key_size bytes (big-endian)
+        bn_to_em(EM, m_bn, key_size);
+
+        // c) Verify EM[0] == 0x00
+        if *(EM + 0) != 0 { err = 1; }
     }
 
-    // k) Find 0x01 separator after lHash (PS bytes between must be 0x00)
-    idx: u32 = HLEN;
-    found: u32 = 0;
-    while idx < db_len {
-        b: u32 = *(maskedDB + idx);
-        if b == 1 { found = 1; break; }
-        if b != 0 {
-            // non-zero, non-0x01 byte before separator -> invalid
-            free(ct_bn); free(m_bn); free(EM); free(maskedSeed);
-            free(maskedDB); free(seedMask); free(dbMask); free(lHash_expected);
-            return 0;
+    if err == 0 {
+        // d) maskedSeed = EM[1 .. 1+hLen]
+        i: u32 = 0;
+        while i < HLEN { *(maskedSeed + i) = *(EM + 1 + i); i = i + 1; }
+
+        // e) maskedDB = EM[1+hLen .. key_size]
+        i = 0;
+        while i < db_len { *(maskedDB + i) = *(EM + 1 + HLEN + i); i = i + 1; }
+
+        // f) seedMask = MGF1(maskedDB, hLen)
+        mgf1(maskedDB, db_len, seedMask, HLEN, 0);
+
+        // g) seed = maskedSeed XOR seedMask
+        xor_bytes(maskedSeed, seedMask, HLEN);
+
+        // h) dbMask = MGF1(seed, db_len)
+        mgf1(maskedSeed, HLEN, dbMask, db_len, 0);
+
+        // i) DB = maskedDB XOR dbMask   (in place on maskedDB)
+        xor_bytes(maskedDB, dbMask, db_len);
+
+        // j) lHash' = DB[0..hLen]; verify lHash' == Hash(label)
+        hash_oneshot(label, label_len, lHash_expected, 0);
+        if oaep_cteq(maskedDB, lHash_expected, HLEN) != 0 { err = 1; }
+    }
+
+    if err == 0 {
+        // k) Find 0x01 separator after lHash (PS bytes between must be 0x00)
+        idx: u32 = HLEN;
+        found: u32 = 0;
+        while idx < db_len {
+            b: u32 = *(maskedDB + idx);
+            if b == 1 { found = 1; break; }
+            if b != 0 {
+                // non-zero, non-0x01 byte before separator -> invalid
+                err = 1;
+                break;
+            }
+            idx = idx + 1;
         }
-        idx = idx + 1;
-    }
-    if found == 0 {
-        free(ct_bn); free(m_bn); free(EM); free(maskedSeed);
-        free(maskedDB); free(seedMask); free(dbMask); free(lHash_expected);
-        return 0;
-    }
+        if found == 0 && err == 0 { err = 1; }
 
-    // l) Message = bytes after 0x01
-    msg_len: u32 = db_len - idx - 1;
-    i = 0;
-    while i < msg_len {
-        *(msg_out + i) = *(maskedDB + idx + 1 + i);
-        i = i + 1;
+        if err == 0 {
+            // l) Message = bytes after 0x01
+            msg_len = db_len - idx - 1;
+            i: u32 = 0;
+            while i < msg_len {
+                *(msg_out + i) = *(maskedDB + idx + 1 + i);
+                i = i + 1;
+            }
+        }
     }
 
     free(ct_bn); free(m_bn); free(EM); free(maskedSeed);
     free(maskedDB); free(seedMask); free(dbMask); free(lHash_expected);
+
+    if err != 0 { return 0; }
     return msg_len;
 }
 
@@ -309,78 +328,83 @@ fn rsa_oaep_decrypt(ciphertext: Address, d: Address, n: Address, key_size: u32, 
 // ===========================================================================
 
 fn rsa_pss_sign(msg: Address, msg_len: u32, d: Address, n: Address, key_size: u32, salt: Address, salt_len: u32, signature: Address) -> u32 {
-    // Length check: salt_len + hLen + 2 <= key_size
-    if salt_len + HLEN + 2 > key_size { return 0; }
+    err: u32 = 0;
 
-    db_len: u32 = key_size - HLEN - 1;
-    ps_len: u32 = key_size - salt_len - HLEN - 2;
-    mprime_len: u32 = 8 + HLEN + salt_len;
+    mHash   = allocate(HLEN);
+    Mprime  = allocate(8 + HLEN + 64); // up to 8 + HLEN + (key_size - HLEN - 2)
+    H       = allocate(HLEN);
+    DB      = allocate(BN_BYTES);
+    dbMask  = allocate(BN_BYTES);
+    EM      = allocate(BN_BYTES);
+    em_bn   = allocate(BN_BYTES);
+    s_bn    = allocate(BN_BYTES);
 
-    // a) mHash = Hash(msg)  (32 bytes, SHA-256)
-    mHash = allocate(HLEN);
-    sha256_oneshot(msg, msg_len, mHash);
+    if salt_len + HLEN + 2 > key_size { err = 1; }
 
-    // b) M' = (0x00 * 8) || mHash || salt   (8 + hLen + saltLen bytes)
-    Mprime = allocate(mprime_len);
-    i: u32 = 0;
-    while i < 8 { *(Mprime + i) = 0; i = i + 1; }
-    i = 0;
-    while i < HLEN { *(Mprime + 8 + i) = *(mHash + i); i = i + 1; }
-    i = 0;
-    while i < salt_len { *(Mprime + 8 + HLEN + i) = *(salt + i); i = i + 1; }
+    if err == 0 {
+        db_len: u32 = key_size - HLEN - 1;
+        ps_len: u32 = key_size - salt_len - HLEN - 2;
+        mprime_len: u32 = 8 + HLEN + salt_len;
 
-    // c) H = Hash(M')
-    H = allocate(HLEN);
-    sha256_oneshot(Mprime, mprime_len, H);
+        // a) mHash = Hash(msg)  (32 bytes, SHA-256)
+        sha256_oneshot(msg, msg_len, mHash);
 
-    // d)+e) DB = PS(zeros) || 0x01 || salt   (db_len bytes)
-    DB = allocate(db_len);
-    i = 0;
-    while i < ps_len { *(DB + i) = 0; i = i + 1; }
-    *(DB + ps_len) = 1;
-    i = 0;
-    while i < salt_len { *(DB + ps_len + 1 + i) = *(salt + i); i = i + 1; }
+        // b) M' = (0x00 * 8) || mHash || salt   (8 + hLen + saltLen bytes)
+        i: u32 = 0;
+        while i < 8 { *(Mprime + i) = 0; i = i + 1; }
+        i = 0;
+        while i < HLEN { *(Mprime + 8 + i) = *(mHash + i); i = i + 1; }
+        i = 0;
+        while i < salt_len { *(Mprime + 8 + HLEN + i) = *(salt + i); i = i + 1; }
 
-    // f) dbMask = MGF1(H, db_len)
-    dbMask = allocate(db_len);
-    mgf1(H, HLEN, dbMask, db_len, 0);
+        // c) H = Hash(M')
+        sha256_oneshot(Mprime, mprime_len, H);
 
-    // g) maskedDB = DB XOR dbMask   (in place on DB)
-    xor_bytes(DB, dbMask, db_len);
+        // d)+e) DB = PS(zeros) || 0x01 || salt   (db_len bytes)
+        i = 0;
+        while i < ps_len { *(DB + i) = 0; i = i + 1; }
+        *(DB + ps_len) = 1;
+        i = 0;
+        while i < salt_len { *(DB + ps_len + 1 + i) = *(salt + i); i = i + 1; }
 
-    // h) Set leftmost (8*emLen - emBits) bits of maskedDB[0] to 0
-    //    where emBits = modBits - 1, emLen = key_size
-    mod_bits: u32 = bn2048_bitlen(n);
-    if mod_bits == 0 {
-        free(mHash); free(Mprime); free(H); free(DB); free(dbMask);
-        return 0;
+        // f) dbMask = MGF1(H, db_len)
+        mgf1(H, HLEN, dbMask, db_len, 0);
+
+        // g) maskedDB = DB XOR dbMask   (in place on DB)
+        xor_bytes(DB, dbMask, db_len);
+
+        // h) Set leftmost (8*emLen - emBits) bits of maskedDB[0] to 0
+        //    where emBits = modBits - 1, emLen = key_size
+        mod_bits: u32 = bn2048_bitlen(n);
+        if mod_bits == 0 { err = 1; }
+        if err == 0 {
+            em_bits: u32 = mod_bits - 1;
+            clear_bits: u32 = 8 * key_size - em_bits;
+            if clear_bits >= 8 {
+                *(DB + 0) = 0;
+            } else {
+                m8: u32 = 255 >> clear_bits;
+                *(DB + 0) = *(DB + 0) & m8;
+            }
+
+            // i) EM = maskedDB || H || 0xBC   (key_size bytes)
+            i = 0;
+            while i < db_len { *(EM + i) = *(DB + i); i = i + 1; }
+            i = 0;
+            while i < HLEN { *(EM + db_len + i) = *(H + i); i = i + 1; }
+            *(EM + db_len + HLEN) = 0xBC;
+
+            // j) s = EM^d mod n
+            em_to_bn(em_bn, EM, key_size);
+            bn2048_mod_exp(s_bn, em_bn, d, n);
+            bn_to_em(signature, s_bn, key_size);
+        }
     }
-    em_bits: u32 = mod_bits - 1;
-    clear_bits: u32 = 8 * key_size - em_bits;
-    if clear_bits >= 8 {
-        *(DB + 0) = 0;
-    } else {
-        m8: u32 = 255 >> clear_bits;
-        *(DB + 0) = *(DB + 0) & m8;
-    }
-
-    // i) EM = maskedDB || H || 0xBC   (key_size bytes)
-    EM = allocate(key_size);
-    i = 0;
-    while i < db_len { *(EM + i) = *(DB + i); i = i + 1; }
-    i = 0;
-    while i < HLEN { *(EM + db_len + i) = *(H + i); i = i + 1; }
-    *(EM + db_len + HLEN) = 0xBC;
-
-    // j) s = EM^d mod n
-    em_bn = allocate(BN_BYTES);
-    s_bn = allocate(BN_BYTES);
-    em_to_bn(em_bn, EM, key_size);
-    bn2048_mod_exp(s_bn, em_bn, d, n);
-    bn_to_em(signature, s_bn, key_size);
 
     free(mHash); free(Mprime); free(H); free(DB); free(dbMask);
     free(EM); free(em_bn); free(s_bn);
+
+    if err != 0 { return 0; }
     return key_size;
 }
 
@@ -391,103 +415,106 @@ fn rsa_pss_sign(msg: Address, msg_len: u32, d: Address, n: Address, key_size: u3
 // ===========================================================================
 
 fn rsa_pss_verify(msg: Address, msg_len: u32, e: Address, n: Address, key_size: u32, signature: Address, salt_len: u32) -> u32 {
-    if salt_len + HLEN + 2 > key_size { return 0; }
-
-    db_len: u32 = key_size - HLEN - 1;
-    ps_len: u32 = key_size - salt_len - HLEN - 2;
-    mprime_len: u32 = 8 + HLEN + salt_len;
-
-    // a) mHash = Hash(msg)
-    mHash = allocate(HLEN);
-    sha256_oneshot(msg, msg_len, mHash);
-
-    // b) EM = s^e mod n (padded to key_size bytes, big-endian)
-    s_bn = allocate(BN_BYTES);
-    m_bn = allocate(BN_BYTES);
-    em_to_bn(s_bn, signature, key_size);
-    bn2048_mod_exp(m_bn, s_bn, e, n);
-    EM = allocate(key_size);
-    bn_to_em(EM, m_bn, key_size);
-
-    // c) Check EM[key_size - 1] == 0xBC
-    if *(EM + key_size - 1) != 0xBC {
-        free(mHash); free(s_bn); free(m_bn); free(EM);
-        return 0;
-    }
-
-    // d) maskedDB = EM[0 .. db_len]
-    maskedDB = allocate(db_len);
-    i: u32 = 0;
-    while i < db_len { *(maskedDB + i) = *(EM + i); i = i + 1; }
-
-    // e) H = EM[db_len .. db_len + hLen]
-    H = allocate(HLEN);
-    i = 0;
-    while i < HLEN { *(H + i) = *(EM + db_len + i); i = i + 1; }
-
-    // f) dbMask = MGF1(H, db_len)
-    dbMask = allocate(db_len);
-    mgf1(H, HLEN, dbMask, db_len, 0);
-
-    // g) DB = maskedDB XOR dbMask   (in place on maskedDB)
-    xor_bytes(maskedDB, dbMask, db_len);
-
-    // h) Set leftmost (8*emLen - emBits) bits of DB[0] to 0
-    mod_bits: u32 = bn2048_bitlen(n);
-    if mod_bits == 0 {
-        free(mHash); free(s_bn); free(m_bn); free(EM);
-        free(maskedDB); free(H); free(dbMask);
-        return 0;
-    }
-    em_bits: u32 = mod_bits - 1;
-    clear_bits: u32 = 8 * key_size - em_bits;
-    if clear_bits >= 8 {
-        *(maskedDB + 0) = 0;
-    } else {
-        m8: u32 = 255 >> clear_bits;
-        *(maskedDB + 0) = *(maskedDB + 0) & m8;
-    }
-
-    // i) Check DB[0 .. ps_len] == 0x00
-    i = 0;
-    while i < ps_len {
-        if *(maskedDB + i) != 0 {
-            free(mHash); free(s_bn); free(m_bn); free(EM);
-            free(maskedDB); free(H); free(dbMask);
-            return 0;
-        }
-        i = i + 1;
-    }
-
-    // j) Check DB[ps_len] == 0x01
-    if *(maskedDB + ps_len) != 1 {
-        free(mHash); free(s_bn); free(m_bn); free(EM);
-        free(maskedDB); free(H); free(dbMask);
-        return 0;
-    }
-
-    // k) salt' = DB[ps_len + 1 .. db_len]
-    salt_offset: u32 = ps_len + 1;
-
-    // l) M' = (0x00 * 8) || mHash || salt'
-    Mprime = allocate(mprime_len);
-    i = 0;
-    while i < 8 { *(Mprime + i) = 0; i = i + 1; }
-    i = 0;
-    while i < HLEN { *(Mprime + 8 + i) = *(mHash + i); i = i + 1; }
-    i = 0;
-    while i < salt_len { *(Mprime + 8 + HLEN + i) = *(maskedDB + salt_offset + i); i = i + 1; }
-
-    // m) H' = Hash(M')
-    Hprime = allocate(HLEN);
-    sha256_oneshot(Mprime, mprime_len, Hprime);
-
-    // n) Return H == H'
+    err: u32 = 0;
     result: u32 = 0;
-    if memcmp(H, Hprime, HLEN) == 0 { result = 1; }
+
+    mHash    = allocate(HLEN);
+    s_bn     = allocate(BN_BYTES);
+    m_bn     = allocate(BN_BYTES);
+    EM       = allocate(BN_BYTES);
+    maskedDB = allocate(BN_BYTES);
+    H        = allocate(HLEN);
+    dbMask   = allocate(BN_BYTES);
+    Mprime   = allocate(8 + HLEN + 64);
+    Hprime   = allocate(HLEN);
+
+    db_len: u32 = 0;
+    ps_len: u32 = 0;
+    mprime_len: u32 = 0;
+
+    if salt_len + HLEN + 2 > key_size { err = 1; }
+
+    if err == 0 {
+        db_len = key_size - HLEN - 1;
+        ps_len = key_size - salt_len - HLEN - 2;
+        mprime_len = 8 + HLEN + salt_len;
+
+        // a) mHash = Hash(msg)
+        sha256_oneshot(msg, msg_len, mHash);
+
+        // b) EM = s^e mod n (padded to key_size bytes, big-endian)
+        em_to_bn(s_bn, signature, key_size);
+        bn2048_mod_exp(m_bn, s_bn, e, n);
+        bn_to_em(EM, m_bn, key_size);
+
+        // c) Check EM[key_size - 1] == 0xBC
+        if *(EM + key_size - 1) != 0xBC { err = 1; }
+    }
+
+    if err == 0 {
+        // d) maskedDB = EM[0 .. db_len]
+        i: u32 = 0;
+        while i < db_len { *(maskedDB + i) = *(EM + i); i = i + 1; }
+
+        // e) H = EM[db_len .. db_len + hLen]
+        i = 0;
+        while i < HLEN { *(H + i) = *(EM + db_len + i); i = i + 1; }
+
+        // f) dbMask = MGF1(H, db_len)
+        mgf1(H, HLEN, dbMask, db_len, 0);
+
+        // g) DB = maskedDB XOR dbMask   (in place on maskedDB)
+        xor_bytes(maskedDB, dbMask, db_len);
+
+        // h) Set leftmost (8*emLen - emBits) bits of DB[0] to 0
+        mod_bits: u32 = bn2048_bitlen(n);
+        if mod_bits == 0 { err = 1; }
+        if err == 0 {
+            em_bits: u32 = mod_bits - 1;
+            clear_bits: u32 = 8 * key_size - em_bits;
+            if clear_bits >= 8 {
+                *(maskedDB + 0) = 0;
+            } else {
+                m8: u32 = 255 >> clear_bits;
+                *(maskedDB + 0) = *(maskedDB + 0) & m8;
+            }
+
+            // i) Check DB[0 .. ps_len] == 0x00
+            i = 0;
+            while i < ps_len {
+                if *(maskedDB + i) != 0 { err = 1; break; }
+                i = i + 1;
+            }
+        }
+    }
+
+    if err == 0 {
+        // j) Check DB[ps_len] == 0x01
+        if *(maskedDB + ps_len) != 1 { err = 1; }
+    }
+
+    if err == 0 {
+        // k) salt' = DB[ps_len + 1 .. db_len]
+        salt_offset: u32 = ps_len + 1;
+
+        // l) M' = (0x00 * 8) || mHash || salt'
+        i: u32 = 0;
+        while i < 8 { *(Mprime + i) = 0; i = i + 1; }
+        i = 0;
+        while i < HLEN { *(Mprime + 8 + i) = *(mHash + i); i = i + 1; }
+        i = 0;
+        while i < salt_len { *(Mprime + 8 + HLEN + i) = *(maskedDB + salt_offset + i); i = i + 1; }
+
+        // m) H' = Hash(M')
+        sha256_oneshot(Mprime, mprime_len, Hprime);
+
+        // n) Return H == H' (constant-time)
+        if oaep_cteq(H, Hprime, HLEN) == 0 { result = 1; }
+    }
 
     free(mHash); free(s_bn); free(m_bn); free(EM);
     free(maskedDB); free(H); free(dbMask);
     free(Mprime); free(Hprime);
+
     return result;
 }
