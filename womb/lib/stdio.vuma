@@ -196,7 +196,7 @@ fn write_bin(val: u64) -> i64 {
 }
 
 // ===========================================================================
-// printf-style formatted output (simplified)
+// printf-style formatted output
 // ===========================================================================
 
 fn printf_str(s: Address) -> i64 {
