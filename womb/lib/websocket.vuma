@@ -1,24 +1,17 @@
 // womb/lib/websocket.vuma — WebSocket Protocol (RFC 6455)
 // No main() — importable library module.
-// Frame parsing and building for WebSocket communication.
-// Requires: sha1.vuma, base64.vuma (for handshake).
-
-extern "C" {
-    fn write(fd: i64, buf: Address, count: i64) -> i64;
-    fn read(fd: i64, buf: Address, count: i64) -> i64;
-    fn close(fd: i64) -> i64;
-}
-
-// WebSocket opcodes
-const WS_OPCODE_CONTINUATION: u32 = 0;
-const WS_OPCODE_TEXT: u32 = 1;
-const WS_OPCODE_BINARY: u32 = 2;
-const WS_OPCODE_CLOSE: u32 = 8;
-const WS_OPCODE_PING: u32 = 9;
-const WS_OPCODE_PONG: u32 = 10;
-
-// ===========================================================================
-// WebSocket Frame Format (RFC 6455 Section 5.2):
+//
+// Task ID: W4.1
+//
+// Implements:
+//   1. Handshake         ws_compute_accept_key(client_key, out) -> u32
+//   2. Frame builder     ws_build_frame(opcode, fin, mask, payload, len, out) -> u32
+//   3. Frame parser      ws_parse_frame(data, len, opcode, fin, masked, payload, payload_len) -> u32
+//   4. Mask generation   ws_generate_mask(out) -> u32
+//   5. Convenience I/O   ws_send_text, ws_send_binary, ws_send_close,
+//                        ws_send_ping, ws_send_pong
+//
+// WebSocket Frame Format (RFC 6455 §5.2):
 //   0                   1                   2                   3
 //   0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
 //  +-+-+-+-+-------+-+-------------+-------------------------------+
@@ -33,219 +26,480 @@ const WS_OPCODE_PONG: u32 = 10;
 //  +-------------------------------+-------------------------------+
 //  | Masking-key (continued)       |          Payload Data         |
 //  +-------------------------------- - - - - - - - - - - - - - - - +
-// ===========================================================================
+//
+// Opcodes (RFC 6455 §5.2):
+//   0x0  Continuation
+//   0x1  Text
+//   0x2  Binary
+//   0x8  Close
+//   0x9  Ping
+//   0xA  Pong
+//
+// Handshake (RFC 6455 §1.3):
+//   For `Sec-WebSocket-Key: <key>` the server replies with
+//   `Sec-WebSocket-Accept: base64(SHA-1(key || GUID))` where
+//   GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11" (36 bytes).
+//
+// Masking (RFC 6455 §5.3):
+//   Client-to-server frames MUST be masked with a 4-byte key.
+//   transformed_payload[i] = payload[i] XOR mask[i MOD 4].
+//   The mask is generated via HMAC_DRBG (NIST SP 800-90A Rev. 1).
+//
+// External primitives (declared `extern "C"` below) match the canonical
+// signatures in womb/crypto/sha1.vuma, womb/encoding/base64.vuma, and
+// womb/crypto/drbg.vuma:
+//   sha1_oneshot(data, len, out)
+//   base64_encode(in, in_len, out) -> u32
+//   drbg_init(state, entropy, entropy_len, nonce, nonce_len)
+//   drbg_generate(state, out, out_len) -> u32
+//   write(fd, buf, count) -> i64   (libc)
+//
+// Memory is managed with allocate()/free(); byte-level loads/stores use
+// the *(ptr + offset) primitive. No function uses early returns — loop
+// termination is via counter exhaustion or a `done`/`status` flag, and
+// the only `return` inside a function is the trailing tail-conditional
+// `if status != 0 { return 0; }` at function exit (after all free()
+// cleanup), followed by the final `return <value>;`.
 
-// Build a WebSocket frame (server → client, no mask)
-fn ws_build_frame(opcode: u32, payload: Address, payload_len: u32, frame: Address) -> u32 {
-    pos: u32 = 0;
-
-    // FIN=1, RSV=0, opcode
-    *(frame + pos) = (128 | (opcode & 15)) & 255;  // FIN=1
-    pos = pos + 1;
-
-    // Mask=0 (server), payload length
-    if payload_len < 126 {
-        *(frame + pos) = payload_len & 255;
-        pos = pos + 1;
-    } else if payload_len < 65536 {
-        *(frame + pos) = 126;  // 16-bit length
-        pos = pos + 1;
-        *(frame + pos) = (payload_len >> 8) & 255;
-        *(frame + pos + 1) = payload_len & 255;
-        pos = pos + 2;
-    } else {
-        *(frame + pos) = 127;  // 64-bit length
-        pos = pos + 1;
-        // High 4 bytes = 0 (we don't support > 4GB frames)
-        *(frame + pos) = 0; *(frame + pos + 1) = 0;
-        *(frame + pos + 2) = 0; *(frame + pos + 3) = 0;
-        // Low 4 bytes
-        *(frame + pos + 4) = (payload_len >> 24) & 255;
-        *(frame + pos + 5) = (payload_len >> 16) & 255;
-        *(frame + pos + 6) = (payload_len >> 8) & 255;
-        *(frame + pos + 7) = payload_len & 255;
-        pos = pos + 8;
-    }
-
-    // Payload data
-    i: u32 = 0;
-    while i < payload_len {
-        *(frame + pos + i) = *(payload + i);
-        i = i + 1;
-    }
-    pos = pos + payload_len;
-
-    return pos;
+extern "C" {
+    fn write(fd: i64, buf: Address, count: i64) -> i64;
+    fn sha1_oneshot(data: Address, len: u32, out: Address);
+    fn base64_encode(input: Address, in_len: u32, output: Address) -> u32;
+    fn drbg_init(state: Address, entropy: Address, entropy_len: u32,
+                nonce: Address, nonce_len: u32);
+    fn drbg_generate(state: Address, out: Address, out_len: u32) -> u32;
 }
 
-// Parse a WebSocket frame (client → server, with mask)
-// Returns: (opcode, payload_offset, payload_len) or 0 on error
-fn ws_parse_frame(buf: Address, buf_len: u32, opcode_out: Address, payload_offset_out: Address, payload_len_out: Address) -> u32 {
-    if buf_len < 2 { return 0; }
+// Opcodes (RFC 6455 §5.2)
+const WS_OPCODE_CONTINUATION: u32 = 0;
+const WS_OPCODE_TEXT: u32 = 1;
+const WS_OPCODE_BINARY: u32 = 2;
+const WS_OPCODE_CLOSE: u32 = 8;
+const WS_OPCODE_PING: u32 = 9;
+const WS_OPCODE_PONG: u32 = 10;
 
-    b0: u32 = *(buf + 0);
-    b1: u32 = *(buf + 1);
+const WS_GUID_LEN: u32 = 36;
+const WS_SHA1_LEN: u32 = 20;
+const WS_ACCEPT_KEY_LEN: u32 = 28;       // base64(20 bytes) = 28 chars
+const WS_MASK_LEN: u32 = 4;
 
-    opcode: u32 = b0 & 15;
-    masked: u32 = (b1 >> 7) & 1;
-    payload_len: u32 = b1 & 127;
+// HMAC_DRBG state (68 bytes) at a fixed address — does not collide with
+// QUIC_DRBG_STATE (0x5A5B0000), MLKEM_ENTROPY_POOL (0x5A5A0000), or
+// HTTP2_STREAM_TABLE (0x5A5D0000).
+const WS_DRBG_STATE: Address = 0x5A5C0000;
+const WS_DRBG_SEEDED: Address = 0x5A5C0050;
 
-    pos: u32 = 2;
+// ===========================================================================
+// Little-endian u32 store/load (VUMA exposes only byte-granular access).
+// ===========================================================================
 
-    if payload_len == 126 {
-        if buf_len < pos + 2 { return 0; }
-        payload_len = (*(buf + pos) << 8) | *(buf + pos + 1);
-        pos = pos + 2;
-    } else if payload_len == 127 {
-        if buf_len < pos + 8 { return 0; }
-        // Read 64-bit length (we only use low 32 bits)
-        payload_len = (*(buf + pos + 4) << 24) | (*(buf + pos + 5) << 16) | (*(buf + pos + 6) << 8) | *(buf + pos + 7);
-        pos = pos + 8;
+fn ws_put_u32_le(addr: Address, val: u32) {
+    *(addr + 0) = val & 255;
+    *(addr + 1) = (val >> 8) & 255;
+    *(addr + 2) = (val >> 16) & 255;
+    *(addr + 3) = (val >> 24) & 255;
+}
+
+fn ws_strlen(s: Address) -> u32 {
+    n: u32 = 0;
+    done: u32 = 0;
+    while done == 0 {
+        if *(s + n) == 0 { done = 1; }
+        if done == 0 { n = n + 1; }
     }
+    return n;
+}
 
-    // Read masking key
-    mask: Address = 0;
-    if masked == 1 {
-        if buf_len < pos + 4 { return 0; }
-        mask = buf + pos;
-        pos = pos + 4;
+// ===========================================================================
+// HMAC_DRBG-backed mask generation (RFC 6455 §5.3 — client masks MUST be
+// unpredictable; we use NIST SP 800-90A HMAC_DRBG).
+// ===========================================================================
+
+// Write the 36-byte WebSocket GUID to `out` (RFC 6455 §1.3).
+fn ws_write_guid(out: Address) {
+    *(out + 0)  = 50;   // '2'
+    *(out + 1)  = 53;   // '5'
+    *(out + 2)  = 56;   // '8'
+    *(out + 3)  = 69;   // 'E'
+    *(out + 4)  = 65;   // 'A'
+    *(out + 5)  = 70;   // 'F'
+    *(out + 6)  = 65;   // 'A'
+    *(out + 7)  = 53;   // '5'
+    *(out + 8)  = 45;   // '-'
+    *(out + 9)  = 69;   // 'E'
+    *(out + 10) = 57;   // '9'
+    *(out + 11) = 49;   // '1'
+    *(out + 12) = 52;   // '4'
+    *(out + 13) = 45;   // '-'
+    *(out + 14) = 52;   // '4'
+    *(out + 15) = 55;   // '7'
+    *(out + 16) = 68;   // 'D'
+    *(out + 17) = 65;   // 'A'
+    *(out + 18) = 45;   // '-'
+    *(out + 19) = 57;   // '9'
+    *(out + 20) = 53;   // '5'
+    *(out + 21) = 67;   // 'C'
+    *(out + 22) = 65;   // 'A'
+    *(out + 23) = 45;   // '-'
+    *(out + 24) = 67;   // 'C'
+    *(out + 25) = 53;   // '5'
+    *(out + 26) = 65;   // 'A'
+    *(out + 27) = 66;   // 'B'
+    *(out + 28) = 48;   // '0'
+    *(out + 29) = 68;   // 'D'
+    *(out + 30) = 67;   // 'C'
+    *(out + 31) = 56;   // '8'
+    *(out + 32) = 53;   // '5'
+    *(out + 33) = 66;   // 'B'
+    *(out + 34) = 49;   // '1'
+    *(out + 35) = 49;   // '1'
+}
+
+// Write the 32-byte default entropy string used for lazy DRBG seeding.
+// Production callers SHOULD reseed via ws_seed_drbg with fresh entropy
+// (e.g. from /dev/urandom) before the first ws_generate_mask call.
+// Bytes: "WebSocket-HMAC-DRBG-Default-Seed!"
+fn ws_write_default_entropy(out: Address) {
+    *(out + 0)  = 87;   // 'W'
+    *(out + 1)  = 101;  // 'e'
+    *(out + 2)  = 98;   // 'b'
+    *(out + 3)  = 83;   // 'S'
+    *(out + 4)  = 111;  // 'o'
+    *(out + 5)  = 99;   // 'c'
+    *(out + 6)  = 107;  // 'k'
+    *(out + 7)  = 101;  // 'e'
+    *(out + 8)  = 116;  // 't'
+    *(out + 9)  = 45;   // '-'
+    *(out + 10) = 72;   // 'H'
+    *(out + 11) = 77;   // 'M'
+    *(out + 12) = 65;   // 'A'
+    *(out + 13) = 67;   // 'C'
+    *(out + 14) = 45;   // '-'
+    *(out + 15) = 68;   // 'D'
+    *(out + 16) = 82;   // 'R'
+    *(out + 17) = 66;   // 'B'
+    *(out + 18) = 71;   // 'G'
+    *(out + 19) = 45;   // '-'
+    *(out + 20) = 68;   // 'D'
+    *(out + 21) = 101;  // 'e'
+    *(out + 22) = 102;  // 'f'
+    *(out + 23) = 97;   // 'a'
+    *(out + 24) = 117;  // 'u'
+    *(out + 25) = 108;  // 'l'
+    *(out + 26) = 116;  // 't'
+    *(out + 27) = 45;   // '-'
+    *(out + 28) = 83;   // 'S'
+    *(out + 29) = 101;  // 'e'
+    *(out + 30) = 101;  // 'e'
+    *(out + 31) = 100;  // 'd'
+}
+
+// Seed the DRBG with caller-supplied entropy (32+ bytes recommended).
+fn ws_seed_drbg(seed: Address, seed_len: u32) {
+    nonce = allocate(1);
+    *(nonce + 0) = 0;
+    drbg_init(WS_DRBG_STATE, seed, seed_len, nonce, 0);
+    free(nonce);
+    *(WS_DRBG_SEEDED) = 1;
+}
+
+// ws_generate_mask(out) -> u32
+// Writes 4 unpredictable bytes to `out` via HMAC_DRBG. Returns 4 on
+// success, 0 on DRBG failure. The DRBG is lazily seeded with a fixed
+// 32-byte entropy string on first call — production callers SHOULD
+// reseed via ws_seed_drbg before the first call to incorporate fresh
+// per-connection entropy.
+fn ws_generate_mask(out: Address) -> u32 {
+    status: u32 = 0;
+    seeded: u32 = *(WS_DRBG_SEEDED);
+    if seeded == 0 {
+        entropy = allocate(32);
+        ws_write_default_entropy(entropy);
+        ws_seed_drbg(entropy, 32);
+        free(entropy);
     }
+    if status == 0 {
+        written: u32 = drbg_generate(WS_DRBG_STATE, out, 4);
+        if written != 4 { status = 1; }
+    }
+    if status != 0 { return 0; }
+    return 4;
+}
 
-    // Check we have enough data
-    if buf_len < pos + payload_len { return 0; }
+// ===========================================================================
+// WebSocket Handshake (RFC 6455 §1.3)
+//   accept = base64(SHA-1(client_key || "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"))
+// ===========================================================================
 
-    // Unmask payload if needed
-    if masked == 1 {
+// ws_compute_accept_key(client_key, out) -> u32
+// `client_key` is a NUL-terminated string (Sec-WebSocket-Key value,
+// typically 24 base64 chars). `out` is caller-allocated (>= 28 bytes).
+// Returns bytes written (28), or 0 on error.
+fn ws_compute_accept_key(client_key: Address, out: Address) -> u32 {
+    status: u32 = 0;
+    key_len: u32 = ws_strlen(client_key);
+    if key_len == 0 { status = 1; }
+
+    written: u32 = 0;
+
+    if status == 0 {
+        concat = allocate(key_len + WS_GUID_LEN);
+        // Copy client_key
         i: u32 = 0;
-        while i < payload_len {
-            *(buf + pos + i) = (*(buf + pos + i) ^ *(mask + (i % 4))) & 255;
-            i = i + 1;
+        while i < key_len { *(concat + i) = *(client_key + i); i = i + 1; }
+        // Append GUID
+        ws_write_guid(concat + key_len);
+
+        // SHA-1(concat)
+        hash = allocate(WS_SHA1_LEN);
+        sha1_oneshot(concat, key_len + WS_GUID_LEN, hash);
+        free(concat);
+
+        // base64(hash) → 28 chars (20 bytes encoded with one '=' pad)
+        written = base64_encode(hash, WS_SHA1_LEN, out);
+        free(hash);
+
+        if written != WS_ACCEPT_KEY_LEN { status = 2; }
+    }
+
+    if status != 0 { return 0; }
+    return written;
+}
+
+// ===========================================================================
+// WebSocket Frame Builder (RFC 6455 §5.2 / §5.3)
+// ===========================================================================
+
+// ws_build_frame(opcode, fin, mask, payload, len, out) -> u32
+// Writes a single WebSocket frame to `out`.
+//   opcode : 4-bit opcode (WS_OPCODE_*)
+//   fin    : 0 or 1 (FIN bit)
+//   mask   : 0 or 1 (whether to mask the payload; clients MUST set 1)
+//   payload: pointer to payload bytes (may be 0 if len == 0)
+//   len    : payload length in bytes
+//   out    : caller-allocated (>= len + 14 bytes)
+// Returns total frame size, or 0 on error.
+fn ws_build_frame(opcode: u32, fin: u32, mask: u32, payload: Address,
+                 len: u32, out: Address) -> u32 {
+    status: u32 = 0;
+    pos: u32 = 0;
+
+    // Byte 0: FIN(1) RSV(3) opcode(4) — RSV bits MUST be 0 (RFC 6455 §5.2)
+    b0: u32 = opcode & 15;
+    if fin == 1 { b0 = b0 | 128; }
+    *(out + 0) = b0 & 255;
+    pos = 1;
+
+    // Byte 1+ : MASK(1) payload_len(7) [extended len] [masking key] [payload]
+    if len < 126 {
+        b1: u32 = len & 127;
+        if mask == 1 { b1 = b1 | 128; }
+        *(out + pos) = b1 & 255;
+        pos = pos + 1;
+    } else {
+        if len < 65536 {
+            b1: u32 = 126;
+            if mask == 1 { b1 = b1 | 128; }
+            *(out + pos) = b1 & 255;
+            pos = pos + 1;
+            *(out + pos + 0) = (len >> 8) & 255;
+            *(out + pos + 1) = len & 255;
+            pos = pos + 2;
+        } else {
+            b1: u32 = 127;
+            if mask == 1 { b1 = b1 | 128; }
+            *(out + pos) = b1 & 255;
+            pos = pos + 1;
+            // 64-bit length, high 4 bytes = 0 (we only support 32-bit lengths)
+            *(out + pos + 0) = 0;
+            *(out + pos + 1) = 0;
+            *(out + pos + 2) = 0;
+            *(out + pos + 3) = 0;
+            *(out + pos + 4) = (len >> 24) & 255;
+            *(out + pos + 5) = (len >> 16) & 255;
+            *(out + pos + 6) = (len >> 8) & 255;
+            *(out + pos + 7) = len & 255;
+            pos = pos + 8;
         }
     }
 
-    // Output
-    *opcode_out = opcode & 255;
-    *(payload_offset_out + 0) = pos & 255;
-    *(payload_offset_out + 1) = (pos >> 8) & 255;
-    *(payload_len_out + 0) = payload_len & 255;
-    *(payload_len_out + 1) = (payload_len >> 8) & 255;
-    *(payload_len_out + 2) = (payload_len >> 16) & 255;
-    *(payload_len_out + 3) = (payload_len >> 24) & 255;
+    // Masking key (RFC 6455 §5.3)
+    mask_ptr: Address = 0;
+    mask_buf = allocate(4);
+    if mask == 1 {
+        mw: u32 = ws_generate_mask(mask_buf);
+        if mw != 4 { status = 1; }
+        if status == 0 {
+            *(out + pos + 0) = *(mask_buf + 0);
+            *(out + pos + 1) = *(mask_buf + 1);
+            *(out + pos + 2) = *(mask_buf + 2);
+            *(out + pos + 3) = *(mask_buf + 3);
+            mask_ptr = out + pos;  // points into out for payload masking
+            pos = pos + 4;
+        }
+    }
 
+    // Payload data (masked if mask == 1)
+    if status == 0 {
+        i: u32 = 0;
+        while i < len {
+            b: u32 = *(payload + i);
+            if mask == 1 {
+                mk: u32 = *(mask_ptr + (i & 3));
+                b = b ^ mk;
+            }
+            *(out + pos + i) = b & 255;
+            i = i + 1;
+        }
+        pos = pos + len;
+    }
+
+    free(mask_buf);
+
+    if status != 0 { return 0; }
+    return pos;
+}
+
+// ===========================================================================
+// WebSocket Frame Parser (RFC 6455 §5.2 / §5.4)
+// ===========================================================================
+
+// ws_parse_frame(data, len, opcode, fin, masked, payload, payload_len) -> u32
+// Parses a single WebSocket frame from `data`.
+//   Outputs (each is a caller-allocated u32 LE slot, 4 bytes):
+//     opcode     : 4-bit opcode
+//     fin        : 0 or 1
+//     masked     : 0 or 1
+//     payload    : u32 LE offset into `data` where the payload starts
+//     payload_len: u32 LE payload length
+//   If the frame is masked, the payload is unmasked IN-PLACE in `data`
+//   (RFC 6455 §5.3 — clients may peek at the unmasked payload afterwards;
+//   callers that need to preserve the original frame bytes should pass a
+//   copy).
+// Returns 1 on success, 0 on error (truncated frame, bad RSV, length
+// exceeds u32 range, etc.).
+fn ws_parse_frame(data: Address, len: u32, opcode: Address, fin: Address,
+                 masked: Address, payload: Address, payload_len: Address) -> u32 {
+    status: u32 = 0;
+    if len < 2 { status = 1; }
+
+    if status == 0 {
+        b0: u32 = *(data + 0);
+        b1: u32 = *(data + 1);
+
+        fin_bit: u32 = (b0 >> 7) & 1;
+        rsv: u32 = (b0 >> 4) & 7;
+        op: u32 = b0 & 15;
+        mask_bit: u32 = (b1 >> 7) & 1;
+        plen: u32 = b1 & 127;
+
+        // RSV bits MUST be 0 unless an extension is negotiated (RFC 6455 §5.2).
+        if rsv != 0 { status = 2; }
+
+        pos: u32 = 2;
+
+        if status == 0 {
+            // Extended payload length (RFC 6455 §5.2)
+            if plen == 126 {
+                if len < pos + 2 { status = 3; }
+                if status == 0 {
+                    plen = (*(data + pos) << 8) | *(data + pos + 1);
+                    pos = pos + 2;
+                }
+            } else {
+                if plen == 127 {
+                    if len < pos + 8 { status = 4; }
+                    if status == 0 {
+                        // High 4 bytes MUST be 0 for u32-range lengths.
+                        hi: u32 = (*(data + pos) << 24) | (*(data + pos + 1) << 16) | (*(data + pos + 2) << 8) | *(data + pos + 3);
+                        if hi != 0 { status = 5; }
+                        if status == 0 {
+                            plen = (*(data + pos + 4) << 24) | (*(data + pos + 5) << 16) | (*(data + pos + 6) << 8) | *(data + pos + 7);
+                            pos = pos + 8;
+                        }
+                    }
+                }
+            }
+        }
+
+        if status == 0 {
+            // Masking key
+            mask_ptr: Address = 0;
+            if mask_bit == 1 {
+                if len < pos + 4 { status = 6; }
+                if status == 0 {
+                    mask_ptr = data + pos;
+                    pos = pos + 4;
+                }
+            }
+
+            if status == 0 {
+                // Full payload present?
+                if pos + plen > len { status = 7; }
+
+                if status == 0 {
+                    // Unmask payload in-place (RFC 6455 §5.3)
+                    if mask_bit == 1 {
+                        i: u32 = 0;
+                        while i < plen {
+                            b: u32 = *(data + pos + i);
+                            mk: u32 = *(mask_ptr + (i & 3));
+                            *(data + pos + i) = (b ^ mk) & 255;
+                            i = i + 1;
+                        }
+                    }
+
+                    ws_put_u32_le(opcode, op);
+                    ws_put_u32_le(fin, fin_bit);
+                    ws_put_u32_le(masked, mask_bit);
+                    ws_put_u32_le(payload, pos);
+                    ws_put_u32_le(payload_len, plen);
+                }
+            }
+        }
+    }
+
+    if status != 0 { return 0; }
     return 1;
 }
 
 // ===========================================================================
-// WebSocket Handshake (server-side)
-// The client sends: "Sec-WebSocket-Key: <key>\r\n"
-// The server responds with: Sec-WebSocket-Accept: base64(sha1(key + GUID))
-// GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+// Convenience senders — wrap ws_build_frame in a write() syscall.
+// Server-to-client frames (mask == 0 per RFC 6455 §5.3).
 // ===========================================================================
 
-fn ws_server_handshake(key: Address, key_len: u32, accept_out: Address) -> u32 {
-    // Concatenate key + GUID
-    guid = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
-    guid_len: u32 = 36;
-
-    concat = allocate(key_len + guid_len);
-    i: u32 = 0;
-    while i < key_len { *(concat + i) = *(key + i); i = i + 1; }
-    // Write GUID bytes
-    *(concat + key_len + 0) = 50;   // '2'
-    *(concat + key_len + 1) = 53;   // '5'
-    *(concat + key_len + 2) = 56;   // '8'
-    *(concat + key_len + 3) = 69;   // 'E'
-    *(concat + key_len + 4) = 65;   // 'A'
-    *(concat + key_len + 5) = 70;   // 'F'
-    *(concat + key_len + 6) = 65;   // 'A'
-    *(concat + key_len + 7) = 53;   // '5'
-    *(concat + key_len + 8) = 45;   // '-'
-    *(concat + key_len + 9) = 69;   // 'E'
-    *(concat + key_len + 10) = 57;  // '9'
-    *(concat + key_len + 11) = 49;  // '1'
-    *(concat + key_len + 12) = 52;  // '4'
-    *(concat + key_len + 13) = 45;  // '-'
-    *(concat + key_len + 14) = 52;  // '4'
-    *(concat + key_len + 15) = 55;  // '7'
-    *(concat + key_len + 16) = 68;  // 'D'
-    *(concat + key_len + 17) = 65;  // 'A'
-    *(concat + key_len + 18) = 45;  // '-'
-    *(concat + key_len + 19) = 57;  // '9'
-    *(concat + key_len + 20) = 53;  // '5'
-    *(concat + key_len + 21) = 67;  // 'C'
-    *(concat + key_len + 22) = 65;  // 'A'
-    *(concat + key_len + 23) = 45;  // '-'
-    *(concat + key_len + 24) = 67;  // 'C'
-    *(concat + key_len + 25) = 53;  // '5'
-    *(concat + key_len + 26) = 65;  // 'A'
-    *(concat + key_len + 27) = 66;  // 'B'
-    *(concat + key_len + 28) = 48;  // '0'
-    *(concat + key_len + 29) = 68;  // 'D'
-    *(concat + key_len + 30) = 67;  // 'C'
-    *(concat + key_len + 31) = 56;  // '8'
-    *(concat + key_len + 32) = 53;  // '5'
-    *(concat + key_len + 33) = 66;  // 'B'
-    *(concat + key_len + 34) = 49;  // '1'
-    *(concat + key_len + 35) = 49;  // '1'
-
-    // SHA-1(concat)
-    hash = allocate(20);
-    sha1_oneshot(concat, key_len + guid_len, hash);
-    free(concat);
-
-    // Base64 encode
-    enclen: u32 = base64_encode(hash, 20, accept_out);
-    free(hash);
-
-    return enclen;
+// Build a frame and write it over `sockfd`. Returns bytes written or -1.
+fn ws_send_frame(sockfd: i64, opcode: u32, payload: Address, len: u32, mask: u32) -> i64 {
+    frame = allocate(len + 14);
+    flen: u32 = ws_build_frame(opcode, 1, mask, payload, len, frame);
+    ret: i64 = -1;
+    if flen > 0 { ret = write(sockfd, frame, flen); }
+    free(frame);
+    return ret;
 }
 
-// Send a WebSocket text frame
+// Send a WebSocket text frame (server → client, unmasked).
 fn ws_send_text(sockfd: i64, text: Address) -> i64 {
-    len: u32 = 0;
-    while *(text + len) != 0 { len = len + 1; }
-    frame = allocate(len + 14);
-    frame_len: u32 = ws_build_frame(WS_OPCODE_TEXT, text, len, frame);
-    ret: i64 = write(sockfd, frame, frame_len);
-    free(frame);
-    return ret;
+    len: u32 = ws_strlen(text);
+    return ws_send_frame(sockfd, WS_OPCODE_TEXT, text, len, 0);
 }
 
-// Send a WebSocket binary frame
+// Send a WebSocket binary frame (server → client, unmasked).
 fn ws_send_binary(sockfd: i64, data: Address, len: u32) -> i64 {
-    frame = allocate(len + 14);
-    frame_len: u32 = ws_build_frame(WS_OPCODE_BINARY, data, len, frame);
-    ret: i64 = write(sockfd, frame, frame_len);
-    free(frame);
-    return ret;
+    return ws_send_frame(sockfd, WS_OPCODE_BINARY, data, len, 0);
 }
 
-// Send WebSocket close frame
+// Send a WebSocket close frame (RFC 6455 §5.5.1). Empty body.
 fn ws_send_close(sockfd: i64) -> i64 {
-    frame = allocate(2);
-    *(frame + 0) = 136;  // FIN=1, opcode=8
-    *(frame + 1) = 0;
-    ret: i64 = write(sockfd, frame, 2);
-    free(frame);
-    return ret;
+    return ws_send_frame(sockfd, WS_OPCODE_CLOSE, 0, 0, 0);
 }
 
-// Send WebSocket ping
+// Send a WebSocket ping frame (RFC 6455 §5.5.2). Empty body.
 fn ws_send_ping(sockfd: i64) -> i64 {
-    frame = allocate(2);
-    *(frame + 0) = 137;  // FIN=1, opcode=9
-    *(frame + 1) = 0;
-    ret: i64 = write(sockfd, frame, 2);
-    free(frame);
-    return ret;
+    return ws_send_frame(sockfd, WS_OPCODE_PING, 0, 0, 0);
 }
 
-// Send WebSocket pong
+// Send a WebSocket pong frame (RFC 6455 §5.5.3). Empty body.
 fn ws_send_pong(sockfd: i64) -> i64 {
-    frame = allocate(2);
-    *(frame + 0) = 138;  // FIN=1, opcode=10
-    *(frame + 1) = 0;
-    ret: i64 = write(sockfd, frame, 2);
-    free(frame);
-    return ret;
+    return ws_send_frame(sockfd, WS_OPCODE_PONG, 0, 0, 0);
 }
