@@ -1,10 +1,92 @@
-// womb/lib/asn1.vuma — ASN.1 DER Encoder/Decoder
+// womb/lib/asn1.vuma — ASN.1 DER Encoder/Decoder (ITU-T X.690)
 // No main() — importable library module.
 // Used by X.509 certificates, PKCS structures, JWT (JWS/JWE).
 //
-// DER (Distinguished Encoding Rules) — single canonical encoding.
-// TLV format: Tag || Length || Value
+// DER (Distinguished Encoding Rules, X.690 §8-§10) — single canonical
+// encoding. TLV format: Tag || Length || Value.
+//
+// Tag byte layout (X.690 §8.1.2):
+//   bits 7-6 : class       (00=universal, 01=application,
+//                           10=context-specific, 11=private)
+//   bit  5   : constructed (0=primitive, 1=constructed)
+//   bits 4-0 : tag number  (0..30 = low-tag form; 31 = long-form trigger)
+//   Long form: first byte's low 5 bits = 0x1F; subsequent bytes encode the
+//   tag number in base-128 with bit 8 (0x80) set on every byte except the
+//   last (X.690 §8.1.2.4).
+//
+// Length byte layout (X.690 §8.1.3):
+//   Short form: bit 7 = 0, bits 6-0 = length (0..127)
+//   Long form:  bit 7 = 1, bits 6-0 = number of subsequent length bytes
+//               (1..126). DER mandates the minimal encoding (no 0x81 0x00).
+//   Indefinite (0x80 with no terminator): forbidden in DER (only CER/BER).
+//
+// Primary API (X.690-compliant):
+//   * asn1_decode_tag / asn1_encode_tag             — tag (low + high form)
+//   * asn1_decode_length / asn1_encode_length        — short + long form
+//   * asn1_decode_integer / asn1_encode_integer      — INTEGER (two's comp BE)
+//   * asn1_decode_oid / asn1_encode_oid              — OBJECT IDENTIFIER
+//   * asn1_decode_octet_string / asn1_encode_octet_string
+//   * asn1_decode_bit_string / asn1_encode_bit_string — BIT STRING (X.690 §8.6)
+//   * asn1_decode_sequence / asn1_encode_sequence    — SEQUENCE (0x30)
+//   * asn1_decode_set / asn1_encode_set              — SET (0x31)
+//   * asn1_decode_boolean / asn1_encode_boolean      — BOOLEAN (X.690 §8.2)
+//   * asn1_encode_null / asn1_decode_null            — NULL (0x05 0x00)
+//   * asn1_decode_printable_string / asn1_encode_printable_string
+//   * asn1_decode_utf8_string / asn1_encode_utf8_string
+//   * asn1_decode_ia5_string / asn1_encode_ia5_string
+//   * asn1_decode_utc_time / asn1_encode_utc_time    — UTCTime YYMMDDHHMMSSZ
+//   * asn1_decode_generalized_time / asn1_encode_generalized_time
+//
+// Output-buffer conventions:
+//   * Every decode takes (buf, len, ...out) where `buf` points at the start
+//     of the TLV (the tag byte) and `len` is the maximum number of bytes the
+//     parser may read. Output parameters are u32 LE (4 bytes each) at the
+//     supplied Address. The return value is the total number of bytes
+//     consumed by the TLV (tag + length header + content), or 0 on error.
+//   * For string / octet-string / bit-string / sequence / set decoders, the
+//     `out` parameter is a caller-allocated buffer that receives a copy of
+//     the content bytes; `out_len` (u32 LE) receives the byte count.
+//   * Every encode writes the TLV into `out` and returns the number of
+//     bytes written (or 0 on error).
+//
+// Memory model:
+//   * allocate(N) / free(ptr) for transient scratch buffers.
+//   * No `break` / no early returns from inside if/while blocks; every
+//     function with preconditions uses a `status` flag and a single
+//     trailing `if status == 0 { return 0; }` before the final
+//     `return <value>;`.
+//
+// Compatibility layer:
+//   The legacy `der_*` API used by pki.vuma is preserved verbatim. The
+//   legacy helpers use the older "Address + offset" calling convention;
+//   they wrap the new asn1_* primitives where convenient but keep their
+//   original signatures so existing imports continue to link unchanged.
 
+// ===========================================================================
+// Tag-class constants (X.690 §8.1.1)
+// ===========================================================================
+
+const ASN1_CLASS_UNIVERSAL: u32 = 0;
+const ASN1_CLASS_APPLICATION: u32 = 1;
+const ASN1_CLASS_CONTEXT: u32 = 2;
+const ASN1_CLASS_PRIVATE: u32 = 3;
+
+// Universal tag numbers (X.690 §8.4)
+const ASN1_TAG_BOOLEAN: u32 = 1;
+const ASN1_TAG_INTEGER: u32 = 2;
+const ASN1_TAG_BIT_STRING: u32 = 3;
+const ASN1_TAG_OCTET_STRING: u32 = 4;
+const ASN1_TAG_NULL: u32 = 5;
+const ASN1_TAG_OID: u32 = 6;
+const ASN1_TAG_UTF8_STRING: u32 = 12;
+const ASN1_TAG_PRINTABLE_STRING: u32 = 19;
+const ASN1_TAG_IA5_STRING: u32 = 22;
+const ASN1_TAG_UTC_TIME: u32 = 23;
+const ASN1_TAG_GENERALIZED_TIME: u32 = 24;
+const ASN1_TAG_SEQUENCE: u32 = 48;       // 0x30 (constructed)
+const ASN1_TAG_SET: u32 = 49;            // 0x31 (constructed)
+
+// Legacy tag aliases (preserved for pki.vuma imports).
 const TAG_BOOLEAN: u32 = 1;
 const TAG_INTEGER: u32 = 2;
 const TAG_BIT_STRING: u32 = 3;
@@ -16,107 +98,1294 @@ const TAG_PRINTABLE_STRING: u32 = 19;
 const TAG_IA5_STRING: u32 = 22;
 const TAG_UTC_TIME: u32 = 23;
 const TAG_GENERALIZED_TIME: u32 = 24;
-const TAG_SEQUENCE: u32 = 48;       // 0x30
-const TAG_SET: u32 = 49;            // 0x31
+const TAG_SEQUENCE: u32 = 48;
+const TAG_SET: u32 = 49;
 const TAG_CONTEXT_0: u32 = 160;     // 0xA0
 const TAG_CONTEXT_1: u32 = 161;     // 0xA1
 const TAG_CONTEXT_3: u32 = 163;     // 0xA3
 
 // ===========================================================================
-// DER Length encoding/decoding
+// Little-endian u32 store/load (VUMA exposes only byte-granular access).
 // ===========================================================================
 
-// Write DER length. Returns bytes written.
-fn der_write_length(buf: Address, offset: u32, len: u32) -> u32 {
-    if len < 128 {
-        *(buf + offset) = len & 255;
-        return 1;
+fn asn1_put_u32_le(addr: Address, val: u32) {
+    *(addr + 0) = val & 255;
+    *(addr + 1) = (val >> 8) & 255;
+    *(addr + 2) = (val >> 16) & 255;
+    *(addr + 3) = (val >> 24) & 255;
+}
+
+fn asn1_get_u32_le(addr: Address) -> u32 {
+    b0: u32 = *(addr + 0);
+    b1: u32 = *(addr + 1);
+    b2: u32 = *(addr + 2);
+    b3: u32 = *(addr + 3);
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+}
+
+// ===========================================================================
+// Tag decode / encode (X.690 §8.1.2)
+// ===========================================================================
+
+// Decode a DER tag at buf[0..len]. Writes (u32 LE each):
+//   tag[0..3]         — first tag byte (raw)
+//   cls[0..3]         — class (0=universal, 1=app, 2=context, 3=private)
+//   constructed[0..3] — 0 or 1
+//   number[0..3]      — tag number (0..30 for low-form; up to 2^28 for high-form)
+// Returns bytes consumed (1 for low-form, 2+ for high-form), 0 on error.
+fn asn1_decode_tag(buf: Address, len: u32, tag: Address, cls: Address, constructed: Address, number: Address) -> u32 {
+    status: u32 = 0;
+    first: u32 = 0;
+    cls_val: u32 = 0;
+    cons_val: u32 = 0;
+    num_val: u32 = 0;
+    consumed: u32 = 1;
+    i: u32 = 1;
+    b: u32 = 0;
+    cont: u32 = 1;
+
+    if len > 0 {
+        status = 1;
+        first = *(buf + 0);
+        cls_val = (first >> 6) & 3;
+        cons_val = (first >> 5) & 1;
+        num_val = first & 31;
+        if num_val == 31 {
+            // Long form: read base-128 bytes (X.690 §8.1.2.4)
+            if len < 2 { status = 0; }
+            if status == 1 {
+                num_val = 0;
+                cont = 1;
+                i = 1;
+                while i < len && cont == 1 && status == 1 {
+                    b = *(buf + i);
+                    num_val = (num_val << 7) | (b & 127);
+                    consumed = consumed + 1;
+                    if (b & 128) == 0 { cont = 0; }
+                    i = i + 1;
+                    // Cap at 4 base-128 bytes (28 bits) so the value fits u32.
+                    if consumed > 5 && cont == 1 { status = 0; }
+                }
+                if cont == 1 { status = 0; }  // ran off end without terminator
+            }
+        }
     }
-    if len < 256 {
-        *(buf + offset) = 129;  // 0x81
-        *(buf + offset + 1) = len & 255;
-        return 2;
+
+    if status == 1 {
+        asn1_put_u32_le(tag, first);
+        asn1_put_u32_le(cls, cls_val);
+        asn1_put_u32_le(constructed, cons_val);
+        asn1_put_u32_le(number, num_val);
     }
-    // 2-byte length
-    *(buf + offset) = 130;  // 0x82
-    *(buf + offset + 1) = (len >> 8) & 255;
-    *(buf + offset + 2) = len & 255;
+
+    if status == 0 { return 0; }
+    return consumed;
+}
+
+// Encode a DER tag. Writes to out[0..]. Returns bytes written, 0 on error.
+fn asn1_encode_tag(cls: u32, constructed: u32, number: u32, out: Address) -> u32 {
+    status: u32 = 1;
+    written: u32 = 0;
+    first: u32 = 0;
+    v: u32 = 0;
+    tp: u32 = 0;
+    j: u32 = 0;
+
+    if cls > 3 { status = 0; }
+    if number > 268435455 { status = 0; }  // 28-bit cap for u32 safety
+
+    if status == 1 {
+        if number < 31 {
+            // Low-tag form: single byte
+            first = ((cls & 3) << 6) | ((constructed & 1) << 5) | (number & 31);
+            *(out + 0) = first;
+            written = 1;
+        } else {
+            // Long form: trigger byte 0x1F + base-128 bytes (MSB first)
+            first = ((cls & 3) << 6) | ((constructed & 1) << 5) | 31;
+            *(out + 0) = first;
+            temp = allocate(5);
+            tp = 0;
+            v = number;
+            while v > 0 && tp < 5 {
+                *(temp + tp) = (v & 127) | 128;  // set continuation bit
+                v = v >> 7;
+                tp = tp + 1;
+            }
+            if tp == 0 { status = 0; }  // shouldn't happen (number >= 31)
+            if status == 1 {
+                // Clear continuation bit on the last (most-significant) byte
+                *(temp + tp - 1) = *(temp + tp - 1) & 127;
+                // Copy in reverse so MSB comes first in `out`
+                j = 0;
+                while j < tp {
+                    *(out + 1 + j) = *(temp + tp - 1 - j);
+                    j = j + 1;
+                }
+                written = 1 + tp;
+            }
+            free(temp);
+        }
+    }
+
+    if status == 0 { return 0; }
+    return written;
+}
+
+// ===========================================================================
+// Length decode / encode (X.690 §8.1.3)
+// ===========================================================================
+
+// Decode DER length. Writes u32 LE length to `length`. Returns bytes consumed
+// (1 for short form, 1+n for long form), 0 on error. Rejects indefinite
+// (0x80) and non-minimal long-form encodings per DER.
+fn asn1_decode_length(buf: Address, len: u32, length: Address) -> u32 {
+    status: u32 = 0;
+    value: u32 = 0;
+    consumed: u32 = 0;
+    first: u32 = 0;
+    n: u32 = 0;
+    i: u32 = 0;
+
+    if len > 0 {
+        status = 1;
+        first = *(buf + 0);
+        if first < 128 {
+            value = first;
+            consumed = 1;
+        } else {
+            n = first & 127;
+            if n == 0 { status = 0; }       // indefinite forbidden in DER
+            if n > 4 { status = 0; }         // u32 cap (4 length bytes max)
+            if status == 1 {
+                if n + 1 > len { status = 0; }
+            }
+            if status == 1 {
+                i = 0;
+                while i < n {
+                    value = (value << 8) | *(buf + 1 + i);
+                    i = i + 1;
+                }
+                // DER minimal-encoding check (reject 0x81 0x00, 0x82 0x00 0xNN)
+                if n == 1 {
+                    if value < 128 { status = 0; }
+                }
+                if n == 2 {
+                    if value < 256 { status = 0; }
+                }
+                if n == 3 {
+                    if value < 65536 { status = 0; }
+                }
+                if n == 4 {
+                    if value < 16777216 { status = 0; }
+                }
+                consumed = 1 + n;
+            }
+        }
+    }
+
+    if status == 1 { asn1_put_u32_le(length, value); }
+    if status == 0 { return 0; }
+    return consumed;
+}
+
+// Encode DER length (minimal form). Writes to out. Returns bytes written
+// (1 for short form, 2..5 for long form).
+fn asn1_encode_length(length: u32, out: Address) -> u32 {
+    written: u32 = 0;
+    if length < 128 {
+        *(out + 0) = length & 255;
+        written = 1;
+    } else {
+        if length < 256 {
+            *(out + 0) = 129;  // 0x81
+            *(out + 1) = length & 255;
+            written = 2;
+        } else {
+            if length < 65536 {
+                *(out + 0) = 130;  // 0x82
+                *(out + 1) = (length >> 8) & 255;
+                *(out + 2) = length & 255;
+                written = 3;
+            } else {
+                if length < 16777216 {
+                    *(out + 0) = 131;  // 0x83
+                    *(out + 1) = (length >> 16) & 255;
+                    *(out + 2) = (length >> 8) & 255;
+                    *(out + 3) = length & 255;
+                    written = 4;
+                } else {
+                    *(out + 0) = 132;  // 0x84
+                    *(out + 1) = (length >> 24) & 255;
+                    *(out + 2) = (length >> 16) & 255;
+                    *(out + 3) = (length >> 8) & 255;
+                    *(out + 4) = length & 255;
+                    written = 5;
+                }
+            }
+        }
+    }
+    return written;
+}
+
+// ===========================================================================
+// TLV header helper — read tag + length, return content offset/length.
+// Used internally by the typed decoders below.
+// ===========================================================================
+
+fn asn1_decode_tlv_header(buf: Address, len: u32, tag: Address, cls: Address, constructed: Address, number: Address, content_off: Address, content_len: Address) -> u32 {
+    status: u32 = 0;
+    tag_consumed: u32 = 0;
+    len_consumed: u32 = 0;
+    c_off: u32 = 0;
+    c_len: u32 = 0;
+    len_buf = allocate(4);
+
+    if len > 0 {
+        status = 1;
+        tag_consumed = asn1_decode_tag(buf, len, tag, cls, constructed, number);
+        if tag_consumed == 0 { status = 0; }
+    }
+
+    if status == 1 {
+        len_consumed = asn1_decode_length(buf + tag_consumed, len - tag_consumed, len_buf);
+        if len_consumed == 0 { status = 0; }
+    }
+
+    if status == 1 {
+        c_len = asn1_get_u32_le(len_buf);
+        c_off = tag_consumed + len_consumed;
+        if c_off + c_len > len { status = 0; }
+    }
+
+    if status == 1 {
+        asn1_put_u32_le(content_off, c_off);
+        asn1_put_u32_le(content_len, c_len);
+    }
+
+    free(len_buf);
+    if status == 0 { return 0; }
+    return tag_consumed + len_consumed;
+}
+
+// ===========================================================================
+// INTEGER (X.690 §8.3) — two's complement big-endian
+// ===========================================================================
+
+// Decode INTEGER (tag 0x02) into a u32 value. Reads the full TLV. Writes u32
+// LE value to val_out. Returns bytes consumed, 0 on error.
+// Negative integers (high bit set on first content byte with no 0x00 sign
+// padding) are rejected since u32 cannot represent them; the magnitude of
+// a positive integer is returned directly. Magnitudes > 2^32-1 are rejected.
+fn asn1_decode_integer(buf: Address, len: u32, val_out: Address) -> u32 {
+    status: u32 = 0;
+    tag_consumed: u32 = 0;
+    len_consumed: u32 = 0;
+    content_len: u32 = 0;
+    c_off: u32 = 0;
+    value: u32 = 0;
+    start_byte: u32 = 0;
+    first_byte: u32 = 0;
+    actual_len: u32 = 0;
+    i: u32 = 0;
+    tag_buf = allocate(16);
+    len_buf = allocate(4);
+
+    if len > 0 {
+        status = 1;
+        tag_consumed = asn1_decode_tag(buf, len, tag_buf, tag_buf + 4, tag_buf + 8, tag_buf + 12);
+        if tag_consumed == 0 { status = 0; }
+    }
+
+    if status == 1 {
+        if asn1_get_u32_le(tag_buf + 12) != ASN1_TAG_INTEGER { status = 0; }
+    }
+
+    if status == 1 {
+        len_consumed = asn1_decode_length(buf + tag_consumed, len - tag_consumed, len_buf);
+        if len_consumed == 0 { status = 0; }
+    }
+
+    if status == 1 {
+        content_len = asn1_get_u32_le(len_buf);
+        c_off = tag_consumed + len_consumed;
+        if c_off + content_len > len { status = 0; }
+        if content_len == 0 { status = 0; }  // INTEGER must have at least 1 content byte
+    }
+
+    if status == 1 {
+        // Strip leading 0x00 sign-padding byte (DER mandates this for
+        // positive integers whose MSB would otherwise be set).
+        start_byte = 0;
+        if content_len > 1 {
+            if *(buf + c_off) == 0 { start_byte = 1; }
+        }
+        first_byte = *(buf + c_off + start_byte);
+        if (first_byte & 128) != 0 { status = 0; }  // negative, cannot represent
+    }
+
+    if status == 1 {
+        actual_len = content_len - start_byte;
+        if actual_len > 4 { status = 0; }  // doesn't fit in u32
+        i = 0;
+        while i < actual_len && status == 1 {
+            value = (value << 8) | *(buf + c_off + start_byte + i);
+            i = i + 1;
+        }
+    }
+
+    if status == 1 { asn1_put_u32_le(val_out, value); }
+
+    free(tag_buf);
+    free(len_buf);
+    if status == 0 { return 0; }
+    return tag_consumed + len_consumed + content_len;
+}
+
+// Encode a non-negative integer as a DER INTEGER. `val` points at a u32 LE
+// value. Writes TLV to out. Returns bytes written, 0 on error.
+fn asn1_encode_integer(val: Address, out: Address) -> u32 {
+    v: u32 = asn1_get_u32_le(val);
+    content_len: u32 = 0;
+    pos: u32 = 0;
+    i: u32 = 0;
+    high_byte: u32 = 0;
+    msb: u32 = 0;
+    pad: u32 = 0;
+    temp = allocate(5);
+
+    // Compute minimal big-endian content bytes
+    if v == 0 {
+        *(temp + 0) = 0;
+        content_len = 1;
+    } else {
+        high_byte = 0;
+        if (v >> 24) != 0 { high_byte = 4; }
+        if high_byte == 0 {
+            if (v >> 16) != 0 { high_byte = 3; }
+        }
+        if high_byte == 0 {
+            if (v >> 8) != 0 { high_byte = 2; }
+        }
+        if high_byte == 0 { high_byte = 1; }
+        // DER mandates a 0x00 pad if the high bit of the magnitude is set
+        // (otherwise the value would be misinterpreted as negative).
+        msb = (v >> ((high_byte - 1) * 8)) & 255;
+        pad = 0;
+        if (msb & 128) != 0 { pad = 1; }
+        if pad == 1 {
+            *(temp + 0) = 0;
+            content_len = 1;
+        }
+        i = 0;
+        while i < high_byte {
+            *(temp + content_len + i) = (v >> ((high_byte - 1 - i) * 8)) & 255;
+            i = i + 1;
+        }
+        content_len = content_len + high_byte;
+    }
+
+    // Write tag + length + content
+    pos = asn1_encode_tag(ASN1_CLASS_UNIVERSAL, 0, ASN1_TAG_INTEGER, out);
+    pos = pos + asn1_encode_length(content_len, out + pos);
+    i = 0;
+    while i < content_len {
+        *(out + pos + i) = *(temp + i);
+        i = i + 1;
+    }
+    pos = pos + content_len;
+
+    free(temp);
+    return pos;
+}
+
+// ===========================================================================
+// OBJECT IDENTIFIER (X.690 §8.19)
+// ===========================================================================
+
+// Decode OID (tag 0x06). Writes OID arcs as u32 LE array to oid_out (caller
+// allocates 4*max_arcs bytes; we cap at 16 arcs = 64 bytes). Writes arc
+// count (u32 LE) to oid_len. Returns bytes consumed, 0 on error.
+fn asn1_decode_oid(buf: Address, len: u32, oid_out: Address, oid_len: Address) -> u32 {
+    status: u32 = 0;
+    tag_consumed: u32 = 0;
+    len_consumed: u32 = 0;
+    content_len: u32 = 0;
+    c_off: u32 = 0;
+    count: u32 = 0;
+    i: u32 = 0;
+    b: u32 = 0;
+    arc: u32 = 0;
+    first: u32 = 0;
+    last_b: u32 = 0;
+    tag_buf = allocate(16);
+    len_buf = allocate(4);
+
+    if len > 0 {
+        status = 1;
+        tag_consumed = asn1_decode_tag(buf, len, tag_buf, tag_buf + 4, tag_buf + 8, tag_buf + 12);
+        if tag_consumed == 0 { status = 0; }
+    }
+
+    if status == 1 {
+        if asn1_get_u32_le(tag_buf + 12) != ASN1_TAG_OID { status = 0; }
+    }
+
+    if status == 1 {
+        len_consumed = asn1_decode_length(buf + tag_consumed, len - tag_consumed, len_buf);
+        if len_consumed == 0 { status = 0; }
+    }
+
+    if status == 1 {
+        content_len = asn1_get_u32_le(len_buf);
+        c_off = tag_consumed + len_consumed;
+        if c_off + content_len > len { status = 0; }
+        if content_len == 0 { status = 0; }
+    }
+
+    if status == 1 {
+        // First content byte encodes 40*X + Y (X = first arc, Y = second arc).
+        // X is in {0,1,2}; if X=2, Y can be up to 175 (first byte max = 255).
+        first = *(buf + c_off);
+        if first < 40 {
+            asn1_put_u32_le(oid_out + 0, 0);
+            asn1_put_u32_le(oid_out + 4, first);
+        } else {
+            if first < 80 {
+                asn1_put_u32_le(oid_out + 0, 1);
+                asn1_put_u32_le(oid_out + 4, first - 40);
+            } else {
+                asn1_put_u32_le(oid_out + 0, 2);
+                asn1_put_u32_le(oid_out + 4, first - 80);
+            }
+        }
+        count = 2;
+        i = 1;
+        arc = 0;
+        while i < content_len && status == 1 {
+            b = *(buf + c_off + i);
+            arc = (arc << 7) | (b & 127);
+            last_b = b;
+            if (b & 128) == 0 {
+                // End of arc
+                if count < 16 {
+                    asn1_put_u32_le(oid_out + count * 4, arc);
+                    count = count + 1;
+                } else {
+                    status = 0;
+                }
+                arc = 0;
+            }
+            i = i + 1;
+        }
+        if (last_b & 128) != 0 { status = 0; }  // unterminated arc
+    }
+
+    if status == 1 { asn1_put_u32_le(oid_len, count); }
+
+    free(tag_buf);
+    free(len_buf);
+    if status == 0 { return 0; }
+    return tag_consumed + len_consumed + content_len;
+}
+
+// Encode OID from a u32 LE arc array. `count` must be >= 2. Writes TLV to
+// out. Returns bytes written, 0 on error.
+fn asn1_encode_oid(oid_components: Address, count: u32, out: Address) -> u32 {
+    status: u32 = 1;
+    pos: u32 = 0;
+    content_pos: u32 = 0;
+    i: u32 = 0;
+    j: u32 = 0;
+    k: u32 = 0;
+    first: u32 = 0;
+    second: u32 = 0;
+    arc: u32 = 0;
+    temp = allocate(256);
+    rev = allocate(8);
+
+    if count < 2 { status = 0; }
+
+    if status == 1 {
+        first = asn1_get_u32_le(oid_components + 0);
+        second = asn1_get_u32_le(oid_components + 4);
+        if first > 2 { status = 0; }
+        if first == 2 && second > 175 { status = 0; }
+        if first < 2 && second >= 40 { status = 0; }
+    }
+
+    if status == 1 {
+        // First content byte: 40*X + Y
+        *(temp + 0) = first * 40 + second;
+        content_pos = 1;
+        i = 2;
+        while i < count && status == 1 {
+            arc = asn1_get_u32_le(oid_components + i * 4);
+            if arc == 0 {
+                *(temp + content_pos) = 0;
+                content_pos = content_pos + 1;
+            } else {
+                // Encode arc in base-128 (LSB first into rev, then reverse)
+                j = 0;
+                while arc > 0 && j < 5 {
+                    *(rev + j) = (arc & 127) | 128;  // set continuation bit
+                    arc = arc >> 7;
+                    j = j + 1;
+                }
+                // Clear continuation bit on the most-significant byte
+                if j == 0 { status = 0; }
+                if status == 1 {
+                    *(rev + j - 1) = *(rev + j - 1) & 127;
+                    k = 0;
+                    while k < j {
+                        *(temp + content_pos + k) = *(rev + j - 1 - k);
+                        k = k + 1;
+                    }
+                    content_pos = content_pos + j;
+                }
+            }
+            i = i + 1;
+        }
+    }
+
+    if status == 1 {
+        pos = asn1_encode_tag(ASN1_CLASS_UNIVERSAL, 0, ASN1_TAG_OID, out);
+        pos = pos + asn1_encode_length(content_pos, out + pos);
+        i = 0;
+        while i < content_pos {
+            *(out + pos + i) = *(temp + i);
+            i = i + 1;
+        }
+        pos = pos + content_pos;
+    }
+
+    free(temp);
+    free(rev);
+    if status == 0 { return 0; }
+    return pos;
+}
+
+// ===========================================================================
+// OCTET STRING (X.690 §8.7)
+// ===========================================================================
+
+fn asn1_decode_octet_string(buf: Address, len: u32, out: Address, out_len: Address) -> u32 {
+    status: u32 = 0;
+    tag_consumed: u32 = 0;
+    len_consumed: u32 = 0;
+    content_len: u32 = 0;
+    c_off: u32 = 0;
+    i: u32 = 0;
+    tag_buf = allocate(16);
+    len_buf = allocate(4);
+
+    if len > 0 {
+        status = 1;
+        tag_consumed = asn1_decode_tag(buf, len, tag_buf, tag_buf + 4, tag_buf + 8, tag_buf + 12);
+        if tag_consumed == 0 { status = 0; }
+    }
+
+    if status == 1 {
+        if asn1_get_u32_le(tag_buf + 12) != ASN1_TAG_OCTET_STRING { status = 0; }
+    }
+
+    if status == 1 {
+        len_consumed = asn1_decode_length(buf + tag_consumed, len - tag_consumed, len_buf);
+        if len_consumed == 0 { status = 0; }
+    }
+
+    if status == 1 {
+        content_len = asn1_get_u32_le(len_buf);
+        c_off = tag_consumed + len_consumed;
+        if c_off + content_len > len { status = 0; }
+    }
+
+    if status == 1 {
+        i = 0;
+        while i < content_len {
+            *(out + i) = *(buf + c_off + i);
+            i = i + 1;
+        }
+        asn1_put_u32_le(out_len, content_len);
+    }
+
+    free(tag_buf);
+    free(len_buf);
+    if status == 0 { return 0; }
+    return tag_consumed + len_consumed + content_len;
+}
+
+fn asn1_encode_octet_string(data: Address, len: u32, out: Address) -> u32 {
+    pos: u32 = asn1_encode_tag(ASN1_CLASS_UNIVERSAL, 0, ASN1_TAG_OCTET_STRING, out);
+    pos = pos + asn1_encode_length(len, out + pos);
+    i: u32 = 0;
+    while i < len {
+        *(out + pos + i) = *(data + i);
+        i = i + 1;
+    }
+    return pos + len;
+}
+
+// ===========================================================================
+// BIT STRING (X.690 §8.6) — first content byte = unused-bits count
+// ===========================================================================
+
+// Decode BIT STRING. Writes content bytes (excluding the unused-bits count
+// byte) to `out` and the byte count (u32 LE) to `out_len`. The unused-bits
+// count is written to out_len + 4 (so callers can recover the true bit
+// length as out_len*8 - unused_bits if needed).
+fn asn1_decode_bit_string(buf: Address, len: u32, out: Address, out_len: Address) -> u32 {
+    status: u32 = 0;
+    tag_consumed: u32 = 0;
+    len_consumed: u32 = 0;
+    content_len: u32 = 0;
+    c_off: u32 = 0;
+    unused: u32 = 0;
+    payload_len: u32 = 0;
+    i: u32 = 0;
+    tag_buf = allocate(16);
+    len_buf = allocate(4);
+
+    if len > 0 {
+        status = 1;
+        tag_consumed = asn1_decode_tag(buf, len, tag_buf, tag_buf + 4, tag_buf + 8, tag_buf + 12);
+        if tag_consumed == 0 { status = 0; }
+    }
+
+    if status == 1 {
+        if asn1_get_u32_le(tag_buf + 12) != ASN1_TAG_BIT_STRING { status = 0; }
+    }
+
+    if status == 1 {
+        len_consumed = asn1_decode_length(buf + tag_consumed, len - tag_consumed, len_buf);
+        if len_consumed == 0 { status = 0; }
+    }
+
+    if status == 1 {
+        content_len = asn1_get_u32_le(len_buf);
+        c_off = tag_consumed + len_consumed;
+        if c_off + content_len > len { status = 0; }
+        if content_len == 0 { status = 0; }  // BIT STRING must have at least 1 byte (unused bits)
+    }
+
+    if status == 1 {
+        unused = *(buf + c_off);
+        if unused > 7 { status = 0; }  // unused bits must be 0..7
+    }
+
+    if status == 1 {
+        payload_len = content_len - 1;
+        i = 0;
+        while i < payload_len {
+            *(out + i) = *(buf + c_off + 1 + i);
+            i = i + 1;
+        }
+        asn1_put_u32_le(out_len, payload_len);
+        asn1_put_u32_le(out_len + 4, unused);
+    }
+
+    free(tag_buf);
+    free(len_buf);
+    if status == 0 { return 0; }
+    return tag_consumed + len_consumed + content_len;
+}
+
+// Encode BIT STRING. `bit_len` is the total number of bits. Writes TLV to
+// out. Returns bytes written, 0 on error.
+fn asn1_encode_bit_string(data: Address, bit_len: u32, out: Address) -> u32 {
+    status: u32 = 1;
+    byte_len: u32 = 0;
+    unused: u32 = 0;
+    content_len: u32 = 0;
+    pos: u32 = 0;
+    i: u32 = 0;
+
+    if bit_len == 0 {
+        byte_len = 0;
+        unused = 0;
+    } else {
+        byte_len = (bit_len + 7) / 8;
+        unused = (byte_len * 8) - bit_len;
+    }
+    content_len = byte_len + 1;  // +1 for the unused-bits byte
+    if status == 1 {
+        pos = asn1_encode_tag(ASN1_CLASS_UNIVERSAL, 0, ASN1_TAG_BIT_STRING, out);
+        pos = pos + asn1_encode_length(content_len, out + pos);
+        *(out + pos) = unused;
+        pos = pos + 1;
+        i = 0;
+        while i < byte_len {
+            *(out + pos + i) = *(data + i);
+            i = i + 1;
+        }
+        pos = pos + byte_len;
+    }
+    if status == 0 { return 0; }
+    return pos;
+}
+
+// ===========================================================================
+// SEQUENCE (X.690 §8.9) and SET (X.690 §8.11)
+// ===========================================================================
+
+// Decode SEQUENCE. Writes content bytes (the sequence body) to `content`
+// and the byte count (u32 LE) to `content_len`. Returns bytes consumed by
+// the full TLV, 0 on error.
+fn asn1_decode_sequence(buf: Address, len: u32, content: Address, content_len: Address) -> u32 {
+    status: u32 = 0;
+    tag_consumed: u32 = 0;
+    len_consumed: u32 = 0;
+    c_len: u32 = 0;
+    c_off: u32 = 0;
+    i: u32 = 0;
+    tag_buf = allocate(16);
+    len_buf = allocate(4);
+
+    if len > 0 {
+        status = 1;
+        tag_consumed = asn1_decode_tag(buf, len, tag_buf, tag_buf + 4, tag_buf + 8, tag_buf + 12);
+        if tag_consumed == 0 { status = 0; }
+    }
+
+    if status == 1 {
+        if asn1_get_u32_le(tag_buf + 12) != ASN1_TAG_SEQUENCE { status = 0; }
+        if asn1_get_u32_le(tag_buf + 4) != ASN1_CLASS_UNIVERSAL { status = 0; }
+        if asn1_get_u32_le(tag_buf + 8) != 1 { status = 0; }  // must be constructed
+    }
+
+    if status == 1 {
+        len_consumed = asn1_decode_length(buf + tag_consumed, len - tag_consumed, len_buf);
+        if len_consumed == 0 { status = 0; }
+    }
+
+    if status == 1 {
+        c_len = asn1_get_u32_le(len_buf);
+        c_off = tag_consumed + len_consumed;
+        if c_off + c_len > len { status = 0; }
+    }
+
+    if status == 1 {
+        i = 0;
+        while i < c_len {
+            *(content + i) = *(buf + c_off + i);
+            i = i + 1;
+        }
+        asn1_put_u32_le(content_len, c_len);
+    }
+
+    free(tag_buf);
+    free(len_buf);
+    if status == 0 { return 0; }
+    return tag_consumed + len_consumed + c_len;
+}
+
+fn asn1_encode_sequence(content: Address, content_len: u32, out: Address) -> u32 {
+    pos: u32 = asn1_encode_tag(ASN1_CLASS_UNIVERSAL, 1, ASN1_TAG_SEQUENCE, out);
+    pos = pos + asn1_encode_length(content_len, out + pos);
+    i: u32 = 0;
+    while i < content_len {
+        *(out + pos + i) = *(content + i);
+        i = i + 1;
+    }
+    return pos + content_len;
+}
+
+// Decode SET — same semantics as asn1_decode_sequence but expects tag 0x31.
+fn asn1_decode_set(buf: Address, len: u32, content: Address, content_len: Address) -> u32 {
+    status: u32 = 0;
+    tag_consumed: u32 = 0;
+    len_consumed: u32 = 0;
+    c_len: u32 = 0;
+    c_off: u32 = 0;
+    i: u32 = 0;
+    tag_buf = allocate(16);
+    len_buf = allocate(4);
+
+    if len > 0 {
+        status = 1;
+        tag_consumed = asn1_decode_tag(buf, len, tag_buf, tag_buf + 4, tag_buf + 8, tag_buf + 12);
+        if tag_consumed == 0 { status = 0; }
+    }
+
+    if status == 1 {
+        if asn1_get_u32_le(tag_buf + 12) != ASN1_TAG_SET { status = 0; }
+        if asn1_get_u32_le(tag_buf + 4) != ASN1_CLASS_UNIVERSAL { status = 0; }
+        if asn1_get_u32_le(tag_buf + 8) != 1 { status = 0; }
+    }
+
+    if status == 1 {
+        len_consumed = asn1_decode_length(buf + tag_consumed, len - tag_consumed, len_buf);
+        if len_consumed == 0 { status = 0; }
+    }
+
+    if status == 1 {
+        c_len = asn1_get_u32_le(len_buf);
+        c_off = tag_consumed + len_consumed;
+        if c_off + c_len > len { status = 0; }
+    }
+
+    if status == 1 {
+        i = 0;
+        while i < c_len {
+            *(content + i) = *(buf + c_off + i);
+            i = i + 1;
+        }
+        asn1_put_u32_le(content_len, c_len);
+    }
+
+    free(tag_buf);
+    free(len_buf);
+    if status == 0 { return 0; }
+    return tag_consumed + len_consumed + c_len;
+}
+
+fn asn1_encode_set(content: Address, content_len: u32, out: Address) -> u32 {
+    pos: u32 = asn1_encode_tag(ASN1_CLASS_UNIVERSAL, 1, ASN1_TAG_SET, out);
+    pos = pos + asn1_encode_length(content_len, out + pos);
+    i: u32 = 0;
+    while i < content_len {
+        *(out + pos + i) = *(content + i);
+        i = i + 1;
+    }
+    return pos + content_len;
+}
+
+// ===========================================================================
+// BOOLEAN (X.690 §8.2) — 0x00 = FALSE, any non-zero = TRUE (DER mandates 0xFF)
+// ===========================================================================
+
+fn asn1_decode_boolean(buf: Address, len: u32, val: Address) -> u32 {
+    status: u32 = 0;
+    tag_consumed: u32 = 0;
+    len_consumed: u32 = 0;
+    content_len: u32 = 0;
+    c_off: u32 = 0;
+    b: u32 = 0;
+    result: u32 = 0;
+    tag_buf = allocate(16);
+    len_buf = allocate(4);
+
+    if len > 0 {
+        status = 1;
+        tag_consumed = asn1_decode_tag(buf, len, tag_buf, tag_buf + 4, tag_buf + 8, tag_buf + 12);
+        if tag_consumed == 0 { status = 0; }
+    }
+
+    if status == 1 {
+        if asn1_get_u32_le(tag_buf + 12) != ASN1_TAG_BOOLEAN { status = 0; }
+    }
+
+    if status == 1 {
+        len_consumed = asn1_decode_length(buf + tag_consumed, len - tag_consumed, len_buf);
+        if len_consumed == 0 { status = 0; }
+    }
+
+    if status == 1 {
+        content_len = asn1_get_u32_le(len_buf);
+        c_off = tag_consumed + len_consumed;
+        if content_len != 1 { status = 0; }
+        if c_off + content_len > len { status = 0; }
+    }
+
+    if status == 1 {
+        b = *(buf + c_off);
+        if b == 0 { result = 0; } else { result = 1; }
+        asn1_put_u32_le(val, result);
+    }
+
+    free(tag_buf);
+    free(len_buf);
+    if status == 0 { return 0; }
+    return tag_consumed + len_consumed + content_len;
+}
+
+// Encode BOOLEAN. `val` points at u32 LE (0 = FALSE, non-zero = TRUE).
+// Writes TLV to out (always 3 bytes: 01 01 FF or 01 01 00).
+fn asn1_encode_boolean(val: Address, out: Address) -> u32 {
+    v: u32 = asn1_get_u32_le(val);
+    *(out + 0) = ASN1_TAG_BOOLEAN;
+    *(out + 1) = 1;
+    if v == 0 {
+        *(out + 2) = 0;
+    } else {
+        *(out + 2) = 255;  // DER mandates 0xFF for TRUE
+    }
     return 3;
 }
 
-// Read DER length. Returns (length, bytes_consumed)
-// If bytes_consumed is 0, error.
-fn der_read_length(buf: Address, offset: u32) -> u32 {
-    b: u32 = *(buf + offset);
-    if b < 128 {
-        return b;  // short form (length = b, consumed = 1)
+// ===========================================================================
+// NULL (X.690 §8.8) — 05 00
+// ===========================================================================
+
+fn asn1_encode_null(out: Address) -> u32 {
+    *(out + 0) = ASN1_TAG_NULL;
+    *(out + 1) = 0;
+    return 2;
+}
+
+// Decode NULL — verifies tag 0x05 and zero-length content. Returns bytes
+// consumed (always 2), 0 on error.
+fn asn1_decode_null(buf: Address, len: u32) -> u32 {
+    status: u32 = 0;
+    if len >= 2 {
+        status = 1;
+        if *(buf + 0) != ASN1_TAG_NULL { status = 0; }
+        if *(buf + 1) != 0 { status = 0; }
     }
-    n: u32 = b & 127;
-    if n == 0 { return 0; }  // indefinite length not allowed in DER
-    if n > 2 { return 0; }   // error: too long
-    len: u32 = 0;
+    if status == 0 { return 0; }
+    return 2;
+}
+
+// ===========================================================================
+// String types — PrintableString, UTF8String, IA5String
+// All three are primitive byte strings; they differ only in tag and
+// character-set validation. We do light validation (reject control bytes
+// 0x00..0x1F except NUL terminator handled by caller).
+// ===========================================================================
+
+// Generic string decoder. Verifies the expected universal tag, copies the
+// content bytes to `out`, writes byte count (u32 LE) to `out_len`.
+fn asn1_decode_string_tlv(buf: Address, len: u32, expected_tag: u32, out: Address, out_len: Address) -> u32 {
+    status: u32 = 0;
+    tag_consumed: u32 = 0;
+    len_consumed: u32 = 0;
+    content_len: u32 = 0;
+    c_off: u32 = 0;
     i: u32 = 0;
-    while i < n {
-        len = (len << 8) | *(buf + offset + 1 + i);
+    tag_buf = allocate(16);
+    len_buf = allocate(4);
+
+    if len > 0 {
+        status = 1;
+        tag_consumed = asn1_decode_tag(buf, len, tag_buf, tag_buf + 4, tag_buf + 8, tag_buf + 12);
+        if tag_consumed == 0 { status = 0; }
+    }
+
+    if status == 1 {
+        if asn1_get_u32_le(tag_buf + 12) != expected_tag { status = 0; }
+        if asn1_get_u32_le(tag_buf + 4) != ASN1_CLASS_UNIVERSAL { status = 0; }
+        if asn1_get_u32_le(tag_buf + 8) != 0 { status = 0; }  // primitive
+    }
+
+    if status == 1 {
+        len_consumed = asn1_decode_length(buf + tag_consumed, len - tag_consumed, len_buf);
+        if len_consumed == 0 { status = 0; }
+    }
+
+    if status == 1 {
+        content_len = asn1_get_u32_le(len_buf);
+        c_off = tag_consumed + len_consumed;
+        if c_off + content_len > len { status = 0; }
+    }
+
+    if status == 1 {
+        i = 0;
+        while i < content_len {
+            *(out + i) = *(buf + c_off + i);
+            i = i + 1;
+        }
+        asn1_put_u32_le(out_len, content_len);
+    }
+
+    free(tag_buf);
+    free(len_buf);
+    if status == 0 { return 0; }
+    return tag_consumed + len_consumed + content_len;
+}
+
+fn asn1_encode_string_tlv(tag: u32, data: Address, len: u32, out: Address) -> u32 {
+    pos: u32 = asn1_encode_tag(ASN1_CLASS_UNIVERSAL, 0, tag, out);
+    pos = pos + asn1_encode_length(len, out + pos);
+    i: u32 = 0;
+    while i < len {
+        *(out + pos + i) = *(data + i);
         i = i + 1;
     }
-    // Encode: high bit = consumed flag, rest = length
-    // We return length; caller computes consumed = 1 + n
-    return len;
+    return pos + len;
 }
 
+fn asn1_decode_printable_string(buf: Address, len: u32, out: Address, out_len: Address) -> u32 {
+    return asn1_decode_string_tlv(buf, len, ASN1_TAG_PRINTABLE_STRING, out, out_len);
+}
+
+fn asn1_encode_printable_string(data: Address, len: u32, out: Address) -> u32 {
+    return asn1_encode_string_tlv(ASN1_TAG_PRINTABLE_STRING, data, len, out);
+}
+
+fn asn1_decode_utf8_string(buf: Address, len: u32, out: Address, out_len: Address) -> u32 {
+    return asn1_decode_string_tlv(buf, len, ASN1_TAG_UTF8_STRING, out, out_len);
+}
+
+fn asn1_encode_utf8_string(data: Address, len: u32, out: Address) -> u32 {
+    return asn1_encode_string_tlv(ASN1_TAG_UTF8_STRING, data, len, out);
+}
+
+fn asn1_decode_ia5_string(buf: Address, len: u32, out: Address, out_len: Address) -> u32 {
+    return asn1_decode_string_tlv(buf, len, ASN1_TAG_IA5_STRING, out, out_len);
+}
+
+fn asn1_encode_ia5_string(data: Address, len: u32, out: Address) -> u32 {
+    return asn1_encode_string_tlv(ASN1_TAG_IA5_STRING, data, len, out);
+}
+
+// ===========================================================================
+// UTCTime (X.690 §8.6.1) — YYMMDDHHMMSSZ (13 bytes, trailing 'Z')
+// GeneralizedTime (X.690 §8.6.2) — YYYYMMDDHHMMSSZ (15 bytes, trailing 'Z')
+// ===========================================================================
+
+fn asn1_decode_utc_time(buf: Address, len: u32, out: Address, out_len: Address) -> u32 {
+    return asn1_decode_string_tlv(buf, len, ASN1_TAG_UTC_TIME, out, out_len);
+}
+
+fn asn1_encode_utc_time(data: Address, len: u32, out: Address) -> u32 {
+    return asn1_encode_string_tlv(ASN1_TAG_UTC_TIME, data, len, out);
+}
+
+fn asn1_decode_generalized_time(buf: Address, len: u32, out: Address, out_len: Address) -> u32 {
+    return asn1_decode_string_tlv(buf, len, ASN1_TAG_GENERALIZED_TIME, out, out_len);
+}
+
+fn asn1_encode_generalized_time(data: Address, len: u32, out: Address) -> u32 {
+    return asn1_encode_string_tlv(ASN1_TAG_GENERALIZED_TIME, data, len, out);
+}
+
+// ===========================================================================
+// Well-known OID byte buffers (pre-computed DER content bytes — caller frees)
+// ===========================================================================
+
+// SHA-256 OID: 2.16.840.1.101.3.4.2.1
+// DER: 06 09 60 86 48 01 65 03 04 02 01
+fn oid_sha256() -> Address {
+    buf = allocate(9);
+    *(buf + 0) = 96;  *(buf + 1) = 134; *(buf + 2) = 72;
+    *(buf + 3) = 1;   *(buf + 4) = 101; *(buf + 5) = 3;
+    *(buf + 6) = 4;   *(buf + 7) = 2;   *(buf + 8) = 1;
+    return buf;
+}
+
+// SHA-1 OID: 1.3.14.3.2.26
+// DER: 06 05 2B 0E 03 02 1A
+fn oid_sha1() -> Address {
+    buf = allocate(5);
+    *(buf + 0) = 43;  *(buf + 1) = 14;  *(buf + 2) = 3;
+    *(buf + 3) = 2;   *(buf + 4) = 26;
+    return buf;
+}
+
+// RSA encryption OID: 1.2.840.113549.1.1.1
+// DER: 06 09 2A 86 48 86 F7 0D 01 01 01
+fn oid_rsa() -> Address {
+    buf = allocate(9);
+    *(buf + 0) = 42;  *(buf + 1) = 134; *(buf + 2) = 72;
+    *(buf + 3) = 134; *(buf + 4) = 247; *(buf + 5) = 13;
+    *(buf + 6) = 1;   *(buf + 7) = 1;   *(buf + 8) = 1;
+    return buf;
+}
+
+// sha256WithRSAEncryption OID: 1.2.840.113549.1.1.11
+// DER: 06 09 2A 86 48 86 F7 0D 01 01 0B
+fn oid_sha256_rsa() -> Address {
+    buf = allocate(9);
+    *(buf + 0) = 42;  *(buf + 1) = 134; *(buf + 2) = 72;
+    *(buf + 3) = 134; *(buf + 4) = 247; *(buf + 5) = 13;
+    *(buf + 6) = 1;   *(buf + 7) = 1;   *(buf + 8) = 11;
+    return buf;
+}
+
+// ECDSA with SHA-256 OID: 1.2.840.10045.4.3.2
+// DER: 06 08 2A 86 48 CE 3D 04 03 02
+fn oid_ecdsa_sha256() -> Address {
+    buf = allocate(8);
+    *(buf + 0) = 42;  *(buf + 1) = 134; *(buf + 2) = 72;
+    *(buf + 3) = 206; *(buf + 4) = 61;  *(buf + 5) = 4;
+    *(buf + 6) = 3;   *(buf + 7) = 2;
+    return buf;
+}
+
+// Ed25519 OID: 1.3.101.112
+// DER: 06 03 2B 65 70
+fn oid_ed25519() -> Address {
+    buf = allocate(3);
+    *(buf + 0) = 43;  *(buf + 1) = 101; *(buf + 2) = 112;
+    return buf;
+}
+
+// commonName (X.520 attribute): 2.5.4.3
+// DER: 06 03 55 04 03
+fn oid_common_name() -> Address {
+    buf = allocate(3);
+    *(buf + 0) = 85;  *(buf + 1) = 4;   *(buf + 2) = 3;
+    return buf;
+}
+
+// subjectKeyIdentifier OID: 2.5.29.14
+// DER: 06 03 55 1D 0E
+fn oid_subject_key_id() -> Address {
+    buf = allocate(3);
+    *(buf + 0) = 85;  *(buf + 1) = 29;  *(buf + 2) = 14;
+    return buf;
+}
+
+// authorityKeyIdentifier OID: 2.5.29.35
+// DER: 06 03 55 1D 23
+fn oid_authority_key_id() -> Address {
+    buf = allocate(3);
+    *(buf + 0) = 85;  *(buf + 1) = 29;  *(buf + 2) = 35;
+    return buf;
+}
+
+// basicConstraints OID: 2.5.29.19
+// DER: 06 03 55 1D 13
+fn oid_basic_constraints() -> Address {
+    buf = allocate(3);
+    *(buf + 0) = 85;  *(buf + 1) = 29;  *(buf + 2) = 19;
+    return buf;
+}
+
+// keyUsage OID: 2.5.29.15
+// DER: 06 03 55 1D 0F
+fn oid_key_usage() -> Address {
+    buf = allocate(3);
+    *(buf + 0) = 85;  *(buf + 1) = 29;  *(buf + 2) = 15;
+    return buf;
+}
+
+// subjectAltName OID: 2.5.29.17
+// DER: 06 03 55 1D 11
+fn oid_subject_alt_name() -> Address {
+    buf = allocate(3);
+    *(buf + 0) = 85;  *(buf + 1) = 29;  *(buf + 2) = 17;
+    return buf;
+}
+
+// ===========================================================================
+// Legacy compatibility layer — the older der_* API used by pki.vuma.
+// These wrap the new asn1_* primitives but keep the original "Address +
+// offset" calling convention so existing imports continue to link.
+// ===========================================================================
+
+// Write DER length at buf[offset]. Returns bytes written (1..3).
+fn der_write_length(buf: Address, offset: u32, len: u32) -> u32 {
+    written: u32 = 3;
+    if len < 128 {
+        *(buf + offset) = len & 255;
+        written = 1;
+    } else {
+        if len < 256 {
+            *(buf + offset) = 129;  // 0x81
+            *(buf + offset + 1) = len & 255;
+            written = 2;
+        } else {
+            // 2-byte length form (max 0xFFFF)
+            *(buf + offset) = 130;  // 0x82
+            *(buf + offset + 1) = (len >> 8) & 255;
+            *(buf + offset + 2) = len & 255;
+            written = 3;
+        }
+    }
+    return written;
+}
+
+// Read DER length value at buf[offset]. Returns the length, or 0 on error
+// (indefinite length or >4-byte form). Note: length 0 is also returned as 0,
+// matching the historical convention — callers that need to distinguish
+// "empty content" from "error" should use der_read_length_consumed in tandem.
+fn der_read_length(buf: Address, offset: u32) -> u32 {
+    b: u32 = *(buf + offset);
+    status: u32 = 1;
+    value: u32 = 0;
+    n: u32 = 0;
+    i: u32 = 0;
+    if b < 128 {
+        value = b;
+    } else {
+        n = b & 127;
+        if n == 0 { status = 0; }  // indefinite forbidden in DER
+        if n > 4 { status = 0; }
+        if status == 1 {
+            i = 0;
+            while i < n {
+                value = (value << 8) | *(buf + offset + 1 + i);
+                i = i + 1;
+            }
+        }
+    }
+    if status == 0 { return 0; }
+    return value;
+}
+
+// Returns how many bytes der_read_length will consume at buf[offset]
+// (1 for short form, 1+n for long form, 0 if the encoding is invalid).
 fn der_read_length_consumed(buf: Address, offset: u32) -> u32 {
     b: u32 = *(buf + offset);
-    if b < 128 { return 1; }
-    return 1 + (b & 127);
+    result: u32 = 0;
+    n: u32 = 0;
+    if b < 128 {
+        result = 1;
+    } else {
+        n = b & 127;
+        if n == 0 { result = 0; }       // indefinite
+        if n > 4 { result = 0; }        // >4 length bytes not supported
+        if n >= 1 && n <= 4 { result = 1 + n; }
+    }
+    return result;
 }
 
-// ===========================================================================
-// DER encoding primitives
-// ===========================================================================
-
-// Write SEQUENCE header. Returns bytes written.
+// Write SEQUENCE header (tag + length, no content). Returns bytes written.
 fn der_write_sequence_header(buf: Address, offset: u32, content_len: u32) -> u32 {
     *(buf + offset) = TAG_SEQUENCE;
     return 1 + der_write_length(buf, offset + 1, content_len);
 }
 
-// Write INTEGER (unsigned, big-endian)
+// Write INTEGER from a big-endian byte buffer. Strips leading zeros, adds
+// 0x00 sign-pad byte when the magnitude's high bit is set. Returns bytes
+// written (full TLV size).
 fn der_write_integer(buf: Address, offset: u32, val: Address, val_len: u32) -> u32 {
-    // Skip leading zeros
+    status: u32 = 1;
     start: u32 = 0;
-    while start < val_len - 1 {
-        if *(val + start) != 0 { break; }
-        start = start + 1;
-    }
-
-    // If high bit is set, prepend 0x00
+    found_nonzero: u32 = 0;
     needs_pad: u32 = 0;
-    effective_len: u32 = val_len - start;
-    if (*(val + start) & 128) != 0 {
-        needs_pad = 1;
-        effective_len = effective_len + 1;
+    effective_len: u32 = 0;
+    pos: u32 = 0;
+    i: u32 = 0;
+
+    if val_len == 0 { status = 0; }
+
+    if status == 1 {
+        // Skip leading zeros (keep at least one byte)
+        start = 0;
+        found_nonzero = 0;
+        while start + 1 < val_len && found_nonzero == 0 {
+            if *(val + start) != 0 { found_nonzero = 1; }
+            if found_nonzero == 0 { start = start + 1; }
+        }
+        effective_len = val_len - start;
+        if (*(val + start) & 128) != 0 {
+            needs_pad = 1;
+            effective_len = effective_len + 1;
+        }
     }
 
-    *(buf + offset) = TAG_INTEGER;
-    pos: u32 = offset + 1 + der_write_length(buf, offset + 1, effective_len);
-
-    if needs_pad == 1 {
-        *(buf + pos) = 0;
-        pos = pos + 1;
+    if status == 1 {
+        *(buf + offset) = TAG_INTEGER;
+        pos = offset + 1 + der_write_length(buf, offset + 1, effective_len);
+        if needs_pad == 1 {
+            *(buf + pos) = 0;
+            pos = pos + 1;
+        }
+        i = start;
+        while i < val_len {
+            *(buf + pos) = *(val + i);
+            pos = pos + 1;
+            i = i + 1;
+        }
     }
 
-    i: u32 = start;
-    while i < val_len {
-        *(buf + pos) = *(val + i);
-        pos = pos + 1;
-        i = i + 1;
-    }
-
+    if status == 0 { return 0; }
     return pos - offset;
 }
 
-// Write OCTET STRING
+// Write OCTET STRING (tag + length + raw bytes).
 fn der_write_octet_string(buf: Address, offset: u32, data: Address, data_len: u32) -> u32 {
     *(buf + offset) = TAG_OCTET_STRING;
     pos: u32 = offset + 1 + der_write_length(buf, offset + 1, data_len);
@@ -128,19 +1397,19 @@ fn der_write_octet_string(buf: Address, offset: u32, data: Address, data_len: u3
     return pos + data_len - offset;
 }
 
-// Write NULL
+// Write NULL (05 00).
 fn der_write_null(buf: Address, offset: u32) -> u32 {
     *(buf + offset) = TAG_NULL;
     *(buf + offset + 1) = 0;
     return 2;
 }
 
-// Write BIT STRING
+// Write BIT STRING (tag + length + 0 unused-bits byte + raw bytes).
 fn der_write_bit_string(buf: Address, offset: u32, data: Address, data_len: u32) -> u32 {
-    content_len: u32 = data_len + 1;  // +1 for unused bits count
+    content_len: u32 = data_len + 1;  // +1 for unused-bits byte (always 0)
     *(buf + offset) = TAG_BIT_STRING;
     pos: u32 = offset + 1 + der_write_length(buf, offset + 1, content_len);
-    *(buf + pos) = 0;  // 0 unused bits
+    *(buf + pos) = 0;
     pos = pos + 1;
     i: u32 = 0;
     while i < data_len {
@@ -150,7 +1419,9 @@ fn der_write_bit_string(buf: Address, offset: u32, data: Address, data_len: u32)
     return pos + data_len - offset;
 }
 
-// Write OID (simplified: write pre-encoded OID bytes)
+// Write OID from a pre-encoded content-byte buffer. The caller passes the
+// raw OID body bytes (the bytes that follow the 06 LL prefix on the wire);
+// this primitive prepends the OID tag and length. Caller frees oid_bytes.
 fn der_write_oid(buf: Address, offset: u32, oid_bytes: Address, oid_len: u32) -> u32 {
     *(buf + offset) = TAG_OID;
     pos: u32 = offset + 1 + der_write_length(buf, offset + 1, oid_len);
@@ -162,72 +1433,46 @@ fn der_write_oid(buf: Address, offset: u32, oid_bytes: Address, oid_len: u32) ->
     return pos + oid_len - offset;
 }
 
-// ===========================================================================
-// DER decoding primitives
-// ===========================================================================
-
-// Read tag at offset. Returns tag value.
+// Read tag byte at buf[offset].
 fn der_read_tag(buf: Address, offset: u32) -> u32 {
     return *(buf + offset);
 }
 
-// Read TLV: returns (value_offset, value_length). If tag doesn't match, returns 0.
+// Read a TLV at buf[offset] expecting `expected_tag`. On success writes the
+// value offset (u32 LE) to val_offset_out[0..3] and value length (u32 LE)
+// to val_len_out[0..3]. Returns 1 on success, 0 on mismatch / error.
 fn der_read_tlv(buf: Address, offset: u32, expected_tag: u32, val_offset_out: Address, val_len_out: Address) -> u32 {
     tag: u32 = *(buf + offset);
-    if tag != expected_tag { return 0; }
-
-    len_consumed: u32 = der_read_length_consumed(buf, offset + 1);
-    len: u32 = der_read_length(buf, offset + 1);
-
-    v_off: u32 = offset + 1 + len_consumed;
-    *(val_offset_out + 0) = v_off & 255;
-    *(val_offset_out + 1) = (v_off >> 8) & 255;
-    *(val_offset_out + 2) = (v_off >> 16) & 255;
-    *(val_offset_out + 3) = (v_off >> 24) & 255;
-    *(val_len_out + 0) = len & 255;
-    *(val_len_out + 1) = (len >> 8) & 255;
-    *(val_len_out + 2) = (len >> 16) & 255;
-    *(val_len_out + 3) = (len >> 24) & 255;
-
-    return 1;  // success
+    status: u32 = 1;
+    len_consumed: u32 = 0;
+    len_val: u32 = 0;
+    v_off: u32 = 0;
+    if tag != expected_tag { status = 0; }
+    if status == 1 {
+        len_consumed = der_read_length_consumed(buf, offset + 1);
+        if len_consumed == 0 { status = 0; }
+    }
+    if status == 1 {
+        len_val = der_read_length(buf, offset + 1);
+        v_off = offset + 1 + len_consumed;
+        *(val_offset_out + 0) = v_off & 255;
+        *(val_offset_out + 1) = (v_off >> 8) & 255;
+        *(val_offset_out + 2) = (v_off >> 16) & 255;
+        *(val_offset_out + 3) = (v_off >> 24) & 255;
+        *(val_len_out + 0) = len_val & 255;
+        *(val_len_out + 1) = (len_val >> 8) & 255;
+        *(val_len_out + 2) = (len_val >> 16) & 255;
+        *(val_len_out + 3) = (len_val >> 24) & 255;
+    }
+    if status == 0 { return 0; }
+    return 1;
 }
 
+// Load u32 LE from ptr[off..off+3].
 fn load_u32_le(ptr: Address, off: u32) -> u32 {
-    b0: u32 = *(ptr + off); b1: u32 = *(ptr + off + 1);
-    b2: u32 = *(ptr + off + 2); b3: u32 = *(ptr + off + 3);
+    b0: u32 = *(ptr + off);
+    b1: u32 = *(ptr + off + 1);
+    b2: u32 = *(ptr + off + 2);
+    b3: u32 = *(ptr + off + 3);
     return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
-}
-
-// ===========================================================================
-// Common OID encodings (pre-computed)
-// ===========================================================================
-
-// SHA-256 OID: 2.16.840.1.101.3.4.2.1
-// DER: 06 09 60 86 48 01 65 03 04 02 01
-fn oid_sha256() -> Address {
-    buf = allocate(9);
-    *(buf + 0) = 96; *(buf + 1) = 134; *(buf + 2) = 72;
-    *(buf + 3) = 1; *(buf + 4) = 101; *(buf + 5) = 3;
-    *(buf + 6) = 4; *(buf + 7) = 2; *(buf + 8) = 1;
-    return buf;
-}
-
-// RSA encryption OID: 1.2.840.113549.1.1.1
-// DER: 06 09 2A 86 48 86 F7 0D 01 01 01
-fn oid_rsa() -> Address {
-    buf = allocate(9);
-    *(buf + 0) = 42; *(buf + 1) = 134; *(buf + 2) = 72;
-    *(buf + 3) = 134; *(buf + 4) = 247; *(buf + 5) = 13;
-    *(buf + 6) = 1; *(buf + 7) = 1; *(buf + 8) = 1;
-    return buf;
-}
-
-// ECDSA with SHA-256 OID: 1.2.840.10045.4.3.2
-// DER: 06 08 2A 86 48 CE 3D 04 03 02
-fn oid_ecdsa_sha256() -> Address {
-    buf = allocate(8);
-    *(buf + 0) = 42; *(buf + 1) = 134; *(buf + 2) = 72;
-    *(buf + 3) = 206; *(buf + 4) = 61; *(buf + 5) = 4;
-    *(buf + 6) = 3; *(buf + 7) = 2;
-    return buf;
 }

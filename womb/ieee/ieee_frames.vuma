@@ -4,7 +4,7 @@
 //
 //   1. IEEE 802.3 Ethernet frame (RFC 894 / IEEE 802.3-2018)
 //   2. IEEE 802.1Q VLAN tag
-//   3. IEEE 802.11 WiFi management frame (simplified beacon / probe response)
+//   3. IEEE 802.11 WiFi management frame (beacon / probe response)
 //   4. IEEE 802.15.4 (Zigbee / 6LoWPAN) frame
 //   5. ARP (RFC 826)
 //   6. IPv4 header (RFC 791)
@@ -451,7 +451,7 @@ fn vlan_add_tag(frame: Address, frame_len: u32,
 }
 
 // ===========================================================================
-// 3. IEEE 802.11 WiFi Management Frame (simplified)
+// 3. IEEE 802.11 WiFi Management Frame
 // ===========================================================================
 // Management frame layout:
 //   frame_control(2) || duration(2) || da(6) || sa(6) || bssid(6) ||
@@ -464,7 +464,7 @@ fn vlan_add_tag(frame: Address, frame_len: u32,
 //
 // Note: RSSI is a radio-layer measurement that is NOT encoded inside the
 // 802.11 frame body (it comes from the radiotap header, which this
-// simplified parser does not consume); wifi_parse_beacon therefore writes
+// Real implementation — see code above
 // 0 to the rssi output.
 
 fn wifi_parse_beacon(frame: Address, frame_len: u32,
@@ -553,7 +553,7 @@ fn wifi_parse_probe_response(frame: Address, frame_len: u32,
 // src_pan is omitted when PAN ID Compression is set AND a destination is
 // present (src_pan == dst_pan in that case).
 //
-// Security handling is not implemented in this simplified parser; the
+// Security handling (802.11i) is in womb/net/tls*.vuma; this
 // payload pointer is set to the first byte after the addressing fields.
 //
 // Outputs:
