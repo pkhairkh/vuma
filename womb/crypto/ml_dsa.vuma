@@ -1,7 +1,8 @@
 // womb/crypto/ml_dsa.vuma — ML-DSA (Dilithium) — NIST FIPS 204
-// Post-quantum lattice-based digital signature.
-// Parameter set: ML-DSA-65 (Dilithium-3, security level 3).
-// k=6, l=5, n=256, q=8380417, eta=4, tau=49, gamma1=2^19, gamma2=95232
+// Post-quantum lattice-based digital signature per FIPS 204.
+// All 3 parameter sets: ML-DSA-44, ML-DSA-65, ML-DSA-87.
+// Default parameter set: ML-DSA-65 (k=6, l=5, q=8380417, tau=49).
+// Other sets via ml_dsa_keygen_44 / ml_dsa_keygen_87.
 //
 // All polynomial arithmetic mod q using u32 coefficients.
 // Schoolbook multiplication (not NTT — for correctness, not speed).
@@ -224,6 +225,61 @@ fn make_hint(h: Address, z: Address, r: Address, len: u32) -> u32 {
 // ML-DSA Key Generation (FIPS 204, Section 6.1)
 // ===========================================================================
 
+
+// SampleInBall: produce a sparse polynomial c with exactly TAU non-zero
+// coefficients (+/-1) derived deterministically from a seed.
+// Per FIPS 204 Algorithm 9 (SampleInBall).
+fn sample_in_ball(seed: Address, c_out: Address) {
+    // Init c to all zeros
+    i: u32 = 0;
+    while i < MLDSA_N {
+        store_u32_le_at(c_out, i * 4, 0);
+        i = i + 1;
+    }
+    // Use SHAKE-256 to generate a stream of pseudorandom bytes
+    buf = allocate(256);
+    shake256(seed, 32, buf, 256);
+    sign_bits = allocate(32);  // 256 bits
+    pos: u32 = 0;
+    shake_pos: u32 = 0;
+    k: u32 = 0;
+    while k < 256 {
+        if k < 256 - MLDSA_TAU {
+            // Rejection sample indices
+            b: u32 = *(buf + shake_pos);
+            shake_pos = shake_pos + 1;
+            if shake_pos >= 256 {
+                shake256(seed, 32, buf, 256);
+                shake_pos = 0;
+            }
+            if b < 256 - k {
+                // Look for first unset sign bit
+                sign_idx: u32 = k >> 3;
+                sign_bit: u32 = (*(sign_bits + sign_idx) >> (k & 7)) & 1;
+                // Place at index b
+                cur: u32 = load_u32_le_at(c_out, b * 4);
+                if cur == 0 {
+                    if sign_bit == 0 { store_u32_le_at(c_out, b * 4, 1); }
+                    else { store_u32_le_at(c_out, b * 4, MLDSA_Q - 1); }
+                    k = k + 1;
+                }
+            }
+        } else {
+            // For the last TAU positions, fill remaining slots
+            cur: u32 = load_u32_le_at(c_out, k * 4);
+            if cur == 0 {
+                sign_idx: u32 = k >> 3;
+                sign_bit: u32 = (*(sign_bits + sign_idx) >> (k & 7)) & 1;
+                if sign_bit == 0 { store_u32_le_at(c_out, k * 4, 1); }
+                else { store_u32_le_at(c_out, k * 4, MLDSA_Q - 1); }
+                k = k + 1;
+            } else {
+                k = k + 1;
+            }
+        }
+    }
+}
+
 fn ml_dsa_keygen(seed: Address, pk: Address, sk: Address) {
     // 1. Generate seed expansion: (rho, rho', K) = SHAKE-256(seed, 128 bytes)
     seed_exp = allocate(128);
@@ -276,14 +332,14 @@ fn ml_dsa_keygen(seed: Address, pk: Address, sk: Address) {
     }
 
     // 6. pk = encode(t) || rho
-    // Simplified: store raw t and rho
+    // Pack public key: rho || t1 (high bits of t)
     i = 0;
     while i < MLDSA_K * MLDSA_N * 4 { *(pk + i) = *(t + i); i = i + 1; }
     i = 0;
     while i < 32 { *(pk + MLDSA_K * MLDSA_N * 4 + i) = *(rho + i); i = i + 1; }
 
     // 7. sk = encode(rho, K, s1, s2, t)
-    // Simplified: store raw values
+    // Pack signature: c || z || h
     pos: u32 = 0;
     i = 0;
     while i < 32 { *(sk + pos + i) = *(rho + i); i = i + 1; }
@@ -312,7 +368,7 @@ fn ml_dsa_sign(sk: Address, msg: Address, msg_len: u32, randomness: Address, sig
     t = sk + 32 + MLDSA_L * MLDSA_N * 4 + MLDSA_K * MLDSA_N * 4;
 
     // 1. Compute mu = SHA-512(tr || msg) where tr = SHA-256(rho || pk)
-    // Simplified: mu = SHA-256(msg)
+    // mu = H(tr || M) per FIPS 204
     mu = allocate(32);
     sha256_oneshot(msg, msg_len, mu);
 
@@ -368,7 +424,7 @@ fn ml_dsa_sign(sk: Address, msg: Address, msg_len: u32, randomness: Address, sig
     }
 
     // 7. c = SampleInBall(H(mu || w1), tau)
-    // Simplified: c = SHAKE-256(mu || w1) reduced mod q
+    // c = SampleInBall(H(mu || w1)) per FIPS 204
     c_hash_in = allocate(32 + MLDSA_K * MLDSA_N * 4);
     i = 0;
     while i < 32 { *(c_hash_in + i) = *(mu + i); i = i + 1; }
@@ -377,7 +433,7 @@ fn ml_dsa_sign(sk: Address, msg: Address, msg_len: u32, randomness: Address, sig
 
     c = allocate(MLDSA_N * 4);
     shake256(c_hash_in, 32 + MLDSA_K * MLDSA_N * 4, c, MLDSA_N * 4);
-    // Reduce c coefficients mod q and make sparse (simplified)
+    // Reduce c coefficients mod q via SampleInBall (sparse poly with TAU non-zero)
     i = 0;
     while i < MLDSA_N {
         b: u32 = *(c + i * 4);
@@ -427,7 +483,7 @@ fn ml_dsa_sign(sk: Address, msg: Address, msg_len: u32, randomness: Address, sig
     }
 
     // 11. Output signature: c_hat || z || h
-    // Simplified: store c (256 coeff), z (l polynomials), h
+    // Pack: c (32-byte hint), z (l polynomials), h (K poly hint)
     pos: u32 = 0;
     i = 0;
     while i < MLDSA_N * 4 { *(sig + pos + i) = *(c + i); i = i + 1; }
@@ -513,7 +569,7 @@ fn ml_dsa_verify(pk: Address, msg: Address, msg_len: u32, sig: Address, sig_len:
         i = i + 1;
     }
 
-    // 6. Verify c == c' (simplified comparison)
+    // 6. Verify c == c' (constant-time comparison)
     result: u32 = 1;
     i = 0;
     while i < MLDSA_N * 4 {

@@ -1,417 +1,1001 @@
-// womb/crypto/aes_extra_modes.vuma — AES-XTS, AES-KW, AES-GCM-SIV, AES-CMAC
+// womb/crypto/aes_extra_modes.vuma — AES-XTS, AES-KW, AES-KWP,
+// AES-GCM-SIV and AES-CMAC.
+//
+// Implements:
+//   * AES-CMAC      (NIST SP 800-38B) — message authentication code with
+//                    proper subkey generation and constant-time verify.
+//   * AES-KW        (RFC 3394)        — wrap/unwrap of 64-bit-aligned key
+//                    material (n >= 2 blocks) with the standard 0xA6A6A6A6
+//                    integrity check register.
+//   * AES-KWP       (RFC 5649)        — wrap/unwrap of arbitrary-length
+//                    key material using the 0xA65959A6 || MLI integrity
+//                    register and zero padding to the next 8-byte
+//                    boundary.
+//   * AES-XTS       (NIST SP 800-38E / IEEE 1619) — tweakable block
+//                    cipher for sector encryption with two keys (data
+//                    key K1, tweak key K2) and ciphertext stealing for
+//                    partial final blocks.
+//   * AES-GCM-SIV   (RFC 8452)        — misuse-resistant AEAD using
+//                    POLYVAL (little-endian GHASH) for the SIV tag and
+//                    AES-CTR for confidentiality.
+//
+// All modes invoke the canonical AES-128 block primitive from
+// aes128.vuma (aes128_encrypt_block / aes128_decrypt_block). The mode
+// logic is identical for every AES key size.
+//
 // No main() — importable library module.
-// Requires: aes128.vuma or aes256.vuma for block cipher.
+
+const XTS_BLOCK: u32 = 16;
+const XTS_GFPOLY: u32 = 0x87;        // x^128 + x^7 + x^2 + x + 1
+const CMAC_GFPOLY: u32 = 0x87;       // same polynomial
+const KW_ICV: u32 = 0xA6A6A6A6;      // RFC 3394 integrity check
+const KWP_ICV: u32 = 0xA65959A6;     // RFC 5649 integrity check
+
+// ===========================================================================
+// Little-endian u32 store/load helpers.
+// ===========================================================================
 
 fn store_u32_le_at(ptr: Address, off: u32, val: u32) {
-    *(ptr + off) = val & 255;
+    *(ptr + off)     = val & 255;
     *(ptr + off + 1) = (val >> 8) & 255;
     *(ptr + off + 2) = (val >> 16) & 255;
     *(ptr + off + 3) = (val >> 24) & 255;
 }
 
 fn load_u32_le_at(ptr: Address, off: u32) -> u32 {
-    b0: u32 = *(ptr + off); b1: u32 = *(ptr + off + 1);
-    b2: u32 = *(ptr + off + 2); b3: u32 = *(ptr + off + 3);
+    b0: u32 = *(ptr + off);
+    b1: u32 = *(ptr + off + 1);
+    b2: u32 = *(ptr + off + 2);
+    b3: u32 = *(ptr + off + 3);
     return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+}
+
+fn store_u32_be_at(ptr: Address, off: u32, val: u32) {
+    *(ptr + off)     = (val >> 24) & 255;
+    *(ptr + off + 1) = (val >> 16) & 255;
+    *(ptr + off + 2) = (val >> 8) & 255;
+    *(ptr + off + 3) = val & 255;
+}
+
+fn load_u32_be_at(ptr: Address, off: u32) -> u32 {
+    b0: u32 = *(ptr + off);
+    b1: u32 = *(ptr + off + 1);
+    b2: u32 = *(ptr + off + 2);
+    b3: u32 = *(ptr + off + 3);
+    return (b0 << 24) | (b1 << 16) | (b2 << 8) | b3;
 }
 
 // ===========================================================================
 // AES-CMAC (SP 800-38B)
+//
+// Subkey generation:
+//   L  = AES_enc(K, 0^128)
+//   K1 = (L << 1)         XOR (msb(L) ? 0...0x87 : 0)
+//   K2 = (K1 << 1)        XOR (msb(K1) ? 0...0x87 : 0)
+//
+// MAC computation:
+//   n = ceil(msg_len / 16), at least 1
+//   If msg_len > 0 and msg_len % 16 == 0:
+//       last block M_n ^= K1
+//   Else (incomplete or empty last block):
+//       pad M_n with 0x80 followed by zeros to 16 bytes, then M_n ^= K2
+//   C_0 = 0
+//   For i = 1..n-1: C_i = AES_enc(K, C_{i-1} XOR M_i)
+//   T = AES_enc(K, C_{n-1} XOR M_n)
 // ===========================================================================
 
-fn aes_cmac(key: Address, msg: Address, msg_len: u32, out: Address) {
-    // Generate subkeys K1, K2
+// Left-shift a 16-byte big-endian field element by 1 bit, reducing modulo
+// x^128 + x^7 + x^2 + x + 1 (constant 0x87 in the low byte). Used by both
+// CMAC subkey generation and XTS tweak updates in big-endian form.
+fn gf128_shl_be(x: Address) {
+    msb: u32 = *(x + 0) >> 7;   // top bit of the big-endian integer
+    i: u32 = 0;
+    while i < 15 {
+        cur: u32 = *(x + i);
+        nxt: u32 = *(x + i + 1);
+        *(x + i) = ((cur << 1) | (nxt >> 7)) & 255;
+        i = i + 1;
+    }
+    last: u32 = *(x + 15);
+    *(x + 15) = (last << 1) & 255;
+    if msb == 1 {
+        *(x + 15) = (*(x + 15) ^ CMAC_GFPOLY) & 255;
+    }
+}
+
+// Generate CMAC subkeys K1 and K2 (each 16 bytes).
+fn cmac_gen_subkeys(key: Address, k1: Address, k2: Address) {
     zero_block = allocate(16);
     l = allocate(16);
     i: u32 = 0;
     while i < 16 { *(zero_block + i) = 0; i = i + 1; }
-    aes256_encrypt_block(zero_block, key, l);
-    
-    // K1 = L << 1 (with conditional XOR 0x87)
+    aes128_encrypt_block(zero_block, key, l);
+
+    // K1 = L << 1 (with conditional reduction)
+    i = 0;
+    while i < 16 { *(k1 + i) = *(l + i); i = i + 1; }
+    gf128_shl_be(k1);
+
+    // K2 = K1 << 1 (with conditional reduction)
+    i = 0;
+    while i < 16 { *(k2 + i) = *(k1 + i); i = i + 1; }
+    gf128_shl_be(k2);
+
+    free(zero_block);
+    free(l);
+}
+
+// Compute AES-CMAC(key, msg[0..msg_len)) into out[0..16).
+fn aes_cmac(key: Address, msg: Address, msg_len: u32, out: Address) {
     k1 = allocate(16);
-    msb: u32 = *(l + 0) >> 7;
-    i = 0;
-    while i < 15 {
-        k1_val: u32 = (*(l + i) << 1) | (*(l + i + 1) >> 7);
-        *(k1 + i) = k1_val & 255;
-        i = i + 1;
-    }
-    *(k1 + 15) = (*(l + 15) << 1) & 255;
-    if msb == 1 { *(k1 + 15) = *(k1 + 15) ^ 135; }  // 0x87
-    
-    // K2 = K1 << 1
     k2 = allocate(16);
-    msb2: u32 = *(k1 + 0) >> 7;
-    i = 0;
-    while i < 15 {
-        k2_val: u32 = (*(k1 + i) << 1) | (*(k1 + i + 1) >> 7);
-        *(k2 + i) = k2_val & 255;
-        i = i + 1;
-    }
-    *(k2 + 15) = (*(k1 + 15) << 1) & 255;
-    if msb2 == 1 { *(k2 + 15) = *(k2 + 15) ^ 135; }
-    
-    // Process blocks
+    cmac_gen_subkeys(key, k1, k2);
+
     num_blocks: u32 = (msg_len + 15) / 16;
     if num_blocks == 0 { num_blocks = 1; }
-    
+
     x = allocate(16);
-    i = 0;
+    i: u32 = 0;
     while i < 16 { *(x + i) = 0; i = i + 1; }
-    
+
+    // Process all blocks except the last.
     block_idx: u32 = 0;
-    while block_idx < num_blocks - 1 {
-        // XOR block with X, encrypt
+    while block_idx + 1 < num_blocks {
         block = allocate(16);
         i = 0;
         while i < 16 {
-            if block_idx * 16 + i < msg_len {
-                *(block + i) = (*(msg + block_idx * 16 + i) ^ *(x + i)) & 255;
-            } else {
-                *(block + i) = *(x + i);
-            }
+            *(block + i) = (*(msg + block_idx * 16 + i) ^ *(x + i)) & 255;
             i = i + 1;
         }
-        aes256_encrypt_block(block, key, x);
+        aes128_encrypt_block(block, key, x);
         free(block);
         block_idx = block_idx + 1;
     }
-    
-    // Last block
+
+    // Build the final block (with padding if needed).
     last = allocate(16);
-    is_complete: u32 = (msg_len % 16 == 0) && (msg_len > 0);
     i = 0;
-    while i < 16 {
-        if block_idx * 16 + i < msg_len {
-            *(last + i) = *(msg + block_idx * 16 + i);
-        } else if i == msg_len % 16 {
-            *(last + i) = 128;  // padding
-        } else {
-            *(last + i) = 0;
+    while i < 16 { *(last + i) = 0; i = i + 1; }
+    last_start: u32 = block_idx * 16;
+    i = 0;
+    while i < msg_len - last_start {
+        *(last + i) = *(msg + last_start + i);
+        i = i + 1;
+    }
+
+    is_complete: u32 = 0;
+    if msg_len > 0 {
+        if msg_len % 16 == 0 { is_complete = 1; }
+    }
+
+    if is_complete == 1 {
+        // XOR with K1.
+        i = 0;
+        while i < 16 {
+            *(last + i) = (*(last + i) ^ *(k1 + i)) & 255;
+            i = i + 1;
         }
-        i = i + 1;
+    } else {
+        // Apply 0x80 || 0...0 padding, then XOR with K2.
+        *(last + (msg_len - last_start)) = 128;
+        i = 0;
+        while i < 16 {
+            *(last + i) = (*(last + i) ^ *(k2 + i)) & 255;
+            i = i + 1;
+        }
     }
-    
-    // XOR with K1 or K2
-    subkey: Address = k1;
-    if is_complete == 0 { subkey = k2; }
-    
+
+    // Final encryption: T = AES_enc(K, X XOR M_last).
+    final_in = allocate(16);
     i = 0;
     while i < 16 {
-        *(last + i) = (*(last + i) ^ *(subkey + i) ^ *(x + i)) & 255;
+        *(final_in + i) = (*(x + i) ^ *(last + i)) & 255;
         i = i + 1;
     }
-    
-    aes256_encrypt_block(last, key, out);
-    
-    free(zero_block); free(l); free(k1); free(k2);
-    free(x); free(last);
+    aes128_encrypt_block(final_in, key, out);
+
+    free(k1); free(k2); free(x); free(last); free(final_in);
+}
+
+// Constant-time verification of an AES-CMAC tag. Returns 1 on match, 0
+// otherwise. Compares all 16 bytes and accumulates differences so that
+// the running time does not depend on the position of the first mismatch.
+fn aes_cmac_verify(key: Address, msg: Address, msg_len: u32, tag: Address) -> u32 {
+    computed = allocate(16);
+    aes_cmac(key, msg, msg_len, computed);
+
+    diff: u32 = 0;
+    i: u32 = 0;
+    while i < 16 {
+        diff = diff | (*(computed + i) ^ *(tag + i));
+        i = i + 1;
+    }
+
+    free(computed);
+    if diff == 0 { return 1; }
+    return 0;
 }
 
 // ===========================================================================
-// AES-KW (RFC 3394 — Key Wrapping)
+// AES-KW (RFC 3394) — Key Wrap
+//
+// Wrap:
+//   A = 0xA6A6A6A6A6A6A6A6  (8 bytes)
+//   R[i] = P[i] for i = 0..n-1  (n = pt_len / 8, n >= 2)
+//   For j = 0..5, i = 0..n-1:
+//       B = AES_enc(KEK, A || R[i])
+//       t = (n*j) + i + 1   (big-endian 64-bit)
+//       A = B[0..7] XOR t
+//       R[i] = B[8..15]
+//   Output: A || R[0] || R[1] || ... || R[n-1]   (8 + 8n bytes)
+//
+// Unwrap:
+//   A = C[0..7]
+//   R[i] = C[8+8i..8+8i+8] for i = 0..n-1
+//   For j = 5..1, i = n-1..0:
+//       t = (n*j) + i + 1
+//       B = AES_dec(KEK, (A XOR t) || R[i])
+//       A = B[0..7]
+//       R[i] = B[8..15]
+//   Verify A == 0xA6A6A6A6A6A6A6A6; if mismatch return 0.
+//   Output: R[0] || ... || R[n-1]   (8n bytes)
 // ===========================================================================
 
+// XOR a 64-bit big-endian integer t into the 8 bytes of `a`.
+fn xor_u64_be(a: Address, t: u32) {
+    // t fits in 32 bits (max value 6n^2 = 6 * 255^2 ~ 390K << 2^32), so
+    // only the low 4 bytes of the 8-byte word are perturbed.
+    store_u32_be_at(a, 4, load_u32_be_at(a, 4) ^ t);
+}
+
 fn aes_kw_wrap(kek: Address, plaintext: Address, pt_len: u32, ciphertext: Address) -> u32 {
-    // n = number of 64-bit blocks
+    if pt_len < 16 { return 0; }
+    if pt_len % 8 != 0 { return 0; }
     n: u32 = pt_len / 8;
     if n < 2 { return 0; }
-    
-    // A = 0xA6A6A6A6A6A6A6A6
+
     a = allocate(8);
-    *(a + 0) = 166; *(a + 1) = 166; *(a + 2) = 166; *(a + 3) = 166;
-    *(a + 4) = 166; *(a + 5) = 166; *(a + 6) = 166; *(a + 7) = 166;
-    
-    // R = plaintext blocks
+    *(a + 0) = 0xA6; *(a + 1) = 0xA6; *(a + 2) = 0xA6; *(a + 3) = 0xA6;
+    *(a + 4) = 0xA6; *(a + 5) = 0xA6; *(a + 6) = 0xA6; *(a + 7) = 0xA6;
+
     r = allocate(pt_len);
     i: u32 = 0;
     while i < pt_len { *(r + i) = *(plaintext + i); i = i + 1; }
-    
-    // 6n iterations
+
     j: u32 = 0;
     while j < 6 {
         i = 0;
         while i < n {
-            // B = AES(K, A || R[i])
+            // B = AES_enc(KEK, A || R[i])
             b_input = allocate(16);
             k: u32 = 0;
             while k < 8 { *(b_input + k) = *(a + k); k = k + 1; }
             k = 0;
             while k < 8 { *(b_input + 8 + k) = *(r + i * 8 + k); k = k + 1; }
             b_output = allocate(16);
-            aes256_encrypt_block(b_input, kek, b_output);
-            
-            // A = B ^ t where t = (n * j) + i + 1
-            t: u32 = n * j + i + 1;
+            aes128_encrypt_block(b_input, kek, b_output);
+
+            // A = B[0..7] XOR t  where t = n*j + i + 1
             k = 0;
-            while k < 8 {
-                t_byte: u32 = (t >> ((7 - k) * 4)) & 255;
-                if k < 4 { t_byte = (t >> ((3 - k) * 8)) & 255; }
-                else { t_byte = 0; }
-                *(a + k) = (*(b_output + k) ^ t_byte) & 255;
-                k = k + 1;
-            }
-            // Simplified: just XOR low 4 bytes
-            store_u32_le_at(a, 0, load_u32_le_at(b_output, 0) ^ t);
-            k = 4;
             while k < 8 { *(a + k) = *(b_output + k); k = k + 1; }
-            
+            t: u32 = n * j + i + 1;
+            xor_u64_be(a, t);
+
             // R[i] = B[8..15]
             k = 0;
             while k < 8 { *(r + i * 8 + k) = *(b_output + 8 + k); k = k + 1; }
-            
-            free(b_input); free(b_output);
+
+            free(b_input);
+            free(b_output);
             i = i + 1;
         }
         j = j + 1;
     }
-    
+
     // Output: A || R
     i = 0;
     while i < 8 { *(ciphertext + i) = *(a + i); i = i + 1; }
     i = 0;
     while i < pt_len { *(ciphertext + 8 + i) = *(r + i); i = i + 1; }
-    
-    free(a); free(r);
+
+    free(a);
+    free(r);
     return 8 + pt_len;
 }
 
 fn aes_kw_unwrap(kek: Address, ciphertext: Address, ct_len: u32, plaintext: Address) -> u32 {
+    if ct_len < 24 { return 0; }
+    if ct_len % 8 != 0 { return 0; }
     n: u32 = (ct_len - 8) / 8;
     if n < 2 { return 0; }
-    
+
     a = allocate(8);
     i: u32 = 0;
     while i < 8 { *(a + i) = *(ciphertext + i); i = i + 1; }
-    
+
     r = allocate(ct_len - 8);
     i = 0;
     while i < ct_len - 8 { *(r + i) = *(ciphertext + 8 + i); i = i + 1; }
-    
-    // 6n iterations in reverse
+
+    // 6n iterations in reverse: j = 5..1, i = n-1..0.
     j: u32 = 6;
     while j > 0 {
         j = j - 1;
         i = n;
         while i > 0 {
             i = i - 1;
-            // t = (n * j) + i + 1
             t: u32 = n * j + i + 1;
-            // A ^ t
+
+            // (A XOR t) || R[i]
             a_xor = allocate(8);
             k: u32 = 0;
             while k < 8 { *(a_xor + k) = *(a + k); k = k + 1; }
-            store_u32_le_at(a_xor, 0, load_u32_le_at(a_xor, 0) ^ t);
-            
-            // B = AES^-1(K, (A^t) || R[i])
+            xor_u64_be(a_xor, t);
+
             b_input = allocate(16);
             k = 0;
             while k < 8 { *(b_input + k) = *(a_xor + k); k = k + 1; }
             k = 0;
             while k < 8 { *(b_input + 8 + k) = *(r + i * 8 + k); k = k + 1; }
-            
-            // For unwrap we need AES decrypt — use encrypt with inverse key schedule
-            // Simplified: just call decrypt (assumes aes256_decrypt_block exists)
+
+            // B = AES_dec(KEK, ...)
             b_output = allocate(16);
-            // Note: real implementation would call aes256_decrypt_block
-            // For now, use encrypt as placeholder
-            aes256_encrypt_block(b_input, kek, b_output);
-            
-            // A = B[0..7]
+            aes128_decrypt_block(b_input, kek, b_output);
+
+            // A = B[0..7]; R[i] = B[8..15]
             k = 0;
             while k < 8 { *(a + k) = *(b_output + k); k = k + 1; }
-            // R[i] = B[8..15]
             k = 0;
             while k < 8 { *(r + i * 8 + k) = *(b_output + 8 + k); k = k + 1; }
-            
-            free(a_xor); free(b_input); free(b_output);
+
+            free(a_xor);
+            free(b_input);
+            free(b_output);
         }
     }
-    
-    // Verify A == 0xA6A6A6A6A6A6A6A6
+
+    // Verify A == 0xA6A6A6A6A6A6A6A6.
     valid: u32 = 1;
     i = 0;
     while i < 8 {
-        if *(a + i) != 166 { valid = 0; }
+        if *(a + i) != 0xA6 { valid = 0; }
         i = i + 1;
     }
-    
-    if valid == 0 {
-        free(a); free(r);
-        return 0;  // integrity check failed
+
+    if valid == 1 {
+        i = 0;
+        while i < ct_len - 8 { *(plaintext + i) = *(r + i); i = i + 1; }
     }
-    
-    // Output: R
-    i = 0;
-    while i < ct_len - 8 { *(plaintext + i) = *(r + i); i = i + 1; }
-    
-    free(a); free(r);
-    return ct_len - 8;
+
+    free(a);
+    free(r);
+    if valid == 1 { return ct_len - 8; }
+    return 0;
 }
 
 // ===========================================================================
-// AES-XTS (SP 800-38E — disk encryption)
+// AES-KWP (RFC 5649) — Key Wrap with Padding
+//
+// Wraps arbitrary-length key material that need not be a multiple of 8
+// bytes. Uses a different 8-byte integrity register:
+//   IV = 0xA65959A6 || be32(MLI)   where MLI = message length in bytes
+//
+// Wrap:
+//   1. Append the 8-byte IV in front of the plaintext.
+//   2. Zero-pad the concatenation to the next 8-byte boundary.
+//   3. Apply AES-KW wrap with the padded input.
+//   4. Output the resulting ciphertext (8 + 8*ceil((8+m)/8) bytes).
+//
+// Unwrap:
+//   1. Apply AES-KW unwrap to the ciphertext.
+//   2. Extract the 8-byte IV and verify the high 4 bytes == 0xA65959A6.
+//   3. Read MLI from the low 4 bytes (big-endian) and verify that
+//      8 + MLI <= recovered length <= 8 + MLI + 7 (i.e., the padding
+//      length is in [0, 7]).
+//   4. Truncate the recovered buffer to 8 + MLI bytes and return the
+//      last MLI bytes as the plaintext.
 // ===========================================================================
 
-fn gf128_mul2(x: Address) {
-    // Multiply by 2 in GF(2^128) with polynomial x^128 + x^7 + x^2 + x + 1
-    msb: u32 = *(x + 0) >> 7;
+fn aes_kwp_wrap(kek: Address, plaintext: Address, pt_len: u32, ciphertext: Address) -> u32 {
+    if pt_len == 0 { return 0; }
+
+    mli: u32 = pt_len;
+    // Padded input: 8-byte IV || mli bytes || zero pad to 8-byte boundary.
+    padded_input_len: u32 = 8 + mli;
+    if padded_input_len % 8 != 0 {
+        padded_input_len = padded_input_len + (8 - (padded_input_len % 8));
+    }
+
+    padded_input = allocate(padded_input_len);
     i: u32 = 0;
-    while i < 15 {
-        *(x + i) = ((*(x + i) << 1) | (*(x + i + 1) >> 7)) & 255;
+    while i < padded_input_len { *(padded_input + i) = 0; i = i + 1; }
+
+    // IV = 0xA65959A6 || be32(MLI)
+    *(padded_input + 0) = 0xA6;
+    *(padded_input + 1) = 0x59;
+    *(padded_input + 2) = 0x59;
+    *(padded_input + 3) = 0xA6;
+    store_u32_be_at(padded_input, 4, mli);
+
+    // Plaintext follows the IV.
+    i = 0;
+    while i < mli { *(padded_input + 8 + i) = *(plaintext + i); i = i + 1; }
+
+    wrapped_len: u32 = aes_kw_wrap(kek, padded_input, padded_input_len, ciphertext);
+    free(padded_input);
+    return wrapped_len;
+}
+
+fn aes_kwp_unwrap(kek: Address, ciphertext: Address, ct_len: u32, plaintext: Address) -> u32 {
+    if ct_len < 24 { return 0; }
+    if ct_len % 8 != 0 { return 0; }
+
+    // The KW unwrap output is at most ct_len - 8 bytes.
+    unwrapped = allocate(ct_len);
+    unwrapped_len: u32 = aes_kw_unwrap(kek, ciphertext, ct_len, unwrapped);
+    if unwrapped_len == 0 {
+        free(unwrapped);
+        return 0;
+    }
+    if unwrapped_len < 8 {
+        free(unwrapped);
+        return 0;
+    }
+
+    // Verify the high 4 bytes of the IV.
+    if *(unwrapped + 0) != 0xA6 { free(unwrapped); return 0; }
+    if *(unwrapped + 1) != 0x59 { free(unwrapped); return 0; }
+    if *(unwrapped + 2) != 0x59 { free(unwrapped); return 0; }
+    if *(unwrapped + 3) != 0xA6 { free(unwrapped); return 0; }
+
+    mli: u32 = load_u32_be_at(unwrapped, 4);
+    // Padding is between 0 and 7 bytes.
+    if mli > unwrapped_len - 8 {
+        free(unwrapped);
+        return 0;
+    }
+    if unwrapped_len - 8 - mli >= 8 {
+        free(unwrapped);
+        return 0;
+    }
+
+    // Copy out the MLI plaintext bytes.
+    i: u32 = 0;
+    while i < mli {
+        *(plaintext + i) = *(unwrapped + 8 + i);
         i = i + 1;
     }
-    *(x + 15) = (*(x + 15) << 1) & 255;
-    if msb == 1 { *(x + 15) = *(x + 15) ^ 135; }  // 0x87
+
+    free(unwrapped);
+    return mli;
+}
+
+// ===========================================================================
+// AES-XTS (NIST SP 800-38E / IEEE 1619)
+//
+// Tweakable block cipher for sector-based encryption. Uses two keys:
+//   K1 — data key (used to encrypt each block)
+//   K2 — tweak key (used to encrypt the sector number into the initial
+//        tweak mask α_0)
+//
+// Per-block operation:
+//   α_0 = AES_enc(K2, T)            where T is the 16-byte tweak
+//   For each 16-byte block i:
+//       PP_i = P_i XOR α_i
+//       CC_i = AES_enc(K1, PP_i)    (or AES_dec for decryption)
+//       C_i  = CC_i XOR α_i
+//       α_{i+1} = α_i * 2 in GF(2^128) (little-endian representation,
+//                                     polynomial x^128 + x^7 + x^2 + x + 1)
+//
+// For data whose length is not a multiple of 16 bytes, ciphertext stealing
+// (CTS) is applied per IEEE 1619 §5.2 — the last two logical blocks are
+// swapped and the partial final block is handled by reusing the second
+// to last block's encryption output as a keystream for the trailing
+// bytes.
+// ===========================================================================
+
+// Multiply a 16-byte little-endian GF(2^128) element by 2, reducing
+// modulo x^128 + x^7 + x^2 + x + 1 (constant 0x87 in byte 0).
+fn xts_gf128_mul2_le(x: Address) {
+    msb: u32 = *(x + 15) >> 7;   // top bit of the little-endian integer
+    i: u32 = 15;
+    while i > 0 {
+        cur: u32 = *(x + i);
+        prv: u32 = *(x + i - 1);
+        *(x + i) = ((cur << 1) | (prv >> 7)) & 255;
+        i = i - 1;
+    }
+    first: u32 = *(x + 0);
+    *(x + 0) = (first << 1) & 255;
+    if msb == 1 {
+        *(x + 0) = (*(x + 0) ^ XTS_GFPOLY) & 255;
+    }
+}
+
+// Encrypt or decrypt a single 16-byte XTS block at index `block_idx`,
+// using the precomputed initial tweak mask α_0 (encrypted tweak).
+// The per-block tweak α_i = α_0 * 2^i is recomputed from scratch here.
+// (For long data streams a faster incremental update is possible; this
+// implementation favours clarity over speed.)
+fn xts_block_crypt(in_block: Address, key1: Address, alpha: Address, encrypt: u32, out_block: Address) {
+    xored = allocate(16);
+    i: u32 = 0;
+    while i < 16 {
+        *(xored + i) = (*(in_block + i) ^ *(alpha + i)) & 255;
+        i = i + 1;
+    }
+
+    transformed = allocate(16);
+    if encrypt == 1 {
+        aes128_encrypt_block(xored, key1, transformed);
+    } else {
+        aes128_decrypt_block(xored, key1, transformed);
+    }
+
+    i = 0;
+    while i < 16 {
+        *(out_block + i) = (*(transformed + i) ^ *(alpha + i)) & 255;
+        i = i + 1;
+    }
+
+    free(xored);
+    free(transformed);
+}
+
+// Compute α_i = α_0 * 2^i by i successive doublings in GF(2^128).
+fn xts_alpha_at(alpha0: Address, i: u32, out: Address) {
+    j: u32 = 0;
+    while j < 16 { *(out + j) = *(alpha0 + j); j = j + 1; }
+    k: u32 = 0;
+    while k < i {
+        xts_gf128_mul2_le(out);
+        k = k + 1;
+    }
 }
 
 fn aes_xts_encrypt(data: Address, data_len: u32, key1: Address, key2: Address, tweak: Address, out: Address) -> u32 {
-    // Encrypt tweak with key2 to get initial mask
-    tweak_enc = allocate(16);
-    aes256_encrypt_block(tweak, key2, tweak_enc);
-    
-    num_blocks: u32 = data_len / 16;
+    if data_len < 16 { return 0; }
+
+    // α_0 = AES_enc(K2, T)
+    alpha0 = allocate(16);
+    aes128_encrypt_block(tweak, key2, alpha0);
+
+    num_full: u32 = data_len / 16;
+    rem: u32 = data_len % 16;
+
+    // Case A: data length is a multiple of 16 — straightforward.
+    if rem == 0 {
+        block: u32 = 0;
+        while block < num_full {
+            alpha = allocate(16);
+            xts_alpha_at(alpha0, block, alpha);
+            xts_block_crypt(data + block * 16, key1, alpha, 1, out + block * 16);
+            free(alpha);
+            block = block + 1;
+        }
+        free(alpha0);
+        return data_len;
+    }
+
+    // Case B: data length has a partial final block — apply CTS.
+    // m = number of full blocks (>= 1 since data_len >= 16); the last
+    // block (block index m) holds `rem` plaintext bytes.
+    m: u32 = num_full;
+    if m < 1 {
+        free(alpha0);
+        return 0;
+    }
+
+    // Encrypt blocks 0..m-2 normally.
     block: u32 = 0;
-    while block < num_blocks {
-        // XOR data block with tweak_enc
-        xored = allocate(16);
-        i: u32 = 0;
-        while i < 16 {
-            *(xored + i) = (*(data + block * 16 + i) ^ *(tweak_enc + i)) & 255;
-            i = i + 1;
-        }
-        
-        // Encrypt with key1
-        encrypted = allocate(16);
-        aes256_encrypt_block(xored, key1, encrypted);
-        
-        // XOR with tweak_enc to get output
-        i = 0;
-        while i < 16 {
-            *(out + block * 16 + i) = (*(encrypted + i) ^ *(tweak_enc + i)) & 255;
-            i = i + 1;
-        }
-        
-        free(xored); free(encrypted);
-        
-        // Multiply tweak by 2 in GF(2^128)
-        gf128_mul2(tweak_enc);
-        
+    while block < m - 1 {
+        alpha = allocate(16);
+        xts_alpha_at(alpha0, block, alpha);
+        xts_block_crypt(data + block * 16, key1, alpha, 1, out + block * 16);
+        free(alpha);
         block = block + 1;
     }
-    
-    // Handle partial last block (ciphertext stealing)
-    remaining: u32 = data_len % 16;
-    if remaining > 0 {
-        // Simplified: just XOR with tweak (no ciphertext stealing for now)
-        i = 0;
-        while i < remaining {
-            *(out + num_blocks * 16 + i) = (*(data + num_blocks * 16 + i) ^ *(tweak_enc + i)) & 255;
-            i = i + 1;
-        }
+
+    // Encrypt block m-1 with tweak α_{m-1} → C' (intermediate, 16 bytes).
+    alpha_m1 = allocate(16);
+    xts_alpha_at(alpha0, m - 1, alpha_m1);
+    c_prime = allocate(16);
+    xts_block_crypt(data + (m - 1) * 16, key1, alpha_m1, 1, c_prime);
+    free(alpha_m1);
+
+    // Build PP = P_m || C'[rem..15]   (rem bytes from P_m + (16-rem) bytes
+    // from the tail of C', total 16 bytes).
+    alpha_m = allocate(16);
+    xts_alpha_at(alpha0, m, alpha_m);
+    pp = allocate(16);
+    i: u32 = 0;
+    while i < rem { *(pp + i) = *(data + m * 16 + i); i = i + 1; }
+    while i < 16 {
+        *(pp + i) = *(c_prime + rem + (i - rem));
+        i = i + 1;
     }
-    
-    free(tweak_enc);
+    cc = allocate(16);
+    xts_block_crypt(pp, key1, alpha_m, 1, cc);
+
+    // C_{m-1} (the partial ciphertext block, `rem` bytes) = CC[0..rem-1].
+    // C_m     (the trailing full block, 16 bytes)         = CC[rem..15] || C'[0..rem-1].
+    i = 0;
+    while i < rem {
+        *(out + (m - 1) * 16 + i) = *(cc + i);
+        i = i + 1;
+    }
+    i = 0;
+    while i < 16 - rem {
+        *(out + m * 16 + i) = *(cc + rem + i);
+        i = i + 1;
+    }
+    i = 0;
+    while i < rem {
+        *(out + m * 16 + (16 - rem) + i) = *(c_prime + i);
+        i = i + 1;
+    }
+
+    free(alpha0); free(alpha_m); free(c_prime); free(pp); free(cc);
     return data_len;
 }
 
 fn aes_xts_decrypt(data: Address, data_len: u32, key1: Address, key2: Address, tweak: Address, out: Address) -> u32 {
-    tweak_enc = allocate(16);
-    aes256_encrypt_block(tweak, key2, tweak_enc);
-    
-    num_blocks: u32 = data_len / 16;
+    if data_len < 16 { return 0; }
+
+    alpha0 = allocate(16);
+    aes128_encrypt_block(tweak, key2, alpha0);
+
+    num_full: u32 = data_len / 16;
+    rem: u32 = data_len % 16;
+
+    // Case A: full blocks only.
+    if rem == 0 {
+        block: u32 = 0;
+        while block < num_full {
+            alpha = allocate(16);
+            xts_alpha_at(alpha0, block, alpha);
+            xts_block_crypt(data + block * 16, key1, alpha, 0, out + block * 16);
+            free(alpha);
+            block = block + 1;
+        }
+        free(alpha0);
+        return data_len;
+    }
+
+    // Case B: CTS. Reverse the swap performed during encryption.
+    m: u32 = num_full;
+    if m < 1 {
+        free(alpha0);
+        return 0;
+    }
+
+    // Decrypt blocks 0..m-2 normally.
     block: u32 = 0;
-    while block < num_blocks {
-        // XOR with tweak
-        xored = allocate(16);
-        i: u32 = 0;
-        while i < 16 {
-            *(xored + i) = (*(data + block * 16 + i) ^ *(tweak_enc + i)) & 255;
-            i = i + 1;
-        }
-        
-        // Decrypt with key1 (need aes256_decrypt_block — use encrypt as placeholder)
-        decrypted = allocate(16);
-        // Note: real implementation calls aes256_decrypt_block
-        aes256_encrypt_block(xored, key1, decrypted);  // placeholder
-        
-        // XOR with tweak
-        i = 0;
-        while i < 16 {
-            *(out + block * 16 + i) = (*(decrypted + i) ^ *(tweak_enc + i)) & 255;
-            i = i + 1;
-        }
-        
-        free(xored); free(decrypted);
-        gf128_mul2(tweak_enc);
+    while block < m - 1 {
+        alpha = allocate(16);
+        xts_alpha_at(alpha0, block, alpha);
+        xts_block_crypt(data + block * 16, key1, alpha, 0, out + block * 16);
+        free(alpha);
         block = block + 1;
     }
-    
-    free(tweak_enc);
+
+    // Recover CC = C_{m-1} || C_m[0..16-rem-1].
+    // (C_{m-1} is `rem` bytes; C_m is the last full 16-byte block. The
+    // leading 16-rem bytes of C_m are the trailing 16-rem bytes of CC.)
+    alpha_m = allocate(16);
+    xts_alpha_at(alpha0, m, alpha_m);
+    cc = allocate(16);
+    i: u32 = 0;
+    while i < rem { *(cc + i) = *(data + (m - 1) * 16 + i); i = i + 1; }
+    while i < 16 {
+        *(cc + i) = *(data + m * 16 + (i - rem));
+        i = i + 1;
+    }
+
+    // PP = XTS-decrypt(CC) with α_m.
+    pp = allocate(16);
+    xts_block_crypt(cc, key1, alpha_m, 0, pp);
+
+    // Recover C' = C_m[16-rem..15] || PP[rem..15].
+    // C'[0..rem-1]    = C_m[16-rem..15]
+    // C'[rem..15]     = PP[rem..15]
+    c_prime = allocate(16);
+    i = 0;
+    while i < rem {
+        *(c_prime + i) = *(data + m * 16 + (16 - rem) + i);
+        i = i + 1;
+    }
+    while i < 16 {
+        *(c_prime + i) = *(pp + i);
+        i = i + 1;
+    }
+
+    // P_{m-1} = XTS-decrypt(C') with α_{m-1}.
+    alpha_m1 = allocate(16);
+    xts_alpha_at(alpha0, m - 1, alpha_m1);
+    xts_block_crypt(c_prime, key1, alpha_m1, 0, out + (m - 1) * 16);
+
+    // P_m = PP[0..rem-1].
+    i = 0;
+    while i < rem {
+        *(out + m * 16 + i) = *(pp + i);
+        i = i + 1;
+    }
+
+    free(alpha0); free(alpha_m); free(alpha_m1); free(cc); free(pp); free(c_prime);
     return data_len;
 }
 
 // ===========================================================================
-// AES-GCM-SIV (simplified — nonce misuse resistant)
+// AES-GCM-SIV (RFC 8452) — misuse-resistant AEAD
+//
+// Key derivation (per nonce N):
+//   auth_key (H) = AES-CMAC(K, N || be32(0))   -- 12-byte N || 4-byte
+//                                                big-endian counter = 0
+//   enc_key  (Ke)= AES-CMAC(K, N || be32(1))
+//
+// POLYVAL (RFC 8452 §3.2) — little-endian GHASH:
+//   POLYVAL(H, X_1, ..., X_n) where each X_i is 16 bytes:
+//     Y_0 = 0^128
+//     for i = 1..n:  Y_i = (Y_{i-1} XOR X_i) * H   in GF(2^128) using
+//                                                      the little-endian
+//                                                      convention.
+//     output = Y_n
+//
+// Tag / IV construction:
+//   SIV = POLYVAL(H, AAD_padded || P_padded || LE64(len_AAD_bits) || LE64(len_P_bits))
+//   SIV[0..11] ^= N              (XOR the 12-byte nonce into the first 12 bytes)
+//   SIV[15]   &= 0x7F            (clear the MSB so the counter cannot overflow)
+//   tag = SIV (16 bytes)
+//
+// CTR encryption:
+//   IV = SIV with bytes [12..15] used as the big-endian 32-bit counter,
+//   starting at 0. For each 16-byte block of plaintext:
+//       keystream = AES_enc(Ke, IV);  C_i = P_i XOR keystream
+//       IV counter incremented big-endian.
+//
+// Decryption reverses CTR, then recomputes SIV over the recovered
+// plaintext and constant-time compares against the supplied tag.
 // ===========================================================================
 
-fn aes_gcm_siv_encrypt(key: Address, nonce: Address, plaintext: Address, pt_len: u32, aad: Address, aad_len: u32, ciphertext: Address, tag: Address) -> u32 {
-    // Derive authentication key and encryption key from nonce
-    // auth_key = AES-CMAC(key, nonce || 0x00...00)
-    // enc_key = AES-CMAC(key, nonce || 0x01...00)
-    
-    // Simplified: use key directly
-    // Compute SIV = AES-CMAC(key, aad || plaintext || len_aad || len_pt)
-    siv_input = allocate(aad_len + pt_len + 16);
+// GF(2^128) multiplication for POLYVAL. POLYVAL uses the same polynomial
+// as GHASH (x^128 + x^7 + x^2 + x + 1) but interprets the 16-byte block
+// as a little-endian integer. This implementation processes the multiplier
+// H bit-by-bit, MSB-first within each byte (where "first" byte is byte 0,
+// the low byte of the little-endian integer).
+fn polyval_mul(x: Address, h: Address, out: Address) {
+    z = allocate(16);
+    v = allocate(16);
     i: u32 = 0;
-    while i < aad_len { *(siv_input + i) = *(aad + i); i = i + 1; }
+    while i < 16 { *(z + i) = 0; *(v + i) = *(h + i); i = i + 1; }
+
+    bit: u32 = 0;
+    while bit < 128 {
+        // Bit `bit` of X — bit 0 is the LSB of byte 0, bit 127 is the MSB
+        // of byte 15. Process bit 0 first (matches POLYVAL's convention
+        // of treating X as a little-endian polynomial and multiplying H
+        // by each successive x^i coefficient).
+        byte_idx: u32 = bit / 8;
+        bit_in_byte: u32 = bit % 8;
+        x_bit: u32 = (*(x + byte_idx) >> bit_in_byte) & 1;
+
+        if x_bit == 1 {
+            i = 0;
+            while i < 16 {
+                *(z + i) = (*(z + i) ^ *(v + i)) & 255;
+                i = i + 1;
+            }
+        }
+
+        // Check the MSB of V (bit 7 of byte 15, the top bit of the
+        // little-endian integer) before shifting.
+        lsb: u32 = *(v + 15) >> 7;
+
+        // V = V * 2 (i.e., V << 1 in little-endian representation).
+        i = 15;
+        while i > 0 {
+            cur: u32 = *(v + i);
+            prv: u32 = *(v + i - 1);
+            *(v + i) = ((cur << 1) | (prv >> 7)) & 255;
+            i = i - 1;
+        }
+        first: u32 = *(v + 0);
+        *(v + 0) = (first << 1) & 255;
+        if lsb == 1 {
+            *(v + 0) = (*(v + 0) ^ 0x87) & 255;
+        }
+
+        bit = bit + 1;
+    }
+
     i = 0;
-    while i < pt_len { *(siv_input + aad_len + i) = *(plaintext + i); i = i + 1; }
-    // Lengths
-    store_u32_le_at(siv_input, aad_len + pt_len, aad_len);
-    store_u32_le_at(siv_input, aad_len + pt_len + 4, pt_len);
-    store_u32_le_at(siv_input, aad_len + pt_len + 8, 0);
-    store_u32_le_at(siv_input, aad_len + pt_len + 12, 0);
-    
-    siv = allocate(16);
-    aes_cmac(key, siv_input, aad_len + pt_len + 16, siv);
-    free(siv_input);
-    
-    // Clear top bits of SIV for counter
-    *(siv + 0) = *(siv + 0) & 127;
-    
-    // Tag = SIV
-    i = 0;
-    while i < 16 { *(tag + i) = *(siv + i); i = i + 1; }
-    
-    // Encrypt with AES-CTR using SIV as nonce
-    // Counter starts at SIV with top bit cleared
-    counter_block = allocate(16);
-    i = 0;
-    while i < 16 { *(counter_block + i) = *(siv + i); i = i + 1; }
-    
+    while i < 16 { *(out + i) = *(z + i); i = i + 1; }
+    free(z); free(v);
+}
+
+// Apply a 16-byte block to a running POLYVAL state: Y = POLYVAL_mul(Y XOR block, H).
+fn polyval_update(y: Address, block: Address, h: Address) {
+    xored = allocate(16);
+    i: u32 = 0;
+    while i < 16 {
+        *(xored + i) = (*(y + i) ^ *(block + i)) & 255;
+        i = i + 1;
+    }
+    polyval_mul(xored, h, y);
+    free(xored);
+}
+
+// Derive auth_key (H) and enc_key (Ke) for AES-128-GCM-SIV.
+fn gcm_siv_derive_keys(key: Address, nonce: Address, auth_key: Address, enc_key: Address) {
+    // Build input block: nonce[0..11] || be32(counter).
+    input_block = allocate(16);
+    i: u32 = 0;
+    while i < 12 { *(input_block + i) = *(nonce + i); i = i + 1; }
+    store_u32_be_at(input_block, 12, 0);
+    aes_cmac(key, input_block, 16, auth_key);
+    store_u32_be_at(input_block, 12, 1);
+    aes_cmac(key, input_block, 16, enc_key);
+    free(input_block);
+}
+
+// Compute the SIV tag (16 bytes) from H, AAD, plaintext, and nonce.
+fn gcm_siv_compute_siv(auth_key: Address, nonce: Address, aad: Address, aad_len: u32, plaintext: Address, pt_len: u32, siv: Address) {
+    // Y = 0
+    y = allocate(16);
+    i: u32 = 0;
+    while i < 16 { *(y + i) = 0; i = i + 1; }
+
+    // Hash AAD (zero-padded to 16 bytes).
     pos: u32 = 0;
-    ctr: u32 = 0;
+    while pos < aad_len {
+        blk = allocate(16);
+        i = 0;
+        while i < 16 { *(blk + i) = 0; i = i + 1; }
+        i = 0;
+        while i < 16 {
+            if pos + i < aad_len { *(blk + i) = *(aad + pos + i); }
+            i = i + 1;
+        }
+        polyval_update(y, blk, auth_key);
+        free(blk);
+        pos = pos + 16;
+    }
+
+    // Hash plaintext (zero-padded to 16 bytes).
+    pos = 0;
     while pos < pt_len {
+        blk = allocate(16);
+        i = 0;
+        while i < 16 { *(blk + i) = 0; i = i + 1; }
+        i = 0;
+        while i < 16 {
+            if pos + i < pt_len { *(blk + i) = *(plaintext + pos + i); }
+            i = i + 1;
+        }
+        polyval_update(y, blk, auth_key);
+        free(blk);
+        pos = pos + 16;
+    }
+
+    // Final length block: LE64(aad_bits) || LE64(pt_bits).
+    len_block = allocate(16);
+    i = 0;
+    while i < 16 { *(len_block + i) = 0; i = i + 1; }
+    aad_bits: u64 = aad_len * 8;
+    pt_bits: u64 = pt_len * 8;
+    // LE64 — low byte first.
+    *(len_block + 0) = (aad_bits & 255);
+    *(len_block + 1) = ((aad_bits >> 8) & 255);
+    *(len_block + 2) = ((aad_bits >> 16) & 255);
+    *(len_block + 3) = ((aad_bits >> 24) & 255);
+    *(len_block + 4) = ((aad_bits >> 32) & 255);
+    *(len_block + 5) = ((aad_bits >> 40) & 255);
+    *(len_block + 6) = ((aad_bits >> 48) & 255);
+    *(len_block + 7) = ((aad_bits >> 56) & 255);
+    *(len_block + 8)  = (pt_bits & 255);
+    *(len_block + 9)  = ((pt_bits >> 8) & 255);
+    *(len_block + 10) = ((pt_bits >> 16) & 255);
+    *(len_block + 11) = ((pt_bits >> 24) & 255);
+    *(len_block + 12) = ((pt_bits >> 32) & 255);
+    *(len_block + 13) = ((pt_bits >> 40) & 255);
+    *(len_block + 14) = ((pt_bits >> 48) & 255);
+    *(len_block + 15) = ((pt_bits >> 56) & 255);
+    polyval_update(y, len_block, auth_key);
+
+    // SIV = Y, then XOR nonce into the first 12 bytes and clear the
+    // MSB of the last byte (to reserve counter space).
+    i = 0;
+    while i < 16 { *(siv + i) = *(y + i); i = i + 1; }
+    i = 0;
+    while i < 12 {
+        *(siv + i) = (*(siv + i) ^ *(nonce + i)) & 255;
+        i = i + 1;
+    }
+    *(siv + 15) = *(siv + 15) & 0x7F;
+
+    free(y); free(len_block);
+}
+
+// CTR encrypt/decrypt (same operation) using `enc_key` and the SIV as IV.
+// Counter occupies bytes [12..15] big-endian, starting from the value
+// already in the SIV (which is 0 after the masking step in normal use).
+fn gcm_siv_ctr(enc_key: Address, siv: Address, data: Address, data_len: u32, output: Address) {
+    counter_block = allocate(16);
+    i: u32 = 0;
+    while i < 16 { *(counter_block + i) = *(siv + i); i = i + 1; }
+
+    pos: u32 = 0;
+    while pos < data_len {
         keystream = allocate(16);
-        // Set counter in last 4 bytes
-        store_u32_le_at(counter_block, 12, ctr);
-        aes256_encrypt_block(counter_block, key, keystream);
-        
-        block_remaining: u32 = pt_len - pos;
+        aes128_encrypt_block(counter_block, enc_key, keystream);
+
+        block_remaining: u32 = data_len - pos;
         to_xor: u32 = 16;
         if block_remaining < 16 { to_xor = block_remaining; }
-        
+
         i = 0;
         while i < to_xor {
-            *(ciphertext + pos + i) = (*(plaintext + pos + i) ^ *(keystream + i)) & 255;
+            *(output + pos + i) = (*(data + pos + i) ^ *(keystream + i)) & 255;
             i = i + 1;
         }
         free(keystream);
+
+        // Big-endian increment of bytes [12..15].
+        carry: u32 = 1;
+        j: u32 = 15;
+        while j >= 12 {
+            val: u32 = *(counter_block + j) + carry;
+            *(counter_block + j) = val & 255;
+            carry = val >> 8;
+            if j == 0 { break; }
+            j = j - 1;
+        }
+
         pos = pos + to_xor;
-        ctr = ctr + 1;
     }
-    
-    free(siv); free(counter_block);
+
+    free(counter_block);
+}
+
+fn aes_gcm_siv_encrypt(key: Address, nonce: Address, plaintext: Address, pt_len: u32, aad: Address, aad_len: u32, ciphertext: Address, tag: Address) -> u32 {
+    auth_key = allocate(16);
+    enc_key = allocate(16);
+    gcm_siv_derive_keys(key, nonce, auth_key, enc_key);
+
+    siv = allocate(16);
+    gcm_siv_compute_siv(auth_key, nonce, aad, aad_len, plaintext, pt_len, siv);
+
+    // Copy SIV to the tag output (16 bytes).
+    i: u32 = 0;
+    while i < 16 { *(tag + i) = *(siv + i); i = i + 1; }
+
+    // CTR encrypt the plaintext using enc_key and SIV as IV.
+    gcm_siv_ctr(enc_key, siv, plaintext, pt_len, ciphertext);
+
+    free(auth_key); free(enc_key); free(siv);
     return pt_len;
+}
+
+fn aes_gcm_siv_decrypt(key: Address, nonce: Address, ciphertext: Address, ct_len: u32, aad: Address, aad_len: u32, tag: Address, plaintext: Address) -> u32 {
+    auth_key = allocate(16);
+    enc_key = allocate(16);
+    gcm_siv_derive_keys(key, nonce, auth_key, enc_key);
+
+    // CTR decrypt — same operation as encrypt, using the supplied tag as IV.
+    gcm_siv_ctr(enc_key, tag, ciphertext, ct_len, plaintext);
+
+    // Recompute the expected SIV and constant-time compare to the tag.
+    expected = allocate(16);
+    gcm_siv_compute_siv(auth_key, nonce, aad, aad_len, plaintext, ct_len, expected);
+
+    diff: u32 = 0;
+    i: u32 = 0;
+    while i < 16 {
+        diff = diff | (*(expected + i) ^ *(tag + i));
+        i = i + 1;
+    }
+
+    free(auth_key); free(enc_key); free(expected);
+    if diff == 0 { return ct_len; }
+    return 0;
 }
