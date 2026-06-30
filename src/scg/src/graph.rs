@@ -6,7 +6,7 @@
 
 use hashbrown::HashMap;
 use indexmap::IndexSet;
-use petgraph::algo::{has_path_connecting, toposort};
+use petgraph::algo::{has_path_connecting, toposort, tarjan_scc};
 use petgraph::graph::{DiGraph, EdgeIndex, NodeIndex};
 use petgraph::visit::EdgeRef;
 use petgraph::Direction;
@@ -578,6 +578,43 @@ impl SCG {
             .filter_map(|idx| self.node_index_to_id.get(&idx).copied())
             .collect();
         Ok(result)
+    }
+
+    /// Returns a topological ordering of the nodes in the graph, handling
+    /// cycles by grouping nodes into strongly connected components (SCCs).
+    ///
+    /// Unlike `topological_sort`, this method does not fail when the graph
+    /// contains cycles (e.g., from loops). Instead, it:
+    /// 1. Computes SCCs using Tarjan's algorithm
+    /// 2. Topologically sorts the SCC DAG (SCCs are returned in reverse
+    ///    topological order by tarjan_scc)
+    /// 3. Within each SCC, orders nodes by their NodeIndex for determinism
+    ///
+    /// This allows the MSG builder to process cyclic SCGs that arise from
+    /// loops in the source program.
+    pub fn topological_sort_with_cycles(&self) -> Vec<NodeId> {
+        let sccs = tarjan_scc(&self.graph);
+        // tarjan_scc returns SCCs in reverse topological order (children first).
+        // We need topological order (parents first), so reverse.
+        let mut result: Vec<NodeId> = Vec::with_capacity(self.graph.node_count());
+        for scc in sccs.into_iter().rev() {
+            // Within each SCC, sort by NodeIndex for deterministic ordering
+            let mut sorted_scc: Vec<NodeIndex> = scc;
+            sorted_scc.sort();
+            for idx in sorted_scc {
+                if let Some(&node_id) = self.node_index_to_id.get(&idx) {
+                    result.push(node_id);
+                }
+            }
+        }
+        result
+    }
+
+    /// Returns true if the graph contains any cycles.
+    ///
+    /// Uses petgraph's `toposort` — if it fails, the graph has a cycle.
+    pub fn has_cycles(&self) -> bool {
+        toposort(&self.graph, None).is_err()
     }
 
     // ── Region Operations ──────────────────────────────────────────

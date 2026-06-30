@@ -281,9 +281,14 @@ pub fn scg_to_msg(scg: &SCG) -> Result<MSG, ConversionError> {
     let mut ctx = ConversionContext::new();
 
     // Step 1: Topological sort the SCG.
-    let sorted_nodes = scg
-        .topological_sort()
-        .map_err(|_| ConversionError::CycleDetected)?;
+    // Use SCC-based sort that handles cycles from loops, falling back to
+    // strict topological sort for acyclic graphs.
+    let sorted_nodes = if scg.has_cycles() {
+        scg.topological_sort_with_cycles()
+    } else {
+        scg.topological_sort()
+            .map_err(|_| ConversionError::CycleDetected)?
+    };
 
     // Step 2: Pre-scan — identify which allocation nodes exist and which regions
     // are freed, so we can assign correct region status upfront.

@@ -455,3 +455,235 @@ fn bn2048_mod_inv(r: Address, a: Address, m: Address) {
 
     free(u); free(v); free(x1); free(x2);
 }
+
+// ===========================================================================
+// Montgomery multiplication.
+//
+// Montgomery constants (computed at runtime via the helpers below):
+//   BN2048_R       = 2^2048 mod m  (the Montgomery radix R = 2^2048; used
+//                                   implicitly, never materialised as a
+//                                   standalone buffer)
+//   BN2048_R2      = 2^4096 mod m = R^2 mod m
+//                                   (bn2048_mont_compute_r2)
+//   BN2048_M_PRIME = -m^(-1) mod 2^64
+//                                   (bn2048_mont_compute_m_prime)
+//
+// The modulus m must be odd so that m^(-1) mod 2^64 exists.  All Montgomery-
+// domain values are stored as 256-byte (32-limb) buffers and are kept
+// reduced below m.
+// ===========================================================================
+
+// Compute R^2 mod m = 2^4096 mod m via 4096 doublings, reducing mod m after
+// each doubling.  r2_out receives the 256-byte result.  m must be odd and > 1.
+fn bn2048_mont_compute_r2(r2_out: Address, m: Address) {
+    bn2048_set_u32(r2_out, 1);
+    tmp = allocate(256);
+    i: u32 = 0;
+    while i < 4096 {
+        bn2048_copy(tmp, r2_out);
+        bn2048_mod_add(r2_out, tmp, tmp, m);
+        i = i + 1;
+    }
+    free(tmp);
+}
+
+// Compute m_prime = -m^(-1) mod 2^64 via Newton iteration on the low limb
+// of m.  Only the low limb m[0] participates because (m * m') mod 2^64
+// depends solely on m[0] * m' mod 2^64.  m must be odd.  Returns m_prime.
+fn bn2048_mont_compute_m_prime(m: Address) -> u64 {
+    m0: u64 = bn2048_load_u64(m, 0);
+    m_prime: u64 = 1;
+    two: u64 = 2;
+    i: u32 = 0;
+    while i < 6 {
+        prod: u64 = m0 * m_prime;
+        factor: u64 = two - prod;
+        m_prime = m_prime * factor;
+        i = i + 1;
+    }
+    return 0 - m_prime;
+}
+
+// Montgomery reduction: result = t * R^(-1) mod m, where R = 2^2048.
+// t is a t_len-limb buffer (t_len must be >= 65) that is modified in place.
+// After the reduction loop the low 32 limbs of t are zero and the result
+// lives in limbs 32..64 (33 limbs, value < 2m).  A final conditional
+// subtraction by m brings the value below m and the low 32 limbs are stored
+// into result.  m_prime comes from bn2048_mont_compute_m_prime.
+fn bn2048_mont_reduce(result: Address, t: Address, t_len: u32, m: Address, m_prime: u64) {
+    n: u32 = 32;
+    t_bytes: u32 = t_len * 8;
+
+    lo = allocate(8);
+    hi = allocate(8);
+
+    i: u32 = 0;
+    while i < n {
+        ti: u64 = bn2048_load_u64(t, i * 8);
+        u: u64 = ti * m_prime;
+
+        j: u32 = 0;
+        while j < n {
+            mj: u64 = bn2048_load_u64(m, j * 8);
+            bn2048_mul_u64(mj, u, lo, hi);
+
+            off: u32 = (i + j) * 8;
+            carry: u64 = 0;
+
+            // Add low 64 bits of (m[j] * u) at limb (i + j).
+            k: u32 = 0;
+            while k < 8 {
+                cur: u64 = *(t + off + k);
+                addv: u64 = *(lo + k);
+                sum: u64 = cur + addv + carry;
+                *(t + off + k) = sum & 255;
+                carry = sum >> 8;
+                k = k + 1;
+            }
+            // Add high 64 bits of (m[j] * u) at limb (i + j + 1).
+            k = 0;
+            while k < 8 {
+                cur: u64 = *(t + off + 8 + k);
+                addv: u64 = *(hi + k);
+                sum: u64 = cur + addv + carry;
+                *(t + off + 8 + k) = sum & 255;
+                carry = sum >> 8;
+                k = k + 1;
+            }
+            // Propagate any remaining carry through higher bytes.
+            k = 16;
+            while carry != 0 {
+                pos: u32 = off + k;
+                if pos >= t_bytes {
+                    carry = 0;
+                } else {
+                    cur: u64 = *(t + pos);
+                    sum: u64 = cur + carry;
+                    *(t + pos) = sum & 255;
+                    carry = sum >> 8;
+                    k = k + 1;
+                }
+            }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+
+    free(lo); free(hi);
+
+    // The result lives in t[32..64] (33 limbs, 264 bytes).  Copy it into a
+    // candidate buffer so the conditional subtraction can run without
+    // aliasing concerns.
+    candidate = allocate(264);
+    ci: u32 = 0;
+    while ci < 264 {
+        *(candidate + ci) = *(t + n * 8 + ci);
+        ci = ci + 1;
+    }
+
+    // If candidate >= m, subtract m.  candidate < 2m so one subtraction
+    // suffices.  The top (33rd) limb is at most 1 because the reduced
+    // value is < 2m < 2^2049.
+    top: u64 = bn2048_load_u64(candidate, 32 * 8);
+    need_sub: u32 = 0;
+    if top != 0 {
+        need_sub = 1;
+    } else {
+        if bn2048_cmp(candidate, m) >= 0 {
+            need_sub = 1;
+        }
+    }
+    if need_sub == 1 {
+        borrow: u32 = bn2048_sub(candidate, candidate, m);
+        new_top: u64 = top - (borrow as u64);
+        bn2048_store_u64(candidate, 32 * 8, new_top);
+    }
+
+    // Store the low 32 limbs (256 bytes) into result.
+    ci = 0;
+    while ci < 256 {
+        *(result + ci) = *(candidate + ci);
+        ci = ci + 1;
+    }
+
+    free(candidate);
+}
+
+// Montgomery multiplication: r = a * b * R^(-1) mod m.
+// a and b are 256-byte operands (each < m).  r is the 256-byte result (< m).
+// m_prime is -m^(-1) mod 2^64 from bn2048_mont_compute_m_prime.
+fn bn2048_mont_mul(r: Address, a: Address, b: Address, m: Address, m_prime: u64) {
+    // t = a * b (4096-bit, 64 limbs) plus one extra limb to absorb the
+    // carry produced during Montgomery reduction (the reduced value can
+    // reach 2m - 1 < 2^2049, which needs 33 result limbs).
+    t = allocate(520);
+    bn2048_mul_4096(t, a, b);
+    bn2048_store_u64(t, 512, 0);
+    bn2048_mont_reduce(r, t, 65, m, m_prime);
+    free(t);
+}
+
+// Convert a from normal to Montgomery domain: r = a * R mod m.
+// Computed as bn2048_mont_mul(a, R2, m, m_prime) since a * R2 * R^(-1) = a * R.
+fn bn2048_mont_convert(r: Address, a: Address, m: Address, r2: Address, m_prime: u64) {
+    bn2048_mont_mul(r, a, r2, m, m_prime);
+}
+
+// Convert a from Montgomery to normal domain: r = a * R^(-1) mod m.
+// Computed as bn2048_mont_mul(a, 1, m, m_prime) since a * 1 * R^(-1) = a * R^(-1).
+fn bn2048_momt_revert(r: Address, a: Address, m: Address, m_prime: u64) {
+    one = allocate(256);
+    bn2048_set_u32(one, 1);
+    bn2048_mont_mul(r, a, one, m, m_prime);
+    free(one);
+}
+
+// Montgomery-based modular exponentiation: r = a^exp mod m.
+// m must be odd.  Uses square-and-multiply with Montgomery multiplication,
+// avoiding the 4096/2048 binary long division used by bn2048_mod_exp.
+fn bn2048_mod_exp_mont(r: Address, a: Address, exp: Address, m: Address) {
+    // r2 = R^2 mod m
+    r2 = allocate(256);
+    bn2048_mont_compute_r2(r2, m);
+
+    // m_prime = -m^(-1) mod 2^64
+    m_prime: u64 = bn2048_mont_compute_m_prime(m);
+
+    // a_mont = a * R mod m  (base in Montgomery domain)
+    a_mont = allocate(256);
+    bn2048_mont_convert(a_mont, a, m, r2, m_prime);
+
+    // result_mont = R mod m = mont_mul(1, r2)  (represents the value 1)
+    result_mont = allocate(256);
+    one = allocate(256);
+    bn2048_set_u32(one, 1);
+    bn2048_mont_mul(result_mont, one, r2, m, m_prime);
+
+    bits: u32 = bn2048_bitlen(exp);
+    if bits == 0 {
+        // exp = 0  =>  a^0 = 1
+        bn2048_set_u32(r, 1);
+        free(r2); free(a_mont); free(result_mont); free(one);
+        return;
+    }
+
+    i: u32 = 0;
+    while i < bits {
+        if bn2048_get_bit(exp, i) == 1 {
+            tmp = allocate(256);
+            bn2048_mont_mul(tmp, result_mont, a_mont, m, m_prime);
+            bn2048_copy(result_mont, tmp);
+            free(tmp);
+        }
+        sq = allocate(256);
+        bn2048_mont_mul(sq, a_mont, a_mont, m, m_prime);
+        bn2048_copy(a_mont, sq);
+        free(sq);
+        i = i + 1;
+    }
+
+    // r = result_mont * R^(-1) mod m  (convert back to normal domain)
+    bn2048_momt_revert(r, result_mont, m, m_prime);
+
+    free(r2); free(a_mont); free(result_mont); free(one);
+}
