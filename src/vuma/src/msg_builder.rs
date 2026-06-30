@@ -445,9 +445,15 @@ impl MsgBuilder {
     /// This method may be called only once on a fresh builder. For incremental
     /// updates, use [`MsgBuilder::update`].
     pub fn build(&mut self, scg: &SCG) -> Result<&MSG, BuilderError> {
-        let topo_order = scg
-            .topological_sort()
-            .map_err(|_| BuilderError::CycleDetected)?;
+        // Use SCC-based topological sort that handles cycles from loops.
+        // Falls back to strict topological_sort for backward compatibility
+        // if the graph is acyclic.
+        let topo_order = if scg.has_cycles() {
+            scg.topological_sort_with_cycles()
+        } else {
+            scg.topological_sort()
+                .map_err(|_| BuilderError::CycleDetected)?
+        };
 
         // Pre-populate the SCG region → MSG region mapping.
         // We create one MSG Region for each SCG Region that has an AllocationNode.
