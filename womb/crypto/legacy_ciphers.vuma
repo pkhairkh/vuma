@@ -430,12 +430,33 @@ fn cam_fl_inv(inp: u64, k: u64) -> u64 {
     return (((x_hi as u64) << 32) | (x_lo as u64)) & ((1 << 63) | ((1 << 63) - 1));
 }
 
-// ROTL128(x_hi, x_lo, n)
-fn cam_rotl128(x_hi: u64, x_lo: u64, n: u32) -> u64 {
-    // We only need n=15, n=30, n=45, n=60, n=77, n=94, n=111
-    // Implement via byte shifts for simplicity
-    // Pack into a temporary buffer of 16 bytes
-    return x_lo;  // Forward to canonical implementation
+// ROTL128 — return the high 64 bits of (x_hi || x_lo) rotated left by n bits.
+// Per RFC 3713 §2.2, the key schedule uses rotations by 0, 15, 30, 45, 60, 77, 94, 111.
+fn cam_rotl128_hi(x_hi: u64, x_lo: u64, n: u32) -> u64 {
+    MASK64: u64 = ((1 << 63) | ((1 << 63) - 1));
+    m: u32 = 0;
+    if n == 0 { return x_hi & MASK64; }
+    if n == 64 { return x_lo & MASK64; }
+    if n < 64 {
+        return ((x_hi << n) | (x_lo >> (64 - n))) & MASK64;
+    }
+    // 64 < n < 128
+    m = n - 64;
+    return ((x_lo << m) | (x_hi >> (64 - m))) & MASK64;
+}
+
+// ROTL128 — return the low 64 bits of (x_hi || x_lo) rotated left by n bits.
+fn cam_rotl128_lo(x_hi: u64, x_lo: u64, n: u32) -> u64 {
+    MASK64: u64 = ((1 << 63) | ((1 << 63) - 1));
+    m: u32 = 0;
+    if n == 0 { return x_lo & MASK64; }
+    if n == 64 { return x_hi & MASK64; }
+    if n < 64 {
+        return ((x_lo << n) | (x_hi >> (64 - n))) & MASK64;
+    }
+    // 64 < n < 128
+    m = n - 64;
+    return ((x_hi << m) | (x_lo >> (64 - m))) & MASK64;
 }
 
 // Camellia key schedule for 128-bit key (26 subkeys: ku_kl_*, kr_ka_*)
@@ -507,6 +528,96 @@ fn cam_load_subkey(sk: Address, idx: u32) -> u64 {
     while i < 4 { hi = (hi << 8) | *(sk + idx * 8 + i); i = i + 1; }
     while i < 8 { lo = (lo << 8) | *(sk + idx * 8 + i); i = i + 1; }
     return (((hi as u64) << 32) | (lo as u64)) & ((1 << 63) | ((1 << 63) - 1));
+}
+
+// Camellia key schedule for 256-bit key — RFC 3713 §2.2.
+// Produces 34 subkeys (kw1, kw2, k1..k24, kl1..kl6, kw3, kw4) at subkeys[0..33].
+// Subkey layout (indices 0..33, 8 bytes each = 272 bytes total):
+//   0,1     = kw1, kw2     (pre-whitening)
+//   2..7    = k1..k6
+//   8,9     = kl1, kl2     (FL after round 6)
+//   10..15  = k7..k12
+//   16,17   = kl3, kl4     (FL after round 12)
+//   18..23  = k13..k18
+//   24,25   = kl5, kl6     (FL after round 18)
+//   26..31  = k19..k24
+//   32,33   = kw3, kw4     (post-whitening)
+fn cam_key_schedule_256(key: Address, subkeys: Address) {
+    MASK64: u64 = ((1 << 63) | ((1 << 63) - 1));
+    // KL = (K1, K2) = key[0..16]; KR = (K3, K4) = key[16..32]
+    kl_hi: u64 = 0;
+    kl_lo: u64 = 0;
+    kr_hi: u64 = 0;
+    kr_lo: u64 = 0;
+    i: u32 = 0;
+    while i < 8  { kl_hi = ((kl_hi << 8) | *(key + i)) & MASK64; i = i + 1; }
+    while i < 16 { kl_lo = ((kl_lo << 8) | *(key + i)) & MASK64; i = i + 1; }
+    while i < 24 { kr_hi = ((kr_hi << 8) | *(key + i)) & MASK64; i = i + 1; }
+    while i < 32 { kr_lo = ((kr_lo << 8) | *(key + i)) & MASK64; i = i + 1; }
+
+    // RFC 3713 §2.2 constants CON0..CON5
+    con0: u64 = 0xa09e667f3bcc908b;
+    con1: u64 = 0xb67ae8584caa73b2;
+    con2: u64 = 0xc6ef372fe94f82be;
+    con3: u64 = 0x54ff53a5f1d36f1c;
+    con4: u64 = 0x10e527fade682d1d;
+    con5: u64 = 0xb05688c2b3e6c1fd;
+
+    // Compute KA: D1 = KL_L, D2 = KL_R; four F rounds with CON0..CON3; XOR back KL.
+    d1: u64 = kl_hi;
+    d2: u64 = kl_lo;
+    d1 = (d1 ^ cam_f(d2, con0)) & MASK64;
+    d2 = (d2 ^ cam_f(d1, con1)) & MASK64;
+    d1 = (d1 ^ cam_f(d2, con2)) & MASK64;
+    d2 = (d2 ^ cam_f(d1, con3)) & MASK64;
+    d1 = (d1 ^ kl_hi) & MASK64;
+    d2 = (d2 ^ kl_lo) & MASK64;
+    ka_hi: u64 = d1;
+    ka_lo: u64 = d2;
+
+    // Compute KB: two more F rounds with CON4..CON5; XOR with KR.
+    d1 = (d1 ^ cam_f(d2, con4)) & MASK64;
+    d2 = (d2 ^ cam_f(d1, con5)) & MASK64;
+    d1 = (d1 ^ kr_hi) & MASK64;
+    d2 = (d2 ^ kr_lo) & MASK64;
+    kb_hi: u64 = d1;
+    kb_lo: u64 = d2;
+
+    // Derive 34 subkeys per RFC 3713 Table 3 (192/256-bit keys) via ROTL128.
+    cam_store_subkey(subkeys, 0,  kl_hi);
+    cam_store_subkey(subkeys, 1,  kl_lo);
+    cam_store_subkey(subkeys, 2,  kb_hi);
+    cam_store_subkey(subkeys, 3,  kb_lo);
+    cam_store_subkey(subkeys, 4,  cam_rotl128_hi(kr_hi, kr_lo, 15));
+    cam_store_subkey(subkeys, 5,  cam_rotl128_lo(kr_hi, kr_lo, 15));
+    cam_store_subkey(subkeys, 6,  cam_rotl128_hi(ka_hi, ka_lo, 15));
+    cam_store_subkey(subkeys, 7,  cam_rotl128_lo(ka_hi, ka_lo, 15));
+    cam_store_subkey(subkeys, 8,  cam_rotl128_hi(kr_hi, kr_lo, 30));
+    cam_store_subkey(subkeys, 9,  cam_rotl128_lo(kr_hi, kr_lo, 30));
+    cam_store_subkey(subkeys, 10, cam_rotl128_hi(kb_hi, kb_lo, 30));
+    cam_store_subkey(subkeys, 11, cam_rotl128_lo(kb_hi, kb_lo, 30));
+    cam_store_subkey(subkeys, 12, cam_rotl128_hi(kl_hi, kl_lo, 45));
+    cam_store_subkey(subkeys, 13, cam_rotl128_lo(kl_hi, kl_lo, 45));
+    cam_store_subkey(subkeys, 14, cam_rotl128_hi(ka_hi, ka_lo, 45));
+    cam_store_subkey(subkeys, 15, cam_rotl128_lo(ka_hi, ka_lo, 45));
+    cam_store_subkey(subkeys, 16, cam_rotl128_hi(kl_hi, kl_lo, 60));
+    cam_store_subkey(subkeys, 17, cam_rotl128_lo(kl_hi, kl_lo, 60));
+    cam_store_subkey(subkeys, 18, cam_rotl128_hi(kr_hi, kr_lo, 60));
+    cam_store_subkey(subkeys, 19, cam_rotl128_lo(kr_hi, kr_lo, 60));
+    cam_store_subkey(subkeys, 20, cam_rotl128_hi(kb_hi, kb_lo, 77));
+    cam_store_subkey(subkeys, 21, cam_rotl128_lo(kb_hi, kb_lo, 77));
+    cam_store_subkey(subkeys, 22, cam_rotl128_hi(kl_hi, kl_lo, 77));
+    cam_store_subkey(subkeys, 23, cam_rotl128_lo(kl_hi, kl_lo, 77));
+    cam_store_subkey(subkeys, 24, cam_rotl128_hi(kl_hi, kl_lo, 94));
+    cam_store_subkey(subkeys, 25, cam_rotl128_lo(kl_hi, kl_lo, 94));
+    cam_store_subkey(subkeys, 26, cam_rotl128_hi(kr_hi, kr_lo, 94));
+    cam_store_subkey(subkeys, 27, cam_rotl128_lo(kr_hi, kr_lo, 94));
+    cam_store_subkey(subkeys, 28, cam_rotl128_hi(ka_hi, ka_lo, 94));
+    cam_store_subkey(subkeys, 29, cam_rotl128_lo(ka_hi, ka_lo, 94));
+    cam_store_subkey(subkeys, 30, cam_rotl128_hi(kl_hi, kl_lo, 111));
+    cam_store_subkey(subkeys, 31, cam_rotl128_lo(kl_hi, kl_lo, 111));
+    cam_store_subkey(subkeys, 32, cam_rotl128_hi(kb_hi, kb_lo, 111));
+    cam_store_subkey(subkeys, 33, cam_rotl128_lo(kb_hi, kb_lo, 111));
 }
 
 // Camellia 128-bit block encryption (18 rounds + 6 FL/FL^-1)
@@ -583,85 +694,90 @@ fn camellia_decrypt_block_128(cipher: Address, key: Address, plain: Address) {
     while i < 16 { *(plain + i) = (out_d2 >> (56 - (i - 8) * 8)) & 255; i = i + 1; }
 }
 
-// 256-bit key uses 24 rounds; same structure with extended key schedule
+// 256-bit key uses 24 rounds; same Feistel structure with FL/FL^-1 after rounds 6, 12, 18.
+// Per RFC 3713 §2.3 (24-round variant): pre-whitening, 6 rounds, FL, 6 rounds, FL,
+// 6 rounds, FL, 6 rounds, post-whitening (with implicit final swap).
 fn camellia_encrypt_block_256(plain: Address, key: Address, cipher: Address) {
-    // For 256-bit, we extend the 128-bit key schedule with KR
-    // We delegate to a simpler approach: use first 128 bits as k1, derive
-    // KA and KB with KR = second 128 bits
-    subkeys = allocate(208);
-    // Use 128-bit schedule for 256-bit key (caller should validate)
-    cam_key_schedule_128(key, subkeys);
+    subkeys = allocate(272);  // 34 subkeys * 8 bytes
+    cam_key_schedule_256(key, subkeys);
+    // Load plaintext as D1 || D2 (64-bit halves)
     d1: u64 = 0; d2: u64 = 0;
     i: u32 = 0;
     while i < 8 { d1 = (d1 << 8) | *(plain + i); i = i + 1; }
     while i < 16 { d2 = (d2 << 8) | *(plain + i); i = i + 1; }
+    // Pre-whitening (kw1, kw2)
     d1 = d1 ^ cam_load_subkey(subkeys, 0);
     d2 = d2 ^ cam_load_subkey(subkeys, 1);
     round: u32 = 0;
     sk_idx: u32 = 2;
     while round < 24 {
         if round == 6 {
-            d1 = cam_fl(d1, cam_load_subkey(subkeys, 14));
-            d2 = cam_fl_inv(d2, cam_load_subkey(subkeys, 15));
-            sk_idx = 16;
+            d1 = cam_fl(d1, cam_load_subkey(subkeys, 8));
+            d2 = cam_fl_inv(d2, cam_load_subkey(subkeys, 9));
+            sk_idx = 10;
         }
         if round == 12 {
-            d1 = cam_fl(d1, cam_load_subkey(subkeys, 18));
-            d2 = cam_fl_inv(d2, cam_load_subkey(subkeys, 19));
-            sk_idx = 20;
+            d1 = cam_fl(d1, cam_load_subkey(subkeys, 16));
+            d2 = cam_fl_inv(d2, cam_load_subkey(subkeys, 17));
+            sk_idx = 18;
         }
         if round == 18 {
-            d1 = cam_fl(d1, cam_load_subkey(subkeys, 22));
-            d2 = cam_fl_inv(d2, cam_load_subkey(subkeys, 23));
-            sk_idx = 24;
+            d1 = cam_fl(d1, cam_load_subkey(subkeys, 24));
+            d2 = cam_fl_inv(d2, cam_load_subkey(subkeys, 25));
+            sk_idx = 26;
         }
-        new_d2: u64 = d1 ^ cam_f(d2, cam_load_subkey(subkeys, sk_idx & 25));
+        new_d2: u64 = d1 ^ cam_f(d2, cam_load_subkey(subkeys, sk_idx));
         d1 = d2;
         d2 = new_d2;
         sk_idx = sk_idx + 1;
         round = round + 1;
     }
-    out_d1: u64 = d2 ^ cam_load_subkey(subkeys, 24);
-    out_d2: u64 = d1 ^ cam_load_subkey(subkeys, 25);
+    // Final swap + post-whitening (kw3, kw4)
+    out_d1: u64 = d2 ^ cam_load_subkey(subkeys, 32);
+    out_d2: u64 = d1 ^ cam_load_subkey(subkeys, 33);
     i = 0;
     while i < 8 { *(cipher + i) = (out_d1 >> (56 - i * 8)) & 255; i = i + 1; }
     while i < 16 { *(cipher + i) = (out_d2 >> (56 - (i - 8) * 8)) & 255; i = i + 1; }
 }
 
 fn camellia_decrypt_block_256(cipher: Address, key: Address, plain: Address) {
-    // Mirror of encrypt_256
-    subkeys = allocate(208);
-    cam_key_schedule_128(key, subkeys);
+    // Mirror of encrypt_256: run the same Feistel network with subkeys in reverse
+    // order, and swap the kl_left/kl_right keys at each FL point (matching the
+    // 128-bit decrypt structure already in this file).
+    subkeys = allocate(272);
+    cam_key_schedule_256(key, subkeys);
     d1: u64 = 0; d2: u64 = 0;
     i: u32 = 0;
     while i < 8 { d1 = (d1 << 8) | *(cipher + i); i = i + 1; }
     while i < 16 { d2 = (d2 << 8) | *(cipher + i); i = i + 1; }
-    d1 = d1 ^ cam_load_subkey(subkeys, 24);
-    d2 = d2 ^ cam_load_subkey(subkeys, 25);
+    // Pre-whitening (kw3, kw4 — encrypt's post-whitening keys)
+    d1 = d1 ^ cam_load_subkey(subkeys, 32);
+    d2 = d2 ^ cam_load_subkey(subkeys, 33);
     round: u32 = 0;
-    sk_idx: u32 = 23;
+    sk_idx: u32 = 31;
     while round < 24 {
         if round == 6 {
-            d1 = cam_fl(d1, cam_load_subkey(subkeys, 23));
-            d2 = cam_fl_inv(d2, cam_load_subkey(subkeys, 22));
-            sk_idx = 21;
+            d1 = cam_fl(d1, cam_load_subkey(subkeys, 25));
+            d2 = cam_fl_inv(d2, cam_load_subkey(subkeys, 24));
+            sk_idx = 23;
         }
         if round == 12 {
-            d1 = cam_fl(d1, cam_load_subkey(subkeys, 19));
-            d2 = cam_fl_inv(d2, cam_load_subkey(subkeys, 18));
-            sk_idx = 17;
+            d1 = cam_fl(d1, cam_load_subkey(subkeys, 17));
+            d2 = cam_fl_inv(d2, cam_load_subkey(subkeys, 16));
+            sk_idx = 15;
         }
         if round == 18 {
-            d1 = cam_fl(d1, cam_load_subkey(subkeys, 15));
-            d2 = cam_fl_inv(d2, cam_load_subkey(subkeys, 14));
+            d1 = cam_fl(d1, cam_load_subkey(subkeys, 9));
+            d2 = cam_fl_inv(d2, cam_load_subkey(subkeys, 8));
             sk_idx = 7;
         }
-        new_d2: u64 = d1 ^ cam_f(d2, cam_load_subkey(subkeys, sk_idx & 25));
+        new_d2: u64 = d1 ^ cam_f(d2, cam_load_subkey(subkeys, sk_idx));
         d1 = d2;
         d2 = new_d2;
         sk_idx = sk_idx - 1;
         round = round + 1;
     }
+    // Final swap + post-whitening (kw1, kw2 — encrypt's pre-whitening keys)
     out_d1: u64 = d2 ^ cam_load_subkey(subkeys, 0);
     out_d2: u64 = d1 ^ cam_load_subkey(subkeys, 1);
     i = 0;
@@ -803,28 +919,60 @@ fn aria_decrypt_block_128(cipher: Address, key: Address, plain: Address) {
     while i < 16 { *(plain + i) = *(state + i); i = i + 1; }
 }
 
+// 128-bit left-rotation helpers for ARIA round-key derivation (RFC 5794 §3).
+// (x_hi || x_lo) is treated as a single 128-bit value; rotate left by n bits.
+// Each helper returns one 64-bit half of the rotated result. The rotation
+// amounts used by ARIA-128 are 19, 31, and 67 (RFC 5794 §3.1).
+fn aria_rotl128_hi(x_hi: u64, x_lo: u64, n: u32) -> u64 {
+    MASK64: u64 = (1 << 63) | ((1 << 63) - 1);
+    n_mod: u32 = n & 127;
+    if n_mod == 0 { return x_hi & MASK64; }
+    if n_mod == 64 { return x_lo & MASK64; }
+    if n_mod < 64 {
+        return ((x_hi << n_mod) | (x_lo >> (64 - n_mod))) & MASK64;
+    }
+    return ((x_lo << (n_mod - 64)) | (x_hi >> (128 - n_mod))) & MASK64;
+}
+
+fn aria_rotl128_lo(x_hi: u64, x_lo: u64, n: u32) -> u64 {
+    MASK64: u64 = (1 << 63) | ((1 << 63) - 1);
+    n_mod: u32 = n & 127;
+    if n_mod == 0 { return x_lo & MASK64; }
+    if n_mod == 64 { return x_hi & MASK64; }
+    if n_mod < 64 {
+        return ((x_lo << n_mod) | (x_hi >> (64 - n_mod))) & MASK64;
+    }
+    return ((x_hi << (n_mod - 64)) | (x_lo >> (128 - n_mod))) & MASK64;
+}
+
 fn aria_key_schedule_128(key: Address, ek: Address) {
-    // ARIA uses CK1, CK2, CK3 constants for round-key regeneration
-    // Derive 11 round keys deterministically from W0..W3
-    // Real impl: W0 = KL (16 bytes), W1 = FO(W0, CK1), W2 = FE(W1, CK2), W3 = FO(W2, CK3)
-    // Then EK_i derived by rotation of W_i
+    // RFC 5794 §2.4 key schedule for ARIA-128.
+    // W0 = KL (16 bytes), W1 = FO(W0, CK1), W2 = FE(W1, CK2), W3 = FO(W2, CK3).
+    // Round keys EK_1..EK_11 are then derived by 128-bit rotations of W0..W3
+    // (see aria_derive_ek_128 for the rotation table from RFC 5794 §3.1).
     w = allocate(64);  // 4 * 16 bytes (W0..W3)
     i: u32 = 0;
     while i < 16 { *(w + i) = *(key + i); i = i + 1; }
     // W1 = FO(W0, CK1) — round function with CK1 as round key
-    aria_fo(w, 0, 16);  // produces W1 at w+16
-    aria_fe(w, 16, 32); // produces W2 at w+32
-    aria_fo(w, 32, 48); // produces W3 at w+48
-    // Derive 11 round keys (EK_0..EK_11) from rotations of W0,W1,W2,W3
+    aria_fo(w, 0, 16, 1);   // produces W1 at w+16 using CK1
+    aria_fe(w, 16, 32);     // produces W2 at w+32 using CK2
+    aria_fo(w, 32, 48, 3);  // produces W3 at w+48 using CK3
+    // Derive 11 round keys (EK_1..EK_11) from rotations of W0,W1,W2,W3
     aria_derive_ek_128(w, ek);
 }
 
-fn aria_fo(w: Address, src_off: u32, dst_off: u32) {
-    // FO(X, RK) = A(SL1(X XOR RK))
-    // RK = CK constants — embedded
+fn aria_fo(w: Address, src_off: u32, dst_off: u32, ck_sel: u32) {
+    // FO(X, RK) = A(SL1(X XOR RK)) — odd round function.
+    // ck_sel selects the embedded cipher-key constant: 1 -> CK1, 3 -> CK3.
+    // RFC 5794 §2.4: W1 = FO(W0, CK1), W3 = FO(W2, CK3).
     tmp = allocate(16);
     i: u32 = 0;
-    while i < 16 { *(tmp + i) = *(w + src_off + i) ^ aria_ck1(i); i = i + 1; }
+    while i < 16 {
+        ck: u32 = aria_ck1(i);
+        if ck_sel == 3 { ck = aria_ck3(i); }
+        *(tmp + i) = *(w + src_off + i) ^ ck;
+        i = i + 1;
+    }
     aria_sl1(tmp);
     aria_a(tmp);
     i = 0;
@@ -842,19 +990,48 @@ fn aria_fe(w: Address, src_off: u32, dst_off: u32) {
 }
 
 fn aria_derive_ek_128(w: Address, ek: Address) {
-    // EK_i derived from W_i via byte rotation (RFC 5794 §3)
-    // For correctness, we use the standard rotation pattern from RFC 5794 §3
+    // RFC 5794 §3.1 round-key derivation for ARIA-128.
+    // EK_{i+1} = (W_{i mod 4} rotl R_{i / 4}) for i = 0..10,
+    // where R_0 = 19, R_1 = 31, R_2 = 67 (the rotation amounts fixed by
+    // RFC 5794 §3.1). The rotation is a true 128-bit bitwise left rotation
+    // applied to the 128-bit value W_{i mod 4}; the result is stored as
+    // 16 big-endian bytes at ek + i*16.
     r: u32 = 0;
     while r < 11 {
         src_idx: u32 = r & 3;
         src_off: u32 = src_idx * 16;
-        rot: u32 = (r * 19) & 127;
+        rot: u32 = 19;
+        if r >= 4 { rot = 31; }
+        if r >= 8 { rot = 67; }
+        // Load W_{src_idx} (16 bytes big-endian) into (hi, lo) u64 pair.
+        hi: u64 = 0;
+        lo: u64 = 0;
         i: u32 = 0;
-        while i < 16 {
-            src_byte: u32 = (i + (rot >> 3)) & 15;
-            src_bit: u32 = rot & 7;
-            v: u32 = *(w + src_off + src_byte);
-            *(ek + r * 16 + i) = v;  // Copy with byte rotation per RFC 5794
+        while i < 8 {
+            b: u32 = *(w + src_off + i);
+            hi = hi | ((b as u64) << ((56 - i * 8) as u64));
+            i = i + 1;
+        }
+        i = 0;
+        while i < 8 {
+            b: u32 = *(w + src_off + 8 + i);
+            lo = lo | ((b as u64) << ((56 - i * 8) as u64));
+            i = i + 1;
+        }
+        // Apply the 128-bit left rotation.
+        new_hi: u64 = aria_rotl128_hi(hi, lo, rot);
+        new_lo: u64 = aria_rotl128_lo(hi, lo, rot);
+        // Store EK_{r+1} as 16 big-endian bytes at ek + r*16.
+        i = 0;
+        while i < 8 {
+            b: u32 = ((new_hi >> ((56 - i * 8) as u64)) & 255) as u32;
+            *(ek + r * 16 + i) = b;
+            i = i + 1;
+        }
+        i = 0;
+        while i < 8 {
+            b: u32 = ((new_lo >> ((56 - i * 8) as u64)) & 255) as u32;
+            *(ek + r * 16 + 8 + i) = b;
             i = i + 1;
         }
         r = r + 1;
@@ -863,6 +1040,7 @@ fn aria_derive_ek_128(w: Address, ek: Address) {
 
 fn aria_ck1(idx: u32) -> u32 { return aria_ck1_table(idx); }
 fn aria_ck2(idx: u32) -> u32 { return aria_ck2_table(idx); }
+fn aria_ck3(idx: u32) -> u32 { return aria_ck3_table(idx); }
 
 // 256-bit key ARIA: 14 rounds, expanded key schedule
 fn aria_encrypt_block_256(plain: Address, key: Address, cipher: Address) {
@@ -928,9 +1106,9 @@ fn aria_key_schedule_256(key: Address, ek: Address) {
     i: u32 = 0;
     while i < 16 { *(w + i) = *(key + i); i = i + 1; }
     while i < 32 { *(w + i) = *(key + i); i = i + 1; }  // 256-bit key as KL||KR
-    aria_fo(w, 0, 32);
-    aria_fe(w, 16, 48);
-    aria_fo(w, 32, 64);
+    aria_fo(w, 0, 32, 1);   // W1 = FO(W0, CK1)   per RFC 5794 §2.4
+    aria_fe(w, 16, 48);     // W2 = FE(W1, CK2)   per RFC 5794 §2.4
+    aria_fo(w, 32, 64, 3);  // W3 = FO(W2, CK3)   per RFC 5794 §2.4
     // Derive 15 round keys
     r: u32 = 0;
     while r < 15 {
@@ -3220,5 +3398,27 @@ fn aria_ck2_table(idx: u32) -> u32 {
     if idx == 13 { return 93; }
     if idx == 14 { return 226; }
     if idx == 15 { return 176; }
+    return 0;
+}
+
+// ARIA cipher key CK3 (RFC 5794 §2.4) — used by FO in the third regeneration
+// step (W3 = FO(W2, CK3)) for both ARIA-128 and ARIA-256.
+fn aria_ck3_table(idx: u32) -> u32 {
+    if idx == 0 { return 219; }   // 0xdb
+    if idx == 1 { return 146; }   // 0x92
+    if idx == 2 { return 55; }    // 0x37
+    if idx == 3 { return 29; }    // 0x1d
+    if idx == 4 { return 33; }    // 0x21
+    if idx == 5 { return 38; }    // 0x26
+    if idx == 6 { return 233; }   // 0xe9
+    if idx == 7 { return 112; }   // 0x70
+    if idx == 8 { return 3; }     // 0x03
+    if idx == 9 { return 36; }    // 0x24
+    if idx == 10 { return 151; }  // 0x97
+    if idx == 11 { return 117; }  // 0x75
+    if idx == 12 { return 4; }    // 0x04
+    if idx == 13 { return 232; }  // 0xe8
+    if idx == 14 { return 201; }  // 0xc9
+    if idx == 15 { return 14; }   // 0x0e
     return 0;
 }
