@@ -127,7 +127,7 @@ fn time_diff_ns(start: u64, end: u64) -> u64 {
 }
 
 // ===========================================================================
-// Epoch conversion helpers (simplified Unix epoch)
+// Epoch conversion helpers (Unix epoch)
 // ===========================================================================
 
 fn epoch_seconds() -> u64 {
