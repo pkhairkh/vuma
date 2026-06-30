@@ -187,6 +187,6 @@ fn ct_memcmp(a: Address, b: Address, n: u32) -> u32 {
 
 // Constant-time select: if mask == 0xFFFFFFFF, return a; if mask == 0,
 // return b. Used for side-channel-resistant conditional moves.
-fn ct_select(mask: u32, a: u32, b: u32) -> u32 {
+fn hmac_ct_select(mask: u32, a: u32, b: u32) -> u32 {
     return (a & mask) | (b & ((~mask) & HMAC_MASK32));
 }

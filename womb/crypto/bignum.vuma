@@ -3,7 +3,7 @@
 // gcd, mod_inv. Foundation for RSA, ECDSA, ECDH. No main().
 
 const BN256_MASK32: u32 = 4294967295;
-const BN256_MASK64: u64 = 18446744073709551615;
+const BN256_MASK64: u64 = ((1 << 63) | ((1 << 63) - 1));
 const BN256_LIMBS: u32 = 4;
 const BN256_BYTES: u32 = 32;
 

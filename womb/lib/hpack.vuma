@@ -1271,7 +1271,7 @@ fn hpack_static_name_len_ext(idx: u32) -> u32 {
     if idx == 43 { return 7; }   // "proxy-authenticate"
     if idx == 44 { return 13; }  // "proxy-authorization"
     if idx == 45 { return 5; }   // "range"
-    if idx == 7; }                // "referer"
+    if idx == 46 { return 7; }   // "referer"
     if idx == 47 { return 7; }   // "refresh"
     if idx == 48 { return 13; }  // "retry-after"
     if idx == 49 { return 6; }   // "server"

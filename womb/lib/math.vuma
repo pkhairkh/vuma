@@ -248,14 +248,14 @@ fn exp_f64(x: f64) -> f64 {
 
     // Range reduction
     k: i32 = round_f64(x / LN_2);
-    r: f64 = x - (k: f64) * LN_2;
+    r: f64 = x - k as f64 * LN_2;
 
     // Taylor series for exp(r), r in [-0.5*ln2, 0.5*ln2]
     result: f64 = 1.0;
     term: f64 = 1.0;
     i: u32 = 1;
     while i < 20 {
-        term = term * r / (i: f64);
+        term = term * r / i as f64;
         result = result + term;
         i = i + 1;
     }
@@ -340,7 +340,7 @@ fn ln_f64(x: f64) -> f64 {
     i: u32 = 1;
     while i < 30 {
         term = term * t2;
-        result = result + term / (2.0 * (i: f64) + 1.0);
+        result = result + term / (2.0 * i as f64 + 1.0);
         i = i + 1;
     }
     result = result * 2.0;
@@ -389,7 +389,7 @@ fn sin_f64(x: f64) -> f64 {
     result: f64 = x;
     i: u32 = 1;
     while i < 15 {
-        term = 0.0 - term * x2 / ((2.0 * (i: f64)) * (2.0 * (i: f64) + 1.0));
+        term = 0.0 - term * x2 / ((2.0 * i as f64) * (2.0 * i as f64 + 1.0));
         result = result + term;
         i = i + 1;
     }
@@ -425,8 +425,8 @@ fn asin_f64(x: f64) -> f64 {
     result: f64 = x;
     i: u32 = 1;
     while i < 20 {
-        term = term * x2 * (2.0 * (i: f64) - 1.0) / (2.0 * (i: f64));
-        result = result + term / (2.0 * (i: f64) + 1.0);
+        term = term * x2 * (2.0 * i as f64 - 1.0) / (2.0 * i as f64);
+        result = result + term / (2.0 * i as f64 + 1.0);
         i = i + 1;
     }
     return result;
@@ -463,7 +463,7 @@ fn atan_f64(x: f64) -> f64 {
     i: u32 = 1;
     while i < 30 {
         term = 0.0 - term * x2;
-        result = result + term / (2.0 * (i: f64) + 1.0);
+        result = result + term / (2.0 * i as f64 + 1.0);
         i = i + 1;
     }
 
@@ -635,7 +635,7 @@ fn sin_f32(x: f32) -> f32 {
     result: f32 = x;
     i: u32 = 1;
     while i < 10 {
-        term = 0.0 - term * x2 / ((2.0 * (i: f32)) * (2.0 * (i: f32) + 1.0));
+        term = 0.0 - term * x2 / ((2.0 * i as f64) * (2.0 * i as f64 + 1.0));
         result = result + term;
         i = i + 1;
     }
