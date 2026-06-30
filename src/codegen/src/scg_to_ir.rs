@@ -829,61 +829,17 @@ impl IRBuilder {
         ir_func: &mut IRFunction,
         names: &mut HashMap<String, u32>,
     ) -> Result<()> {
-        // Separate Return statements from non-Return statements.
-        // Return statements must be lowered LAST (after all computations,
-        // loops, and control flow) to ensure the return value reflects
-        // the latest variable values. The topological sort doesn't
-        // understand control-flow dependencies and might reorder a
-        // Return before a Loop if the Return's variable was defined
-        // before the Loop.
-        let mut non_return_indices: Vec<usize> = Vec::new();
-        let mut return_indices: Vec<usize> = Vec::new();
-        for (i, stmt) in stmts.iter().enumerate() {
-            if matches!(stmt, ScgStatement::Return(_)) {
-                return_indices.push(i);
-            } else {
-                non_return_indices.push(i);
-            }
-        }
+        // Check if any statement is a control-flow statement for diagnostics.
+        let _has_control_flow = stmts.iter().any(|s| matches!(s, ScgStatement::Control(_)));
 
-        // Check if any statement is a control-flow statement (Loop, If, Break,
-        // Continue). If so, use SOURCE ORDER — the topological sort doesn't
-        // understand control-flow dependencies and can reorder an If before
-        // a Loop that defines the variable the If references.
-        // Also use source order for functions with memory ops (any Call,
-        // atomics, loads, stores) since the topological sort can reorder
-        // loads before stores, or calls in the wrong order. Any function
-        // call may have memory side effects (writes to memory via pointers),
-        // so reordering calls is unsafe.
-        let has_control_flow = non_return_indices.iter().any(|&i| {
-            matches!(&stmts[i], ScgStatement::Control(_))
-        });
-        let has_memory_ops = non_return_indices.iter().any(|&i| {
-            match &stmts[i] {
-                ScgStatement::Call(_) => true,  // ANY call may have memory side effects
-                ScgStatement::Access(_) => true,
-                _ => false,
-            }
-        });
-
-        if has_control_flow || has_memory_ops {
-            // Use source order for functions with control flow or memory ops
-            for &idx in &non_return_indices {
-                self.lower_statement(&stmts[idx], ir_func, names)?;
-            }
-        } else {
-            // Use topological sort for simple straight-line functions
-            // (no loops, no ifs, no memory ops). This helps with data-flow
-            // ordering for programs where the SCG bridge returns statements
-            // in a non-optimal order.
-            let order = Self::topological_sort_statements_subset(stmts, &non_return_indices);
-            for &idx in &order {
-                self.lower_statement(&stmts[idx], ir_func, names)?;
-            }
-        }
-
-        // Lower Return statements last, in their original order.
-        for &idx in &return_indices {
+        // Always lower ALL statements (including Returns) in source order.
+        // Previously, Returns were deferred to the end to handle topological
+        // sort reordering. But this breaks if-bodies: a Return inside an
+        // if-then block gets moved to the merge point, causing the
+        // then-branch to fall through instead of returning early.
+        // Source order is correct for all cases because the SCG walk
+        // already produces statements in the right order.
+        for idx in 0..stmts.len() {
             self.lower_statement(&stmts[idx], ir_func, names)?;
         }
 

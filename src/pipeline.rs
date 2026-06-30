@@ -3288,6 +3288,38 @@ fn resolve_subexpr(
                 }
             }
         }
+        // Check if it's a const reference (e.g. MASK32, BN256_MASK64)
+        // Const nodes have label "const NAME = VALUE"
+        // Scan all nodes for a const definition matching the name
+        for node_data in scg.nodes() {
+            if let NodePayload::Computation(comp) = &node_data.payload {
+                let label = comp.kind.label();
+                if label.starts_with("const ") {
+                    // Format: "const NAME = VALUE"
+                    let rest = &label[6..];  // skip "const "
+                    if let Some(eq_pos) = rest.find('=') {
+                        let name = rest[..eq_pos].trim();
+                        if name == subexpr {
+                            let value_str = rest[eq_pos + 1..].trim();
+                            // Try to parse as integer (decimal or hex)
+                            if let Ok(num) = value_str.parse::<i64>() {
+                                return ScgExpr::Int(num);
+                            }
+                            if value_str.starts_with("0x") || value_str.starts_with("0X") {
+                                if let Ok(num) = i64::from_str_radix(&value_str[2..], 16) {
+                                    return ScgExpr::Int(num);
+                                }
+                            }
+                            // Try parsing as u64 then converting (for large constants)
+                            if let Ok(num) = value_str.parse::<u64>() {
+                                return ScgExpr::Int(num as i64);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // If still no match, return the variable name as a Var expression
         // for valid variable names. The IR builder will resolve it from its
         // names map (e.g., for-loop iterators registered by lower_loop).
@@ -4024,10 +4056,13 @@ pub fn bridge_scg_to_codegen_with_externs(scg: &SCG, extern_functions: &HashSet<
                 vec![]
             };
 
-            // Add return statement if the function has a FunctionReturn
-            if let Some(ret) = return_node {
-                consumed.insert(ret);
-            }
+            // Note: we do NOT consume the FunctionReturn node here.
+            // If we do, the walk's if-body handler cannot reach it when
+            // a Return statement is inside an if-then block, causing
+            // the Return to be dropped (the then-body walk breaks at
+            // the already-consumed FunctionReturn node).
+            // The FunctionReturn will be consumed by the walk itself
+            // when it reaches it.
             if !body.iter().any(|s| matches!(s, ScgStatement::Return(_))) {
                 // The walk didn't reach the FunctionReturn (e.g., loop
                 // exit with no outgoing CF). Try to process the
