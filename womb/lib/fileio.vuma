@@ -184,9 +184,9 @@ fn file_exists(path: Address) -> u32 {
     let rc: i64 = stat(path, sb);
     free(sb);
     if rc == 0 {
-        return 1u32;
+        return 1;
     }
-    return 0u32;
+    return 0;
 }
 
 // Delete a file via unlink(). Returns 0 on success, -1 on error.
