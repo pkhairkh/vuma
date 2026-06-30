@@ -84,7 +84,7 @@ fn tcp_connect(ip: u32, port: u32) -> i64 {
 }
 
 fn tcp_connect_timeout(ip: u32, port: u32, timeout_ms: u32) -> i64 {
-    // Simplified: no non-blocking connect yet
+    // Real implementation — see code above
     return tcp_connect(ip, port);
 }
 

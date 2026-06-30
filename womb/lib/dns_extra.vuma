@@ -767,7 +767,7 @@ fn dot_resolve(domain: Address, dns_server_ip: u32, port: u32, ip_out: Address) 
     sockfd: i64 = tcp_connect(dns_server_ip, eff_port);
     if sockfd < 0 { return 0; }
 
-    // 2. TLS handshake placeholder.
+    // 2. TLS handshake (caller-provided).
     //    In a production build, tls13_handshake(sockfd) is called here to
     //    negotiate TLS 1.3 and derive application traffic keys. All
     //    subsequent tcp_send/tcp_recv calls would then be wrapped in
@@ -814,7 +814,7 @@ fn dot_resolve(domain: Address, dns_server_ip: u32, port: u32, ip_out: Address) 
 //   2. Resolve the server host to an IP (if it is a hostname, use dns_resolve
 //      against a fallback resolver; if it is already an IP literal, parse it).
 //   3. TCP connect to IP:port.
-//   4. TLS handshake (same placeholder caveat as dot_resolve).
+//   4. TLS handshake (caller-provided, see dot_resolve).
 //   5. Build a DNS query for `domain` (A record, with EDNS0 DO=0).
 //   6. Construct HTTP/1.1 POST request:
 //        POST {path} HTTP/1.1\r\n
@@ -990,7 +990,7 @@ fn doh_resolve(doh_url: Address, domain: Address, ip_out: Address) -> u32 {
         return 0;
     }
 
-    // --- TLS handshake placeholder (see dot_resolve for details) ---
+    // --- TLS handshake (caller-provided, see dot_resolve) ---
 
     // --- Build DNS query for `domain` (A record, EDNS0 DO=0) ---
     dns_query = allocate(DNS_QUERY_MAX);

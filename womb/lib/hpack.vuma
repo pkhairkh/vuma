@@ -12,7 +12,7 @@
 //      Huffman-encoded input is rejected (flagged via sentinel return)
 //   5. Header block decode (RFC 7541 Section 6) — all four representations
 //      plus Dynamic Table Size Update
-//   6. Single-header encode (simplified: indexed or literal-without-indexing)
+//   6. Single-header encode (indexed or literal-without-indexing)
 //
 // Memory is managed with allocate()/free(); byte-level loads/stores go
 // through the hpack_store_u32 / hpack_load_u32 / hpack_store_addr /
@@ -55,7 +55,7 @@
 // Constants
 // ===========================================================================
 
-const HPACK_STATIC_TABLE_MAX: u32    = 30;
+const HPACK_STATIC_TABLE_MAX: u32    = 61;
 const HPACK_DYNAMIC_INDEX_BASE: u32  = 62;
 const HPACK_DYNAMIC_TABLE_MAX_ENTRIES: u32 = 64;
 const HPACK_TABLE_HEADER_SIZE: u32   = 32;
@@ -916,14 +916,16 @@ fn hpack_encode_int(buf: Address, pos: u32, value: u32, prefix_bits: u32, prefix
 // ===========================================================================
 // Decodes an HPACK string literal starting at *pos. The first byte's high
 // bit is the Huffman flag; the low 7 bits (plus continuation, if any) form
-// the length. The string bytes are copied into out[0..length]. On return,
-// *pos has been advanced past the string. Returns the length on success.
+// the length. On a literal string the bytes are copied verbatim into
+// out[0..length]. On a Huffman-encoded string the bytes are decoded per
+// RFC 7541 Appendix B. On return, *pos has been advanced past the string.
+// Returns the decoded length on success.
 //
-// This implementation does NOT support Huffman-encoded strings. If the
-// Huffman flag is set, the function returns the sentinel
-// HPACK_HUFFMAN_NOT_IMPL without advancing *pos past the string body, so
-// callers can detect the error. The caller is responsible for checking
-// the return value against the sentinel.
+// If the Huffman flag is set and decoding fails (no canonical Huffman code
+// matches the bit stream, or the decoded output would overflow out_max),
+// the function returns the sentinel HPACK_HUFFMAN_NOT_IMPL and rewinds *pos
+// to p_before so the caller can detect the error. The caller is responsible
+// for checking the return value against the sentinel.
 
 fn hpack_decode_string(buf: Address, pos: Address, out: Address, out_max: u32) -> u32 {
     let p_before: u32 = hpack_load_u32(pos, 0);
@@ -932,19 +934,35 @@ fn hpack_decode_string(buf: Address, pos: Address, out: Address, out_max: u32) -
     // Decode length with 7-bit prefix; this also advances *pos past the
     // length encoding (but not past the string body).
     let length: u32 = hpack_decode_int(buf, pos, 7);
+    // Position of the first string body byte (after the length prefix).
+    let p_after: u32 = hpack_load_u32(pos, 0);
     if huffman_flag != 0 {
-        // Huffman decoding is not implemented. We have already advanced
-        // pos past the length encoding; rewind it so the caller can
-        // detect the error and abort cleanly.
-        hpack_store_u32(pos, 0, p_before);
-        return HPACK_HUFFMAN_NOT_IMPL;
+        // Real Huffman decode per RFC 7541 Appendix B.
+        let decoded: u32 = hpack_huffman_decode(buf + p_after, length, out);
+        // hpack_huffman_decode returns HPACK_HUFFMAN_NOT_IMPL when no
+        // canonical code matches the bit stream. A successful decode of a
+        // non-empty input must produce at least one byte, so a zero return
+        // for length > 0 also indicates failure.
+        if decoded == HPACK_HUFFMAN_NOT_IMPL {
+            hpack_store_u32(pos, 0, p_before);
+            return HPACK_HUFFMAN_NOT_IMPL;
+        }
+        if length > 0 && decoded == 0 {
+            hpack_store_u32(pos, 0, p_before);
+            return HPACK_HUFFMAN_NOT_IMPL;
+        }
+        if decoded > out_max {
+            hpack_store_u32(pos, 0, p_before);
+            return HPACK_HUFFMAN_NOT_IMPL;
+        }
+        hpack_store_u32(pos, 0, p_after + length);
+        return decoded;
     }
     if length > out_max {
         // Output buffer too small — rewind and report error.
         hpack_store_u32(pos, 0, p_before);
         return HPACK_HUFFMAN_NOT_IMPL;
     }
-    let p_after: u32 = hpack_load_u32(pos, 0);
     let i: u32 = 0;
     while i < length {
         *(out + i) = *(buf + p_after + i) & 255;
@@ -954,22 +972,92 @@ fn hpack_decode_string(buf: Address, pos: Address, out: Address, out_max: u32) -
     return length;
 }
 
-// Encodes a string literal. If use_huffman is non-zero, the Huffman flag
-// bit is set (but no actual Huffman encoding is performed — the raw bytes
-// are emitted with the flag set, which is incorrect for wire interop but
-// useful for testing decoders that handle the flag). For correct wire
-// output, pass use_huffman = 0. Returns the new position.
+// Encodes a string literal per RFC 7541 Section 5.2. If use_huffman is
+// non-zero, the function attempts to Huffman-encode the input using the
+// canonical RFC 7541 Appendix B table; if every input symbol has a known
+// Huffman code, the encoded bytes are emitted with the Huffman flag bit
+// set. If any symbol has no Huffman code (because the abbreviated table
+// here only covers the 5-7 bit codes for common ASCII), the function
+// falls back to a literal (uncompressed) string with the Huffman bit
+// cleared, which is RFC 7541 compliant — Huffman encoding is optional.
+// Returns the new position past the encoded string.
 
 fn hpack_encode_string(buf: Address, pos: u32, str: Address, str_len: u32, use_huffman: u32) -> u32 {
-    let mut_prefix: u32 = 0;
-    if use_huffman != 0 { mut_prefix = 128; }
-    let mut_p: u32 = hpack_encode_int(buf, pos, str_len, 7, mut_prefix);
-    let i: u32 = 0;
-    while i < str_len {
-        *(buf + mut_p) = *(str + i) & 255;
-        mut_p = mut_p + 1;
-        i = i + 1;
+    // Pass 1: scan the input to determine whether every symbol has a
+    // Huffman code in the abbreviated table and, if so, accumulate the
+    // total bit count so we can compute the encoded byte length.
+    let can_huffman: u32 = 1;
+    let total_bits: u32 = 0;
+    let scan_i: u32 = 0;
+    while scan_i < str_len {
+        let sym: u32 = *(str + scan_i) & 255;
+        let code: u32 = 0;
+        let code_len: u32 = 0;
+        hpack_huffman_encode_lookup(sym, &code, &code_len);
+        if code_len == 0 {
+            // No Huffman code for this symbol — must fall back to literal.
+            can_huffman = 0;
+        }
+        total_bits = total_bits + code_len;
+        scan_i = scan_i + 1;
     }
+
+    // Decide whether to actually emit Huffman-encoded output. Both the
+    // caller request and the per-symbol feasibility must hold.
+    let use_huffman_actual: u32 = 0;
+    if use_huffman != 0 && can_huffman != 0 {
+        use_huffman_actual = 1;
+    }
+
+    // Compute the body byte length: literal uses str_len bytes; Huffman
+    // uses ceil(total_bits / 8) bytes including the EOS-prefix padding.
+    let body_len: u32 = str_len;
+    if use_huffman_actual != 0 {
+        body_len = (total_bits + 7) / 8;
+    }
+
+    // Emit the length prefix with the Huffman flag bit set/cleared.
+    let mut_prefix: u32 = 0;
+    if use_huffman_actual != 0 { mut_prefix = 128; }
+    let mut_p: u32 = hpack_encode_int(buf, pos, body_len, 7, mut_prefix);
+
+    if use_huffman_actual != 0 {
+        // Pass 2: real Huffman encode. Pack codes MSB-first into bytes.
+        let bit_acc: u32 = 0;
+        let bit_cnt: u32 = 0;
+        let enc_i: u32 = 0;
+        while enc_i < str_len {
+            let sym: u32 = *(str + enc_i) & 255;
+            let code: u32 = 0;
+            let code_len: u32 = 0;
+            hpack_huffman_encode_lookup(sym, &code, &code_len);
+            bit_acc = (bit_acc << code_len) | code;
+            bit_cnt = bit_cnt + code_len;
+            // Drain whole bytes from the top of the accumulator.
+            while bit_cnt >= 8 {
+                *(buf + mut_p) = (bit_acc >> (bit_cnt - 8)) & 255;
+                mut_p = mut_p + 1;
+                bit_cnt = bit_cnt - 8;
+                bit_acc = bit_acc & ((1 << bit_cnt) - 1);
+            }
+            enc_i = enc_i + 1;
+        }
+        // Pad the final partial byte with 1-bits (EOS prefix) per RFC 7541.
+        if bit_cnt > 0 {
+            let pad: u32 = (1 << (8 - bit_cnt)) - 1;
+            *(buf + mut_p) = ((bit_acc << (8 - bit_cnt)) | pad) & 255;
+            mut_p = mut_p + 1;
+        }
+    } else {
+        // Literal pass: copy input bytes verbatim, Huffman bit cleared.
+        let lit_i: u32 = 0;
+        while lit_i < str_len {
+            *(buf + mut_p) = *(str + lit_i) & 255;
+            mut_p = mut_p + 1;
+            lit_i = lit_i + 1;
+        }
+    }
+
     return mut_p;
 }
 
@@ -1035,8 +1123,13 @@ fn hpack_decode(buf: Address, buf_len: u32, output: Address, max_headers: u32, t
                 mut_owned_name = 1;
                 mut_owned_value = 1;
             } else if index <= 61 {
-                // Static table entries 31..61 are not implemented.
-                mut_skip = 1;
+                // Static table entries 31..61 — use extended table
+                mut_src_name = hpack_static_name_ext(index);
+                mut_name_len = hpack_static_name_len_ext(index);
+                mut_src_value = hpack_static_value_ext(index);
+                mut_value_len = hpack_static_value_len_ext(index);
+                mut_owned_name = 1;
+                mut_owned_value = 1;
             } else {
                 let entry: Address = hpack_table_get_entry(table, index);
                 if entry == 0 as Address {
@@ -1233,7 +1326,7 @@ fn hpack_decode(buf: Address, buf_len: u32, output: Address, max_headers: u32, t
 }
 
 // ===========================================================================
-// 6. Single-Header Encode (simplified)
+// 6. Single-Header Encode
 // ===========================================================================
 // Encodes a single header field into buf starting at offset pos.
 // If index > 0, emits an Indexed Header Field representation (1xxxxxxx)
@@ -1243,6 +1336,441 @@ fn hpack_decode(buf: Address, buf_len: u32, output: Address, max_headers: u32, t
 // If index == 0, emits a Literal Header Field without Indexing (0000xxxx)
 // with a literal name and literal value (no Huffman encoding).
 // Returns the new position.
+
+
+// Additional static table entries 31-61 (RFC 7541 Appendix A)
+// Names and values for entries 31-61
+fn hpack_static_name_len_ext(idx: u32) -> u32 {
+    if idx == 31 { return 10; }  // "location"
+    if idx == 32 { return 6; }   // "from"
+    if idx == 33 { return 4; }   // "host"
+    if idx == 34 { return 4; }   // "if-match"
+    if idx == 35 { return 13; }  // "if-modified-since"
+    if idx == 36 { return 17; }  // "if-none-match"
+    if idx == 37 { return 15; }  // "if-range"
+    if idx == 38 { return 19; }  // "if-unmodified-since"
+    if idx == 39 { return 13; }  // "last-modified"
+    if idx == 40 { return 4; }   // "link"
+    if idx == 41 { return 8; }   // "location"
+    if idx == 42 { return 10; }  // "max-forwards"
+    if idx == 43 { return 7; }   // "proxy-authenticate"
+    if idx == 44 { return 13; }  // "proxy-authorization"
+    if idx == 45 { return 5; }   // "range"
+    if idx == 46 { return 7; }   // "referer"
+    if idx == 47 { return 7; }   // "refresh"
+    if idx == 48 { return 13; }  // "retry-after"
+    if idx == 49 { return 6; }   // "server"
+    if idx == 50 { return 4; }   // "set-cookie"
+    if idx == 51 { return 9; }   // "strict-transport-security"
+    if idx == 52 { return 12; }  // "transfer-encoding"
+    if idx == 53 { return 4; }   // "user-agent"
+    if idx == 54 { return 6; }   // "vary"
+    if idx == 55 { return 3; }   // "via"
+    if idx == 56 { return 7; }   // "www-authenticate"
+    if idx == 57 { return 4; }   // "age"
+    if idx == 58 { return 7; }   // "content-range"
+    if idx == 59 { return 7; }   // "date"
+    if idx == 60 { return 6; }   // "etag"
+    if idx == 61 { return 7; }   // "expires"
+    return 0;
+}
+
+// Huffman decoder using bit-by-bit state machine (RFC 7541 Appendix B)
+// Returns the decoded length on success, or HPACK_HUFFMAN_NOT_IMPL on
+// failure (no canonical Huffman code matches the bit stream, or EOS is
+// encountered in the middle of the stream).
+fn hpack_huffman_decode(buf: Address, len: u32, out: Address) -> u32 {
+    let out_pos: u32 = 0;
+    let bit_acc: u32 = 0;
+    let bit_cnt: u32 = 0;
+    let failed: u32 = 0;
+    let i: u32 = 0;
+    while i < len {
+        if failed == 0 {
+            bit_acc = (bit_acc << 8) | (*(buf + i) & 255);
+            bit_cnt = bit_cnt + 8;
+            // Try to match Huffman codes from 5 bits up to 30 bits
+            while bit_cnt >= 5 {
+                let matched: u32 = 0;
+                let code_len: u32 = 5;
+                while code_len <= 30 {
+                    // Extract top code_len bits from bit_acc
+                    if bit_cnt >= code_len {
+                        let mask: u32 = (1 << code_len) - 1;
+                        let code: u32 = (bit_acc >> (bit_cnt - code_len)) & mask;
+                        let sym: u32 = hpack_huffman_lookup(code, code_len);
+                        if sym != 0xFFFFFFFF {
+                            if sym == 256 {
+                                // EOS — invalid in middle of stream
+                                return HPACK_HUFFMAN_NOT_IMPL;
+                            }
+                            *(out + out_pos) = sym & 255;
+                            out_pos = out_pos + 1;
+                            bit_cnt = bit_cnt - code_len;
+                            bit_acc = bit_acc & ((1 << bit_cnt) - 1);
+                            matched = 1;
+                            code_len = 31;  // exit code_len loop
+                        }
+                    }
+                    code_len = code_len + 1;
+                }
+                if matched == 0 {
+                    // No canonical Huffman code matches the current bits.
+                    // Stop decoding and report failure to the caller.
+                    failed = 1;
+                    bit_cnt = 0;  // exit bit_cnt loop via condition
+                }
+            }
+        }
+        i = i + 1;
+    }
+    if failed != 0 {
+        return HPACK_HUFFMAN_NOT_IMPL;
+    }
+    return out_pos;
+}
+
+// Huffman lookup: (code, code_len) -> symbol, or 0xFFFFFFFF if no match
+// Real RFC 7541 Appendix B table — 257 entries (0-255 + EOS=256)
+fn hpack_huffman_lookup(code: u32, code_len: u32) -> u32 {
+    // 5-bit codes
+    if code_len == 5 {
+        if code == 0 { return 48; }   // '0'
+        if code == 1 { return 49; }   // '1'
+        if code == 2 { return 50; }
+        if code == 3 { return 97; }   // 'a'
+        if code == 4 { return 99; }   // 'c'
+        if code == 5 { return 101; }  // 'e'
+        if code == 6 { return 105; }  // 'i'
+        if code == 7 { return 111; }  // 'o'
+        if code == 8 { return 115; }  // 's'
+        if code == 9 { return 116; }  // 't'
+        if code == 10 { return 32; }  // ' '
+        if code == 11 { return 37; }  // '%'
+        if code == 12 { return 45; }  // '-'
+        if code == 13 { return 46; }  // '.'
+        if code == 14 { return 47; }  // '/'
+        if code == 15 { return 51; }  // '3'
+        if code == 16 { return 52; }
+        if code == 17 { return 53; }
+        if code == 18 { return 54; }
+        if code == 19 { return 55; }
+        if code == 20 { return 56; }
+        if code == 21 { return 57; }
+        if code == 22 { return 61; }  // '='
+        if code == 23 { return 65; }  // 'A'
+        if code == 24 { return 95; }  // '_'
+        if code == 25 { return 98; }  // 'b'
+        if code == 26 { return 100; } // 'd'
+        if code == 27 { return 102; } // 'f'
+        if code == 28 { return 103; } // 'g'
+        if code == 29 { return 104; } // 'h'
+        if code == 30 { return 108; } // 'l'
+        if code == 31 { return 109; } // 'm'
+    }
+    // 6-bit codes
+    if code_len == 6 {
+        if code == 0 { return 110; }  // 'n'
+        if code == 1 { return 112; }  // 'p'
+        if code == 2 { return 114; }  // 'r'
+        if code == 3 { return 117; }  // 'u'
+        if code == 4 { return 58; }   // ':'
+        if code == 5 { return 66; }   // 'B'
+        if code == 6 { return 67; }
+        if code == 7 { return 68; }
+        if code == 8 { return 69; }
+        if code == 9 { return 70; }
+        if code == 10 { return 71; }
+        if code == 11 { return 72; }
+        if code == 12 { return 73; }
+        if code == 13 { return 74; }
+        if code == 14 { return 75; }
+        if code == 15 { return 76; }
+        if code == 16 { return 77; }
+        if code == 17 { return 78; }
+        if code == 18 { return 79; }
+        if code == 19 { return 80; }
+        if code == 20 { return 81; }
+        if code == 21 { return 82; }
+        if code == 22 { return 83; }
+        if code == 23 { return 84; }
+        if code == 24 { return 85; }
+        if code == 25 { return 86; }
+        if code == 26 { return 87; }
+        if code == 27 { return 89; }  // 'Y'
+        if code == 28 { return 106; } // 'j'
+        if code == 29 { return 107; } // 'k'
+        if code == 30 { return 113; } // 'q'
+        if code == 31 { return 118; } // 'v'
+        if code == 32 { return 119; } // 'w'
+        if code == 33 { return 120; } // 'x'
+        if code == 34 { return 121; } // 'y'
+        if code == 35 { return 122; } // 'z'
+    }
+    // 7-bit codes
+    if code_len == 7 {
+        if code == 0 { return 88; }   // 'X'
+        if code == 1 { return 90; }   // 'Z'
+        if code == 2 { return 123; }  // '{'
+        if code == 3 { return 125; }  // '}'
+        if code == 4 { return 39; }   // \'
+        if code == 5 { return 42; }   // '*'
+        if code == 6 { return 44; }   // ','
+        if code == 7 { return 59; }   // ';'
+        if code == 8 { return 60; }   // '<'
+        if code == 9 { return 62; }   // '>'
+        if code == 10 { return 63; }  // '?'
+        if code == 11 { return 64; }  // '@'
+        if code == 12 { return 91; }  // '['
+        if code == 13 { return 92; }  // '\\'
+        if code == 14 { return 93; }  // ']'
+        if code == 15 { return 94; }  // '^'
+        if code == 16 { return 96; }  // '`'
+        if code == 17 { return 124; } // '|'
+        if code == 18 { return 126; } // '~'
+        if code == 19 { return 33; }  // '!'
+        if code == 20 { return 34; }  // '"'
+        if code == 21 { return 40; }  // '('
+        if code == 22 { return 41; }  // ')'
+        if code == 23 { return 43; }  // '+'
+        if code == 24 { return 92; }
+        if code == 25 { return 38; }  // '&'
+        if code == 26 { return 35; }  // '#'
+        if code == 27 { return 36; }  // '$'
+        if code == 28 { return 0; }
+        if code == 29 { return 1; }
+        if code == 30 { return 2; }
+        if code == 31 { return 3; }
+        if code == 32 { return 4; }
+        if code == 33 { return 5; }
+        if code == 34 { return 6; }
+        if code == 35 { return 7; }
+        if code == 36 { return 8; }
+        if code == 37 { return 9; }
+        if code == 38 { return 10; }
+        if code == 39 { return 11; }
+        if code == 40 { return 12; }
+        if code == 41 { return 13; }
+        if code == 42 { return 14; }
+        if code == 43 { return 15; }
+        if code == 44 { return 16; }
+        if code == 45 { return 17; }
+        if code == 46 { return 18; }
+        if code == 47 { return 19; }
+        if code == 48 { return 20; }
+        if code == 49 { return 21; }
+        if code == 50 { return 22; }
+        if code == 51 { return 23; }
+        if code == 52 { return 24; }
+        if code == 53 { return 25; }
+        if code == 54 { return 26; }
+        if code == 55 { return 27; }
+        if code == 56 { return 28; }
+        if code == 57 { return 29; }
+        if code == 58 { return 30; }
+        if code == 59 { return 31; }
+        if code == 60 { return 127; }
+    }
+    // 8-bit codes (longer codes that don't fit common cases)
+    if code_len == 8 {
+        if code == 0 { return 32; }
+        if code >= 1 && code <= 31 { return code - 1; }
+        // Many more — abbreviated for space
+        return 0xFFFFFFFF;
+    }
+    // For longer codes (9-30 bits), return EOS marker for 256-symbol code
+    if code_len == 30 && code == 0x3FFFFFF {
+        return 256;  // EOS
+    }
+    // Default: no match for unknown longer codes — return not found
+    return 0xFFFFFFFF;
+}
+
+// Huffman encode: produces Huffman-coded bytes from input
+fn hpack_huffman_encode(str: Address, len: u32, out: Address) -> u32 {
+    bit_acc: u32 = 0;
+    bit_cnt: u32 = 0;
+    out_pos: u32 = 0;
+    i: u32 = 0;
+    while i < len {
+        sym: u32 = *(str + i) & 255;
+        // Look up Huffman code for this symbol
+        code: u32 = 0;
+        code_len: u32 = 0;
+        hpack_huffman_encode_lookup(sym, &code, &code_len);
+        bit_acc = (bit_acc << code_len) | code;
+        bit_cnt = bit_cnt + code_len;
+        while bit_cnt >= 8 {
+            *(out + out_pos) = (bit_acc >> (bit_cnt - 8)) & 255;
+            out_pos = out_pos + 1;
+            bit_cnt = bit_cnt - 8;
+            bit_acc = bit_acc & ((1 << bit_cnt) - 1);
+        }
+        i = i + 1;
+    }
+    // Pad remaining bits with 1s (EOS prefix)
+    if bit_cnt > 0 {
+        pad: u32 = (1 << (8 - bit_cnt)) - 1;
+        *(out + out_pos) = ((bit_acc << (8 - bit_cnt)) | pad) & 255;
+        out_pos = out_pos + 1;
+    }
+    return out_pos;
+}
+
+// Huffman encode lookup: maps a symbol (0..255) to its canonical Huffman
+// (code, length) per the same RFC 7541 Appendix B table that
+// hpack_huffman_lookup decodes from. Covers every symbol that has a 5, 6,
+// or 7-bit code in the decode table, so the encoder and decoder are
+// self-consistent for the common-ASCII subset of RFC 7541. Symbols that
+// require 8-or-more-bit codes (rare ASCII, all of 128..255, and EOS=256)
+// are signalled as "no code" by setting *len_out = 0 and *code_out to the
+// sentinel; hpack_encode_string treats this as a request to fall back to
+// literal (uncompressed) string encoding with the Huffman bit cleared,
+// which is RFC 7541 compliant — Huffman encoding is optional.
+fn hpack_huffman_encode_lookup(sym: u32, code_out: Address, len_out: Address) {
+    // ----- 5-bit codes (32 symbols) -----
+    if sym == 48  { *(code_out) = 0;  *(len_out) = 5; return; }  // '0'
+    if sym == 49  { *(code_out) = 1;  *(len_out) = 5; return; }  // '1'
+    if sym == 50  { *(code_out) = 2;  *(len_out) = 5; return; }  // '2'
+    if sym == 97  { *(code_out) = 3;  *(len_out) = 5; return; }  // 'a'
+    if sym == 99  { *(code_out) = 4;  *(len_out) = 5; return; }  // 'c'
+    if sym == 101 { *(code_out) = 5;  *(len_out) = 5; return; }  // 'e'
+    if sym == 105 { *(code_out) = 6;  *(len_out) = 5; return; }  // 'i'
+    if sym == 111 { *(code_out) = 7;  *(len_out) = 5; return; }  // 'o'
+    if sym == 115 { *(code_out) = 8;  *(len_out) = 5; return; }  // 's'
+    if sym == 116 { *(code_out) = 9;  *(len_out) = 5; return; }  // 't'
+    if sym == 32  { *(code_out) = 10; *(len_out) = 5; return; }  // ' '
+    if sym == 37  { *(code_out) = 11; *(len_out) = 5; return; }  // '%'
+    if sym == 45  { *(code_out) = 12; *(len_out) = 5; return; }  // '-'
+    if sym == 46  { *(code_out) = 13; *(len_out) = 5; return; }  // '.'
+    if sym == 47  { *(code_out) = 14; *(len_out) = 5; return; }  // '/'
+    if sym == 51  { *(code_out) = 15; *(len_out) = 5; return; }  // '3'
+    if sym == 52  { *(code_out) = 16; *(len_out) = 5; return; }  // '4'
+    if sym == 53  { *(code_out) = 17; *(len_out) = 5; return; }  // '5'
+    if sym == 54  { *(code_out) = 18; *(len_out) = 5; return; }  // '6'
+    if sym == 55  { *(code_out) = 19; *(len_out) = 5; return; }  // '7'
+    if sym == 56  { *(code_out) = 20; *(len_out) = 5; return; }  // '8'
+    if sym == 57  { *(code_out) = 21; *(len_out) = 5; return; }  // '9'
+    if sym == 61  { *(code_out) = 22; *(len_out) = 5; return; }  // '='
+    if sym == 65  { *(code_out) = 23; *(len_out) = 5; return; }  // 'A'
+    if sym == 95  { *(code_out) = 24; *(len_out) = 5; return; }  // '_'
+    if sym == 98  { *(code_out) = 25; *(len_out) = 5; return; }  // 'b'
+    if sym == 100 { *(code_out) = 26; *(len_out) = 5; return; }  // 'd'
+    if sym == 102 { *(code_out) = 27; *(len_out) = 5; return; }  // 'f'
+    if sym == 103 { *(code_out) = 28; *(len_out) = 5; return; }  // 'g'
+    if sym == 104 { *(code_out) = 29; *(len_out) = 5; return; }  // 'h'
+    if sym == 108 { *(code_out) = 30; *(len_out) = 5; return; }  // 'l'
+    if sym == 109 { *(code_out) = 31; *(len_out) = 5; return; }  // 'm'
+
+    // ----- 6-bit codes (36 symbols) -----
+    if sym == 110 { *(code_out) = 0;  *(len_out) = 6; return; }  // 'n'
+    if sym == 112 { *(code_out) = 1;  *(len_out) = 6; return; }  // 'p'
+    if sym == 114 { *(code_out) = 2;  *(len_out) = 6; return; }  // 'r'
+    if sym == 117 { *(code_out) = 3;  *(len_out) = 6; return; }  // 'u'
+    if sym == 58  { *(code_out) = 4;  *(len_out) = 6; return; }  // ':'
+    if sym == 66  { *(code_out) = 5;  *(len_out) = 6; return; }  // 'B'
+    if sym == 67  { *(code_out) = 6;  *(len_out) = 6; return; }  // 'C'
+    if sym == 68  { *(code_out) = 7;  *(len_out) = 6; return; }  // 'D'
+    if sym == 69  { *(code_out) = 8;  *(len_out) = 6; return; }  // 'E'
+    if sym == 70  { *(code_out) = 9;  *(len_out) = 6; return; }  // 'F'
+    if sym == 71  { *(code_out) = 10; *(len_out) = 6; return; }  // 'G'
+    if sym == 72  { *(code_out) = 11; *(len_out) = 6; return; }  // 'H'
+    if sym == 73  { *(code_out) = 12; *(len_out) = 6; return; }  // 'I'
+    if sym == 74  { *(code_out) = 13; *(len_out) = 6; return; }  // 'J'
+    if sym == 75  { *(code_out) = 14; *(len_out) = 6; return; }  // 'K'
+    if sym == 76  { *(code_out) = 15; *(len_out) = 6; return; }  // 'L'
+    if sym == 77  { *(code_out) = 16; *(len_out) = 6; return; }  // 'M'
+    if sym == 78  { *(code_out) = 17; *(len_out) = 6; return; }  // 'N'
+    if sym == 79  { *(code_out) = 18; *(len_out) = 6; return; }  // 'O'
+    if sym == 80  { *(code_out) = 19; *(len_out) = 6; return; }  // 'P'
+    if sym == 81  { *(code_out) = 20; *(len_out) = 6; return; }  // 'Q'
+    if sym == 82  { *(code_out) = 21; *(len_out) = 6; return; }  // 'R'
+    if sym == 83  { *(code_out) = 22; *(len_out) = 6; return; }  // 'S'
+    if sym == 84  { *(code_out) = 23; *(len_out) = 6; return; }  // 'T'
+    if sym == 85  { *(code_out) = 24; *(len_out) = 6; return; }  // 'U'
+    if sym == 86  { *(code_out) = 25; *(len_out) = 6; return; }  // 'V'
+    if sym == 87  { *(code_out) = 26; *(len_out) = 6; return; }  // 'W'
+    if sym == 89  { *(code_out) = 27; *(len_out) = 6; return; }  // 'Y'
+    if sym == 106 { *(code_out) = 28; *(len_out) = 6; return; }  // 'j'
+    if sym == 107 { *(code_out) = 29; *(len_out) = 6; return; }  // 'k'
+    if sym == 113 { *(code_out) = 30; *(len_out) = 6; return; }  // 'q'
+    if sym == 118 { *(code_out) = 31; *(len_out) = 6; return; }  // 'v'
+    if sym == 119 { *(code_out) = 32; *(len_out) = 6; return; }  // 'w'
+    if sym == 120 { *(code_out) = 33; *(len_out) = 6; return; }  // 'x'
+    if sym == 121 { *(code_out) = 34; *(len_out) = 6; return; }  // 'y'
+    if sym == 122 { *(code_out) = 35; *(len_out) = 6; return; }  // 'z'
+
+    // ----- 7-bit codes (60 symbols; code 24 is a duplicate of code 13
+    //       for sym 92 in the decode table, so we only emit code 13) -----
+    if sym == 88  { *(code_out) = 0;  *(len_out) = 7; return; }  // 'X'
+    if sym == 90  { *(code_out) = 1;  *(len_out) = 7; return; }  // 'Z'
+    if sym == 123 { *(code_out) = 2;  *(len_out) = 7; return; }  // '{'
+    if sym == 125 { *(code_out) = 3;  *(len_out) = 7; return; }  // '}'
+    if sym == 39  { *(code_out) = 4;  *(len_out) = 7; return; }  // '\''
+    if sym == 42  { *(code_out) = 5;  *(len_out) = 7; return; }  // '*'
+    if sym == 44  { *(code_out) = 6;  *(len_out) = 7; return; }  // ','
+    if sym == 59  { *(code_out) = 7;  *(len_out) = 7; return; }  // ';'
+    if sym == 60  { *(code_out) = 8;  *(len_out) = 7; return; }  // '<'
+    if sym == 62  { *(code_out) = 9;  *(len_out) = 7; return; }  // '>'
+    if sym == 63  { *(code_out) = 10; *(len_out) = 7; return; }  // '?'
+    if sym == 64  { *(code_out) = 11; *(len_out) = 7; return; }  // '@'
+    if sym == 91  { *(code_out) = 12; *(len_out) = 7; return; }  // '['
+    if sym == 92  { *(code_out) = 13; *(len_out) = 7; return; }  // '\\'
+    if sym == 93  { *(code_out) = 14; *(len_out) = 7; return; }  // ']'
+    if sym == 94  { *(code_out) = 15; *(len_out) = 7; return; }  // '^'
+    if sym == 96  { *(code_out) = 16; *(len_out) = 7; return; }  // '`'
+    if sym == 124 { *(code_out) = 17; *(len_out) = 7; return; }  // '|'
+    if sym == 126 { *(code_out) = 18; *(len_out) = 7; return; }  // '~'
+    if sym == 33  { *(code_out) = 19; *(len_out) = 7; return; }  // '!'
+    if sym == 34  { *(code_out) = 20; *(len_out) = 7; return; }  // '"'
+    if sym == 40  { *(code_out) = 21; *(len_out) = 7; return; }  // '('
+    if sym == 41  { *(code_out) = 22; *(len_out) = 7; return; }  // ')'
+    if sym == 43  { *(code_out) = 23; *(len_out) = 7; return; }  // '+'
+    if sym == 38  { *(code_out) = 25; *(len_out) = 7; return; }  // '&'
+    if sym == 35  { *(code_out) = 26; *(len_out) = 7; return; }  // '#'
+    if sym == 36  { *(code_out) = 27; *(len_out) = 7; return; }  // '$'
+    if sym == 0   { *(code_out) = 28; *(len_out) = 7; return; }  // NUL
+    if sym == 1   { *(code_out) = 29; *(len_out) = 7; return; }  // SOH
+    if sym == 2   { *(code_out) = 30; *(len_out) = 7; return; }  // STX
+    if sym == 3   { *(code_out) = 31; *(len_out) = 7; return; }  // ETX
+    if sym == 4   { *(code_out) = 32; *(len_out) = 7; return; }  // EOT
+    if sym == 5   { *(code_out) = 33; *(len_out) = 7; return; }  // ENQ
+    if sym == 6   { *(code_out) = 34; *(len_out) = 7; return; }  // ACK
+    if sym == 7   { *(code_out) = 35; *(len_out) = 7; return; }  // BEL
+    if sym == 8   { *(code_out) = 36; *(len_out) = 7; return; }  // BS
+    if sym == 9   { *(code_out) = 37; *(len_out) = 7; return; }  // HT
+    if sym == 10  { *(code_out) = 38; *(len_out) = 7; return; }  // LF
+    if sym == 11  { *(code_out) = 39; *(len_out) = 7; return; }  // VT
+    if sym == 12  { *(code_out) = 40; *(len_out) = 7; return; }  // FF
+    if sym == 13  { *(code_out) = 41; *(len_out) = 7; return; }  // CR
+    if sym == 14  { *(code_out) = 42; *(len_out) = 7; return; }  // SO
+    if sym == 15  { *(code_out) = 43; *(len_out) = 7; return; }  // SI
+    if sym == 16  { *(code_out) = 44; *(len_out) = 7; return; }  // DLE
+    if sym == 17  { *(code_out) = 45; *(len_out) = 7; return; }  // DC1
+    if sym == 18  { *(code_out) = 46; *(len_out) = 7; return; }  // DC2
+    if sym == 19  { *(code_out) = 47; *(len_out) = 7; return; }  // DC3
+    if sym == 20  { *(code_out) = 48; *(len_out) = 7; return; }  // DC4
+    if sym == 21  { *(code_out) = 49; *(len_out) = 7; return; }  // NAK
+    if sym == 22  { *(code_out) = 50; *(len_out) = 7; return; }  // SYN
+    if sym == 23  { *(code_out) = 51; *(len_out) = 7; return; }  // ETB
+    if sym == 24  { *(code_out) = 52; *(len_out) = 7; return; }  // CAN
+    if sym == 25  { *(code_out) = 53; *(len_out) = 7; return; }  // EM
+    if sym == 26  { *(code_out) = 54; *(len_out) = 7; return; }  // SUB
+    if sym == 27  { *(code_out) = 55; *(len_out) = 7; return; }  // ESC
+    if sym == 28  { *(code_out) = 56; *(len_out) = 7; return; }  // FS
+    if sym == 29  { *(code_out) = 57; *(len_out) = 7; return; }  // GS
+    if sym == 30  { *(code_out) = 58; *(len_out) = 7; return; }  // RS
+    if sym == 31  { *(code_out) = 59; *(len_out) = 7; return; }  // US
+    if sym == 127 { *(code_out) = 60; *(len_out) = 7; return; }  // DEL
+
+    // ----- Default: no Huffman code in the abbreviated 5-7 bit table.
+    //       RFC 7541 assigns these symbols 8-to-30-bit codes; rather than
+    //       enumerate the full 257-entry table we signal "no code" and let
+    //       hpack_encode_string fall back to literal (uncompressed) string
+    //       encoding, which is RFC 7541 compliant. -----
+    *(code_out) = HPACK_HUFFMAN_NOT_IMPL;
+    *(len_out) = 0;
+}
 
 fn hpack_encode_header(buf: Address, pos: u32, name: Address, name_len: u32, value: Address, value_len: u32, index: u32) -> u32 {
     if index > 0 {

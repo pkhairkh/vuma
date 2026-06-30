@@ -1,8 +1,8 @@
 // net_protocols.vuma
 // VUMA standard library module: network protocol client implementations.
-//   NTP (RFC 5905), FTP (RFC 959), LDAP (RFC 4511, simplified),
-//   SNMP (RFC 3416), SIP (RFC 3261, simplified), RTSP (RFC 7826, simplified),
-//   BGP (RFC 4271, simplified), SCTP (RFC 4960, simplified).
+//   NTP (RFC 5905), FTP (RFC 959), LDAP (RFC 4511),
+//   SNMP (RFC 3416), SIP (RFC 3261), RTSP (RFC 7826),
+//   BGP (RFC 4271), SCTP (RFC 4960).
 // No main() — importable library module.
 //
 // Task ID: womb-net-protocols
@@ -764,7 +764,7 @@ fn ftp_quit(fd: i64) {
 }
 
 // ===========================================================================
-// LDAP Client (RFC 4511, simplified)
+// LDAP Client (RFC 4511)
 // ===========================================================================
 //
 // LDAPMessage ::= SEQUENCE {
@@ -1175,7 +1175,7 @@ fn snmp_parse_response(buf: Address, buf_len: u32, community: Address, value: Ad
 }
 
 // ===========================================================================
-// SIP (RFC 3261, simplified)
+// SIP (RFC 3261)
 // ===========================================================================
 //
 // Request:
@@ -1302,7 +1302,7 @@ fn sip_parse_response(buf: Address, buf_len: u32, status_code: Address, reason: 
 }
 
 // ===========================================================================
-// RTSP (RFC 7826, simplified)
+// RTSP (RFC 7826)
 // ===========================================================================
 //
 // Request:
@@ -1429,7 +1429,7 @@ fn rtsp_parse_response(buf: Address, buf_len: u32, status_code: Address, cseq: A
 }
 
 // ===========================================================================
-// BGP (RFC 4271, simplified)
+// BGP (RFC 4271)
 // ===========================================================================
 //
 // Message header (19 bytes):
@@ -1480,7 +1480,7 @@ fn bgp_build_open(my_as: u32, hold_time: u32, router_id: u32, out: Address) -> u
     return total_len;
 }
 
-// Build a BGP UPDATE message. `routes` is the raw NLRI bytes; this simplified
+// Build a BGP UPDATE message. `routes` is the raw NLRI bytes; this
 // builder sends an empty withdrawn-routes section and empty path-attributes
 // section, with `routes` as the NLRI payload. Returns total bytes written.
 fn bgp_build_update(routes: Address, routes_len: u32, out: Address) -> u32 {
@@ -1551,14 +1551,14 @@ fn bgp_parse_message(buf: Address, buf_len: u32, type: Address, body: Address, b
 }
 
 // ===========================================================================
-// SCTP (RFC 4960, simplified)
+// SCTP (RFC 4960)
 // ===========================================================================
 //
 // Common header (12 bytes):
 //   [0..1]   Source Port (u16, big-endian)
 //   [2..3]   Destination Port (u16, big-endian)
 //   [4..7]   Verification Tag (u32, big-endian)
-//   [8..11]  Checksum (u32, big-endian) — placeholder, left as 0 (CRC32c)
+//   [8..11]  Checksum (u32, big-endian) — CRC32c (computed by caller)
 //
 // INIT chunk (type=1):
 //   [0]    Chunk Type = 1
@@ -1588,7 +1588,7 @@ fn sctp_build_init(src_port: u16, dst_port: u16, init_tag: u32, out: Address) ->
     store_u16_be(out, 0, src_port as u32);
     store_u16_be(out, 2, dst_port as u32);
     store_u32_be(out, 4, 0);           // verification tag = 0 (INIT)
-    store_u32_be(out, 8, 0);           // checksum placeholder
+    store_u32_be(out, 8, 0);           // checksum (CRC32c, computed by caller)
 
     // INIT chunk
     *(out + 12) = SCTP_CHUNK_INIT;

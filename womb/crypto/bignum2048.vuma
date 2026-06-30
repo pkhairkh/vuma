@@ -1,19 +1,29 @@
 // womb/crypto/bignum2048.vuma — 2048-bit Multi-Precision Integer Arithmetic
-// Extends bignum.vuma to 32-limb (2048-bit) numbers for RSA.
-// No main() — importable library module.
+// 32 x u64 limbs (little-endian). Real add, sub, mul, mod, mod_exp, gcd,
+// mod_inv for RSA-2048. No main().
 
-const MASK64: u64 = 18446744073709551615;
-const BN_LIMBS: u32 = 32;  // 32 × 64 = 2048 bits
+const BN2048_MASK32: u32 = 4294967295;
+const BN2048_LIMBS: u32 = 32;
+const BN2048_BYTES: u32 = 256;
 
-fn load_u64_le(ptr: Address, off: u32) -> u64 {
-    b0: u64 = *(ptr + off); b1: u64 = *(ptr + off + 1);
-    b2: u64 = *(ptr + off + 2); b3: u64 = *(ptr + off + 3);
-    b4: u64 = *(ptr + off + 4); b5: u64 = *(ptr + off + 5);
-    b6: u64 = *(ptr + off + 6); b7: u64 = *(ptr + off + 7);
-    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
+// ===========================================================================
+// Byte-level memory helpers
+// ===========================================================================
+
+fn bn2048_load_u64(ptr: Address, off: u32) -> u64 {
+    b0: u64 = *(ptr + off);
+    b1: u64 = *(ptr + off + 1);
+    b2: u64 = *(ptr + off + 2);
+    b3: u64 = *(ptr + off + 3);
+    b4: u64 = *(ptr + off + 4);
+    b5: u64 = *(ptr + off + 5);
+    b6: u64 = *(ptr + off + 6);
+    b7: u64 = *(ptr + off + 7);
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+             | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
 }
 
-fn store_u64_le(ptr: Address, off: u32, val: u64) {
+fn bn2048_store_u64(ptr: Address, off: u32, val: u64) {
     *(ptr + off) = val & 255;
     *(ptr + off + 1) = (val >> 8) & 255;
     *(ptr + off + 2) = (val >> 16) & 255;
@@ -26,28 +36,37 @@ fn store_u64_le(ptr: Address, off: u32, val: u64) {
 
 fn bn2048_zero(a: Address) {
     i: u32 = 0;
-    while i < BN_LIMBS * 8 { *(a + i) = 0; i = i + 1; }
+    while i < BN2048_BYTES { *(a + i) = 0; i = i + 1; }
 }
 
 fn bn2048_copy(r: Address, a: Address) {
     i: u32 = 0;
-    while i < BN_LIMBS * 8 { *(r + i) = *(a + i); i = i + 1; }
+    while i < BN2048_BYTES { *(r + i) = *(a + i); i = i + 1; }
+}
+
+fn bn2048_set_u32(r: Address, v: u32) {
+    bn2048_zero(r);
+    *(r + 0) = v & 255;
+    *(r + 1) = (v >> 8) & 255;
+    *(r + 2) = (v >> 16) & 255;
+    *(r + 3) = (v >> 24) & 255;
 }
 
 fn bn2048_is_zero(a: Address) -> u32 {
     i: u32 = 0;
-    while i < BN_LIMBS {
-        if load_u64_le(a, i * 8) != 0 { return 0; }
+    while i < BN2048_LIMBS {
+        if bn2048_load_u64(a, i * 8) != 0 { return 0; }
         i = i + 1;
     }
     return 1;
 }
 
+// Three-way compare: 1 if a>b, -1 if a<b, 0 if equal.
 fn bn2048_cmp(a: Address, b: Address) -> i32 {
-    i: u32 = BN_LIMBS - 1;
+    i: u32 = BN2048_LIMBS - 1;
     while 1 == 1 {
-        av: u64 = load_u64_le(a, i * 8);
-        bv: u64 = load_u64_le(b, i * 8);
+        av: u64 = bn2048_load_u64(a, i * 8);
+        bv: u64 = bn2048_load_u64(b, i * 8);
         if av > bv { return 1; }
         if av < bv { return -1; }
         if i == 0 { break; }
@@ -56,52 +75,88 @@ fn bn2048_cmp(a: Address, b: Address) -> i32 {
     return 0;
 }
 
+// r = a + b. Returns carry-out (0 or 1).
 fn bn2048_add(r: Address, a: Address, b: Address) -> u32 {
     carry: u64 = 0;
     i: u32 = 0;
-    while i < BN_LIMBS {
-        av: u64 = load_u64_le(a, i * 8);
-        bv: u64 = load_u64_le(b, i * 8);
+    while i < BN2048_LIMBS {
+        av: u64 = bn2048_load_u64(a, i * 8);
+        bv: u64 = bn2048_load_u64(b, i * 8);
         sum: u64 = av + bv + carry;
-        store_u64_le(r, i * 8, sum);
+        bn2048_store_u64(r, i * 8, sum);
         if sum < av { carry = 1; }
-        else { carry = 0; }
+        else {
+            if sum == av {
+                if carry == 1 { carry = 1; } else { carry = 0; }
+            } else { carry = 0; }
+        }
         i = i + 1;
     }
     return carry;
 }
 
+// r = a - b. Returns borrow-out (0 or 1).
 fn bn2048_sub(r: Address, a: Address, b: Address) -> u32 {
     borrow: u64 = 0;
     i: u32 = 0;
-    while i < BN_LIMBS {
-        av: u64 = load_u64_le(a, i * 8);
-        bv: u64 = load_u64_le(b, i * 8);
+    while i < BN2048_LIMBS {
+        av: u64 = bn2048_load_u64(a, i * 8);
+        bv: u64 = bn2048_load_u64(b, i * 8);
         diff: u64 = av - bv - borrow;
-        store_u64_le(r, i * 8, diff);
+        bn2048_store_u64(r, i * 8, diff);
         if av < bv { borrow = 1; }
-        else { borrow = 0; }
+        else {
+            if av == bv {
+                if borrow == 1 { borrow = 1; } else { borrow = 0; }
+            } else { borrow = 0; }
+        }
         i = i + 1;
     }
     return borrow;
 }
 
+// r = a << 1. Returns the bit shifted out (0 or 1).
+fn bn2048_lshift1(r: Address, a: Address) -> u32 {
+    carry: u64 = 0;
+    i: u32 = 0;
+    while i < BN2048_LIMBS {
+        v: u64 = bn2048_load_u64(a, i * 8);
+        bn2048_store_u64(r, i * 8, (v << 1) | carry);
+        carry = v >> 63;
+        i = i + 1;
+    }
+    return carry;
+}
+
+// r = a >> 1.
+fn bn2048_rshift1(r: Address, a: Address) {
+    i: u32 = BN2048_LIMBS - 1;
+    while i > 0 {
+        hi: u64 = bn2048_load_u64(a, i * 8);
+        lo: u64 = bn2048_load_u64(a, (i - 1) * 8);
+        bn2048_store_u64(r, i * 8, (hi >> 1) | (lo << 63));
+        i = i - 1;
+    }
+    v0: u64 = bn2048_load_u64(a, 0);
+    bn2048_store_u64(r, 0, v0 >> 1);
+}
+
 fn bn2048_get_bit(a: Address, bit: u32) -> u32 {
     limb: u32 = bit / 64;
     pos: u32 = bit % 64;
-    if limb >= BN_LIMBS { return 0; }
-    v: u64 = load_u64_le(a, limb * 8);
+    if limb >= BN2048_LIMBS { return 0; }
+    v: u64 = bn2048_load_u64(a, limb * 8);
     return (v >> pos) & 1;
 }
 
 fn bn2048_bitlen(a: Address) -> u32 {
-    i: u32 = BN_LIMBS - 1;
+    i: u32 = BN2048_LIMBS - 1;
     while 1 == 1 {
-        v: u64 = load_u64_le(a, i * 8);
+        v: u64 = bn2048_load_u64(a, i * 8);
         if v != 0 {
             bits: u32 = 64;
             while bits > 0 {
-                if (v >> (bits - 1)) & 1 == 1 { return i * 64 + bits; }
+                if ((v >> (bits - 1)) & 1) == 1 { return i * 64 + bits; }
                 bits = bits - 1;
             }
             return i * 64 + 1;
@@ -112,15 +167,143 @@ fn bn2048_bitlen(a: Address) -> u32 {
     return 0;
 }
 
-// Modular add: r = (a + b) mod m
-fn bn2048_mod_add(r: Address, a: Address, b: Address, m: Address) {
-    carry: u32 = bn2048_add(r, a, b);
-    if carry == 1 || bn2048_cmp(r, m) >= 0 {
-        bn2048_sub(r, r, m);
+// ===========================================================================
+// 64x64 -> 128 multiplication helper (split into 32-bit halves).
+// ===========================================================================
+
+fn bn2048_mul_u64(a: u64, b: u64, lo_out: Address, hi_out: Address) {
+    a_lo: u64 = a & 4294967295;
+    a_hi: u64 = a >> 32;
+    b_lo: u64 = b & 4294967295;
+    b_hi: u64 = b >> 32;
+
+    ll: u64 = a_lo * b_lo;
+    lh: u64 = a_lo * b_hi;
+    hl: u64 = a_hi * b_lo;
+    hh: u64 = a_hi * b_hi;
+
+    mid: u64 = lh + hl;
+    mid_carry: u64 = 0;
+    if mid < lh { mid_carry = 1; }
+
+    mid_lo: u64 = mid & 4294967295;
+    mid_hi: u64 = mid >> 32;
+
+    lo: u64 = ll + (mid_lo << 32);
+    lo_carry: u64 = 0;
+    if lo < ll { lo_carry = 1; }
+
+    hi: u64 = hh + mid_hi + (mid_carry << 32) + lo_carry;
+
+    bn2048_store_u64(lo_out, 0, lo);
+    bn2048_store_u64(hi_out, 0, hi);
+}
+
+// ===========================================================================
+// Schoolbook 32x32 -> 64 limb multiplication (4096-bit result).
+// r must be 512 bytes (64 limbs). r may not alias a or b.
+// ===========================================================================
+
+fn bn2048_mul_4096(r: Address, a: Address, b: Address) {
+    i: u32 = 0;
+    while i < 512 { *(r + i) = 0; i = i + 1; }
+
+    lo = allocate(8);
+    hi = allocate(8);
+
+    ai: u32 = 0;
+    while ai < BN2048_LIMBS {
+        bj: u32 = 0;
+        while bj < BN2048_LIMBS {
+            av: u64 = bn2048_load_u64(a, ai * 8);
+            bv: u64 = bn2048_load_u64(b, bj * 8);
+            bn2048_mul_u64(av, bv, lo, hi);
+
+            off: u32 = (ai + bj) * 8;
+            carry: u64 = 0;
+            k: u32 = 0;
+            while k < 8 {
+                cur: u64 = *(r + off + k);
+                addv: u64 = *(lo + k);
+                sum: u64 = cur + addv + carry;
+                *(r + off + k) = sum & 255;
+                carry = sum >> 8;
+                k = k + 1;
+            }
+            k = 0;
+            while k < 8 {
+                cur: u64 = *(r + off + 8 + k);
+                addv: u64 = *(hi + k);
+                sum: u64 = cur + addv + carry;
+                *(r + off + 8 + k) = sum & 255;
+                carry = sum >> 8;
+                k = k + 1;
+            }
+            k = 16;
+            while carry != 0 {
+                cur: u64 = *(r + off + k);
+                sum: u64 = cur + carry;
+                *(r + off + k) = sum & 255;
+                carry = sum >> 8;
+                k = k + 1;
+            }
+            bj = bj + 1;
+        }
+        ai = ai + 1;
+    }
+    free(lo); free(hi);
+}
+
+// ===========================================================================
+// 4096 / 2048 binary long division.
+//   dividend:  512 bytes (4096 bits)
+//   divisor:   256 bytes (2048 bits), must be non-zero
+//   quotient:  512 bytes (caller-provided, fits up to 4096 bits)
+//   remainder: 256 bytes (will be < divisor)
+// ===========================================================================
+
+fn bn2048_divmod_4096(dividend: Address, divisor: Address, quotient: Address, remainder: Address) {
+    i: u32 = 0;
+    while i < 512 { *(quotient + i) = 0; i = i + 1; }
+    bn2048_zero(remainder);
+
+    bit: u32 = 4096;
+    while bit > 0 {
+        bit = bit - 1;
+        bn2048_lshift1(remainder, remainder);
+        word: u32 = bit / 64;
+        pos: u32 = bit % 64;
+        d_word: u64 = bn2048_load_u64(dividend, word * 8);
+        in_bit: u32 = (d_word >> pos) & 1;
+        if in_bit == 1 {
+            *(remainder + 0) = *(remainder + 0) | 1;
+        }
+        if bn2048_cmp(remainder, divisor) >= 0 {
+            bn2048_sub(remainder, remainder, divisor);
+            q_word: u32 = bit / 64;
+            q_pos: u32 = bit % 64;
+            cur: u64 = bn2048_load_u64(quotient, q_word * 8);
+            cur = cur | ((1 as u64) << q_pos);
+            bn2048_store_u64(quotient, q_word * 8, cur);
+        }
     }
 }
 
-// Modular sub: r = (a - b) mod m
+// ===========================================================================
+// Modular arithmetic (mod m), assumes a, b < m.
+// ===========================================================================
+
+fn bn2048_mod_add(r: Address, a: Address, b: Address, m: Address) {
+    carry: u32 = bn2048_add(r, a, b);
+    if carry == 1 {
+        bn2048_sub(r, r, m);
+    } else {
+        if bn2048_cmp(r, m) >= 0 {
+            bn2048_sub(r, r, m);
+        }
+    }
+}
+
 fn bn2048_mod_sub(r: Address, a: Address, b: Address, m: Address) {
     borrow: u32 = bn2048_sub(r, a, b);
     if borrow == 1 {
@@ -128,64 +311,147 @@ fn bn2048_mod_sub(r: Address, a: Address, b: Address, m: Address) {
     }
 }
 
-// Modular multiply: r = (a * b) mod m using shift-and-add
+// r = (a * b) mod m. Uses real schoolbook mul + 4096/2048 long division.
+// a, b assumed < m.
 fn bn2048_mod_mul(r: Address, a: Address, b: Address, m: Address) {
-    bn2048_zero(r);
-    temp = allocate(BN_LIMBS * 8);
-    bn2048_copy(temp, a);
-
-    bits: u32 = bn2048_bitlen(b);
-    i: u32 = 0;
-    while i < bits {
-        if bn2048_get_bit(b, i) == 1 {
-            bn2048_mod_add(r, r, temp, m);
-        }
-        // temp = temp * 2 mod m
-        // Double = add to self
-        doubled = allocate(BN_LIMBS * 8);
-        bn2048_add(doubled, temp, temp);
-        if bn2048_cmp(doubled, m) >= 0 {
-            bn2048_sub(temp, doubled, m);
-        } else {
-            bn2048_copy(temp, doubled);
-        }
-        free(doubled);
-        i = i + 1;
-    }
-    free(temp);
+    prod = allocate(512);
+    quot = allocate(512);
+    bn2048_mul_4096(prod, a, b);
+    bn2048_divmod_4096(prod, m, quot, r);
+    free(prod); free(quot);
 }
 
-// Modular exponentiation: r = a^exp mod m (square-and-multiply)
+// r = a mod m for any 2048-bit a (zero-extends to 4096-bit dividend).
+fn bn2048_mod(r: Address, a: Address, m: Address) {
+    prod = allocate(512);
+    quot = allocate(512);
+    i: u32 = 0;
+    while i < 512 {
+        if i < 256 { *(prod + i) = *(a + i); }
+        else { *(prod + i) = 0; }
+        i = i + 1;
+    }
+    bn2048_divmod_4096(prod, m, quot, r);
+    free(prod); free(quot);
+}
+
+// r = a^exp mod m via square-and-multiply.
 fn bn2048_mod_exp(r: Address, a: Address, exp: Address, m: Address) {
     bn2048_zero(r);
     *(r + 0) = 1;  // r = 1
 
-    base = allocate(BN_LIMBS * 8);
-    bn2048_copy(base, a);
+    base = allocate(256);
+    bn2048_mod(base, a, m);
 
     bits: u32 = bn2048_bitlen(exp);
+    if bits == 0 {
+        free(base);
+        return;
+    }
     i: u32 = 0;
     while i < bits {
         if bn2048_get_bit(exp, i) == 1 {
-            temp = allocate(BN_LIMBS * 8);
-            bn2048_mod_mul(temp, r, base, m);
-            bn2048_copy(r, temp);
-            free(temp);
+            tmp = allocate(256);
+            bn2048_mod_mul(tmp, r, base, m);
+            bn2048_copy(r, tmp);
+            free(tmp);
         }
-        temp2 = allocate(BN_LIMBS * 8);
-        bn2048_mod_mul(temp2, base, base, m);
-        bn2048_copy(base, temp2);
-        free(temp2);
+        sq = allocate(256);
+        bn2048_mod_mul(sq, base, base, m);
+        bn2048_copy(base, sq);
+        free(sq);
         i = i + 1;
     }
     free(base);
 }
 
-// Set from small value
-fn bn2048_set_u32(r: Address, val: u32) {
-    bn2048_zero(r);
-    *(r + 0) = val & 255;
-    *(r + 1) = (val >> 8) & 255;
-    *(r + 2) = (val >> 16) & 255;
-    *(r + 3) = (val >> 24) & 255;
+// ===========================================================================
+// Binary GCD: r = gcd(a, b). Inputs are 2048-bit unsigned.
+// ===========================================================================
+
+fn bn2048_gcd(r: Address, a: Address, b: Address) {
+    u = allocate(256);
+    v = allocate(256);
+    bn2048_copy(u, a);
+    bn2048_copy(v, b);
+
+    shift: u32 = 0;
+    while (bn2048_get_bit(u, 0) == 0) && (bn2048_get_bit(v, 0) == 0) {
+        bn2048_rshift1(u, u);
+        bn2048_rshift1(v, v);
+        shift = shift + 1;
+    }
+    while bn2048_get_bit(u, 0) == 0 {
+        bn2048_rshift1(u, u);
+    }
+    while bn2048_is_zero(v) == 0 {
+        while bn2048_get_bit(v, 0) == 0 {
+            bn2048_rshift1(v, v);
+        }
+        if bn2048_cmp(u, v) >= 0 {
+            bn2048_sub(u, u, v);
+        } else {
+            bn2048_sub(v, v, u);
+            t = allocate(256);
+            bn2048_copy(t, u);
+            bn2048_copy(u, v);
+            bn2048_copy(v, t);
+            free(t);
+        }
+    }
+    bn2048_copy(r, u);
+    s: u32 = 0;
+    while s < shift {
+        bn2048_lshift1(r, r);
+        s = s + 1;
+    }
+    free(u); free(v);
+}
+
+// ===========================================================================
+// Modular inverse via binary extended GCD.
+// Computes r = a^(-1) mod m. Requires m odd and gcd(a, m) = 1.
+// ===========================================================================
+
+fn bn2048_mod_inv(r: Address, a: Address, m: Address) {
+    u = allocate(256);
+    v = allocate(256);
+    x1 = allocate(256);
+    x2 = allocate(256);
+
+    bn2048_copy(u, a);
+    bn2048_copy(v, m);
+    bn2048_set_u32(x1, 1);
+    bn2048_zero(x2);
+
+    while bn2048_is_zero(u) == 0 {
+        while bn2048_get_bit(u, 0) == 0 {
+            bn2048_rshift1(u, u);
+            if bn2048_get_bit(x1, 0) == 0 {
+                bn2048_rshift1(x1, x1);
+            } else {
+                bn2048_add(x1, x1, m);
+                bn2048_rshift1(x1, x1);
+            }
+        }
+        while bn2048_get_bit(v, 0) == 0 {
+            bn2048_rshift1(v, v);
+            if bn2048_get_bit(x2, 0) == 0 {
+                bn2048_rshift1(x2, x2);
+            } else {
+                bn2048_add(x2, x2, m);
+                bn2048_rshift1(x2, x2);
+            }
+        }
+        if bn2048_cmp(u, v) >= 0 {
+            bn2048_sub(u, u, v);
+            bn2048_mod_sub(x1, x1, x2, m);
+        } else {
+            bn2048_sub(v, v, u);
+            bn2048_mod_sub(x2, x2, x1, m);
+        }
+    }
+    bn2048_mod(r, x1, m);
+
+    free(u); free(v); free(x1); free(x2);
 }

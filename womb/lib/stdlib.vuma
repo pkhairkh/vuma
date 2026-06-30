@@ -105,7 +105,7 @@ fn utoa(val: u32, buf: Address, base: u32) -> Address {
     pos: u32 = 0;
     while v > 0 {
         d: u32 = v % base;
-        c: u32;
+        c: u32 = 0;
         if d >= 10 { c = 65 + d - 10; } else { c = 48 + d; }
         *(temp + tp) = c;
         tp = tp + 1;
@@ -133,7 +133,7 @@ fn u64toa(val: u64, buf: Address, base: u32) -> Address {
     pos: u32 = 0;
     while v > 0 {
         d: u64 = v % base;
-        c: u64;
+        c: u64 = 0;
         if d >= 10 { c = 65 + d - 10; } else { c = 48 + d; }
         *(temp + tp) = c;
         tp = tp + 1;

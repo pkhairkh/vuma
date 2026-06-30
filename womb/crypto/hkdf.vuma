@@ -1,21 +1,25 @@
 // womb/crypto/hkdf.vuma — HKDF (RFC 5869)
 // HMAC-based Extract-and-Expand Key Derivation Function.
-// No main() — importable library module.
-// Requires: hmac.vuma (which requires sha256.vuma).
+// Provides HKDF-Extract, HKDF-Expand, and HKDF (oneshot) for SHA-256 and
+// SHA-512. No main().
+// Requires: hmac.vuma (which requires sha256.vuma / sha512.vuma).
+
+const HKDF_HASH256_LEN: u32 = 32;
+const HKDF_HASH512_LEN: u32 = 64;
+const HKDF_MAX_BLOCKS: u32 = 255;
 
 // ===========================================================================
-// HKDF-Extract (RFC 5869 Section 2.2)
-// PRK = HMAC-Hash(salt, IKM)
-// Uses SHA-256 (32-byte output, 64-byte block)
+// HKDF-Extract (RFC 5869 Section 2.2) with SHA-256.
+//   PRK = HMAC-SHA-256(salt, IKM)
+//   If salt is empty, a string of HashLen zero bytes is used as the salt.
 // ===========================================================================
 
 fn hkdf_extract_sha256(salt: Address, salt_len: u32, ikm: Address, ikm_len: u32, prk: Address) {
-    // If salt is not provided, use a string of zeros of length HashLen
     if salt_len == 0 {
-        zeros = allocate(32);
+        zeros = allocate(HKDF_HASH256_LEN);
         i: u32 = 0;
-        while i < 32 { *(zeros + i) = 0; i = i + 1; }
-        hmac_sha256(zeros, 32, ikm, ikm_len, prk);
+        while i < HKDF_HASH256_LEN { *(zeros + i) = 0; i = i + 1; }
+        hmac_sha256(zeros, HKDF_HASH256_LEN, ikm, ikm_len, prk);
         free(zeros);
     } else {
         hmac_sha256(salt, salt_len, ikm, ikm_len, prk);
@@ -23,96 +27,86 @@ fn hkdf_extract_sha256(salt: Address, salt_len: u32, ikm: Address, ikm_len: u32,
 }
 
 // ===========================================================================
-// HKDF-Expand (RFC 5869 Section 2.3)
-// OKM = first L bytes of T(1) | T(2) | ... | T(N)
-// T(i) = HMAC-Hash(PRK, T(i-1) | info | i)
+// HKDF-Expand (RFC 5869 Section 2.3) with SHA-256.
+//   N = ceil(L / HashLen)
+//   T(0) = empty
+//   T(i) = HMAC-SHA-256(PRK, T(i-1) || info || i)
+//   OKM = first L octets of T(1) || T(2) || ... || T(N)
+// L must be <= 255 * HashLen; this is the caller's responsibility.
 // ===========================================================================
 
 fn hkdf_expand_sha256(prk: Address, info: Address, info_len: u32, okm: Address, okm_len: u32) {
-    // Max output = 255 * 32 = 8160 bytes
-    t = allocate(32);
+    t = allocate(HKDF_HASH256_LEN);
     i: u32 = 0;
-    while i < 32 { *(t + i) = 0; i = i + 1; }
+    while i < HKDF_HASH256_LEN { *(t + i) = 0; i = i + 1; }
 
     t_len: u32 = 0;
     counter: u32 = 1;
     pos: u32 = 0;
 
     while pos < okm_len {
-        // Build input: T(prev) | info | counter
+        // input = T(prev) || info || counter
         input_len: u32 = t_len + info_len + 1;
         input = allocate(input_len);
 
-        // Copy T(prev)
         i = 0;
-        while i < t_len {
-            *(input + i) = *(t + i);
-            i = i + 1;
-        }
-
-        // Copy info
+        while i < t_len { *(input + i) = *(t + i); i = i + 1; }
         i = 0;
-        while i < info_len {
-            *(input + t_len + i) = *(info + i);
-            i = i + 1;
-        }
-
-        // Append counter (single byte)
+        while i < info_len { *(input + t_len + i) = *(info + i); i = i + 1; }
         *(input + t_len + info_len) = counter & 255;
 
-        // T(i) = HMAC(PRK, input)
-        hmac_sha256(prk, 32, input, input_len, t);
-        t_len = 32;
+        hmac_sha256(prk, HKDF_HASH256_LEN, input, input_len, t);
+        t_len = HKDF_HASH256_LEN;
         free(input);
 
-        // Copy to output
-        to_copy: u32 = 32;
+        to_copy: u32 = HKDF_HASH256_LEN;
         remaining: u32 = okm_len - pos;
-        if remaining < 32 { to_copy = remaining; }
+        if remaining < to_copy { to_copy = remaining; }
 
         i = 0;
-        while i < to_copy {
-            *(okm + pos + i) = *(t + i);
-            i = i + 1;
-        }
+        while i < to_copy { *(okm + pos + i) = *(t + i); i = i + 1; }
         pos = pos + to_copy;
         counter = counter + 1;
     }
-
     free(t);
 }
 
 // ===========================================================================
-// HKDF (RFC 5869) — Extract + Expand in one call
+// HKDF-SHA256 (RFC 5869) — Extract + Expand in one call.
 // ===========================================================================
 
-fn hkdf_sha256(salt: Address, salt_len: u32, ikm: Address, ikm_len: u32, info: Address, info_len: u32, okm: Address, okm_len: u32) {
-    prk = allocate(32);
+fn hkdf_sha256(salt: Address, salt_len: u32, ikm: Address, ikm_len: u32,
+               info: Address, info_len: u32, okm: Address, okm_len: u32) {
+    prk = allocate(HKDF_HASH256_LEN);
     hkdf_extract_sha256(salt, salt_len, ikm, ikm_len, prk);
     hkdf_expand_sha256(prk, info, info_len, okm, okm_len);
     free(prk);
 }
 
 // ===========================================================================
-// HKDF-Extract for SHA-512 (64-byte output, 128-byte block)
+// HKDF-Extract with SHA-512.
 // ===========================================================================
 
 fn hkdf_extract_sha512(salt: Address, salt_len: u32, ikm: Address, ikm_len: u32, prk: Address) {
     if salt_len == 0 {
-        zeros = allocate(64);
+        zeros = allocate(HKDF_HASH512_LEN);
         i: u32 = 0;
-        while i < 64 { *(zeros + i) = 0; i = i + 1; }
-        hmac_sha512(zeros, 64, ikm, ikm_len, prk);
+        while i < HKDF_HASH512_LEN { *(zeros + i) = 0; i = i + 1; }
+        hmac_sha512(zeros, HKDF_HASH512_LEN, ikm, ikm_len, prk);
         free(zeros);
     } else {
         hmac_sha512(salt, salt_len, ikm, ikm_len, prk);
     }
 }
 
+// ===========================================================================
+// HKDF-Expand with SHA-512.
+// ===========================================================================
+
 fn hkdf_expand_sha512(prk: Address, info: Address, info_len: u32, okm: Address, okm_len: u32) {
-    t = allocate(64);
+    t = allocate(HKDF_HASH512_LEN);
     i: u32 = 0;
-    while i < 64 { *(t + i) = 0; i = i + 1; }
+    while i < HKDF_HASH512_LEN { *(t + i) = 0; i = i + 1; }
 
     t_len: u32 = 0;
     counter: u32 = 1;
@@ -128,28 +122,29 @@ fn hkdf_expand_sha512(prk: Address, info: Address, info_len: u32, okm: Address, 
         while i < info_len { *(input + t_len + i) = *(info + i); i = i + 1; }
         *(input + t_len + info_len) = counter & 255;
 
-        hmac_sha512(prk, 64, input, input_len, t);
-        t_len = 64;
+        hmac_sha512(prk, HKDF_HASH512_LEN, input, input_len, t);
+        t_len = HKDF_HASH512_LEN;
         free(input);
 
-        to_copy: u32 = 64;
+        to_copy: u32 = HKDF_HASH512_LEN;
         remaining: u32 = okm_len - pos;
-        if remaining < 64 { to_copy = remaining; }
+        if remaining < to_copy { to_copy = remaining; }
 
         i = 0;
-        while i < to_copy {
-            *(okm + pos + i) = *(t + i);
-            i = i + 1;
-        }
+        while i < to_copy { *(okm + pos + i) = *(t + i); i = i + 1; }
         pos = pos + to_copy;
         counter = counter + 1;
     }
-
     free(t);
 }
 
-fn hkdf_sha512(salt: Address, salt_len: u32, ikm: Address, ikm_len: u32, info: Address, info_len: u32, okm: Address, okm_len: u32) {
-    prk = allocate(64);
+// ===========================================================================
+// HKDF-SHA512 (RFC 5869) — Extract + Expand in one call.
+// ===========================================================================
+
+fn hkdf_sha512(salt: Address, salt_len: u32, ikm: Address, ikm_len: u32,
+               info: Address, info_len: u32, okm: Address, okm_len: u32) {
+    prk = allocate(HKDF_HASH512_LEN);
     hkdf_extract_sha512(salt, salt_len, ikm, ikm_len, prk);
     hkdf_expand_sha512(prk, info, info_len, okm, okm_len);
     free(prk);

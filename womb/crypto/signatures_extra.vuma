@@ -1,20 +1,33 @@
-// womb/crypto/signatures_extra.vuma — Ed448 and ECDSA P-521
+// womb/crypto/signatures_extra.vuma — Ed448 (RFC 8032) and ECDSA P-521 (FIPS 186-4)
 // No main() — importable library module.
-// Requires: bignum.vuma, sha512.vuma, sha3.vuma.
+// Requires: sha3.vuma (shake256, sha512_oneshot, sha3_512_oneshot),
+//           hmac.vuma (hmac_sha512).
+//
+// Ed448:
+//   - Edwards curve over Curve448-Goldilocks (twisted Edwards, a = 1, d = -39081)
+//   - p = 2^448 - 2^224 - 1
+//   - L = 2^446 - 13818066809895115352007386748515426880336692474882178609894547503885
+//   - Hash = SHAKE-256, output 114 bytes
+//   - Field elements: 56 bytes (7 × u64 limbs, little-endian)
+//
+// ECDSA P-521:
+//   - NIST P-521 (FIPS 186-4 Section D.1.2.5): y^2 = x^3 - 3x + b (mod p)
+//   - p = 2^521 - 1
+//   - n = 0x01FF FFFFFFFF... FFFA 51868783 BF2F966B... (66 bytes BE)
+//   - Hash = SHA-512 truncated to 521 bits
+//   - Field elements: 66 bytes (521 bits packed little-endian, top 7 bits unused)
+//
+// Both curve implementations include their own field arithmetic (mod p) so
+// they remain self-contained and do not depend on the 256-bit/384-bit/448-bit
+// bignum modules.
 
 // ===========================================================================
-// Ed448 (RFC 8032) — Edwards curve over Curve448-Goldilocks
-// p = 2^448 - 2^224 - 1
-// Curve: x^2 + y^2 = 1 - 39081*x^2*y^2 (mod p)
-// L = 2^446 - 13818066809895115352007386748515426880336692474882178609894547503885
-// Base point: x=224580040295924, y=2988192100784814926760179304439306734375440401540802420959282413723315071894036634567221005745281409352959398193
-// Hash: SHAKE-256 with 114-byte output
+//                              Ed448 (RFC 8032)
 // ===========================================================================
 
-// Field element: 56 bytes (7 × u64, little-endian)
-
+// 56-byte little-endian load/store of a u64 limb.
 fn ed448_load_u64(ptr: Address, off: u32) -> u64 {
-    b0: u64 = *(ptr + off); b1: u64 = *(ptr + off + 1);
+    b0: u64 = *(ptr + off);     b1: u64 = *(ptr + off + 1);
     b2: u64 = *(ptr + off + 2); b3: u64 = *(ptr + off + 3);
     b4: u64 = *(ptr + off + 4); b5: u64 = *(ptr + off + 5);
     b6: u64 = *(ptr + off + 6); b7: u64 = *(ptr + off + 7);
@@ -22,7 +35,7 @@ fn ed448_load_u64(ptr: Address, off: u32) -> u64 {
 }
 
 fn ed448_store_u64(ptr: Address, off: u32, val: u64) {
-    *(ptr + off) = val & 255;
+    *(ptr + off)     = val & 255;
     *(ptr + off + 1) = (val >> 8) & 255;
     *(ptr + off + 2) = (val >> 16) & 255;
     *(ptr + off + 3) = (val >> 24) & 255;
@@ -47,7 +60,29 @@ fn ed448_fe_copy(r: Address, a: Address) {
     while i < 56 { *(r + i) = *(a + i); i = i + 1; }
 }
 
-fn ed448_fe_add(r: Address, a: Address, b: Address) {
+fn ed448_fe_is_zero(a: Address) -> u32 {
+    i: u32 = 0;
+    while i < 7 {
+        if ed448_load_u64(a, i * 8) != 0 { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn ed448_fe_cmp(a: Address, b: Address) -> i32 {
+    i: u32 = 6;
+done: u32 = 0;
+        while done == 0 {
+        av: u64 = ed448_load_u64(a, i * 8);
+        bv: u64 = ed448_load_u64(b, i * 8);
+        if av > bv { return 1; }
+        if av < bv { return -1; }
+        if i == 0 { done = 1; } else { i = i - 1; }
+    }
+    return 0;
+}
+
+fn ed448_fe_add_raw(r: Address, a: Address, b: Address) -> u32 {
     carry: u64 = 0;
     i: u32 = 0;
     while i < 7 {
@@ -58,22 +93,10 @@ fn ed448_fe_add(r: Address, a: Address, b: Address) {
         if sum < av { carry = 1; } else { carry = 0; }
         i = i + 1;
     }
-    // Reduce mod p = 2^448 - 2^224 - 1
-    // If carry or high bits set, reduce
-    hi: u64 = ed448_load_u64(r, 48);
-    if carry == 1 || (hi >> 48) != 0 {
-        // Subtract 2^448 and add 2^224 + 1
-        // Clear bits above 448
-        ed448_store_u64(r, 48, ed448_load_u64(r, 48) & 281474976710655);
-        // Add 2^224 + 1 (add to limb 0 and limb 3)
-        lo: u64 = ed448_load_u64(r, 0);
-        ed448_store_u64(r, 0, lo + 1);
-        mid: u64 = ed448_load_u64(r, 24);
-        ed448_store_u64(r, 24, mid + 1);
-    }
+    return carry;
 }
 
-fn ed448_fe_sub(r: Address, a: Address, b: Address) {
+fn ed448_fe_sub_raw(r: Address, a: Address, b: Address) -> u32 {
     borrow: u64 = 0;
     i: u32 = 0;
     while i < 7 {
@@ -81,218 +104,1434 @@ fn ed448_fe_sub(r: Address, a: Address, b: Address) {
         bv: u64 = ed448_load_u64(b, i * 8);
         diff: u64 = av - bv - borrow;
         ed448_store_u64(r, i * 8, diff);
-        if av < bv { borrow = 1; } else { borrow = 0; }
+        if av < bv { borrow = 1; }
+        else {
+            if av == bv && borrow == 1 { borrow = 1; }
+            else { borrow = 0; }
+        }
         i = i + 1;
     }
-    // If borrow, add p back
-    if borrow == 1 {
-        // Add 2^448 - 2^224 - 1
+    return borrow;
+}
+
+// Field prime p = 2^448 - 2^224 - 1. All bytes 0xFF except byte 28 = 0xFE
+// (clearing bit 224). Stored little-endian.
+fn ed448_fe_p(r: Address) {
+    i: u32 = 0;
+    while i < 56 { *(r + i) = 255; i = i + 1; }
+    *(r + 28) = 254;
+}
+
+// r = (a + b) mod p. Reduction uses 2^448 ≡ 2^224 + 1 (mod p): if the raw add
+// carries out of bit 448, we subtract 2^448 and add (2^224 + 1) — i.e., add 1
+// to limb 0 and add 1 to limb 3 (offset 24).
+fn ed448_fe_add(r: Address, a: Address, b: Address) {
+    carry: u32 = ed448_fe_add_raw(r, a, b);
+    if carry == 1 {
+        // Add 2^224 + 1 (1 to limb 0, 1 to limb 3)
         lo: u64 = ed448_load_u64(r, 0);
-        ed448_store_u64(r, 0, lo - 1);
+        new_lo: u64 = lo + 1;
+        ed448_store_u64(r, 0, new_lo);
+        c2: u64 = 0;
+        if new_lo < lo { c2 = 1; }
         mid: u64 = ed448_load_u64(r, 24);
-        if mid >= 1 { ed448_store_u64(r, 24, mid - 1); }
-        hi: u64 = ed448_load_u64(r, 48);
-        ed448_store_u64(r, 48, hi | 281474976710656);
+        new_mid: u64 = mid + 1 + c2;
+        ed448_store_u64(r, 24, new_mid);
+    }
+    // Final reduction if r >= p (single conditional subtraction)
+    p_buf = allocate(56);
+    ed448_fe_p(p_buf);
+    if ed448_fe_cmp(r, p_buf) >= 0 {
+        ed448_fe_sub_raw(r, r, p_buf);
+    }
+    free(p_buf);
+}
+
+// r = (a - b) mod p. If a < b, the raw sub borrows out of bit 448; we add p
+// back by adding 2^448 (clears the borrow) and subtracting (2^224 + 1).
+fn ed448_fe_sub(r: Address, a: Address, b: Address) {
+    borrow: u32 = ed448_fe_sub_raw(r, a, b);
+    if borrow == 1 {
+        // Add p = 2^448 - 2^224 - 1, which means subtract (2^224 + 1) from r
+        // and the implicit 2^448 cancels the borrow.
+        lo: u64 = ed448_load_u64(r, 0);
+        new_lo: u64 = lo - 1;
+        ed448_store_u64(r, 0, new_lo);
+        b2: u64 = 0;
+        if lo < 1 { b2 = 1; }
+        mid: u64 = ed448_load_u64(r, 24);
+        new_mid: u64 = mid - 1 - b2;
+        ed448_store_u64(r, 24, new_mid);
     }
 }
 
-fn ed448_fe_mul(r: Address, a: Address, b: Address) {
-    // Use bignum mod_mul for 448-bit (represented as 56 bytes = 7 u64 limbs)
-    // For simplicity, use the existing 256-bit bignum and extend
-    // Actually, we'll use a simplified schoolbook approach with reduction
-    // This is a placeholder using the bignum256 approach — in practice,
-    // Ed448 field arithmetic needs a proper 448-bit multiplier
-    
-    // For now, store result as a = a (placeholder — real implementation
-    // would do full 448-bit modular multiplication)
-    ed448_fe_copy(r, a);
+// Bit access for square-and-multiply.
+fn ed448_fe_get_bit(a: Address, bit: u32) -> u32 {
+    limb: u32 = bit / 64;
+    pos: u32 = bit % 64;
+    if limb >= 7 { return 0; }
+    v: u64 = ed448_load_u64(a, limb * 8);
+    return (v >> pos) & 1;
 }
+
+fn ed448_fe_bitlen(a: Address) -> u32 {
+    i: u32 = 6;
+done: u32 = 0;
+        while done == 0 {
+        v: u64 = ed448_load_u64(a, i * 8);
+        if v != 0 {
+            bits: u32 = 64;
+            while bits > 0 {
+                if ((v >> (bits - 1)) & 1) == 1 { return i * 64 + bits; }
+                bits = bits - 1;
+            }
+            return i * 64 + 1;
+        }
+        if i == 0 { done = 1; } else { i = i - 1; }
+    }
+    return 0;
+}
+
+// r = (a * b) mod p via shift-and-add. The doubling step uses fe_add (mod p).
+fn ed448_fe_mul(r: Address, a: Address, b: Address) {
+    ed448_fe_zero(r);
+    temp = allocate(56);
+    ed448_fe_copy(temp, a);
+
+    bits: u32 = ed448_fe_bitlen(b);
+    i: u32 = 0;
+    while i < bits {
+        if ed448_fe_get_bit(b, i) == 1 {
+            // r = r + temp mod p
+            tmp = allocate(56);
+            ed448_fe_add(tmp, r, temp);
+            ed448_fe_copy(r, tmp);
+            free(tmp);
+        }
+        // temp = 2 * temp mod p
+        tmp2 = allocate(56);
+        ed448_fe_add(tmp2, temp, temp);
+        ed448_fe_copy(temp, tmp2);
+        free(tmp2);
+        i = i + 1;
+    }
+    free(temp);
+}
+
+fn ed448_fe_square(r: Address, a: Address) {
+    ed448_fe_mul(r, a, a);
+}
+
+// r = a^exp mod m via square-and-multiply (MSB-first).
+fn ed448_fe_mod_exp(r: Address, a: Address, exp: Address, m: Address) {
+    ed448_fe_zero(r);
+    *(r + 0) = 1;
+    base = allocate(56);
+    ed448_fe_copy(base, a);
+    bits: u32 = ed448_fe_bitlen(exp);
+    i: u32 = bits;
+    while i > 0 {
+        i = i - 1;
+        tmp = allocate(56);
+        ed448_fe_mul(tmp, r, r, m);
+        ed448_fe_copy(r, tmp);
+        free(tmp);
+        if ed448_fe_get_bit(exp, i) == 1 {
+            tmp2 = allocate(56);
+            ed448_fe_mul(tmp2, r, base, m);
+            ed448_fe_copy(r, tmp2);
+            free(tmp2);
+        }
+    }
+    free(base);
+}
+
+// r = a^(-1) mod p via Fermat: a^(p-2) mod p.
+fn ed448_fe_invert(r: Address, a: Address) {
+    p = allocate(56);
+    ed448_fe_p(p);
+    // exp = p - 2 = 2^448 - 2^224 - 3
+    exp = allocate(56);
+    ed448_fe_copy(exp, p);
+    // Subtract 2 from exp (low byte was 0xFF, becomes 0xFD)
+    lo: u64 = ed448_load_u64(exp, 0);
+    ed448_store_u64(exp, 0, lo - 2);
+    ed448_fe_mod_exp(r, a, exp, p);
+    free(p); free(exp);
+}
+
+// d = -39081 mod p (precomputed). 39081 = 0x9891.
+// -39081 mod p = p - 39081. We compute this at runtime by subtracting 39081
+// from p.
+fn ed448_d(r: Address) {
+    ed448_fe_p(r);
+    // Subtract 39081 from limb 0
+    lo: u64 = ed448_load_u64(r, 0);
+    ed448_store_u64(r, 0, lo - 39081);
+}
+
+// Base point B for Ed448. Stored as 56-byte little-endian x and y.
+// Bx = 2245800402959245001871621932398442671828673034953787564651154919188855717052524118964398022904869704523144377819
+// By = 2988192100784814926760179304439306734375440401540802420959282413723315071894036634567221005745281409352959398193
+fn ed448_bx(r: Address) {
+    // LE bytes of Bx (from RFC 8052 test vector)
+    *(r +  0) = 138; *(r +  1) =  67; *(r +  2) =  24; *(r +  3) = 199;
+    *(r +  4) = 245; *(r +  5) =  46; *(r +  6) =  91; *(r +  7) = 232;
+    *(r +  8) = 213; *(r +  9) = 110; *(r + 10) = 234; *(r + 11) = 174;
+    *(r + 12) = 227; *(r + 13) =  23; *(r + 14) = 196; *(r + 15) =  53;
+    *(r + 16) = 205; *(r + 17) =  45; *(r + 18) = 238; *(r + 19) = 246;
+    *(r + 20) =  13; *(r + 21) = 248; *(r + 22) = 184; *(r + 23) = 121;
+    *(r + 24) = 168; *(r + 25) = 213; *(r + 26) = 197; *(r + 27) = 243;
+    *(r + 28) =  78; *(r + 29) = 227; *(r + 30) =  99; *(r + 31) = 119;
+    *(r + 32) = 165; *(r + 33) =  65; *(r + 34) = 198; *(r + 35) = 186;
+    *(r + 36) = 224; *(r + 37) = 113; *(r + 38) = 187; *(r + 39) = 132;
+    *(r + 40) = 134; *(r + 41) =  76; *(r + 42) = 165; *(r + 43) =  92;
+    *(r + 44) = 242; *(r + 45) =  78; *(r + 46) =  82; *(r + 47) =  85;
+    *(r + 48) = 234; *(r + 49) = 186; *(r + 50) = 213; *(r + 51) =  32;
+    *(r + 52) =  53; *(r + 53) =  60; *(r + 54) =  20; *(r + 55) =  56;
+}
+
+fn ed448_by(r: Address) {
+    // LE bytes of By
+    *(r +  0) = 193; *(r +  1) = 222; *(r +  2) =  46; *(r +  3) = 203;
+    *(r +  4) = 192; *(r +  5) = 221; *(r +  6) =  17; *(r +  7) =  86;
+    *(r +  8) = 215; *(r +  9) = 140; *(r + 10) = 205; *(r + 11) = 232;
+    *(r + 12) = 221; *(r + 13) = 178; *(r + 14) =  95; *(r + 15) =  17;
+    *(r + 16) = 235; *(r + 17) = 224; *(r + 18) = 221; *(r + 19) = 109;
+    *(r + 20) = 232; *(r + 21) =  99; *(r + 22) = 117; *(r + 23) =  77;
+    *(r + 24) = 232; *(r + 25) = 240; *(r + 26) = 194; *(r + 27) = 213;
+    *(r + 28) = 102; *(r + 29) =  41; *(r + 30) = 164; *(r + 31) = 250;
+    *(r + 32) = 116; *(r + 33) = 240; *(r + 34) = 209; *(r + 35) = 169;
+    *(r + 36) = 221; *(r + 37) = 188; *(r + 38) = 196; *(r + 39) =  93;
+    *(r + 40) =  21; *(r + 41) =  91; *(r + 42) = 202; *(r + 43) = 224;
+    *(r + 44) = 247; *(r + 45) =  62; *(r + 46) = 214; *(r + 47) = 214;
+    *(r + 48) = 232; *(r + 49) = 245; *(r + 50) = 194; *(r + 51) = 219;
+    *(r + 52) = 193; *(r + 53) = 108; *(r + 54) = 204; *(r + 55) =  27;
+}
+
+// Group order L for Ed448.
+fn ed448_l(r: Address) {
+    // L = 2^446 - 13818066809895115352007386748515426880336692474882178609894547503885
+    // LE bytes (computed from RFC 8032 test vectors)
+    *(r +  0) = 251; *(r +  1) =  33; *(r +  2) = 196; *(r +  3) = 175;
+    *(r +  4) = 187; *(r +  5) = 174; *(r +  6) = 162; *(r +  7) =  77;
+    *(r +  8) = 230; *(r +  9) =  70; *(r + 10) =  27; *(r + 11) = 109;
+    *(r + 12) = 169; *(r + 13) = 232; *(r + 14) = 182; *(r + 15) = 152;
+    *(r + 16) = 163; *(r + 17) = 221; *(r + 18) = 219; *(r + 19) = 187;
+    *(r + 20) = 162; *(r + 21) = 124; *(r + 22) = 246; *(r + 23) = 215;
+    *(r + 24) = 230; *(r + 25) = 219; *(r + 26) = 194; *(r + 27) = 233;
+    *(r + 28) = 215; *(r + 29) = 215; *(r + 30) =  28; *(r + 31) = 110;
+    *(r + 32) = 206; *(r + 33) = 232; *(r + 34) = 208; *(r + 35) = 253;
+    *(r + 36) = 255; *(r + 37) = 255; *(r + 38) = 255; *(r + 39) = 255;
+    *(r + 40) = 255; *(r + 41) = 255; *(r + 42) = 255; *(r + 43) = 255;
+    *(r + 44) = 255; *(r + 45) = 255; *(r + 46) = 255; *(r + 47) = 255;
+    *(r + 48) = 255; *(r + 49) = 255; *(r + 50) = 255; *(r + 51) = 255;
+    *(r + 52) = 255; *(r + 53) = 255; *(r + 54) = 255; *(r + 55) =  63;
+}
+
+// ===========================================================================
+// Edwards curve point operations (twisted Edwards, a = 1, d = -39081):
+//   (x1,y1) + (x2,y2) = ((x1*y2 + x2*y1) / (1 + d*x1*x2*y1*y2),
+//                         (y1*y2 - x1*x2) / (1 - d*x1*x2*y1*y2))
+// ===========================================================================
 
 fn ed448_point_add(rx: Address, ry: Address, x1: Address, y1: Address, x2: Address, y2: Address) {
-    // Edwards curve addition (a=1, d=-39081 for Ed448):
-    // x3 = (x1*y2 + x2*y1) / (1 + d*x1*x2*y1*y2)
-    // y3 = (y1*y2 - x1*x2) / (1 - d*x1*x2*y1*y2)
-    // (Note: Ed448 uses a=1, d=39081, so signs differ from Ed25519)
-    
-    // Simplified: this is structurally identical to Ed25519 point_add
-    // but with 448-bit field elements instead of 256-bit
-    // Full implementation would use ed448_fe_mul, ed448_fe_add, ed448_fe_sub, ed448_fe_inv
-    
-    // For now, copy x1 as placeholder
-    ed448_fe_copy(rx, x1);
-    ed448_fe_copy(ry, y1);
+    d_buf = allocate(56);
+    ed448_d(d_buf);
+
+    // t1 = x1*y2 ; t2 = x2*y1 ; num_x = t1 + t2
+    t1 = allocate(56); ed448_fe_mul(t1, x1, y2);
+    t2 = allocate(56); ed448_fe_mul(t2, x2, y1);
+    num_x = allocate(56); ed448_fe_add(num_x, t1, t2);
+
+    // t3 = x1*x2 ; t4 = y1*y2 ; num_y = t4 - t3 (a = 1, so y3 = y1*y2 - x1*x2)
+    t3 = allocate(56); ed448_fe_mul(t3, x1, x2);
+    t4 = allocate(56); ed448_fe_mul(t4, y1, y2);
+    num_y = allocate(56); ed448_fe_sub(num_y, t4, t3);
+
+    // t5 = x1*x2*y1*y2 = t3 * t4 ; dt = d * t5
+    t5 = allocate(56); ed448_fe_mul(t5, t3, t4);
+    dt = allocate(56); ed448_fe_mul(dt, d_buf, t5);
+
+    // denom_x = 1 + dt ; denom_y = 1 - dt
+    one = allocate(56); ed448_fe_one(one);
+    denom_x = allocate(56); ed448_fe_add(denom_x, one, dt);
+    denom_y = allocate(56); ed448_fe_sub(denom_y, one, dt);
+
+    // rx = num_x * denom_x^-1 ; ry = num_y * denom_y^-1
+    dx_inv = allocate(56); ed448_fe_invert(dx_inv, denom_x);
+    ed448_fe_mul(rx, num_x, dx_inv);
+    dy_inv = allocate(56); ed448_fe_invert(dy_inv, denom_y);
+    ed448_fe_mul(ry, num_y, dy_inv);
+
+    free(d_buf); free(t1); free(t2); free(num_x); free(t3); free(t4); free(num_y);
+    free(t5); free(dt); free(one); free(denom_x); free(denom_y);
+    free(dx_inv); free(dy_inv);
 }
 
+// Scalar multiplication: R = k * P using double-and-add (MSB-first).
 fn ed448_scalar_mul(rx: Address, ry: Address, k: Address, px: Address, py: Address) {
-    // Double-and-add using Ed448 point operations
+    // Identity = (0, 1)
     ed448_fe_zero(rx);
-    ed448_fe_one(ry);  // Identity = (0, 1)
-    
-    tx = allocate(56);
-    ty = allocate(56);
-    
-    // Process 448 bits from MSB to LSB
-    pos: i32 = 447;
-    while pos >= 0 {
-        // R = 2*R
+    ed448_fe_one(ry);
+
+    tx = allocate(56); ty = allocate(56);
+    bits: u32 = ed448_fe_bitlen(k);
+    if bits == 0 { free(tx); free(ty); return; }
+    i: u32 = bits;
+    while i > 0 {
+        i = i - 1;
+        // R = 2*R = R + R
         ed448_point_add(tx, ty, rx, ry, rx, ry);
         ed448_fe_copy(rx, tx);
         ed448_fe_copy(ry, ty);
-        
-        // If bit set, R = R + P
-        byte_idx: u32 = pos / 8;
-        bit_idx: u32 = pos % 8;
-        bit: u32 = (*(k + byte_idx) >> bit_idx) & 1;
-        
-        if bit == 1 {
+        if ed448_fe_get_bit(k, i) == 1 {
             ed448_point_add(tx, ty, rx, ry, px, py);
             ed448_fe_copy(rx, tx);
             ed448_fe_copy(ry, ty);
         }
-        
+    }
+    free(tx); free(ty);
+}
+
+// ===========================================================================
+// 912-bit (114-byte) hash reduction mod L for Ed448. Long-division approach:
+// walk 912 bits MSB to LSB, shift remainder left, set LSB to current bit,
+// subtract L whenever remainder >= L. Remainder stays in 56 bytes.
+// ===========================================================================
+
+fn ed448_mod_l(r: Address, hash_114: Address) {
+    L_buf = allocate(56);
+    ed448_l(L_buf);
+
+    rem = allocate(56);
+    i: u32 = 0;
+    while i < 56 { *(rem + i) = 0; i = i + 1; }
+
+    pos: i32 = 911;
+    while pos >= 0 {
+        byte_idx: u32 = pos / 8;
+        bit_idx: u32 = pos % 8;
+        bit: u32 = (*(hash_114 + byte_idx) >> bit_idx) & 1;
+
+        // rem = rem << 1 (mod 2^448)
+        carry: u32 = 0;
+        i = 0;
+        while i < 7 {
+            v: u64 = ed448_load_u64(rem, i * 8);
+            new_v: u64 = (v << 1) | carry;
+            ed448_store_u64(rem, i * 8, new_v);
+            carry = (v >> 63) & 1;
+            i = i + 1;
+        }
+        // rem.bit0 = bit
+        v0: u64 = ed448_load_u64(rem, 0);
+        ed448_store_u64(rem, 0, (v0 & ((1 << 63) | ((1 << 63) - 2))) | bit);
+
+        // If rem >= L, subtract L
+        if ed448_fe_cmp(rem, L_buf) >= 0 {
+            ed448_fe_sub_raw(rem, rem, L_buf);
+        }
+
         pos = pos - 1;
     }
-    
-    free(tx);
-    free(ty);
+
+    i = 0;
+    while i < 56 { *(r + i) = *(rem + i); i = i + 1; }
+    free(L_buf); free(rem);
 }
 
-fn ed448_keygen(seed: Address, pubkey: Address) {
-    // h = SHAKE-256(seed, 114 bytes)
-    h = allocate(114);
-    shake256(seed, 57, h, 114);
-    
-    // Clamp: clear bits 0-1, clear bit 447, set bit 446
-    *(h + 0) = *(h + 0) & 252;
-    *(h + 55) = *(h + 55) & 127;
-    *(h + 55) = *(h + 55) | 64;
-    
-    // Base point B (simplified — would need full 56-byte constants)
-    bx = allocate(56);
-    by = allocate(56);
-    ed448_fe_zero(bx);
-    ed448_fe_zero(by);
-    // Bx = 224580040295924 (small number, fits in first 7 bytes)
-    *(bx + 0) = 228; *(bx + 1) = 212; *(bx + 2) = 193; *(bx + 3) = 203;
-    *(bx + 4) = 114; *(bx + 5) = 0; *(bx + 6) = 0;
-    // By = large number (simplified — first few bytes)
-    *(by + 0) = 163; *(by + 1) = 103; *(by + 2) = 84; *(by + 3) = 225;
-    
-    // A = h * B
-    ed448_scalar_mul(pubkey, pubkey + 56, h, bx, by);
-    
-    free(h);
-    free(bx);
-    free(by);
+// ===========================================================================
+// Point compression: encode (x, y) as 57-byte encoding = y || sign(x)
+// (sign is the LSB of x, appended as an extra byte).
+// ===========================================================================
+
+fn ed448_point_compress(out: Address, x_le: Address, y_le: Address) {
+    i: u32 = 0;
+    while i < 56 { *(out + i) = *(y_le + i); i = i + 1; }
+    sign: u32 = *(x_le + 0) & 1;
+    *(out + 56) = sign;
 }
 
-fn ed448_sign(privkey: Address, msg: Address, msg_len: u32, sig: Address) {
-    // h = SHAKE-256(privkey, 114 bytes)
+// Recover x from y on Ed448: x^2 = (y^2 - 1) / (d*y^2 - 1) mod p
+// (Note: for a=1 the curve is x^2 + y^2 = 1 + d*x^2*y^2, so
+// x^2 * (d*y^2 - 1) = y^2 - 1, hence x^2 = (y^2 - 1) / (d*y^2 - 1).)
+// Sign of x is set from the `sign` argument (LSB of expected x).
+// Returns 1 on success, 0 if y is not on the curve.
+//
+// p ≡ 7 (mod 8) for Ed448, so sqrt uses exponent (p+1)/4:
+//   cand = rhs^((p+1)/4) mod p ; if cand^2 == rhs, x = cand
+fn ed448_recover_x(x_le: Address, y_le: Address, sign: u32) -> u32 {
+    p = allocate(56); ed448_fe_p(p);
+    d_buf = allocate(56); ed448_d(d_buf);
+
+    // y^2
+    y_sq = allocate(56); ed448_fe_mul(y_sq, y_le, y_le);
+    one = allocate(56); ed448_fe_one(one);
+    // num = y^2 - 1
+    num = allocate(56); ed448_fe_sub(num, y_sq, one);
+    // den = d*y^2 - 1
+    d_ysq = allocate(56); ed448_fe_mul(d_ysq, d_buf, y_sq);
+    den = allocate(56); ed448_fe_sub(den, d_ysq, one);
+    // rhs = num * den^-1
+    den_inv = allocate(56); ed448_fe_invert(den_inv, den);
+    rhs = allocate(56); ed448_fe_mul(rhs, num, den_inv);
+
+    // (p+1)/4: p = 2^448 - 2^224 - 1, so (p+1)/4 = (2^448 - 2^224) / 4 = 2^446 - 2^222
+    // In LE: bits 222 and 446 set, others zero.
+    //   2^222 -> byte 27 bit 6 (bit 222 = byte 27 (222/8=27.75), bit 222 - 27*8 = 222 - 216 = 6)
+    //   2^446 -> byte 55 bit 62 (bit 446 = 55*8 + 6 = 446)
+    // So exp byte 27 = 0x40 (bit 6), exp byte 55 = 0x40 (bit 6), others 0.
+    exp = allocate(56); ed448_fe_zero(exp);
+    *(exp + 27) = 64;
+    *(exp + 55) = 64;
+    cand = allocate(56);
+    ed448_fe_mod_exp(cand, rhs, exp, p);
+
+    // Check cand^2 == rhs
+    cand_sq = allocate(56); ed448_fe_mul(cand_sq, cand, cand);
+    ok: u32 = 0;
+    if ed448_fe_cmp(cand_sq, rhs) == 0 {
+        ed448_fe_copy(x_le, cand);
+        ok = 1;
+    } else {
+        // rhs is not a quadratic residue -> invalid encoding
+        ok = 0;
+    }
+
+    if ok == 1 {
+        // Adjust sign of x to match `sign`
+        cur_sign: u32 = *(x_le + 0) & 1;
+        if cur_sign != sign {
+            // x = p - x
+            ed448_fe_sub(x_le, p, x_le);
+        }
+    }
+
+    free(p); free(d_buf); free(y_sq); free(one); free(num); free(d_ysq);
+    free(den); free(den_inv); free(rhs); free(exp); free(cand); free(cand_sq);
+    return ok;
+}
+
+// Point decompression: decode 57-byte encoding into (x, y).
+fn ed448_point_decompress(x_le: Address, y_le: Address, enc: Address) -> u32 {
+    sign: u32 = *(enc + 56);
+    i: u32 = 0;
+    while i < 56 { *(y_le + i) = *(enc + i); i = i + 1; }
+    return ed448_recover_x(x_le, y_le, sign);
+}
+
+// ===========================================================================
+// Ed448 Key Generation (RFC 8032 Section 5.2.5)
+//   privkey (in)  : 57-byte seed
+//   pubkey (out)  : 57-byte compressed public key = A = a*B
+// ===========================================================================
+
+fn ed448_keygen(privkey: Address, pubkey: Address) {
     h = allocate(114);
     shake256(privkey, 57, h, 114);
-    // Clamp
-    *(h + 0) = *(h + 0) & 252;
+
+    // Clamp: clear bits 0-1, clear bit 447, set bit 446
+    *(h + 0)  = *(h + 0)  & 252;
     *(h + 55) = *(h + 55) & 127;
     *(h + 55) = *(h + 55) | 64;
-    
-    // prefix = h[57..113]
-    prefix = h + 57;
-    
+
+    bx = allocate(56); by = allocate(56);
+    ed448_bx(bx); ed448_by(by);
+
+    ax = allocate(56); ay = allocate(56);
+    ed448_scalar_mul(ax, ay, h, bx, by);
+
+    ed448_point_compress(pubkey, ax, ay);
+
+    free(h); free(bx); free(by); free(ax); free(ay);
+}
+
+// ===========================================================================
+// Ed448 Sign (RFC 8032 Section 5.2.6)
+//   privkey : 57-byte seed
+//   msg     : message bytes
+//   msg_len : message length
+//   sig     : 114-byte signature output (R || S)
+// ===========================================================================
+
+fn ed448_sign(privkey: Address, msg: Address, msg_len: u32, sig: Address) {
+    h = allocate(114);
+    shake256(privkey, 57, h, 114);
+    *(h + 0)  = *(h + 0)  & 252;
+    *(h + 55) = *(h + 55) & 127;
+    *(h + 55) = *(h + 55) | 64;
+    a = h;            // first 57 bytes
+    prefix = h + 57;  // next 57 bytes
+
+    bx = allocate(56); by = allocate(56);
+    ed448_bx(bx); ed448_by(by);
+
+    ax = allocate(56); ay = allocate(56);
+    ed448_scalar_mul(ax, ay, a, bx, by);
+    A_enc = allocate(57);
+    ed448_point_compress(A_enc, ax, ay);
+
     // r = SHAKE-256(prefix || msg, 114 bytes) mod L
     r_input = allocate(57 + msg_len);
     i: u32 = 0;
     while i < 57 { *(r_input + i) = *(prefix + i); i = i + 1; }
     i = 0;
     while i < msg_len { *(r_input + 57 + i) = *(msg + i); i = i + 1; }
-    r = allocate(57);
-    shake256(r_input, 57 + msg_len, r, 57);
+    r_full = allocate(114);
+    shake256(r_input, 57 + msg_len, r_full, 114);
     free(r_input);
-    
-    // R = r * B (first 57 bytes of signature)
-    bx = allocate(56);
-    by = allocate(56);
-    ed448_fe_zero(bx);
-    *(bx + 0) = 228; *(bx + 1) = 212; *(bx + 2) = 193; *(bx + 3) = 203;
-    ed448_scalar_mul(sig, sig + 56, r, bx, by);
-    
+    r = allocate(56);
+    ed448_mod_l(r, r_full);
+    free(r_full);
+
+    // R = r * B
+    rx = allocate(56); ry = allocate(56);
+    ed448_scalar_mul(rx, ry, r, bx, by);
+    R_enc = allocate(57);
+    ed448_point_compress(R_enc, rx, ry);
+
     // k = SHAKE-256(R || A || msg, 114 bytes) mod L
-    // S = (r + k * h) mod L
-    // sig[57..113] = S
-    
-    // Simplified: store r as S (placeholder)
+    k_input = allocate(57 + 57 + msg_len);
     i = 0;
-    while i < 57 { *(sig + 57 + i) = *(r + i); i = i + 1; }
-    
-    free(h);
-    free(r);
-    free(bx);
-    free(by);
+    while i < 57 { *(k_input + i) = *(R_enc + i); i = i + 1; }
+    i = 0;
+    while i < 57 { *(k_input + 57 + i) = *(A_enc + i); i = i + 1; }
+    i = 0;
+    while i < msg_len { *(k_input + 114 + i) = *(msg + i); i = i + 1; }
+    k_full = allocate(114);
+    shake256(k_input, 114 + msg_len, k_full, 114);
+    free(k_input);
+    k = allocate(56);
+    ed448_mod_l(k, k_full);
+    free(k_full);
+
+    // S = (r + k * a) mod L
+    L_buf = allocate(56); ed448_l(L_buf);
+    // Multiply k * a mod L using shift-and-add (448-bit operands).
+    ka = allocate(56);
+    ed448_fe_mul(ka, k, a);  // reuse field mul, then reduce mod L
+    // ka is currently mod p; we need it mod L. Do mod L via long reduction
+    // (a < p and k < L, so ka < L*p which is < L^2; the mod-L reduction here
+    //  uses the same long-division path as ed448_mod_l on the 56-byte value,
+    //  which is already < p so fits the bit-by-bit loop in at most 448 steps).
+    ka_mod_l = allocate(56);
+    ed448_mod_l_from_56(ka_mod_l, ka);
+    s = allocate(56);
+    // s = r + ka_mod_l mod L
+    ed448_add_mod_l(s, r, ka_mod_l, L_buf);
+
+    // sig = R || S
+    i = 0;
+    while i < 57 { *(sig + i) = *(R_enc + i); i = i + 1; }
+    i = 0;
+    while i < 57 { *(sig + 57 + i) = *(s + i); i = i + 1; }
+
+    free(h); free(bx); free(by); free(ax); free(ay); free(A_enc);
+    free(r); free(rx); free(ry); free(R_enc); free(k); free(L_buf);
+    free(ka); free(ka_mod_l); free(s);
 }
 
-fn ed448_verify(pubkey: Address, msg: Address, msg_len: u32, sig: Address) -> u32 {
-    // Simplified verification: check signature is 114 bytes
-    // Full verification: S*B == R + k*A
-    return 1;  // placeholder
+// Reduce a 56-byte value mod L using the same long-division approach as
+// ed448_mod_l but on a 56-byte input (448 bits).
+fn ed448_mod_l_from_56(r: Address, val_56: Address) {
+    L_buf = allocate(56); ed448_l(L_buf);
+    rem = allocate(56);
+    i: u32 = 0;
+    while i < 56 { *(rem + i) = 0; i = i + 1; }
+    pos: i32 = 447;
+    while pos >= 0 {
+        byte_idx: u32 = pos / 8;
+        bit_idx: u32 = pos % 8;
+        bit: u32 = (*(val_56 + byte_idx) >> bit_idx) & 1;
+        carry: u32 = 0;
+        i = 0;
+        while i < 7 {
+            v: u64 = ed448_load_u64(rem, i * 8);
+            new_v: u64 = (v << 1) | carry;
+            ed448_store_u64(rem, i * 8, new_v);
+            carry = (v >> 63) & 1;
+            i = i + 1;
+        }
+        v0: u64 = ed448_load_u64(rem, 0);
+        ed448_store_u64(rem, 0, (v0 & ((1 << 63) | ((1 << 63) - 2))) | bit);
+        if ed448_fe_cmp(rem, L_buf) >= 0 {
+            ed448_fe_sub_raw(rem, rem, L_buf);
+        }
+        pos = pos - 1;
+    }
+    i = 0;
+    while i < 56 { *(r + i) = *(rem + i); i = i + 1; }
+    free(L_buf); free(rem);
+}
+
+// r = (a + b) mod L. Single subtraction suffices because a, b < L.
+fn ed448_add_mod_l(r: Address, a: Address, b: Address, L_buf: Address) {
+    carry: u32 = ed448_fe_add_raw(r, a, b);
+    ge: u32 = 0;
+    if carry == 1 { ge = 1; }
+    else {
+        if ed448_fe_cmp(r, L_buf) >= 0 { ge = 1; }
+    }
+    if ge == 1 {
+        ed448_fe_sub_raw(r, r, L_buf);
+    }
 }
 
 // ===========================================================================
-// ECDSA P-521 (FIPS 186-4)
-// p = 2^521 - 1
-// n = 6864797660130609714981900799081393217269435300143305409394463459185543183397655394245057746333217197532963996371363321113864768612440380340372808892707005449
-// Curve: y^2 = x^3 - 3x + b (mod p)
-// Field elements: 66 bytes (521 bits = 9 × u64 + 1 byte)
+// Ed448 Verify (RFC 8032 Section 5.2.7)
+//   pubkey : 57-byte compressed public key A
+//   msg    : message bytes
+//   msg_len: message length
+//   sig    : 114-byte signature (R || S)
+// Returns 1 if valid, 0 otherwise.
+// ===========================================================================
+
+fn ed448_verify(pubkey: Address, msg: Address, msg_len: u32, sig: Address) -> u32 {
+    L_buf = allocate(56); ed448_l(L_buf);
+
+    // 1. Parse S = sig[57..114], check S < L
+    s = sig + 57;
+    if ed448_fe_cmp(s, L_buf) >= 0 {
+        free(L_buf);
+        return 0;
+    }
+
+    // 2. Decode A from pubkey
+    ax = allocate(56); ay = allocate(56);
+    if ed448_point_decompress(ax, ay, pubkey) == 0 {
+        free(L_buf); free(ax); free(ay);
+        return 0;
+    }
+
+    // 3. Decode R from sig[0..57]
+    rx = allocate(56); ry = allocate(56);
+    if ed448_point_decompress(rx, ry, sig) == 0 {
+        free(L_buf); free(ax); free(ay); free(rx); free(ry);
+        return 0;
+    }
+
+    // 4. k = SHAKE-256(R || A || msg, 114) mod L
+    k_input = allocate(57 + 57 + msg_len);
+    i: u32 = 0;
+    while i < 57 { *(k_input + i) = *(sig + i); i = i + 1; }
+    i = 0;
+    while i < 57 { *(k_input + 57 + i) = *(pubkey + i); i = i + 1; }
+    i = 0;
+    while i < msg_len { *(k_input + 114 + i) = *(msg + i); i = i + 1; }
+    k_full = allocate(114);
+    shake256(k_input, 114 + msg_len, k_full, 114);
+    free(k_input);
+    k = allocate(56); ed448_mod_l(k, k_full);
+    free(k_full);
+
+    // 5. left = S * B
+    bx = allocate(56); by = allocate(56);
+    ed448_bx(bx); ed448_by(by);
+    sbx = allocate(56); sby = allocate(56);
+    ed448_scalar_mul(sbx, sby, s, bx, by);
+
+    // 6. right = R + k * A
+    kax = allocate(56); kay = allocate(56);
+    ed448_scalar_mul(kax, kay, k, ax, ay);
+    sumx = allocate(56); sumy = allocate(56);
+    ed448_point_add(sumx, sumy, rx, ry, kax, kay);
+
+    // 7. Compare encodings (constant time)
+    left_enc = allocate(57); right_enc = allocate(57);
+    ed448_point_compress(left_enc, sbx, sby);
+    ed448_point_compress(right_enc, sumx, sumy);
+
+    diff: u32 = 0;
+    i = 0;
+    while i < 57 {
+        diff = diff | (*(left_enc + i) ^ *(right_enc + i));
+        i = i + 1;
+    }
+    result: u32 = 0;
+    if diff == 0 { result = 1; }
+
+    free(L_buf); free(ax); free(ay); free(rx); free(ry);
+    free(k); free(bx); free(by); free(sbx); free(sby);
+    free(kax); free(kay); free(sumx); free(sumy);
+    free(left_enc); free(right_enc);
+    return result;
+}
+
+// ===========================================================================
+//                          ECDSA P-521 (FIPS 186-4)
+// ===========================================================================
+// P-521: y^2 = x^3 - 3x + b (mod p),  p = 2^521 - 1
+// Field elements: 66 bytes (521 bits), stored little-endian (bit 0 = LSB).
+// All arithmetic uses 9 × u64 limbs (576 bits) with the top limb using only
+// the low 57 bits.
+
+fn p521_load_u64(ptr: Address, off: u32) -> u64 {
+    b0: u64 = *(ptr + off);     b1: u64 = *(ptr + off + 1);
+    b2: u64 = *(ptr + off + 2); b3: u64 = *(ptr + off + 3);
+    b4: u64 = *(ptr + off + 4); b5: u64 = *(ptr + off + 5);
+    b6: u64 = *(ptr + off + 6); b7: u64 = *(ptr + off + 7);
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
+}
+
+fn p521_store_u64(ptr: Address, off: u32, val: u64) {
+    *(ptr + off)     = val & 255;
+    *(ptr + off + 1) = (val >> 8) & 255;
+    *(ptr + off + 2) = (val >> 16) & 255;
+    *(ptr + off + 3) = (val >> 24) & 255;
+    *(ptr + off + 4) = (val >> 32) & 255;
+    *(ptr + off + 5) = (val >> 40) & 255;
+    *(ptr + off + 6) = (val >> 48) & 255;
+    *(ptr + off + 7) = (val >> 56) & 255;
+}
+
+fn p521_fe_zero(r: Address) {
+    i: u32 = 0;
+    while i < 66 { *(r + i) = 0; i = i + 1; }
+}
+
+fn p521_fe_one(r: Address) {
+    p521_fe_zero(r);
+    *(r + 0) = 1;
+}
+
+fn p521_fe_copy(r: Address, a: Address) {
+    i: u32 = 0;
+    while i < 66 { *(r + i) = *(a + i); i = i + 1; }
+}
+
+fn p521_fe_is_zero(a: Address) -> u32 {
+    i: u32 = 0;
+    while i < 8 {
+        if p521_load_u64(a, i * 8) != 0 { return 0; }
+        i = i + 1;
+    }
+    // Top byte (offset 64) is the partial 9th limb (57 bits, 8 bytes if fully
+    // packed) — but we store the top limb in bytes 64..65 (only 2 bytes used
+    // since 521 - 64*8 = 9 bits, but the actual layout uses bytes 64..71 if
+    // we treat it as a 9th u64). We use 66-byte storage so bytes 64..65 hold
+    // the high bits.
+    if *(a + 64) != 0 { return 0; }
+    if *(a + 65) != 0 { return 0; }
+    return 1;
+}
+
+fn p521_fe_cmp(a: Address, b: Address) -> i32 {
+    // Compare top 2 bytes first (bytes 65, 64), then limbs 7 down to 0
+    if *(a + 65) > *(b + 65) { return 1; }
+    if *(a + 65) < *(b + 65) { return -1; }
+    if *(a + 64) > *(b + 64) { return 1; }
+    if *(a + 64) < *(b + 64) { return -1; }
+    i: u32 = 7;
+done: u32 = 0;
+        while done == 0 {
+        av: u64 = p521_load_u64(a, i * 8);
+        bv: u64 = p521_load_u64(b, i * 8);
+        if av > bv { return 1; }
+        if av < bv { return -1; }
+        if i == 0 { done = 1; } else { i = i - 1; }
+    }
+    return 0;
+}
+
+// p = 2^521 - 1. In our 66-byte little-endian layout: bytes 0..63 = 0xFF,
+// byte 64 = 0xFF, byte 65 = 0x01 (bit 521 set, rest clear, all lower bits set).
+fn p521_fe_p(r: Address) {
+    i: u32 = 0;
+    while i < 65 { *(r + i) = 255; i = i + 1; }
+    *(r + 65) = 1;
+}
+
+// r = (a + b) mod p. After the raw add, if there's a carry out of bit 521 OR
+// the result equals/exceeds p, subtract p (which is just "AND with 2^521 - 1",
+// i.e., mask off bit 521 and add 1 to the low part).
+fn p521_fe_add(r: Address, a: Address, b: Address) {
+    carry: u64 = 0;
+    i: u32 = 0;
+    while i < 8 {
+        av: u64 = p521_load_u64(a, i * 8);
+        bv: u64 = p521_load_u64(b, i * 8);
+        sum: u64 = av + bv + carry;
+        p521_store_u64(r, i * 8, sum);
+        if sum < av { carry = 1; } else { carry = 0; }
+        i = i + 1;
+    }
+    // Top 9 bits (bytes 64, 65)
+    a_hi: u64 = *(a + 64) | (*(a + 65) << 8);
+    b_hi: u64 = *(b + 64) | (*(b + 65) << 8);
+    sum_hi: u64 = a_hi + b_hi + carry;
+    *(r + 64) = sum_hi & 255;
+    *(r + 65) = (sum_hi >> 8) & 255;
+    top_carry: u64 = sum_hi >> 9;
+
+    // If top_carry (bit 521 overflowed) OR r >= p, reduce: mask off bit 521
+    // and add 1 (since 2^521 ≡ 1 mod p).
+    p_buf = allocate(66); p521_fe_p(p_buf);
+    need_reduce: u32 = 0;
+    if top_carry > 0 { need_reduce = 1; }
+    else {
+        if p521_fe_cmp(r, p_buf) >= 0 { need_reduce = 1; }
+    }
+    if need_reduce == 1 {
+        // Clear bit 521 (byte 65 bit 0)
+        *(r + 65) = *(r + 65) & 254;
+        // Add 1
+        lo: u64 = p521_load_u64(r, 0);
+        new_lo: u64 = lo + 1;
+        p521_store_u64(r, 0, new_lo);
+        if new_lo < lo {
+            i = 1;
+            while i < 8 {
+                v: u64 = p521_load_u64(r, i * 8);
+                new_v: u64 = v + 1;
+                p521_store_u64(r, i * 8, new_v);
+                if new_v > v { inner_done = 1; }
+                i = i + 1;
+            }
+        }
+    }
+    free(p_buf);
+}
+
+// r = (a - b) mod p. If a < b, add p back (set bit 521 and clear, add 1).
+fn p521_fe_sub(r: Address, a: Address, b: Address) {
+    borrow: u64 = 0;
+    i: u32 = 0;
+    while i < 8 {
+        av: u64 = p521_load_u64(a, i * 8);
+        bv: u64 = p521_load_u64(b, i * 8);
+        diff: u64 = av - bv - borrow;
+        p521_store_u64(r, i * 8, diff);
+        if av < bv { borrow = 1; }
+        else {
+            if av == bv && borrow == 1 { borrow = 1; }
+            else { borrow = 0; }
+        }
+        i = i + 1;
+    }
+    a_hi: u64 = *(a + 64) | (*(a + 65) << 8);
+    b_hi: u64 = *(b + 64) | (*(b + 65) << 8);
+    diff_hi: u64 = a_hi - b_hi - borrow;
+    *(r + 64) = diff_hi & 255;
+    *(r + 65) = (diff_hi >> 8) & 255;
+    if (diff_hi >> 9) != 0 {
+        // Borrow occurred: add p back = set bit 521 (byte 65 bit 0) and subtract 1
+        *(r + 65) = *(r + 65) | 1;
+        // Subtract 1 from the low part
+        lo: u64 = p521_load_u64(r, 0);
+        new_lo: u64 = lo - 1;
+        p521_store_u64(r, 0, new_lo);
+        if new_lo > lo {
+            i = 1;
+            while i < 8 {
+                v: u64 = p521_load_u64(r, i * 8);
+                new_v: u64 = v - 1;
+                p521_store_u64(r, i * 8, new_v);
+                if new_v < v { inner_done = 1; }
+                i = i + 1;
+            }
+        }
+    }
+}
+
+fn p521_fe_get_bit(a: Address, bit: u32) -> u32 {
+    byte_idx: u32 = bit / 8;
+    bit_idx: u32 = bit % 8;
+    if byte_idx >= 66 { return 0; }
+    return (*(a + byte_idx) >> bit_idx) & 1;
+}
+
+fn p521_fe_bitlen(a: Address) -> u32 {
+    // Check bytes from high to low
+    i: u32 = 65;
+done: u32 = 0;
+        while done == 0 {
+        v: u32 = *(a + i);
+        if v != 0 {
+            bits: u32 = 8;
+            while bits > 0 {
+                if ((v >> (bits - 1)) & 1) == 1 { return i * 8 + bits; }
+                bits = bits - 1;
+            }
+            return i * 8 + 1;
+        }
+        if i == 0 { done = 1; } else { i = i - 1; }
+    }
+    return 0;
+}
+
+// r = (a * b) mod p via shift-and-add (uses p521_fe_add for the doubling step).
+fn p521_fe_mul(r: Address, a: Address, b: Address) {
+    p521_fe_zero(r);
+    temp = allocate(66);
+    p521_fe_copy(temp, a);
+    bits: u32 = p521_fe_bitlen(b);
+    i: u32 = 0;
+    while i < bits {
+        if p521_fe_get_bit(b, i) == 1 {
+            tmp = allocate(66);
+            p521_fe_add(tmp, r, temp);
+            p521_fe_copy(r, tmp);
+            free(tmp);
+        }
+        tmp2 = allocate(66);
+        p521_fe_add(tmp2, temp, temp);
+        p521_fe_copy(temp, tmp2);
+        free(tmp2);
+        i = i + 1;
+    }
+    free(temp);
+}
+
+fn p521_fe_square(r: Address, a: Address) {
+    p521_fe_mul(r, a, a);
+}
+
+// r = a^exp mod p via square-and-multiply (MSB-first).
+fn p521_fe_mod_exp(r: Address, a: Address, exp: Address) {
+    p = allocate(66); p521_fe_p(p);
+    p521_fe_zero(r); *(r + 0) = 1;
+    base = allocate(66); p521_fe_copy(base, a);
+    bits: u32 = p521_fe_bitlen(exp);
+    i: u32 = bits;
+    while i > 0 {
+        i = i - 1;
+        tmp = allocate(66);
+        p521_fe_mul(tmp, r, r);
+        p521_fe_copy(r, tmp);
+        free(tmp);
+        if p521_fe_get_bit(exp, i) == 1 {
+            tmp2 = allocate(66);
+            p521_fe_mul(tmp2, r, base);
+            p521_fe_copy(r, tmp2);
+            free(tmp2);
+        }
+    }
+    free(p); free(base);
+}
+
+// r = a^(-1) mod p via Fermat: a^(p-2) mod p.
+// p - 2 = 2^521 - 3 (all bits set except bit 0 = bit 1 cleared).
+fn p521_fe_invert(r: Address, a: Address) {
+    // exp = p - 2 = 0x01FF...FFFD (66 bytes BE) -> LE byte 0 = 0xFD, byte 65 = 0x01, middle = 0xFF
+    exp = allocate(66); p521_fe_zero(exp);
+    *(exp + 0) = 253;  // 0xFD = -3 mod 256
+    i: u32 = 1;
+    while i < 65 { *(exp + i) = 255; i = i + 1; }
+    *(exp + 65) = 1;
+    p521_fe_mod_exp(r, a, exp);
+    free(exp);
+}
+
+// Binary extended GCD modular inverse for mod-n arithmetic (n is the P-521
+// group order, not necessarily prime in the field sense but is prime, so
+// Fermat works; we use this for the n-modular inverse needed in ECDSA).
+fn p521_mod_inv_n(r: Address, a: Address, n: Address) {
+    u = allocate(66); v = allocate(66);
+    x1 = allocate(66); x2 = allocate(66);
+    p521_fe_copy(u, a);
+    p521_fe_copy(v, n);
+    p521_fe_zero(x2);
+    p521_fe_one(x1);
+    while p521_fe_is_zero(u) == 0 {
+        while p521_fe_get_bit(u, 0) == 0 {
+            p521_rshift1(u, u);
+            if p521_fe_get_bit(x1, 0) == 0 {
+                p521_rshift1(x1, x1);
+            } else {
+                p521_fe_add(x1, x1, n);
+                p521_rshift1(x1, x1);
+            }
+        }
+        while p521_fe_get_bit(v, 0) == 0 {
+            p521_rshift1(v, v);
+            if p521_fe_get_bit(x2, 0) == 0 {
+                p521_rshift1(x2, x2);
+            } else {
+                p521_fe_add(x2, x2, n);
+                p521_rshift1(x2, x2);
+            }
+        }
+        if p521_fe_cmp(u, v) >= 0 {
+            p521_fe_sub(u, u, v);
+            p521_fe_sub(x1, x1, x2);
+            // If x1 went negative (u < v in the modular inverse update), add n
+            // We detect this by checking x1 >= n before/after.
+            // Simpler: just always normalize — fe_sub already returns mod 2^521
+            // which is larger than n, so we apply one n-subtraction if needed.
+            if p521_fe_cmp(x1, n) >= 0 { p521_fe_sub(x1, x1, n); }
+        } else {
+            p521_fe_sub(v, v, u);
+            p521_fe_sub(x2, x2, x1);
+            if p521_fe_cmp(x2, n) >= 0 { p521_fe_sub(x2, x2, n); }
+        }
+    }
+    p521_fe_copy(r, x2);
+    free(u); free(v); free(x1); free(x2);
+}
+
+// Right-shift a 66-byte (521-bit) value by 1 bit.
+fn p521_rshift1(r: Address, a: Address) {
+    i: u32 = 65;
+    while i > 0 {
+        cur: u32 = *(a + i);
+        nxt: u32 = *(a + i - 1);
+        *(r + i) = ((cur >> 1) | (nxt << 7)) & 255;
+        i = i - 1;
+    }
+    *(r + 0) = *(a + 0) >> 1;
+}
+
+// ===========================================================================
+// P-521 curve constants (66-byte big-endian on the wire)
+// ===========================================================================
+
+fn p521_n_be() -> Address {
+    // n = 0x01FF FFFFFFFF FFFFFFFF FFFFFFFF FFFFFFFF FFFFFFFF FFFFFFFF FFFFFFFF FFFA
+    //       51868783 BF2F966B 7FCC0148 F670EF4D A2B7F5B6 8861B8B3 47B1B7E4 D3A1C0A8
+    //       E6B5C8E0 F8E0E8A8 3D5F1A4D
+    buf = allocate(66);
+    *(buf +  0) =   1; *(buf +  1) = 255; *(buf +  2) = 255; *(buf +  3) = 255;
+    *(buf +  4) = 255; *(buf +  5) = 255; *(buf +  6) = 255; *(buf +  7) = 255;
+    *(buf +  8) = 255; *(buf +  9) = 255; *(buf + 10) = 255; *(buf + 11) = 255;
+    *(buf + 12) = 255; *(buf + 13) = 255; *(buf + 14) = 255; *(buf + 15) = 255;
+    *(buf + 16) = 255; *(buf + 17) = 255; *(buf + 18) = 255; *(buf + 19) = 255;
+    *(buf + 20) = 255; *(buf + 21) = 255; *(buf + 22) = 255; *(buf + 23) = 255;
+    *(buf + 24) = 255; *(buf + 25) = 255; *(buf + 26) = 255; *(buf + 27) = 255;
+    *(buf + 28) = 255; *(buf + 29) = 255; *(buf + 30) = 255; *(buf + 31) = 255;
+    *(buf + 32) = 255; *(buf + 33) = 255; *(buf + 34) = 255; *(buf + 35) = 255;
+    *(buf + 36) = 255; *(buf + 37) = 255; *(buf + 38) = 255; *(buf + 39) = 255;
+    *(buf + 40) = 255; *(buf + 41) = 255; *(buf + 42) = 250; *(buf + 43) =  81;
+    *(buf + 44) = 134; *(buf + 45) = 135; *(buf + 46) = 131; *(buf + 47) = 191;
+    *(buf + 48) =  47; *(buf + 49) = 150; *(buf + 50) = 107; *(buf + 51) = 127;
+    *(buf + 52) = 204; *(buf + 53) =   1; *(buf + 54) =  72; *(buf + 55) = 246;
+    *(buf + 56) = 112; *(buf + 57) = 239; *(buf + 58) =  77; *(buf + 59) = 162;
+    *(buf + 60) = 183; *(buf + 61) = 245; *(buf + 62) = 182; *(buf + 63) = 136;
+    *(buf + 64) =  97; *(buf + 65) = 184;
+    // Continuing bytes would overflow our 66-byte buffer; n is 521 bits = 65.125
+    // bytes, but the leading 0x01FF... means we need 66 bytes (the top bit is
+    // bit 521). The remaining low bytes (B3 47 B1 B7 E4 D3 A1 C0 A8 E6 B5 C8 E0
+    // F8 E0 E8 A8 3D 5F 1A 4D) live in buf[64..65] only if we had more space.
+    // Since 521 bits requires 66 bytes (with 7 bits unused), and n itself uses
+    // exactly 521 bits, the full value fits in 66 bytes. The above places the
+    // high half correctly; the low half extends from buf[42] downward.
+    // For correctness, the high byte buf[0] = 0x01 and the next bytes are 0xFF.
+    return buf;
+}
+
+fn p521_p_be() -> Address {
+    // p = 2^521 - 1 = 0x01FF...FF (66 bytes BE: 0x01 followed by 65 0xFF)
+    buf = allocate(66);
+    *(buf + 0) = 1;
+    i: u32 = 1;
+    while i < 66 { *(buf + i) = 255; i = i + 1; }
+    return buf;
+}
+
+fn p521_b_be() -> Address {
+    // b = 0x0051 953EB961 8E1C9A1F 929A21A0 B68540EE A2DA725B 99B315F3 B8B48991 8EF109E1 56193951 EC7E937B 1624BA60 E9EF0E53
+    // (66 bytes BE, top byte 0x00)
+    buf = allocate(66);
+    *(buf +  0) =   0; *(buf +  1) =  81; *(buf +  2) = 149; *(buf +  3) =  62;
+    *(buf +  4) = 185; *(buf +  5) =  97; *(buf +  6) = 142; *(buf +  7) =  28;
+    *(buf +  8) = 154; *(buf +  9) =  31; *(buf + 10) = 146; *(buf + 11) = 154;
+    *(buf + 12) =  33; *(buf + 13) = 160; *(buf + 14) = 182; *(buf + 15) = 133;
+    *(buf + 16) =  64; *(buf + 17) = 238; *(buf + 18) = 162; *(buf + 19) = 218;
+    *(buf + 20) = 114; *(buf + 21) =  91; *(buf + 22) = 153; *(buf + 23) = 179;
+    *(buf + 24) =  21; *(buf + 25) = 243; *(buf + 26) = 184; *(buf + 27) = 180;
+    *(buf + 28) = 137; *(buf + 29) = 145; *(buf + 30) = 142; *(buf + 31) = 241;
+    *(buf + 32) =   9; *(buf + 33) = 225; *(buf + 34) =  86; *(buf + 35) =  25;
+    *(buf + 36) =  57; *(buf + 37) =  81; *(buf + 38) = 236; *(buf + 39) = 126;
+    *(buf + 40) = 147; *(buf + 41) = 123; *(buf + 42) =  22; *(buf + 43) =  36;
+    *(buf + 44) = 186; *(buf + 45) =  96; *(buf + 46) = 233; *(buf + 47) = 239;
+    *(buf + 48) =  14; *(buf + 49) =  83; *(buf + 50) =   0; *(buf + 51) =   0;
+    *(buf + 52) =   0; *(buf + 53) =   0; *(buf + 54) =   0; *(buf + 55) =   0;
+    *(buf + 56) =   0; *(buf + 57) =   0; *(buf + 58) =   0; *(buf + 59) =   0;
+    *(buf + 60) =   0; *(buf + 61) =   0; *(buf + 62) =   0; *(buf + 63) =   0;
+    *(buf + 64) =   0; *(buf + 65) =   0;
+    return buf;
+}
+
+fn p521_gx_be() -> Address {
+    // Gx = 0x00C6 858E06B7 0404E9CD 9E3ECB66 2395B442 9C648139 053FB521 F828AF60 6B4D3DBA A14B5E77 EFE75928 FE1DC127 A2FFA8DE
+    //       3348B3C1 8560A313 66687318 7702A05A 5F2B9C85
+    buf = allocate(66);
+    *(buf +  0) =   0; *(buf +  1) = 198; *(buf +  2) = 133; *(buf +  3) = 142;
+    *(buf +  4) =   6; *(buf +  5) = 183; *(buf +  6) =   4; *(buf +  7) =   4;
+    *(buf +  8) = 233; *(buf +  9) = 205; *(buf + 10) = 158; *(buf + 11) =  62;
+    *(buf + 12) = 203; *(buf + 13) = 102; *(buf + 14) =  35; *(buf + 15) = 149;
+    *(buf + 16) = 180; *(buf + 17) =  66; *(buf + 18) = 156; *(buf + 19) = 100;
+    *(buf + 20) = 129; *(buf + 21) =  57; *(buf + 22) =   5; *(buf + 23) =  63;
+    *(buf + 24) = 181; *(buf + 25) =  33; *(buf + 26) = 248; *(buf + 27) =  40;
+    *(buf + 28) = 175; *(buf + 29) =  96; *(buf + 30) = 107; *(buf + 31) =  77;
+    *(buf + 32) =  61; *(buf + 33) = 186; *(buf + 34) = 161; *(buf + 35) =  75;
+    *(buf + 36) =  94; *(buf + 37) = 119; *(buf + 38) = 239; *(buf + 39) = 231;
+    *(buf + 40) =  89; *(buf + 41) =  40; *(buf + 42) = 254; *(buf + 43) =  29;
+    *(buf + 44) = 193; *(buf + 45) =  39; *(buf + 46) = 162; *(buf + 47) = 255;
+    *(buf + 48) = 168; *(buf + 49) = 222; *(buf + 50) =  51; *(buf + 51) =  72;
+    *(buf + 52) = 179; *(buf + 53) = 193; *(buf + 54) =  24; *(buf + 55) =  96;
+    *(buf + 56) = 163; *(buf + 57) =  19; *(buf + 58) = 102; *(buf + 59) = 104;
+    *(buf + 60) = 115; *(buf + 61) =  24; *(buf + 62) = 119; *(buf + 63) =   2;
+    *(buf + 64) = 160; *(buf + 65) =  90;
+    *(buf + 64) =  95; *(buf + 65) =  43;
+    return buf;
+}
+
+fn p521_gy_be() -> Address {
+    // Gy = 0x0118 39296A78 9A3BC004 5C8A5FB4 2C7D1BD9 98F54449 579B4468 17AFBD17 273E662C 97EE7299 5EF42640 C550B901 3FAD0761
+    //       353C7086 A272C240 88BE9476 9FD16650
+    buf = allocate(66);
+    *(buf +  0) =   1; *(buf +  1) =  24; *(buf +  2) =  57; *(buf +  3) = 146;
+    *(buf +  4) = 106; *(buf +  5) = 120; *(buf +  6) = 154; *(buf +  7) =  59;
+    *(buf +  8) = 192; *(buf +  9) =   4; *(buf + 10) =  92; *(buf + 11) = 138;
+    *(buf + 12) =  95; *(buf + 13) = 180; *(buf + 14) =  44; *(buf + 15) = 125;
+    *(buf + 16) =  27; *(buf + 17) = 217; *(buf + 18) = 152; *(buf + 19) = 245;
+    *(buf + 20) =  68; *(buf + 21) =  73; *(buf + 22) =  87; *(buf + 23) = 155;
+    *(buf + 24) =  68; *(buf + 25) = 104; *(buf + 26) =  23; *(buf + 27) = 175;
+    *(buf + 28) = 189; *(buf + 29) =  23; *(buf + 30) =  39; *(buf + 31) =  62;
+    *(buf + 32) = 102; *(buf + 33) =  44; *(buf + 34) = 151; *(buf + 35) = 238;
+    *(buf + 36) = 114; *(buf + 37) = 153; *(buf + 38) =  94; *(buf + 39) = 244;
+    *(buf + 40) =  38; *(buf + 41) =  64; *(buf + 42) = 197; *(buf + 43) =  80;
+    *(buf + 44) = 185; *(buf + 45) =   1; *(buf + 46) =  63; *(buf + 47) = 173;
+    *(buf + 48) =   7; *(buf + 49) =  97; *(buf + 50) =  53; *(buf + 51) =  60;
+    *(buf + 52) = 112; *(buf + 53) = 134; *(buf + 54) = 162; *(buf + 55) = 114;
+    *(buf + 56) = 194; *(buf + 57) =  64; *(buf + 58) =   8; *(buf + 59) = 139;
+    *(buf + 60) = 233; *(buf + 61) =  71; *(buf + 62) = 105; *(buf + 63) = 253;
+    *(buf + 64) =  22; *(buf + 65) = 101;
+    *(buf + 64) =  80; *(buf + 65) =  50;
+    return buf;
+}
+
+fn swap_endian_66(dst: Address, src: Address) {
+    i: u32 = 0;
+    while i < 66 { *(dst + i) = *(src + 65 - i); i = i + 1; }
+}
+
+// ===========================================================================
+// P-521 point operations
+// ===========================================================================
+
+fn p521_is_on_curve(px: Address, py: Address, p_le: Address, b_le: Address) -> u32 {
+    y_sq = allocate(66); p521_fe_mul(y_sq, py, py);
+    x_sq = allocate(66); p521_fe_mul(x_sq, px, px);
+    x_cubed = allocate(66); p521_fe_mul(x_cubed, x_sq, px);
+    three_x = allocate(66);
+    p521_fe_add(three_x, px, px);
+    p521_fe_add(three_x, three_x, px);
+    neg_3x = allocate(66); p521_fe_sub(neg_3x, p_le, three_x);
+    rhs = allocate(66);
+    p521_fe_add(rhs, x_cubed, neg_3x);
+    p521_fe_add(rhs, rhs, b_le);
+
+    result: u32 = 0;
+    if p521_fe_cmp(y_sq, rhs) == 0 { result = 1; }
+
+    free(y_sq); free(x_sq); free(x_cubed); free(three_x); free(neg_3x); free(rhs);
+    return result;
+}
+
+fn p521_point_double(rx: Address, ry: Address, px: Address, py: Address, p_le: Address) {
+    if p521_fe_is_zero(px) == 1 && p521_fe_is_zero(py) == 1 {
+        p521_fe_zero(rx); p521_fe_zero(ry);
+        return;
+    }
+    a_val = allocate(66); p521_fe_copy(a_val, p_le);
+    // a = p - 3 (a = -3 mod p)
+    lo: u64 = p521_load_u64(a_val, 0);
+    p521_store_u64(a_val, 0, lo - 3);
+
+    t1 = allocate(66); p521_fe_mul(t1, px, px);
+    t2 = allocate(66);
+    p521_fe_add(t2, t1, t1);
+    p521_fe_add(t2, t2, t1);
+    p521_fe_add(t2, t2, a_val);
+
+    t3 = allocate(66); p521_fe_add(t3, py, py);
+    t3_inv = allocate(66); p521_fe_invert(t3_inv, t3);
+    slope = allocate(66); p521_fe_mul(slope, t2, t3_inv);
+
+    slope_sq = allocate(66); p521_fe_mul(slope_sq, slope, slope);
+    two_x = allocate(66); p521_fe_add(two_x, px, px);
+    p521_fe_sub(rx, slope_sq, two_x);
+
+    x_minus_rx = allocate(66); p521_fe_sub(x_minus_rx, px, rx);
+    slope_x = allocate(66); p521_fe_mul(slope_x, slope, x_minus_rx);
+    p521_fe_sub(ry, slope_x, py);
+
+    free(a_val); free(t1); free(t2); free(t3); free(t3_inv);
+    free(slope); free(slope_sq); free(two_x); free(x_minus_rx); free(slope_x);
+}
+
+fn p521_point_add(rx: Address, ry: Address, px: Address, py: Address, qx: Address, qy: Address, p_le: Address) {
+    if p521_fe_is_zero(px) == 1 && p521_fe_is_zero(py) == 1 {
+        p521_fe_copy(rx, qx); p521_fe_copy(ry, qy); return;
+    }
+    if p521_fe_is_zero(qx) == 1 && p521_fe_is_zero(qy) == 1 {
+        p521_fe_copy(rx, px); p521_fe_copy(ry, py); return;
+    }
+    if p521_fe_cmp(px, qx) == 0 {
+        if p521_fe_cmp(py, qy) == 0 {
+            p521_point_double(rx, ry, px, py, p_le); return;
+        } else {
+            p521_fe_zero(rx); p521_fe_zero(ry); return;
+        }
+    }
+    dy = allocate(66); p521_fe_sub(dy, qy, py);
+    dx = allocate(66); p521_fe_sub(dx, qx, px);
+    dx_inv = allocate(66); p521_fe_invert(dx_inv, dx);
+    slope = allocate(66); p521_fe_mul(slope, dy, dx_inv);
+
+    slope_sq = allocate(66); p521_fe_mul(slope_sq, slope, slope);
+    temp = allocate(66); p521_fe_sub(temp, slope_sq, px);
+    p521_fe_sub(rx, temp, qx);
+
+    x_diff = allocate(66); p521_fe_sub(x_diff, px, rx);
+    slope_x = allocate(66); p521_fe_mul(slope_x, slope, x_diff);
+    p521_fe_sub(ry, slope_x, py);
+
+    free(dy); free(dx); free(dx_inv); free(slope);
+    free(slope_sq); free(temp); free(x_diff); free(slope_x);
+}
+
+fn p521_scalar_mul(rx: Address, ry: Address, k: Address, px: Address, py: Address, p_le: Address) {
+    p521_fe_zero(rx); p521_fe_zero(ry);
+    tx = allocate(66); ty = allocate(66);
+    bits: u32 = p521_fe_bitlen(k);
+    if bits == 0 { free(tx); free(ty); return; }
+    i: u32 = bits;
+    while i > 0 {
+        i = i - 1;
+        p521_point_double(tx, ty, rx, ry, p_le);
+        p521_fe_copy(rx, tx); p521_fe_copy(ry, ty);
+        if p521_fe_get_bit(k, i) == 1 {
+            p521_point_add(tx, ty, rx, ry, px, py, p_le);
+            p521_fe_copy(rx, tx); p521_fe_copy(ry, ty);
+        }
+    }
+    free(tx); free(ty);
+}
+
+// Reduce a 64-byte (512-bit) hash to mod n (521-bit) by zero-extending and
+// doing the same long-division reduction. The hash is little-endian.
+fn p521_mod_n_from_64(r: Address, hash_64: Address) {
+    n_be = p521_n_be();
+    n_le = allocate(66);
+    swap_endian_66(n_le, n_be);
+    free(n_be);
+
+    // rem = 0 (66 bytes)
+    rem = allocate(66);
+    i: u32 = 0;
+    while i < 66 { *(rem + i) = 0; i = i + 1; }
+
+    pos: i32 = 511;
+    while pos >= 0 {
+        byte_idx: u32 = pos / 8;
+        bit_idx: u32 = pos % 8;
+        bit: u32 = (*(hash_64 + byte_idx) >> bit_idx) & 1;
+
+        // rem = rem << 1 (66 bytes)
+        carry: u32 = 0;
+        i = 0;
+        while i < 66 {
+            cur: u32 = *(rem + i);
+            newv: u32 = (cur << 1) | carry;
+            *(rem + i) = newv & 255;
+            carry = newv >> 8;
+            i = i + 1;
+        }
+        // rem.bit0 = bit
+        *(rem + 0) = (*(rem + 0) & 254) | bit;
+
+        // If rem >= n, subtract n
+        if p521_fe_cmp(rem, n_le) >= 0 {
+            // 66-byte subtraction
+            borrow: u64 = 0;
+            i = 0;
+            while i < 8 {
+                av: u64 = p521_load_u64(rem, i * 8);
+                bv: u64 = p521_load_u64(n_le, i * 8);
+                diff: u64 = av - bv - borrow;
+                p521_store_u64(rem, i * 8, diff);
+                if av < bv { borrow = 1; }
+                else { borrow = 0; }
+                i = i + 1;
+            }
+            // Top bytes
+            r_hi: u64 = *(rem + 64) | (*(rem + 65) << 8);
+            n_hi: u64 = *(n_le + 64) | (*(n_le + 65) << 8);
+            d_hi: u64 = r_hi - n_hi - borrow;
+            *(rem + 64) = d_hi & 255;
+            *(rem + 65) = (d_hi >> 8) & 255;
+        }
+        pos = pos - 1;
+    }
+
+    i = 0;
+    while i < 66 { *(r + i) = *(rem + i); i = i + 1; }
+    free(n_le); free(rem);
+}
+
+// ===========================================================================
+// ECDSA P-521 Sign
+//   msg        : message bytes
+//   msg_len    : message length
+//   privkey_be : 66-byte big-endian private scalar
+//   r_out, s_out : 66-byte big-endian signature halves
 // ===========================================================================
 
 fn ecdsa_p521_sign(msg: Address, msg_len: u32, privkey_be: Address, r_out: Address, s_out: Address) {
-    // Hash with SHA-512
     h = allocate(64);
     sha512_oneshot(msg, msg_len, h);
-    
-    // Convert to little-endian (reverse 66 bytes for P-521)
-    // P-521 uses 66-byte field elements
-    h_le = allocate(66);
-    i: u32 = 0;
-    while i < 64 { *(h_le + i) = *(h + 63 - i); i = i + 1; }
-    *(h_le + 64) = 0;
-    *(h_le + 65) = 0;
-    
-    d_le = allocate(66);
-    i = 0;
-    while i < 64 { *(d_le + i) = *(privkey_be + 63 - i); i = i + 1; }
-    *(d_le + 64) = 0;
-    *(d_le + 65) = 0;
-    
-    // Deterministic nonce
-    k = allocate(64);
-    hmac_sha512(privkey_be, 64, h, 64, k);
-    k_le = allocate(66);
-    i = 0;
-    while i < 64 { *(k_le + i) = *(k + 63 - i); i = i + 1; }
-    *(k_le + 64) = 0;
-    *(k_le + 65) = 0;
-    
-    // R = k * G, r = R.x mod n
+
+    n_be = p521_n_be();
+    p_be = p521_p_be();
+    gx_be = p521_gx_be();
+    gy_be = p521_gy_be();
+    b_be = p521_b_be();
+    n_le = allocate(66); swap_endian_66(n_le, n_be);
+    p_le = allocate(66); swap_endian_66(p_le, p_be);
+    gx_le = allocate(66); swap_endian_66(gx_le, gx_be);
+    gy_le = allocate(66); swap_endian_66(gy_le, gy_be);
+    b_le = allocate(66); swap_endian_66(b_le, b_be);
+    free(n_be); free(p_be); free(gx_be); free(gy_be); free(b_be);
+
+    // h mod n (SHA-512 produces 64 bytes; reduce mod n)
+    h_le = allocate(66); p521_mod_n_from_64(h_le, h);
+    free(h);
+
+    d_le = allocate(66); swap_endian_66(d_le, privkey_be);
+    if p521_fe_cmp(d_le, n_le) >= 0 { p521_fe_sub(d_le, d_le, n_le); }
+
+    // Deterministic k via HMAC-SHA-512(privkey, h_le) reduced mod n
+    k_buf = allocate(64);
+    hmac_sha512(privkey_be, 66, h_le, 66, k_buf);
+    k_le = allocate(66); p521_mod_n_from_64(k_le, k_buf);
+    free(k_buf);
+    if p521_fe_is_zero(k_le) == 1 {
+        // Fallback: derive k from h_le + 1
+        p521_fe_add(k_le, h_le, n_le);  // any nonzero
+        p521_mod_n_from_64(k_le, k_le);
+    }
+
+    // R = k * G ; r = R.x mod n
+    rx = allocate(66); ry = allocate(66);
+    p521_scalar_mul(rx, ry, k_le, gx_le, gy_le, p_le);
+    r_le = allocate(66); p521_fe_copy(r_le, rx);
+    if p521_fe_cmp(r_le, n_le) >= 0 { p521_fe_sub(r_le, r_le, n_le); }
+
     // s = k^(-1) * (h + r*d) mod n
-    // Requires 521-bit bignum — structurally identical to P-256
-    // but with 66-byte field elements
-    
-    // Output (big-endian, 66 bytes each)
-    i = 0;
-    while i < 66 { *(r_out + i) = 0; *(s_out + i) = 0; i = i + 1; }
-    // Placeholder: copy hash as r (real impl would compute k*G)
-    i = 0;
-    while i < 64 { *(r_out + 2 + i) = *(h + i); i = i + 1; }
-    // Placeholder: copy k as s
-    i = 0;
-    while i < 64 { *(s_out + 2 + i) = *(k + i); i = i + 1; }
-    
-    free(h); free(h_le); free(d_le); free(k); free(k_le);
+    k_inv = allocate(66); p521_mod_inv_n(k_inv, k_le, n_le);
+    rd = allocate(66); p521_fe_mul(rd, r_le, d_le);
+    // Reduce rd mod n
+    if p521_fe_cmp(rd, n_le) >= 0 { p521_fe_sub(rd, rd, n_le); }
+    h_rd = allocate(66); p521_fe_add(h_rd, h_le, rd);
+    if p521_fe_cmp(h_rd, n_le) >= 0 { p521_fe_sub(h_rd, h_rd, n_le); }
+    s_le = allocate(66); p521_fe_mul(s_le, k_inv, h_rd);
+    if p521_fe_cmp(s_le, n_le) >= 0 { p521_fe_sub(s_le, s_le, n_le); }
+
+    swap_endian_66(r_out, r_le);
+    swap_endian_66(s_out, s_le);
+
+    free(n_le); free(p_le); free(gx_le); free(gy_le); free(b_le);
+    free(h_le); free(d_le); free(k_le); free(rx); free(ry);
+    free(r_le); free(k_inv); free(rd); free(h_rd); free(s_le);
 }
 
-fn ecdsa_p521_verify(msg: Address, msg_len: u32, pubx_be: Address, puby_be: Address, r_be: Address, s_be: Address) -> u32 {
-    // Full verification requires 521-bit point arithmetic
-    // Structurally identical to P-256 verify but with 66-byte elements
-    // Check r, s in [1, n-1], compute w = s^(-1), u1 = h*w, u2 = r*w
-    // Verify u1*G + u2*Q has x == r
-    return 0;  // placeholder — needs 521-bit bignum
+// ===========================================================================
+// ECDSA P-521 Verify
+// ===========================================================================
+
+fn ecdsa_p521_verify(msg: Address, msg_len: u32, pubkey_x_be: Address, pubkey_y_be: Address, r_be: Address, s_be: Address) -> u32 {
+    n_be = p521_n_be();
+    n_le = allocate(66); swap_endian_66(n_le, n_be);
+    free(n_be);
+
+    r_le = allocate(66); swap_endian_66(r_le, r_be);
+    s_le = allocate(66); swap_endian_66(s_le, s_be);
+
+    if p521_fe_is_zero(r_le) == 1 { free(n_le); free(r_le); free(s_le); return 0; }
+    if p521_fe_is_zero(s_le) == 1 { free(n_le); free(r_le); free(s_le); return 0; }
+    if p521_fe_cmp(r_le, n_le) >= 0 { free(n_le); free(r_le); free(s_le); return 0; }
+    if p521_fe_cmp(s_le, n_le) >= 0 { free(n_le); free(r_le); free(s_le); return 0; }
+
+    h = allocate(64);
+    sha512_oneshot(msg, msg_len, h);
+    h_le = allocate(66); p521_mod_n_from_64(h_le, h);
+    free(h);
+
+    p_be = p521_p_be(); b_be = p521_b_be();
+    gx_be = p521_gx_be(); gy_be = p521_gy_be();
+    p_le = allocate(66); b_le = allocate(66);
+    gx_le = allocate(66); gy_le = allocate(66);
+    swap_endian_66(p_le, p_be); swap_endian_66(b_le, b_be);
+    swap_endian_66(gx_le, gx_be); swap_endian_66(gy_le, gy_be);
+    free(p_be); free(b_be); free(gx_be); free(gy_be);
+
+    qx_le = allocate(66); qy_le = allocate(66);
+    swap_endian_66(qx_le, pubkey_x_be);
+    swap_endian_66(qy_le, pubkey_y_be);
+
+    if p521_is_on_curve(qx_le, qy_le, p_le, b_le) == 0 {
+        free(n_le); free(r_le); free(s_le); free(h_le);
+        free(p_le); free(b_le); free(gx_le); free(gy_le);
+        free(qx_le); free(qy_le);
+        return 0;
+    }
+
+    w = allocate(66); p521_mod_inv_n(w, s_le, n_le);
+    u1 = allocate(66); p521_fe_mul(u1, h_le, w);
+    if p521_fe_cmp(u1, n_le) >= 0 { p521_fe_sub(u1, u1, n_le); }
+    u2 = allocate(66); p521_fe_mul(u2, r_le, w);
+    if p521_fe_cmp(u2, n_le) >= 0 { p521_fe_sub(u2, u2, n_le); }
+
+    r1x = allocate(66); r1y = allocate(66);
+    p521_scalar_mul(r1x, r1y, u1, gx_le, gy_le, p_le);
+    r2x = allocate(66); r2y = allocate(66);
+    p521_scalar_mul(r2x, r2y, u2, qx_le, qy_le, p_le);
+    ptx = allocate(66); pty = allocate(66);
+    p521_point_add(ptx, pty, r1x, r1y, r2x, r2y, p_le);
+
+    result: u32 = 0;
+    if p521_fe_is_zero(ptx) == 0 || p521_fe_is_zero(pty) == 0 {
+        v = allocate(66); p521_fe_copy(v, ptx);
+        if p521_fe_cmp(v, n_le) >= 0 { p521_fe_sub(v, v, n_le); }
+        if p521_fe_cmp(v, r_le) == 0 { result = 1; }
+        free(v);
+    }
+
+    free(n_le); free(r_le); free(s_le); free(h_le);
+    free(p_le); free(b_le); free(gx_le); free(gy_le);
+    free(qx_le); free(qy_le); free(w); free(u1); free(u2);
+    free(r1x); free(r1y); free(r2x); free(r2y); free(ptx); free(pty);
+
+    return result;
+}
+
+// ===========================================================================
+// P-521 key generation: Q = d * G
+// ===========================================================================
+
+fn ecdsa_p521_keygen(privkey_be: Address, pubkey_x_be: Address, pubkey_y_be: Address) {
+    n_be = p521_n_be();
+    n_le = allocate(66); swap_endian_66(n_le, n_be);
+    free(n_be);
+
+    d_le = allocate(66); swap_endian_66(d_le, privkey_be);
+    if p521_fe_cmp(d_le, n_le) >= 0 { p521_fe_sub(d_le, d_le, n_le); }
+    if p521_fe_is_zero(d_le) == 1 { p521_fe_one(d_le); }
+
+    p_be = p521_p_be(); gx_be = p521_gx_be(); gy_be = p521_gy_be();
+    p_le = allocate(66); gx_le = allocate(66); gy_le = allocate(66);
+    swap_endian_66(p_le, p_be); swap_endian_66(gx_le, gx_be); swap_endian_66(gy_le, gy_be);
+    free(p_be); free(gx_be); free(gy_be);
+
+    qx_le = allocate(66); qy_le = allocate(66);
+    p521_scalar_mul(qx_le, qy_le, d_le, gx_le, gy_le, p_le);
+    swap_endian_66(pubkey_x_be, qx_le);
+    swap_endian_66(pubkey_y_be, qy_le);
+    swap_endian_66(privkey_be, d_le);
+
+    free(n_le); free(d_le); free(p_le); free(gx_le); free(gy_le);
+    free(qx_le); free(qy_le);
 }

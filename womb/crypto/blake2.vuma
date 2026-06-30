@@ -1,26 +1,69 @@
-// womb/crypto/blake2.vuma — BLAKE2b and BLAKE2s (RFC 7693)
-// Fast cryptographic hash — faster than MD5, as secure as SHA-256.
+// womb/crypto/blake2.vuma — BLAKE2b (RFC 7693)
+// 12-round hash over 128-byte blocks, variable-length output up to 64 bytes.
+// Streaming API: blake2b_init / blake2b_update / blake2b_final / blake2b_oneshot.
+// Also provides blake2b_256 for the common 32-byte digest case.
 // No main() — importable library module.
 
-const MASK64: u64 = 18446744073709551615;
+// VUMA's parser rejects integer literals >= 2^63 for u64. Constants at or
+// above that threshold are written as (1 << 63) | lower_63_bits.
+const MASK64: u64 = (1 << 63) | ((1 << 63) - 1);
 const MASK32: u32 = 4294967295;
 
-// BLAKE2b constants — IV (same as SHA-256 IV, but u64)
-const B2B_IV0: u64 = 1766644222196013392;    // SHA-512 IV
-const B2B_IV1: u64 = 1766748919350259374;
-const B2B_IV2: u64 = 1766748919350259375;
-const B2B_IV3: u64 = 1776777767291745923;
-const B2B_IV4: u64 = 1776777767291745924;
-const B2B_IV5: u64 = 1776777767291745925;
-const B2B_IV6: u64 = 1776777767291745926;
-const B2B_IV7: u64 = 1776777767291745927;
+// BLAKE2b IV (RFC 7693 Section 2.4): same as SHA-512 initial hash values.
+const B2B_IV0: u64 = 7640891576956012808;
+const B2B_IV1: u64 = (1 << 63) | 4280581859320702779;
+const B2B_IV2: u64 = 4354685564936845355;
+const B2B_IV3: u64 = (1 << 63) | 2688637133616133873;
+const B2B_IV4: u64 = 5840696475078001361;
+const B2B_IV5: u64 = (1 << 63) | 1947077365137828895;
+const B2B_IV6: u64 = 2270897969802886507;
+const B2B_IV7: u64 = 6620516959819538809;
 
-// BLAKE2b rotation amounts
+// BLAKE2b SIGMA table: 10 permutations of 16 message-word indices
+// (RFC 7693 Section 2.6). The 12 rounds index rows 0..9, then 0..1 again.
+
 fn rotr64(x: u64, n: u64) -> u64 {
+    if n == 0 { return x; }
     return (x >> n) | (x << (64 - n));
 }
 
-// G function for BLAKE2b
+fn load_u64_le(ptr: Address, off: u32) -> u64 {
+    b0: u64 = *(ptr + off); b1: u64 = *(ptr + off + 1);
+    b2: u64 = *(ptr + off + 2); b3: u64 = *(ptr + off + 3);
+    b4: u64 = *(ptr + off + 4); b5: u64 = *(ptr + off + 5);
+    b6: u64 = *(ptr + off + 6); b7: u64 = *(ptr + off + 7);
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+         | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
+}
+
+fn store_u64_le(ptr: Address, off: u32, val: u64) {
+    *(ptr + off)     = val & 255;
+    *(ptr + off + 1) = (val >> 8) & 255;
+    *(ptr + off + 2) = (val >> 16) & 255;
+    *(ptr + off + 3) = (val >> 24) & 255;
+    *(ptr + off + 4) = (val >> 32) & 255;
+    *(ptr + off + 5) = (val >> 40) & 255;
+    *(ptr + off + 6) = (val >> 48) & 255;
+    *(ptr + off + 7) = (val >> 56) & 255;
+}
+
+fn store_u32_le(ptr: Address, off: u32, val: u32) {
+    *(ptr + off)     = val & 255;
+    *(ptr + off + 1) = (val >> 8) & 255;
+    *(ptr + off + 2) = (val >> 16) & 255;
+    *(ptr + off + 3) = (val >> 24) & 255;
+}
+
+fn load_u32_le(ptr: Address, off: u32) -> u32 {
+    b0: u32 = *(ptr + off);
+    b1: u32 = *(ptr + off + 1);
+    b2: u32 = *(ptr + off + 2);
+    b3: u32 = *(ptr + off + 3);
+    return (b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)) & MASK32;
+}
+
+// G primitive (RFC 7693 Section 3.1): mixes four work-vector words with two
+// message words. Operates in place on the work vector.
 fn blake2b_g(v: Address, a: u32, b: u32, c: u32, d: u32, x: u64, y: u64) {
     va: u64 = load_u64_le(v, a * 8);
     vb: u64 = load_u64_le(v, b * 8);
@@ -42,39 +85,22 @@ fn blake2b_g(v: Address, a: u32, b: u32, c: u32, d: u32, x: u64, y: u64) {
     store_u64_le(v, d * 8, vd);
 }
 
-fn load_u64_le(ptr: Address, off: u32) -> u64 {
-    b0: u64 = *(ptr + off); b1: u64 = *(ptr + off + 1);
-    b2: u64 = *(ptr + off + 2); b3: u64 = *(ptr + off + 3);
-    b4: u64 = *(ptr + off + 4); b5: u64 = *(ptr + off + 5);
-    b6: u64 = *(ptr + off + 6); b7: u64 = *(ptr + off + 7);
-    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
-}
+// BLAKE2b compression function F(h, m, t, f) per RFC 7693 Section 3.2.
+//   h:      8 x u64 chain value (64 bytes)
+//   block:  128-byte message block
+//   t_lo:   low 64 bits of the byte counter (incremented per 128-byte block)
+//   t_hi:   high 64 bits of the byte counter
+//   last:   1 if this is the final block (sets f[0])
+fn blake2b_compress(h: Address, block: Address, t_lo: u64, t_hi: u64, last: u32) {
+    v = allocate(128);  // 16 x u64 work vector
 
-fn store_u64_le(ptr: Address, off: u32, val: u64) {
-    *(ptr + off) = val & 255;
-    *(ptr + off + 1) = (val >> 8) & 255;
-    *(ptr + off + 2) = (val >> 16) & 255;
-    *(ptr + off + 3) = (val >> 24) & 255;
-    *(ptr + off + 4) = (val >> 32) & 255;
-    *(ptr + off + 5) = (val >> 40) & 255;
-    *(ptr + off + 6) = (val >> 48) & 255;
-    *(ptr + off + 7) = (val >> 56) & 255;
-}
-
-// BLAKE2b compression function
-// h: 8 × u64 state (64 bytes)
-// block: 128-byte message block
-// t: 128-bit counter (we use low 64 bits)
-// last: 1 if this is the last block
-fn blake2b_compress(h: Address, block: Address, t: u64, last: u32) {
-    // Initialize work vector v[0..15]
-    v = allocate(128);  // 16 × u64
+    // v[0..7] = h[0..7]
     i: u32 = 0;
     while i < 8 {
         store_u64_le(v, i * 8, load_u64_le(h, i * 8));
         i = i + 1;
     }
-    // v[8..15] = IV
+    // v[8..15] = IV[0..7]
     store_u64_le(v, 64, B2B_IV0);
     store_u64_le(v, 72, B2B_IV1);
     store_u64_le(v, 80, B2B_IV2);
@@ -84,11 +110,14 @@ fn blake2b_compress(h: Address, block: Address, t: u64, last: u32) {
     store_u64_le(v, 112, B2B_IV6);
     store_u64_le(v, 120, B2B_IV7);
 
-    // v[12] ^= t (low 64 bits of counter)
+    // v[12] ^= t_lo (low 64 bits of byte counter)
     v12: u64 = load_u64_le(v, 96);
-    store_u64_le(v, 96, v12 ^ t);
+    store_u64_le(v, 96, v12 ^ t_lo);
+    // v[13] ^= t_hi (high 64 bits of byte counter)
+    v13: u64 = load_u64_le(v, 104);
+    store_u64_le(v, 104, v13 ^ t_hi);
 
-    // v[14] ^= last flag
+    // v[14] ^= f (finalization flag, all-ones if last block)
     if last == 1 {
         v14: u64 = load_u64_le(v, 112);
         store_u64_le(v, 112, v14 ^ MASK64);
@@ -102,52 +131,47 @@ fn blake2b_compress(h: Address, block: Address, t: u64, last: u32) {
         i = i + 1;
     }
 
-    // 12 rounds
+    // 12 rounds; each round selects a row of SIGMA.
     round: u32 = 0;
     while round < 12 {
-        // Sigma permutation (RFC 7693 Table)
-        // Each round uses different message word indices
         s: u32 = round % 10;
 
-        // Get message indices for this round
-        m0: u32 = 0; m1: u32 = 1; m2: u32 = 2; m3: u32 = 3;
-        m4: u32 = 4; m5: u32 = 5; m6: u32 = 6; m7: u32 = 7;
-        m8: u32 = 8; m9: u32 = 9; m10: u32 = 10; m11: u32 = 11;
+        // Resolve this round's 16 message-word indices from SIGMA[s].
+        m0: u32 = 0;  m1: u32 = 1;  m2: u32 = 2;  m3: u32 = 3;
+        m4: u32 = 4;  m5: u32 = 5;  m6: u32 = 6;  m7: u32 = 7;
+        m8: u32 = 8;  m9: u32 = 9;  m10: u32 = 10; m11: u32 = 11;
         m12: u32 = 12; m13: u32 = 13; m14: u32 = 14; m15: u32 = 15;
 
-        // Simplified: use identity permutation for all rounds
-        // (Correct implementation would use the SIGMA table from RFC 7693)
-        if s == 0 { m0 = 0; m1 = 1; m2 = 2; m3 = 3; m4 = 4; m5 = 5; m6 = 6; m7 = 7; m8 = 8; m9 = 9; m10 = 10; m11 = 11; m12 = 12; m13 = 13; m14 = 14; m15 = 15; }
-        if s == 1 { m0 = 14; m1 = 10; m2 = 4; m3 = 8; m4 = 9; m5 = 15; m6 = 13; m7 = 6; m8 = 1; m9 = 12; m10 = 0; m11 = 2; m12 = 11; m13 = 7; m14 = 5; m15 = 3; }
-        if s == 2 { m0 = 11; m1 = 8; m2 = 12; m3 = 0; m4 = 5; m5 = 2; m6 = 15; m7 = 13; m8 = 10; m9 = 14; m10 = 3; m11 = 6; m12 = 7; m13 = 1; m14 = 9; m15 = 4; }
-        if s == 3 { m0 = 7; m1 = 9; m2 = 3; m3 = 1; m4 = 13; m5 = 12; m6 = 11; m7 = 14; m8 = 2; m9 = 6; m10 = 5; m11 = 10; m12 = 4; m13 = 0; m14 = 15; m15 = 8; }
-        if s == 4 { m0 = 9; m1 = 0; m2 = 5; m3 = 7; m4 = 2; m5 = 4; m6 = 10; m7 = 15; m8 = 14; m9 = 1; m10 = 11; m11 = 12; m12 = 6; m13 = 8; m14 = 3; m15 = 13; }
-        if s == 5 { m0 = 2; m1 = 12; m2 = 6; m3 = 10; m4 = 0; m5 = 11; m6 = 8; m7 = 3; m8 = 4; m9 = 13; m10 = 7; m11 = 5; m12 = 15; m13 = 14; m14 = 1; m15 = 9; }
-        if s == 6 { m0 = 12; m1 = 5; m2 = 1; m3 = 15; m4 = 14; m5 = 13; m6 = 4; m7 = 10; m8 = 0; m9 = 7; m10 = 6; m11 = 3; m12 = 9; m13 = 2; m14 = 8; m15 = 11; }
-        if s == 7 { m0 = 13; m1 = 11; m2 = 7; m3 = 14; m4 = 12; m5 = 1; m6 = 3; m7 = 9; m8 = 5; m9 = 0; m10 = 15; m11 = 4; m12 = 8; m13 = 6; m14 = 2; m15 = 10; }
-        if s == 8 { m0 = 6; m1 = 15; m2 = 14; m3 = 9; m4 = 11; m5 = 3; m6 = 0; m7 = 8; m8 = 12; m9 = 2; m10 = 13; m11 = 7; m12 = 1; m13 = 4; m14 = 10; m15 = 5; }
-        if s == 9 { m0 = 10; m1 = 2; m2 = 8; m3 = 4; m4 = 7; m5 = 6; m6 = 1; m7 = 5; m8 = 15; m9 = 11; m10 = 9; m11 = 14; m12 = 3; m13 = 12; m14 = 13; m15 = 0; }
+        if s == 0 { m0 = 0;  m1 = 1;  m2 = 2;  m3 = 3;  m4 = 4;  m5 = 5;  m6 = 6;  m7 = 7;  m8 = 8;  m9 = 9;  m10 = 10; m11 = 11; m12 = 12; m13 = 13; m14 = 14; m15 = 15; }
+        if s == 1 { m0 = 14; m1 = 10; m2 = 4;  m3 = 8;  m4 = 9;  m5 = 15; m6 = 13; m7 = 6;  m8 = 1;  m9 = 12; m10 = 0;  m11 = 2;  m12 = 11; m13 = 7;  m14 = 5;  m15 = 3; }
+        if s == 2 { m0 = 11; m1 = 8;  m2 = 12; m3 = 0;  m4 = 5;  m5 = 2;  m6 = 15; m7 = 13; m8 = 10; m9 = 14; m10 = 3;  m11 = 6;  m12 = 7;  m13 = 1;  m14 = 9;  m15 = 4; }
+        if s == 3 { m0 = 7;  m1 = 9;  m2 = 3;  m3 = 1;  m4 = 13; m5 = 12; m6 = 11; m7 = 14; m8 = 2;  m9 = 6;  m10 = 5;  m11 = 10; m12 = 4;  m13 = 0;  m14 = 15; m15 = 8; }
+        if s == 4 { m0 = 9;  m1 = 0;  m2 = 5;  m3 = 7;  m4 = 2;  m5 = 4;  m6 = 10; m7 = 15; m8 = 14; m9 = 1;  m10 = 11; m11 = 12; m12 = 6;  m13 = 8;  m14 = 3;  m15 = 13; }
+        if s == 5 { m0 = 2;  m1 = 12; m2 = 6;  m3 = 10; m4 = 0;  m5 = 11; m6 = 8;  m7 = 3;  m8 = 4;  m9 = 13; m10 = 7;  m11 = 5;  m12 = 15; m13 = 14; m14 = 1;  m15 = 9; }
+        if s == 6 { m0 = 12; m1 = 5;  m2 = 1;  m3 = 15; m4 = 14; m5 = 13; m6 = 4;  m7 = 10; m8 = 0;  m9 = 7;  m10 = 6;  m11 = 3;  m12 = 9;  m13 = 2;  m14 = 8;  m15 = 11; }
+        if s == 7 { m0 = 13; m1 = 11; m2 = 7;  m3 = 14; m4 = 12; m5 = 1;  m6 = 3;  m7 = 9;  m8 = 5;  m9 = 0;  m10 = 15; m11 = 4;  m12 = 8;  m13 = 6;  m14 = 2;  m15 = 10; }
+        if s == 8 { m0 = 6;  m1 = 15; m2 = 14; m3 = 9;  m4 = 11; m5 = 3;  m6 = 0;  m7 = 8;  m8 = 12; m9 = 2;  m10 = 13; m11 = 7;  m12 = 1;  m13 = 4;  m14 = 10; m15 = 5; }
+        if s == 9 { m0 = 10; m1 = 2;  m2 = 8;  m3 = 4;  m4 = 7;  m5 = 6;  m6 = 1;  m7 = 5;  m8 = 15; m9 = 11; m10 = 9;  m11 = 14; m12 = 3;  m13 = 12; m14 = 13; m15 = 0; }
 
-        // Column round: G(v, 0, 4, 8, 12, m[m0], m[m1])
-        blake2b_g(v, 0, 4, 8, 12, load_u64_le(m, m0 * 8), load_u64_le(m, m1 * 8));
-        blake2b_g(v, 1, 5, 9, 13, load_u64_le(m, m2 * 8), load_u64_le(m, m3 * 8));
-        blake2b_g(v, 2, 6, 10, 14, load_u64_le(m, m4 * 8), load_u64_le(m, m5 * 8));
-        blake2b_g(v, 3, 7, 11, 15, load_u64_le(m, m6 * 8), load_u64_le(m, m7 * 8));
-
+        // Column round
+        blake2b_g(v, 0, 4, 8,  12, load_u64_le(m, m0 * 8),  load_u64_le(m, m1 * 8));
+        blake2b_g(v, 1, 5, 9,  13, load_u64_le(m, m2 * 8),  load_u64_le(m, m3 * 8));
+        blake2b_g(v, 2, 6, 10, 14, load_u64_le(m, m4 * 8),  load_u64_le(m, m5 * 8));
+        blake2b_g(v, 3, 7, 11, 15, load_u64_le(m, m6 * 8),  load_u64_le(m, m7 * 8));
         // Diagonal round
-        blake2b_g(v, 0, 5, 10, 15, load_u64_le(m, m8 * 8), load_u64_le(m, m9 * 8));
+        blake2b_g(v, 0, 5, 10, 15, load_u64_le(m, m8 * 8),  load_u64_le(m, m9 * 8));
         blake2b_g(v, 1, 6, 11, 12, load_u64_le(m, m10 * 8), load_u64_le(m, m11 * 8));
-        blake2b_g(v, 2, 7, 8, 13, load_u64_le(m, m12 * 8), load_u64_le(m, m13 * 8));
-        blake2b_g(v, 3, 4, 9, 14, load_u64_le(m, m14 * 8), load_u64_le(m, m15 * 8));
+        blake2b_g(v, 2, 7, 8,  13, load_u64_le(m, m12 * 8), load_u64_le(m, m13 * 8));
+        blake2b_g(v, 3, 4, 9,  14, load_u64_le(m, m14 * 8), load_u64_le(m, m15 * 8));
 
         round = round + 1;
     }
 
-    // h[i] ^= v[i] ^ v[i+8]
+    // h[i] ^= v[i] ^ v[i + 8]
     i = 0;
     while i < 8 {
-        hi: u64 = load_u64_le(h, i * 8);
-        vi: u64 = load_u64_le(v, i * 8);
+        hi:  u64 = load_u64_le(h, i * 8);
+        vi:  u64 = load_u64_le(v, i * 8);
         vi8: u64 = load_u64_le(v, (i + 8) * 8);
         store_u64_le(h, i * 8, hi ^ vi ^ vi8);
         i = i + 1;
@@ -157,77 +181,108 @@ fn blake2b_compress(h: Address, block: Address, t: u64, last: u32) {
     free(m);
 }
 
+// Context layout (216 bytes):
+//   [  0.. 63] h[0..7]    8 x u64 chain value (little-endian)
+//   [ 64.. 71] t_lo       low 64 bits of the byte counter (little-endian)
+//   [ 72.. 79] t_hi       high 64 bits of the byte counter (little-endian)
+//   [ 80.. 83] buf_len    bytes currently in the partial block buffer
+//   [ 84.. 87] digest_len output length in bytes (1..64)
+//   [ 88..215] buf[128]   partial block accumulator
+
+fn blake2b_init(ctx: Address, digest_len: u32) {
+    // h = IV with the first word XORed with the parameter block.
+    // Parameter block (digest_len, key_len=0, fanout=1, depth=1):
+    //   byte 0      digest_len
+    //   byte 1      key_len (0 here)
+    //   byte 2      fanout (1)
+    //   byte 3      depth (1)
+    //   bytes 4..47 reserved zeros
+    // Only the first 8 bytes of the parameter block affect h[0]:
+    //   h[0] = IV[0] ^ (digest_len | (0 << 8) | (1 << 16) | (1 << 24))
+    param: u64 = (digest_len & 255) | (0 << 8) | (1 << 16) | (1 << 24);
+    store_u64_le(ctx, 0, B2B_IV0 ^ param);
+    store_u64_le(ctx, 8,  B2B_IV1);
+    store_u64_le(ctx, 16, B2B_IV2);
+    store_u64_le(ctx, 24, B2B_IV3);
+    store_u64_le(ctx, 32, B2B_IV4);
+    store_u64_le(ctx, 40, B2B_IV5);
+    store_u64_le(ctx, 48, B2B_IV6);
+    store_u64_le(ctx, 56, B2B_IV7);
+    store_u64_le(ctx, 64, 0);  // t_lo
+    store_u64_le(ctx, 72, 0);  // t_hi
+    store_u32_le(ctx, 80, 0);  // buf_len — helper below
+    store_u32_le(ctx, 84, digest_len);
+}
+
+// Increment the 128-bit byte counter by `n`, carrying through both limbs.
+fn blake2b_add_bytes(ctx: Address, n: u64) {
+    lo: u64 = load_u64_le(ctx, 64);
+    hi: u64 = load_u64_le(ctx, 72);
+    new_lo: u64 = lo + n;
+    if new_lo < lo { hi = hi + 1; }
+    store_u64_le(ctx, 64, new_lo);
+    store_u64_le(ctx, 72, hi);
+}
+
+fn blake2b_update(ctx: Address, data: Address, len: u32) {
+    buf_len: u32 = load_u32_le(ctx, 80);
+    i: u32 = 0;
+    while i < len {
+        *(ctx + 88 + buf_len) = *(data + i);
+        buf_len = buf_len + 1;
+        i = i + 1;
+        if buf_len == 128 {
+            blake2b_add_bytes(ctx, 128);
+            t_lo: u64 = load_u64_le(ctx, 64);
+            t_hi: u64 = load_u64_le(ctx, 72);
+            blake2b_compress(ctx, ctx + 88, t_lo, t_hi, 0);
+            buf_len = 0;
+        }
+    }
+    store_u32_le(ctx, 80, buf_len);
+}
+
+// Pad the final partial block with zeros, set the finalization flag, run the
+// last compression, and emit `digest_len` bytes of the chain value.
+fn blake2b_final(ctx: Address, out: Address) {
+    buf_len: u32 = load_u32_le(ctx, 80);
+    digest_len: u32 = load_u32_le(ctx, 84);
+
+    // Account for the buffered bytes in the byte counter
+    blake2b_add_bytes(ctx, buf_len);
+
+    // Zero-pad the partial block up to 128 bytes
+    i: u32 = buf_len;
+    while i < 128 {
+        *(ctx + 88 + i) = 0;
+        i = i + 1;
+    }
+    t_lo: u64 = load_u64_le(ctx, 64);
+    t_hi: u64 = load_u64_le(ctx, 72);
+    blake2b_compress(ctx, ctx + 88, t_lo, t_hi, 1);
+
+    // Emit digest_len bytes from h[0..7] (little-endian lanes)
+    i = 0;
+    while i < digest_len {
+        *(out + i) = *(ctx + i);
+        i = i + 1;
+    }
+}
+
 // BLAKE2b oneshot — 512-bit (64-byte) output
 fn blake2b_oneshot(data: Address, len: u32, out: Address) {
-    // Initialize state h = IV with output length parameterization
-    h = allocate(64);
-    store_u64_le(h, 0, B2B_IV0 ^ 0x0101000040);  // digest_length=64, key_length=0, fanout=1, depth=1
-    store_u64_le(h, 8, B2B_IV1);
-    store_u64_le(h, 16, B2B_IV2);
-    store_u64_le(h, 24, B2B_IV3);
-    store_u64_le(h, 32, B2B_IV4);
-    store_u64_le(h, 40, B2B_IV5);
-    store_u64_le(h, 48, B2B_IV6);
-    store_u64_le(h, 56, B2B_IV7);
-
-    // Process blocks
-    t: u64 = 0;
-    pos: u32 = 0;
-
-    while pos + 128 <= len {
-        t = t + 128;
-        blake2b_compress(h, data + pos, t, 0);
-        pos = pos + 128;
-    }
-
-    // Last block (pad with zeros)
-    last_block = allocate(128);
-    i: u32 = 0;
-    while i < 128 { *(last_block + i) = 0; i = i + 1; }
-    remaining: u32 = len - pos;
-    i = 0;
-    while i < remaining { *(last_block + i) = *(data + pos + i); i = i + 1; }
-    t = t + remaining;
-    blake2b_compress(h, last_block, t, 1);
-    free(last_block);
-
-    // Output 64 bytes
-    i = 0;
-    while i < 64 { *(out + i) = *(h + i); i = i + 1; }
-    free(h);
+    ctx = allocate(216);
+    blake2b_init(ctx, 64);
+    blake2b_update(ctx, data, len);
+    blake2b_final(ctx, out);
+    free(ctx);
 }
 
 // BLAKE2b with 256-bit (32-byte) output
 fn blake2b_256(data: Address, len: u32, out: Address) {
-    h = allocate(64);
-    store_u64_le(h, 0, B2B_IV0 ^ 0x0101000020);  // digest_length=32
-    store_u64_le(h, 8, B2B_IV1);
-    store_u64_le(h, 16, B2B_IV2);
-    store_u64_le(h, 24, B2B_IV3);
-    store_u64_le(h, 32, B2B_IV4);
-    store_u64_le(h, 40, B2B_IV5);
-    store_u64_le(h, 48, B2B_IV6);
-    store_u64_le(h, 56, B2B_IV7);
-
-    t: u64 = 0;
-    pos: u32 = 0;
-    while pos + 128 <= len {
-        t = t + 128;
-        blake2b_compress(h, data + pos, t, 0);
-        pos = pos + 128;
-    }
-
-    last_block = allocate(128);
-    i: u32 = 0;
-    while i < 128 { *(last_block + i) = 0; i = i + 1; }
-    remaining: u32 = len - pos;
-    i = 0;
-    while i < remaining { *(last_block + i) = *(data + pos + i); i = i + 1; }
-    t = t + remaining;
-    blake2b_compress(h, last_block, t, 1);
-    free(last_block);
-
-    i = 0;
-    while i < 32 { *(out + i) = *(h + i); i = i + 1; }
-    free(h);
+    ctx = allocate(216);
+    blake2b_init(ctx, 32);
+    blake2b_update(ctx, data, len);
+    blake2b_final(ctx, out);
+    free(ctx);
 }

@@ -1,162 +1,175 @@
-// womb/crypto/hmac.vuma — HMAC (NIST FIPS 198-1)
-// Generic HMAC supporting SHA-1, SHA-256, SHA-512.
-// No main() — importable library module.
-// Requires: sha1.vuma, sha256.vuma, sha512.vuma to be imported alongside.
+// womb/crypto/hmac.vuma — HMAC (RFC 2104 / FIPS 198-1)
+// Generic HMAC supporting SHA-1, SHA-256, SHA-512. No main().
+// Requires sibling modules: sha1.vuma, sha256.vuma (from sha_variants.vuma),
+// sha512.vuma. Each exports <hash>_oneshot(data, len, out).
 
-// ipad = 0x36, opad = 0x5c
+const HMAC_IPAD: u32 = 54;   // 0x36
+const HMAC_OPAD: u32 = 92;   // 0x5c
+const HMAC_MASK32: u32 = 4294967295;
 
 // ===========================================================================
-// HMAC-SHA1 (20-byte digest, 64-byte block)
+// HMAC-SHA-1 (20-byte digest, 64-byte block).
+//   key:    pointer to key bytes (any length)
+//   keylen: key length
+//   msg:    pointer to message bytes
+//   msglen: message length
+//   out:    pointer to 20-byte output buffer
 // ===========================================================================
 
 fn hmac_sha1(key: Address, keylen: u32, msg: Address, msglen: u32, out: Address) {
-    kprime = allocate(64);
-    if keylen <= 64 {
-        i: u32 = 0;
-        while i < 64 {
-            if i < keylen { *(kprime + i) = *(key + i); }
-            else { *(kprime + i) = 0; }
-            i = i + 1;
-        }
+    block_size: u32 = 64;
+    digest_size: u32 = 20;
+
+    // K' = key (padded to block_size with zeros), or Hash(key) if too long.
+    kprime = allocate(block_size);
+    i: u32 = 0;
+    while i < block_size { *(kprime + i) = 0; i = i + 1; }
+    if keylen <= block_size {
+        i = 0;
+        while i < keylen { *(kprime + i) = *(key + i); i = i + 1; }
     } else {
         sha1_oneshot(key, keylen, kprime);
-        i: u32 = 20;
-        while i < 64 { *(kprime + i) = 0; i = i + 1; }
+        // remaining bytes already zero
     }
 
-    kipad = allocate(64);
-    kopad = allocate(64);
-    i: u32 = 0;
-    while i < 64 {
+    // kipad = K' XOR ipad, kopad = K' XOR opad
+    kipad = allocate(block_size);
+    kopad = allocate(block_size);
+    i = 0;
+    while i < block_size {
         kb: u32 = *(kprime + i);
-        *(kipad + i) = (kb ^ 54) & 255;
-        *(kopad + i) = (kb ^ 92) & 255;
+        *(kipad + i) = (kb ^ HMAC_IPAD) & 255;
+        *(kopad + i) = (kb ^ HMAC_OPAD) & 255;
         i = i + 1;
     }
 
-    inner = allocate(64 + msglen);
+    // inner = kipad || msg
+    inner = allocate(block_size + msglen);
     i = 0;
-    while i < 64 { *(inner + i) = *(kipad + i); i = i + 1; }
+    while i < block_size { *(inner + i) = *(kipad + i); i = i + 1; }
     i = 0;
-    while i < msglen { *(inner + 64 + i) = *(msg + i); i = i + 1; }
+    while i < msglen { *(inner + block_size + i) = *(msg + i); i = i + 1; }
 
-    inner_hash = allocate(20);
-    sha1_oneshot(inner, 64 + msglen, inner_hash);
+    // inner_hash = SHA1(inner)
+    inner_hash = allocate(digest_size);
+    sha1_oneshot(inner, block_size + msglen, inner_hash);
 
-    outer = allocate(64 + 20);
+    // outer = kopad || inner_hash
+    outer = allocate(block_size + digest_size);
     i = 0;
-    while i < 64 { *(outer + i) = *(kopad + i); i = i + 1; }
+    while i < block_size { *(outer + i) = *(kopad + i); i = i + 1; }
     i = 0;
-    while i < 20 { *(outer + 64 + i) = *(inner_hash + i); i = i + 1; }
+    while i < digest_size { *(outer + block_size + i) = *(inner_hash + i); i = i + 1; }
 
-    sha1_oneshot(outer, 84, out);
+    // out = SHA1(outer)
+    sha1_oneshot(outer, block_size + digest_size, out);
 
     free(kprime); free(kipad); free(kopad);
     free(inner); free(inner_hash); free(outer);
 }
 
 // ===========================================================================
-// HMAC-SHA256 (32-byte digest, 64-byte block)
+// HMAC-SHA-256 (32-byte digest, 64-byte block).
 // ===========================================================================
 
 fn hmac_sha256(key: Address, keylen: u32, msg: Address, msglen: u32, out: Address) {
-    kprime = allocate(64);
-    if keylen <= 64 {
-        i: u32 = 0;
-        while i < 64 {
-            if i < keylen { *(kprime + i) = *(key + i); }
-            else { *(kprime + i) = 0; }
-            i = i + 1;
-        }
+    block_size: u32 = 64;
+    digest_size: u32 = 32;
+
+    kprime = allocate(block_size);
+    i: u32 = 0;
+    while i < block_size { *(kprime + i) = 0; i = i + 1; }
+    if keylen <= block_size {
+        i = 0;
+        while i < keylen { *(kprime + i) = *(key + i); i = i + 1; }
     } else {
         sha256_oneshot(key, keylen, kprime);
-        i: u32 = 32;
-        while i < 64 { *(kprime + i) = 0; i = i + 1; }
     }
 
-    kipad = allocate(64);
-    kopad = allocate(64);
-    i: u32 = 0;
-    while i < 64 {
+    kipad = allocate(block_size);
+    kopad = allocate(block_size);
+    i = 0;
+    while i < block_size {
         kb: u32 = *(kprime + i);
-        *(kipad + i) = (kb ^ 54) & 255;
-        *(kopad + i) = (kb ^ 92) & 255;
+        *(kipad + i) = (kb ^ HMAC_IPAD) & 255;
+        *(kopad + i) = (kb ^ HMAC_OPAD) & 255;
         i = i + 1;
     }
 
-    inner = allocate(64 + msglen);
+    inner = allocate(block_size + msglen);
     i = 0;
-    while i < 64 { *(inner + i) = *(kipad + i); i = i + 1; }
+    while i < block_size { *(inner + i) = *(kipad + i); i = i + 1; }
     i = 0;
-    while i < msglen { *(inner + 64 + i) = *(msg + i); i = i + 1; }
+    while i < msglen { *(inner + block_size + i) = *(msg + i); i = i + 1; }
 
-    inner_hash = allocate(32);
-    sha256_oneshot(inner, 64 + msglen, inner_hash);
+    inner_hash = allocate(digest_size);
+    sha256_oneshot(inner, block_size + msglen, inner_hash);
 
-    outer = allocate(64 + 32);
+    outer = allocate(block_size + digest_size);
     i = 0;
-    while i < 64 { *(outer + i) = *(kopad + i); i = i + 1; }
+    while i < block_size { *(outer + i) = *(kopad + i); i = i + 1; }
     i = 0;
-    while i < 32 { *(outer + 64 + i) = *(inner_hash + i); i = i + 1; }
+    while i < digest_size { *(outer + block_size + i) = *(inner_hash + i); i = i + 1; }
 
-    sha256_oneshot(outer, 96, out);
+    sha256_oneshot(outer, block_size + digest_size, out);
 
     free(kprime); free(kipad); free(kopad);
     free(inner); free(inner_hash); free(outer);
 }
 
 // ===========================================================================
-// HMAC-SHA512 (64-byte digest, 128-byte block)
+// HMAC-SHA-512 (64-byte digest, 128-byte block).
 // ===========================================================================
 
 fn hmac_sha512(key: Address, keylen: u32, msg: Address, msglen: u32, out: Address) {
-    kprime = allocate(128);
-    if keylen <= 128 {
-        i: u32 = 0;
-        while i < 128 {
-            if i < keylen { *(kprime + i) = *(key + i); }
-            else { *(kprime + i) = 0; }
-            i = i + 1;
-        }
+    block_size: u32 = 128;
+    digest_size: u32 = 64;
+
+    kprime = allocate(block_size);
+    i: u32 = 0;
+    while i < block_size { *(kprime + i) = 0; i = i + 1; }
+    if keylen <= block_size {
+        i = 0;
+        while i < keylen { *(kprime + i) = *(key + i); i = i + 1; }
     } else {
         sha512_oneshot(key, keylen, kprime);
-        i: u32 = 64;
-        while i < 128 { *(kprime + i) = 0; i = i + 1; }
     }
 
-    kipad = allocate(128);
-    kopad = allocate(128);
-    i: u32 = 0;
-    while i < 128 {
+    kipad = allocate(block_size);
+    kopad = allocate(block_size);
+    i = 0;
+    while i < block_size {
         kb: u32 = *(kprime + i);
-        *(kipad + i) = (kb ^ 54) & 255;
-        *(kopad + i) = (kb ^ 92) & 255;
+        *(kipad + i) = (kb ^ HMAC_IPAD) & 255;
+        *(kopad + i) = (kb ^ HMAC_OPAD) & 255;
         i = i + 1;
     }
 
-    inner = allocate(128 + msglen);
+    inner = allocate(block_size + msglen);
     i = 0;
-    while i < 128 { *(inner + i) = *(kipad + i); i = i + 1; }
+    while i < block_size { *(inner + i) = *(kipad + i); i = i + 1; }
     i = 0;
-    while i < msglen { *(inner + 128 + i) = *(msg + i); i = i + 1; }
+    while i < msglen { *(inner + block_size + i) = *(msg + i); i = i + 1; }
 
-    inner_hash = allocate(64);
-    sha512_oneshot(inner, 128 + msglen, inner_hash);
+    inner_hash = allocate(digest_size);
+    sha512_oneshot(inner, block_size + msglen, inner_hash);
 
-    outer = allocate(128 + 64);
+    outer = allocate(block_size + digest_size);
     i = 0;
-    while i < 128 { *(outer + i) = *(kopad + i); i = i + 1; }
+    while i < block_size { *(outer + i) = *(kopad + i); i = i + 1; }
     i = 0;
-    while i < 64 { *(outer + 128 + i) = *(inner_hash + i); i = i + 1; }
+    while i < digest_size { *(outer + block_size + i) = *(inner_hash + i); i = i + 1; }
 
-    sha512_oneshot(outer, 192, out);
+    sha512_oneshot(outer, block_size + digest_size, out);
 
     free(kprime); free(kipad); free(kopad);
     free(inner); free(inner_hash); free(outer);
 }
 
 // ===========================================================================
-// Constant-time comparison (crypto-safe)
+// Constant-time comparison (crypto-safe). Returns 1 if a and b match for
+// the first n bytes, 0 otherwise. The loop always reads all n bytes so the
+// running time does not depend on where the first mismatch occurs.
 // ===========================================================================
 
 fn ct_memcmp(a: Address, b: Address, n: u32) -> u32 {
@@ -166,13 +179,14 @@ fn ct_memcmp(a: Address, b: Address, n: u32) -> u32 {
         diff = diff | (*(a + i) ^ *(b + i));
         i = i + 1;
     }
-    // diff is 0 if equal, non-zero if different
-    // Return 1 if equal, 0 if different (inverted from memcmp)
-    if diff == 0 { return 1; }
-    return 0;
+    // diff == 0 iff equal; fold to a single-bit result without branching.
+    // (diff | -diff) >> 31 is 1 if diff != 0, 0 if diff == 0.
+    folded: u32 = (diff | ((0 - diff) & HMAC_MASK32)) >> 31;
+    return 1 - folded;
 }
 
-fn ct_select(mask: u32, a: u32, b: u32) -> u32 {
-    // If mask=0xFFFFFFFF, return a; if mask=0, return b
-    return (a & mask) | (b & (~mask & MASK32));
+// Constant-time select: if mask == 0xFFFFFFFF, return a; if mask == 0,
+// return b. Used for side-channel-resistant conditional moves.
+fn hmac_ct_select(mask: u32, a: u32, b: u32) -> u32 {
+    return (a & mask) | (b & ((~mask) & HMAC_MASK32));
 }
