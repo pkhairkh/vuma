@@ -1,0 +1,223 @@
+// womb/crypto/aes256.vuma — AES-256 (NIST FIPS 197)
+// 256-bit key, 14 rounds, 240-byte round key schedule.
+// Includes encrypt AND decrypt (inverse cipher) plus CBC and CTR modes.
+// No main() — importable library module.
+
+const MASK32: u32 = 4294967295;
+
+// Reuse the canonical S-box / inverse S-box / xtime / gmul from aes128.vuma.
+fn aes256_sbox(idx: u32) -> u32 { return sbox(idx); }
+fn aes256_inv_sbox(idx: u32) -> u32 { return inv_sbox(idx); }
+fn aes256_xtime(x: u32) -> u32 { return xtime(x); }
+fn aes256_gmul(a: u32, b: u32) -> u32 { return gmul(a, b); }
+
+// ===========================================================================
+// Key expansion: Nk=8, Nr=14, 60 words = 240 bytes
+// ===========================================================================
+fn aes256_key_expansion(key: Address, rk: Address) {
+    i: u32 = 0;
+    while i < 32 { *(rk + i) = *(key + i); i = i + 1; }
+    rcon: u32 = 1;
+    i = 8;
+    while i < 60 {
+        t0: u32 = *(rk + (i - 1) * 4 + 0);
+        t1: u32 = *(rk + (i - 1) * 4 + 1);
+        t2: u32 = *(rk + (i - 1) * 4 + 2);
+        t3: u32 = *(rk + (i - 1) * 4 + 3);
+        if (i & 7) == 0 {
+            tmp: u32 = t0; t0 = t1; t1 = t2; t2 = t3; t3 = tmp;
+            t0 = sbox(t0); t1 = sbox(t1); t2 = sbox(t2); t3 = sbox(t3);
+            t0 = t0 ^ rcon; rcon = xtime(rcon);
+        }
+        if (i & 7) == 4 {
+            t0 = sbox(t0); t1 = sbox(t1); t2 = sbox(t2); t3 = sbox(t3);
+        }
+        k0: u32 = *(rk + (i - 8) * 4 + 0);
+        k1: u32 = *(rk + (i - 8) * 4 + 1);
+        k2: u32 = *(rk + (i - 8) * 4 + 2);
+        k3: u32 = *(rk + (i - 8) * 4 + 3);
+        *(rk + i * 4 + 0) = k0 ^ t0;
+        *(rk + i * 4 + 1) = k1 ^ t1;
+        *(rk + i * 4 + 2) = k2 ^ t2;
+        *(rk + i * 4 + 3) = k3 ^ t3;
+        i = i + 1;
+    }
+}
+
+fn aes256_add_round_key(state: Address, rk_off: Address) {
+    i: u32 = 0;
+    while i < 16 { *(state + i) = *(state + i) ^ *(rk_off + i); i = i + 1; }
+}
+fn aes256_sub_bytes(state: Address) {
+    i: u32 = 0;
+    while i < 16 { *(state + i) = sbox(*(state + i)); i = i + 1; }
+}
+fn aes256_inv_sub_bytes(state: Address) {
+    i: u32 = 0;
+    while i < 16 { *(state + i) = inv_sbox(*(state + i)); i = i + 1; }
+}
+fn aes256_shift_rows(state: Address) {
+    t: u32 = *(state + 1);
+    *(state + 1) = *(state + 5); *(state + 5) = *(state + 9);
+    *(state + 9) = *(state + 13); *(state + 13) = t;
+    t = *(state + 2);
+    *(state + 2) = *(state + 10); *(state + 10) = t;
+    t = *(state + 6);
+    *(state + 6) = *(state + 14); *(state + 14) = t;
+    t = *(state + 15);
+    *(state + 15) = *(state + 11); *(state + 11) = *(state + 7);
+    *(state + 7) = *(state + 3); *(state + 3) = t;
+}
+fn aes256_inv_shift_rows(state: Address) {
+    t: u32 = *(state + 13);
+    *(state + 13) = *(state + 9); *(state + 9) = *(state + 5);
+    *(state + 5) = *(state + 1); *(state + 1) = t;
+    t = *(state + 2);
+    *(state + 2) = *(state + 10); *(state + 10) = t;
+    t = *(state + 6);
+    *(state + 6) = *(state + 14); *(state + 14) = t;
+    t = *(state + 3);
+    *(state + 3) = *(state + 7); *(state + 7) = *(state + 11);
+    *(state + 11) = *(state + 15); *(state + 15) = t;
+}
+fn aes256_mix_columns(state: Address) {
+    i: u32 = 0;
+    while i < 16 {
+        s0: u32 = *(state + i); s1: u32 = *(state + i + 1);
+        s2: u32 = *(state + i + 2); s3: u32 = *(state + i + 3);
+        t: u32 = s0 ^ s1 ^ s2 ^ s3;
+        *(state + i)     = s0 ^ t ^ xtime(s0 ^ s1);
+        *(state + i + 1) = s1 ^ t ^ xtime(s1 ^ s2);
+        *(state + i + 2) = s2 ^ t ^ xtime(s2 ^ s3);
+        *(state + i + 3) = s3 ^ t ^ xtime(s3 ^ s0);
+        i = i + 4;
+    }
+}
+fn aes256_inv_mix_columns(state: Address) {
+    i: u32 = 0;
+    while i < 16 {
+        s0: u32 = *(state + i); s1: u32 = *(state + i + 1);
+        s2: u32 = *(state + i + 2); s3: u32 = *(state + i + 3);
+        *(state + i)     = gmul(s0, 14) ^ gmul(s1, 11) ^ gmul(s2, 13) ^ gmul(s3, 9);
+        *(state + i + 1) = gmul(s0, 9)  ^ gmul(s1, 14) ^ gmul(s2, 11) ^ gmul(s3, 13);
+        *(state + i + 2) = gmul(s0, 13) ^ gmul(s1, 9)  ^ gmul(s2, 14) ^ gmul(s3, 11);
+        *(state + i + 3) = gmul(s0, 11) ^ gmul(s1, 13) ^ gmul(s2, 9)  ^ gmul(s3, 14);
+        i = i + 4;
+    }
+}
+
+fn aes256_encrypt_block(plaintext: Address, key: Address, ciphertext: Address) {
+    rk = allocate(240);
+    aes256_key_expansion(key, rk);
+    state = allocate(16);
+    i: u32 = 0;
+    while i < 16 { *(state + i) = *(plaintext + i); i = i + 1; }
+    aes256_add_round_key(state, rk);
+    round: u32 = 1;
+    while round < 14 {
+        aes256_sub_bytes(state);
+        aes256_shift_rows(state);
+        aes256_mix_columns(state);
+        aes256_add_round_key(state, rk + round * 16);
+        round = round + 1;
+    }
+    aes256_sub_bytes(state);
+    aes256_shift_rows(state);
+    aes256_add_round_key(state, rk + 14 * 16);
+    i = 0;
+    while i < 16 { *(ciphertext + i) = *(state + i); i = i + 1; }
+}
+
+fn aes256_decrypt_block(ciphertext: Address, key: Address, plaintext: Address) {
+    rk = allocate(240);
+    aes256_key_expansion(key, rk);
+    state = allocate(16);
+    i: u32 = 0;
+    while i < 16 { *(state + i) = *(ciphertext + i); i = i + 1; }
+    aes256_add_round_key(state, rk + 14 * 16);
+    round: u32 = 13;
+    while round > 0 {
+        aes256_inv_shift_rows(state);
+        aes256_inv_sub_bytes(state);
+        aes256_add_round_key(state, rk + round * 16);
+        aes256_inv_mix_columns(state);
+        round = round - 1;
+    }
+    aes256_inv_shift_rows(state);
+    aes256_inv_sub_bytes(state);
+    aes256_add_round_key(state, rk);
+    i = 0;
+    while i < 16 { *(plaintext + i) = *(state + i); i = i + 1; }
+}
+
+fn aes256_cbc_encrypt(plaintext: Address, pt_len: u32, key: Address, iv: Address, ciphertext: Address) -> u32 {
+    pad: u32 = 16 - (pt_len & 15);
+    if pad == 0 { pad = 16; }
+    padded_len: u32 = pt_len + pad;
+    pbuf = allocate(padded_len);
+    i: u32 = 0;
+    while i < pt_len { *(pbuf + i) = *(plaintext + i); i = i + 1; }
+    while i < padded_len { *(pbuf + i) = pad; i = i + 1; }
+    prev = allocate(16);
+    i = 0;
+    while i < 16 { *(prev + i) = *(iv + i); i = i + 1; }
+    block = allocate(16);
+    off: u32 = 0;
+    while off < padded_len {
+        i = 0;
+        while i < 16 { *(block + i) = *(pbuf + off + i) ^ *(prev + i); i = i + 1; }
+        aes256_encrypt_block(block, key, block);
+        i = 0;
+        while i < 16 { *(ciphertext + off + i) = *(block + i); *(prev + i) = *(block + i); i = i + 1; }
+        off = off + 16;
+    }
+    return padded_len;
+}
+
+fn aes256_cbc_decrypt(ciphertext: Address, ct_len: u32, key: Address, iv: Address, plaintext: Address) -> u32 {
+    prev = allocate(16);
+    i: u32 = 0;
+    while i < 16 { *(prev + i) = *(iv + i); i = i + 1; }
+    block = allocate(16);
+    off: u32 = 0;
+    while off < ct_len {
+        i = 0;
+        while i < 16 { *(block + i) = *(ciphertext + off + i); i = i + 1; }
+        aes256_decrypt_block(block, key, block);
+        i = 0;
+        while i < 16 { *(plaintext + off + i) = *(block + i) ^ *(prev + i); i = i + 1; }
+        i = 0;
+        while i < 16 { *(prev + i) = *(ciphertext + off + i); i = i + 1; }
+        off = off + 16;
+    }
+    pad: u32 = *(plaintext + ct_len - 1);
+    if pad == 0 { return ct_len; }
+    if pad > 16 { return ct_len; }
+    return ct_len - pad;
+}
+
+fn aes256_ctr_crypt(data: Address, data_len: u32, key: Address, nonce: Address, output: Address) {
+    ctr = allocate(16);
+    i: u32 = 0;
+    while i < 12 { *(ctr + i) = *(nonce + i); i = i + 1; }
+    *(ctr + 12) = 0; *(ctr + 13) = 0; *(ctr + 14) = 0; *(ctr + 15) = 0;
+    ks = allocate(16);
+    off: u32 = 0;
+    while off < data_len {
+        aes256_encrypt_block(ctr, key, ks);
+        take: u32 = 16;
+        if data_len - off < 16 { take = data_len - off; }
+        i = 0;
+        while i < take { *(output + off + i) = *(data + off + i) ^ *(ks + i); i = i + 1; }
+        carry: u32 = 1;
+        j: u32 = 15;
+        while j >= 12 {
+            v: u32 = *(ctr + j) + carry;
+            *(ctr + j) = v & 255;
+            carry = v >> 8;
+            if j == 0 { j = 4294967295; }
+            j = j - 1;
+        }
+        off = off + 16;
+    }
+}
