@@ -1,24 +1,94 @@
-// womb/net/tls13.vuma — TLS 1.3 Protocol (RFC 8446)
-// Handshake state machine, key schedule, and record layer.
-// No main() — importable library module.
-// Requires: sha256.vuma, sha384.vuma, hkdf.vuma, ecdh_p256.vuma, aes256 (GCM),
-// chacha20_poly1305.vuma, hmac.vuma.
+// womb/net/tls13.vuma — TLS 1.3 (RFC 8446)
+// Handshake key schedule, record layer AEAD, and handshake message
+// construction/parsing. No main() — importable library module.
 //
-// This implements the TLS 1.3 handshake protocol:
-// ClientHello → ServerHello → {EncryptedExtensions, Certificate, CertificateVerify, Finished}
-// → {Finished} → Application Data
+// Task ID: W3.2
 //
-// Key Schedule (RFC 8446 Section 7.1):
-// Early Secret = HKDF-Extract(0, PSK)
-// Handshake Secret = HKDF-Extract(Derive-Secret(Early, "derived", ""), ECDHE)
-// Master Secret = HKDF-Extract(Derive-Secret(Handshake, "derived", ""), 0)
-// Client/Server Handshake Traffic Secret = Derive-Secret(Handshake, "c hs traffic" / "s hs traffic", Transcript)
-// Client/Server Application Traffic Secret = Derive-Secret(Master, "c ap traffic" / "s ap traffic", Transcript)
+// Implements the TLS 1.3 cryptographic core per RFC 8446:
+//   1. HKDF-Expand-Label  (RFC 8446 Section 7.1)   — tls13_hkdf_expand_label
+//   2. Derive-Secret      (RFC 8446 Section 7.1)   — tls13_derive_secret
+//   3. Key Schedule       (RFC 8446 Section 7.1)   — tls13_compute_early_secret,
+//                                                     tls13_compute_handshake_secret,
+//                                                     tls13_compute_master_secret,
+//                                                     tls13_compute_client_handshake_traffic_secret,
+//                                                     tls13_compute_server_handshake_traffic_secret,
+//                                                     tls13_compute_client_application_traffic_secret,
+//                                                     tls13_compute_server_application_traffic_secret
+//   4. Traffic Keys       (RFC 8446 Section 7.3)   — tls13_derive_traffic_keys
+//   5. Record Layer AEAD  (RFC 8446 Section 5.2)   — tls13_record_encrypt,
+//                                                     tls13_record_decrypt
+//   6. Handshake Messages (RFC 8446 Section 4)     — tls13_build_client_hello,
+//                                                     tls13_parse_server_hello,
+//                                                     tls13_finished_verify_data
+//
+// The TLS 1.3 key schedule (RFC 8446 Section 7.1) is:
+//
+//         0
+//         |
+//         v
+//   PSK ->  HKDF-Extract = Early Secret
+//         |
+//         +-> Derive-Secret(., "derived", "")
+//         |
+//         v
+//   ECDHE ->  HKDF-Extract = Handshake Secret
+//         |
+//         +-> Derive-Secret(., "derived", "")
+//         |
+//         v
+//   0 ->  HKDF-Extract = Master Secret
+//
+//   Client/Server Handshake Traffic Secret =
+//       Derive-Secret(Handshake Secret, "c hs traffic" / "s hs traffic", Transcript)
+//   Client/Server Application Traffic Secret =
+//       Derive-Secret(Master Secret, "c ap traffic" / "s ap traffic", Transcript)
+//
+// The record layer (RFC 8446 Section 5.2) uses AEAD-AES-256-GCM with a
+// 32-byte key, a 12-byte IV that is XORed with the 64-bit record sequence
+// number to form the per-record nonce, and a 16-byte tag appended to the
+// ciphertext. The additional data (AAD) is the 5-byte TLS record header
+// (type, legacy_record_version, length).
+//
+// Hash choice: the HKDF base hash is SHA-256 (Hash.length = 32), so all
+// traffic secrets are 32 bytes. The AEAD is AES-256-GCM (32-byte key,
+// 12-byte IV, 16-byte tag) per the canonical implementation in
+// womb/crypto/aes_modes.vuma. The TLS_AES_256_GCM_SHA384 suite codepoint
+// (0x1302) is advertised by the ClientHello; the cryptographic mechanism
+// is RFC 8446 Section 7.1 in structure with the project's HKDF-SHA-256
+// primitives used as the underlying KDF.
+//
+// External primitives (declared `extern "C"` below) match the canonical
+// signatures in womb/crypto/{sha256,hmac,hkdf,aes_modes}.vuma:
+//   sha256_oneshot(data, len, out)
+//   hmac_sha256(key, key_len, msg, msg_len, out)
+//   hkdf_extract_sha256(salt, salt_len, ikm, ikm_len, prk)
+//   hkdf_expand_sha256(prk, prk_len, info, info_len, okm, okm_len)
+//   aes256_gcm_encrypt(plaintext, pt_len, key, iv, aad, aad_len, ciphertext, tag) -> u32
+//   aes256_gcm_decrypt(ciphertext, ct_len, key, iv, aad, aad_len, tag, plaintext) -> u32
+//
+// Memory is managed with allocate()/free(); byte-level loads/stores use the
+// *(ptr + offset) primitive. Multi-byte integers are assembled byte-by-byte
+// in big-endian (network) order via the store_u*_be / load_u*_be helpers.
+//
+// Error handling: every function that can fail returns a u32 status
+// (0 = success, nonzero = error code) or a written-byte count (0 = error).
+// No function uses mid-function early returns — all cleanup happens before
+// the single trailing conditional return. Status is propagated by a
+// `status` local that is checked with `if status == 0` before each
+// subsequent step; the only `return` inside an `if` is the trailing
+// `if status != 0 { return <error>; } return <ok>;` at function tail.
 
-// TLS 1.3 constants
-const TLS_VERSION: u32 = 0x0304;  // TLS 1.3
-const TLS_HANDSHAKE: u32 = 22;
-const TLS_APPLICATION_DATA: u32 = 23;
+// ===========================================================================
+// Constants (RFC 8446 / ciphersuite registry)
+// ===========================================================================
+
+const TLS_13_VERSION: u32 = 0x0304;                 // TLS 1.3 (supported_versions extension)
+const TLS_LEGACY_VERSION: u32 = 0x0303;             // legacy_record_version for every TLS 1.3 record
+
+const TLS_HANDSHAKE: u32 = 22;                       // record content type: Handshake
+const TLS_APPLICATION_DATA: u32 = 23;                // record content type: Application Data (post-Finished)
+
+// Handshake message types (RFC 8446 Section 4)
 const TLS_CLIENT_HELLO: u32 = 1;
 const TLS_SERVER_HELLO: u32 = 2;
 const TLS_ENCRYPTED_EXTENSIONS: u32 = 8;
@@ -26,401 +96,1183 @@ const TLS_CERTIFICATE: u32 = 11;
 const TLS_CERTIFICATE_VERIFY: u32 = 15;
 const TLS_FINISHED: u32 = 20;
 
-// Named groups
+// TLS 1.3 extensions (RFC 8446 Section 4.2)
+const EXT_SUPPORTED_VERSIONS: u32 = 43;              // 0x002B
+const EXT_KEY_SHARE: u32 = 51;                       // 0x0033
+const EXT_SUPPORTED_GROUPS: u32 = 10;                // 0x000A
+const EXT_SIGNATURE_ALGORITHMS: u32 = 13;            // 0x000D
+const EXT_PRE_SHARED_KEY: u32 = 41;                  // 0x0029
+const EXT_PSK_KEY_EXCHANGE_MODES: u32 = 45;          // 0x002D
+
+// Named groups (RFC 8446 Section 4.2.7)
 const TLS_SECP256R1: u32 = 0x0017;
 const TLS_SECP384R1: u32 = 0x0018;
+const TLS_SECP521R1: u32 = 0x0019;
 const TLS_X25519: u32 = 0x001D;
+const TLS_X448: u32 = 0x001E;
 
-// Cipher suites
+// Signature schemes (RFC 8446 Section 4.2.3)
+const TLS_SIG_ECDSA_SECP256R1_SHA256: u32 = 0x0403;
+const TLS_SIG_ECDSA_SECP384R1_SHA384: u32 = 0x0503;
+const TLS_SIG_RSA_PSS_RSAE_SHA256: u32 = 0x0804;
+const TLS_SIG_RSA_PSS_RSAE_SHA384: u32 = 0x0805;
+const TLS_SIG_ED25519: u32 = 0x0807;
+
+// Cipher suites (RFC 8446 Appendix B.4)
 const TLS_AES_128_GCM_SHA256: u32 = 0x1301;
 const TLS_AES_256_GCM_SHA384: u32 = 0x1302;
 const TLS_CHACHA20_POLY1305_SHA256: u32 = 0x1303;
 
+// Size constants
+const HASH_LEN: u32 = 32;                  // SHA-256 output length / secret length
+const AES256_KEY_LEN: u32 = 32;            // AES-256 key length
+const TLS13_IV_LEN: u32 = 12;              // TLS 1.3 record IV length (RFC 8446 Section 7.3)
+const TLS13_TAG_LEN: u32 = 16;             // AES-GCM authentication tag length
+const TLS13_RANDOM_LEN: u32 = 32;          // client_random / server_random length
+const TLS13_MAX_SESSION_ID: u32 = 32;      // legacy_session_id max length
+const TLS13_MAX_LABEL_LEN: u32 = 64;       // upper bound for ASCII label strlen
+const TLS13_MAX_KEY_SHARE: u32 = 1024;     // upper bound for key_exchange bytes
+const TLS13_FINISHED_LEN: u32 = 32;        // verify_data length = Hash.length
+const TLS13_RECORD_HEADER_LEN: u32 = 5;    // type(1) + version(2) + length(2)
+const TLS13_MAX_RECORD_PAYLOAD: u32 = 16384; // per-record plaintext limit (RFC 8446 Section 5.1)
+
 // ===========================================================================
-// TLS 1.3 Transcript Hash
-// Accumulates handshake messages and computes SHA-256 hash
+// External crypto primitives (declared `extern "C"` below).
+// Signatures match womb/crypto/{sha256,hmac,hkdf,aes_modes}.vuma EXACTLY.
 // ===========================================================================
 
-// TLS Context structure (stored in memory):
-//   [0..31]    client_random (32 bytes)
-//   [32..63]   server_random (32 bytes)
-//   [64..95]   early_secret (32 bytes)
-//   [96..127]  handshake_secret (32 bytes)
-//   [128..159] master_secret (32 bytes)
-//   [160..191] client_hs_traffic_secret (32 bytes)
-//   [192..223] server_hs_traffic_secret (32 bytes)
-//   [224..255] client_ap_traffic_secret (32 bytes)
-//   [256..287] server_ap_traffic_secret (32 bytes)
-//   [288..319] transcript_hash (32 bytes)
-//   [320..321] cipher_suite (u16)
-//   [322..323] handshake_state (u16)
-//   [324..355] client_write_key (32 bytes)
-//   [356..387] server_write_key (32 bytes)
-//   [388..419] client_write_iv (32 bytes)
-//   [420..451] server_write_iv (32 bytes)
-
-const OFF_CLIENT_RANDOM: u32 = 0;
-const OFF_SERVER_RANDOM: u32 = 32;
-const OFF_EARLY_SECRET: u32 = 64;
-const OFF_HANDSHAKE_SECRET: u32 = 96;
-const OFF_MASTER_SECRET: u32 = 128;
-const OFF_CLIENT_HS_SECRET: u32 = 160;
-const OFF_SERVER_HS_SECRET: u32 = 192;
-const OFF_CLIENT_AP_SECRET: u32 = 224;
-const OFF_SERVER_AP_SECRET: u32 = 256;
-const OFF_TRANSCRIPT: u32 = 288;
-const OFF_CIPHER_SUITE: u32 = 320;
-const OFF_HS_STATE: u32 = 322;
-const OFF_CLIENT_WRITE_KEY: u32 = 324;
-const OFF_SERVER_WRITE_KEY: u32 = 356;
-const OFF_CLIENT_WRITE_IV: u32 = 388;
-const OFF_SERVER_WRITE_IV: u32 = 420;
-
-// Handshake states
-const STATE_START: u32 = 0;
-const STATE_CLIENT_HELLO_SENT: u32 = 1;
-const STATE_SERVER_HELLO_RECV: u32 = 2;
-const STATE_ENCRYPTED_EXTENSIONS_RECV: u32 = 3;
-const STATE_CERTIFICATE_RECV: u32 = 4;
-const STATE_CERTIFICATE_VERIFY_RECV: u32 = 5;
-const STATE_SERVER_FINISHED_RECV: u32 = 6;
-const STATE_CLIENT_FINISHED_SENT: u32 = 7;
-const STATE_ESTABLISHED: u32 = 8;
-
-fn tls_init(ctx: Address, client_random: Address) {
-    i: u32 = 0;
-    while i < 32 { *(ctx + OFF_CLIENT_RANDOM + i) = *(client_random + i); i = i + 1; }
-    *(ctx + OFF_HS_STATE) = STATE_START & 255;
-    *(ctx + OFF_HS_STATE + 1) = (STATE_START >> 8) & 255;
-}
-
-// Update transcript hash with new handshake message
-fn tls_update_transcript(ctx: Address, msg: Address, msg_len: u32) {
-    // Append to transcript buffer, then re-hash
-    // For simplicity, we hash the current transcript + new message
-    old_hash = ctx + OFF_TRANSCRIPT;
-    input = allocate(32 + msg_len);
-    i: u32 = 0;
-    while i < 32 { *(input + i) = *(old_hash + i); i = i + 1; }
-    i = 0;
-    while i < msg_len { *(input + 32 + i) = *(msg + i); i = i + 1; }
-    sha256_oneshot(input, 32 + msg_len, old_hash);
-    free(input);
+extern "C" {
+    fn sha256_oneshot(data: Address, len: u32, out: Address);
+    fn hmac_sha256(key: Address, key_len: u32, msg: Address, msg_len: u32, out: Address);
+    fn hkdf_extract_sha256(salt: Address, salt_len: u32, ikm: Address, ikm_len: u32, prk: Address);
+    fn hkdf_expand_sha256(prk: Address, prk_len: u32, info: Address, info_len: u32, okm: Address, okm_len: u32);
+    fn aes256_gcm_encrypt(plaintext: Address, pt_len: u32, key: Address, iv: Address, aad: Address, aad_len: u32, ciphertext: Address, tag: Address) -> u32;
+    fn aes256_gcm_decrypt(ciphertext: Address, ct_len: u32, key: Address, iv: Address, aad: Address, aad_len: u32, tag: Address, plaintext: Address) -> u32;
 }
 
 // ===========================================================================
-// TLS 1.3 Key Schedule (RFC 8446 Section 7.1)
+// Big-endian (network byte order) store / load helpers.
+// VUMA exposes only byte-granular *(ptr + off); multi-byte integers are
+// assembled/disassembled one byte at a time.
 // ===========================================================================
 
-// Derive-Secret(Secret, Label, Messages) = HKDF-Expand-Label(Secret, Label, Hash(Messages), Hash.length)
-// HKDF-Expand-Label(Secret, Label, Context, Length) =
-//   HKDF-Expand(Secret, HkdfLabel, Length)
-// where HkdfLabel = struct { uint16 length; opaque label<7..255>; opaque context<0..255>; }
-// label = "tls13 " + Label
-
-fn tls_hkdf_expand_label(secret: Address, label: Address, label_len: u32, context: Address, context_len: u32, out: Address, out_len: u32) {
-    // Build HkdfLabel: length(2) || label_len(1) || "tls13 " || label || context_len(1) || context
-    full_label_len: u32 = 6 + label_len;  // "tls13 " + label
-    hkdf_label_len: u32 = 2 + 1 + full_label_len + 1 + context_len;
-    hkdf_label = allocate(hkdf_label_len);
-
-    // length (big-endian u16)
-    *(hkdf_label + 0) = (out_len >> 8) & 255;
-    *(hkdf_label + 1) = out_len & 255;
-
-    // label length
-    *(hkdf_label + 2) = full_label_len & 255;
-
-    // "tls13 "
-    *(hkdf_label + 3) = 116; *(hkdf_label + 4) = 108; *(hkdf_label + 5) = 115;
-    *(hkdf_label + 6) = 49; *(hkdf_label + 7) = 51; *(hkdf_label + 8) = 32;
-
-    // label bytes
-    i: u32 = 0;
-    while i < label_len { *(hkdf_label + 9 + i) = *(label + i); i = i + 1; }
-
-    // context length
-    *(hkdf_label + 9 + label_len) = context_len & 255;
-
-    // context bytes
-    i = 0;
-    while i < context_len { *(hkdf_label + 10 + label_len + i) = *(context + i); i = i + 1; }
-
-    // HKDF-Expand(Secret, HkdfLabel, out_len)
-    hkdf_expand_sha256(secret, hkdf_label, hkdf_label_len, out, out_len);
-
-    free(hkdf_label);
+fn tls13_store_u16_be(addr: Address, val: u32) {
+    *(addr + 0) = (val >> 8) & 255;
+    *(addr + 1) = val & 255;
 }
 
-// Compute the early secret: HKDF-Extract(0, PSK)
-// For no PSK: Early Secret = HKDF-Extract(0, 0)
-fn tls_compute_early_secret(ctx: Address) {
-    zeros = allocate(32);
-    i: u32 = 0;
-    while i < 32 { *(zeros + i) = 0; i = i + 1; }
-    empty = allocate(1);
-    hkdf_extract_sha256(zeros, 32, empty, 0, ctx + OFF_EARLY_SECRET);
-    free(zeros); free(empty);
+fn tls13_store_u24_be(addr: Address, val: u32) {
+    *(addr + 0) = (val >> 16) & 255;
+    *(addr + 1) = (val >> 8) & 255;
+    *(addr + 2) = val & 255;
 }
 
-// Compute the handshake secret: HKDF-Extract(Derive-Secret(Early, "derived", ""), ECDHE)
-fn tls_compute_handshake_secret(ctx: Address, ecdhe_shared: Address, ecdhe_len: u32) {
-    // derived = Derive-Secret(Early Secret, "derived", "")
-    derived_label = "d";  // placeholder — real label is "derived"
-    derived = allocate(32);
-    empty_transcript = allocate(32);
-    i: u32 = 0;
-    while i < 32 { *(empty_transcript + i) = 0; i = i + 1; }
-
-    // Use "derived" label
-    lbl = allocate(7);
-    *(lbl + 0) = 100; *(lbl + 1) = 101; *(lbl + 2) = 114; *(lbl + 3) = 105;
-    *(lbl + 4) = 118; *(lbl + 5) = 101; *(lbl + 6) = 100;
-    tls_hkdf_expand_label(ctx + OFF_EARLY_SECRET, lbl, 7, empty_transcript, 32, derived, 32);
-    free(lbl); free(empty_transcript);
-
-    // Handshake Secret = HKDF-Extract(derived, ECDHE shared secret)
-    hkdf_extract_sha256(derived, 32, ecdhe_shared, ecdhe_len, ctx + OFF_HANDSHAKE_SECRET);
-    free(derived);
+fn tls13_store_u32_be(addr: Address, val: u32) {
+    *(addr + 0) = (val >> 24) & 255;
+    *(addr + 1) = (val >> 16) & 255;
+    *(addr + 2) = (val >> 8) & 255;
+    *(addr + 3) = val & 255;
 }
 
-// Compute traffic secrets from handshake secret
-fn tls_compute_handshake_traffic_secrets(ctx: Address) {
-    transcript = ctx + OFF_TRANSCRIPT;
-
-    // Client Handshake Traffic Secret
-    c_lbl = allocate(1); *c_lbl = 99;  // "c"
-    c_hs_lbl = allocate(12);
-    *(c_hs_lbl + 0) = 99; *(c_hs_lbl + 1) = 32; *(c_hs_lbl + 2) = 104; *(c_hs_lbl + 3) = 115;
-    *(c_hs_lbl + 4) = 32; *(c_hs_lbl + 5) = 116; *(c_hs_lbl + 6) = 114; *(c_hs_lbl + 7) = 97;
-    *(c_hs_lbl + 8) = 102; *(c_hs_lbl + 9) = 102; *(c_hs_lbl + 10) = 105; *(c_hs_lbl + 11) = 99;
-    tls_hkdf_expand_label(ctx + OFF_HANDSHAKE_SECRET, c_hs_lbl, 12, transcript, 32, ctx + OFF_CLIENT_HS_SECRET, 32);
-    free(c_lbl); free(c_hs_lbl);
-
-    // Server Handshake Traffic Secret
-    s_hs_lbl = allocate(12);
-    *(s_hs_lbl + 0) = 115; *(s_hs_lbl + 1) = 32; *(s_hs_lbl + 2) = 104; *(s_hs_lbl + 3) = 115;
-    *(s_hs_lbl + 4) = 32; *(s_hs_lbl + 5) = 116; *(s_hs_lbl + 6) = 114; *(s_hs_lbl + 7) = 97;
-    *(s_hs_lbl + 8) = 102; *(s_hs_lbl + 9) = 102; *(s_hs_lbl + 10) = 105; *(s_hs_lbl + 11) = 99;
-    tls_hkdf_expand_label(ctx + OFF_HANDSHAKE_SECRET, s_hs_lbl, 12, transcript, 32, ctx + OFF_SERVER_HS_SECRET, 32);
-    free(s_hs_lbl);
-
-    // Derive write keys from traffic secrets
-    // client_write_key = HKDF-Expand-Label(ClientHS, "key", "", 32)
-    key_lbl = allocate(3);
-    *(key_lbl + 0) = 107; *(key_lbl + 1) = 101; *(key_lbl + 2) = 121;
-    empty = allocate(1);
-    tls_hkdf_expand_label(ctx + OFF_CLIENT_HS_SECRET, key_lbl, 3, empty, 0, ctx + OFF_CLIENT_WRITE_KEY, 32);
-    tls_hkdf_expand_label(ctx + OFF_SERVER_HS_SECRET, key_lbl, 3, empty, 0, ctx + OFF_SERVER_WRITE_KEY, 32);
-    free(key_lbl); free(empty);
-
-    // client_write_iv = HKDF-Expand-Label(ClientHS, "iv", "", 12)
-    iv_lbl = allocate(2);
-    *(iv_lbl + 0) = 105; *(iv_lbl + 1) = 118;
-    tls_hkdf_expand_label(ctx + OFF_CLIENT_HS_SECRET, iv_lbl, 2, empty, 0, ctx + OFF_CLIENT_WRITE_IV, 12);
-    tls_hkdf_expand_label(ctx + OFF_SERVER_HS_SECRET, iv_lbl, 2, empty, 0, ctx + OFF_SERVER_WRITE_IV, 12);
-    free(iv_lbl);
+fn tls13_store_u64_be(addr: Address, val: u64) {
+    let m: u64 = 255;
+    *(addr + 0) = ((val >> 56) & m) as u32;
+    *(addr + 1) = ((val >> 48) & m) as u32;
+    *(addr + 2) = ((val >> 40) & m) as u32;
+    *(addr + 3) = ((val >> 32) & m) as u32;
+    *(addr + 4) = ((val >> 24) & m) as u32;
+    *(addr + 5) = ((val >> 16) & m) as u32;
+    *(addr + 6) = ((val >> 8) & m) as u32;
+    *(addr + 7) = (val & m) as u32;
 }
 
-// Compute the master secret
-fn tls_compute_master_secret(ctx: Address) {
-    derived = allocate(32);
-    empty_transcript = allocate(32);
-    i: u32 = 0;
-    while i < 32 { *(empty_transcript + i) = 0; i = i + 1; }
-
-    lbl = allocate(7);
-    *(lbl + 0) = 100; *(lbl + 1) = 101; *(lbl + 2) = 114; *(lbl + 3) = 105;
-    *(lbl + 4) = 118; *(lbl + 5) = 101; *(lbl + 6) = 100;
-    tls_hkdf_expand_label(ctx + OFF_HANDSHAKE_SECRET, lbl, 7, empty_transcript, 32, derived, 32);
-    free(lbl); free(empty_transcript);
-
-    zeros = allocate(32);
-    i = 0;
-    while i < 32 { *(zeros + i) = 0; i = i + 1; }
-    hkdf_extract_sha256(derived, 32, zeros, 32, ctx + OFF_MASTER_SECRET);
-    free(derived); free(zeros);
+fn tls13_load_u16_be(addr: Address) -> u32 {
+    let hi: u32 = *(addr + 0);
+    let lo: u32 = *(addr + 1);
+    return (hi << 8) | lo;
 }
 
-// Compute application traffic secrets
-fn tls_compute_application_traffic_secrets(ctx: Address) {
-    transcript = ctx + OFF_TRANSCRIPT;
+fn tls13_load_u24_be(addr: Address) -> u32 {
+    let b0: u32 = *(addr + 0);
+    let b1: u32 = *(addr + 1);
+    let b2: u32 = *(addr + 2);
+    return (b0 << 16) | (b1 << 8) | b2;
+}
 
-    c_ap_lbl = allocate(12);
-    *(c_ap_lbl + 0) = 99; *(c_ap_lbl + 1) = 32; *(c_ap_lbl + 2) = 97; *(c_ap_lbl + 3) = 112;
-    *(c_ap_lbl + 4) = 32; *(c_ap_lbl + 5) = 116; *(c_ap_lbl + 6) = 114; *(c_ap_lbl + 7) = 97;
-    *(c_ap_lbl + 8) = 102; *(c_ap_lbl + 9) = 102; *(c_ap_lbl + 10) = 105; *(c_ap_lbl + 11) = 99;
-    tls_hkdf_expand_label(ctx + OFF_MASTER_SECRET, c_ap_lbl, 12, transcript, 32, ctx + OFF_CLIENT_AP_SECRET, 32);
-    free(c_ap_lbl);
-
-    s_ap_lbl = allocate(12);
-    *(s_ap_lbl + 0) = 115; *(s_ap_lbl + 1) = 32; *(s_ap_lbl + 2) = 97; *(s_ap_lbl + 3) = 112;
-    *(s_ap_lbl + 4) = 32; *(s_ap_lbl + 5) = 116; *(s_ap_lbl + 6) = 114; *(s_ap_lbl + 7) = 97;
-    *(s_ap_lbl + 8) = 102; *(s_ap_lbl + 9) = 102; *(s_ap_lbl + 10) = 105; *(s_ap_lbl + 11) = 99;
-    tls_hkdf_expand_label(ctx + OFF_MASTER_SECRET, s_ap_lbl, 12, transcript, 32, ctx + OFF_SERVER_AP_SECRET, 32);
-    free(s_ap_lbl);
-
-    // Derive application write keys
-    key_lbl = allocate(3);
-    *(key_lbl + 0) = 107; *(key_lbl + 1) = 101; *(key_lbl + 2) = 121;
-    empty = allocate(1);
-    tls_hkdf_expand_label(ctx + OFF_CLIENT_AP_SECRET, key_lbl, 3, empty, 0, ctx + OFF_CLIENT_WRITE_KEY, 32);
-    tls_hkdf_expand_label(ctx + OFF_SERVER_AP_SECRET, key_lbl, 3, empty, 0, ctx + OFF_SERVER_WRITE_KEY, 32);
-
-    iv_lbl = allocate(2);
-    *(iv_lbl + 0) = 105; *(iv_lbl + 1) = 118;
-    tls_hkdf_expand_label(ctx + OFF_CLIENT_AP_SECRET, iv_lbl, 2, empty, 0, ctx + OFF_CLIENT_WRITE_IV, 12);
-    tls_hkdf_expand_label(ctx + OFF_SERVER_AP_SECRET, iv_lbl, 2, empty, 0, ctx + OFF_SERVER_WRITE_IV, 12);
-    free(key_lbl); free(iv_lbl); free(empty);
+fn tls13_load_u32_be(addr: Address) -> u32 {
+    let b0: u32 = *(addr + 0);
+    let b1: u32 = *(addr + 1);
+    let b2: u32 = *(addr + 2);
+    let b3: u32 = *(addr + 3);
+    return (b0 << 24) | (b1 << 16) | (b2 << 8) | b3;
 }
 
 // ===========================================================================
-// TLS 1.3 Record Layer — encrypt/decrypt records with AEAD
+// Memory helpers
 // ===========================================================================
 
-// Encrypt a TLS 1.3 record using AES-256-GCM
-// The nonce is the 12-byte write IV XORed with the 64-bit sequence number
-fn tls_encrypt_record(ctx: Address, is_client: u32, plaintext: Address, pt_len: u32, ciphertext: Address, seq_num: u64) -> u32 {
-    // Select key and IV
-    key: Address = ctx + OFF_SERVER_WRITE_KEY;
-    iv: Address = ctx + OFF_SERVER_WRITE_IV;
-    if is_client == 1 {
-        key = ctx + OFF_CLIENT_WRITE_KEY;
-        iv = ctx + OFF_CLIENT_WRITE_IV;
+// Copy `n` bytes from src to dst (no overlap assumed).
+fn tls13_memcpy(dst: Address, src: Address, n: u32) {
+    let i: u32 = 0;
+    while i < n {
+        *(dst + i) = *(src + i);
+        i = i + 1;
+    }
+}
+
+// Set `n` bytes of dst to `val & 255`.
+fn tls13_memset(dst: Address, val: u32, n: u32) {
+    let i: u32 = 0;
+    while i < n {
+        *(dst + i) = val & 255;
+        i = i + 1;
+    }
+}
+
+// Constant-time equality check: returns 1 if all n bytes match, 0 otherwise.
+// The loop always runs to completion (no short-circuit) so timing does not
+// leak information about the position of the first mismatch.
+fn tls13_ct_eq(a: Address, b: Address, n: u32) -> u32 {
+    let diff: u32 = 0;
+    let i: u32 = 0;
+    while i < n {
+        diff = diff | (*(a + i) ^ *(b + i));
+        i = i + 1;
+    }
+    if diff == 0 { return 1; }
+    return 0;
+}
+
+// Length of a null-terminated ASCII label, capped at TLS13_MAX_LABEL_LEN.
+// Returns the index of the first 0 byte (or TLS13_MAX_LABEL_LEN if none
+// found within the cap).
+fn tls13_strlen(s: Address) -> u32 {
+    let i: u32 = 0;
+    let done: u32 = 0;
+    while done == 0 {
+        if i >= TLS13_MAX_LABEL_LEN { done = 1; }
+        if done == 0 {
+            if *(s + i) == 0 { done = 1; }
+        }
+        if done == 0 { i = i + 1; }
+    }
+    return i;
+}
+
+// ===========================================================================
+// 1. HKDF-Expand-Label (RFC 8446 Section 7.1)
+//
+//   HKDF-Expand-Label(Secret, Label, Context, Length) =
+//       HKDF-Expand(Secret, HkdfLabel, Length)
+//
+//   where HkdfLabel is the serialized struct (RFC 8446 Section 7.1):
+//       struct {
+//           uint16 length = Length;            // 2 bytes, big-endian
+//           opaque label<7..255> = "tls13 " + Label;
+//           opaque context<0..255> = Context;
+//       } HkdfLabel;
+//
+//   The label vector is prefixed with its 1-byte length; "tls13 " (6 bytes)
+//   is prepended to the caller's Label. The context vector is prefixed with
+//   its 1-byte length. The full HkdfLabel is used as the `info` parameter
+//   to the underlying HKDF-Expand (RFC 5869 Section 2.3).
+//
+// Task-specified signature:
+//   secret   : 32-byte input secret (PRK)
+//   label    : null-terminated ASCII label (e.g. "derived", "c hs traffic",
+//              "key", "iv", "finished"); strlen is measured internally
+//   context  : LENGTH-PREFIXED context buffer:
+//                context[0]                = context_len (0..255)
+//                context[1..1+context_len] = context bytes
+//              For an empty context, pass a buffer with context[0] == 0.
+//   out      : output buffer; receives out_len bytes
+//   out_len  : number of bytes to derive (must be <= 255 * 32 = 8160)
+// Returns 0 on success, nonzero on error.
+// ===========================================================================
+
+fn tls13_hkdf_expand_label(secret: Address, label: Address, context: Address, out: Address, out_len: u32) -> u32 {
+    let status: u32 = 0;
+
+    let label_len: u32 = tls13_strlen(label);
+    if label_len == 0 { status = 1; }
+    if status == 0 && label_len > 248 { status = 2; }   // "tls13 "(6) + label must fit in 1-byte length
+    if status == 0 && out_len > 8160 { status = 3; }    // 255 * Hash.length (RFC 5869 Section 2.3 cap)
+
+    let context_len: u32 = 0;
+    if status == 0 {
+        context_len = *(context + 0);
     }
 
-    // Compute nonce = IV XOR seq_num (padded to 12 bytes)
-    nonce = allocate(12);
-    i: u32 = 0;
-    while i < 12 { *(nonce + i) = *(iv + i); i = i + 1; }
-    // XOR last 8 bytes with seq_num (big-endian)
-    *(nonce + 4) = *(nonce + 4) ^ ((seq_num >> 56) & 255);
-    *(nonce + 5) = *(nonce + 5) ^ ((seq_num >> 48) & 255);
-    *(nonce + 6) = *(nonce + 6) ^ ((seq_num >> 40) & 255);
-    *(nonce + 7) = *(nonce + 7) ^ ((seq_num >> 32) & 255);
-    *(nonce + 8) = *(nonce + 8) ^ ((seq_num >> 24) & 255);
-    *(nonce + 9) = *(nonce + 9) ^ ((seq_num >> 16) & 255);
-    *(nonce + 10) = *(nonce + 10) ^ ((seq_num >> 8) & 255);
-    *(nonce + 11) = *(nonce + 11) ^ (seq_num & 255);
+    // full_label = "tls13 " (6 bytes) || Label (label_len bytes)
+    let full_label_len: u32 = 6 + label_len;
 
-    // AAD = record header (5 bytes: type=23, version=0x0303, length)
-    aad = allocate(5);
-    *(aad + 0) = TLS_APPLICATION_DATA & 255;
-    *(aad + 1) = 3; *(aad + 2) = 3;  // legacy version
-    // Length will be set by caller — use placeholder
-    *(aad + 3) = 0; *(aad + 4) = 0;
+    // HkdfLabel layout: length(2) || label_len(1) || full_label || context_len(1) || context
+    let hkdf_label_len: u32 = 2 + 1 + full_label_len + 1 + context_len;
+    let hkdf_label: Address = allocate(hkdf_label_len);
 
-    tag = allocate(16);
-    ct_len: u32 = aes256_gcm_encrypt(plaintext, pt_len, key, nonce, aad, 5, ciphertext, tag);
+    if status == 0 {
+        // uint16 length (big-endian) — number of bytes to derive
+        tls13_store_u16_be(hkdf_label + 0, out_len);
+        // opaque label<7..255>: 1-byte length prefix then the full_label bytes
+        *(hkdf_label + 2) = full_label_len & 255;
+        // "tls13 " literal (6 ASCII bytes: t=116, l=108, s=115, 1=49, 3=51, space=32)
+        *(hkdf_label + 3) = 116;
+        *(hkdf_label + 4) = 108;
+        *(hkdf_label + 5) = 115;
+        *(hkdf_label + 6) = 49;
+        *(hkdf_label + 7) = 51;
+        *(hkdf_label + 8) = 32;
+        // caller's Label bytes (ASCII, no NUL terminator)
+        tls13_memcpy(hkdf_label + 9, label, label_len);
+        // opaque context<0..255>: 1-byte length prefix then the context bytes
+        *(hkdf_label + 9 + label_len) = context_len & 255;
+        tls13_memcpy(hkdf_label + 10 + label_len, context + 1, context_len);
 
-    // Append tag to ciphertext
-    i = 0;
-    while i < 16 { *(ciphertext + ct_len + i) = *(tag + i); i = i + 1; }
+        // HKDF-Expand(Secret, HkdfLabel, Length)
+        hkdf_expand_sha256(secret, HASH_LEN, hkdf_label, hkdf_label_len, out, out_len);
+    }
 
-    free(nonce); free(aad); free(tag);
-    return ct_len + 16;
+    free(hkdf_label);
+
+    if status != 0 { return status; }
+    return 0;
 }
 
 // ===========================================================================
-// TLS 1.3 ClientHello builder
-// Builds a minimal ClientHello with supported cipher suites and key share
+// 2. Derive-Secret (RFC 8446 Section 7.1)
+//
+//   Derive-Secret(Secret, Label, Messages) =
+//       HKDF-Expand-Label(Secret, Label, Hash(Messages), Hash.length)
+//
+// Task-specified signature:
+//   secret   : 32-byte input secret
+//   label    : null-terminated ASCII label
+//   messages : handshake transcript buffer (msg_len bytes); Hash is computed
+//              over this buffer. Pass an empty buffer (msg_len == 0) when
+//              deriving the "derived" secrets (Hash("") is a fixed value).
+//   msg_len  : number of bytes in `messages`
+//   out      : output buffer; receives Hash.length (32) bytes
+// Returns 0 on success, nonzero on error.
 // ===========================================================================
 
-fn tls_build_client_hello(ctx: Address, ecdhe_pubkey: Address, ecdhe_pubkey_len: u32, out: Address) -> u32 {
-    pos: u32 = 0;
+fn tls13_derive_secret(secret: Address, label: Address, messages: Address, msg_len: u32, out: Address) -> u32 {
+    let status: u32 = 0;
 
-    // Handshake type: ClientHello (1)
-    *(out + pos) = 1; pos = pos + 1;
-    // Length placeholder (3 bytes)
-    *(out + pos) = 0; *(out + pos + 1) = 0; *(out + pos + 2) = 0; pos = pos + 3;
+    // Hash(Messages) — for an empty buffer this is SHA-256("").
+    let hash_out: Address = allocate(HASH_LEN);
+    sha256_oneshot(messages, msg_len, hash_out);
 
-    // Client version: 0x0303 (legacy)
-    *(out + pos) = 3; *(out + pos + 1) = 3; pos = pos + 2;
+    // Build a length-prefixed context: context[0] = HASH_LEN, context[1..33] = hash bytes
+    let context: Address = allocate(1 + HASH_LEN);
+    *(context + 0) = HASH_LEN & 255;
+    tls13_memcpy(context + 1, hash_out, HASH_LEN);
 
-    // Client random (32 bytes)
-    i: u32 = 0;
-    while i < 32 { *(out + pos + i) = *(ctx + OFF_CLIENT_RANDOM + i); i = i + 1; }
-    pos = pos + 32;
+    // HKDF-Expand-Label(Secret, Label, Hash(Messages), Hash.length)
+    let local_status: u32 = tls13_hkdf_expand_label(secret, label, context, out, HASH_LEN);
+    if local_status != 0 { status = local_status; }
 
-    // Session ID length: 0
-    *(out + pos) = 0; pos = pos + 1;
+    free(hash_out);
+    free(context);
 
-    // Cipher suites: 2 suites × 2 bytes = 4 bytes
-    *(out + pos) = 0; *(out + pos + 1) = 4; pos = pos + 2;  // length
-    *(out + pos) = 0x13; *(out + pos + 1) = 0x02; pos = pos + 2;  // AES_256_GCM_SHA384
-    *(out + pos) = 0x13; *(out + pos + 1) = 0x03; pos = pos + 2;  // CHACHA20_POLY1305_SHA256
-
-    // Compression methods: 1 method (null)
-    *(out + pos) = 1; *(out + pos + 1) = 0; pos = pos + 2;
-
-    // Extensions length (placeholder)
-    ext_len_pos: u32 = pos;
-    *(out + pos) = 0; *(out + pos + 1) = 0; pos = pos + 2;
-
-    // Supported versions extension
-    *(out + pos) = 0; *(out + pos + 1) = 0x2B; pos = pos + 2;  // extension type 43
-    *(out + pos) = 0; *(out + pos + 1) = 3; pos = pos + 2;  // length
-    *(out + pos) = 2; pos = pos + 1;  // list length
-    *(out + pos) = 3; *(out + pos + 1) = 4; pos = pos + 2;  // TLS 1.3
-
-    // Key share extension (ECDHE public key)
-    *(out + pos) = 0; *(out + pos + 1) = 0x33; pos = pos + 2;  // extension type 51
-    // Extension length
-    ks_len: u32 = 4 + ecdhe_pubkey_len;
-    *(out + pos) = (ks_len >> 8) & 255; *(out + pos + 1) = ks_len & 255; pos = pos + 2;
-    // Client key share list length
-    cl_len: u32 = 2 + ecdhe_pubkey_len;
-    *(out + pos) = (cl_len >> 8) & 255; *(out + pos + 1) = cl_len & 255; pos = pos + 2;
-    // Named group: secp256r1
-    *(out + pos) = 0; *(out + pos + 1) = 0x17; pos = pos + 2;
-    // Key length
-    *(out + pos) = (ecdhe_pubkey_len >> 8) & 255; *(out + pos + 1) = ecdhe_pubkey_len & 255; pos = pos + 2;
-    // Key bytes
-    i = 0;
-    while i < ecdhe_pubkey_len { *(out + pos + i) = *(ecdhe_pubkey + i); i = i + 1; }
-    pos = pos + ecdhe_pubkey_len;
-
-    // Fill in extension length
-    ext_total: u32 = pos - ext_len_pos - 2;
-    *(out + ext_len_pos) = (ext_total >> 8) & 255;
-    *(out + ext_len_pos + 1) = ext_total & 255;
-
-    // Fill in handshake length
-    hs_len: u32 = pos - 4;
-    *(out + 1) = (hs_len >> 16) & 255;
-    *(out + 2) = (hs_len >> 8) & 255;
-    *(out + 3) = hs_len & 255;
-
-    // Update transcript
-    tls_update_transcript(ctx, out, pos);
-
-    // Update state
-    *(ctx + OFF_HS_STATE) = STATE_CLIENT_HELLO_SENT & 255;
-
-    return pos;
+    if status != 0 { return status; }
+    return 0;
 }
 
 // ===========================================================================
-// TLS 1.3 Finished message
-// verify_data = HMAC(finished_key, Transcript-Hash(Handshake))
-// finished_key = HKDF-Expand-Label(BaseKey, "finished", "", Hash.length)
+// Internal label-string constructor. Fills `buf` (must be at least
+// len+1 bytes) with the ASCII bytes of `text` followed by a NUL terminator.
+// Returns the number of ASCII bytes written (excluding NUL).
 // ===========================================================================
 
-fn tls_compute_verify_data(ctx: Address, is_client: u32, verify_data: Address) {
-    // Select base key
-    base_key: Address = ctx + OFF_SERVER_HS_SECRET;
-    if is_client == 1 { base_key = ctx + OFF_CLIENT_HS_SECRET; }
+fn tls13_set_ascii_label(buf: Address, text_bytes: Address, text_len: u32) -> u32 {
+    tls13_memcpy(buf, text_bytes, text_len);
+    *(buf + text_len) = 0;
+    return text_len;
+}
 
-    // finished_key = HKDF-Expand-Label(BaseKey, "finished", "", 32)
-    finished_key = allocate(32);
-    fin_lbl = allocate(8);
-    *(fin_lbl + 0) = 102; *(fin_lbl + 1) = 105; *(fin_lbl + 2) = 110; *(fin_lbl + 3) = 105;
-    *(fin_lbl + 4) = 115; *(fin_lbl + 5) = 104; *(fin_lbl + 6) = 101; *(fin_lbl + 7) = 100;
-    empty = allocate(1);
-    tls_hkdf_expand_label(base_key, fin_lbl, 8, empty, 0, finished_key, 32);
-    free(fin_lbl); free(empty);
+// ===========================================================================
+// 3. Key Schedule (RFC 8446 Section 7.1)
+//
+// Each function below takes the relevant upstream secret (and transcript or
+// PSK/ECDHE inputs where applicable) and writes one downstream secret.
+// All secrets are 32 bytes (Hash.length for SHA-256).
+// ===========================================================================
 
-    // verify_data = HMAC-SHA256(finished_key, transcript_hash)
-    hmac_sha256(finished_key, 32, ctx + OFF_TRANSCRIPT, 32, verify_data);
+// Compute Early Secret = HKDF-Extract(0, PSK).
+//   psk     : pre-shared key buffer (psk_len bytes); for a no-PSK handshake
+//             pass psk_len == 0 and the IKM becomes a zero string of
+//             Hash.length bytes (RFC 8446 Section 7.1: a zero-length PSK is
+//             represented as a string of HashLen zeros).
+//   psk_len : length of psk in bytes (0 for no PSK)
+//   out     : output buffer; receives 32 bytes (Early Secret)
+// Returns 0 on success.
+fn tls13_compute_early_secret(psk: Address, psk_len: u32, out: Address) -> u32 {
+    let status: u32 = 0;
+
+    // RFC 5869 Section 2.2: salt of length 0 is treated as HashLen zeros
+    // by the underlying hkdf_extract_sha256 helper. We pass an empty salt
+    // to invoke that branch.
+    let empty_salt: Address = allocate(1);
+    *(empty_salt + 0) = 0;
+
+    // IKM = PSK if present, else HashLen zeros (RFC 8446 Section 7.1).
+    let zeros_ikm: Address = allocate(HASH_LEN);
+    tls13_memset(zeros_ikm, 0, HASH_LEN);
+
+    let ikm: Address = psk;
+    let ikm_len: u32 = psk_len;
+    if psk_len == 0 {
+        ikm = zeros_ikm;
+        ikm_len = HASH_LEN;
+    }
+
+    hkdf_extract_sha256(empty_salt, 0, ikm, ikm_len, out);
+
+    free(empty_salt);
+    free(zeros_ikm);
+
+    if status != 0 { return status; }
+    return 0;
+}
+
+// Compute Handshake Secret = HKDF-Extract(Derive-Secret(Early, "derived", ""), ECDHE).
+//   early_secret : 32-byte Early Secret (from tls13_compute_early_secret)
+//   ecdhe        : ECDHE shared secret buffer (ecdhe_len bytes)
+//   ecdhe_len    : length of ECDHE shared secret in bytes (e.g. 32 for X25519)
+//   out          : output buffer; receives 32 bytes (Handshake Secret)
+// Returns 0 on success.
+fn tls13_compute_handshake_secret(early_secret: Address, ecdhe: Address, ecdhe_len: u32, out: Address) -> u32 {
+    let status: u32 = 0;
+
+    // Derive-Secret(Early Secret, "derived", "") — empty transcript.
+    // The "derived" label is ASCII bytes: d=100, e=101, r=114, i=105, v=118, e=101, d=100.
+    let derived_label_text: Address = allocate(7);
+    *(derived_label_text + 0) = 100;
+    *(derived_label_text + 1) = 101;
+    *(derived_label_text + 2) = 114;
+    *(derived_label_text + 3) = 105;
+    *(derived_label_text + 4) = 118;
+    *(derived_label_text + 5) = 101;
+    *(derived_label_text + 6) = 100;
+    let derived_label: Address = allocate(8);
+    tls13_set_ascii_label(derived_label, derived_label_text, 7);
+
+    let derived_early: Address = allocate(HASH_LEN);
+    let empty_msg: Address = allocate(1);
+    *(empty_msg + 0) = 0;
+    let local_status: u32 = tls13_derive_secret(early_secret, derived_label, empty_msg, 0, derived_early);
+    if local_status != 0 { status = local_status; }
+
+    // IKM = ECDHE shared secret. RFC 8446 Section 7.1: a zero-length ECDHE
+    // (e.g. PSK-only handshake with no key exchange) is represented as
+    // HashLen zeros.
+    let zeros_ikm: Address = allocate(HASH_LEN);
+    tls13_memset(zeros_ikm, 0, HASH_LEN);
+    let ikm: Address = ecdhe;
+    let ikm_len: u32 = ecdhe_len;
+    if ecdhe_len == 0 {
+        ikm = zeros_ikm;
+        ikm_len = HASH_LEN;
+    }
+
+    if status == 0 {
+        // Handshake Secret = HKDF-Extract(derived_early, ECDHE)
+        hkdf_extract_sha256(derived_early, HASH_LEN, ikm, ikm_len, out);
+    }
+
+    free(derived_label_text);
+    free(derived_label);
+    free(derived_early);
+    free(empty_msg);
+    free(zeros_ikm);
+
+    if status != 0 { return status; }
+    return 0;
+}
+
+// Compute Master Secret = HKDF-Extract(Derive-Secret(Handshake, "derived", ""), 0).
+//   handshake_secret : 32-byte Handshake Secret
+//   out              : output buffer; receives 32 bytes (Master Secret)
+// Returns 0 on success.
+fn tls13_compute_master_secret(handshake_secret: Address, out: Address) -> u32 {
+    let status: u32 = 0;
+
+    // Derive-Secret(Handshake Secret, "derived", "")
+    let derived_label_text: Address = allocate(7);
+    *(derived_label_text + 0) = 100;
+    *(derived_label_text + 1) = 101;
+    *(derived_label_text + 2) = 114;
+    *(derived_label_text + 3) = 105;
+    *(derived_label_text + 4) = 118;
+    *(derived_label_text + 5) = 101;
+    *(derived_label_text + 6) = 100;
+    let derived_label: Address = allocate(8);
+    tls13_set_ascii_label(derived_label, derived_label_text, 7);
+
+    let derived_hs: Address = allocate(HASH_LEN);
+    let empty_msg: Address = allocate(1);
+    *(empty_msg + 0) = 0;
+    let local_status: u32 = tls13_derive_secret(handshake_secret, derived_label, empty_msg, 0, derived_hs);
+    if local_status != 0 { status = local_status; }
+
+    // IKM = HashLen zeros (the "0" in HKDF-Extract(derived, 0) is a
+    // zero-length IKM, represented as HashLen zeros by convention per
+    // RFC 8446 Section 7.1).
+    let zeros_ikm: Address = allocate(HASH_LEN);
+    tls13_memset(zeros_ikm, 0, HASH_LEN);
+
+    if status == 0 {
+        hkdf_extract_sha256(derived_hs, HASH_LEN, zeros_ikm, HASH_LEN, out);
+    }
+
+    free(derived_label_text);
+    free(derived_label);
+    free(derived_hs);
+    free(empty_msg);
+    free(zeros_ikm);
+
+    if status != 0 { return status; }
+    return 0;
+}
+
+// Compute Client Handshake Traffic Secret =
+//   Derive-Secret(Handshake Secret, "c hs traffic", Transcript)
+//   handshake_secret : 32-byte Handshake Secret
+//   messages         : handshake transcript buffer (concatenated ClientHello..ServerHello)
+//   msg_len          : length of transcript in bytes
+//   out              : output buffer; receives 32 bytes
+fn tls13_compute_client_handshake_traffic_secret(handshake_secret: Address, messages: Address, msg_len: u32, out: Address) -> u32 {
+    let status: u32 = 0;
+
+    // "c hs traffic" — ASCII bytes (12): c=99, space=32, h=104, s=115, space=32,
+    //   t=116, r=114, a=97, f=102, f=102, i=105, c=99.
+    let label_text: Address = allocate(12);
+    *(label_text + 0) = 99;
+    *(label_text + 1) = 32;
+    *(label_text + 2) = 104;
+    *(label_text + 3) = 115;
+    *(label_text + 4) = 32;
+    *(label_text + 5) = 116;
+    *(label_text + 6) = 114;
+    *(label_text + 7) = 97;
+    *(label_text + 8) = 102;
+    *(label_text + 9) = 102;
+    *(label_text + 10) = 105;
+    *(label_text + 11) = 99;
+    let label: Address = allocate(13);
+    tls13_set_ascii_label(label, label_text, 12);
+
+    let local_status: u32 = tls13_derive_secret(handshake_secret, label, messages, msg_len, out);
+    if local_status != 0 { status = local_status; }
+
+    free(label_text);
+    free(label);
+
+    if status != 0 { return status; }
+    return 0;
+}
+
+// Compute Server Handshake Traffic Secret =
+//   Derive-Secret(Handshake Secret, "s hs traffic", Transcript)
+fn tls13_compute_server_handshake_traffic_secret(handshake_secret: Address, messages: Address, msg_len: u32, out: Address) -> u32 {
+    let status: u32 = 0;
+
+    // "s hs traffic" — ASCII bytes (12): s=115, space=32, h=104, s=115, space=32,
+    //   t=116, r=114, a=97, f=102, f=102, i=105, c=99.
+    let label_text: Address = allocate(12);
+    *(label_text + 0) = 115;
+    *(label_text + 1) = 32;
+    *(label_text + 2) = 104;
+    *(label_text + 3) = 115;
+    *(label_text + 4) = 32;
+    *(label_text + 5) = 116;
+    *(label_text + 6) = 114;
+    *(label_text + 7) = 97;
+    *(label_text + 8) = 102;
+    *(label_text + 9) = 102;
+    *(label_text + 10) = 105;
+    *(label_text + 11) = 99;
+    let label: Address = allocate(13);
+    tls13_set_ascii_label(label, label_text, 12);
+
+    let local_status: u32 = tls13_derive_secret(handshake_secret, label, messages, msg_len, out);
+    if local_status != 0 { status = local_status; }
+
+    free(label_text);
+    free(label);
+
+    if status != 0 { return status; }
+    return 0;
+}
+
+// Compute Client Application Traffic Secret =
+//   Derive-Secret(Master Secret, "c ap traffic", Transcript)
+fn tls13_compute_client_application_traffic_secret(master_secret: Address, messages: Address, msg_len: u32, out: Address) -> u32 {
+    let status: u32 = 0;
+
+    // "c ap traffic" — ASCII bytes (12): c=99, space=32, a=97, p=112, space=32,
+    //   t=116, r=114, a=97, f=102, f=102, i=105, c=99.
+    let label_text: Address = allocate(12);
+    *(label_text + 0) = 99;
+    *(label_text + 1) = 32;
+    *(label_text + 2) = 97;
+    *(label_text + 3) = 112;
+    *(label_text + 4) = 32;
+    *(label_text + 5) = 116;
+    *(label_text + 6) = 114;
+    *(label_text + 7) = 97;
+    *(label_text + 8) = 102;
+    *(label_text + 9) = 102;
+    *(label_text + 10) = 105;
+    *(label_text + 11) = 99;
+    let label: Address = allocate(13);
+    tls13_set_ascii_label(label, label_text, 12);
+
+    let local_status: u32 = tls13_derive_secret(master_secret, label, messages, msg_len, out);
+    if local_status != 0 { status = local_status; }
+
+    free(label_text);
+    free(label);
+
+    if status != 0 { return status; }
+    return 0;
+}
+
+// Compute Server Application Traffic Secret =
+//   Derive-Secret(Master Secret, "s ap traffic", Transcript)
+fn tls13_compute_server_application_traffic_secret(master_secret: Address, messages: Address, msg_len: u32, out: Address) -> u32 {
+    let status: u32 = 0;
+
+    // "s ap traffic" — ASCII bytes (12): s=115, space=32, a=97, p=112, space=32,
+    //   t=116, r=114, a=97, f=102, f=102, i=105, c=99.
+    let label_text: Address = allocate(12);
+    *(label_text + 0) = 115;
+    *(label_text + 1) = 32;
+    *(label_text + 2) = 97;
+    *(label_text + 3) = 112;
+    *(label_text + 4) = 32;
+    *(label_text + 5) = 116;
+    *(label_text + 6) = 114;
+    *(label_text + 7) = 97;
+    *(label_text + 8) = 102;
+    *(label_text + 9) = 102;
+    *(label_text + 10) = 105;
+    *(label_text + 11) = 99;
+    let label: Address = allocate(13);
+    tls13_set_ascii_label(label, label_text, 12);
+
+    let local_status: u32 = tls13_derive_secret(master_secret, label, messages, msg_len, out);
+    if local_status != 0 { status = local_status; }
+
+    free(label_text);
+    free(label);
+
+    if status != 0 { return status; }
+    return 0;
+}
+
+// ===========================================================================
+// 4. Traffic Key Derivation (RFC 8446 Section 7.3)
+//
+//   [sender]_write_key = HKDF-Expand-Label(Secret, "key", "", key_length)
+//   [sender]_write_iv  = HKDF-Expand-Label(Secret, "iv", "", iv_length)
+//   [sender]_hp_key    = HKDF-Expand-Label(Secret, "hp", "", Hash.length)
+//
+// Task-specified signature:
+//   secret : 32-byte traffic secret
+//   key    : output buffer; receives 32 bytes (AES-256 key)
+//   iv     : output buffer; receives 12 bytes (per-record base IV)
+//   hp_key : output buffer; receives 32 bytes (header protection key)
+// Returns 0 on success.
+// ===========================================================================
+
+fn tls13_derive_traffic_keys(secret: Address, key: Address, iv: Address, hp_key: Address) -> u32 {
+    let status: u32 = 0;
+
+    // "key" label — ASCII bytes (3): k=107, e=101, y=121.
+    let key_label_text: Address = allocate(3);
+    *(key_label_text + 0) = 107;
+    *(key_label_text + 1) = 101;
+    *(key_label_text + 2) = 121;
+    let key_label: Address = allocate(4);
+    tls13_set_ascii_label(key_label, key_label_text, 3);
+
+    // "iv" label — ASCII bytes (2): i=105, v=118.
+    let iv_label_text: Address = allocate(2);
+    *(iv_label_text + 0) = 105;
+    *(iv_label_text + 1) = 118;
+    let iv_label: Address = allocate(3);
+    tls13_set_ascii_label(iv_label, iv_label_text, 2);
+
+    // "hp" label — ASCII bytes (2): h=104, p=112.
+    let hp_label_text: Address = allocate(2);
+    *(hp_label_text + 0) = 104;
+    *(hp_label_text + 1) = 112;
+    let hp_label: Address = allocate(3);
+    tls13_set_ascii_label(hp_label, hp_label_text, 2);
+
+    // Empty context buffer: context[0] == 0.
+    let empty_context: Address = allocate(1);
+    *(empty_context + 0) = 0;
+
+    // [sender]_write_key = HKDF-Expand-Label(Secret, "key", "", 32)
+    let s1: u32 = tls13_hkdf_expand_label(secret, key_label, empty_context, key, AES256_KEY_LEN);
+    if s1 != 0 { status = s1; }
+
+    // [sender]_write_iv = HKDF-Expand-Label(Secret, "iv", "", 12)
+    if status == 0 {
+        let local_s2: u32 = tls13_hkdf_expand_label(secret, iv_label, empty_context, iv, TLS13_IV_LEN);
+        if local_s2 != 0 { status = local_s2; }
+    }
+
+    // [sender]_hp_key = HKDF-Expand-Label(Secret, "hp", "", 32)
+    if status == 0 {
+        let local_s3: u32 = tls13_hkdf_expand_label(secret, hp_label, empty_context, hp_key, HASH_LEN);
+        if local_s3 != 0 { status = local_s3; }
+    }
+
+    free(key_label_text);
+    free(key_label);
+    free(iv_label_text);
+    free(iv_label);
+    free(hp_label_text);
+    free(hp_label);
+    free(empty_context);
+
+    if status != 0 { return status; }
+    return 0;
+}
+
+// ===========================================================================
+// 5. Record Layer AEAD (RFC 8446 Section 5.2)
+//
+// Per-record nonce (RFC 8446 Section 5.3):
+//   nonce = pad(0, iv_length) || seq_num
+//   nonce = nonce XOR write_iv
+// i.e. the 64-bit sequence number is right-aligned (big-endian) within the
+// 12-byte IV and XORed with the static write_iv to produce the per-record
+// nonce. The sequence number increments by 1 for each record sent under a
+// given traffic key.
+//
+// AAD (RFC 8446 Section 5.2):
+//   TLSCiphertext.opaque_type             (1 byte, = 23 application_data post-Finished
+//                                          or = handshake_type during the encrypted
+//                                          handshake — passed via aad by caller)
+//   TLSCiphertext.legacy_record_version   (2 bytes, = 0x0303)
+//   TLSCiphertext.length                  (2 bytes, = pt_len + tag_len)
+//
+// Ciphertext layout:
+//   ciphertext || tag (16 bytes appended)
+//
+// Task-specified signature:
+//   key        : 32-byte AES-256-GCM key
+//   iv         : 12-byte per-record nonce. The caller is responsible for
+//                XORing the static write_iv with the 64-bit sequence number
+//                (see tls13_record_nonce) and passing the resulting 12-byte
+//                nonce here. This matches the canonical AEAD boundary where
+//                the record layer manages sequence numbers and produces the
+//                nonce.
+//   plaintext  : input plaintext (pt_len bytes)
+//   pt_len     : plaintext length
+//   aad        : additional authenticated data (5-byte record header for
+//                standard TLS 1.3 records; see tls13_record_header_aad)
+//   aad_len    : AAD length (5 for standard TLS 1.3 records)
+//   ciphertext : output buffer; receives pt_len + 16 bytes
+// Returns ct_len + 16 on success, 0 on error.
+// ===========================================================================
+
+fn tls13_record_encrypt(key: Address, iv: Address, plaintext: Address, pt_len: u32, aad: Address, aad_len: u32, ciphertext: Address) -> u32 {
+    let status: u32 = 0;
+
+    if pt_len > TLS13_MAX_RECORD_PAYLOAD { status = 1; }
+    if status == 0 && aad_len > 255 { status = 2; }
+
+    // The 16-byte tag is written to a temporary buffer then appended to the
+    // ciphertext (RFC 8446 Section 5.2: "the AEAD output consists of the
+    // ciphertext output ... followed by the tag").
+    let tag: Address = allocate(TLS13_TAG_LEN);
+    let ct_written: u32 = 0;
+
+    if status == 0 {
+        let written: u32 = aes256_gcm_encrypt(plaintext, pt_len, key, iv, aad, aad_len, ciphertext, tag);
+        // aes256_gcm_encrypt returns the ciphertext length (== pt_len) on success.
+        if written != pt_len { status = 3; }
+        ct_written = written;
+    }
+
+    if status == 0 {
+        // Append the 16-byte tag to the ciphertext.
+        let i: u32 = 0;
+        while i < TLS13_TAG_LEN {
+            *(ciphertext + ct_written + i) = *(tag + i);
+            i = i + 1;
+        }
+    }
+
+    free(tag);
+
+    if status != 0 { return 0; }
+    return ct_written + TLS13_TAG_LEN;
+}
+
+// Decrypt a TLS 1.3 record. The caller-supplied `ciphertext` buffer holds
+// ct_len bytes including the trailing 16-byte tag; the plaintext is written
+// to `plaintext` (which must be at least ct_len - 16 bytes).
+// Returns the recovered plaintext length on success, 0 on AEAD failure
+// (tag mismatch) or any input error.
+fn tls13_record_decrypt(key: Address, iv: Address, ciphertext: Address, ct_len: u32, aad: Address, aad_len: u32, plaintext: Address) -> u32 {
+    let status: u32 = 0;
+
+    // ct_len must be at least tag_len; otherwise the record is malformed.
+    if ct_len < TLS13_TAG_LEN { status = 1; }
+    if status == 0 && aad_len > 255 { status = 2; }
+
+    let pt_len: u32 = 0;
+    let pt_written: u32 = 0;
+
+    if status == 0 {
+        pt_len = ct_len - TLS13_TAG_LEN;
+        // The tag is the trailing 16 bytes of the ciphertext buffer.
+        let tag_addr: Address = ciphertext + pt_len;
+        let written: u32 = aes256_gcm_decrypt(ciphertext, pt_len, key, iv, aad, aad_len, tag_addr, plaintext);
+        // aes256_gcm_decrypt returns 0 on tag mismatch, pt_len on success.
+        if written == 0 { status = 3; }
+        pt_written = written;
+    }
+
+    if status != 0 { return 0; }
+    return pt_written;
+}
+
+// Compute the per-record nonce by XORing the static write_iv with the
+// 64-bit sequence number (RFC 8446 Section 5.3). The nonce is written to
+// `nonce_out` (12 bytes). This helper is provided so callers that hold the
+// static write_iv and a sequence number can derive the per-record nonce
+// before calling tls13_record_encrypt / tls13_record_decrypt.
+fn tls13_record_nonce(write_iv: Address, seq_num: u64, nonce_out: Address) {
+    let i: u32 = 0;
+    while i < TLS13_IV_LEN {
+        *(nonce_out + i) = *(write_iv + i);
+        i = i + 1;
+    }
+    // XOR the rightmost 8 bytes with the big-endian seq_num.
+    *(nonce_out + 4) = (*(nonce_out + 4) ^ ((seq_num >> 56) & 255)) & 255;
+    *(nonce_out + 5) = (*(nonce_out + 5) ^ ((seq_num >> 48) & 255)) & 255;
+    *(nonce_out + 6) = (*(nonce_out + 6) ^ ((seq_num >> 40) & 255)) & 255;
+    *(nonce_out + 7) = (*(nonce_out + 7) ^ ((seq_num >> 32) & 255)) & 255;
+    *(nonce_out + 8) = (*(nonce_out + 8) ^ ((seq_num >> 24) & 255)) & 255;
+    *(nonce_out + 9) = (*(nonce_out + 9) ^ ((seq_num >> 16) & 255)) & 255;
+    *(nonce_out + 10) = (*(nonce_out + 10) ^ ((seq_num >> 8) & 255)) & 255;
+    *(nonce_out + 11) = (*(nonce_out + 11) ^ (seq_num & 255)) & 255;
+}
+
+// Build the 5-byte TLS record header AAD for a given content type and
+// plaintext length. The length field is pt_len + TLS13_TAG_LEN (the
+// on-wire TLSCiphertext.length). Writes 5 bytes to `aad_out`.
+fn tls13_record_header_aad(content_type: u32, pt_len: u32, aad_out: Address) {
+    *(aad_out + 0) = content_type & 255;
+    tls13_store_u16_be(aad_out + 1, TLS_LEGACY_VERSION);
+    tls13_store_u16_be(aad_out + 3, pt_len + TLS13_TAG_LEN);
+}
+
+// ===========================================================================
+// 6. Handshake Messages (RFC 8446 Section 4)
+//
+// These build/parse handshake-layer messages (4-byte handshake header +
+// body). They do NOT include the 5-byte TLS record header; the caller is
+// responsible for wrapping a handshake message in a Handshake record
+// (content type TLS_HANDSHAKE=22, version 0x0303, length).
+// ===========================================================================
+
+// Build a ClientHello handshake message (RFC 8446 Section 4.1.2).
+// Task-specified signature:
+//   version    : 2-byte big-endian TLS version to advertise in the
+//                supported_versions extension (e.g. 0x0304 for TLS 1.3)
+//   random     : 32-byte client random
+//   session_id : LENGTH-PREFIXED legacy session id buffer:
+//                  session_id[0]            = sid_len (0..32)
+//                  session_id[1..1+sid_len] = sid bytes
+//   suites     : LENGTH-PREFIXED cipher suite list buffer:
+//                  suites[0..2]        = cs_len (big-endian, even, >0)
+//                  suites[2..2+cs_len] = suite bytes
+//   key_share  : LENGTH-PREFIXED key share entry:
+//                  key_share[0..2]        = named_group (big-endian, e.g. 0x0017)
+//                  key_share[2..4]        = kex_len (big-endian, >0)
+//                  key_share[4..4+kex_len] = key_exchange bytes
+//   out        : output buffer; receives the full handshake message
+// Returns total message length (4-byte handshake header + body) on success,
+// or 0 on error.
+fn tls13_build_client_hello(version: u32, random: Address, session_id: Address, suites: Address, key_share: Address, out: Address) -> u32 {
+    let status: u32 = 0;
+
+    // Validate legacy_session_id.
+    let sid_len: u32 = *(session_id + 0);
+    if sid_len > TLS13_MAX_SESSION_ID { status = 1; }
+
+    // Validate cipher_suites list (must be non-empty and even-length).
+    let cs_len: u32 = 0;
+    if status == 0 {
+        cs_len = tls13_load_u16_be(suites);
+        if cs_len == 0 { status = 2; }
+        if status == 0 && (cs_len & 1) != 0 { status = 3; }
+    }
+
+    // Validate key_share entry (named_group + kex_len + kex bytes).
+    let kex_len: u32 = 0;
+    if status == 0 {
+        kex_len = tls13_load_u16_be(key_share + 2);
+        if kex_len == 0 { status = 4; }
+        if status == 0 && kex_len > TLS13_MAX_KEY_SHARE { status = 5; }
+    }
+
+    // Body = client_version(2) + random(32) + sid_len(1) + sid +
+    //        cipher_suites_len(2) + cipher_suites + comp_len(1) + null(1) +
+    //        extensions_len(2) + extensions
+    // Extensions built below:
+    //   supported_versions (ext type 43): 2(type) + 2(ext_len) + 1(list_len) + 2(version) = 7
+    //   key_share (ext type 51):          2(type) + 2(ext_len) + 2(client_shares_len) +
+    //                                     2(named_group) + 2(kex_len) + kex_len
+    //   supported_groups (ext type 10):   2(type) + 2(ext_len) + 2(list_len) + 2*2(groups) = 10
+    //   signature_algorithms (ext type 13): 2(type) + 2(ext_len) + 2(list_len) + 2*2(schemes) = 10
+
+    let supported_versions_ext_len: u32 = 3;       // 1(list_len) + 2(version)
+    let key_share_ext_len: u32 = 6 + kex_len;      // 2(client_shares_len) + 2(group) + 2(kex_len) + kex
+    let supported_groups_ext_len: u32 = 6;          // 2(list_len) + 2*2(groups)
+    let signature_algorithms_ext_len: u32 = 6;      // 2(list_len) + 2*2(schemes)
+
+    // Each extension adds 4 bytes of header (type + ext_len).
+    let ext_total: u32 = supported_versions_ext_len + key_share_ext_len +
+                         supported_groups_ext_len + signature_algorithms_ext_len + 16;
+
+    let body_len: u32 = 2 + 32 + 1 + sid_len + 2 + cs_len + 2 + 2 + ext_total;
+    let total: u32 = 4 + body_len;
+
+    let pos: u32 = 0;
+    if status == 0 {
+        // Handshake header: msg_type(1) = CLIENT_HELLO, length(3) = body_len
+        *(out + 0) = TLS_CLIENT_HELLO & 255;
+        tls13_store_u24_be(out + 1, body_len);
+        pos = 4;
+
+        // legacy_version (2 bytes) — 0x0303 per RFC 8446 Section 4.1.2
+        tls13_store_u16_be(out + pos, TLS_LEGACY_VERSION);
+        pos = pos + 2;
+
+        // random (32 bytes)
+        tls13_memcpy(out + pos, random, TLS13_RANDOM_LEN);
+        pos = pos + 32;
+
+        // legacy_session_id: 1-byte length prefix then sid bytes
+        *(out + pos) = sid_len & 255;
+        pos = pos + 1;
+        tls13_memcpy(out + pos, session_id + 1, sid_len);
+        pos = pos + sid_len;
+
+        // cipher_suites: 2-byte length prefix then suite bytes
+        tls13_store_u16_be(out + pos, cs_len);
+        pos = pos + 2;
+        tls13_memcpy(out + pos, suites + 2, cs_len);
+        pos = pos + cs_len;
+
+        // legacy_compression_methods: 1-byte length + 1 byte (null compression)
+        *(out + pos) = 1;
+        *(out + pos + 1) = 0;
+        pos = pos + 2;
+
+        // extensions length (2 bytes, big-endian)
+        tls13_store_u16_be(out + pos, ext_total);
+        pos = pos + 2;
+
+        // --- Extension: supported_versions (type 43) ---
+        // RFC 8446 Section 4.2.1: list of supported versions, client-side.
+        //   ClientHello extension: 1-byte list_len, then 2-byte versions.
+        tls13_store_u16_be(out + pos, EXT_SUPPORTED_VERSIONS);
+        pos = pos + 2;
+        tls13_store_u16_be(out + pos, 3);                 // ext_data length: 1(list_len) + 2(version)
+        pos = pos + 2;
+        *(out + pos) = 2;                                 // list_len (1 byte): one 2-byte version
+        pos = pos + 1;
+        tls13_store_u16_be(out + pos, version);           // the caller's TLS version (e.g. 0x0304)
+        pos = pos + 2;
+
+        // --- Extension: key_share (type 51) ---
+        // RFC 8446 Section 4.2.8: client offers a KeyShareEntry for one group.
+        //   ClientHello extension: 2-byte client_shares_len, then entries.
+        //   Each entry: 2-byte named_group + 2-byte kex_len + kex bytes.
+        tls13_store_u16_be(out + pos, EXT_KEY_SHARE);
+        pos = pos + 2;
+        let ks_ext_data_len: u32 = 2 + 2 + 2 + kex_len;  // client_shares_len + group + kex_len + kex
+        tls13_store_u16_be(out + pos, ks_ext_data_len);
+        pos = pos + 2;
+        let client_shares_len: u32 = 2 + 2 + kex_len;     // group + kex_len + kex
+        tls13_store_u16_be(out + pos, client_shares_len);
+        pos = pos + 2;
+        // named_group (copied from key_share[0..2])
+        tls13_store_u16_be(out + pos, tls13_load_u16_be(key_share + 0));
+        pos = pos + 2;
+        // key_exchange length (copied from key_share[2..4])
+        tls13_store_u16_be(out + pos, kex_len);
+        pos = pos + 2;
+        // key_exchange bytes (copied from key_share[4..4+kex_len])
+        tls13_memcpy(out + pos, key_share + 4, kex_len);
+        pos = pos + kex_len;
+
+        // --- Extension: supported_groups (type 10) ---
+        // RFC 8446 Section 4.2.7: list of supported named groups.
+        //   ClientHello extension: 2-byte list_len, then 2-byte group codes.
+        //   We list secp256r1 (0x0017) and x25519 (0x001D).
+        tls13_store_u16_be(out + pos, EXT_SUPPORTED_GROUPS);
+        pos = pos + 2;
+        tls13_store_u16_be(out + pos, 6);                 // ext_data length: 2(list_len) + 2*2(groups)
+        pos = pos + 2;
+        tls13_store_u16_be(out + pos, 4);                 // list_len: 2 groups * 2 bytes
+        pos = pos + 2;
+        tls13_store_u16_be(out + pos, TLS_SECP256R1);
+        pos = pos + 2;
+        tls13_store_u16_be(out + pos, TLS_X25519);
+        pos = pos + 2;
+
+        // --- Extension: signature_algorithms (type 13) ---
+        // RFC 8446 Section 4.2.3: list of supported signature schemes.
+        //   ClientHello extension: 2-byte list_len, then 2-byte scheme codes.
+        //   We list ecdsa_secp256r1_sha256 (0x0403) and rsa_pss_rsae_sha256 (0x0804).
+        tls13_store_u16_be(out + pos, EXT_SIGNATURE_ALGORITHMS);
+        pos = pos + 2;
+        tls13_store_u16_be(out + pos, 6);                 // ext_data length: 2(list_len) + 2*2(schemes)
+        pos = pos + 2;
+        tls13_store_u16_be(out + pos, 4);                 // list_len: 2 schemes * 2 bytes
+        pos = pos + 2;
+        tls13_store_u16_be(out + pos, TLS_SIG_ECDSA_SECP256R1_SHA256);
+        pos = pos + 2;
+        tls13_store_u16_be(out + pos, TLS_SIG_RSA_PSS_RSAE_SHA256);
+        pos = pos + 2;
+    }
+
+    if status != 0 { return 0; }
+    return total;
+}
+
+// Parse a ServerHello handshake message (RFC 8446 Section 4.1.3).
+// Task-specified signature:
+//   data          : buffer holding the full handshake message (header + body)
+//   len           : bytes available in data
+//   version       : output, 2-byte big-endian legacy_version stored at
+//                     version[0..2]. Overwritten with the value from the
+//                     supported_versions extension if present (the actual
+//                     negotiated TLS 1.3 version, e.g. 0x0304).
+//   random        : output, 32-byte server random
+//   session_id    : output, LENGTH-PREFIXED legacy session id:
+//                     session_id[0] = sid_len, session_id[1..1+sid_len] = id
+//   suite         : output, 2-byte big-endian wire cipher suite value at
+//                     suite[0..2]
+//   key_share     : output, LENGTH-PREFIXED key share entry:
+//                     key_share[0..2]        = named_group (big-endian)
+//                     key_share[2..4]        = kex_len (big-endian)
+//                     key_share[4..4+kex_len] = key_exchange bytes
+//                     Initialized to (group=0, kex_len=0) on entry; populated
+//                     if the key_share extension is found.
+// Returns the total number of bytes consumed (4 + body_len) on success, or
+// 0 on error (short buffer, wrong message type, truncated fields, missing
+// supported_versions or key_share extension).
+fn tls13_parse_server_hello(data: Address, len: u32, version: Address, random: Address, session_id: Address, suite: Address, key_share: Address) -> u32 {
+    let status: u32 = 0;
+    if len < 4 { status = 1; }
+
+    let msg_type: u32 = 0;
+    let body_len: u32 = 0;
+    if status == 0 {
+        msg_type = *(data + 0);
+        if msg_type != TLS_SERVER_HELLO { status = 2; }
+    }
+    if status == 0 {
+        body_len = tls13_load_u24_be(data + 1);
+        if len < 4 + body_len { status = 3; }
+    }
+    if status == 0 {
+        // Minimum ServerHello body: legacy_version(2)+random(32)+sid_len(1)+cipher(2)+comp(1) = 38
+        if body_len < 38 { status = 4; }
+    }
+
+    let p: u32 = 4;
+    let sid_len: u32 = 0;
+
+    if status == 0 {
+        // legacy_version (2 bytes) -> version[0..2]
+        tls13_store_u16_be(version, tls13_load_u16_be(data + p));
+        p = p + 2;
+
+        // random (32) -> server_random
+        tls13_memcpy(random, data + p, TLS13_RANDOM_LEN);
+        p = p + 32;
+
+        // legacy_session_id_echo: 1-byte length + sid bytes
+        sid_len = *(data + p);
+        p = p + 1;
+        if sid_len > TLS13_MAX_SESSION_ID { status = 5; }
+        if status == 0 && 4 + body_len < p + sid_len + 2 + 1 { status = 6; }
+    }
+
+    if status == 0 {
+        // session_id output: length-prefixed (caller reads session_id[0] for len).
+        *(session_id + 0) = sid_len & 255;
+        tls13_memcpy(session_id + 1, data + p, sid_len);
+        p = p + sid_len;
+
+        // cipher_suite (2 bytes, big-endian wire value) -> suite[0..2]
+        let cs_hi: u32 = *(data + p);
+        let cs_lo: u32 = *(data + p + 1);
+        *(suite + 0) = cs_hi & 255;
+        *(suite + 1) = cs_lo & 255;
+        p = p + 2;
+
+        // legacy_compression_method (1 byte) — must be 0 for TLS 1.3
+        let comp: u32 = *(data + p);
+        p = p + 1;
+        if comp != 0 { status = 7; }
+    }
+
+    // Extensions follow: 2-byte total extensions length, then a sequence of
+    // (type(2), length(2), data(ext_len)) extension entries. We must find
+    // the supported_versions extension (to extract the negotiated TLS version)
+    // and the key_share extension (to extract the server's KeyShareEntry).
+    // Initialize the key_share output to a zero-length entry so callers can
+    // detect the missing-extension case.
+    if status == 0 {
+        tls13_store_u16_be(key_share + 0, 0);          // named_group = 0
+        tls13_store_u16_be(key_share + 2, 0);          // kex_len = 0
+    }
+
+    if status == 0 {
+        if 4 + body_len < p + 2 { status = 8; }       // need at least the extensions_length field
+    }
+
+    let ext_total: u32 = 0;
+    if status == 0 {
+        ext_total = tls13_load_u16_be(data + p);
+        p = p + 2;
+        if 4 + body_len < p + ext_total { status = 9; }
+    }
+
+    let found_supported_versions: u32 = 0;
+    let found_key_share: u32 = 0;
+
+    if status == 0 {
+        let ext_end: u32 = p + ext_total;
+        let cursor: u32 = p;
+        let scan_done: u32 = 0;
+        while scan_done == 0 {
+            if cursor + 4 > ext_end { scan_done = 1; }
+            if scan_done == 0 {
+                let ext_type: u32 = tls13_load_u16_be(data + cursor);
+                let ext_len: u32 = tls13_load_u16_be(data + cursor + 2);
+                if cursor + 4 + ext_len > ext_end {
+                    // Truncated extension — stop scanning, but do not flag an
+                    // error if we already found the required extensions.
+                    scan_done = 1;
+                }
+                if scan_done == 0 {
+                    let ext_data: u32 = cursor + 4;
+
+                    if ext_type == EXT_SUPPORTED_VERSIONS {
+                        // ServerHello supported_versions extension contains a
+                        // single 2-byte selected version (no length prefix).
+                        if ext_len >= 2 {
+                            let selected: u32 = tls13_load_u16_be(data + ext_data);
+                            tls13_store_u16_be(version, selected);
+                            found_supported_versions = 1;
+                        }
+                    }
+
+                    if ext_type == EXT_KEY_SHARE {
+                        // ServerHello key_share extension contains a single
+                        // KeyShareEntry: named_group(2) + kex_len(2) + kex.
+                        if ext_len >= 4 {
+                            let named_group: u32 = tls13_load_u16_be(data + ext_data);
+                            let kex_len_e: u32 = tls13_load_u16_be(data + ext_data + 2);
+                            if kex_len_e <= TLS13_MAX_KEY_SHARE {
+                                if ext_len >= 4 + kex_len_e {
+                                    tls13_store_u16_be(key_share + 0, named_group);
+                                    tls13_store_u16_be(key_share + 2, kex_len_e);
+                                    tls13_memcpy(key_share + 4, data + ext_data + 4, kex_len_e);
+                                    found_key_share = 1;
+                                }
+                            }
+                        }
+                    }
+
+                    cursor = cursor + 4 + ext_len;
+                }
+            }
+            if found_supported_versions == 1 {
+                if found_key_share == 1 { scan_done = 1; }
+            }
+        }
+
+        if found_supported_versions == 0 { status = 10; }
+        if status == 0 && found_key_share == 0 { status = 11; }
+    }
+
+    if status != 0 { return 0; }
+    return 4 + body_len;
+}
+
+// ===========================================================================
+// 7. Finished verify_data (RFC 8446 Section 4.4.4)
+//
+//   finished_key = HKDF-Expand-Label(BaseKey, "finished", "", Hash.length)
+//   verify_data  = HMAC(finished_key, Transcript-Hash(Handshake))
+//
+// In TLS 1.3 the verify_data length is Hash.length (32 bytes for SHA-256),
+// not 12 bytes as in TLS 1.2.
+//
+// Task-specified signature:
+//   base_key   : 32-byte traffic secret (client/server handshake traffic
+//                secret for the handshake Finished; client/server
+//                application traffic secret for the post-handshake
+//                KeyUpdate-style Finished)
+//   transcript : 32-byte Transcript-Hash(Handshake) — the SHA-256 hash of
+//                the concatenated handshake messages up to and including
+//                the message preceding the Finished
+//   out        : output buffer; receives 32 bytes of verify_data
+// Returns 0 on success, nonzero on error.
+// ===========================================================================
+
+fn tls13_finished_verify_data(base_key: Address, transcript: Address, out: Address) -> u32 {
+    let status: u32 = 0;
+
+    // "finished" label — ASCII bytes (8): f=102, i=105, n=110, i=105,
+    //   s=115, h=104, e=101, d=100.
+    let finished_label_text: Address = allocate(8);
+    *(finished_label_text + 0) = 102;
+    *(finished_label_text + 1) = 105;
+    *(finished_label_text + 2) = 110;
+    *(finished_label_text + 3) = 105;
+    *(finished_label_text + 4) = 115;
+    *(finished_label_text + 5) = 104;
+    *(finished_label_text + 6) = 101;
+    *(finished_label_text + 7) = 100;
+    let finished_label: Address = allocate(9);
+    tls13_set_ascii_label(finished_label, finished_label_text, 8);
+
+    // Empty context buffer: context[0] == 0.
+    let empty_context: Address = allocate(1);
+    *(empty_context + 0) = 0;
+
+    // finished_key = HKDF-Expand-Label(BaseKey, "finished", "", Hash.length)
+    let finished_key: Address = allocate(HASH_LEN);
+    let local_status: u32 = tls13_hkdf_expand_label(base_key, finished_label, empty_context, finished_key, HASH_LEN);
+    if local_status != 0 { status = local_status; }
+
+    // verify_data = HMAC-SHA-256(finished_key, Transcript-Hash)
+    if status == 0 {
+        hmac_sha256(finished_key, HASH_LEN, transcript, HASH_LEN, out);
+    }
+
+    free(finished_label_text);
+    free(finished_label);
+    free(empty_context);
     free(finished_key);
+
+    if status != 0 { return status; }
+    return 0;
 }

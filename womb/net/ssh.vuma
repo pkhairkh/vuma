@@ -1,17 +1,19 @@
-// ssh.vuma — SSH-2 Protocol (RFC 4251-4254)
-// Transport layer, key derivation, binary packet protocol,
-// connection layer, and authentication message builders.
-// No main() — importable library module.
+// womb/net/ssh.vuma — SSH-2 (RFC 4251-4254)
+// Transport layer, Diffie-Hellman group14 key exchange, key derivation,
+// binary packet protocol, connection layer, and authentication message
+// builders. No main() — importable library module.
 //
-// Task ID: womb-ssh
+// Task ID: W3.4
 //
-// This module implements the wire-format construction and parsing for the
-// SSH-2 protocol:
-//   1. Transport Layer     (RFC 4253): KEXINIT, ECDH key exchange, exchange hash
+// This module implements the wire-format construction, parsing, and
+// cryptographic core for SSH-2:
+//   1. Transport Layer     (RFC 4253 §4.2, §7.1, §8): version string,
+//                            KEXINIT, diffie-hellman-group14-sha256, H
 //   2. Key Derivation      (RFC 4253 §7.2): six session keys from K / H / session_id
-//   3. Binary Packet Proto (RFC 4253 §6): encrypt + MAC + framing
-//   4. Connection Layer    (RFC 4254): channel open / data / close
-//   5. Authentication      (RFC 4252): USERAUTH_REQUEST prefix
+//   3. Binary Packet Proto (RFC 4253 §6): framing + padding (build) / parse
+//   4. Encryption / MAC    (RFC 4253 §6, RFC 4344): AES-256-CTR + HMAC-SHA-256
+//   5. Connection Layer    (RFC 4254 §5): channel open / data / close
+//   6. Authentication      (RFC 4252 §5): USERAUTH_REQUEST prefix
 //
 // All multi-byte integer fields on the wire are big-endian (network order),
 // per RFC 4251 §5. SSH "string" = uint32 length || data. SSH "mpint" =
@@ -19,31 +21,31 @@
 // high bit of the magnitude would otherwise be set; zero is encoded as an
 // empty string (length 0).
 //
+// Diffie-Hellman group14 uses the 2048-bit MODP prime from RFC 3526 §3:
+//   p = 2^2048 - 2^1984 - 1 + 2^64 * (floor(2^1918 * pi) + 124476)
+// stored as 256 little-endian bytes for use with the bn2048_* primitives
+// from womb/crypto/bignum2048.vuma (which use 32 x u64 little-endian limbs,
+// i.e. byte[0] = least significant byte of the integer).
+//
 // Length values written to output structures and to length-output parameters
-// (e.g. host_key_len, sp_len, sig_len, and the ParsedKexInit field lengths)
-// are stored as 4-byte big-endian and are read back with ssh_get_u32_be().
+// (host_key_len, sp_len, sig_len, payload_len_out) are stored as 4-byte
+// big-endian and are read back with ssh_get_u32_be().
 //
-// The following cryptographic primitives are assumed to be available and are
-// declared extern "C" below:
-//   sha256_oneshot(data, data_len, out)                  — 32-byte digest
-//   hmac_sha256(key, key_len, msg, msg_len, out)         — 32-byte tag
-//   aes256_ctr_crypt(key, iv, data, data_len, out)       — stream cipher
-//     (key = 32 bytes, iv = 16-byte initial counter; iv is NOT mutated; the
-//      counter is treated as a 128-bit big-endian integer incremented per
-//      16-byte block. For multi-packet streams the caller advances iv with
-//      ssh_ctr_advance_iv() between calls so the keystream is continuous.)
-//   ecdh_p256_shared_secret(privkey, peer_pubkey, shared)
-//   ed25519_sign(privkey, msg, msg_len, sig)  -> u32     — 64-byte signature
-//   ed25519_verify(pubkey, msg, msg_len, sig)  -> u32    — 1 = valid, 0 = bad
+// Cryptographic primitives are resolved at link time from sibling modules:
+//   sha256_oneshot(data, data_len, out)            — womb/crypto/hqc.vuma
+//   hmac_sha256(key, key_len, msg, msg_len, out)   — womb/crypto/hmac.vuma
+//   aes256_ctr_crypt(data, data_len, key, nonce, output)  — womb/crypto/aes256.vuma
+//     (canonical signature: data, data_len, key, nonce, output. The function
+//      treats `nonce` as a 96-bit nonce occupying bytes [0..11] and runs a
+//      32-bit block counter in bytes [12..15], starting at 0. For SSH the
+//      caller advances the 128-bit IV between packets via ssh_ctr_advance_iv
+//      so that each packet's keystream is unique.)
+//   bn2048_mod_exp(r, a, exp, m)                   — womb/crypto/bignum2048.vuma
+//   bn2048_set_u32(r, v), bn2048_zero(a), bn2048_copy(r, a)
 //
-// SECURITY NOTES:
-//   * Random packet padding is filled with zero bytes. RFC 4253 §6 says
-//     padding SHOULD contain random bytes; a production implementation MUST
-//     replace this with output from a CSPRNG (e.g. getrandom()).
-//   * MAC comparison in ssh_parse_packet is byte-by-byte and branches on
-//     mismatch, which is not strictly constant-time. Acceptable here because
-//     the MAC is computed by the sender over its own plaintext; a production
-//     implementation may wish to harden the comparison.
+// Packet padding is filled with zero bytes, satisfying the RFC 4253 §6
+// minimum (4 bytes). Callers requiring randomised padding per RFC 4253 §6
+// SHOULD overwrite the padding region with CSPRNG output before encryption.
 
 // ===========================================================================
 // External cryptographic primitives
@@ -52,10 +54,11 @@
 extern "C" {
     fn sha256_oneshot(data: Address, data_len: u32, out: Address);
     fn hmac_sha256(key: Address, key_len: u32, msg: Address, msg_len: u32, out: Address);
-    fn aes256_ctr_crypt(key: Address, iv: Address, data: Address, data_len: u32, out: Address);
-    fn ecdh_p256_shared_secret(privkey: Address, peer_pubkey: Address, shared: Address);
-    fn ed25519_sign(privkey: Address, msg: Address, msg_len: u32, sig: Address) -> u32;
-    fn ed25519_verify(pubkey: Address, msg: Address, msg_len: u32, sig: Address) -> u32;
+    fn aes256_ctr_crypt(data: Address, data_len: u32, key: Address, nonce: Address, output: Address);
+    fn bn2048_mod_exp(r: Address, a: Address, exp: Address, m: Address);
+    fn bn2048_set_u32(r: Address, v: u32);
+    fn bn2048_zero(a: Address);
+    fn bn2048_copy(r: Address, a: Address);
 }
 
 // ===========================================================================
@@ -64,8 +67,8 @@ extern "C" {
 
 // SSH message types (RFC 4250 / 4253 / 4254 / 4252)
 const SSH_MSG_KEXINIT: u32 = 20;
-const SSH_MSG_KEX_ECDH_INIT: u32 = 30;
-const SSH_MSG_KEX_ECDH_REPLY: u32 = 31;
+const SSH_MSG_KEXDH_INIT: u32 = 30;
+const SSH_MSG_KEXDH_REPLY: u32 = 31;
 const SSH_MSG_USERAUTH_REQUEST: u32 = 50;
 const SSH_MSG_CHANNEL_OPEN: u32 = 90;
 const SSH_MSG_CHANNEL_DATA: u32 = 94;
@@ -80,6 +83,12 @@ const HMAC_SHA256_OUT_SIZE: u32 = 32;
 const SSH_MIN_PADDING: u32 = 4;
 const SSH_MAX_PADDING: u32 = 255;
 const SSH_PLAINTEXT_BLOCK_SIZE: u32 = 8;
+const SSH_DEFAULT_MAX_PACKET: u32 = 32768;
+
+// DH group14 sizes (RFC 3526 MODP Group 14, 2048-bit prime)
+const DH_GROUP14_BYTES: u32 = 256;
+const DH_GROUP14_BITS: u32 = 2048;
+const DH_GROUP14_GENERATOR: u32 = 2;
 
 // Derivation letters (RFC 4253 §7.2)
 const LETTER_A: u32 = 65;
@@ -88,6 +97,16 @@ const LETTER_C: u32 = 67;
 const LETTER_D: u32 = 68;
 const LETTER_E: u32 = 69;
 const LETTER_F: u32 = 70;
+
+// ASCII constants for the version-string parser
+const CHAR_S: u32 = 83;
+const CHAR_H: u32 = 72;
+const CHAR_DASH: u32 = 45;
+const CHAR_2: u32 = 50;
+const CHAR_DOT: u32 = 46;
+const CHAR_0: u32 = 48;
+const CHAR_CR: u32 = 13;
+const CHAR_LF: u32 = 10;
 
 // ---------------------------------------------------------------------------
 // ParsedKexInit output layout (filled by ssh_parse_kex_init, 1576 bytes):
@@ -110,23 +129,6 @@ const PKI_ENC_C2S: u32 = 2;
 const PKI_ENC_S2C: u32 = 3;
 const PKI_MAC_C2S: u32 = 4;
 const PKI_MAC_S2C: u32 = 5;
-
-// ---------------------------------------------------------------------------
-// ssh_keys output layout (filled by ssh_derive_keys, 160 bytes):
-//   offset 0    iv_c2s            (16 bytes)
-//   offset 16   iv_s2c            (16 bytes)
-//   offset 32   encryption_key_c2s (32 bytes)
-//   offset 64   encryption_key_s2c (32 bytes)
-//   offset 96   mac_key_c2s       (32 bytes)
-//   offset 128  mac_key_s2c       (32 bytes)
-// ---------------------------------------------------------------------------
-const KEYS_IV_C2S_OFF: u32 = 0;
-const KEYS_IV_S2C_OFF: u32 = 16;
-const KEYS_ENC_C2S_OFF: u32 = 32;
-const KEYS_ENC_S2C_OFF: u32 = 64;
-const KEYS_MAC_C2S_OFF: u32 = 96;
-const KEYS_MAC_S2C_OFF: u32 = 128;
-const KEYS_TOTAL_SIZE: u32 = 160;
 
 // ===========================================================================
 // Encoding helpers
@@ -177,24 +179,29 @@ fn ssh_write_cstr_string(out: Address, pos: u32, s: Address) -> u32 {
 // big-endian magnitude buffer.
 fn ssh_mpint_len(data: Address, len: u32) -> u32 {
     start: u32 = 0;
-    while start < len {
-        if *(data + start) != 0 { break; }
-        start = start + 1;
+    done: u32 = 0;
+    while start < len && done == 0 {
+        if *(data + start) != 0 { done = 1; }
+        else { start = start + 1; }
     }
     mag: u32 = len - start;
-    if mag == 0 { return 4; }                 // zero -> empty magnitude
     extra: u32 = 0;
-    if (*(data + start) & 128) != 0 { extra = 1; }   // high bit set -> 0x00 prefix
-    return 4 + extra + mag;
+    if mag != 0 {
+        if (*(data + start) & 128) != 0 { extra = 1; }
+    }
+    result: u32 = 4;
+    if mag != 0 { result = 4 + extra + mag; }
+    return result;
 }
 
 // Write an mpint at `out`+`pos` from a big-endian magnitude buffer.
 // Returns the new offset.
 fn ssh_write_mpint(out: Address, pos: u32, data: Address, len: u32) -> u32 {
     start: u32 = 0;
-    while start < len {
-        if *(data + start) != 0 { break; }
-        start = start + 1;
+    done: u32 = 0;
+    while start < len && done == 0 {
+        if *(data + start) != 0 { done = 1; }
+        else { start = start + 1; }
     }
     mag: u32 = len - start;
     extra: u32 = 0;
@@ -211,22 +218,130 @@ fn ssh_write_mpint(out: Address, pos: u32, data: Address, len: u32) -> u32 {
 }
 
 // ===========================================================================
-// 1. SSH Transport Layer (RFC 4253)
+// 1. SSH Version Exchange (RFC 4253 §4.2)
+// ===========================================================================
+
+// Build the SSH-2.0 identification string "SSH-2.0-<client_version>\r\n".
+//   client_version: NUL-terminated softwareversion string (e.g. "OpenSSH_8.9").
+//                   Must not contain CR or LF per RFC 4253 §4.2.
+//   out:            output buffer (must hold 8 + strlen(client_version) + 2 bytes).
+//   Returns total bytes written.
+fn ssh_build_version_string(client_version: Address, out: Address) -> u32 {
+    *(out + 0) = CHAR_S & 255;
+    *(out + 1) = CHAR_S & 255;
+    *(out + 2) = CHAR_H & 255;
+    *(out + 3) = CHAR_DASH & 255;
+    *(out + 4) = CHAR_2 & 255;
+    *(out + 5) = CHAR_DOT & 255;
+    *(out + 6) = CHAR_0 & 255;
+    *(out + 7) = CHAR_DASH & 255;
+    pos: u32 = 8;
+    n: u32 = ssh_strlen(client_version);
+    i: u32 = 0;
+    while i < n { *(out + pos + i) = *(client_version + i); i = i + 1; }
+    pos = pos + n;
+    *(out + pos) = CHAR_CR & 255;
+    *(out + pos + 1) = CHAR_LF & 255;
+    return pos + 2;
+}
+
+// Parse the SSH identification string from `data` (which may contain
+// leading non-SSH banner lines per RFC 4253 §4.2). The function scans for
+// a line beginning with "SSH-", verifies the protoversion is "2.0", and
+// copies the version string (without the trailing CR/LF) into version_out.
+//   data:         input bytes.
+//   len:          length of data.
+//   version_out:  output buffer for the parsed version string (without CR/LF).
+//   Returns the length of the parsed version string on success, 0 on failure
+//   (no valid SSH-2.0 version line found).
+fn ssh_parse_version_string(data: Address, len: u32, version_out: Address) -> u32 {
+    pos: u32 = 0;
+    found: u32 = 0;
+    start: u32 = 0;
+    scan_done: u32 = 0;
+
+    // Scan for a line starting with "SSH-" preceded by start-of-data or LF.
+    while pos < len && scan_done == 0 {
+        match: u32 = 0;
+        if pos + 4 <= len {
+            if *(data + pos) == (CHAR_S & 255) {
+                if *(data + pos + 1) == (CHAR_S & 255) {
+                    if *(data + pos + 2) == (CHAR_H & 255) {
+                        if *(data + pos + 3) == (CHAR_DASH & 255) {
+                            match = 1;
+                        }
+                    }
+                }
+            }
+        }
+        if match == 1 {
+            at_line_start: u32 = 0;
+            if pos == 0 { at_line_start = 1; }
+            else {
+                if *(data + pos - 1) == (CHAR_LF & 255) { at_line_start = 1; }
+            }
+            if at_line_start == 1 {
+                found = 1;
+                start = pos;
+                scan_done = 1;
+            }
+        }
+        if scan_done == 0 { pos = pos + 1; }
+    }
+
+    // Verify protoversion is exactly "2.0" followed by '-'.
+    valid: u32 = found;
+    if found == 1 {
+        if start + 8 > len { valid = 0; }
+        if valid == 1 {
+            if *(data + start + 4) != (CHAR_2 & 255) { valid = 0; }
+            if *(data + start + 5) != (CHAR_DOT & 255) { valid = 0; }
+            if *(data + start + 6) != (CHAR_0 & 255) { valid = 0; }
+            if *(data + start + 7) != (CHAR_DASH & 255) { valid = 0; }
+        }
+    }
+
+    // Find end of the version line (CR, LF, or end of data).
+    out_len: u32 = 0;
+    if valid == 1 {
+        end: u32 = start + 8;
+        end_done: u32 = 0;
+        while end < len && end_done == 0 {
+            cur: u32 = *(data + end);
+            if cur == (CHAR_CR & 255) { end_done = 1; }
+            else {
+                if cur == (CHAR_LF & 255) { end_done = 1; }
+                else { end = end + 1; }
+            }
+        }
+        out_len = end - start;
+        i: u32 = 0;
+        while i < out_len {
+            *(version_out + i) = *(data + start + i);
+            i = i + 1;
+        }
+    }
+    return out_len;
+}
+
+// ===========================================================================
+// 2. SSH Key Exchange Init (KEXINIT, RFC 4253 §7.1)
 // ===========================================================================
 
 // SSH_MSG_KEXINIT (type 20). RFC 4253 §7.1.
-//   cookie:               16 random bytes (caller-provided).
-//   kex_algorithms:       NUL-terminated name-list.
-//   host_key_algorithms:  NUL-terminated name-list.
-//   enc_algorithms:       NUL-terminated name-list (used for both c2s and s2c).
-//   mac_algorithms:       NUL-terminated name-list (used for both c2s and s2c).
-//   out:                  output buffer.
+//   cookie:           16 random bytes (caller-provided).
+//   kex_algorithms:   NUL-terminated name-list.
+//   host_key_algorithms: NUL-terminated name-list.
+//   enc_algorithms:   NUL-terminated name-list (used for both c2s and s2c).
+//   mac_algorithms:   NUL-terminated name-list (used for both c2s and s2c).
+//   comp_algorithms:  NUL-terminated name-list (used for both c2s and s2c).
+//   out:              output buffer.
 //   Returns total bytes written.
 //
-// The compression name-lists are fixed to "none" and the language name-lists
-// to "" (the empty string), as is standard for the initial exchange.
-// first_kex_packet_follows = 0 (false) and the reserved uint32 = 0.
-fn ssh_build_kex_init(cookie: Address, kex_algorithms: Address, host_key_algorithms: Address, enc_algorithms: Address, mac_algorithms: Address, out: Address) -> u32 {
+// The language name-lists are fixed to "" (the empty string) as is standard
+// for the initial exchange. first_kex_packet_follows = 0 (false) and the
+// reserved uint32 = 0.
+fn ssh_build_kex_init(cookie: Address, kex_algorithms: Address, host_key_algorithms: Address, enc_algorithms: Address, mac_algorithms: Address, comp_algorithms: Address, out: Address) -> u32 {
     pos: u32 = 0;
     *(out + pos) = SSH_MSG_KEXINIT & 255;
     pos = pos + 1;
@@ -248,15 +363,10 @@ fn ssh_build_kex_init(cookie: Address, kex_algorithms: Address, host_key_algorit
     pos = ssh_write_cstr_string(out, pos, mac_algorithms);
     // mac_algorithms_server_to_client
     pos = ssh_write_cstr_string(out, pos, mac_algorithms);
-
-    // compression_algorithms_client_to_server = "none"
-    ssh_put_u32_be(out + pos, 4); pos = pos + 4;
-    *(out + pos) = 110; *(out + pos + 1) = 111; *(out + pos + 2) = 110; *(out + pos + 3) = 101;
-    pos = pos + 4;
-    // compression_algorithms_server_to_client = "none"
-    ssh_put_u32_be(out + pos, 4); pos = pos + 4;
-    *(out + pos) = 110; *(out + pos + 1) = 111; *(out + pos + 2) = 110; *(out + pos + 3) = 101;
-    pos = pos + 4;
+    // compression_algorithms_client_to_server
+    pos = ssh_write_cstr_string(out, pos, comp_algorithms);
+    // compression_algorithms_server_to_client
+    pos = ssh_write_cstr_string(out, pos, comp_algorithms);
 
     // languages_client_to_server = "" (empty)
     ssh_put_u32_be(out + pos, 0); pos = pos + 4;
@@ -275,15 +385,24 @@ fn ssh_build_kex_init(cookie: Address, kex_algorithms: Address, host_key_algorit
 // into the `algorithms` structure (see ParsedKexInit layout above).
 // Returns 1 on success, 0 on malformed input.
 fn ssh_parse_kex_init(buf: Address, buf_len: u32, algorithms: Address) -> u32 {
-    if buf_len < 1 { return 0; }
-    if *(buf + 0) != (SSH_MSG_KEXINIT & 255) { return 0; }
-    pos: u32 = 1;
+    status: u32 = 1;
+    pos: u32 = 0;
+
+    if buf_len < 1 { status = 0; }
+    if status == 1 {
+        if *(buf + 0) != (SSH_MSG_KEXINIT & 255) { status = 0; }
+        pos = 1;
+    }
 
     // cookie
-    if pos + SSH_COOKIE_SIZE > buf_len { return 0; }
-    i: u32 = 0;
-    while i < SSH_COOKIE_SIZE { *(algorithms + PKI_COOKIE_OFF + i) = *(buf + pos + i); i = i + 1; }
-    pos = pos + SSH_COOKIE_SIZE;
+    if status == 1 {
+        if pos + SSH_COOKIE_SIZE > buf_len { status = 0; }
+    }
+    if status == 1 {
+        i: u32 = 0;
+        while i < SSH_COOKIE_SIZE { *(algorithms + PKI_COOKIE_OFF + i) = *(buf + pos + i); i = i + 1; }
+        pos = pos + SSH_COOKIE_SIZE;
+    }
 
     // Ten name-list string fields follow in order:
     //   0 kex_algorithms                  (retained)
@@ -297,99 +416,280 @@ fn ssh_parse_kex_init(buf: Address, buf_len: u32, algorithms: Address) -> u32 {
     //   8 languages_c2s                   (skipped)
     //   9 languages_s2c                   (skipped)
     field: u32 = 0;
-    while field < 10 {
-        if pos + 4 > buf_len { return 0; }
-        slen: u32 = ssh_get_u32_be(buf + pos);
-        pos = pos + 4;
-        if pos + slen > buf_len { return 0; }
-        if field < 6 {
-            base: u32 = PKI_FIRST_FIELD_OFF + field * PKI_FIELD_STRIDE;
-            ssh_put_u32_be(algorithms + base, slen);
-            copy: u32 = slen;
-            if copy > PKI_MAX_NAMELIST { copy = PKI_MAX_NAMELIST; }
-            j: u32 = 0;
-            while j < copy { *(algorithms + base + 4 + j) = *(buf + pos + j); j = j + 1; }
+    while field < 10 && status == 1 {
+        if pos + 4 > buf_len { status = 0; }
+        if status == 1 {
+            slen: u32 = ssh_get_u32_be(buf + pos);
+            pos = pos + 4;
+            if pos + slen > buf_len { status = 0; }
+            if status == 1 {
+                if field < 6 {
+                    base: u32 = PKI_FIRST_FIELD_OFF + field * PKI_FIELD_STRIDE;
+                    ssh_put_u32_be(algorithms + base, slen);
+                    copy: u32 = slen;
+                    if copy > PKI_MAX_NAMELIST { copy = PKI_MAX_NAMELIST; }
+                    j: u32 = 0;
+                    while j < copy { *(algorithms + base + 4 + j) = *(buf + pos + j); j = j + 1; }
+                }
+                pos = pos + slen;
+            }
         }
-        pos = pos + slen;
         field = field + 1;
     }
+    return status;
+}
+
+// ===========================================================================
+// 3. Diffie-Hellman Key Exchange (RFC 4253 §8, "diffie-hellman-group14-sha256")
+// ===========================================================================
+
+// Write the RFC 3526 MODP Group 14 prime (2048-bit) into `out` as 256
+// little-endian bytes (the bn2048_* storage format: byte[0] = LSB).
+//
+//   p = 2^2048 - 2^1984 - 1 + 2^64 * (floor(2^1918 * pi) + 124476)
+//
+// The 256 bytes below are the little-endian representation of p, i.e. byte 0
+// is the least significant byte (0xFF) and byte 255 is the most significant
+// byte (0xFF). Each row of 8 bytes corresponds to one little-endian u64 limb
+// of the bn2048 representation (limb 0 = bytes 0..7 = least significant).
+fn ssh_dh_group14_prime(out: Address) {
+    // limb[0]  = 0xFFFFFFFFFFFFFFFF (least significant)
+    *(out + 0) = 255; *(out + 1) = 255; *(out + 2) = 255; *(out + 3) = 255; *(out + 4) = 255; *(out + 5) = 255; *(out + 6) = 255; *(out + 7) = 255;
+    // limb[1]  = 0x15728E5A8AACAA68
+    *(out + 8) = 104; *(out + 9) = 170; *(out + 10) = 172; *(out + 11) = 138; *(out + 12) = 90; *(out + 13) = 142; *(out + 14) = 114; *(out + 15) = 21;
+    // limb[2]  = 0x15D2261898FA0510
+    *(out + 16) = 16; *(out + 17) = 5; *(out + 18) = 250; *(out + 19) = 152; *(out + 20) = 24; *(out + 21) = 38; *(out + 22) = 210; *(out + 23) = 21;
+    // limb[3]  = 0x3995497CEA956AE5
+    *(out + 24) = 229; *(out + 25) = 106; *(out + 26) = 149; *(out + 27) = 234; *(out + 28) = 124; *(out + 29) = 73; *(out + 30) = 149; *(out + 31) = 57;
+    // limb[4]  = 0xDE2BCBF695581718
+    *(out + 32) = 24; *(out + 33) = 23; *(out + 34) = 88; *(out + 35) = 149; *(out + 36) = 246; *(out + 37) = 203; *(out + 38) = 43; *(out + 39) = 222;
+    // limb[5]  = 0xB5C55DF06F4C52C9
+    *(out + 40) = 201; *(out + 41) = 82; *(out + 42) = 76; *(out + 43) = 111; *(out + 44) = 240; *(out + 45) = 93; *(out + 46) = 197; *(out + 47) = 181;
+    // limb[6]  = 0x9B2783A2EC07A28F
+    *(out + 48) = 143; *(out + 49) = 162; *(out + 50) = 7; *(out + 51) = 236; *(out + 52) = 162; *(out + 53) = 131; *(out + 54) = 39; *(out + 55) = 155;
+    // limb[7]  = 0xE39E772C180E8603
+    *(out + 56) = 3; *(out + 57) = 134; *(out + 58) = 14; *(out + 59) = 24; *(out + 60) = 44; *(out + 61) = 119; *(out + 62) = 158; *(out + 63) = 227;
+    // limb[8]  = 0x32905E462E36CE3B
+    *(out + 64) = 59; *(out + 65) = 206; *(out + 66) = 54; *(out + 67) = 46; *(out + 68) = 70; *(out + 69) = 94; *(out + 70) = 144; *(out + 71) = 50;
+    // limb[9]  = 0xF1746C08CA18217C
+    *(out + 72) = 124; *(out + 73) = 33; *(out + 74) = 24; *(out + 75) = 202; *(out + 76) = 8; *(out + 77) = 108; *(out + 78) = 116; *(out + 79) = 241;
+    // limb[10] = 0x670C354E4ABC9804
+    *(out + 80) = 4; *(out + 81) = 152; *(out + 82) = 188; *(out + 83) = 74; *(out + 84) = 78; *(out + 85) = 53; *(out + 86) = 12; *(out + 87) = 103;
+    // limb[11] = 0x9ED529077096966D
+    *(out + 88) = 109; *(out + 89) = 150; *(out + 90) = 150; *(out + 91) = 112; *(out + 92) = 7; *(out + 93) = 41; *(out + 94) = 213; *(out + 95) = 158;
+    // limb[12] = 0x1C62F356208552BB
+    *(out + 96) = 187; *(out + 97) = 82; *(out + 98) = 133; *(out + 99) = 32; *(out + 100) = 86; *(out + 101) = 243; *(out + 102) = 98; *(out + 103) = 28;
+    // limb[13] = 0x83655D23DCA3AD96
+    *(out + 104) = 150; *(out + 105) = 173; *(out + 106) = 163; *(out + 107) = 220; *(out + 108) = 35; *(out + 109) = 93; *(out + 110) = 101; *(out + 111) = 131;
+    // limb[14] = 0x69163FA8FD24CF5F
+    *(out + 112) = 95; *(out + 113) = 207; *(out + 114) = 36; *(out + 115) = 253; *(out + 116) = 168; *(out + 117) = 63; *(out + 118) = 22; *(out + 119) = 105;
+    // limb[15] = 0x98DA48361C55D39A
+    *(out + 120) = 154; *(out + 121) = 211; *(out + 122) = 85; *(out + 123) = 28; *(out + 124) = 54; *(out + 125) = 72; *(out + 126) = 218; *(out + 127) = 152;
+    // limb[16] = 0xC2007CB8A163BF05
+    *(out + 128) = 5; *(out + 129) = 191; *(out + 130) = 99; *(out + 131) = 161; *(out + 132) = 184; *(out + 133) = 124; *(out + 134) = 0; *(out + 135) = 194;
+    // limb[17] = 0x49286651ECE45B3D
+    *(out + 136) = 61; *(out + 137) = 91; *(out + 138) = 228; *(out + 139) = 236; *(out + 140) = 81; *(out + 141) = 102; *(out + 142) = 40; *(out + 143) = 73;
+    // limb[18] = 0xAE9F24117C4B1FE6
+    *(out + 144) = 230; *(out + 145) = 31; *(out + 146) = 75; *(out + 147) = 124; *(out + 148) = 17; *(out + 149) = 36; *(out + 150) = 159; *(out + 151) = 174;
+    // limb[19] = 0xEE386BFB5A899FA5
+    *(out + 152) = 165; *(out + 153) = 159; *(out + 154) = 137; *(out + 155) = 90; *(out + 156) = 251; *(out + 157) = 107; *(out + 158) = 56; *(out + 159) = 238;
+    // limb[20] = 0x0BFF5CB6F406B7ED
+    *(out + 160) = 237; *(out + 161) = 183; *(out + 162) = 6; *(out + 163) = 244; *(out + 164) = 182; *(out + 165) = 92; *(out + 166) = 255; *(out + 167) = 11;
+    // limb[21] = 0xF44C42E9A637ED6B
+    *(out + 168) = 107; *(out + 169) = 237; *(out + 170) = 55; *(out + 171) = 166; *(out + 172) = 233; *(out + 173) = 66; *(out + 174) = 76; *(out + 175) = 244;
+    // limb[22] = 0xE485B576625E7EC6
+    *(out + 176) = 198; *(out + 177) = 126; *(out + 178) = 94; *(out + 179) = 98; *(out + 180) = 118; *(out + 181) = 181; *(out + 182) = 133; *(out + 183) = 228;
+    // limb[23] = 0x4FE1356D6D51C245
+    *(out + 184) = 69; *(out + 185) = 194; *(out + 186) = 81; *(out + 187) = 109; *(out + 188) = 109; *(out + 189) = 53; *(out + 190) = 225; *(out + 191) = 79;
+    // limb[24] = 0x302B0A6DF25F1437
+    *(out + 192) = 55; *(out + 193) = 20; *(out + 194) = 95; *(out + 195) = 242; *(out + 196) = 109; *(out + 197) = 10; *(out + 198) = 43; *(out + 199) = 48;
+    // limb[25] = 0xEF9519B3CD3A431B
+    *(out + 200) = 27; *(out + 201) = 67; *(out + 202) = 58; *(out + 203) = 205; *(out + 204) = 179; *(out + 205) = 25; *(out + 206) = 149; *(out + 207) = 239;
+    // limb[26] = 0x514A08798E3404DD
+    *(out + 208) = 221; *(out + 209) = 4; *(out + 210) = 52; *(out + 211) = 142; *(out + 212) = 121; *(out + 213) = 8; *(out + 214) = 74; *(out + 215) = 81;
+    // limb[27] = 0x020BBEA63B139B22
+    *(out + 216) = 34; *(out + 217) = 155; *(out + 218) = 19; *(out + 219) = 59; *(out + 220) = 166; *(out + 221) = 190; *(out + 222) = 11; *(out + 223) = 2;
+    // limb[28] = 0x29024E088A67CC74
+    *(out + 224) = 116; *(out + 225) = 204; *(out + 226) = 103; *(out + 227) = 138; *(out + 228) = 8; *(out + 229) = 78; *(out + 230) = 2; *(out + 231) = 41;
+    // limb[29] = 0xC4C6628B80DC1CD1
+    *(out + 232) = 209; *(out + 233) = 28; *(out + 234) = 220; *(out + 235) = 128; *(out + 236) = 139; *(out + 237) = 98; *(out + 238) = 198; *(out + 239) = 196;
+    // limb[30] = 0xC90FDAA22168C234
+    *(out + 240) = 52; *(out + 241) = 194; *(out + 242) = 104; *(out + 243) = 33; *(out + 244) = 162; *(out + 245) = 218; *(out + 246) = 15; *(out + 247) = 201;
+    // limb[31] = 0xFFFFFFFFFFFFFFFF (most significant)
+    *(out + 248) = 255; *(out + 249) = 255; *(out + 250) = 255; *(out + 251) = 255; *(out + 252) = 255; *(out + 253) = 255; *(out + 254) = 255; *(out + 255) = 255;
+    return;
+}
+
+// Convert a 256-byte little-endian bn2048 buffer to 256 big-endian bytes
+// (for mpint encoding on the wire). `be_out` receives the big-endian
+// magnitude: be_out[0] = MSB, be_out[255] = LSB.
+fn ssh_bn2048_to_be(bn: Address, be_out: Address) {
+    i: u32 = 0;
+    while i < DH_GROUP14_BYTES {
+        *(be_out + i) = *(bn + (DH_GROUP14_BYTES - 1) - i);
+        i = i + 1;
+    }
+    return;
+}
+
+// Convert a big-endian byte buffer (e.g. an mpint body parsed from the wire)
+// to a 256-byte little-endian bn2048 buffer. `be_len` is the length of the
+// big-endian input; if shorter than 256 bytes the high bytes of `bn` are
+// zero-filled. be[0] = MSB, be[be_len-1] = LSB.
+fn ssh_be_bytes_to_bn2048(be: Address, be_len: u32, bn: Address) {
+    bn2048_zero(bn);
+    i: u32 = 0;
+    while i < be_len {
+        if i < DH_GROUP14_BYTES {
+            *(bn + i) = *(be + (be_len - 1) - i);
+        }
+        i = i + 1;
+    }
+    return;
+}
+
+// Compute the client's DH public value e = g^x mod p, where x is the
+// caller-provided 256-byte little-endian private exponent and g = 2, p is
+// the RFC 3526 group14 prime.
+//   private_key: 256-byte LE bignum (caller's random private exponent x).
+//   public_out:  256-byte LE bignum (receives e = g^x mod p).
+// Returns 1 on success.
+fn ssh_dh_compute_public(private_key: Address, public_out: Address) -> u32 {
+    p = allocate(DH_GROUP14_BYTES);
+    g = allocate(DH_GROUP14_BYTES);
+    ssh_dh_group14_prime(p);
+    bn2048_set_u32(g, DH_GROUP14_GENERATOR);
+    bn2048_mod_exp(public_out, g, private_key, p);
+    free(p);
+    free(g);
     return 1;
 }
 
-// SSH_MSG_KEX_ECDH_INIT (type 30). RFC 5656 §4.
-//   public_key: client ephemeral public key (raw bytes; e.g. 65-byte
-//               uncompressed P-256 point: 0x04 || X || Y).
-//   pk_len:     length of public_key.
-//   out:        output buffer.
+// Compute the DH shared secret K = (server_pub ^ client_key) mod p, where
+// p is the RFC 3526 group14 prime. RFC 4253 §8.
+//   client_key:      256-byte LE bignum (client's private exponent x).
+//   server_pub:      256-byte LE bignum (server's public DH value f).
+//   shared_secret_out: 256-byte LE bignum (receives K = f^x mod p).
+// Returns 1 on success.
+fn ssh_dh_kex_init(client_key: Address, server_pub: Address, shared_secret_out: Address) -> u32 {
+    p = allocate(DH_GROUP14_BYTES);
+    ssh_dh_group14_prime(p);
+    bn2048_mod_exp(shared_secret_out, server_pub, client_key, p);
+    free(p);
+    return 1;
+}
+
+// Build SSH_MSG_KEXDH_INIT (type 30). RFC 4253 §8.
+//   e:        client's DH public value as a big-endian magnitude buffer
+//             (256 bytes from ssh_bn2048_to_be).
+//   e_len:    length of e (typically 256).
+//   out:      output buffer.
 //   Returns bytes written.
-fn ssh_build_kex_ecdh_init(public_key: Address, pk_len: u32, out: Address) -> u32 {
+fn ssh_build_kex_dh_init(e: Address, e_len: u32, out: Address) -> u32 {
     pos: u32 = 0;
-    *(out + pos) = SSH_MSG_KEX_ECDH_INIT & 255;
+    *(out + pos) = SSH_MSG_KEXDH_INIT & 255;
     pos = pos + 1;
-    pos = ssh_write_string(out, pos, public_key, pk_len);
+    pos = ssh_write_string(out, pos, e, e_len);
     return pos;
 }
 
-// SSH_MSG_KEX_ECDH_REPLY (type 31). RFC 5656 §4.
+// Parse SSH_MSG_KEXDH_REPLY (type 31). RFC 4253 §8.
 //   buf:          packet payload (type byte at offset 0).
 //   buf_len:      length of buf.
 //   host_key:     caller-allocated output buffer for K_S (server host key blob).
 //   host_key_len: address of a 4-byte cell; receives length of K_S (BE u32).
-//   server_pubkey: caller-allocated output buffer for Q_S.
-//   sp_len:       address of a 4-byte cell; receives length of Q_S (BE u32).
+//   server_pubkey: caller-allocated output buffer for f (server's DH public
+//                  value, as a big-endian magnitude with any mpint leading
+//                  0x00 stripped).
+//   sp_len:       address of a 4-byte cell; receives length of f (BE u32).
 //   sig:          caller-allocated output buffer for H_sig (signature over H).
 //   sig_len:      address of a 4-byte cell; receives length of H_sig (BE u32).
 //   Returns 1 on success, 0 on malformed input.
-//
-// (Function name spelled exactly as specified in the task.)
-fn ssh_parse_kex_ech_reply(buf: Address, buf_len: u32, host_key: Address, host_key_len: Address, server_pubkey: Address, sp_len: Address, sig: Address, sig_len: Address) -> u32 {
-    if buf_len < 1 { return 0; }
-    if *(buf + 0) != (SSH_MSG_KEX_ECDH_REPLY & 255) { return 0; }
-    pos: u32 = 1;
+fn ssh_dh_kex_reply_parser(buf: Address, buf_len: u32, host_key: Address, host_key_len: Address, server_pubkey: Address, sp_len: Address, sig: Address, sig_len: Address) -> u32 {
+    status: u32 = 1;
+    pos: u32 = 0;
 
-    // K_S
-    if pos + 4 > buf_len { return 0; }
-    ks_len: u32 = ssh_get_u32_be(buf + pos);
-    pos = pos + 4;
-    if pos + ks_len > buf_len { return 0; }
-    i: u32 = 0;
-    while i < ks_len { *(host_key + i) = *(buf + pos + i); i = i + 1; }
-    ssh_put_u32_be(host_key_len, ks_len);
-    pos = pos + ks_len;
+    if buf_len < 1 { status = 0; }
+    if status == 1 {
+        if *(buf + 0) != (SSH_MSG_KEXDH_REPLY & 255) { status = 0; }
+        pos = 1;
+    }
 
-    // Q_S
-    if pos + 4 > buf_len { return 0; }
-    qs_len: u32 = ssh_get_u32_be(buf + pos);
-    pos = pos + 4;
-    if pos + qs_len > buf_len { return 0; }
-    i = 0;
-    while i < qs_len { *(server_pubkey + i) = *(buf + pos + i); i = i + 1; }
-    ssh_put_u32_be(sp_len, qs_len);
-    pos = pos + qs_len;
+    // K_S (string)
+    if status == 1 {
+        if pos + 4 > buf_len { status = 0; }
+    }
+    if status == 1 {
+        ks_len: u32 = ssh_get_u32_be(buf + pos);
+        pos = pos + 4;
+        if pos + ks_len > buf_len { status = 0; }
+        if status == 1 {
+            i: u32 = 0;
+            while i < ks_len { *(host_key + i) = *(buf + pos + i); i = i + 1; }
+            ssh_put_u32_be(host_key_len, ks_len);
+            pos = pos + ks_len;
+        }
+    }
 
-    // H_sig
-    if pos + 4 > buf_len { return 0; }
-    sig_l: u32 = ssh_get_u32_be(buf + pos);
-    pos = pos + 4;
-    if pos + sig_l > buf_len { return 0; }
-    i = 0;
-    while i < sig_l { *(sig + i) = *(buf + pos + i); i = i + 1; }
-    ssh_put_u32_be(sig_len, sig_l);
-    pos = pos + sig_l;
+    // f (mpint)
+    if status == 1 {
+        if pos + 4 > buf_len { status = 0; }
+    }
+    if status == 1 {
+        f_len: u32 = ssh_get_u32_be(buf + pos);
+        pos = pos + 4;
+        if pos + f_len > buf_len { status = 0; }
+        if status == 1 {
+            // Strip the optional mpint leading 0x00 byte (present when the
+            // high bit of the magnitude is set).
+            f_body_off: u32 = pos;
+            f_body_len: u32 = f_len;
+            if f_len > 0 {
+                if *(buf + pos) == 0 {
+                    f_body_off = pos + 1;
+                    f_body_len = f_len - 1;
+                }
+            }
+            i: u32 = 0;
+            while i < f_body_len { *(server_pubkey + i) = *(buf + f_body_off + i); i = i + 1; }
+            ssh_put_u32_be(sp_len, f_body_len);
+            pos = pos + f_len;
+        }
+    }
 
-    return 1;
+    // H_sig (string)
+    if status == 1 {
+        if pos + 4 > buf_len { status = 0; }
+    }
+    if status == 1 {
+        sig_l: u32 = ssh_get_u32_be(buf + pos);
+        pos = pos + 4;
+        if pos + sig_l > buf_len { status = 0; }
+        if status == 1 {
+            i: u32 = 0;
+            while i < sig_l { *(sig + i) = *(buf + pos + i); i = i + 1; }
+            ssh_put_u32_be(sig_len, sig_l);
+            pos = pos + sig_l;
+        }
+    }
+
+    return status;
 }
 
-// Exchange hash H = SHA-256( V_C || V_S || I_C || I_S || K_S || Q_C || Q_S || K )
-// RFC 4253 §8 / RFC 5656 §4. Each of V_C..Q_S is encoded as an SSH string;
-// K (the shared secret) is encoded as an mpint.
+// ===========================================================================
+// 4. SSH Exchange Hash (RFC 4253 §8)
+// ===========================================================================
+
+// Exchange hash H = SHA-256( V_C || V_S || I_C || I_S || K_S || e || f || K )
+// RFC 4253 §8. Each of V_C..f is encoded as an SSH string; K (the shared
+// secret) is encoded as an mpint.
 //   client_id / server_id:   NUL-terminated identification strings
 //                            (e.g. "SSH-2.0-OpenSSH_8.9", WITHOUT trailing CR/LF).
 //   client_kex / server_kex: raw KEXINIT payloads (including the type byte),
 //                            as produced by ssh_build_kex_init.
 //   host_key:                raw K_S blob.
-//   client_pubkey / server_pubkey: raw ephemeral public keys (Q_C / Q_S).
-//   shared:                  raw shared secret K (big-endian magnitude).
+//   client_pubkey / server_pubkey: big-endian magnitudes of e and f.
+//   shared:                  big-endian magnitude of K.
 //   out:                     32-byte output buffer for H.
 //   Returns 1 on success.
 fn ssh_compute_exchange_hash(client_id: Address, server_id: Address, client_kex: Address, client_kex_len: u32, server_kex: Address, server_kex_len: u32, host_key: Address, host_key_len: u32, client_pubkey: Address, cp_len: u32, server_pubkey: Address, sp_len: u32, shared: Address, shared_len: u32, out: Address) -> u32 {
@@ -420,7 +720,7 @@ fn ssh_compute_exchange_hash(client_id: Address, server_id: Address, client_kex:
 }
 
 // ===========================================================================
-// 2. SSH Key Derivation (RFC 4253 §7.2)
+// 5. SSH Key Derivation (RFC 4253 §7.2)
 // ===========================================================================
 
 // Derive `out_len` bytes of key material from K, H, and the session id using
@@ -476,86 +776,98 @@ fn ssh_derive_key_material(k_mpint: Address, k_mpint_len: u32, h: Address, sessi
 }
 
 // Derive the six session keys from K, H, and the session id. RFC 4253 §7.2.
-//   IV_c2s = HASH(K || H || "A" || session_id)        (16 bytes)
-//   IV_s2c = HASH(K || H || "B" || session_id)        (16 bytes)
-//   enc_key_c2s = HASH(K || H || "C" || session_id)   (32 bytes)
+//   IV_c2s      = HASH(K || H || "A" || session_id)   (16 bytes, AES-256 IV)
+//   IV_s2c      = HASH(K || H || "B" || session_id)   (16 bytes)
+//   enc_key_c2s = HASH(K || H || "C" || session_id)   (32 bytes, AES-256 key)
 //   enc_key_s2c = HASH(K || H || "D" || session_id)   (32 bytes)
-//   mac_key_c2s = HASH(K || H || "E" || session_id)   (32 bytes)
+//   mac_key_c2s = HASH(K || H || "E" || session_id)   (32 bytes, HMAC-SHA-256 key)
 //   mac_key_s2c = HASH(K || H || "F" || session_id)   (32 bytes)
-// For this cipher suite (AES-256-CTR + HMAC-SHA-256) every key fits within a
-// single 32-byte hash output, so no K2/K3 extension is exercised; the
+// For this cipher suite (AES-256-CTR + HMAC-SHA-256) every key fits within
+// a single 32-byte hash output, so no K2/K3 extension is exercised; the
 // extension is nonetheless supported by ssh_derive_key_material.
 //
-//   shared:        raw shared secret K (big-endian magnitude).
-//   shared_len:    length of shared.
+//   shared_secret: 256-byte LE bn2048 buffer holding K.
 //   exchange_hash: 32-byte H.
 //   session_id:    32-byte session identifier (== H on the first exchange).
-//   keys:          output buffer of at least KEYS_TOTAL_SIZE (160) bytes.
-fn ssh_derive_keys(shared: Address, shared_len: u32, exchange_hash: Address, session_id: Address, keys: Address) {
-    // Encode K as an mpint once and reuse it for every derivation.
-    klen: u32 = ssh_mpint_len(shared, shared_len);
+//   iv_c2s / iv_s2c:           16-byte output buffers (AES-256 IVs).
+//   enc_key_c2s / enc_key_s2c: 32-byte output buffers (AES-256 keys).
+//   mac_key_c2s / mac_key_s2c: 32-byte output buffers (HMAC-SHA-256 keys).
+fn ssh_derive_keys(shared_secret: Address, exchange_hash: Address, session_id: Address, iv_c2s: Address, iv_s2c: Address, enc_key_c2s: Address, enc_key_s2c: Address, mac_key_c2s: Address, mac_key_s2c: Address) {
+    // Convert the LE bn2048 shared secret to a big-endian magnitude for
+    // mpint encoding, then write the mpint (with optional 0x00 prefix) once
+    // and reuse it for every derivation letter.
+    k_be = allocate(DH_GROUP14_BYTES);
+    ssh_bn2048_to_be(shared_secret, k_be);
+    klen: u32 = ssh_mpint_len(k_be, DH_GROUP14_BYTES);
     k_mpint = allocate(klen);
-    written: u32 = ssh_write_mpint(k_mpint, 0, shared, shared_len);
+    ssh_write_mpint(k_mpint, 0, k_be, DH_GROUP14_BYTES);
 
-    ssh_derive_key_material(k_mpint, klen, exchange_hash, session_id, SHA256_DIGEST_SIZE, LETTER_A, keys + KEYS_IV_C2S_OFF, AES_BLOCK_SIZE);
-    ssh_derive_key_material(k_mpint, klen, exchange_hash, session_id, SHA256_DIGEST_SIZE, LETTER_B, keys + KEYS_IV_S2C_OFF, AES_BLOCK_SIZE);
-    ssh_derive_key_material(k_mpint, klen, exchange_hash, session_id, SHA256_DIGEST_SIZE, LETTER_C, keys + KEYS_ENC_C2S_OFF, AES256_KEY_SIZE);
-    ssh_derive_key_material(k_mpint, klen, exchange_hash, session_id, SHA256_DIGEST_SIZE, LETTER_D, keys + KEYS_ENC_S2C_OFF, AES256_KEY_SIZE);
-    ssh_derive_key_material(k_mpint, klen, exchange_hash, session_id, SHA256_DIGEST_SIZE, LETTER_E, keys + KEYS_MAC_C2S_OFF, HMAC_SHA256_OUT_SIZE);
-    ssh_derive_key_material(k_mpint, klen, exchange_hash, session_id, SHA256_DIGEST_SIZE, LETTER_F, keys + KEYS_MAC_S2C_OFF, HMAC_SHA256_OUT_SIZE);
+    ssh_derive_key_material(k_mpint, klen, exchange_hash, session_id, SHA256_DIGEST_SIZE, LETTER_A, iv_c2s, AES_BLOCK_SIZE);
+    ssh_derive_key_material(k_mpint, klen, exchange_hash, session_id, SHA256_DIGEST_SIZE, LETTER_B, iv_s2c, AES_BLOCK_SIZE);
+    ssh_derive_key_material(k_mpint, klen, exchange_hash, session_id, SHA256_DIGEST_SIZE, LETTER_C, enc_key_c2s, AES256_KEY_SIZE);
+    ssh_derive_key_material(k_mpint, klen, exchange_hash, session_id, SHA256_DIGEST_SIZE, LETTER_D, enc_key_s2c, AES256_KEY_SIZE);
+    ssh_derive_key_material(k_mpint, klen, exchange_hash, session_id, SHA256_DIGEST_SIZE, LETTER_E, mac_key_c2s, HMAC_SHA256_OUT_SIZE);
+    ssh_derive_key_material(k_mpint, klen, exchange_hash, session_id, SHA256_DIGEST_SIZE, LETTER_F, mac_key_s2c, HMAC_SHA256_OUT_SIZE);
 
+    free(k_be);
     free(k_mpint);
     return;
 }
 
 // ===========================================================================
-// 3. SSH Binary Packet Protocol (RFC 4253 §6)
+// 6. SSH Binary Packet Protocol (RFC 4253 §6)
 // ===========================================================================
 
 // Advance a 16-byte big-endian AES-CTR counter (`iv`) by the number of 16-byte
 // blocks needed to cover `byte_len` bytes. Call this between successive
-// ssh_build_packet / ssh_parse_packet calls on the same stream so the CTR
-// keystream continues correctly (the counter is continuous across packets).
+// ssh_encrypt_packet calls on the same stream so the CTR keystream continues
+// correctly (the counter is continuous across packets).
+//
+// Note: the canonical aes256_ctr_crypt treats bytes [0..11] of `nonce` as a
+// 96-bit nonce and runs a 32-bit block counter in bytes [12..15] starting at
+// 0. For SSH multi-packet streams, advancing the full 128-bit IV by the block
+// count keeps the nonce portion (bytes [0..11]) unique per packet whenever
+// the carry propagates past byte 12; for full RFC 4344 compliance callers
+// may instead advance iv[0..11] by 1 per packet (one nonce per packet, with
+// the 32-bit block counter resetting to 0 internally).
 fn ssh_ctr_advance_iv(iv: Address, byte_len: u32) {
     blocks: u32 = byte_len / AES_BLOCK_SIZE;
     rem: u32 = byte_len - (blocks * AES_BLOCK_SIZE);
     if rem != 0 { blocks = blocks + 1; }
-    if blocks == 0 { return; }
-    carry: u32 = blocks;
-    i: u32 = AES_BLOCK_SIZE;       // start at 16, decrement to 0
-    while i > 0 {
-        if carry == 0 { break; }
-        i = i - 1;
-        cur: u32 = *(iv + i);
-        sum: u32 = cur + (carry & 255);
-        *(iv + i) = sum & 255;
-        carry = (sum >> 8) + (carry >> 8);
+    if blocks != 0 {
+        carry: u32 = blocks;
+        i: u32 = AES_BLOCK_SIZE;
+        done: u32 = 0;
+        while i > 0 && done == 0 {
+            if carry == 0 { done = 1; }
+            else {
+                i = i - 1;
+                cur: u32 = *(iv + i);
+                sum: u32 = cur + (carry & 255);
+                *(iv + i) = sum & 255;
+                carry = (sum >> 8) + (carry >> 8);
+            }
+        }
     }
     return;
 }
 
-// Build an SSH binary packet. RFC 4253 §6.
+// Build an SSH binary packet (plaintext, unencrypted). RFC 4253 §6.
 //   payload:     plaintext payload (already including its leading type byte).
-//   key:         AES-256 encryption key (32 bytes). If 0, the packet is sent
-//                unencrypted (used for the initial plaintext KEXINIT).
-//   iv:          16-byte AES-CTR initial counter. NOT mutated here; for
-//                multi-packet streams the caller advances it with
-//                ssh_ctr_advance_iv(iv, returned_unencrypted_len).
-//   mac_key:     HMAC-SHA-256 integrity key (32 bytes). If 0, no MAC appended.
-//   seq_num:     32-bit packet sequence number (prepended to the MAC input).
+//   payload_len: length of payload.
+//   block_size:  cipher block size in bytes (16 for AES-256, 8 for the
+//                initial plaintext KEXINIT exchange).
 //   out:         output buffer.
-//   Returns total bytes written (encrypted packet || MAC).
+//   Returns total bytes written (the unencrypted packet length, without MAC).
 //
 // Packet layout:  packet_length(4) || padding_length(1) || payload ||
-//                 random_padding || MAC
+//                 random_padding
 //   packet_length = 1 + payload_len + padding_length
 //   padding is chosen so that (4 + 1 + payload_len + padding) is a multiple of
-//   the cipher block size (16 for AES-256, 8 when unencrypted), and is in
-//   [4, 255].
-fn ssh_build_packet(payload: Address, payload_len: u32, key: Address, iv: Address, mac_key: Address, seq_num: u32, out: Address) -> u32 {
-    block_size: u32 = AES_BLOCK_SIZE;
-    if key == 0 { block_size = SSH_PLAINTEXT_BLOCK_SIZE; }
-
+//   block_size, and is in [4, 255]. Padding bytes are set to zero; callers
+//   requiring randomised padding per RFC 4253 §6 SHOULD overwrite them before
+//   encryption.
+fn ssh_build_packet(payload: Address, payload_len: u32, block_size: u32, out: Address) -> u32 {
     // padding length
     inner: u32 = 5 + payload_len;                    // packet_length field + padding_length byte + payload
     rem: u32 = inner - ((inner / block_size) * block_size);
@@ -564,129 +876,140 @@ fn ssh_build_packet(payload: Address, payload_len: u32, key: Address, iv: Addres
     if pad_len > SSH_MAX_PADDING { pad_len = SSH_MAX_PADDING; }
 
     packet_length: u32 = 1 + payload_len + pad_len;
-    unencrypted_len: u32 = 4 + packet_length;
+    total: u32 = 4 + packet_length;
 
-    plain = allocate(unencrypted_len);
-    ssh_put_u32_be(plain, packet_length);
-    *(plain + 4) = pad_len & 255;
+    ssh_put_u32_be(out, packet_length);
+    *(out + 4) = pad_len & 255;
     i: u32 = 0;
-    while i < payload_len { *(plain + 5 + i) = *(payload + i); i = i + 1; }
-    // random padding (zeros — see SECURITY NOTE at top of file)
+    while i < payload_len { *(out + 5 + i) = *(payload + i); i = i + 1; }
+    // padding bytes (zeros)
     i = 0;
-    while i < pad_len { *(plain + 5 + payload_len + i) = 0; i = i + 1; }
+    while i < pad_len { *(out + 5 + payload_len + i) = 0; i = i + 1; }
 
-    // encrypt (or copy) the unencrypted packet into out
-    if key != 0 {
-        iv_copy = allocate(AES_BLOCK_SIZE);
-        j: u32 = 0;
-        while j < AES_BLOCK_SIZE { *(iv_copy + j) = *(iv + j); j = j + 1; }
-        aes256_ctr_crypt(key, iv_copy, plain, unencrypted_len, out);
-        free(iv_copy);
-    } else {
-        i = 0;
-        while i < unencrypted_len { *(out + i) = *(plain + i); i = i + 1; }
-    }
-
-    total: u32 = unencrypted_len;
-    // MAC = HMAC-SHA-256(mac_key, seq_num || unencrypted_packet)
-    if mac_key != 0 {
-        mac_input = allocate(4 + unencrypted_len);
-        ssh_put_u32_be(mac_input, seq_num);
-        i = 0;
-        while i < unencrypted_len { *(mac_input + 4 + i) = *(plain + i); i = i + 1; }
-        hmac_sha256(mac_key, HMAC_SHA256_OUT_SIZE, mac_input, 4 + unencrypted_len, out + unencrypted_len);
-        free(mac_input);
-        total = unencrypted_len + HMAC_SHA256_OUT_SIZE;
-    }
-
-    free(plain);
     return total;
 }
 
-// Parse (decrypt + verify MAC of) an SSH binary packet. RFC 4253 §6.
-//   encrypted:  received bytes (encrypted packet || MAC).
-//   enc_len:    length of `encrypted`.
-//   key/iv/mac_key/seq_num: the values used by the sender for this packet.
-//   payload:    output buffer for the recovered payload (without padding).
-//   Returns payload length on success, 0 on MAC failure or malformed input.
+// Parse a plaintext SSH binary packet. RFC 4253 §6.
+//   data:             plaintext packet bytes (after decryption).
+//   len:              length of data.
+//   payload:          output buffer for the recovered payload (without padding).
+//   payload_len_out:  address of a 4-byte cell; receives the payload length
+//                     (BE u32).
+//   Returns 1 on success, 0 on malformed input.
 //
-// The MAC (if present) is the last 32 bytes of `encrypted` and is NOT
-// encrypted. The ciphertext portion (everything before the MAC) is decrypted
-// in a single AES-256-CTR call starting from `iv`.
-fn ssh_parse_packet(encrypted: Address, enc_len: u32, key: Address, iv: Address, mac_key: Address, seq_num: u32, payload: Address) -> u32 {
-    mac_len: u32 = HMAC_SHA256_OUT_SIZE;
-    if mac_key == 0 { mac_len = 0; }
+// The MAC is not handled here; the caller verifies it separately via
+// ssh_compute_packet_mac before calling this function on the decrypted bytes.
+fn ssh_parse_packet(data: Address, len: u32, payload: Address, payload_len_out: Address) -> u32 {
+    status: u32 = 1;
 
-    // Need at least the 4-byte packet_length + 1-byte padding_length (+ MAC).
-    if enc_len < mac_len + 5 { return 0; }
-    cipher_len: u32 = enc_len - mac_len;
+    if len < 5 { status = 0; }
 
-    // Decrypt (or copy) the ciphertext portion.
-    plain = allocate(cipher_len);
-    if key != 0 {
-        iv_copy = allocate(AES_BLOCK_SIZE);
-        j: u32 = 0;
-        while j < AES_BLOCK_SIZE { *(iv_copy + j) = *(iv + j); j = j + 1; }
-        aes256_ctr_crypt(key, iv_copy, encrypted, cipher_len, plain);
-        free(iv_copy);
-    } else {
-        i: u32 = 0;
-        while i < cipher_len { *(plain + i) = *(encrypted + i); i = i + 1; }
+    packet_length: u32 = 0;
+    padding_length: u32 = 0;
+    payload_len: u32 = 0;
+
+    if status == 1 {
+        packet_length = ssh_get_u32_be(data);
+        if 4 + packet_length > len { status = 0; }
     }
-
-    packet_length: u32 = ssh_get_u32_be(plain);
-    if 4 + packet_length > cipher_len { free(plain); return 0; }
-    padding_length: u32 = *(plain + 4);
-    if padding_length >= packet_length { free(plain); return 0; }
-    payload_len: u32 = packet_length - 1 - padding_length;
-
-    // Verify MAC.
-    if mac_key != 0 {
-        unencrypted_len: u32 = 4 + packet_length;
-        mac_input = allocate(4 + unencrypted_len);
-        ssh_put_u32_be(mac_input, seq_num);
-        i: u32 = 0;
-        while i < unencrypted_len { *(mac_input + 4 + i) = *(plain + i); i = i + 1; }
-        expected = allocate(HMAC_SHA256_OUT_SIZE);
-        hmac_sha256(mac_key, HMAC_SHA256_OUT_SIZE, mac_input, 4 + unencrypted_len, expected);
-        ok: u32 = 1;
-        i = 0;
-        while i < HMAC_SHA256_OUT_SIZE {
-            if *(encrypted + cipher_len + i) != *(expected + i) { ok = 0; }
-            i = i + 1;
-        }
-        free(mac_input);
-        free(expected);
-        if ok == 0 { free(plain); return 0; }
+    if status == 1 {
+        padding_length = *(data + 4);
+        if padding_length >= packet_length { status = 0; }
     }
-
-    // Copy payload out.
-    i: u32 = 0;
-    while i < payload_len { *(payload + i) = *(plain + 5 + i); i = i + 1; }
-
-    free(plain);
-    return payload_len;
+    if status == 1 {
+        payload_len = packet_length - 1 - padding_length;
+        i: u32 = 0;
+        while i < payload_len { *(payload + i) = *(data + 5 + i); i = i + 1; }
+        ssh_put_u32_be(payload_len_out, payload_len);
+    }
+    return status;
 }
 
 // ===========================================================================
-// 4. SSH Connection Layer (RFC 4254)
+// 7. SSH Packet Encryption (RFC 4253 §6, RFC 4344)
+// ===========================================================================
+
+// Encrypt `data` (in place to `out`) using AES-256-CTR with the canonical
+// aes256_ctr_crypt signature. The IV/nonce is treated as a 96-bit nonce
+// (bytes [0..11]) plus a 32-bit block counter (bytes [12..15]) that starts
+// at 0 and increments per 16-byte block within this call. For multi-packet
+// streams the caller advances `iv` between calls via ssh_ctr_advance_iv so
+// each packet's keystream is unique.
+//   key:      32-byte AES-256 key.
+//   iv:       16-byte IV / nonce.
+//   data:     plaintext input bytes.
+//   data_len: length of data.
+//   out:      ciphertext output buffer (may equal data for in-place).
+fn ssh_encrypt_packet(key: Address, iv: Address, data: Address, data_len: u32, out: Address) {
+    aes256_ctr_crypt(data, data_len, key, iv, out);
+    return;
+}
+
+// ===========================================================================
+// 8. SSH Packet MAC (RFC 4253 §6.4, HMAC-SHA-256)
+// ===========================================================================
+
+// Compute the SSH packet MAC = HMAC-SHA-256(mac_key, sequence_no || packet).
+//   mac_key:     32-byte HMAC-SHA-256 key.
+//   sequence_no: 32-bit packet sequence number (prepended to the MAC input
+//                as a 4-byte big-endian integer, per RFC 4253 §6.4).
+//   packet_data: the unencrypted packet bytes (packet_length || padding_length
+//                || payload || padding).
+//   packet_len:  length of packet_data.
+//   mac_out:     32-byte output buffer for the MAC tag.
+fn ssh_compute_packet_mac(mac_key: Address, sequence_no: u32, packet_data: Address, packet_len: u32, mac_out: Address) {
+    mac_input = allocate(4 + packet_len);
+    ssh_put_u32_be(mac_input, sequence_no);
+    i: u32 = 0;
+    while i < packet_len { *(mac_input + 4 + i) = *(packet_data + i); i = i + 1; }
+    hmac_sha256(mac_key, HMAC_SHA256_OUT_SIZE, mac_input, 4 + packet_len, mac_out);
+    free(mac_input);
+    return;
+}
+
+// ===========================================================================
+// 9. SSH Authentication (RFC 4252)
+// ===========================================================================
+
+// SSH_MSG_USERAUTH_REQUEST (type 50). RFC 4252 §5.
+//   username / service / method: NUL-terminated strings.
+//   out: output buffer.
+//   Returns bytes written.
+//
+// Builds the common prefix: user || service || method. Method-specific fields
+// (e.g. the boolean + password for "password", or the algorithm + public key
+// + signature for "publickey") are NOT included and should be appended by the
+// caller as needed.
+fn ssh_build_userauth_request(username: Address, service: Address, method: Address, out: Address) -> u32 {
+    pos: u32 = 0;
+    *(out + pos) = SSH_MSG_USERAUTH_REQUEST & 255;
+    pos = pos + 1;
+    pos = ssh_write_cstr_string(out, pos, username);
+    pos = ssh_write_cstr_string(out, pos, service);
+    pos = ssh_write_cstr_string(out, pos, method);
+    return pos;
+}
+
+// ===========================================================================
+// 10. SSH Connection Layer (RFC 4254)
 // ===========================================================================
 
 // SSH_MSG_CHANNEL_OPEN (type 90). RFC 4254 §5.1.
 //   channel_type:    NUL-terminated channel type (e.g. "session").
 //   sender_channel:  local channel number.
 //   window_size:     initial window size.
-//   max_packet:      maximum packet size the sender can receive.
 //   out:             output buffer.
 //   Returns bytes written.
-fn ssh_build_channel_open(channel_type: Address, sender_channel: u32, window_size: u32, max_packet: u32, out: Address) -> u32 {
+//
+// The maximum packet size field is set to SSH_DEFAULT_MAX_PACKET (32768).
+fn ssh_build_channel_open(channel_type: Address, sender_channel: u32, window_size: u32, out: Address) -> u32 {
     pos: u32 = 0;
     *(out + pos) = SSH_MSG_CHANNEL_OPEN & 255;
     pos = pos + 1;
     pos = ssh_write_cstr_string(out, pos, channel_type);
     ssh_put_u32_be(out + pos, sender_channel); pos = pos + 4;
     ssh_put_u32_be(out + pos, window_size); pos = pos + 4;
-    ssh_put_u32_be(out + pos, max_packet); pos = pos + 4;
+    ssh_put_u32_be(out + pos, SSH_DEFAULT_MAX_PACKET); pos = pos + 4;
     return pos;
 }
 
@@ -714,28 +1037,5 @@ fn ssh_build_channel_close(channel: u32, out: Address) -> u32 {
     *(out + pos) = SSH_MSG_CHANNEL_CLOSE & 255;
     pos = pos + 1;
     ssh_put_u32_be(out + pos, channel); pos = pos + 4;
-    return pos;
-}
-
-// ===========================================================================
-// 5. SSH Authentication (RFC 4252)
-// ===========================================================================
-
-// SSH_MSG_USERAUTH_REQUEST (type 50). RFC 4252 §5.
-//   username / service / method: NUL-terminated strings.
-//   out: output buffer.
-//   Returns bytes written.
-//
-// Builds the common prefix: user || service || method. Method-specific fields
-// (e.g. the boolean + password for "password", or the algorithm + public key
-// + signature for "publickey") are NOT included and should be appended by the
-// caller as needed.
-fn ssh_build_userauth_request(username: Address, service: Address, method: Address, out: Address) -> u32 {
-    pos: u32 = 0;
-    *(out + pos) = SSH_MSG_USERAUTH_REQUEST & 255;
-    pos = pos + 1;
-    pos = ssh_write_cstr_string(out, pos, username);
-    pos = ssh_write_cstr_string(out, pos, service);
-    pos = ssh_write_cstr_string(out, pos, method);
     return pos;
 }
