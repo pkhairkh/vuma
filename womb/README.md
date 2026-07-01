@@ -1,83 +1,86 @@
 # Womb — VUMA Standard Library
 
-Real compilable VUMA implementations of the POSIX + NIST + encoding stack.
-All code compiles to bare-metal machine code on all 10 VUMA backends.
+VUMA-native library code. All 115 `.vuma` files compile on x86_64 with `--verification none`.
 
-## Library Modules (`womb/lib/`)
+**Important:** These are VUMA source files, not linked Rust code. They are not integrated into the compilation pipeline as automatic imports. Programs must manually inline the functions they need (the import system exists but has limitations).
 
-| Module | C Equivalent | Functions |
-|--------|-------------|-----------|
-| `string.vuma` | `string.h` | memcpy, memmove, memset, memcmp, memchr, strlen, strcmp, strncmp, strcasecmp, strcpy, strncpy, strcat, strncat, strchr, strrchr, strstr, strtok_r, load/store u16/u32/u64 le/be, bswap16/32/64, htons/ntohs/htonl/ntohl |
-| `stdlib.vuma` | `stdlib.h` | atoi, strtol, itoa, utoa, u64toa, abs, abs64, min, max, min_u32, max_u32, min_u64, max_u64, clamp, clamp_u32, gcd_u32, lcm_u32, gcd_u64, is_power_of_two, next_power_of_two, count_ones_u32, leading_zeros_u32, trailing_zeros_u32, log2_u32, reverse_bits_u32, swap_bytes_u32, xorshift32, xorshift64, rand_u32, rand_range |
-| `math.vuma` | `math.h` | PI, TAU, E, LN_2, LN_10, SQRT_2 + isnan, isinf, isfinite, iszero, signbit, fabs, copysign, signum, trunc, floor, ceil, round, fract, fmin, fmax, fdim, clamp, lerp, remap, sqrt, cbrt, pow, hypot, exp, exp2, expm1, ldexp, frexp, ln, log10, log2, log, log1p, sin, cos, tan, asin, acos, atan, atan2, sinh, cosh, tanh, asinh, acosh, atanh, fmod, modf, fma, degrees, radians + f32 variants |
-| `stdio.vuma` | `stdio.h` | write_str, write_str_fd, write_bytes, write_char, write_newline, write_int, write_uint, write_hex, write_hex_u32, write_bin, printf_* helpers, read_line, read_bytes, read_byte, eprint_str, eprint_int, eprintln_str |
-| `time.vuma` | `time.h` | time_now, time_monotonic, time_monotonic_ns/us/ms, sleep_ms/us/s, time_diff_ns/us/ms, epoch_seconds, epoch_millis |
-| `socket.vuma` | `sys/socket.h` | tcp_socket, tcp_connect, tcp_listen, tcp_accept, tcp_accept_addr, tcp_send, tcp_recv, tcp_send_all, tcp_recv_all, tcp_send_str, tcp_close, set_reuseaddr, set_keepalive, set_recv_bufsize, set_send_bufsize, udp_socket, udp_bind, udp_sendto, udp_recvfrom, inet_pton_ipv4, inet_ntop_ipv4 |
+## What Actually Works
 
-## Crypto Modules (`womb/crypto/`)
+All 115 files compile successfully on x86_64. The following modules have been tested and produce correct results:
 
-| Module | Standard | Functions |
-|--------|----------|-----------|
-| `sha256.vuma` | NIST FIPS 180-4 | sha256_init, sha256_update, sha256_final, sha256_oneshot |
-| `aes256.vuma` | NIST FIPS 197 | aes256_key_expansion, aes256_encrypt_block |
-| `hmac_sha256.vuma` | NIST FIPS 198-1 | hmac_sha256 |
+| Module | Status | Notes |
+|--------|--------|-------|
+| `collections/vec.vuma` | ✅ Tested | Heap-backed DynamicVec using `__vuma_alloc` (mmap). Works across function calls. |
+| `graph/digraph.vuma` | ✅ Tested | Heap-backed directed graph. Verified 300+ nodes with dynamic grow. |
+| `string/utf8.vuma` | ✅ Tested | Dynamic VStr with grow, append, compare. |
+| `fs/file.vuma` | ✅ Tested | Raw syscall wrappers (open, read, write, close). |
+| `lang/full_lexer.vuma` | ✅ Compiles | Full VUMA lexer with strings, chars, hex, all operators. |
+| `lang/full_parser.vuma` | ✅ Compiles | Full recursive descent parser (structs, enums, match, closures, generics). |
+| `lang/ir_builder.vuma` | ✅ Compiles | AST→IR lowering with symbol table. |
+| `lang/codegen.vuma` | ✅ Compiles | x86_64 instruction encoders. |
+| `lang/elf.vuma` | ✅ Compiles | ELF64 writer. |
+| `crypto/*.vuma` | ✅ Compiles | 44 crypto modules (SHA, AES, RSA, ECDSA, etc.) |
+| `encoding/*.vuma` | ✅ Compiles | Base64, hex, URL encoding |
+| `net/*.vuma` | ✅ Compiles | TCP/UDP sockets, DNS, HTTP |
 
-## Encoding Modules (`womb/encoding/`)
+## Known Issues
 
-| Module | Standard | Functions |
-|--------|----------|-----------|
-| `base64.vuma` | RFC 4648 | base64_encode, base64_decode |
-| `hex.vuma` | RFC 4648 | hex_encode, hex_decode, hex_encode_upper |
-| `url.vuma` | RFC 3986 | url_encode, url_decode |
+- `allocate()` creates stack-local memory. Use `__vuma_alloc()` (mmap) for heap memory that persists across function calls.
+- The import system (`import "module.vuma"::{func};`) works but has limitations with complex module graphs.
+- The while-loop variable tracking across function calls has a known compiler bug. Sequential code works correctly.
 
-## Usage
+## Module Categories
 
-```vuma
-import "womb/lib/string.vuma"::{memcpy, memset, strlen, strcmp};
-import "womb/lib/math.vuma"::{sin, cos, sqrt, PI};
-import "womb/lib/stdio.vuma"::{write_str, write_int, write_newline};
-import "womb/lib/socket.vuma"::{tcp_connect, tcp_send_str, tcp_close};
-import "womb/crypto/sha256.vuma"::{sha256_oneshot};
-import "womb/encoding/base64.vuma"::{base64_encode};
+### Collections (`womb/collections/`)
+- `vec.vuma` — Heap-backed DynamicVec (grow, push, pop, get, set)
+- `hashmap.vuma` — Open-addressing hash map with 64-bit keys
+- `btree_map.vuma` — Ordered map with O(log n) binary search
+- `enum_map.vuma` — Tagged union storage for AST/SCG payloads
 
-fn main() -> i32 {
-    // Hash a message and print it
-    msg = allocate(5);
-    *(msg + 0) = 72;  // H
-    *(msg + 1) = 101; // e
-    *(msg + 2) = 108; // l
-    *(msg + 3) = 108; // l
-    *(msg + 4) = 111; // o
+### Strings (`womb/string/`)
+- `string.vuma` — C-style string operations (strlen, strcmp, memcpy, etc.)
+- `utf8.vuma` — Dynamic UTF-8 string (VStr) with grow and codepoint decoding
+- `string_builder.vuma` — Dynamic string concatenation
 
-    digest = allocate(32);
-    sha256_oneshot(msg, 5, digest);
+### File I/O (`womb/fs/`)
+- `file.vuma` — Raw syscall wrappers (open, read, write, close, lseek)
+- `high_level.vuma` — read_file, write_file, path manipulation
 
-    encoded = allocate(48);
-    base64_encode(digest, 32, encoded);
+### Allocation (`womb/alloc/`)
+- `arena.vuma` — Bump allocator on mmap'd block (opaque arena pattern)
 
-    write_str(encoded);
-    write_newline();
+### Graph (`womb/graph/`)
+- `digraph.vuma` — Heap-backed directed graph with dynamic grow
+- `algorithms.vuma` — Topological sort, cycle detection
 
-    free(msg);
-    free(digest);
-    free(encoded);
-    return 0;
-}
-```
+### I/O (`womb/io/`)
+- `buffered.vuma` — BufReader/BufWriter with 8KB buffer
 
-## What's Still Missing
+### CLI (`womb/env/`)
+- `cli.vuma` — CLI argument parsing via /proc/self/cmdline
 
-The following are planned but not yet implemented:
+### Language (`womb/lang/`)
+- `tokens.vuma` — Token type definitions
+- `lexer.vuma` — Basic VUMA lexer
+- `full_lexer.vuma` — Full VUMA lexer (strings, chars, hex, all operators)
+- `ast.vuma` — AST node definitions (arena-based)
+- `parser.vuma` — Basic recursive descent parser
+- `full_parser.vuma` — Full parser (structs, enums, match, closures, generics)
+- `ir.vuma` — IR instruction definitions
+- `ir_builder.vuma` — AST→IR lowering
+- `codegen.vuma` — x86_64 instruction encoders
+- `elf.vuma` — ELF64 writer
+- `mini_compiler.vuma` — Integration test (stdin→lex→output)
+- `self_host_test.vuma` — End-to-end pipeline test
 
-- SHA-1, SHA-512, SHA-3 (FIPS 180-4 / FIPS 202)
-- AES-128, AES-192, AES-CBC, AES-GCM, AES-CTR
-- ChaCha20-Poly1305 (RFC 8439)
-- HMAC-SHA1, HMAC-SHA512
-- PBKDF2 (RFC 2898), HKDF (RFC 5869)
-- RSA, ECDSA, ECDH
-- DRBG (NIST SP 800-90A)
-- Containers: vector, hashmap, linked_list, ring_buffer
-- File I/O: open, close, read, write, lseek, stat
-- Process: fork, exec, waitpid, signal
-- epoll/kqueue event loops
-- TLS/SSL (would need full X.509 + ASN.1 + DH + ECDH + AES-GCM + SHA-256 + RSA/ECDSA)
+### Crypto (`womb/crypto/`)
+44 modules including: SHA-1/256/384/512, SHA-3, AES-128/192/256, ChaCha20, Poly1305, HMAC, RSA, ECDSA, Ed25519, X25519, bcrypt, scrypt, Argon2, HKDF, PBKDF2, and more.
+
+### Encoding (`womb/encoding/`)
+Base64, hex, URL encoding/decoding.
+
+### Network (`womb/net/`)
+TCP/UDP sockets, DNS, HTTP, WebSocket, MQTT, SMTP, and more.
+
+### Codec (`womb/codec/`)
+Byte-level encoding/decoding utilities (LE/BE store/load, mem_copy, mem_set, mem_cmp).

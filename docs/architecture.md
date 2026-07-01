@@ -1,23 +1,21 @@
 # VUMA Architecture
 
-**Version:** 0.1.0-alpha.1
+**Version:** 0.2.0-alpha.1
 
 ---
 
 ## Overview
 
-VUMA (Verified-Unsafe Memory Access) is a programming language framework where unsafe memory operations are made verifiable instead of forbidden. Instead of a borrow checker rejecting programs that cannot be statically proven safe, VUMA constructs a formal model of every memory operation and verifies global invariants against that model. Programs that pass verification run without runtime overhead; programs that fail receive counterexamples showing the execution path to the violation.
+VUMA (Verified-Unsafe Memory Access) is a programming language framework where unsafe memory operations are made verifiable instead of forbidden. The compiler constructs a formal model (MSG) of every memory operation and verifies global invariants. Programs that pass verification run without runtime overhead; programs that fail receive counterexamples.
 
-The SCG (Semantic Computation Graph) is the primary program representation. Nodes represent operations, edges represent relationships, and regions delineate scopes.
-
----
+**Current state:** The verification engine has false positives on some valid programs. Most compilation uses `--verification none`.
 
 ## System Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│                    LLM Integration Layer                             │
-│    VumaForLLM API · LSP Server · REPL · Structured Diagnostics     │
+│                    CLI / API Layer                                    │
+│    vuma build/emit/run/verify · VumaForLLM API · LSP · REPL        │
 ├─────────────────────────────────────────────────────────────────────┤
 │                    Parser / Frontend                                 │
 │    Lexer → Parser → AST → AST-to-SCG Lowering · Module Resolution  │
@@ -26,183 +24,63 @@ The SCG (Semantic Computation Graph) is the primary program representation. Node
 │    IVE (Inference + Verification) · BD (Descriptors) · MSG (Memory) │
 │    Invariants: Liveness · Exclusivity · Interpretation ·             │
 │                Origin · Cleanup                                      │
+│    Note: IVE has false positives; most programs use --verification   │
+│    none to bypass.                                                   │
 ├─────────────────────────────────────────────────────────────────────┤
 │                    SCG (Core Representation)                         │
 │    Nodes (ops, allocs, effects) · Edges (data flow, deps) · Regions │
 ├─────────────────────────────────────────────────────────────────────┤
 │                    Execution                                         │
-│    COR Runtime (always-compiled, PGO, JIT) · Multi-ISA Codegen      │
+│    COR Runtime (partially integrated) · Multi-ISA Codegen            │
 │    x86_64 · AArch64 · RISC-V 64/32 · ARM32 · MIPS64 · PPC64        │
 │    LoongArch64 · x86_32 · Wasm32                                    │
+│    All 10 backends at 100% gold-standard pass rate                   │
+│    (with --verification none)                                        │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-### Pipeline
+## Pipeline
 
 ```
 Source Text → Lexer → Parser → AST → SCG Lowering → Raw SCG
     → Module Resolution (imports) → Merged SCG
-    → BD Inference (RepD + CapD + RelD fixpoint) → Annotated SCG
-    → MSG Builder → VUMA Verification (5 invariants) → Verified SCG
+    → [Optional: BD Inference → MSG Builder → VUMA Verification]
     → Multi-Arch Codegen (IR → regalloc → emit) → Machine Code / Wasm
 ```
 
----
+The verification step is optional. When `--verification none` is used (the common case), the pipeline skips BD inference and MSG verification, going directly from SCG to codegen.
 
-## Workspace Crates
+## Workspace Crates (11 members)
 
-The workspace has 11 member crates:
+| Crate | Role | Test Status |
+|-------|------|-------------|
+| `vuma-scg` | Semantic Computation Graph (petgraph-backed) | 36/36 pass |
+| `vuma-bd` | Behavioral Descriptors (RepD, CapD, RelD) | Tests pass |
+| `vuma` (core) | MSG, Region, Derivation, Access, Invariants | 301/301 pass |
+| `vuma-ive` | Inference & Verification Engine | Tests pass (false positives on valid programs) |
+| `vuma-cor` | Continuous Optimization Runtime | Partially integrated |
+| `vuma-parser` | Lexer → AST → SCG bridge | 286/286 pass |
+| `vuma-codegen` | 10-ISA backend | 57,380/57,380 gold-standard pass |
+| `vuma-proof` | Formal proof system | Tests pass |
+| `vuma-std` | Rust stdlib wrapper (NOT linked to VUMA programs) | N/A |
+| `vuma-package` | Package manager | Basic functionality |
+| `vuma-tests` | Integration tests & benchmarks | Tests pass |
 
-| Crate | Path | Responsibility |
-|-------|------|----------------|
-| `vuma-scg` | `src/scg/` | Semantic Computation Graph — nodes, edges, regions, queries, dominance, liveness, transforms |
-| `vuma-ive` | `src/ive/` | Inference & Verification Engine — five invariant verifiers, counterexamples |
-| `vuma-core` | `src/vuma/` | VUMA Memory Model — MSG construction, invariants, incremental verification |
-| `vuma-bd` | `src/bd/` | Behavioral Descriptors — RepD, CapD, RelD, inference, unification |
-| `vuma-codegen` | `src/codegen/` | Multi-ISA code generation — 10 backends, regalloc, DWARF, FFI |
-| `vuma-parser` | `src/parser/` | Lexer, parser, AST, AST-to-SCG lowering, module resolution |
-| `vuma-cor` | `src/cor/` | Continuous Optimization Runtime — PGO, speculative optimization, deployment |
-| `vuma-proof` | `src/proof/` | Formal proof system — proofs, checker, tactics, counterexamples |
-| `vuma-std` | `src/std/` | Standard library (Rust crate, not yet linked to VUMA programs) |
-| `vuma-tests` | `src/tests/` | Integration tests and benchmarks |
-| `vuma-package` | `src/package/` | Package manager — manifest, resolver, registry |
-
-### Crate Dependency Graph
-
-```
-                    ┌──────────┐
-                    │  tests   │  (depends on everything)
-                    └────┬─────┘
-           ┌─────────────┼──────────────────┐
-           ▼             ▼                  ▼
-    ┌────────────┐ ┌──────────┐      ┌──────────┐
-    │   cor      │ │   std    │      │  codegen │
-    └─────┬──────┘ └────┬─────┘      └─────┬────┘
-          │              │                   │
-          ▼              ▼                   ▼
-    ┌──────────┐  ┌──────────┐  ┌──────────────────┐
-    │  (cor)   │  │  vuma    │  │  ive · proof     │
-    └────┬─────┘  └────┬─────┘  └────┬─────────────┘
-         │             │              │
-         └─────────────┼──────────────┘
-                       ▼
-                ┌──────────────┐
-                │  bd · parser │
-                └──────┬───────┘
-                       ▼
-                ┌──────────────┐
-                │     scg      │  ◄── foundation (zero workspace deps)
-                └──────────────┘
-```
-
----
-
-## Core Concepts
+## Key Concepts
 
 ### SCG — Semantic Computation Graph
-
-The SCG is the single source of truth. Nodes represent computational operations (allocations, accesses, computations, casts, effects, control flow), edges represent relationships (data flow, control flow, derivation, annotation), and regions delineate scopes.
+The SCG is the primary program representation. Nodes represent operations (allocations, accesses, computations, casts, effects, control flow), edges represent relationships (data flow, control flow, derivation), and regions delineate scopes.
 
 ### BD — Behavioral Descriptor
+A Behavioral Descriptor replaces traditional nominal types with the triple (RepD, CapD, RelD):
+- **RepD**: memory layout (size, alignment, field offsets)
+- **CapD**: permitted operations (read, write, execute, etc.)
+- **RelD**: relationships (temporal, structural, dependency)
 
-A Behavioral Descriptor replaces nominal types with the triple (RepD, CapD, RelD):
-
-- **RepD** (Representation Descriptor): memory layout — size, alignment, field offsets
-- **CapD** (Capability Descriptor): permitted operations — read, write, execute, etc.
-- **RelD** (Relational Descriptor): relationships — containment, aliasing, data flow
-
-BDs are inferred, not declared. The IVE derives them from SCG structure through iterative fixpoint computation.
+BDs are inferred from SCG structure through iterative fixpoint computation. **Note:** Complex generic inference (M2.3) is deferred.
 
 ### MSG — Memory State Graph
-
-The MSG captures every allocation point, pointer derivation, deallocation point, concurrent access, and reinterpretation. It is constructed from the annotated SCG and serves as the formal model for verification.
+The MSG captures every allocation, pointer derivation, deallocation, and access. It is constructed from the annotated SCG and verified against the five invariants. **Note:** The MSG builder handles cycles via SCC-based topological sort, but may produce false positives on some valid programs.
 
 ### IVE — Inference & Verification Engine
-
-The IVE reads the SCG, infers BDs, constructs the MSG, and verifies five global invariants through iterative fixpoint computation. It supports interprocedural analysis, escape analysis, verification caching, and incremental re-verification.
-
-### The Five VUMA Invariants
-
-| Invariant | Ensures |
-|-----------|---------|
-| **Liveness** | Every access targets allocated memory |
-| **Exclusivity** | No conflicting concurrent accesses |
-| **Interpretation** | Every access uses a valid representation |
-| **Origin** | Every address traces to a valid allocation |
-| **Cleanup** | Every region is eventually freed or explicitly leaked |
-
----
-
-## Code Generation
-
-### 10 Backend Architectures
-
-| Backend | ELF Class | Endianness | Pointer Width | Calling Convention |
-|---------|-----------|------------|---------------|-------------------|
-| x86_64 | ELF64 | Little | 64-bit | System V AMD64 |
-| AArch64 | ELF64 | Little | 64-bit | AAPCS64 |
-| RISC-V 64 | ELF64 | Little | 64-bit | RV64G LP64D |
-| ARM32 | ELF32 | Little | 32-bit | AAPCS |
-| MIPS64 | ELF64 | Little | 64-bit | N64 |
-| PPC64 | ELF64 | Big | 64-bit | ELFv2 |
-| LoongArch64 | ELF64 | Little | 64-bit | LP64 |
-| x86_32 | ELF32 | Little | 32-bit | cdecl |
-| RISC-V 32 | ELF32 | Little | 32-bit | RV32G ILP32 |
-| Wasm32 | Wasm | Little | 32-bit | Stack machine |
-
-All backends share a unified `Backend` trait. The codegen pipeline:
-
-```
-SCG → IR (target-independent) → Register Allocation → Instruction Selection → Binary Emission
-```
-
-All 10 backends pass the 5,738-program gold-standard test suite at 100% (57,380/57,380 runs).
-
-### DWARF v4 Debug Info
-
-Per-backend DWARF debug information: `.debug_abbrev`, `.debug_info`, `.debug_line`, `.debug_frame`.
-
-### FFI & Syscalls
-
-19 Linux syscalls across all 10 architectures. Architecture-specific relocations. `extern "C"` blocks with `is_extern` propagation through IR and codegen.
-
----
-
-## LLM Integration
-
-### VumaForLLM API (`src/llm_api.rs`)
-
-Stateless API for LLM agents: `compile()`, `check()`, `analyze()`, `to_wasm()`, `explain_error()`, `suggest_fixes()`, `targets()`.
-
-### VumaCompiler API (`src/api.rs`)
-
-Full pipeline API: `compile()`, `parse()`, `analyze()`, `validate()`, `verify()`.
-
-### LSP Server (`src/lsp/`)
-
-Full LSP protocol: diagnostics, hover, go-to-definition, completion, document symbols, semantic tokens.
-
-### REPL (`src/vuma/src/repl.rs`)
-
-Commands: `:wasm`, `:backends`, `:check`, `:diagnostics`, `:exports`, `:verify`, `:help`.
-
-### Structured Diagnostics (`src/diagnostics.rs`)
-
-66 diagnostic codes (E000–E050, W001–W010, I001–I005) with error chaining and JSON serialization.
-
----
-
-## Security Model
-
-VUMA addresses six categories of memory safety vulnerabilities:
-
-1. **Spatial memory errors** (buffer overflow, out-of-bounds) — addressed by liveness and interpretation invariants
-2. **Temporal memory errors** (use-after-free, double-free) — addressed by liveness and cleanup invariants
-3. **Type confusion** (reading integer as pointer, uninitialized reads) — addressed by interpretation invariant
-4. **Resource exhaustion** (memory leaks, fd exhaustion) — addressed by cleanup invariant
-5. **Concurrent access violations** (data races, deadlock) — addressed by exclusivity invariant (single-threaded currently)
-6. **Supply chain attacks** — partially addressed by origin verification
-
-### Verification Confidence
-
-`VerificationLevel` tiers: `Full` (formal proof), `Partial` (most cases), `BestEffort` (empirical). Unverified properties are tracked as `VerificationDebt` with priorities: `Critical`, `High`, `Medium`, `Low`.
+The IVE reads the SCG, infers BDs, constructs the MSG, and verifies the five invariants. It supports interprocedural analysis, escape analysis, and verification caching. A modular verification infrastructure exists (`src/ive/src/modular.rs`) with per-function analysis, incremental caching, and abstract region tracking, but is not yet integrated into the main pipeline.
