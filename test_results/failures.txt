@@ -1,9 +1,7 @@
-VUMA Test Failures — 2026-07-01 16:40:06 UTC
-Total: 59 failures across 6 tests
+VUMA Test Failures — 2026-07-01 18:18:27 UTC
+Total: 31 failures across 4 tests
 
-  crypto_patterns      crc32.vuma                                    exp= 255 [('aarch64', 16, 'MM'), ('riscv64', 12, 'MM'), ('x86_64', 16, 'MM'), ('mips64', 16, 'MM'), ('arm32', 16, 'MM'), ('ppc64', 12, 'MM'), ('loongarch64', 16, 'MM'), ('x86_32', 16, 'MM'), ('riscv32', 16, 'MM'), ('wasm32', 16, 'MM')]
-  functions            quicksort.vuma                                exp=  90 [('aarch64', 33, 'MM'), ('x86_64', 33, 'MM'), ('arm32', 33, 'MM'), ('riscv64', 33, 'MM'), ('mips64', 33, 'MM'), ('loongarch64', 33, 'MM'), ('ppc64', 33, 'MM'), ('riscv32', 33, 'MM'), ('x86_32', 33, 'MM'), ('wasm32', 33, 'MM')]
-  pointers             hex_dump.vuma                                 exp=   0 [('riscv64', 7, 'MM'), ('aarch64', 7, 'MM'), ('x86_64', 7, 'MM'), ('arm32', 7, 'MM'), ('ppc64', 7, 'MM'), ('mips64', 7, 'MM'), ('loongarch64', 7, 'MM'), ('riscv32', 7, 'MM'), ('x86_32', 7, 'MM'), ('wasm32', 7, 'MM')]
-  pointers             ptr_double_deref.vuma                         exp=  42 [('x86_64', -11, 'CR'), ('aarch64', -11, 'CR'), ('riscv64', -11, 'CR'), ('arm32', -11, 'CR'), ('mips64', -11, 'CR'), ('ppc64', -11, 'CR'), ('riscv32', -11, 'CR'), ('loongarch64', -11, 'CR'), ('x86_32', -11, 'CR'), ('wasm32', 0, 'MM')]
-  pointers             ptr_multi_level.vuma                          exp=   3 [('aarch64', -11, 'CR'), ('x86_64', -11, 'CR'), ('riscv64', -11, 'CR'), ('arm32', -11, 'CR'), ('mips64', -11, 'CR'), ('ppc64', -11, 'CR'), ('loongarch64', -11, 'CR'), ('x86_32', -11, 'CR'), ('riscv32', -11, 'CR'), ('wasm32', 0, 'MM')]
-  pointers             ptr_pointer_to_pointer.vuma                   exp=  42 [('aarch64', -11, 'CR'), ('riscv64', -11, 'CR'), ('x86_64', -11, 'CR'), ('arm32', -11, 'CR'), ('mips64', -11, 'CR'), ('ppc64', -11, 'CR'), ('loongarch64', -11, 'CR'), ('riscv32', -11, 'CR'), ('x86_32', -11, 'CR')]
+  crypto_patterns      crc32.vuma                                    exp=  38 [('riscv64', 170, 'MM'), ('ppc64', 170, 'MM')]
+  pointers             ptr_double_deref.vuma                         exp=  42 [('aarch64', -11, 'CR'), ('riscv64', -11, 'CR'), ('x86_64', -11, 'CR'), ('ppc64', -11, 'CR'), ('mips64', -11, 'CR'), ('arm32', -11, 'CR'), ('riscv32', -11, 'CR'), ('loongarch64', -11, 'CR'), ('x86_32', -11, 'CR'), ('wasm32', 0, 'MM')]
+  pointers             ptr_multi_level.vuma                          exp=   3 [('aarch64', -11, 'CR'), ('x86_64', -11, 'CR'), ('arm32', -11, 'CR'), ('riscv64', -11, 'CR'), ('mips64', -11, 'CR'), ('loongarch64', -11, 'CR'), ('ppc64', -11, 'CR'), ('riscv32', -11, 'CR'), ('x86_32', -11, 'CR'), ('wasm32', 0, 'MM')]
+  pointers             ptr_pointer_to_pointer.vuma                   exp=  42 [('aarch64', -11, 'CR'), ('x86_64', -11, 'CR'), ('riscv64', -11, 'CR'), ('mips64', -11, 'CR'), ('arm32', -11, 'CR'), ('loongarch64', -11, 'CR'), ('ppc64', -11, 'CR'), ('riscv32', -11, 'CR'), ('x86_32', -11, 'CR')]
