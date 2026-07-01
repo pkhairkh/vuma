@@ -1868,11 +1868,33 @@ stmts.push(ScgStatement::Control(ControlNode::Switch {
                         default_body,
                     }));
 
-                    // Continue from after the Join node
+                    // Continue from after the Join node.
+                    // If the Join has no CF successors (common in SCG layout
+                    // where post-match code is connected to the Switch, not
+                    // the Join), fall back to the Switch's CF successors
+                    // (skipping Dispatch edges and already-consumed nodes).
                     if let Some(join) = join_node {
                         current = edge_idx.outgoing_cf(join).first().map(|e| e.target);
-                    } else {
-                        current = None;
+                    }
+                    if current.is_none() {
+                        // Join has no CF successors — try Switch's CF successors
+                        current = edge_idx.outgoing_cf(node_id)
+                            .iter()
+                            .map(|e| e.target)
+                            .find(|&t| {
+                                !consumed.contains(&t)
+                                    && t != join_node.unwrap_or(t)
+                            });
+                    }
+                    if current.is_none() {
+                        // Still no successor — try any outgoing edge from Switch
+                        current = edge_idx.outgoing
+                            .get(&node_id)
+                            .map(|edges| edges.iter()
+                                .filter(|e| e.kind == EdgeKind::ControlFlow)
+                                .map(|e| e.target)
+                                .find(|&t| !consumed.contains(&t) && t != join_node.unwrap_or(t)))
+                            .flatten();
                     }
                     continue;
                 }
