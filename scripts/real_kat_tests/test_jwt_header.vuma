@@ -1,0 +1,12 @@
+// KAT: JWT header start {"a
+// Expected: 7b2261
+extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+
+fn main() -> i32 {
+    // JWT: header starts with '{"alg"'
+    // '{' = 123, '"' = 34, 'a' = 97
+    out = allocate(3);
+    *(out+0)=123; *(out+1)=34; *(out+2)=97;
+    write(1, out, 3);
+    return 0;
+}

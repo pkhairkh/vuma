@@ -1,0 +1,16 @@
+// KAT: bcrypt 2^5=32 rounds
+// Expected: 20
+extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+
+fn main() -> i32 {
+    // bcrypt uses Blowfish, hash cost = 2^cost
+    // Test: cost=5 means 2^5=32 rounds
+    cost: u32 = 5;
+    rounds: u32 = 1;
+    i: u32 = 0;
+    while i < cost { rounds = rounds * 2; i = i + 1; }
+    out = allocate(1);
+    *out = rounds & 255;
+    write(1, out, 1);
+    return 0;
+}

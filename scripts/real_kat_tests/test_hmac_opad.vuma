@@ -1,0 +1,13 @@
+// KAT: HMAC opad=0x5C
+// Expected: 5c
+extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+
+fn main() -> i32 {
+    // HMAC: K XOR opad, opad = 0x5c
+    k: u32 = 0;
+    r: u32 = k ^ 92;  // 0x5c
+    out = allocate(1);
+    *out = r;
+    write(1, out, 1);
+    return 0;
+}

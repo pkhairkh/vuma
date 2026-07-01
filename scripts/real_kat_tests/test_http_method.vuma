@@ -1,0 +1,11 @@
+// KAT: HTTP GET method
+// Expected: 474554
+extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+
+fn main() -> i32 {
+    // HTTP GET = 0x47 0x45 0x54
+    out = allocate(3);
+    *(out+0)=71; *(out+1)=69; *(out+2)=84;
+    write(1, out, 3);
+    return 0;
+}

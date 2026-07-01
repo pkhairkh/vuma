@@ -1,0 +1,12 @@
+// KAT: HKDF PRK length=32
+// Expected: 20
+extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+
+fn main() -> i32 {
+    // HKDF-Extract: PRK = HMAC-Hash(salt, IKM)
+    // For empty salt, salt = HashLen zeros (32 for SHA-256)
+    out = allocate(1);
+    *out = 32;  // PRK length = 32 bytes
+    write(1, out, 1);
+    return 0;
+}

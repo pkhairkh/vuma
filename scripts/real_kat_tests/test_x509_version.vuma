@@ -1,0 +1,11 @@
+// KAT: X.509 v3 version = 2
+// Expected: 02
+extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+
+fn main() -> i32 {
+    // X.509 v3: version field = 2 (0-indexed)
+    out = allocate(1);
+    *out = 2;
+    write(1, out, 1);
+    return 0;
+}

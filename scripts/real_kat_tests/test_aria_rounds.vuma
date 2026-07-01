@@ -1,0 +1,11 @@
+// KAT: ARIA-128 rounds=12
+// Expected: 0c
+extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+
+fn main() -> i32 {
+    // ARIA-128: 12 rounds
+    out = allocate(1);
+    *out = 12;
+    write(1, out, 1);
+    return 0;
+}

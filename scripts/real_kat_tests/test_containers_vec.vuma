@@ -1,0 +1,13 @@
+// KAT: Vector pop = 30 = 0x1E
+// Expected: 1e
+extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+fn main() -> i32 {
+    buf = allocate(12);
+    *(buf+0)=10; *(buf+4)=20; *(buf+8)=30;
+    len: u32 = 3;
+    val: u32 = *(buf + (len - 1) * 4);
+    out = allocate(1);
+    *out = val;
+    write(1, out, 1);
+    return 0;
+}
