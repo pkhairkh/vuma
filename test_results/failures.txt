@@ -1,7 +1,11 @@
-VUMA Test Failures — 2026-07-01 18:18:27 UTC
-Total: 31 failures across 4 tests
+VUMA Test Failures — 2026-07-01 18:32:23 UTC
+Total: 39 failures across 8 tests
 
-  crypto_patterns      crc32.vuma                                    exp=  38 [('riscv64', 170, 'MM'), ('ppc64', 170, 'MM')]
-  pointers             ptr_double_deref.vuma                         exp=  42 [('aarch64', -11, 'CR'), ('riscv64', -11, 'CR'), ('x86_64', -11, 'CR'), ('ppc64', -11, 'CR'), ('mips64', -11, 'CR'), ('arm32', -11, 'CR'), ('riscv32', -11, 'CR'), ('loongarch64', -11, 'CR'), ('x86_32', -11, 'CR'), ('wasm32', 0, 'MM')]
-  pointers             ptr_multi_level.vuma                          exp=   3 [('aarch64', -11, 'CR'), ('x86_64', -11, 'CR'), ('arm32', -11, 'CR'), ('riscv64', -11, 'CR'), ('mips64', -11, 'CR'), ('loongarch64', -11, 'CR'), ('ppc64', -11, 'CR'), ('riscv32', -11, 'CR'), ('x86_32', -11, 'CR'), ('wasm32', 0, 'MM')]
-  pointers             ptr_pointer_to_pointer.vuma                   exp=  42 [('aarch64', -11, 'CR'), ('x86_64', -11, 'CR'), ('riscv64', -11, 'CR'), ('mips64', -11, 'CR'), ('arm32', -11, 'CR'), ('loongarch64', -11, 'CR'), ('ppc64', -11, 'CR'), ('riscv32', -11, 'CR'), ('x86_32', -11, 'CR')]
+  bitwise              bit2_priority_encode.vuma                     exp=   7 [('riscv64', 0, 'MM'), ('ppc64', 0, 'MM')]
+  bitwise              bit_is_pow2.vuma                              exp=   1 [('riscv64', 0, 'MM'), ('ppc64', 0, 'MM')]
+  bitwise              bit_log2.vuma                                 exp=   3 [('riscv64', 0, 'MM'), ('ppc64', 0, 'MM')]
+  bitwise              bit_priority_encoder.vuma                     exp=   7 [('riscv64', 0, 'MM'), ('ppc64', 0, 'MM')]
+  complex_stores       base64_encode.vuma                            exp=  20 [('riscv64', 0, 'MM'), ('ppc64', 0, 'MM')]
+  pointers             ptr_double_deref.vuma                         exp=  42 [('aarch64', -11, 'CR'), ('riscv64', -11, 'CR'), ('x86_64', -11, 'CR'), ('arm32', -11, 'CR'), ('mips64', -11, 'CR'), ('ppc64', -11, 'CR'), ('loongarch64', -11, 'CR'), ('riscv32', -11, 'CR'), ('x86_32', -11, 'CR'), ('wasm32', 0, 'MM')]
+  pointers             ptr_multi_level.vuma                          exp=   3 [('aarch64', -11, 'CR'), ('x86_64', -11, 'CR'), ('riscv64', -11, 'CR'), ('arm32', -11, 'CR'), ('mips64', -11, 'CR'), ('ppc64', -11, 'CR'), ('riscv32', -11, 'CR'), ('loongarch64', -11, 'CR'), ('x86_32', -11, 'CR'), ('wasm32', 0, 'MM')]
+  pointers             ptr_pointer_to_pointer.vuma                   exp=  42 [('aarch64', -11, 'CR'), ('x86_64', -11, 'CR'), ('riscv64', -11, 'CR'), ('arm32', -11, 'CR'), ('mips64', -11, 'CR'), ('ppc64', -11, 'CR'), ('loongarch64', -11, 'CR'), ('riscv32', -11, 'CR'), ('x86_32', -11, 'CR')]
