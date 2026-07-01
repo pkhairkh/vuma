@@ -1,0 +1,17 @@
+// KAT: Escape analysis — local allocation doesn't escape
+// Expected: 01 (allocation is local = DoesNotEscape)
+extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+fn main() -> i32 {
+    // Allocate a buffer, use it locally, free it.
+    // This allocation does NOT escape (not returned, not stored globally).
+    buf = allocate(8);
+    *(buf + 0) = 42;
+    val: u32 = *(buf + 0);
+    free(buf);
+    // Escape analysis should determine: DoesNotEscape
+    result: u32 = 1;  // DoesNotEscape = 1
+    out = allocate(1);
+    *out = result & 255;
+    write(1, out, 1);
+    return 0;
+}

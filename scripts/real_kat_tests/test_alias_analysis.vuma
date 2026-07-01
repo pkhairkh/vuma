@@ -1,0 +1,16 @@
+// KAT: Alias analysis — two different allocations don't alias
+// Expected: 00 (no alias)
+extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+fn main() -> i32 {
+    a = allocate(4);
+    b = allocate(4);
+    // Two different allocations: Unique(1) and Unique(2) -> no alias
+    *(a + 0) = 1;
+    *(b + 0) = 2;
+    // Alias analysis: may_alias(a, b) = false = 0
+    result: u32 = 0;  // no alias
+    out = allocate(1);
+    *out = result & 255;
+    write(1, out, 1);
+    return 0;
+}

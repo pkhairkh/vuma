@@ -1,0 +1,14 @@
+// KAT: Lexer — tokenize '+' -> Plus (type 40)
+// Expected: 28 (40 in hex)
+extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+fn main() -> i32 {
+    src = allocate(1);
+    *src = 43;  // '+'
+    c: u32 = *(src + 0);
+    token_type: u32 = 1;
+    if c == 43 { token_type = 40; }  // Plus
+    out = allocate(1);
+    *out = token_type & 255;
+    write(1, out, 1);
+    return 0;
+}

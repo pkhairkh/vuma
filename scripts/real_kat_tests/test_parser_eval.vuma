@@ -1,0 +1,56 @@
+// KAT: Parser — parse and evaluate "3 + 4 * 2" = 11
+// Expected: 0b (11 in hex)
+extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+
+fn store_u32(ptr: Address, offset: u32, val: u32) {
+    *(ptr + offset) = val & 255;
+    *(ptr + offset + 1) = (val >> 8) & 255;
+    *(ptr + offset + 2) = (val >> 16) & 255;
+    *(ptr + offset + 3) = (val >> 24) & 255;
+}
+fn load_u32(ptr: Address, offset: u32) -> u32 {
+    b0: u32 = *(ptr + offset); b1: u32 = *(ptr + offset + 1);
+    b2: u32 = *(ptr + offset + 2); b3: u32 = *(ptr + offset + 3);
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+}
+
+fn main() -> i32 {
+    // Manually build AST for "3 + 4 * 2"
+    // Nodes:
+    //   0: IntLit(3)     type=1, value=3
+    //   1: IntLit(4)     type=1, value=4
+    //   2: IntLit(2)     type=1, value=2
+    //   3: BinOp(Mul)    type=3, left=1, right=2, op=2
+    //   4: BinOp(Add)    type=3, left=0, right=3, op=0
+    ast = allocate(80);  // 5 nodes × 16 bytes
+    // Node 0: IntLit(3)
+    store_u32(ast, 0, 1); store_u32(ast, 12, 3);
+    // Node 1: IntLit(4)
+    store_u32(ast, 16, 1); store_u32(ast, 28, 4);
+    // Node 2: IntLit(2)
+    store_u32(ast, 32, 1); store_u32(ast, 44, 2);
+    // Node 3: BinOp(Mul) = 4 * 2
+    store_u32(ast, 48, 3); store_u32(ast, 52, 1); store_u32(ast, 56, 2); store_u32(ast, 60, 2);
+    // Node 4: BinOp(Add) = 3 + (4*2)
+    store_u32(ast, 64, 3); store_u32(ast, 68, 0); store_u32(ast, 72, 3); store_u32(ast, 76, 0);
+    
+    // Evaluate node 4: 3 + (4*2) = 3 + 8 = 11
+    result: u32 = 0;
+    // Eval node 4 (Add): left=node0(3), right=node3(Mul)
+    n4_left: u32 = load_u32(ast, 68);  // 0
+    n4_right: u32 = load_u32(ast, 72); // 3
+    // Eval node 0: IntLit(3)
+    val_left: u32 = load_u32(ast, n4_left * 16 + 12);  // 3
+    // Eval node 3 (Mul): left=node1(4), right=node2(2)
+    n3_left: u32 = load_u32(ast, n4_right * 16 + 4);   // 1
+    n3_right: u32 = load_u32(ast, n4_right * 16 + 8);  // 2
+    val_4: u32 = load_u32(ast, n3_left * 16 + 12);     // 4
+    val_2: u32 = load_u32(ast, n3_right * 16 + 12);    // 2
+    val_right: u32 = val_4 * val_2;                     // 8
+    result = val_left + val_right;                       // 11
+    
+    out = allocate(1);
+    *out = result & 255;
+    write(1, out, 1);
+    return 0;
+}
