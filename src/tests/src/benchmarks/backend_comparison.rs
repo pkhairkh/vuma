@@ -98,6 +98,7 @@ fn build_reference_program() -> Scg {
         rhs: ScgExpr::Int(2),
         tail_call: false,
         reassigns: None,
+        result_ty: None,
     }));
     body.push(ScgStatement::Computation(ComputationNode {
         dst: "b".to_string(),
@@ -106,6 +107,7 @@ fn build_reference_program() -> Scg {
         rhs: ScgExpr::Int(3),
         tail_call: false,
         reassigns: None,
+        result_ty: None,
     }));
     body.push(ScgStatement::Computation(ComputationNode {
         dst: "c".to_string(),
@@ -114,6 +116,7 @@ fn build_reference_program() -> Scg {
         rhs: ScgExpr::Var("a".to_string()),
         tail_call: false,
         reassigns: None,
+        result_ty: None,
     }));
 
     // Memory operations
@@ -145,6 +148,7 @@ fn build_reference_program() -> Scg {
             rhs: ScgExpr::Int(1),
             tail_call: false,
             reassigns: None,
+            result_ty: None,
         })],
         else_body: Some(vec![ScgStatement::Computation(ComputationNode {
             dst: "d".to_string(),
@@ -153,6 +157,7 @@ fn build_reference_program() -> Scg {
             rhs: ScgExpr::Int(1),
             tail_call: false,
             reassigns: None,
+            result_ty: None,
         })]),
     }));
 
