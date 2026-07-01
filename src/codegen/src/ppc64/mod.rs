@@ -3932,12 +3932,6 @@ impl Backend for PPC64Backend {
                                 code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R3));
                                 code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::R4));
                                 if is_32bit {
-                                    // Clear upper 32 bits of both operands before
-                                    // 32-bit division. Without this, garbage in the
-                                    // upper 32 bits of R3/R4 corrupts the Subf
-                                    // (remainder = dividend - quotient * divisor).
-                                    code.extend_from_slice(&Instruction::Rlwinm { ra: Gpr::R3, rs: Gpr::R3, sh: 0, mb: 0, me: 31 }.encode());
-                                    code.extend_from_slice(&Instruction::Rlwinm { ra: Gpr::R4, rs: Gpr::R4, sh: 0, mb: 0, me: 31 }.encode());
                                     let div_instr = match op {
                                         BinOpKind::URem => Instruction::Divwu { rt: Gpr::R5, ra: Gpr::R3, rb: Gpr::R4 },
                                         _ => Instruction::Divw { rt: Gpr::R5, ra: Gpr::R3, rb: Gpr::R4 },

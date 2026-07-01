@@ -69,7 +69,6 @@ fn build_program(stmt_count: usize) -> Scg {
             rhs: ScgExpr::Int((i + 1) as i64),
             tail_call: false,
             reassigns: None,
-            result_ty: None,
         }));
     }
     body.push(ScgStatement::Return(vec![ScgExpr::Var(format!("x{}", stmt_count - 1))]));
