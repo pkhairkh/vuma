@@ -1,0 +1,110 @@
+// Real KAT test: SHA-256("abc")
+// Expected output (hex): ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+const MASK32: u32 = 4294967295;
+fn rotr32(x: u32, n: u32) -> u32 { return ((x >> n) | (x << (32 - n))) & MASK32; }
+fn load_u32_be(ptr: Address, off: u32) -> u32 {
+    b0: u32 = *(ptr + off); b1: u32 = *(ptr + off + 1);
+    b2: u32 = *(ptr + off + 2); b3: u32 = *(ptr + off + 3);
+    return (b0 << 24) | (b1 << 16) | (b2 << 8) | b3;
+}
+fn store_u32_be(ptr: Address, off: u32, val: u32) {
+    *(ptr + off) = (val >> 24) & 255; *(ptr + off + 1) = (val >> 16) & 255;
+    *(ptr + off + 2) = (val >> 8) & 255; *(ptr + off + 3) = val & 255;
+}
+fn sha256_k(idx: u32) -> u32 {
+    if idx == 0 { return 1116352408; } if idx == 1 { return 1899447441; }
+    if idx == 2 { return 3049323471; } if idx == 3 { return 3921009573; }
+    if idx == 4 { return 961987163; } if idx == 5 { return 1508970993; }
+    if idx == 6 { return 2453635748; } if idx == 7 { return 2870763221; }
+    if idx == 8 { return 3624381080; } if idx == 9 { return 310598401; }
+    if idx == 10 { return 607225278; } if idx == 11 { return 1426881987; }
+    if idx == 12 { return 1925078388; } if idx == 13 { return 2162078206; }
+    if idx == 14 { return 2614888103; } if idx == 15 { return 3248222580; }
+    if idx == 16 { return 3835390401; } if idx == 17 { return 4022224774; }
+    if idx == 18 { return 264347078; } if idx == 19 { return 604807628; }
+    if idx == 20 { return 770255983; } if idx == 21 { return 1249150122; }
+    if idx == 22 { return 1555081692; } if idx == 23 { return 1996064986; }
+    if idx == 24 { return 2554220882; } if idx == 25 { return 2821834349; }
+    if idx == 26 { return 2952996808; } if idx == 27 { return 3210313671; }
+    if idx == 28 { return 3336571891; } if idx == 29 { return 3584528711; }
+    if idx == 30 { return 113926993; } if idx == 31 { return 338241895; }
+    if idx == 32 { return 666307205; } if idx == 33 { return 773529912; }
+    if idx == 34 { return 1294757372; } if idx == 35 { return 1396182291; }
+    if idx == 36 { return 1695183700; } if idx == 37 { return 1986661051; }
+    if idx == 38 { return 2177026350; } if idx == 39 { return 2456956037; }
+    if idx == 40 { return 2730485921; } if idx == 41 { return 2820302411; }
+    if idx == 42 { return 3259730800; } if idx == 43 { return 3345764771; }
+    if idx == 44 { return 3516065817; } if idx == 45 { return 3600352804; }
+    if idx == 46 { return 4094571909; } if idx == 47 { return 275423344; }
+    if idx == 48 { return 430227734; } if idx == 49 { return 506948616; }
+    if idx == 50 { return 659060556; } if idx == 51 { return 883997877; }
+    if idx == 52 { return 958139571; } if idx == 53 { return 1322822218; }
+    if idx == 54 { return 1537002063; } if idx == 55 { return 1747873779; }
+    if idx == 56 { return 1955562222; } if idx == 57 { return 2024104815; }
+    if idx == 58 { return 2227730452; } if idx == 59 { return 2361852424; }
+    if idx == 60 { return 2428436474; } if idx == 61 { return 2756734187; }
+    if idx == 62 { return 3204031479; } if idx == 63 { return 3329325298; }
+    return 0;
+}
+fn sha256_compress(state: Address, block: Address) {
+    w = allocate(256);
+    i: u32 = 0;
+    while i < 16 { store_u32_be(w, i*4, load_u32_be(block, i*4)); i = i + 1; }
+    i = 16;
+    while i < 64 {
+        s0: u32 = rotr32(load_u32_be(w,(i-15)*4),7) ^ rotr32(load_u32_be(w,(i-15)*4),18) ^ (load_u32_be(w,(i-15)*4)>>3);
+        s1: u32 = rotr32(load_u32_be(w,(i-2)*4),17) ^ rotr32(load_u32_be(w,(i-2)*4),19) ^ (load_u32_be(w,(i-2)*4)>>10);
+        val: u32 = (load_u32_be(w,(i-16)*4)+s0+load_u32_be(w,(i-7)*4)+s1) & MASK32;
+        store_u32_be(w,i*4,val); i = i + 1;
+    }
+    a: u32 = load_u32_be(state,0); b: u32 = load_u32_be(state,4);
+    c: u32 = load_u32_be(state,8); d: u32 = load_u32_be(state,12);
+    e: u32 = load_u32_be(state,16); f: u32 = load_u32_be(state,20);
+    g: u32 = load_u32_be(state,24); h: u32 = load_u32_be(state,28);
+    i = 0;
+    while i < 64 {
+        S1: u32 = rotr32(e,6) ^ rotr32(e,11) ^ rotr32(e,25);
+        ch: u32 = (e & f) ^ ((e ^ MASK32) & g);
+        temp1: u32 = (h+S1+ch+sha256_k(i)+load_u32_be(w,i*4)) & MASK32;
+        S0: u32 = rotr32(a,2) ^ rotr32(a,13) ^ rotr32(a,22);
+        maj: u32 = (a&b) ^ (a&c) ^ (b&c);
+        temp2: u32 = (S0+maj) & MASK32;
+        h=g; g=f; f=e; e=(d+temp1)&MASK32; d=c; c=b; b=a; a=(temp1+temp2)&MASK32;
+        i = i + 1;
+    }
+    store_u32_be(state,0,(load_u32_be(state,0)+a)&MASK32);
+    store_u32_be(state,4,(load_u32_be(state,4)+b)&MASK32);
+    store_u32_be(state,8,(load_u32_be(state,8)+c)&MASK32);
+    store_u32_be(state,12,(load_u32_be(state,12)+d)&MASK32);
+    store_u32_be(state,16,(load_u32_be(state,16)+e)&MASK32);
+    store_u32_be(state,20,(load_u32_be(state,20)+f)&MASK32);
+    store_u32_be(state,24,(load_u32_be(state,24)+g)&MASK32);
+    store_u32_be(state,28,(load_u32_be(state,28)+h)&MASK32);
+}
+fn main() -> i32 {
+    state = allocate(32);
+    store_u32_be(state,0,1779033703); store_u32_be(state,4,3144134277);
+    store_u32_be(state,8,1013904242); store_u32_be(state,12,2773480762);
+    store_u32_be(state,16,1359893119); store_u32_be(state,20,2600822924);
+    store_u32_be(state,24,528734635); store_u32_be(state,28,1541459225);
+    msg_len: u32 = 3;
+    block = allocate(64);
+    i: u32 = 0;
+    while i < 64 { *(block + i) = 0; i = i + 1; }
+        // Store input: "abc"
+    msg = allocate(4);
+    *(msg + 0) = 97;
+    *(msg + 1) = 98;
+    *(msg + 2) = 99;
+    *(msg + 3) = 0;
+    i = 0;
+    while i < msg_len { *(block + i) = *(msg + i); i = i + 1; }
+    *(block + msg_len) = 128;
+    bit_len: u32 = msg_len * 8;
+    *(block + 63) = bit_len & 255;
+    *(block + 62) = (bit_len >> 8) & 255;
+    sha256_compress(state, block);
+    write(1, state, 32);
+    return 0;
+}

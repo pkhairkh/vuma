@@ -1,0 +1,44 @@
+// Real KAT test: CRC32("123456789")
+// Expected output (hex): cbf43926
+extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+const POLY: u32 = 3988292384;
+fn crc32_table_entry(idx: u32) -> u32 {
+    crc: u32 = idx; i: u32 = 0;
+    while i < 8 { if (crc&1)==1 { crc=(crc>>1)^POLY; } else { crc=crc>>1; } i=i+1; }
+    return crc;
+}
+fn main() -> i32 {
+    table = allocate(1024);
+    i: u32 = 0;
+    while i < 256 {
+        val: u32 = crc32_table_entry(i);
+        *(table+i*4)=val&255; *(table+i*4+1)=(val>>8)&255; *(table+i*4+2)=(val>>16)&255; *(table+i*4+3)=(val>>24)&255;
+        i=i+1;
+    }
+    msg_len: u32 = 9;
+        // Store input: "123456789"
+    msg = allocate(10);
+    *(msg + 0) = 49;
+    *(msg + 1) = 50;
+    *(msg + 2) = 51;
+    *(msg + 3) = 52;
+    *(msg + 4) = 53;
+    *(msg + 5) = 54;
+    *(msg + 6) = 55;
+    *(msg + 7) = 56;
+    *(msg + 8) = 57;
+    *(msg + 9) = 0;
+    crc: u32 = 4294967295;
+    i = 0;
+    while i < msg_len {
+        b: u32 = *(msg+i); idx: u32 = (crc^b)&255;
+        t0:u32=*(table+idx*4); t1:u32=*(table+idx*4+1); t2:u32=*(table+idx*4+2); t3:u32=*(table+idx*4+3);
+        tval:u32=t0|(t1<<8)|(t2<<16)|(t3<<24);
+        crc=(crc>>8)^tval; i=i+1;
+    }
+    result: u32 = crc ^ 4294967295;
+    out = allocate(4);
+    *(out+0)=(result>>24)&255; *(out+1)=(result>>16)&255; *(out+2)=(result>>8)&255; *(out+3)=result&255;
+    write(1, out, 4);
+    return 0;
+}

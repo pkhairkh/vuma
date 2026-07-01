@@ -1,0 +1,29 @@
+// Real KAT test: ChaCha20 Quarter Round (RFC 8439 §2.1.1)
+// QR(0x11111111, 0x01020304, 0x9b8d6f43, 0x01234567)
+// = (0xea22192c, 0x0aaa3c9c, 0x1e0b038a, 0x131286da)
+// We output the first word (big-endian): ea22192c
+extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+const MASK32: u32 = 4294967295;
+fn rotl32(x: u32, n: u32) -> u32 { return ((x << n) | (x >> (32 - n))) & MASK32; }
+
+fn main() -> i32 {
+    a: u32 = 286331153;   // 0x11111111
+    b: u32 = 16909060;    // 0x01020304
+    c: u32 = 2608569411;  // 0x9b8d6f43
+    d: u32 = 19088743;    // 0x01234567
+    
+    // QR(a,b,c,d)
+    a = (a + b) & MASK32; d = d ^ a; d = rotl32(d, 16);
+    c = (c + d) & MASK32; b = b ^ c; b = rotl32(b, 12);
+    a = (a + b) & MASK32; d = d ^ a; d = rotl32(d, 8);
+    c = (c + d) & MASK32; b = b ^ c; b = rotl32(b, 7);
+    
+    // Output a in big-endian: 0xea22192c
+    out = allocate(4);
+    *(out + 0) = (a >> 24) & 255;
+    *(out + 1) = (a >> 16) & 255;
+    *(out + 2) = (a >> 8) & 255;
+    *(out + 3) = a & 255;
+    write(1, out, 4);
+    return 0;
+}

@@ -1,0 +1,22 @@
+// Real KAT test: Base64("f") = "Zg=="
+// Expected output (hex): 5a673d3d
+extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+fn b64_char(idx: u32) -> u32 {
+    if idx < 26 { return idx + 65; }
+    if idx < 52 { return idx + 71; }
+    if idx < 62 { return idx - 4; }
+    if idx == 62 { return 43; }
+    if idx == 63 { return 47; }
+    return 61;
+}
+fn main() -> i32 {
+    b0: u32 = 102;
+    c0: u32 = b64_char(b0 >> 2);
+    c1: u32 = b64_char((b0 & 3) << 4);
+    c2: u32 = 61;
+    c3: u32 = 61;
+    out = allocate(4);
+    *(out + 0) = c0; *(out + 1) = c1; *(out + 2) = c2; *(out + 3) = c3;
+    write(1, out, 4);
+    return 0;
+}

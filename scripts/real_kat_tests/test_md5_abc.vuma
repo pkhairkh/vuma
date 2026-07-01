@@ -1,0 +1,146 @@
+// Real KAT test: MD5("abc")
+// Expected output (hex): 900150983cd24fb0d6963f7d28e17f72
+extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+const MASK32: u32 = 4294967295;
+fn rotl32(x: u32, n: u32) -> u32 { return ((x << n) | (x >> (32 - n))) & MASK32; }
+fn load_u32_le(ptr: Address, off: u32) -> u32 {
+    b0: u32 = *(ptr + off); b1: u32 = *(ptr + off + 1);
+    b2: u32 = *(ptr + off + 2); b3: u32 = *(ptr + off + 3);
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+}
+fn store_u32_le(ptr: Address, off: u32, val: u32) {
+    *(ptr + off) = val & 255; *(ptr + off + 1) = (val >> 8) & 255;
+    *(ptr + off + 2) = (val >> 16) & 255; *(ptr + off + 3) = (val >> 24) & 255;
+}
+fn md5_k(idx: u32) -> u32 {
+    if idx == 0 { return 3614090360; }
+    if idx == 1 { return 3905402710; }
+    if idx == 2 { return 606105819; }
+    if idx == 3 { return 3250441966; }
+    if idx == 4 { return 4118548399; }
+    if idx == 5 { return 1200080426; }
+    if idx == 6 { return 2821735955; }
+    if idx == 7 { return 4249261313; }
+    if idx == 8 { return 1770035416; }
+    if idx == 9 { return 2336552879; }
+    if idx == 10 { return 4294925233; }
+    if idx == 11 { return 2304563134; }
+    if idx == 12 { return 1804603682; }
+    if idx == 13 { return 4254626195; }
+    if idx == 14 { return 2792965006; }
+    if idx == 15 { return 1236535329; }
+    if idx == 16 { return 4129170786; }
+    if idx == 17 { return 3225465664; }
+    if idx == 18 { return 643717713; }
+    if idx == 19 { return 3921069994; }
+    if idx == 20 { return 3593408605; }
+    if idx == 21 { return 38016083; }
+    if idx == 22 { return 3634488961; }
+    if idx == 23 { return 3889429448; }
+    if idx == 24 { return 568446438; }
+    if idx == 25 { return 3275163606; }
+    if idx == 26 { return 4107603335; }
+    if idx == 27 { return 1163531501; }
+    if idx == 28 { return 2850285829; }
+    if idx == 29 { return 4243563512; }
+    if idx == 30 { return 1735328473; }
+    if idx == 31 { return 2368359562; }
+    if idx == 32 { return 4294588738; }
+    if idx == 33 { return 2272392833; }
+    if idx == 34 { return 1839030562; }
+    if idx == 35 { return 4259657740; }
+    if idx == 36 { return 2763975236; }
+    if idx == 37 { return 1272893353; }
+    if idx == 38 { return 4139469664; }
+    if idx == 39 { return 3200236656; }
+    if idx == 40 { return 681279174; }
+    if idx == 41 { return 3936430074; }
+    if idx == 42 { return 3572445317; }
+    if idx == 43 { return 76029189; }
+    if idx == 44 { return 3654602809; }
+    if idx == 45 { return 3873151461; }
+    if idx == 46 { return 530742520; }
+    if idx == 47 { return 3299628645; }
+    if idx == 48 { return 4096336452; }
+    if idx == 49 { return 1126891415; }
+    if idx == 50 { return 2878612391; }
+    if idx == 51 { return 4237533241; }
+    if idx == 52 { return 1700485571; }
+    if idx == 53 { return 2399980690; }
+    if idx == 54 { return 4293915773; }
+    if idx == 55 { return 2240044497; }
+    if idx == 56 { return 1873313359; }
+    if idx == 57 { return 4264355552; }
+    if idx == 58 { return 2734768916; }
+    if idx == 59 { return 1309151649; }
+    if idx == 60 { return 4149444226; }
+    if idx == 61 { return 3174756917; }
+    if idx == 62 { return 718787259; }
+    if idx == 63 { return 3951481745; }
+    return 0;
+}
+fn md5_s(idx: u32) -> u32 {
+    if idx == 0 { return 7; } if idx == 1 { return 12; } if idx == 2 { return 17; } if idx == 3 { return 22; }
+    if idx == 4 { return 7; } if idx == 5 { return 12; } if idx == 6 { return 17; } if idx == 7 { return 22; }
+    if idx == 8 { return 7; } if idx == 9 { return 12; } if idx == 10 { return 17; } if idx == 11 { return 22; }
+    if idx == 12 { return 7; } if idx == 13 { return 12; } if idx == 14 { return 17; } if idx == 15 { return 22; }
+    if idx == 16 { return 5; } if idx == 17 { return 9; } if idx == 18 { return 14; } if idx == 19 { return 20; }
+    if idx == 20 { return 5; } if idx == 21 { return 9; } if idx == 22 { return 14; } if idx == 23 { return 20; }
+    if idx == 24 { return 5; } if idx == 25 { return 9; } if idx == 26 { return 14; } if idx == 27 { return 20; }
+    if idx == 28 { return 5; } if idx == 29 { return 9; } if idx == 30 { return 14; } if idx == 31 { return 20; }
+    if idx == 32 { return 4; } if idx == 33 { return 11; } if idx == 34 { return 16; } if idx == 35 { return 23; }
+    if idx == 36 { return 4; } if idx == 37 { return 11; } if idx == 38 { return 16; } if idx == 39 { return 23; }
+    if idx == 40 { return 4; } if idx == 41 { return 11; } if idx == 42 { return 16; } if idx == 43 { return 23; }
+    if idx == 44 { return 4; } if idx == 45 { return 11; } if idx == 46 { return 16; } if idx == 47 { return 23; }
+    if idx == 48 { return 6; } if idx == 49 { return 10; } if idx == 50 { return 15; } if idx == 51 { return 21; }
+    if idx == 52 { return 6; } if idx == 53 { return 10; } if idx == 54 { return 15; } if idx == 55 { return 21; }
+    if idx == 56 { return 6; } if idx == 57 { return 10; } if idx == 58 { return 15; } if idx == 59 { return 21; }
+    if idx == 60 { return 6; } if idx == 61 { return 10; } if idx == 62 { return 15; } if idx == 63 { return 21; }
+    return 0;
+}
+fn main() -> i32 {
+    state = allocate(16);
+    store_u32_le(state, 0, 1732584193);
+    store_u32_le(state, 4, 4023233417);
+    store_u32_le(state, 8, 2562383102);
+    store_u32_le(state, 12, 271733878);
+    msg_len: u32 = 3;
+    // Pad: 0x80 || zeros || 64-bit length (little-endian)
+    block = allocate(64);
+    i: u32 = 0;
+    while i < 64 { *(block + i) = 0; i = i + 1; }
+        // Store input: "abc"
+    msg = allocate(4);
+    *(msg + 0) = 97;
+    *(msg + 1) = 98;
+    *(msg + 2) = 99;
+    *(msg + 3) = 0;
+    i = 0;
+    while i < msg_len { *(block + i) = *(msg + i); i = i + 1; }
+    *(block + msg_len) = 128;
+    bit_len: u32 = msg_len * 8;
+    *(block + 56) = bit_len & 255;
+    *(block + 57) = (bit_len >> 8) & 255;
+    a: u32 = load_u32_le(state, 0); b: u32 = load_u32_le(state, 4);
+    c: u32 = load_u32_le(state, 8); d: u32 = load_u32_le(state, 12);
+    i = 0;
+    while i < 64 {
+        f: u32 = 0; g: u32 = 0;
+        if i < 16 { f = (b & c) | ((b ^ MASK32) & d); g = i; }
+        if i >= 16 { if i < 32 { f = (d & b) | ((d ^ MASK32) & c); g = (5 * i + 1) & 15; } }
+        if i >= 32 { if i < 48 { f = b ^ c ^ d; g = (3 * i + 5) & 15; } }
+        if i >= 48 { f = c ^ (b | (d ^ MASK32)); g = (7 * i) & 15; }
+        temp: u32 = d;
+        d = c; c = b;
+        m_val: u32 = load_u32_le(block, g * 4);
+        new_b: u32 = (b + rotl32((a + f + md5_k(i) + m_val) & MASK32, md5_s(i))) & MASK32;
+        b = new_b; a = temp;
+        i = i + 1;
+    }
+    store_u32_le(state, 0, (load_u32_le(state,0) + a) & MASK32);
+    store_u32_le(state, 4, (load_u32_le(state,4) + b) & MASK32);
+    store_u32_le(state, 8, (load_u32_le(state,8) + c) & MASK32);
+    store_u32_le(state, 12, (load_u32_le(state,12) + d) & MASK32);
+    write(1, state, 16);
+    return 0;
+}
