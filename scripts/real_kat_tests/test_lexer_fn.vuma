@@ -1,0 +1,51 @@
+// KAT: Lexer — tokenize "fn" keyword from "fn main"
+// Expected: 0a (token type 10 = Fn keyword)
+extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+
+fn is_alpha(c: u32) -> u32 {
+    if c >= 97 { if c <= 122 { return 1; } }
+    if c >= 65 { if c <= 90 { return 1; } }
+    if c == 95 { return 1; }
+    return 0;
+}
+
+fn main() -> i32 {
+    // Source: "fn main"
+    src = allocate(7);
+    *(src + 0) = 102; *(src + 1) = 110; *(src + 2) = 32;
+    *(src + 3) = 109; *(src + 4) = 97; *(src + 5) = 105; *(src + 6) = 110;
+    
+    pos: u32 = 0;
+    start: u32 = 0;
+    done: u32 = 0;
+    
+    // Read identifier using is_alpha
+    while done == 0 {
+        if pos >= 7 { done = 1; }
+        if done == 0 {
+            c: u32 = *(src + pos);
+            a: u32 = is_alpha(c);
+            if a == 1 {
+                pos = pos + 1;
+            } else {
+                done = 1;
+            }
+        }
+    }
+    
+    len: u32 = pos - start;
+    token_type: u32 = 1;  // default: Ident
+    first: u32 = *(src + start);
+    
+    // Keyword check: "fn" (len=2, first='f'=102)
+    if len == 2 {
+        if first == 102 {
+            token_type = 10;  // Fn
+        }
+    }
+    
+    out = allocate(1);
+    *out = token_type & 255;
+    write(1, out, 1);
+    return 0;
+}

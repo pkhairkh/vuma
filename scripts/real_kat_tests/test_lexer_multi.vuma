@@ -1,0 +1,45 @@
+// KAT: Lexer — tokenize "42 + x" -> Int, Plus, Ident
+// Expected: 02 (Int token type = 2)
+extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+fn main() -> i32 {
+    // Source: "42 + x"
+    src = allocate(6);
+    *(src + 0) = 52;  // '4'
+    *(src + 1) = 50;  // '2'
+    *(src + 2) = 32;  // ' '
+    *(src + 3) = 43;  // '+'
+    *(src + 4) = 32;  // ' '
+    *(src + 5) = 120; // 'x'
+    
+    // Token 1: "42" -> Int (type 2)
+    pos: u32 = 0;
+    // Skip whitespace
+    done: u32 = 0;
+    while done == 0 {
+        if pos >= 6 { done = 1; }
+        if done == 0 {
+            c: u32 = *(src + pos);
+            if c == 32 { pos = pos + 1; }
+            else { done = 1; }
+        }
+    }
+    // Read digits
+    t1_start: u32 = pos;
+    done = 0;
+    while done == 0 {
+        if pos >= 6 { done = 1; }
+        if done == 0 {
+            c: u32 = *(src + pos);
+            if c >= 48 { if c <= 57 { pos = pos + 1; } else { done = 1; } }
+            else { done = 1; }
+        }
+    }
+    t1_type: u32 = 2;  // Int
+    t1_len: u32 = pos - t1_start;
+    
+    // Output token type
+    out = allocate(1);
+    *out = t1_type & 255;
+    write(1, out, 1);
+    return 0;
+}

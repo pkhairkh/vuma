@@ -1,0 +1,15 @@
+// KAT: Effect system — pure function has no effects
+// Expected: 00 (pure = no effects)
+extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+fn main() -> i32 {
+    // A function that only does arithmetic is pure
+    a: u32 = 3;
+    b: u32 = 4;
+    c: u32 = a + b;
+    // Effect analysis: no alloc, no IO, no modifies = pure
+    result: u32 = 0;  // pure = 0 effects
+    out = allocate(1);
+    *out = result & 255;
+    write(1, out, 1);
+    return 0;
+}

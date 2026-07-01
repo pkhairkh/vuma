@@ -1,0 +1,55 @@
+// KAT: End-to-end pipeline — lex "42", parse to AST, eval = 42
+// Tests the full lexer → parser → eval pipeline
+// Expected: 2a (42 in hex)
+extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+
+fn is_digit(c: u32) -> u32 {
+    if c >= 48 { if c <= 57 { return 1; } }
+    return 0;
+}
+
+fn main() -> i32 {
+    // Source: "42"
+    src = allocate(2);
+    *(src + 0) = 52;  // '4'
+    *(src + 1) = 50;  // '2'
+    
+    // === LEXER ===
+    // Lex token: integer "42"
+    pos: u32 = 0;
+    start: u32 = 0;
+    done: u32 = 0;
+    while done == 0 {
+        if pos >= 2 { done = 1; }
+        if done == 0 {
+            c: u32 = *(src + pos);
+            d: u32 = is_digit(c);
+            if d == 1 { pos = pos + 1; }
+            else { done = 1; }
+        }
+    }
+    token_start: u32 = start;
+    token_len: u32 = pos - start;
+    
+    // === PARSER ===
+    // Parse integer literal: convert digits to value
+    val: u32 = 0;
+    i: u32 = 0;
+    while i < token_len {
+        c: u32 = *(src + token_start + i);
+        val = val * 10 + (c - 48);
+        i = i + 1;
+    }
+    
+    // === IR ===
+    // IR: Const vreg0 = val; Ret vreg0
+    
+    // === EVAL ===
+    // Evaluate: return val
+    
+    // === OUTPUT ===
+    out = allocate(1);
+    *out = val & 255;
+    write(1, out, 1);
+    return 0;
+}

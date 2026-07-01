@@ -154,3 +154,4 @@ done
 
 echo "PASS: $pass / $idx, FAIL: $fail, COMPILE_FAIL: $compile_fail"
 echo "Report: $REPORT"
+EXPECTED[lexer]="2a"
