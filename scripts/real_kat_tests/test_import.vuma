@@ -1,0 +1,11 @@
+// KAT: Import system — import helper function, call it
+// Expected: 2a (42 = 21*2)
+import "test_import_helper.vuma";
+extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+fn main() -> i32 {
+    result: u32 = helper(21);
+    out = allocate(1);
+    *out = result & 255;
+    write(1, out, 1);
+    return 0;
+}
