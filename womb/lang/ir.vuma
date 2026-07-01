@@ -1,159 +1,110 @@
-// womb/lang/ir.vuma — Simple IR for self-hosting
-// IR instruction layout: [opcode: u32][dst: u32][src1: u32][src2: u32] = 16 bytes
+// womb/lang/ir.vuma — Simple IR instructions for the self-hosted compiler
+// IR is stored as a flat array of instructions in a heap buffer.
+//
+// Instruction layout (32 bytes):
+//   [opcode: u32][dst: u32][lhs: u32][rhs: u32][imm: u64][aux: u64]
+//
 // Opcodes:
-//   0=Nop, 1=Const, 2=Add, 3=Sub, 4=Mul, 5=Div
-//   6=Load, 7=Store, 8=Alloc, 9=Free
-//   10=Cmp, 11=Branch, 12=Jump, 13=Call, 14=Ret
-//   15=Phi, 16=Cast
+//   0 = NOP
+//   1 = ADD(dst, lhs, rhs)
+//   2 = SUB(dst, lhs, rhs)
+//   3 = MUL(dst, lhs, rhs)
+//   4 = DIV(dst, lhs, rhs)
+//   5 = AND(dst, lhs, rhs)
+//   6 = OR(dst, lhs, rhs)
+//   7 = XOR(dst, lhs, rhs)
+//   8 = SHL(dst, lhs, rhs)
+//   9 = SHR(dst, lhs, rhs)
+//   10 = CMP(dst, op, lhs, rhs)  — op in aux field
+//   11 = LOAD(dst, addr, offset)
+//   12 = STORE(val, addr, offset)
+//   13 = CALL(dst, func_name_hash, arg_count)
+//   14 = RET(val)
+//   15 = ALLOC(dst, size)
+//   16 = MOV(dst, imm)
+//   17 = BRANCH(target)
+//   18 = COND_BRANCH(cond, true_target, false_target)
+//   19 = PHI(dst, incoming_count)
 
-// No main() — importable library module.
+const IR_SIZE: u32 = 32;
 
-fn store_u32(ptr: Address, offset: u32, val: u32) {
-    *(ptr + offset) = val & 255;
-    *(ptr + offset + 1) = (val >> 8) & 255;
-    *(ptr + offset + 2) = (val >> 16) & 255;
-    *(ptr + offset + 3) = (val >> 24) & 255;
+extern "C" {
+    fn __vuma_alloc(size: i64) -> Address;
+    fn __vuma_free(addr: Address, size: i64);
 }
 
+fn store_u64(ptr: Address, offset: u32, val: u64) {
+    *(ptr + offset) = val & 255; *(ptr + offset + 1) = (val >> 8) & 255;
+    *(ptr + offset + 2) = (val >> 16) & 255; *(ptr + offset + 3) = (val >> 24) & 255;
+    *(ptr + offset + 4) = (val >> 32) & 255; *(ptr + offset + 5) = (val >> 40) & 255;
+    *(ptr + offset + 6) = (val >> 48) & 255; *(ptr + offset + 7) = (val >> 56) & 255;
+}
+fn load_u64(ptr: Address, offset: u32) -> u64 {
+    b0: u64 = *(ptr + offset); b1: u64 = *(ptr + offset + 1);
+    b2: u64 = *(ptr + offset + 2); b3: u64 = *(ptr + offset + 3);
+    b4: u64 = *(ptr + offset + 4); b5: u64 = *(ptr + offset + 5);
+    b6: u64 = *(ptr + offset + 6); b7: u64 = *(ptr + offset + 7);
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
+}
+fn store_u32(ptr: Address, offset: u32, val: u32) {
+    *(ptr + offset) = val & 255; *(ptr + offset + 1) = (val >> 8) & 255;
+    *(ptr + offset + 2) = (val >> 16) & 255; *(ptr + offset + 3) = (val >> 24) & 255;
+}
 fn load_u32(ptr: Address, offset: u32) -> u32 {
     b0: u32 = *(ptr + offset); b1: u32 = *(ptr + offset + 1);
     b2: u32 = *(ptr + offset + 2); b3: u32 = *(ptr + offset + 3);
     return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
 }
 
-// Emit a Const instruction: dst = value
-fn ir_const(ir: Address, count: u32, dst: u32, value: u32) -> u32 {
-    base: u32 = count * 16;
-    store_u32(ir, base + 0, 1);      // Const
-    store_u32(ir, base + 4, dst);
-    store_u32(ir, base + 8, value);
-    store_u32(ir, base + 12, 0);
-    return count + 1;
+// Create IR buffer
+fn ir_new(cap: u32) -> Address {
+    buf = __vuma_alloc(8 + cap * IR_SIZE);  // 8 bytes for count
+    store_u32(buf, 0, 0);  // count = 0
+    store_u32(buf, 4, cap); // capacity
+    return buf;
 }
 
-// Emit an Add instruction: dst = src1 + src2
-fn ir_add(ir: Address, count: u32, dst: u32, src1: u32, src2: u32) -> u32 {
-    base: u32 = count * 16;
-    store_u32(ir, base + 0, 2);      // Add
-    store_u32(ir, base + 4, dst);
-    store_u32(ir, base + 8, src1);
-    store_u32(ir, base + 12, src2);
-    return count + 1;
+fn ir_count(buf: Address) -> u32 { return load_u32(buf, 0); }
+
+// Emit an instruction, returns its index
+fn ir_emit(buf: Address, opcode: u32, dst: u32, lhs: u32, rhs: u32, imm: u64, aux: u64) -> u32 {
+    count: u32 = load_u32(buf, 0);
+    offset: u32 = 8 + count * IR_SIZE;
+    store_u32(buf, offset, opcode);
+    store_u32(buf, offset + 4, dst);
+    store_u32(buf, offset + 8, lhs);
+    store_u32(buf, offset + 12, rhs);
+    store_u64(buf, offset + 16, imm);
+    store_u64(buf, offset + 24, aux);
+    store_u32(buf, 0, count + 1);
+    return count;
 }
 
-// Emit a Sub instruction: dst = src1 - src2
-fn ir_sub(ir: Address, count: u32, dst: u32, src1: u32, src2: u32) -> u32 {
-    base: u32 = count * 16;
-    store_u32(ir, base + 0, 3);
-    store_u32(ir, base + 4, dst);
-    store_u32(ir, base + 8, src1);
-    store_u32(ir, base + 12, src2);
-    return count + 1;
+// Convenience emitters
+fn ir_add(buf: Address, dst: u32, lhs: u32, rhs: u32) -> u32 {
+    return ir_emit(buf, 1, dst, lhs, rhs, 0, 0);
 }
-
-// Emit a Mul instruction: dst = src1 * src2
-fn ir_mul(ir: Address, count: u32, dst: u32, src1: u32, src2: u32) -> u32 {
-    base: u32 = count * 16;
-    store_u32(ir, base + 0, 4);
-    store_u32(ir, base + 4, dst);
-    store_u32(ir, base + 8, src1);
-    store_u32(ir, base + 12, src2);
-    return count + 1;
+fn ir_sub(buf: Address, dst: u32, lhs: u32, rhs: u32) -> u32 {
+    return ir_emit(buf, 2, dst, lhs, rhs, 0, 0);
 }
-
-// Emit a Ret instruction: return src1
-fn ir_ret(ir: Address, count: u32, src1: u32) -> u32 {
-    base: u32 = count * 16;
-    store_u32(ir, base + 0, 14);     // Ret
-    store_u32(ir, base + 4, 0);
-    store_u32(ir, base + 8, src1);
-    store_u32(ir, base + 12, 0);
-    return count + 1;
+fn ir_mov(buf: Address, dst: u32, imm: u64) -> u32 {
+    return ir_emit(buf, 16, dst, 0, 0, imm, 0);
 }
-
-// Emit a Load instruction: dst = *(src1 + offset)
-fn ir_load(ir: Address, count: u32, dst: u32, src1: u32, offset: u32) -> u32 {
-    base: u32 = count * 16;
-    store_u32(ir, base + 0, 6);      // Load
-    store_u32(ir, base + 4, dst);
-    store_u32(ir, base + 8, src1);
-    store_u32(ir, base + 12, offset);
-    return count + 1;
+fn ir_ret(buf: Address, val: u32) -> u32 {
+    return ir_emit(buf, 14, val, 0, 0, 0, 0);
 }
-
-// Emit a Store instruction: *(dst + offset) = src1
-fn ir_store(ir: Address, count: u32, dst: u32, offset: u32, src1: u32) -> u32 {
-    base: u32 = count * 16;
-    store_u32(ir, base + 0, 7);      // Store
-    store_u32(ir, base + 4, dst);
-    store_u32(ir, base + 8, src1);
-    store_u32(ir, base + 12, offset);
-    return count + 1;
+fn ir_load(buf: Address, dst: u32, addr: u32, offset: u32) -> u32 {
+    return ir_emit(buf, 11, dst, addr, offset, 0, 0);
 }
-
-// Get instruction opcode
-fn ir_opcode(ir: Address, idx: u32) -> u32 {
-    return load_u32(ir, idx * 16 + 0);
+fn ir_store(buf: Address, val: u32, addr: u32, offset: u32) -> u32 {
+    return ir_emit(buf, 12, val, addr, offset, 0, 0);
 }
-
-// Get instruction dst
-fn ir_dst(ir: Address, idx: u32) -> u32 {
-    return load_u32(ir, idx * 16 + 4);
+fn ir_alloc(buf: Address, dst: u32, size: u32) -> u32 {
+    return ir_emit(buf, 15, dst, size, 0, 0, 0);
 }
-
-// Get instruction src1
-fn ir_src1(ir: Address, idx: u32) -> u32 {
-    return load_u32(ir, idx * 16 + 8);
+fn ir_branch(buf: Address, target: u32) -> u32 {
+    return ir_emit(buf, 17, target, 0, 0, 0, 0);
 }
-
-// Get instruction src2
-fn ir_src2(ir: Address, idx: u32) -> u32 {
-    return load_u32(ir, idx * 16 + 12);
-}
-
-// Simple IR interpreter for testing
-// vregs: array of u32 values, vreg 0 = first param
-fn ir_eval(ir: Address, ir_count: u32, vregs: Address, vreg_count: u32) -> u32 {
-    i: u32 = 0;
-    done: u32 = 0;
-    result: u32 = 0;
-    while done == 0 {
-        if i >= ir_count { done = 1; }
-        if done == 0 {
-            op: u32 = ir_opcode(ir, i);
-            dst: u32 = ir_dst(ir, i);
-            s1: u32 = ir_src1(ir, i);
-            s2: u32 = ir_src2(ir, i);
-            
-            if op == 1 {
-                // Const: vreg[dst] = s1
-                store_u32(vregs, dst * 4, s1);
-            }
-            if op == 2 {
-                // Add: vreg[dst] = vreg[s1] + vreg[s2]
-                v1: u32 = load_u32(vregs, s1 * 4);
-                v2: u32 = load_u32(vregs, s2 * 4);
-                store_u32(vregs, dst * 4, v1 + v2);
-            }
-            if op == 3 {
-                // Sub: vreg[dst] = vreg[s1] - vreg[s2]
-                v1: u32 = load_u32(vregs, s1 * 4);
-                v2: u32 = load_u32(vregs, s2 * 4);
-                store_u32(vregs, dst * 4, v1 - v2);
-            }
-            if op == 4 {
-                // Mul: vreg[dst] = vreg[s1] * vreg[s2]
-                v1: u32 = load_u32(vregs, s1 * 4);
-                v2: u32 = load_u32(vregs, s2 * 4);
-                store_u32(vregs, dst * 4, v1 * v2);
-            }
-            if op == 14 {
-                // Ret: return vreg[s1]
-                result = load_u32(vregs, s1 * 4);
-                done = 1;
-            }
-            i = i + 1;
-        }
-    }
-    return result;
+fn ir_cond_branch(buf: Address, cond: u32, t: u32, f: u32) -> u32 {
+    return ir_emit(buf, 18, cond, t, f, 0, 0);
 }

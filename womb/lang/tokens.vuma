@@ -1,0 +1,60 @@
+// womb/lang/tokens.vuma — Token type definitions for VUMA lexer
+// Token types follow the womb/lang/lexer.vuma convention
+
+// Token types
+const TOK_EOF: u32 = 0;
+const TOK_IDENT: u32 = 1;
+const TOK_INT_LIT: u32 = 2;
+const TOK_STR_LIT: u32 = 3;
+const TOK_FN: u32 = 10;
+const TOK_LET: u32 = 11;
+const TOK_IF: u32 = 12;
+const TOK_ELSE: u32 = 13;
+const TOK_WHILE: u32 = 14;
+const TOK_FOR: u32 = 15;
+const TOK_RETURN: u32 = 16;
+const TOK_MATCH: u32 = 17;
+const TOK_BREAK: u32 = 18;
+const TOK_CONTINUE: u32 = 19;
+const TOK_STRUCT: u32 = 20;
+const TOK_ENUM: u32 = 21;
+const TOK_EXTERN: u32 = 27;
+const TOK_CONST: u32 = 25;
+
+// Operators
+const TOK_PLUS: u32 = 40;
+const TOK_MINUS: u32 = 41;
+const TOK_STAR: u32 = 42;
+const TOK_SLASH: u32 = 43;
+const TOK_PERCENT: u32 = 44;
+const TOK_EQ: u32 = 45;
+const TOK_EQEQ: u32 = 46;
+const TOK_NOTEQ: u32 = 47;
+const TOK_LT: u32 = 48;
+const TOK_GT: u32 = 49;
+const TOK_LE: u32 = 50;
+const TOK_GE: u32 = 51;
+const TOK_AND: u32 = 52;
+const TOK_OR: u32 = 53;
+const TOK_NOT: u32 = 54;
+const TOK_BITAND: u32 = 55;
+const TOK_BITOR: u32 = 56;
+const TOK_BITXOR: u32 = 57;
+const TOK_SHL: u32 = 59;
+const TOK_SHR: u32 = 60;
+
+// Delimiters
+const TOK_LPAREN: u32 = 61;
+const TOK_RPAREN: u32 = 62;
+const TOK_LBRACE: u32 = 63;
+const TOK_RBRACE: u32 = 64;
+const TOK_LBRACKET: u32 = 65;
+const TOK_RBRACKET: u32 = 66;
+const TOK_SEMI: u32 = 67;
+const TOK_COMMA: u32 = 68;
+const TOK_DOT: u32 = 69;
+const TOK_COLON: u32 = 70;
+const TOK_ARROW: u32 = 72;
+
+// Token layout: [type: u32][start: u32][len: u32][value: u64] = 20 bytes (round to 24)
+const TOKEN_SIZE: u32 = 24;

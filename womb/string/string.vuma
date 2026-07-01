@@ -1,0 +1,121 @@
+// womb/string/string.vuma — Core string operations
+// All functions operate on (Address, u32) string references (ptr, len).
+// No null-termination required.
+
+// String length (byte count)
+fn string_len(str: Address) -> u32 {
+    i: u32 = 0;
+    while *(str + i) != 0 { i = i + 1; }
+    return i;
+}
+
+// Compare two strings. Returns 1 if equal, 0 if not.
+fn string_eq(a: Address, a_len: u32, b: Address, b_len: u32) -> u32 {
+    if a_len != b_len { return 0; }
+    i: u32 = 0;
+    while i < a_len {
+        if *(a + i) != *(b + i) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+// Compare two C-style null-terminated strings
+fn string_eq_cstr(a: Address, b: Address) -> u32 {
+    i: u32 = 0;
+    done: u32 = 0;
+    while done == 0 {
+        ca: u32 = *(a + i);
+        cb: u32 = *(b + i);
+        if ca != cb { return 0; }
+        if ca == 0 { done = 1; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+// Copy src to dst (up to dst_cap bytes). Returns bytes copied.
+fn string_copy(dst: Address, dst_cap: u32, src: Address, src_len: u32) -> u32 {
+    n: u32 = src_len;
+    if n >= dst_cap { n = dst_cap - 1; }
+    i: u32 = 0;
+    while i < n {
+        *(dst + i) = *(src + i) & 255;
+        i = i + 1;
+    }
+    if dst_cap > 0 { *(dst + n) = 0; }  // null terminate
+    return n;
+}
+
+// Copy C-style null-terminated string
+fn string_copy_cstr(dst: Address, dst_cap: u32, src: Address) -> u32 {
+    i: u32 = 0;
+    while i + 1 < dst_cap {
+        c: u32 = *(src + i);
+        if c == 0 { *(dst + i) = 0; return i; }
+        *(dst + i) = c & 255;
+        i = i + 1;
+    }
+    if dst_cap > 0 { *(dst + i) = 0; }
+    return i;
+}
+
+// Check if character is alphanumeric
+fn is_alpha(c: u32) -> u32 {
+    if c >= 97 { if c <= 122 { return 1; } }  // a-z
+    if c >= 65 { if c <= 90 { return 1; } }   // A-Z
+    if c == 95 { return 1; }                    // _
+    return 0;
+}
+
+fn is_digit(c: u32) -> u32 {
+    if c >= 48 { if c <= 57 { return 1; } }
+    return 0;
+}
+
+fn is_alnum(c: u32) -> u32 {
+    if is_alpha(c) == 1 { return 1; }
+    if is_digit(c) == 1 { return 1; }
+    return 0;
+}
+
+fn is_space(c: u32) -> u32 {
+    if c == 32 { return 1; }
+    if c == 9 { return 1; }
+    if c == 10 { return 1; }
+    if c == 13 { return 1; }
+    return 0;
+}
+
+fn is_hex(c: u32) -> u32 {
+    if is_digit(c) == 1 { return 1; }
+    if c >= 97 { if c <= 102 { return 1; } }  // a-f
+    if c >= 65 { if c <= 70 { return 1; } }   // A-F
+    return 0;
+}
+
+// Convert character to lowercase
+fn to_lower(c: u32) -> u32 {
+    if c >= 65 { if c <= 90 { return c + 32; } }
+    return c;
+}
+
+// Convert character to uppercase
+fn to_upper(c: u32) -> u32 {
+    if c >= 97 { if c <= 122 { return c - 32; } }
+    return c;
+}
+
+// Parse a decimal u64 from a string starting at pos.
+// Returns { value: u64, end_pos: u32 } packed as u64 (value in low 32, end in high 32)
+fn parse_u64(str: Address, start: u32, len: u32) -> u64 {
+    val: u64 = 0;
+    pos: u32 = start;
+    while pos < len {
+        c: u32 = *(str + pos);
+        if is_digit(c) == 0 { break; }
+        val = val * 10 + (c - 48);
+        pos = pos + 1;
+    }
+    return val | ((pos as u64) << 32);
+}

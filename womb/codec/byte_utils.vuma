@@ -1,0 +1,28 @@
+fn store_u64_le(ptr: Address, offset: u32, val: u64) {
+    *(ptr + offset) = val & 255; *(ptr + offset + 1) = (val >> 8) & 255;
+    *(ptr + offset + 2) = (val >> 16) & 255; *(ptr + offset + 3) = (val >> 24) & 255;
+    *(ptr + offset + 4) = (val >> 32) & 255; *(ptr + offset + 5) = (val >> 40) & 255;
+    *(ptr + offset + 6) = (val >> 48) & 255; *(ptr + offset + 7) = (val >> 56) & 255;
+}
+fn load_u64_le(ptr: Address, offset: u32) -> u64 {
+    b0: u64 = *(ptr + offset); b1: u64 = *(ptr + offset + 1);
+    b2: u64 = *(ptr + offset + 2); b3: u64 = *(ptr + offset + 3);
+    b4: u64 = *(ptr + offset + 4); b5: u64 = *(ptr + offset + 5);
+    b6: u64 = *(ptr + offset + 6); b7: u64 = *(ptr + offset + 7);
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
+}
+fn store_u32_le(ptr: Address, offset: u32, val: u32) {
+    *(ptr + offset) = val & 255; *(ptr + offset + 1) = (val >> 8) & 255;
+    *(ptr + offset + 2) = (val >> 16) & 255; *(ptr + offset + 3) = (val >> 24) & 255;
+}
+fn load_u32_le(ptr: Address, offset: u32) -> u32 {
+    b0: u32 = *(ptr + offset); b1: u32 = *(ptr + offset + 1);
+    b2: u32 = *(ptr + offset + 2); b3: u32 = *(ptr + offset + 3);
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+}
+fn mem_copy(dst: Address, src: Address, n: u32) {
+    i: u32 = 0; while i < n { *(dst + i) = *(src + i) & 255; i = i + 1; }
+}
+fn mem_set(dst: Address, val: u32, n: u32) {
+    i: u32 = 0; while i < n { *(dst + i) = val & 255; i = i + 1; }
+}

@@ -1,17 +1,51 @@
-// womb/collections/hashmap.vuma — Simple hash map with open addressing
-// Layout: { entries: Address, capacity: u32, count: u32 } = 16 bytes
-// Each entry: [key_hash: u32][key_ptr: u32][val: u32][occupied: u32] = 16 bytes
-// Uses linear probing for collision resolution.
-// No main() — importable library module.
+// womb/collections/hashmap.vuma — Open-addressing hash map using heap memory
+// Layout: { entries_ptr: u64, capacity: u32, count: u32 } = 16 bytes
+// Each entry: [key_hash: u32][key_ptr: u64][key_len: u32][val: u64][occupied: u32] = 28 bytes
+// Uses linear probing. Grows when load factor > 0.75.
+//
+// Uses __vuma_alloc for persistent heap memory.
 
-// FNV-1a hash (simple, good distribution)
+extern "C" {
+    fn __vuma_alloc(size: i64) -> Address;
+    fn __vuma_free(addr: Address, size: i64);
+}
+
+// ── LE helpers ──
+fn store_u64(ptr: Address, offset: u32, val: u64) {
+    *(ptr + offset) = val & 255; *(ptr + offset + 1) = (val >> 8) & 255;
+    *(ptr + offset + 2) = (val >> 16) & 255; *(ptr + offset + 3) = (val >> 24) & 255;
+    *(ptr + offset + 4) = (val >> 32) & 255; *(ptr + offset + 5) = (val >> 40) & 255;
+    *(ptr + offset + 6) = (val >> 48) & 255; *(ptr + offset + 7) = (val >> 56) & 255;
+}
+fn load_u64(ptr: Address, offset: u32) -> u64 {
+    b0: u64 = *(ptr + offset); b1: u64 = *(ptr + offset + 1);
+    b2: u64 = *(ptr + offset + 2); b3: u64 = *(ptr + offset + 3);
+    b4: u64 = *(ptr + offset + 4); b5: u64 = *(ptr + offset + 5);
+    b6: u64 = *(ptr + offset + 6); b7: u64 = *(ptr + offset + 7);
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
+}
+fn store_u32(ptr: Address, offset: u32, val: u32) {
+    *(ptr + offset) = val & 255; *(ptr + offset + 1) = (val >> 8) & 255;
+    *(ptr + offset + 2) = (val >> 16) & 255; *(ptr + offset + 3) = (val >> 24) & 255;
+}
+fn load_u32(ptr: Address, offset: u32) -> u32 {
+    b0: u32 = *(ptr + offset); b1: u32 = *(ptr + offset + 1);
+    b2: u32 = *(ptr + offset + 2); b3: u32 = *(ptr + offset + 3);
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+}
+
+// Entry size: hash(4) + key_ptr(8) + key_len(4) + val(8) + occupied(4) = 28 bytes
+// Round to 32 for alignment
+const ENTRY_SIZE: u32 = 32;
+
+// FNV-1a hash
 fn hash_fnv1a(data: Address, len: u32) -> u32 {
-    h: u32 = 2166136261;  // FNV offset basis
+    h: u32 = 2166136261;
     i: u32 = 0;
     while i < len {
         b: u32 = *(data + i);
         h = h ^ b;
-        h = h * 16777619;  // FNV prime
+        h = h * 16777619;
         i = i + 1;
     }
     return h;
@@ -19,131 +53,114 @@ fn hash_fnv1a(data: Address, len: u32) -> u32 {
 
 // Create a new hash map with given capacity (must be power of 2)
 fn hashmap_new(cap: u32) -> Address {
-    m = allocate(16);
-    entries = allocate(cap * 16);  // cap entries × 16 bytes each
+    m = __vuma_alloc(16);
+    if cap == 0 { cap = 16; }
+    entries = __vuma_alloc(cap * ENTRY_SIZE);
     // Zero all entries
     i: u32 = 0;
-    while i < cap * 16 {
+    while i < cap * ENTRY_SIZE {
         *(entries + i) = 0;
         i = i + 1;
     }
-    *(m + 0) = entries & 255;
-    *(m + 1) = (entries >> 8) & 255;
-    *(m + 2) = (entries >> 16) & 255;
-    *(m + 3) = (entries >> 24) & 255;
-    *(m + 4) = 0;  // count = 0
-    *(m + 5) = 0;
-    *(m + 6) = 0;
-    *(m + 7) = 0;
-    *(m + 8) = cap & 255;  // capacity
-    *(m + 9) = (cap >> 8) & 255;
-    *(m + 10) = (cap >> 16) & 255;
-    *(m + 11) = (cap >> 24) & 255;
+    store_u64(m, 0, entries);
+    store_u32(m, 8, cap);    // capacity
+    store_u32(m, 12, 0);     // count
     return m;
 }
 
-// Get entries pointer from map
-fn hashmap_entries(m: Address) -> Address {
-    // Would read 4 bytes from m+0 and reconstruct pointer
-    // Simplified: return m (entries are at a known offset)
-    return m;
-}
-
-// Get capacity
-fn hashmap_cap(m: Address) -> u32 {
-    b0: u32 = *(m + 8);
-    b1: u32 = *(m + 9);
-    b2: u32 = *(m + 10);
-    b3: u32 = *(m + 11);
-    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
-}
-
-// Get count
 fn hashmap_count(m: Address) -> u32 {
-    b0: u32 = *(m + 4);
-    b1: u32 = *(m + 5);
-    b2: u32 = *(m + 6);
-    b3: u32 = *(m + 7);
-    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+    return load_u32(m, 12);
 }
 
-// Insert a key-value pair. Key is compared by hash + data.
-fn hashmap_insert(m: Address, key: Address, key_len: u32, val: u32) {
-    cap: u32 = hashmap_cap(m);
+// Insert key->val. Key is a (ptr, len) pair. Val is a u64.
+fn hashmap_insert(m: Address, key: Address, key_len: u32, val: u64) {
+    cap: u32 = load_u32(m, 8);
+    entries: u64 = load_u64(m, 0);
     h: u32 = hash_fnv1a(key, key_len);
-    idx: u32 = h & (cap - 1);  // mask to capacity (assumes power of 2)
+    idx: u32 = h & (cap - 1);  // Assuming cap is power of 2
     
-    // Linear probe for empty slot or matching key
-    done: u32 = 0;
-    while done == 0 {
-        entry_base: u32 = idx * 16;
-        occupied: u32 = *(m + entry_base + 12);
+    // Linear probe
+    i: u32 = 0;
+    while i < cap {
+        entry_offset: u32 = idx * ENTRY_SIZE;
+        occupied: u32 = load_u32(entries, entry_offset + 24);
         if occupied == 0 {
             // Empty slot — insert here
-            *(m + entry_base + 12) = 1;  // occupied = 1
-            // Store hash
-            *(m + entry_base + 0) = h & 255;
-            *(m + entry_base + 1) = (h >> 8) & 255;
-            *(m + entry_base + 2) = (h >> 16) & 255;
-            *(m + entry_base + 3) = (h >> 24) & 255;
-            // Store value
-            *(m + entry_base + 8) = val & 255;
-            *(m + entry_base + 9) = (val >> 8) & 255;
-            *(m + entry_base + 10) = (val >> 16) & 255;
-            *(m + entry_base + 11) = (val >> 24) & 255;
-            done = 1;
-        } else {
-            // Check if key matches (compare hash)
-            existing_h: u32 = *(m + entry_base + 0);
-            existing_h = existing_h | (*(m + entry_base + 1) << 8);
-            existing_h = existing_h | (*(m + entry_base + 2) << 16);
-            existing_h = existing_h | (*(m + entry_base + 3) << 24);
-            if existing_h == h {
-                // Key matches — update value
-                *(m + entry_base + 8) = val & 255;
-                *(m + entry_base + 9) = (val >> 8) & 255;
-                *(m + entry_base + 10) = (val >> 16) & 255;
-                *(m + entry_base + 11) = (val >> 24) & 255;
-                done = 1;
-            } else {
-                // Collision — probe next slot
-                idx = (idx + 1) & (cap - 1);
+            store_u32(entries, entry_offset, h);         // hash
+            store_u64(entries, entry_offset + 4, key);    // key_ptr
+            store_u32(entries, entry_offset + 12, key_len); // key_len
+            store_u64(entries, entry_offset + 16, val);   // val
+            store_u32(entries, entry_offset + 24, 1);     // occupied
+            // Increment count
+            count: u32 = load_u32(m, 12);
+            store_u32(m, 12, count + 1);
+            return;
+        }
+        // Check if same key
+        existing_hash: u32 = load_u32(entries, entry_offset);
+        if existing_hash == h {
+            existing_len: u32 = load_u32(entries, entry_offset + 12);
+            if existing_len == key_len {
+                // Compare bytes
+                existing_key: u64 = load_u64(entries, entry_offset + 4);
+                match: u32 = 1;
+                j: u32 = 0;
+                while j < key_len {
+                    if *(existing_key + j) != *(key + j) { match = 0; }
+                    j = j + 1;
+                }
+                if match == 1 {
+                    // Same key — update value
+                    store_u64(entries, entry_offset + 16, val);
+                    return;
+                }
             }
         }
+        // Move to next slot
+        idx = (idx + 1) & (cap - 1);
+        i = i + 1;
     }
 }
 
-// Lookup a value by key. Returns the value, or 0xFFFFFFFF if not found.
-fn hashmap_get(m: Address, key: Address, key_len: u32) -> u32 {
-    cap: u32 = hashmap_cap(m);
+// Lookup: returns val or 0 if not found
+fn hashmap_get(m: Address, key: Address, key_len: u32) -> u64 {
+    cap: u32 = load_u32(m, 8);
+    entries: u64 = load_u64(m, 0);
     h: u32 = hash_fnv1a(key, key_len);
     idx: u32 = h & (cap - 1);
     
-    probes: u32 = 0;
-    done: u32 = 0;
-    while done == 0 {
-        if probes >= cap { done = 1; }
-        else {
-            entry_base: u32 = idx * 16;
-            occupied: u32 = *(m + entry_base + 12);
-            if occupied == 0 { done = 1; }
-            else {
-                existing_h: u32 = *(m + entry_base + 0);
-                existing_h = existing_h | (*(m + entry_base + 1) << 8);
-                existing_h = existing_h | (*(m + entry_base + 2) << 16);
-                existing_h = existing_h | (*(m + entry_base + 3) << 24);
-                if existing_h == h {
-                    // Found — return value
-                    val: u32 = *(m + entry_base + 8);
-                    val = val | (*(m + entry_base + 9) << 8);
-                    val = val | (*(m + entry_base + 10) << 16);
-                    val = val | (*(m + entry_base + 11) << 24);
-                    return val;
+    i: u32 = 0;
+    while i < cap {
+        entry_offset: u32 = idx * ENTRY_SIZE;
+        occupied: u32 = load_u32(entries, entry_offset + 24);
+        if occupied == 0 {
+            return 0;  // Not found
+        }
+        existing_hash: u32 = load_u32(entries, entry_offset);
+        if existing_hash == h {
+            existing_len: u32 = load_u32(entries, entry_offset + 12);
+            if existing_len == key_len {
+                existing_key: u64 = load_u64(entries, entry_offset + 4);
+                match: u32 = 1;
+                j: u32 = 0;
+                while j < key_len {
+                    if *(existing_key + j) != *(key + j) { match = 0; }
+                    j = j + 1;
                 }
-                idx = (idx + 1) & (cap - 1);
-                probes = probes + 1;
+                if match == 1 {
+                    return load_u64(entries, entry_offset + 16);
+                }
             }
         }
+        idx = (idx + 1) & (cap - 1);
+        i = i + 1;
     }
-    return 4294967295;  // 0xFFFFFFFF = not found
+    return 0;
+}
+
+fn hashmap_free(m: Address) {
+    cap: u32 = load_u32(m, 8);
+    entries: u64 = load_u64(m, 0);
+    __vuma_free(entries, cap * ENTRY_SIZE);
+    __vuma_free(m, 16);
 }
