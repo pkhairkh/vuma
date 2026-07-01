@@ -51,6 +51,7 @@ pub mod cleanup;
 pub mod constraint;
 pub mod debt;
 pub mod escape;
+pub mod constant_time;
 pub mod exclusivity;
 pub mod inference;
 pub mod interpretation;
