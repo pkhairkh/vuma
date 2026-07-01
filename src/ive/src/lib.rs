@@ -60,6 +60,7 @@ pub mod invariant_aggregator;
 pub mod liveness;
 pub mod origin;
 pub mod modular;
+pub mod query;
 pub mod result;
 pub mod verification;
 

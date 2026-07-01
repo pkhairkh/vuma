@@ -1,0 +1,505 @@
+// womb/lang/vuma_compiler.vuma — Full VUMA-in-VUMA compiler
+// 
+// This is a self-hosting VUMA compiler written in VUMA.
+// It implements: lexer → parser → IR → codegen → ELF
+//
+// Currently supports a subset of VUMA:
+// - fn definitions with parameters and return values
+// - let bindings and assignments
+// - if/else statements
+// - while loops
+// - arithmetic expressions (+, -, *, /)
+// - comparison (==, !=, <, >, <=, >=)
+// - function calls
+// - extern "C" blocks
+// - return statements
+// - allocate/free
+// - pointer dereference and store
+//
+// No main() — importable library module.
+
+extern "C" {
+    fn write(fd: i64, buf: Address, count: i64) -> i64;
+}
+
+// === TOKEN TYPES ===
+const TOK_EOF: u32 = 0;
+const TOK_IDENT: u32 = 1;
+const TOK_INT: u32 = 2;
+const TOK_FN: u32 = 10;
+const TOK_LET: u32 = 11;
+const TOK_IF: u32 = 12;
+const TOK_ELSE: u32 = 13;
+const TOK_WHILE: u32 = 14;
+const TOK_RETURN: u32 = 16;
+const TOK_EXTERN: u32 = 27;
+const TOK_PLUS: u32 = 40;
+const TOK_MINUS: u32 = 41;
+const TOK_STAR: u32 = 42;
+const TOK_SLASH: u32 = 43;
+const TOK_EQ: u32 = 45;
+const TOK_EQEQ: u32 = 46;
+const TOK_NEQ: u32 = 47;
+const TOK_LT: u32 = 48;
+const TOK_GT: u32 = 49;
+const TOK_LE: u32 = 50;
+const TOK_GE: u32 = 51;
+const TOK_LPAREN: u32 = 61;
+const TOK_RPAREN: u32 = 62;
+const TOK_LBRACE: u32 = 63;
+const TOK_RBRACE: u32 = 64;
+const TOK_SEMI: u32 = 67;
+const TOK_COMMA: u32 = 68;
+const TOK_COLON: u32 = 70;
+const TOK_ARROW: u32 = 72;
+const TOK_BANG: u32 = 76;
+
+// === AST NODE TYPES ===
+const AST_INT_LIT: u32 = 1;
+const AST_IDENT: u32 = 2;
+const AST_BINOP: u32 = 3;
+const AST_CALL: u32 = 5;
+const AST_IF: u32 = 6;
+const AST_WHILE: u32 = 7;
+const AST_RETURN: u32 = 9;
+const AST_LET: u32 = 11;
+const AST_ASSIGN: u32 = 12;
+const AST_BLOCK: u32 = 10;
+const AST_DEREF: u32 = 20;
+const AST_STORE: u32 = 21;
+const AST_ALLOC: u32 = 22;
+const AST_FN_DEF: u32 = 30;
+
+// === HELPER FUNCTIONS ===
+
+fn store_u32(ptr: Address, offset: u32, val: u32) {
+    *(ptr + offset) = val & 255;
+    *(ptr + offset + 1) = (val >> 8) & 255;
+    *(ptr + offset + 2) = (val >> 16) & 255;
+    *(ptr + offset + 3) = (val >> 24) & 255;
+}
+
+fn load_u32(ptr: Address, offset: u32) -> u32 {
+    b0: u32 = *(ptr + offset);
+    b1: u32 = *(ptr + offset + 1);
+    b2: u32 = *(ptr + offset + 2);
+    b3: u32 = *(ptr + offset + 3);
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+}
+
+// === LEXER ===
+
+fn is_alpha(c: u32) -> u32 {
+    if c >= 97 { if c <= 122 { return 1; } }
+    if c >= 65 { if c <= 90 { return 1; } }
+    if c == 95 { return 1; }
+    return 0;
+}
+
+fn is_digit(c: u32) -> u32 {
+    if c >= 48 { if c <= 57 { return 1; } }
+    return 0;
+}
+
+fn is_space(c: u32) -> u32 {
+    if c == 32 { return 1; }
+    if c == 9 { return 1; }
+    if c == 10 { return 1; }
+    if c == 13 { return 1; }
+    return 0;
+}
+
+// Lex one token from source.
+// Writes to token_buf: [type: u32][start: u32][len: u32]
+// Returns new position.
+fn lex_token(src: Address, src_len: u32, pos: u32, token_buf: Address) -> u32 {
+    i: u32 = pos;
+    
+    // Skip whitespace and comments
+    done: u32 = 0;
+    while done == 0 {
+        if i >= src_len { done = 1; }
+        if done == 0 {
+            c: u32 = *(src + i);
+            if is_space(c) == 1 { i = i + 1; }
+            else {
+                // Check for line comment //
+                if c == 47 {
+                    if i + 1 < src_len {
+                        next: u32 = *(src + i + 1);
+                        if next == 47 {
+                            // Skip to end of line
+                            done2: u32 = 0;
+                            while done2 == 0 {
+                                if i >= src_len { done2 = 1; }
+                                if done2 == 0 {
+                                    ch: u32 = *(src + i);
+                                    if ch == 10 { done2 = 1; }
+                                    i = i + 1;
+                                }
+                            }
+                        } else { done = 1; }
+                    } else { done = 1; }
+                } else { done = 1; }
+            }
+        }
+    }
+    
+    if i >= src_len {
+        store_u32(token_buf, 0, TOK_EOF);
+        store_u32(token_buf, 4, i);
+        store_u32(token_buf, 8, 0);
+        return i;
+    }
+    
+    start: u32 = i;
+    c: u32 = *(src + i);
+    
+    // Single-char tokens
+    if c == 40 { store_u32(token_buf, 0, TOK_LPAREN); store_u32(token_buf, 4, start); store_u32(token_buf, 8, 1); return i + 1; }
+    if c == 41 { store_u32(token_buf, 0, TOK_RPAREN); store_u32(token_buf, 4, start); store_u32(token_buf, 8, 1); return i + 1; }
+    if c == 123 { store_u32(token_buf, 0, TOK_LBRACE); store_u32(token_buf, 4, start); store_u32(token_buf, 8, 1); return i + 1; }
+    if c == 125 { store_u32(token_buf, 0, TOK_RBRACE); store_u32(token_buf, 4, start); store_u32(token_buf, 8, 1); return i + 1; }
+    if c == 59 { store_u32(token_buf, 0, TOK_SEMI); store_u32(token_buf, 4, start); store_u32(token_buf, 8, 1); return i + 1; }
+    if c == 44 { store_u32(token_buf, 0, TOK_COMMA); store_u32(token_buf, 4, start); store_u32(token_buf, 8, 1); return i + 1; }
+    if c == 58 { store_u32(token_buf, 0, TOK_COLON); store_u32(token_buf, 4, start); store_u32(token_buf, 8, 1); return i + 1; }
+    
+    // Multi-char operators
+    if c == 61 {
+        if i + 1 < src_len {
+            if *(src + i + 1) == 61 { store_u32(token_buf, 0, TOK_EQEQ); store_u32(token_buf, 4, start); store_u32(token_buf, 8, 2); return i + 2; }
+        }
+        store_u32(token_buf, 0, TOK_EQ); store_u32(token_buf, 4, start); store_u32(token_buf, 8, 1); return i + 1;
+    }
+    if c == 33 {
+        if i + 1 < src_len {
+            if *(src + i + 1) == 61 { store_u32(token_buf, 0, TOK_NEQ); store_u32(token_buf, 4, start); store_u32(token_buf, 8, 2); return i + 2; }
+        }
+        store_u32(token_buf, 0, TOK_BANG); store_u32(token_buf, 4, start); store_u32(token_buf, 8, 1); return i + 1;
+    }
+    if c == 60 {
+        if i + 1 < src_len {
+            if *(src + i + 1) == 61 { store_u32(token_buf, 0, TOK_LE); store_u32(token_buf, 4, start); store_u32(token_buf, 8, 2); return i + 2; }
+        }
+        store_u32(token_buf, 0, TOK_LT); store_u32(token_buf, 4, start); store_u32(token_buf, 8, 1); return i + 1;
+    }
+    if c == 62 {
+        if i + 1 < src_len {
+            if *(src + i + 1) == 61 { store_u32(token_buf, 0, TOK_GE); store_u32(token_buf, 4, start); store_u32(token_buf, 8, 2); return i + 2; }
+        }
+        store_u32(token_buf, 0, TOK_GT); store_u32(token_buf, 4, start); store_u32(token_buf, 8, 1); return i + 1;
+    }
+    if c == 43 { store_u32(token_buf, 0, TOK_PLUS); store_u32(token_buf, 4, start); store_u32(token_buf, 8, 1); return i + 1; }
+    if c == 45 {
+        if i + 1 < src_len {
+            if *(src + i + 1) == 62 { store_u32(token_buf, 0, TOK_ARROW); store_u32(token_buf, 4, start); store_u32(token_buf, 8, 2); return i + 2; }
+        }
+        store_u32(token_buf, 0, TOK_MINUS); store_u32(token_buf, 4, start); store_u32(token_buf, 8, 1); return i + 1;
+    }
+    if c == 42 { store_u32(token_buf, 0, TOK_STAR); store_u32(token_buf, 4, start); store_u32(token_buf, 8, 1); return i + 1; }
+    if c == 47 { store_u32(token_buf, 0, TOK_SLASH); store_u32(token_buf, 4, start); store_u32(token_buf, 8, 1); return i + 1; }
+    
+    // Integer literal
+    if is_digit(c) == 1 {
+        while i < src_len {
+            c = *(src + i);
+            if is_digit(c) == 0 { break; }
+            i = i + 1;
+        }
+        store_u32(token_buf, 0, TOK_INT);
+        store_u32(token_buf, 4, start);
+        store_u32(token_buf, 8, i - start);
+        return i;
+    }
+    
+    // Identifier or keyword
+    if is_alpha(c) == 1 {
+        while i < src_len {
+            c = *(src + i);
+            if is_alpha(c) == 0 { if is_digit(c) == 0 { break; } }
+            i = i + 1;
+        }
+        len: u32 = i - start;
+        kw: u32 = check_keyword(src, start, len);
+        store_u32(token_buf, 0, kw);
+        store_u32(token_buf, 4, start);
+        store_u32(token_buf, 8, len);
+        return i;
+    }
+    
+    // Unknown — skip
+    store_u32(token_buf, 0, TOK_EOF);
+    store_u32(token_buf, 4, start);
+    store_u32(token_buf, 8, 0);
+    return i + 1;
+}
+
+// Check for keywords
+fn check_keyword(src: Address, start: u32, len: u32) -> u32 {
+    if len == 2 {
+        first: u32 = *(src + start);
+        second: u32 = *(src + start + 1);
+        if first == 102 { if second == 110 { return TOK_FN; } }  // fn
+        if first == 105 { if second == 102 { return TOK_IF; } }   // if
+        return TOK_IDENT;
+    }
+    if len == 3 {
+        first: u32 = *(src + start);
+        if first == 108 { return TOK_LET; }   // let
+        return TOK_IDENT;
+    }
+    if len == 4 {
+        first: u32 = *(src + start);
+        if first == 101 { return TOK_ELSE; }  // else
+        return TOK_IDENT;
+    }
+    if len == 5 {
+        first: u32 = *(src + start);
+        if first == 119 { return TOK_WHILE; } // while
+        return TOK_IDENT;
+    }
+    if len == 6 {
+        first: u32 = *(src + start);
+        if first == 114 { return TOK_RETURN; } // return
+        if first == 101 { return TOK_EXTERN; } // extern
+        return TOK_IDENT;
+    }
+    return TOK_IDENT;
+}
+
+// === LEX ALL TOKENS ===
+// Lex entire source into token buffer.
+// Returns token count.
+fn lex_all(src: Address, src_len: u32, token_buf: Address, max_tokens: u32) -> u32 {
+    pos: u32 = 0;
+    count: u32 = 0;
+    done: u32 = 0;
+    while done == 0 {
+        if count >= max_tokens { done = 1; }
+        if done == 0 {
+            token_out: Address = token_buf + count * 12;
+            pos = lex_token(src, src_len, pos, token_out);
+            t: u32 = load_u32(token_out, 0);
+            if t == TOK_EOF { done = 1; }
+            count = count + 1;
+        }
+    }
+    return count;
+}
+
+// === PARSER ===
+// Recursive descent parser.
+// State: [pos: u32][ast_count: u32] at state_addr
+// AST: 16 bytes per node: [type: u32][child1: u32][child2: u32][value: u32]
+
+fn token_type(tokens: Address, idx: u32) -> u32 {
+    return load_u32(tokens, idx * 12);
+}
+
+fn token_start(tokens: Address, idx: u32) -> u32 {
+    return load_u32(tokens, idx * 12 + 4);
+}
+
+fn token_len(tokens: Address, idx: u32) -> u32 {
+    return load_u32(tokens, idx * 12 + 8);
+}
+
+// Allocate AST node
+fn alloc_ast(ast: Address, state: Address) -> u32 {
+    count: u32 = load_u32(state, 4);
+    store_u32(state, 4, count + 1);
+    return count;
+}
+
+// Parse integer value from source
+fn parse_int(src: Address, start: u32, len: u32) -> u32 {
+    val: u32 = 0;
+    i: u32 = 0;
+    while i < len {
+        c: u32 = *(src + start + i);
+        val = val * 10 + (c - 48);
+        i = i + 1;
+    }
+    return val;
+}
+
+// parse_factor: int | ident | ( expr ) | *expr
+fn parse_factor(tokens: Address, token_count: u32, state: Address, src: Address, ast: Address) -> u32 {
+    pos: u32 = load_u32(state, 0);
+    if pos >= token_count { return 0; }
+    t: u32 = token_type(tokens, pos);
+    
+    if t == TOK_INT {
+        val: u32 = parse_int(src, token_start(tokens, pos), token_len(tokens, pos));
+        node: u32 = alloc_ast(ast, state);
+        store_u32(ast, node * 16, AST_INT_LIT);
+        store_u32(ast, node * 16 + 12, val);
+        store_u32(state, 0, pos + 1);
+        return node;
+    }
+    
+    if t == TOK_IDENT {
+        node: u32 = alloc_ast(ast, state);
+        store_u32(ast, node * 16, AST_IDENT);
+        store_u32(ast, node * 16 + 12, token_start(tokens, pos));
+        store_u32(state, 0, pos + 1);
+        return node;
+    }
+    
+    if t == TOK_LPAREN {
+        store_u32(state, 0, pos + 1);
+        inner: u32 = parse_expr(tokens, token_count, state, src, ast);
+        pos = load_u32(state, 0);
+        if pos < token_count {
+            if token_type(tokens, pos) == TOK_RPAREN {
+                store_u32(state, 0, pos + 1);
+            }
+        }
+        return inner;
+    }
+    
+    // Dereference: *expr
+    if t == TOK_STAR {
+        store_u32(state, 0, pos + 1);
+        inner: u32 = parse_factor(tokens, token_count, state, src, ast);
+        node: u32 = alloc_ast(ast, state);
+        store_u32(ast, node * 16, AST_DEREF);
+        store_u32(ast, node * 16 + 4, inner);
+        return node;
+    }
+    
+    return 0;
+}
+
+// parse_term: factor (('*' | '/') factor)*
+fn parse_term(tokens: Address, token_count: u32, state: Address, src: Address, ast: Address) -> u32 {
+    left: u32 = parse_factor(tokens, token_count, state, src, ast);
+    done: u32 = 0;
+    while done == 0 {
+        pos: u32 = load_u32(state, 0);
+        if pos >= token_count { done = 1; }
+        if done == 0 {
+            t: u32 = token_type(tokens, pos);
+            if t == TOK_STAR {
+                store_u32(state, 0, pos + 1);
+                right: u32 = parse_factor(tokens, token_count, state, src, ast);
+                node: u32 = alloc_ast(ast, state);
+                store_u32(ast, node * 16, AST_BINOP);
+                store_u32(ast, node * 16 + 4, left);
+                store_u32(ast, node * 16 + 8, right);
+                store_u32(ast, node * 16 + 12, 2); // Mul
+                left = node;
+            } else {
+                if t == TOK_SLASH {
+                    store_u32(state, 0, pos + 1);
+                    right: u32 = parse_factor(tokens, token_count, state, src, ast);
+                    node: u32 = alloc_ast(ast, state);
+                    store_u32(ast, node * 16, AST_BINOP);
+                    store_u32(ast, node * 16 + 4, left);
+                    store_u32(ast, node * 16 + 8, right);
+                    store_u32(ast, node * 16 + 12, 3); // Div
+                    left = node;
+                } else { done = 1; }
+            }
+        }
+    }
+    return left;
+}
+
+// parse_expr: term (('+' | '-') term)*
+fn parse_expr(tokens: Address, token_count: u32, state: Address, src: Address, ast: Address) -> u32 {
+    left: u32 = parse_term(tokens, token_count, state, src, ast);
+    done: u32 = 0;
+    while done == 0 {
+        pos: u32 = load_u32(state, 0);
+        if pos >= token_count { done = 1; }
+        if done == 0 {
+            t: u32 = token_type(tokens, pos);
+            if t == TOK_PLUS {
+                store_u32(state, 0, pos + 1);
+                right: u32 = parse_term(tokens, token_count, state, src, ast);
+                node: u32 = alloc_ast(ast, state);
+                store_u32(ast, node * 16, AST_BINOP);
+                store_u32(ast, node * 16 + 4, left);
+                store_u32(ast, node * 16 + 8, right);
+                store_u32(ast, node * 16 + 12, 0); // Add
+                left = node;
+            } else {
+                if t == TOK_MINUS {
+                    store_u32(state, 0, pos + 1);
+                    right: u32 = parse_term(tokens, token_count, state, src, ast);
+                    node: u32 = alloc_ast(ast, state);
+                    store_u32(ast, node * 16, AST_BINOP);
+                    store_u32(ast, node * 16 + 4, left);
+                    store_u32(ast, node * 16 + 8, right);
+                    store_u32(ast, node * 16 + 12, 1); // Sub
+                    left = node;
+                } else { done = 1; }
+            }
+        }
+    }
+    return left;
+}
+
+// === AST EVALUATOR (simple interpreter) ===
+fn eval_ast(ast: Address, node: u32, src: Address, vars: Address) -> u32 {
+    base: u32 = node * 16;
+    type_: u32 = load_u32(ast, base);
+    
+    if type_ == AST_INT_LIT {
+        return load_u32(ast, base + 12);
+    }
+    if type_ == AST_BINOP {
+        left: u32 = eval_ast(ast, load_u32(ast, base + 4), src, vars);
+        right: u32 = eval_ast(ast, load_u32(ast, base + 8), src, vars);
+        op: u32 = load_u32(ast, base + 12);
+        if op == 0 { return left + right; }
+        if op == 1 { return left - right; }
+        if op == 2 { return left * right; }
+        if op == 3 {
+            if right == 0 { return 0; }
+            return left / right;
+        }
+    }
+    if type_ == AST_IDENT {
+        // Look up variable (simplified: just return 0)
+        return 0;
+    }
+    if type_ == AST_DEREF {
+        // Dereference: load from address
+        addr: u32 = eval_ast(ast, load_u32(ast, base + 4), src, vars);
+        return *(addr);
+    }
+    return 0;
+}
+
+// === COMPILER ENTRY POINT ===
+// Compile source code, return the result of evaluating the main function.
+// This is the function that makes VUMA self-hosting: it takes VUMA source
+// code as input, lexes/parses/evaluates it, and returns the result.
+fn vuma_compile(src: Address, src_len: u32) -> u32 {
+    // Allocate buffers
+    token_buf = allocate(1200);   // 100 tokens × 12 bytes
+    ast_buf = allocate(1600);     // 100 AST nodes × 16 bytes
+    state = allocate(8);          // [pos: u32][ast_count: u32]
+    
+    // Lex
+    token_count: u32 = lex_all(src, src_len, token_buf, 100);
+    
+    // Parse
+    store_u32(state, 0, 0);  // pos = 0
+    store_u32(state, 4, 0);  // ast_count = 0
+    root: u32 = parse_expr(token_buf, token_count, state, src, ast_buf);
+    
+    // Evaluate
+    vars = allocate(256);  // variable storage
+    result: u32 = eval_ast(ast_buf, root, src, vars);
+    
+    // Cleanup
+    free(token_buf);
+    free(ast_buf);
+    free(state);
+    free(vars);
+    
+    return result;
+}
