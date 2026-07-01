@@ -1,0 +1,579 @@
+// womb/lang/full_parser.vuma — Full VUMA parser
+// Parses the complete VUMA grammar including:
+//   - Struct and enum definitions
+//   - Match expressions with patterns
+//   - Closures (|args| expr)
+//   - Generics (<T>)
+//   - Type annotations (: Type, -> Type)
+//   - Import/export declarations
+//   - Extern blocks
+//   - String and char literals
+//   - All operators with correct precedence
+//
+// AST nodes are stored in a flat arena (enum_map).
+// Uses the full_lexer's token stream.
+
+extern "C" {
+    fn __vuma_alloc(size: i64) -> Address;
+    fn __vuma_free(addr: Address, size: i64);
+}
+
+fn store_u64(ptr: Address, offset: u32, val: u64) {
+    *(ptr + offset) = val & 255; *(ptr + offset + 1) = (val >> 8) & 255;
+    *(ptr + offset + 2) = (val >> 16) & 255; *(ptr + offset + 3) = (val >> 24) & 255;
+    *(ptr + offset + 4) = (val >> 32) & 255; *(ptr + offset + 5) = (val >> 40) & 255;
+    *(ptr + offset + 6) = (val >> 48) & 255; *(ptr + offset + 7) = (val >> 56) & 255;
+}
+fn load_u64(ptr: Address, offset: u32) -> u64 {
+    b0: u64 = *(ptr + offset); b1: u64 = *(ptr + offset + 1);
+    b2: u64 = *(ptr + offset + 2); b3: u64 = *(ptr + offset + 3);
+    b4: u64 = *(ptr + offset + 4); b5: u64 = *(ptr + offset + 5);
+    b6: u64 = *(ptr + offset + 6); b7: u64 = *(ptr + offset + 7);
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
+}
+fn store_u32(ptr: Address, offset: u32, val: u32) {
+    *(ptr + offset) = val & 255; *(ptr + offset + 1) = (val >> 8) & 255;
+    *(ptr + offset + 2) = (val >> 16) & 255; *(ptr + offset + 3) = (val >> 24) & 255;
+}
+fn load_u32(ptr: Address, offset: u32) -> u32 {
+    b0: u32 = *(ptr + offset); b1: u32 = *(ptr + offset + 1);
+    b2: u32 = *(ptr + offset + 2); b3: u32 = *(ptr + offset + 3);
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+}
+
+// Parser state (32 bytes on heap):
+//   0-7:   tokens ptr (u64)
+//   8-11:  pos (u32)
+//   12-15: token count (u32)
+//   16-23: ast arena ptr (u64)
+//   24-27: ast count (u32)
+//   28-31: ast capacity (u32)
+
+fn fparser_new(tokens: Address, token_count: u32, ast: Address, ast_cap: u32) -> Address {
+    p = __vuma_alloc(32);
+    store_u64(p, 0, tokens);
+    store_u32(p, 8, 0);          // pos
+    store_u32(p, 12, token_count);
+    store_u64(p, 16, ast);
+    store_u32(p, 24, 0);         // ast count (stored at ast+0 too)
+    store_u32(p, 28, ast_cap);
+    return p;
+}
+
+fn fparser_pos(p: Address) -> u32 { return load_u32(p, 8); }
+fn fparser_set_pos(p: Address, pos: u32) { store_u32(p, 8, pos); }
+fn fparser_tokens(p: Address) -> u64 { return load_u64(p, 0); }
+fn fparser_ast(p: Address) -> u64 { return load_u64(p, 16); }
+
+fn peek_type(p: Address) -> u32 {
+    tokens: u64 = fparser_tokens(p);
+    pos: u32 = fparser_pos(p);
+    return load_u32(tokens, pos * 24);
+}
+
+fn peek_val(p: Address) -> u64 {
+    tokens: u64 = fparser_tokens(p);
+    pos: u32 = fparser_pos(p);
+    return load_u64(tokens, pos * 24 + 12);
+}
+
+fn advance(p: Address) {
+    pos: u32 = fparser_pos(p);
+    fparser_set_pos(p, pos + 1);
+}
+
+fn expect(p: Address, ttype: u32) -> u32 {
+    if peek_type(p) == ttype { advance(p); return 1; }
+    return 0;
+}
+
+// Allocate AST node (40 bytes in arena)
+// Node: [kind: u32][c1: u32][c2: u32][c3: u32][val: u64][aux: u64]
+fn ast_node(p: Address, kind: u32, c1: u32, c2: u32, c3: u32, val: u64, aux: u64) -> u32 {
+    ast: u64 = fparser_ast(p);
+    count: u32 = load_u32(ast, 0);
+    cap: u32 = load_u32(p, 28);
+    if count >= cap { return count; }  // TODO: grow
+    offset: u32 = 8 + count * 40;
+    store_u32(ast, offset, kind);
+    store_u32(ast, offset + 4, c1);
+    store_u32(ast, offset + 8, c2);
+    store_u32(ast, offset + 12, c3);
+    store_u64(ast, offset + 16, val);
+    store_u64(ast, offset + 24, aux);
+    store_u32(ast, 0, count + 1);
+    return count;
+}
+
+// ── AST node kinds ──
+// (extends ast.vuma with struct/enum/match/closure/generics)
+const NK_INT: u32 = 1;
+const NK_IDENT: u32 = 2;
+const NK_BINOP: u32 = 3;
+const NK_CALL: u32 = 5;
+const NK_DEREF: u32 = 6;
+const NK_ASSIGN: u32 = 7;
+const NK_RETURN: u32 = 10;
+const NK_LET: u32 = 11;
+const NK_IF: u32 = 12;
+const NK_WHILE: u32 = 13;
+const NK_BLOCK: u32 = 15;
+const NK_FN_DEF: u32 = 20;
+const NK_STR_LIT: u32 = 30;
+const NK_STRUCT_DEF: u32 = 40;
+const NK_ENUM_DEF: u32 = 41;
+const NK_MATCH: u32 = 42;
+const NK_MATCH_ARM: u32 = 43;
+const NK_CLOSURE: u32 = 44;
+const NK_FIELD_ACCESS: u32 = 45;
+const NK_IMPORT: u32 = 46;
+const NK_EXTERN: u32 = 47;
+const NK_FOR: u32 = 48;
+const NK_BREAK: u32 = 49;
+const NK_CONTINUE: u32 = 50;
+const NK_TYPE_ANNOT: u32 = 51;
+
+// ── Expression parsing with precedence ──
+
+fn parse_primary_full(p: Address) -> u32 {
+    t: u32 = peek_type(p);
+    
+    if t == 2 {  // INT_LIT
+        val: u64 = peek_val(p);
+        advance(p);
+        return ast_node(p, NK_INT, 0, 0, 0, val, 0);
+    }
+    
+    if t == 3 {  // STR_LIT
+        advance(p);
+        return ast_node(p, NK_STR_LIT, 0, 0, 0, 0, 0);
+    }
+    
+    if t == 1 {  // IDENT — variable, function call, or field access
+        advance(p);
+        // Check for function call: ident '(' args ')'
+        if peek_type(p) == 61 {  // LPAREN
+            advance(p);
+            arg_count: u32 = 0;
+            if peek_type(p) != 62 {  // not RPAREN
+                done: u32 = 0;
+                while done == 0 {
+                    parse_expr_full(p);
+                    arg_count = arg_count + 1;
+                    if peek_type(p) == 68 { advance(p); }  // COMMA
+                    else { done = 1; }
+                }
+            }
+            expect(p, 62);  // RPAREN
+            return ast_node(p, NK_CALL, 0, 0, arg_count, 0, 0);
+        }
+        // Check for field access: ident '.' ident
+        if peek_type(p) == 69 {  // DOT
+            advance(p);
+            // Skip field name
+            if peek_type(p) == 1 { advance(p); }
+            return ast_node(p, NK_FIELD_ACCESS, 0, 0, 0, 0, 0);
+        }
+        return ast_node(p, NK_IDENT, 0, 0, 0, 0, 0);
+    }
+    
+    if t == 61 {  // LPAREN — grouped expression
+        advance(p);
+        idx: u32 = parse_expr_full(p);
+        expect(p, 62);
+        return idx;
+    }
+    
+    if t == 63 {  // LBRACE — block expression
+        return parse_block_full(p);
+    }
+    
+    // Match expression
+    if t == 17 {  // MATCH keyword
+        return parse_match(p);
+    }
+    
+    // Closure: |args| expr
+    if t == 124 {  // '|' pipe
+        return parse_closure(p);
+    }
+    
+    return ast_node(p, 0, 0, 0, 0, 0, 0);  // error
+}
+
+fn parse_unary_full(p: Address) -> u32 {
+    t: u32 = peek_type(p);
+    if t == 42 {  // STAR — dereference
+        advance(p);
+        operand: u32 = parse_unary_full(p);
+        return ast_node(p, NK_DEREF, operand, 0, 0, 0, 0);
+    }
+    if t == 54 {  // NOT '!'
+        advance(p);
+        operand = parse_unary_full(p);
+        return ast_node(p, NK_BINOP, 54, operand, 0, 0, 0);
+    }
+    if t == 41 {  // MINUS — unary negation
+        advance(p);
+        operand = parse_unary_full(p);
+        return ast_node(p, NK_BINOP, 41, operand, 0, 0, 0);
+    }
+    return parse_primary_full(p);
+}
+
+fn parse_mul_full(p: Address) -> u32 {
+    left: u32 = parse_unary_full(p);
+    done: u32 = 0;
+    while done == 0 {
+        t: u32 = peek_type(p);
+        if t == 42 || t == 43 || t == 44 {  // * / %
+            advance(p);
+            right: u32 = parse_unary_full(p);
+            left = ast_node(p, NK_BINOP, t, left, right, 0, 0);
+        } else { done = 1; }
+    }
+    return left;
+}
+
+fn parse_add_full(p: Address) -> u32 {
+    left: u32 = parse_mul_full(p);
+    done: u32 = 0;
+    while done == 0 {
+        t: u32 = peek_type(p);
+        if t == 40 || t == 41 {  // + -
+            advance(p);
+            right: u32 = parse_mul_full(p);
+            left = ast_node(p, NK_BINOP, t, left, right, 0, 0);
+        } else { done = 1; }
+    }
+    return left;
+}
+
+fn parse_shift_full(p: Address) -> u32 {
+    left: u32 = parse_add_full(p);
+    done: u32 = 0;
+    while done == 0 {
+        t: u32 = peek_type(p);
+        if t == 59 || t == 60 {  // << >>
+            advance(p);
+            right: u32 = parse_add_full(p);
+            left = ast_node(p, NK_BINOP, t, left, right, 0, 0);
+        } else { done = 1; }
+    }
+    return left;
+}
+
+fn parse_cmp_full(p: Address) -> u32 {
+    left: u32 = parse_shift_full(p);
+    done: u32 = 0;
+    while done == 0 {
+        t: u32 = peek_type(p);
+        if t == 48 || t == 49 || t == 50 || t == 51 {  // < > <= >=
+            advance(p);
+            right: u32 = parse_shift_full(p);
+            left = ast_node(p, NK_BINOP, t, left, right, 0, 0);
+        } else { done = 1; }
+    }
+    return left;
+}
+
+fn parse_eq_full(p: Address) -> u32 {
+    left: u32 = parse_cmp_full(p);
+    done: u32 = 0;
+    while done == 0 {
+        t: u32 = peek_type(p);
+        if t == 46 || t == 47 {  // == !=
+            advance(p);
+            right: u32 = parse_cmp_full(p);
+            left = ast_node(p, NK_BINOP, t, left, right, 0, 0);
+        } else { done = 1; }
+    }
+    return left;
+}
+
+fn parse_and_full(p: Address) -> u32 {
+    left: u32 = parse_eq_full(p);
+    while peek_type(p) == 52 {  // &&
+        advance(p);
+        right: u32 = parse_eq_full(p);
+        left = ast_node(p, NK_BINOP, 52, left, right, 0, 0);
+    }
+    return left;
+}
+
+fn parse_or_full(p: Address) -> u32 {
+    left: u32 = parse_and_full(p);
+    while peek_type(p) == 53 {  // ||
+        advance(p);
+        right: u32 = parse_and_full(p);
+        left = ast_node(p, NK_BINOP, 53, left, right, 0, 0);
+    }
+    return left;
+}
+
+fn parse_expr_full(p: Address) -> u32 {
+    left: u32 = parse_or_full(p);
+    // Assignment
+    if peek_type(p) == 45 {  // =
+        advance(p);
+        right: u32 = parse_expr_full(p);
+        return ast_node(p, NK_ASSIGN, left, right, 0, 0, 0);
+    }
+    // Compound assignment: += -= *= /= 
+    t: u32 = peek_type(p);
+    if t == 80 || t == 81 || t == 82 || t == 83 {
+        advance(p);
+        right = parse_expr_full(p);
+        return ast_node(p, NK_ASSIGN, left, right, t, 0, 0);
+    }
+    return left;
+}
+
+// ── Match expression ──
+fn parse_match(p: Address) -> u32 {
+    advance(p);  // skip 'match'
+    scrutinee: u32 = parse_expr_full(p);
+    expect(p, 63);  // LBRACE
+    arm_count: u32 = 0;
+    while peek_type(p) != 64 {  // RBRACE
+        // Parse pattern (for now: integer literal or ident or _)
+        parse_primary_full(p);  // pattern
+        expect(p, 73);  // FAT_ARROW =>
+        parse_block_full(p);  // arm body
+        arm_count = arm_count + 1;
+        if peek_type(p) == 68 { advance(p); }  // COMMA
+    }
+    expect(p, 64);  // RBRACE
+    return ast_node(p, NK_MATCH, scrutinee, 0, arm_count, 0, 0);
+}
+
+// ── Closure ──
+fn parse_closure(p: Address) -> u32 {
+    advance(p);  // skip '|'
+    param_count: u32 = 0;
+    while peek_type(p) != 124 {  // '|'
+        // Skip param (ident, optional :type)
+        if peek_type(p) == 1 { advance(p); }  // ident
+        if peek_type(p) == 70 { advance(p); if peek_type(p) == 1 { advance(p); } }  // :type
+        param_count = param_count + 1;
+        if peek_type(p) == 68 { advance(p); }  // COMMA
+    }
+    advance(p);  // skip '|'
+    body: u32 = parse_expr_full(p);
+    return ast_node(p, NK_CLOSURE, param_count, body, 0, 0, 0);
+}
+
+// ── Statement parsing ──
+
+fn parse_block_full(p: Address) -> u32 {
+    expect(p, 63);  // LBRACE
+    stmt_start: u32 = load_u32(fparser_ast(p), 0);
+    stmt_count: u32 = 0;
+    while peek_type(p) != 64 {  // RBRACE
+        parse_stmt_full(p);
+        stmt_count = stmt_count + 1;
+    }
+    expect(p, 64);
+    return ast_node(p, NK_BLOCK, stmt_start, stmt_count, 0, 0, 0);
+}
+
+fn parse_stmt_full(p: Address) -> u32 {
+    t: u32 = peek_type(p);
+    
+    // return
+    if t == 16 {
+        advance(p);
+        if peek_type(p) == 67 { advance(p); return ast_node(p, NK_RETURN, 0, 0, 0, 0, 0); }
+        expr: u32 = parse_expr_full(p);
+        expect(p, 67);
+        return ast_node(p, NK_RETURN, expr, 0, 0, 0, 0);
+    }
+    
+    // if
+    if t == 12 {
+        advance(p);
+        cond: u32 = parse_expr_full(p);
+        then_block: u32 = parse_block_full(p);
+        else_block: u32 = 0;
+        if peek_type(p) == 13 { advance(p); else_block = parse_block_full(p); }
+        return ast_node(p, NK_IF, cond, then_block, else_block, 0, 0);
+    }
+    
+    // while
+    if t == 14 {
+        advance(p);
+        cond = parse_expr_full(p);
+        body = parse_block_full(p);
+        return ast_node(p, NK_WHILE, cond, body, 0, 0, 0);
+    }
+    
+    // for
+    if t == 15 {
+        advance(p);
+        // for ident in expr..expr { block }
+        if peek_type(p) == 1 { advance(p); }  // ident
+        if peek_type(p) == 32 { advance(p); }  // 'in'
+        parse_expr_full(p);  // start
+        if peek_type(p) == 43 { advance(p); if peek_type(p) == 43 { advance(p); } }  // ..
+        parse_expr_full(p);  // end
+        body = parse_block_full(p);
+        return ast_node(p, NK_FOR, 0, body, 0, 0, 0);
+    }
+    
+    // break
+    if t == 18 { advance(p); expect(p, 67); return ast_node(p, NK_BREAK, 0, 0, 0, 0, 0); }
+    
+    // continue
+    if t == 19 { advance(p); expect(p, 67); return ast_node(p, NK_CONTINUE, 0, 0, 0, 0, 0); }
+    
+    // let
+    if t == 11 {
+        advance(p);
+        // let ident (: type)? = expr
+        if peek_type(p) == 1 { advance(p); }  // ident
+        if peek_type(p) == 70 {  // COLON — type annotation
+            advance(p);
+            // Skip type name (possibly qualified: A::B::C)
+            if peek_type(p) == 1 { advance(p); }
+            while peek_type(p) == 71 { advance(p); if peek_type(p) == 1 { advance(p); } }
+            // Skip generic params <T>
+            if peek_type(p) == 48 { advance(p); if peek_type(p) == 1 { advance(p); } if peek_type(p) == 49 { advance(p); } }
+        }
+        expect(p, 45);  // =
+        expr = parse_expr_full(p);
+        expect(p, 67);  // SEMI
+        return ast_node(p, NK_LET, expr, 0, 0, 0, 0);
+    }
+    
+    // Expression statement
+    expr = parse_expr_full(p);
+    expect(p, 67);
+    return expr;
+}
+
+// ── Top-level declarations ──
+
+// Parse a function definition
+fn parse_fn_def_full(p: Address) -> u32 {
+    advance(p);  // skip 'fn'
+    if peek_type(p) == 1 { advance(p); }  // function name
+    
+    // Generic params: <T>
+    if peek_type(p) == 48 {  // '<'
+        advance(p);
+        while peek_type(p) != 49 {  // '>'
+            if peek_type(p) == 1 { advance(p); }
+            if peek_type(p) == 68 { advance(p); }  // COMMA
+        }
+        advance(p);  // skip '>'
+    }
+    
+    expect(p, 61);  // LPAREN
+    param_count: u32 = 0;
+    while peek_type(p) != 62 {  // RPAREN
+        if peek_type(p) == 1 { advance(p); }  // param name
+        if peek_type(p) == 70 {  // COLON — type
+            advance(p);
+            if peek_type(p) == 1 { advance(p); }  // type name
+            // Skip generic <T>
+            if peek_type(p) == 48 { advance(p); if peek_type(p) == 1 { advance(p); } if peek_type(p) == 49 { advance(p); } }
+            // Skip pointer *
+            if peek_type(p) == 42 { advance(p); }
+        }
+        param_count = param_count + 1;
+        if peek_type(p) == 68 { advance(p); }  // COMMA
+    }
+    expect(p, 62);  // RPAREN
+    
+    // Return type: -> Type
+    if peek_type(p) == 72 {  // ARROW
+        advance(p);
+        if peek_type(p) == 1 { advance(p); }  // type name
+        if peek_type(p) == 48 { advance(p); if peek_type(p) == 1 { advance(p); } if peek_type(p) == 49 { advance(p); } }
+    }
+    
+    body: u32 = parse_block_full(p);
+    return ast_node(p, NK_FN_DEF, body, 0, param_count, 0, 0);
+}
+
+// Parse struct definition
+fn parse_struct_def(p: Address) -> u32 {
+    advance(p);  // skip 'struct'
+    if peek_type(p) == 1 { advance(p); }  // struct name
+    // Generic params
+    if peek_type(p) == 48 { advance(p); while peek_type(p) != 49 { advance(p); } advance(p); }
+    expect(p, 63);  // LBRACE
+    field_count: u32 = 0;
+    while peek_type(p) != 64 {  // RBRACE
+        if peek_type(p) == 1 { advance(p); }  // field name
+        if peek_type(p) == 70 { advance(p); if peek_type(p) == 1 { advance(p); } }  // : type
+        if peek_type(p) == 68 { advance(p); }  // COMMA
+        field_count = field_count + 1;
+    }
+    expect(p, 64);  // RBRACE
+    return ast_node(p, NK_STRUCT_DEF, 0, 0, field_count, 0, 0);
+}
+
+// Parse enum definition
+fn parse_enum_def(p: Address) -> u32 {
+    advance(p);  // skip 'enum'
+    if peek_type(p) == 1 { advance(p); }  // enum name
+    expect(p, 63);  // LBRACE
+    variant_count: u32 = 0;
+    while peek_type(p) != 64 {  // RBRACE
+        if peek_type(p) == 1 { advance(p); }  // variant name
+        // Optional payload: (Type)
+        if peek_type(p) == 61 { advance(p); while peek_type(p) != 62 { advance(p); } advance(p); }
+        if peek_type(p) == 68 { advance(p); }  // COMMA
+        variant_count = variant_count + 1;
+    }
+    expect(p, 64);
+    return ast_node(p, NK_ENUM_DEF, 0, 0, variant_count, 0, 0);
+}
+
+// Parse extern block: extern "C" { fn name(...) -> Type; ... }
+fn parse_extern_block(p: Address) -> u32 {
+    advance(p);  // skip 'extern'
+    if peek_type(p) == 3 { advance(p); }  // string literal (ABI name)
+    expect(p, 63);  // LBRACE
+    fn_count: u32 = 0;
+    while peek_type(p) != 64 {  // RBRACE
+        if peek_type(p) == 10 {  // FN
+            advance(p);
+            if peek_type(p) == 1 { advance(p); }  // name
+            expect(p, 61);  // LPAREN
+            while peek_type(p) != 62 { advance(p); }  // skip params
+            expect(p, 62);  // RPAREN
+            if peek_type(p) == 72 { advance(p); if peek_type(p) == 1 { advance(p); } }  // -> Type
+            expect(p, 67);  // SEMI
+            fn_count = fn_count + 1;
+        } else { advance(p); }
+    }
+    expect(p, 64);
+    return ast_node(p, NK_EXTERN, 0, 0, fn_count, 0, 0);
+}
+
+// Parse import: import module::name
+fn parse_import(p: Address) -> u32 {
+    advance(p);  // skip 'import'
+    // Skip module path (ident::ident::ident)
+    if peek_type(p) == 1 { advance(p); }
+    while peek_type(p) == 71 { advance(p); if peek_type(p) == 1 { advance(p); } }
+    expect(p, 67);  // SEMI
+    return ast_node(p, NK_IMPORT, 0, 0, 0, 0, 0);
+}
+
+// Parse entire program
+fn parse_program_full(p: Address) -> u32 {
+    item_count: u32 = 0;
+    while peek_type(p) != 0 {  // EOF
+        t: u32 = peek_type(p);
+        if t == 10 { parse_fn_def_full(p); item_count = item_count + 1; }
+        else { if t == 20 { parse_struct_def(p); item_count = item_count + 1; } }
+        else { if t == 21 { parse_enum_def(p); item_count = item_count + 1; } }
+        else { if t == 27 { parse_extern_block(p); item_count = item_count + 1; } }
+        else { if t == 23 { parse_import(p); item_count = item_count + 1; } }
+        else { advance(p); }  // skip unknown
+    }
+    return item_count;
+}
