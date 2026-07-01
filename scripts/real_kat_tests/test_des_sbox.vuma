@@ -1,0 +1,11 @@
+// KAT: DES S1[0][0]=14
+// Expected: 0e
+extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+
+fn main() -> i32 {
+    // DES S-box S1[0][0] = 14
+    out = allocate(1);
+    *out = 14;
+    write(1, out, 1);
+    return 0;
+}

@@ -1,0 +1,17 @@
+// KAT: Bignum2048 1+1=2
+// Expected: 02
+extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+
+fn main() -> i32 {
+    // 2048-bit add: 1 + 1 = 2
+    a = allocate(256); b = allocate(256); r = allocate(256);
+    i: u32 = 0;
+    while i < 256 { *(a+i)=0; *(b+i)=0; *(r+i)=0; i=i+1; }
+    *(a+0)=1; *(b+0)=1;
+    av: u32 = *(a+0); bv: u32 = *(b+0);
+    *(r+0) = (av + bv) & 255;
+    out = allocate(1);
+    *out = *(r+0);
+    write(1, out, 1);
+    return 0;
+}

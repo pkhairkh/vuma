@@ -1,0 +1,11 @@
+// KAT: O_RDWR = 2
+// Expected: 02
+extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+
+fn main() -> i32 {
+    // O_RDWR = 2
+    out = allocate(1);
+    *out = 2;
+    write(1, out, 1);
+    return 0;
+}

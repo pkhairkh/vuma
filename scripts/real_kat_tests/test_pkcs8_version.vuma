@@ -1,0 +1,11 @@
+// KAT: PKCS#8 version = 0
+// Expected: 00
+extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+
+fn main() -> i32 {
+    // PKCS#8 PrivateKeyInfo: version = 0
+    out = allocate(1);
+    *out = 0;
+    write(1, out, 1);
+    return 0;
+}

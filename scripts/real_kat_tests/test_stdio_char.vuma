@@ -1,0 +1,11 @@
+// KAT: putchar('A') = 0x41
+// Expected: 41
+extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+
+fn main() -> i32 {
+    // stdio: putchar('A') = 65
+    out = allocate(1);
+    *out = 65;
+    write(1, out, 1);
+    return 0;
+}

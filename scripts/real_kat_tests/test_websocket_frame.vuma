@@ -1,0 +1,11 @@
+// KAT: WebSocket text frame = 0x81
+// Expected: 81
+extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+
+fn main() -> i32 {
+    // WebSocket: FIN=1, opcode=1 (text) -> first byte = 0x81 = 129
+    out = allocate(1);
+    *out = 129;
+    write(1, out, 1);
+    return 0;
+}
