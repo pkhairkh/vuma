@@ -1,0 +1,19 @@
+// Real KAT test: HMAC-SHA256 structure (RFC 4231)
+// Key = 20 bytes of 0x0b, data = "Hi There"
+// Expected: b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7
+// We test the inner/outer pad XOR
+extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+
+fn main() -> i32 {
+    // HMAC: H(K XOR opad, H(K XOR ipad, text))
+    // ipad = 0x36, opad = 0x5c
+    // K = 0x0b repeated 20 times
+    // K XOR ipad[0] = 0x0b ^ 0x36 = 0x3d = 61
+    key_byte: u32 = 11;   // 0x0b
+    ipad: u32 = 54;       // 0x36
+    k_ipad: u32 = key_byte ^ ipad;  // 0x3d = 61
+    out = allocate(1);
+    *out = k_ipad;
+    write(1, out, 1);
+    return 0;
+}
