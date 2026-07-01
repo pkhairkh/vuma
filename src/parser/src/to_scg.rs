@@ -97,6 +97,8 @@ pub struct AstToScg {
     default_region: RegionId,
     /// Current function's return type (for propagating to return expr Computation nodes).
     current_return_type: Option<String>,
+    /// Struct definitions: maps struct name → list of (field_name, field_type, offset)
+    struct_table: HashMap<String, Vec<(String, String, u64)>>,
 }
 
 impl AstToScg {
@@ -109,6 +111,7 @@ impl AstToScg {
             next_region_id: 1,
             current_return_type: None,
             default_region,
+            struct_table: HashMap::new(),
         }
     }
 
@@ -209,6 +212,17 @@ impl AstToScg {
                 Ok(id)
             }
             Item::StructDef(s) => {
+                // Register struct layout in struct_table
+                let mut offset: u64 = 0;
+                let mut layout: Vec<(String, String, u64)> = Vec::new();
+                for f in &s.fields {
+                    let field_type = f.ty.to_string();
+                    let size = self.type_size_from_name(&field_type);
+                    layout.push((f.name.clone(), field_type, offset));
+                    offset += size;
+                }
+                self.struct_table.insert(s.name.clone(), layout);
+
                 let fields_str: Vec<String> = s
                     .fields
                     .iter()
@@ -2924,10 +2938,38 @@ impl AstToScg {
     }
 
     /// Enhanced: infer field offset from an access expression.
-    fn infer_field_offset(&self, _expr: &Expr) -> Option<u64> {
-        // Best-effort: without struct layout information we cannot compute
-        // exact offsets. Returns None for now; can be enhanced with
-        // struct definition analysis.
+    fn infer_field_offset(&self, expr: &Expr) -> Option<u64> {
+        // Try to find the field name and struct type from the expression.
+        // For FieldAccess: expr.field → look up struct type of expr,
+        // then find field offset.
+        if let Expr::FieldAccess { expr: inner, field, .. } = expr {
+            // Try to determine the struct type of the inner expression.
+            // For now, we look for a variable whose name matches a struct
+            // and find the field offset.
+            // This is a best-effort approach — a proper implementation would
+            // track types through the SCG.
+            
+            // Check if inner is a dereference: (*ptr).field
+            if let Expr::Deref { expr: deref_inner, .. } = inner.as_ref() {
+                // (*ptr).field — look up the field in all known structs
+                for (struct_name, layout) in &self.struct_table {
+                    for (fname, _ftype, foffset) in layout {
+                        if fname == field {
+                            return Some(*foffset);
+                        }
+                    }
+                }
+            }
+            
+            // Direct field access: var.field — look up in struct_table
+            for (struct_name, layout) in &self.struct_table {
+                for (fname, _ftype, foffset) in layout {
+                    if fname == field {
+                        return Some(*foffset);
+                    }
+                }
+            }
+        }
         None
     }
 
