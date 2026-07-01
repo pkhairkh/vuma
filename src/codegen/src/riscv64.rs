@@ -4501,7 +4501,7 @@ impl Backend for RiscV64Backend {
             for instr in &block.instructions {
                 let encoded: Vec<u8> = match instr {
                     // ── BinOp (generic) ──────────────────────────────────────
-                    IRInstr::BinOp { op, dst, lhs, rhs, .. } => {
+                    IRInstr::BinOp { op, dst, lhs, rhs, ty } => {
                         let dst_id = dst.as_register().unwrap_or(0);
                         let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
                         let mut code = Vec::new();
@@ -4535,9 +4535,32 @@ impl Backend for RiscV64Backend {
                                     BinOpKind::And => { code.extend(Instruction::And { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T1 }.encode()); }
                                     BinOpKind::Or => { code.extend(Instruction::Or { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T1 }.encode()); }
                                     BinOpKind::Xor => { code.extend(Instruction::Xor { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T1 }.encode()); }
-                                    BinOpKind::Shl => { code.extend(Instruction::Sll { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T1 }.encode()); }
-                                    BinOpKind::ShrL => { code.extend(Instruction::Srl { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T1 }.encode()); }
-                                    BinOpKind::ShrA => { code.extend(Instruction::Sra { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T1 }.encode()); }
+                                    BinOpKind::Shl => {
+                                        let is_32bit = ty.as_ref().map_or(false, |t| matches!(t, crate::ir::IRType::I32 | crate::ir::IRType::U32));
+                                        if is_32bit {
+                                            // Use SLLW (32-bit shift left) which clears upper 32 bits
+                                            code.extend(Instruction::Sllw { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T1 }.encode());
+                                        } else {
+                                            code.extend(Instruction::Sll { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T1 }.encode());
+                                        }
+                                    }
+                                    BinOpKind::ShrL => {
+                                        let is_32bit = ty.as_ref().map_or(false, |t| matches!(t, crate::ir::IRType::I32 | crate::ir::IRType::U32));
+                                        if is_32bit {
+                                            // Use SRLW (32-bit unsigned shift right) which clears upper 32 bits
+                                            code.extend(Instruction::Srlw { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T1 }.encode());
+                                        } else {
+                                            code.extend(Instruction::Srl { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T1 }.encode());
+                                        }
+                                    }
+                                    BinOpKind::ShrA => {
+                                        let is_32bit = ty.as_ref().map_or(false, |t| matches!(t, crate::ir::IRType::I32 | crate::ir::IRType::U32));
+                                        if is_32bit {
+                                            code.extend(Instruction::Sraw { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T1 }.encode());
+                                        } else {
+                                            code.extend(Instruction::Sra { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T1 }.encode());
+                                        }
+                                    }
                                     BinOpKind::SLt | BinOpKind::SLe | BinOpKind::SGt | BinOpKind::SGe
                                     | BinOpKind::ULt | BinOpKind::ULe | BinOpKind::UGt | BinOpKind::UGe
                                     | BinOpKind::Eq | BinOpKind::Ne => {
