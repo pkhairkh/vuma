@@ -1,0 +1,36 @@
+// womb/lang/ast.vuma — AST node definitions (arena-based)
+// AST nodes are stored in a flat arena, referenced by index.
+// This implements the "opaque arena" pattern from the audit.
+//
+// Node layout (40 bytes):
+//   [kind: u32][child1: u32][child2: u32][child3: u32][val: u64][aux: u64]
+// kind: node type
+// child1/2/3: indices of child nodes (or token indices for leaves)
+// val: integer value for literals
+// aux: auxiliary data (e.g., string length, function name hash)
+
+const AST_SIZE: u32 = 40;
+
+// Node kinds
+const NODE_NONE: u32 = 0;
+const NODE_INT_LIT: u32 = 1;    // val = integer value
+const NODE_IDENT: u32 = 2;      // child1 = token index
+const NODE_BINOP: u32 = 3;      // child1 = op token type, child2 = lhs, child3 = rhs
+const NODE_UNOP: u32 = 4;       // child1 = op, child2 = operand
+const NODE_CALL: u32 = 5;       // child1 = func name token, child2 = args start, child3 = arg count
+const NODE_DEREF: u32 = 6;      // child1 = pointer expr
+const NODE_ASSIGN: u32 = 7;     // child1 = lhs, child2 = rhs
+
+const NODE_RETURN: u32 = 10;    // child1 = expr (or 0 for void)
+const NODE_LET: u32 = 11;       // child1 = name token, child2 = init expr
+const NODE_IF: u32 = 12;        // child1 = cond, child2 = then, child3 = else
+const NODE_WHILE: u32 = 13;     // child1 = cond, child2 = body
+const NODE_BREAK: u32 = 14;
+const NODE_BLOCK: u32 = 15;     // child1 = stmt start, child2 = stmt count
+
+const NODE_FN_DEF: u32 = 20;    // child1 = name token, child2 = body block, child3 = param count
+const NODE_PARAM: u32 = 21;     // child1 = name token
+const NODE_EXTERN: u32 = 22;    // child1 = name token
+
+// Arena operations (assumes arena functions from womb/alloc/arena.vuma)
+// These are inline since we can't import yet

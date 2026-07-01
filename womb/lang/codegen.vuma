@@ -1,80 +1,163 @@
-// womb/lang/codegen.vuma — Simple codegen for self-hosting
+// womb/lang/codegen.vuma — x86_64 code generator (subset)
 // Generates x86_64 machine code from IR instructions.
-// Output: raw machine code bytes.
+// Each vreg gets a stack slot at [rbp - offset].
 //
-// x86_64 instruction encoding (simplified):
-//   Const vregN = imm32  -> mov rax, imm32; mov [vreg_table+N*8], rax
-//   Add vregD = vregA + vregB -> mov rax, [vreg_table+A*8]; add rax, [vreg_table+B*8]; mov [vreg_table+D*8], rax
-//   Ret vregN -> mov rax, [vreg_table+N*8]; ret
-//
-// For simplicity, we emit a flat byte sequence.
-
-// No main() — importable library module.
+// Syscall stubs are linked by the existing backend.
 
 extern "C" {
+    fn __vuma_alloc(size: i64) -> Address;
+    fn __vuma_free(addr: Address, size: i64);
     fn write(fd: i64, buf: Address, count: i64) -> i64;
 }
 
-// Generate x86_64 machine code for a single IR instruction.
-// Writes bytes to the output buffer. Returns new output position.
-fn gen_instruction(ir: Address, idx: u32, out: Address, out_pos: u32) -> u32 {
-    base: u32 = idx * 16;
-    op: u32 = load_u32(ir, base + 0);
-    dst: u32 = load_u32(ir, base + 4);
-    s1: u32 = load_u32(ir, base + 8);
-    s2: u32 = load_u32(ir, base + 12);
-    pos: u32 = out_pos;
-    
-    if op == 1 {
-        // Const: mov dword [stack+dst*4], s1
-        // Simplified: mov eax, imm32; mov [rsp+dst*4], eax
-        // mov eax, imm32 = B8 + imm32 (5 bytes)
-        *(out + pos) = 184; pos = pos + 1;  // B8 = mov eax, imm32
-        *(out + pos) = s1 & 255; pos = pos + 1;
-        *(out + pos) = (s1 >> 8) & 255; pos = pos + 1;
-        *(out + pos) = (s1 >> 16) & 255; pos = pos + 1;
-        *(out + pos) = (s1 >> 24) & 255; pos = pos + 1;
-    }
-    if op == 2 {
-        // Add: vreg[dst] = vreg[s1] + vreg[s2]
-        // Simplified: just emit a NOP (we'll handle properly later)
-        *(out + pos) = 144; pos = pos + 1;  // NOP
-    }
-    if op == 14 {
-        // Ret: return vreg[s1]
-        // Simplified: mov eax, vreg[s1]; ret
-        // For now, just emit ret (C3)
-        *(out + pos) = 195; pos = pos + 1;  // ret
-    }
-    
-    return pos;
+fn store_u64(ptr: Address, offset: u32, val: u64) {
+    *(ptr + offset) = val & 255; *(ptr + offset + 1) = (val >> 8) & 255;
+    *(ptr + offset + 2) = (val >> 16) & 255; *(ptr + offset + 3) = (val >> 24) & 255;
+    *(ptr + offset + 4) = (val >> 32) & 255; *(ptr + offset + 5) = (val >> 40) & 255;
+    *(ptr + offset + 6) = (val >> 48) & 255; *(ptr + offset + 7) = (val >> 56) & 255;
 }
-
-// Generate code for all IR instructions.
-// Returns total bytes generated.
-fn gen_function(ir: Address, ir_count: u32, out: Address) -> u32 {
-    pos: u32 = 0;
-    i: u32 = 0;
-    done: u32 = 0;
-    while done == 0 {
-        if i >= ir_count { done = 1; }
-        if done == 0 {
-            pos = gen_instruction(ir, i, out, pos);
-            i = i + 1;
-        }
-    }
-    return pos;
+fn load_u64(ptr: Address, offset: u32) -> u64 {
+    b0: u64 = *(ptr + offset); b1: u64 = *(ptr + offset + 1);
+    b2: u64 = *(ptr + offset + 2); b3: u64 = *(ptr + offset + 3);
+    b4: u64 = *(ptr + offset + 4); b5: u64 = *(ptr + offset + 5);
+    b6: u64 = *(ptr + offset + 6); b7: u64 = *(ptr + offset + 7);
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
 }
-
 fn store_u32(ptr: Address, offset: u32, val: u32) {
-    *(ptr + offset) = val & 255;
-    *(ptr + offset + 1) = (val >> 8) & 255;
-    *(ptr + offset + 2) = (val >> 16) & 255;
-    *(ptr + offset + 3) = (val >> 24) & 255;
+    *(ptr + offset) = val & 255; *(ptr + offset + 1) = (val >> 8) & 255;
+    *(ptr + offset + 2) = (val >> 16) & 255; *(ptr + offset + 3) = (val >> 24) & 255;
 }
-
 fn load_u32(ptr: Address, offset: u32) -> u32 {
     b0: u32 = *(ptr + offset); b1: u32 = *(ptr + offset + 1);
     b2: u32 = *(ptr + offset + 2); b3: u32 = *(ptr + offset + 3);
     return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+}
+
+// Append a byte to the code buffer
+fn emit_byte(code: Address, pos: u32, b: u32) {
+    *(code + pos) = b & 255;
+}
+
+// Append a 32-bit immediate (little-endian)
+fn emit_u32(code: Address, pos: u32, val: u32) {
+    *(code + pos) = val & 255;
+    *(code + pos + 1) = (val >> 8) & 255;
+    *(code + pos + 2) = (val >> 16) & 255;
+    *(code + pos + 3) = (val >> 24) & 255;
+}
+
+// ── x86_64 instruction encoders ──
+
+// PUSH rbp: 0x55
+fn enc_push_rbp(code: Address, pos: u32) -> u32 {
+    emit_byte(code, pos, 0x55);
+    return pos + 1;
+}
+
+// MOV rbp, rsp: 0x48 0x89 0xE5
+fn enc_mov_rbp_rsp(code: Address, pos: u32) -> u32 {
+    emit_byte(code, pos, 0x48);
+    emit_byte(code, pos + 1, 0x89);
+    emit_byte(code, pos + 2, 0xE5);
+    return pos + 3;
+}
+
+// SUB rsp, imm32: 0x48 0x81 0xEC <imm32>
+fn enc_sub_rsp(code: Address, pos: u32, imm: u32) -> u32 {
+    emit_byte(code, pos, 0x48);
+    emit_byte(code, pos + 1, 0x81);
+    emit_byte(code, pos + 2, 0xEC);
+    emit_u32(code, pos + 3, imm);
+    return pos + 7;
+}
+
+// POP rbp: 0x5D
+fn enc_pop_rbp(code: Address, pos: u32) -> u32 {
+    emit_byte(code, pos, 0x5D);
+    return pos + 1;
+}
+
+// RET: 0xC3
+fn enc_ret(code: Address, pos: u32) -> u32 {
+    emit_byte(code, pos, 0xC3);
+    return pos + 1;
+}
+
+// MOV rax, imm64: 0x48 0xB8 <imm64>
+fn enc_mov_rax_imm64(code: Address, pos: u32, val: u64) -> u32 {
+    emit_byte(code, pos, 0x48);
+    emit_byte(code, pos + 1, 0xB8);
+    store_u64(code, pos + 2, val);
+    return pos + 10;
+}
+
+// MOV [rbp-offset], rax: 0x48 0x89 0x45 <disp8>
+fn enc_store_rax(code: Address, pos: u32, offset: u32) -> u32 {
+    emit_byte(code, pos, 0x48);
+    emit_byte(code, pos + 1, 0x89);
+    emit_byte(code, pos + 2, 0x45);
+    emit_byte(code, pos + 3, offset & 255);  // disp8 (negative offset)
+    return pos + 4;
+}
+
+// MOV rax, [rbp-offset]: 0x48 0x8B 0x45 <disp8>
+fn enc_load_rax(code: Address, pos: u32, offset: u32) -> u32 {
+    emit_byte(code, pos, 0x48);
+    emit_byte(code, pos + 1, 0x8B);
+    emit_byte(code, pos + 2, 0x45);
+    emit_byte(code, pos + 3, offset & 255);
+    return pos + 4;
+}
+
+// ADD rax, rcx: 0x48 0x01 0xC8
+fn enc_add_rax_rcx(code: Address, pos: u32) -> u32 {
+    emit_byte(code, pos, 0x48);
+    emit_byte(code, pos + 1, 0x01);
+    emit_byte(code, pos + 2, 0xC8);
+    return pos + 3;
+}
+
+// SUB rax, rcx: 0x48 0x29 0xC8
+fn enc_sub_rax_rcx(code: Address, pos: u32) -> u32 {
+    emit_byte(code, pos, 0x48);
+    emit_byte(code, pos + 1, 0x29);
+    emit_byte(code, pos + 2, 0xC8);
+    return pos + 3;
+}
+
+// XOR rax, rax: 0x48 0x31 0xC0
+fn enc_xor_rax(code: Address, pos: u32) -> u32 {
+    emit_byte(code, pos, 0x48);
+    emit_byte(code, pos + 1, 0x31);
+    emit_byte(code, pos + 2, 0xC0);
+    return pos + 3;
+}
+
+// SYSCALL: 0x0F 0x05
+fn enc_syscall(code: Address, pos: u32) -> u32 {
+    emit_byte(code, pos, 0x0F);
+    emit_byte(code, pos + 1, 0x05);
+    return pos + 2;
+}
+
+// MOV edi, imm32: 0xBF <imm32>
+fn enc_mov_edi_imm32(code: Address, pos: u32, val: u32) -> u32 {
+    emit_byte(code, pos, 0xBF);
+    emit_u32(code, pos + 1, val);
+    return pos + 5;
+}
+
+// Generate function prologue
+fn gen_prologue(code: Address, pos: u32, frame_size: u32) -> u32 {
+    pos = enc_push_rbp(code, pos);
+    pos = enc_mov_rbp_rsp(code, pos);
+    pos = enc_sub_rsp(code, pos, frame_size);
+    return pos;
+}
+
+// Generate function epilogue
+fn gen_epilogue(code: Address, pos: u32) -> u32 {
+    pos = enc_pop_rbp(code, pos);
+    pos = enc_ret(code, pos);
+    return pos;
 }
