@@ -1,172 +1,101 @@
-// Mini-compiler v2 — fully inlined, no function calls in loops
-// Evaluates "10 + 20 * 3" = 70
 extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
 
-fn main() -> i32 {
-    // Source: "10+20*3"
-    src = allocate(8);
-    *(src + 0) = 49;  // '1'
-    *(src + 1) = 48;  // '0'
-    *(src + 2) = 43;  // '+'
-    *(src + 3) = 50;  // '2'
-    *(src + 4) = 48;  // '0'
-    *(src + 5) = 42;  // '*'
-    *(src + 6) = 51;  // '3'
-    src_len: u32 = 7;
-    
-    // === INLINE LEXER + PARSER + EVALUATOR ===
-    // Parse expr = term (('+' | '-') term)*
-    // Parse term = factor (('*' | '/') factor)*
-    // Parse factor = number
-    
-    pos: u32 = 0;
-    
-    // --- Parse first term (factor (('*'|'/') factor)*) ---
-    // Parse first factor: number "10"
-    val1: u32 = 0;
+fn is_digit(c: u32) -> u32 {
+    if c >= 48 { if c <= 57 { return 1; } }
+    return 0;
+}
+
+fn lex_number(src: Address, pos: u32, src_len: u32) -> u32 {
+    val: u32 = 0;
+    p: u32 = pos;
     done: u32 = 0;
     while done == 0 {
-        if pos >= src_len { done = 1; }
+        if p >= src_len { done = 1; }
         if done == 0 {
-            c: u32 = *(src + pos);
-            if c >= 48 { if c <= 57 {
-                val1 = val1 * 10 + (c - 48);
-                pos = pos + 1;
-            } else { done = 1; } }
+            c: u32 = *(src + p);
+            d: u32 = is_digit(c);
+            if d == 1 { val = val * 10 + (c - 48); p = p + 1; }
             else { done = 1; }
         }
     }
-    
-    // Check for '*' or '/' after first factor
-    left1: u32 = val1;
-    done = 0;
+    return val * 10000 + p;
+}
+
+fn parse_factor(src: Address, state: Address, src_len: u32) -> u32 {
+    pos: u32 = load_u32(state, 0);
+    result: u32 = lex_number(src, pos, src_len);
+    val: u32 = result / 10000;
+    new_pos: u32 = result % 10000;
+    store_u32(state, 0, new_pos);
+    return val;
+}
+
+fn parse_term(src: Address, state: Address, src_len: u32) -> u32 {
+    left: u32 = parse_factor(src, state, src_len);
+    done: u32 = 0;
     while done == 0 {
+        pos: u32 = load_u32(state, 0);
         if pos >= src_len { done = 1; }
         if done == 0 {
             c: u32 = *(src + pos);
-            if c == 42 {  // '*'
-                pos = pos + 1;
-                // Parse next factor
-                val_next: u32 = 0;
-                done2: u32 = 0;
-                while done2 == 0 {
-                    if pos >= src_len { done2 = 1; }
-                    if done2 == 0 {
-                        c2: u32 = *(src + pos);
-                        if c2 >= 48 { if c2 <= 57 {
-                            val_next = val_next * 10 + (c2 - 48);
-                            pos = pos + 1;
-                        } else { done2 = 1; } }
-                        else { done2 = 1; }
-                    }
-                }
-                left1 = left1 * val_next;
-            } else {
-                if c == 47 {  // '/'
-                    pos = pos + 1;
-                    val_next: u32 = 0;
-                    done2: u32 = 0;
-                    while done2 == 0 {
-                        if pos >= src_len { done2 = 1; }
-                        if done2 == 0 {
-                            c2: u32 = *(src + pos);
-                            if c2 >= 48 { if c2 <= 57 {
-                                val_next = val_next * 10 + (c2 - 48);
-                                pos = pos + 1;
-                            } else { done2 = 1; } }
-                            else { done2 = 1; }
-                        }
-                    }
-                    if val_next == 0 { left1 = 0; }
-                    else { left1 = left1 / val_next; }
-                } else {
-                    done = 1;
-                }
-            }
+            if c == 42 {
+                store_u32(state, 0, pos + 1);
+                right: u32 = parse_factor(src, state, src_len);
+                left = left * right;
+            } else { done = 1; }
         }
     }
-    // left1 = first term = 10
-    
-    // Check for '+' or '-' after first term
-    result: u32 = left1;
-    done = 0;
+    return left;
+}
+
+fn parse_expr(src: Address, state: Address, src_len: u32) -> u32 {
+    left: u32 = parse_term(src, state, src_len);
+    done: u32 = 0;
     while done == 0 {
+        pos: u32 = load_u32(state, 0);
         if pos >= src_len { done = 1; }
         if done == 0 {
             c: u32 = *(src + pos);
-            if c == 43 {  // '+'
-                pos = pos + 1;
-                // Parse next term (factor (('*'|'/') factor)*)
-                // Parse factor: "20"
-                val_f: u32 = 0;
-                done2: u32 = 0;
-                while done2 == 0 {
-                    if pos >= src_len { done2 = 1; }
-                    if done2 == 0 {
-                        c2: u32 = *(src + pos);
-                        if c2 >= 48 { if c2 <= 57 {
-                            val_f = val_f * 10 + (c2 - 48);
-                            pos = pos + 1;
-                        } else { done2 = 1; } }
-                        else { done2 = 1; }
-                    }
-                }
-                // val_f = 20
-                left_t: u32 = val_f;
-                // Check for '*' or '/'
-                done3: u32 = 0;
-                while done3 == 0 {
-                    if pos >= src_len { done3 = 1; }
-                    if done3 == 0 {
-                        c3: u32 = *(src + pos);
-                        if c3 == 42 {  // '*'
-                            pos = pos + 1;
-                            val_n: u32 = 0;
-                            done4: u32 = 0;
-                            while done4 == 0 {
-                                if pos >= src_len { done4 = 1; }
-                                if done4 == 0 {
-                                    c4: u32 = *(src + pos);
-                                    if c4 >= 48 { if c4 <= 57 {
-                                        val_n = val_n * 10 + (c4 - 48);
-                                        pos = pos + 1;
-                                    } else { done4 = 1; } }
-                                    else { done4 = 1; }
-                                }
-                            }
-                            left_t = left_t * val_n;
-                        } else {
-                            done3 = 1;
-                        }
-                    }
-                }
-                // left_t = 20 * 3 = 60
-                result = result + left_t;  // 10 + 60 = 70
+            if c == 43 {
+                store_u32(state, 0, pos + 1);
+                right: u32 = parse_term(src, state, src_len);
+                left = left + right;
             } else {
-                if c == 45 {  // '-'
-                    pos = pos + 1;
-                    val_f: u32 = 0;
-                    done2: u32 = 0;
-                    while done2 == 0 {
-                        if pos >= src_len { done2 = 1; }
-                        if done2 == 0 {
-                            c2: u32 = *(src + pos);
-                            if c2 >= 48 { if c2 <= 57 {
-                                val_f = val_f * 10 + (c2 - 48);
-                                pos = pos + 1;
-                            } else { done2 = 1; } }
-                            else { done2 = 1; }
-                        }
-                    }
-                    result = result - val_f;
-                } else {
-                    done = 1;
-                }
+                if c == 45 {
+                    store_u32(state, 0, pos + 1);
+                    right: u32 = parse_term(src, state, src_len);
+                    left = left - right;
+                } else { done = 1; }
             }
         }
     }
+    return left;
+}
+
+fn store_u32(ptr: Address, offset: u32, val: u32) {
+    *(ptr + offset) = val & 255;
+    *(ptr + offset + 1) = (val >> 8) & 255;
+    *(ptr + offset + 2) = (val >> 16) & 255;
+    *(ptr + offset + 3) = (val >> 24) & 255;
+}
+
+fn load_u32(ptr: Address, offset: u32) -> u32 {
+    b0: u32 = *(ptr + offset); b1: u32 = *(ptr + offset + 1);
+    b2: u32 = *(ptr + offset + 2); b3: u32 = *(ptr + offset + 3);
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+}
+
+fn main() -> i32 {
+    // Source: "10+20*3" = 10 + (20*3) = 10 + 60 = 70
+    src = allocate(7);
+    *(src + 0) = 49; *(src + 1) = 48; *(src + 2) = 43;
+    *(src + 3) = 50; *(src + 4) = 48; *(src + 5) = 42; *(src + 6) = 51;
     
-    // Output result
+    state = allocate(4);
+    store_u32(state, 0, 0);
+    
+    result: u32 = parse_expr(src, state, 7);
+    
     out = allocate(1);
     *out = result & 255;
     write(1, out, 1);
