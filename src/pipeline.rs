@@ -2802,12 +2802,33 @@ fn convert_computation_no_calls(
 
                     inferred_ty
                 };
-                return vec![ScgStatement::Access(AccessNode::Load {
-                    dst: node_var(node_id, "val"),
+                let load_dst = node_var(node_id, "val");
+                let mut stmts = vec![ScgStatement::Access(AccessNode::Load {
+                    dst: load_dst.clone(),
                     ptr,
                     offset: None,
                     ty: load_ty,
                 })];
+                // If this is a "let X = *ptr" pattern, also register X in
+                // the IR builder's names map by emitting a copy statement
+                // with reassigns: Some("X"). Without this, the variable
+                // reference node (label "X") created by the AST→SCG
+                // converter resolves to Var("X"), but names["X"] was never
+                // set — only names["v_N"] was set by the Load. The
+                // reassigns mechanism propagates the Load's result vreg to
+                // both names["v_N"] and names["X"], so both the old-style
+                // Var("v_N") and the new-style Var("X") references work.
+                if let Some(uv) = extract_user_var_from_label(op_label) {
+                    stmts.push(ScgStatement::Computation(ComputationNode {
+                        dst: node_var(node_id, "let"),
+                        op: IrBinOpKind::Add,
+                        lhs: ScgExpr::Int(0),
+                        rhs: ScgExpr::Var(load_dst),
+                        tail_call: false,
+                        reassigns: Some(uv),
+                    }));
+                }
+                return stmts;
             }
         }
     }
@@ -2924,6 +2945,7 @@ fn convert_computation_no_calls(
                             .as_deref()
                             .and_then(parse_scg_type)
                             .unwrap_or(ScgType::U8);
+                        let alloc_name = node_var(node_id, "comp");
                         if alloc.size == 0 {
                             let df_inputs = edge_idx.incoming_df(node_id);
                             let sources2: Vec<NodeId> =
@@ -2934,18 +2956,42 @@ fn convert_computation_no_calls(
                                 edge_idx,
                                 scg,
                             ) {
-                                return vec![ScgStatement::Allocation(AllocationNode::Heap {
-                                    name: node_var(node_id, "comp"),
+                                let mut stmts = vec![ScgStatement::Allocation(AllocationNode::Heap {
+                                    name: alloc_name.clone(),
                                     size_expr,
                                     ty,
                                 })];
+                                // Register user-visible variable name (e.g. "buf" from "buf = allocate(8)")
+                                if let Some(uv) = extract_user_var_from_label(op_label) {
+                                    stmts.push(ScgStatement::Computation(ComputationNode {
+                                        dst: node_var(node_id, "let"),
+                                        op: IrBinOpKind::Add,
+                                        lhs: ScgExpr::Int(0),
+                                        rhs: ScgExpr::Var(alloc_name),
+                                        tail_call: false,
+                                        reassigns: Some(uv),
+                                    }));
+                                }
+                                return stmts;
                             }
                         }
-                        return vec![ScgStatement::Allocation(AllocationNode::Stack {
-                            name: node_var(node_id, "comp"),
+                        let mut stmts = vec![ScgStatement::Allocation(AllocationNode::Stack {
+                            name: alloc_name.clone(),
                             size: alloc.size as u32,
                             ty,
                         })];
+                        // Register user-visible variable name (e.g. "buf" from "buf = allocate(8)")
+                        if let Some(uv) = extract_user_var_from_label(op_label) {
+                            stmts.push(ScgStatement::Computation(ComputationNode {
+                                dst: node_var(node_id, "let"),
+                                op: IrBinOpKind::Add,
+                                lhs: ScgExpr::Int(0),
+                                rhs: ScgExpr::Var(alloc_name),
+                                tail_call: false,
+                                reassigns: Some(uv),
+                            }));
+                        }
+                        return stmts;
                     }
                     NodePayload::Access(access) => {
                         let is_store_label =
@@ -2954,12 +3000,25 @@ fn convert_computation_no_calls(
                             op_label.contains("= *") && !op_label.starts_with("*");
                         match access.mode {
                             AccessMode::Read if is_load_label => {
-                                return vec![ScgStatement::Access(AccessNode::Load {
+                                let load_dst = node_var(node_id, "val");
+                                let mut stmts = vec![ScgStatement::Access(AccessNode::Load {
                                     ty: None,
-                                    dst: node_var(node_id, "val"),
+                                    dst: load_dst.clone(),
                                     ptr: resolve_df_input(node_id, 0, edge_idx, scg),
                                     offset: access.offset.map(|o| ScgExpr::Int(o as i64)),
                                 })];
+                                // Register user-visible variable name (same fix as above)
+                                if let Some(uv) = extract_user_var_from_label(op_label) {
+                                    stmts.push(ScgStatement::Computation(ComputationNode {
+                                        dst: node_var(node_id, "let"),
+                                        op: IrBinOpKind::Add,
+                                        lhs: ScgExpr::Int(0),
+                                        rhs: ScgExpr::Var(load_dst),
+                                        tail_call: false,
+                                        reassigns: Some(uv),
+                                    }));
+                                }
+                                return stmts;
                             }
                             AccessMode::Write | AccessMode::ReadWrite if is_store_label => {
                                 let access_id = deriv_edge.target;
