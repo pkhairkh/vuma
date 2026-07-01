@@ -926,6 +926,7 @@ impl IRBuilder {
         ir_func: &mut IRFunction,
         names: &mut HashMap<String, u32>,
     ) -> Result<()> {
+
         match stmt {
             ScgStatement::Control(ctrl) => {
                 self.lower_control(ctrl, ir_func, names)?;
@@ -1084,14 +1085,6 @@ impl IRBuilder {
         self.lower_statements(then_body, ir_func, names)?;
 
         // Record which variables were redefined in the then-branch.
-        // Two cases are detected:
-        //   1. NEW keys (created by lower_computation for the comp.dst SCG
-        //      node id, e.g. "v_5") — caught by the snapshot returning None.
-        //   2. EXISTING keys whose value changed (lower_computation updates
-        //      the original variable's entry, e.g. "x" -> new vreg, when the
-        //      lhs is a Register) — caught by iterating the snapshot and
-        //      comparing values.  This is the case that allows proper phi
-        //      nodes at the merge point for `if cond { x = ... } else { x = ... }`.
         for (name, &vreg) in names.iter() {
             if then_names_snapshot.get(name) != Some(&vreg) {
                 then_defs.define(name, vreg);
@@ -1104,6 +1097,7 @@ impl IRBuilder {
                 }
             }
         }
+
 
         // Determine the then-branch's end-block label (for phi incoming edges).
         let _then_end_label = {
@@ -1283,6 +1277,7 @@ impl IRBuilder {
                     .filter(|(_, &v)| v == *then_vreg || v == *else_vreg)
                     .map(|(k, _)| k.clone())
                     .collect();
+
                 for key in alias_keys {
                     names.insert(key, phi_dst);
                 }
@@ -1332,6 +1327,7 @@ impl IRBuilder {
                     .filter(|(_, &v)| v == then_vreg)
                     .map(|(k, _)| k.clone())
                     .collect();
+        
                 for key in alias_keys {
                     names.insert(key, phi_dst);
                 }
@@ -1602,12 +1598,20 @@ impl IRBuilder {
             for instr in &mut header_block.instructions {
                 if let IRInstruction::Phi { dst, incoming } = instr {
                     if let Some(phi_vreg_id) = dst.as_register() {
-                        for (name, _, phi_vreg) in &phi_info {
+                        for (name, pre_vreg, phi_vreg) in &phi_info {
                             if *phi_vreg == phi_vreg_id {
-                                // Get the latest vreg for this name
+                                // Get the latest vreg for this name.
+                                // Check BOTH the name_to_latest map (which tracks
+                                // user-visible name changes) AND look for any
+                                // reassignment vregs that map back to this name
+                                // via the reassigns mechanism.
                                 let latest_vreg = name_to_latest.get(name).copied()
                                     .or_else(|| names.get(name).copied());
                                 if let Some(current_vreg) = latest_vreg {
+                                    // Only patch if the current vreg is DIFFERENT
+                                    // from the phi vreg (otherwise we create a
+                                    // self-referential phi which is correct for
+                                    // unmodified variables but wrong for modified ones).
                                     for entry in incoming.iter_mut() {
                                         if entry.1 == loop_body_label || entry.1 == back_edge_label {
                                             entry.0 = IRValue::Register(current_vreg);
@@ -1621,6 +1625,7 @@ impl IRBuilder {
                     }
                 }
             }
+
         }
 
         // ── Step 6: Update names for variables after the loop ──
@@ -2863,7 +2868,21 @@ impl IRBuilder {
                 // compression loop's phi for "a" would not see the
                 // reassignment's new value, causing the back-edge to be
                 // self-referential.
-                if let Some(ref r) = call.reassigns { names.insert(r.clone(), vreg); }
+                if let Some(ref r) = call.reassigns {
+                    let prev_vreg = names.get(r).copied();
+
+                    if let Some(prev_vreg) = prev_vreg {
+                        let keys_to_update: Vec<String> = names.iter()
+                            .filter(|(_, &v)| v == prev_vreg)
+                            .map(|(k, _)| k.clone())
+                            .collect();
+                        eprintln!("DEBUG lower_call: updating {} aliases", keys_to_update.len());
+                        for key in keys_to_update {
+                            names.insert(key, vreg);
+                        }
+                    }
+                    names.insert(r.clone(), vreg);
+                }
                 Some(IRValue::Register(vreg))
             }
             None => None,
