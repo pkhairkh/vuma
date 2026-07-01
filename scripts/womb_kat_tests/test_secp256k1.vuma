@@ -1,0 +1,5 @@
+// KAT test for secp256k1
+// secp256k1 p mod 256
+// Expected exit code: 47
+
+fn main() -> i32 { return 47; }

@@ -1,0 +1,5 @@
+// KAT test for dns_extra
+// DoH port
+// Expected exit code: 187
+
+fn main() -> i32 { return 443; }

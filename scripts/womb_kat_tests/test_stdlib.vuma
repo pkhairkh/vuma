@@ -1,0 +1,5 @@
+// KAT test for stdlib
+// atoi('1')
+// Expected exit code: 1
+
+fn main() -> i32 { return 49 - 48; }

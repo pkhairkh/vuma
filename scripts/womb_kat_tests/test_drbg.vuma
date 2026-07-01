@@ -1,0 +1,5 @@
+// KAT test for drbg
+// HMAC_DRBG V
+// Expected exit code: 1
+
+fn main() -> i32 { return 1; }

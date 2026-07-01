@@ -1,0 +1,8 @@
+// KAT test for poly1305
+// Poly1305 r clamp
+// Expected exit code: 15
+
+fn main() -> i32 {
+    r: u32 = 4294967295; r = r & 268435452;
+    return (r >> 24) & 255;
+}

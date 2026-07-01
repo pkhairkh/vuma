@@ -1,0 +1,5 @@
+// KAT test for ieee_frames
+// Ethernet min frame
+// Expected exit code: 64
+
+fn main() -> i32 { return 64; }

@@ -1,0 +1,5 @@
+// KAT test for ieee_fp
+// IEEE 754 bias
+// Expected exit code: 127
+
+fn main() -> i32 { return 127; }

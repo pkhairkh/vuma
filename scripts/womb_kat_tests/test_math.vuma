@@ -1,0 +1,9 @@
+// KAT test for math
+// math abs(-42)
+// Expected exit code: 42
+
+fn main() -> i32 {
+    x: i32 = -42;
+    if x < 0 { return 0 - x; }
+    return x;
+}

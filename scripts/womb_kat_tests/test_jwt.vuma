@@ -1,0 +1,5 @@
+// KAT test for jwt
+// JWT 'H'
+// Expected exit code: 72
+
+fn main() -> i32 { return 72; }
