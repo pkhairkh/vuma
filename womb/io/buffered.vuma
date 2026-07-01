@@ -1,0 +1,151 @@
+// womb/io/buffered.vuma — Buffered I/O (BufReader/BufWriter)
+extern "C" {
+    fn __vuma_alloc(size: i64) -> Address;
+    fn __vuma_free(addr: Address, size: i64);
+    fn read(fd: i64, buf: Address, count: i64) -> i64;
+    fn write(fd: i64, buf: Address, count: i64) -> i64;
+}
+fn store_i64(ptr: Address, offset: u32, val: i64) {
+    *(ptr + offset) = val & 255; *(ptr + offset + 1) = (val >> 8) & 255;
+    *(ptr + offset + 2) = (val >> 16) & 255; *(ptr + offset + 3) = (val >> 24) & 255;
+    *(ptr + offset + 4) = (val >> 32) & 255; *(ptr + offset + 5) = (val >> 40) & 255;
+    *(ptr + offset + 6) = (val >> 48) & 255; *(ptr + offset + 7) = (val >> 56) & 255;
+}
+fn load_i64(ptr: Address, offset: u32) -> i64 {
+    b0: i64 = *(ptr + offset); b1: i64 = *(ptr + offset + 1);
+    b2: i64 = *(ptr + offset + 2); b3: i64 = *(ptr + offset + 3);
+    b4: i64 = *(ptr + offset + 4); b5: i64 = *(ptr + offset + 5);
+    b6: i64 = *(ptr + offset + 6); b7: i64 = *(ptr + offset + 7);
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
+}
+fn store_u64(ptr: Address, offset: u32, val: u64) {
+    *(ptr + offset) = val & 255; *(ptr + offset + 1) = (val >> 8) & 255;
+    *(ptr + offset + 2) = (val >> 16) & 255; *(ptr + offset + 3) = (val >> 24) & 255;
+    *(ptr + offset + 4) = (val >> 32) & 255; *(ptr + offset + 5) = (val >> 40) & 255;
+    *(ptr + offset + 6) = (val >> 48) & 255; *(ptr + offset + 7) = (val >> 56) & 255;
+}
+fn load_u64(ptr: Address, offset: u32) -> u64 {
+    b0: u64 = *(ptr + offset); b1: u64 = *(ptr + offset + 1);
+    b2: u64 = *(ptr + offset + 2); b3: u64 = *(ptr + offset + 3);
+    b4: u64 = *(ptr + offset + 4); b5: u64 = *(ptr + offset + 5);
+    b6: u64 = *(ptr + offset + 6); b7: u64 = *(ptr + offset + 7);
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
+}
+fn store_u32(ptr: Address, offset: u32, val: u32) {
+    *(ptr + offset) = val & 255; *(ptr + offset + 1) = (val >> 8) & 255;
+    *(ptr + offset + 2) = (val >> 16) & 255; *(ptr + offset + 3) = (val >> 24) & 255;
+}
+fn load_u32(ptr: Address, offset: u32) -> u32 {
+    b0: u32 = *(ptr + offset); b1: u32 = *(ptr + offset + 1);
+    b2: u32 = *(ptr + offset + 2); b3: u32 = *(ptr + offset + 3);
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+}
+
+fn bufreader_new(fd: i64, buf_cap: u32) -> Address {
+    if buf_cap == 0 { buf_cap = 8192; }
+    r = __vuma_alloc(32);
+    buf = __vuma_alloc(buf_cap);
+    store_i64(r, 0, fd); store_u64(r, 8, buf);
+    store_u32(r, 16, 0); store_u32(r, 20, 0);
+    store_u32(r, 24, buf_cap); store_u32(r, 28, 0);
+    return r;
+}
+fn bufreader_fill(r: Address) -> u32 {
+    buf_len: u32 = load_u32(r, 16); buf_pos: u32 = load_u32(r, 20);
+    if buf_pos < buf_len { return 1; }
+    eof: u32 = load_u32(r, 28);
+    if eof == 1 { return 0; }
+    fd: i64 = load_i64(r, 0); buf: u64 = load_u64(r, 8); cap: u32 = load_u32(r, 24);
+    n: i64 = read(fd, buf, cap);
+    if n <= 0 { store_u32(r, 28, 1); store_u32(r, 16, 0); store_u32(r, 20, 0); return 0; }
+    store_u32(r, 16, n & 0xFFFFFFFF); store_u32(r, 20, 0); return 1;
+}
+fn bufreader_read_byte(r: Address) -> i32 {
+    if bufreader_fill(r) == 0 { return -1; }
+    buf: u64 = load_u64(r, 8); pos: u32 = load_u32(r, 20);
+    b: u32 = *(buf + pos); store_u32(r, 20, pos + 1); return b;
+}
+fn bufreader_read_line(r: Address, dst: Address, dst_cap: u32) -> i32 {
+    if dst_cap == 0 { return -1; }
+    len: u32 = 0; done: u32 = 0;
+    while done == 0 {
+        b: i32 = bufreader_read_byte(r);
+        if b < 0 { if len == 0 { return -1; } done = 1; }
+        else {
+            if len + 1 < dst_cap { *(dst + len) = b & 255; len = len + 1; }
+            if b == 10 { done = 1; }
+        }
+    }
+    if len < dst_cap { *(dst + len) = 0; }
+    return len as i32;
+}
+fn bufreader_read(r: Address, dst: Address, n: u32) -> u32 {
+    total: u32 = 0;
+    while total < n {
+        if bufreader_fill(r) == 0 { break; }
+        buf: u64 = load_u64(r, 8); buf_len: u32 = load_u32(r, 16);
+        buf_pos: u32 = load_u32(r, 20); avail: u32 = buf_len - buf_pos;
+        need: u32 = n - total; copy: u32 = avail;
+        if need < avail { copy = need; }
+        i: u32 = 0;
+        while i < copy { *(dst + total + i) = *(buf + buf_pos + i) & 255; i = i + 1; }
+        total = total + copy; store_u32(r, 20, buf_pos + copy);
+    }
+    return total;
+}
+fn bufreader_free(r: Address) {
+    buf: u64 = load_u64(r, 8); cap: u32 = load_u32(r, 24);
+    __vuma_free(buf, cap); __vuma_free(r, 32);
+}
+
+fn bufwriter_new(fd: i64, buf_cap: u32) -> Address {
+    if buf_cap == 0 { buf_cap = 8192; }
+    w = __vuma_alloc(24); buf = __vuma_alloc(buf_cap);
+    store_i64(w, 0, fd); store_u64(w, 8, buf);
+    store_u32(w, 16, 0); store_u32(w, 20, buf_cap);
+    return w;
+}
+fn bufwriter_flush(w: Address) -> u32 {
+    buf_len: u32 = load_u32(w, 16); if buf_len == 0 { return 1; }
+    fd: i64 = load_i64(w, 0); buf: u64 = load_u64(w, 8);
+    written: u32 = 0;
+    while written < buf_len {
+        n: i64 = write(fd, buf + written, buf_len - written);
+        if n <= 0 { return 0; }
+        written = written + (n & 0xFFFFFFFF);
+    }
+    store_u32(w, 16, 0); return 1;
+}
+fn bufwriter_write(w: Address, data: Address, data_len: u32) -> u32 {
+    buf_len: u32 = load_u32(w, 16); buf_cap: u32 = load_u32(w, 20);
+    buf: u64 = load_u64(w, 8);
+    if buf_len + data_len <= buf_cap {
+        i: u32 = 0;
+        while i < data_len { *(buf + buf_len + i) = *(data + i) & 255; i = i + 1; }
+        store_u32(w, 16, buf_len + data_len); return data_len;
+    }
+    bufwriter_flush(w);
+    if data_len > buf_cap {
+        fd: i64 = load_i64(w, 0); written: u32 = 0;
+        while written < data_len {
+            n: i64 = write(fd, data + written, data_len - written);
+            if n <= 0 { return written; }
+            written = written + (n & 0xFFFFFFFF);
+        }
+        return data_len;
+    }
+    i = 0;
+    while i < data_len { *(buf + i) = *(data + i) & 255; i = i + 1; }
+    store_u32(w, 16, data_len); return data_len;
+}
+fn bufwriter_write_byte(w: Address, byte: u32) {
+    buf_len: u32 = load_u32(w, 16); buf_cap: u32 = load_u32(w, 20);
+    if buf_len >= buf_cap { bufwriter_flush(w); }
+    buf: u64 = load_u64(w, 8); buf_len = load_u32(w, 16);
+    *(buf + buf_len) = byte & 255; store_u32(w, 16, buf_len + 1);
+}
+fn bufwriter_free(w: Address) {
+    bufwriter_flush(w);
+    buf: u64 = load_u64(w, 8); cap: u32 = load_u32(w, 20);
+    __vuma_free(buf, cap); __vuma_free(w, 24);
+}
