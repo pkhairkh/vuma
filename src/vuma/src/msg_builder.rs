@@ -2000,6 +2000,12 @@ mod tests {
 
     #[test]
     fn test_cycle_detection() {
+        // The MSG builder now handles cycles gracefully using SCC-based
+        // topological sort (topological_sort_with_cycles). This is required
+        // for loop back-edges in real programs. The test verifies that a
+        // cyclic SCG doesn't cause a CycleDetected error — it may produce
+        // other errors (like DerivationNotFound for bare computation nodes
+        // without allocation context), but the cycle itself is not rejected.
         let mut scg = SCG::new();
         let n1 = scg.add_node(
             ScgNodeType::Computation,
@@ -2024,7 +2030,13 @@ mod tests {
 
         let mut builder = MsgBuilder::new();
         let result = builder.build(&scg);
-        assert!(matches!(result, Err(BuilderError::CycleDetected)));
+        // The cycle should NOT cause CycleDetected — the builder handles
+        // cycles via SCC. Other errors are acceptable for this synthetic test.
+        assert!(
+            !matches!(result, Err(BuilderError::CycleDetected)),
+            "cyclic SCG should not be rejected with CycleDetected; got: {:?}",
+            result
+        );
     }
 
     // ---- Test 19: Multiple allocations create non-overlapping regions ----
