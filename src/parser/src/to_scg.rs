@@ -1298,17 +1298,62 @@ impl AstToScg {
                     };
 
                     // Computation node for the arm body.
-                    let body_id = scg.add_node(
-                        NodeType::Computation,
-                        NodePayload::Computation(ComputationNode {
-                            kind: ComputationKind::Other(format!("match_arm[{}]: {}", arm_idx, arm_body_desc)),
-                            result_type: None,
-                            tail_call: false,
-                        }),
-                        self.span_to_pp(&arm.span),
-                    );
-                    region.add_node(body_id);
-                    let _ = scg.add_edge(arm_entry, body_id, EdgeKind::ControlFlow);
+                    // If the arm body is a Block expression, convert each
+                    // statement in the block as a separate SCG node.
+                    let body_id = if let Expr::Block { statements, trailing_expr, .. } = &arm.body {
+                        // Convert each statement in the block
+                        let mut prev_id = arm_entry;
+                        for stmt in statements {
+                            let sid = self.convert_stmt_in_region(stmt, scg, region)?;
+                            let _ = scg.add_edge(prev_id, sid, EdgeKind::ControlFlow);
+                            prev_id = sid;
+                        }
+                        // If there's a trailing expression, create a node for it
+                        if let Some(te) = trailing_expr {
+                            let te_desc = self.expr_to_string(te);
+                            let te_id = scg.add_node(
+                                NodeType::Computation,
+                                NodePayload::Computation(ComputationNode {
+                                    kind: ComputationKind::Other(format!("match_arm[{}]: {}", arm_idx, te_desc)),
+                                    result_type: None,
+                                    tail_call: false,
+                                }),
+                                self.span_to_pp(&arm.span),
+                            );
+                            region.add_node(te_id);
+                            let _ = scg.add_edge(prev_id, te_id, EdgeKind::ControlFlow);
+                            te_id
+                        } else {
+                            // No trailing expression — use the last statement node
+                            // or create a dummy node
+                            let dummy_id = scg.add_node(
+                                NodeType::Computation,
+                                NodePayload::Computation(ComputationNode {
+                                    kind: ComputationKind::Other(format!("match_arm[{}]: block_end", arm_idx)),
+                                    result_type: None,
+                                    tail_call: false,
+                                }),
+                                self.span_to_pp(&arm.span),
+                            );
+                            region.add_node(dummy_id);
+                            let _ = scg.add_edge(prev_id, dummy_id, EdgeKind::ControlFlow);
+                            dummy_id
+                        }
+                    } else {
+                        // Non-block arm body: single expression
+                        let bid = scg.add_node(
+                            NodeType::Computation,
+                            NodePayload::Computation(ComputationNode {
+                                kind: ComputationKind::Other(format!("match_arm[{}]: {}", arm_idx, arm_body_desc)),
+                                result_type: None,
+                                tail_call: false,
+                            }),
+                            self.span_to_pp(&arm.span),
+                        );
+                        region.add_node(bid);
+                        let _ = scg.add_edge(arm_entry, bid, EdgeKind::ControlFlow);
+                        bid
+                    };
 
                     // Struct destructuring: create Access nodes for each field.
                     if let MatchPattern::Struct { name, fields, .. } = &arm.pattern {
@@ -2674,6 +2719,7 @@ impl AstToScg {
             Expr::AtomicLoad { .. } => {}
             Expr::AtomicStore { .. } => {}
             Expr::AtomicCas { .. } => {}
+            Expr::Block { .. } => {}
             Expr::MatchExpr { .. } => {}
         }
     }
@@ -2834,6 +2880,7 @@ impl AstToScg {
             Expr::AtomicLoad { .. } => "u32".to_string(),
             Expr::AtomicStore { .. } => "void".to_string(),
             Expr::AtomicCas { .. } => "u32".to_string(),
+            Expr::Block { .. } => "block".to_string(),
             Expr::MatchExpr { .. } => "unknown".to_string(),
         }
     }
@@ -2996,6 +3043,7 @@ impl AstToScg {
             Expr::AtomicLoad { .. } => "atomic_load(…)".to_string(),
             Expr::AtomicStore { .. } => "atomic_store(…)".to_string(),
             Expr::AtomicCas { .. } => "atomic_cas(…)".to_string(),
+            Expr::Block { .. } => "{block}".to_string(),
             Expr::MatchExpr { .. } => "match(…)".to_string(),
         }
     }
