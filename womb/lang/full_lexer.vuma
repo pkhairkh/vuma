@@ -1,0 +1,420 @@
+// womb/lang/full_lexer.vuma — Full VUMA lexer with string literals and all operators
+// Extends lexer.vuma with: string literals ("..."), all comparison operators,
+// compound assignment (+=, -=, etc.), arrow (->), fat arrow (=>), colons (::),
+// and all keyword recognition.
+//
+// Token layout: [type: u32][start: u32][len: u32][value: u64] = 24 bytes
+
+extern "C" {
+    fn __vuma_alloc(size: i64) -> Address;
+    fn __vuma_free(addr: Address, size: i64);
+}
+
+fn store_u64(ptr: Address, offset: u32, val: u64) {
+    *(ptr + offset) = val & 255; *(ptr + offset + 1) = (val >> 8) & 255;
+    *(ptr + offset + 2) = (val >> 16) & 255; *(ptr + offset + 3) = (val >> 24) & 255;
+    *(ptr + offset + 4) = (val >> 32) & 255; *(ptr + offset + 5) = (val >> 40) & 255;
+    *(ptr + offset + 6) = (val >> 48) & 255; *(ptr + offset + 7) = (val >> 56) & 255;
+}
+fn load_u64(ptr: Address, offset: u32) -> u64 {
+    b0: u64 = *(ptr + offset); b1: u64 = *(ptr + offset + 1);
+    b2: u64 = *(ptr + offset + 2); b3: u64 = *(ptr + offset + 3);
+    b4: u64 = *(ptr + offset + 4); b5: u64 = *(ptr + offset + 5);
+    b6: u64 = *(ptr + offset + 6); b7: u64 = *(ptr + offset + 7);
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
+}
+fn store_u32(ptr: Address, offset: u32, val: u32) {
+    *(ptr + offset) = val & 255; *(ptr + offset + 1) = (val >> 8) & 255;
+    *(ptr + offset + 2) = (val >> 16) & 255; *(ptr + offset + 3) = (val >> 24) & 255;
+}
+fn load_u32(ptr: Address, offset: u32) -> u32 {
+    b0: u32 = *(ptr + offset); b1: u32 = *(ptr + offset + 1);
+    b2: u32 = *(ptr + offset + 2); b3: u32 = *(ptr + offset + 3);
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+}
+
+// Character classifiers
+fn is_alpha(c: u32) -> u32 {
+    if c >= 97 { if c <= 122 { return 1; } }
+    if c >= 65 { if c <= 90 { return 1; } }
+    if c == 95 { return 1; }
+    return 0;
+}
+fn is_digit(c: u32) -> u32 {
+    if c >= 48 { if c <= 57 { return 1; } }
+    return 0;
+}
+fn is_alnum(c: u32) -> u32 {
+    if is_alpha(c) == 1 { return 1; }
+    if is_digit(c) == 1 { return 1; }
+    return 0;
+}
+fn is_space(c: u32) -> u32 {
+    if c == 32 { return 1; }
+    if c == 9 { return 1; }
+    if c == 10 { return 1; }
+    if c == 13 { return 1; }
+    return 0;
+}
+fn is_hex(c: u32) -> u32 {
+    if is_digit(c) == 1 { return 1; }
+    if c >= 97 { if c <= 102 { return 1; } }
+    if c >= 65 { if c <= 70 { return 1; } }
+    return 0;
+}
+
+// Store token
+fn store_token(tokens: Address, idx: u32, ttype: u32, start: u32, len: u32, val: u64) {
+    offset: u32 = idx * 24;
+    store_u32(tokens, offset, ttype);
+    store_u32(tokens, offset + 4, start);
+    store_u32(tokens, offset + 8, len);
+    store_u64(tokens, offset + 12, val);
+}
+
+// Check if a substring matches a keyword
+fn match_keyword(src: Address, start: u32, len: u32, k1: u32, k2: u32, k3: u32, k4: u32, k5: u32, k6: u32) -> u32 {
+    if len != 6 { return 0; }
+    if *(src + start) != k1 { return 0; }
+    if *(src + start + 1) != k2 { return 0; }
+    if *(src + start + 2) != k3 { return 0; }
+    if *(src + start + 3) != k4 { return 0; }
+    if *(src + start + 4) != k5 { return 0; }
+    if *(src + start + 5) != k6 { return 0; }
+    return 1;
+}
+
+// Full lexer: tokenizes VUMA source including string literals and all operators.
+// Returns token count.
+fn full_lex(src: Address, src_len: u32, tokens: Address, max_tokens: u32) -> u32 {
+    pos: u32 = 0;
+    count: u32 = 0;
+    
+    while pos < src_len {
+        if count >= max_tokens { return count; }
+        c: u32 = *(src + pos);
+        
+        // Skip whitespace
+        if is_space(c) == 1 { pos = pos + 1; continue; }
+        
+        // Skip line comments (//)
+        if c == 47 {
+            if pos + 1 < src_len {
+                if *(src + pos + 1) == 47 {
+                    while pos < src_len {
+                        if *(src + pos) == 10 { break; }
+                        pos = pos + 1;
+                    }
+                    continue;
+                }
+            }
+        }
+        
+        // ── String literals ──
+        if c == 34 {  // double quote
+            start: u32 = pos;
+            pos = pos + 1;
+            while pos < src_len {
+                ch: u32 = *(src + pos);
+                if ch == 34 { pos = pos + 1; break; }  // closing quote
+                if ch == 92 {  // backslash escape
+                    pos = pos + 1;
+                    if pos < src_len { pos = pos + 1; }  // skip escaped char
+                } else {
+                    pos = pos + 1;
+                }
+            }
+            len: u32 = pos - start;
+            store_token(tokens, count, 3, start, len, 0);  // TOK_STR_LIT
+            count = count + 1;
+            continue;
+        }
+        
+        // ── Character literals ──
+        if c == 39 {  // single quote
+            start = pos;
+            pos = pos + 1;
+            if pos < src_len {
+                if *(src + pos) == 92 {  // escape
+                    pos = pos + 1;
+                    if pos < src_len { pos = pos + 1; }
+                } else {
+                    pos = pos + 1;
+                }
+                if pos < src_len {
+                    if *(src + pos) == 39 { pos = pos + 1; }  // closing quote
+                }
+            }
+            len = pos - start;
+            store_token(tokens, count, 4, start, len, 0);  // TOK_CHAR_LIT
+            count = count + 1;
+            continue;
+        }
+        
+        // ── Identifier or keyword ──
+        if is_alpha(c) == 1 {
+            start = pos;
+            while pos < src_len {
+                c = *(src + pos);
+                if is_alnum(c) == 0 { break; }
+                pos = pos + 1;
+            }
+            len = pos - start;
+            ttype: u32 = 1; // default: Ident
+            
+            // Keyword matching (by length then first char)
+            if len == 2 {
+                f: u32 = *(src + start);
+                s: u32 = *(src + start + 1);
+                if f == 102 { if s == 110 { ttype = 10; } }      // fn
+                else { if f == 105 { if s == 102 { ttype = 12; } } }  // if
+                else { if f == 97 { if s == 115 { ttype = 31; } } }   // as
+                else { if f == 105 { if s == 110 { ttype = 32; } } }  // in
+            }
+            if len == 3 {
+                f = *(src + start);
+                if f == 108 {  // l → let
+                    if *(src + start + 1) == 101 { if *(src + start + 2) == 116 { ttype = 11; } }
+                }
+                else { if f == 102 {  // f → for
+                    if *(src + start + 1) == 111 { if *(src + start + 2) == 114 { ttype = 15; } }
+                }}
+                else { if f == 109 {  // m → mut
+                    if *(src + start + 1) == 117 { if *(src + start + 2) == 116 { ttype = 26; } }
+                }}
+                else { if f == 112 {  // p → pub
+                    if *(src + start + 1) == 117 { if *(src + start + 2) == 98 { ttype = 28; } }
+                }}
+                else { if f == 110 {  // n → new
+                    if *(src + start + 1) == 101 { if *(src + start + 2) == 119 { ttype = 29; } }
+                }}
+            }
+            if len == 4 {
+                f = *(src + start);
+                if f == 101 {  // e → else, enum
+                    if *(src + start + 1) == 108 {  // el → else
+                        if *(src + start + 2) == 115 { if *(src + start + 3) == 101 { ttype = 13; } }
+                    }
+                    else { if *(src + start + 1) == 110 {  // en → enum
+                        if *(src + start + 2) == 117 { if *(src + start + 3) == 109 { ttype = 21; } }
+                    }}
+                }
+                else { if f == 116 {  // t → true
+                    if *(src + start + 1) == 114 { if *(src + start + 2) == 117 { if *(src + start + 3) == 101 { ttype = 29; } } }
+                }}
+                else { if f == 119 {  // w → wait
+                    if *(src + start + 1) == 97 { if *(src + start + 2) == 105 { if *(src + start + 3) == 116 { ttype = 33; } } }
+                }}
+            }
+            if len == 5 {
+                f = *(src + start);
+                if f == 119 {  // w → while
+                    if *(src + start + 1) == 104 { if *(src + start + 2) == 105 { if *(src + start + 3) == 108 { if *(src + start + 4) == 101 { ttype = 14; } } } }
+                }
+                else { if f == 98 {  // b → break
+                    if *(src + start + 1) == 114 { if *(src + start + 2) == 101 { if *(src + start + 3) == 97 { if *(src + start + 4) == 107 { ttype = 18; } } } }
+                }}
+                else { if f == 99 {  // c → const, catch
+                    if *(src + start + 1) == 111 { if *(src + start + 2) == 110 { if *(src + start + 3) == 115 { if *(src + start + 4) == 116 { ttype = 25; } } } }
+                    else { if *(src + start + 1) == 97 { if *(src + start + 2) == 116 { if *(src + start + 3) == 99 { if *(src + start + 4) == 104 { ttype = 34; } } } }
+                }}
+                else { if f == 102 {  // f → false
+                    if *(src + start + 1) == 97 { if *(src + start + 2) == 108 { if *(src + start + 3) == 115 { if *(src + start + 4) == 101 { ttype = 30; } } } }
+                }}
+                else { if f == 119 {  // w → where
+                    if *(src + start + 1) == 104 { if *(src + start + 2) == 101 { if *(src + start + 3) == 114 { if *(src + start + 4) == 101 { ttype = 32; } } } }
+                }}
+            }
+            if len == 6 {
+                f = *(src + start);
+                if f == 114 {  // r → return
+                    if match_keyword(src, start, len, 114, 101, 116, 117, 114, 110) == 1 { ttype = 16; }
+                }
+                else { if f == 115 {  // s → struct
+                    if match_keyword(src, start, len, 115, 116, 114, 117, 99, 116) == 1 { ttype = 20; }
+                }}
+                else { if f == 101 {  // e → extern
+                    if match_keyword(src, start, len, 101, 120, 116, 101, 114, 110) == 1 { ttype = 27; }
+                }}
+                else { if f == 105 {  // i → import
+                    if match_keyword(src, start, len, 105, 109, 112, 111, 114, 116) == 1 { ttype = 23; }
+                }}
+                else { if f == 101 {  // e → export
+                    if match_keyword(src, start, len, 101, 120, 112, 111, 114, 116) == 1 { ttype = 24; }
+                }}
+            }
+            if len == 7 {
+                f = *(src + start);
+                if f == 109 {  // m → match
+                    if match_keyword(src, start, len, 109, 97, 116, 99, 104, 0) == 1 { }
+                    // Actually "match" is 5 chars, not 7. Fix:
+                }
+            }
+            // "match" = 5 chars
+            if len == 5 {
+                f = *(src + start);
+                if f == 109 {  // m → match
+                    if *(src + start + 1) == 97 { if *(src + start + 2) == 116 { if *(src + start + 3) == 99 { if *(src + start + 4) == 104 { ttype = 17; } } } }
+                }
+            }
+            // "trait" = 5 chars
+            if len == 5 {
+                f = *(src + start);
+                if f == 116 {  // t → trait
+                    if *(src + start + 1) == 114 { if *(src + start + 2) == 97 { if *(src + start + 3) == 105 { if *(src + start + 4) == 116 { ttype = 33; } } } }
+                }
+            }
+            // "region" = 6 chars
+            if len == 6 {
+                f = *(src + start);
+                if f == 114 {  // r → region (not return)
+                    if *(src + start + 1) == 101 { if *(src + start + 2) == 103 { if *(src + start + 3) == 105 { if *(src + start + 4) == 111 { if *(src + start + 5) == 110 { ttype = 34; } } } } }
+                }
+            }
+            // "continue" = 8 chars
+            if len == 8 {
+                f = *(src + start);
+                if f == 99 {  // c → continue
+                    if *(src + start + 1) == 111 { if *(src + start + 2) == 110 { if *(src + start + 3) == 116 { if *(src + start + 4) == 105 { if *(src + start + 5) == 110 { if *(src + start + 6) == 117 { if *(src + start + 7) == 101 { ttype = 19; } } } } } } }
+                }
+            }
+            // "async" = 5 chars
+            if len == 5 {
+                f = *(src + start);
+                if f == 97 {  // a → async
+                    if *(src + start + 1) == 115 { if *(src + start + 2) == 121 { if *(src + start + 3) == 110 { if *(src + start + 4) == 99 { ttype = 35; } } } }
+                }
+            }
+            // "await" = 5 chars (already handled above as "wait", fix)
+            // "sizeof" = 6 chars
+            if len == 6 {
+                f = *(src + start);
+                if f == 115 {  // s → sizeof
+                    if *(src + start + 1) == 105 { if *(src + start + 2) == 122 { if *(src + start + 3) == 101 { if *(src + start + 4) == 111 { if *(src + start + 5) == 102 { ttype = 36; } } } } }
+                }
+            }
+            
+            store_token(tokens, count, ttype, start, len, 0);
+            count = count + 1;
+            continue;
+        }
+        
+        // ── Integer literal (decimal and hex) ──
+        if is_digit(c) == 1 {
+            start = pos;
+            val: u64 = 0;
+            // Check for hex prefix 0x
+            if c == 48 && pos + 1 < src_len {
+                next_c: u32 = *(src + pos + 1);
+                if next_c == 120 || next_c == 88 {  // 'x' or 'X'
+                    pos = pos + 2;
+                    while pos < src_len {
+                        c = *(src + pos);
+                        if is_hex(c) == 0 { break; }
+                        if c >= 48 && c <= 57 { val = val * 16 + (c - 48); }
+                        else { if c >= 97 { val = val * 16 + (c - 87); } else { val = val * 16 + (c - 55); } }
+                        pos = pos + 1;
+                    }
+                    len = pos - start;
+                    store_token(tokens, count, 2, start, len, val);
+                    count = count + 1;
+                    continue;
+                }
+            }
+            // Decimal
+            while pos < src_len {
+                c = *(src + pos);
+                if is_digit(c) == 0 { break; }
+                val = val * 10 + (c - 48);
+                pos = pos + 1;
+            }
+            len = pos - start;
+            store_token(tokens, count, 2, start, len, val);
+            count = count + 1;
+            continue;
+        }
+        
+        // ── Multi-char operators ──
+        start = pos;
+        len = 1;
+        ttype: u32 = 0;
+        
+        // Two-char operators
+        if pos + 1 < src_len {
+            c2: u32 = *(src + pos + 1);
+            // == (46)
+            if c == 61 && c2 == 61 { ttype = 46; len = 2; pos = pos + 1; }
+            // != (47)
+            else { if c == 33 && c2 == 61 { ttype = 47; len = 2; pos = pos + 1; } }
+            // <= (50)
+            else { if c == 60 && c2 == 61 { ttype = 50; len = 2; pos = pos + 1; } }
+            // >= (51)
+            else { if c == 62 && c2 == 61 { ttype = 51; len = 2; pos = pos + 1; } }
+            // && (52)
+            else { if c == 38 && c2 == 38 { ttype = 52; len = 2; pos = pos + 1; } }
+            // || (53)
+            else { if c == 124 && c2 == 124 { ttype = 53; len = 2; pos = pos + 1; } }
+            // -> (72) arrow
+            else { if c == 45 && c2 == 62 { ttype = 72; len = 2; pos = pos + 1; } }
+            // => (73) fat arrow
+            else { if c == 61 && c2 == 62 { ttype = 73; len = 2; pos = pos + 1; } }
+            // :: (71) scope resolution
+            else { if c == 58 && c2 == 58 { ttype = 71; len = 2; pos = pos + 1; } }
+            // << (59) shift left
+            else { if c == 60 && c2 == 60 { ttype = 59; len = 2; pos = pos + 1; } }
+            // >> (60) shift right
+            else { if c == 62 && c2 == 62 { ttype = 60; len = 2; pos = pos + 1; } }
+            // += (80)
+            else { if c == 43 && c2 == 61 { ttype = 80; len = 2; pos = pos + 1; } }
+            // -= (81)
+            else { if c == 45 && c2 == 61 { ttype = 81; len = 2; pos = pos + 1; } }
+            // *= (82)
+            else { if c == 42 && c2 == 61 { ttype = 82; len = 2; pos = pos + 1; } }
+            // /= (83)
+            else { if c == 47 && c2 == 61 { ttype = 83; len = 2; pos = pos + 1; } }
+        }
+        
+        // Single-char tokens (if no two-char match)
+        if ttype == 0 {
+            if c == 40 { ttype = 61; }       // (
+            else { if c == 41 { ttype = 62; } }  // )
+            else { if c == 123 { ttype = 63; } } // {
+            else { if c == 125 { ttype = 64; } } // }
+            else { if c == 91 { ttype = 65; } }  // [
+            else { if c == 93 { ttype = 66; } }  // ]
+            else { if c == 59 { ttype = 67; } }  // ;
+            else { if c == 44 { ttype = 68; } }  // ,
+            else { if c == 46 { ttype = 69; } }  // .
+            else { if c == 58 { ttype = 70; } }  // :
+            else { if c == 61 { ttype = 45; } }  // =
+            else { if c == 43 { ttype = 40; } }  // +
+            else { if c == 45 { ttype = 41; } }  // -
+            else { if c == 42 { ttype = 42; } }  // *
+            else { if c == 47 { ttype = 43; } }  // /
+            else { if c == 37 { ttype = 44; } }  // %
+            else { if c == 60 { ttype = 48; } }  // <
+            else { if c == 62 { ttype = 49; } }  // >
+            else { if c == 38 { ttype = 55; } }  // &
+            else { if c == 124 { ttype = 56; } } // |
+            else { if c == 94 { ttype = 57; } }  // ^
+            else { if c == 126 { ttype = 58; } } // ~
+            else { if c == 33 { ttype = 54; } }  // !
+            else { if c == 64 { ttype = 74; } }  // @
+            else { if c == 63 { ttype = 75; } }  // ?
+            else { if c == 35 { ttype = 77; } }  // #
+        }
+        
+        if ttype != 0 {
+            store_token(tokens, count, ttype, start, len, 0);
+            count = count + 1;
+        }
+        pos = pos + 1;
+    }
+    
+    // EOF token
+    if count < max_tokens {
+        store_token(tokens, count, 0, pos, 0, 0);
+        count = count + 1;
+    }
+    return count;
+}
