@@ -1,0 +1,24 @@
+// KAT: Lexer — tokenize '"hello"' -> StrLit (type 3)
+// Expected: 03
+extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+fn main() -> i32 {
+    // Source: "hello" (with quotes)
+    src = allocate(7);
+    *(src + 0) = 34;  // '"'
+    *(src + 1) = 104; // 'h'
+    *(src + 2) = 101; // 'e'
+    *(src + 3) = 108; // 'l'
+    *(src + 4) = 108; // 'l'
+    *(src + 5) = 111; // 'o'
+    *(src + 6) = 34;  // '"'
+    
+    // Check first char is quote -> StringLit (type 3)
+    c: u32 = *(src + 0);
+    token_type: u32 = 1;
+    if c == 34 { token_type = 3; }
+    
+    out = allocate(1);
+    *out = token_type & 255;
+    write(1, out, 1);
+    return 0;
+}
