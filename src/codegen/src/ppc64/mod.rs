@@ -4067,13 +4067,30 @@ impl Backend for PPC64Backend {
                         code.extend(ss_store_to_slot(Gpr::R3, dst_offset));
                         code
                     }
-                    IRInstr::Div { dst, lhs, rhs, .. } => {
+                    IRInstr::Div { dst, lhs, rhs, ty } => {
                         let dst_id = dst.as_register().unwrap_or(0);
                         let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
                         let mut code = Vec::new();
                         code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R3));
                         code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::R4));
-                        code.extend_from_slice(&Instruction::Divd { rt: Gpr::R3, ra: Gpr::R3, rb: Gpr::R4 }.encode());
+                        let is_32bit = ty.as_ref().map_or(false, |t| matches!(t, IRType::I32 | IRType::U32));
+                        let is_unsigned = ty.as_ref().map_or(false, |t| matches!(t, IRType::U8 | IRType::U16 | IRType::U32 | IRType::U64));
+                        if is_32bit {
+                            // Clear upper 32 bits before 32-bit division
+                            code.extend_from_slice(&Instruction::Rlwinm { ra: Gpr::R3, rs: Gpr::R3, sh: 0, mb: 0, me: 31 }.encode());
+                            code.extend_from_slice(&Instruction::Rlwinm { ra: Gpr::R4, rs: Gpr::R4, sh: 0, mb: 0, me: 31 }.encode());
+                            if is_unsigned {
+                                code.extend_from_slice(&Instruction::Divwu { rt: Gpr::R3, ra: Gpr::R3, rb: Gpr::R4 }.encode());
+                            } else {
+                                code.extend_from_slice(&Instruction::Divw { rt: Gpr::R3, ra: Gpr::R3, rb: Gpr::R4 }.encode());
+                            }
+                        } else {
+                            if is_unsigned {
+                                code.extend_from_slice(&Instruction::Divdu { rt: Gpr::R3, ra: Gpr::R3, rb: Gpr::R4 }.encode());
+                            } else {
+                                code.extend_from_slice(&Instruction::Divd { rt: Gpr::R3, ra: Gpr::R3, rb: Gpr::R4 }.encode());
+                            }
+                        }
                         code.extend(ss_store_to_slot(Gpr::R3, dst_offset));
                         code
                     }
