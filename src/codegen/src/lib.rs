@@ -39,6 +39,8 @@ pub mod memory_safety;
 pub mod mips64;
 pub mod opt;
 pub mod egraph;
+pub mod closures;
+pub mod monomorphize;
 pub mod effects;
 pub mod escape_analysis;
 pub mod alias_analysis;
