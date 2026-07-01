@@ -31,6 +31,7 @@ fn build_sha256d_like_scg() -> Scg {
             rhs: ScgExpr::Var(format!("b{}", (i + 1) % 8)),
             tail_call: false,
             reassigns: None,
+            result_ty: None,
         }));
     }
     main_body.push(ScgStatement::Return(vec![ScgExpr::Var("h0".to_string())]));
@@ -52,6 +53,7 @@ fn build_sha256d_like_scg() -> Scg {
             rhs: ScgExpr::Var(format!("msg{}", i % 16)),
             tail_call: false,
             reassigns: None,
+            result_ty: None,
         }));
     }
     compress_body.push(ScgStatement::Return(vec![ScgExpr::Var("w0".to_string())]));
