@@ -733,7 +733,6 @@ impl CORuntime {
                         rhs: ScgExpr::Var("arg1".to_string()),
                         tail_call: false,
                         reassigns: None,
-                        result_ty: None,
                     }),
                     ScgStatement::Return(vec![ScgExpr::Var(format!("v{}", node.id))]),
                 ]
@@ -762,7 +761,6 @@ impl CORuntime {
                         rhs: ScgExpr::Int(0),
                         tail_call: false,
                         reassigns: None,
-                        result_ty: None,
                     }));
                 }
                 stmts.push(ScgStatement::Return(vec![ScgExpr::Var(format!(
@@ -784,7 +782,6 @@ impl CORuntime {
                             rhs: ScgExpr::Int(1),
                             tail_call: false,
                             reassigns: None,
-                            result_ty: None,
                         })]
                     })
                     .collect();
@@ -851,7 +848,6 @@ impl CORuntime {
                             rhs: ScgExpr::Int(1),
                             tail_call: false,
                             reassigns: None,
-                            result_ty: None,
                         }),
                         ScgStatement::Return(vec![ScgExpr::Var("inlined_result".to_string())]),
                     ]
