@@ -1,0 +1,92 @@
+// womb/lang/string.vuma — String operations
+// In VUMA, a "string" is represented as (data: Address, len: u32).
+// The data pointer points to a heap-allocated byte buffer.
+// The length is the number of bytes.
+// No main() — importable library module.
+
+// Get string length (just returns the len parameter)
+fn string_len(len: u32) -> u32 {
+    return len;
+}
+
+// Compare two strings byte-by-byte
+// Returns 1 if equal, 0 if not
+fn string_eq(data_a: Address, len_a: u32, data_b: Address, len_b: u32) -> u32 {
+    if len_a != len_b { return 0; }
+    i: u32 = 0;
+    while i < len_a {
+        if *(data_a + i) != *(data_b + i) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+// Copy string data to an output buffer
+// Returns number of bytes copied
+fn string_copy(data: Address, len: u32, out: Address, max_len: u32) -> u32 {
+    n: u32 = len;
+    if n > max_len { n = max_len; }
+    i: u32 = 0;
+    while i < n {
+        *(out + i) = *(data + i);
+        i = i + 1;
+    }
+    return n;
+}
+
+// Find first occurrence of a byte in a string
+// Returns index if found, or len if not found
+fn string_find_byte(data: Address, len: u32, byte: u32) -> u32 {
+    i: u32 = 0;
+    while i < len {
+        if *(data + i) == byte { return i; }
+        i = i + 1;
+    }
+    return len;
+}
+
+// Compare two strings lexicographically
+// Returns: 0 if equal, negative if a < b, positive if a > b
+// (simplified: returns 0, 1, or 2)
+fn string_cmp(data_a: Address, len_a: u32, data_b: Address, len_b: u32) -> u32 {
+    i: u32 = 0;
+    while i < len_a {
+        if i >= len_b { return 1; }  // a is longer
+        av: u32 = *(data_a + i);
+        bv: u32 = *(data_b + i);
+        if av < bv { return 1; }  // a < b
+        if av > bv { return 2; }  // a > b
+        i = i + 1;
+    }
+    if i < len_b { return 1; }  // b is longer
+    return 0;  // equal
+}
+
+// Concatenate: copy a then b into out
+// Returns total length
+fn string_concat(data_a: Address, len_a: u32, data_b: Address, len_b: u32, out: Address) -> u32 {
+    i: u32 = 0;
+    while i < len_a {
+        *(out + i) = *(data_a + i);
+        i = i + 1;
+    }
+    j: u32 = 0;
+    while j < len_b {
+        *(out + i + j) = *(data_b + j);
+        j = j + 1;
+    }
+    return len_a + len_b;
+}
+
+// Substring: copy from offset for count bytes
+fn string_substr(data: Address, len: u32, offset: u32, count: u32, out: Address) -> u32 {
+    if offset >= len { return 0; }
+    n: u32 = count;
+    if offset + n > len { n = len - offset; }
+    i: u32 = 0;
+    while i < n {
+        *(out + i) = *(data + offset + i);
+        i = i + 1;
+    }
+    return n;
+}
