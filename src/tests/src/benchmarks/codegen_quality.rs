@@ -168,6 +168,7 @@ fn build_program_with_memory(size: usize) -> Scg {
             rhs: ScgExpr::Int((i + 1) as i64),
             tail_call: false,
             reassigns: None,
+            result_ty: None,
         }));
     }
 

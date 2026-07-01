@@ -329,6 +329,9 @@ pub struct ComputationNode {
     /// reassignment and create a proper phi node at if/else merge points.
     /// `None` for let-bindings and non-assignment computations.
     pub reassigns: Option<String>,
+    /// Optional result type from the SCG node's result_type field.
+    /// When set, overrides lhs-based type inference for BinOp width.
+    pub result_ty: Option<crate::ir::IRType>,
 }
 
 /// Unary computation node (neg, not, clz, ctz, popcnt).
@@ -2582,8 +2585,11 @@ impl IRBuilder {
         // backends (especially ppc64/riscv64) can use the correct instruction
         // width (32-bit vs 64-bit shifts). Without this, 64-bit shifts on
         // 32-bit values with garbage in the upper bits corrupt the result.
-        let op_ty = lhs_val.as_register()
-            .and_then(|id| self.vreg_types.get(&id).cloned())
+        let op_ty = comp.result_ty.clone()
+            .or_else(|| {
+                lhs_val.as_register()
+                    .and_then(|id| self.vreg_types.get(&id).cloned())
+            })
             .or_else(|| {
                 // Fall back to checking if reassigns variable has a known type
                 // via param_types (for variables declared with type annotations)
@@ -3855,6 +3861,7 @@ mod tests {
                     rhs: ScgExpr::Int(1),
                     tail_call: false,
                     reassigns: None,
+                    result_ty: None,
                 }),
                 ScgStatement::Return(vec![ScgExpr::Var("result".into())]),
             ],
@@ -3909,6 +3916,7 @@ mod tests {
                         rhs: ScgExpr::Int(2),
                         tail_call: false,
                     reassigns: None,
+                    result_ty: None,
                     })],
                     else_body: None,
                 }),
@@ -4199,6 +4207,7 @@ mod tests {
                     rhs: ScgExpr::Int(1),
                     tail_call: false,
                     reassigns: None,
+                    result_ty: None,
                 }),
                 ScgStatement::Computation(ComputationNode {
                     dst: "m".into(),
@@ -4207,6 +4216,7 @@ mod tests {
                     rhs: ScgExpr::Int(2),
                     tail_call: false,
                     reassigns: None,
+                    result_ty: None,
                 }),
                 ScgStatement::Computation(ComputationNode {
                     dst: "d".into(),
@@ -4215,6 +4225,7 @@ mod tests {
                     rhs: ScgExpr::Int(4),
                     tail_call: false,
                     reassigns: None,
+                    result_ty: None,
                 }),
                 ScgStatement::Return(vec![ScgExpr::Var("d".into())]),
             ],
@@ -4296,6 +4307,7 @@ mod tests {
                     rhs: ScgExpr::Int(10),
                     tail_call: false,
                     reassigns: None,
+                    result_ty: None,
                 }),
                 ScgStatement::Return(vec![ScgExpr::Var("output".into())]),
             ],
@@ -4371,6 +4383,7 @@ mod tests {
                         rhs: ScgExpr::Int(2),
                         tail_call: false,
                     reassigns: None,
+                    result_ty: None,
                     })],
                     else_body: Some(vec![ScgStatement::Computation(ComputationNode {
                         dst: "y".into(),
@@ -4379,6 +4392,7 @@ mod tests {
                         rhs: ScgExpr::Int(3),
                         tail_call: false,
                     reassigns: None,
+                    result_ty: None,
                     })]),
                 }),
                 ScgStatement::Return(vec![]),
@@ -4533,6 +4547,7 @@ mod tests {
                     rhs: ScgExpr::Int(10),
                     tail_call: false,
                     reassigns: None,
+                    result_ty: None,
                 }),
                 ScgStatement::Computation(ComputationNode {
                     dst: "equal".into(),
@@ -4541,6 +4556,7 @@ mod tests {
                     rhs: ScgExpr::Int(0),
                     tail_call: false,
                     reassigns: None,
+                    result_ty: None,
                 }),
                 ScgStatement::Return(vec![
                     ScgExpr::Var("less".into()),
@@ -4595,6 +4611,7 @@ mod tests {
                     rhs: ScgExpr::Int(10),
                     tail_call: false,
                     reassigns: None,
+                    result_ty: None,
                 }),
                 ScgStatement::Computation(ComputationNode {
                     dst: "uge".into(),
@@ -4603,6 +4620,7 @@ mod tests {
                     rhs: ScgExpr::Int(5),
                     tail_call: false,
                     reassigns: None,
+                    result_ty: None,
                 }),
                 ScgStatement::Return(vec![ScgExpr::Var("ult".into()), ScgExpr::Var("uge".into())]),
             ],
@@ -4696,6 +4714,7 @@ mod tests {
                         rhs: ScgExpr::Int(2),
                         tail_call: false,
                     reassigns: None,
+                    result_ty: None,
                     })],
                     else_body: Some(vec![ScgStatement::Computation(ComputationNode {
                         dst: "x".into(),
@@ -4704,6 +4723,7 @@ mod tests {
                         rhs: ScgExpr::Int(3),
                         tail_call: false,
                     reassigns: None,
+                    result_ty: None,
                     })]),
                 }),
                 ScgStatement::Return(vec![ScgExpr::Var("x".into())]),
@@ -4739,6 +4759,7 @@ mod tests {
                 rhs: ScgExpr::Int(2),
                 tail_call: false,
                     reassigns: None,
+                    result_ty: None,
             }),
             ScgStatement::Computation(ComputationNode {
                 dst: "b".into(),
@@ -4747,6 +4768,7 @@ mod tests {
                 rhs: ScgExpr::Int(3),
                 tail_call: false,
                     reassigns: None,
+                    result_ty: None,
             }),
             ScgStatement::Return(vec![ScgExpr::Var("b".into())]),
         ];
@@ -4770,6 +4792,7 @@ mod tests {
                 rhs: ScgExpr::Int(2),
                 tail_call: false,
                     reassigns: None,
+                    result_ty: None,
             }),
             ScgStatement::Computation(ComputationNode {
                 dst: "b".into(),
@@ -4778,6 +4801,7 @@ mod tests {
                 rhs: ScgExpr::Int(4),
                 tail_call: false,
                     reassigns: None,
+                    result_ty: None,
             }),
             ScgStatement::Computation(ComputationNode {
                 dst: "c".into(),
@@ -4786,6 +4810,7 @@ mod tests {
                 rhs: ScgExpr::Var("b".into()),
                 tail_call: false,
                     reassigns: None,
+                    result_ty: None,
             }),
         ];
         let order = IRBuilder::topological_sort_statements(&stmts);
@@ -4985,6 +5010,7 @@ mod tests {
                     rhs: ScgExpr::Int(0xFF),
                     tail_call: false,
                     reassigns: None,
+                    result_ty: None,
                 }),
                 ScgStatement::Computation(ComputationNode {
                     dst: "or_result".into(),
@@ -4993,6 +5019,7 @@ mod tests {
                     rhs: ScgExpr::Int(0x100),
                     tail_call: false,
                     reassigns: None,
+                    result_ty: None,
                 }),
                 ScgStatement::Return(vec![
                     ScgExpr::Var("and_result".into()),
@@ -5154,6 +5181,7 @@ mod tests {
                     rhs: ScgExpr::Int(0),
                     tail_call: false,
                     reassigns: None,
+                    result_ty: None,
                 }),
                 ScgStatement::Computation(ComputationNode {
                     dst: "sge".into(),
@@ -5162,6 +5190,7 @@ mod tests {
                     rhs: ScgExpr::Int(0),
                     tail_call: false,
                     reassigns: None,
+                    result_ty: None,
                 }),
                 ScgStatement::Return(vec![ScgExpr::Var("ne".into()), ScgExpr::Var("sge".into())]),
             ],
@@ -5248,6 +5277,7 @@ mod tests {
                             rhs: ScgExpr::Int(1),
                             tail_call: false,
                     reassigns: None,
+                    result_ty: None,
                         }),
                         ScgStatement::Control(ControlNode::Break),
                     ],
@@ -5339,6 +5369,7 @@ mod tests {
                     rhs: ScgExpr::Var("y".to_string()), // undefined
                     tail_call: false,
                     reassigns: None,
+                    result_ty: None,
                 })],
             })],
         };

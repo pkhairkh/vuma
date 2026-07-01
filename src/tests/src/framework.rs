@@ -909,6 +909,7 @@ fn bridge_stmt_to_codegen(stmt: &vuma_parser::ast::Stmt) -> Vec<CodegenScgStatem
                 rhs,
                 tail_call: false,
                 reassigns: None,
+                result_ty: None,
             })]
         }
         PStmt::Assign(assign_stmt) => {
@@ -926,6 +927,7 @@ fn bridge_stmt_to_codegen(stmt: &vuma_parser::ast::Stmt) -> Vec<CodegenScgStatem
                 rhs,
                 tail_call: false,
                 reassigns: None,
+                result_ty: None,
             })]
         }
         PStmt::CompoundAssign(ca_stmt) => {
@@ -954,6 +956,7 @@ fn bridge_stmt_to_codegen(stmt: &vuma_parser::ast::Stmt) -> Vec<CodegenScgStatem
                 rhs: bridge_expr_to_scg_expr(&ca_stmt.value),
                 tail_call: false,
                 reassigns: None,
+                result_ty: None,
             })]
         }
         PStmt::Allocate(alloc_stmt) => {
@@ -967,6 +970,7 @@ fn bridge_stmt_to_codegen(stmt: &vuma_parser::ast::Stmt) -> Vec<CodegenScgStatem
                 rhs: bridge_expr_to_scg_expr(&alloc_stmt.size),
                 tail_call: false,
                 reassigns: None,
+                result_ty: None,
             })]
         }
         PStmt::Free(free_stmt) => {
@@ -979,6 +983,7 @@ fn bridge_stmt_to_codegen(stmt: &vuma_parser::ast::Stmt) -> Vec<CodegenScgStatem
                 rhs: CodegenScgExpr::Int(0),
                 tail_call: false,
                 reassigns: None,
+                result_ty: None,
             })]
         }
         PStmt::Cast(cast_stmt) => {
@@ -990,6 +995,7 @@ fn bridge_stmt_to_codegen(stmt: &vuma_parser::ast::Stmt) -> Vec<CodegenScgStatem
                 rhs: CodegenScgExpr::Int(0),
                 tail_call: false,
                 reassigns: None,
+                result_ty: None,
             })]
         }
         PStmt::Return(ret_stmt) => {
@@ -1009,6 +1015,7 @@ fn bridge_stmt_to_codegen(stmt: &vuma_parser::ast::Stmt) -> Vec<CodegenScgStatem
                 rhs,
                 tail_call: false,
                 reassigns: None,
+                result_ty: None,
             })]
         }
         PStmt::If(if_stmt) => {
@@ -1046,6 +1053,7 @@ fn bridge_stmt_to_codegen(stmt: &vuma_parser::ast::Stmt) -> Vec<CodegenScgStatem
                 rhs: bridge_expr_to_scg_expr(&for_stmt.iter),
                 tail_call: false,
                 reassigns: None,
+                result_ty: None,
             });
             let body = bridge_block_to_codegen_stmts(&for_stmt.body);
             let mut loop_stmts = vec![iter_init];
