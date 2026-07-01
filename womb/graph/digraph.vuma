@@ -1,172 +1,213 @@
-// womb/graph/digraph.vuma — Directed graph (arena-based, no petgraph)
-// Replaces petgraph for self-hosting. Uses arena allocation.
-// Layout:
-//   Graph struct: { nodes: Address, edges: Address, node_count: u32, edge_count: u32, node_cap: u32, edge_cap: u32 }
-//   Node: [payload_ptr: u32][first_in_edge: u32][first_out_edge: u32] = 12 bytes
-//   Edge: [src: u32][dst: u32][next_out: u32][next_in: u32] = 16 bytes
-// No main() — importable library module.
+// womb/graph/digraph.vuma — Directed graph using heap-backed arena
+// Replaces petgraph for self-hosting. Uses __vuma_alloc for persistent
+// heap memory and proper u32/u64 little-endian storage.
+//
+// Layout (Graph struct, 48 bytes on heap):
+//   offset  0-7:  nodes_ptr (u64)
+//   offset  8-15: edges_ptr (u64)
+//   offset 16-19: node_count (u32)
+//   offset 20-23: edge_count (u32)
+//   offset 24-27: node_cap (u32)
+//   offset 28-31: edge_cap (u32)
+//
+// Node (12 bytes): [payload_tag: u32][first_in: u32][first_out: u32]
+// Edge (16 bytes): [src: u32][dst: u32][next_out: u32][next_in: u32]
+//
+// Linked-list adjacency: each node has a singly-linked list of outgoing
+// edges (via next_out) and incoming edges (via next_in).
 
-// Create a new directed graph
+extern "C" {
+    fn __vuma_alloc(size: i64) -> Address;
+    fn __vuma_free(addr: Address, size: i64);
+}
+
+// ── LE helpers ──
+fn store_u64(ptr: Address, offset: u32, val: u64) {
+    *(ptr + offset) = val & 255; *(ptr + offset + 1) = (val >> 8) & 255;
+    *(ptr + offset + 2) = (val >> 16) & 255; *(ptr + offset + 3) = (val >> 24) & 255;
+    *(ptr + offset + 4) = (val >> 32) & 255; *(ptr + offset + 5) = (val >> 40) & 255;
+    *(ptr + offset + 6) = (val >> 48) & 255; *(ptr + offset + 7) = (val >> 56) & 255;
+}
+fn load_u64(ptr: Address, offset: u32) -> u64 {
+    b0: u64 = *(ptr + offset); b1: u64 = *(ptr + offset + 1);
+    b2: u64 = *(ptr + offset + 2); b3: u64 = *(ptr + offset + 3);
+    b4: u64 = *(ptr + offset + 4); b5: u64 = *(ptr + offset + 5);
+    b6: u64 = *(ptr + offset + 6); b7: u64 = *(ptr + offset + 7);
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
+}
+fn store_u32(ptr: Address, offset: u32, val: u32) {
+    *(ptr + offset) = val & 255; *(ptr + offset + 1) = (val >> 8) & 255;
+    *(ptr + offset + 2) = (val >> 16) & 255; *(ptr + offset + 3) = (val >> 24) & 255;
+}
+fn load_u32(ptr: Address, offset: u32) -> u32 {
+    b0: u32 = *(ptr + offset); b1: u32 = *(ptr + offset + 1);
+    b2: u32 = *(ptr + offset + 2); b3: u32 = *(ptr + offset + 3);
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+}
+
+const NODE_SIZE: u32 = 12;
+const EDGE_SIZE: u32 = 16;
+const GRAPH_SIZE: u32 = 48;
+
+// Create a new directed graph with given capacities.
+// Uses __vuma_alloc for heap-backed storage (persists across calls).
 fn digraph_new(node_cap: u32, edge_cap: u32) -> Address {
-    g = allocate(24);
-    nodes = allocate(node_cap * 12);
-    edges = allocate(edge_cap * 16);
+    g = __vuma_alloc(GRAPH_SIZE);
+    if node_cap == 0 { node_cap = 1024; }
+    if edge_cap == 0 { edge_cap = 4096; }
+    nodes = __vuma_alloc(node_cap * NODE_SIZE);
+    edges = __vuma_alloc(edge_cap * EDGE_SIZE);
     // Zero everything
     i: u32 = 0;
-    while i < node_cap * 12 { *(nodes + i) = 0; i = i + 1; }
+    while i < node_cap * NODE_SIZE { *(nodes + i) = 0; i = i + 1; }
     i = 0;
-    while i < edge_cap * 16 { *(edges + i) = 0; i = i + 1; }
-    // Store nodes ptr, edges ptr, counts, capacities
-    *(g + 0) = 0; *(g + 1) = 0; *(g + 2) = 0; *(g + 3) = 0;  // nodes ptr (simplified)
-    *(g + 4) = 0; *(g + 5) = 0; *(g + 6) = 0; *(g + 7) = 0;  // edges ptr (simplified)
-    *(g + 8) = 0;   // node_count = 0
-    *(g + 12) = 0;  // edge_count = 0
-    *(g + 16) = node_cap & 255;  // node_cap
-    *(g + 17) = (node_cap >> 8) & 255;
-    *(g + 18) = (node_cap >> 16) & 255;
-    *(g + 19) = (node_cap >> 24) & 255;
-    *(g + 20) = edge_cap & 255;  // edge_cap
-    *(g + 21) = (edge_cap >> 8) & 255;
-    *(g + 22) = (edge_cap >> 16) & 255;
-    *(g + 23) = (edge_cap >> 24) & 255;
+    while i < edge_cap * EDGE_SIZE { *(edges + i) = 0; i = i + 1; }
+    // Store pointers and capacities
+    store_u64(g, 0, nodes);
+    store_u64(g, 8, edges);
+    store_u32(g, 16, 0);          // node_count
+    store_u32(g, 20, 0);          // edge_count
+    store_u32(g, 24, node_cap);   // node_cap
+    store_u32(g, 28, edge_cap);   // edge_cap
     return g;
 }
 
-// Add a node to the graph. Returns the node index.
-fn digraph_add_node(g: Address) -> u32 {
-    count: u32 = *(g + 8);
-    *(g + 8) = (count + 1) & 255;  // simplified: assumes count < 256
-    // Node at index `count` is already zeroed
+// Grow the node array (2x capacity)
+fn digraph_grow_nodes(g: Address) {
+    old_cap: u32 = load_u32(g, 24);
+    new_cap: u32 = old_cap * 2;
+    old_nodes: u64 = load_u64(g, 0);
+    new_nodes = __vuma_alloc(new_cap * NODE_SIZE);
+    // Copy old data
+    i: u32 = 0;
+    while i < old_cap * NODE_SIZE {
+        *(new_nodes + i) = *(old_nodes + i) & 255;
+        i = i + 1;
+    }
+    // Zero new space
+    while i < new_cap * NODE_SIZE {
+        *(new_nodes + i) = 0;
+        i = i + 1;
+    }
+    __vuma_free(old_nodes, old_cap * NODE_SIZE);
+    store_u64(g, 0, new_nodes);
+    store_u32(g, 24, new_cap);
+}
+
+// Grow the edge array (2x capacity)
+fn digraph_grow_edges(g: Address) {
+    old_cap: u32 = load_u32(g, 28);
+    new_cap: u32 = old_cap * 2;
+    old_edges: u64 = load_u64(g, 8);
+    new_edges = __vuma_alloc(new_cap * EDGE_SIZE);
+    i: u32 = 0;
+    while i < old_cap * EDGE_SIZE {
+        *(new_edges + i) = *(old_edges + i) & 255;
+        i = i + 1;
+    }
+    while i < new_cap * EDGE_SIZE {
+        *(new_edges + i) = 0;
+        i = i + 1;
+    }
+    __vuma_free(old_edges, old_cap * EDGE_SIZE);
+    store_u64(g, 8, new_edges);
+    store_u32(g, 28, new_cap);
+}
+
+// Add a node with a payload tag. Returns node index.
+fn digraph_add_node(g: Address, payload_tag: u32) -> u32 {
+    count: u32 = load_u32(g, 16);
+    cap: u32 = load_u32(g, 24);
+    if count >= cap { digraph_grow_nodes(g); }
+    nodes: u64 = load_u64(g, 0);
+    offset: u32 = count * NODE_SIZE;
+    store_u32(nodes, offset, payload_tag);      // payload_tag
+    store_u32(nodes, offset + 4, 0xFFFFFFFF);   // first_in (none)
+    store_u32(nodes, offset + 8, 0xFFFFFFFF);   // first_out (none)
+    store_u32(g, 16, count + 1);
     return count;
 }
 
-// Add a directed edge from src to dst.
+// Add a directed edge from src to dst. Returns edge index.
 fn digraph_add_edge(g: Address, src: u32, dst: u32) -> u32 {
-    edge_count: u32 = *(g + 12);
-    *(g + 12) = (edge_count + 1) & 255;
-    // Edge at index `edge_count`:
-    //   src, dst, next_out (linked list of outgoing edges from src),
-    //   next_in (linked list of incoming edges to dst)
-    edge_base: u32 = edge_count * 16;
-    *(g + edge_base + 0) = src & 255;  // src
-    *(g + edge_base + 4) = dst & 255;  // dst
-    // Link to previous first_out edge of src
-    node_base: u32 = src * 12;
-    prev_out: u32 = *(g + node_base + 8);  // first_out_edge
-    *(g + edge_base + 8) = prev_out & 255;  // next_out
-    *(g + node_base + 8) = edge_count & 255;  // update first_out
-    // Link to previous first_in edge of dst
-    dst_base: u32 = dst * 12;
-    prev_in: u32 = *(g + dst_base + 4);  // first_in_edge
-    *(g + edge_base + 12) = prev_in & 255;  // next_in
-    *(g + dst_base + 4) = edge_count & 255;  // update first_in
+    edge_count: u32 = load_u32(g, 20);
+    edge_cap: u32 = load_u32(g, 28);
+    if edge_count >= edge_cap { digraph_grow_edges(g); }
+    edges: u64 = load_u64(g, 8);
+    nodes: u64 = load_u64(g, 0);
+    
+    ebase: u32 = edge_count * EDGE_SIZE;
+    store_u32(edges, ebase, src);       // src
+    store_u32(edges, ebase + 4, dst);   // dst
+    
+    // Link into src's outgoing list
+    src_base: u32 = src * NODE_SIZE;
+    prev_out: u32 = load_u32(nodes, src_base + 8);  // first_out
+    store_u32(edges, ebase + 8, prev_out);           // next_out = old first_out
+    store_u32(nodes, src_base + 8, edge_count);      // first_out = new edge
+    
+    // Link into dst's incoming list
+    dst_base: u32 = dst * NODE_SIZE;
+    prev_in: u32 = load_u32(nodes, dst_base + 4);    // first_in
+    store_u32(edges, ebase + 12, prev_in);            // next_in = old first_in
+    store_u32(nodes, dst_base + 4, edge_count);       // first_in = new edge
+    
+    store_u32(g, 20, edge_count + 1);
     return edge_count;
 }
 
-// Get node count
-fn digraph_node_count(g: Address) -> u32 {
-    return *(g + 8);
+fn digraph_node_count(g: Address) -> u32 { return load_u32(g, 16); }
+fn digraph_edge_count(g: Address) -> u32 { return load_u32(g, 20); }
+
+// Get node payload tag
+fn digraph_node_payload(g: Address, node: u32) -> u32 {
+    nodes: u64 = load_u64(g, 0);
+    return load_u32(nodes, node * NODE_SIZE);
 }
 
-// Get edge count
-fn digraph_edge_count(g: Address) -> u32 {
-    return *(g + 12);
+// Get first outgoing edge (returns 0xFFFFFFFF if none)
+fn digraph_first_out(g: Address, node: u32) -> u32 {
+    nodes: u64 = load_u64(g, 0);
+    return load_u32(nodes, node * NODE_SIZE + 8);
 }
 
-// Get the first outgoing edge of a node (returns edge index or 0xFFFFFFFF)
-fn digraph_first_out_edge(g: Address, node: u32) -> u32 {
-    node_base: u32 = node * 12;
-    e: u32 = *(g + node_base + 8);
-    if e == 0 { return 4294967295; }
-    return e;
+// Get first incoming edge (returns 0xFFFFFFFF if none)
+fn digraph_first_in(g: Address, node: u32) -> u32 {
+    nodes: u64 = load_u64(g, 0);
+    return load_u32(nodes, node * NODE_SIZE + 4);
 }
 
-// Get the next outgoing edge (follows linked list)
-fn digraph_next_out_edge(g: Address, edge: u32) -> u32 {
-    edge_base: u32 = edge * 16;
-    next: u32 = *(g + edge_base + 8);
-    if next == 0 { return 4294967295; }
-    return next;
+// Get next outgoing edge
+fn digraph_next_out(g: Address, edge: u32) -> u32 {
+    edges: u64 = load_u64(g, 8);
+    return load_u32(edges, edge * EDGE_SIZE + 8);
 }
 
-// Get the destination of an edge
-fn digraph_edge_dst(g: Address, edge: u32) -> u32 {
-    edge_base: u32 = edge * 16;
-    return *(g + edge_base + 4);
+// Get next incoming edge
+fn digraph_next_in(g: Address, edge: u32) -> u32 {
+    edges: u64 = load_u64(g, 8);
+    return load_u32(edges, edge * EDGE_SIZE + 12);
 }
 
-// Get the source of an edge
+// Get edge source
 fn digraph_edge_src(g: Address, edge: u32) -> u32 {
-    edge_base: u32 = edge * 16;
-    return *(g + edge_base + 0);
+    edges: u64 = load_u64(g, 8);
+    return load_u32(edges, edge * EDGE_SIZE);
 }
 
-// Check if there is an edge from src to dst
-fn digraph_has_edge(g: Address, src: u32, dst: u32) -> u32 {
-    edge: u32 = digraph_first_out_edge(g, src);
-    done: u32 = 0;
-    while done == 0 {
-        if edge == 4294967295 { done = 1; }
-        else {
-            if digraph_edge_dst(g, edge) == dst { return 1; }
-            edge = digraph_next_out_edge(g, edge);
-        }
-    }
-    return 0;
+// Get edge destination
+fn digraph_edge_dst(g: Address, edge: u32) -> u32 {
+    edges: u64 = load_u64(g, 8);
+    return load_u32(edges, edge * EDGE_SIZE + 4);
 }
 
-// Topological sort (returns node indices in topo order, or empty if cycle)
-// Uses Kahn's algorithm. Output buffer must be pre-allocated.
-fn digraph_topo_sort(g: Address, out: Address) -> u32 {
-    n: u32 = digraph_node_count(g);
-    // Compute in-degrees
-    in_degree = allocate(n);
-    i: u32 = 0;
-    while i < n { *(in_degree + i) = 0; i = i + 1; }
-    // Count incoming edges for each node
-    edge_idx: u32 = 0;
-    while edge_idx < digraph_edge_count(g) {
-        dst: u32 = digraph_edge_dst(g, edge_idx);
-        *(in_degree + dst) = *(in_degree + dst) + 1;
-        edge_idx = edge_idx + 1;
-    }
-    // Queue nodes with in-degree 0
-    queue = allocate(n);
-    q_head: u32 = 0;
-    q_tail: u32 = 0;
-    i = 0;
-    while i < n {
-        if *(in_degree + i) == 0 {
-            *(queue + q_tail) = i & 255;
-            q_tail = q_tail + 1;
-        }
-        i = i + 1;
-    }
-    // Process queue
-    out_idx: u32 = 0;
-    while q_head < q_tail {
-        node: u32 = *(queue + q_head);
-        q_head = q_head + 1;
-        *(out + out_idx) = node & 255;
-        out_idx = out_idx + 1;
-        // Decrease in-degree of successors
-        edge: u32 = digraph_first_out_edge(g, node);
-        done: u32 = 0;
-        while done == 0 {
-            if edge == 4294967295 { done = 1; }
-            else {
-                succ: u32 = digraph_edge_dst(g, edge);
-                *(in_degree + succ) = *(in_degree + succ) - 1;
-                if *(in_degree + succ) == 0 {
-                    *(queue + q_tail) = succ & 255;
-                    q_tail = q_tail + 1;
-                }
-                edge = digraph_next_out_edge(g, edge);
-            }
-        }
-    }
-    free(in_degree);
-    free(queue);
-    if out_idx != n { return 4294967295; }  // cycle detected
-    return out_idx;
+// Free the graph
+fn digraph_free(g: Address) {
+    nodes: u64 = load_u64(g, 0);
+    edges: u64 = load_u64(g, 8);
+    node_cap: u32 = load_u32(g, 24);
+    edge_cap: u32 = load_u32(g, 28);
+    __vuma_free(nodes, node_cap * NODE_SIZE);
+    __vuma_free(edges, edge_cap * EDGE_SIZE);
+    __vuma_free(g, GRAPH_SIZE);
 }
