@@ -2714,7 +2714,7 @@ impl IRBuilder {
                     dst,
                     lhs: lhs_val,
                     rhs: rhs_val,
-                    ty: op_ty.clone(),
+                    ty: None,
                 });
             }
             // Comparison operations → dedicated Cmp instruction.
