@@ -374,12 +374,16 @@ pub enum ScgExpr {
     /// A symbolic label reference.
     Label(String),
     /// A binary operation: lhs op rhs
-    /// This allows the bridge to express nested expressions that get
-    /// recursively lowered to multiple IR instructions.
     BinOp {
         op: BinOpKind,
         lhs: Box<ScgExpr>,
         rhs: Box<ScgExpr>,
+    },
+    /// A memory load: *addr (dereference)
+    /// The address expression is resolved to a vreg, then a Load
+    /// IR instruction is emitted to read from that address.
+    Load {
+        addr: Box<ScgExpr>,
     },
 }
 
@@ -3236,6 +3240,18 @@ impl IRBuilder {
                 Ok(IRValue::Immediate(f.to_bits() as i64))
             }
             ScgExpr::Label(name) => Ok(IRValue::Label(name.clone())),
+            ScgExpr::Load { addr } => {
+                let addr_val = self.resolve_expr(addr, names, ir_func)?;
+                let dst_vreg = self.alloc_vreg();
+                ir_func.register_vreg(VirtualRegister::anonymous(dst_vreg));
+                ir_func.current_block().push(IRInstruction::Load {
+                    dst: IRValue::Register(dst_vreg),
+                    addr: addr_val,
+                    offset: 0,
+                    ty: IRType::U8,
+                });
+                Ok(IRValue::Register(dst_vreg))
+            }
             ScgExpr::BinOp { op, lhs, rhs } => {
                 let lhs_val = self.resolve_expr(lhs, names, ir_func)?;
                 let rhs_val = self.resolve_expr(rhs, names, ir_func)?;
