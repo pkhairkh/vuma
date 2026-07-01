@@ -1,14 +1,17 @@
-// womb/collections/vec.vuma — Dynamic array (growable buffer)
+// womb/collections/vec.vuma — Dynamic array using heap-allocated memory
 // Layout: { data_ptr: u64, len: u32, cap: u32 } = 16 bytes
-//   offset 0-7:  data_ptr (64-bit pointer to allocated buffer)
-//   offset 8-11: len (current element count)
-//   offset 12-15: cap (allocated capacity)
 //
-// Uses allocate() for memory. Grows by 2x when full.
-// Supports byte-level and u64-level access.
-// No main() — importable library module.
+// Uses __vuma_alloc (mmap) for persistent heap memory.
+// Unlike allocate() (stack-local), heap buffers survive function returns.
+// This enables cross-function dynamic data structures.
 
-// ── Store/load helpers for 64-bit pointers (little-endian) ──
+extern "C" {
+    fn __vuma_alloc(size: i64) -> Address;
+    fn __vuma_free(addr: Address, size: i64);
+    fn write(fd: i64, buf: Address, count: i64) -> i64;
+}
+
+// ── Store/load helpers (little-endian) ──
 
 fn store_u64(ptr: Address, offset: u32, val: u64) {
     *(ptr + offset) = val & 255;
@@ -49,64 +52,59 @@ fn load_u32(ptr: Address, offset: u32) -> u32 {
     return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
 }
 
-// ── Vector operations ──
+// ── Vector operations (heap-backed) ──
 
-// Create a new vector with initial capacity (in bytes)
+// Create a new vector with initial capacity (in bytes).
+// The vector header and data buffer are both heap-allocated.
 fn vec_new(cap: u32) -> Address {
-    v = allocate(16);
+    v = __vuma_alloc(16);
     if cap == 0 { cap = 16; }
-    data = allocate(cap);
+    data = __vuma_alloc(cap);
     store_u64(v, 0, data);
     store_u32(v, 8, 0);     // len = 0
     store_u32(v, 12, cap);  // cap
     return v;
 }
 
-// Get vector length
 fn vec_len(v: Address) -> u32 {
     return load_u32(v, 8);
 }
 
-// Get vector capacity
 fn vec_cap(v: Address) -> u32 {
     return load_u32(v, 12);
 }
 
-// Get the raw data pointer
 fn vec_data(v: Address) -> u64 {
     return load_u64(v, 0);
 }
 
-// Set vector length (unsafe — no bounds check)
 fn vec_set_len(v: Address, len: u32) {
     store_u32(v, 8, len);
 }
 
-// Internal: ensure capacity >= needed. Grows by 2x, copying all data.
+// Ensure capacity >= needed. Allocates new buffer on heap, copies data,
+// frees old buffer. Works across function calls because __vuma_alloc
+// uses mmap (persistent heap memory).
 fn vec_reserve(v: Address, needed: u32) {
     cap: u32 = vec_cap(v);
     if needed <= cap { return; }
-    // Grow by 2x until we have enough
     new_cap: u32 = cap;
     if new_cap == 0 { new_cap = 16; }
     while new_cap < needed {
         new_cap = new_cap * 2;
     }
-    // Allocate new buffer
-    new_data = allocate(new_cap);
+    new_data = __vuma_alloc(new_cap);
     old_data: u64 = vec_data(v);
     old_len: u32 = vec_len(v);
-    // Copy old data byte-by-byte
+    // Copy old data
     i: u32 = 0;
     while i < old_len {
         b: u32 = *(old_data + i);
         *(new_data + i) = b & 255;
         i = i + 1;
     }
-    // Old buffer is a stack allocation — automatically reclaimed when
-    // the function returns. Do NOT call free() on a pointer loaded from
-    // memory (the backend can't identify it as a stack alloc, so it
-    // would try to call the nonexistent __vuma_free, causing a crash).
+    // Free old buffer (munmap)
+    __vuma_free(old_data, cap);
     // Update vector header
     store_u64(v, 0, new_data);
     store_u32(v, 12, new_cap);
@@ -124,7 +122,7 @@ fn vec_push_byte(v: Address, byte: u32) {
     store_u32(v, 8, len + 1);
 }
 
-// Push a u64 value (8 bytes, little-endian) onto the vector
+// Push a u64 value (8 bytes, little-endian)
 fn vec_push_u64(v: Address, val: u64) {
     len: u32 = vec_len(v);
     vec_reserve(v, len + 8);
@@ -133,7 +131,16 @@ fn vec_push_u64(v: Address, val: u64) {
     store_u32(v, 8, len + 8);
 }
 
-// Pop a byte from the vector. Returns the byte, or -1 if empty.
+// Push a u32 value (4 bytes, little-endian)
+fn vec_push_u32(v: Address, val: u32) {
+    len: u32 = vec_len(v);
+    vec_reserve(v, len + 4);
+    data: u64 = vec_data(v);
+    store_u32(data, len, val);
+    store_u32(v, 8, len + 4);
+}
+
+// Pop a byte. Returns the byte, or -1 if empty.
 fn vec_pop_byte(v: Address) -> i32 {
     len: u32 = vec_len(v);
     if len == 0 { return -1; }
@@ -176,22 +183,29 @@ fn vec_set_u64(v: Address, offset: u32, val: u64) {
     store_u64(data, offset, val);
 }
 
-// Clear the vector (set len to 0, keep capacity)
+// Get u32 at byte offset
+fn vec_get_u32(v: Address, offset: u32) -> u32 {
+    len: u32 = vec_len(v);
+    if offset + 4 > len { return 0; }
+    data: u64 = vec_data(v);
+    return load_u32(data, offset);
+}
+
+// Clear (set len=0, keep cap)
 fn vec_clear(v: Address) {
     store_u32(v, 8, 0);
 }
 
-// Check if vector is empty
 fn vec_is_empty(v: Address) -> u32 {
     len: u32 = vec_len(v);
     if len == 0 { return 1; }
     return 0;
 }
 
-// Free the vector and its data buffer.
-// NOTE: Since allocate() creates stack allocations, this is a no-op.
-// Memory is reclaimed when the enclosing function returns.
+// Free the vector and its data buffer
 fn vec_free(v: Address) {
-    // Stack allocations are auto-freed on function return.
-    // This function exists for API completeness only.
+    data: u64 = vec_data(v);
+    cap: u32 = vec_cap(v);
+    __vuma_free(data, cap);
+    __vuma_free(v, 16);
 }
