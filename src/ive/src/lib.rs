@@ -59,6 +59,7 @@ pub mod interprocedural;
 pub mod invariant_aggregator;
 pub mod liveness;
 pub mod origin;
+pub mod modular;
 pub mod result;
 pub mod verification;
 

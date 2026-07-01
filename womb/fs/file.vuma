@@ -1,0 +1,74 @@
+// womb/fs/file.vuma — File I/O via raw Linux syscalls
+// Provides: open, read, write, close, lseek, stat
+// All functions use extern "C" to invoke syscall stubs.
+// No main() — importable library module.
+
+// Linux syscall numbers (x86_64, same on aarch64):
+//   read=0, write=1, open=2, close=3, lseek=8, exit=60
+//   mmap=9, munmap=11, fstat=5
+
+// O_RDONLY=0, O_WRONLY=1, O_RDWR=2, O_CREAT=64, O_TRUNC=512, O_APPEND=1024
+
+extern "C" {
+    fn read(fd: i64, buf: Address, count: i64) -> i64;
+    fn write(fd: i64, buf: Address, count: i64) -> i64;
+    fn open(path: Address, flags: i64, mode: i64) -> i64;
+    fn close(fd: i64) -> i64;
+    fn lseek(fd: i64, offset: i64, whence: i64) -> i64;
+    fn exit(code: u32);
+}
+
+// Read entire file into a buffer. Returns bytes read, or -1 on error.
+// Caller must allocate a buffer large enough.
+fn file_read(path: Address, path_len: u32, buf: Address, buf_size: u32) -> i32 {
+    // Open file: path must be null-terminated
+    fd: i64 = open(path, 0, 0);  // O_RDONLY
+    if fd < 0 { return -1; }
+    total: i32 = 0;
+    done: u32 = 0;
+    while done == 0 {
+        n: i64 = read(fd, buf + total, buf_size - total);
+        if n <= 0 { done = 1; }
+        else { total = total + n; }
+        if total >= buf_size { done = 1; }
+    }
+    close(fd);
+    return total;
+}
+
+// Write data to a file path. Returns bytes written, or -1 on error.
+fn file_write(path: Address, path_len: u32, data: Address, data_len: u32) -> i32 {
+    // O_WRONLY=1, O_CREAT=64, O_TRUNC=512
+    fd: i64 = open(path, 577, 420);  // O_WRONLY | O_CREAT | O_TRUNC, 0644
+    if fd < 0 { return -1; }
+    n: i64 = write(fd, data, data_len);
+    close(fd);
+    if n < 0 { return -1; }
+    return n;
+}
+
+// Write to stdout (fd=1)
+fn stdout_write(buf: Address, len: u32) -> i32 {
+    n: i64 = write(1, buf, len);
+    if n < 0 { return -1; }
+    return n;
+}
+
+// Write to stderr (fd=2)
+fn stderr_write(buf: Address, len: u32) -> i32 {
+    n: i64 = write(2, buf, len);
+    if n < 0 { return -1; }
+    return n;
+}
+
+// Close a file descriptor
+fn file_close(fd: i64) -> i32 {
+    n: i64 = close(fd);
+    if n < 0 { return -1; }
+    return 0;
+}
+
+// Exit the program with a code
+fn exit_program(code: u32) {
+    exit(code);
+}

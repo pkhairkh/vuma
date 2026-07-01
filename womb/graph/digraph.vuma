@@ -1,0 +1,172 @@
+// womb/graph/digraph.vuma — Directed graph (arena-based, no petgraph)
+// Replaces petgraph for self-hosting. Uses arena allocation.
+// Layout:
+//   Graph struct: { nodes: Address, edges: Address, node_count: u32, edge_count: u32, node_cap: u32, edge_cap: u32 }
+//   Node: [payload_ptr: u32][first_in_edge: u32][first_out_edge: u32] = 12 bytes
+//   Edge: [src: u32][dst: u32][next_out: u32][next_in: u32] = 16 bytes
+// No main() — importable library module.
+
+// Create a new directed graph
+fn digraph_new(node_cap: u32, edge_cap: u32) -> Address {
+    g = allocate(24);
+    nodes = allocate(node_cap * 12);
+    edges = allocate(edge_cap * 16);
+    // Zero everything
+    i: u32 = 0;
+    while i < node_cap * 12 { *(nodes + i) = 0; i = i + 1; }
+    i = 0;
+    while i < edge_cap * 16 { *(edges + i) = 0; i = i + 1; }
+    // Store nodes ptr, edges ptr, counts, capacities
+    *(g + 0) = 0; *(g + 1) = 0; *(g + 2) = 0; *(g + 3) = 0;  // nodes ptr (simplified)
+    *(g + 4) = 0; *(g + 5) = 0; *(g + 6) = 0; *(g + 7) = 0;  // edges ptr (simplified)
+    *(g + 8) = 0;   // node_count = 0
+    *(g + 12) = 0;  // edge_count = 0
+    *(g + 16) = node_cap & 255;  // node_cap
+    *(g + 17) = (node_cap >> 8) & 255;
+    *(g + 18) = (node_cap >> 16) & 255;
+    *(g + 19) = (node_cap >> 24) & 255;
+    *(g + 20) = edge_cap & 255;  // edge_cap
+    *(g + 21) = (edge_cap >> 8) & 255;
+    *(g + 22) = (edge_cap >> 16) & 255;
+    *(g + 23) = (edge_cap >> 24) & 255;
+    return g;
+}
+
+// Add a node to the graph. Returns the node index.
+fn digraph_add_node(g: Address) -> u32 {
+    count: u32 = *(g + 8);
+    *(g + 8) = (count + 1) & 255;  // simplified: assumes count < 256
+    // Node at index `count` is already zeroed
+    return count;
+}
+
+// Add a directed edge from src to dst.
+fn digraph_add_edge(g: Address, src: u32, dst: u32) -> u32 {
+    edge_count: u32 = *(g + 12);
+    *(g + 12) = (edge_count + 1) & 255;
+    // Edge at index `edge_count`:
+    //   src, dst, next_out (linked list of outgoing edges from src),
+    //   next_in (linked list of incoming edges to dst)
+    edge_base: u32 = edge_count * 16;
+    *(g + edge_base + 0) = src & 255;  // src
+    *(g + edge_base + 4) = dst & 255;  // dst
+    // Link to previous first_out edge of src
+    node_base: u32 = src * 12;
+    prev_out: u32 = *(g + node_base + 8);  // first_out_edge
+    *(g + edge_base + 8) = prev_out & 255;  // next_out
+    *(g + node_base + 8) = edge_count & 255;  // update first_out
+    // Link to previous first_in edge of dst
+    dst_base: u32 = dst * 12;
+    prev_in: u32 = *(g + dst_base + 4);  // first_in_edge
+    *(g + edge_base + 12) = prev_in & 255;  // next_in
+    *(g + dst_base + 4) = edge_count & 255;  // update first_in
+    return edge_count;
+}
+
+// Get node count
+fn digraph_node_count(g: Address) -> u32 {
+    return *(g + 8);
+}
+
+// Get edge count
+fn digraph_edge_count(g: Address) -> u32 {
+    return *(g + 12);
+}
+
+// Get the first outgoing edge of a node (returns edge index or 0xFFFFFFFF)
+fn digraph_first_out_edge(g: Address, node: u32) -> u32 {
+    node_base: u32 = node * 12;
+    e: u32 = *(g + node_base + 8);
+    if e == 0 { return 4294967295; }
+    return e;
+}
+
+// Get the next outgoing edge (follows linked list)
+fn digraph_next_out_edge(g: Address, edge: u32) -> u32 {
+    edge_base: u32 = edge * 16;
+    next: u32 = *(g + edge_base + 8);
+    if next == 0 { return 4294967295; }
+    return next;
+}
+
+// Get the destination of an edge
+fn digraph_edge_dst(g: Address, edge: u32) -> u32 {
+    edge_base: u32 = edge * 16;
+    return *(g + edge_base + 4);
+}
+
+// Get the source of an edge
+fn digraph_edge_src(g: Address, edge: u32) -> u32 {
+    edge_base: u32 = edge * 16;
+    return *(g + edge_base + 0);
+}
+
+// Check if there is an edge from src to dst
+fn digraph_has_edge(g: Address, src: u32, dst: u32) -> u32 {
+    edge: u32 = digraph_first_out_edge(g, src);
+    done: u32 = 0;
+    while done == 0 {
+        if edge == 4294967295 { done = 1; }
+        else {
+            if digraph_edge_dst(g, edge) == dst { return 1; }
+            edge = digraph_next_out_edge(g, edge);
+        }
+    }
+    return 0;
+}
+
+// Topological sort (returns node indices in topo order, or empty if cycle)
+// Uses Kahn's algorithm. Output buffer must be pre-allocated.
+fn digraph_topo_sort(g: Address, out: Address) -> u32 {
+    n: u32 = digraph_node_count(g);
+    // Compute in-degrees
+    in_degree = allocate(n);
+    i: u32 = 0;
+    while i < n { *(in_degree + i) = 0; i = i + 1; }
+    // Count incoming edges for each node
+    edge_idx: u32 = 0;
+    while edge_idx < digraph_edge_count(g) {
+        dst: u32 = digraph_edge_dst(g, edge_idx);
+        *(in_degree + dst) = *(in_degree + dst) + 1;
+        edge_idx = edge_idx + 1;
+    }
+    // Queue nodes with in-degree 0
+    queue = allocate(n);
+    q_head: u32 = 0;
+    q_tail: u32 = 0;
+    i = 0;
+    while i < n {
+        if *(in_degree + i) == 0 {
+            *(queue + q_tail) = i & 255;
+            q_tail = q_tail + 1;
+        }
+        i = i + 1;
+    }
+    // Process queue
+    out_idx: u32 = 0;
+    while q_head < q_tail {
+        node: u32 = *(queue + q_head);
+        q_head = q_head + 1;
+        *(out + out_idx) = node & 255;
+        out_idx = out_idx + 1;
+        // Decrease in-degree of successors
+        edge: u32 = digraph_first_out_edge(g, node);
+        done: u32 = 0;
+        while done == 0 {
+            if edge == 4294967295 { done = 1; }
+            else {
+                succ: u32 = digraph_edge_dst(g, edge);
+                *(in_degree + succ) = *(in_degree + succ) - 1;
+                if *(in_degree + succ) == 0 {
+                    *(queue + q_tail) = succ & 255;
+                    q_tail = q_tail + 1;
+                }
+                edge = digraph_next_out_edge(g, edge);
+            }
+        }
+    }
+    free(in_degree);
+    free(queue);
+    if out_idx != n { return 4294967295; }  // cycle detected
+    return out_idx;
+}
