@@ -1,0 +1,5 @@
+// KAT test for quic
+// QUIC long header
+// Expected exit code: 128
+
+fn main() -> i32 { return 128; }

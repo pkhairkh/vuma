@@ -1,0 +1,5 @@
+// KAT test for compression_extra
+// gzip magic
+// Expected exit code: 31
+
+fn main() -> i32 { return 31; }

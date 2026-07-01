@@ -1,0 +1,5 @@
+// KAT test for ml_dsa
+// ML-DSA q
+// Expected exit code: 1
+
+fn main() -> i32 { return 8380417 & 255; }

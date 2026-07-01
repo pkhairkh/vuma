@@ -1,0 +1,8 @@
+// KAT test for containers
+// Vector pop
+// Expected exit code: 30
+
+fn main() -> i32 {
+    buf=allocate(12); *(buf+0)=10;*(buf+4)=20;*(buf+8)=30; len:u32=3;
+    return *(buf+(len-1)*4);
+}

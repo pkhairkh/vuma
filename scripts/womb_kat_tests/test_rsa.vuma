@@ -1,0 +1,9 @@
+// KAT test for rsa
+// RSA 2^3 mod 5
+// Expected exit code: 3
+
+fn main() -> i32 {
+    m:u32=2; e:u32=3; n:u32=5; result:u32=1; i:u32=0;
+    while i<e { result=(result*m)%n; i=i+1; }
+    return result;
+}

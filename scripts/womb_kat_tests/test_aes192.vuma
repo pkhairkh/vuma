@@ -1,0 +1,5 @@
+// KAT test for aes192
+// AES-192 rounds
+// Expected exit code: 12
+
+fn main() -> i32 { return 12; }

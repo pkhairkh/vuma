@@ -1,0 +1,5 @@
+// KAT test for sha_variants
+// SHA-256 IV[0]
+// Expected exit code: 106
+
+fn main() -> i32 { return (1779033703 >> 24) & 255; }

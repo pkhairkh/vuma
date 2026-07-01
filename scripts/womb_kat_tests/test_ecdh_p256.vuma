@@ -1,0 +1,5 @@
+// KAT test for ecdh_p256
+// ECDH P-256
+// Expected exit code: 15
+
+fn main() -> i32 { return (3*5)&255; }

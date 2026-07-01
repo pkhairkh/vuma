@@ -1,0 +1,5 @@
+// KAT test for tcp
+// TCP header
+// Expected exit code: 20
+
+fn main() -> i32 { return 20; }

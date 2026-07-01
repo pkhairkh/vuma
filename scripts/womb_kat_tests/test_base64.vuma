@@ -1,0 +1,13 @@
+// KAT test for base64
+// Base64('A')='Q'
+// Expected exit code: 81
+
+fn b64_char(idx: u32) -> u32 {
+    if idx < 26 { return idx + 65; }
+    if idx < 52 { return idx + 71; }
+    if idx < 62 { return idx - 4; }
+    if idx == 62 { return 43; }
+    if idx == 63 { return 47; }
+    return 61;
+}
+fn main() -> i32 { return b64_char(65 >> 2); }

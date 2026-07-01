@@ -1,0 +1,18 @@
+// KAT test for url
+// URL: space (0x20) is not alphanumeric, so it's unsafe (needs encoding)
+// Expected exit code: 1
+fn main() -> i32 {
+    c: u32 = 32;  // space
+    // Space is NOT in [0-9] (48-57), NOT in [A-Z] (65-90), NOT in [a-z] (97-122)
+    // So it's unsafe -> return 1
+    is_digit: u32 = 0;
+    is_upper: u32 = 0;
+    is_lower: u32 = 0;
+    if c >= 48 { if c <= 57 { is_digit = 1; } }
+    if c >= 65 { if c <= 90 { is_upper = 1; } }
+    if c >= 97 { if c <= 122 { is_lower = 1; } }
+    safe: u32 = is_digit | is_upper | is_lower;
+    // safe = 0 means unsafe -> return 1
+    if safe == 0 { return 1; }
+    return 0;
+}

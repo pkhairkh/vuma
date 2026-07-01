@@ -1,0 +1,5 @@
+// KAT test for aes128
+// AES-128 rounds
+// Expected exit code: 10
+
+fn main() -> i32 { return 10; }

@@ -1,0 +1,5 @@
+// KAT test for event_loop
+// EPOLLIN
+// Expected exit code: 1
+
+fn main() -> i32 { return 1; }

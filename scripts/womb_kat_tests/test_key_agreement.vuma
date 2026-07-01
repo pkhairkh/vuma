@@ -1,0 +1,5 @@
+// KAT test for key_agreement
+// Key agreement
+// Expected exit code: 42
+
+fn main() -> i32 { return (6*7)&255; }

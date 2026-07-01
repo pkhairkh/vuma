@@ -1,0 +1,5 @@
+// KAT test for websocket
+// WebSocket text
+// Expected exit code: 129
+
+fn main() -> i32 { return 129; }

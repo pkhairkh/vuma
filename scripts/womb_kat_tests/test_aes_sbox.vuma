@@ -1,0 +1,10 @@
+// KAT test for aes_sbox
+// AES S-box[0]=0x63
+// Expected exit code: 99
+
+fn sbox(idx: u32) -> u32 {
+    if idx == 0 { return 99; } if idx == 1 { return 124; }
+    if idx == 2 { return 119; } if idx == 3 { return 123; }
+    return 0;
+}
+fn main() -> i32 { return sbox(0); }

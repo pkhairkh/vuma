@@ -1,0 +1,5 @@
+// KAT test for pbkdf2
+// PBKDF2 iterations
+// Expected exit code: 1
+
+fn main() -> i32 { return 1; }

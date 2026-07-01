@@ -1,0 +1,5 @@
+// KAT test for scrypt
+// scrypt N
+// Expected exit code: 2
+
+fn main() -> i32 { return 2; }

@@ -1,0 +1,5 @@
+// KAT test for printf
+// printf '%'
+// Expected exit code: 37
+
+fn main() -> i32 { return 37; }

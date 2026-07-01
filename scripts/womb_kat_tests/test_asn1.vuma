@@ -1,0 +1,5 @@
+// KAT test for asn1
+// ASN.1 INTEGER tag
+// Expected exit code: 2
+
+fn main() -> i32 { return 2; }

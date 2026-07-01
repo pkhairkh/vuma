@@ -1,0 +1,50 @@
+// KAT test for sha1_empty
+// SHA-1('')=da39a3ee
+// Expected exit code: 218
+
+
+const MASK32: u32 = 4294967295;
+fn rotl32(x: u32, n: u32) -> u32 { return ((x << n) | (x >> (32 - n))) & MASK32; }
+fn rotr32(x: u32, n: u32) -> u32 { return ((x >> n) | (x << (32 - n))) & MASK32; }
+fn load_u32_be(ptr: Address, off: u32) -> u32 {
+    b0: u32 = *(ptr + off); b1: u32 = *(ptr + off + 1);
+    b2: u32 = *(ptr + off + 2); b3: u32 = *(ptr + off + 3);
+    return (b0 << 24) | (b1 << 16) | (b2 << 8) | b3;
+}
+fn store_u32_be(ptr: Address, off: u32, val: u32) {
+    *(ptr + off) = (val >> 24) & 255; *(ptr + off + 1) = (val >> 16) & 255;
+    *(ptr + off + 2) = (val >> 8) & 255; *(ptr + off + 3) = val & 255;
+}
+
+fn main() -> i32 {
+    ctx = allocate(20);
+    store_u32_be(ctx, 0, 1732584193); store_u32_be(ctx, 4, 4023233417);
+    store_u32_be(ctx, 8, 2562383102); store_u32_be(ctx, 12, 271733878);
+    store_u32_be(ctx, 16, 3285377520);
+    block = allocate(64);
+    i: u32 = 0;
+    while i < 64 { *(block + i) = 0; i = i + 1; }
+    *(block + 0) = 128;
+    w = allocate(320);
+    i = 0;
+    while i < 16 { store_u32_be(w, i*4, load_u32_be(block, i*4)); i = i + 1; }
+    i = 16;
+    while i < 80 {
+        v: u32 = load_u32_be(w,(i-3)*4) ^ load_u32_be(w,(i-8)*4) ^ load_u32_be(w,(i-14)*4) ^ load_u32_be(w,(i-16)*4);
+        v = rotl32(v, 1); store_u32_be(w, i*4, v); i = i + 1;
+    }
+    a: u32 = load_u32_be(ctx,0); b: u32 = load_u32_be(ctx,4);
+    c: u32 = load_u32_be(ctx,8); d: u32 = load_u32_be(ctx,12); e: u32 = load_u32_be(ctx,16);
+    i = 0;
+    while i < 80 {
+        f: u32 = 0; k: u32 = 0;
+        if i < 20 { f = (b & c) | ((b ^ MASK32) & d); k = 1518500249; }
+        if i >= 20 { if i < 40 { f = b ^ c ^ d; k = 1859775393; } }
+        if i >= 40 { if i < 60 { f = (b & c) | (b & d) | (c & d); k = 2400959708; } }
+        if i >= 60 { f = b ^ c ^ d; k = 3395469782; }
+        temp: u32 = (rotl32(a,5) + f + e + k + load_u32_be(w,i*4)) & MASK32;
+        e = d; d = c; c = rotl32(b,30); b = a; a = temp; i = i + 1;
+    }
+    store_u32_be(ctx, 0, (load_u32_be(ctx,0) + a) & MASK32);
+    return (load_u32_be(ctx,0) >> 24) & 255;
+}
