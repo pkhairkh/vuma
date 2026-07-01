@@ -2082,9 +2082,15 @@ impl IRBuilder {
             .collect();
         let default_label = self.alloc_label("default");
 
-        // Emit cascading compare-and-branch in the current block.
-        // Each case: CMP disc, value → CSET cond → CondBranch to arm label.
-        // After all cases, fall through to default.
+        // Emit cascading compare-and-branch. Each comparison gets its OWN
+        // block so the CondBranch properly terminates it. Without this,
+        // multiple CondBranches in the same block cause the backend to
+        // only honor the last one (the terminator).
+        let mut cmp_labels: Vec<String> = Vec::new();
+        for i in 0..arms.len() {
+            cmp_labels.push(self.alloc_label(&format!("switch_cmp_{}", i)));
+        }
+
         for (i, arm) in arms.iter().enumerate() {
             let cond_vreg = self.alloc_vreg();
             ir_func.register_vreg(VirtualRegister::anonymous(cond_vreg));
@@ -2095,18 +2101,29 @@ impl IRBuilder {
                 rhs: IRValue::Immediate(arm.value),
                 ty: None,
             });
+            let false_target = if i + 1 < arms.len() {
+                cmp_labels[i + 1].clone()
+            } else {
+                default_label.clone()
+            };
             ir_func.current_block().push(IRInstruction::CondBranch {
                 cond: IRValue::Register(cond_vreg),
                 true_target: arm_labels[i].clone(),
-                false_target: if i + 1 < arms.len() {
-                    arm_labels[i + 1].clone()
-                } else {
-                    default_label.clone()
-                },
+                false_target: false_target.clone(),
             });
+            ir_func.current_block().terminator = IRTerminator::Branch {
+                cond: IRValue::Register(cond_vreg),
+                true_block: arm_labels[i].clone(),
+                false_block: false_target.clone(),
+            };
+
+            // Create next comparison block (or fall through to default)
+            if i + 1 < arms.len() {
+                ir_func.append_block(&cmp_labels[i + 1]);
+            }
         }
 
-        // Unconditional branch to default (if no case matched).
+        // After all comparisons, fall through to default.
         ir_func.current_block().push(IRInstruction::Branch {
             target: default_label.clone(),
         });

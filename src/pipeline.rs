@@ -854,6 +854,21 @@ fn resolve_df_input(
                 NodePayload::Computation(comp) => {
                     // Check if this is a literal computation node (label "lit_<n>")
                     if let ComputationKind::Other(ref label) = comp.kind {
+                        // For variable reference nodes (label is just "result"),
+                        // return Var(label) so IR builder uses names[label]
+                        let is_var_ref = !label.is_empty()
+                            && label.chars().next().map_or(false, |c| c.is_alphabetic() || c == '_')
+                            && label.chars().all(|c| c.is_alphanumeric() || c == '_')
+                            && !(label.starts_with("v_") && label[2..].chars().all(|c| c.is_ascii_digit()))
+                            && !label.starts_with("lit_")
+                            && !label.starts_with("param ")
+                            && !label.starts_with("match_arm")
+                            && !label.starts_with("const ")
+                            && !label.contains(" = ")
+                            && !label.contains("(");
+                        if is_var_ref {
+                            return ScgExpr::Var(label.clone());
+                        }
                         // For "param <name>" nodes, return Var("<name>")
                         if let Some(param_name) = label.strip_prefix("param ") {
                             let param_name = param_name.trim();
