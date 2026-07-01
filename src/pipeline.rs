@@ -855,7 +855,22 @@ fn resolve_df_input(
                     // Check if this is a literal computation node (label "lit_<n>")
                     if let ComputationKind::Other(ref label) = comp.kind {
                         // For variable reference nodes (label is just "result"),
-                        // return Var(label) so IR builder uses names[label]
+                        // return Var(label) so IR builder uses names[label].
+                        //
+                        // BUT: only do this if the source node's DataFlow
+                        // predecessors do NOT include an assignment
+                        // (label with " = " or starting with "let "). If the
+                        // variable was defined by a Load/Allocation/assignment,
+                        // the vreg (Var("v_N")) is the correct reference —
+                        // using Var(label) would be wrong in if/else bodies
+                        // where the variable has different values on different
+                        // paths, because names[label] might point to the wrong
+                        // path's value.
+                        //
+                        // The Var(label) path is only safe for pure variable
+                        // references in match/Switch contexts, where the
+                        // variable's value comes from a phi/merge node (not
+                        // an assignment).
                         let is_var_ref = !label.is_empty()
                             && label.chars().next().map_or(false, |c| c.is_alphabetic() || c == '_')
                             && label.chars().all(|c| c.is_alphanumeric() || c == '_')
@@ -867,7 +882,32 @@ fn resolve_df_input(
                             && !label.contains(" = ")
                             && !label.contains("(");
                         if is_var_ref {
-                            return ScgExpr::Var(label.clone());
+                            // Check if any DataFlow predecessor is an assignment
+                            // (has " = " in its label). If so, fall through to
+                            // the vreg-based resolution.
+                            let has_assignment_predecessor = edge_idx
+                                .incoming
+                                .get(&source)
+                                .map(|edges| {
+                                    edges.iter().any(|e| {
+                                        if e.kind == EdgeKind::DataFlow {
+                                            if let Some(pred_data) = scg.get_node(e.source) {
+                                                if let NodePayload::Computation(pred_comp) = &pred_data.payload {
+                                                    if let ComputationKind::Other(ref pred_label) = pred_comp.kind {
+                                                        return pred_label.contains(" = ")
+                                                            || pred_label.starts_with("let ");
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        false
+                                    })
+                                })
+                                .unwrap_or(false);
+                            if !has_assignment_predecessor {
+                                return ScgExpr::Var(label.clone());
+                            }
+                            // Fall through to vreg-based resolution
                         }
                         // For "param <name>" nodes, return Var("<name>")
                         if let Some(param_name) = label.strip_prefix("param ") {
