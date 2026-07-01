@@ -457,8 +457,7 @@ Examples:
 
 These conventions apply to types and functions specific to the VUMA domain:
 
-**SCG Node Types**: Named as `{Kind}Node` — the `Node` suffix is mandatory for
-all node payload types in the SCG:
+**SCG Node Types**: The `NodeType` enum (`src/scg/src/node.rs:41`) has 26 variants (14 core + 12 WOMB data models). Core node types include:
 
 - `AllocationNode` — memory allocation operation
 - `DeallocationNode` — memory deallocation operation
@@ -468,6 +467,9 @@ all node payload types in the SCG:
 - `EffectNode` — side-effecting operation
 - `ControlNode` — control flow point
 - `PhantomNode` — structural/analysis placeholder
+- `VTableNode`, `ClosureEnvNode`, `StructDefNode`, `EnumDefNode`, `MatchNode`, `ConstantTimeNode`
+
+The 12 WOMB data-model variants (`ConceptDecl`, `ConceptField`, `ConceptAccess`, `GestaltDecl`, `GestaltInterpret`, `ContextAssert`, `ManifoldDecl`, `ManifoldQuery`, `ManifoldSlice`, `AuraAttach`, `AuraQuery`, `AuraUpdate`) are parsed but not all are lowered to IR.
 
 **BD Components**: Named as `{DescriptorKind}Descriptor` in public APIs. The
 abbreviations `RepD`, `CapD`, `RelD` are acceptable in doc comments, local
@@ -506,7 +508,7 @@ fn compute_ptr_repd(pointee: &RepresentationDescriptor) -> RepresentationDescrip
 
 - `ScgError` — errors in SCG construction or validation
 - `IveError` — errors in IVE verification or inference
-- `CodegenError` — errors in ARM64 code generation
+- `CodegenError` — errors in multi-architecture code generation (10 backends)
 - `ConversionError` — errors in SCG → MSG conversion
 - `ProofError` — errors in proof construction or checking
 
@@ -534,7 +536,7 @@ fn compute_ptr_repd(pointee: &RepresentationDescriptor) -> RepresentationDescrip
 - `RegionId` — unique region identifier
 - `AccessId` — unique access identifier
 - `DerivationId` — unique derivation identifier
-- `SyncEdgeId` — unique synchronization edge identifier
+**SCG Edge Kinds**: The `EdgeKind` enum (`src/scg/src/edge.rs:41`) has 7 variants: `DataFlow`, `ControlFlow`, `Derivation`, `Annotation`, `Dispatch`, `Call{from_node, to_node, caller_region}`, `Return{from_node, to_node, return_values}`. There is no `Sync` edge kind in the SCG — synchronization is modeled in the MSG, not the SCG.
 
 ### 4.3 Function Naming Patterns
 

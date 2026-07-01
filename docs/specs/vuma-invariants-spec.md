@@ -6,6 +6,8 @@
 
 ---
 
+> **Implementation note (2026-07):** The five invariants (Liveness, Exclusivity, Interpretation, Origin, Cleanup) are implemented in two places: (1) simple MSG-only checkers in `src/vuma/src/invariant_{liveness,exclusivity,interpretation,origin,cleanup}.rs`, and (2) richer path-sensitive verifiers in `src/ive/src/{liveness,exclusivity,interpretation,origin,cleanup}.rs` (aggregated by `src/ive/src/invariant_aggregator.rs`). Where this spec lists Access kinds as 2 (Read/Write), `vuma-verification-algorithm.md` lists 4 (Read/Write/Execute/Free) and `trivial-proofs.md` lists 3 (Read/Write/Free) — consult the source `AccessKind` enum for the definitive list. The SyncEdge ordering (HappensBefore/Atomic/Locked, 3 kinds) in this spec is an MSG concept and differs from the 7 SyncEdge kinds in `vuma-verification-algorithm.md`; consult the source for the definitive MSG sync-edge model.
+
 ## Table of Contents
 
 1. [Introduction](#1-introduction)

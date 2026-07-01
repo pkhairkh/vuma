@@ -134,14 +134,18 @@ bd1 ⊑ bd2  ⟺  bd1.repd.subsumes(bd2.repd)
 RepD describes the memory shape, size, and alignment of a value. It forms a subsumption lattice where more-specific RepDs subsume less-specific ones. The `Byte` variant is the universal bottom element that is compatible with everything.
 
 ```vuma
-// RepD variants (from the bd crate):
-//   Byte(size, align)   — raw byte sequence, compatible with anything
-//   Struct { fields }   — named field layout
-//   Array { elem, len } — homogeneous fixed-size array
-//   Enum { variants }   — tagged union
-//   Ptr(pointee)        — pointer representation
-//   Union { variants }  — untagged union
-//   Func { params, ret }— function pointer representation
+// RepD variants (11, from src/bd/src/repd.rs:191):
+//   Byte(size, align)              — raw byte sequence (universal bottom)
+//   Struct { fields, total_size }  — named field layout with offsets
+//   Array { element, count }       — homogeneous fixed-size array
+//   Enum { variants }              — tagged union
+//   Ptr(pointee)                   — pointer representation
+//   Union { alternatives, max_* }  — untagged union of overlapping alternatives
+//   Func { params, result }        — function signature
+//   ManifoldSpatial { dims, ... }  — multi-dimensional data, space-filling curve layout
+//   GestaltSuperposition { ... }   — tagless, context-dependent superposition
+//   ConceptRelational { fields }   — relational data, lazily-inferred layout
+//   Generic { name, constraints }  — generic type parameter with BD constraints
 
 // In source code, RepD is inferred from type annotations:
 let x: i32 = 42;           // RepD: Byte(4, 4)
@@ -153,11 +157,24 @@ let p: Address = allocate(8); // RepD: Ptr(Byte(8, 8))
 CapD specifies what operations are permitted on a value. It forms a lattice where the **meet** (intersection of capabilities, union of conditions) and **join** (union of capabilities, intersection of conditions) operations are well-defined. Capabilities can be conditioned on holding a specific lock, enabling fine-grained concurrency reasoning.
 
 ```vuma
-// CapD capabilities (from the bd crate):
-//   Read     — the value may be read
-//   Write    — the value may be written
-//   Execute  — the value may be executed as code
-//   Derive   — new pointers may be derived from this value
+// CapD capabilities (17, from src/bd/src/capd.rs:50):
+//   Read         — the value may be read
+//   Write        — the value may be written
+//   Execute      — the value may be executed as code
+//   Iterate      — the value may be iterated (e.g. for-loop)
+//   Send         — the value may cross a concurrency boundary
+//   Persist      — the value may be persisted to stable storage
+//   Serialize    — the value may be serialized
+//   Deserialize  — a value may be deserialized into this
+//   Hash         — a hash may be computed over the value
+//   Compare      — the value may be compared for equality/ordering
+//   DerivePtr    — new pointers may be derived from this value
+//   Cast         — the value may be cast to a different type
+//   Fork         — the value may be forked (cloned) into a new owner
+//   Drop         — the value may be dropped (deallocated)
+//   Share        — the value may be shared (shared reference)
+//   Move         — the value may be moved (ownership transfer)
+//   Pin          — the value may be pinned (prevent moves)
 
 // CapD can be conditioned on lock acquisition:
 //   CapD { read: true, write: true, write_requires_lock: 42 }
@@ -178,12 +195,13 @@ CapD specifies what operations are permitted on a value. It forms a lattice wher
 RelD captures temporal, dependency, and security relationships that a value participates in. It ensures that constraints such as lifetime ordering, information flow policies, and dependency tracking are preserved across operations. RelD composition is the union of relations, and consistency checking ensures that contradictory constraints (e.g., `Outlives` + `Succeeds`) are rejected.
 
 ```vuma
-// RelD relation types (from the bd crate):
-//   Liveness      — value is guaranteed to be live
-//   Outlives(a,b) — region a outlives region b
-//   DependsOn(a,b)— computation depends on value b
-//   Succeeds(a,b) — event a happens after event b
-//   FlowPolicy(p) — information-flow policy label p
+// RelD relation kinds (6, from src/bd/src/reld.rs:112):
+//   Temporal(TemporalKind)  — Outlives / Coincides / Precedes / Succeeds
+//   Containment             — one value is nested inside another
+//   Dependency(DepKind)     — DataDep / ControlDep / AliasDep
+//   Equivalence            — observational equivalence
+//   Security(FlowPolicy)    — NoDowngrade / NoCrossBoundary / Sanitized
+//   Liveness               — value is guaranteed to be eventually usable
 
 // RelD is usually inferred, but can be annotated:
 // #bd(Exclusive) carries an implicit RelD with Liveness
@@ -241,11 +259,13 @@ value: i32 = *region;     // type ascription without `let`
 
 ## 3. Memory Model
 
-VUMA's memory model is built around four first-class operations: **allocate**, **write**, **read**, and **free**. Unlike languages where these are library calls, VUMA makes them primitive statements that the Invariant Verification Engine (IVE) automatically checks. Every pointer operation is verified against the five LIVE invariants, and there is no `unsafe` keyword to bypass verification. This section describes regions, allocations, derivations, and accesses — the core concepts that define how VUMA programs interact with memory.
+VUMA's memory model is built around four first-class operations: **allocate**, **write**, **read**, and **free**. Unlike languages where these are library calls, VUMA makes them primitive statements that the Invariant Verification Engine (IVE) automatically checks. Every pointer operation is verified against the five invariants. VUMA does have an `unsafe` keyword (`TokenKind::Unsafe`, parsed via `parse_unsafe_block` into `Stmt::UnsafeBlock`), but it does not bypass IVE verification — it is a syntactic marker for code that performs manual memory management, not an escape hatch. This section describes regions, allocations, derivations, and accesses — the core concepts that define how VUMA programs interact with memory.
 
 ### Regions
 
-A **region** is a contiguous block of memory created by `allocate(size)` or `map_device(base, size)`. Regions are identified by their `Address` value, an opaque 64-bit handle. The IVE tracks the lifetime and bounds of every region, ensuring that all accesses fall within the region's allocated range.
+A **region** is a contiguous block of memory created by `allocate(size)`. Regions are identified by their `Address` value, an opaque 64-bit handle. The IVE tracks the lifetime and bounds of every region, ensuring that all accesses fall within the region's allocated range.
+
+> **Note:** `map_device(base, size)` appears in some example comments but is **not** a VUMA language feature. Hardware device access is not modeled by the current IVE. Likewise, `volatile` is not implemented.
 
 ```vuma
 // Allocate a region for one 64-bit integer
@@ -253,9 +273,6 @@ region = allocate(8);
 
 // Allocate a region large enough for a struct
 node = allocate(24);  // sizeof(NodeHeader) = 24
-
-// Map a hardware device region (never freed, volatile semantics)
-gpio = map_device(0x7e200000, 4096);
 ```
 
 Regions can be named using the `region` keyword for clarity:
@@ -270,7 +287,7 @@ The `allocate(size)` statement reserves `size` bytes of memory and returns an `A
 
 1. **Liveness:** the returned address is live immediately after allocation
 2. **Interpretation:** the allocation size is a positive, known value
-3. **Cleanup:** every allocation is eventually freed (or mapped as a device that never needs freeing)
+3. **Cleanup:** every allocation is eventually freed (or explicitly leaked)
 
 ```vuma
 // Simple allocation
@@ -393,12 +410,11 @@ slot_2 = base + 16;    // and so on
 *slot_1 = 20;
 *slot_2 = 30;
 
-// Hardware register access via offset
-const GPIO_BASE: Address = 0x7e200000;
-gpio = map_device(GPIO_BASE, 4096);
-fsel = gpio + 0x00;    // GPFSEL0 offset
-set = gpio + 0x1c;     // GPSET0 offset
-clr = gpio + 0x28;     // GPCLR0 offset
+// Note: map_device() is NOT a VUMA language feature. Hardware register
+// access via raw memory addresses is not modeled by the current IVE.
+// The GPIO example below is aspirational and does not compile:
+//   const GPIO_BASE: Address = 0x7e200000;
+//   gpio = map_device(GPIO_BASE, 4096);  // NOT a real builtin
 ```
 
 ### Derive
@@ -857,11 +873,14 @@ VUMA's standard library provides essential data structures, memory management, I
 
 ### Memory Management
 
-- **`allocate(size) -> Address`**: Reserve `size` bytes of memory. IVE verifies liveness and cleanup.
-- **`free(ptr)`**: Release a memory region. IVE marks all derived pointers as dead.
-- **`map_device(base, size) -> Address`**: Map a physical hardware address range into the program's address space. Implies volatile semantics; never needs to be freed.
+- **`allocate(size) -> Address`**: Reserve `size` bytes of memory. IVE verifies liveness and cleanup. In the canonical pipeline, allocations > 4096 bytes use `__vuma_alloc` (heap); smaller ones are stack-local.
+- **`free(ptr)`**: Release a memory region. In the direct path, no-op for stack allocations; in the canonical pipeline, always lowers to `__vuma_free`.
+- **`__vuma_alloc(size) -> Address`**: mmap wrapper (bump allocator on Wasm32) for heap memory that persists across function calls.
+- **`__vuma_free(addr, size)`**: munmap wrapper (no-op on Wasm32).
 - **`align_to(ptr, alignment) -> Address`**: Align a pointer to the given boundary. Part of the derivation chain.
-- **Allocation strategies**: `GlobalAllocator`, `ArenaAllocator`, `BumpAllocator`, `PoolAllocator`, `FreeListAllocator` — each with BD-annotated allocation and deallocation.
+- **Allocation strategies**: `GlobalAllocator`, `ArenaAllocator`, `BumpAllocator`, `PoolAllocator`, `FreeListAllocator` — each with BD-annotated allocation and deallocation (in `vuma-std`, not linked to VUMA programs by default).
+
+> **Note:** `map_device(base, size)` is NOT a VUMA builtin. It appears only in example comments. Hardware device memory mapping is not modeled by the current IVE. Likewise, `volatile` is not implemented.
 
 ```vuma
 import "vuma:mem";
@@ -1051,9 +1070,9 @@ Functions declared in `extern` blocks have the `is_extern` flag set in the SCG. 
 
 ### Supported Syscalls
 
-VUMA provides FFI bindings for 19 Linux syscalls across all 10 architectures:
+VUMA provides FFI bindings for 19 Linux syscalls (enum `SyscallName` in `src/ffi.rs:478`) across all 10 architectures:
 
-`read`, `write`, `open`, `close`, `exit`, `mmap`, `munmap`, `brk`, `ioctl`, `fcntl`, `getpid`, `clone`, `futex`, `pipe`, `dup`, `dup2`, `wait4`, `rt_sigaction`, `rt_sigprocmask`
+`read`, `write`, `open`, `close`, `exit`, `exit_group`, `mmap`, `munmap`, `brk`, `ioctl`, `fcntl`, `getpid`, `kill`, `mprotect`, `clock_gettime`, `sched_yield`, `clone`, `futex`, `set_tid_address`
 
 Each syscall has architecture-specific relocations for all backends.
 
@@ -1074,87 +1093,28 @@ The DWARF builder is parameterized by address size to support all 10 backends (8
 
 ## 11. Platform-Specific Features
 
-VUMA targets 10 backend architectures with AArch64 as the primary platform. This section describes platform-specific features, with detailed AArch64 bare-metal support.
+VUMA targets 10 backend architectures (enum `BackendKind`) with AArch64 as the primary platform. The CLI `vuma emit`/`vuma compile` commands accept 8 ISA targets (enum `IsaArg`: aarch64, x86_64, riscv64, wasm32, loongarch64, arm32, mips64, ppc64); all 10 backends are exercised by the `compile_dump` test binary.
 
 ### Device Memory Mapping
 
-The `map_device(base, size)` intrinsic maps a physical address range into the program's virtual address space. On AArch64, this is used to access hardware peripherals such as GPIO, UART, and DMA controllers. The IVE treats mapped device regions specially:
+> **`map_device(base, size)` is NOT a VUMA language feature.** It appears only in example comments and historical documentation. Hardware device memory mapping is not modeled by the current IVE. Likewise, `volatile` is not implemented. Programs that need raw memory-mapped I/O today must use `extern "C"` FFI to call host OS helpers.
 
-- They never need to be freed (hardware is always present)
-- They have volatile semantics (reads and writes have side effects)
-- They have a known size for bounds checking
-
-```vuma
-const GPIO_BASE: Address = 0x7e200000;  // AArch64 GPIO base (BCM address)
-
-fn gpio_set_output(pin: u32) {
-    gpio = map_device(GPIO_BASE, 4096);
-    fsel = gpio + 0x00;  // GPFSEL0 register
-    *fsel = (*fsel & ~(7 << (pin * 3))) | (1 << (pin * 3));
-}
-
-fn gpio_set(pin: u32) {
-    gpio = map_device(GPIO_BASE, 4096);
-    *(gpio + 0x1c) = 1 << pin;  // GPSET0 register
-}
-
-fn gpio_clear(pin: u32) {
-    gpio = map_device(GPIO_BASE, 4096);
-    *(gpio + 0x28) = 1 << pin;  // GPCLR0 register
-}
-```
-
-### GPIO Register Layout
-
-The AArch64 GPIO peripheral is memory-mapped at BCM address `0x7e200000`. The key register offsets are:
-
-| Register | Offset | Purpose |
-|---|---|---|
-| GPFSEL0 | 0x00 | Function select for pins 0-9 |
-| GPFSEL1 | 0x04 | Function select for pins 10-19 |
-| GPFSEL2 | 0x08 | Function select for pins 20-29 |
-| GPSET0 | 0x1c | Set pin high |
-| GPCLR0 | 0x28 | Set pin low |
-| GPLEV0 | 0x34 | Pin level read |
-
-Each pin uses 3 bits in the function select register: `000` = input, `001` = output.
+The GPIO examples below are **aspirational** — they illustrate intended bare-metal usage but do not compile against the current language because `map_device` is not parsed.
 
 ### ARM64 Code Generation
 
-VUMA compiles to native ARM64 machine code. The code generator targets the Cortex-A76 (AArch64's SoC) and produces optimized instruction sequences for:
+VUMA compiles to native AArch64 machine code. The code generator produces optimized instruction sequences for:
 - Pointer arithmetic using register-offset addressing
 - Atomic operations using `LDXR`/`STXR` (exclusive access) and `LDA`/`STL` (acquire/release)
-- Volatile device access using explicit load/store instructions (no optimization)
 - Stack frame layout aligned to 16-byte boundaries per AAPCS64
 
 ### Bare-Metal Execution
 
-VUMA programs can run bare-metal on the AArch64 without an operating system. The runtime provides:
-- **Startup code:** Sets up the stack pointer, clears BSS, calls `main()`
-- **Memory allocator:** Simple bump allocator for the `allocate()` primitive
-- **Delay loops:** `delay_ms()` uses the AArch64's system timer at `0x7e003000`
-- **UART output:** `print()` writes to the AArch64's AUX UART for console output
-
-```vuma
-// Complete bare-metal LED blink program for AArch64
-const GPIO_BASE: Address = 0x7e200000;
-
-fn main() -> i32 {
-    led_pin: u32 = 25;
-    gpio_set_output(led_pin);
-    loop {
-        gpio_set(led_pin);
-        delay_ms(500);
-        gpio_clear(led_pin);
-        delay_ms(500);
-    }
-    return 0;
-}
-```
+> Bare-metal execution is **aspirational**, not currently supported. The examples below assume `map_device`, `delay_ms`, and AUX UART `print` helpers that are not provided by the current runtime. VUMA programs today run under a host OS (Linux via QEMU, or Wasm via wasmtime).
 
 ### Const Addresses
 
-Hardware register addresses are declared as `const` values with the `Address` type. The IVE treats these as known constants and can verify at compile time that register accesses stay within mapped device regions:
+Hardware register addresses can be declared as `const` values with the `Address` type. These are treated as known integer constants by the compiler:
 
 ```vuma
 const GPIO_BASE: Address = 0x7e200000;
@@ -1165,20 +1125,22 @@ const GPCLR0_OFFSET: Address = 0x28;
 
 ### Multi-Backend Support
 
-VUMA supports 8 compilation targets with a unified `Backend` trait:
+VUMA's codegen crate implements 10 backends (enum `BackendKind`). The CLI `vuma emit`/`vuma compile` commands accept 8 ISAs (enum `IsaArg`); all 10 are exercised by the `compile_dump` test binary:
 
-| Backend | Endianness | Pointer Width | Output Format |
-|---------|-----------|---------------|---------------|
-| AArch64 | Little | 64-bit | ELF64 |
-| x86_64 | Little | 64-bit | ELF64 |
-| RISC-V 64 | Little | 64-bit | ELF64 |
-| ARM32 | Little | 32-bit | ELF32 |
-| MIPS64 | Big | 64-bit | ELF64 |
-| PPC64 | Big | 64-bit | ELF64 |
-| LoongArch64 | Little | 64-bit | ELF64 |
-| Wasm32 | Little | 32-bit | Wasm |
+| Backend | Endianness | Pointer Width | Output Format | CLI-emittable |
+|---------|-----------|---------------|---------------|---------------|
+| AArch64 | Little | 64-bit | ELF64 | yes |
+| x86_64 | Little | 64-bit | ELF64 | yes |
+| RISC-V 64 | Little | 64-bit | ELF64 | yes |
+| ARM32 | Little | 32-bit | ELF32 | yes |
+| MIPS64 | Big | 64-bit | ELF64 | yes |
+| PPC64 | Big (ELFv2) | 64-bit | ELF64 | yes |
+| LoongArch64 | Little | 64-bit | ELF64 | yes |
+| x86_32 | Little | 32-bit | ELF32 | no (codegen only) |
+| RISC-V 32 | Little | 32-bit | ELF32 | no (codegen only) |
+| Wasm32 | Little | 32-bit | Wasm | yes |
 
-All 9 native backends (x86_64, AArch64, RISC-V 64, ARM32, MIPS64, PPC64) pass the full SHA256d execution test. LoongArch64 passes individual operation tests. Wasm32 generates valid modules.
+Latest full-suite results (`test_results/summary.json`, 2026-07-01): 57,377/57,380 runs pass (99.99%). 3 failures: `crc32.vuma` on riscv64 and ppc64, `s27_fn_two_args_mod.vuma` on ppc64.
 
 ---
 
@@ -1218,7 +1180,7 @@ All 9 native backends (x86_64, AArch64, RISC-V 64, ARM32, MIPS64, PPC64) pass th
 | `channel` | Concurrency | Channel creation |
 | `send` | Concurrency | Channel send |
 | `recv` | Concurrency | Channel receive |
-| `unsafe` | Safety | Reserved (no escape hatch) |
+| `unsafe` | Safety | Unsafe block (parsed, does not bypass IVE) |
 | `safe` | Safety | Manual safety assertion |
 | `bd` | BD | Behavioral descriptor directive |
 | `repd` | BD | Representation descriptor |

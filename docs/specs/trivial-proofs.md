@@ -7,6 +7,8 @@
 
 ---
 
+> **Implementation note (2026-07):** This spec lists Access operations as 3 (Read/Write/Free) and uses an `Unborn` region status not listed in its own status enumeration. Cross-spec inconsistency: `vuma-invariants-spec.md` lists 2 Access kinds (Read/Write), `vuma-verification-algorithm.md` lists 4 (Read/Write/Execute/Free). Consult the source `AccessKind` enum for the definitive list. The proof infrastructure is implemented in `src/proof/src/` (15 files: liveness_proofs, exclusivity_proofs, interpretation_proofs, origin_proofs, cleanup_proofs, plus checker, rules, tactics, judgment, models, counterexample, composition, serialization).
+
 ## Notation and Conventions
 
 We adopt the following formal notation for the Memory State Graph (MSG) and invariant proofs.
