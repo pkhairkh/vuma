@@ -614,6 +614,17 @@ impl VerificationEngine {
                         let _ = graph.add_edge(src, dst);
                     }
                 }
+                // Include Derivation edges to connect Allocation nodes
+                // (linked via Derivation to Phantom markers) to the cleanup
+                // graph. Without this, top-level region allocations appear
+                // as disconnected nodes and are flagged as leaks.
+                vuma_scg::edge::EdgeKind::Derivation => {
+                    if let (Some(&src), Some(&dst)) =
+                        (node_map.get(&edge.source), node_map.get(&edge.target))
+                    {
+                        let _ = graph.add_edge(src, dst);
+                    }
+                }
                 _ => {}
             }
         }
