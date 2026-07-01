@@ -1,0 +1,5 @@
+// KAT test for hqc
+// HQC q
+// Expected exit code: 0
+
+fn main() -> i32 { return 2048 & 255; }

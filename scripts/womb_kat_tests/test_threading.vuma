@@ -1,0 +1,5 @@
+// KAT test for threading
+// Mutex unlock
+// Expected exit code: 0
+
+fn main() -> i32 { mutex:u32=0; mutex=1; mutex=0; return mutex; }

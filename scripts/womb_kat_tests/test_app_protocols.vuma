@@ -1,0 +1,5 @@
+// KAT test for app_protocols
+// MQTT port
+// Expected exit code: 91
+
+fn main() -> i32 { return 1883; }

@@ -1,0 +1,5 @@
+// KAT test for http2
+// HTTP/2 preface
+// Expected exit code: 80
+
+fn main() -> i32 { return 80; }

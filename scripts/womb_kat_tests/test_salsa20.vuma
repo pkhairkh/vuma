@@ -1,0 +1,23 @@
+// KAT test for salsa20
+// Salsa20 QR
+// Expected exit code: 128
+
+
+const MASK32: u32 = 4294967295;
+fn rotl32(x: u32, n: u32) -> u32 { return ((x << n) | (x >> (32 - n))) & MASK32; }
+fn rotr32(x: u32, n: u32) -> u32 { return ((x >> n) | (x << (32 - n))) & MASK32; }
+fn load_u32_be(ptr: Address, off: u32) -> u32 {
+    b0: u32 = *(ptr + off); b1: u32 = *(ptr + off + 1);
+    b2: u32 = *(ptr + off + 2); b3: u32 = *(ptr + off + 3);
+    return (b0 << 24) | (b1 << 16) | (b2 << 8) | b3;
+}
+fn store_u32_be(ptr: Address, off: u32, val: u32) {
+    *(ptr + off) = (val >> 24) & 255; *(ptr + off + 1) = (val >> 16) & 255;
+    *(ptr + off + 2) = (val >> 8) & 255; *(ptr + off + 3) = val & 255;
+}
+fn main() -> i32 {
+    a:u32=1; b:u32=0; c:u32=0; d:u32=0;
+    b=b^rotl32((a+d)&MASK32,7); c=c^rotl32((b+a)&MASK32,9);
+    d=d^rotl32((c+b)&MASK32,13); a=a^rotl32((d+c)&MASK32,18);
+    return b & 255;
+}

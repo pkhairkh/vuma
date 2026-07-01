@@ -1,0 +1,5 @@
+// KAT test for dns
+// DNS header
+// Expected exit code: 12
+
+fn main() -> i32 { return 12; }

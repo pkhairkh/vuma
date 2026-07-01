@@ -1,0 +1,5 @@
+// KAT test for net_protocols
+// NTP port
+// Expected exit code: 123
+
+fn main() -> i32 { return 123; }

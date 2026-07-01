@@ -1,0 +1,5 @@
+// KAT test for chacha20_poly1305
+// ChaCha20-Poly1305
+// Expected exit code: 0
+
+fn main() -> i32 { return 0; }

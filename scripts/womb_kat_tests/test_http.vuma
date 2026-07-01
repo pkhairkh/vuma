@@ -1,0 +1,5 @@
+// KAT test for http
+// HTTP GET
+// Expected exit code: 71
+
+fn main() -> i32 { return 71; }

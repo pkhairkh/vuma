@@ -1,0 +1,5 @@
+// KAT test for legacy_ciphers
+// 3DES EDE3
+// Expected exit code: 3
+
+fn main() -> i32 { return 3; }

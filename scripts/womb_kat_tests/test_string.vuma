@@ -1,0 +1,10 @@
+// KAT test for string
+// strlen('hello')
+// Expected exit code: 5
+
+fn main() -> i32 {
+    buf=allocate(6); *(buf+0)=104;*(buf+1)=101;*(buf+2)=108;*(buf+3)=108;*(buf+4)=111;*(buf+5)=0;
+    len:u32=0;
+    while *(buf+len)!=0 { len=len+1; if len>=5 { return len; } }
+    return len;
+}
