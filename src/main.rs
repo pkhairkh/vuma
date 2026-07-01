@@ -1175,7 +1175,6 @@ fn flatten_expr(
                 rhs: rhs_expr,
                 tail_call: false,
                 reassigns: None,
-                result_ty: None,
             }));
             ScgExpr::Var(dst)
         }
@@ -1193,7 +1192,6 @@ fn flatten_expr(
                         rhs: ScgExpr::Int(-1),
                         tail_call: false,
                         reassigns: None,
-                        result_ty: None,
                     }));
                 }
                 UnOp::Neg => {
@@ -1204,7 +1202,6 @@ fn flatten_expr(
                         rhs: operand_expr,
                         tail_call: false,
                         reassigns: None,
-                        result_ty: None,
                     }));
                 }
                 UnOp::Not => {
@@ -1215,7 +1212,6 @@ fn flatten_expr(
                         rhs: ScgExpr::Int(0),
                         tail_call: false,
                         reassigns: None,
-                        result_ty: None,
                     }));
                 }
                 UnOp::Deref => {
@@ -1326,7 +1322,6 @@ fn flatten_expr(
                 rhs: off_expr,
                 tail_call: false,
                 reassigns: None,
-                result_ty: None,
             }));
             ScgExpr::Var(dst)
         }
@@ -1349,7 +1344,6 @@ fn flatten_expr(
                 rhs: idx_expr,
                 tail_call: false,
                 reassigns: None,
-                result_ty: None,
             }));
             let dst = ctx.alloc_temp();
             stmts.push(ScgStatement::Access(AccessNode::Load {
@@ -1517,7 +1511,6 @@ fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) -> Vec
                         rhs: ScgExpr::Int(0),
                         tail_call: false,
                         reassigns: None,
-                        result_ty: None,
                     }));
                 }
             }
@@ -1553,7 +1546,6 @@ fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) -> Vec
                     rhs: idx,
                     tail_call: false,
                     reassigns: None,
-                    result_ty: None,
                 }));
                 let value = flatten_expr(&assign_stmt.value, &mut stmts, ctx);
                 stmts.push(ScgStatement::Access(AccessNode::Store {
@@ -1623,7 +1615,6 @@ fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) -> Vec
                         rhs: ScgExpr::Int(0),
                         tail_call: false,
                         reassigns: Some(dst),
-                        result_ty: None,
                     }));
                 }
             }
@@ -1658,7 +1649,6 @@ fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) -> Vec
                 rhs,
                 tail_call: false,
                 reassigns: Some(dst),
-                result_ty: None,
             }));
             stmts
         }
@@ -1744,7 +1734,6 @@ fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) -> Vec
                 rhs: ScgExpr::Int(0),
                 tail_call: false,
                 reassigns: None,
-                result_ty: None,
             });
 
             let mut loop_body = Vec::new();
@@ -1756,7 +1745,6 @@ fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) -> Vec
                 rhs: end_expr.clone(),
                 tail_call: false,
                 reassigns: None,
-                result_ty: None,
             }));
 
             let inner_body = bridge_block_to_scg_stmts(&for_stmt.body, ctx);
@@ -1768,7 +1756,6 @@ fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) -> Vec
                 rhs: ScgExpr::Int(1),
                 tail_call: false,
                 reassigns: None,
-                result_ty: None,
             }));
 
             loop_body.push(ScgStatement::Control(ControlNode::If {
