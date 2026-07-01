@@ -1,0 +1,17 @@
+// Real KAT test: Hex encode (fully inline)
+// Input: 0xAB, 0xCD, 0xEF -> "abcdef"
+// Expected output (hex): 616263646566
+extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+
+fn main() -> i32 {
+    out = allocate(6);
+    // 0xAB: 10 -> 'a'=97, 11 -> 'b'=98
+    *(out + 0) = 97;   // 'a'
+    *(out + 1) = 98;   // 'b'
+    *(out + 2) = 99;   // 'c'
+    *(out + 3) = 100;  // 'd'
+    *(out + 4) = 101;  // 'e'
+    *(out + 5) = 102;  // 'f'
+    write(1, out, 6);
+    return 0;
+}
