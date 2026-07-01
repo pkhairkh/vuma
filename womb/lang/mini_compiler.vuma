@@ -1,12 +1,17 @@
-// womb/lang/lexer.vuma — VUMA lexer using heap-allocated token buffer
-// Tokenizes VUMA source code into a token stream stored on the heap.
+// womb/lang/mini_compiler.vuma — Integration test
+// A self-hosted mini-compiler that:
+// 1. Reads source from stdin (via read syscall)
+// 2. Tokenizes it with the lexer
+// 3. Outputs token types to stdout
 //
-// Token layout: [type: u32][start: u32][len: u32][value: u64] = 24 bytes
-// See tokens.vuma for token type constants.
+// This demonstrates the full pipeline: File I/O → Lexer → Output
+// All using heap-allocated memory (__vuma_alloc/mmap).
 
 extern "C" {
     fn __vuma_alloc(size: i64) -> Address;
     fn __vuma_free(addr: Address, size: i64);
+    fn read(fd: i64, buf: Address, count: i64) -> i64;
+    fn write(fd: i64, buf: Address, count: i64) -> i64;
 }
 
 // ── LE helpers ──
@@ -57,7 +62,7 @@ fn is_space(c: u32) -> u32 {
     return 0;
 }
 
-// ── Store token ──
+// ── Token storage ──
 fn store_token(tokens: Address, idx: u32, ttype: u32, start: u32, len: u32, val: u64) {
     offset: u32 = idx * 24;
     store_u32(tokens, offset, ttype);
@@ -66,21 +71,7 @@ fn store_token(tokens: Address, idx: u32, ttype: u32, start: u32, len: u32, val:
     store_u64(tokens, offset + 12, val);
 }
 
-fn token_type(tokens: Address, idx: u32) -> u32 {
-    return load_u32(tokens, idx * 24);
-}
-fn token_start(tokens: Address, idx: u32) -> u32 {
-    return load_u32(tokens, idx * 24 + 4);
-}
-fn token_len(tokens: Address, idx: u32) -> u32 {
-    return load_u32(tokens, idx * 24 + 8);
-}
-fn token_val(tokens: Address, idx: u32) -> u64 {
-    return load_u64(tokens, idx * 24 + 12);
-}
-
-// ── Lex entire source ──
-// Returns number of tokens. tokens buffer must be pre-allocated.
+// ── Lexer (simplified) ──
 fn lex(src: Address, src_len: u32, tokens: Address, max_tokens: u32) -> u32 {
     pos: u32 = 0;
     count: u32 = 0;
@@ -90,16 +81,12 @@ fn lex(src: Address, src_len: u32, tokens: Address, max_tokens: u32) -> u32 {
         c: u32 = *(src + pos);
         
         // Skip whitespace
-        if is_space(c) == 1 {
-            pos = pos + 1;
-            continue;
-        }
+        if is_space(c) == 1 { pos = pos + 1; continue; }
         
-        // Skip line comments (//)
+        // Skip line comments
         if c == 47 {
             if pos + 1 < src_len {
-                next: u32 = *(src + pos + 1);
-                if next == 47 {
+                if *(src + pos + 1) == 47 {
                     while pos < src_len {
                         if *(src + pos) == 10 { break; }
                         pos = pos + 1;
@@ -118,55 +105,25 @@ fn lex(src: Address, src_len: u32, tokens: Address, max_tokens: u32) -> u32 {
                 pos = pos + 1;
             }
             len: u32 = pos - start;
-            // Check keywords: "fn"=2 chars, "if"=2, "else"=4, "while"=5, "return"=6, "let"=3
-            ttype: u32 = 1; // default: Ident
+            ttype: u32 = 1; // Ident
+            // "fn" keyword
             if len == 2 {
-                first: u32 = *(src + start);
-                if first == 102 {  // 'f'
-                    second: u32 = *(src + start + 1);
-                    if second == 110 { ttype = 10; }  // "fn"
-                }
-                if first == 105 {  // 'i'
-                    second: u32 = *(src + start + 1);
-                    if second == 102 { ttype = 12; }  // "if"
+                if *(src + start) == 102 {
+                    if *(src + start + 1) == 110 { ttype = 10; }
                 }
             }
-            if len == 3 {
-                first: u32 = *(src + start);
-                if first == 108 {  // 'l'
-                    s2: u32 = *(src + start + 1);
-                    s3: u32 = *(src + start + 2);
-                    if s2 == 101 { if s3 == 116 { ttype = 11; } }  // "let"
-                }
-            }
-            if len == 4 {
-                first: u32 = *(src + start);
-                if first == 101 {  // 'e' → "else"
-                    s2: u32 = *(src + start + 1);
-                    s3: u32 = *(src + start + 2);
-                    s4: u32 = *(src + start + 3);
-                    if s2 == 108 { if s3 == 115 { if s4 == 101 { ttype = 13; } } }
-                }
-            }
-            if len == 5 {
-                first: u32 = *(src + start);
-                if first == 119 {  // 'w' → "while"
-                    s2: u32 = *(src + start + 1);
-                    s3: u32 = *(src + start + 2);
-                    s4: u32 = *(src + start + 3);
-                    s5: u32 = *(src + start + 4);
-                    if s2 == 104 { if s3 == 105 { if s4 == 108 { if s5 == 101 { ttype = 14; } } } }
-                }
-            }
+            // "return" keyword
             if len == 6 {
-                first: u32 = *(src + start);
-                if first == 114 {  // 'r' → "return"
-                    s2: u32 = *(src + start + 1);
-                    s3: u32 = *(src + start + 2);
-                    s4: u32 = *(src + start + 3);
-                    s5: u32 = *(src + start + 4);
-                    s6: u32 = *(src + start + 5);
-                    if s2 == 101 { if s3 == 116 { if s4 == 117 { if s5 == 114 { if s6 == 110 { ttype = 16; } } } } }
+                if *(src + start) == 114 {
+                    if *(src + start + 1) == 101 {
+                        if *(src + start + 2) == 116 {
+                            if *(src + start + 3) == 117 {
+                                if *(src + start + 4) == 114 {
+                                    if *(src + start + 5) == 110 { ttype = 16; }
+                                }
+                            }
+                        }
+                    }
                 }
             }
             store_token(tokens, count, ttype, start, len, 0);
@@ -192,37 +149,18 @@ fn lex(src: Address, src_len: u32, tokens: Address, max_tokens: u32) -> u32 {
         
         // Single-char tokens
         start = pos;
-        len: u32 = 1;
-        ttype: u32 = 1; // default to Ident (unknown)
+        len = 1;
+        ttype = 0;
         if c == 40 { ttype = 61; }      // (
         else { if c == 41 { ttype = 62; } }  // )
-        else { if c == 123 { ttype = 63; } }  // {
-        else { if c == 125 { ttype = 64; } }  // }
-        else { if c == 59 { ttype = 67; } }   // ;
-        else { if c == 44 { ttype = 68; } }   // ,
-        else { if c == 43 { ttype = 40; } }   // +
-        else { if c == 45 { ttype = 41; } }   // -
-        else { if c == 42 { ttype = 42; } }   // *
-        else { if c == 60 { ttype = 48; } }   // <
-        else { if c == 62 { ttype = 49; } }   // >
+        else { if c == 123 { ttype = 63; } } // {
+        else { if c == 125 { ttype = 64; } } // }
+        else { if c == 59 { ttype = 67; } }  // ;
+        else { if c == 43 { ttype = 40; } }  // +
+        else { if c == 45 { ttype = 41; } }  // -
+        else { if c == 42 { ttype = 42; } }  // *
         
-        if c == 61 {  // = or ==
-            if pos + 1 < src_len {
-                if *(src + pos + 1) == 61 {
-                    ttype = 46; len = 2; pos = pos + 1;
-                } else { ttype = 45; }
-            } else { ttype = 45; }
-        }
-        
-        if c == 33 {  // ! or !=
-            if pos + 1 < src_len {
-                if *(src + pos + 1) == 61 {
-                    ttype = 47; len = 2; pos = pos + 1;
-                }
-            }
-        }
-        
-        if ttype != 1 {
+        if ttype != 0 {
             store_token(tokens, count, ttype, start, len, 0);
             count = count + 1;
         }
@@ -235,4 +173,34 @@ fn lex(src: Address, src_len: u32, tokens: Address, max_tokens: u32) -> u32 {
         count = count + 1;
     }
     return count;
+}
+
+fn main() -> i32 {
+    // Read source from stdin (fd=0)
+    src = __vuma_alloc(4096);
+    src_len: i64 = read(0, src, 4096);
+    if src_len <= 0 { return 1; }
+    
+    // Allocate token buffer (max 256 tokens × 24 bytes = 6144)
+    tokens = __vuma_alloc(6144);
+    
+    // Lex
+    token_count: u32 = lex(src, src_len & 0xFFFFFFFF, tokens, 256);
+    
+    // Output: write each token type as a byte to stdout
+    out = __vuma_alloc(token_count + 1);
+    i: u32 = 0;
+    while i < token_count {
+        ttype: u32 = load_u32(tokens, i * 24);
+        *(out + i) = ttype & 255;
+        i = i + 1;
+    }
+    write(1, out, token_count);
+    
+    // Cleanup
+    __vuma_free(src, 4096);
+    __vuma_free(tokens, 6144);
+    __vuma_free(out, token_count + 1);
+    
+    return 0;
 }
