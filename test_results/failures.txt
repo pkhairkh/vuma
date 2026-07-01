@@ -1,7 +1,5 @@
-VUMA Test Failures — 2026-07-01 18:41:59 UTC
-Total: 31 failures across 4 tests
+VUMA Test Failures — 2026-07-01 19:09:09 UTC
+Total: 3 failures across 2 tests
 
   crypto_patterns      crc32.vuma                                    exp=  38 [('riscv64', 170, 'MM'), ('ppc64', 170, 'MM')]
-  pointers             ptr_double_deref.vuma                         exp=  42 [('aarch64', -11, 'CR'), ('riscv64', -11, 'CR'), ('x86_64', -11, 'CR'), ('mips64', -11, 'CR'), ('arm32', -11, 'CR'), ('ppc64', -11, 'CR'), ('loongarch64', -11, 'CR'), ('riscv32', -11, 'CR'), ('x86_32', -11, 'CR'), ('wasm32', 0, 'MM')]
-  pointers             ptr_multi_level.vuma                          exp=   3 [('aarch64', -11, 'CR'), ('riscv64', -11, 'CR'), ('x86_64', -11, 'CR'), ('ppc64', -11, 'CR'), ('mips64', -11, 'CR'), ('arm32', -11, 'CR'), ('loongarch64', -11, 'CR'), ('riscv32', -11, 'CR'), ('x86_32', -11, 'CR'), ('wasm32', 0, 'MM')]
-  pointers             ptr_pointer_to_pointer.vuma                   exp=  42 [('aarch64', -11, 'CR'), ('x86_64', -11, 'CR'), ('riscv64', -11, 'CR'), ('mips64', -11, 'CR'), ('arm32', -11, 'CR'), ('ppc64', -11, 'CR'), ('riscv32', -11, 'CR'), ('loongarch64', -11, 'CR'), ('x86_32', -11, 'CR')]
+  functions            s27_fn_two_args_mod.vuma                      exp=   4 [('ppc64', -4, 'CR')]
