@@ -1,0 +1,98 @@
+// womb/lang/elf.vuma — Minimal ELF writer for x86_64
+// Generates a minimal ELF64 executable from raw machine code.
+//
+// ELF64 header: 64 bytes
+// Program header: 56 bytes
+// Code: variable length
+// Total header size: 120 bytes before code
+
+// No main() — importable library module.
+
+// ELF magic: 0x7f 'E' 'L' 'F'
+fn write_elf_header(out: Address, code_size: u32) -> u32 {
+    // ELF64 header (64 bytes)
+    // e_ident[0..3]: magic
+    *(out + 0) = 127;  // 0x7f
+    *(out + 1) = 69;   // 'E'
+    *(out + 2) = 76;   // 'L'
+    *(out + 3) = 70;   // 'F'
+    // e_ident[4]: class = 2 (64-bit)
+    *(out + 4) = 2;
+    // e_ident[5]: data = 1 (little-endian)
+    *(out + 5) = 1;
+    // e_ident[6]: version = 1
+    *(out + 6) = 1;
+    // e_ident[7..15]: padding
+    *(out + 7) = 0; *(out + 8) = 0; *(out + 9) = 0; *(out + 10) = 0;
+    *(out + 11) = 0; *(out + 12) = 0; *(out + 13) = 0; *(out + 14) = 0; *(out + 15) = 0;
+    
+    // e_type: 2 (ET_EXEC)
+    store_u16(out, 16, 2);
+    // e_machine: 0x3E (x86_64)
+    store_u16(out, 18, 62);
+    // e_version: 1
+    store_u32(out, 20, 1);
+    // e_entry: 0x400078 (after headers)
+    store_u64(out, 24, 4194424);
+    // e_phoff: 64 (program headers right after ELF header)
+    store_u64(out, 32, 64);
+    // e_shoff: 0 (no section headers)
+    store_u64(out, 40, 0);
+    // e_flags: 0
+    store_u32(out, 48, 0);
+    // e_ehsize: 64
+    store_u16(out, 52, 64);
+    // e_phentsize: 56
+    store_u16(out, 54, 56);
+    // e_phnum: 1
+    store_u16(out, 56, 1);
+    // e_shentsize: 0
+    store_u16(out, 58, 0);
+    // e_shnum: 0
+    store_u16(out, 60, 0);
+    // e_shstrndx: 0
+    store_u16(out, 62, 0);
+    
+    // Program header (56 bytes at offset 64)
+    // p_type: 1 (PT_LOAD)
+    store_u32(out, 64, 1);
+    // p_flags: 5 (R+X)
+    store_u32(out, 68, 5);
+    // p_offset: 0
+    store_u64(out, 72, 0);
+    // p_vaddr: 0x400000
+    store_u64(out, 80, 4194304);
+    // p_paddr: 0x400000
+    store_u64(out, 88, 4194304);
+    // p_filesz: 120 + code_size
+    store_u64(out, 96, 120 + code_size);
+    // p_memsz: 120 + code_size
+    store_u64(out, 104, 120 + code_size);
+    // p_align: 0x1000
+    store_u64(out, 112, 4096);
+    
+    return 120;  // header size
+}
+
+fn store_u16(ptr: Address, offset: u32, val: u32) {
+    *(ptr + offset) = val & 255;
+    *(ptr + offset + 1) = (val >> 8) & 255;
+}
+
+fn store_u32(ptr: Address, offset: u32, val: u32) {
+    *(ptr + offset) = val & 255;
+    *(ptr + offset + 1) = (val >> 8) & 255;
+    *(ptr + offset + 2) = (val >> 16) & 255;
+    *(ptr + offset + 3) = (val >> 24) & 255;
+}
+
+fn store_u64(ptr: Address, offset: u32, val: u32) {
+    *(ptr + offset) = val & 255;
+    *(ptr + offset + 1) = (val >> 8) & 255;
+    *(ptr + offset + 2) = (val >> 16) & 255;
+    *(ptr + offset + 3) = (val >> 24) & 255;
+    *(ptr + offset + 4) = 0;
+    *(ptr + offset + 5) = 0;
+    *(ptr + offset + 6) = 0;
+    *(ptr + offset + 7) = 0;
+}
