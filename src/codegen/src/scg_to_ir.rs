@@ -649,15 +649,6 @@ pub struct IRBuilder {
     /// ir_func.result_types to avoid breaking wasm32 (which uses
     /// result_types for the wasm function signature).
     current_return_type: Option<crate::ir::IRType>,
-    /// Map from vreg ID to its IR type. Populated when a variable is
-    /// declared with a type annotation (e.g. `crc: u32 = 0`) or when a
-    /// parameter is typed. Used by lower_computation to set the `ty`
-    /// field on BinOp IR instructions so backends can use the correct
-    /// instruction width (32-bit vs 64-bit shifts, etc.).
-    /// This is critical for ppc64/riscv64 where a 64-bit logical right
-    /// shift on a 32-bit value with garbage in the upper bits corrupts
-    /// the result.
-    vreg_types: std::collections::HashMap<u32, crate::ir::IRType>,
 }
 
 /// Backward-compatible alias.
@@ -677,7 +668,6 @@ impl IRBuilder {
             store_count: 0,
             cmp_count: 0,
             current_return_type: None,
-            vreg_types: std::collections::HashMap::new(),
         }
     }
 
@@ -724,7 +714,6 @@ impl IRBuilder {
     /// statements, and rebuilds the CFG predecessor/successor sets.
     fn lower_function(&mut self, func: &ScgFunction) -> Result<IRFunction> {
         self.param_types.clear();
-        self.vreg_types.clear();
         // Count the number of Load statements in this function's body.
         // Used by lower_access to decide whether to infer load width from
         // the function's return type (safe only for single-load functions
@@ -749,8 +738,6 @@ impl IRBuilder {
             }
             // Record param type for Store/Load width inference
             self.param_types.insert(param.name.clone(), param.ty.to_ir_type());
-            // Record vreg type for BinOp width inference (32-bit shifts, etc.)
-            self.vreg_types.insert(vreg_id, param.ty.to_ir_type().clone());
         }
 
         // Map result registers with proper types.
@@ -2412,10 +2399,8 @@ impl IRBuilder {
                     dst: IRValue::Register(dst_vreg),
                     addr: addr_val,
                     offset: byte_offset,
-                    ty: load_ty.clone(),
+                    ty: load_ty,
                 });
-                // Register the load result's type for BinOp width inference
-                self.vreg_types.insert(dst_vreg, load_ty);
             }
             AccessNode::Store { ptr, offset, value, ty } => {
                 let ptr_val = self.resolve_expr(ptr, names, ir_func)?;
@@ -2576,27 +2561,6 @@ impl IRBuilder {
         let dst_vreg = self.alloc_vreg();
         ir_func.register_vreg(VirtualRegister::named(dst_vreg, &comp.dst));
         names.insert(comp.dst.clone(), dst_vreg);
-
-        // Determine the operation type from the lhs operand's vreg type.
-        // This is used to set the `ty` field on BinOp IR instructions so
-        // backends (especially ppc64/riscv64) can use the correct instruction
-        // width (32-bit vs 64-bit shifts). Without this, 64-bit shifts on
-        // 32-bit values with garbage in the upper bits corrupt the result.
-        let op_ty = lhs_val.as_register()
-            .and_then(|id| self.vreg_types.get(&id).cloned())
-            .or_else(|| {
-                // Fall back to checking if reassigns variable has a known type
-                // via param_types (for variables declared with type annotations)
-                if let Some(ref name) = comp.reassigns {
-                    self.param_types.get(name).cloned()
-                } else {
-                    None
-                }
-            });
-        // Record the dst vreg's type so downstream operations can use it
-        if let Some(ref ty) = op_ty {
-            self.vreg_types.insert(dst_vreg, ty.clone());
-        }
 
         // Reassignment propagation: update the `names` map so that the
         // user-visible variable being assigned (and any aliases sharing the
@@ -2791,7 +2755,7 @@ impl IRBuilder {
                     dst,
                     lhs: lhs_val,
                     rhs: rhs_val,
-                    ty: op_ty.clone(),
+                    ty: None,
                 });
             }
         }
@@ -3293,12 +3257,6 @@ impl IRBuilder {
                 let rhs_val = self.resolve_expr(rhs, names, ir_func)?;
                 let dst_vreg = self.alloc_vreg();
                 ir_func.register_vreg(VirtualRegister::anonymous(dst_vreg));
-                // Determine type from lhs for shift width inference
-                let inline_op_ty = lhs_val.as_register()
-                    .and_then(|id| self.vreg_types.get(&id).cloned());
-                if let Some(ref ty) = inline_op_ty {
-                    self.vreg_types.insert(dst_vreg, ty.clone());
-                }
                 // Comparison operators → Cmp instruction
                 match op {
                     BinOpKind::SLt | BinOpKind::SLe | BinOpKind::SGt | BinOpKind::SGe
@@ -3326,7 +3284,7 @@ impl IRBuilder {
                             dst: IRValue::Register(dst_vreg),
                             lhs: lhs_val,
                             rhs: rhs_val,
-                            ty: inline_op_ty.clone(),
+                            ty: None,
                         });
                     }
                 }
