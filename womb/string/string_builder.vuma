@@ -1,0 +1,90 @@
+// womb/string/string_builder.vuma — Dynamic string builder using heap memory
+// Wraps DynamicVec for efficient string concatenation.
+
+extern "C" {
+    fn __vuma_alloc(size: i64) -> Address;
+    fn __vuma_free(addr: Address, size: i64);
+    fn write(fd: i64, buf: Address, count: i64) -> i64;
+}
+
+fn store_u64(ptr: Address, offset: u32, val: u64) {
+    *(ptr + offset) = val & 255; *(ptr + offset + 1) = (val >> 8) & 255;
+    *(ptr + offset + 2) = (val >> 16) & 255; *(ptr + offset + 3) = (val >> 24) & 255;
+    *(ptr + offset + 4) = (val >> 32) & 255; *(ptr + offset + 5) = (val >> 40) & 255;
+    *(ptr + offset + 6) = (val >> 48) & 255; *(ptr + offset + 7) = (val >> 56) & 255;
+}
+fn load_u64(ptr: Address, offset: u32) -> u64 {
+    b0: u64 = *(ptr + offset); b1: u64 = *(ptr + offset + 1);
+    b2: u64 = *(ptr + offset + 2); b3: u64 = *(ptr + offset + 3);
+    b4: u64 = *(ptr + offset + 4); b5: u64 = *(ptr + offset + 5);
+    b6: u64 = *(ptr + offset + 6); b7: u64 = *(ptr + offset + 7);
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
+}
+fn store_u32(ptr: Address, offset: u32, val: u32) {
+    *(ptr + offset) = val & 255; *(ptr + offset + 1) = (val >> 8) & 255;
+    *(ptr + offset + 2) = (val >> 16) & 255; *(ptr + offset + 3) = (val >> 24) & 255;
+}
+fn load_u32(ptr: Address, offset: u32) -> u32 {
+    b0: u32 = *(ptr + offset); b1: u32 = *(ptr + offset + 1);
+    b2: u32 = *(ptr + offset + 2); b3: u32 = *(ptr + offset + 3);
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+}
+
+fn sb_new(cap: u32) -> Address {
+    sb = __vuma_alloc(16);
+    if cap == 0 { cap = 64; }
+    data = __vuma_alloc(cap);
+    store_u64(sb, 0, data); store_u32(sb, 8, 0); store_u32(sb, 12, cap);
+    return sb;
+}
+fn sb_len(sb: Address) -> u32 { return load_u32(sb, 8); }
+fn sb_cap(sb: Address) -> u32 { return load_u32(sb, 12); }
+fn sb_data(sb: Address) -> u64 { return load_u64(sb, 0); }
+
+fn sb_reserve(sb: Address, needed: u32) {
+    cap: u32 = sb_cap(sb); if needed <= cap { return; }
+    new_cap: u32 = cap; if new_cap == 0 { new_cap = 64; }
+    while new_cap < needed { new_cap = new_cap * 2; }
+    new_data = __vuma_alloc(new_cap);
+    old_data: u64 = sb_data(sb); old_len: u32 = sb_len(sb);
+    i: u32 = 0;
+    while i < old_len { *(new_data + i) = *(old_data + i) & 255; i = i + 1; }
+    store_u64(sb, 0, new_data); store_u32(sb, 12, new_cap);
+}
+
+fn sb_push_char(sb: Address, ch: u32) {
+    len: u32 = sb_len(sb); cap: u32 = sb_cap(sb);
+    if len >= cap { sb_reserve(sb, len + 1); }
+    data: u64 = sb_data(sb);
+    *(data + len) = ch & 255;
+    store_u32(sb, 8, len + 1);
+}
+
+fn sb_append(sb: Address, str: Address, str_len: u32) {
+    i: u32 = 0;
+    while i < str_len { sb_push_char(sb, *(str + i)); i = i + 1; }
+}
+
+fn sb_append_u64(sb: Address, val: u64) {
+    if val == 0 { sb_push_char(sb, 48); return; }
+    digits = __vuma_alloc(32);
+    n: u64 = val; pos: u32 = 0;
+    while n > 0 {
+        d: u32 = (n % 10) & 0xFFFFFFFF;
+        *(digits + pos) = (d + 48) & 255; n = n / 10; pos = pos + 1;
+    }
+    i: u32 = pos;
+    while i > 0 { i = i - 1; sb_push_char(sb, *(digits + i)); }
+}
+
+fn sb_write(sb: Address, fd: i64) {
+    data: u64 = sb_data(sb); len: u32 = sb_len(sb);
+    write(fd, data, len);
+}
+
+fn sb_clear(sb: Address) { store_u32(sb, 8, 0); }
+
+fn sb_free(sb: Address) {
+    data: u64 = sb_data(sb); cap: u32 = sb_cap(sb);
+    __vuma_free(data, cap); __vuma_free(sb, 16);
+}

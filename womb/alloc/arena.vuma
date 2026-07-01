@@ -1,0 +1,55 @@
+// womb/alloc/arena.vuma — Bump allocator using heap memory
+extern "C" {
+    fn __vuma_alloc(size: i64) -> Address;
+    fn __vuma_free(addr: Address, size: i64);
+}
+
+fn store_u64(ptr: Address, offset: u32, val: u64) {
+    *(ptr + offset) = val & 255; *(ptr + offset + 1) = (val >> 8) & 255;
+    *(ptr + offset + 2) = (val >> 16) & 255; *(ptr + offset + 3) = (val >> 24) & 255;
+    *(ptr + offset + 4) = (val >> 32) & 255; *(ptr + offset + 5) = (val >> 40) & 255;
+    *(ptr + offset + 6) = (val >> 48) & 255; *(ptr + offset + 7) = (val >> 56) & 255;
+}
+fn load_u64(ptr: Address, offset: u32) -> u64 {
+    b0: u64 = *(ptr + offset); b1: u64 = *(ptr + offset + 1);
+    b2: u64 = *(ptr + offset + 2); b3: u64 = *(ptr + offset + 3);
+    b4: u64 = *(ptr + offset + 4); b5: u64 = *(ptr + offset + 5);
+    b6: u64 = *(ptr + offset + 6); b7: u64 = *(ptr + offset + 7);
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
+}
+fn store_u32(ptr: Address, offset: u32, val: u32) {
+    *(ptr + offset) = val & 255; *(ptr + offset + 1) = (val >> 8) & 255;
+    *(ptr + offset + 2) = (val >> 16) & 255; *(ptr + offset + 3) = (val >> 24) & 255;
+}
+fn load_u32(ptr: Address, offset: u32) -> u32 {
+    b0: u32 = *(ptr + offset); b1: u32 = *(ptr + offset + 1);
+    b2: u32 = *(ptr + offset + 2); b3: u32 = *(ptr + offset + 3);
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+}
+
+fn arena_new(size: u32) -> Address {
+    arena = __vuma_alloc(16);
+    base = __vuma_alloc(size);
+    store_u64(arena, 0, base); store_u32(arena, 8, 0); store_u32(arena, 12, size);
+    return arena;
+}
+
+fn arena_alloc(arena: Address, size: u32) -> u64 {
+    offset: u32 = load_u32(arena, 8);
+    total: u32 = load_u32(arena, 12);
+    aligned: u32 = (offset + 7) & 0xFFFFFFF8;
+    if aligned + size > total { return 0; }
+    base: u64 = load_u64(arena, 0);
+    store_u32(arena, 8, aligned + size);
+    return base + aligned;
+}
+
+fn arena_reset(arena: Address) { store_u32(arena, 8, 0); }
+
+fn arena_free(arena: Address) {
+    base: u64 = load_u64(arena, 0); size: u32 = load_u32(arena, 12);
+    __vuma_free(base, size); __vuma_free(arena, 16);
+}
+
+fn arena_used(arena: Address) -> u32 { return load_u32(arena, 8); }
+fn arena_capacity(arena: Address) -> u32 { return load_u32(arena, 12); }
