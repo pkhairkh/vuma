@@ -2714,7 +2714,7 @@ impl IRBuilder {
                     dst,
                     lhs: lhs_val,
                     rhs: rhs_val,
-                    ty: op_ty.clone(),
+                    ty: None,
                 });
             }
             // Comparison operations → dedicated Cmp instruction.
@@ -2809,12 +2809,22 @@ impl IRBuilder {
                 });
             }
             _ => {
+                // Only propagate type for operations that need 32/64-bit
+                // distinction on ppc64/riscv64: shifts (Shl/ShrL/ShrA) and
+                // remainder (SRem/URem). For all other operations (Add, Sub,
+                // Mul, And, Or, Xor), keep ty=None to avoid regressions —
+                // those operations work correctly with 64-bit instructions
+                // on all backends.
+                let needs_type = matches!(comp.op,
+                    BinOpKind::Shl | BinOpKind::ShrL | BinOpKind::ShrA
+                    | BinOpKind::SRem | BinOpKind::URem
+                );
                 ir_func.current_block().push(IRInstruction::BinOp {
                     op: comp.op,
                     dst,
                     lhs: lhs_val,
                     rhs: rhs_val,
-                    ty: op_ty.clone(),
+                    ty: if needs_type { op_ty.clone() } else { None },
                 });
             }
         }
@@ -3344,12 +3354,16 @@ impl IRBuilder {
                         });
                     }
                     _ => {
+                        let needs_type = matches!(op,
+                            BinOpKind::Shl | BinOpKind::ShrL | BinOpKind::ShrA
+                            | BinOpKind::SRem | BinOpKind::URem
+                        );
                         ir_func.current_block().push(IRInstruction::BinOp {
                             op: *op,
                             dst: IRValue::Register(dst_vreg),
                             lhs: lhs_val,
                             rhs: rhs_val,
-                            ty: inline_op_ty.clone(),
+                            ty: if needs_type { inline_op_ty.clone() } else { None },
                         });
                     }
                 }
