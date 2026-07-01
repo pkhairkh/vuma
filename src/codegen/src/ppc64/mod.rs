@@ -3920,6 +3920,19 @@ impl Backend for PPC64Backend {
                                         _ => unreachable!(),
                                     }
                                 } else {
+                                    // When the type is None (unknown), the value may be a
+                                    // 32-bit unsigned value stored in a 64-bit register with
+                                    // garbage in the upper 32 bits. For ShrL, bits from the
+                                    // upper half would shift into the lower half, corrupting
+                                    // the result. Clear the upper 32 bits of the input first
+                                    // using rlwinm (zero-extend to 64 bits).
+                                    //
+                                    // We do NOT do this for ShrA (arithmetic shift) because
+                                    // sign extension is the intended behavior.
+                                    if *op == BinOpKind::ShrL {
+                                        // rlwinm R4, R4, 0, 0, 31 — clear upper 32 bits
+                                        code.extend_from_slice(&Instruction::Rlwinm { ra: Gpr::R4, rs: Gpr::R4, sh: 0, mb: 0, me: 31 }.encode());
+                                    }
                                     match op {
                                         BinOpKind::Shl => { code.extend_from_slice(&Instruction::Sld { ra: Gpr::R3, rs: Gpr::R4, rb: Gpr::R5 }.encode()); }
                                         BinOpKind::ShrL => { code.extend_from_slice(&Instruction::Srd { ra: Gpr::R3, rs: Gpr::R4, rb: Gpr::R5 }.encode()); }
