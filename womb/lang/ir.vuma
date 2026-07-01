@@ -1,0 +1,159 @@
+// womb/lang/ir.vuma — Simple IR for self-hosting
+// IR instruction layout: [opcode: u32][dst: u32][src1: u32][src2: u32] = 16 bytes
+// Opcodes:
+//   0=Nop, 1=Const, 2=Add, 3=Sub, 4=Mul, 5=Div
+//   6=Load, 7=Store, 8=Alloc, 9=Free
+//   10=Cmp, 11=Branch, 12=Jump, 13=Call, 14=Ret
+//   15=Phi, 16=Cast
+
+// No main() — importable library module.
+
+fn store_u32(ptr: Address, offset: u32, val: u32) {
+    *(ptr + offset) = val & 255;
+    *(ptr + offset + 1) = (val >> 8) & 255;
+    *(ptr + offset + 2) = (val >> 16) & 255;
+    *(ptr + offset + 3) = (val >> 24) & 255;
+}
+
+fn load_u32(ptr: Address, offset: u32) -> u32 {
+    b0: u32 = *(ptr + offset); b1: u32 = *(ptr + offset + 1);
+    b2: u32 = *(ptr + offset + 2); b3: u32 = *(ptr + offset + 3);
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+}
+
+// Emit a Const instruction: dst = value
+fn ir_const(ir: Address, count: u32, dst: u32, value: u32) -> u32 {
+    base: u32 = count * 16;
+    store_u32(ir, base + 0, 1);      // Const
+    store_u32(ir, base + 4, dst);
+    store_u32(ir, base + 8, value);
+    store_u32(ir, base + 12, 0);
+    return count + 1;
+}
+
+// Emit an Add instruction: dst = src1 + src2
+fn ir_add(ir: Address, count: u32, dst: u32, src1: u32, src2: u32) -> u32 {
+    base: u32 = count * 16;
+    store_u32(ir, base + 0, 2);      // Add
+    store_u32(ir, base + 4, dst);
+    store_u32(ir, base + 8, src1);
+    store_u32(ir, base + 12, src2);
+    return count + 1;
+}
+
+// Emit a Sub instruction: dst = src1 - src2
+fn ir_sub(ir: Address, count: u32, dst: u32, src1: u32, src2: u32) -> u32 {
+    base: u32 = count * 16;
+    store_u32(ir, base + 0, 3);
+    store_u32(ir, base + 4, dst);
+    store_u32(ir, base + 8, src1);
+    store_u32(ir, base + 12, src2);
+    return count + 1;
+}
+
+// Emit a Mul instruction: dst = src1 * src2
+fn ir_mul(ir: Address, count: u32, dst: u32, src1: u32, src2: u32) -> u32 {
+    base: u32 = count * 16;
+    store_u32(ir, base + 0, 4);
+    store_u32(ir, base + 4, dst);
+    store_u32(ir, base + 8, src1);
+    store_u32(ir, base + 12, src2);
+    return count + 1;
+}
+
+// Emit a Ret instruction: return src1
+fn ir_ret(ir: Address, count: u32, src1: u32) -> u32 {
+    base: u32 = count * 16;
+    store_u32(ir, base + 0, 14);     // Ret
+    store_u32(ir, base + 4, 0);
+    store_u32(ir, base + 8, src1);
+    store_u32(ir, base + 12, 0);
+    return count + 1;
+}
+
+// Emit a Load instruction: dst = *(src1 + offset)
+fn ir_load(ir: Address, count: u32, dst: u32, src1: u32, offset: u32) -> u32 {
+    base: u32 = count * 16;
+    store_u32(ir, base + 0, 6);      // Load
+    store_u32(ir, base + 4, dst);
+    store_u32(ir, base + 8, src1);
+    store_u32(ir, base + 12, offset);
+    return count + 1;
+}
+
+// Emit a Store instruction: *(dst + offset) = src1
+fn ir_store(ir: Address, count: u32, dst: u32, offset: u32, src1: u32) -> u32 {
+    base: u32 = count * 16;
+    store_u32(ir, base + 0, 7);      // Store
+    store_u32(ir, base + 4, dst);
+    store_u32(ir, base + 8, src1);
+    store_u32(ir, base + 12, offset);
+    return count + 1;
+}
+
+// Get instruction opcode
+fn ir_opcode(ir: Address, idx: u32) -> u32 {
+    return load_u32(ir, idx * 16 + 0);
+}
+
+// Get instruction dst
+fn ir_dst(ir: Address, idx: u32) -> u32 {
+    return load_u32(ir, idx * 16 + 4);
+}
+
+// Get instruction src1
+fn ir_src1(ir: Address, idx: u32) -> u32 {
+    return load_u32(ir, idx * 16 + 8);
+}
+
+// Get instruction src2
+fn ir_src2(ir: Address, idx: u32) -> u32 {
+    return load_u32(ir, idx * 16 + 12);
+}
+
+// Simple IR interpreter for testing
+// vregs: array of u32 values, vreg 0 = first param
+fn ir_eval(ir: Address, ir_count: u32, vregs: Address, vreg_count: u32) -> u32 {
+    i: u32 = 0;
+    done: u32 = 0;
+    result: u32 = 0;
+    while done == 0 {
+        if i >= ir_count { done = 1; }
+        if done == 0 {
+            op: u32 = ir_opcode(ir, i);
+            dst: u32 = ir_dst(ir, i);
+            s1: u32 = ir_src1(ir, i);
+            s2: u32 = ir_src2(ir, i);
+            
+            if op == 1 {
+                // Const: vreg[dst] = s1
+                store_u32(vregs, dst * 4, s1);
+            }
+            if op == 2 {
+                // Add: vreg[dst] = vreg[s1] + vreg[s2]
+                v1: u32 = load_u32(vregs, s1 * 4);
+                v2: u32 = load_u32(vregs, s2 * 4);
+                store_u32(vregs, dst * 4, v1 + v2);
+            }
+            if op == 3 {
+                // Sub: vreg[dst] = vreg[s1] - vreg[s2]
+                v1: u32 = load_u32(vregs, s1 * 4);
+                v2: u32 = load_u32(vregs, s2 * 4);
+                store_u32(vregs, dst * 4, v1 - v2);
+            }
+            if op == 4 {
+                // Mul: vreg[dst] = vreg[s1] * vreg[s2]
+                v1: u32 = load_u32(vregs, s1 * 4);
+                v2: u32 = load_u32(vregs, s2 * 4);
+                store_u32(vregs, dst * 4, v1 * v2);
+            }
+            if op == 14 {
+                // Ret: return vreg[s1]
+                result = load_u32(vregs, s1 * 4);
+                done = 1;
+            }
+            i = i + 1;
+        }
+    }
+    return result;
+}

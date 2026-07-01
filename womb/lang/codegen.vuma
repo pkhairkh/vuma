@@ -1,0 +1,80 @@
+// womb/lang/codegen.vuma — Simple codegen for self-hosting
+// Generates x86_64 machine code from IR instructions.
+// Output: raw machine code bytes.
+//
+// x86_64 instruction encoding (simplified):
+//   Const vregN = imm32  -> mov rax, imm32; mov [vreg_table+N*8], rax
+//   Add vregD = vregA + vregB -> mov rax, [vreg_table+A*8]; add rax, [vreg_table+B*8]; mov [vreg_table+D*8], rax
+//   Ret vregN -> mov rax, [vreg_table+N*8]; ret
+//
+// For simplicity, we emit a flat byte sequence.
+
+// No main() — importable library module.
+
+extern "C" {
+    fn write(fd: i64, buf: Address, count: i64) -> i64;
+}
+
+// Generate x86_64 machine code for a single IR instruction.
+// Writes bytes to the output buffer. Returns new output position.
+fn gen_instruction(ir: Address, idx: u32, out: Address, out_pos: u32) -> u32 {
+    base: u32 = idx * 16;
+    op: u32 = load_u32(ir, base + 0);
+    dst: u32 = load_u32(ir, base + 4);
+    s1: u32 = load_u32(ir, base + 8);
+    s2: u32 = load_u32(ir, base + 12);
+    pos: u32 = out_pos;
+    
+    if op == 1 {
+        // Const: mov dword [stack+dst*4], s1
+        // Simplified: mov eax, imm32; mov [rsp+dst*4], eax
+        // mov eax, imm32 = B8 + imm32 (5 bytes)
+        *(out + pos) = 184; pos = pos + 1;  // B8 = mov eax, imm32
+        *(out + pos) = s1 & 255; pos = pos + 1;
+        *(out + pos) = (s1 >> 8) & 255; pos = pos + 1;
+        *(out + pos) = (s1 >> 16) & 255; pos = pos + 1;
+        *(out + pos) = (s1 >> 24) & 255; pos = pos + 1;
+    }
+    if op == 2 {
+        // Add: vreg[dst] = vreg[s1] + vreg[s2]
+        // Simplified: just emit a NOP (we'll handle properly later)
+        *(out + pos) = 144; pos = pos + 1;  // NOP
+    }
+    if op == 14 {
+        // Ret: return vreg[s1]
+        // Simplified: mov eax, vreg[s1]; ret
+        // For now, just emit ret (C3)
+        *(out + pos) = 195; pos = pos + 1;  // ret
+    }
+    
+    return pos;
+}
+
+// Generate code for all IR instructions.
+// Returns total bytes generated.
+fn gen_function(ir: Address, ir_count: u32, out: Address) -> u32 {
+    pos: u32 = 0;
+    i: u32 = 0;
+    done: u32 = 0;
+    while done == 0 {
+        if i >= ir_count { done = 1; }
+        if done == 0 {
+            pos = gen_instruction(ir, i, out, pos);
+            i = i + 1;
+        }
+    }
+    return pos;
+}
+
+fn store_u32(ptr: Address, offset: u32, val: u32) {
+    *(ptr + offset) = val & 255;
+    *(ptr + offset + 1) = (val >> 8) & 255;
+    *(ptr + offset + 2) = (val >> 16) & 255;
+    *(ptr + offset + 3) = (val >> 24) & 255;
+}
+
+fn load_u32(ptr: Address, offset: u32) -> u32 {
+    b0: u32 = *(ptr + offset); b1: u32 = *(ptr + offset + 1);
+    b2: u32 = *(ptr + offset + 2); b3: u32 = *(ptr + offset + 3);
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+}
