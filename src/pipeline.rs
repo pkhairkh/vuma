@@ -1751,12 +1751,16 @@ fn walk_control_flow_with_externs(
                     //   })
 
                     // Parse the discriminant from the Switch label: "match <subject>"
+                    // Use the Switch node's DataFlow inputs as sources so that
+                    // variable references in the subject expression resolve
+                    // correctly.
+                    let df_sources: Vec<NodeId> = edge_idx.incoming_df(node_id)
+                        .iter().map(|e| e.source).collect();
                     let disc_expr = if let Some(ref label) = ctrl.label {
                         let s = label.trim();
                         if s.starts_with("match ") {
                             let subject_str = &s[6..];
-                            // Try to resolve as a simple expression
-                            resolve_subexpr(subject_str, &[], edge_idx, scg)
+                            resolve_subexpr(subject_str, &df_sources, edge_idx, scg)
                         } else {
                             ScgExpr::Int(0)
                         }
@@ -1792,24 +1796,23 @@ fn walk_control_flow_with_externs(
                     let mut arms: Vec<SwitchArm> = Vec::new();
                     let mut arm_bodies: Vec<Vec<ScgStatement>> = Vec::new();
 
+                    let mut default_body: Vec<ScgStatement> = Vec::new();
+
                     for dedge in &dispatch_edges {
                         let case_node = dedge.target;
                         if let Some(case_data) = scg.get_node(case_node) {
                             if let NodePayload::Control(case_ctrl) = &case_data.payload {
                                 if case_ctrl.kind == ControlKind::SwitchCase {
                                     // Extract case value from label: "case N: <pattern>"
-                                    let case_value = if let Some(ref label) = case_ctrl.label {
-                                        // Try to parse the pattern as an integer
+                                    let pattern_str = if let Some(ref label) = case_ctrl.label {
                                         let s = label.trim();
                                         if let Some(colon_pos) = s.find(':') {
-                                            let pattern = s[colon_pos + 1..].trim();
-                                            // Try parsing as integer literal
-                                            pattern.parse::<i64>().unwrap_or(0)
+                                            s[colon_pos + 1..].trim().to_string()
                                         } else {
-                                            0
+                                            String::new()
                                         }
                                     } else {
-                                        0
+                                        String::new()
                                     };
 
                                     // Walk the arm body from the SwitchCase to the Join
@@ -1821,33 +1824,30 @@ fn walk_control_flow_with_externs(
                                         &arm_stop,
                                         extern_functions,
                                     );
-                                    arm_bodies.push(body);
-                                    arms.push(SwitchArm {
-                                        value: case_value,
-                                        body: Vec::new(), // Will be filled below
-                                    });
+
+                                    // Check if this is a wildcard/default arm
+                                    if pattern_str == "_" || pattern_str.is_empty() {
+                                        // Wildcard arm -> default_body
+                                        default_body = body;
+                                    } else {
+                                        // Regular arm with integer value
+                                        let case_value = pattern_str.parse::<i64>().unwrap_or(0);
+                                        arms.push(SwitchArm {
+                                            value: case_value,
+                                            body,
+                                        });
+                                    }
                                 }
                             }
                         }
                     }
-
-                    // Fill in arm bodies
-                    for (i, body) in arm_bodies.into_iter().enumerate() {
-                        arms[i].body = body;
-                    }
-
-                    // Walk the default body (from Switch to Join, skipping SwitchCases)
-                    // The default body is the code after all arms, from Join onwards.
-                    // For now, use empty default body — the Join node's successors
-                    // will be walked after the Switch statement.
-                    let default_body: Vec<ScgStatement> = Vec::new();
 
                     // Consume the Join node
                     if let Some(join) = join_node {
                         consumed.insert(join);
                     }
 
-                    stmts.push(ScgStatement::Control(ControlNode::Switch {
+stmts.push(ScgStatement::Control(ControlNode::Switch {
                         discriminant: disc_expr,
                         arms,
                         default_body,
@@ -2318,12 +2318,10 @@ fn convert_computation_node(
     }
 
     // Match arm body: "match_arm[N]: <expr>"
-    // These are created by the match-to-SCG conversion. The expression
-    // after the colon is the arm body. We skip these because the arm
-    // body is handled by the Switch handler in walk_control_flow.
     if op_label.starts_with("match_arm[") {
         return Vec::new();
     }
+
     // Block end marker in match arm body
     if op_label.contains("block_end") {
         return Vec::new();
