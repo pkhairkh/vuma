@@ -1,5 +1,7 @@
 // CRC32 — CRC32 checksum implementation (IEEE 802.3 / ITU-T V.42)
-// Expected exit code: 255
+// Expected exit code: 38
+//
+// CRC32("123456789") = 0xCBF43926, exit code = 0x26 = 38
 //
 // Implements the standard CRC32 algorithm used in ZIP, PNG, Ethernet, and
 // countless other protocols. Uses the polynomial 0xEDB88320 (bit-reversed
@@ -51,7 +53,7 @@ fn build_crc_table(table: Address) {
         j: u64 = 0;
         while j < 8 {
             if crc & 1 != 0 {
-                crc = (crc >> 1) ^ 3777300212;   // 0xEDB88320 in decimal
+                crc = (crc >> 1) ^ 3988292384;   // 0xEDB88320 in decimal
             } else {
                 crc = crc >> 1;
             }
