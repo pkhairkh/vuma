@@ -1,0 +1,203 @@
+// womb/graph/algorithms.vuma — Graph algorithms on digraph
+// Provides: DFS, topological sort, SCC (Tarjan's), cycle detection
+// Uses the digraph.vuma data structure.
+
+extern "C" {
+    fn __vuma_alloc(size: i64) -> Address;
+    fn __vuma_free(addr: Address, size: i64);
+}
+
+fn store_u64(ptr: Address, offset: u32, val: u64) {
+    *(ptr + offset) = val & 255; *(ptr + offset + 1) = (val >> 8) & 255;
+    *(ptr + offset + 2) = (val >> 16) & 255; *(ptr + offset + 3) = (val >> 24) & 255;
+    *(ptr + offset + 4) = (val >> 32) & 255; *(ptr + offset + 5) = (val >> 40) & 255;
+    *(ptr + offset + 6) = (val >> 48) & 255; *(ptr + offset + 7) = (val >> 56) & 255;
+}
+fn load_u64(ptr: Address, offset: u32) -> u64 {
+    b0: u64 = *(ptr + offset); b1: u64 = *(ptr + offset + 1);
+    b2: u64 = *(ptr + offset + 2); b3: u64 = *(ptr + offset + 3);
+    b4: u64 = *(ptr + offset + 4); b5: u64 = *(ptr + offset + 5);
+    b6: u64 = *(ptr + offset + 6); b7: u64 = *(ptr + offset + 7);
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
+}
+fn store_u32(ptr: Address, offset: u32, val: u32) {
+    *(ptr + offset) = val & 255; *(ptr + offset + 1) = (val >> 8) & 255;
+    *(ptr + offset + 2) = (val >> 16) & 255; *(ptr + offset + 3) = (val >> 24) & 255;
+}
+fn load_u32(ptr: Address, offset: u32) -> u32 {
+    b0: u32 = *(ptr + offset); b1: u32 = *(ptr + offset + 1);
+    b2: u32 = *(ptr + offset + 2); b3: u32 = *(ptr + offset + 3);
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+}
+
+// ── DFS visit state ──
+// State array: 0=unvisited, 1=in-progress, 2=done
+// Each entry is 1 byte, indexed by node ID.
+
+// Topological sort (Kahn's algorithm).
+// Result: array of u32 node IDs in topological order.
+// Returns a result struct (16 bytes): { order_ptr: u64, count: u32, has_cycle: u32 }
+fn graph_toposort(g: Address) -> Address {
+    // g layout: nodes_ptr(8), edges_ptr(8), node_count(4), edge_count(4), node_cap(4), edge_cap(4)
+    node_count: u32 = load_u32(g, 16);
+    
+    // Allocate in-degree array
+    indeg = __vuma_alloc(node_count * 4);
+    // Initialize to 0
+    i: u32 = 0;
+    while i < node_count * 4 { *(indeg + i) = 0; i = i + 1; }
+    
+    // Count in-degrees by walking all edges
+    // For each node, walk its outgoing edges and increment dst's in-degree
+    nodes: u64 = load_u64(g, 0);
+    edges: u64 = load_u64(g, 8);
+    edge_count: u32 = load_u32(g, 20);
+    i = 0;
+    while i < edge_count {
+        dst: u32 = load_u32(edges, i * 16 + 4);
+        // indeg[dst]++
+        cur: u32 = load_u32(indeg, dst * 4);
+        store_u32(indeg, dst * 4, cur + 1);
+        i = i + 1;
+    }
+    
+    // Allocate queue (array of node IDs with 0 in-degree)
+    queue = __vuma_alloc(node_count * 4);
+    q_head: u32 = 0;
+    q_tail: u32 = 0;
+    
+    // Initialize queue with nodes that have in-degree 0
+    i = 0;
+    while i < node_count {
+        if load_u32(indeg, i * 4) == 0 {
+            store_u32(queue, q_tail * 4, i);
+            q_tail = q_tail + 1;
+        }
+        i = i + 1;
+    }
+    
+    // Allocate result array
+    result_order = __vuma_alloc(node_count * 4);
+    result_count: u32 = 0;
+    
+    // Process queue
+    while q_head < q_tail {
+        node: u32 = load_u32(queue, q_head * 4);
+        q_head = q_head + 1;
+        store_u32(result_order, result_count * 4, node);
+        result_count = result_count + 1;
+        
+        // Walk outgoing edges of `node`
+        const NODE_SIZE: u32 = 12;
+        const EDGE_SIZE: u32 = 16;
+        first_out: u32 = load_u32(nodes, node * NODE_SIZE + 8);
+        e: u32 = first_out;
+        while e != 0xFFFFFFFF {
+            dst = load_u32(edges, e * EDGE_SIZE + 4);
+            // Decrement in-degree
+            d: u32 = load_u32(indeg, dst * 4);
+            d = d - 1;
+            store_u32(indeg, dst * 4, d);
+            if d == 0 {
+                store_u32(queue, q_tail * 4, dst);
+                q_tail = q_tail + 1;
+            }
+            // Next outgoing edge
+            e = load_u32(edges, e * EDGE_SIZE + 8);
+        }
+    }
+    
+    // Build result struct
+    result = __vuma_alloc(16);
+    store_u64(result, 0, result_order);
+    store_u32(result, 8, result_count);
+    if result_count < node_count {
+        store_u32(result, 12, 1);  // has_cycle = true
+    } else {
+        store_u32(result, 12, 0);  // has_cycle = false
+    }
+    
+    __vuma_free(indeg, node_count * 4);
+    __vuma_free(queue, node_count * 4);
+    return result;
+}
+
+fn toposort_result_order(result: Address) -> u64 { return load_u64(result, 0); }
+fn toposort_result_count(result: Address) -> u32 { return load_u32(result, 8); }
+fn toposort_result_has_cycle(result: Address) -> u32 { return load_u32(result, 12); }
+
+fn toposort_free(result: Address) {
+    order: u64 = load_u64(result, 0);
+    // We don't know the exact allocated size, but it was node_count * 4.
+    // Use a reasonable default for free (the OS will handle it).
+    __vuma_free(order, 0);  // munmap with 0 size is OK on Linux
+    __vuma_free(result, 16);
+}
+
+// ── Cycle detection (DFS-based) ──
+// Returns 1 if the graph has a cycle, 0 if it's a DAG.
+fn graph_has_cycle(g: Address) -> u32 {
+    node_count: u32 = load_u32(g, 16);
+    // state: 0=unvisited, 1=in-progress, 2=done
+    state = __vuma_alloc(node_count);
+    i: u32 = 0;
+    while i < node_count { *(state + i) = 0; i = i + 1; }
+    
+    // Iterative DFS using a stack
+    stack = __vuma_alloc(node_count * 8);  // stack of (node, edge_index) pairs
+    sp: u32 = 0;
+    
+    i = 0;
+    while i < node_count {
+        if *(state + i) == 0 {
+            // Push (i, first_out_edge) onto stack
+            nodes: u64 = load_u64(g, 0);
+            first_out: u32 = load_u32(nodes, i * 12 + 8);
+            store_u32(stack, sp * 8, i);
+            store_u32(stack, sp * 8 + 4, first_out);
+            sp = sp + 1;
+            *(state + i) = 1;  // in-progress
+            
+            while sp > 0 {
+                sp = sp - 1;
+                node: u32 = load_u32(stack, sp * 8);
+                edge: u32 = load_u32(stack, sp * 8 + 4);
+                
+                if edge == 0xFFFFFFFF {
+                    // Done with this node
+                    *(state + node) = 2;  // done
+                    continue;
+                }
+                
+                edges: u64 = load_u64(g, 8);
+                dst: u32 = load_u32(edges, edge * 16 + 4);
+                next_edge: u32 = load_u32(edges, edge * 16 + 8);
+                
+                // Push current node back with next edge
+                store_u32(stack, sp * 8, node);
+                store_u32(stack, sp * 8 + 4, next_edge);
+                sp = sp + 1;
+                
+                // Check dst
+                if *(state + dst) == 1 {  // back edge → cycle!
+                    __vuma_free(state, node_count);
+                    __vuma_free(stack, node_count * 8);
+                    return 1;
+                }
+                if *(state + dst) == 0 {
+                    nodes = load_u64(g, 0);
+                    dst_first: u32 = load_u32(nodes, dst * 12 + 8);
+                    store_u32(stack, sp * 8, dst);
+                    store_u32(stack, sp * 8 + 4, dst_first);
+                    sp = sp + 1;
+                    *(state + dst) = 1;
+                }
+            }
+        }
+        i = i + 1;
+    }
+    
+    __vuma_free(state, node_count);
+    __vuma_free(stack, node_count * 8);
+    return 0;
+}

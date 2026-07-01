@@ -1,0 +1,191 @@
+// womb/fs/high_level.vuma — High-level file system operations
+// Provides: read_to_string, write_all, path_join, path_basename
+// Built on top of womb/fs/file.vuma raw syscall wrappers.
+
+extern "C" {
+    fn __vuma_alloc(size: i64) -> Address;
+    fn __vuma_free(addr: Address, size: i64);
+    fn read(fd: i64, buf: Address, count: i64) -> i64;
+    fn write(fd: i64, buf: Address, count: i64) -> i64;
+    fn open(path: Address, flags: i64, mode: i64) -> i64;
+    fn close(fd: i64) -> i64;
+}
+
+fn store_u64(ptr: Address, offset: u32, val: u64) {
+    *(ptr + offset) = val & 255; *(ptr + offset + 1) = (val >> 8) & 255;
+    *(ptr + offset + 2) = (val >> 16) & 255; *(ptr + offset + 3) = (val >> 24) & 255;
+    *(ptr + offset + 4) = (val >> 32) & 255; *(ptr + offset + 5) = (val >> 40) & 255;
+    *(ptr + offset + 6) = (val >> 48) & 255; *(ptr + offset + 7) = (val >> 56) & 255;
+}
+fn load_u64(ptr: Address, offset: u32) -> u64 {
+    b0: u64 = *(ptr + offset); b1: u64 = *(ptr + offset + 1);
+    b2: u64 = *(ptr + offset + 2); b3: u64 = *(ptr + offset + 3);
+    b4: u64 = *(ptr + offset + 4); b5: u64 = *(ptr + offset + 5);
+    b6: u64 = *(ptr + offset + 6); b7: u64 = *(ptr + offset + 7);
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
+}
+fn store_u32(ptr: Address, offset: u32, val: u32) {
+    *(ptr + offset) = val & 255; *(ptr + offset + 1) = (val >> 8) & 255;
+    *(ptr + offset + 2) = (val >> 16) & 255; *(ptr + offset + 3) = (val >> 24) & 255;
+}
+fn load_u32(ptr: Address, offset: u32) -> u32 {
+    b0: u32 = *(ptr + offset); b1: u32 = *(ptr + offset + 1);
+    b2: u32 = *(ptr + offset + 2); b3: u32 = *(ptr + offset + 3);
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+}
+
+// Read entire file into a heap-allocated buffer.
+// Returns result struct (16 bytes): { data_ptr: u64, len: u32, _pad: u32 }
+// On error returns 0 (null).
+fn read_file(path: Address) -> Address {
+    fd: i64 = open(path, 0, 0);  // O_RDONLY
+    if fd < 0 { return 0; }
+    
+    buf_size: u32 = 4096;
+    buf = __vuma_alloc(buf_size);
+    total: u32 = 0;
+    done: u32 = 0;
+    
+    while done == 0 {
+        remaining: u32 = buf_size - total;
+        if remaining == 0 {
+            // Grow
+            new_size: u32 = buf_size * 2;
+            new_buf = __vuma_alloc(new_size);
+            i: u32 = 0;
+            while i < total { *(new_buf + i) = *(buf + i) & 255; i = i + 1; }
+            __vuma_free(buf, buf_size);
+            buf = new_buf; buf_size = new_size;
+            remaining = buf_size - total;
+        }
+        n: i64 = read(fd, buf + total, remaining);
+        if n <= 0 { done = 1; }
+        else { total = total + (n & 0xFFFFFFFF); }
+    }
+    close(fd);
+    
+    result = __vuma_alloc(16);
+    store_u64(result, 0, buf);
+    store_u32(result, 8, total);
+    store_u32(result, 12, buf_size);
+    return result;
+}
+
+fn read_result_data(result: Address) -> u64 { return load_u64(result, 0); }
+fn read_result_len(result: Address) -> u32 { return load_u32(result, 8); }
+
+// Write entire buffer to file. Returns 1 on success, 0 on error.
+fn write_file(path: Address, data: Address, data_len: u32) -> u32 {
+    fd: i64 = open(path, 577, 420);  // O_WRONLY|O_CREAT|O_TRUNC, 0644
+    if fd < 0 { return 0; }
+    written: u32 = 0;
+    while written < data_len {
+        n: i64 = write(fd, data + written, data_len - written);
+        if n <= 0 { close(fd); return 0; }
+        written = written + (n & 0xFFFFFFFF);
+    }
+    close(fd);
+    return 1;
+}
+
+// Write to stdout
+fn write_stdout(data: Address, len: u32) -> i64 {
+    return write(1, data, len);
+}
+
+// Write to stderr
+fn write_stderr(data: Address, len: u32) -> i64 {
+    return write(2, data, len);
+}
+
+// ── Path manipulation ──
+
+// Find the last '/' in a path. Returns index or 0xFFFFFFFF if none.
+fn path_last_slash(path: Address, len: u32) -> u32 {
+    i: u32 = len;
+    while i > 0 {
+        i = i - 1;
+        if *(path + i) == 47 { return i; }  // '/'
+    }
+    return 0xFFFFFFFF;
+}
+
+// Get basename: returns (ptr, len) pointing into the original path.
+// Returns { ptr: u64 (low 32), len: u32 (high 32) }
+fn path_basename(path: Address, path_len: u32) -> u64 {
+    slash: u32 = path_last_slash(path, path_len);
+    if slash == 0xFFFFFFFF { return path | ((path_len as u64) << 32); }
+    base_ptr: u64 = path + slash + 1;
+    base_len: u32 = path_len - slash - 1;
+    return base_ptr | ((base_len as u64) << 32);
+}
+
+// Get directory: copies the directory portion to dst.
+// Returns the length of the directory path.
+fn path_dirname(path: Address, path_len: u32, dst: Address, dst_cap: u32) -> u32 {
+    slash: u32 = path_last_slash(path, path_len);
+    if slash == 0xFFFFFFFF {
+        // No slash — copy "."
+        if dst_cap > 0 { *(dst + 0) = 46; }
+        return 1;
+    }
+    if slash == 0 {
+        // Root "/"
+        if dst_cap > 0 { *(dst + 0) = 47; }
+        return 1;
+    }
+    n: u32 = slash;
+    if n >= dst_cap { n = dst_cap - 1; }
+    i: u32 = 0;
+    while i < n { *(dst + i) = *(path + i) & 255; i = i + 1; }
+    if n < dst_cap { *(dst + n) = 0; }
+    return n;
+}
+
+// Join two paths: dst = base + "/" + child
+// Returns total length.
+fn path_join(dst: Address, dst_cap: u32, base: Address, base_len: u32, child: Address, child_len: u32) -> u32 {
+    pos: u32 = 0;
+    // Copy base
+    while pos < base_len && pos + 1 < dst_cap {
+        *(dst + pos) = *(base + pos) & 255;
+        pos = pos + 1;
+    }
+    // Add '/' if base doesn't end with one
+    if pos > 0 && pos + 1 < dst_cap {
+        if *(dst + pos - 1) != 47 {
+            *(dst + pos) = 47;
+            pos = pos + 1;
+        }
+    }
+    // Copy child
+    i: u32 = 0;
+    while i < child_len && pos + 1 < dst_cap {
+        *(dst + pos) = *(child + i) & 255;
+        pos = pos + 1;
+        i = i + 1;
+    }
+    if pos < dst_cap { *(dst + pos) = 0; }
+    return pos;
+}
+
+// Check if file extension matches. path ends with "." + ext
+fn path_has_extension(path: Address, path_len: u32, ext: Address, ext_len: u32) -> u32 {
+    if path_len < ext_len + 1 { return 0; }
+    dot_pos: u32 = path_len - ext_len - 1;
+    if *(path + dot_pos) != 46 { return 0; }  // '.'
+    i: u32 = 0;
+    while i < ext_len {
+        if *(path + dot_pos + 1 + i) != *(ext + i) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+// Free a read_file result
+fn read_result_free(result: Address) {
+    data: u64 = load_u64(result, 0);
+    buf_size: u32 = load_u32(result, 12);
+    __vuma_free(data, buf_size);
+    __vuma_free(result, 16);
+}
