@@ -4536,16 +4536,7 @@ impl Backend for RiscV64Backend {
                                     BinOpKind::Or => { code.extend(Instruction::Or { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T1 }.encode()); }
                                     BinOpKind::Xor => { code.extend(Instruction::Xor { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T1 }.encode()); }
                                     BinOpKind::Shl => { code.extend(Instruction::Sll { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T1 }.encode()); }
-                                    BinOpKind::ShrL => {
-                                        // Clear upper 32 bits of input to prevent bits from
-                                        // shifting into the lower half (same fix as ppc64).
-                                        // Use SRLIW with shift=0 to zero-extend low 32 bits.
-                                        // Actually, use ANDI with mask isn't enough for 32 bits.
-                                        // Use SLLI by 32 then SRLI by 32 to clear upper bits.
-                                        code.extend(Instruction::Slli { rd: Gpr::T0, rs1: Gpr::T0, shamt: 32 }.encode());
-                                        code.extend(Instruction::Srli { rd: Gpr::T0, rs1: Gpr::T0, shamt: 32 }.encode());
-                                        code.extend(Instruction::Srl { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T1 }.encode());
-                                    }
+                                    BinOpKind::ShrL => { code.extend(Instruction::Srl { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T1 }.encode()); }
                                     BinOpKind::ShrA => { code.extend(Instruction::Sra { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T1 }.encode()); }
                                     BinOpKind::SLt | BinOpKind::SLe | BinOpKind::SGt | BinOpKind::SGe
                                     | BinOpKind::ULt | BinOpKind::ULe | BinOpKind::UGt | BinOpKind::UGe
