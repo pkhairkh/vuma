@@ -7,6 +7,8 @@
 
 ---
 
+> **Implementation note (2026-07):** This spec is the authoritative description of the IVE verification algorithm. Where this spec and other docs disagree on Access mode taxonomy, SyncEdge ordering, or RepD interpretation counts, **this spec is the source of truth for the algorithm** — but the actual source code in `src/ive/src/` and `src/vuma/src/` is the final authority. Known cross-spec inconsistencies: (1) Access modes are listed as 4 (Read/Write/Execute/Free) in §6 below; `vuma-invariants-spec.md` lists 2 (Read/Write); `trivial-proofs.md` lists 3 (Read/Write/Free). The source `AccessKind` enum should be consulted for the definitive list. (2) SyncEdge kinds (7) are an MSG concept; the SCG `EdgeKind` enum has 7 variants but they differ (DataFlow/ControlFlow/Derivation/Annotation/Dispatch/Call/Return — no `Sync`). (3) RepD interpretation list (4 in §6) is incomplete; the actual `RepD` enum has 11 variants (see `repd-formal-spec.md`).
+
 ## Overview
 
 This document specifies the verification algorithms used by the Inference and Verification Engine (IVE) to prove or refute the five global memory-safety invariants of the Verified-Unsafe Memory Access (VUMA) model. Each algorithm operates on the **Memory State Graph (MSG)** — a formal model of the program's entire memory behavior — and produces for each invariant either a proof that the invariant holds or a counterexample demonstrating a violation.

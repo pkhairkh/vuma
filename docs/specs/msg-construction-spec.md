@@ -7,6 +7,8 @@
 
 ---
 
+> **Implementation note (2026-07):** The MSG is implemented in `src/vuma/src/msg.rs` and `src/vuma/src/msg_builder.rs` (with an incremental variant in `msg_incremental.rs`). The MSG builder handles cycles via SCC-based `topological_sort_with_cycles()`. Where this spec lists Region status as 5 (including `Device`), `vuma-invariants-spec.md` lists 4 — `Device` is aspirational (hardware device mapping via `map_device` is not implemented). Where this spec lists Derivation kinds as 4, `vuma-verification-algorithm.md` lists 5 — consult the source `DerivationKind` enum for the definitive list. The MSG is constructed from the SCG after BD inference; BD inference (stage 4) and MSG construction (stage 5) always run, even with `--verification none`.
+
 ## 0. Preliminary Definitions
 
 Before specifying the construction rules, we define the core domains and structures that compose the Memory State Graph.

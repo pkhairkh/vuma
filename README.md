@@ -1,163 +1,220 @@
 # VUMA — Verified-Unsafe Memory Access
 
-**Version:** 0.2.0-alpha.1  
-**License:** MIT  
-**Toolchain:** nightly-2026-03-01  
+**Version:** 0.2.0-alpha.1
+**License:** MIT
+**Toolchain:** nightly-2026-03-01 (pinned in `rust-toolchain.toml`)
+**Repository:** https://github.com/pkhairkh/vuma
+**Author:** Parham Khairkhah
 
-VUMA is a programming language compiler written in Rust (203 source files, ~282K lines). It compiles a C-like language with memory verification to 10 CPU architectures. The language has `unsafe` blocks, `allocate`/`free` for memory, `extern "C"` FFI, structs, enums, match, imports, and type annotations.
+VUMA is a programming language compiler framework written in Rust. It compiles a C-like language with behavioral verification to multiple CPU architectures. The language has `unsafe` blocks, `allocate`/`free` for memory, `extern "C"` FFI, structs, enums, match, imports, traits/impls, closures, atomics, and type annotations.
 
 ## What Actually Works
 
 ### Compiler Pipeline
 
 ```
-Source → Lexer → Parser → AST → SCG → [BD Inference → MSG → IVE Verification] → IR → RegAlloc → Codegen → ELF/Wasm
+Source → Lexer → Parser → AST → SCG → [BD Inference → MSG Construction → IVE Verification] → IR → RegAlloc → Codegen → ELF/Wasm
 ```
 
-The verification step (in brackets) is optional. The `compile_dump` binary (used by the test suite) uses `--verification none` and the canonical SCG pipeline (`bridge_scg_to_codegen`). The `vuma emit` command uses a direct AST→codegen path (`bridge_ast_to_codegen_scg`). Both produce working binaries.
+The verification step (in brackets) is optional. With `--verification none`, only the IVE verification stage (stage 6) is skipped — BD inference (stage 4) and MSG construction (stage 5) still run. The `compile_dump` binary (used by the test suite) uses `--verification none` and the canonical SCG pipeline (`bridge_scg_to_codegen` in `src/pipeline.rs`). The `vuma emit` command uses a direct AST→codegen path (`bridge_ast_to_codegen_scg`). Both produce working binaries.
 
-**Pipeline stages** (in `src/pipeline.rs`, enum `PipelineStage`):
-1. Parse → 2. AstToScg → 3. ScgValidation → 4. BdInference → 5. MsgConstruction → 6. IveVerification → 7. ScgTransforms → 8. IrLowering → 9. RegisterAlloc → 10. CodeEmission → 11. CorInit
+**Pipeline stages** (enum `PipelineStage` in `src/pipeline.rs:567`, 11 variants):
+1. `Parse` — Lexing + parsing
+2. `AstToScg` — AST → SCG conversion
+3. `ScgValidation` — SCG validation
+4. `BdInference` — BD inference (always runs)
+5. `MsgConstruction` — SCG → MSG construction (always runs)
+6. `IveVerification` — IVE verification (skipped when `--verification none`)
+7. `ScgTransforms` — SCG transformation passes
+8. `IrLowering` — IR lowering (SCG → IR)
+9. `RegisterAlloc` — Register allocation
+10. `CodeEmission` — Code emission
+11. `CorInit` — COR (Continuous Optimization Runtime) initialization
 
-Stages 4-6 are skipped when `--verification none` is used.
+### Backend Architectures
 
-### 10 Backend Architectures
+The codegen crate (`src/codegen/`) implements 10 backends (enum `BackendKind`, 10 variants). Test results from the latest full-suite run (`test_results/summary.json`, 2026-07-01 22:05:13 UTC, host `pi-pkhairkh-dev`):
 
-All 10 backends pass 5,738 gold-standard test programs (57,380 total runs) at 100% with `--verification none`:
+| Backend | ELF | Endian | Pointer | Syscall Stubs | Pass Rate |
+|---------|-----|--------|---------|---------------|-----------|
+| x86_64 | ELF64 | Little | 64-bit | 26 syscalls + 5 runtime helpers | 5738/5738 |
+| AArch64 | ELF64 | Little | 64-bit | 21 | 5738/5738 |
+| RISC-V 64 | ELF64 | Little | 64-bit | 22 | 5737/5738 |
+| ARM32 | ELF32 | Little | 32-bit | 22 | 5738/5738 |
+| MIPS64 | ELF64 | **Big** | 64-bit | 21 | 5738/5738 |
+| PPC64 | ELF64 | Big (ELFv2) | 64-bit | 21 | 5736/5738 |
+| LoongArch64 | ELF64 | Little | 64-bit | 22 | 5738/5738 |
+| x86_32 | ELF32 | Little | 32-bit | 21 syscalls + 4 helpers | 5738/5738 |
+| RISC-V 32 | ELF32 | Little | 32-bit | 22 | 5738/5738 |
+| Wasm32 | Wasm | Little | 32-bit | 0 (bump allocator) | 5738/5738 |
 
-| Backend | ELF | Endian | Pointer | Syscall Stubs |
-|---------|-----|--------|---------|---------------|
-| x86_64 | ELF64 | Little | 64-bit | 31 |
-| AArch64 | ELF64 | Little | 64-bit | ~20 |
-| RISC-V 64 | ELF64 | Little | 64-bit | 8 |
-| ARM32 | ELF32 | Little | 32-bit | ~20 |
-| MIPS64 | ELF64 | Little | 64-bit | ~20 |
-| PPC64 | ELF64 | Big | 64-bit | 3+table |
-| LoongArch64 | ELF64 | Little | 64-bit | ~20 |
-| x86_32 | ELF32 | Little | 32-bit | ~20 |
-| RISC-V 32 | ELF32 | Little | 32-bit | ~20 |
-| Wasm32 | Wasm | Little | 32-bit | N/A |
+**Overall: 57,377 / 57,380 runs pass = 99.99%** (not 100%). Three failures:
+- `crypto_patterns/crc32.vuma` — riscv64 and ppc64 return 170 (expected 38) — CRC32 polynomial mismatch on Big-endian/lower-width ISAs
+- `functions/s27_fn_two_args_mod.vuma` — ppc64 returns -4 (expected 4) — signed modulo sign issue
 
-**Note:** PPC64 uses ELFv2 ABI (`e_flags = 0x2`). Do not change this — `qemu-ppc64` on the Pi 5 requires ELFv2 for big-endian.
+**Notes:**
+- PPC64 uses ELFv2 ABI (`e_flags = 0x2`). Do not change this — `qemu-ppc64` requires ELFv2 for big-endian.
+- The CLI `vuma emit` and `vuma compile` commands accept only 8 ISA targets (enum `IsaArg` in `src/main.rs:137`): aarch64, x86_64, riscv64, wasm32, loongarch64, arm32, mips64, ppc64. RISC-V 32 and x86_32 exist in the codegen crate but are not exposed via the CLI `emit`/`compile` subcommands.
+- `src/codegen/src/lib.rs.tmp` is a stale 1-line leftover and should be deleted.
 
 ### Language Features (from `src/parser/src/ast.rs`)
 
-**Items** (enum `Item`): FnDef, StructDef, EnumDef, RegionDef, Import, Export, Const, Static, ModuleDef, TraitDef, ConceptDecl, GestaltDecl, ManifoldDecl, ExternBlock, ImplBlock
+**Items** (enum `Item` at `ast.rs:102`, 17 variants): `FnDef`, `StructDef`, `EnumDef`, `RegionDef`, `Import`, `Export`, `Const`, `Static`, `ModuleDef`, `TraitDef`, `ImplBlock`, `ExternBlock`, `ConceptDecl`, `GestaltDecl`, `ManifoldDecl`, `AuraDecl`, `Stmt`
 
-**Statements** (enum `Stmt`): Let, Assign, CompoundAssign, Allocate, Free, Access, Cast, If, While, For, Loop, UnsafeBlock, Match, Break, Continue, Return, Expr, Block
+**Statements** (enum `Stmt` at `ast.rs:519`, 19 variants): `Let`, `Assign`, `CompoundAssign`, `Allocate`, `Free`, `Access`, `Cast`, `If`, `While`, `For`, `Loop`, `UnsafeBlock`, `Match`, `Sync`, `Return`, `Break`, `Continue`, `BdDirective`, `Expr`
 
-**Expressions** (enum `Expr`): Var, Lit, BinOp, UnOp, Call, Cast, Deref, AddressOf, FieldAccess, Index, Offset, Allocate, Spawn, Async, Await, AtomicLoad, AtomicStore, AtomicCas, Range, Tuple, StructInit, FormatStr, Closure, ConceptQuery, GestaltInterpret, ContextAssert
+> Note: `Block` is a struct (`ast.rs:506`), not a `Stmt` variant. A block of statements appears as `Expr(ExprStmt)` containing an `Expr::Block`.
 
-**Types** (enum `Type`): I8/I16/I32/I64, U8/U16/U32/U64, F32/F64, Bool, Address, String, Void, Named, Array, Pointer, Tuple, Generic, Region
+**Expressions** (enum `Expr` at `ast.rs:934`, 33 variants): `Var`, `Lit`, `BinOp`, `UnOp`, `Call`, `AddressOf`, `Deref`, `Offset`, `Cast`, `Index`, `StructInit`, `FieldAccess`, `NamespaceAccess`, `Derive`, `Sizeof`, `Alignof`, `TypeAscription`, `Async`, `Spawn`, `Allocate`, `Null`, `CtSelect`, `CtEq`, `Range`, `FormatStr`, `Closure`, `Await`, `Uninitialized`, `AtomicLoad`, `AtomicStore`, `AtomicCas`, `Block`, `MatchExpr`
 
-**Lexer token kinds**: 350 variants in `TokenKind` enum (`src/parser/src/lexer.rs`)
+**Types** (enum `Type` at `ast.rs:1342`, 8 variants): `BDBase(String)`, `Ptr(Box<Type>)`, `RegionPtr { inner, region }`, `Array { element, size }`, `Struct { name, fields }`, `Generic { name, args }`, `Func { params, return_type }`, `BdAnnot { name }`
 
-**Note:** `unsafe` IS a keyword in VUMA (TokenKind::Unsafe, parser has `parse_unsafe_block`). `map_device()` and `volatile` are NOT language features — they appear only in example comments.
+> Primitive types (`u8`, `u32`, `i64`, `bool`, `void`, `address`, etc.) are represented as `Type::BDBase(String)` — the string carries the primitive name. There are no per-primitive enum variants.
+
+**Binary operators** (enum `BinOp` at `ast.rs:1260`, 19 variants): `Add`, `Sub`, `Mul`, `Div`, `Mod`, `Eq`, `Ne`, `Lt`, `Le`, `Gt`, `Ge`, `And`, `Or`, `BitAnd`, `BitOr`, `BitXor`, `Shl`, `Shr`
+
+**Unary operators** (enum `UnOp` at `ast.rs:1301`, 4 variants): `Neg`, `Not`, `Deref`, `BitNot`
+
+**Lexer token kinds**: 141 variants in the `TokenKind` enum (`src/parser/src/lexer.rs:115`).
+
+**`unsafe` IS a keyword** in VUMA (`TokenKind::Unsafe`, parser has `parse_unsafe_block`). `map_device()` and `volatile` are NOT language features — they appear only in example comments.
 
 ### IR (from `src/codegen/src/ir.rs`)
 
-**IRType**: I8, I16, I32, I64, U8, U16, U32, U64, F32, F64, Ptr, Void, Func, Struct, Array, TaggedUnion
+**IRType** (`ir.rs:43`, 16 variants): I8, I16, I32, I64, U8, U16, U32, U64, F32, F64, Ptr, Void, Func, Struct, Array, TaggedUnion
 
-**IRInstr variants**: Load, Store, BinOp, UnaryOp, Add, Sub, Mul, Div, Cmp, Branch, CondBranch, Call, Ret, Alloc, Free, Cast, Offset, GetAddress, Phi, Select, CtSelect, CtEq, AtomicLoad, AtomicStore, AtomicCas
+**IRInstr** (`ir.rs:1211`, 25 variants): Load, Store, BinOp, UnaryOp, Add, Sub, Mul, Div, Cmp, Branch, CondBranch, Call, Ret, Alloc, Free, Cast, Offset, GetAddress, Phi, Select, CtSelect, CtEq, AtomicLoad, AtomicStore, AtomicCas
 
-**BinOpKind**: Add, Sub, Mul, SDiv, UDiv, SRem, URem, And, Or, Xor, Shl, ShrL, ShrA, Ror, Rol, SLt, SLe, SGt, SGe, ULt, ULe, UGt, UGe, Eq, Ne
+**BinOpKind** (`ir.rs:951`, 25 variants): Add, Sub, Mul, SDiv, UDiv, SRem, URem, And, Or, Xor, Shl, ShrL, ShrA, Ror, Rol, SLt, SLe, SGt, SGe, ULt, ULe, UGt, UGe, Eq, Ne
 
-**Note:** BinOp IR instructions have `ty: Option<IRType>` which is `None` for most operations. The backends use 64-bit instructions by default. Do not propagate type info to BinOp IR — it causes regressions on ppc64.
+> Note: BinOp IR instructions have `ty: Option<IRType>` which is `None` for most operations. The backends use 64-bit instructions by default. Do not propagate type info to BinOp IR — it causes regressions on ppc64.
 
 ### SCG (from `src/scg/src/node.rs`, `src/scg/src/edge.rs`)
 
-**NodeType**: Computation, Allocation, Deallocation, Access, Cast, Effect, Control, Phantom, VTable, ClosureEnv, StructDef, EnumDef, Match, ConstantTime
+**NodeType** (`node.rs:41`, 26 variants):
+- Core (14): Computation, Allocation, Deallocation, Access, Cast, Effect, Control, Phantom, VTable, ClosureEnv, StructDef, EnumDef, Match, ConstantTime
+- WOMB Data Models (12): ConceptDecl, ConceptField, ConceptAccess, GestaltDecl, GestaltInterpret, ContextAssert, ManifoldDecl, ManifoldQuery, ManifoldSlice, AuraAttach, AuraQuery, AuraUpdate
 
-**NodePayload**: 14+ variants matching NodeType (Computation, Allocation, Deallocation, Access, Cast, Effect, Control, Phantom, VTable, ClosureEnv, StructDef, EnumDef, Match, ConstantTime) plus "WOMB DATA MODELS" (ConceptDecl, GestaltDecl, ManifoldDecl — parsed but not lowered to IR)
+**NodePayload** (`node.rs:187`, 26 variants): 1:1 with NodeType.
 
-**EdgeKind**: DataFlow, ControlFlow, Derivation, Annotation, Dispatch, Call{from_node, to_node, caller_region}, Return{from_node, to_node, caller_region}, Sync
+**EdgeKind** (`edge.rs:41`, 7 variants): `DataFlow`, `ControlFlow`, `Derivation`, `Annotation`, `Dispatch`, `Call { from_node, to_node, caller_region }`, `Return { from_node, to_node, return_values: Vec<NodeId> }`
 
-The SCG is backed by `petgraph::DiGraph` (external crate). Cycles are handled via `topological_sort_with_cycles()` using Tarjan's SCC algorithm.
+> The SCG is backed by `petgraph::DiGraph` (external crate). **The SCG is NOT acyclic** — it allows cycles (e.g., loops, recursive calls) and handles them via `topological_sort_with_cycles()` using Tarjan's SCC algorithm (`src/scg/src/graph.rs`).
 
 ### Verification (IVE)
 
 The IVE verifies 5 invariants: Liveness, Exclusivity, Interpretation, Origin, Cleanup.
 
-**Verification levels** (enum `VerificationLevel`): None, Quick, Normal, Exhaustive
+**Two `VerificationLevel` enums exist:**
+- `pipeline::VerificationLevel` (`src/pipeline.rs:127`, 4 variants): `None`, `Quick`, `Normal` (default), `Exhaustive`
+- `ive::VerificationLevel` (`src/ive/src/invariant_aggregator.rs:101`, 3 variants): `Quick`, `Normal` (default), `Exhaustive` — no `None` (the pipeline level `None` short-circuits before IVE is called)
 
-**Current state:** `--verification normal` has false positives on valid programs (especially those using `allocate()`/`free()` with dereference). The test suite uses `--verification none`. A modular verification infrastructure exists in `src/ive/src/modular.rs` (IncrementalCache, AbstractRegionTracker, per-function verification) but is not integrated into the main pipeline.
+**Current state:** `--verification normal` has false positives on valid programs (especially those using `allocate()`/`free()` with dereference). The test suite uses `--verification none`. A modular verification infrastructure exists in `src/ive/src/modular.rs` (389 LOC, with `IncrementalCache`, `AbstractRegionTracker`, `RegionSummary`, `FunctionSummary`, `verify_function`, `verify_all_functions`) but is not integrated into the main pipeline — no other code calls it.
 
-### CLI Commands (from `src/main.rs`, enum `Commands`)
+### Behavioral Descriptors (BD)
+
+BD replaces nominal types with the triple (RepD, CapD, RelD). Implemented in `src/bd/`.
+
+**RepD** (`src/bd/src/repd.rs:191`, 11 variants): `Byte`, `Struct`, `Array`, `Enum`, `Ptr`, `Union`, `Func`, `ManifoldSpatial`, `GestaltSuperposition`, `ConceptRelational`, `Generic`
+
+**Capability** (CapD, `src/bd/src/capd.rs:50`, 17 variants): `Read`, `Write`, `Execute`, `Iterate`, `Send`, `Persist`, `Serialize`, `Deserialize`, `Hash`, `Compare`, `DerivePtr`, `Cast`, `Fork`, `Drop`, `Share`, `Move`, `Pin`
+
+**Relation** (RelD, `src/bd/src/reld.rs:112`, 6 variants): `Temporal(TemporalKind)`, `Containment`, `Dependency(DepKind)`, `Equivalence`, `Security(FlowPolicy)`, `Liveness`
+
+BDs are inferred from SCG structure through iterative fixpoint computation with widening (`src/bd/src/inference.rs`). **Note:** Complex generic inference (M2.3) is deferred — `instantiate_generic` in `src/bd/src/unify.rs` does only shallow substitution.
+
+### CLI Commands (from `src/main.rs`, enum `Commands` at line 172, 10 variants)
 
 | Command | What It Does |
 |---------|-------------|
 | `vuma build <file>` | Canonical pipeline: parse → SCG → IR → codegen → ELF (aarch64 by default) |
-| `vuma emit <isa> <file>` | Direct AST→codegen path, emit to specific ISA |
-| `vuma run <file>` | Build + execute via QEMU (requires QEMU installed) |
-| `vuma check <file>` | Parse + SCG + verification only (no codegen) |
+| `vuma emit <isa> <file>` | Direct AST→codegen path, emit to specific ISA (8 ISAs: aarch64, x86_64, riscv64, wasm32, loongarch64, arm32, mips64, ppc64) |
+| `vuma run <file>` | Build + execute (tries native first, falls back to QEMU aarch64) |
+| `vuma check <file>` | Runs the full compile pipeline (including codegen) with verification forced to `Normal`; discards the binary output |
 | `vuma verify <file>` | Run IVE 5-invariant verification |
-| `vuma compile <file>` | Compile to relocatable object file (ET_REL) |
+| `vuma compile <file>` | Compile to relocatable object file (byte-patches `e_type` from ET_EXEC to ET_REL on the direct path) |
 | `vuma disasm <file>` | Disassemble a binary |
-| `vuma repl` | Interactive REPL (parse and display AST) |
+| `vuma repl` | Interactive REPL (full pipeline: parse → SCG → MSG → IVE → Wasm → multi-ISA; `src/vuma/src/repl.rs`, 2,693 LOC) |
 | `vuma lsp` | Language Server Protocol |
 | `vuma pkg <cmd>` | Package manager (init, build, add) |
 
 ### FFI & Syscalls
 
-`extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }` blocks work on all 10 backends. Each backend has its own syscall stubs (encoded as raw machine code in `build_runtime_syscall_stubs()` or equivalent).
+`extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }` blocks work on all 10 backends. Each backend has its own syscall stubs (encoded as raw machine code in `build_runtime_syscall_stubs()` on x86_64/x86_32, or inline equivalents elsewhere).
 
-**`__vuma_alloc(size)`** — mmap wrapper, provides heap memory that persists across function calls. Available on all 10 backends.
+**`SyscallName`** enum (`src/ffi.rs:478`, 19 variants): `Read`, `Write`, `Open`, `Close`, `Exit`, `ExitGroup`, `Mmap`, `Munmap`, `Brk`, `Ioctl`, `Fcntl`, `Getpid`, `Kill`, `Mprotect`, `ClockGettime`, `SchedYield`, `Clone`, `Futex`, `SetTidAddress`
 
-**`__vuma_free(addr, size)`** — munmap wrapper.
+**`__vuma_alloc(size)`** — mmap wrapper on 9/10 backends; on Wasm32 it uses a bump allocator instead (no mmap in Wasm).
 
-**`allocate(size)`** — VUMA language builtin, creates stack-local memory (freed on function return). Use `__vuma_alloc` for cross-function persistence.
+**`__vuma_free(addr, size)`** — munmap wrapper on 9/10 backends; no-op on Wasm32.
 
-**`free(ptr)`** — VUMA language builtin, no-op for stack allocations.
+**`allocate(size)`** — VUMA language builtin. In the canonical pipeline (`bridge_scg_to_codegen`), allocations ≤ 4096 bytes are stack-local (freed on function return); larger allocations use `__vuma_alloc` (heap). In the direct path (`bridge_ast_to_codegen_scg`), all `allocate()` calls are stack-local. Use `__vuma_alloc` for guaranteed cross-function persistence.
 
-### Heap Allocation
+**`free(ptr)`** — VUMA language builtin. In the direct path it is a no-op for stack allocations. In the canonical pipeline, `free` always lowers to `__vuma_free` (the pipeline does not track which allocations were stack-local).
 
-`__vuma_alloc` (mmap) and `__vuma_free` (munmap) are the correct way to allocate heap memory in VUMA. They work across function calls on all 10 backends. The `allocate()` builtin creates stack-local memory that is lost when the function returns.
+### LSP
+
+The LSP server (`src/lsp/mod.rs`, 2,055 LOC) implements 6 capabilities: `textDocumentSync`, `completion`, `hover`, `definition`, `documentSymbol`, `semanticTokens`.
 
 ---
 
 ## Workspace Structure (11 crates, from `Cargo.toml`)
 
-| Crate | Path | Lines | Tests | Role |
-|-------|------|-------|-------|------|
-| `vuma` (root) | `src/` | ~60K | — | Pipeline, CLI, LLM API, LSP, FFI, diagnostics |
-| `vuma-scg` | `src/scg/` | ~8K | 36/36 | SCG core (petgraph-backed graph, nodes, edges, regions) |
-| `vuma-parser` | `src/parser/` | ~12K | 286/286 | Lexer (350 token kinds), parser, AST, AST→SCG bridge, module resolver |
-| `vuma-codegen` | `src/codegen/` | ~80K | — | IR, 10 backends, regalloc, DWARF, ELF emission |
-| `vuma-ive` | `src/ive/` | ~15K | — | Inference & Verification Engine (5 invariants, BD solver) |
-| `vuma-bd` | `src/bd/` | ~8K | — | Behavioral Descriptors (RepD, CapD, RelD) |
-| `vuma-core` | `src/vuma/` | ~20K | 301/301 | Memory State Graph, invariants, regions, derivations |
-| `vuma-cor` | `src/cor/` | ~10K | — | Continuous Optimization Runtime (partially integrated) |
-| `vuma-proof` | `src/proof/` | ~8K | — | Formal proof system |
-| `vuma-std` | `src/std/` | ~24K | — | Rust stdlib wrapper (NOT linked to VUMA programs) |
-| `vuma-package` | `src/package/` | ~3K | — | Package manager (manifest, resolver, registry) |
-| `vuma-tests` | `src/tests/` | ~30K | — | Integration tests, benchmarks |
+| Crate | Path | LOC | Tests | Role |
+|-------|------|------|-------|------|
+| `vuma` (root) | `src/*.rs` | 16,037 | — | Pipeline, CLI, LLM API, LSP, FFI, diagnostics, logging, telemetry |
+| `vuma-scg` | `src/scg/` | 19,217 | 191 | SCG core (petgraph-backed graph, nodes, edges, regions, transforms, dominance, liveness) |
+| `vuma-parser` | `src/parser/` | 18,807 | 325 | Lexer (141 token kinds), parser, AST, AST→SCG bridge, module resolver, error recovery |
+| `vuma-codegen` | `src/codegen/` | 105,070 | 1,061 | IR, 10 backends, regalloc, DWARF v4, ELF emission |
+| `vuma-ive` | `src/ive/` | 17,824 | 235 | Inference & Verification Engine (5 invariants, BD solver, modular.rs not integrated) |
+| `vuma-bd` | `src/bd/` | 13,193 | 342 | Behavioral Descriptors (RepD, CapD, RelD) + inference + unify + context solver |
+| `vuma-core` | `src/vuma/` | 20,365 | 301 | MSG, invariants, regions, derivations, access analysis, security, REPL |
+| `vuma-cor` | `src/cor/` | 8,831 | 110 | Continuous Optimization Runtime (partially integrated as `Option<CORuntime>`) |
+| `vuma-proof` | `src/proof/` | 9,132 | 102 | Formal proof system (liveness, exclusivity, interpretation, origin, cleanup proofs) |
+| `vuma-std` | `src/std/` | 24,541 | 667 | Rust stdlib wrapper (NOT linked to VUMA programs; provides BD-annotated primitives, alloc, collections, io, fmt) |
+| `vuma-package` | `src/package/` | 1,182 | 6 | Package manager (manifest, resolver, registry) |
+| `vuma-tests` | `src/tests/` | 25,428 | 459 | Integration tests, benchmarks (8 categories) |
+
+**Non-workspace source directories:**
+- `src/bin/` — 5 binaries: `compile_dump` (173 LOC, used by test suite), `dump_codegen_scg` (55 LOC), `dump_ir` (35 LOC), `parse_test` (10 LOC), `scg_dump` (22 LOC)
+- `src/lsp/` — `mod.rs` (2,055 LOC), LSP server
+- `src/bootstrap/` — `vuma_compiler.vuma` (730 LOC, VUMA-in-VUMA lexer proof-of-concept)
 
 **External dependencies** (from `Cargo.toml`): petgraph 0.6, serde 1, serde_json 1, hashbrown 0.14, indexmap 2, smallvec 1, clap 4, chrono 0.4, toml 0.8, tempfile 3, proptest 1, thiserror 1, anyhow 1, log 0.4, env_logger 0.10, colored 2, libc 0.2
+
+**Total:** 205 Rust source files, ~283K lines.
 
 ---
 
 ## Womb (VUMA-Native Library)
 
-115 `.vuma` files, ~65K lines. All compile on x86_64 with `--verification none`. Not auto-imported — programs must inline needed functions.
+115 `.vuma` files, 64,759 lines. Not auto-imported — programs must inline needed functions.
 
-| Category | Files | Key Modules |
-|----------|-------|-------------|
-| Collections | 4 | vec.vuma (heap-backed), hashmap.vuma, btree_map.vuma, enum_map.vuma |
-| Strings | 3 | string.vuma, utf8.vuma (VStr), string_builder.vuma |
-| File I/O | 2 | file.vuma (raw syscalls), high_level.vuma (read_file, write_file, path ops) |
-| Alloc | 1 | arena.vuma (bump allocator on mmap) |
-| Graph | 2 | digraph.vuma (heap-backed, dynamic grow), algorithms.vuma (toposort, cycle detection) |
-| I/O | 1 | buffered.vuma (BufReader/BufWriter) |
-| Env | 1 | cli.vuma (CLI arg parsing) |
-| Language | 12 | full_lexer, full_parser, ir_builder, codegen, elf, tokens, ast, ir, mini_compiler, self_host_test, lexer, parser |
-| Crypto | 44 | sha256, aes128/192/256, hmac, chacha20, poly1305, rsa, ecdsa, ed25519, etc. |
-| Encoding | 3 | base64, hex, url |
-| Network | 10+ | tcp, udp, dns, http, websocket, mqtt, smtp |
-| Codec | 1 | byte_utils.vuma (LE/BE store/load, mem_copy/set/cmp) |
-| Other | ~30 | math, stdlib, stdio, time, socket, threading, sync, etc. |
+> **Caveat:** `womb/core.vuma` (197 LOC) is explicitly a design spec, not compilable — its own header states "DESIGN SPEC, NOT COMPILABLE — VUMA compiler CANNOT compile this file." So 114 of 115 files compile on x86_64 with `--verification none`; `core.vuma` does not.
+
+| Directory | Files | LOC | Key Modules |
+|-----------|-------|------|-------------|
+| `alloc/` | 1 | 55 | arena.vuma (bump allocator on mmap) |
+| `codec/` | 1 | 28 | byte_utils.vuma (LE/BE store/load, mem_copy/set/cmp) |
+| `collections/` | 4 | 714 | vec.vuma (heap-backed), hashmap.vuma, btree_map.vuma, enum_map.vuma |
+| `containers/` | 1 | 627 | containers.vuma (generic container abstractions) |
+| `crypto/` | 45 | 26,223 | sha1/sha3/sha384/sha512/sha_variants, aes128/192/256 + modes, hmac, chacha20, poly1305, rsa + oaep/pss, ecdsa (p256/p384), ed25519, x25519, secp256k1, ml_dsa, ml_kem, slh_dsa, falcon, hqc, bignum/bignum2048, blake2/blake3, md5, crc, hkdf, pbkdf2, scrypt, argon2, drbg, salsa20, kdf_cmac_bcrypt, key_agreement, signatures_extra, legacy_ciphers |
+| `encoding/` | 3 | 204 | base64, hex, url |
+| `env/` | 1 | 175 | cli.vuma (CLI arg parsing) |
+| `fs/` | 2 | 304 | file.vuma (raw syscalls), high_level.vuma (read_file, write_file, path ops) |
+| `graph/` | 2 | 416 | digraph.vuma (heap-backed, dynamic grow), algorithms.vuma (toposort, cycle detection) |
+| `ieee/` | 2 | 1,227 | fp.vuma (floating-point), ieee_frames.vuma |
+| `io/` | 1 | 151 | buffered.vuma (BufReader/BufWriter) |
+| `lang/` | 15 | 3,553 | full_lexer, full_parser, ir_builder, codegen, elf, tokens, ast, ir, mini_compiler, minicompiler, self_host_test, lexer, parser, **string**, **vuma_compiler** (506 LOC, full VUMA-in-VUMA self-hosting compiler pipeline) |
+| `lib/` | 28 | 25,027 | stdlib, stdio, math, time, string, printf, unicode, json, fileio, socket, dns, dns_extra, http, http2, websocket, email (SMTP), app_protocols (MQTT), net_protocols, asn1, x509, pki, auth, jwt, hpack, deflate, compression_extra, event_loop, threading |
+| `net/` | 5 | 5,390 | tcp, ssh, quic, tls12, tls13 |
+| `string/` | 3 | 468 | string.vuma (minimal (data,len) helpers), utf8.vuma (VStr), string_builder.vuma |
+| `core.vuma` (root) | 1 | 197 | Design spec only — NOT compilable |
+
+> Note: There are three `string.vuma` files: `womb/string/string.vuma` (minimal), `womb/lib/string.vuma` (POSIX string.h), `womb/lang/string.vuma` (language-level string utilities). They serve different purposes.
 
 **Known issues:**
-- `allocate()` creates stack-local memory. Use `__vuma_alloc()` for heap memory.
+- `allocate()` creates stack-local memory in the direct path; in the canonical pipeline, allocations > 4096 bytes use the heap. Use `__vuma_alloc()` for guaranteed heap memory.
 - While-loop variable tracking across function calls has a compiler bug.
 - The import system works but has limitations with complex module graphs.
 
@@ -165,7 +222,7 @@ The IVE verifies 5 invariants: Liveness, Exclusivity, Interpretation, Origin, Cl
 
 ## Test Suite
 
-5,738 programs with expected exit codes (5,754 total .vuma files), across 16 categories:
+5,738 programs with expected exit codes (5,754 total `.vuma` files in `tests/gold_standard/`), across 16 categories:
 
 | Category | Programs | Covers |
 |----------|----------|--------|
@@ -186,8 +243,8 @@ The IVE verifies 5 invariants: Liveness, Exclusivity, Interpretation, Origin, Cl
 | crypto_patterns | 350 | Hash and checksum patterns |
 | concurrency | 350 | Lock-free structures, atomics, channels |
 
-Run: `bash scripts/pi5_test_suite.sh --workers 4 --fresh`  
-Test runner: `test_results/run_tests.py` (234 lines)  
+Run: `bash scripts/pi5_test_suite.sh --workers 4 --fresh`
+Test runner: `test_results/run_tests.py`
 Compile binary: `compile_dump` (uses canonical SCG pipeline, `--verification none`)
 
 ---
@@ -196,18 +253,20 @@ Compile binary: `compile_dump` (uses canonical SCG pipeline, `--verification non
 
 | Area | Status | Details |
 |------|--------|---------|
-| Self-hosting | ❌ Not started | VUMA cannot compile itself. Womb language modules exist individually. |
+| Self-hosting | ⚠️ Started | `src/bootstrap/vuma_compiler.vuma` (730 LOC lexer POC) and `womb/lang/vuma_compiler.vuma` (506 LOC full pipeline) exist but are not verified end-to-end by automated tests. |
 | Verification | ⚠️ False positives | `--verification normal` rejects valid programs using allocate/free. Test suite uses `--verification none`. |
 | Type checking | ❌ Not implemented | Parser recognizes syntax but doesn't validate types. |
-| BD inference (M2.3) | ❌ Deferred | Complex generic inference scenarios. |
-| Doubly-linked list verification (M2.4) | ⚠️ Partial | Not fully verified. |
+| BD inference (M2.3) | ❌ Deferred | Complex generic inference scenarios. `instantiate_generic` does shallow substitution only. |
+| Doubly-linked list verification (M2.4) | ⚠️ Partial | `src/tests/src/dlist.rs` (1,010 LOC) has hand-built tests; not fully verified end-to-end. |
 | Concurrent verification | ⚠️ Limited | Single-threaded only. |
-| COR runtime | ⚠️ Partial | Not fully integrated end-to-end. |
-| Standard library | ⚠️ Partial | `vuma-std` (Rust) not linked. Womb (VUMA) exists but not auto-imported. |
+| COR runtime | ⚠️ Partial | Not fully integrated end-to-end (`Option<CORuntime>` field in pipeline). |
+| Standard library | ⚠️ Partial | `vuma-std` (Rust) not linked to VUMA programs. Womb (VUMA) exists but not auto-imported. |
 | While-loop variable tracking | ⚠️ Bug | Loop variables across function calls may not propagate correctly. |
 | `map_device()` | ❌ Not a feature | Referenced in example comments only. |
 | `volatile` | ❌ Not a feature | Not implemented. |
 | BinOp type propagation | ⚠️ Do not attempt | Propagating `ty` to BinOp IR causes ppc64 regression. Keep `ty: None`. |
+| `womb/core.vuma` | ❌ Not compilable | Explicitly a design spec; the other 114 womb files compile. |
+| CLI ISA coverage | ⚠️ 8 of 10 | `vuma emit`/`vuma compile` accept 8 ISAs (missing RISC-V 32, x86_32). All 10 exist in codegen and are tested via `compile_dump`. |
 
 ---
 
@@ -229,8 +288,8 @@ Rust nightly is required (`rust-toolchain.toml` pins `nightly-2026-03-01`).
 | File | Content |
 |------|---------|
 | `docs/architecture.md` | System architecture (11 crates, pipeline) |
-| `docs/language-reference.md` | VUMA syntax (1,257 lines) |
+| `docs/language-reference.md` | VUMA syntax |
 | `docs/ROADMAP.md` | Milestones and current status |
 | `docs/CONTRIBUTING.md` | Build, test, code review process |
 | `docs/GLOSSARY.md` | Term definitions |
-| `docs/specs/` | 15 formal specification documents |
+| `docs/specs/` | Formal specification documents |

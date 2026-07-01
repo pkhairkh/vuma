@@ -6,7 +6,7 @@
 
 VUMA is a systems programming language with compile-time memory safety verification. The compiler can verify five invariants (Liveness, Exclusivity, Interpretation, Origin, Cleanup) but currently has false positives on some valid programs. Most examples are compiled with `--verification none`.
 
-**Note:** VUMA does have an `unsafe` keyword (for explicitly unverifiable code blocks). The `map_device()` and `volatile` features referenced in some example comments are aspirational — they are not implemented as language keywords.
+**Note:** VUMA does have an `unsafe` keyword (`TokenKind::Unsafe`, parsed via `parse_unsafe_block` into `Stmt::UnsafeBlock`). It is a syntactic marker for manual memory management code — it does **not** bypass IVE verification. The `map_device()` and `volatile` features referenced in some example comments are aspirational — they are not implemented as language keywords.
 
 ## Example Index
 
