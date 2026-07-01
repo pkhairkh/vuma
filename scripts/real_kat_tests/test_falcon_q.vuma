@@ -1,0 +1,12 @@
+// KAT: Falcon q=12289 big-endian
+// Expected: 3001
+extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+
+fn main() -> i32 {
+    // Falcon-512: q = 12289
+    out = allocate(2);
+    *(out+0) = (12289 >> 8) & 255;  // 0x30
+    *(out+1) = 12289 & 255;         // 0x01
+    write(1, out, 2);
+    return 0;
+}

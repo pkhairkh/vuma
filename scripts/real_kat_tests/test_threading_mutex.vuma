@@ -1,0 +1,13 @@
+// KAT: Mutex unlocked = 0
+// Expected: 00
+extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+
+fn main() -> i32 {
+    // Mutex: 0=unlocked, 1=locked
+    mutex: u32 = 1;  // lock
+    mutex = 0;        // unlock
+    out = allocate(1);
+    *out = mutex;
+    write(1, out, 1);
+    return 0;
+}

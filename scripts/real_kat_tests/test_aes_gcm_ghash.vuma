@@ -1,0 +1,20 @@
+// KAT: AES-GCM GF(2^128) double(0x80)=0xE1
+// Expected: e1
+extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+
+fn main() -> i32 {
+    // GF(2^128) doubling: if MSB=0, shift left; if MSB=1, shift left XOR R
+    // R = 0xe1 followed by 15 zero bytes (for 128-bit)
+    // Test: double(0x80000000...) = shift left, MSB was 1, XOR with R
+    // For byte-level: double(0x80) = 0x00 XOR 0xe1 = 0xe1
+    x: u32 = 128;  // 0x80
+    msb: u32 = x >> 7;
+    r: u32 = 0;
+    if msb == 1 { r = (x << 1) ^ 225; }  // 0xe1 = 225
+    else { r = x << 1; }
+    r = r & 255;
+    out = allocate(1);
+    *out = r;
+    write(1, out, 1);
+    return 0;
+}

@@ -1,0 +1,11 @@
+// KAT: gzip magic = 0x1F8B
+// Expected: 1f8b
+extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+
+fn main() -> i32 {
+    // gzip magic: 0x1f 0x8b
+    out = allocate(2);
+    *(out+0)=31; *(out+1)=139;
+    write(1, out, 2);
+    return 0;
+}

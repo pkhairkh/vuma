@@ -1,0 +1,11 @@
+// KAT: NTP port = 123
+// Expected: 7b
+extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+
+fn main() -> i32 {
+    // NTP port = 123
+    out = allocate(1);
+    *out = 123;
+    write(1, out, 1);
+    return 0;
+}

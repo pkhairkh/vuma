@@ -1,0 +1,11 @@
+// KAT: DNS type A = 1
+// Expected: 0001
+extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+
+fn main() -> i32 {
+    // DNS type A = 1, AAAA = 28
+    out = allocate(2);
+    *(out+0)=0; *(out+1)=1;  // Type A = 1
+    write(1, out, 2);
+    return 0;
+}

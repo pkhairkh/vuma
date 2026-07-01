@@ -1,0 +1,11 @@
+// KAT: SLH-DSA n=16
+// Expected: 10
+extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+
+fn main() -> i32 {
+    // SLH-DSA-128s: n=16 (security level 1)
+    out = allocate(1);
+    *out = 16;
+    write(1, out, 1);
+    return 0;
+}

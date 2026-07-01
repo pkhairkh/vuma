@@ -1,0 +1,11 @@
+// KAT: Unix epoch year mod 100 = 70
+// Expected: 46
+extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+
+fn main() -> i32 {
+    // Unix epoch: 1970 mod 100 = 70
+    out = allocate(1);
+    *out = 70;
+    write(1, out, 1);
+    return 0;
+}

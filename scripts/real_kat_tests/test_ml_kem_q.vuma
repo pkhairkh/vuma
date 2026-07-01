@@ -1,0 +1,12 @@
+// KAT: ML-KEM q=3329 big-endian
+// Expected: 0d01
+extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+
+fn main() -> i32 {
+    // ML-KEM-768: q = 3329
+    out = allocate(2);
+    *(out+0) = (3329 >> 8) & 255;  // 0x0D
+    *(out+1) = 3329 & 255;         // 0x01
+    write(1, out, 2);
+    return 0;
+}

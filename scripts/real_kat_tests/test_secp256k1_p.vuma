@@ -1,0 +1,12 @@
+// KAT: secp256k1 p mod 256 = 0x2F
+// Expected: 2f
+extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+
+fn main() -> i32 {
+    // secp256k1: p = 2^256 - 2^32 - 977
+    // p mod 256 = (256 - 977%256) = 256 - 209 = 47
+    out = allocate(1);
+    *out = 47;
+    write(1, out, 1);
+    return 0;
+}

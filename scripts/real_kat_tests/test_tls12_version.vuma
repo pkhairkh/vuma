@@ -1,0 +1,11 @@
+// KAT: TLS 1.2 version = 0x0303
+// Expected: 0303
+extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+
+fn main() -> i32 {
+    // TLS 1.2 version = 0x0303
+    out = allocate(2);
+    *(out+0)=3; *(out+1)=3;
+    write(1, out, 2);
+    return 0;
+}

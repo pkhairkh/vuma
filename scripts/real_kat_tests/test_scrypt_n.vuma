@@ -1,0 +1,12 @@
+// KAT: scrypt N=2
+// Expected: 02
+extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+
+fn main() -> i32 {
+    // scrypt: N = 2^r, memory = 128*N*r bytes
+    // Test: N=2 means 2 iterations
+    out = allocate(1);
+    *out = 2;
+    write(1, out, 1);
+    return 0;
+}

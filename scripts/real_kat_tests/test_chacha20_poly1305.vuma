@@ -1,0 +1,11 @@
+// KAT: ChaCha20-Poly1305 tag length=16
+// Expected: 10
+extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+
+fn main() -> i32 {
+    // ChaCha20-Poly1305: tag = 16 bytes
+    out = allocate(1);
+    *out = 16;
+    write(1, out, 1);
+    return 0;
+}

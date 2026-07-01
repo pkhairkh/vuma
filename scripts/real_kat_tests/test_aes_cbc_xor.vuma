@@ -1,0 +1,11 @@
+// KAT: AES-CBC IV XOR: 0xFF^0x80=0x7F
+// Expected: 7f
+extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+
+fn main() -> i32 {
+    iv: u32 = 255; pt: u32 = 128;
+    out = allocate(1);
+    *out = (iv ^ pt) & 255;  // 255 ^ 128 = 127
+    write(1, out, 1);
+    return 0;
+}

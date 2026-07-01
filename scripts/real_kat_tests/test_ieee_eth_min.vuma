@@ -1,0 +1,11 @@
+// KAT: Ethernet min frame = 64
+// Expected: 40
+extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+
+fn main() -> i32 {
+    // Ethernet: minimum frame size = 64 bytes
+    out = allocate(1);
+    *out = 64;
+    write(1, out, 1);
+    return 0;
+}

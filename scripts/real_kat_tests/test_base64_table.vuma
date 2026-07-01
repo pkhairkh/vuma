@@ -1,0 +1,11 @@
+// KAT: Base64 table ABCD
+// Expected: 41424344
+extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+
+fn main() -> i32 {
+    // Base64 table: 'A'='B'='C'='D'... = 65,66,67,68
+    out = allocate(4);
+    *(out+0)=65; *(out+1)=66; *(out+2)=67; *(out+3)=68;
+    write(1, out, 4);
+    return 0;
+}

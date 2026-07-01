@@ -1,0 +1,12 @@
+// KAT: DNS header 12 zeros
+// Expected: 000000000000000000000000
+extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+
+fn main() -> i32 {
+    // DNS header: 12 bytes (ID 2 + flags 2 + QDCOUNT 2 + ANCOUNT 2 + NSCOUNT 2 + ARCOUNT 2)
+    out = allocate(12);
+    i: u32 = 0;
+    while i < 12 { *(out + i) = 0; i = i + 1; }
+    write(1, out, 12);
+    return 0;
+}

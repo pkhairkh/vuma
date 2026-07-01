@@ -1,0 +1,13 @@
+// KAT: SHA-384 IV[0] hi byte
+// Expected: cb
+extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+
+fn main() -> i32 {
+    // SHA-384 IV[0] hi = 0xcbbb9d5d = 3418070365
+    // >> 24 = 0xcb = 203
+    v: u32 = 3418070365;
+    out = allocate(1);
+    *out = (v >> 24) & 255;
+    write(1, out, 1);
+    return 0;
+}

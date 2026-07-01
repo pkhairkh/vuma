@@ -1,0 +1,12 @@
+// KAT: HTTP/2 preface PRI
+// Expected: 505249
+extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+
+fn main() -> i32 {
+    // HTTP/2 preface: "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+    // First 3 bytes: P R I = 80 82 73
+    out = allocate(3);
+    *(out+0)=80; *(out+1)=82; *(out+2)=73;
+    write(1, out, 3);
+    return 0;
+}

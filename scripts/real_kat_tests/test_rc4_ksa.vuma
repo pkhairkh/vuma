@@ -1,0 +1,16 @@
+// KAT: RC4 KSA S[0..1]=0,1
+// Expected: 0001
+extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+
+fn main() -> i32 {
+    // RC4 KSA: S[i] = i for i=0..255
+    // After init, S[0]=0, S[1]=1
+    s = allocate(256);
+    i: u32 = 0;
+    while i < 256 { *(s + i) = i & 255; i = i + 1; }
+    out = allocate(2);
+    *(out+0) = *(s+0);  // 0
+    *(out+1) = *(s+1);  // 1
+    write(1, out, 2);
+    return 0;
+}

@@ -1,0 +1,13 @@
+// KAT: ML-DSA q=8380417 big-endian
+// Expected: 7ffe01
+extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+
+fn main() -> i32 {
+    // ML-DSA-65: q = 8380417
+    out = allocate(3);
+    *(out+0) = (8380417 >> 16) & 255;  // 0x7F
+    *(out+1) = (8380417 >> 8) & 255;   // 0xFE
+    *(out+2) = 8380417 & 255;          // 0x01
+    write(1, out, 3);
+    return 0;
+}

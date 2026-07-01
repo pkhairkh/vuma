@@ -1,0 +1,12 @@
+// KAT: ECDSA P-256 p mod 256 = 0xFF
+// Expected: ff
+extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+
+fn main() -> i32 {
+    // P-256 prime p = 2^256 - 2^224 + 2^192 + 2^96 - 1
+    // p mod 256 = (0 - 0 + 0 + 0 - 1) mod 256 = 255
+    out = allocate(1);
+    *out = 255;
+    write(1, out, 1);
+    return 0;
+}

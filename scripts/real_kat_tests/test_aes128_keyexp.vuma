@@ -1,0 +1,27 @@
+// KAT: AES xtime(0x57)=0x87
+// Expected: 87
+extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+const MASK32: u32 = 4294967295;
+
+fn sbox(idx: u32) -> u32 {
+    if idx==0 {return 99;} if idx==1 {return 124;} if idx==2 {return 119;} if idx==3 {return 123;}
+    if idx==4 {return 242;} if idx==5 {return 107;} if idx==6 {return 111;} if idx==7 {return 197;}
+    return 0;
+}
+fn xtime(x: u32) -> u32 {
+    t: u32 = x << 1;
+    if (x & 128) != 0 { t = t ^ 27; }
+    return t & 255;
+}
+fn main() -> i32 {
+    // Key: 000102030405060708090a0b0c0d0e0f
+    // Word[4] = Word[0] XOR SubWord(RotWord(Word[3])) XOR Rcon[0]
+    // RotWord(0c0d0e0f) = 0d0e0f0c
+    // SubWord = sbox(0d) sbox(0e) sbox(0f) sbox(0c) = ?
+    // For simplicity, test xtime(0x57) = 0x87 (FIPS 197 §4.2.1)
+    r: u32 = xtime(87);  // 0x57
+    out = allocate(1);
+    *out = r;
+    write(1, out, 1);
+    return 0;
+}

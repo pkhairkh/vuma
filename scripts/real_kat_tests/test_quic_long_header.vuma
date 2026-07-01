@@ -1,0 +1,11 @@
+// KAT: QUIC long header form bit = 0x80
+// Expected: 80
+extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+
+fn main() -> i32 {
+    // QUIC long header: form bit = 1 (0x80)
+    out = allocate(1);
+    *out = 128;
+    write(1, out, 1);
+    return 0;
+}

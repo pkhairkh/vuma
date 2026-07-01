@@ -1,0 +1,19 @@
+// KAT: AES-CMAC K1 = L<<1 (MSB=0)
+// Expected: 80
+extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+
+fn main() -> i32 {
+    // CMAC: K1 = L << 1, with conditional XOR by Rb (0x87 for 128-bit)
+    // If MSB(L) = 0: K1 = L << 1
+    // If MSB(L) = 1: K1 = (L << 1) XOR Rb
+    // Test: L = 0x40 (MSB=0), K1 = 0x80
+    l: u32 = 64;  // 0x40
+    msb: u32 = l >> 7;
+    k1: u32 = l << 1;
+    if msb == 1 { k1 = k1 ^ 135; }  // 0x87
+    k1 = k1 & 255;
+    out = allocate(1);
+    *out = k1;
+    write(1, out, 1);
+    return 0;
+}

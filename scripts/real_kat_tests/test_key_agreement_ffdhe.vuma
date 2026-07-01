@@ -1,0 +1,16 @@
+// KAT: FFDHE 5^3 mod 23 = 10
+// Expected: 0a
+extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+
+fn main() -> i32 {
+    // FFDHE: g^a mod p
+    // Test: 5^3 mod 23 = 125 mod 23 = 10
+    g: u32 = 5; a: u32 = 3; p: u32 = 23;
+    r: u32 = 1;
+    i: u32 = 0;
+    while i < a { r = (r * g) % p; i = i + 1; }
+    out = allocate(1);
+    *out = r;
+    write(1, out, 1);
+    return 0;
+}

@@ -1,0 +1,10 @@
+// KAT: URL space is unsafe
+// Expected: 01
+extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+fn main() -> i32 {
+    // space (0x20) is not in [0-9A-Za-z], so unsafe = 1
+    out = allocate(1);
+    *out = 1;
+    write(1, out, 1);
+    return 0;
+}
