@@ -1187,6 +1187,18 @@ pub enum Expr {
         /// Source span.
         span: Span,
     },
+    /// Block expression: `{ stmt; stmt; expr }`
+    /// Evaluates a sequence of statements, with the final expression
+    /// as the block's value. Used in match arm bodies.
+    Block {
+        /// Statements in the block.
+        statements: Vec<Stmt>,
+        /// Optional final expression (the block's value).
+        /// If None, the block produces unit (0).
+        trailing_expr: Option<Box<Expr>>,
+        /// Source span.
+        span: Span,
+    },
     /// Match expression: `match expr { pattern => body, ... }`
     ///
     /// Unlike [`MatchStmt`] (which is a statement), `MatchExpr` produces a

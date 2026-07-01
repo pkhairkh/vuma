@@ -1468,7 +1468,48 @@ impl<'src> Parser<'src> {
             };
 
             self.expect(TokenKind::FatArrow)?;
-            let body = self.parse_expr()?;
+            // Arm body: either a block { ... } or a single expression
+            let body = if self.at(TokenKind::LBrace) {
+                let block_start = self.current.span.start;
+                self.advance(); // consume '{'
+                let mut block_stmts: Vec<Stmt> = Vec::new();
+                let mut trailing: Option<Expr> = None;
+                while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
+                    // Check if this looks like the last expression (no semicolon after)
+                    let peek_save = self.current.clone();
+                    match self.parse_stmt() {
+                        Ok(stmt) => {
+                            let has_semi = self.at(TokenKind::Semicolon);
+                            if has_semi {
+                                self.advance(); // consume ';'
+                                block_stmts.push(stmt);
+                            } else if self.at(TokenKind::RBrace) {
+                                // Last statement without semicolon — it's the trailing expr
+                                // But it's already parsed as a stmt. If it's an expression
+                                // statement, extract the expr.
+                                block_stmts.push(stmt);
+                            } else {
+                                block_stmts.push(stmt);
+                            }
+                        }
+                        Err(_) => {
+                            // Restore and try as expression
+                            self.current = peek_save;
+                            trailing = Some(self.parse_expr()?);
+                            break;
+                        }
+                    }
+                }
+                self.expect(TokenKind::RBrace)?;
+                let block_end = self.current.span.end;
+                Expr::Block {
+                    statements: block_stmts,
+                    trailing_expr: trailing.map(Box::new),
+                    span: Span::new(block_start, block_end),
+                }
+            } else {
+                self.parse_expr()?
+            };
             let arm_end = body.span().end;
             arms.push(MatchArm {
                 pattern,
@@ -3427,6 +3468,7 @@ impl Expr {
             Expr::AtomicLoad { span, .. } => *span,
             Expr::AtomicStore { span, .. } => *span,
             Expr::AtomicCas { span, .. } => *span,
+            Expr::Block { span, .. } => *span,
             Expr::MatchExpr { span, .. } => *span,
         }
     }

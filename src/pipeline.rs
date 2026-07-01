@@ -1732,8 +1732,141 @@ fn walk_control_flow_with_externs(
                     continue;
                 }
 
-                ControlKind::Switch | ControlKind::SwitchCase => {
-                    // Switch/switch-case nodes are handled like Branch
+                ControlKind::Switch => {
+                    // Switch node: collect all SwitchCase children via Dispatch edges,
+                    // walk each arm body, and emit a ControlNode::Switch statement.
+                    //
+                    // SCG structure for match:
+                    //   Switch --Dispatch--> SwitchCase("case 0: <pattern>")
+                    //   SwitchCase --CF--> body_computation --CF--> Join
+                    //   Switch --Dispatch--> SwitchCase("case 1: ...")
+                    //   ...
+                    //   Switch --CF--> Join (default/fall-through)
+                    //
+                    // We convert this to:
+                    //   ScgStatement::Control(ControlNode::Switch {
+                    //       discriminant: <subject expr>,
+                    //       arms: vec![SwitchArm { value: <case_value>, body: <arm_body> }, ...],
+                    //       default_body: <default_body>,
+                    //   })
+
+                    // Parse the discriminant from the Switch label: "match <subject>"
+                    let disc_expr = if let Some(ref label) = ctrl.label {
+                        let s = label.trim();
+                        if s.starts_with("match ") {
+                            let subject_str = &s[6..];
+                            // Try to resolve as a simple expression
+                            resolve_subexpr(subject_str, &[], edge_idx, scg)
+                        } else {
+                            ScgExpr::Int(0)
+                        }
+                    } else {
+                        ScgExpr::Int(0)
+                    };
+
+                    // Collect Dispatch edges to find all SwitchCase nodes
+                    let dispatch_edges: Vec<_> = edge_idx.outgoing
+                        .get(&node_id)
+                        .map(|edges| edges.iter().filter(|e| e.kind == EdgeKind::Dispatch).collect())
+                        .unwrap_or_default();
+
+                    // Find the Join node (first CF successor that is a Join)
+                    let join_node = edge_idx.outgoing_cf(node_id)
+                        .iter()
+                        .find(|e| {
+                            if let Some(n) = scg.get_node(e.target) {
+                                if let NodePayload::Control(c) = &n.payload {
+                                    return c.kind == ControlKind::Join;
+                                }
+                            }
+                            false
+                        })
+                        .map(|e| e.target);
+
+                    // Build arm_stop set: includes the Join node
+                    let mut arm_stop: HashSet<NodeId> = stop_at.clone();
+                    if let Some(join) = join_node {
+                        arm_stop.insert(join);
+                    }
+
+                    let mut arms: Vec<SwitchArm> = Vec::new();
+                    let mut arm_bodies: Vec<Vec<ScgStatement>> = Vec::new();
+
+                    for dedge in &dispatch_edges {
+                        let case_node = dedge.target;
+                        if let Some(case_data) = scg.get_node(case_node) {
+                            if let NodePayload::Control(case_ctrl) = &case_data.payload {
+                                if case_ctrl.kind == ControlKind::SwitchCase {
+                                    // Extract case value from label: "case N: <pattern>"
+                                    let case_value = if let Some(ref label) = case_ctrl.label {
+                                        // Try to parse the pattern as an integer
+                                        let s = label.trim();
+                                        if let Some(colon_pos) = s.find(':') {
+                                            let pattern = s[colon_pos + 1..].trim();
+                                            // Try parsing as integer literal
+                                            pattern.parse::<i64>().unwrap_or(0)
+                                        } else {
+                                            0
+                                        }
+                                    } else {
+                                        0
+                                    };
+
+                                    // Walk the arm body from the SwitchCase to the Join
+                                    let body = walk_control_flow_with_externs(
+                                        case_node,
+                                        scg,
+                                        edge_idx,
+                                        consumed,
+                                        &arm_stop,
+                                        extern_functions,
+                                    );
+                                    arm_bodies.push(body);
+                                    arms.push(SwitchArm {
+                                        value: case_value,
+                                        body: Vec::new(), // Will be filled below
+                                    });
+                                }
+                            }
+                        }
+                    }
+
+                    // Fill in arm bodies
+                    for (i, body) in arm_bodies.into_iter().enumerate() {
+                        arms[i].body = body;
+                    }
+
+                    // Walk the default body (from Switch to Join, skipping SwitchCases)
+                    // The default body is the code after all arms, from Join onwards.
+                    // For now, use empty default body — the Join node's successors
+                    // will be walked after the Switch statement.
+                    let default_body: Vec<ScgStatement> = Vec::new();
+
+                    // Consume the Join node
+                    if let Some(join) = join_node {
+                        consumed.insert(join);
+                    }
+
+                    stmts.push(ScgStatement::Control(ControlNode::Switch {
+                        discriminant: disc_expr,
+                        arms,
+                        default_body,
+                    }));
+
+                    // Continue from after the Join node
+                    if let Some(join) = join_node {
+                        current = edge_idx.outgoing_cf(join).first().map(|e| e.target);
+                    } else {
+                        current = None;
+                    }
+                    continue;
+                }
+
+                ControlKind::SwitchCase => {
+                    // SwitchCase nodes are handled by the Switch handler above.
+                    // If we reach here directly, it means the SwitchCase wasn't
+                    // consumed by a Switch (shouldn't happen in well-formed SCG).
+                    // Skip it and continue.
                     current = edge_idx.outgoing_cf(node_id).first().map(|e| e.target);
                     continue;
                 }
@@ -2181,6 +2314,33 @@ fn convert_computation_node(
         return Vec::new();
     }
     if op_label.starts_with("lit_") {
+        return Vec::new();
+    }
+
+    // Match arm body: "match_arm[N]: <expr>"
+    // These are created by the match-to-SCG conversion. The expression
+    // after the colon is the arm body. We skip these because the arm
+    // body is handled by the Switch handler in walk_control_flow.
+    if op_label.starts_with("match_arm[") {
+        return Vec::new();
+    }
+    // Block end marker in match arm body
+    if op_label.contains("block_end") {
+        return Vec::new();
+    }
+
+    // Enum binding: "enum_bind Name(var)"
+    if op_label.starts_with("enum_bind ") {
+        return Vec::new();
+    }
+
+    // Match arm destructuring: "destructure Name.field"
+    if op_label.starts_with("destructure ") {
+        return Vec::new();
+    }
+
+    // Range check: "range_check start..=end"
+    if op_label.starts_with("range_check ") {
         return Vec::new();
     }
 
