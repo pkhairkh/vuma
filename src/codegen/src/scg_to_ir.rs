@@ -2166,17 +2166,21 @@ impl IRBuilder {
         let default_exit_label = ir_func.current_block().label.clone();
 
         // Compute all modified variable names across all arms + default.
+        // Only include variables that existed BEFORE the switch (in names_before).
+        // Variables created inside an arm (like synthetic SCG node IDs "v_N")
+        // should NOT get merge phis — they don't have a value in other arms
+        // or in the default case.
         let all_modified: HashSet<String> = all_arm_defs
             .iter()
             .chain(std::iter::once(&default_defs))
             .flat_map(|defs| defs.defined_names())
+            .filter(|name| names_before.contains_key(name))
             .collect();
 
         // Merge block with phi nodes for variables modified in multiple arms.
         ir_func.append_block(&merge_label);
 
         for name in &all_modified {
-            // Collect the vregs from each arm that defines this variable.
             let mut incoming: Vec<(IRValue, String)> = Vec::new();
 
             for (i, arm_defs) in all_arm_defs.iter().enumerate() {
@@ -2201,6 +2205,21 @@ impl IRBuilder {
                 incoming,
             });
             names.insert(name.clone(), phi_dst);
+
+            // Also update ALL aliases that share the pre-switch vreg.
+            // Without this, SCG-node-id aliases (e.g. "v_3") still point
+            // to the old vreg, and references to them (e.g. in the return
+            // statement) will use the pre-switch value instead of the
+            // merge phi result.
+            if let Some(&pre_vreg) = names_before.get(name) {
+                let keys_to_update: Vec<String> = names.iter()
+                    .filter(|(_, &v)| v == pre_vreg)
+                    .map(|(k, _)| k.clone())
+                    .collect();
+                for key in keys_to_update {
+                    names.insert(key, phi_dst);
+                }
+            }
         }
 
         Ok(())
@@ -2571,10 +2590,10 @@ impl IRBuilder {
         }
         if let Some(name) = &comp.reassigns {
             names.insert(name.clone(), dst_vreg);
-            // Record the alias: "v_N" -> "user_name" so resolve_expr
-            // can fall back to the user name when "v_N" isn't in names.
             self.vreg_aliases.insert(comp.dst.clone(), name.clone());
         }
+
+
 
         let dst = IRValue::Register(dst_vreg);
 
