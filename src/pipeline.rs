@@ -3398,6 +3398,17 @@ fn resolve_subexpr(
         };
     }
 
+    // Dereference: *expr = Load(expr)
+    // When a dereference appears as a function call argument or in an
+    // expression, resolve the address expression and emit a Load.
+    if subexpr.starts_with('*') {
+        let inner = subexpr[1..].trim();
+        let inner_expr = resolve_subexpr(inner, sources, edge_idx, scg);
+        return ScgExpr::Load {
+            addr: Box::new(inner_expr),
+        };
+    }
+
     // Boolean and unit literals
     match subexpr {
         "true" => return ScgExpr::Int(1),
@@ -3415,6 +3426,37 @@ fn resolve_subexpr(
         }
     }
     
+    // Check if it's a function call: "func_name(args)"
+    // Only match if the expression starts with an identifier followed by "("
+    // This avoids matching expressions like "(a + b)" or "*(ptr + 0)"
+    if subexpr.contains('(') && subexpr.contains(')') {
+        // Check if it starts with an identifier (not *, (, etc.)
+        let first_char = subexpr.chars().next().unwrap_or(' ');
+        if first_char.is_alphabetic() || first_char == '_' {
+            // Find the opening paren
+            if let Some(paren_pos) = subexpr.find('(') {
+                let func_name = &subexpr[..paren_pos].trim();
+                // Verify it's a valid function name
+                let is_valid_name = !func_name.is_empty()
+                    && func_name.chars().all(|c| c.is_alphanumeric() || c == '_');
+                if is_valid_name {
+                    // Look for a Computation node whose label contains this call
+                    for node_data in scg.nodes() {
+                        if let NodePayload::Computation(comp) = &node_data.payload {
+                            let label = comp.kind.label();
+                            // Match "let var = func_name(...)" or "func_name(...)"
+                            if label.contains(subexpr) {
+                                if label.starts_with("let ") || label.contains(&(format!("= {}", subexpr))) {
+                                    return ScgExpr::Var(format!("v_{}", node_data.id.as_u64()));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Check if it's a known literal (lit_<n>)
     if let Some(num_str) = subexpr.strip_prefix("lit_") {
         if let Ok(num) = num_str.parse::<i64>() {
