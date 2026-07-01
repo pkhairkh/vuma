@@ -1,0 +1,314 @@
+// womb/lang/ir_builder.vuma — IR builder: AST → IR
+// Walks the AST arena and generates IR instructions.
+// Handles: expressions, statements, control flow, function calls.
+//
+// The IR builder maintains a symbol table (BTreeMap) mapping variable
+// names to vreg IDs. Each function gets its own IR buffer.
+
+extern "C" {
+    fn __vuma_alloc(size: i64) -> Address;
+    fn __vuma_free(addr: Address, size: i64);
+}
+
+fn store_u64(ptr: Address, offset: u32, val: u64) {
+    *(ptr + offset) = val & 255; *(ptr + offset + 1) = (val >> 8) & 255;
+    *(ptr + offset + 2) = (val >> 16) & 255; *(ptr + offset + 3) = (val >> 24) & 255;
+    *(ptr + offset + 4) = (val >> 32) & 255; *(ptr + offset + 5) = (val >> 40) & 255;
+    *(ptr + offset + 6) = (val >> 48) & 255; *(ptr + offset + 7) = (val >> 56) & 255;
+}
+fn load_u64(ptr: Address, offset: u32) -> u64 {
+    b0: u64 = *(ptr + offset); b1: u64 = *(ptr + offset + 1);
+    b2: u64 = *(ptr + offset + 2); b3: u64 = *(ptr + offset + 3);
+    b4: u64 = *(ptr + offset + 4); b5: u64 = *(ptr + offset + 5);
+    b6: u64 = *(ptr + offset + 6); b7: u64 = *(ptr + offset + 7);
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
+}
+fn store_u32(ptr: Address, offset: u32, val: u32) {
+    *(ptr + offset) = val & 255; *(ptr + offset + 1) = (val >> 8) & 255;
+    *(ptr + offset + 2) = (val >> 16) & 255; *(ptr + offset + 3) = (val >> 24) & 255;
+}
+fn load_u32(ptr: Address, offset: u32) -> u32 {
+    b0: u32 = *(ptr + offset); b1: u32 = *(ptr + offset + 1);
+    b2: u32 = *(ptr + offset + 2); b3: u32 = *(ptr + offset + 3);
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+}
+
+// IR opcodes (matches ir.vuma)
+const IR_NOP: u32 = 0;
+const IR_ADD: u32 = 1;
+const IR_SUB: u32 = 2;
+const IR_MUL: u32 = 3;
+const IR_DIV: u32 = 4;
+const IR_AND: u32 = 5;
+const IR_OR: u32 = 6;
+const IR_XOR: u32 = 7;
+const IR_SHL: u32 = 8;
+const IR_SHR: u32 = 9;
+const IR_CMP: u32 = 10;
+const IR_LOAD: u32 = 11;
+const IR_STORE: u32 = 12;
+const IR_CALL: u32 = 13;
+const IR_RET: u32 = 14;
+const IR_ALLOC: u32 = 15;
+const IR_MOV: u32 = 16;
+const IR_BRANCH: u32 = 17;
+const IR_COND_BRANCH: u32 = 18;
+
+const IR_SIZE: u32 = 32;
+
+// Builder state (32 bytes):
+//   0-7:   ir_buf ptr
+//   8-11:  next_vreg (u32)
+//   12-15: next_label (u32)
+//   16-23: symtab ptr (BTreeMap or simple array)
+//   24-27: symtab_count
+//   28-31: _pad
+
+fn irb_new(ir_buf: Address) -> Address {
+    b = __vuma_alloc(32);
+    store_u64(b, 0, ir_buf);
+    store_u32(b, 8, 1);   // next_vreg starts at 1 (0 is reserved)
+    store_u32(b, 12, 0);  // next_label
+    // Simple symbol table: array of (name_hash: u32, vreg: u32) = 8 bytes each
+    symtab = __vuma_alloc(4096);  // 512 symbols max
+    store_u64(b, 16, symtab);
+    store_u32(b, 24, 0);  // symtab count
+    return b;
+}
+
+fn irb_alloc_vreg(b: Address) -> u32 {
+    v: u32 = load_u32(b, 8);
+    store_u32(b, 8, v + 1);
+    return v;
+}
+
+fn irb_alloc_label(b: Address) -> u32 {
+    l: u32 = load_u32(b, 12);
+    store_u32(b, 12, l + 1);
+    return l;
+}
+
+// Emit IR instruction
+fn irb_emit(b: Address, op: u32, dst: u32, lhs: u32, rhs: u32, imm: u64, aux: u64) {
+    ir_buf: u64 = load_u64(b, 0);
+    count: u32 = load_u32(ir_buf, 0);
+    cap: u32 = load_u32(ir_buf, 4);
+    if count >= cap { return; }  // TODO: grow
+    offset: u32 = 8 + count * IR_SIZE;
+    store_u32(ir_buf, offset, op);
+    store_u32(ir_buf, offset + 4, dst);
+    store_u32(ir_buf, offset + 8, lhs);
+    store_u32(ir_buf, offset + 12, rhs);
+    store_u64(ir_buf, offset + 16, imm);
+    store_u64(ir_buf, offset + 24, aux);
+    store_u32(ir_buf, 0, count + 1);
+}
+
+// ── Symbol table ──
+// Simple linear scan for now (O(n), fine for small functions)
+fn irb_sym_lookup(b: Address, name_hash: u32) -> u32 {
+    symtab: u64 = load_u64(b, 16);
+    count: u32 = load_u32(b, 24);
+    i: u32 = 0;
+    while i < count {
+        h: u32 = load_u32(symtab, i * 8);
+        if h == name_hash { return load_u32(symtab, i * 8 + 4); }
+        i = i + 1;
+    }
+    return 0;  // not found
+}
+
+fn irb_sym_insert(b: Address, name_hash: u32, vreg: u32) {
+    symtab: u64 = load_u64(b, 16);
+    count: u32 = load_u32(b, 24);
+    store_u32(symtab, count * 8, name_hash);
+    store_u32(symtab, count * 8 + 4, vreg);
+    store_u32(b, 24, count + 1);
+}
+
+// ── AST → IR lowering ──
+// Lower an expression AST node. Returns the destination vreg.
+fn irb_lower_expr(b: Address, ast: u64, node_idx: u32) -> u32 {
+    // Read node
+    node_offset: u32 = 8 + node_idx * 40;
+    kind: u32 = load_u32(ast, node_offset);
+    c1: u32 = load_u32(ast, node_offset + 4);
+    c2: u32 = load_u32(ast, node_offset + 8);
+    c3: u32 = load_u32(ast, node_offset + 12);
+    val: u64 = load_u64(ast, node_offset + 16);
+    
+    // NK_INT (1): MOV dst, imm
+    if kind == 1 {
+        dst: u32 = irb_alloc_vreg(b);
+        irb_emit(b, IR_MOV, dst, 0, 0, val, 0);
+        return dst;
+    }
+    
+    // NK_IDENT (2): look up in symbol table
+    if kind == 2 {
+        // c1 contains the token index, but we need the name hash.
+        // For now, use val as the name hash (the parser should set this).
+        return irb_sym_lookup(b, val & 0xFFFFFFFF);
+    }
+    
+    // NK_BINOP (3): c1=op, c2=lhs_node, c3=rhs_node
+    if kind == 3 {
+        lhs_vreg: u32 = irb_lower_expr(b, ast, c2);
+        rhs_vreg: u32 = irb_lower_expr(b, ast, c3);
+        dst = irb_alloc_vreg(b);
+        op: u32 = 0;
+        // Map token types to IR opcodes
+        if c1 == 40 { op = IR_ADD; }      // +
+        else { if c1 == 41 { op = IR_SUB; } }  // -
+        else { if c1 == 42 { op = IR_MUL; } }  // *
+        else { if c1 == 43 { op = IR_DIV; } }  // /
+        else { if c1 == 44 { op = 4; } }       // % (use DIV, TODO: separate REM)
+        else { if c1 == 55 { op = IR_AND; } }  // &
+        else { if c1 == 56 { op = IR_OR; } }   // |
+        else { if c1 == 57 { op = IR_XOR; } }  // ^
+        else { if c1 == 59 { op = IR_SHL; } }  // <<
+        else { if c1 == 60 { op = IR_SHR; } }  // >>
+        else { if c1 == 46 { op = IR_CMP; } }  // ==
+        else { if c1 == 47 { op = IR_CMP; } }  // !=
+        else { if c1 == 48 { op = IR_CMP; } }  // <
+        else { if c1 == 49 { op = IR_CMP; } }  // >
+        else { if c1 == 50 { op = IR_CMP; } }  // <=
+        else { if c1 == 51 { op = IR_CMP; } }  // >=
+        else { op = IR_ADD; }  // default
+        irb_emit(b, op, dst, lhs_vreg, rhs_vreg, c1, 0);
+        return dst;
+    }
+    
+    // NK_DEREF (6): LOAD dst, addr
+    if kind == 6 {
+        addr_vreg: u32 = irb_lower_expr(b, ast, c1);
+        dst = irb_alloc_vreg(b);
+        irb_emit(b, IR_LOAD, dst, addr_vreg, 0, 0, 0);
+        return dst;
+    }
+    
+    // NK_ASSIGN (7): evaluate rhs, store to lhs
+    if kind == 7 {
+        rhs_vreg = irb_lower_expr(b, ast, c2);
+        // For simple assignment, rhs is the result
+        return rhs_vreg;
+    }
+    
+    // NK_CALL (5): c1=func_name_hash, c3=arg_count
+    if kind == 5 {
+        dst = irb_alloc_vreg(b);
+        irb_emit(b, IR_CALL, dst, c1, c3, 0, 0);
+        return dst;
+    }
+    
+    // Default: return vreg 0
+    return 0;
+}
+
+// Lower a statement AST node.
+fn irb_lower_stmt(b: Address, ast: u64, node_idx: u32) {
+    node_offset: u32 = 8 + node_idx * 40;
+    kind: u32 = load_u32(ast, node_offset);
+    c1: u32 = load_u32(ast, node_offset + 4);
+    c2: u32 = load_u32(ast, node_offset + 8);
+    c3: u32 = load_u32(ast, node_offset + 12);
+    
+    // NK_RETURN (10): RET expr
+    if kind == 10 {
+        if c1 == 0 {
+            irb_emit(b, IR_RET, 0, 0, 0, 0, 0);
+        } else {
+            val_vreg: u32 = irb_lower_expr(b, ast, c1);
+            irb_emit(b, IR_RET, val_vreg, 0, 0, 0, 0);
+        }
+        return;
+    }
+    
+    // NK_LET (11): evaluate init expr, bind to variable
+    if kind == 11 {
+        init_vreg: u32 = irb_lower_expr(b, ast, c1);
+        // TODO: bind to symbol table
+        return;
+    }
+    
+    // NK_IF (12): c1=cond, c2=then_block, c3=else_block
+    if kind == 12 {
+        cond_vreg: u32 = irb_lower_expr(b, ast, c1);
+        else_label: u32 = irb_alloc_label(b);
+        end_label: u32 = irb_alloc_label(b);
+        irb_emit(b, IR_COND_BRANCH, cond_vreg, 0, else_label, 0, 0);
+        // Then block
+        irb_lower_block(b, ast, c2);
+        irb_emit(b, IR_BRANCH, end_label, 0, 0, 0, 0);
+        // Else block
+        irb_emit(b, IR_NOP, else_label, 0, 0, 0, 0);  // label marker
+        if c3 != 0 { irb_lower_block(b, ast, c3); }
+        irb_emit(b, IR_NOP, end_label, 0, 0, 0, 0);  // label marker
+        return;
+    }
+    
+    // NK_WHILE (13): c1=cond, c2=body
+    if kind == 13 {
+        start_label: u32 = irb_alloc_label(b);
+        end_label = irb_alloc_label(b);
+        irb_emit(b, IR_NOP, start_label, 0, 0, 0, 0);  // label marker
+        cond_vreg = irb_lower_expr(b, ast, c1);
+        irb_emit(b, IR_COND_BRANCH, cond_vreg, 0, end_label, 0, 0);
+        irb_lower_block(b, ast, c2);
+        irb_emit(b, IR_BRANCH, start_label, 0, 0, 0, 0);
+        irb_emit(b, IR_NOP, end_label, 0, 0, 0, 0);  // label marker
+        return;
+    }
+    
+    // Expression statement
+    irb_lower_expr(b, ast, node_idx);
+}
+
+// Lower a block (NK_BLOCK: c1=stmt_start, c2=stmt_count)
+fn irb_lower_block(b: Address, ast: u64, node_idx: u32) {
+    node_offset: u32 = 8 + node_idx * 40;
+    stmt_start: u32 = load_u32(ast, node_offset + 4);
+    stmt_count: u32 = load_u32(ast, node_offset + 8);
+    i: u32 = 0;
+    while i < stmt_count {
+        irb_lower_stmt(b, ast, stmt_start + i);
+        i = i + 1;
+    }
+}
+
+// Lower a function definition (NK_FN_DEF: c1=body, c3=param_count)
+fn irb_lower_fn(b: Address, ast: u64, node_idx: u32) {
+    node_offset: u32 = 8 + node_idx * 40;
+    body: u32 = load_u32(ast, node_offset + 4);
+    param_count: u32 = load_u32(ast, node_offset + 12);
+    
+    // Reset symbol table for this function
+    store_u32(b, 24, 0);
+    
+    // Allocate vregs for parameters
+    i: u32 = 0;
+    while i < param_count {
+        irb_alloc_vreg(b);
+        i = i + 1;
+    }
+    
+    // Lower body
+    irb_lower_block(b, ast, body);
+    
+    // Ensure function ends with RET
+    ir_buf: u64 = load_u64(b, 0);
+    count: u32 = load_u32(ir_buf, 0);
+    if count > 0 {
+        last_offset: u32 = 8 + (count - 1) * IR_SIZE;
+        last_op: u32 = load_u32(ir_buf, last_offset);
+        if last_op != IR_RET {
+            irb_emit(b, IR_RET, 0, 0, 0, 0, 0);
+        }
+    }
+}
+
+fn irb_free(b: Address) {
+    symtab: u64 = load_u64(b, 16);
+    __vuma_free(symtab, 4096);
+    __vuma_free(b, 32);
+}
