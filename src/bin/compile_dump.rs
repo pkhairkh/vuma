@@ -49,6 +49,16 @@ fn compile_for_backend_with_path(source: &str, kind: BackendKind, file_path: Opt
     let _ = run_scg_transforms(&mut scg, &config);
     let codegen_scg = bridge_scg_to_codegen(&scg);
     let ir_program = { let mut b = IRBuilder::new(); b.build(&codegen_scg).map_err(|e| format!("ir: {}", e))? };
+    if std::env::var("VUMA_DEBUG").is_ok() {
+        for func in &ir_program.functions {
+            eprintln!("Function: {}", func.name);
+            for block in &func.blocks {
+                for instr in &block.instructions {
+                    eprintln!("  {:?}", instr);
+                }
+            }
+        }
+    }
     let backend = create_backend(kind).map_err(|e| format!("backend: {}", e))?;
     let mut allocated = Vec::new();
     for func in &ir_program.functions {
