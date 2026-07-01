@@ -2604,23 +2604,6 @@ impl IRBuilder {
             self.vreg_types.insert(dst_vreg, ty.clone());
         }
 
-        // Pointer propagation: if either lhs or rhs is a pointer vreg,
-        // the result is also a pointer. This is critical for Store width
-        // inference — when a pointer value is stored (e.g. `*buf1 = buf2`),
-        // the store must use U64 (not U8) to preserve the full address.
-        // Without this, the copy `buf2 = buf2 + 0` creates a new vreg that
-        // is NOT in pointer_vregs, causing the Store to truncate the address.
-        let lhs_is_ptr = lhs_val.as_register()
-            .map(|id| self.pointer_vregs.contains(&id))
-            .unwrap_or(false);
-        let rhs_is_ptr = rhs_val.as_register()
-            .map(|id| self.pointer_vregs.contains(&id))
-            .unwrap_or(false);
-        if lhs_is_ptr || rhs_is_ptr {
-            self.pointer_vregs.insert(dst_vreg);
-            self.vreg_types.insert(dst_vreg, crate::ir::IRType::Ptr);
-        }
-
         // Reassignment propagation: update the `names` map so that the
         // user-visible variable being assigned (and any aliases sharing the
         // same previous vreg) now point to the freshly-allocated dst_vreg.
