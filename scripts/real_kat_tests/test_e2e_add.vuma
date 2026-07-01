@@ -1,0 +1,58 @@
+// KAT: E2E — lex '10', lex '+', lex '20', parse, eval = 30
+// Expected: 1e (30)
+extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+fn is_digit(c: u32) -> u32 {
+    if c >= 48 { if c <= 57 { return 1; } }
+    return 0;
+}
+fn main() -> i32 {
+    // Source: "10+20"
+    src = allocate(5);
+    *(src + 0) = 49;  // '1'
+    *(src + 1) = 48;  // '0'
+    *(src + 2) = 43;  // '+'
+    *(src + 3) = 50;  // '2'
+    *(src + 4) = 48;  // '0'
+    
+    // Lex first number: "10"
+    pos: u32 = 0;
+    done: u32 = 0;
+    val1: u32 = 0;
+    while done == 0 {
+        if pos >= 5 { done = 1; }
+        if done == 0 {
+            c: u32 = *(src + pos);
+            d: u32 = is_digit(c);
+            if d == 1 { val1 = val1 * 10 + (c - 48); pos = pos + 1; }
+            else { done = 1; }
+        }
+    }
+    
+    // Skip '+'
+    if pos < 5 {
+        c: u32 = *(src + pos);
+        if c == 43 { pos = pos + 1; }  // '+'
+    }
+    
+    // Lex second number: "20"
+    val2: u32 = 0;
+    done = 0;
+    while done == 0 {
+        if pos >= 5 { done = 1; }
+        if done == 0 {
+            c: u32 = *(src + pos);
+            d: u32 = is_digit(c);
+            if d == 1 { val2 = val2 * 10 + (c - 48); pos = pos + 1; }
+            else { done = 1; }
+        }
+    }
+    
+    // Parse: Add(val1, val2)
+    // Eval: val1 + val2
+    result: u32 = val1 + val2;  // 10 + 20 = 30
+    
+    out = allocate(1);
+    *out = result & 255;
+    write(1, out, 1);
+    return 0;
+}
