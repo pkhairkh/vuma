@@ -2124,10 +2124,17 @@ impl IRBuilder {
         }
 
         // After all comparisons, fall through to default.
-        ir_func.current_block().push(IRInstruction::Branch {
-            target: default_label.clone(),
-        });
-        ir_func.current_block().terminator = IRTerminator::Jump(default_label.clone());
+        // But only if the current block doesn't already have a terminator
+        // (the last CondBranch already sets the terminator).
+        if matches!(
+            ir_func.current_block().terminator,
+            IRTerminator::Unreachable
+        ) {
+            ir_func.current_block().push(IRInstruction::Branch {
+                target: default_label.clone(),
+            });
+            ir_func.current_block().terminator = IRTerminator::Jump(default_label.clone());
+        }
 
         // Track all variable definitions across arms for phi insertion.
         let mut all_arm_defs: Vec<VarDefs> = Vec::new();
