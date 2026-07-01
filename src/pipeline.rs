@@ -2595,6 +2595,7 @@ fn convert_computation_node(
                 rhs,
                 tail_call: false,
                 reassigns: user_var,
+                result_ty: None,
             }));
             return call_stmts;
         }
@@ -2608,6 +2609,7 @@ fn convert_computation_node(
             rhs: rhs_expr,
             tail_call: false,
             reassigns: user_var,
+            result_ty: None,
         }));
         return call_stmts;
     }
@@ -2866,6 +2868,7 @@ fn convert_computation_no_calls(
                         rhs: ScgExpr::Var(load_dst),
                         tail_call: false,
                         reassigns: Some(uv),
+                        result_ty: None,
                     }));
                 }
                 return stmts;
@@ -3010,6 +3013,7 @@ fn convert_computation_no_calls(
                                         rhs: ScgExpr::Var(alloc_name),
                                         tail_call: false,
                                         reassigns: Some(uv),
+                                        result_ty: None,
                                     }));
                                 }
                                 return stmts;
@@ -3029,6 +3033,7 @@ fn convert_computation_no_calls(
                                 rhs: ScgExpr::Var(alloc_name),
                                 tail_call: false,
                                 reassigns: Some(uv),
+                                result_ty: None,
                             }));
                         }
                         return stmts;
@@ -3056,6 +3061,7 @@ fn convert_computation_no_calls(
                                         rhs: ScgExpr::Var(load_dst),
                                         tail_call: false,
                                         reassigns: Some(uv),
+                                        result_ty: None,
                                     }));
                                 }
                                 return stmts;
@@ -3252,6 +3258,7 @@ fn convert_computation_no_calls(
                         rhs: ScgExpr::Int(0),
                         tail_call: false,
                         reassigns: Some(uname),
+                        result_ty: None,
                     }));
                 }
                 return stmts;
@@ -3303,6 +3310,7 @@ fn convert_computation_no_calls(
         }
         let lhs = resolve_subexpr(&lhs_str, sources, edge_idx, scg);
         let rhs = resolve_subexpr(&rhs_str, sources, edge_idx, scg);
+        let rty = result_type_to_load_ty(&comp.result_type);
         return vec![ScgStatement::Computation(ComputationNode {
             dst: computation_dst(node_id, op_label, scg),
             op,
@@ -3310,11 +3318,13 @@ fn convert_computation_no_calls(
             rhs,
             tail_call: false,
             reassigns: user_var,
+            result_ty: rty,
         })];
     }
 
     // No top-level operator: emit a copy
     let rhs_expr = resolve_subexpr(&expr_str, sources, edge_idx, scg);
+    let rty = result_type_to_load_ty(&comp.result_type);
     vec![ScgStatement::Computation(ComputationNode {
         dst: computation_dst(node_id, op_label, scg),
         op: IrBinOpKind::Add,
@@ -3322,6 +3332,7 @@ fn convert_computation_no_calls(
         rhs: rhs_expr,
         tail_call: false,
         reassigns: user_var,
+        result_ty: rty,
     })]
 }
 
