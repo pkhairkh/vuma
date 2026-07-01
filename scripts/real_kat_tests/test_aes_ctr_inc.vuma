@@ -1,0 +1,13 @@
+// KAT: AES-CTR counter increment
+// Expected: 01
+extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+
+fn main() -> i32 {
+    // CTR: nonce || counter, counter starts at 0, increments
+    ctr: u32 = 0;
+    ctr = ctr + 1;
+    out = allocate(1);
+    *out = ctr;
+    write(1, out, 1);
+    return 0;
+}

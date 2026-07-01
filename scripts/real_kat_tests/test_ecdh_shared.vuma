@@ -1,0 +1,15 @@
+// KAT: ECDH 3*5 mod 7 = 1
+// Expected: 01
+extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+
+fn main() -> i32 {
+    // ECDH: shared = dA * QB = dB * QA
+    // Test: scalar mult in GF(p)
+    // 3 * 5 mod 7 = 15 mod 7 = 1
+    d: u32 = 3; q: u32 = 5; p: u32 = 7;
+    r: u32 = (d * q) % p;
+    out = allocate(1);
+    *out = r;
+    write(1, out, 1);
+    return 0;
+}

@@ -1,0 +1,11 @@
+// KAT: Camellia-128 rounds=18
+// Expected: 12
+extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+
+fn main() -> i32 {
+    // Camellia-128: 18 rounds + 6 FL/FL^-1 = 24 operations
+    out = allocate(1);
+    *out = 18;
+    write(1, out, 1);
+    return 0;
+}

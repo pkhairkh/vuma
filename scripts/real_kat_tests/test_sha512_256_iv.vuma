@@ -1,0 +1,13 @@
+// KAT: SHA-512/256 IV[0]
+// Expected: 22
+extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+
+fn main() -> i32 {
+    // SHA-512/256 IV[0] hi = 0x22312194 = 574016148
+    // >> 24 = 0x22 = 34
+    v: u32 = 574016148;
+    out = allocate(1);
+    *out = (v >> 24) & 255;
+    write(1, out, 1);
+    return 0;
+}

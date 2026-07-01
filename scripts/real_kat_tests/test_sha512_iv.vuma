@@ -1,0 +1,13 @@
+// KAT: SHA-512 IV[0] hi byte
+// Expected: 6a
+extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+
+fn main() -> i32 {
+    // SHA-512 IV[0] hi = 0x6a09e667 = 1779033703
+    // >> 24 = 0x6a = 106
+    v: u32 = 1779033703;
+    out = allocate(1);
+    *out = (v >> 24) & 255;
+    write(1, out, 1);
+    return 0;
+}

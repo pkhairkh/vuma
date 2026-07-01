@@ -1,0 +1,12 @@
+// KAT: HQC q=2048 big-endian
+// Expected: 0800
+extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+
+fn main() -> i32 {
+    // HQC-128: q = 2048
+    out = allocate(2);
+    *(out+0) = (2048 >> 8) & 255;  // 0x08
+    *(out+1) = 2048 & 255;         // 0x00
+    write(1, out, 2);
+    return 0;
+}

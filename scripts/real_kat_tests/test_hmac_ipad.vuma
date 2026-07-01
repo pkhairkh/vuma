@@ -1,0 +1,13 @@
+// KAT: HMAC ipad=0x36
+// Expected: 36
+extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+
+fn main() -> i32 {
+    // HMAC: K XOR ipad, ipad = 0x36
+    k: u32 = 0;
+    r: u32 = k ^ 54;
+    out = allocate(1);
+    *out = r;
+    write(1, out, 1);
+    return 0;
+}

@@ -1,0 +1,12 @@
+// KAT: AES-KW IV
+// Expected: a6a6a6a6a6a6a6a6
+extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+
+fn main() -> i32 {
+    // Key Wrap IV = A6A6A6A6A6A6A6A6
+    out = allocate(8);
+    i: u32 = 0;
+    while i < 8 { *(out + i) = 166; i = i + 1; }  // 0xA6
+    write(1, out, 8);
+    return 0;
+}

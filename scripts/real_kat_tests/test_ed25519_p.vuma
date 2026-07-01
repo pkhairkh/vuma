@@ -1,0 +1,12 @@
+// KAT: Ed25519 p mod 256 = 0xED
+// Expected: ed
+extern "C" { fn write(fd: i64, buf: Address, count: i64) -> i64; }
+
+fn main() -> i32 {
+    // Ed25519: p = 2^255 - 19
+    // p mod 256 = (0 - 19) mod 256 = 237
+    out = allocate(1);
+    *out = 237;
+    write(1, out, 1);
+    return 0;
+}
