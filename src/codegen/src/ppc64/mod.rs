@@ -2444,27 +2444,16 @@ fn lower_ir_instr_ppc64(
             ));
         }
 
-        IRInstr::Div { dst, lhs, rhs, ty } => {
+        IRInstr::Div { dst, lhs, rhs, .. } => {
             let d = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
             let l = resolve_gpr_ppc64(lhs, vreg_map, Gpr::R0, &mut result);
             let r = resolve_gpr_ppc64(rhs, vreg_map, Gpr::R11, &mut result);
-            let is_32bit = ty.as_ref().map_or(false, |t| matches!(t, IRType::I32 | IRType::U32));
-            let is_unsigned = ty.as_ref().map_or(false, |t| matches!(t, IRType::U8 | IRType::U16 | IRType::U32 | IRType::U64));
-            let div_instr = if is_32bit {
-                if is_unsigned {
-                    Instruction::Divwu { rt: d, ra: l, rb: r }
-                } else {
-                    Instruction::Divw { rt: d, ra: l, rb: r }
-                }
-            } else {
-                if is_unsigned {
-                    Instruction::Divdu { rt: d, ra: l, rb: r }
-                } else {
-                    Instruction::Divd { rt: d, ra: l, rb: r }
-                }
-            };
             result.push(emit_alloc_instr(
-                div_instr,
+                Instruction::Divd {
+                    rt: d,
+                    ra: l,
+                    rb: r,
+                },
                 vec![
                     PhysicalReg::new(RegClass::Gpr, l.encoding()),
                     PhysicalReg::new(RegClass::Gpr, r.encoding()),
