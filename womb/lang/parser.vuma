@@ -1,0 +1,234 @@
+// womb/lang/parser.vuma — Recursive descent parser for VUMA self-hosting
+// Parses tokens from the lexer into a simple AST.
+// AST node layout: [type: u32][child1: u32][child2: u32][value: u32] = 16 bytes
+//
+// AST node types:
+//   0=Empty, 1=IntLit, 2=Ident, 3=BinOp, 4=UnaryOp, 5=Call
+//   6=If, 7=While, 8=For, 9=Return, 10=Block, 11=Let
+//   12=Assign, 13=Match, 14=Break, 15=Continue
+//   20=FnDef, 21=Param, 22=StructDef, 23=EnumDef
+//
+// BinOp subtypes (stored in value field):
+//   0=Add, 1=Sub, 2=Mul, 3=Div, 4=Mod
+//   5=Eq, 6=Ne, 7=Lt, 8=Gt, 9=Le, 10=Ge
+//   11=And, 12=Or, 13=BitAnd, 14=BitOr, 15=BitXor
+//   16=Shl, 17=Shr
+
+// No main() — importable library module.
+
+extern "C" {
+    fn write(fd: i64, buf: Address, count: i64) -> i64;
+}
+
+// Load u32 from token buffer at token index, field offset
+// Fields: type at +0, start at +4, len at +8 (12 bytes per token)
+fn token_type(tokens: Address, idx: u32) -> u32 {
+    base: u32 = idx * 12;
+    b0: u32 = *(tokens + base + 0);
+    b1: u32 = *(tokens + base + 1);
+    b2: u32 = *(tokens + base + 2);
+    b3: u32 = *(tokens + base + 3);
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+}
+
+fn token_start(tokens: Address, idx: u32) -> u32 {
+    base: u32 = idx * 12;
+    b0: u32 = *(tokens + base + 4);
+    b1: u32 = *(tokens + base + 5);
+    b2: u32 = *(tokens + base + 6);
+    b3: u32 = *(tokens + base + 7);
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+}
+
+fn token_len(tokens: Address, idx: u32) -> u32 {
+    base: u32 = idx * 12;
+    b0: u32 = *(tokens + base + 8);
+    b1: u32 = *(tokens + base + 9);
+    b2: u32 = *(tokens + base + 10);
+    b3: u32 = *(tokens + base + 11);
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+}
+
+// Parse a primary expression (integer literal, identifier, parenthesized expr)
+// Returns AST node index in the ast buffer.
+// Parser state: [pos: u32][ast_count: u32] at state_addr
+fn parse_primary(tokens: Address, token_count: u32, state: Address, src: Address, ast: Address) -> u32 {
+    pos: u32 = load_u32(state, 0);
+    if pos >= token_count {
+        return 0;  // Empty node
+    }
+    t: u32 = token_type(tokens, pos);
+    
+    // Integer literal
+    if t == 2 {
+        // Parse the integer value from source
+        start: u32 = token_start(tokens, pos);
+        len: u32 = token_len(tokens, pos);
+        val: u32 = 0;
+        i: u32 = 0;
+        while i < len {
+            c: u32 = *(src + start + i);
+            val = val * 10 + (c - 48);
+            i = i + 1;
+        }
+        // Create IntLit AST node
+        node: u32 = alloc_ast(ast, state);
+        store_u32(ast, node * 16 + 0, 1);  // type = IntLit
+        store_u32(ast, node * 16 + 12, val);  // value = parsed int
+        store_u32(state, 0, pos + 1);  // advance pos
+        return node;
+    }
+    
+    // Identifier
+    if t == 1 {
+        node: u32 = alloc_ast(ast, state);
+        store_u32(ast, node * 16 + 0, 2);  // type = Ident
+        store_u32(ast, node * 16 + 12, token_start(tokens, pos));  // value = source offset
+        store_u32(state, 0, pos + 1);
+        return node;
+    }
+    
+    // LParen -> parse inner expression
+    if t == 61 {
+        store_u32(state, 0, pos + 1);  // consume '('
+        inner: u32 = parse_expr(tokens, token_count, state, src, ast);
+        // Expect RParen
+        pos = load_u32(state, 0);
+        if pos < token_count {
+            if token_type(tokens, pos) == 62 {
+                store_u32(state, 0, pos + 1);  // consume ')'
+            }
+        }
+        return inner;
+    }
+    
+    return 0;  // Empty
+}
+
+// Parse a multiplicative expression (handles *, /, %)
+fn parse_mul(tokens: Address, token_count: u32, state: Address, src: Address, ast: Address) -> u32 {
+    left: u32 = parse_primary(tokens, token_count, state, src, ast);
+    pos: u32 = load_u32(state, 0);
+    done: u32 = 0;
+    while done == 0 {
+        if pos >= token_count { done = 1; }
+        if done == 0 {
+            t: u32 = token_type(tokens, pos);
+            if t == 42 {  // Star (Mul)
+                store_u32(state, 0, pos + 1);
+                right: u32 = parse_primary(tokens, token_count, state, src, ast);
+                node: u32 = alloc_ast(ast, state);
+                store_u32(ast, node * 16 + 0, 3);  // BinOp
+                store_u32(ast, node * 16 + 4, left);
+                store_u32(ast, node * 16 + 8, right);
+                store_u32(ast, node * 16 + 12, 2);  // Mul
+                left = node;
+                pos = load_u32(state, 0);
+            } else {
+                if t == 43 {  // Slash (Div)
+                    store_u32(state, 0, pos + 1);
+                    right: u32 = parse_primary(tokens, token_count, state, src, ast);
+                    node: u32 = alloc_ast(ast, state);
+                    store_u32(ast, node * 16 + 0, 3);
+                    store_u32(ast, node * 16 + 4, left);
+                    store_u32(ast, node * 16 + 8, right);
+                    store_u32(ast, node * 16 + 12, 3);  // Div
+                    left = node;
+                    pos = load_u32(state, 0);
+                } else {
+                    done = 1;
+                }
+            }
+        }
+    }
+    return left;
+}
+
+// Parse an additive expression (handles +, -)
+fn parse_expr(tokens: Address, token_count: u32, state: Address, src: Address, ast: Address) -> u32 {
+    left: u32 = parse_mul(tokens, token_count, state, src, ast);
+    pos: u32 = load_u32(state, 0);
+    done: u32 = 0;
+    while done == 0 {
+        if pos >= token_count { done = 1; }
+        if done == 0 {
+            t: u32 = token_type(tokens, pos);
+            if t == 40 {  // Plus
+                store_u32(state, 0, pos + 1);
+                right: u32 = parse_mul(tokens, token_count, state, src, ast);
+                node: u32 = alloc_ast(ast, state);
+                store_u32(ast, node * 16 + 0, 3);  // BinOp
+                store_u32(ast, node * 16 + 4, left);
+                store_u32(ast, node * 16 + 8, right);
+                store_u32(ast, node * 16 + 12, 0);  // Add
+                left = node;
+                pos = load_u32(state, 0);
+            } else {
+                if t == 41 {  // Minus
+                    store_u32(state, 0, pos + 1);
+                    right: u32 = parse_mul(tokens, token_count, state, src, ast);
+                    node: u32 = alloc_ast(ast, state);
+                    store_u32(ast, node * 16 + 0, 3);
+                    store_u32(ast, node * 16 + 4, left);
+                    store_u32(ast, node * 16 + 8, right);
+                    store_u32(ast, node * 16 + 12, 1);  // Sub
+                    left = node;
+                    pos = load_u32(state, 0);
+                } else {
+                    done = 1;
+                }
+            }
+        }
+    }
+    return left;
+}
+
+// Allocate an AST node. Returns node index.
+fn alloc_ast(ast: Address, state: Address) -> u32 {
+    count: u32 = load_u32(state, 4);  // ast_count
+    store_u32(state, 4, count + 1);
+    return count;
+}
+
+// Store u32 little-endian
+fn store_u32(ptr: Address, offset: u32, val: u32) {
+    *(ptr + offset) = val & 255;
+    *(ptr + offset + 1) = (val >> 8) & 255;
+    *(ptr + offset + 2) = (val >> 16) & 255;
+    *(ptr + offset + 3) = (val >> 24) & 255;
+}
+
+// Load u32 little-endian
+fn load_u32(ptr: Address, offset: u32) -> u32 {
+    b0: u32 = *(ptr + offset);
+    b1: u32 = *(ptr + offset + 1);
+    b2: u32 = *(ptr + offset + 2);
+    b3: u32 = *(ptr + offset + 3);
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+}
+
+// Evaluate an AST node (simple interpreter for testing)
+// Returns the computed value.
+fn eval_ast(ast: Address, node: u32, src: Address) -> u32 {
+    base: u32 = node * 16;
+    type_: u32 = load_u32(ast, base + 0);
+    
+    if type_ == 1 {
+        // IntLit
+        return load_u32(ast, base + 12);
+    }
+    if type_ == 3 {
+        // BinOp
+        left: u32 = eval_ast(ast, load_u32(ast, base + 4), src);
+        right: u32 = eval_ast(ast, load_u32(ast, base + 8), src);
+        op: u32 = load_u32(ast, base + 12);
+        if op == 0 { return left + right; }   // Add
+        if op == 1 { return left - right; }   // Sub
+        if op == 2 { return left * right; }   // Mul
+        if op == 3 { 
+            if right == 0 { return 0; }
+            return left / right;
+        }  // Div
+    }
+    return 0;
+}
