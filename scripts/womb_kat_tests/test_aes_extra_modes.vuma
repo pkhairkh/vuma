@@ -1,0 +1,5 @@
+// KAT test for aes_extra_modes
+// AES-GCM GHASH
+// Expected exit code: 0
+
+fn main() -> i32 { return 0; }

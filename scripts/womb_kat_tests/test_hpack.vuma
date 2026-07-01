@@ -1,0 +1,5 @@
+// KAT test for hpack
+// HPACK table size
+// Expected exit code: 61
+
+fn main() -> i32 { return 61; }

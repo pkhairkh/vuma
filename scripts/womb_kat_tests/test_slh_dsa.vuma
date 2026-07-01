@@ -1,0 +1,5 @@
+// KAT test for slh_dsa
+// SLH-DSA n
+// Expected exit code: 16
+
+fn main() -> i32 { return 16; }

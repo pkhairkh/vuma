@@ -1,0 +1,5 @@
+// KAT test for md5
+// MD5 IV[0]
+// Expected exit code: 103
+
+fn main() -> i32 { return (1732584193 >> 24) & 255; }

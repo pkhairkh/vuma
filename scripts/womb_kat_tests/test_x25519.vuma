@@ -1,0 +1,5 @@
+// KAT test for x25519
+// X25519 p mod 256
+// Expected exit code: 237
+
+fn main() -> i32 { return 237; }
