@@ -2,69 +2,74 @@
 
 All notable changes to the VUMA project.
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+---
+
+## [0.2.0-alpha.1] — 2026-06-30
+
+### Added
+
+- **Heap allocation**: `__vuma_alloc` (mmap) and `__vuma_free` (munmap) syscall stubs on all 10 backends
+- **Womb stdlib**: 115 .vuma files (~65K lines) including:
+  - Collections: DynamicVec (heap-backed), HashMap, BTreeMap, EnumMap
+  - Strings: UTF-8 VStr, StringBuilder
+  - File I/O: raw syscalls, high-level read/write, path manipulation
+  - Graph: heap-backed digraph with dynamic grow, toposort, cycle detection
+  - Language: full lexer, full parser, IR builder, x86_64 codegen, ELF writer
+  - Crypto: 44 modules (SHA, AES, RSA, ECDSA, Ed25519, ChaCha20, etc.)
+  - Network: TCP/UDP, DNS, HTTP, WebSocket
+- **Language features**: match expressions, struct field access, enum tagged unions, import system, for-range loops, break/continue, type annotations, dereference in function arguments, function calls in expressions
+- **Arena allocator**: bump allocator on mmap'd block (opaque arena pattern)
+- **Buffered I/O**: BufReader/BufWriter with 8KB buffer
+- **CLI argument parsing**: via /proc/self/cmdline
+- **Modular IVE infrastructure**: IncrementalCache, AbstractRegionTracker, per-function verification (not integrated into main pipeline)
+
+### Fixed
+
+- Const reference resolution (`x & MASK32` no longer returns 0)
+- If-body return (`if cond { return val; }` no longer dropped)
+- Function calls in while loops (recursive descent parser works)
+- Deep call chains (5-level recursion works)
+- Dereference in function arguments (`id(*(buf + 0))` works)
+- Function calls in expressions (`if (is_digit(c) == 1)` works)
+- Match expressions with block arms and default arm
+- Switch block isolation (each Cmp+CondBranch has own block)
+- CRC32 polynomial (3988292384 not 4022334336)
+- SHA-256 K[1] (1899447441 not 1899447443)
+- Function calls and Loads in while/if conditions
+- User-visible variable name registration for Load/Allocation
+- Digraph 8-bit overflow bug (node/edge counts truncated to 8 bits)
+- Call-site argument DataFlow edges (labeled "arg0", "arg1", etc.)
+- MSG cycle detection (updated for SCC-based topological sort)
+
+### Known Limitations
+
+- Verification has false positives (most programs use `--verification none`)
+- Self-hosting not started (individual modules exist, not tested end-to-end)
+- Type checking not implemented
+- While-loop variable tracking bug across function calls
+- `vuma-std` Rust crate not linked to VUMA programs
+- BD inference M2.3 (generics) deferred
+- Concurrent verification limited to single-threaded
+- COR runtime not fully integrated
 
 ---
 
 ## [0.1.0-alpha.1] — 2026-06-28
 
-Alpha release with 10 backend architectures at 100% gold-standard pass rate.
+Initial alpha release.
 
 ### Added
 
-- **10 backend architectures**: x86_64, AArch64, RISC-V 64, ARM32, MIPS64, PPC64, LoongArch64, x86_32, RISC-V 32, Wasm32
-- **5,738-program gold-standard test suite** at 100% pass rate (57,380/57,380 runs across all 10 backends)
-- **FFI**: 19 Linux syscalls across all 10 architectures, `extern "C"` blocks, architecture-specific relocations
-- **Atomics**: `AtomicLoad`, `AtomicStore`, `AtomicCas` on all 10 backends
-- **FP conversions**: `IntToFloat`, `UIntToFloat`, `FloatToInt`, `FloatToUInt`, `FloatToFloat` on all 10 backends
-- **Constant-time crypto**: `ct_select`, `ct_eq`, `ct_ne`, `ct_lt`, `ct_gte`
-- **DWARF v4 debug info**: `.debug_abbrev`, `.debug_info`, `.debug_line`, `.debug_frame`
-- **66 diagnostic codes**: E000–E050, W001–W010, I001–I005 with error chaining
-- **LLM API**: `VumaForLLM` with `compile()`, `check()`, `analyze()`, `to_wasm()`, `explain_error()`, `suggest_fixes()`
-- **LSP server**: diagnostics, hover, go-to-definition, completion, semantic tokens
-- **REPL**: `:wasm`, `:backends`, `:check`, `:diagnostics`, `:exports`
-- **Module system**: `import` with circular import detection
-- **Package manager**: `vuma pkg init/build/add`
-- **11 workspace crates**: scg, ive, vuma (core), bd, codegen, parser, cor, proof, std, tests, package
-
-### Fixed
-
-- **mips64 MAP_ANONYMOUS**: Fixed flag value from 0x22 (x86) to 0x802 (MIPS where MAP_ANONYMOUS=0x800)
-- **wasm32 __vuma_alloc**: Dynamic-size allocations now use bump allocator instead of resolving to return-(-1) stub
-- **ppc64 enum_demo**: Big-endian U8/U32 mismatch fixed via byte-level access
-- **x86_32 stack-passed args**: Args 4+ now loaded from [EBP+8+(i-4)*4]
-- **x86_32 EBP clobber**: mmap/futex stubs now save/restore EBP frame pointer
-- **x86_32 EDX high word**: Removed incorrect EDX store after function calls
-- **x86_32 store_vreg**: Zeroes high word after 32-bit stores
-- **riscv32/arm32 64-bit return values**: Load both words for 64-bit returns, sign-extend extern returns
-- **wasm32 stub**: Unknown extern functions resolve to stub returning -1
-- **While-loop for-range guard**: Skip conversion when body reassigns variables
-- **Continue block**: Always create continue block for all loops
-- **mmap_sha256d race condition**: PID-based unique temp file path
-- **lower_computation prev_vreg**: Removed incorrect lhs-based vreg remapping that treated let-bindings as reassignments
-
-### Changed
-
-- **FFI Arch enum**: Added `X86_32` and `RiscV32` variants with correct syscall tables
-- **README**: Complete rewrite to remove AI-generated fluff, fix factual errors, update repo URL
-- **Documentation**: All "8 backends" references updated to "10 backends" across docs/
-
----
-
-## [0.1.0-alpha.0] — 2026-06-16
-
-Initial alpha pre-release.
-
-### Added
-
-- SCG (Semantic Computation Graph) core
-- IVE (Inference & Verification Engine) with five invariants
-- BD (Behavioral Descriptors) with RepD/CapD/RelD
-- MSG (Memory State Graph) construction
-- Parser with lexer, AST, error recovery
-- 8 initial backend architectures (x86_64, AArch64, RISC-V 64, ARM32, MIPS64, PPC64, LoongArch64, Wasm32)
-- Proof system with counterexamples
-- Standard library (host-side)
-- LLM API and LSP server
-- 15 formal specification documents
+- 10 backend architectures: x86_64, AArch64, RISC-V 64, ARM32, MIPS64, PPC64, LoongArch64, x86_32, RISC-V 32, Wasm32
+- 5,738-program gold-standard test suite at 100% pass rate (57,380/57,380 runs with `--verification none`)
+- FFI: 19 Linux syscalls, `extern "C"` blocks, architecture-specific relocations
+- Atomics: `AtomicLoad`, `AtomicStore`, `AtomicCas` on all 10 backends
+- FP conversions: `IntToFloat`, `UIntToFloat`, `FloatToInt`, `FloatToUInt`, `FloatToFloat`
+- DWARF v4 debug info
+- 66 diagnostic codes
+- LLM API (`VumaForLLM`)
+- LSP server
+- REPL
+- Module system with circular import detection
+- Package manager (`vuma pkg init/build/add`)
+- 11 workspace crates
