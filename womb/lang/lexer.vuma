@@ -1,11 +1,33 @@
-// womb/lang/lexer.vuma — Minimal lexer for VUMA self-hosting
-// Tokenizes a source string into tokens.
-// Token layout: [type: u32][value: u32] = 8 bytes per token
-// Token types: 0=EOF, 1=Ident, 2=Int, 3=Plus, 4=Minus, 5=Star, 6=Slash
-//              7=LParen, 8=RParen, 9=LBrace, 10=RBrace, 11=Semi
-//              12=Eq, 13=Comma, 14=Return, 15=Fn, 16=If, 17=While
+// womb/lang/lexer.vuma — VUMA lexer for self-hosting
+// Tokenizes VUMA source code into a token stream.
+// Token layout: [type: u32][start: u32][len: u32] = 12 bytes per token
+// Stored in a flat buffer: token_buf[i*12 + 0..3] = type
+//                          token_buf[i*12 + 4..7] = start offset in source
+//                          token_buf[i*12 + 8..11] = length
+//
+// Token types:
+//   0=EOF, 1=Ident, 2=IntLit, 3=StrLit, 4=CharLit
+//   10=Fn, 11=Let, 12=If, 13=Else, 14=While, 15=For, 16=Return
+//   17=Match, 18=Break, 19=Continue, 20=Struct, 21=Enum, 22=Impl
+//   23=Import, 24=Export, 25=Const, 26=Static, 27=Extern, 28=Pub
+//   29=True, 30=False, 31=As, 32=Where, 33=Trait, 34=Region
+//   40=Plus, 41=Minus, 42=Star, 43=Slash, 44=Percent
+//   45=Eq, 46=EqEq, 47=NotEq, 48=Lt, 49=Gt, 50=Le, 51=Ge
+//   52=And, 53=Or, 54=Not, 55=BitAnd, 56=BitOr, 57=BitXor, 58=BitNot
+//   59=Shl, 60=Shr
+//   61=LParen, 62=RParen, 63=LBrace, 64=RBrace, 65=LBracket, 66=RBracket
+//   67=Semi, 68=Comma, 69=Dot, 70=Colon, 71=ColonColon, 72=Arrow, 73=FatArrow
+//   74=At, 75=Question, 76=Bang, 77=Hash
+//   80=PlusEq, 81=MinusEq, 82=StarEq, 83=SlashEq
+//   90=Comment, 91=LineComment
 
-// Check if character is alphanumeric
+// No main() — importable library module.
+
+extern "C" {
+    fn write(fd: i64, buf: Address, count: i64) -> i64;
+}
+
+// Check if character is alphabetic (a-z, A-Z, _)
 fn is_alpha(c: u32) -> u32 {
     if c >= 97 { if c <= 122 { return 1; } }  // a-z
     if c >= 65 { if c <= 90 { return 1; } }   // A-Z
@@ -13,9 +35,16 @@ fn is_alpha(c: u32) -> u32 {
     return 0;
 }
 
-// Check if character is a digit
+// Check if character is a digit (0-9)
 fn is_digit(c: u32) -> u32 {
     if c >= 48 { if c <= 57 { return 1; } }
+    return 0;
+}
+
+// Check if character is alphanumeric
+fn is_alnum(c: u32) -> u32 {
+    if is_alpha(c) == 1 { return 1; }
+    if is_digit(c) == 1 { return 1; }
     return 0;
 }
 
@@ -28,79 +57,341 @@ fn is_space(c: u32) -> u32 {
     return 0;
 }
 
-// Lex a single token from source at position pos
-// Returns: token_type in out[0], token_value in out[1], new_pos in out[2]
-fn lex_token(src: Address, pos: u32, out: Address) -> u32 {
+// Check if character is hex digit
+fn is_hex(c: u32) -> u32 {
+    if is_digit(c) == 1 { return 1; }
+    if c >= 97 { if c <= 102 { return 1; } }  // a-f
+    if c >= 65 { if c <= 70 { return 1; } }   // A-F
+    return 0;
+}
+
+// Lex a single token from source at position pos.
+// Writes token info to out buffer (3 u32s: type, start, len).
+// Returns new position.
+fn lex_token(src: Address, src_len: u32, pos: u32, out: Address) -> u32 {
     i: u32 = pos;
+    
     // Skip whitespace
     done: u32 = 0;
     while done == 0 {
-        if i >= 4096 { done = 1; }
-        c: u32 = *(src + i);
-        if is_space(c) == 1 { i = i + 1; }
-        else { done = 1; }
-    }
-    if i >= 4096 {
-        *(out + 0) = 0;  // EOF
-        *(out + 4) = 0;
-        *(out + 8) = i;
-        return i;
-    }
-    c: u32 = *(src + i);
-    // Single-char tokens
-    if c == 43 { *(out + 0) = 3; *(out + 4) = 0; *(out + 8) = i + 1; return i + 1; }  // +
-    if c == 45 { *(out + 0) = 4; *(out + 4) = 0; *(out + 8) = i + 1; return i + 1; }  // -
-    if c == 42 { *(out + 0) = 5; *(out + 4) = 0; *(out + 8) = i + 1; return i + 1; }  // *
-    if c == 47 { *(out + 0) = 6; *(out + 4) = 0; *(out + 8) = i + 1; return i + 1; }  // /
-    if c == 40 { *(out + 0) = 7; *(out + 4) = 0; *(out + 8) = i + 1; return i + 1; }  // (
-    if c == 41 { *(out + 0) = 8; *(out + 4) = 0; *(out + 8) = i + 1; return i + 1; }  // )
-    if c == 123 { *(out + 0) = 9; *(out + 4) = 0; *(out + 8) = i + 1; return i + 1; } // {
-    if c == 125 { *(out + 0) = 10; *(out + 4) = 0; *(out + 8) = i + 1; return i + 1; } // }
-    if c == 59 { *(out + 0) = 11; *(out + 4) = 0; *(out + 8) = i + 1; return i + 1; } // ;
-    if c == 61 { *(out + 0) = 12; *(out + 4) = 0; *(out + 8) = i + 1; return i + 1; } // =
-    if c == 44 { *(out + 0) = 13; *(out + 4) = 0; *(out + 8) = i + 1; return i + 1; } // ,
-    // Integer literal
-    if is_digit(c) == 1 {
-        val: u32 = 0;
-        while is_digit(c) == 1 {
-            val = val * 10 + (c - 48);
-            i = i + 1;
-            if i < 4096 { c = *(src + i); }
-            else { c = 0; }
+        if i >= src_len { done = 1; }
+        else {
+            c: u32 = *(src + i);
+            if is_space(c) == 1 { i = i + 1; }
+            else {
+                // Skip line comments (//)
+                if c == 47 {
+                    if i + 1 < src_len {
+                        next: u32 = *(src + i + 1);
+                        if next == 47 {
+                            // Line comment — skip to end of line
+                            while i < src_len {
+                                c = *(src + i);
+                                if c == 10 { i = i + 1; done = 1; }
+                                else { i = i + 1; }
+                            }
+                        } else { done = 1; }
+                    } else { done = 1; }
+                } else { done = 1; }
+            }
         }
-        *(out + 0) = 2;  // Int
-        *(out + 4) = val;
-        *(out + 8) = i;
+    }
+    
+    // EOF
+    if i >= src_len {
+        store_u32(out, 0, 0);      // type = EOF
+        store_u32(out, 4, i);      // start
+        store_u32(out, 8, 0);      // len
         return i;
     }
+    
+    start: u32 = i;
+    c: u32 = *(src + i);
+    
+    // Single-char tokens
+    if c == 40 { store_token(out, 61, start, 1); return i + 1; }  // (
+    if c == 41 { store_token(out, 62, start, 1); return i + 1; }  // )
+    if c == 123 { store_token(out, 63, start, 1); return i + 1; } // {
+    if c == 125 { store_token(out, 64, start, 1); return i + 1; } // }
+    if c == 91 { store_token(out, 65, start, 1); return i + 1; }  // [
+    if c == 93 { store_token(out, 66, start, 1); return i + 1; }  // ]
+    if c == 59 { store_token(out, 67, start, 1); return i + 1; }  // ;
+    if c == 44 { store_token(out, 68, start, 1); return i + 1; }  // ,
+    if c == 46 { store_token(out, 69, start, 1); return i + 1; }  // .
+    if c == 64 { store_token(out, 74, start, 1); return i + 1; }  // @
+    if c == 35 { store_token(out, 77, start, 1); return i + 1; }  // #
+    
+    // Multi-char operators
+    if c == 61 {  // = or ==
+        if i + 1 < src_len {
+            if *(src + i + 1) == 61 { store_token(out, 46, start, 2); return i + 2; }
+        }
+        store_token(out, 45, start, 1); return i + 1;
+    }
+    if c == 33 {  // ! or !=
+        if i + 1 < src_len {
+            if *(src + i + 1) == 61 { store_token(out, 47, start, 2); return i + 2; }
+        }
+        store_token(out, 76, start, 1); return i + 1;  // Bang
+    }
+    if c == 60 {  // < or <= or <<
+        if i + 1 < src_len {
+            if *(src + i + 1) == 61 { store_token(out, 50, start, 2); return i + 2; }
+            if *(src + i + 1) == 60 { store_token(out, 59, start, 2); return i + 2; }
+        }
+        store_token(out, 48, start, 1); return i + 1;
+    }
+    if c == 62 {  // > or >= or >>
+        if i + 1 < src_len {
+            if *(src + i + 1) == 61 { store_token(out, 51, start, 2); return i + 2; }
+            if *(src + i + 1) == 62 { store_token(out, 60, start, 2); return i + 2; }
+        }
+        store_token(out, 49, start, 1); return i + 1;
+    }
+    if c == 38 {  // &
+        store_token(out, 55, start, 1); return i + 1;  // BitAnd
+    }
+    if c == 124 {  // |
+        store_token(out, 56, start, 1); return i + 1;  // BitOr
+    }
+    if c == 94 {  // ^
+        store_token(out, 57, start, 1); return i + 1;  // BitXor
+    }
+    if c == 126 {  // ~
+        store_token(out, 58, start, 1); return i + 1;  // BitNot
+    }
+    if c == 58 {  // : or ::
+        if i + 1 < src_len {
+            if *(src + i + 1) == 58 { store_token(out, 71, start, 2); return i + 2; }
+        }
+        store_token(out, 70, start, 1); return i + 1;
+    }
+    
+    // Arrow ->
+    if c == 45 {  // - or -> or -=
+        if i + 1 < src_len {
+            if *(src + i + 1) == 62 { store_token(out, 72, start, 2); return i + 2; }  // ->
+            if *(src + i + 1) == 61 { store_token(out, 81, start, 2); return i + 2; }  // -=
+        }
+        store_token(out, 41, start, 1); return i + 1;  // Minus
+    }
+    
+    // Fat arrow =>
+    if c == 61 {
+        if i + 1 < src_len {
+            if *(src + i + 1) == 62 { store_token(out, 73, start, 2); return i + 2; }  // =>
+        }
+    }
+    
+    // Plus or +=
+    if c == 43 {
+        if i + 1 < src_len {
+            if *(src + i + 1) == 61 { store_token(out, 80, start, 2); return i + 2; }  // +=
+        }
+        store_token(out, 40, start, 1); return i + 1;  // Plus
+    }
+    
+    // Star or *=
+    if c == 42 {
+        if i + 1 < src_len {
+            if *(src + i + 1) == 61 { store_token(out, 82, start, 2); return i + 2; }  // *=
+        }
+        store_token(out, 42, start, 1); return i + 1;  // Star
+    }
+    
+    // Slash or /= (comments already handled above)
+    if c == 47 {
+        if i + 1 < src_len {
+            if *(src + i + 1) == 61 { store_token(out, 83, start, 2); return i + 2; }  // /=
+        }
+        store_token(out, 43, start, 1); return i + 1;  // Slash
+    }
+    
+    // Percent
+    if c == 37 {
+        store_token(out, 44, start, 1); return i + 1;
+    }
+    
+    // Integer literal (decimal or hex)
+    if is_digit(c) == 1 {
+        // Check for hex prefix 0x
+        if c == 48 {
+            if i + 1 < src_len {
+                if *(src + i + 1) == 120 {  // 'x'
+                    // Hex literal
+                    i = i + 2;
+                    while i < src_len {
+                        c = *(src + i);
+                        if is_hex(c) == 0 { break; }
+                        i = i + 1;
+                    }
+                    store_token(out, 2, start, i - start);
+                    return i;
+                }
+            }
+        }
+        // Decimal literal
+        while i < src_len {
+            c = *(src + i);
+            if is_digit(c) == 0 { break; }
+            i = i + 1;
+        }
+        store_token(out, 2, start, i - start);
+        return i;
+    }
+    
+    // String literal "..."
+    if c == 34 {
+        i = i + 1;  // skip opening quote
+        while i < src_len {
+            c = *(src + i);
+            if c == 34 { i = i + 1; break; }  // closing quote
+            if c == 92 { i = i + 1; }  // escape: skip next char
+            i = i + 1;
+        }
+        store_token(out, 3, start, i - start);
+        return i;
+    }
+    
     // Identifier or keyword
     if is_alpha(c) == 1 {
-        start: u32 = i;
-        while is_alpha(c) == 1 {
+        while i < src_len {
+            c = *(src + i);
+            if is_alnum(c) == 0 { break; }
             i = i + 1;
-            if i < 4096 { c = *(src + i); }
-            else { c = 0; }
         }
         len: u32 = i - start;
-        // Check for keywords (simplified: just check first char + length)
-        first: u32 = *(src + start);
-        // "fn" = 2 chars, starts with 'f' (102)
-        if first == 102 { if len == 2 { *(out + 0) = 15; *(out + 4) = 0; *(out + 8) = i; return i; } }
-        // "if" = 2 chars, starts with 'i' (105)
-        if first == 105 { if len == 2 { *(out + 0) = 16; *(out + 4) = 0; *(out + 8) = i; return i; } }
-        // "return" = 6 chars, starts with 'r' (114)
-        if first == 114 { if len == 6 { *(out + 0) = 14; *(out + 4) = 0; *(out + 8) = i; return i; } }
-        // "while" = 5 chars, starts with 'w' (119)
-        if first == 119 { if len == 5 { *(out + 0) = 17; *(out + 4) = 0; *(out + 8) = i; return i; } }
-        // Default: identifier (use start position as value)
-        *(out + 0) = 1;  // Ident
-        *(out + 4) = start;
-        *(out + 8) = i;
+        
+        // Check for keywords
+        kw_type: u32 = check_keyword(src, start, len);
+        store_token(out, kw_type, start, len);
         return i;
     }
-    // Unknown character — skip it
-    *(out + 0) = 0;
-    *(out + 4) = 0;
-    *(out + 8) = i + 1;
+    
+    // Unknown character — emit as single-char token
+    store_token(out, 0, start, 1);
     return i + 1;
+}
+
+// Check if an identifier matches a keyword.
+// Returns keyword token type, or 1 (Ident) if not a keyword.
+fn check_keyword(src: Address, start: u32, len: u32) -> u32 {
+    // Keywords by length
+    if len == 2 {
+        first: u32 = *(src + start);
+        second: u32 = *(src + start + 1);
+        // "fn" = 102, 110
+        if first == 102 { if second == 110 { return 10; } }
+        // "if" = 105, 102
+        if first == 105 { if second == 102 { return 12; } }
+        return 1;
+    }
+    if len == 3 {
+        first: u32 = *(src + start);
+        // "for" = 102, 111, 114
+        if first == 102 { return 15; }  // simplified: assume "for"
+        // "let" = 108, 101, 116
+        if first == 108 { return 11; }
+        return 1;
+    }
+    if len == 4 {
+        first: u32 = *(src + start);
+        // "else" = 101
+        if first == 101 { return 13; }
+        // "true" = 116
+        if first == 116 { return 29; }
+        // "enum" = 101 (already handled above as "else")
+        // "impl" = 105
+        if first == 105 { return 22; }
+        // "pub" is 3 chars, skip
+        return 1;
+    }
+    if len == 5 {
+        first: u32 = *(src + start);
+        // "while" = 119
+        if first == 119 { return 14; }
+        // "break" = 98
+        if first == 98 { return 18; }
+        // "const" = 99
+        if first == 99 { return 25; }
+        // "match" = 109
+        if first == 109 { return 17; }
+        // "false" = 102
+        if first == 102 { return 30; }
+        return 1;
+    }
+    if len == 6 {
+        first: u32 = *(src + start);
+        // "return" = 114
+        if first == 114 { return 16; }
+        // "struct" = 115
+        if first == 115 { return 20; }
+        // "static" = 115
+        if first == 115 { return 26; }
+        // "import" = 105
+        if first == 105 { return 23; }
+        // "extern" = 101
+        if first == 101 { return 27; }
+        return 1;
+    }
+    if len == 7 {
+        first: u32 = *(src + start);
+        // "continue" is 8 chars
+        // "region" = 114
+        if first == 114 { return 34; }
+        return 1;
+    }
+    if len == 8 {
+        first: u32 = *(src + start);
+        // "continue" = 99
+        if first == 99 { return 19; }
+        // "export" is 6 chars
+        return 1;
+    }
+    return 1;  // Not a keyword — it's an identifier
+}
+
+// Store a u32 in little-endian at ptr+offset
+fn store_u32(ptr: Address, offset: u32, val: u32) {
+    *(ptr + offset) = val & 255;
+    *(ptr + offset + 1) = (val >> 8) & 255;
+    *(ptr + offset + 2) = (val >> 16) & 255;
+    *(ptr + offset + 3) = (val >> 24) & 255;
+}
+
+// Store a token (type, start, len) in the output buffer
+fn store_token(out: Address, token_type: u32, start: u32, len: u32) {
+    store_u32(out, 0, token_type);
+    store_u32(out, 4, start);
+    store_u32(out, 8, len);
+}
+
+// Lex an entire source file into tokens.
+// Writes tokens to token_buf (12 bytes each).
+// Returns number of tokens.
+fn lex_file(src: Address, src_len: u32, token_buf: Address, max_tokens: u32) -> u32 {
+    pos: u32 = 0;
+    count: u32 = 0;
+    done: u32 = 0;
+    while done == 0 {
+        if count >= max_tokens { done = 1; }
+        else {
+            token_out: Address = token_buf + count * 12;
+            pos = lex_token(src, src_len, pos, token_out);
+            // Check for EOF
+            t_type: u32 = load_u32(token_out, 0);
+            if t_type == 0 { done = 1; }  // EOF
+            count = count + 1;
+        }
+    }
+    return count;
+}
+
+// Load a u32 from little-endian bytes at ptr+offset
+fn load_u32(ptr: Address, offset: u32) -> u32 {
+    b0: u32 = *(ptr + offset);
+    b1: u32 = *(ptr + offset + 1);
+    b2: u32 = *(ptr + offset + 2);
+    b3: u32 = *(ptr + offset + 3);
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
 }
