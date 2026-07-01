@@ -8,6 +8,8 @@
 
 This document provides a rigorous mathematical specification for the Semantic Computation Graph (SCG), the primary intermediate representation of programs in the VUMA framework. The SCG replaces traditional source code as the canonical representation of a program: it is a directed, annotated graph whose nodes denote computational operations and whose edges denote data flow, control flow, derivation chains, and behavioral annotations. The formalism presented here is designed to be machine-reasonable by the Inference and Verification Engine (IVE), to support formally defined composition operators, and to admit a bisimulation-based equivalence relation that yields a unique canonical form.
 
+> **Implementation note (2026-07):** This spec presents an **idealized 8-constructor model** for mathematical clarity. The actual `NodeType` enum in `src/scg/src/node.rs:41` has **26 variants**: 14 core (the 8 below plus `VTable`, `ClosureEnv`, `StructDef`, `EnumDef`, `Match`, `ConstantTime`) and 12 WOMB data-model variants (`ConceptDecl`, `ConceptField`, `ConceptAccess`, `GestaltDecl`, `GestaltInterpret`, `ContextAssert`, `ManifoldDecl`, `ManifoldQuery`, `ManifoldSlice`, `AuraAttach`, `AuraQuery`, `AuraUpdate`). Similarly, the actual `EdgeKind` enum (`src/scg/src/edge.rs:41`) has **7 variants** (`DataFlow`, `ControlFlow`, `Derivation`, `Annotation`, `Dispatch`, `Call`, `Return`), not the 4 edge labels introduced in §1.4 below. The SCG is **not acyclic** — it allows cycles (loops, recursion) and handles them via Tarjan-SCC-based `topological_sort_with_cycles()`. The `acyclic` predicate in this spec is aspirational.
+
 We adopt the following notational conventions throughout:
 
 - **Sets** are denoted by uppercase italic letters (e.g., $N$, $E$, $V$).  

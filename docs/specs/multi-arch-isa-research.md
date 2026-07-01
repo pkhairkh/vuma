@@ -6,6 +6,8 @@
 
 ---
 
+> **Implementation note (2026-07):** This is a research document surveying each ISA's general characteristics. VUMA's actual codegen choices (in `src/codegen/`) may differ from the defaults listed here. Key VUMA-specific decisions: (1) **MIPS64 is Big-endian** in VUMA (not little-endian as the `mips64el` Rust target triple on line 858 might suggest); the codegen uses `to_be_bytes()` for MIPS64 emission. (2) **PPC64 uses ELFv2 ABI** (`e_flags = 0x2`), required by `qemu-ppc64`. (3) **Wasm32 uses a bump allocator** for `__vuma_alloc` (no mmap in Wasm). (4) The CLI `vuma emit`/`vuma compile` accept only 8 ISAs (missing RISC-V 32 and x86_32); all 10 backends are tested via `compile_dump`. Latest test results: 57,377/57,380 runs pass (99.99%).
+
 ## Overview
 
 This document provides a comprehensive reference for each instruction set architecture that VUMA should target as a multi-architecture compiler. For each ISA, we detail register files, calling conventions, instruction encoding, ELF types, base addresses, key instructions for basic codegen, relevance domains, implementation complexity, and toolchain/ecosystem readiness.

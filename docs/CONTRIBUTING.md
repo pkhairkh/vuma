@@ -187,7 +187,7 @@ cargo test -p vuma-ive
 cargo test -p vuma-scg
 cargo test -p vuma-codegen
 cargo test -p vuma-bd
-cargo test -p vuma-vuma
+cargo test -p vuma-core
 cargo test -p vuma-proof
 cargo test -p vuma-cor
 ```
@@ -294,7 +294,7 @@ The VUMA project has a comprehensive test infrastructure spanning multiple categ
 | Parser roundtrip | `vuma-tests::parser_roundtrip` | Parse → SCG → text → re-parse stability |
 | SHA256d backends | `vuma-tests::sha256d_backends` | SHA256d correctness across all backends |
 | DWARF/FFI integration | `vuma-tests::dwarf_ffi_integration` | Debug info and FFI syscall emission |
-| Diagnostics integration | `vuma-tests::diagnostics_integration` | 65 diagnostic codes and error chaining |
+| Diagnostics integration | `vuma-tests::diagnostics_integration` | Diagnostic codes and error chaining |
 | Memory safety | `vuma-tests::execution_validation` | 10 violation types, runtime bounds checks |
 | Regression tests | `vuma-tests::regression` | Prevents re-introduction of fixed bugs |
 
@@ -384,6 +384,7 @@ Add the variant to the `NodeType` enum in `src/scg/src/node.rs`:
 ```rust
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum NodeType {
+    // Core (14 variants)
     Computation,
     Allocation,
     Deallocation,
@@ -392,9 +393,21 @@ pub enum NodeType {
     Effect,
     Control,
     Phantom,
+    VTable,
+    ClosureEnv,
+    StructDef,
+    EnumDef,
+    Match,
+    ConstantTime,
+    // WOMB Data Models (12 variants)
+    ConceptDecl,
+    ConceptField,
+    // ... (see src/scg/src/node.rs for the full list)
     Barrier,  // New variant
 }
 ```
+
+The full enum has 26 variants (14 core + 12 WOMB data models) — see `src/scg/src/node.rs:41` for the current set.
 
 Update the `Display` impl for `NodeType`:
 
@@ -644,7 +657,7 @@ regions), add it to `src/vuma/src/region.rs` or the relevant module.
 
 ## 6. How to Add New Backend Instructions
 
-The codegen crate (`src/codegen/`) defines instructions for all 10 backends (AArch64, x86_64, RISC-V 64, ARM32, MIPS64, PPC64, LoongArch64, Wasm32), register allocation, and the SCG → IR → machine code lowering pipeline. Adding a new instruction requires changes across several modules.
+The codegen crate (`src/codegen/`) defines instructions for all 10 backends (x86_64, AArch64, RISC-V 64, ARM32, MIPS64, PPC64, LoongArch64, x86_32, RISC-V 32, Wasm32), register allocation, and the SCG → IR → machine code lowering pipeline. Adding a new instruction requires changes across several modules.
 
 ### 6.1 Step 1: Define the Instruction Variant
 
