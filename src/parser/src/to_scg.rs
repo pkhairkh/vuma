@@ -1871,9 +1871,12 @@ impl AstToScg {
         let _ = scg.add_edge(caller_node, entry_id, EdgeKind::ControlFlow);
 
         // Per-argument DataFlow edges from caller variables and literals
-        // to the FunctionEntry node.
-        for arg in args.iter() {
-            self.add_df_edges_recursive(arg, entry_id, scg);
+        // to the FunctionEntry node. Each edge is labeled "argN" for
+        // traceability and to enable the test_call_site_argument_data_flow
+        // test to verify argument edges exist.
+        for (arg_idx, arg) in args.iter().enumerate() {
+            let arg_label = format!("arg{}", arg_idx);
+            self.add_df_edges_recursive_labeled(arg, entry_id, scg, &arg_label);
         }
 
         let ret_id = scg.add_node(
@@ -2572,6 +2575,90 @@ impl AstToScg {
 
     fn add_data_flow_edges(&self, expr: &Expr, target_node: NodeId, scg: &mut SCG) {
         self.add_df_edges_recursive(expr, target_node, scg);
+    }
+
+    /// Like `add_df_edges_recursive` but labels each created DataFlow edge
+    /// with the given label (e.g., "arg0", "arg1"). Used for call-site
+    /// argument edges so downstream consumers can identify which argument
+    /// a DataFlow edge corresponds to.
+    fn add_df_edges_recursive_labeled(
+        &self,
+        expr: &Expr,
+        target_node: NodeId,
+        scg: &mut SCG,
+        label: &str,
+    ) {
+        match expr {
+            Expr::BinOp { lhs, rhs, .. } => {
+                self.add_df_edges_recursive_labeled(lhs, target_node, scg, label);
+                self.add_df_edges_recursive_labeled(rhs, target_node, scg, label);
+            }
+            Expr::UnOp { expr: inner, .. } => {
+                self.add_df_edges_recursive_labeled(inner, target_node, scg, label);
+            }
+            Expr::Var { name, .. } => {
+                if let Some(source_node) = self.lookup_var(name) {
+                    let eid = scg.add_edge(source_node, target_node, EdgeKind::DataFlow);
+                    if let Ok(id) = eid {
+                        if let Some(edge) = scg.get_edge_mut(id) {
+                            edge.label = Some(label.to_string());
+                        }
+                    }
+                }
+            }
+            Expr::Lit { value, .. } => {
+                let lit_str = match value {
+                    crate::ast::Lit::Int(n) => format!("lit_{}", n),
+                    crate::ast::Lit::Float(fl) => format!("lit_{}", fl),
+                    crate::ast::Lit::String(s) => format!("lit_str_{}", s),
+                    crate::ast::Lit::Bool(b) => format!("lit_{}", b),
+                    crate::ast::Lit::Address(a) => format!("lit_{}", a),
+                };
+                let lit_id = scg.add_node(
+                    NodeType::Computation,
+                    NodePayload::Computation(ComputationNode {
+                        kind: ComputationKind::Other(lit_str),
+                        result_type: None,
+                        tail_call: false,
+                    }),
+                    ProgramPoint { file: None, line: None, column: None, offset: None },
+                );
+                let eid = scg.add_edge(lit_id, target_node, EdgeKind::DataFlow);
+                if let Ok(id) = eid {
+                    if let Some(edge) = scg.get_edge_mut(id) {
+                        edge.label = Some(label.to_string());
+                    }
+                }
+            }
+            Expr::Cast { expr: inner, .. } => {
+                self.add_df_edges_recursive_labeled(inner, target_node, scg, label);
+            }
+            Expr::Deref { expr: inner, .. } => {
+                self.add_df_edges_recursive_labeled(inner, target_node, scg, label);
+            }
+            Expr::AddressOf { expr: inner, .. } => {
+                self.add_df_edges_recursive_labeled(inner, target_node, scg, label);
+            }
+            Expr::FieldAccess { expr: inner, .. } => {
+                self.add_df_edges_recursive_labeled(inner, target_node, scg, label);
+            }
+            Expr::Index { expr: inner, index, .. } => {
+                self.add_df_edges_recursive_labeled(inner, target_node, scg, label);
+                self.add_df_edges_recursive_labeled(index, target_node, scg, label);
+            }
+            _ => {
+                for var_name in self.expr_uses(expr) {
+                    if let Some(source_node) = self.lookup_var(&var_name) {
+                        let eid = scg.add_edge(source_node, target_node, EdgeKind::DataFlow);
+                        if let Ok(id) = eid {
+                            if let Some(edge) = scg.get_edge_mut(id) {
+                                edge.label = Some(label.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     fn add_df_edges_recursive(&self, expr: &Expr, target_node: NodeId, scg: &mut SCG) {
