@@ -1,5 +1,9 @@
 // Quicksort — In-place quicksort on an array of integers
-// Expected exit code: 90
+// Expected exit code: 33
+//
+// After sorting [64, 25, 12, 22, 11, 90, 33, 7, 55, 42]:
+//   [7, 11, 12, 22, 25, 33, 42, 55, 64, 90]
+// Median (index 5) = 33
 //
 // Implements the classic quicksort algorithm using Lomuto partition scheme
 // with in-place swapping. The array is stored in allocated memory with

@@ -1,5 +1,9 @@
 // Hex Dump — Read bytes from memory, output hex representation
-// Expected exit code: 0
+// Expected exit code: 7
+//
+// XOR of all hex ASCII characters:
+// D^E^A^D^B^E^E^F^C^A^F^E^4^2^0^0
+// = 68^69^65^68^66^69^69^70^67^65^70^69^52^50^48^48 = 7
 //
 // Reads a block of bytes from memory and converts each byte to its
 // two-digit hexadecimal representation. The hex output is written into
