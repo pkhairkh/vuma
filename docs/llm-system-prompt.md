@@ -299,7 +299,7 @@ fn atomic_increment(counter: Address) -> u64 {
 }
 ```
 
-Atomic operations are available on 64-bit backends (x86_64, AArch64, RISC-V 64).
+Atomic operations are available on all 10 backends (x86_64, AArch64, RISC-V 64, ARM32, MIPS64, PPC64, LoongArch64, x86_32, RISC-V 32, Wasm32).
 
 ### 1.11 Debug Information
 
@@ -317,8 +317,8 @@ When enabled, the ELF binary contains `.debug_info`, `.debug_abbrev`, `.debug_li
 Every value in VUMA carries a Behavioral Descriptor composed of three orthogonal axes:
 
 - **RepD (Representation Descriptor):** Memory shape, size, and alignment (e.g., `Byte(4, 4)` for i32, `Ptr(...)` for pointers).
-- **CapD (Capability Descriptor):** What operations are permitted — `Read`, `Write`, `Execute`, `Derive`. Can be conditioned on lock acquisition.
-- **RelD (Relational Descriptor):** Temporal and dependency relationships — `Liveness`, `Outlives`, `DependsOn`, `Succeeds`, `FlowPolicy`.
+- **CapD (Capability Descriptor):** What operations are permitted — 17 capabilities: `Read`, `Write`, `Execute`, `Iterate`, `Send`, `Persist`, `Serialize`, `Deserialize`, `Hash`, `Compare`, `DerivePtr`, `Cast`, `Fork`, `Drop`, `Share`, `Move`, `Pin`. Can be conditioned on lock acquisition.
+- **RelD (Relational Descriptor):** 6 relation kinds — `Temporal(TemporalKind: Outlives/Coincides/Precedes/Succeeds)`, `Containment`, `Dependency(DepKind: DataDep/ControlDep/AliasDep)`, `Equivalence`, `Security(FlowPolicy: NoDowngrade/NoCrossBoundary/Sanitized)`, `Liveness`.
 
 BDs are usually inferred automatically. You can annotate them explicitly with `#bd(...)` syntax when needed for verification hints.
 
@@ -1133,7 +1133,8 @@ vuma build program.vu -o program
 # Build and run (via QEMU aarch64 or native)
 vuma run program.vu
 
-# Parse + SCG + BD inference + IVE verification only (no codegen)
+# Run the full compile pipeline (including codegen) with verification forced to Normal;
+# the binary output is discarded. Use this to check that a program compiles and verifies.
 vuma check program.vu
 
 # Compile to a specific ISA

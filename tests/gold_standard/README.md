@@ -7,7 +7,7 @@ A categorized collection of `.vuma` programs that serve as the gold standard for
 - **Total programs:** 5,738 (with expected exit codes) across 16 categories
 - **Total .vuma files:** 5,754 (some lack expected exit codes)
 - **Test runs:** 5,738 programs × 10 backends = 57,380 runs
-- **Pass rate:** 100% (57,380/57,380) with `--verification none`
+- **Pass rate:** 99.99% (57,377/57,380) with `--verification none` — 3 failures across 2 tests (see `test_results/summary.json`)
 - **Test runner:** `scripts/pi5_test_suite.sh` (uses QEMU for cross-architecture, Wasmtime for Wasm32)
 - **Compilation:** Uses `compile_dump` binary (canonical SCG pipeline, `--verification none`)
 

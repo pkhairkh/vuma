@@ -1150,21 +1150,18 @@ ld -o ffi_demo ffi_demo.o -lc
 
 ### 14.4 Built-in Syscall Bindings
 
-The VUMA compiler includes built-in bindings for common Linux syscalls and C library functions. These are available without explicit `extern` declarations when compiling for bare-metal:
+The VUMA compiler recognizes 19 Linux syscalls (enum `SyscallName` in `src/ffi.rs:478`). Each backend emits raw machine-code syscall stubs for these. Programs must still declare the ones they want to call via `extern "C"` blocks — the stubs make the calls linkable, they do not auto-import the symbols.
 
-**Linux syscalls:**
-- `write(fd, buf, count)` — write bytes to a file descriptor
-- `read(fd, buf, count)` — read bytes from a file descriptor
-- `exit(code)` — terminate the process
-- `mmap(addr, len, prot, flags, fd, offset)` — map memory
-- `munmap(addr, len)` — unmap memory
-- `brk(addr)` — change data segment size
+**Linux syscalls (19):**
+`read`, `write`, `open`, `close`, `exit`, `exit_group`, `mmap`, `munmap`, `brk`, `ioctl`, `fcntl`, `getpid`, `kill`, `mprotect`, `clock_gettime`, `sched_yield`, `clone`, `futex`, `set_tid_address`
 
-**C library functions:**
-- `memcpy(dst, src, n)` — copy memory
-- `memset(dst, c, n)` — fill memory
-- `malloc(size)` — allocate memory
-- `free(ptr)` — free memory
+**Runtime helpers (not syscalls, emitted alongside stubs on some backends):**
+- `__vuma_alloc(size)` — mmap wrapper (bump allocator on Wasm32); heap memory that persists across function calls
+- `__vuma_free(addr, size)` — munmap wrapper (no-op on Wasm32)
+- `memcpy(dst, src, n)` / `memset(dst, c, n)` / `strcmp(a, b)` — emitted by some backends as helper symbols
+- `print_int(x)` / `print_hex(x)` — emitted by x86_64/x86_32 as debug helpers
+
+> **Note:** VUMA does NOT provide `malloc`/`free` from a C library. Use `__vuma_alloc`/`__vuma_free` for heap memory, or the `allocate(size)` language builtin for stack-local (or ≤4096-byte heap in the canonical pipeline) memory.
 
 ### 14.5 Pitfalls for FFI
 
@@ -1743,22 +1740,24 @@ VUMA produces structured diagnostics with error codes. These codes are organized
 
 ## 20. Target Platforms
 
-VUMA compiles to native machine code for 10 architectures plus Wasm. Each target has its own backend that translates the IR to machine code.
+VUMA's codegen crate implements 10 backend architectures (enum `BackendKind`). The CLI `vuma emit`/`vuma compile` commands accept 8 ISA targets (enum `IsaArg`: aarch64, x86_64, riscv64, wasm32, loongarch64, arm32, mips64, ppc64). All 10 backends are exercised by the `compile_dump` test binary. Each target has its own backend that translates the IR to machine code.
 
 ### Supported Targets
 
-| Target | Status | Pointer Size | Register Width | Notes |
-|--------|--------|-------------|----------------|-------|
-| x86_64 | Stable | 8 bytes | 64-bit | System V AMD64 ABI, DWARF debug info, FFI, atomics |
-| AArch64 | Stable | 8 bytes | 64-bit | AAPCS64 calling convention, DWARF debug info, FFI, atomics |
-| RISC-V 64 | Stable | 8 bytes | 64-bit | RV64GC, LP64 ABI, DWARF debug info, FFI, atomics |
-| ARM32 | Stable | 4 bytes | 32-bit | AAPCS, no u32 masking needed*, DWARF debug info, FFI |
-| MIPS64 | Stable | 8 bytes | 64-bit | N64 ABI, big-endian, DWARF debug info, FFI |
-| PPC64 | Stable | 8 bytes | 64-bit | ELFv2 ABI, big-endian, DWARF debug info, FFI |
-| LoongArch64 | Stable | 8 bytes | 64-bit | LP64 ABI, DWARF debug info, FFI, QEMU slow |
-| Wasm32 | Experimental | 4 bytes | 32-bit | WebAssembly MVP, limited atomics |
+| Target | Status | Pointer Size | Register Width | CLI-emittable | Notes |
+|--------|--------|-------------|----------------|---------------|-------|
+| x86_64 | Stable | 8 bytes | 64-bit | yes | System V AMD64 ABI, DWARF debug info, FFI, atomics |
+| AArch64 | Stable | 8 bytes | 64-bit | yes | AAPCS64 calling convention, DWARF debug info, FFI, atomics |
+| RISC-V 64 | Stable | 8 bytes | 64-bit | yes | RV64GC, LP64 ABI, DWARF debug info, FFI, atomics |
+| ARM32 | Stable | 4 bytes | 32-bit | yes | AAPCS, DWARF debug info, FFI, atomics |
+| MIPS64 | Stable | 8 bytes | 64-bit | yes | N64 ABI, big-endian, DWARF debug info, FFI |
+| PPC64 | Stable | 8 bytes | 64-bit | yes | ELFv2 ABI, big-endian, DWARF debug info, FFI |
+| LoongArch64 | Stable | 8 bytes | 64-bit | yes | LP64 ABI, DWARF debug info, FFI |
+| x86_32 | Stable | 4 bytes | 32-bit | no (codegen only) | cdecl, DWARF debug info, FFI |
+| RISC-V 32 | Stable | 4 bytes | 32-bit | no (codegen only) | ILP32 ABI, DWARF debug info, FFI |
+| Wasm32 | Stable | 4 bytes | 32-bit | yes | WebAssembly MVP, bump allocator (no mmap), limited atomics |
 
-*ARM32 uses 32-bit registers, so u32 masking is not needed on this target. However, **write code that works on all targets** by always masking u32 results.
+Latest full-suite results (`test_results/summary.json`, 2026-07-01): 57,377/57,380 runs pass (99.99%). 3 failures: `crc32.vuma` on riscv64+ppc64, `s27_fn_two_args_mod.vuma` on ppc64.
 
 ### Cross-Compilation and Testing
 
@@ -1795,7 +1794,7 @@ qemu-loongarch64 ./sha256d_loongarch64; echo $?
 - `Address` is 8 bytes
 - Pointer arithmetic uses 64-bit addition
 
-**32-bit targets (ARM32, Wasm32)**:
+**32-bit targets (ARM32, x86_32, RISC-V 32, Wasm32)**:
 - Use 32-bit registers
 - u32 masking is technically unnecessary but recommended for portability
 - `Address` is 4 bytes

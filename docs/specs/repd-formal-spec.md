@@ -21,9 +21,15 @@ RepD ::= ByteRep { size: Nat, align: Nat }
        | PtrRep { pointee: RepD }
        | UnionRep { alternatives: List<RepD>, max_size: Nat, max_align: Nat }
        | FuncRep { params: List<RepD>, result: RepD }
+       | ManifoldSpatialRep { dimensions: List<Nat>, dim_sizes: List<Nat>, element_size: Nat, curve: CurveKind, order: Nat, total_bytes: Nat }
+       | GestaltSuperpositionRep { variants: List<RepD>, max_size: Nat, max_align: Nat, degraded: Bool, tag_offset: Nat }
+       | ConceptRelationalRep { field_names: List<String>, field_offsets: List<Offset>, total_size: Nat, align: Nat, use_soa: Bool }
+       | Generic { name: String, constraints: List<BDConstraint> }
 ```
 
-Where `Nat` is the set of natural numbers {0, 1, 2, ...}, `Offset` is a natural number denoting a byte offset from the start of a struct, and `Tag` is a natural number serving as a discriminant for enum variants.
+> **Implementation note (2026-07):** The actual `RepD` enum in `src/bd/src/repd.rs:191` has **11 variants**. The first 7 (Byte through Func) are the classic layout descriptors formalized above. The remaining 4 (ManifoldSpatial, GestaltSuperposition, ConceptRelational, Generic) are WOMB data-model representations added for the LLM-native type system; their formal semantics are still being developed. This spec fully formalizes only the first 7.
+
+Where `Nat` is the set of natural numbers {0, 1, 2, ...}, `Offset` is a natural number denoting a byte offset from the start of a struct, `Tag` is a natural number serving as a discriminant for enum variants, `CurveKind` ∈ {RowMajor, ZOrder, Hilbert}, and `BDConstraint` is a constraint on generic type parameters (see `src/bd/src/descriptor.rs`).
 
 ### 1.2 Semantic Domain
 
