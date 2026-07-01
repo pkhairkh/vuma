@@ -1476,10 +1476,8 @@ fn build_ppc64_elf_2seg(code: &[u8], base_addr: u64) -> Vec<u8> {
     elf.extend_from_slice(&entry_point.to_be_bytes()); // e_entry
     elf.extend_from_slice(&elf_header_size.to_be_bytes()); // e_phoff
     elf.extend_from_slice(&0u64.to_be_bytes()); // e_shoff (no section headers)
-    // e_flags: 0 for big-endian PPC64 (ELFv1 ABI, required by qemu-ppc64).
-    // Do NOT use EF_PPC64_ABI_V2 (0x2) — that's for ppc64le (little-endian).
-    // Using 0x2 with big-endian causes qemu-ppc64 to SIGILL.
-    elf.extend_from_slice(&0u32.to_be_bytes()); // e_flags
+    // e_flags: EF_PPC64_ABI_V2 = 0x2 (required for PPC64LE ELFv2 ABI)
+    elf.extend_from_slice(&2u32.to_be_bytes()); // e_flags
     elf.extend_from_slice(&64u16.to_be_bytes()); // e_ehsize
     elf.extend_from_slice(&56u16.to_be_bytes()); // e_phentsize
     elf.extend_from_slice(&2u16.to_be_bytes()); // e_phnum = 2
