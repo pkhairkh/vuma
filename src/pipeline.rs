@@ -922,7 +922,21 @@ fn resolve_df_input(
 
 /// Resolve the condition expression for a Branch node by looking at its
 /// incoming DataFlow edges.
-fn resolve_branch_cond(branch_id: NodeId, edge_idx: &EdgeIndex, scg: &SCG) -> ScgExpr {
+///
+/// Returns the condition as an `ScgExpr` AND a list of `ScgStatement`s
+/// (typically `Call` statements) that must be emitted **before** the
+/// branch.  These pre-statements are produced when the condition contains
+/// inline function calls like `if (is_space(c) == 1)` — the call
+/// `is_space(c)` has no dedicated Computation node in the SCG (it only
+/// appears in the Branch label), so we extract it here and emit it as a
+/// separate `Call` statement whose result vreg is then referenced by the
+/// condition expression.
+fn resolve_branch_cond(
+    branch_id: NodeId,
+    edge_idx: &EdgeIndex,
+    scg: &SCG,
+    extern_functions: &HashSet<String>,
+) -> (ScgExpr, Vec<ScgStatement>) {
     // First, try to parse the branch label (e.g., "if (a > b)")
     // to extract the condition expression.
     if let Some(node_data) = scg.get_node(branch_id) {
@@ -935,41 +949,64 @@ fn resolve_branch_cond(branch_id: NodeId, edge_idx: &EdgeIndex, scg: &SCG) -> Sc
                 let cond_str = cond_str.strip_suffix(')').unwrap_or(cond_str);
                 let cond_str = cond_str.trim();
 
+                let df_inputs = edge_idx.incoming_df(branch_id);
+                let sources: Vec<NodeId> = df_inputs.iter().map(|e| e.source).collect();
+
+                // ── Extract inline function calls from the condition ──
+                //
+                // The condition string may contain function calls like
+                // `is_space(c)` that have no dedicated SCG Computation node.
+                // `extract_calls_from_label` scans the string, emits a
+                // `Call` statement for each call, and replaces the call
+                // text with a vreg reference (e.g. `v_N_call_0`).  The
+                // returned `Call` statements must be emitted before the
+                // branch so the vreg is populated.
+                let (cond_no_calls, pre_calls) = extract_calls_from_label(
+                    cond_str,
+                    branch_id,
+                    &sources,
+                    edge_idx,
+                    scg,
+                    extern_functions,
+                );
+
                 // Try to parse as a comparison expression
-                if let Some((op, lhs_str, rhs_str)) = parse_expr_split(cond_str) {
-                    let df_inputs = edge_idx.incoming_df(branch_id);
-                    let sources: Vec<NodeId> = df_inputs.iter().map(|e| e.source).collect();
+                if let Some((op, lhs_str, rhs_str)) = parse_expr_split(&cond_no_calls) {
                     let lhs = resolve_subexpr(&lhs_str, &sources, edge_idx, scg);
                     let rhs = resolve_subexpr(&rhs_str, &sources, edge_idx, scg);
-                    return ScgExpr::BinOp {
-                        op: map_binop_kind(op),
-                        lhs: Box::new(lhs),
-                        rhs: Box::new(rhs),
-                    };
+                    return (
+                        ScgExpr::BinOp {
+                            op: map_binop_kind(op),
+                            lhs: Box::new(lhs),
+                            rhs: Box::new(rhs),
+                        },
+                        pre_calls,
+                    );
                 }
 
                 // For "if true" or "if false", return Int(1) or Int(0)
-                if cond_str == "true" {
-                    return ScgExpr::Int(1);
+                if cond_no_calls == "true" {
+                    return (ScgExpr::Int(1), pre_calls);
                 }
-                if cond_str == "false" {
-                    return ScgExpr::Int(0);
+                if cond_no_calls == "false" {
+                    return (ScgExpr::Int(0), pre_calls);
                 }
 
                 // For simple variable conditions, resolve via DataFlow
-                let df_inputs = edge_idx.incoming_df(branch_id);
-                let sources: Vec<NodeId> = df_inputs.iter().map(|e| e.source).collect();
-                let is_valid_var = cond_str.chars().next().map_or(false, |c| c.is_alphabetic() || c == '_')
-                    && cond_str.chars().all(|c| c.is_alphanumeric() || c == '_');
+                let is_valid_var = cond_no_calls.chars().next().map_or(false, |c| c.is_alphabetic() || c == '_')
+                    && cond_no_calls.chars().all(|c| c.is_alphanumeric() || c == '_');
                 if is_valid_var {
-                    return resolve_subexpr(cond_str, &sources, edge_idx, scg);
+                    return (
+                        resolve_subexpr(&cond_no_calls, &sources, edge_idx, scg),
+                        pre_calls,
+                    );
                 }
             }
         }
     }
 
     // Fallback: use the first DataFlow input
-    resolve_df_input(branch_id, 0, edge_idx, scg)
+    (resolve_df_input(branch_id, 0, edge_idx, scg), Vec::new())
 }
 
 // ── Control flow resolution helpers ────────────────────────────────────
@@ -1301,7 +1338,13 @@ fn walk_control_flow_with_externs(
             NodePayload::Control(ctrl) => match ctrl.kind {
                 ControlKind::Branch => {
                     let (then_tgt, else_tgt, join_node) = resolve_branch(node_id, scg, edge_idx);
-                    let cond = resolve_branch_cond(node_id, edge_idx, scg);
+                    let (cond, pre_calls) = resolve_branch_cond(node_id, edge_idx, scg, extern_functions);
+
+                    // Emit any pre-branch Call statements (extracted from
+                    // inline function calls in the condition, e.g.
+                    // `if (is_space(c) == 1)`).  These must execute before
+                    // the branch so the condition can read the call's result.
+                    stmts.extend(pre_calls);
 
                     // Check if this is a match/switch branch (label starts
                     // with "match") vs a simple if/else. For match branches,
@@ -1473,7 +1516,7 @@ fn walk_control_flow_with_externs(
                                 }
                             }
                             if for_range.is_none() && !needs_guard {
-                                if let Some(_neg_cond) = parse_while_condition(node_id, label, edge_idx, scg) {
+                                if let Some((_neg_cond, _pre_calls)) = parse_while_condition(node_id, label, edge_idx, scg, extern_functions) {
                                     needs_guard = true;
                                 }
                             }
@@ -1482,8 +1525,26 @@ fn walk_control_flow_with_externs(
                     let body = if needs_guard {
                         let mut b = body;
                         if let Some(label) = &ctrl.label {
-                            if let Some(neg_cond) = parse_while_condition(node_id, label, edge_idx, scg) {
-                                b.insert(0, ScgStatement::Control(ControlNode::If {
+                            if let Some((neg_cond, pre_calls)) = parse_while_condition(node_id, label, edge_idx, scg, extern_functions) {
+                                // Emit any pre-guard Call statements (extracted
+                                // from inline function calls in the while
+                                // condition, e.g. `while (is_space(c) == 0)`).
+                                // These must execute BEFORE the guard so the
+                                // condition can read the call's result.
+                                //
+                                // We insert the pre-calls first (at position 0,
+                                // in order), then insert the guard If AFTER
+                                // them (at position = number of pre-calls).
+                                // The previous code inserted the guard If at
+                                // position 0 AFTER the pre-calls, placing it
+                                // BEFORE them — causing the guard to read
+                                // uninitialized/zero values instead of the
+                                // call results.
+                                let n_pre = pre_calls.len();
+                                for call_stmt in pre_calls {
+                                    b.insert(0, call_stmt);
+                                }
+                                b.insert(n_pre, ScgStatement::Control(ControlNode::If {
                                     cond: neg_cond,
                                     then_body: vec![ScgStatement::Control(ControlNode::Break)],
                                     else_body: None,
@@ -4119,7 +4180,8 @@ fn parse_while_condition(
     label: &str,
     edge_idx: &EdgeIndex,
     scg: &SCG,
-) -> Option<ScgExpr> {
+    extern_functions: &HashSet<String>,
+) -> Option<(ScgExpr, Vec<ScgStatement>)> {
     let label = label.trim();
     // Strip "while (" prefix and ")" suffix to get the condition expression.
     let cond_str = label.strip_prefix("while")?.trim();
@@ -4127,38 +4189,54 @@ fn parse_while_condition(
     let cond_str = cond_str.strip_suffix(')').unwrap_or(cond_str);
     let cond_str = cond_str.trim();
 
+    // ── Extract inline function calls from the while condition ──
+    //
+    // While conditions like `while (is_space(c) == 0)` contain a function
+    // call that has no dedicated SCG Computation node.  We extract the call
+    // into a `Call` statement (emitted before the loop guard) and replace
+    // the call text with a vreg reference so the comparison can be parsed.
+    let df_inputs = edge_idx.incoming_df(header_id);
+    let sources: Vec<NodeId> = df_inputs.iter().map(|e| e.source).collect();
+    let (cond_no_calls, pre_calls) = extract_calls_from_label(
+        cond_str,
+        header_id,
+        &sources,
+        edge_idx,
+        scg,
+        extern_functions,
+    );
+
     // Find the comparison operator.  Check two-character operators first
     // (<=, >=, ==, !=) before single-character ones (<, >).
-    let (op_str, lhs_str, rhs_str) = if let Some(pos) = find_operator(cond_str, "<=") {
-        ("<=", &cond_str[..pos], &cond_str[pos + 2..])
-    } else if let Some(pos) = find_operator(cond_str, ">=") {
-        (">=", &cond_str[..pos], &cond_str[pos + 2..])
-    } else if let Some(pos) = find_operator(cond_str, "==") {
-        ("==", &cond_str[..pos], &cond_str[pos + 2..])
-    } else if let Some(pos) = find_operator(cond_str, "!=") {
-        ("!=", &cond_str[..pos], &cond_str[pos + 2..])
-    } else if let Some(pos) = find_operator(cond_str, "<") {
-        ("<", &cond_str[..pos], &cond_str[pos + 1..])
-    } else if let Some(pos) = find_operator(cond_str, ">") {
-        (">", &cond_str[..pos], &cond_str[pos + 1..])
+    let (op_str, lhs_str, rhs_str) = if let Some(pos) = find_operator(&cond_no_calls, "<=") {
+        ("<=", &cond_no_calls[..pos], &cond_no_calls[pos + 2..])
+    } else if let Some(pos) = find_operator(&cond_no_calls, ">=") {
+        (">=", &cond_no_calls[..pos], &cond_no_calls[pos + 2..])
+    } else if let Some(pos) = find_operator(&cond_no_calls, "==") {
+        ("==", &cond_no_calls[..pos], &cond_no_calls[pos + 2..])
+    } else if let Some(pos) = find_operator(&cond_no_calls, "!=") {
+        ("!=", &cond_no_calls[..pos], &cond_no_calls[pos + 2..])
+    } else if let Some(pos) = find_operator(&cond_no_calls, "<") {
+        ("<", &cond_no_calls[..pos], &cond_no_calls[pos + 1..])
+    } else if let Some(pos) = find_operator(&cond_no_calls, ">") {
+        (">", &cond_no_calls[..pos], &cond_no_calls[pos + 1..])
     } else {
         return None;
     };
 
-    // Resolve lhs and rhs operands.
+    // Resolve lhs and rhs operands using resolve_subexpr.
     //
-    // The LoopHeader has exactly two DataFlow inputs: input 0 = lhs,
-    // input 1 = rhs.  We resolve them to ScgExprs via resolve_df_input.
-    // As a fallback, if a DataFlow input is missing, we try to parse the
-    // operand string as an integer literal or a variable name.
-    let lhs = resolve_df_input(header_id, 0, edge_idx, scg);
-    let rhs = resolve_df_input(header_id, 1, edge_idx, scg);
-
-    // Map the operator to its negation (so "break when negated" works).
-    // If the resolved ScgExprs are Int literals (e.g. resolve_df_input fell
-    // back to Int(0)), also try parsing the label operand strings.
-    let lhs = improve_expr(&lhs, lhs_str.trim());
-    let rhs = improve_expr(&rhs, rhs_str.trim());
+    // We use resolve_subexpr (the same function used by resolve_branch_cond
+    // for if-conditions) because it can handle complex sub-expressions like
+    // `*(src + p)` (Load), `is_digit(c)` (function call), and `a + b` (BinOp).
+    //
+    // The old approach used resolve_df_input which only looks at DataFlow
+    // edges — it cannot resolve Loads or function calls that have no
+    // dedicated Computation node in the SCG.  This caused while-conditions
+    // like `while (*(src + p) == 1)` to silently evaluate to false (0 == 1),
+    // making the loop exit immediately with pre-loop values.
+    let lhs = resolve_subexpr(lhs_str.trim(), &sources, edge_idx, scg);
+    let rhs = resolve_subexpr(rhs_str.trim(), &sources, edge_idx, scg);
 
     let neg_op = match op_str {
         "<" => IrBinOpKind::SGe,   // !(a < b)  ≡  a >= b
@@ -4170,11 +4248,14 @@ fn parse_while_condition(
         _ => return None,
     };
 
-    Some(ScgExpr::BinOp {
-        op: map_binop_kind(neg_op),
-        lhs: Box::new(lhs),
-        rhs: Box::new(rhs),
-    })
+    Some((
+        ScgExpr::BinOp {
+            op: map_binop_kind(neg_op),
+            lhs: Box::new(lhs),
+            rhs: Box::new(rhs),
+        },
+        pre_calls,
+    ))
 }
 
 /// Find the position of a comparison operator in a condition string,
