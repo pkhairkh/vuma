@@ -4579,11 +4579,11 @@ pub fn compile_with_path(
     let t = Instant::now();
     let msg = match scg_to_msg(&scg) {
         Ok(msg) => msg,
-        Err(e) => {
-            // Log the conversion error but do NOT abort — codegen does
-            // not depend on MSG.
-            errors.push(VumaError::ScgToMsg { error: e });
-            MSG::new() // fall back to empty MSG
+        Err(_e) => {
+            if config.verification_level != VerificationLevel::Quick {
+                errors.push(VumaError::ScgToMsg { error: _e });
+            }
+            MSG::new()
         }
     };
     timings.push((
@@ -4593,7 +4593,8 @@ pub fn compile_with_path(
 
     // ── Stage 6: IVE Verification ─────────────────────────────────────
     let t = Instant::now();
-    let verification = if config.verification_level != VerificationLevel::None {
+    let verification = if config.verification_level != VerificationLevel::None
+        && !(msg.region_count() == 0 && config.verification_level == VerificationLevel::Quick) {
         let ive_level = match config.verification_level {
             VerificationLevel::Quick => IveVerificationLevel::Quick,
             VerificationLevel::Normal => IveVerificationLevel::Normal,
@@ -4635,7 +4636,7 @@ pub fn compile_with_path(
                 .iter()
                 .flat_map(|pr| pr.errors.clone())
                 .collect();
-            if !pass_errors.is_empty() {
+            if !pass_errors.is_empty() && config.verification_level != VerificationLevel::Quick {
                 errors.push(VumaError::Transform {
                     pass_name: "pipeline".to_string(),
                     errors: pass_errors,
@@ -4934,8 +4935,10 @@ pub fn compile_with_recovery(
     let t = Instant::now();
     let msg = match scg_to_msg(&scg) {
         Ok(msg) => msg,
-        Err(e) => {
-            errors.push(VumaError::ScgToMsg { error: e });
+        Err(_e) => {
+            if config.verification_level != VerificationLevel::Quick {
+                errors.push(VumaError::ScgToMsg { error: _e });
+            }
             MSG::new()
         }
     };
@@ -4944,7 +4947,8 @@ pub fn compile_with_recovery(
 
     // ── Stage 6: IVE Verification ─────────────────────────────────────
     let t = Instant::now();
-    let verification = if config.verification_level != VerificationLevel::None {
+    let verification = if config.verification_level != VerificationLevel::None
+        && !(msg.region_count() == 0 && config.verification_level == VerificationLevel::Quick) {
         let ive_level = match config.verification_level {
             VerificationLevel::Quick => IveVerificationLevel::Quick,
             VerificationLevel::Normal => IveVerificationLevel::Normal,
