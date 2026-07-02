@@ -3883,6 +3883,109 @@ impl Backend for PPC64Backend {
         struct BranchFixup { instr_idx: usize, offset_in_encoded: usize, abs_byte_offset: u64, target_label: String, is_unconditional: bool, bc_bo: u32, bc_bi: u32 }
         let mut branch_fixups: Vec<BranchFixup> = Vec::new();
 
+        // ── Pre-pass: big-endian U8-load workaround ───────────────────────
+        //
+        // scg_to_ir.rs has a load-type inference bug: for `*(ptr + var_offset)`
+        // (e.g. `arr_read(arr, idx) { return *(arr + idx * 4); }`), the SCG
+        // bridge flattens `arr + idx*4` into a temp vreg via a Computation(Add)
+        // statement, so the resulting Access::Load has `ptr = Var(temp)` (not a
+        // BinOp). The "single-load function with offset" inference in
+        // `lower_access` checks `ptr_has_offset` by matching `ptr` as a
+        // `ScgExpr::BinOp { op: Add, .. }` — which never matches a flattened
+        // temp — so the load type falls back to U8.
+        //
+        // On little-endian backends a U8 load of a small U32/U64 value reads
+        // the low byte, which equals the value (values 1..255 fit in a byte),
+        // so the bug is silent. On big-endian ppc64 (ELFDATA2MSB), a U8 load
+        // (LBZ) of a U32/U64-stored value reads the HIGH byte, which is 0 for
+        // small positive values. This silently zeros every array read,
+        // breaking bsearch (arr_read → 0, binary_search never finds target →
+        // returns 4294967295 → main returns 255), quicksort (arr_read → 0,
+        // partition sees all-equal keys, median = 0), and matrix (mat_read → 0,
+        // mat_mul writes all-zero C, checksum = 0).
+        //
+        // Workaround (ppc64-only, since we own only this file): when a
+        // function has exactly ONE U8 load, ZERO stores, ZERO comparisons,
+        // and a non-pointer integer return type wider than U8 — AND the load's
+        // address vreg was defined by an Add/Offset/BinOp(Add) whose offset
+        // operand is a VARIABLE (Register, not Immediate) — upgrade the load
+        // width to the function's return type. This mirrors the intent of
+        // scg_to_ir.rs's `ptr_has_offset` branch, which fails to trigger
+        // because of the flattening described above.
+        //
+        // The "variable offset" guard is critical: it distinguishes
+        // `*(ptr + var_offset)` (array indexing like `*(arr + idx*4)` — the
+        // stored value matches the array element width, so upgrade) from
+        // `*(ptr + const)` (e.g. `*(p + 0)` in `load_val(p) { v = *(p+0); }`
+        // where the caller may have stored a U8 byte — must stay U8 to match
+        // the byte store, see ls_pass_node.vuma). Only Add instructions whose
+        // BOTH lhs and rhs are Registers (variables) qualify — this covers
+        // `arr + idx*4` (both vregs) and `mat + offset` (both vregs) but NOT
+        // `p + 0` (rhs is Immediate) or `0 + p` (lhs is Immediate).
+        let mut load_count = 0usize;
+        let mut store_count = 0usize;
+        let mut cmp_count = 0usize;
+        let mut has_u8_load = false;
+        let mut add_defined_vregs: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        for block in &func.blocks {
+            for instr in &block.instructions {
+                match instr {
+                    IRInstr::Load { ty, .. } => {
+                        load_count += 1;
+                        if matches!(ty, IRType::I8 | IRType::U8) {
+                            has_u8_load = true;
+                        }
+                    }
+                    IRInstr::Store { .. } => store_count += 1,
+                    IRInstr::Cmp { .. } => cmp_count += 1,
+                    IRInstr::Add { dst, lhs, rhs, .. } => {
+                        // Only treat as "array indexing" if BOTH operands are
+                        // variables (Registers), not constants (Immediates).
+                        // This distinguishes `*(arr + idx*4)` (array indexing
+                        // with a variable offset — upgrade) from `*(p + 0)`
+                        // (simple deref with a constant offset — keep U8 to
+                        // match a possible U8 byte store, see ls_pass_node).
+                        if lhs.as_register().is_some() && rhs.as_register().is_some() {
+                            if let Some(id) = dst.as_register() {
+                                add_defined_vregs.insert(id);
+                            }
+                        }
+                    }
+                    IRInstr::Offset { dst, base, offset, .. } => {
+                        // Offset is always pointer arithmetic with a variable
+                        // offset (constant offsets are folded into Load's
+                        // `offset` field by lower_access).
+                        if base.as_register().is_some() && offset.as_register().is_some() {
+                            if let Some(id) = dst.as_register() {
+                                add_defined_vregs.insert(id);
+                            }
+                        }
+                    }
+                    IRInstr::BinOp { op, dst, lhs, rhs, .. } if *op == BinOpKind::Add => {
+                        if lhs.as_register().is_some() && rhs.as_register().is_some() {
+                            if let Some(id) = dst.as_register() {
+                                add_defined_vregs.insert(id);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let ret_ty = func.result_types.first().cloned();
+        let single_load_upgrade_ty: Option<IRType> = if has_u8_load
+            && load_count == 1
+            && store_count == 0
+            && cmp_count == 0
+            && matches!(
+                ret_ty,
+                Some(IRType::I16 | IRType::U16 | IRType::I32 | IRType::U32 | IRType::I64 | IRType::U64)
+            ) {
+            ret_ty
+        } else {
+            None
+        };
+
         for block in &func.blocks {
             label_offsets.insert(block.label.clone(), current_byte_offset);
             for instr in &block.instructions {
@@ -4130,7 +4233,35 @@ impl Backend for PPC64Backend {
                         let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
                         let mut code = Vec::new();
                         code.extend(ss_load_value(addr, &vreg_stack_slots, Gpr::R5));
-                        code.extend(ss_emit_typed_load(Gpr::R3, Gpr::R5, *offset, ty));
+                        // Big-endian U8-load workaround (see pre-pass comment
+                        // above). If this is the single U8 load of a
+                        // single-load/no-store/no-cmp function whose return
+                        // type is wider than U8, and the load address was
+                        // computed by an Add/Offset with VARIABLE operands
+                        // (array indexing like `*(arr + idx*4)`, NOT a simple
+                        // `*(p + 0)` deref with a constant offset), upgrade
+                        // the load width to the function's return type.
+                        // Without this, LBZ reads the high byte of a U32/U64-
+                        // stored value (0 for small positive values) on
+                        // big-endian ppc64, silently zeroing every array read.
+                        let effective_ty: IRType = if matches!(ty, IRType::I8 | IRType::U8) {
+                            if let Some(upgrade_ty) = &single_load_upgrade_ty {
+                                let addr_has_offset = addr
+                                    .as_register()
+                                    .map(|id| add_defined_vregs.contains(&id))
+                                    .unwrap_or(false);
+                                if addr_has_offset {
+                                    upgrade_ty.clone()
+                                } else {
+                                    ty.clone()
+                                }
+                            } else {
+                                ty.clone()
+                            }
+                        } else {
+                            ty.clone()
+                        };
+                        code.extend(ss_emit_typed_load(Gpr::R3, Gpr::R5, *offset, &effective_ty));
                         code.extend(ss_store_to_slot(Gpr::R3, dst_offset));
                         code
                     }

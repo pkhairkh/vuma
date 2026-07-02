@@ -4483,7 +4483,14 @@ impl Backend for RiscV32Backend {
                         // for the full rationale). RV32 masks the shift count
                         // to 5 bits, so `<< 32` becomes `<< 0`. For u64/i64
                         // values, shift-by-32 is a word-swap + zero-fill.
-                        let is_64bit = matches!(ty, Some(IRType::U64) | Some(IRType::I64));
+                        //
+                        // The shift-by-32 idiom only makes sense for 64-bit
+                        // values, so we also trigger when `ty` is None
+                        // (unknown) — the IR builder does not always propagate
+                        // the declared u64 type from `let x: u64 = ...` to the
+                        // BinOp's `ty` field. See Task 7-C (cluster F).
+                        let is_64bit = matches!(ty, Some(IRType::U64) | Some(IRType::I64))
+                            || ty.is_none();
                         let is_shl_32 = is_64bit && matches!(rhs, IRValue::Immediate(32))
                             && matches!(op, BinOpKind::Shl);
                         let is_shr_32 = is_64bit && matches!(rhs, IRValue::Immediate(32))
@@ -4511,6 +4518,35 @@ impl Backend for RiscV32Backend {
                             code.extend(ss_store_to_slot(Gpr::T0, dst_offset - 4));
                         } else {
                         match op {
+                            BinOpKind::And | BinOpKind::Or | BinOpKind::Xor => {
+                                // 64-bit bitwise op: operate on BOTH low and high
+                                // words. This preserves the high word for u64
+                                // values — critical for the
+                                // `(out_idx << 32) | checksum` pack pattern in
+                                // base64_encode.vuma. For u32 values (where
+                                // both operands have high=0), the high-word op
+                                // is 0 <op> 0 = 0, so the result is unchanged.
+                                // See Task 7-C (cluster F).
+                                code.extend(ss_load_value_64(Gpr::T0, Gpr::T2, lhs, &vreg_stack_slots));
+                                code.extend(ss_load_value_64(Gpr::T1, Gpr::T3, rhs, &vreg_stack_slots));
+                                let rv_op = match op {
+                                    BinOpKind::And => Instruction::And { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T1 },
+                                    BinOpKind::Or => Instruction::Or { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T1 },
+                                    BinOpKind::Xor => Instruction::Xor { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T1 },
+                                    _ => unreachable!(),
+                                };
+                                code.extend(rv_op.encode());
+                                let rv_op_hi = match op {
+                                    BinOpKind::And => Instruction::And { rd: Gpr::T2, rs1: Gpr::T2, rs2: Gpr::T3 },
+                                    BinOpKind::Or => Instruction::Or { rd: Gpr::T2, rs1: Gpr::T2, rs2: Gpr::T3 },
+                                    BinOpKind::Xor => Instruction::Xor { rd: Gpr::T2, rs1: Gpr::T2, rs2: Gpr::T3 },
+                                    _ => unreachable!(),
+                                };
+                                code.extend(rv_op_hi.encode());
+                                code.extend(ss_store_64(Gpr::T0, Gpr::T2, dst_offset));
+                                // Already stored both halves — skip the
+                                // ss_store_to_slot at the end of the else block.
+                            }
                             BinOpKind::Ror | BinOpKind::Rol => {
                                 code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::T1));
                                 code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::T2));
@@ -4524,6 +4560,7 @@ impl Backend for RiscV32Backend {
                                     code.extend(Instruction::Srl { rd: Gpr::T4, rs1: Gpr::T1, rs2: Gpr::T4 }.encode());
                                 }
                                 code.extend(Instruction::Or { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T4 }.encode());
+                                code.extend(ss_store_to_slot(Gpr::T0, dst_offset));
                             }
                             _ => {
                                 code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::T0));
@@ -4536,9 +4573,6 @@ impl Backend for RiscV32Backend {
                                     BinOpKind::UDiv => { code.extend(Instruction::Divu { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T1 }.encode()); }
                                     BinOpKind::SRem => { code.extend(Instruction::Rem { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T1 }.encode()); }
                                     BinOpKind::URem => { code.extend(Instruction::Remu { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T1 }.encode()); }
-                                    BinOpKind::And => { code.extend(Instruction::And { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T1 }.encode()); }
-                                    BinOpKind::Or => { code.extend(Instruction::Or { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T1 }.encode()); }
-                                    BinOpKind::Xor => { code.extend(Instruction::Xor { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T1 }.encode()); }
                                     BinOpKind::Shl => { code.extend(Instruction::Sll { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T1 }.encode()); }
                                     BinOpKind::ShrL => { code.extend(Instruction::Srl { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T1 }.encode()); }
                                     BinOpKind::ShrA => { code.extend(Instruction::Sra { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T1 }.encode()); }
@@ -4547,11 +4581,12 @@ impl Backend for RiscV32Backend {
                                     | BinOpKind::Eq | BinOpKind::Ne => {
                                         code.extend(emit_binop_cmp_isel(op, Gpr::T0, Gpr::T0, Gpr::T1, Gpr::T5));
                                     }
-                                    BinOpKind::Ror | BinOpKind::Rol => unreachable!(),
+                                    BinOpKind::And | BinOpKind::Or | BinOpKind::Xor
+                                    | BinOpKind::Ror | BinOpKind::Rol => unreachable!(),
                                 }
+                                code.extend(ss_store_to_slot(Gpr::T0, dst_offset));
                             }
                         }
-                        code.extend(ss_store_to_slot(Gpr::T0, dst_offset));
                         } // close else block for is_shl_32/is_shr_32
                         code
                     }
