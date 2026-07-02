@@ -477,18 +477,24 @@ impl Instruction {
         // "dmb") so test infrastructure can verify atomic operations.
         //
         // Bit layouts (see ARM ARM A8.8.71–A8.8.78):
-        //   LDREX:  cond 0001_1011 Rn Rd 1111 1001 1111
+        //   LDREX:  cond 0001_1001 Rn Rd 1111 1001 1111
         //   LDREXB: cond 0001_1101 Rn Rd 1111 1001 1111
         //   LDREXH: cond 0001_1111 Rn Rd 1111 1001 1111
         //   STREX:  cond 0001_1000 Rn Rd 1111 1001 Rt
         //   STREXB: cond 0001_1100 Rn Rd 1111 1001 Rt
         //   STREXH: cond 0001_1110 Rn Rd 1111 1001 Rt
         //   DMB:    cond 0101_0111 1111 1111 1111 0101 option
+        //
+        // NOTE: LDREX uses bits[27:20] = 0001_1001 (0x19), NOT 0001_1011
+        // (0x1B). 0x1B is the LDREXD (doubleword) opcode, which requires an
+        // even/odd register pair. The encoder was previously emitting LDREXD
+        // with Rt2=R15 (PC), causing UNPREDICTABLE behavior. See the comment
+        // in `encode_ldrex` (arm32/mod.rs) for details.
 
         // LDREX family — bits [27:20] distinguishes the variant; bits [11:8]
         // are 1111, bits [7:4] are 1001, bits [3:0] are 1111 (the "Rt"
         // position is hardwired to 0b1111 for the exclusive-load forms).
-        if (word & 0x0FF0_0FFF) == 0x01B0_0F9F {
+        if (word & 0x0FF0_0FFF) == 0x0190_0F9F {
             let rn = (word >> 16) & 0xF;
             let rd = (word >> 12) & 0xF;
             return Ok(Instruction::Ldrex {

@@ -541,6 +541,15 @@ struct LoopContext {
     /// Used to create phi nodes at the loop exit that merge values from
     /// all break paths with the normal (fall-through) exit path.
     break_snapshots: Vec<(String, HashMap<String, u32>)>,
+    /// Variable snapshots from each continue path: (continue_block_label,
+    /// names_at_continue).  Used to create phi nodes in the `loop_continue`
+    /// block that merge values from all continue paths with the
+    /// fall-through (end-of-body) path.  Without these phis, the
+    /// loop-header phi's back-edge incoming value (taken from the
+    /// fall-through `names`) would be stale on continue paths — the
+    /// loop-carried variable never advances past the continue point,
+    /// causing an infinite loop (cf_while_continue / cf_for_continue).
+    continue_snapshots: Vec<(String, HashMap<String, u32>)>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1034,7 +1043,7 @@ impl IRBuilder {
                 self.lower_break(ir_func, names)?;
             }
             ControlNode::Continue => {
-                self.lower_continue(ir_func)?;
+                self.lower_continue(ir_func, names)?;
             }
             ControlNode::Switch {
                 discriminant,
@@ -1391,6 +1400,7 @@ impl IRBuilder {
             exit_label: loop_exit.clone(),
             continue_target: continue_label.clone(),
             break_snapshots: Vec::new(),
+            continue_snapshots: Vec::new(),
         });
 
         // ── Step 0: For-loop — initialize loop counter ──
@@ -1545,19 +1555,159 @@ impl IRBuilder {
         // ── Step 4b: Emit the continue target block (for for-loops) ──
         // This block contains the loop increment and back-edge to header.
         // `continue` jumps here, ensuring the increment is always executed.
+        //
+        // For while-loops (and for-loops via the direct AST bridge, which
+        // sets for_range=None), this block ALSO serves as the merge point
+        // for all continue paths and the fall-through (end-of-body) path.
+        // We insert phi nodes here that merge the variable values from
+        // every continue snapshot (captured by `lower_continue`) with the
+        // fall-through values.  The loop-header phi's back-edge incoming
+        // value is then taken from these `loop_continue` phi results,
+        // ensuring that a `continue` mid-body does not leave the
+        // loop-carried variable stuck at a stale fall-through-only value
+        // (which would cause an infinite loop — cf_while_continue /
+        // cf_for_continue).
+        let mut fall_through_names: Option<HashMap<String, u32>> = None;
+        let mut fall_through_label: Option<String> = None;
         if let Some(ref cont_label) = continue_label {
-            // If the current block (end of loop body) doesn't have a terminator,
-            // it falls through to the continue block.
+            // If the current block (end of loop body) doesn't have a
+            // terminator, it falls through to the continue block.  We
+            // capture the variable map at this fall-through point so that
+            // the `loop_continue` phi nodes can include it as one of their
+            // incoming edges.
             if matches!(
                 ir_func.current_block().terminator,
                 IRTerminator::Unreachable
             ) {
+                fall_through_names = Some(names.clone());
+                fall_through_label = Some(ir_func.current_block().label.clone());
                 ir_func.current_block().push(IRInstruction::Branch {
                     target: cont_label.clone(),
                 });
                 ir_func.current_block().terminator = IRTerminator::Jump(cont_label.clone());
             }
             ir_func.append_block(cont_label);
+        }
+
+        // ── Step 4c: Merge continue snapshots in the loop_continue block ──
+        //
+        // If any `continue` was hit inside the loop body, we now build phi
+        // nodes at the top of the `loop_continue` block that merge the
+        // variable values from each continue path with the fall-through
+        // (end-of-body) path.  The merge-phi results replace the
+        // fall-through-only values in `names`, so the subsequent
+        // for-range increment (if any) and the loop-header phi back-edge
+        // patching both observe path-merged values.
+        //
+        // Without this merge, the loop-header phi's back-edge incoming
+        // value would be the fall-through value (stale on the continue
+        // path), causing the loop-carried variable to never advance past
+        // the continue point → infinite loop.
+        let continue_snapshots: Vec<(String, HashMap<String, u32>)> = self
+            .loop_stack
+            .last()
+            .map(|ctx| ctx.continue_snapshots.clone())
+            .unwrap_or_default();
+
+        if !continue_snapshots.is_empty() {
+            let cont_label_str = continue_label.clone().unwrap_or_else(|| {
+                ir_func.current_block().label.clone()
+            });
+
+            // Build phi nodes for every variable that was in scope before
+            // the loop (these are the loop-carried variables that have
+            // loop-header phis whose back-edge needs a merged value).
+            //
+            // We only consider `names_before` keys (not body-local temps
+            // like `v_0`, `v_1`) because:
+            //   1. The loop-header phi back-edge patching only touches
+            //      `names_before` variables — body-local temps have no
+            //      loop-header phi and don't persist across iterations.
+            //   2. A body-local temp may not exist on the continue path
+            //      (it's defined after the continue), so its snapshot
+            //      value would be a bogus `0` fallback.  Creating a phi
+            //      for it would inject an invalid edge.
+            //
+            // For each `names_before` variable, the continue-phi merges:
+            //   - The continue-path value (from each continue snapshot).
+            //   - The fall-through value (from `fall_through_names`).
+            // If a snapshot doesn't contain the variable (e.g., it was
+            // shadowed mid-body), we fall back to the pre-loop vreg.
+            let mut phi_names: Vec<String> = names_before.keys().cloned().collect();
+            phi_names.sort(); // deterministic order
+
+            let mut continue_phi_info: Vec<(String, u32)> = Vec::new();
+            let mut continue_phi_instructions: Vec<IRInstruction> = Vec::new();
+
+            for name in &phi_names {
+                let pre_vreg = names_before.get(name).copied();
+
+                // Build the incoming list: one edge per continue snapshot,
+                // plus one edge for the fall-through (if it reaches
+                // loop_continue).
+                let mut incoming: Vec<(IRValue, String)> = Vec::new();
+                for (snap_label, snap_names) in &continue_snapshots {
+                    let vreg = snap_names
+                        .get(name)
+                        .copied()
+                        .or(pre_vreg)
+                        .unwrap_or(0);
+                    incoming.push((IRValue::Register(vreg), snap_label.clone()));
+                }
+                if let (Some(ref ft_names), Some(ref ft_label)) =
+                    (&fall_through_names, &fall_through_label)
+                {
+                    let vreg = ft_names
+                        .get(name)
+                        .copied()
+                        .or(pre_vreg)
+                        .unwrap_or(0);
+                    incoming.push((IRValue::Register(vreg), ft_label.clone()));
+                }
+
+                if incoming.is_empty() {
+                    continue;
+                }
+
+                let phi_vreg = self.alloc_vreg();
+                ir_func.register_vreg(VirtualRegister::named(phi_vreg, name));
+                continue_phi_info.push((name.clone(), phi_vreg));
+                continue_phi_instructions.push(IRInstruction::Phi {
+                    dst: IRValue::Register(phi_vreg),
+                    incoming,
+                });
+            }
+
+            // Insert the phi instructions at the beginning of the
+            // loop_continue block.
+            let cont_block = ir_func
+                .blocks
+                .iter_mut()
+                .find(|b| b.label == cont_label_str)
+                .expect("loop_continue block must exist");
+            for phi in continue_phi_instructions {
+                cont_block.instructions.push(phi);
+            }
+
+            // Update `names` so the for-range increment (below) and the
+            // loop-header phi back-edge patching both observe the merged
+            // values.  We must update BOTH the user-visible name and any
+            // alias entries that still point to the old (fall-through)
+            // vreg, mirroring lower_computation's alias-update logic.
+            for (name, phi_vreg) in &continue_phi_info {
+                let old_vreg = names.get(name).copied();
+                names.insert(name.clone(), *phi_vreg);
+                if let Some(old) = old_vreg {
+                    let alias_keys: Vec<String> = names
+                        .iter()
+                        .filter(|(_, &v)| v == old)
+                        .map(|(k, _)| k.clone())
+                        .collect();
+                    for key in alias_keys {
+                        names.insert(key, *phi_vreg);
+                    }
+                }
+            }
         }
 
         if let Some((var, _start, _end)) = for_range {
@@ -2076,22 +2226,33 @@ impl IRBuilder {
         Ok(())
     }
 
-    /// Lower a `continue` to a jump to the enclosing loop's header label.
-    fn lower_continue(&mut self, ir_func: &mut IRFunction) -> Result<()> {
+    /// Lower a `continue` to a jump to the enclosing loop's continue target
+    /// (the `loop_continue` block), and record a snapshot of the current
+    /// variable map so that `lower_loop` can build phi nodes in the
+    /// `loop_continue` block merging values from all continue paths with
+    /// the fall-through (end-of-body) path.
+    fn lower_continue(
+        &mut self,
+        ir_func: &mut IRFunction,
+        names: &HashMap<String, u32>,
+    ) -> Result<()> {
         // Continue should jump to the loop back-edge (increment) block,
         // NOT the loop header. Jumping to the header skips the increment,
         // causing an infinite loop when continue is hit.
         //
-        // For for-loops, the back-edge block is the last block in the loop
-        // body that contains the increment and then jumps to the header.
-        // We don't track the back-edge label directly, so we jump to the
-        // end of the loop body — the code after lower_statements(body)
-        // adds the increment and back-edge to header.
+        // For for-loops, the back-edge block is the `loop_continue` block
+        // that contains the increment and then jumps to the header.
         //
-        // The simplest correct fix: create a continue target that is the
-        // loop body's back-edge. Since we can't know the back-edge label
-        // at continue-lowering time, we use a synthetic label and patch
-        // it after the loop body is lowered.
+        // For while-loops (no increment), `loop_continue` is the merge
+        // point for all continue paths and the fall-through path; the
+        // loop-header phi's back-edge incoming value is taken from the
+        // `loop_continue` block's phi results (merging continue + fall-
+        // through), NOT from the fall-through-only `names` at the end of
+        // the body.  Without this snapshot, the back-edge phi incoming
+        // value would be the fall-through value (stale on the continue
+        // path), so the loop-carried variable never advances past the
+        // continue point → infinite loop (cf_while_continue /
+        // cf_for_continue).
         let ctx = self
             .loop_stack
             .last_mut()
@@ -2099,9 +2260,19 @@ impl IRBuilder {
                 crate::CodegenError::TranslationError("continue outside of loop".to_string())
             })?;
 
+        // Snapshot the current variable map at the continue point so that
+        // `lower_loop` can build phi nodes in `loop_continue` merging
+        // continue-path values with fall-through values.
+        let continue_block_label = ir_func.current_block().label.clone();
+        ctx.continue_snapshots
+            .push((continue_block_label, names.clone()));
+
         // If we have a continue_target, jump there. Otherwise jump to header
         // (for while-loops where there's no increment, this is correct).
-        let target = ctx.continue_target.clone().unwrap_or_else(|| ctx.header_label.clone());
+        let target = ctx
+            .continue_target
+            .clone()
+            .unwrap_or_else(|| ctx.header_label.clone());
 
         ir_func.current_block().push(IRInstruction::Branch {
             target: target.clone(),
@@ -4086,6 +4257,186 @@ mod tests {
         assert!(cont_block.is_some(), "continue should jump to loop_header");
     }
 
+    // ── Test 7b: Continue with loop-carried variable gets a merge phi ──
+    //
+    // Reproduces cf_while_continue: a `while`-style loop with a body that
+    // reassigns a loop-carried variable BEFORE a `continue`, then reassigns
+    // it again AFTER the continue (on the fall-through path).  Without a
+    // continue-phi merge in `loop_continue`, the loop-header phi's
+    // back-edge incoming value is taken from the fall-through-only `names`
+    // — which is stale on the continue path, so the loop-carried variable
+    // never advances past the continue point and the loop never terminates.
+    //
+    // We assert that the `loop_continue` block contains a Phi instruction
+    // (the merge phi for the loop-carried variable), and that the
+    // loop-header phi's back-edge incoming value is NOT the stale
+    // fall-through value.
+    #[test]
+    fn test_continue_merges_loop_carried_variable() {
+        // SCG for:
+        //   fn test(i: u32) -> u32 {
+        //     sum: u32 = 0;
+        //     loop {
+        //       i = i + 1;            // reassign BEFORE continue (advances on both paths)
+        //       if (i == 5) { continue; }
+        //       sum = sum + i;        // reassign AFTER continue (only on fall-through)
+        //     }
+        //     return sum;
+        //   }
+        //
+        // The continue-phi for `sum` must merge:
+        //   - continue path: sum_phi (not yet incremented)
+        //   - fall-through:  sum_v2 (incremented)
+        // The loop-header phi's back-edge for `sum` must use this merge-phi
+        // result, NOT the fall-through-only sum_v2.
+        let scg = func_scg(
+            "test_continue_merge",
+            vec![ScgParam {
+                name: "i".into(),
+                ty: ScgType::U32,
+            }],
+            vec![
+                // sum = 0
+                ScgStatement::Computation(ComputationNode {
+                    dst: "sum".into(),
+                    op: BinOpKind::Add,
+                    lhs: ScgExpr::Int(0),
+                    rhs: ScgExpr::Int(0),
+                    tail_call: false,
+                    reassigns: Some("sum".into()),
+                }),
+                ScgStatement::Control(ControlNode::Loop {
+                    body: vec![
+                        // v_inc = i + 1
+                        ScgStatement::Computation(ComputationNode {
+                            dst: "v_inc".into(),
+                            op: BinOpKind::Add,
+                            lhs: ScgExpr::Var("i".into()),
+                            rhs: ScgExpr::Int(1),
+                            tail_call: false,
+                            reassigns: None,
+                        }),
+                        // i = v_inc  (reassign i BEFORE the continue)
+                        ScgStatement::Computation(ComputationNode {
+                            dst: "i".into(),
+                            op: BinOpKind::Add,
+                            lhs: ScgExpr::Var("v_inc".into()),
+                            rhs: ScgExpr::Int(0),
+                            tail_call: false,
+                            reassigns: Some("i".into()),
+                        }),
+                        // v_cmp = (i == 5)
+                        ScgStatement::Computation(ComputationNode {
+                            dst: "v_cmp".into(),
+                            op: BinOpKind::Eq,
+                            lhs: ScgExpr::Var("i".into()),
+                            rhs: ScgExpr::Int(5),
+                            tail_call: false,
+                            reassigns: None,
+                        }),
+                        // if v_cmp { continue }
+                        ScgStatement::Control(ControlNode::If {
+                            cond: ScgExpr::Var("v_cmp".into()),
+                            then_body: vec![ScgStatement::Control(ControlNode::Continue)],
+                            else_body: None,
+                        }),
+                        // v_sum = sum + i  (reassign sum AFTER the continue —
+                        // only reached on the fall-through path)
+                        ScgStatement::Computation(ComputationNode {
+                            dst: "v_sum".into(),
+                            op: BinOpKind::Add,
+                            lhs: ScgExpr::Var("sum".into()),
+                            rhs: ScgExpr::Var("i".into()),
+                            tail_call: false,
+                            reassigns: None,
+                        }),
+                        // sum = v_sum
+                        ScgStatement::Computation(ComputationNode {
+                            dst: "sum".into(),
+                            op: BinOpKind::Add,
+                            lhs: ScgExpr::Var("v_sum".into()),
+                            rhs: ScgExpr::Int(0),
+                            tail_call: false,
+                            reassigns: Some("sum".into()),
+                        }),
+                    ],
+                    for_range: None,
+                    while_cond: None,
+                }),
+                ScgStatement::Return(vec![ScgExpr::Var("sum".into())]),
+            ],
+        );
+
+        let mut builder = IRBuilder::new();
+        let program = builder.build(&scg).unwrap();
+        let func = &program.functions[0];
+
+        // 1. The `loop_continue` block must contain at least one Phi
+        //    instruction (the merge phi for `sum`, and possibly `i`).
+        let cont_block = func
+            .blocks
+            .iter()
+            .find(|b| b.label.contains("loop_continue"))
+            .expect("loop_continue block must exist");
+        assert!(
+            cont_block
+                .instructions
+                .iter()
+                .any(|i| matches!(i, IRInstruction::Phi { .. })),
+            "loop_continue block must contain a merge Phi instruction when \
+             the loop body contains a `continue` and a loop-carried variable \
+             is reassigned after the continue. Without this phi, the \
+             loop-header phi's back-edge incoming value is the stale \
+             fall-through-only value, causing an infinite loop \
+             (cf_while_continue)."
+        );
+
+        // 2. The loop-header phi for `sum` must have a back-edge incoming
+        //    value that is NOT the fall-through-only `sum` vreg.  We can't
+        //    easily identify the fall-through vreg by name, so we instead
+        //    verify that the loop-header phi has ≥2 incoming edges and at
+        //    least one incoming edge comes from `loop_continue` (the merged
+        //    back-edge), proving the back-edge was patched to the
+        //    loop_continue block (not left as the placeholder
+        //    `loop_body_label`).
+        let header_block = func
+            .blocks
+            .iter()
+            .find(|b| b.label.contains("loop_header"))
+            .expect("loop_header block must exist");
+        let header_sum_phi = header_block
+            .instructions
+            .iter()
+            .find_map(|i| {
+                if let IRInstruction::Phi { dst: _, incoming } = i {
+                    // The `sum` phi's dst vreg is named "sum" (or "i" — we
+                    // accept either; the key assertion is the back-edge
+                    // incoming label is loop_continue).
+                    if incoming.len() == 2
+                        && incoming
+                            .iter()
+                            .any(|(_, lbl)| lbl.contains("loop_continue"))
+                    {
+                        return Some(incoming.clone());
+                    }
+                }
+                None
+            })
+            .expect("loop_header must have a Phi with a loop_continue back-edge");
+
+        // At least one incoming edge must come from loop_continue (the
+        // merged back-edge), confirming the continue-phi merge result is
+        // used as the back-edge value.
+        assert!(
+            header_sum_phi
+                .iter()
+                .any(|(_, lbl)| lbl.contains("loop_continue")),
+            "loop_header phi's back-edge incoming must come from \
+             loop_continue (the merged back-edge), not from the stale \
+             placeholder loop_body_label."
+        );
+    }
+
     // ── Test 8: Stack allocation ─────────────────────────────────────
 
     #[test]
@@ -4155,6 +4506,7 @@ mod tests {
                     dst: "val".into(),
                     ptr: ScgExpr::Var("ptr".into()),
                     offset: Some(ScgExpr::Int(8)),
+                    ty: None,
                 }),
                 ScgStatement::Access(AccessNode::Store {
                     ptr: ScgExpr::Var("ptr".into()),
@@ -4914,6 +5266,7 @@ mod tests {
                     dst: "val".into(),
                     ptr: ScgExpr::Var("ptr".into()),
                     offset: None,
+                    ty: None,
                 }),
                 ScgStatement::Return(vec![ScgExpr::Var("val".into())]),
             ],
@@ -5194,6 +5547,7 @@ mod tests {
                     dst: "loaded".into(),
                     ptr: ScgExpr::Var("buf".into()),
                     offset: None,
+                    ty: None,
                 }),
                 ScgStatement::Return(vec![ScgExpr::Var("loaded".into())]),
             ],
@@ -6119,6 +6473,157 @@ mod tests {
             "Expected the result vreg to be a NEW vreg (the copy's dst), not the \
              same as the `a` vreg. If they are the same, the let-copy lowering is \
              aliasing `result` to `a` without creating a fresh vreg."
+        );
+    }
+
+    // ── Test: double-deref (**p) inner load must be pointer-width (U64) ──
+    //
+    // Reproduces the SCG shape that `flatten_expr` (pipeline.rs) emits for
+    // `**buf1` where buf1 holds buf2's address:
+    //
+    //   1. Alloc buf1 (pointer)
+    //   2. Store buf2's address into buf1 (U64 store — pointer_vregs path)
+    //   3. Load from buf1 with ty: Some(U64)  ← INNER deref (pointer-width)
+    //   4. Load from result with ty: None     ← OUTER deref (default U8)
+    //
+    // Without the U64 inner load, only 1 byte of buf2's 64-bit address is
+    // read, and the outer deref reads from a truncated (invalid) address →
+    // SIGSEGV on all native backends. See ptr_double_deref / ptr_multi_level
+    // / ptr_pointer_to_pointer gold-standard tests.
+    #[test]
+    fn test_double_deref_inner_load_is_pointer_width() {
+        let scg = func_scg(
+            "test_double_deref",
+            vec![],
+            vec![
+                // buf1 = allocate(8)  → stack allocation, buf1 vreg marked pointer
+                ScgStatement::Allocation(AllocationNode::Stack {
+                    name: "buf1".into(),
+                    size: 8,
+                    ty: ScgType::Ptr,
+                }),
+                // buf2 = allocate(8)  → stack allocation, buf2 vreg marked pointer
+                ScgStatement::Allocation(AllocationNode::Stack {
+                    name: "buf2".into(),
+                    size: 8,
+                    ty: ScgType::Ptr,
+                }),
+                // *buf2 = 42  → U8 store (immediate fits in a byte)
+                ScgStatement::Access(AccessNode::Store {
+                    ptr: ScgExpr::Var("buf2".into()),
+                    offset: None,
+                    value: ScgExpr::Int(42),
+                    ty: None,
+                }),
+                // *buf1 = buf2  → U64 store (buf2 vreg is in pointer_vregs)
+                ScgStatement::Access(AccessNode::Store {
+                    ptr: ScgExpr::Var("buf1".into()),
+                    offset: None,
+                    value: ScgExpr::Var("buf2".into()),
+                    ty: None,
+                }),
+                // INNER deref: load buf2's address from buf1.
+                // flatten_expr emits this with ty: Some(U64) so the full
+                // 64-bit address is read (not just the low byte).
+                ScgStatement::Access(AccessNode::Load {
+                    dst: "inner".into(),
+                    ptr: ScgExpr::Var("buf1".into()),
+                    offset: None,
+                    ty: Some(IRType::U64),
+                }),
+                // OUTER deref: load the final byte value from buf2.
+                // flatten_expr emits this with ty: None (default U8).
+                ScgStatement::Access(AccessNode::Load {
+                    dst: "val".into(),
+                    ptr: ScgExpr::Var("inner".into()),
+                    offset: None,
+                    ty: None,
+                }),
+                ScgStatement::Return(vec![ScgExpr::Var("val".into())]),
+            ],
+        );
+
+        let mut builder = IRBuilder::new();
+        let program = builder.build(&scg).unwrap();
+        let func = &program.functions[0];
+
+        // Collect all Load instructions in order.
+        let loads: Vec<&IRType> = func
+            .blocks
+            .iter()
+            .flat_map(|b| b.instructions.iter())
+            .filter_map(|i| {
+                if let IRInstruction::Load { ty, .. } = i {
+                    Some(ty)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // We expect exactly 2 loads: the inner (U64) and the outer (U8).
+        assert_eq!(
+            loads.len(),
+            2,
+            "Expected exactly 2 Load instructions (inner + outer deref), found {}",
+            loads.len()
+        );
+
+        // The INNER load (first) must be U64 (pointer-width) so the full
+        // 64-bit address is read. If it's U8, the address is truncated and
+        // the outer deref reads from a garbage address → SIGSEGV.
+        assert_eq!(
+            *loads[0],
+            IRType::U64,
+            "Expected the INNER deref load to be U64 (pointer-width) so the \
+             full 64-bit address is read. Got {:?}. If this is U8, \
+             `**buf1` reads only 1 byte of buf2's address and the outer \
+             deref segfaults.",
+            loads[0]
+        );
+
+        // The OUTER load (second) reads the final byte value (default U8).
+        assert_eq!(
+            *loads[1],
+            IRType::U8,
+            "Expected the OUTER deref load to be U8 (default byte width). \
+             Got {:?}.",
+            loads[1]
+        );
+
+        // Also verify the Store of buf2's address into buf1 is U64 (not U8).
+        // If this is U8, only 1 byte of buf2's address is stored, and the
+        // inner load reads a truncated address → SIGSEGV.
+        let stores: Vec<&IRType> = func
+            .blocks
+            .iter()
+            .flat_map(|b| b.instructions.iter())
+            .filter_map(|i| {
+                if let IRInstruction::Store { ty, .. } = i {
+                    Some(ty)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        // 2 stores: *buf2 = 42 (U8), *buf1 = buf2 (U64). The two stores
+        // have no data dependency on each other, so their relative order
+        // is not guaranteed by the topological sort — check by count, not
+        // by position.
+        assert_eq!(stores.len(), 2, "Expected exactly 2 Store instructions");
+        let u8_store_count = stores.iter().filter(|t| **t == IRType::U8).count();
+        let u64_store_count = stores.iter().filter(|t| **t == IRType::U64).count();
+        assert_eq!(
+            u8_store_count, 1,
+            "Expected exactly 1 U8 store (`*buf2 = 42`, immediate fits in a byte). Found {}",
+            u8_store_count
+        );
+        assert_eq!(
+            u64_store_count, 1,
+            "Expected exactly 1 U64 store (`*buf1 = buf2`, buf2 is a pointer). \
+             Found {}. If this is 0, only 1 byte of buf2's address is stored \
+             and the inner deref reads a truncated address.",
+            u64_store_count
         );
     }
 }
