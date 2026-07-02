@@ -1808,11 +1808,10 @@ impl LoweringContext {
                 self.stack_depth += 1;
             }
             IRValue::Register(id) => {
-                // If the register hasn't been allocated yet, allocate it.
-                // Use the type hint to decide i32 vs i64 (for 64-bit ops).
+                // If the register hasn't been allocated yet, allocate it as i32.
+                // On Wasm32, all integer locals are i32.
                 if self.get_local(*id).is_none() {
-                    let local_ty = type_hint.copied().unwrap_or(WasmType::I32);
-                    self.alloc_local(*id, local_ty);
+                    self.alloc_local(*id, WasmType::I32);
                 }
                 if let Some(local_idx) = self.get_local(*id) {
                     self.emit(WasmInstr::LocalGet(local_idx));
@@ -1851,8 +1850,7 @@ fn wasm_type_for_dedicated_arith(ir_ty: Option<&IRType>) -> WasmType {
     match ir_ty {
         Some(IRType::F32) => WasmType::F32,
         Some(IRType::F64) => WasmType::F64,
-        Some(IRType::I64) | Some(IRType::U64) => WasmType::I64,
-        _ => WasmType::I32, // 32-bit integer types → i32 on wasm32 (pointers are i32)
+        _ => WasmType::I32, // all integer types → i32 on wasm32 (pointers are i32)
     }
 }
 
@@ -1867,14 +1865,12 @@ fn wasm_type_for_binop(
     ir_ty: Option<&IRType>,
     _vreg_types: &HashMap<u32, WasmType>,
 ) -> WasmType {
-    // If the IR provides a type, use it. I64/U64 map to WasmType::I64
-    // (Wasm natively supports i64 on the value stack even in wasm32).
+    // If the IR provides a type, use it (but map I64/U64 to I32 for Wasm32).
     if let Some(ty) = ir_ty {
         return match ty {
             IRType::F32 => WasmType::F32,
             IRType::F64 => WasmType::F64,
-            IRType::I64 | IRType::U64 => WasmType::I64,
-            _ => WasmType::I32, // 32-bit integer types → i32 on wasm32
+            _ => WasmType::I32, // all integer types → i32 on wasm32
         };
     }
     // Default to i32 for all integer ops on wasm32
@@ -1910,13 +1906,7 @@ fn lower_function(
         .result_types
         .iter()
         .filter_map(WasmType::from_ir_type)
-        .map(|t| match t {
-            // I64/U64 returns stay I64 (Wasm supports i64 on the value
-            // stack even in wasm32). 32-bit integer types → I32.
-            WasmType::I64 => WasmType::I64,
-            other if other.is_integer() => WasmType::I32,
-            other => other,
-        })
+        .map(|t| if t.is_integer() { WasmType::I32 } else { t })
         .collect();
     let mut ctx = LoweringContext::new(result_types);
 
@@ -2460,18 +2450,12 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
                 "write", "exit", "free", "__vuma_dealloc", "__vuma_free"];
             if !void_functions.contains(&func.as_str()) {
                 // Non-void call: load return value from memory address 0
-                // (the callee stores its return value there before returning).
-                // Use i64.load if the dst vreg is I64-typed, else i32.load.
+                // (the callee stores its return value there before returning)
                 if let Some(IRValue::Register(id)) = dst {
-                    let ret_ty = ctx.vreg_types.get(id).copied().unwrap_or(WasmType::I32);
                     ctx.emit(WasmInstr::I32Const(0));
+                    ctx.emit(WasmInstr::I32Load { align: 2, offset: 0 });
                     ctx.stack_depth += 1;
-                    match ret_ty {
-                        WasmType::I64 => ctx.emit(WasmInstr::I64Load { align: 3, offset: 0 }),
-                        _ => ctx.emit(WasmInstr::I32Load { align: 2, offset: 0 }),
-                    }
-                    ctx.stack_depth += 1;
-                    ctx.pop_to_vreg(*id, ret_ty);
+                    ctx.pop_to_vreg(*id, WasmType::I32);
                 }
             } else {
                 // Void function with dst — push dummy 0
@@ -2887,17 +2871,13 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
         }
 
         IRInstr::Ret { values } => {
-            // Store return value at memory address 0 for _start/_vuma_main
-            // to read. The store width depends on the function's return type.
+            // Store return value at memory address 0 for _start to read.
+            // wasm i32.store expects stack: [addr, value]
             if let Some(val) = values.first() {
-                let ret_ty = ctx.result_types.first().copied().unwrap_or(WasmType::I32);
                 ctx.emit(WasmInstr::I32Const(0));
                 ctx.stack_depth += 1;
-                ctx.push_value(val, Some(&ret_ty));
-                match ret_ty {
-                    WasmType::I64 => ctx.emit(WasmInstr::I64Store { align: 3, offset: 0 }),
-                    _ => ctx.emit(WasmInstr::I32Store { align: 2, offset: 0 }),
-                }
+                ctx.push_value(val, Some(&WasmType::I32));
+                ctx.emit(WasmInstr::I32Store { align: 2, offset: 0 });
                 // Store pops 2 (addr, value)
                 ctx.stack_depth -= 2;
             }
@@ -2985,17 +2965,12 @@ fn lower_terminator_trampoline(
 ) -> Result<(), BackendError> {
     match term {
         IRTerminator::Return(values) => {
-            // Store return value at memory address 0 for _start/_vuma_main
-            // to read. The store width depends on the function's return type.
+            // Store return value at memory address 0 for _start to read
             if let Some(val) = values.first() {
-                let ret_ty = ctx.result_types.first().copied().unwrap_or(WasmType::I32);
                 ctx.emit(WasmInstr::I32Const(0));
                 ctx.stack_depth += 1;
-                ctx.push_value(val, Some(&ret_ty));
-                match ret_ty {
-                    WasmType::I64 => ctx.emit(WasmInstr::I64Store { align: 3, offset: 0 }),
-                    _ => ctx.emit(WasmInstr::I32Store { align: 2, offset: 0 }),
-                }
+                ctx.push_value(val, Some(&WasmType::I32));
+                ctx.emit(WasmInstr::I32Store { align: 2, offset: 0 });
                 ctx.stack_depth -= 2;
             }
             ctx.emit(WasmInstr::Return);
@@ -3479,11 +3454,11 @@ impl Backend for Wasm32Backend {
             // Call main() — stores return value at memory address 0
             WasmInstr::Call(main_idx).encode(&mut start_body);
 
-            // Load return value from memory address 0.
-            // Use i64.load + i32.wrap to handle both 32-bit and 64-bit returns.
+            // Load return value from memory address 0
+            // i32.const 0 (address)
             WasmInstr::I32Const(0).encode(&mut start_body);
-            WasmInstr::I64Load { align: 3, offset: 0 }.encode(&mut start_body);
-            WasmInstr::I32WrapI64.encode(&mut start_body);
+            // i32.load (addr -> value)
+            WasmInstr::I32Load { align: 2, offset: 0 }.encode(&mut start_body); // align=4, offset=0
             // Call proc_exit(return_value)
             WasmInstr::Call(WASI_PROC_EXIT_IDX).encode(&mut start_body);
         } else {
@@ -3523,13 +3498,9 @@ impl Backend for Wasm32Backend {
             let mut test_body = Vec::new();
             // Call main() — stores return value at memory address 0
             WasmInstr::Call(main_idx).encode(&mut test_body);
-            // Load return value from memory address 0.
-            // Use i64.load (8 bytes) + i32.wrap (truncate to i32) so that
-            // 64-bit returns are handled correctly. For 32-bit returns, the
-            // high 4 bytes at address 4 are zero, so wrapping is a no-op.
+            // Load return value from memory address 0
             WasmInstr::I32Const(0).encode(&mut test_body);
-            WasmInstr::I64Load { align: 3, offset: 0 }.encode(&mut test_body);
-            WasmInstr::I32WrapI64.encode(&mut test_body);
+            WasmInstr::I32Load { align: 2, offset: 0 }.encode(&mut test_body);
             // Return the value
             WasmInstr::Return.encode(&mut test_body);
             test_body.push(0x0B); // end
