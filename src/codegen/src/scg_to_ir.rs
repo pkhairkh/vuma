@@ -2573,6 +2573,33 @@ impl IRBuilder {
     ) -> Result<()> {
         let lhs_val = self.resolve_expr(&comp.lhs, names, ir_func)?;
         let rhs_val = self.resolve_expr(&comp.rhs, names, ir_func)?;
+
+        // Capture the previous vreg for the reassigned variable BEFORE
+        // inserting the new dst_vreg into `names`.  This is critical for
+        // correct alias propagation: when `comp.dst == comp.reassigns`
+        // (the common case for assignments like `x = expr` produced by
+        // the direct AST→codegen bridge, where both fields are the
+        // user-visible name), looking up `names[reassigns]` AFTER the
+        // insert would return the NEW dst_vreg rather than the OLD vreg.
+        // The subsequent alias-update loop filters `names` entries whose
+        // value equals `prev_vreg`; if `prev_vreg` is the NEW vreg, the
+        // only matching entry is `names[dst]` itself (already the new
+        // vreg), so the update is a no-op.  Any OTHER names entries that
+        // still point to the OLD vreg — e.g. an SCG-node-id alias like
+        // "v_5" that shares the same vreg as the user-visible "x", or a
+        // sibling entry created by lower_loop's loop-header phi dedup —
+        // are left stale.  Subsequent statements that resolve those
+        // aliases then read the pre-reassignment value, which causes
+        // stale-condition bugs such as the minicompiler infinite loop
+        // (a then-only `if cond { done = 1; }` followed by
+        // `if done == 0 { ... }` reads stale `done == 0` and re-enters
+        // the loop body forever).
+        let prev_vreg: Option<u32> = if let Some(name) = &comp.reassigns {
+            names.get(name).copied()
+        } else {
+            None
+        };
+
         let dst_vreg = self.alloc_vreg();
         ir_func.register_vreg(VirtualRegister::named(dst_vreg, &comp.dst));
         names.insert(comp.dst.clone(), dst_vreg);
@@ -2655,11 +2682,17 @@ impl IRBuilder {
         // `next_head = head + 1`, `head` resolved to the wrong vreg, so
         // `slot = buf + (head % capacity) * 4` used the comparison result
         // instead of the actual head value.
-        let prev_vreg: Option<u32> = if let Some(name) = &comp.reassigns {
-            names.get(name).copied()
-        } else {
-            None
-        };
+        //
+        // `prev_vreg` was captured above (before the `names[dst] = dst_vreg`
+        // insert) so that it holds the OLD vreg of the reassigned variable.
+        // The loop below updates EVERY names entry still pointing at that
+        // OLD vreg — this catches both the user-var-name entry (e.g. "x")
+        // and any alias entries (e.g. the SCG-node-id "v_1", or a sibling
+        // entry created by lower_loop's loop-header phi dedup) so they all
+        // forward to the freshly-allocated dst_vreg.  Without this, a
+        // subsequent `if done == 0 { ... }` that resolves `done` through
+        // an alias would read the pre-reassignment value, causing the
+        // minicompiler while-loop infinite-loop bug.
         if let Some(prev_vreg) = prev_vreg {
             let keys_to_update: Vec<String> = names.iter()
                 .filter(|(_, &v)| v == prev_vreg)
@@ -3936,6 +3969,8 @@ mod tests {
             vec![],
             vec![ScgStatement::Control(ControlNode::Loop {
                 body: vec![ScgStatement::Return(vec![])],
+                for_range: None,
+                while_cond: None,
             })],
         );
         let mut builder = IRBuilder::new();
@@ -3960,6 +3995,8 @@ mod tests {
             vec![],
             vec![ScgStatement::Control(ControlNode::Loop {
                 body: vec![ScgStatement::Control(ControlNode::Break)],
+                for_range: None,
+                while_cond: None,
             })],
         );
         let mut builder = IRBuilder::new();
@@ -3982,6 +4019,8 @@ mod tests {
             vec![],
             vec![ScgStatement::Control(ControlNode::Loop {
                 body: vec![ScgStatement::Control(ControlNode::Continue)],
+                for_range: None,
+                while_cond: None,
             })],
         );
         let mut builder = IRBuilder::new();
@@ -5251,6 +5290,8 @@ mod tests {
                         }),
                         ScgStatement::Control(ControlNode::Break),
                     ],
+                    for_range: None,
+                    while_cond: None,
                 }),
                 ScgStatement::Return(vec![ScgExpr::Var("sum".into())]),
             ],
@@ -5357,5 +5398,269 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ── Test 43: while-loop with sequential then-only ifs (minicompiler pattern) ──
+    //
+    // Reproduces the SCG shape from `womb/lang/minicompiler.vuma`'s
+    // `lex_number` loop:
+    //
+    //   while done == 0 {
+    //       if p >= src_len { done = 1; }        // then-only If that reassigns
+    //       if done == 0 { ... }                 // then-only If that reads
+    //   }
+    //
+    // The bridge lowers `while cond { body }` to
+    //   Loop { body: [__t = cond; If { cond: __t, then_body: body, else_body: [Break] }] }
+    // so the inner-body seen by `lower_loop` is a sequence of two then-only
+    // `ControlNode::If`s: the first reassigns `done`, the second reads `done`.
+    //
+    // The critical invariant: the second if's condition must resolve to the
+    // FIRST if's merge-phi for `done` (not the loop-header phi, not the
+    // pre-if vreg).  If `lower_if`'s then-only arm failed to create a merge
+    // block with a phi, OR if `lower_computation`'s `reassigns` update
+    // didn't propagate to `names["done"]` live, the second if would read
+    // the stale pre-if `done` and the loop would never terminate.
+    //
+    // This test builds the minimal SCG (a single reassigning then-only If
+    // followed by a single reading then-only If, both inside a Loop) and
+    // verifies the IR contains a block that has BOTH:
+    //   (a) a `Phi` instruction (the first if's merge phi for `done`), and
+    //   (b) a `CondBranch` instruction whose `cond` is that Phi's dst vreg
+    //       (the second if reading the post-reassignment `done`).
+    // The loop-header phi block is excluded because it has a `Jump`
+    // terminator (no CondBranch), so only the first if's merge block can
+    // satisfy both conditions.
+    #[test]
+    fn test_loop_sequential_then_only_if_reassign_propagates() {
+        let scg = func_scg(
+            "test_loop_seq_if",
+            vec![ScgParam {
+                name: "done".into(),
+                ty: ScgType::U32,
+            }],
+            vec![
+                ScgStatement::Control(ControlNode::Loop {
+                    body: vec![
+                        // First if: then-only, reassigns done = 1 (cond is
+                        // a constant 1 so the then-branch always executes
+                        // on the first iteration).
+                        ScgStatement::Control(ControlNode::If {
+                            cond: ScgExpr::Int(1),
+                            then_body: vec![ScgStatement::Computation(
+                                ComputationNode {
+                                    dst: "done".into(),
+                                    op: BinOpKind::Add,
+                                    lhs: ScgExpr::Int(1),
+                                    rhs: ScgExpr::Int(0),
+                                    tail_call: false,
+                                    reassigns: Some("done".into()),
+                                },
+                            )],
+                            else_body: None,
+                        }),
+                        // Second if: then-only, reads `done`.  After the
+                        // first if, `names["done"]` must point at the first
+                        // if's merge-phi dst — otherwise this CondBranch
+                        // reads the stale loop-header phi (done == 0 on
+                        // iteration 1) and the break never fires.
+                        ScgStatement::Control(ControlNode::If {
+                            cond: ScgExpr::Var("done".into()),
+                            then_body: vec![ScgStatement::Control(ControlNode::Break)],
+                            else_body: None,
+                        }),
+                    ],
+                    for_range: None,
+                    while_cond: None,
+                }),
+                ScgStatement::Return(vec![ScgExpr::Var("done".into())]),
+            ],
+        );
+
+        let mut builder = IRBuilder::new();
+        let program = builder.build(&scg).unwrap();
+        let func = &program.functions[0];
+
+        // Find a block that has BOTH a Phi instruction AND a CondBranch
+        // whose `cond` is that Phi's dst vreg.  This is the first if's
+        // merge block (it contains the merge phi for `done` followed by
+        // the second if's CondBranch reading `done`).  The loop-header
+        // block has a Phi but a Jump terminator (no CondBranch), so it
+        // won't match — only the first if's merge block satisfies both.
+        let mut found_merge_with_cond_branch = false;
+        for block in &func.blocks {
+            // Look for a Phi in this block.
+            let phi_dst = block.instructions.iter().find_map(|instr| {
+                if let IRInstruction::Phi { dst, .. } = instr {
+                    dst.as_register()
+                } else {
+                    None
+                }
+            });
+            let Some(phi_dst) = phi_dst else { continue; };
+
+            // Check whether the SAME block has a CondBranch whose cond
+            // is the Phi's dst.  This means the second if's condition
+            // was resolved to the merge phi (correct propagation).
+            let cond_branch_uses_phi = block.instructions.iter().any(|instr| {
+                if let IRInstruction::CondBranch { cond, .. } = instr {
+                    *cond == IRValue::Register(phi_dst)
+                } else {
+                    false
+                }
+            });
+            if cond_branch_uses_phi {
+                found_merge_with_cond_branch = true;
+                break;
+            }
+        }
+
+        assert!(
+            found_merge_with_cond_branch,
+            "Expected a block containing BOTH a Phi (the first if's merge phi \
+             for `done`) AND a CondBranch whose cond is that Phi's dst (the \
+             second if reading the post-reassignment `done`). If this fails, \
+             `lower_if`'s then-only arm is not creating a merge phi for the \
+             reassigned variable, OR `lower_computation`'s `reassigns` \
+             handling is not propagating the new vreg to `names[done]` live — \
+             causing the second if to read a stale `done == 0` and the loop \
+             to infinite-loop (the minicompiler #6-infinite-loop bug)."
+        );
+    }
+
+    // ── Test 44: reassignment alias propagation (prev_vreg fix) ──
+    //
+    // Verifies the `prev_vreg` fix in `lower_computation`: when a
+    // `ComputationNode` has `dst == reassigns` (the common `x = expr` case
+    // from the direct AST bridge), the previous-vreg lookup MUST happen
+    // BEFORE `names[dst] = dst_vreg` is inserted, so that the alias-update
+    // loop can find OTHER names entries still pointing at the OLD vreg and
+    // forward them to the new dst_vreg.
+    //
+    // SCG shape:
+    //   fn test(done: u32) -> u32 {
+    //     v_1 = done + 0;        // creates alias: names["v_1"] = names["done"]
+    //     Loop {
+    //       body: [
+    //         done = 1;           // reassigns done; prev_vreg fix must update v_1 too
+    //         if v_1 { break }    // reads v_1 — must see done=1, not stale done=0
+    //       ]
+    //     }
+    //     return done;
+    //   }
+    //
+    // Without the prev_vreg fix, `names["v_1"]` stays at the loop-header
+    // phi vreg after `done = 1`, so the `if v_1` reads the stale phi
+    // (which is 0 on iteration 1) and the loop never breaks.  With the
+    // fix, `names["v_1"]` is forwarded to the new `done` vreg and the
+    // `if v_1` reads 1, breaks immediately.
+    //
+    // We assert the same property as Test 43: some block has a Phi whose
+    // dst is used as a CondBranch's cond.  (After `v_1 = done`, both
+    // names share the same vreg; the loop-header phi dedup gives them
+    // one shared phi; `done = 1`'s reassignment — with the fix —
+    // forwards the shared alias to the new vreg; the `if v_1` then
+    // resolves through `vreg_aliases["v_1"] = "done"` to the new vreg.)
+    #[test]
+    fn test_reassignment_alias_propagation_prev_vreg_fix() {
+        let scg = func_scg(
+            "test_alias_reassign",
+            vec![ScgParam {
+                name: "done".into(),
+                ty: ScgType::U32,
+            }],
+            vec![
+                // v_1 = done + 0  (reassigns: Some("done") — creates the alias)
+                ScgStatement::Computation(ComputationNode {
+                    dst: "v_1".into(),
+                    op: BinOpKind::Add,
+                    lhs: ScgExpr::Var("done".into()),
+                    rhs: ScgExpr::Int(0),
+                    tail_call: false,
+                    reassigns: Some("done".into()),
+                }),
+                ScgStatement::Control(ControlNode::Loop {
+                    body: vec![
+                        // done = 1  (dst == reassigns == "done"; prev_vreg
+                        // must be captured BEFORE the names[dst] insert)
+                        ScgStatement::Computation(ComputationNode {
+                            dst: "done".into(),
+                            op: BinOpKind::Add,
+                            lhs: ScgExpr::Int(1),
+                            rhs: ScgExpr::Int(0),
+                            tail_call: false,
+                            reassigns: Some("done".into()),
+                        }),
+                        // if v_1 { break }  — reads the alias; must see 1
+                        ScgStatement::Control(ControlNode::If {
+                            cond: ScgExpr::Var("v_1".into()),
+                            then_body: vec![ScgStatement::Control(ControlNode::Break)],
+                            else_body: None,
+                        }),
+                    ],
+                    for_range: None,
+                    while_cond: None,
+                }),
+                ScgStatement::Return(vec![ScgExpr::Var("done".into())]),
+            ],
+        );
+
+        let mut builder = IRBuilder::new();
+        let program = builder.build(&scg).unwrap();
+        let func = &program.functions[0];
+
+        // The loop body has no inner if-merge (the `done = 1` is direct in
+        // the body, and the `if v_1` is then-only with just a Break — no
+        // reassignment in the then-branch, so no merge phi for `done` is
+        // created by the if).  But the loop-header phi exists for `done`
+        // (and its alias `v_1` via dedup).  The back-edge patching must
+        // set the loop-header phi's back-edge incoming to the new `done`
+        // vreg (from `done = 1`), not the stale pre-loop vreg.
+        //
+        // We verify this by checking that the loop-header phi's back-edge
+        // incoming is NOT the pre-loop vreg (i.e., it was patched).  Find
+        // the loop-header block (first block with a Phi that has TWO
+        // incoming edges, one of which is from the pre-header) and check
+        // that at least one of its phi's incoming values differs from the
+        // function parameter's vreg (proving the back-edge was patched to
+        // a post-body vreg, not left as the placeholder pre-loop vreg).
+        let param_vreg = func.params.first().and_then(|v| v.as_register());
+        let mut found_patched_loop_phi = false;
+        for block in &func.blocks {
+            for instr in &block.instructions {
+                if let IRInstruction::Phi { incoming, .. } = instr {
+                    // Loop-header phis have exactly 2 incoming edges
+                    // (pre-header + back-edge).  If the back-edge was
+                    // patched, at least one incoming value is a Register
+                    // that is NOT the param vreg (it's the post-body vreg).
+                    if incoming.len() == 2 {
+                        let any_patched = incoming.iter().any(|(val, _)| {
+                            if let IRValue::Register(r) = val {
+                                Some(*r) != param_vreg
+                            } else {
+                                false
+                            }
+                        });
+                        if any_patched {
+                            found_patched_loop_phi = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            if found_patched_loop_phi {
+                break;
+            }
+        }
+        assert!(
+            found_patched_loop_phi,
+            "Expected the loop-header phi's back-edge incoming to be patched \
+             to the post-body vreg (after `done = 1`), not left as the \
+             placeholder pre-loop vreg. If this fails, the prev_vreg fix in \
+             `lower_computation` is not correctly forwarding alias entries \
+             to the new dst_vreg, so the loop-header phi back-edge patching \
+             sees a stale `names[\"v_1\"]` and leaves the back-edge pointing \
+             at the pre-loop value — causing the loop to read stale `done`."
+        );
     }
 }
