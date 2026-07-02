@@ -1871,16 +1871,69 @@ impl IRBuilder {
             // Run the parallel-copy algorithm.
             let emitted = self.emit_parallel_copies(copies.clone(), ir_func)?;
 
-            // Insert all emitted instructions before the terminator (Branch).
+            // Insert all emitted instructions BEFORE the block's terminating
+            // control-flow instruction.
+            //
+            // Both `Branch` and `CondBranch` IR instructions emit ACTUAL
+            // machine-code jumps on every native stack-slot backend
+            // (x86_64, x86_32, arm32, arm64-via-emit.rs, riscv32/64, ppc64,
+            // mips64, loongarch64).  The `IRTerminator` is metadata only on
+            // those backends — `encode_function` iterates `block.instructions`
+            // and ignores the terminator.  (arm64.rs's `select_from_ir` treats
+            // CondBranch as a no-op, but the actual emission path used in
+            // practice is `emit.rs::emit_function_stack_slot`, which emits
+            // `CBNZ; B` from the CondBranch instruction — same dead-code
+            // hazard.)
+            //
+            // Therefore any instruction appended AFTER a `Branch` or
+            // `CondBranch` is UNREACHABLE dead code: the jumps always fire
+            // before the appended instruction executes.  This was the root
+            // cause of the then-only-if loop-carried phi bug (Task 5-B):
+            //
+            //   For a then-only `if cond { x = ...; }` the merge phi has two
+            //   incoming edges — (then_vreg, then_exit) and (pre_vreg,
+            //   if_entry).  The if_entry block ends with `CondBranch`.  The
+            //   phi copy `phi_dst = pre_vreg` for the fall-through edge was
+            //   APPENDED after the CondBranch, making it dead code.  So
+            //   `phi_dst` was never written on the fall-through path (when
+            //   the condition is false), and reads as 0 (uninitialized stack
+            //   slot).  This broke `arith_min` (returns 0 instead of 3) and
+            //   `arith_modular_exp` (returns 0 instead of 1, because the
+            //   then-only-if merge phi inside the loop body never propagates
+            //   the carried value to the loop-header back-edge).
+            //
+            // Inserting BEFORE the CondBranch means the copy runs on BOTH
+            // paths (then-true and fall-through-false).  This is safe:
+            //   - On the then-path, the then-block's own phi copy (for the
+            //     then-edge, inserted before the then-block's unconditional
+            //     `Branch` to merge) overwrites the entry-block copy, so the
+            //     final value is the then-branch's reassigned value.
+            //   - On the fall-through path, the entry-block copy is the
+            //     correct value (the pre-if value) and is not overwritten.
+            //   - If the then-branch does NOT fall through (e.g. it returns),
+            //     `lower_if` creates no merge phi at all, so no copy is
+            //     emitted into the entry block — the both-branch case where
+            //     one side returns also creates no entry-block copy because
+            //     the entry block is not a predecessor of merge in that case.
             let block = &mut ir_func.blocks[pred_idx];
-            if let Some(IRInstruction::Branch { .. }) = block.instructions.last() {
-                // Insert before the Branch
+            // Determine whether the block ends with a control-flow
+            // instruction (Branch or CondBranch) that we must insert
+            // BEFORE (not after).  Using `matches!` returns a `bool` so
+            // the immutable borrow from `last()` ends immediately,
+            // allowing the mutable `insert`/`extend` below.
+            let insert_before_ctrl = matches!(
+                block.instructions.last(),
+                Some(IRInstruction::Branch { .. }) | Some(IRInstruction::CondBranch { .. })
+            );
+            if insert_before_ctrl {
+                // Insert before the control-flow instruction so the copy
+                // executes before the jump(s) transfer control away.
                 let insert_at = block.instructions.len() - 1;
                 for (i, instr) in emitted.into_iter().enumerate() {
                     block.instructions.insert(insert_at + i, instr);
                 }
             } else {
-                // No Branch at end — just append
+                // No control-flow instruction at end — just append.
                 block.instructions.extend(emitted);
             }
         }
@@ -5661,6 +5714,411 @@ mod tests {
              to the new dst_vreg, so the loop-header phi back-edge patching \
              sees a stale `names[\"v_1\"]` and leaves the back-edge pointing \
              at the pre-loop value — causing the loop to read stale `done`."
+        );
+    }
+
+    // ── Test 45: then-only-if merge phi copy is BEFORE CondBranch ──
+    //
+    // Reproduces the `arith_min` regression: a then-only `if` (no else)
+    // that reassigns a variable, followed by a read of that variable.
+    //
+    //   fn test(cond: u32) -> u32 {
+    //     result = 3;            // let result = 3
+    //     if cond {              // ControlNode::If { cond: Var("cond"), then_body: [result = 8], else_body: None }
+    //       result = 8;          // reassigns result
+    //     }
+    //     return result;         // should return 3 when cond == 0, 8 when cond != 0
+    //   }
+    //
+    // The merge phi for `result` has two incoming edges:
+    //   - (then_vreg, then_exit)   — the reassigned value (8)
+    //   - (pre_vreg,  if_entry)    — the pre-if value (3)
+    //
+    // The if_entry block ends with `CondBranch`.  `resolve_phis` must
+    // insert the phi copy `phi_dst = pre_vreg` BEFORE the CondBranch (so
+    // it executes on the fall-through path).  If the copy is APPENDED
+    // after the CondBranch (the pre-fix bug), it is dead code on every
+    // native stack-slot backend (x86_64, arm64, riscv64, ppc64, etc.),
+    // because CondBranch emits the actual `test; jnz; jmp` machine code —
+    // the appended copy never executes, phi_dst is never written on the
+    // fall-through path, and `return result` reads 0 (uninitialized).
+    //
+    // This test asserts that, in the if_entry block (the block containing
+    // the CondBranch), the CondBranch is the LAST instruction (nothing is
+    // appended after it) AND there is an Add (the phi copy) whose dst is
+    // the return vreg, positioned before the CondBranch.
+    #[test]
+    fn test_then_only_if_merge_phi_copy_before_condbranch() {
+        let scg = func_scg(
+            "test_then_only_if_merge",
+            vec![ScgParam {
+                name: "cond".into(),
+                ty: ScgType::U32,
+            }],
+            vec![
+                // result = 3   (let-binding, reassigns: None)
+                ScgStatement::Computation(ComputationNode {
+                    dst: "result".into(),
+                    op: BinOpKind::Add,
+                    lhs: ScgExpr::Int(3),
+                    rhs: ScgExpr::Int(0),
+                    tail_call: false,
+                    reassigns: None,
+                }),
+                // if cond { result = 8; }
+                ScgStatement::Control(ControlNode::If {
+                    cond: ScgExpr::Var("cond".into()),
+                    then_body: vec![ScgStatement::Computation(ComputationNode {
+                        dst: "result".into(),
+                        op: BinOpKind::Add,
+                        lhs: ScgExpr::Int(8),
+                        rhs: ScgExpr::Int(0),
+                        tail_call: false,
+                        reassigns: Some("result".into()),
+                    })],
+                    else_body: None,
+                }),
+                // return result
+                ScgStatement::Return(vec![ScgExpr::Var("result".into())]),
+            ],
+        );
+
+        let mut builder = IRBuilder::new();
+        let program = builder.build(&scg).unwrap();
+        let func = &program.functions[0];
+
+        // Find the return vreg (the vreg used in the Ret instruction).
+        let return_vreg = func
+            .blocks
+            .iter()
+            .flat_map(|b| b.instructions.iter())
+            .find_map(|instr| {
+                if let IRInstruction::Ret { values } = instr {
+                    values.first().and_then(|v| v.as_register())
+                } else {
+                    None
+                }
+            })
+            .expect("expected a Ret instruction with a return value");
+
+        // Find the if_entry block: the block whose last instruction is a
+        // CondBranch.  (The merge block ends with Ret; the then block ends
+        // with an unconditional Branch; the entry/function-entry block ends
+        // with CondBranch.)
+        let if_entry_block = func
+            .blocks
+            .iter()
+            .find(|b| {
+                matches!(
+                    b.instructions.last(),
+                    Some(IRInstruction::CondBranch { .. })
+                )
+            })
+            .expect("expected a block ending with CondBranch (the if's entry block)");
+
+        let instructions = &if_entry_block.instructions;
+        // The CondBranch MUST be the last instruction (nothing appended
+        // after it).  If the phi copy were appended after CondBranch (the
+        // pre-fix bug), the CondBranch would NOT be last.
+        assert!(
+            matches!(
+                instructions.last(),
+                Some(IRInstruction::CondBranch { .. })
+            ),
+            "Expected CondBranch to be the LAST instruction in the if's entry \
+             block. If it is not last, the phi copy for the fall-through edge \
+             was appended AFTER the CondBranch (dead code on native backends) \
+             — the then-only-if merge phi bug (Task 5-B)."
+        );
+
+        // Find the CondBranch's index.
+        let condbranch_idx = instructions
+            .iter()
+            .position(|i| matches!(i, IRInstruction::CondBranch { .. }))
+            .expect("CondBranch must exist in the if's entry block");
+
+        // There MUST be an Add (the phi copy) whose dst is the return vreg,
+        // positioned BEFORE the CondBranch.  This is the copy
+        // `phi_dst = pre_vreg` that runs on the fall-through path.
+        let phi_copy_before_condbranch = instructions
+            .iter()
+            .take(condbranch_idx)
+            .any(|instr| {
+                if let IRInstruction::Add { dst, .. } = instr {
+                    dst.as_register() == Some(return_vreg)
+                } else {
+                    false
+                }
+            });
+        assert!(
+            phi_copy_before_condbranch,
+            "Expected an Add instruction with dst == return vreg ({}) positioned \
+             BEFORE the CondBranch in the if's entry block. This is the phi copy \
+             for the fall-through edge. If it is missing or positioned after the \
+             CondBranch, the fall-through path reads an uninitialized value (0) \
+             instead of the pre-if value — the arith_min regression.",
+            return_vreg
+        );
+    }
+
+    // ── Test 46: then-only-if inside a loop, loop-carried phi ──
+    //
+    // Reproduces the `arith_modular_exp` regression: a then-only `if`
+    // inside a `while` loop that reassigns a loop-carried variable.
+    //
+    //   fn test(cond: u32, cond2: u32) -> u32 {
+    //     result = 1;                          // let result = 1
+    //     while cond {                         // Loop { body: [...] }
+    //       if cond2 {                         //   If { cond: cond2, then_body: [result = 2], else_body: None }
+    //         result = 2;                      //     reassigns result (inside then-only if, inside loop)
+    //       }
+    //     }
+    //     return result;                       // should return the carried value
+    //   }
+    //
+    // The then-only-if merge phi (inside the loop body) must propagate
+    // correctly to the loop-header phi's back-edge.  This requires the
+    // then-only-if's fall-through phi copy to execute BEFORE the inner
+    // if's CondBranch (the same property as Test 45, but in a loop
+    // context).  If the copy is dead code (appended after CondBranch),
+    // the merge phi reads 0 on the fall-through path, the loop-header
+    // back-edge picks up 0, and `return result` returns 0 instead of
+    // the accumulated value.
+    //
+    // We assert the same property as Test 45: the inner if's entry block
+    // (the block with CondBranch, INSIDE the loop body) has its
+    // CondBranch as the LAST instruction.  We identify the inner if's
+    // entry block by looking for a CondBranch whose true_target or
+    // false_target contains "then" (the inner if's then-label).
+    #[test]
+    fn test_then_only_if_in_loop_carried_phi() {
+        let scg = func_scg(
+            "test_loop_then_only_if",
+            vec![
+                ScgParam { name: "cond".into(), ty: ScgType::U32 },
+                ScgParam { name: "cond2".into(), ty: ScgType::U32 },
+            ],
+            vec![
+                // result = 1   (let-binding)
+                ScgStatement::Computation(ComputationNode {
+                    dst: "result".into(),
+                    op: BinOpKind::Add,
+                    lhs: ScgExpr::Int(1),
+                    rhs: ScgExpr::Int(0),
+                    tail_call: false,
+                    reassigns: None,
+                }),
+                // while cond { ... }
+                ScgStatement::Control(ControlNode::Loop {
+                    body: vec![
+                        // if cond2 { result = 2; }
+                        ScgStatement::Control(ControlNode::If {
+                            cond: ScgExpr::Var("cond2".into()),
+                            then_body: vec![ScgStatement::Computation(ComputationNode {
+                                dst: "result".into(),
+                                op: BinOpKind::Add,
+                                lhs: ScgExpr::Int(2),
+                                rhs: ScgExpr::Int(0),
+                                tail_call: false,
+                                reassigns: Some("result".into()),
+                            })],
+                            else_body: None,
+                        }),
+                    ],
+                    for_range: None,
+                    while_cond: None,
+                }),
+                // return result
+                ScgStatement::Return(vec![ScgExpr::Var("result".into())]),
+            ],
+        );
+
+        let mut builder = IRBuilder::new();
+        let program = builder.build(&scg).unwrap();
+        let func = &program.functions[0];
+
+        // Find ALL blocks ending with CondBranch.  There should be at
+        // least one inside the loop body (the inner if's entry block).
+        // For each such block, assert the CondBranch is the LAST
+        // instruction (nothing appended after it).
+        let mut checked_inner_if = false;
+        for block in &func.blocks {
+            if let Some(IRInstruction::CondBranch { true_target, false_target, .. }) =
+                block.instructions.last()
+            {
+                // Skip the loop-header's CondBranch (for_range / while_cond
+                // lowering) — our loop has for_range: None and while_cond:
+                // None, so the loop header uses an unconditional Branch, not
+                // a CondBranch.  Any CondBranch here is from the inner If.
+                // Identify the inner if's entry block by checking that one
+                // of its targets contains "then" (the if's then-label).
+                let is_inner_if = true_target.contains("then")
+                    || false_target.contains("then")
+                    || true_target.contains("merge")
+                    || false_target.contains("merge");
+                if is_inner_if {
+                    checked_inner_if = true;
+                    // The CondBranch MUST be the last instruction.
+                    assert!(
+                        matches!(
+                            block.instructions.last(),
+                            Some(IRInstruction::CondBranch { .. })
+                        ),
+                        "Expected CondBranch to be the LAST instruction in the \
+                         inner if's entry block (inside the loop body). If it is \
+                         not last, the phi copy for the fall-through edge was \
+                         appended AFTER the CondBranch (dead code) — the \
+                         arith_modular_exp loop-carried phi regression (Task 5-B)."
+                    );
+                    // There must be an Add (the phi copy) before the
+                    // CondBranch.  We don't check the exact dst vreg (it's
+                    // the merge phi's dst, which is an internal vreg), but
+                    // we check that at least one Add exists before the
+                    // CondBranch in this block.  The entry-block phi copy
+                    // `merge_phi_dst = pre_if_result_vreg` is emitted as an
+                    // Add instruction.
+                    let condbranch_idx = block
+                        .instructions
+                        .iter()
+                        .position(|i| matches!(i, IRInstruction::CondBranch { .. }))
+                        .unwrap();
+                    let has_phi_copy_before = block
+                        .instructions
+                        .iter()
+                        .take(condbranch_idx)
+                        .any(|i| matches!(i, IRInstruction::Add { .. }));
+                    assert!(
+                        has_phi_copy_before,
+                        "Expected at least one Add (the phi copy for the \
+                         fall-through edge) positioned BEFORE the CondBranch in \
+                         the inner if's entry block. If missing, the merge phi \
+                         for `result` is never written on the fall-through path, \
+                         so the loop-carried value is lost (arith_modular_exp)."
+                    );
+                }
+            }
+        }
+        assert!(
+            checked_inner_if,
+            "Expected to find the inner if's entry block (a CondBranch-terminated \
+             block whose targets include 'then' or 'merge') inside the loop body. \
+             If not found, the SCG was not lowered as expected."
+        );
+    }
+
+    // ── Test 47: let-copy lowering (result = a + 0) ──
+    //
+    // Sanity check that `let result = a` (lowered by the bridge as
+    // `Computation { dst: "result", op: Add, lhs: Var("a"), rhs: Int(0),
+    // reassigns: None }`) produces a correct vreg for `result` that
+    // reads the value of `a`.  This is the let-copy pattern used in
+    // arith_min (`result: u32 = a;`) and many other tests.
+    //
+    //   fn test() -> u32 {
+    //     a = 3;              // let a = 3
+    //     result = a;         // let result = a  →  Computation { dst: "result", lhs: Var("a"), rhs: Int(0), reassigns: None }
+    //     return result;      // should return 3
+    //   }
+    //
+    // We assert that the return reads a vreg that is the dst of an
+    // Add instruction whose lhs resolves to the `a` vreg (i.e., the
+    // copy `result = a + 0` is correctly lowered).
+    #[test]
+    fn test_let_copy_lowering() {
+        let scg = func_scg(
+            "test_let_copy",
+            vec![],
+            vec![
+                // a = 3   (let-binding)
+                ScgStatement::Computation(ComputationNode {
+                    dst: "a".into(),
+                    op: BinOpKind::Add,
+                    lhs: ScgExpr::Int(3),
+                    rhs: ScgExpr::Int(0),
+                    tail_call: false,
+                    reassigns: None,
+                }),
+                // result = a   (let-binding, copy via Add(a, 0))
+                ScgStatement::Computation(ComputationNode {
+                    dst: "result".into(),
+                    op: BinOpKind::Add,
+                    lhs: ScgExpr::Var("a".into()),
+                    rhs: ScgExpr::Int(0),
+                    tail_call: false,
+                    reassigns: None,
+                }),
+                // return result
+                ScgStatement::Return(vec![ScgExpr::Var("result".into())]),
+            ],
+        );
+
+        let mut builder = IRBuilder::new();
+        let program = builder.build(&scg).unwrap();
+        let func = &program.functions[0];
+
+        // Find the `a` vreg: the dst of the first Add instruction
+        // (from `a = 3 + 0`).
+        let a_vreg = func
+            .blocks
+            .iter()
+            .flat_map(|b| b.instructions.iter())
+            .find_map(|instr| {
+                if let IRInstruction::Add { dst, lhs, rhs, .. } = instr {
+                    if matches!(lhs, IRValue::Immediate(3)) && matches!(rhs, IRValue::Immediate(0)) {
+                        return dst.as_register();
+                    }
+                }
+                None
+            })
+            .expect("expected an Add(3, 0) instruction for `a = 3`");
+
+        // Find the `result` vreg: the dst of the Add instruction whose
+        // lhs is the `a` vreg (from `result = a + 0`).
+        let result_vreg = func
+            .blocks
+            .iter()
+            .flat_map(|b| b.instructions.iter())
+            .find_map(|instr| {
+                if let IRInstruction::Add { dst, lhs, rhs, .. } = instr {
+                    if lhs.as_register() == Some(a_vreg)
+                        && matches!(rhs, IRValue::Immediate(0))
+                    {
+                        return dst.as_register();
+                    }
+                }
+                None
+            })
+            .expect("expected an Add(a_vreg, 0) instruction for `result = a`");
+
+        // Find the return vreg.
+        let return_vreg = func
+            .blocks
+            .iter()
+            .flat_map(|b| b.instructions.iter())
+            .find_map(|instr| {
+                if let IRInstruction::Ret { values } = instr {
+                    values.first().and_then(|v| v.as_register())
+                } else {
+                    None
+                }
+            })
+            .expect("expected a Ret instruction with a return value");
+
+        // The return vreg must equal the result vreg (the copy's dst).
+        assert_eq!(
+            return_vreg, result_vreg,
+            "Expected `return result` to read the result vreg ({}) — the dst of \
+             the copy `result = a + 0`. If it reads a different vreg, the let-copy \
+             lowering is broken and `result` does not propagate the value of `a`.",
+            result_vreg
+        );
+        // The result vreg must differ from the a vreg (the copy creates a
+        // new vreg; it does not alias `a`).
+        assert_ne!(
+            return_vreg, a_vreg,
+            "Expected the result vreg to be a NEW vreg (the copy's dst), not the \
+             same as the `a` vreg. If they are the same, the let-copy lowering is \
+             aliasing `result` to `a` without creating a fresh vreg."
         );
     }
 }
