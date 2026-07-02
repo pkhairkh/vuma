@@ -2,7 +2,7 @@
 use vuma_codegen::backend::{create_backend, BackendKind, AllocatedProgram};
 use vuma_codegen::scg_to_ir::IRBuilder;
 use vuma_parser::{Parser, AstToScg, ModuleResolver};
-use vuma::pipeline::{CompileConfig, run_scg_transforms, CompileTarget, OptLevel, VerificationLevel, bridge_scg_to_codegen};
+use vuma::pipeline::{CompileConfig, run_scg_transforms, CompileTarget, OptLevel, VerificationLevel, bridge_ast_to_codegen_scg};
 use std::path::Path;
 use std::process::Command;
 use std::fs;
@@ -47,7 +47,9 @@ fn compile_for_backend_with_path(source: &str, kind: BackendKind, file_path: Opt
         opt_level: OptLevel::O0, verification_level: VerificationLevel::None, ..Default::default()
     };
     let _ = run_scg_transforms(&mut scg, &config);
-    let codegen_scg = bridge_scg_to_codegen(&scg);
+    // Use the unified direct AST→codegen bridge (same path as vuma build/emit/run).
+    // The deprecated bridge_scg_to_codegen(&scg) path is no longer used here.
+    let codegen_scg = bridge_ast_to_codegen_scg(&ast);
     let ir_program = { let mut b = IRBuilder::new(); b.build(&codegen_scg).map_err(|e| format!("ir: {}", e))? };
     let backend = create_backend(kind).map_err(|e| format!("backend: {}", e))?;
     let mut allocated = Vec::new();
