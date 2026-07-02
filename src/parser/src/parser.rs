@@ -1324,6 +1324,30 @@ impl<'src> Parser<'src> {
     }
 
     /// `if` <expr> `{` <block> `}` [`else` `{` <block> `}` | `else if` …]
+    ///
+    /// Handles the dangling-else pattern across block boundaries used by
+    /// the `womb/lang` self-hosting files:
+    ///
+    /// ```text
+    /// if c == 40 { ttype = 61; }
+    /// else { if c == 41 { ttype = 62; } }
+    /// else { if c == 123 { ttype = 63; } }
+    /// ```
+    ///
+    /// Here the trailing `else` after the closing `}` of the first
+    /// `else { … }` block attaches to the *inner* `if` (the one inside
+    /// the block), not the outer `if`. Without special handling the
+    /// inner `if`'s own `parse_if_stmt` only sees `}` after its
+    /// `then_block` (because `parse_block` consumes the `{ … }`), so
+    /// its `else_block` is `None`, and the trailing `else` is left
+    /// orphaned at the outer statement list — producing
+    /// "expected expression, found 'else'".
+    ///
+    /// The fix lives in [`Parser::parse_else_clause`]: when an `else`
+    /// block opens with an `if`, the inner `if` is parsed directly (NOT
+    /// via `parse_block`), the closing `}` is consumed, and any trailing
+    /// `else` is then attached to the inner `if` (recursively, so
+    /// arbitrarily long chains work).
     fn parse_if_stmt(&mut self) -> Result<Stmt, ParseError> {
         let start = self.current.span.start;
         self.expect(TokenKind::If)?;
@@ -1334,28 +1358,87 @@ impl<'src> Parser<'src> {
         let condition = self.parse_expr()?;
         self.no_struct_literal = prev;
         let then_block = self.parse_block()?;
-        let else_block = if self.at(TokenKind::Else) {
-            self.advance();
-            if self.at(TokenKind::If) {
-                // `else if` — parse as a block containing an if statement
-                let if_stmt = self.parse_if_stmt()?;
-                let span = if_stmt.span();
-                Some(Block {
-                    statements: vec![if_stmt],
-                    span,
-                })
-            } else {
-                Some(self.parse_block()?)
-            }
-        } else {
-            None
-        };
+        let else_block = self.parse_else_clause()?;
         Ok(Stmt::If(IfStmt {
             condition,
             then_block,
             else_block,
             span: Span::new(start, self.current.span.end),
         }))
+    }
+
+    /// Parse the optional `else` clause of an `if` statement.
+    ///
+    /// Three forms are supported:
+    ///
+    /// * `else if <expr> { } …` — parse another if-statement as the
+    ///   else body (existing behaviour).
+    /// * `else { <block> }` — parse a normal block.
+    /// * `else { if <expr> { } } [else …]` — the block opens with an
+    ///   `if`. Parse the inner `if` directly (NOT via `parse_block`),
+    ///   consume the closing `}`, then attach any trailing `else` to
+    ///   the inner `if` (dangling-else across a block boundary). This
+    ///   is the form used by the `womb/lang` self-hosting files, which
+    ///   write `else { if c == 41 { } } else { if c == 123 { } }`
+    ///   instead of the more compact `else if c == 41 { } else if …`.
+    fn parse_else_clause(&mut self) -> Result<Option<Block>, ParseError> {
+        if !self.at(TokenKind::Else) {
+            return Ok(None);
+        }
+        self.advance(); // consume `else`
+
+        if self.at(TokenKind::If) {
+            // `else if …` — parse another if-statement as the else body.
+            // The inner parse_if_stmt consumes its own trailing else.
+            let if_stmt = self.parse_if_stmt()?;
+            let span = if_stmt.span();
+            Ok(Some(Block {
+                statements: vec![if_stmt],
+                span,
+            }))
+        } else if self.at(TokenKind::LBrace) {
+            // `else { … }` — could be a normal block, or
+            // `else { if X { } } [else …]` (dangling-else across a
+            // block boundary). Peek past `{` to see whether the block
+            // opens with `if`.
+            let lbrace = self.current.clone();
+            self.advance(); // consume `{`
+            if self.at(TokenKind::If) {
+                // `else { if X { } } [else …]` — parse the inner if
+                // directly. The inner if's parse_else_clause will see
+                // `}` (the closing brace of THIS block), so its
+                // else_block will be None. We then consume the `}` and
+                // attach any trailing `else` to the inner if via a
+                // recursive call to parse_else_clause.
+                let mut if_stmt = self.parse_if_stmt()?;
+                self.expect(TokenKind::RBrace)?;
+                // Dangling-else across block boundary: attach a
+                // trailing `else` (if any) to the inner if. Recursion
+                // handles arbitrarily long `else { if … } else { if … }`
+                // chains.
+                if let Stmt::If(ref mut inner_if) = if_stmt {
+                    if inner_if.else_block.is_none() {
+                        inner_if.else_block = self.parse_else_clause()?;
+                    }
+                }
+                let span = if_stmt.span();
+                Ok(Some(Block {
+                    statements: vec![if_stmt],
+                    span,
+                }))
+            } else {
+                // Normal `else { … }` block — rewind to `{` and let
+                // parse_block handle the full block (multi-statement
+                // bodies, error recovery, span tracking).
+                self.push_back_current(lbrace);
+                Ok(Some(self.parse_block()?))
+            }
+        } else {
+            // `else` not followed by `if` or `{` — fall through to
+            // parse_block, which will report "expected '{'" (preserving
+            // the original behaviour for malformed input).
+            Ok(Some(self.parse_block()?))
+        }
     }
 
     /// `while` <expr> `{` <block> `}`
@@ -4395,6 +4478,76 @@ fn main() -> i32 {
                         assert!(if_s.else_block.is_some());
                     }
                     other => panic!("expected If, got {:?}", other),
+                }
+            }
+            other => panic!("expected FnDef, got {:?}", other),
+        }
+    }
+
+    // ---- Test 32b: else { if … } else { … } block chain ----
+    //
+    // Regression test for the `womb/lang` self-hosting style:
+    //   if c == 40 { … }
+    //   else { if c == 41 { … } }
+    //   else { if c == 123 { … } }
+    // The trailing `else` after the closing `}` of the first `else { … }`
+    // block must attach to the *inner* if (the one inside the block),
+    // forming a nested chain. Before the fix, the trailing `else` was
+    // orphaned at the outer statement list, producing
+    // "expected expression, found 'else'".
+    #[test]
+    fn parse_else_if_block_chain() {
+        let source = r#"
+            fn test() {
+                if c == 40 { ttype = 61; }
+                else { if c == 41 { ttype = 62; } }
+                else { if c == 123 { ttype = 63; } }
+            }
+        "#;
+        let mut parser = Parser::new(source);
+        let result = parser.parse_program();
+        assert!(
+            result.errors.is_empty(),
+            "expected no parse errors, got: {:?}",
+            result.errors
+        );
+        let program = result.expect("should have a parsed program");
+        match &program.items[0] {
+            Item::FnDef(f) => {
+                assert_eq!(f.body.statements.len(), 1);
+                match &f.body.statements[0] {
+                    Stmt::If(outer) => {
+                        // Outer if (c == 40) has an else block.
+                        let outer_else = outer
+                            .else_block
+                            .as_ref()
+                            .expect("outer if must have an else block");
+                        assert_eq!(outer_else.statements.len(), 1);
+                        // The else block contains the inner if (c == 41),
+                        // which itself must have an else block (the third
+                        // `else { if c == 123 { } }`).
+                        match &outer_else.statements[0] {
+                            Stmt::If(inner) => {
+                                let inner_else = inner
+                                    .else_block
+                                    .as_ref()
+                                    .expect("inner if must have an else block");
+                                assert_eq!(inner_else.statements.len(), 1);
+                                match &inner_else.statements[0] {
+                                    Stmt::If(innermost) => {
+                                        // Innermost if (c == 123) has no else.
+                                        assert!(
+                                            innermost.else_block.is_none(),
+                                            "innermost if must have no else"
+                                        );
+                                    }
+                                    other => panic!("expected innermost If, got {:?}", other),
+                                }
+                            }
+                            other => panic!("expected inner If, got {:?}", other),
+                        }
+                    }
+                    other => panic!("expected outer If, got {:?}", other),
                 }
             }
             other => panic!("expected FnDef, got {:?}", other),
