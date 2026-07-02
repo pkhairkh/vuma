@@ -124,14 +124,6 @@ pub enum Item {
     ImplBlock(ImplBlock),
     /// Extern block: `extern "C" { fn ...; fn ...; }`
     ExternBlock(ExternBlockDef),
-    /// Womb: Concept declaration (replaces struct)
-    ConceptDecl(ConceptDecl),
-    /// Womb: Gestalt declaration (replaces union/enum)
-    GestaltDecl(GestaltDecl),
-    /// Womb: Manifold declaration (replaces array/tensor)
-    ManifoldDecl(ManifoldDecl),
-    /// Womb: Aura declaration (self-describing metadata)
-    AuraDecl(AuraDecl),
     /// Top-level statement (assignment, expression, free, etc.) that
     /// appears outside of any function body.
     Stmt(Stmt),
@@ -229,72 +221,6 @@ pub struct EnumVariant {
     pub name: String,
     /// Optional payload type.
     pub payload: Option<Type>,
-    /// Source span.
-    pub span: Span,
-}
-
-// ---------------------------------------------------------------------------
-// Womb Data Model Declarations
-// ---------------------------------------------------------------------------
-
-/// Womb: Concept declaration (replaces struct).
-///
-/// `concept Name { field: Type, ... }`
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConceptDecl {
-    /// Concept name.
-    pub name: String,
-    /// Fields as (name, type) pairs.
-    pub fields: Vec<(String, Type)>,
-    /// Layout hint: "aos", "soa", or "auto".
-    pub layout_hint: Option<String>,
-    /// Source span.
-    pub span: Span,
-}
-
-/// Womb: Gestalt declaration (replaces union/enum).
-///
-/// `gestalt Name { variant: Type, ... }`
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GestaltDecl {
-    /// Gestalt name.
-    pub name: String,
-    /// Variants as (name, type) pairs.
-    pub variants: Vec<(String, Type)>,
-    /// Source span.
-    pub span: Span,
-}
-
-/// Womb: Manifold declaration (replaces array/tensor).
-///
-/// `manifold Name { dimensions: [4, 4], element: u32, curve: zorder }`
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ManifoldDecl {
-    /// Manifold name.
-    pub name: String,
-    /// Dimension sizes.
-    pub dim_sizes: Vec<u64>,
-    /// Element type.
-    pub element_type: Type,
-    /// Curve type: "zorder", "hilbert", or "row_major".
-    pub curve: Option<String>,
-    /// Source span.
-    pub span: Span,
-}
-
-/// Womb: Aura declaration (self-describing metadata).
-///
-/// `aura Name { schema: "SchemaName", version: 1, bounds: true }`
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AuraDecl {
-    /// Aura name.
-    pub name: String,
-    /// Schema name string.
-    pub schema: String,
-    /// Schema version.
-    pub version: u32,
-    /// Whether to include bounds checking.
-    pub bounds: bool,
     /// Source span.
     pub span: Span,
 }

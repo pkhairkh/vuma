@@ -362,19 +362,7 @@ fn process_node(
         | NodeType::StructDef
         | NodeType::EnumDef
         | NodeType::Match
-        | NodeType::ConstantTime
-        | NodeType::ConceptDecl
-        | NodeType::ConceptField
-        | NodeType::ConceptAccess
-        | NodeType::GestaltDecl
-        | NodeType::GestaltInterpret
-        | NodeType::ContextAssert
-        | NodeType::ManifoldDecl
-        | NodeType::ManifoldQuery
-        | NodeType::ManifoldSlice
-        | NodeType::AuraAttach
-        | NodeType::AuraQuery
-        | NodeType::AuraUpdate => {
+        | NodeType::ConstantTime => {
             // These node types do not directly produce MSG constructs.
             // However, if they participate in derivation chains via Derivation
             // edges, we create a passthrough derivation.
