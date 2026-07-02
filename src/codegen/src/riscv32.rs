@@ -4474,11 +4474,42 @@ impl Backend for RiscV32Backend {
             for instr in &block.instructions {
                 let encoded: Vec<u8> = match instr {
                     // ── BinOp (generic) ──────────────────────────────────────
-                    IRInstr::BinOp { op, dst, lhs, rhs, .. } => {
+                    IRInstr::BinOp { op, dst, lhs, rhs, ty } => {
                         let dst_id = dst.as_register().unwrap_or(0);
                         let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
                         let mut code = Vec::new();
 
+                        // Detect 64-bit shift-by-32 (see x86_32/stack_slot_isel.rs
+                        // for the full rationale). RV32 masks the shift count
+                        // to 5 bits, so `<< 32` becomes `<< 0`. For u64/i64
+                        // values, shift-by-32 is a word-swap + zero-fill.
+                        let is_64bit = matches!(ty, Some(IRType::U64) | Some(IRType::I64));
+                        let is_shl_32 = is_64bit && matches!(rhs, IRValue::Immediate(32))
+                            && matches!(op, BinOpKind::Shl);
+                        let is_shr_32 = is_64bit && matches!(rhs, IRValue::Immediate(32))
+                            && matches!(op, BinOpKind::ShrL | BinOpKind::ShrA);
+
+                        if is_shl_32 {
+                            // u64 << 32: result_high = lhs_low, result_low = 0
+                            code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::T0));
+                            code.extend(ss_store_to_slot(Gpr::T0, dst_offset - 4));
+                            code.extend(Instruction::Addi { rd: Gpr::T0, rs1: Gpr::Zero, imm: 0 }.encode());
+                            code.extend(ss_store_to_slot(Gpr::T0, dst_offset));
+                        } else if is_shr_32 {
+                            // u64 >> 32: result_low = lhs_high, result_high = 0
+                            if let IRValue::Register(lhs_id) = lhs {
+                                let lhs_off = vreg_stack_slots.get(lhs_id).copied().unwrap_or(0);
+                                code.extend(ss_load_from_slot(Gpr::T0, lhs_off - 4));
+                            } else {
+                                let imm = if let IRValue::Immediate(v) = lhs { *v }
+                                    else if let IRValue::Address(v) = lhs { *v as i64 }
+                                    else { 0 };
+                                code.extend(ss_load_imm(Gpr::T0, (imm >> 32) as i64));
+                            }
+                            code.extend(ss_store_to_slot(Gpr::T0, dst_offset));
+                            code.extend(Instruction::Addi { rd: Gpr::T0, rs1: Gpr::Zero, imm: 0 }.encode());
+                            code.extend(ss_store_to_slot(Gpr::T0, dst_offset - 4));
+                        } else {
                         match op {
                             BinOpKind::Ror | BinOpKind::Rol => {
                                 code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::T1));
@@ -4521,6 +4552,7 @@ impl Backend for RiscV32Backend {
                             }
                         }
                         code.extend(ss_store_to_slot(Gpr::T0, dst_offset));
+                        } // close else block for is_shl_32/is_shr_32
                         code
                     }
 

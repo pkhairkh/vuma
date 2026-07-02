@@ -1227,21 +1227,53 @@ impl Instruction {
                 }
             },
 
-            // ---- SUB (shifted register): 1 1 0 0 1 0 1 1 shift 0 Rm imm6 Rn Rd ----
-            Instruction::SUB { rd, rn, rm } => match rm {
-                Operand::Reg { reg, shift } => {
-                    let (hw, imm6) = shift.map(|(k, v)| (k.encoding(), v)).unwrap_or((0, 0));
-                    Ok(0xCB000000u32
-                        | (hw << 22)
-                        | (reg.encoding() << 16)
-                        | (imm6 << 10)
+            // ---- SUB (shifted register): sf 1 0 S 1 0 1 1 shift 0 Rm imm6 Rn Rd ----
+            //
+            // IMPORTANT: When `rd == XZR`, the subtract discards its result.
+            // All in-tree callers that emit `SUB { rd: XZR, ... }` (the
+            // AtomicCas lowering in emit.rs, the Select/CSET pattern, the
+            // EOR-equality pattern, and the instruction-selector's SUBS+CSET
+            // placeholder) intend CMP semantics — i.e. they immediately follow
+            // with a flag-consuming instruction (B.cond, CSEL, CSET). The
+            // S=0 encoding (plain SUB) does NOT update flags, so those
+            // consumers read STALE flags and produce wrong results.
+            //
+            // For the AtomicCas in particular, the stale-flag bug means the
+            // `B.NE done` after the compare branches on whatever flags were
+            // left by an unrelated earlier instruction. When the stale flags
+            // happen to be NE, the CAS retry loop spins forever on a lock
+            // that is already held (spinlock.vuma TIMEOUT 124 on aarch64).
+            //
+            // The fix: when `rd == XZR`, set the S bit (bit 29) so the
+            // encoded instruction is SUBS XZR, Rn, Rm — the standard CMP
+            // pattern. This matches the AArch64 CMP alias (ARM ARM C6.2.851)
+            // and is what every caller already expects. When `rd != XZR`,
+            // keep S=0 (plain SUB, no flag side-effects) so existing
+            // arithmetic callers are unaffected. We must use pattern-match
+            // on `Register::XZR` (not just `encoding() == 31`) because
+            // `SP` also encodes as 31 and `SUB Xd, SP, ...` must NOT set
+            // flags (SUBS with SP destination is UNPREDICTABLE for the
+            // shifted-register form per ARM ARM C6.2.851).
+            Instruction::SUB { rd, rn, rm } => {
+                // S=1 only when rd is exactly XZR (CMP/SUBS alias).
+                let s_bit: u32 = if matches!(rd, Register::XZR) { 1 << 29 } else { 0 };
+                match rm {
+                    Operand::Reg { reg, shift } => {
+                        let (hw, imm6) = shift.map(|(k, v)| (k.encoding(), v)).unwrap_or((0, 0));
+                        Ok(0xCB000000u32
+                            | s_bit
+                            | (hw << 22)
+                            | (reg.encoding() << 16)
+                            | (imm6 << 10)
+                            | (rn.encoding() << 5)
+                            | rd.encoding())
+                    }
+                    Operand::Imm12(imm) => Ok(0xD1000000u32
+                        | s_bit
+                        | ((*imm as u32) << 10)
                         | (rn.encoding() << 5)
-                        | rd.encoding())
+                        | rd.encoding()),
                 }
-                Operand::Imm12(imm) => Ok(0xD1000000u32
-                    | ((*imm as u32) << 10)
-                    | (rn.encoding() << 5)
-                    | rd.encoding()),
             },
 
             // ---- MUL: alias for MADD Rd, Rn, Rm, XZR ----
@@ -1636,16 +1668,36 @@ impl Instruction {
                 | (rn.encoding() << 5)
                 | rt.encoding()),
 
-            // ---- LDAXR (load-acquire exclusive) ----
-            // LDAXR: 1 1 0 0 1 0 0 0 1 1 1 1 1 0 0 0 0 0 Rn Rt
+            // ---- LDAXR (load-acquire exclusive, 64-bit) ----
+            // LDAXR Xt, [Xn]: size=11, bits 29:23=0010001, L=1 (bit 22),
+            //   bit 23=0 (exclusive), Rs=111111 (bits 21:16), o0=1 (bit 15, acquire),
+            //   Rt2=11111 (bits 14:10), Rn (bits 9:5), Rt (bits 4:0).
+            //   Base = 0xC85FFC00.
+            //
+            // IMPORTANT: The previous encoding 0x08DFFC00 decoded as LDARB
+            // (Load-Acquire Register Byte, NON-exclusive) because bits 31:30=00
+            // (size=byte) and bit 23=1 (non-exclusive). LDARB does NOT arm the
+            // exclusive monitor, so the subsequent STLXR always failed (Rs=1),
+            // causing the CAS retry loop to spin forever (spinlock.vuma
+            // TIMEOUT on aarch64). The correct 64-bit LDAXR uses size=11 and
+            // bit 23=0 (exclusive), which arms the monitor for STLXR.
             Instruction::LDAXR { rt, rn } => {
-                Ok(0x08DFFC00u32 | (rn.encoding() << 5) | rt.encoding())
+                Ok(0xC85FFC00u32 | (rn.encoding() << 5) | rt.encoding())
             }
 
-            // ---- STLXR (store-release exclusive) ----
-            // STLXR: 1 1 0 0 1 0 0 0 0 0 Rs 0 0 0 0 0 Rn Rt
+            // ---- STLXR (store-release exclusive, 64-bit) ----
+            // STLXR Ws, Xt, [Xn]: size=11, bits 29:23=0010000, L=0 (bit 22),
+            //   bit 23=0 (exclusive), Rs (bits 21:16), o0=1 (bit 15, release),
+            //   Rt2=11111 (bits 14:10), Rn (bits 9:5), Rt (bits 4:0).
+            //   Base = 0xC800FC00.
+            //
+            // IMPORTANT: The previous encoding 0x0800FC00 decoded as STLXRB
+            // (Store-Release Exclusive Register Byte) because bits 31:30=00
+            // (size=byte). While STLXRB is exclusive, it only stores 1 byte.
+            // For a u64 CAS (spinlock.vuma uses u64 state), the 1-byte store
+            // corrupts the lock state. The correct 64-bit STLXR uses size=11.
             Instruction::STLXR { rs, rt, rn } => {
-                Ok(0x0800FC00u32 | (rs.encoding() << 16) | (rn.encoding() << 5) | rt.encoding())
+                Ok(0xC800FC00u32 | (rs.encoding() << 16) | (rn.encoding() << 5) | rt.encoding())
             }
 
             // ---- CAS ----
@@ -2087,26 +2139,37 @@ impl Instruction {
                     | rd.encoding()),
             },
 
-            // ---- SUB (shifted register): sf 1 0 0 1 0 1 1 shift 0 Rm imm6 Rn Rd ----
-            // SUB (shifted register): sf op S 01011 shift 0 Rm imm6 Rn Rd
-            // 64-bit base=0xCB000000, 32-bit base=0x4B000000
-            Instruction::SUB { rd, rn, rm } => match rm {
-                Operand::Reg { reg, shift } => {
-                    let (hw, imm6) = shift.map(|(k, v)| (k.encoding(), v)).unwrap_or((0, 0));
-                    Ok((sf << 31)
-                        | 0x4B000000u32
-                        | (hw << 22)
-                        | (reg.encoding() << 16)
-                        | (imm6 << 10)
+            // ---- SUB (shifted register): sf op S 01011 shift 0 Rm imm6 Rn Rd ----
+            // 64-bit base=0xCB000000 (S=0), SUBS=0xEB000000 (S=1)
+            // 32-bit base=0x4B000000 (S=0), SUBS=0x6B000000 (S=1)
+            //
+            // When `rd == XZR`, set S=1 so the instruction is SUBS XZR/WZR
+            // (= CMP) — see the encode() SUB arm for the full rationale.
+            // This makes `emit_instruction_with_width(SUB { rd: XZR, ... })`
+            // (used by the Select lowering's compare-against-zero pattern)
+            // correctly set flags for the subsequent CSEL/CSET.
+            Instruction::SUB { rd, rn, rm } => {
+                let s_bit: u32 = if matches!(rd, Register::XZR) { 1 << 29 } else { 0 };
+                match rm {
+                    Operand::Reg { reg, shift } => {
+                        let (hw, imm6) = shift.map(|(k, v)| (k.encoding(), v)).unwrap_or((0, 0));
+                        Ok((sf << 31)
+                            | 0x4B000000u32
+                            | s_bit
+                            | (hw << 22)
+                            | (reg.encoding() << 16)
+                            | (imm6 << 10)
+                            | (rn.encoding() << 5)
+                            | rd.encoding())
+                    }
+                    // SUB (immediate): 64-bit base=0xD1000000, 32-bit base=0x51000000
+                    Operand::Imm12(imm) => Ok((sf << 31)
+                        | 0x51000000u32
+                        | s_bit
+                        | ((*imm as u32) << 10)
                         | (rn.encoding() << 5)
-                        | rd.encoding())
+                        | rd.encoding()),
                 }
-                // SUB (immediate): 64-bit base=0xD1000000, 32-bit base=0x51000000
-                Operand::Imm12(imm) => Ok((sf << 31)
-                    | 0x51000000u32
-                    | ((*imm as u32) << 10)
-                    | (rn.encoding() << 5)
-                    | rd.encoding()),
             },
 
             // ---- MUL: alias for MADD Rd, Rn, Rm, XZR ----

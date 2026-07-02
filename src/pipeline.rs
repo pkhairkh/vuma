@@ -3739,13 +3739,14 @@ fn resolve_subexpr(
     
     // For complex sub-expressions, recursively parse and return BinOp
     if let Some((op, lhs_str, rhs_str)) = parse_expr_split(subexpr) {
-        // In VUMA, >> defaults to logical (unsigned) shift.
-        // Only use arithmetic shift if explicitly dealing with signed types.
-        let op = if op == IrBinOpKind::ShrA {
-            IrBinOpKind::ShrL
-        } else {
-            op
-        };
+        // VUMA's `>>` is arithmetic (sign-extending) for signed integers.
+        // `parse_expr_split` already maps `>>` to `IrBinOpKind::ShrA`
+        // (see the `two_char_ops` table).  We keep `op` as-is here — the
+        // previous unconditional `ShrA → ShrL` rewrite broke any signed-
+        // shift code, most notably the `bit_abs` gold-standard test
+        // (`x >> 63` on a negative i64 must yield -1, not a large positive
+        // number; the abs computation `flipped - sign` then returned 214
+        // instead of 42 across all backends).
         let lhs = resolve_subexpr(&lhs_str, sources, edge_idx, scg);
         let rhs = resolve_subexpr(&rhs_str, sources, edge_idx, scg);
         // Map IrBinOpKind to the codegen BinOpKind
@@ -6681,16 +6682,54 @@ pub fn flatten_expr(
         }
 
         // ── Dereference: flatten the address, emit Load ──
+        //
+        // For chained derefs (**p, ***p, ...), the INNER loads must read a
+        // full pointer-width value (U64 on 64-bit backends, falls back to
+        // native register width on 32-bit backends) so a 64-bit address is
+        // not truncated to its low byte. The OUTERMOST load reads the final
+        // value (default U8 — e.g. a byte stored via `*p = 42`).
+        //
+        // Without this, `**buf1` (where buf1 holds buf2's address) reads
+        // only 1 byte of buf2's address, then dereferences the truncated
+        // value → SIGSEGV on all native backends. See ptr_double_deref,
+        // ptr_multi_level, ptr_pointer_to_pointer gold-standard tests.
         Expr::Deref { expr, .. } => {
-            let addr = flatten_expr(expr, stmts, ctx);
-            let dst = ctx.alloc_temp();
-            stmts.push(ScgStatement::Access(AccessNode::Load {
-                dst: dst.clone(),
-                ptr: addr,
-                offset: None,
-                ty: None,
-            }));
-            ScgExpr::Var(dst)
+            // Walk the inner Deref chain to find the innermost non-Deref
+            // expression. `chain_depth` counts the total number of Derefs
+            // (1 for the current one + N for any nested Derefs in `expr`).
+            let mut chain_depth: usize = 1;
+            let mut cur = expr.as_ref();
+            loop {
+                if let Expr::Deref { expr: inner, .. } = cur {
+                    chain_depth += 1;
+                    cur = inner.as_ref();
+                } else {
+                    break;
+                }
+            }
+            // `cur` is now the innermost non-Deref expression (typically a
+            // Var holding a pointer, or an Offset/Index computing an address).
+            let mut current_addr = flatten_expr(cur, stmts, ctx);
+            // Emit `chain_depth` Load statements from innermost to outermost.
+            // The OUTERMOST load (i == 0, emitted last) reads the final byte
+            // value (ty: None → defaults to U8). All INNER loads (i > 0) read
+            // pointer-width (U64) so intermediate addresses aren't truncated.
+            for i in (0..chain_depth).rev() {
+                let dst = ctx.alloc_temp();
+                let ty = if i == 0 {
+                    None
+                } else {
+                    Some(vuma_codegen::ir::IRType::U64)
+                };
+                stmts.push(ScgStatement::Access(AccessNode::Load {
+                    dst: dst.clone(),
+                    ptr: current_addr,
+                    offset: None,
+                    ty,
+                }));
+                current_addr = ScgExpr::Var(dst);
+            }
+            current_addr
         }
 
         // ── Offset (pointer arithmetic): flatten base and offset, emit Add ──
@@ -6805,7 +6844,13 @@ pub fn map_ast_binop(op: &vuma_parser::ast::BinOp) -> BinOpKind {
         BinOp::BitOr => BinOpKind::Or,
         BinOp::BitXor => BinOpKind::Xor,
         BinOp::Shl => BinOpKind::Shl,
-        BinOp::Shr => BinOpKind::ShrL,
+        // VUMA's `>>` is arithmetic (sign-extending) for signed integers.
+        // The bit_abs gold-standard test relies on this: `x >> 63` on a
+        // negative i64 must yield -1, not a large positive number.  Mapping
+        // to ShrL (logical shift) unconditionally was the root cause of
+        // bit_abs returning 214 (-42 as u8) instead of 42 across all
+        // backends.
+        BinOp::Shr => BinOpKind::ShrA,
         BinOp::Eq => BinOpKind::Eq,
         BinOp::Ne => BinOpKind::Ne,
         BinOp::Lt => BinOpKind::SLt,
@@ -6906,7 +6951,45 @@ pub fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) ->
 
             // Detect dereference writes: `*expr = val` → Access::Store
             if let vuma_parser::ast::AssignTarget::Deref { expr, .. } = &assign_stmt.target {
-                let ptr = flatten_expr(expr, &mut stmts, ctx);
+                // For chained deref targets (`**p = val`, `***p = val`, ...),
+                // the inner Deref chain must be flattened with pointer-width
+                // (U64) loads so intermediate addresses aren't truncated to
+                // their low byte. For a single `*p = val`, the value of `p`
+                // IS the address to store at — no load is needed.
+                //
+                // Without this, `**buf1 = 42` (where buf1 holds buf2's
+                // address) loads only 1 byte of buf2's address, then stores
+                // 42 at the truncated address → SIGSEGV. See
+                // ptr_pointer_to_pointer gold-standard test.
+                let ptr = if let vuma_parser::ast::Expr::Deref { .. } = expr.as_ref() {
+                    // Chained deref target. Walk the inner Deref chain; every
+                    // load in the chain reads a pointer (U64).
+                    let mut chain_depth: usize = 0;
+                    let mut cur = expr.as_ref();
+                    loop {
+                        if let vuma_parser::ast::Expr::Deref { expr: inner, .. } = cur {
+                            chain_depth += 1;
+                            cur = inner.as_ref();
+                        } else {
+                            break;
+                        }
+                    }
+                    let mut current_addr = flatten_expr(cur, &mut stmts, ctx);
+                    for _ in 0..chain_depth {
+                        let dst = ctx.alloc_temp();
+                        stmts.push(ScgStatement::Access(AccessNode::Load {
+                            dst: dst.clone(),
+                            ptr: current_addr,
+                            offset: None,
+                            ty: Some(vuma_codegen::ir::IRType::U64),
+                        }));
+                        current_addr = ScgExpr::Var(dst);
+                    }
+                    current_addr
+                } else {
+                    // Single deref: `*p = val`. `p`'s value is the store address.
+                    flatten_expr(expr, &mut stmts, ctx)
+                };
                 let value = flatten_expr(&assign_stmt.value, &mut stmts, ctx);
                 stmts.push(ScgStatement::Access(AccessNode::Store {
                     ptr,
@@ -7183,8 +7266,26 @@ pub fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) ->
 
         // for name in start..end { body }
         // Lowered as:
-        //   name = start
-        //   loop { _cond = name < end; if _cond { body; name = name + 1 } else { break } }
+        //   loop { body } with for_range = Some((name, start, end))
+        //
+        // `lower_loop` emits the counter initialization (before the loop
+        // header), the condition check (in the loop header), AND the
+        // increment (in the `loop_continue` block, after the continue-phi
+        // merge).  Placing the increment in `loop_continue` is critical:
+        // a `continue` inside the body jumps to `loop_continue`, so the
+        // increment still executes — matching the semantics of a for-loop
+        // (where `continue` does NOT skip the increment).
+        //
+        // The previous lowering wrapped the body in an explicit
+        // `if cond { body; name = name + 1 } else { break }` and set
+        // `for_range = None`.  That structure placed the increment INSIDE
+        // the then-branch, so `continue` skipped it — the loop variable
+        // never advanced past the continue point, causing an infinite loop
+        // (cf_for_continue, all 10 backends timeout).  The continue-phi
+        // merge in `lower_loop` (Task 6-A) ensures the loop-header phi
+        // back-edge observes path-merged values, but the increment MUST
+        // still run on the continue path for the loop variable to advance
+        // — only `for_range` guarantees that.
         PStmt::For(for_stmt) => {
             let mut pre_stmts = Vec::new();
             let (start_expr, end_expr) = match &for_stmt.iter {
@@ -7198,46 +7299,16 @@ pub fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) ->
                 }
             };
 
-            let init_stmt = ScgStatement::Computation(ComputationNode {
-                dst: for_stmt.name.clone(),
-                op: BinOpKind::Add,
-                lhs: start_expr,
-                rhs: ScgExpr::Int(0),
-                tail_call: false,
-                reassigns: None,
-            });
-
-            let mut loop_body = Vec::new();
-            let cond_temp = format!("{}_cond", for_stmt.name);
-            loop_body.push(ScgStatement::Computation(ComputationNode {
-                dst: cond_temp.clone(),
-                op: BinOpKind::SLt,
-                lhs: ScgExpr::Var(for_stmt.name.clone()),
-                rhs: end_expr.clone(),
-                tail_call: false,
-                reassigns: None,
-            }));
-
             let inner_body = bridge_block_to_scg_stmts(&for_stmt.body, ctx);
-            let mut full_then = inner_body;
-            full_then.push(ScgStatement::Computation(ComputationNode {
-                dst: for_stmt.name.clone(),
-                op: BinOpKind::Add,
-                lhs: ScgExpr::Var(for_stmt.name.clone()),
-                rhs: ScgExpr::Int(1),
-                tail_call: false,
-                reassigns: None,
-            }));
 
-            loop_body.push(ScgStatement::Control(ControlNode::If {
-                cond: ScgExpr::Var(cond_temp),
-                then_body: full_then,
-                else_body: Some(vec![ScgStatement::Control(ControlNode::Break)]),
-            }));
+            let for_range = Some((for_stmt.name.clone(), start_expr, end_expr));
 
             let mut result = pre_stmts;
-            result.push(init_stmt);
-            result.push(ScgStatement::Control(ControlNode::Loop { body: loop_body, for_range: None, while_cond: None }));
+            result.push(ScgStatement::Control(ControlNode::Loop {
+                body: inner_body,
+                for_range,
+                while_cond: None,
+            }));
             result
         }
 
