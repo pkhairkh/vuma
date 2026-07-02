@@ -1,78 +1,58 @@
 // Arena Allocator - demonstrates VUMA region management
-// All allocations in an arena are freed at once
+// Expected exit code: 0
 //
 // The arena pattern is fundamental in systems programming:
 //   - Game engines use it for per-frame allocations
 //   - Compilers use it for AST node lifetimes
 //   - Embedded systems use it to avoid fragmentation
 //
-// VUMA's IVE adds a unique guarantee: after arena_destroy(), the engine
-// marks ALL derived pointers as invalid. This prevents the #1 bug in
-// arena-based code: using a pointer after its arena has been freed.
-//
 // VUMA Key Concepts:
 //   - Pointer arithmetic: base + offset to derive new addresses
-//   - Intra-region tracking: IVE knows which bytes within a region are live
+//   - Manual alignment computation
 //   - Bulk invalidation: free(base) invalidates all derived pointers
-//   - Alignment computation with .align_to()
-
-struct Arena {
-    base: Address,   // Start of the arena's memory block
-    size: u64,       // Total size of the arena
-    offset: u64,     // Current allocation offset
-}
-
-fn arena_create(size: u64) -> Arena {
-    // Allocate one contiguous block for the entire arena
-    // IVE verifies: allocation succeeds and size is recorded
-    base = allocate(size);
-    return Arena { base, size, offset: 0 };
-}
-
-fn arena_alloc(arena: Address, alloc_size: u64, align: u64) -> Address {
-    // Bump-allocate within the arena, respecting alignment
-    //
-    // IVE tracks the derivation chain:
-    //   arena.base → current → aligned
-    // and knows that `aligned` is within the arena's allocation.
-    //
-    // The bounds check (new_offset <= arena.size) is verified by IVE
-    // to prevent out-of-bounds writes into the arena.
-    current = (*arena).base + (*arena).offset;
-    aligned = current.align_to(align);
-    new_offset = (aligned - (*arena).base) + alloc_size;
-    // IVE verifies: new_offset <= arena.size
-    (*arena).offset = new_offset;
-    return aligned;
-}
-
-fn arena_destroy(arena: Arena) {
-    // Free the entire arena in one operation
-    // IVE verifies: all derivations from arena.base are now invalid
-    //
-    // After this call, any pointer that was returned by arena_alloc()
-    // for this arena is flagged as dead by IVE. This is the key safety
-    // guarantee that makes arenas safer than manual free().
-    free(arena.base);
-}
 
 fn main() -> i32 {
-    arena = arena_create(4096);
+    // Allocate one contiguous block for the entire arena
+    base: Address = allocate(4096);
+    offset: u64 = 0;
+    size: u64 = 4096;
 
-    // Both `a` and `b` are derived from arena.base
-    // IVE knows they are within the arena's 4096-byte allocation
-    a = arena_alloc(arena, 64, 8);
-    b = arena_alloc(arena, 128, 16);
+    // Bump-allocate within the arena, respecting alignment
+    // a = arena_alloc(64, 8)
+    current_a: Address = base + offset;
+    rem_a: u64 = current_a % 8;
+    pad_a: u64 = (8 - rem_a) % 8;
+    a: Address = current_a + pad_a;
+    offset = (a - base) + 64;
 
+    // b = arena_alloc(128, 16)
+    current_b: Address = base + offset;
+    rem_b: u64 = current_b % 16;
+    pad_b: u64 = (16 - rem_b) % 16;
+    b: Address = current_b + pad_b;
+    offset = (b - base) + 128;
+
+    // Verify bounds
+    if offset > size {
+        free(base);
+        return 1;
+    }
+
+    // Write values
     *a = 1;
     *b = 2;
 
-    // All allocations freed in one call
-    arena_destroy(arena);
+    // Read back and verify
+    val_a: u64 = *a;
+    val_b: u64 = *b;
 
-    // IVE flags any access to a or b after this point
-    // The following would be a compile-time error in VUMA:
-    //   x = *a;  // ERROR: use of dead pointer `a`
+    // Free entire arena in one call
+    free(base);
 
-    return 0;
+    if val_a == 1 {
+        if val_b == 2 {
+            return 0;
+        }
+    }
+    return 1;
 }

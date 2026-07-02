@@ -1,4 +1,5 @@
 // Minimal hex test: allocate a 1-byte buffer and print_hex it
+// Expected exit code: 0
 fn main() -> i32 {
     buf = allocate(1);
     *(buf + 0) = 0x41;
