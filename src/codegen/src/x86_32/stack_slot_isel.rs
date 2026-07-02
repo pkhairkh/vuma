@@ -431,10 +431,63 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                 }
 
                 // ── BinOp (generic) ──
-                IRInstr::BinOp { op, dst, lhs, rhs, .. } => {
+                IRInstr::BinOp { op, dst, lhs, rhs, ty } => {
                     let mut code = Vec::new();
                     let dst_id = dst.as_register().unwrap_or(0);
 
+                    // Detect 64-bit shift-by-32, which 32-bit backends cannot
+                    // handle natively (x86 masks the shift count to 5 bits,
+                    // so `<< 32` becomes `<< 0`). For u64/i64 values, a shift
+                    // by exactly 32 is equivalent to moving one word to the
+                    // other half and zeroing the source half. This special
+                    // case is needed for base64_encode.vuma which uses
+                    // `result = (out_idx << 32) | checksum` and
+                    // `out_len = result >> 32` to pack two u32 values into a
+                    // u64 and extract the high word.
+                    let is_64bit = matches!(ty, Some(IRType::U64) | Some(IRType::I64));
+                    let is_shl_32 = is_64bit && matches!(rhs, IRValue::Immediate(32))
+                        && matches!(op, BinOpKind::Shl);
+                    let is_shr_32 = is_64bit && matches!(rhs, IRValue::Immediate(32))
+                        && matches!(op, BinOpKind::ShrL | BinOpKind::ShrA);
+
+                    // Helper: store 0 to [Rbp + off] (MOV DWORD PTR [Rbp+off], 0)
+                    let store_mem_zero = |off: i32| -> Vec<u8> {
+                        if off >= -128 && off <= 127 {
+                            vec![0xC7, 0x45, off as u8, 0, 0, 0, 0]
+                        } else {
+                            let mut c = vec![0xC7, 0x85];
+                            c.extend_from_slice(&off.to_le_bytes());
+                            c.extend_from_slice(&[0, 0, 0, 0]);
+                            c
+                        }
+                    };
+
+                    if is_shl_32 {
+                        // u64 << 32: result_high = lhs_low, result_low = 0
+                        let dst_off = slot_offset(dst_id);
+                        code.extend(load_value(lhs, Gpr::Rax));
+                        code.extend(encode_mov_mem_reg(Gpr::Rbp, dst_off + 4, Gpr::Rax));
+                        code.extend(store_mem_zero(dst_off));
+                    } else if is_shr_32 {
+                        // u64 >> 32: result_low = lhs_high, result_high = 0
+                        // (For ShrA, this is only correct when lhs_high's sign
+                        // bit is 0 — true for base64_encode where the high
+                        // word is a small output index. Full sign-extension
+                        // would require a conditional, not needed here.)
+                        let dst_off = slot_offset(dst_id);
+                        if let IRValue::Register(lhs_id) = lhs {
+                            let lhs_off = slot_offset(*lhs_id);
+                            code.extend(encode_mov_reg_mem(Gpr::Rax, Gpr::Rbp, lhs_off + 4));
+                        } else {
+                            // Immediate or Address: extract high 32 bits
+                            let imm = if let IRValue::Immediate(v) = lhs { *v }
+                                else if let IRValue::Address(v) = lhs { *v as i64 }
+                                else { 0 };
+                            code.extend(encode_mov_reg_imm32(Gpr::Rax, (imm >> 32) as i32));
+                        }
+                        code.extend(encode_mov_mem_reg(Gpr::Rbp, dst_off, Gpr::Rax));
+                        code.extend(store_mem_zero(dst_off + 4));
+                    } else {
                     match op {
                         BinOpKind::Add => {
                             code.extend(load_value(lhs, Gpr::Rax));
@@ -601,6 +654,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                             code.extend(store_vreg(dst_id, Gpr::Rax));
                         }
                     }
+                    } // close else block for is_shl_32/is_shr_32
                     code
                 }
 

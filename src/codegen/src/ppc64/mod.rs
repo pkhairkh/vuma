@@ -3765,18 +3765,32 @@ impl Backend for PPC64Backend {
             }
         }
 
-        // Stack Layout (relative to R31, which = R1 + frame_size):
-        // [R31 + 8]  = saved LR
-        // [R31]      = back chain
-        // [R31 - 16] = saved R31
-        // Then alloc regions, then vreg slots at [R31 - offset]
-
-        let mut alloc_offsets: std::collections::HashMap<u32, i32> = std::collections::HashMap::new();
-        // Start at 32 to avoid overlapping with:
-        //   [R31 - 0]  = back chain (old R1)
+        // Stack Layout (relative to R31, which = R1 + frame_size = old SP):
+        //   [R31 + 0]  = back chain (old R1) — set by STDU, lives in CALLER's frame
         //   [R31 - 8]  = unused
         //   [R31 - 16] = saved R31
-        //   [R31 - 24] = unused
+        //   [R31 - 24] = saved LR  (callee's own frame; see prologue below)
+        //   [R31 - 32] = unused
+        //   [R31 - 40], [R31 - 48], ... = vreg slots / alloc regions
+        //
+        // LR is saved in the CALLEE's own frame (at R31 - 24 = SP + fs - 24),
+        // NOT in the caller's frame. The previous code saved LR at
+        // SP + fs + 16 (= caller's SP + 16), which is INSIDE the caller's
+        // frame and overwrites one of the caller's vreg slots (the slot at
+        // caller_SP + 16, which is caller's vreg at offset caller_fs - 16).
+        // This silently corrupted the caller's vregs on every call, causing
+        // ppc64-specific failures in tests with 3+ vregs in the caller
+        // (bsearch, fn_sum_squares, quicksort, matrix, mem_nested_alloc).
+
+        let mut alloc_offsets: std::collections::HashMap<u32, i32> = std::collections::HashMap::new();
+        // Start at 32 to avoid overlapping with the reserved save-area slots:
+        //   [R31 - 0]  = back chain (old R1) — at SP+0, set by STDU
+        //   [R31 - 8]  = unused
+        //   [R31 - 16] = saved R31
+        //   [R31 - 24] = saved LR
+        //   [R31 - 32] = unused
+        // The first vreg slot lands at [R31 - 40] (current_offset is
+        // incremented by 8 before each assignment).
         let mut current_offset: i32 = 32;
 
         let mut alloc_vreg_ids: Vec<u32> = stack_alloc_vregs.iter().copied().collect();
@@ -3815,12 +3829,21 @@ impl Backend for PPC64Backend {
             opcode: "mflr".into(), reads: vec![], writes: vec![PhysicalReg::new(RegClass::Gpr, 0)],
             encoded: encode_word(mflr_word).to_vec(),
         });
-        // STD R0, fs+16(R1) - save LR at caller's SP+16 (ELFv2 LR save area)
+        // STD R0, fs-24(R1) - save LR in the CALLEE's own frame at SP + fs - 24
+        // (= R31 - 24 after R31 is set up). Saving LR inside the callee's own
+        // frame is critical: the previous code saved LR at SP + fs + 16 (the
+        // caller's SP + 16), which OVERWRITES one of the caller's vreg slots
+        // (the slot at caller_SP + 16, which corresponds to caller's vreg at
+        // offset caller_fs - 16). This silently corrupted caller vregs on
+        // every call, breaking tests where the caller has 3+ vregs (so that
+        // some vreg lands at offset caller_fs - 16). R31 - 24 is reserved
+        // (between saved R31 at R31 - 16 and the first vreg slot at R31 - 40)
+        // and never overlaps any vreg slot, alloc region, or back chain.
         instructions.push(AllocatedInstruction {
             opcode: "std".into(),
             reads: vec![PhysicalReg::new(RegClass::Gpr, 0), PhysicalReg::new(RegClass::Gpr, 1)],
             writes: vec![],
-            encoded: Instruction::Std { rs: Gpr::R0, ra: Gpr::R1, ds: fs + 16 }.encode().to_vec(),
+            encoded: Instruction::Std { rs: Gpr::R0, ra: Gpr::R1, ds: fs - 24 }.encode().to_vec(),
         });
         // STD R31, fs-16(R1) - save R31
         instructions.push(AllocatedInstruction {
@@ -4505,8 +4528,9 @@ impl Backend for PPC64Backend {
                         if let Some(val) = values.first() {
                             code.extend(ss_load_value(val, &vreg_stack_slots, Gpr::R3));
                         }
-                        // Epilogue
-                        code.extend_from_slice(&Instruction::Ld { rt: Gpr::R0, ra: Gpr::R1, ds: fs + 16 }.encode());
+                        // Epilogue: restore LR from the callee's own frame at SP + fs - 24
+                        // (= R31 - 24), matching the prologue's save location.
+                        code.extend_from_slice(&Instruction::Ld { rt: Gpr::R0, ra: Gpr::R1, ds: fs - 24 }.encode());
                         let mtlr_word: u32 = (31u32 << 26) | (0u32 << 21) | (8u32 << 16) | (467 << 1);
                         code.extend_from_slice(&encode_word(mtlr_word));
                         code.extend_from_slice(&Instruction::Ld { rt: Gpr::R31, ra: Gpr::R1, ds: fs - 16 }.encode());
