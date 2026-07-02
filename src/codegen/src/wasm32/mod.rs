@@ -2020,23 +2020,41 @@ fn lower_function(
     ctx.emit(WasmInstr::End);
 
     // Build the function type.
-    // In Wasm32, all integer params/results are i32.
+    // In Wasm32, all integer params are i32. Parameters are passed through
+    // the Wasm function signature as usual.
     let param_types: Vec<WasmType> = func
         .param_types
         .iter()
         .filter_map(WasmType::from_ir_type)
         .map(|t| if t.is_integer() { WasmType::I32 } else { t })
         .collect();
-    let result_types: Vec<WasmType> = func
-        .result_types
-        .iter()
-        .filter_map(WasmType::from_ir_type)
-        .map(|t| if t.is_integer() { WasmType::I32 } else { t })
-        .collect();
 
+    // IMPORTANT: All program functions are emitted as `() -> ()` (void)
+    // regardless of `func.result_types`.  Return values are communicated
+    // through linear memory at address 0 — `IRInstr::Ret` and the
+    // `IRTerminator::Return` lowerings store the value there with
+    // `i32.store` before emitting `return`, and the call sites
+    // (`IRInstr::Call`, the `_start` wrapper, and the `_vuma_main` test
+    // wrapper) load it back with `i32.load` after the call.
+    //
+    // This is required because the Ret/Return lowering consumes the value
+    // (via `i32.store`, which pops `[addr, value]`) and leaves the Wasm
+    // value stack EMPTY at the `return` instruction.  If we declared
+    // `results: [I32]` here, the Wasm validator would reject the module
+    // ("type mismatch: expected i32 on stack at return, found []").
+    //
+    // Previously, when the canonical pipeline went through
+    // `bridge_scg_to_codegen`, the bridge produced IR with `result_types`
+    // already empty for all functions, so this override was a no-op.  The
+    // direct `bridge_ast_to_codegen_scg` bridge (now in `src/pipeline.rs`)
+    // correctly populates `result_types` from the VUMA source (e.g.
+    // `[I32]` for `fn main() -> i32`), which exposed this latent
+    // dependency: with non-empty `result_types`, the emitted module fails
+    // Wasm validation → wasmtime rejects it → the wasm32 backend
+    // collapses from 99.65% to 1.20% pass rate (5669 failures).
     let func_type = WasmFuncType {
         params: param_types,
-        results: result_types,
+        results: vec![],
     };
 
     // Encode all instructions to bytecode and compute call relocations.
@@ -6030,5 +6048,135 @@ mod wasm_target_tests {
 
         // Verify the rest of the body is intact
         assert_eq!(body[1 + leb_len], 0x0B, "End byte should still be present");
+    }
+
+    /// Regression test for the wasm32 backend collapse (Task ID: 5-A).
+    ///
+    /// The direct `bridge_ast_to_codegen_scg` bridge (src/pipeline.rs)
+    /// populates `IRFunction::result_types` from the VUMA source — e.g.
+    /// `[IRType::I32]` for `fn main() -> i32`.  The wasm32 backend's
+    /// `lower_function` previously built `wasm_func_type.results` directly
+    /// from `func.result_types`, but the Ret/Return lowering stores the
+    /// value to memory[0] and emits `return` with an empty value stack.
+    /// When `results` was non-empty, the Wasm validator rejected the
+    /// module ("stack underflow at return"), wasmtime exited 1, and the
+    /// wasm32 backend collapsed from 99.65% to 1.20% pass rate (5669
+    /// failures) — even the trivial `fn main() -> i32 { return 0; }`.
+    ///
+    /// The fix forces `wasm_func_type.results = vec![]` for all program
+    /// functions (the void+memory[0] return convention already used by
+    /// Ret/Return lowering, call sites, and the `_start`/`_vuma_main`
+    /// wrappers).  This test exercises the full path
+    /// (`allocate_registers` → `encode_program`) with the minimal
+    /// `fn main() -> i32 { return 0; }` IR and asserts:
+    ///   1. encode_program returns Ok(bytes).
+    ///   2. The bytes start with the Wasm magic and version 1 header.
+    ///   3. The module exports `_vuma_main` (the test-harness entry).
+    ///   4. The module exports `main` and its Wasm function type is
+    ///      `() -> ()` — i.e. results is empty (the actual fix).
+    #[test]
+    fn test_wasm32_main_returning_i32_emits_void_func_type() {
+        // ── Step 1: construct minimal IR for `fn main() -> i32 { return 0; }`
+        // (params: [], result_types: [I32] — exactly what the direct bridge
+        // produces for this source).
+        let func = make_main_returning(0);
+
+        // ── Step 2: run allocate_registers → encode_program (the path
+        // compile_to_wasm takes; this is the path that broke).
+        let backend = Wasm32Backend::new();
+        let allocated = backend
+            .allocate_registers(&func)
+            .expect("allocate_registers should succeed for fn main() -> i32 { return 0; }");
+
+        // Sanity: wasm_func_type must be Some (set by allocate_registers).
+        assert!(
+            allocated.wasm_func_type.is_some(),
+            "allocate_registers must populate wasm_func_type"
+        );
+        let ft = allocated.wasm_func_type.as_ref().unwrap();
+        assert!(
+            ft.results.is_empty(),
+            "main's wasm_func_type.results must be empty (void return convention); \
+             got {:?}. Non-empty results causes Wasm validation failure because the \
+             Ret lowering emits `return` with an empty value stack.",
+            ft.results
+        );
+        assert!(
+            ft.params.is_empty(),
+            "main takes no params; got {:?}",
+            ft.params
+        );
+
+        let program = AllocatedProgram {
+            functions: vec![allocated],
+            total_code_size: 0,
+            total_data_size: 0,
+        };
+        let result = backend.encode_program(&program);
+        let wasm_bytes = result.expect("encode_program should succeed");
+
+        // ── Step 3: verify the bytes are a well-formed Wasm module header.
+        assert!(
+            wasm_bytes.len() > 8,
+            "module should be at least 8 bytes; got {} bytes",
+            wasm_bytes.len()
+        );
+        assert_eq!(
+            &wasm_bytes[0..4],
+            &[0x00, 0x61, 0x73, 0x6d],
+            "module must start with Wasm magic bytes \\0asm"
+        );
+        assert_eq!(
+            &wasm_bytes[4..8],
+            &[0x01, 0x00, 0x00, 0x00],
+            "module must declare Wasm version 1"
+        );
+
+        // ── Step 4: parse the export section and verify both `main` and
+        // `_vuma_main` are exported.  The test harness invokes
+        // `_vuma_main` via `wasmtime run --invoke _vuma_main`; if it's
+        // missing, every wasm32 test fails with exit 1.
+        let mut found_main_export = false;
+        let mut found_vuma_main_export = false;
+        let mut offset = 8usize;
+        while offset < wasm_bytes.len() {
+            let section_id = wasm_bytes[offset];
+            offset += 1;
+            let (section_size, size_len) = decode_unsigned_leb128(&wasm_bytes[offset..]);
+            offset += size_len;
+            let section_end = offset + section_size as usize;
+            if section_id == SECTION_EXPORT {
+                let (num_exports, n) = decode_unsigned_leb128(&wasm_bytes[offset..]);
+                let mut pos = offset + n;
+                for _ in 0..num_exports {
+                    let (name_len, nl) = decode_unsigned_leb128(&wasm_bytes[pos..]);
+                    let export_name = std::str::from_utf8(
+                        &wasm_bytes[pos + nl..pos + nl + name_len as usize],
+                    )
+                    .unwrap_or("");
+                    if export_name == "main" {
+                        found_main_export = true;
+                    } else if export_name == "_vuma_main" {
+                        found_vuma_main_export = true;
+                    }
+                    pos += nl + name_len as usize;
+                    // skip kind byte + index LEB128
+                    pos += 1;
+                    let (_, il) = decode_unsigned_leb128(&wasm_bytes[pos..]);
+                    pos += il;
+                }
+            }
+            offset = section_end;
+        }
+        assert!(
+            found_main_export,
+            "module should export 'main' (test harness needs it)"
+        );
+        assert!(
+            found_vuma_main_export,
+            "module should export '_vuma_main' (test harness invokes it via \
+             `wasmtime run --invoke _vuma_main`); without it, every wasm32 \
+             test fails with exit 1"
+        );
     }
 }
