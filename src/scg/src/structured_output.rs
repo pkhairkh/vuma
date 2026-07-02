@@ -619,18 +619,6 @@ fn node_operation(node: &NodeData) -> String {
         NodePayload::EnumDef(e) => format!("enum_def({})", e.name),
         NodePayload::Match(m) => format!("match({})", m.subject),
         NodePayload::ConstantTime(ct) => format!("ct_{:?}", ct.op),
-        NodePayload::ConceptDecl(c) => format!("concept_decl({})", c.name),
-        NodePayload::ConceptField(c) => format!("concept_field({}.{})", c.concept_name, c.name),
-        NodePayload::ConceptAccess(c) => format!("concept_access({}.{})", c.concept_name, c.field_name),
-        NodePayload::GestaltDecl(g) => format!("gestalt_decl({})", g.name),
-        NodePayload::GestaltInterpret(g) => format!("gestalt_interp({}.{})", g.gestalt_name, g.variant_name),
-        NodePayload::ContextAssert(c) => format!("context_assert({}.{})", c.gestalt_name, c.variant_name),
-        NodePayload::ManifoldDecl(m) => format!("manifold_decl({})", m.name),
-        NodePayload::ManifoldQuery(m) => format!("manifold_query({})", m.manifold_name),
-        NodePayload::ManifoldSlice(m) => format!("manifold_slice({})", m.manifold_name),
-        NodePayload::AuraAttach(a) => format!("aura_attach({})", a.schema_name),
-        NodePayload::AuraQuery(a) => format!("aura_query({:?})", a.field),
-        NodePayload::AuraUpdate(a) => format!("aura_update({:?})", a.field),
     }
 }
 

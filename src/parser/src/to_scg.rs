@@ -338,87 +338,6 @@ impl AstToScg {
                 default_region.add_node(id);
                 Ok(id)
             }
-            // Womb data model lowering — convert AST to SCG nodes
-            Item::ConceptDecl(c) => {
-                let layout_hint = match c.layout_hint.as_deref() {
-                    Some("aos") => vuma_scg::node::ConceptLayoutHint::AoS,
-                    Some("soa") => vuma_scg::node::ConceptLayoutHint::SoA,
-                    _ => vuma_scg::node::ConceptLayoutHint::Auto,
-                };
-                let id = scg.add_node(
-                    NodeType::ConceptDecl,
-                    NodePayload::ConceptDecl(vuma_scg::node::ConceptDeclNode {
-                        name: c.name.clone(),
-                        field_names: c.fields.iter().map(|(n, _)| n.clone()).collect(),
-                        region_id: default_region.id,
-                        layout_hint,
-                        layout_resolved: false,
-                        resolved_offsets: Vec::new(),
-                        resolved_size: 0,
-                        resolved_align: 0,
-                    }),
-                    self.span_to_pp(&c.span),
-                );
-                default_region.add_node(id);
-                Ok(id)
-            }
-            Item::GestaltDecl(g) => {
-                let id = scg.add_node(
-                    NodeType::GestaltDecl,
-                    NodePayload::GestaltDecl(vuma_scg::node::GestaltDeclNode {
-                        name: g.name.clone(),
-                        variants: g.variants.iter().map(|(n, _)| n.clone()).collect(),
-                        max_size: 8, // default, refined by BD
-                        max_align: 8,
-                        degraded: false,
-                        tag_offset: None,
-                    }),
-                    self.span_to_pp(&g.span),
-                );
-                default_region.add_node(id);
-                Ok(id)
-            }
-            Item::ManifoldDecl(m) => {
-                let curve = match m.curve.as_deref() {
-                    Some("hilbert") => vuma_scg::node::SpaceFillingCurve::Hilbert,
-                    Some("row_major") => vuma_scg::node::SpaceFillingCurve::RowMajor,
-                    _ => vuma_scg::node::SpaceFillingCurve::ZOrder,
-                };
-                let total_elements: u64 = m.dim_sizes.iter().product();
-                let element_size = 4u64; // default u32
-                let id = scg.add_node(
-                    NodeType::ManifoldDecl,
-                    NodePayload::ManifoldDecl(vuma_scg::node::ManifoldDeclNode {
-                        name: m.name.clone(),
-                        dimensions: m.dim_sizes.len() as u32,
-                        dim_sizes: m.dim_sizes.clone(),
-                        element_size,
-                        total_elements,
-                        total_bytes: total_elements * element_size,
-                        curve,
-                        locality_hints: Vec::new(),
-                    }),
-                    self.span_to_pp(&m.span),
-                );
-                default_region.add_node(id);
-                Ok(id)
-            }
-            Item::AuraDecl(a) => {
-                let id = scg.add_node(
-                    NodeType::AuraAttach,
-                    NodePayload::AuraAttach(vuma_scg::node::AuraAttachNode {
-                        base_ptr: String::new(),
-                        schema_hash: compute_schema_hash(&a.schema),
-                        version: a.version,
-                        bounds_size: if a.bounds { 0 } else { 0 },
-                        schema_name: a.schema.clone(),
-                        result_ptr: String::new(),
-                    }),
-                    self.span_to_pp(&a.span),
-                );
-                default_region.add_node(id);
-                Ok(id)
-            }
         }
     }
 
@@ -4190,13 +4109,3 @@ mod tests {
 }
 
 
-/// Compute a simple FNV-1a hash for a schema name string.
-/// Used by Aura declaration lowering to generate a schema_hash.
-fn compute_schema_hash(name: &str) -> u64 {
-    let mut hash: u64 = 0xcbf29ce484222325;
-    for byte in name.bytes() {
-        hash ^= byte as u64;
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    hash
-}

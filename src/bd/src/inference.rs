@@ -28,15 +28,15 @@ use crate::capd::{CapD, Capability};
 use crate::descriptor::BD;
 use crate::reld::{DepKind, RelD, Relation};
 use crate::repd::{
-    ArrayRep, BDConstraint as RepDConstraint, ByteRep, ConceptRelationalRep, EnumRep, FuncRep,
-    GestaltSuperpositionRep, ManifoldSpatialRep, PtrRep, RepD, StructRep, UnionRep,
+    ArrayRep, BDConstraint as RepDConstraint, ByteRep, EnumRep, FuncRep,
+    PtrRep, RepD, StructRep, UnionRep,
 };
 use hashbrown::{HashMap, HashSet};
 use std::fmt;
 use vuma_scg::edge::EdgeKind;
 use vuma_scg::graph::SCG;
 use vuma_scg::node::{
-    AccessMode, ConceptDeclNode, GestaltDeclNode, ManifoldDeclNode, NodeId, NodePayload, NodeType,
+    AccessMode, NodeId, NodePayload, NodeType,
 };
 
 // ---------------------------------------------------------------------------
@@ -399,17 +399,6 @@ impl BDInferenceEngine {
                 // VTable and ClosureEnv nodes inherit BD from their inputs
                 self.compute_phantom_bd(scg, node_id, bd_map)
             }
-            // Womb data models — compute actual RepD from node payloads
-            NodeType::ManifoldDecl => self.compute_manifold_bd(&node_data.payload),
-            NodeType::GestaltDecl => self.compute_gestalt_bd(&node_data.payload),
-            NodeType::ConceptDecl => self.compute_concept_bd(&node_data.payload),
-            // These node types inherit BD from inputs (phantom-like)
-            NodeType::ConceptField | NodeType::ConceptAccess
-            | NodeType::GestaltInterpret | NodeType::ContextAssert
-            | NodeType::ManifoldQuery | NodeType::ManifoldSlice
-            | NodeType::AuraAttach | NodeType::AuraQuery | NodeType::AuraUpdate => {
-                self.compute_phantom_bd(scg, node_id, bd_map)
-            }
         }
     }
 
@@ -426,80 +415,6 @@ impl BDInferenceEngine {
                 Some(BD::new(repd, capd, reld))
             }
             _ => None,
-        }
-    }
-
-    /// Manifold declaration: compute ManifoldSpatial RepD using Z-order/Hilbert curve.
-    ///
-    /// The RepD captures the dimensional topology and space-filling curve
-    /// used for memory layout. The Z-order encoding is in `crate::manifold`.
-    fn compute_manifold_bd(&self, payload: &NodePayload) -> Option<BD> {
-        if let NodePayload::ManifoldDecl(m) = payload {
-            let order = m.dim_sizes.iter()
-                .map(|s| if *s > 0 { 64 - s.leading_zeros() as u32 - 1 } else { 0 })
-                .max()
-                .unwrap_or(0);
-            let curve = match m.curve {
-                vuma_scg::node::SpaceFillingCurve::ZOrder => crate::manifold::SpaceFillingCurve::ZOrder,
-                vuma_scg::node::SpaceFillingCurve::Hilbert => crate::manifold::SpaceFillingCurve::Hilbert,
-                vuma_scg::node::SpaceFillingCurve::RowMajor => crate::manifold::SpaceFillingCurve::RowMajor,
-            };
-            let repd = RepD::ManifoldSpatial(ManifoldSpatialRep {
-                dimensions: m.dimensions,
-                dim_sizes: m.dim_sizes.clone(),
-                element_size: m.element_size,
-                curve,
-                order,
-                total_bytes: m.total_bytes,
-            });
-            let capd = CapD::all();
-            let reld = RelD::empty();
-            Some(BD::new(repd, capd, reld))
-        } else {
-            None
-        }
-    }
-
-    /// Gestalt declaration: compute GestaltSuperposition RepD.
-    ///
-    /// Initially not degraded. The IVE may set degraded=true if it cannot
-    /// prove all interpretations.
-    fn compute_gestalt_bd(&self, payload: &NodePayload) -> Option<BD> {
-        if let NodePayload::GestaltDecl(g) = payload {
-            let repd = RepD::GestaltSuperposition(GestaltSuperpositionRep {
-                variants: g.variants.clone(),
-                max_size: g.max_size,
-                max_align: g.max_align,
-                degraded: g.degraded,
-                tag_offset: g.tag_offset,
-            });
-            let capd = CapD::all();
-            let reld = RelD::empty();
-            Some(BD::new(repd, capd, reld))
-        } else {
-            None
-        }
-    }
-
-    /// Concept declaration: compute ConceptRelational RepD.
-    ///
-    /// Initially has no resolved offsets. The LayoutResolutionPass
-    /// (run later) will populate field_offsets and total_size.
-    fn compute_concept_bd(&self, payload: &NodePayload) -> Option<BD> {
-        if let NodePayload::ConceptDecl(c) = payload {
-            let use_soa = matches!(c.layout_hint, vuma_scg::node::ConceptLayoutHint::SoA);
-            let repd = RepD::ConceptRelational(ConceptRelationalRep {
-                field_names: c.field_names.clone(),
-                field_offsets: c.resolved_offsets.clone(),
-                total_size: c.resolved_size,
-                align: c.resolved_align,
-                use_soa,
-            });
-            let capd = CapD::all();
-            let reld = RelD::empty();
-            Some(BD::new(repd, capd, reld))
-        } else {
-            None
         }
     }
 
@@ -951,11 +866,6 @@ impl BDInferenceEngine {
             NodeType::Control => Some(UsageContext::Argument),
             NodeType::Phantom => None,
             NodeType::VTable | NodeType::ClosureEnv | NodeType::StructDef | NodeType::EnumDef | NodeType::Match | NodeType::ConstantTime => None,
-            // Womb data models
-            NodeType::ConceptDecl | NodeType::ConceptField | NodeType::ConceptAccess
-            | NodeType::GestaltDecl | NodeType::GestaltInterpret | NodeType::ContextAssert
-            | NodeType::ManifoldDecl | NodeType::ManifoldQuery | NodeType::ManifoldSlice
-            | NodeType::AuraAttach | NodeType::AuraQuery | NodeType::AuraUpdate => None,
         }
     }
 
