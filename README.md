@@ -8,7 +8,23 @@
 
 VUMA is a programming language compiler framework written in Rust. It compiles a C-like language with behavioral verification to multiple CPU architectures. The language has `unsafe` blocks, `allocate`/`free` for memory, `extern "C"` FFI, structs, enums, match, imports, traits/impls, closures, atomics, and type annotations.
 
-## What Actually Works
+> ## ⚠️ Critical Known Issues (read before trusting any claim below)
+>
+> Empirical testing (building the workspace, running the compiler against examples, the bootstrap file, and `womb/lang/*`) reveals that several "works" claims in this README and the docs are aspirational, not real. The static source-code audit that produced the rest of this doc trusted comments and test-suite metadata too much. The following are **blocking issues** that mean VUMA is currently a research prototype, not a usable compiler:
+>
+> 1. **IVE verification is broken on the canonical idiom.** Every one of the 48 `examples/*.vuma` files fails default (`--verification normal`) verification. Even `examples/hello_memory.vuma` — whose own header claims all 5 invariants pass — fails with `error[ive-verification]: verdict: FAIL`. Root cause is documented in `src/pipeline.rs:5783-5797`: top-level `region` declarations have no ControlFlow edges, so `check_leaks` flags every program-lifetime arena as a leak. Spec §5.4 "Global scope / Static lifetime" inference is also unimplemented. **The language's flagship feature is unusable.** The only way to compile anything is `--verification none`.
+> 2. **The bootstrap file does not compile.** `src/bootstrap/vuma_compiler.vuma` (730 lines, "Phase 5 goal") fails at SCG→MSG construction: `error[scg-to-msg]: access references unknown region RegionId(8)`. It is also only a lexer — no parser, IR builder, or codegen written in VUMA. It additionally has a live bug: `lex_identifier` references an undeclared global `src_len_global` (declared 200 lines later, never initialized by `main`), so even if it compiled it would loop forever. Self-hosting is at <5%.
+> 3. **6 of 16 `womb/lang/*.vuma` files do not parse.** The parser supports `else if` (no braces) and `else { block }`, but not `else { if … } else { … }` chains — the inner `if` closes the outer one, leaving subsequent `else` orphaned. The entire `womb/lang` self-hosting effort is written in a style the parser rejects.
+> 4. **`concept`/`gestalt`/`manifold`/`aura` are tokenized but never parsed.** The lexer produces `TokenKind::Concept/Gestalt/Manifold/Aura`, the AST has `Item::ConceptDecl` etc., the SCG has `NodeType::ConceptDecl` etc., but `parser.rs` has no `parse_concept_decl` — these tokens are never matched. The entire "Womb" data-model layer is a frontend gap, not just unfinished.
+> 5. **Two parallel SCG→IR bridges with divergent semantics.** `vuma build` routes through the canonical semantic SCG (which verifies but produces broken code); `vuma emit` uses `bridge_ast_to_codegen_scg` (`src/main.rs:909`) which bypasses verification entirely. The verification IR (MSG) and the codegen IR are not connected — verification never sees what gets emitted. `compile_with_path` explicitly notes this.
+> 6. **Memory ops are silently dropped in the AST→codegen bridge.** In `src/main.rs:1656-1657` and `1781-1784`: standalone `Allocate`, `Free`, `Match`, `Sync`, `UnsafeBlock`, `Access` statements generate zero instructions. `Cast` keeps the operand but loses the target type. The `region = allocate(N)` assignment form works (special-cased to `AllocationNode::Stack`), but `free(region)` after it is a no-op — every VUMA program leaks every allocation.
+> 7. **Codegen produces binaries that crash or infinite-loop.** `region buf = allocate(1024);` at top level (the canonical pattern) → emitted x86_64 binary segfaults (SIGSEGV, exit 139). `womb/lang/minicompiler.vuma` (a 100-line toy parser, compiles cleanly) → emitted binary infinite-loops at runtime. Even with `--verification none` and the working emit path, the output is not trustworthy.
+> 8. **`vuma run` is broken on non-aarch64 hosts.** `cmd_run` (`src/main.rs:488`) tries native exec first (returns ENOEXEC on x86_64 since `vuma build` defaults to AArch64 ELF), then falls back to `qemu-aarch64` — which isn't installed by default. There is no host-arch detection, no `--target` flag on `run`, no graceful error. Developers on x86_64 cannot run any VUMA program without manually installing qemu-aarch64 or remembering to use `vuma emit x86_64`.
+> 9. **SCG→MSG errors are swallowed silently under Quick mode.** `src/pipeline.rs:4794`: when `verification_level == Quick`, SCG→MSG errors (including `AccessRegionNotFound`, the bootstrap's failure) are dropped and an empty MSG is substituted. This makes debugging the bootstrap essentially impossible without first knowing to use Normal mode.
+>
+> **Bottom line:** until items 1–3 above are fixed, writing a self-hosting compiler in VUMA is not achievable. The "99.99% gold-standard pass rate" below is real but only measures that 5,738 tiny test programs exit with the expected code under `--verification none` — it does **not** mean the verifier works, that emitted binaries are correct in general, or that the language is usable for programs larger than a few dozen lines.
+
+## What Compiles (with caveats)
 
 ### Compiler Pipeline
 
@@ -16,7 +32,8 @@ VUMA is a programming language compiler framework written in Rust. It compiles a
 Source → Lexer → Parser → AST → SCG → [BD Inference → MSG Construction → IVE Verification] → IR → RegAlloc → Codegen → ELF/Wasm
 ```
 
-The verification step (in brackets) is optional. With `--verification none`, only the IVE verification stage (stage 6) is skipped — BD inference (stage 4) and MSG construction (stage 5) still run. The `compile_dump` binary (used by the test suite) uses `--verification none` and the canonical SCG pipeline (`bridge_scg_to_codegen` in `src/pipeline.rs`). The `vuma emit` command uses a direct AST→codegen path (`bridge_ast_to_codegen_scg`). Both produce working binaries.
+The verification step (in brackets) is optional. With `--verification none`, only the IVE verification stage (stage 6) is skipped — BD inference (stage 4) and MSG construction (stage 5) still run. The `compile_dump` binary (used by the test suite) uses `--verification none` and the canonical SCG pipeline (`bridge_scg_to_codegen` in `src/pipeline.rs`). The `vuma emit` command uses a direct AST→codegen path (`bridge_ast_to_codegen_scg`) that bypasses verification entirely. **Neither path produces trustworthy binaries in general** — see Critical Known Issues #5, #6, #7 above.
+
 
 **Pipeline stages** (enum `PipelineStage` in `src/pipeline.rs:567`, 11 variants):
 1. `Parse` — Lexing + parsing
@@ -251,10 +268,19 @@ Compile binary: `compile_dump` (uses canonical SCG pipeline, `--verification non
 
 ## Known Limitations
 
+> The first rows are **blocking** — see "Critical Known Issues" at the top of this README for full detail.
+
 | Area | Status | Details |
 |------|--------|---------|
-| Self-hosting | ⚠️ Started | `src/bootstrap/vuma_compiler.vuma` (730 LOC lexer POC) and `womb/lang/vuma_compiler.vuma` (506 LOC full pipeline) exist but are not verified end-to-end by automated tests. |
-| Verification | ⚠️ False positives | `--verification normal` rejects valid programs using allocate/free. Test suite uses `--verification none`. |
+| IVE verification | ❌ Broken on canonical idiom | Every `examples/*.vuma` fails `--verification normal`. Top-level `region` declarations are flagged as leaks (`pipeline.rs:5783-5797`). Spec §5.4 static-lifetime inference unimplemented. Test suite uses `--verification none`. |
+| Self-hosting | ❌ Bootstrap does not compile | `src/bootstrap/vuma_compiler.vuma` fails SCG→MSG (`access references unknown region RegionId(8)`). It is lexer-only and has a live `src_len_global` bug. `womb/lang/vuma_compiler.vuma` (506 LOC) exists but is in the 6/16 set that doesn't parse. |
+| Parser — `else { if … } else { … }` chains | ❌ Unsupported | 6 of 16 `womb/lang/*.vuma` files fail to parse. Parser only supports `else if` (no braces) or `else { block }`. |
+| Parser — Womb keywords | ❌ Tokenized, never parsed | `concept`/`gestalt`/`manifold`/`aura` have `TokenKind`, `Item`, and `NodeType` variants but no `parse_*_decl` in `parser.rs`. The Womb data-model layer is a frontend gap. |
+| Codegen bridges | ❌ Divergent | Canonical path verifies but emits broken code; `bridge_ast_to_codegen_scg` emits but skips verification. MSG and codegen IR are not connected. |
+| Silent statement dropping | ❌ Bug | `Allocate`/`Free`/`Match`/`Sync`/`UnsafeBlock`/`Access` as standalone statements emit zero instructions (`src/main.rs:1656-1657, 1781-1784`). `Cast` loses its target type. Every program leaks. |
+| Emitted binary correctness | ❌ Crashes / infinite loops | Top-level `region buf = allocate(1024)` → SIGSEGV on x86_64. `womb/lang/minicompiler.vuma` → infinite loop. Output is not trustworthy. |
+| `vuma run` on non-aarch64 | ❌ Broken | Native exec fails (ENOEXEC), qemu-aarch64 fallback not installed by default. No host-arch detection, no `--target` flag. |
+| SCG→MSG error swallowing | ⚠️ Quick mode hides errors | `pipeline.rs:4794`: under `Quick`, SCG→MSG errors are dropped and an empty MSG substituted. Use `Normal` to see them. |
 | Type checking | ❌ Not implemented | Parser recognizes syntax but doesn't validate types. |
 | BD inference (M2.3) | ❌ Deferred | Complex generic inference scenarios. `instantiate_generic` does shallow substitution only. |
 | Doubly-linked list verification (M2.4) | ⚠️ Partial | `src/tests/src/dlist.rs` (1,010 LOC) has hand-built tests; not fully verified end-to-end. |
@@ -267,6 +293,7 @@ Compile binary: `compile_dump` (uses canonical SCG pipeline, `--verification non
 | BinOp type propagation | ⚠️ Do not attempt | Propagating `ty` to BinOp IR causes ppc64 regression. Keep `ty: None`. |
 | `womb/core.vuma` | ❌ Not compilable | Explicitly a design spec; the other 114 womb files compile. |
 | CLI ISA coverage | ⚠️ 8 of 10 | `vuma emit`/`vuma compile` accept 8 ISAs (missing RISC-V 32, x86_32). All 10 exist in codegen and are tested via `compile_dump`. |
+| Housekeeping | ⚠️ Cleanup needed | `src/codegen/src/lib.rs.tmp` is a stale leftover. `cargo check --workspace` produces 200+ warnings. `src/pipeline.rs` is ~5,800 lines with ~12 unused helper functions from abandoned refactors. |
 
 ---
 
