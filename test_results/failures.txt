@@ -1,12 +1,4 @@
-VUMA Test Failures — 2026-07-02 18:24:12 UTC
-Total: 46 failures across 9 tests
+VUMA Test Failures — 2026-07-02 20:48:25 UTC
+Total: 1 failures across 1 tests
 
-  bitwise              bit2_priority_encode.vuma                     exp=   7 [('aarch64', 249, 'MM'), ('riscv64', 249, 'MM'), ('x86_64', 249, 'MM'), ('mips64', 249, 'MM'), ('ppc64', 249, 'MM'), ('arm32', 249, 'MM'), ('riscv32', 249, 'MM'), ('loongarch64', 249, 'MM'), ('x86_32', 249, 'MM'), ('wasm32', -7, 'MM')]
-  bitwise              bit_log2.vuma                                 exp=   3 [('aarch64', 253, 'MM'), ('x86_64', 253, 'MM'), ('mips64', 253, 'MM'), ('riscv64', 253, 'MM'), ('arm32', 253, 'MM'), ('loongarch64', 253, 'MM'), ('ppc64', 253, 'MM'), ('riscv32', 253, 'MM'), ('x86_32', 253, 'MM'), ('wasm32', -3, 'MM')]
-  bitwise              bit_priority_encoder.vuma                     exp=   7 [('aarch64', 249, 'MM'), ('x86_64', 249, 'MM'), ('riscv64', 249, 'MM'), ('arm32', 249, 'MM'), ('ppc64', 249, 'MM'), ('mips64', 249, 'MM'), ('loongarch64', 249, 'MM'), ('riscv32', 249, 'MM'), ('x86_32', 249, 'MM'), ('wasm32', -7, 'MM')]
-  complex_stores       base64_encode.vuma                            exp=  20 [('riscv32', 87, 'MM'), ('x86_32', 87, 'MM'), ('wasm32', 87, 'MM')]
-  control_flow         bsearch.vuma                                  exp=   7 [('ppc64', 255, 'MM')]
-  crypto_patterns      crc32.vuma                                    exp=  38 [('arm32', 27, 'MM'), ('riscv32', 27, 'MM'), ('x86_32', 27, 'MM'), ('wasm32', 27, 'MM')]
-  crypto_patterns      mmap_sha256d.vuma                             exp= 229 [('aarch64', 175, 'MM'), ('arm32', 175, 'MM'), ('ppc64', 175, 'MM'), ('riscv32', 175, 'MM'), ('x86_32', 175, 'MM'), ('wasm32', 175, 'MM')]
-  functions            quicksort.vuma                                exp=  33 [('ppc64', 0, 'MM')]
-  nested_loops         matrix.vuma                                   exp=  16 [('ppc64', 0, 'MM')]
+  complex_stores       base64_encode.vuma                            exp=  20 [('wasm32', 87, 'MM')]
