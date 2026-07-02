@@ -1,4 +1,5 @@
 // Sorted Map - AVL-balanced tree map with verified pointer safety
+// Expected exit code: 0
 // Demonstrates: balanced tree, key-value storage, ordered traversal
 //
 // Balanced trees are a classic challenge for safe systems languages.

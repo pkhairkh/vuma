@@ -61,21 +61,30 @@ def run_one(args):
         "test": test_name, "category": category, "path": test_path,
         "backend": backend, "expected": expected, "actual": None,
         "compile_ok": False, "crashed": False, "timed_out": False, "match": False,
+        "compile_error": None,
     }
     out = f"/tmp/vuma_{os.getpid()}_{backend}_{test_name}.bin"
     try:
         r = subprocess.run([str(COMPILE), test_path, out, backend], capture_output=True, timeout=15)
         if r.returncode != 0:
+            result["compile_error"] = r.stderr.decode(errors="replace")[:500]
             return result
         result["compile_ok"] = True
 
         if backend == "wasm32":
             os.chmod(out, 0o644)
             # Use --invoke _vuma_main for all tests EXCEPT those that use
-            # print_int/print_hex (which write to stdout, mixing with return value).
-            # For those, use proc_exit via plain 'wasmtime run'.
-            test_name_lower = test_name.lower()
-            if "print" in test_name_lower:
+            # print_int/print_hex (which write to stdout, mixing with return
+            # value). For those, use proc_exit via plain 'wasmtime run'.
+            # Detection is content-based: scan the source for print calls,
+            # not just the filename — test_hex.vuma uses print_hex but
+            # doesn't have "print" in its name.
+            with open(test_path) as sf:
+                source = sf.read()
+            uses_print = any(p in source for p in
+                ("print_int", "print_hex", "__vuma_print",
+                 "print_int(", "print_hex("))
+            if uses_print:
                 cmd = [WASMTIME, "run", out]
             else:
                 cmd = [WASMTIME, "run", "--invoke", "_vuma_main", out]
@@ -90,7 +99,7 @@ def run_one(args):
             ep = subprocess.run(cmd, capture_output=True, timeout=EXEC_TIMEOUT + 3)
             rc = ep.returncode
             if backend == "wasm32":
-                if "print" in test_name_lower:
+                if uses_print:
                     # Use proc_exit exit code for print tests
                     crashed = rc < 0 or rc > 128
                     result["actual"] = rc; result["crashed"] = crashed
@@ -226,6 +235,11 @@ def main():
         for (cat, test), rs in sorted(by_test.items()):
             backends = [(r["backend"], r.get("actual"), "TO" if r.get("timed_out") else ("CR" if r.get("crashed") else "MM")) for r in rs]
             f.write(f"  {cat:20s} {test:45s} exp={rs[0]['expected']:4} {backends}\n")
+            # If any backend had a compile error, include the first 200 chars
+            for r in rs:
+                if r.get("compile_error"):
+                    f.write(f"    compile_error ({r['backend']}): {r['compile_error'][:200]}\n")
+                    break
 
     print(f"\nFailures: {len(failures)} across {len(by_test)} tests")
     print(f"Results saved to {RESULTS}/")

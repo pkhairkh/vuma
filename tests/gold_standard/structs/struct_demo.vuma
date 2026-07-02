@@ -1,4 +1,5 @@
 // Struct Demo — Demonstrates struct types in VUMA
+// Expected exit code: 5000
 //
 // This program shows how structs are used in VUMA. Structs are compiled
 // to flat memory layouts where fields are laid out sequentially with
