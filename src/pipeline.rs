@@ -6080,6 +6080,281 @@ mod tests {
         assert!(display2.contains("bad inference"));
         assert!(display2.contains("bad emit"));
     }
+
+    // ── Type-aware shift tests (Task 7-A) ────────────────────────────────
+    //
+    // Verifies that `flatten_expr` chooses `BinOpKind::ShrA` (arithmetic,
+    // sign-extending) when the lhs operand is a variable declared with a
+    // SIGNED integer type, and `BinOpKind::ShrL` (logical, zero-filling)
+    // when the lhs is a variable declared with an UNSIGNED integer type.
+    //
+    // Background: 6-A changed `map_ast_binop` to map `>>` → `ShrA`
+    // unconditionally to fix `bit_abs.vuma` (i64, -42 >> 63). This broke
+    // the 3 unsigned-shift gold-standard tests on ALL 10 backends (30
+    // failures) — `bit_log2` (u64, expected 3, got 253), `bit_priority_encoder`
+    // (u64, expected 7, got 249), and `bit2_priority_encode` (u64, expected 7,
+    // got 249). The fix is type-aware: signed → ShrA, unsigned → ShrL.
+
+    /// Test 13: Type-aware right shift — SIGNED operand uses ShrA.
+    ///
+    /// Source pattern: `x: i64 = -42; y = x >> 63;`
+    /// Expected: the `>>` lowers to `BinOpKind::ShrA` (arithmetic shift),
+    ///           and the resulting IR BinOp instruction uses `ShrA`.
+    #[test]
+    fn test_shr_signed_uses_shra() {
+        use vuma_parser::ast::{BinOp as AstBinOp, Expr as AstExpr, Lit as AstLit};
+        use vuma_parser::Span;
+
+        let mut ctx = BridgeCtx::new();
+        // Mimic what `bridge_stmt_to_scg`'s PStmt::Let arm does when it
+        // sees `let x: i64 = -42` — record x's declared type as I64.
+        ctx.var_types.insert("x".to_string(), ScgType::I64);
+
+        // AST for `x >> 63`
+        let shr_expr = AstExpr::BinOp {
+            op: AstBinOp::Shr,
+            lhs: Box::new(AstExpr::Var {
+                name: "x".into(),
+                span: Span::synthetic(),
+            }),
+            rhs: Box::new(AstExpr::Lit {
+                value: AstLit::Int(63),
+                span: Span::synthetic(),
+            }),
+            span: Span::synthetic(),
+        };
+
+        let mut stmts = Vec::new();
+        let result = flatten_expr(&shr_expr, &mut stmts, &mut ctx);
+
+        // The flatten should produce exactly one Computation with op: ShrA.
+        let computations: Vec<&ComputationNode> = stmts
+            .iter()
+            .filter_map(|s| {
+                if let ScgStatement::Computation(c) = s {
+                    Some(c)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(
+            computations.len(),
+            1,
+            "Expected exactly 1 Computation node for `x >> 63`"
+        );
+        assert_eq!(
+            computations[0].op,
+            BinOpKind::ShrA,
+            "Signed `i64 >> 63` must lower to ShrA (arithmetic shift). \
+             Got {:?}. If this is ShrL, `bit_abs.vuma` (i64, -42 >> 63) \
+             would return 214 (-42 as u8) instead of 42 — this is the \
+             regression 6-A introduced and Task 7-A fixes via the \
+             type-aware path (signed → ShrA).",
+            computations[0].op,
+        );
+        // Result is a Var referencing the computation's dst.
+        assert!(
+            matches!(result, ScgExpr::Var(_)),
+            "flatten_expr should return a Var referencing the Computation's dst"
+        );
+
+        // Also verify the IR: build the SCG, lower to IR, and assert the
+        // IR contains a BinOp instruction with op: ShrA. This catches any
+        // future regression in lower_computation's shift handling.
+        // Append a Return so the function has a proper terminator (the IR
+        // builder's CFG rebuild expects one). Capture the dst before moving
+        // `stmts` into `ir_body` (the `computations` vec borrows `stmts`).
+        let shr_dst = computations[0].dst.clone();
+        let mut ir_body = stmts;
+        ir_body.push(ScgStatement::Return(vec![ScgExpr::Var(shr_dst)]));
+        let scg = Scg {
+            nodes: vec![ScgNode::Function(ScgFunction {
+                name: "test_shr_signed".into(),
+                params: vec![ScgParam {
+                    name: "x".into(),
+                    ty: ScgType::I64,
+                }],
+                results: vec![],
+                body: ir_body,
+            })],
+        };
+        let mut builder = IRBuilder::new();
+        let program = builder.build(&scg).expect("IR build should succeed");
+        let func = &program.functions[0];
+        let has_shra = func.blocks.iter().any(|b| {
+            b.instructions.iter().any(|i| {
+                matches!(
+                    i,
+                    vuma_codegen::ir::IRInstruction::BinOp {
+                        op: BinOpKind::ShrA,
+                        ..
+                    }
+                )
+            })
+        });
+        assert!(
+            has_shra,
+            "IR should contain a BinOp {{ op: ShrA, .. }} instruction for \
+             `i64 >> 63`. If absent, lower_computation's shift handling is \
+             dropping the ShrA op kind."
+        );
+    }
+
+    /// Test 14: Type-aware right shift — UNSIGNED operand uses ShrL.
+    ///
+    /// Source pattern: `n: u64 = 8; y = n >> 1;`
+    /// Expected: the `>>` lowers to `BinOpKind::ShrL` (logical shift),
+    ///           and the resulting IR BinOp instruction uses `ShrL`.
+    #[test]
+    fn test_shr_unsigned_uses_shrl() {
+        use vuma_parser::ast::{BinOp as AstBinOp, Expr as AstExpr, Lit as AstLit};
+        use vuma_parser::Span;
+
+        let mut ctx = BridgeCtx::new();
+        // Mimic `let n: u64 = 8` — record n's declared type as U64.
+        ctx.var_types.insert("n".to_string(), ScgType::U64);
+
+        // AST for `n >> 1`
+        let shr_expr = AstExpr::BinOp {
+            op: AstBinOp::Shr,
+            lhs: Box::new(AstExpr::Var {
+                name: "n".into(),
+                span: Span::synthetic(),
+            }),
+            rhs: Box::new(AstExpr::Lit {
+                value: AstLit::Int(1),
+                span: Span::synthetic(),
+            }),
+            span: Span::synthetic(),
+        };
+
+        let mut stmts = Vec::new();
+        let result = flatten_expr(&shr_expr, &mut stmts, &mut ctx);
+
+        let computations: Vec<&ComputationNode> = stmts
+            .iter()
+            .filter_map(|s| {
+                if let ScgStatement::Computation(c) = s {
+                    Some(c)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(
+            computations.len(),
+            1,
+            "Expected exactly 1 Computation node for `n >> 1`"
+        );
+        assert_eq!(
+            computations[0].op,
+            BinOpKind::ShrL,
+            "Unsigned `u64 >> 1` must lower to ShrL (logical shift). \
+             Got {:?}. If this is ShrA, `bit_log2.vuma` (u64, 8 >> 1) \
+             returns 253 (=-3) instead of 3, and `bit_priority_encoder` \
+             / `bit2_priority_encode` (u64) return 249 (=-7) instead of 7 \
+             — these are the 30 failures across all 10 backends that \
+             Task 7-A fixes via the type-aware path (unsigned → ShrL).",
+            computations[0].op,
+        );
+        assert!(
+            matches!(result, ScgExpr::Var(_)),
+            "flatten_expr should return a Var referencing the Computation's dst"
+        );
+
+        // Also verify the IR contains a BinOp with op: ShrL. Capture the
+        // dst before moving `stmts` (the `computations` vec borrows `stmts`),
+        // and append a Return so the function has a proper terminator.
+        let shr_dst = computations[0].dst.clone();
+        let mut ir_body = stmts;
+        ir_body.push(ScgStatement::Return(vec![ScgExpr::Var(shr_dst)]));
+        let scg = Scg {
+            nodes: vec![ScgNode::Function(ScgFunction {
+                name: "test_shr_unsigned".into(),
+                params: vec![ScgParam {
+                    name: "n".into(),
+                    ty: ScgType::U64,
+                }],
+                results: vec![],
+                body: ir_body,
+            })],
+        };
+        let mut builder = IRBuilder::new();
+        let program = builder.build(&scg).expect("IR build should succeed");
+        let func = &program.functions[0];
+        let has_shrl = func.blocks.iter().any(|b| {
+            b.instructions.iter().any(|i| {
+                matches!(
+                    i,
+                    vuma_codegen::ir::IRInstruction::BinOp {
+                        op: BinOpKind::ShrL,
+                        ..
+                    }
+                )
+            })
+        });
+        assert!(
+            has_shrl,
+            "IR should contain a BinOp {{ op: ShrL, .. }} instruction for \
+             `u64 >> 1`. If absent, lower_computation's shift handling is \
+             dropping the ShrL op kind."
+        );
+    }
+
+    /// Test 15: Type-aware right shift — UNKNOWN operand defaults to ShrL.
+    ///
+    /// When the lhs variable has no recorded type (untyped let-binding,
+    /// untyped parameter), `flatten_expr` should default to `ShrL`. This
+    /// is the safer default for the bit-twiddling idioms in the
+    /// gold-standard tests, and it matches the behavior of the previous
+    /// (pre-6-A) bridge. The `bit_abs` test (i64) explicitly declares
+    /// its type, so it still gets ShrA via the type-aware path.
+    #[test]
+    fn test_shr_untyped_defaults_to_shrl() {
+        use vuma_parser::ast::{BinOp as AstBinOp, Expr as AstExpr, Lit as AstLit};
+        use vuma_parser::Span;
+
+        let mut ctx = BridgeCtx::new();
+        // NOTE: deliberately do NOT register "x" in ctx.var_types —
+        // simulates an untyped `let x = ...` or untyped parameter.
+
+        let shr_expr = AstExpr::BinOp {
+            op: AstBinOp::Shr,
+            lhs: Box::new(AstExpr::Var {
+                name: "x".into(),
+                span: Span::synthetic(),
+            }),
+            rhs: Box::new(AstExpr::Lit {
+                value: AstLit::Int(1),
+                span: Span::synthetic(),
+            }),
+            span: Span::synthetic(),
+        };
+
+        let mut stmts = Vec::new();
+        let _ = flatten_expr(&shr_expr, &mut stmts, &mut ctx);
+
+        let computations: Vec<&ComputationNode> = stmts
+            .iter()
+            .filter_map(|s| {
+                if let ScgStatement::Computation(c) = s {
+                    Some(c)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(computations.len(), 1);
+        assert_eq!(
+            computations[0].op,
+            BinOpKind::ShrL,
+            "Untyped `x >> 1` should default to ShrL (logical shift). \
+             Got {:?}. This default matches the pre-6-A bridge behavior \
+             and is safer for the bit-twiddling gold-standard tests.",
+            computations[0].op,
+        );
+    }
 }/// Try to convert a while-loop condition into a for-range tuple.
 ///
 /// Recognises patterns like "while (i < 4)" and converts them to
@@ -6370,6 +6645,13 @@ pub struct BridgeCtx {
     /// Populated by scanning top-level `const`, `static`, and type-ascription
     /// declarations before processing any function bodies.
     pub global_constants: HashMap<String, i64>,
+    /// Variable name → declared type (from `let x: T = ...` annotations).
+    /// Populated by the `PStmt::Let` arm of `bridge_stmt_to_scg`. Used by
+    /// `flatten_expr` to choose `ShrA` (arithmetic, signed) vs `ShrL`
+    /// (logical, unsigned) for the `>>` operator — see Task 7-A. Without
+    /// this, all `>>` operations collapse to a single shift kind, breaking
+    /// either `bit_abs` (i64 → needs ShrA) or `bit_log2` (u64 → needs ShrL).
+    pub var_types: HashMap<String, ScgType>,
 }
 
 impl BridgeCtx {
@@ -6380,6 +6662,7 @@ impl BridgeCtx {
             last_expr_result: None,
             extern_fns: HashSet::new(),
             global_constants: HashMap::new(),
+            var_types: HashMap::new(),
         }
     }
 
@@ -6551,7 +6834,43 @@ pub fn flatten_expr(
             let lhs_expr = flatten_expr(lhs, stmts, ctx);
             let rhs_expr = flatten_expr(rhs, stmts, ctx);
             let dst = ctx.alloc_temp();
-            let binop_kind = map_ast_binop(op);
+            // Type-aware right shift: arithmetic (ShrA) for SIGNED integer
+            // types (i8/i16/i32/i64), logical (ShrL) for UNSIGNED types
+            // (u8/u16/u32/u64) and pointers. The shift kind depends on the
+            // OPERAND TYPE, not a global default — see Task 7-A.
+            //
+            //   `bit_abs.vuma`     uses `i64` → ShrA  (correct: -42 >> 63 == -1)
+            //   `bit_log2.vuma`    uses `u64` → ShrL  (correct: 0xFF..FF00 >> 63 == 1)
+            //   `mmap_sha256d.vuma` uses `u32` → ShrL (correct: small_sigma0/1)
+            //
+            // When the lhs is not a Var (complex expression) OR the variable
+            // has no recorded type (untyped let-binding, untyped parameter),
+            // default to ShrL — safer for the bit-twiddling idioms in the
+            // gold-standard tests, and `bit_abs` (i64) explicitly declares
+            // its type so it still gets ShrA via the type-aware path.
+            let binop_kind = match op {
+                vuma_parser::ast::BinOp::Shr => {
+                    let is_signed = match lhs.as_ref() {
+                        Expr::Var { name, .. } => ctx
+                            .var_types
+                            .get(name)
+                            .map(|ty| {
+                                matches!(
+                                    ty,
+                                    ScgType::I8 | ScgType::I16 | ScgType::I32 | ScgType::I64
+                                )
+                            })
+                            .unwrap_or(false),
+                        _ => false,
+                    };
+                    if is_signed {
+                        BinOpKind::ShrA
+                    } else {
+                        BinOpKind::ShrL
+                    }
+                }
+                _ => map_ast_binop(op),
+            };
             stmts.push(ScgStatement::Computation(ComputationNode {
                 dst: dst.clone(),
                 op: binop_kind,
@@ -6844,13 +7163,23 @@ pub fn map_ast_binop(op: &vuma_parser::ast::BinOp) -> BinOpKind {
         BinOp::BitOr => BinOpKind::Or,
         BinOp::BitXor => BinOpKind::Xor,
         BinOp::Shl => BinOpKind::Shl,
-        // VUMA's `>>` is arithmetic (sign-extending) for signed integers.
-        // The bit_abs gold-standard test relies on this: `x >> 63` on a
-        // negative i64 must yield -1, not a large positive number.  Mapping
-        // to ShrL (logical shift) unconditionally was the root cause of
-        // bit_abs returning 214 (-42 as u8) instead of 42 across all
-        // backends.
-        BinOp::Shr => BinOpKind::ShrA,
+        // VUMA's `>>` DEFAULTS to LOGICAL (unsigned) shift. The actual
+        // type-aware decision (ShrA for signed, ShrL for unsigned) is made
+        // in `flatten_expr` based on the lhs operand's declared type — see
+        // Task 7-A. This default applies when the operand type is unknown
+        // (e.g. untyped let-bindings, function parameters without type
+        // annotations), which is the common case for the bit-twiddling
+        // gold-standard tests (`bit_log2`, `bit_priority_encoder`,
+        // `bit2_priority_encode` all use `u64` and expect logical shifts).
+        //
+        // `bit_abs` (i64) gets ShrA via the type-aware path because it
+        // explicitly declares `i64`, so reverting this default from ShrA
+        // back to ShrL does NOT regress it.
+        //
+        // Historical note: 6-A changed this to `ShrA` unconditionally to
+        // fix `bit_abs`, which broke the 3 unsigned-shift tests on all 10
+        // backends (30 failures). The type-aware path is the correct fix.
+        BinOp::Shr => BinOpKind::ShrL,
         BinOp::Eq => BinOpKind::Eq,
         BinOp::Ne => BinOpKind::Ne,
         BinOp::Lt => BinOpKind::SLt,
@@ -6869,6 +7198,30 @@ pub fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) ->
         // ── let x [: T] = expr ──
         PStmt::Let(let_stmt) => {
             let mut stmts = Vec::new();
+
+            // Record the variable's declared type (if any) so `flatten_expr`
+            // can choose ShrA (signed) vs ShrL (unsigned) for `>>` operations
+            // — see Task 7-A (type-aware shift regression). Without this,
+            // all `>>` operations collapse to a single shift kind, breaking
+            // either `bit_abs` (i64 → needs ShrA) or `bit_log2` (u64 →
+            // needs ShrL).
+            //
+            // Only primitive integer types (i8/i16/i32/i64/u8/u16/u32/u64)
+            // and pointers are recorded; other types map to `ScgType::Void`
+            // via `bridge_type_to_codegen_scg` and are skipped (no shift
+            // type information for aggregates/void/etc.).
+            //
+            // This must run BEFORE the early-return paths below (allocate,
+            // Allocate, call) so the type is registered regardless of which
+            // path the let-binding takes. The early-return paths don't go
+            // through `flatten_expr`, but the variable may still be used as
+            // a shift operand in subsequent statements.
+            if let Some(ref ty) = let_stmt.ty {
+                let scg_ty = bridge_type_to_codegen_scg(&Some(ty.clone()));
+                if scg_ty != ScgType::Void {
+                    ctx.var_types.insert(let_stmt.name.clone(), scg_ty);
+                }
+            }
 
             // Check if the RHS is an allocate() call → AllocationNode::Stack
             if let vuma_parser::ast::Expr::Call { callee, args, .. } = &let_stmt.value {
