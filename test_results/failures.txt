@@ -1,16 +1,12 @@
-VUMA Test Failures — 2026-07-02 14:44:20 UTC
-Total: 70 failures across 13 tests
+VUMA Test Failures — 2026-07-02 18:24:12 UTC
+Total: 46 failures across 9 tests
 
-  atomics              spinlock.vuma                                 exp=   3 [('arm32', -11, 'CR'), ('aarch64', 124, 'TO')]
-  bitwise              bit_abs.vuma                                  exp=  42 [('aarch64', 214, 'MM'), ('x86_64', 214, 'MM'), ('riscv64', 214, 'MM'), ('arm32', 214, 'MM'), ('mips64', 214, 'MM'), ('ppc64', 214, 'MM'), ('loongarch64', 214, 'MM'), ('riscv32', 214, 'MM'), ('x86_32', 214, 'MM'), ('wasm32', -42, 'MM')]
-  complex_stores       base64_encode.vuma                            exp=  20 [('ppc64', -11, 'CR'), ('riscv32', 87, 'MM'), ('x86_32', 87, 'MM'), ('wasm32', 87, 'MM')]
+  bitwise              bit2_priority_encode.vuma                     exp=   7 [('aarch64', 249, 'MM'), ('riscv64', 249, 'MM'), ('x86_64', 249, 'MM'), ('mips64', 249, 'MM'), ('ppc64', 249, 'MM'), ('arm32', 249, 'MM'), ('riscv32', 249, 'MM'), ('loongarch64', 249, 'MM'), ('x86_32', 249, 'MM'), ('wasm32', -7, 'MM')]
+  bitwise              bit_log2.vuma                                 exp=   3 [('aarch64', 253, 'MM'), ('x86_64', 253, 'MM'), ('mips64', 253, 'MM'), ('riscv64', 253, 'MM'), ('arm32', 253, 'MM'), ('loongarch64', 253, 'MM'), ('ppc64', 253, 'MM'), ('riscv32', 253, 'MM'), ('x86_32', 253, 'MM'), ('wasm32', -3, 'MM')]
+  bitwise              bit_priority_encoder.vuma                     exp=   7 [('aarch64', 249, 'MM'), ('x86_64', 249, 'MM'), ('riscv64', 249, 'MM'), ('arm32', 249, 'MM'), ('ppc64', 249, 'MM'), ('mips64', 249, 'MM'), ('loongarch64', 249, 'MM'), ('riscv32', 249, 'MM'), ('x86_32', 249, 'MM'), ('wasm32', -7, 'MM')]
+  complex_stores       base64_encode.vuma                            exp=  20 [('riscv32', 87, 'MM'), ('x86_32', 87, 'MM'), ('wasm32', 87, 'MM')]
   control_flow         bsearch.vuma                                  exp=   7 [('ppc64', 255, 'MM')]
-  control_flow         cf_for_continue.vuma                          exp=  40 [('aarch64', 124, 'TO'), ('x86_64', 124, 'TO'), ('riscv64', 124, 'TO'), ('arm32', 124, 'TO'), ('mips64', 124, 'TO'), ('ppc64', 124, 'TO'), ('loongarch64', 124, 'TO'), ('riscv32', 124, 'TO'), ('x86_32', 124, 'TO'), ('wasm32', 124, 'TO')]
-  control_flow         cf_while_continue.vuma                        exp=  50 [('aarch64', 124, 'TO'), ('x86_64', 124, 'TO'), ('riscv64', 124, 'TO'), ('arm32', 124, 'TO'), ('mips64', 124, 'TO'), ('ppc64', 124, 'TO'), ('loongarch64', 124, 'TO'), ('riscv32', 124, 'TO'), ('x86_32', 124, 'TO'), ('wasm32', 124, 'TO')]
-  functions            fn_sum_squares.vuma                           exp=  25 [('ppc64', 68, 'MM')]
+  crypto_patterns      crc32.vuma                                    exp=  38 [('arm32', 27, 'MM'), ('riscv32', 27, 'MM'), ('x86_32', 27, 'MM'), ('wasm32', 27, 'MM')]
+  crypto_patterns      mmap_sha256d.vuma                             exp= 229 [('aarch64', 175, 'MM'), ('arm32', 175, 'MM'), ('ppc64', 175, 'MM'), ('riscv32', 175, 'MM'), ('x86_32', 175, 'MM'), ('wasm32', 175, 'MM')]
   functions            quicksort.vuma                                exp=  33 [('ppc64', 0, 'MM')]
-  memory               mem_nested_alloc.vuma                         exp=   0 [('ppc64', 1, 'MM')]
   nested_loops         matrix.vuma                                   exp=  16 [('ppc64', 0, 'MM')]
-  pointers             ptr_double_deref.vuma                         exp=  42 [('aarch64', -11, 'CR'), ('x86_64', -11, 'CR'), ('arm32', -11, 'CR'), ('riscv64', -11, 'CR'), ('mips64', -11, 'CR'), ('ppc64', -11, 'CR'), ('loongarch64', -11, 'CR'), ('riscv32', -11, 'CR'), ('x86_32', -11, 'CR'), ('wasm32', 0, 'MM')]
-  pointers             ptr_multi_level.vuma                          exp=   3 [('aarch64', -11, 'CR'), ('x86_64', -11, 'CR'), ('riscv64', -11, 'CR'), ('mips64', -11, 'CR'), ('arm32', -11, 'CR'), ('ppc64', -11, 'CR'), ('loongarch64', -11, 'CR'), ('riscv32', -11, 'CR'), ('x86_32', -11, 'CR'), ('wasm32', 0, 'MM')]
-  pointers             ptr_pointer_to_pointer.vuma                   exp=  42 [('x86_64', -11, 'CR'), ('aarch64', -11, 'CR'), ('riscv64', -11, 'CR'), ('mips64', -11, 'CR'), ('arm32', -11, 'CR'), ('ppc64', -11, 'CR'), ('riscv32', -11, 'CR'), ('x86_32', -11, 'CR'), ('loongarch64', -11, 'CR')]
