@@ -1,4 +1,20 @@
-VUMA Test Failures — 2026-07-02 20:48:25 UTC
-Total: 1 failures across 1 tests
+VUMA Test Failures — 2026-07-02 22:01:00 UTC
+Total: 17 failures across 17 tests
 
-  complex_stores       base64_encode.vuma                            exp=  20 [('wasm32', 87, 'MM')]
+  atomics              spinlock.vuma                                 exp=   3 [('wasm32', 1, 'CR')]
+  complex_stores       base64_encode.vuma                            exp=  20 [('wasm32', 1, 'CR')]
+  complex_stores       test_sha_manual.vuma                          exp= 205 [('wasm32', 1, 'CR')]
+  control_flow         bsearch.vuma                                  exp=   7 [('wasm32', 1, 'CR')]
+  crypto_patterns      test_sha_round.vuma                           exp=  77 [('wasm32', 1, 'CR')]
+  functions            fn2_address_return.vuma                       exp=  42 [('wasm32', 1, 'CR')]
+  functions            fn_address_return.vuma                        exp=  42 [('wasm32', 1, 'CR')]
+  functions            fn_pass_u64.vuma                              exp= 250 [('wasm32', 1, 'CR')]
+  functions            quicksort.vuma                                exp=  33 [('wasm32', 1, 'CR')]
+  multi_function       mf_address_return.vuma                        exp=  42 [('wasm32', 1, 'CR')]
+  pointers             hex_dump.vuma                                 exp=   7 [('wasm32', 1, 'CR')]
+  pointers             ptr_func_returns_ptr.vuma                     exp=  42 [('wasm32', 1, 'CR')]
+  structs              struct2_func_load.vuma                        exp=  42 [('wasm32', 1, 'CR')]
+  structs              struct_func_returns.vuma                      exp=  42 [('wasm32', 1, 'CR')]
+  u32_arith            test_u32_arith.vuma                           exp=  79 [('wasm32', 1, 'CR')]
+  u32_arith            test_u32_mem.vuma                             exp=  79 [('wasm32', 1, 'CR')]
+  u32_arith            test_w_sched.vuma                             exp= 128 [('wasm32', 1, 'CR')]
