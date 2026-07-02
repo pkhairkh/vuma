@@ -547,10 +547,6 @@ fn item_name(item: &Item) -> Option<String> {
         Item::Export(_) => None,     // exports are not definitions
         Item::Stmt(_) => None,       // top-level statements are not named
         Item::ExternBlock(_) => None, // extern blocks are not named
-        Item::ConceptDecl(c) => Some(c.name.clone()),
-        Item::GestaltDecl(g) => Some(g.name.clone()),
-        Item::ManifoldDecl(m) => Some(m.name.clone()),
-        Item::AuraDecl(a) => Some(a.name.clone()),
     }
 }
 

@@ -183,6 +183,19 @@ pub struct CleanupGraph {
     next_node_id: u64,
     /// Entry node of the graph (set when verification begins).
     entry: Option<NodeId>,
+    /// Resources with **static lifetime** (program-lifetime allocations
+    /// that live at the top level of a program, outside any function's
+    /// control flow).
+    ///
+    /// Per VUMA verification spec §5.4 "Global scope / Static lifetime",
+    /// these allocations are intentionally leaked — they are released
+    /// only at program shutdown — and MUST NOT be reported as leak
+    /// violations by [`CleanupVerifier`].
+    ///
+    /// [`extract_cleanup_graph`][crate::verification::VerificationEngine]
+    /// populates this set by scanning the SCG for `Allocation` nodes
+    /// that have no incoming `ControlFlow` edges.
+    pub static_lifetime_resources: BTreeSet<ResourceId>,
 }
 
 impl CleanupGraph {
@@ -353,6 +366,19 @@ impl CleanupGraph {
             .filter(|&&id| self.successors.get(&id).is_none_or(|s| s.is_empty()))
             .copied()
             .collect()
+    }
+
+    /// Mark a resource as having **static lifetime** (program-lifetime,
+    /// intentionally leaked per spec §5.4). Such resources will NOT be
+    /// reported as leak violations by [`CleanupVerifier`].
+    pub fn mark_static_lifetime(&mut self, resource: ResourceId) {
+        self.static_lifetime_resources.insert(resource);
+    }
+
+    /// Returns `true` if `resource` has static lifetime and should be
+    /// exempt from leak reporting.
+    pub fn is_static_lifetime(&self, resource: &ResourceId) -> bool {
+        self.static_lifetime_resources.contains(resource)
     }
 }
 
@@ -726,7 +752,13 @@ impl CleanupVerifier {
             // Terminal node — check for leaks
             *paths_explored += 1;
             let leak_violations = state.check_leaks(current);
-            violations.extend(leak_violations);
+            // Exclude resources with static lifetime (program-lifetime
+            // allocations per VUMA spec §5.4 "Global scope / Static
+            // lifetime"): these are intentionally leaked at program
+            // shutdown and must NOT be reported as leak violations.
+            violations.extend(leak_violations.into_iter().filter(|v| {
+                !graph.is_static_lifetime(&v.resource)
+            }));
         } else {
             // Explore each successor
             for succ in succs {

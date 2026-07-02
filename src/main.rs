@@ -26,9 +26,11 @@ use vuma::logging::{LogLevel, init_logger, global_logger};
 use vuma_codegen::backend::{create_backend, BackendKind};
 use vuma_codegen::ScgToIr;
 use vuma_codegen::scg_to_ir::{Scg, ScgNode, ScgFunction, ScgParam, ScgStatement, ScgType,
-    ScgExpr, ComputationNode, AllocationNode, AccessNode, CallNode, ControlNode, GetAddressNode};
-use std::collections::{HashMap, HashSet};
+    ScgExpr, ComputationNode, AllocationNode, AccessNode, CallNode, ControlNode, GetAddressNode,
+    CastNode, SwitchArm};
 use vuma_codegen::ir::BinOpKind;
+use vuma_codegen::CastKind;
+use std::collections::{HashMap, HashSet};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // CLI definition (clap derive)
@@ -168,9 +170,37 @@ impl From<IsaArg> for BackendKind {
     }
 }
 
+/// Detect the host architecture at compile time and return the closest
+/// matching VUMA backend. Returns `None` for unsupported architectures
+/// (the caller should fall back to `IsaArg::Aarch64` in that case).
+///
+/// Used by `vuma build` and `vuma run` so that the emitted binary can be
+/// executed natively on the developer's machine. Without this, `vuma build`
+/// always produces an AArch64 ELF (the canonical pipeline's only target),
+/// which fails to execute on x86_64 / riscv64 / etc. hosts without QEMU.
+fn host_isa() -> Option<IsaArg> {
+    match std::env::consts::ARCH {
+        "x86_64" => Some(IsaArg::X86_64),
+        "aarch64" => Some(IsaArg::Aarch64),
+        "riscv64" => Some(IsaArg::Riscv64),
+        "arm" => Some(IsaArg::Arm32),
+        "powerpc64" => Some(IsaArg::Ppc64),
+        "mips" => Some(IsaArg::Mips64), // closest match; endian may need a runtime check
+        "loongarch64" => Some(IsaArg::Loongarch64),
+        _ => None,
+    }
+}
+
+/// Resolve the effective ISA for a subcommand: explicit `--isa` flag wins,
+/// otherwise fall back to the host architecture, otherwise AArch64
+/// (preserving the historical default of the canonical pipeline).
+fn resolve_isa(isa: &Option<IsaArg>) -> IsaArg {
+    isa.or_else(host_isa).unwrap_or(IsaArg::Aarch64)
+}
+
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Parse + compile to ARM64 ELF (default), save to output file
+    /// Parse + compile to ELF (host ISA by default), save to output file
     Build {
         /// Input VUMA source file
         file: PathBuf,
@@ -182,10 +212,25 @@ enum Commands {
         /// Target platform
         #[arg(long, value_enum, default_value = "linux")]
         target: TargetArg,
+
+        /// Target ISA. Defaults to the host architecture so the emitted
+        /// binary can be executed natively; pass `--isa aarch64` to
+        /// cross-compile for AArch64 (uses the canonical pipeline with
+        /// full verification + telemetry). Non-AArch64 targets use the
+        /// direct AST→codegen bridge path.
+        #[arg(long, value_enum)]
+        isa: Option<IsaArg>,
     },
 
-    /// Build + execute (via QEMU aarch64 or native)
+    /// Build + execute (native on host arch, or via qemu-<isa>)
     Run {
+        /// Target ISA. Defaults to the host architecture so the emitted
+        /// binary can be executed natively. NOTE: because `args` uses
+        /// `trailing_var_arg`, `--isa` must appear BEFORE the input file:
+        ///   `vuma run --isa x86_64 hello.vuma arg1 arg2`
+        #[arg(long, value_enum)]
+        isa: Option<IsaArg>,
+
         /// Input VUMA source file
         file: PathBuf,
 
@@ -375,18 +420,118 @@ fn default_output_path(input: &Path) -> PathBuf {
     dir.join(format!("{}.o", stem))
 }
 
+/// Compile VUMA source to a binary for the given ISA, using the direct
+/// AST → codegen SCG → IR → backend.encode_program path.
+///
+/// This bypasses the canonical pipeline (which always targets AArch64)
+/// and is used by:
+///   - `vuma run` (so the emitted binary matches the host ISA and can be
+///     executed natively),
+///   - `vuma build` when the resolved ISA is not AArch64 (the canonical
+///     pipeline cannot emit non-AArch64 ELF),
+///   - `vuma compile` and `vuma emit` (which already had their own copies
+///     of this logic — this helper exists to factor out the common path).
+///
+/// Returns the encoded binary bytes on success.
+fn compile_to_binary_direct(
+    source: &str,
+    isa: IsaArg,
+) -> Result<Vec<u8>, String> {
+    let backend_kind = BackendKind::from(isa);
+
+    // Step 1: Parse source → AST.
+    let mut parser = vuma_parser::Parser::new(source);
+    let parse_result = parser.parse_program();
+    if parse_result.is_err() {
+        return Err(format!("parse error: {:?}", parse_result.errors));
+    }
+    if !parse_result.errors.is_empty() {
+        eprintln!(
+            "[vuma] WARNING: {} non-fatal parse errors:",
+            parse_result.errors.len()
+        );
+        for err in &parse_result.errors {
+            eprintln!("[vuma]   {:?}", err);
+        }
+    }
+    let program = parse_result.value.unwrap();
+
+    // Step 2: Bridge parser AST → codegen SCG.
+    let codegen_scg = bridge_ast_to_codegen_scg(&program);
+
+    // Step 3: Lower codegen SCG → IR.
+    let mut ir_builder = ScgToIr::new();
+    let ir_program = ir_builder.convert(&codegen_scg).map_err(|e| {
+        format!("IR conversion error: {}", e)
+    })?;
+
+    // Step 4: Create backend and allocate registers.
+    let backend = create_backend(backend_kind).map_err(|e| {
+        format!(
+            "error: cannot create {} backend: {}",
+            backend_kind.isa_name(),
+            e
+        )
+    })?;
+
+    let mut allocated_functions = Vec::new();
+    for func in &ir_program.functions {
+        match backend.allocate_registers(func) {
+            Ok(allocated) => allocated_functions.push(allocated),
+            Err(e) => {
+                eprintln!(
+                    "warning: register allocation failed for '{}': {}",
+                    func.name, e
+                );
+            }
+        }
+    }
+
+    if allocated_functions.is_empty() {
+        return Err("no functions were successfully allocated".to_string());
+    }
+
+    let allocated_program = vuma_codegen::backend::AllocatedProgram {
+        functions: allocated_functions,
+        total_code_size: 0,
+        total_data_size: 0,
+    };
+
+    backend
+        .encode_program(&allocated_program)
+        .map_err(|e| format!("error: {} encoding failed: {}", backend.name(), e))
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Subcommand handlers
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// `vuma build <file>` — Parse + compile to ELF, save to output file.
+///
+/// When the resolved ISA (explicit `--isa` flag, else host arch, else
+/// AArch64) is AArch64, uses the canonical pipeline (`compile_with_recovery`)
+/// which supports verification, MSG construction, SCG transforms, and
+/// telemetry. For any other ISA, falls back to the direct AST→codegen
+/// SCG bridge path (no verification / telemetry), since the canonical
+/// pipeline currently always emits AArch64 ELF.
 fn cmd_build(
     cli: &Cli,
     file: &PathBuf,
     output: &Option<PathBuf>,
     target: &TargetArg,
+    isa: &Option<IsaArg>,
 ) -> Result<(), String> {
     let source = read_source(file)?;
+    let resolved_isa = resolve_isa(isa);
+
+    // Non-AArch64 path: direct AST→codegen bridge.
+    // The canonical pipeline (`compile_with_recovery`) only emits AArch64
+    // ELF, so cross-arch builds must use the direct path.
+    if !matches!(resolved_isa, IsaArg::Aarch64) {
+        return cmd_build_direct(cli, file, output, &source, resolved_isa);
+    }
+
+    // AArch64 path: canonical pipeline (verification + telemetry + MSG + transforms).
     let config = make_config(cli, CompileTarget::from(*target));
 
     // Initialize telemetry collector if --telemetry is set.
@@ -484,18 +629,105 @@ fn cmd_build(
     }
 }
 
-/// `vuma run <file>` — Build + execute.
-fn cmd_run(cli: &Cli, file: &PathBuf, args: &[String]) -> Result<(), String> {
-    let source = read_source(file)?;
-    let config = make_config(cli, CompileTarget::Linux);
-    let result = compile_with_path(&source, Some(file), &config).map_err(|errors| {
-        print_errors(&errors);
-        global_logger().error("compile", &format!("compilation failed with {} error(s)", errors.len()));
-        format!("compilation failed with {} error(s)", errors.len())
+/// Non-AArch64 implementation of `vuma build`: uses the direct
+/// AST→codegen SCG bridge path (`compile_to_binary_direct`). Does not
+/// run the canonical pipeline (no verification, MSG, SCG transforms,
+/// or telemetry — those are AArch64-only until the canonical pipeline
+/// is generalised to other ISAs).
+fn cmd_build_direct(
+    cli: &Cli,
+    file: &PathBuf,
+    output: &Option<PathBuf>,
+    source: &str,
+    isa: IsaArg,
+) -> Result<(), String> {
+    let backend_kind = BackendKind::from(isa);
+    eprintln!(
+        "[build] Note: targeting {} via direct AST→codegen path \
+         (canonical pipeline is AArch64-only; verification/telemetry unavailable)",
+        backend_kind.isa_name(),
+    );
+
+    let binary = compile_to_binary_direct(source, isa)?;
+
+    let out_path = output
+        .as_ref()
+        .cloned()
+        .unwrap_or_else(|| default_output_path(file));
+    fs::write(&out_path, &binary).map_err(|e| {
+        format!(
+            "error: cannot write output file '{}': {}",
+            out_path.display(),
+            e
+        )
     })?;
+    // Make the output file executable on Unix.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&out_path)
+            .map_err(|e| format!("error: cannot stat '{}': {}", out_path.display(), e))?
+            .permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&out_path, perms)
+            .map_err(|e| format!("error: cannot chmod '{}': {}", out_path.display(), e))?;
+    }
+
+    if !cli.quiet {
+        println!(
+            "Compiled {} -> {} ({} bytes, ISA: {})",
+            file.display(),
+            out_path.display(),
+            binary.len(),
+            backend_kind.isa_name(),
+        );
+    }
+
+    Ok(())
+}
+
+/// `vuma run <file>` — Build + execute.
+///
+/// Always uses the direct AST→codegen SCG bridge path
+/// (`compile_to_binary_direct`) so that the emitted binary matches the
+/// resolved ISA (explicit `--isa` flag, else host arch, else AArch64).
+/// This is necessary because the canonical pipeline (`compile_with_path`)
+/// always emits AArch64 ELF — using it here would silently produce a
+/// non-runnable binary on x86_64 / riscv64 / etc. hosts.
+///
+/// Execution strategy:
+///   1. Try to execute the binary natively (works when the resolved ISA
+///      matches the host ISA).
+///   2. On native-exec failure (ENOEXEC, etc.), try `qemu-<isa>` as a
+///      user-space emulator.
+///   3. If both fail, print a clear, actionable error message naming the
+///      ISA, the host arch, and the suggested remedy (install qemu or
+///      compile for the host via `vuma emit`).
+fn cmd_run(
+    _cli: &Cli,
+    file: &PathBuf,
+    args: &[String],
+    isa: &Option<IsaArg>,
+) -> Result<(), String> {
+    let source = read_source(file)?;
+    let resolved_isa = resolve_isa(isa);
+    let backend_kind = BackendKind::from(resolved_isa);
+    let isa_name = backend_kind.isa_name();
+    let host_arch = std::env::consts::ARCH;
+
+    // Build via the direct path so the binary targets `resolved_isa`
+    // (NOT the canonical pipeline's hardcoded AArch64).
+    let binary = compile_to_binary_direct(&source, resolved_isa).map_err(|err| {
+        global_logger().error(
+            "run",
+            &format!("compilation failed: {}", err),
+        );
+        err
+    })?;
+
     let tmp_dir = std::env::temp_dir();
     let exe_path = tmp_dir.join(format!("vuma_run_{}", std::process::id()));
-    fs::write(&exe_path, &result.binary).map_err(|e| {
+    fs::write(&exe_path, &binary).map_err(|e| {
         format!(
             "error: cannot write temporary executable '{}': {}",
             exe_path.display(),
@@ -515,24 +747,50 @@ fn cmd_run(cli: &Cli, file: &PathBuf, args: &[String]) -> Result<(), String> {
             .map_err(|e| format!("error: cannot chmod '{}': {}", exe_path.display(), e))?;
     }
 
-    // Try to execute: first natively (if on aarch64), then via qemu-aarch64.
+    // Step 1: try native execution. This works whenever the resolved ISA
+    // matches the host ISA (the common case, since resolved_isa defaults
+    // to host_isa()).
     let native_output = Command::new(&exe_path).args(args).output();
 
     let output = match native_output {
         Ok(out) => out,
-        Err(_) => {
-            // Native execution failed; try qemu-aarch64.
-            let qemu_output = Command::new("qemu-aarch64")
+        Err(native_err) => {
+            // Step 2: native exec failed (typically ENOEXEC on ISA
+            // mismatch). Try the appropriate qemu-user emulator.
+            // qemu-user binary names: qemu-aarch64, qemu-x86_64,
+            // qemu-riscv64, qemu-arm (for arm32), etc.
+            let qemu_bin = format!("qemu-{}", isa_name);
+            match Command::new(&qemu_bin)
                 .arg(&exe_path)
                 .args(args)
                 .output()
-                .map_err(|e| {
-                    format!(
-                        "error: failed to execute binary (neither native nor qemu-aarch64): {}",
-                        e
-                    )
-                })?;
-            qemu_output
+            {
+                Ok(qemu_out) => qemu_out,
+                Err(qemu_err) => {
+                    // Step 3: both failed. Clean up and surface a clear,
+                    // actionable error.
+                    let _ = fs::remove_file(&exe_path);
+                    let host_isa_name = host_isa()
+                        .map(|i| BackendKind::from(i).isa_name())
+                        .unwrap_or("aarch64");
+                    return Err(format!(
+                        "error: cannot execute {isa} binary on {host} host.\n\
+                         Native exec failed: {native_err}\n\
+                         {qemu} not found: {qemu_err2}\n\
+                         \n\
+                         To fix this, either:\n\
+                         (1) install qemu-{isa} (e.g. `apt install qemu-user`), or\n\
+                         (2) compile for the host instead: `vuma emit {host_isa} {file}`",
+                        isa = isa_name,
+                        host = host_arch,
+                        native_err = native_err,
+                        qemu = qemu_bin,
+                        qemu_err2 = qemu_err,
+                        host_isa = host_isa_name,
+                        file = file.display(),
+                    ));
+                }
+            }
         }
     };
 
@@ -1653,12 +1911,100 @@ fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) -> Vec
             stmts
         }
 
-        PStmt::Allocate(_) => vec![],
-        PStmt::Free(_) => vec![],
+        // ── allocate(size);  (standalone — not bound to a variable) ──
+        // Lower to a stack allocation when the size is a literal int (mirrors
+        // the `let x = allocate(N)` path), else to a heap allocation with a
+        // dynamic size expression. Previously this was silently dropped.
+        PStmt::Allocate(alloc_stmt) => {
+            let mut stmts = Vec::new();
+            let temp = ctx.alloc_temp();
+            // Try to extract a literal integer size; fall back to Heap otherwise.
+            if let vuma_parser::ast::Expr::Lit {
+                value: vuma_parser::ast::Lit::Int(n),
+                ..
+            } = &alloc_stmt.size
+            {
+                let size = (*n as u32).max(1); // never allocate 0 bytes
+                stmts.push(ScgStatement::Allocation(AllocationNode::Stack {
+                    name: temp,
+                    size,
+                    ty: ScgType::U8, // raw byte buffer; caller may cast the pointer
+                }));
+            } else {
+                let size_expr = flatten_expr(&alloc_stmt.size, &mut stmts, ctx);
+                stmts.push(ScgStatement::Allocation(AllocationNode::Heap {
+                    name: temp,
+                    size_expr,
+                    ty: ScgType::U8,
+                }));
+            }
+            stmts
+        }
 
+        // ── free(ptr);  (standalone) ──
+        // There is no ScgStatement::Free variant, so lower to a runtime call
+        // to `__vuma_free(ptr, 0)`. The size argument is 0 because FreeStmt
+        // does not carry a size (most mmap-based allocators track the size
+        // internally). Previously this was silently dropped.
+        PStmt::Free(free_stmt) => {
+            let mut stmts = Vec::new();
+            let ptr_expr = flatten_expr(&free_stmt.ptr, &mut stmts, ctx);
+            stmts.push(ScgStatement::Call(CallNode {
+                dst: None,
+                func: "__vuma_free".to_string(),
+                args: vec![ptr_expr, ScgExpr::Int(0)],
+                is_extern: true,
+                reassigns: None,
+            }));
+            stmts
+        }
+
+        // ── expr as Type;  (standalone cast) ──
+        // Lower to a proper CastNode so the type conversion is preserved in
+        // the IR. Previously this kept the operand (via flatten_expr) but
+        // discarded the target type, producing an incorrect no-op.
         PStmt::Cast(cast_stmt) => {
             let mut stmts = Vec::new();
-            let _ = flatten_expr(&cast_stmt.expr, &mut stmts, ctx);
+            let src = flatten_expr(&cast_stmt.expr, &mut stmts, ctx);
+            let temp = ctx.alloc_temp();
+            // The AST's CastStmt always carries a target type (target_type: Type,
+            // not Option<Type>); use the existing bridge to map it to ScgType.
+            let to_ty = bridge_type_to_codegen_scg(&Some(cast_stmt.target_type.clone()));
+            // Source type is not annotated in the AST — assume I64 (VUMA's
+            // default integer width). The IR layer can refine this via BD.
+            let from_ty = ScgType::I64;
+            // Choose a CastKind based on the source/target bit widths.
+            // Floats are not handled by this heuristic (bridge_type_to_codegen_scg
+            // currently maps "f32"/"f64" to ScgType::I64), so the result is
+            // always an integer-to-integer cast kind.
+            let kind = {
+                let from_bits = match from_ty {
+                    ScgType::I8 | ScgType::U8 => 8,
+                    ScgType::I16 | ScgType::U16 => 16,
+                    ScgType::I32 | ScgType::U32 | ScgType::F32 => 32,
+                    _ => 64, // I64, U64, Ptr, F64, Void
+                };
+                let to_bits = match to_ty {
+                    ScgType::I8 | ScgType::U8 => 8,
+                    ScgType::I16 | ScgType::U16 => 16,
+                    ScgType::I32 | ScgType::U32 | ScgType::F32 => 32,
+                    _ => 64,
+                };
+                if to_bits > from_bits {
+                    CastKind::SExt
+                } else if to_bits < from_bits {
+                    CastKind::Trunc
+                } else {
+                    CastKind::BitCast
+                }
+            };
+            stmts.push(ScgStatement::Cast(CastNode {
+                dst: temp,
+                src,
+                kind,
+                from_ty,
+                to_ty,
+            }));
             stmts
         }
 
@@ -1777,11 +2123,123 @@ fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) -> Vec
 
         PStmt::Break(_) => vec![ScgStatement::Control(ControlNode::Break)],
         PStmt::Continue(_) => vec![ScgStatement::Control(ControlNode::Continue)],
-        PStmt::BdDirective(_)
-        | PStmt::Sync(_)
-        | PStmt::UnsafeBlock { .. }
-        | PStmt::Match(_)
-        | PStmt::Access(_) => vec![],
+
+        // ── *ptr;  or  (*ptr).field;  (standalone access / deref read) ──
+        // A dereference read with no destination. Lower to a Load into a
+        // temporary so the pointer is evaluated AND the load happens
+        // (which may trap on a bad pointer — the correct behavior for an
+        // explicit dereference). Previously this was silently dropped,
+        // which suppressed segfaults that the programmer should observe.
+        PStmt::Access(access_stmt) => {
+            let mut stmts = Vec::new();
+            let ptr_expr = flatten_expr(&access_stmt.expr, &mut stmts, ctx);
+            let temp = ctx.alloc_temp();
+            stmts.push(ScgStatement::Access(AccessNode::Load {
+                dst: temp,
+                ptr: ptr_expr,
+                offset: None,
+                ty: None,
+            }));
+            stmts
+        }
+
+        // ── match subject { arms } ──
+        // Lower to ControlNode::Switch when every arm pattern is a simple
+        // integer literal (or the wildcard `_`). For complex patterns
+        // (Ident, Struct, Enum, Range, Or), emit a TODO warning and drop
+        // ONLY those arm bodies — the wildcard/default arm still runs,
+        // which is better than silently dropping the whole match.
+        PStmt::Match(match_stmt) => {
+            let mut pre_stmts = Vec::new();
+            let discriminant = flatten_expr(&match_stmt.subject, &mut pre_stmts, ctx);
+
+            let mut switch_arms: Vec<SwitchArm> = Vec::new();
+            let mut default_body: Vec<ScgStatement> = Vec::new();
+            let mut saw_complex_pattern = false;
+
+            for arm in &match_stmt.arms {
+                match &arm.pattern {
+                    vuma_parser::ast::MatchPattern::Lit { value, .. } => {
+                        // Only integer-valued literals can become SwitchArm values.
+                        let value_i = match value {
+                            vuma_parser::ast::Lit::Int(n) => *n,
+                            vuma_parser::ast::Lit::Bool(b) => {
+                                if *b {
+                                    1
+                                } else {
+                                    0
+                                }
+                            }
+                            vuma_parser::ast::Lit::Address(a) => *a as i64,
+                            _ => {
+                                // Float/String literal — not a valid switch arm value.
+                                saw_complex_pattern = true;
+                                continue;
+                            }
+                        };
+                        let mut arm_body: Vec<ScgStatement> = Vec::new();
+                        let _ = flatten_expr(&arm.body, &mut arm_body, ctx);
+                        switch_arms.push(SwitchArm {
+                            value: value_i,
+                            body: arm_body,
+                        });
+                    }
+                    vuma_parser::ast::MatchPattern::Wildcard(_) => {
+                        let mut arm_body: Vec<ScgStatement> = Vec::new();
+                        let _ = flatten_expr(&arm.body, &mut arm_body, ctx);
+                        default_body = arm_body;
+                    }
+                    _ => {
+                        // Ident / Struct / Enum / Range / Or — too complex for
+                        // the direct AST→codegen bridge. The arm body is
+                        // dropped (NOT the whole match).
+                        saw_complex_pattern = true;
+                    }
+                }
+            }
+
+            if saw_complex_pattern {
+                eprintln!(
+                    "[vuma] TODO: match statement at span {:?} uses complex patterns \
+                     (ident/struct/enum/range/or) which are not yet supported by the direct \
+                     AST→codegen bridge. Only literal-integer and wildcard arms were lowered; \
+                     other arm bodies were dropped.",
+                    match_stmt.span,
+                );
+            }
+
+            pre_stmts.push(ScgStatement::Control(ControlNode::Switch {
+                discriminant,
+                arms: switch_arms,
+                default_body,
+            }));
+            pre_stmts
+        }
+
+        // ── sync { body } ──
+        // Concurrency primitive. The direct AST→codegen bridge does not
+        // enforce sync semantics (no mutex / atomic fence emission); the
+        // body is lowered inline so the statements still execute. TODO:
+        // implement proper sync-block lowering.
+        PStmt::Sync(sync_block) => {
+            eprintln!(
+                "[vuma] TODO: sync {{ ... }} block at span {:?} lowered without \
+                 synchronization semantics (body executes inline, no mutex/fence)",
+                sync_block.span,
+            );
+            bridge_block_to_scg_stmts(&sync_block.body, ctx)
+        }
+
+        // ── unsafe { body } ──
+        // A scoping marker; lower the body inline. The unsafe contract is
+        // the programmer's responsibility — no special handling needed.
+        PStmt::UnsafeBlock { body, .. } => {
+            bridge_block_to_scg_stmts(body, ctx)
+        }
+
+        // BD directives (bd/repd/capd/reld) are annotations consumed by
+        // the BD inference pass — they produce no codegen statements.
+        PStmt::BdDirective(_) => vec![],
     }
 }
 fn cmd_disasm(file: &PathBuf, isa: &IsaArg, base_addr_str: &str) -> Result<(), String> {
@@ -2242,8 +2700,13 @@ fn main() {
             ref file,
             ref output,
             ref target,
-        } => cmd_build(&cli, file, output, target),
-        Commands::Run { ref file, ref args } => cmd_run(&cli, file, args),
+            ref isa,
+        } => cmd_build(&cli, file, output, target, isa),
+        Commands::Run {
+            ref file,
+            ref args,
+            ref isa,
+        } => cmd_run(&cli, file, args, isa),
         Commands::Check { ref file } => cmd_check(&cli, file),
         Commands::Emit {
             ref isa,
@@ -2313,10 +2776,12 @@ mod tests {
                 ref file,
                 ref output,
                 ref target,
+                ref isa,
             }) => {
                 assert_eq!(file, &PathBuf::from("hello.vuma"));
                 assert!(output.is_none());
                 assert_eq!(target, &TargetArg::Linux);
+                assert!(isa.is_none(), "--isa should default to None (resolved at runtime)");
             }
             _ => panic!("expected Build command"),
         }
@@ -2340,10 +2805,31 @@ mod tests {
                 ref file,
                 ref output,
                 ref target,
+                isa: _,
             }) => {
                 assert_eq!(file, &PathBuf::from("hello.vuma"));
                 assert_eq!(output.as_ref().unwrap(), &PathBuf::from("out.o"));
                 assert_eq!(target, &TargetArg::Linux);
+            }
+            _ => panic!("expected Build command"),
+        }
+    }
+
+    /// Test 2b: `vuma build hello.vuma --isa x86_64` parses the --isa flag.
+    #[test]
+    fn test_build_with_isa() {
+        let cli = Cli::try_parse_from([
+            "vuma",
+            "build",
+            "hello.vuma",
+            "--isa",
+            "x86_64",
+        ])
+        .unwrap();
+        match cli.command {
+            Some(Commands::Build { ref file, ref isa, .. }) => {
+                assert_eq!(file, &PathBuf::from("hello.vuma"));
+                assert_eq!(*isa, Some(IsaArg::X86_64));
             }
             _ => panic!("expected Build command"),
         }
@@ -2354,7 +2840,7 @@ mod tests {
     fn test_run_basic() {
         let cli = Cli::try_parse_from(["vuma", "run", "hello.vuma"]).unwrap();
         match cli.command {
-            Some(Commands::Run { ref file, ref args }) => {
+            Some(Commands::Run { ref file, ref args, isa: _ }) => {
                 assert_eq!(file, &PathBuf::from("hello.vuma"));
                 assert!(args.is_empty());
             }
@@ -2367,11 +2853,44 @@ mod tests {
     fn test_run_with_args() {
         let cli = Cli::try_parse_from(["vuma", "run", "hello.vuma", "arg1", "arg2"]).unwrap();
         match cli.command {
-            Some(Commands::Run { ref file, ref args }) => {
+            Some(Commands::Run { ref file, ref args, .. }) => {
                 assert_eq!(file, &PathBuf::from("hello.vuma"));
                 assert_eq!(args, &vec!["arg1".to_string(), "arg2".to_string()]);
             }
             _ => panic!("expected Run command"),
+        }
+    }
+
+    /// Test 4b: `vuma run --isa aarch64 hello.vuma arg1` parses the --isa flag
+    /// (must come BEFORE the file because of `trailing_var_arg`).
+    #[test]
+    fn test_run_with_isa() {
+        let cli = Cli::try_parse_from([
+            "vuma", "run", "--isa", "aarch64", "hello.vuma", "arg1",
+        ])
+        .unwrap();
+        match cli.command {
+            Some(Commands::Run { ref file, ref args, ref isa }) => {
+                assert_eq!(file, &PathBuf::from("hello.vuma"));
+                assert_eq!(*isa, Some(IsaArg::Aarch64));
+                assert_eq!(args, &vec!["arg1".to_string()]);
+            }
+            _ => panic!("expected Run command"),
+        }
+    }
+
+    /// Test 4c: `host_isa()` returns Some on a known host arch.
+    #[test]
+    fn test_host_isa_returns_some_on_known_arch() {
+        // We can't predict the build host, but the helper should return
+        // Some on all arches VUMA claims to support. If None, the caller
+        // falls back to AArch64 — verify that fallback works too.
+        let resolved = resolve_isa(&None);
+        let _ = resolved; // just ensure it doesn't panic.
+        // On any of the supported arches, host_isa() should be Some.
+        let known = ["x86_64", "aarch64", "riscv64", "arm", "powerpc64", "mips", "loongarch64"];
+        if known.contains(&std::env::consts::ARCH) {
+            assert!(host_isa().is_some(), "host_isa() should return Some on supported arch {}", std::env::consts::ARCH);
         }
     }
 

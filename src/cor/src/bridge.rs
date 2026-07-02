@@ -83,19 +83,7 @@ fn map_node_type(
         vuma_scg::NodeType::StructDef
         | vuma_scg::NodeType::EnumDef
         | vuma_scg::NodeType::Match
-        | vuma_scg::NodeType::ConstantTime
-        | vuma_scg::NodeType::ConceptDecl
-        | vuma_scg::NodeType::ConceptField
-        | vuma_scg::NodeType::ConceptAccess
-        | vuma_scg::NodeType::GestaltDecl
-        | vuma_scg::NodeType::GestaltInterpret
-        | vuma_scg::NodeType::ContextAssert
-        | vuma_scg::NodeType::ManifoldDecl
-        | vuma_scg::NodeType::ManifoldQuery
-        | vuma_scg::NodeType::ManifoldSlice
-        | vuma_scg::NodeType::AuraAttach
-        | vuma_scg::NodeType::AuraQuery
-        | vuma_scg::NodeType::AuraUpdate => NodeKind::Entry,
+        | vuma_scg::NodeType::ConstantTime => NodeKind::Entry,
     }
 }
 

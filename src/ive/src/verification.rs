@@ -636,6 +636,41 @@ impl VerificationEngine {
             }
         }
 
+        // Spec §5.4 "Global scope / Static lifetime": allocations that
+        // live at the top level of a program (not inside any function's
+        // control flow) have **static lifetime** and are intentionally
+        // leaked — they are released only at program shutdown and MUST
+        // NOT be reported as leak violations.
+        //
+        // Detection heuristic: an SCG `Allocation` node with NO incoming
+        // `ControlFlow` edge is not reachable from any function's entry,
+        // so it is a top-level / program-init allocation. We mark its
+        // `CleanupResourceId` as static-lifetime on the cleanup graph;
+        // `CleanupVerifier::dfs_verify` then filters out leak reports
+        // for these resources at terminal nodes.
+        //
+        // This does NOT change behavior for allocations inside function
+        // control flow — those still have an incoming `ControlFlow` edge
+        // (from the function's entry / preceding computation) and remain
+        // subject to the leak invariant.
+        for node in scg.nodes() {
+            if node.node_type != NodeType::Allocation {
+                continue;
+            }
+            let alloc_region_id = match &node.payload {
+                NodePayload::Allocation(alloc) => alloc.region_id,
+                _ => continue,
+            };
+            let has_ctrlflow_pred = scg.edges().any(|e| {
+                e.target == node.id && matches!(e.kind, EdgeKind::ControlFlow)
+            });
+            if !has_ctrlflow_pred {
+                graph.mark_static_lifetime(CleanupResourceId(
+                    alloc_region_id.as_u64(),
+                ));
+            }
+        }
+
         graph
     }
 }
@@ -1038,6 +1073,147 @@ mod tests {
             result.is_proven()
                 || matches!(result.status, VerificationStatus::ProbablySafe { .. })
                 || matches!(result.status, VerificationStatus::Unverified { .. })
+        );
+    }
+
+    // Regression test for the IVE false-positive on top-level `region`
+    // declarations (see spec §5.4 "Global scope / Static lifetime").
+    //
+    // A top-level `region` allocation has NO incoming `ControlFlow`
+    // edge in the SCG (it is not reachable from any function's entry;
+    // only a Derivation edge links it to its Phantom marker). Before
+    // the fix, `extract_cleanup_graph` placed it as a disconnected
+    // node in the cleanup graph, where `CleanupVerifier` treated it
+    // as both a start and a terminal node — and thus reported the
+    // program-lifetime allocation as a leak. After the fix, the
+    // resource is added to `CleanupGraph::static_lifetime_resources`
+    // and leak reports for it are filtered out in `dfs_verify`.
+    #[test]
+    fn verify_cleanup_top_level_region_not_leaked() {
+        use vuma_scg::node::ProgramPoint;
+        use vuma_scg::node::AllocationNode;
+        use vuma_scg::region::{DeploymentTarget, RegionId, SCGRegion};
+
+        let mut scg = SCG::new();
+        let region_id = RegionId::new(1);
+
+        let alloc_id = scg.add_node(
+            NodeType::Allocation,
+            NodePayload::Allocation(AllocationNode {
+                size: 256,
+                align: 16,
+                region_id,
+                type_name: Some("Buf".to_string()),
+            }),
+            ProgramPoint {
+                file: None,
+                line: Some(1),
+                column: Some(1),
+                offset: None,
+            },
+        );
+
+        let mut region = SCGRegion::new(region_id, DeploymentTarget::Heap);
+        region.add_node(alloc_id);
+        scg.add_region(region);
+
+        // Intentionally NO ControlFlow edges: this allocation lives
+        // at the top level of the program (not inside any function's
+        // control flow), so it has program-lifetime / static lifetime
+        // per spec §5.4 and must NOT be flagged as a leak.
+
+        let engine = VerificationEngine::new();
+        let input = VerificationInput::from_scg(scg);
+        let result = engine.verify_cleanup(&input);
+        assert!(
+            !result.is_violated(),
+            "Top-level `region` declaration must NOT be flagged as a leak \
+             (spec §5.4 static lifetime), but got: {} - {}",
+            result.status,
+            result.message,
+        );
+    }
+
+    // Companion regression test: an allocation that DOES have an
+    // incoming `ControlFlow` edge (i.e., it is inside some function's
+    // control flow) is NOT exempt from the leak invariant. If it is
+    // never freed, it must still be flagged. This guards against the
+    // fix over-applying the static-lifetime exemption.
+    #[test]
+    fn verify_cleanup_function_local_allocation_still_leaked() {
+        use vuma_scg::edge::EdgeKind;
+        use vuma_scg::node::ProgramPoint;
+        use vuma_scg::node::AllocationNode;
+        use vuma_scg::region::{DeploymentTarget, RegionId, SCGRegion};
+
+        let mut scg = SCG::new();
+        let region_id = RegionId::new(2);
+
+        // First node: a top-level allocation (no ControlFlow pred).
+        // It would normally be static-lifetime-exempt, but we use it
+        // here only to provide a ControlFlow predecessor for the
+        // second allocation, demonstrating that the second allocation
+        // is "inside" control flow and must still be checked.
+        let alloc_a_id = scg.add_node(
+            NodeType::Allocation,
+            NodePayload::Allocation(AllocationNode {
+                size: 64,
+                align: 8,
+                region_id,
+                type_name: Some("A".to_string()),
+            }),
+            ProgramPoint {
+                file: None,
+                line: Some(1),
+                column: Some(1),
+                offset: None,
+            },
+        );
+
+        // Second allocation — same region_id would normally be a
+        // re-acquire, so use a distinct region to keep resources
+        // separate. This allocation HAS a ControlFlow predecessor
+        // (alloc_a), so it is NOT static-lifetime and must be
+        // flagged as a leak (no dealloc exists for it).
+        let region_id_b = RegionId::new(3);
+        let alloc_b_id = scg.add_node(
+            NodeType::Allocation,
+            NodePayload::Allocation(AllocationNode {
+                size: 128,
+                align: 8,
+                region_id: region_id_b,
+                type_name: Some("B".to_string()),
+            }),
+            ProgramPoint {
+                file: None,
+                line: Some(2),
+                column: Some(1),
+                offset: None,
+            },
+        );
+
+        let mut region_a = SCGRegion::new(region_id, DeploymentTarget::Heap);
+        region_a.add_node(alloc_a_id);
+        scg.add_region(region_a);
+        let mut region_b = SCGRegion::new(region_id_b, DeploymentTarget::Heap);
+        region_b.add_node(alloc_b_id);
+        scg.add_region(region_b);
+
+        // ControlFlow from A to B: B now has a ControlFlow predecessor
+        // and is therefore NOT static-lifetime.
+        scg.add_edge(alloc_a_id, alloc_b_id, EdgeKind::ControlFlow)
+            .unwrap();
+
+        let engine = VerificationEngine::new();
+        let input = VerificationInput::from_scg(scg);
+        let result = engine.verify_cleanup(&input);
+        assert!(
+            result.is_violated(),
+            "Function-local allocation (with a ControlFlow predecessor) \
+             that is never freed MUST be flagged as a leak, but got: \
+             {} - {}",
+            result.status,
+            result.message,
         );
     }
 

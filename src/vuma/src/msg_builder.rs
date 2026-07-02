@@ -506,19 +506,7 @@ impl MsgBuilder {
             | ScgNodeType::StructDef
             | ScgNodeType::EnumDef
             | ScgNodeType::Match
-            | ScgNodeType::ConstantTime
-            | ScgNodeType::ConceptDecl
-            | ScgNodeType::ConceptField
-            | ScgNodeType::ConceptAccess
-            | ScgNodeType::GestaltDecl
-            | ScgNodeType::GestaltInterpret
-            | ScgNodeType::ContextAssert
-            | ScgNodeType::ManifoldDecl
-            | ScgNodeType::ManifoldQuery
-            | ScgNodeType::ManifoldSlice
-            | ScgNodeType::AuraAttach
-            | ScgNodeType::AuraQuery
-            | ScgNodeType::AuraUpdate => ScgNodeMapping::None,
+            | ScgNodeType::ConstantTime => ScgNodeMapping::None,
         };
 
         self.node_map.insert(node_id, result);
