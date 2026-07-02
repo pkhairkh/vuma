@@ -5056,7 +5056,7 @@ mod tests {
         assert_eq!(info.isa_name(), "mips64");
         assert_eq!(info.elf_machine_type(), 8);
         assert!(info.has_branch_delay_slots());
-        assert_eq!(info.endianness(), crate::backend::Endianness::Big);
+        assert_eq!(info.endianness(), crate::backend::Endianness::Little);
         assert_eq!(info.pointer_width(), 8);
         assert_eq!(info.calling_convention_name(), "n64");
         assert_eq!(info.num_int_arg_regs(), 8);

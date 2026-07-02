@@ -1,4 +1,5 @@
 // Singly-Linked List — Insert, traverse, and free
+// Expected exit code: 232
 //
 // Implements a singly-linked list with head-only insertion. Each node stores
 // a u64 payload and a next pointer. The list supports prepending nodes,
