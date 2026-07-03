@@ -468,6 +468,13 @@ pub trait Backend: Send + Sync + 'static {
     fn name(&self) -> &'static str;
 }
 
+use std::collections::HashSet;
+
+/// Set the thread-local set of 64-bit-returning function names.
+pub fn set_64bit_returns(names: &HashSet<String>) {
+    crate::arm32::set_64bit_returns(names);
+}
+
 // ---------------------------------------------------------------------------
 // BackendKind
 // ---------------------------------------------------------------------------
