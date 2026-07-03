@@ -50,6 +50,17 @@ const S1: Gpr = Gpr::A1; // $r5 — secondary operand
 const S2: Gpr = Gpr::T0; // $r12 — tertiary scratch
 const S3: Gpr = Gpr::T1; // $r13 — quaternary scratch
 
+/// Scratch register used *only* in function prologues.
+///
+/// This MUST NOT be an argument register ($a0–$a7 = $r4–$r11) because the
+/// prologue runs *before* argument registers are spilled to their stack
+/// slots. Using $a0/$a1 (S0/S1) as a prologue scratch clobbers the
+/// function's incoming arguments before they can be saved.
+///
+/// $t2 ($r14) is caller-saved, not an argument register, and is not used
+/// as S0–S3 above, so it is a safe prologue scratch.
+const PROLOGUE_SCRATCH: Gpr = Gpr::T2; // $r14
+
 // FPR scratch registers (caller-saved temporaries)
 const FS0: Fpr = Fpr::F0; // $f0 / $fa0 — primary FPR scratch
 const FS1: Fpr = Fpr::F1; // $f1 / $fa1 — secondary FPR scratch
@@ -442,9 +453,18 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
             "addi.d sp, sp, -frame_size",
         );
     } else {
-        // Large frame: load -fs into scratch, then sub.d
-        let mut code = encode_load_imm(S0, -(fs as i64));
-        code.extend_from_slice(&Instruction::AddD { rd: Gpr::Sp, rj: Gpr::Sp, rk: S0 }.encode());
+        // Large frame: load -fs into PROLOGUE_SCRATCH, then sub.d
+        //
+        // NOTE: Do NOT use S0 ($a0) here — $a0..$a7 hold the function's
+        // incoming arguments, which are spilled to their stack slots *after*
+        // the prologue completes. Clobbering $a0 in the prologue corrupts
+        // the first argument (e.g. `argc` in `main(argc, argv)`), which
+        // previously caused self_exec.vuma to SIGSEGV at address 0x8 because
+        // `argc` was loaded as the frame size instead of 0, the
+        // `if argc >= 2` guard was wrongly taken, and `*(argv + 8)` was
+        // dereferenced with `argv == 0`.
+        let mut code = encode_load_imm(PROLOGUE_SCRATCH, -(fs as i64));
+        code.extend_from_slice(&Instruction::AddD { rd: Gpr::Sp, rj: Gpr::Sp, rk: PROLOGUE_SCRATCH }.encode());
         push_code(code, "sub sp, sp, frame_size");
     }
 
@@ -456,9 +476,9 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
             "st.d ra, sp, fs-8",
         );
     } else {
-        let mut code = encode_load_imm(S0, ra_off as i64);
-        code.extend_from_slice(&Instruction::AddD { rd: S0, rj: Gpr::Sp, rk: S0 }.encode());
-        code.extend_from_slice(&Instruction::StD { rd: Gpr::Ra, rj: S0, imm12: 0 }.encode());
+        let mut code = encode_load_imm(PROLOGUE_SCRATCH, ra_off as i64);
+        code.extend_from_slice(&Instruction::AddD { rd: PROLOGUE_SCRATCH, rj: Gpr::Sp, rk: PROLOGUE_SCRATCH }.encode());
+        code.extend_from_slice(&Instruction::StD { rd: Gpr::Ra, rj: PROLOGUE_SCRATCH, imm12: 0 }.encode());
         push_code(code, "st.d ra, sp, fs-8");
     }
 
@@ -470,9 +490,9 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
             "st.d fp, sp, fs-16",
         );
     } else {
-        let mut code = encode_load_imm(S0, fp_off as i64);
-        code.extend_from_slice(&Instruction::AddD { rd: S0, rj: Gpr::Sp, rk: S0 }.encode());
-        code.extend_from_slice(&Instruction::StD { rd: fp, rj: S0, imm12: 0 }.encode());
+        let mut code = encode_load_imm(PROLOGUE_SCRATCH, fp_off as i64);
+        code.extend_from_slice(&Instruction::AddD { rd: PROLOGUE_SCRATCH, rj: Gpr::Sp, rk: PROLOGUE_SCRATCH }.encode());
+        code.extend_from_slice(&Instruction::StD { rd: fp, rj: PROLOGUE_SCRATCH, imm12: 0 }.encode());
         push_code(code, "st.d fp, sp, fs-16");
     }
 
@@ -483,8 +503,8 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
             "addi.d fp, sp, frame_size",
         );
     } else {
-        let mut code = encode_load_imm(S0, fs as i64);
-        code.extend_from_slice(&Instruction::AddD { rd: fp, rj: Gpr::Sp, rk: S0 }.encode());
+        let mut code = encode_load_imm(PROLOGUE_SCRATCH, fs as i64);
+        code.extend_from_slice(&Instruction::AddD { rd: fp, rj: Gpr::Sp, rk: PROLOGUE_SCRATCH }.encode());
         push_code(code, "add fp, sp, frame_size");
     }
 
