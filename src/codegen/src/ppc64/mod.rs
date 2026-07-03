@@ -421,7 +421,7 @@ impl fmt::Display for CrField {
 
 /// Encode a PPC64 32-bit instruction word and return as big-endian bytes.
 fn encode_word(word: u32) -> [u8; 4] {
-    word.to_le_bytes()
+    word.to_be_bytes()
 }
 
 /// Build a D-form instruction: opcode[0:5] | rT[6:10] | rA[11:15] | d[16:31]
@@ -1466,47 +1466,47 @@ fn build_ppc64_elf_2seg(code: &[u8], base_addr: u64) -> Vec<u8> {
     // --- e_ident ---
     elf.extend_from_slice(&[0x7f, b'E', b'L', b'F']); // magic
     elf.push(2); // ELFCLASS64
-    elf.push(1); // ELFDATA2LSB (little-endian PPC64LE)
+    elf.push(2); // ELFDATA2MSB (big-endian PPC64)
     elf.push(1); // EV_CURRENT
     elf.push(3); // ELFOSABI_LINUX
     elf.push(0); // padding
     elf.extend_from_slice(&[0u8; 7]); // padding
 
     // --- ELF header fields ---
-    elf.extend_from_slice(&2u16.to_le_bytes()); // e_type = ET_EXEC
-    elf.extend_from_slice(&21u16.to_le_bytes()); // e_machine = EM_PPC64
-    elf.extend_from_slice(&1u32.to_le_bytes()); // e_version
-    elf.extend_from_slice(&entry_point.to_le_bytes()); // e_entry
-    elf.extend_from_slice(&elf_header_size.to_le_bytes()); // e_phoff
-    elf.extend_from_slice(&0u64.to_le_bytes()); // e_shoff (no section headers)
+    elf.extend_from_slice(&2u16.to_be_bytes()); // e_type = ET_EXEC
+    elf.extend_from_slice(&21u16.to_be_bytes()); // e_machine = EM_PPC64
+    elf.extend_from_slice(&1u32.to_be_bytes()); // e_version
+    elf.extend_from_slice(&entry_point.to_be_bytes()); // e_entry
+    elf.extend_from_slice(&elf_header_size.to_be_bytes()); // e_phoff
+    elf.extend_from_slice(&0u64.to_be_bytes()); // e_shoff (no section headers)
     // e_flags: EF_PPC64_ABI_V2 = 0x2 (required for PPC64LE ELFv2 ABI)
-    elf.extend_from_slice(&2u32.to_le_bytes()); // e_flags
-    elf.extend_from_slice(&64u16.to_le_bytes()); // e_ehsize
-    elf.extend_from_slice(&56u16.to_le_bytes()); // e_phentsize
-    elf.extend_from_slice(&2u16.to_le_bytes()); // e_phnum = 2
-    elf.extend_from_slice(&64u16.to_le_bytes()); // e_shentsize
-    elf.extend_from_slice(&0u16.to_le_bytes()); // e_shnum
-    elf.extend_from_slice(&0u16.to_le_bytes()); // e_shstrndx
+    elf.extend_from_slice(&2u32.to_be_bytes()); // e_flags
+    elf.extend_from_slice(&64u16.to_be_bytes()); // e_ehsize
+    elf.extend_from_slice(&56u16.to_be_bytes()); // e_phentsize
+    elf.extend_from_slice(&2u16.to_be_bytes()); // e_phnum = 2
+    elf.extend_from_slice(&64u16.to_be_bytes()); // e_shentsize
+    elf.extend_from_slice(&0u16.to_be_bytes()); // e_shnum
+    elf.extend_from_slice(&0u16.to_be_bytes()); // e_shstrndx
 
     // --- Program Header 1: LOAD (PF_R | PF_X) — .text ---
-    elf.extend_from_slice(&1u32.to_le_bytes()); // p_type = PT_LOAD
-    elf.extend_from_slice(&5u32.to_le_bytes()); // p_flags = PF_R | PF_X
-    elf.extend_from_slice(&0u64.to_le_bytes()); // p_offset = 0
-    elf.extend_from_slice(&base_addr.to_le_bytes()); // p_vaddr (page-aligned; p_offset=0 requires alignment)
-    elf.extend_from_slice(&base_addr.to_le_bytes()); // p_paddr
-    elf.extend_from_slice(&((text_offset + text_size) as u64).to_le_bytes()); // p_filesz
-    elf.extend_from_slice(&((text_offset + text_size) as u64).to_le_bytes()); // p_memsz
-    elf.extend_from_slice(&PAGE_SIZE.to_le_bytes()); // p_align
+    elf.extend_from_slice(&1u32.to_be_bytes()); // p_type = PT_LOAD
+    elf.extend_from_slice(&5u32.to_be_bytes()); // p_flags = PF_R | PF_X
+    elf.extend_from_slice(&0u64.to_be_bytes()); // p_offset = 0
+    elf.extend_from_slice(&base_addr.to_be_bytes()); // p_vaddr (page-aligned; p_offset=0 requires alignment)
+    elf.extend_from_slice(&base_addr.to_be_bytes()); // p_paddr
+    elf.extend_from_slice(&((text_offset + text_size) as u64).to_be_bytes()); // p_filesz
+    elf.extend_from_slice(&((text_offset + text_size) as u64).to_be_bytes()); // p_memsz
+    elf.extend_from_slice(&PAGE_SIZE.to_be_bytes()); // p_align
 
     // --- Program Header 2: LOAD (PF_R | PF_W) — .data / stack ---
-    elf.extend_from_slice(&1u32.to_le_bytes()); // p_type = PT_LOAD
-    elf.extend_from_slice(&6u32.to_le_bytes()); // p_flags = PF_R | PF_W
-    elf.extend_from_slice(&0u64.to_le_bytes()); // p_offset = 0
-    elf.extend_from_slice(&data_vaddr.to_le_bytes()); // p_vaddr
-    elf.extend_from_slice(&data_vaddr.to_le_bytes()); // p_paddr
-    elf.extend_from_slice(&0u64.to_le_bytes()); // p_filesz (no initialized data)
-    elf.extend_from_slice(&data_size.to_le_bytes()); // p_memsz (writable pages)
-    elf.extend_from_slice(&PAGE_SIZE.to_le_bytes()); // p_align
+    elf.extend_from_slice(&1u32.to_be_bytes()); // p_type = PT_LOAD
+    elf.extend_from_slice(&6u32.to_be_bytes()); // p_flags = PF_R | PF_W
+    elf.extend_from_slice(&0u64.to_be_bytes()); // p_offset = 0
+    elf.extend_from_slice(&data_vaddr.to_be_bytes()); // p_vaddr
+    elf.extend_from_slice(&data_vaddr.to_be_bytes()); // p_paddr
+    elf.extend_from_slice(&0u64.to_be_bytes()); // p_filesz (no initialized data)
+    elf.extend_from_slice(&data_size.to_be_bytes()); // p_memsz (writable pages)
+    elf.extend_from_slice(&PAGE_SIZE.to_be_bytes()); // p_align
 
     // --- .text section ---
     // Pad to page-aligned text_offset
@@ -4799,11 +4799,11 @@ impl Backend for PPC64Backend {
                 if fixup.is_unconditional {
                     let imm24 = (offset_words as u32) & 0x00FF_FFFF;
                     let b_word: u32 = (18u32 << 26) | (imm24 << 2);
-                    encoded[fixup.offset_in_encoded..fixup.offset_in_encoded+4].copy_from_slice(&b_word.to_le_bytes());
+                    encoded[fixup.offset_in_encoded..fixup.offset_in_encoded+4].copy_from_slice(&b_word.to_be_bytes());
                 } else {
                     let bd = (offset_words as i32) & 0x3FFF;
                     let bc_word: u32 = (16u32 << 26) | ((fixup.bc_bo & 0x1F) << 21) | ((fixup.bc_bi & 0x1F) << 16) | (((bd as u32) & 0x3FFF) << 2);
-                    encoded[fixup.offset_in_encoded..fixup.offset_in_encoded+4].copy_from_slice(&bc_word.to_le_bytes());
+                    encoded[fixup.offset_in_encoded..fixup.offset_in_encoded+4].copy_from_slice(&bc_word.to_be_bytes());
                 }
             }
         }
@@ -4997,7 +4997,7 @@ impl Backend for PPC64Backend {
             let li_val = (main_offset as i64) / 4;
             let imm24 = (li_val as u32) & 0x00FF_FFFF;
             let bl_word: u32 = (18u32 << 26) | (imm24 << 2) | 1;
-            start_stub[0..4].copy_from_slice(&bl_word.to_le_bytes());
+            start_stub[0..4].copy_from_slice(&bl_word.to_be_bytes());
         }
 
         // ── Build __vuma_alloc / __vuma_free syscall stubs (mmap/munmap) ──
@@ -5090,7 +5090,7 @@ impl Backend for PPC64Backend {
                         // Clear LI field (bits 2-25) and set new value
                         let patched = (existing & 0xFC00_0003) | (imm24 << 2);
                         all_code[abs_offset..abs_offset + 4]
-                            .copy_from_slice(&patched.to_le_bytes());
+                            .copy_from_slice(&patched.to_be_bytes());
                     } else {
                         // External symbol — defer to the system linker.
                         // Leave the BL instruction pointing to offset 0 (BL #0 = trap).
