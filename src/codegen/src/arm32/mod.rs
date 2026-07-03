@@ -4396,12 +4396,14 @@ impl Backend for Arm32Backend {
                         if let Some(d) = dst {
                             let dst_id = d.as_register().unwrap_or(0);
                             let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
-                            // Store low word (R0)
+                            // Store low word (R0) and zero high word.
+                            // For VUMA functions, the return value is 32-bit in R0 (u32/i32).
+                            // R1 may contain garbage from the callee's internal computation.
+                            // Storing R1 to the high word would corrupt subsequent 64-bit
+                            // operations (e.g., Add, And, Or) that use ss_load_value_64.
+                            // Fix: always zero the high word (ss_store_32_zero does this).
                             code.extend(ss_store_32_zero(Gpr::R0, dst_offset, fs));
-                            if !is_extern {
-                                // VUMA function: store high word (R1) from 64-bit return
-                                code.extend(ss_store_to_slot(Gpr::R1, dst_offset + 4));
-                            } else {
+                            if *is_extern {
                                 // Extern/syscall: sign-extend 32-bit R0 to 64-bit R0:R1.
                                 // MOV R1, R0, ASR #31 — fills R1 with 0xFFFFFFFF if R0 is
                                 // negative (bit 31 set), or 0x00000000 if non-negative.
