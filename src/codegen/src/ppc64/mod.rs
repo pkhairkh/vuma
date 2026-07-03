@@ -3199,8 +3199,7 @@ fn lower_ir_instr_ppc64(
 
             // AtomicLoad pattern (acquire semantics):
             //   sync                        ; full barrier
-            //   ldarx/lwarx rT, 0, rA       ; load and reserve
-            //   stdcx./stwcx. R0, 0, rA     ; clear reservation (dummy store)
+            //   lbz/lhz/lwz/ld rT, 0(rA)    ; plain aligned load (atomic on PPC64)
             //   isync                       ; context sync → acquire
             //   (sign-extend if needed for sub-word types)
 
@@ -3209,14 +3208,9 @@ fn lower_ir_instr_ppc64(
             match ty {
                 IRType::I8 | IRType::U8 => {
                     result.push(emit_alloc_instr(
-                        Instruction::Lbarx { rt: d, ra: Gpr::R0, rb: a },
+                        Instruction::Lbz { rt: d, ra: a, d: 0 },
                         vec![PhysicalReg::new(RegClass::Gpr, a.encoding())],
                         vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
-                    ));
-                    result.push(emit_alloc_instr(
-                        Instruction::Stbcx { rs: Gpr::R0, ra: Gpr::R0, rb: a },
-                        vec![PhysicalReg::new(RegClass::Gpr, a.encoding())],
-                        vec![],
                     ));
                     result.push(emit_alloc_instr(Instruction::Isync, vec![], vec![]));
                     if *ty == IRType::I8 {
@@ -3229,14 +3223,9 @@ fn lower_ir_instr_ppc64(
                 }
                 IRType::I16 | IRType::U16 => {
                     result.push(emit_alloc_instr(
-                        Instruction::Lharx { rt: d, ra: Gpr::R0, rb: a },
+                        Instruction::Lhz { rt: d, ra: a, d: 0 },
                         vec![PhysicalReg::new(RegClass::Gpr, a.encoding())],
                         vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
-                    ));
-                    result.push(emit_alloc_instr(
-                        Instruction::Sthcx { rs: Gpr::R0, ra: Gpr::R0, rb: a },
-                        vec![PhysicalReg::new(RegClass::Gpr, a.encoding())],
-                        vec![],
                     ));
                     result.push(emit_alloc_instr(Instruction::Isync, vec![], vec![]));
                     if *ty == IRType::I16 {
@@ -3249,14 +3238,9 @@ fn lower_ir_instr_ppc64(
                 }
                 IRType::I32 | IRType::U32 => {
                     result.push(emit_alloc_instr(
-                        Instruction::Lwarx { rt: d, ra: Gpr::R0, rb: a },
+                        Instruction::Lwz { rt: d, ra: a, d: 0 },
                         vec![PhysicalReg::new(RegClass::Gpr, a.encoding())],
                         vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
-                    ));
-                    result.push(emit_alloc_instr(
-                        Instruction::Stwcx { rs: Gpr::R0, ra: Gpr::R0, rb: a },
-                        vec![PhysicalReg::new(RegClass::Gpr, a.encoding())],
-                        vec![],
                     ));
                     result.push(emit_alloc_instr(Instruction::Isync, vec![], vec![]));
                     if *ty == IRType::I32 {
@@ -3270,14 +3254,9 @@ fn lower_ir_instr_ppc64(
                 _ => {
                     // 64-bit (I64, U64, Ptr, etc.)
                     result.push(emit_alloc_instr(
-                        Instruction::Ldarx { rt: d, ra: Gpr::R0, rb: a },
+                        Instruction::Ld { rt: d, ra: a, ds: 0 },
                         vec![PhysicalReg::new(RegClass::Gpr, a.encoding())],
                         vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
-                    ));
-                    result.push(emit_alloc_instr(
-                        Instruction::Stdcx { rs: Gpr::R0, ra: Gpr::R0, rb: a },
-                        vec![PhysicalReg::new(RegClass::Gpr, a.encoding())],
-                        vec![],
                     ));
                     result.push(emit_alloc_instr(Instruction::Isync, vec![], vec![]));
                 }
