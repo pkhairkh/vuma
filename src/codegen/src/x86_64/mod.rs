@@ -2542,53 +2542,56 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         stubs.push(("print_int".to_string(), code));
     }
 
-    // print_hex(value: i32, width: i32) -> void
-    // Simple stub: just calls print_int for now (placeholder)
-    // Args: RDI = value, RSI = width
+    // print_hex(buf: Address, count: u64) -> void
+    // Prints `count` bytes from `buf` as hex to stdout.
+    // Args: RDI = buf pointer, RSI = count
     {
         let mut code = Vec::new();
-        // For now, just call print_int with the value
-        // push rsi (width) — not used
-        // call print_int (will be resolved by relocation)
-        // The actual print_int function is at a known offset
-        // For simplicity, just convert to decimal and print
         code.extend_from_slice(&[0x55]); // push rbp
         code.extend_from_slice(&[0x48, 0x89, 0xE5]); // mov rbp, rsp
-        // Convert value (rdi) to hex string on stack
-        // lea rcx, [rsp+16] (end of buffer)
-        code.extend_from_slice(&[0x48, 0x8D, 0x4C, 0x24, 0x10]); // lea rcx, [rsp+16]
-        // mov byte [rcx], 0x0a (newline)
-        code.extend_from_slice(&[0xC6, 0x01, 0x0A]); // mov byte [rcx], 10
-        // sub rcx, 1
-        code.extend_from_slice(&[0x48, 0x83, 0xE9, 0x01]); // sub rcx, 1
-        // mov r8, rdi (save value)
-        code.extend_from_slice(&[0x49, 0x89, 0xF8]); // mov r8, rdi
-        // mov r9, 4 (bytes to process = 4 for i32)
-        code.extend_from_slice(&[0x49, 0xC7, 0xC1, 0x04, 0x00, 0x00, 0x00]); // mov r9, 4
-        // loop:
-        // mov rax, r8; and rax, 0xF; add al, 0x30; cmp al, 0x3A; jl digit; add al, 7
-        code.extend_from_slice(&[0x4C, 0x89, 0xC0]); // mov rax, r8
-        code.extend_from_slice(&[0x48, 0x83, 0xE0, 0x0F]); // and rax, 0xF
+        // Save buf (rdi) in r8, count (rsi) in r9
+        code.extend_from_slice(&[0x49, 0x89, 0xF8]); // mov r8, rdi (buf)
+        code.extend_from_slice(&[0x49, 0x89, 0xF1]); // mov r9, rsi (count)
+        // Check count == 0 → skip
+        code.extend_from_slice(&[0x4D, 0x85, 0xC9]); // test r9, r9
+        code.extend_from_slice(&[0x74, 0x3C]); // jz +60 (to pop rbp; ret)
+
+        // Loop: for each byte in buf[0..count]
+        // r8 = current buf pointer, r9 = remaining count
+        // loop_start (offset = 15):
+        // Load byte: movzx eax, byte [r8]
+        code.extend_from_slice(&[0x41, 0x0F, 0xB6, 0x00]); // movzx eax, byte [r8]
+        // Compute high nibble: shr eax, 4
+        code.extend_from_slice(&[0xC1, 0xE8, 0x04]); // shr eax, 4
+        // Convert to hex char: add al, 0x30; cmp al, 0x3A; jl +2; add al, 7
         code.extend_from_slice(&[0x04, 0x30]); // add al, 0x30
         code.extend_from_slice(&[0x3C, 0x3A]); // cmp al, 0x3A
-        code.extend_from_slice(&[0x7C, 0x02]); // jl +2 (skip add)
-        code.extend_from_slice(&[0x04, 0x07]); // add al, 7 (a-f)
-        // mov [rcx], al; sub rcx, 1; shr r8, 4; sub r9, 1; jnz loop
-        code.extend_from_slice(&[0x88, 0x01]); // mov [rcx], al
-        code.extend_from_slice(&[0x48, 0x83, 0xE9, 0x01]); // sub rcx, 1
-        code.extend_from_slice(&[0x49, 0xC1, 0xE8, 0x04]); // shr r8, 4
-        code.extend_from_slice(&[0x49, 0x83, 0xE9, 0x01]); // sub r9, 1
-        code.extend_from_slice(&[0x75, 0xE5]); // jnz -27 (back to loop)
-        // done: add rcx, 1; lea rdx, [rsp+17]; sub rdx, rcx; mov rsi, rcx
-        code.extend_from_slice(&[0x48, 0x83, 0xC1, 0x01]); // add rcx, 1
-        code.extend_from_slice(&[0x48, 0x8D, 0x54, 0x24, 0x11]); // lea rdx, [rsp+17]
-        code.extend_from_slice(&[0x48, 0x29, 0xCA]); // sub rdx, rcx
-        code.extend_from_slice(&[0x48, 0x89, 0xCE]); // mov rsi, rcx
-        // mov edi, 1; mov rax, 1; syscall
+        code.extend_from_slice(&[0x7C, 0x02]); // jl +2
+        code.extend_from_slice(&[0x04, 0x07]); // add al, 7
+        // Store high nibble on stack: mov [rsp-8], al
+        code.extend_from_slice(&[0x88, 0x44, 0x24, 0xF8]); // mov [rsp-8], al
+        // Load byte again: movzx eax, byte [r8]
+        code.extend_from_slice(&[0x41, 0x0F, 0xB6, 0x00]); // movzx eax, byte [r8]
+        // Compute low nibble: and eax, 0xF
+        code.extend_from_slice(&[0x83, 0xE0, 0x0F]); // and eax, 0xF
+        // Convert to hex char
+        code.extend_from_slice(&[0x04, 0x30]); // add al, 0x30
+        code.extend_from_slice(&[0x3C, 0x3A]); // cmp al, 0x3A
+        code.extend_from_slice(&[0x7C, 0x02]); // jl +2
+        code.extend_from_slice(&[0x04, 0x07]); // add al, 7
+        // Store low nibble: mov [rsp-7], al
+        code.extend_from_slice(&[0x88, 0x44, 0x24, 0xF9]); // mov [rsp-7], al
+        // Write 2 bytes to stdout: write(1, rsp-8, 2)
         code.extend_from_slice(&[0xBF, 0x01, 0x00, 0x00, 0x00]); // mov edi, 1
-        code.extend_from_slice(&[0x48, 0xC7, 0xC0, 0x01, 0x00, 0x00, 0x00]); // mov rax, 1
+        code.extend_from_slice(&[0x48, 0x8D, 0x74, 0x24, 0xF8]); // lea rsi, [rsp-8]
+        code.extend_from_slice(&[0xBA, 0x02, 0x00, 0x00, 0x00]); // mov edx, 2
+        code.extend_from_slice(&[0x48, 0xC7, 0xC0, 0x01, 0x00, 0x00, 0x00]); // mov rax, 1 (sys_write)
         code.extend_from_slice(&[0x0F, 0x05]); // syscall
-        // pop rbp; ret
+        // Advance: inc r8; dec r9; jnz loop_start
+        code.extend_from_slice(&[0x49, 0xFF, 0xC0]); // inc r8
+        code.extend_from_slice(&[0x49, 0xFF, 0xC9]); // dec r9
+        code.extend_from_slice(&[0x75, 0xBA]); // jnz -70 (back to loop_start at offset 15)
+        // done: pop rbp; ret
         code.extend_from_slice(&[0x5D]); // pop rbp
         code.extend_from_slice(&[0xC3]); // ret
         stubs.push(("print_hex".to_string(), code));
