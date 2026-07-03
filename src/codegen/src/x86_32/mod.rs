@@ -1833,11 +1833,20 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
     // VUMA args come in: EDI=arg0, ESI=arg1, EDX=arg2, ECX=arg3
     // Remap: EDI→EBX, ESI→ECX, EDX stays, ECX→ESI
     // Use PUSH/POP to avoid clobbering during remap.
+    //
+    // IMPORTANT: EBX is callee-saved on i386 SysV ABI but is also the syscall
+    // arg1 register. Every stub that touches EBX MUST save/restore it with
+    // PUSH EBX (outermost) / POP EBX (outermost). Otherwise the caller's
+    // callee-saved state is corrupted — which was the root cause of the
+    // self_exec SIGSEGV (parent crashed at NULL after close/free/munmap).
 
     // write(fd, buf, count) → ssize_t  [i386 syscall 4]
     // args: EDI=fd, ESI=buf, EDX=count → EBX=fd, ECX=buf, EDX=count
+    // EBX is callee-saved on i386 SysV ABI but is syscall arg1.
+    // Save/restore it around the whole stub (outermost push/pop).
     {
         let mut code = Vec::new();
+        code.extend(encode_push(Gpr::Rbx));       // save EBX (callee-saved)
         // push edx (save count before clobbering)
         code.extend(encode_push(Gpr::Rdx));       // push count
         // push esi (save buf)
@@ -1851,14 +1860,18 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         // mov eax, 4 (sys_write)
         code.extend(encode_mov_reg_imm32(Gpr::Rax, 4));
         code.extend(encode_syscall());             // int 0x80
+        code.extend(encode_pop(Gpr::Rbx));        // restore EBX
         code.extend(encode_ret());
         stubs.push(("write".to_string(), code));
     }
 
     // read(fd, buf, count) → ssize_t  [i386 syscall 3]
     // args: EDI=fd, ESI=buf, EDX=count → EBX=fd, ECX=buf, EDX=count
+    // EBX is callee-saved on i386 SysV ABI but is syscall arg1.
+    // Save/restore it around the whole stub (outermost push/pop).
     {
         let mut code = Vec::new();
+        code.extend(encode_push(Gpr::Rbx));       // save EBX (callee-saved)
         code.extend(encode_push(Gpr::Rdx));
         code.extend(encode_push(Gpr::Rsi));
         code.extend(encode_mov_reg_reg(Gpr::Rbx, Gpr::Rdi));
@@ -1866,14 +1879,18 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         code.extend(encode_pop(Gpr::Rdx));
         code.extend(encode_mov_reg_imm32(Gpr::Rax, 3));
         code.extend(encode_syscall());
+        code.extend(encode_pop(Gpr::Rbx));        // restore EBX
         code.extend(encode_ret());
         stubs.push(("read".to_string(), code));
     }
 
     // open(pathname, flags, mode) → int  [i386 syscall 5]
     // args: EDI=pathname, ESI=flags, EDX=mode → EBX=pathname, ECX=flags, EDX=mode
+    // EBX is callee-saved on i386 SysV ABI but is syscall arg1.
+    // Save/restore it around the whole stub (outermost push/pop).
     {
         let mut code = Vec::new();
+        code.extend(encode_push(Gpr::Rbx));       // save EBX (callee-saved)
         code.extend(encode_push(Gpr::Rdx));
         code.extend(encode_push(Gpr::Rsi));
         code.extend(encode_mov_reg_reg(Gpr::Rbx, Gpr::Rdi));
@@ -1881,39 +1898,53 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         code.extend(encode_pop(Gpr::Rdx));
         code.extend(encode_mov_reg_imm32(Gpr::Rax, 5));
         code.extend(encode_syscall());
+        code.extend(encode_pop(Gpr::Rbx));        // restore EBX
         code.extend(encode_ret());
         stubs.push(("open".to_string(), code));
     }
 
     // close(fd) → int  [i386 syscall 6]
     // args: EDI=fd → EBX=fd
+    // EBX is callee-saved on i386 SysV ABI but is syscall arg1.
+    // Save/restore it around the whole stub.
     {
         let mut code = Vec::new();
+        code.extend(encode_push(Gpr::Rbx));       // save EBX (callee-saved)
         code.extend(encode_mov_reg_reg(Gpr::Rbx, Gpr::Rdi));
         code.extend(encode_mov_reg_imm32(Gpr::Rax, 6));
         code.extend(encode_syscall());
+        code.extend(encode_pop(Gpr::Rbx));        // restore EBX
         code.extend(encode_ret());
         stubs.push(("close".to_string(), code));
     }
 
     // exit(code) → void  [i386 syscall 1]
     // args: EDI=code → EBX=code
+    // EBX is callee-saved on i386 SysV ABI but is syscall arg1.
+    // Save/restore it (the restore is dead code since exit never returns,
+    // but we keep the pattern uniform for safety).
     {
         let mut code = Vec::new();
+        code.extend(encode_push(Gpr::Rbx));       // save EBX (callee-saved)
         code.extend(encode_mov_reg_reg(Gpr::Rbx, Gpr::Rdi));
         code.extend(encode_mov_reg_imm32(Gpr::Rax, 1));
         code.extend(encode_syscall());
+        code.extend(encode_pop(Gpr::Rbx));        // restore EBX (dead code)
         code.extend(encode_int3()); // safety guard (exit never returns)
         stubs.push(("exit".to_string(), code));
     }
 
     // unlink(pathname) → int  [i386 syscall 10]
     // args: EDI=pathname → EBX=pathname
+    // EBX is callee-saved on i386 SysV ABI but is syscall arg1.
+    // Save/restore it around the whole stub.
     {
         let mut code = Vec::new();
+        code.extend(encode_push(Gpr::Rbx));       // save EBX (callee-saved)
         code.extend(encode_mov_reg_reg(Gpr::Rbx, Gpr::Rdi));
         code.extend(encode_mov_reg_imm32(Gpr::Rax, 10));
         code.extend(encode_syscall());
+        code.extend(encode_pop(Gpr::Rbx));        // restore EBX
         code.extend(encode_ret());
         stubs.push(("unlink".to_string(), code));
     }
@@ -1929,6 +1960,7 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
     // heap allocation (not stack allocation via Alloc instruction).
     {
         let mut code = Vec::new();
+        code.extend(encode_push(Gpr::Rbx));                     // save EBX (callee-saved, outermost)
         // Save EBP (frame pointer)
         code.extend(encode_push(Gpr::Rbp));
         // mmap2(NULL, size, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0)
@@ -1942,19 +1974,24 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         code.extend(encode_syscall());
         // Restore EBP (frame pointer)
         code.extend(encode_pop(Gpr::Rbp));
+        code.extend(encode_pop(Gpr::Rbx));                      // restore EBX (callee-saved, outermost)
         code.extend(encode_ret());
         stubs.push(("__vuma_alloc".to_string(), code));
     }
 
     // __vuma_free(addr, size) → void  [i386 syscall 91 = munmap]
     // args: EDI=addr, ESI=size → EBX=addr, ECX=size
+    // EBX is callee-saved on i386 SysV ABI but is syscall arg1.
+    // Save/restore it around the whole stub (outermost push/pop).
     {
         let mut code = Vec::new();
+        code.extend(encode_push(Gpr::Rbx));                     // save EBX (callee-saved, outermost)
         code.extend(encode_push(Gpr::Rsi));                     // push size
         code.extend(encode_mov_reg_reg(Gpr::Rbx, Gpr::Rdi));    // EBX = addr
         code.extend(encode_pop(Gpr::Rcx));                      // ECX = size
         code.extend(encode_mov_reg_imm32(Gpr::Rax, 91));        // EAX = sys_munmap
         code.extend(encode_syscall());
+        code.extend(encode_pop(Gpr::Rbx));                      // restore EBX
         code.extend(encode_ret());
         stubs.push(("__vuma_free".to_string(), code));
     }
@@ -1963,8 +2000,11 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
     // Kernel: rt_sigaction(int signum, const struct sigaction *act,
     //                      struct sigaction *oldact, size_t sigsetsize)
     // args: EDI=signum, ESI=act, EDX=oldact → EBX=signum, ECX=act, EDX=oldact, ESI=8
+    // EBX is callee-saved on i386 SysV ABI but is syscall arg1.
+    // Save/restore it around the whole stub (outermost push/pop).
     {
         let mut code = Vec::new();
+        code.extend(encode_push(Gpr::Rbx));     // save EBX (callee-saved, outermost)
         // Save oldact (EDX) before clobbering
         code.extend(encode_push(Gpr::Rdx));     // push oldact
         code.extend(encode_push(Gpr::Rsi));     // push act
@@ -1974,67 +2014,89 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         code.extend(encode_mov_reg_imm32(Gpr::Rsi, 8)); // ESI = sigsetsize = 8
         code.extend(encode_mov_reg_imm32(Gpr::Rax, 174)); // sys_rt_sigaction
         code.extend(encode_syscall());
+        code.extend(encode_pop(Gpr::Rbx));      // restore EBX
         code.extend(encode_ret());
         stubs.push(("sigaction".to_string(), code));
     }
 
     // alarm(seconds) → unsigned int  [i386 syscall 27]
     // args: EDI=seconds → EBX=seconds
+    // EBX is callee-saved on i386 SysV ABI but is syscall arg1.
+    // Save/restore it around the whole stub.
     {
         let mut code = Vec::new();
+        code.extend(encode_push(Gpr::Rbx));       // save EBX (callee-saved)
         code.extend(encode_mov_reg_reg(Gpr::Rbx, Gpr::Rdi));
         code.extend(encode_mov_reg_imm32(Gpr::Rax, 27));
         code.extend(encode_syscall());
+        code.extend(encode_pop(Gpr::Rbx));        // restore EBX
         code.extend(encode_ret());
         stubs.push(("alarm".to_string(), code));
     }
 
     // pipe(int pipefd[2]) → int  [i386 syscall 42]
     // args: EDI=pipefd → EBX=pipefd
+    // EBX is callee-saved on i386 SysV ABI but is syscall arg1.
+    // Save/restore it around the whole stub.
     {
         let mut code = Vec::new();
+        code.extend(encode_push(Gpr::Rbx));       // save EBX (callee-saved)
         code.extend(encode_mov_reg_reg(Gpr::Rbx, Gpr::Rdi));
         code.extend(encode_mov_reg_imm32(Gpr::Rax, 42));
         code.extend(encode_syscall());
+        code.extend(encode_pop(Gpr::Rbx));        // restore EBX
         code.extend(encode_ret());
         stubs.push(("pipe".to_string(), code));
     }
 
     // dup2(int oldfd, int newfd) → int  [i386 syscall 63]
     // args: EDI=oldfd, ESI=newfd → EBX=oldfd, ECX=newfd
+    // EBX is callee-saved on i386 SysV ABI but is syscall arg1.
+    // Save/restore it around the whole stub (outermost push/pop).
     {
         let mut code = Vec::new();
+        code.extend(encode_push(Gpr::Rbx));       // save EBX (callee-saved, outermost)
         code.extend(encode_push(Gpr::Rsi));
         code.extend(encode_mov_reg_reg(Gpr::Rbx, Gpr::Rdi));
         code.extend(encode_pop(Gpr::Rcx));
         code.extend(encode_mov_reg_imm32(Gpr::Rax, 63));
         code.extend(encode_syscall());
+        code.extend(encode_pop(Gpr::Rbx));        // restore EBX
         code.extend(encode_ret());
         stubs.push(("dup2".to_string(), code));
     }
 
     // getpid() → pid_t  [i386 syscall 20]
+    // EBX is callee-saved on i386 SysV ABI; save/restore for uniformity.
     {
         let mut code = Vec::new();
+        code.extend(encode_push(Gpr::Rbx));       // save EBX (callee-saved)
         code.extend(encode_mov_reg_imm32(Gpr::Rax, 20));
         code.extend(encode_syscall());
+        code.extend(encode_pop(Gpr::Rbx));        // restore EBX
         code.extend(encode_ret());
         stubs.push(("getpid".to_string(), code));
     }
 
     // fork() → pid_t  [i386 syscall 2]
+    // EBX is callee-saved on i386 SysV ABI; save/restore for uniformity.
     {
         let mut code = Vec::new();
+        code.extend(encode_push(Gpr::Rbx));       // save EBX (callee-saved)
         code.extend(encode_mov_reg_imm32(Gpr::Rax, 2));
         code.extend(encode_syscall());
+        code.extend(encode_pop(Gpr::Rbx));        // restore EBX
         code.extend(encode_ret());
         stubs.push(("fork".to_string(), code));
     }
 
     // execve(pathname, argv, envp) → int  [i386 syscall 11]
     // args: EDI=pathname, ESI=argv, EDX=envp → EBX=pathname, ECX=argv, EDX=envp
+    // EBX is callee-saved on i386 SysV ABI but is syscall arg1.
+    // Save/restore it around the whole stub (outermost push/pop).
     {
         let mut code = Vec::new();
+        code.extend(encode_push(Gpr::Rbx));       // save EBX (callee-saved, outermost)
         code.extend(encode_push(Gpr::Rdx));
         code.extend(encode_push(Gpr::Rsi));
         code.extend(encode_mov_reg_reg(Gpr::Rbx, Gpr::Rdi));
@@ -2042,6 +2104,7 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         code.extend(encode_pop(Gpr::Rdx));
         code.extend(encode_mov_reg_imm32(Gpr::Rax, 11));
         code.extend(encode_syscall());
+        code.extend(encode_pop(Gpr::Rbx));        // restore EBX (only reached on execve failure)
         code.extend(encode_ret());
         stubs.push(("execve".to_string(), code));
     }
@@ -2049,8 +2112,11 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
     // wait4(pid, wstatus, options, rusage) → pid_t  [i386 syscall 114]
     // args: EDI=pid, ESI=wstatus, EDX=options, ECX=rusage
     //   → EBX=pid, ECX=wstatus, EDX=options, ESI=rusage
+    // EBX is callee-saved on i386 SysV ABI but is syscall arg1.
+    // Save/restore it around the whole stub (outermost push/pop).
     {
         let mut code = Vec::new();
+        code.extend(encode_push(Gpr::Rbx));     // save EBX (callee-saved, outermost)
         code.extend(encode_push(Gpr::Rcx));     // push rusage
         code.extend(encode_push(Gpr::Rdx));     // push options
         code.extend(encode_push(Gpr::Rsi));     // push wstatus
@@ -2060,8 +2126,29 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         code.extend(encode_pop(Gpr::Rsi));      // ESI = rusage
         code.extend(encode_mov_reg_imm32(Gpr::Rax, 114)); // sys_wait4
         code.extend(encode_syscall());
+        code.extend(encode_pop(Gpr::Rbx));      // restore EBX
         code.extend(encode_ret());
         stubs.push(("wait4".to_string(), code));
+    }
+
+    // waitpid(pid, wstatus, options) → pid_t  [i386 syscall 114 = sys_wait4]
+    // VUMA declares: fn waitpid(pid: i64, status: Address, options: i64) -> i64;
+    // VUMA args: EDI=pid, ESI=wstatus, EDX=options
+    //   → EBX=pid, ECX=wstatus, EDX=options, ESI=0 (rusage = NULL)
+    // EBX is callee-saved on i386 SysV ABI but is syscall arg1.
+    // Save/restore it around the whole stub (outermost push/pop).
+    {
+        let mut code = Vec::new();
+        code.extend(encode_push(Gpr::Rbx));                  // save EBX (callee-saved, outermost)
+        code.extend(encode_push(Gpr::Rsi));                  // push wstatus
+        code.extend(encode_mov_reg_reg(Gpr::Rbx, Gpr::Rdi)); // EBX = pid
+        code.extend(encode_pop(Gpr::Rcx));                   // ECX = wstatus
+        code.extend(encode_xor_reg_reg(Gpr::Rsi, Gpr::Rsi)); // ESI = 0 (rusage = NULL)
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 114));    // EAX = sys_wait4
+        code.extend(encode_syscall());
+        code.extend(encode_pop(Gpr::Rbx));                   // restore EBX
+        code.extend(encode_ret());
+        stubs.push(("waitpid".to_string(), code));
     }
 
     // mmap(addr, length, prot, flags, fd, offset) → void*  [i386 syscall 192 = mmap2]
@@ -2082,6 +2169,7 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
     // all subsequent local variable access reads garbage → SIGSEGV.
     {
         let mut code = Vec::new();
+        code.extend(encode_push(Gpr::Rbx));                  // save EBX (callee-saved, outermost)
         // Save EBP (frame pointer) — will be restored after the syscall.
         code.extend(encode_push(Gpr::Rbp));                  // push EBP
         // Save addr in EBX (target register) before we lose it.
@@ -2091,14 +2179,15 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         // Push ESI (length) so we can later pop it into ECX.
         code.extend(encode_push(Gpr::Rsi));                  // push length
         // Stack now: [ESP]=length, [ESP+4]=flags, [ESP+8]=saved_EBP,
-        //            [ESP+12]=retaddr, [ESP+16]=fd, [ESP+20]=offset
+        //            [ESP+12]=saved_EBX, [ESP+16]=retaddr,
+        //            [ESP+20]=fd, [ESP+24]=offset
         // Compute EBP = offset_pages = offset_bytes >> 12
-        code.extend(encode_mov_reg_mem(Gpr::Rax, Gpr::Rsp, 20)); // EAX = offset_bytes
+        code.extend(encode_mov_reg_mem(Gpr::Rax, Gpr::Rsp, 24)); // EAX = offset_bytes
         // shr EAX, 12
         code.extend_from_slice(&[0xC1, 0xE8, 0x0C]);         // shr eax, 12
         code.extend(encode_mov_reg_reg(Gpr::Rbp, Gpr::Rax)); // EBP = offset_pages
-        // Set EDI = fd (was at [ESP+16] after our three pushes)
-        code.extend(encode_mov_reg_mem(Gpr::Rax, Gpr::Rsp, 16)); // EAX = fd
+        // Set EDI = fd (was at [ESP+20] after our four pushes)
+        code.extend(encode_mov_reg_mem(Gpr::Rax, Gpr::Rsp, 20)); // EAX = fd
         code.extend(encode_mov_reg_reg(Gpr::Rdi, Gpr::Rax)); // EDI = fd
         // Restore length → ECX and flags → ESI from the stack.
         code.extend(encode_pop(Gpr::Rcx));                   // ECX = length
@@ -2108,19 +2197,24 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         code.extend(encode_syscall());                       // int 0x80
         // Restore EBP (frame pointer) before returning.
         code.extend(encode_pop(Gpr::Rbp));                   // pop EBP
+        code.extend(encode_pop(Gpr::Rbx));                   // restore EBX (callee-saved, outermost)
         code.extend(encode_ret());
         stubs.push(("mmap".to_string(), code));
     }
 
     // munmap(addr, length) → int  [i386 syscall 91]
     // VUMA args: EDI=addr, ESI=length → EBX=addr, ECX=length
+    // EBX is callee-saved on i386 SysV ABI but is syscall arg1.
+    // Save/restore it around the whole stub (outermost push/pop).
     {
         let mut code = Vec::new();
+        code.extend(encode_push(Gpr::Rbx));                  // save EBX (callee-saved, outermost)
         code.extend(encode_push(Gpr::Rsi));                  // push length
         code.extend(encode_mov_reg_reg(Gpr::Rbx, Gpr::Rdi)); // EBX = addr
         code.extend(encode_pop(Gpr::Rcx));                   // ECX = length
         code.extend(encode_mov_reg_imm32(Gpr::Rax, 91));     // EAX = sys_munmap
         code.extend(encode_syscall());
+        code.extend(encode_pop(Gpr::Rbx));                   // restore EBX
         code.extend(encode_ret());
         stubs.push(("munmap".to_string(), code));
     }
@@ -2128,24 +2222,32 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
     // socket(domain, type, protocol) → int  [i386 syscall 359]
     // VUMA args: EDI=domain, ESI=type, EDX=protocol
     //   → EBX=domain, ECX=type, EDX=protocol
+    // EBX is callee-saved on i386 SysV ABI but is syscall arg1.
+    // Save/restore it around the whole stub (outermost push/pop).
     {
         let mut code = Vec::new();
+        code.extend(encode_push(Gpr::Rbx));                  // save EBX (callee-saved, outermost)
         code.extend(encode_push(Gpr::Rsi));                  // push type
         code.extend(encode_mov_reg_reg(Gpr::Rbx, Gpr::Rdi)); // EBX = domain
         code.extend(encode_pop(Gpr::Rcx));                   // ECX = type
         code.extend(encode_mov_reg_imm32(Gpr::Rax, 359));    // EAX = sys_socket (i386)
         code.extend(encode_syscall());
+        code.extend(encode_pop(Gpr::Rbx));                   // restore EBX
         code.extend(encode_ret());
         stubs.push(("socket".to_string(), code));
     }
 
     // epoll_create1(flags) → int  [i386 syscall 329]
     // VUMA args: EDI=flags → EBX=flags
+    // EBX is callee-saved on i386 SysV ABI but is syscall arg1.
+    // Save/restore it around the whole stub.
     {
         let mut code = Vec::new();
+        code.extend(encode_push(Gpr::Rbx));                  // save EBX (callee-saved)
         code.extend(encode_mov_reg_reg(Gpr::Rbx, Gpr::Rdi)); // EBX = flags
         code.extend(encode_mov_reg_imm32(Gpr::Rax, 329));    // EAX = sys_epoll_create1 (i386)
         code.extend(encode_syscall());
+        code.extend(encode_pop(Gpr::Rbx));                   // restore EBX
         code.extend(encode_ret());
         stubs.push(("epoll_create1".to_string(), code));
     }
@@ -2161,6 +2263,7 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
     // save/restore it, otherwise the caller's stack frame is corrupted.
     {
         let mut code = Vec::new();
+        code.extend(encode_push(Gpr::Rbx));                  // save EBX (callee-saved, outermost)
         // Save EBP (frame pointer) — will be restored after the syscall.
         code.extend(encode_push(Gpr::Rbp));                  // push EBP
         // Save uaddr in EBX (target register) before losing it.
@@ -2170,12 +2273,13 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         code.extend(encode_push(Gpr::Rcx));                  // push timeout
         code.extend(encode_push(Gpr::Rsi));                  // push futex_op
         // Stack: [ESP]=futex_op, [ESP+4]=timeout, [ESP+8]=saved_EBP,
-        //        [ESP+12]=retaddr, [ESP+16]=uaddr2, [ESP+20]=val3
-        // Set EBP = val3 (was at [ESP+20] after three pushes)
-        code.extend(encode_mov_reg_mem(Gpr::Rax, Gpr::Rsp, 20)); // EAX = val3
+        //        [ESP+12]=saved_EBX, [ESP+16]=retaddr,
+        //        [ESP+20]=uaddr2, [ESP+24]=val3
+        // Set EBP = val3 (was at [ESP+24] after four pushes)
+        code.extend(encode_mov_reg_mem(Gpr::Rax, Gpr::Rsp, 24)); // EAX = val3
         code.extend(encode_mov_reg_reg(Gpr::Rbp, Gpr::Rax)); // EBP = val3
-        // Set EDI = uaddr2 (was at [ESP+16] after three pushes)
-        code.extend(encode_mov_reg_mem(Gpr::Rax, Gpr::Rsp, 16)); // EAX = uaddr2
+        // Set EDI = uaddr2 (was at [ESP+20] after four pushes)
+        code.extend(encode_mov_reg_mem(Gpr::Rax, Gpr::Rsp, 20)); // EAX = uaddr2
         code.extend(encode_mov_reg_reg(Gpr::Rdi, Gpr::Rax)); // EDI = uaddr2
         // Restore futex_op → ECX and timeout → ESI from the stack.
         code.extend(encode_pop(Gpr::Rcx));                   // ECX = futex_op
@@ -2184,6 +2288,7 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         code.extend(encode_syscall());
         // Restore EBP (frame pointer) before returning.
         code.extend(encode_pop(Gpr::Rbp));                   // pop EBP
+        code.extend(encode_pop(Gpr::Rbx));                   // restore EBX (callee-saved, outermost)
         code.extend(encode_ret());
         stubs.push(("futex".to_string(), code));
     }
@@ -2191,8 +2296,11 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
     // epoll_ctl(epfd, op, fd, event) → int  [i386 syscall 253]
     // VUMA args: EDI=epfd, ESI=op, EDX=fd, ECX=event
     //   → EBX=epfd, ECX=op, EDX=fd, ESI=event
+    // EBX is callee-saved on i386 SysV ABI but is syscall arg1.
+    // Save/restore it around the whole stub (outermost push/pop).
     {
         let mut code = Vec::new();
+        code.extend(encode_push(Gpr::Rbx));                  // save EBX (callee-saved, outermost)
         code.extend(encode_push(Gpr::Rcx));                  // push event
         code.extend(encode_push(Gpr::Rsi));                  // push op
         code.extend(encode_mov_reg_reg(Gpr::Rbx, Gpr::Rdi)); // EBX = epfd
@@ -2200,6 +2308,7 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         code.extend(encode_pop(Gpr::Rsi));                   // ESI = event
         code.extend(encode_mov_reg_imm32(Gpr::Rax, 253));    // EAX = sys_epoll_ctl (i386)
         code.extend(encode_syscall());
+        code.extend(encode_pop(Gpr::Rbx));                   // restore EBX
         code.extend(encode_ret());
         stubs.push(("epoll_ctl".to_string(), code));
     }
@@ -2207,8 +2316,11 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
     // epoll_wait(epfd, events, maxevents, timeout) → int  [i386 syscall 256]
     // VUMA args: EDI=epfd, ESI=events, EDX=maxevents, ECX=timeout
     //   → EBX=epfd, ECX=events, EDX=maxevents, ESI=timeout
+    // EBX is callee-saved on i386 SysV ABI but is syscall arg1.
+    // Save/restore it around the whole stub (outermost push/pop).
     {
         let mut code = Vec::new();
+        code.extend(encode_push(Gpr::Rbx));                  // save EBX (callee-saved, outermost)
         code.extend(encode_push(Gpr::Rcx));                  // push timeout
         code.extend(encode_push(Gpr::Rsi));                  // push events
         code.extend(encode_mov_reg_reg(Gpr::Rbx, Gpr::Rdi)); // EBX = epfd
@@ -2216,8 +2328,50 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         code.extend(encode_pop(Gpr::Rsi));                   // ESI = timeout
         code.extend(encode_mov_reg_imm32(Gpr::Rax, 256));    // EAX = sys_epoll_wait (i386)
         code.extend(encode_syscall());
+        code.extend(encode_pop(Gpr::Rbx));                   // restore EBX
         code.extend(encode_ret());
         stubs.push(("epoll_wait".to_string(), code));
+    }
+
+    // strcmp(const char *s1, const char *s2) → int
+    // Not a syscall — implemented as a small assembly loop.
+    // Returns 0 if equal, otherwise *s1 - *s2 for the first differing byte.
+    // Register usage: AL = byte from s1, CL = byte from s2,
+    // EDI and ESI are advanced each iteration. EBX is not touched, so no
+    // callee-saved save/restore is needed here.
+    //
+    // .loop:
+    //   8A 07           mov al, [edi]
+    //   8A 0E           mov cl, [esi]
+    //   38 C8           cmp al, cl
+    //   75 08           jne .done (+8)
+    //   84 C0           test al, al
+    //   74 04           jz .done (+4)
+    //   47              inc edi
+    //   46              inc esi
+    //   EB F0           jmp .loop (-16)
+    // .done:
+    //   0F B6 C0        movzx eax, al
+    //   0F B6 C9        movzx ecx, cl
+    //   29 C8           sub eax, ecx
+    //   C3              ret
+    {
+        let code: Vec<u8> = vec![
+            0x8A, 0x07,                         // mov al, [edi]
+            0x8A, 0x0E,                         // mov cl, [esi]
+            0x38, 0xC8,                         // cmp al, cl
+            0x75, 0x08,                         // jne .done (+8)
+            0x84, 0xC0,                         // test al, al
+            0x74, 0x04,                         // jz .done (+4)
+            0x47,                               // inc edi
+            0x46,                               // inc esi
+            0xEB, 0xF0,                         // jmp .loop (-16)
+            0x0F, 0xB6, 0xC0,                   // movzx eax, al
+            0x0F, 0xB6, 0xC9,                   // movzx ecx, cl
+            0x29, 0xC8,                         // sub eax, ecx
+            0xC3,                               // ret
+        ];
+        stubs.push(("strcmp".to_string(), code));
     }
 
     // ── print_hex: Print EAX as 8 hex digits to stdout ──
