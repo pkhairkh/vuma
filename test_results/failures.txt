@@ -1,8 +1,13 @@
-VUMA Test Failures — 2026-07-03 18:49:41 UTC
-Total: 11 failures across 5 tests
+VUMA Test Failures — 2026-07-03 19:57:52 UTC
+Total: 15 failures across 10 tests
 
   atomics              atomics_demo.vuma                             exp=1264 [('ppc64', 180, 'MM')]
-  complex_stores       base64_encode.vuma                            exp=  20 [('arm32', 0, 'MM'), ('wasm32', 87, 'MM')]
-  concurrency          self_exec.vuma                                exp=   0 [('riscv64', -13, 'CR'), ('loongarch64', -11, 'CR'), ('ppc64', 6, 'MM'), ('mips64', 6, 'MM'), ('x86_32', -11, 'CR'), ('wasm32', 1, 'CR')]
+  bitwise              bit2_priority_encode.vuma                     exp=   7 [('arm32', 0, 'MM')]
+  bitwise              bit_abs.vuma                                  exp=  42 [('arm32', 214, 'MM')]
+  bitwise              bit_is_pow2.vuma                              exp=   1 [('arm32', 0, 'MM')]
+  bitwise              bit_log2.vuma                                 exp=   3 [('arm32', 0, 'MM')]
+  bitwise              bit_priority_encoder.vuma                     exp=   7 [('arm32', 0, 'MM')]
+  complex_stores       base64_encode.vuma                            exp=  20 [('wasm32', 87, 'MM')]
+  concurrency          self_exec.vuma                                exp=   0 [('mips64', 6, 'MM'), ('aarch64', -13, 'CR'), ('loongarch64', -11, 'CR'), ('ppc64', 6, 'MM'), ('x86_32', -11, 'CR'), ('wasm32', 1, 'CR')]
   memory               memory_arena.vuma                             exp=   0 [('ppc64', -11, 'CR')]
   multi_function       sha256d.vuma                                  exp=  79 [('wasm32', 226, 'MM')]
