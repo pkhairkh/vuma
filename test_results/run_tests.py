@@ -117,8 +117,8 @@ def run_one(args):
         except: pass
 
     if result["actual"] is not None:
-        a = result["actual"] & 0xFF
-        e = expected & 0xFF
+        a = result["actual"] & 0xFF if result["actual"] >= 0 else result["actual"]
+        e = expected & 0xFF if expected >= 0 else expected
         result["match"] = (a == e)
     return result
 
