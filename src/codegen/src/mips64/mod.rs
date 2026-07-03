@@ -4451,9 +4451,27 @@ impl Backend for Mips64Backend {
                 ("getpid", 5038), ("socket", 5040), ("epoll_create1", 5285),
                 ("futex", 5194), ("execve", 5057), ("wait4", 5059),
                 ("epoll_ctl", 5208), ("epoll_wait", 5209),
-                ("pipe", 5021), ("dup2", 5032), ("fork", 5056), ("unlink", 5085),
+                ("dup2", 5032), ("fork", 5056), ("unlink", 5085),
             ] {
                 stubs.push((name.to_string(), simple_stub(num)));
+            }
+
+            // pipe → pipe2(pipefd, 0) → int  [syscall 5287]
+            // On mips64, pipe() returns fd in v0 instead of 0.
+            // Use pipe2() which writes to buffer and returns 0 on success.
+            {
+                let mut code = Vec::new();
+                // a1 = 0 (flags)
+                code.extend_from_slice(&[0x00, 0x00, 0x20, 0x2a]); // move a1, zero (or $a1, $zero, $zero)
+                // li v0, 5287 (sys_pipe2)
+                code.extend_from_slice(&crate::mips64::Instruction::Daddiu { rt: crate::mips64::Gpr::V0, rs: crate::mips64::Gpr::Zero, imm: 5287 }.encode());
+                // syscall
+                code.extend_from_slice(&crate::mips64::Instruction::Syscall { code: 0 }.encode());
+                // jr ra
+                code.extend_from_slice(&crate::mips64::Instruction::Jr { rs: crate::mips64::Gpr::Ra }.encode());
+                // nop (delay slot)
+                code.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
+                stubs.push(("pipe".to_string(), code));
             }
 
             // sigaction → rt_sigaction(signum, act, oldact, sigsetsize=8)
