@@ -1337,17 +1337,51 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     code
                 }
 
-                IRInstr::AtomicCas { dst, addr, expected, desired, ty: _ } => {
-                    // Simplified: plain load (single-threaded fallback).
-                    // Returns the current value (no actual compare-and-swap).
+                IRInstr::AtomicCas { dst, addr, expected, desired, ty } => {
+                    // Proper CAS using LL/SC (Load-Link/Store-Conditional).
+                    // LoongArch64 sc.d overwrites rd with success/failure flag,
+                    // so we must reload desired on each retry.
+                    //
+                    // Layout:
+                    //   dbar 0
+                    //   ll.d  S0, S2, 0       ; load-linked (old value)
+                    //   bne   S0, S3, +4      ; if old != expected, skip to dbar
+                    //   <reload desired into S1>  ; S1 = desired (reload each retry)
+                    //   sc.d  S1, S2, 0       ; store-conditional, S1 = result
+                    //   beq   S1, zero, -3    ; if S1==0 (failed), retry at ll.d
+                    //   dbar 0
                     let mut code = Vec::new();
                     let dst_id = dst.as_register().unwrap_or(0);
-                    let _ = (expected, desired);
-                    // Load address into S0
-                    code.extend(encode_load_value(addr, S0, fp, &vreg_slots));
-                    // Plain load from [S0 + 0]
-                    code.extend_from_slice(&Instruction::LdD { rd: S0, rj: S0, imm12: 0 }.encode());
-                    // Store result to dst vreg slot
+
+                    // Load address into S2
+                    code.extend(encode_load_value(addr, S2, fp, &vreg_slots));
+                    // Load expected into S3
+                    code.extend(encode_load_value(expected, S3, fp, &vreg_slots));
+
+                    // dbar 0 (full barrier before)
+                    code.extend_from_slice(&0x3872_0000u32.to_le_bytes());
+
+                    // ll.d S0, S2, 0  (load-linked)
+                    code.extend_from_slice(&Instruction::LlD { rd: S0, rj: S2, imm14: 0 }.encode());
+
+                    // bne S0, S3, +4 (if old != expected, skip 4 instrs to dbar after)
+                    // +4 skips: reload_desired, sc.d, beq, dbar
+                    code.extend_from_slice(&Instruction::Bne { rj: S0, rd: S3, offs16: 4 }.encode());
+
+                    // Reload desired into S1 (must reload each retry since sc.d clobbers rd)
+                    code.extend(encode_load_value(desired, S1, fp, &vreg_slots));
+
+                    // sc.d S1, S2, 0  (store desired to [S2], S1 = 1/0 result)
+                    code.extend_from_slice(&Instruction::ScD { rd: S1, rj: S2, imm14: 0 }.encode());
+
+                    // beq S1, zero, -3 (if store failed (S1=0), retry at ll.d)
+                    // -3 goes back 3 instructions: ll.d, bne, reload
+                    code.extend_from_slice(&Instruction::Beq { rj: S1, rd: Gpr::R0, offs16: -3 }.encode());
+
+                    // dbar 0 (full barrier after)
+                    code.extend_from_slice(&0x3872_0000u32.to_le_bytes());
+
+                    // Store old value (S0) to dst vreg slot
                     code.extend(encode_store_to_vreg(S0, dst_id, fp, &vreg_slots));
                     code
                 }
