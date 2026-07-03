@@ -809,22 +809,15 @@ impl Instruction {
                 encode_xo_form(31, rt.encoding(), ra.encoding(), rb.encoding(), 0, 491, 0)
             }
             Instruction::Divd { rt, ra, rb } => {
-                // DIVD rT, rA, rB: primary=31, OE=0, xo=487, Rc=0
-                // NOTE: QEMU 7.2 has a bug where XO=487 is misinterpreted as stvxl.
-                // We use XO=459 (divdu) instead, which QEMU treats as divwu (32-bit).
-                // For positive 32-bit operands, divwu gives the correct result, which
-                // covers the common case of `x % small_constant` where x fits in 32 bits.
-                encode_xo_form(31, rt.encoding(), ra.encoding(), rb.encoding(), 0, 459, 0)
+                // DIVD rT, rA, rB: primary=31, OE=0, xo=487, Rc=0 (signed 64-bit)
+                encode_xo_form(31, rt.encoding(), ra.encoding(), rb.encoding(), 0, 487, 0)
             }
             Instruction::Divwu { rt, ra, rb } => {
-                // DIVWU rT, rA, rB: primary=31, OE=0, xo=455, Rc=0
+                // DIVWU rT, rA, rB: primary=31, OE=0, xo=455, Rc=0 (unsigned 32-bit)
                 encode_xo_form(31, rt.encoding(), ra.encoding(), rb.encoding(), 0, 455, 0)
             }
             Instruction::Divdu { rt, ra, rb } => {
-                // DIVDU rT, rA, rB: primary=31, OE=0, xo=459, Rc=0
-                // NOTE: QEMU 7.2 has a bug where this is executed as divwu (32-bit).
-                // We avoid using this instruction for 64-bit divides; see SRem/URem
-                // lowering for the power-of-2 optimization.
+                // DIVDU rT, rA, rB: primary=31, OE=0, xo=459, Rc=0 (unsigned 64-bit)
                 encode_xo_form(31, rt.encoding(), ra.encoding(), rb.encoding(), 0, 459, 0)
             }
             Instruction::Neg { rt, ra } => {
