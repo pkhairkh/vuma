@@ -1911,9 +1911,18 @@ fn lower_function(
     let mut ctx = LoweringContext::new(result_types);
 
     // Assign locals for parameters.
-    // In Wasm32, all integer parameters are i32 regardless of IR type, since
-    // pointers and all integer values fit in 32 bits on a 32-bit target.
-    // Only float types retain their original width.
+    // In Wasm, function parameters ARE locals 0..N-1. We must NOT allocate
+    // extra locals for them — instead, map vreg_to_local directly to the
+    // param's local index (0, 1, 2, ...). The wasm function type already
+    // declares these as params, so they're initialized by the caller.
+    //
+    // Previously, this loop allocated EXTRA locals (starting at num_locals=0)
+    // which shadowed the wasm params. The callee then read UNINITIALIZED
+    // locals instead of the passed arguments, corrupting all function calls
+    // with parameters on wasm32.
+    //
+    // All integer parameters are i32 on wasm32 (32-bit target). Float types
+    // retain their original width.
     for (i, param) in func.params.iter().enumerate() {
         let ty = func
             .param_types
@@ -1922,21 +1931,15 @@ fn lower_function(
             .map(|t| if t.is_integer() { WasmType::I32 } else { t })
             .unwrap_or(WasmType::I32);
         if let IRValue::Register(id) = param {
-            let idx = ctx.num_locals;
-            ctx.vreg_to_local.insert(*id, idx);
+            // Map vreg to the wasm param local index (0, 1, 2, ...).
+            // Do NOT increment num_locals — wasm params are already counted
+            // by the function type. Only non-param locals start at num_locals.
+            ctx.vreg_to_local.insert(*id, i as u32);
             ctx.vreg_types.insert(*id, ty);
-            ctx.num_locals += 1;
-            if let Some(last) = ctx.locals.last_mut() {
-                if last.1 == ty {
-                    last.0 += 1;
-                } else {
-                    ctx.locals.push((1, ty));
-                }
-            } else {
-                ctx.locals.push((1, ty));
-            }
         }
     }
+    // num_locals starts AFTER the params (params are locals 0..N-1).
+    ctx.num_locals = func.params.len() as u32;
 
     // ── Trampoline-based control flow ──
     //
