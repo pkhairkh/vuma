@@ -52,6 +52,19 @@ fn compile_for_backend_with_path(source: &str, kind: BackendKind, file_path: Opt
     let codegen_scg = bridge_ast_to_codegen_scg(&ast);
     let ir_program = { let mut b = IRBuilder::new(); b.build(&codegen_scg).map_err(|e| format!("ir: {}", e))? };
     let backend = create_backend(kind).map_err(|e| format!("backend: {}", e))?;
+
+    // Populate thread-local set of 64-bit-returning function names.
+    // Used by arm32 allocate_registers to determine whether to store R1
+    // (high word) for non-extern call returns.
+    {
+        use std::collections::HashSet;
+        let func_64bit: HashSet<String> = ir_program.functions.iter()
+            .filter(|f| f.result_types.iter().any(|t| matches!(t, vuma_codegen::ir::IRType::I64 | vuma_codegen::ir::IRType::U64)))
+            .map(|f| f.name.clone())
+            .collect();
+        vuma_codegen::backend::set_64bit_returns(&func_64bit);
+    }
+
     let mut allocated = Vec::new();
     for func in &ir_program.functions {
         allocated.push(backend.allocate_registers(func).map_err(|e| format!("regalloc: {}", e))?);
