@@ -4934,9 +4934,45 @@ impl Backend for PPC64Backend {
                 ("getpid", 20), ("socket", 326), ("epoll_create1", 315),
                 ("futex", 221), ("execve", 11), ("wait4", 114),
                 ("epoll_ctl", 237), ("epoll_wait", 238),
-                ("pipe", 42), ("dup2", 63), ("fork", 2), ("unlink", 10),
+                ("dup2", 63), ("fork", 2), ("unlink", 10),
             ] {
                 stubs.push((name.to_string(), simple_stub(num)));
+            }
+
+            // pipe → pipe(pipefd) → int  [syscall 42]
+            // On big-endian PPC64, pipe() writes fd values in big-endian.
+            // The test reads them as little-endian (read_i32_le).
+            // Fix: byte-swap the two int32 values after the syscall.
+            // R3 = pipefd buffer pointer (caller arg)
+            // After SC: R3 = return value (0=success)
+            // Need to save original R3 (pipefd) before SC clobbers it.
+            {
+                let mut code = Vec::new();
+                // Save pipefd pointer in R5
+                code.extend_from_slice(&Instruction::Mr { ra: Gpr::R5, rs: Gpr::R3 }.encode());
+                // LI R0, 42 (sys_pipe)
+                code.extend_from_slice(&Instruction::Li { rt: Gpr::R0, simm: 42 }.encode());
+                // SC
+                code.extend_from_slice(&Instruction::Sc.encode());
+                // Check return: if R3 != 0 (error), skip byte-swap and return
+                // CMPDI R3, 0
+                code.extend_from_slice(&Instruction::Cmpi { bf: crate::ppc64::CrField::CR0, l: 1, ra: Gpr::R3, simm: 0 }.encode());
+                // BNE skip (branch if not equal, i.e. error)
+                code.extend_from_slice(&Instruction::Bc { bo: 4, bi: 2, bd: 6 }.encode()); // skip 6 instrs
+                // Byte-swap pipefd[0]: LWZ R4, 0(R5); STWBRX R4, 0, R5
+                let lwz_word = (32u32 << 26) | (4u32 << 21) | (5u32 << 16) | 0u32;
+                code.extend_from_slice(&encode_word(lwz_word));
+                let stwbrx_word = (31u32 << 26) | (4u32 << 21) | (0u32 << 16) | (5u32 << 11) | (662u32 << 1) | 0u32;
+                code.extend_from_slice(&encode_word(stwbrx_word));
+                // Byte-swap pipefd[1]: LWZ R4, 4(R5); STWBRX R4, R5, R6 (R6=4)
+                let lwz2_word = (32u32 << 26) | (4u32 << 21) | (5u32 << 16) | 4u32;
+                code.extend_from_slice(&encode_word(lwz2_word));
+                code.extend_from_slice(&Instruction::Li { rt: Gpr::R6, simm: 4 }.encode());
+                let stwbrx2_word = (31u32 << 26) | (4u32 << 21) | (5u32 << 16) | (6u32 << 11) | (662u32 << 1) | 0u32;
+                code.extend_from_slice(&encode_word(stwbrx2_word));
+                // BLR
+                code.extend_from_slice(&Instruction::Bclr { bo: 20, bi: 0, bh: 0 }.encode());
+                stubs.push(("pipe".to_string(), code));
             }
 
             // sigaction → rt_sigaction(signum, act, oldact, sigsetsize=8)
