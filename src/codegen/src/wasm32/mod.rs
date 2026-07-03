@@ -2448,19 +2448,19 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
             let void_functions = ["print_int", "print_hex", "print_newline",
                 "__vuma_print_int", "__vuma_print_hex", "__vuma_print_newline",
                 "write", "exit", "free", "__vuma_dealloc", "__vuma_free"];
-            if !void_functions.contains(&func.as_str()) {
+            // A call is void if the function is in the void_functions list
+            // OR if the IR Call instruction has dst=None (no return value).
+            // This is critical: user-defined void functions like sha256_transform
+            // are NOT in void_functions but still don't write to mem[0].
+            // Loading from mem[0] after such a call reads STALE data from a
+            // previous function, corrupting the caller's state.
+            let is_void = void_functions.contains(&func.as_str()) || dst.is_none();
+            if !is_void {
                 // Non-void call: load return value from memory address 0
                 // (the callee stores its return value there before returning)
                 if let Some(IRValue::Register(id)) = dst {
                     ctx.emit(WasmInstr::I32Const(0));
                     ctx.emit(WasmInstr::I32Load { align: 2, offset: 0 });
-                    ctx.stack_depth += 1;
-                    ctx.pop_to_vreg(*id, WasmType::I32);
-                }
-            } else {
-                // Void function with dst — push dummy 0
-                if let Some(IRValue::Register(id)) = dst {
-                    ctx.emit(WasmInstr::I32Const(0));
                     ctx.stack_depth += 1;
                     ctx.pop_to_vreg(*id, WasmType::I32);
                 }
