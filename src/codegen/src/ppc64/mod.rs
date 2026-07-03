@@ -3432,9 +3432,10 @@ fn lower_ir_instr_ppc64(
                 vec![],
             ));
 
-            // bc 12, 2, +3: branch if CR0 EQ=0 (not equal), BD=3
+            // bc 4, 2, +3: branch if CR0 EQ=0 (not equal), skip stdcx, BD=3
+            // BO=4 = branch if condition FALSE (CR0.EQ=0 means not equal)
             result.push(emit_alloc_instr(
-                Instruction::Bc { bo: 12, bi: 2, bd: 3 },
+                Instruction::Bc { bo: 4, bi: 2, bd: 3 },
                 vec![],
                 vec![],
             ));
@@ -3470,9 +3471,10 @@ fn lower_ir_instr_ppc64(
                 }
             }
 
-            // bc 12, 2, -4: branch if CR0 EQ=0 (store failed), retry at ldarx, BD=-4
+            // bc 4, 2, -4: branch if CR0 EQ=0 (store failed), retry at ldarx, BD=-4
+            // BO=4 = branch if condition FALSE (CR0.EQ=0 means store reservation lost)
             result.push(emit_alloc_instr(
-                Instruction::Bc { bo: 12, bi: 2, bd: -4 },
+                Instruction::Bc { bo: 4, bi: 2, bd: -4 },
                 vec![],
                 vec![],
             ));
@@ -4580,8 +4582,9 @@ impl Backend for PPC64Backend {
                         // cmpd R3, R4 (compare old value with expected)
                         code.extend_from_slice(&Instruction::Cmp { bf: CrField::CR0, l: 1, ra: Gpr::R3, rb: Gpr::R4 }.encode());
 
-                        // bc 12, 2, +3 (if not equal, skip to sync)
-                        code.extend_from_slice(&Instruction::Bc { bo: 12, bi: 2, bd: 3 }.encode());
+                        // bc 4, 2, +3 (if not equal, skip to sync)
+                        // BO=4 = branch if condition FALSE (CR0.EQ=0 means not equal)
+                        code.extend_from_slice(&Instruction::Bc { bo: 4, bi: 2, bd: 3 }.encode());
 
                         // stdcx./stwcx./stbcx./sthcx. R6, 0, R5 (try to store desired)
                         match ty {
@@ -4599,8 +4602,9 @@ impl Backend for PPC64Backend {
                             }
                         }
 
-                        // bc 12, 2, -4 (if store failed, retry at ldarx)
-                        code.extend_from_slice(&Instruction::Bc { bo: 12, bi: 2, bd: -4 }.encode());
+                        // bc 4, 2, -4 (if store failed, retry at ldarx)
+                        // BO=4 = branch if condition FALSE (CR0.EQ=0 means store reservation lost)
+                        code.extend_from_slice(&Instruction::Bc { bo: 4, bi: 2, bd: -4 }.encode());
 
                         // sync (full barrier after)
                         code.extend_from_slice(&Instruction::Sync.encode());
