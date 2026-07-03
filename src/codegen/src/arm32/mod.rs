@@ -3553,17 +3553,10 @@ impl Backend for Arm32Backend {
                 }
                 crate::ir::IRValue::Immediate(v) => {
                     code.extend(load_immediate_arm32(lo_reg, *v as u32));
-                    if *v < 0 {
-                        // MVN hi_reg, #0 → 0xFFFFFFFF
-                        code.extend_from_slice(&encode_dp_imm(
-                            Condition::Al, DP_MVN, false, 0, hi_reg.encoding(), 0, 0,
-                        ));
-                    } else {
-                        // MOV hi_reg, #0
-                        code.extend_from_slice(&encode_dp_imm(
-                            Condition::Al, DP_MOV, false, 0, hi_reg.encoding(), 0, 0,
-                        ));
-                    }
+                    // Load high word: (v >> 32) as u32
+                    // For negative i64 values, this naturally gives 0xFFFFFFFF (sign extension)
+                    let hi_val = (*v >> 32) as u32;
+                    code.extend(load_immediate_arm32(hi_reg, hi_val));
                 }
                 crate::ir::IRValue::Address(a) => {
                     code.extend(load_immediate_arm32(lo_reg, *a as u32));
