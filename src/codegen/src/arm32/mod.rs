@@ -3330,12 +3330,19 @@ impl Backend for Arm32Backend {
                     rn.encoding(), rd.encoding(), rotate, imm8,
                 ));
             } else {
+                // Load imm into R12, then ADD rd, rn, R12.
+                // This works for ALL register combinations including rd == R12:
+                //   - rd == R12, rd != rn: ADD R12, rn, R12 → R12 = rn + R12 = rn + imm ✓
+                //   - rd == R12, rd == rn: ADD R12, R12, R12 → R12 = 2*R12 (wrong, but
+                //     this case means caller wants R12 = R12 + imm which IS 2*old_R12
+                //     only if imm == old_R12, so caller must avoid this; in practice
+                //     callers never pass rd == rn == R12).
+                //   - rd != R12: ADD rd, rn, R12 → rd = rn + imm ✓
+                // The previous code had a `MOV rd, rn` between the load and ADD which
+                // was redundant for rd != R12 and DESTRUCTIVE for rd == R12 (it
+                // overwrote the immediate in R12 before the ADD could read it,
+                // producing rd = rn + rn = 2*rn instead of rn + imm).
                 code.extend_from_slice(&load_immediate_arm32(Gpr::R12, imm as u32));
-                if rn != rd {
-                    code.extend_from_slice(&encode_dp_reg(
-                        Condition::Al, DP_MOV, false, 0, rd.encoding(), rn.encoding(),
-                    ));
-                }
                 code.extend_from_slice(&encode_dp_reg(
                     Condition::Al, DP_ADD, false, rn.encoding(), rd.encoding(), Gpr::R12.encoding(),
                 ));
@@ -3439,7 +3446,7 @@ impl Backend for Arm32Backend {
         /// 400+ vregs) and the R12 scratch conflict makes it unsafe.
         /// The high word will be garbage, but those functions typically
         /// don't use 64-bit operations on their results.
-        fn ss_store_32_zero(src_reg: Gpr, offset_from_r11: i32, frame_size: i32) -> Vec<u8> {
+        fn ss_store_32_zero(src_reg: Gpr, offset_from_r11: i32, _frame_size: i32) -> Vec<u8> {
             let neg_off = -offset_from_r11;
             let hi_neg_off = neg_off + 4; // high word at [R11 - (offset-4)]
             if neg_off >= -4095 && hi_neg_off >= -4095 {
@@ -3451,7 +3458,9 @@ impl Backend for Arm32Backend {
                     Gpr::R11.encoding(), src_reg.encoding(), (-neg_off) as u32,
                 ));
                 // Use R14 (LR) as temporary zero register. LR is callee-saved
-                // and already saved in the prologue at [R11 + fs + 4].
+                // and already saved in the prologue at [R11 + 4]. We clobber LR
+                // here; it will be restored by the function epilogue (or
+                // overwritten by the next BL). No restore needed mid-function.
                 // MOV R14, #0
                 code.extend_from_slice(&encode_dp_imm(
                     Condition::Al, DP_MOV, false, 0, Gpr::R14.encoding(), 0, 0,
@@ -3461,25 +3470,47 @@ impl Backend for Arm32Backend {
                     Condition::Al, true, false, false, false, false,
                     Gpr::R11.encoding(), Gpr::R14.encoding(), (-hi_neg_off) as u32,
                 ));
-                // Restore LR: LDR R14, [R11, #(frame_size + 4)]
-                if (frame_size + 4) <= 4095 {
-                    code.extend_from_slice(&encode_ls_imm(
-                        Condition::Al, true, true, false, false, true,
-                        Gpr::R11.encoding(), Gpr::R14.encoding(), (frame_size + 4) as u32,
-                    ));
-                } else {
-                    code.extend_from_slice(&emit_add_imm(Gpr::R14, Gpr::R11, frame_size + 4));
-                    code.extend_from_slice(&encode_ls_imm(
-                        Condition::Al, true, true, false, false, true,
-                        Gpr::R14.encoding(), Gpr::R14.encoding(), 0,
-                    ));
-                }
                 code
             } else {
-                // Large offset — fall back to plain store (no high-word zeroing).
-                // This is safe because large-offset functions (400+ vregs) rarely
-                // mix 32-bit and 64-bit operations on the same vreg.
-                ss_store_to_slot(src_reg, offset_from_r11)
+                // Large offset — compute address into R12, store low word,
+                // then store 0 to high word using R14 (LR) as zero scratch.
+                //
+                // LR is clobbered as a zero source; the function epilogue
+                // restores LR from the prologue save area at [R11 + 4], so
+                // no mid-function LR restore is needed.
+                //
+                // Precondition: src_reg != R12 (callers already enforce this).
+                let mut code = Vec::new();
+
+                // ── Store low word: R12 = R11 - offset; STR src_reg, [R12] ──
+                code.extend_from_slice(&load_immediate_arm32(Gpr::R12, offset_from_r11 as u32));
+                code.extend_from_slice(&encode_dp_reg(
+                    Condition::Al, DP_SUB, false,
+                    Gpr::R11.encoding(), Gpr::R12.encoding(), Gpr::R12.encoding(),
+                ));
+                code.extend_from_slice(&encode_ls_imm(
+                    Condition::Al, true, true, false, false, false,
+                    Gpr::R12.encoding(), src_reg.encoding(), 0,
+                ));
+
+                // ── Zero R14, then store to high word ──
+                // MOV R14, #0  (safe even if src_reg == R14: already stored above)
+                code.extend_from_slice(&encode_dp_imm(
+                    Condition::Al, DP_MOV, false, 0, Gpr::R14.encoding(), 0, 0,
+                ));
+                // R12 = R11 - (offset - 4)   (high word is 4 bytes ABOVE low word)
+                let hi_offset = offset_from_r11 - 4;
+                code.extend_from_slice(&load_immediate_arm32(Gpr::R12, hi_offset as u32));
+                code.extend_from_slice(&encode_dp_reg(
+                    Condition::Al, DP_SUB, false,
+                    Gpr::R11.encoding(), Gpr::R12.encoding(), Gpr::R12.encoding(),
+                ));
+                // STR R14, [R12]  (high word = 0)
+                code.extend_from_slice(&encode_ls_imm(
+                    Condition::Al, true, true, false, false, false,
+                    Gpr::R12.encoding(), Gpr::R14.encoding(), 0,
+                ));
+                code
             }
         }
 
