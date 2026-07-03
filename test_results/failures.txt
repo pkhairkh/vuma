@@ -1,7 +1,7 @@
-VUMA Test Failures — 2026-07-03 20:37:55 UTC
-Total: 8 failures across 4 tests
+VUMA Test Failures — 2026-07-03 21:01:57 UTC
+Total: 7 failures across 4 tests
 
   complex_stores       base64_encode.vuma                            exp=  20 [('wasm32', 87, 'MM')]
-  concurrency          self_exec.vuma                                exp=   0 [('ppc64', 6, 'MM'), ('mips64', 6, 'MM'), ('loongarch64', -11, 'CR'), ('x86_32', -11, 'CR'), ('wasm32', 1, 'CR')]
+  concurrency          self_exec.vuma                                exp=   0 [('loongarch64', -11, 'CR'), ('x86_32', -11, 'CR'), ('wasm32', 1, 'CR'), ('ppc64', 124, 'TO')]
   memory               memory_arena.vuma                             exp=   0 [('ppc64', -11, 'CR')]
   multi_function       sha256d.vuma                                  exp=  79 [('wasm32', 226, 'MM')]
