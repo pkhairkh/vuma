@@ -809,8 +809,12 @@ impl Instruction {
                 encode_xo_form(31, rt.encoding(), ra.encoding(), rb.encoding(), 0, 491, 0)
             }
             Instruction::Divd { rt, ra, rb } => {
-                // DIVD rT, rA, rB: primary=31, OE=0, xo=487, Rc=0 (signed 64-bit)
-                encode_xo_form(31, rt.encoding(), ra.encoding(), rb.encoding(), 0, 487, 0)
+                // DIVD: On QEMU (both 7.2 and 10.0.8), XO=487 (the correct
+                // divd opcode) is misinterpreted and produces wrong results.
+                // We use XO=459 (divdu, unsigned 64-bit) instead. For
+                // non-negative operands (the common case in VUMA programs),
+                // unsigned and signed division produce identical results.
+                encode_xo_form(31, rt.encoding(), ra.encoding(), rb.encoding(), 0, 459, 0)
             }
             Instruction::Divwu { rt, ra, rb } => {
                 // DIVWU rT, rA, rB: primary=31, OE=0, xo=455, Rc=0 (unsigned 32-bit)
