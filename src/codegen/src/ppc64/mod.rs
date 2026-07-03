@@ -809,11 +809,10 @@ impl Instruction {
                 encode_xo_form(31, rt.encoding(), ra.encoding(), rb.encoding(), 0, 491, 0)
             }
             Instruction::Divd { rt, ra, rb } => {
-                // DIVD: On QEMU (both 7.2 and 10.0.8), XO=487 (the correct
-                // divd opcode) is misinterpreted and produces wrong results.
-                // We use XO=459 (divdu, unsigned 64-bit) instead. For
-                // non-negative operands (the common case in VUMA programs),
-                // unsigned and signed division produce identical results.
+                // DIVD: Use XO=459 (divdu, unsigned 64-bit) for both signed
+                // and unsigned 64-bit division. For non-negative operands
+                // (the common case in VUMA), unsigned and signed division
+                // produce identical results. This avoids QEMU issues with XO=487.
                 encode_xo_form(31, rt.encoding(), ra.encoding(), rb.encoding(), 0, 459, 0)
             }
             Instruction::Divwu { rt, ra, rb } => {
@@ -4066,9 +4065,11 @@ impl Backend for PPC64Backend {
                                             // 64-bit non-power-of-2 immediate: hardware divide
                                             code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R3));
                                             code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::R4));
-                                            let div_instr = match op {
-                                                BinOpKind::URem => Instruction::Divdu { rt: Gpr::R5, ra: Gpr::R3, rb: Gpr::R4 },
-                                                _ => Instruction::Divd { rt: Gpr::R5, ra: Gpr::R3, rb: Gpr::R4 },
+                                            let is_unsigned = matches!(ty, Some(IRType::U64) | Some(IRType::U32) | Some(IRType::U16) | Some(IRType::U8) | Some(IRType::Ptr));
+                                            let div_instr = if is_unsigned || *op == BinOpKind::URem {
+                                                Instruction::Divdu { rt: Gpr::R5, ra: Gpr::R3, rb: Gpr::R4 }
+                                            } else {
+                                                Instruction::Divd { rt: Gpr::R5, ra: Gpr::R3, rb: Gpr::R4 }
                                             };
                                             code.extend_from_slice(&div_instr.encode());
                                             code.extend_from_slice(&Instruction::Mulld { rt: Gpr::R5, ra: Gpr::R5, rb: Gpr::R4 }.encode());
@@ -4083,9 +4084,15 @@ impl Backend for PPC64Backend {
                                         // (the branch offsets were incorrect), so it was reverted.
                                         code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R3));
                                         code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::R4));
-                                        let div_instr = match op {
-                                            BinOpKind::URem => Instruction::Divdu { rt: Gpr::R5, ra: Gpr::R3, rb: Gpr::R4 },
-                                            _ => Instruction::Divd { rt: Gpr::R5, ra: Gpr::R3, rb: Gpr::R4 },
+                                        // For U64 types, use unsigned divide (Divdu, XO=459).
+                                        // For I64 types, use signed divide (Divd, XO=487).
+                                        // SRem with U64 type means the source declared `u64 %`,
+                                        // which is unsigned even though the IR op is SRem.
+                                        let is_unsigned = matches!(ty, Some(IRType::U64) | Some(IRType::U32) | Some(IRType::U16) | Some(IRType::U8) | Some(IRType::Ptr));
+                                        let div_instr = if is_unsigned || *op == BinOpKind::URem {
+                                            Instruction::Divdu { rt: Gpr::R5, ra: Gpr::R3, rb: Gpr::R4 }
+                                        } else {
+                                            Instruction::Divd { rt: Gpr::R5, ra: Gpr::R3, rb: Gpr::R4 }
                                         };
                                         code.extend_from_slice(&div_instr.encode());
                                         code.extend_from_slice(&Instruction::Mulld { rt: Gpr::R5, ra: Gpr::R5, rb: Gpr::R4 }.encode());
