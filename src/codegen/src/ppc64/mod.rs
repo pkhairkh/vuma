@@ -4505,29 +4505,21 @@ impl Backend for PPC64Backend {
                         let mut code = Vec::new();
                         // Load address into R5
                         code.extend(ss_load_value(addr, &vreg_stack_slots, Gpr::R5));
-                        // sync (full barrier)
+                        // sync (full barrier before — acquire semantics)
                         code.extend_from_slice(&Instruction::Sync.encode());
-                        // ldarx/lwarx/lbarx/lharx R3, 0, R5 (load and reserve)
+                        // Plain load (aligned loads are atomic on PPC64)
                         match ty {
                             IRType::I8 | IRType::U8 => {
-                                code.extend_from_slice(&Instruction::Lbarx { rt: Gpr::R3, ra: Gpr::R0, rb: Gpr::R5 }.encode());
-                                // stbcx. R0, 0, R5 (clear reservation)
-                                code.extend_from_slice(&Instruction::Stbcx { rs: Gpr::R0, ra: Gpr::R0, rb: Gpr::R5 }.encode());
+                                code.extend_from_slice(&Instruction::Lbz { rt: Gpr::R3, ra: Gpr::R5, d: 0 }.encode());
                             }
                             IRType::I16 | IRType::U16 => {
-                                code.extend_from_slice(&Instruction::Lharx { rt: Gpr::R3, ra: Gpr::R0, rb: Gpr::R5 }.encode());
-                                // sthcx. R0, 0, R5 (clear reservation)
-                                code.extend_from_slice(&Instruction::Sthcx { rs: Gpr::R0, ra: Gpr::R0, rb: Gpr::R5 }.encode());
+                                code.extend_from_slice(&Instruction::Lhz { rt: Gpr::R3, ra: Gpr::R5, d: 0 }.encode());
                             }
                             IRType::I32 | IRType::U32 => {
-                                code.extend_from_slice(&Instruction::Lwarx { rt: Gpr::R3, ra: Gpr::R0, rb: Gpr::R5 }.encode());
-                                // stwcx. R0, 0, R5 (clear reservation)
-                                code.extend_from_slice(&Instruction::Stwcx { rs: Gpr::R0, ra: Gpr::R0, rb: Gpr::R5 }.encode());
+                                code.extend_from_slice(&Instruction::Lwz { rt: Gpr::R3, ra: Gpr::R5, d: 0 }.encode());
                             }
                             _ => {
-                                code.extend_from_slice(&Instruction::Ldarx { rt: Gpr::R3, ra: Gpr::R0, rb: Gpr::R5 }.encode());
-                                // stdcx. R0, 0, R5 (clear reservation)
-                                code.extend_from_slice(&Instruction::Stdcx { rs: Gpr::R0, ra: Gpr::R0, rb: Gpr::R5 }.encode());
+                                code.extend_from_slice(&Instruction::Ld { rt: Gpr::R3, ra: Gpr::R5, ds: 0 }.encode());
                             }
                         }
                         // isync (context sync → acquire semantics)
