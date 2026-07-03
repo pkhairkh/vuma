@@ -4399,7 +4399,7 @@ impl Backend for RiscV64Backend {
         }
 
         // Save RA and S0
-        if fs - 8 >= -2048 {
+        if fs - 8 >= -2048 && fs - 8 <= 2047 {
             instructions.push(AllocatedInstruction {
                 opcode: "sd".to_string(),
                 reads: vec![PhysicalReg::new(RegClass::Gpr, Gpr::Ra.encoding()), PhysicalReg::new(RegClass::Gpr, Gpr::Sp.encoding())],
@@ -4419,7 +4419,7 @@ impl Backend for RiscV64Backend {
             });
         }
 
-        if fs - 16 >= -2048 {
+        if fs - 16 >= -2048 && fs - 16 <= 2047 {
             instructions.push(AllocatedInstruction {
                 opcode: "sd".to_string(),
                 reads: vec![PhysicalReg::new(RegClass::Gpr, Gpr::S0.encoding()), PhysicalReg::new(RegClass::Gpr, Gpr::Sp.encoding())],
@@ -5026,14 +5026,14 @@ impl Backend for RiscV64Backend {
                             code.extend(ss_load_value(val, &vreg_stack_slots, Gpr::A0));
                         }
                         // Epilogue
-                        if fs - 16 >= -2048 {
+                        if fs - 16 >= -2048 && fs - 16 <= 2047 {
                             code.extend(Instruction::Ld { rd: Gpr::S0, rs1: Gpr::Sp, imm: fs - 16 }.encode());
                         } else {
                             code.extend(ss_load_imm(Gpr::T2, (fs - 16) as i64));
                             code.extend(Instruction::Add { rd: Gpr::T2, rs1: Gpr::Sp, rs2: Gpr::T2 }.encode());
                             code.extend(Instruction::Ld { rd: Gpr::S0, rs1: Gpr::T2, imm: 0 }.encode());
                         }
-                        if fs - 8 >= -2048 {
+                        if fs - 8 >= -2048 && fs - 8 <= 2047 {
                             code.extend(Instruction::Ld { rd: Gpr::Ra, rs1: Gpr::Sp, imm: fs - 8 }.encode());
                         } else {
                             code.extend(ss_load_imm(Gpr::T2, (fs - 8) as i64));
