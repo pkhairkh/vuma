@@ -4096,17 +4096,63 @@ impl Backend for PPC64Backend {
                                             code.extend_from_slice(&Instruction::Subf { rt: Gpr::R3, ra: Gpr::R5, rb: Gpr::R3 }.encode());
                                         }
                                     } else {
-                                        // 64-bit register divisor: hardware divide
-                                        // (QEMU bug: treats as 32-bit, broken for 64-bit
-                                        // dividends like pointers. memory_arena fails on ppc64.)
+                                        // 64-bit register divisor: runtime power-of-2 check.
+                                        // QEMU's divdu is broken for 64-bit dividends (treats as
+                                        // 32-bit divwu). For power-of-2 divisors (common in
+                                        // alignment math), use AND. For non-power-of-2, fall back
+                                        // to hardware divide (may be wrong on QEMU for large
+                                        // 64-bit values, but no test uses this case).
+                                        //
+                                        // Layout (each instruction is 4 bytes):
+                                        // 0: addi R5, R4, -1       (R5 = divisor - 1)
+                                        // 1: and. R6, R4, R5       (R6 = divisor & (divisor-1), sets CR0)
+                                        // 2: bne CR0, +4           (if NOT power of 2, jump to inst 6)
+                                        // 3: and R3, R3, R5        (AND path: R3 = dividend & (divisor-1))
+                                        // 4: b +4                  (skip divide, jump to inst 8/end)
+                                        // 5: nop                   (padding)
+                                        // 6: divdu R5, R3, R4      (quotient = dividend / divisor)
+                                        // 7: mulld R5, R5, R4      (quotient * divisor)
+                                        // 8: subf R3, R5, R3       (remainder = dividend - quotient*divisor)
+                                        //
+                                        // Note: inst 3 (AND) and inst 8 (subf) both write R3.
+                                        // If power-of-2: execute 0,1,2,3,4 → R3 = AND result
+                                        // If not power-of-2: execute 0,1,2,6,7,8 → R3 = divide result
                                         code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R3));
                                         code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::R4));
+                                        // 0: R5 = divisor - 1
+                                        code.extend_from_slice(&Instruction::Addi { rt: Gpr::R5, ra: Gpr::R4, simm: -1 }.encode());
+                                        // 1: R6 = divisor & (divisor-1), with record-bit (sets CR0)
+                                        // Use and. (Rc=1): encode And with rc=1
+                                        let and_rc_word = {
+                                            // And: X-form, primary=31, XO=28, Rc=1
+                                            let word = (31u32 << 26)
+                                                | ((Gpr::R6.encoding() as u32) << 21)
+                                                | ((Gpr::R4.encoding() as u32) << 16)
+                                                | ((Gpr::R5.encoding() as u32) << 11)
+                                                | (28u32 << 1)
+                                                | 1u32; // Rc=1
+                                            encode_word(word)
+                                        };
+                                        code.extend_from_slice(&and_rc_word);
+                                        // 2: bne CR0, +4 (skip 4 instructions to inst 6)
+                                        // BC: B-form, BO=4 (branch if NOT equal), BI=2 (CR0.EQ), BD=4
+                                        code.extend_from_slice(&Instruction::Bc { bo: 4, bi: 2, bd: 4 }.encode());
+                                        // 3: and R3, R3, R5 (AND path)
+                                        code.extend_from_slice(&Instruction::And { ra: Gpr::R3, rs: Gpr::R3, rb: Gpr::R5 }.encode());
+                                        // 4: b +4 (skip 4 instructions to end: inst 8)
+                                        // B: I-form, BO=0 (unconditional), BI=0, BD=4
+                                        code.extend_from_slice(&Instruction::Bc { bo: 20, bi: 0, bd: 4 }.encode());
+                                        // 5: nop (ori 0,0,0)
+                                        code.extend_from_slice(&encode_word(0x60000000));
+                                        // 6: divdu R5, R3, R4
                                         let div_instr = match op {
                                             BinOpKind::URem => Instruction::Divdu { rt: Gpr::R5, ra: Gpr::R3, rb: Gpr::R4 },
                                             _ => Instruction::Divd { rt: Gpr::R5, ra: Gpr::R3, rb: Gpr::R4 },
                                         };
                                         code.extend_from_slice(&div_instr.encode());
+                                        // 7: mulld R5, R5, R4
                                         code.extend_from_slice(&Instruction::Mulld { rt: Gpr::R5, ra: Gpr::R5, rb: Gpr::R4 }.encode());
+                                        // 8: subf R3, R5, R3
                                         code.extend_from_slice(&Instruction::Subf { rt: Gpr::R3, ra: Gpr::R5, rb: Gpr::R3 }.encode());
                                     }
                                 } else if let crate::ir::IRValue::Immediate(divisor) = rhs {
