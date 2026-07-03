@@ -4495,6 +4495,13 @@ impl Backend for RiscV32Backend {
                             && matches!(op, BinOpKind::Shl);
                         let is_shr_32 = is_64bit && matches!(rhs, IRValue::Immediate(32))
                             && matches!(op, BinOpKind::ShrL | BinOpKind::ShrA);
+                        // 64-bit shifts by > 32 (immediate): handle as cross-word shifts
+                        let is_shl_large = is_64bit && matches!(op, BinOpKind::Shl)
+                            && matches!(rhs, IRValue::Immediate(n) if *n > 32 && *n < 64);
+                        let is_shrl_large = is_64bit && matches!(op, BinOpKind::ShrL)
+                            && matches!(rhs, IRValue::Immediate(n) if *n > 32 && *n < 64);
+                        let is_shra_large = is_64bit && matches!(op, BinOpKind::ShrA)
+                            && matches!(rhs, IRValue::Immediate(n) if *n > 32 && *n < 64);
 
                         if is_shl_32 {
                             // u64 << 32: result_high = lhs_low, result_low = 0
@@ -4515,6 +4522,55 @@ impl Backend for RiscV32Backend {
                             }
                             code.extend(ss_store_to_slot(Gpr::T0, dst_offset));
                             code.extend(Instruction::Addi { rd: Gpr::T0, rs1: Gpr::Zero, imm: 0 }.encode());
+                            code.extend(ss_store_to_slot(Gpr::T0, dst_offset - 4));
+                        } else if is_shl_large {
+                            // u64 << N (N > 32): result_high = lhs_low << (N-32), result_low = 0
+                            let n = if let IRValue::Immediate(n) = rhs { *n } else { 0 };
+                            let shift = (n - 32) as i32;
+                            code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::T0));
+                            // result_high = T0 << (N-32)
+                            code.extend(Instruction::Slli { rd: Gpr::T0, rs1: Gpr::T0, shamt: (shift as u32) & 0x1f }.encode());
+                            code.extend(ss_store_to_slot(Gpr::T0, dst_offset - 4));
+                            // result_low = 0
+                            code.extend(Instruction::Addi { rd: Gpr::T0, rs1: Gpr::Zero, imm: 0 }.encode());
+                            code.extend(ss_store_to_slot(Gpr::T0, dst_offset));
+                        } else if is_shrl_large {
+                            // u64 >>L N (N > 32): result_low = lhs_high >> (N-32), result_high = 0
+                            let n = if let IRValue::Immediate(n) = rhs { *n } else { 0 };
+                            let shift = (n - 32) as i32;
+                            if let IRValue::Register(lhs_id) = lhs {
+                                let lhs_off = vreg_stack_slots.get(lhs_id).copied().unwrap_or(0);
+                                code.extend(ss_load_from_slot(Gpr::T0, lhs_off - 4));
+                            } else {
+                                let imm = if let IRValue::Immediate(v) = lhs { *v }
+                                    else if let IRValue::Address(v) = lhs { *v as i64 }
+                                    else { 0 };
+                                code.extend(ss_load_imm(Gpr::T0, (imm >> 32) as i64));
+                            }
+                            // result_low = lhs_high >>L (N-32)
+                            code.extend(Instruction::Srli { rd: Gpr::T0, rs1: Gpr::T0, shamt: (shift as u32) & 0x1f }.encode());
+                            code.extend(ss_store_to_slot(Gpr::T0, dst_offset));
+                            // result_high = 0
+                            code.extend(Instruction::Addi { rd: Gpr::T0, rs1: Gpr::Zero, imm: 0 }.encode());
+                            code.extend(ss_store_to_slot(Gpr::T0, dst_offset - 4));
+                        } else if is_shra_large {
+                            // u64 >>A N (N > 32): result_low = lhs_high >>A (N-32), result_high = sign_ext(lhs_high >> 31)
+                            let n = if let IRValue::Immediate(n) = rhs { *n } else { 0 };
+                            let shift = (n - 32) as i32;
+                            if let IRValue::Register(lhs_id) = lhs {
+                                let lhs_off = vreg_stack_slots.get(lhs_id).copied().unwrap_or(0);
+                                code.extend(ss_load_from_slot(Gpr::T0, lhs_off - 4));
+                            } else {
+                                let imm = if let IRValue::Immediate(v) = lhs { *v }
+                                    else if let IRValue::Address(v) = lhs { *v as i64 }
+                                    else { 0 };
+                                code.extend(ss_load_imm(Gpr::T0, (imm >> 32) as i64));
+                            }
+                            // result_low = lhs_high >>A (N-32)
+                            code.extend(Instruction::Srai { rd: Gpr::T0, rs1: Gpr::T0, shamt: (shift as u32) & 0x1f }.encode());
+                            code.extend(ss_store_to_slot(Gpr::T0, dst_offset));
+                            // result_high = sign extension (srai 31)
+                            code.extend(Instruction::Srai { rd: Gpr::T0, rs1: Gpr::T0, shamt: 31 }.encode());
                             code.extend(ss_store_to_slot(Gpr::T0, dst_offset - 4));
                         } else {
                         match op {

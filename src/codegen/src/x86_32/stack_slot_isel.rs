@@ -500,6 +500,53 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                         }
                         code.extend(encode_mov_mem_reg(Gpr::Rbp, dst_off, Gpr::Rax));
                         code.extend(store_mem_zero(dst_off + 4));
+                    } else if is_64bit && matches!(rhs, IRValue::Immediate(n) if *n > 32 && *n < 64) {
+                        // 64-bit shift by N > 32 (immediate): cross-word shift
+                        let n = if let IRValue::Immediate(n) = rhs { *n } else { 0 };
+                        let shift = (n - 32) as u32;
+                        let dst_off = slot_offset(dst_id);
+                        
+                        if matches!(op, BinOpKind::Shl) {
+                            // u64 << N: result_high = lhs_low << (N-32), result_low = 0
+                            code.extend(load_value(lhs, Gpr::Rax));
+                            code.extend(encode_mov_reg_imm32(Gpr::Rcx, shift as i32));
+                            code.extend(encode_shl_reg_cl(Gpr::Rax));
+                            code.extend(encode_mov_mem_reg(Gpr::Rbp, dst_off + 4, Gpr::Rax));
+                            code.extend(store_mem_zero(dst_off));
+                        } else if matches!(op, BinOpKind::ShrL) {
+                            // u64 >>L N: result_low = lhs_high >> (N-32), result_high = 0
+                            if let IRValue::Register(lhs_id) = lhs {
+                                let lhs_off = slot_offset(*lhs_id);
+                                code.extend(encode_mov_reg_mem(Gpr::Rax, Gpr::Rbp, lhs_off + 4));
+                            } else {
+                                let imm = if let IRValue::Immediate(v) = lhs { *v }
+                                    else if let IRValue::Address(v) = lhs { *v as i64 }
+                                    else { 0 };
+                                code.extend(encode_mov_reg_imm32(Gpr::Rax, (imm >> 32) as i32));
+                            }
+                            code.extend(encode_mov_reg_imm32(Gpr::Rcx, shift as i32));
+                            code.extend(encode_shr_reg_cl(Gpr::Rax));
+                            code.extend(encode_mov_mem_reg(Gpr::Rbp, dst_off, Gpr::Rax));
+                            code.extend(store_mem_zero(dst_off + 4));
+                        } else {
+                            // u64 >>A N: result_low = lhs_high >>A (N-32), result_high = sign_ext
+                            if let IRValue::Register(lhs_id) = lhs {
+                                let lhs_off = slot_offset(*lhs_id);
+                                code.extend(encode_mov_reg_mem(Gpr::Rax, Gpr::Rbp, lhs_off + 4));
+                            } else {
+                                let imm = if let IRValue::Immediate(v) = lhs { *v }
+                                    else if let IRValue::Address(v) = lhs { *v as i64 }
+                                    else { 0 };
+                                code.extend(encode_mov_reg_imm32(Gpr::Rax, (imm >> 32) as i32));
+                            }
+                            code.extend(encode_mov_reg_imm32(Gpr::Rcx, shift as i32));
+                            code.extend(encode_sar_reg_cl(Gpr::Rax));
+                            code.extend(encode_mov_mem_reg(Gpr::Rbp, dst_off, Gpr::Rax));
+                            // Sign-extend: sar eax, 31 → all 1s if negative, all 0s if positive
+                            code.extend(encode_mov_reg_imm32(Gpr::Rcx, 31));
+                            code.extend(encode_sar_reg_cl(Gpr::Rax));
+                            code.extend(encode_mov_mem_reg(Gpr::Rbp, dst_off + 4, Gpr::Rax));
+                        }
                     } else {
                     match op {
                         BinOpKind::Add => {
