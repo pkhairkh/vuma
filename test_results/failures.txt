@@ -1,8 +1,8 @@
-VUMA Test Failures — 2026-07-03 13:24:05 UTC
-Total: 13 failures across 5 tests
+VUMA Test Failures — 2026-07-03 15:29:26 UTC
+Total: 12 failures across 5 tests
 
-  atomics              atomics_demo.vuma                             exp=1264 [('loongarch64', 122, 'MM'), ('ppc64', 124, 'TO')]
+  atomics              atomics_demo.vuma                             exp=1264 [('ppc64', 180, 'MM')]
   complex_stores       base64_encode.vuma                            exp=  20 [('wasm32', 87, 'MM')]
-  concurrency          self_exec.vuma                                exp=   0 [('mips64', 6, 'MM'), ('ppc64', 6, 'MM'), ('loongarch64', -11, 'CR'), ('x86_32', -11, 'CR'), ('wasm32', 1, 'CR')]
+  concurrency          self_exec.vuma                                exp=   0 [('ppc64', 6, 'MM'), ('mips64', 6, 'MM'), ('loongarch64', -11, 'CR'), ('x86_32', -11, 'CR'), ('wasm32', 1, 'CR')]
   memory               memory_arena.vuma                             exp=   0 [('ppc64', -11, 'CR')]
   multi_function       sha256d.vuma                                  exp=  79 [('arm32', 61, 'MM'), ('riscv32', 30, 'MM'), ('x86_32', 30, 'MM'), ('wasm32', 226, 'MM')]
