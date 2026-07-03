@@ -1499,15 +1499,13 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     // only; store EAX and zero the high word via store_vreg.
                     if let Some(d) = dst {
                         let dst_id = d.as_register().unwrap_or(0);
-                        if !is_extern {
-                            // VUMA function: 64-bit return in EDX:EAX.
-                            let dst_off = slot_offset(dst_id);
-                            code.extend(encode_mov_mem_reg(Gpr::Rbp, dst_off, Gpr::Rax));     // dst.low  = EAX
-                            code.extend(encode_mov_mem_reg(Gpr::Rbp, dst_off + 4, Gpr::Rdx)); // dst.high = EDX
-                        } else {
-                            // Extern: 32-bit return in EAX, zero high word.
-                            code.extend(store_vreg(dst_id, Gpr::Rax));
-                        }
+                        // For both VUMA and extern calls, store only EAX (32-bit)
+                        // and zero the high word via store_vreg. VUMA functions
+                        // return 32-bit values in EAX; EDX contains garbage from
+                        // the callee's internal computation. Storing EDX to the
+                        // high word corrupts subsequent 64-bit comparisons
+                        // (e.g., comparing a read() return with 0 using SLt).
+                        code.extend(store_vreg(dst_id, Gpr::Rax));
                     }
                     code
                 }
