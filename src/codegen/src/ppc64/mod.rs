@@ -4061,25 +4061,54 @@ impl Backend for PPC64Backend {
                                 }
                             }
                             BinOpKind::SRem | BinOpKind::URem => {
-                                // Power-of-2 optimization: for `x % (2^n)`, use `x & (2^n - 1)`.
-                                // This avoids the broken 64-bit divide on QEMU (both 7.2 and 10.0.8)
-                                // which treats divdu/divd as 32-bit divwu/divw, producing wrong
-                                // results for 64-bit dividends like pointer addresses.
+                                // Power-of-2 immediate optimization: for `x % (2^n)` with an
+                                // immediate power-of-2 divisor, use `x & (2^n - 1)`.
+                                // This avoids the broken 64-bit divide on QEMU (which treats
+                                // divdu/divd as 32-bit divwu/divw, producing wrong results for
+                                // 64-bit dividends like pointer addresses).
+                                //
+                                // For non-power-of-2 divisors (e.g. `len % 3` in base64_encode),
+                                // use hardware divide — QEMU treats 64-bit divdu as 32-bit divwu,
+                                // but for values that fit in 32 bits (small lengths), this gives
+                                // the correct result.
+                                //
+                                // For register divisors (e.g. `current % align` in memory_arena),
+                                // hardware divide is broken on QEMU for 64-bit dividends. This
+                                // affects memory_arena on ppc64 only.
                                 if !is_32bit {
-                                    // 64-bit path: always use AND with (divisor - 1).
-                                    // This is correct ONLY for power-of-2 divisors, but:
-                                    // - All 64-bit modulo operations in the VUMA test suite use
-                                    //   power-of-2 alignment values (8, 16, 32, etc.)
-                                    // - The QEMU divdu bug makes hardware divide unusable for
-                                    //   64-bit values, so AND is the only correct option
-                                    // - For non-power-of-2 divisors, this gives wrong results,
-                                    //   but no test in the suite does 64-bit % non-power-of-2
-                                    code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R3));
-                                    code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::R4));
-                                    // R5 = divisor - 1 (mask)
-                                    code.extend_from_slice(&Instruction::Addi { rt: Gpr::R5, ra: Gpr::R4, simm: -1 }.encode());
-                                    // R3 = lhs & (divisor - 1)
-                                    code.extend_from_slice(&Instruction::And { ra: Gpr::R3, rs: Gpr::R3, rb: Gpr::R5 }.encode());
+                                    if let crate::ir::IRValue::Immediate(divisor) = rhs {
+                                        let d = *divisor;
+                                        if d > 0 && (d & (d - 1)) == 0 {
+                                            // 64-bit power-of-2 immediate: x % d = x & (d - 1)
+                                            code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R3));
+                                            code.extend(ss_load_imm(Gpr::R4, d - 1));
+                                            code.extend_from_slice(&Instruction::And { ra: Gpr::R3, rs: Gpr::R3, rb: Gpr::R4 }.encode());
+                                        } else {
+                                            // 64-bit non-power-of-2 immediate: hardware divide
+                                            code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R3));
+                                            code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::R4));
+                                            let div_instr = match op {
+                                                BinOpKind::URem => Instruction::Divdu { rt: Gpr::R5, ra: Gpr::R3, rb: Gpr::R4 },
+                                                _ => Instruction::Divd { rt: Gpr::R5, ra: Gpr::R3, rb: Gpr::R4 },
+                                            };
+                                            code.extend_from_slice(&div_instr.encode());
+                                            code.extend_from_slice(&Instruction::Mulld { rt: Gpr::R5, ra: Gpr::R5, rb: Gpr::R4 }.encode());
+                                            code.extend_from_slice(&Instruction::Subf { rt: Gpr::R3, ra: Gpr::R5, rb: Gpr::R3 }.encode());
+                                        }
+                                    } else {
+                                        // 64-bit register divisor: hardware divide
+                                        // (QEMU bug: treats as 32-bit, broken for 64-bit
+                                        // dividends like pointers. memory_arena fails on ppc64.)
+                                        code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R3));
+                                        code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::R4));
+                                        let div_instr = match op {
+                                            BinOpKind::URem => Instruction::Divdu { rt: Gpr::R5, ra: Gpr::R3, rb: Gpr::R4 },
+                                            _ => Instruction::Divd { rt: Gpr::R5, ra: Gpr::R3, rb: Gpr::R4 },
+                                        };
+                                        code.extend_from_slice(&div_instr.encode());
+                                        code.extend_from_slice(&Instruction::Mulld { rt: Gpr::R5, ra: Gpr::R5, rb: Gpr::R4 }.encode());
+                                        code.extend_from_slice(&Instruction::Subf { rt: Gpr::R3, ra: Gpr::R5, rb: Gpr::R3 }.encode());
+                                    }
                                 } else if let crate::ir::IRValue::Immediate(divisor) = rhs {
                                     let d = *divisor;
                                     if d > 0 && (d & (d - 1)) == 0 {
