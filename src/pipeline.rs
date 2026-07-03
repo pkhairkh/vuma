@@ -6519,6 +6519,20 @@ pub fn bridge_ast_to_codegen_scg(program: &AstProgram) -> Scg {
     // as literal values when referenced in function bodies.
     let global_constants = collect_global_constants(program);
 
+    // Collect void function names (functions with no return type annotation).
+    // Used by flatten_expr to emit dst=None for void function calls — critical
+    // for wasm32 which loads from mem[0] for non-void calls.
+    let void_functions: HashSet<String> = program.items.iter()
+        .filter_map(|item| {
+            if let Item::FnDef(fn_def) = item {
+                if fn_def.return_type.is_none() {
+                    return Some(fn_def.name.clone());
+                }
+            }
+            None
+        })
+        .collect();
+
     // ── Collect top-level statements ─────────────────────────────────
     //
     // Top-level `Item::Stmt` items (e.g. `region buf = allocate(1024);`,
@@ -6562,6 +6576,7 @@ pub fn bridge_ast_to_codegen_scg(program: &AstProgram) -> Scg {
             let mut ctx = BridgeCtx::new();
             ctx.extern_fns = extern_fns.clone();
             ctx.global_constants = global_constants.clone();
+            ctx.void_functions = void_functions.clone();
             let mut body = bridge_block_to_scg_stmts(&fn_def.body, &mut ctx);
 
             // Ensure every function ends with a Return statement.
@@ -6652,6 +6667,11 @@ pub struct BridgeCtx {
     /// this, all `>>` operations collapse to a single shift kind, breaking
     /// either `bit_abs` (i64 → needs ShrA) or `bit_log2` (u64 → needs ShrL).
     pub var_types: HashMap<String, ScgType>,
+    /// Set of user-defined function names that return void (no return type).
+    /// Populated by `bridge_ast_to_codegen_scg` before processing function
+    /// bodies. Used by `flatten_expr` to emit `dst: None` for void function
+    /// calls — critical for wasm32 which loads from mem[0] for non-void calls.
+    pub void_functions: HashSet<String>,
 }
 
 impl BridgeCtx {
@@ -6663,6 +6683,7 @@ impl BridgeCtx {
             extern_fns: HashSet::new(),
             global_constants: HashMap::new(),
             var_types: HashMap::new(),
+            void_functions: HashSet::new(),
         }
     }
 
@@ -6938,7 +6959,6 @@ pub fn flatten_expr(
             let flat_args: Vec<ScgExpr> = args.iter()
                 .map(|a| flatten_expr(a, stmts, ctx))
                 .collect();
-            let dst = ctx.alloc_temp();
             // Mark as extern if the function was declared in an extern "C" block
             // OR if it's a known built-in intrinsic (AtomicLoad/AtomicStore/AtomicCas
             // are lowered by the backend to machine instructions, not external calls,
@@ -6946,14 +6966,34 @@ pub fn flatten_expr(
             let is_extern = ctx.extern_fns.contains(&func_name)
                 || func_name == "__vuma_alloc"
                 || func_name == "__vuma_dealloc";
-            stmts.push(ScgStatement::Call(CallNode {
-                dst: Some(dst.clone()),
-                func: func_name,
-                args: flat_args,
-                is_extern,
-                reassigns: None,
-            }));
-            ScgExpr::Var(dst)
+            // Void functions (no return type) get dst=None so the wasm32
+            // backend doesn't load stale data from mem[0].
+            let is_void = ctx.void_functions.contains(&func_name)
+                || func_name == "free"
+                || func_name == "print_int"
+                || func_name == "print_hex"
+                || func_name == "print_newline";
+            if is_void {
+                stmts.push(ScgStatement::Call(CallNode {
+                    dst: None,
+                    func: func_name,
+                    args: flat_args,
+                    is_extern,
+                    reassigns: None,
+                }));
+                // Return a dummy value (0) for void calls used as expressions
+                ScgExpr::Int(0)
+            } else {
+                let dst = ctx.alloc_temp();
+                stmts.push(ScgStatement::Call(CallNode {
+                    dst: Some(dst.clone()),
+                    func: func_name,
+                    args: flat_args,
+                    is_extern,
+                    reassigns: None,
+                }));
+                ScgExpr::Var(dst)
+            }
         }
 
         // ── Atomic operations: emit as CallNodes with special names ──
