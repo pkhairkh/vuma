@@ -1,35 +1,62 @@
-//! Dump IR for a .vuma file.
+//! Dump the IR for a .vuma file
 use vuma_codegen::scg_to_ir::IRBuilder;
-use vuma_parser::{Parser, AstToScg};
-use vuma::pipeline::{CompileConfig, run_scg_transforms, bridge_scg_to_codegen};
+use vuma_parser::{Parser, AstToScg, ModuleResolver};
+use vuma::pipeline::{CompileConfig, run_scg_transforms, CompileTarget, OptLevel, VerificationLevel, bridge_ast_to_codegen_scg};
+use vuma_codegen::backend::{create_backend, BackendKind};
+
+fn backend_from_name(name: &str) -> Result<BackendKind, String> {
+    match name.to_ascii_lowercase().as_str() {
+        "x86_64" | "x86-64" | "x64" => Ok(BackendKind::X86_64),
+        "aarch64" | "arm64" => Ok(BackendKind::AArch64),
+        "riscv64" | "riscv" => Ok(BackendKind::RiscV64),
+        "riscv32" => Ok(BackendKind::RiscV32),
+        "x86_32" | "i386" | "x86" => Ok(BackendKind::X86_32),
+        "arm32" | "arm" => Ok(BackendKind::Arm32),
+        "mips64" | "mips" => Ok(BackendKind::Mips64),
+        "ppc64" | "powerpc64" | "ppc" => Ok(BackendKind::PowerPC64),
+        "loongarch64" | "loongarch" => Ok(BackendKind::LoongArch64),
+        "wasm32" | "wasm" => Ok(BackendKind::Wasm32),
+        _ => Err(format!("unknown backend: {}", name)),
+    }
+}
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let path = if args.len() > 1 { &args[1] } else { "examples/test_call.vuma" };
+    let path = &args[1];
+    let backend_name = if args.len() > 2 { args[2].as_str() } else { "arm32" };
+    let kind = backend_from_name(backend_name).unwrap_or(BackendKind::Arm32);
     let source = std::fs::read_to_string(path).unwrap();
-    let mut parser = Parser::new(&source);
-    let result = parser.parse_program();
-    if result.has_errors() {
-        eprintln!("Parse errors: {}", result.errors.len());
-        return;
-    }
-    let ast = result.unwrap();
-    let mut scg = { let mut c = AstToScg::new(); c.convert(&ast).map_err(|e| format!("scg: {}", e)).unwrap() };
-    let config = CompileConfig { opt_level: vuma::pipeline::OptLevel::O0, ..Default::default() };
-    let _ = run_scg_transforms(&mut scg, &config);
-    let codegen_scg = bridge_scg_to_codegen(&scg);
-    let ir_program = { let mut b = IRBuilder::new(); b.build(&codegen_scg).map_err(|e| format!("ir: {}", e)).unwrap() };
+    let file_path = std::path::Path::new(path);
+
+    let mut resolver = ModuleResolver::new();
+    let ast = resolver.resolve_source(&source, Some(file_path)).unwrap();
+
+    let codegen_scg = bridge_ast_to_codegen_scg(&ast);
+    let mut b = IRBuilder::new();
+    let ir_program = b.build(&codegen_scg).unwrap();
+
+    println!("=== IR for {} (backend={}) ===", path, backend_name);
     for func in &ir_program.functions {
-        println!("Function: {} ({} params, {} vregs)", func.name, func.params.len(), func.vregs.len());
-        for (id, vr) in &func.vregs {
-            println!("  vreg {}: {:?}", id, vr);
-        }
-        for block in &func.blocks {
-            println!("  Block: {}", block.label);
-            for instr in &block.instructions {
+        println!("\n--- Function: {} (params={:?} returns={:?}) ---",
+            func.name, func.param_types, func.result_types);
+        for (i, bb) in func.blocks.iter().enumerate() {
+            println!("  bb{}: preds={:?}", i, bb.predecessors);
+            for instr in &bb.instructions {
                 println!("    {:?}", instr);
             }
-            println!("    TERM: {:?}", block.terminator);
+            println!("    TERM: {:?}", bb.terminator);
+        }
+    }
+
+    let backend = create_backend(kind).unwrap();
+    for func in &ir_program.functions {
+        let allocated = backend.allocate_registers(func).unwrap();
+        println!("\n=== Allocated: {} ===", func.name);
+        for (i, bb) in allocated.blocks.iter().enumerate() {
+            println!("  bb{}:", i);
+            for instr in &bb.instructions {
+                println!("    {:?}", instr);
+            }
         }
     }
 }
