@@ -1273,8 +1273,8 @@ impl TargetInfo for PowerPC64TargetInfo {
         alignment_of_with_ptr_width(ty, 8)
     }
     fn endianness(&self) -> Endianness {
-        Endianness::Little
-    } // Little-endian (powerpc64le)
+        Endianness::Bi
+    } // Bi-endian
     fn has_registers(&self) -> bool {
         true
     }
