@@ -19,6 +19,18 @@ use crate::ir::{
 };
 use std::collections::HashMap;
 
+// Thread-local set of function names that return 64-bit values (I64/U64).
+thread_local! {
+    static FUNC_64BIT_RETURNS: std::cell::RefCell<Option<std::collections::HashSet<String>>> = std::cell::RefCell::new(None);
+}
+
+/// Set the thread-local set of 64-bit-returning function names.
+pub fn set_64bit_returns(names: &std::collections::HashSet<String>) {
+    FUNC_64BIT_RETURNS.with(|s| {
+        *s.borrow_mut() = Some(names.clone());
+    });
+}
+
 pub mod disasm;
 
 // ===========================================================================
@@ -1816,6 +1828,16 @@ impl LoweringContext {
                 if let Some(local_idx) = self.get_local(*id) {
                     self.emit(WasmInstr::LocalGet(local_idx));
                     self.stack_depth += 1;
+                    // If this local is I64 (from a 64-bit Call return) but
+                    // the desired type is I32, wrap to I32.
+                    // If this local is I32 but the desired type is I64, extend.
+                    let local_ty = self.vreg_types.get(id).copied().unwrap_or(WasmType::I32);
+                    let desired_ty = type_hint.copied().unwrap_or(WasmType::I32);
+                    if local_ty == WasmType::I64 && desired_ty != WasmType::I64 {
+                        self.emit(WasmInstr::I32WrapI64);
+                    } else if local_ty == WasmType::I32 && desired_ty == WasmType::I64 {
+                        self.emit(WasmInstr::I64ExtendI32U);
+                    }
                 }
             }
             IRValue::Address(addr) => {
@@ -1834,6 +1856,16 @@ impl LoweringContext {
             self.alloc_local(vreg_id, ty);
         }
         if let Some(local_idx) = self.get_local(vreg_id) {
+            // Check if type conversion is needed: if the stack value (ty)
+            // differs from the local's type, convert before LocalSet.
+            let local_ty = self.vreg_types.get(&vreg_id).copied().unwrap_or(WasmType::I32);
+            if ty != local_ty {
+                if ty == WasmType::I64 && local_ty == WasmType::I32 {
+                    self.emit(WasmInstr::I32WrapI64);
+                } else if ty == WasmType::I32 && local_ty == WasmType::I64 {
+                    self.emit(WasmInstr::I64ExtendI32U);
+                }
+            }
             self.emit(WasmInstr::LocalSet(local_idx));
             self.stack_depth -= 1;
         }
@@ -1860,18 +1892,31 @@ fn wasm_type_for_dedicated_arith(ir_ty: Option<&IRType>) -> WasmType {
 /// retain their original width.
 fn wasm_type_for_binop(
     _op: &BinOpKind,
-    _lhs: &IRValue,
-    _rhs: &IRValue,
+    lhs: &IRValue,
+    rhs: &IRValue,
     ir_ty: Option<&IRType>,
-    _vreg_types: &HashMap<u32, WasmType>,
+    vreg_types: &HashMap<u32, WasmType>,
 ) -> WasmType {
-    // If the IR provides a type, use it (but map I64/U64 to I32 for Wasm32).
+    // If the IR provides a type, use it.
     if let Some(ty) = ir_ty {
         return match ty {
             IRType::F32 => WasmType::F32,
             IRType::F64 => WasmType::F64,
-            _ => WasmType::I32, // all integer types → i32 on wasm32
+            IRType::I64 | IRType::U64 => WasmType::I64,
+            _ => WasmType::I32,
         };
+    }
+    // If ty is None, check if either operand is an I64 local (from shift >= 32
+    // or 64-bit Call return). If so, use I64 so the operation matches.
+    if let IRValue::Register(id) = lhs {
+        if let Some(&WasmType::I64) = vreg_types.get(id) {
+            return WasmType::I64;
+        }
+    }
+    if let IRValue::Register(id) = rhs {
+        if let Some(&WasmType::I64) = vreg_types.get(id) {
+            return WasmType::I64;
+        }
     }
     // Default to i32 for all integer ops on wasm32
     WasmType::I32
@@ -1905,8 +1950,12 @@ fn lower_function(
     let result_types: Vec<WasmType> = func
         .result_types
         .iter()
-        .filter_map(WasmType::from_ir_type)
-        .map(|t| if t.is_integer() { WasmType::I32 } else { t })
+        .map(|t| match t {
+            IRType::I64 | IRType::U64 => WasmType::I64,
+            IRType::F32 => WasmType::F32,
+            IRType::F64 => WasmType::F64,
+            _ => WasmType::I32,
+        })
         .collect();
     let mut ctx = LoweringContext::new(result_types);
 
@@ -2095,6 +2144,73 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
     match instr {
         IRInstr::BinOp { op, dst, lhs, rhs, ty } => {
             let wasm_ty = wasm_type_for_binop(op, lhs, rhs, ty.as_ref(), &ctx.vreg_types);
+
+            // Special case: shifts by >= 32 require I64 (I32 shifts mask
+            // to 5 bits, so << 32 becomes << 0 = identity). Handle these
+            // with explicit I64 operations + I32WrapI64, without changing
+            // the global type system.
+            if matches!(op, BinOpKind::Shl | BinOpKind::ShrL | BinOpKind::ShrA)
+                && matches!(rhs, IRValue::Immediate(n) if *n >= 32)
+            {
+                // Push lhs as I64
+                match lhs {
+                    IRValue::Register(id) => {
+                        if let Some(local_idx) = ctx.get_local(*id) {
+                            ctx.emit(WasmInstr::LocalGet(local_idx));
+                            // Check if this local is I64 (from a 64-bit Call return)
+                            let local_ty = ctx.vreg_types.get(id).copied().unwrap_or(WasmType::I32);
+                            if local_ty != WasmType::I64 {
+                                ctx.emit(WasmInstr::I64ExtendI32U);
+                            }
+                        } else {
+                            ctx.emit(WasmInstr::I64Const(0));
+                        }
+                    }
+                    IRValue::Immediate(v) => {
+                        ctx.emit(WasmInstr::I64Const(*v));
+                    }
+                    IRValue::Address(a) => {
+                        ctx.emit(WasmInstr::I64Const(*a as i64));
+                    }
+                    IRValue::Label(_) => {
+                        ctx.emit(WasmInstr::I64Const(0));
+                    }
+                }
+                ctx.stack_depth += 1;
+                // Push rhs as I64
+                if let IRValue::Immediate(n) = rhs {
+                    ctx.emit(WasmInstr::I64Const(*n));
+                } else {
+                    ctx.push_value(rhs, Some(&WasmType::I64));
+                }
+                ctx.stack_depth += 1;
+                // Emit I64 shift
+                let i64_op = match op {
+                    BinOpKind::Shl => WasmInstr::I64Shl,
+                    BinOpKind::ShrL => WasmInstr::I64ShrU,
+                    BinOpKind::ShrA => WasmInstr::I64ShrS,
+                    _ => unreachable!(),
+                };
+                ctx.emit(i64_op);
+                ctx.stack_depth -= 1; // 2 popped, 1 pushed
+                // Don't wrap — keep as I64 and store in I64 local
+                // This preserves the full 64-bit value for subsequent Or/And ops
+                if let IRValue::Register(id) = dst {
+                    if !ctx.vreg_to_local.contains_key(id) {
+                        ctx.alloc_local(*id, WasmType::I64);
+                    }
+                    // Record as I64 so subsequent ops use I64
+                    ctx.vreg_types.insert(*id, WasmType::I64);
+                    if let Some(local_idx) = ctx.get_local(*id) {
+                        ctx.emit(WasmInstr::LocalSet(local_idx));
+                    }
+                } else {
+                    ctx.emit(WasmInstr::Drop);
+                }
+                ctx.stack_depth -= 1;
+                return Ok(());
+            }
+
             ctx.push_value(lhs, Some(&wasm_ty));
             ctx.push_value(rhs, Some(&wasm_ty));
             let mut skip_emit = false;
@@ -2461,11 +2577,37 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
             if !is_void {
                 // Non-void call: load return value from memory address 0
                 // (the callee stores its return value there before returning)
+                // For 64-bit-returning functions, use i64.load to get the
+                // full 64-bit value, then store it in TWO I32 locals
+                // (low word at slot, high word at slot+1... but wasm32
+                // doesn't have multi-word locals). Instead, store the I64
+                // in a local and use I32WrapI64 when needed.
+                let is_64bit_ret = FUNC_64BIT_RETURNS.with(|s| {
+                    s.borrow().as_ref()
+                        .map(|set| set.contains(func))
+                        .unwrap_or(false)
+                });
                 if let Some(IRValue::Register(id)) = dst {
-                    ctx.emit(WasmInstr::I32Const(0));
-                    ctx.emit(WasmInstr::I32Load { align: 2, offset: 0 });
-                    ctx.stack_depth += 1;
-                    ctx.pop_to_vreg(*id, WasmType::I32);
+                    if is_64bit_ret {
+                        // Load 64-bit value from mem[0] and store in an I64 local.
+                        // This preserves the full 64-bit value for shifts >= 32.
+                        ctx.emit(WasmInstr::I32Const(0));
+                        ctx.emit(WasmInstr::I64Load { align: 3, offset: 0 });
+                        ctx.stack_depth += 1;
+                        // Allocate as I64 local
+                        if !ctx.vreg_to_local.contains_key(id) {
+                            ctx.alloc_local(*id, WasmType::I64);
+                        }
+                        if let Some(local_idx) = ctx.get_local(*id) {
+                            ctx.emit(WasmInstr::LocalSet(local_idx));
+                        }
+                        ctx.stack_depth -= 1;
+                    } else {
+                        ctx.emit(WasmInstr::I32Const(0));
+                        ctx.emit(WasmInstr::I32Load { align: 2, offset: 0 });
+                        ctx.stack_depth += 1;
+                        ctx.pop_to_vreg(*id, WasmType::I32);
+                    }
                 }
             }
         }
@@ -2875,14 +3017,44 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
 
         IRInstr::Ret { values } => {
             // Store return value at memory address 0 for _start to read.
-            // wasm i32.store expects stack: [addr, value]
+            // For 64-bit returns (I64/U64), use i64.store to preserve the
+            // full 64-bit value. For 32-bit returns, use i32.store.
             if let Some(val) = values.first() {
-                ctx.emit(WasmInstr::I32Const(0));
-                ctx.stack_depth += 1;
-                ctx.push_value(val, Some(&WasmType::I32));
-                ctx.emit(WasmInstr::I32Store { align: 2, offset: 0 });
-                // Store pops 2 (addr, value)
-                ctx.stack_depth -= 2;
+                let is_64bit_ret = ctx.result_types.iter().any(|t| matches!(t, WasmType::I64));
+                if is_64bit_ret {
+                    ctx.emit(WasmInstr::I32Const(0));
+                    ctx.stack_depth += 1;
+                    // Push value as I64
+                    match val {
+                        IRValue::Register(id) => {
+                            if let Some(local_idx) = ctx.get_local(*id) {
+                                ctx.emit(WasmInstr::LocalGet(local_idx));
+                                // Only extend if the local is I32 (not I64)
+                                let local_ty = ctx.vreg_types.get(id).copied().unwrap_or(WasmType::I32);
+                                if local_ty != WasmType::I64 {
+                                    ctx.emit(WasmInstr::I64ExtendI32U);
+                                }
+                            } else {
+                                ctx.emit(WasmInstr::I64Const(0));
+                            }
+                        }
+                        IRValue::Immediate(v) => {
+                            ctx.emit(WasmInstr::I64Const(*v));
+                        }
+                        _ => {
+                            ctx.emit(WasmInstr::I64Const(0));
+                        }
+                    }
+                    ctx.stack_depth += 1;
+                    ctx.emit(WasmInstr::I64Store { align: 3, offset: 0 });
+                    ctx.stack_depth -= 2;
+                } else {
+                    ctx.emit(WasmInstr::I32Const(0));
+                    ctx.stack_depth += 1;
+                    ctx.push_value(val, Some(&WasmType::I32));
+                    ctx.emit(WasmInstr::I32Store { align: 2, offset: 0 });
+                    ctx.stack_depth -= 2;
+                }
             }
             ctx.emit(WasmInstr::Return);
         }
