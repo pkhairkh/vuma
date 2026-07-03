@@ -4031,19 +4031,19 @@ impl Backend for Arm32Backend {
                         let dst_id = dst.as_register().unwrap_or(0);
                         let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
                         let mut code = Vec::new();
-                        code.extend(ss_load_value_64(Gpr::R0, Gpr::R2, lhs, &vreg_stack_slots));
-                        code.extend(ss_load_value_64(Gpr::R1, Gpr::R3, rhs, &vreg_stack_slots));
-                        // ADDS R0, R0, R1 (low word, set carry)
+                        // Load only low words (32-bit) for the add. This avoids
+                        // garbage high words from function call returns corrupting
+                        // the result. The high word of the result is zeroed by
+                        // ss_store_32_zero, preventing garbage propagation.
+                        code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R0));
+                        code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::R1));
+                        // ADD R0, R0, R1 (32-bit add, carry lost — correct for u32)
                         code.extend_from_slice(&encode_dp_reg(
-                            Condition::Al, DP_ADD, true,
+                            Condition::Al, DP_ADD, false,
                             Gpr::R0.encoding(), Gpr::R0.encoding(), Gpr::R1.encoding(),
                         ));
-                        // ADC R2, R2, R3 (high word, with carry)
-                        code.extend_from_slice(&encode_dp_reg(
-                            Condition::Al, DP_ADC, true,
-                            Gpr::R2.encoding(), Gpr::R2.encoding(), Gpr::R3.encoding(),
-                        ));
-                        code.extend(ss_store_64(Gpr::R0, Gpr::R2, dst_offset));
+                        // Store 32-bit result + zero high word
+                        code.extend(ss_store_32_zero(Gpr::R0, dst_offset, fs));
                         code
                     }
                     crate::ir::IRInstr::Sub { dst, lhs, rhs, .. } => {
@@ -4396,14 +4396,17 @@ impl Backend for Arm32Backend {
                         if let Some(d) = dst {
                             let dst_id = d.as_register().unwrap_or(0);
                             let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
-                            // Store low word (R0) and zero high word.
-                            // For VUMA functions, the return value is 32-bit in R0 (u32/i32).
-                            // R1 may contain garbage from the callee's internal computation.
-                            // Storing R1 to the high word would corrupt subsequent 64-bit
-                            // operations (e.g., Add, And, Or) that use ss_load_value_64.
-                            // Fix: always zero the high word (ss_store_32_zero does this).
+                            // Store low word (R0)
                             code.extend(ss_store_32_zero(Gpr::R0, dst_offset, fs));
-                            if *is_extern {
+                            if !is_extern {
+                                // VUMA function: store high word (R1) from 64-bit return.
+                                // Some VUMA functions (e.g., base64_encode) return 64-bit
+                                // packed values. The high word is needed.
+                                // For 32-bit returns, R1 is garbage — but the Add instruction
+                                // uses ss_store_32_zero (which zeros the high word), preventing
+                                // garbage from propagating.
+                                code.extend(ss_store_to_slot(Gpr::R1, dst_offset + 4));
+                            } else {
                                 // Extern/syscall: sign-extend 32-bit R0 to 64-bit R0:R1.
                                 // MOV R1, R0, ASR #31 — fills R1 with 0xFFFFFFFF if R0 is
                                 // negative (bit 31 set), or 0x00000000 if non-negative.
