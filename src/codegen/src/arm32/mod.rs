@@ -3953,6 +3953,54 @@ impl Backend for Arm32Backend {
                                 // Software division: R0 = R0 / R1
                                 code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R0));
                                 code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::R1));
+
+                                // For signed division, normalize the signs of
+                                // dividend and divisor before running the
+                                // unsigned division loop, then negate the
+                                // quotient if exactly one operand was negative.
+                                // R12 holds the XOR-of-signs flag (0 = same,
+                                // 1 = differ).
+                                if matches!(op, BinOpKind::SDiv) {
+                                    // TST R0, #0x80000000  (sign bit of dividend)
+                                    if let Some((rot, imm8)) = try_encode_arm_imm(0x8000_0000) {
+                                        code.extend_from_slice(&encode_dp_imm(
+                                            Condition::Al, DP_TST, true,
+                                            Gpr::R0.encoding(), 0, rot, imm8,
+                                        ));
+                                    }
+                                    // R12 = (R0 < 0) ? 1 : 0
+                                    code.extend_from_slice(&encode_dp_imm(
+                                        Condition::Mi, DP_MOV, false, 0,
+                                        Gpr::R12.encoding(), 0, 1,
+                                    )); // MOVMI R12, #1
+                                    code.extend_from_slice(&encode_dp_imm(
+                                        Condition::Pl, DP_MOV, false, 0,
+                                        Gpr::R12.encoding(), 0, 0,
+                                    )); // MOVPL R12, #0
+                                    // TST R1, #0x80000000  (sign bit of divisor)
+                                    if let Some((rot, imm8)) = try_encode_arm_imm(0x8000_0000) {
+                                        code.extend_from_slice(&encode_dp_imm(
+                                            Condition::Al, DP_TST, true,
+                                            Gpr::R1.encoding(), 0, rot, imm8,
+                                        ));
+                                    }
+                                    // Toggle R12 if R1 < 0  → R12 = (signs differ)
+                                    code.extend_from_slice(&encode_dp_imm(
+                                        Condition::Mi, DP_EOR, false,
+                                        Gpr::R12.encoding(), Gpr::R12.encoding(), 0, 1,
+                                    )); // EORMI R12, R12, #1
+                                    // Negate dividend if negative
+                                    code.extend_from_slice(&encode_dp_imm(
+                                        Condition::Mi, 0b0011, false,
+                                        Gpr::R0.encoding(), Gpr::R0.encoding(), 0, 0,
+                                    )); // RSBMI R0, R0, #0
+                                    // Negate divisor if negative
+                                    code.extend_from_slice(&encode_dp_imm(
+                                        Condition::Mi, 0b0011, false,
+                                        Gpr::R1.encoding(), Gpr::R1.encoding(), 0, 0,
+                                    )); // RSBMI R1, R1, #0
+                                }
+
                                 // MOV R2, #0 (quotient)
                                 code.extend_from_slice(&0xE3A02000u32.to_le_bytes());
                                 // MOV R3, R0 (remainder)
@@ -3973,6 +4021,21 @@ impl Backend for Arm32Backend {
                                 code.extend_from_slice(&0xEAFFFFFAu32.to_le_bytes());
                                 // done: MOV R0, R2 (quotient)
                                 code.extend_from_slice(&0xE1A00002u32.to_le_bytes());
+
+                                // For SDiv: negate quotient if signs differed.
+                                if matches!(op, BinOpKind::SDiv) {
+                                    // CMP R12, #0
+                                    code.extend_from_slice(&encode_dp_imm(
+                                        Condition::Al, DP_CMP, true,
+                                        Gpr::R12.encoding(), 0, 0, 0,
+                                    ));
+                                    // RSBNE R0, R0, #0
+                                    code.extend_from_slice(&encode_dp_imm(
+                                        Condition::Ne, 0b0011, false,
+                                        Gpr::R0.encoding(), Gpr::R0.encoding(), 0, 0,
+                                    ));
+                                }
+
                                 code.extend(ss_store_32_zero(Gpr::R0, dst_offset, fs));
                                 // Zero high word (32-bit result in 64-bit slot)
                                 code.extend_from_slice(&encode_dp_imm(
@@ -3984,6 +4047,48 @@ impl Backend for Arm32Backend {
                                 // Software modulo: R0 = R0 % R1 (remainder)
                                 code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R0));
                                 code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::R1));
+
+                                // For signed remainder, normalize signs of
+                                // dividend and divisor before running the
+                                // unsigned division loop, then negate the
+                                // remainder if the dividend was negative.
+                                // R12 holds the dividend-sign flag (1 = was neg).
+                                if matches!(op, BinOpKind::SRem) {
+                                    // TST R0, #0x80000000  (sign bit of dividend)
+                                    if let Some((rot, imm8)) = try_encode_arm_imm(0x8000_0000) {
+                                        code.extend_from_slice(&encode_dp_imm(
+                                            Condition::Al, DP_TST, true,
+                                            Gpr::R0.encoding(), 0, rot, imm8,
+                                        ));
+                                    }
+                                    // R12 = (R0 < 0) ? 1 : 0
+                                    code.extend_from_slice(&encode_dp_imm(
+                                        Condition::Mi, DP_MOV, false, 0,
+                                        Gpr::R12.encoding(), 0, 1,
+                                    )); // MOVMI R12, #1
+                                    code.extend_from_slice(&encode_dp_imm(
+                                        Condition::Pl, DP_MOV, false, 0,
+                                        Gpr::R12.encoding(), 0, 0,
+                                    )); // MOVPL R12, #0
+                                    // Negate dividend if negative
+                                    code.extend_from_slice(&encode_dp_imm(
+                                        Condition::Mi, 0b0011, false,
+                                        Gpr::R0.encoding(), Gpr::R0.encoding(), 0, 0,
+                                    )); // RSBMI R0, R0, #0
+                                    // TST R1, #0x80000000  (sign bit of divisor)
+                                    if let Some((rot, imm8)) = try_encode_arm_imm(0x8000_0000) {
+                                        code.extend_from_slice(&encode_dp_imm(
+                                            Condition::Al, DP_TST, true,
+                                            Gpr::R1.encoding(), 0, rot, imm8,
+                                        ));
+                                    }
+                                    // Negate divisor if negative
+                                    code.extend_from_slice(&encode_dp_imm(
+                                        Condition::Mi, 0b0011, false,
+                                        Gpr::R1.encoding(), Gpr::R1.encoding(), 0, 0,
+                                    )); // RSBMI R1, R1, #0
+                                }
+
                                 // MOV R2, #0 (quotient)
                                 code.extend_from_slice(&0xE3A02000u32.to_le_bytes());
                                 // MOV R3, R0 (remainder)
@@ -4004,6 +4109,21 @@ impl Backend for Arm32Backend {
                                 code.extend_from_slice(&0xEAFFFFFAu32.to_le_bytes());
                                 // done: MOV R0, R3 (remainder)
                                 code.extend_from_slice(&0xE1A00003u32.to_le_bytes());
+
+                                // For SRem: negate remainder if dividend was negative.
+                                if matches!(op, BinOpKind::SRem) {
+                                    // CMP R12, #0
+                                    code.extend_from_slice(&encode_dp_imm(
+                                        Condition::Al, DP_CMP, true,
+                                        Gpr::R12.encoding(), 0, 0, 0,
+                                    ));
+                                    // RSBNE R0, R0, #0
+                                    code.extend_from_slice(&encode_dp_imm(
+                                        Condition::Ne, 0b0011, false,
+                                        Gpr::R0.encoding(), Gpr::R0.encoding(), 0, 0,
+                                    ));
+                                }
+
                                 code.extend(ss_store_32_zero(Gpr::R0, dst_offset, fs));
                                 // Zero high word (32-bit result in 64-bit slot)
                                 code.extend_from_slice(&encode_dp_imm(
@@ -4087,17 +4207,61 @@ impl Backend for Arm32Backend {
                         code.extend(ss_store_64(Gpr::R0, Gpr::R2, dst_offset));
                         code
                     }
-                    crate::ir::IRInstr::Mul { dst, lhs, rhs, .. } => {
+                    crate::ir::IRInstr::Mul { dst, lhs, rhs, ty } => {
                         let dst_id = dst.as_register().unwrap_or(0);
                         let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
                         let mut code = Vec::new();
-                        code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R0));
-                        code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::R1));
-                        code.extend_from_slice(&encode_mul(
-                            Condition::Al, false,
-                            Gpr::R0.encoding(), 0, Gpr::R1.encoding(), Gpr::R0.encoding(),
-                        ));
-                        code.extend(ss_store_32_zero(Gpr::R0, dst_offset, fs));
+
+                        // Detect 64-bit multiply: when ty is I64/U64 (or
+                        // None defaulting to 64-bit), use UMULL to produce
+                        // the full 64-bit product. Otherwise, use the 32-bit
+                        // MUL instruction.
+                        let is_64bit = match ty.as_ref() {
+                            Some(crate::ir::IRType::I64)
+                            | Some(crate::ir::IRType::U64) => true,
+                            // Default to 32-bit when type is missing or
+                            // explicitly a 32-bit-or-narrower integer.
+                            _ => false,
+                        };
+
+                        if is_64bit {
+                            // Load lhs (R0=low, R2=high) and rhs (R1=low, R3=high).
+                            // We use R0/R2 for lhs and R1/R3 for rhs so that
+                            // UMULL's RdHi/RdLo (R0/R1) don't conflict with
+                            // the inputs.
+                            code.extend(ss_load_value_64(Gpr::R0, Gpr::R2, lhs, &vreg_stack_slots));
+                            code.extend(ss_load_value_64(Gpr::R1, Gpr::R3, rhs, &vreg_stack_slots));
+                            // UMULL R0, R1, R0, R1
+                            //   RdHi=R1 (high 32 bits of product)
+                            //   RdLo=R0 (low 32 bits of product)
+                            //   Rn=R0 (lhs low word, multiplier)
+                            //   Rm=R1 (rhs low word, multiplicand)
+                            // Note: ARM UMULL syntax is `UMULL RdLo, RdHi, Rn, Rm`
+                            // which computes RdHi:RdLo = Rn * Rm (unsigned).
+                            // Our encoder signature is
+                            //   encode_umull(cond, s, rd_hi, rd_lo, rs, rm)
+                            // where the encoded instruction computes
+                            //   RdHi:RdLo = Rm * Rs.
+                            // We want RdHi=R1, RdLo=R0, Rm=R0 (lhs low), Rs=R1 (rhs low).
+                            code.extend_from_slice(&encode_umull(
+                                Condition::Al, false,
+                                Gpr::R1.encoding(),  // rd_hi
+                                Gpr::R0.encoding(),  // rd_lo
+                                Gpr::R1.encoding(),  // rs (rhs low)
+                                Gpr::R0.encoding(),  // rm (lhs low)
+                            ));
+                            // Store both words of the 64-bit product.
+                            code.extend(ss_store_64(Gpr::R0, Gpr::R1, dst_offset));
+                        } else {
+                            // 32-bit multiply: MUL R0, R0, R1
+                            code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R0));
+                            code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::R1));
+                            code.extend_from_slice(&encode_mul(
+                                Condition::Al, false,
+                                Gpr::R0.encoding(), 0, Gpr::R1.encoding(), Gpr::R0.encoding(),
+                            ));
+                            code.extend(ss_store_32_zero(Gpr::R0, dst_offset, fs));
+                        }
                         code
                     }
                     crate::ir::IRInstr::Div { dst, lhs, rhs, .. } => {
@@ -4137,12 +4301,10 @@ impl Backend for Arm32Backend {
                     }
 
                     // ── Cmp ──
-                    crate::ir::IRInstr::Cmp { kind, dst, lhs, rhs, .. } => {
+                    crate::ir::IRInstr::Cmp { kind, dst, lhs, rhs, ty } => {
                         let dst_id = dst.as_register().unwrap_or(0);
                         let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
                         let mut code = Vec::new();
-                        code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R0));
-                        code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::R1));
                         let cmp_cond = match kind {
                             CmpKind::Eq => Condition::Eq,
                             CmpKind::Ne => Condition::Ne,
@@ -4155,10 +4317,51 @@ impl Backend for Arm32Backend {
                             CmpKind::UGt => Condition::Hi,
                             CmpKind::UGe => Condition::Cs,
                         };
-                        code.extend_from_slice(&encode_dp_reg(
-                            Condition::Al, DP_CMP, true,
-                            Gpr::R0.encoding(), 0, Gpr::R1.encoding(),
-                        ));
+
+                        // Detect 64-bit comparison: when ty is I64/U64 (or
+                        // None defaulting to 64-bit), compare both low and
+                        // high words. Otherwise, fall back to 32-bit compare.
+                        let is_64bit = match ty.as_ref() {
+                            Some(crate::ir::IRType::I64)
+                            | Some(crate::ir::IRType::U64) => true,
+                            // Default to 32-bit when type is missing or
+                            // explicitly a 32-bit-or-narrower integer.
+                            _ => false,
+                        };
+
+                        if is_64bit {
+                            // Load lhs (R0=low, R1=high) and rhs (R2=low, R3=high)
+                            code.extend(ss_load_value_64(Gpr::R0, Gpr::R1, lhs, &vreg_stack_slots));
+                            code.extend(ss_load_value_64(Gpr::R2, Gpr::R3, rhs, &vreg_stack_slots));
+                            // CMP R1, R3 — compare high words first
+                            code.extend_from_slice(&encode_dp_reg(
+                                Condition::Al, DP_CMP, true,
+                                Gpr::R1.encoding(), 0, Gpr::R3.encoding(),
+                            ));
+                            // BNE +0 — if high words differ, skip the low-word
+                            // CMP so the flags reflect the high-word result.
+                            // ARM branch target = PC + offset*4 where PC reads
+                            // as branch_addr + 8; offset 0 lands on the
+                            // instruction two slots after the branch (skipping
+                            // exactly one instruction).
+                            code.extend_from_slice(&encode_branch(Condition::Ne, false, 0));
+                            // CMP R0, R2 — compare low words (only reached if
+                            // high words were equal)
+                            code.extend_from_slice(&encode_dp_reg(
+                                Condition::Al, DP_CMP, true,
+                                Gpr::R0.encoding(), 0, Gpr::R2.encoding(),
+                            ));
+                        } else {
+                            // 32-bit comparison
+                            code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R0));
+                            code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::R1));
+                            code.extend_from_slice(&encode_dp_reg(
+                                Condition::Al, DP_CMP, true,
+                                Gpr::R0.encoding(), 0, Gpr::R1.encoding(),
+                            ));
+                        }
+
+                        // SETcc: MOV R0, #0; MOVcc R0, #1
                         code.extend_from_slice(&encode_dp_imm(
                             Condition::Al, DP_MOV, false, 0, Gpr::R0.encoding(), 0, 0,
                         ));
@@ -4381,18 +4584,55 @@ impl Backend for Arm32Backend {
                                     Condition::Al, true, true, true, false, true,
                                     Gpr::R3.encoding(), Gpr::R0.encoding(), 0,
                                 )); // LDRB R0, [R3, #0]
+                                code.extend(ss_store_32_zero(Gpr::R0, dst_offset, fs));
+                                // Zero the high word — loads produce 32-bit results,
+                                // but stack slots are 8 bytes.
+                                code.extend_from_slice(&encode_dp_imm(
+                                    Condition::Al, DP_MOV, false, 0, Gpr::R1.encoding(), 0, 0,
+                                )); // MOV R1, #0
+                                code.extend(ss_store_to_slot(Gpr::R1, dst_offset + 4));
                             }
                             crate::ir::IRType::I16 => {
                                 code.extend_from_slice(&encode_ldrsh_imm(
                                     Condition::Al, true, true, false,
                                     Gpr::R3.encoding(), Gpr::R0.encoding(), 0,
                                 )); // LDRSH R0, [R3, #0]
+                                code.extend(ss_store_32_zero(Gpr::R0, dst_offset, fs));
+                                code.extend_from_slice(&encode_dp_imm(
+                                    Condition::Al, DP_MOV, false, 0, Gpr::R1.encoding(), 0, 0,
+                                )); // MOV R1, #0
+                                code.extend(ss_store_to_slot(Gpr::R1, dst_offset + 4));
                             }
                             crate::ir::IRType::U16 => {
                                 code.extend_from_slice(&encode_ls_half_imm(
                                     Condition::Al, true, true, false, true,
                                     Gpr::R3.encoding(), Gpr::R0.encoding(), 0,
                                 )); // LDRH R0, [R3, #0]
+                                code.extend(ss_store_32_zero(Gpr::R0, dst_offset, fs));
+                                code.extend_from_slice(&encode_dp_imm(
+                                    Condition::Al, DP_MOV, false, 0, Gpr::R1.encoding(), 0, 0,
+                                )); // MOV R1, #0
+                                code.extend(ss_store_to_slot(Gpr::R1, dst_offset + 4));
+                            }
+                            crate::ir::IRType::I64
+                            | crate::ir::IRType::U64
+                            | crate::ir::IRType::F64 => {
+                                // 64-bit load: load low word into R0, high
+                                // word into R1, then store both to the
+                                // destination slot ([R11-#off] and [R11-#off+4]).
+                                // LDR R0, [R3, #0]  (low word)
+                                code.extend_from_slice(&encode_ls_imm(
+                                    Condition::Al, true, true, false, false, true,
+                                    Gpr::R3.encoding(), Gpr::R0.encoding(), 0,
+                                ));
+                                // LDR R1, [R3, #4]  (high word)
+                                code.extend_from_slice(&encode_ls_imm(
+                                    Condition::Al, true, true, false, false, true,
+                                    Gpr::R3.encoding(), Gpr::R1.encoding(), 4,
+                                ));
+                                // Store both words (ss_store_64 stores lo at
+                                // [R11-#off] and hi at [R11-#off+4]).
+                                code.extend(ss_store_64(Gpr::R0, Gpr::R1, dst_offset));
                             }
                             _ => {
                                 // Default: 32-bit word load
@@ -4400,19 +4640,19 @@ impl Backend for Arm32Backend {
                                     Condition::Al, true, true, false, false, true,
                                     Gpr::R3.encoding(), Gpr::R0.encoding(), 0,
                                 )); // LDR R0, [R3, #0]
+                                code.extend(ss_store_32_zero(Gpr::R0, dst_offset, fs));
+                                // Zero the high word — loads produce 32-bit results,
+                                // but stack slots are 8 bytes. Without zeroing, the
+                                // high word contains garbage from a previous value.
+                                // When a 64-bit operation (e.g. Shl) later loads
+                                // both words via ss_load_value_64, the garbage high
+                                // word corrupts the result.
+                                code.extend_from_slice(&encode_dp_imm(
+                                    Condition::Al, DP_MOV, false, 0, Gpr::R1.encoding(), 0, 0,
+                                )); // MOV R1, #0
+                                code.extend(ss_store_to_slot(Gpr::R1, dst_offset + 4));
                             }
                         }
-                        code.extend(ss_store_32_zero(Gpr::R0, dst_offset, fs));
-                        // Zero the high word — loads produce 32-bit results,
-                        // but stack slots are 8 bytes. Without zeroing, the
-                        // high word contains garbage from a previous value.
-                        // When a 64-bit operation (e.g. Shl) later loads
-                        // both words via ss_load_value_64, the garbage high
-                        // word corrupts the result.
-                        code.extend_from_slice(&encode_dp_imm(
-                            Condition::Al, DP_MOV, false, 0, Gpr::R1.encoding(), 0, 0,
-                        )); // MOV R1, #0
-                        code.extend(ss_store_to_slot(Gpr::R1, dst_offset + 4));
                         code
                     }
 
@@ -4436,7 +4676,7 @@ impl Backend for Arm32Backend {
                                 ));
                             }
                         }
-                        // Load value into R0
+                        // Load value into R0 (low word for 64-bit types)
                         code.extend(ss_load_value(value, &vreg_stack_slots, Gpr::R0));
                         // Emit store based on type
                         match ty {
@@ -4451,6 +4691,27 @@ impl Backend for Arm32Backend {
                                     Condition::Al, true, true, false, false,
                                     Gpr::R3.encoding(), Gpr::R0.encoding(), 0,
                                 )); // STRH R0, [R3, #0]
+                            }
+                            crate::ir::IRType::I64
+                            | crate::ir::IRType::U64
+                            | crate::ir::IRType::F64 => {
+                                // 64-bit store: load both words of the value
+                                // (R0=low, R1=high) and store them to
+                                // [R3, #0] and [R3, #4] respectively.
+                                // Note: ss_load_value already loaded the low
+                                // word into R0 above; we only need to load
+                                // the high word into R1 here.
+                                code.extend(ss_load_value_64(Gpr::R0, Gpr::R1, value, &vreg_stack_slots));
+                                // STR R0, [R3, #0]  (low word)
+                                code.extend_from_slice(&encode_ls_imm(
+                                    Condition::Al, true, true, false, false, false,
+                                    Gpr::R3.encoding(), Gpr::R0.encoding(), 0,
+                                ));
+                                // STR R1, [R3, #4]  (high word)
+                                code.extend_from_slice(&encode_ls_imm(
+                                    Condition::Al, true, true, false, false, false,
+                                    Gpr::R3.encoding(), Gpr::R1.encoding(), 4,
+                                ));
                             }
                             _ => {
                                 code.extend_from_slice(&encode_ls_imm(
@@ -4668,9 +4929,84 @@ impl Backend for Arm32Backend {
                         let mut code = Vec::new();
                         code.extend(ss_load_value(src, &vreg_stack_slots, Gpr::R0));
                         match kind {
-                            CastKind::ZExt | CastKind::SExt | CastKind::Trunc | CastKind::BitCast => {
-                                // No conversion needed for integer casts on ARM32
-                                // (all values are already 32-bit)
+                            CastKind::ZExt => {
+                                // Zero-extend based on source type. The value
+                                // is already in R0 (32-bit). Mask the lower
+                                // bits according to from_ty.
+                                match from_ty.as_ref() {
+                                    Some(crate::ir::IRType::I8)
+                                    | Some(crate::ir::IRType::U8) => {
+                                        // AND R0, R0, #0xFF  → 0xE20000FF
+                                        code.extend_from_slice(
+                                            &encode_dp_imm(
+                                                Condition::Al, DP_AND, false,
+                                                Gpr::R0.encoding(), Gpr::R0.encoding(),
+                                                0, 0xFF,
+                                            ),
+                                        );
+                                    }
+                                    Some(crate::ir::IRType::I16)
+                                    | Some(crate::ir::IRType::U16) => {
+                                        // AND R0, R0, #0xFFFF
+                                        // 0xFFFF is not directly encodable as a
+                                        // rotated 8-bit immediate, so load it via
+                                        // MOVW into R12 and AND with R12.
+                                        // MOVW R12, #0xFFFF → 0xE30CFFFF
+                                        code.extend_from_slice(&0xE30CFFFFu32.to_le_bytes());
+                                        code.extend_from_slice(&encode_dp_reg(
+                                            Condition::Al, DP_AND, false,
+                                            Gpr::R0.encoding(), Gpr::R0.encoding(), Gpr::R12.encoding(),
+                                        ));
+                                    }
+                                    // I32/U32/I64/U64 — already full width, no-op.
+                                    _ => {}
+                                }
+                            }
+                            CastKind::SExt => {
+                                // Sign-extend based on source type. The value
+                                // is already in R0 (32-bit). Use SXTB/SXTH for
+                                // 8-bit and 16-bit sources.
+                                match from_ty.as_ref() {
+                                    Some(crate::ir::IRType::I8) => {
+                                        // SXTB R0, R0 — 0xE6AF0070
+                                        code.extend_from_slice(&0xE6AF0070u32.to_le_bytes());
+                                    }
+                                    Some(crate::ir::IRType::I16) => {
+                                        // SXTH R0, R0 — 0xE6BF0070
+                                        code.extend_from_slice(&0xE6BF0070u32.to_le_bytes());
+                                    }
+                                    // I32 — already 32-bit, no-op.
+                                    _ => {}
+                                }
+                            }
+                            CastKind::Trunc => {
+                                // Truncate based on destination type. Mask the
+                                // lower bits according to to_ty.
+                                match to_ty.as_ref() {
+                                    Some(crate::ir::IRType::I8)
+                                    | Some(crate::ir::IRType::U8) => {
+                                        code.extend_from_slice(
+                                            &encode_dp_imm(
+                                                Condition::Al, DP_AND, false,
+                                                Gpr::R0.encoding(), Gpr::R0.encoding(),
+                                                0, 0xFF,
+                                            ),
+                                        );
+                                    }
+                                    Some(crate::ir::IRType::I16)
+                                    | Some(crate::ir::IRType::U16) => {
+                                        // MOVW R12, #0xFFFF → 0xE30CFFFF
+                                        code.extend_from_slice(&0xE30CFFFFu32.to_le_bytes());
+                                        code.extend_from_slice(&encode_dp_reg(
+                                            Condition::Al, DP_AND, false,
+                                            Gpr::R0.encoding(), Gpr::R0.encoding(), Gpr::R12.encoding(),
+                                        ));
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            CastKind::BitCast => {
+                                // No conversion needed for bitcasts.
                             }
                             CastKind::IntToFloat => {
                                 // VCVT.F32.S32 S0, S0 — convert signed int to f32
@@ -5043,12 +5379,42 @@ impl Backend for Arm32Backend {
                     }
 
                     // ── GetAddress ──
-                    crate::ir::IRInstr::GetAddress { dst, name: _ } => {
+                    crate::ir::IRInstr::GetAddress { dst, name } => {
                         let dst_id = dst.as_register().unwrap_or(0);
                         let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
                         let mut code = Vec::new();
+                        // ARM32 GetAddress: emit a placeholder `MOV R0, #0`
+                        // (32-bit absolute address placeholder) plus an
+                        // R_ARM_ABS32 relocation entry so the linker can
+                        // patch in the symbol's runtime address. If the
+                        // relocation system is not wired up for ARM32 yet,
+                        // we still emit the warning so the missing symbol
+                        // resolution is visible at runtime.
+                        //
+                        // The relocation offset is the byte offset of the
+                        // MOV's immediate within this instruction's encoded
+                        // output. `load_immediate_arm32(R0, 0)` emits a
+                        // single `MOV R0, #0` (4 bytes), with the immediate
+                        // embedded in the instruction word itself. The
+                        // relocation patches the entire 4-byte word, so the
+                        // relocation offset is the start of the instruction.
+                        let reloc_offset = current_byte_offset + code.len() as u64;
+                        log::warn!(
+                            "GetAddress for '{}' — emitting placeholder 0 (reloc at func byte {})",
+                            name, reloc_offset
+                        );
                         code.extend_from_slice(&load_immediate_arm32(Gpr::R0, 0));
+                        relocations.push(RelocationEntry {
+                            offset: reloc_offset,
+                            symbol: name.clone(),
+                            reloc_type: "R_ARM_ABS32".to_string(),
+                        });
                         code.extend(ss_store_32_zero(Gpr::R0, dst_offset, fs));
+                        // Zero high word (32-bit pointer result in 64-bit slot)
+                        code.extend_from_slice(&encode_dp_imm(
+                            Condition::Al, DP_MOV, false, 0, Gpr::R1.encoding(), 0, 0,
+                        )); // MOV R1, #0
+                        code.extend(ss_store_to_slot(Gpr::R1, dst_offset + 4));
                         code
                     }
 
