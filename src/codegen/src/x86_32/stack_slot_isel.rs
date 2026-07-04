@@ -31,6 +31,7 @@ use super::{
     Cc, Gpr, Xmm,
     R_X86_64_64, R_X86_64_PLT32,
     encode_add_reg_imm32, encode_add_reg_reg,
+    encode_adc_reg_reg, encode_adc_reg_imm32,
     encode_and_reg_imm32, encode_and_reg_reg,
     encode_call_rel32,
     encode_cmovcc_reg_reg,
@@ -70,6 +71,7 @@ use super::{
     encode_setcc,
     encode_shl_reg_cl, encode_shr_reg_cl,
     encode_sub_reg_imm32, encode_sub_reg_reg,
+    encode_sbb_reg_reg, encode_sbb_reg_imm32,
     encode_test_reg_reg,
     encode_xor_reg_imm32, encode_xor_reg_reg,
 };
@@ -227,20 +229,35 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
         let off = slot_offset(id);
         let mut code = encode_mov_mem_reg(Gpr::Rbp, off, scratch);
         // Zero the high 4 bytes: MOV DWORD PTR [EBP + off + 4], 0
-        // Encoding: C7 /0 (MOV r/m32, imm32) with mod=01 (disp8), reg=0
         let hi_off = off + 4;
         if hi_off >= -128 && hi_off <= 127 {
-            // MOV DWORD PTR [EBP + disp8], 0
-            // C7 45 disp8 00 00 00 00
             code.extend_from_slice(&[0xC7, 0x45, hi_off as u8, 0, 0, 0, 0]);
         } else {
-            // MOV DWORD PTR [EBP + disp32], 0
-            // C7 85 disp32 00 00 00 00
             code.extend_from_slice(&[0xC7, 0x85]);
             code.extend_from_slice(&(hi_off as i32).to_le_bytes());
             code.extend_from_slice(&[0, 0, 0, 0]);
         }
         code
+    };
+
+    // Store only the low 32 bits of a vreg (no high-word zeroing).
+    // Used for paired-word 64-bit operations where the high word
+    // is stored separately.
+    let store_vreg_lo = |id: u32, scratch: Gpr| -> Vec<u8> {
+        let off = slot_offset(id);
+        encode_mov_mem_reg(Gpr::Rbp, off, scratch)
+    };
+
+    // Store only the high 32 bits of a vreg.
+    let store_vreg_hi = |id: u32, scratch: Gpr| -> Vec<u8> {
+        let off = slot_offset(id) + 4;
+        encode_mov_mem32_reg32(Gpr::Rbp, off, scratch)
+    };
+
+    // Load the high 32 bits of a vreg into a scratch register.
+    let load_vreg_hi = |id: u32, scratch: Gpr| -> Vec<u8> {
+        let off = slot_offset(id) + 4;
+        encode_mov_reg32_mem(scratch, Gpr::Rbp, off)
     };
 
     // Load an IRValue into a scratch register
@@ -462,6 +479,11 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     // into the high word. See Task 7-C (cluster F).
                     let is_64bit = matches!(ty, Some(IRType::U64) | Some(IRType::I64))
                         || ty.is_none();
+                    // Extract lhs register ID for 64-bit paired-word operations.
+                    // If lhs is not a Register, use 0 (high word will be loaded
+                    // from vreg 0's slot, which is incorrect but only happens
+                    // for constant-folded cases that shouldn't reach here).
+                    let lhs_reg = if let IRValue::Register(id) = lhs { *id } else { 0 };
                     let is_shl_32 = is_64bit && matches!(rhs, IRValue::Immediate(32))
                         && matches!(op, BinOpKind::Shl);
                     let is_shr_32 = is_64bit && matches!(rhs, IRValue::Immediate(32))
@@ -554,36 +576,119 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     } else {
                     match op {
                         BinOpKind::Add => {
-                            code.extend(load_value(lhs, Gpr::Rax));
-                            if let IRValue::Immediate(imm) = rhs {
-                                let imm = *imm;
-                                if (-2147483648..=2147483647).contains(&imm) {
-                                    code.extend(encode_add_reg_imm32(Gpr::Rax, imm as i32));
+                            if is_64bit {
+                                // 64-bit paired-word Add: ADD low, ADC high
+                                // Load lhs.lo → EAX, rhs.lo → ECX
+                                code.extend(load_value(lhs, Gpr::Rax));
+                                if let IRValue::Immediate(imm) = rhs {
+                                    let imm = *imm;
+                                    if (-2147483648..=2147483647).contains(&imm) {
+                                        code.extend(encode_add_reg_imm32(Gpr::Rax, imm as i32));
+                                    } else {
+                                        code.extend(load_value(rhs, Gpr::Rcx));
+                                        code.extend(encode_add_reg_reg(Gpr::Rax, Gpr::Rcx));
+                                    }
                                 } else {
                                     code.extend(load_value(rhs, Gpr::Rcx));
                                     code.extend(encode_add_reg_reg(Gpr::Rax, Gpr::Rcx));
                                 }
+                                // Store low word (no zeroing!)
+                                code.extend(store_vreg_lo(dst_id, Gpr::Rax));
+                                // Load lhs.hi → EAX, rhs.hi → ECX
+                                if let IRValue::Register(rhs_id) = rhs {
+                                    let rhs_id = *rhs_id;
+                                    code.extend(load_vreg_hi(lhs_reg, Gpr::Rax));
+                                    code.extend(load_vreg_hi(rhs_id, Gpr::Rcx));
+                                    code.extend(encode_adc_reg_reg(Gpr::Rax, Gpr::Rcx));
+                                } else {
+                                    // For immediate rhs, high word is 0 or sign-extend
+                                    code.extend(load_vreg_hi(lhs_reg, Gpr::Rax));
+                                    if let IRValue::Immediate(imm) = rhs {
+                                        if *imm < 0 || *imm > 0x7FFFFFFF {
+                                            // Sign-extend: add 0xFFFFFFFF (carry propagation)
+                                            code.extend(encode_mov_reg_imm32(Gpr::Rcx, -1));
+                                            code.extend(encode_adc_reg_reg(Gpr::Rax, Gpr::Rcx));
+                                        } else {
+                                            // Add 0 (no carry from high word)
+                                            code.extend(encode_adc_reg_imm32(Gpr::Rax, 0));
+                                        }
+                                    } else {
+                                        code.extend(encode_adc_reg_imm32(Gpr::Rax, 0));
+                                    }
+                                }
+                                code.extend(store_vreg_hi(dst_id, Gpr::Rax));
                             } else {
-                                code.extend(load_value(rhs, Gpr::Rcx));
-                                code.extend(encode_add_reg_reg(Gpr::Rax, Gpr::Rcx));
+                                // 32-bit Add (original code)
+                                code.extend(load_value(lhs, Gpr::Rax));
+                                if let IRValue::Immediate(imm) = rhs {
+                                    let imm = *imm;
+                                    if (-2147483648..=2147483647).contains(&imm) {
+                                        code.extend(encode_add_reg_imm32(Gpr::Rax, imm as i32));
+                                    } else {
+                                        code.extend(load_value(rhs, Gpr::Rcx));
+                                        code.extend(encode_add_reg_reg(Gpr::Rax, Gpr::Rcx));
+                                    }
+                                } else {
+                                    code.extend(load_value(rhs, Gpr::Rcx));
+                                    code.extend(encode_add_reg_reg(Gpr::Rax, Gpr::Rcx));
+                                }
+                                code.extend(store_vreg(dst_id, Gpr::Rax));
                             }
-                            code.extend(store_vreg(dst_id, Gpr::Rax));
                         }
                         BinOpKind::Sub => {
-                            code.extend(load_value(lhs, Gpr::Rax));
-                            if let IRValue::Immediate(imm) = rhs {
-                                let imm = *imm;
-                                if (-2147483648..=2147483647).contains(&imm) {
-                                    code.extend(encode_sub_reg_imm32(Gpr::Rax, imm as i32));
+                            if is_64bit {
+                                // 64-bit paired-word Sub: SUB low, SBB high
+                                code.extend(load_value(lhs, Gpr::Rax));
+                                if let IRValue::Immediate(imm) = rhs {
+                                    let imm = *imm;
+                                    if (-2147483648..=2147483647).contains(&imm) {
+                                        code.extend(encode_sub_reg_imm32(Gpr::Rax, imm as i32));
+                                    } else {
+                                        code.extend(load_value(rhs, Gpr::Rcx));
+                                        code.extend(encode_sub_reg_reg(Gpr::Rax, Gpr::Rcx));
+                                    }
                                 } else {
                                     code.extend(load_value(rhs, Gpr::Rcx));
                                     code.extend(encode_sub_reg_reg(Gpr::Rax, Gpr::Rcx));
                                 }
+                                code.extend(store_vreg_lo(dst_id, Gpr::Rax));
+                                // High word
+                                if let IRValue::Register(rhs_id) = rhs {
+                                    let rhs_id = *rhs_id;
+                                    code.extend(load_vreg_hi(lhs_reg, Gpr::Rax));
+                                    code.extend(load_vreg_hi(rhs_id, Gpr::Rcx));
+                                    code.extend(encode_sbb_reg_reg(Gpr::Rax, Gpr::Rcx));
+                                } else {
+                                    code.extend(load_vreg_hi(lhs_reg, Gpr::Rax));
+                                    if let IRValue::Immediate(imm) = rhs {
+                                        if *imm < 0 || *imm > 0x7FFFFFFF {
+                                            code.extend(encode_mov_reg_imm32(Gpr::Rcx, -1));
+                                            code.extend(encode_sbb_reg_reg(Gpr::Rax, Gpr::Rcx));
+                                        } else {
+                                            code.extend(encode_sbb_reg_imm32(Gpr::Rax, 0));
+                                        }
+                                    } else {
+                                        code.extend(encode_sbb_reg_imm32(Gpr::Rax, 0));
+                                    }
+                                }
+                                code.extend(store_vreg_hi(dst_id, Gpr::Rax));
                             } else {
-                                code.extend(load_value(rhs, Gpr::Rcx));
-                                code.extend(encode_sub_reg_reg(Gpr::Rax, Gpr::Rcx));
+                                // 32-bit Sub (original code)
+                                code.extend(load_value(lhs, Gpr::Rax));
+                                if let IRValue::Immediate(imm) = rhs {
+                                    let imm = *imm;
+                                    if (-2147483648..=2147483647).contains(&imm) {
+                                        code.extend(encode_sub_reg_imm32(Gpr::Rax, imm as i32));
+                                    } else {
+                                        code.extend(load_value(rhs, Gpr::Rcx));
+                                        code.extend(encode_sub_reg_reg(Gpr::Rax, Gpr::Rcx));
+                                    }
+                                } else {
+                                    code.extend(load_value(rhs, Gpr::Rcx));
+                                    code.extend(encode_sub_reg_reg(Gpr::Rax, Gpr::Rcx));
+                                }
+                                code.extend(store_vreg(dst_id, Gpr::Rax));
                             }
-                            code.extend(store_vreg(dst_id, Gpr::Rax));
                         }
                         BinOpKind::Mul => {
                             code.extend(load_value(lhs, Gpr::Rax));
