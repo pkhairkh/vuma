@@ -1394,9 +1394,9 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     // sc.d S1, S2, 0  (store desired to [S2], S1 = 1/0 result)
                     code.extend_from_slice(&Instruction::ScD { rd: S1, rj: S2, imm14: 0 }.encode());
 
-                    // beq S1, zero, -3 (if store failed (S1=0), retry at ll.d)
-                    // -3 goes back 3 instructions: ll.d, bne, reload
-                    code.extend_from_slice(&Instruction::Beq { rj: S1, rd: Gpr::R0, offs16: -3 }.encode());
+                    // beq S1, zero, -4 (if store failed (S1=0), retry at ll.d)
+                    // -4 goes back 4 instructions: ll.d, bne, reload, sc.d
+                    code.extend_from_slice(&Instruction::Beq { rj: S1, rd: Gpr::R0, offs16: -4 }.encode());
 
                     // dbar 0 (full barrier after)
                     code.extend_from_slice(&0x3872_0000u32.to_le_bytes());
