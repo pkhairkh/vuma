@@ -2276,6 +2276,15 @@ impl fmt::Display for Instruction {
 fn build_arm32_elf_2seg(code: &[u8], base_addr: u64) -> Vec<u8> {
     const PAGE_SIZE: u64 = 0x1000; // 4 KB
 
+    // ELF32 section header constants (Elf32_Shdr sh_type / sh_flags).
+    const SHT_PROGBITS: u32 = 1;
+    const SHT_STRTAB: u32 = 3;
+    const SHT_NOBITS: u32 = 8;
+    const SHF_WRITE: u32 = 0x1;
+    const SHF_ALLOC: u32 = 0x2;
+    const SHF_EXECINSTR: u32 = 0x4;
+    const SHDR_SIZE: u64 = 40; // sizeof(Elf32_Shdr)
+
     let elf_header_size: u64 = 52;
     let phdr_size: u64 = 32;
     let num_phdrs: u64 = 3; // 2x PT_LOAD + 1x PT_GNU_STACK
@@ -2292,7 +2301,21 @@ fn build_arm32_elf_2seg(code: &[u8], base_addr: u64) -> Vec<u8> {
     let data_size: u64 = PAGE_SIZE; // 1 page of writable memory for stack/data
     let entry_point = base_addr + text_offset;
 
-    let mut elf = Vec::with_capacity((data_offset + data_size) as usize);
+    // --- Section header table layout ---
+    // .shstrtab content: NUL + ".text" + NUL + ".data" + NUL + ".shstrtab" + NUL
+    //   name offsets:  .text=1  .data=7  .shstrtab=13
+    let shstrtab_content: &[u8] = b"\0.text\0.data\0.shstrtab\0";
+    let shstrtab_size = shstrtab_content.len() as u64;
+    // .shstrtab immediately follows the text segment in the file.
+    let shstrtab_offset = text_offset + text_size;
+    // Section header table starts after .shstrtab, 4-byte aligned
+    // (Elf32_Shdr has natural alignment of 4 bytes).
+    let shdr_offset = ((shstrtab_offset + shstrtab_size + 3) / 4) * 4;
+    // Sections: 0=null, 1=.text, 2=.data, 3=.shstrtab
+    let num_shdrs: u64 = 4;
+    let shstrndx: u16 = (num_shdrs - 1) as u16; // .shstrtab is the last section
+
+    let mut elf = Vec::with_capacity((shdr_offset + num_shdrs * SHDR_SIZE) as usize);
 
     // --- e_ident ---
     elf.extend_from_slice(&[0x7f, b'E', b'L', b'F']); // magic
@@ -2309,15 +2332,15 @@ fn build_arm32_elf_2seg(code: &[u8], base_addr: u64) -> Vec<u8> {
     elf.extend_from_slice(&1u32.to_le_bytes()); // e_version
     elf.extend_from_slice(&(entry_point as u32).to_le_bytes()); // e_entry
     elf.extend_from_slice(&(elf_header_size as u32).to_le_bytes()); // e_phoff
-    elf.extend_from_slice(&0u32.to_le_bytes()); // e_shoff (no section headers)
+    elf.extend_from_slice(&(shdr_offset as u32).to_le_bytes()); // e_shoff
     // e_flags: ARM EF_ARM_ABI_VER5 = 0x05000000 (soft-float ABI)
     elf.extend_from_slice(&0x05000000u32.to_le_bytes()); // e_flags
     elf.extend_from_slice(&52u16.to_le_bytes()); // e_ehsize
     elf.extend_from_slice(&32u16.to_le_bytes()); // e_phentsize
     elf.extend_from_slice(&3u16.to_le_bytes()); // e_phnum = 3 (2 LOAD + 1 GNU_STACK)
     elf.extend_from_slice(&40u16.to_le_bytes()); // e_shentsize
-    elf.extend_from_slice(&0u16.to_le_bytes()); // e_shnum
-    elf.extend_from_slice(&0u16.to_le_bytes()); // e_shstrndx
+    elf.extend_from_slice(&(num_shdrs as u16).to_le_bytes()); // e_shnum
+    elf.extend_from_slice(&shstrndx.to_le_bytes()); // e_shstrndx
 
     // --- Program Header 1: LOAD (PF_R | PF_X) — .text ---
     // ELF32 Phdr order: p_type, p_offset, p_vaddr, p_paddr, p_filesz, p_memsz, p_flags, p_align
@@ -2359,9 +2382,66 @@ fn build_arm32_elf_2seg(code: &[u8], base_addr: u64) -> Vec<u8> {
     }
     elf.extend_from_slice(code);
 
-    // Don't pad to data segment offset — the data segment has p_filesz=0
-    // so there's no file content. Extra trailing bytes confuse QEMU's
-    // ELF loader on ARM32.
+    // --- .shstrtab section content ---
+    // Immediately follows the text segment. Contains NUL-terminated section
+    // name strings referenced by the section header table's sh_name fields.
+    elf.extend_from_slice(shstrtab_content);
+
+    // Pad to 4-byte alignment for the section header table.
+    while (elf.len() as u64) < shdr_offset {
+        elf.push(0);
+    }
+
+    // --- Section Header Table ---
+    // Each Elf32_Shdr is 40 bytes:
+    //   sh_name(u32) sh_type(u32) sh_flags(u32) sh_addr(u32) sh_offset(u32)
+    //   sh_size(u32) sh_link(u32) sh_info(u32) sh_addralign(u32) sh_entsize(u32)
+
+    // Section 0: SHT_NULL (reserved, all zeros).
+    elf.extend_from_slice(&[0u8; 40]);
+
+    // Section 1: .text (SHT_PROGBITS, SHF_ALLOC | SHF_EXECINSTR).
+    elf.extend_from_slice(&1u32.to_le_bytes()); // sh_name (offset 1 in .shstrtab)
+    elf.extend_from_slice(&SHT_PROGBITS.to_le_bytes()); // sh_type
+    elf.extend_from_slice(&(SHF_ALLOC | SHF_EXECINSTR).to_le_bytes()); // sh_flags
+    elf.extend_from_slice(&(entry_point as u32).to_le_bytes()); // sh_addr (= base_addr + text_offset)
+    elf.extend_from_slice(&(text_offset as u32).to_le_bytes()); // sh_offset
+    elf.extend_from_slice(&(text_size as u32).to_le_bytes()); // sh_size
+    elf.extend_from_slice(&0u32.to_le_bytes()); // sh_link
+    elf.extend_from_slice(&0u32.to_le_bytes()); // sh_info
+    elf.extend_from_slice(&4u32.to_le_bytes()); // sh_addralign (4 for ARM32 code)
+    elf.extend_from_slice(&0u32.to_le_bytes()); // sh_entsize
+
+    // Section 2: .data (SHT_NOBITS, SHF_ALLOC | SHF_WRITE).
+    // The data segment has p_filesz=0 (BSS-like: zero-filled by the loader),
+    // so we use SHT_NOBITS to accurately reflect that there is no file
+    // content for this section.
+    elf.extend_from_slice(&7u32.to_le_bytes()); // sh_name (offset 7 in .shstrtab)
+    elf.extend_from_slice(&SHT_NOBITS.to_le_bytes()); // sh_type
+    elf.extend_from_slice(&(SHF_ALLOC | SHF_WRITE).to_le_bytes()); // sh_flags
+    elf.extend_from_slice(&(data_vaddr as u32).to_le_bytes()); // sh_addr
+    elf.extend_from_slice(&(text_file_end as u32).to_le_bytes()); // sh_offset (matches p_offset; nominal for NOBITS)
+    elf.extend_from_slice(&(data_size as u32).to_le_bytes()); // sh_size
+    elf.extend_from_slice(&0u32.to_le_bytes()); // sh_link
+    elf.extend_from_slice(&0u32.to_le_bytes()); // sh_info
+    elf.extend_from_slice(&4u32.to_le_bytes()); // sh_addralign
+    elf.extend_from_slice(&0u32.to_le_bytes()); // sh_entsize
+
+    // Section 3: .shstrtab (SHT_STRTAB, no alloc flags — not loaded).
+    elf.extend_from_slice(&13u32.to_le_bytes()); // sh_name (offset 13 in .shstrtab)
+    elf.extend_from_slice(&SHT_STRTAB.to_le_bytes()); // sh_type
+    elf.extend_from_slice(&0u32.to_le_bytes()); // sh_flags (not loaded into memory)
+    elf.extend_from_slice(&0u32.to_le_bytes()); // sh_addr (no virtual address)
+    elf.extend_from_slice(&(shstrtab_offset as u32).to_le_bytes()); // sh_offset
+    elf.extend_from_slice(&(shstrtab_size as u32).to_le_bytes()); // sh_size
+    elf.extend_from_slice(&0u32.to_le_bytes()); // sh_link
+    elf.extend_from_slice(&0u32.to_le_bytes()); // sh_info
+    elf.extend_from_slice(&1u32.to_le_bytes()); // sh_addralign (byte-aligned strings)
+    elf.extend_from_slice(&0u32.to_le_bytes()); // sh_entsize
+
+    // Note: we deliberately do NOT pad to data_offset — the data segment
+    // has p_filesz=0 so there is no file content. Trailing bytes would
+    // confuse QEMU's ELF loader on ARM32.
 
     elf
 }
@@ -7311,6 +7391,227 @@ fn encode_vcvt_f32_f64(sd: u8, dm: u8) -> [u8; 4] {
         | (0 << 8)      // sz = 0 (f32 dest)
         | (0 << 7)
         | (1 << 6)
+        | (m_bit << 5)
+        | (0 << 4)
+        | vm;
+    word.to_le_bytes()
+}
+
+/// Encode VCVT.F64.U32 Dd, Sm — convert unsigned 32-bit int (in Sm) to f64.
+///
+/// ARM VFP encoding (A1):
+///   cond 1110 1D11 1000 Vd 101 1 11 M 0 Vm
+///   [19:16]=1000 (int→float), [8]=1 (sz=f64 dest), [7]=1 (unsigned)
+#[allow(dead_code)]
+fn encode_vcvt_f64_u32(dd: u8, sm: u8) -> [u8; 4] {
+    let d_bit = ((dd >> 4) & 1) as u32;
+    let vd = (dd & 0xF) as u32;
+    let m_bit = ((sm >> 4) & 1) as u32;
+    let vm = (sm & 0xF) as u32;
+    let word = (Condition::Al.encoding() as u32) << 28
+        | 0b1110 << 24
+        | (1 << 23)
+        | (d_bit << 22)
+        | 0b11 << 20
+        | 0b1000 << 16
+        | (vd << 12)
+        | 0b101 << 9
+        | (1 << 8)      // sz = 1 (f64 dest)
+        | (1 << 7)      // unsigned
+        | (1 << 6)
+        | (m_bit << 5)
+        | (0 << 4)
+        | vm;
+    word.to_le_bytes()
+}
+
+/// Encode VCVT.F64.S32 Dd, Sm — convert signed 32-bit int (in Sm) to f64.
+///
+/// ARM VFP encoding (A1):
+///   cond 1110 1D11 1000 Vd 101 1 01 M 0 Vm
+///   [19:16]=1000 (int→float), [8]=1 (sz=f64 dest), [7]=0 (signed)
+#[allow(dead_code)]
+fn encode_vcvt_f64_s32(dd: u8, sm: u8) -> [u8; 4] {
+    let d_bit = ((dd >> 4) & 1) as u32;
+    let vd = (dd & 0xF) as u32;
+    let m_bit = ((sm >> 4) & 1) as u32;
+    let vm = (sm & 0xF) as u32;
+    let word = (Condition::Al.encoding() as u32) << 28
+        | 0b1110 << 24
+        | (1 << 23)
+        | (d_bit << 22)
+        | 0b11 << 20
+        | 0b1000 << 16
+        | (vd << 12)
+        | 0b101 << 9
+        | (1 << 8)      // sz = 1 (f64 dest)
+        | (0 << 7)      // signed
+        | (1 << 6)
+        | (m_bit << 5)
+        | (0 << 4)
+        | vm;
+    word.to_le_bytes()
+}
+
+/// Encode VCVT.U32.F64 Sd, Dm — convert f64 to unsigned 32-bit int (in Sd).
+///
+/// ARM VFP encoding (A1):
+///   cond 1110 1D11 1101 Vd 101 1 11 M 0 Vm
+///   [19:16]=1101 (float→int), [8]=1 (sz=f64 source), [7]=1 (unsigned)
+#[allow(dead_code)]
+fn encode_vcvt_u32_f64(sd: u8, dm: u8) -> [u8; 4] {
+    let d_bit = ((sd >> 4) & 1) as u32;
+    let vd = (sd & 0xF) as u32;
+    let m_bit = ((dm >> 4) & 1) as u32;
+    let vm = (dm & 0xF) as u32;
+    let word = (Condition::Al.encoding() as u32) << 28
+        | 0b1110 << 24
+        | (1 << 23)
+        | (d_bit << 22)
+        | 0b11 << 20
+        | 0b1101 << 16
+        | (vd << 12)
+        | 0b101 << 9
+        | (1 << 8)      // sz = 1 (f64 source)
+        | (1 << 7)      // unsigned
+        | (1 << 6)
+        | (m_bit << 5)
+        | (0 << 4)
+        | vm;
+    word.to_le_bytes()
+}
+
+/// Encode VCVT.S32.F64 Sd, Dm — convert f64 to signed 32-bit int (in Sd).
+///
+/// ARM VFP encoding (A1):
+///   cond 1110 1D11 1101 Vd 101 1 01 M 0 Vm
+///   [19:16]=1101 (float→int), [8]=1 (sz=f64 source), [7]=0 (signed)
+#[allow(dead_code)]
+fn encode_vcvt_s32_f64(sd: u8, dm: u8) -> [u8; 4] {
+    let d_bit = ((sd >> 4) & 1) as u32;
+    let vd = (sd & 0xF) as u32;
+    let m_bit = ((dm >> 4) & 1) as u32;
+    let vm = (dm & 0xF) as u32;
+    let word = (Condition::Al.encoding() as u32) << 28
+        | 0b1110 << 24
+        | (1 << 23)
+        | (d_bit << 22)
+        | 0b11 << 20
+        | 0b1101 << 16
+        | (vd << 12)
+        | 0b101 << 9
+        | (1 << 8)      // sz = 1 (f64 source)
+        | (0 << 7)      // signed
+        | (1 << 6)
+        | (m_bit << 5)
+        | (0 << 4)
+        | vm;
+    word.to_le_bytes()
+}
+
+/// Encode VADD.F64 Dd, Dn, Dm — add two f64 values.
+///
+/// ARM VFP encoding (A1):
+///   cond 1110 0D11 Vn Dd 1011 N 0 M 0 Vm
+#[allow(dead_code)]
+fn encode_vadd_f64(dd: u8, dn: u8, dm: u8) -> [u8; 4] {
+    let d_bit = ((dd >> 4) & 1) as u32;
+    let vd = (dd & 0xF) as u32;
+    let n_bit = ((dn >> 4) & 1) as u32;
+    let vn = (dn & 0xF) as u32;
+    let m_bit = ((dm >> 4) & 1) as u32;
+    let vm = (dm & 0xF) as u32;
+    let word = (Condition::Al.encoding() as u32) << 28
+        | 0b1110 << 24
+        | (d_bit << 22)
+        | 0b11 << 20
+        | (vn << 16)
+        | (vd << 12)
+        | 0b1011 << 8
+        | (n_bit << 7)
+        | (0 << 6)
+        | (m_bit << 5)
+        | (0 << 4)
+        | vm;
+    word.to_le_bytes()
+}
+
+/// Encode VSUB.F64 Dd, Dn, Dm — subtract two f64 values.
+///
+/// ARM VFP encoding (A1):
+///   cond 1110 0D11 Vn Dd 1011 N 1 M 0 Vm   (bit [6] = 1 for subtract)
+#[allow(dead_code)]
+fn encode_vsub_f64(dd: u8, dn: u8, dm: u8) -> [u8; 4] {
+    let d_bit = ((dd >> 4) & 1) as u32;
+    let vd = (dd & 0xF) as u32;
+    let n_bit = ((dn >> 4) & 1) as u32;
+    let vn = (dn & 0xF) as u32;
+    let m_bit = ((dm >> 4) & 1) as u32;
+    let vm = (dm & 0xF) as u32;
+    let word = (Condition::Al.encoding() as u32) << 28
+        | 0b1110 << 24
+        | (d_bit << 22)
+        | 0b11 << 20
+        | (vn << 16)
+        | (vd << 12)
+        | 0b1011 << 8
+        | (n_bit << 7)
+        | (1 << 6)
+        | (m_bit << 5)
+        | (0 << 4)
+        | vm;
+    word.to_le_bytes()
+}
+
+/// Encode VMUL.F64 Dd, Dn, Dm — multiply two f64 values.
+///
+/// ARM VFP encoding (A1):
+///   cond 1110 0D10 Vn Dd 1011 N 0 M 0 Vm   ([21:20]=10 for multiply)
+#[allow(dead_code)]
+fn encode_vmul_f64(dd: u8, dn: u8, dm: u8) -> [u8; 4] {
+    let d_bit = ((dd >> 4) & 1) as u32;
+    let vd = (dd & 0xF) as u32;
+    let n_bit = ((dn >> 4) & 1) as u32;
+    let vn = (dn & 0xF) as u32;
+    let m_bit = ((dm >> 4) & 1) as u32;
+    let vm = (dm & 0xF) as u32;
+    let word = (Condition::Al.encoding() as u32) << 28
+        | 0b1110 << 24
+        | (d_bit << 22)
+        | 0b10 << 20
+        | (vn << 16)
+        | (vd << 12)
+        | 0b1011 << 8
+        | (n_bit << 7)
+        | (0 << 6)
+        | (m_bit << 5)
+        | (0 << 4)
+        | vm;
+    word.to_le_bytes()
+}
+
+/// Encode VDIV.F64 Dd, Dn, Dm — divide two f64 values.
+///
+/// ARM VFP encoding (A1):
+///   cond 1110 0D00 Vn Dd 1011 N 0 M 0 Vm  ... actually: cond 1110 1D00 Vn Dd 1011 N 0 M 0 Vm
+///   Encoding for VDIV.F64 D0, D0, D0 = 0xEE800B00
+#[allow(dead_code)]
+fn encode_vdiv_f64(dd: u8, dn: u8, dm: u8) -> [u8; 4] {
+    let d_bit = ((dd >> 4) & 1) as u32;
+    let vd = (dd & 0xF) as u32;
+    let n_bit = ((dn >> 4) & 1) as u32;
+    let vn = (dn & 0xF) as u32;
+    let m_bit = ((dm >> 4) & 1) as u32;
+    let vm = (dm & 0xF) as u32;
+    let word = (Condition::Al.encoding() as u32) << 28
+        | 0b1110 << 24
+        | (d_bit << 22)
+        | 0b00 << 20
+        | (vn << 16)
+        | (vd << 12)
+        | 0b1011 << 8
+        | (n_bit << 7)
+        | (0 << 6)
         | (m_bit << 5)
         | (0 << 4)
         | vm;
