@@ -463,6 +463,144 @@ impl Instruction {
             }
         }
 
+        // MLA: cond 0000001 S Rd Rn Rs 1001 Rm  (Rd = Rn + Rm * Rs)
+        // Distinguished from MUL by bit[21]=1; the 7-bit opcode field
+        // bits[27:21] = 0b0000001 → mask 0x0FE000F0, value 0x00200090.
+        if (word & 0x0FE000F0) == 0x00200090 {
+            let s_bit = (word >> 20) & 1 != 0;
+            let rd = (word >> 16) & 0xF;
+            let rn = (word >> 12) & 0xF;
+            let rs = (word >> 8) & 0xF;
+            let rm = word & 0xF;
+            if !s_bit {
+                return Ok(Instruction::Mla {
+                    rd: gpr_from_bits(rd),
+                    rn: gpr_from_bits(rn),
+                    rs: gpr_from_bits(rs),
+                    rm: gpr_from_bits(rm),
+                    cond,
+                });
+            }
+        }
+
+        // UMULL: cond 0000100 S RdHi RdLo Rs 1001 Rm  (RdHi:RdLo = Rm * Rs, unsigned)
+        // bits[27:21] = 0b0000100 → mask 0x0FE000F0, value 0x00800090.
+        if (word & 0x0FE000F0) == 0x00800090 {
+            let s_bit = (word >> 20) & 1 != 0;
+            let rd_hi = (word >> 16) & 0xF;
+            let rd_lo = (word >> 12) & 0xF;
+            let rs = (word >> 8) & 0xF;
+            let rm = word & 0xF;
+            if !s_bit {
+                return Ok(Instruction::Umull {
+                    rd_hi: gpr_from_bits(rd_hi),
+                    rd_lo: gpr_from_bits(rd_lo),
+                    rs: gpr_from_bits(rs),
+                    rm: gpr_from_bits(rm),
+                    cond,
+                });
+            }
+        }
+
+        // SMULL: cond 0000110 S RdHi RdLo Rs 1001 Rm  (RdHi:RdLo = Rm * Rs, signed)
+        // bits[27:21] = 0b0000110 → mask 0x0FE000F0, value 0x00C00090.
+        if (word & 0x0FE000F0) == 0x00C00090 {
+            let s_bit = (word >> 20) & 1 != 0;
+            let rd_hi = (word >> 16) & 0xF;
+            let rd_lo = (word >> 12) & 0xF;
+            let rs = (word >> 8) & 0xF;
+            let rm = word & 0xF;
+            if !s_bit {
+                return Ok(Instruction::Smull {
+                    rd_hi: gpr_from_bits(rd_hi),
+                    rd_lo: gpr_from_bits(rd_lo),
+                    rs: gpr_from_bits(rs),
+                    rm: gpr_from_bits(rm),
+                    cond,
+                });
+            }
+        }
+
+        // LDRH/STRH (immediate offset, pre-indexed, no writeback).
+        // Format: cond 000 P U 0 W L Rn Rd offset_hi 1011 offset_lo
+        //   bits[27:25] = 000
+        //   bit[24] = P = 1 (pre-indexed)
+        //   bit[22] = I = 0 (immediate)
+        //   bit[21] = W = 0 (no writeback)
+        //   bits[7:4] = 1011 (halfword load/store signature)
+        // Mask: 0x0F6000F0, value: 0x010000B0
+        if (word & 0x0F6000F0) == 0x010000B0 {
+            let rn = (word >> 16) & 0xF;
+            let rd = (word >> 12) & 0xF;
+            let off_hi = (word >> 8) & 0xF;
+            let off_lo = word & 0xF;
+            let offset8 = (off_hi << 4) | off_lo;
+            let up = (word >> 23) & 1 != 0;
+            let load = (word >> 20) & 1 != 0;
+            let off = if up {
+                offset8 as i32
+            } else {
+                -(offset8 as i32)
+            };
+            if load {
+                return Ok(Instruction::Ldrh {
+                    rd: gpr_from_bits(rd),
+                    rn: gpr_from_bits(rn),
+                    offset: off,
+                    cond,
+                });
+            } else {
+                return Ok(Instruction::Strh {
+                    rd: gpr_from_bits(rd),
+                    rn: gpr_from_bits(rn),
+                    offset: off,
+                    cond,
+                });
+            }
+        }
+
+        // LDRD/STRD (immediate offset, pre-indexed, no writeback).
+        // Format: cond 000 P U 0 W L Rn Rd offset_hi 1111 offset_lo
+        //   bits[7:4] = 1111 (doubleword load/store signature)
+        //   bit[20] = L: 1=LDRD, 0=STRD
+        // Mask: 0x0F6000F0, value: 0x010000F0
+        //
+        // NOTE: This encoding is shared with LDRSH (immediate, pre-indexed,
+        // no writeback) when L=1. The ISel does not currently emit Ldrsh, so
+        // we decode any L=1 form as LDRD. If LDRSH support is ever needed,
+        // the disambiguation must rely on bit[5] (set for LDRD, clear for
+        // LDRSH per ARM ARM A8.6.53), but our encoder sets bits[7:4]=1111
+        // (i.e. bit[5]=1) for both, so the two are indistinguishable here.
+        if (word & 0x0F6000F0) == 0x010000F0 {
+            let rn = (word >> 16) & 0xF;
+            let rd = (word >> 12) & 0xF;
+            let off_hi = (word >> 8) & 0xF;
+            let off_lo = word & 0xF;
+            let offset8 = (off_hi << 4) | off_lo;
+            let up = (word >> 23) & 1 != 0;
+            let load = (word >> 20) & 1 != 0;
+            let off = if up {
+                offset8 as i32
+            } else {
+                -(offset8 as i32)
+            };
+            if load {
+                return Ok(Instruction::Ldrd {
+                    rd: gpr_from_bits(rd),
+                    rn: gpr_from_bits(rn),
+                    offset: off,
+                    cond,
+                });
+            } else {
+                return Ok(Instruction::Strd {
+                    rd: gpr_from_bits(rd),
+                    rn: gpr_from_bits(rn),
+                    offset: off,
+                    cond,
+                });
+            }
+        }
+
         // SVC: cond 1111 imm24
         if (word >> 24) & 0xF == 0b1111 {
             let imm24 = word & 0x00FF_FFFF;
@@ -776,5 +914,122 @@ mod tests {
     fn test_decode_truncated() {
         let result = Instruction::decode(&[0x00, 0x00]);
         assert!(matches!(result, Err(DecodeError::Truncated { .. })));
+    }
+
+    #[test]
+    fn test_decode_mla_umull_smull() {
+        // 64-bit multiply variants and multiply-accumulate.
+        for instr in [
+            Instruction::Mla {
+                rd: G::R0,
+                rn: G::R1,
+                rs: G::R2,
+                rm: G::R3,
+                cond: C::Al,
+            },
+            Instruction::Umull {
+                rd_hi: G::R0,
+                rd_lo: G::R1,
+                rs: G::R2,
+                rm: G::R3,
+                cond: C::Al,
+            },
+            Instruction::Smull {
+                rd_hi: G::R0,
+                rd_lo: G::R1,
+                rs: G::R2,
+                rm: G::R3,
+                cond: C::Al,
+            },
+        ] {
+            let bytes = instr.encode();
+            let decoded = Instruction::decode(&bytes).unwrap();
+            assert_eq!(
+                format!("{decoded}"),
+                format!("{instr}"),
+                "round-trip failed for {:?}",
+                instr
+            );
+        }
+    }
+
+    #[test]
+    fn test_decode_ldrh_strh() {
+        // Halfword load/store, positive and negative offsets.
+        for instr in [
+            Instruction::Ldrh {
+                rd: G::R0,
+                rn: G::R1,
+                offset: 4,
+                cond: C::Al,
+            },
+            Instruction::Strh {
+                rd: G::R0,
+                rn: G::R1,
+                offset: 4,
+                cond: C::Al,
+            },
+            Instruction::Ldrh {
+                rd: G::R2,
+                rn: G::R3,
+                offset: -8,
+                cond: C::Al,
+            },
+            Instruction::Strh {
+                rd: G::R4,
+                rn: G::R5,
+                offset: -16,
+                cond: C::Al,
+            },
+        ] {
+            let bytes = instr.encode();
+            let decoded = Instruction::decode(&bytes).unwrap();
+            assert_eq!(
+                format!("{decoded}"),
+                format!("{instr}"),
+                "round-trip failed for {:?}",
+                instr
+            );
+        }
+    }
+
+    #[test]
+    fn test_decode_ldrd_strd() {
+        // Doubleword load/store, positive and negative offsets.
+        for instr in [
+            Instruction::Ldrd {
+                rd: G::R0,
+                rn: G::R1,
+                offset: 8,
+                cond: C::Al,
+            },
+            Instruction::Strd {
+                rd: G::R0,
+                rn: G::R1,
+                offset: 8,
+                cond: C::Al,
+            },
+            Instruction::Ldrd {
+                rd: G::R2,
+                rn: G::R3,
+                offset: -16,
+                cond: C::Al,
+            },
+            Instruction::Strd {
+                rd: G::R4,
+                rn: G::R5,
+                offset: -32,
+                cond: C::Al,
+            },
+        ] {
+            let bytes = instr.encode();
+            let decoded = Instruction::decode(&bytes).unwrap();
+            assert_eq!(
+                format!("{decoded}"),
+                format!("{instr}"),
+                "round-trip failed for {:?}",
+                instr
+            );
+        }
     }
 }

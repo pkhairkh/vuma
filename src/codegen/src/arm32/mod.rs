@@ -2577,12 +2577,31 @@ fn build_arm32_runtime() -> Vec<u8> {
 
     // ── __vuma_print_int ──
     // Input: r0 = 32-bit signed integer to print as decimal
-    // Strategy: divide by 10, store digits, reverse, write.
-    // Uses repeated subtraction for division (ARM32 baseline has no hardware divide).
+    // Strategy:
+    //   1. If r0 < 0, print '-' to stdout, then negate r0.
+    //   2. Divide by 10 (repeated subtraction — ARM32 baseline has no MUL/UDIV),
+    //      store each remainder digit (in reverse) into a 16-byte stack buffer.
+    //   3. Reverse the buffer in place.
+    //   4. sys_write(1, buf, digit_count) and return.
+    //
+    // W15 (this rewrite) fixes two pre-existing issues:
+    //   - The minus sign was never actually emitted (an earlier attempt was
+    //     truncated with `code.truncate(code.len() - 4)`).
+    //   - The BGE branch offset (`3 * 4`) assumed three placeholder
+    //     instructions (RSBLT/MOV/BL) would follow, but only one was ever
+    //     emitted, so the branch landed two instructions *into* the digit
+    //     loop — skipping the initial `CMP r4, #0` and corrupting the loop.
+    // The new layout uses an unconditional RSB (BGE already gates entry),
+    // emits a real sys_write call for '-', and recomputes the BGE offset
+    // from the actual instruction count below.
+    //
+    // We also save/restore R7 around this function because sys_write
+    // requires R7 = 4 (syscall number) and the caller may be holding a
+    // live value there. Previously R7 was clobbered without preservation.
 
-    // PUSH {r4, r5, r6, lr}
+    // PUSH {r4, r5, r6, r7, lr}
     code.extend_from_slice(&encode_stm(
-        Condition::Al, true, false, false, true, Gpr::R13.encoding(), 0x4070,
+        Condition::Al, true, false, false, true, Gpr::R13.encoding(), 0x40F0,
     ));
     // SUB SP, SP, #16 (buffer for digits)
     code.extend_from_slice(&encode_dp_imm(
@@ -2600,29 +2619,46 @@ fn build_arm32_runtime() -> Vec<u8> {
     code.extend_from_slice(&encode_dp_imm(
         Condition::Al, DP_CMP, true, Gpr::R4.encoding(), 0, 0, 0,
     ));
-    // BGE int_positive
-    let bge_offset = 3 * 4; // skip 3 instructions: RSBLT, MOV, BL
-    code.extend_from_slice(&encode_branch(Condition::Ge, false, bge_offset / 4));
-    // RSBLT r4, r4, #0 (negate if negative)
+    // BGE int_positive — skip the 8-instruction negative-handling block below.
+    // The block consists of: RSB, MOV r0,#45, STRB r0,[SP,#15], MOV r0,#1,
+    //                       ADD r1,SP,#15, MOV r2,#1, MOV r7,#4, SVC #0.
+    // ARM branch semantics: target = PC+8 + offset*4, so to skip N
+    // instructions the offset must be N-1. With N=8, offset = 7.
+    code.extend_from_slice(&encode_branch(Condition::Ge, false, 7));
+
+    // ── Negative handling (only reached if r4 < 0) ──
+    // RSB r4, r4, #0  →  r4 = -r4 (unconditional: BGE above already gated entry)
     code.extend_from_slice(&encode_dp_imm(
-        Condition::Lt, 0b0011, false, Gpr::R4.encoding(), Gpr::R4.encoding(), 0, 0,
-    )); // RSB r4, r4, #0
-    // Print minus sign
+        Condition::Al, 0b0011, false, Gpr::R4.encoding(), Gpr::R4.encoding(), 0, 0,
+    ));
     // MOV r0, #45 ('-')
     code.extend_from_slice(&encode_dp_imm(
-        Condition::Lt, DP_MOV, false, 0, Gpr::R0.encoding(), 0, 45,
+        Condition::Al, DP_MOV, false, 0, Gpr::R0.encoding(), 0, 45,
     ));
-    // PUSH {r0} and sys_write — actually let's use a simpler approach
-    // STRB r0, [SP, #-1]! — pre-decrement SP by 1, store byte
-    // But this is complex. Let's just store '-' at SP + 16 (temp area) and write it.
-    // Actually, let me use a different approach: write '-' directly.
-    // We'll use SP + 12 as a temp byte buffer.
-    // MOV r0, #1 (fd)
-    // Actually, the simplest: use a 1-byte write on stack.
-    // Let's just skip the minus sign for now and always print positive.
-    // Remove the last MOV (4 bytes)
-    code.truncate(code.len() - 4);
-    // Instead, just negate the value if negative (RSB already done conditionally)
+    // STRB r0, [SP, #15]  — store '-' at the top of the 16-byte buffer
+    // (digit positions 0..r5-1 never reach index 15 for a 32-bit int,
+    // so this slot is safely reusable as a 1-byte scratch).
+    code.extend_from_slice(&encode_ls_imm(
+        Condition::Al, true, true, true, false, false, Gpr::R13.encoding(), Gpr::R0.encoding(), 15,
+    ));
+    // MOV r0, #1 (fd = stdout)
+    code.extend_from_slice(&encode_dp_imm(
+        Condition::Al, DP_MOV, false, 0, Gpr::R0.encoding(), 0, 1,
+    ));
+    // ADD r1, SP, #15 (buffer pointer to '-')
+    code.extend_from_slice(&encode_dp_imm(
+        Condition::Al, DP_ADD, false, Gpr::R13.encoding(), Gpr::R1.encoding(), 0, 15,
+    ));
+    // MOV r2, #1 (length)
+    code.extend_from_slice(&encode_dp_imm(
+        Condition::Al, DP_MOV, false, 0, Gpr::R2.encoding(), 0, 1,
+    ));
+    // MOV r7, #4 (sys_write syscall number)
+    code.extend_from_slice(&encode_dp_imm(
+        Condition::Al, DP_MOV, false, 0, Gpr::R7.encoding(), 0, 4,
+    ));
+    // SVC #0
+    code.extend_from_slice(&encode_svc(Condition::Al, 0));
 
     // int_positive:
     // int_div_loop: divide r4 by 10 using repeated subtraction
@@ -2791,9 +2827,10 @@ fn build_arm32_runtime() -> Vec<u8> {
     code.extend_from_slice(&encode_dp_imm(
         Condition::Al, DP_ADD, false, Gpr::R13.encoding(), Gpr::R13.encoding(), 0, 16,
     ));
-    // POP {r4, r5, r6, pc}
+    // POP {r4, r5, r6, r7, pc}  — restored R7 to match the PUSH above.
+    // Mask: (1<<4)|(1<<5)|(1<<6)|(1<<7)|(1<<15) = 0x80F0.
     code.extend_from_slice(&encode_ldm(
-        Condition::Al, false, true, false, true, Gpr::R13.encoding(), 0x8070,
+        Condition::Al, false, true, false, true, Gpr::R13.encoding(), 0x80F0,
     ));
 
     // ── __vuma_print_newline ──
@@ -5927,6 +5964,13 @@ impl Backend for Arm32Backend {
                 code_offset: 0,
             }],
             frame_size,
+            // Callee-saved register list is empty: the stack-slot ISel keeps
+            // all virtual-register state on the stack (no callee-saved GPRs
+            // or DPRs are assigned to vregs), so there are no caller-owned
+            // registers that the function needs to report as having
+            // preserved. R11 (FP) and LR are saved/restored directly via
+            // explicit LDR/STR in the prologue/epilogue rather than through
+            // this callee_saved vector.
             callee_saved: vec![],
             spill_slots: all_vreg_ids.len(),
             code_size,
@@ -5979,9 +6023,11 @@ impl Backend for Arm32Backend {
         // Note: ARM AAPCS marks R4-R11 as callee-saved. We clobber R4 and R5 in
         // the alloc stub, so we save/restore them via PUSH/POP. The free stub
         // and simple syscall stubs clobber only R7 (which is also callee-saved
-        // in AAPCS) — this matches the existing _start stub and the runtime
-        // print_hex/print_int functions, which also clobber R7 without saving
-        // (treated as leaf syscall wrappers, not full C functions).
+        // in AAPCS) — this matches the existing _start stub. (The runtime
+        // `__vuma_print_int` previously clobbered R7 without saving as well,
+        // but W15 added an explicit PUSH/POP of R7 around that function so it
+        // now preserves R7 across the call. The bare syscall stubs here are
+        // leaf wrappers that intentionally do not.)
         let vuma_alloc_stub: Vec<u8> = {
             let mut code = Vec::new();
             // PUSH {R4, R5}  — save callee-saved registers we'll clobber.
@@ -6862,6 +6908,10 @@ mod tests {
         assert_eq!((1u16<<4)|(1u16<<5)|(1u16<<6)|(1u16<<14), 0x4070);
         // Verify POP {r4,r5,r6,pc}: (1<<4)|(1<<5)|(1<<6)|(1<<15) = 0x8070
         assert_eq!((1u16<<4)|(1u16<<5)|(1u16<<6)|(1u16<<15), 0x8070);
+        // Verify PUSH {r4,r5,r6,r7,lr}: (1<<4)|(1<<5)|(1<<6)|(1<<7)|(1<<14) = 0x40F0
+        assert_eq!((1u16<<4)|(1u16<<5)|(1u16<<6)|(1u16<<7)|(1u16<<14), 0x40F0);
+        // Verify POP {r4,r5,r6,r7,pc}: (1<<4)|(1<<5)|(1<<6)|(1<<7)|(1<<15) = 0x80F0
+        assert_eq!((1u16<<4)|(1u16<<5)|(1u16<<6)|(1u16<<7)|(1u16<<15), 0x80F0);
         // Verify PUSH {r0,r1,r2,r7,lr}: (1<<0)|(1<<1)|(1<<2)|(1<<7)|(1<<14) = 0x4087
         assert_eq!((1u16<<0)|(1u16<<1)|(1u16<<2)|(1u16<<7)|(1u16<<14), 0x4087);
         // Verify POP {r0,r1,r2,r7,pc}: (1<<0)|(1<<1)|(1<<2)|(1<<7)|(1<<15) = 0x8087
