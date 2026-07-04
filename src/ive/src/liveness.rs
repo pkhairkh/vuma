@@ -987,10 +987,28 @@ impl LivenessVerifier {
                     // that have successors leading (transitively) to a dealloc
                     // are safe. Only true dead-end nodes that don't reach a
                     // dealloc represent a potential resource leak on some path.
+                    //
+                    // Important: a dead-end node that is a Deallocation for
+                    // ANY resource (not just the current one) is NOT a leak
+                    // endpoint — it is a deliberate cleanup point.  Without
+                    // this, Derivation shortcuts through other resources'
+                    // dealloc nodes create false-positive "potential leak
+                    // path" reports.
+                    let all_dealloc_points: hashbrown::HashSet<PointId> = input
+                        .events
+                        .iter()
+                        .filter(|e| e.event == EventAction::Deallocate)
+                        .map(|e| e.point)
+                        .collect();
                     let mut has_potential_leak_path = false;
                     for &point in &reachable_from_alloc {
                         if dealloc_points.contains(&point) {
-                            continue; // This IS a dealloc point
+                            continue; // This IS a dealloc point for this resource
+                        }
+                        // Skip dead-end nodes that are deallocations for
+                        // ANY resource — they are cleanup points, not leaks.
+                        if all_dealloc_points.contains(&point) {
+                            continue;
                         }
                         // Only consider dead-end nodes (no successors) as
                         // potential leak endpoints. Nodes with successors that
