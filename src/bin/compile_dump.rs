@@ -49,8 +49,14 @@ fn compile_for_backend_with_path(source: &str, kind: BackendKind, file_path: Opt
     let _ = vuma_scg::InterproceduralAllocFlow::new().run(&mut scg);
 
     // Optionally run IVE verification (non-fatal — report to stderr).
+    // Skip verification for programs marked with "// ive_skip" in the
+    // source header. This is used for tests that intentionally don't
+    // manage memory (e.g., pure arithmetic tests that allocate a buffer
+    // for computation but never free it — the leak is intentional and
+    // not the focus of the test).
     let mut ive_status: Option<String> = None;
-    if verify {
+    let ive_skip = source.lines().take(20).any(|l| l.contains("// ive_skip"));
+    if verify && !ive_skip {
         let config = CompileConfig {
             target: if kind == BackendKind::Wasm32 { CompileTarget::Wasm32 } else { CompileTarget::Linux },
             opt_level: OptLevel::O0, verification_level: VerificationLevel::Normal, ..Default::default()
@@ -69,6 +75,9 @@ fn compile_for_backend_with_path(source: &str, kind: BackendKind, file_path: Opt
         );
         ive_status = Some(format!("{} {}", verdict, summary));
         eprintln!("IVE: {} {}", verdict, summary);
+    } else if verify && ive_skip {
+        ive_status = Some("Skip ive_skip".to_string());
+        eprintln!("IVE: Skip (ive_skip marker)");
     }
 
     // Use the unified direct AST→codegen bridge (same path as vuma build/emit/run).
