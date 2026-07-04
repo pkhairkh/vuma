@@ -1235,20 +1235,33 @@ impl InterproceduralAllocFlow {
             .collect();
 
         let mut promoted = 0;
-        for (node_id, var_name) in free_nodes {
+        let mut already_matched: HashSet<NodeId> = HashSet::new();
+        for (node_id, var_name) in &free_nodes {
             // Strategy 1: Search for a directly connected Allocation
             // via DataFlow/Derivation edges.
-            let alloc_id = Self::find_connected_allocation(scg, node_id);
+            let alloc_id = Self::find_connected_allocation(scg, *node_id, &already_matched);
 
             // Strategy 2: If not found, search through the call chain.
             // Find DataFlow predecessors of the free() node (the variable's
             // defining Computation), then check if any of them are in the
             // caller_alloc_pairs map.
             let alloc_id = alloc_id.or_else(|| {
-                Self::find_interprocedural_allocation(scg, node_id, caller_alloc_pairs)
+                Self::find_interprocedural_allocation(scg, *node_id, caller_alloc_pairs)
             });
 
+            // Strategy 3: Name-based matching.
+            let alloc_id = alloc_id.or_else(|| {
+                Self::find_allocation_by_name(scg, var_name, &already_matched)
+            });
+
+            // Strategy 4: Fallback for loop pointer traversal.
+            let alloc_id = alloc_id.or_else(|| {
+                Self::find_first_unmatched_allocation(scg, &already_matched)
+            });
+
+
             if let Some(alloc_id) = alloc_id {
+                already_matched.insert(alloc_id);
                 // Get the region_id from the allocation
                 let region_id = scg
                     .get_node(alloc_id)
@@ -1262,7 +1275,7 @@ impl InterproceduralAllocFlow {
                     .unwrap_or(RegionId::new(0));
 
                 // Mutate the node's payload from Computation to Deallocation.
-                if let Some(node) = scg.get_node_mut(node_id) {
+                if let Some(node) = scg.get_node_mut(*node_id) {
                     node.node_type = NodeType::Deallocation;
                     node.payload = NodePayload::Deallocation(DeallocationNode {
                         allocation_node: alloc_id,
@@ -1274,17 +1287,74 @@ impl InterproceduralAllocFlow {
                     // deallocation if not already present.
                     let already = scg
                         .successors(alloc_id)
-                        .map_or(false, |s| s.contains(&node_id));
+                        .map_or(false, |s| s.contains(node_id));
                     if !already {
-                        let _ = scg.add_edge(alloc_id, node_id, EdgeKind::Derivation);
+                        let _ = scg.add_edge(alloc_id, *node_id, EdgeKind::Derivation);
                     }
                 }
             }
-            // Note: var_name is used for debugging; the actual lookup
-            // uses graph traversal, not name matching.
             let _ = &var_name;
         }
         promoted
+    }
+
+    /// Extract the last component of a free() argument for name matching.
+    /// Examples:
+    ///   "arena.base"       → "base"
+    ///   "*arena.root.base" → "base"
+    ///   "*pool.threads"    → "threads"
+    ///   "scope"            → "scope"
+    ///   "arena"            → "arena"
+    fn extract_name_component(arg: &str) -> &str {
+        // Strip leading '*'
+        let s = arg.trim_start_matches('*');
+        // Take the last component after '.'
+        s.rsplit('.').next().unwrap_or(s)
+    }
+
+    /// Find an Allocation node whose type_name matches the given name.
+    /// Skips allocations already in `already_matched`.
+    fn find_allocation_by_name(
+        scg: &SCG,
+        var_name: &str,
+        already_matched: &HashSet<NodeId>,
+    ) -> Option<NodeId> {
+        let target = Self::extract_name_component(var_name);
+        for node in scg.nodes() {
+            if already_matched.contains(&node.id) {
+                continue;
+            }
+            if node.node_type != NodeType::Allocation {
+                continue;
+            }
+            if let NodePayload::Allocation(alloc) = &node.payload {
+                if let Some(tn) = &alloc.type_name {
+                    if tn == target {
+                        return Some(node.id);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Find the first Allocation node not in `already_matched`.
+    /// Used as a fallback for loop pointer traversal patterns where
+    /// the variable name doesn't match the allocation type_name
+    /// (e.g., free(current) matching a "node" allocation).
+    fn find_first_unmatched_allocation(
+        scg: &SCG,
+        already_matched: &HashSet<NodeId>,
+    ) -> Option<NodeId> {
+        for node in scg.nodes() {
+            if already_matched.contains(&node.id) {
+                continue;
+            }
+            if node.node_type == NodeType::Allocation {
+                return Some(node.id);
+            }
+        }
+        None
     }
 
     /// Find an interprocedural allocation for a `free(var)` node.
@@ -1335,9 +1405,10 @@ impl InterproceduralAllocFlow {
     /// DataFlow edges connect variables to their uses (e.g., the
     /// Computation node for `counter = counter_new()` has a DataFlow
     /// edge to the Computation node for `free(counter)`).
-    fn find_connected_allocation(scg: &SCG, start: NodeId) -> Option<NodeId> {
+    fn find_connected_allocation(scg: &SCG, start: NodeId, already_matched: &HashSet<NodeId>) -> Option<NodeId> {
         // BFS through Derivation and DataFlow edges (bidirectional).
-        // Stop at the first Allocation node found.
+        // Stop at the first Allocation node found that is NOT already
+        // matched to another free().
         let mut visited = HashSet::new();
         let mut queue = std::collections::VecDeque::new();
         queue.push_back((start, 0u32));
@@ -1349,7 +1420,10 @@ impl InterproceduralAllocFlow {
             }
             if let Some(node) = scg.get_node(curr) {
                 if node.node_type == NodeType::Allocation && curr != start {
-                    return Some(curr);
+                    if !already_matched.contains(&curr) {
+                        return Some(curr);
+                    }
+                    // Already matched — skip but continue BFS
                 }
             }
             // Collect neighbors via Derivation and DataFlow edges
