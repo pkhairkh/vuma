@@ -34,7 +34,27 @@ pub struct FunctionSummary {
 
 impl FunctionSummary {
     pub fn new() -> Self {
-        Self::default()
+        // A newly-created (empty) function summary represents a function
+        // with no known side effects — it is pure by default. Side-effect
+        // flags (allocates, performs_io, modified_regions, etc.) start
+        // empty/false and are set to true when the corresponding behavior
+        // is observed during analysis. When any side-effect flag is set,
+        // `is_pure` should be recomputed (see `recompute_purity`).
+        Self {
+            is_pure: true,
+            ..Self::default()
+        }
+    }
+
+    /// Recompute the `is_pure` flag based on side-effect flags.
+    /// A function is pure if it doesn't allocate, perform I/O, free
+    /// regions, or modify any regions.
+    pub fn recompute_purity(&mut self) {
+        self.is_pure = !self.allocates
+            && !self.performs_io
+            && self.freed_regions.is_empty()
+            && self.modified_regions.is_empty()
+            && self.escaping_regions.is_empty();
     }
 
     /// Check if a region escapes this function.
@@ -144,6 +164,7 @@ mod tests {
     fn test_summary_with_alloc() {
         let mut summary = FunctionSummary::new();
         summary.allocates = true;
+        summary.recompute_purity();
         assert!(!summary.is_pure);
     }
 }
