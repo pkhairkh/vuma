@@ -58,6 +58,7 @@ use super::{
     encode_movq_gpr_xmm, encode_movq_xmm_gpr,
     encode_movsx_reg8,
     encode_movsx_reg8_mem,
+    encode_movsx_reg16,
     encode_movzx_reg8, encode_movzx_reg16,
     encode_movzx_reg8_mem, encode_movzx_reg16_mem,
     encode_neg_reg, encode_nop, encode_not_reg,
@@ -772,44 +773,27 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                             code.extend(encode_not_reg(Gpr::Rax));
                         }
                         UnaryOpKind::Clz => {
-                            // BSR RAX, RAX → result = 63 - BSR
-                            let r = Gpr::Rax.needs_rex();
-                            let b = Gpr::Rax.needs_rex();
-                            if let Some(rex) = rex_prefix(true, r, false, b) {
-                                code.push(rex);
-                            } else {
-                                code.push(0x48);
-                            }
+                            // LZCNT EAX, EAX (F3 0F BD /r) — handles zero input
+                            // LZCNT returns 32 for zero input on 32-bit.
+                            // No REX prefix on x86_32!
+                            code.push(0xF3);
                             code.push(0x0F);
                             code.push(0xBD);
                             code.push(modrm(3, Gpr::Rax.encoding() & 7, Gpr::Rax.encoding() & 7));
-                            code.extend(encode_mov_reg_imm32(Gpr::Rax, 63));
-                            code.extend(encode_sub_reg_reg(Gpr::Rax, Gpr::Rax));
-                            code.extend(encode_mov_reg_reg(Gpr::Rax, Gpr::Rax));
                         }
                         UnaryOpKind::Ctz => {
-                            // BSF RAX, RAX
-                            let r = Gpr::Rax.needs_rex();
-                            let b = Gpr::Rax.needs_rex();
-                            if let Some(rex) = rex_prefix(true, r, false, b) {
-                                code.push(rex);
-                            } else {
-                                code.push(0x48);
-                            }
+                            // TZCNT EAX, EAX (F3 0F BC /r) — handles zero input
+                            // TZCNT returns 32 for zero input on 32-bit.
+                            // No REX prefix on x86_32!
+                            code.push(0xF3);
                             code.push(0x0F);
                             code.push(0xBC);
                             code.push(modrm(3, Gpr::Rax.encoding() & 7, Gpr::Rax.encoding() & 7));
                         }
                         UnaryOpKind::Popcnt => {
-                            // POPCNT RAX, RAX (F3 0F B8 /r)
+                            // POPCNT EAX, EAX (F3 0F B8 /r)
+                            // No REX prefix on x86_32!
                             code.push(0xF3);
-                            let r = Gpr::Rax.needs_rex();
-                            let b = Gpr::Rax.needs_rex();
-                            if let Some(rex) = rex_prefix(true, r, false, b) {
-                                code.push(rex);
-                            } else {
-                                code.push(0x48);
-                            }
                             code.push(0x0F);
                             code.push(0xB8);
                             code.push(modrm(3, Gpr::Rax.encoding() & 7, Gpr::Rax.encoding() & 7));
@@ -847,14 +831,14 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                 IRInstr::Select { dst, cond, true_val, false_val, .. } => {
                     let mut code = Vec::new();
                     let dst_id = dst.as_register().unwrap_or(0);
-                    // Load false_val into RAX, true_val into R10, cond into R11
+                    // Load false_val into EAX, true_val into ECX, cond into EDX
                     code.extend(load_value(false_val, Gpr::Rax));
-                    code.extend(load_value(true_val, Gpr::Rax));
+                    code.extend(load_value(true_val, Gpr::Rcx));
                     code.extend(load_value(cond, Gpr::Rdx));
                     // Test cond != 0
                     code.extend(encode_test_reg_reg(Gpr::Rdx, Gpr::Rdx));
-                    // CMOVNZ RAX, R10
-                    code.extend(encode_cmovcc_reg_reg(Cc::NotEqual, Gpr::Rax, Gpr::Rax));
+                    // CMOVNE EAX, ECX (if cond != 0, EAX = true_val)
+                    code.extend(encode_cmovcc_reg_reg(Cc::NotEqual, Gpr::Rax, Gpr::Rcx));
                     code.extend(store_vreg(dst_id, Gpr::Rax));
                     code
                 }
@@ -863,30 +847,28 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                 // ct_select(cond, a, b) = (a & mask) | (b & ~mask)
                 // where mask = -(cond != 0) = all-ones if cond!=0, else 0
                 // Key: NO BRANCHES — all bitwise operations to prevent timing side-channels
+                // Register usage: EAX = mask/result, ECX = true_val, EDX = false_val
                 IRInstr::CtSelect { dst, cond, true_val, false_val, .. } => {
                     let mut code = Vec::new();
                     let dst_id = dst.as_register().unwrap_or(0);
-                    // Load cond into R10, true_val into R11, false_val into RAX
+                    // Load true_val into ECX, false_val into EDX
+                    code.extend(load_value(true_val, Gpr::Rcx));
+                    code.extend(load_value(false_val, Gpr::Rdx));
+                    // Build mask in EAX: mask = -(cond != 0)
                     code.extend(load_value(cond, Gpr::Rax));
-                    code.extend(load_value(true_val, Gpr::Rdx));
-                    code.extend(load_value(false_val, Gpr::Rax));
-                    // Build mask: mask = -(cond != 0)
-                    //   TEST R10, R10      ; set ZF if cond == 0
-                    //   SETNE R10b         ; R10b = 1 if cond != 0, else 0
-                    //   MOVZX R10, R10b    ; zero-extend to full register
-                    //   NEG R10            ; R10 = 0xFFFFFFFFFFFFFFFF if cond!=0, else 0
                     code.extend(encode_test_reg_reg(Gpr::Rax, Gpr::Rax));
                     code.extend(encode_setcc(Cc::NotEqual, Gpr::Rax));
                     code.extend(encode_movzx_reg8(Gpr::Rax, Gpr::Rax));
                     code.extend(encode_neg_reg(Gpr::Rax));
                     // result = (true_val & mask) | (false_val & ~mask)
-                    //   R11 &= R10         ; R11 = true_val & mask
-                    //   RAX &= ~R10        ; RAX = false_val & ~mask (NOT R10 then AND)
-                    //   OR RAX, R11        ; RAX = result
-                    code.extend(encode_and_reg_reg(Gpr::Rdx, Gpr::Rax));
+                    // ECX = true_val & mask
+                    code.extend(encode_and_reg_reg(Gpr::Rcx, Gpr::Rax));
+                    // EDX = false_val & ~mask (NOT EAX then AND EDX)
                     code.extend(encode_not_reg(Gpr::Rax));
-                    code.extend(encode_and_reg_reg(Gpr::Rax, Gpr::Rax));
-                    code.extend(encode_or_reg_reg(Gpr::Rax, Gpr::Rdx));
+                    code.extend(encode_and_reg_reg(Gpr::Rdx, Gpr::Rax));
+                    // EAX = ECX | EDX
+                    code.extend(encode_or_reg_reg(Gpr::Rcx, Gpr::Rdx));
+                    code.extend(encode_mov_reg_reg(Gpr::Rax, Gpr::Rcx));
                     code.extend(store_vreg(dst_id, Gpr::Rax));
                     code
                 }
@@ -895,28 +877,26 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                 // ct_eq(a, b): diff = a ^ b; result = ((diff | -diff) >> 31) ^ 1
                 // Returns 1 if equal, 0 if not.
                 // Key: NO BRANCHES — all bitwise operations to prevent timing side-channels
+                // Register usage: EAX = diff, ECX = -diff, EDX = result
                 IRInstr::CtEq { dst, lhs, rhs, .. } => {
                     let mut code = Vec::new();
                     let dst_id = dst.as_register().unwrap_or(0);
-                    // Load lhs into RAX, rhs into RCX
+                    // Load lhs into EAX, rhs into ECX
                     code.extend(load_value(lhs, Gpr::Rax));
                     code.extend(load_value(rhs, Gpr::Rcx));
-                    // XOR RAX, RCX → diff in RAX
+                    // XOR EAX, ECX → diff in EAX
                     code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rcx));
-                    // NEG RAX → -diff in RAX (but we need diff too, so save diff first)
-                    // Use R10 = diff, R11 = -diff
-                    code.extend(encode_mov_reg_reg(Gpr::Rax, Gpr::Rax)); // R10 = diff
-                    code.extend(encode_neg_reg(Gpr::Rax));                // RAX = -diff
-                    code.extend(encode_mov_reg_reg(Gpr::Rdx, Gpr::Rax));  // R11 = -diff
-                    // OR R10, R11 → (diff | -diff)
-                    code.extend(encode_or_reg_reg(Gpr::Rax, Gpr::Rdx));
-                    // SHR R10, 31 → 0 if diff==0, 1 if diff!=0 (for 32-bit)
-                    // For 64-bit, we'd use >> 63, but ct_eq operates on u32 primarily
+                    // ECX = diff (save before negating)
+                    code.extend(encode_mov_reg_reg(Gpr::Rcx, Gpr::Rax));
+                    // EAX = -diff
+                    code.extend(encode_neg_reg(Gpr::Rax));
+                    // EAX = diff | -diff (always has sign bit set if diff != 0)
+                    code.extend(encode_or_reg_reg(Gpr::Rax, Gpr::Rcx));
+                    // SHR EAX, 31 → 0 if diff==0, 1 if diff!=0
                     code.extend(encode_mov_reg_imm32(Gpr::Rcx, 31));
                     code.extend(encode_shr_reg_cl(Gpr::Rax));
-                    // XOR R10, 1 → invert: 1 if equal, 0 if not
+                    // XOR EAX, 1 → invert: 1 if equal, 0 if not
                     code.extend(encode_xor_reg_imm32(Gpr::Rax, 1));
-                    code.extend(encode_mov_reg_reg(Gpr::Rax, Gpr::Rax));
                     code.extend(store_vreg(dst_id, Gpr::Rax));
                     code
                 }
@@ -997,10 +977,13 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                 IRInstr::GetAddress { dst, name } => {
                     let mut code = Vec::new();
                     let dst_id = dst.as_register().unwrap_or(0);
-                    // mov rax, imm64 (placeholder, patched by relocation)
+                    // On x86_32, encode_mov_reg_imm64 emits a 5-byte
+                    // MOV r32, imm32 (B8+rd + imm32). The immediate is
+                    // 4 bytes, so the relocation offset is code.len() - 4,
+                    // and we patch 4 bytes (not 8).
                     code.extend(encode_mov_reg_imm64(Gpr::Rax, 0));
-                    // Offset of the 8-byte immediate within the instruction:
-                    let imm_offset = byte_offset + code.len() - 8;
+                    // Offset of the 4-byte immediate within the instruction:
+                    let imm_offset = byte_offset + code.len() - 4;
                     relocations.push(RelocationEntry {
                         offset: imm_offset as u64,
                         symbol: name.clone(),
@@ -1124,22 +1107,34 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
 
                     match kind {
                         CastKind::ZExt => {
-                            if let IRValue::Immediate(imm) = src {
-                                let imm = *imm;
+                            if let IRValue::Immediate(imm) = *src {
+                                let imm = imm;
                                 if (-2147483648..=2147483647).contains(&imm) {
                                     code.extend(encode_mov_reg_imm32(Gpr::Rax, imm as i32));
                                 } else {
                                     code.extend(encode_mov_reg_imm64(Gpr::Rax, imm as u64));
                                 }
                             } else {
-                                // Load from stack, zero-extend byte → 64 bits
                                 code.extend(load_value(src, Gpr::Rax));
-                                code.extend(encode_movzx_reg8(Gpr::Rax, Gpr::Rax));
+                                match from_ty {
+                                    Some(IRType::U8) | Some(IRType::I8) => {
+                                        code.extend(encode_movzx_reg8(Gpr::Rax, Gpr::Rax));
+                                    }
+                                    Some(IRType::U16) | Some(IRType::I16) => {
+                                        code.extend(encode_movzx_reg16(Gpr::Rax, Gpr::Rax));
+                                    }
+                                    Some(IRType::U32) | Some(IRType::I32) => {
+                                        // AND EAX, 0xFFFFFFFF (clears nothing on 32-bit,
+                                        // but ensures the value is treated as unsigned 32)
+                                        code.extend(encode_and_reg_imm32(Gpr::Rax, -1));
+                                    }
+                                    _ => {}
+                                }
                             }
                         }
                         CastKind::SExt => {
-                            if let IRValue::Immediate(imm) = src {
-                                let imm = *imm;
+                            if let IRValue::Immediate(imm) = *src {
+                                let imm = imm;
                                 if (-2147483648..=2147483647).contains(&imm) {
                                     code.extend(encode_mov_reg_imm32(Gpr::Rax, imm as i32));
                                 } else {
@@ -1147,10 +1142,36 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                 }
                             } else {
                                 code.extend(load_value(src, Gpr::Rax));
-                                code.extend(encode_movsx_reg8(Gpr::Rax, Gpr::Rax));
+                                match from_ty {
+                                    Some(IRType::I8) | Some(IRType::U8) => {
+                                        code.extend(encode_movsx_reg8(Gpr::Rax, Gpr::Rax));
+                                    }
+                                    Some(IRType::I16) | Some(IRType::U16) => {
+                                        code.extend(encode_movsx_reg16(Gpr::Rax, Gpr::Rax));
+                                    }
+                                    Some(IRType::I32) | Some(IRType::U32) => {
+                                        // On x86_32, 32-bit is the full register — no extension needed
+                                    }
+                                    _ => {}
+                                }
                             }
                         }
-                        CastKind::Trunc | CastKind::BitCast => {
+                        CastKind::Trunc => {
+                            // Truncate: mask the upper bits based on to_ty.
+                            code.extend(load_value(src, Gpr::Rax));
+                            match to_ty {
+                                Some(IRType::U8) | Some(IRType::I8) => {
+                                    code.extend(encode_and_reg_imm32(Gpr::Rax, 0xFF));
+                                }
+                                Some(IRType::U16) | Some(IRType::I16) => {
+                                    code.extend(encode_and_reg_imm32(Gpr::Rax, 0xFFFF));
+                                }
+                                _ => {
+                                    // Truncating to 32-bit is a no-op on x86_32
+                                }
+                            }
+                        }
+                        CastKind::BitCast => {
                             code.extend(load_value(src, Gpr::Rax));
                         }
 
@@ -1568,21 +1589,24 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                 }
 
                 IRInstr::AtomicCas { dst, addr, expected, desired, .. } => {
-                    // x86_64: LOCK CMPXCHG [addr], desired
-                    // RAX = expected (implicitly compared by CMPXCHG)
-                    // If [addr] == RAX, then [addr] = desired, ZF=1
-                    // Otherwise RAX = [addr], ZF=0
+                    // x86_32: LOCK CMPXCHG [addr], desired
+                    // EAX = expected (implicitly compared by CMPXCHG)
+                    // If [addr] == EAX, then [addr] = desired, ZF=1
+                    // Otherwise EAX = [addr], ZF=0
+                    // Use EDX for addr (caller-saved), not EBX (callee-saved).
                     let mut code = Vec::new();
-                    code.extend(load_value(addr, Gpr::Rbx));     // addr -> Rbx
-                    code.extend(load_value(expected, Gpr::Rax)); // expected -> Rax
-                    code.extend(load_value(desired, Gpr::Rcx));  // desired -> Rcx
-                    // LOCK CMPXCHG [Rbx], RCx
-                    // F0 0F B1 0B  =  LOCK CMPXCHG RCx, [Rbx]
+                    code.extend(load_value(addr, Gpr::Rdx));      // addr -> EDX
+                    code.extend(load_value(expected, Gpr::Rax));  // expected -> EAX
+                    code.extend(load_value(desired, Gpr::Rcx));   // desired -> ECX
+                    // LOCK CMPXCHG [EDX], ECX
+                    // F0 0F B1 0A  =  LOCK CMPXCHG ECX, [EDX]
+                    // ModRM: mod=00, reg=ECX(1), r/m=EDX(2)
+                    // ModRM = (00 << 6) | (001 << 3) | 010 = 0x0A
                     code.push(0xF0); // LOCK prefix
                     code.push(0x0F);
                     code.push(0xB1);
-                    code.push(0x0B); // ModRM: [Rbx], RCx
-                    // Result: Rax has the old value (whether swap succeeded or not)
+                    code.push(0x0A); // ModRM: [EDX], ECX
+                    // Result: EAX has the old value (whether swap succeeded or not)
                     let dst_id = dst.as_register().unwrap_or(0);
                     code.extend(store_vreg(dst_id, Gpr::Rax));
                     code
