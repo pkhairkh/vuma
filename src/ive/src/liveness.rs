@@ -195,6 +195,11 @@ pub struct LivenessInput {
     pub wait_for_deps: Vec<WaitForDependency>,
     /// Entry point of the program.
     pub entry_point: Option<PointId>,
+    /// Points that are function returns (legitimate path exits).
+    /// A dead-end node that is a function return is NOT a leak — it
+    /// represents the function exiting, and the caller is responsible
+    /// for cleanup.
+    pub function_returns: hashbrown::HashSet<PointId>,
 }
 
 impl LivenessInput {
@@ -1000,6 +1005,39 @@ impl LivenessVerifier {
                         .filter(|e| e.event == EventAction::Deallocate)
                         .map(|e| e.point)
                         .collect();
+
+                    // Collect all FunctionReturn points — these are
+                    // legitimate path exits (function returns), not
+                    // leak endpoints. A return statement exits the
+                    // current function; if the caller has a free()
+                    // after the call, the resource is properly cleaned
+                    // up. Without this, returns inside if-branches
+                    // create false-positive "potential leak path"
+                    // reports because the return is a dead-end node
+                    // reachable from the allocation.
+                    //
+                    // We identify FunctionReturn points by checking
+                    // the input's program points — any point that has
+                    // no successors in the CFG AND is a return-like
+                    // node. Since the CFG builder skips edges FROM
+                    // FunctionReturn nodes, these nodes have no
+                    // successors and appear as dead-ends. We skip them
+                    // because they represent legitimate control flow
+                    // exits, not leaks.
+                    //
+                    // Heuristic: a dead-end node is a FunctionReturn
+                    // if its point ID is not in the dealloc set and
+                    // it's reachable from the allocation. We treat ALL
+                    // dead-end nodes that are NOT deallocations as
+                    // potential leak endpoints UNLESS they are
+                    // FunctionReturn nodes. Since we can't easily
+                    // distinguish FunctionReturn from other dead-ends
+                    // in the liveness input, we use a different
+                    // approach: only report a leak if the dead-end
+                    // node is NOT reachable from any dealloc point.
+                    // This is already handled by the
+                    // `passes_through_dealloc` check below.
+
                     let mut has_potential_leak_path = false;
                     for &point in &reachable_from_alloc {
                         if dealloc_points.contains(&point) {
@@ -1008,6 +1046,14 @@ impl LivenessVerifier {
                         // Skip dead-end nodes that are deallocations for
                         // ANY resource — they are cleanup points, not leaks.
                         if all_dealloc_points.contains(&point) {
+                            continue;
+                        }
+                        // Skip function return points — they are
+                        // legitimate path exits, not leaks. A return
+                        // statement exits the function; if the caller
+                        // has a free() after the call, the resource is
+                        // properly cleaned up.
+                        if input.function_returns.contains(&point) {
                             continue;
                         }
                         // Only consider dead-end nodes (no successors) as
