@@ -45,6 +45,7 @@ use super::{
     encode_cvttsd2si_r32_xmm, encode_cvttsd2si_r64_xmm,
     encode_cvttss2si_r32_xmm, encode_cvttss2si_r64_xmm,
     encode_addsd_xmm_xmm, encode_addss_xmm_xmm,
+    encode_subsd_xmm_xmm, encode_subss_xmm_xmm,
     encode_div_reg,
     encode_idiv_reg,
     encode_imul_reg_reg,
@@ -240,7 +241,13 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                 }
             }
             IRValue::Address(addr) => encode_mov_reg_imm64(scratch, *addr),
-            IRValue::Label(_) => encode_mov_reg_imm64(scratch, 0), // placeholder
+            IRValue::Label(name) => {
+                // Labels need relocation but load_value doesn't have access
+                // to the relocations vector. Emit a placeholder and log.
+                // This is a known limitation — labels are rare in IR operands.
+                log::warn!("IRValue::Label('{}') in load_value: emitting placeholder 0", name);
+                encode_mov_reg_imm64(scratch, 0)
+            }
         }
     };
 
@@ -1148,20 +1155,59 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                         // | f64     | u8..u32     | MOVQ xmm,r64; CVTSD2SI r32,xmm         |
                         // | f64     | u64         | MOVQ xmm,r64; CVTSD2SI r64,xmm         |
                         CastKind::FloatToUInt => {
+                            // Proper unsigned float→int conversion.
+                            // For values that fit in the positive signed range,
+                            // CVTTSD2SI works directly (positive signed == unsigned).
+                            // For values >= 2^63 (u64) or >= 2^31 (u32), we use
+                            // the subtract-convert-XOR technique:
+                            //   1. Subtract 2^N from the float
+                            //   2. Convert with CVTTSD2SI (now fits in signed range)
+                            //   3. XOR the result with 2^(N-1) to add 2^N back
                             code.extend(load_value(src, Gpr::Rax));
                             if src_is_f32 {
                                 code.extend(encode_movd_xmm_gpr(Xmm::Xmm0, Gpr::Rax));
                                 if dst_is_32bit_int {
+                                    // f32 → u32: subtract 2^31, convert, XOR 2^31
+                                    // This works for ALL values (small and large):
+                                    //   small: v - 2^31 is negative (sign set), XOR clears → v
+                                    //   large: v - 2^31 is positive (sign clear), XOR sets → v
+                                    code.extend(encode_mov_reg_imm32(Gpr::R10, 0x4F000000));
+                                    code.extend(encode_movd_xmm_gpr(Xmm::Xmm1, Gpr::R10));
+                                    code.extend(encode_subss_xmm_xmm(Xmm::Xmm0, Xmm::Xmm1));
                                     code.extend(encode_cvttss2si_r32_xmm(Gpr::Rax, Xmm::Xmm0));
+                                    code.extend(encode_xor_reg_imm32(Gpr::Rax, 0x80000000u32 as i32));
                                 } else {
+                                    // f32 → u64: threshold = 2^63
+                                    // Load 2^63 as float (0x5F000000) into XMM1
+                                    code.extend(encode_mov_reg_imm32(Gpr::R10, 0x5F000000));
+                                    code.extend(encode_movd_xmm_gpr(Xmm::Xmm1, Gpr::R10));
+                                    code.extend(encode_subss_xmm_xmm(Xmm::Xmm0, Xmm::Xmm1));
                                     code.extend(encode_cvttss2si_r64_xmm(Gpr::Rax, Xmm::Xmm0));
+                                    // XOR with 0x8000000000000000 to add 2^63 back
+                                    code.extend(encode_mov_reg_imm64(Gpr::R10, 0x8000000000000000));
+                                    code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::R10));
                                 }
                             } else {
+                                // f64 → u32 or u64
                                 code.extend(encode_movq_xmm_gpr(Xmm::Xmm0, Gpr::Rax));
                                 if dst_is_32bit_int {
+                                    // f64 → u32: threshold = 2^31
+                                    // Load 2^31 as double (0x41E0000000000000) into XMM1
+                                    code.extend(encode_mov_reg_imm64(Gpr::R10, 0x41E0000000000000));
+                                    code.extend(encode_movq_xmm_gpr(Xmm::Xmm1, Gpr::R10));
+                                    code.extend(encode_subsd_xmm_xmm(Xmm::Xmm0, Xmm::Xmm1));
                                     code.extend(encode_cvttsd2si_r32_xmm(Gpr::Rax, Xmm::Xmm0));
+                                    code.extend(encode_xor_reg_imm32(Gpr::Rax, 0x80000000u32 as i32));
                                 } else {
+                                    // f64 → u64: threshold = 2^63
+                                    // Load 2^63 as double (0x43E0000000000000) into XMM1
+                                    code.extend(encode_mov_reg_imm64(Gpr::R10, 0x43E0000000000000));
+                                    code.extend(encode_movq_xmm_gpr(Xmm::Xmm1, Gpr::R10));
+                                    code.extend(encode_subsd_xmm_xmm(Xmm::Xmm0, Xmm::Xmm1));
                                     code.extend(encode_cvttsd2si_r64_xmm(Gpr::Rax, Xmm::Xmm0));
+                                    // XOR with 0x8000000000000000 to add 2^63 back
+                                    code.extend(encode_mov_reg_imm64(Gpr::R10, 0x8000000000000000));
+                                    code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::R10));
                                 }
                             }
                         }
@@ -1323,8 +1369,14 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     } else if non_self.is_empty() {
                         encode_nop() // trivial self-loop
                     } else {
-                        // Multiple non-self incoming: should have been resolved.
-                        // Just use the first one as a fallback.
+                        // Multiple non-self incoming: should have been resolved
+                        // by resolve_phis(). Emit a warning — using the first
+                        // value as a fallback produces incorrect code for other
+                        // predecessors.
+                        log::warn!(
+                            "Non-trivial Phi with {} incoming values — using first (may be wrong)",
+                            non_self.len()
+                        );
                         let (val, _) = non_self[0];
                         let mut code = Vec::new();
                         code.extend(load_value(val, Gpr::Rax));

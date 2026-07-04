@@ -269,7 +269,10 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                 }
             }
             IRValue::Address(addr) => encode_mov_reg_imm64(scratch, *addr),
-            IRValue::Label(_) => encode_mov_reg_imm64(scratch, 0), // placeholder
+            IRValue::Label(name) => {
+                log::warn!("IRValue::Label('{}') in load_value: emitting placeholder 0", name);
+                encode_mov_reg_imm64(scratch, 0)
+            }
         }
     };
 
@@ -1555,8 +1558,10 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     } else if non_self.is_empty() {
                         encode_nop() // trivial self-loop
                     } else {
-                        // Multiple non-self incoming: should have been resolved.
-                        // Just use the first one as a fallback.
+                        log::warn!(
+                            "Non-trivial Phi with {} incoming values — using first (may be wrong)",
+                            non_self.len()
+                        );
                         let (val, _) = non_self[0];
                         let mut code = Vec::new();
                         code.extend(load_value(val, Gpr::Rax));
