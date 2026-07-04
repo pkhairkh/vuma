@@ -71,8 +71,8 @@ use vuma_ive::{
 use vuma_parser::{AstToScg, Item, ModuleResolver, ParseError, Parser, Program as AstProgram, ResolveError};
 use vuma_scg::{
     AccessMode, CommonSubexpressionElimination, ConstantFolding, ControlKind, DeadCodeElimination,
-    EdgeData, EdgeKind, InliningPass, NodeData, NodeId, NodePayload, NodeType, PassManager,
-    PipelineResult as ScgPipelineResult, SCG, ComputationKind,
+    EdgeData, EdgeKind, InliningPass, InterproceduralAllocFlow, NodeData, NodeId, NodePayload,
+    NodeType, PassManager, PipelineResult as ScgPipelineResult, SCG, SCGPass, ComputationKind,
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -4791,6 +4791,17 @@ pub fn compile_with_path(
     }
     timings.push(("scg-validation".to_string(), t.elapsed().as_millis() as u64));
 
+    // ── Stage 3b: Interprocedural Allocation Flow ────────────────────
+    // Connect call sites to allocation nodes inside callee functions
+    // so that IVE can trace `free(caller_var)` to `allocate()` inside
+    // the callee.  This runs BEFORE IVE verification (Stage 6) to
+    // eliminate false-positive "Resource leak" reports for programs
+    // that use factory functions (e.g., `counter = counter_new()`).
+    let t = Instant::now();
+    let ipaf_pass = vuma_scg::transform::InterproceduralAllocFlow::new();
+    let _ = ipaf_pass.run(&mut scg);
+    timings.push(("ipaf".to_string(), t.elapsed().as_millis() as u64));
+
     // ── Stage 4: BD Inference ─────────────────────────────────────────
     let t = Instant::now();
     let inference_engine = InferenceEngine::new();
@@ -5174,6 +5185,12 @@ pub fn compile_with_recovery(
     }
     timings.push(("scg-validation".to_string(), t.elapsed().as_millis() as u64));
     last_completed = Some(PipelineStage::ScgValidation);
+
+    // ── Stage 3b: Interprocedural Allocation Flow ────────────────────
+    let t = Instant::now();
+    let ipaf_pass = vuma_scg::transform::InterproceduralAllocFlow::new();
+    let _ = ipaf_pass.run(&mut scg);
+    timings.push(("ipaf".to_string(), t.elapsed().as_millis() as u64));
 
     // ── Stage 4: BD Inference ─────────────────────────────────────────
     let t = Instant::now();
