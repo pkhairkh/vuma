@@ -4190,8 +4190,162 @@ impl Backend for Arm32Backend {
                                     Gpr::R0.encoding(), Gpr::R0.encoding(),
                                 ));
                             }
-                            UnaryOpKind::Clz | UnaryOpKind::Ctz | UnaryOpKind::Popcnt => {
-                                // Placeholder: pass through
+                            UnaryOpKind::Clz => {
+                                // CLZ R0, R0  (ARMv5T+)
+                                // Dedicated extension encoding:
+                                //   cond 0001 0110 1111 Rd 1111 0000 Rm
+                                // With Rm=R0, Rd=R0 → 0xE16F0F10
+                                code.extend_from_slice(&0xE16F0F10u32.to_le_bytes());
+                            }
+                            UnaryOpKind::Ctz => {
+                                // CTZ(x) = CLZ(RBIT(x))  (ARMv6T2+)
+                                // RBIT R0, R0 : 0xE6FF0F30
+                                //   cond 0110 1111 1111 Rd 1111 0011 Rm
+                                code.extend_from_slice(&0xE6FF0F30u32.to_le_bytes());
+                                // CLZ R0, R0 : 0xE16F0F10
+                                code.extend_from_slice(&0xE16F0F10u32.to_le_bytes());
+                            }
+                            UnaryOpKind::Popcnt => {
+                                // SWAR popcount (correct for full 32-bit input).
+                                // R0 = input → R0 = popcount. R12 = scratch.
+                                // Uses 8 bytes of stack ([SP+0]=x, [SP+4]=temp).
+                                // Masks are built with MOVW/MOVT (ARMv6T2+).
+
+                                // SUB SP, SP, #8
+                                code.extend_from_slice(&encode_dp_imm(
+                                    Condition::Al, DP_SUB, false,
+                                    Gpr::R13.encoding(), Gpr::R13.encoding(), 0, 8,
+                                ));
+
+                                // ── Step 1: x = x - ((x >> 1) & 0x55555555) ──
+                                // STR R0, [SP]
+                                code.extend_from_slice(&encode_ls_imm(
+                                    Condition::Al, true, true, false, false, false,
+                                    Gpr::R13.encoding(), Gpr::R0.encoding(), 0,
+                                ));
+                                // MOVW R12, #0x5555 ; MOVT R12, #0x5555 → R12 = 0x55555555
+                                code.extend_from_slice(&0xE300C555u32.to_le_bytes());
+                                code.extend_from_slice(&0xE340C555u32.to_le_bytes());
+                                // R0 = (R0 >> 1) & R12
+                                code.extend_from_slice(&encode_dp_shift_imm(
+                                    Condition::Al, DP_MOV, false, 0,
+                                    Gpr::R0.encoding(), 1, 1, Gpr::R0.encoding(),
+                                ));
+                                code.extend_from_slice(&encode_dp_reg(
+                                    Condition::Al, DP_AND, false,
+                                    Gpr::R0.encoding(), Gpr::R0.encoding(), Gpr::R12.encoding(),
+                                ));
+                                // R0 = saved_x - R0  →  SUB R0, R12, R0
+                                code.extend_from_slice(&encode_ls_imm(
+                                    Condition::Al, true, true, false, false, true,
+                                    Gpr::R13.encoding(), Gpr::R12.encoding(), 0,
+                                ));
+                                code.extend_from_slice(&encode_dp_reg(
+                                    Condition::Al, DP_SUB, false,
+                                    Gpr::R12.encoding(), Gpr::R0.encoding(), Gpr::R0.encoding(),
+                                ));
+                                // STR R0, [SP]
+                                code.extend_from_slice(&encode_ls_imm(
+                                    Condition::Al, true, true, false, false, false,
+                                    Gpr::R13.encoding(), Gpr::R0.encoding(), 0,
+                                ));
+
+                                // ── Step 2: x = (x & 0x33333333) + ((x >> 2) & 0x33333333) ──
+                                // MOVW/MOVT R12 = 0x33333333
+                                code.extend_from_slice(&0xE300C333u32.to_le_bytes());
+                                code.extend_from_slice(&0xE340C333u32.to_le_bytes());
+                                // R0 = (R0 >> 2) & R12
+                                code.extend_from_slice(&encode_dp_shift_imm(
+                                    Condition::Al, DP_MOV, false, 0,
+                                    Gpr::R0.encoding(), 1, 2, Gpr::R0.encoding(),
+                                ));
+                                code.extend_from_slice(&encode_dp_reg(
+                                    Condition::Al, DP_AND, false,
+                                    Gpr::R0.encoding(), Gpr::R0.encoding(), Gpr::R12.encoding(),
+                                ));
+                                // STR R0, [SP, #4]  (temp)
+                                code.extend_from_slice(&encode_ls_imm(
+                                    Condition::Al, true, true, false, false, false,
+                                    Gpr::R13.encoding(), Gpr::R0.encoding(), 4,
+                                ));
+                                // R0 = saved_x & R12
+                                code.extend_from_slice(&encode_ls_imm(
+                                    Condition::Al, true, true, false, false, true,
+                                    Gpr::R13.encoding(), Gpr::R0.encoding(), 0,
+                                ));
+                                code.extend_from_slice(&encode_dp_reg(
+                                    Condition::Al, DP_AND, false,
+                                    Gpr::R0.encoding(), Gpr::R0.encoding(), Gpr::R12.encoding(),
+                                ));
+                                // R12 = temp; R0 = R0 + R12
+                                code.extend_from_slice(&encode_ls_imm(
+                                    Condition::Al, true, true, false, false, true,
+                                    Gpr::R13.encoding(), Gpr::R12.encoding(), 4,
+                                ));
+                                code.extend_from_slice(&encode_dp_reg(
+                                    Condition::Al, DP_ADD, false,
+                                    Gpr::R0.encoding(), Gpr::R0.encoding(), Gpr::R12.encoding(),
+                                ));
+                                // STR R0, [SP]
+                                code.extend_from_slice(&encode_ls_imm(
+                                    Condition::Al, true, true, false, false, false,
+                                    Gpr::R13.encoding(), Gpr::R0.encoding(), 0,
+                                ));
+
+                                // ── Step 3: x = (x + (x >> 4)) & 0x0F0F0F0F ──
+                                // R0 = R0 >> 4 ; R12 = saved_x ; R0 = R0 + R12
+                                code.extend_from_slice(&encode_dp_shift_imm(
+                                    Condition::Al, DP_MOV, false, 0,
+                                    Gpr::R0.encoding(), 1, 4, Gpr::R0.encoding(),
+                                ));
+                                code.extend_from_slice(&encode_ls_imm(
+                                    Condition::Al, true, true, false, false, true,
+                                    Gpr::R13.encoding(), Gpr::R12.encoding(), 0,
+                                ));
+                                code.extend_from_slice(&encode_dp_reg(
+                                    Condition::Al, DP_ADD, false,
+                                    Gpr::R0.encoding(), Gpr::R0.encoding(), Gpr::R12.encoding(),
+                                ));
+                                // MOVW/MOVT R12 = 0x0F0F0F0F ; R0 = R0 & R12
+                                code.extend_from_slice(&0xE300C0F0u32.to_le_bytes());
+                                code.extend_from_slice(&0xE340C0F0u32.to_le_bytes());
+                                code.extend_from_slice(&encode_dp_reg(
+                                    Condition::Al, DP_AND, false,
+                                    Gpr::R0.encoding(), Gpr::R0.encoding(), Gpr::R12.encoding(),
+                                ));
+
+                                // ── Step 4: return (x * 0x01010101) >> 24 ──
+                                // x * 0x01010101 = x + (x<<8) + (x<<16) + (x<<24)
+                                // Let z = x + (x<<8). Then z + (z<<16) = x*0x01010101.
+                                // R12 = R0 << 8 ; R0 = R0 + R12
+                                code.extend_from_slice(&encode_dp_shift_imm(
+                                    Condition::Al, DP_MOV, false, 0,
+                                    Gpr::R12.encoding(), 0, 8, Gpr::R0.encoding(),
+                                ));
+                                code.extend_from_slice(&encode_dp_reg(
+                                    Condition::Al, DP_ADD, false,
+                                    Gpr::R0.encoding(), Gpr::R0.encoding(), Gpr::R12.encoding(),
+                                ));
+                                // R12 = R0 << 16 ; R0 = R0 + R12
+                                code.extend_from_slice(&encode_dp_shift_imm(
+                                    Condition::Al, DP_MOV, false, 0,
+                                    Gpr::R12.encoding(), 0, 16, Gpr::R0.encoding(),
+                                ));
+                                code.extend_from_slice(&encode_dp_reg(
+                                    Condition::Al, DP_ADD, false,
+                                    Gpr::R0.encoding(), Gpr::R0.encoding(), Gpr::R12.encoding(),
+                                ));
+                                // R0 = R0 >> 24
+                                code.extend_from_slice(&encode_dp_shift_imm(
+                                    Condition::Al, DP_MOV, false, 0,
+                                    Gpr::R0.encoding(), 1, 24, Gpr::R0.encoding(),
+                                ));
+
+                                // ADD SP, SP, #8  (release scratch slot)
+                                code.extend_from_slice(&encode_dp_imm(
+                                    Condition::Al, DP_ADD, false,
+                                    Gpr::R13.encoding(), Gpr::R13.encoding(), 0, 8,
+                                ));
                             }
                         }
                         code.extend(ss_store_32_zero(Gpr::R0, dst_offset, fs));

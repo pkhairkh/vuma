@@ -837,8 +837,13 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                             code.extend_from_slice(&Instruction::Nor { rd: S0, rj: Gpr::R0, rk: S0 }.encode());
                             code.extend_from_slice(&Instruction::CloD { rd: S0, rj: S0 }.encode());
                         }
-                        UnaryOpKind::Ctz | UnaryOpKind::Popcnt => {
-                            // Placeholder: just keep the value as-is
+                        UnaryOpKind::Ctz => {
+                            // Count trailing zeros, doubleword: ctz.d S0, S0
+                            code.extend_from_slice(&Instruction::CtzD { rd: S0, rj: S0 }.encode());
+                        }
+                        UnaryOpKind::Popcnt => {
+                            // Population count, doubleword: popcnt.d S0, S0
+                            code.extend_from_slice(&Instruction::PopcntD { rd: S0, rj: S0 }.encode());
                         }
                     }
                     code.extend(encode_store_to_vreg(S0, dst_id, fp, &vreg_slots));
