@@ -2273,7 +2273,7 @@ fn build_arm32_elf_2seg(code: &[u8], base_addr: u64) -> Vec<u8> {
 
     let elf_header_size: u64 = 52;
     let phdr_size: u64 = 32;
-    let num_phdrs: u64 = 2;
+    let num_phdrs: u64 = 3; // 2x PT_LOAD + 1x PT_GNU_STACK
     let phdr_end = elf_header_size + num_phdrs * phdr_size;
     // Page-align the text segment start in the file for mmap compatibility.
     let text_offset = phdr_end; // No page alignment — code right after headers
@@ -2309,7 +2309,7 @@ fn build_arm32_elf_2seg(code: &[u8], base_addr: u64) -> Vec<u8> {
     elf.extend_from_slice(&0x05000000u32.to_le_bytes()); // e_flags
     elf.extend_from_slice(&52u16.to_le_bytes()); // e_ehsize
     elf.extend_from_slice(&32u16.to_le_bytes()); // e_phentsize
-    elf.extend_from_slice(&2u16.to_le_bytes()); // e_phnum = 2
+    elf.extend_from_slice(&3u16.to_le_bytes()); // e_phnum = 3 (2 LOAD + 1 GNU_STACK)
     elf.extend_from_slice(&40u16.to_le_bytes()); // e_shentsize
     elf.extend_from_slice(&0u16.to_le_bytes()); // e_shnum
     elf.extend_from_slice(&0u16.to_le_bytes()); // e_shstrndx
@@ -2334,6 +2334,18 @@ fn build_arm32_elf_2seg(code: &[u8], base_addr: u64) -> Vec<u8> {
     elf.extend_from_slice(&(data_size as u32).to_le_bytes()); // p_memsz
     elf.extend_from_slice(&6u32.to_le_bytes()); // p_flags = PF_R | PF_W
     elf.extend_from_slice(&(PAGE_SIZE as u32).to_le_bytes()); // p_align
+
+    // --- Program Header 3: PT_GNU_STACK (non-executable stack) ---
+    // p_type = 0x6474e551, p_flags = PF_R | PF_W (no PF_X)
+    // All offsets/sizes are 0; p_align = 0x4 (32-bit ELF).
+    elf.extend_from_slice(&0x6474e551u32.to_le_bytes()); // p_type = PT_GNU_STACK
+    elf.extend_from_slice(&0u32.to_le_bytes()); // p_offset
+    elf.extend_from_slice(&0u32.to_le_bytes()); // p_vaddr
+    elf.extend_from_slice(&0u32.to_le_bytes()); // p_paddr
+    elf.extend_from_slice(&0u32.to_le_bytes()); // p_filesz
+    elf.extend_from_slice(&0u32.to_le_bytes()); // p_memsz
+    elf.extend_from_slice(&6u32.to_le_bytes()); // p_flags = PF_R | PF_W
+    elf.extend_from_slice(&0x4u32.to_le_bytes()); // p_align
 
     // --- .text section ---
     // Pad to page-aligned text_offset
@@ -4217,10 +4229,10 @@ impl Backend for Arm32Backend {
                                 )); // LDRB R0, [R3, #0]
                             }
                             crate::ir::IRType::I16 => {
-                                code.extend_from_slice(&encode_ldrsb_imm(
+                                code.extend_from_slice(&encode_ldrsh_imm(
                                     Condition::Al, true, true, false,
                                     Gpr::R3.encoding(), Gpr::R0.encoding(), 0,
-                                )); // LDRSB R0, [R3, #0]
+                                )); // LDRSH R0, [R3, #0]
                             }
                             crate::ir::IRType::U16 => {
                                 code.extend_from_slice(&encode_ls_half_imm(
@@ -4330,7 +4342,12 @@ impl Backend for Arm32Backend {
                         let mut code = Vec::new();
                         let num_args = args.len();
                         let num_stack_args = if num_args > 4 { num_args - 4 } else { 0 };
-                        let stack_args_bytes = num_stack_args * 4;
+                        // AAPCS requires the stack to remain 8-byte aligned at
+                        // a public function boundary. If an odd number of stack
+                        // args is passed, pad the allocation up to the next
+                        // 8-byte boundary; the cleanup below uses the same
+                        // padded size.
+                        let stack_args_bytes = (num_stack_args * 4 + 7) & !7;
 
                         // ── AAPCS: args 5+ go on the stack ──
                         // 1. Decrement SP to make room for stack-passed arguments
