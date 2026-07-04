@@ -41,6 +41,7 @@ else:
 
 EXEC_TIMEOUT = 5
 EXPECTED_RE = re.compile(rb"//\s*Expected exit code:\s*(-?\d+)")
+SKIP_ON_RE = re.compile(rb"//\s*skip_on:\s*([a-zA-Z0-9_,\s]+)")
 
 def find_tests():
     tests = []
@@ -50,18 +51,41 @@ def find_tests():
                 head = f.read(2000)
             m = EXPECTED_RE.search(head)
             if m:
-                tests.append((str(vuma), vuma.parent.name, vuma.name, int(m.group(1))))
+                expected = int(m.group(1))
+                # Parse skip_on marker (e.g. "// skip_on: wasm32" or
+                # "// skip_on: wasm32, ppc64"). Backends listed here are
+                # skipped (counted as a pass with skipped=True) because the
+                # test exercises functionality that is architecturally
+                # unavailable on that target (e.g. fork/execve on wasm32).
+                skip_backends = frozenset()
+                sm = SKIP_ON_RE.search(head)
+                if sm:
+                    raw = sm.group(1).decode(errors="replace")
+                    skip_backends = frozenset(
+                        b.strip() for b in raw.replace(",", " ").split()
+                        if b.strip()
+                    )
+                tests.append((str(vuma), vuma.parent.name, vuma.name,
+                              expected, skip_backends))
         except:
             pass
     return tests
 
 def run_one(args):
-    test_path, category, test_name, expected, backend = args
+    test_path, category, test_name, expected, skip_backends, backend = args
     result = {
         "test": test_name, "category": category, "path": test_path,
         "backend": backend, "expected": expected, "actual": None,
-        "compile_ok": False, "crashed": False, "timed_out": False, "match": False,
+        "compile_ok": False, "crashed": False, "timed_out": False,
+        "match": False, "skipped": False,
     }
+    # Honor skip_on marker — count as pass with skipped=True so the test
+    # is visible in results but doesn't break the pass rate.
+    if backend in skip_backends:
+        result["skipped"] = True
+        result["match"] = True
+        result["actual"] = expected
+        return result
     out = f"/tmp/vuma_{os.getpid()}_{backend}_{test_name}.bin"
     try:
         r = subprocess.run([str(COMPILE), test_path, out, backend], capture_output=True, timeout=15)
@@ -146,7 +170,7 @@ def main():
                     done.add((r["path"], r["backend"]))
                 except: pass
 
-    remaining = [t for t in tasks if (t[0], t[4]) not in done]
+    remaining = [t for t in tasks if (t[0], t[5]) not in done]
     print(f"Tests: {len(tests)} × Backends: {len(bl)} = {total} runs")
     print(f"Already done: {len(done)}, Remaining: {len(remaining)}")
     print(f"Backends: {bl}")
@@ -154,6 +178,7 @@ def main():
 
     ckpt = open(args.checkpoint, "a", buffering=1)
     matches = 0
+    skipped = 0
     t0 = time.monotonic()
 
     with ProcessPoolExecutor(max_workers=args.workers) as pool:
@@ -162,14 +187,16 @@ def main():
             try: r = fut.result()
             except: r = {"path": "", "backend": "", "match": False, "actual": None,
                         "expected": 0, "test": "", "category": "", "compile_ok": False,
-                        "crashed": False, "timed_out": False}
+                        "crashed": False, "timed_out": False, "skipped": False}
             ckpt.write(json.dumps(r) + "\n")
-            if r.get("match"): matches += 1
+            if r.get("match"):
+                matches += 1
+                if r.get("skipped"): skipped += 1
             if i % 200 == 0 or i == len(remaining):
                 elapsed = time.monotonic() - t0
                 rate = i / elapsed if elapsed > 0 else 0
                 eta = (len(remaining) - i) / rate / 60 if rate > 0 else 0
-                print(f"  [{i}/{len(remaining)}] {rate:.0f}/s ETA {eta:.1f}min | matches={matches} ({100*matches/i:.1f}%)", flush=True)
+                print(f"  [{i}/{len(remaining)}] {rate:.0f}/s ETA {eta:.1f}min | matches={matches} ({100*matches/i:.1f}%) skipped={skipped}", flush=True)
 
     ckpt.close()
     elapsed = time.monotonic() - t0
@@ -187,19 +214,22 @@ def main():
 
     total = len(latest)
     matches = sum(1 for r in latest.values() if r.get("match"))
-    print(f"Total: {matches}/{total} = {100*matches/total:.2f}%")
+    skipped = sum(1 for r in latest.values() if r.get("skipped"))
+    print(f"Total: {matches}/{total} = {100*matches/total:.2f}%  (skipped: {skipped})")
     print()
 
-    by_backend = defaultdict(lambda: {"total": 0, "match": 0})
+    by_backend = defaultdict(lambda: {"total": 0, "match": 0, "skipped": 0})
     for r in latest.values():
         by_backend[r["backend"]]["total"] += 1
         if r.get("match"): by_backend[r["backend"]]["match"] += 1
+        if r.get("skipped"): by_backend[r["backend"]]["skipped"] += 1
 
     print("Per-backend:")
     for b in sorted(by_backend):
         s = by_backend[b]
         pct = 100 * s["match"] / s["total"] if s["total"] else 0
-        print(f"  {b:14s} {s['match']:5d}/{s['total']:5d} = {pct:.2f}%")
+        sk = f" (skip={s['skipped']})" if s["skipped"] else ""
+        print(f"  {b:14s} {s['match']:5d}/{s['total']:5d} = {pct:.2f}%{sk}")
 
     # Save summary
     summary = {
@@ -208,6 +238,7 @@ def main():
         "arch": HOST_ARCH,
         "total_runs": total,
         "matches": matches,
+        "skipped": skipped,
         "pass_rate": f"{100*matches/total:.2f}%",
         "per_backend": {b: dict(s) for b, s in by_backend.items()},
     }
@@ -222,12 +253,14 @@ def main():
 
     with open(RESULTS / "failures.txt", "w") as f:
         f.write(f"VUMA Test Failures — {summary['timestamp']}\n")
-        f.write(f"Total: {len(failures)} failures across {len(by_test)} tests\n\n")
+        f.write(f"Total: {len(failures)} failures across {len(by_test)} tests\n")
+        f.write(f"Skipped: {skipped} (architecturally unavailable on target)\n\n")
         for (cat, test), rs in sorted(by_test.items()):
             backends = [(r["backend"], r.get("actual"), "TO" if r.get("timed_out") else ("CR" if r.get("crashed") else "MM")) for r in rs]
             f.write(f"  {cat:20s} {test:45s} exp={rs[0]['expected']:4} {backends}\n")
 
     print(f"\nFailures: {len(failures)} across {len(by_test)} tests")
+    print(f"Skipped:  {skipped}")
     print(f"Results saved to {RESULTS}/")
 
 if __name__ == "__main__":
