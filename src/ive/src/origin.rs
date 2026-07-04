@@ -328,9 +328,19 @@ impl Derivation {
         }
     }
 
-    /// Returns `true` if the provenance range is well-formed (lo < hi).
+    /// Returns `true` if the provenance range is well-formed (lo <= hi).
+    ///
+    /// A zero-size range `[addr, addr)` is well-formed — it represents
+    /// a pointer to a single address with no accessible bytes. This
+    /// occurs naturally for:
+    /// - Allocations with `size: 0` (e.g., `allocate(0)` or typeless
+    ///   allocations where the parser couldn't infer a size).
+    /// - Derivations that don't extend the accessible range (e.g.,
+    ///   casting a pointer without adding an offset).
+    ///
+    /// Only `lo > hi` (an inverted/empty range) is ill-formed.
     pub fn is_within_bounds(&self) -> bool {
-        self.proven_range.0 < self.proven_range.1
+        self.proven_range.0 <= self.proven_range.1
     }
 }
 
