@@ -304,8 +304,33 @@ pub fn encode_mov_reg_reg(dst: Gpr, src: Gpr) -> Vec<u8> {
 }
 
 /// Encode MOV r32, imm32 (B8+rd + 4-byte imm) — 32-bit immediate load.
-/// For x86_32, this replaces the 64-bit MOV r64, imm64.
+///
+/// # Limitation on x86_32
+///
+/// x86_32 general-purpose registers are 32 bits wide, so a 64-bit
+/// immediate *cannot* be loaded into a single register in one
+/// instruction.  This encoder therefore emits the 5-byte `MOV r32, imm32`
+/// form (`B8+rd + imm32`) and loads only the **low 32 bits** of `imm`.
+///
+/// The **high 32 bits are silently discarded**.  Callers that need the
+/// full 64-bit value must arrange for the high word to be stored
+/// separately (e.g. via `store_vreg_hi`, which writes the high 4 bytes
+/// of a stack slot directly).  When `imm > 0xFFFF_FFFF` we emit a
+/// `log::warn!` so the truncation is visible in debug builds.
+///
+/// This function is named `encode_mov_reg_imm64` for API parity with
+/// the x86_64 backend; on x86_32 it is effectively a 32-bit immediate
+/// load.
 pub fn encode_mov_reg_imm64(dst: Gpr, imm: u64) -> Vec<u8> {
+    if imm > 0xFFFF_FFFF {
+        log::warn!(
+            "encode_mov_reg_imm64: truncating 64-bit immediate {:#x} to low 32 bits \
+             ({:#x}) — x86_32 registers cannot hold 64-bit values; \
+             the high 32 bits are lost",
+            imm,
+            imm as u32,
+        );
+    }
     let mut code = Vec::with_capacity(5);
     // No REX prefix for 32-bit. Use B8+rd opcode with 4-byte immediate.
     code.push(0xB8 + (dst.encoding() & 7));
@@ -2894,27 +2919,49 @@ impl Backend for X86_32Backend {
     }
 
     fn encode_program(&self, program: &AllocatedProgram) -> Result<Vec<u8>, BackendError> {
-        // Build the _start stub:
-        //   mov rdi, [rsp]          ; argc = *RSP       (4 bytes with SIB)
-        //   lea rsi, [rsp + 8]      ; argv = RSP + 8    (5 bytes with SIB)
-        //   E8 <rel32 to main>      ; call main         (5 bytes)
-        //   48 89 C7                ; mov rdi, rax      (3 bytes)
-        //   48 C7 C0 3C 00 00 00   ; mov rax, 60       (7 bytes)
-        //   0F 05                   ; syscall            (2 bytes)
-        // Total = 4 + 5 + 5 + 3 + 7 + 2 = 26 bytes
+        // Build the _start stub (i386 Linux process entry):
         //
-        // On Linux x86_32, the process entry stack layout is:
-        //   [RSP]     = argc (8 bytes)
-        //   [RSP+8]   = argv[0] pointer
-        //   [RSP+16]  = argv[1] pointer
+        //   8B 04 24                mov eax, [esp]      ; argc       (3 bytes)
+        //   8D 4C 24 04             lea ecx, [esp+4]    ; argv       (4 bytes)
+        //   51                      push ecx            ; push argv  (1 byte)
+        //   50                      push eax            ; push argc  (1 byte)
+        //   E8 <rel32 to main>      call main           (5 bytes)
+        //   83 C4 08                add esp, 8          ; clean up   (3 bytes)
+        //   89 C3                   mov ebx, eax        ; exit code  (2 bytes)
+        //   B8 01 00 00 00          mov eax, 1          ; sys_exit   (5 bytes)
+        //   CD 80                   int 0x80            ; syscall    (2 bytes)
+        //
+        // Total = 3 + 4 + 1 + 1 + 5 + 3 + 2 + 5 + 2 = 26 bytes
+        //
+        // On Linux x86_32, the kernel sets up the process entry stack as:
+        //   [ESP]     = argc   (4 bytes, NOT 8 like x86_64!)
+        //   [ESP+4]   = argv[0] pointer
+        //   [ESP+8]   = argv[1] pointer
         //   ...
         //   NULL
         //   envp[0], envp[1], ..., NULL
         //   auxv...
+        //
+        // main(argc, argv) is called via the cdecl ABI: args pushed
+        // right-to-left (argv first, then argc), so that at function
+        // entry — after CALL pushes the return address — [ESP+4] = argc
+        // and [ESP+8] = argv, matching what main's prologue expects.
 
-        // _start stub: call(5) + mov(2) + mov(6) + int(2) = 15 bytes
-        // Note: encode_mov_reg_imm32 uses C7 /0 form (6 bytes, not 5)
-        let start_stub_size: usize = 15;
+        // _start stub layout (byte offsets):
+        //   0..3   : mov eax, [esp]        (3 bytes)
+        //   3..7   : lea ecx, [esp+4]      (4 bytes)
+        //   7..8   : push ecx              (1 byte)
+        //   8..9   : push eax              (1 byte)
+        //   9..14  : call main             (5 bytes; E8 at offset 9, rel32 at 10..14)
+        //   14..17 : add esp, 8            (3 bytes)
+        //   17..19 : mov ebx, eax          (2 bytes)
+        //   19..24 : mov eax, 1            (5 bytes)
+        //   24..26 : int 0x80              (2 bytes)
+        let start_stub_size: usize = 26;
+        // The CALL instruction (E8) is at offset 9; its rel32 field starts
+        // at offset 10.  call_site = offset of the E8 byte = 9.
+        const CALL_SITE_OFFSET: usize = 9;
+        const REL32_PATCH_OFFSET: usize = CALL_SITE_OFFSET + 1;
 
         // Build runtime syscall stubs for common POSIX operations.
         // These are small functions that use the `syscall` instruction
@@ -2944,38 +2991,60 @@ impl Backend for X86_32Backend {
             current_offset += func_size;
         }
 
-        // Build _start stub — i386 Linux convention:
-        //   call main       ; EAX = return value
-        //   mov ebx, eax    ; EBX = exit code (arg1 for sys_exit)
-        //   mov eax, 1      ; EAX = sys_exit (1 on i386, NOT 60!)
-        //   int 0x80        ; syscall
+        // Build _start stub — i386 Linux process entry convention:
+        //
+        //   mov eax, [esp]      ; argc = top of stack at process entry
+        //   lea ecx, [esp+4]    ; argv = pointer to argv[0]
+        //   push ecx            ; push argv (cdecl arg 2, pushed first)
+        //   push eax            ; push argc (cdecl arg 1, pushed second)
+        //   call main           ; main(argc, argv); EAX = return value
+        //   add esp, 8          ; clean up the 2 pushed args
+        //   mov ebx, eax        ; EBX = exit code (arg1 for sys_exit)
+        //   mov eax, 1          ; EAX = sys_exit (1 on i386, NOT 60!)
+        //   int 0x80            ; syscall
         let mut start_stub = Vec::with_capacity(start_stub_size);
 
-        // call main (E8 + rel32 placeholder)
+        // mov eax, [esp] — argc (3 bytes: 8B 04 24)
+        start_stub.extend(encode_mov_reg_mem(Gpr::Rax, Gpr::Rsp, 0));
+
+        // lea ecx, [esp+4] — argv = &argv[0] (4 bytes: 8D 4C 24 04)
+        start_stub.extend(encode_lea_reg_mem(Gpr::Rcx, Gpr::Rsp, 4));
+
+        // push ecx — push argv (1 byte: 51)
+        start_stub.extend(encode_push(Gpr::Rcx));
+
+        // push eax — push argc (1 byte: 50)
+        start_stub.extend(encode_push(Gpr::Rax));
+
+        // call main (E8 + rel32 placeholder, 5 bytes)
         start_stub.extend(encode_call_rel32(0));
+
+        // add esp, 8 — clean up pushed argc/argv (3 bytes: 83 C4 08)
+        // Note: encode_add_reg_imm32 emits the 6-byte 81 /0 id form;
+        // we want the shorter 3-byte 83 /0 ib form for small immediates.
+        start_stub.extend_from_slice(&[0x83, 0xC4, 0x08]);
 
         // mov ebx, eax — move main's return value to EBX (exit code arg)
         start_stub.extend(encode_mov_reg_reg(Gpr::Rbx, Gpr::Rax));
 
-        // mov eax, 1 (sys_exit = 1 on i386)
-        start_stub.extend(encode_mov_reg_imm32(Gpr::Rax, 1));
+        // mov eax, 1 (sys_exit = 1 on i386; 5-byte B8+rd form)
+        start_stub.extend(encode_mov_reg_imm64(Gpr::Rax, 1));
 
         // int 0x80
         start_stub.extend(encode_syscall());
 
-        // Patch the call main rel32 offset in _start stub
-        // The call is at offset 0 (E8 + 4 bytes = 5 bytes total)
-        // rel32 is at offset 1 (after the E8 opcode byte)
+        // Patch the call main rel32 offset in _start stub.
+        // The E8 byte sits at CALL_SITE_OFFSET; the rel32 field starts at
+        // CALL_SITE_OFFSET + 1.  rel32 = target - (call_site + 5).
         let main_key = func_offsets.keys()
             .find(|k| *k == "main" || k.starts_with("fn_main"))
             .cloned();
         if let Some(ref key) = main_key {
             let main_offset = func_offsets[key];
-            let rel32_patch_offset = 1usize; // offset within start_stub
             // rel32 = target - (call_site + 5)
-            // call_site = offset of the E8 byte = 0
-            let rel32 = (main_offset as i64) - (0i64 + 5i64);
-            start_stub[rel32_patch_offset..rel32_patch_offset + 4]
+            // call_site = offset of the E8 byte within the _start stub.
+            let rel32 = (main_offset as i64) - (CALL_SITE_OFFSET as i64 + 5i64);
+            start_stub[REL32_PATCH_OFFSET..REL32_PATCH_OFFSET + 4]
                 .copy_from_slice(&(rel32 as i32).to_le_bytes());
         }
 
@@ -3247,157 +3316,184 @@ mod tests {
 
     #[test]
     fn test_mov_rax_rcx() {
-        // MOV RCX, RAX => REX.W + 89 /r with src=RAX, dst=RCX
+        // MOV ECX, EAX => 89 /r with src=EAX, dst=ECX (no REX on x86_32)
         let code = encode_mov_reg_reg(Gpr::Rcx, Gpr::Rax);
-        assert_eq!(code, vec![0x48, 0x89, 0xC1]);
+        assert_eq!(code, vec![0x89, 0xC1]);
     }
 
     #[test]
     fn test_mov_rax_r8() {
-        // MOV R8, RAX => REX.WB + 89 /r (src=RAX in reg field, dst=R8 in rm field with REX.B)
+        // On x86_32, R8 is a source-compat alias for the encoding of
+        // EAX (encoding() & 7 == 0); there is no REX.B.  MOV "R8", EAX
+        // therefore emits the same bytes as MOV EAX, EAX: 89 /r mod=3.
         let code = encode_mov_reg_reg(Gpr::R8, Gpr::Rax);
-        assert_eq!(code, vec![0x49, 0x89, 0xC0]);
+        assert_eq!(code, vec![0x89, 0xC0]);
     }
 
     #[test]
     fn test_mov_r9_r15() {
-        // MOV R15, R9 => REX.WRB + 89 /r
+        // On x86_32, R9/R15 alias to ECX/EDI (encoding() & 7 == 1/7).
+        // MOV "R15", "R9" emits 89 /r mod=3, reg=1, rm=7 (no REX).
         let code = encode_mov_reg_reg(Gpr::R15, Gpr::R9);
-        assert_eq!(code, vec![0x4D, 0x89, 0xCF]);
+        assert_eq!(code, vec![0x89, 0xCF]);
     }
 
     // ── MOV Reg-Imm64 Tests ────────────────────────────────────────────
 
     #[test]
     fn test_mov_rax_imm64() {
-        let code = encode_mov_reg_imm64(Gpr::Rax, 0xDEADBEEFCAFE0000);
-        assert_eq!(code[0], 0x48); // REX.W
-        assert_eq!(code[1], 0xB8); // MOV RAX, imm64
-        assert_eq!(&code[2..10], 0xDEADBEEFCAFE0000u64.to_le_bytes());
+        // x86_32 cannot hold a 64-bit immediate in a single register;
+        // encode_mov_reg_imm64 loads only the low 32 bits via
+        // `MOV r32, imm32` (B8+rd + imm32, 5 bytes, no REX).
+        let imm: u64 = 0xDEADBEEFCAFE0000;
+        let code = encode_mov_reg_imm64(Gpr::Rax, imm);
+        assert_eq!(code.len(), 5);
+        assert_eq!(code[0], 0xB8); // MOV EAX, imm32
+        assert_eq!(&code[1..5], (imm as u32).to_le_bytes());
     }
 
     #[test]
     fn test_mov_r8_imm64() {
+        // x86_32: R8 aliases to EAX (encoding() & 7 == 0).  MOV "R8",
+        // imm32 emits B8 + imm32 (5 bytes, no REX).
         let code = encode_mov_reg_imm64(Gpr::R8, 0x1234);
-        assert_eq!(code[0], 0x49); // REX.WB
-        assert_eq!(code[1], 0xB8); // MOV R8, imm64
+        assert_eq!(code.len(), 5);
+        assert_eq!(code[0], 0xB8); // MOV EAX, imm32 (R8 & 7 == 0)
+        assert_eq!(&code[1..5], 0x1234u32.to_le_bytes());
     }
 
     // ── MOV Reg-Imm32 Tests ────────────────────────────────────────────
 
     #[test]
     fn test_mov_rcx_imm32() {
+        // x86_32: MOV ECX, imm32 = C7 /0 + imm32 (no REX)
         let code = encode_mov_reg_imm32(Gpr::Rcx, 42);
-        assert_eq!(code, vec![0x48, 0xC7, 0xC1, 0x2A, 0x00, 0x00, 0x00]);
+        assert_eq!(code, vec![0xC7, 0xC1, 0x2A, 0x00, 0x00, 0x00]);
     }
 
     // ── ADD/SUB Tests ──────────────────────────────────────────────────
 
     #[test]
     fn test_add_rax_rcx() {
+        // ADD EAX, ECX = 01 /r (no REX on x86_32)
         let code = encode_add_reg_reg(Gpr::Rax, Gpr::Rcx);
-        assert_eq!(code, vec![0x48, 0x01, 0xC8]);
+        assert_eq!(code, vec![0x01, 0xC8]);
     }
 
     #[test]
     fn test_sub_rdx_rsi() {
+        // SUB EDX, ESI = 29 /r (no REX on x86_32)
         let code = encode_sub_reg_reg(Gpr::Rdx, Gpr::Rsi);
-        assert_eq!(code, vec![0x48, 0x29, 0xF2]);
+        assert_eq!(code, vec![0x29, 0xF2]);
     }
 
     #[test]
     fn test_add_r8_r9() {
+        // x86_32: R8/R9 alias to EAX/ECX.  ADD "R8", "R9" emits
+        // 01 /r mod=3, reg=1, rm=0 (no REX).
         let code = encode_add_reg_reg(Gpr::R8, Gpr::R9);
-        assert_eq!(code, vec![0x4D, 0x01, 0xC8]);
+        assert_eq!(code, vec![0x01, 0xC8]);
     }
 
     // ── IMUL Tests ─────────────────────────────────────────────────────
 
     #[test]
     fn test_imul_rax_rcx() {
+        // IMUL EAX, ECX = 0F AF /r (no REX on x86_32)
         let code = encode_imul_reg_reg(Gpr::Rax, Gpr::Rcx);
-        assert_eq!(code, vec![0x48, 0x0F, 0xAF, 0xC1]);
+        assert_eq!(code, vec![0x0F, 0xAF, 0xC1]);
     }
 
     #[test]
     fn test_imul_r8_r15() {
+        // x86_32: R8/R15 alias to EAX/EDI.  IMUL "R8", "R15" emits
+        // 0F AF /r mod=3, reg=0, rm=7 (no REX).
         let code = encode_imul_reg_reg(Gpr::R8, Gpr::R15);
-        assert_eq!(code, vec![0x4D, 0x0F, 0xAF, 0xC7]);
+        assert_eq!(code, vec![0x0F, 0xAF, 0xC7]);
     }
 
     // ── IDIV Test ──────────────────────────────────────────────────────
 
     #[test]
     fn test_idiv_rcx() {
+        // IDIV ECX = F7 /7 (no REX on x86_32)
         let code = encode_idiv_reg(Gpr::Rcx);
-        assert_eq!(code, vec![0x48, 0xF7, 0xF9]);
+        assert_eq!(code, vec![0xF7, 0xF9]);
     }
 
     // ── CMP Tests ──────────────────────────────────────────────────────
 
     #[test]
     fn test_cmp_rax_rcx() {
+        // CMP EAX, ECX = 39 /r (no REX on x86_32)
         let code = encode_cmp_reg_reg(Gpr::Rax, Gpr::Rcx);
-        assert_eq!(code, vec![0x48, 0x39, 0xC8]);
+        assert_eq!(code, vec![0x39, 0xC8]);
     }
 
     #[test]
     fn test_cmp_reg_imm32() {
+        // x86_32: CMP EAX, imm8 uses the short 83 /7 ib form when the
+        // immediate fits in a signed byte (100 does).  No REX prefix.
         let code = encode_cmp_reg_imm32(Gpr::Rax, 100);
-        assert_eq!(code[0], 0x48); // REX.W
-        assert_eq!(code[1], 0x81); // CMP r/m64, imm32
-        assert_eq!(code[2], 0xF8); // mod=3, reg=7(/7), rm=RAX(0)
-        let imm = i32::from_le_bytes([code[3], code[4], code[5], code[6]]);
-        assert_eq!(imm, 100);
+        assert_eq!(code[0], 0x83); // CMP r/m32, imm8
+        assert_eq!(code[1], 0xF8); // mod=3, reg=7(/7), rm=EAX(0)
+        assert_eq!(code[2], 100);  // imm8 = 100
+        assert_eq!(code.len(), 3);
     }
 
     // ── TEST Test ──────────────────────────────────────────────────────
 
     #[test]
     fn test_test_rax_rax() {
+        // TEST EAX, EAX = 85 /r (no REX on x86_32)
         let code = encode_test_reg_reg(Gpr::Rax, Gpr::Rax);
-        assert_eq!(code, vec![0x48, 0x85, 0xC0]);
+        assert_eq!(code, vec![0x85, 0xC0]);
     }
 
     // ── AND/OR/XOR Tests ──────────────────────────────────────────────
 
     #[test]
     fn test_and_rax_rcx() {
+        // AND EAX, ECX = 21 /r (no REX on x86_32)
         let code = encode_and_reg_reg(Gpr::Rax, Gpr::Rcx);
-        assert_eq!(code, vec![0x48, 0x21, 0xC8]);
+        assert_eq!(code, vec![0x21, 0xC8]);
     }
 
     #[test]
     fn test_or_rdx_rsi() {
+        // OR EDX, ESI = 09 /r (no REX on x86_32)
         let code = encode_or_reg_reg(Gpr::Rdx, Gpr::Rsi);
-        assert_eq!(code, vec![0x48, 0x09, 0xF2]);
+        assert_eq!(code, vec![0x09, 0xF2]);
     }
 
     #[test]
     fn test_xor_rax_rax() {
+        // XOR EAX, EAX = 31 /r (no REX on x86_32)
         let code = encode_xor_reg_reg(Gpr::Rax, Gpr::Rax);
-        assert_eq!(code, vec![0x48, 0x31, 0xC0]);
+        assert_eq!(code, vec![0x31, 0xC0]);
     }
 
     // ── Shift Tests ────────────────────────────────────────────────────
 
     #[test]
     fn test_shl_cl() {
+        // SHL EAX, CL = D3 /4 (no REX on x86_32)
         let code = encode_shl_reg_cl(Gpr::Rax);
-        assert_eq!(code, vec![0x48, 0xD3, 0xE0]);
+        assert_eq!(code, vec![0xD3, 0xE0]);
     }
 
     #[test]
     fn test_shr_cl() {
-        // SHR RCX, CL => REX.W + D3 /5 + ModRM(3,5,1) = 0xE9
+        // SHR ECX, CL => D3 /5 + ModRM(3,5,1) = 0xE9 (no REX)
         let code = encode_shr_reg_cl(Gpr::Rcx);
-        assert_eq!(code, vec![0x48, 0xD3, 0xE9]);
+        assert_eq!(code, vec![0xD3, 0xE9]);
     }
 
     #[test]
     fn test_sar_cl() {
+        // SAR EDX, CL = D3 /7 (no REX on x86_32)
         let code = encode_sar_reg_cl(Gpr::Rdx);
-        assert_eq!(code, vec![0x48, 0xD3, 0xFA]);
+        assert_eq!(code, vec![0xD3, 0xFA]);
     }
 
     // ── JMP/CALL/RET Tests ─────────────────────────────────────────────
@@ -3437,7 +3533,9 @@ mod tests {
 
     #[test]
     fn test_push_r8() {
-        assert_eq!(encode_push(Gpr::R8), vec![0x41, 0x50]);
+        // x86_32: R8 aliases to EAX (encoding() & 7 == 0); no REX.B.
+        // PUSH "R8" therefore emits the same byte as PUSH EAX: 0x50.
+        assert_eq!(encode_push(Gpr::R8), vec![0x50]);
     }
 
     #[test]
@@ -3447,7 +3545,9 @@ mod tests {
 
     #[test]
     fn test_pop_r15() {
-        assert_eq!(encode_pop(Gpr::R15), vec![0x41, 0x5F]);
+        // x86_32: R15 aliases to EDI (encoding() & 7 == 7); no REX.B.
+        // POP "R15" therefore emits the same byte as POP EDI: 0x5F.
+        assert_eq!(encode_pop(Gpr::R15), vec![0x5F]);
     }
 
     // ── SETcc Tests ────────────────────────────────────────────────────
@@ -3460,8 +3560,10 @@ mod tests {
 
     #[test]
     fn test_setl_r8b() {
+        // x86_32: R8 aliases to EAX (encoding() & 7 == 0); no REX.B.
+        // SETL "R8b" therefore emits 0F 9C /0 with rm=0 (same as SETL AL).
         let code = encode_setcc(Cc::Less, Gpr::R8);
-        assert_eq!(code, vec![0x41, 0x0F, 0x9C, 0xC0]);
+        assert_eq!(code, vec![0x0F, 0x9C, 0xC0]);
     }
 
     // ── Jcc Tests ──────────────────────────────────────────────────────
@@ -3486,51 +3588,59 @@ mod tests {
 
     #[test]
     fn test_cmove_rax_rcx() {
+        // CMOVE EAX, ECX = 0F 44 /r (no REX on x86_32)
         let code = encode_cmovcc_reg_reg(Cc::Equal, Gpr::Rax, Gpr::Rcx);
-        assert_eq!(code, vec![0x48, 0x0F, 0x44, 0xC1]);
+        assert_eq!(code, vec![0x0F, 0x44, 0xC1]);
     }
 
     // ── LEA Tests ──────────────────────────────────────────────────────
 
     #[test]
     fn test_lea_rax_rbp_offset8() {
+        // LEA EAX, [EBP+8] = 8D /r + disp8 (no REX on x86_32)
         let code = encode_lea_reg_mem(Gpr::Rax, Gpr::Rbp, 8);
-        assert_eq!(code, vec![0x48, 0x8D, 0x45, 0x08]);
+        assert_eq!(code, vec![0x8D, 0x45, 0x08]);
     }
 
     #[test]
     fn test_lea_rax_rsp_offset0() {
-        // RSP as base requires SIB byte
+        // ESP as base requires SIB byte (no REX on x86_32)
         let code = encode_lea_reg_mem(Gpr::Rax, Gpr::Rsp, 0);
-        assert_eq!(code, vec![0x48, 0x8D, 0x04, 0x24]);
+        assert_eq!(code, vec![0x8D, 0x04, 0x24]);
     }
 
     // ── MOVZX/MOVSX Tests ──────────────────────────────────────────────
 
     #[test]
     fn test_movzx_reg8() {
+        // MOVZX EAX, CL = 0F B6 /r (no REX on x86_32)
         let code = encode_movzx_reg8(Gpr::Rax, Gpr::Rcx);
-        assert_eq!(code, vec![0x48, 0x0F, 0xB6, 0xC1]);
+        assert_eq!(code, vec![0x0F, 0xB6, 0xC1]);
     }
 
     #[test]
     fn test_movsx_reg8() {
+        // MOVSX EAX, CL = 0F BE /r (no REX on x86_32)
         let code = encode_movsx_reg8(Gpr::Rax, Gpr::Rcx);
-        assert_eq!(code, vec![0x48, 0x0F, 0xBE, 0xC1]);
+        assert_eq!(code, vec![0x0F, 0xBE, 0xC1]);
     }
 
     #[test]
     fn test_movsxd() {
+        // x86_32 has no MOVSXD (32-bit registers are already 32-bit);
+        // encode_movsxd lowers to a plain MOV r32, r32 (89 /r, no REX).
+        // encode_mov_reg_reg(dst, src) emits 89 /r with reg=src, rm=dst.
         let code = encode_movsxd(Gpr::Rax, Gpr::Rcx);
-        assert_eq!(code, vec![0x48, 0x63, 0xC1]);
+        assert_eq!(code, vec![0x89, 0xC8]); // 89 /r mod=3, reg=ECX(1), rm=EAX(0)
     }
 
     // ── XCHG Test ──────────────────────────────────────────────────────
 
     #[test]
     fn test_xchg_rax_rcx() {
+        // XCHG EAX, ECX = 90+rd (1 byte, no REX on x86_32)
         let code = encode_xchg_rax_reg(Gpr::Rcx);
-        assert_eq!(code, vec![0x48, 0x91]);
+        assert_eq!(code, vec![0x91]);
     }
 
     // ── SYSCALL/INT3 Tests ─────────────────────────────────────────────
@@ -3565,17 +3675,28 @@ mod tests {
 
     #[test]
     fn test_gpr_callee_saved() {
+        // i386 SysV ABI: EBX, ESI, EDI, EBP are callee-saved.
+        // (R12-R15 don't exist on x86_32; they're kept in the enum for
+        // source compatibility only and are NOT callee-saved here.)
         assert!(Gpr::Rbx.is_callee_saved());
         assert!(Gpr::Rbp.is_callee_saved());
-        assert!(Gpr::R12.is_callee_saved());
+        assert!(Gpr::Rsi.is_callee_saved());
+        assert!(Gpr::Rdi.is_callee_saved());
         assert!(!Gpr::Rax.is_callee_saved());
-        assert!(!Gpr::Rdi.is_callee_saved());
+        assert!(!Gpr::Rcx.is_callee_saved());
+        assert!(!Gpr::Rdx.is_callee_saved());
+        assert!(!Gpr::R12.is_callee_saved());
     }
 
     #[test]
     fn test_gpr_arg_regs() {
-        assert!(Gpr::Rdi.is_arg_reg());
-        assert!(Gpr::R9.is_arg_reg());
+        // i386 SysV ABI passes all integer args on the stack; there are
+        // no integer argument registers.  (The codegen does use a
+        // fastcall-style EDI/ESI/EDX/ECX convention internally for the
+        // first 4 args, but `is_arg_reg()` reflects the documented ABI
+        // and returns false for every register.)
+        assert!(!Gpr::Rdi.is_arg_reg());
+        assert!(!Gpr::R9.is_arg_reg());
         assert!(!Gpr::Rax.is_arg_reg());
         assert!(!Gpr::R10.is_arg_reg());
     }
@@ -3588,8 +3709,9 @@ mod tests {
 
     #[test]
     fn test_gpr_arg_register() {
-        assert_eq!(Gpr::arg_register(0), Some(Gpr::Rdi));
-        assert_eq!(Gpr::arg_register(5), Some(Gpr::R9));
+        // i386 SysV ABI: no integer argument registers — always None.
+        assert_eq!(Gpr::arg_register(0), None);
+        assert_eq!(Gpr::arg_register(5), None);
         assert_eq!(Gpr::arg_register(6), None);
     }
 
@@ -3608,12 +3730,13 @@ mod tests {
     #[test]
     fn test_trampoline() {
         let backend = X86_32Backend::new();
-        let tramp = backend.trampoline(0x7FFFF7000000);
-        // mov rax, imm64; jmp rax
-        assert_eq!(tramp[0], 0x48); // REX.W
-        assert_eq!(tramp[1], 0xB8); // MOV RAX, imm64
-        assert_eq!(&tramp[2..10], 0x7FFFF7000000u64.to_le_bytes());
-        assert_eq!(&tramp[10..12], &[0xFF, 0xE0]); // JMP RAX
+        let target: u64 = 0x7FFFF7000000;
+        let tramp = backend.trampoline(target);
+        // x86_32 trampoline: MOV EAX, imm32 (low 32 bits, no REX) + JMP EAX.
+        // The high 32 bits of the 64-bit target are lost on x86_32.
+        assert_eq!(tramp[0], 0xB8); // MOV EAX, imm32
+        assert_eq!(&tramp[1..5], (target as u32).to_le_bytes());
+        assert_eq!(&tramp[5..7], &[0xFF, 0xE0]); // JMP EAX
     }
 
     // ── ELF Header Validation Test ─────────────────────────────────────
@@ -3684,8 +3807,11 @@ mod tests {
         let backend: Box<dyn Backend> = Box::new(X86_32Backend::new());
         assert_eq!(backend.name(), "x86_32");
         assert_eq!(backend.target_info().isa_name(), "x86_32");
-        assert_eq!(backend.target_info().elf_machine_type(), 62);
-        assert_eq!(backend.target_info().calling_convention_name(), "systemv");
+        // EM_386 (3), NOT EM_X86_64 (62) — x86_32 produces ELF32 i386 objects.
+        assert_eq!(backend.target_info().elf_machine_type(), 3);
+        // i386 SysV uses the cdecl calling convention (args on stack),
+        // not the SystemV AMD64 register-arg convention.
+        assert_eq!(backend.target_info().calling_convention_name(), "cdecl");
     }
 
     // ── Backend TargetInfo Consistency Test ─────────────────────────────
@@ -3694,83 +3820,94 @@ mod tests {
     fn test_target_info_consistency() {
         let backend = X86_32Backend::new();
         let info = backend.target_info();
-        assert_eq!(info.pointer_width(), 8);
-        assert_eq!(info.num_gp_regs(), 16);
-        assert_eq!(info.num_simd_fp_regs(), 16);
+        // x86_32: 32-bit pointers, 8 GPRs (EAX–EDI), 8 XMM regs,
+        // no register-arg calling convention (i386 cdecl passes on stack).
+        assert_eq!(info.pointer_width(), 4);
+        assert_eq!(info.num_gp_regs(), 8);
+        assert_eq!(info.num_simd_fp_regs(), 8);
         assert!(!info.has_hardwired_zero());
         assert!(!info.has_link_register());
         assert_eq!(info.stack_alignment(), 16);
         assert_eq!(info.instruction_alignment(), 1);
         assert_eq!(info.instruction_width_range(), (1, 15));
-        assert_eq!(info.num_int_arg_regs(), 6);
-        assert_eq!(info.num_fp_arg_regs(), 8);
+        assert_eq!(info.num_int_arg_regs(), 0);
+        assert_eq!(info.num_fp_arg_regs(), 0);
     }
 
     // ── MOV [mem] Tests ────────────────────────────────────────────────
 
     #[test]
     fn test_mov_reg_mem_offset8() {
+        // MOV EAX, [EBX+8] = 8B /r + disp8 (no REX on x86_32)
         let code = encode_mov_reg_mem(Gpr::Rax, Gpr::Rbx, 8);
-        assert_eq!(code, vec![0x48, 0x8B, 0x43, 0x08]);
+        assert_eq!(code, vec![0x8B, 0x43, 0x08]);
     }
 
     #[test]
     fn test_mov_reg_mem_offset0_rbp() {
-        // RBP with offset 0 requires mod=01 with disp8=0
+        // EBP with offset 0 requires mod=01 with disp8=0 (no REX)
         let code = encode_mov_reg_mem(Gpr::Rax, Gpr::Rbp, 0);
-        assert_eq!(code, vec![0x48, 0x8B, 0x45, 0x00]);
+        assert_eq!(code, vec![0x8B, 0x45, 0x00]);
     }
 
     #[test]
     fn test_mov_reg_mem_rsp_sib() {
-        // RSP as base requires SIB byte
+        // ESP as base requires SIB byte (no REX on x86_32)
         let code = encode_mov_reg_mem(Gpr::Rax, Gpr::Rsp, 0);
-        assert_eq!(code, vec![0x48, 0x8B, 0x04, 0x24]);
+        assert_eq!(code, vec![0x8B, 0x04, 0x24]);
     }
 
     #[test]
     fn test_mov_mem_reg_offset8() {
+        // MOV [EBX+8], EAX = 89 /r + disp8 (no REX on x86_32)
         let code = encode_mov_mem_reg(Gpr::Rbx, 8, Gpr::Rax);
-        assert_eq!(code, vec![0x48, 0x89, 0x43, 0x08]);
+        assert_eq!(code, vec![0x89, 0x43, 0x08]);
     }
 
     // ── CQO Test ───────────────────────────────────────────────────────
 
     #[test]
     fn test_cqo() {
-        assert_eq!(encode_cqo(), vec![0x48, 0x99]);
+        // x86_32 uses CDQ (99) to sign-extend EAX into EDX:EAX.
+        // (CQO with REX.W prefix is the x86_64 64-bit variant.)
+        assert_eq!(encode_cqo(), vec![0x99]);
     }
 
     // ── NEG/NOT Tests ──────────────────────────────────────────────────
 
     #[test]
     fn test_neg_rax() {
+        // NEG EAX = F7 /3 (no REX on x86_32)
         let code = encode_neg_reg(Gpr::Rax);
-        assert_eq!(code, vec![0x48, 0xF7, 0xD8]);
+        assert_eq!(code, vec![0xF7, 0xD8]);
     }
 
     #[test]
     fn test_not_rcx() {
+        // NOT ECX = F7 /2 (no REX on x86_32)
         let code = encode_not_reg(Gpr::Rcx);
-        assert_eq!(code, vec![0x48, 0xF7, 0xD1]);
+        assert_eq!(code, vec![0xF7, 0xD1]);
     }
 
     // ── MOVZX r16 Test ─────────────────────────────────────────────────
 
     #[test]
     fn test_movzx_reg16() {
+        // MOVZX EAX, CX = 0F B7 /r (no REX on x86_32)
         let code = encode_movzx_reg16(Gpr::Rax, Gpr::Rcx);
-        assert_eq!(code, vec![0x48, 0x0F, 0xB7, 0xC1]);
+        assert_eq!(code, vec![0x0F, 0xB7, 0xC1]);
     }
 
     // ── ADD/SUB imm32 Tests ────────────────────────────────────────────
 
     #[test]
     fn test_sub_reg_imm32() {
+        // SUB ESP, 32 = 81 /5 + imm32 (no REX on x86_32; encode_sub_reg_imm32
+        // always uses the 81 /5 id form, never the 83 /5 ib short form).
         let code = encode_sub_reg_imm32(Gpr::Rsp, 32);
-        assert_eq!(code[0], 0x48); // REX.W
-        assert_eq!(code[1], 0x81); // SUB r/m64, imm32
-        assert_eq!(code[2], 0xEC); // mod=3, /5, rm=RSP(4)
+        assert_eq!(code[0], 0x81); // SUB r/m32, imm32
+        assert_eq!(code[1], 0xEC); // mod=3, /5, rm=ESP(4)
+        assert_eq!(code.len(), 6);
     }
 
     // ── Disassemble Test ───────────────────────────────────────────────
@@ -3789,14 +3926,17 @@ mod tests {
 
     #[test]
     fn test_movsx_reg16_rax_rcx() {
+        // MOVSX EAX, CX = 0F BF /r (no REX on x86_32)
         let code = encode_movsx_reg16(Gpr::Rax, Gpr::Rcx);
-        assert_eq!(code, vec![0x48, 0x0F, 0xBF, 0xC1]);
+        assert_eq!(code, vec![0x0F, 0xBF, 0xC1]);
     }
 
     #[test]
     fn test_movsx_reg16_r8_r9() {
+        // x86_32: R8/R9 alias to EAX/ECX.  MOVSX "R8", "R9" emits
+        // 0F BF /r mod=3, reg=0, rm=1 (no REX).
         let code = encode_movsx_reg16(Gpr::R8, Gpr::R9);
-        assert_eq!(code, vec![0x4D, 0x0F, 0xBF, 0xC1]);
+        assert_eq!(code, vec![0x0F, 0xBF, 0xC1]);
     }
 
     // ── ISel Tests (full allocate_registers pipeline) ──────────────────
@@ -3916,10 +4056,12 @@ mod tests {
             rhs: IRValue::Register(2),
             ty: None,
         });
-        // SDiv uses CQO (0x48 0x99) + IDIV (0xF7 /7)
+        // SDiv uses CDQ (0x99 on x86_32, no REX prefix) + IDIV (0xF7 /7).
+        // (On x86_64 this would be CQO = REX.W + 0x99 = 48 99; on x86_32
+        // it's just the single-byte CDQ = 0x99.)
         assert!(
-            code.windows(2).any(|w| w[0] == 0x48 && w[1] == 0x99),
-            "CQO not found for SDiv"
+            code.iter().any(|&b| b == 0x99),
+            "CDQ not found for SDiv"
         );
         assert!(
             code.iter().any(|&b| b == 0xF7),
@@ -3960,11 +4102,15 @@ mod tests {
             rhs: IRValue::Immediate(5),
             ty: None,
         });
-        // CMP r64, imm32 (0x81 /7)
-        let has_cmp_imm = code
-            .windows(2)
-            .any(|w| w[0] == 0x81 && (w[1] & 0xC0) == 0xC0 && (w[1] & 0x38) == 0x38);
-        assert!(has_cmp_imm, "CMP r64, imm32 not found");
+        // CMP r/m32, imm — x86_32 uses the short `83 /7 ib` form (3 bytes)
+        // when the immediate fits in a signed byte (5 does), or the long
+        // `81 /7 id` form (6 bytes) otherwise.  Accept either form.
+        let has_cmp_imm = code.windows(2).any(|w| {
+            (w[0] == 0x81 || w[0] == 0x83)
+                && (w[1] & 0xC0) == 0xC0
+                && (w[1] & 0x38) == 0x38
+        });
+        assert!(has_cmp_imm, "CMP r/m32, imm not found");
         // Should also have SETcc (0F 9x) and MOVZX (0F B6)
         assert!(
             code.windows(2)
@@ -3979,10 +4125,12 @@ mod tests {
             kind: CastKind::ZExt,
             dst: IRValue::Register(0),
             src: IRValue::Register(1),
-            from_ty: None,
+            from_ty: Some(IRType::U8),
             to_ty: None,
         });
-        // ZExt of a register uses MOVZX r8→r64 (0F B6)
+        // ZExt of a U8 register uses MOVZX r8→r32 (0F B6).
+        // (When from_ty is None, the isel skips the MOVZX; the test must
+        // supply a concrete source type to exercise the extension path.)
         assert!(
             code.windows(2).any(|w| w[0] == 0x0F && w[1] == 0xB6),
             "MOVZX r8 not found for ZExt"
@@ -3995,10 +4143,12 @@ mod tests {
             kind: CastKind::SExt,
             dst: IRValue::Register(0),
             src: IRValue::Register(1),
-            from_ty: None,
+            from_ty: Some(IRType::I8),
             to_ty: None,
         });
-        // SExt of a register uses MOVSX r8→r64 (0F BE)
+        // SExt of an I8 register uses MOVSX r8→r32 (0F BE).
+        // (When from_ty is None, the isel skips the MOVSX; the test must
+        // supply a concrete source type to exercise the extension path.)
         assert!(
             code.windows(2).any(|w| w[0] == 0x0F && w[1] == 0xBE),
             "MOVSX r8 not found for SExt"
@@ -4016,22 +4166,17 @@ mod tests {
         });
         // Select uses TEST + CMOVcc.
         //
-        // The stack-slot isel (src/codegen/src/x86_32/stack_slot_isel.rs:640)
-        // lowers Select as: load false_val->RAX, true_val->R10, cond->R11;
-        // `TEST R11, R11` then `CMOVNZ RAX, R10`.
+        // On x86_32 the stack-slot isel lowers Select as:
+        //   load false_val->EAX, true_val->scratch, cond->scratch;
+        //   `TEST r32, r32` then `CMOVNZ EAX, scratch`.
         //
-        // R11 is in the high register file (R8-R15), so its encoding requires
-        // REX.R and REX.B extensions on top of REX.W. The resulting REX prefix
-        // for `TEST R11, R11` is therefore 0x4D (REX.WRB), not 0x48 (REX.W
-        // only). The CMOVcc opcode byte (0x0F 0x45 for CMOVNZ) is unaffected.
-        //
-        // Accept any REX.W+TEST encoding (REX byte 0x48..=0x4F followed by the
-        // TEST r/m64, r64 opcode 0x85) so the assertion matches the actual
-        // isel output regardless of which scratch register holds `cond`.
+        // x86_32 emits no REX prefix (no R8-R15 registers, no 64-bit
+        // operand size), so the TEST opcode 0x85 appears as a bare byte
+        // rather than as `REX.W + 0x85`. The CMOVcc opcode (0x0F 0x4x) is
+        // unaffected by the absence of REX.
         assert!(
-            code.windows(2)
-                .any(|w| (w[0] >= 0x48 && w[0] <= 0x4F) && w[1] == 0x85),
-            "TEST (REX.W + 0x85) not found for Select"
+            code.iter().any(|&b| b == 0x85),
+            "TEST (0x85) not found for Select"
         );
         assert!(
             code.windows(2)

@@ -6611,8 +6611,8 @@ mod tests {
         // is not guaranteed by the topological sort — check by count, not
         // by position.
         assert_eq!(stores.len(), 2, "Expected exactly 2 Store instructions");
-        let u8_store_count = stores.iter().filter(|t| **t == IRType::U8).count();
-        let u64_store_count = stores.iter().filter(|t| **t == IRType::U64).count();
+        let u8_store_count = stores.iter().filter(|t| ***t == IRType::U8).count();
+        let u64_store_count = stores.iter().filter(|t| ***t == IRType::U64).count();
         assert_eq!(
             u8_store_count, 1,
             "Expected exactly 1 U8 store (`*buf2 = 42`, immediate fits in a byte). Found {}",
