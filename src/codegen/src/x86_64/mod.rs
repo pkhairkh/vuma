@@ -2483,6 +2483,201 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         stubs.push(("epoll_wait".to_string(), code));
     }
 
+    // ── Additional POSIX syscall stubs ─────────────────────────────
+    // These are simple "mov eax, #num; syscall; ret" stubs for syscalls
+    // where the SysV register convention matches the syscall convention
+    // (args in RDI, RSI, RDX, R10, R8, R9).
+
+    // lseek(fd, offset, whence) → off_t  [syscall 8]
+    {
+        let mut code = Vec::new();
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 8));
+        code.extend(encode_syscall());
+        code.extend(encode_ret());
+        stubs.push(("lseek".to_string(), code));
+    }
+
+    // stat(path, statbuf) → int  [syscall 4]
+    {
+        let mut code = Vec::new();
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 4));
+        code.extend(encode_syscall());
+        code.extend(encode_ret());
+        stubs.push(("stat".to_string(), code));
+    }
+
+    // fstat(fd, statbuf) → int  [syscall 5]
+    {
+        let mut code = Vec::new();
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 5));
+        code.extend(encode_syscall());
+        code.extend(encode_ret());
+        stubs.push(("fstat".to_string(), code));
+    }
+
+    // lstat(path, statbuf) → int  [syscall 6]
+    {
+        let mut code = Vec::new();
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 6));
+        code.extend(encode_syscall());
+        code.extend(encode_ret());
+        stubs.push(("lstat".to_string(), code));
+    }
+
+    // kill(pid, sig) → int  [syscall 62]
+    {
+        let mut code = Vec::new();
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 62));
+        code.extend(encode_syscall());
+        code.extend(encode_ret());
+        stubs.push(("kill".to_string(), code));
+    }
+
+    // getcwd(buf, size) → char*  [syscall 79]
+    {
+        let mut code = Vec::new();
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 79));
+        code.extend(encode_syscall());
+        code.extend(encode_ret());
+        stubs.push(("getcwd".to_string(), code));
+    }
+
+    // chdir(path) → int  [syscall 80]
+    {
+        let mut code = Vec::new();
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 80));
+        code.extend(encode_syscall());
+        code.extend(encode_ret());
+        stubs.push(("chdir".to_string(), code));
+    }
+
+    // ioctl(fd, request, ...) → int  [syscall 16]
+    {
+        let mut code = Vec::new();
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 16));
+        code.extend(encode_syscall());
+        code.extend(encode_ret());
+        stubs.push(("ioctl".to_string(), code));
+    }
+
+    // fcntl(fd, cmd, ...) → int  [syscall 72]
+    {
+        let mut code = Vec::new();
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 72));
+        code.extend(encode_syscall());
+        code.extend(encode_ret());
+        stubs.push(("fcntl".to_string(), code));
+    }
+
+    // recv(fd, buf, len, flags) → ssize_t  [syscall 45]
+    {
+        let mut code = Vec::new();
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 45));
+        code.extend(encode_syscall());
+        code.extend(encode_ret());
+        stubs.push(("recv".to_string(), code));
+    }
+
+    // send(fd, buf, len, flags) → ssize_t  [syscall 44]
+    {
+        let mut code = Vec::new();
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 44));
+        code.extend(encode_syscall());
+        code.extend(encode_ret());
+        stubs.push(("send".to_string(), code));
+    }
+
+    // recvfrom(fd, buf, len, flags, addr, addrlen) → ssize_t  [syscall 45]
+    // (recvfrom is syscall 45 on x86_64, same as recv but with addr params)
+    {
+        let mut code = Vec::new();
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 45));
+        code.extend(encode_syscall());
+        code.extend(encode_ret());
+        stubs.push(("recvfrom".to_string(), code));
+    }
+
+    // sendto(fd, buf, len, flags, addr, addrlen) → ssize_t  [syscall 44]
+    {
+        let mut code = Vec::new();
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 44));
+        code.extend(encode_syscall());
+        code.extend(encode_ret());
+        stubs.push(("sendto".to_string(), code));
+    }
+
+    // shutdown(fd, how) → int  [syscall 48]
+    {
+        let mut code = Vec::new();
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 48));
+        code.extend(encode_syscall());
+        code.extend(encode_ret());
+        stubs.push(("shutdown".to_string(), code));
+    }
+
+    // connect(fd, addr, addrlen) → int  [syscall 42]
+    {
+        let mut code = Vec::new();
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 42));
+        code.extend(encode_syscall());
+        code.extend(encode_ret());
+        stubs.push(("connect".to_string(), code));
+    }
+
+    // poll(fds, nfds, timeout) → int  [syscall 7]
+    {
+        let mut code = Vec::new();
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 7));
+        code.extend(encode_syscall());
+        code.extend(encode_ret());
+        stubs.push(("poll".to_string(), code));
+    }
+
+    // nanosleep(req, rem) → int  [syscall 35]
+    {
+        let mut code = Vec::new();
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 35));
+        code.extend(encode_syscall());
+        code.extend(encode_ret());
+        stubs.push(("nanosleep".to_string(), code));
+    }
+
+    // mprotect(addr, len, prot) → int  [syscall 10]
+    {
+        let mut code = Vec::new();
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 10));
+        code.extend(encode_syscall());
+        code.extend(encode_ret());
+        stubs.push(("mprotect".to_string(), code));
+    }
+
+    // dup(fd) → int  [syscall 32]
+    {
+        let mut code = Vec::new();
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 32));
+        code.extend(encode_syscall());
+        code.extend(encode_ret());
+        stubs.push(("dup".to_string(), code));
+    }
+
+    // dup3(oldfd, newfd, flags) → int  [syscall 292]
+    {
+        let mut code = Vec::new();
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 292));
+        code.extend(encode_syscall());
+        code.extend(encode_ret());
+        stubs.push(("dup3".to_string(), code));
+    }
+
+    // exit_group(status) → void  [syscall 231]
+    {
+        let mut code = Vec::new();
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 231));
+        code.extend(encode_syscall());
+        code.extend(encode_ret());
+        stubs.push(("exit_group".to_string(), code));
+    }
+
     // print_int(n) → void
     // Converts integer to decimal string and writes to stdout.
     // Args: RDI = integer value
