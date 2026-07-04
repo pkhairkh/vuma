@@ -1,5 +1,6 @@
 // Self-Executing Fork+Exec Pipeline — VUMA Meta-Recursive Test
 // Expected exit code: 0
+// skip_on: wasm32
 //
 // A VUMA program that fork()s, the child execve()s *itself* with different
 // arguments, and they communicate via pipes.

@@ -5019,6 +5019,28 @@ impl Backend for PPC64Backend {
             code
         };
 
+        // Helper: encode STWBRX (Store Word Byte-Reverse Indexed)
+        // X-form: primary=31, rS, rA, rB, xo=662, Rc=0
+        let stwbrx = |rs: Gpr, ra: Gpr, rb: Gpr| -> [u8; 4] {
+            let word = (31u32 << 26)
+                | (rs.encoding() << 21)
+                | (ra.encoding() << 16)
+                | (rb.encoding() << 11)
+                | (662u32 << 1);
+            encode_word(word)
+        };
+
+        // Helper: encode STDBRX (Store Doubleword Byte-Reverse Indexed)
+        // X-form: primary=31, rS, rA, rB, xo=660, Rc=0
+        let stdbrx = |rs: Gpr, ra: Gpr, rb: Gpr| -> [u8; 4] {
+            let word = (31u32 << 26)
+                | (rs.encoding() << 21)
+                | (ra.encoding() << 16)
+                | (rb.encoding() << 11)
+                | (660u32 << 1);
+            encode_word(word)
+        };
+
         let syscall_stubs: Vec<(String, Vec<u8>)> = {
             let mut stubs: Vec<(String, Vec<u8>)> = Vec::new();
 
@@ -5027,15 +5049,238 @@ impl Backend for PPC64Backend {
                 ("write", 4), ("read", 3), ("open", 5), ("close", 6),
                 ("mmap", 90), ("munmap", 91), ("exit", 1), ("alarm", 27),
                 ("getpid", 20), ("socket", 326), ("epoll_create1", 315),
-                ("futex", 221), ("execve", 11), ("wait4", 114),
+                ("futex", 221), ("wait4", 114),
                 ("epoll_ctl", 237), ("epoll_wait", 238),
                 ("dup2", 63), ("fork", 2), ("unlink", 10),
             ] {
                 stubs.push((name.to_string(), simple_stub(num)));
             }
 
-            // pipe (simple stub — LE mode, no byte-swap needed)
-            stubs.push(("pipe".to_string(), simple_stub(42)));
+            // ── pipe(fd_pair) — byte-swap fd pair for BE ───────────────
+            // The kernel writes two 32-bit fds in native (BE) byte order.
+            // VUMA programs read them with read_i32_le() (composing bytes
+            // as little-endian). To bridge this, after the syscall we
+            // byte-swap each fd in place so the buffer holds LE-stored
+            // values that read_i32_le() will correctly decode.
+            //
+            // Register usage:
+            //   R3 (in)  = fd_pair buffer pointer
+            //   R3 (out) = syscall return (0 on success, -errno on error)
+            //   R9       = saved buffer pointer (across SC)
+            //   R10      = scratch for fd value
+            //   R11      = &fd[1]
+            //
+            // SC clobbers R0 (syscall #), R3 (return value). The Linux
+            // kernel preserves R9-R12 across SC (they are saved/restored
+            // in the syscall exception frame), so R9 is safe to use as
+            // a scratch save slot for the buffer pointer.
+            {
+                let mut code = Vec::new();
+                // MR R9, R3 — save buffer pointer
+                code.extend_from_slice(&Instruction::Mr { ra: Gpr::R9, rs: Gpr::R3 }.encode());
+                // LI R0, 42 — sys_pipe
+                code.extend_from_slice(&Instruction::Li { rt: Gpr::R0, simm: 42 }.encode());
+                // SC — perform syscall; R3 = return value
+                code.extend_from_slice(&Instruction::Sc.encode());
+                // LWZ R10, 0(R9) — load fd[0] (native BE)
+                code.extend_from_slice(&Instruction::Lwz { rt: Gpr::R10, ra: Gpr::R9, d: 0 }.encode());
+                // STWBRX R10, 0, R9 — store byte-reversed (LE in memory)
+                code.extend_from_slice(&stwbrx(Gpr::R10, Gpr::R0, Gpr::R9));
+                // ADDI R11, R9, 4 — R11 = &fd[1]
+                code.extend_from_slice(&Instruction::Addi { rt: Gpr::R11, ra: Gpr::R9, simm: 4 }.encode());
+                // LWZ R10, 0(R11) — load fd[1]
+                code.extend_from_slice(&Instruction::Lwz { rt: Gpr::R10, ra: Gpr::R11, d: 0 }.encode());
+                // STWBRX R10, 0, R11 — store byte-reversed
+                code.extend_from_slice(&stwbrx(Gpr::R10, Gpr::R0, Gpr::R11));
+                // BLR
+                code.extend_from_slice(&Instruction::Bclr { bo: 20, bi: 0, bh: 0 }.encode());
+                stubs.push(("pipe".to_string(), code));
+            }
+
+            // ── execve(pathname, argv, envp) — byte-swap argv/envp ptrs ─
+            // VUMA programs build argv/envp arrays with write_u64_le(),
+            // storing 64-bit pointers in little-endian byte order. The
+            // kernel expects native (BE) pointers on ppc64 BE. This stub
+            // walks each array and byte-swaps every non-null pointer
+            // in place before invoking the syscall.
+            //
+            // Register usage:
+            //   R3 (in)  = pathname
+            //   R4 (in)  = argv
+            //   R5 (in)  = envp
+            //   R9       = saved pathname
+            //   R10      = saved envp
+            //   R11      = array iterator
+            //   R12      = scratch for pointer value
+            //
+            // Branch encoding: BC (B-form) with BO=12 (branch if CR0 bit
+            // set), BI=2 (EQ bit in CR0) → BEQ. BD is the branch target
+            // in 4-byte words, relative to the BC instruction.
+            {
+                let mut code = Vec::new();
+                // MR R9, R3 — save pathname
+                code.extend_from_slice(&Instruction::Mr { ra: Gpr::R9, rs: Gpr::R3 }.encode());
+                // MR R10, R5 — save envp
+                code.extend_from_slice(&Instruction::Mr { ra: Gpr::R10, rs: Gpr::R5 }.encode());
+                // MR R11, R4 — argv iterator
+                code.extend_from_slice(&Instruction::Mr { ra: Gpr::R11, rs: Gpr::R4 }.encode());
+
+                // argv_loop:
+                let argv_loop_offset = code.len();
+                // LD R12, 0(R11) — load 64-bit pointer (native BE)
+                code.extend_from_slice(&Instruction::Ld { rt: Gpr::R12, ra: Gpr::R11, ds: 0 }.encode());
+                // CMPLDI R12, 0 — compare with 0 (unsigned)
+                code.extend_from_slice(&Instruction::Cmpli { bf: CrField::CR0, l: 1, ra: Gpr::R12, uimm: 0 }.encode());
+                // BEQ argv_done (skip to end of loop)
+                //   Need to compute branch distance after emitting all loop body.
+                //   We'll emit a placeholder BC and patch it.
+                let beq_argv_pos = code.len();
+                code.extend_from_slice(&[0u8; 4]); // placeholder for BC
+                // STDBRX R12, 0, R11 — store byte-reversed (BE in memory)
+                code.extend_from_slice(&stdbrx(Gpr::R12, Gpr::R0, Gpr::R11));
+                // ADDI R11, R11, 8 — advance to next entry
+                code.extend_from_slice(&Instruction::Addi { rt: Gpr::R11, ra: Gpr::R11, simm: 8 }.encode());
+                // B argv_loop
+                let b_argv_pos = code.len();
+                code.extend_from_slice(&[0u8; 4]); // placeholder for B
+                let argv_done_offset = code.len();
+
+                // envp_loop:
+                let envp_loop_offset = code.len();
+                // MR R11, R10 — envp iterator
+                code.extend_from_slice(&Instruction::Mr { ra: Gpr::R11, rs: Gpr::R10 }.encode());
+                // LD R12, 0(R11)
+                code.extend_from_slice(&Instruction::Ld { rt: Gpr::R12, ra: Gpr::R11, ds: 0 }.encode());
+                // CMPLDI R12, 0
+                code.extend_from_slice(&Instruction::Cmpli { bf: CrField::CR0, l: 1, ra: Gpr::R12, uimm: 0 }.encode());
+                // BEQ envp_done
+                let beq_envp_pos = code.len();
+                code.extend_from_slice(&[0u8; 4]); // placeholder
+                // STDBRX R12, 0, R11
+                code.extend_from_slice(&stdbrx(Gpr::R12, Gpr::R0, Gpr::R11));
+                // ADDI R11, R11, 8
+                code.extend_from_slice(&Instruction::Addi { rt: Gpr::R11, ra: Gpr::R11, simm: 8 }.encode());
+                // B envp_loop
+                let b_envp_pos = code.len();
+                code.extend_from_slice(&[0u8; 4]); // placeholder
+                let envp_done_offset = code.len();
+
+                // Restore R3 (pathname) and R5 (envp); R4 (argv) unchanged
+                code.extend_from_slice(&Instruction::Mr { ra: Gpr::R3, rs: Gpr::R9 }.encode());
+                code.extend_from_slice(&Instruction::Mr { ra: Gpr::R5, rs: Gpr::R10 }.encode());
+                // LI R0, 11 — sys_execve
+                code.extend_from_slice(&Instruction::Li { rt: Gpr::R0, simm: 11 }.encode());
+                // SC
+                code.extend_from_slice(&Instruction::Sc.encode());
+                // BLR
+                code.extend_from_slice(&Instruction::Bclr { bo: 20, bi: 0, bh: 0 }.encode());
+
+                // ── Patch branch targets ──
+                // Use the existing encode_b_form (B-form: BC) and
+                // encode_i_form (I-form: B) helpers for correct masks.
+                // BO=12, BI=2 → BEQ (branch if CR0.EQ set).
+                let patch_beq = |code: &mut Vec<u8>, pos: usize, target: usize| {
+                    let bd = ((target as i64) - (pos as i64)) / 4;
+                    let word = encode_b_form(16, 12, 2, bd as i32, 0, 0);
+                    code[pos..pos + 4].copy_from_slice(&word);
+                };
+                let patch_b = |code: &mut Vec<u8>, pos: usize, target: usize| {
+                    let li = ((target as i64) - (pos as i64)) / 4;
+                    let word = encode_i_form(18, li as i32, 0, 0);
+                    code[pos..pos + 4].copy_from_slice(&word);
+                };
+                patch_beq(&mut code, beq_argv_pos, argv_done_offset);
+                patch_b(&mut code, b_argv_pos, argv_loop_offset);
+                patch_beq(&mut code, beq_envp_pos, envp_done_offset);
+                patch_b(&mut code, b_envp_pos, envp_loop_offset);
+
+                stubs.push(("execve".to_string(), code));
+            }
+
+            // ── waitpid(pid, wstatus, options) → wraps wait4(pid, wstatus, options, NULL)
+            // VUMA declares waitpid with 3 args; the syscall wait4 takes 4
+            // (the 4th is rusage, which must be NULL). Sets R6=0 before SC.
+            {
+                let mut code = Vec::new();
+                // LI R6, 0 — rusage = NULL
+                code.extend_from_slice(&Instruction::Li { rt: Gpr::R6, simm: 0 }.encode());
+                // LI R0, 114 — sys_wait4
+                code.extend_from_slice(&Instruction::Li { rt: Gpr::R0, simm: 114 }.encode());
+                // SC
+                code.extend_from_slice(&Instruction::Sc.encode());
+                // BLR
+                code.extend_from_slice(&Instruction::Bclr { bo: 20, bi: 0, bh: 0 }.encode());
+                stubs.push(("waitpid".to_string(), code));
+            }
+
+            // ── strcmp(s1, s2) → int — assembly loop, not a syscall
+            // PPC64 calling convention: R3=s1, R4=s2, return in R3.
+            // Loop: load byte from each, compare; if differ or NUL, return
+            // the difference; else advance and repeat.
+            //
+            // Register usage:
+            //   R3 = s1 iterator (and return value)
+            //   R4 = s2 iterator
+            //   R5 = byte from s1
+            //   R6 = byte from s2
+            {
+                let mut code = Vec::new();
+                // strcmp_loop:
+                let loop_offset = code.len();
+                // LBZ R5, 0(R3) — load byte from s1
+                code.extend_from_slice(&Instruction::Lbz { rt: Gpr::R5, ra: Gpr::R3, d: 0 }.encode());
+                // LBZ R6, 0(R4) — load byte from s2
+                code.extend_from_slice(&Instruction::Lbz { rt: Gpr::R6, ra: Gpr::R4, d: 0 }.encode());
+                // CMPW CR0, R5, R6 — compare bytes (unsigned)
+                code.extend_from_slice(&Instruction::Cmpl { bf: CrField::CR0, l: 0, ra: Gpr::R5, rb: Gpr::R6 }.encode());
+                // BNE done (CR0.EQ clear → BO=4, BI=2)
+                let bne_pos = code.len();
+                code.extend_from_slice(&[0u8; 4]); // placeholder
+                // CMPLWI R5, 0 — check if s1 byte is NUL
+                code.extend_from_slice(&Instruction::Cmpli { bf: CrField::CR0, l: 0, ra: Gpr::R5, uimm: 0 }.encode());
+                // BEQ done (CR0.EQ set → BO=12, BI=2)
+                let beq_pos = code.len();
+                code.extend_from_slice(&[0u8; 4]); // placeholder
+                // ADDI R3, R3, 1 — advance s1
+                code.extend_from_slice(&Instruction::Addi { rt: Gpr::R3, ra: Gpr::R3, simm: 1 }.encode());
+                // ADDI R4, R4, 1 — advance s2
+                code.extend_from_slice(&Instruction::Addi { rt: Gpr::R4, ra: Gpr::R4, simm: 1 }.encode());
+                // B loop
+                let b_loop_pos = code.len();
+                code.extend_from_slice(&[0u8; 4]); // placeholder
+                let done_offset = code.len();
+
+                // done: R3 = R5 - R6 (return difference)
+                code.extend_from_slice(&Instruction::Subf { rt: Gpr::R3, ra: Gpr::R6, rb: Gpr::R5 }.encode());
+                // Note: SUBF R3, R6, R5 computes R6 - R5... we want R5 - R6.
+                // SUBF RT, RA, RB = RT = RB - RA. So SUBF R3, R6, R5 = R5 - R6. ✓
+                // BLR
+                code.extend_from_slice(&Instruction::Bclr { bo: 20, bi: 0, bh: 0 }.encode());
+
+                // ── Patch branches ──
+                // BNE: BO=4 (branch if CR0.EQ NOT set), BI=2
+                // BEQ: BO=12 (branch if CR0.EQ set), BI=2
+                let patch_bne = |code: &mut Vec<u8>, pos: usize, target: usize| {
+                    let bd = ((target as i64) - (pos as i64)) / 4;
+                    let word = encode_b_form(16, 4, 2, bd as i32, 0, 0);
+                    code[pos..pos + 4].copy_from_slice(&word);
+                };
+                let patch_beq = |code: &mut Vec<u8>, pos: usize, target: usize| {
+                    let bd = ((target as i64) - (pos as i64)) / 4;
+                    let word = encode_b_form(16, 12, 2, bd as i32, 0, 0);
+                    code[pos..pos + 4].copy_from_slice(&word);
+                };
+                let patch_b = |code: &mut Vec<u8>, pos: usize, target: usize| {
+                    let li = ((target as i64) - (pos as i64)) / 4;
+                    let word = encode_i_form(18, li as i32, 0, 0);
+                    code[pos..pos + 4].copy_from_slice(&word);
+                };
+                patch_bne(&mut code, bne_pos, done_offset);
+                patch_beq(&mut code, beq_pos, done_offset);
+                patch_b(&mut code, b_loop_pos, loop_offset);
+
+                stubs.push(("strcmp".to_string(), code));
+            }
 
             // sigaction → rt_sigaction(signum, act, oldact, sigsetsize=8)
             // Caller args: R3=signum, R4=act, R5=oldact
