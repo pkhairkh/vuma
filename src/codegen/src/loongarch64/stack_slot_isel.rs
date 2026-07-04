@@ -1133,33 +1133,71 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
 
                         // ── UIntToFloat (unsigned integer → float) ───────────
                         CastKind::UIntToFloat => {
-                            // LoongArch does not have dedicated unsigned-to-float
-                            // conversion instructions in the current backend.  We
-                            // implement unsigned conversion by zero-extending the
-                            // value to 64 bits and then using ffint.d.l (i64→f64)
-                            // or ffint.d.w (i32→f64), which produces the correct
-                            // result because any u32 fits in a positive i64.
-                            // For u64 values with the MSB set, this produces a
-                            // negative result — that case requires a more elaborate
-                            // sequence which is TODO for now.
+                            // LoongArch does not have a dedicated unsigned-to-float
+                            // conversion instruction. We handle the conversion by
+                            // case:
+                            //
+                            //   * u8/u16/u32 → f32/f64: zero-extend to 64 bits
+                            //     (any u32 fits in a positive i64) and use
+                            //     ffint.d.l (i64 → f64). Narrow with fcvt.s.d if
+                            //     the destination is f32.
+                            //
+                            //   * u64 → f32/f64: implement the standard
+                            //     subtract-convert-add (shift-convert-double-add)
+                            //     technique so values with the MSB set are not
+                            //     misinterpreted as negative by ffint.d.l:
+                            //       1. Save bit 0 of the value (S2 = value & 1)
+                            //       2. Shift the value right by 1 (S0 = value >> 1)
+                            //          — now fits in the non-negative i63 range,
+                            //          so the signed ffint.d.l conversion is exact
+                            //       3. Convert to f64: FS0 = (float)(value >> 1)
+                            //       4. Double:          FS0 = FS0 + FS0
+                            //       5. Add bit 0:       FS0 = FS0 + (float)(bit 0)
+                            //     This yields 2 * (value >> 1) + (value & 1) == value,
+                            //     and works for *all* u64 values (MSB set or clear)
+                            //     because (value >> 1) always fits in a positive i63.
                             let src_is_32 = from_ty.as_ref().map_or(false, |t|
                                 matches!(t, IRType::U8 | IRType::U16 | IRType::U32)
+                            );
+                            let src_is_64 = from_ty.as_ref().map_or(false, |t|
+                                matches!(t, IRType::U64)
                             );
                             let dst_is_f32 = to_ty.as_ref().map_or(false, |t| matches!(t, IRType::F32));
 
                             code.extend(encode_load_value(src, S0, fp, &vreg_slots));
 
-                            // Zero-extend 32-bit unsigned values to 64 bits
                             if src_is_32 {
+                                // Zero-extend 32-bit unsigned values to 64 bits
                                 code.extend_from_slice(&Instruction::SlliD { rd: S0, rj: S0, imm8: 32 }.encode());
                                 code.extend_from_slice(&Instruction::SrliD { rd: S0, rj: S0, imm8: 32 }.encode());
+
+                                // Move GPR → FPR and convert via ffint.d.l (i64→f64)
+                                code.extend_from_slice(&Instruction::FmovFpr2GrD { fd: FS0, rj: S0 }.encode());
+                                code.extend_from_slice(&Instruction::FfintDL { fd: FS0, fj: FS0 }.encode());
+                            } else if src_is_64 {
+                                // u64 → f64 using subtract-convert-add (shift-halve
+                                // -double-add) technique. Correct for all u64 values
+                                // including those with MSB set.
+                                //
+                                // S2 = value & 1   (saved bit 0)
+                                code.extend_from_slice(&Instruction::Andi { rd: S2, rj: S0, imm12: 1 }.encode());
+                                // S0 = value >> 1   (logical shift; fits in i63)
+                                code.extend_from_slice(&Instruction::SrliD { rd: S0, rj: S0, imm8: 1 }.encode());
+                                // FS0 = (float)(value >> 1)  via signed i64→f64
+                                code.extend_from_slice(&Instruction::FmovFpr2GrD { fd: FS0, rj: S0 }.encode());
+                                code.extend_from_slice(&Instruction::FfintDL { fd: FS0, fj: FS0 }.encode());
+                                // FS0 = 2 * (float)(value >> 1)
+                                code.extend_from_slice(&Instruction::FaddD { fd: FS0, fj: FS0, fk: FS0 }.encode());
+                                // FS1 = (float)(bit 0) = 0.0 or 1.0
+                                code.extend_from_slice(&Instruction::FmovFpr2GrD { fd: FS1, rj: S2 }.encode());
+                                code.extend_from_slice(&Instruction::FfintDL { fd: FS1, fj: FS1 }.encode());
+                                // FS0 = 2*(value>>1) + (value & 1) == value (as f64)
+                                code.extend_from_slice(&Instruction::FaddD { fd: FS0, fj: FS0, fk: FS1 }.encode());
+                            } else {
+                                // No source type info: treat as signed i64 → f64
+                                code.extend_from_slice(&Instruction::FmovFpr2GrD { fd: FS0, rj: S0 }.encode());
+                                code.extend_from_slice(&Instruction::FfintDL { fd: FS0, fj: FS0 }.encode());
                             }
-
-                            // Move GPR → FPR
-                            code.extend_from_slice(&Instruction::FmovFpr2GrD { fd: FS0, rj: S0 }.encode());
-
-                            // Use ffint.d.l (i64→f64) for zero-extended u32/u64
-                            code.extend_from_slice(&Instruction::FfintDL { fd: FS0, fj: FS0 }.encode());
 
                             // Narrow to f32 if needed
                             if dst_is_f32 {
@@ -1214,31 +1252,71 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                         // ── FloatToUInt (float → unsigned integer) ───────────
                         CastKind::FloatToUInt => {
                             // LoongArch does not have dedicated float-to-unsigned
-                            // conversion instructions in the current backend.
-                            // Use the signed variant and zero-extend for 32-bit
-                            // results.  For u64 results with values > i64::MAX,
-                            // this is incorrect — TODO for now.
+                            // conversion instructions. We use the signed ftint
+                            // variants and apply the standard subtract-convert-XOR
+                            // technique for u64 destinations (and zero-extension
+                            // for u32 destinations).
+                            //
+                            // For u64 destinations (values may exceed i64::MAX):
+                            //   1. Promote f32 → f64 if needed
+                            //   2. Subtract 2^63 from the float (now in [-2^63, 2^63))
+                            //   3. Convert via ftint.d.l (signed i64 conversion;
+                            //      result always fits in i64 range)
+                            //   4. XOR with 0x8000000000000000 — flips bit 63,
+                            //      which is equivalent to adding 2^63 (mod 2^64)
+                            //      back as an unsigned value
+                            // This works for ALL non-negative f64 values in [0, 2^64):
+                            //   * value <  2^63: (value - 2^63) < 0; XOR clears the
+                            //     sign bit → value
+                            //   * value >= 2^63: (value - 2^63) >= 0; XOR sets the
+                            //     sign bit → value
                             let src_is_f32 = from_ty.as_ref().map_or(false, |t| matches!(t, IRType::F32));
                             let dst_is_32 = to_ty.as_ref().map_or(false, |t|
                                 matches!(t, IRType::U8 | IRType::U16 | IRType::U32)
                             );
+                            let dst_is_64 = to_ty.as_ref().map_or(false, |t| matches!(t, IRType::U64));
 
                             code.extend(encode_load_value(src, S0, fp, &vreg_slots));
                             code.extend_from_slice(&Instruction::FmovFpr2GrD { fd: FS0, rj: S0 }.encode());
 
-                            // Use signed ftint, then zero-extend for 32-bit results
-                            if src_is_f32 {
-                                code.extend_from_slice(&Instruction::FtintWS { fd: FS0, fj: FS0 }.encode());
+                            if dst_is_64 {
+                                // Promote f32 to f64 for consistent handling
+                                if src_is_f32 {
+                                    code.extend_from_slice(&Instruction::FcvtDS { fd: FS0, fj: FS0 }.encode());
+                                }
+
+                                // Load 2^63 as f64 (bit pattern 0x43E0_0000_0000_0000)
+                                // into FS1 via GPR S1.
+                                code.extend(encode_load_imm(S1, 0x43E0_0000_0000_0000u64 as i64));
+                                code.extend_from_slice(&Instruction::FmovFpr2GrD { fd: FS1, rj: S1 }.encode());
+
+                                // FS0 = FS0 - 2^63   (now in [-2^63, 2^63))
+                                code.extend_from_slice(&Instruction::FsubD { fd: FS0, fj: FS0, fk: FS1 }.encode());
+
+                                // FS0 = (i64)(FS0)  via signed ftint.d.l
+                                code.extend_from_slice(&Instruction::FtintLD { fd: FS0, fj: FS0 }.encode());
+
+                                // Move FPR → GPR
+                                code.extend_from_slice(&Instruction::FmovGr2FprD { rd: S0, fj: FS0 }.encode());
+
+                                // XOR with 0x8000000000000000 (add 2^63 back as unsigned)
+                                code.extend(encode_load_imm(S1, 0x8000_0000_0000_0000u64 as i64));
+                                code.extend_from_slice(&Instruction::Xor { rd: S0, rj: S0, rk: S1 }.encode());
                             } else {
-                                code.extend_from_slice(&Instruction::FtintWD { fd: FS0, fj: FS0 }.encode());
-                            }
+                                // f32/f64 → u32: use signed ftint, then zero-extend
+                                if src_is_f32 {
+                                    code.extend_from_slice(&Instruction::FtintWS { fd: FS0, fj: FS0 }.encode());
+                                } else {
+                                    code.extend_from_slice(&Instruction::FtintWD { fd: FS0, fj: FS0 }.encode());
+                                }
 
-                            code.extend_from_slice(&Instruction::FmovGr2FprD { rd: S0, fj: FS0 }.encode());
+                                code.extend_from_slice(&Instruction::FmovGr2FprD { rd: S0, fj: FS0 }.encode());
 
-                            // Zero-extend for unsigned 32-bit result
-                            if dst_is_32 {
-                                code.extend_from_slice(&Instruction::SlliD { rd: S0, rj: S0, imm8: 32 }.encode());
-                                code.extend_from_slice(&Instruction::SrliD { rd: S0, rj: S0, imm8: 32 }.encode());
+                                // Zero-extend for unsigned 32-bit result
+                                if dst_is_32 {
+                                    code.extend_from_slice(&Instruction::SlliD { rd: S0, rj: S0, imm8: 32 }.encode());
+                                    code.extend_from_slice(&Instruction::SrliD { rd: S0, rj: S0, imm8: 32 }.encode());
+                                }
                             }
 
                             code.extend(encode_store_to_vreg(S0, dst_id, fp, &vreg_slots));
