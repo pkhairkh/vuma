@@ -1419,6 +1419,40 @@ pub fn encode_addss_xmm_xmm(dst: Xmm, src: Xmm) -> Vec<u8> {
     code
 }
 
+/// Encode SUBSD xmm, xmm (F2 0F 5C /r) — subtract scalar double-precision floats.
+pub fn encode_subsd_xmm_xmm(dst: Xmm, src: Xmm) -> Vec<u8> {
+    let mut code = Vec::with_capacity(4);
+    let r = src.needs_rex();
+    let b = dst.needs_rex();
+    if r || b {
+        if let Some(rex) = rex_prefix(false, r, false, b) {
+            code.push(rex);
+        }
+    }
+    code.push(0xF2);
+    code.push(0x0F);
+    code.push(0x5C);
+    code.push(modrm(3, src.encoding() & 7, dst.encoding() & 7));
+    code
+}
+
+/// Encode SUBSS xmm, xmm (F3 0F 5C /r) — subtract scalar single-precision floats.
+pub fn encode_subss_xmm_xmm(dst: Xmm, src: Xmm) -> Vec<u8> {
+    let mut code = Vec::with_capacity(4);
+    let r = src.needs_rex();
+    let b = dst.needs_rex();
+    if r || b {
+        if let Some(rex) = rex_prefix(false, r, false, b) {
+            code.push(rex);
+        }
+    }
+    code.push(0xF3);
+    code.push(0x0F);
+    code.push(0x5C);
+    code.push(modrm(3, src.encoding() & 7, dst.encoding() & 7));
+    code
+}
+
 // ===========================================================================
 // x86_64 Mnemonic Disassembler
 // ===========================================================================
