@@ -127,6 +127,14 @@ fn sign_extend_12(val: u32) -> i32 {
     }
 }
 
+fn sign_extend_14(val: u32) -> i32 {
+    if val & 0x2000 != 0 {
+        (val | 0xFFFFC000) as i32
+    } else {
+        val as i32
+    }
+}
+
 fn sign_extend_16(val: u32) -> i32 {
     if val & 0x8000 != 0 {
         (val | 0xFFFF0000) as i32
@@ -135,10 +143,7 @@ fn sign_extend_16(val: u32) -> i32 {
     }
 }
 
-// NOTE: Upper-immediate instructions (LU12I.W, LU32I.D, PCADDU12I,
-// PCADDU18I) are not yet decoded by the disassembler. Kept for use when
-// those decode paths are added.
-#[allow(dead_code)]
+// Used for LU12I.W / LU32I.D upper-immediate decoding.
 fn sign_extend_20(val: u32) -> i32 {
     if val & 0x80000 != 0 {
         (val | 0xFFF00000) as i32
@@ -268,9 +273,50 @@ const OPC_FMOV_D: u32 = 0x004526;
 const OPC_MOVFR2GR_D: u32 = 0x00452E;
 const OPC_MOVGR2FR_D: u32 = 0x00452A;
 
+// 2R-format opcodes — bit count / popcount (bits[31:10])
+const OPC_CLO_D: u32 = 0x0000008;
+const OPC_CTZ_D: u32 = 0x000000C;
+const OPC_POPCNT_D: u32 = 0x000000E;
+
+// 2R-format opcodes — FP conversions (bits[31:10])
+const OPC_FFINT_S_W: u32 = 0x004519; // ffint.s.w (i32→f32)
+const OPC_FFINT_S_L: u32 = 0x00451A; // ffint.s.l (i64→f32)
+const OPC_FFINT_D_W: u32 = 0x00451B; // ffint.d.w (i32→f64)
+const OPC_FFINT_D_L: u32 = 0x00451C; // ffint.d.l (i64→f64)
+const OPC_FTINT_W_S: u32 = 0x00450C; // ftint.w.s (f32→i32)
+const OPC_FTINT_W_D: u32 = 0x00450D; // ftint.w.d (f64→i32)
+const OPC_FTINT_L_S: u32 = 0x00450E; // ftint.l.s (f32→i64)
+const OPC_FTINT_L_D: u32 = 0x00450F; // ftint.l.d (f64→i64)
+const OPC_FCVT_D_S: u32 = 0x004502; // fcvt.d.s (f32→f64)
+const OPC_FCVT_S_D: u32 = 0x004503; // fcvt.s.d (f64→f32)
+
+// 3R-format opcodes — conditional select (bits[31:15])
+const OPC_MASKEQZ: u32 = 0x0026;
+const OPC_MASKNEZ: u32 = 0x0027;
+
+// 2RI12-format opcodes — LU52I.D and DBAR (bits[31:22])
+const OPC_LU52I_D: u32 = 0x00C;
+const OPC_DBAR: u32 = 0x0E7; // DBAR: 2RI12 with rd=$r0, rj=$r0
+
+// 1RI20-format opcodes — LU12I.W / LU32I.D (bits[31:25])
+const OPC_LU12I_W: u32 = 0x0A;
+const OPC_LU32I_D: u32 = 0x0B;
+
+// 2RI14-format opcodes — load-linked / store-conditional (bits[31:24])
+const OPC_LL_W: u32 = 0x20;
+const OPC_SC_W: u32 = 0x21;
+const OPC_LL_D: u32 = 0x22;
+const OPC_SC_D: u32 = 0x23;
+
 // 4R-format opcodes (bits[31:20])
 const OPC_FCMP_S: u32 = 0x0C1;
 const OPC_FCMP_D: u32 = 0x0C2;
+
+// SYSCALL / BREAK — full-word matches (no register fields used).
+// Encoding in mod.rs: Syscall = 0x002B0000, Break = 0x002A0000.
+const WORD_SYSCALL: u32 = 0x002B0000;
+#[allow(dead_code)]
+const WORD_BREAK: u32 = 0x002A0000;
 
 // ---------------------------------------------------------------------------
 // Decode entry point
@@ -318,6 +364,14 @@ impl Instruction {
         // I26 format: opcode in bits [31:26]
         let opc_i26 = (word >> 26) & 0x3F;
 
+        // 1RI20 format (LU12I.W / LU32I.D): opcode in bits [31:25]
+        let opc_1ri20 = (word >> 25) & 0x7F;
+        let imm20_raw = (word >> 5) & 0xFFFFF;
+
+        // 2RI14 format (LL.W/SC.W/LL.D/SC.D): opcode in bits [31:24]
+        let opc_2ri14 = (word >> 24) & 0xFF;
+        let imm14_raw = (word >> 10) & 0x3FFF;
+
         // ── 2R format (longest opcode, check first) ────────────────
         match opc_2r {
             OPC_EXT_W_H => {
@@ -358,6 +412,87 @@ impl Instruction {
                 return Ok(Instruction::FmovFpr2GrD {
                     fd: fpr_from_bits(rd),
                     rj: gpr_from_bits(rj),
+                });
+            }
+            // ── Bit count (2R) ──
+            OPC_CLO_D => {
+                return Ok(Instruction::CloD {
+                    rd: gpr_from_bits(rd),
+                    rj: gpr_from_bits(rj),
+                });
+            }
+            OPC_CTZ_D => {
+                return Ok(Instruction::CtzD {
+                    rd: gpr_from_bits(rd),
+                    rj: gpr_from_bits(rj),
+                });
+            }
+            OPC_POPCNT_D => {
+                return Ok(Instruction::PopcntD {
+                    rd: gpr_from_bits(rd),
+                    rj: gpr_from_bits(rj),
+                });
+            }
+            // ── FP conversions: int↔float (2R) ──
+            OPC_FFINT_S_W => {
+                return Ok(Instruction::FfintSW {
+                    fd: fpr_from_bits(rd),
+                    fj: fpr_from_bits(rj),
+                });
+            }
+            OPC_FFINT_S_L => {
+                return Ok(Instruction::FfintSL {
+                    fd: fpr_from_bits(rd),
+                    fj: fpr_from_bits(rj),
+                });
+            }
+            OPC_FFINT_D_W => {
+                return Ok(Instruction::FfintDW {
+                    fd: fpr_from_bits(rd),
+                    fj: fpr_from_bits(rj),
+                });
+            }
+            OPC_FFINT_D_L => {
+                return Ok(Instruction::FfintDL {
+                    fd: fpr_from_bits(rd),
+                    fj: fpr_from_bits(rj),
+                });
+            }
+            OPC_FTINT_W_S => {
+                return Ok(Instruction::FtintWS {
+                    fd: fpr_from_bits(rd),
+                    fj: fpr_from_bits(rj),
+                });
+            }
+            OPC_FTINT_W_D => {
+                return Ok(Instruction::FtintWD {
+                    fd: fpr_from_bits(rd),
+                    fj: fpr_from_bits(rj),
+                });
+            }
+            OPC_FTINT_L_S => {
+                return Ok(Instruction::FtintLS {
+                    fd: fpr_from_bits(rd),
+                    fj: fpr_from_bits(rj),
+                });
+            }
+            OPC_FTINT_L_D => {
+                return Ok(Instruction::FtintLD {
+                    fd: fpr_from_bits(rd),
+                    fj: fpr_from_bits(rj),
+                });
+            }
+            // ── FP conversions: float↔float (2R) ──
+            OPC_FCVT_D_S => {
+                return Ok(Instruction::FcvtDS {
+                    fd: fpr_from_bits(rd),
+                    fj: fpr_from_bits(rj),
+                });
+            }
+            OPC_FCVT_S_D => {
+                return Ok(Instruction::FcvtSD {
+                    fd: fpr_from_bits(rd),
+                    fj: fpr_from_bits(rj),
                 });
             }
             _ => {}
@@ -429,6 +564,21 @@ impl Instruction {
             }
             OPC_SLTU => {
                 return Ok(Instruction::Sltu {
+                    rd: gpr_from_bits(rd),
+                    rj: gpr_from_bits(rj),
+                    rk: gpr_from_bits(rk),
+                });
+            }
+            // ── Conditional select (3R) ──
+            OPC_MASKEQZ => {
+                return Ok(Instruction::Maskeqz {
+                    rd: gpr_from_bits(rd),
+                    rj: gpr_from_bits(rj),
+                    rk: gpr_from_bits(rk),
+                });
+            }
+            OPC_MASKNEZ => {
+                return Ok(Instruction::Masknez {
                     rd: gpr_from_bits(rd),
                     rj: gpr_from_bits(rj),
                     rk: gpr_from_bits(rk),
@@ -877,6 +1027,20 @@ impl Instruction {
                     imm12: sign_extend_12(imm12_raw),
                 });
             }
+            // ── Upper Immediate (2RI12) ──
+            OPC_LU52I_D => {
+                return Ok(Instruction::Lu52iD {
+                    rd: gpr_from_bits(rd),
+                    rj: gpr_from_bits(rj),
+                    imm12: sign_extend_12(imm12_raw),
+                });
+            }
+            // ── Memory Barrier (2RI12, rd=$r0 rj=$r0) ──
+            OPC_DBAR => {
+                return Ok(Instruction::Dbar {
+                    hint: imm12_raw & 0xFFF,
+                });
+            }
             _ => {}
         }
 
@@ -976,6 +1140,66 @@ impl Instruction {
                 }
                 _ => {}
             }
+        }
+
+        // ── 1RI20 format (lu12i.w / lu32i.d) ─────────────────────
+        // Encoding: opcode[31:25] | si20[24:5] | rd[4:0]
+        match opc_1ri20 {
+            OPC_LU12I_W => {
+                return Ok(Instruction::Lu12iW {
+                    rd: gpr_from_bits(rd),
+                    imm20: sign_extend_20(imm20_raw),
+                });
+            }
+            OPC_LU32I_D => {
+                return Ok(Instruction::Lu32iD {
+                    rd: gpr_from_bits(rd),
+                    imm20: sign_extend_20(imm20_raw),
+                });
+            }
+            _ => {}
+        }
+
+        // ── 2RI14 format (ll.w / sc.w / ll.d / sc.d) ─────────────
+        // Encoding: opcode[31:24] | si14[23:10] | rj[9:5] | rd[4:0]
+        match opc_2ri14 {
+            OPC_LL_W => {
+                return Ok(Instruction::LlW {
+                    rd: gpr_from_bits(rd),
+                    rj: gpr_from_bits(rj),
+                    imm14: sign_extend_14(imm14_raw),
+                });
+            }
+            OPC_SC_W => {
+                return Ok(Instruction::ScW {
+                    rd: gpr_from_bits(rd),
+                    rj: gpr_from_bits(rj),
+                    imm14: sign_extend_14(imm14_raw),
+                });
+            }
+            OPC_LL_D => {
+                return Ok(Instruction::LlD {
+                    rd: gpr_from_bits(rd),
+                    rj: gpr_from_bits(rj),
+                    imm14: sign_extend_14(imm14_raw),
+                });
+            }
+            OPC_SC_D => {
+                return Ok(Instruction::ScD {
+                    rd: gpr_from_bits(rd),
+                    rj: gpr_from_bits(rj),
+                    imm14: sign_extend_14(imm14_raw),
+                });
+            }
+            _ => {}
+        }
+
+        // ── Full-word match for SYSCALL ──────────────────────────
+        // SYSCALL has no register fields; the encoder emits the literal
+        // word 0x002B0000. Match it exactly so disassembly of runtime
+        // stubs (start_stub, vuma_alloc_stub, etc.) round-trips.
+        if word == WORD_SYSCALL {
+            return Ok(Instruction::Syscall);
         }
 
         Err(DecodeError::UnknownEncoding { word })
@@ -1391,5 +1615,151 @@ mod tests {
         let bytes = ld.encode();
         let decoded = Instruction::decode(&bytes).unwrap();
         assert_eq!(format!("{decoded}"), format!("{ld}"));
+    }
+
+    #[test]
+    fn test_decode_upper_immediates() {
+        // LU12I.W / LU32I.D (1RI20) and LU52I.D (2RI12)
+        for instr in [
+            Instruction::Lu12iW {
+                rd: G::A0,
+                imm20: 0x12345,
+            },
+            Instruction::Lu12iW {
+                rd: G::T0,
+                imm20: -0x54321,
+            },
+            Instruction::Lu32iD {
+                rd: G::A0,
+                imm20: 0x7FFFF,
+            },
+            Instruction::Lu32iD {
+                rd: G::T1,
+                imm20: -1,
+            },
+            Instruction::Lu52iD {
+                rd: G::A0,
+                rj: G::A1,
+                imm12: 0x123,
+            },
+            Instruction::Lu52iD {
+                rd: G::A0,
+                rj: G::A1,
+                imm12: -1,
+            },
+        ] {
+            let bytes = instr.encode();
+            let decoded = Instruction::decode(&bytes).unwrap();
+            assert_eq!(
+                format!("{decoded}"),
+                format!("{instr}"),
+                "round-trip failed for {:?}",
+                instr
+            );
+        }
+    }
+
+    #[test]
+    fn test_decode_dbar_syscall() {
+        // DBAR (2RI12 with rd=rj=$r0)
+        let dbar = Instruction::Dbar { hint: 0 };
+        let bytes = dbar.encode();
+        let decoded = Instruction::decode(&bytes).unwrap();
+        assert_eq!(format!("{decoded}"), format!("{dbar}"));
+
+        let dbar_hint = Instruction::Dbar { hint: 0x123 };
+        let bytes = dbar_hint.encode();
+        let decoded = Instruction::decode(&bytes).unwrap();
+        assert_eq!(format!("{decoded}"), format!("{dbar_hint}"));
+
+        // SYSCALL (literal word match)
+        let sys = Instruction::Syscall;
+        let bytes = sys.encode();
+        let decoded = Instruction::decode(&bytes).unwrap();
+        assert_eq!(format!("{decoded}"), format!("{sys}"));
+    }
+
+    #[test]
+    fn test_decode_ll_sc() {
+        // LL.W / SC.W / LL.D / SC.D (2RI14)
+        for instr in [
+            Instruction::LlW {
+                rd: G::A0,
+                rj: G::A1,
+                imm14: 8,
+            },
+            Instruction::ScW {
+                rd: G::A0,
+                rj: G::A1,
+                imm14: -8,
+            },
+            Instruction::LlD {
+                rd: G::A0,
+                rj: G::A1,
+                imm14: 16,
+            },
+            Instruction::ScD {
+                rd: G::A0,
+                rj: G::A1,
+                imm14: -16,
+            },
+        ] {
+            let bytes = instr.encode();
+            let decoded = Instruction::decode(&bytes).unwrap();
+            assert_eq!(
+                format!("{decoded}"),
+                format!("{instr}"),
+                "round-trip failed for {:?}",
+                instr
+            );
+        }
+    }
+
+    #[test]
+    fn test_decode_bit_count_and_mask() {
+        // 2R bit-count + 3R conditional-select
+        for instr in [
+            Instruction::CloD { rd: G::A0, rj: G::A1 },
+            Instruction::CtzD { rd: G::A0, rj: G::A1 },
+            Instruction::PopcntD { rd: G::A0, rj: G::A1 },
+            Instruction::Maskeqz { rd: G::A0, rj: G::A1, rk: G::A2 },
+            Instruction::Masknez { rd: G::A0, rj: G::A1, rk: G::A2 },
+        ] {
+            let bytes = instr.encode();
+            let decoded = Instruction::decode(&bytes).unwrap();
+            assert_eq!(
+                format!("{decoded}"),
+                format!("{instr}"),
+                "round-trip failed for {:?}",
+                instr
+            );
+        }
+    }
+
+    #[test]
+    fn test_decode_fp_conversions() {
+        use crate::loongarch64::Fpr as F;
+        // FFINT.* / FTINT.* / FCVT.*
+        for instr in [
+            Instruction::FfintSW { fd: F::F0, fj: F::F1 },
+            Instruction::FfintSL { fd: F::F0, fj: F::F1 },
+            Instruction::FfintDW { fd: F::F0, fj: F::F1 },
+            Instruction::FfintDL { fd: F::F0, fj: F::F1 },
+            Instruction::FtintWS { fd: F::F0, fj: F::F1 },
+            Instruction::FtintWD { fd: F::F0, fj: F::F1 },
+            Instruction::FtintLS { fd: F::F0, fj: F::F1 },
+            Instruction::FtintLD { fd: F::F0, fj: F::F1 },
+            Instruction::FcvtDS { fd: F::F0, fj: F::F1 },
+            Instruction::FcvtSD { fd: F::F0, fj: F::F1 },
+        ] {
+            let bytes = instr.encode();
+            let decoded = Instruction::decode(&bytes).unwrap();
+            assert_eq!(
+                format!("{decoded}"),
+                format!("{instr}"),
+                "round-trip failed for {:?}",
+                instr
+            );
+        }
     }
 }

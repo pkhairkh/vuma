@@ -616,12 +616,22 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                 }
 
                 // ── Div ──
-                IRInstr::Div { dst, lhs, rhs, .. } => {
+                IRInstr::Div { dst, lhs, rhs, ty } => {
                     let mut code = Vec::new();
                     let dst_id = dst.as_register().unwrap_or(0);
                     code.extend(encode_load_value(lhs, S0, fp, &vreg_slots));
                     code.extend(encode_load_value(rhs, S1, fp, &vreg_slots));
-                    code.extend_from_slice(&Instruction::DivD { rd: S0, rj: S0, rk: S1 }.encode());
+                    // Dispatch on the IR type field: U64 uses unsigned division;
+                    // all other integer/pointer types use signed division.
+                    if *ty == Some(IRType::U64) {
+                        code.extend_from_slice(
+                            &Instruction::DivDu { rd: S0, rj: S0, rk: S1 }.encode(),
+                        );
+                    } else {
+                        code.extend_from_slice(
+                            &Instruction::DivD { rd: S0, rj: S0, rk: S1 }.encode(),
+                        );
+                    }
                     code.extend(encode_store_to_vreg(S0, dst_id, fp, &vreg_slots));
                     code
                 }
