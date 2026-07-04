@@ -438,7 +438,9 @@ PYEOF
 
 export REPO_DIR="$REPO_DIR"
 export WASMTIME_BIN="$WASMTIME_BIN"
-python3 "$RESULTS_DIR/run_tests.py" --workers "$WORKERS" ${BACKENDS:+--backends "$BACKENDS"} ${VERIFY:+--verify}
+VERIFY_FLAG=""
+if [[ "$VERIFY" == "1" ]]; then VERIFY_FLAG="--verify"; fi
+python3 "$RESULTS_DIR/run_tests.py" --workers "$WORKERS" ${BACKENDS:+--backends "$BACKENDS"} $VERIFY_FLAG
 TEST_EXIT=$?
 
 echo ""
