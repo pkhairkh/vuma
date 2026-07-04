@@ -176,19 +176,19 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
     }
 
     // Round up to ensure proper stack alignment for calls.
-    // The prologue does: push rbp (-8); mov rbp,rsp; sub rsp,frame_size; push×5 (-40)
+    // The prologue does: push rbp (-8); mov rbp,rsp; sub rsp,frame_size
+    // No callee-saved pushes (ISel uses only caller-saved regs).
     // On entry to this function: RSP was 8 mod 16 (SysV ABI).
     // After push rbp: RSP is 0 mod 16.
     // After sub rsp,frame_size: RSP is (-frame_size) mod 16.
-    // After 5 pushes (40 bytes): RSP is (-frame_size - 40) mod 16.
     // Before any `call` from this function, RSP must be 0 mod 16 (so that
     // the callee enters with RSP at 8 mod 16 as required by SysV).
-    // Therefore: (frame_size + 40) % 16 == 0, i.e., frame_size % 16 == 8.
+    // Therefore: frame_size % 16 == 0.
     let aligned = ((current_offset + 15) & !15) as usize;
-    let frame_size = if aligned % 16 == 8 {
-        aligned.max(8)
+    let frame_size = if aligned % 16 == 0 {
+        aligned.max(16)
     } else {
-        (aligned + 8).max(8)  // Add 8 bytes padding to make frame_size ≡ 8 (mod 16)
+        (aligned + 16 - (aligned % 16)).max(16)  // Round up to 16-byte boundary
     };
 
     // ── Helper closures for stack slot access ──
@@ -281,8 +281,12 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
         emit(encode_sub_reg_imm32(Gpr::Rsp, frame_size as i32), "sub_rsp");
     }
 
-    // Push callee-saved registers (RBX, R12–R15) — always, to be safe
-    let callee_save_regs: Vec<Gpr> = vec![Gpr::Rbx, Gpr::R12, Gpr::R13, Gpr::R14, Gpr::R15];
+    // Push callee-saved registers.
+    // The stack-slot ISel only uses caller-saved registers (RAX, RCX, RDX,
+    // R10, R11). No callee-saved registers (RBX, R12-R15) are touched,
+    // so we don't need to save/restore any. This saves 40 bytes of stack
+    // and 10 bytes of code per function.
+    let callee_save_regs: Vec<Gpr> = vec![];
     for &reg in &callee_save_regs {
         emit(encode_push(reg), "push_callee_save");
     }
@@ -1063,24 +1067,31 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                 // signed i63, then double the FP result.
                                 //
                                 //   1. RCX = 1
-                                //   2. R10 = RAX            (save original)
+                                //   2. R11 = RAX            (save original)
                                 //   3. SHR RAX, CL          (halve; fits in i63)
                                 //   4. Convert RAX → float in XMM0
                                 //   5. ADDSD/ADDSS XMM0, XMM0  (double)
-                                //   6. If the original had bit 0 set, add 1.0
-                                //      (compensate for the truncated bit).
-                                //      For simplicity we skip the bit-0 fix-up;
-                                //      the error is at most 1 ULP for f64.
+                                //   6. AND R11, 1           (isolate bit 0)
+                                //   7. CVTSI2SD/SS XMM1, R11 (0.0 or 1.0)
+                                //   8. ADDSD/SS XMM0, XMM1  (correct 1-ULP error)
                                 code.extend(encode_mov_reg_imm32(Gpr::Rcx, 1));  // CL = 1
-                                code.extend(encode_mov_reg_reg(Gpr::R10, Gpr::Rax));  // save
+                                code.extend(encode_mov_reg_reg(Gpr::R11, Gpr::Rax));  // save original to R11
                                 code.extend(encode_shr_reg_cl(Gpr::Rax));  // RAX >>= 1
                                 if dst_is_f32 {
                                     code.extend(encode_cvtsi2ss_xmm_r64(Xmm::Xmm0, Gpr::Rax));
                                     code.extend(encode_addss_xmm_xmm(Xmm::Xmm0, Xmm::Xmm0));
+                                    // Bit-0 fix-up: convert saved bit 0 to 0.0/1.0 and add
+                                    code.extend(encode_and_reg_imm32(Gpr::R11, 1));
+                                    code.extend(encode_cvtsi2ss_xmm_r64(Xmm::Xmm1, Gpr::R11));
+                                    code.extend(encode_addss_xmm_xmm(Xmm::Xmm0, Xmm::Xmm1));
                                     code.extend(encode_movd_gpr_xmm(Gpr::Rax, Xmm::Xmm0));
                                 } else {
                                     code.extend(encode_cvtsi2sd_xmm_r64(Xmm::Xmm0, Gpr::Rax));
                                     code.extend(encode_addsd_xmm_xmm(Xmm::Xmm0, Xmm::Xmm0));
+                                    // Bit-0 fix-up: convert saved bit 0 to 0.0/1.0 and add
+                                    code.extend(encode_and_reg_imm32(Gpr::R11, 1));
+                                    code.extend(encode_cvtsi2sd_xmm_r64(Xmm::Xmm1, Gpr::R11));
+                                    code.extend(encode_addsd_xmm_xmm(Xmm::Xmm0, Xmm::Xmm1));
                                     code.extend(encode_movq_gpr_xmm(Gpr::Rax, Xmm::Xmm0));
                                 }
                             } else {
