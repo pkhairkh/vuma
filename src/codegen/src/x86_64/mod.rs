@@ -2036,7 +2036,11 @@ fn build_minimal_x86_64_elf(code: &[u8], base_addr: u64, bss_size: u64) -> Vec<u
 
     let elf_header_size: u64 = 64;
     let phdr_size: u64 = 56;
-    let num_phdrs: u64 = if bss_size > 0 { 2 } else { 1 };
+    // Program headers: (1) text LOAD, (2) BSS LOAD (if any BSS), (3) PT_GNU_STACK.
+    // PT_GNU_STACK is always emitted so the kernel explicitly marks the stack
+    // non-executable; without it, some loaders default to an executable stack
+    // (security risk). The +1 for PT_GNU_STACK keeps e_phnum in sync.
+    let num_phdrs: u64 = if bss_size > 0 { 3 } else { 2 };
     let phdr_end = elf_header_size + phdr_size * num_phdrs;
     // Page-align the text segment start for mmap compatibility (required by QEMU).
     let text_offset = ((phdr_end + FILE_PAGE_SIZE - 1) / FILE_PAGE_SIZE) * FILE_PAGE_SIZE;
@@ -2099,6 +2103,28 @@ fn build_minimal_x86_64_elf(code: &[u8], base_addr: u64, bss_size: u64) -> Vec<u
         elf.extend_from_slice(&bss_size.to_le_bytes()); // p_memsz
         elf.extend_from_slice(&FILE_PAGE_SIZE.to_le_bytes()); // p_align
     }
+
+    // --- Program Header (last): PT_GNU_STACK ---
+    // Marks the stack as non-executable (PF_W | PF_R, no PF_X). Always
+    // emitted — even when there is no BSS — so the loader never falls
+    // back to a default executable-stack policy. A zero p_memsz/p_filesz
+    // is the conventional "annotation-only" form: the kernel still
+    // allocates a stack of its default size, but applies our permission
+    // policy to it.
+    //
+    // p_type   = PT_GNU_STACK (0x6474e551)
+    // p_flags  = PF_W | PF_R  (0x6)         — explicitly NOT PF_X
+    // p_offset = 0, p_vaddr = 0, p_paddr = 0
+    // p_filesz = 0, p_memsz  = 0
+    // p_align  = 0x10                       — standard PT_GNU_STACK alignment
+    elf.extend_from_slice(&0x6474e551u32.to_le_bytes()); // p_type = PT_GNU_STACK
+    elf.extend_from_slice(&6u32.to_le_bytes()); // p_flags = PF_R | PF_W (no PF_X)
+    elf.extend_from_slice(&0u64.to_le_bytes()); // p_offset
+    elf.extend_from_slice(&0u64.to_le_bytes()); // p_vaddr
+    elf.extend_from_slice(&0u64.to_le_bytes()); // p_paddr
+    elf.extend_from_slice(&0u64.to_le_bytes()); // p_filesz
+    elf.extend_from_slice(&0u64.to_le_bytes()); // p_memsz
+    elf.extend_from_slice(&0x10u64.to_le_bytes()); // p_align
 
     // --- Padding + Code section ---
     // Pad to page-aligned text_offset
@@ -2725,6 +2751,43 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
 
         // mov r8, rdi (save n in r8)
         code.extend_from_slice(&[0x49, 0x89, 0xF8]); // mov r8, rdi
+
+        // ── Negative-number handling ─────────────────────────────────
+        // If r8 is negative, emit a leading '-' to stdout (write syscall)
+        // and negate r8 so the unsigned decimal loop below produces the
+        // correct magnitude digits. Without this, signed DIV alone would
+        // yield wrong results because the loop pre-zeros RDX instead of
+        // using CQO, and the digit extraction assumes a non-negative
+        // dividend.
+        //
+        // Encoding:
+        //   test r8, r8              ; 4D 85 C0       (3 bytes)
+        //   jns  .positive           ; 79 1E          (2 bytes, skip 30)
+        //   neg  r8                  ; 49 F7 D8       (3 bytes)
+        //   mov  byte [rsp], 0x2D    ; C6 04 24 2D    (4 bytes)  '-'
+        //   mov  edi, 1              ; BF 01 00 00 00 (5 bytes)  fd
+        //   lea  rsi, [rsp]          ; 48 8D 34 24    (4 bytes)  buf
+        //   mov  edx, 1              ; BA 01 00 00 00 (5 bytes)  count
+        //   mov  rax, 1              ; 48 C7 C0 01 00 00 00 (7)  sys_write
+        //   syscall                  ; 0F 05          (2 bytes)
+        // .positive:
+        //
+        // Skipped bytes after `jns`: 3 + 4 + 5 + 4 + 5 + 7 + 2 = 30 = 0x1E.
+        // Stack frame is fixed (sub rsp, 32 above), so [rsp] is a stable
+        // 1-byte scratch buffer that does not collide with the digit
+        // buffer at [rsp+20..rsp+21].
+        code.extend_from_slice(&[0x4D, 0x85, 0xC0]); // test r8, r8
+        code.extend_from_slice(&[0x79, 0x1E]); // jns +30 (to .positive)
+        code.extend_from_slice(&[0x49, 0xF7, 0xD8]); // neg r8
+        code.extend_from_slice(&[0xC6, 0x04, 0x24, 0x2D]); // mov byte [rsp], '-' (0x2D)
+        code.extend_from_slice(&[0xBF, 0x01, 0x00, 0x00, 0x00]); // mov edi, 1 (stdout)
+        code.extend_from_slice(&[0x48, 0x8D, 0x34, 0x24]); // lea rsi, [rsp]
+        code.extend_from_slice(&[0xBA, 0x01, 0x00, 0x00, 0x00]); // mov edx, 1
+        code.extend_from_slice(&[0x48, 0xC7, 0xC0, 0x01, 0x00, 0x00, 0x00]); // mov rax, 1 (sys_write)
+        code.extend_from_slice(&[0x0F, 0x05]); // syscall
+        // .positive:
+        //   (note: syscall clobbers rcx and r11, but rcx is reloaded below)
+
         // lea rcx, [rsp+20] (point to end of buffer)
         code.extend_from_slice(&[0x48, 0x8D, 0x4C, 0x24, 0x14]); // lea rcx, [rsp+20]
         // mov byte [rcx], 0x0a (newline)
@@ -2739,11 +2802,17 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         code.extend_from_slice(&[0xEB, 0x25]); // jmp +37 (to write code, past add rcx,1)
 
         // loop: (offset 0x0B from jnz target)
-        // mov rax, r8; xor rdx, rdx; mov r9, 10; div r9
+        // mov rax, r8; xor rdx, rdx; mov r9, 10; idiv r9
+        // Use signed IDIV (F7 /7) instead of unsigned DIV (F7 /6).  Because
+        // we negate negative inputs above, r8 is always non-negative on
+        // entry to the loop, so the dividend rdx:rax is a non-negative
+        // 128-bit value and signed/unsigned division agree — but IDIV is
+        // required to honour the spirit of the i64→decimal conversion
+        // contract for `print_int`.
         code.extend_from_slice(&[0x4C, 0x89, 0xC0]); // mov rax, r8
         code.extend_from_slice(&[0x48, 0x31, 0xD2]); // xor rdx, rdx
         code.extend_from_slice(&[0x49, 0xC7, 0xC1, 0x0A, 0x00, 0x00, 0x00]); // mov r9, 10
-        code.extend_from_slice(&[0x49, 0xF7, 0xF1]); // div r9
+        code.extend_from_slice(&[0x49, 0xF7, 0xF9]); // idiv r9 (was: div r9)
         // mov r8, rax; add dl, 0x30; mov [rcx], dl; sub rcx, 1
         code.extend_from_slice(&[0x49, 0x89, 0xC0]); // mov r8, rax
         code.extend_from_slice(&[0x80, 0xC2, 0x30]); // add dl, 0x30
@@ -3073,8 +3142,17 @@ impl Backend for X86_64Backend {
         // Data symbols (global variables from `allocate()` in VUMA source)
         // are referenced via R_X86_64_64 absolute 64-bit relocations.
         // They need addresses in a writable BSS segment.  We assign each
-        // unique symbol a slot of 8 bytes (pointer-sized) in BSS.
-        const BSS_SLOT_SIZE: u64 = 8;
+        // unique symbol a slot in BSS.
+        //
+        // The slot size must comfortably cover the largest object any
+        // single global may reference.  VUMA globals are produced by
+        // `allocate()` and the codegen has no per-symbol size metadata
+        // (the R_X86_64_64 relocation only carries an address), so we
+        // pick a generous 64-byte default per symbol.  This covers most
+        // small struct/array globals without making adjacent globals
+        // alias each other — the previous 8-byte slot caused globals
+        // larger than a pointer to silently overwrite their neighbours.
+        const BSS_SLOT_SIZE: u64 = 64; // Generous default per global symbol
         let mut data_symbols: Vec<String> = Vec::new();
         {
             let mut seen: HashSet<String> = HashSet::new();
@@ -3102,7 +3180,10 @@ impl Backend for X86_64Backend {
         const FILE_PAGE_SIZE: u64 = 0x1000;
         const VADDR_ALIGN: u64 = 0x10000;
         const BASE_ADDR: u64 = 0x400000;
-        let num_phdrs: u64 = if bss_size > 0 { 2 } else { 1 };
+        // Mirrors build_minimal_x86_64_elf: (text LOAD) + (BSS LOAD if any) +
+        // (PT_GNU_STACK, always). Keep this in sync with the emitter or
+        // text_offset / text_vaddr will diverge from the emitted ELF.
+        let num_phdrs: u64 = if bss_size > 0 { 3 } else { 2 };
         let phdr_end = ELF_HEADER_SIZE + PHDR_SIZE * num_phdrs;
         let text_offset = ((phdr_end + FILE_PAGE_SIZE - 1) / FILE_PAGE_SIZE) * FILE_PAGE_SIZE;
         let text_size = all_code.len() as u64;
@@ -3707,14 +3788,28 @@ mod tests {
         assert_eq!(u16::from_le_bytes([elf[16], elf[17]]), 2);
         // e_machine = EM_X86_64 (62)
         assert_eq!(u16::from_le_bytes([elf[18], elf[19]]), 62);
-        // With 1 phdr (no BSS), e_phnum = 1
-        assert_eq!(u16::from_le_bytes([elf[56], elf[57]]), 1);
-        // entry = vaddr_align(0x400000 + page_align(64 + 56)) = vaddr_align(0x401000) = 0x410000
+        // With no BSS, e_phnum = 2 (text LOAD + PT_GNU_STACK)
+        assert_eq!(u16::from_le_bytes([elf[56], elf[57]]), 2);
+        // entry = vaddr_align(0x400000 + page_align(64 + 2*56)) = vaddr_align(0x401000) = 0x410000
         // (64K-aligned for host page size compatibility with QEMU 10.x)
         let entry = u64::from_le_bytes([
             elf[24], elf[25], elf[26], elf[27], elf[28], elf[29], elf[30], elf[31],
         ]);
         assert_eq!(entry, 0x410000);
+
+        // Second program header (PT_GNU_STACK) starts at offset 64 + 56 = 120.
+        // PT_GNU_STACK is always emitted (even without BSS) and marks the
+        // stack as non-executable.
+        let ph2 = 64 + 56;
+        let p_type = u32::from_le_bytes([elf[ph2], elf[ph2+1], elf[ph2+2], elf[ph2+3]]);
+        assert_eq!(p_type, 0x6474e551, "PT_GNU_STACK type");
+        let p_flags = u32::from_le_bytes([elf[ph2+4], elf[ph2+5], elf[ph2+6], elf[ph2+7]]);
+        assert_eq!(p_flags, 6, "PT_GNU_STACK flags = PF_R | PF_W (no PF_X)");
+        let p_align = u64::from_le_bytes([
+            elf[ph2+48], elf[ph2+49], elf[ph2+50], elf[ph2+51],
+            elf[ph2+52], elf[ph2+53], elf[ph2+54], elf[ph2+55],
+        ]);
+        assert_eq!(p_align, 0x10, "PT_GNU_STACK align");
     }
 
     #[test]
@@ -3728,18 +3823,18 @@ mod tests {
         assert_eq!(u16::from_le_bytes([elf[16], elf[17]]), 2);
         // e_machine = EM_X86_64
         assert_eq!(u16::from_le_bytes([elf[18], elf[19]]), 62);
-        // With BSS, e_phnum = 2
-        assert_eq!(u16::from_le_bytes([elf[56], elf[57]]), 2);
+        // With BSS, e_phnum = 3 (text LOAD + BSS LOAD + PT_GNU_STACK)
+        assert_eq!(u16::from_le_bytes([elf[56], elf[57]]), 3);
         // Entry point is still in text segment
         let entry = u64::from_le_bytes([
             elf[24], elf[25], elf[26], elf[27], elf[28], elf[29], elf[30], elf[31],
         ]);
-        // With 2 phdrs, text_offset = page_align(64 + 2*56) = page_align(176) = 0x1000
+        // With 3 phdrs, text_offset = page_align(64 + 3*56) = page_align(232) = 0x1000
         // entry = vaddr_align(0x400000 + 0x1000) = vaddr_align(0x401000) = 0x410000
         // (64K-aligned for host page size compatibility with QEMU 10.x)
         assert_eq!(entry, 0x410000);
 
-        // Second program header (BSS) starts at offset 64 + 56 = 120
+        // Second program header (BSS LOAD) starts at offset 64 + 56 = 120
         // Elf64_Phdr layout: p_type(4) p_flags(4) p_offset(8) p_vaddr(8) p_paddr(8) p_filesz(8) p_memsz(8) p_align(8)
         let ph2 = 64 + 56;
         let p_type = u32::from_le_bytes([elf[ph2], elf[ph2+1], elf[ph2+2], elf[ph2+3]]);
@@ -3763,6 +3858,19 @@ mod tests {
         // BSS vaddr should be 64K-aligned and after the text segment
         assert_eq!(bss_vaddr % 0x10000, 0, "BSS vaddr should be 64K-aligned");
         assert!(bss_vaddr > 0x410000, "BSS should be after text segment");
+
+        // Third program header (PT_GNU_STACK) starts at offset 64 + 2*56 = 176.
+        // Always emitted; marks stack non-executable.
+        let ph3 = 64 + 2 * 56;
+        let p_type3 = u32::from_le_bytes([elf[ph3], elf[ph3+1], elf[ph3+2], elf[ph3+3]]);
+        assert_eq!(p_type3, 0x6474e551, "PT_GNU_STACK type");
+        let p_flags3 = u32::from_le_bytes([elf[ph3+4], elf[ph3+5], elf[ph3+6], elf[ph3+7]]);
+        assert_eq!(p_flags3, 6, "PT_GNU_STACK flags = PF_R | PF_W (no PF_X)");
+        let p_align3 = u64::from_le_bytes([
+            elf[ph3+48], elf[ph3+49], elf[ph3+50], elf[ph3+51],
+            elf[ph3+52], elf[ph3+53], elf[ph3+54], elf[ph3+55],
+        ]);
+        assert_eq!(p_align3, 0x10, "PT_GNU_STACK align");
     }
 
     // ── Backend Trait Dispatch Test ─────────────────────────────────────
