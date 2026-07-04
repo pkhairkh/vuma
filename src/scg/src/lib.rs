@@ -121,9 +121,9 @@ pub use loop_detection::{LoopDetector, LoopNestingTree, NaturalLoop};
 // -- Transform passes --
 pub use transform::{
     dead_region_elim, detect_tail_calls, licm, strength_reduce, CommonSubexpressionElimination,
-    ConstantFolding, DeadCodeElimination, DeadRegionElimination, InliningPass,
-    LoopInvariantCodeMotion, PassManager, PassResult, PipelineResult, SCGPass, StrengthReduction,
-    TailCallOptDetection, VerificationPass,
+    ConstantFolding, DeadCodeElimination, DeadRegionElimination, InterproceduralAllocFlow,
+    InliningPass, LoopInvariantCodeMotion, PassManager, PassResult, PipelineResult, SCGPass,
+    StrengthReduction, TailCallOptDetection, VerificationPass,
 };
 
 // -- Structured output for LLMs --
