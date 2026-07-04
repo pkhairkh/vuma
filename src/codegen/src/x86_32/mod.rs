@@ -443,6 +443,20 @@ pub fn encode_sub_reg_reg(dst: Gpr, src: Gpr) -> Vec<u8> {
     code
 }
 
+/// Encode ADC r32, r32 (11 /r) — add with carry.
+pub fn encode_adc_reg_reg(dst: Gpr, src: Gpr) -> Vec<u8> {
+    let mut code = Vec::with_capacity(3);
+    emit_rexw_reg_reg(&mut code, 0x11, src, dst);
+    code
+}
+
+/// Encode SBB r32, r32 (19 /r) — subtract with borrow.
+pub fn encode_sbb_reg_reg(dst: Gpr, src: Gpr) -> Vec<u8> {
+    let mut code = Vec::with_capacity(3);
+    emit_rexw_reg_reg(&mut code, 0x19, src, dst);
+    code
+}
+
 /// Encode IMUL r32, r32 (0F AF /r) — 32-bit multiply.
 /// No REX prefix needed for x86_32.
 pub fn encode_imul_reg_reg(dst: Gpr, src: Gpr) -> Vec<u8> {
@@ -768,6 +782,24 @@ pub fn encode_add_reg_imm32(dst: Gpr, imm: i32) -> Vec<u8> {
     let mut code = Vec::with_capacity(7);
         code.push(0x81);
     code.push(modrm(3, 0, dst.encoding() & 7));
+    code.extend_from_slice(&imm.to_le_bytes());
+    code
+}
+
+/// Encode ADC r32, imm32 (81 /2 + imm32) — add with carry.
+pub fn encode_adc_reg_imm32(dst: Gpr, imm: i32) -> Vec<u8> {
+    let mut code = Vec::with_capacity(7);
+    code.push(0x81);
+    code.push(modrm(3, 2, dst.encoding() & 7)); // /2 is the ADC extension
+    code.extend_from_slice(&imm.to_le_bytes());
+    code
+}
+
+/// Encode SBB r32, imm32 (81 /3 + imm32) — subtract with borrow.
+pub fn encode_sbb_reg_imm32(dst: Gpr, imm: i32) -> Vec<u8> {
+    let mut code = Vec::with_capacity(7);
+    code.push(0x81);
+    code.push(modrm(3, 3, dst.encoding() & 7)); // /3 is the SBB extension
     code.extend_from_slice(&imm.to_le_bytes());
     code
 }
