@@ -43,6 +43,9 @@ fn main() -> u64 {
     // Read it back
     result: u32 = read_u32(w, 0);
 
+    free(block);
+    free(w);
+
     // Return low byte
     return result & 0xFF;
 }

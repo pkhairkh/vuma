@@ -23,11 +23,11 @@ fn backend_from_name(name: &str) -> Result<BackendKind, String> {
     }
 }
 
-fn compile_for_backend(source: &str, kind: BackendKind) -> Result<Vec<u8>, String> {
-    compile_for_backend_with_path(source, kind, None)
+fn compile_for_backend(source: &str, kind: BackendKind) -> Result<(Vec<u8>, Option<String>), String> {
+    compile_for_backend_with_path(source, kind, None, false)
 }
 
-fn compile_for_backend_with_path(source: &str, kind: BackendKind, file_path: Option<&Path>) -> Result<Vec<u8>, String> {
+fn compile_for_backend_with_path(source: &str, kind: BackendKind, file_path: Option<&Path>, verify: bool) -> Result<(Vec<u8>, Option<String>), String> {
     // Resolve imports if a file path is provided
     let ast = if let Some(path) = file_path {
         let mut resolver = ModuleResolver::new();
@@ -42,20 +42,41 @@ fn compile_for_backend_with_path(source: &str, kind: BackendKind, file_path: Opt
         result.unwrap()
     };
     let mut scg = { let mut c = AstToScg::new(); c.convert(&ast).map_err(|e| format!("scg: {}", e))? };
-    let config = CompileConfig {
-        target: if kind == BackendKind::Wasm32 { CompileTarget::Wasm32 } else { CompileTarget::Linux },
-        opt_level: OptLevel::O0, verification_level: VerificationLevel::None, ..Default::default()
-    };
-    let _ = run_scg_transforms(&mut scg, &config);
+
+    // Run InterproceduralAllocFlow pass to connect factory-function
+    // allocations to their callers' free() calls.
+    use vuma_scg::SCGPass;
+    let _ = vuma_scg::InterproceduralAllocFlow::new().run(&mut scg);
+
+    // Optionally run IVE verification (non-fatal — report to stderr).
+    let mut ive_status: Option<String> = None;
+    if verify {
+        let config = CompileConfig {
+            target: if kind == BackendKind::Wasm32 { CompileTarget::Wasm32 } else { CompileTarget::Linux },
+            opt_level: OptLevel::O0, verification_level: VerificationLevel::Normal, ..Default::default()
+        };
+        let _ = run_scg_transforms(&mut scg, &config);
+        let ive_input = vuma_ive::verification::VerificationInput::from_scg(scg.clone());
+        let aggregator = vuma_ive::invariant_aggregator::InvariantAggregator::new()
+            .with_level(vuma_ive::invariant_aggregator::VerificationLevel::Normal);
+        let result = aggregator.verify_all(&ive_input);
+        let verdict = format!("{:?}", result.overall);
+        let summary = format!(
+            "passed={} failed={} total={}",
+            result.summary.passed,
+            result.summary.failed,
+            result.summary.total_checked
+        );
+        ive_status = Some(format!("{} {}", verdict, summary));
+        eprintln!("IVE: {} {}", verdict, summary);
+    }
+
     // Use the unified direct AST→codegen bridge (same path as vuma build/emit/run).
-    // The deprecated bridge_scg_to_codegen(&scg) path is no longer used here.
     let codegen_scg = bridge_ast_to_codegen_scg(&ast);
     let ir_program = { let mut b = IRBuilder::new(); b.build(&codegen_scg).map_err(|e| format!("ir: {}", e))? };
     let backend = create_backend(kind).map_err(|e| format!("backend: {}", e))?;
 
     // Populate thread-local set of 64-bit-returning function names.
-    // Used by arm32 allocate_registers to determine whether to store R1
-    // (high word) for non-extern call returns.
     {
         use std::collections::HashSet;
         let func_64bit: HashSet<String> = ir_program.functions.iter()
@@ -71,7 +92,8 @@ fn compile_for_backend_with_path(source: &str, kind: BackendKind, file_path: Opt
     }
     let total_code: usize = allocated.iter().map(|f| f.code_size).sum();
     let program = AllocatedProgram { functions: allocated, total_code_size: total_code, total_data_size: 0 };
-    backend.encode_program(&program).map_err(|e| format!("encode: {}", e))
+    let binary = backend.encode_program(&program).map_err(|e| format!("encode: {}", e))?;
+    Ok((binary, ive_status))
 }
 
 fn execute_binary(binary: &[u8], qemu: Option<&str>, timeout_secs: u64) -> (i32, Vec<u8>, Vec<u8>, bool) {
@@ -134,7 +156,7 @@ fn run_diag(backend_name: &str, examples_dir: &str, qemu: Option<&str>) {
         let path = format!("{}/{}", examples_dir, ex);
         let source = fs::read_to_string(&path).unwrap();
         let binary = match compile_for_backend(&source, kind) {
-            Ok(b) => b,
+            Ok((b, _)) => b,
             Err(e) => { compile_fail.push((ex.clone(), e)); continue; }
         };
         if let Some(q) = qemu {
@@ -176,13 +198,23 @@ fn main() {
         run_diag(backend, examples_dir, qemu);
         return;
     }
-    let path = &args[1];
-    let out_path = &args[2];
-    let backend_name = if args.len() > 3 { args[3].as_str() } else { "aarch64" };
+    // Parse flags: --verify enables IVE verification (non-fatal).
+    let mut verify = false;
+    let positional: Vec<String> = args.iter().skip(1).filter(|a| {
+        if *a == "--verify" { verify = true; false }
+        else { true }
+    }).cloned().collect();
+    if positional.len() < 2 {
+        eprintln!("Usage: compile_dump <source.vuma> <output.bin> [backend] [--verify]");
+        std::process::exit(1);
+    }
+    let path = &positional[0];
+    let out_path = &positional[1];
+    let backend_name = if positional.len() > 2 { positional[2].as_str() } else { "aarch64" };
     let kind = backend_from_name(backend_name).unwrap_or(BackendKind::AArch64);
     let source = std::fs::read_to_string(path).unwrap();
     let file_path = std::path::Path::new(path);
-    let binary = compile_for_backend_with_path(&source, kind, Some(file_path)).unwrap();
+    let (binary, _ive_status) = compile_for_backend_with_path(&source, kind, Some(file_path), verify).unwrap();
     std::fs::write(out_path, &binary).unwrap();
     eprintln!("Wrote {} bytes to {}", binary.len(), out_path);
 }

@@ -85,4 +85,6 @@ fn main() {
 
     // Read the result (should be 3)
     result = *counter;
+    free(lock);
+    free(counter);
 }

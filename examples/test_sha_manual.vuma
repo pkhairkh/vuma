@@ -107,5 +107,8 @@ fn main() -> u64 {
 
     // Return low byte of new_a
     result: u32 = new_a & 0xFF;
+    free(state);
+    free(w);
+    free(block);
     return result;
 }

@@ -9,6 +9,7 @@ SKIP_BUILD=0
 NO_PUSH=0
 FRESH=0
 BACKENDS=""
+VERIFY=0
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
 while [[ $# -gt 0 ]]; do
@@ -18,6 +19,7 @@ while [[ $# -gt 0 ]]; do
         --no-push) NO_PUSH=1; shift ;;
         --fresh) FRESH=1; shift ;;
         --backends) BACKENDS="$2"; shift 2 ;;
+        --verify) VERIFY=1; shift ;;
         *) echo "Unknown option: $1"; exit 1 ;;
     esac
 done
@@ -185,12 +187,13 @@ def find_tests():
     return tests
 
 def run_one(args):
-    test_path, category, test_name, expected, skip_backends, backend = args
+    test_path, category, test_name, expected, skip_backends, backend, verify = args
     result = {
         "test": test_name, "category": category, "path": test_path,
         "backend": backend, "expected": expected, "actual": None,
         "compile_ok": False, "crashed": False, "timed_out": False,
         "match": False, "skipped": False,
+        "ive_verdict": None, "ive_passed": None, "ive_failed": None, "ive_total": None,
     }
     # Honor skip_on marker — count as pass with skipped=True so the test
     # is visible in results but doesn't break the pass rate.
@@ -201,10 +204,32 @@ def run_one(args):
         return result
     out = f"/tmp/vuma_{os.getpid()}_{backend}_{test_name}.bin"
     try:
-        r = subprocess.run([str(COMPILE), test_path, out, backend], capture_output=True, timeout=15)
+        compile_cmd = [str(COMPILE), test_path, out, backend]
+        if verify:
+            compile_cmd.append("--verify")
+        r = subprocess.run(compile_cmd, capture_output=True, timeout=15)
         if r.returncode != 0:
             return result
         result["compile_ok"] = True
+
+        # Parse IVE status from stderr (if --verify was passed)
+        if verify:
+            stderr = r.stderr.decode(errors="replace")
+            for line in stderr.splitlines():
+                if line.startswith("IVE: "):
+                    # Format: "IVE: Pass passed=5 failed=0 total=5"
+                    parts = line[5:].split()
+                    if parts:
+                        result["ive_verdict"] = parts[0]
+                    for p in parts[1:]:
+                        if "=" in p:
+                            k, v = p.split("=", 1)
+                            try:
+                                iv = int(v)
+                                if k == "passed": result["ive_passed"] = iv
+                                elif k == "failed": result["ive_failed"] = iv
+                                elif k == "total": result["ive_total"] = iv
+                            except: pass
 
         if backend == "wasm32":
             os.chmod(out, 0o644)
@@ -264,13 +289,15 @@ def main():
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--backends", default=None)
     ap.add_argument("--checkpoint", default=str(RESULTS / "checkpoint.jsonl"))
+    ap.add_argument("--verify", action="store_true",
+                    help="Run IVE verification (non-fatal) and report pass rate")
     args = ap.parse_args()
 
     RESULTS.mkdir(parents=True, exist_ok=True)
     tests = find_tests()
     bl = args.backends.split(",") if args.backends else list(BACKENDS.keys())
     bl = [b for b in bl if b in BACKENDS]
-    tasks = [(*t, b) for t in tests for b in bl]
+    tasks = [(*t, b, args.verify) for t in tests for b in bl]
     total = len(tasks)
 
     # Resume support
@@ -287,6 +314,8 @@ def main():
     print(f"Tests: {len(tests)} × Backends: {len(bl)} = {total} runs")
     print(f"Already done: {len(done)}, Remaining: {len(remaining)}")
     print(f"Backends: {bl}")
+    if args.verify:
+        print(f"IVE verification: ENABLED (non-fatal, reported separately)")
     print()
 
     ckpt = open(args.checkpoint, "a", buffering=1)
@@ -344,6 +373,25 @@ def main():
         sk = f" (skip={s['skipped']})" if s["skipped"] else ""
         print(f"  {b:14s} {s['match']:5d}/{s['total']:5d} = {pct:.2f}%{sk}")
 
+    # IVE verification summary (if --verify was used)
+    ive_runs = [r for r in latest.values() if r.get("ive_verdict")]
+    if ive_runs:
+        ive_pass = sum(1 for r in ive_runs if r.get("ive_verdict") == "Pass")
+        ive_fail = sum(1 for r in ive_runs if r.get("ive_verdict") == "Fail")
+        ive_total = len(ive_runs)
+        print()
+        print(f"IVE Verification: {ive_pass}/{ive_total} = {100*ive_pass/ive_total:.2f}% pass")
+        # Per-backend IVE stats
+        ive_by_backend = defaultdict(lambda: {"total": 0, "pass": 0})
+        for r in ive_runs:
+            ive_by_backend[r["backend"]]["total"] += 1
+            if r.get("ive_verdict") == "Pass":
+                ive_by_backend[r["backend"]]["pass"] += 1
+        for b in sorted(ive_by_backend):
+            s = ive_by_backend[b]
+            pct = 100 * s["pass"] / s["total"] if s["total"] else 0
+            print(f"  {b:14s} {s['pass']:5d}/{s['total']:5d} = {pct:.2f}%")
+
     # Save summary
     summary = {
         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime()),
@@ -355,6 +403,14 @@ def main():
         "pass_rate": f"{100*matches/total:.2f}%",
         "per_backend": {b: dict(s) for b, s in by_backend.items()},
     }
+    if ive_runs:
+        ive_pass = sum(1 for r in ive_runs if r.get("ive_verdict") == "Pass")
+        summary["ive_verification"] = {
+            "total": len(ive_runs),
+            "pass": ive_pass,
+            "fail": len(ive_runs) - ive_pass,
+            "pass_rate": f"{100*ive_pass/len(ive_runs):.2f}%",
+        }
     with open(RESULTS / "summary.json", "w") as f:
         json.dump(summary, f, indent=2)
 
@@ -382,7 +438,7 @@ PYEOF
 
 export REPO_DIR="$REPO_DIR"
 export WASMTIME_BIN="$WASMTIME_BIN"
-python3 "$RESULTS_DIR/run_tests.py" --workers "$WORKERS" ${BACKENDS:+--backends "$BACKENDS"}
+python3 "$RESULTS_DIR/run_tests.py" --workers "$WORKERS" ${BACKENDS:+--backends "$BACKENDS"} ${VERIFY:+--verify}
 TEST_EXIT=$?
 
 echo ""
