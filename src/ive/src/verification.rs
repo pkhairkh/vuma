@@ -610,12 +610,19 @@ impl VerificationEngine {
         let mut node_map: HashMap<NodeId, CleanupNodeId> = HashMap::new();
 
         // Add nodes for each SCG node
+        // IMPORTANT: Use the allocation's NodeId as the CleanupResourceId,
+        // NOT the region_id. Multiple allocations in the same region
+        // (which is the common case — all allocations in main() share
+        // RegionId(1)) must have distinct resource IDs, otherwise freeing
+        // allocation B after freeing allocation A looks like a double-free.
+        // Deallocation references its allocation via `allocation_node`,
+        // so it uses that NodeId to match the allocation's resource ID.
         for node in scg.nodes() {
             let op = match node.node_type {
                 NodeType::Allocation => {
-                    if let NodePayload::Allocation(alloc) = &node.payload {
+                    if let NodePayload::Allocation(_alloc) = &node.payload {
                         Some(OperationKind::Acquire {
-                            resource: CleanupResourceId(alloc.region_id.as_u64()),
+                            resource: CleanupResourceId(node.id.as_u64()),
                             kind: CleanupResourceKind::Memory,
                         })
                     } else {
@@ -625,7 +632,7 @@ impl VerificationEngine {
                 NodeType::Deallocation => {
                     if let NodePayload::Deallocation(dealloc) = &node.payload {
                         Some(OperationKind::Release {
-                            resource: CleanupResourceId(dealloc.region_id.as_u64()),
+                            resource: CleanupResourceId(dealloc.allocation_node.as_u64()),
                             kind: CleanupResourceKind::Memory,
                         })
                     } else {
@@ -756,16 +763,12 @@ impl VerificationEngine {
             if node.node_type != NodeType::Allocation {
                 continue;
             }
-            let alloc_region_id = match &node.payload {
-                NodePayload::Allocation(alloc) => alloc.region_id,
-                _ => continue,
-            };
             let has_ctrlflow_pred = scg.edges().any(|e| {
                 e.target == node.id && matches!(e.kind, EdgeKind::ControlFlow)
             });
             if !has_ctrlflow_pred {
                 graph.mark_static_lifetime(CleanupResourceId(
-                    alloc_region_id.as_u64(),
+                    node.id.as_u64(),
                 ));
             }
         }

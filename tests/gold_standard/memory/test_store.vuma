@@ -1,7 +1,7 @@
 // Test: allocate, store, return
-// Expected exit code: 0
 fn main() -> i32 {
     msg = allocate(3);
     *(msg + 0) = 97;
+    free(msg);
     return 0;
 }
