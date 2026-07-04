@@ -1860,16 +1860,54 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     // For 5+ args, push them on the stack (reverse order).
                     let call_arg_regs = [Gpr::Rdi, Gpr::Rsi, Gpr::Rdx, Gpr::Rcx];
                     let num_reg_args = call_arg_regs.len().min(args.len());
-                    
+
+                    // ── Stack alignment for stack-passed args (SysV i386 ABI) ──
+                    // The ABI requires (ESP + 4) % 16 == 0 at the callee's entry
+                    // point, which means ESP % 16 == 0 immediately before the
+                    // CALL instruction (CALL pushes a 4-byte return address).
+                    //
+                    // The function prologue guarantees ESP % 16 == 0 at the
+                    // start of the function body (see the `frame_size` alignment
+                    // computation above: it forces `frame_size % 16 == 12` so
+                    // that `push ebp` (-4) + `sub esp, frame_size` (-12) +
+                    // `push rbx` (-4) brings ESP back to 0 mod 16).
+                    //
+                    // Pushing N stack args subtracts 4*N bytes from ESP.  To
+                    // restore ESP % 16 == 0 before CALL, we round the total
+                    // stack-args area up to a multiple of 16:
+                    //   aligned_bytes = (stack_bytes + 15) & !15
+                    //   padding       = aligned_bytes - stack_bytes
+                    // and `SUB ESP, padding` *before* pushing the args.  After
+                    // CALL we `ADD ESP, aligned_bytes` to release both the
+                    // padding and the pushed args.
+                    let num_stack_args = args.len().saturating_sub(num_reg_args);
+                    let stack_bytes = num_stack_args * 4;
+                    let aligned_bytes = (stack_bytes + 15) & !15;
+                    let padding = aligned_bytes - stack_bytes;
+
+                    // SUB ESP, padding before pushing args (i386 stack alignment).
+                    // Use the 3-byte `83 /5 ib` form for small padding (≤ 127)
+                    // and the 6-byte `81 /5 id` form otherwise.
+                    if padding > 0 {
+                        if padding <= 0x7f {
+                            // SUB ESP, imm8  →  83 EC <ib>
+                            code.extend_from_slice(&[0x83, 0xEC, padding as u8]);
+                        } else {
+                            // SUB ESP, imm32 →  81 EC <id>
+                            code.extend_from_slice(&[0x81, 0xEC]);
+                            code.extend_from_slice(&(padding as i32).to_le_bytes());
+                        }
+                    }
+
                     // Push extra args (5+) on stack in reverse order
-                    if args.len() > num_reg_args {
+                    if num_stack_args > 0 {
                         for arg in args[num_reg_args..].iter().rev() {
                             // Load arg into EAX, then push EAX
                             code.extend(load_value(arg, Gpr::Rax));
                             code.extend(encode_push(Gpr::Rax));
                         }
                     }
-                    
+
                     // Load first 4 args into registers
                     for (i, arg) in args.iter().take(num_reg_args).enumerate() {
                         code.extend(load_value(arg, call_arg_regs[i]));
@@ -1882,11 +1920,11 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                         symbol: call_target.clone(),
                         reloc_type: R_X86_64_PLT32.to_string(),
                     });
-                    
-                    // Clean up stack if we pushed extra args
-                    if args.len() > num_reg_args {
-                        let stack_bytes = (args.len() - num_reg_args) * 4;
-                        code.extend(encode_add_reg_imm32(Gpr::Rsp, stack_bytes as i32));
+
+                    // Clean up stack: release both padding and pushed args.
+                    // Use `ADD ESP, aligned_bytes` (the rounded-up total).
+                    if aligned_bytes > 0 {
+                        code.extend(encode_add_reg_imm32(Gpr::Rsp, aligned_bytes as i32));
                     }
 
                     // Store return value to dst's stack slot.
