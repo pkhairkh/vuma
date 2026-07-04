@@ -670,6 +670,17 @@ impl ExclusivityVerifier {
                     continue;
                 }
 
+                // Skip if accesses are to different regions — writes to
+                // different allocations cannot conflict regardless of
+                // byte-range overlap.  Without this check, all accesses
+                // with base_address=0 (the default when the SCG doesn't
+                // track concrete addresses) would be reported as
+                // overlapping, even when they target completely different
+                // buffers.
+                if a1.region_id != a2.region_id {
+                    continue;
+                }
+
                 // Skip if byte ranges don't overlap.
                 if !a1.overlaps(a2) {
                     continue;

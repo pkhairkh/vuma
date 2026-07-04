@@ -325,6 +325,37 @@ impl VerificationEngine {
                         label: Some("return".to_string()),
                     });
                 }
+                // Include Derivation edges to bridge Allocation and
+                // Deallocation nodes into the ControlFlow CFG.
+                //
+                // The parser emits Allocation/Deallocation nodes OFF the
+                // main ControlFlow chain: a Computation node (e.g. the
+                // assignment "region = allocate(8)") has a Derivation edge
+                // TO the Allocation node, and the Allocation node has a
+                // Derivation edge TO the Deallocation node. Without
+                // including these Derivation edges in the CFG, the
+                // Allocation node is a disconnected dead-end, and
+                // `is_reachable(alloc_point, dealloc_point)` returns
+                // false — producing a false-positive "Resource leak"
+                // report even when the program correctly calls `free()`.
+                //
+                // This mirrors the same fix already applied to
+                // `extract_cleanup_graph` (see lines 617-627 above),
+                // which is why the Cleanup invariant passes but the
+                // Liveness invariant does not.
+                //
+                // Derivation edges only connect logically-related nodes
+                // (Computation↔Allocation, Allocation↔Deallocation), so
+                // they cannot create "spurious shortcut" paths between
+                // unrelated resources.
+                vuma_scg::edge::EdgeKind::Derivation => {
+                    input.add_cfg_edge(crate::liveness::ControlFlowEdge {
+                        from: PointId(edge.source.as_u64()),
+                        to: PointId(edge.target.as_u64()),
+                        conditional: false,
+                        label: Some("derivation".to_string()),
+                    });
+                }
                 _ => {}
             }
         }
@@ -340,13 +371,20 @@ impl VerificationEngine {
     /// Extract exclusivity-relevant input from the SCG.
     fn extract_exclusivity_input(&self, scg: &SCG) -> ExclusivityInput {
         let mut input = ExclusivityInput::new();
-        let mut next_access_id: u64 = 1;
 
+        // First pass: create AccessRecords for all Access nodes.
+        // Use the SCG NodeId as the AccessId so that sync edges (which
+        // reference nodes by NodeId) correctly match the access records.
+        // Use the access's `offset` field (if present) as the base_address
+        // so that writes to different offsets within the same buffer
+        // (e.g., `*(buf+0)` and `*(buf+1)`) are correctly recognized as
+        // non-overlapping.  Previously, base_address was hard-coded to 0,
+        // causing all accesses to the same region to appear overlapping.
+        let mut access_node_ids: Vec<vuma_scg::node::NodeId> = Vec::new();
         for node in scg.nodes() {
             if node.node_type == NodeType::Access {
                 if let NodePayload::Access(access) = &node.payload {
-                    let access_id = crate::exclusivity::AccessId(next_access_id);
-                    next_access_id += 1;
+                    let access_id = crate::exclusivity::AccessId(node.id.as_u64());
 
                     let kind = match access.mode {
                         AccessMode::Read => ExclusivityAccessKind::Read,
@@ -354,7 +392,7 @@ impl VerificationEngine {
                         AccessMode::ReadWrite => ExclusivityAccessKind::Write, // Conservative
                     };
 
-                    let base_address = 0; // SCG doesn't track concrete addresses
+                    let base_address = access.offset.unwrap_or(0);
                     let size = access.access_size.unwrap_or(8);
 
                     let pp = format!(
@@ -372,23 +410,84 @@ impl VerificationEngine {
                         node.id.as_u64(),          // derivation_id
                         access.region_id.as_u64(), // region_id
                     ));
+                    access_node_ids.push(node.id);
                 }
             }
         }
 
-        // Extract synchronization edges from ControlFlow edges between Access nodes
+        // Build a reachability map between Access nodes using BOTH
+        // ControlFlow and Derivation edges.  Access nodes are connected
+        // to the ControlFlow chain only via Derivation edges (from their
+        // parent Computation nodes), so a BFS that only follows
+        // ControlFlow would never leave an Access node.  We traverse:
+        //   - ControlFlow edges (forward, for execution order)
+        //   - Derivation edges (bidirectional, to bridge Access nodes
+        //     to/from their parent Computation nodes on the ControlFlow
+        //     chain)
+        // DataFlow edges are excluded — they represent data dependencies,
+        // not execution order, and could create spurious orderings.
+        use std::collections::{HashMap, HashSet, VecDeque};
+        let mut fwd_cf: HashMap<u64, Vec<u64>> = HashMap::new();
+        let mut fwd_deriv: HashMap<u64, Vec<u64>> = HashMap::new();
+        let mut bwd_deriv: HashMap<u64, Vec<u64>> = HashMap::new();
         for edge in scg.edges() {
-            if edge.kind == vuma_scg::edge::EdgeKind::ControlFlow {
-                let src = scg.get_node(edge.source);
-                let dst = scg.get_node(edge.target);
-                if let (Some(s), Some(d)) = (src, dst) {
-                    if s.node_type == NodeType::Access && d.node_type == NodeType::Access {
-                        // Control flow between two accesses creates a happens-before ordering
-                        input.add_sync_edge(SyncEdgeRecord::new(
-                            crate::exclusivity::AccessId(edge.source.as_u64()),
-                            crate::exclusivity::AccessId(edge.target.as_u64()),
-                            SyncOrdering::HappensBefore,
-                        ));
+            match edge.kind {
+                vuma_scg::edge::EdgeKind::ControlFlow => {
+                    fwd_cf.entry(edge.source.as_u64()).or_default().push(edge.target.as_u64());
+                }
+                vuma_scg::edge::EdgeKind::Derivation => {
+                    fwd_deriv.entry(edge.source.as_u64()).or_default().push(edge.target.as_u64());
+                    bwd_deriv.entry(edge.target.as_u64()).or_default().push(edge.source.as_u64());
+                }
+                _ => {}
+            }
+        }
+
+        // For each Access node, BFS through ControlFlow (forward) and
+        // Derivation (bidirectional) to find all reachable Access nodes.
+        let access_id_set: HashSet<u64> = access_node_ids.iter().map(|n| n.as_u64()).collect();
+        for &src_node in &access_node_ids {
+            let src_u64 = src_node.as_u64();
+            let mut visited: HashSet<u64> = HashSet::new();
+            let mut queue: VecDeque<u64> = VecDeque::new();
+            // Start by going backward through Derivation to reach the
+            // parent Computation node on the ControlFlow chain.
+            if let Some(preds) = bwd_deriv.get(&src_u64) {
+                for &p in preds {
+                    queue.push_back(p);
+                }
+            }
+            while let Some(curr) = queue.pop_front() {
+                if !visited.insert(curr) {
+                    continue; // Already visited
+                }
+                if access_id_set.contains(&curr) && curr != src_u64 {
+                    // Found a reachable Access node — add sync edge.
+                    input.add_sync_edge(SyncEdgeRecord::new(
+                        crate::exclusivity::AccessId(src_u64),
+                        crate::exclusivity::AccessId(curr),
+                        SyncOrdering::HappensBefore,
+                    ));
+                    // Continue BFS past this Access node (it may bridge
+                    // to further Access nodes via its own Derivation
+                    // edges).
+                }
+                // Forward ControlFlow (execution order)
+                if let Some(succs) = fwd_cf.get(&curr) {
+                    for &s in succs {
+                        queue.push_back(s);
+                    }
+                }
+                // Forward Derivation (Computation → Access)
+                if let Some(succs) = fwd_deriv.get(&curr) {
+                    for &s in succs {
+                        queue.push_back(s);
+                    }
+                }
+                // Backward Derivation (Access ← Computation)
+                if let Some(preds) = bwd_deriv.get(&curr) {
+                    for &p in preds {
+                        queue.push_back(p);
                     }
                 }
             }
