@@ -1770,7 +1770,7 @@ fn build_loongarch64_elf_2seg(code: &[u8], base_addr: u64) -> Vec<u8> {
 
     let elf_header_size: u64 = 64;
     let phdr_size: u64 = 56;
-    let num_phdrs: u64 = 2;
+    let num_phdrs: u64 = 3; // 2x PT_LOAD + 1x PT_GNU_STACK
     let phdr_end = elf_header_size + num_phdrs * phdr_size;
     // Page-align the text segment start in the file.
     let text_offset = phdr_end; // No page alignment — code right after headers
@@ -1804,7 +1804,7 @@ fn build_loongarch64_elf_2seg(code: &[u8], base_addr: u64) -> Vec<u8> {
     elf.extend_from_slice(&0x43u32.to_le_bytes()); // e_flags = 0x43 (LP64D ABI double-float)
     elf.extend_from_slice(&64u16.to_le_bytes()); // e_ehsize
     elf.extend_from_slice(&56u16.to_le_bytes()); // e_phentsize
-    elf.extend_from_slice(&2u16.to_le_bytes()); // e_phnum = 2
+    elf.extend_from_slice(&3u16.to_le_bytes()); // e_phnum = 3 (2 LOAD + 1 GNU_STACK)
     elf.extend_from_slice(&64u16.to_le_bytes()); // e_shentsize
     elf.extend_from_slice(&0u16.to_le_bytes()); // e_shnum
     elf.extend_from_slice(&0u16.to_le_bytes()); // e_shstrndx
@@ -1830,6 +1830,18 @@ fn build_loongarch64_elf_2seg(code: &[u8], base_addr: u64) -> Vec<u8> {
     elf.extend_from_slice(&data_size.to_le_bytes()); // p_filesz (write zeros so QEMU can mmap)
     elf.extend_from_slice(&data_size.to_le_bytes()); // p_memsz (writable pages)
     elf.extend_from_slice(&PAGE_SIZE.to_le_bytes()); // p_align
+
+    // --- Program Header 3: PT_GNU_STACK (non-executable stack) ---
+    // p_type = 0x6474e551, p_flags = PF_R | PF_W (no PF_X)
+    // All offsets/sizes are 0; p_align = 0x10 (64-bit ELF).
+    elf.extend_from_slice(&0x6474e551u32.to_le_bytes()); // p_type = PT_GNU_STACK
+    elf.extend_from_slice(&6u32.to_le_bytes()); // p_flags = PF_R | PF_W
+    elf.extend_from_slice(&0u64.to_le_bytes()); // p_offset
+    elf.extend_from_slice(&0u64.to_le_bytes()); // p_vaddr
+    elf.extend_from_slice(&0u64.to_le_bytes()); // p_paddr
+    elf.extend_from_slice(&0u64.to_le_bytes()); // p_filesz
+    elf.extend_from_slice(&0u64.to_le_bytes()); // p_memsz
+    elf.extend_from_slice(&0x10u64.to_le_bytes()); // p_align
 
     // --- .text section ---
     // Pad to page-aligned text_offset
@@ -3970,7 +3982,7 @@ impl Backend for LoongArch64Backend {
         const ELF_PAGE_SIZE: u64 = 0x10000;
         const ELF_HEADER_SIZE: u64 = 64;
         const ELF_PHDR_SIZE: u64 = 56;
-        const ELF_NUM_PHDRS: u64 = 2;
+        const ELF_NUM_PHDRS: u64 = 3; // 2 LOAD + 1 GNU_STACK
         let phdr_end = ELF_HEADER_SIZE + ELF_NUM_PHDRS * ELF_PHDR_SIZE;
         let text_offset = ((phdr_end + ELF_PAGE_SIZE - 1) / ELF_PAGE_SIZE) * ELF_PAGE_SIZE;
         let code_vaddr_base = ELF_BASE_ADDR + text_offset;
