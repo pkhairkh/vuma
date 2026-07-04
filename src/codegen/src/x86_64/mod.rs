@@ -1472,23 +1472,55 @@ fn disassemble_x86_64_mnemonic(bytes: &[u8], addr: u64) -> Vec<String> {
         let start_pc = pc;
         let mut pos = offset;
 
-        // Skip legacy prefixes
-        while pos < bytes.len() && matches!(bytes[pos], 0x66 | 0x67 | 0xF2 | 0xF3) {
-            pos += 1;
-        }
-
-        // REX prefix
+        // Skip legacy prefixes and REX. x86_64 permits legacy prefixes
+        // (0x66/0x67/0xF2/0xF3) and the REX byte to appear in any order
+        // before the opcode; we loop until we hit a non-prefix byte.
+        //
+        // Special handling for 0xF2/0xF3: these are ambiguous — they can be
+        // REP/REPNE legacy prefixes OR mandatory SSE/SSE2/SSE3 prefixes
+        // (e.g. CVTSI2SD = F2 0F 2A, ADDSD = F2 0F 58). To distinguish, we
+        // peek forward past any REX byte and check whether 0x0F follows. If
+        // so, the prefix is treated as a mandatory SSE prefix; otherwise it
+        // is treated as a REP/REPNE hint and discarded.
         let mut rex = 0u8;
         let mut _rex_w = false;
         let mut rex_r = false;
+        let mut rex_x = false;
         let mut rex_b = false;
-        if pos < bytes.len() && bytes[pos] >= 0x40 && bytes[pos] <= 0x4F {
-            rex = bytes[pos];
-            _rex_w = (rex & 0x08) != 0;
-            rex_r = (rex & 0x04) != 0;
-            rex_b = (rex & 0x01) != 0;
-            pos += 1;
+        let mut mandatory_prefix: u8 = 0; // 0 = none, 0xF2, or 0xF3
+
+        while pos < bytes.len() {
+            match bytes[pos] {
+                0x66 | 0x67 => {
+                    pos += 1;
+                }
+                0xF2 | 0xF3 => {
+                    // Peek forward (skipping any REX) for the 0x0F two-byte
+                    // opcode escape. If found, treat as mandatory SSE prefix.
+                    let mut peek = pos + 1;
+                    while peek < bytes.len() && bytes[peek] >= 0x40 && bytes[peek] <= 0x4F {
+                        peek += 1;
+                    }
+                    if peek < bytes.len() && bytes[peek] == 0x0F {
+                        mandatory_prefix = bytes[pos];
+                        pos += 1;
+                    } else {
+                        // REP/REPNE hint: discard.
+                        pos += 1;
+                    }
+                }
+                0x40..=0x4F => {
+                    rex = bytes[pos];
+                    _rex_w = (rex & 0x08) != 0;
+                    rex_r = (rex & 0x04) != 0;
+                    rex_x = (rex & 0x02) != 0;
+                    rex_b = (rex & 0x01) != 0;
+                    pos += 1;
+                }
+                _ => break,
+            }
         }
+        let _ = rex_x; // currently unused by reg/reg callers but tracked for SIB
 
         if pos >= bytes.len() {
             let end = pos.min(bytes.len());
@@ -1577,7 +1609,109 @@ fn disassemble_x86_64_mnemonic(bytes: &[u8], addr: u64) -> Vec<String> {
                 } else {
                     let op2 = bytes[pos];
                     pos += 1;
-                    match op2 {
+                    // SSE mandatory-prefix opcodes take priority over the
+                    // legacy 0F xx decoding. 0xF2/0xF3 were detected during
+                    // prefix scanning only if a 0x0F escape followed them.
+                    if mandatory_prefix == 0xF3 {
+                        match op2 {
+                            // POPCNT r64, r/m64 (F3 0F B8 /r)
+                            0xB8 => {
+                                let (r, op, np) = decode_modrm_operand(bytes, pos, rex);
+                                pos = np;
+                                format!("popcnt {}, {}", gpr_name_64(r), op)
+                            }
+                            // TZCNT r64, r/m64 (F3 0F BC /r)
+                            0xBC => {
+                                let (r, op, np) = decode_modrm_operand(bytes, pos, rex);
+                                pos = np;
+                                format!("tzcnt {}, {}", gpr_name_64(r), op)
+                            }
+                            // LZCNT r64, r/m64 (F3 0F BD /r)
+                            0xBD => {
+                                let (r, op, np) = decode_modrm_operand(bytes, pos, rex);
+                                pos = np;
+                                format!("lzcnt {}, {}", gpr_name_64(r), op)
+                            }
+                            // CVTSI2SS xmm, r/m32 (F3 0F 2A /r) — reg=xmm, rm=gpr/mem
+                            0x2A => {
+                                let (r, op, np) = decode_modrm_operand(bytes, pos, rex);
+                                pos = np;
+                                format!("cvtsi2ss {}, {}", xmm_name(r), op)
+                            }
+                            // CVTTSS2SI r32, xmm (F3 0F 2C /r) — reg=gpr, rm=xmm/mem
+                            0x2C => {
+                                let (r, op, np) = decode_modrm_xmm_rm(bytes, pos, rex);
+                                pos = np;
+                                format!("cvttss2si {}, {}", gpr_name_64(r), op)
+                            }
+                            // CVTSS2SI r32, xmm (F3 0F 2D /r) — reg=gpr, rm=xmm/mem
+                            0x2D => {
+                                let (r, op, np) = decode_modrm_xmm_rm(bytes, pos, rex);
+                                pos = np;
+                                format!("cvtss2si {}, {}", gpr_name_64(r), op)
+                            }
+                            // ADDSS xmm, xmm (F3 0F 58 /r) — both XMM
+                            0x58 => {
+                                let (r, op, np) = decode_modrm_xmm_rm(bytes, pos, rex);
+                                pos = np;
+                                format!("addss {}, {}", xmm_name(r), op)
+                            }
+                            // CVTSS2SD xmm, xmm (F3 0F 5A /r) — both XMM
+                            0x5A => {
+                                let (r, op, np) = decode_modrm_xmm_rm(bytes, pos, rex);
+                                pos = np;
+                                format!("cvtss2sd {}, {}", xmm_name(r), op)
+                            }
+                            // SUBSS xmm, xmm (F3 0F 5C /r) — both XMM
+                            0x5C => {
+                                let (r, op, np) = decode_modrm_xmm_rm(bytes, pos, rex);
+                                pos = np;
+                                format!("subss {}, {}", xmm_name(r), op)
+                            }
+                            _ => format!("f3 0f {:02x}", op2),
+                        }
+                    } else if mandatory_prefix == 0xF2 {
+                        match op2 {
+                            // CVTSI2SD xmm, r/m32 (F2 0F 2A /r) — reg=xmm, rm=gpr/mem
+                            0x2A => {
+                                let (r, op, np) = decode_modrm_operand(bytes, pos, rex);
+                                pos = np;
+                                format!("cvtsi2sd {}, {}", xmm_name(r), op)
+                            }
+                            // CVTTSD2SI r32, xmm (F2 0F 2C /r) — reg=gpr, rm=xmm/mem
+                            0x2C => {
+                                let (r, op, np) = decode_modrm_xmm_rm(bytes, pos, rex);
+                                pos = np;
+                                format!("cvttsd2si {}, {}", gpr_name_64(r), op)
+                            }
+                            // CVTSD2SI r32, xmm (F2 0F 2D /r) — reg=gpr, rm=xmm/mem
+                            0x2D => {
+                                let (r, op, np) = decode_modrm_xmm_rm(bytes, pos, rex);
+                                pos = np;
+                                format!("cvtsd2si {}, {}", gpr_name_64(r), op)
+                            }
+                            // ADDSD xmm, xmm (F2 0F 58 /r) — both XMM
+                            0x58 => {
+                                let (r, op, np) = decode_modrm_xmm_rm(bytes, pos, rex);
+                                pos = np;
+                                format!("addsd {}, {}", xmm_name(r), op)
+                            }
+                            // CVTSD2SS xmm, xmm (F2 0F 5A /r) — both XMM
+                            0x5A => {
+                                let (r, op, np) = decode_modrm_xmm_rm(bytes, pos, rex);
+                                pos = np;
+                                format!("cvtsd2ss {}, {}", xmm_name(r), op)
+                            }
+                            // SUBSD xmm, xmm (F2 0F 5C /r) — both XMM
+                            0x5C => {
+                                let (r, op, np) = decode_modrm_xmm_rm(bytes, pos, rex);
+                                pos = np;
+                                format!("subsd {}, {}", xmm_name(r), op)
+                            }
+                            _ => format!("f2 0f {:02x}", op2),
+                        }
+                    } else {
+                        match op2 {
                         // SYSCALL
                         0x05 => "syscall".to_string(),
                         // IMUL r64, r64
@@ -1622,29 +1756,54 @@ fn disassemble_x86_64_mnemonic(bytes: &[u8], addr: u64) -> Vec<String> {
                                 format!("{} ???", cc_name)
                             }
                         }
+                        // BT/BTS/BTR/BTC r/m64, r64 (0F BA /x is the imm8 form,
+                        // but 0F A3/AB/B3/BB are the reg forms — handled below.)
+                        0xBA => {
+                            let (r, op, np) = decode_modrm_operand(bytes, pos, rex);
+                            pos = np;
+                            let op_name = match r & 7 {
+                                4 => "bt",
+                                5 => "bts",
+                                6 => "btr",
+                                7 => "btc",
+                                _ => "0f ba",
+                            };
+                            if pos < bytes.len() {
+                                let imm = bytes[pos] as i8 as i32;
+                                pos += 1;
+                                format!("{} {}, {}", op_name, op, imm)
+                            } else {
+                                format!("{} {}, ???", op_name, op)
+                            }
+                        }
+                        // BSWAP r64 (0F C8+rd)
+                        0xC8..=0xCF => {
+                            let reg_idx = (op2 - 0xC8) | (if rex_b { 8 } else { 0 });
+                            format!("bswap {}", gpr_name_64(reg_idx))
+                        }
                         // MOVZX r64, r8
                         0xB6 => {
-                            let (r, rm, new_pos) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
-                            pos = new_pos;
-                            format!("movzx {}, {}", gpr_name_64(r), gpr_name_8(rm, rex != 0))
+                            let (r, op, np) = decode_modrm_operand(bytes, pos, rex);
+                            pos = np;
+                            format!("movzx {}, {}", gpr_name_64(r), op)
                         }
                         // MOVZX r64, r16
                         0xB7 => {
-                            let (r, rm, new_pos) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
-                            pos = new_pos;
-                            format!("movzx {}, r16({})", gpr_name_64(r), gpr_name_64(rm))
+                            let (r, op, np) = decode_modrm_operand(bytes, pos, rex);
+                            pos = np;
+                            format!("movzx {}, {}", gpr_name_64(r), op)
                         }
                         // MOVSX r64, r8
                         0xBE => {
-                            let (r, rm, new_pos) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
-                            pos = new_pos;
-                            format!("movsx {}, {}", gpr_name_64(r), gpr_name_8(rm, rex != 0))
+                            let (r, op, np) = decode_modrm_operand(bytes, pos, rex);
+                            pos = np;
+                            format!("movsx {}, {}", gpr_name_64(r), op)
                         }
                         // MOVSX r64, r16
                         0xBF => {
-                            let (r, rm, new_pos) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
-                            pos = new_pos;
-                            format!("movsx {}, r16({})", gpr_name_64(r), gpr_name_64(rm))
+                            let (r, op, np) = decode_modrm_operand(bytes, pos, rex);
+                            pos = np;
+                            format!("movsx {}, {}", gpr_name_64(r), op)
                         }
                         // SETcc r/m8
                         0x90..=0x9F => {
@@ -1697,6 +1856,7 @@ fn disassemble_x86_64_mnemonic(bytes: &[u8], addr: u64) -> Vec<String> {
                             format!("{} {}, {}", cc_name, gpr_name_64(r), gpr_name_64(rm))
                         }
                         _ => format!("0f {:02x}", op2),
+                        }
                     }
                 }
             }
@@ -1772,20 +1932,35 @@ fn disassemble_x86_64_mnemonic(bytes: &[u8], addr: u64) -> Vec<String> {
                 pos = np;
                 format!("xchg {}, {}", gpr_name_64(rm), gpr_name_64(r))
             }
+            // MOV r/m, r (89 /r) — supports memory operands.
             0x89 => {
-                let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+                let (r, op, np) = decode_modrm_operand(bytes, pos, rex);
                 pos = np;
-                format!("mov {}, {}", gpr_name_64(rm), gpr_name_64(r))
+                format!("mov {}, {}", op, gpr_name_64(r))
             }
+            // MOV r, r/m (8B /r) — supports memory operands.
             0x8B => {
-                let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+                let (r, op, np) = decode_modrm_operand(bytes, pos, rex);
                 pos = np;
-                format!("mov {}, {}", gpr_name_64(r), gpr_name_64(rm))
+                format!("mov {}, {}", gpr_name_64(r), op)
             }
-            0x8D => {
-                let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+            // MOV r/m8, r8 (88 /r) — byte store to memory or register.
+            0x88 => {
+                let (r, op, np) = decode_modrm_operand(bytes, pos, rex);
                 pos = np;
-                format!("lea {}, [{}]", gpr_name_64(r), gpr_name_64(rm))
+                format!("mov {}, {}", op, gpr_name_8(r, rex != 0))
+            }
+            // MOV r8, r/m8 (8A /r) — byte load from memory or register.
+            0x8A => {
+                let (r, op, np) = decode_modrm_operand(bytes, pos, rex);
+                pos = np;
+                format!("mov {}, {}", gpr_name_8(r, rex != 0), op)
+            }
+            // LEA r64, m (8D /r) — memory operand (no load occurs).
+            0x8D => {
+                let (r, op, np) = decode_modrm_operand(bytes, pos, rex);
+                pos = np;
+                format!("lea {}, {}", gpr_name_64(r), op)
             }
             0x63 => {
                 let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
@@ -1816,6 +1991,58 @@ fn disassemble_x86_64_mnemonic(bytes: &[u8], addr: u64) -> Vec<String> {
                     5 => format!("shr {}, cl", gpr_name_64(rm)),
                     7 => format!("sar {}, cl", gpr_name_64(rm)),
                     _ => format!("d3 /{}, {}", r, gpr_name_64(rm)),
+                }
+            }
+
+            // C1 /x + imm8 (SHL/SHR/SAR/ROL/ROR r/m, imm8)
+            0xC1 => {
+                let (r, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+                pos = np;
+                if pos < bytes.len() {
+                    let imm = bytes[pos];
+                    pos += 1;
+                    let op_name = match r {
+                        0 => "rol",
+                        1 => "ror",
+                        2 => "rcl",
+                        3 => "rcr",
+                        4 => "shl",
+                        5 => "shr",
+                        6 => "sal",
+                        7 => "sar",
+                        _ => "???",
+                    };
+                    format!("{} {}, {}", op_name, gpr_name_64(rm), imm)
+                } else {
+                    pos = bytes.len();
+                    format!("c1 /{}, {}", r, gpr_name_64(rm))
+                }
+            }
+
+            // C6 /0 + imm8 (MOV r/m8, imm8) / C7 /0 + imm32 handled below
+            0xC6 => {
+                let (_, rm, np) = decode_modrm_reg_rm(bytes, pos, rex_r, rex_b);
+                pos = np;
+                if pos < bytes.len() {
+                    let imm = bytes[pos];
+                    pos += 1;
+                    format!("mov byte {}, {}", gpr_name_64(rm), imm)
+                } else {
+                    pos = bytes.len();
+                    format!("mov byte {}, ???", gpr_name_64(rm))
+                }
+            }
+
+            // CD ib (INT ib) — software interrupt. CD 80 is the Linux
+            // 32-bit syscall gateway; show as "int 0x80" for that case.
+            0xCD => {
+                if pos < bytes.len() {
+                    let imm = bytes[pos];
+                    pos += 1;
+                    format!("int {:#x}", imm)
+                } else {
+                    pos = bytes.len();
+                    "int ???".to_string()
                 }
             }
 
@@ -1987,24 +2214,250 @@ fn gpr_name_8(idx: u8, has_rex: bool) -> &'static str {
 }
 
 /// Decode a ModR/M byte, returning (reg, rm, new_pos).
-/// Handles register-register (mod=3) only for simplicity.
+///
+/// Properly advances `new_pos` past the ModR/M byte and any SIB byte and
+/// displacement for memory operands (mod != 3). For mod=3 (register-register),
+/// `rm` is the destination register index; for memory operands, `rm` is the
+/// raw r/m field value (with REX.B applied) — callers that need to display the
+/// memory operand should use [`decode_modrm_operand`] instead.
 fn decode_modrm_reg_rm(bytes: &[u8], pos: usize, rex_r: bool, rex_b: bool) -> (u8, u8, usize) {
     if pos >= bytes.len() {
         return (0, 0, pos);
     }
     let modrm = bytes[pos];
-    let new_pos = pos + 1;
+    let mut new_pos = pos + 1;
     let mod_bits = (modrm >> 6) & 3;
     let reg = ((modrm >> 3) & 7) | (if rex_r { 8 } else { 0 });
-    let rm = (modrm & 7) | (if rex_b { 8 } else { 0 });
+    let rm_raw = modrm & 7;
+    let rm = rm_raw | (if rex_b { 8 } else { 0 });
 
     if mod_bits == 3 {
-        // Register-register
-        (reg, rm, new_pos)
-    } else {
-        // For memory operands, just return the rm as-is (simplified)
-        (reg, rm, new_pos)
+        // Register-register: just the ModR/M byte.
+        return (reg, rm, new_pos);
     }
+
+    // Memory operand: consume SIB byte and/or displacement.
+    if rm_raw == 4 {
+        // SIB byte follows.
+        if new_pos >= bytes.len() {
+            return (reg, rm, new_pos);
+        }
+        let sib = bytes[new_pos];
+        new_pos += 1;
+        let sib_base = sib & 7;
+        // Special case: SIB base == 5 with mod == 0 means no base register;
+        // a disp32 follows instead.
+        if sib_base == 5 && mod_bits == 0 && new_pos + 4 <= bytes.len() {
+            new_pos += 4;
+        }
+    } else if rm_raw == 5 && mod_bits == 0 {
+        // mod=0, r/m=5: disp32 (RIP-relative) follows; no base register.
+        if new_pos + 4 <= bytes.len() {
+            new_pos += 4;
+        }
+    }
+
+    // Displacement based on mod (mod=0 already handled above; only SIB.base==5
+    // case has disp32 already consumed).
+    match mod_bits {
+        1 => new_pos = (new_pos + 1).min(bytes.len()), // disp8
+        2 => new_pos = (new_pos + 4).min(bytes.len()), // disp32
+        _ => {}
+    }
+
+    (reg, rm, new_pos)
+}
+
+/// Decode a ModR/M byte and return the full operand string.
+///
+/// Returns `(reg, operand_string, new_pos)`:
+/// - For mod=3 (register operand), `operand_string` is the register name.
+/// - For mod!=3 (memory operand), `operand_string` is the full addressing mode,
+///   e.g. `[rbp-0x10]`, `[rax+rcx*4+0x100]`, `[rip+0x1234]`, `[0x4000]`.
+///
+/// `rex` is the full REX byte (0x40-0x4F, or 0 if no REX). The REX.R/X/B bits
+/// are extracted internally.
+fn decode_modrm_operand(bytes: &[u8], pos: usize, rex: u8) -> (u8, String, usize) {
+    if pos >= bytes.len() {
+        return (0, "???".to_string(), pos);
+    }
+    let modrm = bytes[pos];
+    let mut new_pos = pos + 1;
+    let mod_bits = (modrm >> 6) & 3;
+    let rex_r = (rex & 0x04) != 0;
+    let rex_x = (rex & 0x02) != 0;
+    let rex_b = (rex & 0x01) != 0;
+    let reg = ((modrm >> 3) & 7) | (if rex_r { 8 } else { 0 });
+    let rm_raw = modrm & 7;
+
+    if mod_bits == 3 {
+        let rm = rm_raw | (if rex_b { 8 } else { 0 });
+        return (reg, gpr_name_64(rm).to_string(), new_pos);
+    }
+
+    // Memory operand.
+    let mut base_reg: Option<u8> = None;
+    let mut index_reg: Option<u8> = None;
+    let mut scale: u8 = 0;
+    let mut disp: i64 = 0;
+    let mut has_disp = false;
+    let mut rip_relative = false;
+
+    if rm_raw == 4 {
+        // SIB byte follows.
+        if new_pos >= bytes.len() {
+            return (reg, "[???]".to_string(), new_pos);
+        }
+        let sib = bytes[new_pos];
+        new_pos += 1;
+        let scale_raw = (sib >> 6) & 3;
+        scale = match scale_raw {
+            0 => 1,
+            1 => 2,
+            2 => 4,
+            _ => 8,
+        };
+        let index_raw = (sib >> 3) & 7;
+        let base_raw = sib & 7;
+
+        // Index: raw == 4 means "no index" (even with REX.X).
+        if index_raw != 4 {
+            index_reg = Some(index_raw | (if rex_x { 8 } else { 0 }));
+        }
+
+        // Base register: raw == 5 with mod == 0 means "no base", disp32 follows.
+        if base_raw == 5 && mod_bits == 0 {
+            if new_pos + 4 <= bytes.len() {
+                disp = i32::from_le_bytes(
+                    bytes[new_pos..new_pos + 4].try_into().unwrap_or([0; 4]),
+                ) as i64;
+                new_pos += 4;
+                has_disp = true;
+            }
+        } else {
+            base_reg = Some(base_raw | (if rex_b { 8 } else { 0 }));
+        }
+    } else if rm_raw == 5 && mod_bits == 0 {
+        // mod=0, r/m=5: disp32 (RIP-relative).
+        if new_pos + 4 <= bytes.len() {
+            disp = i32::from_le_bytes(
+                bytes[new_pos..new_pos + 4].try_into().unwrap_or([0; 4]),
+            ) as i64;
+            new_pos += 4;
+            has_disp = true;
+            rip_relative = true;
+        }
+    } else {
+        base_reg = Some(rm_raw | (if rex_b { 8 } else { 0 }));
+    }
+
+    // Displacement based on mod.
+    match mod_bits {
+        1 => {
+            if new_pos < bytes.len() {
+                disp = bytes[new_pos] as i8 as i64;
+                new_pos += 1;
+                has_disp = true;
+            }
+        }
+        2 => {
+            if new_pos + 4 <= bytes.len() {
+                disp = i32::from_le_bytes(
+                    bytes[new_pos..new_pos + 4].try_into().unwrap_or([0; 4]),
+                ) as i64;
+                new_pos += 4;
+                has_disp = true;
+            }
+        }
+        _ => {}
+    }
+
+    if rip_relative {
+        let s = if disp < 0 {
+            format!("[rip-{:#x}]", (-disp) as u64)
+        } else {
+            format!("[rip+{:#x}]", disp as u64)
+        };
+        return (reg, s, new_pos);
+    }
+
+    // Build the operand string: [base+index*scale+disp]
+    let mut s = String::from("[");
+    let mut empty = true;
+    if let Some(b) = base_reg {
+        s.push_str(gpr_name_64(b));
+        empty = false;
+    }
+    if let Some(i) = index_reg {
+        if !empty {
+            s.push('+');
+        }
+        s.push_str(gpr_name_64(i));
+        if scale != 1 {
+            s.push_str(&format!("*{}", scale));
+        }
+        empty = false;
+    }
+    if has_disp {
+        if empty {
+            // Absolute address (no base/index).
+            s.push_str(&format!("{:#x}", disp as u64));
+        } else if disp < 0 {
+            s.push_str(&format!("-{:#x}", (-disp) as u64));
+        } else {
+            s.push_str(&format!("+{:#x}", disp as u64));
+        }
+    }
+    s.push(']');
+    (reg, s, new_pos)
+}
+
+/// Helper: get XMM register name from index (0-15).
+fn xmm_name(idx: u8) -> &'static str {
+    match idx & 0xF {
+        0 => "xmm0",
+        1 => "xmm1",
+        2 => "xmm2",
+        3 => "xmm3",
+        4 => "xmm4",
+        5 => "xmm5",
+        6 => "xmm6",
+        7 => "xmm7",
+        8 => "xmm8",
+        9 => "xmm9",
+        10 => "xmm10",
+        11 => "xmm11",
+        12 => "xmm12",
+        13 => "xmm13",
+        14 => "xmm14",
+        15 => "xmm15",
+        _ => "xmm?",
+    }
+}
+
+/// Decode ModR/M for SSE instructions where the r/m field is an XMM register
+/// (mod=3) or a memory operand (mod != 3).
+///
+/// Returns `(reg, operand_string, new_pos)`. For mod=3, `operand_string` is
+/// the XMM register name; for mod!=3, it is the full memory operand string
+/// (e.g., `[rax+0x8]`). The `reg` field is returned as a raw index — callers
+/// format it as either GPR or XMM depending on the instruction.
+fn decode_modrm_xmm_rm(bytes: &[u8], pos: usize, rex: u8) -> (u8, String, usize) {
+    if pos >= bytes.len() {
+        return (0, "???".to_string(), pos);
+    }
+    let modrm = bytes[pos];
+    let mod_bits = (modrm >> 6) & 3;
+    if mod_bits == 3 {
+        let rex_r = (rex & 0x04) != 0;
+        let rex_b = (rex & 0x01) != 0;
+        let reg = ((modrm >> 3) & 7) | (if rex_r { 8 } else { 0 });
+        let rm = (modrm & 7) | (if rex_b { 8 } else { 0 });
+        return (reg, xmm_name(rm).to_string(), pos + 1);
+    }
+    // For memory operands, the addressing-mode format is independent of
+    // whether the loaded/stored value is in a GPR or XMM register.
+    decode_modrm_operand(bytes, pos, rex)
 }
 
 // ===========================================================================
@@ -2034,13 +2487,24 @@ fn build_minimal_x86_64_elf(code: &[u8], base_addr: u64, bss_size: u64) -> Vec<u
     const FILE_PAGE_SIZE: u64 = 0x1000; // 4 KB — file offset alignment
     const VADDR_ALIGN: u64 = 0x10000;   // 64 KB — virtual address alignment
 
+    // ELF section header constants (Elf64_Shdr sh_type / sh_flags).
+    // SHT_NULL (0) is implicit: section 0 is emitted as 64 zero bytes.
+    const SHT_PROGBITS: u32 = 1;
+    const SHT_STRTAB: u32 = 3;
+    const SHT_NOBITS: u32 = 8;
+    const SHF_WRITE: u64 = 0x1;
+    const SHF_ALLOC: u64 = 0x2;
+    const SHF_EXECINSTR: u64 = 0x4;
+    const SHDR_SIZE: u64 = 64; // sizeof(Elf64_Shdr)
+
     let elf_header_size: u64 = 64;
     let phdr_size: u64 = 56;
     // Program headers: (1) text LOAD, (2) BSS LOAD (if any BSS), (3) PT_GNU_STACK.
     // PT_GNU_STACK is always emitted so the kernel explicitly marks the stack
     // non-executable; without it, some loaders default to an executable stack
     // (security risk). The +1 for PT_GNU_STACK keeps e_phnum in sync.
-    let num_phdrs: u64 = if bss_size > 0 { 3 } else { 2 };
+    let has_bss = bss_size > 0;
+    let num_phdrs: u64 = if has_bss { 3 } else { 2 };
     let phdr_end = elf_header_size + phdr_size * num_phdrs;
     // Page-align the text segment start for mmap compatibility (required by QEMU).
     let text_offset = ((phdr_end + FILE_PAGE_SIZE - 1) / FILE_PAGE_SIZE) * FILE_PAGE_SIZE;
@@ -2051,7 +2515,29 @@ fn build_minimal_x86_64_elf(code: &[u8], base_addr: u64, bss_size: u64) -> Vec<u
     let text_vaddr = ((base_addr + text_offset + VADDR_ALIGN - 1) / VADDR_ALIGN) * VADDR_ALIGN;
     let entry_point = text_vaddr;
 
-    let mut elf = Vec::with_capacity(text_offset as usize + code.len());
+    // BSS virtual address (computed once; used by both the program header
+    // and the .bss section header). Zero when there is no BSS.
+    let bss_vaddr: u64 = if has_bss {
+        ((text_vaddr + text_size + VADDR_ALIGN - 1) / VADDR_ALIGN) * VADDR_ALIGN
+    } else {
+        0
+    };
+
+    // --- Section header table layout ---
+    // .shstrtab content: NUL + ".text" + NUL + ".bss" + NUL + ".shstrtab" + NUL
+    //   name offsets:  .text=1  .bss=7  .shstrtab=12
+    let shstrtab_content: &[u8] = b"\0.text\0.bss\0.shstrtab\0";
+    let shstrtab_size = shstrtab_content.len() as u64;
+    // .shstrtab immediately follows the text segment in the file.
+    let shstrtab_offset = text_offset + text_size;
+    // Section header table starts after .shstrtab, 8-byte aligned
+    // (Elf64_Shdr has natural alignment of 8 bytes).
+    let shdr_offset = ((shstrtab_offset + shstrtab_size + 7) / 8) * 8;
+    // Sections: 0=null, 1=.text, [2=.bss], last=.shstrtab
+    let num_shdrs: u64 = if has_bss { 4 } else { 3 };
+    let shstrndx: u16 = (num_shdrs - 1) as u16; // .shstrtab is the last section
+
+    let mut elf = Vec::with_capacity(shdr_offset as usize + (num_shdrs * SHDR_SIZE) as usize);
 
     // --- e_ident ---
     elf.extend_from_slice(&[0x7f, b'E', b'L', b'F']); // magic
@@ -2068,14 +2554,14 @@ fn build_minimal_x86_64_elf(code: &[u8], base_addr: u64, bss_size: u64) -> Vec<u
     elf.extend_from_slice(&1u32.to_le_bytes()); // e_version
     elf.extend_from_slice(&entry_point.to_le_bytes()); // e_entry
     elf.extend_from_slice(&elf_header_size.to_le_bytes()); // e_phoff
-    elf.extend_from_slice(&0u64.to_le_bytes()); // e_shoff (no section headers)
+    elf.extend_from_slice(&shdr_offset.to_le_bytes()); // e_shoff
     elf.extend_from_slice(&0u32.to_le_bytes()); // e_flags
     elf.extend_from_slice(&64u16.to_le_bytes()); // e_ehsize
     elf.extend_from_slice(&56u16.to_le_bytes()); // e_phentsize
     elf.extend_from_slice(&(num_phdrs as u16).to_le_bytes()); // e_phnum
     elf.extend_from_slice(&64u16.to_le_bytes()); // e_shentsize
-    elf.extend_from_slice(&0u16.to_le_bytes()); // e_shnum
-    elf.extend_from_slice(&0u16.to_le_bytes()); // e_shstrndx
+    elf.extend_from_slice(&(num_shdrs as u16).to_le_bytes()); // e_shnum
+    elf.extend_from_slice(&shstrndx.to_le_bytes()); // e_shstrndx
 
     // --- Program Header 1: LOAD segment for .text (PF_R | PF_X) ---
     elf.extend_from_slice(&1u32.to_le_bytes()); // p_type = PT_LOAD
@@ -2092,8 +2578,7 @@ fn build_minimal_x86_64_elf(code: &[u8], base_addr: u64, bss_size: u64) -> Vec<u
     // next 64K boundary after the text segment to ensure it doesn't share
     // a host page with the RX text segment. p_filesz = 0 because BSS
     // has no file content; the kernel zero-fills p_memsz bytes at load time.
-    if bss_size > 0 {
-        let bss_vaddr = ((text_vaddr + text_size + VADDR_ALIGN - 1) / VADDR_ALIGN) * VADDR_ALIGN;
+    if has_bss {
         elf.extend_from_slice(&1u32.to_le_bytes()); // p_type = PT_LOAD
         elf.extend_from_slice(&6u32.to_le_bytes()); // p_flags = PF_R | PF_W
         elf.extend_from_slice(&0u64.to_le_bytes()); // p_offset (no file content)
@@ -2132,6 +2617,64 @@ fn build_minimal_x86_64_elf(code: &[u8], base_addr: u64, bss_size: u64) -> Vec<u
         elf.push(0);
     }
     elf.extend_from_slice(code);
+
+    // --- .shstrtab section content ---
+    // Immediately follows the text segment. Contains NUL-terminated section
+    // name strings referenced by the section header table's sh_name fields.
+    elf.extend_from_slice(shstrtab_content);
+
+    // Pad to 8-byte alignment for the section header table.
+    while (elf.len() as u64) < shdr_offset {
+        elf.push(0);
+    }
+
+    // --- Section Header Table ---
+    // Each Elf64_Shdr is 64 bytes:
+    //   sh_name(u32) sh_type(u32) sh_flags(u64) sh_addr(u64) sh_offset(u64)
+    //   sh_size(u64) sh_link(u32) sh_info(u32) sh_addralign(u64) sh_entsize(u64)
+
+    // Section 0: SHT_NULL (reserved, all zeros).
+    elf.extend_from_slice(&[0u8; 64]);
+
+    // Section 1: .text (SHT_PROGBITS, SHF_ALLOC | SHF_EXECINSTR).
+    elf.extend_from_slice(&1u32.to_le_bytes()); // sh_name (offset 1 in .shstrtab)
+    elf.extend_from_slice(&SHT_PROGBITS.to_le_bytes()); // sh_type
+    elf.extend_from_slice(&(SHF_ALLOC | SHF_EXECINSTR).to_le_bytes()); // sh_flags
+    elf.extend_from_slice(&text_vaddr.to_le_bytes()); // sh_addr
+    elf.extend_from_slice(&text_offset.to_le_bytes()); // sh_offset
+    elf.extend_from_slice(&text_size.to_le_bytes()); // sh_size
+    elf.extend_from_slice(&0u32.to_le_bytes()); // sh_link
+    elf.extend_from_slice(&0u32.to_le_bytes()); // sh_info
+    elf.extend_from_slice(&16u64.to_le_bytes()); // sh_addralign (16 for code)
+    elf.extend_from_slice(&0u64.to_le_bytes()); // sh_entsize
+
+    // Section 2: .bss (SHT_NOBITS, SHF_ALLOC | SHF_WRITE) — only when present.
+    if has_bss {
+        elf.extend_from_slice(&7u32.to_le_bytes()); // sh_name (offset 7 in .shstrtab)
+        elf.extend_from_slice(&SHT_NOBITS.to_le_bytes()); // sh_type
+        elf.extend_from_slice(&(SHF_ALLOC | SHF_WRITE).to_le_bytes()); // sh_flags
+        elf.extend_from_slice(&bss_vaddr.to_le_bytes()); // sh_addr
+        elf.extend_from_slice(&0u64.to_le_bytes()); // sh_offset (NOBITS: no file content)
+        elf.extend_from_slice(&bss_size.to_le_bytes()); // sh_size
+        elf.extend_from_slice(&0u32.to_le_bytes()); // sh_link
+        elf.extend_from_slice(&0u32.to_le_bytes()); // sh_info
+        elf.extend_from_slice(&16u64.to_le_bytes()); // sh_addralign
+        elf.extend_from_slice(&0u64.to_le_bytes()); // sh_entsize
+    }
+
+    // Section (last): .shstrtab (SHT_STRTAB, no alloc flags — not loaded).
+    // ".shstrtab" lives at offset 12 in the .shstrtab blob regardless of
+    // whether the .bss section is present.
+    elf.extend_from_slice(&12u32.to_le_bytes()); // sh_name
+    elf.extend_from_slice(&SHT_STRTAB.to_le_bytes()); // sh_type
+    elf.extend_from_slice(&0u64.to_le_bytes()); // sh_flags (not loaded into memory)
+    elf.extend_from_slice(&0u64.to_le_bytes()); // sh_addr (no virtual address)
+    elf.extend_from_slice(&shstrtab_offset.to_le_bytes()); // sh_offset
+    elf.extend_from_slice(&shstrtab_size.to_le_bytes()); // sh_size
+    elf.extend_from_slice(&0u32.to_le_bytes()); // sh_link
+    elf.extend_from_slice(&0u32.to_le_bytes()); // sh_info
+    elf.extend_from_slice(&1u64.to_le_bytes()); // sh_addralign (byte-aligned strings)
+    elf.extend_from_slice(&0u64.to_le_bytes()); // sh_entsize
 
     elf
 }
@@ -3242,12 +3785,12 @@ impl Backend for X86_64Backend {
                         all_code[abs_offset..abs_offset + 4]
                             .copy_from_slice(&resolved.to_le_bytes());
                     } else {
-                        // External symbol — defer to the system linker.
-                        // When compiled with `vuma compile --format obj`, the linker
-                        // will resolve this relocation against libc or the runtime.
-                        log::debug!(
-                            "unresolved relocation: symbol '{}' in '{}' at 0x{:X} (type: {}) — deferring to linker",
-                            reloc.symbol, func.name, reloc.offset, reloc.reloc_type
+                        // External symbol — but this is an ET_EXEC static ELF
+                        // with no linker step. The relocation is left as zero,
+                        // which means the call will jump to address 0.
+                        log::warn!(
+                            "Unresolved external symbol '{}' in '{}' at 0x{:X} — static ELF has no linker step, call will jump to address 0",
+                            reloc.symbol, func.name, reloc.offset
                         );
                         continue;
                     }
@@ -3267,8 +3810,8 @@ impl Backend for X86_64Backend {
                         all_code[abs_offset..abs_offset + 8]
                             .copy_from_slice(&func_addr.to_le_bytes());
                     } else {
-                        log::debug!(
-                            "unresolved R_X86_64_64 relocation: symbol '{}' in '{}' at 0x{:X} — deferring to linker",
+                        log::warn!(
+                            "Unresolved external symbol '{}' in '{}' at 0x{:X} — static ELF has no linker step, call will jump to address 0",
                             reloc.symbol, func.name, reloc.offset
                         );
                     }
