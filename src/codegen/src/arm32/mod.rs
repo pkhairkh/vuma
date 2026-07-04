@@ -907,16 +907,21 @@ fn encode_strexh(cond: Condition, rn: u32, rd: u32, rt: u32) -> [u8; 4] {
 
 /// Encode DMB (Data Memory Barrier) instruction.
 ///
-/// Format: `cond[31:28] | 01010111[27:20] | 1111[19:16] | 1111[15:12] | 1111[11:8] | 0101[7:4] | option[3:0]`
+/// Format: `cond[31:28] | 01010111[27:20] | 1111[19:16] | 1111[15:12] | 0101[11:8] | 1111[7:4] | option[3:0]`
 ///
-/// option = 0xF for DMB SY (full system barrier)
+/// option = 0xF for DMB SY (full system barrier).
+///
+/// NOTE: An earlier version of this encoder had bits[11:8] and bits[7:4]
+/// swapped (emitted `0xE57FFF5F` instead of the correct `0xE57FF5FF`), which
+/// decoded to an UNPREDICTABLE `LDR PC, [PC, #imm]!` and caused SIGSEGV under
+/// QEMU. The fields are now correctly placed.
 fn encode_dmb(cond: Condition, option: u32) -> [u8; 4] {
     let word = (cond.encoding() << 28)
         | (0b0101_0111 << 20)
         | (0b1111 << 16)
         | (0b1111 << 12)
-        | (0b1111 << 8)
-        | (0b0101 << 4)
+        | (0b0101 << 8)
+        | (0b1111 << 4)
         | (option & 0xF);
     word.to_le_bytes()
 }
@@ -2990,8 +2995,9 @@ fn resolve_gpr_arm32(
             let code = load_immediate_arm32(scratch, *addr as u32);
             (scratch, code)
         }
-        crate::ir::IRValue::Label(_) => {
+        crate::ir::IRValue::Label(name) => {
             // Labels need relocation; emit a placeholder MOV Rd, #0
+            log::warn!("IRValue::Label('{}') emitting placeholder 0", name);
             let code = load_immediate_arm32(scratch, 0);
             (scratch, code)
         }
@@ -3559,7 +3565,10 @@ impl Backend for Arm32Backend {
                 }
                 crate::ir::IRValue::Immediate(v) => load_immediate_arm32(scratch, *v as u32),
                 crate::ir::IRValue::Address(a) => load_immediate_arm32(scratch, *a as u32),
-                crate::ir::IRValue::Label(_) => load_immediate_arm32(scratch, 0),
+                crate::ir::IRValue::Label(name) => {
+                    log::warn!("IRValue::Label('{}') emitting placeholder 0", name);
+                    load_immediate_arm32(scratch, 0)
+                }
             }
         }
 
@@ -3590,7 +3599,8 @@ impl Backend for Arm32Backend {
                         Condition::Al, DP_MOV, false, 0, hi_reg.encoding(), 0, 0,
                     ));
                 }
-                crate::ir::IRValue::Label(_) => {
+                crate::ir::IRValue::Label(name) => {
+                    log::warn!("IRValue::Label('{}') emitting placeholder 0", name);
                     code.extend_from_slice(&encode_dp_imm(
                         Condition::Al, DP_MOV, false, 0, lo_reg.encoding(), 0, 0,
                     ));
@@ -5425,15 +5435,35 @@ impl Backend for Arm32Backend {
                     }
 
                     // ── Phi ──
-                    crate::ir::IRInstr::Phi { .. } => {
+                    crate::ir::IRInstr::Phi { dst, incoming, .. } => {
+                        // ARM32 backend does not implement real phi resolution
+                        // (relies on the front-end having lowered phis before
+                        // code generation). When a phi reaches this point with
+                        // multiple non-self incoming values, emit a warning so
+                        // the missing resolution is visible at compile time;
+                        // the produced encoding is empty (no copy emitted).
+                        let non_self: Vec<_> = incoming.iter()
+                            .filter(|(val, _)| val != dst)
+                            .collect();
+                        if non_self.len() > 1 {
+                            log::warn!(
+                                "Non-trivial Phi with {} incoming (ARM32 phi lowering is a no-op)",
+                                non_self.len()
+                            );
+                        }
                         Vec::new()
                     }
 
                     // ── Atomic operations (with DMB fences for acquire/release on ARM32) ──
                     crate::ir::IRInstr::AtomicLoad { dst, addr, ty } => {
-                        // Simplified: plain load (single-threaded atomics).
-                        // DMB barriers caused crashes on arm32 QEMU.
+                        // Acquire-load: DMB SY before the LDR orders preceding
+                        // stores; DMB SY after the LDR orders the loaded value
+                        // with respect to subsequent memory operations. The
+                        // previously broken `encode_dmb` is now fixed, so the
+                        // barriers can safely be emitted.
                         let mut code = Vec::new();
+                        // DMB SY — acquire fence (before the load)
+                        code.extend_from_slice(&encode_dmb(Condition::Al, 0xF));
                         // Load address into R3
                         code.extend(ss_load_value(addr, &vreg_stack_slots, Gpr::R3));
                         let dst_id = dst.as_register().unwrap_or(0);
@@ -5459,12 +5489,18 @@ impl Backend for Arm32Backend {
                                 ));
                             }
                         }
+                        // DMB SY — acquire fence (after the load)
+                        code.extend_from_slice(&encode_dmb(Condition::Al, 0xF));
                         code.extend(ss_store_32_zero(Gpr::R0, dst_offset, fs));
                         code
                     }
                     crate::ir::IRInstr::AtomicStore { value, addr, ty } => {
-                        // Simplified: plain store (single-threaded atomics).
+                        // Release-store: DMB SY before the STR orders preceding
+                        // memory operations; DMB SY after the STR publishes the
+                        // store to other observers.
                         let mut code = Vec::new();
+                        // DMB SY — release fence (before the store)
+                        code.extend_from_slice(&encode_dmb(Condition::Al, 0xF));
                         // Load address and value
                         code.extend(ss_load_value(addr, &vreg_stack_slots, Gpr::R3));
                         code.extend(ss_load_value(value, &vreg_stack_slots, Gpr::R0));
@@ -5488,6 +5524,8 @@ impl Backend for Arm32Backend {
                                 ));
                             }
                         }
+                        // DMB SY — release fence (after the store)
+                        code.extend_from_slice(&encode_dmb(Condition::Al, 0xF));
                         code
                     }
                     crate::ir::IRInstr::AtomicCas { dst, addr, expected, desired, ty } => {
@@ -5501,31 +5539,29 @@ impl Backend for Arm32Backend {
                         //   R12 = STREX status (0=success, 1=failure)
                         //
                         // CAS loop layout (all 4-byte instructions):
+                        //   DMB SY                     (pre-loop acquire/release fence)
                         //   +0:  LDREX{,B,H} R0, [R3]    ← retry
                         //   +4:  CMP R0, R1
-                        //   +8:  BNE done                  (offset_words = +2)
+                        //   +8:  BNE done                  (offset_words = +3)
                         //   +12: STREX{,B,H} R12, R2, [R3]
                         //   +16: CMP R12, #0
                         //   +20: BNE retry                 (offset_words = -7)
-                        //   +24: <done label — store R0 to dst>
+                        //   +24: DMB SY                    (post-success release fence)
+                        //   +28: <done label — store R0 to dst>
                         //
                         // ARM branch offset = (target - (branch_addr + 8)) / 4
-                        // BNE done:   (24 - (8 + 8)) / 4 = +2
+                        // BNE done:   (28 - (8 + 8)) / 4  = +3
                         // BNE retry:  (0 - (20 + 8)) / 4 = -7
                         //
-                        // NOTE: No DMB barriers are emitted, matching the
-                        // AtomicLoad/AtomicStore lowering. The previous
-                        // encode_dmb had bits[11:8] and bits[7:4] swapped
-                        // (emitted 0xE57FFF5F instead of the correct
-                        // 0xE57FF5FF), which decoded to an UNPREDICTABLE
-                        // `LDR PC, [PC, #0xF5F]!` and caused SIGSEGV
-                        // (spinlock.vuma CRASH -11 on arm32). The spinlock
-                        // gold-standard test is single-threaded, so the
-                        // acquire/release barriers are not needed for
-                        // correctness; removing them avoids the broken
-                        // encoder. See commit 226ff76 for the same approach
-                        // applied to AtomicLoad/AtomicStore.
+                        // NOTE: A previous version omitted the DMB barriers
+                        // because `encode_dmb` was incorrectly emitting
+                        // 0xE57FFF5F (an UNPREDICTABLE LDR PC encoding). The
+                        // encoder is now fixed to emit 0xE57FF5FF (DMB SY with
+                        // cond=AL), so the acquire/release fences are restored.
                         let mut code = Vec::new();
+
+                        // DMB SY — pre-loop fence (acquire for the LDREX)
+                        code.extend_from_slice(&encode_dmb(Condition::Al, 0xF));
 
                         // Load operands into scratch registers
                         code.extend(ss_load_value(addr, &vreg_stack_slots, Gpr::R3));
@@ -5551,8 +5587,10 @@ impl Backend for Arm32Backend {
                             Gpr::R0.encoding(), 0, Gpr::R1.encoding(),
                         ));
 
-                        // BNE done — if old != expected, skip store (offset_words = +2)
-                        code.extend_from_slice(&encode_branch(Condition::Ne, false, 2));
+                        // BNE done — if old != expected, skip store (offset_words = +3)
+                        // The +3 (was +2) accounts for the DMB SY that now sits
+                        // between the success branch and the <done> label.
+                        code.extend_from_slice(&encode_branch(Condition::Ne, false, 3));
 
                         // STREX{,B,H} R12, R2, [R3] — try to store desired value
                         match ty {
@@ -5575,6 +5613,11 @@ impl Backend for Arm32Backend {
 
                         // BNE retry — if store failed, retry (offset_words = -7)
                         code.extend_from_slice(&encode_branch(Condition::Ne, false, -7));
+
+                        // DMB SY — post-success release fence
+                        // (only reached on the success path; the BNE-done
+                        //  branch above skips this on mismatch).
+                        code.extend_from_slice(&encode_dmb(Condition::Al, 0xF));
 
                         // <done label> — Store the old value (in R0) to the dst stack slot.
                         // R0 holds the old value loaded by LDREX regardless of whether
@@ -5986,7 +6029,11 @@ impl Backend for Arm32Backend {
         //   munmap=91, unlink=10, exit=1, exit_group=248, alarm=27,
         //   getpid=20, socket=281 (arm32), epoll_create1=356 (arm32),
         //   futex=240, sigaction=67, pipe=42, dup2=63, fork=2,
-        //   execve=11, wait4=114, epoll_ctl=251 (arm32), epoll_wait=252 (arm32)
+        //   execve=11, wait4=114, epoll_ctl=251 (arm32), epoll_wait=252 (arm32),
+        //   lseek=19, stat=106, fstat=108, kill=37, getcwd=183, chdir=12,
+        //   ioctl=54, fcntl=55, connect=283, poll=168, nanosleep=162,
+        //   mprotect=125, dup=41, recv=291, send=290, shutdown=293,
+        //   bind=282, listen=284, accept=285, setsockopt=294.
         //
         // Note: socket=281 (0x119) and epoll_create1=356 (0x164) do NOT fit
         // in a single ARM rotated-immediate MOV (which encodes an 8-bit value
@@ -6052,6 +6099,15 @@ impl Backend for Arm32Backend {
                 ("fork", 2), ("execve", 11), ("wait4", 114),
                 ("socket", 281), ("epoll_create1", 356),
                 ("epoll_ctl", 251), ("epoll_wait", 252),
+                // ── W6: additional POSIX syscall stubs ──
+                ("lseek", 19), ("stat", 106), ("fstat", 108),
+                ("kill", 37), ("getcwd", 183), ("chdir", 12),
+                ("ioctl", 54), ("fcntl", 55), ("connect", 283),
+                ("poll", 168), ("nanosleep", 162), ("mprotect", 125),
+                ("dup", 41),
+                ("recv", 291), ("send", 290), ("shutdown", 293),
+                ("bind", 282), ("listen", 284), ("accept", 285),
+                ("setsockopt", 294),
             ] {
                 stubs.push((name.to_string(), simple_stub(num)));
             }
@@ -6291,6 +6347,10 @@ impl Backend for Arm32Backend {
                         all_code[abs_offset..abs_offset + 4].copy_from_slice(&patched.to_le_bytes());
                     } else {
                         // External symbol — point to FFI return-0 stub
+                        log::warn!(
+                            "unresolved relocation: symbol '{}' in '{}' at 0x{:X} (type: {}) — deferring to FFI stub",
+                            reloc.symbol, func.name, reloc.offset, reloc.reloc_type
+                        );
                         let target_addr = ffi_stub_offset as i32;
                         let bl_addr = abs_offset as i32;
                         let offset_words = (target_addr - (bl_addr + 8)) / 4;
@@ -6321,6 +6381,10 @@ impl Backend for Arm32Backend {
                         all_code[abs_offset..abs_offset + 4].copy_from_slice(&patched.to_le_bytes());
                     } else {
                         // External symbol — point to FFI return-0 stub
+                        log::warn!(
+                            "unresolved relocation: symbol '{}' in '{}' at 0x{:X} (type: {}) — deferring to FFI stub",
+                            reloc.symbol, func.name, reloc.offset, reloc.reloc_type
+                        );
                         let target_addr = ffi_stub_offset as i32;
                         let bl_addr = abs_offset as i32;
                         let offset_words = (target_addr - (bl_addr + 8)) / 4;

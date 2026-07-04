@@ -3874,6 +3874,15 @@ impl Backend for LoongArch64Backend {
                 ("munmap", 215), ("exit", 93), ("alarm", 36), ("getpid", 172),
                 ("socket", 198), ("epoll_create1", 20), ("futex", 98),
                 ("execve", 221), ("wait4", 260), ("epoll_ctl", 21), ("epoll_wait", 22),
+                // ── W6: additional POSIX syscall stubs ──
+                ("lseek", 62), ("stat", 80), ("fstat", 80),
+                ("kill", 129), ("getcwd", 17), ("chdir", 49),
+                ("ioctl", 73), ("fcntl", 72), ("connect", 203),
+                ("poll", 168), ("nanosleep", 101), ("mprotect", 226),
+                ("dup", 23), ("exit_group", 94),
+                ("recv", 207), ("send", 206), ("shutdown", 210),
+                ("bind", 200), ("listen", 201), ("accept", 202),
+                ("setsockopt", 194),
             ] {
                 let mut code = Vec::new();
                 code.extend_from_slice(&Instruction::AddiD { rd: Gpr::A7, rj: Gpr::R0, imm12: num }.encode());
@@ -4047,6 +4056,10 @@ impl Backend for LoongArch64Backend {
                             .copy_from_slice(&patched.to_le_bytes());
                     } else {
                         // External symbol — point to FFI return-0 stub
+                        log::warn!(
+                            "unresolved relocation: symbol '{}' in '{}' at 0x{:X} (type: {}) — deferring to FFI stub",
+                            reloc.symbol, func.name, reloc.offset, reloc.reloc_type
+                        );
                         let target_addr = ffi_stub_offset as i64;
                         let bl_addr = abs_offset as i64;
                         let offset_words = (target_addr - bl_addr) / 4;
@@ -4083,7 +4096,7 @@ impl Backend for LoongArch64Backend {
                         // Leave the load-immediate sequence as-is (zero = trap).
                         // When compiled with `vuma compile --format obj`, the linker
                         // will resolve this relocation against libc or the runtime.
-                        log::debug!(
+                        log::warn!(
                             "unresolved relocation: symbol '{}' in '{}' at 0x{:X} (type: {}) — deferring to linker",
                             reloc.symbol, func.name, reloc.offset, reloc.reloc_type
                         );

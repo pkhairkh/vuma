@@ -226,7 +226,8 @@ fn encode_load_value(val: &IRValue, scratch: Gpr, fp: Gpr, vreg_slots: &HashMap<
         IRValue::Address(addr) => {
             encode_load_imm(scratch, *addr as i64)
         }
-        IRValue::Label(_) => {
+        IRValue::Label(name) => {
+            log::warn!("IRValue::Label('{}') emitting placeholder 0", name);
             encode_load_imm(scratch, 0) // placeholder
         }
     }
@@ -1336,29 +1337,39 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                 // for 64-bit types (I64/U64/Ptr/Func) we use the .D variants.
 
                 IRInstr::AtomicLoad { dst, addr, ty } => {
-                    // Simplified: plain load (single-threaded atomics).
-                    // The dbar/LlW/AmswapW encodings were causing illegal-instruction
-                    // crashes on QEMU.
+                    // Acquire-load: dbar 0 before the load orders preceding
+                    // stores; dbar 0 after the load orders the loaded value
+                    // with respect to subsequent memory operations.
                     let mut code = Vec::new();
                     let dst_id = dst.as_register().unwrap_or(0);
                     let _ = ty; // size handled by plain LdD
+                    // dbar 0 — acquire fence (before the load)
+                    code.extend_from_slice(&Instruction::Dbar { hint: 0 }.encode());
                     // Load address into S0
                     code.extend(encode_load_value(addr, S0, fp, &vreg_slots));
                     // Plain load from [S0 + 0]
                     code.extend_from_slice(&Instruction::LdD { rd: S0, rj: S0, imm12: 0 }.encode());
+                    // dbar 0 — acquire fence (after the load)
+                    code.extend_from_slice(&Instruction::Dbar { hint: 0 }.encode());
                     // Store result to dst vreg slot
                     code.extend(encode_store_to_vreg(S0, dst_id, fp, &vreg_slots));
                     code
                 }
 
                 IRInstr::AtomicStore { value, addr, ty: _ } => {
-                    // Simplified: plain store (single-threaded atomics).
+                    // Release-store: dbar 0 before the store orders preceding
+                    // memory operations; dbar 0 after the store publishes the
+                    // store to other observers.
                     let mut code = Vec::new();
+                    // dbar 0 — release fence (before the store)
+                    code.extend_from_slice(&Instruction::Dbar { hint: 0 }.encode());
                     // Load address into S1, value into S0
                     code.extend(encode_load_value(addr, S1, fp, &vreg_slots));
                     code.extend(encode_load_value(value, S0, fp, &vreg_slots));
                     // Plain store to [S1 + 0]
                     code.extend_from_slice(&Instruction::StD { rd: S0, rj: S1, imm12: 0 }.encode());
+                    // dbar 0 — release fence (after the store)
+                    code.extend_from_slice(&Instruction::Dbar { hint: 0 }.encode());
                     code
                 }
 
@@ -1370,11 +1381,19 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     // Layout:
                     //   dbar 0
                     //   ll.d  S0, S2, 0       ; load-linked (old value)
-                    //   bne   S0, S3, +4      ; if old != expected, skip to dbar
-                    //   <reload desired into S1>  ; S1 = desired (reload each retry)
+                    //   bne   S0, S3, +N+3    ; if old != expected, skip to dbar after
+                    //   <reload desired into S1>  ; N instructions (reload each retry)
                     //   sc.d  S1, S2, 0       ; store-conditional, S1 = result
-                    //   beq   S1, zero, -3    ; if S1==0 (failed), retry at ll.d
+                    //   beq   S1, zero, -(N+3) ; if S1==0 (failed), retry at ll.d
                     //   dbar 0
+                    //
+                    // The reload sequence length is computed dynamically because
+                    // `encode_load_value` may emit more than one instruction
+                    // (e.g. for an immediate that does not fit in a 12-bit
+                    // signed ADDI.D immediate). Both the forward BNE skip and
+                    // the backward BEQ retry offsets are derived from that
+                    // count so the loop stays correct regardless of `desired`'s
+                    // representation.
                     let mut code = Vec::new();
                     let dst_id = dst.as_register().unwrap_or(0);
 
@@ -1384,27 +1403,39 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     code.extend(encode_load_value(expected, S3, fp, &vreg_slots));
 
                     // dbar 0 (full barrier before)
-                    code.extend_from_slice(&0x3872_0000u32.to_le_bytes());
+                    code.extend_from_slice(&Instruction::Dbar { hint: 0 }.encode());
 
                     // ll.d S0, S2, 0  (load-linked)
                     code.extend_from_slice(&Instruction::LlD { rd: S0, rj: S2, imm14: 0 }.encode());
 
-                    // bne S0, S3, +4 (if old != expected, skip 4 instrs to dbar after)
-                    // +4 skips: reload_desired, sc.d, beq, dbar
-                    code.extend_from_slice(&Instruction::Bne { rj: S0, rd: S3, offs16: 4 }.encode());
+                    // Emit the desired reload into a temp Vec so we can count
+                    // its instructions. sc.d clobbers rd on every retry, so the
+                    // reload must run inside the loop.
+                    let reload_code = encode_load_value(desired, S1, fp, &vreg_slots);
+                    let reload_instr_count = (reload_code.len() / 4) as i32;
+
+                    // BNE skips forward over: reload(N) + sc.d(1) + beq(1) + dbar(1)
+                    //   = N + 3 instructions, landing on the first instruction
+                    //   after the post-success dbar.
+                    let bne_off = reload_instr_count + 3;
+                    code.extend_from_slice(&Instruction::Bne { rj: S0, rd: S3, offs16: bne_off }.encode());
 
                     // Reload desired into S1 (must reload each retry since sc.d clobbers rd)
-                    code.extend(encode_load_value(desired, S1, fp, &vreg_slots));
+                    code.extend(reload_code);
 
                     // sc.d S1, S2, 0  (store desired to [S2], S1 = 1/0 result)
                     code.extend_from_slice(&Instruction::ScD { rd: S1, rj: S2, imm14: 0 }.encode());
 
-                    // beq S1, zero, -4 (if store failed (S1=0), retry at ll.d)
-                    // -4 goes back 4 instructions: ll.d, bne, reload, sc.d
-                    code.extend_from_slice(&Instruction::Beq { rj: S1, rd: Gpr::R0, offs16: -4 }.encode());
+                    // beq S1, zero, -(N+3) (if store failed (S1=0), retry at ll.d)
+                    // Going back from the beq over: sc.d(1) + reload(N) + bne(1)
+                    //   = N + 2 instructions. The BNE sits between LL.D and the
+                    //   reload; from the beq's PC, LL.D is N+3 instructions back
+                    //   (LL.D ← BNE ← reload*N ← SC.D ← BEQ).
+                    let beq_off = -(reload_instr_count + 3);
+                    code.extend_from_slice(&Instruction::Beq { rj: S1, rd: Gpr::R0, offs16: beq_off }.encode());
 
                     // dbar 0 (full barrier after)
-                    code.extend_from_slice(&0x3872_0000u32.to_le_bytes());
+                    code.extend_from_slice(&Instruction::Dbar { hint: 0 }.encode());
 
                     // Store old value (S0) to dst vreg slot
                     code.extend(encode_store_to_vreg(S0, dst_id, fp, &vreg_slots));
@@ -1467,6 +1498,10 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                         Vec::new()
                     } else {
                         // Multiple non-self incoming: use the first one
+                        log::warn!(
+                            "Non-trivial Phi with {} incoming (using first non-self value)",
+                            non_self.len()
+                        );
                         let (val, _) = non_self[0];
                         let mut code = Vec::new();
                         let dst_id = dst.as_register().unwrap_or(0);
