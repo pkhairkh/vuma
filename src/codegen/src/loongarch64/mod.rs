@@ -633,6 +633,10 @@ const OPC_EXT_W_H: u32 = 0x0000016;
 const OPC_EXT_W_B: u32 = 0x0000017;
 /// CLO.D (count leading ones, doubleword): opcode 0x0000008 in 2R format.
 const OPC_CLO_D: u32 = 0x0000008;
+/// CTZ.D (count trailing zeros, doubleword): opcode 0x000000C in 2R format.
+const OPC_CTZ_D: u32 = 0x000000C;
+/// POPCNT.D (population count, doubleword): opcode 0x000000E in 2R format.
+const OPC_POPCNT_D: u32 = 0x000000E;
 
 #[allow(dead_code)]
 const OPC_REVB_2H: u32 = 0x000000C;
@@ -894,6 +898,10 @@ pub enum Instruction {
     ExtWB { rd: Gpr, rj: Gpr },
     /// Count Leading Ones, Doubleword: `clo.d rd, rj`
     CloD { rd: Gpr, rj: Gpr },
+    /// Count Trailing Zeros, Doubleword: `ctz.d rd, rj`
+    CtzD { rd: Gpr, rj: Gpr },
+    /// Population Count, Doubleword: `popcnt.d rd, rj`
+    PopcntD { rd: Gpr, rj: Gpr },
 
     // ── FP Load/Store (2RI12) ───────────────────────────────────────
     /// Load Float Word to FP: `fld.s fd, rj, si12`
@@ -1354,6 +1362,8 @@ impl Instruction {
             Instruction::ExtWH { rd, rj } => encode_2r(OPC_EXT_W_H, rj.encoding(), rd.encoding()),
             Instruction::ExtWB { rd, rj } => encode_2r(OPC_EXT_W_B, rj.encoding(), rd.encoding()),
             Instruction::CloD { rd, rj } => encode_2r(OPC_CLO_D, rj.encoding(), rd.encoding()),
+            Instruction::CtzD { rd, rj } => encode_2r(OPC_CTZ_D, rj.encoding(), rd.encoding()),
+            Instruction::PopcntD { rd, rj } => encode_2r(OPC_POPCNT_D, rj.encoding(), rd.encoding()),
 
             // ── FP Load/Store (2RI12) ─────────────────────────────
             Instruction::FldS { fd, rj, imm12 } => encode_2ri12(
@@ -1563,6 +1573,8 @@ impl Instruction {
             Instruction::ExtWH { .. } => "ext.w.h",
             Instruction::ExtWB { .. } => "ext.w.b",
             Instruction::CloD { .. } => "clo.d",
+            Instruction::CtzD { .. } => "ctz.d",
+            Instruction::PopcntD { .. } => "popcnt.d",
             Instruction::FldS { .. } => "fld.s",
             Instruction::FldD { .. } => "fld.d",
             Instruction::FstS { .. } => "fst.s",
@@ -1707,6 +1719,8 @@ impl fmt::Display for Instruction {
             Instruction::ExtWH { rd, rj } => write!(f, "ext.w.h {}, {}", rd, rj),
             Instruction::ExtWB { rd, rj } => write!(f, "ext.w.b {}, {}", rd, rj),
             Instruction::CloD { rd, rj } => write!(f, "clo.d {}, {}", rd, rj),
+            Instruction::CtzD { rd, rj } => write!(f, "ctz.d {}, {}", rd, rj),
+            Instruction::PopcntD { rd, rj } => write!(f, "popcnt.d {}, {}", rd, rj),
             Instruction::FldS { fd, rj, imm12 } => write!(f, "fld.s {}, {}, {}", fd, rj, imm12),
             Instruction::FldD { fd, rj, imm12 } => write!(f, "fld.d {}, {}, {}", fd, rj, imm12),
             Instruction::FstS { fd, rj, imm12 } => write!(f, "fst.s {}, {}, {}", fd, rj, imm12),
@@ -3245,14 +3259,18 @@ fn lower_ir_instr_la64(
                         vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
                     ));
                 }
-                UnaryOpKind::Ctz | UnaryOpKind::Popcnt => {
-                    // Placeholder: move operand to dst
+                UnaryOpKind::Ctz => {
+                    // Count trailing zeros, doubleword: ctz.d rd, rj
                     result.push(emit_alloc_instr(
-                        Instruction::AddD {
-                            rd: d,
-                            rj: s,
-                            rk: Gpr::R0,
-                        },
+                        Instruction::CtzD { rd: d, rj: s },
+                        vec![PhysicalReg::new(RegClass::Gpr, s.encoding())],
+                        vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+                    ));
+                }
+                UnaryOpKind::Popcnt => {
+                    // Population count, doubleword: popcnt.d rd, rj
+                    result.push(emit_alloc_instr(
+                        Instruction::PopcntD { rd: d, rj: s },
                         vec![PhysicalReg::new(RegClass::Gpr, s.encoding())],
                         vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
                     ));
