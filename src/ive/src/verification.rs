@@ -365,12 +365,75 @@ impl VerificationEngine {
             input.entry_point = Some(PointId(first_node.id.as_u64()));
         }
 
+        // Collect all FunctionReturn node IDs — these are legitimate
+        // path exits that should not be flagged as leak endpoints.
+        for node in scg.nodes() {
+            if node.node_type == NodeType::Control {
+                if let NodePayload::Control(ctrl) = &node.payload {
+                    if ctrl.kind == vuma_scg::node::ControlKind::FunctionReturn {
+                        input.function_returns.insert(PointId(node.id.as_u64()));
+                    }
+                }
+            }
+        }
+
         input
     }
 
     /// Extract exclusivity-relevant input from the SCG.
     fn extract_exclusivity_input(&self, scg: &SCG) -> ExclusivityInput {
         let mut input = ExclusivityInput::new();
+
+        // Build a map from Access NodeId → allocation NodeId.
+        // An Access node is connected to its Allocation via Derivation
+        // edges (through the parent Computation node). We BFS backward
+        // from each Access node through Derivation edges to find the
+        // nearest Allocation node. This gives us a per-allocation ID
+        // (the Allocation's NodeId) instead of the coarse region_id,
+        // so writes to different allocations in the same region are
+        // correctly recognized as non-conflicting.
+        use std::collections::{HashSet, VecDeque};
+        let mut access_to_alloc: HashMap<u64, u64> = HashMap::new();
+        for node in scg.nodes() {
+            if node.node_type != NodeType::Access {
+                continue;
+            }
+            // BFS backward through Derivation edges to find Allocation
+            let start = node.id.as_u64();
+            let mut visited: HashSet<u64> = HashSet::new();
+            let mut queue: VecDeque<u64> = VecDeque::new();
+            queue.push_back(start);
+            visited.insert(start);
+            let mut found_alloc: Option<u64> = None;
+            while let Some(curr) = queue.pop_front() {
+                if let Some(n) = scg.get_node(vuma_scg::node::NodeId::new(curr)) {
+                    if n.node_type == NodeType::Allocation && curr != start {
+                        found_alloc = Some(curr);
+                        break;
+                    }
+                }
+                // Check predecessors via Derivation edges
+                for edge in scg.edges() {
+                    if edge.target.as_u64() == curr && edge.kind == EdgeKind::Derivation {
+                        if visited.insert(edge.source.as_u64()) {
+                            queue.push_back(edge.source.as_u64());
+                        }
+                    }
+                }
+                // Also check successors via Derivation (Access → Allocation
+                // can be forward too)
+                for edge in scg.edges() {
+                    if edge.source.as_u64() == curr && edge.kind == EdgeKind::Derivation {
+                        if visited.insert(edge.target.as_u64()) {
+                            queue.push_back(edge.target.as_u64());
+                        }
+                    }
+                }
+            }
+            if let Some(alloc_id) = found_alloc {
+                access_to_alloc.insert(start, alloc_id);
+            }
+        }
 
         // First pass: create AccessRecords for all Access nodes.
         // Use the SCG NodeId as the AccessId so that sync edges (which
@@ -380,6 +443,11 @@ impl VerificationEngine {
         // (e.g., `*(buf+0)` and `*(buf+1)`) are correctly recognized as
         // non-overlapping.  Previously, base_address was hard-coded to 0,
         // causing all accesses to the same region to appear overlapping.
+        //
+        // For region_id, use the allocation NodeId (found via Derivation
+        // BFS above) instead of the coarse region_id. This ensures that
+        // accesses to different allocations in the same region are
+        // correctly recognized as non-conflicting.
         let mut access_node_ids: Vec<vuma_scg::node::NodeId> = Vec::new();
         for node in scg.nodes() {
             if node.node_type == NodeType::Access {
@@ -401,14 +469,22 @@ impl VerificationEngine {
                         node.program_point.line.unwrap_or(0)
                     );
 
+                    // Use the allocation NodeId as the region_id for
+                    // conflict detection. Fall back to region_id if no
+                    // allocation was found (conservative).
+                    let alloc_id = access_to_alloc
+                        .get(&node.id.as_u64())
+                        .copied()
+                        .unwrap_or(access.region_id.as_u64());
+
                     input.add_access(AccessRecord::new(
                         access_id,
                         kind,
                         base_address,
                         size,
                         pp,
-                        node.id.as_u64(),          // derivation_id
-                        access.region_id.as_u64(), // region_id
+                        node.id.as_u64(), // derivation_id
+                        alloc_id,         // region_id (per-allocation)
                     ));
                     access_node_ids.push(node.id);
                 }
@@ -426,7 +502,7 @@ impl VerificationEngine {
         //     chain)
         // DataFlow edges are excluded — they represent data dependencies,
         // not execution order, and could create spurious orderings.
-        use std::collections::{HashMap, HashSet, VecDeque};
+        // (HashSet and VecDeque already imported above)
         let mut fwd_cf: HashMap<u64, Vec<u64>> = HashMap::new();
         let mut fwd_deriv: HashMap<u64, Vec<u64>> = HashMap::new();
         let mut bwd_deriv: HashMap<u64, Vec<u64>> = HashMap::new();
