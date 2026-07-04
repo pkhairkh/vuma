@@ -1,5 +1,4 @@
-VUMA Test Failures — 2026-07-04 10:03:03 UTC
-Total: 1 failures across 1 tests
+VUMA Test Failures — 2026-07-04 10:22:17 UTC
+Total: 0 failures across 0 tests
 Skipped: 1 (architecturally unavailable on target)
 
-  concurrency          self_exec.vuma                                exp=   0 [('x86_32', -13, 'CR')]
