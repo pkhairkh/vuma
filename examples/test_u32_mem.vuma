@@ -35,5 +35,6 @@ fn main() -> u64 {
     
     // Return low byte
     result: u32 = rotated & 0xFF;
+    free(buf);
     return result;
 }

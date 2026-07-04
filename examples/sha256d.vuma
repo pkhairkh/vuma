@@ -371,5 +371,7 @@ fn main() -> i32 {
     // Return the first byte of the hash as exit code.
     // Expected: 0x4f = 79
     result: i32 = *(digest + 0);
+    free(msg);
+    free(digest);
     return result;
 }

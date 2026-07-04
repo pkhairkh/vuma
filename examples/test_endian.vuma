@@ -15,5 +15,6 @@ fn main() -> i32 {
     *(buf + 3) = 1;
     val: u32 = read_u32_be(buf, 0);
     // Should be 1 (big-endian: 0x00000001)
+    free(buf);
     return 0;
 }
