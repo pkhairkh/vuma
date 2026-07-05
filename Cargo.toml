@@ -109,3 +109,20 @@ toml.workspace = true
 opt-level = 3
 lto = true
 codegen-units = 1
+
+# Fast iterative build profile for test-suite runs.
+# Disables LTO and bumps codegen-units so a from-scratch build that
+# would take 10+ minutes on a Pi 5 with the `release` profile completes
+# in ~1-2 minutes. Runtime is still O3 (so QEMU-emulated executions stay
+# fast); only the link-time optimization pass is skipped, which costs
+# ~5-10% runtime but ~5-10x build time.
+#
+# Use:  cargo build --profile release-fast --bin compile_dump --bin dump_ir
+# The binary lands in target/release-fast/ (NOT target/release/).
+[profile.release-fast]
+inherits = "release"
+opt-level = 3
+lto = false
+codegen-units = 16
+debug = false
+strip = true
