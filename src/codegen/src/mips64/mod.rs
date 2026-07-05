@@ -2801,6 +2801,9 @@ fn mips64_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, 
     let mut branch_fixups: Vec<(usize, String, i32)> = Vec::new(); // (code_offset, label, adjustment)
     let mut relocations: Vec<RelocationEntry> = Vec::new();
 
+    // Build predecessor-aware phi resolution map.
+    let phi_map = func.build_phi_map();
+
     for block in &func.blocks {
         label_offsets.insert(block.label.clone(), code.len());
 
@@ -3479,6 +3482,15 @@ fn mips64_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, 
 
                 // ── Branch ──
                 IRInstr::Branch { target } => {
+                    // Emit phi copies for (target, current_block) before the jump.
+                    if let Some(pairs) = phi_map.get(&(target.clone(), block.label.clone())) {
+                        for (dst, src) in pairs {
+                            code.extend(ss_load_value(src, &vreg_stack_slots, Gpr::T0));
+                            let dst_id = dst.as_register().unwrap_or(0);
+                            let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+                            code.extend(ss_sd(Gpr::T0, dst_off));
+                        }
+                    }
                     let fixup_offset = code.len();
                     branch_fixups.push((fixup_offset, target.clone(), 0)); // B instruction offset
                     code.extend_from_slice(&Instruction::Beq { rs: Gpr::Zero, rt: Gpr::Zero, offset: 0 }.encode()); // placeholder
@@ -3488,16 +3500,70 @@ fn mips64_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, 
                 // ── CondBranch ──
                 IRInstr::CondBranch { cond, true_target, false_target } => {
                     code.extend(ss_load_value(cond, &vreg_stack_slots, Gpr::T0));
-                    // BNE $t0, $zero, true_target
-                    let true_fixup = code.len();
-                    branch_fixups.push((true_fixup, true_target.clone(), 0));
-                    code.extend_from_slice(&Instruction::Bne { rs: Gpr::T0, rt: Gpr::Zero, offset: 0 }.encode()); // placeholder
-                    code.extend_from_slice(&encode_nop()); // delay slot
-                    // BEQ $zero, $zero, false_target  (unconditional branch)
-                    let false_fixup = code.len();
-                    branch_fixups.push((false_fixup, false_target.clone(), 0));
-                    code.extend_from_slice(&Instruction::Beq { rs: Gpr::Zero, rt: Gpr::Zero, offset: 0 }.encode()); // placeholder
-                    code.extend_from_slice(&encode_nop()); // delay slot
+
+                    // Compute phi copies for both successors.
+                    let false_copies: Vec<u8> = if let Some(pairs) = phi_map.get(&(false_target.clone(), block.label.clone())) {
+                        let mut c = Vec::new();
+                        for (dst, src) in pairs {
+                            c.extend(ss_load_value(src, &vreg_stack_slots, Gpr::T0));
+                            let dst_id = dst.as_register().unwrap_or(0);
+                            let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+                            c.extend(ss_sd(Gpr::T0, dst_off));
+                        }
+                        c
+                    } else { Vec::new() };
+                    let true_copies: Vec<u8> = if let Some(pairs) = phi_map.get(&(true_target.clone(), block.label.clone())) {
+                        let mut c = Vec::new();
+                        for (dst, src) in pairs {
+                            c.extend(ss_load_value(src, &vreg_stack_slots, Gpr::T0));
+                            let dst_id = dst.as_register().unwrap_or(0);
+                            let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+                            c.extend(ss_sd(Gpr::T0, dst_off));
+                        }
+                        c
+                    } else { Vec::new() };
+
+                    if false_copies.is_empty() && true_copies.is_empty() {
+                        // Common case (no phis): BNE true, BEQ false
+                        let true_fixup = code.len();
+                        branch_fixups.push((true_fixup, true_target.clone(), 0));
+                        code.extend_from_slice(&Instruction::Bne { rs: Gpr::T0, rt: Gpr::Zero, offset: 0 }.encode()); // placeholder
+                        code.extend_from_slice(&encode_nop()); // delay slot
+                        // BEQ $zero, $zero, false_target  (unconditional branch)
+                        let false_fixup = code.len();
+                        branch_fixups.push((false_fixup, false_target.clone(), 0));
+                        code.extend_from_slice(&Instruction::Beq { rs: Gpr::Zero, rt: Gpr::Zero, offset: 0 }.encode()); // placeholder
+                        code.extend_from_slice(&encode_nop()); // delay slot
+                    } else {
+                        // Landing-pad pattern (MIPS branch delay slot requires care):
+                        //   BNE $t0, $zero, +N   ← skip false_copies + B false + B false delay slot
+                        //   NOP                  ← BNE delay slot (always executes)
+                        //   <false copies>       ← fall-through if cond == 0
+                        //   B false_target       ← unconditional
+                        //   NOP                  ← B false delay slot
+                        //   <true copies>        ← BNE target lands here
+                        //   B true_target
+                        //   NOP                  ← B true delay slot
+                        //
+                        // BNE target = current_BNE_pos + 4 (delay) + false_copies.len() + 4 (B false) + 4 (B false delay)
+                        //            = current_BNE_pos + 12 + false_copies.len()
+                        // MIPS offset = (target - BNE_pos - 4) / 4 = (8 + false_copies.len()) / 4 = 2 + false_copies.len()/4
+                        let bne_offset_words = 2 + (false_copies.len() as i32) / 4;
+                        code.extend_from_slice(&Instruction::Bne { rs: Gpr::T0, rt: Gpr::Zero, offset: bne_offset_words }.encode());
+                        code.extend_from_slice(&encode_nop()); // BNE delay slot
+                        // False path
+                        code.extend(false_copies);
+                        let b_false_fixup = code.len();
+                        branch_fixups.push((b_false_fixup, false_target.clone(), 0));
+                        code.extend_from_slice(&Instruction::Beq { rs: Gpr::Zero, rt: Gpr::Zero, offset: 0 }.encode()); // placeholder
+                        code.extend_from_slice(&encode_nop()); // B false delay slot
+                        // True path (BNE target)
+                        code.extend(true_copies);
+                        let b_true_fixup = code.len();
+                        branch_fixups.push((b_true_fixup, true_target.clone(), 0));
+                        code.extend_from_slice(&Instruction::Beq { rs: Gpr::Zero, rt: Gpr::Zero, offset: 0 }.encode()); // placeholder
+                        code.extend_from_slice(&encode_nop()); // B true delay slot
+                    }
                 }
 
                 // ── Call ──
@@ -3528,10 +3594,11 @@ fn mips64_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, 
                 }
 
                 // ── Phi ──
-                IRInstr::Phi { incoming, .. } => {
-                    if incoming.len() > 1 {
-                        log::warn!("Phi with multiple incoming — no-op");
-                    }
+                // Phi copies are emitted at predecessor block terminators
+                // (Branch/CondBranch handlers), not at the phi block entry.
+                // See func.build_phi_map().
+                IRInstr::Phi { .. } => {
+                    // No code emitted at the phi block entry.
                 }
 
                 // ── Atomic operations ──

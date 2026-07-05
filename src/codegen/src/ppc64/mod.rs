@@ -4353,6 +4353,9 @@ impl Backend for PPC64Backend {
         struct BranchFixup { instr_idx: usize, offset_in_encoded: usize, abs_byte_offset: u64, target_label: String, is_unconditional: bool, bc_bo: u32, bc_bi: u32 }
         let mut branch_fixups: Vec<BranchFixup> = Vec::new();
 
+        // Build predecessor-aware phi resolution map.
+        let phi_map = func.build_phi_map();
+
         // ── Pre-pass: big-endian U8-load workaround ───────────────────────
         //
         // scg_to_ir.rs has a load-type inference bug: for `*(ptr + var_offset)`
@@ -5380,26 +5383,94 @@ impl Backend for PPC64Backend {
                         code
                     }
                     IRInstr::Branch { target } => {
+                        let mut code = Vec::new();
+                        // Emit phi copies for (target, current_block) before the jump.
+                        if let Some(pairs) = phi_map.get(&(target.clone(), block.label.clone())) {
+                            for (dst, src) in pairs {
+                                code.extend(ss_load_value(src, &vreg_stack_slots, Gpr::R3));
+                                let dst_id = dst.as_register().unwrap_or(0);
+                                let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+                                code.extend(ss_store_to_slot(Gpr::R3, dst_off));
+                            }
+                        }
                         let instr_idx = instructions.len();
-                        let b_abs_offset = current_byte_offset;
-                        branch_fixups.push(BranchFixup { instr_idx, offset_in_encoded: 0, abs_byte_offset: b_abs_offset, target_label: target.clone(), is_unconditional: true, bc_bo: 0, bc_bi: 0 });
-                        Instruction::B { li: 0 }.encode().to_vec()
+                        let b_offset = code.len();
+                        let b_abs_offset = current_byte_offset + b_offset as u64;
+                        branch_fixups.push(BranchFixup { instr_idx, offset_in_encoded: b_offset, abs_byte_offset: b_abs_offset, target_label: target.clone(), is_unconditional: true, bc_bo: 0, bc_bi: 0 });
+                        code.extend_from_slice(&Instruction::B { li: 0 }.encode());
+                        code
                     }
                     IRInstr::CondBranch { cond, true_target, false_target } => {
                         let mut code = Vec::new();
                         code.extend(ss_load_value(cond, &vreg_stack_slots, Gpr::R3));
                         let instr_idx = instructions.len();
                         code.extend_from_slice(&Instruction::Cmpi { bf: CrField::CR0, l: 1, ra: Gpr::R3, simm: 0 }.encode());
-                        let bne_offset = code.len();
-                        let bne_abs = current_byte_offset + bne_offset as u64;
-                        code.extend_from_slice(&Instruction::Bc { bo: 4, bi: 2, bd: 0 }.encode());
-                        let b_offset = code.len();
-                        let b_abs = current_byte_offset + b_offset as u64;
-                        code.extend_from_slice(&Instruction::B { li: 0 }.encode());
-                        branch_fixups.push(BranchFixup { instr_idx, offset_in_encoded: bne_offset, abs_byte_offset: bne_abs, target_label: true_target.clone(), is_unconditional: false, bc_bo: 4, bc_bi: 2 });
-                        branch_fixups.push(BranchFixup { instr_idx, offset_in_encoded: b_offset, abs_byte_offset: b_abs, target_label: false_target.clone(), is_unconditional: true, bc_bo: 0, bc_bi: 0 });
+
+                        // Compute phi copies for both successors.
+                        let false_copies: Vec<u8> = if let Some(pairs) = phi_map.get(&(false_target.clone(), block.label.clone())) {
+                            let mut c = Vec::new();
+                            for (dst, src) in pairs {
+                                c.extend(ss_load_value(src, &vreg_stack_slots, Gpr::R3));
+                                let dst_id = dst.as_register().unwrap_or(0);
+                                let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+                                c.extend(ss_store_to_slot(Gpr::R3, dst_off));
+                            }
+                            c
+                        } else { Vec::new() };
+                        let true_copies: Vec<u8> = if let Some(pairs) = phi_map.get(&(true_target.clone(), block.label.clone())) {
+                            let mut c = Vec::new();
+                            for (dst, src) in pairs {
+                                c.extend(ss_load_value(src, &vreg_stack_slots, Gpr::R3));
+                                let dst_id = dst.as_register().unwrap_or(0);
+                                let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+                                c.extend(ss_store_to_slot(Gpr::R3, dst_off));
+                            }
+                            c
+                        } else { Vec::new() };
+
+                        if false_copies.is_empty() && true_copies.is_empty() {
+                            // Common case (no phis): BNE true, B false
+                            let bne_offset = code.len();
+                            let bne_abs = current_byte_offset + bne_offset as u64;
+                            code.extend_from_slice(&Instruction::Bc { bo: 4, bi: 2, bd: 0 }.encode());
+                            let b_offset = code.len();
+                            let b_abs = current_byte_offset + b_offset as u64;
+                            code.extend_from_slice(&Instruction::B { li: 0 }.encode());
+                            branch_fixups.push(BranchFixup { instr_idx, offset_in_encoded: bne_offset, abs_byte_offset: bne_abs, target_label: true_target.clone(), is_unconditional: false, bc_bo: 4, bc_bi: 2 });
+                            branch_fixups.push(BranchFixup { instr_idx, offset_in_encoded: b_offset, abs_byte_offset: b_abs, target_label: false_target.clone(), is_unconditional: true, bc_bo: 0, bc_bi: 0 });
+                        } else {
+                            // Landing-pad pattern:
+                            //   BNE +N           (skip false copies + false B)
+                            //   <false copies>
+                            //   B false_target
+                            //   <true copies>    ← BNE lands here
+                            //   B true_target
+                            //
+                            // PPC branch target = branch_addr + (bd << 2)
+                            // BNE target = BNE_addr + 4 (B false) + false_copies.len() + 4 (B false)
+                            //            = BNE_addr + 8 + false_copies.len()
+                            // bd = (target - BNE_addr) / 4 = (8 + false_copies.len()) / 4 = 2 + false_copies.len()/4
+                            let bne_bd = 2 + (false_copies.len() as i32) / 4;
+                            code.extend_from_slice(&Instruction::Bc { bo: 4, bi: 2, bd: bne_bd }.encode());
+                            // False path
+                            code.extend(false_copies);
+                            let b_false_offset = code.len();
+                            let b_false_abs = current_byte_offset + b_false_offset as u64;
+                            code.extend_from_slice(&Instruction::B { li: 0 }.encode());
+                            branch_fixups.push(BranchFixup { instr_idx, offset_in_encoded: b_false_offset, abs_byte_offset: b_false_abs, target_label: false_target.clone(), is_unconditional: true, bc_bo: 0, bc_bi: 0 });
+                            // True path (BNE target)
+                            code.extend(true_copies);
+                            let b_true_offset = code.len();
+                            let b_true_abs = current_byte_offset + b_true_offset as u64;
+                            code.extend_from_slice(&Instruction::B { li: 0 }.encode());
+                            branch_fixups.push(BranchFixup { instr_idx, offset_in_encoded: b_true_offset, abs_byte_offset: b_true_abs, target_label: true_target.clone(), is_unconditional: true, bc_bo: 0, bc_bi: 0 });
+                        }
                         code
                     }
+                    // ── Phi ──
+                    // Phi copies are emitted at predecessor block terminators
+                    // (Branch/CondBranch handlers), not at the phi block entry.
+                    // See func.build_phi_map().
                     IRInstr::Phi { .. } => Instruction::Nop.encode().to_vec(),
                 };
                 current_byte_offset += encoded.len() as u64;

@@ -2019,6 +2019,9 @@ fn lower_function(
         .map(|(i, b)| (b.label.clone(), i as u32))
         .collect();
 
+    // Build predecessor-aware phi resolution map.
+    let phi_map = func.build_phi_map();
+
     // Emit the trampoline loop
     ctx.emit(WasmInstr::Loop(None));
 
@@ -2051,6 +2054,7 @@ fn lower_function(
             let trampoline_depth = (num_blocks - 1 - block_idx) as u32;
             lower_terminator_trampoline(
                 &block.terminator, &mut ctx, pc_local, &block_indices, trampoline_depth,
+                &phi_map, &block.label,
             )?;
         }
 
@@ -2759,8 +2763,9 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
         }
 
         IRInstr::Phi { .. } => {
-            // Phi nodes are resolved during SSA destruction before lowering.
-            // They should not appear here, but we treat them as no-ops.
+            // Phi copies are emitted at predecessor block terminators
+            // (IRTerminator::Jump/Branch handlers in lower_terminator_trampoline),
+            // not at the phi block entry. See func.build_phi_map().
         }
 
         IRInstr::GetAddress { dst, name: _ } => {
@@ -3137,6 +3142,8 @@ fn lower_terminator_trampoline(
     pc_local: u32,
     block_indices: &HashMap<String, u32>,
     trampoline_depth: u32,
+    phi_map: &HashMap<(String, String), Vec<(crate::ir::IRValue, crate::ir::IRValue)>>,
+    current_label: &str,
 ) -> Result<(), BackendError> {
     match term {
         IRTerminator::Return(values) => {
@@ -3151,6 +3158,18 @@ fn lower_terminator_trampoline(
             ctx.emit(WasmInstr::Return);
         }
         IRTerminator::Jump(target) => {
+            // Emit phi copies for (target, current_block) before the jump.
+            if let Some(pairs) = phi_map.get(&(target.clone(), current_label.to_string())) {
+                for (dst, src) in pairs {
+                    ctx.push_value(src, Some(&WasmType::I32));
+                    if let crate::ir::IRValue::Register(dst_id) = dst {
+                        ctx.pop_to_vreg(*dst_id, WasmType::I32);
+                    } else {
+                        ctx.emit(WasmInstr::Drop);
+                        ctx.stack_depth -= 1;
+                    }
+                }
+            }
             // Set $pc = target block index, then br to trampoline
             if let Some(&idx) = block_indices.get(target) {
                 ctx.emit(WasmInstr::I32Const(idx as i32));
@@ -3167,20 +3186,70 @@ fn lower_terminator_trampoline(
             true_block,
             false_block,
         } => {
-            // wasm select: stack [val1, val2, cond] → if cond!=0 returns val1, else val2
+            // Compute phi copies for both successors.
+            let false_pairs: Vec<&(crate::ir::IRValue, crate::ir::IRValue)> =
+                phi_map.get(&(false_block.clone(), current_label.to_string()))
+                    .map(|v| v.iter().collect()).unwrap_or_default();
+            let true_pairs: Vec<&(crate::ir::IRValue, crate::ir::IRValue)> =
+                phi_map.get(&(true_block.clone(), current_label.to_string()))
+                    .map(|v| v.iter().collect()).unwrap_or_default();
+
             let true_idx = block_indices.get(true_block).copied().unwrap_or(0) as i32;
             let false_idx = block_indices.get(false_block).copied().unwrap_or(0) as i32;
-            // Push true_idx first (val1, returned when cond != 0), then false_idx (val2)
-            ctx.emit(WasmInstr::I32Const(true_idx));
-            ctx.stack_depth += 1;
-            ctx.emit(WasmInstr::I32Const(false_idx));
-            ctx.stack_depth += 1;
-            ctx.push_value(cond, Some(&WasmType::I32));
-            ctx.emit(WasmInstr::Select);
-            ctx.stack_depth -= 2; // select pops 3, pushes 1 = net -2
-            ctx.emit(WasmInstr::LocalSet(pc_local));
-            ctx.stack_depth -= 1;
-            ctx.emit(WasmInstr::Br(trampoline_depth));
+
+            if false_pairs.is_empty() && true_pairs.is_empty() {
+                // Common case (no phis): select pattern.
+                // Push true_idx first (val1, returned when cond != 0), then false_idx (val2)
+                ctx.emit(WasmInstr::I32Const(true_idx));
+                ctx.stack_depth += 1;
+                ctx.emit(WasmInstr::I32Const(false_idx));
+                ctx.stack_depth += 1;
+                ctx.push_value(cond, Some(&WasmType::I32));
+                ctx.emit(WasmInstr::Select);
+                ctx.stack_depth -= 2; // select pops 3, pushes 1 = net -2
+                ctx.emit(WasmInstr::LocalSet(pc_local));
+                ctx.stack_depth -= 1;
+                ctx.emit(WasmInstr::Br(trampoline_depth));
+            } else {
+                // Landing-pad pattern using wasm if/else:
+                //   if cond:
+                //     <true copies>
+                //     $pc = true_idx
+                //   else:
+                //     <false copies>
+                //     $pc = false_idx
+                //   br trampoline
+                ctx.push_value(cond, Some(&WasmType::I32));
+                ctx.emit(WasmInstr::If(None));
+                ctx.stack_depth -= 1; // if consumes cond
+                // if-body (cond was true)
+                for (dst, src) in true_pairs {
+                    ctx.push_value(src, Some(&WasmType::I32));
+                    if let crate::ir::IRValue::Register(dst_id) = dst {
+                        ctx.pop_to_vreg(*dst_id, WasmType::I32);
+                    } else {
+                        ctx.emit(WasmInstr::Drop);
+                        ctx.stack_depth -= 1;
+                    }
+                }
+                ctx.emit(WasmInstr::I32Const(true_idx));
+                ctx.emit(WasmInstr::LocalSet(pc_local));
+                ctx.emit(WasmInstr::Else);
+                // else-body (cond was false)
+                for (dst, src) in false_pairs {
+                    ctx.push_value(src, Some(&WasmType::I32));
+                    if let crate::ir::IRValue::Register(dst_id) = dst {
+                        ctx.pop_to_vreg(*dst_id, WasmType::I32);
+                    } else {
+                        ctx.emit(WasmInstr::Drop);
+                        ctx.stack_depth -= 1;
+                    }
+                }
+                ctx.emit(WasmInstr::I32Const(false_idx));
+                ctx.emit(WasmInstr::LocalSet(pc_local));
+                ctx.emit(WasmInstr::End);
+                ctx.emit(WasmInstr::Br(trampoline_depth));
+            }
         }
         IRTerminator::Unreachable => {
             ctx.emit(WasmInstr::Unreachable);
