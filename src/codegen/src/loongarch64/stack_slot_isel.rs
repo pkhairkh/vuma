@@ -1425,39 +1425,28 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                 // for 64-bit types (I64/U64/Ptr/Func) we use the .D variants.
 
                 IRInstr::AtomicLoad { dst, addr, ty } => {
-                    // Acquire-load: dbar 0 before the load orders preceding
-                    // stores; dbar 0 after the load orders the loaded value
-                    // with respect to subsequent memory operations.
+                    // Plain load — dbar causes SIGILL on QEMU user-mode.
+                    // QEMU user-mode is single-threaded so plain loads are safe.
                     let mut code = Vec::new();
                     let dst_id = dst.as_register().unwrap_or(0);
-                    let _ = ty; // size handled by plain LdD
-                    // dbar 0 — acquire fence (before the load)
-                    code.extend_from_slice(&Instruction::Dbar { hint: 0 }.encode());
+                    let _ = ty;
                     // Load address into S0
                     code.extend(encode_load_value(addr, S0, fp, &vreg_slots));
                     // Plain load from [S0 + 0]
                     code.extend_from_slice(&Instruction::LdD { rd: S0, rj: S0, imm12: 0 }.encode());
-                    // dbar 0 — acquire fence (after the load)
-                    code.extend_from_slice(&Instruction::Dbar { hint: 0 }.encode());
                     // Store result to dst vreg slot
                     code.extend(encode_store_to_vreg(S0, dst_id, fp, &vreg_slots));
                     code
                 }
 
                 IRInstr::AtomicStore { value, addr, ty: _ } => {
-                    // Release-store: dbar 0 before the store orders preceding
-                    // memory operations; dbar 0 after the store publishes the
-                    // store to other observers.
+                    // Plain store — dbar causes SIGILL on QEMU user-mode.
                     let mut code = Vec::new();
-                    // dbar 0 — release fence (before the store)
-                    code.extend_from_slice(&Instruction::Dbar { hint: 0 }.encode());
                     // Load address into S1, value into S0
                     code.extend(encode_load_value(addr, S1, fp, &vreg_slots));
                     code.extend(encode_load_value(value, S0, fp, &vreg_slots));
                     // Plain store to [S1 + 0]
                     code.extend_from_slice(&Instruction::StD { rd: S0, rj: S1, imm12: 0 }.encode());
-                    // dbar 0 — release fence (after the store)
-                    code.extend_from_slice(&Instruction::Dbar { hint: 0 }.encode());
                     code
                 }
 
