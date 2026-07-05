@@ -4494,6 +4494,9 @@ impl Backend for RiscV64Backend {
         }
         let mut branch_fixups: Vec<BranchFixup> = Vec::new();
 
+        // Build predecessor-aware phi resolution map.
+        let phi_map = func.build_phi_map();
+
         for block in &func.blocks {
             // Record the byte offset for this block's label
             label_offsets.insert(block.label.clone(), current_byte_offset);
@@ -5051,10 +5054,20 @@ impl Backend for RiscV64Backend {
                     }
 
                     IRInstr::Branch { target } => {
+                        let mut code = Vec::new();
+                        // Emit phi copies for (target, current_block) before the jump.
+                        if let Some(pairs) = phi_map.get(&(target.clone(), block.label.clone())) {
+                            for (dst, src) in pairs {
+                                code.extend(ss_load_value(src, &vreg_stack_slots, Gpr::T0));
+                                let dst_id = dst.as_register().unwrap_or(0);
+                                let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+                                code.extend(ss_store_to_slot(Gpr::T0, dst_off));
+                            }
+                        }
                         // JAL x0, placeholder — will be fixed up
                         let instr_idx = instructions.len();
-                        let jal_offset_in_encoded = 0usize;
-                        let jal_abs_offset = current_byte_offset;
+                        let jal_offset_in_encoded = code.len();
+                        let jal_abs_offset = current_byte_offset + jal_offset_in_encoded as u64;
                         branch_fixups.push(BranchFixup {
                             instr_idx,
                             offset_in_encoded: jal_offset_in_encoded,
@@ -5065,7 +5078,8 @@ impl Backend for RiscV64Backend {
                             bne_rs1: Gpr::Zero,
                             bne_rs2: Gpr::Zero,
                         });
-                        Instruction::Jal { rd: Gpr::Zero, offset: 0 }.encode().to_vec()
+                        code.extend(Instruction::Jal { rd: Gpr::Zero, offset: 0 }.encode());
+                        code
                     }
 
                     IRInstr::CondBranch { cond, true_target, false_target } => {
@@ -5074,39 +5088,111 @@ impl Backend for RiscV64Backend {
 
                         let instr_idx = instructions.len();
 
-                        // BNE T0, x0, placeholder — branch to true_target
-                        let bne_offset_in_encoded = code.len();
-                        let bne_abs_offset = current_byte_offset + bne_offset_in_encoded as u64;
-                        code.extend(Instruction::Bne { rs1: Gpr::T0, rs2: Gpr::Zero, offset: 0 }.encode());
+                        // Compute phi copies for both successors.
+                        let false_copies: Vec<u8> = if let Some(pairs) = phi_map.get(&(false_target.clone(), block.label.clone())) {
+                            let mut c = Vec::new();
+                            for (dst, src) in pairs {
+                                c.extend(ss_load_value(src, &vreg_stack_slots, Gpr::T0));
+                                let dst_id = dst.as_register().unwrap_or(0);
+                                let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+                                c.extend(ss_store_to_slot(Gpr::T0, dst_off));
+                            }
+                            c
+                        } else { Vec::new() };
+                        let true_copies: Vec<u8> = if let Some(pairs) = phi_map.get(&(true_target.clone(), block.label.clone())) {
+                            let mut c = Vec::new();
+                            for (dst, src) in pairs {
+                                c.extend(ss_load_value(src, &vreg_stack_slots, Gpr::T0));
+                                let dst_id = dst.as_register().unwrap_or(0);
+                                let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+                                c.extend(ss_store_to_slot(Gpr::T0, dst_off));
+                            }
+                            c
+                        } else { Vec::new() };
 
-                        // JAL x0, placeholder — jump to false_target
-                        let jal_offset_in_encoded = code.len();
-                        let jal_abs_offset = current_byte_offset + jal_offset_in_encoded as u64;
-                        code.extend(Instruction::Jal { rd: Gpr::Zero, offset: 0 }.encode());
+                        if false_copies.is_empty() && true_copies.is_empty() {
+                            // Common case (no phis): BNE true, JAL false
+                            let bne_offset_in_encoded = code.len();
+                            let bne_abs_offset = current_byte_offset + bne_offset_in_encoded as u64;
+                            code.extend(Instruction::Bne { rs1: Gpr::T0, rs2: Gpr::Zero, offset: 0 }.encode());
 
-                        branch_fixups.push(BranchFixup {
-                            instr_idx,
-                            offset_in_encoded: bne_offset_in_encoded,
-                            abs_byte_offset: bne_abs_offset,
-                            target_label: true_target.clone(),
-                            is_jal: false,
-                            jal_rd: Gpr::Zero,
-                            bne_rs1: Gpr::T0,
-                            bne_rs2: Gpr::Zero,
-                        });
-                        branch_fixups.push(BranchFixup {
-                            instr_idx,
-                            offset_in_encoded: jal_offset_in_encoded,
-                            abs_byte_offset: jal_abs_offset,
-                            target_label: false_target.clone(),
-                            is_jal: true,
-                            jal_rd: Gpr::Zero,
-                            bne_rs1: Gpr::Zero,
-                            bne_rs2: Gpr::Zero,
-                        });
+                            // JAL x0, placeholder — jump to false_target
+                            let jal_offset_in_encoded = code.len();
+                            let jal_abs_offset = current_byte_offset + jal_offset_in_encoded as u64;
+                            code.extend(Instruction::Jal { rd: Gpr::Zero, offset: 0 }.encode());
+
+                            branch_fixups.push(BranchFixup {
+                                instr_idx,
+                                offset_in_encoded: bne_offset_in_encoded,
+                                abs_byte_offset: bne_abs_offset,
+                                target_label: true_target.clone(),
+                                is_jal: false,
+                                jal_rd: Gpr::Zero,
+                                bne_rs1: Gpr::T0,
+                                bne_rs2: Gpr::Zero,
+                            });
+                            branch_fixups.push(BranchFixup {
+                                instr_idx,
+                                offset_in_encoded: jal_offset_in_encoded,
+                                abs_byte_offset: jal_abs_offset,
+                                target_label: false_target.clone(),
+                                is_jal: true,
+                                jal_rd: Gpr::Zero,
+                                bne_rs1: Gpr::Zero,
+                                bne_rs2: Gpr::Zero,
+                            });
+                        } else {
+                            // Landing-pad pattern:
+                            //   BNE T0, x0, +N   (skip false copies + false JAL)
+                            //   <false copies>   ← fall-through if cond == 0
+                            //   JAL false_target
+                            //   <true copies>    ← BNE target lands here
+                            //   JAL true_target
+                            //
+                            // RISC-V BNE target = BNE_addr + offset (in bytes)
+                            // BNE target = BNE_addr + 4 (BNE) + false_copies.len() + 4 (JAL false)
+                            //            = BNE_addr + 8 + false_copies.len()
+                            // offset = 8 + false_copies.len()
+                            let bne_offset = 8 + false_copies.len() as i32;
+                            code.extend(Instruction::Bne { rs1: Gpr::T0, rs2: Gpr::Zero, offset: bne_offset }.encode());
+                            // False path
+                            code.extend(false_copies);
+                            let jal_false_offset_in_encoded = code.len();
+                            let jal_false_abs_offset = current_byte_offset + jal_false_offset_in_encoded as u64;
+                            code.extend(Instruction::Jal { rd: Gpr::Zero, offset: 0 }.encode());
+                            branch_fixups.push(BranchFixup {
+                                instr_idx,
+                                offset_in_encoded: jal_false_offset_in_encoded,
+                                abs_byte_offset: jal_false_abs_offset,
+                                target_label: false_target.clone(),
+                                is_jal: true,
+                                jal_rd: Gpr::Zero,
+                                bne_rs1: Gpr::Zero,
+                                bne_rs2: Gpr::Zero,
+                            });
+                            // True path (BNE target)
+                            code.extend(true_copies);
+                            let jal_true_offset_in_encoded = code.len();
+                            let jal_true_abs_offset = current_byte_offset + jal_true_offset_in_encoded as u64;
+                            code.extend(Instruction::Jal { rd: Gpr::Zero, offset: 0 }.encode());
+                            branch_fixups.push(BranchFixup {
+                                instr_idx,
+                                offset_in_encoded: jal_true_offset_in_encoded,
+                                abs_byte_offset: jal_true_abs_offset,
+                                target_label: true_target.clone(),
+                                is_jal: true,
+                                jal_rd: Gpr::Zero,
+                                bne_rs1: Gpr::Zero,
+                                bne_rs2: Gpr::Zero,
+                            });
+                        }
                         code
                     }
 
+                    // ── Phi ──
+                    // Phi copies are emitted at predecessor block terminators
+                    // (Branch/CondBranch handlers), not at the phi block entry.
+                    // See func.build_phi_map().
                     IRInstr::Phi { .. } => {
                         Instruction::Addi { rd: Gpr::Zero, rs1: Gpr::Zero, imm: 0 }
                             .encode()

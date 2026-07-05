@@ -313,6 +313,9 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
     // Track branches that need patching: (rel32_field_offset, target_label)
     let mut branch_patches: Vec<(usize, String)> = Vec::new();
 
+    // Build predecessor-aware phi resolution map.
+    let phi_map = func.build_phi_map();
+
     for block in &func.blocks {
         // Record this block's label offset
         block_offsets.insert(block.label.clone(), byte_offset);
@@ -1271,7 +1274,16 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
 
                 // ── Control: Branch (unconditional) ──
                 IRInstr::Branch { target } => {
-                    let code = encode_jmp_rel32(0);
+                    let mut code = Vec::new();
+                    // Emit phi copies for (target, current_block) before the jump.
+                    if let Some(pairs) = phi_map.get(&(target.clone(), block.label.clone())) {
+                        for (dst, src) in pairs {
+                            code.extend(load_value(src, Gpr::Rax));
+                            let dst_id = dst.as_register().unwrap_or(0);
+                            code.extend(store_vreg(dst_id, Gpr::Rax));
+                        }
+                    }
+                    code.extend(encode_jmp_rel32(0));
                     let rel32_offset = byte_offset + code.len() - 4;
                     branch_patches.push((rel32_offset, target.clone()));
                     code
@@ -1282,16 +1294,58 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     let mut code = Vec::new();
                     // Load condition from stack into RAX
                     code.extend(load_value(cond, Gpr::Rax));
-                    // test rax, rax; jnz true; jmp false
+                    // test rax, rax
                     code.extend(encode_test_reg_reg(Gpr::Rax, Gpr::Rax));
-                    // JNZ rel32
-                    code.extend(encode_jcc_rel32(Cc::NotEqual, 0));
-                    let jnz_rel32_offset = byte_offset + code.len() - 4;
-                    branch_patches.push((jnz_rel32_offset, true_target.clone()));
-                    // JMP rel32
-                    code.extend(encode_jmp_rel32(0));
-                    let jmp_rel32_offset = byte_offset + code.len() - 4;
-                    branch_patches.push((jmp_rel32_offset, false_target.clone()));
+
+                    // Compute phi copies for both successors.
+                    let false_copies: Vec<u8> = if let Some(pairs) = phi_map.get(&(false_target.clone(), block.label.clone())) {
+                        let mut c = Vec::new();
+                        for (dst, src) in pairs {
+                            c.extend(load_value(src, Gpr::Rax));
+                            let dst_id = dst.as_register().unwrap_or(0);
+                            c.extend(store_vreg(dst_id, Gpr::Rax));
+                        }
+                        c
+                    } else { Vec::new() };
+                    let true_copies: Vec<u8> = if let Some(pairs) = phi_map.get(&(true_target.clone(), block.label.clone())) {
+                        let mut c = Vec::new();
+                        for (dst, src) in pairs {
+                            c.extend(load_value(src, Gpr::Rax));
+                            let dst_id = dst.as_register().unwrap_or(0);
+                            c.extend(store_vreg(dst_id, Gpr::Rax));
+                        }
+                        c
+                    } else { Vec::new() };
+
+                    if false_copies.is_empty() && true_copies.is_empty() {
+                        // Common case (no phis): jnz true, jmp false
+                        code.extend(encode_jcc_rel32(Cc::NotEqual, 0));
+                        let jnz_rel32_offset = byte_offset + code.len() - 4;
+                        branch_patches.push((jnz_rel32_offset, true_target.clone()));
+                        code.extend(encode_jmp_rel32(0));
+                        let jmp_rel32_offset = byte_offset + code.len() - 4;
+                        branch_patches.push((jmp_rel32_offset, false_target.clone()));
+                    } else {
+                        // Landing-pad pattern:
+                        //   jnz +N           (skip false copies + false jmp)
+                        //   <false copies>
+                        //   jmp false_target
+                        //   <true copies>    ← jnz lands here
+                        //   jmp true_target
+                        let jmp_rel32_size = 5; // E9 + 4-byte rel32
+                        let jnz_rel32 = (false_copies.len() + jmp_rel32_size) as i32;
+                        code.extend(encode_jcc_rel32(Cc::NotEqual, jnz_rel32));
+                        // False path
+                        code.extend(false_copies);
+                        code.extend(encode_jmp_rel32(0));
+                        let jmp_false_offset = byte_offset + code.len() - 4;
+                        branch_patches.push((jmp_false_offset, false_target.clone()));
+                        // True path (jnz target)
+                        code.extend(true_copies);
+                        code.extend(encode_jmp_rel32(0));
+                        let jmp_true_offset = byte_offset + code.len() - 4;
+                        branch_patches.push((jmp_true_offset, true_target.clone()));
+                    }
                     code
                 }
 
@@ -1359,42 +1413,11 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                 }
 
                 // ── Phi ──
-                // Phi nodes are resolved by the resolve_phis pass before codegen.
-                // If any remain, they should have been replaced by copies.
-                // Emit a NOP as a safety fallback.
-                IRInstr::Phi { dst, incoming, .. } => {
-                    // Self-referencing or trivial phi: just emit a NOP.
-                    // Non-trivial phi should have been resolved by resolve_phis().
-                    // As a safety measure, if the phi has exactly one non-self incoming,
-                    // emit a copy from that incoming to dst.
-                    let non_self: Vec<_> = incoming.iter()
-                        .filter(|(val, _)| val != dst)
-                        .collect();
-                    if non_self.len() == 1 {
-                        let (val, _) = non_self[0];
-                        let mut code = Vec::new();
-                        code.extend(load_value(val, Gpr::Rax));
-                        let dst_id = dst.as_register().unwrap_or(0);
-                        code.extend(store_vreg(dst_id, Gpr::Rax));
-                        code
-                    } else if non_self.is_empty() {
-                        encode_nop() // trivial self-loop
-                    } else {
-                        // Multiple non-self incoming: should have been resolved
-                        // by resolve_phis(). Emit a warning — using the first
-                        // value as a fallback produces incorrect code for other
-                        // predecessors.
-                        log::warn!(
-                            "Non-trivial Phi with {} incoming values — using first (may be wrong)",
-                            non_self.len()
-                        );
-                        let (val, _) = non_self[0];
-                        let mut code = Vec::new();
-                        code.extend(load_value(val, Gpr::Rax));
-                        let dst_id = dst.as_register().unwrap_or(0);
-                        code.extend(store_vreg(dst_id, Gpr::Rax));
-                        code
-                    }
+                // Phi copies are emitted at predecessor block terminators
+                // (Branch/CondBranch handlers), not at the phi block entry.
+                // See func.build_phi_map().
+                IRInstr::Phi { .. } => {
+                    encode_nop()
                 }
 
                 // ── Atomic operations ──────────────────────────────────────────
