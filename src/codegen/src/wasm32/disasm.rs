@@ -232,6 +232,14 @@ impl std::fmt::Display for WasmInstr {
             WasmInstr::F32Div => write!(f, "f32.div"),
             WasmInstr::F32Sqrt => write!(f, "f32.sqrt"),
             WasmInstr::F32Neg => write!(f, "f32.neg"),
+            WasmInstr::F32Abs => write!(f, "f32.abs"),
+            WasmInstr::F32Min => write!(f, "f32.min"),
+            WasmInstr::F32Max => write!(f, "f32.max"),
+            WasmInstr::F32Copysign => write!(f, "f32.copysign"),
+            WasmInstr::F32Ceil => write!(f, "f32.ceil"),
+            WasmInstr::F32Floor => write!(f, "f32.floor"),
+            WasmInstr::F32Trunc => write!(f, "f32.trunc"),
+            WasmInstr::F32Nearest => write!(f, "f32.nearest"),
 
             // Numeric f64
             WasmInstr::F64Const(val) => write!(f, "f64.const {val}"),
@@ -247,6 +255,14 @@ impl std::fmt::Display for WasmInstr {
             WasmInstr::F64Div => write!(f, "f64.div"),
             WasmInstr::F64Sqrt => write!(f, "f64.sqrt"),
             WasmInstr::F64Neg => write!(f, "f64.neg"),
+            WasmInstr::F64Abs => write!(f, "f64.abs"),
+            WasmInstr::F64Min => write!(f, "f64.min"),
+            WasmInstr::F64Max => write!(f, "f64.max"),
+            WasmInstr::F64Copysign => write!(f, "f64.copysign"),
+            WasmInstr::F64Ceil => write!(f, "f64.ceil"),
+            WasmInstr::F64Floor => write!(f, "f64.floor"),
+            WasmInstr::F64Trunc => write!(f, "f64.trunc"),
+            WasmInstr::F64Nearest => write!(f, "f64.nearest"),
 
             // Conversions
             WasmInstr::I32WrapI64 => write!(f, "i32.wrap_i64"),
@@ -788,6 +804,14 @@ impl WasmInstr {
             0x95 => WasmInstr::F32Div,
             0x91 => WasmInstr::F32Sqrt,
             0x8C => WasmInstr::F32Neg,
+            0x8B => WasmInstr::F32Abs,
+            0x96 => WasmInstr::F32Min,
+            0x97 => WasmInstr::F32Max,
+            0x98 => WasmInstr::F32Copysign,
+            0x8D => WasmInstr::F32Ceil,
+            0x8E => WasmInstr::F32Floor,
+            0x8F => WasmInstr::F32Trunc,
+            0x90 => WasmInstr::F32Nearest,
 
             // f64
             0x44 => {
@@ -813,6 +837,14 @@ impl WasmInstr {
             0xA3 => WasmInstr::F64Div,
             0x9F => WasmInstr::F64Sqrt,
             0x9A => WasmInstr::F64Neg,
+            0x99 => WasmInstr::F64Abs,
+            0xA4 => WasmInstr::F64Min,
+            0xA5 => WasmInstr::F64Max,
+            0xA6 => WasmInstr::F64Copysign,
+            0x9B => WasmInstr::F64Ceil,
+            0x9C => WasmInstr::F64Floor,
+            0x9D => WasmInstr::F64Trunc,
+            0x9E => WasmInstr::F64Nearest,
 
             // Conversions
             0xA7 => WasmInstr::I32WrapI64,

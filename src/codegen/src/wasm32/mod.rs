@@ -330,6 +330,22 @@ pub enum WasmInstr {
     F32Div,
     F32Sqrt,
     F32Neg,
+    /// f32.abs: absolute value (opcode 0x8B)
+    F32Abs,
+    /// f32.min: minimum (opcode 0x96)
+    F32Min,
+    /// f32.max: maximum (opcode 0x97)
+    F32Max,
+    /// f32.copysign: copysign (opcode 0x98)
+    F32Copysign,
+    /// f32.ceil: ceiling (opcode 0x8D)
+    F32Ceil,
+    /// f32.floor: floor (opcode 0x8E)
+    F32Floor,
+    /// f32.trunc: truncate toward zero (opcode 0x8F)
+    F32Trunc,
+    /// f32.nearest: round to nearest even (opcode 0x90)
+    F32Nearest,
 
     // ── Numeric f64 ──────────────────────────────────────────────────
     F64Const(f64),
@@ -345,6 +361,22 @@ pub enum WasmInstr {
     F64Div,
     F64Sqrt,
     F64Neg,
+    /// f64.abs: absolute value (opcode 0x99)
+    F64Abs,
+    /// f64.min: minimum (opcode 0xA4)
+    F64Min,
+    /// f64.max: maximum (opcode 0xA5)
+    F64Max,
+    /// f64.copysign: copysign (opcode 0xA6)
+    F64Copysign,
+    /// f64.ceil: ceiling (opcode 0x9B)
+    F64Ceil,
+    /// f64.floor: floor (opcode 0x9C)
+    F64Floor,
+    /// f64.trunc: truncate toward zero (opcode 0x9D)
+    F64Trunc,
+    /// f64.nearest: round to nearest even (opcode 0x9E)
+    F64Nearest,
 
     // ── Conversions ──────────────────────────────────────────────────
     I32WrapI64,
@@ -761,6 +793,14 @@ impl WasmInstr {
             WasmInstr::F32Div => out.push(0x95),
             WasmInstr::F32Sqrt => out.push(0x91),
             WasmInstr::F32Neg => out.push(0x8C),
+            WasmInstr::F32Abs => out.push(0x8B),
+            WasmInstr::F32Min => out.push(0x96),
+            WasmInstr::F32Max => out.push(0x97),
+            WasmInstr::F32Copysign => out.push(0x98),
+            WasmInstr::F32Ceil => out.push(0x8D),
+            WasmInstr::F32Floor => out.push(0x8E),
+            WasmInstr::F32Trunc => out.push(0x8F),
+            WasmInstr::F32Nearest => out.push(0x90),
 
             // ── Numeric f64 ─────────────────────────────────────────
             WasmInstr::F64Const(val) => {
@@ -779,6 +819,14 @@ impl WasmInstr {
             WasmInstr::F64Div => out.push(0xA3),
             WasmInstr::F64Sqrt => out.push(0x9F),
             WasmInstr::F64Neg => out.push(0x9A),
+            WasmInstr::F64Abs => out.push(0x99),
+            WasmInstr::F64Min => out.push(0xA4),
+            WasmInstr::F64Max => out.push(0xA5),
+            WasmInstr::F64Copysign => out.push(0xA6),
+            WasmInstr::F64Ceil => out.push(0x9B),
+            WasmInstr::F64Floor => out.push(0x9C),
+            WasmInstr::F64Trunc => out.push(0x9D),
+            WasmInstr::F64Nearest => out.push(0x9E),
 
             // ── Conversions ─────────────────────────────────────────
             WasmInstr::I32WrapI64 => out.push(0xA7),
@@ -1161,6 +1209,85 @@ impl WasmImport {
             kind: WasmImportKind::Function { type_idx },
         }
     }
+
+    /// Create a WASI `fd_read` import (wasip1).
+    ///
+    /// Signature: (fd: i32, iovs: i32, iovs_len: i32, nread: i32) -> i32
+    pub fn wasi_fd_read(type_idx: u32) -> Self {
+        WasmImport {
+            module: "wasi_snapshot_preview1".to_string(),
+            name: "fd_read".to_string(),
+            kind: WasmImportKind::Function { type_idx },
+        }
+    }
+
+    /// Create a WASI `fd_close` import (wasip1).
+    ///
+    /// Signature: (fd: i32) -> i32
+    pub fn wasi_fd_close(type_idx: u32) -> Self {
+        WasmImport {
+            module: "wasi_snapshot_preview1".to_string(),
+            name: "fd_close".to_string(),
+            kind: WasmImportKind::Function { type_idx },
+        }
+    }
+
+    /// Create a WASI `fd_seek` import (wasip1).
+    ///
+    /// Signature: (fd: i32, offset: i64, whence: i32, newoffset_ptr: i32) -> i32
+    /// (newoffset is written through the out pointer as an i64.)
+    pub fn wasi_fd_seek(type_idx: u32) -> Self {
+        WasmImport {
+            module: "wasi_snapshot_preview1".to_string(),
+            name: "fd_seek".to_string(),
+            kind: WasmImportKind::Function { type_idx },
+        }
+    }
+
+    /// Create a WASI `clock_time_get` import (wasip1).
+    ///
+    /// Signature: (clock_id: i32, precision: i64, time_ptr: i32) -> i32
+    /// (time is written through the out pointer as an i64.)
+    pub fn wasi_clock_time_get(type_idx: u32) -> Self {
+        WasmImport {
+            module: "wasi_snapshot_preview1".to_string(),
+            name: "clock_time_get".to_string(),
+            kind: WasmImportKind::Function { type_idx },
+        }
+    }
+
+    /// Create a WASI `random_get` import (wasip1).
+    ///
+    /// Signature: (buf: i32, buf_len: i32) -> i32
+    pub fn wasi_random_get(type_idx: u32) -> Self {
+        WasmImport {
+            module: "wasi_snapshot_preview1".to_string(),
+            name: "random_get".to_string(),
+            kind: WasmImportKind::Function { type_idx },
+        }
+    }
+
+    /// Create a WASI `args_sizes_get` import (wasip1).
+    ///
+    /// Signature: (argc_ptr: i32, argv_buf_size_ptr: i32) -> i32
+    pub fn wasi_args_sizes_get(type_idx: u32) -> Self {
+        WasmImport {
+            module: "wasi_snapshot_preview1".to_string(),
+            name: "args_sizes_get".to_string(),
+            kind: WasmImportKind::Function { type_idx },
+        }
+    }
+
+    /// Create a WASI `args_get` import (wasip1).
+    ///
+    /// Signature: (argv_ptr: i32, argv_buf_ptr: i32) -> i32
+    pub fn wasi_args_get(type_idx: u32) -> Self {
+        WasmImport {
+            module: "wasi_snapshot_preview1".to_string(),
+            name: "args_get".to_string(),
+            kind: WasmImportKind::Function { type_idx },
+        }
+    }
 }
 
 /// Kind of import.
@@ -1232,13 +1359,28 @@ const HEAP_START: i32 = 65536;
 
 // ── WASI import function indices ─────────────────────────────────────────
 // These are the function indices of WASI imports in the module.
-// fd_write is the first import (index 0), proc_exit is the second (index 1).
+// fd_write is the first import (index 0), proc_exit is the second (index 1),
+// and the remaining WASI functions follow in declaration order.
 // MUST be kept in sync with the order imports are added in `encode_program`.
 
 /// Function index for the WASI `fd_write` import (first imported function).
 const WASI_FD_WRITE_IDX: u32 = 0;
 /// Function index for the WASI `proc_exit` import (second imported function).
 const WASI_PROC_EXIT_IDX: u32 = 1;
+/// Function index for the WASI `fd_read` import.
+const WASI_FD_READ_IDX: u32 = 2;
+/// Function index for the WASI `fd_close` import.
+const WASI_FD_CLOSE_IDX: u32 = 3;
+/// Function index for the WASI `fd_seek` import.
+const WASI_FD_SEEK_IDX: u32 = 4;
+/// Function index for the WASI `clock_time_get` import.
+const WASI_CLOCK_TIME_GET_IDX: u32 = 5;
+/// Function index for the WASI `random_get` import.
+const WASI_RANDOM_GET_IDX: u32 = 6;
+/// Function index for the WASI `args_sizes_get` import.
+const WASI_ARGS_SIZES_GET_IDX: u32 = 7;
+/// Function index for the WASI `args_get` import.
+const WASI_ARGS_GET_IDX: u32 = 8;
 
 // ── Runtime helper memory layout ─────────────────────────────────────────
 // These addresses are in page 0 of linear memory, well below the heap.
@@ -2770,12 +2912,36 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
 
         IRInstr::GetAddress { dst, name: _ } => {
             // In Wasm, addresses are offsets in linear memory.
-            // We use i32.const with a placeholder; the linker resolves it.
+            //
+            // BUG W2 (wasm32): we have no notion of a "data symbol" — the
+            // module emits no data segment and the only memory in use is the
+            // bump-allocator heap (starting at HEAP_START = 65536).  Without
+            // a linker-defined data layout, we cannot resolve the address of
+            // an arbitrary named symbol here.
+            //
+            // For now we emit `i32.const 0` (placeholder) and log a warning
+            // so callers know the result is meaningless.  This matches the
+            // pre-existing behavior (the placeholder was already being
+            // emitted silently) but makes the failure visible.
+            //
+            // TODO: implement a proper relocation similar to
+            // resolve_call_relocations — emit `i32.const <placeholder>` and
+            // record a (byte_offset, symbol_name) entry; then in
+            // encode_program allocate a data region for each unique symbol
+            // and patch the i32.const immediate (signed LEB128, 5 bytes
+            // following the 0x41 opcode) with the symbol's linear-memory
+            // address.
+            log::warn!(
+                "wasm32 GetAddress: returning placeholder 0 — symbol addresses \
+                 are not yet supported on the wasm32 backend"
+            );
             ctx.emit(WasmInstr::I32Const(0)); // placeholder
+            ctx.stack_depth += 1;
             if let IRValue::Register(id) = dst {
                 ctx.pop_to_vreg(*id, WasmType::I32);
             } else {
                 ctx.emit(WasmInstr::Drop);
+                ctx.stack_depth -= 1;
             }
         }
 
@@ -2984,6 +3150,22 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
             ctx.push_value(lhs, Some(&wasm_ty));
             ctx.push_value(rhs, Some(&wasm_ty));
             let wasm_op = match wasm_ty {
+                WasmType::F32 => match kind {
+                    crate::ir::CmpKind::Eq => WasmInstr::F32Eq,
+                    crate::ir::CmpKind::Ne => WasmInstr::F32Ne,
+                    crate::ir::CmpKind::SLt | crate::ir::CmpKind::ULt => WasmInstr::F32Lt,
+                    crate::ir::CmpKind::SLe | crate::ir::CmpKind::ULe => WasmInstr::F32Le,
+                    crate::ir::CmpKind::SGt | crate::ir::CmpKind::UGt => WasmInstr::F32Gt,
+                    crate::ir::CmpKind::SGe | crate::ir::CmpKind::UGe => WasmInstr::F32Ge,
+                },
+                WasmType::F64 => match kind {
+                    crate::ir::CmpKind::Eq => WasmInstr::F64Eq,
+                    crate::ir::CmpKind::Ne => WasmInstr::F64Ne,
+                    crate::ir::CmpKind::SLt | crate::ir::CmpKind::ULt => WasmInstr::F64Lt,
+                    crate::ir::CmpKind::SLe | crate::ir::CmpKind::ULe => WasmInstr::F64Le,
+                    crate::ir::CmpKind::SGt | crate::ir::CmpKind::UGt => WasmInstr::F64Gt,
+                    crate::ir::CmpKind::SGe | crate::ir::CmpKind::UGe => WasmInstr::F64Ge,
+                },
                 WasmType::I64 => match kind {
                     crate::ir::CmpKind::Eq => WasmInstr::I64Eq,
                     crate::ir::CmpKind::Ne => WasmInstr::I64Ne,
@@ -3259,27 +3441,53 @@ fn lower_terminator_trampoline(
             targets,
             default,
         } => {
-            // For switch, set $pc based on discriminant value
-            // Use a chain of if/else to select the target
+            // For switch, set $pc based on discriminant value via an if/else
+            // chain.  The wasm br_table would require contiguous 0-indexed
+            // discriminant values, which we cannot assume in general.
+            //
+            // Emission pattern (void blocks):
+            //   discr_local = discr
+            //   for each (val, label):
+            //     if discr_local == val:
+            //       $pc = label_idx; br trampoline
+            //   $pc = default_idx; br trampoline
+            //
+            // We use a scratch vreg id (9003) so the local is reused if a
+            // function has multiple switches.  (The LoweringContext always
+            // allocates a fresh local on the first call, then the get_local
+            // fast path reuses it on subsequent calls.)
+            const SWITCH_DISCR_VREG: u32 = 9003;
+            let discr_local = match ctx.get_local(SWITCH_DISCR_VREG) {
+                Some(idx) => idx,
+                None => ctx.alloc_local(SWITCH_DISCR_VREG, WasmType::I32),
+            };
+
+            // Push discr and store into the scratch local.
             ctx.push_value(discr, Some(&WasmType::I32));
-            // We need to emit: if discr == target_val then $pc = target_idx
-            // For simplicity, use br_table on discr value mapped to block indices
-            // Actually, the targets are (value, label) pairs. We map each
-            // value to its block index and use br_table if values are
-            // contiguous, otherwise emit if/else chain.
-            // For now, emit if/else chain for each target:
-            let default_idx = block_indices.get(default).copied().unwrap_or(0) as i64;
-            for (val, label) in targets {
-                let target_idx = block_indices.get(label).copied().unwrap_or(0) as i64;
-                // if discr == val: $pc = target_idx
-                // We already have discr on stack. Duplicate it:
-                // Actually, let's use a simpler approach: emit all comparisons
-                // For now, just set $pc to default (TODO: implement properly)
-                let _ = (val, target_idx);
-            }
-            ctx.emit(WasmInstr::Drop);
+            ctx.emit(WasmInstr::LocalSet(discr_local));
             ctx.stack_depth -= 1;
-            ctx.emit(WasmInstr::I32Const(default_idx as i32));
+
+            for (val, label) in targets {
+                let target_idx = block_indices.get(label).copied().unwrap_or(0) as i32;
+                // if discr_local == val
+                ctx.emit(WasmInstr::LocalGet(discr_local));
+                ctx.stack_depth += 1;
+                ctx.emit(WasmInstr::I32Const(*val as i32));
+                ctx.stack_depth += 1;
+                ctx.emit(WasmInstr::I32Eq);
+                ctx.stack_depth -= 1; // eq pops 2, pushes 1
+                ctx.emit(WasmInstr::If(None));
+                ctx.stack_depth -= 1; // if consumes cond
+                // $pc = target_idx
+                ctx.emit(WasmInstr::I32Const(target_idx));
+                ctx.emit(WasmInstr::LocalSet(pc_local));
+                ctx.emit(WasmInstr::Br(trampoline_depth));
+                ctx.emit(WasmInstr::End);
+            }
+
+            // Default fallthrough.
+            let default_idx = block_indices.get(default).copied().unwrap_or(0) as i32;
+            ctx.emit(WasmInstr::I32Const(default_idx));
             ctx.emit(WasmInstr::LocalSet(pc_local));
             ctx.emit(WasmInstr::Br(trampoline_depth));
         }
@@ -3521,6 +3729,73 @@ impl Backend for Wasm32Backend {
         module.add_import(WasmImport::wasi_proc_exit(proc_exit_type_idx));
         // proc_exit is now function index 1 (WASI_PROC_EXIT_IDX).
 
+        // Import wasi_snapshot_preview1.fd_read for reading from file
+        // descriptors (e.g. stdin).  Signature: (fd, iovs, iovs_len, nread) -> errno.
+        let fd_read_type_idx = module.add_type(WasmFuncType {
+            params: vec![WasmType::I32, WasmType::I32, WasmType::I32, WasmType::I32],
+            results: vec![WasmType::I32],
+        });
+        module.add_import(WasmImport::wasi_fd_read(fd_read_type_idx));
+        // fd_read is now function index 2 (WASI_FD_READ_IDX).
+
+        // Import wasi_snapshot_preview1.fd_close for closing file descriptors.
+        // Signature: (fd) -> errno.
+        let fd_close_type_idx = module.add_type(WasmFuncType {
+            params: vec![WasmType::I32],
+            results: vec![WasmType::I32],
+        });
+        module.add_import(WasmImport::wasi_fd_close(fd_close_type_idx));
+        // fd_close is now function index 3 (WASI_FD_CLOSE_IDX).
+
+        // Import wasi_snapshot_preview1.fd_seek for seeking in file
+        // descriptors.  Signature: (fd, offset: i64, whence, newoffset_ptr) -> errno.
+        // (newoffset is written through the out pointer as an i64.)
+        let fd_seek_type_idx = module.add_type(WasmFuncType {
+            params: vec![WasmType::I32, WasmType::I64, WasmType::I32, WasmType::I32],
+            results: vec![WasmType::I32],
+        });
+        module.add_import(WasmImport::wasi_fd_seek(fd_seek_type_idx));
+        // fd_seek is now function index 4 (WASI_FD_SEEK_IDX).
+
+        // Import wasi_snapshot_preview1.clock_time_get for reading the
+        // wall clock.  Signature: (clock_id, precision: i64, time_ptr) -> errno.
+        let clock_time_get_type_idx = module.add_type(WasmFuncType {
+            params: vec![WasmType::I32, WasmType::I64, WasmType::I32],
+            results: vec![WasmType::I32],
+        });
+        module.add_import(WasmImport::wasi_clock_time_get(clock_time_get_type_idx));
+        // clock_time_get is now function index 5 (WASI_CLOCK_TIME_GET_IDX).
+
+        // Import wasi_snapshot_preview1.random_get for filling a buffer
+        // with cryptographically-secure random bytes.
+        // Signature: (buf, buf_len) -> errno.
+        let random_get_type_idx = module.add_type(WasmFuncType {
+            params: vec![WasmType::I32, WasmType::I32],
+            results: vec![WasmType::I32],
+        });
+        module.add_import(WasmImport::wasi_random_get(random_get_type_idx));
+        // random_get is now function index 6 (WASI_RANDOM_GET_IDX).
+
+        // Import wasi_snapshot_preview1.args_sizes_get for retrieving the
+        // number and total size of command-line arguments.
+        // Signature: (argc_ptr, argv_buf_size_ptr) -> errno.
+        let args_sizes_get_type_idx = module.add_type(WasmFuncType {
+            params: vec![WasmType::I32, WasmType::I32],
+            results: vec![WasmType::I32],
+        });
+        module.add_import(WasmImport::wasi_args_sizes_get(args_sizes_get_type_idx));
+        // args_sizes_get is now function index 7 (WASI_ARGS_SIZES_GET_IDX).
+
+        // Import wasi_snapshot_preview1.args_get for retrieving
+        // command-line argument strings.
+        // Signature: (argv_ptr, argv_buf_ptr) -> errno.
+        let args_get_type_idx = module.add_type(WasmFuncType {
+            params: vec![WasmType::I32, WasmType::I32],
+            results: vec![WasmType::I32],
+        });
+        module.add_import(WasmImport::wasi_args_get(args_get_type_idx));
+        // args_get is now function index 8 (WASI_ARGS_GET_IDX).
+
         // ── _start wrapper type ────────────────────────────────────
         // The Wasm start-section function must have signature () -> ().
         let start_type_idx = module.add_type(WasmFuncType {
@@ -3579,8 +3854,22 @@ impl Backend for Wasm32Backend {
         func_name_to_idx.insert("print_int".to_string(), print_int_func_idx);
         func_name_to_idx.insert("print_hex".to_string(), print_hex_func_idx);
         func_name_to_idx.insert("print_newline".to_string(), print_newline_func_idx);
-        func_name_to_idx.insert("write".to_string(), 0); // fd_write import = index 0
-        func_name_to_idx.insert("exit".to_string(), 1);  // proc_exit import = index 1
+        func_name_to_idx.insert("write".to_string(), WASI_FD_WRITE_IDX); // fd_write
+        func_name_to_idx.insert("exit".to_string(),  WASI_PROC_EXIT_IDX); // proc_exit
+        // Map FFI/syscall names that match WASI imports so calls to these
+        // externs resolve to the real WASI function instead of the stub.
+        func_name_to_idx.insert("read".to_string(),            WASI_FD_READ_IDX);
+        func_name_to_idx.insert("fd_read".to_string(),         WASI_FD_READ_IDX);
+        func_name_to_idx.insert("close".to_string(),           WASI_FD_CLOSE_IDX);
+        func_name_to_idx.insert("fd_close".to_string(),        WASI_FD_CLOSE_IDX);
+        func_name_to_idx.insert("lseek".to_string(),           WASI_FD_SEEK_IDX);
+        func_name_to_idx.insert("fd_seek".to_string(),         WASI_FD_SEEK_IDX);
+        func_name_to_idx.insert("clock_gettime".to_string(),   WASI_CLOCK_TIME_GET_IDX);
+        func_name_to_idx.insert("clock_time_get".to_string(),  WASI_CLOCK_TIME_GET_IDX);
+        func_name_to_idx.insert("getrandom".to_string(),       WASI_RANDOM_GET_IDX);
+        func_name_to_idx.insert("random_get".to_string(),      WASI_RANDOM_GET_IDX);
+        func_name_to_idx.insert("args_sizes_get".to_string(),  WASI_ARGS_SIZES_GET_IDX);
+        func_name_to_idx.insert("args_get".to_string(),        WASI_ARGS_GET_IDX);
 
         // ── Stub function for unknown externs ──────────────────────
         // When the wasm32 backend encounters a call to an unknown extern
