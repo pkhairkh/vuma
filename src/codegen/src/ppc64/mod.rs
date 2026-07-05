@@ -841,19 +841,22 @@ impl Instruction {
                 encode_xo_form(31, rt.encoding(), ra.encoding(), rb.encoding(), 0, 491, 0)
             }
             Instruction::Divd { rt, ra, rb } => {
-                // DIVD rT, rA, rB: primary=31, OE=0, xo=487, Rc=0 (signed 64-bit)
-                // Use the correct signed division opcode. QEMU 10.x supports divd
-                // (XO=487) properly; the previous use of XO=459 was divdu (unsigned)
-                // and produced wrong results for negative operands.
-                encode_xo_form(31, rt.encoding(), ra.encoding(), rb.encoding(), 0, 487, 0)
+                // DIVD rT, rA, rB: primary=31, OE=0, xo=459, Rc=0 (signed 64-bit)
+                // PowerISA v3.1B Book I: divd = XO 459 (signed), divdu = XO 457 (unsigned).
+                // The previous XO=487 is 'tlbsx' (supervisor-only) and causes SIGSEGV
+                // in user mode under QEMU.
+                encode_xo_form(31, rt.encoding(), ra.encoding(), rb.encoding(), 0, 459, 0)
             }
             Instruction::Divwu { rt, ra, rb } => {
                 // DIVWU rT, rA, rB: primary=31, OE=0, xo=455, Rc=0 (unsigned 32-bit)
                 encode_xo_form(31, rt.encoding(), ra.encoding(), rb.encoding(), 0, 455, 0)
             }
             Instruction::Divdu { rt, ra, rb } => {
-                // DIVDU rT, rA, rB: primary=31, OE=0, xo=459, Rc=0 (unsigned 64-bit)
-                encode_xo_form(31, rt.encoding(), ra.encoding(), rb.encoding(), 0, 459, 0)
+                // DIVDU rT, rA, rB: primary=31, OE=0, xo=457, Rc=0 (unsigned 64-bit)
+                // PowerISA v3.1B Book I: divdu = XO 457 (unsigned 64).
+                // The previous XO=459 was divd (signed), producing wrong results
+                // for unsigned operands with the high bit set.
+                encode_xo_form(31, rt.encoding(), ra.encoding(), rb.encoding(), 0, 457, 0)
             }
             Instruction::Neg { rt, ra } => {
                 // NEG rT, rA: primary=31, OE=0, xo=104, Rc=0, rB=0
