@@ -1,7 +1,7 @@
 //! Dump the IR for a .vuma file
 use vuma_codegen::scg_to_ir::IRBuilder;
-use vuma_parser::{Parser, AstToScg, ModuleResolver};
-use vuma::pipeline::{CompileConfig, run_scg_transforms, CompileTarget, OptLevel, VerificationLevel, bridge_ast_to_codegen_scg};
+use vuma_parser::{ModuleResolver};
+use vuma::pipeline::bridge_ast_to_codegen_scg;
 use vuma_codegen::backend::{create_backend, BackendKind};
 
 fn backend_from_name(name: &str) -> Result<BackendKind, String> {
