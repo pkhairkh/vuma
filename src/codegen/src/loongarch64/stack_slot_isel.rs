@@ -306,15 +306,13 @@ fn binop_kind_to_cmp_kind(op: &BinOpKind) -> CmpKind {
     }
 }
 
-/// Returns true if the type is a 32-bit integer type (I8/I16/I32/U8/U16/U32).
-/// For these types, arithmetic should use the .W (word) variants to avoid
-/// producing wrong results for 32-bit overflow (e.g. u32 multiplication
-/// wrapping at 2^32).
+/// Returns true if the type is a 32-bit integer type (I32/U32 only).
+/// For I32/U32, arithmetic uses the .W (word) variants to correctly wrap
+/// at 2^32. Sub-word types (I8/U8/I16/U16) are stored in 64-bit registers
+/// and use 64-bit operations — the .W variants would truncate shift amounts
+/// to 0-31, breaking byte/halfword reconstruction into u64 (e.g. b4 << 32).
 fn is_32bit_ty(ty: &Option<IRType>) -> bool {
-    ty.as_ref().map_or(false, |t| matches!(
-        t,
-        IRType::I8 | IRType::U8 | IRType::I16 | IRType::U16 | IRType::I32 | IRType::U32
-    ))
+    ty.as_ref().map_or(false, |t| matches!(t, IRType::I32 | IRType::U32))
 }
 
 /// Map a CmpKind to a LoongArch FCmp condition code.

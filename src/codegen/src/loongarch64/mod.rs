@@ -2115,12 +2115,11 @@ fn build_loongarch64_elf_2seg(code: &[u8], base_addr: u64) -> Vec<u8> {
     let phdr_size: u64 = 56;
     let num_phdrs: u64 = 3; // 2x PT_LOAD + 1x PT_GNU_STACK
     let phdr_end = elf_header_size + num_phdrs * phdr_size;
-    // Page-align the text segment start — MUST match the text_offset computed
-    // in `link()`. The link function computes:
-    //   text_offset = ((phdr_end + PAGE_SIZE - 1) / PAGE_SIZE) * PAGE_SIZE
-    // = 0x10000 (65536) for phdr_end=232. If these two diverge, R_LARCH_64
+    // text_offset must match the value computed in `link()`. Both use
+    // phdr_end (232) directly — no page alignment. This keeps the ELF
+    // compact (no 65KB zero padding). If these two diverge, R_LARCH_64
     // relocations (GetAddress) patch the wrong absolute addresses.
-    let text_offset = ((phdr_end + PAGE_SIZE - 1) / PAGE_SIZE) * PAGE_SIZE;
+    let text_offset = phdr_end;
     let text_size = code.len() as u64;
 
     // The data segment starts on the next page after the text.
@@ -2170,13 +2169,10 @@ fn build_loongarch64_elf_2seg(code: &[u8], base_addr: u64) -> Vec<u8> {
     elf.extend_from_slice(&shstrndx.to_le_bytes()); // e_shstrndx
 
     // --- Program Header 1: LOAD (PF_R | PF_X) — .text ---
-    // The text segment starts at file offset `text_offset` (page-aligned) and
-    // extends through the end of the code.  p_offset=0 means the LOAD segment
-    // starts at the beginning of the file (covering the ELF header + phdrs +
-    // padding + code), so p_filesz must cover everything from 0 to the end of
-    // code, page-aligned for QEMU's mmap.
-    let text_segment_end = text_offset + text_size;
-    let text_memsz = ((text_segment_end + PAGE_SIZE - 1) / PAGE_SIZE) * PAGE_SIZE;
+    // p_filesz = page-aligned text size (code + headers). QEMU needs this
+    // for mmap. p_offset=0 means the LOAD segment starts at the beginning
+    // of the file (covering the ELF header + phdrs + code).
+    let text_memsz = ((text_offset + text_size + PAGE_SIZE - 1) / PAGE_SIZE) * PAGE_SIZE;
     elf.extend_from_slice(&1u32.to_le_bytes()); // p_type = PT_LOAD
     elf.extend_from_slice(&5u32.to_le_bytes()); // p_flags = PF_R | PF_X
     elf.extend_from_slice(&0u64.to_le_bytes()); // p_offset = 0 (include ELF header)
@@ -2945,7 +2941,9 @@ impl Backend for LoongArch64Backend {
         const ELF_PHDR_SIZE: u64 = 56;
         const ELF_NUM_PHDRS: u64 = 3; // 2 LOAD + 1 GNU_STACK
         let phdr_end = ELF_HEADER_SIZE + ELF_NUM_PHDRS * ELF_PHDR_SIZE;
-        let text_offset = ((phdr_end + ELF_PAGE_SIZE - 1) / ELF_PAGE_SIZE) * ELF_PAGE_SIZE;
+        // MUST match build_loongarch64_elf_2seg — both use phdr_end (232)
+        // directly, no page alignment.
+        let text_offset = phdr_end;
         let code_vaddr_base = ELF_BASE_ADDR + text_offset;
 
         // ── Patch relocations ──
@@ -4837,14 +4835,12 @@ mod tests {
         // each 56 bytes, after the 64-byte ELF header.  The text segment is
         // page-aligned (64 KB), so:
         //   phdr_end    = 64 + 3*56 = 232
-        //   text_offset = round_up(phdr_end, 0x10000) = 0x10000 (65536)
-        //   e_entry     = base_addr + text_offset = 0x120000000 + 0x10000 = 0x120010000
+        //   text_offset = phdr_end = 232 (0xE8)
+        //   e_entry     = base_addr + text_offset = 0x120000000 + 0xE8 = 0x1200000E8
         const ELF_HEADER_SIZE: usize = 64;
         const PHDR_SIZE: usize = 56;
         const NUM_PHDRS: usize = 3;
-        const PAGE_SIZE: usize = 0x10000;
-        let phdr_end = ELF_HEADER_SIZE + NUM_PHDRS * PHDR_SIZE;
-        let text_offset = ((phdr_end + PAGE_SIZE - 1) / PAGE_SIZE) * PAGE_SIZE;
+        let text_offset = ELF_HEADER_SIZE + NUM_PHDRS * PHDR_SIZE; // 232
         let expected_entry: u64 = 0x120000000 + text_offset as u64;
         assert_eq!(e_entry, expected_entry, "entry point should point to _start stub");
         // Verify the first instruction at the entry point is BL
