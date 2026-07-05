@@ -306,6 +306,17 @@ fn binop_kind_to_cmp_kind(op: &BinOpKind) -> CmpKind {
     }
 }
 
+/// Returns true if the type is a 32-bit integer type (I8/I16/I32/U8/U16/U32).
+/// For these types, arithmetic should use the .W (word) variants to avoid
+/// producing wrong results for 32-bit overflow (e.g. u32 multiplication
+/// wrapping at 2^32).
+fn is_32bit_ty(ty: &Option<IRType>) -> bool {
+    ty.as_ref().map_or(false, |t| matches!(
+        t,
+        IRType::I8 | IRType::U8 | IRType::I16 | IRType::U16 | IRType::I32 | IRType::U32
+    ))
+}
+
 /// Map a CmpKind to a LoongArch FCmp condition code.
 ///
 /// LoongArch FCmp condition codes (from the ISA manual):
@@ -646,16 +657,28 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     let dst_id = dst.as_register().unwrap_or(0);
                     code.extend(encode_load_value(lhs, S0, fp, &vreg_slots));
                     code.extend(encode_load_value(rhs, S1, fp, &vreg_slots));
-                    // Dispatch on the IR type field: U64 uses unsigned division;
-                    // all other integer/pointer types use signed division.
-                    if *ty == Some(IRType::U64) {
-                        code.extend_from_slice(
-                            &Instruction::DivDu { rd: S0, rj: S0, rk: S1 }.encode(),
-                        );
+                    // Type-aware division:
+                    // - U64 → DivDu (unsigned 64-bit)
+                    // - U32/U16/U8 → DivWu (unsigned 32-bit) + sign-extend
+                    // - I64/Ptr → DivD (signed 64-bit)
+                    // - I32/I16/I8 → DivW (signed 32-bit) + sign-extend
+                    let is_unsigned = ty.as_ref().map_or(false, |t|
+                        matches!(t, IRType::U8 | IRType::U16 | IRType::U32 | IRType::U64));
+                    let is_32bit = is_32bit_ty(&ty);
+                    if is_unsigned {
+                        if is_32bit {
+                            code.extend_from_slice(&Instruction::DivWu { rd: S0, rj: S0, rk: S1 }.encode());
+                            code.extend_from_slice(&Instruction::SlliW { rd: S0, rj: S0, imm8: 0 }.encode());
+                        } else {
+                            code.extend_from_slice(&Instruction::DivDu { rd: S0, rj: S0, rk: S1 }.encode());
+                        }
                     } else {
-                        code.extend_from_slice(
-                            &Instruction::DivD { rd: S0, rj: S0, rk: S1 }.encode(),
-                        );
+                        if is_32bit {
+                            code.extend_from_slice(&Instruction::DivW { rd: S0, rj: S0, rk: S1 }.encode());
+                            code.extend_from_slice(&Instruction::SlliW { rd: S0, rj: S0, imm8: 0 }.encode());
+                        } else {
+                            code.extend_from_slice(&Instruction::DivD { rd: S0, rj: S0, rk: S1 }.encode());
+                        }
                     }
                     code.extend(encode_store_to_vreg(S0, dst_id, fp, &vreg_slots));
                     code
@@ -702,31 +725,58 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                         BinOpKind::Mul => {
                             code.extend(encode_load_value(lhs, S0, fp, &vreg_slots));
                             code.extend(encode_load_value(rhs, S1, fp, &vreg_slots));
-                            code.extend_from_slice(&Instruction::MulD { rd: S0, rj: S0, rk: S1 }.encode());
+                            // Type-aware: use .W for 32-bit, .D for 64-bit.
+                            if is_32bit_ty(ty) {
+                                code.extend_from_slice(&Instruction::MulW { rd: S0, rj: S0, rk: S1 }.encode());
+                                // Sign-extend 32-bit result to 64 bits (SLLI.W rd, rd, 0)
+                                code.extend_from_slice(&Instruction::SlliW { rd: S0, rj: S0, imm8: 0 }.encode());
+                            } else {
+                                code.extend_from_slice(&Instruction::MulD { rd: S0, rj: S0, rk: S1 }.encode());
+                            }
                             code.extend(encode_store_to_vreg(S0, dst_id, fp, &vreg_slots));
                         }
                         BinOpKind::SDiv => {
                             code.extend(encode_load_value(lhs, S0, fp, &vreg_slots));
                             code.extend(encode_load_value(rhs, S1, fp, &vreg_slots));
-                            code.extend_from_slice(&Instruction::DivD { rd: S0, rj: S0, rk: S1 }.encode());
+                            if is_32bit_ty(ty) {
+                                code.extend_from_slice(&Instruction::DivW { rd: S0, rj: S0, rk: S1 }.encode());
+                                code.extend_from_slice(&Instruction::SlliW { rd: S0, rj: S0, imm8: 0 }.encode());
+                            } else {
+                                code.extend_from_slice(&Instruction::DivD { rd: S0, rj: S0, rk: S1 }.encode());
+                            }
                             code.extend(encode_store_to_vreg(S0, dst_id, fp, &vreg_slots));
                         }
                         BinOpKind::UDiv => {
                             code.extend(encode_load_value(lhs, S0, fp, &vreg_slots));
                             code.extend(encode_load_value(rhs, S1, fp, &vreg_slots));
-                            code.extend_from_slice(&Instruction::DivDu { rd: S0, rj: S0, rk: S1 }.encode());
+                            if is_32bit_ty(ty) {
+                                code.extend_from_slice(&Instruction::DivWu { rd: S0, rj: S0, rk: S1 }.encode());
+                                code.extend_from_slice(&Instruction::SlliW { rd: S0, rj: S0, imm8: 0 }.encode());
+                            } else {
+                                code.extend_from_slice(&Instruction::DivDu { rd: S0, rj: S0, rk: S1 }.encode());
+                            }
                             code.extend(encode_store_to_vreg(S0, dst_id, fp, &vreg_slots));
                         }
                         BinOpKind::SRem => {
                             code.extend(encode_load_value(lhs, S0, fp, &vreg_slots));
                             code.extend(encode_load_value(rhs, S1, fp, &vreg_slots));
-                            code.extend_from_slice(&Instruction::ModD { rd: S0, rj: S0, rk: S1 }.encode());
+                            if is_32bit_ty(ty) {
+                                code.extend_from_slice(&Instruction::ModW { rd: S0, rj: S0, rk: S1 }.encode());
+                                code.extend_from_slice(&Instruction::SlliW { rd: S0, rj: S0, imm8: 0 }.encode());
+                            } else {
+                                code.extend_from_slice(&Instruction::ModD { rd: S0, rj: S0, rk: S1 }.encode());
+                            }
                             code.extend(encode_store_to_vreg(S0, dst_id, fp, &vreg_slots));
                         }
                         BinOpKind::URem => {
                             code.extend(encode_load_value(lhs, S0, fp, &vreg_slots));
                             code.extend(encode_load_value(rhs, S1, fp, &vreg_slots));
-                            code.extend_from_slice(&Instruction::ModDu { rd: S0, rj: S0, rk: S1 }.encode());
+                            if is_32bit_ty(ty) {
+                                code.extend_from_slice(&Instruction::ModWu { rd: S0, rj: S0, rk: S1 }.encode());
+                                code.extend_from_slice(&Instruction::SlliW { rd: S0, rj: S0, imm8: 0 }.encode());
+                            } else {
+                                code.extend_from_slice(&Instruction::ModDu { rd: S0, rj: S0, rk: S1 }.encode());
+                            }
                             code.extend(encode_store_to_vreg(S0, dst_id, fp, &vreg_slots));
                         }
                         BinOpKind::And => {
@@ -784,63 +834,112 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                         }
                         BinOpKind::Shl => {
                             code.extend(encode_load_value(lhs, S0, fp, &vreg_slots));
+                            let bits = if is_32bit_ty(ty) { 32 } else { 64 };
                             if let IRValue::Immediate(imm) = rhs {
-                                if *imm >= 0 && *imm < 64 {
-                                    code.extend_from_slice(&Instruction::SlliD { rd: S0, rj: S0, imm8: *imm as u32 }.encode());
+                                if *imm >= 0 && *imm < bits {
+                                    if is_32bit_ty(ty) {
+                                        code.extend_from_slice(&Instruction::SlliW { rd: S0, rj: S0, imm8: *imm as u32 }.encode());
+                                    } else {
+                                        code.extend_from_slice(&Instruction::SlliD { rd: S0, rj: S0, imm8: *imm as u32 }.encode());
+                                    }
                                 } else {
                                     code.extend(encode_load_value(rhs, S1, fp, &vreg_slots));
-                                    code.extend_from_slice(&Instruction::SllD { rd: S0, rj: S0, rk: S1 }.encode());
+                                    if is_32bit_ty(ty) {
+                                        code.extend_from_slice(&Instruction::SllW { rd: S0, rj: S0, rk: S1 }.encode());
+                                    } else {
+                                        code.extend_from_slice(&Instruction::SllD { rd: S0, rj: S0, rk: S1 }.encode());
+                                    }
                                 }
                             } else {
                                 code.extend(encode_load_value(rhs, S1, fp, &vreg_slots));
-                                code.extend_from_slice(&Instruction::SllD { rd: S0, rj: S0, rk: S1 }.encode());
+                                if is_32bit_ty(ty) {
+                                    code.extend_from_slice(&Instruction::SllW { rd: S0, rj: S0, rk: S1 }.encode());
+                                } else {
+                                    code.extend_from_slice(&Instruction::SllD { rd: S0, rj: S0, rk: S1 }.encode());
+                                }
                             }
                             code.extend(encode_store_to_vreg(S0, dst_id, fp, &vreg_slots));
                         }
                         BinOpKind::ShrL => {
                             code.extend(encode_load_value(lhs, S0, fp, &vreg_slots));
+                            let bits = if is_32bit_ty(ty) { 32 } else { 64 };
                             if let IRValue::Immediate(imm) = rhs {
-                                if *imm >= 0 && *imm < 64 {
-                                    code.extend_from_slice(&Instruction::SrliD { rd: S0, rj: S0, imm8: *imm as u32 }.encode());
+                                if *imm >= 0 && *imm < bits {
+                                    if is_32bit_ty(ty) {
+                                        code.extend_from_slice(&Instruction::SrliW { rd: S0, rj: S0, imm8: *imm as u32 }.encode());
+                                    } else {
+                                        code.extend_from_slice(&Instruction::SrliD { rd: S0, rj: S0, imm8: *imm as u32 }.encode());
+                                    }
                                 } else {
                                     code.extend(encode_load_value(rhs, S1, fp, &vreg_slots));
-                                    code.extend_from_slice(&Instruction::SrlD { rd: S0, rj: S0, rk: S1 }.encode());
+                                    if is_32bit_ty(ty) {
+                                        code.extend_from_slice(&Instruction::SrlW { rd: S0, rj: S0, rk: S1 }.encode());
+                                    } else {
+                                        code.extend_from_slice(&Instruction::SrlD { rd: S0, rj: S0, rk: S1 }.encode());
+                                    }
                                 }
                             } else {
                                 code.extend(encode_load_value(rhs, S1, fp, &vreg_slots));
-                                code.extend_from_slice(&Instruction::SrlD { rd: S0, rj: S0, rk: S1 }.encode());
+                                if is_32bit_ty(ty) {
+                                    code.extend_from_slice(&Instruction::SrlW { rd: S0, rj: S0, rk: S1 }.encode());
+                                } else {
+                                    code.extend_from_slice(&Instruction::SrlD { rd: S0, rj: S0, rk: S1 }.encode());
+                                }
                             }
                             code.extend(encode_store_to_vreg(S0, dst_id, fp, &vreg_slots));
                         }
                         BinOpKind::ShrA => {
                             code.extend(encode_load_value(lhs, S0, fp, &vreg_slots));
+                            let bits = if is_32bit_ty(ty) { 32 } else { 64 };
                             if let IRValue::Immediate(imm) = rhs {
-                                if *imm >= 0 && *imm < 64 {
-                                    code.extend_from_slice(&Instruction::SraiD { rd: S0, rj: S0, imm8: *imm as u32 }.encode());
+                                if *imm >= 0 && *imm < bits {
+                                    if is_32bit_ty(ty) {
+                                        code.extend_from_slice(&Instruction::SraiW { rd: S0, rj: S0, imm8: *imm as u32 }.encode());
+                                    } else {
+                                        code.extend_from_slice(&Instruction::SraiD { rd: S0, rj: S0, imm8: *imm as u32 }.encode());
+                                    }
                                 } else {
                                     code.extend(encode_load_value(rhs, S1, fp, &vreg_slots));
-                                    code.extend_from_slice(&Instruction::SraD { rd: S0, rj: S0, rk: S1 }.encode());
+                                    if is_32bit_ty(ty) {
+                                        code.extend_from_slice(&Instruction::SraW { rd: S0, rj: S0, rk: S1 }.encode());
+                                    } else {
+                                        code.extend_from_slice(&Instruction::SraD { rd: S0, rj: S0, rk: S1 }.encode());
+                                    }
                                 }
                             } else {
                                 code.extend(encode_load_value(rhs, S1, fp, &vreg_slots));
-                                code.extend_from_slice(&Instruction::SraD { rd: S0, rj: S0, rk: S1 }.encode());
+                                if is_32bit_ty(ty) {
+                                    code.extend_from_slice(&Instruction::SraW { rd: S0, rj: S0, rk: S1 }.encode());
+                                } else {
+                                    code.extend_from_slice(&Instruction::SraD { rd: S0, rj: S0, rk: S1 }.encode());
+                                }
                             }
                             code.extend(encode_store_to_vreg(S0, dst_id, fp, &vreg_slots));
                         }
                         BinOpKind::Ror => {
                             code.extend(encode_load_value(lhs, S0, fp, &vreg_slots));
                             code.extend(encode_load_value(rhs, S1, fp, &vreg_slots));
-                            code.extend_from_slice(&Instruction::RotrD { rd: S0, rj: S0, rk: S1 }.encode());
+                            if is_32bit_ty(ty) {
+                                code.extend_from_slice(&Instruction::RotrW { rd: S0, rj: S0, rk: S1 }.encode());
+                                code.extend_from_slice(&Instruction::SlliW { rd: S0, rj: S0, imm8: 0 }.encode());
+                            } else {
+                                code.extend_from_slice(&Instruction::RotrD { rd: S0, rj: S0, rk: S1 }.encode());
+                            }
                             code.extend(encode_store_to_vreg(S0, dst_id, fp, &vreg_slots));
                         }
                         BinOpKind::Rol => {
-                            // ROL(x, n) = ROTR(x, 64-n)
+                            // ROL(x, n) = ROTR(x, bits-n)
                             code.extend(encode_load_value(lhs, S0, fp, &vreg_slots));
                             code.extend(encode_load_value(rhs, S1, fp, &vreg_slots));
-                            // Compute 64-n: load 64 into S2, sub S2, S2, S1; then rotr.d S0, S0, S2
-                            code.extend_from_slice(&Instruction::AddiD { rd: S2, rj: Gpr::R0, imm12: 64 }.encode());
+                            let bits: i32 = if is_32bit_ty(ty) { 32 } else { 64 };
+                            code.extend_from_slice(&Instruction::AddiD { rd: S2, rj: Gpr::R0, imm12: bits }.encode());
                             code.extend_from_slice(&Instruction::SubD { rd: S2, rj: S2, rk: S1 }.encode());
-                            code.extend_from_slice(&Instruction::RotrD { rd: S0, rj: S0, rk: S2 }.encode());
+                            if is_32bit_ty(ty) {
+                                code.extend_from_slice(&Instruction::RotrW { rd: S0, rj: S0, rk: S2 }.encode());
+                                code.extend_from_slice(&Instruction::SlliW { rd: S0, rj: S0, imm8: 0 }.encode());
+                            } else {
+                                code.extend_from_slice(&Instruction::RotrD { rd: S0, rj: S0, rk: S2 }.encode());
+                            }
                             code.extend(encode_store_to_vreg(S0, dst_id, fp, &vreg_slots));
                         }
                         // Comparison BinOps
