@@ -45,6 +45,12 @@ const OPC_SDC1: u32 = 0x3D;
 const OPC_J: u32 = 0x02;
 const OPC_JAL: u32 = 0x03;
 
+/// I-type opcodes for atomic load-linked / store-conditional.
+const OPC_LL: u32 = 0x30;
+const OPC_LLD: u32 = 0x34;
+const OPC_SC: u32 = 0x38;
+const OPC_SCD: u32 = 0x3C;
+
 // COP1 (coprocessor 1 / FPU) opcode and field constants — must match the
 // encoder constants in the parent module. COP1 R-type format is:
 //   `COP1[31:26] | fmt[25:21] | ft[20:16] | fs[15:11] | fd[10:6] | func[5:0]`
@@ -112,6 +118,12 @@ const FN_JR: u32 = 0x08;
 const FN_JALR: u32 = 0x09;
 const FN_SYSCALL: u32 = 0x0C;
 const FN_BREAK: u32 = 0x0D;
+const FN_MOVZ: u32 = 0x0A;
+const FN_MOVN: u32 = 0x0B;
+const FN_SYNC: u32 = 0x0F;
+const FN_DSLL32: u32 = 0x3C;
+const FN_DSRL32: u32 = 0x3E;
+const FN_DSRA32: u32 = 0x3F;
 
 // ---------------------------------------------------------------------------
 // Decode error
@@ -440,6 +452,35 @@ impl Instruction {
                 FN_BREAK => Ok(Instruction::Break {
                     code: (word >> 6) & 0xFFFFF,
                 }),
+                FN_MOVZ => Ok(Instruction::Movz {
+                    rd: gpr_from_bits(rd),
+                    rs: gpr_from_bits(rs),
+                    rt: gpr_from_bits(rt),
+                }),
+                FN_MOVN => Ok(Instruction::Movn {
+                    rd: gpr_from_bits(rd),
+                    rs: gpr_from_bits(rs),
+                    rt: gpr_from_bits(rt),
+                }),
+                FN_SYNC => Ok(Instruction::Sync { stype: sa }),
+                // The "32" shift variants are encoded with the actual shift
+                // amount in the sa field minus 32 (i.e. sa_field = real_sa - 32).
+                // Re-materialise the Dsll/Dsrl/Dsra enum variant with sa >= 32.
+                FN_DSLL32 => Ok(Instruction::Dsll {
+                    rd: gpr_from_bits(rd),
+                    rt: gpr_from_bits(rt),
+                    sa: sa + 32,
+                }),
+                FN_DSRL32 => Ok(Instruction::Dsrl {
+                    rd: gpr_from_bits(rd),
+                    rt: gpr_from_bits(rt),
+                    sa: sa + 32,
+                }),
+                FN_DSRA32 => Ok(Instruction::Dsra {
+                    rd: gpr_from_bits(rd),
+                    rt: gpr_from_bits(rt),
+                    sa: sa + 32,
+                }),
                 _ => Err(DecodeError::UnknownEncoding { word }),
             },
 
@@ -608,6 +649,28 @@ impl Instruction {
             // J-type
             OPC_J => Ok(Instruction::J { target }),
             OPC_JAL => Ok(Instruction::Jal { target }),
+
+            // ── Atomic load-linked / store-conditional ──
+            OPC_LL => Ok(Instruction::Ll {
+                rt: gpr_from_bits(rt),
+                base: gpr_from_bits(rs),
+                offset: sign_extend_16(imm),
+            }),
+            OPC_LLD => Ok(Instruction::Lld {
+                rt: gpr_from_bits(rt),
+                base: gpr_from_bits(rs),
+                offset: sign_extend_16(imm),
+            }),
+            OPC_SC => Ok(Instruction::Sc {
+                rt: gpr_from_bits(rt),
+                base: gpr_from_bits(rs),
+                offset: sign_extend_16(imm),
+            }),
+            OPC_SCD => Ok(Instruction::Scd {
+                rt: gpr_from_bits(rt),
+                base: gpr_from_bits(rs),
+                offset: sign_extend_16(imm),
+            }),
 
             // COP1 (coprocessor 1 / FPU) — FP moves and conversions.
             //

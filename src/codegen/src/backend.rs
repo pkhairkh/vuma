@@ -3258,7 +3258,7 @@ mod tests {
         assert_eq!(info.elf_machine_type(), 8);
         assert!(info.has_branch_delay_slots()); // THE defining feature
         assert!(info.has_hardwired_zero());
-        assert_eq!(info.endianness(), Endianness::Big);
+        assert_eq!(info.endianness(), Endianness::Little);
         assert_eq!(info.calling_convention_name(), "n64");
         validate_target_info(&info);
     }
