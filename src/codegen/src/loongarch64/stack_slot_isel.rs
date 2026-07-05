@@ -306,6 +306,31 @@ fn binop_kind_to_cmp_kind(op: &BinOpKind) -> CmpKind {
     }
 }
 
+/// Map a CmpKind to a LoongArch FCmp condition code.
+///
+/// LoongArch FCmp condition codes (from the ISA manual):
+///   0x01 = CLT  (fj < fk,  ordered)
+///   0x02 = CEQ  (fj == fk, ordered)
+///   0x03 = CLE  (fj <= fk, ordered)
+///   0x08 = CNE  (fj != fk, ordered)
+///
+/// For > and >= we swap operands at the call site and use CLT/CLE.
+fn fp_cmp_cond(kind: &CmpKind) -> u8 {
+    match kind {
+        CmpKind::SLt | CmpKind::ULt => 0x01, // CLT: fj < fk
+        CmpKind::SLe | CmpKind::ULe => 0x03, // CLE: fj <= fk
+        CmpKind::SGt | CmpKind::UGt => 0x01, // CLT: swapped operands → fj > fk
+        CmpKind::SGe | CmpKind::UGe => 0x03, // CLE: swapped operands → fj >= fk
+        CmpKind::Eq => 0x02,                 // CEQ: fj == fk
+        CmpKind::Ne => 0x08,                 // CNE: fj != fk
+    }
+}
+
+/// Returns true if the comparison should swap its FP operands (for > and >=).
+fn fp_cmp_swap(kind: &CmpKind) -> bool {
+    matches!(kind, CmpKind::SGt | CmpKind::UGt | CmpKind::SGe | CmpKind::UGe)
+}
+
 // =============================================================================
 // Main allocation function
 // =============================================================================
@@ -637,7 +662,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                 }
 
                 // ── BinOp (generic) ──
-                IRInstr::BinOp { op, dst, lhs, rhs, .. } => {
+                IRInstr::BinOp { op, dst, lhs, rhs, ty } => {
                     let mut code = Vec::new();
                     let dst_id = dst.as_register().unwrap_or(0);
 
@@ -822,9 +847,32 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                         BinOpKind::SLt | BinOpKind::SLe | BinOpKind::SGt | BinOpKind::SGe
                         | BinOpKind::ULt | BinOpKind::ULe | BinOpKind::UGt | BinOpKind::UGe
                         | BinOpKind::Eq | BinOpKind::Ne => {
-                            code.extend(encode_load_value(lhs, S0, fp, &vreg_slots));
-                            code.extend(encode_load_value(rhs, S1, fp, &vreg_slots));
-                            code.extend(encode_cmp(&binop_kind_to_cmp_kind(op), S0, S0, S1));
+                            let cmp_kind = binop_kind_to_cmp_kind(op);
+                            let is_fp = ty.as_ref().map_or(false, |t| matches!(t, IRType::F32 | IRType::F64));
+                            if is_fp {
+                                let is_f32 = ty.as_ref().map_or(false, |t| matches!(t, IRType::F32));
+                                let (lhs_val, rhs_val) = if fp_cmp_swap(&cmp_kind) {
+                                    (rhs, lhs)
+                                } else {
+                                    (lhs, rhs)
+                                };
+                                code.extend(encode_load_value(lhs_val, S0, fp, &vreg_slots));
+                                code.extend(encode_load_value(rhs_val, S1, fp, &vreg_slots));
+                                code.extend_from_slice(&Instruction::FmovFpr2GrD { fd: FS0, rj: S0 }.encode());
+                                code.extend_from_slice(&Instruction::FmovFpr2GrD { fd: FS1, rj: S1 }.encode());
+                                let cond = fp_cmp_cond(&cmp_kind);
+                                if is_f32 {
+                                    code.extend_from_slice(&Instruction::FCmpS { cond, fj: FS0, fk: FS1, cd: 0 }.encode());
+                                } else {
+                                    code.extend_from_slice(&Instruction::FCmpD { cond, fj: FS0, fk: FS1, cd: 0 }.encode());
+                                }
+                                let movcf2gr_word: u32 = 0x01150000u32 | ((S0.encoding() as u32) & 0x1F);
+                                code.extend_from_slice(&movcf2gr_word.to_le_bytes());
+                            } else {
+                                code.extend(encode_load_value(lhs, S0, fp, &vreg_slots));
+                                code.extend(encode_load_value(rhs, S1, fp, &vreg_slots));
+                                code.extend(encode_cmp(&cmp_kind, S0, S0, S1));
+                            }
                             code.extend(encode_store_to_vreg(S0, dst_id, fp, &vreg_slots));
                         }
                     }
@@ -862,12 +910,43 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                 }
 
                 // ── Cmp ──
-                IRInstr::Cmp { kind, dst, lhs, rhs, .. } => {
+                IRInstr::Cmp { kind, dst, lhs, rhs, ty } => {
                     let mut code = Vec::new();
                     let dst_id = dst.as_register().unwrap_or(0);
-                    code.extend(encode_load_value(lhs, S0, fp, &vreg_slots));
-                    code.extend(encode_load_value(rhs, S1, fp, &vreg_slots));
-                    code.extend(encode_cmp(kind, S0, S0, S1));
+                    // Dispatch on operand type: FP types use FCmpS/FCmpD,
+                    // integer types use the integer Slt/Sltu/Eq/Ne path.
+                    let is_fp = ty.as_ref().map_or(false, |t| matches!(t, IRType::F32 | IRType::F64));
+                    if is_fp {
+                        let is_f32 = ty.as_ref().map_or(false, |t| matches!(t, IRType::F32));
+                        // For > and >=, swap operands so we can use CLT/CLE.
+                        let (lhs_val, rhs_val) = if fp_cmp_swap(kind) {
+                            (rhs, lhs)
+                        } else {
+                            (lhs, rhs)
+                        };
+                        // Load float bit-patterns from stack slots into GPR S0/S1
+                        code.extend(encode_load_value(lhs_val, S0, fp, &vreg_slots));
+                        code.extend(encode_load_value(rhs_val, S1, fp, &vreg_slots));
+                        // Move GPR → FPR for comparison
+                        code.extend_from_slice(&Instruction::FmovFpr2GrD { fd: FS0, rj: S0 }.encode());
+                        code.extend_from_slice(&Instruction::FmovFpr2GrD { fd: FS1, rj: S1 }.encode());
+                        // FCmp writes result to condition register fcc0.
+                        let cond = fp_cmp_cond(kind);
+                        if is_f32 {
+                            code.extend_from_slice(&Instruction::FCmpS { cond, fj: FS0, fk: FS1, cd: 0 }.encode());
+                        } else {
+                            code.extend_from_slice(&Instruction::FCmpD { cond, fj: FS0, fk: FS1, cd: 0 }.encode());
+                        }
+                        // MOVCF2GR rd, fcc0 — moves condition flag (0 or 1) to GPR.
+                        // Encoding: 0000000001 01 cd(3:0) 000000 rd(4:0) 00000
+                        // For cd=0 (fcc0): 0x01150000 | rd
+                        let movcf2gr_word: u32 = 0x01150000u32 | ((S0.encoding() as u32) & 0x1F);
+                        code.extend_from_slice(&movcf2gr_word.to_le_bytes());
+                    } else {
+                        code.extend(encode_load_value(lhs, S0, fp, &vreg_slots));
+                        code.extend(encode_load_value(rhs, S1, fp, &vreg_slots));
+                        code.extend(encode_cmp(kind, S0, S0, S1));
+                    }
                     code.extend(encode_store_to_vreg(S0, dst_id, fp, &vreg_slots));
                     code
                 }
