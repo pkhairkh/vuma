@@ -929,7 +929,10 @@ fn expected_cas_patterns(kind: BackendKind) -> Vec<&'static str> {
     match kind {
         BackendKind::AArch64 => vec!["ldaxr", "stlxr"],
         BackendKind::X86_64 | BackendKind::X86_32 => vec!["lock", "cmpxchg"],
-        BackendKind::RiscV64 | BackendKind::RiscV32 => vec!["lr.d", "sc.d"],
+        BackendKind::RiscV64 => vec!["lr.d", "sc.d"],
+        // RV32A only has LR.W/SC.W (LR.D/SC.D are RV64A-only and don't
+        // exist in RV32). The riscv32 backend correctly uses the .W variants.
+        BackendKind::RiscV32 => vec!["lr.w", "sc.w"],
         BackendKind::Arm32 => vec!["ldrex", "strex"],
         BackendKind::Mips64 => vec!["lld", "scd"],
         BackendKind::PowerPC64 => vec!["ldarx", "stdcx"],

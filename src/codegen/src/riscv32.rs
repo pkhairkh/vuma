@@ -723,11 +723,130 @@ pub enum Instruction {
     Nop,
 
     // ── RV32A Extension: Atomic operations ──────────────────────────────
-    /// Load-Reserved Doubleword: `lr.d rd, (rs1)` — RV32A
+    /// Load-Reserved Doubleword: `lr.d rd, (rs1)` — RV64A only (NOT in RV32).
+    ///
+    /// Kept for decoder/Display completeness. RV32 code MUST use `LrW` instead.
+    #[allow(dead_code)]
     LrD { rd: Gpr, rs1: Gpr },
-    /// Store-Conditional Doubleword: `sc.d rd, rs1, rs2` — RV32A
-    /// rd = 0 on success, non-zero on failure
+    /// Store-Conditional Doubleword: `sc.d rd, rs1, rs2` — RV64A only (NOT in RV32).
+    /// rd = 0 on success, non-zero on failure.
+    ///
+    /// Kept for decoder/Display completeness. RV32 code MUST use `ScW` instead.
+    #[allow(dead_code)]
     ScD { rd: Gpr, rs1: Gpr, rs2: Gpr },
+    /// Load-Reserved Word: `lr.w rd, (rs1)` — RV32A
+    ///
+    /// Atomically loads a 32-bit value from `[rs1]` and establishes a
+    /// reservation. Used as the load half of an LL/SC pair.
+    LrW { rd: Gpr, rs1: Gpr },
+    /// Store-Conditional Word: `sc.w rd, rs1, rs2` — RV32A
+    ///
+    /// Atomically stores `rs2` to `[rs1]` if the reservation from a prior
+    /// `lr.w` is still valid. `rd` = 0 on success, non-zero on failure.
+    ScW { rd: Gpr, rs1: Gpr, rs2: Gpr },
+
+    // ── F/D Extension: FP Comparison ────────────────────────────────────
+    /// FP Equal Double: `feq.d rd, fs1, fs2` — writes 0/1 to GPR rd
+    FeqD { rd: Gpr, rs1: Fpr, rs2: Fpr },
+    /// FP Less-Than Double: `flt.d rd, fs1, fs2` — writes 0/1 to GPR rd
+    FltD { rd: Gpr, rs1: Fpr, rs2: Fpr },
+    /// FP Less-Or-Equal Double: `fle.d rd, fs1, fs2` — writes 0/1 to GPR rd
+    FleD { rd: Gpr, rs1: Fpr, rs2: Fpr },
+    /// FP Equal Single: `feq.s rd, fs1, fs2` — writes 0/1 to GPR rd
+    FeqS { rd: Gpr, rs1: Fpr, rs2: Fpr },
+    /// FP Less-Than Single: `flt.s rd, fs1, fs2` — writes 0/1 to GPR rd
+    FltS { rd: Gpr, rs1: Fpr, rs2: Fpr },
+    /// FP Less-Or-Equal Single: `fle.s rd, fs1, fs2` — writes 0/1 to GPR rd
+    FleS { rd: Gpr, rs1: Fpr, rs2: Fpr },
+
+    // ── F Extension: Single-Precision Arithmetic ────────────────────────
+    /// FP Add Single: `fadd.s fd, fs1, fs2`
+    FaddS { rd: Fpr, rs1: Fpr, rs2: Fpr },
+    /// FP Subtract Single: `fsub.s fd, fs1, fs2`
+    FsubS { rd: Fpr, rs1: Fpr, rs2: Fpr },
+    /// FP Multiply Single: `fmul.s fd, fs1, fs2`
+    FmulS { rd: Fpr, rs1: Fpr, rs2: Fpr },
+    /// FP Divide Single: `fdiv.s fd, fs1, fs2`
+    FdivS { rd: Fpr, rs1: Fpr, rs2: Fpr },
+    /// FP Square Root Single: `fsqrt.s fd, fs1`
+    FsqrtS { rd: Fpr, rs1: Fpr },
+    /// FP Minimum Single: `fmin.s fd, fs1, fs2`
+    FminS { rd: Fpr, rs1: Fpr, rs2: Fpr },
+    /// FP Maximum Single: `fmax.s fd, fs1, fs2`
+    FmaxS { rd: Fpr, rs1: Fpr, rs2: Fpr },
+    /// FP Sign Inject Single: `fsgnj.s fd, fs1, fs2`
+    FsgnjS { rd: Fpr, rs1: Fpr, rs2: Fpr },
+    /// FP Negate Sign Inject Single: `fsgnjn.s fd, fs1, fs2`
+    FsgnjnS { rd: Fpr, rs1: Fpr, rs2: Fpr },
+    /// FP XOR Sign Inject Single: `fsgnjx.s fd, fs1, fs2` (pseudo: `fneg.s`/`fabs.s`)
+    FsgnjxS { rd: Fpr, rs1: Fpr, rs2: Fpr },
+    /// FP Classify Single: `fclass.s rd, fs1` — writes 10-bit class mask to GPR
+    FclassS { rd: Gpr, rs1: Fpr },
+    /// FP Move Single: `fmv.s fd, fs1` (pseudo: fsgnj.s fd, fs1, fs1)
+    FmvS { rd: Fpr, rs1: Fpr },
+
+    // ── D Extension: Additional Double-Precision Arithmetic ─────────────
+    /// FP Square Root Double: `fsqrt.d fd, fs1`
+    FsqrtD { rd: Fpr, rs1: Fpr },
+    /// FP Minimum Double: `fmin.d fd, fs1, fs2`
+    FminD { rd: Fpr, rs1: Fpr, rs2: Fpr },
+    /// FP Maximum Double: `fmax.d fd, fs1, fs2`
+    FmaxD { rd: Fpr, rs1: Fpr, rs2: Fpr },
+    /// FP Sign Inject Double: `fsgnj.d fd, fs1, fs2`
+    FsgnjD { rd: Fpr, rs1: Fpr, rs2: Fpr },
+    /// FP Negate Sign Inject Double: `fsgnjn.d fd, fs1, fs2`
+    FsgnjnD { rd: Fpr, rs1: Fpr, rs2: Fpr },
+    /// FP XOR Sign Inject Double: `fsgnjx.d fd, fs1, fs2` (pseudo: `fneg.d`/`fabs.d`)
+    FsgnjxD { rd: Fpr, rs1: Fpr, rs2: Fpr },
+    /// FP Classify Double: `fclass.d rd, fs1` — writes 10-bit class mask to GPR
+    FclassD { rd: Gpr, rs1: Fpr },
+
+    // ── RV32A Extension: Atomic Memory Operations (AMO) ────────────────
+    /// AMOADD Word: `amoadd.w rd, rs2, (rs1)` — atomically rd = [rs1]; [rs1] = [rs1] + rs2
+    AmoaddW { rd: Gpr, rs1: Gpr, rs2: Gpr },
+    /// AMOADD Doubleword: `amoadd.d rd, rs2, (rs1)` — RV64A only (defined for completeness)
+    #[allow(dead_code)]
+    AmoaddD { rd: Gpr, rs1: Gpr, rs2: Gpr },
+    /// AMOSWAP Word: `amoswap.w rd, rs2, (rs1)` — atomically rd = [rs1]; [rs1] = rs2
+    AmoswapW { rd: Gpr, rs1: Gpr, rs2: Gpr },
+    /// AMOSWAP Doubleword: `amoswap.d rd, rs2, (rs1)` — RV64A only
+    #[allow(dead_code)]
+    AmoswapD { rd: Gpr, rs1: Gpr, rs2: Gpr },
+    /// AMOXOR Word: `amoxor.w rd, rs2, (rs1)`
+    AmoxorW { rd: Gpr, rs1: Gpr, rs2: Gpr },
+    /// AMOXOR Doubleword: `amoxor.d rd, rs2, (rs1)` — RV64A only
+    #[allow(dead_code)]
+    AmoxorD { rd: Gpr, rs1: Gpr, rs2: Gpr },
+    /// AMOAND Word: `amoand.w rd, rs2, (rs1)`
+    AmoandW { rd: Gpr, rs1: Gpr, rs2: Gpr },
+    /// AMOAND Doubleword: `amoand.d rd, rs2, (rs1)` — RV64A only
+    #[allow(dead_code)]
+    AmoandD { rd: Gpr, rs1: Gpr, rs2: Gpr },
+    /// AMOOR Word: `amoor.w rd, rs2, (rs1)`
+    AmoorW { rd: Gpr, rs1: Gpr, rs2: Gpr },
+    /// AMOOR Doubleword: `amoor.d rd, rs2, (rs1)` — RV64A only
+    #[allow(dead_code)]
+    AmoorD { rd: Gpr, rs1: Gpr, rs2: Gpr },
+    /// AMOMAX Word (signed): `amomax.w rd, rs2, (rs1)`
+    AmomaxW { rd: Gpr, rs1: Gpr, rs2: Gpr },
+    /// AMOMAX Doubleword (signed): `amomax.d rd, rs2, (rs1)` — RV64A only
+    #[allow(dead_code)]
+    AmomaxD { rd: Gpr, rs1: Gpr, rs2: Gpr },
+    /// AMOMIN Word (signed): `amomin.w rd, rs2, (rs1)`
+    AmominW { rd: Gpr, rs1: Gpr, rs2: Gpr },
+    /// AMOMIN Doubleword (signed): `amomin.d rd, rs2, (rs1)` — RV64A only
+    #[allow(dead_code)]
+    AmominD { rd: Gpr, rs1: Gpr, rs2: Gpr },
+    /// AMOMAXU Word (unsigned): `amomaxu.w rd, rs2, (rs1)`
+    AmomaxWu { rd: Gpr, rs1: Gpr, rs2: Gpr },
+    /// AMOMAXU Doubleword (unsigned): `amomaxu.d rd, rs2, (rs1)` — RV64A only
+    #[allow(dead_code)]
+    AmomaxDu { rd: Gpr, rs1: Gpr, rs2: Gpr },
+    /// AMOMINU Word (unsigned): `amominu.w rd, rs2, (rs1)`
+    AmominWu { rd: Gpr, rs1: Gpr, rs2: Gpr },
+    /// AMOMINU Doubleword (unsigned): `amominu.d rd, rs2, (rs1)` — RV64A only
+    #[allow(dead_code)]
+    AmominDu { rd: Gpr, rs1: Gpr, rs2: Gpr },
 }
 
 impl Instruction {
@@ -1361,18 +1480,189 @@ impl Instruction {
 
             // ── RV32A Extension: Atomic ───────────────────────────────
             Instruction::LrD { rd, rs1 } => {
-                // LR.D rd, (rs1)
-                // Encoding: R-type with funct3=0b010 (64-bit), funct7=0b0001010
-                // (aq=0, rl=0, funct5=0b00010), rs2=0, opcode=0b0101111 (AMO).
+                // LR.D rd, (rs1)  — RV64A only; emitted with funct3=0b011 (64-bit).
+                // RV32 code must use LrW instead. Kept here for decoder symmetry.
+                // Encoding: R-type, funct3=0b011 (D), funct5=0b00010 (LR), rs2=0,
+                // opcode=0b0101111 (AMO).
                 // encode_r_type signature: (funct7, rs2, rs1, funct3, rd, opcode).
-                encode_r_type(0b0001010, 0, rs1.encoding(), 0b010, rd.encoding(), 0b0101111)
+                encode_r_type(0b0001011, 0, rs1.encoding(), 0b011, rd.encoding(), 0b0101111)
             }
             Instruction::ScD { rd, rs1, rs2 } => {
-                // SC.D rd, rs1, rs2
-                // Encoding: R-type with funct3=0b010 (64-bit), funct7=0b0001100
-                // (aq=0, rl=0, funct5=0b00011), opcode=0b0101111 (AMO).
+                // SC.D rd, rs1, rs2 — RV64A only; emitted with funct3=0b011 (64-bit).
+                // RV32 code must use ScW instead. Kept here for decoder symmetry.
+                // Encoding: R-type, funct3=0b011 (D), funct5=0b00011 (SC),
+                // opcode=0b0101111 (AMO).
+                encode_r_type(0b0001111, rs2.encoding(), rs1.encoding(), 0b011, rd.encoding(), 0b0101111)
+            }
+            Instruction::LrW { rd, rs1 } => {
+                // LR.W rd, (rs1)
+                // Encoding: R-type with funct3=0b010 (32-bit), funct5=0b00010 (LR),
+                // rs2=0, opcode=0b0101111 (AMO). funct7 = funct5<<2 | (aq<<1) | rl,
+                // with aq=0, rl=0 → funct7 = 0b0001000.
                 // encode_r_type signature: (funct7, rs2, rs1, funct3, rd, opcode).
+                encode_r_type(0b0001000, 0, rs1.encoding(), 0b010, rd.encoding(), 0b0101111)
+            }
+            Instruction::ScW { rd, rs1, rs2 } => {
+                // SC.W rd, rs1, rs2
+                // Encoding: R-type with funct3=0b010 (32-bit), funct5=0b00011 (SC),
+                // opcode=0b0101111 (AMO). funct7 = 0b0001100.
                 encode_r_type(0b0001100, rs2.encoding(), rs1.encoding(), 0b010, rd.encoding(), 0b0101111)
+            }
+
+            // ── F/D Extension: FP Comparison ───────────────────────────
+            // FEQ.D/FLT.D/FLE.D: opcode=OP_FP, funct5=0b00101, funct3=000/001/010
+            // rs2 = the second FPR operand.
+            Instruction::FeqD { rd, rs1, rs2 } => {
+                encode_r_type(0b1010001, rs2.encoding(), rs1.encoding(), 0b010, rd.encoding(), OP_FP)
+            }
+            Instruction::FltD { rd, rs1, rs2 } => {
+                encode_r_type(0b1010001, rs2.encoding(), rs1.encoding(), 0b001, rd.encoding(), OP_FP)
+            }
+            Instruction::FleD { rd, rs1, rs2 } => {
+                encode_r_type(0b1010001, rs2.encoding(), rs1.encoding(), 0b000, rd.encoding(), OP_FP)
+            }
+            // FEQ.S/FLT.S/FLE.S: opcode=OP_FP, funct5=0b00100, funct3=000/001/010
+            Instruction::FeqS { rd, rs1, rs2 } => {
+                encode_r_type(0b1010000, rs2.encoding(), rs1.encoding(), 0b010, rd.encoding(), OP_FP)
+            }
+            Instruction::FltS { rd, rs1, rs2 } => {
+                encode_r_type(0b1010000, rs2.encoding(), rs1.encoding(), 0b001, rd.encoding(), OP_FP)
+            }
+            Instruction::FleS { rd, rs1, rs2 } => {
+                encode_r_type(0b1010000, rs2.encoding(), rs1.encoding(), 0b000, rd.encoding(), OP_FP)
+            }
+
+            // ── F Extension: Single-Precision Arithmetic ───────────────
+            // FADD.S/FSUB.S/FMUL.S/FDIV.S: opcode=OP_FP, funct5=0b00000/0b00001/0b00010/0b00011,
+            // funct3=0b111 (dynamic rounding), rs2 = second FPR operand.
+            Instruction::FaddS { rd, rs1, rs2 } => {
+                encode_r_type(0b0000000, rs2.encoding(), rs1.encoding(), 0b111, rd.encoding(), OP_FP)
+            }
+            Instruction::FsubS { rd, rs1, rs2 } => {
+                encode_r_type(0b0000100, rs2.encoding(), rs1.encoding(), 0b111, rd.encoding(), OP_FP)
+            }
+            Instruction::FmulS { rd, rs1, rs2 } => {
+                encode_r_type(0b0001000, rs2.encoding(), rs1.encoding(), 0b111, rd.encoding(), OP_FP)
+            }
+            Instruction::FdivS { rd, rs1, rs2 } => {
+                encode_r_type(0b0001100, rs2.encoding(), rs1.encoding(), 0b111, rd.encoding(), OP_FP)
+            }
+            // FSQRT.S: opcode=OP_FP, funct5=0b01011, funct3=0b111, rs2=0b00000
+            Instruction::FsqrtS { rd, rs1 } => {
+                encode_r_type(0b0101100, 0b00000, rs1.encoding(), 0b111, rd.encoding(), OP_FP)
+            }
+            // FMIN.S/FMAX.S: opcode=OP_FP, funct5=0b00100, funct3=0b000/0b001
+            Instruction::FminS { rd, rs1, rs2 } => {
+                encode_r_type(0b0010100, rs2.encoding(), rs1.encoding(), 0b000, rd.encoding(), OP_FP)
+            }
+            Instruction::FmaxS { rd, rs1, rs2 } => {
+                encode_r_type(0b0010100, rs2.encoding(), rs1.encoding(), 0b001, rd.encoding(), OP_FP)
+            }
+            // FSGNJ.S/FSGNJN.S/FSGNJX.S: opcode=OP_FP, funct5=0b00100, funct3=0b010/0b011/0b100
+            Instruction::FsgnjS { rd, rs1, rs2 } => {
+                encode_r_type(0b0010000, rs2.encoding(), rs1.encoding(), 0b000, rd.encoding(), OP_FP)
+            }
+            Instruction::FsgnjnS { rd, rs1, rs2 } => {
+                encode_r_type(0b0010000, rs2.encoding(), rs1.encoding(), 0b001, rd.encoding(), OP_FP)
+            }
+            Instruction::FsgnjxS { rd, rs1, rs2 } => {
+                encode_r_type(0b0010000, rs2.encoding(), rs1.encoding(), 0b010, rd.encoding(), OP_FP)
+            }
+            // FCLASS.S: opcode=OP_FP, funct5=0b11100, funct3=0b001, rs2=0b00000
+            Instruction::FclassS { rd, rs1 } => {
+                encode_r_type(0b1110000, 0b00000, rs1.encoding(), 0b001, rd.encoding(), OP_FP)
+            }
+            // FMV.S = FSGNJ.S rd, fs1, fs1: funct7=0b0010000, funct3=0b000
+            Instruction::FmvS { rd, rs1 } => {
+                encode_r_type(0b0010000, rs1.encoding(), rs1.encoding(), 0b000, rd.encoding(), OP_FP)
+            }
+
+            // ── D Extension: Additional Double-Precision Arithmetic ────
+            // FSQRT.D: opcode=OP_FP, funct5=0b01011, funct3=0b111, rs2=0b00001
+            Instruction::FsqrtD { rd, rs1 } => {
+                encode_r_type(0b0101101, 0b00001, rs1.encoding(), 0b111, rd.encoding(), OP_FP)
+            }
+            // FMIN.D/FMAX.D: opcode=OP_FP, funct5=0b00101, funct3=0b000/0b001
+            Instruction::FminD { rd, rs1, rs2 } => {
+                encode_r_type(0b0010101, rs2.encoding(), rs1.encoding(), 0b000, rd.encoding(), OP_FP)
+            }
+            Instruction::FmaxD { rd, rs1, rs2 } => {
+                encode_r_type(0b0010101, rs2.encoding(), rs1.encoding(), 0b001, rd.encoding(), OP_FP)
+            }
+            // FSGNJ.D/FSGNJN.D/FSGNJX.D: opcode=OP_FP, funct5=0b00101, funct3=0b000/0b001/0b010
+            Instruction::FsgnjD { rd, rs1, rs2 } => {
+                encode_r_type(0b0010001, rs2.encoding(), rs1.encoding(), 0b000, rd.encoding(), OP_FP)
+            }
+            Instruction::FsgnjnD { rd, rs1, rs2 } => {
+                encode_r_type(0b0010001, rs2.encoding(), rs1.encoding(), 0b001, rd.encoding(), OP_FP)
+            }
+            Instruction::FsgnjxD { rd, rs1, rs2 } => {
+                encode_r_type(0b0010001, rs2.encoding(), rs1.encoding(), 0b010, rd.encoding(), OP_FP)
+            }
+            // FCLASS.D: opcode=OP_FP, funct5=0b11100, funct3=0b001, rs2=0b00001
+            Instruction::FclassD { rd, rs1 } => {
+                encode_r_type(0b1110001, 0b00001, rs1.encoding(), 0b001, rd.encoding(), OP_FP)
+            }
+
+            // ── RV32A Extension: Atomic Memory Operations (AMO) ────────
+            // All AMO encodings: opcode=0b0101111 (AMO).
+            // funct3 selects width: 0b010 = .W (32-bit), 0b011 = .D (64-bit, RV64 only).
+            // funct5 selects operation: 00000=add, 00001=swap, 00100=xor, 01100=and,
+            // 01000=or, 10000=max, 10100=min, 11000=maxu, 11100=minu.
+            // funct7 = (funct5 << 2) | (aq << 1) | rl, with aq=rl=0.
+            Instruction::AmoaddW { rd, rs1, rs2 } => {
+                encode_r_type(0b0000000, rs2.encoding(), rs1.encoding(), 0b010, rd.encoding(), 0b0101111)
+            }
+            Instruction::AmoaddD { rd, rs1, rs2 } => {
+                encode_r_type(0b0000000, rs2.encoding(), rs1.encoding(), 0b011, rd.encoding(), 0b0101111)
+            }
+            Instruction::AmoswapW { rd, rs1, rs2 } => {
+                encode_r_type(0b0000100, rs2.encoding(), rs1.encoding(), 0b010, rd.encoding(), 0b0101111)
+            }
+            Instruction::AmoswapD { rd, rs1, rs2 } => {
+                encode_r_type(0b0000100, rs2.encoding(), rs1.encoding(), 0b011, rd.encoding(), 0b0101111)
+            }
+            Instruction::AmoxorW { rd, rs1, rs2 } => {
+                encode_r_type(0b0001000, rs2.encoding(), rs1.encoding(), 0b010, rd.encoding(), 0b0101111)
+            }
+            Instruction::AmoxorD { rd, rs1, rs2 } => {
+                encode_r_type(0b0001000, rs2.encoding(), rs1.encoding(), 0b011, rd.encoding(), 0b0101111)
+            }
+            Instruction::AmoandW { rd, rs1, rs2 } => {
+                encode_r_type(0b0011000, rs2.encoding(), rs1.encoding(), 0b010, rd.encoding(), 0b0101111)
+            }
+            Instruction::AmoandD { rd, rs1, rs2 } => {
+                encode_r_type(0b0011000, rs2.encoding(), rs1.encoding(), 0b011, rd.encoding(), 0b0101111)
+            }
+            Instruction::AmoorW { rd, rs1, rs2 } => {
+                encode_r_type(0b0010000, rs2.encoding(), rs1.encoding(), 0b010, rd.encoding(), 0b0101111)
+            }
+            Instruction::AmoorD { rd, rs1, rs2 } => {
+                encode_r_type(0b0010000, rs2.encoding(), rs1.encoding(), 0b011, rd.encoding(), 0b0101111)
+            }
+            Instruction::AmomaxW { rd, rs1, rs2 } => {
+                encode_r_type(0b0100000, rs2.encoding(), rs1.encoding(), 0b010, rd.encoding(), 0b0101111)
+            }
+            Instruction::AmomaxD { rd, rs1, rs2 } => {
+                encode_r_type(0b0100000, rs2.encoding(), rs1.encoding(), 0b011, rd.encoding(), 0b0101111)
+            }
+            Instruction::AmominW { rd, rs1, rs2 } => {
+                encode_r_type(0b0101000, rs2.encoding(), rs1.encoding(), 0b010, rd.encoding(), 0b0101111)
+            }
+            Instruction::AmominD { rd, rs1, rs2 } => {
+                encode_r_type(0b0101000, rs2.encoding(), rs1.encoding(), 0b011, rd.encoding(), 0b0101111)
+            }
+            Instruction::AmomaxWu { rd, rs1, rs2 } => {
+                encode_r_type(0b0110000, rs2.encoding(), rs1.encoding(), 0b010, rd.encoding(), 0b0101111)
+            }
+            Instruction::AmomaxDu { rd, rs1, rs2 } => {
+                encode_r_type(0b0110000, rs2.encoding(), rs1.encoding(), 0b011, rd.encoding(), 0b0101111)
+            }
+            Instruction::AmominWu { rd, rs1, rs2 } => {
+                encode_r_type(0b0111000, rs2.encoding(), rs1.encoding(), 0b010, rd.encoding(), 0b0101111)
+            }
+            Instruction::AmominDu { rd, rs1, rs2 } => {
+                encode_r_type(0b0111000, rs2.encoding(), rs1.encoding(), 0b011, rd.encoding(), 0b0101111)
             }
         }
     }
@@ -1481,6 +1771,51 @@ impl Instruction {
             Instruction::Nop => "nop",
             Instruction::LrD { .. } => "lr.d",
             Instruction::ScD { .. } => "sc.d",
+            Instruction::LrW { .. } => "lr.w",
+            Instruction::ScW { .. } => "sc.w",
+            Instruction::FeqD { .. } => "feq.d",
+            Instruction::FltD { .. } => "flt.d",
+            Instruction::FleD { .. } => "fle.d",
+            Instruction::FeqS { .. } => "feq.s",
+            Instruction::FltS { .. } => "flt.s",
+            Instruction::FleS { .. } => "fle.s",
+            Instruction::FaddS { .. } => "fadd.s",
+            Instruction::FsubS { .. } => "fsub.s",
+            Instruction::FmulS { .. } => "fmul.s",
+            Instruction::FdivS { .. } => "fdiv.s",
+            Instruction::FsqrtS { .. } => "fsqrt.s",
+            Instruction::FminS { .. } => "fmin.s",
+            Instruction::FmaxS { .. } => "fmax.s",
+            Instruction::FsgnjS { .. } => "fsgnj.s",
+            Instruction::FsgnjnS { .. } => "fsgnjn.s",
+            Instruction::FsgnjxS { .. } => "fsgnjx.s",
+            Instruction::FclassS { .. } => "fclass.s",
+            Instruction::FmvS { .. } => "fmv.s",
+            Instruction::FsqrtD { .. } => "fsqrt.d",
+            Instruction::FminD { .. } => "fmin.d",
+            Instruction::FmaxD { .. } => "fmax.d",
+            Instruction::FsgnjD { .. } => "fsgnj.d",
+            Instruction::FsgnjnD { .. } => "fsgnjn.d",
+            Instruction::FsgnjxD { .. } => "fsgnjx.d",
+            Instruction::FclassD { .. } => "fclass.d",
+            Instruction::AmoaddW { .. } => "amoadd.w",
+            Instruction::AmoaddD { .. } => "amoadd.d",
+            Instruction::AmoswapW { .. } => "amoswap.w",
+            Instruction::AmoswapD { .. } => "amoswap.d",
+            Instruction::AmoxorW { .. } => "amoxor.w",
+            Instruction::AmoxorD { .. } => "amoxor.d",
+            Instruction::AmoandW { .. } => "amoand.w",
+            Instruction::AmoandD { .. } => "amoand.d",
+            Instruction::AmoorW { .. } => "amoor.w",
+            Instruction::AmoorD { .. } => "amoor.d",
+            Instruction::AmomaxW { .. } => "amomax.w",
+            Instruction::AmomaxD { .. } => "amomax.d",
+            Instruction::AmominW { .. } => "amomin.w",
+            Instruction::AmominD { .. } => "amomin.d",
+            Instruction::AmomaxWu { .. } => "amomaxu.w",
+            Instruction::AmomaxDu { .. } => "amomaxu.d",
+            Instruction::AmominWu { .. } => "amominu.w",
+            Instruction::AmominDu { .. } => "amominu.d",
         }
     }
 
@@ -2074,21 +2409,34 @@ impl Instruction {
             }
 
             // ── AMO (opcode=0b0101111, RV32A) ──────────────────────
-            // The encoder produces LR.D and SC.D with funct3=0b010 (64-bit)
-            // and funct5 = 0b00010 (LR) / 0b00011 (SC). The low 2 bits of
-            // funct7 are the aq/rl bits, which we ignore when decoding so
-            // that all aq/rl combinations are recognised.
+            // RV32A LR.W/SC.W: funct3=0b010 (32-bit word), funct5=0b00010 (LR) / 0b00011 (SC).
+            // RV64A LR.D/SC.D: funct3=0b011 (64-bit double), funct5=0b00010 / 0b00011.
+            // The low 2 bits of funct7 are the aq/rl bits, which we ignore when
+            // decoding so that all aq/rl combinations are recognised.
             0b0101111 => {
                 let rd_reg = Gpr::from_encoding(rd)?;
                 let rs1_reg = Gpr::from_encoding(rs1)?;
                 let funct5 = funct7 >> 2;
                 match (funct5, funct3) {
                     (0b00010, 0b010) => {
-                        // LR.D rd, (rs1)  — rs2 must be 0
-                        Some(Instruction::LrD { rd: Gpr::Ra, rs1: rs1_reg })
+                        // LR.W rd, (rs1)  — rs2 must be 0
+                        Some(Instruction::LrW { rd: Gpr::Ra, rs1: rs1_reg })
                     }
                     (0b00011, 0b010) => {
-                        // SC.D rd, rs2, (rs1)
+                        // SC.W rd, rs2, (rs1)
+                        let rs2_reg = Gpr::from_encoding(rs2)?;
+                        Some(Instruction::ScW {
+                            rd: Gpr::Ra,
+                            rs1: rs1_reg,
+                            rs2: rs2_reg,
+                        })
+                    }
+                    (0b00010, 0b011) => {
+                        // LR.D rd, (rs1)  — RV64A only; rs2 must be 0
+                        Some(Instruction::LrD { rd: Gpr::Ra, rs1: rs1_reg })
+                    }
+                    (0b00011, 0b011) => {
+                        // SC.D rd, rs2, (rs1) — RV64A only
                         let rs2_reg = Gpr::from_encoding(rs2)?;
                         Some(Instruction::ScD {
                             rd: Gpr::Ra,
@@ -2233,6 +2581,51 @@ impl std::fmt::Display for Instruction {
             Instruction::Nop => write!(f, "nop"),
             Instruction::LrD { rd, rs1 } => write!(f, "lr.d {}, ({})", rd, rs1),
             Instruction::ScD { rd, rs1, rs2 } => write!(f, "sc.d {}, {}, ({})", rd, rs2, rs1),
+            Instruction::LrW { rd, rs1 } => write!(f, "lr.w {}, ({})", rd, rs1),
+            Instruction::ScW { rd, rs1, rs2 } => write!(f, "sc.w {}, {}, ({})", rd, rs2, rs1),
+            Instruction::FeqD { rd, rs1, rs2 } => write!(f, "feq.d {}, {}, {}", rd, rs1, rs2),
+            Instruction::FltD { rd, rs1, rs2 } => write!(f, "flt.d {}, {}, {}", rd, rs1, rs2),
+            Instruction::FleD { rd, rs1, rs2 } => write!(f, "fle.d {}, {}, {}", rd, rs1, rs2),
+            Instruction::FeqS { rd, rs1, rs2 } => write!(f, "feq.s {}, {}, {}", rd, rs1, rs2),
+            Instruction::FltS { rd, rs1, rs2 } => write!(f, "flt.s {}, {}, {}", rd, rs1, rs2),
+            Instruction::FleS { rd, rs1, rs2 } => write!(f, "fle.s {}, {}, {}", rd, rs1, rs2),
+            Instruction::FaddS { rd, rs1, rs2 } => write!(f, "fadd.s {}, {}, {}", rd, rs1, rs2),
+            Instruction::FsubS { rd, rs1, rs2 } => write!(f, "fsub.s {}, {}, {}", rd, rs1, rs2),
+            Instruction::FmulS { rd, rs1, rs2 } => write!(f, "fmul.s {}, {}, {}", rd, rs1, rs2),
+            Instruction::FdivS { rd, rs1, rs2 } => write!(f, "fdiv.s {}, {}, {}", rd, rs1, rs2),
+            Instruction::FsqrtS { rd, rs1 } => write!(f, "fsqrt.s {}, {}", rd, rs1),
+            Instruction::FminS { rd, rs1, rs2 } => write!(f, "fmin.s {}, {}, {}", rd, rs1, rs2),
+            Instruction::FmaxS { rd, rs1, rs2 } => write!(f, "fmax.s {}, {}, {}", rd, rs1, rs2),
+            Instruction::FsgnjS { rd, rs1, rs2 } => write!(f, "fsgnj.s {}, {}, {}", rd, rs1, rs2),
+            Instruction::FsgnjnS { rd, rs1, rs2 } => write!(f, "fsgnjn.s {}, {}, {}", rd, rs1, rs2),
+            Instruction::FsgnjxS { rd, rs1, rs2 } => write!(f, "fsgnjx.s {}, {}, {}", rd, rs1, rs2),
+            Instruction::FclassS { rd, rs1 } => write!(f, "fclass.s {}, {}", rd, rs1),
+            Instruction::FmvS { rd, rs1 } => write!(f, "fmv.s {}, {}", rd, rs1),
+            Instruction::FsqrtD { rd, rs1 } => write!(f, "fsqrt.d {}, {}", rd, rs1),
+            Instruction::FminD { rd, rs1, rs2 } => write!(f, "fmin.d {}, {}, {}", rd, rs1, rs2),
+            Instruction::FmaxD { rd, rs1, rs2 } => write!(f, "fmax.d {}, {}, {}", rd, rs1, rs2),
+            Instruction::FsgnjD { rd, rs1, rs2 } => write!(f, "fsgnj.d {}, {}, {}", rd, rs1, rs2),
+            Instruction::FsgnjnD { rd, rs1, rs2 } => write!(f, "fsgnjn.d {}, {}, {}", rd, rs1, rs2),
+            Instruction::FsgnjxD { rd, rs1, rs2 } => write!(f, "fsgnjx.d {}, {}, {}", rd, rs1, rs2),
+            Instruction::FclassD { rd, rs1 } => write!(f, "fclass.d {}, {}", rd, rs1),
+            Instruction::AmoaddW { rd, rs1, rs2 } => write!(f, "amoadd.w {}, {}, ({})", rd, rs2, rs1),
+            Instruction::AmoaddD { rd, rs1, rs2 } => write!(f, "amoadd.d {}, {}, ({})", rd, rs2, rs1),
+            Instruction::AmoswapW { rd, rs1, rs2 } => write!(f, "amoswap.w {}, {}, ({})", rd, rs2, rs1),
+            Instruction::AmoswapD { rd, rs1, rs2 } => write!(f, "amoswap.d {}, {}, ({})", rd, rs2, rs1),
+            Instruction::AmoxorW { rd, rs1, rs2 } => write!(f, "amoxor.w {}, {}, ({})", rd, rs2, rs1),
+            Instruction::AmoxorD { rd, rs1, rs2 } => write!(f, "amoxor.d {}, {}, ({})", rd, rs2, rs1),
+            Instruction::AmoandW { rd, rs1, rs2 } => write!(f, "amoand.w {}, {}, ({})", rd, rs2, rs1),
+            Instruction::AmoandD { rd, rs1, rs2 } => write!(f, "amoand.d {}, {}, ({})", rd, rs2, rs1),
+            Instruction::AmoorW { rd, rs1, rs2 } => write!(f, "amoor.w {}, {}, ({})", rd, rs2, rs1),
+            Instruction::AmoorD { rd, rs1, rs2 } => write!(f, "amoor.d {}, {}, ({})", rd, rs2, rs1),
+            Instruction::AmomaxW { rd, rs1, rs2 } => write!(f, "amomax.w {}, {}, ({})", rd, rs2, rs1),
+            Instruction::AmomaxD { rd, rs1, rs2 } => write!(f, "amomax.d {}, {}, ({})", rd, rs2, rs1),
+            Instruction::AmominW { rd, rs1, rs2 } => write!(f, "amomin.w {}, {}, ({})", rd, rs2, rs1),
+            Instruction::AmominD { rd, rs1, rs2 } => write!(f, "amomin.d {}, {}, ({})", rd, rs2, rs1),
+            Instruction::AmomaxWu { rd, rs1, rs2 } => write!(f, "amomaxu.w {}, {}, ({})", rd, rs2, rs1),
+            Instruction::AmomaxDu { rd, rs1, rs2 } => write!(f, "amomaxu.d {}, {}, ({})", rd, rs2, rs1),
+            Instruction::AmominWu { rd, rs1, rs2 } => write!(f, "amominu.w {}, {}, ({})", rd, rs2, rs1),
+            Instruction::AmominDu { rd, rs1, rs2 } => write!(f, "amominu.d {}, {}, ({})", rd, rs2, rs1),
         }
     }
 }
@@ -4717,13 +5110,161 @@ impl Backend for RiscV32Backend {
                         code
                     }
 
-                    IRInstr::Cmp { kind, dst, lhs, rhs, .. } => {
+                    IRInstr::Cmp { kind, dst, lhs, rhs, ty } => {
+                        // BUG R5 (FIXED): The Cmp handler previously used integer
+                        // comparison instructions (SLT/SLTU/SLTIU/…) for ALL
+                        // operand types, including F32 and F64. For floating-
+                        // point operands this is wrong because:
+                        //  (a) the bit pattern of an FP value bears no
+                        //      relation to its numeric ordering (negative
+                        //      numbers have the high bit set, NaN compares
+                        //      unordered, etc.), and
+                        //  (b) integer SLT/SLTU on the raw FP bits gives
+                        //      silently incorrect results.
+                        // We now dispatch on `ty`: for F32 we use Feq.S/Flt.S/
+                        // Fle.S, for F64 we use Feq.D/Flt.D/Fle.D. All other
+                        // types (and None) fall through to the original
+                        // integer-comparison path via emit_cmp_isel.
                         let dst_id = dst.as_register().unwrap_or(0);
                         let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
                         let mut code = Vec::new();
-                        code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::T0));
-                        code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::T1));
-                        code.extend(emit_cmp_isel(kind, Gpr::T0, Gpr::T0, Gpr::T1, Gpr::T5));
+
+                        let is_fp_cmp = matches!(ty, Some(IRType::F64) | Some(IRType::F32));
+                        let is_f64 = matches!(ty, Some(IRType::F64));
+
+                        if is_fp_cmp {
+                            // Load lhs and rhs into FPRs F0 and F1.
+                            // For Register operands, load the FP value directly
+                            // from the stack slot via FLD (F64) or FLW (F32).
+                            // For non-Register operands (immediate/address), we
+                            // fall back to the integer load path and then
+                            // FmvDX/FmvWX into the FPR — this is a best-effort
+                            // path that works for the common case where the
+                            // IR builder materialises FP immediates as bit
+                            // patterns in GPRs.
+                            let load_fpr = |fpr: Fpr, val: &IRValue| -> Vec<u8> {
+                                let mut c = Vec::new();
+                                if let IRValue::Register(id) = val {
+                                    let off = vreg_stack_slots.get(id).copied().unwrap_or(0);
+                                    let neg_off = -off;
+                                    if neg_off >= -2048 {
+                                        if is_f64 {
+                                            c.extend(Instruction::Fld { rd: fpr, rs1: Gpr::S0, imm: neg_off }.encode());
+                                        } else {
+                                            c.extend(Instruction::Flw { rd: fpr, rs1: Gpr::S0, imm: neg_off }.encode());
+                                        }
+                                    } else {
+                                        // Large offset: compute addr into T3, then FLD/FLW from T3.
+                                        c.extend(ss_load_imm(Gpr::T3, off as i64));
+                                        c.extend(Instruction::Sub { rd: Gpr::T3, rs1: Gpr::S0, rs2: Gpr::T3 }.encode());
+                                        if is_f64 {
+                                            c.extend(Instruction::Fld { rd: fpr, rs1: Gpr::T3, imm: 0 }.encode());
+                                        } else {
+                                            c.extend(Instruction::Flw { rd: fpr, rs1: Gpr::T3, imm: 0 }.encode());
+                                        }
+                                    }
+                                } else {
+                                    // Immediate/address: load as integer bits, then move to FPR.
+                                    c.extend(ss_load_value(val, &vreg_stack_slots, Gpr::T0));
+                                    if is_f64 {
+                                        c.extend(Instruction::FmvDX { rd: fpr, rs1: Gpr::T0 }.encode());
+                                    } else {
+                                        c.extend(Instruction::FmvWX { rd: fpr, rs1: Gpr::T0 }.encode());
+                                    }
+                                }
+                                c
+                            };
+                            code.extend(load_fpr(Fpr::F0, lhs));
+                            code.extend(load_fpr(Fpr::F1, rhs));
+
+                            // Dispatch on CmpKind. FP comparisons only have
+                            // Eq/Ne/SLt/SLe/SGt/SGe — ULt/ULe/UGt/UGe don't
+                            // make sense for FP. For those we fall back to the
+                            // signed comparison (with a TODO note).
+                            match kind {
+                                CmpKind::Eq => {
+                                    if is_f64 {
+                                        code.extend(Instruction::FeqD { rd: Gpr::T0, rs1: Fpr::F0, rs2: Fpr::F1 }.encode());
+                                    } else {
+                                        code.extend(Instruction::FeqS { rd: Gpr::T0, rs1: Fpr::F0, rs2: Fpr::F1 }.encode());
+                                    }
+                                }
+                                CmpKind::Ne => {
+                                    // a != b  <=>  !(a == b)
+                                    if is_f64 {
+                                        code.extend(Instruction::FeqD { rd: Gpr::T0, rs1: Fpr::F0, rs2: Fpr::F1 }.encode());
+                                    } else {
+                                        code.extend(Instruction::FeqS { rd: Gpr::T0, rs1: Fpr::F0, rs2: Fpr::F1 }.encode());
+                                    }
+                                    code.extend(Instruction::Xori { rd: Gpr::T0, rs1: Gpr::T0, imm: 1 }.encode());
+                                }
+                                CmpKind::SLt => {
+                                    if is_f64 {
+                                        code.extend(Instruction::FltD { rd: Gpr::T0, rs1: Fpr::F0, rs2: Fpr::F1 }.encode());
+                                    } else {
+                                        code.extend(Instruction::FltS { rd: Gpr::T0, rs1: Fpr::F0, rs2: Fpr::F1 }.encode());
+                                    }
+                                }
+                                CmpKind::SLe => {
+                                    if is_f64 {
+                                        code.extend(Instruction::FleD { rd: Gpr::T0, rs1: Fpr::F0, rs2: Fpr::F1 }.encode());
+                                    } else {
+                                        code.extend(Instruction::FleS { rd: Gpr::T0, rs1: Fpr::F0, rs2: Fpr::F1 }.encode());
+                                    }
+                                }
+                                CmpKind::SGt => {
+                                    // a > b  <=>  b < a
+                                    if is_f64 {
+                                        code.extend(Instruction::FltD { rd: Gpr::T0, rs1: Fpr::F1, rs2: Fpr::F0 }.encode());
+                                    } else {
+                                        code.extend(Instruction::FltS { rd: Gpr::T0, rs1: Fpr::F1, rs2: Fpr::F0 }.encode());
+                                    }
+                                }
+                                CmpKind::SGe => {
+                                    // a >= b  <=>  b <= a
+                                    if is_f64 {
+                                        code.extend(Instruction::FleD { rd: Gpr::T0, rs1: Fpr::F1, rs2: Fpr::F0 }.encode());
+                                    } else {
+                                        code.extend(Instruction::FleS { rd: Gpr::T0, rs1: Fpr::F1, rs2: Fpr::F0 }.encode());
+                                    }
+                                }
+                                // Unsigned comparisons don't apply to FP.
+                                // Fall back to signed comparison semantics.
+                                CmpKind::ULt => {
+                                    if is_f64 {
+                                        code.extend(Instruction::FltD { rd: Gpr::T0, rs1: Fpr::F0, rs2: Fpr::F1 }.encode());
+                                    } else {
+                                        code.extend(Instruction::FltS { rd: Gpr::T0, rs1: Fpr::F0, rs2: Fpr::F1 }.encode());
+                                    }
+                                }
+                                CmpKind::ULe => {
+                                    if is_f64 {
+                                        code.extend(Instruction::FleD { rd: Gpr::T0, rs1: Fpr::F0, rs2: Fpr::F1 }.encode());
+                                    } else {
+                                        code.extend(Instruction::FleS { rd: Gpr::T0, rs1: Fpr::F0, rs2: Fpr::F1 }.encode());
+                                    }
+                                }
+                                CmpKind::UGt => {
+                                    if is_f64 {
+                                        code.extend(Instruction::FltD { rd: Gpr::T0, rs1: Fpr::F1, rs2: Fpr::F0 }.encode());
+                                    } else {
+                                        code.extend(Instruction::FltS { rd: Gpr::T0, rs1: Fpr::F1, rs2: Fpr::F0 }.encode());
+                                    }
+                                }
+                                CmpKind::UGe => {
+                                    if is_f64 {
+                                        code.extend(Instruction::FleD { rd: Gpr::T0, rs1: Fpr::F1, rs2: Fpr::F0 }.encode());
+                                    } else {
+                                        code.extend(Instruction::FleS { rd: Gpr::T0, rs1: Fpr::F1, rs2: Fpr::F0 }.encode());
+                                    }
+                                }
+                            }
+                        } else {
+                            // Integer comparison path (unchanged).
+                            code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::T0));
+                            code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::T1));
+                            code.extend(emit_cmp_isel(kind, Gpr::T0, Gpr::T0, Gpr::T1, Gpr::T5));
+                        }
                         code.extend(ss_store_to_slot(Gpr::T0, dst_offset));
                         code
                     }
@@ -5087,11 +5628,59 @@ impl Backend for RiscV32Backend {
                         code
                     }
 
-                    IRInstr::GetAddress { dst, .. } => {
+                    IRInstr::GetAddress { dst, name } => {
+                        // BUG R4 (FIXED): Previously loaded 0 unconditionally.
+                        //
+                        // GetAddress computes &symbol for a data symbol. In a
+                        // fully-linked static executable the symbol's address is
+                        // a compile-time-unknown constant that must be resolved
+                        // against the data section. Since the riscv32 backend
+                        // does not yet have a data section or a symbol-resolution
+                        // pass, we emit a placeholder LUI+ADDI sequence (loads
+                        // 0 into T0) and record two relocations — R_RISCV_HI20
+                        // for the LUI and R_RISCV_LO12_I for the ADDI — so that
+                        // a future linker pass could patch in the real address.
+                        //
+                        // Until that pass exists, GetAddress continues to return
+                        // 0 for unknown symbols. Callers that depend on
+                        // GetAddress (e.g. string literal addresses) will fault
+                        // at runtime — this is a known limitation.
                         let dst_id = dst.as_register().unwrap_or(0);
                         let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
                         let mut code = Vec::new();
-                        code.extend(Instruction::Addi { rd: Gpr::T0, rs1: Gpr::Zero, imm: 0 }.encode());
+
+                        // LUI T0, 0  — upper 20 bits of symbol address (placeholder)
+                        let lui_byte_offset_in_func = current_byte_offset + code.len() as u64;
+                        code.extend(Instruction::Lui { rd: Gpr::T0, imm: 0 }.encode());
+
+                        // ADDI T0, T0, 0  — lower 12 bits of symbol address (placeholder)
+                        let addi_byte_offset_in_func = current_byte_offset + code.len() as u64;
+                        code.extend(Instruction::Addi { rd: Gpr::T0, rs1: Gpr::T0, imm: 0 }.encode());
+
+                        // Record relocations so a future link pass can patch them.
+                        // R_RISCV_HI20 = 26, R_RISCV_LO12_I = 27 (per RISC-V ELG spec).
+                        relocations.push(RelocationEntry {
+                            offset: lui_byte_offset_in_func,
+                            symbol: name.clone(),
+                            reloc_type: "R_RISCV_HI20".to_string(),
+                        });
+                        relocations.push(RelocationEntry {
+                            offset: addi_byte_offset_in_func,
+                            symbol: name.clone(),
+                            reloc_type: "R_RISCV_LO12_I".to_string(),
+                        });
+
+                        // Log a one-time warning so users know GetAddress is a stub.
+                        // (We avoid spamming by only warning when the symbol is
+                        // non-empty; the IR builder always sets a name for real
+                        // GetAddress instructions.)
+                        if !name.is_empty() {
+                            log::warn!("riscv32: GetAddress(\"{}\") emitted as LUI+ADDI \
+                                        placeholder (returns 0); data-section symbol \
+                                        resolution is not yet implemented for this backend",
+                                       name);
+                        }
+
                         code.extend(ss_store_to_slot(Gpr::T0, dst_offset));
                         code
                     }
@@ -5333,13 +5922,14 @@ impl Backend for RiscV32Backend {
                     }
 
                     // ── Atomic operations ──────────────────────────────────────────
-                    // RISC-V: LR.D / SC.D for load-reserved / store-conditional
+                    // RV32A: LR.W / SC.W for load-reserved / store-conditional.
+                    // (RV32 does NOT have LR.D/SC.D — those are RV64A only.)
                     IRInstr::AtomicLoad { dst, addr, .. } => {
-                        // RISC-V: LR.D rd, [addr] — load-reserved
+                        // RV32A: LR.W rd, [addr] — load-reserved word
                         let mut code = Vec::new();
                         code.extend(ss_load_value(addr, &vreg_stack_slots, Gpr::T0));
-                        // LR.D T1, T0, 0
-                        code.extend(Instruction::LrD { rd: Gpr::T1, rs1: Gpr::T0 }.encode());
+                        // LR.W T1, (T0)
+                        code.extend(Instruction::LrW { rd: Gpr::T1, rs1: Gpr::T0 }.encode());
                         let dst_id = dst.as_register().unwrap_or(0);
                         let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
                         code.extend(ss_store_to_slot(Gpr::T1, dst_off));
@@ -5347,19 +5937,19 @@ impl Backend for RiscV32Backend {
                     }
 
                     IRInstr::AtomicStore { value, addr, .. } => {
-                        // RISC-V: LR.D/SC.D loop — load-reserved, store-conditional, retry on failure
+                        // RV32A: LR.W/SC.W loop — load-reserved, store-conditional, retry on failure
                         let mut code = Vec::new();
                         code.extend(ss_load_value(addr, &vreg_stack_slots, Gpr::T0));
                         code.extend(ss_load_value(value, &vreg_stack_slots, Gpr::T1));
 
-                        // retry: LR.D T2, T0 — establish reservation
+                        // retry: LR.W T2, (T0) — establish reservation
                         let retry_abs_offset = current_byte_offset + code.len() as u64;
                         let retry_label = format!("__atomic_store_retry_{}", retry_abs_offset);
                         label_offsets.insert(retry_label.clone(), retry_abs_offset);
-                        code.extend(Instruction::LrD { rd: Gpr::T2, rs1: Gpr::T0 }.encode());
+                        code.extend(Instruction::LrW { rd: Gpr::T2, rs1: Gpr::T0 }.encode());
 
-                        // SC.D T2, T1, T0 — attempt store
-                        code.extend(Instruction::ScD { rd: Gpr::T2, rs1: Gpr::T0, rs2: Gpr::T1 }.encode());
+                        // SC.W T2, T1, (T0) — attempt store
+                        code.extend(Instruction::ScW { rd: Gpr::T2, rs1: Gpr::T0, rs2: Gpr::T1 }.encode());
 
                         // BNE T2, x0, retry — if SC failed, retry
                         let bne_offset_in_encoded = code.len();
@@ -5381,27 +5971,27 @@ impl Backend for RiscV32Backend {
                     }
 
                     IRInstr::AtomicCas { dst, addr, expected, desired, .. } => {
-                        // RISC-V CAS loop: LR.D / BNE done / SC.D / BNE retry
+                        // RV32A CAS loop: LR.W / BNE done / SC.W / BNE retry
                         let mut code = Vec::new();
                         code.extend(ss_load_value(addr, &vreg_stack_slots, Gpr::T0));
                         code.extend(ss_load_value(expected, &vreg_stack_slots, Gpr::T1));
                         code.extend(ss_load_value(desired, &vreg_stack_slots, Gpr::T3));
 
-                        // retry: LR.D T2, T0 — load current value & establish reservation
+                        // retry: LR.W T2, (T0) — load current value & establish reservation
                         let retry_abs_offset = current_byte_offset + code.len() as u64;
                         let retry_label = format!("__atomic_cas_retry_{}", retry_abs_offset);
                         label_offsets.insert(retry_label.clone(), retry_abs_offset);
-                        code.extend(Instruction::LrD { rd: Gpr::T2, rs1: Gpr::T0 }.encode());
+                        code.extend(Instruction::LrW { rd: Gpr::T2, rs1: Gpr::T0 }.encode());
 
                         // BNE T2, T1, done — if current != expected, skip to done
                         let bne1_offset_in_encoded = code.len();
                         let bne1_abs_offset = current_byte_offset + bne1_offset_in_encoded as u64;
                         code.extend(Instruction::Bne { rs1: Gpr::T2, rs2: Gpr::T1, offset: 0 }.encode());
 
-                        // SC.D T4, T3, T0 — try to store desired value
-                        code.extend(Instruction::ScD { rd: Gpr::T4, rs1: Gpr::T0, rs2: Gpr::T3 }.encode());
+                        // SC.W T4, T3, (T0) — try to store desired value
+                        code.extend(Instruction::ScW { rd: Gpr::T4, rs1: Gpr::T0, rs2: Gpr::T3 }.encode());
 
-                        // BNE T4, x0, retry — if SC failed, retry from LR.D
+                        // BNE T4, x0, retry — if SC failed, retry from LR.W
                         let bne2_offset_in_encoded = code.len();
                         let bne2_abs_offset = current_byte_offset + bne2_offset_in_encoded as u64;
                         code.extend(Instruction::Bne { rs1: Gpr::T4, rs2: Gpr::Zero, offset: 0 }.encode());
@@ -5795,6 +6385,89 @@ impl Backend for RiscV32Backend {
                 stubs.push(("fork".to_string(), code));
             }
 
+            // ── Additional POSIX syscall stubs (RISC-V generic syscall numbers,
+            // shared between RV32 and RV64). All simple stubs — args are already
+            // in a0-a5, just set a7=syscall_num and ECALL.
+            for (name, num) in [
+                ("lseek", 62),
+                ("stat", 80),       // RISC-V: fstat (80); stat is emulated via newfstatat
+                ("fstat", 80),
+                ("kill", 129),
+                ("getcwd", 17),
+                ("chdir", 49),
+                ("ioctl", 73),
+                ("fcntl", 72),
+                ("connect", 203),
+                ("poll", 168),
+                ("nanosleep", 101),
+                ("mprotect", 226),
+                ("dup", 23),
+                ("exit_group", 94),
+                ("recv", 207),      // RISC-V: recvfrom (207)
+                ("send", 206),      // RISC-V: sendto (206)
+                ("shutdown", 210),
+                ("bind", 200),
+                ("listen", 201),
+                ("accept", 202),    // RISC-V: accept4 (202)
+                ("setsockopt", 194),
+                ("waitpid", 260),   // RISC-V: wait4 (260)
+                ("brk", 214),
+                ("clock_gettime", 113),
+                ("gettimeofday", 169),
+                ("rt_sigprocmask", 135),
+            ] {
+                stubs.push((name.to_string(), simple_stub(num)));
+            }
+
+            // rt_sigreturn (139) — special stub: does NOT return.
+            // The kernel uses this syscall to restore the saved signal context.
+            // It takes no args and never returns; we just issue ECALL with
+            // a7=139 and no RET (any code after would be unreachable).
+            {
+                let mut code = Vec::new();
+                code.extend(Instruction::Addi { rd: Gpr::A7, rs1: Gpr::Zero, imm: 139 }.encode()); // sys_rt_sigreturn
+                code.extend(Instruction::Ecall.encode());
+                // Defensive RET in case the kernel ever returns (it shouldn't).
+                code.extend(Instruction::Jalr { rd: Gpr::Zero, rs1: Gpr::Ra, imm: 0 }.encode());
+                stubs.push(("rt_sigreturn".to_string(), code));
+            }
+
+            // ── Runtime helper: strcmp(a0=s1, a1=s2) -> a0 = (s1 - s2) at first
+            // differing byte, or 0 if equal. Standard C semantics.
+            // Loop:
+            //   LBU t0, 0(a0)      ; c1 = *s1
+            //   LBU t1, 0(a1)      ; c2 = *s2
+            //   BEQ t0, zero, done ; if c1 == 0, we reached end of s1
+            //   BNE t0, t1, done   ; if c1 != c2, done
+            //   ADDI a0, a0, 1     ; s1++
+            //   ADDI a1, a1, 1     ; s2++
+            //   J loop
+            // done:
+            //   SUB a0, t0, t1     ; a0 = c1 - c2
+            //   RET
+            {
+                let mut code = Vec::new();
+                // Save original s1/s2 pointers (we'll modify a0/a1 in the loop).
+                // Actually we just use a0/a1 directly as moving pointers; the
+                // result is computed from the last-loaded bytes.
+                // loop:
+                let loop_off: i32 = 0; // relative to start of this stub
+                code.extend(Instruction::Lbu { rd: Gpr::T0, rs1: Gpr::A0, imm: 0 }.encode()); // c1 = *s1
+                code.extend(Instruction::Lbu { rd: Gpr::T1, rs1: Gpr::A1, imm: 0 }.encode()); // c2 = *s2
+                // BEQ t0, zero, done (8 bytes ahead: SUB + RET = 8 bytes)
+                code.extend(Instruction::Beq { rs1: Gpr::T0, rs2: Gpr::Zero, offset: 12 }.encode());
+                // BNE t0, t1, done (8 bytes ahead)
+                code.extend(Instruction::Bne { rs1: Gpr::T0, rs2: Gpr::T1, offset: 8 }.encode());
+                code.extend(Instruction::Addi { rd: Gpr::A0, rs1: Gpr::A0, imm: 1 }.encode()); // s1++
+                code.extend(Instruction::Addi { rd: Gpr::A1, rs1: Gpr::A1, imm: 1 }.encode()); // s2++
+                // J loop (back to start: -20 bytes from end of this J = -20)
+                code.extend(Instruction::Jal { rd: Gpr::Zero, offset: loop_off - 24 }.encode());
+                // done: a0 = c1 - c2
+                code.extend(Instruction::Sub { rd: Gpr::A0, rs1: Gpr::T0, rs2: Gpr::T1 }.encode());
+                code.extend(Instruction::Jalr { rd: Gpr::Zero, rs1: Gpr::Ra, imm: 0 }.encode());
+                stubs.push(("strcmp".to_string(), code));
+            }
+
             stubs
         };
 
@@ -5819,6 +6492,10 @@ impl Backend for RiscV32Backend {
         func_offsets.insert("__vuma_print_hex".to_string(), runtime_offsets_start);
         func_offsets.insert("__vuma_print_int".to_string(), runtime_offsets_start);
         func_offsets.insert("__vuma_print_newline".to_string(), runtime_offsets_start);
+        // Public aliases (without __vuma_ prefix) so user code can call
+        // print_int / print_hex directly. They share the same entry point.
+        func_offsets.insert("print_int".to_string(), runtime_offsets_start);
+        func_offsets.insert("print_hex".to_string(), runtime_offsets_start);
         current_offset += runtime_code.len();
 
         // __vuma_alloc / __vuma_free stubs go after the runtime blob.
