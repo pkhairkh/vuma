@@ -1,6 +1,6 @@
 //! # PowerPC64 Mnemonic Disassembler
 //!
-//! Decodes PowerPC64 32-bit little-endian machine code into `Instruction`
+//! Decodes PowerPC64 32-bit big-endian machine code into `Instruction`
 //! instances. Covers the D-form, X-form, XO-form, I-form, B-form, and
 //! XL-form instructions lowered by the VUMA ISel. Display is already
 //! provided by the parent module.
@@ -193,6 +193,22 @@ impl Instruction {
                     simm: d,
                 });
             }
+            // ADDIC (primary=12)
+            12 => {
+                return Ok(Instruction::Addic {
+                    rt: gpr_from_bits(rt),
+                    ra: gpr_from_bits(ra),
+                    simm: d,
+                });
+            }
+            // SUBFIC (primary=8)
+            8 => {
+                return Ok(Instruction::Subfic {
+                    rt: gpr_from_bits(rt),
+                    ra: gpr_from_bits(ra),
+                    simm: d,
+                });
+            }
             // ORI (primary=24)
             24 => {
                 let uimm = word & 0xFFFF;
@@ -201,6 +217,15 @@ impl Instruction {
                     return Ok(Instruction::Nop);
                 }
                 return Ok(Instruction::Ori {
+                    ra: gpr_from_bits(ra),
+                    rs: gpr_from_bits(rt),
+                    uimm,
+                });
+            }
+            // ORIS (primary=25)
+            25 => {
+                let uimm = word & 0xFFFF;
+                return Ok(Instruction::Oris {
                     ra: gpr_from_bits(ra),
                     rs: gpr_from_bits(rt),
                     uimm,
@@ -408,7 +433,7 @@ impl Instruction {
             // SC (primary=17)
             17 => return Ok(Instruction::Sc),
 
-            // M-form: RLWINM (primary=21), RLWIMI (primary=20)
+            // M-form: RLWINM (primary=21), RLWIMI (primary=20), RLWNM (primary=23)
             21 => {
                 let sh = (word >> 11) & 0x1F;
                 let mb = (word >> 6) & 0x1F;
@@ -429,6 +454,18 @@ impl Instruction {
                     ra: gpr_from_bits(ra),
                     rs: gpr_from_bits(rt),
                     sh,
+                    mb,
+                    me,
+                });
+            }
+            // RLWNM (primary=23): same M-form layout, but the SH slot holds rB.
+            23 => {
+                let mb = (word >> 6) & 0x1F;
+                let me = (word >> 1) & 0x1F;
+                return Ok(Instruction::Rlwnm {
+                    ra: gpr_from_bits(ra),
+                    rs: gpr_from_bits(rt),
+                    rb: gpr_from_bits(rb),
                     mb,
                     me,
                 });
@@ -514,6 +551,14 @@ impl Instruction {
                     return Ok(Instruction::Neg {
                         rt: gpr_from_bits(rt),
                         ra: gpr_from_bits(ra),
+                    })
+                }
+                // SUBFE (xo=136)
+                136 => {
+                    return Ok(Instruction::Subfe {
+                        ra: gpr_from_bits(ra),
+                        rs: gpr_from_bits(rt),
+                        rb: gpr_from_bits(rb),
                     })
                 }
 
@@ -747,6 +792,48 @@ impl Instruction {
                         return Ok(Instruction::Lwsync);
                     }
                 }
+                // STWBRX (xo=662): store word byte-reverse indexed.
+                662 => {
+                    return Ok(Instruction::Stwbrx {
+                        rs: gpr_from_bits(rt),
+                        ra: gpr_from_bits(ra),
+                        rb: gpr_from_bits(rb),
+                    })
+                }
+                // STDBRX (xo=660): store doubleword byte-reverse indexed.
+                660 => {
+                    return Ok(Instruction::Stdbrx {
+                        rs: gpr_from_bits(rt),
+                        ra: gpr_from_bits(ra),
+                        rb: gpr_from_bits(rb),
+                    })
+                }
+                // MFLR (xo=339): MFSPR with SPR=8 (LR).
+                339 => {
+                    return Ok(Instruction::Mflr {
+                        rt: gpr_from_bits(rt),
+                    })
+                }
+                // MTSPR (xo=467): MTLR (SPR=8) or MTCTR (SPR=9). The 10-bit
+                // SPR field is split with the low 5 bits in bits [11:15]
+                // and the high 5 bits in bits [16:20]. For SPR=8 (LR) and
+                // SPR=9 (CTR) the high 5 bits are zero, so SPR = bits[11:15].
+                467 => {
+                    let spr_lo = (word >> 16) & 0x1F;
+                    let spr_hi = (word >> 11) & 0x1F;
+                    let spr = (spr_hi << 5) | spr_lo;
+                    if spr == 8 {
+                        return Ok(Instruction::Mtlr {
+                            rs: gpr_from_bits(rt),
+                        });
+                    }
+                    if spr == 9 {
+                        return Ok(Instruction::Mtctr {
+                            rs: gpr_from_bits(rt),
+                        });
+                    }
+                    // Unknown SPR — fall through to UnknownEncoding.
+                }
 
                 // CMP (xo=0)
                 0 => {
@@ -789,13 +876,13 @@ impl Instruction {
             }
         }
 
-        // MD-form (primary=30) — RLDCL, RLDCR
+        // MD-form (primary=30) — RLDCL, RLDCR, RLDICR
         if primary == 30 {
             let rs = (word >> 21) & 0x1F;
             let ra = (word >> 16) & 0x1F;
             let rb = (word >> 11) & 0x1F;
-            let mb_lo = (word >> 6) & 0x1F;  // MB[0:4]
-            let mb5 = (word >> 5) & 1;       // MB[5]
+            let mb_lo = (word >> 6) & 0x1F;  // MB[1:5] (low 5 bits of MB)
+            let mb5 = (word >> 5) & 1;       // MB[0] (high bit of MB)
             let mb = mb_lo | (mb5 << 5);
             let me_lo = mb_lo; // same field positions for ME
             let me5 = mb5;
@@ -814,6 +901,25 @@ impl Instruction {
                     rb: gpr_from_bits(rb),
                     me,
                 }),
+                // RLDICR (XO=2): MD-form with SH (immediate) and ME fields.
+                // bits [16:20] (MSB-first) = SH[1:5] (low 5 bits)
+                // bit  [21]   (MSB-first) = SH[0]    (high bit)
+                // bits [22:26] (MSB-first) = ME[1:5] (low 5 bits)
+                // bit  [27]   (MSB-first) = ME[0]    (high bit)
+                2 => {
+                    let sh_lo = (word >> 11) & 0x1F;
+                    let sh0 = (word >> 10) & 1;
+                    let sh = (sh0 << 5) | sh_lo;
+                    let me_lo = (word >> 5) & 0x1F;
+                    let me0 = (word >> 4) & 1;
+                    let me = (me0 << 5) | me_lo;
+                    return Ok(Instruction::Rldicr {
+                        ra: gpr_from_bits(ra),
+                        rs: gpr_from_bits(rs),
+                        sh,
+                        me,
+                    });
+                }
                 _ => {}
             }
         }
