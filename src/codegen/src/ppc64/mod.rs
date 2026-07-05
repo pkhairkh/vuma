@@ -1,7 +1,7 @@
 //! # PowerPC64 Backend
 //!
-//! Implements the `Backend` trait for the PowerPC 64-bit target (ELFv2 ABI,
-//! little-endian default). This module provides:
+//! Implements the `Backend` trait for the PowerPC 64-bit target (big-endian
+//! PPC64, ELFv2 ABI). This module provides:
 //!
 //! - `Gpr` — General-purpose register enum (R0–R31)
 //! - `Fpr` — Floating-point register enum (F0–F31)
@@ -569,6 +569,8 @@ pub enum Instruction {
     Or { ra: Gpr, rs: Gpr, rb: Gpr },
     /// OR Immediate: `ori rA, rS, uimm16` (D-form, primary=24)
     Ori { ra: Gpr, rs: Gpr, uimm: u32 },
+    /// OR Immediate Shifted: `oris rA, rS, uimm16` (D-form, primary=25)
+    Oris { ra: Gpr, rs: Gpr, uimm: u32 },
     /// XOR: `xor rA, rS, rB` (X-form, primary=31, xo=316)
     Xor { ra: Gpr, rs: Gpr, rb: Gpr },
     /// XOR Immediate: `xori rA, rS, uimm16` (D-form, primary=26)
@@ -615,6 +617,21 @@ pub enum Instruction {
         mb: u32,
         me: u32,
     },
+    /// Rotate Left Word then AND Mask: `rlwnm rA, rS, rB, MB, ME` (M-form, primary=23)
+    Rlwnm {
+        ra: Gpr,
+        rs: Gpr,
+        rb: Gpr,
+        mb: u32,
+        me: u32,
+    },
+    /// Rotate Left Doubleword Immediate then Clear Right: `rldicr rA, rS, SH, ME` (MD-form, primary=30, xo=2)
+    Rldicr {
+        ra: Gpr,
+        rs: Gpr,
+        sh: u32,
+        me: u32,
+    },
 
     // ── Load / Store ───────────────────────────────────────────────
     /// Load Doubleword: `ld rT, ds(rA)` (DS-form, primary=58, xo=0)
@@ -641,6 +658,10 @@ pub enum Instruction {
     Stb { rs: Gpr, ra: Gpr, d: i32 },
     /// Store Halfword: `sth rS, d(rA)` (D-form, primary=44)
     Sth { rs: Gpr, ra: Gpr, d: i32 },
+    /// Store Word Byte-Reverse Indexed: `stwbrx rS, 0, rB` (X-form, primary=31, xo=662)
+    Stwbrx { rs: Gpr, ra: Gpr, rb: Gpr },
+    /// Store Doubleword Byte-Reverse Indexed: `stdbrx rS, 0, rB` (X-form, primary=31, xo=660)
+    Stdbrx { rs: Gpr, ra: Gpr, rb: Gpr },
     /// Load Floating-Point Double: `lfd fT, d(rA)` (D-form, primary=50)
     Lfd { ft: Fpr, ra: Gpr, d: i32 },
     /// Store Floating-Point Double: `stfd fS, d(rA)` (D-form, primary=54)
@@ -738,6 +759,14 @@ pub enum Instruction {
     Extsb { ra: Gpr, rs: Gpr },
     /// Extend Sign Halfword: `extsh rA, rS` (X-form, primary=31, xo=922)
     Extsh { ra: Gpr, rs: Gpr },
+
+    // ── Move from/to Special-Purpose Registers ───────────────────
+    /// Move From Link Register: `mflr rT` (XFX-form, primary=31, xo=339, SPR=8)
+    Mflr { rt: Gpr },
+    /// Move To Link Register: `mtlr rS` (XFX-form, primary=31, xo=467, SPR=8)
+    Mtlr { rs: Gpr },
+    /// Move To Count Register: `mtctr rS` (XFX-form, primary=31, xo=467, SPR=9)
+    Mtctr { rs: Gpr },
 
     // ── System ─────────────────────────────────────────────────────
     /// System Call: `sc` (primary=17, SVC=0)
@@ -880,6 +909,14 @@ impl Instruction {
                     | (uimm & 0xFFFF);
                 encode_word(word)
             }
+            Instruction::Oris { ra, rs, uimm } => {
+                // ORIS rA, rS, uimm16: primary=25
+                let word = ((25u32 & 0x3F) << 26)
+                    | ((rs.encoding() & 0x1F) << 21)
+                    | ((ra.encoding() & 0x1F) << 16)
+                    | (uimm & 0xFFFF);
+                encode_word(word)
+            }
             Instruction::Xor { ra, rs, rb } => {
                 // XOR rA, rS, rB: primary=31, xo=316, Rc=0
                 encode_x_form(31, rs.encoding(), ra.encoding(), rb.encoding(), 316, 0)
@@ -968,6 +1005,27 @@ impl Instruction {
                 // RLWIMI rA, rS, SH, MB, ME: primary=20
                 encode_m_form(20, rs.encoding(), ra.encoding(), *sh, *mb, *me, 0)
             }
+            Instruction::Rlwnm { ra, rs, rb, mb, me } => {
+                // RLWNM rA, rS, rB, MB, ME: primary=23
+                // M-form with rB in the SH slot (bits [16:20]).
+                encode_m_form(23, rs.encoding(), ra.encoding(), rb.encoding(), *mb, *me, 0)
+            }
+            Instruction::Rldicr { ra, rs, sh, me } => {
+                // RLDICR rA, rS, SH, ME: MD-form, primary=30, XO=2
+                // Encoding (MSB-first bit numbers):
+                //   [0:5]=30, [6:10]=rS, [11:15]=rA,
+                //   [16:20]=SH[0:4], [21]=SH[5],
+                //   [22:26]=ME[0:4], [27]=ME[5], [28:30]=XO(=2), [31]=Rc(=0)
+                let word = (30u32 << 26)
+                    | (rs.encoding() << 21)
+                    | (ra.encoding() << 16)
+                    | ((sh & 0x1F) << 11)
+                    | (((sh >> 5) & 1) << 10)
+                    | ((me & 0x1F) << 5)
+                    | (((me >> 5) & 1) << 4)
+                    | (2 << 1);
+                encode_word(word)
+            }
 
             // ── Load / Store ───────────────────────────────────
             Instruction::Ld { rt, ra, ds } => {
@@ -1017,6 +1075,14 @@ impl Instruction {
             Instruction::Sth { rs, ra, d } => {
                 // STH rS, d(rA): primary=44
                 encode_d_form(44, rs.encoding(), ra.encoding(), *d)
+            }
+            Instruction::Stwbrx { rs, ra, rb } => {
+                // STWBRX rS, 0, rB: primary=31, xo=662, Rc=0
+                encode_x_form(31, rs.encoding(), ra.encoding(), rb.encoding(), 662, 0)
+            }
+            Instruction::Stdbrx { rs, ra, rb } => {
+                // STDBRX rS, 0, rB: primary=31, xo=660, Rc=0
+                encode_x_form(31, rs.encoding(), ra.encoding(), rb.encoding(), 660, 0)
             }
             Instruction::Lfd { ft, ra, d } => {
                 // LFD fT, d(rA): primary=50
@@ -1174,6 +1240,39 @@ impl Instruction {
                 encode_x_form(31, rs.encoding(), ra.encoding(), 0, 922, 0)
             }
 
+            // ── Move from/to Special-Purpose Registers ─────────
+            Instruction::Mflr { rt } => {
+                // MFLR rT: primary=31, rT, SPR=8 (LR), xo=339, Rc=0
+                // The 10-bit SPR field is split with the low 5 bits in
+                // MSB-first bits [11:15] (= LSB-first bits [16:20]) and the
+                // high 5 bits in MSB-first bits [16:20] (= LSB-first bits
+                // [11:15]). For SPR=8: low=8, high=0.
+                let word = (31u32 << 26)
+                    | (rt.encoding() << 21)
+                    | (8u32 << 16)
+                    | (0u32 << 11)
+                    | (339u32 << 1);
+                encode_word(word)
+            }
+            Instruction::Mtlr { rs } => {
+                // MTLR rS: primary=31, rS, SPR=8 (LR), xo=467, Rc=0
+                let word = (31u32 << 26)
+                    | (rs.encoding() << 21)
+                    | (8u32 << 16)
+                    | (0u32 << 11)
+                    | (467u32 << 1);
+                encode_word(word)
+            }
+            Instruction::Mtctr { rs } => {
+                // MTCTR rS: primary=31, rS, SPR=9 (CTR), xo=467, Rc=0
+                let word = (31u32 << 26)
+                    | (rs.encoding() << 21)
+                    | (9u32 << 16)
+                    | (0u32 << 11)
+                    | (467u32 << 1);
+                encode_word(word)
+            }
+
             // ── System ─────────────────────────────────────────
             Instruction::Sc => {
                 // SC: primary=17, bits [6:29]=0, bit 30=1 (SVC field)
@@ -1255,6 +1354,7 @@ impl Instruction {
             Instruction::Andi { .. } => "andi.",
             Instruction::Or { .. } => "or",
             Instruction::Ori { .. } => "ori",
+            Instruction::Oris { .. } => "oris",
             Instruction::Xor { .. } => "xor",
             Instruction::Xori { .. } => "xori",
             Instruction::Nor { .. } => "nor",
@@ -1271,6 +1371,8 @@ impl Instruction {
             Instruction::Rldcr { .. } => "rldcr",
             Instruction::Rlwinm { .. } => "rlwinm",
             Instruction::Rlwimi { .. } => "rlwimi",
+            Instruction::Rlwnm { .. } => "rlwnm",
+            Instruction::Rldicr { .. } => "rldicr",
             Instruction::Ld { .. } => "ld",
             Instruction::Lwa { .. } => "lwa",
             Instruction::Lwz { .. } => "lwz",
@@ -1283,6 +1385,8 @@ impl Instruction {
             Instruction::Lhz { .. } => "lhz",
             Instruction::Stb { .. } => "stb",
             Instruction::Sth { .. } => "sth",
+            Instruction::Stwbrx { .. } => "stwbrx",
+            Instruction::Stdbrx { .. } => "stdbrx",
             Instruction::Lfd { .. } => "lfd",
             Instruction::Stfd { .. } => "stfd",
             Instruction::Lfs { .. } => "lfs",
@@ -1317,6 +1421,9 @@ impl Instruction {
             Instruction::Isync => "isync",
             Instruction::Extsb { .. } => "extsb",
             Instruction::Extsh { .. } => "extsh",
+            Instruction::Mflr { .. } => "mflr",
+            Instruction::Mtlr { .. } => "mtlr",
+            Instruction::Mtctr { .. } => "mtctr",
             Instruction::Sc => "sc",
             Instruction::Nop => "nop",
             Instruction::Trap => "trap",
@@ -1359,6 +1466,7 @@ impl fmt::Display for Instruction {
             Instruction::Andi { ra, rs, uimm } => write!(f, "andi. {}, {}, {}", ra, rs, uimm),
             Instruction::Or { ra, rs, rb } => write!(f, "or {}, {}, {}", ra, rs, rb),
             Instruction::Ori { ra, rs, uimm } => write!(f, "ori {}, {}, {}", ra, rs, uimm),
+            Instruction::Oris { ra, rs, uimm } => write!(f, "oris {}, {}, {}", ra, rs, uimm),
             Instruction::Xor { ra, rs, rb } => write!(f, "xor {}, {}, {}", ra, rs, rb),
             Instruction::Xori { ra, rs, uimm } => write!(f, "xori {}, {}, {}", ra, rs, uimm),
             Instruction::Nor { ra, rs, rb } => write!(f, "nor {}, {}, {}", ra, rs, rb),
@@ -1383,6 +1491,12 @@ impl fmt::Display for Instruction {
             Instruction::Rlwimi { ra, rs, sh, mb, me } => {
                 write!(f, "rlwimi {}, {}, {}, {}, {}", ra, rs, sh, mb, me)
             }
+            Instruction::Rlwnm { ra, rs, rb, mb, me } => {
+                write!(f, "rlwnm {}, {}, {}, {}, {}", ra, rs, rb, mb, me)
+            }
+            Instruction::Rldicr { ra, rs, sh, me } => {
+                write!(f, "rldicr {}, {}, {}, {}", ra, rs, sh, me)
+            }
             Instruction::Ld { rt, ra, ds } => write!(f, "ld {}, {}({})", rt, ds, ra),
             Instruction::Lwa { rt, ra, ds } => write!(f, "lwa {}, {}({})", rt, ds, ra),
             Instruction::Lwz { rt, ra, d } => write!(f, "lwz {}, {}({})", rt, d, ra),
@@ -1395,6 +1509,8 @@ impl fmt::Display for Instruction {
             Instruction::Lhz { rt, ra, d } => write!(f, "lhz {}, {}({})", rt, d, ra),
             Instruction::Stb { rs, ra, d } => write!(f, "stb {}, {}({})", rs, d, ra),
             Instruction::Sth { rs, ra, d } => write!(f, "sth {}, {}({})", rs, d, ra),
+            Instruction::Stwbrx { rs, ra, rb } => write!(f, "stwbrx {}, {}, {}", rs, ra, rb),
+            Instruction::Stdbrx { rs, ra, rb } => write!(f, "stdbrx {}, {}, {}", rs, ra, rb),
             Instruction::Lfd { ft, ra, d } => write!(f, "lfd {}, {}({})", ft, d, ra),
             Instruction::Stfd { fs, ra, d } => write!(f, "stfd {}, {}({})", fs, d, ra),
             Instruction::Lfs { ft, ra, d } => write!(f, "lfs {}, {}({})", ft, d, ra),
@@ -1435,6 +1551,9 @@ impl fmt::Display for Instruction {
             Instruction::Isync => write!(f, "isync"),
             Instruction::Extsb { ra, rs } => write!(f, "extsb {}, {}", ra, rs),
             Instruction::Extsh { ra, rs } => write!(f, "extsh {}, {}", ra, rs),
+            Instruction::Mflr { rt } => write!(f, "mflr {}", rt),
+            Instruction::Mtlr { rs } => write!(f, "mtlr {}", rs),
+            Instruction::Mtctr { rs } => write!(f, "mtctr {}", rs),
             Instruction::Sc => write!(f, "sc"),
             Instruction::Nop => write!(f, "nop"),
             Instruction::Trap => write!(f, "trap"),
@@ -1468,6 +1587,34 @@ fn build_ppc64_elf_2seg(code: &[u8], base_addr: u64) -> Vec<u8> {
     const PAGE_SIZE: u64 = 0x10000; // 64 KB (PPC64 typical page size)
     const PT_GNU_STACK: u32 = 0x6474_e551;
 
+    // Section header constants (ELF64).
+    const SHT_NULL: u32 = 0; // First (null) section header — required by spec.
+    const SHT_PROGBITS: u32 = 1; // .text / .data — bytes present in file.
+    const SHT_STRTAB: u32 = 3; // .shstrtab — section-name string table.
+    const SHF_WRITE: u64 = 0x1;
+    const SHF_ALLOC: u64 = 0x2;
+    const SHF_EXECINSTR: u64 = 0x4;
+    const SHENT_SIZE: u64 = 64; // sizeof(Elf64_Shdr)
+
+    // Section-name string table. Indices:
+    //   0: ""        (null, 1 byte including NUL)
+    //   1: ".text"   (6 bytes including NUL)
+    //   7: ".data"   (6 bytes including NUL)
+    //  13: ".shstrtab" (11 bytes including NUL)
+    // Layout: NUL | ".text\0" | ".data\0" | ".shstrtab\0"
+    let shstrtab: &[u8] = b"\0.text\0.data\0.shstrtab\0";
+    // Name offsets within shstrtab.
+    const NAME_TEXT: u32 = 1;
+    const NAME_DATA: u32 = 7;
+    const NAME_SHSTRTAB: u32 = 13;
+
+    // We always emit .text and .shstrtab. .data is only emitted when the
+    // data segment has actual bytes (the current builder keeps p_filesz=0
+    // for the data segment, so .data is omitted in practice — but we still
+    // reserve the name slot to keep the indices stable if a future caller
+    // starts populating the data segment).
+    let has_data = false; // data segment currently BSS-like (p_filesz = 0)
+
     let elf_header_size: u64 = 64;
     let phdr_size: u64 = 56;
     let num_phdrs: u64 = 3;
@@ -1483,7 +1630,17 @@ fn build_ppc64_elf_2seg(code: &[u8], base_addr: u64) -> Vec<u8> {
     let data_size: u64 = PAGE_SIZE; // 1 page of writable memory for stack/data
     let entry_point = base_addr + text_offset;
 
-    let mut elf = Vec::with_capacity((data_offset + data_size) as usize);
+    // Section-header table lives at the end of the file (after .text and any
+    // .data bytes). We always emit at least 3 entries (null, .text,
+    // .shstrtab) plus optionally .data.
+    let shstrtab_offset: u64 = text_file_end; // string table immediately after .text
+    let shstrtab_size: u64 = shstrtab.len() as u64;
+    // 8-byte align the section-header table (Elf64_Shdr natural alignment).
+    let shoff = (shstrtab_offset + shstrtab_size + 7) & !7;
+    let shnum: u16 = if has_data { 4 } else { 3 };
+    let shstrndx: u16 = if has_data { 3 } else { 2 };
+
+    let mut elf = Vec::with_capacity((shoff + (shnum as u64) * SHENT_SIZE) as usize);
 
     // --- e_ident ---
     elf.extend_from_slice(&[0x7f, b'E', b'L', b'F']); // magic
@@ -1500,15 +1657,15 @@ fn build_ppc64_elf_2seg(code: &[u8], base_addr: u64) -> Vec<u8> {
     elf.extend_from_slice(&1u32.to_be_bytes()); // e_version
     elf.extend_from_slice(&entry_point.to_be_bytes()); // e_entry
     elf.extend_from_slice(&elf_header_size.to_be_bytes()); // e_phoff
-    elf.extend_from_slice(&0u64.to_be_bytes()); // e_shoff (no section headers)
+    elf.extend_from_slice(&shoff.to_be_bytes()); // e_shoff — section-header table
     // e_flags: EF_PPC64_ABI_V2 = 0x2 (required for PPC64LE ELFv2 ABI)
     elf.extend_from_slice(&2u32.to_be_bytes()); // e_flags
     elf.extend_from_slice(&64u16.to_be_bytes()); // e_ehsize
     elf.extend_from_slice(&56u16.to_be_bytes()); // e_phentsize
     elf.extend_from_slice(&3u16.to_be_bytes()); // e_phnum = 3 (2x LOAD + PT_GNU_STACK)
-    elf.extend_from_slice(&64u16.to_be_bytes()); // e_shentsize
-    elf.extend_from_slice(&0u16.to_be_bytes()); // e_shnum
-    elf.extend_from_slice(&0u16.to_be_bytes()); // e_shstrndx
+    elf.extend_from_slice(&(SHENT_SIZE as u16).to_be_bytes()); // e_shentsize = 64
+    elf.extend_from_slice(&shnum.to_be_bytes()); // e_shnum
+    elf.extend_from_slice(&shstrndx.to_be_bytes()); // e_shstrndx
 
     // --- Program Header 1: LOAD (PF_R | PF_X) — .text ---
     elf.extend_from_slice(&1u32.to_be_bytes()); // p_type = PT_LOAD
@@ -1554,6 +1711,94 @@ fn build_ppc64_elf_2seg(code: &[u8], base_addr: u64) -> Vec<u8> {
     // bytes confuse QEMU's ELF loader on some architectures)
 
     // No file data for the .data segment (it's BSS-like, zero-initialized)
+
+    // --- .shstrtab section (section-name string table) ---
+    // Write the string table immediately after .text. Pad to its declared
+    // offset if any rounding occurred (currently none, since shstrtab_offset
+    // == text_file_end).
+    while (elf.len() as u64) < shstrtab_offset {
+        elf.push(0);
+    }
+    elf.extend_from_slice(shstrtab);
+
+    // --- Section Header Table ---
+    // Pad to the 8-byte-aligned shoff.
+    while (elf.len() as u64) < shoff {
+        elf.push(0);
+    }
+    // Helper: append one Elf64_Shdr (64 bytes, big-endian).
+    let push_shdr = |elf: &mut Vec<u8>,
+                     sh_name: u32,
+                     sh_type: u32,
+                     sh_flags: u64,
+                     sh_addr: u64,
+                     sh_offset: u64,
+                     sh_size: u64,
+                     sh_link: u32,
+                     sh_info: u32,
+                     sh_addralign: u64,
+                     sh_entsize: u64| {
+        elf.extend_from_slice(&sh_name.to_be_bytes());
+        elf.extend_from_slice(&sh_type.to_be_bytes());
+        elf.extend_from_slice(&sh_flags.to_be_bytes());
+        elf.extend_from_slice(&sh_addr.to_be_bytes());
+        elf.extend_from_slice(&sh_offset.to_be_bytes());
+        elf.extend_from_slice(&sh_size.to_be_bytes());
+        elf.extend_from_slice(&sh_link.to_be_bytes());
+        elf.extend_from_slice(&sh_info.to_be_bytes());
+        elf.extend_from_slice(&sh_addralign.to_be_bytes());
+        elf.extend_from_slice(&sh_entsize.to_be_bytes());
+    };
+
+    // Section 0: SHT_NULL — required to be the first entry, all zeros.
+    push_shdr(&mut elf, 0, SHT_NULL, 0, 0, 0, 0, 0, 0, 0, 0);
+
+    // Section 1: .text
+    push_shdr(
+        &mut elf,
+        NAME_TEXT,
+        SHT_PROGBITS,
+        SHF_ALLOC | SHF_EXECINSTR,
+        base_addr + text_offset,
+        text_offset,
+        text_size,
+        0,
+        0,
+        4, // instructions are 4-byte aligned
+        0,
+    );
+
+    if has_data {
+        // Section 2: .data (only emitted when the data segment has bytes)
+        push_shdr(
+            &mut elf,
+            NAME_DATA,
+            SHT_PROGBITS,
+            SHF_ALLOC | SHF_WRITE,
+            data_vaddr,
+            data_offset,
+            data_size,
+            0,
+            0,
+            8,
+            0,
+        );
+    }
+
+    // Section (2 or 3): .shstrtab
+    push_shdr(
+        &mut elf,
+        NAME_SHSTRTAB,
+        SHT_STRTAB,
+        0,
+        0,
+        shstrtab_offset,
+        shstrtab_size,
+        0,
+        0,
+        1,
+        0,
+    );
 
     elf
 }
@@ -2116,6 +2361,16 @@ fn lower_cmp_ppc64(kind: &CmpKind, dst: Gpr, lhs: Gpr, rhs: Gpr) -> Vec<Allocate
 /// 32-byte mandatory save area) so that `Alloc` instructions can compute
 /// addresses within the already-allocated frame instead of double-decrementing
 /// SP.
+///
+/// **Note:** This function is currently unused — the production
+/// `PPC64Backend::allocate_registers` path uses an inline stack-slot ISel
+/// (`ss_load_value` / `ss_store_to_slot` / etc.) instead. The body is
+/// retained as a reference implementation of the register-allocator-style
+/// lowering and is exercised by unit tests for its helper functions
+/// (`load_immediate_ppc64`, `resolve_gpr_ppc64`). Deletion is risky because
+/// the helpers it shares with the test suite would also need to be
+/// preserved, so we silence the dead-code lint instead.
+#[allow(dead_code)]
 fn lower_ir_instr_ppc64(
     instr: &IRInstr,
     vreg_map: &mut std::collections::HashMap<u32, Gpr>,
@@ -2738,6 +2993,7 @@ fn lower_ir_instr_ppc64(
         }
 
         IRInstr::Call { dst, func, args, is_extern: _ } => {
+            // ── Register-pass args 0..7 ──
             for (i, arg) in args.iter().enumerate() {
                 if let Some(arg_reg) = Gpr::arg_register(i) {
                     let a = resolve_gpr_ppc64(arg, vreg_map, Gpr::R0, &mut result);
@@ -2750,6 +3006,48 @@ fn lower_ir_instr_ppc64(
                     }
                 }
             }
+
+            // ── Stack-pass args 8+ ──
+            // The ELFv2 ABI requires that the caller reserve a parameter
+            // area on its own frame and spill excess arguments there. We
+            // implement this by allocating a temporary block on the stack
+            // (aligned to 16 bytes), spilling each overflow argument at a
+            // fixed offset (arg 8 at SP+0, arg 9 at SP+8, …) before the
+            // BL, and deallocating immediately afterwards.
+            let stack_args = args.len().saturating_sub(8);
+            let stack_bytes = ((stack_args * 8) + 15) & !15; // 16-byte aligned
+            if stack_bytes > 0 {
+                // STDU r1, r1, -stack_bytes — push a new frame for overflow args.
+                result.push(emit_alloc_instr(
+                    Instruction::Stdu {
+                        rs: Gpr::R1,
+                        ra: Gpr::R1,
+                        ds: -(stack_bytes as i32),
+                    },
+                    vec![PhysicalReg::new(RegClass::Gpr, Gpr::R1.encoding())],
+                    vec![PhysicalReg::new(RegClass::Gpr, Gpr::R1.encoding())],
+                ));
+                // Push args 8+ in reverse order so that any scratch-register
+                // clobbering does not corrupt already-stored values.
+                for i in (8..args.len()).rev() {
+                    let j = i - 8; // 0-based overflow index
+                    let off = (j * 8) as i32; // offset from new SP (r1)
+                    let a = resolve_gpr_ppc64(&args[i], vreg_map, Gpr::R11, &mut result);
+                    result.push(emit_alloc_instr(
+                        Instruction::Std {
+                            rs: a,
+                            ra: Gpr::R1,
+                            ds: off,
+                        },
+                        vec![
+                            PhysicalReg::new(RegClass::Gpr, a.encoding()),
+                            PhysicalReg::new(RegClass::Gpr, Gpr::R1.encoding()),
+                        ],
+                        vec![],
+                    ));
+                }
+            }
+
             // Record relocation for the BL instruction.
             let bl_offset = (result.len() * 4) as u64; // byte offset within this batch
             result.push(emit_alloc_instr(
@@ -2762,6 +3060,20 @@ fn lower_ir_instr_ppc64(
                 symbol: func.clone(),
                 reloc_type: "R_PPC64_REL24".to_string(),
             });
+
+            // ── Clean up the overflow-arg stack area ──
+            if stack_bytes > 0 {
+                result.push(emit_alloc_instr(
+                    Instruction::Addi {
+                        rt: Gpr::R1,
+                        ra: Gpr::R1,
+                        simm: stack_bytes as i32,
+                    },
+                    vec![PhysicalReg::new(RegClass::Gpr, Gpr::R1.encoding())],
+                    vec![PhysicalReg::new(RegClass::Gpr, Gpr::R1.encoding())],
+                ));
+            }
+
             if let Some(d) = dst {
                 let d_reg = map_vreg_to_gpr(vreg_id(d), None, vreg_map);
                 if d_reg != Gpr::R3 {
@@ -2810,7 +3122,7 @@ fn lower_ir_instr_ppc64(
             result.push(emit_alloc_instr(Instruction::B { li: 0 }, vec![], vec![]));
         }
 
-        IRInstr::Cast { kind, dst, src, .. } => {
+        IRInstr::Cast { kind, dst, src, from_ty, to_ty } => {
             let d = map_vreg_to_gpr(vreg_id(dst), None, vreg_map);
             let s = resolve_gpr_ppc64(src, vreg_map, Gpr::R0, &mut result);
             match kind {
@@ -2990,41 +3302,80 @@ fn lower_ir_instr_ppc64(
                     ));
                 }
                 CastKind::FloatToFloat => {
-                    // f64 → f32: STD s,scratch(R1); LFD F0,scratch(R1); FRSP F0,F0; STFS F0,scratch(R1); LWZ d,scratch(R1)
-                    // Note: f32 → f64 is a no-op on PPC64 (all FP ops are 64-bit internally),
-                    // but since we track values in GPRs we treat FloatToFloat as f64 → f32
-                    // with FRSP to round to single precision.
+                    // Direction is determined by `from_ty` / `to_ty`. When type
+                    // info is missing (None), fall back to the historical
+                    // behaviour of treating the cast as f64 → f32 (FRSP).
+                    let widen = matches!(
+                        (from_ty, to_ty),
+                        (Some(IRType::F32), Some(IRType::F64))
+                    );
                     let scratch = *alloc_offset;
-                    // STD s, scratch(R1)
-                    result.push(emit_alloc_instr(
-                        Instruction::Std { rs: s, ra: Gpr::R1, ds: scratch },
-                        vec![PhysicalReg::new(RegClass::Gpr, s.encoding()), PhysicalReg::new(RegClass::Gpr, Gpr::R1.encoding())],
-                        vec![],
-                    ));
-                    // LFD F0, scratch(R1)
-                    result.push(emit_alloc_instr(
-                        Instruction::Lfd { ft: Fpr::F0, ra: Gpr::R1, d: scratch },
-                        vec![PhysicalReg::new(RegClass::Gpr, Gpr::R1.encoding())],
-                        vec![PhysicalReg::new(RegClass::SimdFp, 0)],
-                    ));
-                    // FRSP F0, F0 — round to single precision
-                    result.push(emit_alloc_instr(
-                        Instruction::Frsp { ft: Fpr::F0, fb: Fpr::F0 },
-                        vec![PhysicalReg::new(RegClass::SimdFp, 0)],
-                        vec![PhysicalReg::new(RegClass::SimdFp, 0)],
-                    ));
-                    // STFS F0, scratch(R1)
-                    result.push(emit_alloc_instr(
-                        Instruction::Stfs { fs: Fpr::F0, ra: Gpr::R1, d: scratch },
-                        vec![PhysicalReg::new(RegClass::SimdFp, 0), PhysicalReg::new(RegClass::Gpr, Gpr::R1.encoding())],
-                        vec![],
-                    ));
-                    // LWZ d, scratch(R1) — load 32-bit float as integer into GPR
-                    result.push(emit_alloc_instr(
-                        Instruction::Lwz { rt: d, ra: Gpr::R1, d: scratch },
-                        vec![PhysicalReg::new(RegClass::Gpr, Gpr::R1.encoding())],
-                        vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
-                    ));
+                    if widen {
+                        // f32 → f64: STW s,scratch(R1); LFS F0,scratch(R1)
+                        //   (LFS loads a single-precision value and promotes
+                        //   it to double in the FPR — this is the FCFIDS
+                        //   equivalent on hardware with no direct f32→f64
+                        //   convert instruction); STFD F0,scratch(R1);
+                        //   LD d,scratch(R1).
+                        // STW s, scratch(R1)
+                        result.push(emit_alloc_instr(
+                            Instruction::Stw { rs: s, ra: Gpr::R1, d: scratch },
+                            vec![PhysicalReg::new(RegClass::Gpr, s.encoding()), PhysicalReg::new(RegClass::Gpr, Gpr::R1.encoding())],
+                            vec![],
+                        ));
+                        // LFS F0, scratch(R1) — load 32-bit float, auto-promote to f64 in F0
+                        result.push(emit_alloc_instr(
+                            Instruction::Lfs { ft: Fpr::F0, ra: Gpr::R1, d: scratch },
+                            vec![PhysicalReg::new(RegClass::Gpr, Gpr::R1.encoding())],
+                            vec![PhysicalReg::new(RegClass::SimdFp, 0)],
+                        ));
+                        // STFD F0, scratch(R1) — store as 8-byte double
+                        result.push(emit_alloc_instr(
+                            Instruction::Stfd { fs: Fpr::F0, ra: Gpr::R1, d: scratch },
+                            vec![PhysicalReg::new(RegClass::SimdFp, 0), PhysicalReg::new(RegClass::Gpr, Gpr::R1.encoding())],
+                            vec![],
+                        ));
+                        // LD d, scratch(R1) — load 8-byte double bit pattern into GPR
+                        result.push(emit_alloc_instr(
+                            Instruction::Ld { rt: d, ra: Gpr::R1, ds: scratch },
+                            vec![PhysicalReg::new(RegClass::Gpr, Gpr::R1.encoding())],
+                            vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+                        ));
+                    } else {
+                        // f64 → f32 (default when type info is unavailable):
+                        //   STD s,scratch(R1); LFD F0,scratch(R1); FRSP F0,F0;
+                        //   STFS F0,scratch(R1); LWZ d,scratch(R1)
+                        // STD s, scratch(R1)
+                        result.push(emit_alloc_instr(
+                            Instruction::Std { rs: s, ra: Gpr::R1, ds: scratch },
+                            vec![PhysicalReg::new(RegClass::Gpr, s.encoding()), PhysicalReg::new(RegClass::Gpr, Gpr::R1.encoding())],
+                            vec![],
+                        ));
+                        // LFD F0, scratch(R1)
+                        result.push(emit_alloc_instr(
+                            Instruction::Lfd { ft: Fpr::F0, ra: Gpr::R1, d: scratch },
+                            vec![PhysicalReg::new(RegClass::Gpr, Gpr::R1.encoding())],
+                            vec![PhysicalReg::new(RegClass::SimdFp, 0)],
+                        ));
+                        // FRSP F0, F0 — round to single precision
+                        result.push(emit_alloc_instr(
+                            Instruction::Frsp { ft: Fpr::F0, fb: Fpr::F0 },
+                            vec![PhysicalReg::new(RegClass::SimdFp, 0)],
+                            vec![PhysicalReg::new(RegClass::SimdFp, 0)],
+                        ));
+                        // STFS F0, scratch(R1)
+                        result.push(emit_alloc_instr(
+                            Instruction::Stfs { fs: Fpr::F0, ra: Gpr::R1, d: scratch },
+                            vec![PhysicalReg::new(RegClass::SimdFp, 0), PhysicalReg::new(RegClass::Gpr, Gpr::R1.encoding())],
+                            vec![],
+                        ));
+                        // LWZ d, scratch(R1) — load 32-bit float as integer into GPR
+                        result.push(emit_alloc_instr(
+                            Instruction::Lwz { rt: d, ra: Gpr::R1, d: scratch },
+                            vec![PhysicalReg::new(RegClass::Gpr, Gpr::R1.encoding())],
+                            vec![PhysicalReg::new(RegClass::Gpr, d.encoding())],
+                        ));
+                    }
                 }
             }
         }
@@ -3461,13 +3812,43 @@ fn lower_ir_instr_ppc64(
             };
 
             // AtomicCas pattern (sequentially consistent):
-            //   0: sync                       ; full barrier before
-            //   1: ldarx/lwarx rD, 0, rA      ; load and reserve (RETRY)
-            //   2: cmpd rD, rExp              ; compare with expected
-            //   3: bc 12, 2, +3               ; if CR0 EQ=0 (not equal), skip to sync at 6
-            //   4: stdcx./stwcx. rDes, 0, rA  ; try to store
-            //   5: bc 12, 2, -4               ; if store failed (CR0 EQ=0), retry at 1
-            //   6: sync                       ; full barrier after
+            //
+            // The sequence is exactly 7 instructions (28 bytes), laid out as:
+            //
+            //   slot  byte   instruction                  purpose
+            //   ────  ────   ───────────────────────────  ──────────────────────
+            //     0     0    sync                         full barrier before
+            //     1     4    ldarx/lwarx/lbarx/lharx rD   load and reserve (RETRY label)
+            //     2     8    cmp   cr0, 1, rD, rExp       compare old vs. expected
+            //     3    12    bc    4, 2, +3               if CR0.EQ=0 → skip to slot 6 (sync)
+            //     4    16    stdcx./stwcx./stbcx./sthcx.  try to store desired
+            //     5    20    bc    4, 2, -4               if CR0.EQ=0 → retry at slot 1 (ldarx)
+            //     6    24    sync                         full barrier after
+            //
+            // BD-encoding convention used in this codebase:
+            //
+            //   Power ISA computes the B-form target as
+            //       target = CIA + 4 + SignExtend(BD) * 4
+            //   where CIA is the byte address of the BC instruction itself.
+            //   This codebase instead uses the simpler
+            //       BD = (target_byte_offset - CIA) / 4
+            //   convention (see `branch_fixups` phase 4 in
+            //   `PPC64Backend::allocate_registers`), which matches the
+            //   existing relocation arithmetic.
+            //
+            //   ── Slot-3 BC (BD=+3): CIA = byte 12, target = byte 24 (slot 6).
+            //        BD = (24 - 12) / 4 = 3 ✓
+            //      The branch is taken when CR0.EQ=0 (i.e. the loaded value
+            //      did not equal `expected`), skipping the store and retry
+            //      loop and falling through to the trailing sync. BO=4
+            //      encodes "branch if condition FALSE" with respect to the
+            //      BI bit (here CR0.EQ, bit index 2).
+            //
+            //   ── Slot-5 BC (BD=-4): CIA = byte 20, target = byte 4 (slot 1).
+            //        BD = (4 - 20) / 4 = -4 ✓
+            //      The branch is taken when CR0.EQ=0 (i.e. the stdcx. failed
+            //      because the reservation was lost between the ldarx and the
+            //      stwcx.), looping back to retry the load-and-reserve.
 
             result.push(emit_alloc_instr(Instruction::Sync, vec![], vec![]));
 
@@ -3508,8 +3889,10 @@ fn lower_ir_instr_ppc64(
                 vec![],
             ));
 
-            // bc 4, 2, +3: branch if CR0 EQ=0 (not equal), skip stdcx, BD=3
-            // BO=4 = branch if condition FALSE (CR0.EQ=0 means not equal)
+            // Slot-3 BC: bd=+3, CIA=byte 12, target=byte 24 (slot 6, sync).
+            // BO=4 → branch if CR0.EQ=0 (loaded value != expected): skip
+            // the stdcx. and the retry-BC, falling through to the trailing
+            // sync. See the layout comment above for the offset derivation.
             result.push(emit_alloc_instr(
                 Instruction::Bc { bo: 4, bi: 2, bd: 3 },
                 vec![],
@@ -3547,8 +3930,10 @@ fn lower_ir_instr_ppc64(
                 }
             }
 
-            // bc 4, 2, -4: branch if CR0 EQ=0 (store failed), retry at ldarx, BD=-4
-            // BO=4 = branch if condition FALSE (CR0.EQ=0 means store reservation lost)
+            // Slot-5 BC: bd=-4, CIA=byte 20, target=byte 4 (slot 1, ldarx).
+            // BO=4 → branch if CR0.EQ=0 (stdcx. failed because the
+            // reservation was lost between ldarx and stdcx.): loop back to
+            // retry the load-and-reserve. See the layout comment above.
             result.push(emit_alloc_instr(
                 Instruction::Bc { bo: 4, bi: 2, bd: -4 },
                 vec![],
@@ -4518,7 +4903,7 @@ impl Backend for PPC64Backend {
                         let trap_word: u32 = (31u32 << 26) | (31u32 << 21) | (0u32 << 16) | (0u32 << 11) | (4 << 1);
                         encode_word(trap_word).to_vec()
                     }
-                    IRInstr::Cast { kind, dst, src, .. } => {
+                    IRInstr::Cast { kind, dst, src, from_ty, to_ty } => {
                         let dst_id = dst.as_register().unwrap_or(0);
                         let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
                         let mut code = Vec::new();
@@ -4577,15 +4962,27 @@ impl Backend for PPC64Backend {
                                 code.extend_from_slice(&Instruction::Rlwinm { ra: Gpr::R3, rs: Gpr::R3, sh: 0, mb: 0, me: 31 }.encode());
                             }
                             CastKind::FloatToFloat => {
-                                // f64 → f32: LFD, FRSP, STFS, LWZ
-                                // Note: f32 → f64 is a no-op on PPC64 (all FP ops are 64-bit internally),
-                                // but since we track values in GPRs we treat FloatToFloat as f64 → f32
-                                // with FRSP to round to single precision.
-                                code.extend_from_slice(&Instruction::Lfd { ft: Fpr::F0, ra: Gpr::R31, d: -dst_offset }.encode());
-                                code.extend_from_slice(&Instruction::Frsp { ft: Fpr::F0, fb: Fpr::F0 }.encode());
-                                code.extend_from_slice(&Instruction::Stfs { fs: Fpr::F0, ra: Gpr::R31, d: -dst_offset }.encode());
-                                code.extend_from_slice(&Instruction::Lwz { rt: Gpr::R3, ra: Gpr::R31, d: -dst_offset }.encode());
-                                code.extend_from_slice(&Instruction::Rlwinm { ra: Gpr::R3, rs: Gpr::R3, sh: 0, mb: 0, me: 31 }.encode());
+                                // Direction is determined by `from_ty` / `to_ty`.
+                                // f32 → f64: LFS (auto-promote), STFD, LD.
+                                // f64 → f32 (default): LFD, FRSP, STFS, LWZ.
+                                let widen = matches!(
+                                    (from_ty, to_ty),
+                                    (Some(IRType::F32), Some(IRType::F64))
+                                );
+                                if widen {
+                                    // f32 → f64 (FCFIDS-equivalent via LFS auto-promote)
+                                    code.extend_from_slice(&Instruction::Stw { rs: Gpr::R3, ra: Gpr::R31, d: -dst_offset }.encode());
+                                    code.extend_from_slice(&Instruction::Lfs { ft: Fpr::F0, ra: Gpr::R31, d: -dst_offset }.encode());
+                                    code.extend_from_slice(&Instruction::Stfd { fs: Fpr::F0, ra: Gpr::R31, d: -dst_offset }.encode());
+                                    code.extend(ss_load_from_slot(Gpr::R3, dst_offset));
+                                } else {
+                                    // f64 → f32 (default when type info is unavailable)
+                                    code.extend_from_slice(&Instruction::Lfd { ft: Fpr::F0, ra: Gpr::R31, d: -dst_offset }.encode());
+                                    code.extend_from_slice(&Instruction::Frsp { ft: Fpr::F0, fb: Fpr::F0 }.encode());
+                                    code.extend_from_slice(&Instruction::Stfs { fs: Fpr::F0, ra: Gpr::R31, d: -dst_offset }.encode());
+                                    code.extend_from_slice(&Instruction::Lwz { rt: Gpr::R3, ra: Gpr::R31, d: -dst_offset }.encode());
+                                    code.extend_from_slice(&Instruction::Rlwinm { ra: Gpr::R3, rs: Gpr::R3, sh: 0, mb: 0, me: 31 }.encode());
+                                }
                             }
                         }
                         code.extend(ss_store_to_slot(Gpr::R3, dst_offset));
@@ -4734,13 +5131,30 @@ impl Backend for PPC64Backend {
                         code.extend(ss_load_value(desired, &vreg_stack_slots, Gpr::R6));
 
                         // AtomicCas pattern (sequentially consistent):
-                        //   0: sync                       ; full barrier before
-                        //   1: ldarx/lwarx R3, 0, R5      ; load and reserve (RETRY)
-                        //   2: cmpd R3, R4                 ; compare with expected
-                        //   3: bc 12, 2, +3                ; if CR0 EQ=0 (not equal), skip to sync at 6
-                        //   4: stdcx./stwcx. R6, 0, R5    ; try to store desired
-                        //   5: bc 12, 2, -4                ; if store failed (CR0 EQ=0), retry at 1
-                        //   6: sync                        ; full barrier after
+                        //
+                        // 7-instruction layout (matches the register-allocator
+                        // AtomicCas path — see the longer comment there for
+                        // the BD-encoding convention used by this codebase):
+                        //
+                        //   slot  byte   instruction                  purpose
+                        //   ────  ────   ───────────────────────────  ──────────────────────
+                        //     0     0    sync                         full barrier before
+                        //     1     4    ldarx/lwarx/lbarx/lharx R3    load and reserve (RETRY)
+                        //     2     8    cmp   cr0, 1, R3, R4         compare old vs. expected
+                        //     3    12    bc    4, 2, +3               if CR0.EQ=0 → skip to slot 6 (sync)
+                        //     4    16    stdcx./stwcx./stbcx./sthcx.  try to store desired
+                        //     5    20    bc    4, 2, -4               if CR0.EQ=0 → retry at slot 1 (ldarx)
+                        //     6    24    sync                         full barrier after
+                        //
+                        // Slot-3 BC: BD = (24 - 12)/4 = +3 → jumps to slot 6
+                        //            when the loaded value != expected.
+                        // Slot-5 BC: BD = (4 - 20)/4 = -4 → jumps to slot 1
+                        //            when the reservation was lost.
+                        //
+                        // (The "+3"/"-4" notations in the original pseudo-asm
+                        // comments above used BO=12; the actual emitted BC
+                        // uses BO=4 — "branch if CR0.EQ=0 (condition FALSE)".
+                        // Both notations describe the same control flow.)
 
                         // sync (full barrier before)
                         code.extend_from_slice(&Instruction::Sync.encode());
@@ -4764,8 +5178,8 @@ impl Backend for PPC64Backend {
                         // cmpd R3, R4 (compare old value with expected)
                         code.extend_from_slice(&Instruction::Cmp { bf: CrField::CR0, l: 1, ra: Gpr::R3, rb: Gpr::R4 }.encode());
 
-                        // bc 4, 2, +3 (if not equal, skip to sync)
-                        // BO=4 = branch if condition FALSE (CR0.EQ=0 means not equal)
+                        // bc 4, 2, +3 — slot 3, BD=+3 → slot 6 (trailing sync)
+                        // when CR0.EQ=0 (loaded != expected), skip the store.
                         code.extend_from_slice(&Instruction::Bc { bo: 4, bi: 2, bd: 3 }.encode());
 
                         // stdcx./stwcx./stbcx./sthcx. R6, 0, R5 (try to store desired)
@@ -4784,8 +5198,8 @@ impl Backend for PPC64Backend {
                             }
                         }
 
-                        // bc 4, 2, -4 (if store failed, retry at ldarx)
-                        // BO=4 = branch if condition FALSE (CR0.EQ=0 means store reservation lost)
+                        // bc 4, 2, -4 — slot 5, BD=-4 → slot 1 (ldarx)
+                        // when CR0.EQ=0 (stdcx. failed, reservation lost).
                         code.extend_from_slice(&Instruction::Bc { bo: 4, bi: 2, bd: -4 }.encode());
 
                         // sync (full barrier after)
@@ -4884,10 +5298,41 @@ impl Backend for PPC64Backend {
                     }
                     IRInstr::Call { dst, func: target_func, args, is_extern: _ } => {
                         let mut code = Vec::new();
+                        // ── Register-pass args 0..7 ──
                         for (i, arg) in args.iter().enumerate() {
                             if i >= 8 { break; }
                             code.extend(ss_load_value(arg, &vreg_stack_slots, arg_regs[i]));
                         }
+
+                        // ── Stack-pass args 8+ ──
+                        // Reserve a temporary 16-byte-aligned block on the
+                        // stack, spill each overflow argument at SP+8*j, call,
+                        // then deallocate. This matches the register-allocator
+                        // Call path semantics.
+                        let stack_args = args.len().saturating_sub(8);
+                        let stack_bytes = ((stack_args * 8) + 15) & !15;
+                        if stack_bytes > 0 {
+                            // STDU r1, r1, -stack_bytes
+                            code.extend_from_slice(&Instruction::Stdu {
+                                rs: Gpr::R1,
+                                ra: Gpr::R1,
+                                ds: -(stack_bytes as i32),
+                            }.encode());
+                            // Push args 8+ in reverse order. Use R12 as the
+                            // scratch for loading each value (R0 is reserved
+                            // for ra=0 in DS-form addressing semantics).
+                            for i in (8..args.len()).rev() {
+                                let j = i - 8;
+                                let off = (j * 8) as i32;
+                                code.extend(ss_load_value(&args[i], &vreg_stack_slots, Gpr::R12));
+                                code.extend_from_slice(&Instruction::Std {
+                                    rs: Gpr::R12,
+                                    ra: Gpr::R1,
+                                    ds: off,
+                                }.encode());
+                            }
+                        }
+
                         // Note: TOC (R2) save/restore is skipped because we
                         // run under QEMU user mode without a TOC base. The
                         // standard ELFv2 TOC save at SP+24 overlaps with the
@@ -4899,6 +5344,16 @@ impl Backend for PPC64Backend {
                             symbol: target_func.clone(),
                             reloc_type: "R_PPC64_REL24".to_string(),
                         });
+
+                        // ── Clean up the overflow-arg stack area ──
+                        if stack_bytes > 0 {
+                            code.extend_from_slice(&Instruction::Addi {
+                                rt: Gpr::R1,
+                                ra: Gpr::R1,
+                                simm: stack_bytes as i32,
+                            }.encode());
+                        }
+
                         if let Some(d) = dst {
                             let dst_id = d.as_register().unwrap_or(0);
                             let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
