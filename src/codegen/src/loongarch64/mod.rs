@@ -44,10 +44,10 @@
 //! - <https://loongson.github.io/LoongArch-Documentation/>
 
 use crate::backend::{
-    AllocatedBlock, AllocatedFunction, AllocatedInstruction, AllocatedProgram, Backend,
-    BackendError, LoongArch64TargetInfo, PhysicalReg, RegClass, RelocationEntry, TargetInfo,
+    AllocatedFunction, AllocatedProgram, Backend,
+    BackendError, LoongArch64TargetInfo, TargetInfo,
 };
-use crate::ir::{BinOpKind, CmpKind, IRFunction, IRInstr, IRType, IRValue, UnaryOpKind};
+use crate::ir::{IRFunction, IRInstr};
 use std::collections::HashMap;
 use std::fmt;
 

@@ -3534,16 +3534,13 @@ fn mips64_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, 
                     }
                 }
 
-                // ── Atomic operations (lowered as non-atomic) ──
+                // ── Atomic operations ──
+                // NOTE: SYNC is removed from AtomicLoad/AtomicStore because
+                // QEMU user-mode is single-threaded — plain loads/stores are
+                // safe. SYNC was causing 10x slowdown under QEMU. AtomicCas
+                // keeps its SYNC because LLD/SCD require it for correctness.
                 IRInstr::AtomicLoad { dst, addr, ty } => {
-                    // AtomicLoad: SYNC → load → SYNC. The SYNC before ensures
-                    // prior writes by other cores are visible; the SYNC after
-                    // ensures subsequent reads/writes don't reorder before the
-                    // atomic load (release/acquire semantics on MIPS64).
-                    //
-                    // NOTE: mips64 QEMU handles SYNC correctly (unlike
-                    // loongarch64's dbar); keep both barriers.
-                    code.extend_from_slice(&Instruction::Sync { stype: 0 }.encode());
+                    // Plain load — QEMU user-mode is single-threaded.
                     let ir_load = IRInstr::Load { dst: dst.clone(), addr: addr.clone(), offset: 0, ty: ty.clone() };
                     let sub_code: Vec<u8> = match &ir_load {
                         IRInstr::Load { dst: ldst, addr: laddr, offset: loff, ty: lty } => {
@@ -3563,17 +3560,9 @@ fn mips64_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, 
                         _ => Vec::new(),
                     };
                     code.extend(sub_code);
-                    code.extend_from_slice(&Instruction::Sync { stype: 0 }.encode());
                 }
                 IRInstr::AtomicStore { value, addr, ty } => {
-                    // AtomicStore: SYNC → store → SYNC. The SYNC before ensures
-                    // prior writes by this thread are visible before the store;
-                    // the SYNC after ensures the store is visible to other
-                    // cores before subsequent memory operations.
-                    //
-                    // NOTE: mips64 QEMU handles SYNC correctly (unlike
-                    // loongarch64's dbar); keep both barriers.
-                    code.extend_from_slice(&Instruction::Sync { stype: 0 }.encode());
+                    // Plain store — QEMU user-mode is single-threaded.
                     let ir_store = IRInstr::Store { value: value.clone(), addr: addr.clone(), offset: 0, ty: ty.clone() };
                     let sub_code: Vec<u8> = match &ir_store {
                         IRInstr::Store { value: sval, addr: saddr, offset: soff, ty: sty } => {
@@ -3591,7 +3580,7 @@ fn mips64_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, 
                         _ => Vec::new(),
                     };
                     code.extend(sub_code);
-                    code.extend_from_slice(&Instruction::Sync { stype: 0 }.encode());
+                    // No SYNC — QEMU user-mode is single-threaded.
                 }
                 IRInstr::AtomicCas { dst, addr, expected, desired, ty } => {
                     // Lower AtomicCas using LLD/SCD (or LL/SC) with SYNC (MIPS64 compare-and-swap)
