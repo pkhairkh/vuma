@@ -1,0 +1,1286 @@
+warning: unnecessary parentheses around `let` scrutinee expression
+    --> src/scg/src/transform.rs:2317:34
+     |
+2317 |                 if let Some(v) = (match &c.kind {
+     |                                  ^
+...
+2320 |                 }) {
+     |                  ^
+     |
+     = note: `#[warn(unused_parens)]` (part of `#[warn(unused)]`) on by default
+help: remove these parentheses
+     |
+2317 ~                 if let Some(v) = match &c.kind {
+2318 |                     ComputationKind::Other(ref op) => StrengthReduction::try_parse_const_int(op),
+2319 |                     _ => None,
+2320 ~                 } {
+     |
+
+warning: `vuma-scg` (lib) generated 1 warning (run `cargo fix --lib -p vuma-scg` to apply 1 suggestion)
+   Compiling vuma-codegen v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/codegen)
+warning: unused imports: `NodeId as ScgNodeId` and `NodeType`
+  --> src/ive/src/modular.rs:16:43
+   |
+16 | use vuma_scg::node::{NodeId, NodePayload, NodeType, NodeId as ScgNodeId};
+   |                                           ^^^^^^^^  ^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `NodeType`
+  --> src/ive/src/query.rs:17:43
+   |
+17 | use vuma_scg::node::{NodeId, NodePayload, NodeType};
+   |                                           ^^^^^^^^
+
+warning: unused variable: `summaries`
+   --> src/ive/src/modular.rs:336:5
+    |
+336 |     summaries: &HashMap<String, FunctionSummary>,
+    |     ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_summaries`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `consistent` is never read
+  --> src/ive/src/query.rs:37:5
+   |
+31 | pub struct QuerySystem {
+   |            ----------- field in this struct
+...
+37 |     consistent: bool,
+   |     ^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `vuma-ive` (lib) generated 4 warnings (run `cargo fix --lib -p vuma-ive` to apply 3 suggestions)
+warning: unused variable: `deref_inner`
+    --> src/parser/src/to_scg.rs:2959:40
+     |
+2959 |             if let Expr::Deref { expr: deref_inner, .. } = inner.as_ref() {
+     |                                        ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_deref_inner`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `struct_name`
+    --> src/parser/src/to_scg.rs:2961:22
+     |
+2961 |                 for (struct_name, layout) in &self.struct_table {
+     |                      ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_struct_name`
+
+warning: unused variable: `struct_name`
+    --> src/parser/src/to_scg.rs:2971:18
+     |
+2971 |             for (struct_name, layout) in &self.struct_table {
+     |                  ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_struct_name`
+
+warning: `vuma-parser` (lib) generated 3 warnings (run `cargo fix --lib -p vuma-parser` to apply 3 suggestions)
+warning: unused import: `HashSet`
+  --> src/codegen/src/memory_safety.rs:26:33
+   |
+26 | use std::collections::{HashMap, HashSet};
+   |                                 ^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `CallNode`, `ScgType`, and `SwitchArm`
+  --> src/codegen/src/memory_safety.rs:34:33
+   |
+34 |     AccessNode, AllocationNode, CallNode, ControlNode, Scg, ScgExpr, ScgFunction, ScgNode,
+   |                                 ^^^^^^^^
+35 |     ScgStatement, ScgType, SwitchArm,
+   |                   ^^^^^^^  ^^^^^^^^^
+
+warning: unused imports: `IRFunction`, `IRInstr`, `IRType`, and `IRValue`
+  --> src/codegen/src/closures.rs:22:17
+   |
+22 | use crate::ir::{IRFunction, IRInstr, IRValue, IRType};
+   |                 ^^^^^^^^^^  ^^^^^^^  ^^^^^^^  ^^^^^^
+
+warning: unused imports: `BinOpKind`, `IRType`, and `IRValue`
+  --> src/codegen/src/monomorphize.rs:14:38
+   |
+14 | use crate::ir::{IRFunction, IRInstr, IRValue, IRType, BinOpKind};
+   |                                      ^^^^^^^  ^^^^^^  ^^^^^^^^^
+
+warning: unused import: `IRTerminator`
+  --> src/codegen/src/effects.rs:14:38
+   |
+14 | use crate::ir::{IRFunction, IRInstr, IRTerminator};
+   |                                      ^^^^^^^^^^^^
+
+warning: unused imports: `AllocatedBlock`, `AllocatedInstruction`, `PhysicalReg`, `RegClass`, and `RelocationEntry`
+  --> src/codegen/src/x86_64/mod.rs:35:5
+   |
+35 |     AllocatedBlock, AllocatedFunction, AllocatedInstruction, AllocatedProgram, Backend,
+   |     ^^^^^^^^^^^^^^                     ^^^^^^^^^^^^^^^^^^^^
+36 |     BackendError, PhysicalReg, RegClass, RelocationEntry, TargetInfo, X86_64TargetInfo,
+   |                   ^^^^^^^^^^^  ^^^^^^^^  ^^^^^^^^^^^^^^^
+
+warning: unused imports: `CastKind`, `IRInstr`, `IRType`, and `UnaryOpKind`
+  --> src/codegen/src/x86_64/mod.rs:38:28
+   |
+38 | use crate::ir::{BinOpKind, CastKind, CmpKind, IRFunction, IRInstr, IRType, IRValue, UnaryOpKind};
+   |                            ^^^^^^^^                       ^^^^^^^  ^^^^^^           ^^^^^^^^^^^
+
+warning: unused import: `CmpKind`
+  --> src/codegen/src/x86_64/stack_slot_isel.rs:25:38
+   |
+25 | use crate::ir::{BinOpKind, CastKind, CmpKind, IRFunction, IRInstr, IRType, IRValue, UnaryOpKind};
+   |                                      ^^^^^^^
+
+warning: unused imports: `AllocatedBlock`, `AllocatedInstruction`, `PhysicalReg`, `RegClass`, and `RelocationEntry`
+  --> src/codegen/src/x86_32/mod.rs:35:5
+   |
+35 |     AllocatedBlock, AllocatedFunction, AllocatedInstruction, AllocatedProgram, Backend,
+   |     ^^^^^^^^^^^^^^                     ^^^^^^^^^^^^^^^^^^^^
+36 |     BackendError, PhysicalReg, RegClass, RelocationEntry, TargetInfo, X86_32TargetInfo,
+   |                   ^^^^^^^^^^^  ^^^^^^^^  ^^^^^^^^^^^^^^^
+
+warning: unused imports: `CastKind`, `IRInstr`, `IRType`, and `UnaryOpKind`
+  --> src/codegen/src/x86_32/mod.rs:38:28
+   |
+38 | use crate::ir::{BinOpKind, CastKind, CmpKind, IRFunction, IRInstr, IRType, IRValue, UnaryOpKind};
+   |                            ^^^^^^^^                       ^^^^^^^  ^^^^^^           ^^^^^^^^^^^
+
+warning: unused import: `CmpKind`
+  --> src/codegen/src/x86_32/stack_slot_isel.rs:25:38
+   |
+25 | use crate::ir::{BinOpKind, CastKind, CmpKind, IRFunction, IRInstr, IRType, IRValue, UnaryOpKind};
+   |                                      ^^^^^^^
+
+warning: unused variable: `data_offset`
+    --> src/codegen/src/arm32/mod.rs:2303:9
+     |
+2303 |     let data_offset = data_vaddr - base_addr;
+     |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_data_offset`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `data_offset`
+    --> src/codegen/src/backend.rs:1825:9
+     |
+1825 |     let data_offset = data_vaddr - base_addr; // file offset for data segment
+     |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_data_offset`
+
+warning: variable does not need to be mutable
+    --> src/codegen/src/backend.rs:2849:13
+     |
+2849 |         let mut external_symbols: Vec<String> = Vec::new();
+     |             ----^^^^^^^^^^^^^^^^
+     |             |
+     |             help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unreachable pattern
+   --> src/codegen/src/dwarf.rs:610:13
+    |
+608 |             BackendKind::RiscV32 => self.set_cie_riscv64(),
+    |             -------------------- matches all the relevant values
+609 |             BackendKind::X86_32 => self.set_cie_x86_64(),
+610 |             BackendKind::RiscV32 => self.set_cie_riscv64(),
+    |             ^^^^^^^^^^^^^^^^^^^^ no value can reach this
+    |
+    = note: `#[warn(unreachable_patterns)]` (part of `#[warn(unused)]`) on by default
+
+warning: unreachable pattern
+   --> src/codegen/src/dwarf.rs:611:13
+    |
+609 |             BackendKind::X86_32 => self.set_cie_x86_64(),
+    |             ------------------- matches all the relevant values
+610 |             BackendKind::RiscV32 => self.set_cie_riscv64(),
+611 |             BackendKind::X86_32 => self.set_cie_x86_64(),
+    |             ^^^^^^^^^^^^^^^^^^^ no value can reach this
+
+warning: variable does not need to be mutable
+   --> src/codegen/src/emit.rs:933:21
+    |
+933 |                 let mut immediate_scratch_used: Vec<usize> = Vec::new(); // which scratch reg each immediate uses
+    |                     ----^^^^^^^^^^^^^^^^^^^^^^
+    |                     |
+    |                     help: remove this `mut`
+
+warning: unused variable: `immediate_scratch_used`
+   --> src/codegen/src/emit.rs:933:21
+    |
+933 |                 let mut immediate_scratch_used: Vec<usize> = Vec::new(); // which scratch reg each immediate uses
+    |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_immediate_scratch_used`
+
+warning: value assigned to `external_symbols` is never read
+    --> src/codegen/src/emit.rs:4054:45
+     |
+4054 |     let mut external_symbols: Vec<String> = Vec::new();
+     |                                             ^^^^^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+     = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `tt`
+    --> src/codegen/src/ir.rs:1691:37
+     |
+1691 |                     (Some(ft), Some(tt)) => write!(f, "{} = {} {} ({})", dst, kind, src, ft),
+     |                                     ^^ help: if this is intentional, prefix it with an underscore: `_tt`
+
+warning: unused variable: `ty`
+    --> src/codegen/src/loongarch64/stack_slot_isel.rs:1453:68
+     |
+1453 |                 IRInstr::AtomicCas { dst, addr, expected, desired, ty } => {
+     |                                                                    ^^ help: try ignoring the field: `ty: _`
+
+warning: unused variable: `loop_start`
+    --> src/codegen/src/mips64/mod.rs:3002:33
+     |
+3002 | ...                   let loop_start = code.len();
+     |                           ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_loop_start`
+
+warning: unused variable: `loop_start`
+    --> src/codegen/src/mips64/mod.rs:3021:33
+     |
+3021 | ...                   let loop_start = code.len();
+     |                           ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_loop_start`
+
+warning: unused variable: `loop_start`
+    --> src/codegen/src/mips64/mod.rs:3042:33
+     |
+3042 | ...                   let loop_start = code.len();
+     |                           ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_loop_start`
+
+warning: unused variable: `x`
+   --> src/codegen/src/egraph.rs:194:46
+    |
+194 |                 ENode::BinOp(BinOpKind::Mul, x, _) => Some(ENode::Lit(0)), // placeholder
+    |                                              ^ help: if this is intentional, prefix it with an underscore: `_x`
+
+warning: unused variable: `x`
+   --> src/codegen/src/egraph.rs:184:46
+    |
+184 |                 ENode::BinOp(BinOpKind::Add, x, zero) => {
+    |                                              ^ help: if this is intentional, prefix it with an underscore: `_x`
+
+warning: unused variable: `zero`
+   --> src/codegen/src/egraph.rs:184:49
+    |
+184 |                 ENode::BinOp(BinOpKind::Add, x, zero) => {
+    |                                                 ^^^^ help: if this is intentional, prefix it with an underscore: `_zero`
+
+warning: unused variable: `params`
+  --> src/codegen/src/closures.rs:74:9
+   |
+74 |         params: &[String],
+   |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_params`
+
+warning: unused variable: `out`
+   --> src/codegen/src/closures.rs:127:9
+    |
+127 |         out: u32,
+    |         ^^^ help: if this is intentional, prefix it with an underscore: `_out`
+
+warning: unused variable: `id`
+    --> src/codegen/src/regalloc.rs:2774:44
+     |
+2774 |                         (IRValue::Register(id), IRValue::Immediate(_)) => true,
+     |                                            ^^ help: if this is intentional, prefix it with an underscore: `_id`
+
+warning: unused variable: `id`
+    --> src/codegen/src/regalloc.rs:2775:67
+     |
+2775 |                         (IRValue::Immediate(_), IRValue::Register(id)) => true,
+     |                                                                   ^^ help: if this is intentional, prefix it with an underscore: `_id`
+
+warning: unused variable: `rd_reg`
+    --> src/codegen/src/riscv64.rs:1514:21
+     |
+1514 |                 let rd_reg = Gpr::from_encoding(rd)?;
+     |                     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_rd_reg`
+
+warning: unused variable: `rd_reg`
+    --> src/codegen/src/riscv64.rs:1521:21
+     |
+1521 |                 let rd_reg = Gpr::from_encoding(rd)?;
+     |                     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_rd_reg`
+
+warning: unused variable: `rd_reg`
+    --> src/codegen/src/riscv64.rs:1528:21
+     |
+1528 |                 let rd_reg = Gpr::from_encoding(rd)?;
+     |                     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_rd_reg`
+
+warning: unused variable: `rd_reg`
+    --> src/codegen/src/riscv64.rs:1539:21
+     |
+1539 |                 let rd_reg = Gpr::from_encoding(rd)?;
+     |                     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_rd_reg`
+
+warning: unused variable: `rd_reg`
+    --> src/codegen/src/riscv64.rs:1595:21
+     |
+1595 |                 let rd_reg = Gpr::from_encoding(rd)?;
+     |                     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_rd_reg`
+
+warning: unused variable: `rd_reg`
+    --> src/codegen/src/riscv64.rs:1673:21
+     |
+1673 |                 let rd_reg = Gpr::from_encoding(rd)?;
+     |                     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_rd_reg`
+
+warning: unused variable: `rd_reg`
+    --> src/codegen/src/riscv64.rs:1734:21
+     |
+1734 |                 let rd_reg = Gpr::from_encoding(rd)?;
+     |                     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_rd_reg`
+
+warning: unused variable: `rd_reg`
+    --> src/codegen/src/riscv64.rs:1835:21
+     |
+1835 |                 let rd_reg = Gpr::from_encoding(rd)?;
+     |                     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_rd_reg`
+
+warning: unused variable: `rd_reg`
+    --> src/codegen/src/riscv64.rs:1871:21
+     |
+1871 |                 let rd_reg = Gpr::from_encoding(rd)?;
+     |                     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_rd_reg`
+
+warning: unused variable: `rd_reg`
+    --> src/codegen/src/riscv64.rs:1912:25
+     |
+1912 |                     let rd_reg = Gpr::from_encoding(rd)?;
+     |                         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_rd_reg`
+
+warning: unused variable: `rd_reg`
+    --> src/codegen/src/riscv64.rs:2094:21
+     |
+2094 |                 let rd_reg = Gpr::from_encoding(rd)?;
+     |                     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_rd_reg`
+
+warning: unused variable: `rd_reg`
+    --> src/codegen/src/riscv64.rs:5734:29
+     |
+5734 |                         let rd_reg = Gpr::from_encoding(rd_idx).unwrap_or(Gpr::Ra);
+     |                             ^^^^^^ help: if this is intentional, prefix it with an underscore: `_rd_reg`
+
+warning: unreachable pattern
+   --> src/codegen/src/riscv32.rs:795:13
+    |
+788 |             Instruction::Lw { rd, rs1, imm } => encode_i_type(
+    |             -------------------------------- matches all the relevant values
+...
+795 |             Instruction::Lw { rd, rs1, imm } => encode_i_type(
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+   --> src/codegen/src/riscv32.rs:816:13
+    |
+788 |             Instruction::Lw { rd, rs1, imm } => encode_i_type(
+    |             -------------------------------- matches all the relevant values
+...
+816 |             Instruction::Lw { rd, rs1, imm } => encode_i_type(
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+   --> src/codegen/src/riscv32.rs:846:13
+    |
+839 |             Instruction::Sw { rs1, rs2, imm } => encode_s_type(
+    |             --------------------------------- matches all the relevant values
+...
+846 |             Instruction::Sw { rs1, rs2, imm } => encode_s_type(
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+    --> src/codegen/src/riscv32.rs:1012:13
+     |
+ 930 |             Instruction::Add { rd, rs1, rs2 } => encode_r_type(
+     |             --------------------------------- matches all the relevant values
+...
+1012 |             Instruction::Add { rd, rs1, rs2 } => encode_r_type(
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+    --> src/codegen/src/riscv32.rs:1020:13
+     |
+ 938 |             Instruction::Sub { rd, rs1, rs2 } => encode_r_type(
+     |             --------------------------------- matches all the relevant values
+...
+1020 |             Instruction::Sub { rd, rs1, rs2 } => encode_r_type(
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+    --> src/codegen/src/riscv32.rs:1028:13
+     |
+ 946 |             Instruction::Sll { rd, rs1, rs2 } => encode_r_type(
+     |             --------------------------------- matches all the relevant values
+...
+1028 |             Instruction::Sll { rd, rs1, rs2 } => encode_r_type(
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+    --> src/codegen/src/riscv32.rs:1036:13
+     |
+ 978 |             Instruction::Srl { rd, rs1, rs2 } => encode_r_type(
+     |             --------------------------------- matches all the relevant values
+...
+1036 |             Instruction::Srl { rd, rs1, rs2 } => encode_r_type(
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+    --> src/codegen/src/riscv32.rs:1044:13
+     |
+ 986 |             Instruction::Sra { rd, rs1, rs2 } => encode_r_type(
+     |             --------------------------------- matches all the relevant values
+...
+1044 |             Instruction::Sra { rd, rs1, rs2 } => encode_r_type(
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+    --> src/codegen/src/riscv32.rs:1052:13
+     |
+ 855 |             Instruction::Addi { rd, rs1, imm } => encode_i_type(
+     |             ---------------------------------- matches all the relevant values
+...
+1052 |             Instruction::Addi { rd, rs1, imm } => encode_i_type(
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+    --> src/codegen/src/riscv32.rs:1059:13
+     |
+ 897 |             Instruction::Slli { rd, rs1, shamt } => {
+     |             ------------------------------------ matches all the relevant values
+...
+1059 |             Instruction::Slli { rd, rs1, shamt } => {
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+    --> src/codegen/src/riscv32.rs:1069:13
+     |
+ 908 |             Instruction::Srli { rd, rs1, shamt } => {
+     |             ------------------------------------ matches all the relevant values
+...
+1069 |             Instruction::Srli { rd, rs1, shamt } => {
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+    --> src/codegen/src/riscv32.rs:1078:13
+     |
+ 918 |             Instruction::Srai { rd, rs1, shamt } => {
+     |             ------------------------------------ matches all the relevant values
+...
+1078 |             Instruction::Srai { rd, rs1, shamt } => {
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+    --> src/codegen/src/riscv32.rs:1396:13
+     |
+1395 |             Instruction::Lw { .. } => "lw",
+     |             ---------------------- matches all the relevant values
+1396 |             Instruction::Lw { .. } => "lw",
+     |             ^^^^^^^^^^^^^^^^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+    --> src/codegen/src/riscv32.rs:1399:13
+     |
+1395 |             Instruction::Lw { .. } => "lw",
+     |             ---------------------- matches all the relevant values
+...
+1399 |             Instruction::Lw { .. } => "lw",
+     |             ^^^^^^^^^^^^^^^^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+    --> src/codegen/src/riscv32.rs:1403:13
+     |
+1402 |             Instruction::Sw { .. } => "sw",
+     |             ---------------------- matches all the relevant values
+1403 |             Instruction::Sw { .. } => "sw",
+     |             ^^^^^^^^^^^^^^^^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+    --> src/codegen/src/riscv32.rs:1423:13
+     |
+1413 |             Instruction::Add { .. } => "add",
+     |             ----------------------- matches all the relevant values
+...
+1423 |             Instruction::Add { .. } => "add",
+     |             ^^^^^^^^^^^^^^^^^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+    --> src/codegen/src/riscv32.rs:1424:13
+     |
+1414 |             Instruction::Sub { .. } => "sub",
+     |             ----------------------- matches all the relevant values
+...
+1424 |             Instruction::Sub { .. } => "sub",
+     |             ^^^^^^^^^^^^^^^^^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+    --> src/codegen/src/riscv32.rs:1425:13
+     |
+1415 |             Instruction::Sll { .. } => "sll",
+     |             ----------------------- matches all the relevant values
+...
+1425 |             Instruction::Sll { .. } => "sll",
+     |             ^^^^^^^^^^^^^^^^^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+    --> src/codegen/src/riscv32.rs:1426:13
+     |
+1419 |             Instruction::Srl { .. } => "srl",
+     |             ----------------------- matches all the relevant values
+...
+1426 |             Instruction::Srl { .. } => "srl",
+     |             ^^^^^^^^^^^^^^^^^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+    --> src/codegen/src/riscv32.rs:1427:13
+     |
+1420 |             Instruction::Sra { .. } => "sra",
+     |             ----------------------- matches all the relevant values
+...
+1427 |             Instruction::Sra { .. } => "sra",
+     |             ^^^^^^^^^^^^^^^^^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+    --> src/codegen/src/riscv32.rs:1428:13
+     |
+1404 |             Instruction::Addi { .. } => "addi",
+     |             ------------------------ matches all the relevant values
+...
+1428 |             Instruction::Addi { .. } => "addi",
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+    --> src/codegen/src/riscv32.rs:1429:13
+     |
+1410 |             Instruction::Slli { .. } => "slli",
+     |             ------------------------ matches all the relevant values
+...
+1429 |             Instruction::Slli { .. } => "slli",
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+    --> src/codegen/src/riscv32.rs:1430:13
+     |
+1411 |             Instruction::Srli { .. } => "srli",
+     |             ------------------------ matches all the relevant values
+...
+1430 |             Instruction::Srli { .. } => "srli",
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+    --> src/codegen/src/riscv32.rs:1431:13
+     |
+1412 |             Instruction::Srai { .. } => "srai",
+     |             ------------------------ matches all the relevant values
+...
+1431 |             Instruction::Srai { .. } => "srai",
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^ no value can reach this
+
+warning: unused variable: `rd_reg`
+    --> src/codegen/src/riscv32.rs:1502:21
+     |
+1502 |                 let rd_reg = Gpr::from_encoding(rd)?;
+     |                     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_rd_reg`
+
+warning: unused variable: `rd_reg`
+    --> src/codegen/src/riscv32.rs:1509:21
+     |
+1509 |                 let rd_reg = Gpr::from_encoding(rd)?;
+     |                     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_rd_reg`
+
+warning: unused variable: `rd_reg`
+    --> src/codegen/src/riscv32.rs:1516:21
+     |
+1516 |                 let rd_reg = Gpr::from_encoding(rd)?;
+     |                     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_rd_reg`
+
+warning: unused variable: `rd_reg`
+    --> src/codegen/src/riscv32.rs:1527:21
+     |
+1527 |                 let rd_reg = Gpr::from_encoding(rd)?;
+     |                     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_rd_reg`
+
+warning: unused variable: `rd_reg`
+    --> src/codegen/src/riscv32.rs:1583:21
+     |
+1583 |                 let rd_reg = Gpr::from_encoding(rd)?;
+     |                     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_rd_reg`
+
+warning: unused variable: `rd_reg`
+    --> src/codegen/src/riscv32.rs:1661:21
+     |
+1661 |                 let rd_reg = Gpr::from_encoding(rd)?;
+     |                     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_rd_reg`
+
+warning: unused variable: `rd_reg`
+    --> src/codegen/src/riscv32.rs:1722:21
+     |
+1722 |                 let rd_reg = Gpr::from_encoding(rd)?;
+     |                     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_rd_reg`
+
+warning: unused variable: `rd_reg`
+    --> src/codegen/src/riscv32.rs:1823:21
+     |
+1823 |                 let rd_reg = Gpr::from_encoding(rd)?;
+     |                     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_rd_reg`
+
+warning: unused variable: `rd_reg`
+    --> src/codegen/src/riscv32.rs:1859:21
+     |
+1859 |                 let rd_reg = Gpr::from_encoding(rd)?;
+     |                     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_rd_reg`
+
+warning: unused variable: `rd_reg`
+    --> src/codegen/src/riscv32.rs:1900:25
+     |
+1900 |                     let rd_reg = Gpr::from_encoding(rd)?;
+     |                         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_rd_reg`
+
+warning: unused variable: `rd_reg`
+    --> src/codegen/src/riscv32.rs:2082:21
+     |
+2082 |                 let rd_reg = Gpr::from_encoding(rd)?;
+     |                     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_rd_reg`
+
+warning: unreachable pattern
+    --> src/codegen/src/riscv32.rs:2136:13
+     |
+2135 |             Instruction::Lw { rd, rs1, imm } => write!(f, "lw {}, {}({})", rd, imm, rs1),
+     |             -------------------------------- matches all the relevant values
+2136 |             Instruction::Lw { rd, rs1, imm } => write!(f, "ld {}, {}({})", rd, imm, rs1),
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+    --> src/codegen/src/riscv32.rs:2139:13
+     |
+2135 |             Instruction::Lw { rd, rs1, imm } => write!(f, "lw {}, {}({})", rd, imm, rs1),
+     |             -------------------------------- matches all the relevant values
+...
+2139 |             Instruction::Lw { rd, rs1, imm } => write!(f, "lwu {}, {}({})", rd, imm, rs1),
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+    --> src/codegen/src/riscv32.rs:2143:13
+     |
+2142 |             Instruction::Sw { rs1, rs2, imm } => write!(f, "sw {}, {}({})", rs2, imm, rs1),
+     |             --------------------------------- matches all the relevant values
+2143 |             Instruction::Sw { rs1, rs2, imm } => write!(f, "sd {}, {}({})", rs2, imm, rs1),
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+    --> src/codegen/src/riscv32.rs:2163:13
+     |
+2153 |             Instruction::Add { rd, rs1, rs2 } => write!(f, "add {}, {}, {}", rd, rs1, rs2),
+     |             --------------------------------- matches all the relevant values
+...
+2163 |             Instruction::Add { rd, rs1, rs2 } => write!(f, "addw {}, {}, {}", rd, rs1, rs2),
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+    --> src/codegen/src/riscv32.rs:2164:13
+     |
+2154 |             Instruction::Sub { rd, rs1, rs2 } => write!(f, "sub {}, {}, {}", rd, rs1, rs2),
+     |             --------------------------------- matches all the relevant values
+...
+2164 |             Instruction::Sub { rd, rs1, rs2 } => write!(f, "subw {}, {}, {}", rd, rs1, rs2),
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+    --> src/codegen/src/riscv32.rs:2165:13
+     |
+2155 |             Instruction::Sll { rd, rs1, rs2 } => write!(f, "sll {}, {}, {}", rd, rs1, rs2),
+     |             --------------------------------- matches all the relevant values
+...
+2165 |             Instruction::Sll { rd, rs1, rs2 } => write!(f, "sllw {}, {}, {}", rd, rs1, rs2),
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+    --> src/codegen/src/riscv32.rs:2166:13
+     |
+2159 |             Instruction::Srl { rd, rs1, rs2 } => write!(f, "srl {}, {}, {}", rd, rs1, rs2),
+     |             --------------------------------- matches all the relevant values
+...
+2166 |             Instruction::Srl { rd, rs1, rs2 } => write!(f, "srlw {}, {}, {}", rd, rs1, rs2),
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+    --> src/codegen/src/riscv32.rs:2167:13
+     |
+2160 |             Instruction::Sra { rd, rs1, rs2 } => write!(f, "sra {}, {}, {}", rd, rs1, rs2),
+     |             --------------------------------- matches all the relevant values
+...
+2167 |             Instruction::Sra { rd, rs1, rs2 } => write!(f, "sraw {}, {}, {}", rd, rs1, rs2),
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+    --> src/codegen/src/riscv32.rs:2168:13
+     |
+2144 |             Instruction::Addi { rd, rs1, imm } => write!(f, "addi {}, {}, {}", rd, rs1, imm),
+     |             ---------------------------------- matches all the relevant values
+...
+2168 |             Instruction::Addi { rd, rs1, imm } => write!(f, "addiw {}, {}, {}", rd, rs1, imm),
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+    --> src/codegen/src/riscv32.rs:2169:13
+     |
+2150 |             Instruction::Slli { rd, rs1, shamt } => write!(f, "slli {}, {}, {}", rd, rs1, shamt),
+     |             ------------------------------------ matches all the relevant values
+...
+2169 |             Instruction::Slli { rd, rs1, shamt } => write!(f, "slliw {}, {}, {}", rd, rs1, shamt),
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+    --> src/codegen/src/riscv32.rs:2170:13
+     |
+2151 |             Instruction::Srli { rd, rs1, shamt } => write!(f, "srli {}, {}, {}", rd, rs1, shamt),
+     |             ------------------------------------ matches all the relevant values
+...
+2170 |             Instruction::Srli { rd, rs1, shamt } => write!(f, "srliw {}, {}, {}", rd, rs1, shamt),
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+    --> src/codegen/src/riscv32.rs:2171:13
+     |
+2152 |             Instruction::Srai { rd, rs1, shamt } => write!(f, "srai {}, {}, {}", rd, rs1, shamt),
+     |             ------------------------------------ matches all the relevant values
+...
+2171 |             Instruction::Srai { rd, rs1, shamt } => write!(f, "sraiw {}, {}, {}", rd, rs1, shamt),
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no value can reach this
+
+warning: unused variable: `rd_reg`
+    --> src/codegen/src/riscv32.rs:5869:29
+     |
+5869 |                         let rd_reg = Gpr::from_encoding(rd_idx).unwrap_or(Gpr::Ra);
+     |                             ^^^^^^ help: if this is intentional, prefix it with an underscore: `_rd_reg`
+
+warning: unused variable: `while_cond`
+    --> src/codegen/src/scg_to_ir.rs:1380:9
+     |
+1380 |         while_cond: &Option<String>,
+     |         ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_while_cond`
+
+warning: unused variable: `pre_vreg`
+    --> src/codegen/src/scg_to_ir.rs:1768:36
+     |
+1768 |                         for (name, pre_vreg, phi_vreg) in &phi_info {
+     |                                    ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_pre_vreg`
+
+warning: unused variable: `d`
+    --> src/codegen/src/scg_to_ir.rs:2185:22
+     |
+2185 |                 for (d, s) in copies.iter_mut() {
+     |                      ^ help: if this is intentional, prefix it with an underscore: `_d`
+
+warning: unused variable: `ty`
+    --> src/codegen/src/scg_to_ir.rs:3921:74
+     |
+3921 |             ScgStatement::Access(AccessNode::Store { ptr, offset, value, ty }) => {
+     |                                                                          ^^ help: try ignoring the field: `ty: _`
+
+warning: variable `main_func_type` is assigned to, but never used
+    --> src/codegen/src/wasm32/mod.rs:3542:13
+     |
+3542 |         let mut main_func_type: Option<WasmFuncType> = None;
+     |             ^^^^^^^^^^^^^^^^^^
+     |
+     = note: consider using `_main_func_type` instead
+
+warning: value assigned to `main_func_type` is never read
+    --> src/codegen/src/wasm32/mod.rs:3563:17
+     |
+3563 |                 main_func_type = Some(func_type);
+     |                 ^^^^^^^^^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+
+warning: constant `DP_RSC` is never used
+   --> src/codegen/src/arm32/mod.rs:348:7
+    |
+348 | const DP_RSC: u32 = 0b0111; // Reverse Subtract with Carry
+    |       ^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `arm32_compute_frame_size` is never used
+    --> src/codegen/src/arm32/mod.rs:3235:4
+     |
+3235 | fn arm32_compute_frame_size(func: &IRFunction) -> usize {
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: fields `is_unconditional` and `condition` are never read
+    --> src/codegen/src/arm32/mod.rs:3968:13
+     |
+3964 |         struct BranchFixup {
+     |                ----------- fields in this struct
+...
+3968 |             is_unconditional: bool, // true for B, false for Bcc (BNE etc.)
+     |             ^^^^^^^^^^^^^^^^
+3969 |             condition: Condition,   // condition code (AL for unconditional)
+     |             ^^^^^^^^^
+
+warning: variant `BCond19` is never constructed
+  --> src/codegen/src/emit.rs:93:5
+   |
+87 | enum BranchFormat {
+   |      ------------ variant in this enum
+...
+93 |     BCond19,
+   |     ^^^^^^^
+   |
+   = note: `BranchFormat` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: constant `STT_NOTYPE` is never used
+   --> src/codegen/src/emit.rs:178:7
+    |
+178 | const STT_NOTYPE: u8 = 0;
+    |       ^^^^^^^^^^
+
+warning: function `loongarch64_compute_frame_size` is never used
+    --> src/codegen/src/loongarch64/mod.rs:2153:4
+     |
+2153 | fn loongarch64_compute_frame_size(func: &IRFunction) -> usize {
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `emit_instr` is never used
+  --> src/codegen/src/loongarch64/stack_slot_isel.rs:82:4
+   |
+82 | fn emit_instr(inst: Instruction, name: &str) -> AllocatedInstruction {
+   |    ^^^^^^^^^^
+
+warning: field `name` is never read
+   --> src/codegen/src/memory_safety.rs:387:5
+    |
+385 | struct AllocationInfo {
+    |        -------------- field in this struct
+386 |     /// Variable name of the allocation.
+387 |     name: String,
+    |     ^^^^
+    |
+    = note: `AllocationInfo` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: fields `name` and `is_explicit` are never read
+   --> src/codegen/src/memory_safety.rs:406:5
+    |
+404 | struct FreeInfo {
+    |        -------- fields in this struct
+405 |     /// Variable name being freed.
+406 |     name: String,
+    |     ^^^^
+...
+410 |     is_explicit: bool,
+    |     ^^^^^^^^^^^
+    |
+    = note: `FreeInfo` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: fields `name`, `line`, and `offset_expr` are never read
+   --> src/codegen/src/memory_safety.rs:417:5
+    |
+415 | struct AccessInfo {
+    |        ---------- fields in this struct
+416 |     /// Variable name being accessed.
+417 |     name: String,
+    |     ^^^^
+...
+421 |     line: Option<u32>,
+    |     ^^^^
+422 |     /// Optional offset expression (for array indexing).
+423 |     offset_expr: Option<String>,
+    |     ^^^^^^^^^^^
+    |
+    = note: `AccessInfo` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: function `mips64_compute_frame_size` is never used
+    --> src/codegen/src/mips64/mod.rs:1751:4
+     |
+1751 | fn mips64_compute_frame_size(func: &IRFunction) -> usize {
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ALLOCATABLE_GPRS` is never used
+    --> src/codegen/src/mips64/mod.rs:1769:7
+     |
+1769 | const ALLOCATABLE_GPRS: &[Gpr] = &[
+     |       ^^^^^^^^^^^^^^^^
+
+warning: function `map_vreg_to_gpr` is never used
+    --> src/codegen/src/mips64/mod.rs:1806:4
+     |
+1806 | fn map_vreg_to_gpr(
+     |    ^^^^^^^^^^^^^^^
+
+warning: function `vreg_id` is never used
+    --> src/codegen/src/mips64/mod.rs:1838:4
+     |
+1838 | fn vreg_id(val: &IRValue) -> u32 {
+     |    ^^^^^^^
+
+warning: function `resolve_value` is never used
+    --> src/codegen/src/mips64/mod.rs:1854:4
+     |
+1854 | fn resolve_value(
+     |    ^^^^^^^^^^^^^
+
+warning: function `lower_binop` is never used
+    --> src/codegen/src/mips64/mod.rs:2029:4
+     |
+2029 | fn lower_binop(
+     |    ^^^^^^^^^^^
+
+warning: function `lower_binop_typed` is never used
+    --> src/codegen/src/mips64/mod.rs:2042:4
+     |
+2042 | fn lower_binop_typed(
+     |    ^^^^^^^^^^^^^^^^^
+
+warning: function `ss_ld_typed` is never used
+    --> src/codegen/src/mips64/mod.rs:2702:8
+     |
+2702 |     fn ss_ld_typed(dst: Gpr, offset: i32, ty: &IRType) -> Vec<u8> {
+     |        ^^^^^^^^^^^
+
+warning: function `ss_sd_typed` is never used
+    --> src/codegen/src/mips64/mod.rs:2727:8
+     |
+2727 |     fn ss_sd_typed(src: Gpr, offset: i32, ty: &IRType) -> Vec<u8> {
+     |        ^^^^^^^^^^^
+
+warning: function `lower_ir_instr` is never used
+    --> src/codegen/src/mips64/mod.rs:3727:4
+     |
+3727 | fn lower_ir_instr(
+     |    ^^^^^^^^^^^^^^
+
+warning: constant `PAGE_SIZE` is never used
+    --> src/codegen/src/mips64/mod.rs:4724:15
+     |
+4724 |         const PAGE_SIZE: u64 = 0x10000; // 64 KB (MIPS typical)
+     |               ^^^^^^^^^
+
+warning: constant `FP_SCRATCH_SIZE` is never used
+    --> src/codegen/src/ppc64/mod.rs:1832:7
+     |
+1832 | const FP_SCRATCH_SIZE: u32 = 16;
+     |       ^^^^^^^^^^^^^^^
+
+warning: function `ppc64_compute_frame_size` is never used
+    --> src/codegen/src/ppc64/mod.rs:1839:4
+     |
+1839 | fn ppc64_compute_frame_size(func: &IRFunction) -> usize {
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `riscv64_compute_frame_size` is never used
+    --> src/codegen/src/riscv64.rs:2633:4
+     |
+2633 | fn riscv64_compute_frame_size(func: &IRFunction) -> usize {
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ALLOCATABLE_GPRS` is never used
+    --> src/codegen/src/riscv64.rs:2651:7
+     |
+2651 | const ALLOCATABLE_GPRS: &[Gpr] = &[
+     |       ^^^^^^^^^^^^^^^^
+
+warning: function `map_vreg_to_gpr` is never used
+    --> src/codegen/src/riscv64.rs:2689:4
+     |
+2689 | fn map_vreg_to_gpr(
+     |    ^^^^^^^^^^^^^^^
+
+warning: function `resolve_gpr` is never used
+    --> src/codegen/src/riscv64.rs:2732:4
+     |
+2732 | fn resolve_gpr(
+     |    ^^^^^^^^^^^
+
+warning: function `riscv32_compute_frame_size` is never used
+    --> src/codegen/src/riscv32.rs:2601:4
+     |
+2601 | fn riscv32_compute_frame_size(func: &IRFunction) -> usize {
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ALLOCATABLE_GPRS` is never used
+    --> src/codegen/src/riscv32.rs:2619:7
+     |
+2619 | const ALLOCATABLE_GPRS: &[Gpr] = &[
+     |       ^^^^^^^^^^^^^^^^
+
+warning: function `map_vreg_to_gpr` is never used
+    --> src/codegen/src/riscv32.rs:2657:4
+     |
+2657 | fn map_vreg_to_gpr(
+     |    ^^^^^^^^^^^^^^^
+
+warning: function `resolve_gpr` is never used
+    --> src/codegen/src/riscv32.rs:2700:4
+     |
+2700 | fn resolve_gpr(
+     |    ^^^^^^^^^^^
+
+warning: function `skip_leb128` is never used
+    --> src/codegen/src/wasm32/mod.rs:1572:4
+     |
+1572 | fn skip_leb128(bytes: &[u8], offset: &mut usize, count: usize) {
+     |    ^^^^^^^^^^^
+
+warning: function `skip_signed_leb128` is never used
+    --> src/codegen/src/wasm32/mod.rs:1584:4
+     |
+1584 | fn skip_signed_leb128(bytes: &[u8], offset: &mut usize, count: usize) {
+     |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `skip_one_instruction` is never used
+    --> src/codegen/src/wasm32/mod.rs:1615:4
+     |
+1615 | fn skip_one_instruction(bytes: &[u8], offset: &mut usize) {
+     |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: field `block_labels` is never read
+    --> src/codegen/src/wasm32/mod.rs:1746:5
+     |
+1736 | struct LoweringContext {
+     |        --------------- field in this struct
+...
+1746 |     block_labels: HashMap<String, u32>,
+     |     ^^^^^^^^^^^^
+
+warning: function `lower_terminator` is never used
+    --> src/codegen/src/wasm32/mod.rs:3227:4
+     |
+3227 | fn lower_terminator(
+     |    ^^^^^^^^^^^^^^^^
+
+warning: function `x86_64_compute_frame_size` is never used
+    --> src/codegen/src/x86_64/mod.rs:3472:4
+     |
+3472 | fn x86_64_compute_frame_size(func: &IRFunction) -> usize {
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `resolve_gpr` is never used
+    --> src/codegen/src/x86_64/mod.rs:3498:4
+     |
+3498 | fn resolve_gpr(val: &IRValue, reg_map: &HashMap<u32, Gpr>, scratch: Gpr) -> (Gpr, Vec<u8>) {
+     |    ^^^^^^^^^^^
+
+warning: function `emit_cmp_setcc` is never used
+    --> src/codegen/src/x86_64/mod.rs:3557:4
+     |
+3557 | fn emit_cmp_setcc(dst: Gpr, lhs: Gpr, rhs: Gpr, cc: Cc) -> Vec<u8> {
+     |    ^^^^^^^^^^^^^^
+
+warning: function `rex_prefix` is never used
+   --> src/codegen/src/x86_32/mod.rs:246:4
+    |
+246 | fn rex_prefix(w: bool, r: bool, x: bool, b: bool) -> Option<u8> {
+    |    ^^^^^^^^^^
+
+warning: function `x86_32_compute_frame_size` is never used
+    --> src/codegen/src/x86_32/mod.rs:2808:4
+     |
+2808 | fn x86_32_compute_frame_size(func: &IRFunction) -> usize {
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `resolve_gpr` is never used
+    --> src/codegen/src/x86_32/mod.rs:2834:4
+     |
+2834 | fn resolve_gpr(val: &IRValue, reg_map: &HashMap<u32, Gpr>, scratch: Gpr) -> (Gpr, Vec<u8>) {
+     |    ^^^^^^^^^^^
+
+warning: function `emit_cmp_setcc` is never used
+    --> src/codegen/src/x86_32/mod.rs:2893:4
+     |
+2893 | fn emit_cmp_setcc(dst: Gpr, lhs: Gpr, rhs: Gpr, cc: Cc) -> Vec<u8> {
+     |    ^^^^^^^^^^^^^^
+
+   Compiling vuma-cor v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/cor)
+warning: field `config` is never read
+   --> src/cor/src/deployment.rs:517:5
+    |
+513 | pub struct DeploymentPlanner {
+    |            ----------------- field in this struct
+...
+517 |     config: Config,
+    |     ^^^^^^
+    |
+    = note: `DeploymentPlanner` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling vuma-core v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/vuma)
+warning: `vuma-cor` (lib) generated 1 warning
+   Compiling vuma v0.2.0-alpha.1 (/home/pkhairkh/vuma)
+warning: unused import: `InterproceduralAllocFlow`
+  --> src/pipeline.rs:74:39
+   |
+74 |     EdgeData, EdgeKind, InliningPass, InterproceduralAllocFlow, NodeData, NodeId, NodePayload,
+   |                                       ^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `serde::de::Error`
+   --> src/api.rs:736:9
+    |
+736 |     use serde::de::Error;
+    |         ^^^^^^^^^^^^^^^^
+
+warning: variable does not need to be mutable
+    --> src/pipeline.rs:1921:25
+     |
+1921 |                     let mut arm_bodies: Vec<Vec<ScgStatement>> = Vec::new();
+     |                         ----^^^^^^^^^^
+     |                         |
+     |                         help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `arm_bodies`
+    --> src/pipeline.rs:1921:25
+     |
+1921 |                     let mut arm_bodies: Vec<Vec<ScgStatement>> = Vec::new();
+     |                         ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_arm_bodies`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unreachable pattern
+    --> src/pipeline.rs:4664:9
+     |
+4663 |         "shr.a" | "shr.l" | ">>" => return Some(IrBinOpKind::ShrA),
+     |         ------------------------ matches all the relevant values
+4664 |         "shr.a" => return Some(IrBinOpKind::ShrA),
+     |         ^^^^^^^ no value can reach this
+     |
+     = note: `#[warn(unreachable_patterns)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `last_completed` is never read
+    --> src/pipeline.rs:5174:5
+     |
+5174 |     last_completed = Some(PipelineStage::AstToScg);
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+     = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `last_completed` is never read
+    --> src/pipeline.rs:5187:5
+     |
+5187 |     last_completed = Some(PipelineStage::ScgValidation);
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+
+warning: value assigned to `last_completed` is never read
+    --> src/pipeline.rs:5201:5
+     |
+5201 |     last_completed = Some(PipelineStage::BdInference);
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+
+warning: value assigned to `last_completed` is never read
+    --> src/pipeline.rs:5261:5
+     |
+5261 |     last_completed = Some(PipelineStage::IveVerification);
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+
+warning: value assigned to `last_completed` is never read
+    --> src/pipeline.rs:5387:5
+     |
+5387 |     last_completed = Some(PipelineStage::CodeEmission);
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+
+warning: field `next_id` is never read
+   --> src/lsp/mod.rs:501:5
+    |
+493 | pub struct LspServer {
+    |            --------- field in this struct
+...
+501 |     next_id: i64,
+    |     ^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `has_derivation_to_allocation` is never used
+   --> src/pipeline.rs:733:4
+    |
+733 | fn has_derivation_to_allocation(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `resolve_all_inputs` is never used
+   --> src/pipeline.rs:753:4
+    |
+753 | fn resolve_all_inputs(
+    |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `walk_control_flow` is never used
+    --> src/pipeline.rs:1345:4
+     |
+1345 | fn walk_control_flow(
+     |    ^^^^^^^^^^^^^^^^^
+
+warning: function `convert_node_to_statement` is never used
+    --> src/pipeline.rs:2059:4
+     |
+2059 | fn convert_node_to_statement(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `get_store_type_from_value` is never used
+    --> src/pipeline.rs:2698:4
+     |
+2698 | fn get_store_type_from_value(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `is_expr_unsigned` is never used
+    --> src/pipeline.rs:3467:4
+     |
+3467 | fn is_expr_unsigned(expr: &str, scg: &SCG, sources: &[NodeId]) -> bool {
+     |    ^^^^^^^^^^^^^^^^
+
+warning: function `find_original_let_def` is never used
+    --> src/pipeline.rs:3929:4
+     |
+3929 | fn find_original_let_def(var_name: &str, scg: &SCG) -> Option<NodeId> {
+     |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `improve_expr` is never used
+    --> src/pipeline.rs:4402:4
+     |
+4402 | fn improve_expr(expr: &ScgExpr, str_repr: &str) -> ScgExpr {
+     |    ^^^^^^^^^^^^
+
+warning: function `parse_binop` is never used
+    --> src/pipeline.rs:4650:4
+     |
+4650 | fn parse_binop(op: &str) -> Option<IrBinOpKind> {
+     |    ^^^^^^^^^^^
+
+warning: missing documentation for a macro
+   --> src/logging.rs:229:1
+    |
+229 | macro_rules! log_warn {
+    | ^^^^^^^^^^^^^^^^^^^^^
+    |
+note: the lint level is defined here
+   --> src/lib.rs:41:9
+    |
+ 41 | #![warn(missing_docs)]
+    |         ^^^^^^^^^^^^
+
+warning: missing documentation for a macro
+   --> src/logging.rs:236:1
+    |
+236 | macro_rules! log_info {
+    | ^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a macro
+   --> src/logging.rs:243:1
+    |
+243 | macro_rules! log_debug {
+    | ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a macro
+   --> src/logging.rs:250:1
+    |
+250 | macro_rules! log_trace {
+    | ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `vuma` (lib) generated 24 warnings (run `cargo fix --lib -p vuma` to apply 3 suggestions)
+warning: `vuma-codegen` (lib) generated 140 warnings (run `cargo fix --lib -p vuma-codegen` to apply 56 suggestions)
+    Finished `release-fast` profile [optimized] target(s) in 13.30s
