@@ -1479,8 +1479,8 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     // Load expected into S3
                     code.extend(encode_load_value(expected, S3, fp, &vreg_slots));
 
-                    // dbar 0 (full barrier before)
-                    code.extend_from_slice(&Instruction::Dbar { hint: 0 }.encode());
+                    // No dbar — QEMU user-mode SIGILL on dbar.
+                    // QEMU user-mode is single-threaded so LL/SC without fences is safe.
 
                     // ll.d S0, S2, 0  (load-linked)
                     code.extend_from_slice(&Instruction::LlD { rd: S0, rj: S2, imm14: 0 }.encode());
@@ -1491,10 +1491,10 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     let reload_code = encode_load_value(desired, S1, fp, &vreg_slots);
                     let reload_instr_count = (reload_code.len() / 4) as i32;
 
-                    // BNE skips forward over: reload(N) + sc.d(1) + beq(1) + dbar(1)
-                    //   = N + 3 instructions, landing on the first instruction
-                    //   after the post-success dbar.
-                    let bne_off = reload_instr_count + 3;
+                    // BNE skips forward over: reload(N) + sc.d(1) + beq(1)
+                    //   = N + 2 instructions, landing on the first instruction
+                    //   after the beq (the store-old-value path).
+                    let bne_off = reload_instr_count + 2;
                     code.extend_from_slice(&Instruction::Bne { rj: S0, rd: S3, offs16: bne_off }.encode());
 
                     // Reload desired into S1 (must reload each retry since sc.d clobbers rd)
@@ -1505,14 +1505,12 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
 
                     // beq S1, zero, -(N+3) (if store failed (S1=0), retry at ll.d)
                     // Going back from the beq over: sc.d(1) + reload(N) + bne(1)
-                    //   = N + 2 instructions. The BNE sits between LL.D and the
-                    //   reload; from the beq's PC, LL.D is N+3 instructions back
+                    //   = N + 2 instructions. From the beq's PC, LL.D is N+3 instructions back
                     //   (LL.D ← BNE ← reload*N ← SC.D ← BEQ).
                     let beq_off = -(reload_instr_count + 3);
                     code.extend_from_slice(&Instruction::Beq { rj: S1, rd: Gpr::R0, offs16: beq_off }.encode());
 
-                    // dbar 0 (full barrier after)
-                    code.extend_from_slice(&Instruction::Dbar { hint: 0 }.encode());
+                    // No dbar — QEMU user-mode SIGILL.
 
                     // Store old value (S0) to dst vreg slot
                     code.extend(encode_store_to_vreg(S0, dst_id, fp, &vreg_slots));
