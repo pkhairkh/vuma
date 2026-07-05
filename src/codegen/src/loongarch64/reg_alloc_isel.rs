@@ -1365,16 +1365,105 @@ fn lower_atomic(
             Some(pieces)
         }
 
-        IRInstr::AtomicCas { dst, addr, expected, desired, ty: _ } => {
-            // Simplified: plain load (single-threaded fallback).
+        IRInstr::AtomicCas { dst, addr, expected, desired, ty } => {
+            // Proper CAS using LL/SC (Load-Link / Store-Conditional).
+            //
+            // We emit the CAS loop as a single code blob using scratch
+            // registers T0-T4 (all caller-saved, never allocated to vregs).
+            // This avoids interactions with the reg-cache during the loop.
+            //
+            // Register usage inside the loop:
+            //   T0 = address
+            //   T1 = expected value
+            //   T2 = desired value (reloaded each iteration)
+            //   T3 = old value (LL result / dst)
+            //   T4 = SC result (1=success, 0=failure)
+            //
+            // Loop:
+            //   ll.[wd]  T3, T0, 0     ; load-linked
+            //   bne      T3, T1, +N    ; if old != expected, exit loop
+            //   <reload desired into T2>
+            //   sc.[wd]  T4, T0, 0     ; store-conditional, T4 = 1/0
+            //   beq      T4, r0, -M    ; if SC failed, retry
+            //   ; T3 holds old value, store to dst
             let mut pieces: Vec<(Vec<u8>, &'static str)> = Vec::new();
-            let (a, pre) = resolve_val(addr, cache, fp);
-            if !pre.is_empty() { pieces.push((pre, "st.d")); }
             let dst_id = dst.as_register().unwrap_or(0);
-            let (d, ac) = cache.alloc_vreg(dst_id, None, fp);
-            if !ac.is_empty() { pieces.push((ac, "st.d")); }
-            let _ = (expected, desired);
-            pieces.push((Instruction::LdD { rd: d, rj: a, imm12: 0 }.encode().to_vec(), "ld.d"));
+
+            // Flush caller-saved registers so T0-T4 are free.
+            let flush = cache.flush_caller_saved(fp);
+            if !flush.is_empty() { pieces.push((flush, "st.d")); }
+
+            // Resolve addr → T0, expected → T1, desired → T2.
+            // We read each operand via resolve_val (which may use any
+            // caller-saved reg), then OR it into the target scratch reg.
+            let mut setup = Vec::new();
+
+            let (a_reg, a_pre) = resolve_val(addr, cache, fp);
+            setup.extend(a_pre);
+            if a_reg != Gpr::T0 {
+                setup.extend_from_slice(&Instruction::Or { rd: Gpr::T0, rj: a_reg, rk: Gpr::R0 }.encode());
+            }
+
+            let (e_reg, e_pre) = resolve_val(expected, cache, fp);
+            setup.extend(e_pre);
+            if e_reg != Gpr::T1 {
+                setup.extend_from_slice(&Instruction::Or { rd: Gpr::T1, rj: e_reg, rk: Gpr::R0 }.encode());
+            }
+
+            // Build the desired-reload sequence (runs inside the loop).
+            let (d_reg, d_pre) = resolve_val(desired, cache, fp);
+            let mut reload = d_pre;
+            if d_reg != Gpr::T2 {
+                reload.extend_from_slice(&Instruction::Or { rd: Gpr::T2, rj: d_reg, rk: Gpr::R0 }.encode());
+            }
+            let reload_count = (reload.len() / 4) as i32;
+
+            if !setup.is_empty() { pieces.push((setup, "or")); }
+
+            // Invalidate caller-saved cache entries (we're about to clobber T0-T4).
+            cache.invalidate_caller_saved();
+
+            // Choose LL/SC variant based on type
+            let is_32bit = matches!(ty, IRType::I8 | IRType::U8 | IRType::I16 | IRType::U16 | IRType::I32 | IRType::U32);
+
+            // ll.[wd] T3, T0, 0
+            let ll = if is_32bit {
+                Instruction::LlW { rd: Gpr::T3, rj: Gpr::T0, imm14: 0 }.encode()
+            } else {
+                Instruction::LlD { rd: Gpr::T3, rj: Gpr::T0, imm14: 0 }.encode()
+            };
+            pieces.push((ll.to_vec(), if is_32bit { "ll.w" } else { "ll.d" }));
+
+            // bne T3, T1, +(reload_count + 2)  [skip reload + sc + beq]
+            let bne_off = reload_count + 2;
+            pieces.push((Instruction::Bne { rj: Gpr::T3, rd: Gpr::T1, offs16: bne_off }.encode().to_vec(), "bne"));
+
+            // Reload desired into T2 (inside loop)
+            if !reload.is_empty() { pieces.push((reload, "or")); }
+
+            // sc.[wd] T4, T0, 0  — SC stores rd's value to [rj], writes success to rd.
+            // So we need desired in T4, not T2. Move T2 → T4 first.
+            let mut sc_code = Vec::new();
+            sc_code.extend_from_slice(&Instruction::Or { rd: Gpr::T4, rj: Gpr::T2, rk: Gpr::R0 }.encode());
+            let sc = if is_32bit {
+                Instruction::ScW { rd: Gpr::T4, rj: Gpr::T0, imm14: 0 }.encode()
+            } else {
+                Instruction::ScD { rd: Gpr::T4, rj: Gpr::T0, imm14: 0 }.encode()
+            };
+            sc_code.extend_from_slice(&sc);
+            pieces.push((sc_code, if is_32bit { "sc.w" } else { "sc.d" }));
+
+            // beq T4, r0, -(reload_count + 3)  [retry: ll + bne + reload + sc = reload+3 back]
+            let beq_off = -(reload_count + 3);
+            pieces.push((Instruction::Beq { rj: Gpr::T4, rd: Gpr::R0, offs16: beq_off }.encode().to_vec(), "beq"));
+
+            // Move old value T3 → dst register
+            let (d, ac) = cache.alloc_vreg(dst_id, Some(Gpr::T3), fp);
+            let mut final_code = ac;
+            if d != Gpr::T3 {
+                final_code.extend_from_slice(&Instruction::Or { rd: d, rj: Gpr::T3, rk: Gpr::R0 }.encode());
+            }
+            if !final_code.is_empty() { pieces.push((final_code, "or")); }
             cache.mark_dirty(dst_id);
             Some(pieces)
         }
