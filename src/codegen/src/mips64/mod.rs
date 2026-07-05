@@ -120,6 +120,9 @@ const FN_CVT_D_L: u32 = 0x21; // cvt.d.l
 const FN_CVT_L_S: u32 = 0x25; // cvt.l.s
 const FN_CVT_L_D: u32 = 0x25; // cvt.l.d
 
+// COP1 function code for FP arithmetic (sub.d)
+const FN_SUB_D: u32 = 0x01; // sub.d
+
 // COP1 fmt field values for move instructions
 const FMT_MF: u32 = 0x00; // MFC1
 const FMT_DMF: u32 = 0x01; // DMFC1
@@ -764,6 +767,10 @@ pub enum Instruction {
     /// Convert Double to Long: `cvt.l.d fd, fs` (fmt=D, func=0x25)
     CvtLD { fd: Fpr, fs: Fpr },
 
+    // ── Coprocessor 1: FP Arithmetic ───────────────────────────────────
+    /// FP Subtract Double: `sub.d fd, fs, ft` (fmt=D, func=0x01)
+    SubD { fd: Fpr, fs: Fpr, ft: Fpr },
+
     // ── Coprocessor 1: GPR↔FPR Move ────────────────────────────────────
     /// Move Word to Coprocessor 1: `mtc1 rt, fs` (GPR→FPR, 32-bit)
     Mtc1 { rt: Gpr, fs: Fpr },
@@ -1314,6 +1321,12 @@ impl Instruction {
                 encode_cop1_r_type(FMT_D, 0, fs.encoding(), fd.encoding(), FN_CVT_L_D)
             }
 
+            // ── Coprocessor 1: FP Arithmetic ──────────────────────────
+            // sub.d fd, fs, ft: COP1 fmt=D, ft, fs, fd, func=0x01
+            Instruction::SubD { fd, fs, ft } => {
+                encode_cop1_r_type(FMT_D, ft.encoding(), fs.encoding(), fd.encoding(), FN_SUB_D)
+            }
+
             // ── Coprocessor 1: GPR↔FPR Move ────────────────────────────
             // MTC1/DMTC1/MFC1/DMFC1: COP1 fmt[25:21] rt[20:16] fs[15:11] 0[10:0]
             Instruction::Mtc1 { rt, fs } => {
@@ -1442,6 +1455,7 @@ impl Instruction {
             Instruction::CvtDL { .. } => "cvt.d.l",
             Instruction::CvtLS { .. } => "cvt.l.s",
             Instruction::CvtLD { .. } => "cvt.l.d",
+            Instruction::SubD { .. } => "sub.d",
             Instruction::Mtc1 { .. } => "mtc1",
             Instruction::Mfc1 { .. } => "mfc1",
             Instruction::Dmtc1 { .. } => "dmtc1",
@@ -1550,6 +1564,7 @@ impl fmt::Display for Instruction {
             Instruction::CvtDL { fd, fs } => write!(f, "cvt.d.l {}, {}", fd, fs),
             Instruction::CvtLS { fd, fs } => write!(f, "cvt.l.s {}, {}", fd, fs),
             Instruction::CvtLD { fd, fs } => write!(f, "cvt.l.d {}, {}", fd, fs),
+            Instruction::SubD { fd, fs, ft } => write!(f, "sub.d {}, {}, {}", fd, fs, ft),
             Instruction::Mtc1 { rt, fs } => write!(f, "mtc1 {}, {}", rt, fs),
             Instruction::Mfc1 { rt, fs } => write!(f, "mfc1 {}, {}", rt, fs),
             Instruction::Dmtc1 { rt, fs } => write!(f, "dmtc1 {}, {}", rt, fs),
@@ -1595,6 +1610,10 @@ impl Instruction {
             | Instruction::CvtDL { fd, fs }
             | Instruction::CvtLS { fd, fs }
             | Instruction::CvtLD { fd, fs } => (vec![fpr(*fs)], vec![fpr(*fd)]),
+            // FP arithmetic: read source FPRs, write destination FPR.
+            Instruction::SubD { fd, fs, ft } => {
+                (vec![fpr(*fs), fpr(*ft)], vec![fpr(*fd)])
+            }
             // Everything else: leave reads/writes empty (existing behaviour).
             _ => (vec![], vec![]),
         }
@@ -2684,6 +2703,16 @@ fn mips64_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, 
     // ── Phase 3: Emit prologue ──
     let mut code: Vec<u8> = Vec::new();
 
+    // Callee-saved registers ($s0-$s7) are NOT saved/restored because
+    // the stack-slot ISel only uses caller-saved registers ($t0-$t9,
+    // $a0-$a3, $v0). No $s register is touched, so preservation is
+    // trivially satisfied.
+    //
+    // (Note: $fp is technically callee-saved per the N64 ABI and IS
+    // saved below — that is correct because the prologue actively
+    // overwrites it as the frame pointer. $s0-$s7 are never written
+    // by any ISel-emitted instruction, so they require no save/restore.)
+
     // DADDIU $sp, $sp, -frame_size
     code.extend_from_slice(&Instruction::Daddiu { rt: Gpr::Sp, rs: Gpr::Sp, imm: -(frame_size as i32) }.encode());
     code.extend_from_slice(&encode_nop()); // delay slot (safe: SP update is committed)
@@ -2912,13 +2941,13 @@ fn mips64_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, 
                             code.extend_from_slice(&encode_nop());
                             // Loop: while T0 != 0 { T0 <<= 1; T1-- }
                             let loop_start = code.len();
-                            code.extend_from_slice(&Instruction::Beq { rs: Gpr::T0, rt: Gpr::Zero, offset: 5 }.encode()); // if T0 == 0, exit (skip 5 instrs)
+                            code.extend_from_slice(&Instruction::Beq { rs: Gpr::T0, rt: Gpr::Zero, offset: 20 }.encode()); // if T0 == 0, exit (skip 5 instrs; offset in bytes = 5*4)
                             code.extend_from_slice(&encode_nop()); // delay slot
                             code.extend_from_slice(&Instruction::Dsll { rd: Gpr::T0, rt: Gpr::T0, sa: 1 }.encode()); // T0 <<= 1
                             code.extend_from_slice(&encode_nop());
                             code.extend_from_slice(&Instruction::Daddiu { rt: Gpr::T1, rs: Gpr::T1, imm: -1 }.encode()); // T1--
                             code.extend_from_slice(&encode_nop());
-                            code.extend_from_slice(&Instruction::Beq { rs: Gpr::Zero, rt: Gpr::Zero, offset: -7 }.encode()); // unconditional back
+                            code.extend_from_slice(&Instruction::Beq { rs: Gpr::Zero, rt: Gpr::Zero, offset: -28 }.encode()); // unconditional back (-7 instrs * 4 bytes)
                             code.extend_from_slice(&encode_nop()); // delay slot
                             // Move T1 to T0 (result)
                             code.extend_from_slice(&Instruction::Or { rd: Gpr::T0, rs: Gpr::T1, rt: Gpr::Zero }.encode());
@@ -2933,13 +2962,13 @@ fn mips64_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, 
                             let loop_start = code.len();
                             code.extend_from_slice(&Instruction::Andi { rt: Gpr::T2, rs: Gpr::T0, imm: 1 }.encode()); // T2 = T0 & 1
                             code.extend_from_slice(&encode_nop());
-                            code.extend_from_slice(&Instruction::Bne { rs: Gpr::T2, rt: Gpr::Zero, offset: 5 }.encode()); // if T2 != 0, exit
+                            code.extend_from_slice(&Instruction::Bne { rs: Gpr::T2, rt: Gpr::Zero, offset: 20 }.encode()); // if T2 != 0, exit (5 instrs * 4 bytes)
                             code.extend_from_slice(&encode_nop()); // delay slot
                             code.extend_from_slice(&Instruction::Dsrl { rd: Gpr::T0, rt: Gpr::T0, sa: 1 }.encode()); // T0 >>= 1
                             code.extend_from_slice(&encode_nop());
                             code.extend_from_slice(&Instruction::Daddiu { rt: Gpr::T1, rs: Gpr::T1, imm: 1 }.encode()); // T1++
                             code.extend_from_slice(&encode_nop());
-                            code.extend_from_slice(&Instruction::Beq { rs: Gpr::Zero, rt: Gpr::Zero, offset: -7 }.encode()); // unconditional back
+                            code.extend_from_slice(&Instruction::Beq { rs: Gpr::Zero, rt: Gpr::Zero, offset: -28 }.encode()); // unconditional back (-7 instrs * 4 bytes)
                             code.extend_from_slice(&encode_nop()); // delay slot
                             code.extend_from_slice(&Instruction::Or { rd: Gpr::T0, rs: Gpr::T1, rt: Gpr::Zero }.encode());
                             code.extend_from_slice(&encode_nop());
@@ -2952,7 +2981,7 @@ fn mips64_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, 
                             code.extend_from_slice(&Instruction::Ori { rt: Gpr::T1, rs: Gpr::T1, imm: 0 }.encode()); // T1 = 0
                             code.extend_from_slice(&encode_nop());
                             let loop_start = code.len();
-                            code.extend_from_slice(&Instruction::Beq { rs: Gpr::T0, rt: Gpr::Zero, offset: 5 }.encode()); // if T0 == 0, exit
+                            code.extend_from_slice(&Instruction::Beq { rs: Gpr::T0, rt: Gpr::Zero, offset: 20 }.encode()); // if T0 == 0, exit (5 instrs * 4 bytes)
                             code.extend_from_slice(&encode_nop()); // delay slot
                             code.extend_from_slice(&Instruction::Andi { rt: Gpr::T2, rs: Gpr::T0, imm: 1 }.encode()); // T2 = T0 & 1
                             code.extend_from_slice(&encode_nop());
@@ -2960,7 +2989,7 @@ fn mips64_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, 
                             code.extend_from_slice(&encode_nop());
                             code.extend_from_slice(&Instruction::Dsrl { rd: Gpr::T0, rt: Gpr::T0, sa: 1 }.encode()); // T0 >>= 1
                             code.extend_from_slice(&encode_nop());
-                            code.extend_from_slice(&Instruction::Beq { rs: Gpr::Zero, rt: Gpr::Zero, offset: -8 }.encode()); // unconditional back
+                            code.extend_from_slice(&Instruction::Beq { rs: Gpr::Zero, rt: Gpr::Zero, offset: -32 }.encode()); // unconditional back (-8 instrs * 4 bytes)
                             code.extend_from_slice(&encode_nop()); // delay slot
                             code.extend_from_slice(&Instruction::Or { rd: Gpr::T0, rs: Gpr::T1, rt: Gpr::Zero }.encode());
                             code.extend_from_slice(&encode_nop());
@@ -3188,11 +3217,58 @@ fn mips64_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, 
                             code.extend_from_slice(&Instruction::Mfc1 { rt: Gpr::T0, fs: Fpr::F0 }.encode());
                         }
                         CastKind::FloatToUInt => {
-                            // f64 → unsigned i32: DMTC1 T0→F0, CVT.W.D F0,F0, MFC1 T0←F0
-                            // (MIPS doesn't have a dedicated unsigned FP→int conversion)
-                            code.extend_from_slice(&Instruction::Dmtc1 { rt: Gpr::T0, fs: Fpr::F0 }.encode());
+                            // f64 → unsigned i32: use the subtract-convert-XOR technique
+                            // (same as x86_64). MIPS `cvt.w.d` is signed-only, so for
+                            // values >= 2^31 the conversion would overflow. We instead:
+                            //   1. Load 2^31 as double (0x41E0_0000_0000_0000) into F2
+                            //   2. F0 = input - 2^31   (sub.d)
+                            //   3. signed cvt.w.d F0 → F0
+                            //   4. MFC1 T0 ← F0 (sign-extended to 64-bit)
+                            //   5. Zero-extend T0 to 32 bits (DSLL 32 + DSRL 32)
+                            //   6. XOR T0 with 0x8000_0000 to add 2^31 back.
+                            // For inputs < 2^31, the XOR clears the sign bit that
+                            // cvt.w.d set, giving the original value. For inputs
+                            // >= 2^31, the XOR sets the high bit, reconstructing
+                            // the unsigned value.
+
+                            // T0 currently holds the f64 bit-pattern (input).
+                            // Step 1: Load 2^31 as double into T1.
+                            code.extend_from_slice(&Instruction::Lui { rt: Gpr::T1, imm: 0x41E0 }.encode()); // T1 = 0x0000_0000_41E0_0000
+                            code.extend_from_slice(&encode_nop());
+                            code.extend_from_slice(&Instruction::Dsll { rd: Gpr::T1, rt: Gpr::T1, sa: 32 }.encode()); // T1 = 0x41E0_0000_0000_0000 (= 2^31 as f64)
+                            code.extend_from_slice(&encode_nop());
+
+                            // Step 2: Move input to F0, magic to F2, then F0 = F0 - F2.
+                            code.extend_from_slice(&Instruction::Dmtc1 { rt: Gpr::T0, fs: Fpr::F0 }.encode()); // F0 = input double
+                            code.extend_from_slice(&encode_nop());
+                            code.extend_from_slice(&Instruction::Dmtc1 { rt: Gpr::T1, fs: Fpr::F2 }.encode()); // F2 = 2^31 as double
+                            code.extend_from_slice(&encode_nop());
+                            code.extend_from_slice(&Instruction::SubD { fd: Fpr::F0, fs: Fpr::F0, ft: Fpr::F2 }.encode()); // F0 = input - 2^31
+                            code.extend_from_slice(&encode_nop());
+
+                            // Step 3: Signed convert to 32-bit int.
                             code.extend_from_slice(&Instruction::CvtWD { fd: Fpr::F0, fs: Fpr::F0 }.encode());
+                            code.extend_from_slice(&encode_nop());
+
+                            // Step 4: Move to GPR (sign-extended to 64 bits).
                             code.extend_from_slice(&Instruction::Mfc1 { rt: Gpr::T0, fs: Fpr::F0 }.encode());
+                            code.extend_from_slice(&encode_nop());
+
+                            // Step 5: Zero-extend to 32 bits (clears upper sign-extension).
+                            code.extend_from_slice(&Instruction::Dsll { rd: Gpr::T0, rt: Gpr::T0, sa: 32 }.encode());
+                            code.extend_from_slice(&encode_nop());
+                            code.extend_from_slice(&Instruction::Dsrl { rd: Gpr::T0, rt: Gpr::T0, sa: 32 }.encode());
+                            code.extend_from_slice(&encode_nop());
+
+                            // Step 6: Load 0x8000_0000 into T1 and XOR with T0.
+                            code.extend_from_slice(&Instruction::Lui { rt: Gpr::T1, imm: 0x8000 }.encode()); // T1 = 0xFFFF_FFFF_8000_0000 (sign-extended)
+                            code.extend_from_slice(&encode_nop());
+                            code.extend_from_slice(&Instruction::Dsll { rd: Gpr::T1, rt: Gpr::T1, sa: 32 }.encode()); // T1 = 0x8000_0000_0000_0000
+                            code.extend_from_slice(&encode_nop());
+                            code.extend_from_slice(&Instruction::Dsrl { rd: Gpr::T1, rt: Gpr::T1, sa: 32 }.encode()); // T1 = 0x0000_0000_8000_0000
+                            code.extend_from_slice(&encode_nop());
+                            code.extend_from_slice(&Instruction::Xor { rd: Gpr::T0, rs: Gpr::T0, rt: Gpr::T1 }.encode()); // T0 ^= 0x8000_0000
+                            code.extend_from_slice(&encode_nop());
                         }
                         CastKind::FloatToFloat => {
                             // f64 → f32 (narrow): DMTC1 T0→F0, CVT.S.D F0,F0, MFC1 T0←F0
@@ -3350,6 +3426,14 @@ fn mips64_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, 
 
                 // ── Atomic operations (lowered as non-atomic) ──
                 IRInstr::AtomicLoad { dst, addr, ty } => {
+                    // AtomicLoad: SYNC → load → SYNC. The SYNC before ensures
+                    // prior writes by other cores are visible; the SYNC after
+                    // ensures subsequent reads/writes don't reorder before the
+                    // atomic load (release/acquire semantics on MIPS64).
+                    //
+                    // NOTE: mips64 QEMU handles SYNC correctly (unlike
+                    // loongarch64's dbar); keep both barriers.
+                    code.extend_from_slice(&Instruction::Sync { stype: 0 }.encode());
                     let ir_load = IRInstr::Load { dst: dst.clone(), addr: addr.clone(), offset: 0, ty: ty.clone() };
                     let sub_code: Vec<u8> = match &ir_load {
                         IRInstr::Load { dst: ldst, addr: laddr, offset: loff, ty: lty } => {
@@ -3369,8 +3453,17 @@ fn mips64_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, 
                         _ => Vec::new(),
                     };
                     code.extend(sub_code);
+                    code.extend_from_slice(&Instruction::Sync { stype: 0 }.encode());
                 }
                 IRInstr::AtomicStore { value, addr, ty } => {
+                    // AtomicStore: SYNC → store → SYNC. The SYNC before ensures
+                    // prior writes by this thread are visible before the store;
+                    // the SYNC after ensures the store is visible to other
+                    // cores before subsequent memory operations.
+                    //
+                    // NOTE: mips64 QEMU handles SYNC correctly (unlike
+                    // loongarch64's dbar); keep both barriers.
+                    code.extend_from_slice(&Instruction::Sync { stype: 0 }.encode());
                     let ir_store = IRInstr::Store { value: value.clone(), addr: addr.clone(), offset: 0, ty: ty.clone() };
                     let sub_code: Vec<u8> = match &ir_store {
                         IRInstr::Store { value: sval, addr: saddr, offset: soff, ty: sty } => {
@@ -3388,6 +3481,7 @@ fn mips64_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, 
                         _ => Vec::new(),
                     };
                     code.extend(sub_code);
+                    code.extend_from_slice(&Instruction::Sync { stype: 0 }.encode());
                 }
                 IRInstr::AtomicCas { dst, addr, expected, desired, ty } => {
                     // Lower AtomicCas using LLD/SCD (or LL/SC) with SYNC (MIPS64 compare-and-swap)
@@ -3951,15 +4045,65 @@ fn lower_ir_instr(
                     });
                 }
                 CastKind::FloatToUInt => {
-                    // f64 → unsigned i32: same as FloatToInt for now
-                    // (MIPS doesn't have a dedicated unsigned FP→int conversion)
-                    let dmtc1 = Instruction::Dmtc1 { rt: src_reg, fs: Fpr::F0 };
+                    // f64 → unsigned i32: subtract-convert-XOR technique (same
+                    // as x86_64). MIPS `cvt.w.d` is signed-only, so for values
+                    // >= 2^31 the conversion would overflow. We instead:
+                    //   1. Load 2^31 as double (0x41E0_0000_0000_0000) into F2
+                    //      (via $at, the assembler temporary — never allocated).
+                    //   2. F0 = input - 2^31   (sub.d)
+                    //   3. signed cvt.w.d F0 → F0
+                    //   4. MFC1 dst ← F0 (sign-extended to 64-bit)
+                    //   5. Zero-extend dst to 32 bits (DSLL 32 + DSRL 32)
+                    //   6. XOR dst with 0x8000_0000 (loaded into $at) to add
+                    //      2^31 back. For inputs < 2^31, the XOR clears the
+                    //      sign bit that cvt.w.d set, giving the original value.
+                    //      For inputs >= 2^31, the XOR sets the high bit,
+                    //      reconstructing the unsigned value.
+                    let at = Gpr::At;
+
+                    // Step 1: Load 2^31 as double into $at, then F2.
+                    let lui_hi = Instruction::Lui { rt: at, imm: 0x41E0 }; // $at = 0x0000_0000_41E0_0000
+                    result.push(AllocatedInstruction {
+                        opcode: "lui".to_string(),
+                        reads: vec![],
+                        writes: vec![PhysicalReg::new(RegClass::Gpr, at.encoding())],
+                        encoded: lui_hi.encode().to_vec(),
+                    });
+                    let dsll_at = Instruction::Dsll { rd: at, rt: at, sa: 32 }; // $at = 0x41E0_0000_0000_0000 (= 2^31 as f64)
+                    result.push(AllocatedInstruction {
+                        opcode: "dsll".to_string(),
+                        reads: vec![PhysicalReg::new(RegClass::Gpr, at.encoding())],
+                        writes: vec![PhysicalReg::new(RegClass::Gpr, at.encoding())],
+                        encoded: dsll_at.encode().to_vec(),
+                    });
+
+                    // Step 2: Move input to F0, magic to F2, then F0 = F0 - F2.
+                    let dmtc1_src = Instruction::Dmtc1 { rt: src_reg, fs: Fpr::F0 };
                     result.push(AllocatedInstruction {
                         opcode: "dmtc1".to_string(),
                         reads: vec![PhysicalReg::new(RegClass::Gpr, src_reg.encoding())],
                         writes: vec![PhysicalReg::new(RegClass::SimdFp, Fpr::F0.encoding())],
-                        encoded: dmtc1.encode().to_vec(),
+                        encoded: dmtc1_src.encode().to_vec(),
                     });
+                    let dmtc1_magic = Instruction::Dmtc1 { rt: at, fs: Fpr::F2 };
+                    result.push(AllocatedInstruction {
+                        opcode: "dmtc1".to_string(),
+                        reads: vec![PhysicalReg::new(RegClass::Gpr, at.encoding())],
+                        writes: vec![PhysicalReg::new(RegClass::SimdFp, Fpr::F2.encoding())],
+                        encoded: dmtc1_magic.encode().to_vec(),
+                    });
+                    let sub_d = Instruction::SubD { fd: Fpr::F0, fs: Fpr::F0, ft: Fpr::F2 };
+                    result.push(AllocatedInstruction {
+                        opcode: "sub.d".to_string(),
+                        reads: vec![
+                            PhysicalReg::new(RegClass::SimdFp, Fpr::F0.encoding()),
+                            PhysicalReg::new(RegClass::SimdFp, Fpr::F2.encoding()),
+                        ],
+                        writes: vec![PhysicalReg::new(RegClass::SimdFp, Fpr::F0.encoding())],
+                        encoded: sub_d.encode().to_vec(),
+                    });
+
+                    // Step 3: Signed convert to 32-bit int.
                     let cvt = Instruction::CvtWD { fd: Fpr::F0, fs: Fpr::F0 };
                     result.push(AllocatedInstruction {
                         opcode: "cvt.w.d".to_string(),
@@ -3967,12 +4111,63 @@ fn lower_ir_instr(
                         writes: vec![PhysicalReg::new(RegClass::SimdFp, Fpr::F0.encoding())],
                         encoded: cvt.encode().to_vec(),
                     });
+
+                    // Step 4: Move to GPR dst (sign-extended to 64 bits).
                     let mfc1 = Instruction::Mfc1 { rt: dst_reg, fs: Fpr::F0 };
                     result.push(AllocatedInstruction {
                         opcode: "mfc1".to_string(),
                         reads: vec![PhysicalReg::new(RegClass::SimdFp, Fpr::F0.encoding())],
                         writes: vec![PhysicalReg::new(RegClass::Gpr, dst_reg.encoding())],
                         encoded: mfc1.encode().to_vec(),
+                    });
+
+                    // Step 5: Zero-extend dst to 32 bits (clears upper sign-extension).
+                    let dsll_dst = Instruction::Dsll { rd: dst_reg, rt: dst_reg, sa: 32 };
+                    result.push(AllocatedInstruction {
+                        opcode: "dsll".to_string(),
+                        reads: vec![PhysicalReg::new(RegClass::Gpr, dst_reg.encoding())],
+                        writes: vec![PhysicalReg::new(RegClass::Gpr, dst_reg.encoding())],
+                        encoded: dsll_dst.encode().to_vec(),
+                    });
+                    let dsrl_dst = Instruction::Dsrl { rd: dst_reg, rt: dst_reg, sa: 32 };
+                    result.push(AllocatedInstruction {
+                        opcode: "dsrl".to_string(),
+                        reads: vec![PhysicalReg::new(RegClass::Gpr, dst_reg.encoding())],
+                        writes: vec![PhysicalReg::new(RegClass::Gpr, dst_reg.encoding())],
+                        encoded: dsrl_dst.encode().to_vec(),
+                    });
+
+                    // Step 6: Load 0x8000_0000 into $at and XOR with dst.
+                    let lui_sign = Instruction::Lui { rt: at, imm: 0x8000 }; // $at = 0xFFFF_FFFF_8000_0000 (sign-extended)
+                    result.push(AllocatedInstruction {
+                        opcode: "lui".to_string(),
+                        reads: vec![],
+                        writes: vec![PhysicalReg::new(RegClass::Gpr, at.encoding())],
+                        encoded: lui_sign.encode().to_vec(),
+                    });
+                    let dsll_at2 = Instruction::Dsll { rd: at, rt: at, sa: 32 }; // $at = 0x8000_0000_0000_0000
+                    result.push(AllocatedInstruction {
+                        opcode: "dsll".to_string(),
+                        reads: vec![PhysicalReg::new(RegClass::Gpr, at.encoding())],
+                        writes: vec![PhysicalReg::new(RegClass::Gpr, at.encoding())],
+                        encoded: dsll_at2.encode().to_vec(),
+                    });
+                    let dsrl_at2 = Instruction::Dsrl { rd: at, rt: at, sa: 32 }; // $at = 0x0000_0000_8000_0000
+                    result.push(AllocatedInstruction {
+                        opcode: "dsrl".to_string(),
+                        reads: vec![PhysicalReg::new(RegClass::Gpr, at.encoding())],
+                        writes: vec![PhysicalReg::new(RegClass::Gpr, at.encoding())],
+                        encoded: dsrl_at2.encode().to_vec(),
+                    });
+                    let xor_dst = Instruction::Xor { rd: dst_reg, rs: dst_reg, rt: at };
+                    result.push(AllocatedInstruction {
+                        opcode: "xor".to_string(),
+                        reads: vec![
+                            PhysicalReg::new(RegClass::Gpr, dst_reg.encoding()),
+                            PhysicalReg::new(RegClass::Gpr, at.encoding()),
+                        ],
+                        writes: vec![PhysicalReg::new(RegClass::Gpr, dst_reg.encoding())],
+                        encoded: xor_dst.encode().to_vec(),
                     });
                 }
                 CastKind::FloatToFloat => {
@@ -4452,6 +4647,11 @@ impl Backend for Mips64Backend {
                 ("futex", 5194), ("execve", 5057), ("wait4", 5059),
                 ("epoll_ctl", 5208), ("epoll_wait", 5209),
                 ("dup2", 5032), ("fork", 5056), ("unlink", 5085),
+                // exit_group (mips64 N64 syscall #5205) — like exit but
+                // terminates all threads in the thread group. Used by libc
+                // runtimes and many language runtimes (e.g. Rust's std) when
+                // exiting the main process after a panic or normal return.
+                ("exit_group", 5205),
             ] {
                 stubs.push((name.to_string(), simple_stub(num)));
             }

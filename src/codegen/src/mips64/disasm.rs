@@ -1,6 +1,6 @@
 //! # MIPS64 Mnemonic Disassembler
 //!
-//! Decodes MIPS64 32-bit big-endian machine code into `Instruction`
+//! Decodes MIPS64 32-bit little-endian machine code into `Instruction`
 //! instances. Covers the R-type, I-type, and J-type instructions lowered
 //! by the VUMA ISel. Display is already provided by the parent module.
 
@@ -242,7 +242,7 @@ impl Instruction {
                 available: bytes.len(),
             });
         }
-        let word = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        let word = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
         let opcode = (word >> 26) & 0x3F;
         let rs = (word >> 21) & 0x1F;
         let rt = (word >> 16) & 0x1F;
