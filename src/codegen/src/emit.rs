@@ -2450,6 +2450,9 @@ impl Emitter {
 
         // ── Phase 3: Emit each basic block ──
 
+        // Build predecessor-aware phi resolution map.
+        let phi_map = func.build_phi_map();
+
         for block in &func.blocks {
             self.label_offsets.insert(block.label.clone(), self.code.len());
             for instr in &block.instructions {
@@ -2458,9 +2461,11 @@ impl Emitter {
                     &vreg_stack_slots,
                     &alloc_offsets,
                     &stack_alloc_vregs,
+                    &phi_map,
+                    &block.label,
                 )?;
             }
-            self.ss_emit_terminator(&block.terminator, &vreg_stack_slots)?;
+            self.ss_emit_terminator(&block.terminator, &vreg_stack_slots, &phi_map, &block.label)?;
         }
 
         // ── Phase 4: Apply fixups ──
@@ -2601,6 +2606,8 @@ impl Emitter {
         slots: &HashMap<u32, i32>,
         alloc_offsets: &HashMap<u32, i32>,
         stack_alloc_vregs: &std::collections::HashSet<u32>,
+        phi_map: &HashMap<(String, String), Vec<(IRValue, IRValue)>>,
+        current_label: &str,
     ) -> Result<()> {
         match instr {
             // ── Load ──
@@ -2866,25 +2873,12 @@ impl Emitter {
             }
 
             // ── Phi ──
-            IRInstr::Phi { dst, incoming } => {
-                let non_self: Vec<_> = incoming
-                    .iter()
-                    .filter(|(val, _)| val != dst)
-                    .collect();
-                if non_self.len() == 1 {
-                    let (val, _) = non_self[0];
-                    let dst_id = dst.as_register().unwrap_or(0);
-                    let dst_offset = slots.get(&dst_id).copied().unwrap_or(0);
-                    self.ss_load_value(val, Register::X9, slots)?;
-                    self.ss_store_to_slot(Register::X9, dst_offset)?;
-                } else if !non_self.is_empty() {
-                    let (val, _) = non_self[0];
-                    let dst_id = dst.as_register().unwrap_or(0);
-                    let dst_offset = slots.get(&dst_id).copied().unwrap_or(0);
-                    self.ss_load_value(val, Register::X9, slots)?;
-                    self.ss_store_to_slot(Register::X9, dst_offset)?;
-                }
-                // Empty phi = self-loop = no-op
+            // Phi copies are emitted at predecessor block terminators
+            // (IRInstr::Branch/CondBranch and IRTerminator::Jump/Branch
+            // handlers), not at the phi block entry.
+            // See func.build_phi_map().
+            IRInstr::Phi { .. } => {
+                // No code emitted at the phi block entry.
             }
 
             // ── GetAddress ──
@@ -3015,6 +3009,15 @@ impl Emitter {
 
             // ── Branch (instruction-level) ──
             IRInstr::Branch { target } => {
+                // Emit phi copies for (target, current_block) before the jump.
+                if let Some(pairs) = phi_map.get(&(target.clone(), current_label.to_string())) {
+                    for (dst, src) in pairs {
+                        self.ss_load_value(src, Register::X9, slots)?;
+                        let dst_id = dst.as_register().unwrap_or(0);
+                        let dst_offset = slots.get(&dst_id).copied().unwrap_or(0);
+                        self.ss_store_to_slot(Register::X9, dst_offset)?;
+                    }
+                }
                 let fixup_idx = self.code.len();
                 self.fixups.push((fixup_idx, target.clone(), BranchFormat::B26));
                 self.emit_instruction(Instruction::B { offset: 0 })?;
@@ -3023,12 +3026,59 @@ impl Emitter {
             // ── CondBranch (instruction-level) ──
             IRInstr::CondBranch { cond, true_target, false_target } => {
                 self.ss_load_value(cond, Register::X9, slots)?;
-                let fixup_cbz = self.code.len();
-                self.fixups.push((fixup_cbz, true_target.clone(), BranchFormat::Cond19));
-                self.emit_instruction(Instruction::CBNZ { rt: Register::X9, offset: 0 })?;
-                let fixup_b = self.code.len();
-                self.fixups.push((fixup_b, false_target.clone(), BranchFormat::B26));
-                self.emit_instruction(Instruction::B { offset: 0 })?;
+
+                // Compute phi copies for both successors.
+                let false_pairs: Vec<&(IRValue, IRValue)> =
+                    phi_map.get(&(false_target.clone(), current_label.to_string()))
+                        .map(|v| v.iter().collect()).unwrap_or_default();
+                let true_pairs: Vec<&(IRValue, IRValue)> =
+                    phi_map.get(&(true_target.clone(), current_label.to_string()))
+                        .map(|v| v.iter().collect()).unwrap_or_default();
+
+                if false_pairs.is_empty() && true_pairs.is_empty() {
+                    // Common case (no phis): CBNZ true, B false
+                    let fixup_cbz = self.code.len();
+                    self.fixups.push((fixup_cbz, true_target.clone(), BranchFormat::Cond19));
+                    self.emit_instruction(Instruction::CBNZ { rt: Register::X9, offset: 0 })?;
+                    let fixup_b = self.code.len();
+                    self.fixups.push((fixup_b, false_target.clone(), BranchFormat::B26));
+                    self.emit_instruction(Instruction::B { offset: 0 })?;
+                } else {
+                    // Landing-pad pattern:
+                    //   CBNZ X9, +N    (skip false copies + false B)
+                    //   <false copies> ← fall-through if cond == 0
+                    //   B false_target
+                    //   <true copies>  ← CBNZ target lands here
+                    //   B true_target
+                    let cbnz_word_idx = self.code.len();
+                    self.emit_instruction(Instruction::CBNZ { rt: Register::X9, offset: 0 })?;
+                    // False path
+                    for (dst, src) in false_pairs {
+                        self.ss_load_value(src, Register::X9, slots)?;
+                        let dst_id = dst.as_register().unwrap_or(0);
+                        let dst_offset = slots.get(&dst_id).copied().unwrap_or(0);
+                        self.ss_store_to_slot(Register::X9, dst_offset)?;
+                    }
+                    let b_false_word_idx = self.code.len();
+                    self.fixups.push((b_false_word_idx, false_target.clone(), BranchFormat::B26));
+                    self.emit_instruction(Instruction::B { offset: 0 })?;
+                    // True path (CBNZ target)
+                    let true_copies_word_idx = self.code.len();
+                    for (dst, src) in true_pairs {
+                        self.ss_load_value(src, Register::X9, slots)?;
+                        let dst_id = dst.as_register().unwrap_or(0);
+                        let dst_offset = slots.get(&dst_id).copied().unwrap_or(0);
+                        self.ss_store_to_slot(Register::X9, dst_offset)?;
+                    }
+                    let b_true_word_idx = self.code.len();
+                    self.fixups.push((b_true_word_idx, true_target.clone(), BranchFormat::B26));
+                    self.emit_instruction(Instruction::B { offset: 0 })?;
+                    // Patch the CBNZ offset: target = true_copies_word_idx
+                    let cbnz_offset = (true_copies_word_idx as i32) - (cbnz_word_idx as i32);
+                    let old_word = self.code[cbnz_word_idx];
+                    let imm19 = cbnz_offset & 0x7FFFF;
+                    self.code[cbnz_word_idx] = (old_word & !(0x7FFFF << 5)) | ((imm19 as u32) << 5);
+                }
             }
 
             // ── Select ──
@@ -3577,21 +3627,79 @@ impl Emitter {
         &mut self,
         term: &IRTerminator,
         slots: &HashMap<u32, i32>,
+        phi_map: &HashMap<(String, String), Vec<(IRValue, IRValue)>>,
+        current_label: &str,
     ) -> Result<()> {
         match term {
             IRTerminator::Jump(target) => {
+                // Emit phi copies for (target, current_block) before the jump.
+                if let Some(pairs) = phi_map.get(&(target.clone(), current_label.to_string())) {
+                    for (dst, src) in pairs {
+                        self.ss_load_value(src, Register::X9, slots)?;
+                        let dst_id = dst.as_register().unwrap_or(0);
+                        let dst_offset = slots.get(&dst_id).copied().unwrap_or(0);
+                        self.ss_store_to_slot(Register::X9, dst_offset)?;
+                    }
+                }
                 let fixup_idx = self.code.len();
                 self.fixups.push((fixup_idx, target.clone(), BranchFormat::B26));
                 self.emit_instruction(Instruction::B { offset: 0 })?;
             }
             IRTerminator::Branch { cond, true_block, false_block } => {
                 self.ss_load_value(cond, Register::X9, slots)?;
-                let fixup_cbnz = self.code.len();
-                self.fixups.push((fixup_cbnz, true_block.clone(), BranchFormat::Cond19));
-                self.emit_instruction(Instruction::CBNZ { rt: Register::X9, offset: 0 })?;
-                let fixup_b = self.code.len();
-                self.fixups.push((fixup_b, false_block.clone(), BranchFormat::B26));
-                self.emit_instruction(Instruction::B { offset: 0 })?;
+
+                // Compute phi copies for both successors.
+                let false_pairs: Vec<&(IRValue, IRValue)> =
+                    phi_map.get(&(false_block.clone(), current_label.to_string()))
+                        .map(|v| v.iter().collect()).unwrap_or_default();
+                let true_pairs: Vec<&(IRValue, IRValue)> =
+                    phi_map.get(&(true_block.clone(), current_label.to_string()))
+                        .map(|v| v.iter().collect()).unwrap_or_default();
+
+                if false_pairs.is_empty() && true_pairs.is_empty() {
+                    // Common case (no phis): CBNZ true, B false
+                    let fixup_cbnz = self.code.len();
+                    self.fixups.push((fixup_cbnz, true_block.clone(), BranchFormat::Cond19));
+                    self.emit_instruction(Instruction::CBNZ { rt: Register::X9, offset: 0 })?;
+                    let fixup_b = self.code.len();
+                    self.fixups.push((fixup_b, false_block.clone(), BranchFormat::B26));
+                    self.emit_instruction(Instruction::B { offset: 0 })?;
+                } else {
+                    // Landing-pad pattern (same as IRInstr::CondBranch):
+                    //   CBNZ X9, +N    (skip false copies + false B)
+                    //   <false copies>
+                    //   B false_block
+                    //   <true copies>  ← CBNZ target
+                    //   B true_block
+                    let cbnz_word_idx = self.code.len();
+                    self.emit_instruction(Instruction::CBNZ { rt: Register::X9, offset: 0 })?;
+                    // False path
+                    for (dst, src) in false_pairs {
+                        self.ss_load_value(src, Register::X9, slots)?;
+                        let dst_id = dst.as_register().unwrap_or(0);
+                        let dst_offset = slots.get(&dst_id).copied().unwrap_or(0);
+                        self.ss_store_to_slot(Register::X9, dst_offset)?;
+                    }
+                    let b_false_word_idx = self.code.len();
+                    self.fixups.push((b_false_word_idx, false_block.clone(), BranchFormat::B26));
+                    self.emit_instruction(Instruction::B { offset: 0 })?;
+                    // True path (CBNZ target)
+                    let true_copies_word_idx = self.code.len();
+                    for (dst, src) in true_pairs {
+                        self.ss_load_value(src, Register::X9, slots)?;
+                        let dst_id = dst.as_register().unwrap_or(0);
+                        let dst_offset = slots.get(&dst_id).copied().unwrap_or(0);
+                        self.ss_store_to_slot(Register::X9, dst_offset)?;
+                    }
+                    let b_true_word_idx = self.code.len();
+                    self.fixups.push((b_true_word_idx, true_block.clone(), BranchFormat::B26));
+                    self.emit_instruction(Instruction::B { offset: 0 })?;
+                    // Patch the CBNZ offset.
+                    let cbnz_offset = (true_copies_word_idx as i32) - (cbnz_word_idx as i32);
+                    let old_word = self.code[cbnz_word_idx];
+                    let imm19 = cbnz_offset & 0x7FFFF;
+                    self.code[cbnz_word_idx] = (old_word & !(0x7FFFF << 5)) | ((imm19 as u32) << 5);
+                }
             }
             IRTerminator::Return(vals) => {
                 for (i, val) in vals.iter().enumerate() {

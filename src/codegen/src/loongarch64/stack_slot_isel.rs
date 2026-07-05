@@ -342,6 +342,31 @@ fn fp_cmp_swap(kind: &CmpKind) -> bool {
     matches!(kind, CmpKind::SGt | CmpKind::UGt | CmpKind::SGe | CmpKind::UGe)
 }
 
+/// Emit phi-resolution copies for a specific (successor, predecessor) edge.
+///
+/// Looks up the phi_map and emits `dst = src` copies for all phi nodes in
+/// `successor` block that correspond to the `predecessor` block. Each copy
+/// loads `src` into scratch register S0 and stores it to `dst`'s stack slot.
+///
+/// Returns the encoded instruction bytes (empty if no phis for this edge).
+fn emit_phi_copies(
+    phi_map: &HashMap<(String, String), Vec<(IRValue, IRValue)>>,
+    successor: &str,
+    predecessor: &str,
+    fp: Gpr,
+    vreg_slots: &HashMap<u32, i32>,
+) -> Vec<u8> {
+    let mut code = Vec::new();
+    if let Some(pairs) = phi_map.get(&(successor.to_string(), predecessor.to_string())) {
+        for (dst, src) in pairs {
+            let dst_id = dst.as_register().unwrap_or(0);
+            code.extend(encode_load_value(src, S0, fp, vreg_slots));
+            code.extend(encode_store_to_vreg(S0, dst_id, fp, vreg_slots));
+        }
+    }
+    code
+}
+
 // =============================================================================
 // Main allocation function
 // =============================================================================
@@ -588,6 +613,12 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
     // For unconditional branches: (instr_index, target_label, false)
     // For conditional branches: two entries
     let mut branch_patches: Vec<(usize, String)> = Vec::new(); // (byte_offset_of_branch_instr, target_label)
+
+    // Build predecessor-aware phi resolution map.
+    // Key: (successor_block_label, predecessor_block_label)
+    // Value: list of (dst, src) copies to emit at the END of the predecessor
+    // (before its terminator) when jumping to the successor.
+    let phi_map = func.build_phi_map();
 
     for block in &func.blocks {
         // Record this block's label offset
@@ -1765,54 +1796,17 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                 }
 
                 // ── Phi ──
-                IRInstr::Phi { dst, incoming, .. } => {
-                    // Phi resolution: copy the appropriate incoming value to dst.
-                    //
-                    // Single-incoming phi (common case after SCG optimization):
-                    //   Just copy the incoming value to dst.
-                    //
-                    // Multi-incoming phi (if/else, loop back-edge):
-                    //   The correct approach requires emitting moves at the END
-                    //   of each predecessor block, not at phi block entry.
-                    //   This is a codegen-wide architectural limitation — all
-                    //   10 backends share this issue.  In practice, VUMA's
-                    //   SCG/IR optimizer eliminates multi-incoming phis before
-                    //   they reach the backend (100% test pass confirms this).
-                    //
-                    //   Fallback: if all non-self incoming values are identical,
-                    //   use that value (correct for all predecessors).  Otherwise,
-                    //   use the first non-self value with a debug log (works if
-                    //   only one predecessor actually reaches the phi at runtime).
-                    let non_self: Vec<_> = incoming.iter()
-                        .filter(|(val, _)| val != dst)
-                        .collect();
-                    if non_self.is_empty() {
-                        // Trivial self-loop — no-op
-                        Vec::new()
-                    } else if non_self.len() == 1 {
-                        let (val, _) = non_self[0];
-                        let mut code = Vec::new();
-                        let dst_id = dst.as_register().unwrap_or(0);
-                        code.extend(encode_load_value(val, S0, fp, &vreg_slots));
-                        code.extend(encode_store_to_vreg(S0, dst_id, fp, &vreg_slots));
-                        code
-                    } else {
-                        // Check if all non-self incoming values are the same
-                        let first_val = &non_self[0].0;
-                        let all_same = non_self.iter().all(|(v, _)| v == first_val);
-                        if !all_same {
-                            log::debug!(
-                                "Multi-incoming Phi with {} distinct values — using first (predecessor-aware phi resolution not implemented)",
-                                non_self.len()
-                            );
-                        }
-                        let val = non_self[0].0.clone();
-                        let mut code = Vec::new();
-                        let dst_id = dst.as_register().unwrap_or(0);
-                        code.extend(encode_load_value(&val, S0, fp, &vreg_slots));
-                        code.extend(encode_store_to_vreg(S0, dst_id, fp, &vreg_slots));
-                        code
-                    }
+                // Phi copies are emitted at the END of each predecessor block
+                // (before its terminator), NOT at the phi block's entry.
+                // This is the correct SSA lowering: each predecessor emits the
+                // copy with its own incoming value before branching to the phi
+                // block. See `func.build_phi_map()` and the terminator handlers
+                // (Jump, Branch, Switch) below for the copy emission sites.
+                //
+                // At the phi block entry, we emit nothing — the dst vreg slot
+                // already contains the correct value by the time we arrive.
+                IRInstr::Phi { .. } => {
+                    Vec::new()
                 }
             };
 
@@ -1823,10 +1817,16 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
         }
 
         // Handle block terminators
+        // Phi-resolution copies are emitted BEFORE the branch instruction,
+        // at the end of the current (predecessor) block. This is the correct
+        // SSA lowering: the incoming value is unambiguous in the predecessor's
+        // code path.
         match &block.terminator {
             crate::ir::IRTerminator::Jump(target) => {
-                let patch_offset = byte_offset;
-                let code = Instruction::B { offs26: 0 }.encode().to_vec();
+                // Emit phi copies for (target, current_block) before the jump.
+                let mut code = emit_phi_copies(&phi_map, target, &block.label, fp, &vreg_slots);
+                let patch_offset = byte_offset + code.len();
+                code.extend_from_slice(&Instruction::B { offs26: 0 }.encode());
                 branch_patches.push((patch_offset, target.clone()));
                 byte_offset += code.len();
                 instrs.push(emit(code, "jump"));
@@ -1835,14 +1835,41 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                 let mut code = Vec::new();
                 // Load condition
                 code.extend(encode_load_value(cond, S0, fp, &vreg_slots));
-                // bnez S0, true_block (placeholder)
-                let bnez_off = byte_offset + code.len();
-                code.extend_from_slice(&Instruction::Bnez { rj: S0, offs21: 0 }.encode());
-                branch_patches.push((bnez_off, true_block.clone()));
-                // B false_block (placeholder)
-                let b_off = byte_offset + code.len();
-                code.extend_from_slice(&Instruction::B { offs26: 0 }.encode());
-                branch_patches.push((b_off, false_block.clone()));
+
+                // Compute phi copies for both successors.
+                let false_copies = emit_phi_copies(&phi_map, false_block, &block.label, fp, &vreg_slots);
+                let true_copies = emit_phi_copies(&phi_map, true_block, &block.label, fp, &vreg_slots);
+
+                if false_copies.is_empty() && true_copies.is_empty() {
+                    // Common case (no phis): bnez to true_block, b to false_block.
+                    let bnez_off = byte_offset + code.len();
+                    code.extend_from_slice(&Instruction::Bnez { rj: S0, offs21: 0 }.encode());
+                    branch_patches.push((bnez_off, true_block.clone()));
+                    let b_off = byte_offset + code.len();
+                    code.extend_from_slice(&Instruction::B { offs26: 0 }.encode());
+                    branch_patches.push((b_off, false_block.clone()));
+                } else {
+                    // Landing-pad pattern: emit copies for each path.
+                    //   bnez S0, +N    (skip false copies + false B)
+                    //   <false copies>
+                    //   b false_block
+                    //   <true copies>   ← bnez lands here
+                    //   b true_block
+                    let bnez_off = byte_offset + code.len();
+                    // N = (false_copies.len() + 4) / 4  (word offset to skip false copies + B instruction)
+                    let skip_words = ((false_copies.len() as i32) + 4) / 4;
+                    code.extend_from_slice(&Instruction::Bnez { rj: S0, offs21: skip_words }.encode());
+                    // False path
+                    code.extend(false_copies);
+                    let b_false_off = byte_offset + code.len();
+                    code.extend_from_slice(&Instruction::B { offs26: 0 }.encode());
+                    branch_patches.push((b_false_off, false_block.clone()));
+                    // True path (bnez target)
+                    code.extend(true_copies);
+                    let b_true_off = byte_offset + code.len();
+                    code.extend_from_slice(&Instruction::B { offs26: 0 }.encode());
+                    branch_patches.push((b_true_off, true_block.clone()));
+                }
                 byte_offset += code.len();
                 instrs.push(emit(code, "cond_branch"));
             }

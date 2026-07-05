@@ -2130,6 +2130,61 @@ impl IRFunction {
     pub fn instruction_count(&self) -> usize {
         self.blocks.iter().map(|b| b.instructions.len()).sum()
     }
+
+    /// Build a phi-resolution map for predecessor-aware phi lowering.
+    ///
+    /// Returns a map from `(successor_block_label, predecessor_block_label)`
+    /// to the list of `(dst, src)` copy pairs that must be emitted at the
+    /// **end of the predecessor block** (before its terminator) when jumping
+    /// to the successor.
+    ///
+    /// This allows backends to emit phi copies at the correct location:
+    /// instead of copying at the phi block's entry (where the incoming value
+    /// is ambiguous if there are multiple predecessors), copies are emitted
+    /// in the predecessor's own code path where the value is unambiguous.
+    ///
+    /// Self-referencing pairs (where `dst == src`) are skipped — they
+    /// represent loop-carried values that are already in place.
+    ///
+    /// # Example
+    ///
+    /// For IR:
+    /// ```text
+    /// block A:
+    ///   ...
+    ///   br cond, B, C
+    /// block B:
+    ///   x = phi [(1, A), (2, D)]
+    /// ```
+    ///
+    /// The map will contain:
+    ///   `("B", "A") -> [(x, 1)]`
+    ///   `("B", "D") -> [(x, 2)]`
+    ///
+    /// When block A's terminator is emitted, the backend looks up
+    /// `("B", "A")` and emits `x = 1` before branching to B.
+    /// When block D's terminator is emitted, the backend looks up
+    /// `("B", "D")` and emits `x = 2` before branching to B.
+    pub fn build_phi_map(&self) -> HashMap<(String, String), Vec<(IRValue, IRValue)>> {
+        let mut map: HashMap<(String, String), Vec<(IRValue, IRValue)>> = HashMap::new();
+        for block in &self.blocks {
+            for instr in &block.instructions {
+                if let IRInstr::Phi { dst, incoming } = instr {
+                    for (src, pred_label) in incoming {
+                        // Skip self-referencing pairs (loop-carried values
+                        // that are already in dst).
+                        if src == dst {
+                            continue;
+                        }
+                        map.entry((block.label.clone(), pred_label.clone()))
+                            .or_default()
+                            .push((dst.clone(), src.clone()));
+                    }
+                }
+            }
+        }
+        map
+    }
 }
 
 impl fmt::Display for IRFunction {
