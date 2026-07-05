@@ -10,6 +10,7 @@ NO_PUSH=0
 FRESH=0
 BACKENDS=""
 VERIFY=0
+BUILD_PROFILE="release-fast"   # fast iterative profile (LTO off, codegen-units=16)
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
 while [[ $# -gt 0 ]]; do
@@ -20,6 +21,8 @@ while [[ $# -gt 0 ]]; do
         --fresh) FRESH=1; shift ;;
         --backends) BACKENDS="$2"; shift 2 ;;
         --verify) VERIFY=1; shift ;;
+        --release) BUILD_PROFILE="release"; shift ;;   # opt-in: slow LTO build
+        --profile) BUILD_PROFILE="$2"; shift 2 ;;
         *) echo "Unknown option: $1"; exit 1 ;;
     esac
 done
@@ -34,6 +37,7 @@ echo "║  VUMA Full Test Suite — $(date -u '+%Y-%m-%d %H:%M UTC')            
 echo "╠══════════════════════════════════════════════════════════════╣"
 echo "║  Repo:    $REPO_DIR"
 echo "║  Workers: $WORKERS"
+echo "║  Profile: $BUILD_PROFILE"
 echo "║  Host:    $(uname -m) ($(hostname))"
 echo "╚══════════════════════════════════════════════════════════════╝"
 echo ""
@@ -83,16 +87,31 @@ echo ""
 
 # ── Step 2: Build compiler ──
 if [ $SKIP_BUILD -eq 0 ]; then
-    echo "▸ Building VUMA compiler (release mode)..."
-    cargo build --release --bin compile_dump --bin dump_ir 2>&1 | tail -5
-    echo "✓ Build complete"
+    echo "▸ Building VUMA compiler (profile: $BUILD_PROFILE)..."
+    # Stream build output live so the user sees progress (the LTO `release`
+    # profile can take 10+ minutes on a Pi 5 and would otherwise show nothing
+    # until completion). Capture stderr to a log for post-mortem on failure.
+    RESULTS_DIR="$REPO_DIR/test_results"
+    mkdir -p "$RESULTS_DIR"
+    BUILD_LOG="$RESULTS_DIR/build.log"
+    BUILD_START=$(date +%s)
+    if cargo build --profile "$BUILD_PROFILE" --bin compile_dump --bin dump_ir 2>"$BUILD_LOG"; then
+        BUILD_END=$(date +%s)
+        echo "  ✓ Build complete in $((BUILD_END - BUILD_START))s  (log: $BUILD_LOG)"
+    else
+        BUILD_END=$(date +%s)
+        echo "  ✗ Build FAILED after $((BUILD_END - BUILD_START))s"
+        echo "  ── last 30 lines of build log ──"
+        tail -30 "$BUILD_LOG" | sed 's/^/  /'
+        exit 1
+    fi
     echo ""
 fi
 
 # ── Step 2.5: Clear checkpoint if --fresh or if compiler was rebuilt ──
 RESULTS_DIR="$REPO_DIR/test_results"
 CHECKPOINT="$RESULTS_DIR/checkpoint.jsonl"
-COMPILE_BIN="$REPO_DIR/target/release/compile_dump"
+COMPILE_BIN="$REPO_DIR/target/$BUILD_PROFILE/compile_dump"
 if [ $FRESH -eq 1 ]; then
     echo "▸ --fresh: clearing previous checkpoint..."
     rm -f "$CHECKPOINT"
@@ -111,6 +130,9 @@ fi
 
 # ── Step 3: Create Python test runner ──
 mkdir -p "$RESULTS_DIR"
+export VUMA_BUILD_PROFILE="$BUILD_PROFILE"
+export REPO_DIR="$REPO_DIR"
+export WASMTIME_BIN="${WASMTIME_BIN:-}"
 
 cat > "$RESULTS_DIR/run_tests.py" << 'PYEOF'
 #!/usr/bin/env python3
@@ -122,7 +144,7 @@ from collections import defaultdict
 
 REPO = Path(os.environ.get("REPO_DIR", "."))
 GOLD_DIR = REPO / "tests" / "gold_standard"
-COMPILE = REPO / "target" / "release" / "compile_dump"
+COMPILE = REPO / "target" / os.environ.get("VUMA_BUILD_PROFILE", "release-fast") / "compile_dump"
 RESULTS = REPO / "test_results"
 HOST_ARCH = platform.machine()
 

@@ -7,7 +7,7 @@ from collections import defaultdict
 
 REPO = Path(os.environ.get("REPO_DIR", "."))
 GOLD_DIR = REPO / "tests" / "gold_standard"
-COMPILE = REPO / "target" / "release" / "compile_dump"
+COMPILE = REPO / "target" / os.environ.get("VUMA_BUILD_PROFILE", "release-fast") / "compile_dump"
 RESULTS = REPO / "test_results"
 HOST_ARCH = platform.machine()
 
