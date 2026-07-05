@@ -953,15 +953,15 @@ warning: constant `PAGE_SIZE` is never used
      |               ^^^^^^^^^
 
 warning: constant `FP_SCRATCH_SIZE` is never used
-    --> src/codegen/src/ppc64/mod.rs:1832:7
+    --> src/codegen/src/ppc64/mod.rs:1835:7
      |
-1832 | const FP_SCRATCH_SIZE: u32 = 16;
+1835 | const FP_SCRATCH_SIZE: u32 = 16;
      |       ^^^^^^^^^^^^^^^
 
 warning: function `ppc64_compute_frame_size` is never used
-    --> src/codegen/src/ppc64/mod.rs:1839:4
+    --> src/codegen/src/ppc64/mod.rs:1842:4
      |
-1839 | fn ppc64_compute_frame_size(func: &IRFunction) -> usize {
+1842 | fn ppc64_compute_frame_size(func: &IRFunction) -> usize {
      |    ^^^^^^^^^^^^^^^^^^^^^^^^
 
 warning: function `riscv64_compute_frame_size` is never used
@@ -1283,4 +1283,4 @@ warning: missing documentation for a macro
 
 warning: `vuma` (lib) generated 24 warnings (run `cargo fix --lib -p vuma` to apply 3 suggestions)
 warning: `vuma-codegen` (lib) generated 140 warnings (run `cargo fix --lib -p vuma-codegen` to apply 56 suggestions)
-    Finished `release-fast` profile [optimized] target(s) in 13.30s
+    Finished `release-fast` profile [optimized] target(s) in 16.06s
