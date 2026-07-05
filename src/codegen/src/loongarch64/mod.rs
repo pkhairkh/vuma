@@ -615,6 +615,61 @@ const OPC_SC_D: u32 = 0x23;
 
 const OPC_AMSWAP_W: u32 = 0x00C0;
 const OPC_AMSWAP_D: u32 = 0x00C2;
+const OPC_AMADD_W: u32 = 0x00C4;
+const OPC_AMADD_D: u32 = 0x00C6;
+const OPC_AMAND_W: u32 = 0x00C8;
+const OPC_AMAND_D: u32 = 0x00CA;
+const OPC_AMOR_W: u32 = 0x00CC;
+const OPC_AMOR_D: u32 = 0x00CE;
+const OPC_AMXOR_W: u32 = 0x00D0;
+const OPC_AMXOR_D: u32 = 0x00D2;
+const OPC_AMMAX_W: u32 = 0x00D4;
+const OPC_AMMAX_D: u32 = 0x00D6;
+const OPC_AMMIN_W: u32 = 0x00D8;
+const OPC_AMMIN_D: u32 = 0x00DA;
+const OPC_AMMAX_WU: u32 = 0x00DC;
+const OPC_AMMAX_DU: u32 = 0x00DE;
+const OPC_AMMIN_WU: u32 = 0x00E0;
+const OPC_AMMIN_DU: u32 = 0x00E2;
+
+// FP math opcodes (2R format: primary=0x0B in bits 31:26, sub-opcode in bits 9:0)
+// These are the full 15-bit opcode values (bits 31:15) used by encode_2r.
+const OPC_FSQRT_S: u32 = 0x2E000000 >> 15; // 0x2E000000 = primary 0x0B, sub 0x040000
+const OPC_FSQRT_D: u32 = 0x2E000001 >> 15;
+const OPC_FABS_S: u32 = 0x2E000004 >> 15;
+const OPC_FABS_D: u32 = 0x2E000005 >> 15;
+const OPC_FNEG_S: u32 = 0x2E000006 >> 15;
+const OPC_FNEG_D: u32 = 0x2E000007 >> 15;
+const OPC_FLOGB_S: u32 = 0x2E000008 >> 15;
+const OPC_FLOGB_D: u32 = 0x2E000009 >> 15;
+const OPC_FCLASS_S: u32 = 0x2E00000A >> 15;
+const OPC_FCLASS_D: u32 = 0x2E00000B >> 15;
+
+// FP math opcodes (3R format: primary=0x0B in bits 31:26)
+const OPC_FMIN_S: u32 = 0x2E300000 >> 15;
+const OPC_FMIN_D: u32 = 0x2E300001 >> 15;
+const OPC_FMAX_S: u32 = 0x2E300002 >> 15;
+const OPC_FMAX_D: u32 = 0x2E300003 >> 15;
+const OPC_FSCALEB_S: u32 = 0x2E300008 >> 15;
+const OPC_FSCALEB_D: u32 = 0x2E300009 >> 15;
+const OPC_FCOPYSIGN_S: u32 = 0x2E30000A >> 15;
+const OPC_FCOPYSIGN_D: u32 = 0x2E30000B >> 15;
+const OPC_FSGNJ_S: u32 = 0x2E30000C >> 15;
+const OPC_FSGNJ_D: u32 = 0x2E30000D >> 15;
+const OPC_FSGNJN_S: u32 = 0x2E30000E >> 15;
+const OPC_FSGNJN_D: u32 = 0x2E30000F >> 15;
+const OPC_FSGNJX_S: u32 = 0x2E300010 >> 15;
+const OPC_FSGNJX_D: u32 = 0x2E300011 >> 15;
+
+// Bit manipulation opcodes — already defined below in the 2R section
+// (OPC_REVB_2H, OPC_REVB_4H, OPC_REVB_2W, OPC_BITREV_4B, OPC_BITREV_8B)
+
+// Misc system instruction opcodes (2R format)
+const OPC_CPUCFG: u32 = 0x00000006;
+const OPC_RDTIMEL_W: u32 = 0x00000020;
+const OPC_RDTIMEH_W: u32 = 0x00000021;
+const OPC_ASRTLE_D: u32 = 0x00000000;
+const OPC_ASRTGT_D: u32 = 0x00000001;
 
 // ===========================================================================
 // 1RI21-format Opcodes (bits[31:26])
@@ -885,6 +940,39 @@ pub enum Instruction {
     /// Atomic Memory Swap Doubleword: `amswap.d rd, rj, rk`
     /// rd = old value at [rj]; [rj] = rk
     AmswapD { rd: Gpr, rj: Gpr, rk: Gpr },
+    /// Atomic Memory Add Word: `amadd.w rd, rj, rk`
+    /// rd = old value at [rj]; [rj] = old + rk
+    AmaddW { rd: Gpr, rj: Gpr, rk: Gpr },
+    /// Atomic Memory Add Doubleword: `amadd.d rd, rj, rk`
+    AmaddD { rd: Gpr, rj: Gpr, rk: Gpr },
+    /// Atomic Memory AND Word: `amand.w rd, rj, rk`
+    AmandW { rd: Gpr, rj: Gpr, rk: Gpr },
+    /// Atomic Memory AND Doubleword: `amand.d rd, rj, rk`
+    AmandD { rd: Gpr, rj: Gpr, rk: Gpr },
+    /// Atomic Memory OR Word: `amor.w rd, rj, rk`
+    AmorW { rd: Gpr, rj: Gpr, rk: Gpr },
+    /// Atomic Memory OR Doubleword: `amor.d rd, rj, rk`
+    AmorD { rd: Gpr, rj: Gpr, rk: Gpr },
+    /// Atomic Memory XOR Word: `amxor.w rd, rj, rk`
+    AmxorW { rd: Gpr, rj: Gpr, rk: Gpr },
+    /// Atomic Memory XOR Doubleword: `amxor.d rd, rj, rk`
+    AmxorD { rd: Gpr, rj: Gpr, rk: Gpr },
+    /// Atomic Memory Max Word (signed): `ammax.w rd, rj, rk`
+    AmmaxW { rd: Gpr, rj: Gpr, rk: Gpr },
+    /// Atomic Memory Max Doubleword (signed): `ammax.d rd, rj, rk`
+    AmmaxD { rd: Gpr, rj: Gpr, rk: Gpr },
+    /// Atomic Memory Max Word Unsigned: `ammax_wu.w rd, rj, rk`
+    AmmaxWu { rd: Gpr, rj: Gpr, rk: Gpr },
+    /// Atomic Memory Max Doubleword Unsigned: `ammax_wu.d rd, rj, rk`
+    AmmaxDu { rd: Gpr, rj: Gpr, rk: Gpr },
+    /// Atomic Memory Min Word (signed): `ammin.w rd, rj, rk`
+    AmminW { rd: Gpr, rj: Gpr, rk: Gpr },
+    /// Atomic Memory Min Doubleword (signed): `ammin.d rd, rj, rk`
+    AmminD { rd: Gpr, rj: Gpr, rk: Gpr },
+    /// Atomic Memory Min Word Unsigned: `ammin_wu.w rd, rj, rk`
+    AmminWu { rd: Gpr, rj: Gpr, rk: Gpr },
+    /// Atomic Memory Min Doubleword Unsigned: `ammin_wu.d rd, rj, rk`
+    AmminDu { rd: Gpr, rj: Gpr, rk: Gpr },
 
     // ── Memory Barrier (2RI12) ─────────────────────────────────────
     /// Data Barrier: `dbar hint`
@@ -970,6 +1058,80 @@ pub enum Instruction {
     FCmpS { cond: u8, fj: Fpr, fk: Fpr, cd: u8 },
     /// FP Compare Double: `fcmp.cond.d cd, fj, fk`
     FCmpD { cond: u8, fj: Fpr, fk: Fpr, cd: u8 },
+
+    // ── FP Math (2R) ───────────────────────────────────────────────
+    /// FP Square Root Single: `fsqrt.s fd, fj`
+    FsqrtS { fd: Fpr, fj: Fpr },
+    /// FP Square Root Double: `fsqrt.d fd, fj`
+    FsqrtD { fd: Fpr, fj: Fpr },
+    /// FP Absolute Value Single: `fabs.s fd, fj`
+    FabsS { fd: Fpr, fj: Fpr },
+    /// FP Absolute Value Double: `fabs.d fd, fj`
+    FabsD { fd: Fpr, fj: Fpr },
+    /// FP Negate Single: `fneg.s fd, fj`
+    FnegS { fd: Fpr, fj: Fpr },
+    /// FP Negate Double: `fneg.d fd, fj`
+    FnegD { fd: Fpr, fj: Fpr },
+    /// FP Min Single: `fmin.s fd, fj, fk`
+    FminS { fd: Fpr, fj: Fpr, fk: Fpr },
+    /// FP Min Double: `fmin.d fd, fj, fk`
+    FminD { fd: Fpr, fj: Fpr, fk: Fpr },
+    /// FP Max Single: `fmax.s fd, fj, fk`
+    FmaxS { fd: Fpr, fj: Fpr, fk: Fpr },
+    /// FP Max Double: `fmax.d fd, fj, fk`
+    FmaxD { fd: Fpr, fj: Fpr, fk: Fpr },
+    /// FP Copy Sign Single: `fcopysign.s fd, fj, fk`
+    FcopysignS { fd: Fpr, fj: Fpr, fk: Fpr },
+    /// FP Copy Sign Double: `fcopysign.d fd, fj, fk`
+    FcopysignD { fd: Fpr, fj: Fpr, fk: Fpr },
+    /// FP Scale by Power Single: `fscaleb.s fd, fj, fk`
+    FscalebS { fd: Fpr, fj: Fpr, fk: Fpr },
+    /// FP Scale by Power Double: `fscaleb.d fd, fj, fk`
+    FscalebD { fd: Fpr, fj: Fpr, fk: Fpr },
+    /// FP Log Base 2 Single: `flogb.s fd, fj`
+    FlogbS { fd: Fpr, fj: Fpr },
+    /// FP Log Base 2 Double: `flogb.d fd, fj`
+    FlogbD { fd: Fpr, fj: Fpr },
+    /// FP Class Single: `fclass.s fd, fj`
+    FclassS { fd: Fpr, fj: Fpr },
+    /// FP Class Double: `fclass.d fd, fj`
+    FclassD { fd: Fpr, fj: Fpr },
+    /// FP Sign Inject Single: `fsgnj.s fd, fj, fk`
+    FsgnjS { fd: Fpr, fj: Fpr, fk: Fpr },
+    /// FP Sign Inject Double: `fsgnj.d fd, fj, fk`
+    FsgnjD { fd: Fpr, fj: Fpr, fk: Fpr },
+    /// FP Neg Sign Inject Single: `fsgnjn.s fd, fj, fk`
+    FsgnjnS { fd: Fpr, fj: Fpr, fk: Fpr },
+    /// FP Neg Sign Inject Double: `fsgnjn.d fd, fj, fk`
+    FsgnjnD { fd: Fpr, fj: Fpr, fk: Fpr },
+    /// FP XOR Sign Inject Single: `fsgnjx.s fd, fj, fk`
+    FsgnjxS { fd: Fpr, fj: Fpr, fk: Fpr },
+    /// FP XOR Sign Inject Double: `fsgnjx.d fd, fj, fk`
+    FsgnjxD { fd: Fpr, fj: Fpr, fk: Fpr },
+
+    // ── Bit Manipulation (2R) ──────────────────────────────────────
+    /// Reverse Bytes in 2 Halfwords: `revb.2h rd, rj`
+    Revb2H { rd: Gpr, rj: Gpr },
+    /// Reverse Bytes in 4 Halfwords: `revb.4h rd, rj`
+    Revb4H { rd: Gpr, rj: Gpr },
+    /// Reverse Bytes in 2 Words: `revb.2w rd, rj`
+    Revb2W { rd: Gpr, rj: Gpr },
+    /// Bit Reverse 4 Bytes: `bitrev.4b rd, rj`
+    Bitrev4B { rd: Gpr, rj: Gpr },
+    /// Bit Reverse 8 Bytes: `bitrev.8b rd, rj`
+    Bitrev8B { rd: Gpr, rj: Gpr },
+
+    // ── Misc System Instructions ───────────────────────────────────
+    /// CPU Configure: `cpucfg rd, rj`
+    Cpucfg { rd: Gpr, rj: Gpr },
+    /// Read Time Stamp Counter Low: `rdtimel.w rd, rj`
+    RdtimelW { rd: Gpr, rj: Gpr },
+    /// Read Time Stamp Counter High: `rdtimeh.w rd, rj`
+    RdtimehW { rd: Gpr, rj: Gpr },
+    /// Address Bounds Check Less: `asrtle.d rj, rk`
+    AsrtleD { rj: Gpr, rk: Gpr },
+    /// Address Bounds Check Greater: `asrgt.d rj, rk`
+    AsrgtD { rj: Gpr, rk: Gpr },
 
     // ── No-op / Break ───────────────────────────────────────────────
     /// No-operation (pseudo: `and $r0, $r0, $r0`)
@@ -1349,6 +1511,64 @@ impl Instruction {
                 rj.encoding(),
                 rd.encoding(),
             ),
+            Instruction::AmaddW { rd, rj, rk } => encode_3r(OPC_AMADD_W, rk.encoding(), rj.encoding(), rd.encoding()),
+            Instruction::AmaddD { rd, rj, rk } => encode_3r(OPC_AMADD_D, rk.encoding(), rj.encoding(), rd.encoding()),
+            Instruction::AmandW { rd, rj, rk } => encode_3r(OPC_AMAND_W, rk.encoding(), rj.encoding(), rd.encoding()),
+            Instruction::AmandD { rd, rj, rk } => encode_3r(OPC_AMAND_D, rk.encoding(), rj.encoding(), rd.encoding()),
+            Instruction::AmorW { rd, rj, rk } => encode_3r(OPC_AMOR_W, rk.encoding(), rj.encoding(), rd.encoding()),
+            Instruction::AmorD { rd, rj, rk } => encode_3r(OPC_AMOR_D, rk.encoding(), rj.encoding(), rd.encoding()),
+            Instruction::AmxorW { rd, rj, rk } => encode_3r(OPC_AMXOR_W, rk.encoding(), rj.encoding(), rd.encoding()),
+            Instruction::AmxorD { rd, rj, rk } => encode_3r(OPC_AMXOR_D, rk.encoding(), rj.encoding(), rd.encoding()),
+            Instruction::AmmaxW { rd, rj, rk } => encode_3r(OPC_AMMAX_W, rk.encoding(), rj.encoding(), rd.encoding()),
+            Instruction::AmmaxD { rd, rj, rk } => encode_3r(OPC_AMMAX_D, rk.encoding(), rj.encoding(), rd.encoding()),
+            Instruction::AmmaxWu { rd, rj, rk } => encode_3r(OPC_AMMAX_WU, rk.encoding(), rj.encoding(), rd.encoding()),
+            Instruction::AmmaxDu { rd, rj, rk } => encode_3r(OPC_AMMAX_DU, rk.encoding(), rj.encoding(), rd.encoding()),
+            Instruction::AmminW { rd, rj, rk } => encode_3r(OPC_AMMIN_W, rk.encoding(), rj.encoding(), rd.encoding()),
+            Instruction::AmminD { rd, rj, rk } => encode_3r(OPC_AMMIN_D, rk.encoding(), rj.encoding(), rd.encoding()),
+            Instruction::AmminWu { rd, rj, rk } => encode_3r(OPC_AMMIN_WU, rk.encoding(), rj.encoding(), rd.encoding()),
+            Instruction::AmminDu { rd, rj, rk } => encode_3r(OPC_AMMIN_DU, rk.encoding(), rj.encoding(), rd.encoding()),
+
+            // ── FP Math (2R: unary) ───────────────────────────────
+            Instruction::FsqrtS { fd, fj } => encode_2r(OPC_FSQRT_S, fj.encoding(), fd.encoding()),
+            Instruction::FsqrtD { fd, fj } => encode_2r(OPC_FSQRT_D, fj.encoding(), fd.encoding()),
+            Instruction::FabsS { fd, fj } => encode_2r(OPC_FABS_S, fj.encoding(), fd.encoding()),
+            Instruction::FabsD { fd, fj } => encode_2r(OPC_FABS_D, fj.encoding(), fd.encoding()),
+            Instruction::FnegS { fd, fj } => encode_2r(OPC_FNEG_S, fj.encoding(), fd.encoding()),
+            Instruction::FnegD { fd, fj } => encode_2r(OPC_FNEG_D, fj.encoding(), fd.encoding()),
+            Instruction::FlogbS { fd, fj } => encode_2r(OPC_FLOGB_S, fj.encoding(), fd.encoding()),
+            Instruction::FlogbD { fd, fj } => encode_2r(OPC_FLOGB_D, fj.encoding(), fd.encoding()),
+            Instruction::FclassS { fd, fj } => encode_2r(OPC_FCLASS_S, fj.encoding(), fd.encoding()),
+            Instruction::FclassD { fd, fj } => encode_2r(OPC_FCLASS_D, fj.encoding(), fd.encoding()),
+
+            // ── FP Math (3R: binary) ──────────────────────────────
+            Instruction::FminS { fd, fj, fk } => encode_3r(OPC_FMIN_S, fk.encoding(), fj.encoding(), fd.encoding()),
+            Instruction::FminD { fd, fj, fk } => encode_3r(OPC_FMIN_D, fk.encoding(), fj.encoding(), fd.encoding()),
+            Instruction::FmaxS { fd, fj, fk } => encode_3r(OPC_FMAX_S, fk.encoding(), fj.encoding(), fd.encoding()),
+            Instruction::FmaxD { fd, fj, fk } => encode_3r(OPC_FMAX_D, fk.encoding(), fj.encoding(), fd.encoding()),
+            Instruction::FscalebS { fd, fj, fk } => encode_3r(OPC_FSCALEB_S, fk.encoding(), fj.encoding(), fd.encoding()),
+            Instruction::FscalebD { fd, fj, fk } => encode_3r(OPC_FSCALEB_D, fk.encoding(), fj.encoding(), fd.encoding()),
+            Instruction::FcopysignS { fd, fj, fk } => encode_3r(OPC_FCOPYSIGN_S, fk.encoding(), fj.encoding(), fd.encoding()),
+            Instruction::FcopysignD { fd, fj, fk } => encode_3r(OPC_FCOPYSIGN_D, fk.encoding(), fj.encoding(), fd.encoding()),
+            Instruction::FsgnjS { fd, fj, fk } => encode_3r(OPC_FSGNJ_S, fk.encoding(), fj.encoding(), fd.encoding()),
+            Instruction::FsgnjD { fd, fj, fk } => encode_3r(OPC_FSGNJ_D, fk.encoding(), fj.encoding(), fd.encoding()),
+            Instruction::FsgnjnS { fd, fj, fk } => encode_3r(OPC_FSGNJN_S, fk.encoding(), fj.encoding(), fd.encoding()),
+            Instruction::FsgnjnD { fd, fj, fk } => encode_3r(OPC_FSGNJN_D, fk.encoding(), fj.encoding(), fd.encoding()),
+            Instruction::FsgnjxS { fd, fj, fk } => encode_3r(OPC_FSGNJX_S, fk.encoding(), fj.encoding(), fd.encoding()),
+            Instruction::FsgnjxD { fd, fj, fk } => encode_3r(OPC_FSGNJX_D, fk.encoding(), fj.encoding(), fd.encoding()),
+
+            // ── Bit Manipulation (2R) ─────────────────────────────
+            Instruction::Revb2H { rd, rj } => encode_2r(OPC_REVB_2H, rj.encoding(), rd.encoding()),
+            Instruction::Revb4H { rd, rj } => encode_2r(OPC_REVB_4H, rj.encoding(), rd.encoding()),
+            Instruction::Revb2W { rd, rj } => encode_2r(OPC_REVB_2W, rj.encoding(), rd.encoding()),
+            Instruction::Bitrev4B { rd, rj } => encode_2r(OPC_BITREV_4B, rj.encoding(), rd.encoding()),
+            Instruction::Bitrev8B { rd, rj } => encode_2r(OPC_BITREV_8B, rj.encoding(), rd.encoding()),
+
+            // ── Misc System Instructions ──────────────────────────
+            Instruction::Cpucfg { rd, rj } => encode_2r(OPC_CPUCFG, rj.encoding(), rd.encoding()),
+            Instruction::RdtimelW { rd, rj } => encode_2r(OPC_RDTIMEL_W, rj.encoding(), rd.encoding()),
+            Instruction::RdtimehW { rd, rj } => encode_2r(OPC_RDTIMEH_W, rj.encoding(), rd.encoding()),
+            Instruction::AsrtleD { rj, rk } => encode_3r(OPC_ASRTLE_D, rk.encoding(), rj.encoding(), 0),
+            Instruction::AsrgtD { rj, rk } => encode_3r(OPC_ASRTGT_D, rk.encoding(), rj.encoding(), 0),
 
             // ── Memory Barrier (2RI12) ────────────────────────────
             Instruction::Dbar { hint } => encode_2ri12(
@@ -1569,6 +1789,56 @@ impl Instruction {
             Instruction::ScD { .. } => "sc.d",
             Instruction::AmswapW { .. } => "amswap.w",
             Instruction::AmswapD { .. } => "amswap.d",
+            Instruction::AmaddW { .. } => "amadd.w",
+            Instruction::AmaddD { .. } => "amadd.d",
+            Instruction::AmandW { .. } => "amand.w",
+            Instruction::AmandD { .. } => "amand.d",
+            Instruction::AmorW { .. } => "amor.w",
+            Instruction::AmorD { .. } => "amor.d",
+            Instruction::AmxorW { .. } => "amxor.w",
+            Instruction::AmxorD { .. } => "amxor.d",
+            Instruction::AmmaxW { .. } => "ammax.w",
+            Instruction::AmmaxD { .. } => "ammax.d",
+            Instruction::AmmaxWu { .. } => "ammax.wu",
+            Instruction::AmmaxDu { .. } => "ammax.du",
+            Instruction::AmminW { .. } => "ammin.w",
+            Instruction::AmminD { .. } => "ammin.d",
+            Instruction::AmminWu { .. } => "ammin.wu",
+            Instruction::AmminDu { .. } => "ammin.du",
+            Instruction::FsqrtS { .. } => "fsqrt.s",
+            Instruction::FsqrtD { .. } => "fsqrt.d",
+            Instruction::FabsS { .. } => "fabs.s",
+            Instruction::FabsD { .. } => "fabs.d",
+            Instruction::FnegS { .. } => "fneg.s",
+            Instruction::FnegD { .. } => "fneg.d",
+            Instruction::FminS { .. } => "fmin.s",
+            Instruction::FminD { .. } => "fmin.d",
+            Instruction::FmaxS { .. } => "fmax.s",
+            Instruction::FmaxD { .. } => "fmax.d",
+            Instruction::FcopysignS { .. } => "fcopysign.s",
+            Instruction::FcopysignD { .. } => "fcopysign.d",
+            Instruction::FscalebS { .. } => "fscaleb.s",
+            Instruction::FscalebD { .. } => "fscaleb.d",
+            Instruction::FlogbS { .. } => "flogb.s",
+            Instruction::FlogbD { .. } => "flogb.d",
+            Instruction::FclassS { .. } => "fclass.s",
+            Instruction::FclassD { .. } => "fclass.d",
+            Instruction::FsgnjS { .. } => "fsgnj.s",
+            Instruction::FsgnjD { .. } => "fsgnj.d",
+            Instruction::FsgnjnS { .. } => "fsgnjn.s",
+            Instruction::FsgnjnD { .. } => "fsgnjn.d",
+            Instruction::FsgnjxS { .. } => "fsgnjx.s",
+            Instruction::FsgnjxD { .. } => "fsgnjx.d",
+            Instruction::Revb2H { .. } => "revb.2h",
+            Instruction::Revb4H { .. } => "revb.4h",
+            Instruction::Revb2W { .. } => "revb.2w",
+            Instruction::Bitrev4B { .. } => "bitrev.4b",
+            Instruction::Bitrev8B { .. } => "bitrev.8b",
+            Instruction::Cpucfg { .. } => "cpucfg",
+            Instruction::RdtimelW { .. } => "rdtimel.w",
+            Instruction::RdtimehW { .. } => "rdtimeh.w",
+            Instruction::AsrtleD { .. } => "asrtle.d",
+            Instruction::AsrgtD { .. } => "asrgt.d",
             Instruction::Dbar { .. } => "dbar",
             Instruction::ExtWH { .. } => "ext.w.h",
             Instruction::ExtWB { .. } => "ext.w.b",
@@ -1715,6 +1985,56 @@ impl fmt::Display for Instruction {
             Instruction::ScD { rd, rj, imm14 } => write!(f, "sc.d {}, {}, {}", rd, rj, imm14),
             Instruction::AmswapW { rd, rj, rk } => write!(f, "amswap.w {}, {}, {}", rd, rj, rk),
             Instruction::AmswapD { rd, rj, rk } => write!(f, "amswap.d {}, {}, {}", rd, rj, rk),
+            Instruction::AmaddW { rd, rj, rk } => write!(f, "amadd.w {}, {}, {}", rd, rj, rk),
+            Instruction::AmaddD { rd, rj, rk } => write!(f, "amadd.d {}, {}, {}", rd, rj, rk),
+            Instruction::AmandW { rd, rj, rk } => write!(f, "amand.w {}, {}, {}", rd, rj, rk),
+            Instruction::AmandD { rd, rj, rk } => write!(f, "amand.d {}, {}, {}", rd, rj, rk),
+            Instruction::AmorW { rd, rj, rk } => write!(f, "amor.w {}, {}, {}", rd, rj, rk),
+            Instruction::AmorD { rd, rj, rk } => write!(f, "amor.d {}, {}, {}", rd, rj, rk),
+            Instruction::AmxorW { rd, rj, rk } => write!(f, "amxor.w {}, {}, {}", rd, rj, rk),
+            Instruction::AmxorD { rd, rj, rk } => write!(f, "amxor.d {}, {}, {}", rd, rj, rk),
+            Instruction::AmmaxW { rd, rj, rk } => write!(f, "ammax.w {}, {}, {}", rd, rj, rk),
+            Instruction::AmmaxD { rd, rj, rk } => write!(f, "ammax.d {}, {}, {}", rd, rj, rk),
+            Instruction::AmmaxWu { rd, rj, rk } => write!(f, "ammax.wu {}, {}, {}", rd, rj, rk),
+            Instruction::AmmaxDu { rd, rj, rk } => write!(f, "ammax.du {}, {}, {}", rd, rj, rk),
+            Instruction::AmminW { rd, rj, rk } => write!(f, "ammin.w {}, {}, {}", rd, rj, rk),
+            Instruction::AmminD { rd, rj, rk } => write!(f, "ammin.d {}, {}, {}", rd, rj, rk),
+            Instruction::AmminWu { rd, rj, rk } => write!(f, "ammin.wu {}, {}, {}", rd, rj, rk),
+            Instruction::AmminDu { rd, rj, rk } => write!(f, "ammin.du {}, {}, {}", rd, rj, rk),
+            Instruction::FsqrtS { fd, fj } => write!(f, "fsqrt.s {}, {}", fd, fj),
+            Instruction::FsqrtD { fd, fj } => write!(f, "fsqrt.d {}, {}", fd, fj),
+            Instruction::FabsS { fd, fj } => write!(f, "fabs.s {}, {}", fd, fj),
+            Instruction::FabsD { fd, fj } => write!(f, "fabs.d {}, {}", fd, fj),
+            Instruction::FnegS { fd, fj } => write!(f, "fneg.s {}, {}", fd, fj),
+            Instruction::FnegD { fd, fj } => write!(f, "fneg.d {}, {}", fd, fj),
+            Instruction::FminS { fd, fj, fk } => write!(f, "fmin.s {}, {}, {}", fd, fj, fk),
+            Instruction::FminD { fd, fj, fk } => write!(f, "fmin.d {}, {}, {}", fd, fj, fk),
+            Instruction::FmaxS { fd, fj, fk } => write!(f, "fmax.s {}, {}, {}", fd, fj, fk),
+            Instruction::FmaxD { fd, fj, fk } => write!(f, "fmax.d {}, {}, {}", fd, fj, fk),
+            Instruction::FcopysignS { fd, fj, fk } => write!(f, "fcopysign.s {}, {}, {}", fd, fj, fk),
+            Instruction::FcopysignD { fd, fj, fk } => write!(f, "fcopysign.d {}, {}, {}", fd, fj, fk),
+            Instruction::FscalebS { fd, fj, fk } => write!(f, "fscaleb.s {}, {}, {}", fd, fj, fk),
+            Instruction::FscalebD { fd, fj, fk } => write!(f, "fscaleb.d {}, {}, {}", fd, fj, fk),
+            Instruction::FlogbS { fd, fj } => write!(f, "flogb.s {}, {}", fd, fj),
+            Instruction::FlogbD { fd, fj } => write!(f, "flogb.d {}, {}", fd, fj),
+            Instruction::FclassS { fd, fj } => write!(f, "fclass.s {}, {}", fd, fj),
+            Instruction::FclassD { fd, fj } => write!(f, "fclass.d {}, {}", fd, fj),
+            Instruction::FsgnjS { fd, fj, fk } => write!(f, "fsgnj.s {}, {}, {}", fd, fj, fk),
+            Instruction::FsgnjD { fd, fj, fk } => write!(f, "fsgnj.d {}, {}, {}", fd, fj, fk),
+            Instruction::FsgnjnS { fd, fj, fk } => write!(f, "fsgnjn.s {}, {}, {}", fd, fj, fk),
+            Instruction::FsgnjnD { fd, fj, fk } => write!(f, "fsgnjn.d {}, {}, {}", fd, fj, fk),
+            Instruction::FsgnjxS { fd, fj, fk } => write!(f, "fsgnjx.s {}, {}, {}", fd, fj, fk),
+            Instruction::FsgnjxD { fd, fj, fk } => write!(f, "fsgnjx.d {}, {}, {}", fd, fj, fk),
+            Instruction::Revb2H { rd, rj } => write!(f, "revb.2h {}, {}", rd, rj),
+            Instruction::Revb4H { rd, rj } => write!(f, "revb.4h {}, {}", rd, rj),
+            Instruction::Revb2W { rd, rj } => write!(f, "revb.2w {}, {}", rd, rj),
+            Instruction::Bitrev4B { rd, rj } => write!(f, "bitrev.4b {}, {}", rd, rj),
+            Instruction::Bitrev8B { rd, rj } => write!(f, "bitrev.8b {}, {}", rd, rj),
+            Instruction::Cpucfg { rd, rj } => write!(f, "cpucfg {}, {}", rd, rj),
+            Instruction::RdtimelW { rd, rj } => write!(f, "rdtimel.w {}, {}", rd, rj),
+            Instruction::RdtimehW { rd, rj } => write!(f, "rdtimeh.w {}, {}", rd, rj),
+            Instruction::AsrtleD { rj, rk } => write!(f, "asrtle.d {}, {}", rj, rk),
+            Instruction::AsrgtD { rj, rk } => write!(f, "asrgt.d {}, {}", rj, rk),
             Instruction::Dbar { hint } => write!(f, "dbar {}", hint),
             Instruction::ExtWH { rd, rj } => write!(f, "ext.w.h {}, {}", rd, rj),
             Instruction::ExtWB { rd, rj } => write!(f, "ext.w.b {}, {}", rd, rj),
@@ -2331,6 +2651,11 @@ impl Backend for LoongArch64Backend {
                 ("recv", 207), ("send", 206), ("shutdown", 210),
                 ("bind", 200), ("listen", 201), ("accept", 202),
                 ("setsockopt", 194),
+                // ── Phase 8: additional POSIX syscalls for full coverage ──
+                ("dup3", 24),         // dup3 (like dup2 but with flags)
+                ("lstat", 82),        // lstat (stat on symlink)
+                ("recvfrom", 207),    // recvfrom (same as recv on LoongArch generic ABI)
+                ("sendto", 206),      // sendto (same as send on LoongArch generic ABI)
                 // ── W7: more POSIX syscall stubs ──
                 // waitpid is the same syscall as wait4 (caller passes NULL
                 // rusage in $a3 if it doesn't care).
