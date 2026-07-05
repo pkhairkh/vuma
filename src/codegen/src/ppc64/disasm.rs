@@ -546,6 +546,22 @@ impl Instruction {
                         rb: gpr_from_bits(rb),
                     })
                 }
+                // DIVDU (xo=457)
+                457 => {
+                    return Ok(Instruction::Divdu {
+                        rt: gpr_from_bits(rt),
+                        ra: gpr_from_bits(ra),
+                        rb: gpr_from_bits(rb),
+                    })
+                }
+                // DIVWU (xo=455)
+                455 => {
+                    return Ok(Instruction::Divwu {
+                        rt: gpr_from_bits(rt),
+                        ra: gpr_from_bits(ra),
+                        rb: gpr_from_bits(rb),
+                    })
+                }
                 // NEG (xo=104)
                 104 => {
                     return Ok(Instruction::Neg {
