@@ -6234,8 +6234,90 @@ impl Backend for Arm32Backend {
                 ("recv", 291), ("send", 290), ("shutdown", 293),
                 ("bind", 282), ("listen", 284), ("accept", 285),
                 ("setsockopt", 294),
+                // ── W7: more POSIX syscall stubs ──
+                // waitpid is the same syscall as wait4 (caller passes NULL
+                // rusage in R3 if it doesn't care).
+                ("waitpid", 114),
+                ("brk", 45),
+                ("clock_gettime", 263),
+                ("gettimeofday", 78),
+                ("rt_sigprocmask", 126),
+                // mmap2 takes the same 6 args as mmap but with the offset
+                // in pages (4096-byte units) rather than bytes; on ARM EABI
+                // args 5-6 are on the caller's stack but a simple stub
+                // suffices for callers that only need 4 args (addr, len,
+                // prot, flags) — the kernel will read R4/R5 for fd/offset.
+                ("mmap2", 192),
             ] {
                 stubs.push((name.to_string(), simple_stub(num)));
+            }
+
+            // rt_sigreturn (173) — special: no args, never returns.
+            // The kernel restores the saved signal context from the stack
+            // and resumes execution at the interrupted PC. We emit just
+            // `MOV R7, #173 ; SVC #0` followed by an UDF trap as a safety
+            // net in case the kernel ever does return (it shouldn't).
+            {
+                let mut code = Vec::new();
+                code.extend(load_immediate_arm32(Gpr::R7, 173));
+                code.extend_from_slice(&encode_svc(Condition::Al, 0));
+                // UDF #0 — undefined instruction trap (0xE7F000F0).
+                code.extend_from_slice(&0xE7F000F0u32.to_le_bytes());
+                stubs.push(("rt_sigreturn".to_string(), code));
+            }
+
+            // strcmp(s1, s2) → int — not a syscall, implemented as a small
+            // assembly loop. Returns the difference (*s1 - *s2) at the first
+            // differing byte (or at the terminating NUL if strings are equal).
+            // Inputs:  R0 = s1, R1 = s2
+            // Clobbers: R0, R1, R2, R3
+            // Returns:  R0 = (*s1 - *s2) (zero iff equal)
+            {
+                let mut code = Vec::new();
+                // strcmp_loop:
+                let loop_start = code.len();
+                // LDRB R2, [R0, #0]
+                code.extend_from_slice(&encode_ls_imm(
+                    Condition::Al, true, true, true, false, true,
+                    Gpr::R0.encoding(), Gpr::R2.encoding(), 0,
+                ));
+                // LDRB R3, [R1, #0]
+                code.extend_from_slice(&encode_ls_imm(
+                    Condition::Al, true, true, true, false, true,
+                    Gpr::R1.encoding(), Gpr::R3.encoding(), 0,
+                ));
+                // CMP R2, R3
+                code.extend_from_slice(&encode_dp_reg(
+                    Condition::Al, DP_CMP, true, Gpr::R2.encoding(), 0, Gpr::R3.encoding(),
+                ));
+                // BNE strcmp_done — target is 6 instructions after BNE,
+                // so offset = (6 - 2) = 4 (target = PC + 24 = PC + 8 + 4*4).
+                code.extend_from_slice(&encode_branch(Condition::Ne, false, 4));
+                // CMP R2, #0  (both bytes equal; if 0, strings match)
+                code.extend_from_slice(&encode_dp_imm(
+                    Condition::Al, DP_CMP, true, Gpr::R2.encoding(), 0, 0, 0,
+                ));
+                // BEQ strcmp_done — target is 4 instructions after BEQ,
+                // so offset = (4 - 2) = 2 (target = PC + 16 = PC + 8 + 2*4).
+                code.extend_from_slice(&encode_branch(Condition::Eq, false, 2));
+                // ADD R0, R0, #1
+                code.extend_from_slice(&encode_dp_imm(
+                    Condition::Al, DP_ADD, false, Gpr::R0.encoding(), Gpr::R0.encoding(), 0, 1,
+                ));
+                // ADD R1, R1, #1
+                code.extend_from_slice(&encode_dp_imm(
+                    Condition::Al, DP_ADD, false, Gpr::R1.encoding(), Gpr::R1.encoding(), 0, 1,
+                ));
+                // B strcmp_loop (backward branch)
+                let loop_back = (loop_start as i32) - (code.len() as i32 + 8);
+                code.extend_from_slice(&encode_branch(Condition::Al, false, loop_back >> 2));
+                // strcmp_done: R0 = R2 - R3
+                code.extend_from_slice(&encode_dp_reg(
+                    Condition::Al, DP_SUB, false, Gpr::R2.encoding(), Gpr::R0.encoding(), Gpr::R3.encoding(),
+                ));
+                // BX LR
+                code.extend_from_slice(&encode_bx(Condition::Al, Gpr::R14.encoding()));
+                stubs.push(("strcmp".to_string(), code));
             }
 
             // futex — 6-arg syscall. Args 1-4 in R0-R3, args 5-6 on the
@@ -6347,6 +6429,11 @@ impl Backend for Arm32Backend {
         func_offsets.insert("__vuma_print_hex".to_string(), runtime_offsets_start);
         func_offsets.insert("__vuma_print_int".to_string(), runtime_offsets_start);
         func_offsets.insert("__vuma_print_newline".to_string(), runtime_offsets_start);
+        // POSIX-friendly aliases: print_int / print_hex point to the same
+        // runtime blob offsets as the __vuma_print_* symbols so that user
+        // code can call them by their bare names.
+        func_offsets.insert("print_int".to_string(), runtime_offsets_start);
+        func_offsets.insert("print_hex".to_string(), runtime_offsets_start);
         current_offset += runtime_code.len();
 
         // __vuma_alloc / __vuma_free stubs go after the runtime blob.
