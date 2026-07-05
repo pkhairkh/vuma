@@ -1427,26 +1427,57 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                 IRInstr::AtomicLoad { dst, addr, ty } => {
                     // Plain load — dbar causes SIGILL on QEMU user-mode.
                     // QEMU user-mode is single-threaded so plain loads are safe.
+                    // Type-aware: use the correct load width so we don't read
+                    // past the end of the atomic cell (which would corrupt
+                    // adjacent memory for I8/I16/I32 atomics).
                     let mut code = Vec::new();
                     let dst_id = dst.as_register().unwrap_or(0);
-                    let _ = ty;
                     // Load address into S0
                     code.extend(encode_load_value(addr, S0, fp, &vreg_slots));
-                    // Plain load from [S0 + 0]
-                    code.extend_from_slice(&Instruction::LdD { rd: S0, rj: S0, imm12: 0 }.encode());
+                    // Type-dispatched plain load from [S0 + 0]
+                    let load = match ty {
+                        IRType::I8 | IRType::U8 => Instruction::LdB { rd: S0, rj: S0, imm12: 0 },
+                        IRType::I16 | IRType::U16 => Instruction::LdH { rd: S0, rj: S0, imm12: 0 },
+                        IRType::I32 | IRType::U32 => Instruction::LdW { rd: S0, rj: S0, imm12: 0 },
+                        _ => Instruction::LdD { rd: S0, rj: S0, imm12: 0 },
+                    };
+                    code.extend_from_slice(&load.encode());
+                    // For signed sub-word loads (LdB/LdH/LdW), the result is
+                    // sign-extended. For unsigned, use LdBu/LdHu/LdWu instead.
+                    // AtomicLoad on unsigned types should zero-extend.
+                    if matches!(ty, IRType::U8 | IRType::U16 | IRType::U32) {
+                        // Replace the last instruction with the unsigned variant.
+                        // Easier: re-encode with the unsigned load.
+                        let unsigned_load = match ty {
+                            IRType::U8 => Instruction::LdBu { rd: S0, rj: S0, imm12: 0 },
+                            IRType::U16 => Instruction::LdHu { rd: S0, rj: S0, imm12: 0 },
+                            IRType::U32 => Instruction::LdWu { rd: S0, rj: S0, imm12: 0 },
+                            _ => unreachable!(),
+                        };
+                        // Overwrite the 4 bytes we just wrote.
+                        let off = code.len() - 4;
+                        code[off..off + 4].copy_from_slice(&unsigned_load.encode());
+                    }
                     // Store result to dst vreg slot
                     code.extend(encode_store_to_vreg(S0, dst_id, fp, &vreg_slots));
                     code
                 }
 
-                IRInstr::AtomicStore { value, addr, ty: _ } => {
+                IRInstr::AtomicStore { value, addr, ty } => {
                     // Plain store — dbar causes SIGILL on QEMU user-mode.
+                    // Type-aware: use the correct store width.
                     let mut code = Vec::new();
                     // Load address into S1, value into S0
                     code.extend(encode_load_value(addr, S1, fp, &vreg_slots));
                     code.extend(encode_load_value(value, S0, fp, &vreg_slots));
-                    // Plain store to [S1 + 0]
-                    code.extend_from_slice(&Instruction::StD { rd: S0, rj: S1, imm12: 0 }.encode());
+                    // Type-dispatched plain store to [S1 + 0]
+                    let store = match ty {
+                        IRType::I8 | IRType::U8 => Instruction::StB { rd: S0, rj: S1, imm12: 0 },
+                        IRType::I16 | IRType::U16 => Instruction::StH { rd: S0, rj: S1, imm12: 0 },
+                        IRType::I32 | IRType::U32 => Instruction::StW { rd: S0, rj: S1, imm12: 0 },
+                        _ => Instruction::StD { rd: S0, rj: S1, imm12: 0 },
+                    };
+                    code.extend_from_slice(&store.encode());
                     code
                 }
 
