@@ -2927,6 +2927,110 @@ fn try_encode_arm_imm(val: u32) -> Option<(u32, u32)> {
     None
 }
 
+/// Emit the 18-instruction body of a 64-bit unsigned division loop.
+///
+/// Register allocation at loop entry:
+///   R0:R1 = dividend (will be shifted to 0 by the end)
+///   R2:R3 = divisor (preserved)
+///   R4:R5 = remainder (init to 0 before loop)
+///   R6:R7 = quotient  (init to 0 before loop)
+///   R8    = loop counter (init to 64 before loop)
+///   R9    = scratch (used to extract dividend MSB)
+///
+/// On exit, R6:R7 = quotient and R4:R5 = remainder.
+///
+/// The loop performs the classic shift-and-subtract long division: for each
+/// of the 64 bit positions (from MSB to LSB), it shifts the next dividend
+/// bit into the remainder, compares the remainder against the divisor, and
+/// if the remainder is greater-or-equal, subtracts the divisor and sets the
+/// corresponding quotient bit.
+///
+/// All branch offsets are computed relative to the loop's first instruction
+/// (byte 0 = `.loop`).
+fn emit_arm32_udiv64_loop() -> Vec<u8> {
+    let mut code = Vec::new();
+    // .loop:                                            ; byte offset (within loop)
+    // MOV  R9, R1, LSR #31   ; R9 = MSB of dividend     ; 0
+    code.extend_from_slice(&encode_dp_shift_imm(
+        Condition::Al, DP_MOV, false, 0,
+        Gpr::R9.encoding(), 1, 31, Gpr::R1.encoding(),
+    ));
+    // MOVS R4, R4, LSL #1    ; rem_lo <<= 1, C = bit31  ; 4
+    code.extend_from_slice(&encode_dp_shift_imm(
+        Condition::Al, DP_MOV, true, 0,
+        Gpr::R4.encoding(), 0, 1, Gpr::R4.encoding(),
+    ));
+    // ADC  R5, R5, R5        ; rem_hi = (rem_hi<<1) + C  ; 8
+    code.extend_from_slice(&encode_dp_reg(
+        Condition::Al, DP_ADC, false,
+        Gpr::R5.encoding(), Gpr::R5.encoding(), Gpr::R5.encoding(),
+    ));
+    // ORR  R4, R4, R9        ; rem_lo |= dividend MSB   ; 12
+    code.extend_from_slice(&encode_dp_reg(
+        Condition::Al, DP_ORR, false,
+        Gpr::R4.encoding(), Gpr::R4.encoding(), Gpr::R9.encoding(),
+    ));
+    // MOVS R0, R0, LSL #1    ; div_lo <<= 1, C = bit31  ; 16
+    code.extend_from_slice(&encode_dp_shift_imm(
+        Condition::Al, DP_MOV, true, 0,
+        Gpr::R0.encoding(), 0, 1, Gpr::R0.encoding(),
+    ));
+    // ADC  R1, R1, R1        ; div_hi = (div_hi<<1) + C ; 20
+    code.extend_from_slice(&encode_dp_reg(
+        Condition::Al, DP_ADC, false,
+        Gpr::R1.encoding(), Gpr::R1.encoding(), Gpr::R1.encoding(),
+    ));
+    // MOVS R6, R6, LSL #1    ; quot_lo <<= 1, C = bit31 ; 24
+    code.extend_from_slice(&encode_dp_shift_imm(
+        Condition::Al, DP_MOV, true, 0,
+        Gpr::R6.encoding(), 0, 1, Gpr::R6.encoding(),
+    ));
+    // ADC  R7, R7, R7        ; quot_hi = (quot_hi<<1)+C ; 28
+    code.extend_from_slice(&encode_dp_reg(
+        Condition::Al, DP_ADC, false,
+        Gpr::R7.encoding(), Gpr::R7.encoding(), Gpr::R7.encoding(),
+    ));
+    // CMP  R5, R3            ; compare rem_hi vs dvsr_hi; 32
+    code.extend_from_slice(&encode_dp_reg(
+        Condition::Al, DP_CMP, true,
+        Gpr::R5.encoding(), 0, Gpr::R3.encoding(),
+    ));
+    // BHI  +2 (to .skip_sub at byte 52)                 ; 36
+    code.extend_from_slice(&encode_branch(Condition::Hi, false, 2));
+    // BLO  +4 (to .shift_sub at byte 64)                ; 40
+    code.extend_from_slice(&encode_branch(Condition::Cc, false, 4));
+    // CMP  R4, R2            ; high equal, compare low  ; 44
+    code.extend_from_slice(&encode_dp_reg(
+        Condition::Al, DP_CMP, true,
+        Gpr::R4.encoding(), 0, Gpr::R2.encoding(),
+    ));
+    // BLO  +2 (to .shift_sub at byte 64)                ; 48
+    code.extend_from_slice(&encode_branch(Condition::Cc, false, 2));
+    // .skip_sub: SUBS R4, R4, R2  ; rem_lo -= dvsr_lo   ; 52
+    code.extend_from_slice(&encode_dp_reg(
+        Condition::Al, DP_SUB, true,
+        Gpr::R4.encoding(), Gpr::R4.encoding(), Gpr::R2.encoding(),
+    ));
+    // SBC  R5, R5, R3        ; rem_hi -= dvsr_hi - borrow ; 56
+    code.extend_from_slice(&encode_dp_reg(
+        Condition::Al, DP_SBC, false,
+        Gpr::R5.encoding(), Gpr::R5.encoding(), Gpr::R3.encoding(),
+    ));
+    // ORR  R6, R6, #1        ; quot_lo |= 1            ; 60
+    code.extend_from_slice(&encode_dp_imm(
+        Condition::Al, DP_ORR, false,
+        Gpr::R6.encoding(), Gpr::R6.encoding(), 0, 1,
+    ));
+    // .shift_sub: SUBS R8, R8, #1   ; counter--         ; 64
+    code.extend_from_slice(&encode_dp_imm(
+        Condition::Al, DP_SUB, true,
+        Gpr::R8.encoding(), Gpr::R8.encoding(), 0, 1,
+    ));
+    // BNE  -19 (to .loop at byte 0)                     ; 68
+    code.extend_from_slice(&encode_branch(Condition::Ne, false, -19));
+    code
+}
+
 /// Generate ARM32 machine code to load a 32-bit immediate value into a register.
 ///
 /// For values that fit in the ARM rotated-immediate format, emits a single
@@ -3871,7 +3975,7 @@ impl Backend for Arm32Backend {
             for instr in &block.instructions {
                 let encoded: Vec<u8> = match instr {
                     // ── BinOp (generic) ──
-                    crate::ir::IRInstr::BinOp { op, dst, lhs, rhs, .. } => {
+                    crate::ir::IRInstr::BinOp { op, dst, lhs, rhs, ty } => {
                         let dst_id = dst.as_register().unwrap_or(0);
                         let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
                         let mut code = Vec::new();
@@ -4077,186 +4181,552 @@ impl Backend for Arm32Backend {
                                 code.extend(ss_store_32_zero(Gpr::R0, dst_offset, fs));
                             }
                             BinOpKind::SDiv | BinOpKind::UDiv => {
-                                // Software division: R0 = R0 / R1
-                                code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R0));
-                                code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::R1));
+                                // Detect 64-bit division: when ty is I64/U64,
+                                // use the 64-bit shift-and-subtract algorithm.
+                                // Otherwise (32-bit-or-narrower types and the
+                                // default `None`), fall back to the 32-bit
+                                // software-division loop.
+                                let is_64bit = match ty.as_ref() {
+                                    Some(crate::ir::IRType::I64)
+                                    | Some(crate::ir::IRType::U64) => true,
+                                    _ => false,
+                                };
 
-                                // For signed division, normalize the signs of
-                                // dividend and divisor before running the
-                                // unsigned division loop, then negate the
-                                // quotient if exactly one operand was negative.
-                                // R12 holds the XOR-of-signs flag (0 = same,
-                                // 1 = differ).
-                                if matches!(op, BinOpKind::SDiv) {
-                                    // TST R0, #0x80000000  (sign bit of dividend)
-                                    if let Some((rot, imm8)) = try_encode_arm_imm(0x8000_0000) {
+                                if is_64bit {
+                                    // === 64-bit SDiv / UDiv ===
+                                    // Load dividend into R0:R1 and divisor into R2:R3.
+                                    code.extend(ss_load_value_64(
+                                        Gpr::R0, Gpr::R1, lhs, &vreg_stack_slots,
+                                    ));
+                                    code.extend(ss_load_value_64(
+                                        Gpr::R2, Gpr::R3, rhs, &vreg_stack_slots,
+                                    ));
+
+                                    // PUSH {R4, R5, R6, R7, R8, R9} — save
+                                    // callee-saved registers we clobber below.
+                                    // Register list: (1<<4)|(1<<5)|(1<<6)|(1<<7)|(1<<8)|(1<<9) = 0x03F0.
+                                    code.extend_from_slice(&encode_stm(
+                                        Condition::Al, true, false, false, true,
+                                        Gpr::R13.encoding(), 0x03F0,
+                                    ));
+
+                                    if matches!(op, BinOpKind::SDiv) {
+                                        // Signed division: normalize dividend
+                                        // and divisor to be non-negative, then
+                                        // run the unsigned 64-bit division
+                                        // loop, then negate the quotient if
+                                        // exactly one operand was negative.
+                                        // R12 holds the XOR-of-signs flag
+                                        // (0 = same, 1 = differ).
+                                        //
+                                        // TST R1, #0x80000000  (sign bit of dividend_hi)
+                                        if let Some((rot, imm8)) = try_encode_arm_imm(0x8000_0000) {
+                                            code.extend_from_slice(&encode_dp_imm(
+                                                Condition::Al, DP_TST, true,
+                                                Gpr::R1.encoding(), 0, rot, imm8,
+                                            ));
+                                        }
+                                        // R12 = (R1 < 0) ? 1 : 0  (MOVPL/MOVMI do not update flags)
                                         code.extend_from_slice(&encode_dp_imm(
-                                            Condition::Al, DP_TST, true,
-                                            Gpr::R0.encoding(), 0, rot, imm8,
+                                            Condition::Pl, DP_MOV, false, 0,
+                                            Gpr::R12.encoding(), 0, 0,
+                                        )); // MOVPL R12, #0
+                                        code.extend_from_slice(&encode_dp_imm(
+                                            Condition::Mi, DP_MOV, false, 0,
+                                            Gpr::R12.encoding(), 0, 1,
+                                        )); // MOVMI R12, #1
+                                        // BEQ +1 (skip 64-bit negate if positive)
+                                        code.extend_from_slice(&encode_branch(
+                                            Condition::Eq, false, 1,
+                                        ));
+                                        // RSBS R0, R0, #0  (low word, sets C = !borrow)
+                                        code.extend_from_slice(&encode_dp_imm(
+                                            Condition::Al, DP_RSB, true,
+                                            Gpr::R0.encoding(), Gpr::R0.encoding(), 0, 0,
+                                        ));
+                                        // SBC R1, R1, #0   (high word, with borrow)
+                                        code.extend_from_slice(&encode_dp_imm(
+                                            Condition::Al, DP_SBC, false,
+                                            Gpr::R1.encoding(), Gpr::R1.encoding(), 0, 0,
+                                        ));
+                                        // TST R3, #0x80000000  (sign bit of divisor_hi)
+                                        if let Some((rot, imm8)) = try_encode_arm_imm(0x8000_0000) {
+                                            code.extend_from_slice(&encode_dp_imm(
+                                                Condition::Al, DP_TST, true,
+                                                Gpr::R3.encoding(), 0, rot, imm8,
+                                            ));
+                                        }
+                                        // Toggle R12 if R3 < 0  → R12 = (signs differ)
+                                        code.extend_from_slice(&encode_dp_imm(
+                                            Condition::Mi, DP_EOR, false,
+                                            Gpr::R12.encoding(), Gpr::R12.encoding(), 0, 1,
+                                        )); // EORMI R12, R12, #1
+                                        // BEQ +1 (skip 64-bit negate if positive)
+                                        code.extend_from_slice(&encode_branch(
+                                            Condition::Eq, false, 1,
+                                        ));
+                                        // RSBS R2, R2, #0
+                                        code.extend_from_slice(&encode_dp_imm(
+                                            Condition::Al, DP_RSB, true,
+                                            Gpr::R2.encoding(), Gpr::R2.encoding(), 0, 0,
+                                        ));
+                                        // SBC R3, R3, #0
+                                        code.extend_from_slice(&encode_dp_imm(
+                                            Condition::Al, DP_SBC, false,
+                                            Gpr::R3.encoding(), Gpr::R3.encoding(), 0, 0,
                                         ));
                                     }
-                                    // R12 = (R0 < 0) ? 1 : 0
-                                    code.extend_from_slice(&encode_dp_imm(
-                                        Condition::Mi, DP_MOV, false, 0,
-                                        Gpr::R12.encoding(), 0, 1,
-                                    )); // MOVMI R12, #1
-                                    code.extend_from_slice(&encode_dp_imm(
-                                        Condition::Pl, DP_MOV, false, 0,
-                                        Gpr::R12.encoding(), 0, 0,
-                                    )); // MOVPL R12, #0
-                                    // TST R1, #0x80000000  (sign bit of divisor)
-                                    if let Some((rot, imm8)) = try_encode_arm_imm(0x8000_0000) {
-                                        code.extend_from_slice(&encode_dp_imm(
-                                            Condition::Al, DP_TST, true,
-                                            Gpr::R1.encoding(), 0, rot, imm8,
-                                        ));
-                                    }
-                                    // Toggle R12 if R1 < 0  → R12 = (signs differ)
-                                    code.extend_from_slice(&encode_dp_imm(
-                                        Condition::Mi, DP_EOR, false,
-                                        Gpr::R12.encoding(), Gpr::R12.encoding(), 0, 1,
-                                    )); // EORMI R12, R12, #1
-                                    // Negate dividend if negative
-                                    code.extend_from_slice(&encode_dp_imm(
-                                        Condition::Mi, 0b0011, false,
-                                        Gpr::R0.encoding(), Gpr::R0.encoding(), 0, 0,
-                                    )); // RSBMI R0, R0, #0
-                                    // Negate divisor if negative
-                                    code.extend_from_slice(&encode_dp_imm(
-                                        Condition::Mi, 0b0011, false,
-                                        Gpr::R1.encoding(), Gpr::R1.encoding(), 0, 0,
-                                    )); // RSBMI R1, R1, #0
-                                }
 
-                                // MOV R2, #0 (quotient)
-                                code.extend_from_slice(&0xE3A02000u32.to_le_bytes());
-                                // MOV R3, R0 (remainder)
-                                code.extend_from_slice(&0xE1A03000u32.to_le_bytes());
-                                // CMP R1, #0
-                                code.extend_from_slice(&0xE3510000u32.to_le_bytes());
-                                // BEQ +3 (to done)
-                                code.extend_from_slice(&0x0A000003u32.to_le_bytes());
-                                // loop: CMP R3, R1
-                                code.extend_from_slice(&0xE1530001u32.to_le_bytes());
-                                // BLO +2 (to done)
-                                code.extend_from_slice(&0x3A000002u32.to_le_bytes());
-                                // SUB R3, R3, R1
-                                code.extend_from_slice(&0xE0433001u32.to_le_bytes());
-                                // ADD R2, R2, #1
-                                code.extend_from_slice(&0xE2822001u32.to_le_bytes());
-                                // B loop (-6)
-                                code.extend_from_slice(&0xEAFFFFFAu32.to_le_bytes());
-                                // done: MOV R0, R2 (quotient)
-                                code.extend_from_slice(&0xE1A00002u32.to_le_bytes());
+                                    // Init remainder=0, quotient=0, counter=64.
+                                    // MOV R4, #0 (rem_lo)
+                                    code.extend_from_slice(&encode_dp_imm(
+                                        Condition::Al, DP_MOV, false, 0, Gpr::R4.encoding(), 0, 0,
+                                    ));
+                                    // MOV R5, #0 (rem_hi)
+                                    code.extend_from_slice(&encode_dp_imm(
+                                        Condition::Al, DP_MOV, false, 0, Gpr::R5.encoding(), 0, 0,
+                                    ));
+                                    // MOV R6, #0 (quot_lo)
+                                    code.extend_from_slice(&encode_dp_imm(
+                                        Condition::Al, DP_MOV, false, 0, Gpr::R6.encoding(), 0, 0,
+                                    ));
+                                    // MOV R7, #0 (quot_hi)
+                                    code.extend_from_slice(&encode_dp_imm(
+                                        Condition::Al, DP_MOV, false, 0, Gpr::R7.encoding(), 0, 0,
+                                    ));
+                                    // MOV R8, #64 (counter)
+                                    code.extend_from_slice(&encode_dp_imm(
+                                        Condition::Al, DP_MOV, false, 0, Gpr::R8.encoding(), 0, 64,
+                                    ));
 
-                                // For SDiv: negate quotient if signs differed.
-                                if matches!(op, BinOpKind::SDiv) {
-                                    // CMP R12, #0
+                                    // Check divisor == 0 (skip the loop entirely
+                                    // if so — quotient stays 0). The CMPEQ
+                                    // conditional compare only executes if the
+                                    // preceding CMP set Z (i.e., R2 == 0), so
+                                    // BEQ is taken iff both R2 and R3 are 0.
+                                    // CMP R2, #0
                                     code.extend_from_slice(&encode_dp_imm(
                                         Condition::Al, DP_CMP, true,
-                                        Gpr::R12.encoding(), 0, 0, 0,
+                                        Gpr::R2.encoding(), 0, 0, 0,
                                     ));
-                                    // RSBNE R0, R0, #0
+                                    // CMPEQ R3, #0
                                     code.extend_from_slice(&encode_dp_imm(
-                                        Condition::Ne, 0b0011, false,
-                                        Gpr::R0.encoding(), Gpr::R0.encoding(), 0, 0,
+                                        Condition::Eq, DP_CMP, true,
+                                        Gpr::R3.encoding(), 0, 0, 0,
                                     ));
-                                }
+                                    // BEQ +17 — skip the 18-instruction loop
+                                    // body and land on the post-loop `MOV R0, R6`.
+                                    // The loop body is 18 instructions (72 bytes),
+                                    // so target = (BEQ+4) + 72 = BEQ + 76; the
+                                    // branch offset = (76 - 8) / 4 = 17.
+                                    code.extend_from_slice(&encode_branch(
+                                        Condition::Eq, false, 17,
+                                    ));
 
-                                code.extend(ss_store_32_zero(Gpr::R0, dst_offset, fs));
-                                // Zero high word (32-bit result in 64-bit slot)
-                                code.extend_from_slice(&encode_dp_imm(
-                                    Condition::Al, DP_MOV, false, 0, Gpr::R1.encoding(), 0, 0,
-                                )); // MOV R1, #0
-                                code.extend(ss_store_to_slot(Gpr::R1, dst_offset + 4));
+                                    // === 64-bit unsigned division loop ===
+                                    code.extend(emit_arm32_udiv64_loop());
+
+                                    // === Post-loop ===
+                                    // MOV R0, R6 (quotient low)
+                                    code.extend_from_slice(&encode_dp_reg(
+                                        Condition::Al, DP_MOV, false, 0,
+                                        Gpr::R0.encoding(), Gpr::R6.encoding(),
+                                    ));
+                                    // MOV R1, R7 (quotient high)
+                                    code.extend_from_slice(&encode_dp_reg(
+                                        Condition::Al, DP_MOV, false, 0,
+                                        Gpr::R1.encoding(), Gpr::R7.encoding(),
+                                    ));
+
+                                    // For SDiv: negate quotient if signs differed.
+                                    if matches!(op, BinOpKind::SDiv) {
+                                        // CMP R12, #0
+                                        code.extend_from_slice(&encode_dp_imm(
+                                            Condition::Al, DP_CMP, true,
+                                            Gpr::R12.encoding(), 0, 0, 0,
+                                        ));
+                                        // BEQ +1 (skip negate if signs same)
+                                        code.extend_from_slice(&encode_branch(
+                                            Condition::Eq, false, 1,
+                                        ));
+                                        // RSBS R0, R0, #0
+                                        code.extend_from_slice(&encode_dp_imm(
+                                            Condition::Al, DP_RSB, true,
+                                            Gpr::R0.encoding(), Gpr::R0.encoding(), 0, 0,
+                                        ));
+                                        // SBC R1, R1, #0
+                                        code.extend_from_slice(&encode_dp_imm(
+                                            Condition::Al, DP_SBC, false,
+                                            Gpr::R1.encoding(), Gpr::R1.encoding(), 0, 0,
+                                        ));
+                                    }
+
+                                    // POP {R4, R5, R6, R7, R8, R9}
+                                    code.extend_from_slice(&encode_ldm(
+                                        Condition::Al, false, true, false, true,
+                                        Gpr::R13.encoding(), 0x03F0,
+                                    ));
+
+                                    // Store 64-bit quotient.
+                                    code.extend(ss_store_64(Gpr::R0, Gpr::R1, dst_offset));
+                                } else {
+                                    // === 32-bit SDiv / UDiv (existing) ===
+                                    // Software division: R0 = R0 / R1
+                                    code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R0));
+                                    code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::R1));
+
+                                    // For signed division, normalize the signs of
+                                    // dividend and divisor before running the
+                                    // unsigned division loop, then negate the
+                                    // quotient if exactly one operand was negative.
+                                    // R12 holds the XOR-of-signs flag (0 = same,
+                                    // 1 = differ).
+                                    if matches!(op, BinOpKind::SDiv) {
+                                        // TST R0, #0x80000000  (sign bit of dividend)
+                                        if let Some((rot, imm8)) = try_encode_arm_imm(0x8000_0000) {
+                                            code.extend_from_slice(&encode_dp_imm(
+                                                Condition::Al, DP_TST, true,
+                                                Gpr::R0.encoding(), 0, rot, imm8,
+                                            ));
+                                        }
+                                        // R12 = (R0 < 0) ? 1 : 0
+                                        code.extend_from_slice(&encode_dp_imm(
+                                            Condition::Mi, DP_MOV, false, 0,
+                                            Gpr::R12.encoding(), 0, 1,
+                                        )); // MOVMI R12, #1
+                                        code.extend_from_slice(&encode_dp_imm(
+                                            Condition::Pl, DP_MOV, false, 0,
+                                            Gpr::R12.encoding(), 0, 0,
+                                        )); // MOVPL R12, #0
+                                        // TST R1, #0x80000000  (sign bit of divisor)
+                                        if let Some((rot, imm8)) = try_encode_arm_imm(0x8000_0000) {
+                                            code.extend_from_slice(&encode_dp_imm(
+                                                Condition::Al, DP_TST, true,
+                                                Gpr::R1.encoding(), 0, rot, imm8,
+                                            ));
+                                        }
+                                        // Toggle R12 if R1 < 0  → R12 = (signs differ)
+                                        code.extend_from_slice(&encode_dp_imm(
+                                            Condition::Mi, DP_EOR, false,
+                                            Gpr::R12.encoding(), Gpr::R12.encoding(), 0, 1,
+                                        )); // EORMI R12, R12, #1
+                                        // Negate dividend if negative
+                                        code.extend_from_slice(&encode_dp_imm(
+                                            Condition::Mi, 0b0011, false,
+                                            Gpr::R0.encoding(), Gpr::R0.encoding(), 0, 0,
+                                        )); // RSBMI R0, R0, #0
+                                        // Negate divisor if negative
+                                        code.extend_from_slice(&encode_dp_imm(
+                                            Condition::Mi, 0b0011, false,
+                                            Gpr::R1.encoding(), Gpr::R1.encoding(), 0, 0,
+                                        )); // RSBMI R1, R1, #0
+                                    }
+
+                                    // MOV R2, #0 (quotient)
+                                    code.extend_from_slice(&0xE3A02000u32.to_le_bytes());
+                                    // MOV R3, R0 (remainder)
+                                    code.extend_from_slice(&0xE1A03000u32.to_le_bytes());
+                                    // CMP R1, #0
+                                    code.extend_from_slice(&0xE3510000u32.to_le_bytes());
+                                    // BEQ +3 (to done)
+                                    code.extend_from_slice(&0x0A000003u32.to_le_bytes());
+                                    // loop: CMP R3, R1
+                                    code.extend_from_slice(&0xE1530001u32.to_le_bytes());
+                                    // BLO +2 (to done)
+                                    code.extend_from_slice(&0x3A000002u32.to_le_bytes());
+                                    // SUB R3, R3, R1
+                                    code.extend_from_slice(&0xE0433001u32.to_le_bytes());
+                                    // ADD R2, R2, #1
+                                    code.extend_from_slice(&0xE2822001u32.to_le_bytes());
+                                    // B loop (-6)
+                                    code.extend_from_slice(&0xEAFFFFFAu32.to_le_bytes());
+                                    // done: MOV R0, R2 (quotient)
+                                    code.extend_from_slice(&0xE1A00002u32.to_le_bytes());
+
+                                    // For SDiv: negate quotient if signs differed.
+                                    if matches!(op, BinOpKind::SDiv) {
+                                        // CMP R12, #0
+                                        code.extend_from_slice(&encode_dp_imm(
+                                            Condition::Al, DP_CMP, true,
+                                            Gpr::R12.encoding(), 0, 0, 0,
+                                        ));
+                                        // RSBNE R0, R0, #0
+                                        code.extend_from_slice(&encode_dp_imm(
+                                            Condition::Ne, 0b0011, false,
+                                            Gpr::R0.encoding(), Gpr::R0.encoding(), 0, 0,
+                                        ));
+                                    }
+
+                                    code.extend(ss_store_32_zero(Gpr::R0, dst_offset, fs));
+                                    // Zero high word (32-bit result in 64-bit slot)
+                                    code.extend_from_slice(&encode_dp_imm(
+                                        Condition::Al, DP_MOV, false, 0, Gpr::R1.encoding(), 0, 0,
+                                    )); // MOV R1, #0
+                                    code.extend(ss_store_to_slot(Gpr::R1, dst_offset + 4));
+                                }
                             }
                             BinOpKind::SRem | BinOpKind::URem => {
-                                // Software modulo: R0 = R0 % R1 (remainder)
-                                code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R0));
-                                code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::R1));
+                                // Detect 64-bit remainder: when ty is I64/U64,
+                                // use the 64-bit shift-and-subtract algorithm
+                                // and return the remainder instead of the
+                                // quotient. Otherwise, fall back to the 32-bit
+                                // software-division loop.
+                                let is_64bit = match ty.as_ref() {
+                                    Some(crate::ir::IRType::I64)
+                                    | Some(crate::ir::IRType::U64) => true,
+                                    _ => false,
+                                };
 
-                                // For signed remainder, normalize signs of
-                                // dividend and divisor before running the
-                                // unsigned division loop, then negate the
-                                // remainder if the dividend was negative.
-                                // R12 holds the dividend-sign flag (1 = was neg).
-                                if matches!(op, BinOpKind::SRem) {
-                                    // TST R0, #0x80000000  (sign bit of dividend)
-                                    if let Some((rot, imm8)) = try_encode_arm_imm(0x8000_0000) {
+                                if is_64bit {
+                                    // === 64-bit SRem / URem ===
+                                    // Load dividend into R0:R1 and divisor into R2:R3.
+                                    code.extend(ss_load_value_64(
+                                        Gpr::R0, Gpr::R1, lhs, &vreg_stack_slots,
+                                    ));
+                                    code.extend(ss_load_value_64(
+                                        Gpr::R2, Gpr::R3, rhs, &vreg_stack_slots,
+                                    ));
+
+                                    // PUSH {R4, R5, R6, R7, R8, R9}
+                                    code.extend_from_slice(&encode_stm(
+                                        Condition::Al, true, false, false, true,
+                                        Gpr::R13.encoding(), 0x03F0,
+                                    ));
+
+                                    if matches!(op, BinOpKind::SRem) {
+                                        // Signed remainder: the sign of the
+                                        // remainder follows the dividend. Track
+                                        // the dividend sign in R12 (1 = was
+                                        // negative), normalize both operands to
+                                        // be non-negative, run the unsigned
+                                        // 64-bit division loop, then negate the
+                                        // remainder if the dividend was negative.
+                                        //
+                                        // TST R1, #0x80000000  (sign bit of dividend_hi)
+                                        if let Some((rot, imm8)) = try_encode_arm_imm(0x8000_0000) {
+                                            code.extend_from_slice(&encode_dp_imm(
+                                                Condition::Al, DP_TST, true,
+                                                Gpr::R1.encoding(), 0, rot, imm8,
+                                            ));
+                                        }
+                                        // R12 = (R1 < 0) ? 1 : 0
                                         code.extend_from_slice(&encode_dp_imm(
-                                            Condition::Al, DP_TST, true,
-                                            Gpr::R0.encoding(), 0, rot, imm8,
+                                            Condition::Pl, DP_MOV, false, 0,
+                                            Gpr::R12.encoding(), 0, 0,
+                                        )); // MOVPL R12, #0
+                                        code.extend_from_slice(&encode_dp_imm(
+                                            Condition::Mi, DP_MOV, false, 0,
+                                            Gpr::R12.encoding(), 0, 1,
+                                        )); // MOVMI R12, #1
+                                        // BEQ +1 (skip 64-bit negate if positive)
+                                        code.extend_from_slice(&encode_branch(
+                                            Condition::Eq, false, 1,
+                                        ));
+                                        // RSBS R0, R0, #0
+                                        code.extend_from_slice(&encode_dp_imm(
+                                            Condition::Al, DP_RSB, true,
+                                            Gpr::R0.encoding(), Gpr::R0.encoding(), 0, 0,
+                                        ));
+                                        // SBC R1, R1, #0
+                                        code.extend_from_slice(&encode_dp_imm(
+                                            Condition::Al, DP_SBC, false,
+                                            Gpr::R1.encoding(), Gpr::R1.encoding(), 0, 0,
+                                        ));
+                                        // TST R3, #0x80000000  (sign bit of divisor_hi)
+                                        if let Some((rot, imm8)) = try_encode_arm_imm(0x8000_0000) {
+                                            code.extend_from_slice(&encode_dp_imm(
+                                                Condition::Al, DP_TST, true,
+                                                Gpr::R3.encoding(), 0, rot, imm8,
+                                            ));
+                                        }
+                                        // BEQ +1 (skip 64-bit negate if positive)
+                                        code.extend_from_slice(&encode_branch(
+                                            Condition::Eq, false, 1,
+                                        ));
+                                        // RSBS R2, R2, #0
+                                        code.extend_from_slice(&encode_dp_imm(
+                                            Condition::Al, DP_RSB, true,
+                                            Gpr::R2.encoding(), Gpr::R2.encoding(), 0, 0,
+                                        ));
+                                        // SBC R3, R3, #0
+                                        code.extend_from_slice(&encode_dp_imm(
+                                            Condition::Al, DP_SBC, false,
+                                            Gpr::R3.encoding(), Gpr::R3.encoding(), 0, 0,
                                         ));
                                     }
-                                    // R12 = (R0 < 0) ? 1 : 0
-                                    code.extend_from_slice(&encode_dp_imm(
-                                        Condition::Mi, DP_MOV, false, 0,
-                                        Gpr::R12.encoding(), 0, 1,
-                                    )); // MOVMI R12, #1
-                                    code.extend_from_slice(&encode_dp_imm(
-                                        Condition::Pl, DP_MOV, false, 0,
-                                        Gpr::R12.encoding(), 0, 0,
-                                    )); // MOVPL R12, #0
-                                    // Negate dividend if negative
-                                    code.extend_from_slice(&encode_dp_imm(
-                                        Condition::Mi, 0b0011, false,
-                                        Gpr::R0.encoding(), Gpr::R0.encoding(), 0, 0,
-                                    )); // RSBMI R0, R0, #0
-                                    // TST R1, #0x80000000  (sign bit of divisor)
-                                    if let Some((rot, imm8)) = try_encode_arm_imm(0x8000_0000) {
-                                        code.extend_from_slice(&encode_dp_imm(
-                                            Condition::Al, DP_TST, true,
-                                            Gpr::R1.encoding(), 0, rot, imm8,
-                                        ));
-                                    }
-                                    // Negate divisor if negative
-                                    code.extend_from_slice(&encode_dp_imm(
-                                        Condition::Mi, 0b0011, false,
-                                        Gpr::R1.encoding(), Gpr::R1.encoding(), 0, 0,
-                                    )); // RSBMI R1, R1, #0
-                                }
 
-                                // MOV R2, #0 (quotient)
-                                code.extend_from_slice(&0xE3A02000u32.to_le_bytes());
-                                // MOV R3, R0 (remainder)
-                                code.extend_from_slice(&0xE1A03000u32.to_le_bytes());
-                                // CMP R1, #0
-                                code.extend_from_slice(&0xE3510000u32.to_le_bytes());
-                                // BEQ +3 (to done)
-                                code.extend_from_slice(&0x0A000003u32.to_le_bytes());
-                                // loop: CMP R3, R1
-                                code.extend_from_slice(&0xE1530001u32.to_le_bytes());
-                                // BLO +2 (to done)
-                                code.extend_from_slice(&0x3A000002u32.to_le_bytes());
-                                // SUB R3, R3, R1
-                                code.extend_from_slice(&0xE0433001u32.to_le_bytes());
-                                // ADD R2, R2, #1
-                                code.extend_from_slice(&0xE2822001u32.to_le_bytes());
-                                // B loop (-6)
-                                code.extend_from_slice(&0xEAFFFFFAu32.to_le_bytes());
-                                // done: MOV R0, R3 (remainder)
-                                code.extend_from_slice(&0xE1A00003u32.to_le_bytes());
+                                    // Init remainder=0, quotient=0, counter=64.
+                                    code.extend_from_slice(&encode_dp_imm(
+                                        Condition::Al, DP_MOV, false, 0, Gpr::R4.encoding(), 0, 0,
+                                    )); // MOV R4, #0 (rem_lo)
+                                    code.extend_from_slice(&encode_dp_imm(
+                                        Condition::Al, DP_MOV, false, 0, Gpr::R5.encoding(), 0, 0,
+                                    )); // MOV R5, #0 (rem_hi)
+                                    code.extend_from_slice(&encode_dp_imm(
+                                        Condition::Al, DP_MOV, false, 0, Gpr::R6.encoding(), 0, 0,
+                                    )); // MOV R6, #0 (quot_lo)
+                                    code.extend_from_slice(&encode_dp_imm(
+                                        Condition::Al, DP_MOV, false, 0, Gpr::R7.encoding(), 0, 0,
+                                    )); // MOV R7, #0 (quot_hi)
+                                    code.extend_from_slice(&encode_dp_imm(
+                                        Condition::Al, DP_MOV, false, 0, Gpr::R8.encoding(), 0, 64,
+                                    )); // MOV R8, #64 (counter)
 
-                                // For SRem: negate remainder if dividend was negative.
-                                if matches!(op, BinOpKind::SRem) {
-                                    // CMP R12, #0
+                                    // Check divisor == 0 — if zero, skip the loop
+                                    // (remainder stays 0, which matches the C
+                                    // semantics of `x % 0` being undefined but
+                                    // returning 0 here).
+                                    // CMP R2, #0
                                     code.extend_from_slice(&encode_dp_imm(
                                         Condition::Al, DP_CMP, true,
-                                        Gpr::R12.encoding(), 0, 0, 0,
+                                        Gpr::R2.encoding(), 0, 0, 0,
                                     ));
-                                    // RSBNE R0, R0, #0
+                                    // CMPEQ R3, #0
                                     code.extend_from_slice(&encode_dp_imm(
-                                        Condition::Ne, 0b0011, false,
-                                        Gpr::R0.encoding(), Gpr::R0.encoding(), 0, 0,
+                                        Condition::Eq, DP_CMP, true,
+                                        Gpr::R3.encoding(), 0, 0, 0,
                                     ));
-                                }
+                                    // BEQ +17 — skip the 18-instruction loop body
+                                    // and land on the post-loop `MOV R0, R4`.
+                                    code.extend_from_slice(&encode_branch(
+                                        Condition::Eq, false, 17,
+                                    ));
 
-                                code.extend(ss_store_32_zero(Gpr::R0, dst_offset, fs));
-                                // Zero high word (32-bit result in 64-bit slot)
-                                code.extend_from_slice(&encode_dp_imm(
-                                    Condition::Al, DP_MOV, false, 0, Gpr::R1.encoding(), 0, 0,
-                                )); // MOV R1, #0
-                                code.extend(ss_store_to_slot(Gpr::R1, dst_offset + 4));
+                                    // === 64-bit unsigned division loop ===
+                                    code.extend(emit_arm32_udiv64_loop());
+
+                                    // === Post-loop ===
+                                    // MOV R0, R4 (remainder low)
+                                    code.extend_from_slice(&encode_dp_reg(
+                                        Condition::Al, DP_MOV, false, 0,
+                                        Gpr::R0.encoding(), Gpr::R4.encoding(),
+                                    ));
+                                    // MOV R1, R5 (remainder high)
+                                    code.extend_from_slice(&encode_dp_reg(
+                                        Condition::Al, DP_MOV, false, 0,
+                                        Gpr::R1.encoding(), Gpr::R5.encoding(),
+                                    ));
+
+                                    // For SRem: negate remainder if dividend was negative.
+                                    if matches!(op, BinOpKind::SRem) {
+                                        // CMP R12, #0
+                                        code.extend_from_slice(&encode_dp_imm(
+                                            Condition::Al, DP_CMP, true,
+                                            Gpr::R12.encoding(), 0, 0, 0,
+                                        ));
+                                        // BEQ +1 (skip negate if dividend was positive)
+                                        code.extend_from_slice(&encode_branch(
+                                            Condition::Eq, false, 1,
+                                        ));
+                                        // RSBS R0, R0, #0
+                                        code.extend_from_slice(&encode_dp_imm(
+                                            Condition::Al, DP_RSB, true,
+                                            Gpr::R0.encoding(), Gpr::R0.encoding(), 0, 0,
+                                        ));
+                                        // SBC R1, R1, #0
+                                        code.extend_from_slice(&encode_dp_imm(
+                                            Condition::Al, DP_SBC, false,
+                                            Gpr::R1.encoding(), Gpr::R1.encoding(), 0, 0,
+                                        ));
+                                    }
+
+                                    // POP {R4, R5, R6, R7, R8, R9}
+                                    code.extend_from_slice(&encode_ldm(
+                                        Condition::Al, false, true, false, true,
+                                        Gpr::R13.encoding(), 0x03F0,
+                                    ));
+
+                                    // Store 64-bit remainder.
+                                    code.extend(ss_store_64(Gpr::R0, Gpr::R1, dst_offset));
+                                } else {
+                                    // === 32-bit SRem / URem (existing) ===
+                                    // Software modulo: R0 = R0 % R1 (remainder)
+                                    code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R0));
+                                    code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::R1));
+
+                                    // For signed remainder, normalize signs of
+                                    // dividend and divisor before running the
+                                    // unsigned division loop, then negate the
+                                    // remainder if the dividend was negative.
+                                    // R12 holds the dividend-sign flag (1 = was neg).
+                                    if matches!(op, BinOpKind::SRem) {
+                                        // TST R0, #0x80000000  (sign bit of dividend)
+                                        if let Some((rot, imm8)) = try_encode_arm_imm(0x8000_0000) {
+                                            code.extend_from_slice(&encode_dp_imm(
+                                                Condition::Al, DP_TST, true,
+                                                Gpr::R0.encoding(), 0, rot, imm8,
+                                            ));
+                                        }
+                                        // R12 = (R0 < 0) ? 1 : 0
+                                        code.extend_from_slice(&encode_dp_imm(
+                                            Condition::Mi, DP_MOV, false, 0,
+                                            Gpr::R12.encoding(), 0, 1,
+                                        )); // MOVMI R12, #1
+                                        code.extend_from_slice(&encode_dp_imm(
+                                            Condition::Pl, DP_MOV, false, 0,
+                                            Gpr::R12.encoding(), 0, 0,
+                                        )); // MOVPL R12, #0
+                                        // Negate dividend if negative
+                                        code.extend_from_slice(&encode_dp_imm(
+                                            Condition::Mi, 0b0011, false,
+                                            Gpr::R0.encoding(), Gpr::R0.encoding(), 0, 0,
+                                        )); // RSBMI R0, R0, #0
+                                        // TST R1, #0x80000000  (sign bit of divisor)
+                                        if let Some((rot, imm8)) = try_encode_arm_imm(0x8000_0000) {
+                                            code.extend_from_slice(&encode_dp_imm(
+                                                Condition::Al, DP_TST, true,
+                                                Gpr::R1.encoding(), 0, rot, imm8,
+                                            ));
+                                        }
+                                        // Negate divisor if negative
+                                        code.extend_from_slice(&encode_dp_imm(
+                                            Condition::Mi, 0b0011, false,
+                                            Gpr::R1.encoding(), Gpr::R1.encoding(), 0, 0,
+                                        )); // RSBMI R1, R1, #0
+                                    }
+
+                                    // MOV R2, #0 (quotient)
+                                    code.extend_from_slice(&0xE3A02000u32.to_le_bytes());
+                                    // MOV R3, R0 (remainder)
+                                    code.extend_from_slice(&0xE1A03000u32.to_le_bytes());
+                                    // CMP R1, #0
+                                    code.extend_from_slice(&0xE3510000u32.to_le_bytes());
+                                    // BEQ +3 (to done)
+                                    code.extend_from_slice(&0x0A000003u32.to_le_bytes());
+                                    // loop: CMP R3, R1
+                                    code.extend_from_slice(&0xE1530001u32.to_le_bytes());
+                                    // BLO +2 (to done)
+                                    code.extend_from_slice(&0x3A000002u32.to_le_bytes());
+                                    // SUB R3, R3, R1
+                                    code.extend_from_slice(&0xE0433001u32.to_le_bytes());
+                                    // ADD R2, R2, #1
+                                    code.extend_from_slice(&0xE2822001u32.to_le_bytes());
+                                    // B loop (-6)
+                                    code.extend_from_slice(&0xEAFFFFFAu32.to_le_bytes());
+                                    // done: MOV R0, R3 (remainder)
+                                    code.extend_from_slice(&0xE1A00003u32.to_le_bytes());
+
+                                    // For SRem: negate remainder if dividend was negative.
+                                    if matches!(op, BinOpKind::SRem) {
+                                        // CMP R12, #0
+                                        code.extend_from_slice(&encode_dp_imm(
+                                            Condition::Al, DP_CMP, true,
+                                            Gpr::R12.encoding(), 0, 0, 0,
+                                        ));
+                                        // RSBNE R0, R0, #0
+                                        code.extend_from_slice(&encode_dp_imm(
+                                            Condition::Ne, 0b0011, false,
+                                            Gpr::R0.encoding(), Gpr::R0.encoding(), 0, 0,
+                                        ));
+                                    }
+
+                                    code.extend(ss_store_32_zero(Gpr::R0, dst_offset, fs));
+                                    // Zero high word (32-bit result in 64-bit slot)
+                                    code.extend_from_slice(&encode_dp_imm(
+                                        Condition::Al, DP_MOV, false, 0, Gpr::R1.encoding(), 0, 0,
+                                    )); // MOV R1, #0
+                                    code.extend(ss_store_to_slot(Gpr::R1, dst_offset + 4));
+                                }
                             }
                             // Comparison BinOps: produce 0 or 1
                             BinOpKind::SLt | BinOpKind::SLe | BinOpKind::SGt | BinOpKind::SGe
@@ -4884,6 +5354,32 @@ impl Backend for Arm32Backend {
                         let mut code = Vec::new();
                         let num_args = args.len();
                         let num_stack_args = if num_args > 4 { num_args - 4 } else { 0 };
+
+                        // AAPCS-VFP calling convention limitation: when calling
+                        // external (C ABI) functions that take floating-point
+                        // arguments, the AAPCS-VFP variant requires float args
+                        // to be passed in VFP registers S0-S15 / D0-D7 rather
+                        // than in R0-R3. The VUMA IR `Call` instruction does
+                        // not carry per-argument type information, so we
+                        // cannot tell which args are floats. We currently pass
+                        // ALL args in R0-R3 (the soft-float / integer ABI),
+                        // which is correct for VUMA-internal calls (both
+                        // caller and callee use the same convention) and for
+                        // extern functions that take only integer/pointer
+                        // args. Extern functions taking float args (e.g. sin,
+                        // cos, sqrt from libm) may receive their arguments in
+                        // the wrong registers under hard-float VFP ABIs. Emit
+                        // a warning so the limitation is visible at compile
+                        // time.
+                        if *is_extern {
+                            log::warn!(
+                                "Extern call to '{}' — float args may not be in D0-D7 \
+                                 (AAPCS-VFP hardfloat convention not implemented; args \
+                                 passed in R0-R3 only)",
+                                target_func
+                            );
+                        }
+
                         // AAPCS requires the stack to remain 8-byte aligned at
                         // a public function boundary. If an odd number of stack
                         // args is passed, pad the allocation up to the next
@@ -5352,26 +5848,68 @@ impl Backend for Arm32Backend {
                     }
 
                     // ── Select ──
-                    crate::ir::IRInstr::Select { dst, cond, true_val, false_val, .. } => {
+                    crate::ir::IRInstr::Select { dst, cond, true_val, false_val, ty } => {
                         let dst_id = dst.as_register().unwrap_or(0);
                         let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
                         let mut code = Vec::new();
-                        // Load false_val into R0 (default)
-                        code.extend(ss_load_value(false_val, &vreg_stack_slots, Gpr::R0));
-                        // Load true_val into R1
-                        code.extend(ss_load_value(true_val, &vreg_stack_slots, Gpr::R1));
-                        // Load cond into R2
-                        code.extend(ss_load_value(cond, &vreg_stack_slots, Gpr::R2));
-                        // CMP R2, #0; MOVNE R0, R1
-                        code.extend_from_slice(&encode_dp_imm(
-                            Condition::Al, DP_CMP, true,
-                            Gpr::R2.encoding(), 0, 0, 0,
-                        ));
-                        code.extend_from_slice(&encode_dp_reg(
-                            Condition::Ne, DP_MOV, false, 0,
-                            Gpr::R0.encoding(), Gpr::R1.encoding(),
-                        ));
-                        code.extend(ss_store_32_zero(Gpr::R0, dst_offset, fs));
+                        // Detect 64-bit select: when ty is I64/U64, select
+                        // between full 64-bit values. Otherwise (32-bit-or-
+                        // narrower types and the default `None`), select
+                        // between the low 32 bits and zero-extend the result.
+                        let is_64bit = match ty.as_ref() {
+                            Some(crate::ir::IRType::I64)
+                            | Some(crate::ir::IRType::U64) => true,
+                            _ => false,
+                        };
+
+                        if is_64bit {
+                            // === 64-bit Select ===
+                            // Load false_val (R0=lo, R1=hi), true_val (R2=lo, R3=hi),
+                            // and cond into R12. If cond != 0, move true_val into
+                            // R0:R1; otherwise leave false_val in R0:R1.
+                            code.extend(ss_load_value_64(
+                                Gpr::R0, Gpr::R1, false_val, &vreg_stack_slots,
+                            ));
+                            code.extend(ss_load_value_64(
+                                Gpr::R2, Gpr::R3, true_val, &vreg_stack_slots,
+                            ));
+                            code.extend(ss_load_value(cond, &vreg_stack_slots, Gpr::R12));
+                            // CMP R12, #0
+                            code.extend_from_slice(&encode_dp_imm(
+                                Condition::Al, DP_CMP, true,
+                                Gpr::R12.encoding(), 0, 0, 0,
+                            ));
+                            // MOVNE R0, R2 (low word)
+                            code.extend_from_slice(&encode_dp_reg(
+                                Condition::Ne, DP_MOV, false, 0,
+                                Gpr::R0.encoding(), Gpr::R2.encoding(),
+                            ));
+                            // MOVNE R1, R3 (high word)
+                            code.extend_from_slice(&encode_dp_reg(
+                                Condition::Ne, DP_MOV, false, 0,
+                                Gpr::R1.encoding(), Gpr::R3.encoding(),
+                            ));
+                            // Store 64-bit result.
+                            code.extend(ss_store_64(Gpr::R0, Gpr::R1, dst_offset));
+                        } else {
+                            // === 32-bit Select (existing) ===
+                            // Load false_val into R0 (default)
+                            code.extend(ss_load_value(false_val, &vreg_stack_slots, Gpr::R0));
+                            // Load true_val into R1
+                            code.extend(ss_load_value(true_val, &vreg_stack_slots, Gpr::R1));
+                            // Load cond into R2
+                            code.extend(ss_load_value(cond, &vreg_stack_slots, Gpr::R2));
+                            // CMP R2, #0; MOVNE R0, R1
+                            code.extend_from_slice(&encode_dp_imm(
+                                Condition::Al, DP_CMP, true,
+                                Gpr::R2.encoding(), 0, 0, 0,
+                            ));
+                            code.extend_from_slice(&encode_dp_reg(
+                                Condition::Ne, DP_MOV, false, 0,
+                                Gpr::R0.encoding(), Gpr::R1.encoding(),
+                            ));
+                            code.extend(ss_store_32_zero(Gpr::R0, dst_offset, fs));
+                        }
                         code
                     }
 
@@ -5431,38 +5969,103 @@ impl Backend for Arm32Backend {
 
                     // ── Constant-time equality check (NO BRANCHES) ──
                     // ct_eq(a, b): diff = a ^ b; result = ((diff | -diff) >> 31) ^ 1
-                    crate::ir::IRInstr::CtEq { dst, lhs, rhs, .. } => {
+                    crate::ir::IRInstr::CtEq { dst, lhs, rhs, ty } => {
                         let dst_id = dst.as_register().unwrap_or(0);
                         let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
                         let mut code = Vec::new();
-                        code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R0));
-                        code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::R1));
-                        // R0 = R0 ^ R1 (diff)
-                        code.extend_from_slice(&encode_dp_reg(
-                            Condition::Al, DP_EOR, false,
-                            Gpr::R0.encoding(), Gpr::R0.encoding(), Gpr::R1.encoding(),
-                        ));
-                        // R2 = -R0 (NEG: RSB R2, R0, #0)
-                        code.extend_from_slice(&encode_dp_imm(
-                            Condition::Al, DP_RSB, false,
-                            Gpr::R2.encoding(), Gpr::R0.encoding(), 0, 0,
-                        ));
-                        // R0 = R0 | R2 (diff | -diff)
-                        code.extend_from_slice(&encode_dp_reg(
-                            Condition::Al, DP_ORR, false,
-                            Gpr::R0.encoding(), Gpr::R0.encoding(), Gpr::R2.encoding(),
-                        ));
-                        // R0 = R0 >> 31 (logical shift right immediate)
-                        code.extend_from_slice(&encode_dp_shift_imm(
-                            Condition::Al, DP_MOV, false, 0,
-                            Gpr::R0.encoding(), 1, 31, Gpr::R0.encoding(),
-                        ));
-                        // R0 = R0 ^ 1 (invert: 1 if equal, 0 if not)
-                        code.extend_from_slice(&encode_dp_imm(
-                            Condition::Al, DP_EOR, false,
-                            Gpr::R0.encoding(), Gpr::R0.encoding(), 0, 1,
-                        ));
-                        code.extend(ss_store_32_zero(Gpr::R0, dst_offset, fs));
+                        // Detect 64-bit comparison: when ty is I64/U64,
+                        // compare both low and high words. Otherwise, compare
+                        // only the low 32 bits.
+                        let is_64bit = match ty.as_ref() {
+                            Some(crate::ir::IRType::I64)
+                            | Some(crate::ir::IRType::U64) => true,
+                            _ => false,
+                        };
+
+                        if is_64bit {
+                            // === 64-bit CtEq (constant-time, NO BRANCHES) ===
+                            // Load lhs (R0=lo, R1=hi) and rhs (R2=lo, R3=hi).
+                            // diff_lo = lhs_lo ^ rhs_lo
+                            // diff_hi = lhs_hi ^ rhs_hi
+                            // combined = diff_lo | diff_hi   (0 iff both words equal)
+                            // result   = (combined == 0) ? 1 : 0
+                            // The (combined == 0) test is done branch-free via
+                            //   t = (combined | -combined) >> 31   ; 1 if combined != 0, else 0
+                            //   result = t ^ 1                      ; flip
+                            // which matches the 32-bit CtEq construction.
+                            code.extend(ss_load_value_64(
+                                Gpr::R0, Gpr::R1, lhs, &vreg_stack_slots,
+                            ));
+                            code.extend(ss_load_value_64(
+                                Gpr::R2, Gpr::R3, rhs, &vreg_stack_slots,
+                            ));
+                            // R0 = R0 ^ R2 (diff_lo)
+                            code.extend_from_slice(&encode_dp_reg(
+                                Condition::Al, DP_EOR, false,
+                                Gpr::R0.encoding(), Gpr::R0.encoding(), Gpr::R2.encoding(),
+                            ));
+                            // R1 = R1 ^ R3 (diff_hi)
+                            code.extend_from_slice(&encode_dp_reg(
+                                Condition::Al, DP_EOR, false,
+                                Gpr::R1.encoding(), Gpr::R1.encoding(), Gpr::R3.encoding(),
+                            ));
+                            // R0 = R0 | R1 (combined diff)
+                            code.extend_from_slice(&encode_dp_reg(
+                                Condition::Al, DP_ORR, false,
+                                Gpr::R0.encoding(), Gpr::R0.encoding(), Gpr::R1.encoding(),
+                            ));
+                            // R2 = -R0 (NEG: RSB R2, R0, #0)
+                            code.extend_from_slice(&encode_dp_imm(
+                                Condition::Al, DP_RSB, false,
+                                Gpr::R2.encoding(), Gpr::R0.encoding(), 0, 0,
+                            ));
+                            // R0 = R0 | R2 (combined | -combined)
+                            code.extend_from_slice(&encode_dp_reg(
+                                Condition::Al, DP_ORR, false,
+                                Gpr::R0.encoding(), Gpr::R0.encoding(), Gpr::R2.encoding(),
+                            ));
+                            // R0 = R0 >> 31 (1 if combined != 0, else 0)
+                            code.extend_from_slice(&encode_dp_shift_imm(
+                                Condition::Al, DP_MOV, false, 0,
+                                Gpr::R0.encoding(), 1, 31, Gpr::R0.encoding(),
+                            ));
+                            // R0 = R0 ^ 1 (invert: 1 if equal, 0 if not)
+                            code.extend_from_slice(&encode_dp_imm(
+                                Condition::Al, DP_EOR, false,
+                                Gpr::R0.encoding(), Gpr::R0.encoding(), 0, 1,
+                            ));
+                            code.extend(ss_store_32_zero(Gpr::R0, dst_offset, fs));
+                        } else {
+                            // === 32-bit CtEq (existing, NO BRANCHES) ===
+                            code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R0));
+                            code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::R1));
+                            // R0 = R0 ^ R1 (diff)
+                            code.extend_from_slice(&encode_dp_reg(
+                                Condition::Al, DP_EOR, false,
+                                Gpr::R0.encoding(), Gpr::R0.encoding(), Gpr::R1.encoding(),
+                            ));
+                            // R2 = -R0 (NEG: RSB R2, R0, #0)
+                            code.extend_from_slice(&encode_dp_imm(
+                                Condition::Al, DP_RSB, false,
+                                Gpr::R2.encoding(), Gpr::R0.encoding(), 0, 0,
+                            ));
+                            // R0 = R0 | R2 (diff | -diff)
+                            code.extend_from_slice(&encode_dp_reg(
+                                Condition::Al, DP_ORR, false,
+                                Gpr::R0.encoding(), Gpr::R0.encoding(), Gpr::R2.encoding(),
+                            ));
+                            // R0 = R0 >> 31 (logical shift right immediate)
+                            code.extend_from_slice(&encode_dp_shift_imm(
+                                Condition::Al, DP_MOV, false, 0,
+                                Gpr::R0.encoding(), 1, 31, Gpr::R0.encoding(),
+                            ));
+                            // R0 = R0 ^ 1 (invert: 1 if equal, 0 if not)
+                            code.extend_from_slice(&encode_dp_imm(
+                                Condition::Al, DP_EOR, false,
+                                Gpr::R0.encoding(), Gpr::R0.encoding(), 0, 1,
+                            ));
+                            code.extend(ss_store_32_zero(Gpr::R0, dst_offset, fs));
+                        }
                         code
                     }
 
