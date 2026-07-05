@@ -4726,7 +4726,7 @@ impl Backend for Mips64Backend {
         // Compute text_offset (must match build_mips64_elf_2seg)
         let elf_header_size: u64 = 64;
         let phdr_size: u64 = 56;
-        let num_phdrs: u64 = 1; // Only text segment — data segment not needed (p_filesz=0)
+        let num_phdrs: u64 = 2; // PT_LOAD (text) + PT_GNU_STACK — MUST match build_mips64_elf_2seg!
         let phdr_end = elf_header_size + num_phdrs * phdr_size;
         let text_offset: u64 = phdr_end; // No page alignment — match ELF builder
 
