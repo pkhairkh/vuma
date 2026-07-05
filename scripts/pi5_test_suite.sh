@@ -75,12 +75,49 @@ done
 if [ -z "$WASMTIME_BIN" ]; then
     echo "  Installing wasmtime..."
     ARCH=$(uname -m)
-    WASMTIME_URL="https://github.com/bytecodealliance/wasmtime/releases/download/v29.0.1/wasmtime-v29.0.1-${ARCH}-linux.tar.xz"
-    curl -sSL "$WASMTIME_URL" -o /tmp/wasmtime.tar.xz 2>/dev/null && {
-        tar xf /tmp/wasmtime.tar.xz -C /tmp/ 2>/dev/null
-        WASMTIME_BIN=$(find /tmp/wasmtime-v29.0.1-${ARCH}-linux -name wasmtime -type f 2>/dev/null | head -1)
-        [ -n "$WASMTIME_BIN" ] && cp "$WASMTIME_BIN" "$REPO_DIR/wasmtime" && WASMTIME_BIN="$REPO_DIR/wasmtime"
-    } || echo "  ⚠ wasmtime install failed (wasm32 backend will be skipped)"
+    WASMTIME_VER="v29.0.1"
+    WASMTIME_URL="https://github.com/bytecodealliance/wasmtime/releases/download/${WASMTIME_VER}/wasmtime-${WASMTIME_VER}-${ARCH}-linux.tar.xz"
+    WASMTIME_TARBALL="/tmp/wasmtime-${WASMTIME_VER}-${ARCH}.tar.xz"
+    WASMTIME_DIR="/tmp/wasmtime-${WASMTIME_VER}-${ARCH}-linux"
+
+    # Try curl first, then wget as fallback. GitHub releases redirect to
+    # Azure blob storage — some networks block one but not the other.
+    # Show the actual error on failure so the user can diagnose.
+    download_ok=0
+    if curl -fSL --retry 3 --retry-delay 2 --connect-timeout 15 -o "$WASMTIME_TARBALL" "$WASMTIME_URL" 2>/tmp/wasmtime_curl_err; then
+        download_ok=1
+    elif wget -q --tries=3 --timeout=30 -O "$WASMTIME_TARBALL" "$WASMTIME_URL" 2>/tmp/wasmtime_wget_err; then
+        download_ok=1
+    fi
+
+    if [ "$download_ok" = "1" ] && [ -s "$WASMTIME_TARBALL" ]; then
+        rm -rf "$WASMTIME_DIR"
+        if tar xf "$WASMTIME_TARBALL" -C /tmp/ 2>/dev/null; then
+            WASMTIME_BIN=$(find "$WASMTIME_DIR" -name wasmtime -type f 2>/dev/null | head -1)
+            if [ -n "$WASMTIME_BIN" ]; then
+                cp "$WASMTIME_BIN" "$REPO_DIR/wasmtime"
+                chmod +x "$REPO_DIR/wasmtime"
+                WASMTIME_BIN="$REPO_DIR/wasmtime"
+                echo "  ✓ Wasmtime installed: $WASMTIME_BIN"
+            else
+                echo "  ⚠ wasmtime binary not found in tarball (wasm32 backend will be skipped)"
+            fi
+        else
+            echo "  ⚠ wasmtime tarball extraction failed (wasm32 backend will be skipped)"
+        fi
+    else
+        echo "  ⚠ wasmtime download failed from:"
+        echo "    $WASMTIME_URL"
+        if [ -s /tmp/wasmtime_curl_err ]; then
+            echo "  curl error: $(tail -1 /tmp/wasmtime_curl_err)"
+        fi
+        echo "  Try manually:"
+        echo "    curl -fSL -o /tmp/wasmtime.tar.xz '$WASMTIME_URL'"
+        echo "    tar xf /tmp/wasmtime.tar.xz -C /tmp/"
+        echo "    cp $WASMTIME_DIR/wasmtime ~/vuma/wasmtime"
+        echo "  (wasm32 backend will be skipped)"
+    fi
+    rm -f "$WASMTIME_TARBALL" /tmp/wasmtime_curl_err /tmp/wasmtime_wget_err
 fi
 echo "  ✓ Wasmtime: ${WASMTIME_BIN:-NOT FOUND}"
 echo ""
