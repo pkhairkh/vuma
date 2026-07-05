@@ -36,3 +36,4 @@ flamegraph.svg
 .idea/
 .vscode/
 *.iml
+wasmtime
