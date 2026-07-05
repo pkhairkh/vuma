@@ -1795,8 +1795,12 @@ fn build_loongarch64_elf_2seg(code: &[u8], base_addr: u64) -> Vec<u8> {
     let phdr_size: u64 = 56;
     let num_phdrs: u64 = 3; // 2x PT_LOAD + 1x PT_GNU_STACK
     let phdr_end = elf_header_size + num_phdrs * phdr_size;
-    // Page-align the text segment start in the file.
-    let text_offset = phdr_end; // No page alignment — code right after headers
+    // Page-align the text segment start — MUST match the text_offset computed
+    // in `link()`. The link function computes:
+    //   text_offset = ((phdr_end + PAGE_SIZE - 1) / PAGE_SIZE) * PAGE_SIZE
+    // = 0x10000 (65536) for phdr_end=232. If these two diverge, R_LARCH_64
+    // relocations (GetAddress) patch the wrong absolute addresses.
+    let text_offset = ((phdr_end + PAGE_SIZE - 1) / PAGE_SIZE) * PAGE_SIZE;
     let text_size = code.len() as u64;
 
     // The data segment starts on the next page after the text.
@@ -1846,14 +1850,19 @@ fn build_loongarch64_elf_2seg(code: &[u8], base_addr: u64) -> Vec<u8> {
     elf.extend_from_slice(&shstrndx.to_le_bytes()); // e_shstrndx
 
     // --- Program Header 1: LOAD (PF_R | PF_X) — .text ---
-    // p_filesz = actual code size, p_memsz = page-aligned (QEMU needs this for mapping)
-    let text_memsz = ((text_size + PAGE_SIZE - 1) / PAGE_SIZE) * PAGE_SIZE;
+    // The text segment starts at file offset `text_offset` (page-aligned) and
+    // extends through the end of the code.  p_offset=0 means the LOAD segment
+    // starts at the beginning of the file (covering the ELF header + phdrs +
+    // padding + code), so p_filesz must cover everything from 0 to the end of
+    // code, page-aligned for QEMU's mmap.
+    let text_segment_end = text_offset + text_size;
+    let text_memsz = ((text_segment_end + PAGE_SIZE - 1) / PAGE_SIZE) * PAGE_SIZE;
     elf.extend_from_slice(&1u32.to_le_bytes()); // p_type = PT_LOAD
     elf.extend_from_slice(&5u32.to_le_bytes()); // p_flags = PF_R | PF_X
     elf.extend_from_slice(&0u64.to_le_bytes()); // p_offset = 0 (include ELF header)
     elf.extend_from_slice(&base_addr.to_le_bytes()); // p_vaddr (page-aligned; p_offset=0 requires alignment)
     elf.extend_from_slice(&base_addr.to_le_bytes()); // p_paddr
-    elf.extend_from_slice(&text_memsz.to_le_bytes()); // p_filesz (cover full page for QEMU)
+    elf.extend_from_slice(&text_memsz.to_le_bytes()); // p_filesz (cover header + padding + code)
     elf.extend_from_slice(&text_memsz.to_le_bytes()); // p_memsz
     elf.extend_from_slice(&PAGE_SIZE.to_le_bytes()); // p_align
 
@@ -2413,8 +2422,12 @@ impl Backend for LoongArch64Backend {
                 // Prologue: 48 bytes (32-byte digit buffer + 8 for $ra + 8 pad)
                 code.extend_from_slice(&Instruction::AddiD { rd: Gpr::Sp, rj: Gpr::Sp, imm12: -48 }.encode());
                 code.extend_from_slice(&Instruction::StD { rd: Gpr::Ra, rj: Gpr::Sp, imm12: 40 }.encode());
-                // if a0 >= 0, skip negative handling
-                code.extend_from_slice(&Instruction::Bge { rj: Gpr::A0, rd: Gpr::R0, offs16: 9 }.encode());
+                // if a0 >= 0, skip negative handling.
+                // Negative block (instructions 3-10): print '-', syscall, negate a0.
+                // Positive label is instruction 11 (t1 = 32).
+                // Bge target = current_index + 1 + offset = 2 + 1 + offset.
+                // To land on instruction 11: offset = 11 - 2 - 1 = 8.
+                code.extend_from_slice(&Instruction::Bge { rj: Gpr::A0, rd: Gpr::R0, offs16: 8 }.encode());
                 // Print '-' (single byte)
                 code.extend_from_slice(&Instruction::AddiD { rd: Gpr::T0, rj: Gpr::R0, imm12: 45 }.encode());
                 code.extend_from_slice(&Instruction::StB { rd: Gpr::T0, rj: Gpr::Sp, imm12: 0 }.encode());
@@ -4496,13 +4509,17 @@ mod tests {
             elf[28], elf[29], elf[30], elf[31],
         ]);
         // The ELF emits 3 program headers (2 PT_LOAD + 1 PT_GNU_STACK),
-        // each 56 bytes, immediately after the 64-byte ELF header:
-        //   text_offset = 64 + 3*56 = 232 (0xE8)
-        //   e_entry     = base_addr + text_offset = 0x120000000 + 0xE8 = 0x1200000E8
+        // each 56 bytes, after the 64-byte ELF header.  The text segment is
+        // page-aligned (64 KB), so:
+        //   phdr_end    = 64 + 3*56 = 232
+        //   text_offset = round_up(phdr_end, 0x10000) = 0x10000 (65536)
+        //   e_entry     = base_addr + text_offset = 0x120000000 + 0x10000 = 0x120010000
         const ELF_HEADER_SIZE: usize = 64;
         const PHDR_SIZE: usize = 56;
         const NUM_PHDRS: usize = 3;
-        let text_offset = ELF_HEADER_SIZE + NUM_PHDRS * PHDR_SIZE; // 232
+        const PAGE_SIZE: usize = 0x10000;
+        let phdr_end = ELF_HEADER_SIZE + NUM_PHDRS * PHDR_SIZE;
+        let text_offset = ((phdr_end + PAGE_SIZE - 1) / PAGE_SIZE) * PAGE_SIZE;
         let expected_entry: u64 = 0x120000000 + text_offset as u64;
         assert_eq!(e_entry, expected_entry, "entry point should point to _start stub");
         // Verify the first instruction at the entry point is BL
