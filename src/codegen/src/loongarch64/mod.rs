@@ -2322,12 +2322,169 @@ impl Backend for LoongArch64Backend {
                 ("recv", 207), ("send", 206), ("shutdown", 210),
                 ("bind", 200), ("listen", 201), ("accept", 202),
                 ("setsockopt", 194),
+                // ── W7: more POSIX syscall stubs ──
+                // waitpid is the same syscall as wait4 (caller passes NULL
+                // rusage in $a3 if it doesn't care).
+                ("waitpid", 260),
+                ("brk", 214),
+                ("clock_gettime", 113),
+                ("gettimeofday", 169),
+                ("rt_sigprocmask", 135),
             ] {
                 let mut code = Vec::new();
                 code.extend_from_slice(&Instruction::AddiD { rd: Gpr::A7, rj: Gpr::R0, imm12: num }.encode());
                 code.extend_from_slice(&Instruction::Syscall.encode());
                 code.extend_from_slice(&Instruction::Jirl { rd: Gpr::R0, rj: Gpr::Ra, offs16: 0 }.encode());
                 stubs.push((name.to_string(), code));
+            }
+
+            // rt_sigreturn (139) — special: no args, never returns.
+            // The kernel restores the saved signal context and resumes
+            // execution at the interrupted PC. We emit just
+            // `addi.d $a7, $r0, 139 ; syscall 0x0` followed by a `break`
+            // trap as a safety net in case the kernel ever does return.
+            {
+                let mut code = Vec::new();
+                code.extend_from_slice(&Instruction::AddiD { rd: Gpr::A7, rj: Gpr::R0, imm12: 139 }.encode());
+                code.extend_from_slice(&Instruction::Syscall.encode());
+                code.extend_from_slice(&Instruction::Break.encode());
+                stubs.push(("rt_sigreturn".to_string(), code));
+            }
+
+            // ── Runtime helpers: print_hex, print_int, strcmp ──
+            // These are not syscalls but small assembly routines that user
+            // code can call by name. They are appended to the syscall-stub
+            // blob and registered in `func_offsets` like ordinary stubs.
+            //
+            // print_hex($a0) — print a0 as 16 lowercase hex digits to stdout.
+            // Clobbers: $a1, $a2, $a7, $t0–$t6. Stack frame: 32 bytes.
+            {
+                let mut code = Vec::new();
+                // Prologue: 32 bytes (16-byte buffer + 8 for $ra + 8 pad)
+                code.extend_from_slice(&Instruction::AddiD { rd: Gpr::Sp, rj: Gpr::Sp, imm12: -32 }.encode());
+                code.extend_from_slice(&Instruction::StD { rd: Gpr::Ra, rj: Gpr::Sp, imm12: 24 }.encode());
+                // t0 = 16 (loop counter), t1 = 60 (initial shift amount)
+                code.extend_from_slice(&Instruction::AddiD { rd: Gpr::T0, rj: Gpr::R0, imm12: 16 }.encode());
+                code.extend_from_slice(&Instruction::AddiD { rd: Gpr::T1, rj: Gpr::R0, imm12: 60 }.encode());
+
+                // hex_loop:
+                let hex_loop_start = code.len();
+                // t2 = (a0 >> t1) & 0xF
+                code.extend_from_slice(&Instruction::SrlD { rd: Gpr::T2, rj: Gpr::A0, rk: Gpr::T1 }.encode());
+                code.extend_from_slice(&Instruction::Andi { rd: Gpr::T2, rj: Gpr::T2, imm12: 0xF }.encode());
+                // t3 = t2 + 48 ('0')
+                code.extend_from_slice(&Instruction::AddiD { rd: Gpr::T3, rj: Gpr::T2, imm12: 48 }.encode());
+                // slti t4, t2, 10 → t4 = 1 if t2 < 10, else 0
+                code.extend_from_slice(&Instruction::Slti { rd: Gpr::T4, rj: Gpr::T2, imm12: 10 }.encode());
+                // bnez t4, +2 (skip the +39 adjustment if t2 < 10)
+                code.extend_from_slice(&Instruction::Bnez { rj: Gpr::T4, offs21: 2 }.encode());
+                // t3 += 39 (87 - 48 = 39, makes '0'+39 = 'a'-10+39 = 'a'+(t2-10) = t2+87)
+                code.extend_from_slice(&Instruction::AddiD { rd: Gpr::T3, rj: Gpr::T3, imm12: 39 }.encode());
+                // skip_add: store t3 at $sp + (16 - t0)
+                // t5 = 16 - t0
+                code.extend_from_slice(&Instruction::AddiD { rd: Gpr::T5, rj: Gpr::R0, imm12: 16 }.encode());
+                code.extend_from_slice(&Instruction::SubD { rd: Gpr::T5, rj: Gpr::T5, rk: Gpr::T0 }.encode());
+                // t6 = $sp + t5
+                code.extend_from_slice(&Instruction::AddD { rd: Gpr::T6, rj: Gpr::Sp, rk: Gpr::T5 }.encode());
+                code.extend_from_slice(&Instruction::StB { rd: Gpr::T3, rj: Gpr::T6, imm12: 0 }.encode());
+                // t0 -= 1, t1 -= 4
+                code.extend_from_slice(&Instruction::AddiD { rd: Gpr::T0, rj: Gpr::T0, imm12: -1 }.encode());
+                code.extend_from_slice(&Instruction::AddiD { rd: Gpr::T1, rj: Gpr::T1, imm12: -4 }.encode());
+                // if t0 != 0, loop (backward branch)
+                let hex_loop_back = ((hex_loop_start as i32) - (code.len() as i32 + 4)) / 4;
+                code.extend_from_slice(&Instruction::Bnez { rj: Gpr::T0, offs21: hex_loop_back }.encode());
+                // sys_write(1, $sp, 16)
+                code.extend_from_slice(&Instruction::AddiD { rd: Gpr::A0, rj: Gpr::R0, imm12: 1 }.encode());
+                code.extend_from_slice(&Instruction::Or { rd: Gpr::A1, rj: Gpr::Sp, rk: Gpr::R0 }.encode());
+                code.extend_from_slice(&Instruction::AddiD { rd: Gpr::A2, rj: Gpr::R0, imm12: 16 }.encode());
+                code.extend_from_slice(&Instruction::AddiD { rd: Gpr::A7, rj: Gpr::R0, imm12: 64 }.encode());
+                code.extend_from_slice(&Instruction::Syscall.encode());
+                // Epilogue
+                code.extend_from_slice(&Instruction::LdD { rd: Gpr::Ra, rj: Gpr::Sp, imm12: 24 }.encode());
+                code.extend_from_slice(&Instruction::AddiD { rd: Gpr::Sp, rj: Gpr::Sp, imm12: 32 }.encode());
+                code.extend_from_slice(&Instruction::Jirl { rd: Gpr::R0, rj: Gpr::Ra, offs16: 0 }.encode());
+                stubs.push(("print_hex".to_string(), code));
+            }
+
+            // print_int($a0) — print a0 as a signed decimal integer to stdout.
+            // Clobbers: $a1, $a2, $a7, $t1–$t5. Stack frame: 48 bytes.
+            {
+                let mut code = Vec::new();
+                // Prologue: 48 bytes (32-byte digit buffer + 8 for $ra + 8 pad)
+                code.extend_from_slice(&Instruction::AddiD { rd: Gpr::Sp, rj: Gpr::Sp, imm12: -48 }.encode());
+                code.extend_from_slice(&Instruction::StD { rd: Gpr::Ra, rj: Gpr::Sp, imm12: 40 }.encode());
+                // if a0 >= 0, skip negative handling
+                code.extend_from_slice(&Instruction::Bge { rj: Gpr::A0, rd: Gpr::R0, offs16: 9 }.encode());
+                // Print '-' (single byte)
+                code.extend_from_slice(&Instruction::AddiD { rd: Gpr::T0, rj: Gpr::R0, imm12: 45 }.encode());
+                code.extend_from_slice(&Instruction::StB { rd: Gpr::T0, rj: Gpr::Sp, imm12: 0 }.encode());
+                code.extend_from_slice(&Instruction::AddiD { rd: Gpr::A0, rj: Gpr::R0, imm12: 1 }.encode());
+                code.extend_from_slice(&Instruction::Or { rd: Gpr::A1, rj: Gpr::Sp, rk: Gpr::R0 }.encode());
+                code.extend_from_slice(&Instruction::AddiD { rd: Gpr::A2, rj: Gpr::R0, imm12: 1 }.encode());
+                code.extend_from_slice(&Instruction::AddiD { rd: Gpr::A7, rj: Gpr::R0, imm12: 64 }.encode());
+                code.extend_from_slice(&Instruction::Syscall.encode());
+                // Negate a0
+                code.extend_from_slice(&Instruction::SubD { rd: Gpr::A0, rj: Gpr::R0, rk: Gpr::A0 }.encode());
+                // positive: t1 = 32 (buffer end offset), t3 = 10 (divisor)
+                code.extend_from_slice(&Instruction::AddiD { rd: Gpr::T1, rj: Gpr::R0, imm12: 32 }.encode());
+                code.extend_from_slice(&Instruction::AddiD { rd: Gpr::T3, rj: Gpr::R0, imm12: 10 }.encode());
+
+                // div_loop:
+                let div_loop_start = code.len();
+                // t2 = a0 / 10 (unsigned — a0 is already non-negative here)
+                code.extend_from_slice(&Instruction::DivDu { rd: Gpr::T2, rj: Gpr::A0, rk: Gpr::T3 }.encode());
+                // t4 = a0 % 10
+                code.extend_from_slice(&Instruction::ModDu { rd: Gpr::T4, rj: Gpr::A0, rk: Gpr::T3 }.encode());
+                // t4 += '0'
+                code.extend_from_slice(&Instruction::AddiD { rd: Gpr::T4, rj: Gpr::T4, imm12: 48 }.encode());
+                // t1 -= 1, then store t4 at $sp + t1
+                code.extend_from_slice(&Instruction::AddiD { rd: Gpr::T1, rj: Gpr::T1, imm12: -1 }.encode());
+                code.extend_from_slice(&Instruction::AddD { rd: Gpr::T5, rj: Gpr::Sp, rk: Gpr::T1 }.encode());
+                code.extend_from_slice(&Instruction::StB { rd: Gpr::T4, rj: Gpr::T5, imm12: 0 }.encode());
+                // a0 = quotient
+                code.extend_from_slice(&Instruction::Or { rd: Gpr::A0, rj: Gpr::T2, rk: Gpr::R0 }.encode());
+                // if a0 != 0, loop (backward branch)
+                let div_loop_back = ((div_loop_start as i32) - (code.len() as i32 + 4)) / 4;
+                code.extend_from_slice(&Instruction::Bnez { rj: Gpr::A0, offs21: div_loop_back }.encode());
+                // sys_write(1, $sp + t1, 32 - t1)
+                code.extend_from_slice(&Instruction::AddiD { rd: Gpr::A0, rj: Gpr::R0, imm12: 1 }.encode());
+                code.extend_from_slice(&Instruction::AddD { rd: Gpr::A1, rj: Gpr::Sp, rk: Gpr::T1 }.encode());
+                code.extend_from_slice(&Instruction::AddiD { rd: Gpr::A2, rj: Gpr::R0, imm12: 32 }.encode());
+                code.extend_from_slice(&Instruction::SubD { rd: Gpr::A2, rj: Gpr::A2, rk: Gpr::T1 }.encode());
+                code.extend_from_slice(&Instruction::AddiD { rd: Gpr::A7, rj: Gpr::R0, imm12: 64 }.encode());
+                code.extend_from_slice(&Instruction::Syscall.encode());
+                // Epilogue
+                code.extend_from_slice(&Instruction::LdD { rd: Gpr::Ra, rj: Gpr::Sp, imm12: 40 }.encode());
+                code.extend_from_slice(&Instruction::AddiD { rd: Gpr::Sp, rj: Gpr::Sp, imm12: 48 }.encode());
+                code.extend_from_slice(&Instruction::Jirl { rd: Gpr::R0, rj: Gpr::Ra, offs16: 0 }.encode());
+                stubs.push(("print_int".to_string(), code));
+            }
+
+            // strcmp($a0 = s1, $a1 = s2) → $a0 = (*s1 - *s2) at first difference
+            // Not a syscall — a small byte-comparison loop.
+            // Clobbers: $a0, $a1, $t0, $t1.
+            {
+                let mut code = Vec::new();
+                // strcmp_loop:
+                let loop_start = code.len();
+                // t0 = *s1
+                code.extend_from_slice(&Instruction::LdBu { rd: Gpr::T0, rj: Gpr::A0, imm12: 0 }.encode());
+                // t1 = *s2
+                code.extend_from_slice(&Instruction::LdBu { rd: Gpr::T1, rj: Gpr::A1, imm12: 0 }.encode());
+                // if t0 != t1, jump to done (5 instructions ahead)
+                code.extend_from_slice(&Instruction::Bne { rj: Gpr::T0, rd: Gpr::T1, offs16: 5 }.encode());
+                // if t0 == 0, strings equal — jump to done (4 instructions ahead)
+                code.extend_from_slice(&Instruction::Beq { rj: Gpr::T0, rd: Gpr::R0, offs16: 4 }.encode());
+                // a0++, a1++
+                code.extend_from_slice(&Instruction::AddiD { rd: Gpr::A0, rj: Gpr::A0, imm12: 1 }.encode());
+                code.extend_from_slice(&Instruction::AddiD { rd: Gpr::A1, rj: Gpr::A1, imm12: 1 }.encode());
+                // B strcmp_loop (backward branch)
+                let loop_back = ((loop_start as i32) - (code.len() as i32 + 4)) / 4;
+                code.extend_from_slice(&Instruction::B { offs26: loop_back }.encode());
+                // done: a0 = t0 - t1
+                code.extend_from_slice(&Instruction::SubD { rd: Gpr::A0, rj: Gpr::T0, rk: Gpr::T1 }.encode());
+                code.extend_from_slice(&Instruction::Jirl { rd: Gpr::R0, rj: Gpr::Ra, offs16: 0 }.encode());
+                stubs.push(("strcmp".to_string(), code));
             }
 
             // open → openat(AT_FDCWD=-100, pathname, flags, mode)
@@ -3099,6 +3256,40 @@ mod tests {
         }
     }
 
+    /// Returns true if `instr`'s encoded bytes contain a 4-byte instruction
+    /// whose opcode field (extracted via `shift`/`mask`) equals `opcode`.
+    ///
+    /// The stack-slot ISel tags every emitted `AllocatedInstruction` with the
+    /// *IR* name (e.g. "Add", "Sub", "Cmp") rather than the LoongArch
+    /// mnemonic. To verify that a specific machine instruction was actually
+    /// emitted, we decode the raw 32-bit words and compare the opcode bits.
+    fn instr_contains_op(instr: &AllocatedInstruction, shift: u32, mask: u32, opcode: u32) -> bool {
+        instr.encoded.chunks_exact(4).any(|chunk| {
+            let word = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+            (word >> shift) & mask == opcode
+        })
+    }
+
+    /// Returns true if any instruction in `instructions` (filtered by IR
+    /// `opcode` name) contains a 4-byte instruction whose opcode field equals
+    /// `opcode`. If `name_filter` is `None`, all instructions are searched.
+    fn any_instr_contains_op(
+        instructions: &[AllocatedInstruction],
+        name_filter: Option<&str>,
+        shift: u32,
+        mask: u32,
+        opcode: u32,
+    ) -> bool {
+        instructions.iter().any(|i| {
+            if let Some(name) = name_filter {
+                if i.opcode != name {
+                    return false;
+                }
+            }
+            instr_contains_op(i, shift, mask, opcode)
+        })
+    }
+
     #[test]
     fn test_isel_add_with_immediate_si12() {
         // dst = lhs + 10 should emit addi.d
@@ -3113,11 +3304,16 @@ mod tests {
         );
         let backend = LoongArch64Backend::new();
         let result = backend.allocate_registers(&func).unwrap();
-        // Should contain an "addi.d" instruction (not just "add.d")
-        let has_addi = result.blocks[0]
-            .instructions
-            .iter()
-            .any(|i| i.opcode == "addi.d");
+        // The stack-slot ISel tags the emitted instruction with the IR name
+        // ("Add"), so we inspect the encoded bytes for an AddiD opcode
+        // (2RI12 format, opcode at bits[31:22]).
+        let has_addi = any_instr_contains_op(
+            &result.blocks[0].instructions,
+            Some("Add"),
+            22,
+            0x3FF,
+            OPC_ADDI_D,
+        );
         assert!(
             has_addi,
             "expected addi.d for small immediate add, got opcodes: {:?}",
@@ -3143,10 +3339,14 @@ mod tests {
         );
         let backend = LoongArch64Backend::new();
         let result = backend.allocate_registers(&func).unwrap();
-        let has_addi = result.blocks[0]
-            .instructions
-            .iter()
-            .any(|i| i.opcode == "addi.d");
+        // Sub with small immediate is lowered as AddiD with a negated imm12.
+        let has_addi = any_instr_contains_op(
+            &result.blocks[0].instructions,
+            Some("Sub"),
+            22,
+            0x3FF,
+            OPC_ADDI_D,
+        );
         assert!(
             has_addi,
             "expected addi.d for small immediate sub, got opcodes: {:?}",
@@ -3172,10 +3372,14 @@ mod tests {
         );
         let backend = LoongArch64Backend::new();
         let result = backend.allocate_registers(&func).unwrap();
-        let has_sub = result.blocks[0]
-            .instructions
-            .iter()
-            .any(|i| i.opcode == "sub.d");
+        // Neg is lowered as SubD $r0, S0 (3R format, opcode at bits[31:15]).
+        let has_sub = any_instr_contains_op(
+            &result.blocks[0].instructions,
+            Some("UnaryOp"),
+            15,
+            0x1FFFF,
+            OPC_SUB_D,
+        );
         assert!(
             has_sub,
             "expected sub.d for neg, got opcodes: {:?}",
@@ -3201,10 +3405,14 @@ mod tests {
         );
         let backend = LoongArch64Backend::new();
         let result = backend.allocate_registers(&func).unwrap();
-        let has_nor = result.blocks[0]
-            .instructions
-            .iter()
-            .any(|i| i.opcode == "nor");
+        // Not is lowered as Nor $r0, S0 (3R format, opcode at bits[31:15]).
+        let has_nor = any_instr_contains_op(
+            &result.blocks[0].instructions,
+            Some("UnaryOp"),
+            15,
+            0x1FFFF,
+            OPC_NOR,
+        );
         assert!(
             has_nor,
             "expected nor for not, got opcodes: {:?}",
@@ -3231,10 +3439,15 @@ mod tests {
         );
         let backend = LoongArch64Backend::new();
         let result = backend.allocate_registers(&func).unwrap();
-        let has_slt = result.blocks[0]
-            .instructions
-            .iter()
-            .any(|i| i.opcode == "slt");
+        // Cmp SLt is lowered via encode_cmp which emits Slt (3R format,
+        // opcode at bits[31:15]).
+        let has_slt = any_instr_contains_op(
+            &result.blocks[0].instructions,
+            Some("Cmp"),
+            15,
+            0x1FFFF,
+            OPC_SLT,
+        );
         assert!(
             has_slt,
             "expected slt for signed less-than, got opcodes: {:?}",
@@ -3260,10 +3473,16 @@ mod tests {
         );
         let backend = LoongArch64Backend::new();
         let result = backend.allocate_registers(&func).unwrap();
-        let has_lu12i = result.blocks[0]
-            .instructions
-            .iter()
-            .any(|i| i.opcode == "lu12i.w");
+        // Large immediate (100000) doesn't fit in si12, so the ISel loads it
+        // via encode_load_imm which begins with Lu12iW (reg1i20 format,
+        // 7-bit opcode at bits[31:25]).
+        let has_lu12i = any_instr_contains_op(
+            &result.blocks[0].instructions,
+            Some("Add"),
+            25,
+            0x7F,
+            OPC_LU12I_W,
+        );
         assert!(
             has_lu12i,
             "expected lu12i.w for large immediate load, got opcodes: {:?}",
@@ -3290,10 +3509,15 @@ mod tests {
         );
         let backend = LoongArch64Backend::new();
         let result = backend.allocate_registers(&func).unwrap();
-        let has_slli = result.blocks[0]
-            .instructions
-            .iter()
-            .any(|i| i.opcode == "slli.d");
+        // BinOp Shl with immediate is lowered as SlliD (reg2i6 format,
+        // 16-bit opcode at bits[31:16]).
+        let has_slli = any_instr_contains_op(
+            &result.blocks[0].instructions,
+            Some("BinOp"),
+            16,
+            0xFFFF,
+            OPC_SLLI_D,
+        );
         assert!(
             has_slli,
             "expected slli.d for shift-by-immediate, got opcodes: {:?}",
@@ -3311,10 +3535,17 @@ mod tests {
         let func = make_ir_func("ret_test", vec![IRInstr::Ret { values: vec![] }]);
         let backend = LoongArch64Backend::new();
         let result = backend.allocate_registers(&func).unwrap();
-        let has_jirl = result.blocks[0]
-            .instructions
-            .iter()
-            .any(|i| i.opcode == "jirl");
+        // The Ret IR instruction itself is a no-op (return value loaded by the
+        // Return terminator). The Jirl is emitted as part of the epilogue in
+        // the "return" terminator instruction (2RI16 format, opcode at
+        // bits[31:26]).
+        let has_jirl = any_instr_contains_op(
+            &result.blocks[0].instructions,
+            Some("return"),
+            26,
+            0x3F,
+            OPC_JIRL,
+        );
         assert!(
             has_jirl,
             "expected jirl for ret, got opcodes: {:?}",
@@ -3342,14 +3573,20 @@ mod tests {
         );
         let backend = LoongArch64Backend::new();
         let result = backend.allocate_registers(&func).unwrap();
-        // The Alloc should produce an instruction that reads $sp
-        let has_sp_read = result.blocks[0].instructions.iter().any(|i| {
-            i.reads.iter().any(|r| r.class == RegClass::Gpr && r.index == Gpr::Sp.encoding())
-                && (i.opcode.contains("addi.d") || i.opcode.contains("add.d") || i.opcode == "Alloc")
-        });
+        // The Alloc instruction computes its address as $fp + alloc_off using
+        // an AddiD instruction (2RI12 format, opcode at bits[31:22]). The
+        // stack-slot ISel does not populate `reads`/`writes`, so we inspect
+        // the encoded bytes instead.
+        let has_addi = any_instr_contains_op(
+            &result.blocks[0].instructions,
+            Some("Alloc"),
+            22,
+            0x3FF,
+            OPC_ADDI_D,
+        );
         assert!(
-            has_sp_read,
-            "expected addi.d/add.d from $sp or Alloc for stack allocation, got opcodes: {:?}",
+            has_addi,
+            "expected addi.d (from $fp) for stack allocation, got opcodes: {:?}",
             result.blocks[0]
                 .instructions
                 .iter()
@@ -3390,13 +3627,19 @@ mod tests {
         );
         let backend = LoongArch64Backend::new();
         let result = backend.allocate_registers(&func).unwrap();
-        // There should be an instruction reading $sp (the alloc offset computation)
-        let has_sp_read = result.blocks[0].instructions.iter().any(|i| {
-            i.reads.iter().any(|r| r.class == RegClass::Gpr && r.index == Gpr::Sp.encoding())
-        });
+        // The Alloc offset computation emits an AddiD instruction reading
+        // $fp. The stack-slot ISel does not populate `reads`/`writes`, so we
+        // check the encoded bytes for an AddiD opcode instead.
+        let has_addi = any_instr_contains_op(
+            &result.blocks[0].instructions,
+            Some("Alloc"),
+            22,
+            0x3FF,
+            OPC_ADDI_D,
+        );
         assert!(
-            has_sp_read,
-            "expected instruction reading $sp for alloc at offset 0, got opcodes: {:?}",
+            has_addi,
+            "expected addi.d for alloc at offset 0, got opcodes: {:?}",
             result.blocks[0]
                 .instructions
                 .iter()
@@ -4252,10 +4495,17 @@ mod tests {
             elf[24], elf[25], elf[26], elf[27],
             elf[28], elf[29], elf[30], elf[31],
         ]);
-        // Entry should be base_addr + text_offset (0x120000000 + 0x10000 = 0x120010000)
-        assert_eq!(e_entry, 0x120010000, "entry point should point to _start stub");
+        // The ELF emits 3 program headers (2 PT_LOAD + 1 PT_GNU_STACK),
+        // each 56 bytes, immediately after the 64-byte ELF header:
+        //   text_offset = 64 + 3*56 = 232 (0xE8)
+        //   e_entry     = base_addr + text_offset = 0x120000000 + 0xE8 = 0x1200000E8
+        const ELF_HEADER_SIZE: usize = 64;
+        const PHDR_SIZE: usize = 56;
+        const NUM_PHDRS: usize = 3;
+        let text_offset = ELF_HEADER_SIZE + NUM_PHDRS * PHDR_SIZE; // 232
+        let expected_entry: u64 = 0x120000000 + text_offset as u64;
+        assert_eq!(e_entry, expected_entry, "entry point should point to _start stub");
         // Verify the first instruction at the entry point is BL
-        let text_offset = 0x10000usize;
         let first_word = u32::from_le_bytes([
             elf[text_offset], elf[text_offset + 1], elf[text_offset + 2], elf[text_offset + 3],
         ]);
@@ -4341,7 +4591,7 @@ mod tests {
 
         // e_phnum at offset 56
         let e_phnum = u16::from_le_bytes([elf[56], elf[57]]);
-        assert_eq!(e_phnum, 2, "should have 2 program headers");
+        assert_eq!(e_phnum, 3, "should have 3 program headers (2 LOAD + 1 GNU_STACK)");
 
         // First program header: LOAD RX (text)
         let ph1_off = e_phoff as usize;
@@ -4356,6 +4606,14 @@ mod tests {
         let p2_flags = u32::from_le_bytes([elf[ph2_off+4], elf[ph2_off+5], elf[ph2_off+6], elf[ph2_off+7]]);
         assert_eq!(p2_type, 1, "second segment should be PT_LOAD");
         assert_eq!(p2_flags, 6, "second segment should be PF_R | PF_W");
+
+        // Third program header: PT_GNU_STACK (non-executable stack)
+        // p_type = 0x6474e551, p_flags = PF_R | PF_W (no PF_X)
+        let ph3_off = ph2_off + 56;
+        let p3_type = u32::from_le_bytes([elf[ph3_off], elf[ph3_off+1], elf[ph3_off+2], elf[ph3_off+3]]);
+        let p3_flags = u32::from_le_bytes([elf[ph3_off+4], elf[ph3_off+5], elf[ph3_off+6], elf[ph3_off+7]]);
+        assert_eq!(p3_type, 0x6474e551, "third segment should be PT_GNU_STACK");
+        assert_eq!(p3_flags, 6, "PT_GNU_STACK should be PF_R | PF_W (no PF_X)");
     }
 }
 pub mod disasm;
