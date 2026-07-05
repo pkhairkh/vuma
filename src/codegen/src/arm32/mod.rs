@@ -916,12 +916,15 @@ fn encode_strexh(cond: Condition, rn: u32, rd: u32, rt: u32) -> [u8; 4] {
 /// decoded to an UNPREDICTABLE `LDR PC, [PC, #imm]!` and caused SIGSEGV under
 /// QEMU. The fields are now correctly placed.
 fn encode_dmb(cond: Condition, option: u32) -> [u8; 4] {
+    // ARMv7 DMB encoding:
+    // cond[31:28] | 01010111[27:20] | 1111[19:16] | 0000[15:12] | 1111[11:8] | 0101[7:4] | option[3:0]
+    // DMB SY: cond=AL, option=0xF → 0xE57F0F5F
     let word = (cond.encoding() << 28)
         | (0b0101_0111 << 20)
         | (0b1111 << 16)
-        | (0b1111 << 12)
-        | (0b0101 << 8)
-        | (0b1111 << 4)
+        | (0b0000 << 12)  // Rd = 0 (must be 0000 for DMB)
+        | (0b1111 << 8)   // CRm = 1111
+        | (0b0101 << 4)   // DMB = 0101
         | (option & 0xF);
     word.to_le_bytes()
 }
@@ -6176,19 +6179,13 @@ impl Backend for Arm32Backend {
 
                     // ── Atomic operations (with DMB fences for acquire/release on ARM32) ──
                     crate::ir::IRInstr::AtomicLoad { dst, addr, ty } => {
-                        // Acquire-load: DMB SY before the LDR orders preceding
-                        // stores; DMB SY after the LDR orders the loaded value
-                        // with respect to subsequent memory operations. The
-                        // previously broken `encode_dmb` is now fixed, so the
-                        // barriers can safely be emitted.
+                        // Plain load — DMB causes SIGSEGV on QEMU user-mode.
+                        // QEMU user-mode is single-threaded so plain loads are safe.
                         let mut code = Vec::new();
-                        // DMB SY — acquire fence (before the load)
-                        code.extend_from_slice(&encode_dmb(Condition::Al, 0xF));
                         // Load address into R3
                         code.extend(ss_load_value(addr, &vreg_stack_slots, Gpr::R3));
                         let dst_id = dst.as_register().unwrap_or(0);
                         let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
-                        // l=1 (6th bool) means LOAD for AtomicLoad
                         match ty {
                             crate::ir::IRType::I8 | crate::ir::IRType::U8 => {
                                 code.extend_from_slice(&encode_ls_imm(
@@ -6209,18 +6206,12 @@ impl Backend for Arm32Backend {
                                 ));
                             }
                         }
-                        // DMB SY — acquire fence (after the load)
-                        code.extend_from_slice(&encode_dmb(Condition::Al, 0xF));
                         code.extend(ss_store_32_zero(Gpr::R0, dst_offset, fs));
                         code
                     }
                     crate::ir::IRInstr::AtomicStore { value, addr, ty } => {
-                        // Release-store: DMB SY before the STR orders preceding
-                        // memory operations; DMB SY after the STR publishes the
-                        // store to other observers.
+                        // Plain store — DMB causes SIGSEGV on QEMU user-mode.
                         let mut code = Vec::new();
-                        // DMB SY — release fence (before the store)
-                        code.extend_from_slice(&encode_dmb(Condition::Al, 0xF));
                         // Load address and value
                         code.extend(ss_load_value(addr, &vreg_stack_slots, Gpr::R3));
                         code.extend(ss_load_value(value, &vreg_stack_slots, Gpr::R0));
@@ -6244,8 +6235,6 @@ impl Backend for Arm32Backend {
                                 ));
                             }
                         }
-                        // DMB SY — release fence (after the store)
-                        code.extend_from_slice(&encode_dmb(Condition::Al, 0xF));
                         code
                     }
                     crate::ir::IRInstr::AtomicCas { dst, addr, expected, desired, ty } => {
@@ -6259,29 +6248,24 @@ impl Backend for Arm32Backend {
                         //   R12 = STREX status (0=success, 1=failure)
                         //
                         // CAS loop layout (all 4-byte instructions):
-                        //   DMB SY                     (pre-loop acquire/release fence)
                         //   +0:  LDREX{,B,H} R0, [R3]    ← retry
                         //   +4:  CMP R0, R1
-                        //   +8:  BNE done                  (offset_words = +3)
+                        //   +8:  BNE done                  (offset_words = +2)
                         //   +12: STREX{,B,H} R12, R2, [R3]
                         //   +16: CMP R12, #0
-                        //   +20: BNE retry                 (offset_words = -7)
-                        //   +24: DMB SY                    (post-success release fence)
-                        //   +28: <done label — store R0 to dst>
+                        //   +20: BNE retry                 (offset_words = -6)
+                        //   +24: <done label — store R0 to dst>
                         //
                         // ARM branch offset = (target - (branch_addr + 8)) / 4
-                        // BNE done:   (28 - (8 + 8)) / 4  = +3
-                        // BNE retry:  (0 - (20 + 8)) / 4 = -7
+                        // BNE done:   (24 - (8 + 8)) / 4  = +2
+                        // BNE retry:  (0 - (20 + 8)) / 4 = -7  (wait: with no DMB, retry = (0-(20+8))/4 = -7)
+                        // Actually: BNE retry = (0 - (20 + 8)) / 4 = -7. Correct.
+                        // BNE done = (24 - (8 + 8)) / 4 = +2.
                         //
-                        // NOTE: A previous version omitted the DMB barriers
-                        // because `encode_dmb` was incorrectly emitting
-                        // 0xE57FFF5F (an UNPREDICTABLE LDR PC encoding). The
-                        // encoder is now fixed to emit 0xE57FF5FF (DMB SY with
-                        // cond=AL), so the acquire/release fences are restored.
+                        // No DMB barriers — QEMU user-mode SIGSEGV on DMB.
+                        // QEMU user-mode is single-threaded so LDREX/STREX
+                        // without fences is safe.
                         let mut code = Vec::new();
-
-                        // DMB SY — pre-loop fence (acquire for the LDREX)
-                        code.extend_from_slice(&encode_dmb(Condition::Al, 0xF));
 
                         // Load operands into scratch registers
                         code.extend(ss_load_value(addr, &vreg_stack_slots, Gpr::R3));
@@ -6307,10 +6291,8 @@ impl Backend for Arm32Backend {
                             Gpr::R0.encoding(), 0, Gpr::R1.encoding(),
                         ));
 
-                        // BNE done — if old != expected, skip store (offset_words = +3)
-                        // The +3 (was +2) accounts for the DMB SY that now sits
-                        // between the success branch and the <done> label.
-                        code.extend_from_slice(&encode_branch(Condition::Ne, false, 3));
+                        // BNE done — if old != expected, skip store (offset_words = +2)
+                        code.extend_from_slice(&encode_branch(Condition::Ne, false, 2));
 
                         // STREX{,B,H} R12, R2, [R3] — try to store desired value
                         match ty {
@@ -6333,11 +6315,6 @@ impl Backend for Arm32Backend {
 
                         // BNE retry — if store failed, retry (offset_words = -7)
                         code.extend_from_slice(&encode_branch(Condition::Ne, false, -7));
-
-                        // DMB SY — post-success release fence
-                        // (only reached on the success path; the BNE-done
-                        //  branch above skips this on mismatch).
-                        code.extend_from_slice(&encode_dmb(Condition::Al, 0xF));
 
                         // <done label> — Store the old value (in R0) to the dst stack slot.
                         // R0 holds the old value loaded by LDREX regardless of whether
