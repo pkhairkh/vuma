@@ -1,5 +1,4 @@
-VUMA Test Failures — 2026-07-05 16:34:45 UTC
-Total: 1 failures across 1 tests
+VUMA Test Failures — 2026-07-05 16:47:31 UTC
+Total: 0 failures across 0 tests
 Skipped: 1 (architecturally unavailable on target)
 
-  atomics              atomics_demo.vuma                             exp=1264 [('loongarch64', -4, 'CR')]
