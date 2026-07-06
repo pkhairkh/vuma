@@ -4081,10 +4081,12 @@ fn em_machine_for_backend(backend: BackendKind) -> Result<u16> {
         BackendKind::RiscV64 => Ok(EM_RISCV),
         BackendKind::Mips64 => Ok(EM_MIPS),
         BackendKind::PowerPC64 => Ok(EM_PPC64),
+        BackendKind::PowerPC64LE => Ok(EM_PPC64),
         BackendKind::RiscV32 => Ok(EM_RISCV),
         BackendKind::X86_32 => Ok(EM_386),
         BackendKind::LoongArch64 => Ok(EM_LOONGARCH),
         BackendKind::Arm32 => Ok(EM_ARM),
+        BackendKind::Sparc64 => Ok(43), // EM_SPARCV9
         BackendKind::Wasm32 => Err(CodegenError::ElfError(
             "Wasm32 does not use ELF format — use emit_wasm() instead".to_string(),
         )),
@@ -4103,10 +4105,12 @@ fn call_reloc_type_for_backend(backend: BackendKind) -> Result<u32> {
         BackendKind::RiscV64 => Ok(R_RISCV_CALL),
         BackendKind::Mips64 => Ok(R_MIPS_26),
         BackendKind::PowerPC64 => Ok(R_PPC64_REL24),
+        BackendKind::PowerPC64LE => Ok(R_PPC64_REL24),
         BackendKind::RiscV32 => Ok(R_RISCV_CALL),
         BackendKind::X86_32 => Ok(R_386_PC32),
         BackendKind::LoongArch64 => Ok(R_LARCH_B26),
         BackendKind::Arm32 => Ok(R_ARM_CALL),
+        BackendKind::Sparc64 => Ok(30), // R_SPARC_WDISP30
         BackendKind::Wasm32 => {
             Err(CodegenError::ElfError(
                 "Wasm32 does not use ELF relocations — use emit_wasm() instead".to_string(),
@@ -4851,10 +4855,12 @@ pub fn section_alignment_for_backend(backend: BackendKind) -> u64 {
         BackendKind::Arm32 => 4,
         BackendKind::Mips64 => 8,
         BackendKind::PowerPC64 => 16,
+        BackendKind::PowerPC64LE => 16,
         BackendKind::RiscV32 => 4,
         BackendKind::X86_32 => 4,
         BackendKind::LoongArch64 => 8,
         BackendKind::Wasm32 => 4, // Wasm doesn't use ELF, but provide a default
+        BackendKind::Sparc64 => 8,
     }
 }
 

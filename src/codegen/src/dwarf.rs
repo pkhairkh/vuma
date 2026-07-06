@@ -402,8 +402,10 @@ impl DwarfBuilder {
             BackendKind::Arm32        => (4, 2),
             BackendKind::Mips64       => (8, 4),
             BackendKind::PowerPC64    => (8, 4),
+            BackendKind::PowerPC64LE  => (8, 4),
             BackendKind::LoongArch64  => (8, 4),
             BackendKind::Wasm32       => (4, 1),
+            BackendKind::Sparc64      => (8, 4),
         };
         Self::with_config(addr_size, min_inst)
     }
@@ -600,6 +602,7 @@ impl DwarfBuilder {
             BackendKind::Arm32 => self.set_cie_arm32(),
             BackendKind::Mips64 => self.set_cie_mips64(),
             BackendKind::PowerPC64 => self.set_cie_ppc64(),
+            BackendKind::PowerPC64LE => self.set_cie_ppc64(),
             BackendKind::RiscV32 => self.set_cie_riscv64(),
             BackendKind::X86_32 => self.set_cie_x86_64(),
             BackendKind::RiscV32 => self.set_cie_riscv64(),
@@ -615,6 +618,20 @@ impl DwarfBuilder {
                     code_alignment_factor: 1,
                     data_alignment_factor: -4,
                     return_address_reg: 0,
+                });
+            }
+            BackendKind::Sparc64 => {
+                // SPARC V9: %sp = O6 (reg 14), %i7 = return address (reg 31).
+                self.cie = Some(CommonInformationEntry {
+                    cfa_reg: 14,       // %sp (O6)
+                    cfa_offset: 0,
+                    saved_regs: vec![
+                        SavedRegister { reg: 31, cfa_offset: -8 }, // %i7 (return address)
+                        SavedRegister { reg: 30, cfa_offset: -16 }, // %fp (I6)
+                    ],
+                    code_alignment_factor: 4,
+                    data_alignment_factor: -8,
+                    return_address_reg: 31, // %i7
                 });
             }
         }

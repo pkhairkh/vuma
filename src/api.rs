@@ -350,8 +350,10 @@ impl VumaCompiler {
             BackendKind::Arm32,
             BackendKind::Mips64,
             BackendKind::PowerPC64,
+            BackendKind::PowerPC64LE,
             BackendKind::X86_32,
             BackendKind::RiscV32,
+            BackendKind::Sparc64,
         ];
 
         all_kinds
@@ -1359,6 +1361,8 @@ fn parse_target(target: &str) -> Option<vuma_codegen::backend::BackendKind> {
         "arm32" | "arm" => Some(BackendKind::Arm32),
         "mips64" | "mips" => Some(BackendKind::Mips64),
         "ppc64" | "powerpc64" | "ppc" => Some(BackendKind::PowerPC64),
+        "ppc64le" | "powerpc64le" | "ppcle" => Some(BackendKind::PowerPC64LE),
+        "sparc64" | "sparc" => Some(BackendKind::Sparc64),
         _ => None,
     }
 }

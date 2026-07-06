@@ -59,6 +59,7 @@ fn backend_name(kind: BackendKind) -> &'static str {
         BackendKind::Arm32 => "arm32",
         BackendKind::Mips64 => "mips64",
         BackendKind::PowerPC64 => "ppc64",
+        BackendKind::PowerPC64LE => "ppc64le",
         BackendKind::X86_32 => "x86_32",
         BackendKind::RiscV32 => "riscv32",
     }
@@ -75,6 +76,7 @@ fn elf_machine(kind: BackendKind) -> u16 {
         BackendKind::Arm32 => 40,
         BackendKind::Mips64 => 8,
         BackendKind::PowerPC64 => 21,
+        BackendKind::PowerPC64LE => 21,
         BackendKind::X86_32 => 3,
         BackendKind::RiscV32 => 243,
     }

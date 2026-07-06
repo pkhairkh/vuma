@@ -9,7 +9,9 @@ use crate::ir::{size_of_with_ptr_width, alignment_of_with_ptr_width, IRFunction,
 use crate::loongarch64::LoongArch64Backend;
 use crate::mips64::Mips64Backend;
 use crate::ppc64::PPC64Backend;
+use crate::ppc64le::PPC64LEBackend;
 use crate::riscv64::RiscV64Backend;
+use crate::sparc64::Sparc64Backend;
 use crate::x86_64::X86_64Backend;
 use std::collections::HashMap;
 use std::fmt;
@@ -497,12 +499,16 @@ pub enum BackendKind {
     Arm32,
     /// MIPS 64-bit.
     Mips64,
-    /// PowerPC 64-bit.
+    /// PowerPC 64-bit (big-endian).
     PowerPC64,
+    /// PowerPC 64-bit little-endian (ppc64le, ELFv2 ABI).
+    PowerPC64LE,
     /// RISC-V 32-bit.
     RiscV32,
     /// x86-32 (i386).
     X86_32,
+    /// SPARC V9 64-bit (sparc64).
+    Sparc64,
 }
 
 impl BackendKind {
@@ -517,8 +523,10 @@ impl BackendKind {
             BackendKind::Arm32 => "arm32",
             BackendKind::Mips64 => "mips64",
             BackendKind::PowerPC64 => "ppc64",
+            BackendKind::PowerPC64LE => "ppc64le",
             BackendKind::RiscV32 => "riscv32",
             BackendKind::X86_32 => "x86_32",
+            BackendKind::Sparc64 => "sparc64",
         }
     }
 
@@ -535,7 +543,7 @@ impl BackendKind {
             BackendKind::AArch64 | BackendKind::X86_64 | BackendKind::RiscV64 |
             BackendKind::RiscV32 | BackendKind::X86_32 | BackendKind::LoongArch64 |
             BackendKind::Arm32 | BackendKind::Mips64 | BackendKind::Wasm32 |
-            BackendKind::PowerPC64 => BackendTier::Complete,
+            BackendKind::PowerPC64 | BackendKind::PowerPC64LE | BackendKind::Sparc64 => BackendTier::Complete,
         }
     }
 }
@@ -3093,8 +3101,10 @@ pub fn create_backend(kind: BackendKind) -> Result<Box<dyn Backend>, BackendErro
         BackendKind::Arm32 => Ok(Box::new(Arm32Backend::new())),
         BackendKind::Mips64 => Ok(Box::new(Mips64Backend::new())),
         BackendKind::PowerPC64 => Ok(Box::new(PPC64Backend::new())),
+        BackendKind::PowerPC64LE => Ok(Box::new(PPC64LEBackend::new())),
         BackendKind::RiscV32 => Ok(Box::new(crate::riscv32::RiscV32Backend::new())),
         BackendKind::X86_32 => Ok(Box::new(crate::x86_32::X86_32Backend::new())),
+        BackendKind::Sparc64 => Ok(Box::new(Sparc64Backend::new())),
     }
 }
 
