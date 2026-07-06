@@ -33,6 +33,7 @@ pub mod arm64;
 pub mod aarch64_be;
 pub mod m68k;
 pub mod alpha;
+pub mod hppa;
 pub mod backend;
 pub mod control_flow;
 pub mod dwarf;
