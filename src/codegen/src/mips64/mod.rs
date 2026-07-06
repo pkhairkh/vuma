@@ -125,6 +125,7 @@ const FN_SUB_D: u32 = 0x01; // sub.d
 const FN_ADD_D: u32 = 0x00; // add.d
 const FN_MUL_D: u32 = 0x02; // mul.d
 const FN_DIV_D: u32 = 0x03; // div.d
+const FN_C_COND_D: u32 = 0x3C; // c.cond.d (cond field in bits 10:8)
 
 // COP1 fmt field values for move instructions
 const FMT_MF: u32 = 0x00; // MFC1
@@ -779,6 +780,10 @@ pub enum Instruction {
     MulD { fd: Fpr, fs: Fpr, ft: Fpr },
     /// FP Divide Double: `div.d fd, fs, ft` (fmt=D, func=0x03)
     DivD { fd: Fpr, fs: Fpr, ft: Fpr },
+    /// FP Compare Double: `c.cond.d fs, ft` (fmt=D, func=0x3C, cond in bits 10:8)
+    /// The cond field (3 bits) selects the comparison: EQ=0x32→0b010, LT=0x3C→0b100,
+    /// LE=0x3E→0b110. The result is written to FP condition bit 0 (read via CFC1 rt,$25).
+    CCondD { fs: Fpr, ft: Fpr, cond: u32 },
 
     // ── Coprocessor 1: GPR↔FPR Move ────────────────────────────────────
     /// Move Word to Coprocessor 1: `mtc1 rt, fs` (GPR→FPR, 32-bit)
@@ -1343,6 +1348,21 @@ impl Instruction {
             Instruction::DivD { fd, fs, ft } => {
                 encode_cop1_r_type(FMT_D, ft.encoding(), fs.encoding(), fd.encoding(), FN_DIV_D)
             }
+            Instruction::CCondD { fs, ft, cond } => {
+                // c.cond.d fs, ft: COP1 fmt=D | ft | fs | cc(3 bits @ 10:8) | 0(7:6) | FC(5:0)
+                // The `cond` parameter is the full 6-bit FC (function code) selecting
+                // the comparison: 0x32=c.eq.d, 0x3C=c.lt.d, 0x3E=c.le.d (cc field stays 0).
+                // We use encode_cop1_r_type to lay out fmt/ft/fs with funct=FN_C_COND_D as a
+                // base, then patch the low 6 bits with the requested cond so callers pass
+                // the full FC (e.g. 0x32 for EQ).
+                let mut bytes = encode_cop1_r_type(FMT_D, ft.encoding(), fs.encoding(), 0, FN_C_COND_D);
+                let mut word = u32::from_le_bytes(bytes);
+                // Clear bits 5:0 and OR in cond.
+                word &= !0x3F;
+                word |= cond & 0x3F;
+                bytes = word.to_le_bytes();
+                bytes
+            }
 
             // ── Coprocessor 1: GPR↔FPR Move ────────────────────────────
             // MTC1/DMTC1/MFC1/DMFC1: COP1 fmt[25:21] rt[20:16] fs[15:11] 0[10:0]
@@ -1476,6 +1496,7 @@ impl Instruction {
             Instruction::SubD { .. } => "sub.d",
             Instruction::MulD { .. } => "mul.d",
             Instruction::DivD { .. } => "div.d",
+            Instruction::CCondD { .. } => "c.cond.d",
             Instruction::Mtc1 { .. } => "mtc1",
             Instruction::Mfc1 { .. } => "mfc1",
             Instruction::Dmtc1 { .. } => "dmtc1",
@@ -1588,6 +1609,7 @@ impl fmt::Display for Instruction {
             Instruction::SubD { fd, fs, ft } => write!(f, "sub.d {}, {}, {}", fd, fs, ft),
             Instruction::MulD { fd, fs, ft } => write!(f, "mul.d {}, {}, {}", fd, fs, ft),
             Instruction::DivD { fd, fs, ft } => write!(f, "div.d {}, {}, {}", fd, fs, ft),
+            Instruction::CCondD { fs, ft, cond } => write!(f, "c.{}.d {}, {}", cond, fs, ft),
             Instruction::Mtc1 { rt, fs } => write!(f, "mtc1 {}, {}", rt, fs),
             Instruction::Mfc1 { rt, fs } => write!(f, "mfc1 {}, {}", rt, fs),
             Instruction::Dmtc1 { rt, fs } => write!(f, "dmtc1 {}, {}", rt, fs),
@@ -3112,11 +3134,44 @@ fn mips64_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, 
                 }
 
                 // ── Cmp ──
-                IRInstr::Cmp { kind, dst, lhs, rhs, ty: _ } => {
+                IRInstr::Cmp { kind, dst, lhs, rhs, ty } => {
                     let dst_id = dst.as_register().unwrap_or(0);
                     let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
                     code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::T0));
                     code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::T1));
+
+                    // FP Cmp dispatch: when ty is F32/F64, use c.cond.d and CFC1.
+                    let is_fp = ty.as_ref().map_or(false, |t| matches!(t, IRType::F32 | IRType::F64));
+                    if is_fp {
+                        // Move GPR bit patterns to FPRs: F0=lhs, F2=rhs
+                        code.extend_from_slice(&Instruction::Dmtc1 { rt: Gpr::T0, fs: Fpr::F0 }.encode()); code.extend_from_slice(&encode_nop());
+                        code.extend_from_slice(&Instruction::Dmtc1 { rt: Gpr::T1, fs: Fpr::F2 }.encode()); code.extend_from_slice(&encode_nop());
+
+                        // FP comparison is signed (no unsigned FP), so ULt/UGt/ULe/UGe map to SLt/SGt/SLe/SGe.
+                        // Cond codes (full FC funct): EQ=0x32, LT=0x3C, LE=0x3E.
+                        // For >/>=: swap operands and use LT/LE.
+                        // For Ne: use EQ then invert result with XORI.
+                        let (fs_reg, ft_reg, cond, invert) = match kind {
+                            CmpKind::Eq => (Fpr::F0, Fpr::F2, 0x32u32, false),
+                            CmpKind::Ne => (Fpr::F0, Fpr::F2, 0x32u32, true),
+                            CmpKind::SLt | CmpKind::ULt => (Fpr::F0, Fpr::F2, 0x3Cu32, false),
+                            CmpKind::SLe | CmpKind::ULe => (Fpr::F0, Fpr::F2, 0x3Eu32, false),
+                            CmpKind::SGt | CmpKind::UGt => (Fpr::F2, Fpr::F0, 0x3Cu32, false),
+                            CmpKind::SGe | CmpKind::UGe => (Fpr::F2, Fpr::F0, 0x3Eu32, false),
+                        };
+                        code.extend_from_slice(&Instruction::CCondD { fs: fs_reg, ft: ft_reg, cond }.encode()); code.extend_from_slice(&encode_nop());
+
+                        // Read FP condition via CFC1 (0x44400000 | (rt<<16) | (25<<11))
+                        let cfc1_word: u32 = 0x44400000 | (Gpr::T0.encoding() as u32) << 16 | (25u32 << 11);
+                        code.extend_from_slice(&cfc1_word.to_le_bytes()); code.extend_from_slice(&encode_nop());
+                        // Extract bit 0 (FCC0)
+                        code.extend_from_slice(&Instruction::Andi { rt: Gpr::T0, rs: Gpr::T0, imm: 1 }.encode()); code.extend_from_slice(&encode_nop());
+                        // For Ne: invert
+                        if invert {
+                            code.extend_from_slice(&Instruction::Xori { rt: Gpr::T0, rs: Gpr::T0, imm: 1 }.encode()); code.extend_from_slice(&encode_nop());
+                        }
+                        code.extend(ss_sd(Gpr::T0, dst_off));
+                    } else {
                     match kind {
                         CmpKind::Eq => { code.extend_from_slice(&Instruction::Xor { rd: Gpr::T0, rs: Gpr::T0, rt: Gpr::T1 }.encode()); code.extend_from_slice(&encode_nop()); code.extend_from_slice(&Instruction::Sltiu { rt: Gpr::T0, rs: Gpr::T0, imm: 1 }.encode()); code.extend_from_slice(&encode_nop()); }
                         CmpKind::Ne => { code.extend_from_slice(&Instruction::Xor { rd: Gpr::T0, rs: Gpr::T0, rt: Gpr::T1 }.encode()); code.extend_from_slice(&encode_nop()); code.extend_from_slice(&Instruction::Sltu { rd: Gpr::T0, rs: Gpr::Zero, rt: Gpr::T0 }.encode()); code.extend_from_slice(&encode_nop()); }
@@ -3130,6 +3185,7 @@ fn mips64_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, 
                         CmpKind::UGe => { code.extend_from_slice(&Instruction::Sltu { rd: Gpr::T2, rs: Gpr::T0, rt: Gpr::T1 }.encode()); code.extend_from_slice(&encode_nop()); code.extend_from_slice(&Instruction::Xori { rt: Gpr::T0, rs: Gpr::T2, imm: 1 }.encode()); code.extend_from_slice(&encode_nop()); }
                     }
                     code.extend(ss_sd(Gpr::T0, dst_off));
+                    } // end else (integer path)
                 }
 
                 // ── Load ──
