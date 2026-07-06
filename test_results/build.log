@@ -73,13 +73,19 @@ warning: unused variable: `struct_name`
      |                  ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_struct_name`
 
 warning: `vuma-parser` (lib) generated 3 warnings (run `cargo fix --lib -p vuma-parser` to apply 3 suggestions)
+warning: unused import: `CastKind`
+  --> src/codegen/src/alpha.rs:46:28
+   |
+46 | use crate::ir::{BinOpKind, CastKind, CmpKind, IRFunction, IRInstr, IRType, IRValue, UnaryOpKind};
+   |                            ^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
 warning: unused import: `HashSet`
   --> src/codegen/src/memory_safety.rs:26:33
    |
 26 | use std::collections::{HashMap, HashSet};
    |                                 ^^^^^^^
-   |
-   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
 
 warning: unused imports: `CallNode`, `ScgType`, and `SwitchArm`
   --> src/codegen/src/memory_safety.rs:34:33
@@ -161,16 +167,25 @@ warning: unused variable: `data_offset`
      |
      = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
 
+warning: value assigned to `current_offset` is never read
+   --> src/codegen/src/alpha.rs:521:35
+    |
+521 |     let mut current_offset: i32 = -8; // -8 is first vreg slot (above saved RA/FP at 0/8? no, below)
+    |                                   ^^
+    |
+    = help: maybe it is overwritten before being read?
+    = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
 warning: unused variable: `data_offset`
-    --> src/codegen/src/backend.rs:1838:9
+    --> src/codegen/src/backend.rs:1863:9
      |
-1838 |     let data_offset = data_vaddr - base_addr; // file offset for data segment
+1863 |     let data_offset = data_vaddr - base_addr; // file offset for data segment
      |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_data_offset`
 
 warning: variable does not need to be mutable
-    --> src/codegen/src/backend.rs:2913:13
+    --> src/codegen/src/backend.rs:2938:13
      |
-2913 |         let mut external_symbols: Vec<String> = Vec::new();
+2938 |         let mut external_symbols: Vec<String> = Vec::new();
      |             ----^^^^^^^^^^^^^^^^
      |             |
      |             help: remove this `mut`
@@ -178,29 +193,29 @@ warning: variable does not need to be mutable
      = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
 
 warning: unused variable: `ffi_stub_offset`
-    --> src/codegen/src/backend.rs:2563:13
+    --> src/codegen/src/backend.rs:2588:13
      |
-2563 |         let ffi_stub_offset: usize = start_stub_size; // FFI stub right after _start
+2588 |         let ffi_stub_offset: usize = start_stub_size; // FFI stub right after _start
      |             ^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_ffi_stub_offset`
 
 warning: unreachable pattern
-   --> src/codegen/src/dwarf.rs:609:13
+   --> src/codegen/src/dwarf.rs:615:13
     |
-607 |             BackendKind::RiscV32 => self.set_cie_riscv64(),
+613 |             BackendKind::RiscV32 => self.set_cie_riscv64(),
     |             -------------------- matches all the relevant values
-608 |             BackendKind::X86_32 => self.set_cie_x86_64(),
-609 |             BackendKind::RiscV32 => self.set_cie_riscv64(),
+614 |             BackendKind::X86_32 => self.set_cie_x86_64(),
+615 |             BackendKind::RiscV32 => self.set_cie_riscv64(),
     |             ^^^^^^^^^^^^^^^^^^^^ no value can reach this
     |
     = note: `#[warn(unreachable_patterns)]` (part of `#[warn(unused)]`) on by default
 
 warning: unreachable pattern
-   --> src/codegen/src/dwarf.rs:610:13
+   --> src/codegen/src/dwarf.rs:616:13
     |
-608 |             BackendKind::X86_32 => self.set_cie_x86_64(),
+614 |             BackendKind::X86_32 => self.set_cie_x86_64(),
     |             ------------------- matches all the relevant values
-609 |             BackendKind::RiscV32 => self.set_cie_riscv64(),
-610 |             BackendKind::X86_32 => self.set_cie_x86_64(),
+615 |             BackendKind::RiscV32 => self.set_cie_riscv64(),
+616 |             BackendKind::X86_32 => self.set_cie_x86_64(),
     |             ^^^^^^^^^^^^^^^^^^^ no value can reach this
 
 warning: variable does not need to be mutable
@@ -218,13 +233,12 @@ warning: unused variable: `immediate_scratch_used`
     |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_immediate_scratch_used`
 
 warning: value assigned to `external_symbols` is never read
-    --> src/codegen/src/emit.rs:4197:45
+    --> src/codegen/src/emit.rs:4209:45
      |
-4197 |     let mut external_symbols: Vec<String> = Vec::new();
+4209 |     let mut external_symbols: Vec<String> = Vec::new();
      |                                             ^^^^^^^^^^
      |
      = help: maybe it is overwritten before being read?
-     = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
 
 warning: unused variable: `tt`
     --> src/codegen/src/ir.rs:1691:37
@@ -261,6 +275,12 @@ warning: unused variable: `loop_start`
      |
 3118 | ...                   let loop_start = code.len();
      |                           ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_loop_start`
+
+warning: unused variable: `text_offset`
+  --> src/codegen/src/mips64be.rs:82:9
+   |
+82 |     let text_offset = text_offset as usize;
+   |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_text_offset`
 
 warning: unused variable: `x`
    --> src/codegen/src/egraph.rs:194:46
@@ -936,6 +956,18 @@ warning: function `sign_extend_12` is never used
    |
 98 | fn sign_extend_12(val: u32) -> i32 {
    |    ^^^^^^^^^^^^^^
+
+warning: function `swap_u64` is never used
+  --> src/codegen/src/armeb.rs:29:4
+   |
+29 | fn swap_u64(buf: &mut [u8], off: usize) {
+   |    ^^^^^^^^
+
+warning: constant `SP` is never used
+   --> src/codegen/src/m68k.rs:377:7
+    |
+377 | const SP: Gpr = Gpr::A7;
+    |       ^^
 
 warning: constant `DW_CFA_ADVANCE_LOC` is never used
    --> src/codegen/src/dwarf.rs:135:7
@@ -1804,7 +1836,6 @@ warning: field `config` is never read
     = note: `DeploymentPlanner` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
 
-warning: `vuma-cor` (lib) generated 1 warning
    Compiling vuma-core v0.2.0-alpha.1 (/home/pkhairkh/vuma/src/vuma)
    Compiling vuma v0.2.0-alpha.1 (/home/pkhairkh/vuma)
 warning: unused import: `InterproceduralAllocFlow`
@@ -1815,6 +1846,7 @@ warning: unused import: `InterproceduralAllocFlow`
    |
    = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
 
+warning: `vuma-cor` (lib) generated 1 warning
 warning: unused import: `serde::de::Error`
    --> src/api.rs:738:9
     |
@@ -1986,5 +2018,5 @@ warning: missing documentation for a macro
     | ^^^^^^^^^^^^^^^^^^^^^^
 
 warning: `vuma` (lib) generated 24 warnings (run `cargo fix --lib -p vuma` to apply 3 suggestions)
-warning: `vuma-codegen` (lib) generated 256 warnings (run `cargo fix --lib -p vuma-codegen` to apply 65 suggestions)
-    Finished `release-fast` profile [optimized] target(s) in 1m 07s
+warning: `vuma-codegen` (lib) generated 261 warnings (run `cargo fix --lib -p vuma-codegen` to apply 67 suggestions)
+    Finished `release-fast` profile [optimized] target(s) in 1m 09s
