@@ -152,6 +152,8 @@ enum IsaArg {
     Ppc64le,
     #[value(name = "sparc64")]
     Sparc64,
+    #[value(name = "s390x")]
+    S390x,
 }
 
 impl From<IsaArg> for BackendKind {
@@ -167,6 +169,7 @@ impl From<IsaArg> for BackendKind {
             IsaArg::Ppc64 => BackendKind::PowerPC64,
             IsaArg::Ppc64le => BackendKind::PowerPC64LE,
             IsaArg::Sparc64 => BackendKind::Sparc64,
+            IsaArg::S390x => BackendKind::S390X,
         }
     }
 }
@@ -368,7 +371,7 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Supported backend list.
 const SUPPORTED_BACKENDS: &str =
-    "aarch64, x86_64, riscv64, arm32, mips64, ppc64, loongarch64, wasm32, sparc64";
+    "aarch64, x86_64, riscv64, arm32, mips64, ppc64, loongarch64, wasm32, sparc64, s390x";
 
 /// Build the long version string.
 fn version_long() -> String {
@@ -1321,7 +1324,7 @@ fn cmd_bench(_cli: &Cli) {
     });
 
     if !sha256d_source.is_empty() {
-        let backends: [(BackendKind, &str); 10] = [
+        let backends: [(BackendKind, &str); 11] = [
             (BackendKind::AArch64, "aarch64"),
             (BackendKind::X86_64, "x86_64"),
             (BackendKind::RiscV64, "riscv64"),
@@ -1332,6 +1335,7 @@ fn cmd_bench(_cli: &Cli) {
             (BackendKind::LoongArch64, "loongarch64"),
             (BackendKind::Wasm32, "wasm32"),
             (BackendKind::Sparc64, "sparc64"),
+            (BackendKind::S390X, "s390x"),
         ];
 
         println!("  {:15} {:>12} {:>12} {:>12}", "Backend", "Time (ms)", "Size (B)", "Instrs");

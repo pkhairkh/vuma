@@ -50,6 +50,7 @@ pub mod regalloc;
 pub mod riscv_common;
 pub mod riscv64;
 pub mod riscv32;
+pub mod s390x;
 pub mod scg_to_ir;
 pub mod sparc64;
 pub mod target_desc;
@@ -99,6 +100,9 @@ pub use ppc64le::PPC64LEBackend;
 
 /// Re-export SPARC V9 (sparc64) backend types.
 pub use sparc64::Sparc64Backend;
+
+/// Re-export s390x (IBM System Z) backend types.
+pub use s390x::S390XBackend;
 
 /// Re-export target description types.
 pub use target_desc::{
