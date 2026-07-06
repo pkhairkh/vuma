@@ -6415,6 +6415,8 @@ impl Backend for RiscV32Backend {
                 ("clock_gettime", 113),
                 ("gettimeofday", 169),
                 ("rt_sigprocmask", 135),
+                ("dup3", 24), ("lstat", 82),
+                ("recvfrom", 207), ("sendto", 206),
             ] {
                 stubs.push((name.to_string(), simple_stub(num)));
             }
@@ -6620,16 +6622,6 @@ impl Backend for RiscV32Backend {
                         let jal_addr = abs_offset as i32;
                         let target_addr = target_offset as i32;
                         let offset = target_addr - jal_addr;
-                        // Patch the JAL instruction's imm20 field
-                        let existing = u32::from_le_bytes([
-                            all_code[abs_offset],
-                            all_code[abs_offset + 1],
-                            all_code[abs_offset + 2],
-                            all_code[abs_offset + 3],
-                        ]);
-                        // Decode existing JAL to get rd, then re-encode with new offset
-                        let rd_idx = (existing >> 7) & 0x1F;
-                        let rd_reg = Gpr::from_encoding(rd_idx).unwrap_or(Gpr::Ra);
                         let patched = Instruction::Jal {
                             rd: Gpr::Ra,
                             offset: offset,
@@ -6637,11 +6629,7 @@ impl Backend for RiscV32Backend {
                         all_code[abs_offset..abs_offset + 4]
                             .copy_from_slice(&patched.encode());
                     } else {
-                        // External symbol — point to the "return 0" stub
-                        // (li a0, 0; ret) which sits at offset
-                        // `start_stub_size` (= 16) in `all_code`, right
-                        // after the 16-byte _start stub.
-                        let stub_offset = start_stub_size; // = 16
+                        let stub_offset = start_stub_size;
                         let target_addr = stub_offset as i64;
                         let bl_addr = abs_offset as i64;
                         let offset = (target_addr - bl_addr) as i32;
@@ -6651,6 +6639,53 @@ impl Backend for RiscV32Backend {
                         };
                         all_code[abs_offset..abs_offset + 4]
                             .copy_from_slice(&patched.encode());
+                    }
+                } else if reloc.reloc_type == "R_RISCV_HI20" {
+                    // Patch LUI imm20 with hi20 of absolute address
+                    let target_offset = func_offsets.get(&reloc.symbol)
+                        .copied()
+                        .or_else(|| {
+                            let prefix = format!("fn_{}", reloc.symbol);
+                            func_offsets.keys()
+                                .find(|k| k.starts_with(&prefix))
+                                .and_then(|k| func_offsets.get(k))
+                                .copied()
+                        });
+                    if let Some(target_offset) = target_offset {
+                        let abs_addr: u32 = (0x100000u64 + target_offset as u64) as u32;
+                        let hi20 = ((abs_addr as i32).wrapping_add(0x800) >> 12) as u32 & 0xFFFFF;
+                        let existing = u32::from_le_bytes([
+                            all_code[abs_offset], all_code[abs_offset + 1],
+                            all_code[abs_offset + 2], all_code[abs_offset + 3],
+                        ]);
+                        let rd = existing & 0x1F;
+                        let patched = (0x537 << 20) | (hi20 << 12) | rd;
+                        all_code[abs_offset..abs_offset + 4]
+                            .copy_from_slice(&patched.to_le_bytes());
+                    }
+                } else if reloc.reloc_type == "R_RISCV_LO12_I" {
+                    // Patch ADDI imm12 with lo12 of absolute address
+                    let target_offset = func_offsets.get(&reloc.symbol)
+                        .copied()
+                        .or_else(|| {
+                            let prefix = format!("fn_{}", reloc.symbol);
+                            func_offsets.keys()
+                                .find(|k| k.starts_with(&prefix))
+                                .and_then(|k| func_offsets.get(k))
+                                .copied()
+                        });
+                    if let Some(target_offset) = target_offset {
+                        let abs_addr: u32 = (0x100000u64 + target_offset as u64) as u32;
+                        let lo12 = (abs_addr as i32) & 0xFFF;
+                        let existing = u32::from_le_bytes([
+                            all_code[abs_offset], all_code[abs_offset + 1],
+                            all_code[abs_offset + 2], all_code[abs_offset + 3],
+                        ]);
+                        let rd = existing & 0x1F;
+                        let rs1 = (existing >> 15) & 0x1F;
+                        let patched = (0x04 << 2) | (lo12 as u32 & 0xFFF) << 20 | (rs1 << 15) | rd;
+                        all_code[abs_offset..abs_offset + 4]
+                            .copy_from_slice(&patched.to_le_bytes());
                     }
                 }
             }

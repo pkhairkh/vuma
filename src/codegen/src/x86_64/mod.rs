@@ -3192,6 +3192,19 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         stubs.push(("print_newline".to_string(), code));
     }
 
+    // ── Additional missing syscalls (x86_64 numbers) ──
+    // Simple stubs: mov eax, #num; syscall; ret
+    for (name, num) in [
+        ("brk", 12), ("clock_gettime", 228), ("gettimeofday", 96),
+        ("rt_sigprocmask", 14), ("rt_sigreturn", 15),
+    ] {
+        let mut code = Vec::new();
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, num as i32));
+        code.extend(encode_syscall());
+        code.extend(encode_ret());
+        stubs.push((name.to_string(), code));
+    }
+
     stubs
 }
 
