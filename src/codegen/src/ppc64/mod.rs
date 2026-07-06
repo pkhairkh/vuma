@@ -4576,6 +4576,102 @@ impl Backend for PPC64Backend {
                         let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
                         let is_32bit = ty.as_ref().map_or(false, |t| matches!(t, IRType::I32 | IRType::U32));
                         let mut code = Vec::new();
+                        // FP BinOp dispatch: when ty is F32/F64, use FP arithmetic.
+                        // The dst_offset slot is used as scratch: store lhs bits via
+                        // STD (F64) or STW (F32), then LFD/LFS to load into an FPR.
+                        // Repeat for rhs, then dispatch on op:
+                        //   Add/Sub/Mul/Div → Fadd/Fsub/Fmul/Fdiv
+                        //   comparisons → Fcmpu → CR0 → BC + LI 0/1
+                        // For non-arithmetic ops on FP (And/Or/Xor/Shl/...) we fall
+                        // back to loading lhs bits into R3 (matches riscv64 pattern).
+                        let is_fp = ty.as_ref().map_or(false, |t| matches!(t, IRType::F32 | IRType::F64));
+                        if is_fp {
+                            let is_f64 = matches!(ty, Some(IRType::F64));
+                            // Load lhs → R3 → scratch slot → F0
+                            code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R3));
+                            if is_f64 {
+                                code.extend(ss_store_to_slot(Gpr::R3, dst_offset));
+                                code.extend_from_slice(&Instruction::Lfd { ft: Fpr::F0, ra: Gpr::R31, d: -dst_offset }.encode());
+                            } else {
+                                code.extend_from_slice(&Instruction::Stw { rs: Gpr::R3, ra: Gpr::R31, d: -dst_offset }.encode());
+                                code.extend_from_slice(&Instruction::Lfs { ft: Fpr::F0, ra: Gpr::R31, d: -dst_offset }.encode());
+                            }
+                            // Load rhs → R3 → scratch slot → F1
+                            code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::R3));
+                            if is_f64 {
+                                code.extend(ss_store_to_slot(Gpr::R3, dst_offset));
+                                code.extend_from_slice(&Instruction::Lfd { ft: Fpr::F1, ra: Gpr::R31, d: -dst_offset }.encode());
+                            } else {
+                                code.extend_from_slice(&Instruction::Stw { rs: Gpr::R3, ra: Gpr::R31, d: -dst_offset }.encode());
+                                code.extend_from_slice(&Instruction::Lfs { ft: Fpr::F1, ra: Gpr::R31, d: -dst_offset }.encode());
+                            }
+                            // Dispatch on op
+                            let mut cmp_result_in_r3 = false;
+                            match op {
+                                BinOpKind::Add => {
+                                    code.extend_from_slice(&Instruction::Fadd { ft: Fpr::F0, fa: Fpr::F0, fb: Fpr::F1 }.encode());
+                                }
+                                BinOpKind::Sub => {
+                                    code.extend_from_slice(&Instruction::Fsub { ft: Fpr::F0, fa: Fpr::F0, fb: Fpr::F1 }.encode());
+                                }
+                                BinOpKind::Mul => {
+                                    code.extend_from_slice(&Instruction::Fmul { ft: Fpr::F0, fa: Fpr::F0, fb: Fpr::F1 }.encode());
+                                }
+                                BinOpKind::SDiv | BinOpKind::UDiv => {
+                                    code.extend_from_slice(&Instruction::Fdiv { ft: Fpr::F0, fa: Fpr::F0, fb: Fpr::F1 }.encode());
+                                }
+                                BinOpKind::Eq | BinOpKind::Ne | BinOpKind::SLt | BinOpKind::SLe
+                                | BinOpKind::SGt | BinOpKind::SGe | BinOpKind::ULt | BinOpKind::ULe
+                                | BinOpKind::UGt | BinOpKind::UGe => {
+                                    // FP comparison: Fcmpu CR0, F0, F1 sets CR0
+                                    //   LT=1 iff F0<F1, GT=1 iff F0>F1, EQ=1 iff F0==F1.
+                                    // For > or >= we swap operands so the same
+                                    // LT/GT interpretation works.
+                                    let swap = matches!(op, BinOpKind::SGt | BinOpKind::UGt | BinOpKind::SGe | BinOpKind::UGe);
+                                    let (fa, fb) = if swap { (Fpr::F1, Fpr::F0) } else { (Fpr::F0, Fpr::F1) };
+                                    code.extend_from_slice(&Instruction::Fcmpu { bf: 0, fa, fb }.encode());
+                                    // LI R3, 0
+                                    code.extend_from_slice(&Instruction::Li { rt: Gpr::R3, simm: 0 }.encode());
+                                    // Determine BO/BI based on op (CR0 field is at BI=0..3,
+                                    // but the encoded BI is the bit INDEX in the 32-bit CR).
+                                    // CR0: LT=bit0, GT=bit1, EQ=bit2, SO=bit3.
+                                    let (bo, bi): (u32, u32) = match op {
+                                        BinOpKind::Eq | BinOpKind::Ne => (4, 2),  // branch if EQ=0
+                                        BinOpKind::SLt | BinOpKind::ULt => (4, 0), // branch if LT=0
+                                        BinOpKind::SLe | BinOpKind::ULe => (12, 1), // branch if GT=1 (not <=)
+                                        BinOpKind::SGt | BinOpKind::UGt => (4, 1), // branch if GT=0 (after swap: LT=0 of original)
+                                        BinOpKind::SGe | BinOpKind::UGe => (12, 0), // branch if LT=1 (not >=, after swap)
+                                        _ => (4, 2),
+                                    };
+                                    // BC bo, bi, +2 (skip the LI 1 if condition false)
+                                    code.extend_from_slice(&Instruction::Bc { bo, bi, bd: 2 }.encode());
+                                    // LI R3, 1
+                                    code.extend_from_slice(&Instruction::Li { rt: Gpr::R3, simm: 1 }.encode());
+                                    cmp_result_in_r3 = true;
+                                }
+                                _ => {
+                                    // Other ops (And/Or/Xor/Shl/etc.) on FP — fall
+                                    // back to loading lhs bits into R3 (matches
+                                    // riscv64 pattern: just leave the result = lhs).
+                                    code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R3));
+                                    cmp_result_in_r3 = true; // skip FP store path
+                                }
+                            }
+                            if !cmp_result_in_r3 {
+                                // Store result F0 back to scratch slot, then load into R3
+                                if is_f64 {
+                                    code.extend_from_slice(&Instruction::Stfd { fs: Fpr::F0, ra: Gpr::R31, d: -dst_offset }.encode());
+                                    code.extend(ss_load_from_slot(Gpr::R3, dst_offset));
+                                } else {
+                                    // F32: FRSP to round to single, STFS, LWZ (zero-extended)
+                                    code.extend_from_slice(&Instruction::Frsp { ft: Fpr::F0, fb: Fpr::F0 }.encode());
+                                    code.extend_from_slice(&Instruction::Stfs { fs: Fpr::F0, ra: Gpr::R31, d: -dst_offset }.encode());
+                                    code.extend_from_slice(&Instruction::Lwz { rt: Gpr::R3, ra: Gpr::R31, d: -dst_offset }.encode());
+                                }
+                            }
+                            code.extend(ss_store_to_slot(Gpr::R3, dst_offset));
+                            code
+                        } else {
                         match op {
                             BinOpKind::Ror | BinOpKind::Rol => {
                                 code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R4));
@@ -4872,7 +4968,9 @@ impl Backend for PPC64Backend {
                         }
                         code.extend(ss_store_to_slot(Gpr::R3, dst_offset));
                         code
+                        } // end else (integer path)
                     }
+
                     IRInstr::Add { dst, lhs, rhs, .. } => {
                         let dst_id = dst.as_register().unwrap_or(0);
                         let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
@@ -4944,13 +5042,59 @@ impl Backend for PPC64Backend {
                         code.extend(ss_store_to_slot(Gpr::R3, dst_offset));
                         code
                     }
-                    IRInstr::Cmp { kind, dst, lhs, rhs, .. } => {
+                    IRInstr::Cmp { kind, dst, lhs, rhs, ty } => {
                         let dst_id = dst.as_register().unwrap_or(0);
                         let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
                         let mut code = Vec::new();
-                        code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R3));
-                        code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::R4));
-                        code.extend(ss_emit_cmp(kind, Gpr::R3, Gpr::R3, Gpr::R4));
+                        // FP Cmp dispatch: when ty is F32/F64, use Fcmpu to
+                        // compare as floats (integer Cmp/Cmpl on raw FP bits
+                        // gives silently wrong results for negatives/NaN).
+                        let is_fp_cmp = matches!(ty, Some(IRType::F32) | Some(IRType::F64));
+                        let is_f64 = matches!(ty, Some(IRType::F64));
+                        if is_fp_cmp {
+                            // Load lhs → R3 → scratch slot → F0
+                            code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R3));
+                            if is_f64 {
+                                code.extend(ss_store_to_slot(Gpr::R3, dst_offset));
+                                code.extend_from_slice(&Instruction::Lfd { ft: Fpr::F0, ra: Gpr::R31, d: -dst_offset }.encode());
+                            } else {
+                                code.extend_from_slice(&Instruction::Stw { rs: Gpr::R3, ra: Gpr::R31, d: -dst_offset }.encode());
+                                code.extend_from_slice(&Instruction::Lfs { ft: Fpr::F0, ra: Gpr::R31, d: -dst_offset }.encode());
+                            }
+                            // Load rhs → R3 → scratch slot → F1
+                            code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::R3));
+                            if is_f64 {
+                                code.extend(ss_store_to_slot(Gpr::R3, dst_offset));
+                                code.extend_from_slice(&Instruction::Lfd { ft: Fpr::F1, ra: Gpr::R31, d: -dst_offset }.encode());
+                            } else {
+                                code.extend_from_slice(&Instruction::Stw { rs: Gpr::R3, ra: Gpr::R31, d: -dst_offset }.encode());
+                                code.extend_from_slice(&Instruction::Lfs { ft: Fpr::F1, ra: Gpr::R31, d: -dst_offset }.encode());
+                            }
+                            // For SGt/UGt/SGe/UGe, swap operands so we can use
+                            // the same LT/GT interpretation as the SLt/SLe path.
+                            let swap = matches!(kind, CmpKind::SGt | CmpKind::UGt | CmpKind::SGe | CmpKind::UGe);
+                            let (fa, fb) = if swap { (Fpr::F1, Fpr::F0) } else { (Fpr::F0, Fpr::F1) };
+                            code.extend_from_slice(&Instruction::Fcmpu { bf: 0, fa, fb }.encode());
+                            // LI R3, 0
+                            code.extend_from_slice(&Instruction::Li { rt: Gpr::R3, simm: 0 }.encode());
+                            // BO/BI for CR0: LT=bit0, GT=bit1, EQ=bit2, SO=bit3.
+                            let (bo, bi): (u32, u32) = match kind {
+                                CmpKind::Eq => (4, 2),   // branch if EQ=0 → set 1 when EQ=1
+                                CmpKind::Ne => (12, 2),  // branch if EQ=1 → set 1 when EQ=0
+                                CmpKind::SLt | CmpKind::ULt => (4, 0),   // branch if LT=0
+                                CmpKind::SLe | CmpKind::ULe => (12, 1),  // branch if GT=1 (not <=)
+                                CmpKind::SGt | CmpKind::UGt => (4, 1),   // branch if GT=0 (after swap: LT=0 of original)
+                                CmpKind::SGe | CmpKind::UGe => (12, 0),  // branch if LT=1 (not >=, after swap)
+                            };
+                            // BC bo, bi, +2 (skip LI 1 if condition false)
+                            code.extend_from_slice(&Instruction::Bc { bo, bi, bd: 2 }.encode());
+                            // LI R3, 1
+                            code.extend_from_slice(&Instruction::Li { rt: Gpr::R3, simm: 1 }.encode());
+                        } else {
+                            code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R3));
+                            code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::R4));
+                            code.extend(ss_emit_cmp(kind, Gpr::R3, Gpr::R3, Gpr::R4));
+                        }
                         code.extend(ss_store_to_slot(Gpr::R3, dst_offset));
                         code
                     }

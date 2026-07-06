@@ -1192,6 +1192,107 @@ pub fn encode_addss_xmm_xmm(dst: Xmm, src: Xmm) -> Vec<u8> {
     code
 }
 
+/// Encode SUBSD xmm, xmm (F2 0F 5C /r) — subtract scalar double-precision floats.
+pub fn encode_subsd_xmm_xmm(dst: Xmm, src: Xmm) -> Vec<u8> {
+    let mut code = Vec::with_capacity(4);
+    code.push(0xF2);
+    code.push(0x0F);
+    code.push(0x5C);
+    code.push(modrm(3, src.encoding() & 7, dst.encoding() & 7));
+    code
+}
+
+/// Encode SUBSS xmm, xmm (F3 0F 5C /r) — subtract scalar single-precision floats.
+pub fn encode_subss_xmm_xmm(dst: Xmm, src: Xmm) -> Vec<u8> {
+    let mut code = Vec::with_capacity(4);
+    code.push(0xF3);
+    code.push(0x0F);
+    code.push(0x5C);
+    code.push(modrm(3, src.encoding() & 7, dst.encoding() & 7));
+    code
+}
+
+/// Encode MULSD xmm, xmm (F2 0F 59 /r) — multiply scalar double-precision floats.
+pub fn encode_mulsd_xmm_xmm(dst: Xmm, src: Xmm) -> Vec<u8> {
+    let mut code = Vec::with_capacity(4);
+    code.push(0xF2);
+    code.push(0x0F);
+    code.push(0x59);
+    code.push(modrm(3, src.encoding() & 7, dst.encoding() & 7));
+    code
+}
+
+/// Encode MULSS xmm, xmm (F3 0F 59 /r) — multiply scalar single-precision floats.
+pub fn encode_mulss_xmm_xmm(dst: Xmm, src: Xmm) -> Vec<u8> {
+    let mut code = Vec::with_capacity(4);
+    code.push(0xF3);
+    code.push(0x0F);
+    code.push(0x59);
+    code.push(modrm(3, src.encoding() & 7, dst.encoding() & 7));
+    code
+}
+
+/// Encode DIVSD xmm, xmm (F2 0F 5E /r) — divide scalar double-precision floats.
+pub fn encode_divsd_xmm_xmm(dst: Xmm, src: Xmm) -> Vec<u8> {
+    let mut code = Vec::with_capacity(4);
+    code.push(0xF2);
+    code.push(0x0F);
+    code.push(0x5E);
+    code.push(modrm(3, src.encoding() & 7, dst.encoding() & 7));
+    code
+}
+
+/// Encode DIVSS xmm, xmm (F3 0F 5E /r) — divide scalar single-precision floats.
+pub fn encode_divss_xmm_xmm(dst: Xmm, src: Xmm) -> Vec<u8> {
+    let mut code = Vec::with_capacity(4);
+    code.push(0xF3);
+    code.push(0x0F);
+    code.push(0x5E);
+    code.push(modrm(3, src.encoding() & 7, dst.encoding() & 7));
+    code
+}
+
+/// Encode SQRTSD xmm, xmm (F2 0F 51 /r) — square root of scalar double.
+pub fn encode_sqrtsd_xmm_xmm(dst: Xmm, src: Xmm) -> Vec<u8> {
+    let mut code = Vec::with_capacity(4);
+    code.push(0xF2);
+    code.push(0x0F);
+    code.push(0x51);
+    code.push(modrm(3, src.encoding() & 7, dst.encoding() & 7));
+    code
+}
+
+/// Encode SQRTSS xmm, xmm (F3 0F 51 /r) — square root of scalar single.
+pub fn encode_sqrtss_xmm_xmm(dst: Xmm, src: Xmm) -> Vec<u8> {
+    let mut code = Vec::with_capacity(4);
+    code.push(0xF3);
+    code.push(0x0F);
+    code.push(0x51);
+    code.push(modrm(3, src.encoding() & 7, dst.encoding() & 7));
+    code
+}
+
+/// Encode UCOMISD xmm, xmm (66 0F 2E /r) — unordered compare scalar double.
+/// Sets EFLAGS: ZF=1, PF=1, CF=1 if unordered (NaN); otherwise standard
+/// comparison flags (ZF=1 iff equal, CF=1 iff dst < src).
+pub fn encode_ucomisd_xmm_xmm(dst: Xmm, src: Xmm) -> Vec<u8> {
+    let mut code = Vec::with_capacity(4);
+    code.push(0x66);
+    code.push(0x0F);
+    code.push(0x2E);
+    code.push(modrm(3, src.encoding() & 7, dst.encoding() & 7));
+    code
+}
+
+/// Encode UCOMISS xmm, xmm (0F 2E /r) — unordered compare scalar single.
+pub fn encode_ucomiss_xmm_xmm(dst: Xmm, src: Xmm) -> Vec<u8> {
+    let mut code = Vec::with_capacity(4);
+    code.push(0x0F);
+    code.push(0x2E);
+    code.push(modrm(3, src.encoding() & 7, dst.encoding() & 7));
+    code
+}
+
 // ===========================================================================
 // x86_32 Mnemonic Disassembler
 // ===========================================================================

@@ -46,6 +46,11 @@ use super::{
     encode_cvttsd2si_r32_xmm, encode_cvttsd2si_r64_xmm,
     encode_cvttss2si_r32_xmm, encode_cvttss2si_r64_xmm,
     encode_addsd_xmm_xmm, encode_addss_xmm_xmm,
+    encode_divsd_xmm_xmm, encode_divss_xmm_xmm,
+    encode_mulsd_xmm_xmm, encode_mulss_xmm_xmm,
+    encode_subsd_xmm_xmm, encode_subss_xmm_xmm,
+    encode_sqrtsd_xmm_xmm, encode_sqrtss_xmm_xmm,
+    encode_ucomisd_xmm_xmm, encode_ucomiss_xmm_xmm,
     encode_div_reg,
     encode_idiv_reg,
     encode_imul_reg_reg,
@@ -458,6 +463,81 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                 IRInstr::BinOp { op, dst, lhs, rhs, ty } => {
                     let mut code = Vec::new();
                     let dst_id = dst.as_register().unwrap_or(0);
+
+                    // FP BinOp dispatch: when ty is F32/F64, use SSE/SSE2 scalar
+                    // arithmetic (ADDSD/ADDSS, SUBSD/SUBSS, MULSD/MULSS,
+                    // DIVSD/DIVSS) or UCOMISD/UCOMISS + SETcc for comparisons.
+                    // Operands are ferried through EAX and moved into XMM0/XMM1
+                    // via MOVQ (F64) or MOVD (F32).
+                    let is_fp = matches!(ty, Some(IRType::F32) | Some(IRType::F64));
+                    if is_fp {
+                        let is_f64 = matches!(ty, Some(IRType::F64));
+                        // Load lhs → EAX → XMM0
+                        code.extend(load_value(lhs, Gpr::Rax));
+                        if is_f64 {
+                            code.extend(encode_movq_xmm_gpr(Xmm::Xmm0, Gpr::Rax));
+                        } else {
+                            code.extend(encode_movd_xmm_gpr(Xmm::Xmm0, Gpr::Rax));
+                        }
+                        // Load rhs → EAX → XMM1
+                        code.extend(load_value(rhs, Gpr::Rax));
+                        if is_f64 {
+                            code.extend(encode_movq_xmm_gpr(Xmm::Xmm1, Gpr::Rax));
+                        } else {
+                            code.extend(encode_movd_xmm_gpr(Xmm::Xmm1, Gpr::Rax));
+                        }
+                        let mut is_cmp = false;
+                        match op {
+                            BinOpKind::Add => {
+                                if is_f64 { code.extend(encode_addsd_xmm_xmm(Xmm::Xmm0, Xmm::Xmm1)); }
+                                else { code.extend(encode_addss_xmm_xmm(Xmm::Xmm0, Xmm::Xmm1)); }
+                            }
+                            BinOpKind::Sub => {
+                                if is_f64 { code.extend(encode_subsd_xmm_xmm(Xmm::Xmm0, Xmm::Xmm1)); }
+                                else { code.extend(encode_subss_xmm_xmm(Xmm::Xmm0, Xmm::Xmm1)); }
+                            }
+                            BinOpKind::Mul => {
+                                if is_f64 { code.extend(encode_mulsd_xmm_xmm(Xmm::Xmm0, Xmm::Xmm1)); }
+                                else { code.extend(encode_mulss_xmm_xmm(Xmm::Xmm0, Xmm::Xmm1)); }
+                            }
+                            BinOpKind::SDiv | BinOpKind::UDiv => {
+                                if is_f64 { code.extend(encode_divsd_xmm_xmm(Xmm::Xmm0, Xmm::Xmm1)); }
+                                else { code.extend(encode_divss_xmm_xmm(Xmm::Xmm0, Xmm::Xmm1)); }
+                            }
+                            BinOpKind::Eq | BinOpKind::Ne | BinOpKind::SLt | BinOpKind::SLe
+                            | BinOpKind::SGt | BinOpKind::SGe | BinOpKind::ULt | BinOpKind::ULe
+                            | BinOpKind::UGt | BinOpKind::UGe => {
+                                // UCOMISD/UCOMISS sets EFLAGS with the same
+                                // ZF/PF/CF semantics as CMP for the ordered case,
+                                // so we can reuse binop_cmp_to_cc + SETcc.
+                                let cc = binop_cmp_to_cc(op);
+                                if is_f64 { code.extend(encode_ucomisd_xmm_xmm(Xmm::Xmm0, Xmm::Xmm1)); }
+                                else { code.extend(encode_ucomiss_xmm_xmm(Xmm::Xmm0, Xmm::Xmm1)); }
+                                code.extend(encode_setcc(cc, Gpr::Rax));
+                                code.extend(encode_movzx_reg8(Gpr::Rax, Gpr::Rax));
+                                code.extend(store_vreg(dst_id, Gpr::Rax));
+                                is_cmp = true;
+                            }
+                            _ => {
+                                // Other ops (And/Or/Xor/Shl/etc.) on FP — fall
+                                // back to loading lhs bits into EAX (matches
+                                // riscv64/x86_64 pattern).
+                                code.extend(load_value(lhs, Gpr::Rax));
+                                code.extend(store_vreg(dst_id, Gpr::Rax));
+                                is_cmp = true; // skip the post-arithmetic store
+                            }
+                        }
+                        if !is_cmp {
+                            // Move result back to EAX and store
+                            if is_f64 {
+                                code.extend(encode_movq_gpr_xmm(Gpr::Rax, Xmm::Xmm0));
+                            } else {
+                                code.extend(encode_movd_gpr_xmm(Gpr::Rax, Xmm::Xmm0));
+                            }
+                            code.extend(store_vreg(dst_id, Gpr::Rax));
+                        }
+                        code
+                    } else {
 
                     // Detect 64-bit shift-by-32, which 32-bit backends cannot
                     // handle natively (x86 masks the shift count to 5 bits,
@@ -1168,6 +1248,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     }
                     } // close else block for is_shl_32/is_shr_32
                     code
+                    } // end else (integer path)
                 }
 
                 // ── Unary operations ──
@@ -1215,27 +1296,61 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                 }
 
                 // ── Comparison (dedicated Cmp instruction) ──
-                IRInstr::Cmp { kind, dst, lhs, rhs, .. } => {
+                IRInstr::Cmp { kind, dst, lhs, rhs, ty } => {
                     let mut code = Vec::new();
                     let dst_id = dst.as_register().unwrap_or(0);
                     let cc = cmp_kind_to_cc(kind);
-                    code.extend(load_value(lhs, Gpr::Rax));
-                    if let IRValue::Immediate(imm) = rhs {
-                        let imm = *imm;
-                        if (-2147483648..=2147483647).contains(&imm) {
-                            code.extend(encode_cmp_reg_imm32(Gpr::Rax, imm as i32));
+                    // FP Cmp dispatch: when ty is F32/F64, use UCOMISD/UCOMISS
+                    // instead of integer CMP (integer CMP on raw FP bits gives
+                    // silently wrong results for negatives/NaN).
+                    let is_fp_cmp = matches!(ty, Some(IRType::F32) | Some(IRType::F64));
+                    if is_fp_cmp {
+                        let is_f64 = matches!(ty, Some(IRType::F64));
+                        // Load lhs → EAX → XMM0
+                        code.extend(load_value(lhs, Gpr::Rax));
+                        if is_f64 {
+                            code.extend(encode_movq_xmm_gpr(Xmm::Xmm0, Gpr::Rax));
+                        } else {
+                            code.extend(encode_movd_xmm_gpr(Xmm::Xmm0, Gpr::Rax));
+                        }
+                        // Load rhs → EAX → XMM1
+                        code.extend(load_value(rhs, Gpr::Rax));
+                        if is_f64 {
+                            code.extend(encode_movq_xmm_gpr(Xmm::Xmm1, Gpr::Rax));
+                        } else {
+                            code.extend(encode_movd_xmm_gpr(Xmm::Xmm1, Gpr::Rax));
+                        }
+                        // UCOMISD/UCOMISS sets EFLAGS with the same ZF/PF/CF
+                        // semantics as CMP for the ordered case, so we can
+                        // reuse cmp_kind_to_cc + SETcc.
+                        if is_f64 {
+                            code.extend(encode_ucomisd_xmm_xmm(Xmm::Xmm0, Xmm::Xmm1));
+                        } else {
+                            code.extend(encode_ucomiss_xmm_xmm(Xmm::Xmm0, Xmm::Xmm1));
+                        }
+                        code.extend(encode_setcc(cc, Gpr::Rax));
+                        code.extend(encode_movzx_reg8(Gpr::Rax, Gpr::Rax));
+                        code.extend(store_vreg(dst_id, Gpr::Rax));
+                        code
+                    } else {
+                        code.extend(load_value(lhs, Gpr::Rax));
+                        if let IRValue::Immediate(imm) = rhs {
+                            let imm = *imm;
+                            if (-2147483648..=2147483647).contains(&imm) {
+                                code.extend(encode_cmp_reg_imm32(Gpr::Rax, imm as i32));
+                            } else {
+                                code.extend(load_value(rhs, Gpr::Rcx));
+                                code.extend(encode_cmp_reg_reg(Gpr::Rax, Gpr::Rcx));
+                            }
                         } else {
                             code.extend(load_value(rhs, Gpr::Rcx));
                             code.extend(encode_cmp_reg_reg(Gpr::Rax, Gpr::Rcx));
                         }
-                    } else {
-                        code.extend(load_value(rhs, Gpr::Rcx));
-                        code.extend(encode_cmp_reg_reg(Gpr::Rax, Gpr::Rcx));
+                        code.extend(encode_setcc(cc, Gpr::Rax));
+                        code.extend(encode_movzx_reg8(Gpr::Rax, Gpr::Rax));
+                        code.extend(store_vreg(dst_id, Gpr::Rax));
+                        code
                     }
-                    code.extend(encode_setcc(cc, Gpr::Rax));
-                    code.extend(encode_movzx_reg8(Gpr::Rax, Gpr::Rax));
-                    code.extend(store_vreg(dst_id, Gpr::Rax));
-                    code
                 }
 
                 // ── Conditional select (Cmov) ──
