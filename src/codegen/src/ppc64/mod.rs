@@ -2481,7 +2481,6 @@ fn lower_cmp_ppc64(kind: &CmpKind, dst: Gpr, lhs: Gpr, rhs: Gpr) -> Vec<Allocate
 /// (`load_immediate_ppc64`, `resolve_gpr_ppc64`). Deletion is risky because
 /// the helpers it shares with the test suite would also need to be
 /// preserved, so we silence the dead-code lint instead.
-#[allow(dead_code)]
 fn lower_ir_instr_ppc64(
     instr: &IRInstr,
     vreg_map: &mut std::collections::HashMap<u32, Gpr>,

@@ -53,7 +53,6 @@ const OP_IMM: u32 = 0b0010011;
 const OP_REG: u32 = 0b0110011;
 const OP_IMM32: u32 = 0b0011011;
 const OP_REG32: u32 = 0b0111011;
-#[allow(dead_code)]
 const OP_SYSTEM: u32 = 0b1110011;
 const OP_MISC_MEM: u32 = 0b0001111;
 const OP_FP: u32 = 0b1010011;
@@ -726,13 +725,11 @@ pub enum Instruction {
     /// Load-Reserved Doubleword: `lr.d rd, (rs1)` — RV64A only (NOT in RV32).
     ///
     /// Kept for decoder/Display completeness. RV32 code MUST use `LrW` instead.
-    #[allow(dead_code)]
     LrD { rd: Gpr, rs1: Gpr },
     /// Store-Conditional Doubleword: `sc.d rd, rs1, rs2` — RV64A only (NOT in RV32).
     /// rd = 0 on success, non-zero on failure.
     ///
     /// Kept for decoder/Display completeness. RV32 code MUST use `ScW` instead.
-    #[allow(dead_code)]
     ScD { rd: Gpr, rs1: Gpr, rs2: Gpr },
     /// Load-Reserved Word: `lr.w rd, (rs1)` — RV32A
     ///
@@ -805,47 +802,38 @@ pub enum Instruction {
     /// AMOADD Word: `amoadd.w rd, rs2, (rs1)` — atomically rd = [rs1]; [rs1] = [rs1] + rs2
     AmoaddW { rd: Gpr, rs1: Gpr, rs2: Gpr },
     /// AMOADD Doubleword: `amoadd.d rd, rs2, (rs1)` — RV64A only (defined for completeness)
-    #[allow(dead_code)]
     AmoaddD { rd: Gpr, rs1: Gpr, rs2: Gpr },
     /// AMOSWAP Word: `amoswap.w rd, rs2, (rs1)` — atomically rd = [rs1]; [rs1] = rs2
     AmoswapW { rd: Gpr, rs1: Gpr, rs2: Gpr },
     /// AMOSWAP Doubleword: `amoswap.d rd, rs2, (rs1)` — RV64A only
-    #[allow(dead_code)]
     AmoswapD { rd: Gpr, rs1: Gpr, rs2: Gpr },
     /// AMOXOR Word: `amoxor.w rd, rs2, (rs1)`
     AmoxorW { rd: Gpr, rs1: Gpr, rs2: Gpr },
     /// AMOXOR Doubleword: `amoxor.d rd, rs2, (rs1)` — RV64A only
-    #[allow(dead_code)]
     AmoxorD { rd: Gpr, rs1: Gpr, rs2: Gpr },
     /// AMOAND Word: `amoand.w rd, rs2, (rs1)`
     AmoandW { rd: Gpr, rs1: Gpr, rs2: Gpr },
     /// AMOAND Doubleword: `amoand.d rd, rs2, (rs1)` — RV64A only
-    #[allow(dead_code)]
     AmoandD { rd: Gpr, rs1: Gpr, rs2: Gpr },
     /// AMOOR Word: `amoor.w rd, rs2, (rs1)`
     AmoorW { rd: Gpr, rs1: Gpr, rs2: Gpr },
     /// AMOOR Doubleword: `amoor.d rd, rs2, (rs1)` — RV64A only
-    #[allow(dead_code)]
     AmoorD { rd: Gpr, rs1: Gpr, rs2: Gpr },
     /// AMOMAX Word (signed): `amomax.w rd, rs2, (rs1)`
     AmomaxW { rd: Gpr, rs1: Gpr, rs2: Gpr },
     /// AMOMAX Doubleword (signed): `amomax.d rd, rs2, (rs1)` — RV64A only
-    #[allow(dead_code)]
     AmomaxD { rd: Gpr, rs1: Gpr, rs2: Gpr },
     /// AMOMIN Word (signed): `amomin.w rd, rs2, (rs1)`
     AmominW { rd: Gpr, rs1: Gpr, rs2: Gpr },
     /// AMOMIN Doubleword (signed): `amomin.d rd, rs2, (rs1)` — RV64A only
-    #[allow(dead_code)]
     AmominD { rd: Gpr, rs1: Gpr, rs2: Gpr },
     /// AMOMAXU Word (unsigned): `amomaxu.w rd, rs2, (rs1)`
     AmomaxWu { rd: Gpr, rs1: Gpr, rs2: Gpr },
     /// AMOMAXU Doubleword (unsigned): `amomaxu.d rd, rs2, (rs1)` — RV64A only
-    #[allow(dead_code)]
     AmomaxDu { rd: Gpr, rs1: Gpr, rs2: Gpr },
     /// AMOMINU Word (unsigned): `amominu.w rd, rs2, (rs1)`
     AmominWu { rd: Gpr, rs1: Gpr, rs2: Gpr },
     /// AMOMINU Doubleword (unsigned): `amominu.d rd, rs2, (rs1)` — RV64A only
-    #[allow(dead_code)]
     AmominDu { rd: Gpr, rs1: Gpr, rs2: Gpr },
 }
 
@@ -4416,7 +4404,6 @@ fn emit_popcnt_isel(rd: Gpr, rs: Gpr) -> Vec<u8> {
 }
 
 /// Collect all virtual register IDs from an IR function.
-#[allow(dead_code)]
 fn collect_vreg_ids(func: &IRFunction) -> std::collections::HashSet<u32> {
     let mut ids = std::collections::HashSet::new();
     for block in &func.blocks {

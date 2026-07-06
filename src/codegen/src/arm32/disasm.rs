@@ -95,7 +95,6 @@ fn sign_extend_24(val: u32) -> i32 {
 // NOTE: ARM32 load/store offsets use the U (up/down) bit rather than sign-
 // extending the 12-bit immediate, so this helper is not wired into the current
 // decode path. Kept for potential future use with media/DSP extensions.
-#[allow(dead_code)]
 fn sign_extend_12(val: u32) -> i32 {
     if val & 0x800 != 0 {
         (val | 0xFFFFF000) as i32

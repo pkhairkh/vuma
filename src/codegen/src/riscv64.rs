@@ -53,7 +53,6 @@ const OP_IMM: u32 = 0b0010011;
 const OP_REG: u32 = 0b0110011;
 const OP_IMM32: u32 = 0b0011011;
 const OP_REG32: u32 = 0b0111011;
-#[allow(dead_code)]
 const OP_SYSTEM: u32 = 0b1110011;
 const OP_MISC_MEM: u32 = 0b0001111;
 const OP_FP: u32 = 0b1010011;
@@ -4512,7 +4511,6 @@ fn emit_popcnt_isel(rd: Gpr, rs: Gpr) -> Vec<u8> {
 }
 
 /// Collect all virtual register IDs from an IR function.
-#[allow(dead_code)]
 fn collect_vreg_ids(func: &IRFunction) -> std::collections::HashSet<u32> {
     let mut ids = std::collections::HashSet::new();
     for block in &func.blocks {
