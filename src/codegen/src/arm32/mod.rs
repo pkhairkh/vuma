@@ -3986,6 +3986,37 @@ impl Backend for Arm32Backend {
                         let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
                         let mut code = Vec::new();
 
+                        // ── FP BinOp dispatch ──
+                        // When ty is F32/F64 and op is FP-arithmetic (Add/Sub/Mul/SDiv/UDiv),
+                        // load operands' bit patterns into D0/D1 via the dst stack slot,
+                        // run VFP arithmetic, and VSTR the result back to dst.
+                        let is_fp = ty.as_ref().map_or(false, |t| matches!(t, crate::ir::IRType::F32 | crate::ir::IRType::F64));
+                        let fp_arith = is_fp && matches!(op,
+                            BinOpKind::Add | BinOpKind::Sub | BinOpKind::Mul
+                            | BinOpKind::SDiv | BinOpKind::UDiv
+                        );
+                        if fp_arith {
+                            // Load lhs bit pattern into R0, store to dst slot, VLDR D0 from dst.
+                            code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R0));
+                            code.extend(ss_store_to_slot(Gpr::R0, dst_offset));
+                            code.extend_from_slice(&encode_vldr_d(0, Gpr::R11.encoding() as u8, dst_offset));
+                            // Load rhs bit pattern into R0, store to dst slot, VLDR D1 from dst.
+                            code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::R0));
+                            code.extend(ss_store_to_slot(Gpr::R0, dst_offset));
+                            code.extend_from_slice(&encode_vldr_d(1, Gpr::R11.encoding() as u8, dst_offset));
+                            // VFP arithmetic: D0 = D0 <op> D1
+                            match op {
+                                BinOpKind::Add => code.extend_from_slice(&encode_vadd_f64(0, 0, 1)),
+                                BinOpKind::Sub => code.extend_from_slice(&encode_vsub_f64(0, 0, 1)),
+                                BinOpKind::Mul => code.extend_from_slice(&encode_vmul_f64(0, 0, 1)),
+                                BinOpKind::SDiv | BinOpKind::UDiv => code.extend_from_slice(&encode_vdiv_f64(0, 0, 1)),
+                                _ => unreachable!(),
+                            }
+                            // VSTR D0 to dst slot (stores 64-bit double into the 8-byte slot).
+                            code.extend_from_slice(&encode_vstr_d(0, Gpr::R11.encoding() as u8, dst_offset));
+                        }
+
+                        if !fp_arith {
                         match op {
                             BinOpKind::Add | BinOpKind::Sub => {
                                 // 64-bit add/sub: load 64-bit lhs (R0:R2) and rhs (R1:R3),
@@ -4772,6 +4803,7 @@ impl Backend for Arm32Backend {
                                 code.extend(ss_store_to_slot(Gpr::R1, dst_offset + 4));
                             }
                         }
+                        } // end if !fp_arith (integer path)
                         code
                     }
 
@@ -5163,6 +5195,46 @@ impl Backend for Arm32Backend {
                             CmpKind::UGe => Condition::Cs,
                         };
 
+                        // ── FP Cmp dispatch ──
+                        // When ty is F32/F64, load operands' bit patterns into
+                        // D0/D1, run VCMP.F64, FMSTAT to transfer FP flags to
+                        // APSR.NZCV, then SETcc as usual. For FP, signed and
+                        // unsigned comparisons are equivalent; U*-variants map
+                        // to their signed counterparts.
+                        let is_fp = ty.as_ref().map_or(false, |t| matches!(t, crate::ir::IRType::F32 | crate::ir::IRType::F64));
+                        if is_fp {
+                            // Map unsigned conditions to their signed FP equivalents.
+                            let fp_cond = match kind {
+                                CmpKind::Eq => Condition::Eq,
+                                CmpKind::Ne => Condition::Ne,
+                                CmpKind::SLt | CmpKind::ULt => Condition::Lt,
+                                CmpKind::SLe | CmpKind::ULe => Condition::Le,
+                                CmpKind::SGt | CmpKind::UGt => Condition::Gt,
+                                CmpKind::SGe | CmpKind::UGe => Condition::Ge,
+                            };
+                            // Load lhs bit pattern into R0, store to dst slot, VLDR D0.
+                            code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R0));
+                            code.extend(ss_store_to_slot(Gpr::R0, dst_offset));
+                            code.extend_from_slice(&encode_vldr_d(0, Gpr::R11.encoding() as u8, dst_offset));
+                            // Load rhs bit pattern into R0, store to dst slot, VLDR D1.
+                            code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::R0));
+                            code.extend(ss_store_to_slot(Gpr::R0, dst_offset));
+                            code.extend_from_slice(&encode_vldr_d(1, Gpr::R11.encoding() as u8, dst_offset));
+                            // VCMP.F64 D0, D1 — sets FPSCR.NZCV
+                            code.extend_from_slice(&encode_vcmp_f64(0, 1));
+                            // FMSTAT (VMRS APSR_nzcv, FPSCR) — transfer FP flags to ARM NZCV
+                            code.extend_from_slice(&encode_fmstat());
+                            // SETcc: MOV R0, #0; MOVcc R0, #1
+                            code.extend_from_slice(&encode_dp_imm(
+                                Condition::Al, DP_MOV, false, 0, Gpr::R0.encoding(), 0, 0,
+                            ));
+                            code.extend_from_slice(&encode_dp_imm(
+                                fp_cond, DP_MOV, false, 0, Gpr::R0.encoding(), 0, 1,
+                            ));
+                            code.extend(ss_store_32_zero(Gpr::R0, dst_offset, fs));
+                            code
+                        } else {
+
                         // Detect 64-bit comparison: when ty is I64/U64 (or
                         // None defaulting to 64-bit), compare both low and
                         // high words. Otherwise, fall back to 32-bit compare.
@@ -5215,6 +5287,7 @@ impl Backend for Arm32Backend {
                         ));
                         code.extend(ss_store_32_zero(Gpr::R0, dst_offset, fs));
                         code
+                        } // end else (integer Cmp path)
                     }
 
                     // ── UnaryOp ──
@@ -8737,6 +8810,41 @@ fn encode_vdiv_f64(dd: u8, dn: u8, dm: u8) -> [u8; 4] {
         | (0 << 4)
         | vm;
     word.to_le_bytes()
+}
+
+/// Encode VCMP.F64 Dd, Dm — compare two f64 values (sets FPSCR flags).
+///
+/// ARM VFP encoding (A1):
+///   cond 1110 1D11 0100 Dd 1011 E 1 M 0 Vm
+///   E=1 → compare Dd with Dm; E=0 → compare Dd with #0.
+///   We use E=1 (register comparison).
+fn encode_vcmp_f64(dd: u8, dm: u8) -> [u8; 4] {
+    let d_bit = ((dd >> 4) & 1) as u32;
+    let vd = (dd & 0xF) as u32;
+    let m_bit = ((dm >> 4) & 1) as u32;
+    let vm = (dm & 0xF) as u32;
+    let word = (Condition::Al.encoding() as u32) << 28
+        | 0b1110 << 24
+        | (d_bit << 22)
+        | 0b11 << 20
+        | 0b0100 << 16
+        | (vd << 12)
+        | 0b1011 << 8
+        | (1 << 7)  // E = 1 (compare with register)
+        | (1 << 6)  // fixed
+        | (m_bit << 5)
+        | (0 << 4)
+        | vm;
+    word.to_le_bytes()
+}
+
+/// Encode FMSTAT (alias for VMRS APSR_nzcv, FPSCR) — transfer FPSCR flags
+/// to the ARM APSR.NZCV condition flags so that subsequent conditional
+/// instructions (MOVcc, etc.) can read the FP comparison result.
+///
+/// Encoding: cond 1110 1110 1000 1111 1000 0001 0000 = 0xEEF1FA10
+fn encode_fmstat() -> [u8; 4] {
+    0xEEF1FA10u32.to_le_bytes()
 }
 
 pub mod disasm;

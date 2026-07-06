@@ -3289,6 +3289,78 @@ impl Emitter {
         let dst_id = dst.as_register().unwrap_or(0);
         let dst_offset = slots.get(&dst_id).copied().unwrap_or(0);
 
+        // ── FP BinOp dispatch (top of function, before integer path) ──
+        // When ty is F32/F64 we use AArch64 FP arithmetic (FADD/FSUB/FMUL/FDIV)
+        // or FP compare (FCMP + CSET) instead of the integer path.
+        let is_fp = ty.map_or(false, |t| matches!(t, IRType::F32 | IRType::F64));
+        if is_fp {
+            let is_double = matches!(ty, Some(IRType::F64));
+            // FP arithmetic and comparison are the only ops that go through
+            // the FP unit; bitwise/shift ops on FP bit patterns fall through
+            // to the integer path below.
+            let fp_arith = matches!(op,
+                BinOpKind::Add | BinOpKind::Sub | BinOpKind::Mul
+                | BinOpKind::SDiv | BinOpKind::UDiv
+                | BinOpKind::Eq | BinOpKind::Ne
+                | BinOpKind::SLt | BinOpKind::SLe | BinOpKind::SGt | BinOpKind::SGe
+                | BinOpKind::ULt | BinOpKind::ULe | BinOpKind::UGt | BinOpKind::UGe
+            );
+            if fp_arith {
+                // Load operands' bit patterns into X9/X10 (64-bit).
+                self.ss_load_value_with_width(lhs, Register::X9, slots, RegWidth::X64)?;
+                self.ss_load_value_with_width(rhs, Register::X10, slots, RegWidth::X64)?;
+
+                match op {
+                    BinOpKind::Add | BinOpKind::Sub | BinOpKind::Mul | BinOpKind::SDiv | BinOpKind::UDiv => {
+                        // GPR → FP: FMOV D0, X9 ; FMOV D1, X10
+                        self.emit_instruction(Instruction::FMOV_DX { vd: 0, rn: Register::X9 })?;
+                        self.emit_instruction(Instruction::FMOV_DX { vd: 1, rn: Register::X10 })?;
+
+                        let fp_instr = match op {
+                            BinOpKind::Add => Instruction::Fadd {
+                                rd: Register::X0, rn: Register::X0, rm: Register::X1, double: is_double,
+                            },
+                            BinOpKind::Sub => Instruction::Fsub {
+                                rd: Register::X0, rn: Register::X0, rm: Register::X1, double: is_double,
+                            },
+                            BinOpKind::Mul => Instruction::Fmul {
+                                rd: Register::X0, rn: Register::X0, rm: Register::X1, double: is_double,
+                            },
+                            _ => Instruction::Fdiv { // SDiv | UDiv
+                                rd: Register::X0, rn: Register::X0, rm: Register::X1, double: is_double,
+                            },
+                        };
+                        self.emit_instruction(fp_instr)?;
+
+                        // FP → GPR: FMOV X9, D0
+                        self.emit_instruction(Instruction::FMOV_XD { rd: Register::X9, vn: 0 })?;
+                    }
+                    BinOpKind::Eq | BinOpKind::Ne
+                    | BinOpKind::SLt | BinOpKind::SLe | BinOpKind::SGt | BinOpKind::SGe
+                    | BinOpKind::ULt | BinOpKind::ULe | BinOpKind::UGt | BinOpKind::UGe => {
+                        // GPR → FP for comparison
+                        self.emit_instruction(Instruction::FMOV_DX { vd: 0, rn: Register::X9 })?;
+                        self.emit_instruction(Instruction::FMOV_DX { vd: 1, rn: Register::X10 })?;
+                        // FCMP D0, D1 (sets NZCV flags). For FP, signed and
+                        // unsigned comparisons are equivalent — the binop
+                        // condition codes map naturally.
+                        self.emit_instruction(Instruction::Fcmp {
+                            rn: Register::X0, rm: Register::X1, double: is_double,
+                        })?;
+                        // CSET X9, cond
+                        let cond = binop_kind_to_condition(&op);
+                        self.emit_instruction(Instruction::CSET { rd: Register::X9, cond })?;
+                    }
+                    _ => unreachable!("fp_arith filter should have excluded this op"),
+                }
+
+                // Store result to dst's stack slot
+                self.ss_store_to_slot(Register::X9, dst_offset)?;
+                return Ok(());
+            }
+            // else: bitwise/shift ops on FP bit patterns — fall through to integer path
+        }
+
         // Load lhs into X9
         self.ss_load_value_with_width(lhs, Register::X9, slots, width)?;
 
