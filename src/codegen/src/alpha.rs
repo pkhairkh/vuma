@@ -938,13 +938,17 @@ fn emit_instr(
             code.extend(Instruction::Ret.encode());
         }
         IRInstr::Branch { target: _ } => {
-            // BR placeholder.
-            code.extend(Instruction::Br { ra: ZERO, disp: 0 }.encode());
+            // Instruction-level branch (not terminator). Redundant with
+            // the Jump terminator that follows. Emit NOP to avoid
+            // unpatched self-loop branch.
+            code.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // UNOP (Alpha NOP)
         }
-        IRInstr::CondBranch { cond, true_target: _, false_target: _ } => {
-            code.extend(ss_load_value(cond, vreg_stack_slots, S0));
-            code.extend(Instruction::Bne { ra: S0, disp: 0 }.encode());
-            code.extend(Instruction::Br { ra: ZERO, disp: 0 }.encode());
+        IRInstr::CondBranch { cond: _, true_target: _, false_target: _ } => {
+            // Instruction-level CondBranch (not terminator). Redundant with
+            // the Branch terminator that follows. Emit NOPs.
+            code.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
+            code.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
+            code.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
         }
         IRInstr::Call { dst, func, args, is_extern: _ } => {
             // Move args into R16-R21.

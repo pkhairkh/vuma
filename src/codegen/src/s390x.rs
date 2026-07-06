@@ -1048,13 +1048,11 @@ fn s390x_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, B
             let disp_bytes = target_offset as i64 - patch.code_offset as i64;
             let disp_halfwords = (disp_bytes / 2) as i64;
             if patch.is_long {
-                // BRCL: 32-bit displacement at bytes [2..6] of the instruction.
                 let disp = disp_halfwords as i32;
                 let disp_be = disp.to_be_bytes();
                 code[patch.code_offset + 2..patch.code_offset + 6]
                     .copy_from_slice(&disp_be);
             } else {
-                // BRC: 16-bit displacement at bytes [2..4] of the instruction.
                 let disp = disp_halfwords as i16;
                 let disp_be = disp.to_be_bytes();
                 code[patch.code_offset + 2..patch.code_offset + 4]
@@ -1484,19 +1482,28 @@ fn emit_instr(
             code.extend_from_slice(&encode_br(LR));
         }
         IRInstr::Branch { target: _ } => {
-            // Instruction-level branch (not terminator). Emit BRCL placeholder;
-            // would need patching but this is rarely used.
-            code.extend_from_slice(&encode_brcl(0xF, 0));
+            // Instruction-level branch (not terminator). This is always
+            // followed by a Jump terminator with the same target, so the
+            // Branch's BRCL is redundant. Emit a 2-byte NOP (BCR 0, 0)
+            // to preserve code layout without creating an unpatched self-loop.
+            // (Previous code emitted an unpatched BRCL with disp=0, which
+            // caused infinite loops in for/while loops.)
+            code.extend_from_slice(&encode_nop());
         }
         IRInstr::CondBranch {
-            cond,
+            cond: _,
             true_target: _,
             false_target: _,
         } => {
-            code.extend(ss_load_value(cond, vreg_stack_slots, S0));
-            code.extend_from_slice(&encode_rre(0xB9, 0x02, S1, S0));
-            code.extend_from_slice(&encode_brc(0x6, 0));
-            code.extend_from_slice(&encode_brcl(0xF, 0));
+            // Instruction-level CondBranch (not terminator). This is always
+            // followed by a Branch terminator with the same targets, so the
+            // CondBranch's BRC+BRCL are redundant. Emit NOPs to preserve code
+            // layout without creating unpatched self-loops.
+            // (Previous code emitted unpatched BRC+BRCL with disp=0, which
+            // caused infinite loops in for/while loops.)
+            code.extend_from_slice(&encode_nop());
+            code.extend_from_slice(&encode_nop());
+            code.extend_from_slice(&encode_nop());
         }
         IRInstr::Call {
             dst,
