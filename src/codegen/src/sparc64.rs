@@ -66,8 +66,17 @@ use std::fmt;
 
 /// Format 2 op (SETHI, branches).
 const OPC_FORMAT2: u32 = 0x00;
-/// Format 3 op (arithmetic, logical, load, store).
+/// Format 3 op (arithmetic, logical).
 const OPC_FORMAT3: u32 = 0x02;
+/// Format 3 op for load/store (op=3, NOT op=2!).
+/// SPARC v9 distinguishes arithmetic (op=2) from load/store (op=3) at the
+/// 2-bit `op` field (bits 31-30), even though both use the same Format 3
+/// layout. Using op=2 for loads/stores causes them to be decoded as
+/// arithmetic instructions — e.g., STW (op3=0x04, op=3) with op=2 becomes
+/// SUB (op3=0x04, op=2); STX (op3=0x0E, op=3) with op=2 becomes SDIV
+/// (op3=0x0E, op=2). This is the root cause of the "udiv %fp, -16, %l0"
+/// disassembly that appeared in trace output.
+const OPC_LOADSTORE: u32 = 0x03;
 /// Format 1 op (CALL).
 const OPC_CALL: u32 = 0x01;
 
@@ -770,39 +779,39 @@ impl Instruction {
 
             // ── Loads ───────────────────────────────────────────────────
             Instruction::Ldub { rd, rs1, imm } => {
-                encode_fmt3_ri(OPC_FORMAT3, *rd, OP3_LDUB, *rs1, *imm)
+                encode_fmt3_ri(OPC_LOADSTORE, *rd, OP3_LDUB, *rs1, *imm)
             }
             Instruction::Lduh { rd, rs1, imm } => {
-                encode_fmt3_ri(OPC_FORMAT3, *rd, OP3_LDUH, *rs1, *imm)
+                encode_fmt3_ri(OPC_LOADSTORE, *rd, OP3_LDUH, *rs1, *imm)
             }
             Instruction::Lduw { rd, rs1, imm } => {
-                encode_fmt3_ri(OPC_FORMAT3, *rd, OP3_LDUW, *rs1, *imm)
+                encode_fmt3_ri(OPC_LOADSTORE, *rd, OP3_LDUW, *rs1, *imm)
             }
             Instruction::Ldx { rd, rs1, imm } => {
-                encode_fmt3_ri(OPC_FORMAT3, *rd, OP3_LDX, *rs1, *imm)
+                encode_fmt3_ri(OPC_LOADSTORE, *rd, OP3_LDX, *rs1, *imm)
             }
             Instruction::Ldsb { rd, rs1, imm } => {
-                encode_fmt3_ri(OPC_FORMAT3, *rd, OP3_LDSB, *rs1, *imm)
+                encode_fmt3_ri(OPC_LOADSTORE, *rd, OP3_LDSB, *rs1, *imm)
             }
             Instruction::Ldsh { rd, rs1, imm } => {
-                encode_fmt3_ri(OPC_FORMAT3, *rd, OP3_LDSH, *rs1, *imm)
+                encode_fmt3_ri(OPC_LOADSTORE, *rd, OP3_LDSH, *rs1, *imm)
             }
             Instruction::Ldsw { rd, rs1, imm } => {
-                encode_fmt3_ri(OPC_FORMAT3, *rd, OP3_LDSW, *rs1, *imm)
+                encode_fmt3_ri(OPC_LOADSTORE, *rd, OP3_LDSW, *rs1, *imm)
             }
 
             // ── Stores ──────────────────────────────────────────────────
             Instruction::Stb { rd, rs1, imm } => {
-                encode_fmt3_ri(OPC_FORMAT3, *rd, OP3_STB, *rs1, *imm)
+                encode_fmt3_ri(OPC_LOADSTORE, *rd, OP3_STB, *rs1, *imm)
             }
             Instruction::Sth { rd, rs1, imm } => {
-                encode_fmt3_ri(OPC_FORMAT3, *rd, OP3_STH, *rs1, *imm)
+                encode_fmt3_ri(OPC_LOADSTORE, *rd, OP3_STH, *rs1, *imm)
             }
             Instruction::Stw { rd, rs1, imm } => {
-                encode_fmt3_ri(OPC_FORMAT3, *rd, OP3_STW, *rs1, *imm)
+                encode_fmt3_ri(OPC_LOADSTORE, *rd, OP3_STW, *rs1, *imm)
             }
             Instruction::Stx { rd, rs1, imm } => {
-                encode_fmt3_ri(OPC_FORMAT3, *rd, OP3_STX, *rs1, *imm)
+                encode_fmt3_ri(OPC_LOADSTORE, *rd, OP3_STX, *rs1, *imm)
             }
 
             // ── SETHI ───────────────────────────────────────────────────
