@@ -939,16 +939,16 @@ fn emit_instr(
         }
         IRInstr::Branch { target: _ } => {
             // Instruction-level branch (not terminator). Redundant with
-            // the Jump terminator that follows. Emit NOP to avoid
-            // unpatched self-loop branch.
-            code.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // UNOP (Alpha NOP)
+            // the Jump terminator that follows. Emit NOP (BIS ZERO,ZERO,ZERO)
+            // to avoid unpatched self-loop branch.
+            code.extend_from_slice(&[0xE0, 0x03, 0xFE, 0x47]); // BIS ZERO,ZERO,ZERO (LE)
         }
         IRInstr::CondBranch { cond: _, true_target: _, false_target: _ } => {
             // Instruction-level CondBranch (not terminator). Redundant with
             // the Branch terminator that follows. Emit NOPs.
-            code.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
-            code.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
-            code.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
+            code.extend_from_slice(&[0xE0, 0x03, 0xFE, 0x47]); // NOP
+            code.extend_from_slice(&[0xE0, 0x03, 0xFE, 0x47]); // NOP
+            code.extend_from_slice(&[0xE0, 0x03, 0xFE, 0x47]); // NOP
         }
         IRInstr::Call { dst, func, args, is_extern: _ } => {
             // Move args into R16-R21.
