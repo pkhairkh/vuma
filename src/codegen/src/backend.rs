@@ -2965,7 +2965,7 @@ impl Backend for AArch64Backend {
                         let offset_words = (target_addr - bl_addr) / 4;
                         // Check range: ±128MB (26-bit signed)
                         if offset_words < -(1 << 25) || offset_words >= (1 << 25) {
-                            eprintln!(
+                            log::warn!(
                                 "warning: BL relocation to '{}' out of range: {} words",
                                 reloc.symbol, offset_words
                             );

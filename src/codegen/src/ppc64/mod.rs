@@ -6306,7 +6306,7 @@ impl Backend for PPC64Backend {
                         let offset_words = (target_addr - bl_addr) / 4;
                         // Check range: ±32MB (24-bit signed)
                         if offset_words < -(1 << 23) || offset_words >= (1 << 23) {
-                            eprintln!(
+                            log::warn!(
                                 "warning: BL relocation to '{}' out of range: {} words",
                                 reloc.symbol, offset_words
                             );
