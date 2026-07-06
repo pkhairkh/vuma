@@ -1610,11 +1610,32 @@ impl Backend for M68kBackend {
                 ("recvfrom", 350),
                 ("clone", 120),
                 ("fork", 2),
+                ("epoll_create1", 449),
+                ("epoll_ctl", 424),
+                ("epoll_wait", 425),
+                ("dup3", 431),
             ] {
                 stubs.push((name.to_string(), simple_stub(num)));
             }
             stubs
         };
+
+        // ── Complex stub: sigaction → rt_sigaction(signum, act, oldact, sigsetsize=8) ──
+        // m68k rt_sigaction syscall # = 174. VUMA declares 3 args; the kernel
+        // requires a 4th arg (sigsetsize=8) in D4. We set D4=8 before TRAP.
+        let sigaction_stub: Vec<u8> = {
+            let mut code = Vec::new();
+            // MOVEQ #8, D4 (sigsetsize)
+            let w = 0x7000u16 | ((Gpr::D4.encoding() as u16 & 0x7) << 9) | 8;
+            code.extend_from_slice(&w.to_be_bytes());
+            // MOVE.L #174, D0 (sys_rt_sigaction — 174 > 127, can't use MOVEQ)
+            code.extend(Instruction::MoveImm32 { dst: Gpr::D0, imm: 174 }.encode());
+            code.extend(Instruction::Trap0.encode());
+            code.extend(Instruction::Rts.encode());
+            code
+        };
+        let mut syscall_stubs = syscall_stubs;
+        syscall_stubs.push(("sigaction".to_string(), sigaction_stub));
 
         // ── Compute function offsets ──
         let mut func_offsets: HashMap<String, usize> = HashMap::new();

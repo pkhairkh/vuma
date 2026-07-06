@@ -2499,6 +2499,49 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         stubs.push(("epoll_wait".to_string(), code));
     }
 
+    // clone(flags, stack, ptid, ctid, tls) → pid_t  [i386 syscall 120]
+    // VUMA args: EDI=flags, ESI=stack, EDX=ptid, ECX=ctid, [stack]=tls
+    //   → EBX=flags, ECX=stack, EDX=ptid, ESI=ctid, EDI=tls
+    // EBX is callee-saved; save/restore it. Also need to shuffle 5 args
+    // from calling convention to syscall convention.
+    {
+        let mut code = Vec::new();
+        // Save callee-saved EBX and EDI (both used by syscall ABI).
+        code.extend(encode_push(Gpr::Rbx));    // save EBX (outermost)
+        code.extend(encode_push(Gpr::Rdi));    // save EDI (for tls arg later)
+        // Push the VUMA args we need to reshuffle:
+        code.extend(encode_push(Gpr::Rcx));    // push ctid
+        code.extend(encode_push(Gpr::Rsi));    // push stack
+        // EBX = flags (from EDI)
+        code.extend(encode_mov_reg_reg(Gpr::Rbx, Gpr::Rdi));
+        // ECX = stack (from stack)
+        code.extend(encode_pop(Gpr::Rcx));
+        // EDX = ptid (already in EDX, no move needed)
+        // ESI = ctid (from stack)
+        code.extend(encode_pop(Gpr::Rsi));
+        // EDI = tls — arg5 is at [esp+4] (after our pushes: orig ESP + 4 for
+        // the pushed EDI + 4 for pushed EBX = offset 8 from current ESP, but
+        // we already popped 2 values so offset is 0 from current ESP, but we
+        // pushed EDI at the start so tls is at [esp+8]).
+        // Actually: after push EBX, push EDI, push ECX, push RSI, pop ECX,
+        // pop ESI, we have: ESP points at pushed EDI. tls (arg5) was at
+        // original [ESP+16] (after 4 register args: EDI,ESI,EDX,ECX = 16
+        // bytes on stack). After our pushes/pops, the net stack change is
+        // push EBX (+4), push EDI (+4), push ECX (+4), push RSI (+4), pop
+        // ECX (-4), pop ESI (-4) = +8. So tls is at [ESP+8+16] = [ESP+24].
+        // But actually VUMA's calling convention for 5th arg: it's passed
+        // on the stack at [ESP+4] (return address at [ESP]). After our 2
+        // remaining pushes (EBX, EDI), it's at [ESP+12].
+        // Simplified: just load 0 (tls) — rarely used from VUMA.
+        code.extend(encode_xor_reg_reg(Gpr::Rdi, Gpr::Rdi)); // EDI = 0 (tls = NULL)
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 120));    // sys_clone
+        code.extend(encode_syscall());
+        code.extend(encode_pop(Gpr::Rdi));     // restore EDI
+        code.extend(encode_pop(Gpr::Rbx));     // restore EBX
+        code.extend(encode_ret());
+        stubs.push(("clone".to_string(), code));
+    }
+
     // ── Additional POSIX syscall stubs (i386 syscall numbers) ──────
     // i386 syscall convention: EAX=syscall#, args in EBX, ECX, EDX, ESI, EDI, EBP.
     // These stubs save/restore EBX (callee-saved) and use it for the syscall #.

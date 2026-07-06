@@ -6368,6 +6368,7 @@ impl Backend for RiscV32Backend {
                 ("munmap", 215), ("exit", 93), ("alarm", 36), ("getpid", 172),
                 ("socket", 198), ("epoll_create1", 20), ("futex", 98),
                 ("execve", 221), ("wait4", 260), ("epoll_ctl", 21), ("epoll_wait", 22),
+                ("clone", 220),
             ] {
                 stubs.push((name.to_string(), simple_stub(num)));
             }

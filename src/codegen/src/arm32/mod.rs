@@ -7213,6 +7213,7 @@ impl Backend for Arm32Backend {
                 ("alarm", 27), ("getpid", 20), ("unlink", 10),
                 ("sigaction", 67), ("pipe", 42), ("dup2", 63),
                 ("fork", 2), ("execve", 11), ("wait4", 114),
+                ("clone", 120),
                 ("socket", 281), ("epoll_create1", 356),
                 ("epoll_ctl", 251), ("epoll_wait", 252),
                 // ── W6: additional POSIX syscall stubs ──

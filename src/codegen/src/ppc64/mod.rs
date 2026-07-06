@@ -6049,6 +6049,7 @@ impl Backend for PPC64Backend {
                 ("futex", 221), ("wait4", 114),
                 ("epoll_ctl", 237), ("epoll_wait", 238),
                 ("dup2", 63), ("fork", 2), ("unlink", 10),
+                ("clone", 120),
                 // ── P6: missing syscall stubs ──
                 ("lseek", 8), ("stat", 106), ("fstat", 108), ("kill", 37),
                 ("getcwd", 182), ("chdir", 12), ("ioctl", 54), ("fcntl", 55),

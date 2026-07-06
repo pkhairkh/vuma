@@ -5020,6 +5020,7 @@ impl Backend for Mips64Backend {
                 ("futex", 5194), ("execve", 5057), ("wait4", 5059),
                 ("epoll_ctl", 5208), ("epoll_wait", 5209),
                 ("dup2", 5032), ("fork", 5056), ("unlink", 5085),
+                ("clone", 5055),
                 // exit_group (mips64 N64 syscall #5205) — like exit but
                 // terminates all threads in the thread group. Used by libc
                 // runtimes and many language runtimes (e.g. Rust's std) when

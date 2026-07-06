@@ -2623,6 +2623,7 @@ impl Backend for LoongArch64Backend {
                 ("munmap", 215), ("exit", 93), ("alarm", 36), ("getpid", 172),
                 ("socket", 198), ("epoll_create1", 20), ("futex", 98),
                 ("execve", 221), ("wait4", 260), ("epoll_ctl", 21), ("epoll_wait", 22),
+                ("clone", 220),
                 // ── W6: additional POSIX syscall stubs ──
                 ("lseek", 62), ("stat", 80), ("fstat", 80),
                 ("kill", 129), ("getcwd", 17), ("chdir", 49),
