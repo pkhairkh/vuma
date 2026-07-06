@@ -2974,8 +2974,8 @@ impl Backend for LoongArch64Backend {
                         let offset_words = (target_addr - bl_addr) / 4;
                         // Check range: ±128MB (26-bit signed * 4)
                         if offset_words < -(1i64 << 25) || offset_words >= (1i64 << 25) {
-                            eprintln!(
-                                "warning: BL relocation to '{}' out of range: {} words",
+                            log::warn!(
+                                "BL relocation to '{}' out of range: {} words",
                                 reloc.symbol, offset_words
                             );
                             continue;
@@ -3005,8 +3005,8 @@ impl Backend for LoongArch64Backend {
                     // (lu12i.w + ori + lu32i.d + lu52i.d = 16 bytes) with an
                     // absolute 64-bit address.
                     if abs_offset + 16 > all_code.len() {
-                        eprintln!(
-                            "warning: R_LARCH_64 relocation at offset {} overflows code (len {})",
+                        log::warn!(
+                            "R_LARCH_64 relocation at offset {} overflows code (len {})",
                             abs_offset, all_code.len()
                         );
                         continue;

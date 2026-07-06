@@ -718,6 +718,73 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     let mut code = Vec::new();
                     let dst_id = dst.as_register().unwrap_or(0);
 
+                    // ── FP arithmetic dispatch ──
+                    // When the result type is F32 or F64, lower Add/Sub/Mul/Div
+                    // directly to FP instructions: load each operand from its
+                    // stack slot into a GPR scratch, move GPR→FPR (movgr2fr.d),
+                    // emit the FP arithmetic op, then move FPR→GPR (movfr2gr.d)
+                    // and store the result back to the destination slot.
+                    let is_fp = ty
+                        .as_ref()
+                        .map_or(false, |t| matches!(t, IRType::F32 | IRType::F64));
+                    let fp_handled = if is_fp
+                        && matches!(
+                            op,
+                            BinOpKind::Add
+                                | BinOpKind::Sub
+                                | BinOpKind::Mul
+                                | BinOpKind::SDiv
+                                | BinOpKind::UDiv
+                        )
+                    {
+                        let is_f32 = ty.as_ref().map_or(false, |t| matches!(t, IRType::F32));
+                        code.extend(encode_load_value(lhs, S0, fp, &vreg_slots));
+                        code.extend(encode_load_value(rhs, S1, fp, &vreg_slots));
+                        // GPR → FPR (movgr2fr.d) for both operands.
+                        code.extend_from_slice(
+                            &Instruction::FmovFpr2GrD { fd: FS0, rj: S0 }.encode(),
+                        );
+                        code.extend_from_slice(
+                            &Instruction::FmovFpr2GrD { fd: FS1, rj: S1 }.encode(),
+                        );
+                        let inst: Instruction = match (op, is_f32) {
+                            (BinOpKind::Add, true) => {
+                                Instruction::FaddS { fd: FS0, fj: FS0, fk: FS1 }
+                            }
+                            (BinOpKind::Add, false) => {
+                                Instruction::FaddD { fd: FS0, fj: FS0, fk: FS1 }
+                            }
+                            (BinOpKind::Sub, true) => {
+                                Instruction::FsubS { fd: FS0, fj: FS0, fk: FS1 }
+                            }
+                            (BinOpKind::Sub, false) => {
+                                Instruction::FsubD { fd: FS0, fj: FS0, fk: FS1 }
+                            }
+                            (BinOpKind::Mul, true) => {
+                                Instruction::FmulS { fd: FS0, fj: FS0, fk: FS1 }
+                            }
+                            (BinOpKind::Mul, false) => {
+                                Instruction::FmulD { fd: FS0, fj: FS0, fk: FS1 }
+                            }
+                            (_, true) => {
+                                Instruction::FdivS { fd: FS0, fj: FS0, fk: FS1 }
+                            }
+                            (_, false) => {
+                                Instruction::FdivD { fd: FS0, fj: FS0, fk: FS1 }
+                            }
+                        };
+                        code.extend_from_slice(&inst.encode());
+                        // FPR → GPR (movfr2gr.d) and store to destination slot.
+                        code.extend_from_slice(
+                            &Instruction::FmovGr2FprD { rd: S0, fj: FS0 }.encode(),
+                        );
+                        code.extend(encode_store_to_vreg(S0, dst_id, fp, &vreg_slots));
+                        true
+                    } else {
+                        false
+                    };
+
+                    if !fp_handled {
                     match op {
                         BinOpKind::Add => {
                             code.extend(encode_load_value(lhs, S0, fp, &vreg_slots));
@@ -1004,6 +1071,7 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                             code.extend(encode_store_to_vreg(S0, dst_id, fp, &vreg_slots));
                         }
                     }
+                    } // end if !fp_handled
                     code
                 }
 

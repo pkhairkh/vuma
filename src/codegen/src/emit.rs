@@ -2244,11 +2244,6 @@ impl Emitter {
     fn apply_fixups(&mut self) -> Result<()> {
         let fixups = std::mem::take(&mut self.fixups);
         for (word_idx, label, format) in &fixups {
-            // Debug: check if this fixup overwrites GetAddress code (indices 147-150)
-            if *word_idx >= 147 && *word_idx <= 150 {
-                eprintln!("[apply_fixups] WARNING: fixup at word_idx={} label={} format={:?} overwrites GetAddress code!", word_idx, label, format);
-                eprintln!("[apply_fixups]   old word: 0x{:08x}", self.code[*word_idx]);
-            }
             let target_offset = self.label_offsets.get(label).copied().unwrap_or(0);
             let offset = (target_offset as i32) - (*word_idx as i32);
             let old_word = self.code[*word_idx];
@@ -2887,18 +2882,10 @@ impl Emitter {
             // so the relocation patcher always has 16 bytes to patch.
             // encode_program patches these with the function's absolute address.
             IRInstr::GetAddress { dst, name } => {
-                eprintln!("[GetAddress] ss_emit_instr handler called for '{}'", name);
                 let dst_id = dst.as_register().unwrap_or(0);
                 let dst_offset = slots.get(&dst_id).copied().unwrap_or(0);
                 let reloc_offset = (self.code.len() as u64) * 4;
-                eprintln!("[GetAddress] code.len() before emit = {}, reloc_offset = {}", self.code.len(), reloc_offset);
                 self.emit_load_immediate(Register::X9, 0x1111111111111111)?;
-                eprintln!("[GetAddress] code.len() after emit = {}", self.code.len());
-                eprintln!("[GetAddress] last 4 words: {:08x} {:08x} {:08x} {:08x}",
-                    self.code[self.code.len().saturating_sub(4)],
-                    self.code[self.code.len().saturating_sub(3)],
-                    self.code[self.code.len().saturating_sub(2)],
-                    self.code[self.code.len().saturating_sub(1)]);
                 self.relocations.push(RelocationEntry {
                     offset: reloc_offset,
                     symbol: name.clone(),
