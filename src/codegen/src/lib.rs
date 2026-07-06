@@ -46,6 +46,7 @@ pub mod escape_analysis;
 pub mod alias_analysis;
 pub mod ppc64;
 pub mod regalloc;
+pub mod riscv_common;
 pub mod riscv64;
 pub mod riscv32;
 pub mod scg_to_ir;
