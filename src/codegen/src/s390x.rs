@@ -2266,14 +2266,34 @@ impl Backend for S390XBackend {
                 ("accept", 364),
                 ("setsockopt", 366),
                 ("shutdown", 373),
-                ("dup3", 327),
+                ("dup3", 326),
                 ("recvfrom", 371),
                 ("sendto", 370),
+                ("epoll_create1", 327),
+                ("epoll_ctl", 250),
+                ("epoll_wait", 251),
+                ("clone", 120),
             ] {
                 stubs.push((name.to_string(), simple_stub(num)));
             }
             stubs
         };
+
+        // ── Complex stub: sigaction → rt_sigaction(signum, act, oldact, sigsetsize=8) ──
+        // s390x rt_sigaction syscall # = 139. VUMA declares 3 args; the kernel
+        // requires a 4th arg (sigsetsize=8) in R5. We set R5=8 before SVC.
+        let sigaction_stub: Vec<u8> = {
+            let mut code = Vec::new();
+            // LGHI R5, 8 (sigsetsize)
+            code.extend_from_slice(&encode_lghi(Gpr::R5, 8));
+            // LGFI R1, 139 (sys_rt_sigaction)
+            code.extend_from_slice(&encode_lgfi(Gpr::R1, 139));
+            code.extend_from_slice(&encode_svc(0));
+            code.extend_from_slice(&encode_br(Gpr::R14));
+            code
+        };
+        let mut syscall_stubs = syscall_stubs;
+        syscall_stubs.push(("sigaction".to_string(), sigaction_stub));
 
         // ── Compute function offsets ──
         let mut func_offsets: HashMap<String, usize> = HashMap::new();

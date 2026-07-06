@@ -1341,11 +1341,30 @@ impl Backend for AlphaBackend {
                 ("socket", 97), ("connect", 98), ("bind", 104), ("listen", 106),
                 ("accept", 99), ("setsockopt", 105), ("shutdown", 103),
                 ("sendto", 82), ("recvfrom", 102), ("clone", 220), ("fork", 2),
+                ("epoll_create1", 449), ("epoll_ctl", 424), ("epoll_wait", 425),
+                ("dup3", 431),
             ] {
                 stubs.push((name.to_string(), simple_stub(num)));
             }
             stubs
         };
+
+        // ── Complex stub: sigaction → rt_sigaction(signum, act, oldact, sigsetsize=8) ──
+        // Alpha rt_sigaction syscall # = 352. VUMA declares 3 args; the kernel
+        // requires a 4th arg (sigsetsize=8) in R19 (a3). We set R19=8 before
+        // CALL_PAL.
+        let sigaction_stub: Vec<u8> = {
+            let mut code = Vec::new();
+            // ADDQ ZERO, 8, R19 (a3 = sigsetsize = 8)
+            code.extend(Instruction::AddqLi { ra: ZERO, lit: 8, rc: Gpr::R19 }.encode());
+            // Load syscall # 352 into R0 (v0)
+            code.extend(ss_load_imm(Gpr::R0, 352));
+            code.extend(Instruction::CallPal { palcode: 0x83 }.encode());
+            code.extend(Instruction::Ret.encode());
+            code
+        };
+        let mut syscall_stubs = syscall_stubs;
+        syscall_stubs.push(("sigaction".to_string(), sigaction_stub));
 
         // ── Compute function offsets ──
         let mut func_offsets: HashMap<String, usize> = HashMap::new();

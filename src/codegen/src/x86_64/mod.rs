@@ -2974,6 +2974,17 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
         stubs.push(("setsockopt".to_string(), code));
     }
 
+    // clone(flags, stack, ptid, ctid, tls) -> pid_t  [syscall 56]
+    // 4th arg (ctid) is in RCX under SysV but R10 for syscall.
+    {
+        let mut code = Vec::new();
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 56));  // sys_clone
+        code.extend(encode_mov_reg_reg(Gpr::R10, Gpr::Rcx)); // RCX -> R10 (ctid)
+        code.extend(encode_syscall());
+        code.extend(encode_ret());
+        stubs.push(("clone".to_string(), code));
+    }
+
     // epoll_ctl(epfd, op, fd, event) -> int  [syscall 233]
     // 4th arg (event) is in RCX under SysV but R10 for syscall.
     {

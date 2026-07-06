@@ -4031,11 +4031,61 @@ impl Backend for Sparc64Backend {
                 ("dup3", 287),
                 ("recvfrom", 207),
                 ("sendto", 206),
+                ("epoll_create1", 293),
+                ("epoll_ctl", 194),
+                ("epoll_wait", 195),
+                ("clone", 217),
             ] {
                 stubs.push((name.to_string(), simple_stub(num)));
             }
             stubs
         };
+
+        // ── Complex stub: sigaction → rt_sigaction(signum, act, oldact, sigsetsize=8) ──
+        // rt_sigaction syscall # = 109 on SPARC64. VUMA declares 3 args
+        // (signum, act, oldact); the kernel requires a 4th arg (sigsetsize=8)
+        // in %o3. We set %o3=8 before the syscall.
+        let sigaction_stub: Vec<u8> = {
+            let mut code = Vec::new();
+            // OR %g0, 8, %o3  (sigsetsize = 8)
+            code.extend_from_slice(
+                &Instruction::OrImm {
+                    rd: Gpr::O3,
+                    rs1: Gpr::G0,
+                    imm: 8,
+                }
+                .encode(),
+            );
+            // OR %g0, 109, %g1  (sys_rt_sigaction)
+            code.extend_from_slice(
+                &Instruction::OrImm {
+                    rd: Gpr::G1,
+                    rs1: Gpr::G0,
+                    imm: 109,
+                }
+                .encode(),
+            );
+            code.extend_from_slice(&Instruction::Ta { sw_trap: 0x6d }.encode());
+            code.extend_from_slice(
+                &Instruction::Jmpl {
+                    rd: Gpr::G0,
+                    rs1: Gpr::I7,
+                    imm: 8,
+                }
+                .encode(),
+            );
+            code.extend_from_slice(
+                &Instruction::Restore {
+                    rd: Gpr::G0,
+                    rs1: Gpr::G0,
+                    imm: 0,
+                }
+                .encode(),
+            );
+            code
+        };
+        let mut syscall_stubs = syscall_stubs;
+        syscall_stubs.push(("sigaction".to_string(), sigaction_stub));
 
         // ── Runtime helpers: print_int, print_hex ──
         // print_int(%o0) — print %o0 as a signed decimal integer to stdout.
