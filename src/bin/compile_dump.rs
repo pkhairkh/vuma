@@ -27,6 +27,7 @@ fn backend_from_name(name: &str) -> Result<BackendKind, String> {
         "aarch64_be" | "aarch64be" => Ok(BackendKind::AArch64Be),
         "m68k" => Ok(BackendKind::M68k),
         "alpha" => Ok(BackendKind::Alpha),
+        "hppa" | "parisc" => Ok(BackendKind::Hppa),
         _ => Err(format!("unknown backend: {}", name)),
     }
 }
