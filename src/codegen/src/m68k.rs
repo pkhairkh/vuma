@@ -1089,18 +1089,21 @@ fn emit_instr(
             code.extend(Instruction::Rts.encode());
         }
         IRInstr::Branch { target: _ } => {
-            // BRA.W placeholder (rarely used).
-            code.extend_from_slice(&[0x60, 0x00, 0x00, 0x00]);
+            // Instruction-level branch (not terminator). Redundant with
+            // the Jump terminator that follows. Emit NOP to avoid
+            // unpatched self-loop BRA.
+            code.extend_from_slice(&[0x4E, 0x71]); // NOP
         }
         IRInstr::CondBranch {
-            cond,
+            cond: _,
             true_target: _,
             false_target: _,
         } => {
-            code.extend(ss_load_value(cond, vreg_stack_slots, S0));
-            code.extend(Instruction::Tst { dst: S0 }.encode());
-            code.extend_from_slice(&[0x66, 0x00, 0x00, 0x00]); // BNE.W placeholder
-            code.extend_from_slice(&[0x60, 0x00, 0x00, 0x00]); // BRA.W placeholder
+            // Instruction-level CondBranch (not terminator). Redundant with
+            // the Branch terminator that follows. Emit NOPs.
+            code.extend_from_slice(&[0x4E, 0x71]); // NOP
+            code.extend_from_slice(&[0x4E, 0x71]); // NOP
+            code.extend_from_slice(&[0x4E, 0x71]); // NOP
         }
         IRInstr::Call {
             dst,
